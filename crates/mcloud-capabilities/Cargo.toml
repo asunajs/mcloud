@@ -1,0 +1,14 @@
+[package]
+name = "mcloud-capabilities"
+description = "mcloud 能力层：19 个能力 + 声明式注册表 + FieldSpec。禁止 IO。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+mcloud-core = { workspace = true }
+mcloud-upstream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

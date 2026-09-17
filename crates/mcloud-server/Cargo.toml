@@ -1,0 +1,21 @@
+[package]
+name = "mcloud-server"
+description = "mcloud HTTP 服务：axum 路由 + SSE + OpenAPI + 内嵌前端产物。（P0 骨架）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+mcloud-core = { workspace = true }
+mcloud-io = { workspace = true }
+mcloud-exec = { workspace = true }
+mcloud-capabilities = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

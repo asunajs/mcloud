@@ -1,0 +1,90 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/mcloud-core",
+  "crates/mcloud-upstream",
+  "crates/mcloud-capabilities",
+  "crates/mcloud-io",
+  "crates/mcloud-exec",
+  "crates/mcloud-server",
+  "crates/mcloud-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# MSRV：edition 2024 需要 1.85+；本项目用到的 trait 内 async fn / LazyLock 等均早于该版本。
+# 真正的版本固定交给 CI，本地用 stable 通道以免触发工具链下载。
+rust-version = "1.91"
+license = "Apache-2.0"
+authors = ["catlair"]
+repository = "https://github.com/catlair/mcloud"
+
+[workspace.dependencies]
+# --- 内部 crate ---
+mcloud-core = { path = "crates/mcloud-core" }
+mcloud-upstream = { path = "crates/mcloud-upstream" }
+mcloud-capabilities = { path = "crates/mcloud-capabilities" }
+mcloud-io = { path = "crates/mcloud-io" }
+mcloud-exec = { path = "crates/mcloud-exec" }
+mcloud-server = { path = "crates/mcloud-server" }
+
+# --- 序列化 / 错误 ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+
+# --- 异步 / 运行时 ---
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "sync", "signal"] }
+
+# --- HTTP / 存储 ---
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+  "json",
+  "gzip",
+  "brotli",
+  "deflate",
+  "cookies",
+] }
+rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
+
+# --- 时间 / ID / 日志 ---
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- CLI ---
+clap = { version = "4", features = ["derive"] }
+
+# --- 密码学（RustCrypto 全家桶，纯 Rust，不依赖 OpenSSL）---
+# 放在 mcloud-core 而不是 mcloud-io：签名/DES/RSA 是纯计算，
+# 而 mcloud-upstream 必须能在不引入 reqwest 的前提下调用它们（见 docs/rust-rewrite-plan.md §3.2）。
+md-5 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+aes = "0.8"
+cbc = "0.1"
+des = "0.8"
+cipher = "0.4"
+rsa = "0.9"
+flate2 = "1"
+
+# --- 编码 ---
+base64 = "0.22"
+hex = "0.4"
+
+# --- 随机（io 层的 SystemRandom 用 OsRng；版本与 rsa 依赖的 rand_core 对齐）---
+rand = "0.8"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+# 重写期间开发迭代为主：依赖不优化、调试信息全开
+opt-level = 0
+debug = 1

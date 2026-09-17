@@ -1,0 +1,11 @@
+# 用已安装的 stable 通道，而不是钉死 "1.91.1"。
+#
+# 原因（踩过的坑）：本机 rustup 只安装了 `stable-aarch64-apple-darwin`，
+# 它本身就是 1.91.1，但写 `channel = "1.91.1"` 会被 rustup 视为**另一个工具链**，
+# 触发从 static.rust-lang.org 下载 rustc/cargo/rust-std（实测卡住 19 分钟）。
+#
+# 版本要求在 Cargo.toml 的 `rust-version`（MSRV）里声明，
+# 需要完全可复现的 CI 环境时在 CI 里单独钉版本号。
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

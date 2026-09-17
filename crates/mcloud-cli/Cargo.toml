@@ -1,0 +1,26 @@
+[package]
+name = "mcloud-cli"
+description = "mcloud 命令行工具（与原 CLI 对等）+ fixture 抽取子命令"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "mcloud"
+path = "src/main.rs"
+
+[dependencies]
+mcloud-core = { workspace = true }
+mcloud-capabilities = { workspace = true }
+mcloud-server = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

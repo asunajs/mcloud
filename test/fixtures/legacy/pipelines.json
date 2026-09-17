@@ -1,0 +1,23 @@
+{
+  "pipelines": [
+    {
+      "id": "84848ee7-3b94-483b-80fe-2ee33c93c7fe",
+      "name": "轻量巡检",
+      "description": "查奖品 + 领奖品",
+      "stopOnError": true,
+      "createdAt": "2026-09-16T01:57:41.641Z",
+      "updatedAt": "2026-09-16T02:24:07.029Z",
+      "lastRunAt": "2026-09-16T10:41:27.872Z",
+      "lastStatus": "ok",
+      "lastDurationMs": 2481,
+      "steps": [
+        {
+          "task": "prizes"
+        },
+        {
+          "task": "receive"
+        }
+      ]
+    }
+  ]
+}

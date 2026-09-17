@@ -1,0 +1,47 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# 运行时数据（本地凭据，绝不入库）
+/data/*.db
+/data/*.db-journal
+/data/*.db-wal
+/data/*.db-shm
+/data/*.bak
+/data/asign.json
+
+# `mcloud migrate` 的默认归档目录 —— **这条最关键**。
+# 它里面是旧项目数据的逐字副本，其中 state.json 含可直接复用的
+# jwtToken / deviceId / cloudPhoneRedpackToken。少这一行，
+# 任何人跑一次迁移再 `git add .` 就会把真实凭据提交上去。
+/data/legacy-source/
+
+# 原始 HAR 含真实登录凭据 —— 绝不入库
+har/
+*.har
+
+# HTTP 夹具是**本机**测试数据，不进版本库（`mcloud fixture extract` 现抽现用）。
+# 它脱敏过，但每个人抓到的流量都不一样，提交上来既占体积又是环境特定的；
+# 干净与否由 `cargo test -p mcloud-upstream` 里的 `audit_leaks` 兜底。
+test/fixtures/http/
+
+# 前端
+web/node_modules/
+web/dist/
+web/dist-debug/
+web/.vite/
+
+# WorkBuddy 工作数据（记忆 / 计划 / 任务 / 待办）—— **默认全部忽略**。
+# 这些文件按用途会长篇记录真实标识（配置路径、账号掩码、真值对照），
+# 正是"日志可以留、仓库不能留"里的后者。默认全忽略，只把技能目录显式放开：
+# 项目级技能是要随仓库共享的，属于有意入库的内容。
+/.workbuddy/*
+!/.workbuddy/skills/
+
+# 杂项
+.DS_Store
+*.log
+
+# AI 助手的工作数据（计划草稿、会话产物）。与 .workbuddy 同理：
+# 它是工具状态而不是项目内容，不入库；目录本身保留在本地。
+/.codebuddy/

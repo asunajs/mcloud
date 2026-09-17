@@ -1,0 +1,28 @@
+[package]
+name = "mcloud-core"
+description = "mcloud 纯业务内核：领域类型、纯函数、IO trait 定义。禁止任何 IO。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+
+# 纯密码学（无 IO）：见 src/crypto.rs
+md-5 = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+aes = { workspace = true }
+cbc = { workspace = true }
+des = { workspace = true }
+cipher = { workspace = true }
+rsa = { workspace = true }
+flate2 = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }

@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+/* daisyUI 5 通过 Tailwind 4 的 CSS-first 插件机制注册。
+   Tailwind 4 已弃用 tailwind.config.js —— 不要再创建它。 */
+@plugin "daisyui" {
+  themes: light --default, dark --prefersdark;
+}
+
+/* ---------------------------------------------------------------------------
+   主题微调：对齐原有品牌色。
+   注意保持浅色为默认（IDE/既有界面均为浅色），
+   且「涨红跌绿」的约定与主题无关，不受影响。
+   --------------------------------------------------------------------------- */
+@plugin "daisyui/theme" {
+  name: "light";
+  default: true;
+  color-scheme: light;
+
+  --color-primary: oklch(52% 0.19 275);
+  --color-primary-content: oklch(98% 0.01 275);
+}
