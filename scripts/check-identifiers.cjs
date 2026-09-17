@@ -73,6 +73,57 @@ const SHAPES = [
 /** 看起来像 base64 的片段；太短没有判别力。 */
 const B64_CHUNK = /[A-Za-z0-9+/]{16,}={0,2}/g;
 
+/**
+ * 敏感键名下的长值 —— **形状类规则抓不到的那一类**。
+ *
+ * 实测踩到：真实 `authToken` 形如 `<8 字符前缀>|1|RCS|<13 位毫秒>|<以 _ 与 . 分段的载荷>`
+ * （下面写合成值当例子 —— 本仓库踩过一次：真实前缀被抄进了这条注释**和一条提交信息**，
+ * 改文件时没改注释、也没改 commit message，`git log -S` 一搜就现形）。
+ * `|` 会把串切成每段都不足 40 字符的碎片，于是"长串形状"规则一段都认不出来 ——
+ * 而它是**可直接复用的凭据**，比手机号更该拦（实测它就这样进过版本库，守卫没报）。
+ *
+ * 所以换一个维度：**不按值的形状，按键名找**。
+ * 刻意只认 JSON 形态（`"key": "value"`），不认 JS 源码里的 `token: token` ——
+ * 否则会把变量赋值当成明文凭据，噪声大到没法用。
+ */
+const SENSITIVE_KEY_VALUE =
+  /"(auth_token|authToken|authorization|access_token|accessToken|token|jwt|dycpwd|password|passwd|secret|cookie)"\s*:\s*"([^"]{20,})"/gi;
+
+/**
+ * 一眼就是占位/合成值的长值 —— 不算违规。
+ *
+ * 这条与上面那条同等重要：规则的目的是"拦住真实凭据"，**不是**"逼着人把文档里的样例
+ * 改成 `<REDACTED>`"。协议文档要靠样例说明 token 的分段与长度，整段替换会把文档价值
+ * 一起抹掉 —— 那就是过度脱敏。
+ *
+ * 判据刻意保守，只放行一眼假的：含占位关键词、整值同字符重复、或去掉分隔符后字符种类 ≤ 4。
+ */
+function isObviousPlaceholder(value) {
+  if (/REDACTED|PLACEHOLDER|SYNTH|EXAMPLE|SAMPLE|DUMMY|FAKE|XXXX/i.test(value)) {
+    return true;
+  }
+  // 含非 ASCII：中文说明（`<32位大写…sID>` 这种）不可能是凭据
+  if (/[^\x20-\x7E]/.test(value)) return true;
+  if (/^(.)\1+$/.test(value)) return true;
+  // 凭据总含一段**不透明的长串**。`ak|bk|ck|…|fk` 这种"短段拼接"是刻意构造的黄金向量，
+  // 真正的 token / 口令散列一定有一截连续几十字符的载荷 —— 用这条把两者分开。
+  if (!/[A-Za-z0-9+/=_-]{16,}/.test(value)) return true;
+  const distinct = new Set(value.replace(/[^A-Za-z0-9]/g, "")).size;
+  return distinct <= 4;
+}
+
+/**
+ * 不做"用户标识"扫描的路径 —— 抓下来的**上游客户端源码**。
+ *
+ * `docs/capture/apiServer.js` 是移动客户端的源码（vendor 素材，用于对照协议实现），
+ * 不是本项目的产出，也不是用户数据：里面的号码之类是上游自带的调试残留，
+ * 既不来自用户、也不可复用。对它做脱敏只会毁掉这份对照素材。
+ *
+ * 注意这**不是**把值登记进 `ALLOWED` —— 那等于承认"这是要留在仓库里的真实标识"，
+ * 与"真实值一律不准登记"冲突。这里是按**来源**豁免，理由写在注释里。
+ */
+const VENDOR_SOURCE_PATHS = ["docs/capture/apiServer.js"];
+
 /** 只认这些后缀，避免去读图片/二进制。 */
 const TEXT_EXT = new Set([
   ".rs", ".cjs", ".mjs", ".js", ".ts", ".json", ".md", ".toml", ".sh",
@@ -120,14 +171,33 @@ function scan(label, text, violations) {
       violations.push({ label, kind, value });
     }
   }
+
+  // 键名维度：见 SENSITIVE_KEY_VALUE 的说明。凭据**不打印值本身** ——
+  // 报告会进 CI 日志，把一可用凭据再抄一遍就等于又泄一次；
+  // 给前 6 后 4 足够定位（`grep` 一下就找到）。
+  for (const m of text.matchAll(SENSITIVE_KEY_VALUE)) {
+    const [, key, value] = m;
+    if (ALLOWED.has(value) || isObviousPlaceholder(value)) continue;
+    const masked = `${value.slice(0, 6)}…${value.slice(-4)}`;
+    violations.push({
+      label,
+      kind: `疑似凭据明文于 ${key}（${value.length} 字符）`,
+      value: masked,
+    });
+  }
 }
 
 function main() {
   const violations = [];
   let scanned = 0;
+  let vendorSkipped = 0;
 
   for (const rel of trackedFiles()) {
     if (rel.startsWith("target/") || rel.startsWith("node_modules/")) continue;
+    if (VENDOR_SOURCE_PATHS.includes(rel)) {
+      vendorSkipped += 1;
+      continue;
+    }
     if (!TEXT_EXT.has(path.extname(rel))) continue;
 
     let text;
@@ -167,7 +237,10 @@ function main() {
 
   console.log(
     `检查通过：扫了 ${scanned} 个文本文件（字面 + base64 解码后），` +
-      `共发现 ${ALLOWED.size} 个已登记的非 ${SYNTHETIC_PREFIX} 值，无未登记的疑似真实标识。`,
+      `共发现 ${ALLOWED.size} 个已登记的非 ${SYNTHETIC_PREFIX} 值，无未登记的疑似真实标识。` +
+      (vendorSkipped > 0
+        ? `（另有 ${vendorSkipped} 个上游源码素材按来源豁免，见 VENDOR_SOURCE_PATHS）`
+        : ""),
   );
 }
 

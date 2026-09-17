@@ -96,6 +96,9 @@ node scripts/check-identifiers.cjs                  # 仓库里不得有真实�
   历史教训：正因为少了这一步，迁移相关的测试字面量里藏过真实手机号，而当时两道只扫字面的守卫一个都没报。
 - `scripts/check-identifiers.cjs` 的 `ALLOWED` 表登记刻意非 `199` 的测试构造值 ——
   **每条都要写明理由，真实值一律不准登记**。
+- **写抓包 / 协议文档前先读 [`docs/sanitize-guide.md`](./docs/sanitize-guide.md)**：
+  那是"**换值不换形**"的具体做法（哪些必须换、哪些恰好不能换、什么算过度脱敏），
+  以及真实值已经进了提交时该怎么改写历史。
 
 **注意方向**：`crates/mcloud-core/src/sanitize.rs`（HAR → fixture）遮蔽 `userDomainId` 是**对的**，
 它是"进版本库的静态文件"；别因为"日志里可以留"就去放宽它。
