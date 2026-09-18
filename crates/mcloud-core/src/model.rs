@@ -3,6 +3,7 @@
 //! 多账号是**一等公民**：`Account` 覆盖余额、凭据到期、健康度、独立调度，
 //! 而不是把账号当成一个附属字段。
 
+use crate::user::UserId;
 use serde::{Deserialize, Serialize};
 
 /// 账号标识。
@@ -32,6 +33,20 @@ impl std::fmt::Display for AccountId {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Account {
     pub id: AccountId,
+    /// 归属的**系统用户**（[`UserId`](crate::UserId)）。
+    ///
+    /// # 为什么是 `Option` 而不是文档里写的 `UserId`
+    ///
+    /// v2 及更早的库里已经有账号数据，而 schema 迁移是**纯 SQL**、
+    /// 执行时"首个管理员"还不存在（管理员要靠 `mcloud user init` 之后才有）。
+    /// 迁移期硬编一个 owner 只能靠猜，所以历史数据落到 `None`（未归属），
+    /// 由初始化首个管理员时**认领**（见 `StateStore::claim_unowned_accounts`）。
+    ///
+    /// 语义上 `None` 只能出现在"刚迁移完还没初始化管理员"这一个窗口里；
+    /// 隔离判据（[`crate::is_visible_to`]）对它的处理是**谁都看不见**，
+    /// 而不是"谁都看得见" —— 漏判的代价不对称。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<UserId>,
     /// 昵称（优先展示）。
     pub nickname: Option<String>,
     /// 脱敏手机号，形如 `19****01`（前 2 + `****` + 后 2，见 [`crate::pure::mask_phone`]）。
@@ -76,6 +91,17 @@ impl Account {
     /// `None` = 未知，按未过期处理以免误报。
     pub fn is_auth_expired_at(&self, now_millis: i64) -> bool {
         matches!(self.auth_expire, Some(exp) if exp <= now_millis)
+    }
+
+    /// 这个云盘账号对该系统用户是否可见。
+    ///
+    /// **未归属（`owner == None`）对谁都不可见** —— 迁移完还没初始化管理员的窗口里，
+    /// 宁可是"账号暂时不出现"，也不要出现"谁都拿得到"。
+    pub fn is_visible_to(&self, viewer: &UserId) -> bool {
+        match &self.owner {
+            Some(owner) => crate::user::is_visible_to(owner, viewer),
+            None => false,
+        }
     }
 }
 

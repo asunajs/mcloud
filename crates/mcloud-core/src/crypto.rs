@@ -155,6 +155,18 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
+/// SHA-1 → **大写** hex。
+///
+/// 对齐 PC 客户端 `common/utils.js: encryptByHash`：
+/// `CryptoJS.SHA1(HASHTEXT + password).toString(Hex).toUpperCase()`。
+/// 大小写不是风格问题 —— 它直接进入请求体 `dycpwd`，服务端按十六进制解析。
+pub fn sha1_hex_upper(data: &[u8]) -> String {
+    use sha1::Digest as _;
+    let mut h = sha1::Sha1::new();
+    h.update(data);
+    hex::encode_upper(h.finalize())
+}
+
 /// HmacSHA256 → **base64**（不是 hex！对齐 `shared/src/push/index.ts:240` 的钉钉加签）。
 pub fn hmac_sha256_base64(key: &[u8], message: &[u8]) -> String {
     use hmac::Hmac;
@@ -249,6 +261,62 @@ pub fn aes_cbc_fixed_iv_encrypt_hex(key: &str, message: &str) -> Result<String, 
         AES_FIXED_IV,
         message.as_bytes(),
     )?))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3.5 AES-ECB/PKCS7 —— PC 客户端 `common/utils.js: decryptByAes`
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn ecb_pkcs7_decrypt(key: &[u8], data: &[u8]) -> Result<Vec<u8>, Error> {
+    use cipher::BlockDecryptMut as _;
+
+    if data.is_empty() || !data.len().is_multiple_of(16) {
+        return Err(Error::Parse(format!(
+            "AES-ECB 密文长度非法: {}",
+            data.len()
+        )));
+    }
+
+    macro_rules! dec {
+        ($alg:ty) => {{
+            let cipher = <$alg as KeyInit>::new_from_slice(key)
+                .map_err(|e| Error::Internal(format!("AES 密钥不合法: {e}")))?;
+            let mut buf = data.to_vec();
+            // 裸分组密码逐块解密 = ECB（块间无链接），最后一块按 PKCS7 去填充
+            cipher
+                .decrypt_padded_mut::<Pkcs7>(&mut buf)
+                .map_err(|_| Error::Parse("AES 明文填充非法".into()))?
+                .to_vec()
+        }};
+    }
+
+    match key.len() {
+        16 => Ok(dec!(aes::Aes128)),
+        24 => Ok(dec!(aes::Aes192)),
+        32 => Ok(dec!(aes::Aes256)),
+        n => Err(Error::Internal(format!("AES 密钥长度非法: {n}"))),
+    }
+}
+
+/// AES-ECB/PKCS7 解密，密文是 **hex**（不是 base64），返回 UTF-8 明文。
+///
+/// 对齐 PC 客户端 `common/utils.js: decryptByAes(input, key)`：
+///
+/// ```js
+/// const keyWordArray = CryptoJS.enc.Utf8.parse(key);        // 16 字节 ASCII → AES-128
+/// const encryptedWordArray = CryptoJS.enc.Hex.parse(input);  // 输入是 hex
+/// CryptoJS.AES.decrypt(..., { mode: ECB, padding: Pkcs7 })
+/// ```
+///
+/// 两个容易搞错的点：
+/// - **输入是 hex 而不是 base64**：同一个文件里的 `encryptByAes` 输出 base64，
+///   两者不是一对逆运算，照「加解密对称」的直觉写就会解不开；
+/// - 密钥原样使用（不做截断/补零），与本模块 CBC 系列的处理方式不同。
+pub fn aes_ecb_pkcs7_decrypt_hex(key: &str, cipher_hex: &str) -> Result<String, Error> {
+    let cipher = hex::decode(cipher_hex.trim())
+        .map_err(|e| Error::Parse(format!("密文不是合法 hex: {e}")))?;
+    let plain = ecb_pkcs7_decrypt(key.as_bytes(), &cipher)?;
+    String::from_utf8(plain).map_err(|e| Error::Parse(format!("AES 明文不是合法 UTF-8: {e}")))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1057,5 +1125,73 @@ mod tests {
                 "variant 位不对: {u}"
             );
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PC 客户端（common/utils.js）的原语 —— 向量与出处见
+    // test/golden/pcclient-crypto-vectors.json
+    // ─────────────────────────────────────────────────────────────────────────
+
+    const PC_VECTORS: &str = include_str!("../../../test/golden/pcclient-crypto-vectors.json");
+
+    fn pc_vectors() -> Value {
+        serde_json::from_str(PC_VECTORS).expect("向量文件必须是合法 JSON")
+    }
+
+    #[test]
+    fn pc_client_constants_match_the_source_file() {
+        // 常量单独钉一次：它们是"从客户端源码抄来的事实"，
+        // 改了它们等于换了密钥，必须有人主动改这里
+        let v = pc_vectors();
+        assert_eq!(v["constants"]["LOGIN_AES_KEY"], "qPqDw263XgFgL3u8");
+        assert_eq!(v["constants"]["LOGIN_AES_KEY_TEST"], "2ErfJus1Ofr@2o24");
+        assert_eq!(v["constants"]["PASSWORD_HASH_PREFIX"], "fetion.com.cn:");
+    }
+
+    #[test]
+    fn decrypts_pc_client_login_data_with_source_key() {
+        let v = pc_vectors();
+        let key = v["constants"]["LOGIN_AES_KEY"].as_str().unwrap();
+
+        for case in v["loginDataDecrypt"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let cipher = case["cipherHex"].as_str().unwrap();
+            let got = aes_ecb_pkcs7_decrypt_hex(key, cipher);
+
+            if case["expectError"].as_bool() == Some(true) {
+                assert!(got.is_err(), "{name}: 非法填充必须报错，实际解出 {got:?}");
+                continue;
+            }
+            assert_eq!(
+                got.unwrap_or_else(|e| panic!("{name}: {e}")),
+                case["expectPlain"].as_str().unwrap(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn aes_ecb_rejects_malformed_ciphertext() {
+        let key = "qPqDw263XgFgL3u8";
+        // 输入是 hex，不是 base64 —— 传 base64 必须失败而不是解出乱码
+        assert!(aes_ecb_pkcs7_decrypt_hex(key, "RTUyNkUxRjNGOTc2NTQ0NA==").is_err());
+        // 长度不是 16 的倍数
+        assert!(aes_ecb_pkcs7_decrypt_hex(key, "0011223344556677").is_err());
+        // 空密文
+        assert!(aes_ecb_pkcs7_decrypt_hex(key, "").is_err());
+    }
+
+    #[test]
+    fn sha1_upper_matches_pc_client_encrypt_by_hash() {
+        let v = pc_vectors();
+        for case in v["sha1Upper"].as_array().unwrap() {
+            let got = sha1_hex_upper(case["input"].as_str().unwrap().as_bytes());
+            assert_eq!(got, case["expect"].as_str().unwrap(), "{}", case["name"]);
+        }
+
+        // 大小写不是风格问题：结果直接进请求体的 dycpwd，服务端按十六进制解析
+        let hashed = sha1_hex_upper(b"fetion.com.cn:pass1234");
+        assert_eq!(hashed, hashed.to_ascii_uppercase());
+        assert_eq!(hashed.len(), 40, "SHA-1 是 40 位十六进制");
     }
 }

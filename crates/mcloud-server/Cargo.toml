@@ -12,6 +12,9 @@ mcloud-core = { workspace = true }
 mcloud-io = { workspace = true }
 mcloud-exec = { workspace = true }
 mcloud-capabilities = { workspace = true }
+# 组装层：迁移策略、能力注册表 JSON、登录驱动都住在那里，
+# 这样 CLI 不必依赖本 crate（也就不会把 axum 拖进命令行产物）
+mcloud-app = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

@@ -125,7 +125,7 @@
 | 定时逻辑 | `api/src/scheduler.ts` + `exchange-schedule.ts`：croner，支持 **5/6 段（含秒）**，默认 `Asia/Shanghai`；定义落 `data/schedules.json`，**启动自动重注册**；同一"任务+账号"在跑则**静默跳过**；`windowToCron` 把 `HH:mm:ss` 翻成 6 段 cron | **模型保留**（定义落盘 + 启动重注册 + 运行中跳过），**换库**：Rust 侧需选定支持秒级的 cron 实现；"跳过 vs 排队"策略显式化 | 属 P2 剩余项；抢兑需要毫秒级 |
 | CLI | `cli/src/`：**没有真正的子命令** —— `bin` 只接一个可选配置文件路径，不解析业务参数、无 readline；`kouling.ts` / `tjs-main.ts` 是各自独立入口；与 api **完全独立、分别启动**，任务编排是**两套**（CLI 硬编码顺序 vs api registry） | **重做**：clap 正经子命令（`login` / `run` / `serve` …）+ 一致退出码 + 交互式输入（登录必须）；CLI 与 server **共用同一任务注册源**，不再两套编排 | 与 §0.1「两个独立产物」配套 |
 | 配置 | `shared/src/config/`：`asign.json`（`version/caiyun/common/message`，中文任务开关键名）；valibot schema **只用于生成类型/默认值/JSON-Schema，运行期不校验**；敏感值 `auth` **明文落盘**；改配置后**下次任务运行**才生效 | **重做**：运行期真校验（serde + schemars 复刻"单一来源生成"的思路）；分层"默认 → common → 账号"**保留**；配置改动即时生效 | 手改 JSON 的形态由 SQLite 取代（§3.x） |
-| 共享基建 | `shared/src/http/`：请求基座，**按域名注入**凭据（`authorization` 仅发 `AUTH_DOMAINS`、`jwttoken` 仅发目标域、`deviceid` 全发）+ 内置 CookieJar；**无签名、默认不重试**。<br>`shared/src/slide/`：滑块验证码**只算缺口偏移**（自实现 Sobel 边缘检测 + 轮廓提取 + 模板匹配，fast-png 解码），**不含轨迹模拟与提交** | http 基座的"按域名注入凭据 + CookieJar"语义**保留**（登录后绝大多数接口依赖它）；滑块按新抓包重写（登录与兑换都要用） | 重试策略见 §3.5 |
+| 共享基建 | `shared/src/http/`：请求基座，**按域名注入**凭据（`authorization` 仅发 `AUTH_DOMAINS`、`jwttoken` 仅发目标域、`deviceid` 全发）+ 内置 CookieJar；**无签名、默认不重试**。<br>`shared/src/slide/`：滑块验证码**只算缺口偏移**（自实现 Sobel 边缘检测 + 轮廓提取 + 模板匹配，fast-png 解码），**不含轨迹模拟与提交** —— 服务于旧项目**自己的**任务（**旧项目没有登录流程**，别把它和本次登录链路扯在一起） | http 基座的"按域名注入凭据 + CookieJar"语义**保留**（登录后绝大多数接口依赖它）；**滑块那一整套图像识别不搬迁** —— 登录链路上的滑块，缺口坐标由服务端用客户端公开密钥直接下发（`data.puzzleLeft`，解密得坐标；**已由一次真实风控挑战证实**：首发发码被 `200059554` 拦下 → 自动解坐标重发 → `验证码已发送`，见 `docs/upstream-logout-sms-login.md` §2.2.1）。所以既不需要边缘检测，也不需要人工量像素 | 重试策略见 §3.5 |
 
 **待拍板项**（旧做法有争议，或存在多种合理选择）：
 
@@ -342,9 +342,12 @@ mcloud/                               # /Users/catlair/mobile/workspace/mcloud
 │   │   ├── src/run.rs                #   RunStore（SQLite 持久化，替代内存 asyncRuns）
 │   │   ├── src/concurrency.rs        #   默认串行、全局上限、同(能力+账号)互斥
 │   │   └── src/event.rs              #   broadcast 事件流 → SSE
-│   ├── mcloud-app/                      # ★ 组装根：装配运行时（依赖 core/upstream/capabilities/exec/io）
-│   │   │                             #    不含 axum、不含 clap —— 两个产物共用它，见 §3.2
-│   │   └── src/lib.rs                #   「装配好的运行时」：注入 IO 实现、暴露用例入口
+│   ├── mcloud-app/                      # ★ 组装层：两个产物共用它，见 §3.2
+│   │   ├── src/migration.rs          #   旧数据迁移：先归档、再建库、后导入（+ 预演走同一条路径）
+│   │   ├── src/payload.rs            #   能力注册表 / 版本 → 前端要吃的 JSON
+│   │   ├── src/device.rs             #   设备指纹（dID）：最早存在、永不漂移的那份本地状态
+│   │   ├── src/user.rs               #   首个管理员初始化（CLI 与 WebUI 引导共用同一用例）
+│   │   └── src/login.rs              #   登录驱动：状态机 + 真实等待（1000ms）+ 观察者回调
 │   ├── mcloud-server/                   # ★ 产物二：axum 路由 + SSE + 内嵌前端 + OpenAPI
 │   │   ├── src/routes/               #   login / accounts / capabilities / runs / schedules / exchange / debug
 │   │   └── src/openapi.rs            #   utoipa → openapi.json（供前端生成类型）
@@ -594,10 +597,27 @@ CREATE TABLE run_events (
 
 **schema v3 迁移**：
 
-- 新增 `users` / `sessions` 表，`accounts` 加 `owner`；v2 数据迁移时把既有账号归给初始化出的首个管理员。
+- 新增 `users` / `sessions` 表，`accounts` 加 `owner`。
+- **归属分两步**（迁移是纯 SQL，执行时管理员还不存在，硬编一个 owner 只能靠猜）：
+  1. 迁移把历史账号的 `owner` 置为 `NULL` = **未归属**，且未归属的账号**谁都看不见**（宁可暂时不出现，也不要谁都拿得到）；
+  2. `mcloud user init` 初始化首个管理员后调用 `StateStore::claim_unowned_accounts` **认领**（只认领 `owner IS NULL`，幂等）。
 - 迁移必须幂等，且 `--dry-run` 走**完全相同**的代码路径（沿用 §8 的既有约定）。
+  v3 里的 `ALTER TABLE ... ADD COLUMN` 是唯一无法写成 `IF NOT EXISTS` 的语句，
+  因此那一段外面包了**显式事务**：不包的话失败会留下"列已加、版本未升"的半成品库，重跑直接报重复列。
+- `users.name` 用 `COLLATE NOCASE` 唯一：否则 `Alice` 与 `alice` 能各建一个，登录时匹配到谁取决于查询顺序。
 
-**CLI 与 WebUI 的会话差异**：CLI 是本机单机（登录态存本地、可长期有效）；WebUI 是 HTTP（cookie 会话、有到期与登出）。两者**共用同一份 `Session` 领域类型与校验逻辑**，差异只在外层如何携带。
+**本地与网络的分界（2026-09-18 修正）**：原先设想 CLI 也要"登录本系统"，这是**错的** ——
+数据库就在本机，能跑 CLI 的人本来就能直接 `sqlite3` 读库，给他加一道"你是谁"
+既不增加任何安全性，又把本地运维变得别扭（列个账号都要先登录）。所以：
+
+- **CLI 一律用 `Scope::Local`**（不过滤，能操作所有人的账号）—— 这是句实话，不是后门；
+- **WebUI 的每个请求用 `Scope::User(会话用户)`** —— 那里的用户拿不到库文件，隔离才有意义；
+- 过滤逻辑**只有一份**：查询写 `(?n IS NULL OR owner = ?n)`，一个表达式同时表达两种范围，
+  于是"某条查询漏了归属条件"在结构上不可能发生（它必须调用这个表达式）。
+  `owner IS NULL` 的历史账号对两者都不可见，直到被认领。
+
+CLI 与 WebUI 仍共用同一份 `Session` 领域类型与校验逻辑（`mcloud_app::session`），
+但**只有 WebUI 用它**：网络才需要"你是谁"。
 
 > 相关的待拍板项（对外暴露的防护、敏感值落盘、配置校验严格度）见 §1.6 文末。
 
@@ -845,7 +865,7 @@ P6 的**视觉与组件基建可在 P2 后并行启动**（接口先冻结 `open
 4. 复杂活动：`hc1t` → `red-flower` → `play-ai-special` → `play-ai-lottery` → `cloud-phone-redpack`
 5. 最高风险：`kouling`（WS + 小红书 HTML）、`exchange`（并发抢兑 + 幂等）
 
-### 7.2 当前进度（2026-09-17）
+### 7.2 当前进度（2026-09-18）
 
 **已完成并验证过**：
 
@@ -858,17 +878,50 @@ P6 的**视觉与组件基建可在 P2 后并行启动**（接口先冻结 `open
 | `mcloud-core::legacy` 旧数据映射 + 三个陷阱 | ✅ 完成 |
 | 旧数据导入器 + `mcloud migrate`（含 `--dry-run`、归档、幂等台账） | ✅ 完成 |
 | **夹具脱敏与抽取流水线**（§6.2）：36 份 HAR → 30 个文件 / 709 条 / 8.3 MB / **0 残留** | ✅ 完成 |
-| 五项门禁（`cargo test` / `clippy -D warnings` / `fmt --check` / 分层 / 标识守卫） | ✅ 全绿，**241 个测试** |
 | `docs/rust-rewrite-plan.md` 收进本仓库（自 `mcloud-sign` 同步并脱敏） | ✅ 完成 |
+| **`mcloud-upstream::login`**：二维码本地拼装、`thirdlogin`（扫码/短信/账密）、发码、滑块、退出 + 轮询状态机 | ✅ 完成（P2.5 第一块） |
+| **PC 客户端三个密码学原语**：`decryptByAes` / `encryptByAesCBC` / `encryptByHash`（密钥取自本机 `app.asar`） | ✅ 完成，且用真实抓包**逐字节重放**验证 |
+| **`mcloud-core::user`**：`User`/`Session`/`Role`、argon2id 口令哈希、数据隔离判据 | ✅ 完成 |
+| **schema v3 迁移**：`users` / `sessions` 表 + `accounts.owner`（事务包裹的 ALTER）、`UserStore` 契约与 SQLite 实现、认领未归属账号 | ✅ 完成 |
+| **数据隔离落地**：`UserId` 贯穿 `StateStore` 全部方法（读不到=看不到、写要校验、无主账号对谁都不可见）+ 交叉读取验收测试 | ✅ 完成 |
+| **`mcloud-capabilities::login`**：扫码/短信状态机（不 sleep、终态不可逆）、登录结果 → 账号/登录态映射、`auth` 与原客户端逐字一致 | ✅ 完成 |
+| **`mcloud-app` 组装层**：迁移策略下移、能力 JSON、设备指纹持久化、首个管理员初始化、扫码登录驱动 | ✅ 完成 |
+| **CLI**：`user init` / `user list` / `login qr`（终端二维码）/ `login sms`（含滑块降级），与 HTTP 产物共用组装层 | ✅ 完成 |
+| **短信验证码登录全链路**：发码（自动过滑块）→ 输码 → 解密落库，流程在共享层（CLI 与 WebUI 共用） | ✅ 完成 |
+| 六项门禁（`cargo test` / `clippy -D warnings` / `fmt --check` / 分层 / 产物解耦 / 标识守卫） | ✅ 全绿，**346 个测试** |
 
 **旧数据实测**（`Documents/workspace/mcloud-sign`）：账号 2 / 登录态 2 / 组合 1 / 历史 96 条 / **问题 0 条**；
 二次执行 6 个数据文件全部跳过、0 次写入，行数不变。
 
 **已回退（重要）**：P3 曾按旧 TS 搬过 `signin` / `exchange` / `task` / `auth` 四个模块与 15 个 L2 用例，
-**现已全部删除** —— 上游改为按新抓包重写，`mcloud-upstream` 只保留骨架
-（`Upstream` + `Envelope` + `base`，6 个单测）。
+**现已全部删除** —— 上游改为按新抓包重写，`mcloud-upstream` 除 `login` 外只保留骨架
+（`Upstream` + `Envelope` + `base`）。
 
-**尚未开始**：push 10 渠道（§1.4）、调度引擎（cron 解析与触发）、用户体系与两个产物（§3.7 / §3.2）。
+**已记录待实现**：**各端设备指纹与请求头差异** → [`docs/client-profiles.md`](./client-profiles.md)。
+差异主要在请求头（认证/设备/渠道/埋点/签名各端一套），请求体只有 `clientType`/`cpid`/`version` 随端变化。
+该文档记录了实测证据（709 条夹具按 UA 分组）、PC 端头的代码级来源、设备指纹 14 段字段表，以及未知项清单；
+落地时机是"接第二个端的时候"。
+
+**P2.5（账号登录）到此闭环**：用户体系（schema v3 + `UserStore` + 数据隔离）→
+「首管理员初始化」→ 扫码/短信登录状态机 → 「登录结果落成账号与登录态」→ 两个产物共用组装层，
+CLI 侧已可端到端跑通（`user init` → `login qr`）。
+
+**尚未开始**：各端设备指纹/请求头档案的完整形态（见上，[`docs/client-profiles.md`](./client-profiles.md)；
+登录链路的必需部分已落地为 `mcloud-upstream::client::ClientProfile`）、
+WebUI 侧的登录页与会话鉴权、push 10 渠道（§1.4）、调度引擎（cron 解析与触发）、
+`ConfigStore` 的用户维度（定时任务/组合目前仍是全局的）。
+
+**两个已知的小缺口（都不影响当前可用性）**：
+
+- **`user_domain_id` 落空**：真实登录响应的 `userInfo` 里没有 `userId`
+  （文档 §5 那个是设备绑定流程的合成样本），需要用它的接口（如 `get_tn`）得另找来源。
+  已在 `docs/upstream-login-protocol.md` §5 记下，下次登录打印字段名即可确定。
+- **WebUI 的会话鉴权未接**：`mcloud_app::session`（登录本系统、签发/校验/撤销）已实现且有测试，
+  但还没有 HTTP 层去用它 —— 那是 P5 的 `routes/` 骨架。CLI **不需要**它（见 §3.7 的分界说明）。
+
+**CLI 新建账号的归属策略**：库里已有用户时归**首个用户**，没有则保持无主
+（等 `mcloud user init` 认领）。这不是权限检查，而是"账号必须有主人"的落地 ——
+否则网页端按隔离规则看不到它，会出现"扫码成功了、网页里却没有这个账号"。
 
 ---
 

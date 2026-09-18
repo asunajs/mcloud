@@ -8,13 +8,35 @@
 //! 真正的导入逻辑在 `mcloud_io::import_legacy`，这里只负责编排：
 //! **先归档、再建库、后导入**，并把结果整理成前端（CLI/日志）可直接消费的形状。
 
-use mcloud_core::Clock;
+use mcloud_core::{Clock, Scope, UserId, UserStore};
 use mcloud_io::{
     LegacyImportError, LegacySource, MigrationReport, SqliteStore, SystemClock,
     archive_legacy_source, diagnose_legacy, import_legacy,
 };
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+
+/// 迁移执行者的**兜底**来源：库里的首个用户。
+///
+/// # 为什么迁移需要一个人
+///
+/// 账号从 schema v3 起有归属（`accounts.owner`），而**无主账号对谁都不可见**。
+/// 旧数据导入本质上是"把这些账号交给某个人"，所以必须有个接收人。
+///
+/// # 这是个兜底，不是首选
+///
+/// 正常路径是调用方把"当前会话的用户"传进来（CLI 就是这么做的）。
+/// 只有在没有会话概念的场景（例如 WebUI 首次引导）才回落到"首个用户"——
+/// 而那时库里既没有会话文件也可能没有用户，所以它会给出明确的
+/// [`LegacyImportError::NoOwner`]，而不是"迁完了但账号一个都看不见"。
+async fn acting_admin(store: &SqliteStore) -> Result<UserId, LegacyImportError> {
+    let users = store.list_users().await?;
+    users
+        .into_iter()
+        .next()
+        .map(|user| user.id)
+        .ok_or(LegacyImportError::NoOwner)
+}
 
 /// 一次迁移要做的事：从哪读、写到哪、归档到哪。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,15 +136,32 @@ impl MigrationOutcome {
 pub async fn run(
     plan: &MigrationPlan,
     dry_run: bool,
+    owner: Option<&UserId>,
 ) -> Result<MigrationOutcome, LegacyImportError> {
     let now = SystemClock.now();
 
     let report = if dry_run {
+        // 预演不需要用户：`diagnose_legacy` 在临时库里自造一个占位用户，
+        // 走的是与真实导入完全相同的路径（见那里的说明）。
         diagnose_legacy(&plan.source, now).await?
     } else {
         let archived = archive_legacy_source(&plan.source, &plan.backup_dir)?;
         let store = SqliteStore::open(&plan.db_path)?;
-        let report = import_legacy(&store, &plan.source, now).await?;
+        // 谁在操作，就把账号交给谁；没指定执行者才回落到"库里首个用户"
+        // （见 `acting_admin` 的说明）。
+        //
+        // CLI 走的是 `Scope::Local`（不指定 owner）：导入的账号保持无主，
+        // 等 `mcloud user init` 时由认领流程接手 —— 于是"先 migrate 再 init"
+        // 与"先 init 再 migrate"两种顺序都能得到正确结果。
+        let fallback;
+        let scope = match owner {
+            Some(id) => Scope::user(id),
+            None => {
+                fallback = acting_admin(&store).await?;
+                Scope::user(&fallback)
+            }
+        };
+        let report = import_legacy(&store, scope, &plan.source, now).await?;
         return Ok(outcome(report, archived, Some(plan.db_path.clone()), false));
     };
 
@@ -169,6 +208,45 @@ mod tests {
     /// 真实脱敏夹具所在目录（`test/fixtures/legacy/`）。
     const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/fixtures/legacy");
 
+    /// 预置管理员（`mcloud user init` 的等价物）。
+    ///
+    /// 账号从 v3 起必须有主人，"**先 init 再 migrate**"是硬顺序 ——
+    /// 迁移服务自己也要求这一点（见 `acting_admin`），所以测试照这个顺序走，
+    /// 而不是给自己开一条免检通道。
+    async fn seed_admin(path: &Path) -> UserId {
+        let store = SqliteStore::open(path).unwrap();
+        let admin = mcloud_core::User::new(
+            "admin",
+            "admin",
+            "!",
+            mcloud_core::Role::Admin,
+            SystemClock.now(),
+        );
+        store.upsert_user(&admin).await.unwrap();
+        admin.id
+    }
+
+    /// 没有用户时必须**说清楚该怎么做**，而不是默默迁完一场空。
+    #[tokio::test]
+    async fn migration_without_a_user_tells_you_what_to_do() {
+        let work = tempfile::tempdir().unwrap();
+        let plan = fixture_plan(work.path());
+
+        let err = run(&plan, false, None)
+            .await
+            .expect_err("没有用户时迁移必须失败");
+        assert!(matches!(err, LegacyImportError::NoOwner), "{err:?}");
+        assert!(err.to_string().contains("mcloud user init"), "{err}");
+        // 失败要发生在写入之前：不能留下一个"迁了一半"的库
+        let store = SqliteStore::open(&plan.db_path).unwrap();
+        assert!(
+            mcloud_core::StateStore::list_accounts(&store, Scope::user(&UserId::new("nobody")))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     fn fixture_plan(work: &Path) -> MigrationPlan {
         MigrationPlan {
             source: LegacySource::new(
@@ -185,7 +263,7 @@ mod tests {
         let work = tempfile::tempdir().unwrap();
         let plan = fixture_plan(work.path());
 
-        let outcome = run(&plan, true).await.expect("预演应成功");
+        let outcome = run(&plan, true, None).await.expect("预演应成功");
 
         assert!(outcome.dry_run);
         assert_eq!(outcome.archived, 0);
@@ -203,8 +281,9 @@ mod tests {
     async fn real_run_archives_before_writing_the_database() {
         let work = tempfile::tempdir().unwrap();
         let plan = fixture_plan(work.path());
+        let admin = seed_admin(&plan.db_path).await;
 
-        let outcome = run(&plan, false).await.expect("迁移应成功");
+        let outcome = run(&plan, false, None).await.expect("迁移应成功");
 
         assert!(!outcome.dry_run);
         assert_eq!(outcome.archived, 7, "asign.json + 6 个数据文件");
@@ -219,14 +298,23 @@ mod tests {
             assert_eq!(archived, original, "{name} 归档内容应逐字一致");
         }
 
-        // 库真的建了东西
+        // 库真的建了东西，而且**账号归属于那个管理员**（否则它们谁都看不见）
         let store = SqliteStore::open(&plan.db_path).unwrap();
+        let accounts = mcloud_core::StateStore::list_accounts(&store, Scope::user(&admin))
+            .await
+            .unwrap();
+        assert_eq!(accounts.len(), 2);
+        assert!(
+            accounts.iter().all(|a| a.owner.as_ref() == Some(&admin)),
+            "导入的账号必须归属于执行迁移的用户"
+        );
         assert_eq!(
-            mcloud_core::StateStore::list_accounts(&store)
+            mcloud_core::StateStore::list_accounts(&store, Scope::user(&UserId::new("别人")))
                 .await
                 .unwrap()
                 .len(),
-            2
+            0,
+            "换个用户就该一个也看不到"
         );
     }
 
@@ -234,8 +322,9 @@ mod tests {
     async fn archiving_is_idempotent() {
         let work = tempfile::tempdir().unwrap();
         let plan = fixture_plan(work.path());
+        seed_admin(&plan.db_path).await;
 
-        let first = run(&plan, false).await.unwrap();
+        let first = run(&plan, false, None).await.unwrap();
         assert_eq!(first.archived, 7);
 
         let again = archive_legacy_source(&plan.source, &plan.backup_dir).unwrap();
@@ -246,9 +335,10 @@ mod tests {
     async fn second_run_reports_everything_unchanged_and_stays_consistent() {
         let work = tempfile::tempdir().unwrap();
         let plan = fixture_plan(work.path());
+        let admin = seed_admin(&plan.db_path).await;
 
-        run(&plan, false).await.unwrap();
-        let second = run(&plan, false).await.unwrap();
+        run(&plan, false, None).await.unwrap();
+        let second = run(&plan, false, None).await.unwrap();
 
         assert_eq!(second.report["runs"], 0, "源没变就不重复写");
         assert_eq!(second.report["accounts"], 0);
@@ -261,7 +351,7 @@ mod tests {
         // 库里不因重跑而多行
         let store = SqliteStore::open(&plan.db_path).unwrap();
         assert_eq!(
-            mcloud_core::StateStore::list_runs(&store, 100)
+            mcloud_core::StateStore::list_runs(&store, Scope::user(&admin), 100)
                 .await
                 .unwrap()
                 .len(),
@@ -274,13 +364,14 @@ mod tests {
         let work = tempfile::tempdir().unwrap();
         let plan = fixture_plan(work.path());
 
-        let outcome = run(&plan, true).await.unwrap();
+        let outcome = run(&plan, true, None).await.unwrap();
         let text = outcome.human_lines().join("\n");
         assert!(text.contains("预演"));
         assert!(text.contains("账号 2"));
         assert!(text.contains("没有需要人工确认的问题"));
 
-        let real = run(&plan, false).await.unwrap();
+        seed_admin(&plan.db_path).await;
+        let real = run(&plan, false, None).await.unwrap();
         let text = real.human_lines().join("\n");
         assert!(text.contains("迁移完成"));
         assert!(text.contains("已归档 7 个源文件"));
@@ -302,7 +393,7 @@ mod tests {
     async fn outcome_json_is_machine_consumable() {
         let work = tempfile::tempdir().unwrap();
         let plan = fixture_plan(work.path());
-        let outcome = run(&plan, true).await.unwrap();
+        let outcome = run(&plan, true, None).await.unwrap();
 
         let payload = outcome_to_json(&outcome);
         assert_eq!(payload["dryRun"], true);
@@ -330,13 +421,24 @@ mod tests {
             backup_dir: dir.path().join("backup"),
         };
 
-        let err = run(&plan, false).await.expect_err("掩码冲突必须失败");
+        // 先有用户：这样失败点才是身份映射，而不是"没有归属人"。
+        // （两者的顺序都发生在任何写入之前，但测的是哪个错必须说清楚。）
+        seed_admin(&plan.db_path).await;
+
+        let err = run(&plan, false, None).await.expect_err("掩码冲突必须失败");
         assert!(matches!(err, LegacyImportError::Identity(_)), "{err:?}");
 
         // 归档是允许的（它是源数据的副本，无害），但**库必须是空的**
         let store = SqliteStore::open(&plan.db_path).unwrap();
+        let admin = store
+            .list_users()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
         assert!(
-            mcloud_core::StateStore::list_accounts(&store)
+            mcloud_core::StateStore::list_accounts(&store, Scope::user(&admin.id))
                 .await
                 .unwrap()
                 .is_empty()

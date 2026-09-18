@@ -634,9 +634,41 @@ impl ConfigStore for SqliteStore {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+    use mcloud_core::{Account, Role, Scope, StateStore, User, UserId, UserStore};
 
     fn store() -> SqliteStore {
         SqliteStore::open_in_memory().expect("内存库应可打开")
+    }
+
+    /// 测试用户。v3 起账号与登录态都要求归属（`accounts.owner` 有外键指向 `users`），
+    /// 所以碰账号的用例都得先有个"主人"。
+    const TEST_USER: &str = "test-user";
+
+    fn uid() -> UserId {
+        UserId::new(TEST_USER)
+    }
+
+    async fn ensure_user(s: &SqliteStore) {
+        s.upsert_user(&User::new(
+            TEST_USER,
+            TEST_USER,
+            "!",
+            Role::Admin,
+            Utc.with_ymd_and_hms(2026, 9, 16, 1, 0, 0).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    /// 建一个归属于测试用户的账号。
+    async fn owned_account(s: &SqliteStore, id: &str) -> Account {
+        ensure_user(s).await;
+        let mut account = Account::new(id);
+        account.owner = Some(uid());
+        s.upsert_account(Scope::user(&uid()), &account)
+            .await
+            .unwrap();
+        account
     }
 
     fn schedule(id: &str) -> Schedule {
@@ -924,26 +956,25 @@ mod tests {
 
     #[tokio::test]
     async fn account_state_is_stored_apart_from_accounts() {
-        use mcloud_core::{Account, StateStore};
-
         let s = store();
-        let account = Account::new("19****01");
-        s.upsert_account(&account).await.unwrap();
+        let account = owned_account(&s, "19****01").await;
 
         let state = mcloud_core::AccountState {
             jwt_token: Some("SECRETJWT".into()),
             device_id: Some("DEV".into()),
             ..mcloud_core::AccountState::new("19****01")
         };
-        s.upsert_account_state(&state).await.unwrap();
+        s.upsert_account_state(Scope::user(&uid()), &state)
+            .await
+            .unwrap();
 
         // 读账号列表**不会**带出凭据：两张表没有 JOIN，凭据物理上不在结果里
-        let accounts = s.list_accounts().await.unwrap();
+        let accounts = s.list_accounts(Scope::user(&uid())).await.unwrap();
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0], account, "账号行不应被登录态污染");
 
         let loaded = s
-            .get_account_state(&AccountId::new("19****01"))
+            .get_account_state(Scope::user(&uid()), &AccountId::new("19****01"))
             .await
             .unwrap()
             .unwrap();
@@ -954,26 +985,37 @@ mod tests {
     /// 覆盖写而不是合并：`None` 必须能真的清掉旧值。
     #[tokio::test]
     async fn account_state_upsert_overwrites_instead_of_merging() {
-        use mcloud_core::StateStore;
-
         let s = store();
         let id = AccountId::new("19****01");
-        s.upsert_account_state(&mcloud_core::AccountState {
-            jwt_token: Some("OLD".into()),
-            device_id: Some("OLDDEV".into()),
-            ..mcloud_core::AccountState::new("19****01")
-        })
+        // 登录态依附于账号：账号必须先存在且归属于调用者，否则写入会被隔离校验挡住
+        owned_account(&s, "19****01").await;
+
+        s.upsert_account_state(
+            Scope::user(&uid()),
+            &mcloud_core::AccountState {
+                jwt_token: Some("OLD".into()),
+                device_id: Some("OLDDEV".into()),
+                ..mcloud_core::AccountState::new("19****01")
+            },
+        )
         .await
         .unwrap();
 
-        s.upsert_account_state(&mcloud_core::AccountState {
-            jwt_token: Some("NEW".into()),
-            ..mcloud_core::AccountState::new("19****01")
-        })
+        s.upsert_account_state(
+            Scope::user(&uid()),
+            &mcloud_core::AccountState {
+                jwt_token: Some("NEW".into()),
+                ..mcloud_core::AccountState::new("19****01")
+            },
+        )
         .await
         .unwrap();
 
-        let loaded = s.get_account_state(&id).await.unwrap().unwrap();
+        let loaded = s
+            .get_account_state(Scope::user(&uid()), &id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.jwt_token.as_deref(), Some("NEW"));
         assert_eq!(
             loaded.device_id, None,

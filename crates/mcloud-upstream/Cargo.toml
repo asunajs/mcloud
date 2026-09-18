@@ -12,3 +12,5 @@ mcloud-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# sID / 发码 random 是十六进制串，编码属纯计算（与 core 用同一份 hex 版本）
+hex = { workspace = true }

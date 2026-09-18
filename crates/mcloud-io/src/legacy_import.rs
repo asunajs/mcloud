@@ -45,7 +45,7 @@ use mcloud_core::legacy::{
 };
 use mcloud_core::{
     Account, AccountId, AccountMode, AccountState, ConfigStore, Error, ExchangeBinding,
-    ExchangeConfig, Pipeline, PipelineStep, RunRecord, RunStatus, Schedule, ScheduleTarget,
+    ExchangeConfig, Pipeline, PipelineStep, RunRecord, RunStatus, Schedule, ScheduleTarget, Scope,
     StateStore, WebuiConfig, md5_hex, sha256_hex,
 };
 use serde_json::Value;
@@ -310,6 +310,13 @@ pub enum LegacyImportError {
     /// **这一条是"什么都还没写"的那个失败**：掩码冲突会在任何写入之前中止。
     #[error("账号身份映射失败，已中止迁移且未写入任何数据：{0}")]
     Identity(#[from] LegacyError),
+    /// 库里还没有用户，账号没有人可以归。
+    ///
+    /// 单独成一个变体，是为了让前端能给出**可执行**的提示（"先跑 `mcloud user init`"），
+    /// 而不是把它混进"数据库操作失败"里 —— 后者会让人去查数据库，
+    /// 而这件事跟数据库一点关系都没有。
+    #[error("库里还没有用户，导入的账号将无人可归：请先执行 `mcloud user init`")]
+    NoOwner,
     #[error("数据库操作失败: {0}")]
     Store(#[from] Error),
 }
@@ -324,8 +331,21 @@ pub type Result<T> = std::result::Result<T, LegacyImportError>;
 ///
 /// `now` 显式传入而不是内部取 `Utc::now()`：台账的 `imported_at` 因此可测，
 /// 也让"所有时间都从外部进来"这条纪律在 io 层同样成立。
+///
+/// # `scope` 决定导入的账号归谁
+///
+/// 账号从 v3 起有归属（`accounts.owner`），而**无主账号对谁都不可见**（见
+/// `StateStore` 的隔离契约）。于是：
+///
+/// - [`Scope::User`]：导入的账号归那个用户 —— `user init` 之后由管理员执行的迁移；
+/// - [`Scope::Local`]：导入的账号**保持无主**（`owner IS NULL`），
+///   等之后初始化管理员时被 `claim_unowned_accounts` 认领。
+///
+/// 后者是 CLI 的路径，也是"先 migrate 再 init"这个顺序能成立的**原因**：
+/// 本地运维本来就能操作所有数据，没必要为了搬旧数据先造一个用户。
 pub async fn import_legacy(
     store: &SqliteStore,
+    scope: Scope<'_>,
     source: &LegacySource,
     now: DateTime<Utc>,
 ) -> Result<MigrationReport> {
@@ -342,7 +362,7 @@ pub async fn import_legacy(
     let identity = mcloud_core::legacy::build_identity_map(&views)?;
 
     if source_changed(store, &source.config_path, &config_text)? {
-        let written = write_accounts(store, &views).await?;
+        let written = write_accounts(store, scope, &views).await?;
         report.accounts = written as usize;
         commit_ledger(
             store,
@@ -372,8 +392,8 @@ pub async fn import_legacy(
 
         let issues_before = report.issues.len();
         let written = match name {
-            "state.json" => write_state(store, &value, &identity, &mut report).await?,
-            "history.json" => write_history(store, &value, &views, &mut report).await?,
+            "state.json" => write_state(store, scope, &value, &identity, &mut report).await?,
+            "history.json" => write_history(store, scope, &value, &views, &mut report).await?,
             "pipelines.json" => write_pipelines(store, &value, &views, &mut report).await?,
             "schedules.json" => write_schedules(store, &value, &views, &mut report).await?,
             "exchange.json" => write_exchange(store, &value, &views, &mut report).await?,
@@ -403,17 +423,27 @@ pub async fn import_legacy(
 /// 唯一的区别是最后那个库被丢掉 —— 于是漂移在结构上不可能发生。
 pub async fn diagnose_legacy(source: &LegacySource, now: DateTime<Utc>) -> Result<MigrationReport> {
     let scratch = SqliteStore::open_in_memory().map_err(LegacyImportError::Store)?;
-    import_legacy(&scratch, source, now).await
+
+    // 预演走 `Scope::Local`：它与真实导入是**同一条路径**，只是最后把库丢掉。
+    // 这里不再需要造占位用户了 —— 本地范围不要求账号有主人
+    //（导入的账号保持无主，真实迁移之后由认领流程接手）。
+    import_legacy(&scratch, Scope::Local, source, now).await
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 账号
 // ═══════════════════════════════════════════════════════════════════════════
 
-async fn write_accounts(store: &SqliteStore, views: &[LegacyAccountView]) -> Result<i64> {
+async fn write_accounts(
+    store: &SqliteStore,
+    scope: Scope<'_>,
+    views: &[LegacyAccountView],
+) -> Result<i64> {
     for view in views {
         let account = Account {
             id: view.account_id.clone(),
+            // 导入即归属：旧数据里的账号交给执行导入的这个用户
+            owner: scope.owner().cloned(),
             nickname: view.nickname.clone(),
             // 手机号非空时 AccountId 本身就是掩码，直接复用，避免两处掩码逻辑跑偏
             phone_masked: (!view.phone.is_empty()).then(|| view.account_id.as_str().to_string()),
@@ -425,13 +455,14 @@ async fn write_accounts(store: &SqliteStore, views: &[LegacyAccountView]) -> Res
             auth_expire: (view.auth_expire != 0).then_some(view.auth_expire),
             ..Account::new(view.account_id.as_str())
         };
-        store.upsert_account(&account).await?;
+        store.upsert_account(scope, &account).await?;
     }
     Ok(views.len() as i64)
 }
 
 async fn write_state(
     store: &SqliteStore,
+    scope: Scope<'_>,
     value: &Value,
     identity: &BTreeMap<String, AccountId>,
     report: &mut MigrationReport,
@@ -480,15 +511,18 @@ async fn write_state(
         };
 
         store
-            .upsert_account_state(&AccountState {
-                account_id: account_id.clone(),
-                jwt_token: state.jwt_token,
-                device_id: state.device_id,
-                user_domain_id: state.user_domain_id,
-                cloud_phone_redpack_token: state.cloud_phone_redpack_token,
-                // 旧 state.json 没有时间戳字段；"什么时候导入的"看台账
-                updated_at: None,
-            })
+            .upsert_account_state(
+                scope,
+                &AccountState {
+                    account_id: account_id.clone(),
+                    jwt_token: state.jwt_token,
+                    device_id: state.device_id,
+                    user_domain_id: state.user_domain_id,
+                    cloud_phone_redpack_token: state.cloud_phone_redpack_token,
+                    // 旧 state.json 没有时间戳字段；"什么时候导入的"看台账
+                    updated_at: None,
+                },
+            )
             .await?;
         written += 1;
     }
@@ -503,6 +537,7 @@ async fn write_state(
 
 async fn write_history(
     store: &SqliteStore,
+    scope: Scope<'_>,
     value: &Value,
     views: &[LegacyAccountView],
     report: &mut MigrationReport,
@@ -546,23 +581,26 @@ async fn write_history(
         };
 
         store
-            .insert_run(&RunRecord {
-                id: legacy_run_id(&run),
-                account_id,
-                capability: run.task.clone(),
-                status: if run.ok {
-                    RunStatus::Done
-                } else {
-                    RunStatus::Failed
+            .insert_run(
+                scope,
+                &RunRecord {
+                    id: legacy_run_id(&run),
+                    account_id,
+                    capability: run.task.clone(),
+                    status: if run.ok {
+                        RunStatus::Done
+                    } else {
+                        RunStatus::Failed
+                    },
+                    started_at,
+                    finished_at: parse_rfc3339(&run.end),
+                    // 旧数据从未采到"净增云朵"（原项目该字段的写入被注释掉了），
+                    // 编不出来就不编：留空比瞎填一个 0 诚实
+                    cloud_gained: None,
+                    cloud_after: None,
+                    message: run.error.clone(),
                 },
-                started_at,
-                finished_at: parse_rfc3339(&run.end),
-                // 旧数据从未采到"净增云朵"（原项目该字段的写入被注释掉了），
-                // 编不出来就不编：留空比瞎填一个 0 诚实
-                cloud_gained: None,
-                cloud_after: None,
-                message: run.error.clone(),
-            })
+            )
             .await?;
         written += 1;
     }
@@ -1084,6 +1122,7 @@ fn parse_pipeline_status(value: &str) -> Option<mcloud_core::PipelineStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mcloud_core::{Role, Scope, User, UserId, UserStore};
     use mcloud_core::{ScheduleStatus, WEBUI_PAGES};
     use std::path::PathBuf;
 
@@ -1098,6 +1137,34 @@ mod tests {
         DateTime::parse_from_rfc3339("2026-09-17T00:00:00Z")
             .expect("固定时刻")
             .with_timezone(&Utc)
+    }
+
+    /// 测试用的导入者。
+    ///
+    /// 账号从 v3 起有归属，而 `accounts.owner` 有外键指向 `users` ——
+    /// 也就是说**导入之前必须真的有一个用户**。这正是生产路径的要求
+    /// （先 `user init` 再 `migrate`），测试里同样照办，不给自己开免检通道。
+    const TEST_USER: &str = "test-user";
+
+    fn uid() -> UserId {
+        UserId::new(TEST_USER)
+    }
+
+    async fn ensure_user(store: &SqliteStore) {
+        store
+            .upsert_user(&User::new(TEST_USER, TEST_USER, "!", Role::Admin, now()))
+            .await
+            .expect("建测试用户");
+    }
+
+    /// 导入的统一入口：建好首个用户，并把旧数据导到它名下。
+    ///
+    /// 这里刻意走 `Scope::User` 而不是 `Scope::Local`：两者在导入器里的差别只是
+    /// "账号归谁"，而这些用例关心的正是归属正确 —— 所以用 User 范围覆盖它。
+    /// `Scope::Local`（账号保持无主）由 `diagnose_legacy` 的预演用例覆盖。
+    async fn run_import(store: &SqliteStore, source: &LegacySource) -> Result<MigrationReport> {
+        ensure_user(store).await;
+        import_legacy(store, Scope::user(&uid()), source, now()).await
     }
 
     /// 夹具目录本身就是合法的旧项目布局：`asign.json` 与数据文件同目录。
@@ -1144,7 +1211,7 @@ mod tests {
     #[tokio::test]
     async fn fixture_import_lands_every_entity() {
         let s = store();
-        let report = import_legacy(&s, &fixture_source(), now())
+        let report = run_import(&s, &fixture_source())
             .await
             .expect("真实夹具应可导入");
 
@@ -1165,8 +1232,11 @@ mod tests {
         );
 
         // 落库结果与报告一致 —— 报告说导了却查不到是最坏的失败方式
-        assert_eq!(s.list_accounts().await.unwrap().len(), 2);
-        assert_eq!(s.list_runs(100).await.unwrap().len(), 12);
+        assert_eq!(s.list_accounts(Scope::user(&uid())).await.unwrap().len(), 2);
+        assert_eq!(
+            s.list_runs(Scope::user(&uid()), 100).await.unwrap().len(),
+            12
+        );
         assert_eq!(s.list_pipelines().await.unwrap().len(), 1);
         assert!(s.list_schedules().await.unwrap().is_empty());
     }
@@ -1174,9 +1244,9 @@ mod tests {
     #[tokio::test]
     async fn accounts_are_keyed_by_mask_not_by_phone() {
         let s = store();
-        import_legacy(&s, &fixture_source(), now()).await.unwrap();
+        run_import(&s, &fixture_source()).await.unwrap();
 
-        let accounts = s.list_accounts().await.unwrap();
+        let accounts = s.list_accounts(Scope::user(&uid())).await.unwrap();
         let ids: Vec<&str> = accounts.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, vec![ACC_1, ACC_2], "应按配置顺序落库");
 
@@ -1186,7 +1256,11 @@ mod tests {
             "账号 id 不应是手机号原文"
         );
 
-        let first = s.get_account(&id(ACC_1)).await.unwrap().unwrap();
+        let first = s
+            .get_account(Scope::user(&uid()), &id(ACC_1))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(first.nickname.as_deref(), Some("账号2"));
         assert_eq!(first.phone_masked.as_deref(), Some(ACC_1));
         assert_eq!(first.sort_order, 0);
@@ -1198,10 +1272,14 @@ mod tests {
     #[tokio::test]
     async fn state_keys_are_remapped_through_the_identity_map() {
         let s = store();
-        import_legacy(&s, &fixture_source(), now()).await.unwrap();
+        run_import(&s, &fixture_source()).await.unwrap();
 
         // state.json 的键是手机号原文；迁移后必须挂到掩码 id 上
-        let state = s.get_account_state(&id(ACC_1)).await.unwrap().unwrap();
+        let state = s
+            .get_account_state(Scope::user(&uid()), &id(ACC_1))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(state.jwt_token.is_some(), "凭据应随迁移一起搬过去");
         assert!(state.device_id.is_some());
         // userDomainId 是纯标识：运行期（库 / 日志 / Debug）保留 —— 它有排障价值且不可复用；
@@ -1214,14 +1292,14 @@ mod tests {
 
         // 反向：拿手机号原文当 id 必须查不到东西
         assert!(
-            s.get_account_state(&id("19900000001"))
+            s.get_account_state(Scope::user(&uid()), &id("19900000001"))
                 .await
                 .unwrap()
                 .is_none(),
             "手机号原文不该成为 id"
         );
         assert!(
-            !s.list_accounts()
+            !s.list_accounts(Scope::user(&uid()))
                 .await
                 .unwrap()
                 .iter()
@@ -1232,9 +1310,9 @@ mod tests {
     #[tokio::test]
     async fn runs_attach_to_accounts_by_display_name() {
         let s = store();
-        import_legacy(&s, &fixture_source(), now()).await.unwrap();
+        run_import(&s, &fixture_source()).await.unwrap();
 
-        let runs = s.list_runs(100).await.unwrap();
+        let runs = s.list_runs(Scope::user(&uid()), 100).await.unwrap();
         let mut per_account = std::collections::BTreeMap::new();
         for run in &runs {
             if let Some(account) = &run.account_id {
@@ -1275,7 +1353,7 @@ mod tests {
     #[tokio::test]
     async fn pipeline_keeps_steps_order_and_defaults_to_sequential() {
         let s = store();
-        import_legacy(&s, &fixture_source(), now()).await.unwrap();
+        run_import(&s, &fixture_source()).await.unwrap();
 
         let pipelines = s.list_pipelines().await.unwrap();
         let pipeline = &pipelines[0];
@@ -1303,7 +1381,7 @@ mod tests {
     #[tokio::test]
     async fn exchange_windows_and_webui_prefs_round_trip() {
         let s = store();
-        import_legacy(&s, &fixture_source(), now()).await.unwrap();
+        run_import(&s, &fixture_source()).await.unwrap();
 
         let exchange = s.exchange_config().await.unwrap();
         assert_eq!(exchange.windows, vec!["09:59:40", "11:59:40"]);
@@ -1325,9 +1403,9 @@ mod tests {
     #[tokio::test]
     async fn second_run_skips_unchanged_files() {
         let s = store();
-        import_legacy(&s, &fixture_source(), now()).await.unwrap();
+        run_import(&s, &fixture_source()).await.unwrap();
 
-        let again = import_legacy(&s, &fixture_source(), now()).await.unwrap();
+        let again = run_import(&s, &fixture_source()).await.unwrap();
         assert_eq!(again.accounts, 0, "asign.json 没变，不重复写");
         assert_eq!(again.runs, 0);
         assert_eq!(again.pipelines, 0);
@@ -1345,17 +1423,20 @@ mod tests {
         );
 
         // 库里的行数不变
-        assert_eq!(s.list_runs(100).await.unwrap().len(), 12);
-        assert_eq!(s.list_accounts().await.unwrap().len(), 2);
+        assert_eq!(
+            s.list_runs(Scope::user(&uid()), 100).await.unwrap().len(),
+            12
+        );
+        assert_eq!(s.list_accounts(Scope::user(&uid())).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
     async fn re_import_after_touch_does_not_duplicate_rows() {
         let dir = copy_fixtures();
         let s = store();
-        import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        run_import(&s, &source_of(&dir)).await.unwrap();
         let before: Vec<String> = s
-            .list_runs(100)
+            .list_runs(Scope::user(&uid()), 100)
             .await
             .unwrap()
             .into_iter()
@@ -1367,7 +1448,7 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join("history.json")).unwrap();
         write_file(&dir, "history.json", &format!("{text}\n"));
 
-        let report = import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        let report = run_import(&s, &source_of(&dir)).await.unwrap();
         assert_eq!(report.runs, 12, "重跑会重新解析 12 条");
         assert!(
             !report
@@ -1377,14 +1458,14 @@ mod tests {
         );
 
         let after: Vec<String> = s
-            .list_runs(100)
+            .list_runs(Scope::user(&uid()), 100)
             .await
             .unwrap()
             .into_iter()
             .map(|r| r.id)
             .collect();
         assert_eq!(after, before, "行数不变，主键也不变");
-        assert_eq!(s.list_accounts().await.unwrap().len(), 2);
+        assert_eq!(s.list_accounts(Scope::user(&uid())).await.unwrap().len(), 2);
         assert_eq!(s.list_pipelines().await.unwrap().len(), 1);
     }
 
@@ -1406,7 +1487,7 @@ mod tests {
         );
 
         let s = store();
-        let err = import_legacy(&s, &source_of(&dir), now())
+        let err = run_import(&s, &source_of(&dir))
             .await
             .expect_err("掩码冲突必须让迁移失败");
         assert!(
@@ -1416,10 +1497,18 @@ mod tests {
 
         // 关键：不是"导入了一半"，而是"什么都没动"
         assert!(
-            s.list_accounts().await.unwrap().is_empty(),
+            s.list_accounts(Scope::user(&uid()))
+                .await
+                .unwrap()
+                .is_empty(),
             "中止时不该写入任何账号"
         );
-        assert!(s.list_runs(100).await.unwrap().is_empty());
+        assert!(
+            s.list_runs(Scope::user(&uid()), 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(s.list_pipelines().await.unwrap().is_empty());
         assert!(
             s.list_imports().unwrap().is_empty(),
@@ -1433,7 +1522,7 @@ mod tests {
         remove_file(&dir, "schedules.json");
 
         let s = store();
-        let report = import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        let report = run_import(&s, &source_of(&dir)).await.unwrap();
 
         assert_eq!(report.runs, 12, "少一个文件不影响别的文件");
         assert!(
@@ -1452,7 +1541,7 @@ mod tests {
         write_file(&dir, "history.json", "{ 这不是 JSON");
 
         let s = store();
-        let err = import_legacy(&s, &source_of(&dir), now())
+        let err = run_import(&s, &source_of(&dir))
             .await
             .expect_err("整份 JSON 坏掉应当直接失败");
         assert!(
@@ -1479,21 +1568,26 @@ mod tests {
         );
 
         let s = store();
-        let report = import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        let report = run_import(&s, &source_of(&dir)).await.unwrap();
 
-        // 好的那条照常落库；展示名认不出的那条也落库，只是没有归属
-        let runs = s.list_runs(100).await.unwrap();
-        assert_eq!(runs.len(), 2, "坏记录只丢自己");
-        let owned = runs
-            .iter()
-            .filter(|r| r.account_id.is_some())
-            .collect::<Vec<_>>();
-        assert_eq!(owned.len(), 1);
-        assert_eq!(owned[0].account_id, Some(id(ACC_2)), "「账号1」→ 19****02");
-        assert!(
-            runs.iter().any(|r| r.account_id.is_none()),
-            "展示名认不出的记录仍然要保留（否则历史就断了）"
-        );
+        // 能归属的那条照常落库并可读
+        let runs = s.list_runs(Scope::user(&uid()), 100).await.unwrap();
+        assert_eq!(runs.len(), 1, "只有能归属的记录会出现在用户列表里");
+        assert_eq!(runs[0].account_id, Some(id(ACC_2)), "「账号1」→ 19****02");
+
+        // 展示名认不出的那条**仍然落库**（历史不能因为归属解析失败就丢掉），
+        // 只是它无法归属，所以不出现在任何用户的列表里 ——
+        // 它该被看见的地方是迁移报告，不是某个人的"我的历史"。
+        let orphaned: i64 = {
+            let conn = s.connection().lock().expect("数据库锁中毒");
+            conn.query_row(
+                "SELECT COUNT(*) FROM runs WHERE account_id IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(orphaned, 1, "无归属的旧记录仍要保留，否则历史就断了");
 
         let lines = report.issue_lines();
         assert!(
@@ -1514,7 +1608,7 @@ mod tests {
         );
 
         let s = store();
-        let report = import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        let report = run_import(&s, &source_of(&dir)).await.unwrap();
         assert_eq!(report.runs, 0);
         assert!(
             report
@@ -1524,7 +1618,12 @@ mod tests {
             "{:#?}",
             report.issue_lines()
         );
-        assert!(s.list_runs(100).await.unwrap().is_empty());
+        assert!(
+            s.list_runs(Scope::user(&uid()), 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // ── 账号引用：绝不静默扩大范围 ─────────────────────────────────────────
@@ -1546,7 +1645,7 @@ mod tests {
         );
 
         let s = store();
-        let report = import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        let report = run_import(&s, &source_of(&dir)).await.unwrap();
         assert_eq!(report.schedules, 1);
 
         let schedule = &s.list_schedules().await.unwrap()[0];
@@ -1585,7 +1684,7 @@ mod tests {
         );
 
         let s = store();
-        let report = import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        let report = run_import(&s, &source_of(&dir)).await.unwrap();
 
         let schedule = &s.list_schedules().await.unwrap()[0];
         assert!(
@@ -1622,7 +1721,7 @@ mod tests {
         );
 
         let s = store();
-        let report = import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        let report = run_import(&s, &source_of(&dir)).await.unwrap();
         assert_eq!(report.schedules, 3, "三条都要留下，靠 enabled 表达处置");
 
         let schedules = s.list_schedules().await.unwrap();
@@ -1667,7 +1766,7 @@ mod tests {
         );
 
         let s = store();
-        let report = import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        let report = run_import(&s, &source_of(&dir)).await.unwrap();
 
         assert_eq!(report.pipelines, 2, "好组合与混合引用各一条");
         let names: Vec<String> = s
@@ -1725,7 +1824,7 @@ mod tests {
         );
 
         let s = store();
-        let report = import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        let report = run_import(&s, &source_of(&dir)).await.unwrap();
         assert_eq!(report.pipelines, 2);
         assert!(
             s.list_pipelines()
@@ -1763,7 +1862,7 @@ mod tests {
         );
 
         let s = store();
-        let report = import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        let report = run_import(&s, &source_of(&dir)).await.unwrap();
 
         let exchange = s.exchange_config().await.unwrap();
         assert_eq!(
@@ -1813,7 +1912,7 @@ mod tests {
         );
 
         let s = store();
-        let report = import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        let report = run_import(&s, &source_of(&dir)).await.unwrap();
 
         let exchange = s.exchange_config().await.unwrap();
         assert_eq!(exchange.windows, vec!["09:59:40", "11:59:40"]);
@@ -1847,7 +1946,7 @@ mod tests {
         );
 
         let s = store();
-        let report = import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        let report = run_import(&s, &source_of(&dir)).await.unwrap();
 
         let exchange = s.exchange_config().await.unwrap();
         assert_eq!(exchange.bindings.len(), 1, "只有最后一条是完整的");
@@ -1882,7 +1981,7 @@ mod tests {
         );
 
         let s = store();
-        import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        run_import(&s, &source_of(&dir)).await.unwrap();
 
         let webui = s.webui_config().await.unwrap();
         assert!(WEBUI_PAGES.contains(&webui.last_page.as_str()));
@@ -1899,7 +1998,7 @@ mod tests {
     async fn ledger_archives_the_original_text_and_issue_counts() {
         let dir = copy_fixtures();
         let s = store();
-        import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        run_import(&s, &source_of(&dir)).await.unwrap();
 
         let imports = s.list_imports().unwrap();
         assert_eq!(
@@ -1934,7 +2033,7 @@ mod tests {
     #[tokio::test]
     async fn report_summary_is_a_single_safe_line() {
         let s = store();
-        let report = import_legacy(&s, &fixture_source(), now()).await.unwrap();
+        let report = run_import(&s, &fixture_source()).await.unwrap();
         let line = report.summary();
         assert!(line.contains("账号 2"));
         assert!(line.contains("历史 12 条"));
@@ -1950,18 +2049,23 @@ mod tests {
         for name in LEGACY_DATA_FILES {
             remove_file(&dir, name);
         }
-        import_legacy(&s, &source_of(&dir), now()).await.unwrap();
-        assert_eq!(s.list_accounts().await.unwrap().len(), 2);
+        run_import(&s, &source_of(&dir)).await.unwrap();
+        assert_eq!(s.list_accounts(Scope::user(&uid())).await.unwrap().len(), 2);
 
         // 再把 state.json 放回来：这次只该补登录态
         let text = std::fs::read_to_string(PathBuf::from(FIXTURES).join("state.json")).unwrap();
         write_file(&dir, "state.json", &text);
 
-        let report = import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        let report = run_import(&s, &source_of(&dir)).await.unwrap();
         assert_eq!(report.accounts, 0, "asign.json 没变就不重写账号");
         assert_eq!(report.account_states, 2);
-        assert_eq!(s.list_accounts().await.unwrap().len(), 2);
-        assert!(s.get_account_state(&id(ACC_1)).await.unwrap().is_some());
+        assert_eq!(s.list_accounts(Scope::user(&uid())).await.unwrap().len(), 2);
+        assert!(
+            s.get_account_state(Scope::user(&uid()), &id(ACC_1))
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -1981,13 +2085,23 @@ mod tests {
         );
 
         let s = store();
-        let report = import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        let report = run_import(&s, &source_of(&dir)).await.unwrap();
 
         assert_eq!(report.account_states, 1, "只有 19900000001 是可用的");
-        assert!(s.get_account_state(&id(ACC_1)).await.unwrap().is_some());
-        assert!(s.get_account_state(&id(ACC_2)).await.unwrap().is_none());
         assert!(
-            s.list_accounts()
+            s.get_account_state(Scope::user(&uid()), &id(ACC_1))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            s.get_account_state(Scope::user(&uid()), &id(ACC_2))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            s.list_accounts(Scope::user(&uid()))
                 .await
                 .unwrap()
                 .iter()
@@ -2020,7 +2134,7 @@ mod tests {
         );
 
         let s = store();
-        import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        run_import(&s, &source_of(&dir)).await.unwrap();
 
         assert_eq!(
             s.get_schedule("s1").await.unwrap().unwrap().last_status,
@@ -2061,7 +2175,7 @@ mod tests {
         );
 
         let s = store();
-        import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        run_import(&s, &source_of(&dir)).await.unwrap();
 
         for id in ["s1", "s2"] {
             assert_eq!(
@@ -2087,7 +2201,7 @@ mod tests {
         );
 
         let s = store();
-        import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        run_import(&s, &source_of(&dir)).await.unwrap();
         let first_pipeline = s.list_pipelines().await.unwrap()[0].id.clone();
         let first_schedule = s.list_schedules().await.unwrap()[0].id.clone();
 
@@ -2100,7 +2214,7 @@ mod tests {
             "pipelines.json",
             r#"{ "pipelines": [ { "name": "没 id 的组合", "steps": [{ "task": "prizes" }] } ] }"#,
         );
-        import_legacy(&s, &source_of(&dir), now()).await.unwrap();
+        run_import(&s, &source_of(&dir)).await.unwrap();
 
         let pipelines = s.list_pipelines().await.unwrap();
         assert_eq!(pipelines.len(), 1, "兜底 id 变了就会多出一行");

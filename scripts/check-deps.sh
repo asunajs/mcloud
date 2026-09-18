@@ -15,9 +15,17 @@ FORBIDDEN=(reqwest rusqlite)
 PURE_CRATES=(mcloud-core mcloud-upstream mcloud-capabilities mcloud-exec)
 
 # 组装根：**必须**依赖 mcloud-io —— 它负责把 io 的实现注入 core 定义的 trait。
-# 如果把 server 也当成"纯层"，门禁会永远红；而如果把组装根的检查整个去掉，
+# 如果把组装根也当成"纯层"，门禁会永远红；而如果把组装根的检查整个去掉，
 # 又会出现"没人接上 IO 实现"的静默死配置。所以两个方向都要断言。
-COMPOSITION_ROOTS=(mcloud-server)
+COMPOSITION_ROOTS=(mcloud-app mcloud-server)
+
+# 产物之间的**禁止**依赖。
+#
+# CLI 与 HTTP 服务是两个独立产物，它们只能共用 `mcloud-app`（组装层）。
+# 一旦 CLI 依赖了 mcloud-server，命令行工具就会连带拿到 axum / 路由 / 静态资源
+# 那一整套 —— 而这件事**不会让任何测试变红**，只会让二进制悄悄变大、
+# 让"CLI 能在没有 HTTP 环境的地方跑"这条性质消失。所以要在这里挡住。
+FORBIDDEN_EDGES=("mcloud-cli:mcloud-server")
 
 cd "$(dirname "$0")/.."
 
@@ -72,6 +80,26 @@ for crate in "${COMPOSITION_ROOTS[@]}"; do
   fi
 
   echo "ok ${crate}（组装根，允许含 IO）"
+done
+
+for edge in "${FORBIDDEN_EDGES[@]}"; do
+  from="${edge%%:*}"
+  to="${edge##*:}"
+  tree=$(cargo tree -p "${from}" --edges normal --prefix none --no-dedupe 2>/dev/null || true)
+
+  if [ -z "$tree" ]; then
+    echo "!! 无法解析 ${from} 的依赖树"
+    fail=1
+    continue
+  fi
+
+  # 只看 `to` 作为**依赖**出现：`cargo tree` 的首行是 crate 自己，
+  # 所以这里用反引号包住的判断会误伤自己（本脚本假定的路径名不含 `-p` 前缀）
+  if dep_in_tree "$to" "$tree"; then
+    echo "!! ${from} 依赖了 ${to} —— 产物之间不得互相依赖，只能共用 mcloud-app"
+    fail=1
+  fi
+  echo "ok ${from} 未依赖 ${to}"
 done
 
 if [ "$fail" -ne 0 ]; then

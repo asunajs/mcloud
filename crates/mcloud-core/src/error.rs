@@ -27,6 +27,12 @@ pub enum ErrorKind {
     Upstream,
     /// 请求参数错误 —— 不重试。
     BadRequest,
+    /// 资源不存在**或不属于当前用户** —— 不重试。
+    ///
+    /// 两者刻意共用一个类别（见 [`crate::user::is_visible_to`]）：
+    /// "不属于你"若给出与"不存在"不同的错误，响应差异本身就泄漏了资源是否存在，
+    /// 把 id 空间变成可枚举的。
+    NotFound,
     /// 响应解析失败 —— 不重试（通常是上游改动，重试无意义）。
     Parse,
     /// 内部错误 —— 不重试。
@@ -62,6 +68,7 @@ impl ErrorKind {
             Self::Network => "网络异常",
             Self::Upstream => "上游服务异常",
             Self::BadRequest => "请求参数不合法",
+            Self::NotFound => "资源不存在",
             Self::Parse => "响应解析失败",
             Self::Internal => "内部错误",
         }
@@ -109,6 +116,10 @@ pub enum Error {
     #[error("参数错误: {0}")]
     BadRequest(String),
 
+    /// 资源不存在或对当前用户不可见。**两种情形刻意不区分**，详见 [`ErrorKind::NotFound`]。
+    #[error("不存在: {0}")]
+    NotFound(String),
+
     #[error("解析失败: {0}")]
     Parse(String),
 
@@ -133,6 +144,7 @@ impl Error {
             Self::Network(_) => ErrorKind::Network,
             Self::Upstream { .. } => ErrorKind::Upstream,
             Self::BadRequest(_) => ErrorKind::BadRequest,
+            Self::NotFound(_) => ErrorKind::NotFound,
             Self::Parse(_) => ErrorKind::Parse,
             Self::Internal(_) | Self::FixtureMiss(_) => ErrorKind::Internal,
         }

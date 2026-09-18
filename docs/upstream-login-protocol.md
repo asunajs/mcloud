@@ -90,6 +90,24 @@ let cpid       = isMacPc ? '332' : '277';   // Windows=277, macOS=332
 ### 请求头
 - `x-yun-tid`：每次请求一个新 UUID（幂等/链路追踪用）
 
+> **补正（2026-09-18，实现后实测）**：本节原先只列了 `x-yun-tid`，**这是漏项**。
+> 只带 `x-yun-tid` 调该接口会被上游直接拒绝：
+>
+> | 请求头 | 响应 |
+> |---|---|
+> | 只有 `x-yun-tid` | `{"code":"9999","message":"登录失败！"}` ← 不在本文任何错误码表里 |
+> | 加上下面五个头 | `{"code":"200059541","message":"未找到设备的二维码信息"}` ✓ 正常态 |
+>
+> 需要补上的头（客户端 `common/utils.js: sendRequest` 的 **pre-login 分支**，
+> 登录时还没有 `UserInfo`，走的正是这一支）：
+> `x-yun-client-info`、`x-DeviceInfo`（同一个值、两个头）、`x-MM-Source: "000"`、
+> `x-huawei-channelSrc: "10200153"`、`x-UserAgent: "PC"`。
+> 其中 `x-yun-client-info` / `x-DeviceInfo` 的值就是设备信息串（见 §7 与
+> [`docs/client-profiles.md`](./client-profiles.md) §5.2）。
+>
+> 实现落点：`mcloud-upstream::client::ClientProfile`，并由单测逐个断言这五个头存在 ——
+> 少了任何一个都会退化成 `9999`，而那种失败看起来像"登录被拒"，极难定位。
+
 ### 轮询节奏
 - 间隔 **1000ms**，由 `setInterval` 驱动
 - 登录成功后**必须主动 `clearInterval`**，源码注释：`// 停止定时器，避免继续轮询`
@@ -129,6 +147,23 @@ if (result.data) {
 ```
 
 **重要**：成功响应的 `data` 不是明文，**必须 AES 解密**才能拿到 `userInfo`。这是 `README.md` 里「旧 TS 与真实流量不一致案例表」的一个同类陷阱。
+
+> **补全（2026-09-17 晚，补到 `common/utils.js` 实现后）**：解密参数为
+> **AES-128-ECB / PKCS7**，密钥 `qPqDw263XgFgL3u8`（非生产环境为 `2ErfJus1Ofr@2o24`），
+> 且 `decryptByAes` 的**输入是 hex 而不是 base64**（同文件里的 `encryptByAes` 才输出 base64，
+> 两者不是一对逆运算）。已落地于 `mcloud-upstream::login::LoginDataDecryptor`，
+> 向量见 `test/golden/pcclient-crypto-vectors.json`。
+>
+> **端到端确认（2026-09-18）**：扫码登录已真机跑通（CLI 出码 → 手机扫码确认 →
+> 本地落库）。落库后 `account_state.jwt_token` 长度 201、`accounts.auth_expire`
+> 落在 30 天后 —— 说明**解密、字段提取、`auth` 重建三段都正确**：
+> `auth_expire` 是从 `authToken` 的第 4 段（epoch 毫秒）解出来的，
+> 而它只有在"重建的 auth 形状与真实 token 分段一致"时才会是个合理值。
+>
+> **一处与本文示例不一致（待下次登录确认字段名）**：真实 `userInfo` 里
+> **没有 `userId`**，所以 `user_domain_id` 落了空。本文 §5 那个 `userId` 是
+> 从设备绑定流程抄来的合成样本，不能当成登录响应的字段表。
+> 下次登录时打印 `userInfo` 的**字段名**（不打印值）即可确定它到底叫什么。
 
 本项目实测捕获到的 `authToken`（明文形态，来自设备绑定流程）。
 **下例是等长同结构合成值**：分段数、各段长度、载荷里 `_` 与 `.` 的位置都与实测一致，
@@ -170,7 +205,8 @@ windowMachine    = 62AA2BDA29F99744536E142A83CA5B03-ENDIN
 windowDeviceInfo = ||11|8.8.6.20260829|PC|TGktMjAyNjA4MjgxNjI5|...| Windows 11 (10.0.26100.1591)|1920X1020|Q2hpbmVzZSAoU2ltcGxpZmllZCk=
 ```
 
-`windowDeviceInfo` 为 `||` 分隔，解码得 `TGktMjAyNjA4MjgxNjI5` → `L-202608281629`。
+`windowDeviceInfo` 为 `|` 分隔（14 段，字段表见 [`docs/client-profiles.md`](./client-profiles.md) §5.2），
+`TGktMjAyNjA4MjgxNjI5` 解码得 `Li-202608281629`（设备型号码）。
 代码内的兜底模板（原生接口失败时使用）：
 ```js
 `||11|${appVersion}|PC|QkYtMjAyMDAzMTAxNjQ3|${windowMachine}|| Windows 10 (10.0)|1920X1040|Q2hpbmVzZSAoU2ltcGxpZmllZCk=|||`
@@ -209,6 +245,6 @@ POST /user/device/getUserAuthDevInfo
 1. **不要实现「取码接口」** —— 本地生成 32 位 HEX 即可，这一步零网络依赖，纯 `Random` trait 输出。
 2. `dycpwd` 直传二维码里的 `sID`，无需变换。
 3. 轮询用 1000ms 定时器，状态 `200059548` 时可对外提示「已扫码待确认」。
-4. 成功分支**必须先 AES 解密 `data`**，才能取到 `userInfo.account` 与 `authToken`。
+4. 成功分支**必须先 AES 解密 `data`**（AES-128-ECB/PKCS7，hex 输入，key 见 §5 补全），才能取到 `userInfo.account` 与 `authToken`。
 5. `dID` 需持久化（设备指纹），否则刷新二维码会导致设备 ID 漂移、服务端定位失败。
 6. 建议抽象为 `Clock`（1000ms 定时）+ `Random`（GUID32）+ `HttpClient`（thirdlogin）三个 trait，无 IO 依赖即可单测。

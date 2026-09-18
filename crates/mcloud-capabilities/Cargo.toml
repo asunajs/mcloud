@@ -12,3 +12,11 @@ mcloud-core = { workspace = true }
 mcloud-upstream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# 登录状态机要判"二维码过期了吗" —— 时间一律从 `Clock` 注入，本层不读系统时钟
+chrono = { workspace = true }
+# 拼 `auth`（`base64("pc:<account>:<authToken>")`）是纯计算
+base64 = { workspace = true }
+
+[dev-dependencies]
+# 只为跑 async 单测：纯层不允许依赖 mcloud-io，所以测试用假 HttpClient + 内存脚本
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -1,10 +1,14 @@
 //! mcloud-upstream —— 上游接口封装层。
 //!
-//! # 状态：只有骨架，接口实现**等重新抓包后再写**
+//! # 状态
 //!
-//! 旧 TS 实现（`packages/core/src/apis/*`）与新抓包会一并作废重写，
-//! 所以这里刻意不搬任何接口函数 —— 搬了也只是把旧形态再抄一遍。
-//! 目前只保留三样将来一定还要的东西：
+//! - [`login`]：**已实现**。依据 `docs/upstream-login-protocol.md` 与
+//!   `docs/upstream-logout-sms-login.md`（新抓包 + 客户端源码双向确认）——
+//!   这是"按新抓包重写"落地的第一块，也是产物能真正跑起来的起点（一切接口都要凭据）。
+//! - 其余云盘业务接口：**等重新抓包后再写**，不搬旧 TS（旧 TS 与线上请求有多处不一致，
+//!   详见 `README.md` 的「现状须知」）。
+//!
+//! 骨架部分保留三样东西：
 //!
 //! 1. [`Upstream`]：注入 `HttpClient` 的调用上下文（本层禁止自己造 HTTP 客户端）；
 //! 2. [`Envelope`]：上游响应信封（`code` / `msg` / `data|result` 的取值与业务码判定）；
@@ -12,13 +16,16 @@
 //!
 //! # 写接口时的两条硬规矩（上一轮对拍换来的教训）
 //!
-//! - **以真实流量为准，而不是以 TS 代码为准**。旧 TS 与线上实际请求有多处不一致，
-//!   详见 `README.md` 的「现状须知」；新抓包进来后同样要先对拍再落笔。
-//! - 每个接口函数都要能被 `cargo test -p mcloud-upstream` 用
-//!   `test/fixtures/http/` 的夹具离线回放（L2），并断言请求逐字段正确 ——
-//!   只断言"没报错"等于没测。
+//! - **以真实流量为准，而不是以 TS 代码为准**。旧 TS 与线上实际请求有多处不一致；
+//!   新抓包进来后同样要先对拍再落笔。
+//! - 每个接口函数都要能被 `cargo test -p mcloud-upstream` 离线回放（L2）+ 逐字段断言 ——
+//!   只断言"没报错"等于没测。`login` 模块的 body 构造函数全是纯函数，
+//!   所以在拿到登录流量的夹具之前，也能按文档逐字段钉住。
 
 #![forbid(unsafe_code)]
+
+pub mod client;
+pub mod login;
 
 use mcloud_core::{Error, ErrorKind, HttpClient, HttpRequest, classify_status};
 use serde_json::Value;

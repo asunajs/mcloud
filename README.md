@@ -19,7 +19,9 @@ mcloud-upstream      → core
 mcloud-capabilities  → core, upstream
 mcloud-exec          → core, capabilities
 mcloud-io            → core        （+ reqwest / rusqlite / rand：全项目唯一实现 IO 的地方）
-mcloud-server        → core, capabilities, exec, io       组装根
+mcloud-app           → core, upstream, capabilities, io          组装层（两个产物共用）
+mcloud-server        → core, capabilities, exec, io, app         产物之一（HTTP/WebUI）
+mcloud-cli           → core, upstream, capabilities, io, app     产物之一（命令行）
 mcloud-cli           → core, capabilities, server         可执行入口
 ```
 
@@ -33,8 +35,9 @@ mcloud-cli           → core, capabilities, server         可执行入口
 | `mcloud-capabilities` | 能力注册表（CLI 与 WebUI 的唯一契约来源） | 同上 |
 | `mcloud-exec` | 任务编排 | 同上 |
 | `mcloud-io` | reqwest / rusqlite / 系统随机 | 唯一实现 IO 的地方 |
-| `mcloud-server` | 组装根 | **必须**依赖 mcloud-io，否则是"没人接上 IO 实现"的静默死配置 |
-| `mcloud-cli` | 可执行入口 | 只做参数解析；**不**直依赖 mcloud-io |
+| `mcloud-app` | 组装层 | **必须**依赖 mcloud-io；迁移策略、能力注册表 JSON、登录驱动都在这里 |
+| `mcloud-server` | 产物：HTTP/WebUI | **必须**依赖 mcloud-io，否则是"没人接上 IO 实现"的静默死配置 |
+| `mcloud-cli` | 产物：命令行 | **不得**依赖 `mcloud-server`（否则会把 axum 拖进命令行产物） |
 
 外部世界一律走注入 trait，共 4 个：`HttpClient`、`Clock`、`StateStore`、`Random`。
 `Random` 是必需的 —— smid 构造混用了 `randomUUID` 与 `Math.random`，
@@ -109,17 +112,34 @@ node scripts/check-identifiers.cjs                  # 仓库里不得有真实�
 cargo run -p mcloud-cli -- help
 ```
 
-四个子命令：
+子命令一览：
 
 | 子命令 | 作用 |
 | --- | --- |
+| `user init` / `user list` | 建首个管理员（网页端要用，也是历史账号的认领触发点）/ 看看有哪些人 |
+| `login qr` | 扫码登录移动云盘账号：终端出码，手机扫（`--qr-out` 可另存一张图片） |
+| `login sms` | 短信验证码登录：发码 → 输验证码。被风控要求滑块时**自动过**（缺口位置由服务端加密下发，见 `docs/upstream-logout-sms-login.md` §2.2.1） |
+| `migrate` | 把旧项目 mcloud-sign 的数据迁移到 SQLite（`--dry-run` 预演） |
 | `fixture extract` | 从 HAR 流量包抽取脱敏 fixture（用于离线回放）。脱敏有残留则 fail closed，拒绝写出 |
-| `migrate` | 把旧项目 mcloud-sign 的数据迁移到 SQLite |
 | `capabilities` | 打印能力注册表（`--json` 与 `GET /api/capabilities` 同形状） |
 | `version` | 打印版本与运行时信息（`--json` 与 `GET /api/version` 一致） |
 
 **退出码约定**（沿用原项目）：只有**运行错误**影响退出码；业务层面的 fail 属 info 级，不影响退出码。
 无 error/fatal 时退出码 0 是正确设计。
+
+### CLI 不需要"登录本系统"
+
+数据库就在本机：能跑 CLI 的人本来就能直接 `sqlite3` 读库，
+给他加一道"你是谁"**不增加任何安全性**，却让本地运维变别扭。
+所以 CLI 一律用 `Scope::Local`（不过滤，能操作所有人的账号）。
+
+隔离是给**网络上的用户**准备的（WebUI：A 看不到 B 的账号）—— 那里用户拿不到库文件，
+边界才有意义。过滤逻辑只有一份：查询写 `(?n IS NULL OR owner = ?n)`，
+两种范围共用同一句，所以"某条查询漏了归属条件"在结构上不可能发生。
+
+CLI 新建的云盘账号会归**库里首个用户**（没有用户则保持无主，等 `user init` 时认领）——
+这不是权限检查，而是"账号必须有主人"：否则网页端按隔离规则看不到它，
+会出现"扫码成功了、网页里却没有这个账号"。
 
 ## 旧数据迁移
 
@@ -170,8 +190,11 @@ Rust 那条不是风格偏好而是**语言强制**：文件名就是模块名�
 - **服务入口尚未实现。** `mcloud-server` 目前只有 lib，没有 `serve` 命令；
   axum 路由、SSE、`openapi.json` 导出与 `rust-embed` 内嵌前端都在 P5。
   所以现阶段 **CLI 能跑，WebUI 没有后端可连**，前端只能靠 `vite dev` 单独起。
-- **上游接口层只有骨架，接口等重新抓包后再写。** `mcloud-upstream` 只保留
-  `Upstream`（注入 `HttpClient` 的调用上下文）、`Envelope`（响应信封）与基址常量；
+- **CLI 已能完成"从零到登录"**：`mcloud user init` → `mcloud login qr`（终端二维码）/ `mcloud login sms`。
+  登录态落在本地库的 `account_state`（凭据与展示信息**分表**，见 schema 说明）；
+  设备指纹写在 `data/device.txt`（**换掉它等于换一台设备**，服务端会定位不到会话）。
+- **上游接口层按新抓包逐块重写。** 目前只有 `login`（扫码/短信/账密 + 退出登录）是完整的，
+  它是"按新流量写接口"的第一块；其余云盘业务接口仍是骨架（`Upstream` + `Envelope` + `base`）。
   旧 TS 的 12 个接口模块**一律不从旧代码搬迁** —— 旧 HAR 与旧 TS 都会作废，
   搬了只是把旧形态再抄一遍。新 HAR 抓好后：`mcloud fixture extract` → 按新流量写接口
   → 用夹具离线回放并断言请求逐字段正确。
@@ -191,6 +214,12 @@ Rust 那条不是风格偏好而是**语言强制**：文件名就是模块名�
 - **`docs/rust-rewrite-plan.md` 已同步进本仓库**（原 `mcloud-sign` 仓库不再需要它）。
   它是动工前的规划快照，进度以本文为准；同步时里面的真实手机号已替换为合成号段
   —— 原仓库是公开的，这类值不该留在里面。
+- **接第二个端（安卓 / iOS / 邮箱端 / 小程序…）之前先读
+  [`docs/client-profiles.md`](./docs/client-profiles.md)**：
+  各端差异**主要在请求头**（请求体只有 `clientType`/`cpid`/`version` 随端变化）。
+  该文档记录了实测依据（709 条夹具按 UA 分组）、PC 端每个头的代码级来源、
+  设备指纹的 14 段字段表，以及"哪些还不知道、**不要猜**"的清单 ——
+  所以新增接口时不要把某一端的头硬编码进 `mcloud-upstream`。
 
 ## 第三方内容
 

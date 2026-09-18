@@ -16,6 +16,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod login;
+
 use mcloud_core::{AccountMode, CapabilityKind, FieldSpec, Group, RiskLevel};
 use std::sync::LazyLock;
 

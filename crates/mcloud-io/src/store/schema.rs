@@ -19,7 +19,7 @@ use rusqlite::Connection;
 /// 但一旦有了外部用户的库文件，"已应用的迁移"就是历史，只能往后追加 ——
 /// 否则老库的 `user_version` 会说谎：它声称已到 v2，而 v2 的语句已经不是你写的那句了。
 /// 判断标准很简单：**有没有可能存在一个不是本机跑出来的库**。没有，就可以改；有，就只能加。
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// 迁移清单：索引 i（0-based）对应版本 i+1。
 ///
@@ -162,6 +162,52 @@ pub const ALL_MIGRATIONS: &[&str] = &[
         raw          TEXT
     );
     "#,
+    // v3：系统用户 + 会话 + 账号归属（方案 §3.7）
+    //
+    // # 为什么这一段外面包了显式事务
+    //
+    // `ALTER TABLE ... ADD COLUMN` 是**唯一**一条无法写成 `IF NOT EXISTS` 的语句
+    // （SQLite 不支持）。本框架的"幂等"其实有两层保障：
+    //   1. `user_version` 门控 —— 已应用的迁移不会再跑，所以 ALTER 事实上只执行一次；
+    //   2. 包事务 —— 万一这条 ALTER 之后的语句失败，不包事务就会留下
+    //      "列已加、版本没升"的半成品库，而重跑时那条 ALTER 会报"duplicate column name"，
+    //      用户从此进不了程序。包上事务后失败即整体回滚，重跑是干净的。
+    // 注意：这一段里 `CREATE` 仍然全部带 `IF NOT EXISTS`（由单测逐条把关），
+    // 事务只是把"半成品"这个状态消掉。
+    r#"
+    BEGIN;
+
+    -- 系统用户：登录**本系统**的账号，与云盘账号是两回事（见 §3.7 的三概念表）
+    CREATE TABLE IF NOT EXISTS users (
+        id            TEXT PRIMARY KEY,
+        -- 大小写不敏感唯一：否则 Alice 与 alice 能各建一个，
+        -- 而登录时"匹配到谁"取决于查询顺序 —— 这种不确定性在鉴权路径上不可接受
+        name          TEXT NOT NULL COLLATE NOCASE UNIQUE,
+        -- argon2id 的 PHC 编码串（`$argon2id$v=19$m=...$salt$hash`）：
+        -- 它自带盐与参数，所以**不需要单独的 salt 列**，换参数也不用改 schema
+        password_hash TEXT NOT NULL,
+        role          TEXT NOT NULL DEFAULT 'user',
+        created_at    TEXT NOT NULL
+    );
+
+    -- 会话：只存 token 的哈希，明文只在签发那一刻返回一次。
+    -- 拿到库文件也无法直接冒充登录，与口令存哈希是同一个理由。
+    CREATE TABLE IF NOT EXISTS sessions (
+        token_hash TEXT PRIMARY KEY,
+        user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        expires_at TEXT NOT NULL,
+        kind       TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sessions_user    ON sessions (user_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions (expires_at);
+
+    -- 账号归属。历史数据（v2 及以前）为 NULL = 未归属，
+    -- 由 `mcloud user init` 初始化首个管理员时认领（见 StateStore::claim_unowned_accounts）。
+    -- 迁移期无法给 owner 赋值：那时管理员还不存在，硬编一个只能是猜。
+    ALTER TABLE accounts ADD COLUMN owner TEXT REFERENCES users(id);
+
+    COMMIT;
+    "#,
 ];
 
 /// 执行未应用的迁移。
@@ -287,6 +333,9 @@ mod tests {
             "exchange_config",
             "webui_config",
             "imports",
+            // v3
+            "users",
+            "sessions",
         ] {
             let count: i64 = conn
                 .query_row(
@@ -313,6 +362,60 @@ mod tests {
                 "{table} 不应允许第二行"
             );
         }
+    }
+
+    /// `ALTER TABLE ... ADD COLUMN` 是唯一一条无法幂等的语句，验证它被包在事务里。
+    ///
+    /// 不包事务的后果很具体：ALTER 之后的语句失败 → 列已加、版本未升 →
+    /// 重跑时这条 ALTER 报 "duplicate column name" → 用户从此进不了程序。
+    #[test]
+    fn v3_migration_is_wrapped_in_a_transaction() {
+        let v3 = ALL_MIGRATIONS[2].to_lowercase();
+        assert!(v3.contains("begin;"), "v3 必须在显式事务里执行");
+        assert!(v3.contains("commit;"), "v3 必须有配套的 COMMIT");
+        assert!(
+            v3.contains("alter table accounts add column owner"),
+            "v3 的核心动作是给 accounts 加 owner"
+        );
+    }
+
+    /// v2 老库升到 v3：拿到 `owner` 列，且老数据一条不少。
+    #[test]
+    fn v2_database_gains_owner_column_and_keeps_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        // 模拟 v2 老库：只应用 v1 + v2（v3 交给 migrate）
+        conn.execute_batch(ALL_MIGRATIONS[0]).unwrap();
+        conn.execute_batch(ALL_MIGRATIONS[1]).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        conn.execute(
+            "INSERT INTO accounts (id, nickname, enabled, sort_order, fail_streak) \
+             VALUES ('19****01', '账号2', 1, 0, 0)",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let owner: Option<String> = conn
+            .query_row(
+                "SELECT owner FROM accounts WHERE id = '19****01'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            owner, None,
+            "迁移期不能给历史账号硬编 owner —— 那时首个管理员还不存在，只能落到未归属"
+        );
+
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(accounts)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(columns.iter().any(|c| c == "owner"), "缺列: {columns:?}");
     }
 
     /// 老版本升到新版本时，已存在的表不能被重建或清空。
