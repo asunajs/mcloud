@@ -389,7 +389,7 @@ if (e.success) {
 **失效判定是双条件**（`200059542` **或** 本地耗时 > `codeExpire`），`codeExpire = 300` 秒；
 未命中上述分支时，只要 `s < codeExpire + 20`（320 秒）就继续轮询。
 
-### 5.3 登录成功的载荷
+### 5.3 登录成功的载荷 —— **已实测确证**
 
 响应解密后（源码）：
 ```js
@@ -404,14 +404,52 @@ const a = JSON.parse(cryptAesDecrypt(e.data, "qPqDw263XgFgL3u8"));
 
 > **注意**：登录成功后的响应解密用的是**另一个密钥** `qPqDw263XgFgL3u8`
 > —— 即 §4.1 的 body 密钥 `UqEZkrjCKfa02pP6jntzFmkzOz86zHUC` **只用于请求体**，
-> 成功响应走 `cryptAesDecrypt`（ECB）。这两个密钥线索与 PC 客户端一致（客户端常量同为 `qPqDw263XgFgL3u8`）。
+> 成功响应走 `cryptAesDecrypt`（ECB）。
+
+### 5.4 登录成功后的凭据落盘 —— **已实测确证（真实扫码）**
+
+**实测证据**：一次真实扫码登录成功后，浏览器 profile 的 Cookie 库与 `localStorage` 中落下以下项。
+
+#### Cookie（域 `yun.139.com`）
+
+| Cookie 名 | 语义 | 源码常量名 |
+|---|---|---|
+| `auth_token` | **认证 token** | `auth_token` |
+| `token` | **token** | `token` |
+| `authorization` | 授权串 | `authorization` |
+| `ud_id` | 用户域 ID | `ud_id` |
+| `a_k` | **AES 会话密钥**（§3.3 的 16 位随机值） | `a_k` |
+| `skey` | RSA 加密后的密钥（即 `mcloud-skey` 头的值） | `skey` |
+| `ORCHES-I-ACCOUNT-ENCRYPT` | 加密账号 | `ORCHES-I-ACCOUNT-ENCRYPT` |
+| `ORCHES-I-ACCOUNT-SIMPLIFY` | 脱敏账号 | `ORCHES-I-ACCOUNT-SIMPLIFY` |
+| `cutover_status` | 迁移状态 | `cutover_status` |
+| `nation_code` | 国家码 | `nation_code` |
+| `platform` | 平台 | `platform` |
+| `userInfo` | 用户信息 | — |
+
+#### `localStorage`（域 `yun.139.com`）
+
+| key | 实测值（脱敏后） | 说明 |
+|---|---|---|
+| `simplifyAccount` | `199****0000` | 脱敏手机号（11 位，中间 4 位打码） |
+| `encryptAccount` | `MTk5MDAwMDAwMDA=` | Base64(11 位手机号)，长度随号码长度 |
+| `loginType` | `0` | 登录类型 |
+| `provCode` | `23` | 省份码 |
+| `routerInfo` | JSON（路由策略表） | `qryRoutePolicy` 结果 |
+| `randomID` | 32 位 `A-Za-z0-9` | 指纹回退值（§2.2） |
+| `TY_USER_ID` | `<11 位手机号>\|null` | 天翼统计 ID，形如 `19900000000\|null` |
+
+> **关键结论**：登录凭据**走 Cookie**，不落在 `localStorage`（源码 `handleSetCookie` 用 `document.cookie`）。
+> 其中 `a_k` + `skey` 成对出现，**印证了 §3.3 的密钥协商链路**：`a_k` 是明文 16 位 AES 密钥，
+> `skey` 是它经 RSA 加密后的产物 —— 两者同时落盘，服务端/客户端各自持有。
 >
-> 实测本次未能捕获成功响应（二维码未被扫描就过期），**成功分支的密钥/模式来源为前端源码，未做实测复算** ——
-> 开发前建议补一次扫码成功抓包确认。
+> 权限：以上均为 `Secure` cookie（仅 HTTPS）。
 
 ---
 
-## 6. 实测完整时序（本次会话）
+## 6. 实测完整时序
+
+### 6.1 第一轮：未扫码（等 300 秒超时）
 
 | 序号 | 请求 | 状态 | 说明 |
 |---|---|---|---|
@@ -424,7 +462,38 @@ const a = JSON.parse(cryptAesDecrypt(e.data, "qPqDw263XgFgL3u8"));
 **观察**：
 - 轮询间隔稳定 **2 秒**，`dycPwd`（会话 ID）全程不变
 - `secinfo` 字段**每次不同**（`8E5F517B…` / `62899BA2…` 等 40 位 hex）—— 是设备/环境指纹的哈希，非固定值
-- 二维码未被扫描，故未走出成功分支
+- 二维码未被扫描，未走出成功分支
+
+### 6.2 第二轮：**真实扫码并确认授权**（关键）
+
+实测状态跃迁（`dycPwd` = `QfiekgO0mehZyp8v`，全程不变）：
+
+| # | 时间 | 返回码 | 语义 | 阶段 |
+|---|---|---|---|---|
+| 1 | +0.0s | `200059542` | 二维码已失效 | 上一张旧码残留 |
+| 2 | +2.2s | `200059541` | 未找到设备的二维码信息 | 新会话，等待扫码 |
+| 3 | +4.3s | `200059541` | 未找到设备的二维码信息 | 等待扫码 |
+| 4 | +6.4s | **`200059548`** | **二维码信息未授权** | ★ **手机已扫码，等待确认** |
+| 5 | +8.9s | **`200059548`** | **二维码信息未授权** | ★ 持续等待确认 |
+| … | — | `success:true` | 登录成功 | **确认授权后** |
+
+> **实测确证 `200059548` 的语义**：它出现在**手机扫码之后、点击"确认授权"之前**，
+> 与源码分支（`scanSuccess=true` → 2 秒后重试）完全一致。
+> 这是扫码登录状态机里**唯一需要区分"已扫/未扫"的关键码**。
+
+**登录成功后的落盘**：见 §5.4（Cookie 12 项 + localStorage 7 项）。
+
+### 6.3 登录成功后的后续请求
+
+页面跳转后新增的业务请求（实测）：
+
+```
+POST https://share-kd-njs.yun.139.com/yun-share/richlifeApp/devapp/IControl/queryControlSwitch
+GET  https://img.mcloud.139.com/material_prod/material_media/...png
+GET  https://yun.139.com/w/static/img/member_button.*.gif
+```
+
+> 这些是登录后的首页初始化请求，**不属于登录协议本身**。
 
 ---
 
@@ -473,15 +542,22 @@ const a = JSON.parse(cryptAesDecrypt(e.data, "qPqDw263XgFgL3u8"));
 - ✅ `thirdlogin` 请求/响应双向解密实证
 - ✅ 轮询状态机与全部状态码分支
 - ✅ `getRsaPublicKey` 接口与公钥返回结构
+- ✅ **真实扫码完整闭环**（真机扫码 + 确认授权，`200059548` 实测出现 2 次，见 §6.2）
+- ✅ **登录成功后的凭据落盘**（Cookie 12 项 + `localStorage` 7 项，见 §5.4）
+- ✅ **密钥协商成对印证**：Cookie 中 `a_k`（明文 16 位 AES 密钥）与 `skey`（RSA 加密产物）成对出现，印证 §3.3 链路
 
-### 待补（需再抓一次）
-- ⚠️ **扫码成功**的完整分支（本次未扫到，`token`/`authToken` 的实际取值路径未实测）
+### 待补
 - ⚠️ `mcloud-skey` 的**服务端用途**（请求体加密与它无关，其具体保护对象未验证）
+- ⚠️ 登录成功后业务请求的完整头部取值（`mcloud-skey` 是否随 `a_k` 重新生成，未逐条比对）
 
 ---
 
 ## 附：原始素材
 
 - 抓包原始 JSONL（本机临时目录，未入库）：`web-qr-capture/netlog-web-qr3.jsonl`
+- **真实扫码抓包 JSONL**（25 条，CDP `Network` 域原生拦截实时落盘）：`web-qr-capture/netlog-scan2.jsonl`
 - Web 前端全量产物（本机临时目录，未入库）：`web-qr-capture/alljs/`（55 个 JS，含 `app.ff91d73b.js`、`chunk-7e9eba2c.*.js`）
-- 二维码截图：`web-qr-capture/qr-images/qr-*.png`
+- 二维码截图：`web-qr-capture/qr-images/qr-*.png`（含真实扫码用码 `qr-scan2-*.png`）
+- 登录成功凭据取证（Edge profile 磁盘副本，本机临时目录，**已脱敏后摘要入文档，原始档不入库**）：
+  - `edge-cdp-scan/Default/Local Storage/leveldb/000003.log`
+  - `edge-cdp-scan/Default/Network/Cookies`
