@@ -389,6 +389,23 @@ where
     upstream.app_sign_in_status_raw(&jwt, &referer).await
 }
 
+/// `cloudRecordV2` 的查询条件。
+///
+/// 做成结构而不是四个裸参数，理由与 [`SignInOptions`] 同源：`ai_dou` 与 `filter`
+/// 都是 `i64`，`page_number` 与 `page_size` 也都是 —— 四个裸 `i64` 连排时，
+/// 传反了编译期一点提示都没有（实测这种错会静默变成"查错账本、取错页"）。
+pub struct RecordsQuery {
+    /// 账本：取 [`mcloud_upstream::app_signin::RECORD_BOOK_CLOUD`]（改名前的云朵）
+    /// 或 [`mcloud_upstream::app_signin::RECORD_BOOK_BEAN`]（改名后的 AI 豆）。
+    pub ai_dou: i64,
+    /// 收支方向过滤。全部用 [`RECORD_FILTER_ALL`]。
+    pub filter: i64,
+    /// 页码，**从 1 开始**。
+    pub page_number: i64,
+    /// 每页条数。
+    pub page_size: i64,
+}
+
 /// 查一档**豆的收支流水**（`cloudRecordV2`）。**只读**，审计 / 排障用。
 ///
 /// # 它跟 `--status-only` 的分工
@@ -396,16 +413,12 @@ where
 /// `--status-only` 回答"**现在有多少**"（`infoV3.total`）；这一条回答"**这些是怎么来的**"。
 /// 余额对不上时，只有流水能指出差在哪一笔 —— 光看两个余额是永远对不出来的。
 ///
-/// `ai_dou` 取 [`mcloud_upstream::app_signin::RECORD_BOOK_CLOUD`]（改名前的账本）
-/// 或 [`mcloud_upstream::app_signin::RECORD_BOOK_BEAN`]（改名后）。
+/// 查询条件走 [`RecordsQuery`]，见那里的说明。
 pub async fn cloud_records<C, K, R>(
     upstream: &Upstream<'_, C>,
     profile: &AppProfile,
     credential: &SignInCredential,
-    ai_dou: i64,
-    filter: i64,
-    page_number: i64,
-    page_size: i64,
+    query: &RecordsQuery,
     clock: &K,
     rng: &mut R,
 ) -> Result<CloudRecords, Error>
@@ -416,7 +429,14 @@ where
 {
     let (referer, jwt) = open_session(upstream, profile, credential, clock, rng).await?;
     upstream
-        .app_cloud_records(&jwt, &referer, ai_dou, filter, page_number, page_size)
+        .app_cloud_records(
+            &jwt,
+            &referer,
+            query.ai_dou,
+            query.filter,
+            query.page_number,
+            query.page_size,
+        )
         .await
 }
 

@@ -1519,10 +1519,12 @@ async fn signin_one(
                     &upstream,
                     &profile,
                     &credential,
-                    book,
-                    signin::RECORD_FILTER_ALL,
-                    page_number,
-                    RECORD_PAGE_SIZE,
+                    &signin::RecordsQuery {
+                        ai_dou: book,
+                        filter: signin::RECORD_FILTER_ALL,
+                        page_number,
+                        page_size: RECORD_PAGE_SIZE,
+                    },
                     &SystemClock,
                     rng,
                 )

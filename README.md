@@ -46,8 +46,8 @@ mcloud-cli           → core, capabilities, server         可执行入口
 上表不是文档约定，是**可执行断言**：`scripts/check-deps.sh` 会真的读每个 `Cargo.toml`
 并断言依赖方向，违反即非零退出 —— 而不是只在文档里写着"请勿依赖"。
 
-> 现状：仓库**还没有 CI 配置**，也没有 git hook。所以这五条门禁目前靠改完手动跑一遍，
-> 不是自动拦截。加上 CI 是待办。
+> CI 已就位：`.github/workflows/ci.yml` 在 push / PR 到 `main` 时跑完这六条。
+> 本地也可以一条命令跑完：`bash scripts/gates.sh`（任一条失败即非零退出）。
 
 ## 门禁
 

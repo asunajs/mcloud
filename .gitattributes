@@ -1,0 +1,31 @@
+# 行尾统一 —— 这不是洁癖，是**功能性**要求。
+#
+# 背景：本机 `core.autocrlf=true`（Windows 默认），而仓库里跑着 shell 脚本与
+# Node 脚本。若不加约束，checkout 时 `scripts/*.sh` 会变成 CRLF，到 Linux/CI 上
+# 第一行 shebang 变成 `#!/usr/bin/env bash\r` —— 找不到 `bash\r` 这个解释器，
+# 脚本直接报 "bad interpreter"。这个坑只在 CI 上暴露，本地 Windows 完全看不出来。
+#
+# 所以：文本一律以 LF 入库，二进制不碰。
+* text=auto eol=lf
+
+# 显式点出可执行脚本，杜绝 CRLF 混入
+*.sh    text eol=lf
+*.cjs   text eol=lf
+*.py    text eol=lf
+*.rs    text eol=lf
+*.toml  text eol=lf
+*.json  text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.yml   text eol=lf
+*.md    text eol=lf
+
+# GitHub Actions 的 workflow 文件必须 LF（YAML 对 CRLF 容忍度差）
+.github/workflows/*.yml text eol=lf
+
+# 二进制 —— 交给 git 自动判定，不做行尾转换
+*.pack  binary
+*.idx   binary
+*.png   binary
+*.svg   text eol=lf
+*.db    binary

@@ -37,14 +37,11 @@ pub fn next_cloud_stats(
     // 优先取"7 天前或更早"里最近的一条；没有则退化为最早一条。
     let week_base = cutoff
         .and_then(|cut| {
-            history
-                .iter()
-                .filter(|s| {
-                    NaiveDate::parse_from_str(&s.date, "%Y-%m-%d")
-                        .map(|d| d <= cut)
-                        .unwrap_or(false)
-                })
-                .next_back()
+            history.iter().rfind(|s| {
+                NaiveDate::parse_from_str(&s.date, "%Y-%m-%d")
+                    .map(|d| d <= cut)
+                    .unwrap_or(false)
+            })
         })
         .or_else(|| history.first());
 

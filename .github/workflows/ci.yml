@@ -1,0 +1,77 @@
+name: CI
+
+# 六项门禁（README「门禁」一节）的自动化版本。
+#
+# 之所以值得单独存在：分层铁律与标识守卫这两条**被破坏后测试仍然全绿**，
+# 只是不再纯净/不再干净 —— 它们不会自己暴露。靠人记得手跑等于没有。
+#
+# 与本地 `scripts/gates.sh` 的一致性是刻意的：两边跑的是同一组命令。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # 依赖没变时跳过重复编译，CI 时间主要花在这里
+  RUSTFLAGS: -D warnings
+
+jobs:
+  gates:
+    name: 六项门禁
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: 缓存 cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: 安装 Node（标识守卫需要）
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # ── 1/6 单元测试 ──────────────────────────────────────────
+      - name: cargo test
+        run: cargo test --workspace
+
+      # ── 2/6 静态检查 ─────────────────────────────────────────
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # ── 3/6 格式 ─────────────────────────────────────────────
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      # ── 4/6 分层铁律 ─────────────────────────────────────────
+      # 断言纯层（core/upstream/capabilities/exec）不含 reqwest/rusqlite
+      # 且不依赖 mcloud-io，同时断言组装根 mcloud-server 必须依赖 io。
+      - name: 分层铁律
+        run: bash scripts/check-deps.sh
+
+      # ── 5/6 标识守卫 ─────────────────────────────────────────
+      # 扫源码字面量与 base64 解码后的载荷，断言进版本库的标识都是 199 合成号段。
+      - name: 标识守卫
+        run: node scripts/check-identifiers.cjs
+
+      # ── 6/6 黄金向量 ─────────────────────────────────────────
+      # 用 Node crypto 独立实现算一遍 test/golden/*.json，与 Rust 侧互为交叉验证；
+      # 同时对每个 golden 文件做脱敏扫描（Rust 只扫 include_str! 进来的那些）。
+      - name: 黄金向量
+        run: node scripts/check-golden-vectors.cjs
