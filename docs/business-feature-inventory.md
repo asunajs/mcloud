@@ -37,7 +37,14 @@
 
 （`cloud-snapshot` 是新项目按 D1/D2 增设的，不在旧项目 19 项里；旧项目 19 项 = 表中 1、3–20。）
 
-**当前 Rust 侧可跑的东西**：登录（PC 短信/扫码、App 短信）、账号会话与归属（schema v4）、设备指纹 smid（v5）、旧数据迁移、`mcloud-app::cloud` / `signin` 的上游封装（并行工作流，未提交）。**19 项业务能力：0 项可执行** —— 缺的不是接口，是它们下面那一层（§3）。
+**当前 Rust 侧可跑的东西**（2026-09-19 订正）：登录（PC 短信/扫码、App 短信）、账号会话与归属、
+设备指纹 smid、**App 端签到（云朵中心）全链路**、旧数据迁移、`mcloud-app::cloud` / `signin` 的上游封装。
+**schema 现为 v7**（v4 归属 → v5 smid 两列 → v6 `account_state.phone` → v7 `Authorization` 整串存）。
+**19 项业务能力：0 项可执行** —— 缺的不是接口，是它们下面那一层（§3）。
+
+> 上面这段的上一版写的是"schema v4 / v5、`mcloud-app::cloud` / `signin` 并行工作流**未提交**"。
+> 那描述的是两份盘点刚写完、实现还在飞的时候；现在那些提交已经落地
+> （云端 9 个 + 本地 1 个），语境消失，故订正。
 
 **补充（2026-09-19 用户订正，对上面这张表的三处读法）** —— 表格本身按"旧项目代码怎么写"保留原样，读的时候叠加这三条：
 
@@ -328,9 +335,9 @@
 | 层 | 旧项目实际做法 | 新项目落点 / 缺口 |
 | --- | --- | --- |
 | 执行与并发 | `runner.ts`：`running` Map 的 **join 语义**（第二个请求复用第一个的 promise）、`force` 旁路、历史截断 200 条、`asyncRun` 仅内存上限 100（D4） | `mcloud-exec`：目前**只有** `Concurrency::effective_parallelism` 这一个纯函数。缺 runId、锁（要含参数维度）、`runs`/`run_events` 落库、SSE 事件流 |
-| 调度 | `scheduler.ts`：croner，`protect:true`（**跳过不排队**）、5 或 6 段 cron、时区默认 `Asia/Shanghai`、**无错过补偿**、部分失败也记 `error` | `mcloud-io::sched` + 表 `schedules`（schema 已有 v4 归属字段）。"错过不补"要显式保留还是改，属待拍板项 |
+| 调度 | `scheduler.ts`：croner，`protect:true`（**跳过不排队**）、5 或 6 段 cron、时区默认 `Asia/Shanghai`、**无错过补偿**、部分失败也记 `error` | `mcloud-io::sched` + 表 `schedules`（v4 已有归属字段，schema 现为 v7）。"错过不补"要显式保留还是改，属待拍板项 |
 | 组合流水线 | `pipelines.ts`：步骤 ≤30、`stopOnError` 默认 true、**步骤间不传数据**（只共享 `state.json` 与进程全局）、stopped 后仍输出 `skipped` 占位、`ok = ≥1 步执行且全 ok`、账号默认串行防风控 | `mcloud-capabilities` + `mcloud-exec`。旧模型"步骤间不传数据"是 `app` 那种大杂烩的根因；新方案要允许显式的 run 内产物传递（`after` 删文件依赖它） |
-| 账号状态存储 | `storage.ts`：`DATA_DIR` **相对 cwd**、读失败静默回落 `{}`、写 tmp+rename、**无锁**；`account.ts`：`accountKey = phone‖nickname‖"account"`、label 掩码 `前2****后2`、`findAccount` 序号**从 1 起**、state 合并方向 `fresh 覆盖 saved`、`writeConfigFile` 带 `.bak` | `mcloud-io::store`（SQLite，schema v5）已完成；`AccountState` 是**整行覆盖**写，`SmidState` 是**窄写**（两者契约相反，改动时别串台） |
+| 账号状态存储 | `storage.ts`：`DATA_DIR` **相对 cwd**、读失败静默回落 `{}`、写 tmp+rename、**无锁**；`account.ts`：`accountKey = phone‖nickname‖"account"`、label 掩码 `前2****后2`、`findAccount` 序号**从 1 起**、state 合并方向 `fresh 覆盖 saved`、`writeConfigFile` 带 `.bak` | `mcloud-io::store`（SQLite）已完成（schema 现为 v7）；`AccountState` 是**整行覆盖**写，`SmidState` 是**窄写**（两者契约相反，改动时别串台） |
 | 推送 10 渠道 | `shared/src/push/index.ts:104-281`：`pushplus`(明文 http) / `serverChan`(token 进 URL) / `workWeixin`(两步取 token，**token 失败仍继续拼 URL**) / `workWeixinBot` / `tgBot`(缺 token/chat_id 主动跳过；`proxy` 配置**从不生效**) / `bark` / `twoIm`(key/sid 平铺进 query) / `dingTalk`(可选 secret 加签；content 加**前导空格**绕关键词；动态 `import("crypto-js")` 失败会冒泡) / `email`(nodemailer，tjs 运行时直接跳过；缺 pass/from/host **静默 return**) / `customPost`(url/body 占位符**字符串替换后 JSON.parse**，可配数组)。所有渠道失败**一律吞成日志**；**只有 CLI 主流程结束才推送，API / 定时路径从不推送** | `mcloud-io::push`（方案 §1.6 定"渠道保留、发送层重做"）。必须补的三件事：**定时路径也要能推送**、失败可见（进 `run_events`）、**正文脱敏** —— 现正文是全量日志，存在手机号/邮箱明文外泄路径（`auth-service.ts:118`、`app/runners.ts:270`） |
 | CLI | `packages/cli/src/index.ts`：**只有一个"跑全流程"入口**，任务顺序固定，无参数解析、无交互（D9）；账号配置三级合并在这里才做 | `mcloud-cli`：已有 `user / login / smid / capabilities / version / fixture extract`。缺：按能力跑单任务、组合、调度管理、推送测试 |
 | WebUI | 7 页；`WEBUI_PAGES` 白名单只有 6 项（`tasks/pipelines/schedules/accounts/history/config`）**漏了 exchange** ⇒ 停在兑换页时 `normalize` 把 `lastPage` 回落成 `tasks`，"记住上次页面"对该页失效（`api/src/webui-config.ts:16-24,55-62`）；`data/webui.json` 存偏好而非 localStorage；路由在 `index.ts` 平铺注册、**无鉴权、无限流、无全局错误中间件**（D7） | `mcloud-server`：目前只有 `/api/health`、`/api/setup`、`/api/session`（+ 404 兜底）。缺：capabilities / runs / schedules / pipelines / exchange / debug 全部业务路由与 OpenAPI |

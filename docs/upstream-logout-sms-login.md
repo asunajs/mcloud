@@ -4,7 +4,12 @@
 >
 > - 采集时间：2026-09-17 22:05-22:07
 > - 采集环境：Windows 11，客户端 `8.8.6.20260829`
-> - 配套文档：`docs/upstream-login-protocol.md`（扫码登录）
+> - **登录协议一族**（按端分文件，本篇是 **PC 客户端退出+短信**那一支）：
+>   [`upstream-login-protocol.md`](./upstream-login-protocol.md)（PC 客户端扫码）、
+>   [`upstream-web-qr-login.md`](./upstream-web-qr-login.md)（PC Web 扫码）、
+>   [`upstream-app-sms-login.md`](./upstream-app-sms-login.md)（iOS App 短信）、
+>   [`upstream-app-business-api.md`](./upstream-app-business-api.md)（iOS App 业务接口）。
+>   全库索引见 [`docs/README.md`](./README.md)。
 > - 依据 `docs/rust-rewrite-plan.md` §7.0：本文件全部来自实测，无猜测性内容
 
 ---

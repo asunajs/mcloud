@@ -5,7 +5,12 @@
 > - 采集时间：2026-09-18 18:30-18:45
 > - 采集环境：Windows 11 + Edge，Web 端 `7.18.0`（`mcloud-version` 头）
 > - 采集方式：CDP 直连（一次拿到 URL / headers / body / response），非代理抓包
-> - 对照文档：`docs/upstream-login-protocol.md`（PC 客户端）、`docs/upstream-logout-sms-login.md`（退出+短信）
+> - **登录协议一族**（按端分文件，本篇是 **Web** 那一支）：
+>   [`upstream-login-protocol.md`](./upstream-login-protocol.md)（PC 客户端扫码）、
+>   [`upstream-logout-sms-login.md`](./upstream-logout-sms-login.md)（PC 客户端退出+短信）、
+>   [`upstream-app-sms-login.md`](./upstream-app-sms-login.md)（iOS App 短信）、
+>   [`upstream-app-business-api.md`](./upstream-app-business-api.md)（iOS App 业务接口）。
+>   全库索引见 [`docs/README.md`](./README.md)。
 > - 依据 `docs/rust-rewrite-plan.md` §7.0：本文件全部来自实测，无猜测性内容
 
 ---

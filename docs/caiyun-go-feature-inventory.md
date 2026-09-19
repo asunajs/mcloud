@@ -380,7 +380,7 @@ cpactiv 域用 `appId=12345681`（应用级白盒常量，非账号凭据）+ �
 | --- | --- |
 | 失败即 `滑块验证码识别失败：%v` → kind `other` → 重试 → 耗尽 → 任务 failed | **验证码这一层没有"请你去 App 点一下"的出口**：全仓"人工/手动"字样在兑换侧只命中一处，而且是**任务级**（`repository/exchange_schedule.go:211` 的"仅一次任务已尝试过，等待人工处理"），不是识别级 ⇒ 正是 §1.4 要补的第四态 |
 | 每次重试**重新拉一次滑块、重新识别** | N 次重试 = N 次付费识别；offset 不缓存 |
-| 取 deviceId 失败用**硬编码兜底 deviceId**（`services/exchange_executor.go:27-29`，全服务共用同一个假设备号） | 风控负资产 ⇒ **不搬**；我们已有账号绑定的 `smid_fingerprint`/`smid_device_id`（schema v5） |
+| 取 deviceId 失败用**硬编码兜底 deviceId**（`services/exchange_executor.go:27-29`，全服务共用同一个假设备号） | 风控负资产 ⇒ **不搬**；我们已有账号绑定的 `smid_fingerprint`/`smid_device_id`（v5 引入，schema 现为 v7） |
 
 ### 3.7 数据模型与审计
 

@@ -5,6 +5,13 @@
 > + 活体探针（合成号码打真实上游）。
 > 实现：`crates/mcloud-upstream/src/app_login.rs`、`app_client.rs`；
 > 密码学原语：`crates/mcloud-core/src/crypto.rs`。
+>
+> **登录协议一族**（按端分文件，本篇是 **iOS App 短信**那一支）：
+> [`upstream-login-protocol.md`](./upstream-login-protocol.md)（PC 客户端扫码）、
+> [`upstream-logout-sms-login.md`](./upstream-logout-sms-login.md)（PC 客户端退出+短信）、
+> [`upstream-web-qr-login.md`](./upstream-web-qr-login.md)（PC Web 扫码）、
+> [`upstream-app-business-api.md`](./upstream-app-business-api.md)（iOS App 已登录业务接口）。
+> 全库索引见 [`docs/README.md`](./README.md)。
 
 ---
 

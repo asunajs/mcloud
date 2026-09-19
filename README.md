@@ -22,11 +22,14 @@ mcloud-io            → core        （+ reqwest / rusqlite / rand：全项目�
 mcloud-app           → core, upstream, capabilities, io          组装层（两个产物共用）
 mcloud-server        → core, capabilities, exec, io, app         产物之一（HTTP/WebUI）
 mcloud-cli           → core, upstream, capabilities, io, app     产物之一（命令行）
-mcloud-cli           → core, capabilities, server         可执行入口
 ```
 
 `mcloud-server` **必须**依赖 `mcloud-io` —— 反过来（没人接上 IO 实现）是一个静默的死配置，
-编译能过、跑起来什么都没发生。`mcloud-cli` 则**不**直依赖 `mcloud-io`，它只做参数解析。
+编译能过、跑起来什么都没发生。
+
+`mcloud-cli` **不得**依赖 `mcloud-server`（`scripts/check-deps.sh` 的 `FORBIDDEN_EDGES` 断言这条）。
+两个产物只共用 `mcloud-app`：CLI 一旦拿到 `mcloud-server`，就会连带把 axum / 路由 / 静态资源
+拖进命令行产物，而这件事**不会让任何测试变红**，只会让"CLI 能在没有 HTTP 环境的地方跑"这条性质消失。
 
 | crate | 角色 | 约束 |
 | --- | --- | --- |
@@ -74,7 +77,11 @@ node scripts/check-golden-vectors.cjs               # 黄金向量能算出自�
 > 上面那句"106 条"是当时的实况。**2026-09-19 追加**：此刻是 **122 条断言全绿**，
 > 新增的两段是 smid 那条线的 `§smidString` 与 `§smidPriId`（各 3 条，对拍旧 TS）。
 
-当前状态（2026-09-19 收工）：**554 个测试通过**，六项门禁全绿。
+当前状态（2026-09-19 收工）：**586 个测试通过**，六项门禁全绿。
+> 这里以前写的是 554 —— 那是**拉取云端之前**本机的数。云端那 9 个提交带进来的
+> `mcloud-app` 等新模块另有自己的 lib 测试，落地后实跑是 **586**。
+> 下面那段"一路涨上来"的过程保留原样（它是历史，不是当前状态），
+> 只是末数应从 554 读作"当时的一帧"。
 同日接完 smid（设备指纹绑账号）那条线后是 **493 个**（smid 那条线自己贡献 46 个：
 上游算法 25 + 生命周期 13 + 存储 8）；随后 App 签到线又加了上游接口层、编排层
 与存储层（`account_state.phone`，schema v6）的用例，到 **516**；
@@ -86,7 +93,10 @@ node scripts/check-golden-vectors.cjs               # 黄金向量能算出自�
 新增 4 条：窄写"只填空缺"2 条 + 整串优先 1 条 + 迁移回填的幂等与不降级 1 条，到 **546**；
 最后给 CLI 的账号选择（下标语义）补上 9 条用例 —— 零参数只跑启用账号且下标用全列表位置、
 `--account` 数停用账号、下标从 1 开始、越界报总数、`--phone` 空库也能选中、`--list` 互斥、
-顶层与 `mcloud signin` 两种写法等价、不带子命令补出来的确实是签到 —— 到 **554**。
+顶层与 `mcloud signin` 两种写法等价、不带子命令补出来的确实是签到 —— 到 **554**（当时的数）。
+随后把云端那 9 个提交拉进本地（`mcloud-app` 组装层、App 签到全链路、schema v7 等），
+一并修掉两处 clippy（`pure.rs` 的 `filter_next`、`app/src/signin.rs` 的 `too_many_arguments`），
+实跑 **586 个测试通过**。
 上一条实况是 2026-09-17 的 **241 个测试**、其余四项全绿。
 
 > ⚠ **更正（2026-09-19）**：本节此前写着"`mcloud-upstream` 的 L2 夹具回放已跑通
@@ -241,7 +251,7 @@ cargo run -p mcloud-cli -- migrate --repo-root <旧项目路径> --dry-run
 ## 目录结构
 
 ```
-crates/         7 个 crate（见上表）
+crates/         8 个 crate（见上表）
 scripts/        门禁与夹具生成器
   gen-*.cjs       —— 夹具一律从真实产物生成，不手写期望值
   check-*.cjs     —— 门禁（分层 / 标识 / 黄金向量）
@@ -399,6 +409,9 @@ Rust 那条不是风格偏好而是**语言强制**：文件名就是模块名�
 - **`docs/rust-rewrite-plan.md` 已同步进本仓库**（原 `mcloud-sign` 仓库不再需要它）。
   它是动工前的规划快照，进度以本文为准；同步时里面的真实手机号已替换为合成号段
   —— 原仓库是公开的，这类值不该留在里面。
+- **`docs/` 有 13 篇文档，入口是 [`docs/README.md`](./docs/README.md)**：
+  「该读哪篇」按**你要做的事**索引（实现能力 / 接新端 / 做登录 / 写抓包文档），
+  另有「权威关系」表 —— 文档之间冲突时以谁为准，一次说清，不必每篇自己写一份。
 - **接第二个端（安卓 / iOS / 邮箱端 / 小程序…）之前先读
   [`docs/client-profiles.md`](./docs/client-profiles.md)**：
   各端差异**主要在请求头**（请求体只有 `clientType`/`cpid`/`version` 随端变化）。

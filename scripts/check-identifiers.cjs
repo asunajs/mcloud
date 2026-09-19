@@ -121,8 +121,17 @@ function isObviousPlaceholder(value) {
  *
  * 注意这**不是**把值登记进 `ALLOWED` —— 那等于承认"这是要留在仓库里的真实标识"，
  * 与"真实值一律不准登记"冲突。这里是按**来源**豁免，理由写在注释里。
+ *
+ * `docs/capture/pcclient-api.js` 同理：它是**同一个客户端** `app.asar` 里的
+ * `out/renderer/api/api.js`（首行 `console.log('************api.js')`），
+ * 与 `apiServer.js` 是同一目录下的姊妹文件。
+ *
+ * ⚠ 两份都来自 PC 客户端，但**共享同一个豁免理由是巧合、不是保证** ——
+ * 以后再抓新的客户端源码进来，要**逐个**判断并加进这里，别因为"目录名叫 capture"
+ * 就默认整目录安全。这个清单漏过 `pcclient-api.js` 一次：当时它没触发守卫，
+ * 只是**恰巧**不含真实标识，属于运气而不是守住了。
  */
-const VENDOR_SOURCE_PATHS = ["docs/capture/apiServer.js"];
+const VENDOR_SOURCE_PATHS = ["docs/capture/apiServer.js", "docs/capture/pcclient-api.js"];
 
 /** 只认这些后缀，避免去读图片/二进制。 */
 const TEXT_EXT = new Set([

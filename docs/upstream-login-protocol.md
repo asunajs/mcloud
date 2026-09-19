@@ -6,6 +6,12 @@
 > - **证据链 B（客户端源码）**：`D:\Program Files\mcloud\resources\app.asar` 提取 `/out/renderer/api/apiServer.js`
 > - 采集时间：2026-09-17
 > - 采集环境：Windows 11 (10.0.26100.1591)，客户端版本 `8.8.6.20260829`
+> - **登录协议一族**（按端分文件，本篇是 **PC 客户端扫码**那一支）：
+>   [`upstream-logout-sms-login.md`](./upstream-logout-sms-login.md)（PC 客户端退出+短信）、
+>   [`upstream-web-qr-login.md`](./upstream-web-qr-login.md)（PC Web 扫码）、
+>   [`upstream-app-sms-login.md`](./upstream-app-sms-login.md)（iOS App 短信）、
+>   [`upstream-app-business-api.md`](./upstream-app-business-api.md)（iOS App 业务接口）。
+>   全库索引见 [`docs/README.md`](./README.md)。
 >
 > 依据 `docs/rust-rewrite-plan.md` §7.0 硬约束：**本文件内容全部来自实测，未落笔任何猜测性接口**。
 
