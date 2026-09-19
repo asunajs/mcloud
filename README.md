@@ -188,6 +188,9 @@ cd .. && cargo run -p mcloud-server         # API + 前端，默认 http://127.0
 首次打开是**初始化页**（建首个管理员）；之后就一直是登录页。
 前端开发用 `cd web && npm run dev`（vite 5173 → 后端 8787 已配好代理）。
 
+**改前端样式前先读 [`docs/webui-design-guide.md`](./docs/webui-design-guide.md)** ——
+它是视觉与交互的唯一依据（页面骨架、组件类名、移动端硬要求、验收清单都在那里）。
+
 会话走 cookie：`HttpOnly` + `SameSite=Lax`，库里只存 `sha256(token)`，
 登出 = 删掉那一行，**立刻生效**。口令用于登录**本系统**，与移动云盘账号无关。
 
@@ -409,9 +412,13 @@ Rust 那条不是风格偏好而是**语言强制**：文件名就是模块名�
 - **`docs/rust-rewrite-plan.md` 已同步进本仓库**（原 `mcloud-sign` 仓库不再需要它）。
   它是动工前的规划快照，进度以本文为准；同步时里面的真实手机号已替换为合成号段
   —— 原仓库是公开的，这类值不该留在里面。
-- **`docs/` 有 12 篇文档，入口是 [`docs/README.md`](./docs/README.md)**：
-  「该读哪篇」按**你要做的事**索引（实现能力 / 接新端 / 做登录 / 写抓包文档），
+- **`docs/` 有 13 篇文档，入口是 [`docs/README.md`](./docs/README.md)**：
+  「该读哪篇」按**你要做的事**索引（实现能力 / 接新端 / 做登录 / 写抓包文档 / 写前端页面），
   另有「权威关系」表 —— 文档之间冲突时以谁为准，一次说清，不必每篇自己写一份。
+- **写 WebUI 前先读 [`docs/webui-design-guide.md`](./docs/webui-design-guide.md)**：
+  视觉与交互（主题色彩 / 布局骨架 / 组件类名 / 移动端细则 / 验收清单）的**唯一依据**。
+  它把 daisyUI 的用具象规矩钉住 —— 比如"**类名必须字面量**"（`btn-${x}` 拼接会静默失效）、
+  "**禁用 `gray-*` 具名色阶**"（切深色必崩）、"**涨红跌绿不受主题影响**"。
 - **接第二个端（安卓 / iOS / 邮箱端 / 小程序…）之前先读
   [`docs/client-profiles.md`](./docs/client-profiles.md)**：
   各端差异**主要在请求头**（请求体只有 `clientType`/`cpid`/`version` 随端变化）。

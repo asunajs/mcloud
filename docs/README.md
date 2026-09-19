@@ -1,6 +1,6 @@
 # docs/ 索引
 
-12 篇文档 + `capture/` 原始素材。**先看「该读哪篇」那张表，再进去。**
+13 篇文档 + `capture/` 原始素材。**先看「该读哪篇」那张表，再进去。**
 
 > 这份索引的存在理由：`docs/` 有 5,000 多行，而此前唯一的入口是 `README.md` 里一段
 > **叙述式**文字（"要参考 Go 项目前先读 …"）—— 扫不到全貌，于是
@@ -24,6 +24,7 @@
 | 写任何带"**码**"的请求 | [`device-and-source-codes.md`](./device-and-source-codes.md) —— 这些码是**调用参数**，不是端常量 |
 | 做**登录**（PC 客户端 / PC Web / App） | 见下面「登录协议」一族，按端选 |
 | 写**抓包文档**（提交前必读） | [`sanitize-guide.md`](./sanitize-guide.md) —— 脱敏 SOP + 守卫用法 + 泄露后如何改写历史 |
+| 写**任何前端页面 / 组件** | [`webui-design-guide.md`](./webui-design-guide.md) —— 视觉与交互的**唯一依据**，含移动端硬要求 |
 
 ---
 
@@ -56,6 +57,12 @@
 | --- | --- | --- |
 | [`client-profiles.md`](./client-profiles.md) | 各端请求头 / 设备串差异、三种指纹（设备串 / smid / deviceShort）、未知项清单 | PC + iOS App 已落地；其余端待实现 |
 | [`device-and-source-codes.md`](./device-and-source-codes.md) | 设备码 / 来源码 / 渠道码的分类判据与取值谱 | 结论已定 |
+
+### 前端
+
+| 文档 | 一句话 | 状态 |
+| --- | --- | --- |
+| [`webui-design-guide.md`](./webui-design-guide.md) | WebUI 设计规范：主题色彩、布局骨架、组件类名、移动端细则、验收清单 | **规范**（后续美工设计的唯一依据） |
 
 ### 流程与运维
 
@@ -96,6 +103,7 @@
 | **上游协议细节**（字段、状态机、错误码） | 对应的 `upstream-*.md` |
 | **跨端头 / 设备串** | [`client-profiles.md`](./client-profiles.md) |
 | **哪些值能进版本库** | [`sanitize-guide.md`](./sanitize-guide.md) |
+| **前端长什么样 / 怎么写** | [`webui-design-guide.md`](./webui-design-guide.md)（技术选型仍以 [`rust-rewrite-plan.md`](./rust-rewrite-plan.md) §2.2 为准） |
 
 ---
 
