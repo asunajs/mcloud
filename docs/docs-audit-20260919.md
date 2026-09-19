@@ -124,7 +124,7 @@ cargo test / clippy / fmt --check / check-deps.sh / check-identifiers.cjs / chec
 | 文档 | 被引用次数 | 问题 |
 | --- | --- | --- |
 | `upstream-web-qr-login.md` | **0** | 563 行的联网登录协议文档，README 与其它文档都没链它 |
-| `ltsc-store-yingyongbao-guide.md` | **0** | 与 mcloud 项目无关的 Windows 运维文档，混在 `docs/` 里 |
+| `ltsc-store-yingyongbao-guide.md` | **0** | 与 mcloud 项目无关的 Windows 运维文档，混在 `docs/` 里（**已删除**，见 4.1 末） |
 
 `upstream-web-qr-login.md` 尤其可惜 —— 它和 `upstream-login-protocol.md`（PC 客户端）、
 `upstream-logout-sms-login.md` 是同一族的证据，但后两者互相链了，它没有。
@@ -132,7 +132,10 @@ cargo test / clippy / fmt --check / check-deps.sh / check-identifiers.cjs / chec
 并在 README 的文档索引段加一条。
 
 `ltsc-store-yingyongbao-guide.md` 属于"本机环境搭建"而非项目内容，
-建议移到 `docs/ops/`（或干脆移出仓库），避免污染协议文档的检索路径。
+**后续处理**：按本报告原建议**移出仓库**（连同年份相仿的两个配套脚本
+`scripts/install-store-and-yyb.ps1`、`scripts/ltsc-env-check.ps1` 一并删除），
+避免污染协议文档的检索路径。删除后 `docs/` 由 13 篇降为 12 篇 ——
+正文里的"13 篇"是**当次快照**，不再回改。
 
 ### 4.2 `docs/` 缺一个索引
 
@@ -187,7 +190,7 @@ commit `1b2cf07` 才是权威锚点）" —— 现在该文档已经写了 commi
 | `> 状态：PC 端已落地…；iOS App 端已落地…` | `client-profiles.md` |
 | `> **这份文档是什么**：…` | `business-feature-inventory.md` |
 | `> **定位**：…` | `caiyun-go-feature-inventory.md` |
-| 无抬头，直接进正文 | `sanitize-guide.md`、`ltsc-*.md` |
+| 无抬头，直接进正文 | `sanitize-guide.md`、`ltsc-*.md`（后者已删） |
 
 `upstream-*` 那一族（4 篇）有很统一的三段式（状态 / 证据链 / 采集时间与环境），
 值得**推广成全库模板**。`sanitize-guide.md` 是 SOP，本不需要"证据链"，
@@ -243,9 +246,13 @@ commit `1b2cf07` 才是权威锚点）" —— 现在该文档已经写了 commi
 
 **未处理**（有意留下，属于"当事人自己决定"）：
 
-- **4.1 后半**：`ltsc-store-yingyongbao-guide.md` 是否移出 `docs/`。它确实与项目无关，
-  但移出仓库还是挪进 `docs/ops/` 是个取舍，索引里已标注"与项目无关"、
-  已能满足"不污染检索"的目的，就不擅自搬了。
 - **4.4**：`/Users/catlair/...`、`/tmp/caiyun-ref` 这类**证据出处路径**保留原样 ——
   它们记录了"当时在哪读的"，本身是证据的一部分；且文档已给 commit 作权威锚点。
 - **本报告自身**：它是一次性产物，考虑后续移入 `docs/archive/` 或直接删除。
+
+**后续处理**（本报告交付后由当事人决定并执行）：
+
+- **4.1 后半**：`ltsc-store-yingyongbao-guide.md` 及其两个配套脚本
+  （`scripts/install-store-and-yyb.ps1`、`scripts/ltsc-env-check.ps1`）**已删除**，
+  理由是该文与 mcloud 无关、且当事人本机环境早已装好，无长期留存价值。
+  连带清掉了 `docs/README.md` 里的三处引用与 `README.md` 的文档计数（13 → 12）。

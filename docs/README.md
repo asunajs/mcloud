@@ -1,11 +1,15 @@
 # docs/ 索引
 
-13 篇文档 + `capture/` 原始素材。**先看「该读哪篇」那张表，再进去。**
+12 篇文档 + `capture/` 原始素材。**先看「该读哪篇」那张表，再进去。**
 
 > 这份索引的存在理由：`docs/` 有 5,000 多行，而此前唯一的入口是 `README.md` 里一段
 > **叙述式**文字（"要参考 Go 项目前先读 …"）—— 扫不到全貌，于是
-> `upstream-web-qr-login.md` 与 `ltsc-store-yingyongbao-guide.md` 长期没有任何入径。
+> `upstream-web-qr-login.md` 长期没有任何入径。
 > 这里按**角色**和**状态**重排一遍。
+>
+> 原先还混着一份与项目无关的本机运维文档（Windows 11 LTSC 装商店 / 应用宝），
+> 已按 [`docs-audit-20260919.md`](./docs-audit-20260919.md) §4.1 的建议移出仓库。
+> **`docs/` 只放 mcloud 自己的东西** —— 环境搭建类笔记请放在项目外。
 
 ---
 
@@ -20,7 +24,6 @@
 | 写任何带"**码**"的请求 | [`device-and-source-codes.md`](./device-and-source-codes.md) —— 这些码是**调用参数**，不是端常量 |
 | 做**登录**（PC 客户端 / PC Web / App） | 见下面「登录协议」一族，按端选 |
 | 写**抓包文档**（提交前必读） | [`sanitize-guide.md`](./sanitize-guide.md) —— 脱敏 SOP + 守卫用法 + 泄露后如何改写历史 |
-| 在本机搭 LTSC 环境（装商店 / 跑安卓应用） | [`ltsc-store-yingyongbao-guide.md`](./ltsc-store-yingyongbao-guide.md)（**与项目无关**，见下） |
 
 ---
 
@@ -59,7 +62,6 @@
 | 文档 | 一句话 | 状态 |
 | --- | --- | --- |
 | [`sanitize-guide.md`](./sanitize-guide.md) | 抓包脱敏 SOP、标识守卫用法、真实值泄露后如何改写历史 | 最后核对 2026-09-19 |
-| [`ltsc-store-yingyongbao-guide.md`](./ltsc-store-yingyongbao-guide.md) | Windows 11 LTSC 装微软商店 + 应用宝跑安卓应用 | **与 mcloud 项目无关**，属本机环境搭建 |
 | [`docs-audit-20260919.md`](./docs-audit-20260919.md) | 本文档全库体检报告（过期项、矛盾项、待优化项） | 一次性产物，**可归档** |
 
 ### `capture/` 原始素材
