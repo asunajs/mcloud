@@ -1,0 +1,1361 @@
+# 移动云盘 App 端签到（云朵中心）· 实测抓包样本
+
+> 采集：2026-09-19 14:38-14:39（原生 App 全链路）+ 14:42（协议面复现）
+> 客户端：`mCloud_iPhone 12.6.0`（iPad 形态）跑在 macOS 上；bundle `cn.10086.mobileClouds`
+> 通路：Reqable 系统代理（端口 9000）→ iOS App 的 CFNetwork 请求
+> 原始 HAR：`har/signin-2026-09-19-full.har`（638 条，`har/` 已 gitignore）
+> 签到页 JS：`har/h5-signin/`（`newsignin.336f18c3.js` + 签名算法所在 chunk）
+> 脱敏原则见 `docs/sanitize-guide.md`：换值不换形（长度 / 分段 / 字符集保持）。
+>
+> **本文件的凭据一律是合成值**（`199` 号段手机号、等长合成 token），
+> 结构、长度、分段与原值逐字对齐。真实值不落库。
+
+---
+
+## 0. 一句话结论
+
+**签到不是原生接口，是一个 H5 页面**（`newsignin`）。原生 App 只做两件事：
+换一个 SSO token、把 WebView 打开到 `m.mcloud.139.com`。真正的签到请求
+（`infoV3` / `startSignIn` / `taskListV3` …）全部由 H5 发出。
+
+**但它是纯协议可达的** —— 2026-09-19 已用账号 B 在**无浏览器**的条件下端到端跑通
+（见 §6）。整条链路只有三段需要理解：
+
+```text
+原生（A 族头）                     H5（WebView / 纯协议）
+─────────────────────────────────  ─────────────────────────────────────────
+POST /user/querySpecTokenV2        GET  /ycloud/api/timestamp      ← 取服务端毫秒时间戳
+  {"toSourceId":"001005"}          POST /ycloud/auth-service/auth/tyrzLogin  ← 带 x-signature
+  → SSO token（42 字符）             → jwtToken（905 字符）+ userDomainId
+                                   GET  /ycloud/signin/page/infoV3?client=app   ← 带 jwttoken 头
+                                   GET  /ycloud/signin/page/startSignIn?client=app
+```
+
+> ⚠ 这里的 `toSourceId` 取 `001005`，依据是**签到页 URL 自带的 `targetSourceId=001005`**
+> （App 实拍）。它**不是端常量，是调用方参数** —— 同一个 App 进程里出现过三个值。
+> 别从 PC 客户端或别处搬一个过来用，理由见 §2.1 末尾。
+
+---
+
+## 1. 两台主机，两套头
+
+| | 原生接口 | H5 接口 |
+| --- | --- | --- |
+| 主机 | `https://user-njs.yun.139.com` | `https://m.mcloud.139.com` |
+| 请求族 | **A 族**（`Authorization` + 设备头，无签名） | H5 自有头（`activityid` / `appversion` / `jwttoken`） |
+| 鉴权 | `Authorization: Basic base64("mobile:<手机号>:<authToken>")` | `cookie` 里的 `jwtToken`，同时**复制到 `jwttoken` 请求头** |
+| 本条链路的角色 | 只换 SSO token | 建会话 + 签到全部动作 |
+
+> ⚠ `docs/upstream-app-business-api.md` 里那套 **B 族**（`signature` + `encodeData`）
+> **在签到链路上一次都没出现**。签到走的是 A 族 + H5 自有头。
+> 别把 B 族的 `clientKey` / `clientId=iosapp` 搬过来 —— 这里用的是另一套签名（§5）。
+
+### 1.1 一个反直觉的观察：H5 的 `appversion` 是 `0.0.0.0`
+
+原生 WebView 打开的页面里，`appversion` 请求头**不是** `12.6.0.0`，而是 `0.0.0.0`
+（见 §2.2 的 timestamp 请求）。这是 H5 的 `getAppVersion()` 在拿不到 bridge 时的兜底值。
+`tyrzLogin` 那条同样是 `0.0.0.0`。而**签到主体**（`infoV3` / `startSignIn`）是 `12.6.0.0`。
+
+实测这不影响成败（两种取值都能过），但记录在此以免实现时以为抄错。
+
+---
+
+## 2. 鉴权三段
+
+### 2.1 第 1 段：`POST /user/querySpecTokenV2`（明文）
+
+> ⚠ **这条接口有两个发起方，头和参数都不一样。** 下面这条是 **WebKit / H5 发起**的
+> （HAR 里 `_application: com.apple.WebKit.Networking`，带 `sec-fetch-*` 与
+> `origin: mcloudlocal://`）；签到链路真正用的是 **App 原生**发起的那条（§2.1.1）。
+> 两条的 `toSourceId` **不同**：`001003` vs `001005`。
+
+```http
+POST https://user-njs.yun.139.com/user/querySpecTokenV2
+content-type: application/json
+authorization: Basic bW9iaWxlOjE5OTAwMDAwMDAwOlNZTlRIMDAxfDF8UkNTfDE3OTIzOTE2NDIwMjV8QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ejAxMjM0NTY3ODkrLUFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDUuNzg5Ky1BQkNERUZHSElKS0xNTk9QUVJTVC5WX1hZWmFiY2QuZmdoaWprbG1ub3Bxcg==
+x-huawei-channelsrc: 10252400
+x-mm-source: 001
+origin: mcloudlocal://yun.139.com
+user-agent: Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) MCloudApp/12.6.0 iPad AppLanguage/zh-CN
+x-yun-tid: 6290b4f9-d232-4800-8a87-5988e3f52f38
+x-deviceinfo: ||36|12.6.0||iPad|6777a563-950e-427f-87ba-2741ae175a80||ios 18.7|||||
+x-nettype:
+accept-language: zh-CN,zh-Hans;q=0.9
+```
+
+**Body**
+```json
+{"toSourceId":"001003"}
+```
+
+**Response**
+```json
+{"success":true,"code":"0000","message":"请求成功",
+ "data":{"token":"YZsidssolg<32 位小写 hex>","resultCode":"104000"}}
+```
+
+要点：
+
+- `Authorization` 解码后是 `mobile:19900000000:SYNTH001|1|RCS|1792391642025|<172 字符载荷>`
+  —— 与 App 登录链路同一个形状（`mobile` 段、`|1|RCS|`、13 位毫秒、`_`/`.` 分段载荷）。
+- **`x-yun-uni` 在这一条里没有**（WebKit 发起的那条）。但它**不是**只属于登录链路 ——
+  App 原生发起的请求都带它（§2.1.1 就有）。这里没有它，只是因为发起方是 WebView。
+- `origin: mcloudlocal://yun.139.com` 是 App 自定义 scheme；服务端 CORS 也按它放行。
+  原生那条**没有**这个头 —— 它是浏览器才会加的。
+- `x-deviceinfo` 是**另一套 12 段格式**（`||36|12.6.0||iPad|<uuid>||ios 18.7|||||`），
+  与登录链路的 14 段 `x-DeviceInfo` **不是同一个东西**，别复用。
+- **`toSourceId` 不是"端常量"，是调用方传进来的参数。** 同一个 App 进程里就出现过三个值：
+
+  | 取值 | 实拍出处 | 谁在用 |
+  | --- | --- | --- |
+  | `001005` | **签到页 URL 自带 `targetSourceId=001005`**；`CredentialTokenAction` / `MCQueryGotoneAction` / `MCCreditStateAction` / `MCUserRightsAction` | **签到链路** |
+  | `001003` | 本页这条 WebKit 请求；`MCUserRightsAction` / `MCQueryGotoneAction` 各 1 次；PC 端 `apiServer.js` 的 `getCloudTicket` 默认值 | 权益 / 云票 |
+  | `010001` | `MCUserRightsAction` 2 次 | 权益 |
+
+  实现侧取 `001005`，依据是**签到页 URL 自带的 `targetSourceId`**（App 实拍），
+  不是从 PC 或别处抄来的。
+
+> **一条纠错记录。** 本节初稿写的是"`apiServer.js` 默认 `001003`、签到页是 `001005`，
+> **两者都实测可用**"。这句话有两个毛病：
+>
+> 1. `apiServer.js` 是 **PC 客户端**的包。拿它的默认值来论证 App 该用什么，是**跨端外推** ——
+>    两端连签名密钥、`clientId`、`version` 字面量都不一样（见 §5 与 §1 末尾那条警告）。
+> 2. "都能过"只说明**服务端在这条路径上不校验**，**不等于两个值可以互换**。
+>    上游不校验的字段多得很；一旦哪天开始校验，错的那个是**静默失效**，不会报错。
+>
+> 结论改成：**按发起方取它自己的值**。跨端（PC ↔ App）、跨发起方（原生 ↔ H5）的常量
+> **一律不许互搬**。这条与 `deviceId` 那条纠错（§4.2）是同一类错误，别再犯第三次。
+
+### 2.1.1 同一条接口的另一个发起方（App 原生）
+
+签到链路用的是这一条 —— 14:19:28 由 `CredentialTokenAction` 发起，走 CFNetwork：
+
+```http
+POST https://user-njs.yun.139.com/user/querySpecTokenV2
+Content-Type: application/json;charset=UTF-8
+x-yun-user-timestamp: 1789798769256371
+x-yun-uni: 1990000000000000001
+x-yun-api-version: v1
+x-yun-app-channel: 10000020
+x-huawei-channelSrc: 10000020
+x-yun-svc-type: 1
+x-yun-net-type: 1
+x-UserAgent: 412|iPad|ios 26.6|12.6.0-200
+x-yun-client-info: 1|192.168.3.179|2|12.6.0|APPLE|iPad8,6|<32 位 hex>|<12 位 hex>|ipados 26.6|375 * 667|zh-Hans-CN|0.0000|0.0000|aVBhZA==|0|;
+x-DeviceInfo: 1|192.168.3.179|2|12.6.0|APPLE|iPad8,6|<32 位 hex>|<12 位 hex>|ipados 26.6|375 * 667|zh-Hans-CN|0.0000|0.0000|;
+x-DeviceName: aVBhZA==
+x-yun-user-agent: iPad|iPad|ios 26.6|mCloud12.6.0-200
+Authorization: Basic base64("mobile:19900000000:<authToken>")   ← 形状同上一条
+hcy-cool-flag: 1
+Pragma: no-cache
+Accept-Language: zh-CN
+User-Agent: mCloud_iPhone/12.6.0 (iPad; iOS 26.6; Scale/2.00)
+```
+
+**Body**
+```json
+{"toSourceId":"001005"}
+```
+
+两个发起方的差异（都是实拍，别互相借字段）：
+
+| | 原生（CFNetwork） | WebKit / H5 |
+| --- | --- | --- |
+| `toSourceId` | **`001005`** | **`001003`** |
+| `x-yun-uni` | **有** | **没有** |
+| 设备头 | 14 段 `x-DeviceInfo` | 12 段 `x-deviceinfo` |
+| `x-yun-client-info` | 有 | 没有 |
+| `hcy-cool-flag` | `1` | 没有 |
+| `origin` / `sec-fetch-*` | 没有 | 有 |
+| `x-mm-source` / `x-yun-tid` | 没有 | 有 |
+| `x-huawei-channelSrc` | `10000020` | `10252400` |
+
+实现侧（`mcloud-upstream::app_signin`）走的是**原生这一列** —— 它是签到链路的发起方。
+
+> ⚠ `token` 有效期很短：14:38:54 换到的 token，在 14:42:09 重放时已被拒
+> （`{"code":200050409,"msg":"token 已失效"}`）。**换完立刻用，不要缓存**。
+
+### 2.2 第 2 段：`GET /ycloud/api/timestamp`（取签名用的时间戳）
+
+```http
+GET https://m.mcloud.139.com/ycloud/api/timestamp
+activityid: sign_in_3
+appversion: 0.0.0.0
+referer: https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&sourceid=1002&...
+```
+
+**Response**
+```json
+{"code":0,"msg":"success","result":1789800128813}
+```
+
+`result` 是 **13 位毫秒**。它**必须**来自服务端，不能用本地时间 ——
+签名是 `md5(... + x-timestamp + ...)`，而 `x-timestamp` 头要与它逐字相同。
+
+### 2.3 第 3 段：`POST /ycloud/auth-service/auth/tyrzLogin`（带签名）
+
+```http
+POST https://m.mcloud.139.com/ycloud/auth-service/auth/tyrzLogin
+content-type: application/json;charset=UTF-8
+activityid: sign_in_3
+appversion: 0.0.0.0
+origin: https://m.mcloud.139.com
+referer: https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&sourceid=1002&enableShare=1&appID=cy62d5a5e8373a272aeca467accad61722c51cfd48&token=YZsidssolg<32 位小写 hex>&targetSourceId=001005
+showloading: true
+x-request-id: 4b2d0b57-5479-468c-a336-651a4923edb9
+x-nonce: 129eb90a-daae-4173-b3fa-4b1633b1a2f8
+x-timestamp: 1789800128813
+x-signature: 90ee90a9e443059873eca9d599a7e858
+```
+
+**Body**
+```json
+{"token":"YZsidssolg<32 位小写 hex>","openAccount":0,
+ "marketName":"sign_in_3","sourceId":"1002"}
+```
+
+**Response（成功）**
+```json
+{"code":0,"msg":"success","result":{"token":"<jwtToken，905 字符>","mobile":"19900000000"}}
+```
+
+要点：
+
+- `x-request-id` 与 `x-nonce` 都是 **UUID v4**（36 字符带连字符），每次请求重新生成。
+- 三个签名头**缺一不可**；签名算法见 §5。
+- 响应 `result.token` 就是后面要带的 `jwttoken`；同时服务端会 `Set-Cookie`
+  下发 `jwtToken` 与 `userDomainId`。
+- 失败样本（token 过期）：`{"code":200050409,"msg":"token 已失效"}`。
+- **`referer` 必须带 `&targetSourceId=001005`**，且它排在 `token` **之后**。
+  HAR 里 128 处 `referer` 头全是这个形状。这里踩过一次坑：初版把它漏了，
+  因为当时是**照着实现**写的这一行，而不是照着抓包 —— 于是实现漏了、文档也跟着漏。
+
+> ⚠ `referer` 里带的是**本次换到的 SSO token**，所以它每个会话都不同。
+> 它同时也是"这条会话属于哪个页面"的凭据，后续每个请求都要带同一个。
+
+### 2.4 `jwttoken` 请求头从哪来（H5 源码证据）
+
+H5 的 axios 拦截器里写得很清楚：
+
+```javascript
+// 139newsignin~…~promotion~test.59d6fdcb.js（axios request interceptor）
+n = f["a"].getCookie("jwtToken");
+n && (e.headers.jwtToken = n);          // ← cookie → 请求头
+s = localStorage.getItem("marketName");
+s && (e.headers.activityId = s);        // ← localStorage → activityid
+e.headers.appVersion = g["a"]();        // ← appversion
+```
+
+所以 `jwttoken` 头 = `jwtToken` **cookie** 的值。纯协议实现里没有 cookie jar 也不要紧 ——
+把 `tyrzLogin` 响应里的 `result.token` 直接当 `jwttoken` 头传即可（§6 就是这么跑的）。
+
+### 2.5 `jwtToken` 的结构（905 字符，三段 base64url）
+
+| 段 | 长度 | 内容 |
+| --- | --- | --- |
+| header | 20 | `{"alg":"HS256"}` |
+| payload | 840 | 见下 |
+| signature | 43 | HMAC-SHA256 |
+
+payload 解出来：
+
+```json
+{"iss":"richinfo","iat":1789799835,
+ "sub":"{\"areaCode\":\"023\",\"cyToken\":\"<344 字符 base64>\",\"provCode\":\"23\",
+         \"belongsPlatform\":2,\"loginType\":2,\"userDomainId\":\"1990000000000000001\",
+         \"cutoverStatus\":1,\"deviceid\":\"AAA00000000000000000000000000000\",
+         \"account\":\"<44 字符 base64>\"}",
+ "exp":1789807035}
+```
+
+要点：
+
+- **有效期 2 小时**（`exp - iat = 7200`）。它是可复用的会话凭据，不是一次性的。
+- `sub` 是**字符串化的 JSON**（双重编码），要解两次。
+- `userDomainId` 在 `sub` 里 —— 这是 19 位用户域标识的又一个来源。
+- `deviceid` 在 JWT 里是 **32 位大写 hex**（`7F61940DE98F4A96B009F12F2262590C`），
+  与 App 登录链路那个 `device_id` **不是同一个值**（实测两个值不同）。
+  它是服务端会话里记的设备，纯协议实现不控制它。
+
+---
+
+## 3. 签到主体
+
+以下全部需要 `jwttoken: <jwt>` 请求头。**不带就是 `{"code":90001,"msg":"未登录"}`** ——
+这是排查"会话没建起来"最快的判据。
+
+公共头（H5 每次请求都会带）：
+
+```http
+activityid: sign_in_3
+appversion: 12.6.0.0
+referer: https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&sourceid=1002&...
+accept: */*
+```
+
+### 3.1 `GET /ycloud/signin/page/infoV3?client=app`（签到状态，**权威判据**）
+
+**Response**
+```json
+{"code":0,"msg":"success","result":{
+  "curMonthBackup":true,"cardInfo":0,"beforeTotal":8027,"signInPoints":3,
+  "signCount":1,"provinceCode":"23","monthDays":7,"curMonthBackupSignAccept":true,
+  "maxType":"",
+  "cal":[{"d":31,"s":false,"n":0,"p":0,"t":false,"currentMonth":0},
+         {"d":1,"s":true,"n":0,"p":0,"t":false,"currentMonth":1},
+         {"d":2,"s":true,"n":0,"p":0,"t":false,"currentMonth":1},
+         {"d":3,"s":false,"n":0,"p":0,"t":false,"currentMonth":1},
+         "…",
+         {"d":19,"s":true,"n":3,"p":0,"t":true,"currentMonth":1},
+         {"d":20,"s":false,"n":3,"p":0,"t":false,"currentMonth":1},
+         "…"]}}
+```
+
+字段语义（实测对照，不是猜的）：
+
+| 字段 | 含义 |
+| --- | --- |
+| **`total`** | **现行余额（豆）** ← 要记的就是它。H5 原话「恭喜你，现拥有{{total}}豆」 |
+| `lackCloudNum` | **还差多少豆**能兑换。实测恒等于 `canExchangeText[0].pOrder − total`（§3.6.5）|
+| `beforeTotal` | ⚠ **不是余额**。它是「云朵明细（历史）页」口径的另一个数，**领取后不动**（§3.6.5）|
+| `signInPoints` | 本次签到可得数（H5 渲染成 `+{{signInPoints}}豆`）|
+| `signCount` | 连续签到天数 |
+| `monthDays` | **本月已签天数**。实测等于 `cal` 里 `s=true && currentMonth=1` 的条数 |
+| `toReceive` | **现在就能领**的合计。只统计"立即领取"那一类，不含月度线（§3.6.4）|
+| `receiveList[]` | **可点的领取条目**，每条渲染成一个按钮（§3.6）|
+| `curMonthBackup` | 本月是否**开启了自动备份** ← 月度奖励那条线的门槛（§3.6.3）|
+| `curMonthBackupSignAccept` | 是否已同意"备份签到"协议 |
+| `showTaskExpansion` | 是否展示任务扩展入口。**H5 里出现 0 次** —— 是 App 侧字段 |
+| `cal[].d` | 日 |
+| `cal[].s` | **该日是否已签** ← 这就是判"今天签没签"的字段 |
+| `cal[].currentMonth` | `1` = 本月，`0` = 上/下月的补位格 |
+| `cal[].n` | 该日可获得数 |
+| `cal[].t` | 该日是否为"今天" |
+
+> **判据写法**：`cal` 里找 `d == 今天 && currentMonth == 1`，看 `s`。
+> 不要用 `pointsNotClaimed` —— 那个接口的 `result:true` 语义至今没定（见 §8）。
+
+### 3.2 `GET /ycloud/signin/page/startSignIn?client=app`（执行签到）
+
+真实流量里**带 `deviceId` 查询参数**，且带 `isdeviceid: true` 请求头：
+
+```http
+GET https://m.mcloud.139.com/ycloud/signin/page/startSignIn?client=app&deviceId=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0%2BP0A%3D
+jwttoken: <jwt>
+isdeviceid: true
+showloading: false
+activityid: sign_in_3
+appversion: 12.6.0.0
+```
+
+**Response（已签过时的形态，实测）**
+```json
+{"code":0,"msg":"success","result":{
+  "todaySignIn":true,"signInPoints":3,"signCount":1,"time":1789799929696,
+  "cal":[…同上，19 号 s=true…]}}
+```
+
+**Response（本次真的签上了，账号 B 实测）**
+```json
+{"code":0,"msg":"success","result":{
+  "todaySignIn":false,"signInPoints":3,"signCount":1,"monthDays":6,"cal":[…19 号 s=false…]}}
+```
+
+> ⚠ **`todaySignIn` 的语义坑**：实测两次，`startSignIn` 响应里的 `cal` 与
+> `todaySignIn` 都是**调用前**的状态 —— 账号 B 那次响应里 19 号还是 `s:false`，
+> 但紧接着 `infoV3` 已经是 `s:true` 了。
+> 所以 **`todaySignIn:false` 恰恰表示"这次调用把今天签上了"**，而不是失败。
+> 别把它当错误码用；判成败一律回查 `infoV3`。
+
+**`deviceId` 参数**：见 §4。
+
+### 3.3 `POST /ycloud/signin/task/taskListV3`（任务列表）
+
+```http
+POST https://m.mcloud.139.com/ycloud/signin/task/taskListV3
+content-type: application/json;charset=UTF-8
+jwttoken: <jwt>
+activityid: sign_in_3
+appversion: 12.6.0.0
+```
+
+**Body**
+```json
+{"marketname":"sign_in_3","client":1,"clientVersion":"12.6.0"}
+```
+
+`client` 语义：`1` = App/H5 已登录（实测），`0` = 匿名（实测也能返回完整列表，
+但 `button.canReceive` 之类字段的取值会变）。`clientVersion` 与 `appversion` 对齐。
+
+**Response**：`result` 是**数组**（不是对象），每项形如
+
+```json
+{"id":549,"marketname":"sign_in_3","groupid":"time","enable":1,
+ "name":"开启备份领好礼","description":"开启备份，云端无损存储",
+ "icon":"https://img.mcloud.139.com//uop_prod/20260910/<hash>.png",
+ "starttime":"2026-09-10T16:00:00.000+00:00","endtime":"2026-12-31T15:59:59.000+00:00",
+ "sort":10,
+ "button":{"app":{"link":"","btnBg":"#ffcb88","textBtnColor":"#ffffff",
+                 "text":"下月再来","canReceive":0}, "out":{…},"email":{…},"harmony":{…}},
+ "limitType":"MONTH","prov":"0","whiteList":0,"hasNda":0,"hasBak":0,"taskType":0,
+ "limitCloud":4,"content_display2":"+200豆","stepTypeSet":["click"],
+ "state":"WAIT","currstep":0,"process":0,"lastupdate":1789193416744,
+ "recordid":40360471998,"currDay":0,"cloudId":0,
+ "buttonProperty":{…与 button 同构…}}
+```
+
+`state` 是任务状态机（实测见到的取值：`WAIT`）。`groupid` 实测有 `time` / `month` / `hidden`。
+
+### 3.4 `POST /ycloud/signin/page/doTaskPost`（上报任务状态）
+
+```http
+POST https://m.mcloud.139.com/ycloud/signin/page/doTaskPost
+content-type: application/json;charset=UTF-8
+jwttoken: <jwt>
+isdeviceid: true
+```
+
+**Body**
+```json
+{"client":"app","deviceId":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A="}
+```
+
+**Response**：`{"code":0,"msg":"success"}`（无 `result`）
+
+### 3.5 其余已抓到的签到页接口
+
+| 接口 | 方法 | 请求体 / 参数 | 响应样本 |
+| --- | --- | --- | --- |
+| `/ycloud/signin/page/getCode?op=code` | GET | `op=code` | `{"code":0,"msg":"success","result":"N091Q3FrNlhOZDBOQSoleG5IN2s2bG5qSmxIMDJNakxRZFA5WGc9PQ=="}` |
+| `/ycloud/signin/page/popup` | GET | — | `{"code":0,"msg":"success","result":false}` |
+| `/ycloud/signin/public/getPopInfo` | POST | `{"clientType":"iphone","version":"12.6.0"}` | `{"code":0,"msg":"success","result":{"showPop":false}}` |
+| `/ycloud/manager/commonMarketconfig/getActivityConfig` | GET | `marketName=sign_in_3` | `result.memo` 里是签到规则 JSON（`signInPoints` 按连续天数分档 `0/3/7/28`） |
+| `/ycloud/manager/util/notice` | GET | `marketName=sign_in_3` | 活动公告栏文案 |
+| `/ycloud/manager/commonMaintain/isMaintain` | GET | `marketName=sign_in_3` | `{"code":500,"msg":"未开启活动公告栏"}` ← **`code:500` 在这里是正常的** |
+| `/ycloud/advert/getAdInfo` | POST | `{"adPosIdList":[529],"version":"12.6.0","client":"iphone"}` | 广告位列表（`adPosId=529` = 云朵中心热门活动） |
+| `/ycloud/auth-service/auth/getAccount` | POST | `{"marketName":"sign_in_3","sourceId":"1002","openAccount":false}` | 已登录 → 回 `token`（JWT）；未登录 → `{"code":90001,"msg":"未登录"}` |
+
+`getCode` 的 `result` 是 base64 再套一层 AES（云朵商城"手机号加密"用的，签到本身不用它）。
+**它不是签到必需项** —— 签到只需 §3.1/§3.2 两条。
+
+---
+
+### 3.6 领取：`receiveList[]` 是**按钮**，不是文案（2026-09-19 补）
+
+#### 3.6.1 它不是一句提示，是一排可点条目
+
+`receiveList[]` 在签到页上渲染成**最多 6 个可点的按钮**（`AIPoints one` … `AIPoints six`），
+每个按钮上写着 `+<cloudNum>` 和「可领取」三个字。**顺序本身只有视觉含义**
+（第一条多一个 `is-next-month` 类用于换样式），**分流不看顺序，只看每条的 `cloudType`**。
+
+第 6 个按钮在 `receiveList.length > 6` 时变成不可点的「. . .」。
+
+#### 3.6.2 点击分流（H5 源码逐字）
+
+```javascript
+function h(e){
+  if(E()){
+    var t = g.value[e];                          // g = receiveList.slice(0,6)
+    …
+    1 === t.cloudType ? A("2", t.acceptDate, e)
+    : 2 === t.cloudType ? s.$toast("下月可领取")
+    : n("receivePoints", t, "", function(){ v.value.add(e) });
+  }
+}
+```
+
+| `cloudType` | 动作 | 接口 |
+| --- | --- | --- |
+| `1` | `A("2", t.acceptDate, e)` | `GET /ycloud/signin/page/receiveTaskExpansion` |
+| `2` | 只弹 toast「下月可领取」，**一个请求都不发** | — |
+| 其它（实测 `0`）| `receivePoints` | `POST /ycloud/signin/page/receiveV3` |
+
+`A()` 的第一个实参恒为 `"2"`，函数体里**根本没用到它** —— 死参数，别当成类型位。
+
+#### 3.6.3 两条线：月度任务奖励 vs 立即领取
+
+| | **月度任务奖励** | **立即领取** |
+| --- | --- | --- |
+| `cloudType` | `1`（**已到期**）/ `2`（**未到期**）| 其它值（实测 `0`）|
+| 来源 | 签到/做任务攒的记录，**跨月结算** | 当期挂在账上的 |
+| 接口 | `receiveTaskExpansion(acceptDate)` | `receiveV3{client, cloudId, cloudType}` |
+| 门槛 | **要开着自动备份** | 无 |
+| 生效 | 按 `acceptDate` 结算，**不是立即** | **直接生效** |
+
+⚠ `1` 与 `2` **不是两种奖励，是同一个特性的两个时点**：`2` 是"本月攒的、下月才能领"的预告，
+等它到期就变成 `1` —— **那时才带 `acceptDate`**。这解释了"为什么 `acceptDate` 只在 `1` 上出现"。
+
+⚠ 上表里 **`cloudType=1` 那一格至今没有实拍**（两个账号都没出现过 `1`）。
+它是从 H5 的三分支 + 老项目两个字段的对应关系推出来的，**不是实测**。
+
+📌 **`cloudType=2` 那个数怎么算出来的、什么时候入账 —— 见 §3.7**（从流水里反推的，
+两个账号 10 个数据点，其中"界面此刻显示的数"两格逐字命中）。
+
+旧项目 `mcloud-sign` 走的是**老路径**（`mrp.mcloud.139.com/market/signin/page/taskExpansion`），
+同一个特性它用两个字段表达，与上表一一对应：
+
+| 老路径字段 | 对应 | 老项目怎么用（`tasks/task-expansion.ts` 逐字）|
+| --- | --- | --- |
+| `curMonthTaskRecordCount` | `cloudType == 1` | `> 0` 就 `receiveTaskExpansion(acceptDate)` |
+| `nextMonthTaskRecordCount` | `cloudType == 2` | **只打印**「下月可领取 N 个云朵」|
+| `curMonthBackup` | `infoV3.curMonthBackup` | `false` 就先上传个文件触发备份再重试 |
+
+老路径的"立即领取"是**无参**的 `GET …/market/signin/page/receiveV2?client=app`；
+新 H5 换成了带 body 的 `receiveV3`。**新 H5 已经没有 `taskExpansion` 这个查询接口**
+（`acceptDate` 改由 `infoV3.receiveList[]` 直接带下来）。
+
+#### 3.6.4 实测：领掉"当前可领取"那一条（账号 159 / 2026-09-19）
+
+```text
+BEFORE  receiveList = [{cloudType:2, cloudNum:240}, {cloudType:0, cloudNum:6}]   toReceive = 6
+AFTER   receiveList = [{cloudType:2, cloudNum:240}]                              toReceive = 0
+```
+
+- `cloudType:0` 那条**领掉了**（`toReceive` 6 → 0，条目从列表里消失）；
+- `cloudType:2` 的 240 **一动没动**；
+- ⇒ **`toReceive` = "现在就能领"的合计**，只统计立即领取那一类。
+- ⇒ 同时闭环了「Rust 产出的 `deviceId` 上游认不认」—— 认（§9.1）。
+
+#### 3.6.5 余额是 `total`，不是 `beforeTotal`（三个独立验证）
+
+| 来源 | `beforeTotal` | `total` | 兑换门槛 `pOrder` | `pOrder − total` | `lackCloudNum` |
+| --- | --- | --- | --- | --- | --- |
+| 账号 1（`pc:` 那个）| 5392 | 7431 | 7500 | **69** | **69** ✓ |
+| 账号 2（159）| 8027 | 10502 | 12000 | **1498** | **1498** ✓ |
+| 黄金向量（真机实拍）| 8027 | 10496 | 12000 | **1504** | **1504** ✓ |
+
+最硬的一条是**同一账号领取前后的一对实拍**：黄金向量那份 `total = 10496`，
+领掉那 6 豆之后重抓变成 **10502（+6）**，而 `beforeTotal` **两次都是 8027、一动不动**。
+
+📌 **`beforeTotal` 到底是什么、那 2475 差在哪 —— 已从流水里定案，见 §3.8。**
+
+来源也分得清（Vuex store `newsignin`）：
+
+```javascript
+state:   { beforeCloudTotal: 0, cloudTotal: 0 }
+actions: { setBeforeCloudTotal(v){ this.beforeCloudTotal = v },
+           setCloudTotal(v){ this.cloudTotal = v } }
+persist: { enabled: true, strategies: [{ key: "cloudTotal", paths: ["cloudTotal"] }] }
+```
+
+`beforeTotal → beforeCloudTotal`（只有**云朵明细/历史页** `pointRecord` 读）、
+`total → cloudTotal`（**AI豆明细页** `AIBeanRecord` 读，**只有它进 `persist`**）。
+
+⚠ **云朵与「云盘专属 AI豆」是同一个东西的两个名字**（2026-07-31 按 1:1 改名，
+见 H5 云朵明细页公告原文）。所以别把这两个字段说成"两种货币" ——
+它们是**两个口径的数**。实现侧曾把 `beforeTotal` 当余额记进 `cloud_stats`，
+后果不是报错，而是**趋势图变成一条直线**。
+
+#### 3.6.6 `acceptDate` 缺席时，发的是**裸 GET**
+
+H5 的调用点是 `receiveTaskExpansion({acceptDate: t.acceptDate})`，
+而**实测两个账号的 `receiveList[]` 里都没有 `acceptDate` 这个字段**（只有 `cloudNum` / `cloudType`）
+⇒ 那个值是 `undefined` ⇒ axios 的默认 `paramsSerializer` **把整个键丢掉**
+⇒ 真实客户端发出去的是 **`GET …/receiveTaskExpansion`，一个查询参数都没有**。
+
+⚠ 别写成 `?acceptDate=` —— 那是**另一个请求**（多一个空参数）。
+
+#### 3.6.7 错误码（H5 的处理分支）
+
+| `code` | H5 文案 | 含义 |
+| --- | --- | --- |
+| `0` | 领取成功～ | 成功 |
+| `1302` | 开启自动备份按钮才可领取哦～ | **未开启自动备份**（月度线的门槛）|
+| `500` | AI豆已过领取有效期～ | 过期 |
+
+⚠ 这条接口**没有实拍响应**。`result.cloudCount` 的字段名来自旧项目
+（`receiveData?.result?.cloudCount`），**不是实拍**。所以实现侧：
+`cloudCount` 缺失或整个 `result` 缺失都**不判失败**（两个客户端都只拿 `code` 判成败）。
+
+### 3.7 「下月可领取」到底是哪笔钱、有多少（2026-09-19 深夜，从流水反推）
+
+**问题**：`receiveList[cloudType=2]` 那个数（159 显示 240、账号 1 显示 154）**从哪来**？
+`infoV3` 只说"有多少"，不说"怎么算的"。
+
+**答案在流水里，而且是一条独立的入账凭证**：`GET /ycloud/signin/public/cloudRecordV2`
+（`--records`）里有 `type: "backup_1"` 的条目，两种：
+
+| `mark` | `summary` | 金额 |
+| --- | --- | --- |
+| `task_DB` | 备份**任务**翻倍奖励 | 当月累积的任务翻倍额 |
+| `sign_DB{N}` | 备份**签到**翻倍奖励 | **3 × N**（签到基础 3 豆/天 × N 天）|
+
+`sign_DB` 那条的规律一眼可见：`DB2=6`、`DB5=15`、`DB8=24`、`DB10=30`、`DB20=60`
+—— **全部是 `3 × N`**。⇒「翻倍」不是"×2 倍率"，而是**再给一份与基础等额的**
+（签到每天 3 豆 → 备份再补 3 豆/天）。
+
+##### 推导出的规则（两个账号、10 个数据点）
+
+```text
+下月可领取(cloudType=2) = 本月内（**按北京时间月界**）
+                          所有 hasBak=1 且 marketname='sign_in_3' 的流水金额之和
+次月以 type=backup_1 / mark=task_DB / summary=备份任务翻倍奖励 入账
+```
+
+| 账号 | 月份 | `hasBak=1 且 sign_in_3` 合计 | `task_DB` 入账 | 对得上? |
+| --- | --- | --- | --- | --- |
+| 1 | 2026-05 | 310 | 2026-06-01 = 310 | ✓ |
+| 1 | 2026-06 | 334 | 2026-07-12 = 334 | ✓ |
+| 1 | 2026-07 | 280 | 2026-08-01 = 280 | ✓ |
+| 1 | 2026-08 | 160 | 2026-09-01 = 160 | ✓ |
+| 1 | **2026-09** | **154** | 还没入账（下月 1 日）| **= App 此刻显示的 154** ✓ |
+| 2（159）| 2026-05 | 364 | 2026-06-01 = 364 | ✓ |
+| 2（159）| 2026-06 | 370 | 2026-06-30 = 376 | ✗ **差 6**（见下）|
+| 2（159）| 2026-07 | 340 | 2026-08-01 = 340 | ✓ |
+| 2（159）| 2026-08 | 240 | 2026-09-01 = 240 | ✓ |
+| 2（159）| **2026-09** | **240** | 还没入账 | **= App 此刻显示的 240** ✓ |
+
+**最关键的两格是最后两行**：两个账号**此刻界面上的数**都等于"本月至今的合计"。
+尤其账号 1 —— 它上一笔入账是 **160**、界面显示 **154**，**两者不等**
+⇒ 界面显示的**不是"上一笔入账"**，而是**本月正在累积、下月才作数的那笔**。
+
+⚠ 两个坑：
+
+1. **月界按北京时间（UTC+8）**。流水里的 `inserttime` 是 UTC；按 UTC 分月时，
+   159 的 7 月合计是 264、对不上入账的 340；**按 UTC+8 就是 340，逐字命中**。
+   跨境那几笔正好落在 `06-30T16:00Z`–`23:59Z`（= 北京 07-01 零点后）。
+2. **只算 `marketname='sign_in_3'`**（签到中心自己的任务）。邮箱活动
+   （`newsign_139mail`，如"给好友发邮件"30、"体验PDF转换"10）虽然也带 `hasBak=1`，
+   **不进这个池子** —— 159 的 8 月全部 `hasBak=1` 是 280，扣掉这两笔 40 才是 240。
+
+##### 唯一一处对不上（如实记）
+
+159 的 **2026-06-30 有一笔 376**，而 6 月（UTC+8）合计是 370，**差 6**。
+同一天还有一笔 `sign_DB8`。推测是**补发**或那天的结算跑在了最后一笔 6 豆之前，
+但**没有证据能定论** —— 记在这里，别当成"规则不成立"（其余 9 格全中）。
+
+##### 同一天内的直接实证（用户模型的逐字验证）
+
+| 时刻 | `receiveList` | `toReceive` |
+| --- | --- | --- |
+| 09-19 早（黄金向量，`cal[].t` 落在 19 号）| `[{cloudType:2, cloudNum:234}]` | 0 |
+| 09-19 晚（实测）| `[{cloudType:2, cloudNum:240}, {cloudType:0, cloudNum:6}]` | 6 |
+
+而流水里 09-19 正好有一条 `mark:106 / 手动上传一个文件 / num:6 / hasBak:1`
+（`inserttime` 18:47 北京）。
+
+⇒ **一个"开着备份的·手动上传一个文件" = 待领取 +6 且 下月可领取 +6。**
+这就是用户说的「每日任务上传一个文件可得 6 云朵，备份后**额外 6 云朵下月可领取**」
+—— 同一天、同一笔任务、两个桶各 +6，逐字对上。
+
+##### 三个数是三个不同的东西（结论）
+
+| | 值（159，2026-09-19）| 性质 |
+| --- | --- | --- |
+| **可领取** | `cloudType=0, cloudNum=6`（`toReceive`）| 当期挂在账上的，**点了立刻进余额** |
+| **下月可领取** | `cloudType=2, cloudNum=240` | 本月累积的备份翻倍额，**下月 1 日才入账** |
+| **本月可领取** | `cloudType=1` | 上面那条**到期后的形态**，带 `acceptDate` |
+
+⚠ **`cloudType=1` 至今没有实拍**。它的存在依据是 H5 的三分支（§3.6.2）与老项目
+`curMonthTaskRecordCount` / `nextMonthTaskRecordCount` 的一一对应（§3.6.3），
+**不是实测** —— 别把这张表的最后一行当成已经验证过的东西。
+
+##### 怎么自己看
+
+```bash
+mcloud --account 2 --records --records-all      # 全量流水；默认只取 50 条，看不到跨月的规律
+```
+
+`--records` 会把 `type=backup_1` 的条目**单独再列一遍**（它们混在几百条杂项里根本找不着）。
+
+### 3.8 `beforeTotal` 到底是什么：**改名那一刻的结转额**（2026-09-19 深夜收口）
+
+§3.6.5 只证明了「`total` 才是余额」，但留了一个悬案：**两个数差 2475，差在哪？**
+流水一拉就清楚了 —— `beforeTotal` 就是**改名交接的那一条**：
+
+```text
+GET cloudRecordV2?aiDou=1   ← AI豆账本（改名后）
+  { mark: "shouTiaoAiDou", summary: "云朵转换AI豆", num: 5392, inserttime: 2026-07-30 }
+                                                        ↑ 这就是 beforeTotal
+```
+
+| 账号 | `shouTiaoAiDou` | `beforeTotal` | AI豆账本**合计** | `total` |
+| --- | --- | --- | --- | --- |
+| 1 | 5392 | **5392** ✓ | 7431 | **7431** ✓ |
+| 2（159）| 8027 | **8027** ✓ | 10502 | **10502** ✓ |
+
+**两个账号、两列、四个数全部逐字命中。** ⇒
+
+1. `beforeTotal` = **改名时结转进来的那笔**，是一张**冻结的历史快照** ⇒
+   它**永远不变**。§3.6.5 里"签到前后都不动"那条实测，原因在这里（不是"另一种口径的余额"）。
+2. `total` = **AI豆账本从头到尾的累加** ⇒ 那本流水自 2026-07-30 起是**完整**的，
+   可以放心拿它当审计线。
+3. 差的 **2475 = 改名后新增的全部**（账号 159：8 月 1556 + 9 月 904 + 7 月 15）。
+
+⚠ **一处仍没查清、别当成已知**：云朵账本（`aiDou=0`）的合计比 `beforeTotal`
+**恰好多 100**，两个账号都是，且那 100 都是 2024 年那笔 `mark:"1003"`
+「开启APP通知领云朵」；账本里**没有任何 -100 的扣减**。
+推测是**云朵过期不入账**（若如此，云朵账本的合计就只能当"毛收入"、不能当余额），
+但**没有证据**，故只记现象。
+
+> 这一条与 §3.7 用的是同一个手法：**别去读那个数，去流水里找它的"入账凭证"。**
+> `--records-all` 是前提 —— 只看默认那 50 条，交接处那条 2026-07-30 的记录根本看不到。
+
+### 3.9 旧项目的「领取」三件事 → 新接口的完整映射（2026-09-19 补）
+
+旧项目 `mcloud-sign` 的领取不是一件事，是**三件**，散在三个文件里：
+
+| 旧项目 | 在哪 | 老接口 | 新接口 | 实现 |
+| --- | --- | --- | --- | --- |
+| `receiveTask` 领待领取 | `tasks/sign/task.ts` | `GET …/market/signin/page/receiveV2?client=app`（**无参**）| `POST /ycloud/signin/page/receiveV3 {client,cloudId,cloudType}` | `--receive` 的立即领取支 |
+| `taskExpansionTask` 领月度 | `tasks/task-expansion.ts` | `GET …/market/signin/page/receiveTaskExpansion?acceptDate=` | 同名，换主机到 `m.mcloud.139.com` | `--receive` 的月度支 |
+| `executeSignInMultiple` 领**签到翻倍** | `tasks/sign/task.ts`（藏在 `signIn` 里）| `GET …/market/signin/page/multiple` | `GET /ycloud/signin/page/multiple` | **`--multiple`** |
+
+⚠ 第三件**最容易漏** —— 它在旧项目里是 `signIn` 顺手做掉的一步，
+而它是一条**独立的、每月一次的**收入。
+
+#### 3.9.1 `multiple` 的形状（H5 源码逐字）
+
+```javascript
+cloudMultiple: function(e){
+  return c["a"].get("/ycloud/signin/page/multiple",
+    {params: e, headers: {showLoading: true, "content-Type": "application/json"}})
+}
+// 调用点：z["a"].cloudMultiple({})          ← **空对象**
+```
+
+空 `params` ⇒ axios 默认序列化器**一个查询参数都不产生** ⇒ 发的是**裸 GET**。
+（与 §3.6.6 的 `receiveTaskExpansion` 同一个坑。）
+
+响应：`e.data.result.cloudCount`，H5 拿它弹「额外获得 {cloudCount} 豆，
+自动备份保持开启，任务奖励翻倍!」。
+
+#### 3.9.2 门槛：**每月只有一次，必须自己判**
+
+旧项目判据逐字：
+
+```javascript
+if (curMonthBackup && !curMonthBackupSignAccept) { await executeSignInMultiple(ctx); }
+```
+
+两个值都在 `infoV3` 里（`--raw` 就能看到，实测账号 159 是两个 `true`）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `curMonthBackup` | 本月**是否已开启自动备份** |
+| `curMonthBackupSignAccept` | 本月的**翻倍机会是否已经用掉** |
+
+实现侧做成**四态**（`mcloud_app::signin::plan_multiple`），不是布尔：
+
+| 态 | 条件 | 处置 |
+| --- | --- | --- |
+| `Claim` | `(true, false)` | 发 `multiple` |
+| `AlreadyAccepted` | `(true, true)` | 不发（本月已领过）|
+| `NoBackup` | `(false, _)` | 不发（机会没产生）|
+| `Unknown` | 任一字段**上游没给** | **不发** |
+
+⚠ `Unknown` 单独成一档是为了**安全**：`None` 既不是"开了"也不是"没开"。
+当成"开了"会白发一个写请求、把每月一次的名额用掉；当成"没开"会漏领。
+所以只认**真布尔**（`Value::as_bool`），万一上游哪天改成 `1`/`0`，
+这里会落到 `Unknown` 而**不动作** —— 这是个安全的失败方向。
+
+#### 3.9.3 ⚠ `curMonthBackup === false` 那一半我们**还没做**
+
+旧项目在没开备份时会**上传一个随机文件**把备份打开，等 `backupWaitTime`
+（默认 20 秒），然后**重试一次**：
+
+```javascript
+if (curMonthBackup === false) {
+  if (timer > 0) { await backFile(ctx); await sleep(...); return _taskExpansion(ctx, timer - 1); }
+  else { ctx.logger.info("本月未开启备份，将无法获取翻倍奖励"); }
+}
+```
+
+`backFile` 走的是**网盘上传**（`uploadRandomFile(ctx, {opType: "backup", parentFileId: "/"})`）。
+我们**没有网盘上传能力**，所以这一半只**如实报告**"本月未开启备份"，
+**不假装做过**。要补的是"上传"那条线，不是门槛判定。
+
+#### 3.9.4 `/ycloud/signin/page/receiveTask` 是**死代码**
+
+新 H5 里 `receiveTaskData` 只出现 **1 次** —— 就是它自己的定义，**没有任何调用点**。
+所以不用为它实现什么。判据：
+
+```bash
+node -e '…s.split("receiveTaskData").length-1…'   # → 1
+```
+
+#### 3.9.5 实测（2026-09-19）
+
+两个账号的 `curMonthBackupSignAccept` **都已经是 `true`**（本月已领过），
+所以 `--multiple` 都正确地**跳过、一个请求都没发**：
+
+```text
+$ mcloud --account 2 --multiple
+  自动备份：本月已开启（翻倍机会本月已领过）
+  领签到翻倍（`multiple`，每月一次）
+    跳过：本月已经领过翻倍机会（每月只有一次）
+```
+
+⇒ ⚠ **`Claim` 那条路至今没有实拍**（要等下个月机会刷新）。
+`result.cloudCount` 的字段名来自当前版 H5 的调用点，但**响应体没有实拍** ——
+所以解析侧按 §3.6.7 的同一约定：`cloudCount` 缺失**不判失败**（`None` ≠ `0`）。
+
+**补（同日）**：响应里还有一个 `result.multiple` —— **倍数**，与 `cloudCount`（合计）
+不是一个量。旧项目那句话逐字是 `"成功获得", multiple, "倍云朵，共计", cloudCount`，
+只报 `cloudCount` 会把"翻了几倍"丢掉。两个字段都解析、都可能缺、都**不判失败**。
+
+---
+
+### 3.10 旧项目另外两件「领取」：备份好礼 / 待领取奖品（2026-09-19 补）
+
+§3.9 只覆盖了旧项目 `signIn` 那条主链上的三件。`TASKS.md` 里「已完成」的
+签到族还有**两件**，我们此前完全没有：
+
+| 旧项目 | 在哪 | 老接口 | 新接口 | 实现 |
+| --- | --- | --- | --- | --- |
+| `backupGiftTask` 领**备份好礼** | `tasks/backup-gift.ts` | `GET …/market/backupgift/info` + `/receive` | **没有新接口**（见下）| **`--backup-gift`** |
+| `printPendingPrizes` 查**待领取奖品** | `tasks/prize-records.ts` | `GET …/prizeApi/checkPrize/getUserPrizeLogPageV2?currPage=&pageSize=` | `GET /ycloud/signin/public/record?marketname=&type=&pageNumber=&pageSize=` | **`--prizes`** |
+
+#### 3.10.1 备份好礼：**它不在签到 H5 里**
+
+新 H5 里 `backupGift` 只出现 **1 次**，而且是一个指向**独立活动页**的 `popLink`：
+
+```javascript
+commPopInfo: { popUrl: "https://gp.mcloud.139.com/material_grey/…png",
+               popLink: "https://m.mcloud.139.com/portal/caiyunEventPage/index.html?path=backupGifts&…" }
+```
+
+⇒ 它**没有"新接口"可换**，沿用旧项目那两条（`caiyun.feixin.10086.cn/market/backupgift/…`）。
+
+⚠ 换主机是**有实测依据**的，不是照抄旧项目：裸请求
+
+```text
+$ curl -sS https://caiyun.feixin.10086.cn/market/backupgift/info
+{"code":90001,"msg":"未登录"}
+```
+
+—— 与 `m.mcloud.139.com` 上的 `record` / `liveRoomFeedback` **回同一个信封**，
+说明两者在**同一道鉴权网关**后面。而且用**我们的 App 会话**打过去**真的通了**
+（见 §3.10.3）。判据：**若哪天它回 `404` 而不是 `90001`，就是换了主机**，
+别以为"接口下线了"。
+
+三态（旧项目 `switch (state)` 逐字）：
+
+| `curMonth` | `state` | 含义 | 动作 |
+| --- | --- | --- | --- |
+| **假** | — | 本月没有备份好礼 | 连 `state` 都不看，直接返回 |
+| 真 | `0` | **可领** | 发 `/receive` |
+| 真 | `1` | 本月已领过 | 不发 |
+| 真 | 其他（实测 `-1`）| 未开启自动备份 | 不发，提示去 App 开 |
+
+实现侧做成四态（`mcloud_app::signin::plan_backup_gift`）。⚠ **`curMonth` 是前置开关、
+比 `state` 更靠前** —— 所以「本月没有」([`NothingThisMonth`]) 与「未开备份」(`NoBackup`)
+是**两档**，混起来会让用户跑去开一个已经开着的备份。
+
+响应形状：`result.state`（必填，主判据）+ `result.curMonth`；
+`/receive` 的 `result` 是**裸数字**（旧项目类型就写着 `result: number`），不是对象。
+
+#### 3.10.2 待领取奖品：新接口在 `record`
+
+H5 里两个组件都这么打（`getPrizeRecordData`，两处调用点参数一致）：
+
+```javascript
+c["a"].get("/ycloud/signin/public/record",
+  {params: e, headers: {showLoading: true, "content-Type": "application/json"}})
+// 调用点：{marketname: "sign_in_3_ex", type: <页签 id>, pageNumber: F.value, pageSize: 10}
+// 页签（H5 里写死的字面量）：[{id:1,"待领取"},{id:2,"已领取"},{id:10,"已过期"}]
+```
+
+分页判据是 H5 逐字写的：**`records.length < pageSize` ⇒ 到底了**
+（`t.length<10&&(X.value=!0)`）—— 它**不读 `total`**。
+
+⚠ **`marketname` 里那个 `_ex` 不是"兑换"**：页签是「待领取/已领取/已过期」，
+是**奖品记录**；兑换走的是 `exchangeV3` / `exchangeList`。别看到 `_ex` 就往 exchange 上想。
+
+⚠ 旧接口 `…/checkPrize/getUserPrizeLogPageV2` 在 `m.mcloud.139.com` 上**仍然存在**，
+但**裸请求回 `501 参数校验异常`**（把 `currPage` 换成 `pageNumber` 直接 `404`）——
+参数口径已经变了。**用新的那条。**
+
+#### 3.10.3 实拍（2026-09-19，账号 159）
+
+```text
+$ mcloud --account 2 --prizes
+  待领取奖品 1 个：
+    移动云盘1000万tokens叠加包（中奖 2026-09-16T11:12:54.000+00:00，过期 2026-09-30T15:59:59.000+00:00）
+```
+
+条目（**已删掉 `userDomainId`**，见 §3.10.4）：
+
+```json
+{"flag":1,"groupId":0,"type":1057,"source":0,"belonger":0,"device":0,
+ "prizeId":260630014,"prizeName":"移动云盘1000万tokens叠加包",
+ "insertTime":"2026-09-16T11:12:54.000+00:00","expireTime":"2026-09-30T15:59:59.000+00:00",
+ "updateTime":"2026-09-16T11:12:54.000+00:00",
+ "market":"sign_in_3_ex","marketName":"sign_in_3_ex",
+ "oid":1270932714,"orderType":0,"prizeSectionStatus":1,
+ "reasons":"260630014","uorder":400,"linkUrl":"{\"saleType\":103,…}"}
+```
+
+账号 1 同一时刻**是空的**（`没有待领取的奖品。`）—— 空页是最常见的答案，
+所以解析侧把"没有 `records`"当**正常**，不当错误。
+
+备份好礼两个账号都是 `state=1`（本月已领过），门槛正确拦住、**一个写请求都没发**：
+
+```text
+$ mcloud --account 2 --backup-gift
+  跳过：本月已经领过备份好礼（每月只有一次）
+```
+
+⇒ ⚠ **`state=0`（可领）那条路没有实拍** —— 要等下一次机会刷新。
+
+#### 3.10.4 ⚠ 奖品条目里**带账号标识**
+
+实拍条目里有一个 `userDomainId` —— 就是那个 **19 位账号标识**（§"三个长得像的 id"）。
+所以：
+
+- 黄金向量 `test/golden/app-signin-vectors.json` 的 `§prizeRecords`
+  **整字段删掉了它**（不是打码，是删），并有断言钉住"不许留"；
+- 因此那段向量**比线上响应少一个字段** —— 别拿它当"响应就这些字段"的依据。
+
+⚠ 本文档里**不抄那个值**：`scripts/check-identifiers.cjs` 会把 19 位数字当账号标识抓出来
+（它抓的正是"本地日志与版本库的分界线"）。写这节时第一版就把真值抄了进来，
+门禁当场变红 —— 这正是它该有的表现。
+
+#### 3.10.5 一处**先写错、后按实拍更正**的地方（留个教训）
+
+我最初据"当前版 H5 的**列表项模板**只渲染 `insertTime`"，写下
+「`expireTime` 在新接口上**不存在**，别照抄旧字段名」——**错了**。
+
+实拍条目里 `expireTime` **一直在**（`2026-09-30T15:59:59.000+00:00`，中奖后 14 天）。
+H5 只是**没渲染它**。
+
+⇒ **「模板没渲染某个字段」≠「响应没有这个字段」。**
+前者是 UI 的选择，后者是协议的事实 —— 判据只能来自响应本身（`--raw` / 实拍），
+不能从模板反推。旧项目 `printPendingPrizes` 读 `expireTime` 是对的。
+
+---
+
+## 4. `deviceId`：**两个同名不同物**的东西，别混
+
+这是本页最容易踩的一处 —— 签到页里同时存在两个叫 `deviceid` 的东西，
+**形状、承载位置、要不要发都不一样**，但**来源是同一个风控服务**：
+
+| | ① 原生请求头 `deviceid` | ② H5 参数 `deviceId` |
+| --- | --- | --- |
+| 谁在用 | 原生 App 的 A 族/B 族请求（登录、`querySpecTokenV2`…） | 签到页 H5 的 `isDeviceId: true` 请求 |
+| 承载位置 | **请求头** `deviceid` | **查询参数**（GET）或 **请求体字段**（POST） |
+| 形状 | `B` + … | `B` + 88 字符 base64（→ **64 字节**） |
+| 来源 | 数美设备指纹 `POST …/deviceprofile/v4`，`code==1100` 时取 `"B" + detail.deviceId`（本项目实现见 `crates/mcloud-upstream/src/smid.rs`） | **同一个接口、同一条取值规则** —— 只是由 H5 的 `fp.min.js` 发起（见 §4.1） |
+| 本次签到抓包 | **一次都没出现** | `startSignIn` / `doTaskPost` 上有 |
+
+> ✅ **两条线不是"两个东西"**（2026-09-19 晚更正）。早先记成"不是同一个值、
+> 也不能互换"，根源是把 `SMSdk` 误读成了原生 JS Bridge —— 它其实是签到页自己的
+> `fp.min.js` 定义的（所以 App 二进制里根本搜不到这个名字）。
+> 两边都是 `"B" + detail.deviceId`，同一个 host、同一份 organization / appId / 公钥。
+>
+> ⚠ 但"**能不能互换**"还没有 A/B 实测（缺账号的完整手机号，见 §4.3 末），
+> 所以现在的结论只到"同源、同规则、同形状"，不到"任意一个都能用"。
+
+### 4.1 H5 侧：`deviceId` 由页面自己的指纹 SDK 产出（源码逐字）
+
+```javascript
+// 139newsignin~…59d6fdcb.js（axios request interceptor）
+a = true === e.headers.isDeviceId;              // 只有显式标了 isDeviceId 的请求才注入
+c = localStorage.getItem("deviceId");
+if (!a || c) { … } else { … }                   // 没有就先取
+// 取法（fp.min.js 定义的 window.SMSdk）：
+window.SMSdk.ready(function () {
+  n = window.SMSdk.getDeviceId ? window.SMSdk.getDeviceId() : n;
+});
+// 注入方向：
+if ("post" === e.method) → 塞进 body.deviceId
+else                     → 塞进 params.deviceId
+```
+
+`fp.min.js`（334 KB，反混淆后）里 `getDeviceId` 的真身：
+
+```javascript
+_0x5371e8['getDeviceId'] = function () {
+  var a = _0x3f44fa('SMID'), b = _0x3f44fa('smEncryptedData');
+  return a ? 'B' + a : b ? 'D' + b : '';
+};
+```
+
+`SMID` 是它往 `POST https://slw.h5cmpassport.com:9090/deviceprofile/v4` 上报特征后
+拿回的 `detail.deviceId`（`code == 1100`），同时写进 localStorage 的 `SMID` 键
+与 cookie `.thumbcache_<md5(organization)>`。
+
+**所以形状是 `'B'` + base64(64 字节)，不是"65 字节二进制"。**
+（早先记的"65 字节 = `1 + 16 + 48`"是**把 `'B'` 前缀也当成了 base64 数据**：
+`'B'` 与 SMID 首字符拼出第一个字节 `0x05`/`0x06`，于是看起来"首字节是变的、
+不是魔数"。那个字节是前缀与首字符**共用**出来的，不是密文的一部分。
+密钥也就不用找了 —— 这 64 字节不是"我们解不开的密文"，是**服务端下发的 id**。）
+
+### 4.2 ⚠ 哪些接口真的需要它 —— 别按"签到成功"外推
+
+标了 `isDeviceId: true` 的接口（H5 模块 `6715` 里逐条可见）：
+
+| 接口 | 用途 | 不带 `deviceId` 会怎样 |
+| --- | --- | --- |
+| `/ycloud/signin/page/startSignIn` | 签到 | **实测能成功**（账号 B，`{"code":0,"msg":"success"}`） |
+| `/ycloud/signin/page/doTaskPost` | 上报任务状态 | 未单独验证 |
+| `/ycloud/signin/page/receiveV3` | **领云朵** | **实测 `code=615`**（2026-09-19 实证，见下） |
+| `/ycloud/signin/page/exchangeV3` | 兑换 | 未单独验证（与上一条同族） |
+
+#### `receiveV3` 的三档实证（2026-09-19，账号 B，只换 `deviceId` 一项）
+
+请求固定为 `POST /ycloud/signin/page/receiveV3`，体
+`{"client":"app","cloudId":"","cloudType":2,"deviceId":<下面这一列>}`：
+
+| `deviceId` | `code` | 上游 msg |
+| --- | --- | --- |
+| 不带 | **`615`** | 活动太火爆啦，**兑换失败**，试试其他奖品吧 |
+| 长度对、只错一个字符 | **`614`** | 活动太火爆啦，**锁定失败**，试试其他奖品吧 |
+| 真实值（`'B'` + 88 字符 base64 → 64 字节） | `0` | （`result.receive` 正常返回；这一发是 `0`） |
+
+三条结论：
+
+1. **`615` = 没带 `deviceId`；`614` = `deviceId` 内容无效。**
+   两个码的 msg 只差一个动词（"兑换" vs "锁定"），那是唯一的线索。
+2. **服务端校验的是内容，不只是"非空"** —— 长度合法、只错一个字符的 base64 照样被拒。
+   所以"随便给个非空值"这条路是**堵死的**。
+3. ⚠ **上游的 msg 会把人带偏**：开口就是"活动太火爆"，读起来像限流、像该退避重试，
+   而真实原因是**参数问题** —— 重试一万次也没用。别照 msg 归类。
+   （`11029` 才是真的忙，它与这两个码的成因完全不同。）
+
+#### 实测用的那个真实值从哪来 —— **Rust 自己就能算出来**
+
+第一步（取证）：`har/signin-2026-09-19-full.har` 里 `startSignIn` 的查询参数上就带着它。
+它是**账号 B 自己那台设备**的 id，所以拿它做对照实验是正当的。
+
+第二步（**根因查明**，2026-09-19 晚）：签到页 HTML（`index.html?path=newsignin`，
+7756 字节）里逐字写着指纹 SDK 的配置：
+
+```js
+window._smConf = {
+    organization: 'FXlyfmWg2AzwbrxDKSv5',
+    appId: 'default',
+    publicKey: 'MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC8KHAcHbkCn5rx…',
+    apiHost: 'slw.h5cmpassport.com:9090',   // 私有化部署
+    protocol: 'https',
+};
+```
+
+这四项 + `apiPath = /deviceprofile/v4` + `os: 'web'` + `encode: 5` + `compress: 2`
+**与 `crates/mcloud-upstream/src/smid.rs` 的常量逐字相同**，公钥也与
+`mcloud_core::SKLAND_PUBLIC_KEY_B64` 一个字不差。
+⇒ 签到页的指纹客户端与本项目的 `smid` 客户端是**同一个**，纯 Rust 上报即可拿到同一个 id。
+
+```bash
+# 纯 Rust：上报特征、换一个 deviceId 并落库（之后长期复用，不再上报）
+mcloud smid refresh --account <账号>
+# 领取时不用给任何参数 —— 不传 --device-id 就自动从库里取
+mcloud signin --account <账号> --receive --cloud-type 2
+```
+
+**形状**（HAR 真值与本项目 Rust 产出，同形）：
+
+```
+89 字符 = 'B' + 86 个数据字符 + **2 个** '='   ← 规范只要 1 个，它多一个
+'B' 之后的 88 字符按 base64 解 → 恒 **64 字节**
+```
+
+⚠ **那个多余的 `=` 是它本来的样子**，上游也确实收下了（真值实测 `code=0`）。
+实现侧要**原样透传**，别"顺手规范化"成 88 字符 —— "少一个 `=`"会不会被拒**没有实测**。
+
+> **三条纠错记录**
+>
+> 1. 本节初稿写的是"服务端不校验它是否存在，实现侧不发"。
+>    **那个结论只对 `startSignIn` 成立，被外推过头了。**
+>    领取类（`receiveV3`）**不带就报错** —— 2026-09-19 实测到了具体码（`615`）。
+>    签到恰好是那个"能过"的例外，不能拿它当通则。
+> 2. 本节一度写"它不是 `smid` 那条线的东西，是 iOS 原生 `SMSdk` bridge 给的、
+>    密钥未知所以构造不出来"。**也错了**，而且错因很典型：
+>    在 App 二进制里搜不到 `SMSdk` 这个字符串，就**默认它是原生注入的** ——
+>    实际它是签到页自己的 `fp.min.js` 定义的（H5 里 `window.SMSdk = {...}` 明写）。
+>    推论：**"在客户端二进制里搜不到" ≠ "不是这个客户端的东西"**，
+>    还有第三种可能 —— 那是**服务端下发的页面资源**里的。
+> 3. 形状也记错过：把整串 89 字符当 base64 解码会得到 65 字节、"首字节"是
+>    `0x05`/`0x06`，于是写成"65 字节 = `1 + 16 + 48`、首字节是变的、不是魔数"。
+>    机制说反了 —— 那个字节是 `'B'` 前缀与 SMID 首字符**共用**出来的，
+>    真实结构就是 `'B'` + 64 字节，**没有 65 字节这回事**，也没有"未解的密钥"。
+
+> ⚠ **仍然缺一次 A/B**：我们的 Rust `smid` 与签到页**同源同规则同形状**，
+> 但"用 Rust 产出的这个 id 去打 `receiveV3`，上游会不会认"**还没有实测** ——
+> 卡在账号的完整手机号上（库里 `account_state.phone` 为 `NULL`，
+> 那批账号是 v6 之前登的）。要么重登一次 `mcloud login sms --client app`，
+> 要么 `mcloud signin --account … --phone <完整手机号>`。
+> 在那之前，这条链路的结论只到"不需要浏览器"，不到"领取已经跑通"。
+
+⚠ **别再按 localStorage 认 App**（这条教训留着）：本机上 139 邮箱
+（`com.leadtone.mig.139pe.iPhone`）的 localStorage 键名与签到页**一模一样**
+（`deviceId` / `marketName` / `token`…），拿错了就是 `614`。
+`scripts/h5-device-id.py` 用"容器里有没有 mCloud 自己的 `FXTrace*.log`"当归属指纹 ——
+它现在只作**取证对拍**用，日常不需要跑。
+
+H5 侧还有一道**客户端**守卫：`if (!c) return Promise.reject(...)`
+（拿不到 deviceId 就直接不发）。所以真实客户端在领取那一步根本不会漏发它。
+
+### 4.3 实现侧的处理
+
+- 上游层的请求构造函数把 `device_id` 作为**显式参数**：
+  - `start_sign_in_request(…, device_id: Option<&str>)` —— 允许省略（实测能过），
+    但调用点必须写出来，不能默默丢掉；
+  - `receive_v3_request(…, device_id: &str)` —— **必填 `&str`**，
+    让"漏发"变成编译期错误，而不是运行时的上游报错。
+- `deviceId` 的**获取**：**纯 Rust，不需要浏览器（2026-09-19 晚）**。
+  `mcloud_app::smid::device_id(upstream, store, scope, account, clock, rng)` ——
+  库里有 `smid_device_id` 就直接返回（**不打网络**），没有才上报一次换一个并落库。
+  它与签到页的 `fp.min.js` 打的是同一个 `deviceprofile/v4`（同 host / organization /
+  appId / 公钥，逐字比对过），所以拿回的是同一个 `"B"+detail.deviceId`。
+  守卫测试：`smid::tests::the_signin_page_fingerprint_sdk_is_this_same_client`。
+  - CLI 侧不传 `--device-id` 时**自动**走这条；`--device-id` 只用于对照实验
+    （旧名 `--h5-device-id` 仍可用作别名）。
+  - `scripts/h5-device-id.py` 降级为**取证工具**（拿官方实发值对拍），日常不跑。
+  - ⚠ 上游校验它的内容（§4.2 第 2 条），所以"随便编一个"走不通 ——
+    必须是**这个风控服务认的**那个 id，而这正是 `smid` 能给出来的东西。
+  - ⚠ `--revive`（`receiveRevivalReward`）**故意不回落**到它：H5 定义里没有
+    `isDeviceId`，默认就该一个头都不带，只有显式 `--device-id` 才补。
+
+---
+
+## 5. 签名算法：`x-signature`（H5 源码逐字）
+
+出处：`har/h5-signin/139newsignin~National_zero2025~newsignin~promotion~test.59d6fdcb.js`
+
+```javascript
+o = String.fromCodePoint(115,101,107,97,77,100,89,89,76,73,90,102,98,67,102,109)
+//   = "sekaMdYYLIZfbCfm"
+
+opRequest: h → a["a"].get("/ycloud/api/timestamp")     // 取 s
+u = uuid()            // x-request-id
+s = server_timestamp  // x-timestamp（来自上面那个接口，13 位毫秒）
+f = uuid()            // x-nonce
+p = ""                // 预留段，实测恒为空串
+
+x-signature = MD5(o + u + s + f + p + o)
+headers = { "Content-Type": "application/json;charset=UTF-8",
+            "x-request-id": u, "x-timestamp": s, "x-nonce": f, "x-signature": <md5> }
+
+tyrzLogin: a["a"].post("/ycloud/auth-service/auth/tyrzLogin", JSON.stringify(t), {headers: e})
+```
+
+**`sekaMdYYLIZfbCfm` 这个盐值仓库里已经有了**：`mcloud_core::crypto::SIGN_SALT_MAP[1]`
+（`(2, "sekaMdYYLIZfbCfm")`），`generate_signature(id, ts, nonce, 2, "")` 出来的就是同一个式子。
+也就是说**签到签名不需要新算法，直接复用 core 的 `generate_signature`**。
+
+> 那个 `String.fromCodePoint(...)` 是混淆写法，值就是 `sekaMdYYLIZfbCfm`。
+> 它是**公开常量**，与 PC 端签名盐是同一个（`SIGN_SALT_MAP` 只有两个值）。
+
+**实拍样本**（真实抓包，签名与输入逐字对应，可作黄金向量）：
+
+```text
+x-request-id : 4b2d0b57-5479-468c-a336-651a4923edb9
+x-timestamp  : 1789800128813
+x-nonce      : 129eb90a-daae-4173-b3fa-4b1633b1a2f8
+x-signature  : 90ee90a9e443059873eca9d599a7e858
+```
+
+---
+
+## 6. 活体验证：账号 B 纯协议端到端跑通（2026-09-19）
+
+账号 B（合成号 `19900000001`，本地库 `user_domain_id=1990000000000000002`）
+在**无浏览器、无 JS Bridge** 的条件下跑：
+
+| 步骤 | 结果 |
+| --- | --- |
+| 1. `querySpecTokenV2 {"toSourceId":"001005"}` | SSO token（42 字符） |
+| 2. `GET /ycloud/api/timestamp` | 服务端毫秒时间戳 |
+| 3. `tyrzLogin`（带 `x-signature`） | `jwtToken` 907 字符 + `userDomainId` |
+| 4. `infoV3?client=app`（带 `jwttoken` 头） | 云朵余额 `5392`，`signCount=1`，本月已签 `[1,10,12,15,16]`，**19 号 `s=false`** |
+| 5. `startSignIn?client=app`（**不带 `deviceId`**） | `{"code":0,"msg":"success","result":{"todaySignIn":false,…}}` |
+| 6. 再查 `infoV3` | 本月已签 `[1,10,12,15,16,19]` ← **19 号签上了** |
+
+**判据链**：第 4 步 `cal[19].s=false` → 第 6 步 `cal[19].s=true`。
+不依赖 `pointsNotClaimed`、不依赖 `todaySignIn`。
+
+**签名算法单独验证**（先于全链路）：拿实拍参数重算 `x-signature`，
+与抓包值逐字相同后，才把 `tyrzLogin` 发出去。
+
+---
+
+## 7. 签到页接口清单（从 H5 源码枚举，**43 条**）
+
+出处：`har/h5-signin/newsignin.336f18c3.js`。
+这是 H5 的 API 定义对象，**逐条列出方法与路径**，可直接当实现清单。
+
+⚠ **定义分散在两个 API 对象里**（同一文件、不同模块）—— 只读模块 `6715` 会漏掉 14 条。
+本表已按 §表末那段正则对全文件重新枚举并补全。**`isDeviceId` 是逐接口声明的**，
+整页只有 4 条标了 `true`（`getStartSignIn` / `initTaskStatus` / `exchangePrize` / `receiveCloudData`），
+所以"签到链路要带 deviceId"这种整体结论是**错的** —— 见 §4.2。
+
+| 函数名 | 方法 | 路径 | 备注 |
+| --- | --- | --- | --- |
+| `getStartSignIn` | GET | `/ycloud/signin/page/startSignIn` | `isDeviceId:true` |
+| `getUserInfo` | GET | `/ycloud/signin/page/infoV3` | |
+| `getOutCloudNum` | GET | `/ycloud/signin/page/getCloudNum` | |
+| `getFloatData` | GET | `/ycloud/signin/public/text/newsign_139mail/floatWindow.json` | 静态文案 |
+| `getTasklistData` | POST | `/ycloud/signin/task/taskListV3` | |
+| `getPrizelistData` | GET | `/ycloud/signin/page/exchangeList` | 兑换列表 |
+| `getPrizeGroupData` | GET | `/ycloud/signin/public/text/sign_in_3/prizeGroup.json` | 静态文案 |
+| `exchangePrize` | POST | `/ycloud/signin/page/exchangeV3` | `isDeviceId:true` |
+| `getAIBeanRecordData` | GET | `/ycloud/signin/public/cloudRecordV2` | |
+| `getPrizeRecordData` | GET | `/ycloud/signin/public/record` | |
+| `getSwitchStatus` | GET | `/ycloud/manager/publicParam/getValue` | |
+| `getPrizeDetailData` | GET | `/ycloud/prizeApi/checkPrize/receivePrizeDetailsV2` | |
+| `getSlidePuzzle` | POST | `/ycloud/auth-service/slide/getSlide` | 滑块（兑换时可能用） |
+| `getCurrentDate` | GET | `/ycloud/manager/commonMarketconfig/getByMarketName` | |
+| `getPopInfo` | POST | `/ycloud/signin/public/getPopInfo` | |
+| `AdvShowReport` | POST | `/ycloud/advert/show/report` | 埋点 |
+| `AdvClickReport` | POST | `/ycloud/advert/click/report` | 埋点 |
+| `getExchangePrizeDetail` | GET | `/ycloud/signin/page/receivePrizeDetails` | |
+| `getAnimText` | GET | `/ycloud/signin/public/text/sign_in_3/dialog.json` | 静态文案 |
+| `receiveCloudData` | POST | `/ycloud/signin/page/receiveV3` | 领云朵，`isDeviceId:true` |
+| `receiveTaskData` | GET | `/ycloud/signin/page/receiveTask` | 领任务奖励 |
+| `updateRemindData` | GET | `/ycloud/signin/page/updateRemaind` | **`Remaind` 是上游的拼写，不是笔误** |
+| `registerData` | GET | `/ycloud/signin/task/click` | |
+| `receiveTaskExpansion` | GET | `/ycloud/signin/page/receiveTaskExpansion` | |
+| `initTaskStatus` | POST | `/ycloud/signin/page/doTaskPost` | `isDeviceId:true` |
+| `recordAppTStatus` | GET | `/ycloud/signin/page/reportAppNoticeStatus` | |
+| `emailBackup` | GET | `/ycloud/signin/emailStatus/currEmailStatus` | |
+| `receiveRevivalReward` | POST | `/ycloud/signin/page/receiveRevivalReward` | **用复活卡 / 回馈卡**（⚠ 不可逆，见 §8）|
+| `getOpenSmsSwitch` | POST | `/ycloud/openemailsms-service/openEmailsms/openSmsSwitch` | |
+| `getPhoneEncryption` | GET | `/portal/ajax/common/caiYunSignIn.action` | 老入口 |
+| `getAESPhoneEncryption` | GET | `/ycloud/signin/page/getCode` | |
+| `cloudMultiple` | GET | `/ycloud/signin/page/multiple` | |
+| `signinPopup` | GET | `/ycloud/signin/page/popup` | |
+| `smSend` | GET | `/ycloud/signin/page/sendMsg` | |
+| `getAppToken` | GET | `/ycloud/signin/public/getUserExtInfo` | |
+| `getFloatLabel` | GET | `/ycloud/manager/publicParam/getValue` | 与 `getSwitchStatus` **同路径**，只是参数不同 |
+| `getTaskGroup` | GET | `/ycloud/signin/public/text/sign_in_3/taskGroup.json` | 静态文案 |
+| `getFloatData` | GET | `/ycloud/signin/public/text/sign_in_3/floatWindow.json` | 静态文案（另一个同名函数走 `newsign_139mail/`）|
+| `signInCallback` | POST | `/ycloud/signin/mobileApp/signInCallback` | |
+| `finishRedepositTask` | GET | `/ycloud/signin/redeposit/finishRedepositTask` | |
+| `getUnloadData` | POST | `/ycloud/redeposit/getLinkInfoList` | |
+| `saveLinkFile` | POST | `/ycloud/redeposit/saveLinkFile` | |
+| `miguCallback` | POST | `/ycloud/signin/public/doMiGuAppReport` | 咪咕侧回调 |
+| `yidongCallback` | POST | `/ycloud/signin/public/doMoveAppReport` | 移动侧回调 |
+| `hebaoCallback` | POST | `/ycloud/signin/public/heBaoReport` | 和包侧回调 |
+| `weiBoTask` | POST | `/ycloud/signin/public/weiBoTask` | |
+
+> **本表是怎么来的（别以为它天然完整）**：它最初是**手工转写**模块 `6715` 的，
+> 后来按下面的正则对全文件重新枚举过一遍 —— 当时发现原表少了 **14 条**，
+> 已补上（现为 43 条）。重新枚举的命令：
+>
+> ```bash
+> grep -oE '[A-Za-z]+:function\(e\)\{return c\["a"\]\.(get|post)\("[^"]+"' har/h5-signin/*.js
+> ```
+>
+> ⚠ 定义分散在**两个** API 对象里（同一文件、不同模块），只读 `6715` 会漏。
+> ⚠ 表里少数几条属于**同 bundle 的兄弟模块**（`redeposit/*`、各种回调、静态文案），
+> 不是签到动作本身 —— 保留它们是因为"同一个文件里被定义了"，但**别把它们当签到链路**。
+
+> 旧 TS（`packages/core/src/apis/signin.ts`）列的 9 个接口名里，
+> `receiveV2` / `getSlide` / `shakeIt` 在**新版 H5 里已经不存在或改名**：
+> 现在是 `receiveV3`、`/ycloud/auth-service/slide/getSlide`，且**没有 shakeIt**。
+> 以本表为准。
+
+---
+
+## 8. 复活卡 / 回馈卡（`receiveRevivalReward`）
+
+### 8.1 形状（H5 源码逐字）
+
+```javascript
+receiveRevivalReward: function(e){
+  return c["a"].post("/ycloud/signin/page/receiveRevivalReward", JSON.stringify(e),
+    {headers:{showLoading:false, "Content-Type":"application/json;charset=UTF-8"}})
+}
+```
+
+调用点是 `z["a"].receiveRevivalReward({})` —— **body 是空对象 `"{}"`**，
+没有查询参数、没有别的字段。老抓包里 `content-length: 2` 正是它。
+
+⚠ 同页其余接口几乎都是 `showLoading: true`，**只有它是 `false`**
+（H5 要自己画那张卡片的弹窗，不想被全局 loading 遮住）。照抄，别"统一成 true"。
+
+### 8.2 它到底是什么
+
+H5 弹窗文案（逐字）：
+
+> 「送你一张**复活卡**」/「使用复活卡可随机复活 2025 年失效的云朵，并自动转换为云盘专属 AI豆」
+> 「关闭弹窗视为放弃机会，**无法补发**」
+
+`cardType`：`1` = 复活卡，`2` = **回馈卡**（「每月首次签到，可随机获得云盘专属AI豆哦！」）。
+两张卡连累计数的**文案单位都不同**（复活卡叫"累计复活AI豆"，回馈卡叫"累计获得奖励"）。
+
+响应（实拍，老项目夹具 `test/fixtures/http/复活.json`）：
+
+```json
+{"code":0,"msg":"success",
+ "result":{"cardType":1,"littleFirstTime":0,"rewardClouds":114,"totalClouds":571}}
+```
+
+`rewardClouds` = 本次随机复活到的数量（**这就是"这次进账多少"**）；
+`totalClouds` = 累计；`littleFirstTime` 只影响一句文案。
+
+### 8.3 ⚠ 它**不可逆**
+
+**用掉就没了**（H5 原话："关闭弹窗视为放弃机会，无法补发"）。
+所以实现侧把它做成**独立开关**（`signin --revive`，默认不开），
+绝不跟着签到顺手跑 —— 与 `--receive`（领当期云朵）是两件事。
+
+### 8.4 ⚠ `totalClouds` 是不是"云朵余额"：**未验证，所以没接进 `record_cloud`**
+
+规划 §3.4 把"复活/领取类任务返回的 `totalClouds`"列为余额采集的**来源③**。
+但上面那段 H5 文案说的是"复活卡把失效云朵**转换成 AI豆**"、累计文案也是"累计复活**AI豆**"
+⇒ 它与 `infoV3.beforeTotal`（云朵余额）**可能不是同一个池子**。
+**现有实拍分不出来**，所以 `parse_revival_reward` **不**调 `record_cloud` ——
+接进去只会把两个口径混进同一条曲线，而曲线一旦混了没人能事后拆开。
+等 `hc1t` / `cloudStatus` 的实拍到齐再定。
+
+### 8.5 ⚠ `deviceid` 头：两个证据不一致
+
+| 证据 | 结论 |
+| --- | --- |
+| H5 源码（iOS 12.6.0）| 头里**没有** `isDeviceId` ⇒ 拦截器不注入 |
+| 老抓包（Android WebView）| 带一个 `deviceid` **头**（值被脱敏，看不出是不是 §4 那个 `'B'`+64 字节）|
+
+实现侧做成 `Option<&str>`：不给就照 H5 定义（推荐），给了就补那个头。
+**哪个是服务端真正要求的，未验证。** 这也正是留成可选参数的意义 ——
+真出问题时能一次 A/B 试出来（`receiveV3` 的 `614` / `615` 就是这么定的）。
+
+---
+
+## 9. 仍未解 / 明确不做的事
+
+1. ~~**H5 那个 `deviceId` 的密钥**~~ —— **已作废，不用解了**（2026-09-19 晚）。
+   它根本不是"我们解不开的密文"：`fp.min.js` 的 `getDeviceId()` 返回
+   `'B' + localStorage['SMID']`，`SMID` 是风控服务**下发**的 `detail.deviceId`。
+   以前那套"65 字节 = `1 + 16 + 48`、48 字节密文的密钥是独立的第四把"
+   是**从错误的解码方式推出来的**（把 `'B'` 前缀当成了 base64 数据）。
+   现在实现侧**不缺值也不缺来源**：`mcloud_app::smid::device_id` 纯 Rust 就能换一个，
+   与签到页打的是同一个 `deviceprofile/v4`（§4.2 / §4.3）。
+   ✅ **A/B 已闭环（2026-09-19 晚）**：Rust 产出的 `deviceId` 打 `receiveV3`，
+   上游**受理并真领到了**那 6 豆（`toReceive` 6 → 0，§3.6.4）。这条不再是"未实测"。
+2. **`pointsNotClaimed` 的 `result:true` 语义**：老抓包里的 `caiyun.feixin.10086.cn:7071`
+   入口，本次签到链路上**一次都没出现**。`infoV3` 的 `cal[].s` 已经是权威判据，
+   **不再依赖它**，此问题降级为"待观察"。
+3. **`hcy-cool-flag`**：签到链路上**完全没出现**（只在登录链路的 `getSmsCode` 上）。
+   不需要它。
+4. **`client=0` vs `client=1`**：`taskListV3` 上两者都能返回数据，字段差异未逐项对拍。
+   实现侧固定用 `1`（与真实 App 一致）。
+5. **`getCode` 的 `result` 解密**：base64 外套了一层 AES，密钥未知。
+   签到不需要它，不做。
+6. **`receiveRevivalReward` 的 `deviceid` 头到底要不要**：H5 定义说不要、
+   老抓包带了（§8.5）。**未验证**，所以实现侧留成可选参数而不是猜一个。
+7. **`totalClouds` 的单位**：规划曾把它当"云朵余额来源③"。现在单位问题**已经解决** ——
+   云朵与「云盘专属 AI豆」是**同一个东西的两个名字**（2026-07-31 按 1:1 改名，§3.6.5），
+   所以不存在"两个池子"的问题。**但** `receiveRevivalReward` 的 `totalClouds`
+   与 `infoV3.total` 是不是同一个数，**仍没有同刻实拍对拍**，所以还是**不接进 `record_cloud`**。
+   余额的权威来源是 `infoV3.total`（§3.6.5）。
+8. **`exchangeV3`（兑换）仍未实现**：它标了 `isDeviceId: true`，与 `receiveV3` 同族，
+   `deviceId` 的取值通路已经通了（§4.2），所以它现在是**可做**的 ——
+   只是规划把它排在最高风险档（并发抢兑 + 幂等），没到那一批。
+9. **`doTaskPost`（`initTaskStatus`）的 `deviceId` 行为**：实现侧按 `isDeviceId: true`
+   做成必填，但**没有单独实测**过不带会怎样。与 `receiveV3` 同族的推断，不是实证。
+10. **两条"可领"的路都没有实拍**（2026-09-19）：
+    - `multiple` 的 `Claim`（要等翻倍机会刷新，见 §3.9.5）；
+    - `backupgift` 的 `state=0`（同上，见 §3.10.3）。
+
+    两条的**门槛**都实测拦住了（正确跳过、零写请求），但**成功那条分支的响应体**
+    没有样本 —— 所以 `result.cloudCount` / `result.multiple` / `result`（裸数字）
+    都按同一约定：**缺了不判失败**（`None` ≠ `0`），成败只看 `code`。
+11. **旧项目的"上传一个文件把备份打开"仍未做**（§3.9.3）：
+    `backupGiftTask` 与 `taskExpansionTask` 都以「开了自动备份」为前提，
+    而旧项目在没开时会**自己上传一个文件**去打开它。我们**没有网盘上传能力**，
+    所以两条都只如实报告"未开启备份"。要补的是**上传那条线**，不是门槛判定。
+12. **待领取奖品只取第一页**（`pageSize=10`）。要翻页得再加开关 ——
+    当前用途是"看有没有待领的"，一页够。`--records` 那边的 `--records-all`
+    是同类需求，需要时照那个形状加。

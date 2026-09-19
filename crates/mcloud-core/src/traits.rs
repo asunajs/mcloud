@@ -10,7 +10,7 @@
 use crate::error::Error;
 use crate::model::{
     Account, AccountId, AccountState, CloudStats, ExchangeConfig, Pipeline, RunRecord, Schedule,
-    WebuiConfig,
+    SmidState, WebuiConfig,
 };
 use crate::user::{Session, User, UserId};
 use chrono::{DateTime, Utc};
@@ -297,6 +297,28 @@ pub trait StateStore {
     async fn get_account(&self, scope: Scope<'_>, id: &AccountId)
     -> Result<Option<Account>, Error>;
 
+    /// 记下账号**当前**的云朵余额（**窄写**：只动 `cloud_current` / `cloud_updated_at`）。
+    ///
+    /// # 为什么不复用 [`upsert_account`](Self::upsert_account)
+    ///
+    /// 那个方法是**整行覆盖** —— 想改余额就得"读整行 → 改一列 → 写回去"。
+    /// 而读与写之间别人改了昵称 / 启用状态，整行覆盖会把它**静默写回旧值**：
+    /// 一个只在列表页显示错名字的 bug，查起来毫无头绪。
+    ///
+    /// 余额与 [`set_smid_fingerprint`](Self::set_smid_fingerprint) 同属"独立事实"，
+    /// 但理由相反：`smid_*` 是**不该**被别的写顺手改掉（换登录不该换设备长相），
+    /// 余额是**每次采集都会被刷新**（它就该是最新的）。
+    /// 共同点是两者都不该拉着整行一起走。
+    ///
+    /// `at` 由调用方给（[`Clock`]），实现不自己取时间 —— 测试才能钉住。
+    async fn set_account_cloud(
+        &self,
+        scope: Scope<'_>,
+        id: &AccountId,
+        count: i64,
+        at: DateTime<Utc>,
+    ) -> Result<(), Error>;
+
     /// 该范围内可见的账号，按 `sort_order` 升序。
     async fn list_accounts(&self, scope: Scope<'_>) -> Result<Vec<Account>, Error>;
 
@@ -318,6 +340,87 @@ pub trait StateStore {
         &self,
         scope: Scope<'_>,
         state: &AccountState,
+    ) -> Result<(), Error>;
+
+    /// 读这个账号的 smid 状态（绑定的设备特征 + 最近拿到的 `deviceId`）。
+    ///
+    /// 与 [`get_account_state`](Self::get_account_state) 分开：那条是"能冒充这个用户的凭据"，
+    /// 这条是"这台设备长什么样"。放在一起之后，任何一次取凭据都会顺手把特征也读进内存，
+    /// 而它跟凭据的泄露面完全不是一回事（它可以大方地打在本地日志里排障）。
+    ///
+    /// 返回 `None` = 这个账号**一行状态都没有**（从没登录过也没绑过指纹）。
+    async fn get_smid_state(
+        &self,
+        scope: Scope<'_>,
+        id: &AccountId,
+    ) -> Result<Option<SmidState>, Error>;
+
+    /// 写入**新的**设备特征，并把 `smid_device_id` 清空。
+    ///
+    /// # 为什么清空 deviceId 与写特征是**同一条语句**
+    ///
+    /// 换指纹的语义是"这台机器换个长相"。旧的 `deviceId` 是**旧长相**换来的那一个，
+    /// 留着它，下一次上报就等于自相矛盾：新的屏幕/ua/canvas，配的却是旧设备的 id ——
+    /// 那正是风控服务最想看到的"设备在漂移"信号。
+    ///
+    /// 所以这两件事不能分成两次调用：中间崩溃会留下"新指纹 + 旧 id"，
+    /// 而且那种状态**看不出来**（两列各自都合法）。
+    ///
+    /// 入参是序列化后的特征文本（见 [`SmidState::fingerprint_json`] 的说明）：
+    /// 存储层不解析它，也就不会替调用方决定"读不出来时怎么办"。
+    async fn set_smid_fingerprint(
+        &self,
+        scope: Scope<'_>,
+        id: &AccountId,
+        fingerprint_json: &str,
+    ) -> Result<(), Error>;
+
+    /// 记下最近一次上报换回的 `deviceId`（含 `B` 前缀）。
+    ///
+    /// 只在**上报成功**之后调用：拿到的 id 会被下一次上报当作 `box` 带回去，
+    /// 一个失败的、或半截的响应值写进去，等于让这台设备从此自称一个来历不明的 id。
+    ///
+    /// **不**动 `updated_at`：那一列的语义是"登录态快照的时间"，一次指纹上报不是新快照。
+    async fn set_smid_device_id(
+        &self,
+        scope: Scope<'_>,
+        id: &AccountId,
+        device_id: &str,
+    ) -> Result<(), Error>;
+
+    /// 把账号**缺**的 `authorization` / `phone` 两列填上，**不动其余任何列**。
+    ///
+    /// # 是"填空缺"，不是"覆盖"
+    ///
+    /// 已经有值的那一列**原样保留**，入参给什么都不覆盖它。入参 `None` 表示
+    /// "这一列我没有可填的"。
+    ///
+    /// 这个语义是**刻意**选的，理由在下面那条：回填必须能反复跑。
+    ///
+    /// # 为什么是窄写而不是 [`StateStore::upsert_account_state`]
+    ///
+    /// 那个方法按契约是**整体覆盖**（`None` 表示"上游这次没给"）。拿它来"补两列"
+    /// 会把 `jwt_token` / `user_domain_id` / `cloud_phone_redpack_token` 一起抹掉 ——
+    /// 而那正是本方法要修的库所依赖的东西。
+    ///
+    /// # 两个调用点，都是"补缺口"不是"换登录态"
+    ///
+    /// 1. **迁移回填**：旧项目 `asign.json` 里的 `auth` 就是整串 `Authorization`，
+    ///    但它**不在 `state.json` 里**，所以历史行这两列是空的。这条回填**按状态判**
+    ///    （"这一列空着就填"）而不是按源文件哈希判 —— 后者对已经导入过的库永远不会
+    ///    再跑，会让同一个版本的程序产出两种库形态。填空缺的语义让回填天然幂等，
+    ///    于是"每次都跑"是安全的：**重登过、库里存着更新凭据的账号不会被旧配置覆盖回去**。
+    /// 2. **`--phone` 只输一次**：老行让用户手输一遍手机号之后，把它连同拼出来的
+    ///    整串 auth 一起落库，下次就不必再输。
+    ///
+    /// 所以它也**不动 `updated_at`** —— 那一列的语义是"登录态快照的时间"，
+    /// 补一个缺口不是新快照。
+    async fn fill_account_credentials(
+        &self,
+        scope: Scope<'_>,
+        id: &AccountId,
+        authorization: Option<&str>,
+        phone: Option<&str>,
     ) -> Result<(), Error>;
 
     /// 按 `account + date` UPSERT 日快照。

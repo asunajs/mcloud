@@ -191,7 +191,7 @@ pub fn b64_encode(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
-fn b64_decode(s: &str) -> Result<Vec<u8>, Error> {
+pub fn b64_decode(s: &str) -> Result<Vec<u8>, Error> {
     base64::engine::general_purpose::STANDARD
         .decode(s)
         .map_err(|e| Error::Internal(format!("base64 解码失败: {e}")))
@@ -266,6 +266,19 @@ pub fn aes_cbc_fixed_iv_encrypt_hex(key: &str, message: &str) -> Result<String, 
         AES_FIXED_IV,
         message.as_bytes(),
     )?))
+}
+
+/// 固定 IV 那条路的**反向**：hex 密文 → UTF-8 明文。
+///
+/// **仅测试与调试台使用**（与 [`rsa_pkcs1v15_decrypt`] 同理：生产链路不需要解）。
+/// 存在的理由很具体：上报出去的 smid 载荷是单向加密的，光有加密函数就永远
+/// 证明不了"发出去的那一份里装的确实是绑定给这个账号的特征"。
+pub fn aes_cbc_fixed_iv_decrypt_hex(key: &str, cipher_hex: &str) -> Result<String, Error> {
+    let k = js_pad_key16(key);
+    let ct =
+        hex::decode(cipher_hex).map_err(|e| Error::Parse(format!("AES 密文不是合法 hex: {e}")))?;
+    let pt = cbc_pkcs7_decrypt(&k, AES_FIXED_IV, &ct)?;
+    String::from_utf8(pt).map_err(|e| Error::Parse(format!("AES 明文不是 UTF-8: {e}")))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -600,6 +613,21 @@ pub fn gzip_with_os19(data: &[u8]) -> Result<Vec<u8>, Error> {
 /// gzip 压缩后 base64（smid 载荷用的就是这个）。
 pub fn gzip_with_os19_base64(data: &[u8]) -> Result<String, Error> {
     Ok(b64_encode(&gzip_with_os19(data)?))
+}
+
+/// gzip 解压。与 [`gzip_with_os19`] 配成往返，**仅测试与调试台使用**。
+///
+/// 为什么要有它：`data` 字段解出来是一串 gzip 的 base64，而"上报体里带的
+/// 字段值对不对"只能解开来看。没有它，smid 那一整段的断言就只能停在
+/// "算出了一个 hex 串"—— 那等于没测。
+pub fn gunzip(data: &[u8]) -> Result<Vec<u8>, Error> {
+    use std::io::Read as _;
+
+    let mut dec = flate2::read::GzDecoder::new(data);
+    let mut out = Vec::new();
+    dec.read_to_end(&mut out)
+        .map_err(|e| Error::Parse(format!("gzip 解压失败: {e}")))?;
+    Ok(out)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

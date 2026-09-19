@@ -454,6 +454,17 @@ fn b64(raw: &str) -> String {
 /// `authToken` 存进 [`AccountState::jwt_token`]：移动端把它叫 `jwtToken`、
 /// PC 端叫 `authToken`，但**在各自客户端里都是放进 Authorization 头的那一个值**，
 /// 职责完全相同，所以不新开一列。
+///
+/// # 手机号落两处，且**不是重复**
+///
+/// | 落哪 | 值 | 谁看 |
+/// |---|---|---|
+/// | `accounts.phone_masked` | 掩码 `19****16` | 直接吐给前端（列表页） |
+/// | `account_state.phone` | **完整号码**（v6 起） | 拼 `Authorization` 用 |
+///
+/// 完整号码是 `Authorization` 的中间那段，而它**推不出来**（掩码、`jwt_token`、
+/// `user_domain_id` 都不含它）。不存的话，每个要用这个头的能力都得让调用方
+/// 在命令行上重输一遍 —— 那正是 `mcloud signin --phone` 存在的原因（缺口，非设计）。
 pub fn account_and_state_from_login(
     scope: Scope<'_>,
     device_id: &str,
@@ -523,6 +534,23 @@ pub fn account_and_state_from_login_with_prefix(
             .or_else(|| user_info.get("userDomainId"))
             .and_then(Value::as_str)
             .map(str::to_string),
+        // **完整手机号**（v6 起落库）。这里它是**给人看的标识**（日志里认出
+        // "签的是谁"），**不是**拼凭据的原料 —— 凭据见下面的 `authorization`。
+        //
+        // 用 `phone_or_none` 而不是上面那个 `phone`（它把空串折成了 `""`）：
+        // 库里要区分"有号码"与"上游没给"，`Some("")` 会让下游以为有值。
+        phone: parsed.phone_or_none().map(str::to_string),
+        // **整串 auth 原样落库**（v7 起）。
+        //
+        // 注意上面那两行 `auth_from_user_info_with_prefix` → `parse_auth` 的写法：
+        // 拼出整串、紧接着又把它拆回三段 —— 那只是**为了拿 `phone` / `platform` /
+        // `expire` 三个派生值**（`account` 表要它们）。凭据本身不再走"拆开再拼"，
+        // 所以哪怕将来这个拼装规则变了、或者某天 `phone` 解不出来，
+        // 发出去的 `Authorization` 仍然是登录那一刻原样的那一串。
+        //
+        // 旧项目 `mcloud-sign` 的 `asign.json` 里 `auth` 存的就是这个值，
+        // 两边从此同构，迁移时可以直接搬。
+        authorization: Some(auth.clone()),
         updated_at: Some(now),
         ..AccountState::new(account_id.as_str())
     };

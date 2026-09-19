@@ -90,6 +90,38 @@ function aesEcbEncrypt(keyStr, plainStr) {
 // 每个校验器收 (entry, constants)，返回 { actual, expected }。
 // 抛异常 = 这条向量算不出来（会记为失败并打印原因）。
 
+/**
+ * 签名盐表。
+ *
+ * 两个向量文件各带一份：`crypto-vectors.json` 是**完整表**（含"未知 saltKey 回落
+ * 到 1"这条规则），`app-signin-vectors.json` 只声明签到页用的那一把。
+ * 这里统一取，避免把 `sekaMdYYLIZfbCfm` 硬编码进脚本 —— 盐表是 `mcloud-core` 的
+ * `SIGN_SALT_MAP`，向量是它的投影，脚本不该有第三份副本。
+ */
+function signSalt(constants, saltKey) {
+  const map = constants.SIGN_SALT_MAP;
+  if (map) return map[String(saltKey)] ?? map["1"];
+  if (
+    constants.H5_SIGN_SALT &&
+    Number(saltKey) === Number(constants.H5_SIGN_SALT_KEY ?? 2)
+  ) {
+    return constants.H5_SIGN_SALT;
+  }
+  throw new Error(`向量文件没给出 saltKey=${saltKey} 对应的盐`);
+}
+
+/**
+ * `md5(盐 + id + timestamp + nonce + other + 盐)` —— PC 端签名与 App 签到页签名
+ * 是**同一个算式**，只是盐值不同，所以两段共用一个实现。
+ * `other` 是 H5 留的预留位（签到恒为空串，PC 有时是路径）。
+ */
+function signHeaderMd5(e, constants) {
+  const salt = signSalt(constants, e.saltKey);
+  const id = e.id ?? e.requestId;
+  if (id === undefined) throw new Error("向量缺 id / requestId");
+  return md5hex(`${salt}${id}${e.timestamp}${e.nonce}${e.other ?? ""}${salt}`);
+}
+
 const VERIFIERS = {
   // —— App 业务接口（形态 B）：两把锁 ——
   signatureSha256: (e) => ({ actual: sha256hex(e.input), expected: e.expect }),
@@ -124,6 +156,49 @@ const VERIFIERS = {
     // 加密方向：IV 前置拼在密文前面
     const payload = b64(Buffer.concat([iv, aesCbcEncrypt(c.BODY_AES_KEY, iv, e.plaintext)]));
     return { actual: payload, expected: e.payloadB64, extra: `方向=${e.direction}` };
+  },
+
+  // —— 签名头（PC 端 `signHeader` 与 App 签到页 `h5Signature` 同一个算式）——
+  //
+  // 两段分开登记（不是一个别名）是有意的：它们的**消费方不同** ——
+  // `signHeader` 由 `mcloud-core` 的签名测试读，`h5Signature` 由
+  // `mcloud-upstream::app_signin` 读。分开写，覆盖汇总里能一眼看出
+  // "签到那条到底验没验"，而不是被合并成一行。
+  signHeader: (e, c) => ({
+    actual: signHeaderMd5(e, c),
+    expected: e.expectMd5,
+    extra: `saltKey=${e.saltKey}${e.other ? ` other=${e.other}` : ""}`,
+  }),
+  h5Signature: (e, c) => ({
+    actual: signHeaderMd5(e, c),
+    expected: e.expectMd5,
+    extra: `saltKey=${e.saltKey} other=${JSON.stringify(e.other ?? "")}`,
+  }),
+
+  /**
+   * `envelopes`：成功 / 失败信封的样本。
+   *
+   * 本脚本能独立验的是**码值归一化**这条规则 —— 顶层 `code` 与 `raw.code` 的关系：
+   * 数字原样；字符串 `"0000"` 归一到 `0`（`Envelope::code()` 的行为，实拍见
+   * `querySpecTokenV2-success`，它的 `raw.code` 是字符串而顶层是数字）。
+   * 其余语义（`success` 优先于 `code` 判失败、`payload` 取 `data|result`）
+   * 由 Rust 侧 `Envelope` 的测试锁定，这里不重复实现 —— 复刻一遍只会得到
+   * 同一个 bug 的两份拷贝。
+   */
+  envelopes: (e) => {
+    if (e.raw === undefined) throw new Error("向量缺 raw");
+    const rawCode = e.raw.code;
+    if (rawCode === undefined) throw new Error("raw 里没有 code");
+    const normalized =
+      typeof rawCode === "string" ? (rawCode === "0000" ? 0 : Number(rawCode)) : rawCode;
+    if (typeof normalized !== "number" || Number.isNaN(normalized)) {
+      throw new Error(`raw.code 无法归一：${JSON.stringify(rawCode)}`);
+    }
+    return {
+      actual: normalized,
+      expected: e.code,
+      extra: `raw.code=${JSON.stringify(rawCode)}`,
+    };
   },
 
   // —— mcloud-sign TS 原版（crypto-vectors.json）——
@@ -204,6 +279,25 @@ const VERIFIERS = {
     const pad = e.input.length % 4 === 0 ? "" : "=".repeat(4 - (e.input.length % 4));
     return { actual: e.input + pad, expected: e.expect };
   },
+
+  // —— smid（cmpassport 设备指纹）——
+  // 这两段是纯 md5 拼接，所以本脚本能用 `node:crypto` **独立**算一遍：
+  // 生成侧用的是 crypto-js，两边同一套输入得到同一个值才算交叉验证。
+  smidString: (e) => {
+    const v = `${e.timeDigits}${md5hex(e.uid)}00`;
+    const actual = `${v}${md5hex(`smsk_web_${v}`).slice(0, 14)}0`;
+    if (e.expectLen !== undefined && actual.length !== e.expectLen) {
+      throw new Error(`长度应为 ${e.expectLen}，实得 ${actual.length}`);
+    }
+    return { actual, expected: e.expect, extra: "时间 14 位 + md5(uid) + 00 + md5 前 14 位 + 0" };
+  },
+  smidPriId: (e) => {
+    const actual = md5hex(e.uid).slice(0, 16);
+    if (e.expectLen !== undefined && actual.length !== e.expectLen) {
+      throw new Error(`长度应为 ${e.expectLen}，实得 ${actual.length}`);
+    }
+    return { actual, expected: e.expect, extra: "md5(uid) 前 16 位 = 上报体的 AES 密钥" };
+  },
 };
 
 /** 段名 → 一句话说明"为什么没验"。没列出来的段会在末尾统一提醒。 */
@@ -212,12 +306,17 @@ const NOT_VERIFIED_REASONS = {
   identity: "同上（含 legacyKey/accountId 派生规则）",
   desEcbNoPaddingB64: "Node 的 des-ecb 需 legacy provider；补位规则（零/空格）未确认",
   desEcbPkcs7Decrypt: "同上",
-  signHeader: "拼串规则（saltKey/other 的位置）未在向量里给出",
   getTn: "字符串变换，规则未在向量里给出",
   gzip: "向量自己声明不做字节级对拍（deflate 输出因实现而异）",
   rsaPkcs1v15B64: "需公钥加密，Node 侧要做 DER 包装，收益低",
   rsaSelfKeyPair: "同上",
   guid32: "uuid→md5 的具体拼接未在向量里给出",
+  smidTn: "getTn 的排序/缩放规则未在本脚本复刻（同 §getTn）；由 Rust 侧 + 生成侧两份实现交叉",
+  smidDesRules: "同 §desEcbNoPaddingB64：Node 的 des-ecb 需 legacy provider，故只由 Rust 侧断言",
+  receiveRevivalReward: "纯响应体计数（cardType/rewardClouds/totalClouds），无算法可复算；由 Rust 侧解析断言",
+  infoV3: "纯响应体（余额 / 签到日历），无算法可复算；由 Rust 侧 parse_sign_in_status 断言",
+  startSignIn: "同上；由 Rust 侧 parse_start_sign_in 断言",
+  prizeRecords: "纯响应体（奖品记录一条），无算法可复算；由 Rust 侧 parse_prize_records 断言",
 };
 
 // ─────────────────── 脱敏扫描（镜像 Rust 侧守卫）───────────────────
@@ -323,7 +422,20 @@ function main() {
     const constants = data.constants ?? {};
     const fileLines = [];
     for (const [section, entries] of Object.entries(data)) {
-      if (!Array.isArray(entries) || entries.length === 0) continue;
+      // `$` 开头的是元数据（`$source` / `$note` / `$evidence`），不是向量段；
+      // `constants` 是各段共用的常量表，也不是段。
+      if (section.startsWith("$") || section === "constants") continue;
+      if (!Array.isArray(entries)) {
+        // 单条实拍的段写成**对象**（`infoV3` / `startSignIn` / `receiveRevivalReward`）。
+        // ⚠ 这些也必须出现在"未覆盖"清单里 —— 早先这里直接 `continue`，
+        // 于是它们在报告里**彻底消失**，整份输出读起来像"所有段都验过了"。
+        // **没验就得说出来**，这是本脚本存在的理由（见文件头）。
+        if (entries && typeof entries === "object") {
+          noVerifier.set(section, [...(noVerifier.get(section) ?? []), file]);
+        }
+        continue;
+      }
+      if (entries.length === 0) continue;
       const verify = VERIFIERS[section];
       if (!verify) {
         noVerifier.set(section, [...(noVerifier.get(section) ?? []), file]);

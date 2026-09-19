@@ -296,17 +296,21 @@ pub fn session_expiry(now: DateTime<chrono::Utc>, days: i64) -> DateTime<chrono:
 ///
 /// 传入的范围应当与**这一次登录写库时用的同一个**。不一致会出现
 /// "读到了某个账号的用户域、却把它发给另一个账号"，那比读不到更糟。
+///
+/// # 为什么收 [`AccountId`] 而不是手机号
+///
+/// 早先的签名收 `&str` 手机号，内部再 `account_label` 一次。改成收 id 是因为
+/// **调用方不总是有手机号**：`mcloud signin --account <掩码id>` 那条路径手上只有 id
+/// （完整号码在 `account_state.phone` 里，而它可能为空）。
+/// 让"从手机号推 id"这件事只发生在真正有手机号的那一处，比在这里再推一次更不容易跑偏。
 pub async fn profile_with_stored_domain_id<S: StateStore>(
     store: &S,
     scope: Scope<'_>,
     profile: AppProfile,
-    phone: &str,
+    account_id: &AccountId,
 ) -> Result<AppProfile, Error> {
-    // 账号 id 的派生与落库那条路同源（`persist_login` 用的就是 `account_label`），
-    // 所以这里不需要"猜"登录之后这个手机号会落成哪个账号。
-    let id = AccountId::new(mcloud_core::account_label(None, phone));
     let domain = store
-        .get_account_state(scope, &id)
+        .get_account_state(scope, account_id)
         .await?
         .and_then(|state| state.user_domain_id)
         .filter(|domain| !domain.is_empty());
@@ -815,7 +819,7 @@ mod tests {
     ///
     /// 不经真实登录：这里要测的是"回填"，把网络脚本一起拖进来只会让失败原因变模糊。
     async fn seed_domain_id(store: &mcloud_io::SqliteStore, user_id: &UserId, domain: &str) {
-        let id = AccountId::new(mcloud_core::account_label(None, "19900000000"));
+        let id = seeded_account_id();
         let mut account = mcloud_core::Account::new(id.as_str());
         account.owner = Some(user_id.clone());
         store
@@ -832,6 +836,12 @@ mod tests {
             .unwrap();
     }
 
+    /// 上面那个种子账号的 id。派生方式与登录落库**同源**（`account_label`），
+    /// 所以这里不需要"猜"某个手机号会落成哪个账号。
+    fn seeded_account_id() -> AccountId {
+        AccountId::new(mcloud_core::account_label(None, "19900000000"))
+    }
+
     /// 回填这条线**为什么存在**：`thirdlogin` 之后 `userDomainId` 就入库了，
     /// 第二次起的 App 请求要带着它（`x-yun-uni`）。没接上之前，已登录的 App
     /// 请求会静默缺这个头（`docs/rust-rewrite-plan.md` §7.2 记的缺口）。
@@ -840,10 +850,14 @@ mod tests {
         let (store, user_id) = seeded_store().await;
         seed_domain_id(&store, &user_id, "1990000000000000001").await;
 
-        let filled =
-            profile_with_stored_domain_id(&store, Scope::user(&user_id), profile(), "19900000000")
-                .await
-                .unwrap();
+        let filled = profile_with_stored_domain_id(
+            &store,
+            Scope::user(&user_id),
+            profile(),
+            &seeded_account_id(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(filled.user_domain_id(), Some("1990000000000000001"));
         // 档案里有值还不算，要真的落到发出去的那个头上
@@ -862,17 +876,17 @@ mod tests {
     #[tokio::test]
     async fn nothing_is_invented_when_the_domain_id_is_absent() {
         let (store, user_id) = seeded_store().await;
-        let phone = "19900000000";
+        let id = seeded_account_id();
 
         // ① 首次登录：库里还没有这个账号
-        let bare = profile_with_stored_domain_id(&store, Scope::user(&user_id), profile(), phone)
+        let bare = profile_with_stored_domain_id(&store, Scope::user(&user_id), profile(), &id)
             .await
             .unwrap();
         assert_eq!(bare.user_domain_id(), None, "查无此账号时不要带 x-yun-uni");
 
         // ② 有账号，但那一列是空串（上游没给 / 旧数据）
         seed_domain_id(&store, &user_id, "").await;
-        let empty = profile_with_stored_domain_id(&store, Scope::user(&user_id), profile(), phone)
+        let empty = profile_with_stored_domain_id(&store, Scope::user(&user_id), profile(), &id)
             .await
             .unwrap();
         assert_eq!(empty.user_domain_id(), None, "空串不等于有值");
@@ -880,7 +894,7 @@ mod tests {
         // ③ 同一个手机号的数据属于别人 —— 按隔离契约读不到，也就不能带出去
         let other = User::new("u2", "bob", "!", mcloud_core::Role::User, fixed_now());
         store.upsert_user(&other).await.unwrap();
-        let alien = profile_with_stored_domain_id(&store, Scope::user(&other.id), profile(), phone)
+        let alien = profile_with_stored_domain_id(&store, Scope::user(&other.id), profile(), &id)
             .await
             .unwrap();
         assert_eq!(alien.user_domain_id(), None, "别人的账号不能回填进来");

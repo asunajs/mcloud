@@ -29,6 +29,17 @@ const path = require("node:path");
  * 自检：`JSON 起始 + jsonLen == 8 + size`，对不上说明偏移猜错了。
  */
 function readArchive(asarPath) {
+  // 参数顺序是 `<子命令> <app.asar> <参数…>`。踩过一次：把子命令的实参写在 asar 前面
+  // （`grep <正则> <app.asar>`），于是拿正则当路径去 open —— 报错是 ENOENT，
+  // 但**没有**任何提示说"你参数顺序反了"。这里补一条，让下次一眼看出来。
+  if (!fs.existsSync(asarPath)) {
+    console.error(
+      `找不到 asar：${asarPath}\n` +
+        `（若你把子命令的实参写在前面了，注意顺序是 <子命令> <app.asar> <参数…>，\n` +
+        `  见本文件头部的用法注释）`,
+    );
+    process.exit(2);
+  }
   const fd = fs.openSync(asarPath, "r");
   try {
     const sizeBuf = Buffer.alloc(8);

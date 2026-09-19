@@ -19,7 +19,7 @@ use rusqlite::Connection;
 /// 但一旦有了外部用户的库文件，"已应用的迁移"就是历史，只能往后追加 ——
 /// 否则老库的 `user_version` 会说谎：它声称已到 v2，而 v2 的语句已经不是你写的那句了。
 /// 判断标准很简单：**有没有可能存在一个不是本机跑出来的库**。没有，就可以改；有，就只能加。
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// 迁移清单：索引 i（0-based）对应版本 i+1。
 ///
@@ -228,6 +228,110 @@ pub const ALL_MIGRATIONS: &[&str] = &[
 
     COMMIT;
     "#,
+    // v5：smid 设备指纹的两份状态（第三方风控服务发下来的那个 `deviceid` 头）
+    //
+    // # 为什么放这张表，却又**不属于** [`AccountState`]
+    //
+    // 它们确实是"这个账号在这台设备上的状态"，与 `account_state` 是同一主体；
+    // 但那张表的写入契约是**整体覆盖**（`upsert_account_state`，见 v2 注释与 model.rs），
+    // 而这两列的写入契约正相反：**换登录凭据不该动它，换指纹只动它**。
+    // 所以列放在一起（同一个主体、同一套归属校验），而**读写走各自独立的方法**，
+    // 并由 `upsert_account_state_leaves_the_smid_columns_alone` 那条单测把关。
+    //
+    // 语义（三条生命周期不同，别混）：
+    //   - `smid_fingerprint`：绑定账号的那份设备特征，JSON 文本。**只在主动更换时变**；
+    //   - `smid_device_id`：最近一次上报换回的 `deviceId`（含 `B` 前缀）。服务端发的，会变，
+    //     只用作下一次上报的 `box` 字段；换指纹时必须清空（旧 id 属于旧长相）。
+    //
+    // 与 v3/v4 同理：ALTER 不能 `IF NOT EXISTS`，必须包事务。
+    r#"
+    BEGIN;
+
+    ALTER TABLE account_state ADD COLUMN smid_fingerprint TEXT;
+    ALTER TABLE account_state ADD COLUMN smid_device_id TEXT;
+
+    COMMIT;
+    "#,
+    // v6：`account_state.phone` —— **完整手机号**，补上"拼不出 `Authorization`"那个缺口
+    //
+    // # 为什么必须存
+    //
+    // `Authorization` 的形状是 `Basic base64("<前缀>:<手机号>:<authToken>")`，
+    // 中间那段是完整手机号，而它**推不出来**：
+    // `accounts.id` 是掩码、`jwt_token` 里没有它、`user_domain_id` 是另一个东西。
+    // 不存的结果就是每个要用这个头的能力都只能让调用方在命令行上重输一遍手机号
+    // （`mcloud signin --phone`）—— 那是缺口不是设计。
+    //
+    // # 为什么放 `account_state` 而不是 `accounts`
+    //
+    // `accounts` 是**直接吐给前端**的展示表，那里面只能有掩码（`phone_masked`）。
+    // `account_state` 里已经有同类的"标识而非凭据"（`user_domain_id`），
+    // 且"列出账号"这条最常走的查询天然不碰这张表。
+    //
+    // # 与 `smid_*` 两列的差别（别把 v6 也做成"独立读写"）
+    //
+    // `smid_*` 之所以要独立读写，是因为它们的生命周期与登录态**相反**；
+    // 而 `phone` 恰恰**跟着登录态走**：它来自这次登录的 `auth` 载荷，
+    // 换登录就该跟着换。所以它**接进** `upsert_account_state` 的整体覆盖列表，
+    // 不另开方法 —— 这条由 `store.rs` 的 `upsert_account_state_writes_the_phone` 把关。
+    //
+    // # 历史行是 NULL
+    //
+    // v6 之前登录的账号这一列是 `NULL`：那是**如实记录"当时没存"**，
+    // 不是"没有手机号"。不要拿掩码去回填 —— 掩码拼出来的头服务端认不认是未知数，
+    // 而这类"能过但不该过"的值一旦过了一次，就会变成没人敢动的隐性依赖。
+    // 补法只有一种：**重登一次**。
+    //
+    // 与前几版同理：ALTER 不能 `IF NOT EXISTS`，必须包事务。
+    r#"
+    BEGIN;
+
+    ALTER TABLE account_state ADD COLUMN phone TEXT;
+
+    COMMIT;
+    "#,
+    // ── v7：`account_state.authorization` ────────────────────────────────────
+    //
+    // 原样存下整个 `Authorization` 头值（`Basic …`）。
+    //
+    // # 为什么是"加一列"而不是"继续用 v6 的 phone 拼"
+    //
+    // v6 的思路是"把缺的那一段（手机号）补上，拼的时候就不缺料了"。
+    // 那是**绕远路**，而且有三处具体的代价：
+    //
+    // 1. **旧数据搬不过来**。旧项目 `mcloud-sign` 的 `asign.json` 里，
+    //    `auth` 存的**就是这个整串**（`Basic base64("mobile:<手机号>:<authToken>")`），
+    //    它一直用得好好的。我们重写时把它解码、拆成三段、只留 token，
+    //    再把手机号单存一列 —— 于是"旧库里有的东西，新库里凑不齐"。
+    // 2. **前缀要靠猜**。`Basic` 后面第一段是 `mobile`（App）还是 `pc`（PC），
+    //    拆开之后就只剩"调用点硬编码"。猜错不会报错，只会发一个服务端不认的头，
+    //    表现成"未登录"（`90001`）—— 指向凭据坏了，而不是指向拼错了。
+    //    整串存则前缀本来就在里面。
+    // 3. **多一处能失败的环节**。三段缺一就用不了；整串只有一个"有没有"。
+    //
+    // # 与 `phone` 的关系
+    //
+    // 两者**冗余但不同源**，各有各的用途，都留着：
+    //   - `authorization`：给上游用的凭据，读取侧**优先**用它；
+    //   - `phone`：给人看的标识（日志里认出"签的是谁"），掩码不够用。
+    //
+    // 写入契约与 `phone` 完全一致：**跟着登录态走**，接进
+    // `upsert_account_state` 的整体覆盖列表，不另开窄写方法。
+    //
+    // # 历史行是 NULL
+    //
+    // v7 之前登录的账号这一列是 `NULL`，读取侧会**退回**"用 `phone` + `jwt_token`
+    // 现拼"那条老路（`SignInCredential::load` 里写明了退路与它的代价）。
+    // 两条路并存是有意的：新行走新路，老行不必为了这一列重登一次。
+    //
+    // 与前几版同理：ALTER 不能 `IF NOT EXISTS`，必须包事务。
+    r#"
+    BEGIN;
+
+    ALTER TABLE account_state ADD COLUMN authorization TEXT;
+
+    COMMIT;
+    "#,
 ];
 
 /// 执行未应用的迁移。
@@ -402,6 +506,137 @@ mod tests {
             !v4.contains("create "),
             "v4 只该是两条 ALTER + 事务包装；建新表属于另一版"
         );
+    }
+
+    /// v5 给 `account_state` 加两份 smid 状态，同样是"两条 ALTER + 事务"。
+    ///
+    /// 断言"只加这两列"是有理由的：这两列的写入契约与这张表原有的**整体覆盖**相反
+    /// （见上面的 v5 注释），所以它们绝不能被顺手接进 `upsert_account_state` 的列表里 ——
+    /// 那条由 `store.rs` 的 `upsert_account_state_leaves_the_smid_columns_alone` 把关。
+    #[test]
+    fn v5_migration_adds_the_smid_columns_in_a_transaction() {
+        let v5 = ALL_MIGRATIONS[4].to_lowercase();
+        assert!(v5.contains("begin;"), "v5 必须在显式事务里执行");
+        assert!(v5.contains("commit;"), "v5 必须有配套的 COMMIT");
+        assert!(
+            v5.contains("alter table account_state add column smid_fingerprint"),
+            "v5 要加绑定的设备特征列"
+        );
+        assert!(
+            v5.contains("alter table account_state add column smid_device_id"),
+            "v5 要加最近拿到的 deviceId 列"
+        );
+        assert!(
+            !v5.contains("create "),
+            "v5 只该是两条 ALTER + 事务包装；建新表属于另一版"
+        );
+    }
+
+    /// v4 老库升到 v5：已有的登录态一行都不能被动过。
+    #[test]
+    fn v4_database_gains_smid_columns_and_keeps_credentials() {
+        let conn = Connection::open_in_memory().unwrap();
+        // 模拟 v4 老库：v1..v4 手工应用，v5 交给 migrate
+        for sql in &ALL_MIGRATIONS[..4] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 4).unwrap();
+        conn.execute(
+            "INSERT INTO accounts (id, nickname, enabled, sort_order, fail_streak) \
+             VALUES ('19****01', '账号2', 1, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO account_state (account_id, jwt_token, device_id, updated_at) \
+             VALUES ('19****01', 'OLD-TOKEN', 'OLD-ENDIN', '2026-09-18T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(account_state)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            columns.iter().any(|c| c == "smid_fingerprint"),
+            "{columns:?}"
+        );
+        assert!(columns.iter().any(|c| c == "smid_device_id"), "{columns:?}");
+
+        // 新列对老行是 NULL：绑定的特征**只能由用户主动生成**，迁移期凭空造一份
+        // 等于替每台老库发明一台设备（与 v3 不给 owner 硬编值是同一条理由）
+        let (jwt, device, fp, smid): (String, String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT jwt_token, device_id, smid_fingerprint, smid_device_id \
+                 FROM account_state WHERE account_id = '19****01'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(jwt, "OLD-TOKEN", "升级不该动凭据");
+        assert_eq!(device, "OLD-ENDIN");
+        assert_eq!(fp, None);
+        assert_eq!(smid, None);
+    }
+
+    /// v6 只加一列 `phone`，且必须包事务（ALTER 无法 `IF NOT EXISTS`）。
+    #[test]
+    fn v6_migration_adds_the_phone_column_in_a_transaction() {
+        let v6 = ALL_MIGRATIONS[5].to_lowercase();
+        assert!(v6.contains("begin;"), "v6 必须在显式事务里执行");
+        assert!(v6.contains("commit;"), "v6 必须有配套的 COMMIT");
+        assert!(
+            v6.contains("alter table account_state add column phone"),
+            "v6 要加完整手机号列"
+        );
+        assert!(
+            !v6.contains("create "),
+            "v6 只该是一条 ALTER + 事务包装；建新表属于另一版"
+        );
+    }
+
+    /// v5 老库升到 v6：`phone` 对老行是 `NULL`，且**不能**从掩码回填。
+    ///
+    /// 断言"是 NULL"而不是"等于某个值"是有意的：`NULL` = 如实记录"当时没存"，
+    /// 拿 `phone_masked`（`19****01`）去填会让 `Authorization` 拼出一个
+    /// **服务端认不认未知**的头 —— 那正是本项目反复踩的"能过但不该过"。
+    #[test]
+    fn v5_database_gains_the_phone_column_without_backfilling_the_mask() {
+        let conn = Connection::open_in_memory().unwrap();
+        for sql in &ALL_MIGRATIONS[..5] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 5).unwrap();
+        conn.execute(
+            "INSERT INTO accounts (id, nickname, phone_masked, enabled, sort_order, fail_streak) \
+             VALUES ('19****01', '账号2', '19****01', 1, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO account_state (account_id, jwt_token, device_id, updated_at) \
+             VALUES ('19****01', 'OLD-TOKEN', 'OLD-ENDIN', '2026-09-18T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let (jwt, phone): (String, Option<String>) = conn
+            .query_row(
+                "SELECT jwt_token, phone FROM account_state WHERE account_id = '19****01'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(jwt, "OLD-TOKEN", "升级不该动凭据");
+        assert_eq!(phone, None, "老行的 phone 必须是 NULL，不许拿掩码回填");
     }
 
     /// `ALTER TABLE ... ADD COLUMN` 是唯一一条无法幂等的语句，验证它被包在事务里。

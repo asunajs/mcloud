@@ -25,9 +25,12 @@
 #![forbid(unsafe_code)]
 
 pub mod app_login;
+pub mod cloud;
 pub mod device;
 pub mod login;
 pub mod migration;
 pub mod payload;
 pub mod session;
+pub mod signin;
+pub mod smid;
 pub mod user;

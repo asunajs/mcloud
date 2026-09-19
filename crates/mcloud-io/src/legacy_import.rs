@@ -39,9 +39,10 @@
 use crate::store::{ImportRecord, SqliteStore};
 use chrono::{DateTime, Utc};
 use mcloud_core::legacy::{
-    LegacyAccountView, LegacyBinding, LegacyConfig, LegacyError, LegacyPipeline, LegacyRun,
-    LegacySchedule, LegacyStep, ReferenceAdvice, describe_legacy_accounts, find_by_label,
-    normalize_exchange_windows, normalize_pipeline_accounts, normalize_webui, parse_rfc3339,
+    LegacyAccountConfig, LegacyAccountView, LegacyBinding, LegacyConfig, LegacyError,
+    LegacyPipeline, LegacyRun, LegacySchedule, LegacyStep, ReferenceAdvice,
+    describe_legacy_accounts, find_by_label, normalize_exchange_windows,
+    normalize_pipeline_accounts, normalize_webui, parse_rfc3339,
 };
 use mcloud_core::{
     Account, AccountId, AccountMode, AccountState, ConfigStore, Error, ExchangeBinding,
@@ -240,6 +241,15 @@ pub struct MigrationReport {
     pub accounts: usize,
     /// 导入的账号登录态数。
     pub account_states: usize,
+    /// **本次实际补上**整串 `Authorization` / 手机号的账号数。
+    ///
+    /// "实际"是刻意的：没有缺口可补的账号不计入。否则第二次运行还会报同样的数字，
+    /// 而用户正是靠这个数字判断"我那个老库补上了吗"。
+    ///
+    /// 与 `account_states` **不是一回事**，也不是它的子集：凭据来自 `asign.json`，
+    /// 登录态来自 `state.json`，两个文件的台账各自独立。老库（v7 之前导过的）
+    /// 会看到 `account_states` 为 0 而这一项非 0 —— 那正是这条回填要修的东西。
+    pub credentials_filled: usize,
     pub schedules: usize,
     pub pipelines: usize,
     /// 导入的运行历史条数。
@@ -257,9 +267,11 @@ impl MigrationReport {
     /// 一行式摘要（可安全进日志：不含任何凭据）。
     pub fn summary(&self) -> String {
         format!(
-            "账号 {} / 登录态 {} / 定时任务 {} / 组合 {} / 历史 {} 条；跳过未变的文件 {} 个；问题 {} 个",
+            "账号 {} / 登录态 {} / 凭据回填 {} / 定时任务 {} / 组合 {} / 历史 {} 条；\
+             跳过未变的文件 {} 个；问题 {} 个",
             self.accounts,
             self.account_states,
+            self.credentials_filled,
             self.schedules,
             self.pipelines,
             self.runs,
@@ -281,6 +293,7 @@ impl MigrationReport {
         serde_json::json!({
             "accounts": self.accounts,
             "accountStates": self.account_states,
+            "credentialsFilled": self.credentials_filled,
             "schedules": self.schedules,
             "pipelines": self.pipelines,
             "runs": self.runs,
@@ -310,13 +323,6 @@ pub enum LegacyImportError {
     /// **这一条是"什么都还没写"的那个失败**：掩码冲突会在任何写入之前中止。
     #[error("账号身份映射失败，已中止迁移且未写入任何数据：{0}")]
     Identity(#[from] LegacyError),
-    /// 库里还没有用户，账号没有人可以归。
-    ///
-    /// 单独成一个变体，是为了让前端能给出**可执行**的提示（"先跑 `mcloud user init`"），
-    /// 而不是把它混进"数据库操作失败"里 —— 后者会让人去查数据库，
-    /// 而这件事跟数据库一点关系都没有。
-    #[error("库里还没有用户，导入的账号将无人可归：请先执行 `mcloud user init`")]
-    NoOwner,
     #[error("数据库操作失败: {0}")]
     Store(#[from] Error),
 }
@@ -413,6 +419,15 @@ pub async fn import_legacy(
         })?;
     }
 
+    // ── 4. 凭据回填：**必须排在所有文件之后**，且不受哈希门控 ──
+    //
+    // 两个"必须"都有理由：
+    //   - 排在 `state.json` 之后：`write_state` 走的是 `upsert_account_state`，
+    //     那是**整体覆盖**（没给的列会被写成 NULL）。先回填再覆盖等于白填。
+    //   - 不受门控：老库的 `state.json` 早就导过了，走门控就永远不会补上。
+    report.credentials_filled =
+        fill_credentials(store, scope, &config.caiyun, &views).await? as usize;
+
     Ok(report)
 }
 
@@ -458,6 +473,80 @@ async fn write_accounts(
         store.upsert_account(scope, &account).await?;
     }
     Ok(views.len() as i64)
+}
+
+/// 把旧 `asign.json` 里的整串 `auth`（与手机号）回填进 `account_state`。
+///
+/// # 为什么单独一步，而不是塞进 `write_accounts` / `write_state`
+///
+/// 那两处写的是**两张不同的表**（`accounts` 与 `account_state`），而且各自被
+/// "源文件哈希没变就跳过"的门控着。凭据回填需要跨过那道门控 —— 理由见下。
+///
+/// # 为什么**不受 `source_changed` 门控**
+///
+/// `write_state` 里那段注释把问题说得很清楚：一条被哈希门控着的回填，对**已经导入过的
+/// 库**永远不会再跑 —— 于是"同一个版本的程序"会产出两种库形态（老库 `NULL`、新库有值），
+/// 而这两种形态在别处长得分毫不差，排障时根本想不到差别在这里。
+///
+/// 所以这里换一条判据：**按状态判**（"这一列空着就填"），不按哈希判。
+/// [`mcloud_core::StateStore::fill_account_credentials`] 只填空缺、不覆盖已有值，
+/// 于是它天然幂等：每次 `migrate` 都跑也无害，而"已经重登过、库里存着更新凭据"的账号
+/// 不会被旧配置里的串盖回去。
+///
+/// # 为什么按**下标**对上号
+///
+/// `describe_legacy_accounts` 是 `configs.iter().enumerate().map(...)`，第 `i` 个视图的
+/// `index` 恒为 `i + 1`。这里断言钉住这个不变量 —— 将来有人往那里面加过滤，应当**当场炸**，
+/// 而不是悄悄把 A 账号的凭据回填到 B 账号头上。
+///
+/// # 什么算"能填的 `auth`"
+///
+/// 只有 [`mcloud_core::auth::parse_auth`] 认得的才算。旧配置里可能留着占位串或半截
+/// 手改过的值，把那种东西存进去，下一次请求会带着一个格式不对的头出去，
+/// **失败长得像"未登录"** —— 那正是这个项目最不想要的错误方向。
+/// 存进去的是 `parse_auth` 规范化后的整串（它会补上可能缺失的 `Basic ` 前缀），
+/// 而不是配置里的原文。
+async fn fill_credentials(
+    store: &SqliteStore,
+    scope: Scope<'_>,
+    configs: &[LegacyAccountConfig],
+    views: &[LegacyAccountView],
+) -> Result<i64> {
+    let mut filled = 0i64;
+    for (position, (config, view)) in configs.iter().zip(views).enumerate() {
+        debug_assert_eq!(
+            view.index,
+            position + 1,
+            "视图顺序必须与配置顺序一致，否则回填会张冠李戴"
+        );
+
+        let authorization = mcloud_core::auth::parse_auth(&config.auth).map(|info| info.auth);
+        let phone = (!view.phone.is_empty()).then_some(view.phone.as_str());
+        if authorization.is_none() && phone.is_none() {
+            continue;
+        }
+
+        // 先看一眼有没有缺口。回填本身是幂等的（重复调用无害），但**报告要诚实** ——
+        // 每次都报"回填了 2 个账号"，这个数字从第二次运行起就彻底失去意义了，
+        // 而它恰恰是用户用来确认"我那个老库补上了吗"的唯一依据。
+        //
+        // 这里读一次再写没有 TOCTOU 风险：写入是"只填空缺"，结果与读到什么无关。
+        let existing = store.get_account_state(scope, &view.account_id).await?;
+        let has_auth = existing
+            .as_ref()
+            .and_then(|s| s.authorization.as_deref())
+            .is_some();
+        let has_phone = existing.as_ref().and_then(|s| s.phone.as_deref()).is_some();
+        if (authorization.is_none() || has_auth) && (phone.is_none() || has_phone) {
+            continue;
+        }
+
+        store
+            .fill_account_credentials(scope, &view.account_id, authorization.as_deref(), phone)
+            .await?;
+        filled += 1;
+    }
+    Ok(filled)
 }
 
 async fn write_state(
@@ -510,6 +599,16 @@ async fn write_state(
             continue;
         };
 
+        // `state.json` 对 `authorization` / `phone` **没有主张** —— 它本来就没有这两个字段
+        //（键才是手机号原文/昵称）。而 `upsert_account_state` 是**整体覆盖**（`None` = 清空），
+        // 直接传 `None` 会先把库里已有的凭据抹掉，再由 [`fill_credentials`] 从 `asign.json`
+        // 补回来 —— 补回来的却是**旧配置里的串**：如果这中间用户重登过一次，
+        // 新鲜凭据就被换成了旧的，而且事后完全看不出发生过什么。
+        //
+        // 所以这里把库里现有的值**原样带过去**：语义上就是"这次快照对这两列没有新信息"。
+        // 于是回填只剩"从无到有"这一种情况，反复跑都安全。
+        let existing = store.get_account_state(scope, account_id).await?;
+
         store
             .upsert_account_state(
                 scope,
@@ -519,6 +618,15 @@ async fn write_state(
                     device_id: state.device_id,
                     user_domain_id: state.user_domain_id,
                     cloud_phone_redpack_token: state.cloud_phone_redpack_token,
+                    // 从 `asign.json` 反填凭据这件事**不在这里做**：这条写入被
+                    // `source_changed(state.json)` 门控着 —— 已经导入过的库不会重跑，
+                    // 于是"同一版程序、两种库形态"（老库 `NULL`、新库有值），
+                    // 而两种形态在别处长得一模一样。
+                    //
+                    // 改由 [`fill_credentials`] 在**所有文件之后**单独跑一遍：那条回填
+                    // 按状态判（"这一列空着就填"）而不是按哈希判，所以老库也会被补上。
+                    authorization: existing.as_ref().and_then(|s| s.authorization.clone()),
+                    phone: existing.as_ref().and_then(|s| s.phone.clone()),
                     // 旧 state.json 没有时间戳字段；"什么时候导入的"看台账
                     updated_at: None,
                 },
@@ -2073,6 +2181,67 @@ mod tests {
         assert_eq!(report.issue_lines().len(), report.issues.len());
     }
 
+    /// 凭据回填要能补**老库**，反复跑要安全，且**绝不把新凭据换成旧的**。
+    ///
+    /// 三条合起来才说明这条回填可以无条件地"每次 `migrate` 都跑"。
+    /// 特别是第三条：`write_state` 走的是整体覆盖，若它把 `authorization` 一起写成
+    /// `NULL`，后面那条回填就会把用户重登后的新串换成 `asign.json` 里的旧串 ——
+    /// 而那时没有任何线索指向这里。
+    #[tokio::test]
+    async fn credentials_backfill_reaches_old_databases_without_downgrading() {
+        let dir = copy_fixtures();
+        let s = store();
+        let source = source_of(&dir);
+
+        // ① 第一次导入：两个账号都补上
+        let first = run_import(&s, &source).await.unwrap();
+        assert_eq!(first.credentials_filled, 2);
+        let before = s
+            .get_account_state(Scope::user(&uid()), &id(ACC_1))
+            .await
+            .unwrap()
+            .unwrap();
+        let stored = before.authorization.clone().expect("整串应已落库");
+
+        // ② 源文件全都没变时再跑一遍：回填**照样执行**（不受哈希门控），但没缺口可补
+        let second = run_import(&s, &source).await.unwrap();
+        assert_eq!(second.accounts, 0);
+        assert_eq!(
+            second.credentials_filled, 0,
+            "没缺口就不该计数 —— 否则这个数字第二次运行起就没有意义了"
+        );
+
+        // ③ 模拟"用户重登了一次"：登录路径是整体覆盖写，这里照做
+        const FRESH: &str = "Basic MjoxOTkwMDAwMDAwMTpGUkVTSC1UT0tFTg==";
+        let mut fresh = before.clone();
+        fresh.authorization = Some(FRESH.into());
+        s.upsert_account_state(Scope::user(&uid()), &fresh)
+            .await
+            .unwrap();
+
+        // ④ 让 `state.json` 变一下，逼 `write_state` 真的跑一次
+        let text = std::fs::read_to_string(PathBuf::from(FIXTURES).join("state.json")).unwrap();
+        let touched = text.replacen('{', "{\n  \"_\": 1,", 1);
+        write_file(&dir, "state.json", &touched);
+
+        let third = run_import(&s, &source).await.unwrap();
+        assert!(
+            !third.skipped_unchanged.contains(&"state.json".to_string()),
+            "state.json 变了，`write_state` 必须真的跑过，否则这条测试测不到东西"
+        );
+        assert_eq!(third.credentials_filled, 0, "库里已有整串，回填不该再动它");
+        let after = s
+            .get_account_state(Scope::user(&uid()), &id(ACC_1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.authorization.as_deref(),
+            Some(FRESH),
+            "重登后的新凭据不能被 asign.json 里的旧串换掉（现在是 {stored:?} 那种）"
+        );
+    }
+
     #[tokio::test]
     async fn state_only_backfills_account_state_not_accounts() {
         let dir = copy_fixtures();
@@ -2120,17 +2289,37 @@ mod tests {
         let report = run_import(&s, &source_of(&dir)).await.unwrap();
 
         assert_eq!(report.account_states, 1, "只有 19900000001 是可用的");
+        assert_eq!(
+            report.credentials_filled, 2,
+            "两个账号在 asign.json 里都有 auth，都该被回填"
+        );
         assert!(
             s.get_account_state(Scope::user(&uid()), &id(ACC_1))
                 .await
                 .unwrap()
                 .is_some()
         );
+        // `19900000002` 在 `state.json` 里是**空条目**（被报出来，没贡献任何登录态），
+        // 但它在 `asign.json` 里有 `auth` —— 于是凭据回填会为它造出一行。
+        //
+        // 这**不是**"凭空造登录态"：`jwt_token` / `device_id` 仍然全是 `NULL`，
+        // 回填进去的只有 `authorization` 与 `phone`，两样都来自 `asign.json`。
+        // 这条断言把界线钉住：空条目贡献 0，凭据回填贡献那两列。
+        let acc2 = s
+            .get_account_state(Scope::user(&uid()), &id(ACC_2))
+            .await
+            .unwrap()
+            .expect("asign.json 里有 auth，回填就该把这一行补上");
+        assert_eq!(acc2.jwt_token, None, "空 state 条目不该贡献任何登录态");
+        assert_eq!(acc2.device_id, None);
+        assert_eq!(acc2.user_domain_id, None);
+        assert_eq!(acc2.phone.as_deref(), Some("19900000002"));
         assert!(
-            s.get_account_state(Scope::user(&uid()), &id(ACC_2))
-                .await
-                .unwrap()
-                .is_none()
+            acc2.authorization
+                .as_deref()
+                .is_some_and(|a| a.starts_with("Basic ")),
+            "存进去的必须是规范化后的整串：{:?}",
+            acc2.authorization
         );
         assert!(
             s.list_accounts(Scope::user(&uid()))

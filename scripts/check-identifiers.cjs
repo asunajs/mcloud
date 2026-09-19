@@ -128,6 +128,10 @@ const VENDOR_SOURCE_PATHS = ["docs/capture/apiServer.js"];
 const TEXT_EXT = new Set([
   ".rs", ".cjs", ".mjs", ".js", ".ts", ".json", ".md", ".toml", ".sh",
   ".yml", ".yaml", ".html", ".css", ".vue", ".txt",
+  // `.py` 是**抓包侧脚本**的语言（`applog-capture.py` / `reqable-capture.py` /
+  // `h5-device-id.py`）—— 它们天天跟真实流量打交道，是最容易把真实标识顺手写进
+  // 字面量的一类文件。漏了它，守卫就漏掉了风险最高的一角。
+  ".py",
 ]);
 
 function trackedFiles() {

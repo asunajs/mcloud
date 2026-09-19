@@ -16,7 +16,7 @@
 use chrono::{DateTime, Utc};
 use mcloud_core::{
     Account, AccountId, AccountState, ClaimedRows, CloudStats, Error, RunRecord, RunStatus, Scope,
-    StateStore, UserId,
+    SmidState, StateStore, UserId,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
@@ -261,6 +261,25 @@ impl StateStore for SqliteStore {
         Ok(rows)
     }
 
+    async fn set_account_cloud(
+        &self,
+        scope: Scope<'_>,
+        id: &AccountId,
+        count: i64,
+        at: DateTime<Utc>,
+    ) -> Result<(), Error> {
+        let conn = self.conn.lock().expect("数据库锁中毒");
+        // 归属检查放在 UPDATE 之前：`Scope::User` 下写别人的账号要报错，
+        // 而不是"UPDATE 影响 0 行"这种看不出对错的静默结果。
+        validate_owned(&conn, scope, id)?;
+        conn.execute(
+            "UPDATE accounts SET cloud_current = ?1, cloud_updated_at = ?2 WHERE id = ?3",
+            params![count, dt_to_string(&at), id.as_str()],
+        )
+        .map_err(map_sqlite)?;
+        Ok(())
+    }
+
     async fn get_account_state(
         &self,
         scope: Scope<'_>,
@@ -271,18 +290,20 @@ impl StateStore for SqliteStore {
         // 而且那条路径上"忘了校验"不会有任何提示
         conn.query_row(
             "SELECT s.account_id, s.jwt_token, s.device_id, s.user_domain_id, \
-             s.cloud_phone_redpack_token, s.updated_at \
+             s.cloud_phone_redpack_token, s.phone, s.authorization, s.updated_at \
              FROM account_state s JOIN accounts a ON a.id = s.account_id \
              WHERE s.account_id = ?1 AND (?2 IS NULL OR a.owner = ?2)",
             params![id.as_str(), scope.owner().map(UserId::as_str)],
             |row| {
-                let updated_at: Option<String> = row.get(5)?;
+                let updated_at: Option<String> = row.get(7)?;
                 Ok(AccountState {
                     account_id: AccountId::new(row.get::<_, String>(0)?),
                     jwt_token: row.get(1)?,
                     device_id: row.get(2)?,
                     user_domain_id: row.get(3)?,
                     cloud_phone_redpack_token: row.get(4)?,
+                    phone: row.get(5)?,
+                    authorization: row.get(6)?,
                     updated_at: updated_at.and_then(dt_from_string),
                 })
             },
@@ -307,13 +328,15 @@ impl StateStore for SqliteStore {
             r#"
             INSERT INTO account_state (
                 account_id, jwt_token, device_id, user_domain_id,
-                cloud_phone_redpack_token, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                cloud_phone_redpack_token, phone, authorization, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             ON CONFLICT(account_id) DO UPDATE SET
                 jwt_token                 = excluded.jwt_token,
                 device_id                 = excluded.device_id,
                 user_domain_id            = excluded.user_domain_id,
                 cloud_phone_redpack_token = excluded.cloud_phone_redpack_token,
+                phone                     = excluded.phone,
+                authorization             = excluded.authorization,
                 updated_at                = excluded.updated_at
             "#,
             params![
@@ -322,8 +345,127 @@ impl StateStore for SqliteStore {
                 state.device_id,
                 state.user_domain_id,
                 state.cloud_phone_redpack_token,
+                state.phone,
+                state.authorization,
                 state.updated_at.as_ref().map(dt_to_string),
             ],
+        )
+        .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    // ── smid：绑定账号的设备特征 + 最近拿到的 deviceId ──
+    //
+    // 这三条**刻意不走** `upsert_account_state` 那张"整体覆盖"的路，理由见
+    // `mcloud_core::SmidState` 与 schema.rs 的 v5 注释：换凭据不该换设备长相。
+
+    async fn get_smid_state(
+        &self,
+        scope: Scope<'_>,
+        id: &AccountId,
+    ) -> Result<Option<SmidState>, Error> {
+        let conn = self.conn.lock().expect("数据库锁中毒");
+        // 与 get_account_state 同一个形状：归属条件写在**同一条语句**里（TOCTOU 的理由见那处）
+        conn.query_row(
+            "SELECT s.account_id, s.smid_fingerprint, s.smid_device_id \
+             FROM account_state s JOIN accounts a ON a.id = s.account_id \
+             WHERE s.account_id = ?1 AND (?2 IS NULL OR a.owner = ?2)",
+            params![id.as_str(), scope.owner().map(UserId::as_str)],
+            |row| {
+                Ok(SmidState {
+                    account_id: AccountId::new(row.get::<_, String>(0)?),
+                    fingerprint_json: row.get(1)?,
+                    device_id: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(map_sqlite)
+    }
+
+    async fn set_smid_fingerprint(
+        &self,
+        scope: Scope<'_>,
+        id: &AccountId,
+        fingerprint_json: &str,
+    ) -> Result<(), Error> {
+        let conn = self.conn.lock().expect("数据库锁中毒");
+        validate_owned(&conn, scope, id)?;
+        // 写特征与清空旧 deviceId 是**同一条语句**：拆成两次调用，中间崩溃就留下
+        // "新长相 + 旧 id"，而这两列各自都合法，事后看不出发生过什么。
+        conn.execute(
+            r#"
+            INSERT INTO account_state (account_id, smid_fingerprint, smid_device_id)
+            VALUES (?1, ?2, NULL)
+            ON CONFLICT(account_id) DO UPDATE SET
+                smid_fingerprint = excluded.smid_fingerprint,
+                smid_device_id   = NULL
+            "#,
+            params![id.as_str(), fingerprint_json],
+        )
+        .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    async fn set_smid_device_id(
+        &self,
+        scope: Scope<'_>,
+        id: &AccountId,
+        device_id: &str,
+    ) -> Result<(), Error> {
+        let conn = self.conn.lock().expect("数据库锁中毒");
+        validate_owned(&conn, scope, id)?;
+        // 只碰这一列，**不动 updated_at**：那一列记的是"登录态快照的时间"，
+        // 一次指纹上报不是新快照（把它刷成 now，会让人以为这个账号刚重新登录过）。
+        conn.execute(
+            r#"
+            INSERT INTO account_state (account_id, smid_device_id)
+            VALUES (?1, ?2)
+            ON CONFLICT(account_id) DO UPDATE SET
+                smid_device_id = excluded.smid_device_id
+            "#,
+            params![id.as_str(), device_id],
+        )
+        .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    /// 把账号**缺**的 `authorization` / `phone` 两列填上 —— 只碰这两列，
+    /// **不动 `updated_at`**，也**不覆盖已有值**。
+    ///
+    /// # 为什么 `COALESCE` 的两边是反的
+    ///
+    /// 写惯了 `= excluded.x` 的人会本能地把 `excluded` 放前面，那样就成了"有值就覆盖"。
+    /// 这里要的是**填空缺**：已有值优先，`excluded` 只在那一列是 `NULL` 时才生效。
+    /// 顺序反了不会报错，只会让"每次 `migrate` 都重跑的回填"把重登后的新凭据
+    /// 用旧配置里的串盖回去 —— 而且事后完全看不出发生过什么。
+    ///
+    /// 入参 `None` 的语义是"这一列我没有可填的"，与 `Some` 在列已填时**行为相同**。
+    ///
+    /// # 为什么 `INSERT` 分支也不怕
+    ///
+    /// 历史账号可能**根本没有 `account_state` 行**（v6 之前只登过、没上报过指纹）。
+    /// 那时插入的是一行"只有这两列"的状态，其余列按 `NULL` 落 —— 与
+    /// `upsert_account_state` 的整体覆盖语义不冲突（它本来就是覆盖）。
+    async fn fill_account_credentials(
+        &self,
+        scope: Scope<'_>,
+        id: &AccountId,
+        authorization: Option<&str>,
+        phone: Option<&str>,
+    ) -> Result<(), Error> {
+        let conn = self.conn.lock().expect("数据库锁中毒");
+        validate_owned(&conn, scope, id)?;
+        // 刻意**不写 updated_at**：那一列是"登录态快照的时间"，补一个缺口不是新快照。
+        conn.execute(
+            r#"
+            INSERT INTO account_state (account_id, authorization, phone)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(account_id) DO UPDATE SET
+                authorization = COALESCE(account_state.authorization, excluded.authorization),
+                phone         = COALESCE(account_state.phone,         excluded.phone)
+            "#,
+            params![id.as_str(), authorization, phone],
         )
         .map_err(map_sqlite)?;
         Ok(())
@@ -572,6 +714,7 @@ fn run_status_from_str(value: &str) -> RunStatus {
 mod tests {
     use super::*;
     use crate::store::schema::SCHEMA_VERSION;
+    use chrono::TimeZone;
     use mcloud_core::UserStore;
     use mcloud_core::pure;
 
@@ -669,6 +812,72 @@ mod tests {
         assert_eq!(all.len(), 1, "重复写入不应产生第二条账号");
         assert_eq!(all[0].cloud_current, Some(1300));
         assert_eq!(all[0].fail_streak, 2);
+    }
+
+    /// 窄写的意义：只刷余额两列，不把"读出来时"的其余列一起写回去。
+    ///
+    /// 反例很具体 —— 若这里改用 [`StateStore::upsert_account`]（整行覆盖），
+    /// 调用方就得"读整行 → 改余额 → 写回"，而读与写之间别人改的昵称
+    /// 会被**静默写回旧值**：一个只在列表页显示错名字的 bug，查起来毫无头绪。
+    #[tokio::test]
+    async fn set_account_cloud_touches_only_the_two_cloud_columns() {
+        let s = store_with_user().await;
+        let mut acc = account("acc-1");
+        acc.cloud_current = Some(1286);
+        acc.fail_streak = 3;
+        s.upsert_account(Scope::user(&uid()), &acc).await.unwrap();
+
+        let at = Utc.with_ymd_and_hms(2026, 9, 19, 6, 0, 0).unwrap();
+        s.set_account_cloud(Scope::user(&uid()), &AccountId::new("acc-1"), 5392, at)
+            .await
+            .unwrap();
+
+        let loaded = s
+            .get_account(Scope::user(&uid()), &AccountId::new("acc-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.cloud_current, Some(5392));
+        assert_eq!(loaded.cloud_updated_at, Some(at));
+        assert_eq!(
+            loaded.nickname.as_deref(),
+            Some("账号2"),
+            "昵称不该被顺手覆盖"
+        );
+        assert_eq!(loaded.fail_streak, 3, "健康度不该被顺手清零");
+        assert!(loaded.enabled);
+        assert_eq!(loaded.owner.as_ref(), Some(&uid()));
+    }
+
+    #[tokio::test]
+    async fn set_account_cloud_refuses_a_foreign_account() {
+        let s = store_with_user().await;
+        let mut acc = account("acc-1");
+        acc.cloud_current = Some(1286);
+        s.upsert_account(Scope::user(&uid()), &acc).await.unwrap();
+
+        let at = Utc.with_ymd_and_hms(2026, 9, 19, 6, 0, 0).unwrap();
+        let err = s
+            .set_account_cloud(
+                Scope::user(&UserId::new("别人")),
+                &AccountId::new("acc-1"),
+                5392,
+                at,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.kind(), mcloud_core::ErrorKind::NotFound);
+        let loaded = s
+            .get_account(Scope::user(&uid()), &AccountId::new("acc-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.cloud_current,
+            Some(1286),
+            "被拒的写入不该改到任何东西"
+        );
     }
 
     #[tokio::test]
@@ -957,6 +1166,38 @@ mod tests {
                 .is_some()
         );
 
+        // ②b smid 两列：同理。这里的后果比登录态更隐蔽 ——
+        //      alice 若写得进 bob 的账号，就是替 bob 的账号凭空认下一台设备
+        assert_eq!(
+            s.set_smid_fingerprint(Scope::user(&alice), &AccountId::new("acc-b"), FP_V1)
+                .await
+                .unwrap_err()
+                .kind(),
+            mcloud_core::ErrorKind::NotFound
+        );
+        assert_eq!(
+            s.set_smid_device_id(Scope::user(&alice), &AccountId::new("acc-b"), DEVICE_ID_1)
+                .await
+                .unwrap_err()
+                .kind(),
+            mcloud_core::ErrorKind::NotFound
+        );
+        s.set_smid_fingerprint(Scope::user(&bob), &AccountId::new("acc-b"), FP_V1)
+            .await
+            .unwrap();
+        assert!(
+            s.get_smid_state(Scope::user(&alice), &AccountId::new("acc-b"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            s.get_smid_state(Scope::user(&bob), &AccountId::new("acc-b"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+
         // ③ 云朵快照：同理
         let stats = pure::next_cloud_stats(&AccountId::new("acc-b"), "2026-09-15", 100, &[]);
         assert_eq!(
@@ -1116,6 +1357,22 @@ mod tests {
                 .len(),
             1
         );
+
+        // ③b smid 两列：同理。CLI 侧的 `mcloud smid` 就是本地范围 ——
+        //      拿着库文件的人本来就能改所有账号的设备长相，这与隔离不矛盾
+        s.set_smid_fingerprint(Scope::Local, &AccountId::new("acc-b"), FP_V1)
+            .await
+            .unwrap();
+        s.set_smid_device_id(Scope::Local, &AccountId::new("acc-b"), DEVICE_ID_1)
+            .await
+            .unwrap();
+        let smid = s
+            .get_smid_state(Scope::Local, &AccountId::new("acc-b"))
+            .await
+            .unwrap()
+            .expect("本地范围读得到别人的两列");
+        assert_eq!(smid.fingerprint_json.as_deref(), Some(FP_V1));
+        assert_eq!(smid.device_id.as_deref(), Some(DEVICE_ID_1));
     }
 
     /// 本地范围能写**无主**账号 —— 这是"先 migrate / 先 login 再 init"能成立的关键。
@@ -1257,6 +1514,468 @@ mod tests {
             all.len(),
             1,
             "重启后数据必须仍在（原 TS 版运行历史仅存内存）"
+        );
+    }
+
+    // ── smid 两列 ───────────────────────────────────────────────────────────
+    //
+    // 这一组的分量比看上去重：`SmidState` 与 `AccountState` 的写入契约**相反**
+    // （前者窄写、后者整体覆盖），而这个相反只写在注释和 SQL 里，编译器看不见。
+    // 下面几条就是它唯一的执行力来源 —— 尤其 `upsert_account_state_leaves_the_smid_columns_alone`，
+    // schema.rs 的 v5 注释直接点名了它。
+
+    /// 探针用的设备特征文本。存储层**从不解析**它（`SmidState` 的"这一层只搬文本"），
+    /// 所以随手给一段任意 JSON 就是合法的 —— 这本身也是那条契约的断言之一。
+    const FP_V1: &str = r#"{"ua":"UA-v1","canvas":"aaaa1111"}"#;
+    const FP_V2: &str = r#"{"ua":"UA-v2","canvas":"bbbb2222"}"#;
+
+    /// 合成 deviceId（`199` 段，见脱敏约定）。
+    const DEVICE_ID_1: &str = "B1990000000000001";
+
+    /// 合成整串 `Authorization`（`199` 段手机号，见脱敏约定）。
+    ///
+    /// 形状与真实值一致：`Basic base64("<前缀>:<手机号>:<token>")`。
+    /// 这一列存的是**原文**，所以测试里也照原文比 —— 不做任何解析。
+    const AUTH_V1: &str = "Basic MjoxOTkwMDAwMDAwMTphdXRoLXYx";
+
+    /// 另一个合成整串，专用来验证"回填不覆盖已有值"。
+    const AUTH_V2: &str = "Basic MjoxOTkwMDAwMDAwMjphdXRoLXYy";
+
+    #[tokio::test]
+    async fn smid_state_roundtrips_and_is_absent_before_first_bind() {
+        let s = store_with_user().await;
+        put_account(&s, "acc-1").await;
+        let id = AccountId::new("acc-1");
+
+        // 没上报过的账号：整行都还不存在，读到的是 None 而不是"空状态"
+        let never = s.get_smid_state(Scope::user(&uid()), &id).await.unwrap();
+        assert!(never.is_none(), "未绑定不该伪造一个空 SmidState");
+
+        s.set_smid_fingerprint(Scope::user(&uid()), &id, FP_V1)
+            .await
+            .unwrap();
+        let got = s
+            .get_smid_state(Scope::user(&uid()), &id)
+            .await
+            .unwrap()
+            .expect("写完应读得到");
+        assert_eq!(got.account_id, id);
+        assert_eq!(got.fingerprint_json.as_deref(), Some(FP_V1));
+        assert_eq!(got.device_id, None, "刚绑定还没有 deviceId");
+
+        s.set_smid_device_id(Scope::user(&uid()), &id, DEVICE_ID_1)
+            .await
+            .unwrap();
+        let got = s
+            .get_smid_state(Scope::user(&uid()), &id)
+            .await
+            .unwrap()
+            .expect("有状态");
+        assert_eq!(
+            got.fingerprint_json.as_deref(),
+            Some(FP_V1),
+            "特征不该被 deviceId 写入碰掉"
+        );
+        assert_eq!(got.device_id.as_deref(), Some(DEVICE_ID_1));
+    }
+
+    /// 换指纹必须连带清掉旧 deviceId —— 旧 id 是**旧长相**在风控那边换来的。
+    #[tokio::test]
+    async fn rotating_the_fingerprint_clears_the_stale_device_id() {
+        let s = store_with_user().await;
+        put_account(&s, "acc-1").await;
+        let id = AccountId::new("acc-1");
+        s.set_smid_fingerprint(Scope::user(&uid()), &id, FP_V1)
+            .await
+            .unwrap();
+        s.set_smid_device_id(Scope::user(&uid()), &id, DEVICE_ID_1)
+            .await
+            .unwrap();
+
+        s.set_smid_fingerprint(Scope::user(&uid()), &id, FP_V2)
+            .await
+            .unwrap();
+        let got = s
+            .get_smid_state(Scope::user(&uid()), &id)
+            .await
+            .unwrap()
+            .expect("有状态");
+        assert_eq!(got.fingerprint_json.as_deref(), Some(FP_V2));
+        assert_eq!(
+            got.device_id, None,
+            "新长相配旧 id 会被风控认成同一台设备，比没有 id 更糟"
+        );
+    }
+
+    /// 窄写的另一面：`set_smid_*` 不能顺手清掉登录态，也不能刷 `updated_at`。
+    ///
+    /// `updated_at` 的语义是"登录态快照的时间"。一次指纹上报不是新快照 ——
+    /// 把它刷成 now，会让人以为这个账号刚重新登录过。
+    #[tokio::test]
+    async fn smid_writes_leave_credentials_and_updated_at_alone() {
+        let s = store_with_user().await;
+        put_account(&s, "acc-1").await;
+        let id = AccountId::new("acc-1");
+        let at = Utc.with_ymd_and_hms(2026, 9, 18, 0, 0, 0).unwrap();
+        s.upsert_account_state(
+            Scope::user(&uid()),
+            &AccountState {
+                account_id: id.clone(),
+                jwt_token: Some("JWT-1".into()),
+                device_id: Some("own-install-id-ENDIN".into()),
+                user_domain_id: Some("domain-1".into()),
+                cloud_phone_redpack_token: None,
+                phone: Some("19900000001".into()),
+                authorization: Some(AUTH_V1.into()),
+                updated_at: Some(at),
+            },
+        )
+        .await
+        .unwrap();
+
+        s.set_smid_fingerprint(Scope::user(&uid()), &id, FP_V1)
+            .await
+            .unwrap();
+        s.set_smid_device_id(Scope::user(&uid()), &id, DEVICE_ID_1)
+            .await
+            .unwrap();
+
+        let state = s
+            .get_account_state(Scope::user(&uid()), &id)
+            .await
+            .unwrap()
+            .expect("登录态还在");
+        assert_eq!(state.jwt_token.as_deref(), Some("JWT-1"));
+        assert_eq!(state.device_id.as_deref(), Some("own-install-id-ENDIN"));
+        assert_eq!(state.user_domain_id.as_deref(), Some("domain-1"));
+        assert_eq!(
+            state.authorization.as_deref(),
+            Some(AUTH_V1),
+            "整串凭据也得原样留着 —— 它是签到唯一需要的那个头"
+        );
+        assert_eq!(
+            state.updated_at,
+            Some(at),
+            "smid 写入不该把登录态时间刷成 now"
+        );
+    }
+
+    /// 回填是**只填空缺**：已有值的列原样保留，哪怕调用方递了一个新值上来。
+    ///
+    /// 这条是回填能"每次 `migrate` 都跑"的前提。语义写成"有值就覆盖"也不会报错，
+    /// 只会在某次迁移时把用户重登后的新凭据换成 `asign.json` 里的旧串 ——
+    /// 而那时没有任何线索指向这里。
+    #[tokio::test]
+    async fn fill_account_credentials_only_fills_the_blanks() {
+        let s = store_with_user().await;
+        put_account(&s, "acc-1").await;
+        let id = AccountId::new("acc-1");
+
+        // ① 行都不存在时：两列都填上（历史账号可能压根没登录态行）
+        s.fill_account_credentials(Scope::user(&uid()), &id, Some(AUTH_V1), Some("19900000001"))
+            .await
+            .unwrap();
+        let state = s
+            .get_account_state(Scope::user(&uid()), &id)
+            .await
+            .unwrap()
+            .expect("回填应当把行造出来");
+        assert_eq!(state.authorization.as_deref(), Some(AUTH_V1));
+        assert_eq!(state.phone.as_deref(), Some("19900000001"));
+        assert_eq!(state.jwt_token, None, "回填不碰别的列");
+        assert_eq!(state.updated_at, None, "补缺口不是新快照");
+
+        // ② 已有值时：递新值上去也必须**不动**它
+        s.fill_account_credentials(Scope::user(&uid()), &id, Some(AUTH_V2), Some("19900000002"))
+            .await
+            .unwrap();
+        let state = s
+            .get_account_state(Scope::user(&uid()), &id)
+            .await
+            .unwrap()
+            .expect("有登录态");
+        assert_eq!(
+            state.authorization.as_deref(),
+            Some(AUTH_V1),
+            "已有凭据必须原样保留 —— 覆盖它就是把新登录换成旧的"
+        );
+        assert_eq!(state.phone.as_deref(), Some("19900000001"));
+
+        // ③ `None` = "这一列我没有可填的"，不该把已有值清成 NULL
+        s.fill_account_credentials(Scope::user(&uid()), &id, None, None)
+            .await
+            .unwrap();
+        let state = s
+            .get_account_state(Scope::user(&uid()), &id)
+            .await
+            .unwrap()
+            .expect("有登录态");
+        assert_eq!(state.authorization.as_deref(), Some(AUTH_V1));
+        assert_eq!(state.phone.as_deref(), Some("19900000001"));
+    }
+
+    /// 回填的归属检查：不能拿本地范围以外的手去补别人的凭据。
+    #[tokio::test]
+    async fn fill_account_credentials_requires_an_owned_account() {
+        let s = store_with_user().await;
+        put_account(&s, "acc-1").await;
+        let alice = uid();
+        let bob = UserId::new("someone-else");
+
+        // 别人的账号：拒
+        assert_eq!(
+            s.fill_account_credentials(
+                Scope::user(&bob),
+                &AccountId::new("acc-1"),
+                Some(AUTH_V1),
+                None
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+            mcloud_core::ErrorKind::NotFound
+        );
+        // 不存在的账号：也拒（否则就是"给未来那个同名账号预定凭据"）
+        assert_eq!(
+            s.fill_account_credentials(
+                Scope::user(&alice),
+                &AccountId::new("no-such"),
+                Some(AUTH_V1),
+                None
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+            mcloud_core::ErrorKind::NotFound
+        );
+    }
+
+    /// **schema.rs 的 v5 注释点名的那条**：整体覆盖的登录态写入必须绕开这两列。
+    ///
+    /// 现实路径很平常：重新登录 → `upsert_account_state`（新快照，`jwt_token` 之外全是
+    /// `None`）。如果这两列被顺手接进那条 UPDATE 的列表里，绑定就白做了 ——
+    /// 而登录路径根本不知道它们存在，出事也不会有人怀疑到这里。
+    #[tokio::test]
+    async fn upsert_account_state_leaves_the_smid_columns_alone() {
+        let s = store_with_user().await;
+        put_account(&s, "acc-1").await;
+        let id = AccountId::new("acc-1");
+        s.set_smid_fingerprint(Scope::user(&uid()), &id, FP_V1)
+            .await
+            .unwrap();
+        s.set_smid_device_id(Scope::user(&uid()), &id, DEVICE_ID_1)
+            .await
+            .unwrap();
+
+        // 重新登录：一份只带新 token 的快照，其余字段全是 None
+        s.upsert_account_state(
+            Scope::user(&uid()),
+            &AccountState {
+                account_id: id.clone(),
+                jwt_token: Some("JWT-2".into()),
+                ..AccountState::new("acc-1")
+            },
+        )
+        .await
+        .unwrap();
+
+        let smid = s
+            .get_smid_state(Scope::user(&uid()), &id)
+            .await
+            .unwrap()
+            .expect("覆盖登录态之后，smid 两列必须原样还在");
+        assert_eq!(smid.fingerprint_json.as_deref(), Some(FP_V1));
+        assert_eq!(smid.device_id.as_deref(), Some(DEVICE_ID_1));
+        // 顺带确认覆盖本身生效了（否则上一条断言可能只是"没写进去"的假象）
+        let state = s
+            .get_account_state(Scope::user(&uid()), &id)
+            .await
+            .unwrap()
+            .expect("有登录态");
+        assert_eq!(state.jwt_token.as_deref(), Some("JWT-2"));
+        assert_eq!(state.user_domain_id, None, "整体覆盖的语义没被改坏");
+    }
+
+    /// **schema.rs 的 v6 注释点名的那条**：`phone` 与 `smid_*` 相反，**必须**跟着登录态走。
+    ///
+    /// 这条与上一条是同一个坑的两面：把 `phone` 也做成"独立读写"，
+    /// 重新登录（换了个手机号）之后库里就会留着**上一个号**，
+    /// 而 `Authorization` 会被拼成 `新 token + 旧号码` —— 一个服务端只会回
+    /// "未登录"的、看不出根因的组合。
+    #[tokio::test]
+    async fn upsert_account_state_writes_the_phone() {
+        let s = store_with_user().await;
+        put_account(&s, "acc-1").await;
+        let id = AccountId::new("acc-1");
+
+        // 首次登录：写入完整手机号
+        s.upsert_account_state(
+            Scope::user(&uid()),
+            &AccountState {
+                account_id: id.clone(),
+                jwt_token: Some("JWT-1".into()),
+                phone: Some("19900000001".into()),
+                ..AccountState::new("acc-1")
+            },
+        )
+        .await
+        .unwrap();
+        let state = s
+            .get_account_state(Scope::user(&uid()), &id)
+            .await
+            .unwrap()
+            .expect("有登录态");
+        assert_eq!(state.phone.as_deref(), Some("19900000001"));
+
+        // 重新登录换了号：旧号码必须被覆盖掉，不能留下
+        s.upsert_account_state(
+            Scope::user(&uid()),
+            &AccountState {
+                account_id: id.clone(),
+                jwt_token: Some("JWT-2".into()),
+                phone: Some("19900000002".into()),
+                ..AccountState::new("acc-1")
+            },
+        )
+        .await
+        .unwrap();
+        let state = s
+            .get_account_state(Scope::user(&uid()), &id)
+            .await
+            .unwrap()
+            .expect("有登录态");
+        assert_eq!(
+            state.phone.as_deref(),
+            Some("19900000002"),
+            "换号后旧号码不许留在库里"
+        );
+
+        // 快照里没给手机号 = "上游这次没给"，写成 NULL 而不是保留旧值
+        s.upsert_account_state(
+            Scope::user(&uid()),
+            &AccountState {
+                account_id: id.clone(),
+                jwt_token: Some("JWT-3".into()),
+                ..AccountState::new("acc-1")
+            },
+        )
+        .await
+        .unwrap();
+        let state = s
+            .get_account_state(Scope::user(&uid()), &id)
+            .await
+            .unwrap()
+            .expect("有登录态");
+        assert_eq!(state.phone, None, "整体覆盖语义：没给就是 NULL");
+    }
+
+    /// 手机号要活过重启 —— 它只在登录时写一次，丢了就得重登才能拿回来。
+    #[tokio::test]
+    async fn account_state_phone_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcloud.db");
+        let id = AccountId::new("acc-1");
+
+        {
+            let s = SqliteStore::open(&path).unwrap();
+            s.upsert_user(&mcloud_core::User::new(
+                TEST_USER,
+                TEST_USER,
+                "!",
+                mcloud_core::Role::Admin,
+                Utc::now(),
+            ))
+            .await
+            .unwrap();
+            s.upsert_account(Scope::user(&uid()), &account("acc-1"))
+                .await
+                .unwrap();
+            s.upsert_account_state(
+                Scope::user(&uid()),
+                &AccountState {
+                    account_id: id.clone(),
+                    jwt_token: Some("JWT-1".into()),
+                    phone: Some("19900000001".into()),
+                    ..AccountState::new("acc-1")
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let s = SqliteStore::open(&path).unwrap();
+        let got = s
+            .get_account_state(Scope::user(&uid()), &id)
+            .await
+            .unwrap()
+            .expect("重启后仍有登录态");
+        assert_eq!(got.phone.as_deref(), Some("19900000001"));
+    }
+
+    /// 两列都要活过重启：绑定是一次性的事，丢了就等于悄悄换了台设备。
+    #[tokio::test]
+    async fn smid_state_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcloud.db");
+        let id = AccountId::new("acc-1");
+
+        {
+            let s = SqliteStore::open(&path).unwrap();
+            s.upsert_user(&mcloud_core::User::new(
+                TEST_USER,
+                TEST_USER,
+                "!",
+                mcloud_core::Role::Admin,
+                Utc::now(),
+            ))
+            .await
+            .unwrap();
+            s.upsert_account(Scope::user(&uid()), &account("acc-1"))
+                .await
+                .unwrap();
+            s.set_smid_fingerprint(Scope::user(&uid()), &id, FP_V1)
+                .await
+                .unwrap();
+            s.set_smid_device_id(Scope::user(&uid()), &id, DEVICE_ID_1)
+                .await
+                .unwrap();
+        }
+
+        let s = SqliteStore::open(&path).unwrap();
+        let got = s
+            .get_smid_state(Scope::user(&uid()), &id)
+            .await
+            .unwrap()
+            .expect("重启后两列都还在");
+        assert_eq!(got.fingerprint_json.as_deref(), Some(FP_V1));
+        assert_eq!(got.device_id.as_deref(), Some(DEVICE_ID_1));
+    }
+
+    /// 没有归属账号就没有 smid 状态：写入被拒，而不是凭空造一行登录态。
+    #[tokio::test]
+    async fn smid_writes_require_an_owned_account() {
+        let s = store_with_user().await;
+        let missing = AccountId::new("no-such-account");
+        assert_eq!(
+            s.set_smid_fingerprint(Scope::user(&uid()), &missing, FP_V1)
+                .await
+                .unwrap_err()
+                .kind(),
+            mcloud_core::ErrorKind::NotFound
+        );
+        assert_eq!(
+            s.set_smid_device_id(Scope::user(&uid()), &missing, DEVICE_ID_1)
+                .await
+                .unwrap_err()
+                .kind(),
+            mcloud_core::ErrorKind::NotFound,
+            "往不存在的账号上挂 deviceId = 给未来那个同名账号预定设备"
+        );
+        assert!(
+            s.get_smid_state(Scope::user(&uid()), &missing)
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 }

@@ -2,7 +2,7 @@
   "$generator": "scripts/gen-crypto-vectors.cjs",
   "$source": "mcloud-sign TS 原版：crypto-js 4.x + node:crypto + CompressionStream",
   "$cryptoJsVersion": "4.2.0",
-  "$note": "Rust 侧（crates/mcloud-core/src/crypto.rs）必须复现本文件全部 expect* 字段。随机性路径（动态 IV、RSA PKCS#1 v1.5 填充）无法字节级对拍，改为单向/自持密钥验证，见对应条目的 note。",
+  "$note": "Rust 侧（crates/mcloud-core/src/crypto.rs）必须复现本文件全部 expect* 字段。随机性路径（动态 IV、RSA PKCS#1 v1.5 填充）无法字节级对拍，改为单向/自持密钥验证，见对应条目的 note。补（2026-09-19）：smid* 四段由 crates/mcloud-upstream/src/smid.rs 的测试消费（它们的落点在那里，不在 core）。",
   "constants": {
     "SIGN_SALT_MAP": {
       "1": "seedMdYYLIZfbCxg",
@@ -10,7 +10,12 @@
     },
     "REFRESH_TOKEN_KEY": "2olBaQGYnEKoStYomsd1n7ax",
     "AES_FIXED_IV": "0102030405060708",
-    "SKLAND_PUBLIC_KEY": "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC8KHAcHbkCn5rxGgGJE+07tY+pt86D/oZ7sA51FaEBv2jgno2TI9zHJVYKJynmiKpixgwUcv93EfWIrU/p/UCs5Vu+odS3I4UBp3R7IZ1A0W01FkumAHYW2PQpMm8ueQKPLUq/idkpG/9b2JDv/qU+Ks36nbUPwlW4CjdfrV+V9QIDAQAB"
+    "SKLAND_PUBLIC_KEY": "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC8KHAcHbkCn5rxGgGJE+07tY+pt86D/oZ7sA51FaEBv2jgno2TI9zHJVYKJynmiKpixgwUcv93EfWIrU/p/UCs5Vu+odS3I4UBp3R7IZ1A0W01FkumAHYW2PQpMm8ueQKPLUq/idkpG/9b2JDv/qU+Ks36nbUPwlW4CjdfrV+V9QIDAQAB",
+    "SM_ORGANIZATION": "FXlyfmWg2AzwbrxDKSv5",
+    "SM_APP_ID": "default",
+    "SM_PLUGINS": "ChromePDFViewerPortableDocumentFormatinternal-pdf-viewer2,ChromiumPDFViewerPortableDocumentFormatinternal-pdf-viewer2,MicrosoftEdgePDFViewerPortableDocumentFormatinternal-pdf-viewer2,PDFViewerPortableDocumentFormatinternal-pdf-viewer2,WebKitbuilt-inPDFPortableDocumentFormatinternal-pdf-viewer2",
+    "SM_PAGE_URL": "https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&sourceid=1002&token=",
+    "SM_UA": "Mozilla/5.0 (Linux; Android 14; 22041216C Build/TP1A.220624.014; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/128.0.6613.88 Mobile Safari/537.36"
   },
   "md5": [
     {
@@ -395,9 +400,9 @@
       "name": "random-iv-directional",
       "key": "2olBaQGYnEKoStYomsd1n7ax",
       "keyBytes": 24,
-      "ivHex": "e3e02d00667a42c00367f37d394c5e54",
+      "ivHex": "9527413af55779f2c17522565fde7c1f",
       "plaintext": "{\"refreshToken\":\"FAKE_REFRESH_TOKEN_FOR_VECTOR\",\"userDomainId\":\"FAKE_USER_DOMAIN_ID\",\"at\":1700000000}",
-      "expectB64": "4+AtAGZ6QsADZ/N9OUxeVOj+BaFMyk87MBZE3kZjpSb8HBpZ2jlEWikZViexI9xyF/YSeaHoz6uad2vdfsdpyVvE+WlN58tdtXdR9UGvb1Aai3am5V1NJ3DJWCD5RIE6Zdm/zs8hFPNQMJv1NnQd11YYZPV5ozMXa1Lxk4KFTfE=",
+      "expectB64": "lSdBOvVXefLBdSJWX958H/ejMAkGQs7+p7eBl142oER+EKwZvqu1XVtt+90+I2Lq/YQ7WJFVsoPaSvW8Y7CMGEQExBVusAoeCQt8D+guFjeJ9srBXS4njYHcNfrvr2sB4wOWPp4a9gnOrAzZX4S6s7ZfNROtZ/Tthbb/gETuKY4=",
       "byteExact": false,
       "note": "IV 随机，无法字节级对拍；Rust 必须能用同一 key 解出 plaintext"
     }
@@ -410,8 +415,8 @@
       "byteExact": false,
       "note": "PKCS#1 v1.5 加密含随机填充，不做字节级对拍；只断言输出 128 字节且密文整数值 < n",
       "samples": [
-        "nSDkI8R5IE+9CXct/OiEu4Se1yoMWoq2CPoJpisIhEQSLMhnZU4GRNrlNYJpNyyKSV3T0EvHivrdb1sGqg75wbMevGZrZ3X6qDp4bqN26aaMHMtjEIZlwGpUMMVVC5zSzMGswVbS8yVZNZ44QvFhbSuD17haJ0Wdb3ESUQi0fdE=",
-        "k5oQE1/5TB8mnJIQ7asPZ5HK5wktVtX2P8Kvd2E9Zm1CyvcrousWrcl5I6V6Qqa53ICtzY8xL937HAd1b7jrgAVv2v19n+eNJGZuYzXJ15fp4JZjKFaKfjmBxCo8c60+HM+BocOAyMQW1KC9EXwWVzadmGw/9936tkqtqv3ZHhQ="
+        "K0NzGm5m4+VLnOptYEsmZzXdcyFUYixlDLRfJ0XxdAetl5Ll3bN2cLgAsq+CCyXQMsEyGE5ryOMzvAwCYqLbHQJ1hejMA9qfINt9OGNFT9PzokXQIaXv5wg4urMW5Va/R3TwFPNGyT1SmmOnVyA42BHlKnjlYYa9ydKdMkthv8o=",
+        "KGY8xmrdcJi245Zsb6P+fIsyjoqUzRl6cOIyU8XoKsu6U+rretaWeCec9iAaSlp3ZbsVI4xf6sML8XRws9pJhblJldcgEZOHpGIYTvlHO1ndEe7QGQXjQcET4Zcpyql70dyoK1KCzd3fBYg5qBOmJTfqo9WIMovyEQuaOcs7IU0="
       ]
     }
   ],
@@ -497,34 +502,314 @@
       "note": "deflate 输出因实现而异，不做字节级对拍；要求：能 gunzip 回原 JSON 且 OS 字节 == 19"
     }
   ],
+  "smidString": [
+    {
+      "name": "uid-A",
+      "timeDigits": "20260919153000",
+      "uid": "8f14e45f-ceea-467a-9c1b-000000000001",
+      "expect": "202609191530009df27477ae1949774fc1605a971018d500fde1d563d336480",
+      "expectLen": 63
+    },
+    {
+      "name": "uid-B-midnight",
+      "timeDigits": "20270101000000",
+      "uid": "00000000-0000-4000-8000-000000000000",
+      "expect": "202701010000006e9036f9d52b7ac8faea061c38033ffe008f3b37dd02b11e0",
+      "expectLen": 63
+    },
+    {
+      "name": "uid-C-all-f",
+      "timeDigits": "20261231235959",
+      "uid": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      "expect": "20261231235959327474d17ae4132e42b89fa63e55ef7600ed4f72d62859ec0",
+      "expectLen": 63
+    }
+  ],
+  "smidPriId": [
+    {
+      "name": "uid-A",
+      "uid": "8f14e45f-ceea-467a-9c1b-000000000001",
+      "expect": "9df27477ae194977",
+      "expectLen": 16
+    },
+    {
+      "name": "uid-B-midnight",
+      "uid": "00000000-0000-4000-8000-000000000000",
+      "expect": "6e9036f9d52b7ac8",
+      "expectLen": 16
+    },
+    {
+      "name": "uid-C-all-f",
+      "uid": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      "expect": "327474d17ae4132e",
+      "expectLen": 16
+    }
+  ],
+  "smidTn": [
+    {
+      "name": "full-web-fingerprint-first-upload",
+      "target": {
+        "protocol": 4,
+        "organization": "FXlyfmWg2AzwbrxDKSv5",
+        "appId": "default",
+        "os": "web",
+        "version": "3.0.0",
+        "sdkver": "3.0.0",
+        "box": "",
+        "rtype": "all",
+        "smid": "20260919153000cbaf0a651bc923d653e069050ee2ef880015aba4a11e6b030",
+        "subVersion": "1.0.0",
+        "time": 7,
+        "platform": "Linux armv8l",
+        "clientSize": "0_0_0_0_375_667_375_667",
+        "res": "375_667_2_2",
+        "status": "0010",
+        "timezone": -480,
+        "vpw": "vpw-00000000-0000-4000-8000-000000000001",
+        "svm": 1789743328974,
+        "trees": "trees-00000000-0000-4000-8000-000000000001",
+        "pmf": 1789743328974,
+        "cdp": 0,
+        "maxTouchPoints": 5,
+        "connectionRtt": 50,
+        "cpucount": 8,
+        "battery": {
+          "charging": 0,
+          "level": 0.5
+        },
+        "canvas": "1a2b3c4d",
+        "plugins": "ChromePDFViewerPortableDocumentFormatinternal-pdf-viewer2,ChromiumPDFViewerPortableDocumentFormatinternal-pdf-viewer2,MicrosoftEdgePDFViewerPortableDocumentFormatinternal-pdf-viewer2,PDFViewerPortableDocumentFormatinternal-pdf-viewer2,WebKitbuilt-inPDFPortableDocumentFormatinternal-pdf-viewer2",
+        "referer": "",
+        "ua": "Mozilla/5.0 (Linux; Android 14; 22041216C Build/TP1A.220624.014; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/128.0.6613.88 Mobile Safari/537.36",
+        "url": "https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&sourceid=1002&token=",
+        "tn": ""
+      },
+      "expect": "142023ebb09769128495237c20a07051",
+      "note": "target.tn 为**空串**时求摘要，与旧代码 desTarget.tn = md5Hash(getTn(desTarget)) 同一步"
+    },
+    {
+      "name": "second-upload-carries-old-device-id",
+      "target": {
+        "protocol": 4,
+        "organization": "FXlyfmWg2AzwbrxDKSv5",
+        "appId": "default",
+        "os": "web",
+        "version": "3.0.0",
+        "sdkver": "3.0.0",
+        "box": "B1990000000000000000000000000000000000000000000001",
+        "rtype": "all",
+        "smid": "20260920091500924832ae843ff727aff0e32e83d88be400726470e3b83dbb0",
+        "subVersion": "1.0.0",
+        "time": 7,
+        "platform": "Linux armv8l",
+        "clientSize": "0_0_0_0_375_667_375_667",
+        "res": "375_667_2_2",
+        "status": "0010",
+        "timezone": -480,
+        "vpw": "vpw-00000000-0000-4000-8000-000000000001",
+        "svm": 1789829700000,
+        "trees": "trees-00000000-0000-4000-8000-000000000001",
+        "pmf": 1789829700000,
+        "cdp": 0,
+        "maxTouchPoints": 5,
+        "connectionRtt": 50,
+        "cpucount": 8,
+        "battery": {
+          "charging": 0,
+          "level": 0.5
+        },
+        "canvas": "1a2b3c4d",
+        "plugins": "ChromePDFViewerPortableDocumentFormatinternal-pdf-viewer2,ChromiumPDFViewerPortableDocumentFormatinternal-pdf-viewer2,MicrosoftEdgePDFViewerPortableDocumentFormatinternal-pdf-viewer2,PDFViewerPortableDocumentFormatinternal-pdf-viewer2,WebKitbuilt-inPDFPortableDocumentFormatinternal-pdf-viewer2",
+        "referer": "",
+        "ua": "Mozilla/5.0 (Linux; Android 14; 22041216C Build/TP1A.220624.014; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/128.0.6613.88 Mobile Safari/537.36",
+        "url": "https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&sourceid=1002&token=",
+        "tn": ""
+      },
+      "expect": "e8f39710aad4d0597e38148658fb936b"
+    }
+  ],
+  "smidDesRules": [
+    {
+      "name": "first-upload",
+      "target": {
+        "protocol": 4,
+        "organization": "FXlyfmWg2AzwbrxDKSv5",
+        "appId": "default",
+        "os": "web",
+        "version": "3.0.0",
+        "sdkver": "3.0.0",
+        "box": "",
+        "rtype": "all",
+        "smid": "20260919153000cbaf0a651bc923d653e069050ee2ef880015aba4a11e6b030",
+        "subVersion": "1.0.0",
+        "time": 7,
+        "platform": "Linux armv8l",
+        "clientSize": "0_0_0_0_375_667_375_667",
+        "res": "375_667_2_2",
+        "status": "0010",
+        "timezone": -480,
+        "vpw": "vpw-00000000-0000-4000-8000-000000000001",
+        "svm": 1789743328974,
+        "trees": "trees-00000000-0000-4000-8000-000000000001",
+        "pmf": 1789743328974,
+        "cdp": 0,
+        "maxTouchPoints": 5,
+        "connectionRtt": 50,
+        "cpucount": 8,
+        "battery": {
+          "charging": 0,
+          "level": 0.5
+        },
+        "canvas": "1a2b3c4d",
+        "plugins": "ChromePDFViewerPortableDocumentFormatinternal-pdf-viewer2,ChromiumPDFViewerPortableDocumentFormatinternal-pdf-viewer2,MicrosoftEdgePDFViewerPortableDocumentFormatinternal-pdf-viewer2,PDFViewerPortableDocumentFormatinternal-pdf-viewer2,WebKitbuilt-inPDFPortableDocumentFormatinternal-pdf-viewer2",
+        "referer": "",
+        "ua": "Mozilla/5.0 (Linux; Android 14; 22041216C Build/TP1A.220624.014; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/128.0.6613.88 Mobile Safari/537.36",
+        "url": "https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&sourceid=1002&token=",
+        "tn": "142023ebb09769128495237c20a07051"
+      },
+      "expect": {
+        "protocol": 4,
+        "nl": "JhkgOSA8Pbou+0IlhIP03U2CVn1NrLt7",
+        "um": "Jk/Rbu9WX2I=",
+        "lz": "5/0iJtMNRyo=",
+        "version": "3.0.0",
+        "ir": "50HEUi4SvJ4=",
+        "aw": "",
+        "fm": "RaRs5iWX4EU=",
+        "smid": "20260919153000cbaf0a651bc923d653e069050ee2ef880015aba4a11e6b030",
+        "dk": "/qWhkna6lCg=",
+        "jt": "yNKQO46UxlE=",
+        "lm": "8Jpexf47VjluosXAVaM2qw==",
+        "na": "OzH7vpG1sxPWfVIhkr2PX8ql2w1BYpJq",
+        "ut": "vnkDd+jpcLMPZYHO74HJ6w==",
+        "kp": "Ikl45yV/W2o=",
+        "bl": "tyuk/8N9BvU=",
+        "qb": "KOtl0LhgtNOe83vyCxyQghLEf0lzuM5CD5zNVyrFf85zGlKvPNFkrg==",
+        "ee": "+t57cukhNzS8A1qrrnigZA==",
+        "ij": "CYt4i3talFso21BP1vgRnuxYEu88qcPb7q0UcqtgAibtnRjBdfSsNkyvjCjOq09I",
+        "yu": "/mpj/Igo0Aa5ZXKlAMKmsQ==",
+        "cdp": 0,
+        "maxTouchPoints": 5,
+        "connectionRtt": 50,
+        "cpucount": 8,
+        "battery": {
+          "charging": 0,
+          "level": 0.5
+        },
+        "iu": "zk10zW9BVz0=",
+        "hy": "ogrFwVA1bX9jm4eWVx2RgBFKKvgVYqjgQu6XnnFDBiVWybOF2DVn///TY1o26fE4affX48CkPp4dW5XqvWH7cu9rsFA1FaO9GQRjCeYjD8LRcGQwDEvgS/qAFrHTzEAp3qPSbHS2y6K+h6T044PsOsJdbMhZ+b8RjwVt349D2CkYufpue22pBLTrhbp4eo2jVFIhk/mLN25CoQyiSH4h8C8p1waGHkoJafxnNaNdeXEVjXzkVHldseSofkuZjX9TpgDTWk+j58/FjeHExqhGitV1XlfkI87VhyAOuqS3KP0dOEA04mlx3WYtIW9R3pQrV8iQ8MQ27TEIqn1pj593LFRSIZP5izduQqEMokh+IfAvKdcGhh5KCWn8ZzWjXXlx7xrfpd9CiAs=",
+        "mf": "",
+        "pu": "OSp2kTHG+gZkrSNLrlsIXtYi+HxGSe0dtB7CwQVVkl6Xn7YHOh9pJl7I8v2vc4BgZNDiC7OxzWruq5l570JSBYpYqsPJE5ZsUp8dFJRg498g9wQ5a4ZCD+Ap6azaHw4pDnkZKe1hKdd5gGF+iMx3gL7xsSqSkvcSlyLkgVaTyaSGkQsZ9uuNpMteJ22tpnWZou2zEF5oeaT484Q8EI9mqHlcP+aLJPVC",
+        "sb": "3Dvh9X9q2+VF1sPmti1AF2B6/8CjQ2ooZBWQoneDML0kaa2E6sSskhurvm8xuDRrc9Tl4NJSslpoPKbvXVqqr+2p6RwFhRezx83/UIkgpeFDw+/lV7IWFG9d4iaL5Alb",
+        "as": "20mWg6dB254AF+BZmVnXHo/MPn1GR552BxJhU/OCMhM="
+      },
+      "note": "整份改名表的字节级对拍：命中规则的键必须换成 obfuscated_name 并按那把 DES 密钥加密，没命中的（smid/cdp/battery/maxTouchPoints/connectionRtt/cpucount）原名原值"
+    },
+    {
+      "name": "second-upload",
+      "target": {
+        "protocol": 4,
+        "organization": "FXlyfmWg2AzwbrxDKSv5",
+        "appId": "default",
+        "os": "web",
+        "version": "3.0.0",
+        "sdkver": "3.0.0",
+        "box": "B1990000000000000000000000000000000000000000000001",
+        "rtype": "all",
+        "smid": "20260920091500924832ae843ff727aff0e32e83d88be400726470e3b83dbb0",
+        "subVersion": "1.0.0",
+        "time": 7,
+        "platform": "Linux armv8l",
+        "clientSize": "0_0_0_0_375_667_375_667",
+        "res": "375_667_2_2",
+        "status": "0010",
+        "timezone": -480,
+        "vpw": "vpw-00000000-0000-4000-8000-000000000001",
+        "svm": 1789829700000,
+        "trees": "trees-00000000-0000-4000-8000-000000000001",
+        "pmf": 1789829700000,
+        "cdp": 0,
+        "maxTouchPoints": 5,
+        "connectionRtt": 50,
+        "cpucount": 8,
+        "battery": {
+          "charging": 0,
+          "level": 0.5
+        },
+        "canvas": "1a2b3c4d",
+        "plugins": "ChromePDFViewerPortableDocumentFormatinternal-pdf-viewer2,ChromiumPDFViewerPortableDocumentFormatinternal-pdf-viewer2,MicrosoftEdgePDFViewerPortableDocumentFormatinternal-pdf-viewer2,PDFViewerPortableDocumentFormatinternal-pdf-viewer2,WebKitbuilt-inPDFPortableDocumentFormatinternal-pdf-viewer2",
+        "referer": "",
+        "ua": "Mozilla/5.0 (Linux; Android 14; 22041216C Build/TP1A.220624.014; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/128.0.6613.88 Mobile Safari/537.36",
+        "url": "https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&sourceid=1002&token=",
+        "tn": "e8f39710aad4d0597e38148658fb936b"
+      },
+      "expect": {
+        "protocol": 4,
+        "nl": "JhkgOSA8Pbou+0IlhIP03U2CVn1NrLt7",
+        "um": "Jk/Rbu9WX2I=",
+        "lz": "5/0iJtMNRyo=",
+        "version": "3.0.0",
+        "ir": "50HEUi4SvJ4=",
+        "aw": "B1990000000000000000000000000000000000000000000001",
+        "fm": "RaRs5iWX4EU=",
+        "smid": "20260920091500924832ae843ff727aff0e32e83d88be400726470e3b83dbb0",
+        "dk": "/qWhkna6lCg=",
+        "jt": "yNKQO46UxlE=",
+        "lm": "8Jpexf47VjluosXAVaM2qw==",
+        "na": "OzH7vpG1sxPWfVIhkr2PX8ql2w1BYpJq",
+        "ut": "vnkDd+jpcLMPZYHO74HJ6w==",
+        "kp": "Ikl45yV/W2o=",
+        "bl": "tyuk/8N9BvU=",
+        "qb": "KOtl0LhgtNOe83vyCxyQghLEf0lzuM5CD5zNVyrFf85zGlKvPNFkrg==",
+        "ee": "y4Y0bxTr1Lwn1qfkhTytYw==",
+        "ij": "CYt4i3talFso21BP1vgRnuxYEu88qcPb7q0UcqtgAibtnRjBdfSsNkyvjCjOq09I",
+        "yu": "Jj6PvomnRIRYhkix9RAiWA==",
+        "cdp": 0,
+        "maxTouchPoints": 5,
+        "connectionRtt": 50,
+        "cpucount": 8,
+        "battery": {
+          "charging": 0,
+          "level": 0.5
+        },
+        "iu": "zk10zW9BVz0=",
+        "hy": "ogrFwVA1bX9jm4eWVx2RgBFKKvgVYqjgQu6XnnFDBiVWybOF2DVn///TY1o26fE4affX48CkPp4dW5XqvWH7cu9rsFA1FaO9GQRjCeYjD8LRcGQwDEvgS/qAFrHTzEAp3qPSbHS2y6K+h6T044PsOsJdbMhZ+b8RjwVt349D2CkYufpue22pBLTrhbp4eo2jVFIhk/mLN25CoQyiSH4h8C8p1waGHkoJafxnNaNdeXEVjXzkVHldseSofkuZjX9TpgDTWk+j58/FjeHExqhGitV1XlfkI87VhyAOuqS3KP0dOEA04mlx3WYtIW9R3pQrV8iQ8MQ27TEIqn1pj593LFRSIZP5izduQqEMokh+IfAvKdcGhh5KCWn8ZzWjXXlx7xrfpd9CiAs=",
+        "mf": "",
+        "pu": "OSp2kTHG+gZkrSNLrlsIXtYi+HxGSe0dtB7CwQVVkl6Xn7YHOh9pJl7I8v2vc4BgZNDiC7OxzWruq5l570JSBYpYqsPJE5ZsUp8dFJRg498g9wQ5a4ZCD+Ap6azaHw4pDnkZKe1hKdd5gGF+iMx3gL7xsSqSkvcSlyLkgVaTyaSGkQsZ9uuNpMteJ22tpnWZou2zEF5oeaT484Q8EI9mqHlcP+aLJPVC",
+        "sb": "3Dvh9X9q2+VF1sPmti1AF2B6/8CjQ2ooZBWQoneDML0kaa2E6sSskhurvm8xuDRrc9Tl4NJSslpoPKbvXVqqr+2p6RwFhRezx83/UIkgpeFDw+/lV7IWFG9d4iaL5Alb",
+        "as": "qLrWV/qoYGJSsmMQ9zAmI3IhzBgGwlofweVb0mL9fHM="
+      },
+      "note": "整份改名表的字节级对拍：命中规则的键必须换成 obfuscated_name 并按那把 DES 密钥加密，没命中的（smid/cdp/battery/maxTouchPoints/connectionRtt/cpucount）原名原值"
+    }
+  ],
   "rsaSelfKeyPair": {
     "note": "仅用于验证 Rust RSA 实现正确性；这是测试密钥，可公开。",
-    "publicKeyB64": "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCpIWtGLwAZTYpbte5o3N+kWGlxuzw+C2lNNM3ElzxwRGBnLW5h3kcwYLXvmr8J9CT7eViqNRrNuPR4ByXFOFHHjf72RsPZ2ILRwe6yRvlvM0ba7wyjNBhPe7lDZKERYRy8o04TRnoRL8oJQOC4DDjhmBnBRf9KUvOs+2VyVAuxYQIDAQAB",
-    "privateKeyPkcs8B64": "MIICdwIBADANBgkqhkiG9w0BAQEFAASCAmEwggJdAgEAAoGBAKkha0YvABlNilu17mjc36RYaXG7PD4LaU00zcSXPHBEYGctbmHeRzBgte+avwn0JPt5WKo1Gs249HgHJcU4UceN/vZGw9nYgtHB7rJG+W8zRtrvDKM0GE97uUNkoRFhHLyjThNGehEvyglA4LgMOOGYGcFF/0pS86z7ZXJUC7FhAgMBAAECgYEAl4m59EhobkNrlICN/KbqOvZ8g8qfT3gqAWMuetaG8JBTUB8Ep+vhHReJ7AVa5jA6cpdnOhoayfjOEj1VOkAcBJvZHgMdS7RsoKFBRg3j7U4KZl8dmgNsHAIuxO3pVvcfmJBUtQ97OsWjSfEjFtbEupQq37Mwn3oL6JiQVwdW+4ECQQDVKIb4sm0+BYf2XoTd7lxTe/aqSg9gZ4WPUPhil85hsy8aq+c1L90bTWiZw28l3NxBIQrl0+kJsKgzh+0HYlmLAkEAyx+Qhk+UtHi7b1bOngNr8UR0et9Yq5/pHH2/GCfuu19wlffyboz72plMcIJk99FF0vjD6qGaTI91WG2Q6j8GQwJAA8hbVNB9xcr9Va7ptrKDKuwZPX5g9XoA0cFDFyTQgcVXQabpTHVT/CcMgyYHs+lOc01tzxRKn2RmJ7vyxd3F7wJBAK/lNZIZd/yQUD+qPGI5NFBJp1R/9JkqcQNrIQAaFHHNxAEaJaX2EGLMPZVwVV8EqiJ3qbCVILkLweJBfyxaR2ECQCSN3z0YcdZIdoxZocntFK6jWroivaLucR6JP68UnX1XI7vuyfBopu/69BUqrGns6oSbnHqYc3awxDtcTt927Sk=",
-    "modulusB64Url": "qSFrRi8AGU2KW7XuaNzfpFhpcbs8PgtpTTTNxJc8cERgZy1uYd5HMGC175q_CfQk-3lYqjUazbj0eAclxThRx43-9kbD2diC0cHuskb5bzNG2u8MozQYT3u5Q2ShEWEcvKNOE0Z6ES_KCUDguAw44ZgZwUX_SlLzrPtlclQLsWE",
+    "publicKeyB64": "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDVmapxiF+7cusvJPsHxoAwufjjUR5hfGnc0yqXIFPNl3+LZFYQOUGenC6MuudStYgf2WhjiAh4ciy4Cmw4N21h4FRjCOD1Aig5RtZK0Z2CmN0NQSsQqdUCoDrL0EPK66bQBwTxNdY+jRSTSQqYh+sLXYr1uokwT4+CKWplZ00RZwIDAQAB",
+    "privateKeyPkcs8B64": "MIICdQIBADANBgkqhkiG9w0BAQEFAASCAl8wggJbAgEAAoGBANWZqnGIX7ty6y8k+wfGgDC5+ONRHmF8adzTKpcgU82Xf4tkVhA5QZ6cLoy651K1iB/ZaGOICHhyLLgKbDg3bWHgVGMI4PUCKDlG1krRnYKY3Q1BKxCp1QKgOsvQQ8rrptAHBPE11j6NFJNJCpiH6wtdivW6iTBPj4IpamVnTRFnAgMBAAECgYAWyd41XqdYCFqvHPLrUXI7wJudJPpozC0/MghJN1m5hYBGDt5fvLwTf/Y3bXlgiZ2MSFWqyMiekQ/UUshY9xDkPkH8auZlocq1O7iueEuCuLPcfoeq9+uYNoDu5CuJErUOgquLq8etWXvTgl2GIzfWr4RWiXU8lFLm/ZF7EWIIAQJBAP+8s4Xfn+TctH7BbDlrXm6xlLXN5Zpi91VVdvFREhOai9SY+AAX5id832cmfsP53VSIpRjBSnCGqTeMyXrnq8ECQQDV0eA/iKK6R78gnZOTJNmcv326qY/Vy6ske7ASHixQNTqKguGCXMQk0TjtkcaNiSDgxSs4fUdaEvpRoPRGt6cnAkBuCpyU9myu5ekkwcX3zyOLLg53TGmHzR3wMh5EKEZG+TFCAbB1GdOHGkxm7kGNwm5ieYnQ5RtK4CbgKExp/lYBAkBEXGJ+zZeBSRkBO4AIJlrws4RmHnofF4uzEVx8nmr6hdoemLOysyf+wWmbAuVhMPtzAXbNC7i5QqIHYRdYWLU3AkBxdezknXWlD48te4DYGOvGbk2G59yzPxTqX7VKkQwCeqtGveW6EPChQoS/Z4LuYIJBMNd9JkWWhe3wG5wkgi1+",
+    "modulusB64Url": "1ZmqcYhfu3LrLyT7B8aAMLn441EeYXxp3NMqlyBTzZd_i2RWEDlBnpwujLrnUrWIH9loY4gIeHIsuApsODdtYeBUYwjg9QIoOUbWStGdgpjdDUErEKnVAqA6y9BDyuum0AcE8TXWPo0Uk0kKmIfrC12K9bqJME-PgilqZWdNEWc",
     "exponentB64Url": "AQAB",
-    "modulusHex": "a9216b462f00194d8a5bb5ee68dcdfa4586971bb3c3e0b694d34cdc4973c704460672d6e61de473060b5ef9abf09f424fb7958aa351acdb8f4780725c53851c78dfef646c3d9d882d1c1eeb246f96f3346daef0ca334184f7bb94364a111611cbca34e13467a112fca0940e0b80c38e19819c145ff4a52f3acfb6572540bb161",
+    "modulusHex": "d599aa71885fbb72eb2f24fb07c68030b9f8e3511e617c69dcd32a972053cd977f8b64561039419e9c2e8cbae752b5881fd96863880878722cb80a6c38376d61e0546308e0f502283946d64ad19d8298dd0d412b10a9d502a03acbd043caeba6d00704f135d63e8d1493490a9887eb0b5d8af5ba89304f8f82296a65674d1167",
     "exponentHex": "10001",
     "cases": [
       {
         "name": "uuid-v4-payload",
         "message": "8f14e45f-ceea-467a-9c1b-000000000001",
-        "cipherB64": "nSwgCYHnCNbgJdIQEVWTFNBjdKIhMlyczBu35u60TKTgrsXKp0LBXs3qiycxqXFgLmkGdfsaqbNyr6lZtoz3Lhz/+l4QGUHcS2q3vXDb9YnK6nTg9CMLE+EqL88CGYuhN5u51ziazLw4yJX0QiB2NxGZsertx5aQ0/RQRzabGBg="
+        "cipherB64": "jK87ybGkt2/JWcpbR2g6TlGs5TMUGTL9mQRNtiv2fUJFeHxnNRKApihAiI1n+gCV5DtxvM706HuL758FtUX50a2rDrdfuqz3MeV2eLRj9jg8qK3z1YgFVruJUBTT/RW0fMs/rSr9De+2zuJWQeiENpky43d6zx2I+aOOTuFtIhM="
       },
       {
         "name": "single-char",
         "message": "v",
-        "cipherB64": "YcxfK2hVjliLK0vE97wk3dk06rM9W9Cxlk6+dauel5p8dC7dXk0tFkkGGhB8GlWhe9aab94R5PCfxDwhF14nBF19P1+GxAR4DaXFNafw+H+FVNFBVuADqtlmfEl8TX2ct70Wkhh0RuobrPetvitk0wpx73OarHUX0mjVd03BRNM="
+        "cipherB64": "VGZY0BiChSKySDd3z0eJ30tbAS2k7G5Z0TLvJatsAbZWmsy6vOtThECuu613idrawTz7UP+WX3ZMe7+PzlCguhpLNbN8FKZdlhkjgb9//ceWB3MoHk0m06rM579PUQqZUWEU6Vs7NQASZcMcZJFo+zejyD+LHJ4ie/13vBqhyLM="
       },
       {
         "name": "max-117-bytes",
         "message": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        "cipherB64": "Acbf1UgzVqrL6iqLbKiF3fXwJeGTl7qCkr23F63r6Am5m+JcVSEQ3+xf356G9c3SODuIioHUe6n1DgeuNE7hCuQj4sr4dTVFrJm2dxx69eBgy2WMAclJMrrntf79ZUzGtEfsGQDplHSMa3Ls+3bzYumCj0iZzoxLBCw/hp2DuP8="
+        "cipherB64": "GyDxc3XVBL+5g/WQRPNvTxKnYdLJ00nJpimpD8d4YftoqJ9SBU5C1iWKzpdFsmr+QGNMAY2in/kNLe/ucUMDWPjr8FpuilvHznBAUN3nmZ+GjQCybo2pkyzEbYly/ttvuJvq/BwY69yTauy8yLgqQQK1iWUe5PKPjyWLD5YX5eY="
       },
       {
         "name": "cjk",
         "message": "移动云盘",
-        "cipherB64": "FOwimBkNrnBmH52XCT2ACqIkLcd8lLY0jqps9G/NThzwdpMqUPdhchsDrDhqHwN2FtOBjO2Z95GmwWngo4Xle0R+wkq1gOj6TbA3JMyz49xp/NPpa69SEBga6O2vM4xh7ZJzwne/caxD8LpihTw7fn69zVf1U9itoHrT2iW6lx8="
+        "cipherB64": "gYyKa+ExlykQxhIJxPcSLqBaPw3zUG8tSzNISalB2auHJvQYNaORtg0QJzsBa89dbSqqEIHu44ybLnVOMfuCeuOobeFtz+Mv0RSHKQLrVw5J0IF+HBXp76VxweJYVWvVCLo/7Fwnch4cQxKMIpxUPF9uK/lGlIEGjCHryHr4p2c="
       }
     ]
   }

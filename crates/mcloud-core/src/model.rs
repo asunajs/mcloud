@@ -301,6 +301,66 @@ pub struct AccountState {
     pub user_domain_id: Option<String>,
     /// 话费红包活动专用 token。
     pub cloud_phone_redpack_token: Option<String>,
+    /// **完整手机号**（v6 起）。
+    ///
+    /// # 它现在的角色：标识，不是"拼凭据的原料"
+    ///
+    /// `Authorization` 的形状是 `Basic base64("<前缀>:<手机号>:<authToken>")`，
+    /// 中间那段确实是完整手机号。但**不要拿它去拼** —— 整串 auth 由
+    /// [`Self::authorization`] 原样存着，见那里的说明。
+    ///
+    /// 这一列留下来是因为它有两个别处替代不了的用途：
+    /// 日志里认出"签的是谁"（掩码不够）、以及排障时确认端与号对得上。
+    ///
+    /// 补上它之前，任何要用 `Authorization` 的能力都只能让调用方在命令行上
+    /// 重新输一遍手机号（`mcloud signin --phone`），而那是个**缺口不是设计**。
+    ///
+    /// # 为什么放这张表
+    ///
+    /// 它与 `user_domain_id` 同类：**是标识不是凭据**，但**不该被 `/api/accounts`
+    /// 吐给前端**（那张表里只放掩码）。所以留在凭据表里，与"列出账号"那条最常走的
+    /// 查询天然隔开。
+    ///
+    /// `v6` 之前登录的账号这一列是 `NULL` —— 那是**如实记录"当时没存"**，
+    /// 不要拿掩码去填。
+    pub phone: Option<String>,
+    /// **原样存下的 `Authorization` 头值**（`Basic …`，v7 起）。
+    ///
+    /// # 为什么存整串，而不是拆成"前缀 + 手机号 + token"再拼回去
+    ///
+    /// 拆开再拼是个**绕远路**，而且是错的：
+    ///
+    /// | | 拆开再拼（v6 的做法） | 整串存（现在的做法） |
+    /// |---|---|---|
+    /// | 依赖 | 必须凑齐三段，缺一段就用不了 | 一段都不用凑 |
+    /// | 前缀 | 由调用点**硬编码**（App 写死 `mobile`）—— 猜错就是静默发错头 | 前缀本来就在串里 |
+    /// | 旧数据 | 导入时只留下第三段，手机号与前缀一起丢了 | 旧项目的 `auth` 本来就是这个形状，直接搬 |
+    ///
+    /// 旧项目 `mcloud-sign` 的 `asign.json` 里存的 `auth` 就是**这个值本身**
+    /// （`Basic base64("mobile:<手机号>:<authToken>")`），它一直用得好好的。
+    /// 我们在重写时把它解码、拆成三份、只留 token，然后要求用户每次在命令行上
+    /// 把手机号补回来 —— 那是自找的。
+    ///
+    /// # 与 [`Self::phone`] 的关系
+    ///
+    /// 两者**冗余但不同源**：`phone` 是给人看的标识，`authorization` 是给上游用的
+    /// 凭据。写入侧应当同时给（登录时两者都有）；读取侧**优先用整串**，
+    /// 只有它是 `NULL` 的老行才退回"用 `phone` + `jwt_token` 拼"那条路。
+    ///
+    /// # ⚠ 这一列只装「**拿到的**」，不装「拼出来的」
+    ///
+    /// 合法的来源只有两个，都是"服务端或旧配置原样给的"：
+    ///   1. 登录响应 —— `mcloud_capabilities::login` 里那个 `auth` 整串；
+    ///   2. 旧项目 `asign.json` 的 `auth` 字段（迁移回填）。
+    ///
+    /// **不要**把本地合成的串写进来。读取侧会**优先采信**它，而整串路径
+    /// **不校验前缀**（前缀就在串里，没有可校验的对象）—— 于是一串拼错的凭据
+    /// 一旦落库，就会被永久当成原文使用，现象只是"忽然回 90001 未登录"。
+    /// 典型反例：`--phone` 那条老路拼出来的串前缀固定是 `mobile`，
+    /// 拿它去补一个 `pc:` 端账号，存下去就是**永久错的**。
+    ///
+    /// 补录手机号时只写 [`AccountState::phone`] 即可 —— 下次照旧现拼，前缀闸照旧生效。
+    pub authorization: Option<String>,
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -322,6 +382,13 @@ impl std::fmt::Debug for AccountState {
                 "cloud_phone_redpack_token",
                 &describe(&self.cloud_phone_redpack_token),
             )
+            // 手机号不是凭据，但打日志时没有任何理由用完整的 —— 与
+            // `mcloud_app::signin::SignInCredential` 的 `Debug` 同一个口径：
+            // **掩码**（`19****16`），而不是 `<redacted>`。这样排障时还看得出是哪个账号。
+            .field("phone", &self.phone.as_deref().map(crate::pure::mask_phone))
+            // 整串 auth 是**凭据**（解码后就是 `mobile:<手机号>:<token>`），
+            // 所以只暴露"有没有 + 多长"，与 `jwt_token` 同一个口径。
+            .field("authorization", &describe(&self.authorization))
             .field("updated_at", &self.updated_at)
             .finish_non_exhaustive()
     }
@@ -341,6 +408,71 @@ impl AccountState {
             && self.device_id.is_none()
             && self.user_domain_id.is_none()
             && self.cloud_phone_redpack_token.is_none()
+            // `phone` 也算 —— 否则一个"只存了手机号"的行会被判成空状态，
+            // 而它对 `mcloud signin --account` 是**唯一**可用来源。
+            && self.phone.is_none()
+            // 整串 auth 同理：v7 之后它才是真正拿来用的那个凭据。
+            && self.authorization.is_none()
+    }
+}
+
+/// 账号的 **smid 状态**：那份绑定账号的设备特征，与最近一次上报换回的 `deviceId`。
+///
+/// # 为什么不并进 [`AccountState`]
+///
+/// 同一个主体（这个账号在这台设备上的状态）、同一张表，但**写入契约相反**：
+/// `AccountState` 是"整体覆盖的凭据快照"（重新登录要把失效的 token 冲掉），
+/// 而这里的两列必须活过重新登录 —— 换凭据不该换掉设备长相，换长相也不该动凭据。
+/// 放进同一个结构里，"覆盖"就会顺手把特征清掉（登录路径根本不知道它的存在）。
+/// 所以存储层给它们配了独立的方法（见 `StateStore` 的 smid 那三条）。
+///
+/// # 这一层只搬文本
+///
+/// `fingerprint_json` 是 `mcloud-upstream::smid::SmFingerprint` 的序列化结果。
+/// 类型放在 core 会让 core 反向依赖协议层，所以这里存 JSON 串、由调用方负责解析 ——
+/// 代价是"库里那串读不出来"必须由调用方处理（那里的规矩是**报错，不是悄悄重掷一份**）。
+///
+/// # 刻意不派生 `Serialize`
+///
+/// 这两样都不是能吐给前端的东西：`device_id` 是第三方风控服务给这台设备的标识。
+/// 少一个 `Serialize`，就少一条"顺手塞进响应"的路。
+#[derive(Clone, PartialEq, Eq)]
+pub struct SmidState {
+    pub account_id: AccountId,
+    /// 绑定账号的设备特征（JSON 文本）。`None` = 还没绑过。
+    pub fingerprint_json: Option<String>,
+    /// 最近一次上报换回的 `deviceId`（含 `B` 前缀）。**会变**，只用作下一次上报的 `box`。
+    pub device_id: Option<String>,
+}
+
+impl std::fmt::Debug for SmidState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 与 AccountState 同一个口径：只暴露"有没有"与长度，足以判断"有没有被清掉"
+        fn describe(value: &Option<String>) -> Option<String> {
+            value
+                .as_ref()
+                .map(|v| format!("<redacted {} 字符>", v.chars().count()))
+        }
+        f.debug_struct("SmidState")
+            .field("account_id", &self.account_id)
+            .field("fingerprint_json", &describe(&self.fingerprint_json))
+            .field("device_id", &describe(&self.device_id))
+            .finish()
+    }
+}
+
+impl SmidState {
+    pub fn new(account_id: impl Into<String>) -> Self {
+        Self {
+            account_id: AccountId::new(account_id),
+            fingerprint_json: None,
+            device_id: None,
+        }
+    }
+
+    /// 两样都没有 —— 这个账号还从没上报过指纹。
+    pub fn is_empty(&self) -> bool {
+        self.fingerprint_json.is_none() && self.device_id.is_none()
     }
 }
 
@@ -635,6 +767,22 @@ mod tests {
         );
     }
 
+    /// 手机号既不是凭据也不是"纯标识"：它**要掩码**，不能原样打出来，也不能整段抹掉。
+    ///
+    /// 掩码而不是 `<redacted>` 的理由是排障：多账号时"这是哪个账号"必须看得出来，
+    /// 而 `19****16` 已经足够。口径与 `mcloud_app::signin::SignInCredential` 的 `Debug` 一致。
+    #[test]
+    fn account_state_debug_masks_the_phone() {
+        let state = AccountState {
+            phone: Some("19900000001".into()),
+            ..AccountState::new("19****01")
+        };
+
+        let shown = format!("{state:?}");
+        assert!(!shown.contains("19900000001"), "完整号码不得出现: {shown}");
+        assert!(shown.contains("19****01"), "应掩码而非抹掉: {shown}");
+    }
+
     #[test]
     fn account_state_emptiness_is_about_all_fields() {
         let mut state = AccountState::new("19****01");
@@ -642,6 +790,14 @@ mod tests {
 
         state.user_domain_id = Some("1".into());
         assert!(!state.is_empty(), "只有标识也算有内容");
+
+        // 只存了手机号的行**不是**空状态：它是 `mcloud signin --account` 的唯一来源，
+        // 判成空就会被导入流程当"没有内容"跳过。
+        let only_phone = AccountState {
+            phone: Some("19900000001".into()),
+            ..AccountState::new("19****01")
+        };
+        assert!(!only_phone.is_empty());
     }
 
     /// `ScheduleTarget` 用内部标签序列化，便于直接落库/出给前端而不产生二义。

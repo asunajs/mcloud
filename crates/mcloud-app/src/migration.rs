@@ -16,28 +16,6 @@ use mcloud_io::{
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-/// 迁移执行者的**兜底**来源：库里的首个用户。
-///
-/// # 为什么迁移需要一个人
-///
-/// 账号从 schema v3 起有归属（`accounts.owner`），而**无主账号对谁都不可见**。
-/// 旧数据导入本质上是"把这些账号交给某个人"，所以必须有个接收人。
-///
-/// # 这是个兜底，不是首选
-///
-/// 正常路径是调用方把"当前会话的用户"传进来（CLI 就是这么做的）。
-/// 只有在没有会话概念的场景（例如 WebUI 首次引导）才回落到"首个用户"——
-/// 而那时库里既没有会话文件也可能没有用户，所以它会给出明确的
-/// [`LegacyImportError::NoOwner`]，而不是"迁完了但账号一个都看不见"。
-async fn acting_admin(store: &SqliteStore) -> Result<UserId, LegacyImportError> {
-    let users = store.list_users().await?;
-    users
-        .into_iter()
-        .next()
-        .map(|user| user.id)
-        .ok_or(LegacyImportError::NoOwner)
-}
-
 /// 一次迁移要做的事：从哪读、写到哪、归档到哪。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationPlan {
@@ -147,18 +125,34 @@ pub async fn run(
     } else {
         let archived = archive_legacy_source(&plan.source, &plan.backup_dir)?;
         let store = SqliteStore::open(&plan.db_path)?;
-        // 谁在操作，就把账号交给谁；没指定执行者才回落到"库里首个用户"
-        // （见 `acting_admin` 的说明）。
+        // 谁在操作，就把账号交给谁；没指定执行者才回落到"库里首个用户"。
         //
         // CLI 走的是 `Scope::Local`（不指定 owner）：导入的账号保持无主，
         // 等 `mcloud user init` 时由认领流程接手 —— 于是"先 migrate 再 init"
         // 与"先 init 再 migrate"两种顺序都能得到正确结果。
+        //
+        // ⚠ 最后那个分支（**库里连一个用户都没有**）必须落到 `Scope::Local`，
+        // 不能报错。这里踩过一次：代码原先回落到 `acting_admin`，而它没有用户时
+        // 直接返回 `NoOwner`，于是 CLI 那条"先 migrate"的路**整个走不通** ——
+        // 上面这两段注释承诺的顺序，代码自己没兑现。
+        //
+        // 保持无主是**安全**的：`accounts.owner` 落 `NULL`，而 `user init` 里的
+        // `claim_unowned` 正是按 `owner IS NULL` 认领的（`schedules` / `pipelines`
+        // 同理），所以之后补建管理员时它们会被一并接管。
         let fallback;
         let scope = match owner {
             Some(id) => Scope::user(id),
             None => {
-                fallback = acting_admin(&store).await?;
-                Scope::user(&fallback)
+                fallback = store
+                    .list_users()
+                    .await?
+                    .into_iter()
+                    .next()
+                    .map(|user| user.id);
+                match fallback.as_ref() {
+                    Some(id) => Scope::user(id),
+                    None => Scope::Local,
+                }
             }
         };
         let report = import_legacy(&store, scope, &plan.source, now).await?;
@@ -210,9 +204,9 @@ mod tests {
 
     /// 预置管理员（`mcloud user init` 的等价物）。
     ///
-    /// 账号从 v3 起必须有主人，"**先 init 再 migrate**"是硬顺序 ——
-    /// 迁移服务自己也要求这一点（见 `acting_admin`），所以测试照这个顺序走，
-    /// 而不是给自己开一条免检通道。
+    /// 账号从 v3 起必须有主人，所以"**先 init 再 migrate**"是最省事的一条路。
+    /// 但它**不是唯一**的路：下面 `migration_without_a_user_keeps_accounts_unowned`
+    /// 专门盯着"先 migrate 再 init"那条（CLI 走的正是它）。
     async fn seed_admin(path: &Path) -> UserId {
         let store = SqliteStore::open(path).unwrap();
         let admin = mcloud_core::User::new(
@@ -226,24 +220,66 @@ mod tests {
         admin.id
     }
 
-    /// 没有用户时必须**说清楚该怎么做**，而不是默默迁完一场空。
+    /// **库里一个用户都没有时，迁移要照跑**，导入的账号保持无主。
+    ///
+    /// 这条盯的是 CLI 那条路（它一律 `Scope::Local`）："先 migrate 再 init"
+    /// 必须走得通，否则用户第一次上手就撞一道门禁。
+    ///
+    /// 之前这里断言的恰恰相反（要求返回 `NoOwner`）—— 而那个行为与
+    /// `run` 自己的注释、以及 CLI 侧的注释都矛盾。保持无主是**安全**的：
+    /// `owner` 落 `NULL`，`user init` 的 `claim_unowned` 按 `owner IS NULL` 认领，
+    /// 所以下面紧接着断言"认领能把它们收回去"。
     #[tokio::test]
-    async fn migration_without_a_user_tells_you_what_to_do() {
+    async fn migration_without_a_user_keeps_accounts_unowned() {
         let work = tempfile::tempdir().unwrap();
         let plan = fixture_plan(work.path());
 
-        let err = run(&plan, false, None)
+        let outcome = run(&plan, false, None)
             .await
-            .expect_err("没有用户时迁移必须失败");
-        assert!(matches!(err, LegacyImportError::NoOwner), "{err:?}");
-        assert!(err.to_string().contains("mcloud user init"), "{err}");
-        // 失败要发生在写入之前：不能留下一个"迁了一半"的库
+            .expect("没有用户时迁移也该跑得通（账号先保持无主，等 init 认领）");
+        assert_eq!(
+            outcome.report["accounts"].as_u64(),
+            Some(2),
+            "两个账号都该导进来：{}",
+            outcome.report
+        );
+
+        // ① 无主：`Scope::user(任何人)` 都看不见 —— 这是"还没认领"的正常状态
         let store = SqliteStore::open(&plan.db_path).unwrap();
+        let nobody = UserId::new("nobody");
         assert!(
-            mcloud_core::StateStore::list_accounts(&store, Scope::user(&UserId::new("nobody")))
+            mcloud_core::StateStore::list_accounts(&store, Scope::user(&nobody))
                 .await
                 .unwrap()
-                .is_empty()
+                .is_empty(),
+            "无主账号对具体用户不可见"
+        );
+
+        // ② 但本地范围看得见（CLI 就是靠它干活的）
+        assert_eq!(
+            mcloud_core::StateStore::list_accounts(&store, Scope::Local)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // ③ 补建管理员时被认领 —— "先 migrate 再 init"的收尾就靠这一步
+        //
+        // `owner` 上有 `REFERENCES users(id)` 外键，所以这一步**必须**先有真实的用户行；
+        // 光造一个 `UserId` 值去认领会撞 `FOREIGN KEY constraint failed`
+        //（那正是 `mcloud user init` 里"先建用户、再认领"的顺序）。
+        let admin = seed_admin(&plan.db_path).await;
+        let claimed = mcloud_core::StateStore::claim_unowned(&store, &admin)
+            .await
+            .unwrap();
+        assert_eq!(claimed.accounts, 2, "两个账号都该被认领");
+        assert_eq!(
+            mcloud_core::StateStore::list_accounts(&store, Scope::user(&admin))
+                .await
+                .unwrap()
+                .len(),
+            2
         );
     }
 

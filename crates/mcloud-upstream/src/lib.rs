@@ -26,8 +26,10 @@
 
 pub mod app_client;
 pub mod app_login;
+pub mod app_signin;
 pub mod client;
 pub mod login;
+pub mod smid;
 
 use mcloud_core::{Error, ErrorKind, HttpClient, HttpRequest, classify_status};
 use serde_json::Value;
@@ -154,7 +156,7 @@ impl Envelope {
 /// **不带响应体原文**：上游的错误体里常常直接回显凭据，
 /// 而 `Error` 的 detail 会进日志、`public_message()` 才是对外文案 ——
 /// 两头都不该出现上游原文，所以这里只保留状态码。
-fn error_from_status(status: u16) -> Error {
+pub(crate) fn error_from_status(status: u16) -> Error {
     let detail = format!("HTTP {status}");
     match classify_status(status) {
         ErrorKind::Auth => Error::Auth(detail),

@@ -359,7 +359,11 @@ fn client_info_for_captcha(device: &AppDevice) -> String {
 /// 直接 push 会发出两个 `Content-Type`（实测过的坑：reqwest 会拼成
 /// `application/json, application/json;charset=UTF-8`，上游按前者解析）。
 /// 因此这里先把同名头删干净，再加唯一一个。
-fn with_app_headers(request: HttpRequest, profile: &AppProfile, timestamp: i64) -> HttpRequest {
+pub(crate) fn with_app_headers(
+    request: HttpRequest,
+    profile: &AppProfile,
+    timestamp: i64,
+) -> HttpRequest {
     let mut request = request;
     request
         .headers
