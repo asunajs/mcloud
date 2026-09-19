@@ -15,8 +15,8 @@
 
 use chrono::{DateTime, Utc};
 use mcloud_core::{
-    Account, AccountId, AccountState, CloudStats, Error, RunRecord, RunStatus, Scope, StateStore,
-    UserId,
+    Account, AccountId, AccountState, ClaimedRows, CloudStats, Error, RunRecord, RunStatus, Scope,
+    StateStore, UserId,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
@@ -491,17 +491,42 @@ impl StateStore for SqliteStore {
         Ok(rows)
     }
 
-    /// 认领未归属账号（`owner IS NULL`）。实现见 `store/user.rs` 的理由说明，
-    /// 放在这里是因为该契约属于 `StateStore`，而**同一个 trait 不能拆成两个 impl 块**。
-    async fn claim_unowned_accounts(&self, user_id: &mcloud_core::UserId) -> Result<u64, Error> {
-        let conn = self.conn.lock().expect("数据库锁中毒");
-        let affected = conn
+    /// 认领未归属的数据（`owner IS NULL`）：账号、定时任务、组合。
+    ///
+    /// 实现见 `store/user.rs` 的理由说明，放在这里是因为该契约属于 `StateStore`，
+    /// 而**同一个 trait 不能拆成两个 impl 块**。
+    async fn claim_unowned(&self, user_id: &mcloud_core::UserId) -> Result<ClaimedRows, Error> {
+        let mut conn = self.conn.lock().expect("数据库锁中毒");
+        // 三张表在**同一个事务**里认领：半途而废会留下"账号回来了、定时任务没回来"
+        // 这种很难向用户解释的状态，而它偏偏发生在升级路径上（用户第一眼就会看到）。
+        //
+        // 三段 SQL 看着像该被抽成循环，但循环需要一个"把结果写回哪个字段"的映射，
+        // 为省三行引入 unsafe 或元组指针都不值 —— 显式写三遍最安全也最好读。
+        let tx = conn.transaction().map_err(map_sqlite)?;
+        let accounts = tx
             .execute(
                 "UPDATE accounts SET owner = ?1 WHERE owner IS NULL",
                 params![user_id.as_str()],
             )
-            .map_err(map_sqlite)?;
-        Ok(affected as u64)
+            .map_err(map_sqlite)? as u64;
+        let schedules = tx
+            .execute(
+                "UPDATE schedules SET owner = ?1 WHERE owner IS NULL",
+                params![user_id.as_str()],
+            )
+            .map_err(map_sqlite)? as u64;
+        let pipelines = tx
+            .execute(
+                "UPDATE pipelines SET owner = ?1 WHERE owner IS NULL",
+                params![user_id.as_str()],
+            )
+            .map_err(map_sqlite)? as u64;
+        tx.commit().map_err(map_sqlite)?;
+        Ok(ClaimedRows {
+            accounts,
+            schedules,
+            pipelines,
+        })
     }
 }
 
@@ -1126,7 +1151,7 @@ mod tests {
         );
 
         // 认领之后它才进入 alice 的视野
-        assert_eq!(s.claim_unowned_accounts(&alice).await.unwrap(), 1);
+        assert_eq!(s.claim_unowned(&alice).await.unwrap().accounts, 1);
         assert_eq!(s.list_accounts(Scope::user(&alice)).await.unwrap().len(), 1);
     }
 

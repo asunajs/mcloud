@@ -24,11 +24,13 @@
 //! 而 `ON CONFLICT DO UPDATE` 不改 rowid —— 于是**迁移前后顺序一致**，
 //! 不会出现"界面上的定时任务莫名重排了"这种没法解释的现象。
 
-use super::{SqliteStore, dt_from_string, dt_to_string, map_sqlite};
+use super::{SqliteStore, dt_from_string, dt_to_string, map_sqlite, user_id_from_opt};
 use mcloud_core::{
     AccountId, AccountMode, ConfigStore, Error, ExchangeBinding, ExchangeConfig, Pipeline,
-    PipelineStatus, PipelineStep, Schedule, ScheduleStatus, ScheduleTarget, WebuiConfig,
+    PipelineStatus, PipelineStep, Schedule, ScheduleStatus, ScheduleTarget, Scope, UserId,
+    WebuiConfig,
 };
+use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
 use serde::Serialize;
@@ -244,6 +246,7 @@ struct RawSchedule {
     last_run_at: Option<String>,
     last_status: Option<String>,
     last_error: Option<String>,
+    owner: Option<String>,
 }
 
 impl RawSchedule {
@@ -261,12 +264,14 @@ impl RawSchedule {
             last_run_at: row.get(9)?,
             last_status: row.get(10)?,
             last_error: row.get(11)?,
+            owner: row.get(12)?,
         })
     }
 
     fn into_schedule(self) -> Result<Schedule, Error> {
         Ok(Schedule {
             id: self.id,
+            owner: user_id_from_opt(self.owner),
             name: self.name,
             target: self
                 .target
@@ -304,6 +309,7 @@ struct RawPipeline {
     last_status: Option<String>,
     last_error: Option<String>,
     last_duration_ms: Option<i64>,
+    owner: Option<String>,
 }
 
 impl RawPipeline {
@@ -322,12 +328,14 @@ impl RawPipeline {
             last_status: row.get(10)?,
             last_error: row.get(11)?,
             last_duration_ms: row.get(12)?,
+            owner: row.get(13)?,
         })
     }
 
     fn into_pipeline(self) -> Result<Pipeline, Error> {
         Ok(Pipeline {
             id: self.id,
+            owner: user_id_from_opt(self.owner),
             name: self.name,
             description: self.description,
             steps: from_json::<Vec<PipelineStep>>(&self.steps)?,
@@ -347,27 +355,82 @@ impl RawPipeline {
     }
 }
 
+/// 列顺序与 [`RawSchedule::read`] 的索引**一一对应**；`owner` 固定放最后。
+///
+/// 与 `store.rs` 的 `ACCOUNT_COLUMNS` 同一个理由：列清单只能有一处，
+/// 否则某条查询会静默少一列而不报错。
 const SCHEDULE_SELECT: &str = "SELECT id, name, target, cron, timezone, account_ids, body, enabled, \
-     created_at, last_run_at, last_status, last_error FROM schedules";
+     created_at, last_run_at, last_status, last_error, owner FROM schedules";
 
 const PIPELINE_SELECT: &str = "SELECT id, name, description, steps, account_ids, account_mode, \
-     stop_on_error, created_at, updated_at, last_run_at, last_status, last_error, last_duration_ms \
-     FROM pipelines";
+     stop_on_error, created_at, updated_at, last_run_at, last_status, last_error, last_duration_ms, \
+     owner FROM pipelines";
+
+/// 按 id 的单条查询/删除用的归属过滤：`?1` 是 id，归属是 `?2`。
+///
+/// 表达式与 `StateStore` 那边**是同一个**：`?2 IS NULL` 即 `Scope::Local`（不过滤），
+/// `?2` 有值时退化成等值比较；未归属（`owner IS NULL`）的行对**所有人**都不匹配。
+const OWNER_VISIBLE_BY_ID: &str = "(?2 IS NULL OR owner = ?2)";
+
+/// 列表查询用的归属过滤：整条查询只有归属一个参数，所以它是 `?1`。
+///
+/// 与 [`OWNER_VISIBLE_BY_ID`] 是同一个判据、只是占位符编号不同 ——
+/// 写成两个常量而不是一个，是因为编号错了不会编译报错，只会在运行期报
+/// "Wrong number of parameters"，而这类错误最容易在"复制一条查询改改"时产生。
+const OWNER_VISIBLE_ONLY: &str = "(?1 IS NULL OR owner = ?1)";
+
+/// 配置行写入前的归属校验（`sql` 只传本文件的常量，不接受外部输入）。
+///
+/// 与 `store.rs` 账号写入的第二道校验同构：id 是主键，upsert 会顺手改掉别人的那一行，
+/// 所以"已被别人创建"必须显式挡住，而不是让 `ON CONFLICT` 静默顶掉。
+fn ensure_not_owned_by_other(
+    conn: &Connection,
+    scope: Scope<'_>,
+    sql: &str,
+    id: &str,
+    label: &str,
+) -> Result<(), Error> {
+    let existing: Option<Option<String>> = conn
+        .query_row(sql, params![id], |row| row.get(0))
+        .optional()
+        .map_err(map_sqlite)?;
+    if let Some(Some(other)) = existing
+        && scope.owner().is_some_and(|uid| other != uid.as_str())
+    {
+        // 给可行动的提示：表现成"不存在"会变成查不出原因的怪象（同 store.rs 的口径）
+        return Err(Error::BadRequest(format!("该{label}已被其他用户创建")));
+    }
+    Ok(())
+}
 
 // ───────────────────────────── ConfigStore ─────────────────────────────
 
 impl ConfigStore for SqliteStore {
-    async fn upsert_schedule(&self, schedule: &Schedule) -> Result<(), Error> {
+    async fn upsert_schedule(&self, scope: Scope<'_>, schedule: &Schedule) -> Result<(), Error> {
+        // ① 用户范围下不能替别人建任务，也不能把任务写成"无主"
+        //（无主只由 schema 迁移与本地运维产生）—— 与 store.rs 的账号口径一致。
+        if let Some(user_id) = scope.owner()
+            && schedule.owner.as_ref() != Some(user_id)
+        {
+            return Err(Error::NotFound(format!("定时任务 {}", schedule.id)));
+        }
         let target = schedule.target.as_ref().map(to_json).transpose()?;
         let account_ids = account_ids_to_text(&schedule.account_ids)?;
         let body = opt_json_to_text(&schedule.body)?;
         let conn = self.conn.lock().expect("数据库锁中毒");
+        ensure_not_owned_by_other(
+            &conn,
+            scope,
+            "SELECT owner FROM schedules WHERE id = ?1",
+            &schedule.id,
+            "定时任务",
+        )?;
         conn.execute(
             r#"
             INSERT INTO schedules (
                 id, name, target, cron, timezone, account_ids, body, enabled,
-                created_at, last_run_at, last_status, last_error
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                created_at, last_run_at, last_status, last_error, owner
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             ON CONFLICT(id) DO UPDATE SET
                 name        = excluded.name,
                 target      = excluded.target,
@@ -378,7 +441,10 @@ impl ConfigStore for SqliteStore {
                 enabled     = excluded.enabled,
                 last_run_at = excluded.last_run_at,
                 last_status = excluded.last_status,
-                last_error  = excluded.last_error
+                last_error  = excluded.last_error,
+                -- 归属可以在这条语句里被"认领"（无主 → 本人），但不能被换成别人：
+                -- 换成别人的情况已由上面两道校验挡住。
+                owner       = excluded.owner
             "#,
             params![
                 schedule.id,
@@ -393,18 +459,19 @@ impl ConfigStore for SqliteStore {
                 schedule.last_run_at.as_ref().map(dt_to_string),
                 schedule.last_status.map(schedule_status_str),
                 schedule.last_error,
+                schedule.owner.as_ref().map(UserId::as_str),
             ],
         )
         .map_err(map_sqlite)?;
         Ok(())
     }
 
-    async fn get_schedule(&self, id: &str) -> Result<Option<Schedule>, Error> {
+    async fn get_schedule(&self, scope: Scope<'_>, id: &str) -> Result<Option<Schedule>, Error> {
         let conn = self.conn.lock().expect("数据库锁中毒");
         let raw = conn
             .query_row(
-                &format!("{SCHEDULE_SELECT} WHERE id = ?1"),
-                params![id],
+                &format!("{SCHEDULE_SELECT} WHERE id = ?1 AND {OWNER_VISIBLE_BY_ID}"),
+                params![id, scope.owner().map(UserId::as_str)],
                 RawSchedule::read,
             )
             .optional()
@@ -412,39 +479,59 @@ impl ConfigStore for SqliteStore {
         raw.map(RawSchedule::into_schedule).transpose()
     }
 
-    async fn list_schedules(&self) -> Result<Vec<Schedule>, Error> {
+    async fn list_schedules(&self, scope: Scope<'_>) -> Result<Vec<Schedule>, Error> {
         let conn = self.conn.lock().expect("数据库锁中毒");
         let mut stmt = conn
             .prepare(&format!(
-                "{SCHEDULE_SELECT} ORDER BY created_at ASC, rowid ASC"
+                "{SCHEDULE_SELECT} WHERE {OWNER_VISIBLE_ONLY} ORDER BY created_at ASC, rowid ASC"
             ))
             .map_err(map_sqlite)?;
         let raw = stmt
-            .query_map([], RawSchedule::read)
+            .query_map(
+                params![scope.owner().map(UserId::as_str)],
+                RawSchedule::read,
+            )
             .map_err(map_sqlite)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(map_sqlite)?;
         raw.into_iter().map(RawSchedule::into_schedule).collect()
     }
 
-    async fn delete_schedule(&self, id: &str) -> Result<bool, Error> {
+    async fn delete_schedule(&self, scope: Scope<'_>, id: &str) -> Result<bool, Error> {
         let conn = self.conn.lock().expect("数据库锁中毒");
         let affected = conn
-            .execute("DELETE FROM schedules WHERE id = ?1", params![id])
+            .execute(
+                &format!("DELETE FROM schedules WHERE id = ?1 AND {OWNER_VISIBLE_BY_ID}"),
+                params![id, scope.owner().map(UserId::as_str)],
+            )
             .map_err(map_sqlite)?;
         Ok(affected > 0)
     }
 
-    async fn upsert_pipeline(&self, pipeline: &Pipeline) -> Result<(), Error> {
+    async fn upsert_pipeline(&self, scope: Scope<'_>, pipeline: &Pipeline) -> Result<(), Error> {
+        // 两道校验与 upsert_schedule 完全同构，理由见那里的注释
+        if let Some(user_id) = scope.owner()
+            && pipeline.owner.as_ref() != Some(user_id)
+        {
+            return Err(Error::NotFound(format!("组合 {}", pipeline.id)));
+        }
         let steps = to_json(&pipeline.steps)?;
         let account_ids = account_ids_to_text(&pipeline.account_ids)?;
         let conn = self.conn.lock().expect("数据库锁中毒");
+        ensure_not_owned_by_other(
+            &conn,
+            scope,
+            "SELECT owner FROM pipelines WHERE id = ?1",
+            &pipeline.id,
+            "组合",
+        )?;
         conn.execute(
             r#"
             INSERT INTO pipelines (
                 id, name, description, steps, account_ids, account_mode, stop_on_error,
-                created_at, updated_at, last_run_at, last_status, last_error, last_duration_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                created_at, updated_at, last_run_at, last_status, last_error, last_duration_ms,
+                owner
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             ON CONFLICT(id) DO UPDATE SET
                 name             = excluded.name,
                 description      = excluded.description,
@@ -456,7 +543,8 @@ impl ConfigStore for SqliteStore {
                 last_run_at      = excluded.last_run_at,
                 last_status      = excluded.last_status,
                 last_error       = excluded.last_error,
-                last_duration_ms = excluded.last_duration_ms
+                last_duration_ms = excluded.last_duration_ms,
+                owner            = excluded.owner
             "#,
             params![
                 pipeline.id,
@@ -472,18 +560,19 @@ impl ConfigStore for SqliteStore {
                 pipeline.last_status.map(pipeline_status_str),
                 pipeline.last_error,
                 pipeline.last_duration_ms,
+                pipeline.owner.as_ref().map(UserId::as_str),
             ],
         )
         .map_err(map_sqlite)?;
         Ok(())
     }
 
-    async fn get_pipeline(&self, id: &str) -> Result<Option<Pipeline>, Error> {
+    async fn get_pipeline(&self, scope: Scope<'_>, id: &str) -> Result<Option<Pipeline>, Error> {
         let conn = self.conn.lock().expect("数据库锁中毒");
         let raw = conn
             .query_row(
-                &format!("{PIPELINE_SELECT} WHERE id = ?1"),
-                params![id],
+                &format!("{PIPELINE_SELECT} WHERE id = ?1 AND {OWNER_VISIBLE_BY_ID}"),
+                params![id, scope.owner().map(UserId::as_str)],
                 RawPipeline::read,
             )
             .optional()
@@ -491,15 +580,18 @@ impl ConfigStore for SqliteStore {
         raw.map(RawPipeline::into_pipeline).transpose()
     }
 
-    async fn list_pipelines(&self) -> Result<Vec<Pipeline>, Error> {
+    async fn list_pipelines(&self, scope: Scope<'_>) -> Result<Vec<Pipeline>, Error> {
         let conn = self.conn.lock().expect("数据库锁中毒");
         let mut stmt = conn
             .prepare(&format!(
-                "{PIPELINE_SELECT} ORDER BY created_at ASC, rowid ASC"
+                "{PIPELINE_SELECT} WHERE {OWNER_VISIBLE_ONLY} ORDER BY created_at ASC, rowid ASC"
             ))
             .map_err(map_sqlite)?;
         let raw = stmt
-            .query_map([], RawPipeline::read)
+            .query_map(
+                params![scope.owner().map(UserId::as_str)],
+                RawPipeline::read,
+            )
             .map_err(map_sqlite)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(map_sqlite)?;
@@ -634,7 +726,7 @@ impl ConfigStore for SqliteStore {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use mcloud_core::{Account, Role, Scope, StateStore, User, UserId, UserStore};
+    use mcloud_core::{Account, ClaimedRows, Role, Scope, StateStore, User, UserId, UserStore};
 
     fn store() -> SqliteStore {
         SqliteStore::open_in_memory().expect("内存库应可打开")
@@ -674,6 +766,7 @@ mod tests {
     fn schedule(id: &str) -> Schedule {
         Schedule {
             id: id.into(),
+            owner: None,
             name: "每日签到".into(),
             target: Some(ScheduleTarget::Capability {
                 code: "sign".into(),
@@ -693,6 +786,7 @@ mod tests {
     fn pipeline(id: &str) -> Pipeline {
         Pipeline {
             id: id.into(),
+            owner: None,
             name: "轻量巡检".into(),
             description: Some("查奖品 + 领奖品".into()),
             steps: vec![
@@ -723,9 +817,13 @@ mod tests {
     async fn schedule_roundtrip_keeps_every_field() {
         let s = store();
         let original = schedule("sched-1");
-        s.upsert_schedule(&original).await.unwrap();
+        s.upsert_schedule(Scope::Local, &original).await.unwrap();
 
-        let loaded = s.get_schedule("sched-1").await.unwrap().unwrap();
+        let loaded = s
+            .get_schedule(Scope::Local, "sched-1")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded, original);
     }
 
@@ -734,9 +832,13 @@ mod tests {
         let s = store();
         let mut sc = schedule("sched-1");
         sc.target = None;
-        s.upsert_schedule(&sc).await.unwrap();
+        s.upsert_schedule(Scope::Local, &sc).await.unwrap();
         assert_eq!(
-            s.get_schedule("sched-1").await.unwrap().unwrap().target,
+            s.get_schedule(Scope::Local, "sched-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .target,
             None
         );
     }
@@ -747,7 +849,7 @@ mod tests {
         let s = store();
         let mut sc = schedule("sched-1");
         sc.body = None;
-        s.upsert_schedule(&sc).await.unwrap();
+        s.upsert_schedule(Scope::Local, &sc).await.unwrap();
 
         let raw: Option<String> = {
             let conn = s.conn.lock().unwrap();
@@ -758,21 +860,28 @@ mod tests {
         };
         assert_eq!(raw, None, "没给参数应存 NULL");
 
-        assert_eq!(s.get_schedule("sched-1").await.unwrap().unwrap().body, None);
+        assert_eq!(
+            s.get_schedule(Scope::Local, "sched-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .body,
+            None
+        );
     }
 
     #[tokio::test]
     async fn schedule_upsert_updates_in_place() {
         let s = store();
         let mut sc = schedule("sched-1");
-        s.upsert_schedule(&sc).await.unwrap();
+        s.upsert_schedule(Scope::Local, &sc).await.unwrap();
 
         sc.name = "改名了".into();
         sc.enabled = false;
         sc.last_status = Some(ScheduleStatus::Skipped);
-        s.upsert_schedule(&sc).await.unwrap();
+        s.upsert_schedule(Scope::Local, &sc).await.unwrap();
 
-        let all = s.list_schedules().await.unwrap();
+        let all = s.list_schedules(Scope::Local).await.unwrap();
         assert_eq!(all.len(), 1, "重复写入不应产生第二条");
         assert_eq!(all[0].name, "改名了");
         assert!(!all[0].enabled);
@@ -786,10 +895,10 @@ mod tests {
         for id in ["c", "a", "b"] {
             let mut sc = schedule(id);
             sc.created_at = None;
-            s.upsert_schedule(&sc).await.unwrap();
+            s.upsert_schedule(Scope::Local, &sc).await.unwrap();
         }
         let ids: Vec<String> = s
-            .list_schedules()
+            .list_schedules(Scope::Local)
             .await
             .unwrap()
             .into_iter()
@@ -801,13 +910,15 @@ mod tests {
     #[tokio::test]
     async fn delete_schedule_reports_whether_a_row_went_away() {
         let s = store();
-        s.upsert_schedule(&schedule("sched-1")).await.unwrap();
-        assert!(s.delete_schedule("sched-1").await.unwrap());
+        s.upsert_schedule(Scope::Local, &schedule("sched-1"))
+            .await
+            .unwrap();
+        assert!(s.delete_schedule(Scope::Local, "sched-1").await.unwrap());
         assert!(
-            !s.delete_schedule("sched-1").await.unwrap(),
+            !s.delete_schedule(Scope::Local, "sched-1").await.unwrap(),
             "第二次应为 false"
         );
-        assert!(s.list_schedules().await.unwrap().is_empty());
+        assert!(s.list_schedules(Scope::Local).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -817,9 +928,13 @@ mod tests {
         original.account_ids = vec![AccountId::new("19****01"), AccountId::new("19****02")];
         original.account_mode = AccountMode::Parallel;
         original.stop_on_error = false;
-        s.upsert_pipeline(&original).await.unwrap();
+        s.upsert_pipeline(Scope::Local, &original).await.unwrap();
 
-        let loaded = s.get_pipeline("pipe-1").await.unwrap().unwrap();
+        let loaded = s
+            .get_pipeline(Scope::Local, "pipe-1")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded, original);
         assert_eq!(loaded.steps.len(), 2);
         assert_eq!(loaded.steps[1].continue_on_error, Some(true));
@@ -843,7 +958,9 @@ mod tests {
     #[tokio::test]
     async fn unknown_status_string_reads_as_none_instead_of_a_wrong_value() {
         let s = store();
-        s.upsert_schedule(&schedule("sched-1")).await.unwrap();
+        s.upsert_schedule(Scope::Local, &schedule("sched-1"))
+            .await
+            .unwrap();
         {
             let conn = s.conn.lock().unwrap();
             conn.execute(
@@ -853,7 +970,7 @@ mod tests {
             .unwrap();
         }
         assert_eq!(
-            s.get_schedule("sched-1")
+            s.get_schedule(Scope::Local, "sched-1")
                 .await
                 .unwrap()
                 .unwrap()
@@ -1029,11 +1146,171 @@ mod tests {
         let path = dir.path().join("mcloud.db");
         {
             let s = SqliteStore::open(&path).unwrap();
-            s.upsert_schedule(&schedule("sched-1")).await.unwrap();
-            s.upsert_pipeline(&pipeline("pipe-1")).await.unwrap();
+            s.upsert_schedule(Scope::Local, &schedule("sched-1"))
+                .await
+                .unwrap();
+            s.upsert_pipeline(Scope::Local, &pipeline("pipe-1"))
+                .await
+                .unwrap();
         }
         let s = SqliteStore::open(&path).unwrap();
-        assert_eq!(s.list_schedules().await.unwrap().len(), 1);
-        assert_eq!(s.list_pipelines().await.unwrap().len(), 1);
+        assert_eq!(s.list_schedules(Scope::Local).await.unwrap().len(), 1);
+        assert_eq!(s.list_pipelines(Scope::Local).await.unwrap().len(), 1);
+    }
+
+    // ───────────── 归属：定时任务与组合（schema v4 / §3.7） ─────────────
+
+    /// 两个用户，供归属用例使用。
+    async fn two_users(s: &SqliteStore) -> (UserId, UserId) {
+        ensure_user(s).await;
+        let other = UserId::new("other-user");
+        s.upsert_user(&User::new(
+            other.as_str(),
+            other.as_str(),
+            "!",
+            Role::User,
+            Utc.with_ymd_and_hms(2026, 9, 16, 1, 0, 0).unwrap(),
+        ))
+        .await
+        .unwrap();
+        (uid(), other)
+    }
+
+    /// 交叉读取：A 的定时任务与组合，B 既看不到也删不掉。
+    ///
+    /// "看不到"与"不存在"必须是同一个结果（连存在性都不泄露）。
+    #[tokio::test]
+    async fn configs_are_isolated_between_users() {
+        let s = store();
+        let (a, b) = two_users(&s).await;
+
+        let mut sc = schedule("sched-a");
+        sc.owner = Some(a.clone());
+        s.upsert_schedule(Scope::user(&a), &sc).await.unwrap();
+        let mut pl = pipeline("pipe-a");
+        pl.owner = Some(a.clone());
+        s.upsert_pipeline(Scope::user(&a), &pl).await.unwrap();
+
+        // 本人看得见
+        assert_eq!(s.list_schedules(Scope::user(&a)).await.unwrap().len(), 1);
+        assert_eq!(s.list_pipelines(Scope::user(&a)).await.unwrap().len(), 1);
+        assert!(
+            s.get_schedule(Scope::user(&a), "sched-a")
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // 别人看不见
+        assert!(
+            s.list_schedules(Scope::user(&b)).await.unwrap().is_empty(),
+            "B 不该看见 A 的定时任务"
+        );
+        assert!(s.list_pipelines(Scope::user(&b)).await.unwrap().is_empty());
+        assert!(
+            s.get_schedule(Scope::user(&b), "sched-a")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            s.get_pipeline(Scope::user(&b), "pipe-a")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // 删也删不掉，且**返回 false 而不是报错**（不可见等价于不存在）
+        assert!(!s.delete_schedule(Scope::user(&b), "sched-a").await.unwrap());
+        assert_eq!(
+            s.list_schedules(Scope::user(&a)).await.unwrap().len(),
+            1,
+            "B 的删除不该动到 A 的行"
+        );
+
+        // Scope::Local（CLI 口径）不过滤：同一份过滤表达式，两种范围
+        assert_eq!(s.list_schedules(Scope::Local).await.unwrap().len(), 1);
+        assert_eq!(s.list_pipelines(Scope::Local).await.unwrap().len(), 1);
+    }
+
+    /// 写越权：B 不能拿同一个 id 覆盖 A 的任务。
+    ///
+    /// 这条比"读不到"更要紧：id 是主键、写入是 `ON CONFLICT DO UPDATE`，
+    /// 只过滤读的话越权会从"看得到"升级成"改得掉"。
+    #[tokio::test]
+    async fn a_cannot_overwrite_another_users_schedule() {
+        let s = store();
+        let (a, b) = two_users(&s).await;
+
+        let mut mine = schedule("sched-1");
+        mine.owner = Some(a.clone());
+        s.upsert_schedule(Scope::user(&a), &mine).await.unwrap();
+
+        let mut theirs = schedule("sched-1");
+        theirs.owner = Some(b.clone());
+        theirs.name = "B 的任务".into();
+        let err = s
+            .upsert_schedule(Scope::user(&b), &theirs)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), mcloud_core::ErrorKind::BadRequest, "{err}");
+        assert!(
+            format!("{err}").contains("其他用户"),
+            "要给出可行动的提示，而不是让调用方猜: {err}"
+        );
+
+        let loaded = s
+            .get_schedule(Scope::user(&a), "sched-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.name, "每日签到", "A 的行不能被改动");
+
+        // 也不能把自己写的东西写成"无主"（那会立刻从所有人视野里消失）
+        let mut orphan = schedule("sched-2");
+        orphan.owner = None;
+        assert!(
+            s.upsert_schedule(Scope::user(&a), &orphan).await.is_err(),
+            "Scope::User 不该写出无主的行"
+        );
+    }
+
+    /// 未归属的历史数据：**谁都看不见**；认领后归首个管理员，且幂等、不可被抢。
+    #[tokio::test]
+    async fn claiming_covers_schedules_and_pipelines() {
+        let s = store();
+        let (a, _b) = two_users(&s).await;
+
+        // 迁移留下的无主数据（`Scope::Local` 是迁移/CLI 的口径）
+        s.upsert_schedule(Scope::Local, &schedule("sched-legacy"))
+            .await
+            .unwrap();
+        s.upsert_pipeline(Scope::Local, &pipeline("pipe-legacy"))
+            .await
+            .unwrap();
+
+        assert!(
+            s.list_schedules(Scope::user(&a)).await.unwrap().is_empty(),
+            "无主的定时任务谁都看不见 —— 宁可暂时不出现，也不要谁都拿得到"
+        );
+
+        let claimed = s.claim_unowned(&a).await.unwrap();
+        assert_eq!(
+            (claimed.accounts, claimed.schedules, claimed.pipelines),
+            (0, 1, 1)
+        );
+        assert_eq!(s.list_schedules(Scope::user(&a)).await.unwrap().len(), 1);
+        assert_eq!(s.list_pipelines(Scope::user(&a)).await.unwrap().len(), 1);
+
+        assert_eq!(
+            s.claim_unowned(&a).await.unwrap(),
+            ClaimedRows::default(),
+            "认领必须幂等"
+        );
+        assert_eq!(
+            s.claim_unowned(&UserId::new("late-user")).await.unwrap(),
+            ClaimedRows::default(),
+            "已归属的数据不能被后来者抢走"
+        );
     }
 }

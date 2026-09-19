@@ -29,10 +29,12 @@ mod fixture_extract;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use mcloud_app::{device, login, migration, payload, user};
+use mcloud_app::{app_login, device, login, migration, payload, user};
 use mcloud_core::{Clock, Error as CoreError, UserId, UserStore};
 use mcloud_io::{ReqwestClient, SqliteStore, SystemClock, SystemRandom};
 use mcloud_upstream::Upstream;
+use mcloud_upstream::app_client::{AppDevice, AppProfile};
+use mcloud_upstream::app_login::AppLoginCrypto;
 use mcloud_upstream::login::{LoginDataDecryptor, PcPlatform};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -182,10 +184,73 @@ struct SmsArgs {
     phone: String,
     #[arg(long, default_value = "data/mcloud.db")]
     db: PathBuf,
+    /// 冒充哪个客户端。**两端不是"同一件事的两种参数"**，见 `--client` 的说明。
+    #[arg(long, value_enum, default_value_t = ClientArg::Pc)]
+    client: ClientArg,
+    /// 仅 PC：`clientType` / `cpid` / 版本号
     #[arg(long, value_enum, default_value_t = PlatformArg::Windows)]
     platform: PlatformArg,
+    /// 设备指纹文件。**换掉它等于换一台设备**：服务端按 `dID + sID` 定位会话，
+    /// 漂移的表现是"二维码扫了、手机也确认了，这边毫无反应"。
+    ///
+    /// App 端用 `--app-device-file`（形状不同：无 `-ENDIN` 后缀）。
     #[arg(long, default_value = "data/device.txt")]
     device_file: PathBuf,
+    /// 仅 App：`deviceId` 的存放位置（32 位大写 HEX，无后缀）。
+    #[arg(long, default_value = "data/device-app.txt")]
+    app_device_file: PathBuf,
+    /// 只发码、不进入输入验证码这一步，然后退出。
+    ///
+    /// 发码与登录本来就是两次独立调用，中间隔着"用户去手机上读那条短信"。
+    /// 有了它就能把两半分开跑（配合 `--device-short` 钉住设备形态）。
+    ///
+    /// 与 `--code` 互斥：码已经到手时，没有"只发码"这回事。
+    #[arg(long, conflicts_with = "code")]
+    send_only: bool,
+    /// 直接给出验证码，跳过交互式输入。**同时跳过发码**。
+    ///
+    /// 码已经到手就不该再发一次：那会白刷一次今日配额，还要连带过一次滑块。
+    /// 发码与登录本来就是两次独立调用，有码时只跑后一半。
+    ///
+    /// # 为什么这里可以接受"从命令行传"，而口令不行
+    ///
+    /// 口令（`--password`）**永远不允许**：它长期有效、可复用，会留在 shell 历史与 `ps` 里。
+    /// 短信验证码不同 —— 它**单次、短时效**（分钟级、用过即废），
+    /// 且自动化测试与远程协助必须能非交互地提交它。
+    /// 真要更严，用标准输入即可（不给这个参数就走交互读取）。
+    #[arg(long)]
+    code: Option<String>,
+    /// 仅 App：固定设备串第 7 段（12 位大写 HEX）。
+    ///
+    /// **不传时每次运行现生成**（实测该段不是每安装稳定值，见
+    /// `mcloud_app::device::new_app_device_short`）。传它是为了把
+    /// "发码 → 登录"两半**钉在同一台设备形态**上：
+    /// `--send-only` 会把当次生成的值打出来，原样传回来即可。
+    #[arg(long)]
+    device_short: Option<String>,
+}
+
+/// 冒充 PC 还是手机 App。
+///
+/// # 为什么必须显式选，而不是"自动探测"
+///
+/// 两端的差别不止是几个参数：
+///
+/// | | PC | App |
+/// | --- | --- | --- |
+/// | 请求体 | 明文 JSON | **加密** |
+/// | 滑块 | 可取图自动解 | **H5 页面，只能人工拖** |
+/// | 发短信 | 我们发 | **H5 页面自己发** |
+/// | `Authorization` 前缀 | `pc` | `mobile` |
+///
+/// 混搭（App 的 `clientType` 配 PC 的明文请求体）会被上游当成"参数不合法"，
+/// 而那个错误码与"密钥用错"长得一模一样。所以让调用方**显式**承担这个选择。
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum ClientArg {
+    /// PC 客户端（Windows / macOS）
+    Pc,
+    /// iOS App
+    App,
 }
 
 #[derive(clap::Args, Debug)]
@@ -365,10 +430,12 @@ async fn user_init(db: &Path, name: &str) -> Result<()> {
         outcome.user.name,
         outcome.user.role.as_str()
     );
-    if outcome.claimed_accounts > 0 {
+    if outcome.claimed.total() > 0 {
+        // 三笔分开报：升级上来的用户最想知道的是"我的东西还在不在"，
+        // 只回一个总数等于把这件事糊成一句话。
         println!(
-            "已认领 {} 个从旧数据迁移过来、原本没有归属的云盘账号",
-            outcome.claimed_accounts
+            "已认领旧数据里原本没有归属的数据：账号 {} 个、定时任务 {} 个、组合 {} 个",
+            outcome.claimed.accounts, outcome.claimed.schedules, outcome.claimed.pipelines
         );
     }
 
@@ -532,6 +599,13 @@ async fn login_qr(args: QrArgs) -> Result<()> {
 }
 
 async fn login_sms(args: SmsArgs) -> Result<()> {
+    match args.client {
+        ClientArg::Pc => login_sms_pc(args).await,
+        ClientArg::App => login_sms_app(args).await,
+    }
+}
+
+async fn login_sms_pc(args: SmsArgs) -> Result<()> {
     let store = open_local(&args.db)?;
     let owner = preferred_owner(&store).await.map_err(core_err)?;
     let platform: PcPlatform = args.platform.into();
@@ -543,18 +617,26 @@ async fn login_sms(args: SmsArgs) -> Result<()> {
 
     // 发码（被要求滑块时自动解答案重试）。这段循环在 `mcloud_app::login` 里，
     // 与 WebUI 共用同一份 —— 协议语义不该各写一遍。
-    let sent = login::sms_send_code(&upstream, platform, &device_id, &args.phone, &mut rng)
-        .await
-        .map_err(core_err)?;
-    match sent.remain_get_times {
-        Some(remain) => println!("验证码已发送（今日剩余 {remain} 次）"),
-        None => println!("验证码已发送"),
-    }
-    if sent.solved_slider {
-        println!("（被风控要求滑块，已自动解出缺口位置并重发）");
-    }
+    //
+    // 但 `--code` 已经带着码来了就不再发：那会白刷一次今日配额，
+    // 而且 PC 端发码还要连带解一次滑块。发码与登录是两次独立调用，有码时只跑后一半。
+    let code = match &args.code {
+        Some(code) => code.clone(),
+        None => {
+            let sent = login::sms_send_code(&upstream, platform, &device_id, &args.phone, &mut rng)
+                .await
+                .map_err(core_err)?;
+            match sent.remain_get_times {
+                Some(remain) => println!("验证码已发送（今日剩余 {remain} 次）"),
+                None => println!("验证码已发送"),
+            }
+            if sent.solved_slider {
+                println!("（被风控要求滑块，已自动解出缺口位置并重发）");
+            }
+            read_secret("请输入收到的 6 位验证码: ")?
+        }
+    };
 
-    let code = read_secret("请输入收到的 6 位验证码: ")?;
     let outcome = login::sms_login(
         &store,
         &upstream,
@@ -564,6 +646,122 @@ async fn login_sms(args: SmsArgs) -> Result<()> {
             code: code.trim(),
         },
         &LoginDataDecryptor::production(),
+        &SystemClock,
+        &mut rng,
+    )
+    .await
+    .map_err(core_err)?;
+
+    println!("\n登录成功，账号已保存：{}", outcome.summary());
+    println!("（凭据只落在本地库，不会打印出来）");
+    let mut fields: Vec<&str> = outcome
+        .user_info
+        .as_object()
+        .map(|o| o.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    fields.sort_unstable();
+    if !fields.is_empty() {
+        println!("登录返回的字段：{}", fields.join(", "));
+    }
+    Ok(())
+}
+
+/// App（iOS）端的验证码登录。
+///
+/// # 与 PC 那条路最大的不同：**短信是那个 H5 页面发的**
+///
+/// 被要求滑块时，PC 端可以取图 → 算坐标 → 重发（所以 PC 有个自动重试循环）。
+/// App 端没有这条路：原生侧只是把 H5 打开，**短信由 H5 发**，
+/// 回调之后直接进 `thirdlogin`。所以这里把地址打给用户，
+/// 并明确"不要再重新执行本命令"——否则会再要一次滑块、把配额刷掉。
+async fn login_sms_app(args: SmsArgs) -> Result<()> {
+    let store = open_local(&args.db)?;
+    let owner = preferred_owner(&store).await.map_err(core_err)?;
+    let mut rng = SystemRandom;
+
+    let device_id =
+        device::load_or_create_app_device_id(&args.app_device_file, &mut rng).map_err(core_err)?;
+    // `deviceShort` **每次运行现生成**：实测同一 `deviceId` 在不同时间点换过 short，
+    // 所以它不是一个可以持久化的"每安装指纹"（见 `mcloud_app::device` 的说明）。
+    // 传 `--device-short` 可以把它钉住，用于把"发码 → 登录"两半连成一次会话。
+    let device_short = match &args.device_short {
+        Some(short) => short.to_ascii_uppercase(),
+        None => device::new_app_device_short(&mut rng),
+    };
+    let profile = AppProfile::new(AppDevice::ipad(&device_id, &device_short));
+
+    let client = ReqwestClient::new().map_err(core_err)?;
+    let upstream = Upstream::new(&client);
+
+    println!("正在以 iOS App 身份登录（deviceId {device_id}）");
+
+    // 有码就不再发码。App 端这一步的代价比 PC 更大：`getSmsCode` 会再要一次滑块，
+    // 而白刷一次今日配额；码已经到手时它纯粹是浪费。
+    let code = match &args.code {
+        Some(code) => code.clone(),
+        None => {
+            match app_login::app_send_sms_code(&upstream, &profile, &args.phone, &SystemClock)
+                .await
+                .map_err(core_err)?
+            {
+                app_login::AppCodeOutcome::Sent {
+                    remain_get_times,
+                    solved_slider,
+                } => {
+                    match remain_get_times {
+                        Some(remain) => println!("验证码已发送（今日剩余 {remain} 次）"),
+                        None => println!("验证码已发送"),
+                    }
+                    if solved_slider {
+                        println!(
+                            "（被风控要求滑块，已取图解出缺口坐标并自动重发 —— 全程没有开浏览器）"
+                        );
+                    }
+                }
+                // 只有**自动过滑块也失败**时才会走到这里。把坐标一并打出来：
+                // 万一是服务端要的答案口径变了，这一行就是唯一线索。
+                app_login::AppCodeOutcome::NeedCaptcha {
+                    url,
+                    captcha_type,
+                    attempts,
+                    last_answer,
+                } => {
+                    println!(
+                        "自动过滑块失败（已试 {attempts} 次，captchaType={}，最后发上去的坐标 {last_answer:?}）。",
+                        captcha_type.map_or("未知".to_string(), |t| t.to_string())
+                    );
+                    println!("改走兜底路径：请在浏览器打开下面这个地址，拖动拼图完成验证：");
+                    println!("\n{url}\n");
+                    println!(
+                        "（**短信由该页面发出**，完成拖动后回到这里继续。不要再重新执行本命令）"
+                    );
+                }
+            }
+
+            if args.send_only {
+                // 把当次的设备短标识打出来：下一步用 `--device-short` 传回来，
+                // 两半才会被上游看成同一台设备形态。
+                println!("\n本次设备短标识（继续时用 --device-short 传回）：{device_short}");
+                println!("发码完成，已按 --send-only 退出。");
+                return Ok(());
+            }
+
+            read_secret("请输入收到的 6 位验证码: ")?
+        }
+    };
+
+    let outcome = app_login::app_sms_login(
+        &store,
+        &upstream,
+        app_login::AppLoginContext {
+            scope: scope_for_new_accounts(&owner),
+            profile: &profile,
+            credential: login::SmsCredential {
+                phone: &args.phone,
+                code: code.trim(),
+            },
+        },
+        &AppLoginCrypto::production(),
         &SystemClock,
         &mut rng,
     )

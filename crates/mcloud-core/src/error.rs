@@ -134,6 +134,31 @@ pub enum Error {
 }
 
 impl Error {
+    /// 错误正文 —— **不含**类别前缀。
+    ///
+    /// [`Display`](std::fmt::Display) 会给每条错误加上"凭据失效:" / "不存在:" 这类前缀：
+    /// 那在**日志**里很有用（一眼看出类别），但直接端给使用者就很怪 ——
+    /// 登录页上写"凭据失效: 用户名或口令不正确"，前半句是给运维看的。
+    ///
+    /// 所以要不要前缀是调用方的事，而这个能力必须显式提供：
+    /// 不给的话，各处的解法会是 `split(": ")` 或者干脆把前缀一起发出去。
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Auth(m)
+            | Self::RateLimited(m)
+            | Self::SoldOut(m)
+            | Self::InsufficientCloud(m)
+            | Self::Timeout(m)
+            | Self::Network(m)
+            | Self::BadRequest(m)
+            | Self::NotFound(m)
+            | Self::Parse(m)
+            | Self::Internal(m)
+            | Self::FixtureMiss(m) => m,
+            Self::Upstream { message, .. } => message,
+        }
+    }
+
     pub const fn kind(&self) -> ErrorKind {
         match self {
             Self::Auth(_) => ErrorKind::Auth,
@@ -232,5 +257,21 @@ mod tests {
     fn business_code_zero_means_ok() {
         assert!(classify_business_code(0).is_none());
         assert_eq!(classify_business_code(-1), Some(ErrorKind::BadRequest));
+    }
+
+    /// `Display` 带类别前缀（给日志看），`message()` 不带（给使用者看）。
+    #[test]
+    fn message_is_free_of_the_kind_prefix() {
+        let err = Error::Auth("用户名或口令不正确".into());
+        assert_eq!(err.to_string(), "凭据失效: 用户名或口令不正确");
+        assert_eq!(err.message(), "用户名或口令不正确");
+        assert!(!err.message().contains("凭据失效"));
+
+        // 带字段的变体也要能取到正文
+        let upstream = Error::Upstream {
+            status: 502,
+            message: "坏网关".into(),
+        };
+        assert_eq!(upstream.message(), "坏网关");
     }
 }

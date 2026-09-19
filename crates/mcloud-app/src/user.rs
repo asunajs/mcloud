@@ -15,7 +15,8 @@
 
 use chrono::{DateTime, Utc};
 use mcloud_core::{
-    Error, MIN_PASSWORD_LEN, Random, Role, StateStore, User, UserId, UserStore, hash_password,
+    ClaimedRows, Error, MIN_PASSWORD_LEN, Random, Role, StateStore, User, UserId, UserStore,
+    hash_password,
 };
 
 /// 用户名长度上限。
@@ -26,11 +27,11 @@ pub const MAX_USERNAME_LEN: usize = 64;
 /// 初始化结果。
 pub struct InitOutcome {
     pub user: User,
-    /// 被认领的历史账号条数。
+    /// 被认领的历史数据（账号 / 定时任务 / 组合）。
     ///
-    /// 单独返回它是为了让人看见"升级上来的账号去哪了" ——
+    /// 单独返回它是为了让人看见"升级上来的数据去哪了" ——
     /// 从旧项目升上来的用户最关心的就是这个数（0 和 2 是两种心情）。
-    pub claimed_accounts: u64,
+    pub claimed: ClaimedRows,
 }
 
 /// 手写 `Debug`：结果里带 `User`（含口令哈希），而调试输出最容易顺手打印。
@@ -38,7 +39,7 @@ impl std::fmt::Debug for InitOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InitOutcome")
             .field("user", &self.user)
-            .field("claimed_accounts", &self.claimed_accounts)
+            .field("claimed", &self.claimed)
             .finish()
     }
 }
@@ -106,14 +107,11 @@ pub async fn init_first_admin<S: UserStore + StateStore>(
     );
     store.upsert_user(&user).await?;
 
-    // 认领从旧库迁移过来、还没归属的账号（`owner IS NULL`）。
-    // 这是"先 migrate 再 init"顺序下账号的去处；反过来（先 init）则是导入时直接归属。
-    let claimed_accounts = store.claim_unowned_accounts(&user.id).await?;
+    // 认领从旧库迁移过来、还没归属的数据（`owner IS NULL`）：账号、定时任务、组合。
+    // 这是"先 migrate 再 init"顺序下它们的去处；反过来（先 init）则是导入时直接归属。
+    let claimed = store.claim_unowned(&user.id).await?;
 
-    Ok(InitOutcome {
-        user,
-        claimed_accounts,
-    })
+    Ok(InitOutcome { user, claimed })
 }
 
 #[cfg(test)]
@@ -153,7 +151,7 @@ mod tests {
         assert_eq!(outcome.user.role, Role::Admin);
         assert!(outcome.user.is_admin());
         // 新库没有无主账号，所以是 0
-        assert_eq!(outcome.claimed_accounts, 0);
+        assert_eq!(outcome.claimed, ClaimedRows::default());
 
         // 落库了，而且口令能验回来（口令只以 argon2id 编码串形态存储）
         let stored = s.get_user_by_name("admin").await.unwrap().unwrap();
@@ -170,7 +168,7 @@ mod tests {
         let first = init_first_admin(&s, "admin", "correct-horse", &mut SeqRandom(1), now())
             .await
             .unwrap();
-        assert_eq!(first.claimed_accounts, 0);
+        assert_eq!(first.claimed, ClaimedRows::default());
 
         let err = init_first_admin(&s, "admin2", "correct-horse", &mut SeqRandom(2), now())
             .await

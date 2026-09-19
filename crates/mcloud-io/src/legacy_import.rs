@@ -394,8 +394,8 @@ pub async fn import_legacy(
         let written = match name {
             "state.json" => write_state(store, scope, &value, &identity, &mut report).await?,
             "history.json" => write_history(store, scope, &value, &views, &mut report).await?,
-            "pipelines.json" => write_pipelines(store, &value, &views, &mut report).await?,
-            "schedules.json" => write_schedules(store, &value, &views, &mut report).await?,
+            "pipelines.json" => write_pipelines(store, scope, &value, &views, &mut report).await?,
+            "schedules.json" => write_schedules(store, scope, &value, &views, &mut report).await?,
             "exchange.json" => write_exchange(store, &value, &views, &mut report).await?,
             "webui.json" => write_webui(store, &value, &mut report).await?,
             other => unreachable!("LEGACY_DATA_FILES 里没有 {other}"),
@@ -629,6 +629,7 @@ fn legacy_run_id(run: &LegacyRun) -> String {
 
 async fn write_pipelines(
     store: &SqliteStore,
+    scope: Scope<'_>,
     value: &Value,
     views: &[LegacyAccountView],
     report: &mut MigrationReport,
@@ -671,40 +672,45 @@ async fn write_pipelines(
         };
 
         store
-            .upsert_pipeline(&Pipeline {
-                id: non_empty(&pipeline.id).unwrap_or_else(|| fallback_id("pipe", &pipeline.name)),
-                name: if pipeline.name.is_empty() {
-                    "未命名组合".to_string()
-                } else {
-                    pipeline.name.clone()
+            .upsert_pipeline(
+                scope,
+                &Pipeline {
+                    id: non_empty(&pipeline.id)
+                        .unwrap_or_else(|| fallback_id("pipe", &pipeline.name)),
+                    owner: scope.owner().cloned(),
+                    name: if pipeline.name.is_empty() {
+                        "未命名组合".to_string()
+                    } else {
+                        pipeline.name.clone()
+                    },
+                    description: pipeline.description.clone(),
+                    steps: pipeline
+                        .steps
+                        .iter()
+                        .map(|step: &LegacyStep| PipelineStep {
+                            task: step.task.clone(),
+                            body: step.body.clone(),
+                            continue_on_error: step.continue_on_error,
+                        })
+                        .collect(),
+                    account_ids,
+                    account_mode: match pipeline.account_mode.as_deref() {
+                        Some("parallel") => AccountMode::Parallel,
+                        _ => AccountMode::Sequential,
+                    },
+                    // 旧版注释写明"默认 true"
+                    stop_on_error: pipeline.stop_on_error.unwrap_or(true),
+                    created_at: pipeline.created_at.as_deref().and_then(parse_rfc3339),
+                    updated_at: pipeline.updated_at.as_deref().and_then(parse_rfc3339),
+                    last_run_at: pipeline.last_run_at.as_deref().and_then(parse_rfc3339),
+                    last_status: pipeline
+                        .last_status
+                        .as_deref()
+                        .and_then(parse_pipeline_status),
+                    last_error: pipeline.last_error.clone(),
+                    last_duration_ms: pipeline.last_duration_ms,
                 },
-                description: pipeline.description.clone(),
-                steps: pipeline
-                    .steps
-                    .iter()
-                    .map(|step: &LegacyStep| PipelineStep {
-                        task: step.task.clone(),
-                        body: step.body.clone(),
-                        continue_on_error: step.continue_on_error,
-                    })
-                    .collect(),
-                account_ids,
-                account_mode: match pipeline.account_mode.as_deref() {
-                    Some("parallel") => AccountMode::Parallel,
-                    _ => AccountMode::Sequential,
-                },
-                // 旧版注释写明"默认 true"
-                stop_on_error: pipeline.stop_on_error.unwrap_or(true),
-                created_at: pipeline.created_at.as_deref().and_then(parse_rfc3339),
-                updated_at: pipeline.updated_at.as_deref().and_then(parse_rfc3339),
-                last_run_at: pipeline.last_run_at.as_deref().and_then(parse_rfc3339),
-                last_status: pipeline
-                    .last_status
-                    .as_deref()
-                    .and_then(parse_pipeline_status),
-                last_error: pipeline.last_error.clone(),
-                last_duration_ms: pipeline.last_duration_ms,
-            })
+            )
             .await?;
         written += 1;
     }
@@ -769,6 +775,7 @@ fn resolve_pipeline_accounts(
 
 async fn write_schedules(
     store: &SqliteStore,
+    scope: Scope<'_>,
     value: &Value,
     views: &[LegacyAccountView],
     report: &mut MigrationReport,
@@ -838,28 +845,33 @@ async fn write_schedules(
         };
 
         store
-            .upsert_schedule(&Schedule {
-                id: non_empty(&schedule.id).unwrap_or_else(|| fallback_id("sched", &schedule.name)),
-                name: if schedule.name.is_empty() {
-                    "未命名任务".to_string()
-                } else {
-                    schedule.name.clone()
+            .upsert_schedule(
+                scope,
+                &Schedule {
+                    id: non_empty(&schedule.id)
+                        .unwrap_or_else(|| fallback_id("sched", &schedule.name)),
+                    owner: scope.owner().cloned(),
+                    name: if schedule.name.is_empty() {
+                        "未命名任务".to_string()
+                    } else {
+                        schedule.name.clone()
+                    },
+                    target,
+                    cron: schedule.cron.clone(),
+                    timezone: non_empty(schedule.timezone.as_deref().unwrap_or(""))
+                        .unwrap_or_else(|| DEFAULT_TZ.to_string()),
+                    account_ids,
+                    body: schedule.body.clone(),
+                    enabled,
+                    created_at: schedule.created_at.as_deref().and_then(parse_rfc3339),
+                    last_run_at: schedule.last_run_at.as_deref().and_then(parse_rfc3339),
+                    last_status: schedule
+                        .last_status
+                        .as_deref()
+                        .and_then(parse_schedule_status),
+                    last_error: schedule.last_error.clone(),
                 },
-                target,
-                cron: schedule.cron.clone(),
-                timezone: non_empty(schedule.timezone.as_deref().unwrap_or(""))
-                    .unwrap_or_else(|| DEFAULT_TZ.to_string()),
-                account_ids,
-                body: schedule.body.clone(),
-                enabled,
-                created_at: schedule.created_at.as_deref().and_then(parse_rfc3339),
-                last_run_at: schedule.last_run_at.as_deref().and_then(parse_rfc3339),
-                last_status: schedule
-                    .last_status
-                    .as_deref()
-                    .and_then(parse_schedule_status),
-                last_error: schedule.last_error.clone(),
-            })
+            )
             .await?;
         written += 1;
     }
@@ -1237,8 +1249,16 @@ mod tests {
             s.list_runs(Scope::user(&uid()), 100).await.unwrap().len(),
             12
         );
-        assert_eq!(s.list_pipelines().await.unwrap().len(), 1);
-        assert!(s.list_schedules().await.unwrap().is_empty());
+        assert_eq!(
+            s.list_pipelines(Scope::user(&uid())).await.unwrap().len(),
+            1
+        );
+        assert!(
+            s.list_schedules(Scope::user(&uid()))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1355,7 +1375,7 @@ mod tests {
         let s = store();
         run_import(&s, &fixture_source()).await.unwrap();
 
-        let pipelines = s.list_pipelines().await.unwrap();
+        let pipelines = s.list_pipelines(Scope::user(&uid())).await.unwrap();
         let pipeline = &pipelines[0];
         assert_eq!(pipeline.name, "轻量巡检");
         assert_eq!(
@@ -1466,7 +1486,10 @@ mod tests {
             .collect();
         assert_eq!(after, before, "行数不变，主键也不变");
         assert_eq!(s.list_accounts(Scope::user(&uid())).await.unwrap().len(), 2);
-        assert_eq!(s.list_pipelines().await.unwrap().len(), 1);
+        assert_eq!(
+            s.list_pipelines(Scope::user(&uid())).await.unwrap().len(),
+            1
+        );
     }
 
     // ── 安全失败 ───────────────────────────────────────────────────────────
@@ -1509,7 +1532,12 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(s.list_pipelines().await.unwrap().is_empty());
+        assert!(
+            s.list_pipelines(Scope::user(&uid()))
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             s.list_imports().unwrap().is_empty(),
             "中止时也不该留下台账，否则重跑会被误判成已导入"
@@ -1648,7 +1676,7 @@ mod tests {
         let report = run_import(&s, &source_of(&dir)).await.unwrap();
         assert_eq!(report.schedules, 1);
 
-        let schedule = &s.list_schedules().await.unwrap()[0];
+        let schedule = &s.list_schedules(Scope::user(&uid())).await.unwrap()[0];
         assert_eq!(schedule.account_ids, vec![id(ACC_1)], "恢复到了正确的账号");
         assert!(schedule.enabled, "恢复成功就不该停用它");
         assert_eq!(schedule.timezone, DEFAULT_TZ, "旧版缺省是上海");
@@ -1686,7 +1714,7 @@ mod tests {
         let s = store();
         let report = run_import(&s, &source_of(&dir)).await.unwrap();
 
-        let schedule = &s.list_schedules().await.unwrap()[0];
+        let schedule = &s.list_schedules(Scope::user(&uid())).await.unwrap()[0];
         assert!(
             !schedule.enabled,
             "解析不到账号必须停用 —— 回落到'全部账号'等于把'过去什么都没跑'变成'对所有人跑'"
@@ -1724,7 +1752,7 @@ mod tests {
         let report = run_import(&s, &source_of(&dir)).await.unwrap();
         assert_eq!(report.schedules, 3, "三条都要留下，靠 enabled 表达处置");
 
-        let schedules = s.list_schedules().await.unwrap();
+        let schedules = s.list_schedules(Scope::user(&uid())).await.unwrap();
         assert!(schedules.iter().all(|s| !s.enabled));
         assert_eq!(
             schedules
@@ -1770,7 +1798,7 @@ mod tests {
 
         assert_eq!(report.pipelines, 2, "好组合与混合引用各一条");
         let names: Vec<String> = s
-            .list_pipelines()
+            .list_pipelines(Scope::user(&uid()))
             .await
             .unwrap()
             .into_iter()
@@ -1778,7 +1806,11 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["好组合", "混合引用"], "坏组合与空组合都不入库");
 
-        let mixed = s.get_pipeline("p4").await.unwrap().unwrap();
+        let mixed = s
+            .get_pipeline(Scope::user(&uid()), "p4")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             mixed.account_ids,
             vec![id(ACC_2), id(ACC_1)],
@@ -1827,7 +1859,7 @@ mod tests {
         let report = run_import(&s, &source_of(&dir)).await.unwrap();
         assert_eq!(report.pipelines, 2);
         assert!(
-            s.list_pipelines()
+            s.list_pipelines(Scope::user(&uid()))
                 .await
                 .unwrap()
                 .iter()
@@ -2137,11 +2169,15 @@ mod tests {
         run_import(&s, &source_of(&dir)).await.unwrap();
 
         assert_eq!(
-            s.get_schedule("s1").await.unwrap().unwrap().last_status,
+            s.get_schedule(Scope::user(&uid()), "s1")
+                .await
+                .unwrap()
+                .unwrap()
+                .last_status,
             Some(ScheduleStatus::Error)
         );
         assert_eq!(
-            s.get_schedule("s1")
+            s.get_schedule(Scope::user(&uid()), "s1")
                 .await
                 .unwrap()
                 .unwrap()
@@ -2150,12 +2186,20 @@ mod tests {
             Some("上游 500")
         );
         assert_eq!(
-            s.get_schedule("s2").await.unwrap().unwrap().last_status,
+            s.get_schedule(Scope::user(&uid()), "s2")
+                .await
+                .unwrap()
+                .unwrap()
+                .last_status,
             Some(ScheduleStatus::Skipped)
         );
         // 认不出来的状态宁可为空，也不该猜一个
         assert_eq!(
-            s.get_schedule("s3").await.unwrap().unwrap().last_status,
+            s.get_schedule(Scope::user(&uid()), "s3")
+                .await
+                .unwrap()
+                .unwrap()
+                .last_status,
             None
         );
     }
@@ -2179,7 +2223,11 @@ mod tests {
 
         for id in ["s1", "s2"] {
             assert_eq!(
-                s.get_schedule(id).await.unwrap().unwrap().target,
+                s.get_schedule(Scope::user(&uid()), id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .target,
                 Some(ScheduleTarget::Pipeline { id: "p1".into() }),
                 "旧版优先 pipelineId；{id} 的目标不对"
             );
@@ -2202,8 +2250,12 @@ mod tests {
 
         let s = store();
         run_import(&s, &source_of(&dir)).await.unwrap();
-        let first_pipeline = s.list_pipelines().await.unwrap()[0].id.clone();
-        let first_schedule = s.list_schedules().await.unwrap()[0].id.clone();
+        let first_pipeline = s.list_pipelines(Scope::user(&uid())).await.unwrap()[0]
+            .id
+            .clone();
+        let first_schedule = s.list_schedules(Scope::user(&uid())).await.unwrap()[0]
+            .id
+            .clone();
 
         assert!(first_pipeline.starts_with("legacy-pipe-"));
         assert!(first_schedule.starts_with("legacy-sched-"));
@@ -2216,9 +2268,12 @@ mod tests {
         );
         run_import(&s, &source_of(&dir)).await.unwrap();
 
-        let pipelines = s.list_pipelines().await.unwrap();
+        let pipelines = s.list_pipelines(Scope::user(&uid())).await.unwrap();
         assert_eq!(pipelines.len(), 1, "兜底 id 变了就会多出一行");
         assert_eq!(pipelines[0].id, first_pipeline);
-        assert_eq!(s.list_schedules().await.unwrap()[0].id, first_schedule);
+        assert_eq!(
+            s.list_schedules(Scope::user(&uid())).await.unwrap()[0].id,
+            first_schedule
+        );
     }
 }

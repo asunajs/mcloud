@@ -16,6 +16,19 @@ export default defineConfig({
       interop: false,
     }),
   ],
+  server: {
+    // 开发时后端在 mcloud-server（默认 8787）。
+    //
+    // 配代理而不是让前端去跨域请求：会话是 cookie，跨域要一整套
+    // CORS + SameSite=None + Secure，而生产形态本来就是**同源**（后端直接发前端产物）。
+    // 开发期把这条差异用代理抹平，才不会出现"开发能登录、打包上去就登录不了"。
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:8787',
+        changeOrigin: false,
+      },
+    },
+  },
   build: {
     outDir: 'dist',
     // 产物会被 rust-embed 编进二进制，体积敏感

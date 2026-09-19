@@ -51,7 +51,7 @@ mcloud-cli           → core, capabilities, server         可执行入口
 
 ## 门禁
 
-改完代码跑这五条，全绿才算完成：
+改完代码跑这六条，全绿才算完成：
 
 ```bash
 cargo test                                          # 单元测试
@@ -59,7 +59,17 @@ cargo clippy --all-targets -- -D warnings           # 静态检查（warnings �
 cargo fmt --check                                   # 格式
 bash scripts/check-deps.sh                          # 分层铁律（见上）
 node scripts/check-identifiers.cjs                  # 仓库里不得有真实标识（见下）
+node scripts/check-golden-vectors.cjs               # 黄金向量能算出自己（见下）
 ```
+
+第 6 条是**抓包侧**的自检：`test/golden/*.json` 是要进版本库的产物，
+但"有人手工改坏一个字符"只有真算一遍才发现。它用 Node `crypto` 独立实现算
+**106 条**向量，与 Rust 侧互为交叉验证 —— 一边过一边不过，说明其中一边错了。
+它同时做两件 Rust 侧做不到的事：对**每个** golden 文件跑脱敏扫描（Rust 只扫
+`include_str!` 进来的那些），以及列出**没有任何 Rust 测试读取**的向量文件
+（`app-business-crypto-vectors.json` 与 `login-crypto-vectors.json` 目前是这种状态）。
+
+覆盖范围是显式的：没有校验器的段会被**打印出来**，不假装通过。
 
 当前状态（2026-09-17）：**241 个测试通过**，其余四项全绿。
 其中 `mcloud-upstream` 的 L2 夹具回放已跑通（`crates/mcloud-upstream/tests/l2_replay.rs`）——
@@ -112,6 +122,19 @@ node scripts/check-identifiers.cjs                  # 仓库里不得有真实�
 cargo run -p mcloud-cli -- help
 ```
 
+### WebUI
+
+```bash
+cd web && npm install && npm run build      # 前端产物到 web/dist
+cd .. && cargo run -p mcloud-server         # API + 前端，默认 http://127.0.0.1:8787
+```
+
+首次打开是**初始化页**（建首个管理员）；之后就一直是登录页。
+前端开发用 `cd web && npm run dev`（vite 5173 → 后端 8787 已配好代理）。
+
+会话走 cookie：`HttpOnly` + `SameSite=Lax`，库里只存 `sha256(token)`，
+登出 = 删掉那一行，**立刻生效**。口令用于登录**本系统**，与移动云盘账号无关。
+
 子命令一览：
 
 | 子命令 | 作用 |
@@ -136,6 +159,12 @@ cargo run -p mcloud-cli -- help
 隔离是给**网络上的用户**准备的（WebUI：A 看不到 B 的账号）—— 那里用户拿不到库文件，
 边界才有意义。过滤逻辑只有一份：查询写 `(?n IS NULL OR owner = ?n)`，
 两种范围共用同一句，所以"某条查询漏了归属条件"在结构上不可能发生。
+
+**WebUI 那侧确实要**：`POST /api/session` 登录、每个请求带 cookie 解析出 `UserId`，
+再据此取 `Scope::User(谁)`。两条硬规则（见 `docs/rust-rewrite-plan.md` §3.7）：
+
+- **没初始化就只暴露初始化**：库里没有用户时，除 `/api/setup` 与健康检查外一律 `503`；
+- **其余接口一律要会话**，且**白名单**判定豁免（新加的路由默认是"需要登录"）。
 
 CLI 新建的云盘账号会归**库里首个用户**（没有用户则保持无主，等 `user init` 时认领）——
 这不是权限检查，而是"账号必须有主人"：否则网页端按隔离规则看不到它，

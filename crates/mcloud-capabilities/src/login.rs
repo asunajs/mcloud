@@ -401,7 +401,28 @@ impl SmsLogin {
 /// 也就是 `base64("pc:<account>:<authToken>")` —— 注意**第一段是 `pc` 而不是平台号**。
 /// 这个形状正好是 `mcloud_core::parse_auth` 认得的 `platform:phone:token`，
 /// 所以登录结果能直接被既有的账号/登录态模型消费，**不需要第二套解析**。
+///
+/// # 第一段是**按端**变的
+///
+/// PC 端是 `pc`；**App 端是 `mobile`**（实测：App 日志里 1076 处 `Authorization`
+/// 解码后全是 `mobile:<手机号>:<authToken>`，见 `docs/client-profiles.md` §3.3）。
+/// 两端的 `authToken` 形状完全一样，只有这一段字面量不同。
+/// 所以前缀由调用方给出（[`auth_from_user_info_with_prefix`]），
+/// 本函数只是 PC 端的便利包装 —— **不要**把 `pc` 当成"默认值"用到别的端上。
 pub fn auth_from_user_info(user_info: &Value) -> Result<String, Error> {
+    auth_from_user_info_with_prefix(user_info, PC_AUTH_PREFIX)
+}
+
+/// PC 端 `Authorization` 载荷的第一段。
+///
+/// 客户端源码里是字面量 `pc`（不是平台号，Windows 与 macOS 都用它）。
+pub const PC_AUTH_PREFIX: &str = "pc";
+
+/// 同 [`auth_from_user_info`]，但显式指定载荷的第一段。
+///
+/// 之所以不把前缀做成 `Option` 默认 `pc`：默认值会让"给 App 的登录结果套了 PC 的前缀"
+/// 变成一个静默通过的调用，而那正是最难在事后发现的一类错误。
+pub fn auth_from_user_info_with_prefix(user_info: &Value, prefix: &str) -> Result<String, Error> {
     let field = |name: &str| {
         user_info
             .get(name)
@@ -414,7 +435,7 @@ pub fn auth_from_user_info(user_info: &Value) -> Result<String, Error> {
     let auth_token = field("authToken")?;
     Ok(format!(
         "Basic {}",
-        b64(&format!("pc:{account}:{auth_token}"))
+        b64(&format!("{prefix}:{account}:{auth_token}"))
     ))
 }
 
@@ -439,7 +460,40 @@ pub fn account_and_state_from_login(
     user_info: &Value,
     now: DateTime<Utc>,
 ) -> Result<(Account, AccountState), Error> {
-    let auth = auth_from_user_info(user_info)?;
+    account_and_state_from_login_with_prefix(scope, device_id, user_info, PC_AUTH_PREFIX, now)
+}
+
+/// 同 [`account_and_state_from_login`]，但显式指定 `Authorization` 载荷的第一段。
+///
+/// App 端传 `"mobile"`（见 [`auth_from_user_info_with_prefix`] 的说明）。
+///
+/// # 为什么这里能容忍两种用户域字段名
+///
+/// 用户域标识的**响应字段名是 `userDomainId`**（形如 `1990000000000000001`）——
+/// 这条已由一次真机登录打印出的字段清单证实：
+/// `account, …, userAssetFlag, userDomainId, userExtInfo, userid`，
+/// 里面**没有 `userId`**。`userId` 是**请求体**里常见的键名，由 `userDomainId` 赋过去
+/// （如 `userId: window.userDomainId || window.UserInfo.userDomainId || ''`）。
+///
+/// 事前就已经从 PC 客户端源码反推出来了：`UserInfo.userDomainId` 被读了 11 次，
+/// 而 `UserInfo.userId` **一次都没有**；事后实测与这个统计完全吻合。
+/// 而且 App 与 PC **都调 `POST /user/thirdlogin`**，所以两端共用这套字段名。
+///
+/// 既然 `userId` 一次都没在响应里出现过，这里为什么还留着它？
+/// 因为**别的端的响应/别的流程可能用它**，认两个名字的成本是零，
+/// 而认错名字的代价是"用户域标识静默为空"。所以保留兜底，
+/// 而不是让调用方先去伪造一个 `userId`。
+///
+/// 注意**别把 `userid`（全小写）并进这条兜底链**：它在同一份响应里与
+/// `userDomainId` **同时出现、值不同**（12 字符 vs 19 位），不是一回事。
+pub fn account_and_state_from_login_with_prefix(
+    scope: Scope<'_>,
+    device_id: &str,
+    user_info: &Value,
+    prefix: &str,
+    now: DateTime<Utc>,
+) -> Result<(Account, AccountState), Error> {
+    let auth = auth_from_user_info_with_prefix(user_info, prefix)?;
 
     // 复用既有解析：它已经有黄金向量对拍，没必要在这里重写一遍分段逻辑。
     let parsed = mcloud_core::parse_auth(&auth)
@@ -461,9 +515,12 @@ pub fn account_and_state_from_login(
     let state = AccountState {
         jwt_token: parsed.token.clone(),
         device_id: (!device_id.is_empty()).then(|| device_id.to_string()),
-        // PC 登录结果里的 `userId`（形如 1990000000000000001）就是移动侧的用户域标识
+        // `userDomainId` 是**两端的响应字段名**（实测字段清单里就是它）；
+        // `userId` 只是**请求体**里的键名，值是同一个。详见本函数的文档。
+        // `userid`（全小写）**不在此列**，它是 12 字符的另一个值。
         user_domain_id: user_info
             .get("userId")
+            .or_else(|| user_info.get("userDomainId"))
             .and_then(Value::as_str)
             .map(str::to_string),
         updated_at: Some(now),
@@ -484,7 +541,20 @@ pub async fn persist_login<S: StateStore>(
     user_info: &Value,
     now: DateTime<Utc>,
 ) -> Result<AccountId, Error> {
-    let (account, state) = account_and_state_from_login(scope, device_id, user_info, now)?;
+    persist_login_with_prefix(store, scope, device_id, user_info, PC_AUTH_PREFIX, now).await
+}
+
+/// 同 [`persist_login`]，但显式指定 `Authorization` 载荷的第一段（App 端传 `"mobile"`）。
+pub async fn persist_login_with_prefix<S: StateStore>(
+    store: &S,
+    scope: Scope<'_>,
+    device_id: &str,
+    user_info: &Value,
+    prefix: &str,
+    now: DateTime<Utc>,
+) -> Result<AccountId, Error> {
+    let (account, state) =
+        account_and_state_from_login_with_prefix(scope, device_id, user_info, prefix, now)?;
     store.upsert_account(scope, &account).await?;
     store.upsert_account_state(scope, &state).await?;
     Ok(account.id)
@@ -871,6 +941,47 @@ mod tests {
             let err = auth_from_user_info(&info).unwrap_err();
             assert!(format!("{err}").contains(missing), "{err}");
         }
+    }
+
+    #[test]
+    fn app_prefix_produces_mobile_not_pc() {
+        // App 端实测：Basic base64("mobile:<手机号>:<authToken>")
+        // （App 日志 1076 处 Authorization 解码后全是这个形状）
+        let auth = auth_from_user_info_with_prefix(&user_info(), "mobile").unwrap();
+        assert_eq!(
+            auth,
+            format!(
+                "Basic {}",
+                b64("mobile:19900000000:SYNTH001|1|RCS|1893456000000|AAAA")
+            )
+        );
+        // 前缀进得了既有解析器，所以 App 的登录结果不需要第二套模型
+        let parsed = mcloud_core::parse_auth(&auth).unwrap();
+        assert_eq!(parsed.platform.as_deref(), Some("mobile"));
+        assert_eq!(parsed.phone.as_deref(), Some("19900000000"));
+        assert_eq!(parsed.expire_millis(), 1_893_456_000_000);
+
+        // 反证：不能和 PC 的那个撞成一样
+        assert_ne!(auth, auth_from_user_info(&user_info()).unwrap());
+    }
+
+    #[test]
+    fn app_session_payload_is_understood_without_faking_user_id() {
+        // App 的会话载荷用 `userDomainId`，PC 用 `userId` —— 是同一个东西。
+        // 这里钉住"两种名字都认"，免得有人为了复用而在 App 侧伪造一个 `userId`。
+        let mut info = user_info();
+        let domain = info["userId"].clone();
+        info.as_object_mut().unwrap().remove("userId");
+        info["userDomainId"] = domain.clone();
+
+        let (_, state) =
+            account_and_state_from_login_with_prefix(Scope::Local, "DEV", &info, "mobile", now())
+                .unwrap();
+        assert_eq!(state.user_domain_id, domain.as_str().map(str::to_string));
+        assert_eq!(
+            state.jwt_token.as_deref(),
+            Some("SYNTH001|1|RCS|1893456000000|AAAA")
+        );
     }
 
     #[test]

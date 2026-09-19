@@ -496,14 +496,20 @@ mod tests {
             "未归属的账号不该出现在任何人的列表里"
         );
 
-        assert_eq!(s.claim_unowned_accounts(&admin.id).await.unwrap(), 2);
+        let claimed = s.claim_unowned(&admin.id).await.unwrap();
+        assert_eq!(claimed.accounts, 2);
         assert_eq!(
-            s.claim_unowned_accounts(&admin.id).await.unwrap(),
+            (claimed.schedules, claimed.pipelines),
+            (0, 0),
+            "这个夹具里只有账号；定时任务与组合由 config.rs 的用例覆盖"
+        );
+        assert_eq!(
+            s.claim_unowned(&admin.id).await.unwrap().accounts,
             0,
             "认领必须幂等"
         );
         assert_eq!(
-            s.claim_unowned_accounts(&other.id).await.unwrap(),
+            s.claim_unowned(&other.id).await.unwrap().accounts,
             0,
             "已归属的账号不能被别人抢走"
         );

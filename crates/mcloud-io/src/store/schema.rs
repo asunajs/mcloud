@@ -19,7 +19,7 @@ use rusqlite::Connection;
 /// 但一旦有了外部用户的库文件，"已应用的迁移"就是历史，只能往后追加 ——
 /// 否则老库的 `user_version` 会说谎：它声称已到 v2，而 v2 的语句已经不是你写的那句了。
 /// 判断标准很简单：**有没有可能存在一个不是本机跑出来的库**。没有，就可以改；有，就只能加。
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// 迁移清单：索引 i（0-based）对应版本 i+1。
 ///
@@ -208,6 +208,26 @@ pub const ALL_MIGRATIONS: &[&str] = &[
 
     COMMIT;
     "#,
+    // v4：定时任务与组合也归属系统用户（§3.7「所有数据都要有主人」的收口）
+    //
+    // v3 只覆盖了账号；`schedules` / `pipelines` 当时仍是全局表。不补的后果不是"少个字段"，
+    // 而是这两类数据**没有越权判据可加**：等 P5 的调度引擎与 WebUI 上来，
+    // 一个用户就能看见并触发别人的定时任务与组合。
+    //
+    // 与 v3 一样必须包事务，理由同 v3 的注释（ALTER 无法 IF NOT EXISTS）。
+    // 注意这里比 v3 **更危险**：v3 那一段至少还有"重跑时 CREATE 带 IF NOT EXISTS"
+    // 这层缓冲，而这一段只有两条 ALTER —— 事务是唯一的保障。
+    r#"
+    BEGIN;
+
+    -- 历史数据（v3 及以前）为 NULL = 未归属，与账号同一套语义：
+    -- **谁都看不见**（漏判的代价不对称，见 model.rs 的 is_visible_to），
+    -- 由 `mcloud user init` 初始化首个管理员时认领。
+    ALTER TABLE schedules ADD COLUMN owner TEXT REFERENCES users(id);
+    ALTER TABLE pipelines ADD COLUMN owner TEXT REFERENCES users(id);
+
+    COMMIT;
+    "#,
 ];
 
 /// 执行未应用的迁移。
@@ -362,6 +382,26 @@ mod tests {
                 "{table} 不应允许第二行"
             );
         }
+    }
+
+    /// v4 比 v3 更依赖事务：这一段**只有两条 ALTER、没有任何 CREATE 兜底**。
+    #[test]
+    fn v4_migration_is_wrapped_in_a_transaction() {
+        let v4 = ALL_MIGRATIONS[3].to_lowercase();
+        assert!(v4.contains("begin;"), "v4 必须在显式事务里执行");
+        assert!(v4.contains("commit;"), "v4 必须有配套的 COMMIT");
+        assert!(
+            v4.contains("alter table schedules add column owner"),
+            "v4 要给 schedules 加 owner"
+        );
+        assert!(
+            v4.contains("alter table pipelines add column owner"),
+            "v4 要给 pipelines 加 owner"
+        );
+        assert!(
+            !v4.contains("create "),
+            "v4 只该是两条 ALTER + 事务包装；建新表属于另一版"
+        );
     }
 
     /// `ALTER TABLE ... ADD COLUMN` 是唯一一条无法幂等的语句，验证它被包在事务里。

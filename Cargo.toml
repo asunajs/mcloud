@@ -51,6 +51,13 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
 
+# --- HTTP 服务（**只在 mcloud-server**）---
+# 依赖方向门禁会挡住 `mcloud-cli -> mcloud-server`，所以这几个库进不了命令行产物。
+# tower-http 的 fs 用于把前端产物当静态资源发；cors/trace/compression 等到真需要时再加，
+# 现在写上去就是没人读的配置。
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs"] }
+
 # --- 时间 / ID / 日志 ---
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"

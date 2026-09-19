@@ -370,6 +370,12 @@ pub enum ScheduleStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Schedule {
     pub id: String,
+    /// 归属的**系统用户**；`None` = 未归属（v3 及以前的历史数据），**谁都看不见**。
+    ///
+    /// 与 [`Account::owner`] 同一套语义、同一个认领时机（`mcloud user init`）——
+    /// 理由见那里的说明：迁移是纯 SQL，执行时管理员还不存在，硬编一个只能是猜。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<UserId>,
     pub name: String,
     /// 缺失即无法执行 —— 导入时会作为问题报出，而不是猜一个目标。
     pub target: Option<ScheduleTarget>,
@@ -417,6 +423,9 @@ pub struct PipelineStep {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pipeline {
     pub id: String,
+    /// 归属的**系统用户**；语义与 [`Schedule::owner`] 完全一致。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<UserId>,
     pub name: String,
     pub description: Option<String>,
     /// 有序步骤，执行顺序即数组顺序。
@@ -664,6 +673,7 @@ mod tests {
         fn pipeline(stop_on_error: bool) -> Pipeline {
             Pipeline {
                 id: "p-1".into(),
+                owner: None,
                 name: "轻量巡检".into(),
                 description: None,
                 steps: Vec::new(),

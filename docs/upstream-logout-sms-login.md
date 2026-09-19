@@ -150,6 +150,14 @@ AES-128-CBC 解密 → 明文 "370"，而同响应里 picWidth = 680 ⇒ 落在�
   手工量像素那套会让每次登录都变成人工介入；
 - 被拦下的那次**不扣配额**（过滑块后 `remainGetTimes` 仍是 8），所以"换图重试"是廉价的。
 
+> **两端独立复现（2026-09-19）**：App 端把同一条路又走了一遍 —— 它发的
+> `/user/sms/getSmsCode` 与本文的 `/user/verfycode` **是同一台主机**
+> （`user-njs.yun.139.com`），取图接口同样裸请求即可，`puzzleLeft` 同样用
+> `CREATPUZZLE03F9A` 直接解出坐标，提交同样用固定 IV `E526E1F3F9765444`。
+> 也就是说**这不是某一端的实现技巧，而是协议面的能力**：谁算得出答案，服务端就认。
+> 详见 [`upstream-app-sms-login.md`](./upstream-app-sms-login.md) §7.2 与
+> [`capture/app-sms-login-samples.txt`](./capture/app-sms-login-samples.txt) §2.1。
+
 实现落点：`SliderPuzzle::answer()`（自检 + 解密）、`mcloud_app::login::sms_send_code`
 （降级循环：取图 → 解坐标 → 重发 → 挑战作废则重新取图，上限 3 次）。
 

@@ -244,6 +244,25 @@ impl<'a> Scope<'a> {
     }
 }
 
+/// 一次认领各表影响了多少行（见 [`StateStore::claim_unowned`]）。
+///
+/// 不是"随便返回个总数"：`mcloud user init` 要把三笔分别打印出来
+/// （"认领了 3 个账号、2 个定时任务、0 个组合"）。只回一个总数等于把
+/// "历史数据到底有没有被接住"这件事糊成一句话 —— 而升级上来的用户正是靠它
+/// 判断"我的账号还在不在"。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClaimedRows {
+    pub accounts: u64,
+    pub schedules: u64,
+    pub pipelines: u64,
+}
+
+impl ClaimedRows {
+    pub const fn total(self) -> u64 {
+        self.accounts + self.schedules + self.pipelines
+    }
+}
+
 /// 账号维度的状态存储。SQLite 实现在 `mcloud-io`。
 ///
 /// # 数据隔离是**契约的一部分**，不是调用方的义务
@@ -324,16 +343,18 @@ pub trait StateStore {
     /// （那才是它该被看到的地方），而不是塞进某个用户的列表里冒充"他的历史"。
     async fn list_runs(&self, scope: Scope<'_>, limit: usize) -> Result<Vec<RunRecord>, Error>;
 
-    /// 把尚未归属的账号认领给某个用户，返回认领条数。
+    /// 把尚未归属的数据认领给某个用户：**账号、定时任务、组合一起认领**。
     ///
     /// # 为什么需要它
     ///
-    /// v2 及更早的库里已经有账号，而 schema 迁移是纯 SQL、执行时管理员还不存在，
-    /// 所以那些账号的 `owner` 是 `None`（谁都看不见）。初始化首个管理员之后必须
-    /// 把历史账号交还给它，否则升级上来的用户会看到"账号全没了"。
+    /// v3 及更早的库里已经有这些数据，而 schema 迁移是纯 SQL、执行时管理员还不存在，
+    /// 所以它们的 `owner` 是 `None`（谁都看不见）。初始化首个管理员之后必须
+    /// 把历史数据交还给它，否则升级上来的用户会看到"账号全没了"。
     ///
-    /// **只认领 `owner IS NULL` 的行**：已经属于别人的账号不会被抢走，重复调用返回 0。
-    async fn claim_unowned_accounts(&self, user_id: &UserId) -> Result<u64, Error>;
+    /// **只认领 `owner IS NULL` 的行**：已经属于别人的不会被抢走，重复调用返回 0。
+    /// 三张表的认领在**同一个事务**里完成 —— 半途而废会留下"账号回来了、定时任务没回来"
+    /// 这种很难解释的状态。
+    async fn claim_unowned(&self, user_id: &UserId) -> Result<ClaimedRows, Error>;
 }
 
 /// 系统用户与会话的持久化。
@@ -402,17 +423,36 @@ pub trait UserStore {
 /// 旧版就是这个语义（文件不存在返回默认值、且不写盘），
 /// 让每个调用点都去 `unwrap_or_default()` 只会把这段约定抄散。
 pub trait ConfigStore {
-    async fn upsert_schedule(&self, schedule: &Schedule) -> Result<(), Error>;
-    async fn get_schedule(&self, id: &str) -> Result<Option<Schedule>, Error>;
-    /// 按创建时间/名称排序的稳定列表。
-    async fn list_schedules(&self) -> Result<Vec<Schedule>, Error>;
-    /// 删除；返回是否真的删掉了一行。
-    async fn delete_schedule(&self, id: &str) -> Result<bool, Error>;
+    /// 新建或覆盖一个定时任务。
+    ///
+    /// # 写操作**也要**过归属检查（不只是读）
+    ///
+    /// 只过滤读的话，A 仍然能**覆盖** B 的任务：主键是 `id`，写入是 `INSERT OR REPLACE`，
+    /// 一次同 id 的写入就能改掉别人的那一行 —— 越权从"看得到"变成更坏的"改得掉"。
+    /// 所以 `Scope::User` 时校验传入的 `owner`：属于别人 → [`ErrorKind::Forbidden`]。
+    async fn upsert_schedule(&self, scope: Scope<'_>, schedule: &Schedule) -> Result<(), Error>;
 
-    async fn upsert_pipeline(&self, pipeline: &Pipeline) -> Result<(), Error>;
-    async fn get_pipeline(&self, id: &str) -> Result<Option<Pipeline>, Error>;
-    async fn list_pipelines(&self) -> Result<Vec<Pipeline>, Error>;
+    async fn get_schedule(&self, scope: Scope<'_>, id: &str) -> Result<Option<Schedule>, Error>;
 
+    /// 按创建时间/名称排序的稳定列表（只含 [`Scope`] 可见的行）。
+    async fn list_schedules(&self, scope: Scope<'_>) -> Result<Vec<Schedule>, Error>;
+
+    /// 删除；返回是否真的删掉了一行（不可见等价于不存在）。
+    async fn delete_schedule(&self, scope: Scope<'_>, id: &str) -> Result<bool, Error>;
+
+    /// 新建或覆盖一个组合；归属检查同 [`ConfigStore::upsert_schedule`]。
+    async fn upsert_pipeline(&self, scope: Scope<'_>, pipeline: &Pipeline) -> Result<(), Error>;
+
+    async fn get_pipeline(&self, scope: Scope<'_>, id: &str) -> Result<Option<Pipeline>, Error>;
+
+    async fn list_pipelines(&self, scope: Scope<'_>) -> Result<Vec<Pipeline>, Error>;
+
+    /// 单行配置：**无归属**，保持全局。
+    ///
+    /// 不是漏了：`exchange_config` 被 schema 的 `CHECK (id = 1)` 钉成单行表，
+    /// 这本身就是"全局唯一一份"的设计；而 `webui_config` 是界面偏好，
+    /// 在只有一个管理员时它没有第二个读者。真要按用户分，那是**改语义**
+    /// （单行表 → 每用户一行），该单独做一次决定，而不是顺手加个 owner 列。
     async fn exchange_config(&self) -> Result<ExchangeConfig, Error>;
     async fn put_exchange_config(&self, config: &ExchangeConfig) -> Result<(), Error>;
 

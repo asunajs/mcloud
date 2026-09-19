@@ -31,10 +31,11 @@ pub use auth::{
 pub use crypto::{
     AES_FIXED_IV, REFRESH_TOKEN_KEY, Random, SIGN_SALT_MAP, SKLAND_PUBLIC_KEY_B64,
     aes_cbc_fixed_iv_encrypt_hex, aes_dynamic_iv_decrypt, aes_dynamic_iv_encrypt,
-    aes_dynamic_iv_encrypt_random, aes_ecb_pkcs7_decrypt_hex, des_ecb_no_padding_encrypt_base64,
-    des_ecb_pkcs7_decrypt, generate_signature, get_tn, get_tn_md5, gzip_with_os19,
-    gzip_with_os19_base64, hmac_sha256_base64, md5_hex, rsa_pkcs1v15_encrypt_base64,
-    rsa_pkcs1v15_encrypt_base64_with_b64_key, sha1_hex_upper, sha256_hex, sign_salt,
+    aes_dynamic_iv_encrypt_random, aes_ecb_pkcs7_decrypt_hex, aes_ecb_pkcs7_encrypt_hex,
+    b64_encode, des_ecb_no_padding_encrypt_base64, des_ecb_pkcs7_decrypt, generate_signature,
+    get_tn, get_tn_md5, gzip_with_os19, gzip_with_os19_base64, hmac_sha256_base64, md5_hex,
+    rsa_pkcs1v15_encrypt_base64, rsa_pkcs1v15_encrypt_base64_with_b64_key, sha1_hex_upper,
+    sha256_hex, shift_head10_to_back, shift_tail10_to_front, sign_salt,
 };
 pub use error::{Error, ErrorKind, classify_status};
 pub use model::{
@@ -44,8 +45,8 @@ pub use model::{
     Schedule, ScheduleStatus, ScheduleTarget, SelectOption, WEBUI_PAGES, WebuiConfig,
 };
 pub use traits::{
-    Clock, ConfigStore, FixedClock, HttpClient, HttpMethod, HttpRequest, HttpResponse, Scope,
-    StateStore, UserStore,
+    ClaimedRows, Clock, ConfigStore, FixedClock, HttpClient, HttpMethod, HttpRequest, HttpResponse,
+    Scope, StateStore, UserStore,
 };
 pub use user::{
     MIN_PASSWORD_LEN, Role, SESSION_TOKEN_BYTES, Session, SessionKind, User, UserId, hash_password,

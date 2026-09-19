@@ -135,7 +135,9 @@
 4. **定时冲突策略** —— 现在静默跳过（不排队、不告警）。是否改为排队 / 告警 / 可配置。
 5. **推送失败处理** —— 现在 fire-and-forget。是否需要重试 + 持久化队列（重启不丢）。
 6. **异步运行状态** —— 仅内存、重启即丢（D4）。是否随运行历史一起落库。
-7. **CLI 是否也要能起服务** —— 旧项目是两个独立进程；新方案是两个独立产物共用注册源，CLI 是否需要 `serve` 子命令。
+7. ~~**CLI 是否也要能起服务**~~ —— **已定（2026-09-18）**：服务由 `mcloud-server` **自己的二进制**启动。
+   依赖门禁早就给出了答案（`mcloud-cli -> mcloud-server` 被 `FORBIDDEN_EDGES` 挡住），
+   而理由也成立：CLI 一旦拿到 axum，就不再是"能在任何没有 HTTP 环境的地方跑"的命令行工具。
 
 ---
 
@@ -606,6 +608,19 @@ CREATE TABLE run_events (
   因此那一段外面包了**显式事务**：不包的话失败会留下"列已加、版本未升"的半成品库，重跑直接报重复列。
 - `users.name` 用 `COLLATE NOCASE` 唯一：否则 `Alice` 与 `alice` 能各建一个，登录时匹配到谁取决于查询顺序。
 
+**schema v4 迁移（定时任务与组合的归属）**：
+
+- `schedules` / `pipelines` 加 `owner`，与账号**同一套语义**（历史数据 `NULL` = 未归属、谁都看不见；认领时机同为 `user init`）。
+  不补的后果不是"少个字段"，而是这两类数据**没有越权判据可加** —— 等 P5 的调度引擎与 WebUI 上来，一个用户就能看见并触发别人的任务。
+- 与 v3 一样包显式事务，且**这一段比 v3 更依赖它**：只有两条 ALTER，没有任何 `CREATE ... IF NOT EXISTS` 兜底。
+- 认领从 `claim_unowned_accounts` 扩成 `claim_unowned`，返回**三笔分别计数**（账号 / 定时任务 / 组合）：
+  `mcloud user init` 会把三笔分开打印 —— 升级上来的用户最关心"我的东西还在不在"，只回一个总数等于把这件事糊掉。
+- **仍然全局**的是 `exchange_config`（schema 里被 `CHECK (id = 1)` 钉成单行表）与 `webui_config`（界面偏好）。
+  要按用户分是**改语义**（单行表 → 每用户一行），该单独做一次决定，而不是顺手加个 owner 列。
+- 写操作也要过归属检查（不只是读）：`id` 是主键、写入是 `ON CONFLICT DO UPDATE`，
+  只过滤读会让越权从"看得到"升级成**"改得掉"**。已存在且属于别人的行返回
+  `BadRequest("...已被其他用户创建")`，而不是静默顶掉。
+
 **本地与网络的分界（2026-09-18 修正）**：原先设想 CLI 也要"登录本系统"，这是**错的** ——
 数据库就在本机，能跑 CLI 的人本来就能直接 `sqlite3` 读库，给他加一道"你是谁"
 既不增加任何安全性，又把本地运维变得别扭（列个账号都要先登录）。所以：
@@ -618,6 +633,25 @@ CREATE TABLE run_events (
 
 CLI 与 WebUI 仍共用同一份 `Session` 领域类型与校验逻辑（`mcloud_app::session`），
 但**只有 WebUI 用它**：网络才需要"你是谁"。
+
+**网络层的落地（2026-09-18）**：
+
+- 路由在 `mcloud-server`：`POST/GET/DELETE /api/session`（登录 / 当前身份 / 登出）、
+  `GET/POST /api/setup`（是否要初始化 / 建首个管理员）、`GET /api/health`。
+  免登录端点用**白名单**判定（`is_public`）：新加的路由默认是"需要登录"，
+  漏登记一条不会把它变成公开接口。
+- cookie：名 `mcloud_session`，`HttpOnly; SameSite=Lax; Path=/`；`Secure` 由
+  `--secure-cookie` 决定且**默认关** —— 本地是 `http://127.0.0.1`，
+  开了它浏览器根本不会回传，表现是"登录接口返回成功但每个请求都未登录"，很难往 cookie 上想。
+- 有效期 **7 天**（`mcloud_app::session::WEB_SESSION_DAYS`，与 CLI 那边的 365 天刻意不同：
+  cookie 会被浏览器带到每一个请求上）。到期不是唯一保护 —— **撤销立刻生效**（删掉会话行）。
+- **错误形状统一为 `{code, message}`**：4xx 给正文（`Error::message()`，
+  不带 `Display` 的类别前缀 —— "凭据失效: 用户名或口令不正确"前半句是给运维看的）；
+  5xx 给 `ErrorKind::public_message()` 的类别文案，原文只进 `tracing`。
+  请求体错误也走同一形状（`ApiJson` 提取器）：直接用 `axum::Json` 会返回
+  axum 自带的 422 **纯文本**，前端只能显示"HTTP 422"。
+- 契约测试：`cargo test -p mcloud-server --test api_contract`，**只走公开接口** ——
+  放在 `tests/` 而不是单元测试里，要证的正是"这层 API 从外部能不能用"。
 
 > 相关的待拍板项（对外暴露的防护、敏感值落盘、配置校验严格度）见 §1.6 文末。
 
@@ -768,7 +802,7 @@ cargo test -- --ignored                             # 真实链路 smoke（需 M
 
 ### 6.4 门禁
 
-**当前已落地的五项**（改完代码跑这五条，全绿才算完成 —— 与 `README.md` 一致）：
+**当前已落地的六项**（改完代码跑这六条，全绿才算完成 —— 与 `README.md` 一致）：
 
 | # | 命令 | 守住什么 |
 | --- | --- | --- |
@@ -777,8 +811,14 @@ cargo test -- --ignored                             # 真实链路 smoke（需 M
 | 3 | `cargo fmt --check` | 格式 |
 | 4 | `bash scripts/check-deps.sh` | 分层铁律：纯层不含 `reqwest`/`rusqlite`、不依赖 `mcloud-io`；组装根必须接上 IO |
 | 5 | `node scripts/check-identifiers.cjs` | 仓库里不得有真实标识（字面 + **base64 解码后**复查） |
+| 6 | `node scripts/check-golden-vectors.cjs` | `test/golden/*.json` 能算出自己（Node `crypto` 独立实现，101 条） |
 
 > 第 5 条不是可有可无的：夹具与源码字面量都进版本库，而 `auth` 是 base64 —— 字面扫描看不见里面的号码，所以必须解码后复查。
+
+> 第 6 条补的是**第 5 条扫不到的那部分**：第 5 条只扫"有测试去 `include_str!` 的文件"，
+> 于是新加的向量文件在接线之前**没有任何守卫**。第 6 条对每个 golden 文件都扫，
+> 并把"无 Rust 测试读取"的向量文件直接列出来。
+> 它还要求**没有校验器的段必须显式打印**（`NOT_VERIFIED_REASONS`），避免"没验 = 通过"。
 
 **计划追加的**：
 
@@ -887,8 +927,11 @@ P6 的**视觉与组件基建可在 P2 后并行启动**（接口先冻结 `open
 | **`mcloud-capabilities::login`**：扫码/短信状态机（不 sleep、终态不可逆）、登录结果 → 账号/登录态映射、`auth` 与原客户端逐字一致 | ✅ 完成 |
 | **`mcloud-app` 组装层**：迁移策略下移、能力 JSON、设备指纹持久化、首个管理员初始化、扫码登录驱动 | ✅ 完成 |
 | **CLI**：`user init` / `user list` / `login qr`（终端二维码）/ `login sms`（含滑块降级），与 HTTP 产物共用组装层 | ✅ 完成 |
-| **短信验证码登录全链路**：发码（自动过滑块）→ 输码 → 解密落库，流程在共享层（CLI 与 WebUI 共用） | ✅ 完成 |
-| 六项门禁（`cargo test` / `clippy -D warnings` / `fmt --check` / 分层 / 产物解耦 / 标识守卫） | ✅ 全绿，**346 个测试** |
+| **短信验证码登录全链路**：发码（自动过滑块）→ 输码 → 解密落库，流程在共享层（CLI 与 WebUI 共用） | ✅ 完成，**真机跑通**（首批发码被风控拦下 → 自动解坐标重发 → 输码登录成功 → 落库 `15****42`） |
+| **schema v4**：`schedules` / `pipelines` 加 `owner`（事务包裹的 ALTER）、配置类方法全部带 `Scope`、写操作校验归属、认领扩成三笔分别计数 | ✅ 完成（真实 v3 库迁移验证：列已加、既有账号与归属完好、重跑幂等） |
+| **WebUI 登录与会话鉴权**：`POST/GET/DELETE /api/session` + `GET/POST /api/setup`、cookie 会话（HttpOnly / SameSite=Lax / 可配 Secure）、未初始化只暴露初始化页、统一错误形状、10 条路由契约测试 | ✅ 完成（`cargo test -p mcloud-server --test api_contract`） |
+| **`mcloud-server` 可运行**：`main.rs`（clap）+ 静态发前端产物 + `/api` 未知路径报 404 JSON + 前端登录/初始化页（Vapor + daisyUI） | ✅ 完成（真机跑通：初始化 → 落 cookie → 会话查询 → 登出立刻失效） |
+| 六项门禁（`cargo test` / `clippy -D warnings` / `fmt --check` / 分层 / 产物解耦 / 标识守卫） | ✅ 全绿，**365 个测试**（前端另有 `npm run typecheck` + `vite build`） |
 
 **旧数据实测**（`Documents/workspace/mcloud-sign`）：账号 2 / 登录态 2 / 组合 1 / 历史 96 条 / **问题 0 条**；
 二次执行 6 个数据文件全部跳过、0 次写入，行数不变。
@@ -904,20 +947,74 @@ P6 的**视觉与组件基建可在 P2 后并行启动**（接口先冻结 `open
 
 **P2.5（账号登录）到此闭环**：用户体系（schema v3 + `UserStore` + 数据隔离）→
 「首管理员初始化」→ 扫码/短信登录状态机 → 「登录结果落成账号与登录态」→ 两个产物共用组装层，
-CLI 侧已可端到端跑通（`user init` → `login qr`）。
+CLI 侧已端到端跑通（`user init` → `login qr` / `login sms`）。
+
+**数据隔离的覆盖面（v4 后）**：账号、登录态、运行记录、定时任务、组合**都已带归属**，
+且过滤逻辑只有一份表达式（`(?n IS NULL OR owner = ?n)`）。
+只有两处**故意保持全局**：`exchange_config`（单行表，`CHECK (id = 1)`）与 `webui_config`（界面偏好），
+见 §3.7 的说明。
 
 **尚未开始**：各端设备指纹/请求头档案的完整形态（见上，[`docs/client-profiles.md`](./client-profiles.md)；
 登录链路的必需部分已落地为 `mcloud-upstream::client::ClientProfile`）、
-WebUI 侧的登录页与会话鉴权、push 10 渠道（§1.4）、调度引擎（cron 解析与触发）、
-`ConfigStore` 的用户维度（定时任务/组合目前仍是全局的）。
+**P6 的真实页面**（当前主界面仍是 P0 spike 的占位数据；登录/初始化页已是真接口）、
+push 10 渠道（§1.4）、调度引擎（cron 解析与触发）、
+OpenAPI 导出（`utoipa` → `openapi.json` → 前端生成类型，见 §5）。
 
-**两个已知的小缺口（都不影响当前可用性）**：
+**三个已知的小缺口（都不影响当前可用性）**：
 
-- **`user_domain_id` 落空**：真实登录响应的 `userInfo` 里没有 `userId`
-  （文档 §5 那个是设备绑定流程的合成样本），需要用它的接口（如 `get_tn`）得另找来源。
-  已在 `docs/upstream-login-protocol.md` §5 记下，下次登录打印字段名即可确定。
+> 第 3 条（App 业务接口的两把锁 + `hcy-cool-flag` 信封）**已全部解开** ——
+> 连同"三条加密点"在内，App 侧已**没有未解密的点**。往下三条按"怎么错的"留着。
+
+- **`user_domain_id` 落空** —— **已闭环（2026-09-19 真机登录实测）**。
+  这条缺口原话是"登录响应的 `userInfo` 里没有 `userId`，需要用它的接口得另找来源"。
+  现在把响应字段名打印出来了（只打印名字、不打印值）：**字段名就叫 `userDomainId`，
+  `userId` 根本不在响应里** —— 原来那个 `userId` 是**请求体**的键名，由 `userDomainId`
+  赋过去。App 与 PC **都调 `POST /user/thirdlogin`**，所以这条对两端同时成立。
+  落库后 `account_state.user_domain_id` 有值（19 位）、`jwt_token` 201 字符、
+  `auth_expire` 正好 30 天后。
+  事前是靠"统计 PC 客户端源码里 `UserInfo.<字段>` 被读的次数"反推出来的
+  （`userDomainId` 11 次 / `userId` 0 次），事后与实测字段清单完全吻合。
+  详见 `docs/upstream-login-protocol.md` §5、`docs/client-profiles.md` §3.3.2、
+  `docs/upstream-app-sms-login.md` §7.4。
+  ⚠ **还差一段线没接**：`AppProfile::with_user_domain_id` **只在测试里被调用过**，
+  生产路径没把库里存的值回填进 App 档案。现在不痛（App 端还没有已登录接口），
+  但**下一批抓包的第一个已登录请求就会缺 `x-yun-uni`** —— 先接这条线，再写接口。
 - **WebUI 的会话鉴权未接**：`mcloud_app::session`（登录本系统、签发/校验/撤销）已实现且有测试，
   但还没有 HTTP 层去用它 —— 那是 P5 的 `routes/` 骨架。CLI **不需要**它（见 §3.7 的分界说明）。
+- **App 业务接口的两把"锁"：`signature` 与 `encodeData`** —— **已解开（2026-09-19）**。
+  App 里有**两套互斥的请求形态**（12243 条零反例）：
+  **A 族**带 `x-yun-uni`、没有 `signature`；**B 族**带 `signature`、没有 `x-yun-uni`。
+  登录链路学到的那套头**只覆盖 A 族**。
+  - **`signature`** = `SHA256("clientId=iosapp&clientKey=BOFlEUINUdSugD6u&msgId=<msgId>
+    &timeStamp=<13位毫秒>&version=<与请求头逐字相同，含 V>")`
+    —— **6165 / 6165 条实拍逐字命中**；
+  - **`encodeData`** = `base64(16 字符 ASCII 的 IV ‖ AES-128-CBC/PKCS7(key=同一把, iv=IV, 明文=手机号))`
+    —— **6159 / 6159 个样本全部解出**，明文去重后只有 1 种、长度 11（即手机号）。
+  - 密钥怎么来的：iOS 二进制里**没有** `clientKey` 字面量，
+    用 5632 个 16 字符候选做 SHA256 比对命中，再用同一把 key 做 AES 解密交叉验证。
+  - 黄金向量：`test/golden/app-business-crypto-vectors.json`
+    （`signature` 是实拍向量；`encodeData` 是**合成**向量 —— 实拍密文的明文是真实手机号，
+    而密钥要写进仓库 ⇒ 实拍密文等于公布手机号）。
+  - 完整头集、复现命令与仍未解的边界见 `docs/upstream-app-business-api.md`；
+    形态分类与逐端点可行性见 `docs/capture/app-api-families.txt`。
+- **第三条：`hcy-cool-flag` 信封** —— **已解开（2026-09-19 深夜）**。
+  这个头声明的**不是**"响应请加密给我"，而是 **"我这个请求体是加密的"**
+  （响应加密只是同一选项的另一半 —— 这条因果此前写反了，见
+  `docs/upstream-app-sms-login.md` §7.1 的更正）：
+  ```
+  hcy-cool-flag: <任意值>      ← 不发则 body 按明文解析
+  body = base64( IV(16 字节，二进制) ‖ AES-128-CBC/PKCS7(key, iv=IV, 请求 JSON) )
+  key  = "uDjGSA8auFlbwDkY"    ← iOS 二进制字符串常量
+  响应 = 同格式；包装有两种（裸 base64 / JSON 引号包着的），解析时都要认
+  ```
+  - 密钥怎么来的：拿**已知明文**（长度线索 + 服务端自己回的错误）暴力命中，
+    201124 个候选里唯一一个 —— 判据是"解出的明文里必须出现 `200059554`"。
+  - **活体探针已走通**：把请求体按该格式加密发出去，服务端不再回
+    `01000019 Illegal base64 character 7b`，而是正常处理并回 `200059554`。
+  - 黄金向量：`test/golden/app-business-crypto-vectors.json` 的 `hcyCoolFlagEnvelope`
+    （3 条，**含 2 条实拍** —— 实拍明文里没有标识，所以这次不必合成）。
+  - ⚠ **实现侧目前不发这个头**（发码接口上不发时语义与抓包一致）。
+    解开它的价值是"再也不用猜"，不是"必须带上"。
 
 **CLI 新建账号的归属策略**：库里已有用户时归**首个用户**，没有则保持无主
 （等 `mcloud user init` 认领）。这不是权限检查，而是"账号必须有主人"的落地 ——
