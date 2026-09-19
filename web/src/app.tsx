@@ -1,5 +1,6 @@
 import { computed, defineVaporComponent, ref } from 'vue'
 import { ApiError, currentSession, runSetup, setupStatus, signIn, signOut, type User } from './api'
+import { currentTheme, toggleTheme, type Theme } from './ui/theme'
 
 /**
  * 应用外壳：**先过会话门禁**，再谈页面。
@@ -33,15 +34,17 @@ interface Account {
  * 生产构建后静默失效（样式没了但不报错，极难排查）。
  */
 const balanceBadge = {
-  high: 'badge-success',
-  mid: 'badge-warning',
-  low: 'badge-error',
+  high: 'badge-soft badge-success',
+  mid: 'badge-soft badge-warning',
+  low: 'badge-soft badge-error',
 } as const
 
 export default defineVaporComponent(() => {
   const view = ref<View>('loading')
   const user = ref<User | null>(null)
   const minPasswordLen = ref(8)
+  /** 当前主题。以本地状态驱动图标，避免每次渲染都去读 DOM。 */
+  const theme = ref<Theme>(currentTheme())
 
   const name = ref('')
   const password = ref('')
@@ -114,6 +117,11 @@ export default defineVaporComponent(() => {
 
   const minLenHint = computed(() => `至少 ${minPasswordLen.value} 位`)
 
+  /** 切换主题。图标随之变（浅色下显示"切到深色"的月亮，反之太阳）。 */
+  const onToggleTheme = () => {
+    theme.value = toggleTheme()
+  }
+
   // ── 占位主界面（P6 替换）──
   const accounts = ref<Account[]>([
     { id: 'acc-1', name: '账号2', cloud: 1286, todayGain: 12, healthy: true },
@@ -125,31 +133,49 @@ export default defineVaporComponent(() => {
 
   void bootstrap()
 
+  /**
+   * 主题切换按钮。
+   *
+   * 放在**所有视图**都能看到的地方（登录页也有）—— 否则用户得先登录
+   * 才能把刺眼的浅色换成深色，这就本末倒置了。
+   */
+  const themeToggle = () => (
+    <button
+      class="btn btn-square btn-ghost btn-sm"
+      aria-label={theme.value === 'dark' ? '切换到浅色主题' : '切换到深色主题'}
+      title={theme.value === 'dark' ? '切换到浅色主题' : '切换到深色主题'}
+      onClick={onToggleTheme}
+    >
+      {theme.value === 'dark' ? '☀' : '☾'}
+    </button>
+  )
+
   const authForm = (title: string, hint: string, showConfirm: boolean) => (
-    <div class="flex min-h-screen items-center justify-center bg-base-200 p-4">
+    <div class="relative flex min-h-screen items-center justify-center bg-base-200 p-4">
+      <div class="absolute right-3 top-3">{themeToggle()}</div>
       <div class="card w-full max-w-sm bg-base-100 shadow-sm">
         <div class="card-body gap-3">
           <h1 class="card-title text-base">{title}</h1>
           <p class="text-sm opacity-70">{hint}</p>
 
           {error.value ? (
-            <div class="alert alert-error text-sm" role="alert">
+            <div class="alert alert-soft alert-error text-sm" role="alert">
               {error.value}
             </div>
           ) : null}
 
-          <label class="form-control">
-            <span class="label-text">用户名</span>
+          <label class="fieldset">
+            <span class="fieldset-legend">用户名</span>
             <input
-              class="input input-bordered mt-1"
+              class="input input-bordered w-full"
               autocomplete="username"
               value={name.value}
               onInput={(e) => (name.value = (e.target as HTMLInputElement).value)}
             />
           </label>
 
-          <label class="form-control">
-            <span class="label-text">
+          <label class="fieldset">
+            <span class="fieldset-legend">
               口令 <span class="opacity-60">（{minLenHint.value}）</span>
             </span>
             <input
@@ -162,10 +188,10 @@ export default defineVaporComponent(() => {
           </label>
 
           {showConfirm ? (
-            <label class="form-control">
-              <span class="label-text">再输一次</span>
+            <label class="fieldset">
+              <span class="fieldset-legend">再输一次</span>
               <input
-                class="input input-bordered mt-1"
+                class="input input-bordered w-full"
                 type="password"
                 autocomplete="new-password"
                 value={again.value}
@@ -195,10 +221,11 @@ export default defineVaporComponent(() => {
           <span class="text-lg font-medium">mcloud</span>
         </div>
         <div class="navbar-end gap-2">
+          {themeToggle()}
           <span class="badge badge-ghost">
             {user.value?.name}（{user.value?.role}）
           </span>
-          <button class="btn btn-sm btn-ghost" onClick={() => void logout()}>
+          <button class="btn btn-sm btn-soft btn-neutral" onClick={() => void logout()}>
             退出登录
           </button>
         </div>
@@ -206,14 +233,14 @@ export default defineVaporComponent(() => {
 
       <main class="p-4 md:p-6">
         {notice.value ? (
-          <div class="alert alert-info mb-4 text-sm" role="status">
+          <div class="alert alert-soft alert-info mb-4 text-sm" role="status">
             {notice.value}
           </div>
         ) : null}
 
         <div class="mb-4 flex flex-wrap items-center gap-3">
           <h1 class="text-base">账号云朵总览</h1>
-          <span class="badge badge-primary">{total.value} 云朵</span>
+          <span class="badge badge-soft badge-primary">{total.value} 云朵</span>
           <span class="badge badge-ghost">占位数据（P6 接真实接口）</span>
         </div>
 

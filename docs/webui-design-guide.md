@@ -43,15 +43,19 @@
 
 ### 2.2 从 Nexus 借鉴什么、不借鉴什么
 
-Nexus 是一个电商后台。我们的**用途不同**（定时任务 + 账号运营，不是交易），
-所以照搬结构会别扭。逐条划清：
+Nexus 是一个电商后台（daisyUI 官方做的示例仪表盘）。我们的**用途不同**
+（定时任务 + 账号运营，不是交易），所以照搬结构会别扭。
+
+**先说清借鉴的性质**：Nexus 的参考价值**只在"布局怎么组织"这一层**。
+它的**样式是 stock daisyUI，没有可借鉴的自定义实现**（见上方口径框）。
+所以下表"借"的全是**结构用法**，不是视觉样式：
 
 | 借（且必须借） | 理由 |
 | --- | --- |
 | **`drawer` + `navbar` + `dock` 三件套的骨架** | 这是 daisyUI 处理移动端最成熟的一套，自己造只会更差 |
 | **指标卡的 `stats` 用法** | 顶部一排关键数字（云朵 / 今日增量 / 失败数 / 下次任务），结构直接对应 |
 | **卡片 + 内嵌图表的节奏** | 大卡片承载趋势图，小卡片承载数字，层次清晰 |
-| **时间范围切换（Day/Month/Year）的 `tabs`** | 直接映射为「7 天 / 30 天 / 全部」 |
+| **时间范围切换的 `tabs`** | 它用 Day/Month/Year，我们映射为「7 天 / 30 天 / 全部」 |
 | **表格右侧操作列用 `dropdown` 收口** | 行内按钮一多就挤，移动端尤其 |
 | **状态用 `badge` 而不是彩色文字** | 可扫读性显著更好 |
 
@@ -61,12 +65,116 @@ Nexus 是一个电商后台。我们的**用途不同**（定时任务 + 账号�
 | 大面积营销式留白 | 我们是运维工具，屏幕要装信息 |
 | 多币种 / 汇率 / 预测曲线 | 无对应业务 |
 | 侧栏多级嵌套菜单 | 我们只有 9 个页面，一级足够；嵌套反而难点 |
-| 自定义多主题切换（它的 6 个主题） | **我们只用 `light` + `dark`**（见 §3.1） |
+| 自定义多主题切换（它的 6 个主题） | **我们只做 `light` / `dark` 两个**，但**必须有手动切换**（见 §3.1） |
 
-> **口径**：Nexus 是**布局与组件的参照**，不是**像素的参照**。它用什么间距我们就用什么，
-> 但它的商品卡、图表配色、动效节奏都不适用，不搬。
+> **口径**：Nexus 是**布局与组件的参照**，不是**像素的参照**，更不是**样式的参照**。
+> 它用什么间距我们就用什么，但它的商品卡、图表配色、动效节奏都不适用，不搬。
 
-### 2.3 「涨红跌绿」不可动
+> **关于「扒 Nexus 的样式实现」这件事 —— 结论是没有可扒的。**
+> 我把它编译后的 CSS bundle 下载下来逐条核对过：**它用的是完全未经修改的 stock daisyUI**。
+> 没有任何自定义组件类（`nx-*` / `cx-*` 出现次数为 0），没有自定义样式层，
+> 它的 `light` 主题块与 daisyUI 默认值逐字节一致（`--depth: 1`、`--radius-box: .5rem`）。
+> 所以「它好看」**不是因为它做了什么，而是因为 daisyUI 5 本来就长这样** ——
+> 差别在于它**用对了**（挑着用 `-soft`、用 `shadow` 不用 `border`），
+> 而不是**改了**。**要参考就直接看 daisyUI 官方文档，不要绕道去反编译别人的站点。**
+
+### 2.3 让它「看起来现代」的四个开关（**来自 daisyUI 官方文档，非第三方**）
+
+"daisyUI 默认样子过时"这个说法要修正一下：**过时的是"什么都用默认、什么都上实心"的用法**，
+而不是 daisyUI 本身。daisyUI 5 已经内置了现代观感所需的全部开关，
+问题只在于**默认不开、要主动选**。下面四条**都是官方提供的正式能力**：
+
+| 开关 | 怎么做 | 效果 |
+| --- | --- | --- |
+| ① **`-soft` 取代实心** | `btn-soft` / `badge-soft` / `alert-soft` | 背景是主色 8% 混 `base-100`，弱化但不失语义。**这是"现代感"的最大来源** |
+| ② **阴影而非边框** | `shadow-sm` + **不加** `border` | 默认的 1px 硬边框是"表格软件"感；轻阴影才是"产品"感 |
+| ③ **`--depth: 0`** | 关掉 daisyUI 的立体感 | 默认 `depth:1` 给按钮加了内阴影浮雕，扁平化后立刻现代 |
+| ④ **品牌字体** | `--font-sans` 换成非系统字体 | 系统字体是"没设计过"的信号，成本最低、收益最高的一条 |
+
+展开说，因为这四条都容易被做成"半吊子"：
+
+**① `-soft` 系列（最重要）**
+
+daisyUI 5 的 `-soft` 修饰符是独立于颜色的一层样式：
+
+```tsx
+// 主要行动仍用实心（一屏一个），其余一律 soft
+<button class="btn btn-primary">确认兑换</button>          {/* 实心：唯一主行动 */}
+<button class="btn btn-soft btn-primary">查看详情</button>   {/* soft：次要 */}
+<span class="badge badge-soft badge-success">成功</span>
+<div class="alert alert-soft alert-warning">…</div>
+```
+
+为什么它关键：实心 `btn-primary` 满屏都是 ⇒ 重点消失。`-soft` 让**语义色还在、
+视觉重量减半**，界面立刻有层次。**默认从 `-soft` 起手，只有主行动才实心。**
+
+> 已核验（**在本项目 `vite build` 产物里逐个确认**，不是看文档口径）：
+> `.btn-soft { --btn-bg: color-mix(in oklab, var(--btn-color) 8%, var(--color-base-100)) }`
+> —— 与上面写的一致。`badge-soft` / `alert-soft` 同为 8%，边框是 10%。
+>
+> `card` **没有** `-soft`，它只有 `card-border` / `card-dash` —— 所以卡片靠手法②。
+
+**② 阴影代替边框**
+
+```tsx
+<div class="card bg-base-100 shadow-sm">   {/* ✅ */}
+<div class="card bg-base-100 border">      {/* ❌ 硬边框 */}
+<div class="card bg-base-100 shadow-sm border"> {/* ❌ 加戏 */}
+```
+
+深色模式下阴影几乎不可见 —— 这是正常的，靠 `base-100` 与 `base-200` 的明度差分层即可。
+**不要**为了"深色下也有边界"就去加边框，那会让浅色模式变丑。**选一个，两个主题共用。**
+
+**③ 全局扁平（`--depth: 0`）**
+
+daisyUI 用 `--depth` 控制按钮等的"立体感"（内阴影 + 描边）。默认 `1`，
+Nexus 用 `1`（stock 值，它没改）。**我们取 `0`**：
+
+```css
+@plugin "daisyui/theme" {
+  name: "light";
+  /* … */
+  --depth: 0;        /* 关掉浮雕，扁平化 */
+  --radius-box: 0.75rem;   /* 卡片圆角稍大一点，比默认 0.5rem 更"软" */
+  --radius-field: 0.5rem;  /* 输入框/按钮同比例 */
+}
+```
+
+`--radius-*` 一并稍调：默认 `0.25rem` 的输入框显得"紧"，`0.5rem` 更舒展。
+**光调 `primary` 颜色是不够的** —— 形状变量（`--depth` / `--radius-*` / `--border`）
+才是"整体观感"的来源。
+
+> **已核实 `--depth: 0` 不会损坏交互反馈**（这点当初我猜错过，实测纠正）：
+> daisyUI 的 `.btn:hover` 加深用的是**硬编码 7%**、`:active` 用的是
+> **`translate: 0 .5px`** 的位移 —— 两者都**不经过 `--depth`**。
+> `--depth` 只管内阴影浮雕（`--btn-inset`、`--btn-shadow` 里的 `calc(var(--depth) * …)`）。
+> 所以拿掉它**只掉装饰，不掉反馈**，不需要补偿。
+
+**④ 字体（性价比最高的一条）**
+
+系统默认字体（Windows 的 Segoe UI / 中文回落到雅黑）是"没设计过"的典型信号。
+换一个**拉丁子集 + 中文回落**的字体栈，观感提升立竿见影。
+
+> ⚠️ **这里有个坑，我实测踩到过：不能写在 `@plugin "daisyui/theme"` 里。**
+> `--font-sans` **不是 daisyUI 的主题变量**，它是 **Tailwind 自己的 `@theme` 命名空间变量**
+> （见 `tailwindcss/theme.css` 顶部 `@theme default`）。
+> 写进 daisyUI 插件块，Tailwind 会拿它去查自己的注册表 —— 查得到就返回注册值，
+> 于是**你写的字体栈被静默替换成 `sans-serif`**，`vite build` 不报任何错。
+>
+> 正确写法是用 **Tailwind 的 `@theme`**，且**只写一次**（字体不随主题变）：
+
+```css
+/* web/src/app.css —— 放在 daisyUI 插件之后 */
+@theme {
+  --font-sans: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+}
+```
+
+> **落地待办**：字体文件当前**尚未引入**（见 §12 未决项 6）。
+> 中文全量字体很大，建议只引**拉丁子集 + 中文走系统回落**，
+> 或直接自托管一个精简子集 —— **不要**链 Google Fonts（国内访问不稳，且是外部依赖）。
+
+### 2.4 「涨红跌绿」不可动
 
 这是**业务约定，不是配色偏好**（见 [`rust-rewrite-plan.md`](./rust-rewrite-plan.md) 与旧项目日志语义）：
 
@@ -76,7 +184,7 @@ Nexus 是一个电商后台。我们的**用途不同**（定时任务 + 账号�
 由此推出两条硬规则：
 
 1. **禁止用 `text-success` / `text-error` 表达"涨跌"以外的语义**。
-   成功/失败状态另见 §4.5 的 `status` 用法 —— 那里绿=正常、红=异常，
+   成功/失败状态另见 §5.4 的 `status` 用法 —— 那里绿=正常、红=异常，
    与涨跌**恰好同向**，不会打架；但**不要**用同一个 badge 同时表达两件事。
 2. 涨跌色只用于**数值本身**，不要给整行/整卡上色。
 
@@ -84,49 +192,133 @@ Nexus 是一个电商后台。我们的**用途不同**（定时任务 + 账号�
 
 ## 三、主题与色彩
 
-### 3.1 只启用两个主题
+### 3.1 两个主题 + **必须有的手动切换**
+
+只启用 `light` / `dark` 两个主题，但**必须提供手动切换开关**。
 
 ```css
-/* web/src/app.css —— 现状保持，不要新增主题 */
+/* web/src/app.css —— 目前是旧版，按本节订正 */
 @plugin "daisyui" {
-  themes: light --default, dark --prefersdark;
+  themes: light --default, dark;
 }
 ```
 
-- **浅色为默认**（`light --default`）：本机 IDE 与既有界面都是浅色，且它是打印/截图友好的那个。
-- 深色跟随系统（`dark --prefersdark`），**不提供手动切换开关** —— 少一个状态就少一处 bug，
-  且真正需要的人系统级设置已经解决。
-- **禁用** Nexus 用的 `contrast` / `material` / `dim` 等多主题（它是演示站，需要showcase）。
+**为什么给 `dark` 去掉 `--prefersdark`**：`--prefersdark` 只做一件事 ——
+"系统偏好深色时**自动**用 `dark`"。一旦有了手动开关，它就从"贴心的默认值"变成**抢状态**的干扰源：
+用户手动选了浅色，切到别的应用再回来（或系统主题变了），页面可能被 `--prefersdark` 顶回深色，
+而开关还显示"浅色"——**界面与实际样式不一致**，这是最难查的一类 bug。
 
-> `data-theme` 挂在 `<html>` 上，见 `web/index.html`。
+所以职责要分清：
 
-### 3.2 品牌主色已微调，不要再改
+| 职责 | 由谁负责 |
+| --- | --- |
+| **初始主题**（用户还没表态时用哪个） | 我们的 JS：读 localStorage → 没有则读 `prefers-color-scheme` |
+| **主题状态** | 只有 `data-theme` 一个来源，**CSS 的 `--prefersdark` 不参与** |
+
+即：**"跟随系统偏好"是初始值的计算逻辑，不是交给 CSS 的常驻规则。**
+这样用户显式选择后，选择**永久生效**，不会被系统事件覆盖。
+
+### 3.2 主题切换的实现规则
+
+三条硬规则，缺一条就会出问题：
+
+1. **`data-theme` 必须挂在 `<html>` 上**（不是 `body`、不是某个容器）。
+   daisyUI 的所有主题变量都定义在 `:root` / `[data-theme=...]` 上，
+   挂错层会出现"部分元素没变色"。
+2. **必须持久化到 `localStorage`**。刷新页面、关掉再开，用户的选择要还在 ——
+   否则"切了等于没切"，每次访问都要重切一遍。
+3. **必须在首屏渲染前应用，且要防闪烁（FOUC）**。
+   若等 JS 框架挂载（Vapor `createVaporApp`）之后再设 `data-theme`，
+   用户会看到**先浅后深的一闪**。做法是 `index.html` 里一段**内联同步脚本**：
+
+```html
+<!-- web/index.html —— 必须内联、必须同步、必须在 <body> 之前 -->
+<script>
+  // 目的：在首次绘制前就把 data-theme 定下来，避免主题闪烁。
+  try {
+    var saved = localStorage.getItem('mcloud-theme')
+    var theme = saved === 'light' || saved === 'dark'
+      ? saved
+      : (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+    document.documentElement.setAttribute('data-theme', theme)
+  } catch (e) {
+    // localStorage 可能被隐私模式禁用 —— 退化成默认浅色，不能让脚本报错白屏
+    document.documentElement.setAttribute('data-theme', 'light')
+  }
+</script>
+```
+
+> 这段脚本**刻意不写成模块**，也**不放进 `main.ts`** —— 它是防闪烁的一部分，
+> 一旦被异步加载就失去意义。`<html data-theme="light">` 上的静态值保留作**兜底**
+> （脚本被 CSP 拦掉时至少不是无主题裸页面）。
+
+**切换开关放哪**：**所有视图的右上角**都放一个 `btn btn-square btn-ghost btn-sm`。
+
+> **登录页也要有** —— 否则用户得先登录才能把刺眼的浅色换成深色，本末倒置。
+> 登录页没有 navbar，用绝对定位：外层容器 `relative`，按钮 `absolute right-3 top-3`。
+
+点一下在 `light` / `dark` 间切换，写完 `data-theme` 立刻 `localStorage.setItem`。
+图标随当前主题变（浅色下显示月亮=「切到深色」，深色下显示太阳），并带 `aria-label`。
+
+实际实现见 `web/src/ui/theme.ts`（`nextTheme` 是纯函数，独立出来便于单测）：
+
+- **不做"跟随系统"三态开关**（浅 / 深 / 自动）。理由：多一个状态就多一处"当前到底哪个"的歧义
+  ——尤其和上面那条"防 `--prefersdark` 抢状态"的规则叠在一起时。
+  系统偏好已经作为**初始值**生效了，够用。
+- **禁用** Nexus 用的 `contrast` / `material` / `dim` 等多主题（它是演示站，需要 showcase）。
+  我们**只有两个主题**，但**两个都能手动切**。
+
+### 3.3 两个主题的品牌色必须都微调（**当前是漏的**）
+
+`primary` 是品牌色，**两个主题都要覆盖**，否则切到深色会变成 daisyUI 默认紫，
+与浅色下的品牌色不是同一个颜色 —— 这正是"切主题"最容易被忽略的破绽。
 
 ```css
+/* light */
 @plugin "daisyui/theme" {
   name: "light";
   default: true;
   color-scheme: light;
 
-  --color-primary: oklch(52% 0.19 275);        /* 对齐 mcloud 既有品牌色 */
+  --color-primary: oklch(52% 0.19 275);          /* 对齐 mcloud 既有品牌色 */
   --color-primary-content: oklch(98% 0.01 275);
+}
+
+/* dark —— 目前缺失，必须补上 */
+@plugin "daisyui/theme" {
+  name: "dark";
+  color-scheme: dark;
+
+  /* 深色底上同样的色相要提亮才够对比度（oklch 的 L 值调高） */
+  --color-primary: oklch(72% 0.17 275);
+  --color-primary-content: oklch(18% 0.04 275);
 }
 ```
 
-**只微调了 `primary` 一档**，其余全部用 daisyUI 默认 —— 这是刻意的：
-默认值经过对比度校验，随手改容易掉到 AA 以下。
+**做法与边界**：
 
-### 3.3 色彩的用法纪律
+- 只调 `primary` 一档，其余用 daisyUI 默认 —— 默认值经过对比度校验，随手改容易掉到 AA 以下。
+- 深色的 `primary` **必须比浅色亮**（oklch 的 `L` 值更高）：
+  深底上沿用浅色那个 `L=52%` 会糊在背景里，`btn-primary` 直接看不清。
+- 新增主题变量时**两个主题一起加**，这是本节最容易被漏的一步。
+- `data-theme` 挂在 `<html>` 上，见 `web/index.html`。
+
+### 3.4 色彩的用法纪律
+
+**总原则**（来自 §2.3①）：**默认从 `-soft` 起手，只有主行动才实心。**
+下表左列是"强度档位"，不是"颜色"——同一屏里强度要有梯度，全实心就等于没有重点。
 
 | 用途 | 用什么 | 禁止 |
 | --- | --- | --- |
 | 页面底色 | `bg-base-200` | 不要在 `base-300` 上放正文（对比度不足） |
-| 卡片 / 容器 | `bg-base-100` | 不要给卡片加边框**又**加阴影（选一个） |
-| 主行动（每屏最多一个） | `btn-primary` | 不要一屏多个 `btn-primary`，会失去"主要"的含义 |
-| 次要行动 | `btn-ghost` / `btn-outline` | — |
-| 危险动作（消耗云朵、删除） | `btn-error` **并且必须二次确认**（§6.4） | 不要用红色做"取消"按钮 |
-| 信息系统提示 | `alert-info` | — |
-| 成功 / 失败 | `alert-success` / `alert-error` | — |
+| 卡片 / 容器 | `bg-base-100` + `shadow-sm`（§2.3②） | 不要给卡片加边框**又**加阴影（选一个） |
+| 主行动（**每屏最多一个**） | `btn-primary`（**实心，唯一允许实心的地方**） | 不要一屏多个 `btn-primary`，会失去"主要"的含义 |
+| 次要行动 | `btn-soft btn-primary` | 不要用 `btn-outline` —— 描边是"表单软件"感，已被 `-soft` 取代 |
+| 纯导航/工具类按钮（无强调） | `btn-ghost` | 不要给工具按钮上语义色 |
+| 危险动作（消耗云朵、删除） | `btn-soft btn-error`，**执行按钮必须二次确认**（§6.4） | 不要用红色做"取消"按钮 |
+| 信息系统提示 | `alert-soft alert-info` | 不要用实心 `alert-info` —— 大面积色块会压过正文 |
+| 成功 / 失败（操作结果） | `alert-soft alert-success` / `alert-soft alert-error` | 同屏不给两个 `alert`（见 §6.3） |
+| 状态徽标 | `badge-soft badge-*`（§5.4） | `badge` 不要实心 —— 表格里一列实心 badge 会花 |
 | 涨 | `text-error` | — |
 | 跌 | `text-success` | — |
 | 弱化文字 | `opacity-70` / `opacity-60` | 不要用 `text-gray-500` 这类写死色 —— 切主题就崩 |
@@ -135,9 +327,13 @@ Nexus 是一个电商后台。我们的**用途不同**（定时任务 + 账号�
 > 它们不随 daisyUI 主题变，深色模式下必然出现"浅灰字压深灰底"。
 > 一律用语义色（`base-content`）+ `opacity-*`。
 
-### 3.4 间距与圆角
+> **`-soft` 的写法要点**：修饰符**必须与颜色类同时出现**（`btn-soft btn-primary`），
+> 只写 `btn-soft` 会落到默认色（`base-content`），看起来像"没上色的灰按钮"。
+> 另外 Tailwind 只认字面量：**不要**写 `btn-soft btn-${color}`（§9.2 的字符串拼接陷阱）。
 
-用 Tailwind 默认刻度，**不自定义**。常用组合固定下来：
+### 3.5 间距与圆角
+
+**间距**用 Tailwind 默认刻度，**不自定义**。常用组合固定下来：
 
 | 场景 | 类名 |
 | --- | --- |
@@ -147,8 +343,22 @@ Nexus 是一个电商后台。我们的**用途不同**（定时任务 + 账号�
 | 表单字段之间 | `gap-3` |
 | 分组标题与内容 | `mb-3` |
 
-圆角一律走 daisyUI 变量（`--radius-box` / `--radius-field`），
-**不要写 `rounded-lg` 这类硬编码** —— 它绕过了主题。
+**圆角**走 daisyUI 主题变量，**不要写 `rounded-lg` 这类硬编码** —— 它绕过了主题，
+换主题时"圆角不跟着变"就是这么来的。
+
+形状档位在 §2.3③ 统一定义，**两个主题各写一遍**（这是最容易漏的一步）：
+
+| 变量 | light | dark | 说明 |
+| --- | --- | --- | --- |
+| `--depth` | `0` | `0` | 关掉浮雕，全局扁平 |
+| `--radius-box` | `0.75rem` | `0.75rem` | 卡片 / 模态框 / 下拉面板 |
+| `--radius-field` | `0.5rem` | `0.5rem` | 按钮 / 输入框 / 标签页 |
+| `--radius-selector` | `0.5rem` | `0.5rem` | 勾选框 / 开关 |
+| `--border` | `1px` | `1px` | 保持默认，配合 §2.3② 只在必要时出现 |
+
+> 圆角**不必两个主题取不同值**（它不涉及对比度），但**仍要写两遍** ——
+> 主题块是独立的，light 里定义的不会继承给 dark。
+> 若哪天只想改一处，正确的做法是抽成 CSS 变量在上层定义，**不是**指望它继承。
 
 ---
 
@@ -160,7 +370,7 @@ Nexus 是一个电商后台。我们的**用途不同**（定时任务 + 账号�
 ┌──────────────────────────────────────────────┐
 │ navbar（固定，bg-base-100, shadow-sm）        │
 │  左：抽屉按钮(仅移动端) + 页面标题             │
-│  右：用户 badge + 主题无关的操作                │
+│  右：主题切换按钮 + 用户 badge                  │
 ├────────────┬─────────────────────────────────┤
 │ drawer-side│  main（p-4 md:p-6, bg-base-200）│
 │ 侧栏菜单    │    ↑ 内容区                      │
@@ -170,6 +380,8 @@ Nexus 是一个电商后台。我们的**用途不同**（定时任务 + 账号�
 
 - 侧栏在 `lg` 及以上是**常驻**的（`lg:drawer-open`），不是可折叠的。
 - 导航项 **9 条封顶**，与 §4.1 页面表一一对应，**不设二级菜单**。
+- **主题切换按钮常驻 `navbar-end`**（桌面上侧栏不可折叠，所以它只能放 navbar），
+  移动端同理 —— 窄屏也要能切，不能因为位置不够就砍掉。
 
 ### 4.2 移动端（< 768px）
 
@@ -206,6 +418,9 @@ daisyUI 的 `drawer` 结构是**固定三层**，顺序错了就不工作：
         <span class="px-2 text-lg font-medium">{pageTitle}</span>
       </div>
       <div class="navbar-end gap-2">
+        <button class="btn btn-square btn-ghost" aria-label="切换主题" onClick={toggleTheme}>
+          {/* 图标随当前主题变：浅色下显示月亮、深色下显示太阳 */}
+        </button>
         <span class="badge badge-ghost">{user.name}</span>
       </div>
     </div>
@@ -328,17 +543,21 @@ daisyUI 的 `drawer` 结构是**固定三层**，顺序错了就不工作：
 
 | 要用 | 场景 | 写法 |
 | --- | --- | --- |
-| `badge` | 有**文字**的标记（余额档位、任务状态） | `<span class="badge badge-success">成功</span>` |
+| `badge` | 有**文字**的标记（余额档位、任务状态） | `<span class="badge badge-soft badge-success">成功</span>` |
 | `status` | **纯色点**，无文字（账号健康度） | `<span class="status status-success" />` |
+
+`badge` **一律 `badge-soft`**（§2.3①）—— 表格里一列实心 badge 会把整张表压花。
+只有"必须一眼抓住"的单一异常标记才允许实心，且同屏只允许一个。
 
 **余额档位查表**（沿用现有 `app.tsx` 的约定，不要另起一套）：
 
 ```ts
+// 修饰符 badge-soft 单独写、颜色类查表 —— 两边都不能拼接（§9.1① 的字面量陷阱）
 const balanceBadge = {
-  high: 'badge-success',   // ≥1000
-  mid:  'badge-warning',   // ≥500
-  low:  'badge-error',     // <500
-} as const   // ← 必须是字面量查表，不能拼接（见 §1）
+  high: 'badge-soft badge-success',   // ≥1000
+  mid:  'badge-soft badge-warning',   // ≥500
+  low:  'badge-soft badge-error',     // <500
+} as const
 ```
 
 **账号健康度**（`status` 点）：绿 = 正常，红 = 连续失败，黄 = 有告警但可用。
@@ -351,7 +570,7 @@ const balanceBadge = {
 - 颜色用 `currentColor` 或 `text-primary`，这样自动跟随主题。
 - **必须留 `viewBox` 且宽高自适应**（`class="w-full h-auto"`），否则窄屏会被裁。
 - 空数据不能画成一条直线 —— 显示 `暂无数据` 的弱化文案。
-- 涨跌填充色遵循 §2.3（涨红跌绿）。
+- 涨跌填充色遵循 §2.4（涨红跌绿）。
 
 ### 5.6 表单（`input` / `select` / `fieldset`）
 
@@ -410,7 +629,7 @@ const balanceBadge = {
 | 首屏加载 | 居中 `loading loading-spinner loading-lg` |
 | 局部加载 | 容器内 `loading loading-spinner`，或 `skeleton` 占位 |
 | 空列表 | 弱化文字 + 一个明确的下一步动作（如「还没有账号，去添加」） |
-| 错误 | `alert alert-error`，**必须带可读原因**，不能只显示「请求失败」 |
+| 错误 | `alert alert-soft alert-error`，**必须带可读原因**，不能只显示「请求失败」 |
 
 > 空态**不要**只写「暂无数据」四个字 —— 它没告诉用户下一步做什么。
 
@@ -517,6 +736,7 @@ overscroll-behavior: contain;
 - [ ] 表格已切卡片、且**每项带标签**
 - [ ] 内容底部不被 `dock` 遮挡
 - [ ] 刘海 / 小白条区域无内容被裁
+- [ ] **主题切换按钮在窄屏也够得着**（不能被挤掉或挤出屏幕）
 - [ ] 深色模式下无"浅字压浅底"
 - [ ] 长文本已 `break-words`
 
@@ -547,6 +767,7 @@ web/src/
     DataTable.tsx      表格 ↔ 卡片双形态
     Confirm.tsx        危险动作确认弹窗
     toast.ts           toast store（约 20 行）
+    theme.ts           主题切换：nextTheme() 纯函数 + 读写 data-theme/localStorage
     fields.tsx         FieldSpec → 表单控件
   pages/           9 个页面，一个文件一个页面
 ```
@@ -559,6 +780,33 @@ web/src/
    典型：`buildTrendPath()`、排序/分页、`时刻 → cron` 映射、JSON 校验。
 3. **组件名与属性一律 camelCase** —— `vue-jsx-vapor` **不把连字符转小驼峰**（方案 §2.2.4）。
    写成 `<trend-chart>` 会失效。
+
+### 9.1 两个「静默失效」陷阱（都实际踩过）
+
+这两个坑的共同点是：**不报错、类型检查也过、构建也成功，只是样式不对**。
+所以只能靠"产物核对"发现，不要指望工具链报错。
+
+**① 拼接类名**（Tailwind 只认字面量）
+
+```tsx
+class={`btn btn-${variant}`}      // ❌ 生产构建后样式消失
+class={btnVariant[variant]}       // ✅ 查表，值必须是完整字面量
+```
+
+**② 主题变量写错插件块**
+
+`--color-*` / `--radius-*` / `--depth` / `--noise` / `--size-*` / `--border`
+是 **daisyUI** 的主题变量 → 写进 `@plugin "daisyui/theme"`。
+
+`--font-*` / `--spacing` / `--text-*` / `--breakpoint-*` 等是
+**Tailwind** 的 `@theme` 变量 → 写进 `@theme { }`，**写进 daisyUI 块会被静默吞掉**。
+
+> **怎么核对**：改完主题相关的东西，**一定**要 grep 一遍产物：
+> ```bash
+> f=$(ls web/dist/assets/index-*.css)
+> grep -o -e '--font-sans:[^;}]*' -e '--depth:[^;}]*' "$f" | sort -u
+> ```
+> 看到的值和源码里写的一致才算生效。§2.3④ 的字体坑就是这么发现的。
 
 ### Vapor 边界（写页面时会撞上的）
 
@@ -587,15 +835,19 @@ web/src/
 一个页面上线前必须全部为「是」：
 
 - [ ] 用的是 §4.3 的 `drawer` 骨架，`drawer-toggle` 是 checkbox 且靠 `label` 驱动
-- [ ] 没有出现 `btn-${x}`、`badge-${x}` 这类**拼接类名**（§1）
-- [ ] 没有 `gray-*` / `slate-*` 等**具名色阶**（§3.3）
-- [ ] 没有 `rounded-lg` 等**硬编码圆角**（§3.4）
+- [ ] 没有出现 `btn-${x}`、`badge-${x}` 这类**拼接类名**（§9.1①）
+- [ ] 次要行动用 `-soft`，一屏只有一个实心 `btn-primary`（§2.3①、§3.4）
+- [ ] 卡片用 `shadow-sm` 而非 `border`（§2.3②）
+- [ ] 没有 `gray-*` / `slate-*` 等**具名色阶**（§3.4）
+- [ ] 没有 `rounded-lg` 等**硬编码圆角**（§3.5）
 - [ ] 没有 `tailwind.config.js`（§1）
-- [ ] 涨跌用 `text-error` / `text-success`，且没和状态语义混用（§2.3）
-- [ ] 一屏只有一个 `btn-primary`（§3.3）
+- [ ] 涨跌用 `text-error` / `text-success`，且没和状态语义混用（§2.4）
 - [ ] 危险动作有确认弹窗且显示了**具体影响面**（§6.4）
 - [ ] `dropdown-content` 带 `z-50`（§5.7）
+- [ ] 改过主题变量的话，**已 grep 产物核对**（§9.1②）
 - [ ] 移动端清单（§7.4）逐条通过
+- [ ] **主题切换可用**：navbar 有开关、点了生效、刷新后仍在（§3.2）
+- [ ] **两个主题都试过**：`light` 与 `dark` 下各看一遍，`primary` 都是品牌色而非默认紫（§3.3）
 - [ ] 深色模式下无对比度问题
 
 ---
@@ -609,6 +861,9 @@ web/src/
 | 3 | vitest 尚未引入（方案 §6.1 L1' 需要） | 写 `ui/` 纯函数时 |
 | 4 | 抽屉侧栏在**极窄屏（<320px）** 的宽度是否需要收窄为 `w-56` | 移动端首次自测后 |
 | 5 | 是否要 vendored 一份 daisyUI 文档文本供 AI 参考（方案 §2.2.6 的建议） | 视 AI 写码的实际出错率 |
+| 6 | **字体落地**：§2.3④ 的 `--font-sans` 已在 `app.css` 生效，但**只写拉丁子集 + 中文走系统回落**，字体文件**尚未自托管**（目前实际渲染仍是 Segoe UI / 雅黑）。要自托管就选一个可变量重字体，**不要**链 Google Fonts | 有设计稿或首次做视觉验收时 |
+| 7 | ~~`--depth: 0` 会不会让 `btn` 失去按下的反馈~~ **已核实不会**：`:hover` 的加深是硬编码 7%、`:active` 是 `translate:0 .5px`，两者都**不经过 `--depth`**。`--depth` 只管内阴影/浮雕，拿掉它正好。无需补偿 | — |
+| 8 | `btn-soft` 会带一条 `border-style:solid`（边框色是主色 10% 混底）。这与 §2.3②「阴影而非边框」并存，视觉上可接受（很淡），但若实测偏"描边感"，要在 `app.css` 里统一清掉软按钮的 border | 首次视觉验收时 |
 
 > 本文与 [`rust-rewrite-plan.md`](./rust-rewrite-plan.md) 的分工：
 > **方案定"用什么技术、有哪些页面"；本文定"长什么样、怎么写"。**

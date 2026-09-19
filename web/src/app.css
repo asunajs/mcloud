@@ -3,14 +3,51 @@
 /* daisyUI 5 通过 Tailwind 4 的 CSS-first 插件机制注册。
    Tailwind 4 已弃用 tailwind.config.js —— 不要再创建它。 */
 @plugin "daisyui" {
-  themes: light --default, dark --prefersdark;
+  /* 刻意**不用** dark 的 --prefersdark：那是"系统偏好深色时自动切"，
+     而我们有自己的手动开关（见 index.html 的内联脚本 + src/ui/theme.ts）。
+     两者同时存在会互相抢状态 —— 用户手动选了浅色，系统主题一变就被顶回去，
+     按钮显示与实际样式不一致。所以「跟随系统」只作为**初始值**在 JS 里算，
+     交给 CSS 的常驻规则一律不要。 */
+  themes: light --default, dark;
 }
 
 /* ---------------------------------------------------------------------------
-   主题微调：对齐原有品牌色。
-   注意保持浅色为默认（IDE/既有界面均为浅色），
-   且「涨红跌绿」的约定与主题无关，不受影响。
+   主题微调：
+   ① 对齐品牌色（primary）；
+   ② 统一「形状档位」—— 这是"整体观感"的真正来源，只调颜色是不够的。
+
+   注意：每个 @plugin "daisyui/theme" 块是**独立**的，light 里定义的变量
+   **不会**继承给 dark。所以下面两块必须**成对出现**，改一处就要改两处。
+
+   「涨红跌绿」的约定与主题无关，不受这里影响。
    --------------------------------------------------------------------------- */
+
+/* ---------------------------------------------------------------------------
+   主题身份：字体。
+
+   ⚠️ 这里**不能用 `@plugin "daisyui/theme"` 来设 `--font-sans`** ——
+   实测（vite build 产物核对）写在 daisyUI 主题块里会被静默丢掉，
+   输出变成 `--font-sans: sans-serif`。原因：`--font-sans` 是 **Tailwind 自己的
+   `@theme` 命名空间变量**（见 tailwindcss/theme.css 顶部的 `@theme default`），
+   不是 daisyUI 的主题变量。往 daisyUI 插件里写，Tailwind 会拿它去查自己的注册表，
+   查不到就回落 —— 而 daisyUI 的 injectTheme 又是后注入的，结果就是被覆盖成 sans-serif。
+
+   正确做法：用 Tailwind 的 `@theme`，且**只写一次**（字体不随主题变，不需要两遍）。
+   放在 daisyUI 插件之后，保证优先级。
+   --------------------------------------------------------------------------- */
+@theme {
+  /* 只写拉丁子集，中文走系统回落（PingFang SC / 雅黑）。
+     字体文件当前**尚未自托管** —— 见设计指南 §12 未决项 6。 */
+  --font-sans: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+/* 形状档位的取值理由见 docs/webui-design-guide.md §2.3③ 与 §3.5：
+   --depth: 0       关掉 daisyUI 的浮雕内阴影，扁平化（现代感的关键一步）
+   --radius-box     .75rem 卡片/模态框，比默认 .5rem 更"软"
+   --radius-field   .5rem  按钮/输入框，比默认 .25rem 更舒展
+   --radius-selector .5rem 勾选框/开关，与 field 同比例
+   --radius-* 两个主题**取值相同**（不涉及对比度），但仍各写一遍。 */
+
 @plugin "daisyui/theme" {
   name: "light";
   default: true;
@@ -18,4 +55,23 @@
 
   --color-primary: oklch(52% 0.19 275);
   --color-primary-content: oklch(98% 0.01 275);
+
+  --depth: 0;
+  --radius-box: 0.75rem;
+  --radius-field: 0.5rem;
+  --radius-selector: 0.5rem;
+}
+
+@plugin "daisyui/theme" {
+  name: "dark";
+  color-scheme: dark;
+
+  /* 深底上沿用浅色那个 L=52% 会糊在背景里，必须提亮（L 值调高）。 */
+  --color-primary: oklch(72% 0.17 275);
+  --color-primary-content: oklch(18% 0.04 275);
+
+  --depth: 0;
+  --radius-box: 0.75rem;
+  --radius-field: 0.5rem;
+  --radius-selector: 0.5rem;
 }
