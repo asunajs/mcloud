@@ -26,6 +26,21 @@
 # 那是环境特定的东西，跟数据库同理，没有入库的理由。
 /data/device*.txt
 
+# 截图脚本（`scripts/shots.sh`）用的 Edge 调试 profile 与临时响应头。
+# 这是**浏览器自己的状态**（缓存、Crashpad 转储、Cookie 库），
+# 既不是项目内容、又带着上一次会话的登录 cookie —— 与上面同一条理由：
+# 日志可以留、仓库不能留。少这一条，`git add .` 会往里塞进上千个 .dmp / Cache 文件。
+# 通配 `edge-profile*` 是为了连历史遗留的 data/edge-profile 一起挡住。
+/data/edge-profile*/
+/data/cdp-profile/
+/data/tmp/
+
+# 本地预览服务的日志（`scripts/shots.sh` 起服务时的 stdout/stderr）。
+/data/srv.log
+/data/srv.out
+/data/srv.err
+/data/edge.log
+
 # 原始 HAR 含真实登录凭据 —— 绝不入库
 har/
 *.har
