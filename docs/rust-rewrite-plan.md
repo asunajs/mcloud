@@ -326,6 +326,9 @@ mcloud/                               # /Users/catlair/mobile/workspace/mcloud
 │   │   ├── src/live_room.rs  file.rs  share.rs  note.rs  mail139.rs
 │   │   ├── src/live_room_proto.rs    #   prost 生成物 + 编解码
 │   │   └── （模块划分随新抓包调整；目前仅 lib.rs 骨架 = Upstream + Envelope + base）
+│   │       （2026-09-19 补：上面那行是当时的实况，原文留着。此后按抓包落地的有
+│   │        login / client / app_client / app_login / app_signin /
+│   │        smid（cmpassport 设备指纹上报，见 §7.2 与 docs/client-profiles.md §5.4 ③））
 │   ├── mcloud-capabilities/             # 19 个云盘能力 + 注册表
 │   │   ├── src/registry.rs           #   静态 LazyLock<Vec<Capability>>
 │   │   ├── src/login/                #   ★ 登录流程（短信 / 扫码）：多步交互，CLI 与 WebUI 共用一份状态机
@@ -350,6 +353,8 @@ mcloud/                               # /Users/catlair/mobile/workspace/mcloud
 │   │   ├── src/device.rs             #   设备指纹（dID）：最早存在、永不漂移的那份本地状态
 │   │   ├── src/user.rs               #   首个管理员初始化（CLI 与 WebUI 引导共用同一用例）
 │   │   └── src/login.rs              #   登录驱动：状态机 + 真实等待（1000ms）+ 观察者回调
+│   │       （2026-09-19 补：上面那份是 PC 那条。此后还有 app_login.rs（App 端登录驱动）、
+│   │        session.rs（本系统会话）、smid.rs（设备特征绑账号 + 上报换 deviceId + rotate））
 │   ├── mcloud-server/                   # ★ 产物二：axum 路由 + SSE + 内嵌前端 + OpenAPI
 │   │   ├── src/routes/               #   login / accounts / capabilities / runs / schedules / exchange / debug
 │   │   └── src/openapi.rs            #   utoipa → openapi.json（供前端生成类型）
@@ -546,6 +551,14 @@ CREATE TABLE run_events (
 4. `hc1t` 的云朵记录接口
 
 采集后统一走一个 `record_cloud(account, count)` 用例：写 `accounts.cloud_current` + UPSERT `cloud_stats` 并算日/周增量。**纯函数部分（增量计算、日期归属）在 `mcloud-core` 内，可单测。**
+
+> **落地情况（2026-09-19）**：`record_cloud` 已实现于 `mcloud-app::cloud`，
+> 上面 4 个来源里目前只接上了 **① `infoV3.beforeTotal`**（签到链路）——
+> 另外三个各自的接口本身也还没写。增量计算用的就是上面那句说的纯函数
+> `mcloud_core::pure::next_cloud_stats`（它和 `daily_key` 在实现之前就已经在了）。
+> 存储侧为此补了一个**窄写**方法 `StateStore::set_account_cloud`：
+> 不复用整行覆盖的 `upsert_account`，因为"读整行 → 改一列 → 写回"会把
+> 读与写之间别人改的昵称**静默写回旧值**。
 
 ### 3.5 执行器
 
@@ -932,10 +945,19 @@ P6 的**视觉与组件基建可在 P2 后并行启动**（接口先冻结 `open
 | **WebUI 登录与会话鉴权**：`POST/GET/DELETE /api/session` + `GET/POST /api/setup`、cookie 会话（HttpOnly / SameSite=Lax / 可配 Secure）、未初始化只暴露初始化页、统一错误形状、10 条路由契约测试 | ✅ 完成（`cargo test -p mcloud-server --test api_contract`） |
 | **`mcloud-server` 可运行**：`main.rs`（clap）+ 静态发前端产物 + `/api` 未知路径报 404 JSON + 前端登录/初始化页（Vapor + daisyUI） | ✅ 完成（真机跑通：初始化 → 落 cookie → 会话查询 → 登出立刻失效） |
 | **App 档案回填 `user_domain_id`**（`x-yun-uni`）：按手机号从 `account_state` 读，CLI 与将来的已登录接口共用同一个函数 | ✅ 完成（含"查不到/空串/属于别人"三种情况一律不带，见下） |
-| 六项门禁（`cargo test` / `clippy -D warnings` / `fmt --check` / 分层 / 产物解耦 / 标识守卫） | ✅ 全绿，**365 个测试**（前端另有 `npm run typecheck` + `vite build`）。本表这一行记于 365 个时点；接完上面那条回填线后为 **421 个**（2026-09-19，仍全绿） |
+| **`mcloud-upstream::smid`**：cMPassport 风控侧的设备指纹算法 —— `uid=randomUUID()` → `ep=RSA(uid)` + `priId=md5(uid)[0..16]` → 约 31 字段的特征体 → `tn=md5(getTn(特征体))`（**在 `tn` 还是空串时算**）→ 25 条 DES-ECB/NoPadding「改名 + 加密」规则 → gzip（OS 字节写 `19`）→ base64 → AES-CBC/PKCS7 固定 IV → hex 成 `data` → `POST https://slw.h5cmpassport.com:9090/deviceprofile/v4`，`code==1100` 时取 `"B"+detail.deviceId` | ✅ 完成（25 条用例；`test/golden/crypto-vectors.json` 新增 `§smidString` / `§smidPriId` 各 3 条对拍 TS，`§smidTn` / `§smidDesRules` 由 Rust 侧与 Node 生成侧两份实现交叉） |
+| **schema v5：`account_state.smid_fingerprint` + `smid_device_id`** —— 两列的**写契约与 `AccountState` 相反**（窄写、不碰整行），所以专门补了一条守卫测试：**重登（`upsert_account_state`）不得抹掉已绑的设备特征** | ✅ 完成（真实 v4 库迁移到 v5 后账号与凭据完好；8 条用例 = 存储 6（往返 / 重开 / 换特征清空旧 `deviceId` / 窄写不动凭据与 `updated_at` / 越权写 `NotFound` / 上面那条重登守卫）+ schema 2） |
+| **`mcloud-app::smid` 生命周期层 + CLI `mcloud smid show / reset / refresh`**：**设备特征绑账号**、只在主动更换时重掷；换特征时**同一条 SQL 语句**作废旧 `deviceId`；库里那串解析不出来时**报错并提示 `smid reset`，不偷偷重掷**（静默重掷等于换设备） | ✅ 完成（13 条用例，含"上报请求一个凭据头都不带"的断言 —— 发给第三方风控服务的请求必须裸） |
+| **schema v6：`account_state.phone`** —— 存**完整手机号**。因为 `accounts.id` 只有掩码，而 `Authorization` 中间那段要的是完整号码（**不许拿掩码去凑**）。放在 `account_state` 而不是 `accounts`：后者是**直接吐给前端的展示表**，只能有掩码 | ✅ 完成（真实 v5 库迁到 v6、老行留 `NULL` 不回填；登录落库走 `phone_or_none()`；读取侧 `SignInCredential::from_account()` 是首选路径、`from_phone()` 只留给 v6 之前登的号；**端不匹配会被显式拒绝**（拿 PC 登的号去跑 App 签到 → 报错并提示重登）。真实上游实跑：`--account` 与 `--phone` 对同一账号输出逐字相同） |
+| **云朵余额采集**（§3.4 的 `record_cloud` 落地）：`infoV3.beforeTotal` → `accounts.cloud_current` + `cloud_stats` 日快照，日/周增量走纯函数 `next_cloud_stats` | ✅ 完成（新增 `StateStore::set_account_cloud` **窄写**方法 —— 不复用整行覆盖的 `upsert_account`，否则"读整行 → 改一列 → 写回"会把别人改的昵称静默写回旧值；历史窗口取**全量**而非近 7 天，窄窗口会把"两周没采集"的增量算成 0；同日重复采集幂等。真机实跑：余额 5392 落库，第二次跑仍是同一行） |
+| **`receiveV3` 领云朵**（§4 的 `receive` 能力第一块）：请求构造 / 响应解析 / 错误码语义 + CLI `signin --receive` | ✅ 完成（**上游层的三个错误码全部实证**：不带 `deviceId` → `615`、内容错一个字符 → `614`、真值 → `code=0`。⇒ 上游**校验 `deviceId` 的内容**，所以"随便编一个"走不通。**取值通路已补齐（2026-09-19）**：签到页 JS 自己把它缓存在 WebView 的 `localStorage`（桥只调一次、之后走缓存），`scripts/h5-device-id.py` 只读取出来，与官方 App 实发值**逐字节相同**（sha256 一致）。仍未解的是那 48 字节密文的**密钥**（三把已知密钥在 CBC/ECB × 两种切分下全不对），所以值只能"取"不能"造"，前提是这台机器上用官方 App 打开过一次签到页。⚠ 实测形状有个坑：89 字符 = 87 数据字符 + **2 个** padding（规范只要 1 个），**原样透传、别规范化**；首字节 0x05/0x06 都见过，**不是固定魔数**。顺带把 `infoV3.receiveList` / `toReceive` 解析出来 —— `--cloud-type` 的取值来源就是它。详见 `docs/capture/app-signin-samples.txt` §4.2 / §4.3） |
+| **`revival` 复活卡 / 回馈卡**（§4 能力清单第 3 项）：请求构造 / 响应解析 + CLI `signin --revive` | ✅ 完成（**接口是 `POST /ycloud/signin/page/receiveRevivalReward`**，H5 源码逐字：`receiveRevivalReward({})` ⇒ body 是**空对象 `{}`**，整页唯一一个 `showLoading: false`。实拍响应 `{cardType:1, littleFirstTime:0, rewardClouds:114, totalClouds:571}` —— `cardType` 1 = 复活卡 / 2 = 回馈卡，两张卡连累计文案的单位都不同。⚠ **它不可逆**（H5：「关闭弹窗视为放弃机会，无法补发」），所以做成独立开关、默认不开。⚠ **`totalClouds` 没有接进 `record_cloud`** —— 规划 §3.4 把它列为余额来源③，但 H5 文案说复活卡产出的是 **AI豆**，与 `infoV3.beforeTotal` 可能不是一个池子，**没有实拍能分辨**，接进去只会把两个口径混进同一条曲线。⚠ `deviceid` 头：H5 定义没有 `isDeviceId`、老抓包却带了 ⇒ 做成可选参数而不是猜一个。**顺带修掉一个静默空操作**：`--json` 原先在 `--receive` 之前就 `return`，导致 `--json --receive` 什么都不做且不报错；现在两个写开关都跑在 json 分支之前，结果也进 JSON。另：§7 的接口清单按正则重新枚举过，**原表少了 14 条**，已补全为 43 条） |
+| **H5 `deviceId` 根因查明 + 接线**（拆掉 `receiveV3` 唯一的拦路石）：签到页的 `deviceId` **就是 `smid` 换回来的那个**，`--receive` 不再需要任何手工参数 | ✅ 完成（**根因**：签到页的 `fp.min.js` 是数美设备指纹，`window.SMSdk` 是**它自己定义**的（所以 App 二进制里搜不到这个名字），`getDeviceId()` 返回 `'B' + localStorage['SMID']`，而 `SMID` 是它往 `slw.h5cmpassport.com:9090/deviceprofile/v4` 上报后拿回的 `detail.deviceId`；那套配置写在签到页 HTML 的 `window._smConf` 里，与 `mcloud-upstream::smid` 的常量**逐字相同**（含 RSA 公钥）。⇒ 曾经的"65 字节 = `1+16+48`、48 字节密文密钥是独立的第四把、未解"是**从错误的解码方式推出来的**：把 `'B'` 前缀当成了 base64 数据，那个"会变的 0x05/0x06 首字节"其实是前缀与 SMID 首字符**共用**出来的字节，真实结构是 `'B'` + 64 字节，**根本不是密文**。**实测**：`mcloud smid refresh` 纯 Rust 换回 `B…Dw==`（89 字符、`B` 前缀、64 字节，与 HAR 真值同形）。**接线**：CLI 新增 `resolve_device_id`（显式 `--device-id` → 否则库里 `smid_device_id`，没有就现上报一次），`--receive` / 签到都走它；`--revive` **故意不回落**（H5 没有 `isDeviceId`，默认就该一个头都不带）；`--h5-device-id` 改名为 `--device-id` 并保留为别名。守卫测试 `the_signin_page_fingerprint_sdk_is_this_same_client` 把两边常量钉在一起（常量漂移时先炸，而不是"领取忽然回 615"）。⚠ **仍缺一次 A/B**：Rust 产出的 id 打 `receiveV3` 上游认不认 —— 卡在账号 `account_state.phone` 为 `NULL`（v6 之前登的号），要么重登一次、要么 `--phone`。在那之前结论只到"不需要浏览器"，不到"领取已跑通"） |
+| **schema v7：`Authorization` 整串存、整串用** —— 拆开存再拼回去改成原文存取；`phone` 降级为"标识"（不参与拼头） | ✅ 完成（**形状**是 `Basic base64("<前缀>:<手机号>:<authToken>")`，登录时**一次就拿到整串** —— 旧项目 `mcloud-sign` 的 `asign.json` 里 `auth` 存的就是它，一直直接用。我们重写时解码 → 拆三段 → 只留 token → 要求用户每次补手机号，是**绕远路且会错**：① 必须凑齐手机号；② 前缀被硬编码成 `mobile`，猜错**静默**发错头、表现为 `90001` 未登录。⇒ 新增 `account_state.authorization`；读侧**整串优先**，`phone` + `jwt_token` 现拼只作 v7 之前老行的退路。**闸门顺序也一并修正**：`platform` 前缀闸与 `jwt_token` 非空闸原先排在整串分支**之前**，会把"库里只有整串"的行误判成"没有凭据"（而那正是回填造出来的形态）；这两道闸的前提在整串这条路上都不成立，故移到退路里。**实测**：整串路径下 `mobile:` 与 `pc:` 两个账号的 `--status-only` 都正常（余额 5392 / 8027）—— `pc:` 那条同时证明了"前缀闸不该管整串"（旧项目也从不区分，两个前缀走同一条签到路径）。**迁移回填**：`asign.json` 的 `auth` → `account_state.authorization`，走新窄写方法 `fill_account_credentials`（**只填空缺、不覆盖**，故幂等、可每次 `migrate` 都跑）；它**不受源文件哈希门控**（老库的 `state.json` 早导过了，走门控就永远补不上 —— 那正是 `write_state` 里那条"两种库形态"注释描述的问题）；`write_state` 改为把库里现有的两列**原样带过去**（`state.json` 对它们没有主张），否则整体覆盖会先抹掉、再被旧配置里的串填回来，把重登后的新凭据**换成旧的**。报告新增 `凭据回填 N`（**实际**补上的个数，无缺口不计入）。**CLI 零参数 + 下标**：不带子命令直接 `mcloud` = 对全部启用账号各签一次（对齐旧项目"直接运行、都没参数"）；`--account` 收**下标**（`--list` 查编号）而非掩码 id；`--phone` 补一次即落库、下次不必再输；一个账号失败不中断其余、最后用非零退出码统一报数。**顶层收全套签到参数**：顶层那个 `SigninArgs` 是 `#[command(flatten)]`，与子命令里的**同一个结构体** —— 早先顶层只认子命令，`mcloud --list` / `--status-only` / `--json` / `--db X` 会被 clap 判成"未知参数"并报 `Usage: mcloud [COMMAND]`，一个主打"直接运行"的命令行却要用户先知道子命令叫 `signin` 才能查编号。平铺后默认值、互斥关系、帮助文本**只有一份定义**（原来那种"再解析一遍 `["mcloud","signin"]`"的写法一旦有人改回手写字面量，漂移只在"直接运行"时表现为"某个默认值没生效"，最难被发现）。**顺带修掉一个既有 bug**：`--json` 时进度行也打到 stdout，`mcloud signin --json \| jq` 直接语法错 —— 现在进度一律走 stderr，单账号给对象、多账号给数组。**`--phone` 只记号码、不记拼出来的串**：那一列的口径是"服务端给的原文"，写进一个本地合成物等于给它伪造来源 —— 它会走整串优先路径、**绕过前缀闸**，于是此后每个请求都带着一个我们自己安上去的前缀且没人再核对；`pc:` 端的老行被 `--phone` 补一次就会存下**永久错的**凭据。只记 `phone` 即可（下次照旧现拼、闸照旧生效），用户同样不必输第二遍。**新增 8 条 CLI 用例**（用 clap 真解析 `mcloud signin …`，连 `conflicts_with_all` 一起验）：零参数只跑启用账号且下标用**全列表位置**（停用的位次不被顶替）、`--account` 数停用账号、下标从 1 开始、越界要报总数与 `--list`、`--phone` 空库也能选中且下标记 0、`--list` 与二者互斥、不带子命令补出来的确实是签到且默认值逐字一致） |
+| 六项门禁（`cargo test` / `clippy -D warnings` / `fmt --check` / 分层 / 产物解耦 / 标识守卫） | ✅ 全绿，**554 个测试**（前端另有 `npm run typecheck` + `vite build`）。这一行的数是一路涨上来的、**每次都会当天过期**，按时间顺序：本行最初记于 **365 个** → 接完上面那条 App 档案回填线 **421 个** → 接完上面三条 smid 线 **493 个**（同日）→ 签到线补齐上游接口层 / 编排层 / 存储层（`account_state.phone`，schema v6）后 **516 个** → 接上云朵余额采集后 **523 个** → 接上 `receiveV3` 领取（上游层请求构造 / 解析 / 错误码 10 条）后 **533 个** → 接上 `revival` 复活卡（上游层请求构造 / 解析 / 错误码 8 条）后 **541 个** → 查明 H5 `deviceId` 根因并接线（新增常量等价守卫 1 条）后 **542 个** → 接上 schema v7 整串凭据（窄写"只填空缺"2 条 + 整串优先 1 条 + 迁移回填的幂等与不降级 1 条）后 **546 个** → 补 CLI 账号选择用例（下标语义 / 越界 / `--phone` / `--list` 互斥 / 零参数落到签到 / 顶层与子命令等价，9 条）后 **554 个**（2026-09-19 收工，实测 554 passed / 0 failed）。⚠ **365→493 那 72 个不是一条线贡献的**：smid 那条 46 个（上游算法 25 + 生命周期 13 + 存储 8），同时在飞的 App 签到线 26 个 —— 别把整段算成自己的账，也别据此认为签到线已经完成。黄金向量脚本 **122 条断言全绿**（`§smidString` / `§smidPriId` 是 smid 那次新增的 6 条）。⇒ 并行开工时以 `cargo test` 现测为准，本行的数只是当时的一帧。**另一条当时踩出来的教训留着**：这条线在飞时 `fmt --check` 红过，红点**全不在 smid 这条线**上，而在并行那条线的 `crates/mcloud-app/src/signin.rs` 与它写进 `mcloud-cli/src/main.rs` 的那两处；本行涉及的每个文件单独 `rustfmt --check` 都干净 —— **别为了凑绿去格式化别人的在飞文件** |
 
-**旧数据实测**（`Documents/workspace/mcloud-sign`）：账号 2 / 登录态 2 / 组合 1 / 历史 96 条 / **问题 0 条**；
-二次执行 6 个数据文件全部跳过、0 次写入，行数不变。
+**旧数据实测**（`Documents/workspace/mcloud-sign`）：账号 2 / 登录态 2 / **凭据回填 2** / 组合 1 / 历史 96 条 / **问题 0 条**；
+二次执行 6 个数据文件全部跳过、0 次写入、**凭据回填 0**（没缺口就不计数），行数不变。
 
 **已回退（重要）**：P3 曾按旧 TS 搬过 `signin` / `exchange` / `task` / `auth` 四个模块与 15 个 L2 用例，
 **现已全部删除** —— 上游改为按新抓包重写，`mcloud-upstream` 除 `login` 外只保留骨架
@@ -1028,10 +1050,40 @@ OpenAPI 导出（`utoipa` → `openapi.json` → 前端生成类型，见 §5）
     （3 条，**含 2 条实拍** —— 实拍明文里没有标识，所以这次不必合成）。
   - ⚠ **实现侧目前不发这个头**（发码接口上不发时语义与抓包一致）。
     解开它的价值是"再也不用猜"，不是"必须带上"。
+- **smid 算出来了，但还没有请求发它** —— **有意留着，不是漏了**（2026-09-19）。
+  旧项目把 `getDeviceId()` 的结果原样发成请求头 `deviceid`
+  （`packages/shared/src/http/base.ts:44-45` 静态头、`:92-95` 「所有请求」注入、
+  `:166-181` `createTaskHttp`，账号初始化在 `core/src/utils/init-account.ts:33-40`）。
+  我们**没有照搬进 `AppProfile`**，两条实测依据：
+  ① App 签到那批抓包里，原生请求头 `deviceid` **一次都没出现**
+  （`docs/capture/app-signin-samples.txt` §4 那张「两个同名不同物」对照表 ——
+  那一批带 `deviceId` 的是 **H5 的 65 字节 blob**，与 smid 的 `B…` 不是一个东西）；
+  ② 把 `test/fixtures/http/` 的 711 条夹具扫一遍，带 `deviceid` 头的 178 条
+  **全是 H5 / WebView**（iPad UA、Android `wv`、活动页 iPhone UA），原生 App 流量一条没有。
+  所以取值的那一半已经就位（`mcloud_app::smid::device_id`，库里有就不打网络），
+  **注入的那一半等一条原生抓包**：届时按那个接口的要求显式带上，逐端点判断，
+  而不是塞进公共头替所有接口做决定。详见 `docs/client-profiles.md` §5.4 ③ 与 §7。
 
 **CLI 新建账号的归属策略**：库里已有用户时归**首个用户**，没有则保持无主
 （等 `mcloud user init` 认领）。这不是权限检查，而是"账号必须有主人"的落地 ——
 否则网页端按隔离规则看不到它，会出现"扫码成功了、网页里却没有这个账号"。
+
+**业务功能明细已单独成文**（2026-09-19 追加）：[`docs/business-feature-inventory.md`](./business-feature-inventory.md)
+—— 19 项能力逐条的**上游请求序列 / 判据分支 / 副作用分级 / 幂等缺口 / 依赖与共享状态**，
+外加运行时层缺口（run 与并发闸、调度、组合、推送 10 渠道、CLI、WebUI）与硬编码常量集中清单。
+它**不改 §7.1 的实现顺序**，只补"每一项能力内部到底怎么走"这一层。
+其中该文 §5 的「动代码前必须实测确认的冲突」是 §6.3「不照搬旧 TS」的**具体检查表**
+（例如旧代码写 `/market/signin/…` 而我们抓到的是 `/ycloud/signin/…`，前缀与 `taskListV2/V3`、
+`doTask/doTaskPost` 的分歧都记在那里，未实测前不写接口）。
+
+**参考项目的对应盘点也已单独成文**（2026-09-19 追加）：[`docs/caiyun-go-feature-inventory.md`](./caiyun-go-feature-inventory.md)
+—— §2 点名的 Go 参考项目（`/tmp/caiyun-ref` @ `1b2cf07`，backend 61,215 行）逐条对照：24 条任务目录、
+抢兑子系统（一次下单的 11 步 + 响应分支表 + 12 类错误→重试决策表 + 三层锁与 double-spend 面）、
+运行时层（日幂等的确切语义、熔断状态机、6 类令牌、事件与推送、跨任务态建模）、参数面全量与
+**搬 / 不搬 / 先修再搬**总表。它是 §2.4「明确不照搬参考项目」的**逐项落实**：
+MySQL / Redis / 多用户+RBAC / K8s / 监控栈 / API+Worker 双进程各自的替代物写在该文 §8.2，
+"哪些是他们踩过的坑、我们不能继承"汇总在其 §8.4（编号 `T-*/X-*/R-*/C-*`，均带 `file:line`）。
+该文 §7 与旧 TS 盘点篇 §5 是同一张检查表的两个来源，**三源冲突时以我们的抓包为准**。
 
 ---
 

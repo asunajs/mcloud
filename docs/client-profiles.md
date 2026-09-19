@@ -434,6 +434,48 @@ x-yun-client-info (16 段)  = 上面那串 + "aVBhZA==|0|;"
 > **待确认**：它到底按什么变（每次启动 / 每天 / 某个事件）？
 > 目前只有两个观测点，定不下来 —— 记在 §7。
 
+**③ 上面两段讲的是设备串（`deviceInfo`）里的字段。还有第三种指纹**，
+与它**完全不同源、不同形状、不同生命周期**：cMPassport 风控侧的 `smid`。
+
+（2026-09-19 追加，实现见 `crates/mcloud-upstream/src/smid.rs` 与 `crates/mcloud-app/src/smid.rs`。）
+
+它产出两样东西，**绑账号的是前者、会变的后者**：
+
+| | 设备特征（我们生成） | `deviceId`（服务端下发） |
+|---|---|---|
+| 内容 | ~31 个字段的浏览器/设备特征体 + 那 25 条 DES 改名表 | 18 字符，`B` + 17 位 |
+| 从哪来 | 客户端本地 `randomUUID()` → RSA 上送 `uid` → 组特征体 → `tn = md5(getTn(body))` → DES 映射 → gzip(`buf[9]=19`) → base64 → AES-CBC 定 IV → hex 成 `data` | `POST https://slw.h5cmpassport.com:9090/deviceprofile/v4`，`code == 1100` 时取 `"B" + detail.deviceId` |
+| 生命周期 | **绑到账号**：一次生成、长期复用、可**主动更换** | **每次上报都可能换**；下一次的 `box` 字段要回喂上一次的这个值 |
+| 落在哪 | `account_state.smid_fingerprint` | `account_state.smid_device_id` |
+
+**为什么特征绑账号、上报值不绑**（与上面 ② 那条 `deviceShort` 是同类的判据）：
+`deviceId` 是**服务端**决定的，我们若把它当稳定值持久化，就是在声称一个不由我们控制的稳定性；
+而"换特征"必然换 `deviceId`，所以 `rotate` 那一步**同一条语句里清空** `smid_device_id`
+（旧值对新特征无意义，留着只会让人以为它还能回喂）。
+
+这与旧项目**刻意不同**：旧 TS 每次启动现算、失败就吞成空串
+（`packages/shared/src/smid/index.ts:370-397` 的 `catch { … } return "";`），
+于是每台机器每次都是一个新设备。新实现把"生成"和"上报"分开，
+生成一次就绑住，换不换由用户决定（CLI：`mcloud smid show / reset / refresh`）。
+
+> **`deviceid` 请求头：值确认是它，注入点未确认**
+>
+> 旧项目确实把 `B…` 这个值原样发成请求头，代码级证据三条：
+> `packages/shared/src/smid/index.ts:370-397`（`getDeviceId()` → `"B" + json.detail.deviceId`）、
+> `packages/core/src/utils/init-account.ts:33-40`（拿到后 `createHttp({ deviceid: deviceId })`）、
+> `packages/shared/src/http/base.ts:44-45 / 92-95`（`deviceid` 全请求注入）与 `:166-181`
+> （`createTaskHttp` 把 `deviceid` 写进静态头）。
+>
+> **但我们自己不照做**，因为注入范围没有证据：
+> ① App 签到那批抓包里原生请求头 `deviceid` **一次都没出现**
+> （`capture/app-signin-samples.txt` §4 那张两列对照表）；
+> ② 把夹具（`test/fixtures/http/` 本次共 711 条）按"哪些请求真带 `deviceid`"过一遍，
+> 带它的 178 条**全是 H5 / WebView**
+> （iPad UA、Android `wv`、活动页 iPhone UA），没有一条是原生 App 的流量。
+> 所以 `AppProfile::headers()` 保持**不发** `deviceid`，
+> 等某一条**原生**抓包明确带上了，再由那个接口的构造函数按端点显式带上 ——
+> 而不是往公共头里塞一个只来自旧项目、且我们从未测到的值。
+
 ---
 
 ## 6. 落地时的目标形状（三层；PC / iOS App 已落地，其余端未实现）
@@ -444,9 +486,24 @@ x-yun-client-info (16 段)  = 上面那串 + "aVBhZA==|0|;"
 | **每安装指纹** | `deviceId`、`deviceInfo`、听云 id | 首次生成 → 持久化，不可漂移 | `windowMachine`；`AppDevice::device_id` |
 | **每运行** | App 设备串第 7 段（`deviceShort`） | 每次运行生成，**不落盘** | `mcloud_app::device::new_app_device_short` |
 | **每请求** | `x-yun-tid`、`Authorization`/`jwttoken`、`timestamp`/`nonce`/`signature`、`msgid` | 每次计算 | 登录链路的 `x-yun-tid`（PC）；`x-yun-user-timestamp`（App，由调用方传 `timestamp` 注入） |
+| **每账号**（2026-09-19 追加） | smid 的**设备特征**（~31 字段，见 §5.4 ③） | 首次生成 → 落 `account_state.smid_fingerprint`，**可主动换** | `mcloud_app::smid::{ensure_fingerprint, rotate_fingerprint}` |
+| **每上报**（2026-09-19 追加） | smid 的 `deviceId`（`B…`，服务端下发） | 每次上报都可能换；旧值经 `box` 回喂 | `mcloud_app::smid::device_id`（库里有就不再打网络） |
+
+> 这两行**不是**"每端 / 每安装 / 每运行 / 每请求"里某一行的别名，而是**另一棵指纹树**：
+> 上面那张表按"一台设备的设备串"分层，这两行按"一个账号绑一份风控特征"分层。
+> 混起来会犯两类错 —— 把 smid 的 `deviceId` 当每安装常量持久化（它每次上报都在变），
+> 或者反过来把它每次现生成（那正是旧 TS 的行为，等于每请求换一台设备）。
 
 再加一层**按接口叠加**（对应 `options.appendHeads`）：`x-yun-module-type`、
 `x-yun-api-version`、`x-ExpRoute-Code` 都随接口变化。
+
+> **还有一层比"按接口"更细：按调用点。**
+> `toSourceId` / `channelSrc` / `sourceChannel` 这类"码"不是端属性，是**调用方按场景选的参数** ——
+> 同一个 PC 客户端文件里同一条接口就有三个值（`001003` / `001005` / `001248`），
+> 旧项目为拿不同任务会轮流冒充 PC / 安卓 / iPhone / Edge-on-Linux。
+> **完整取值谱、分类判据与"哪些码会整套换头"见
+> [`device-and-source-codes.md`](./device-and-source-codes.md)** ——
+> 接新接口前先看它，别把某端的默认值当常量抄过来。
 
 > **App 端的实现方式与 PC 端有意不同**：`AppProfile::headers(timestamp)` 是**纯函数**，
 > 时间戳由参数传入而不是内部读时钟 —— 这样请求头可以**逐字段断言**（L2 夹具回放的要求），
@@ -507,6 +564,14 @@ iOS 的 `clientType`=`412` / `cpid`=`55` / 渠道号=`10000020` / `version`=`12.
   把请求体按同格式加密发出去，服务端就正常处理并回 `200059554` ⇒ 已用活体探针走通。
   证据见 [`capture/app-sms-login-samples.txt`](./capture/app-sms-login-samples.txt) §1.2。
   **至此登录链路上的加密点全部解开。**
+- **`deviceid` 头在原生 App 上到底哪些端点带**（2026-09-19 追加）：**值**已确认就是 smid 那套
+  （`B` + 17 位，§5.4 ③），**注入范围**没有一条实测 —— 现有夹具里带它的 178 条全是 H5 / WebView，
+  原生流量一条都没有。所以 `AppProfile` 现在**不发**它；
+  接第一批已登录的原生接口时按抓包**逐端点**回填，不要先塞进公共头。
+- **原生侧 smid 特征是什么形状**（同期追加）：`SmFingerprint::caiyun_android_web` 那份是
+  **web/H5 特征**（`os: "web"`、`platform: "Linux armv8l"`、Chrome 插件表），照旧项目逐字沿用的。
+  iOS 原生 App 若走同一套风控，它的特征体（含 `ua`、`plugins`）我们没有观测过，
+  **不拿 H5 那份冒充原生** —— 那等于凭空发明一份特征。
 
 以上每一条，**接该端时用真实流量回填**，不要从推断反推。
 
@@ -563,6 +628,15 @@ cargo run -p mcloud-cli -- fixture extract --har har/x.har --out test/fixtures/h
   这样"换端"= 换 profile，不动业务逻辑。**登录链路的两个函数没有硬编码任何头值。**
 - `PcPlatform::{client_type, cpid, app_version}` 已经是"每端常量"的雏形；
   App 端照同样思路落成了 `app_client::ios`。第三端进来时再考虑合并成一张表。
+- **smid 那条线（§5.4 ③）目前不挂在任何请求链路上**，它是独立的一层，
+  等哪个原生接口要用 `deviceid` 时再接上去：
+
+  | 层 | 位置 | 职责 |
+  |---|---|---|
+  | 算法 | `mcloud-upstream::smid` | 特征体 → `data` → 上报 → `B…`；**只管一次调用，不碰库** |
+  | 生命周期 | `mcloud-app::smid` | 读库里的特征、没有就生成并绑账号、上报、存 `deviceId`；`rotate` 时同一条语句清掉旧 `deviceId` |
+  | 落库 | `account_state.smid_fingerprint` / `smid_device_id`（schema v5） | 见 §6 那两行新层 |
+  | 入口 | `mcloud smid show / reset [--report] / refresh` | 只打印摘要（特征 fp 摘要 + 平台/尺寸/dpr/触屏/CPU + 打码的 `deviceId`），**不打印 UA** |
 
 端档案的调用链（**从 CLI 一路到上游**，可以直接照着读）：
 
