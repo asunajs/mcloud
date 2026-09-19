@@ -24,6 +24,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod app_client;
+pub mod app_login;
 pub mod client;
 pub mod login;
 

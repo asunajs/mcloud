@@ -37,14 +37,26 @@ pub fn new_device_id(rng: &mut impl Random) -> String {
 /// 留下的是一个被截断的 id —— 而它下次会被当成"已经存在的设备 id"读进去，
 /// 于是这台机器的身份永远变了（服务端再也定位不到会话）。
 pub fn load_or_create(path: &Path, rng: &mut impl Random) -> Result<String, Error> {
-    if let Ok(existing) = std::fs::read_to_string(path) {
-        let trimmed = existing.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
+    if let Some(existing) = read_trimmed(path) {
+        return Ok(existing);
     }
-
     let device_id = new_device_id(rng);
+    write_atomically(path, &device_id)?;
+    Ok(device_id)
+}
+
+/// 读文件里的值；不存在或只有空白都算"没有"。
+///
+/// 空白也算没有：一个被截断/清空的文件若被当成"已有设备 id"，
+/// 就等于每次运行都换一个身份（见 [`load_or_create`] 的说明）。
+fn read_trimmed(path: &Path) -> Option<String> {
+    let existing = std::fs::read_to_string(path).ok()?;
+    let trimmed = existing.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// 原子落盘：先写 `<path>.tmp` 再改名。
+fn write_atomically(path: &Path, value: &str) -> Result<(), Error> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -54,11 +66,57 @@ pub fn load_or_create(path: &Path, rng: &mut impl Random) -> Result<String, Erro
     }
 
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, format!("{device_id}\n"))
+    std::fs::write(&tmp, format!("{value}\n"))
         .map_err(|e| Error::Internal(format!("写设备指纹失败 {}: {e}", tmp.display())))?;
     std::fs::rename(&tmp, path)
         .map_err(|e| Error::Internal(format!("落盘设备指纹失败 {}: {e}", path.display())))?;
+    Ok(())
+}
 
+// ==================== App 端（iOS）的设备指纹 ====================
+
+/// App 端的 `deviceId`：32 位大写 HEX，**没有** `-ENDIN` 后缀。
+///
+/// 与 PC 的 [`new_device_id`] 只差那个后缀，但设备串第 6 段是整串比对的一部分，
+/// 带上后缀会让上游看到一台不存在的设备形态。
+pub fn new_app_device_id(rng: &mut impl Random) -> String {
+    let mut bytes = [0u8; 16];
+    rng.fill_bytes(&mut bytes);
+    hex::encode_upper(bytes)
+}
+
+/// App 端的 `deviceShort`：12 位大写 HEX（设备串第 7 段）。
+///
+/// # 它是**每次运行**生成的，不持久化（实测依据）
+///
+/// 同一台设备（`deviceId` 完全相同）在两个时间点的 `deviceShort` **不一样**：
+///
+/// | 观测时间 | `deviceId` | `deviceShort` |
+/// | --- | --- | --- |
+/// | 2026-08-12 | `67F4C56A…315C` | `8A708867DBC3` |
+/// | 2026-09-18 | `67F4C56A…315C` | `EAB9BF94B8DE` |
+///
+/// 也就是说 **`deviceId` 稳定、`deviceShort` 会变** —— 所以后者**不能**当"每安装指纹"
+/// 持久化（那会声称一个已被证伪的稳定性）。它随每次运行新生成。
+///
+/// **未确定的部分**：它到底按什么变（每次启动 / 每天 / 某个事件）只有两个观测点，
+/// 定不下来。记录在 `docs/client-profiles.md` §5.4 的待确认项里。
+pub fn new_app_device_short(rng: &mut impl Random) -> String {
+    let mut bytes = [0u8; 6];
+    rng.fill_bytes(&mut bytes);
+    hex::encode_upper(bytes)
+}
+
+/// 读 App 端 `deviceId`；文件不存在就生成一个并写盘。
+///
+/// **只持久化 `deviceId`**，`deviceShort` 每次运行用 [`new_app_device_short`] 现生成
+/// （理由见该函数的文档）。
+pub fn load_or_create_app_device_id(path: &Path, rng: &mut impl Random) -> Result<String, Error> {
+    if let Some(existing) = read_trimmed(path) {
+        return Ok(existing);
+    }
+    let device_id = new_app_device_id(rng);
+    write_atomically(path, &device_id)?;
     Ok(device_id)
 }
 
@@ -134,5 +192,51 @@ mod tests {
             .filter(|name| name != "device.txt")
             .collect();
         assert!(leftovers.is_empty(), "不该留下临时文件: {leftovers:?}");
+    }
+
+    #[test]
+    fn app_device_id_has_no_endin_suffix() {
+        let id = new_app_device_id(&mut SeqRandom(0));
+        assert_eq!(id, "000102030405060708090A0B0C0D0E0F");
+        assert_eq!(id.len(), 32, "App 的 deviceId 是纯 32 位 HEX");
+        assert!(
+            !id.ends_with(DEVICE_ID_SUFFIX),
+            "带 -ENDIN 的是 PC 的形态，App 端没有"
+        );
+    }
+
+    #[test]
+    fn app_device_short_is_12_hex() {
+        let short = new_app_device_short(&mut SeqRandom(0));
+        assert_eq!(short, "000102030405");
+        assert_eq!(short.len(), 12);
+        assert!(short.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn app_device_id_is_stable_across_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("device-app.txt");
+
+        let first = load_or_create_app_device_id(&path, &mut SeqRandom(1)).unwrap();
+        let second = load_or_create_app_device_id(&path, &mut SeqRandom(200)).unwrap();
+        assert_eq!(first, second, "deviceId 必须稳定（实测跨月不变）");
+        assert_eq!(first.len(), 32);
+    }
+
+    #[test]
+    fn app_device_short_is_not_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("device-app.txt");
+        load_or_create_app_device_id(&path, &mut SeqRandom(1)).unwrap();
+
+        // 同一个随机源连出两次，得到的 short 也必须不同 ——
+        // 它**不落盘**，所以每次运行都是新的（实测：同一 deviceId 换过 short）
+        let a = new_app_device_short(&mut SeqRandom(1));
+        let b = new_app_device_short(&mut SeqRandom(2));
+        assert_ne!(a, b);
+        // 而文件里只有 deviceId 一行，没有 short 的位置
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content.trim().split('\n').count(), 1, "{content:?}");
     }
 }

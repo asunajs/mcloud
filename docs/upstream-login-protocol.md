@@ -160,10 +160,58 @@ if (result.data) {
 > `auth_expire` 是从 `authToken` 的第 4 段（epoch 毫秒）解出来的，
 > 而它只有在"重建的 auth 形状与真实 token 分段一致"时才会是个合理值。
 >
-> **一处与本文示例不一致（待下次登录确认字段名）**：真实 `userInfo` 里
-> **没有 `userId`**，所以 `user_domain_id` 落了空。本文 §5 那个 `userId` 是
-> 从设备绑定流程抄来的合成样本，不能当成登录响应的字段表。
-> 下次登录时打印 `userInfo` 的**字段名**（不打印值）即可确定它到底叫什么。
+> **已收口（2026-09-19 真机登录实测）**：原先这条记的是"真实 `userInfo` 里
+> **没有 `userId`**，所以 `user_domain_id` 落了空，本文 §5 那个 `userId` 是从
+> 设备绑定流程抄来的合成样本"。现在**把响应字段名打印出来了**（只打印名字、不打印值），
+> 答案是：**字段名就叫 `userDomainId`，而 `userId` 根本不在响应里。**
+>
+> ```text
+> account, areaCode, atExpiretime, authToken, belongsPlatform, cutoverStatus,
+> deviceid, expiretime, hasChangeAccount, loginRequestVersion, nationCode,
+> provCode, routerInfo, serverinfo, token, userAssetFlag, userDomainId,
+> userExtInfo, userid
+> ```
+>
+> **这条对两端同时成立**：App 与 PC **都调 `POST /user/thirdlogin`**
+> （同一台 `user-njs.yun.139.com`），只是 `pintype` / 请求体编码不同 ——
+> 响应是同一套 schema。落库后 `account_state.user_domain_id` 有值（19 位），
+> 且 `auth_expire` 正好落在 30 天后，说明**解密、字段提取、`auth` 重建三段全对**。
+> App 侧那份抓包记录（`docs/capture/app-sms-login-samples.txt` §3.4）里
+> 其实早就列过这张表，只是当时没把它和 PC 端这条缺口对上。
+>
+> **事前是怎么猜到的（留作方法）**：统计 PC 客户端源码里 `UserInfo` 上被读的字段名 ——
+>
+> | 读法 | 次数 |
+> |---|---|
+> | `UserInfo.userDomainId` | **11** |
+> | `UserInfo.authToken` | 3 |
+> | `UserInfo.userid`（**全小写**）| 2 |
+> | `UserInfo.token` / `UserInfo.account` | 各 2 |
+> | `UserInfo.cutoverStatus` | 1 |
+> | `UserInfo.userId`（大写 I）| **0** |
+>
+> `UserInfo.userId` 一次都没被读过；而 `userId` 只作为**请求体**键名出现，
+> 且由 `userDomainId` 赋过去：
+>
+> ```js
+> userId:       window.userDomainId || window.UserInfo.userDomainId || '',
+> userDomainId: window.userDomainId || window.UserInfo.userDomainId || '',
+> ```
+>
+> 事后实测的字段清单与这个统计**完全吻合** —— 连"`userid` 与 `userDomainId`
+> 是两个不同的字段"这一点都对上了。所以"数一数客户端源码读了多少次某字段"
+> 是个可靠的**反推响应字段名**的手法，不用等下一次抓包。
+>
+> ⚠ **别把 `userid`（全小写）当用户域标识**：它在同一份响应里与 `userDomainId`
+> **同时出现、值不同**（`userid` 12 字符、`userDomainId` 19 位）。PC 源码里那两处
+> `fromUserInfo.userid` 读的也是本地镜像（来源是原生账号记录 `userData.userid`），
+> 同样不是响应字段。**不要把它并进用户域标识的兜底链。**
+>
+> 实现侧两条名字都认（`mcloud_capabilities::login::account_and_state_from_login_with_prefix`），
+> 实测命中的是 `userDomainId` 分支。
+>
+> 唯一的剩余差异：PC 客户端**不发** `x-yun-uni` 头（该头是 App 独有），
+> 所以"App 靠这个头拿值"那句话仍不能搬给 PC —— 但**字段名**这条已经对齐了。
 
 本项目实测捕获到的 `authToken`（明文形态，来自设备绑定流程）。
 **下例是等长同结构合成值**：分段数、各段长度、载荷里 `_` 与 `.` 的位置都与实测一致，

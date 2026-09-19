@@ -1,0 +1,716 @@
+# 移动云盘 iOS App 端验证码登录 · 实测抓包样本
+
+> 采集：2026-09-18 22:54-22:56，mCloud_iPhone 12.6.0（iPad 形态）跑在 macOS 上
+> 说明：本文件是 `docs/upstream-app-sms-login.md` 的证据素材。
+> 脱敏原则见 `docs/sanitize-guide.md`：换值不换形（长度 / 分段 / 字符集保持）。
+>
+> **本文件的密文一律是"用同一算法对脱敏明文重新生成"的**，不是抓包原值 ——
+> 抓包里那两条密文的密钥已在本仓库公开，原值贴进来等于把真实号码、`authToken`
+> 一起提交。真实抓包的核对结论以**形状断言 + 活体探针**的形式记在 §6，
+> 那两条证据不泄露任何值。
+
+---
+
+## 0. 采集方法（为什么不是代理抓包）
+
+Reqable（MITM，端口 9000）能看到 TLS 明文，但**看不到登录体的明文** ——
+App 在应用层又套了一层 AES，代理只拿到 hex 密文。真正的突破点是
+**App 自己的网络日志**：
+
+```
+~/Library/Containers/1F157E31-0EE5-40A7-81CE-D20E9704B387/
+  Data/Documents/log/FXTrace2026081208260217.log
+```
+
+`Target_MCAppContext Action_outputNetworkingLog:` 会把**每个请求的完整头集合、
+请求体、响应体**写进这份日志；而 `MCLoginService privateEncryptData:` 在加密**之前**
+把明文 body 单独打了一行（`MCLoginService.m:1238`）。两者对照，
+"明文 → 密文"的映射就白送了。
+
+> 该日志属于 App 容器数据，**不入库**（`har/` 同级的处置：`*.log` 已忽略）。
+
+---
+
+## 1. `POST /user/sms/getSmsCode`（明文，未加密）
+
+```http
+POST https://user-njs.yun.139.com/user/sms/getSmsCode
+Content-Type: application/json;charset=UTF-8
+x-yun-user-timestamp: 1789743328974257
+Pragma: no-cache
+x-yun-app-channel: 10000020
+x-yun-net-type: 1
+x-yun-svc-type: 1
+x-huawei-channelSrc: 10000020
+x-yun-uni: 1990000000000000001
+x-yun-api-version: v1
+x-UserAgent: 412|iPad|ios 26.6|12.6.0-200
+x-yun-client-info: 1|192.168.3.179|2|12.6.0|APPLE|iPad8,6|AAA00000000000000000000000000000|AAA000000000|ipados 26.6|375 * 667|zh-Hans-CN|0.0000|0.0000|aVBhZA==|0|;
+Accept-Language: zh-CN
+hcy-cool-flag: 1
+service_identifier_key: service_identifier_userDomain
+User-Agent: mCloud_iPhone/12.6.0 (iPad; iOS 26.6; Scale/2.00)
+x-DeviceName: aVBhZA==
+x-DeviceInfo: 1|192.168.3.179|2|12.6.0|APPLE|iPad8,6|AAA00000000000000000000000000000|AAA000000000|ipados 26.6|375 * 667|zh-Hans-CN|0.0000|0.0000|;
+x-yun-user-agent: iPad|iPad|ios 26.6|mCloud12.6.0-200
+x-SvcType: 1
+```
+
+**Body（明文，111 字节）**
+```json
+{"mode":"0","phoneNumber":"19900000000","reqType":"3","clientType":"412","random":"qwert","puzzleVerfycode":""}
+```
+
+**Response**（`Duration: 140.15 ms`）
+```json
+{"success":false,"code":"200059554","message":"请先获取滑块拼图验证码","data":{"captchaType":2}}
+```
+
+> `hcy-cool-flag: 1` 这个头**只有 getSmsCode 有**，`thirdlogin` 上没有。
+> 它出现在全部三条 getSmsCode 里，是稳定字段，不是偶发。
+
+### 1.1 `hcy-cool-flag` 在**这个接口上**会换成密文（**重要**）
+
+后续补测（合成号码打真实上游）发现：**在 `/user/sms/getSmsCode` 上**，
+这个头**只要出现**，服务端就改用加密响应，**与取值无关**：
+
+| 请求 | 响应体 |
+| --- | --- |
+| 不带 `hcy-cool-flag` | `{"success":false,"code":"200059554","message":"请先获取滑块拼图验证码","data":{"captchaType":2}}` |
+| `hcy-cool-flag: 1` | `"<192 个 base64 字符>"` —— 裸 JSON **字符串**，不是对象 |
+| `hcy-cool-flag: 0` | 同上 |
+
+> ⚠ **本节的说法（"声明的是响应加密"）在 §1.2 已被修正为"声明的是请求体已加密"**，
+> 且 §1 那条抓包与它矛盾。**往下读之前先看 §1.2 (f)。**
+
+> ⚠ **更正（2026-09-19，见 [`app-api-families.txt`](./app-api-families.txt) §3）**：
+> 这里原先写的是"这个头**只要出现**，服务端就改用加密响应"，
+> **概括过头了**。在**业务接口**上，真实客户端**大量携带**这个头，
+> 响应照样是**明文 JSON** —— 实测 `…/IOutLink/queryRecentFriendLinkList`
+> **5991 / 5991 条**都带 `hcy-cool-flag: 1` 且全部回明文；
+> `hcy/group/manage/*` 同理。整个窗口里"裸 base64 响应"是 **0 条**。
+>
+> 所以：**这一条是逐接口的，不是全局能力声明。**
+> 对 `getSmsCode` 的结论不变（仍然不发它）；但**别因为怕它就拒绝给业务接口带上**。
+
+那串 base64 解码后固定 **144 字节**，且每次请求都不同。已排除的解：
+
+- 不是 `MCLoginCryptoUtil` 那套（AES-ECB + 错位，两个方向都试过）；
+- 不是 `MCStateCryptoHelper` 的 SM4-ECB —— 带上我们自己的
+  `yun-encrypt-index` / `yun-encrypt-key`（SM2 C1C2C3 包裹的 16 字节会话密钥）
+  之后用那把会话密钥解，仍然解不出来；
+- `SecretKeyConfig` 里全部 16/24/32 字节静态密钥 × {AES-ECB, AES-CBC 零 IV,
+  SM4-ECB} × {原序, 反错位} 全部未命中；
+- 响应头里**没有任何密钥**（只有 `x-yun-tid` / `Server: APISIX` 等）。
+
+> 结论：**密钥来源未知**。因此实现侧**主动不发**这个头 ——
+> 发一个自己兑现不了的能力声明，换来的是"服务端回了一个本客户端解不开的响应"；
+> 而**不发**时响应语义与抓包完全一致（同一个 `200059554`）。
+> 这一条记在 `docs/upstream-app-sms-login.md` §7 的缺口里。
+>
+> ⚠ **上面这段在 2026-09-19 深夜被推翻并解开了 —— 见 §1.2。**
+> 结论不是"密钥来源未知"，而是"**我们把它理解反了**"：这个头声明的不是
+> "响应请加密给我"，而是"**我这个请求体是加密的**"。密钥也就藏在二进制里。
+
+---
+
+### 1.2 **已解开**：`hcy-cool-flag` 声明的其实是"请求体已加密"（2026-09-19 深夜补测）
+
+#### (a) 先把"只有描述、没有原始串"这个归档缺口补上
+
+原文只写了"192 个 base64 字符"，**原始串没落盘**。重采后归档于
+`har/hcy-cool-flag-samples.json`（`har/` 已 gitignore）。两条样本的形状：
+
+| 项 | 值 |
+|---|---|
+| 载荷长度 | **固定 144 字节**，每次请求都不同 |
+| 前 16 字节 | **二进制**（如 `994e36ac7f383445d9b733950e46bc90`），**不是** ASCII |
+| 整体可打印占比 | 49/144、61/144 —— 与"纯随机密文"一致（期望 ≈53/144） |
+
+> 注意第一条：`encodeData` 的 IV 是"16 个可打印 ASCII"，这里**不是**。
+> 两个约定长得很像但不是同一个，别互相套。
+
+#### (b) 长度结构对上了 —— 而这给了我们**已知明文**
+
+| 明文形态 | 字节 | PKCS7 | 无前缀总长 | +16 字节前缀 |
+|---|---|---|---|---|
+| 原样 UTF-8 的 JSON | 107 | +5 | 112 | 128 |
+| **`\uXXXX` 转义**的同一份 JSON | **140** | +4 | **144** ✔ | 160 |
+
+只有"**无 IV 前缀 + 明文是 CJK 转义形态**"能凑出 144 —— 但那只是长度线索。
+真正的转折是下一条。
+
+#### (c) 密钥：`uDjGSA8auFlbwDkY`，用**已知明文**暴力命中
+
+`scripts/crack-cool-flag-response.py` 拿二进制里 201124 个 16/24/32 字符候选，
+逐个试 `{AES-ECB, AES-CBC(零 IV / 前 16 / 后 16)}`，判据是"**解密结果里必须出现
+`200059554` 或 `"success"`**"（不是"解出可打印字符"那种弱判据）。唯一命中：
+
+```
+key = "uDjGSA8auFlbwDkY"        ← iOS 二进制里的字符串常量
+```
+
+两条实拍样本用**各自载荷里前 16 字节当 IV** 解出**同一份明文**：
+
+```json
+{"success":false,"code":"01000019",
+ "message":"动态解密错误，错误信息:Illegal base64 character 7b","data":null}
+```
+
+`7b` 就是 `{`。**服务端在试图 base64 解码我们的请求体，而我们的请求体是明文 JSON。**
+于是真相浮出来了：**这个头声明的是"请求体已加密"**，而它回的那条错误**本身也是加密的**。
+
+#### (d) 决定性实验：把请求体也加密发出去
+
+`scripts/probe-hcy-cool-flag.py --phase2`（合成号码，不会给任何真实号码发短信）：
+
+| 用例 | 请求体 | 头 | 响应 |
+|---|---|---|---|
+| A | 明文 | 无 | 明文 `200059554` |
+| B | 明文 | `hcy-cool-flag: 1` | **密文** → `01000019 Illegal base64 character 7b` |
+| C | 明文 | `hcy-ios-option-enc: 1` | 明文 `200059554`（**这个头不触发**） |
+| **D** | **加密** | `hcy-cool-flag: 1` | **密文** → `200059554 请先获取滑块拼图验证码` ✔ |
+| E | 加密 | 无 | 明文 `01000001 参数错误`（不带该头 ⇒ body 按明文解析） |
+| F | 加密 | `hcy-cool-flag` + `hcy-ios-option-enc` | 同 D |
+
+D 是收口的那一条：**服务端不再报 base64 错，而是正常处理并走了业务分支** ⇒
+算法在真服务器上成立（与 `signature` 那次活体探针同一性质）。
+
+#### (e) 完整协议
+
+```
+请求：hcy-cool-flag: <任意值>      ← 声明"body 已加密"；不发则 body 按明文解析
+      body = base64( IV(16 字节，二进制) ‖ AES-128-CBC/PKCS7(
+                       key = "uDjGSA8auFlbwDkY",
+                       iv  = IV,
+                       plain = 请求 JSON 的 UTF-8 字节) )
+
+响应：同一个格式。但**包装有两种**，解析时都要认：
+      · 裸 base64 字符串（172 字符，无 JSON 引号）  ← 正常业务分支
+      · JSON 引号包着的 base64（194 字符）          ← 错误分支
+```
+
+> **与 `encodeData` / `signature` 的关系**：三把钥匙都是硬编码客户端常量
+> （`BOFlEUINUdSugD6u` / `uDjGSA8auFlbwDkY`），彼此独立，别混用。
+> 向量见 `test/golden/app-business-crypto-vectors.json` 的 `hcyCoolFlagEnvelope`（3 条，含 2 条实拍）。
+
+#### (f) ⚠ 一条因果表述被推翻 —— 而且 §1 自己就是反例
+
+§1.1 写的是"**这个头只要出现**，服务端就改用加密响应"。现在这句话有两处不对：
+
+1. **因果反了**：加密的不是"响应"，是**双向**；这个头声明的是**请求体**已加密。
+2. **§1 那条抓包与它矛盾**：§1 的 App 请求**带着** `hcy-cool-flag: 1`、体是**明文**，
+   响应却是**明文** `200059554`。而我们的 B 用同样的组合拿到 `01000019`。
+
+两个候选解释，**都未确认**（不选一个当结论）：
+
+- **服务端灰度**：App 抓包在 2026-09-18 22:54，探针在 09-19 深夜；期间服务端可能才启用这个选项。
+  （支持点：我们 A/B/C 是**同一会话内相隔数秒**做的，所以"该头 → 加密"在当下确实成立。）
+- **§1 的头集合是**并集/整理稿，与那条响应**不是同一个请求**。
+
+> **对实现的影响：零。** 我们**不发**这个头（`docs/upstream-app-sms-login.md` §7），
+> 所以两种解释都不改变任何行为。但这句话必须改掉 —— 它和 §3 那次是**同一个毛病**：
+> 把"某一端、某一时刻的行为"写成了协议常量。
+
+---
+
+## 2. 滑块拼图（`captchaType: 2`）—— App 客户端走 H5 桥接，**但接口本身收第一方答案**
+
+App 客户端在 `200059554` 之后**不重发 getSmsCode**，而是开一个 WebView：
+
+```
+linkUrl = https://yun.139.com/fe/captcha/?data=<base64>
+title   = 安全验证
+content = 滑块拼图正在中验证…
+```
+
+`data` 参数解 base64 后（315 字节）：
+
+```json
+{"headers":{"x-yun-app-channel":"10000020","x-yun-client-info":"1|192.168.3.179|2|12.6.0|APPLE|iPad8,6|AAA00000000000000000000000000000|AAA000000000|ipados 26.6|375 * 667|zh-Hans-CN|0.0000|0.0000|aVBhZA==|"},"captchaType":2,"params":{"clientType":"412","reqType":"3","nationCode":"+86","phoneNumber":"19900000000"}}
+```
+
+关键结论：**H5 页自己带着完整请求头与手机号** —— 也就是说，
+"通过滑块"和"发送短信"这两件事是**同一个 H5 会话里完成的**，
+原生侧只负责开 WebView 并等回调：
+
+```objc
+// MCBaseWebViewController.m:6889  registerHandleWithCaptchaCallback:
+// MCBaseWebViewController.m:6897  ..._block_invoke
+H5发起hcy_captcha_callback参数 :{ msg = 获取验证码成功; code = 200; }
+```
+
+原生侧收到 `code == 200` 就关掉 WebView 并提示"验证码已发送"
+（`MCSMSAndPasswordLoginViewController.m:2301 getSMSPasswordCallBack:`）。
+
+> **实测缺口（如实记录）**：本次抓包里三条 `getSmsCode` 的 `puzzleVerfycode`
+> **全是空串** —— 通过滑块之后短信是 H5 发的，原生侧没有第二次 getSmsCode，
+> 所以**没有拿到非空 `puzzleVerfycode` 的样本**。字段存在、类型是 string、
+> 长度未知。实现侧据此只把它做成"可传入的参数"，不做任何猜测性编码。
+
+### 2.1 **补测结论（2026-09-19 实测）：这个字段就是纯协议通路的入口，已跑通**
+
+上面那条"缺口"是**客户端行为**的缺口，不是**协议能力**的缺口。
+后续用活体探针补齐，结论是 **App 端完全可以不用浏览器发码**：
+
+| `puzzleVerfycode` | 响应 |
+| --- | --- |
+| 空串（App 客户端的现状）| `200059554` 请先获取滑块拼图验证码 |
+| **非空**（任意形态）| 服务端**不再回 `200059554`** —— 它确实会去处理这个字段 |
+
+也就是说：**填上它，服务端就走另一条分支**。App 客户端只是从不尝试。
+
+#### 关键前提：App 主机上就有**第一方**滑块取图接口
+
+```
+POST https://user-njs.yun.139.com/user/verfycode
+{"account":"<手机号>","type":2}
+```
+
+**裸请求即可** —— 不需要 `Authorization`、不需要设备头、不需要 `x-yun-tid`。
+（`base::USER_YUN` 与 App 的 `getSmsCode` 是**同一个主机**，所以这不是"跨端借用接口"。）
+
+响应（与 PC 端逐字段一致）：
+
+```json
+{"success":true,"code":"0000","message":"请求成功","data":{
+  "puzzle":"<base64>","puzzleWidth":"96",
+  "picture":"<base64>","picWidth":"680","picHeight":"400","picType":"png",
+  "puzzleLeft":"<base64，32 字节>"}}
+```
+
+`type` 参数实测：`1` → `0000` 但 `data` 为空；`2` → 滑块题；`3` → `9103 图形验证码类型错误`。
+
+#### 答案不需要图像识别 —— 服务端把它加密后直接给了
+
+`puzzleLeft` 是 `base64(IV ‖ AES-128-CBC/PKCS7 密文)`，**前 16 字节就是 IV**，
+密钥是客户端里那个硬编码公开常量 `CREATPUZZLE03F9A`。解开就是拖动答案（实测 `241` / `466`，
+都落在 `picWidth = 680` 之内）。
+
+#### 完整通路（已跑通，返回 `success:true`）
+
+```
+1. POST /user/verfycode  {"account": <手机号>, "type": 2}      ← 裸请求
+2. IV = base64解码(puzzleLeft)[:16]
+   answer = AES-128-CBC_decrypt("CREATPUZZLE03F9A", IV, 其余部分) 去掉 PKCS7
+3. puzzleVerfycode = base64( FIXED_IV ‖ AES-128-CBC/PKCS7(
+        "CREATPUZZLE03F9A", FIXED_IV, answer ) )
+   其中 FIXED_IV = "E526E1F3F9765444"（**与上面那个 IV 不是同一个**，见下）
+4. POST /user/sms/getSmsCode
+   {"mode":"0","phoneNumber":<手机号>,"reqType":"3","clientType":"412",
+    "random":"qwert","puzzleVerfycode": <第 3 步的结果>}
+```
+
+第 4 步实测响应：
+
+```json
+{"success":true,"code":"0000","message":"请求成功",
+ "data":{"regFlag":null,"mode":"0","remainGetTimes":8,
+         "verifyCode":null,"encrptVerifyCode":null,"objNumber":null}}
+```
+
+**短信确实发出去了**（`remainGetTimes` 是配额余量）。全程没有浏览器、没有阿里云、
+没有一次像素计算。
+
+> **两个 IV 不是一回事，这是最容易搞错的地方**：
+> **取题**响应的 `puzzleLeft` 用**动态 IV**（就藏在自己的前 16 字节里）；
+> **提交**答案的 `puzzleVerfycode` 用**固定 IV** `E526E1F3F9765444`。
+> 实测把提交侧也换成动态/随机 IV 会失败。
+
+#### 与 PC 端的关系：**编码完全一样，只是 `clientType` 不同**
+
+所以这不是新协议 —— 是**同一个第一方滑块**，PC 链路（`/user/verfycode` +
+`puzzle_verfycode_encrypt`）的实现在 App 链路上**直接可用**，
+只要把请求头换成 App 的、`clientType` 用 `412`。
+
+#### 和阿里云那套的区别（**两回事，别混**）
+
+| | `/user/verfycode`（本节）| `yun.139.com/fe/captcha/`（§2 上文）|
+| --- | --- | --- |
+| 谁的 | **中国移动自研** | **阿里云验证码 2.0**（第三方 SaaS）|
+| 答案 | 服务端加密后给出，解开即可 | 像素对齐 + 行为轨迹，判题在阿里云侧 |
+| 需要浏览器 | **不需要** | 需要 |
+| 用在哪 | **App 发码的纯协议通路** | App 客户端的 H5 兜底路径 |
+
+#### 错误码语义（实测，用来判别）
+
+| 码 | 含义 | 怎么触发 |
+| --- | --- | --- |
+| `200059554` | 请先获取滑块拼图验证码 | `puzzleVerfycode` 为空 |
+| `9103` | 输入参数不合法 | `puzzleVerfycode` **非空但没有对应的活挑战**（伪造/过期答案）|
+| `200059553` | 同一滑动拼图验证码在单位时间内校验失败次数超限 | **失败会被计数** |
+| `0000` | 成功，短信已发 | 新题 + 正确坐标 + 正确编码 |
+
+> ⚠ **`200059553` 是一条硬约束**：这个接口**计失败次数**，
+> 拿伪造答案反复试探会把自己试进限流。补测时踩到过一次。
+> 所以别"暴力试编码" —— 每次都要取**新题**并用**解出来的真坐标**。
+
+### 2.2 **端到端真机登录成功（2026-09-19 08:39）**
+
+§2.1 那条通路走完之后，接着把后半程（`thirdlogin`）也跑通了 ——
+**全程没有开浏览器、没有阿里云、没有像素计算**：
+
+```text
+$ mcloud login sms --client app --phone <11 位> --send-only
+验证码已发送（今日剩余 7 次）
+（被风控要求滑块，已取图解出缺口坐标并自动重发 —— 全程没有开浏览器）
+本次设备短标识（继续时用 --device-short 传回）：781E8D5EE75D
+
+$ mcloud login sms --client app --phone <11 位> \
+      --device-short 781E8D5EE75D --code <6 位>
+登录成功，账号已保存：19****16
+登录返回的字段：account, areaCode, atExpiretime, authToken, belongsPlatform,
+cutoverStatus, deviceid, expiretime, hasChangeAccount, loginRequestVersion,
+nationCode, provCode, routerInfo, serverinfo, token, userAssetFlag,
+userDomainId, userExtInfo, userid
+```
+
+落库核对（`data/mcloud.db`）：
+
+| 列 | 值 |
+|---|---|
+| `accounts.platform` | `mobile` |
+| `accounts.auth_expire` | 登录时刻 **+30 天**（与 PC 扫码那次一致）|
+| `account_state.jwt_token` | **201** 字符（与 §3.4 记录的形状一致）|
+| `account_state.device_id` | 32 位大写 hex（= `x-DeviceInfo` 里的设备 UUID）|
+| `account_state.user_domain_id` | **有值**，19 位 —— §7.4 那个"首次登录拿不到"的疑问就此收口 |
+
+**两条附带结论：**
+
+1. **`9441` 的准确含义再次被确认**：第一次提交（`956732`，未钉 `--device-short`）
+   回 `9441`。它**不是**"加密错了" —— 加密全对、只是这条码配不上一个活的挑战。
+   第二次换新码 + 把 `--device-short` 钉回发码那次的 `781E8D5EE75D` 就成功了。
+   ⚠ **但这两处同时变了，所以无法归因**：码过期与设备形态不一致都可能是原因。
+   要分清得再单独试一次（钉住 device-short、用一个故意过期的码）。
+2. **响应里没有 `userId`** —— 只有 `userDomainId`（19 位）与 `userid`（12 字符，
+   §3.4 已记）。这条同时收口了 PC 端"`userInfo` 里没有 `userId`"的老缺口，
+   详见 [`../upstream-login-protocol.md`](../upstream-login-protocol.md) §5。
+
+
+---
+
+## 3. `POST /user/thirdlogin`（加密体）
+
+### 3.1 加密前的明文（`MCLoginService.m:1238` 打印，186 字节）
+
+```json
+{"cpid":"55","extInfo":{"ifOpenAccount":"1"},"dycpwd":"429344","pintype":"8","loginMode":"0","verType":"1","version":"12.6.0","msisdn":"19900000000","random":"hOjseB","clienttype":"412"}
+```
+
+### 3.2 请求头全集
+
+```http
+POST https://user-njs.yun.139.com/user/thirdlogin
+Content-Type: application/json;charset=UTF-8
+x-yun-user-timestamp: 1789743362439040
+Pragma: no-cache
+x-yun-app-channel: 10000020
+x-yun-net-type: 1
+x-yun-svc-type: 1
+x-huawei-channelSrc: 10000020
+x-yun-uni: 1990000000000000001
+x-yun-api-version: v1
+x-UserAgent: 412|iPad|ios 26.6|12.6.0-200
+x-yun-client-info: 1|192.168.3.179|2|12.6.0|APPLE|iPad8,6|AAA00000000000000000000000000000|AAA000000000|ipados 26.6|375 * 667|zh-Hans-CN|0.0000|0.0000|aVBhZA==|0|;
+Accept-Language: zh-CN
+service_identifier_key: service_identifier_userDomain
+User-Agent: mCloud_iPhone/12.6.0 (iPad; iOS 26.6; Scale/2.00)
+x-DeviceName: aVBhZA==
+x-DeviceInfo: 1|192.168.3.179|2|12.6.0|APPLE|iPad8,6|AAA00000000000000000000000000000|AAA000000000|ipados 26.6|375 * 667|zh-Hans-CN|0.0000|0.0000|;
+x-yun-user-agent: iPad|iPad|ios 26.6|mCloud12.6.0-200
+x-SvcType: 1
+```
+
+> **没有 `yun-encrypt-index` / `yun-encrypt-key`**。
+> 那两个头是 `MCStateCryptoHelper` 给**别的**接口（SM2 包裹 + SM4-ECB）加的，
+> 登录链路**不走那条路**。照"看到 yun-encrypt-* 就上国密"的直觉写会得到 9103。
+
+### 3.3 请求体（密文，384 个十六进制字符 = 192 字节）
+
+用 §5 的算法对 §3.1 的**脱敏**明文重新生成（非抓包原值）：
+
+```
+2584e02d73b549d837f9fa6e4bdd4968c816497fba1be0770aeba9d7249a928db623ee6b11f26284588aa8dd943fdca3a5e7d21a36fdc347dbf16e1a2d0d55f23c77b1409ad5afff5600844ded9a613635003471e71be8e07b9b7fb8bbd14639e90ffa9716c22fb01670ee5b4b208efc0d59a0b16c087688ad5fd68561af8860b1e1d93ad7d00150cdb6bac04a3cc792a05347c7813afd2e06ca996da52959d7bc92881e4584c088cf7b01dc35341927e92c11d7e66e76c1625228a8d84c0eb0
+```
+
+> 长度规律：`hex_len = 32 * ceil((pt_len + 1) / 16)`。
+> 186 字节明文 → 192 字节密文 → 384 字符。密文是**小写** hex，
+> 而 `yun-encrypt-key`（另一条链路）是**大写** —— 两边风格不同，别统一。
+
+### 3.4 响应
+
+```json
+{"success":true,"code":"0000","message":"请求成功","data":"<13632 个十六进制字符>"}
+```
+
+`data` 是**密文**（6816 字节），不是明文 JSON。用 §5 的算法解出来是：
+
+```json
+{"account":"19900000000","areaCode":"023","atExpiretime":2592000,"authToken":"SYNTHTKN|1|RCS|1792335362968|SYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHS.NT.SYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNTHSYNT_SYNTHSYNTHS-","belongsPlatform":2,"cutoverStatus":1,"deviceid":"AAA00000000000000000000000000001","expiretime":"2592000","hasChangeAccount":0,"loginRequestVersion":"v2","nationCode":"+86","serverinfo":{"pingurl":"http://112.33.119.238:80"},"userAssetFlag":0,"userDomainId":"1990000000000000001","userExtInfo":[{"passID":"1990000001"}],"userid":"SYNTH0000001"}
+```
+
+字段形状（**原样保留**，这是写实现要用的部分）：
+
+| 字段 | 类型 | 实测值形态 |
+| --- | --- | --- |
+| `account` | string | 11 位手机号（**与请求的 `msisdn` 一致**，服务端回显） |
+| `areaCode` | string | 3 位区号，由号码归属地决定（**不是**客户端传的） |
+| `atExpiretime` | number | `2592000`（30 天，秒） |
+| `expiretime` | string | `"2592000"` —— 与上一个**同值不同型**，别合并 |
+| `authToken` | string | 201 字符，`前缀\|1\|RCS\|13 位毫秒\|载荷`，载荷内 `.` ×2、`_` ×1、尾 `-` |
+| `belongsPlatform` | number | `2` |
+| `cutoverStatus` | number | `1` |
+| `deviceid` | string | 32 位**大写** hex（与请求头里的设备 UUID 不同，是服务端侧的） |
+| `hasChangeAccount` | number | `0` |
+| `loginRequestVersion` | string | `"v2"` |
+| `nationCode` | string | `"+86"` |
+| `serverinfo.pingurl` | string | 长连接探测地址 |
+| `userAssetFlag` | number | `0` |
+| `userDomainId` | string | 19 位数字串 —— **就是请求头 `x-yun-uni` 的值** |
+| `userExtInfo[].passID` | string | 10 位数字串 |
+| `userid` | string | 12 字符 |
+
+> 成功响应还带 `routerInfo` 数组（`modName` = `personal` / `file-agent` / `shared`，
+> 每项含 `hashName` / `httpUrl` / `httpsUrl`），本文件从略 —— 它在**登录后**的
+> 接口寻址里才用得上，不属于登录链路的输入。
+
+### 3.5 登录之后的鉴权头：`Authorization = mobile:…`（**同一份日志里挖出来的**）
+
+`thirdlogin` 这条链路本身**不带** `Authorization`（见 §3.2）。但 App 的日志是**滚动**的，
+同一份文件里还有大量**已登录**的请求（97 个不同接口），它们给出了这个头的真身：
+
+```http
+Authorization: Basic bW9iaWxlOjE5OTAwMDAwMDAwOlNZTlRIVEtOfDF8UkNTfDE3OTIzMzUzNjI5Njh8…
+```
+
+解 base64 得到 **三段**：
+
+```text
+mobile : 19900000000 : SYNTHTKN|1|RCS|1792335362968|<172 字符载荷>
+  ↑         ↑            ↑
+ 前缀     手机号       authToken（与 §3.4 响应里那个**逐字相同**）
+```
+
+三个要点：
+
+1. **前缀是 `mobile`，PC 端是 `pc`** —— 两端的 `authToken` 形状完全一样
+   （`前缀|1|RCS|13 位毫秒|载荷`），只有这一段字面量不同。写实现时它必须**按端**给，
+   不能做成"默认 `pc`"。
+2. **未登录时也带这个头**，三段全是占位：
+   ```http
+   Authorization: Basic bW9iaWxlOihudWxsKToobnVsbCk=   →   mobile:(null):(null)
+   ```
+   字面量 `(null)`（不是 JSON `null`、不是空串）。
+3. 统计口径：同一份日志里 `Authorization` 出现 **1076** 次，解码后**全部**是
+   `mobile:<手机号>:<authToken>`，没有第二种形态。
+
+#### 已登录请求的**头超集**（比登录链路多出来的部分）
+
+登录链路的 16 个头之外，业务接口还带这些 —— 记下来是为了下一批抓包不用重来：
+
+| 头 | 实测形态 | 备注 |
+| --- | --- | --- |
+| `version` | `V1.0` | 与请求体里的 `version`（`12.6.0`）**不是一回事** |
+| `clientId` | `iosapp` | |
+| `authType` | `1` | |
+| `anonymous` | `0` | 未登录时是 `1` |
+| `timeStamp` | 13 位（**毫秒**） | **注意与 `x-yun-user-timestamp`（16 位微秒）不同** —— 同一个请求里两个时间单位 |
+| `msgId` | 32 位小写 hex | 每请求一个 |
+| `signature` | 64 位小写 hex | 算法**未解**（见 §7 缺口） |
+| `service_identifier_key` | 见下 | **按服务变**，不是全局常量 |
+
+`service_identifier_key` 在同一份日志里出现过 **4 个**取值：
+`service_identifier_userDomain`（登录链路用这个）、`service_identifier_caixun`、
+`service_identifier_cloudDisk`、`service_identifier_recommend`。
+也就是说它是**接口级**的旋钮，实现时不能钉成一个端常量。
+
+#### 顺带发现的：业务接口的请求体也加密
+
+业务接口（如 `aiAssistant/iconConfig/query`）的体里有 `encodeData` 字段，值是
+`"SGZ5R2tpU2hEc1kwM1ZUYbMn8QOTm2rzardIKTK//gA="` 这类 base64 —— 那是**另一套**
+（与登录链路的 `MCLoginCryptoUtil` 不同，且**没有** `yun-encrypt-*` 头）。
+它属于"核心域 / 活动域"那几批抓包的题目，**不在本文范围内**，此处只记位置。
+
+---
+
+## 4. 时序（同一次操作，毫秒级）
+
+| 时刻 | 事件 |
+| --- | --- |
+| 22:54:52.909 | 点"获取验证码" → `POST getSmsCode` |
+| 22:54:52 → 22:55:23 | **超时**：`NSURLErrorDomain -1001`，30.4 s 无响应 |
+| 22:55:28.980 | 重试 `getSmsCode`（body 与首次**逐字节相同**） |
+| 22:55:29.113 | `200` `200059554` 请先获取滑块拼图验证码（140.15 ms） |
+| 22:55:29.186 | `registerHandleWithCaptchaCallback:` 注册 `hcy_captcha_callback` |
+| 22:55:29.313 | WebView 载入 `https://yun.139.com/fe/captcha/?data=…` |
+| 22:55:48.773 | H5 回调 `{msg = 获取验证码成功; code = 200;}`（**相隔 19.5 s** = 人手拖动） |
+| 22:56:02.438 | `LoginManager loginWithAccount:…LoginWay:1` |
+| 22:56:02.440 | `MCLoginService privateEncryptData:` 打印明文 body |
+| 22:56:02.441 | `POST thirdlogin` 发出（249.06 ms 后 200） |
+| 22:56:02.697 | `loginUserDomain success:` 拿到会话 |
+
+两点值得注意：
+
+1. **首次 getSmsCode 会超时**。客户端**不弹错**、不自动重试，是用户又点了一次。
+   实现侧如果要复刻体验，超时阈值得 ≥30 s，且**不要**在超时后自行重发。
+2. 滑块那 19.5 s 是纯人工时间，**不是**接口耗时 —— 别把它算进协议时序。
+
+---
+
+## 5. 加密算法（`MCLoginCryptoUtil`，反汇编实证）
+
+```
+请求体 = 错位10( AES-128-ECB/PKCS7( key, 明文UTF-8 ).hex() )
+响应体 = AES-128-ECB/PKCS7 解密( key, 反错位10( data ) )  →  UTF-8 JSON 去 PKCS7
+
+错位10(x) = x[末尾10个字符] + x[其余]        // 末 10 位挪到最前
+反错位10(x) = x[去掉前10个字符] + x[前10个字符]
+key = "lYzvvBMUjucw+h^R"                     // 16 字节 ASCII → AES-128
+备用 key = "+09T5lHhO+smS7x@"                // isCurrentEnvironment = NO 分支
+```
+
+反汇编依据（`-[MCLoginCryptoUtil privateEncrypt:isCurrentEnvironment:]` @ `0x1035F2388`）：
+
+```objc
+out = [self AESEncrypt:text isCurrentEnvironment:env];   // 0x1036553c0 → 该方法
+p    = MAX(out.length, 10) - 10;
+a    = [out substringFromIndex:p];   // 0x103884000 → substringFromIndex:
+b    = [out substringToIndex:p];     // 0x103884040 → substringToIndex:
+return [NSString stringWithFormat:@"%@%@", a, b];          // 格式串就是 @"%@%@"
+```
+
+`+[MCLoginCryptoUtil AESEncrypt:isCurrentEnvironment:]` @ `0x1035F2578`：
+
+```objc
+key = isCurrentEnvironment ? @"lYzvvBMUjucw+h^R" : @"+09T5lHhO+smS7x@";
+[key getCString:buf maxLength:33 encoding:NSUTF8StringEncoding];
+data = [text dataUsingEncoding:NSUTF8StringEncoding];
+CCCrypt(kCCEncrypt, kCCAlgorithmAES,
+        kCCOptionPKCS7Padding | kCCOptionECBMode,   // w2 = 3
+        buf, 16, NULL, data.bytes, data.length, out, out.length + 16, &moved);
+return [self hexStringFromData:...];                 // 0x103711880
+```
+
+`-[MCLoginCryptoUtil privateDecrypt:isCurrentEnvironment:]` @ `0x1035F2488` 是它的逆：
+长度 <11 直接返回空串，否则前 10 位挪到末尾，再交给
+`+decodeUserLoginData:isCurrentEnvironment:`（@ `0x1036be0a0`）。
+
+> 三个 selector 是用 `__objc_stubs` 里的机器码解出来的，不是靠猜 ——
+> 反汇编里 `substringFromIndex:` / `substringToIndex:` **很容易认反**，
+> 认反了错位方向就反了，表现为服务端返回 `9103`。
+
+---
+
+## 6. 两条"不泄露值"的硬证据
+
+### 6.1 形状断言
+
+| 断言 | 实测 |
+| --- | --- |
+| 请求明文长度 | 186 字节（`MCLoginService.m:1238` 那行日志直接可数） |
+| 请求密文长度 | 384 字符 / 192 字节 = `16 × ceil(187/16)` ✔ 与 PKCS7 一致 |
+| 响应 `data` 长度 | 13632 字符 / 6816 字节，是 16 的整数倍 ✔ |
+| 响应解密后 PKCS7 填充 | 末 11 字节全是 `0x0b` ✔ 合法填充 |
+| 响应解密后 | 合法 UTF-8 JSON，顶层键齐全 ✔ |
+
+### 6.2 活体探针（决定性）
+
+用**合成号码**（`199` 号段）打真实上游，只看错误码：
+
+| 送出的体 | 上游响应 | 含义 |
+| --- | --- | --- |
+| 明文 JSON | `9103 输入参数不合法` | 服务端解不开 → 必须加密 |
+| AES-ECB + 错位10，**key = `+09T5lHhO+smS7x@`** | `9103 输入参数不合法` | 密钥选错，同样解不开 |
+| AES-ECB + 错位10，**key = `lYzvvBMUjucw+h^R`** | **`9441 验证码不正确`** | **服务端解密成功**，只是码不对 |
+
+`9441` 是关键：它只可能在"参数已正确解析、进入业务校验"之后出现。
+换成任一错误参数都会退回 `9103`，所以这是一个**二值判别器**，
+不需要成功登录就能证明算法、密钥、错位方向、hex 大小写全部正确。
+
+---
+
+## 7. 与 PC 端的差异（同一接口，两套形状）
+
+| | PC 客户端 | iOS App |
+| --- | --- | --- |
+| `pintype` | `21` 扫码 / `5` 短信 / `9` 账密 | **`8`** |
+| `clienttype` | `656`(Win) / `710`(Mac) | **`412`** |
+| `cpid` | `277`(Win) / `332`(Mac) | **`55`** |
+| `version` | `8.8.6.20260829` / `4.2.1` | **`12.6.0`** |
+| 额外字段 | — | `loginMode` / `verType` / `extInfo` / `random` |
+| `dycpwd` | 短信码明文；账密为 `SHA1` 大写 hex | 短信码明文 |
+| 请求体 | **明文 JSON** | **AES-ECB + 错位10 的 hex** |
+| 响应 `data` | AES-ECB hex（**无错位**） | AES-ECB hex **+ 错位10** |
+| 响应解密 key | `qPqDw263XgFgL3u8` | `lYzvvBMUjucw+h^R` |
+| `service_identifier_key` | 无 | `service_identifier_userDomain` |
+| `x-yun-uni` | 无 | = `userDomainId`（登录前就已带上） |
+| 设备头 | `x-yun-client-info` + `x-DeviceInfo` + `x-MM-Source` | `x-yun-client-info` + `x-DeviceInfo` + `x-DeviceName` + `x-yun-user-agent` |
+
+> 注意 `qPqDw263XgFgL3u8`（PC 用）与 `lYzvvBMUjucw+h^R`（App 用）**不是同一个密钥**，
+> 虽然它们在 App 的 `SecretKeyConfig` 里分别叫
+> `MCLoginServiceDecode_Release_Key` 与另一条 App 内硬编码常量。
+> 把 PC 的密钥搬到 App 路径上，会得到 `9103`。
+
+---
+
+## 9. 附：同一份日志里的接口盘点（**下一批抓包的地图**）
+
+> **后续（2026-09-19）**：这份盘点来自当时那个窗口，而日志是**滚动覆盖**的。
+> 等真正开始下一批时，本表里的 `user/auth/refreshToken`（24 次）**已经滚掉了**，
+> 签到接口也从 21 次掉到 2 次。**这张表要当"曾经出现过什么"读，不是"现在能抓到什么"。**
+> 另外，后来把窗口里的请求按形态归了类，发现 **App 有互斥的两套请求形态**
+> （`x-yun-uni` 族 vs `signature` 族），而本表没有体现这一点 ——
+> 那部分见 [`app-api-families.txt`](./app-api-families.txt)（含批 1 的可行路径）。
+
+本文的主线是登录，但挖出 §3.5 的那份日志里其实还有**整个 App** 的流量。
+趁它还在，先把接口盘点记下来 —— 这样后面按 `docs/rust-rewrite-plan.md` §7.1
+分批抓包时，不用再从零摸一遍。
+
+统计口径：日志里 `API Name:` 行去重后 **97 个**不同接口。
+
+**出现频次最高的 25 个**：
+
+| 次数 | 接口 | 属于哪一域 |
+|---|---|---|
+| 117 | `adv-filter/AdInfoFilter/getAdInfos` | 活动/广告 |
+| 64 | `adv-filter/advertReported/reported` | 活动/广告 |
+| 37 | `/isbo/openApi/queryUserGroupMessageCnt` | 消息 |
+| 31 | `richlifeApp/devapp/ILog` | 埋点 |
+| 30 | `user/querySpecTokenV2` | 用户 |
+| 27 | `cloudSEE/openApi/queryRights` | 权益 |
+| 26 | `adv-config/AdInfoFilter/getAdInfos` | 活动/广告 |
+| 25 | `mcloud-log-api/statistic/appInfo` | 埋点 |
+| 25 | `hcy/group/manage/message/msgCenterStatus` | 消息 |
+| 24 | `user/auth/refreshToken` | **鉴权（刷新）** |
+| 21 | `richlifeApp/devapp/IOutLink/queryRecentFriendLinkList` | 分享 |
+| 21 | `market/signin/page/pointsNotClaimed` | 签到 |
+| 20 | `user/getUser` | 用户 |
+| 20 | `/file/checkExists` | **文件** |
+| 20 | `/adv-filter/AdInfoFilter/batchGetAdInfos` | 活动/广告 |
+| 19 | `general/getStatus` | 通用 |
+| 16 | `mc-client-service/openapi/letter/query` | 消息 |
+| 16 | `isbo2/openApi/queryAvailableBenefit` | 权益 |
+| 15 | `config/getValByKey` | 配置 |
+| 15 | `adv-filter/AdInfoFilter/batchGetAdInfoList` | 活动/广告 |
+| 14 | `uaAndPrivacyPolicy/userAgreeQuery` | 协议 |
+| 14 | `personal/v2/base/share/message/unread` | 分享 |
+| 13 | `toolBox/load/recommend` | 工具 |
+| 12 | `uaAndPrivacyPolicy/queryPolicy` | 协议 |
+| 12 | `resource/getResourceConfig` | 配置 |
+
+几个对实现有直接影响的观察：
+
+1. **`user/auth/refreshToken` 出现 24 次** —— 刷新链路是高频路径，且**它必然带
+   `Authorization`**。也就是说"App 的鉴权头"这件事在日志里有大量样本，
+   §3.5 只用了其中最基础的一条。
+2. **`service_identifier_key` 的 4 个取值**（`_userDomain` / `_caixun` / `_cloudDisk` /
+   `_recommend`）说明接口是按"服务"分组的 —— 接新接口时要先确认它属于哪个服务，
+   而不是套一个全局常量。
+3. 多个接口的 host 不是 `*.yun.139.com`（有 `middle.yun.139.com`、
+   `ad.mcloud.139.com`、`caiyun.feixin.10086.cn`、`ypqy.mcloud.139.com`），
+   说明基址也不是一个常量。
+4. **业务接口的体带 `encodeData`**（见 §3.5 末尾）—— 这批接口的加密**不是**
+   登录那套，接它们之前需要先把 `encodeData` 解开。
+
+> 与登录链路的**关系**：以上都不在登录链路的输入里，但都在登录**之后**。
+> 所以正确的顺序仍是先有可用的登录态（本文这条链路），再分批解这些接口。

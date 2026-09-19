@@ -24,6 +24,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod app_login;
 pub mod device;
 pub mod login;
 pub mod migration;

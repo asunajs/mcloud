@@ -1,0 +1,264 @@
+# 移动云盘 iOS App：业务接口的两套请求形态（下一批抓包的前置）
+
+> 状态：**已实测**。来源 = App 自己的网络日志（`scripts/applog-capture.py`）。
+> 采集窗口 2026-09-19 06:26:06 → 08:16:10（5 文件 / 43.8 MB / **12243 条配对**）。
+> 快照留在 `har/applog-2026-09-19-0842/`（gitignore，随时会被挤掉）。
+> 依据 `docs/rust-rewrite-plan.md` §7.0：本文只记实测；**推断一律显式标注**。
+
+---
+
+## 0. 采样口径（先看这节，否则会得出错的结论）
+
+| 项 | 值 |
+|---|---|
+| 配对总数 | 12243 |
+| **其中两条空转轮询** | **12140（99.2%）** |
+| 其余全部端点合计 | 103 条，覆盖 **25 个**不同端点 |
+| 其中带**真实响应**的 | 约 60 条 |
+
+两条轮询占了 99.2% 的体积：
+
+| 条数 | 端点 |
+|---|---|
+| 6149 | `middle.yun.139.com/openapi/toolBox/load/recommend` |
+| 5991 | `share-kd-njs.yun.139.com/yun-share/richlifeApp/devapp/IOutLink/queryRecentFriendLinkList` |
+
+⚠ **窗口不到 2 小时**（5×10 MB 滚动覆盖）。上一次盘点（`app-sms-login-samples.txt` §9）
+里的 `user/auth/refreshToken`（24 次）在本次窗口里**已经滚掉了**，
+`market/signin/page/pointsNotClaimed` 也从 21 次掉到 **2 次**。
+**别把"这次没看到"当成"这个接口不存在"。**
+
+⚠ 另一个坑：带 `Status: 0` 且耗时恰好 **30000 ms** 的，是**没拿到响应（超时）**，
+不是"HTTP 0"。本次窗口里大部分非轮询请求都是这种 —— 只有 60 条左右是真响应。
+
+---
+
+## 1. 结论：App 里有**两套互斥的请求形态**
+
+统计口径：12243 条按 `(signature?, x-yun-uni?, encodeData?)` 分类。
+
+| `signature` | `x-yun-uni` | 体带 `encodeData` | 条数 |
+|---|---|---|---|
+| ✗ | **✓** | ✗ | **6062** |
+| **✓** | ✗ | **✓** | **6158** |
+| **✓** | ✗ | ✗ | 7 |
+| ✗ | ✗ | ✗ | 16 |
+
+**三条硬规则（本次 12243 条零反例）：**
+
+1. **体带 `encodeData` ⟹ 头有 `signature`**
+2. **头有 `signature` ⟹ 头里没有 `x-yun-uni`**
+3. **头有 `x-yun-uni` ⟹ 体里没有 `encodeData`**
+
+也就是说，**登录链路学到的那套头（`x-yun-uni` + `x-yun-*`）只覆盖形态 A**；
+形态 B 是另一套，两者不混用。
+
+### 形态 A —— `x-yun-uni` 家族（**明文体，可直接实现**）
+
+| 端点 | 主机 | 备注 |
+|---|---|---|
+| `market/signin/page/pointsNotClaimed` | `caiyun.feixin.10086.cn:7071` | **签到**，GET，明文响应 |
+| `isbo2/openApi/queryUserBenefits` | `ypqy.mcloud.139.com` | 权益，明文请求体 |
+| `isbo2/openApi/queryAvailableBenefit` | `ypqy.mcloud.139.com` | 权益，明文请求体 |
+| `hcy/group/manage/message/msgCenterStatus` | `group.yun.139.com` | 消息 |
+| `hcy/group/manage/subscribe/remind/list` | `group.yun.139.com` | 消息 |
+| `adv-filter/…/AdInfoFilter/getAdInfos` | `ad.mcloud.139.com` | 广告 |
+| `market/api/message/notify` | `mrp.139.com` | 消息 |
+| `recommend/portal/getRecommendList` | `portal-njs.yun.139.com` | 推荐 |
+| `mcloud-log-api/statistic/appInfo` | `ael.yun.139.com` | 埋点（**无 `x-yun-uni`**）|
+| `rsv/deviceBind` | `pnsmsg-svr.mail.10086.cn:8443` | 推送设备绑定 |
+| `richlifeApp/devapp/ILog` | `ose.caiyun.feixin.10086.cn` | 埋点 |
+
+形态 A 的头（以签到那条为例，与登录链路基本一致，**多出 3 个头**）：
+
+```
+x-yun-uni: <19 位>                  ← 值 = 登录响应里的 userDomainId
+x-yun-user-timestamp: <16 位微秒>
+x-yun-app-channel: 10000020          ← 登录链路没有
+x-huawei-channelSrc: 10000020        ← 登录链路没有
+x-yun-net-type: 1  /  x-NetType: 1
+x-yun-svc-type: 1  /  x-SvcType: 1
+x-UserAgent: iPad|iPad|ios 26.6|mCloud12.6.0-200
+x-yun-user-agent: 同上
+x-DeviceName: aVBhZA==
+x-DeviceInfo: 1|192.168.3.179|2|12.6.0|APPLE|iPad8,6|<uuid32>|<short12>|ipados 26.6|375 * 667|zh-Hans-CN|0.0000|0.0000|
+Content-Type: text/xml;charset=UTF-8   ← GET 且无体，却是 xml —— 照抄，别"修正"
+Authorization: Basic base64("mobile:<手机号>:<authToken>")   ← 302 字符
+```
+
+### 形态 B —— `signature` 家族（`middle.yun.139.com` / `grdt.yun.139.com`）
+
+```
+POST https://middle.yun.139.com/openapi/general/getStatus
+  version: V1.0            （也有 V1.1，随接口）
+  businessId: 600          （只有部分接口有）
+  clientId: iosapp
+  authType: 1
+  anonymous: 0
+  service_identifier_key: service_identifier_caixun
+  timeStamp: 1789802371479
+  msgId: <32 位 hex>       ← **响应会原样回同一个 msgId**
+  signature: <64 字符>     ← 算法未知（`Utils.createSignature()`，在未归档的 utils.js 里）
+  x-yun-user-timestamp: 1789773571479946
+  Authorization: <302 字符>
+  x-DeviceInfo: 同形态 A
+  User-Agent: mCloud_iPhone/12.6.0 (iPad; iOS 26.6; Scale/2.00)
+体：{"userId":"<19 位>","businessType":"aiMessageGroup"}     ← **明文！**
+响应：{"resultCode":200,"resultMsg":"success","resultData":{"status":0},
+       "msgId":"<与请求同值>","success":true,"code":"200"}
+```
+
+> **重要**：形态 B **不等于**"加密" —— `general/getStatus` 带 `signature` 却是**明文体**。
+> `encodeData` 只是形态 B 里的**可选项**（6165 条形态 B 里 6158 条带它）。
+
+> **顺带验证了文档里那个时间偏移**：`timeStamp / 1000` 与 `x-yun-user-timestamp / 1000`
+> 相差正好 **28800000 ms = 8 小时**（`1789802371479` vs `1789773571479`）。
+> 见 `docs/client-profiles.md` §3.3.1。
+
+---
+
+## 2. `encodeData` 的精确形态（**密钥未解**）
+
+6159 个不同值，**全部 32 字节**，且**前 16 字节全部是可打印 ASCII**：
+
+```
+encodeData = base64( 16 字符 ASCII 动态 IV ‖ 16 字节密文 )
+```
+
+实测样本（IV 每次不同，密文随请求不同）：
+
+| base64 | 解码后前 16 字节（ASCII）| 后 16 字节（hex）|
+|---|---|---|
+| `TnNpRTd3R1BlVTg1NWc1cBzA1IWluHoy/3IiBzkAxG1k=` | `NsiE7wGPeU855g5p` | `1cc0d485a5b87a32fc8881ce40311b59` |
+| `eVRRZ3doam90NTlReWFUUVmNQSQag21ru3FVXwSCTww=` | `yTQgwhjot59QyaTQ` | `598d41241a836d6bbb71555f04824f0c` |
+| `bTN3RzNhNE1VV1RFS293doNzq3WdlcTY4MpKWHu0hhU=` | `m3wG3a4MUWTEKowv` | `8373ab759d95c4d8e0ca4a587bb48615` |
+
+密文恒为 **16 字节** ⇒ 明文 1~16 字节（PKCS7 填满一块）。
+
+**已排除的密钥**（`AES-128-CBC`，IV 取前 16 字节；解出来全是随机字节）：
+登录体那把 `lYzvvBMUjucw+h^R`、PC 登录数据那把 `qPqDw263XgFgL3u8`、
+滑块那把 `CREATPUZZLE03F9A`、PC 非生产那把 `2ErfJus1Ofr@2o24`。
+
+> ✅ **已解开（2026-09-19 当晚，见
+> [`../upstream-app-business-api.md`](../upstream-app-business-api.md)）**：
+> 密钥是 **`BOFlEUINUdSugD6u`**（与 `signature` 的 `clientKey` **是同一把**），
+> 明文是**手机号**（11 字符 + PKCS7 = 正好 16 字节）。
+> 6159 / 6159 个样本**全部解出**，明文去重后只有 1 种、长度 11。
+> 结构确实与 `puzzleVerfycode` 同款（`base64(IV ‖ CT)`），只是 IV 是动态 ASCII。
+>
+> ⚠ 上面那句"**推断（未验证）**：16 字节明文很可能是某种短令牌/时间戳"
+> **是错的，留在这里当教训** —— 真正对上的线索在 PC 源码里：
+> `signatureAndAESencrypt(3)` 里 `str = window.userAccount`，
+> 也就是**手机号**。**别放过"长度正好对得上"这种线索**：
+> 11 位手机号 + PKCS7 恰好 = 16 字节，而这个字段的密文**恒为 16 字节**。
+
+
+---
+
+## 3. 更正：`hcy-cool-flag` 的效果是**逐接口**的，不是全局的
+
+`docs/capture/app-sms-login-samples.txt` §1.1 原先写的是
+*"这个头**只要出现**，服务端就改用加密响应，**与取值无关**"*。
+**这个概括过头了。** 本次窗口给出了反例：
+
+| 端点 | 带 `hcy-cool-flag` 的条数 | 响应形态 |
+|---|---|---|
+| `…/IOutLink/queryRecentFriendLinkList` | **5991 / 5991** | **全部明文 JSON** |
+| `hcy/group/manage/message/msgCenterStatus` | 2 / 2 | **明文 JSON** |
+| `hcy/group/manage/subscribe/remind/list` | 2 / 2 | **明文 JSON** |
+| `isbo2/openApi/queryUserBenefits` | 2 / 2 | 超时（无样本）|
+| `isbo2/openApi/queryAvailableBenefit` | 2 / 2 | 超时（无样本）|
+
+**整个窗口里"裸 base64 响应"是 0 条。**
+
+所以正确的表述是：**在 `/user/sms/getSmsCode` 上**，主动加这个头会让响应变成密文
+（那一处的观察仍然成立、也仍然是我们**不发**它的理由）；
+但在**业务接口**上，真实客户端大量携带它、响应照样是明文。
+**别把它当成一个全局能力声明，也别因为怕它就拒绝给业务接口带上它。**
+
+> **2026-09-19 深夜再更正一次（这次是语义）**：那个头声明的**不是**"响应请加密给我"，
+> 而是 **"我这个请求体是加密的"**；响应加密只是同一选项的另一半。
+> 密钥 `uDjGSA8auFlbwDkY`、格式 `base64(IV(16 二进制) ‖ AES-128-CBC/PKCS7)`，
+> 已用活体探针在真服务器上走通。详见
+> [`app-sms-login-samples.txt`](./app-sms-login-samples.txt) §1.2。
+>
+> 这一条**反而解释了上表的"逐接口"现象**：业务接口上带它却回明文，说明
+> **那些接口的服务端没有开这个选项**（或者客户端带了头但体是明文、服务端宽容处理）。
+> 上表的观察仍然成立，但"逐接口"这个结论现在有了机制解释，不再是"说不清"。
+
+---
+
+## 4. 响应信封有**四种**（别写一个通用解析器）
+
+| 信封 | 主机族 | 例子 |
+|---|---|---|
+| `{"code":0,"msg":"success","result":true}` | `caiyun.feixin.10086.cn:7071` | 签到 |
+| `{"resultCode":200,"resultMsg":"success","resultData":{…},"msgId":"…","success":true,"code":"200"}` | `middle.yun.139.com`、`grdt.yun.139.com` | `general/getStatus`、`paintConfig` |
+| `{"success":true,"code":"0000","message":"请求成功","data":{…}}` | `group.yun.139.com`、`share-kd-njs.yun.139.com` | 消息中心、分享 |
+| `{"returnCode":"0","returnMsg":"操作成功","body":[…]}` | `ad.mcloud.139.com` | 广告 |
+| `{"code":1,"message":"success","data":null}` | `ael.yun.139.com` | 埋点 |
+
+注意 `code` 在四处分别是 **数字 0** / **字符串 "200"** / **字符串 "0000"** / **字符串 "0"**，
+而埋点那处用的是 **`1` 表示成功** —— 与其余三处**语义相反**。照抄，别归一化。
+
+---
+
+## 5. 批 1 的可行路径（结论）
+
+| 目标域 | 端点 | 卡在哪 |
+|---|---|---|
+| **签到** | `market/signin/page/pointsNotClaimed` | **不卡** —— 明文、无 `signature`、无 `encodeData` |
+| 权益/云朵 | `isbo2/openApi/queryUserBenefits`、`queryAvailableBenefit` | **卡在没样本**（两条都超时）—— 需重抓 |
+| 消息 | `hcy/group/manage/*` | **不卡**（已有明文响应样本）|
+| **认证刷新** | `user/auth/refreshToken` | **本次窗口已滚掉** —— 需重抓（它必然带 `Authorization`）|
+| 工具/皮肤/AI 配置 | `middle.yun.139.com/openapi/*` | ~~卡在 `signature`~~ → **已解开** |
+| 动态/推荐 | `toolBox/load/recommend`、`pDynamicInfo/*` | ~~卡在 `signature` + `encodeData`~~ → **两把都解开了** |
+
+> ✅ **更新（2026-09-19 当晚）**：`signature` 与 `encodeData` 两把锁**都开了**
+> （同一把密钥 `BOFlEUINUdSugD6u`），完整算法、验证计数与黄金向量见
+> [`../upstream-app-business-api.md`](../upstream-app-business-api.md)。
+> **所以形态 B 现在也不卡了**，批 1 可以按业务优先级挑，不必再迁就"哪条不卡"。
+
+**批 1 的顺序建议（更新后）**：先做**签到**（唯一一条完全无依赖的），
+同时把 `user/auth/refreshToken` 与权益接口补抓回来；
+`signature`/`encodeData` 已解，**可以直接写形态 B 的接口了**。
+
+
+---
+
+## 6. 一个可直接实现的完整样本：签到
+
+```http
+GET https://caiyun.feixin.10086.cn:7071/market/signin/page/pointsNotClaimed
+```
+
+| 项 | 值 |
+|---|---|
+| 方法 | `GET`（**无请求体**）|
+| `Content-Type` | `text/xml;charset=UTF-8`（GET 却是 xml，照抄）|
+| 鉴权 | `Authorization: Basic base64("mobile:<手机号>:<authToken>")`，302 字符 |
+| 身份 | `x-yun-uni: <19 位>`（= 登录响应的 `userDomainId`）|
+| 渠道 | `x-yun-app-channel: 10000020`、`x-huawei-channelSrc: 10000020` |
+| 耗时 | 244 ms |
+| 响应 | `{"code":0,"msg":"success","result":true}` |
+
+语义**未确认**：`result: true` 到底是"今天已签"还是"可签"，
+需要**再抓一次"未签到 → 签到"的对比**才能定 —— 不要凭名字猜。
+（本窗口只有 2 条，两条都是 `true`，无法区分。）
+
+---
+
+## 7. 复现方式
+
+```bash
+# 1. 抢快照（日志滚动覆盖，看到有用的立刻存）
+python3 scripts/applog-capture.py snapshot har/applog-<时间戳>
+
+# 2. 之后所有命令都指向快照，不再依赖线上日志
+python3 scripts/applog-capture.py --dir har/applog-<时间戳> summary
+python3 scripts/applog-capture.py --dir har/applog-<时间戳> dump <接口名片段>
+python3 scripts/applog-capture.py --dir har/applog-<时间戳> har out.har --path <前缀>
+```
+
+本文第 1/2/3 节的三张统计表都是从这个快照里跑出来的，
+脚本见 `scripts/applog-capture.py`（`load_all()` 可直接 import 复用）。

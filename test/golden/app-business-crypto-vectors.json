@@ -1,0 +1,112 @@
+{
+  "$source": "iOS App（/Applications/mCloud.app/Wrapper/mCloud_iPhone.app/mCloud_iPhone）的字符串常量 + macOS 客户端 app.asar 的 out/renderer/api/api.js + App 自有网络日志（har/，gitignore）",
+  "$note": "App 业务接口（形态 B）的两把「锁」。**算法本身是实拍全量验证过的**（见 $evidence）；但 encodeData 的向量是**合成**的 —— 原因见各条 note。",
+  "$convention": "encodeData 的 base64 解码结果是 32 字节 = 前 16 字节 IV(ASCII) + 后 16 字节密文。解密时必须从**载荷内部**切 IV，不能拿 ivAscii 当 AES 的 IV 再喂整个载荷（CBC 只有第一块依赖 IV，会伪装成「第一块乱码、其余正确」）。PKCS7 去补取**明文**末字节。",
+  "$evidence": {
+    "signatureSha256": "**6165 / 6165 条实拍请求逐字命中，且跨三个 version 都命中**：V1.0 6162 条、V6.1 2 条、V1.1 1 条 —— 所以公式里的 version 是**按请求头原样代入**（带 V），不是把 `V1.0` 写死。唯一命中的形态：version 原样带 V、字段名 timeStamp 大写 S、字段顺序 clientId→clientKey→msgId→timeStamp→version",
+    "encodeDataDecrypt": "两层验证：(1) 本窗口 6158 / 6158 条带 encodeData 的请求全部解出，明文去重后只有 1 种、长度 11；(2) **逐条跨字段核对** —— 每条解出的明文与**同一请求** Authorization 头里的手机号相等，6158 / 6158 零例外。第二层把'明文是手机号'从统计推断变成逐条证据。另：IV 恒为可打印 ASCII（6158 / 6158，0 条二进制）—— 与 hcyCoolFlagEnvelope 的**二进制** IV 相反，别互相套用。",
+    "keyDiscovery": "iOS 二进制里没有 clientKey 字面量。用 5632 个 16 字符候选做 SHA256 比对命中；再用同一把 key 做 AES-CBC 解密交叉验证（合法 PKCS7 + 全可打印 ⇒ 唯一候选）",
+    "howToReverify": "python3 -c 见 docs/upstream-app-business-api.md §5；数据源 har/applog-*/（gitignore）",
+    "signatureDoesNotCoverBody": "6165 条带签名的请求里 body 有 6161 种不同取值（encodeData 每请求都变），而 6165 条签名全部等于「仅那 5 个字段」的 SHA256 ⇒ 签名与 body 无关（反证，不是探针）",
+    "liveProbe": "用自算签名打了一次只读的 general/getStatus（真服务器、用户自己的登录态），返回 resultCode:200 且 msgId 原样回传 ⇒ 服务端确实在校验签名，算法在活服务器上成立",
+    "hcyCoolFlagKeyDiscovery": "iOS 二进制里 16 字符候选 201124 个 × {AES-ECB, AES-CBC(零/前16/后16 IV)} 全部试过，唯一命中 uDjGSA8auFlbwDkY；判定用的是**已知明文**（见 §hcyCoolFlagEnvelope 的 note），不是靠'解出可打印字符'这种弱判据。脚本 scripts/crack-cool-flag-response.py",
+    "hcyCoolFlagLiveProbe": "把请求体按同格式加密后发出去，服务端**不再**回 01000019 Illegal base64 character 7b，而是正常处理并回 200059554（且响应也是同格式加密）⇒ 算法在真服务器上成立"
+  },
+  "constants": {
+    "APP_CLIENT_ID": "iosapp",
+    "APP_CLIENT_KEY": "BOFlEUINUdSugD6u",
+    "PC_CLIENT_ID": "pcapp",
+    "PC_CLIENT_KEY": "6lXUhuJGkkAr5HXr",
+    "SIGNATURE_FIELD_ORDER": "clientId, clientKey, msgId, timeStamp, version",
+    "BODY_AES_KEY": "uDjGSA8auFlbwDkY"
+  },
+  "signatureSha256": [
+    {
+      "name": "toolBox/load/recommend 第 1 条",
+      "clientId": "iosapp",
+      "version": "V1.0",
+      "msgId": "78184fef42d2e6f4fc1c63ed77935dd9",
+      "timeStamp": "1789799167012",
+      "expect": "fa96bf76f3f0db3e94eb7f7876d73bd62366606210321b5f18f9cd81e2a9672c",
+      "input": "clientId=iosapp&clientKey=BOFlEUINUdSugD6u&msgId=78184fef42d2e6f4fc1c63ed77935dd9&timeStamp=1789799167012&version=V1.0"
+    },
+    {
+      "name": "toolBox/load/recommend 第 2 条",
+      "clientId": "iosapp",
+      "version": "V1.0",
+      "msgId": "913a7511725f139f9baa3c02de854a5c",
+      "timeStamp": "1789799168011",
+      "expect": "dd422de217537a74e638765841dc33e7c89a4094df4c9fd6e27e809dc3be3f32",
+      "input": "clientId=iosapp&clientKey=BOFlEUINUdSugD6u&msgId=913a7511725f139f9baa3c02de854a5c&timeStamp=1789799168011&version=V1.0"
+    },
+    {
+      "name": "toolBox/load/recommend 第 3 条",
+      "clientId": "iosapp",
+      "version": "V1.0",
+      "msgId": "4bc01d3dfa8ac8c0c74d04db3987cea3",
+      "timeStamp": "1789799169012",
+      "expect": "f302547332ccf5b6f3bf9235afb402587cbde05caf216d475eba48e91509f255",
+      "input": "clientId=iosapp&clientKey=BOFlEUINUdSugD6u&msgId=4bc01d3dfa8ac8c0c74d04db3987cea3&timeStamp=1789799169012&version=V1.0"
+    },
+    {
+      "name": "toolBox/v5/queryToolBoxInfos（version=V6.1）",
+      "clientId": "iosapp",
+      "version": "V6.1",
+      "msgId": "ac4c42ee91dd3bc8c0cfa792557d45a8",
+      "timeStamp": "1789802371496",
+      "expect": "01e988836e6f13c6231ee728b04e2222a1fdb282fd5a5c2a33da672fdca6159e",
+      "input": "clientId=iosapp&clientKey=BOFlEUINUdSugD6u&msgId=ac4c42ee91dd3bc8c0cfa792557d45a8&timeStamp=1789802371496&version=V6.1"
+    },
+    {
+      "name": "pDynamicInfo/queryBatchList（version=V1.1）",
+      "clientId": "iosapp",
+      "version": "V1.1",
+      "msgId": "7111048a5629828a28febec3fe5b3099",
+      "timeStamp": "1789804326172",
+      "expect": "b63bbc2d3bc9058f8ab121ae4ad425ef4ec33fe72b9a0f0b5b58b24f19324845",
+      "input": "clientId=iosapp&clientKey=BOFlEUINUdSugD6u&msgId=7111048a5629828a28febec3fe5b3099&timeStamp=1789804326172&version=V1.1"
+    }
+  ],
+  "encodeDataDecrypt": [
+    {
+      "name": "合成：明文 19900000000",
+      "ivAscii": "AbCdEfGhIjKlMnOp",
+      "plaintext": "19900000000",
+      "encodeData": "QWJDZEVmR2hJaktsTW5PcOyp3iD8NDTUplPw/wyT/z0=",
+      "note": "**合成向量**（用已确认的算法算出来的，不是实拍）。实拍样本的明文是真实手机号，而密钥公开 ⇒ 实拍密文等于公布手机号，故不入库。"
+    },
+    {
+      "name": "合成：明文 19900000001",
+      "ivAscii": "Zq3xWvYpNmLk8Rst",
+      "plaintext": "19900000001",
+      "encodeData": "WnEzeFd2WXBObUxrOFJzdHRHTRhFqa4KRsGtk+OrKZs=",
+      "note": "**合成向量**（用已确认的算法算出来的，不是实拍）。实拍样本的明文是真实手机号，而密钥公开 ⇒ 实拍密文等于公布手机号，故不入库。"
+    }
+  ],
+  "hcyCoolFlagEnvelope": [
+    {
+      "name": "实拍：服务端报「动态解密错误」的那条",
+      "direction": "response",
+      "ivHex": "77970a27e1e0d8c181e3c0e2791d6fb0",
+      "plaintext": "{\"success\":false,\"code\":\"01000019\",\"message\":\"动态解密错误，错误信息:Illegal base64 character 7b\",\"data\":null}",
+      "payloadB64": "d5cKJ+Hg2MGB48DieR1vsNQMt0ZUMrgXMmKqCy7vm60u5iJfemtgeXW07oPE2C4iq27MNKSA7kkb+mrM3Lp3wJ3SO6xWgddIXW4HDAHBc0gfHK2d8EeYdkDMQ9HEg2nGS/y/NqJ4s8/qzuFeDbHDPfYf1iW1VTNaC+WwdC46hOaXj7PpNvcDuLVCPPnS6U/C",
+      "note": "**实拍**。带 hcy-cool-flag 但发明文请求体 ⇒ 服务端 base64 解码撞上 `{`(0x7b)，回这条错误；**错误响应本身也是加密的** —— 这就是密钥被反推出来的入口。明文里没有任何标识，故可直接入库（与 encodeData 那两条不同）。"
+    },
+    {
+      "name": "实拍：加密请求体被正常处理后的业务响应",
+      "direction": "response",
+      "ivHex": "052f9b34dd1dc63da62120a57071851c",
+      "plaintext": "{\"success\":false,\"code\":\"200059554\",\"message\":\"请先获取滑块拼图验证码\",\"data\":{\"captchaType\":2}}",
+      "payloadB64": "BS+bNN0dxj2mISClcHGFHL3kinTviWXgGWMwtNRtwaJ1zfBKdCVbXA0WLI5Q7Y0L4iWv1/YEq4QW0MRn0AgJH41JOd1YP2WedyDm00kFUEJMj/Fjp44kLNE9xEUvB0NsnSaNYeo+06fw9PuX9BAnloop3CJr/ugY9EXLvtIp6Vo=",
+      "note": "**实拍**。请求体按同格式加密 ⇒ 服务端解密成功、走正常业务分支，回 200059554（请先过滑块）。注意这条响应是**裸 base64**（172 字符、无 JSON 引号），而上一条是**JSON 引号包着的**（194 字符）——同一个载荷格式、两种包装，解析时两种都要认。"
+    },
+    {
+      "name": "合成：加密方向（IV = 000102…0f）",
+      "direction": "request",
+      "ivHex": "000102030405060708090a0b0c0d0e0f",
+      "plaintext": "{\"success\":true,\"code\":\"200\",\"message\":\"ok\",\"data\":null}",
+      "payloadB64": "AAECAwQFBgcICQoLDA0OD6uH90ObYvZB3KrUHvNrE1LGJwAjT/fiONMDyiijh/7Ai7xDOjwr4ZiA3fqdbXiZC585NHmfkOY0H8DpjMR2PDY=",
+      "note": "**合成**，只为把**加密**方向也钉进向量（前两条只验解密方向）。IV 固定便于对拍。"
+    }
+  ]
+}
