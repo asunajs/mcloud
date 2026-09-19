@@ -674,6 +674,13 @@ async fn login_sms_pc(args: SmsArgs) -> Result<()> {
 /// App 端没有这条路：原生侧只是把 H5 打开，**短信由 H5 发**，
 /// 回调之后直接进 `thirdlogin`。所以这里把地址打给用户，
 /// 并明确"不要再重新执行本命令"——否则会再要一次滑块、把配额刷掉。
+///
+/// # 补充：本函数里那个自动重试环**不是** App 自己的滑块被自动化了
+///
+/// `app_login::app_send_sms_code` 的环走的是 **PC 端那套**取题与编码
+/// （`/user/verfycode` + `puzzle_verfycode_encrypt`，只是拿 App 的头发出去），
+/// 属**围魏救赵**。App 端自身的滑块自动化**并未实现**，真机走的仍是上面那条 H5 路。
+/// 所以别把"这里过掉了"读成"App 的滑块已攻克"。
 async fn login_sms_app(args: SmsArgs) -> Result<()> {
     let store = open_local(&args.db)?;
     let owner = preferred_owner(&store).await.map_err(core_err)?;
@@ -689,6 +696,14 @@ async fn login_sms_app(args: SmsArgs) -> Result<()> {
         None => device::new_app_device_short(&mut rng),
     };
     let profile = AppProfile::new(AppDevice::ipad(&device_id, &device_short));
+    // 读回填与写落库**必须同一个范围**：范围不同会出现"读到某个账号的用户域、
+    // 却把它发给另一个账号"，那比不带 `x-yun-uni` 更糟。
+    let scope = scope_for_new_accounts(&owner);
+    // 登录过一次之后 `userDomainId` 就在库里了，第二次起要带上（真机也一样）。
+    // 首次登录查不到，档案保持不带 —— 见 `app_login::profile_with_stored_domain_id`。
+    let profile = app_login::profile_with_stored_domain_id(&store, scope, profile, &args.phone)
+        .await
+        .map_err(core_err)?;
 
     let client = ReqwestClient::new().map_err(core_err)?;
     let upstream = Upstream::new(&client);
@@ -754,7 +769,7 @@ async fn login_sms_app(args: SmsArgs) -> Result<()> {
         &store,
         &upstream,
         app_login::AppLoginContext {
-            scope: scope_for_new_accounts(&owner),
+            scope,
             profile: &profile,
             credential: login::SmsCredential {
                 phone: &args.phone,

@@ -365,6 +365,12 @@ nationCode, provCode, routerInfo, serverinfo, token, userAssetFlag,
 userDomainId, userExtInfo, userid
 ```
 
+> **追加澄清（2026-09-19，勿与上面混淆）**：上面这次"没开浏览器"过掉的是**借来的**滑块 ——
+> 取题与编码用的是 **PC 端那套**（`/user/verfycode` + `puzzle_verfycode_encrypt`），
+> 只是 `clientType` 与请求头换成 App 的（见 `mcloud-upstream::app_login::slider_puzzle_request`）。
+> **App 端自身的滑块并没有实现自动化**：真机走的仍是原生开 WebView、由 H5 发码那条
+> （也就是本节 §1 / §2 记录的真机行为）。所以不要把这次跑通读成"App 的滑块已攻克"。
+
 落库核对（`data/mcloud.db`）：
 
 | 列 | 值 |

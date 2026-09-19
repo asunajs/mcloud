@@ -71,7 +71,8 @@ node scripts/check-golden-vectors.cjs               # 黄金向量能算出自�
 
 覆盖范围是显式的：没有校验器的段会被**打印出来**，不假装通过。
 
-当前状态（2026-09-17）：**241 个测试通过**，其余四项全绿。
+当前状态（2026-09-19）：**421 个测试通过**，其余五项全绿。
+上一条实况是 2026-09-17 的 **241 个测试**、其余四项全绿。
 其中 `mcloud-upstream` 的 L2 夹具回放已跑通（`crates/mcloud-upstream/tests/l2_replay.rs`）——
 它吃的 `test/fixtures/http/` 是**本机**测试数据，不进版本库（见下），没有时这组用例自动跳过。
 
@@ -141,7 +142,7 @@ cd .. && cargo run -p mcloud-server         # API + 前端，默认 http://127.0
 | --- | --- |
 | `user init` / `user list` | 建首个管理员（网页端要用，也是历史账号的认领触发点）/ 看看有哪些人 |
 | `login qr` | 扫码登录移动云盘账号：终端出码，手机扫（`--qr-out` 可另存一张图片） |
-| `login sms` | 短信验证码登录：发码 → 输验证码。被风控要求滑块时**自动过**（缺口位置由服务端加密下发，见 `docs/upstream-logout-sms-login.md` §2.2.1） |
+| `login sms` | 短信验证码登录：发码 → 输验证码。被风控要求滑块时**自动过**（缺口位置由服务端加密下发，见 `docs/upstream-logout-sms-login.md` §2.2.1）。⚠ `--client app` 那个"自动过"是**借 PC 端那套**取题与编码、换 App 的头发出去（围魏救赵）；App 自身的滑块**未实现自动化**，真机走的仍是开 WebView 由 H5 发码那条（见 `docs/capture/app-sms-login-samples.txt` §2.2 的澄清） |
 | `migrate` | 把旧项目 mcloud-sign 的数据迁移到 SQLite（`--dry-run` 预演） |
 | `fixture extract` | 从 HAR 流量包抽取脱敏 fixture（用于离线回放）。脱敏有残留则 fail closed，拒绝写出 |
 | `capabilities` | 打印能力注册表（`--json` 与 `GET /api/capabilities` 同形状） |
@@ -216,10 +217,17 @@ Rust 那条不是风格偏好而是**语言强制**：文件名就是模块名�
 
 ## 现状须知
 
-- **服务入口尚未实现。** `mcloud-server` 目前只有 lib，没有 `serve` 命令；
-  axum 路由、SSE、`openapi.json` 导出与 `rust-embed` 内嵌前端都在 P5。
-  所以现阶段 **CLI 能跑，WebUI 没有后端可连**，前端只能靠 `vite dev` 单独起。
+- **服务入口尚未实现。**（当时的实况，2026-09-17，原文留着）`mcloud-server` 那时只有 lib，
+  没有 `serve` 命令；axum 路由、SSE、`openapi.json` 导出与 `rust-embed` 内嵌前端都在 P5。
+  所以那时 **CLI 能跑，WebUI 没有后端可连**，前端只能靠 `vite dev` 单独起。
+- **已更新（2026-09-19）：服务能起了，但只有"会话"这一层。** `cargo run -p mcloud-server` 起 API + 前端产物，
+  路由目前只有 `/api/health`、`/api/setup`、`/api/session`（白名单免登录，其余一律要会话）。
+  跑任务的那一批（accounts / capabilities / runs / schedules）、SSE 与 `openapi.json`
+  导出仍在 P5 —— 所以 WebUI 登录与初始化是真接口，主界面仍是 P0 spike 的占位数据。
 - **CLI 已能完成"从零到登录"**：`mcloud user init` → `mcloud login qr`（终端二维码）/ `mcloud login sms`。
+  短信登录有两个端：`--client pc`（默认）与 `--client app`（iOS 客户端形态）。
+  两端**不是同一件事的两种参数** —— 请求体加解密方式、`Authorization` 前缀、
+  设备指纹形状都不同（差异见 `docs/client-profiles.md`）。
   登录态落在本地库的 `account_state`（凭据与展示信息**分表**，见 schema 说明）；
   设备指纹写在 `data/device.txt`（**换掉它等于换一台设备**，服务端会定位不到会话）。
 - **上游接口层按新抓包逐块重写。** 目前只有 `login`（扫码/短信/账密 + 退出登录）是完整的，

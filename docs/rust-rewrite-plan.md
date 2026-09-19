@@ -931,7 +931,8 @@ P6 的**视觉与组件基建可在 P2 后并行启动**（接口先冻结 `open
 | **schema v4**：`schedules` / `pipelines` 加 `owner`（事务包裹的 ALTER）、配置类方法全部带 `Scope`、写操作校验归属、认领扩成三笔分别计数 | ✅ 完成（真实 v3 库迁移验证：列已加、既有账号与归属完好、重跑幂等） |
 | **WebUI 登录与会话鉴权**：`POST/GET/DELETE /api/session` + `GET/POST /api/setup`、cookie 会话（HttpOnly / SameSite=Lax / 可配 Secure）、未初始化只暴露初始化页、统一错误形状、10 条路由契约测试 | ✅ 完成（`cargo test -p mcloud-server --test api_contract`） |
 | **`mcloud-server` 可运行**：`main.rs`（clap）+ 静态发前端产物 + `/api` 未知路径报 404 JSON + 前端登录/初始化页（Vapor + daisyUI） | ✅ 完成（真机跑通：初始化 → 落 cookie → 会话查询 → 登出立刻失效） |
-| 六项门禁（`cargo test` / `clippy -D warnings` / `fmt --check` / 分层 / 产物解耦 / 标识守卫） | ✅ 全绿，**365 个测试**（前端另有 `npm run typecheck` + `vite build`） |
+| **App 档案回填 `user_domain_id`**（`x-yun-uni`）：按手机号从 `account_state` 读，CLI 与将来的已登录接口共用同一个函数 | ✅ 完成（含"查不到/空串/属于别人"三种情况一律不带，见下） |
+| 六项门禁（`cargo test` / `clippy -D warnings` / `fmt --check` / 分层 / 产物解耦 / 标识守卫） | ✅ 全绿，**365 个测试**（前端另有 `npm run typecheck` + `vite build`）。本表这一行记于 365 个时点；接完上面那条回填线后为 **421 个**（2026-09-19，仍全绿） |
 
 **旧数据实测**（`Documents/workspace/mcloud-sign`）：账号 2 / 登录态 2 / 组合 1 / 历史 96 条 / **问题 0 条**；
 二次执行 6 个数据文件全部跳过、0 次写入，行数不变。
@@ -960,7 +961,7 @@ CLI 侧已端到端跑通（`user init` → `login qr` / `login sms`）。
 push 10 渠道（§1.4）、调度引擎（cron 解析与触发）、
 OpenAPI 导出（`utoipa` → `openapi.json` → 前端生成类型，见 §5）。
 
-**三个已知的小缺口（都不影响当前可用性）**：
+**已记录的小缺口**（逐条标注状态；都不影响当前可用性）：
 
 > 第 3 条（App 业务接口的两把锁 + `hcy-cool-flag` 信封）**已全部解开** ——
 > 连同"三条加密点"在内，App 侧已**没有未解密的点**。往下三条按"怎么错的"留着。
@@ -979,8 +980,20 @@ OpenAPI 导出（`utoipa` → `openapi.json` → 前端生成类型，见 §5）
   ⚠ **还差一段线没接**：`AppProfile::with_user_domain_id` **只在测试里被调用过**，
   生产路径没把库里存的值回填进 App 档案。现在不痛（App 端还没有已登录接口），
   但**下一批抓包的第一个已登录请求就会缺 `x-yun-uni`** —— 先接这条线，再写接口。
+  **已接（2026-09-19，上面那段是当时的实况，留着）**：
+  `mcloud_app::app_login::profile_with_stored_domain_id` 按手机号从 `account_state`
+  回填，CLI 的 `login sms --client app` 在建档案后立刻调用它。
+  回填**登录握手请求**是有实测依据的，不是想当然：抓包里真机的
+  `getSmsCode` 与 `thirdlogin` **都带着** `x-yun-uni`（`docs/capture/app-sms-login-samples.txt`
+  §1 与 §3.2）—— 它缓存了上一次会话的 `userDomainId`，不会因为"这次在登录"就不发。
+  查不到时原样不带：编一个会把这次请求定位到**别人**的用户域，比缺头更糟。
+  读回填用的 `Scope` 与写落库同一个，且"属于别人的账号读不到"由隔离契约兜住（有测试）。
+  下一批已登录接口直接复用这个函数即可，不要再各自拼档案。
 - **WebUI 的会话鉴权未接**：`mcloud_app::session`（登录本系统、签发/校验/撤销）已实现且有测试，
   但还没有 HTTP 层去用它 —— 那是 P5 的 `routes/` 骨架。CLI **不需要**它（见 §3.7 的分界说明）。
+  **已接（2026-09-19，schema v4 那一批，上面是当时的实况）**：HTTP 层落在
+  `mcloud-server/src/auth.rs`（`/api/session` 三个方法 + `/api/setup` + cookie 会话与
+  白名单判定），`mcloud_app::session` 有了调用方。
 - **App 业务接口的两把"锁"：`signature` 与 `encodeData`** —— **已解开（2026-09-19）**。
   App 里有**两套互斥的请求形态**（12243 条零反例）：
   **A 族**带 `x-yun-uni`、没有 `signature`；**B 族**带 `signature`、没有 `x-yun-uni`。
