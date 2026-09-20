@@ -176,6 +176,9 @@ source）。**不要复制那段代码** —— 它已经因为有三份拷贝�
   所以不需要目标平台的头文件。
 - **Node 侧**（`idents` / `golden`）：零个 `execSync` / `process.platform`，纯 fs 遍历。
 - **bash 侧**（`filenames` / `deps`）：零个 `uname` / `cygpath` / `realpath` 分支。
+- **bash 侧（第 5 条，2026-09-20 补）**：只用 **POSIX + bash 3.2** 就能跑的语法 ——
+  不用 `declare -A` / `mapfile` / `${v,,}` / `&>>`。macOS 自带的 `/bin/bash` 永远是 3.2.57。
+  这条是**实跑才发现的**，详见下面「macOS 首跑记录」。
 
 **唯一有平台差异的是工具链定位**（`scripts/toolchain.sh`）：
 
@@ -197,6 +200,68 @@ source）。**不要复制那段代码** —— 它已经因为有三份拷贝�
 > 补进本节。目前**只在 Windows + Git Bash 上实际跑过** ——
 > 上面的"平台无关"是读代码得出的结论，不是跑出来的。
 > 在有人真的在类 Unix 上跑过一次之前，那些结论都还是**推断**。
+
+### ✅ macOS 首跑记录（2026-09-20）：七条全绿，但**第一次是一行没跑就退出**
+
+上面的推断**只对了一半**。实跑环境：macOS（arm64 / Darwin 25）+ rustc 1.91.1。
+
+**七条门禁的结论全对** —— 没有任何一条因为平台而失败：
+
+```
+test       674 个测试通过
+clippy     Finished `dev` profile in 11.03s
+fmt        通过（无输出）
+deps       依赖方向门禁通过
+filenames  143 个文件均为 kebab-case
+idents     扫了 326 个文本文件，无未登记的疑似真实标识
+golden     122 条断言全绿
+```
+
+**但入口脚本自己先挂了**，而且挂得很不显眼：
+
+```
+$ bash scripts/gates.sh
+scripts/gates.sh: line 42: test: unbound variable
+$ echo $?
+0
+```
+
+**根因是 bash 版本，不是平台 API。** macOS 自带的 `/bin/bash` 是 **3.2.57** ——
+Apple 因为 GPLv3 停在了 2007 年那个版本，且不会升；而 `bash` 在 PATH 上默认就是它。
+`declare -A`（关联数组）要 **bash 4.0+**。
+
+失败链条值得逐字记住，因为**每一环都不报"真正的原因"**：
+
+1. `declare -A GATES=(` → bash 3.2 报 `invalid option`（但脚本继续往下跑）；
+2. `GATES` 于是被当成**普通索引数组**；
+3. 紧跟的 `[test]="cargo test --workspace"` 里，`[test]` 是**算术下标**，
+   要展开变量 `test`；
+4. 它未定义，而脚本头上有 `set -u` → **`test: unbound variable`**；
+5. 脚本一行门禁都没跑就退出，**退出码还是 0**。
+
+⇒ 现象与原因隔了四层，而且第 3 步里"`test`"是**数组下标的语法糖**、
+看上去像 `test` 命令 —— 排查时很容易往 clap / cargo 那边想。
+
+**修法**：把命令表从 `declare -A` 换成 `case` 分派的 `gate_cmd()`
+（`scripts/gates.sh` 与 `.githooks/run-gates.sh` 各一份，**两张表逐字一致**），
+bash 3.2 直接就能跑，代价只是查表多一次子进程 —— 门禁的耗时全在 cargo 上，这点可以忽略。
+
+**为什么在 Windows 上测不出来**：Git Bash 的 bash 是 4.4/5.x，`declare -A` 完全正常。
+**这类问题没有"写测试"之外的暴露途径** —— 而它恰好是本节第一句那个
+"刻意核过的平台无关清单"覆盖不到的一类：
+
+> ⚠ 那份清单核的是**平台 API**（`cfg(unix)` / `/tmp` / openssl / `uname`），
+> 核不到**解释器的版本**。本次要补的第 5 条是：
+> **bash 脚本只用 POSIX + bash 3.2 就能跑的语法**（不用 `declare -A` / `mapfile` /
+> `${v,,}` / `&>>`）。理由是 macOS 的默认 `bash` 永远是 3.2，
+> 而它偏偏是"类 Unix 上最可能先被撞到"的那个。
+
+`.githooks/` 那两个 hook 的 shebang 是 `#!/usr/bin/env bash` —— 在 macOS 上同样是 3.2。
+所以这次一并修了：**hook 挂在提交路径上，坏掉的表现是拦住每一次提交**，
+而人只会得出"hook 坏了"并去用 `--no-verify`；`--no-verify` 之后没有任何东西替你补上（见上一节）。
+
+> 注：`core.hooksPath` 当时**尚未设置**（hook 没启用），所以这个坑还没有真的拦到人 ——
+> 是"装一次就会中"。修在装之前。
 
 ### 第 5 条为什么值得单独存在
 

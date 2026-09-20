@@ -39,15 +39,39 @@ cd "$(dirname "$0")/.."
 . scripts/toolchain.sh || exit 1
 
 # ── 门禁定义 ────────────────────────────────────────────────────────
-declare -A GATES=(
-  [test]="cargo test --workspace"
-  [clippy]="cargo clippy --all-targets -- -D warnings"
-  [fmt]="cargo fmt --check"
-  [deps]="bash scripts/check-deps.sh"
-  [filenames]="bash scripts/check-filenames.sh"
-  [idents]="node scripts/check-identifiers.cjs"
-  [golden]="node scripts/check-golden-vectors.cjs"
-)
+#
+# ⚠ 这里**故意不用 `declare -A`**（关联数组要 bash 4.0+）。
+#
+# macOS 自带的 `/bin/bash` 是 **3.2.57** —— Apple 因为 GPLv3 停在了 2007 年
+# 那个版本，且不会升。`bash` 在 PATH 上默认就是它（Homebrew 的 bash 5 得
+# 自己装、且通常叫 `/opt/homebrew/bin/bash`）。
+#
+# 失败形态极其难认：`declare -A` 报 invalid option 后，`GATES` 会退化成
+# **普通索引数组**，于是紧跟的 `[test]="…"` 里那个 `[test]` 被当成
+# **算术下标**求值 —— 变量 `test` 未定义，在 `set -u` 下直接：
+#
+#     scripts/gates.sh: line 42: test: unbound variable
+#
+# 脚本一行都没跑就退出，退出码还是 0。本文件明明有 `Darwin | Linux` 分支
+# （见 `scripts/toolchain.sh`），即"支持 macOS"是写下来的意图 ——
+# 所以这不是"不支持"，是**在支持的平台上悄悄不工作**。
+# 它在 Git Bash（bash 4.4/5.x）上测不出来，只在 macOS 上现形。
+#
+# `case` 分派是 3.2 就能跑的等价写法，没有理由为它要求 bash 4。
+GATE_NAMES="test clippy fmt deps filenames idents golden"
+
+gate_cmd() {
+  case "$1" in
+    test)      echo "cargo test --workspace" ;;
+    clippy)    echo "cargo clippy --all-targets -- -D warnings" ;;
+    fmt)       echo "cargo fmt --check" ;;
+    deps)      echo "bash scripts/check-deps.sh" ;;
+    filenames) echo "bash scripts/check-filenames.sh" ;;
+    idents)    echo "node scripts/check-identifiers.cjs" ;;
+    golden)    echo "node scripts/check-golden-vectors.cjs" ;;
+    *)         echo "" ;;
+  esac
+}
 
 ORDER=(test clippy fmt deps filenames idents golden)
 
@@ -76,9 +100,9 @@ mkdir -p target 2>/dev/null
 : > "$GATE_LOG"
 
 for name in "${ORDER[@]}"; do
-  cmd="${GATES[$name]:-}"
+  cmd="$(gate_cmd "$name")"
   if [ -z "$cmd" ]; then
-    echo "!! 未知门禁: $name（可选：${!GATES[*]}）"
+    echo "!! 未知门禁: $name（可选：$GATE_NAMES）"
     exit 2
   fi
 

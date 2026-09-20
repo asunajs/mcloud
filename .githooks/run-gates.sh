@@ -170,15 +170,30 @@ run_gate() {
 # 同一组命令两个结论，是最难排查的一类失效。
 . scripts/toolchain.sh || exit 1
 
-declare -A CMDS=(
-  [test]="cargo test --workspace"
-  [clippy]="cargo clippy --all-targets -- -D warnings"
-  [fmt]="cargo fmt --check"
-  [deps]="bash scripts/check-deps.sh"
-  [filenames]="bash scripts/check-filenames.sh"
-  [idents]="node scripts/check-identifiers.cjs"
-  [golden]="node scripts/check-golden-vectors.cjs"
-)
+# 门禁名 → 命令。**必须与 `scripts/gates.sh` 的 `gate_cmd()` 逐字一致**
+# （理由见文件头："同一组命令、两个不同结论"是最难排查的一类失效）。
+#
+# ⚠ 这里**故意不用 `declare -A`**（关联数组要 bash 4.0+）：macOS 自带的
+# `/bin/bash` 是 **3.2.57**，而 hook 的 shebang 是 `#!/usr/bin/env bash`，
+# 在 macOS 上就是它。`declare -A` 失败后 `CMDS` 会退化成普通索引数组，
+# 随后的 `[test]="…"` 里 `[test]` 被当**算术下标**求值 —— `set -u` 下直接
+# 报 `line 173: test: unbound variable`，hook 一行没跑就退出。
+#
+# 后果比 `gates.sh` 那次严重：hook 挂在提交/推送路径上，它会**拦住每一次
+# 提交**，而输出是一句与代码无关的 bash 报错。人只会得出"hook 坏了"并去用
+# `--no-verify` —— 而 `--no-verify` 之后没有任何东西会替你补上门禁（本仓库没有 CI）。
+gate_cmd() {
+  case "$1" in
+    test)      echo "cargo test --workspace" ;;
+    clippy)    echo "cargo clippy --all-targets -- -D warnings" ;;
+    fmt)       echo "cargo fmt --check" ;;
+    deps)      echo "bash scripts/check-deps.sh" ;;
+    filenames) echo "bash scripts/check-filenames.sh" ;;
+    idents)    echo "node scripts/check-identifiers.cjs" ;;
+    golden)    echo "node scripts/check-golden-vectors.cjs" ;;
+    *)         echo "" ;;
+  esac
+}
 
 FAILED=()
 printf '\n\033[1m%s\033[0m（本次涉及 %s 个文件）\n' "$TITLE" "$CHANGED_COUNT"
@@ -210,7 +225,7 @@ for name in "${GATES[@]}"; do
     fi
   fi
 
-  run_gate "$name" "${CMDS[$name]}" || FAILED+=("$name")
+  run_gate "$name" "$(gate_cmd "$name")" || FAILED+=("$name")
 done
 
 if [ ${#FAILED[@]} -gt 0 ]; then
