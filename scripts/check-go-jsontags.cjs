@@ -52,6 +52,15 @@ const SCAN_DIRS = ['cmd', 'internal'];
 // `CronSchedule`）脚本会**直接跳过** —— `encoding/json` 本来就看不见它们，
 // 登记进去反而会让白名单越来越长、越来越没人看。
 const UNTAGGED_ALLOWED = {
+  // ⚠ 这两条来自**另一个人正在写的** internal/capabilities/login.go（尚未提交）。
+  // 它们确实不进 JSON：`QrFailure` 实现了 error（对外走 `Error()` 文案），
+  // `QrProgress` 是内存里的推进结果（`UserInfo any` 已经是解开的 JSON 值）。
+  // 若 login.go 最终没落地，这两条会变成"白名单里对不上的条目"并让本门禁变红 ——
+  // 那是**故意**的：它提醒这里有一条依赖别人提交的白名单。
+  'internal/capabilities/login.go:QrFailure':
+    '实现 error 接口，对外走 `Error()` 文案，不整块 marshal',
+  'internal/capabilities/login.go:QrProgress':
+    '扫码登录的**内存**推进结果（`UserInfo any` 已是解开的 JSON 值），本身不是响应体',
   'internal/core/auth.go:AuthInfo':
     'Rust 侧只 derive `Clone, PartialEq`——**刻意不** Serialize（里面是 token）',
   'internal/core/crypto.go:SignSaltPair':

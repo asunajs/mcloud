@@ -295,7 +295,8 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 
 **退出判据**：6 份黄金向量在 Go 侧逐字段复算通过。
 
-### 步 1 已实测出来的十三条（写进这里，免得后面的模块重踩）
+### 步 1 已实测出来的二十七条（写进这里，免得后面的模块重踩）
+
 
 | 现象 | 根因 | 做法 |
 | --- | --- | --- |
@@ -322,6 +323,11 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 | **20** ⭐ | **浮点转整型：Rust 的 `as` 是 saturating 且定义明确，Go 是**实现相关**的** | `n as usize` 对 NaN→0、Inf→usize::MAX，靠它把极端输入挡在 `idx <= len` 之外；而 Go 规范说浮点转整型**超出范围时行为由实现决定** ⇒ 可能拿到一个碰巧合法的数 | 显式 `math.IsNaN` / `math.IsInf` 挡掉再转。⚠ 判小数部分要写 `n - math.Trunc(n) != 0`，别写 `n != math.Trunc(n)` —— 后者对 Inf 是 `false`（不排除），而 Rust 的 `fract()` 对 Inf 给 NaN（排除） |
 | **21** ⭐ | **Go 的 map 遍历顺序是随机的**，Rust 的 `BTreeMap` 不是 | 凡是"取第一个满足条件者"的逻辑（第一个冲突、第一个匹配）在 Go 侧**每次运行都可能不同** —— 而报错内容是要进报告给人看的 | 显式排序后再取第一个。⚠ 这条断言**一开始没承重**：只造一组冲突时排不排序报的都是它（反向测试照样绿），必须**两组以上**才问得出"顺序"这件事 |
 | **22** | **nil slice 与空 slice 的差别，在反序列化侧同样存在** | Rust 的 `#[serde(default)] Vec<T>` 缺失时是 `vec![]`（序列化成 `[]`），Go 是 nil（序列化成 `null`）。这个病在 marshal 侧已经处理过（`RunReport.ManualSteps`），但**unmarshal 侧要单独再归一一次** | 给含 slice 的类型写 `UnmarshalJSON` 归一化（`type plain X` 绕开递归）。⚠ 只有整串比对抓得到 —— 逐字段断言里 `len(nil)` 与 `len([]T{})` 都是 0 |
+| **23** ⭐ | **`Vec<u8>` 在 serde 里是**数字数组**，Go 的 `[]byte` 是 **base64 串** | `{"body":[123,34,...]}` vs `{"body":"eyJhIjox"}`。`encoding/json` 对 `[]byte` 有**专门的** base64 分支 ⇒ 两侧都跑得通、都解析得回来，只是**写出来的文件不是同一份**。而 `HttpRequest` 的注释写着"golden request 对拍依赖它逐字段可比" —— 对拍时两边各写一份文件、逐字节 diff 才发现不一样，单侧跑**永远是绿的** | `Body` 类型显式实现编解码，**只认数字数组**。⚠ 解码要解进 `[]int` 而不是 `[]byte`：后者会**静默接受** base64，而那正是分歧点本身 |
+| **24** ⭐ | **同一个 `null` 在两种字段上结果**相反** | `#[serde(default)] Vec<T>`：缺席补 `[]`，但**显式 null 是失败**（`default` 只管**缺席**，管不到 null）；`Option<T>`：null 就是 None，**收**。实测：`HttpRequest.body:null` 收、`headers:null` 拒、`HttpResponse.body:null` 拒 —— 三种 | 必填字段（`method` / `url` / `status`）用**指针**：缺席与 null 都是 nil，都拒；Vec 字段用 `json.RawMessage` + `rejectNullVec`。⚠ 这是"null 在 Go 侧**静默成功**"的**第三个**实例（前两个：解进 `string` 留空串 —— 见 `enumJSON.unmarshal`；解进指针留 nil） |
+| **25** | **`UPPERCASE` 是第三族命名规则，且**同样约束解码** | 此前两族是 `snake_case`（`partial_success`）与 `lowercase`（`admin`）；`HttpMethod` 是第三族。实测 `"get"` / `"Get"` **都拒**，只收 `"GET"` —— 按"HTTP 方法大小写不敏感"的常识顺手写就分叉 | 同一张表（`enum.go`），文本照向量逐字抄。⚠ 别因为"方法名大写只是显示习惯"就放松解码侧 |
+| **26** ⭐ | **Rust 的 `&T` 非空是**类型保证**，Go 的指针可空 | `Scope::User(&UserId)` 编译器不允许"User 但没有用户"这种态；Go 的 `ScopeUser(nil)` 会**静默退化成 `ScopeLocal`（不过滤）** ⇒ 一次失败的查用户直接变成"把所有人的数据列出来"。这是本项目里唯一一处"指针可空"会放大成**越权**的地方 | `ScopeUser` 对 nil 直接 panic（不返回 error —— 它是写入侧的编程错误，不是运行态可恢复的失败）。`Scope.user` 不导出，逼调用点写 `ScopeLocal()` |
+| **27** | **Go 的数组解码"元素不足补零值"，而 serde 的元组长度是**类型的一部分** | `Vec<(String, String)>` 给 `[["x-a"]]`（1 元组）：serde 拒；Go 的 `[2]string` 静默解成 `["x-a", ""]` —— **凭空多出一个空头值**，而它在上游眼里是"带了一个空 header" | 先解进 `[]string` 再判 `len == 2`。⚠ 对**切片** Go 会报长度错，对**数组**不会 —— 差别就在 `[2]T` 与 `[]T` |
 
 ### ⭐⭐ 第九份向量的做法变了：**path 依赖真实的 mcloud-core，不镜像类型定义**
 
@@ -341,16 +347,21 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 ⇒ **判据：需要"参考实现说形状是什么"时，先问能不能直接依赖它；
 只有在依赖不上（crate 已删 / 依赖拉不全）时才镜像，且镜像必须配整串比对。**
 
-### 步 4 已实测出来的四条（接在步 1 那十九条之后）
+### 步 4 已实测出来的六条（接在步 1 那二十七条之后）
+
+⚠ 编号是**全局连续**的：步 1 占了 1–27，这里从 28 起。
+两个人在同一份文档上加条目时最容易犯的就是各编各的 —— 一旦出现
+两组 `#20`，引用"见 §6.1 #20"就变成歧义，而**歧义恰恰出现在这张表最该被
+引用的场合**（有人正要踩坑、来查条目）。改步 1 的条目数时记得同步这里。
 
 | 现象 | 根因 | 做法 |
 | --- | --- | --- |
-| **20** | **Rust 的 `&'static` / `LazyLock` 只读引用，Go 的切片与指针**都可写** | `REGISTRY` 取出来只能读；Go 若把底层切片或指针交出去，任何调用方都能改写"签到这个能力的声明"，而下一个读到它的能力**不报错**，只是拿到被改过的那一份 —— 注册表是两个产物**共用的唯一契约来源**，被改了就是两个产物同时静默错 | `capabilities.All()` 返回**副本**（`Get` 返回 `Capability` 值而非指针）。⚠ 反向测试已确认：改成 `return registry` 之后 `TestAllCannotBeUsedToMutateTheRegistry` 立刻变红 |
-| **21** ⭐ | **Go 的 map 遍历顺序是**故意随机化**的，Rust 的 `HashMap` 只是"不保证" | `params_digest` 必须先按 key 排序：不排序则"同一组参数"算出两个摘要 ⇒ 互斥失效（同一账号能并发跑两次）。Rust 侧这条**碰巧**稳定了一段时间，Go 侧连这个缓冲都没有 —— **同一进程里两次调用就不一样** | 显式 `sort.Strings`。⚠ 断言不能照搬 Rust 那条"换个顺序再算一次"（Go 里根本构造不出"顺序"），要改成**连算 50 次**；反向测试（把 `sort.Strings` 换成不排序但仍引用 `sort` 的写法）确认它会变红 |
-| **22** | **外部契约的键**不一定**是 snake_case** | `mcloud-app::payload` 的响应体是 Rust 侧用 `json!({...})` **手工**拼的（`runInBatch` / `needsConfirmation` / `defaultAccountMode`），不走 derive ⇒ 它是这套代码里少数几个"契约不是 snake_case"的地方。按"Go 的 struct 默认 snake_case"顺手推字段名，会得到 `run_in_batch`，而后果不是报错，是**前端拿到 `undefined`** | payload 结构体显式写 camelCase tag，并由一条**按文本扫描**的断言守住（`TestPayloadKeysAreCamelCase`）。⚠ **往返测试查不出它**：用什么键名都是绿的 |
-| **23** | **Rust 的 `impl Default` → Go 没有对应物，零值是 nil map** | `RunRegistry::default()` 天然可用；Go 的 `var reg RunRegistry` 两个 map 都是 nil，**读**可以、**写直接 panic**。而"能用零值"的错觉会让构造函数被绕过 | 一律走 `NewRunRegistry()` / `NewEventBus()`，并在文档里写明"零值不可用"。测试只断言"读不 panic"，不假装"零值也能用" |
-| **24** | **"同一条规则两份实现"会发生在 JSON 编解码上** | 产物层要拼对外 payload，于是每个包都想写一遍 `json.NewEncoder` + `SetEscapeHTML(false)`；而 `core` 里那份（`marshalJSON`）是**不导出**的 | 导出 `core.MarshalJSON` / `core.ParseJSON`。⚠ 这不是"方便"，是§5.4 那条原则的正反面：**复用而不是重写**，重写就等于给自己造第二份真相 |
-| **25** | **枚举名容易在产物层再抄一遍字面量** | Rust 的 `payload.rs` 里四个 `*_name` 常量函数（为了 `const fn`）把枚举名又写了一遍；Go 侧若照抄，`RiskLevel` 多一档时这里会**默默输出空串**，而空串在前端就是"没有风险等级" | 一律取 `core` 的 `String()`，并由 `TestEnumNamesComeFromCoreNotFromADuplicateTable` 逐个能力比对（**空串也算失败**） |
+| **28** | **Rust 的 `&'static` / `LazyLock` 只读引用，Go 的切片与指针**都可写** | `REGISTRY` 取出来只能读；Go 若把底层切片或指针交出去，任何调用方都能改写"签到这个能力的声明"，而下一个读到它的能力**不报错**，只是拿到被改过的那一份 —— 注册表是两个产物**共用的唯一契约来源**，被改了就是两个产物同时静默错 | `capabilities.All()` 返回**副本**（`Get` 返回 `Capability` 值而非指针）。⚠ 反向测试已确认：改成 `return registry` 之后 `TestAllCannotBeUsedToMutateTheRegistry` 立刻变红 |
+| **29** ⭐ | **Go 的 map 遍历顺序是**故意随机化**的，Rust 的 `HashMap` 只是"不保证" | `params_digest` 必须先按 key 排序：不排序则"同一组参数"算出两个摘要 ⇒ 互斥失效（同一账号能并发跑两次）。Rust 侧这条**碰巧**稳定了一段时间，Go 侧连这个缓冲都没有 —— **同一进程里两次调用就不一样** | 显式 `sort.Strings`。⚠ 断言不能照搬 Rust 那条"换个顺序再算一次"（Go 里根本构造不出"顺序"），要改成**连算 50 次**；反向测试（把 `sort.Strings` 换成不排序但仍引用 `sort` 的写法）确认它会变红 |
+| **30** | **外部契约的键**不一定**是 snake_case** | `mcloud-app::payload` 的响应体是 Rust 侧用 `json!({...})` **手工**拼的（`runInBatch` / `needsConfirmation` / `defaultAccountMode`），不走 derive ⇒ 它是这套代码里少数几个"契约不是 snake_case"的地方。按"Go 的 struct 默认 snake_case"顺手推字段名，会得到 `run_in_batch`，而后果不是报错，是**前端拿到 `undefined`** | payload 结构体显式写 camelCase tag，并由一条**按文本扫描**的断言守住（`TestPayloadKeysAreCamelCase`）。⚠ **往返测试查不出它**：用什么键名都是绿的 |
+| **31** | **Rust 的 `impl Default` → Go 没有对应物，零值是 nil map** | `RunRegistry::default()` 天然可用；Go 的 `var reg RunRegistry` 两个 map 都是 nil，**读**可以、**写直接 panic**。而"能用零值"的错觉会让构造函数被绕过 | 一律走 `NewRunRegistry()` / `NewEventBus()`，并在文档里写明"零值不可用"。测试只断言"读不 panic"，不假装"零值也能用" |
+| **32** | **"同一条规则两份实现"会发生在 JSON 编解码上** | 产物层要拼对外 payload，于是每个包都想写一遍 `json.NewEncoder` + `SetEscapeHTML(false)`；而 `core` 里那份（`marshalJSON`）是**不导出**的 | 导出 `core.MarshalJSON` / `core.ParseJSON`。⚠ 这不是"方便"，是§5.4 那条原则的正反面：**复用而不是重写**，重写就等于给自己造第二份真相 |
+| **33** | **枚举名容易在产物层再抄一遍字面量** | Rust 的 `payload.rs` 里四个 `*_name` 常量函数（为了 `const fn`）把枚举名又写了一遍；Go 侧若照抄，`RiskLevel` 多一档时这里会**默默输出空串**，而空串在前端就是"没有风险等级" | 一律取 `core` 的 `String()`，并由 `TestEnumNamesComeFromCoreNotFromADuplicateTable` 逐个能力比对（**空串也算失败**） |
 
 ⚠ #13/#14 是**同一个病**的两个面（枚举 JSON），所以判据也共用一条：
 **"有没有 MarshalJSON"这件事必须能被一条断言问出来** —— `enum_test.go` 里的

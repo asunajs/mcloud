@@ -35,10 +35,13 @@
 | `model` | ✅ | Account / RunRecord / 能力注册表 7 个枚举 / AccountState / SmidState / Schedule / Pipeline / Exchange / Webui |
 | `stage` | ✅ | 三阶段存储生命周期 / 四类迁移错误 / RunExecution；**`RunStage` 是 tag 枚举，形状由 serde 产出后对拍** |
 | `legacy` | ✅ | 旧文档 14 个类型 / 规整规则 / 账号视图 / 引用解析；**带来了第九份黄金向量（形状）** |
-| `traits` | ⬜ | 未开始；外加 `error` 后半的 `classify_body` ~400 行 |
+| `traits` | ✅ | HTTP 请求/响应形状 / Clock / Scope / ClaimedRows / 三个 store 接口；**带来了第十份黄金向量（形状）** |
 
-- 落点 `internal/core`，**252 条测试**；读 `test/golden/*.json` 经 `internal/golden`，
+- 落点 `internal/core`，**267 条测试**；读 `test/golden/*.json` 经 `internal/golden`，
   读 `test/fixtures/legacy/*.json` 经 `internal/golden.LoadFixture`，都不复制。
+- ⚠ **步 1 只剩 `error` 后半的 `classify_body` ~400 行**（那台"响应体分类机"）。
+  它之所以一直排在最后：写出来之后**没有消费者**（用到它的层还没迁），
+  而"写下来就没人再看"的代码正是这个项目反复吃亏的地方。
 - 门禁**九条**（新增 `jsontags`）—— 见 `docs/dev-gates.md`。
 - `auth-vectors.json` 从"只有 Rust 读"变成**两边都读**。
 - 步 1 的退出判据是"黄金向量在 Go 侧逐字段复算通过"，**尚未达成**：
@@ -49,8 +52,9 @@
   （`crates/` / `legacy/crates/` / `internal/` / `cmd/`），命中任一即算有消费者，
   **不区分是哪一侧在读**。所以 `app-signin-vectors.json` 至今显示 ✓，
   而读它的**只有已冻结的 Rust 侧**。
-  Go 侧实际读了 6 份**：`crypto` / `pcclient-crypto` / `app-business-crypto` /
-  `auth` / `password-hash` / `enum-json`（见 `internal/core/*_test.go` 里的 `golden.Load`）。
+  Go 侧实际读了 **8 份**：`crypto` / `pcclient-crypto` / `app-business-crypto` /
+  `auth` / `password-hash` / `enum-json` / `legacy-shape` / `traits-shape`
+  （见 `internal/core/*_test.go` 里的 `golden.Load`）。
 - ⚠ `user` 是第一个引入**第三方依赖**（`golang.org/x/crypto`，只为 argon2）的模块。
   它只给**裸 KDF**，PHC 串的编解码要自己写；且 `v=16` 与 `$argon2d$` 两条
   Go 侧**物理上算不出来**，已在向量的 `$crossLanguageGaps` 里登记为
@@ -78,6 +82,15 @@
   `ScheduleTarget` 那次已经证明过一次。
   向量两节：`$serializedShapes`（8 个可序列化类型的空/填充整串）
   与 `$fixtureKeys`（夹具里实际出现的键名，用反射读 tag 逐条认领）。
+- ⚠⚠ **`traits` 是"两侧都跑得通、但写出来的不是同一份东西"最典型的一层**：
+  `HttpRequest` 的注释写着"golden request 对拍依赖它逐字段可比"，
+  而 Rust 侧对它**只断言过一个枚举的一个变体**。第十份向量
+  `traits-shape-vectors.json`（同样 path 依赖真实 mcloud-core）实测出四条
+  Go 侧会**静默接受**的坏形状：`body` 的 base64 串、`headers: null`、
+  缺席的 `method` / `url` / `status`、1 元组的 header。
+  其中 `body` 那条最要命 —— `encoding/json` 对 `[]byte` 有**专门的** base64 分支，
+  于是两侧各自序列化、各自解析都成功，只有两边文件逐字节 diff 才看得见。
+  详见 `go-migration-plan.md` §6.1 #23–#27。
 - ⚠ **测试夹具的 RNG 必须逐模块对齐 Rust 侧各自那一份，不能就近复用**：
   `run.rs` 与 `stage.rs` 各自定义了 `SeededRng`，算法不同
   （前者是 `s*31+7` 的 u8 LCG，**周期恰好 16 —— 正是 UUID 的字节数**）。

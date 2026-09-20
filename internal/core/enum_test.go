@@ -130,6 +130,19 @@ func enumByVariant(t *testing.T, enumName, variant string) any {
 		case "Cli":
 			return SessionCLI
 		}
+	// ⚠ 这里用 **Rust 侧**的类型名：向量由 serde 产出，写的是参考实现里的名字。
+	// Go 侧叫 `HTTPMethod`（首字母缩略词大写），两侧只在这一个类型上不同名。
+	case "HttpMethod":
+		switch variant {
+		case "Get":
+			return MethodGet
+		case "Post":
+			return MethodPost
+		case "Put":
+			return MethodPut
+		case "Delete":
+			return MethodDelete
+		}
 	case "Group":
 		switch variant {
 		case "Daily":
@@ -476,6 +489,7 @@ func TestEnumRoundTripsThroughJSON(t *testing.T) {
 		FieldText, FieldNumber, FieldBool, FieldSelect, FieldMultiSelect, FieldJSON,
 		ScheduleOK, ScheduleError, ScheduleSkipped,
 		PipelineOK, PipelineError, PipelinePartial,
+		MethodGet, MethodPost, MethodPut, MethodDelete,
 	}
 	for _, v := range values {
 		raw, err := marshalJSON(v)
