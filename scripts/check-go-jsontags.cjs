@@ -64,6 +64,10 @@ const UNTAGGED_ALLOWED = {
     '实现 error 接口，对外走 `Error()` 文案，不整块 marshal',
   'internal/capabilities/login.go:QrProgress':
     '扫码登录的**内存**推进结果（`UserInfo any` 已是解开的 JSON 值），本身不是响应体',
+  'internal/upstream/app_signin_session.go:H5Signature':
+    '一次 H5 请求的**四个签名头**（request-id / timestamp / nonce / signature），是内存里的计算结果，不落库也不出响应',
+  'internal/upstream/app_signin_session.go:H5Login':
+    'tyrzLogin 换回的**会话凭据**（jwt + 回显手机号），进程内存里用；Rust 侧 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
   'internal/core/auth.go:AuthInfo':
     'Rust 侧只 derive `Clone, PartialEq`——**刻意不** Serialize（里面是 token）',
   'internal/core/crypto.go:SignSaltPair':
