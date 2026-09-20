@@ -116,7 +116,7 @@
 | `app` 其余 | ⬜ | `login` / `run` / `smid` / `session` / `migration` / `signin/*` 等**依赖 `upstream` 其余部分与 `io`**，步 2 收尾 / 步 3 落地前迁不了 |
 | `upstream::login` | ✅ | 为使 `capabilities::login` 能落地而**提前做的前置**：信封 / 端档案 / 请求体 / 滑块 / 口令哈希 / 判定（**33 条测试**）。步 2 的其余部分（`signin` 协议族）仍未迁 |
 | `upstream::app_client` | ✅ | App 端（iOS）档案：16 段 `x-yun-client-info` 与 14 段 `x-DeviceInfo` **不同值**、三种 `os_version` 写法、`mobile` 前缀的 `Authorization`、未登录占位头（**10 条测试**）。它是整个签到链路的前置 |
-| `upstream::app_signin` | 🟡 建会话段 | 常量（由 `app-signin-vectors` 的 `constants` 钉住）/ `Diagnose` / H5 与原生头 / 百分号编码 / 取值 helper + **建会话三段**（换 SSO token → 取服务端时间戳 → `tyrzLogin`）（**17 条测试**）。⭕ ④⑤⑥⑦（infoV3 / startSignIn / receiveV3 / receiveRevivalReward）未迁 |
+| `upstream::app_signin` | 🟡 过半 | 常量（由 `app-signin-vectors` 的 `constants` 钉住）/ `Diagnose` / H5 与原生头 / 百分号编码 / 取值 helper + **建会话三段**（换 SSO token → 时间戳 → `tyrzLogin`）+ **签到与状态**（`infoV3` / `startSignIn` / `taskListV3` / `doTaskPost`）（**31 条测试**）。⭕ 领取族未迁：`receiveV3` / `receiveRevivalReward` / `multiple` / `receiveTaskExpansion` / 奖品与流水查询 |
 | `cli` / `server` | ⬜ | 在 `app` 之后 |
 
 - 落点 `internal/capabilities`、`internal/exec`（包名 `mcloudexec`）、`internal/app/payload.go`。

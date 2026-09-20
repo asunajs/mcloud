@@ -33,6 +33,22 @@ type appSigninVectors struct {
 		Code        int64  `json:"code"`
 		ExpectToken string `json:"expectToken"`
 	} `json:"envelopes"`
+	InfoV3 struct {
+		Name string `json:"name"`
+		Raw  any    `json:"raw"`
+	} `json:"infoV3"`
+	StartSignIn struct {
+		Name string `json:"name"`
+		Raw  any    `json:"raw"`
+	} `json:"startSignIn"`
+	PrizeRecords struct {
+		Name string `json:"name"`
+		Raw  any    `json:"raw"`
+	} `json:"prizeRecords"`
+	ReceiveRevivalReward struct {
+		Name string `json:"name"`
+		Raw  any    `json:"raw"`
+	} `json:"receiveRevivalReward"`
 }
 
 func loadAppSigninVectors(t *testing.T) appSigninVectors {

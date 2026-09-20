@@ -64,6 +64,14 @@ const UNTAGGED_ALLOWED = {
     '实现 error 接口，对外走 `Error()` 文案，不整块 marshal',
   'internal/capabilities/login.go:QrProgress':
     '扫码登录的**内存**推进结果（`UserInfo any` 已是解开的 JSON 值），本身不是响应体',
+  'internal/upstream/app_signin_status.go:SignInDay':
+    'infoV3 日历格里的一天（`cal[]`），内存解析结果；Rust 侧 derive `Debug, Clone, Copy, PartialEq, Eq`，**不** Serialize',
+  'internal/upstream/app_signin_status.go:ReceiveItem':
+    '账目里的一笔（`receiveList[]`），内存解析结果；它要进 JSON 时走 `mcloud-app` 手工拼的响应体，不整块 marshal',
+  'internal/upstream/app_signin_status.go:SignInStatus':
+    'infoV3 的**整份解析结果**（余额 / 日历 / 账目 / 两个翻倍门槛），同上：Rust 侧不 Serialize，对外由 app 层另拼',
+  'internal/upstream/app_signin_signin.go:SignInResult':
+    'startSignIn 的解析结果（**调用前**的快照），同上；⚠ 它**不是**成败判据，别把它当成对外结论序列化出去',
   'internal/upstream/app_signin_session.go:H5Signature':
     '一次 H5 请求的**四个签名头**（request-id / timestamp / nonce / signature），是内存里的计算结果，不落库也不出响应',
   'internal/upstream/app_signin_session.go:H5Login':
