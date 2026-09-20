@@ -146,6 +146,26 @@ enum PipelineStatus {
     Partial,
 }
 
+/// `RunStage` —— `#[serde(tag = "stage")]`，与 `ScheduleTarget` 同族。
+///
+/// ⚠ 两个变体的**字段顺序不同**：`Done` 是 outcome → manual_steps → summary，
+/// 而 `Failed` 是 summary → manual_steps。整串比对才看得出来，
+/// 逐字段比对会把这个顺序差异整个放过。
+#[derive(Serialize)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+enum RunStage {
+    Running,
+    Done {
+        outcome: RunOutcome,
+        manual_steps: Vec<ManualStep>,
+        summary: Option<String>,
+    },
+    Failed {
+        summary: String,
+        manual_steps: Vec<ManualStep>,
+    },
+}
+
 #[derive(Serialize)]
 #[serde(transparent)]
 struct AccountId(String);
@@ -372,6 +392,40 @@ fn main() {
     let mut tagged_json: Vec<Value> = Vec::new();
     push_json(&mut tagged_json, "schedule-target-capability", ScheduleTarget::Capability { code: "sign".to_string() });
     push_json(&mut tagged_json, "schedule-target-pipeline", ScheduleTarget::Pipeline { id: "p-1".to_string() });
+
+    let step_for_stage = ManualStep {
+        capability: "msg-push".to_string(),
+        account: None,
+        instruction: "请前往 App 手动打开消息通知".to_string(),
+        target: ManualTarget::MobileApp,
+    };
+    push_json(&mut tagged_json, "run-stage-running", RunStage::Running);
+    push_json(
+        &mut tagged_json,
+        "run-stage-done",
+        RunStage::Done {
+            outcome: RunOutcome::ManualRequired,
+            manual_steps: vec![step_for_stage],
+            summary: Some("有一件待办".to_string()),
+        },
+    );
+    push_json(
+        &mut tagged_json,
+        "run-stage-done-empty",
+        RunStage::Done {
+            outcome: RunOutcome::Success,
+            manual_steps: Vec::new(),
+            summary: None,
+        },
+    );
+    push_json(
+        &mut tagged_json,
+        "run-stage-failed",
+        RunStage::Failed {
+            summary: "上游 502".to_string(),
+            manual_steps: Vec::new(),
+        },
+    );
 
     let mut struct_json: Vec<Value> = Vec::new();
     push_json(

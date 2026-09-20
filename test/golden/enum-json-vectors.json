@@ -327,6 +327,22 @@
     {
       "json": "{\"kind\":\"pipeline\",\"id\":\"p-1\"}",
       "kind": "schedule-target-pipeline"
+    },
+    {
+      "json": "{\"stage\":\"running\"}",
+      "kind": "run-stage-running"
+    },
+    {
+      "json": "{\"stage\":\"done\",\"outcome\":\"manual_required\",\"manual_steps\":[{\"capability\":\"msg-push\",\"account\":null,\"instruction\":\"请前往 App 手动打开消息通知\",\"target\":\"mobile_app\"}],\"summary\":\"有一件待办\"}",
+      "kind": "run-stage-done"
+    },
+    {
+      "json": "{\"stage\":\"done\",\"outcome\":\"success\",\"manual_steps\":[],\"summary\":null}",
+      "kind": "run-stage-done-empty"
+    },
+    {
+      "json": "{\"stage\":\"failed\",\"summary\":\"上游 502\",\"manual_steps\":[]}",
+      "kind": "run-stage-failed"
     }
   ]
 }

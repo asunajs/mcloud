@@ -282,12 +282,30 @@ func TestRunEventJSONMatchesSerdeVectors(t *testing.T) {
 // 与库里已存的 `{"kind":"capability","code":"sign"}` 完全不同）。
 func TestTaggedEnumJSONMatchesSerdeVectors(t *testing.T) {
 	v := loadEnumJSONVectors(t)
-	want := map[string]ScheduleTarget{
+
+	doneSteps := []ManualStep{
+		NewManualStep("msg-push", nil, "请前往 App 手动打开消息通知", TargetMobileApp),
+	}
+	doneSummary := "有一件待办"
+
+	// ⚠ `any` 而不是具体类型：两种 tag 枚举的字段**各不相同**，
+	// 硬塞进一个 map[string]X 会让缺的那条拿到**零值**并产出
+	// `{"kind":"capability","code":""}` —— 那种失败信息里看不到"是这个 kind
+	// 没登记"，只会看到一串形状不对的 JSON，很容易被当成序列化写错了。
+	want := map[string]any{
 		"schedule-target-capability": NewScheduleTargetCapability("sign"),
 		"schedule-target-pipeline":   NewScheduleTargetPipeline("p-1"),
+		"run-stage-running":          NewRunStageRunning(),
+		"run-stage-done":             NewRunStageDone(OutcomeManualRequired, doneSteps, &doneSummary),
+		"run-stage-done-empty":       NewRunStageDone(OutcomeSuccess, nil, nil),
+		"run-stage-failed":           NewRunStageFailed("上游 502", nil),
 	}
 	for _, c := range v.TaggedJSON {
-		got, err := marshalJSON(want[c.Kind])
+		w, ok := want[c.Kind]
+		if !ok {
+			t.Fatalf("向量里的 %s 没有对应的 Go 侧构造 —— 补上，别删向量", c.Kind)
+		}
+		got, err := marshalJSON(w)
 		if err != nil {
 			t.Fatalf("%s 序列化失败: %v", c.Kind, err)
 		}

@@ -56,6 +56,8 @@ const UNTAGGED_ALLOWED = {
     'Rust 侧只 derive `Clone, PartialEq`——**刻意不** Serialize（里面是 token）',
   'internal/core/crypto.go:SignSaltPair':
     '签名所需的 (sign, salt) 对，由 crypto 的返回值组装，不整块落库',
+  'internal/core/stage.go:StageError':
+    'Rust 侧 derive `Debug, Clone, PartialEq, Eq, thiserror::Error`，**不** Serialize；对外文案走 `Error()`，不整块 marshal',
   'internal/app/app.go:Deps': '组装根的**依赖集**，不是数据模型',
   'internal/server/server.go:Deps': '组装根的**依赖集**，不是数据模型',
 };
