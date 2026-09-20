@@ -27,12 +27,19 @@
 | `cron` | ✅ | 5/6 段分流、日与周 OR、周日 `0`/`7` 归一化、时区为参数、4 年上界返回 false |
 | `sanitize` | ✅ | header 白名单 / JSON 递归脱敏 / token 形状打码 / 199 号段重映射 / `scan_for_leaks` 自检 / `build_fixture_entry` |
 | `model` | ⚠ 仅 `AccountId` + `CloudStats` | 其余类型（Account / Schedule / Pipeline / WebuiConfig…）等消费者落地时再带过来 |
-| `legacy` `run` `stage` `traits` `user` | ⬜ | 未开始；依赖顺序 `user` → `run` → `model` → `stage` → `legacy` → `traits` |
+| `user` | ✅ | 口令哈希（argon2id PHC 串）/ 会话 token / 数据隔离判据；**带来了第七份黄金向量** |
+| `legacy` `run` `stage` `traits` | ⬜ | 未开始；依赖顺序 `run` → `model` → `stage` → `legacy` → `traits` |
 
-- 落点 `internal/core`，**128 条测试**；读 `test/golden/*.json` 经 `internal/golden`，不复制向量。
+- 落点 `internal/core`，**143 条测试**；读 `test/golden/*.json` 经 `internal/golden`，不复制向量。
 - `auth-vectors.json` 从"只有 Rust 读"变成**两边都读**。
-- 步 1 的退出判据是"6 份黄金向量在 Go 侧逐字段复算通过"，**尚未达成**
-  （`app-signin-vectors` / `login-crypto-vectors` 的消费者在步 2 / 待接线）。
+- 步 1 的退出判据是"黄金向量在 Go 侧逐字段复算通过"，**尚未达成**：
+  `app-signin-vectors` 的消费者在步 2 接线，而 `login-crypto-vectors.json`
+  至今仍是**死向量**（有生成器 `scripts/gen-login-crypto-vectors.cjs`、无消费者），
+  且它的 `§guid32` 连拼接规则都没在向量里给出 —— 详见 `go-migration-plan.md` §6.1 末尾。
+- ⚠ `user` 是第一个引入**第三方依赖**（`golang.org/x/crypto`，只为 argon2）的模块。
+  它只给**裸 KDF**，PHC 串的编解码要自己写；且 `v=16` 与 `$argon2d$` 两条
+  Go 侧**物理上算不出来**，已在向量的 `$crossLanguageGaps` 里登记为
+  "Rust 是 mismatch、Go 是 error"（详见 `go-migration-plan.md` §6.1）。
 - ⚠ `cron` 与 `sanitize` **没有黄金向量** —— 它们的规格来自 Rust 侧的单元测试
   （`sanitize` 的 5 个测试文件共 348 行），迁移时是**逐条平移**的，不是照文档重写。
 

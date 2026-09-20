@@ -355,8 +355,9 @@ Rust 源文件不在管辖范围 —— 文件名就是模块名，`mod my-mod;`
 它同时做两件 Rust 侧做不到的事：
 
 - 对**每个** golden 文件跑脱敏扫描（Rust 只扫 `include_str!` 进来的那些）；
-- 列出**没有任何 Rust 测试读取**的向量文件
-  （`app-business-crypto-vectors.json` 与 `login-crypto-vectors.json` 目前是这种状态）。
+- 列出**没有任何测试读取**的向量文件
+  （`login-crypto-vectors.json` 目前是这唯一一种状态；
+  `app-business-crypto-vectors.json` 已随 Go 侧 `crypto` 落地而有消费者）。
 
 覆盖范围是**显式**的：没有校验器的段会被**打印出来**，不假装通过。
 
