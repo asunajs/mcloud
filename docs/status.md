@@ -16,7 +16,11 @@
 
 ## Go 侧迁移实况（2026-09-20 起）
 
-**当前：步 1（`mcloud-core`）进行中。**
+**当前：步 1（`mcloud-core`）收尾中（`legacy` 模块有未提交在途代码）；步 4 的第一块已落地（`capabilities` 注册表 + `exec` + `app::payload`）。**
+
+> 步 4 的落点见下方「步 4 实况」一节 —— 它**没有**按 `capabilities → exec → app → server/cli`
+> 一口气做完：`capabilities::login` 与 `app` 的绝大多数模块**依赖步 2（`mcloud-upstream`）与
+> 步 3（`mcloud-io`）**，那两步还没迁，所以先落了不依赖它们的三块。
 
 | `mcloud-core` 的模块 | Go 侧 | 说明 |
 | --- | --- | --- |
@@ -85,6 +89,25 @@
   `model` 那批。⚠ **往返测试救不了它**（用什么字段名都是绿的），
   所以新增了第九条门禁 `scripts/check-go-jsontags.cjs`：
   混合 tag 直接失败、全无 tag 必须进白名单并写明理由。
+
+### 步 4 实况（2026-09-20 起）
+
+| 模块 | Go 侧 | 说明 |
+| --- | --- | --- |
+| `capabilities` 注册表 | ✅ | `Capability` / `REGISTRY` / `get` / `list_visible` / `list_batchable`（**10 条测试**）。对应 `capabilities/src/lib.rs` |
+| `capabilities::login` | ⬜ | **未开始** —— 它是 `upstream::login` 的消费者（`ClientProfile` / `PollOutcome` / `SendSmsOutcome` / `SliderPuzzle` / `new_session_id` / `qr_payload` / `classify_poll` …），**步 2 落地前迁不了** |
+| `exec` | ✅ | 并发闸 / 互斥键 / 参数摘要 / 准入（幂等 + 互斥一起判）/ 事件总线（**35 条测试**）。对应 `mcloud-exec/src/lib.rs` |
+| `app::payload` | ✅ | `/api/capabilities` 与 `/api/version` 的响应体（**7 条测试**）。纯：只依赖 `capabilities` + `core` |
+| `app` 其余 | ⬜ | `login` / `run` / `smid` / `session` / `migration` / `signin/*` 等**依赖 `upstream` 与 `io`**，步 2/步 3 落地前迁不了 |
+| `cli` / `server` | ⬜ | 在 `app` 之后 |
+
+- 落点 `internal/capabilities`、`internal/exec`（包名 `mcloudexec`）、`internal/app/payload.go`。
+- ⚠ **`app` 现在仍只是"组装根接上了 IO"那个骨架**（`internal/app/app.go` 只有一个 `Deps`）。
+  payload 是第一个真正有内容的模块。
+- ⚠ `core.MarshalJSON` / `core.ParseJSON` 这次**导出**了：产物层要拼对外 payload，
+  而"不转义 HTML + 不补尾换行"这两条规则**必须只有一份实现**（详见方案 §6.1 #22）。
+- ⚠ `core.Version` 是新增常量 —— Go 没有 `env!("CARGO_PKG_VERSION")`，
+  它得与 `legacy/Cargo.toml` 的 `version` **手工同步**（不同步的表现只是两个产物报的版本号不一样）。
 
 ---
 

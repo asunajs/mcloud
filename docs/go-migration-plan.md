@@ -341,6 +341,17 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 ⇒ **判据：需要"参考实现说形状是什么"时，先问能不能直接依赖它；
 只有在依赖不上（crate 已删 / 依赖拉不全）时才镜像，且镜像必须配整串比对。**
 
+### 步 4 已实测出来的四条（接在步 1 那十九条之后）
+
+| 现象 | 根因 | 做法 |
+| --- | --- | --- |
+| **20** | **Rust 的 `&'static` / `LazyLock` 只读引用，Go 的切片与指针**都可写** | `REGISTRY` 取出来只能读；Go 若把底层切片或指针交出去，任何调用方都能改写"签到这个能力的声明"，而下一个读到它的能力**不报错**，只是拿到被改过的那一份 —— 注册表是两个产物**共用的唯一契约来源**，被改了就是两个产物同时静默错 | `capabilities.All()` 返回**副本**（`Get` 返回 `Capability` 值而非指针）。⚠ 反向测试已确认：改成 `return registry` 之后 `TestAllCannotBeUsedToMutateTheRegistry` 立刻变红 |
+| **21** ⭐ | **Go 的 map 遍历顺序是**故意随机化**的，Rust 的 `HashMap` 只是"不保证" | `params_digest` 必须先按 key 排序：不排序则"同一组参数"算出两个摘要 ⇒ 互斥失效（同一账号能并发跑两次）。Rust 侧这条**碰巧**稳定了一段时间，Go 侧连这个缓冲都没有 —— **同一进程里两次调用就不一样** | 显式 `sort.Strings`。⚠ 断言不能照搬 Rust 那条"换个顺序再算一次"（Go 里根本构造不出"顺序"），要改成**连算 50 次**；反向测试（把 `sort.Strings` 换成不排序但仍引用 `sort` 的写法）确认它会变红 |
+| **22** | **外部契约的键**不一定**是 snake_case** | `mcloud-app::payload` 的响应体是 Rust 侧用 `json!({...})` **手工**拼的（`runInBatch` / `needsConfirmation` / `defaultAccountMode`），不走 derive ⇒ 它是这套代码里少数几个"契约不是 snake_case"的地方。按"Go 的 struct 默认 snake_case"顺手推字段名，会得到 `run_in_batch`，而后果不是报错，是**前端拿到 `undefined`** | payload 结构体显式写 camelCase tag，并由一条**按文本扫描**的断言守住（`TestPayloadKeysAreCamelCase`）。⚠ **往返测试查不出它**：用什么键名都是绿的 |
+| **23** | **Rust 的 `impl Default` → Go 没有对应物，零值是 nil map** | `RunRegistry::default()` 天然可用；Go 的 `var reg RunRegistry` 两个 map 都是 nil，**读**可以、**写直接 panic**。而"能用零值"的错觉会让构造函数被绕过 | 一律走 `NewRunRegistry()` / `NewEventBus()`，并在文档里写明"零值不可用"。测试只断言"读不 panic"，不假装"零值也能用" |
+| **24** | **"同一条规则两份实现"会发生在 JSON 编解码上** | 产物层要拼对外 payload，于是每个包都想写一遍 `json.NewEncoder` + `SetEscapeHTML(false)`；而 `core` 里那份（`marshalJSON`）是**不导出**的 | 导出 `core.MarshalJSON` / `core.ParseJSON`。⚠ 这不是"方便"，是§5.4 那条原则的正反面：**复用而不是重写**，重写就等于给自己造第二份真相 |
+| **25** | **枚举名容易在产物层再抄一遍字面量** | Rust 的 `payload.rs` 里四个 `*_name` 常量函数（为了 `const fn`）把枚举名又写了一遍；Go 侧若照抄，`RiskLevel` 多一档时这里会**默默输出空串**，而空串在前端就是"没有风险等级" | 一律取 `core` 的 `String()`，并由 `TestEnumNamesComeFromCoreNotFromADuplicateTable` 逐个能力比对（**空串也算失败**） |
+
 ⚠ #13/#14 是**同一个病**的两个面（枚举 JSON），所以判据也共用一条：
 **"有没有 MarshalJSON"这件事必须能被一条断言问出来** —— `enum_test.go` 里的
 第一条断言是"序列化结果的首字符必须是 `\"`"，它专门用来接住"漏写了 MarshalJSON"
@@ -493,7 +504,7 @@ PC 与 App 是**两套客户端**，同名同形的常量值可能不同，而"�
 | **1** | `mcloud-core`（纯计算，标准库覆盖最好） | 黄金向量在 Go 侧逐字段复算通过 | 🔄 **进行中**：`crypto` / `error`（前半）/ `auth` / `pure` / `cron` / `sanitize` / `user` 已落（**143 条测试**）。按 Rust 侧 src 行数口径约 **50%**；余 `run`（1,123 行）→ `model` → `stage` → `legacy` → `traits`，另 `error` 后半的 `classify_body`。⚠ 判据要按"**Go 侧**读了几份向量"算，别照门禁那行 `✓ 有测试读取` —— 它不区分是哪一侧在读（见 `status.md`） |
 | **2** | `mcloud-upstream`（协议层） | 同一条抓包请求 Rust/Go **双跑**，header 顺序 / percent-encode / 签名串逐字节一致 | ⬜ |
 | **3** | `mcloud-io`（唯一 IO 层） | 纯 Go sqlite 驱动下 schema v1→v7 迁移 + 老库只读导入结果一致 | ⬜ |
-| **4** | `capabilities` → `exec` → `app` → `server` / `cli` | 19 项能力逐项打勾；CLI 参数互斥与四态输出一致；`api_contract` 契约测试平移，前端不动 | ⬜ |
+| **4** | `capabilities` → `exec` → `app` → `server` / `cli` | 19 项能力逐项打勾；CLI 参数互斥与四态输出一致；`api_contract` 契约测试平移，前端不动 | 🔄 **进行中**：`capabilities` 注册表 / `exec` / `app::payload` 已落（**52 条测试**）。⚠ **它依赖步 2 与步 3**：`capabilities::login` 是 `upstream::login` 的消费者，`app` 其余模块与 `server` 还要 `io` —— 所以先落了不依赖它们的三块，见 `status.md` 的「步 4 实况」 |
 
 ### 步 0 的实测记录
 
