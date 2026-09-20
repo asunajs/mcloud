@@ -377,7 +377,10 @@ function consumedByRust() {
       const p = path.join(dir, ent.name);
       if (ent.isDirectory()) walk(p);
       else if (ent.name.endsWith(".rs")) {
-        for (const m of fs.readFileSync(p, "utf8").matchAll(/include_str!\("([^"]+)"\)/g)) {
+        // `cargo fmt` 会把超长的 `include_str!("…")` 折成多行（相对路径在
+        // `src/<模块>/tests/` 下尤其容易顶到 max_width），所以括号与字面量
+        // 之间可能有换行 —— 这里容忍空白，不然会误报"死向量"。
+        for (const m of fs.readFileSync(p, "utf8").matchAll(/include_str!\(\s*"([^"]+)"\s*\)/g)) {
           const base = path.basename(m[1]);
           if (base.endsWith(".json")) used.add(base);
         }
