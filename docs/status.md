@@ -16,7 +16,7 @@
 
 ## Go 侧迁移实况（2026-09-20 起）
 
-**当前：步 1（`mcloud-core`）收尾中（只剩 `error` 后半的 `classify_body`）；步 4 已落地 `capabilities`（注册表 + `login`）、`exec`、`app::payload`，并为此**前置**补了步 2 的 `upstream::login`。步 3（`mcloud-io`）已开工：schema / store / store::user / store::config / 时间列格式对齐五块落地，剩 `legacy_import`、`fixture` / HTTP 客户端 / 随机源。**
+**当前：步 1（`mcloud-core`）收尾中（只剩 `error` 后半的 `classify_body`）；**步 2（`mcloud-upstream`）已整族落地**（`login` / `client` / `app_client` / `app_login` / `app_signin` 全族 / `smid`，150 条测试）；步 4 已落地 `capabilities`（注册表 + `login`）、`exec`、`app::payload`。步 3（`mcloud-io`）已开工：schema / store / store::user / store::config / 时间列格式对齐五块落地，剩 `legacy_import`、`fixture` / HTTP 客户端 / 随机源。**
 
 > ⚠ **有三个会话在同一棵树上并行迁移**（步 1 = `core`、步 2 = `upstream`、步 3 = `io`、步 4 = 组装层）。
 > 已付出的可见代价：`docs/go-migration-plan.md` 的 §6.1 一度出现**两组 `#20`**，
@@ -168,10 +168,11 @@
 | `capabilities::login` | ✅ | 扫码状态机（推进 / 终态不可逆 / 自身 TTL / 码的映射 / 限流非终态）+ 短信链路（滑块降级 / 配额 / 登录）+ 登录结果 → `auth` 与领域对象（**22 条测试**）。前置的 `upstream::login` 已先落地 |
 | `exec` | ✅ | 并发闸 / 互斥键 / 参数摘要 / 准入（幂等 + 互斥一起判）/ 事件总线（**35 条测试**）。对应 `mcloud-exec/src/lib.rs` |
 | `app::payload` | ✅ | `/api/capabilities` 与 `/api/version` 的响应体（**7 条测试**）。纯：只依赖 `capabilities` + `core` |
-| `app` 其余 | ⬜ | `login` / `run` / `smid` / `session` / `migration` / `signin/*` 等**依赖 `upstream` 其余部分与 `io`**，步 2 收尾 / 步 3 落地前迁不了 |
+| `app` 其余 | ⬜ | `login` / `run` / `smid` / `session` / `migration` / `signin/*` 等**只依赖 `io`**（`upstream` 那侧已整族落地），步 3 落地前迁不了 |
 | `upstream::login` | ✅ | 为使 `capabilities::login` 能落地而**提前做的前置**：信封 / 端档案 / 请求体 / 滑块 / 口令哈希 / 判定（**33 条测试**）。步 2 的其余部分（`signin` 协议族）仍未迁 |
 | `upstream::app_client` | ✅ | App 端（iOS）档案：16 段 `x-yun-client-info` 与 14 段 `x-DeviceInfo` **不同值**、三种 `os_version` 写法、`mobile` 前缀的 `Authorization`、未登录占位头（**10 条测试**）。它是整个签到链路的前置 |
 | `upstream::app_login` | ✅ | App 端验证码登录（`632` 行）：三层封装（明文 JSON → AES-128-ECB hex → **末 10 位错位**）、`hcy-cool-flag` **主动不发**、滑块 H5 的 `data` 只有两个头、`9441`/`9103`/`9999` 三态判定（**18 条测试**）。中心断言 `appLoginWire` 取自 Rust 侧 `crypto/tests/app.rs`（抓包侧独立脚本算出），Go 复算同一串 ⇒ 真跨实现对拍 |
+| `upstream::smid` | ✅ | 设备指纹（`733` 行）：`smid` 拼接 / `priId` / `tn`（**`tn` 还是空串时算摘要**）/ 25 条 DES 规则整表对拍 TS 侧向量 / 特征体绑定账号（`SmFingerprint`）与每次现算的一半（`SmUpload`）/ 上报与 `deviceId`（拼 `B` 前缀）（**18 条测试**）。⭐ `ep` **复现不了**是算法性质（PKCS#1 v1.5 随机填充 + 盲化），不是随机源没注入到位 —— 断言显式排除它并另开一条钉住 |
 | `upstream::app_signin` | ✅ **整族落地** | 常量（由 `app-signin-vectors` 的 `constants` 钉住）/ `Diagnose` / H5 与原生头 / 百分号编码 / 取值 helper + 建会话三段 + 签到与状态（`infoV3` / `startSignIn` / `taskListV3` / `doTaskPost`）+ 领取族（`receiveV3` / `receiveRevivalReward` / `multiple` / `receiveTaskExpansion`）+ 记录族（`cloudRecordV2` / `record` / `backupgift/*`）+ **发送层**（`Upstream` 上的 15 个方法）（**113 条测试，整包合计**）。`app-signin-vectors.json` 从"只有 Rust 读"变成**两边都读** |
 | `cli` / `server` | ⬜ | 在 `app` 之后 |
 

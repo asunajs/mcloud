@@ -184,6 +184,13 @@ func (e *Envelope) EnsureOK() (any, *core.Error) {
 //
 // ⚠ 数字在这里是 [json.Number]（**字符串**形态的字面量），不是 float64 ——
 // 见 [Envelope] 的说明。所以两条分支都要走，缺一条就会把 `"0"` 当成"没有信封"。
+//
+// # 为什么还要收 `int` / `int64`
+//
+// 同一个 `map[string]any` 在 Go 里有两种来源：从响应体解出来的（数字是
+// [json.Number]），以及**我们自己拼出来的**（`BuildSmData` 返回的那个上报体，
+// 数字是 `int`）。只认前一种，后一种就会静默返回 `(0, false)` ——
+// 表现为"encode 应为 5，实得 5"这种看不懂的错误（§6.1 #34 的第二种形态）。
 func asInt64(value any) (int64, bool) {
 	switch v := value.(type) {
 	case json.Number:
@@ -194,6 +201,10 @@ func asInt64(value any) (int64, bool) {
 		return n, err == nil
 	case float64:
 		return int64(v), true
+	case int:
+		return int64(v), true
+	case int64:
+		return v, true
 	}
 	return 0, false
 }

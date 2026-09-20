@@ -5,6 +5,11 @@
 
 package core
 
+import (
+	"bytes"
+	"encoding/json"
+)
+
 // MarshalJSON 序列化，且**与 `serde_json::to_vec` 逐字节同形**。
 //
 // 这是 [marshalJSON] 的导出版本，给**纯层之外**的产物用
@@ -26,3 +31,43 @@ func MarshalJSON(value any) ([]byte, error) { return marshalJSON(value) }
 // 与 [MarshalJSON] 同样的理由导出：产物层读配置与读响应体时
 // 也要能拿到"19 位标识不丢精度"那条保证（见 [parseJSON]）。
 func ParseJSON(text string) (any, bool) { return parseJSON(text) }
+
+// ParseJSONTo 是解析到**具体类型**的版本，语义对齐 `serde_json::from_str::<T>`。
+//
+// # 为什么要有它，而不是让每个包自己 `json.Unmarshal`
+//
+// [ParseJSON] 那条"19 位标识不丢精度"的保证（`UseNumber`）是**解码器**上的开关，
+// 而 `json.Unmarshal` 走的是默认配置。要落到一个结构体上的时候，
+// 顺手写一句 `json.Unmarshal` 就绕开了它 —— 那种绕开不报错，
+// 只在某个 int64 字段被悄悄截断成 float64 时才显形。
+//
+// 所以它复用的仍是同一个解码器：先 `UseNumber` 解成通用值，再转进 `T`。
+// 同理"尾随内容必须报错"那条（[parseJSON] 里的 `io.EOF` 检查）也一并继承。
+//
+// ⚠ 走一遍通用值意味着 `T` 里**不要**指望拿到 `json.RawMessage` 之外的原始字节；
+// 需要原样保留的字段用 `any`（会拿到 `json.Number` 形态的数字）。
+func ParseJSONTo[T any](text string) (T, bool) {
+	var out T
+	if !parseInto(text, &out) {
+		var zero T
+		return zero, false
+	}
+	return out, true
+}
+
+// parseInto 先按 [parseJSON] 的口径解一遍（同时继承它的"尾随内容"检查），
+// 再把结果转进 `out`。
+func parseInto(text string, out any) bool {
+	value, ok := parseJSON(text)
+	if !ok {
+		return false
+	}
+	// 走 marshalJSON 而不是 json.Marshal：转义与尾换行的规则必须只有一份。
+	buf, err := marshalJSON(value)
+	if err != nil {
+		return false
+	}
+	dec := json.NewDecoder(bytes.NewReader(buf))
+	dec.UseNumber()
+	return dec.Decode(out) == nil
+}
