@@ -16,7 +16,14 @@
 
 ## Go 侧迁移实况（2026-09-20 起）
 
-**当前：步 1（`mcloud-core`）收尾中（只剩 `error` 后半的 `classify_body`）；步 4 已落地 `capabilities`（注册表 + `login`）、`exec`、`app::payload`，并为此**前置**补了步 2 的 `upstream::login`。**
+**当前：步 1（`mcloud-core`）收尾中（只剩 `error` 后半的 `classify_body`）；步 4 已落地 `capabilities`（注册表 + `login`）、`exec`、`app::payload`，并为此**前置**补了步 2 的 `upstream::login`。步 3（`mcloud-io`）已开工：schema / store / store::user 三块落地，剩 `store::config`、`legacy_import`、`fixture` / HTTP 客户端 / 随机源。**
+
+> ⚠ **有三个会话在同一棵树上并行迁移**（步 1 = `core`、步 2 = `upstream`、步 3 = `io`、步 4 = 组装层）。
+> 已付出的可见代价：`docs/go-migration-plan.md` 的 §6.1 一度出现**两组 `#20`**，
+> 现已统一为**全局连续 + 追加式**（步 1 = 1–27，步 4 = 28–39，步 3 = 40–41）。
+> ⚠ 动 `docs/`、共享脚本、门禁白名单前**先看 `git status`**：
+> 白名单条目若指向**未提交**的文件，干净检出会让 `jsontags` 门禁变红 ——
+> 条目与文件必须**同进同出**。
 
 > 步 4 的落点见下方「步 4 实况」一节 —— 它**没有**按 `capabilities → exec → app → server/cli`
 > 一口气做完：`capabilities::login` 与 `app` 的绝大多数模块**依赖步 2（`mcloud-upstream`）与
@@ -39,7 +46,7 @@
 | `legacy` | ✅ | 旧文档 14 个类型 / 规整规则 / 账号视图 / 引用解析；**带来了第九份黄金向量（形状）** |
 | `traits` | ✅ | HTTP 请求/响应形状 / Clock / Scope / ClaimedRows / 三个 store 接口；**带来了第十份黄金向量（形状）** |
 
-- 落点 `internal/core`，**267 条测试**；读 `test/golden/*.json` 经 `internal/golden`，
+- 落点 `internal/core`，**267 条测试**（全项目 530 条）；读 `test/golden/*.json` 经 `internal/golden`，
   读 `test/fixtures/legacy/*.json` 经 `internal/golden.LoadFixture`，都不复制。
 - ⚠ **步 1 只剩 `error` 后半的 `classify_body` ~400 行**（那台"响应体分类机"）。
   它之所以一直排在最后：写出来之后**没有消费者**（用到它的层还没迁），
@@ -54,9 +61,10 @@
   （`crates/` / `legacy/crates/` / `internal/` / `cmd/`），命中任一即算有消费者，
   **不区分是哪一侧在读**。所以 `app-signin-vectors.json` 至今显示 ✓，
   而读它的**只有已冻结的 Rust 侧**。
-  Go 侧实际读了 **8 份**：`crypto` / `pcclient-crypto` / `app-business-crypto` /
-  `auth` / `password-hash` / `enum-json` / `legacy-shape` / `traits-shape`
-  （见 `internal/core/*_test.go` 里的 `golden.Load`）。
+  Go 侧实际读了 **9 份**：`crypto` / `pcclient-crypto` / `app-business-crypto` /
+  `auth` / `password-hash` / `enum-json` / `legacy-shape` / `traits-shape` /
+  `datetime-format`
+  （见 `internal/core/*_test.go` 与 `internal/io/*_test.go` 里的 `golden.Load`）。
 - ⚠ `user` 是第一个引入**第三方依赖**（`golang.org/x/crypto`，只为 argon2）的模块。
   它只给**裸 KDF**，PHC 串的编解码要自己写；且 `v=16` 与 `$argon2d$` 两条
   Go 侧**物理上算不出来**，已在向量的 `$crossLanguageGaps` 里登记为
@@ -105,6 +113,38 @@
   所以新增了第九条门禁 `scripts/check-go-jsontags.cjs`：
   混合 tag 直接失败、全无 tag 必须进白名单并写明理由。
 
+### 步 3 实况（2026-09-20 起）
+
+**这是全项目唯一的 IO 层**（8,697 行），也是 `app` / `cli` / `server` 的阻塞点。
+
+| `mcloud-io` 的模块 | Go 侧 | 说明 |
+| --- | --- | --- |
+| `store::schema` | ✅ | schema v1→v8 的 8 条幂等迁移链；**18 条测试**逐级验证 |
+| `store` | ✅ | `StateStore` 全套（账号 / 登录态 / smid / 云朵快照 / 运行记录 / 事件流） |
+| `store::user` | ✅ | `UserStore` + `IssueSession`（口令 / 会话 / 清理过期） |
+| `datetime`（新增） | ✅ | 与 chrono **逐字节一致**的时间写法，见下 |
+| `store::config` | ⬜ | 726 行 + 574 行测试 |
+| `legacy_import` | ⬜ | ~1,600 行 + 1,163 行测试 —— **"老库只读导入结果一致"这条退出判据的载体** |
+| `fixture` / `reqwest_client` / `random` | ⬜ | 398 / 232 / 54 行 |
+
+- **驱动 = `modernc.org/sqlite` v1.59.0（纯 Go，免 cgo）**，方案 §8 早已拍板。
+  实测它吃下了带 `BEGIN/COMMIT` 的**多语句**迁移 —— 这一点不显然
+  （`Exec` 多语句是驱动相关的），所以先写 schema 测试再往下走。
+- 落点 `internal/io`（**包名是 `mcloudio`**，目录名与包名刻意不同）；**76 条测试**。
+- ⚠⚠ **时间列必须与 chrono 逐字节一致**（`internal/io/datetime.go`）：
+  `sessions.expires_at` / `users.created_at` / `runs.started_at` 都在 SQL 里做
+  **字符串比较与排序**，而 chrono 写 `+00:00` + AutoSi（0/3/6/9 位）、
+  Go 的 `RFC3339Nano` 写 `Z` + 去尾零。混着的后果是 `+`(0x2B) < `Z`(0x5A)
+  让**同一时刻的 Rust 行永远排在 Go 行之前** —— 不报错，只在比较与排序时显形。
+  规则由第十一份向量 `datetime-format-vectors.json` 钉（**chrono 0.4.45 真跑**：
+  17 条写出 + 19 条读取），详见 `go-migration-plan.md` §6.1 #16 / #41。
+- ⚠ 读取侧 Go **严格更严**：实测四种 chrono 收而 Go 拒（空格代替 `T`、
+  小写 `t`/`z`、闰秒 `12:00:60`）。方向安全，且这四种 chrono 自己从不写出来 ——
+  逐条登记在 `chronoAcceptsGoRejects` 里**待复查**（名单里出现不了的条目会判失败）。
+- ⚠ **照抄 SQL 时注释里的反引号要全部去掉**：Go 的原始字符串用反引号作定界符，
+  `schema.rs` 里 SQLite 标识符引用（`` `sha256` `` / `` `raw` ``）会把字面量**当场截断**，
+  而编译器报的错指不到"注释里有个反引号"（§6.1 #40）。
+
 ### 步 4 实况（2026-09-20 起）
 
 | 模块 | Go 侧 | 说明 |
@@ -116,7 +156,7 @@
 | `app` 其余 | ⬜ | `login` / `run` / `smid` / `session` / `migration` / `signin/*` 等**依赖 `upstream` 其余部分与 `io`**，步 2 收尾 / 步 3 落地前迁不了 |
 | `upstream::login` | ✅ | 为使 `capabilities::login` 能落地而**提前做的前置**：信封 / 端档案 / 请求体 / 滑块 / 口令哈希 / 判定（**33 条测试**）。步 2 的其余部分（`signin` 协议族）仍未迁 |
 | `upstream::app_client` | ✅ | App 端（iOS）档案：16 段 `x-yun-client-info` 与 14 段 `x-DeviceInfo` **不同值**、三种 `os_version` 写法、`mobile` 前缀的 `Authorization`、未登录占位头（**10 条测试**）。它是整个签到链路的前置 |
-| `upstream::app_signin` | 🟡 过半 | 常量（由 `app-signin-vectors` 的 `constants` 钉住）/ `Diagnose` / H5 与原生头 / 百分号编码 / 取值 helper + **建会话三段**（换 SSO token → 时间戳 → `tyrzLogin`）+ **签到与状态**（`infoV3` / `startSignIn` / `taskListV3` / `doTaskPost`）（**31 条测试**）。⭕ 领取族未迁：`receiveV3` / `receiveRevivalReward` / `multiple` / `receiveTaskExpansion` / 奖品与流水查询 |
+| `upstream::app_signin` | ✅ **整族落地** | 常量（由 `app-signin-vectors` 的 `constants` 钉住）/ `Diagnose` / H5 与原生头 / 百分号编码 / 取值 helper + 建会话三段 + 签到与状态（`infoV3` / `startSignIn` / `taskListV3` / `doTaskPost`）+ 领取族（`receiveV3` / `receiveRevivalReward` / `multiple` / `receiveTaskExpansion`）+ 记录族（`cloudRecordV2` / `record` / `backupgift/*`）+ **发送层**（`Upstream` 上的 15 个方法）（**113 条测试，整包合计**）。`app-signin-vectors.json` 从"只有 Rust 读"变成**两边都读** |
 | `cli` / `server` | ⬜ | 在 `app` 之后 |
 
 - 落点 `internal/capabilities`、`internal/exec`（包名 `mcloudexec`）、`internal/app/payload.go`。

@@ -68,7 +68,7 @@ func (s *SqliteStore) UpsertUser(ctx context.Context, user *core.User) error {
 		user.Name,
 		string(user.PasswordHash),
 		user.Role.String(),
-		user.CreatedAt.UTC().Format(time.RFC3339Nano),
+		formatTime(user.CreatedAt),
 	)
 	if err != nil {
 		return mapUserWrite(err)
@@ -144,7 +144,7 @@ func (s *SqliteStore) InsertSession(ctx context.Context, session *core.Session) 
 		"INSERT INTO sessions (token_hash, user_id, expires_at, kind) VALUES (?, ?, ?, ?)",
 		session.TokenHash,
 		session.UserID.String(),
-		session.ExpiresAt.UTC().Format(time.RFC3339Nano),
+		formatTime(session.ExpiresAt),
 		session.Kind.String(),
 	)
 	if err != nil {
@@ -198,7 +198,7 @@ func (s *SqliteStore) DeleteSession(ctx context.Context, tokenHash string) (bool
 // 两边不一致会出现"清理没删、但校验说无效"的窗口。
 func (s *SqliteStore) DeleteExpiredSessions(ctx context.Context, now time.Time) (uint64, error) {
 	res, err := s.db.ExecContext(ctx, "DELETE FROM sessions WHERE expires_at <= ?",
-		now.UTC().Format(time.RFC3339Nano))
+		formatTime(now))
 	if err != nil {
 		return 0, mapSQLite(err)
 	}

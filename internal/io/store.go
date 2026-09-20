@@ -121,15 +121,14 @@ func optI64(p *int64) any {
 
 // optTime 序列化可选时间列。
 //
-// ⚠ 用 [time.RFC3339Nano]（Go 侧口径）。Rust 侧是 chrono 的 `to_rfc3339()`：
-// UTC 下它给 `+00:00` 而 Go 给 `Z`，且亚秒位数的取舍也不同（chrono AutoSi
-// 用 3/6/9 位、Go 去掉末尾 0）。两边都**能解析对方的串**，所以读老库没问题，
-// 但逐字节比对库文件时会看到差异 —— 与方案 §6.1 #16 记的是同一条。
+// 走 [formatTime]（与 chrono 逐字节一致），**不是** [time.RFC3339Nano] ——
+// 理由见 `datetime.go`：这一列在 SQL 里被当字符串比较与排序，
+// 混两种写法会让"同一时刻的先后"取决于后缀。
 func optTime(p *time.Time) any {
 	if p == nil {
 		return nil
 	}
-	return p.UTC().Format(time.RFC3339Nano)
+	return formatTime(*p)
 }
 
 func optSecret(p *core.SecretValue) any {
@@ -155,8 +154,14 @@ func optUserDomainID(p *core.UserDomainID) any {
 
 // parseTime 解析库里的时间列。
 //
-// ⚠ 用 [time.RFC3339] 布局，但 Go 的 `time.Parse` **额外接受**紧跟在秒后面的
-// 小数部分 —— 所以它同时吃 chrono 的 `+00:00` 与 Go 的 `Z`、也吃带亚秒的串。
+// 吃 chrono 写出来的全部形态（`+00:00` 后缀、0/3/6/9 位亚秒）以及 Go 自己
+// 曾经写过的 `Z` —— 老库两种都可能有。
+//
+// ⚠ 与 chrono 的 `parse_from_rfc3339` 相比，Go **严格更严**，实测有四处
+// chrono 收而 Go 拒：空格代替 `T`、小写 `t`/`z`、闰秒 `12:00:60`。
+// 方向是安全的（Go 绝不会把 chrono 认为非法的串当合法读进来），
+// 而且这四种 chrono 自己**从不写出来**。逐条钉在
+// `test/golden/datetime-format-vectors.json` 的 `$parse` 段里。
 func parseTime(raw string) (time.Time, bool) {
 	t, err := time.Parse(time.RFC3339, raw)
 	if err != nil {
@@ -475,7 +480,7 @@ func (s *SqliteStore) SetAccountCloud(
 	}
 	if _, err := s.db.ExecContext(ctx,
 		"UPDATE accounts SET cloud_current = ?, cloud_updated_at = ? WHERE id = ?",
-		count, at.UTC().Format(time.RFC3339Nano), id.String()); err != nil {
+		count, formatTime(at), id.String()); err != nil {
 		return mapSQLite(err)
 	}
 	return nil
@@ -749,7 +754,7 @@ func (s *SqliteStore) InsertRun(ctx context.Context, scope core.Scope, run *core
 		accountIDArg(run.AccountID),
 		run.Capability,
 		run.Status.String(),
-		run.StartedAt.UTC().Format(time.RFC3339Nano),
+		formatTime(run.StartedAt),
 		optTime(run.FinishedAt),
 		optI64(run.CloudGained),
 		optI64(run.CloudAfter),
@@ -870,7 +875,7 @@ func (s *SqliteStore) AppendRunEvents(ctx context.Context, scope core.Scope, run
 	}
 	defer func() { _ = tx.Rollback() }() // 已提交时是无害的 no-op
 
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := formatTime(time.Now())
 	for _, sequenced := range events {
 		payload, err := serializeEvent(sequenced.Event)
 		if err != nil {
