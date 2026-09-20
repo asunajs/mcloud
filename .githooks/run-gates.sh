@@ -18,6 +18,29 @@
 #
 # 这里保持与 gates.sh **同一组命令**（一致性是刻意的：本地与手动跑必须得出
 # 同一个结论），但按 hook 的职责切分集合，并在可判定时跳过。
+#
+# ── 耗时：瓶颈是"编译次数"，不是"门禁条数" ──────────────────────────
+#
+# 实测（6 核，热 target）：
+#   fmt ~1s ／ deps ~1s ／ filenames 跳过或 ~1s ／ idents ~3s
+#   clippy --all-targets  ~2s      ← 被 test 带热的，不是它自己快
+#   test --workspace     ~20s
+#
+# 七条全跑的热态总耗时约 30–50s。但**冷态**（改动触发重新编译）可以达到
+# 8–15 分钟 —— 因为 `clippy --all-targets` 与 `test` 要各编一遍整棵树。
+#
+# 三个反直觉的点，都实测过，别再"优化"回去：
+#
+#   1. `clippy` 去掉 `--all-targets` 会**更慢**（39s vs 2s）。不带它时
+#      clippy 只 lint 库目标，走的是与 `test` 不同的 fingerprint，
+#      等于凭空多编一遍。"少检查"不等于"更快"——关键是产物能否复用。
+#   2. `clippy` 的 2s 是 `test` 挣来的。把 `clippy` 单独跑（前面没有 test）
+#      要整树重编。所以**调整这两条的先后顺序会显著改变总耗时**。
+#   3. 真正贵的是"改一个 .rs 之后的第一次推送"。改 `.md` / 只改注释
+#      不会触发重编，代价可以忽略。
+#
+# 因此：不要为了"快"去砍门禁条数，那省不下多少；要省就省整树重编
+# （见 docs/dev-gates.md「耗时」一节）。
 
 set -uo pipefail
 
@@ -93,13 +116,49 @@ CHANGED_COUNT=$(printf '%s\n' "$CHANGED" | wc -l | tr -d ' ')
 run_gate() {
   local name="$1"
   local cmd="$2"
+  local log="target/gates-${name}.log"
+
   printf '\n\033[1m──── %s ────\033[0m\n' "$name"
-  if eval "$cmd"; then
-    printf '\033[32m✓ %s 通过\033[0m\n' "$name"
-    return 0
-  fi
-  printf '\033[31m✗ %s 失败\033[0m\n' "$name"
-  return 1
+
+  # 写盘被拦时**必须重试**，和 `scripts/gates.sh` 一致。
+  #
+  # 这里原来只跑一次：失败即判"你的代码没过门禁"。而在 Windows 上
+  # `cargo` 会随机地写不进 target/（杀毒软件实时扫描），**同一次改动换个
+  # 时刻重跑就过**。于是一次环境抖动被翻译成"你写错了代码"。
+  #
+  # 两个后果，都不是小事：
+  #   1. 人开始怀疑门禁的结论 —— 而门禁的全部价值就在于"它说过了就是过了"。
+  #   2. 更容易去用 `--no-verify`。而 hook 根本拦不住 `--no-verify`
+  #      （它没有执行权限），于是**这个门禁实际是"自愿"的，却把人推去绕过它**。
+  #
+  # 更隐蔽的第三点：被杀掉的 `cargo test` 不留下任何缓存，下一次要**从头
+  # 整树重编**。实测同一批文档改动，一次被拦的推送之后，下一次推送因为
+  # 要重编整棵树而多花了几分钟 —— 故障的成本被转嫁到了下一次。
+  #
+  # 判据与 `gates.sh` 严格一致：**只对"写盘被拦"重试，且必须有 `error:` 开头的行**。
+  # 测试失败、编译错误一律立即返回 —— 否则真问题会被掩盖成"重试五次都失败"。
+  local attempt=1
+  local max_attempts=5
+  while :; do
+    if eval "$cmd" >"$log" 2>&1; then
+      cat "$log"
+      printf '\033[32m✓ %s 通过\033[0m\n' "$name"
+      return 0
+    fi
+    cat "$log"
+
+    if [ "$attempt" -lt "$max_attempts" ] \
+      && grep -qE "^(error|error\[)" "$log" \
+      && grep -qE "拒绝访问|os error 5|LNK1104|permission denied" "$log"; then
+      attempt=$((attempt + 1))
+      printf '\033[33m· %s 写盘被拦，第 %d 次重试…\033[0m\n' "$name" "$attempt"
+      sleep 3
+      continue
+    fi
+
+    printf '\033[31m✗ %s 失败\033[0m\n' "$name"
+    return 1
+  done
 }
 
 # 工具链定位：**唯一实现在 `scripts/toolchain.sh`**，这里只 source。
