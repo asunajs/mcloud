@@ -52,11 +52,14 @@ const SCAN_DIRS = ['cmd', 'internal'];
 // `CronSchedule`）脚本会**直接跳过** —— `encoding/json` 本来就看不见它们，
 // 登记进去反而会让白名单越来越长、越来越没人看。
 const UNTAGGED_ALLOWED = {
-  // ⚠ 这两条来自**另一个人正在写的** internal/capabilities/login.go（尚未提交）。
-  // 它们确实不进 JSON：`QrFailure` 实现了 error（对外走 `Error()` 文案），
+  // 这两条确实不进 JSON：`QrFailure` 实现了 error（对外走 `Error()` 文案），
   // `QrProgress` 是内存里的推进结果（`UserInfo any` 已经是解开的 JSON 值）。
-  // 若 login.go 最终没落地，这两条会变成"白名单里对不上的条目"并让本门禁变红 ——
-  // 那是**故意**的：它提醒这里有一条依赖别人提交的白名单。
+  //
+  // ⚠ 后者那条理由**带一个前提**：一旦哪天要把扫码进度直接推给前端
+  // （比如 WebUI 想原样展示"已扫码，请在手机上确认"），正确做法是
+  // 在 app 层**另写一个带 tag 的响应体**，而不是给 `QrProgress` 补 tag ——
+  // `UserInfo any` 的形状由上游决定，把它钉进响应体等于把上游的字段约定
+  // 写进我们自己的契约。
   'internal/capabilities/login.go:QrFailure':
     '实现 error 接口，对外走 `Error()` 文案，不整块 marshal',
   'internal/capabilities/login.go:QrProgress':

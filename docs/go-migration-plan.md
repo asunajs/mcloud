@@ -347,7 +347,7 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 ⇒ **判据：需要"参考实现说形状是什么"时，先问能不能直接依赖它；
 只有在依赖不上（crate 已删 / 依赖拉不全）时才镜像，且镜像必须配整串比对。**
 
-### 步 4 已实测出来的六条（接在步 1 那二十七条之后）
+### 步 4 已实测出来的九条（接在步 1 那二十七条之后）
 
 ⚠ 编号是**全局连续**的：步 1 占了 1–27，这里从 28 起。
 两个人在同一份文档上加条目时最容易犯的就是各编各的 —— 一旦出现
@@ -362,6 +362,9 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 | **31** | **Rust 的 `impl Default` → Go 没有对应物，零值是 nil map** | `RunRegistry::default()` 天然可用；Go 的 `var reg RunRegistry` 两个 map 都是 nil，**读**可以、**写直接 panic**。而"能用零值"的错觉会让构造函数被绕过 | 一律走 `NewRunRegistry()` / `NewEventBus()`，并在文档里写明"零值不可用"。测试只断言"读不 panic"，不假装"零值也能用" |
 | **32** | **"同一条规则两份实现"会发生在 JSON 编解码上** | 产物层要拼对外 payload，于是每个包都想写一遍 `json.NewEncoder` + `SetEscapeHTML(false)`；而 `core` 里那份（`marshalJSON`）是**不导出**的 | 导出 `core.MarshalJSON` / `core.ParseJSON`。⚠ 这不是"方便"，是§5.4 那条原则的正反面：**复用而不是重写**，重写就等于给自己造第二份真相 |
 | **33** | **枚举名容易在产物层再抄一遍字面量** | Rust 的 `payload.rs` 里四个 `*_name` 常量函数（为了 `const fn`）把枚举名又写了一遍；Go 侧若照抄，`RiskLevel` 多一档时这里会**默默输出空串**，而空串在前端就是"没有风险等级" | 一律取 `core` 的 `String()`，并由 `TestEnumNamesComeFromCoreNotFromADuplicateTable` 逐个能力比对（**空串也算失败**） |
+| **34** ⭐ | **`core.ParseJSON` 为了"19 位标识不丢精度"返回 `json.Number`，不是 `float64`** | 于是 `body["ifOpenAccount"] != float64(1)` 在**值就是 1** 的时候也是"不相等"，报错长成 `应为 1: 1` —— 看上去像断言写错，其实是类型不对。这条只在"断言请求体里的数字"时才碰到，而那正是**对拍协议形状**时最常做的事 | 断言数字一律**比文本**（`numText`）。⚠ 已实测：第一次跑红的就是这条，报错是"应为 1: **1**" |
+| **35** | **`core.StateStore` 有 27 个方法，测试里手写一遍会淹没重点** | 登录落库只用到其中 2 个。Rust 侧 trait 可以给默认实现，Go 的接口**必须全实现** —— 于是要么写 25 行 `panic("未使用")`，要么用 `nil` 接口内嵌 | 用**内嵌接口**做部分假实现（`type recordingStore struct{ core.StateStore; … }`）：没重写的方法一旦被调用就 panic ⇒ "登录这条路径碰了别的存储入口"会**当场响**，而不是静默返回零值。⚠ 这不是偷懒，是把"不该发生的事"变成会响的事 |
+| **36** | **夹具里 `data` 是**字符串**，不是嵌套对象** | Rust 的 `json!({… "data": v.to_string()})` 里 `to_string()` 会把对象变成**带引号的字符串**（真实链路里它是 AES 密文，本来就是字符串）。Go 没有 `json!` 宏，顺手写成一个嵌套对象，解密器那一步就被**整个跳过**（它收不到 string，判定降级成别的分支） | 夹具显式**序列化两次**（`quotedJSON` = `mustJSON(mustJSON(v))`）。⚠ 反向测试已确认：改成一次序列化后 `TestQrLoginWalksNotScannedScannedSuccess` 与 `TestSmsLoginDecryptsUserInfoOnSuccess` 同时变红，且报错明确（"登录成功但 data 不是密文字符串"） |
 
 ⚠ #13/#14 是**同一个病**的两个面（枚举 JSON），所以判据也共用一条：
 **"有没有 MarshalJSON"这件事必须能被一条断言问出来** —— `enum_test.go` 里的

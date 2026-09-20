@@ -16,11 +16,13 @@
 
 ## Go 侧迁移实况（2026-09-20 起）
 
-**当前：步 1（`mcloud-core`）收尾中（`legacy` 模块有未提交在途代码）；步 4 的第一块已落地（`capabilities` 注册表 + `exec` + `app::payload`）。**
+**当前：步 1（`mcloud-core`）收尾中（只剩 `error` 后半的 `classify_body`）；步 4 已落地 `capabilities`（注册表 + `login`）、`exec`、`app::payload`，并为此**前置**补了步 2 的 `upstream::login`。**
 
 > 步 4 的落点见下方「步 4 实况」一节 —— 它**没有**按 `capabilities → exec → app → server/cli`
 > 一口气做完：`capabilities::login` 与 `app` 的绝大多数模块**依赖步 2（`mcloud-upstream`）与
-> 步 3（`mcloud-io`）**，那两步还没迁，所以先落了不依赖它们的三块。
+> 步 3（`mcloud-io`）**，那两步还没迁，所以先落了不依赖它们的三块；
+> 之后为了解开 `capabilities::login`，又**回头补了步 2 的 `upstream::login` 那一块**
+> （只补到够用为止，步 2 的 `signin` 协议族仍未迁）。
 
 | `mcloud-core` 的模块 | Go 侧 | 说明 |
 | --- | --- | --- |
@@ -108,10 +110,11 @@
 | 模块 | Go 侧 | 说明 |
 | --- | --- | --- |
 | `capabilities` 注册表 | ✅ | `Capability` / `REGISTRY` / `get` / `list_visible` / `list_batchable`（**10 条测试**）。对应 `capabilities/src/lib.rs` |
-| `capabilities::login` | ⬜ | **未开始** —— 它是 `upstream::login` 的消费者（`ClientProfile` / `PollOutcome` / `SendSmsOutcome` / `SliderPuzzle` / `new_session_id` / `qr_payload` / `classify_poll` …），**步 2 落地前迁不了** |
+| `capabilities::login` | ✅ | 扫码状态机（推进 / 终态不可逆 / 自身 TTL / 码的映射 / 限流非终态）+ 短信链路（滑块降级 / 配额 / 登录）+ 登录结果 → `auth` 与领域对象（**22 条测试**）。前置的 `upstream::login` 已先落地 |
 | `exec` | ✅ | 并发闸 / 互斥键 / 参数摘要 / 准入（幂等 + 互斥一起判）/ 事件总线（**35 条测试**）。对应 `mcloud-exec/src/lib.rs` |
 | `app::payload` | ✅ | `/api/capabilities` 与 `/api/version` 的响应体（**7 条测试**）。纯：只依赖 `capabilities` + `core` |
-| `app` 其余 | ⬜ | `login` / `run` / `smid` / `session` / `migration` / `signin/*` 等**依赖 `upstream` 与 `io`**，步 2/步 3 落地前迁不了 |
+| `app` 其余 | ⬜ | `login` / `run` / `smid` / `session` / `migration` / `signin/*` 等**依赖 `upstream` 其余部分与 `io`**，步 2 收尾 / 步 3 落地前迁不了 |
+| `upstream::login` | ✅ | 为使 `capabilities::login` 能落地而**提前做的前置**：信封 / 端档案 / 请求体 / 滑块 / 口令哈希 / 判定（**33 条测试**）。步 2 的其余部分（`signin` 协议族）仍未迁 |
 | `cli` / `server` | ⬜ | 在 `app` 之后 |
 
 - 落点 `internal/capabilities`、`internal/exec`（包名 `mcloudexec`）、`internal/app/payload.go`。
