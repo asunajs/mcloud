@@ -89,6 +89,7 @@
 | `pcclient-api.js` | **同上姊妹文件**（同目录 `api.js`） |
 | `app-api-families.txt` | App 业务接口的两套互斥形态（A：`x-yun-uni` 无 `signature`；B：反之） |
 | `app-signin-samples.txt` | App 签到链路抓包样本 |
+| `app-rights-token-samples.txt` | App 权益 / token / 待领取族样本（`queryAvailableBenefit`、`queryUserBenefits`、`refreshToken`、`queryRights`、`pointsNotClaimed`） |
 | `app-sms-login-samples.txt` | App 短信登录抓包样本（**含 `§0` 的取证方法**） |
 | `web-qr-login-samples.txt` | PC Web 扫码登录样本 |
 | `logout-sms-requests.txt` | PC 客户端退出 + 短信请求 |

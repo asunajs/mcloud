@@ -1,0 +1,415 @@
+# App 端权益 / token / 待领取 · 实测抓包样本
+
+> 状态：**已确认**（请求形状 + 响应形状均为实测）。证据链 = ① App 自身网络日志（明文请求体）
+> ② Reqable 系统代理 HAR 交叉 ③ 同账号跨时间的 `result` 取值对比。
+>
+> - 采集时间：2026-09-19 07:38–19:14（App 日志）+ 14:38–14:44（HAR 交叉）
+> - 采集环境：iOS 版 `mCloud_iPhone 12.6.0`（iPad 形态：机型 `iPad8,6` / `iPadOS 26.6`）跑在本机 Mac 上
+> - 采集方式：App 自身 `FXTrace*.log`（`Action_outputNetworkingLog:` 块）+ Reqable 系统代理
+> - 原始素材：`har/applog-2026-09-20-1521/`（5 个文件，07:38→19:14）、
+>   `har/signin-2026-09-19-full.har`（638 条，14:38:24→14:44:33）—— 两者均已 gitignore
+> - 配套文档：`docs/capture/app-api-families.txt`（A/B 两族与响应信封）、
+>   `docs/client-profiles.md` §5.3（设备串）、`docs/capture/app-signin-samples.txt`（签到族）
+> - 脱敏见 `docs/sanitize-guide.md`：**换值不换形**。本文件全部凭据为合成值。
+> - 依据 `docs/rust-rewrite-plan.md` §7.0：**本文件全部来自实测，未落笔任何猜测性接口**。
+
+---
+
+## 0. 一句话结论
+
+这五个接口此前**从没抓到过**（`status.md` 的缺口清单里有它们）。现在四个已闭环、
+一个的字段语义仍未定案：
+
+| 接口 | 请求 | 响应 | 状态 |
+|---|---|---|---|
+| `isbo2/openApi/queryAvailableBenefit` | 已确认 | 已确认（85 条权益） | **闭环** |
+| `isbo2/openApi/queryUserBenefits` | 已确认 | 已确认（会员/子成员） | **闭环** |
+| `user/auth/refreshToken` | 已确认 | 已确认 | **闭环**（并带出一条新的跨端常量分歧） |
+| `cloudSEE/openApi/queryRights` | 已确认（**XML**） | **12 条全超时，未取到** | 半闭环 |
+| `market/signin/page/pointsNotClaimed` | 已确认 | 已确认（布尔） | **语义未定案**，见 §5 |
+
+它们**全部属于 A 族**（带 `x-yun-uni`，没有 `signature` / `encodeData`），
+所以能直接用登录链路那套头，**不需要** B 族的两把锁。
+
+---
+
+## 1. 共同的请求头（A 族，实测逐字）
+
+```text
+x-yun-uni          = 1990000000000000001          ← 19 位，= userDomainId
+x-yun-app-channel  = 10000020
+x-huawei-channelSrc= 10000020
+x-yun-svc-type     = 1
+x-SvcType          = 1
+x-yun-net-type     = 1
+x-NetType          = 1
+x-DeviceInfo       = 1|192.168.3.179|2|12.6.0|APPLE|iPad8,6|<uuid32>|<short12>|ipados 26.6|375 * 667|zh-Hans-CN|0.0000|0.0000|
+x-yun-client-info  = 上面那串 + aVBhZA==|0|;
+x-UserAgent        = iPad|iPad|ios 26.6|mCloud12.6.0-200
+x-yun-user-agent   = iPad|iPad|ios 26.6|mCloud12.6.0-200
+User-Agent         = mCloud_iPhone/04241958 (iPad; iOS 26.6; Scale/2.00)
+Authorization      = Basic <整串，见 docs/credential-boundary.md>
+Pragma             = no-cache
+```
+
+设备串各段含义见 `docs/client-profiles.md` §5.3，此处不重复。
+
+### ⚠ `hcy-cool-flag` 在这几个接口上是**明文**
+
+`queryAvailableBenefit` / `queryUserBenefits` / `queryRights` / `refreshToken` **四个都带**
+`hcy-cool-flag: 1`（`queryRights` 与权益两个还带 `hcy-ios-option-enc: 1`），
+但**请求体与响应体全是明文**。
+
+⇒ 再次印证：**这个头是逐接口的声明，不是"整套链路都加密"的开关**。
+不要因为看到它就去做 base64 解码 —— 会把明文 JSON 解坏。
+（它的加密形态见 `docs/upstream-app-business-api.md` §8，只有 `getSmsCode` 那条链路用到。）
+
+---
+
+## 2. 权益可用量：`isbo2/openApi/queryAvailableBenefit`
+
+```http
+POST https://ypqy.mcloud.139.com/isbo2/openApi/queryAvailableBenefit
+Content-Type: application/json;charset=UTF-8
+
+{"account":{"accountType":"1","accountName":"19900000001","nationCode":"+86"}}
+```
+
+响应（实测，`userAvailableBenefitList` 共 **85 条，benefitNo 无重复**）：
+
+```json
+{"result":{"resultCode":"0","resultDesc":"SUCCESS"},
+ "userAvailableBenefitList":[
+   {"benefitNo":"RHR081","benefitValue":"30","reserve3":"30分钟语音转写(限时体验)"},
+   {"benefitNo":"RHR001","benefitValue":"20480"},
+   {"benefitNo":"RHR009","benefitValue":"200","reserve3":"[null]null"},
+   {"benefitNo":"RHR046","benefitValue":"1800000","reserve3":"[AI听记]高精度转写"},
+   {"benefitNo":"RHR135","benefitValue":"500000","reserve3":"[50万 tokens/月]Token"},
+   {"benefitNo":"RHR136","benefitValue":"1","reserve3":"[移动云盘]MClaw"}]}
+```
+
+### ⚠ 信封与 A 族其余接口**不一样**
+
+不是 `{"code":0,"msg":"success","result":…}`，而是：
+
+- 顶层 `result` 里只有 `resultCode` / `resultDesc`，**成功是字符串 `"0"` 不是数字**；
+- 业务数据是**与 `result` 并列的另一个顶层键**（`userAvailableBenefitList`）。
+
+⇒ 别拿 `docs/capture/app-api-families.txt` 里那四种信封去套它 —— 这是第五种形状。
+
+### 三个字段坑
+
+1. **`benefitValue` 是字符串**（`"20480"`），不是数字。当数字用要显式转换。
+2. **`reserve3` 是可选键**：85 条里只有 45 条带它，其余**整个键不出现**（不是空串）。
+   它是给人看的名称，**不是稳定标识** —— 有的值是 `"[null]null"`（上游把 Java `null`
+   拼进了字符串），有的是 `"[照片备份]手机视频 "`（**末尾带空格**）。
+   ⇒ 界面别直接把 `reserve3` 当名称渲染；`[null]null` 要过滤。
+3. **没有 `benefitName` / `benefitDesc` / `benefitIconUrl`** —— 那些是
+   `queryUserBenefits` 的字段（见 §3）。两个接口**字段集不同**，别互相套用。
+
+### 实测目录（`benefitNo` → 名称，45 条里去掉 6 条 `[null]null`）
+
+| benefitNo | 值 | reserve3 |
+|---|---|---|
+| `RHR038` | 1 | [50万 tokens/月]Token |
+| `RHR046` | 1800000 | [AI听记]高精度转写 |
+| `RHR047` | 1 | [更大]保险箱容量 |
+| `RHR048` | 1 | [视频上传]手机视频 |
+| `RHR049` | 1 | [视频备份]手机视频 |
+| `RHR050` | 1 | [PC备份]文件夹自动备份 |
+| `RHR051` | 1 | [手机备份]文件夹自动备份 |
+| `RHR052` | 1 | [听音乐]音频倍速播放 |
+| `RHR053` | 1 | [看视频]高清画质 |
+| `RHR054` | 1 | [大屏幕]TV 特权 |
+| `RHR055` | 1 | [高清]投屏画质 |
+| `RHR056` | 1 | [图转文]OCR识图 |
+| `RHR057` | 1 | [智能清理]重复图片清理 |
+| `RHR061` | 1 | [照片直播]共享活动照片 |
+| `RHR062` | 10000 | [AI精转]消耗Token |
+| `RHR063` | 1800 | [AI翻译]精准实时翻译 |
+| `RHR070` | 99999 | [AI对话]多种文本工具 |
+| `RHR075` | 1 | [集团]AI智能绘图 |
+| `RHR078` | 5 | [50万 tokens/月]Token |
+| `RHR079` | 3 | [AI助手]外部通用渠道的默认对话次数 |
+| `RHR080` | 102400 | 100G挂载盘空间 |
+| `RHR081` | 30 | 30分钟语音转写(限时体验) |
+| `RHR087` | 1 | [手机备份]微信文件备份（**原文末尾带空格**） |
+| `RHR088`–`RHR102` | 1 | [智能搜索]图片文字搜索 / [智能搜索]文档全文搜索 / [智能live]AI活照片 / [一键矫正]图片智能矫正 / [多人合照]智能检索 / [语义搜图]快人一步 / [照片分类]智能有序 / [AI笔记]智能总结 / [听记内容]编辑导出 / [AI笔记]全文翻译 / [云笔记]文本笔记 / [云笔记]录音笔记 / [视频播放]视频画中画 / [视频播放]选集模式 / [AI转文稿]音频转文稿 |
+| `RHR135` | 500000 | [50万 tokens/月]Token |
+| `RHR136` | 1 | [移动云盘]MClaw |
+
+其余 40 条**只有 `benefitNo` + `benefitValue`、没有名称**（`RHR001`–`RHR010`、
+`RHR015`/`RHR019`/`RHR020`/`RHR025`/`RHR027`–`RHR044`、`RHR064`–`RHR069`、
+`RHR085`/`RHR086`、`RHR104`–`RHR134` 等）。其中 `RHR001`/`RHR002` = 20480、
+`RHR027` = 2097152、`RHR080` = 102400（挂载盘 100G 的 KB 数）、
+`RHR108`–`RHR134` 多为 10000。**这些编号的含义未查，不猜。**
+
+### ⚠ 超时是常态，不是异常
+
+同一天 14 条里有**多条**是 `Status: 0 / NSURLErrorDomain -1001 请求超时 / 25 秒左右`。
+⇒ 实现侧要按"可能 25 秒不返回"来设计（超时值、重试、以及**不要把超时当业务失败**）。
+实测同一时刻 `queryUserBenefits` 只要 652 ms —— 两个接口慢的不是同一个东西。
+
+---
+
+## 3. 用户权益 / 会员等级：`isbo2/openApi/queryUserBenefits`
+
+```http
+POST https://ypqy.mcloud.139.com/isbo2/openApi/queryUserBenefits
+Content-Type: application/json;charset=UTF-8
+
+{"isNeedBenefit":1,"account":{"accountType":"1","accountName":"19900000001","nationCode":"+86"}}
+```
+
+⚠ 与 `queryAvailableBenefit` 的差别：请求体**多一个 `isNeedBenefit: 1`**（数字，不是字符串）。
+
+响应：
+
+```json
+{"result":{"resultCode":"0","resultDesc":"SUCCESS"},
+ "userSubMemberList":[
+   {"chargingPolicyList":[
+      {"objectID":"ydyp_mclaw_deploy_obj","contractID":"ydyp_mclaw_deploy",
+       "chargeType":0,"contractPrice":0,"cycleType":0,"periodNum":1,
+       "effectiveTime":"20260603221142","expiredTime":"20991231235959",
+       "subChannel":1,"prodName":"云盘MClaw部署服务","prodDesc":"云盘MClaw部署服务",
+       "isFreeFlow":0,
+       "orderID":"8000000000001_00000000-0000-0000-0000-000000000001_CloudSpaceContractSubscribeOrder"}],
+    "memberBenefitList":[
+      {"benefitNo":"RHR136","benefitValue":"1",
+       "benefitName":"移动云盘MClaw","benefitDesc":"移动云盘MClaw",
+       "benefitIconUrl":"https://eos.guangzhou-2.cmecloud.cn/…/RHR0136.png",
+       "isCalExtreme":1,"strategy":0,"isVisible":0,"reserve3":"[移动云盘]MClaw"},
+      {"benefitNo":"RHR136", "...": "与上一条逐字相同"}],
+    "memberLevel":-1,
+    "memberLvName":"非会员"}]}
+```
+
+### 四个坑
+
+1. **`memberBenefitList` 里同一个 `benefitNo` 会重复出现** —— 实测 `RHR136`
+   出现**两次且内容逐字相同**。去重不是可选项，否则界面会渲染两遍。
+2. **`memberLevel: -1` 表示"非会员"**（数字 `-1`，不是 `0`）；`memberLvName` 是中文文案。
+   别把 `-1` 当"解析失败/缺省"。
+3. **`effectiveTime` / `expiredTime` 是 `yyyyMMddHHmmss` 字符串**（不是毫秒时间戳）：
+   `"20260603221142"` / `"20991231235959"`（后者 = 9999-12-31，上游用"永不过期"的哨兵值）。
+4. `orderID` 是**三段拼起来的**：`<13 位数字>_<uuid>_<订单类型名>`，
+   下划线分隔、末段是 PascalCase 英文 —— 不是不透明随机串，别整体当 id 哈希。
+
+---
+
+## 4. 换 token：`user/auth/refreshToken`
+
+```http
+POST https://user-njs.yun.139.com/user/auth/refreshToken
+Content-Type: application/json;charset=UTF-8
+
+{"userDomainId":"1990000000000000001","clientType":"412"}
+```
+
+响应：
+
+```json
+{"success":true,"code":"0000","message":"请求成功",
+ "data":{"token":"SYNTH001|1|RCS|1792245335331|AAAA…A.AA…（201 字符，见下）",
+         "expireTime":2592000}}
+```
+
+### ⚠⚠ 新的一条"跨端常量不许互搬"（`clientType`）
+
+**App 发 `"412"`**，而旧 TS 项目里 `refreshToken(clientType = "414")`。
+
+| 位置 | 值 | 来源 |
+|---|---|---|
+| App 的 `refreshToken` / `getSmsCode` | `"412"` | 实测（本文件 + `app-sms-login-samples.txt`） |
+| 旧 TS 项目的 `refreshToken` 默认值 | `"414"` | `docs/business-feature-inventory.md` |
+
+⇒ **414 不是 App 的码**。这类"同一个接口、同一个字段名、两端不同值"已经犯过两次
+（`Authorization` 前缀、签名密钥、`version`、`toSourceId`），这是**第五处**。
+拿码之前照旧先问："它出现在哪个端？由谁发出？"
+
+### 另外三点
+
+1. **`expireTime: 2592000` 是秒**（= 30 天），不是毫秒、不是绝对时间戳。
+2. **`code` 是字符串 `"0000"`**，且**与 `success: true` 并列** —— 这个信封又是另一种
+   （`success` + `code` + `message` + `data`）。见 `docs/capture/app-api-families.txt`。
+3. **这条接口慢是常态**：实测一次 **28.4 秒**才返回 200，紧贴 30 秒超时线。
+   别把"慢"当"挂了"。
+4. 它比 A 族其余接口**多两个头**：
+   - `x-yun-api-version: v1`
+   - `x-UserAgent: 412|iPad|ios 26.6|12.6.0-200` ← **第 1 段是 `clientType`（`412`）**，
+     不是 `iPad`。同一个头在别的接口上是 `iPad|iPad|ios …`。
+
+### `token` 的精确形状（脱敏，等长）
+
+```text
+SYNTH001|1|RCS|1792245335331|AAAA…（201 字符）
+ ↑8 段长 1   3    13 位毫秒      载荷 172 字符
+```
+
+| 项 | 值 |
+|---|---|
+| 总长 | **201** |
+| 分段 | `|` 分隔 **5 段**，各段长 `[8, 1, 3, 13, 172]` |
+| 第 1 段 | 8 字符混合大小写字母（合成值形如 `AbCdEfGh`） |
+| 第 2 / 3 段 | 常量 `1` / `RCS` |
+| 第 4 段 | 13 位毫秒时间戳 |
+| 第 5 段（载荷） | 172 字符，含 `_` ×4、`.` ×1、`-` ×1；**位置固定**：`_` 在 24 / 71 / 82 / 129，`.` 在 29，`-` 在 171 |
+
+⚠ **这个 `token` 与 `Authorization` 里的 `authToken` 不是同一个东西**（后者在整串里）。
+两者的关系**未验证** —— 不要互换，也不要拿它去覆盖 `account_state.jwt_token`
+（那条教训见 `docs/credential-boundary.md`）。
+
+---
+
+## 5. 待领取：`market/signin/page/pointsNotClaimed`（**语义未定案**）
+
+```http
+GET https://caiyun.feixin.10086.cn:7071/market/signin/page/pointsNotClaimed
+（无请求体）
+
+{"code":0,"msg":"success","result":true}
+```
+
+### 观测到的取值
+
+同一账号 09-19 07:52–19:14 共 26 条：
+
+| 时段 | `result` |
+|---|---|
+| 07:52:05 → **14:37:14** | `true`（9 条） |
+| **14:38:54** → 19:14:05 | `false`（17 条） |
+
+**一次干净的翻转，没有回摆。**
+
+### 翻转窗口里 App 侧发生了什么（HAR 交叉，14:38:46–14:39:17）
+
+```
+14:38:46  打开签到页   m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin
+14:38:49  H5 发一串调用 startSignIn / infoV3 / doTaskPost / taskListV3 / getPopInfo / popup
+14:38:5x  ← 翻转发生在这里
+14:39:17  再次 GET pointsNotClaimed → false
+```
+
+（该 HAR 里 `startSignIn` 的响应显示当天**已经签过**：`signCount=1`、
+今日格 `{d:19, s:true, n:3, t:true}`。）
+
+### ⇒ **不把翻转归因到某一条**（这是本节的重点）
+
+窗口内有**至少四个候选动作**：打开签到页、`startSignIn`、`doTaskPost`、页面渲染。
+单看这一次无法区分。两个都还站得住的读法：
+
+| 读法 | 与什么吻合 | 与什么冲突 |
+|---|---|---|
+| (a) **"有没有现在就能领的"**（≈ 我们的 `toReceive > 0`） | 与我们 CLI 同日领掉那 6 豆后 `toReceive` 归零吻合 | 07:52 起就是 `true`，而当时是否已有可领项**未核实** |
+| (b) **"今天还有没有未领取的签到积分"** | 与"打开/走完签到页后翻 false"吻合 | 14:38:49 那条 `startSignIn` 的响应显示**当天此前已签过**，那它不该是翻转原因 |
+
+**判据（下次抓包时的最小实验）**：需要一个**只签到不领取**或**只领取不签到**的窗口 ——
+即两个动作分开做、中间各取一次 `pointsNotClaimed`。目前的数据里两者总是一起发生。
+
+### 消费者是谁（已确认）
+
+App 日志显示它由 **`MCCreditStateAction`**（`FXHttpBaseAccessor sendRequest:`，
+回调 `creditStateCallback:`）在**一个 WebView 控制器 `viewDidLoad` 之后**发出。
+⇒ 用途像"签到入口的小红点 / 角标"，**不像**业务数据源。
+别把它当成"可领取数量的权威来源" —— 数量仍然只能来自 `infoV3.receiveList`。
+
+### 一个奇怪的头
+
+这个接口的 `Content-Type: text/xml;charset=UTF-8`，但**返回的是 JSON**。
+照抄即可，别"修正"成 `application/json`。
+
+---
+
+## 6. 同窗口里签到族的其余 H5 调用（**`result` 有五种形态**）
+
+同一 HAR（14:38:49）里，签到页还发了这些：
+
+| 接口 | 请求体 | 响应 |
+|---|---|---|
+| `popup` | 无 | `{"code":0,"msg":"success","result":false}` |
+| `getPopInfo` | `{"clientType":"iphone","version":"12.6.0"}` | `{"code":0,"msg":"success","result":{"showPop":false}}` |
+| `doTaskPost` | `{"client":"app","deviceId":"<smid>"}` | `{"code":0,"msg":"success"}` ← **没有 `result`** |
+| `taskListV3` | `{"marketname":"sign_in_3","client":1,"clientVersion":"12.6.0"}` | `{"code":0,"msg":"success","result":[ … ]}` |
+| `getCode` | 无 | `{"code":0,"msg":"success","result":"<base64，56 字符>"}` |
+
+### ⚠ `doTaskPost` 的 `deviceId` —— 与我们的 `smid.rs` **逐字对拍成功**
+
+```json
+{"client":"app","deviceId":"BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}
+```
+
+（上为**等长合成值**：`B` + 86 字符 + `==`，共 89 字符；真实值不落库。）
+
+这个值就是 `'B' + base64(smid)` 那个 `deviceId`（见 `docs/capture/app-signin-samples.txt` §4）。
+三点值得记：
+
+1. **在 JSON 体里不转义**：`/` 与 `+` 原样出现；在 query string 里则转义成
+   `%2F` / `%2B`（见同 HAR 的 `startSignIn?deviceId=…`）。**同一个值两种编码，别混用。**
+2. **末尾是两个 `=`**（规范只需 1 个）—— 与既有记录一致，**原样透传**。
+3. 这是该实现的**第一个第三方对照物**：此前只有"我们自己的产出"和"HAR 里的真值"，
+   现在多了一条"上游页面自己在用同一个值"。
+
+### `taskListV3` 的条目形状
+
+```json
+{"id":549,"marketname":"sign_in_3","groupid":"time","enable":1,
+ "name":"开启备份领好礼","description":"开启备份，云端无损存储",
+ "icon":"https://img.mcloud.139.com//uop_prod/20260910/….png","steps":[],
+ "starttime":"2026-09-10T16:00:00.000+00:00","endtime":"…"}
+```
+
+⚠ `starttime` / `endtime` 是 **ISO 8601 带 `+00:00` 偏移**的字符串
+（与 §3 的 `yyyyMMddHHmmss` 是**两种完全不同的时间格式**，都在同一端）。
+`steps` 是数组，实测为空。`icon` URL 里有**双斜杠** `…139.com//uop_prod/…` —— 原样透传。
+
+### ⚠⚠ 别写"读 `result` 就知道成败"的通用解析器
+
+把 §2–§6 出现的 `result` 放在一起看，它至少有**五种**形态：
+
+| 接口 | `result` |
+|---|---|
+| `popup` / `pointsNotClaimed` | 布尔 |
+| `doTaskPost` | **整个键不存在** |
+| `getPopInfo` | 对象 `{showPop}` |
+| `taskListV3` | 数组 |
+| `infoV3` / `startSignIn`（见姊妹文档） | 大对象 |
+
+再加上 `code` 的语义也相反（埋点用 `1` 表示成功）—— 与
+`docs/capture/app-api-families.txt` 的结论一致，**逐接口解析**。
+
+---
+
+## 7. 未知项（不猜，等证据）
+
+1. **`queryRights` 的响应形状** —— 12 条全是 `Status: 0 / 超时`，**一条都没返回**。
+   只拿到请求形状（§7 下面那段）。
+2. **`pointsNotClaimed.result` 的确切语义** —— 需要一个单变量窗口，见 §5。
+3. **`popup.result` / `getPopInfo.showPop` 何时为 `true`** —— 本次全 `false`，
+   而当天已签过。猜测是"当天首次签到时弹窗"，**未验证**。
+4. **`refreshToken` 的 `token` 与 `Authorization` 里 `authToken` 的关系** —— 未验证。
+5. **`clientType` 的完整取值谱** —— 已知 `412` = App、`414` = 旧项目里的另一个端，
+   其余未知。
+6. **`queryAvailableBenefit` 里 40 条无名 `benefitNo` 的含义** —— 不猜。
+
+---
+
+## 8. 附：`cloudSEE/openApi/queryRights` 的请求形状（响应未取到）
+
+```http
+POST https://vsbo.caiyun.feixin.10086.cn/cloudSEE/openApi/queryRights
+Content-Type: application/xml;charset=UTF-8
+```
+
+```xml
+<?xml version='1.0' encoding='UTF-8' standalone='no' ?><queryRightsReq><account><accountName>19900000001</accountName><accountType>1</accountType><nationCode>+86</nationCode></account><rightIDs><rightID>gotone.directed.data.traffic.suscribed</rightID><rightID>DirectionalFlow</rightID></rightIDs></queryRightsReq>
+```
+
+三点：
+
+1. **这是本族唯一的 XML 接口** —— 其余全是 JSON。请求体整串**没有换行**，
+   XML 声明与根元素紧挨着。
+2. XML 声明用的是**单引号** `'1.0'` / `'UTF-8'` / `'no'` ——
+   某个序列化器的原样输出。**别"顺手规范化"成双引号**（服务端可能按字面比）。
+3. `rightIDs` 里两个 id 与 `gotone` 定向流量有关（`gotone.directed.data.traffic.suscribed`
+   / `DirectionalFlow`）。**响应没拿到，所以这两个 id 返回什么、有几个字段，一概不知道。**

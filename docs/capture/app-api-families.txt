@@ -188,18 +188,45 @@ encodeData = base64( 16 字符 ASCII 动态 IV ‖ 16 字节密文 )
 
 ---
 
-## 4. 响应信封有**四种**（别写一个通用解析器）
+## 4. 响应信封有**六种**（别写一个通用解析器）
 
 | 信封 | 主机族 | 例子 |
 |---|---|---|
-| `{"code":0,"msg":"success","result":true}` | `caiyun.feixin.10086.cn:7071` | 签到 |
+| `{"code":0,"msg":"success","result":true}` | `caiyun.feixin.10086.cn:7071` | 签到、`pointsNotClaimed`、`popup` |
 | `{"resultCode":200,"resultMsg":"success","resultData":{…},"msgId":"…","success":true,"code":"200"}` | `middle.yun.139.com`、`grdt.yun.139.com` | `general/getStatus`、`paintConfig` |
-| `{"success":true,"code":"0000","message":"请求成功","data":{…}}` | `group.yun.139.com`、`share-kd-njs.yun.139.com` | 消息中心、分享 |
+| `{"success":true,"code":"0000","message":"请求成功","data":{…}}` | `group.yun.139.com`、`share-kd-njs.yun.139.com`、`user-njs.yun.139.com` | 消息中心、分享、`user/auth/refreshToken` |
 | `{"returnCode":"0","returnMsg":"操作成功","body":[…]}` | `ad.mcloud.139.com` | 广告 |
 | `{"code":1,"message":"success","data":null}` | `ael.yun.139.com` | 埋点 |
+| `{"result":{"resultCode":"0","resultDesc":"SUCCESS"},"<业务数组>":[…]}` | `ypqy.mcloud.139.com`（`isbo2/openApi/*`） | `queryAvailableBenefit`、`queryUserBenefits` |
 
 注意 `code` 在四处分别是 **数字 0** / **字符串 "200"** / **字符串 "0000"** / **字符串 "0"**，
 而埋点那处用的是 **`1` 表示成功** —— 与其余三处**语义相反**。照抄，别归一化。
+
+### 4.1 最后一行那条信封特别容易写错（2026-09-20 补）
+
+`isbo2/openApi/*` 的**业务数据不在 `result` 里面**，而是**与 `result` 并列的顶层键**：
+
+```json
+{"result":{"resultCode":"0","resultDesc":"SUCCESS"},
+ "userAvailableBenefitList":[ … ]}          ← 业务数组在顶层，不在 result 里
+```
+
+⇒ 按"取 `result` 再往下找"的通用写法**必然拿不到数据**（`result` 里只有两个字符串字段）。
+而且成功码是**字符串 `"0"`**，不是数字。样本见
+`docs/capture/app-rights-token-samples.txt` §2 / §3。
+
+### 4.2 `result` 这个字段自己有**五种**形态
+
+| 形态 | 例子 |
+|---|---|
+| 布尔 | `popup`、`pointsNotClaimed` |
+| **整个键不存在** | `doTaskPost` → `{"code":0,"msg":"success"}` |
+| 对象 | `getPopInfo` → `{"showPop":false}` |
+| 数组 | `taskListV3` |
+| 大对象 | `infoV3` / `startSignIn` |
+
+⇒ 与本文开头那句同一条理由：**逐接口解析**。`result` 既不是"成败标志"，
+也不是"数据容器"。
 
 ---
 

@@ -186,6 +186,26 @@ export const CHANNEL_SRC = { web: "10000034", pc: "10200153", android: "10000023
 判据是：**它能不能在同一端的两个接口上取不同值？能，就是每调用参数。**
 `x-yun-app-channel` 属于后者 —— 它只是**有个默认值**的每调用参数。
 
+### 5.1 `clientType` —— 真·每端常量，但**已实测出第二个值**（2026-09-20 补）
+
+`clientType` 是上表里少数**确实**属于"每端常量"的码：它不随接口变，只随端变。
+但它的取值谱此前没记全，现在补两条实拍：
+
+| 端 | `clientType` | 出处 |
+|---|---|---|
+| **iOS App** | `"412"` | `user/auth/refreshToken`、`/user/sms/getSmsCode`（实测） |
+| 旧 TS 项目里的 `refreshToken` | `"414"` | `docs/business-feature-inventory.md` |
+
+⚠ **别把 `414` 当 App 的码**。这正是"跨端常量不许互搬"的第 **5** 处实例
+（前四处：`Authorization` 前缀、签名密钥、签名 `version`、`toSourceId`）。
+完整样本见 `docs/capture/app-rights-token-samples.txt` §4。
+
+⚠ 它还会出现在**同一个头的不同位置**：`refreshToken` 的
+`x-UserAgent: 412|iPad|ios 26.6|12.6.0-200` 第 1 段就是 `clientType`，
+而同一端别的接口上是 `iPad|iPad|ios …`。**同一个头名，两种首段。**
+
+⚠ `clientType` 是否还有第三个值（安卓 / 邮箱 / 小程序），**没有实测**。
+
 ---
 
 ## 6. 落地规则（照这几条写代码）
