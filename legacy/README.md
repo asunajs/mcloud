@@ -2,11 +2,28 @@
 
 > **只读。** 这里的代码不再开发，留下来只为当 Go 侧的**对拍基准**。
 >
-> 执行 `bash scripts/freeze-rust.sh` 之后，本目录会装上
-> `crates/`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`.cargo/`。
-> 在那之前这里只有这份说明。
+> ✅ **已冻结**（2026-09-20）。`crates/`、`Cargo.toml`、`Cargo.lock`、
+> `rust-toolchain.toml`、`.cargo/` 都在这里了，另加一个 `test` 符号链接（见下）。
 
 ---
+
+## 冻结时的状态（2026-09-20）
+
+| | |
+| --- | --- |
+| 冻结前的最后一次提交 | `df6796d`（把未完成的调度特性补齐并修好 —— 见下）|
+| Rust 侧门禁 | **`bash scripts/gates.sh` 七项全绿** |
+| 测试 | **714 个通过**（`cargo test --workspace`）|
+| 门禁感知 | `gates.sh` / `check-deps.sh` 在 `legacy/Cargo.toml` 存在时**自动**加 `--manifest-path`，不用手改 |
+
+⚠ **冻结前最后一批代码是"补完"而不是"原本就绿"**：工作区里留着 2171 行未提交的
+调度特性（cron 解析 + server 四个读路由 + `Runner`），但 `cargo test` 根本编译不过，
+clippy 也就从未跑到 lint 阶段。冻结前把它修到全绿（12 处测试编译错误 + 14 处 clippy +
+1 处过期探针），理由见 `../docs/go-migration-plan.md` §3.4 ——
+**一个红的基线不能当对拍基准**：Go 侧跑通那些测试时，无法判断是谁错了。
+
+⚠ `legacy/target/`（约 7 GB）是从仓库根搬过来的 cargo 构建缓存，**已 gitignore**。
+保留它是为了别在下次跑 Rust 测试时从头编译一遍依赖。删掉它只影响速度，不影响正确性。
 
 ## 为什么冻结
 

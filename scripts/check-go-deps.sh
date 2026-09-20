@@ -139,13 +139,33 @@ done
 # internal/golden 会读磁盘，它只供 `_test.go` 使用。测试的 import 不在
 # `go list -deps`（不带 -test）的输出里，所以这条能干净地判出"生产代码
 # 误用了它"。若某天它出现在生产依赖图里，说明有东西放错了层。
-for pkg in $(go list ./... 2>/dev/null | grep -v "^$MODULE/internal/golden$"); do
+# ⚠ 用显式包路径而不是 `./...`：`./...` 会去遍历 `legacy/target/`
+#   （7 GB cargo 构建产物），既慢、又会在 cargo 同时在跑时撞上刚被删的临时目录
+#   而**偶发失败**。理由与对价见 scripts/gates-go.sh 的 GO_PKGS 注释。
+for pkg in $(go list ./cmd/... ./internal/... 2>/dev/null | grep -v "^$MODULE/internal/golden$"); do
   if has_dep "$MODULE/internal/golden" "$(deps_of "$pkg")"; then
     echo "!! $pkg 依赖了 internal/golden —— 它只供测试使用"
     fail=1
   fi
 done
 echo "ok 生产代码未依赖 internal/golden"
+
+# ── 覆盖性：所有 .go 文件都必须在 cmd/ 或 internal/ 下 ──────────────
+#
+# 上面几条与 gates-go.sh 用的是**显式包路径**（不用 `./...`，理由见那边）。
+# 代价是"新加一个顶层目录会被静默漏掉"。这条断言就是那个代价的对价：
+# 漏掉的那一刻它会红，而不是让新目录**永远不被任何 Go 门禁扫到**。
+#
+# 用 `git ls-files` 而不是遍历文件系统：构建产物与编辑器临时文件不该参与判断。
+stray="$(git ls-files '*.go' | grep -vE '^(cmd|internal)/' || true)"
+if [ -n "$stray" ]; then
+  echo "!! 以下 .go 文件不在 cmd/ 或 internal/ 下，不会被任何 Go 门禁覆盖："
+  echo "$stray"
+  echo "   → 要么把它挪进去，要么在 gates-go.sh 的 GO_PKGS 与本脚本里显式加上它。"
+  fail=1
+else
+  echo "ok 所有 .go 文件都在 cmd/ 或 internal/ 下"
+fi
 
 if [ "$fail" -ne 0 ]; then
   echo

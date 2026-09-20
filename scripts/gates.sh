@@ -77,7 +77,11 @@ gate_cmd() {
   case "$1" in
     test)      echo "cargo test --workspace $CARGO_MANIFEST" ;;
     clippy)    echo "cargo clippy --all-targets $CARGO_MANIFEST -- -D warnings" ;;
-    fmt)       echo "cargo fmt $CARGO_MANIFEST --check" ;;
+    # ⚠ 必须带 `--all`：workspace 根是个**虚拟 manifest**（只有 [workspace]、
+    # 没有 [package]），一旦用 `--manifest-path` 指过去，cargo fmt 就认不出
+    # 要格式化哪些 target，直接报 "Failed to find targets"。
+    # 冻结前它在仓库根跑，靠 CWD 就能推出成员，所以没暴露这个问题。
+    fmt)       echo "cargo fmt --all $CARGO_MANIFEST --check" ;;
     deps)      echo "bash scripts/check-deps.sh" ;;
     filenames) echo "bash scripts/check-filenames.sh" ;;
     idents)    echo "node scripts/check-identifiers.cjs" ;;

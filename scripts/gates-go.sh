@@ -43,11 +43,25 @@ cd "$(dirname "$0")/.."
 
 GATE_NAMES="build vet fmt test deps filenames idents golden"
 
+# ⚠ 为什么用显式包路径，而不是惯用的 `./...`：
+#   `./...` 会把 `legacy/target/`（7 GB 的 cargo 构建产物）也遍历一遍。
+#   两个后果，都不是理论上的：
+#     ① 慢 —— 几万个与 Go 无关的文件；
+#     ② **偶发失败** —— cargo 正在改写那个目录时，Go 会撞上刚被删掉的临时目录，
+#        报 `pattern ./...: open legacy/target/debug/deps/xxxx: no such file or directory`，
+#        门禁于是红了，而代码一行问题都没有。
+#        （2026-09-20 冻结后第一次跑就撞上：那轮 Go 门禁与 Rust 门禁是同时在跑的。）
+#   代价是"新加一个顶层目录要记得改这里"。这个代价由 check-go-deps.sh 的
+#   「所有 .go 文件都必须在 cmd/ 或 internal/ 下」那条断言兜住 —— 漏不掉。
+GO_PKGS="./cmd/... ./internal/..."
+
 # gofmt -l 只**列出**未格式化的文件，退出码仍是 0 —— 所以不能直接当门禁用，
 # 必须自己判"输出是否为空"。这一步很容易写错成 `gofmt -l . && echo ok`。
+#
+# ⚠ 范围与 GO_PKGS 对齐（不用 `.`）：`gofmt -l .` 同样会走进 legacy/target。
 gate_fmt() {
   local out
-  out="$(gofmt -l . 2>&1)"
+  out="$(gofmt -l ./cmd ./internal 2>&1)"
   if [ -n "$out" ]; then
     echo "!! 以下文件未格式化（跑 'gofmt -w .' 可修）："
     echo "$out"
@@ -59,10 +73,10 @@ gate_fmt() {
 
 gate_run() {
   case "$1" in
-    build)     go build ./... ;;
-    vet)       go vet ./... ;;
+    build)     go build $GO_PKGS ;;
+    vet)       go vet $GO_PKGS ;;
     fmt)       gate_fmt ;;
-    test)      go test -race ./... ;;
+    test)      go test -race $GO_PKGS ;;
     deps)      bash scripts/check-go-deps.sh ;;
     filenames) bash scripts/check-filenames.sh ;;
     idents)    node scripts/check-identifiers.cjs ;;

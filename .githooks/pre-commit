@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# 提交前门禁：秒级、纯静态的四条。
+# 提交前门禁：秒级、不需要完整编译的四条（Go 侧）。
+#
+# ⚠ 2026-09-20 起 Rust 侧已冻结到 legacy/，hook 只跑 Go 门禁 ——
+#    留着旧 hook 会让每次提交都跑一遍 2 分钟的 cargo，而那边已经不再改动。
+#    要手工跑 Rust 那七条：bash scripts/gates.sh（它会自动加 --manifest-path）。
 #
 # 详情与"为什么是这四条"见同目录 README.md。
 # 手动安装：bash scripts/install-hooks.sh
 #
-# 这个文件本身很薄 —— 逻辑都在 run-gates.sh 里，两个 hook 共用。
+# 这个文件本身很薄 —— 逻辑都在 scripts/gates-go.sh 里，两个 hook 共用。
 
-exec "$(dirname "$0")/run-gates.sh" pre-commit
+exec "$(dirname "$0")/../scripts/gates-go.sh" fmt deps filenames idents

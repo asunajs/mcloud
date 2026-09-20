@@ -43,7 +43,11 @@ is_exempt() {
   case "$1" in
     # ① 生态固定名
     Cargo.toml|Cargo.lock|README.md|LICENSE|THIRD-PARTY-NOTICES.md|rust-toolchain.toml) return 0 ;;
-    */Cargo.toml|*/README.md|*/LICENSE) return 0 ;;
+    # 嵌套一级的那几个：Rust 冻结到 legacy/ 之后，Cargo.toml / Cargo.lock /
+    # rust-toolchain.toml 都从仓库根挪进了 legacy/ —— 它们与上面那行是**同一批
+    # 生态固定名**，只是换了层级。豁免按"路径点名"，所以层级一变就得补一条。
+    # （2026-09-20 冻结时漏了 Cargo.lock 与 rust-toolchain.toml，门禁当场抓到。）
+    */Cargo.toml|*/Cargo.lock|*/rust-toolchain.toml|*/README.md|*/LICENSE) return 0 ;;
     */.npmrc|*/.gitignore|*/.gitattributes) return 0 ;;
     */index.html) return 0 ;;                 # Vite / 静态站点按字面找它
     */package.json|*/package-lock.json|*/tsconfig.json) return 0 ;;
