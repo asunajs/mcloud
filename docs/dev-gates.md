@@ -2,7 +2,8 @@
 
 > 状态：**规范**（改代码前必读；跑门禁是完成定义的一部分）
 >
-> - 入口：`bash scripts/gates.sh`（一条命令跑完全部，任一条失败即非零退出）
+> - 入口：**Rust 侧** `bash scripts/gates.sh`（七条）/ **Go 侧** `bash scripts/gates-go.sh`（八条）——
+>   都是"一条命令跑完全部，任一条失败即非零退出"。**迁移期两套并存、互不替代**，见下面「迁移期」。
 > - 权威说明：本文；分层表与 `scripts/check-deps.sh` 的可执行断言**互为镜像**，改一处要改另一处
 
 ---
@@ -31,6 +32,51 @@ source）。**不要复制那段代码** —— 它已经因为有三份拷贝�
 | 5 | `bash scripts/check-filenames.sh` | 非 Rust 文件一律 kebab-case |
 | 6 | `node scripts/check-identifiers.cjs` | 仓库里不得有真实标识 |
 | 7 | `node scripts/check-golden-vectors.cjs` | 黄金向量能算出自己 |
+
+---
+
+## 迁移期：Go 侧八条（2026-09-20 起）
+
+Rust → Go 迁移期间**两套门禁并存，互不替代**：Rust 侧仍是上面七条
+（`gates.sh` 在 `legacy/Cargo.toml` 存在时会**自动**加 `--manifest-path`，不用手改），
+Go 侧是：
+
+```bash
+bash scripts/gates-go.sh                  # 全跑
+bash scripts/gates-go.sh test deps        # 只跑指定的几条
+```
+
+| # | 门禁 | 管什么 | 从哪来 |
+| --- | --- | --- | --- |
+| 1 | `go build ./...` | 能编译 | Go 版 |
+| 2 | `go vet ./...` | 静态检查 —— ⚠ **≠ clippy，覆盖窄得多** | Go 版 |
+| 3 | `gofmt -l .` | 格式 | Go 版 |
+| 4 | `go test -race ./...` | 测试 **+ 竞态** | Go 版 |
+| 5 | `bash scripts/check-go-deps.sh` | Go 侧分层铁律 | Go 版 |
+| 6 | `bash scripts/check-filenames.sh` | 文件名规则 | **复用** |
+| 7 | `node scripts/check-identifiers.cjs` | 不得有真实标识 | **复用** |
+| 8 | `node scripts/check-golden-vectors.cjs` | 黄金向量能算出自己 | **复用** |
+
+**6–8 刻意复用同一份脚本，不重写** —— 它们与语言无关（扫文件名 / 扫文本里的真实标识 /
+独立复算向量），重写一遍等于给自己造第二份真相，而两份真相迟早分叉，
+分叉那天没人知道该信哪一份。
+
+两条**不可省**的替代关系，别把它们当"Rust 侧那条的等价物"：
+
+- **`-race` 不是可选项。** Rust 里 `&mut R rng` 保证同一随机源不被并发共享 —— 那是
+  **编译期**保证。Go 的 `io.Reader` 是引用语义，并发共用一个源是 data race，
+  而它**不一定**让测试变红：可能只是偶发产生错误数据（签名对不上、`deviceId` 错一位），
+  于是被当成"上游抽风"。`-race` 是那条编译期保证在 Go 侧的替代品。
+- **`vet` 过了不代表静态检查这关过了。** 它只覆盖"几乎肯定是错"的一小撮检查。
+  补齐要引 `golangci-lint`，而那是外部依赖 —— 骨架阶段刻意零第三方依赖。
+  引进来之前，**不要拿 `vet` 当 `clippy` 用**。
+
+⚠ 两个易踩的实现细节（都已在 `scripts/gates-go.sh` 里处理，改脚本时别退化）：
+`gofmt -l` **退出码恒为 0**，必须自己判输出是否为空；每条门禁的输出写**单独**日志文件，
+否则前面通过的门禁留下的字样会污染诊断（Rust 侧踩过这个坑）。
+
+完整理由、逐条设计与"四条会静默降级的编译期保证"见
+[`go-migration-plan.md`](./go-migration-plan.md) §5。
 
 ---
 

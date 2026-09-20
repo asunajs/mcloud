@@ -7,6 +7,13 @@
 > 取代：`docs/REFACTOR_PLAN_20260916.md`（该文基于 TS→TS 渐进优化 + 复用 Vue 前端，已被本方案取代）。
 > 参考项目：[3238614968/caiyun](https://github.com/3238614968/caiyun)（Go + Vue3），clone 于 `/tmp/caiyun-ref`。
 > 日期：2026-09-16
+>
+> ⚠ **2026-09-20 更新：本仓库已决定从 Rust 迁往 Go**（动机是编译体验：改一行
+> `mcloud-core`，`cargo check --workspace` 实测 118 秒）。Rust 侧冻结到 `legacy/`
+> （冻结脚本待执行）。**本文从此是历史快照** —— 它的"做什么、按什么风险顺序"
+> 已被 [`go-migration-plan.md`](./go-migration-plan.md) 接管（**冲突时以那篇为准**），
+> 但 §6 之后那些**逐接口的协议结论**仍然是迁移的输入，不要因为换了语言就丢掉。
+> ⚠ 照着本文继续写 Rust 之前，先确认冻结是否已执行。
 
 ---
 

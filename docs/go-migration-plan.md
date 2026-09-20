@@ -294,6 +294,15 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 
 **退出判据**：6 份黄金向量在 Go 侧逐字段复算通过。
 
+⚠ **注意其中一份是"死向量"**：`test/golden/login-crypto-vectors.json` 有生成器
+（`scripts/gen-login-crypto-vectors.cjs`）、但**没有任何测试读它**（`gates-go.sh` 的 golden
+门禁自己会把它标成 `⚠ 无任何测试读取（死向量）`，**不失败**）。它覆盖
+`aesEcbEncrypt/Decrypt`、`sha1Password`、`md5SafeVerify`、`puzzleAnswer`、`guid32`。
+⇒ 这一份在 Go 侧**不是"照搬已有断言"，而是"第一次真正接上断言"**：Rust 侧这些函数
+目前**处于无断言状态**（是"本来就没测"，不是"测过又丢了"）。另外它的 `§guid32`
+（uuid → md5 的具体拼接）**向量里没给出规则**，门禁会明确跳过它 ——
+所以"接上消费者"只解决一半，剩下那半得回原始出处补。
+
 ### 6.2 `mcloud-upstream`（8,064 行）—— 向量兜底最厚
 
 ⚠ **本层的铁律是"跨端常量不许互搬"**（这条在 Rust 侧已经踩过两次）：
