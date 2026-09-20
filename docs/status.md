@@ -28,9 +28,10 @@
 | `sanitize` | ✅ | header 白名单 / JSON 递归脱敏 / token 形状打码 / 199 号段重映射 / `scan_for_leaks` 自检 / `build_fixture_entry` |
 | `model` | ⚠ 仅 `AccountId` + `CloudStats` | 其余类型（Account / Schedule / Pipeline / WebuiConfig…）等消费者落地时再带过来 |
 | `user` | ✅ | 口令哈希（argon2id PHC 串）/ 会话 token / 数据隔离判据；**带来了第七份黄金向量** |
-| `legacy` `run` `stage` `traits` | ⬜ | 未开始；依赖顺序 `run` → `model` → `stage` → `legacy` → `traits` |
+| `run` | ✅ | RunID / 四态结论 / 需人工 / Seq 语义 / 五类事件流；**顺带补上了枚举的 JSON 编解码（见下）** |
+| `legacy` `stage` `traits` | ⬜ | 未开始；依赖顺序 `model` → `stage` → `legacy` → `traits` |
 
-- 落点 `internal/core`，**143 条测试**；读 `test/golden/*.json` 经 `internal/golden`，不复制向量。
+- 落点 `internal/core`，**182 条测试**；读 `test/golden/*.json` 经 `internal/golden`，不复制向量。
 - `auth-vectors.json` 从"只有 Rust 读"变成**两边都读**。
 - 步 1 的退出判据是"黄金向量在 Go 侧逐字段复算通过"，**尚未达成**：
   `app-signin-vectors` 的消费者在步 2 接线，而 `login-crypto-vectors.json`
@@ -40,14 +41,21 @@
   （`crates/` / `legacy/crates/` / `internal/` / `cmd/`），命中任一即算有消费者，
   **不区分是哪一侧在读**。所以 `app-signin-vectors.json` 至今显示 ✓，
   而读它的**只有已冻结的 Rust 侧**。
-  **Go 侧实际读了 5 份**：`crypto` / `pcclient-crypto` / `app-business-crypto` /
-  `auth` / `password-hash`（见 `internal/core/*_test.go` 里的 `golden.Load`）。
+  **  Go 侧实际读了 6 份**：`crypto` / `pcclient-crypto` / `app-business-crypto` /
+  `auth` / `password-hash` / `enum-json`（见 `internal/core/*_test.go` 里的 `golden.Load`）。
 - ⚠ `user` 是第一个引入**第三方依赖**（`golang.org/x/crypto`，只为 argon2）的模块。
   它只给**裸 KDF**，PHC 串的编解码要自己写；且 `v=16` 与 `$argon2d$` 两条
   Go 侧**物理上算不出来**，已在向量的 `$crossLanguageGaps` 里登记为
   "Rust 是 mismatch、Go 是 error"（详见 `go-migration-plan.md` §6.1）。
 - ⚠ `cron` 与 `sanitize` **没有黄金向量** —— 它们的规格来自 Rust 侧的单元测试
   （`sanitize` 的 5 个测试文件共 348 行），迁移时是**逐条平移**的，不是照文档重写。
+- ⚠⚠ **枚举的 JSON 形状是 `run` 这一步顺手补上的一个既有洞**，不是新需求：
+  Rust 侧每个进 JSON 的枚举都带 `#[serde(rename_all = …)]`，序列化成**文本**；
+  而 Go 的 `type X int` 默认序列化成**数字**。两边读同一批 `run_events.payload`
+  与同一张 `role` 列 ⇒ 同一个字段有两个形状，且**不报错**。
+  `user` 那一步的 `Role` / `SessionKind` 就已经是这个状态（它的测试只比 `String()`，
+  所以没露出来）。现在收进 `internal/core/enum.go` 一张名字表，
+  并由第八份黄金向量 `enum-json-vectors.json`（**serde 产出**）逐条对拍。
 
 ---
 

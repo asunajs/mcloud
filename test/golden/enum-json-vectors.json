@@ -1,0 +1,168 @@
+{
+  "$comment": "枚举与运行事件的 JSON 文本形状，由 serde 1.0 / serde_json 1.0 产出。生成器 = scripts/gen-enum-json-vectors.rs。⚠ 这是跨语言对拍用的：Rust 侧的 serde 枚举序列化成文本，而 Go 的 `type X int` 默认是数字 —— 生成侧与消费侧必须是两份实现，否则是自证。",
+  "$decode": [
+    {
+      "json": "\"manual_required\"",
+      "ok": true,
+      "type": "RunOutcome"
+    },
+    {
+      "json": "\"nope\"",
+      "ok": false,
+      "type": "RunOutcome"
+    },
+    {
+      "json": "2",
+      "ok": false,
+      "type": "RunOutcome"
+    },
+    {
+      "json": "null",
+      "ok": false,
+      "type": "RunOutcome"
+    },
+    {
+      "json": "\"warn\"",
+      "ok": true,
+      "type": "LogLevel"
+    },
+    {
+      "json": "\"trace\"",
+      "ok": false,
+      "type": "LogLevel"
+    },
+    {
+      "json": "\"admin\"",
+      "ok": true,
+      "type": "Role"
+    },
+    {
+      "json": "\"root\"",
+      "ok": false,
+      "type": "Role"
+    }
+  ],
+  "$enumText": [
+    {
+      "enum": "RunStatus",
+      "text": "running",
+      "variant": "Running"
+    },
+    {
+      "enum": "RunStatus",
+      "text": "done",
+      "variant": "Done"
+    },
+    {
+      "enum": "RunStatus",
+      "text": "failed",
+      "variant": "Failed"
+    },
+    {
+      "enum": "RunOutcome",
+      "text": "success",
+      "variant": "Success"
+    },
+    {
+      "enum": "RunOutcome",
+      "text": "partial_success",
+      "variant": "PartialSuccess"
+    },
+    {
+      "enum": "RunOutcome",
+      "text": "manual_required",
+      "variant": "ManualRequired"
+    },
+    {
+      "enum": "RunOutcome",
+      "text": "failed",
+      "variant": "Failed"
+    },
+    {
+      "enum": "ManualTarget",
+      "text": "mobile_app",
+      "variant": "MobileApp"
+    },
+    {
+      "enum": "ManualTarget",
+      "text": "web",
+      "variant": "Web"
+    },
+    {
+      "enum": "ManualTarget",
+      "text": "webui",
+      "variant": "Webui"
+    },
+    {
+      "enum": "ManualTarget",
+      "text": "cli",
+      "variant": "Cli"
+    },
+    {
+      "enum": "ManualTarget",
+      "text": "unspecified",
+      "variant": "Unspecified"
+    },
+    {
+      "enum": "LogLevel",
+      "text": "info",
+      "variant": "Info"
+    },
+    {
+      "enum": "LogLevel",
+      "text": "warn",
+      "variant": "Warn"
+    },
+    {
+      "enum": "LogLevel",
+      "text": "error",
+      "variant": "Error"
+    },
+    {
+      "enum": "Role",
+      "text": "user",
+      "variant": "User"
+    },
+    {
+      "enum": "Role",
+      "text": "admin",
+      "variant": "Admin"
+    },
+    {
+      "enum": "SessionKind",
+      "text": "web",
+      "variant": "Web"
+    },
+    {
+      "enum": "SessionKind",
+      "text": "cli",
+      "variant": "Cli"
+    }
+  ],
+  "$eventJson": [
+    {
+      "json": "{\"type\":\"started\",\"runId\":\"64234443-2463-4483-a4a3-c4c3a4e38403\",\"capability\":\"sign\"}",
+      "kind": "started"
+    },
+    {
+      "json": "{\"type\":\"log\",\"runId\":\"64234443-2463-4483-a4a3-c4c3a4e38403\",\"level\":\"warn\",\"message\":\"风控退避 <b>&amp;</b> 明天再试\"}",
+      "kind": "log"
+    },
+    {
+      "json": "{\"type\":\"progress\",\"runId\":\"64234443-2463-4483-a4a3-c4c3a4e38403\",\"done\":3,\"total\":20}",
+      "kind": "progress"
+    },
+    {
+      "json": "{\"type\":\"finished\",\"runId\":\"64234443-2463-4483-a4a3-c4c3a4e38403\",\"outcome\":\"manual_required\",\"manual_steps\":[{\"capability\":\"backup-gift\",\"account\":\"19900001234\",\"instruction\":\"未开启备份，请前往 App 手动开启\",\"target\":\"mobile_app\"}],\"summary\":\"有一件待办\"}",
+      "kind": "finished-with-steps"
+    },
+    {
+      "json": "{\"type\":\"finished\",\"runId\":\"64234443-2463-4483-a4a3-c4c3a4e38403\",\"outcome\":\"success\",\"manual_steps\":[],\"summary\":null}",
+      "kind": "finished-empty"
+    },
+    {
+      "json": "{\"type\":\"errored\",\"runId\":\"64234443-2463-4483-a4a3-c4c3a4e38403\",\"message\":\"上游 500\"}",
+      "kind": "errored"
+    }
+  ]
+}

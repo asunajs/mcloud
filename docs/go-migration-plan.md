@@ -312,6 +312,13 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 | **PHC 的参数是可选、有默认值的** | 缺 `p=1` 时 RustCrypto 用默认值 1 补上，校验结果仍是**匹配** | **别加"参数必须齐全"这道校验** —— 那会把一条本来能验过的存量哈希判成"格式非法"，而现象只是"老用户登录不上" |
 | **PHC 的段是按位置取的，不是按内容** | `$argon2id$v=19$$<盐>$<哈希>` 里那个**空段会被当成盐**（于是报"盐太短"），不是"空参数表"；`$…$abc$def` 同理 | 判据：参数段必须非空且**每项含 `=`**；base64 无填充，所以盐段不可能含 `=`，不会误判。**别按"看起来像参数"去猜** |
 | **打印脱敏在 Go 里要多挡两条路** | Rust 只有 `{:?}` 一条；Go 有 `%v`（走 Stringer）、`%+v`（**展开字段，不走 struct 的 Stringer**）、`%#v`（走 GoStringer） | 把敏感字段做成**有 Stringer 的具名类型**（`PasswordHash`）—— struct 级 Stringer 挡不住 `%+v`。⚠ 副作用：断言失败信息里也只印 `<已隐藏>`，比较处要显式 `string(v)` |
+| **⚠⚠ Rust 的 serde 枚举序列化成**文本**，Go 的 `type X int` 序列化成**数字** | 前者带 `#[serde(rename_all = …)]`，输出 `{"outcome":"manual_required","level":"warn","role":"admin"}`；后者默认输出 `{"outcome":2,"level":1,"role":0}`。两边读**同一批** `run_events.payload`、同一张 `users.role` 列 ⇒ 这是**外部契约换了个形状**，而它既不编译错也不运行时错，只在真跑起来之后表现为"另一侧读出来的东西不对" | 凡是会进 JSON 的枚举都必须**显式**实现 `MarshalJSON`/`UnmarshalJSON`，收在 `internal/core/enum.go` 一张名字表里（下标即枚举值，所以顺序必须与常量声明一致）。⚠ 漏写的三条后果都不在编译期：`SelectXxx` 这类测试照旧全绿 |
+| **serde 对未知变体 / `null` / 数字一律拒收** | serde 没有"宽松枚举"这回事，三个都失败。而 Go 侧若没有 `UnmarshalJSON`，`2` 会被当成合法值读进来 —— 那正是它自己写出来的形状 | 解码侧走同一张表，三者都报错。⚠ `null` 要**单独挡**：`encoding/json` 把 null 解进 `string` 是**静默成功**（留空串、不报错），不挡的话它会走到"未知的文本 \"\"" 那条报错，行为对但信息指错方向 |
+
+⚠ 这三条是**同一个病**的三个面（枚举 JSON），所以判据也共用一条：
+**"有没有 MarshalJSON"这件事必须能被一条断言问出来** —— `enum_test.go` 里的
+第一条断言是"序列化结果的首字符必须是 `\"`"，它专门用来接住"漏写了 MarshalJSON"
+这种改动（反向测试已确认：拆掉 `RunOutcome.MarshalJSON` 会让整串比对立刻变红）。
 
 ⚠ 另有一条与语言无关、但 Go 侧更容易犯的：**黄金向量门禁靠正则
 `golden.Load("…")` 的字面量判断"这份向量有没有人读"**。把文件名藏进
@@ -324,6 +331,13 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 所以 `test/golden/password-hash-vectors.json` 由 **Rust 侧**产出
 （`scripts/gen-password-hash-vectors.rs`，RustCrypto argon2 0.5.3，
 即迁移前一直在跑的那一份实现），Go 侧只是它的消费者。
+
+第八份向量 `enum-json-vectors.json` 同理：由 **serde 1.0 / serde_json 1.0** 产出
+（`scripts/gen-enum-json-vectors.rs`），Go 侧只是它的消费者。它比第七份更能说明
+这条原则 —— JSON 文本形状这件事**在 Rust 侧原本一个断言都没有**（`run.rs` 里没有
+serde 测试、也没有 `tests/` 目录），形状只隐含在 `rename_all` 属性里。
+⇒ 若照"从实现反推"的老路写 Go 断言，就是把 serde 的命名规则再推一遍，
+而推错时两边会**一起错、一起绿**。
 
 同因：**期望值必须"跑出来"，不能"推出来"**。那份生成器对每条用例都真的跑一遍
 `verify_password`，实测结果与写下的 `expect` 不一致就 panic。这个自检在本次开发中
