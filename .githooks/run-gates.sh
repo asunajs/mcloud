@@ -36,8 +36,10 @@
 #      另一套 fingerprint，等于凭空多编一遍。"少检查"不等于"更快"。
 #   2. `clippy` 的 2s 来自"刚跑过"（首次要 33s 重新 lint 所有目标），
 #      不是被 test 带热的。
-#   3. 日志里那些 `拒绝访问` **不是**瓶颈：冷热两次计数都是 11，耗时却
-#      33s vs 2s。别据此去关 incremental —— 那会让正常重建更慢。
+#   3. **`incremental` 必须关**（已写进 `.cargo/config.toml`）。它的读写一直被
+#      环境拒绝，cargo 反复重试+超时 —— 冷态 `cargo test` 跑过 10 分钟还没编完；
+#      缓存停在半截状态还会让 rustc ICE（`no entry found for key`，
+#      看起来像代码问题，实际不是）。关掉后冷态复用是 1 秒级。
 #
 # 因此：不要为了"快"去砍门禁条数，那省不下多少。详见 docs/dev-gates.md。
 
