@@ -76,6 +76,33 @@ const UNTAGGED_ALLOWED = {
     '一次 H5 请求的**四个签名头**（request-id / timestamp / nonce / signature），是内存里的计算结果，不落库也不出响应',
   'internal/upstream/app_signin_session.go:H5Login':
     'tyrzLogin 换回的**会话凭据**（jwt + 回显手机号），进程内存里用；Rust 侧 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
+  // 领取族与流水族的**解析结果**：由 `ParseXxx(envelope)` 手工从泛型 payload 里取值
+  // 构造（`RequireInt64(payload, "receive")` / `payload["records"]`），
+  // **不是** `json.Unmarshal` 的目标 —— 字段名因此不参与任何解析，
+  // 加 tag 只会让人以为"字段名是这里的解析键"。
+  //
+  // ⚠ 理由的边界：若哪天要把它们**序列化**给前端（比如 CLI `--json` 直接吐），
+  // 正确做法是补上 tag 并从这里删掉 —— 而不是继续待在名单里。
+  // 那时字段名就成了对外契约，要由 `test/golden/enum-json-vectors.json` 那类
+  // serde 产出的向量来定，不能凭手感写。
+  'internal/upstream/app_signin_receive.go:ReceiveResult':
+    'receiveV3 的解析结果（`RequireInt64(payload, "receive")`），手工构造，不做反序列化',
+  'internal/upstream/app_signin_receive.go:RevivalReward':
+    'receiveRevivalReward 的解析结果（用掉一张卡换回的云朵），同上',
+  'internal/upstream/app_signin_receive.go:ReceiveTaskExpansion':
+    'receiveTaskExpansion 的解析结果（月度任务奖励），同上',
+  'internal/upstream/app_signin_receive.go:MultipleResult':
+    'multiple 的解析结果（本次额外领到的豆），同上',
+  'internal/upstream/app_signin_records.go:CloudRecords':
+    'cloudRecordV2 的解析结果（一页流水 + 分页总数），手工构造，不做反序列化',
+  'internal/upstream/app_signin_records.go:PrizeRecordItem':
+    '奖品流水里的一条，同上',
+  'internal/upstream/app_signin_records.go:PrizeRecords':
+    '奖品流水的整份解析结果（条目 + 分页），同上',
+  'internal/upstream/app_signin_records.go:BackupGift':
+    '备用礼包的状态解析结果，同上',
+  'internal/upstream/app_signin_records.go:BackupGiftReceive':
+    '领取备用礼包的结果解析结果，同上',
   'internal/core/auth.go:AuthInfo':
     'Rust 侧只 derive `Clone, PartialEq`——**刻意不** Serialize（里面是 token）',
   'internal/core/crypto.go:SignSaltPair':
