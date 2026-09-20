@@ -30,6 +30,7 @@ pub mod device;
 pub mod login;
 pub mod migration;
 pub mod payload;
+pub mod run; // 跨账号编排：准入 + 事件总线 + 落库
 pub mod session;
 pub mod signin;
 pub mod smid;

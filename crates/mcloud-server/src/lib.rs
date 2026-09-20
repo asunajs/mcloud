@@ -30,9 +30,12 @@ use tower_http::services::{ServeDir, ServeFile};
 
 pub mod auth;
 pub mod error;
+/// API 路由。**不在这里 `with_state`** —— 中间件与状态由 [`auth::router`] 统一套，
+/// 这样"哪条路径免登录"只有一处判断。
+pub mod routes;
 
 pub use auth::{AppState, AuthUser, ServerConfig, router};
-pub use error::ApiError;
+pub use error::{ApiError, ApiJson, ApiQuery};
 
 /// 旧数据迁移的执行策略（实现见 `mcloud-app`）。
 pub use mcloud_app::migration;

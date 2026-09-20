@@ -1,18 +1,5 @@
 # docs/ 索引
 
-17 篇文档 + `capture/` 原始素材。**先看「该读哪篇」那张表，再进去。**
-
-> 这份索引的存在理由：`docs/` 有 5,000 多行，而此前唯一的入口是 `README.md` 里一段
-> **叙述式**文字（"要参考 Go 项目前先读 …"）—— 扫不到全貌，于是
-> `upstream-web-qr-login.md` 长期没有任何入径。
-> 这里按**角色**和**状态**重排一遍。
->
-> 原先还混着一份与项目无关的本机运维文档（Windows 11 LTSC 装商店 / 应用宝），
-> 已按 [`docs-audit-20260919.md`](./docs-audit-20260919.md) §4.1 的建议移出仓库。
-> **`docs/` 只放 mcloud 自己的东西** —— 环境搭建类笔记请放在项目外。
-
----
-
 ## 该读哪篇
 
 | 你现在要做什么 | 先读这个 |
@@ -42,6 +29,7 @@
 | [`rust-rewrite-plan.md`](./rust-rewrite-plan.md) | 动工前的规划快照（技术选型、分层、19 项能力风险序、实现顺序 §7.1） | **提案**（写于动工前，进度以 README 为准） |
 | [`business-feature-inventory.md`](./business-feature-inventory.md) | 旧 TS 项目 19 项能力逐条拆解 + 运行时层缺口 + 硬编码清单 | 编排中 |
 | [`caiyun-go-feature-inventory.md`](./caiyun-go-feature-inventory.md) | Go 参考项目对照（24 条任务、抢兑子系统、搬/不搬总表） | 编排中 |
+| [`rust-to-golang-migration.md`](./rust-to-golang-migration.md) | 把**本仓库**从 Rust 迁到 Go 的评估：规模/依赖对照/四条结构性难点/工作量与是否值得（数字为 2026-09-20 实测，会过期） | 评估（未决策） |
 
 ### 登录协议（按端分文件，互为姊妹篇）
 

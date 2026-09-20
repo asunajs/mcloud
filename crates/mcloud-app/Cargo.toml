@@ -11,6 +11,8 @@ authors.workspace = true
 mcloud-core = { workspace = true }
 mcloud-upstream = { workspace = true }
 mcloud-capabilities = { workspace = true }
+# 执行器：跨账号编排要用它的准入表与事件总线（见 src/run.rs）
+mcloud-exec = { workspace = true }
 mcloud-io = { workspace = true }
 
 serde = { workspace = true }

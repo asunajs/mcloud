@@ -37,6 +37,7 @@ use chrono::{DateTime, Utc};
 use mcloud_app::session;
 use mcloud_app::user::init_first_admin;
 use mcloud_core::{Clock, Error as CoreError, Session, User, UserStore};
+use mcloud_exec::EventBus;
 use mcloud_io::{SqliteStore, SystemRandom};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -63,6 +64,18 @@ struct Inner {
     store: SqliteStore,
     clock: Arc<dyn Clock + Send + Sync>,
     config: ServerConfig,
+    /// 运行事件总线。
+    ///
+    /// # 为什么它住在 `AppState` 而不是某个处理器里
+    ///
+    /// 它的生命周期**比一次请求长**：发布方是跑任务的那条路（`mcloud-app` 的
+    /// `Runner`），订阅方是 `GET /api/runs/:id/events` 的 SSE —— 两者必须是
+    /// **同一个实例**，否则 SSE 永远看不到事件。
+    /// `AppState` 就是"这个进程里唯一一份"的存放处。
+    ///
+    /// 它按 `&self` 暴露（内部一把锁，见 `mcloud-exec` 的 crate 头），
+    /// 所以这里不需要再包 `Mutex`：一次运行期间订阅者照样能读。
+    bus: EventBus,
 }
 
 /// 已认证的请求身份。
@@ -82,12 +95,20 @@ impl AppState {
             store,
             clock,
             config,
+            // 由本函数创建而不是让调用方传进来：总线**没有配置项**，
+            // 而多一个参数就多一种"两个处理器拿到不同总线"的接错法。
+            bus: EventBus::new(),
         }))
     }
 
     /// 组装层与处理器都从这里取存储。
     pub fn store(&self) -> &SqliteStore {
         &self.0.store
+    }
+
+    /// 运行事件总线（发事件的跑任务侧与收事件的 SSE 侧共用这一份）。
+    pub fn bus(&self) -> &EventBus {
+        &self.0.bus
     }
 
     pub fn config(&self) -> ServerConfig {
@@ -126,6 +147,10 @@ pub fn router(state: AppState) -> Router {
             // 登录（POST）必须免登录，否则是个死结 —— 见 `is_public`
             post(login).get(current_session).delete(logout),
         )
+        // 业务路由（能力清单 / 账号 / 运行 / 定时任务）自带"要会话"的前提，
+        // 见 `crate::routes` 的模块说明。合并在这里是为了让中间件与白名单
+        // 只有一处判断 —— 新加一条路由时默认就是"需要登录"。
+        .merge(crate::routes::router())
         // 兜底：`/api` 下不存在的路径必须**明确报 404**，不能落到前端 index.html ——
         // 那会让"路径写错"表现成"返回了一段 HTML"，前端解析失败且毫无线索。
         // 静态段优先于通配，所以它不会抢走上面几条。

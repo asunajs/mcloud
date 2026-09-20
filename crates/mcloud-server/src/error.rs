@@ -18,10 +18,12 @@
 //! 5xx 的文案是出了意外时顺手 `format!` 出来的。
 
 use axum::Json;
-use axum::extract::{FromRequest, Request};
+use axum::extract::{FromRequest, FromRequestParts, Query, Request};
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use mcloud_core::{Error, ErrorKind};
+use serde::de::DeserializeOwned;
 use serde_json::json;
 
 /// 请求体提取器：**所有**请求体错误都变成我们自己的形状。
@@ -50,6 +52,28 @@ where
             Ok(Json(value)) => Ok(Self(value)),
             Err(rejection) => Err(ApiError::BadBody(rejection.body_text())),
         }
+    }
+}
+
+/// 查询串提取器：与 [`ApiJson`] 同一个理由，只不过对象是 `?a=1` 而不是请求体。
+///
+/// 直接用 `axum::extract::Query` 时，`?days=abc` 会得到 axum 自带的 **400 纯文本**
+/// （`Failed to deserialize query string: ...`）。前端是按 `{code, message}` 写的，
+/// 拿到纯文本只能显示"HTTP 400" —— 而这里丢掉的恰恰是"days 得是个数字"这条可行动的信息。
+pub struct ApiQuery<T>(pub T);
+
+impl<S, T> FromRequestParts<S> for ApiQuery<T>
+where
+    T: DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Query::<T>::from_request_parts(parts, state)
+            .await
+            .map(|Query(value)| Self(value))
+            .map_err(|rejection| ApiError::BadBody(rejection.body_text()))
     }
 }
 

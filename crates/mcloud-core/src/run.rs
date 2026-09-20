@@ -160,6 +160,41 @@ impl RunOutcome {
         matches!(self, Self::ManualRequired)
     }
 
+    /// 把**多个账号**的结果合成一次运行的总判定。
+    ///
+    /// 优先级从"最需要人管"往下排：
+    ///
+    /// 1. 只要有一个账号要人动手 → [`Self::ManualRequired`]
+    ///    —— 再跑一遍也没用，必须先有人去客户端；
+    /// 2. 全部成功 → [`Self::Success`]；
+    /// 3. 一个都没成 → [`Self::Failed`]；
+    /// 4. 其余 → [`Self::PartialSuccess`]。
+    ///
+    /// # 两个刻意的选择
+    ///
+    /// - **`ManualRequired` 优先于 `Failed`**：两种都有时返回前者。
+    ///   后者重跑可能就好了，前者重跑一定不好 —— 报告里更该突出"要人动手"。
+    ///   具体哪些账号失败没有丢：逐账号的结果在调用方手里（`RunSummary`）。
+    /// - **空集合是 `Failed`**：什么都没跑成不是成功。这也让"目标账号筛出来是空的"
+    ///   这种情况**在总判定里就露出来**，而不是安静地报成功。
+    ///   （更早拦当然是更好的做法，但那时这一层就看不见了。）
+    pub fn combine(reports: &[RunReport]) -> Self {
+        if reports.iter().any(|r| r.outcome.needs_human_action()) {
+            return Self::ManualRequired;
+        }
+        let succeeded = reports
+            .iter()
+            .filter(|r| r.outcome.is_success_like())
+            .count();
+        if succeeded == 0 {
+            return Self::Failed;
+        }
+        if succeeded == reports.len() {
+            return Self::Success;
+        }
+        Self::PartialSuccess
+    }
+
     /// 从 [`crate::model::RunStatus`] 与本态的映射回推 —— 供存储层在只有
     /// status 一列时的**退路**使用。
     ///
@@ -1048,5 +1083,41 @@ mod tests {
         assert!(LogLevel::Warn < LogLevel::Error);
         assert_eq!(LogLevel::Warn.as_str(), "warn");
         assert_eq!(LogLevel::Error.to_string(), "error");
+    }
+
+    /// 多账号结果的合成：优先级、空集合、以及"没人失败就算成功"都要钉住。
+    #[test]
+    fn combining_reports_picks_the_state_that_deserves_attention() {
+        fn report(outcome: RunOutcome) -> RunReport {
+            RunReport {
+                outcome,
+                manual_steps: Vec::new(),
+                summary: None,
+            }
+        }
+        let ok = || report(RunOutcome::Success);
+        let bad = || report(RunOutcome::Failed);
+
+        // 全成功 / 部分成功 / 全失败
+        assert_eq!(RunOutcome::combine(&[ok(), ok()]), RunOutcome::Success);
+        assert_eq!(
+            RunOutcome::combine(&[ok(), bad()]),
+            RunOutcome::PartialSuccess
+        );
+        assert_eq!(RunOutcome::combine(&[bad(), bad()]), RunOutcome::Failed);
+
+        // 要人动手的那一态**压过**失败：重跑可能好 vs 重跑一定不好
+        assert_eq!(
+            RunOutcome::combine(&[ok(), report(RunOutcome::ManualRequired)]),
+            RunOutcome::ManualRequired
+        );
+        assert_eq!(
+            RunOutcome::combine(&[bad(), report(RunOutcome::ManualRequired)]),
+            RunOutcome::ManualRequired,
+            "两者都有时更该突出要人动手的那件事"
+        );
+
+        // 空集合不是成功 —— "一个账号都没跑成"必须在总判定里露出来
+        assert_eq!(RunOutcome::combine(&[]), RunOutcome::Failed);
     }
 }

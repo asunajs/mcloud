@@ -14,6 +14,7 @@
 //! [`docs/dev-gates.md`]: ../../../docs/dev-gates.md
 
 pub mod auth;
+pub mod cron; // cron 表达式：解析与下次触发
 pub mod crypto;
 pub mod error;
 pub mod legacy;

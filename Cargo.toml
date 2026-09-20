@@ -39,6 +39,10 @@ anyhow = "1"
 
 # --- 异步 / 运行时 ---
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "sync", "signal"] }
+# SSE 的 HTTP 侧要一个 `Stream`，而 axum 只**收**不收（它不重导出 `futures_core`）。
+# `ReceiverStream` 把 `tokio::sync::mpsc` 的接收端包成流，是这件事最短的一条路，
+# 也让"事件流由谁生产"在类型上看得见：一个 channel，一端是 pump 任务，一端是响应体。
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # --- HTTP / 存储 ---
 reqwest = { version = "0.12", default-features = false, features = [

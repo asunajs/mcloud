@@ -14,11 +14,22 @@
 //! 因此现在就能被测住，而不是等到 P5 靠真机试跑验证。
 //! 真正需要 IO 的部分（跑任务、落库、SSE 的 HTTP 侧）在 P5 接 ——
 //! 本层只保证"给它事件，它按序号存好并交给订阅者"。
+//!
+//! # 这些类型是**进程级共享状态**，所以按 `&self` 暴露
+//!
+//! 事件总线与运行登记表会被两条**并发**的路径同时碰到：跑任务的那条
+//! （发布事件 / 受理与释放）与看那条（订阅 SSE、查"谁在跑"）。
+//! 收 `&mut self` 就要求调用方把独占借用握到整趟运行结束 ——
+//! 跑一次 20 个账号的签到期间，服务层连"现在有几个在跑"都问不了。
+//! 所以内部各有一把锁、方法收 `&self`；每次操作短暂加锁不改变任何语义，
+//! 因为这两个表的操作本来就是串行的。这也意味着本 crate **不引入 tokio**：
+//! 锁是 `std::sync::Mutex`，拉取是调用方的事（SSE 侧见 `mcloud-server`）。
 
 #![forbid(unsafe_code)]
 
 use mcloud_core::{AccountMode, LogLevel, RunEvent, RunId, Seq, Sequenced};
 use std::collections::HashMap;
+use std::sync::{Mutex, MutexGuard};
 
 /// 并发闸配置。
 #[derive(Debug, Clone, Copy)]
@@ -173,17 +184,39 @@ pub enum Admission {
 /// 只查锁会让同一 runId 重放跑两次。旧项目两个都没做。
 ///
 /// 这是纯内存实现（P5 会加落库的那一半：跨进程重放靠 `runs` 表）。
+///
+/// 方法收 `&self`（内部一把锁），理由见 crate 头。
 #[derive(Debug, Default)]
 pub struct RunRegistry {
+    inner: Mutex<RegistryState>,
+}
+
+/// [`RunRegistry`] 的全部可变状态。
+///
+/// 单独一个结构体而不是直接 `Mutex<RunRegistry>`：后者会让 `&self` 的方法
+/// 里再借一次 `self`，绕不开。
+#[derive(Debug, Default)]
+struct RegistryState {
     /// 已受理的 runId 及其占用的锁。
-    accepted: std::collections::HashMap<RunId, MutexKey>,
+    accepted: HashMap<RunId, MutexKey>,
     /// 锁 → 当前持有的 runId。
-    held: std::collections::HashMap<MutexKey, RunId>,
+    held: HashMap<MutexKey, RunId>,
 }
 
 impl RunRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 取内部状态。
+    ///
+    /// 中毒（持锁线程 panic）时**按原值继续**而不是跟着 panic：这两个 map
+    /// 的每次操作都在锁内一次做完，没有"写了一半"的中间态可被读到，
+    /// 所以中毒在这里不构成不可用的理由 —— 而跟着 panic 会让整个服务停摆。
+    fn state(&self) -> MutexGuard<'_, RegistryState> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// 申请开跑。**这是唯一入口** —— 不要在外面自己判断后直接执行。
@@ -201,22 +234,23 @@ impl RunRegistry {
     /// 先 `DuplicateRunId` 被拒 ⇒ 等下把拿到的结果丢掉、带着新参数重开一次。
     /// 断言会把这条路直接 panic 掉。所以锁键冲突只能在**有意的检查**里暴露，
     /// 例如 `Blocked { holder }` 里带上占用者，排查时能看出"被谁挡了"。
-    pub fn admit(&mut self, run_id: RunId, key: MutexKey) -> Admission {
-        if let Some(existing_key) = self.accepted.get(&run_id) {
+    pub fn admit(&self, run_id: RunId, key: MutexKey) -> Admission {
+        let mut state = self.state();
+        if let Some(existing_key) = state.accepted.get(&run_id) {
             // 这里只做诊断，不参与判定（详见上面文档注释）
             let _ = existing_key;
             return Admission::DuplicateRunId(run_id);
         }
 
-        if let Some(holder) = self.held.get(&key) {
+        if let Some(holder) = state.held.get(&key) {
             return Admission::Blocked {
                 key: key.clone(),
                 holder: holder.clone(),
             };
         }
 
-        self.held.insert(key.clone(), run_id.clone());
-        self.accepted.insert(run_id, key);
+        state.held.insert(key.clone(), run_id.clone());
+        state.accepted.insert(run_id, key);
         Admission::Admitted
     }
 
@@ -225,25 +259,29 @@ impl RunRegistry {
     /// **只释放锁、保留 runId 记录** —— 这是幂等的前提：
     /// 跑完之后拿同一个 runId 再来，应当得到 `DuplicateRunId`（复用结果），
     /// 而不是又跑一遍。把 `accepted` 也清掉就等于没有幂等。
-    pub fn release(&mut self, run_id: &RunId) -> bool {
-        let Some(key) = self.accepted.get(run_id) else {
+    pub fn release(&self, run_id: &RunId) -> bool {
+        let mut state = self.state();
+        // 先把键拷出来再动 `held`：不这样的话"读 accepted、改 held"
+        // 会同时借这个结构体的两处，虽然编译器允许（字段级拆分），
+        // 但读的人得先想一遍才确认它没问题。
+        let Some(key) = state.accepted.get(run_id).cloned() else {
             return false;
         };
         // 只有仍由它持有才移除，避免把别人的锁误删
-        if self.held.get(key) == Some(run_id) {
-            self.held.remove(key);
+        if state.held.get(&key) == Some(run_id) {
+            state.held.remove(&key);
         }
         true
     }
 
     /// 当前正在跑的数量。
     pub fn running(&self) -> usize {
-        self.held.len()
+        self.state().held.len()
     }
 
     /// 该 runId 是否已被受理过（含已完成）。
     pub fn has_seen(&self, run_id: &RunId) -> bool {
-        self.accepted.contains_key(run_id)
+        self.state().accepted.contains_key(run_id)
     }
 }
 
@@ -326,8 +364,23 @@ const DEFAULT_SUBSCRIBER_CAPACITY: usize = 1024;
 ///
 /// 这里换成"每个订阅者一条队列 + 全量历史"：迟到的订阅者能从历史补齐，
 /// 卡住的订阅者只影响自己（丢的事件数会被报出来），序号由总线统一分配。
+///
+/// # 方法收 `&self`（内部一把锁），且**没有通知机制**
+///
+/// 发布方与订阅方是两条并发的路径（跑任务的那条发，SSE 那条收），
+/// 所以它必须是可共享的：内部一把锁，每次操作短暂加锁。理由见 crate 头。
+///
+/// 订阅方取事件是**拉**（[`EventBus::drain`] 非阻塞）而不是被推送：
+/// 本 crate 不依赖 tokio，没有 `Notify` 可用。调用方自己决定拉取节奏 ——
+/// HTTP 侧是每 50ms 拉一次内存队列（不查库），见 `mcloud-server` 的 `routes/runs.rs`。
 #[derive(Debug, Default)]
 pub struct EventBus {
+    inner: Mutex<BusState>,
+}
+
+/// [`EventBus`] 的全部可变状态（单独成结构体的理由同 `RegistryState`）。
+#[derive(Debug, Default)]
+struct BusState {
     streams: HashMap<RunId, RunStream>,
     next_subscriber_id: u64,
 }
@@ -337,12 +390,20 @@ impl EventBus {
         Self::default()
     }
 
+    /// 取内部状态，中毒时按原值继续（理由同 [`RunRegistry::state`]：
+    /// 每次操作都在锁内一次做完，没有中间态可读，而跟着 panic 代价更大）。
+    fn state(&self) -> MutexGuard<'_, BusState> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// 开始跟踪一个 run。重复调用是安全的（幂等）。
     ///
     /// 返回该 run 当前的序号游标，供调用方把它交给 [`mcloud_core::stage::RunExecution`]
     /// 之外的发布逻辑使用。
-    pub fn open(&mut self, run_id: &RunId) -> Seq {
-        self.streams.entry(run_id.clone()).or_default().seq
+    pub fn open(&self, run_id: &RunId) -> Seq {
+        self.state().streams.entry(run_id.clone()).or_default().seq
     }
 
     /// 发布一条事件，返回被分配的序号。
@@ -355,9 +416,10 @@ impl EventBus {
     /// 不是丢最老的。理由：前端至少要能从这个 run 的开头看起。
     /// 丢最老的会让它从中间开始，进度条与日志都对不上；
     /// 丢最新的则只是"后面几条没看到"，且下次续传时能从序号接上。
-    pub fn publish(&mut self, event: RunEvent) -> (Seq, Vec<Delivery>) {
+    pub fn publish(&self, event: RunEvent) -> (Seq, Vec<Delivery>) {
         let run_id = event.run_id().clone();
-        let stream = self.streams.entry(run_id).or_default();
+        let mut state = self.state();
+        let stream = state.streams.entry(run_id).or_default();
         let seq = stream.seq.next();
         let item = Sequenced::new(seq, event);
         stream.history.push(item.clone());
@@ -390,19 +452,26 @@ impl EventBus {
     /// ⚠ **`since` 是"已看到的值"，不是"下一个要取的值"**：传 `Seq::seen(3)`
     /// 会补发 4、5、…；传 `Seq::resume_after(3)`（内部值 4）会从 **5** 开始 ——
     /// 那会静默跳过 4 号。两个构造器的名字就是为区分这件事而存在的。
-    pub fn subscribe(&mut self, run_id: &RunId, since: Option<Seq>) -> u64 {
+    pub fn subscribe(&self, run_id: &RunId, since: Option<Seq>) -> u64 {
         self.subscribe_with_capacity(run_id, since, DEFAULT_SUBSCRIBER_CAPACITY)
     }
 
     /// 同上，但显式指定队列上限（测试"丢事件"时用得上）。
     pub fn subscribe_with_capacity(
-        &mut self,
+        &self,
         run_id: &RunId,
         since: Option<Seq>,
         capacity: usize,
     ) -> u64 {
         let from = since.map_or(0, |s| s.value());
-        let stream = self.streams.entry(run_id.clone()).or_default();
+        let mut state = self.state();
+
+        // 先取 id 再借 `streams`：`entry()` 拿的是 `state` 的可变借用，
+        // 而计数器也在 `state` 上 —— 先读后借，两者才不打架（行为完全一样）。
+        let id = state.next_subscriber_id;
+        state.next_subscriber_id += 1;
+
+        let stream = state.streams.entry(run_id.clone()).or_default();
 
         let mut sub = Subscriber::new(capacity);
         // 回放：把 since 之后的历史直接灌进队列
@@ -415,15 +484,14 @@ impl EventBus {
             }
         }
 
-        let id = self.next_subscriber_id;
-        self.next_subscriber_id += 1;
         stream.subscribers.insert(id, sub);
         id
     }
 
     /// 取走订阅者当前所有待投递事件（非阻塞）。
-    pub fn drain(&mut self, run_id: &RunId, subscriber: u64) -> Vec<Sequenced> {
-        let Some(stream) = self.streams.get_mut(run_id) else {
+    pub fn drain(&self, run_id: &RunId, subscriber: u64) -> Vec<Sequenced> {
+        let mut state = self.state();
+        let Some(stream) = state.streams.get_mut(run_id) else {
             return Vec::new();
         };
         let Some(sub) = stream.subscribers.get_mut(&subscriber) else {
@@ -436,23 +504,32 @@ impl EventBus {
     ///
     /// 暴露它是为了**让丢事件可见** —— 旧项目所有投递失败都吞成日志，
     /// 于是"前端少了半截日志"从来没人发现。
+    ///
+    /// ⚠ 这是**累计值，不自动清零**：调用方看到它大于 0 之后要处理一次，
+    /// 而"清零"的办法是重新订阅（`unsubscribe` + `subscribe`）——
+    /// 重订阅会把 `since` 之后的历史再灌一遍，丢掉的那些因此补齐。
     pub fn dropped(&self, run_id: &RunId, subscriber: u64) -> usize {
-        self.streams
+        self.state()
+            .streams
             .get(run_id)
             .and_then(|s| s.subscribers.get(&subscriber))
             .map_or(0, |s| s.dropped)
     }
 
     /// 取消订阅。
-    pub fn unsubscribe(&mut self, run_id: &RunId, subscriber: u64) -> bool {
-        self.streams
+    pub fn unsubscribe(&self, run_id: &RunId, subscriber: u64) -> bool {
+        self.state()
+            .streams
             .get_mut(run_id)
             .is_some_and(|s| s.subscribers.remove(&subscriber).is_some())
     }
 
     /// 该 run 已发布的事件条数。
     pub fn len(&self, run_id: &RunId) -> usize {
-        self.streams.get(run_id).map_or(0, |s| s.history.len())
+        self.state()
+            .streams
+            .get(run_id)
+            .map_or(0, |s| s.history.len())
     }
 
     pub fn is_empty(&self, run_id: &RunId) -> bool {
@@ -465,7 +542,8 @@ impl EventBus {
     /// 也不需要订阅，直接读一遍即可。
     pub fn replay(&self, run_id: &RunId, since: Option<Seq>) -> Vec<Sequenced> {
         let from = since.map_or(0, |s| s.value());
-        self.streams
+        self.state()
+            .streams
             .get(run_id)
             .map(|s| {
                 s.history
@@ -479,22 +557,25 @@ impl EventBus {
 
     /// 当前订阅者数量。
     pub fn subscriber_count(&self, run_id: &RunId) -> usize {
-        self.streams.get(run_id).map_or(0, |s| s.subscribers.len())
+        self.state()
+            .streams
+            .get(run_id)
+            .map_or(0, |s| s.subscribers.len())
     }
 
     /// 忘掉一个 run 的全部事件与订阅者。
     ///
     /// **只在 run 的事件已落库之后调**（P5）：
     /// 落库前清掉等于把历史丢了。
-    pub fn forget(&mut self, run_id: &RunId) -> bool {
-        self.streams.remove(run_id).is_some()
+    pub fn forget(&self, run_id: &RunId) -> bool {
+        self.state().streams.remove(run_id).is_some()
     }
 
     /// 日志事件的便捷构造 + 发布。
     ///
     /// 单独给一个方法是因为"打日志"是最高频的调用，
     /// 每次手写 `RunEvent::log(...)` 会诱使调用方自己去拼字符串。
-    pub fn log(&mut self, run_id: &RunId, level: LogLevel, message: impl Into<String>) -> Seq {
+    pub fn log(&self, run_id: &RunId, level: LogLevel, message: impl Into<String>) -> Seq {
         let (seq, _) = self.publish(RunEvent::log(run_id.clone(), level, message));
         seq
     }
@@ -694,7 +775,7 @@ mod tests {
 
     #[test]
     fn fresh_run_is_admitted_and_holds_lock() {
-        let mut reg = RunRegistry::new();
+        let reg = RunRegistry::new();
         let id = RunId::new(&mut rng());
         let key = MutexKey::new("sign", "acc-1", "");
 
@@ -705,7 +786,7 @@ mod tests {
 
     #[test]
     fn same_run_id_replay_does_not_run_twice() {
-        let mut reg = RunRegistry::new();
+        let reg = RunRegistry::new();
         let id = RunId::new(&mut rng());
         let key = MutexKey::new("sign", "acc-1", "");
 
@@ -723,7 +804,7 @@ mod tests {
     /// 否则"网络重试"会把已经做完的事再做一遍（而写操作没有幂等键）。
     #[test]
     fn replay_after_release_is_still_duplicate() {
-        let mut reg = RunRegistry::new();
+        let reg = RunRegistry::new();
         let id = RunId::new(&mut rng());
         let key = MutexKey::new("sign", "acc-1", "");
 
@@ -740,7 +821,7 @@ mod tests {
 
     #[test]
     fn second_run_id_same_params_is_blocked() {
-        let mut reg = RunRegistry::new();
+        let reg = RunRegistry::new();
         let (id1, id2) = two_run_ids();
         let key = MutexKey::new("exchange", "acc-1", "same-params");
 
@@ -753,7 +834,7 @@ mod tests {
     /// 不同参数可以并发 —— 这正是修复掉的那个 bug。
     #[test]
     fn different_params_may_run_concurrently() {
-        let mut reg = RunRegistry::new();
+        let reg = RunRegistry::new();
         let (id1, id2) = two_run_ids();
 
         let key_a = MutexKey::new(
@@ -779,7 +860,7 @@ mod tests {
 
     #[test]
     fn release_is_scoped_to_its_own_run() {
-        let mut reg = RunRegistry::new();
+        let reg = RunRegistry::new();
         let (id1, id2) = two_run_ids();
         let key = MutexKey::new("sign", "acc-1", "");
 
@@ -791,7 +872,7 @@ mod tests {
 
     #[test]
     fn release_twice_is_idempotent() {
-        let mut reg = RunRegistry::new();
+        let reg = RunRegistry::new();
         let id = RunId::new(&mut rng());
         reg.admit(id.clone(), MutexKey::new("sign", "acc-1", ""));
 
@@ -804,7 +885,7 @@ mod tests {
 
     #[test]
     fn seq_is_assigned_by_the_bus() {
-        let mut bus = EventBus::new();
+        let bus = EventBus::new();
         let id = RunId::new(&mut rng());
         let (s1, _) = bus.publish(RunEvent::started(id.clone(), "sign"));
         let (s2, _) = bus.publish(RunEvent::progress(id.clone(), 1, 3));
@@ -816,7 +897,7 @@ mod tests {
     /// 迟到的订阅者必须能看全 —— 旧项目这里会丢事件。
     #[test]
     fn late_subscriber_receives_earlier_events() {
-        let mut bus = EventBus::new();
+        let bus = EventBus::new();
         let id = RunId::new(&mut rng());
         bus.publish(RunEvent::started(id.clone(), "sign"));
         bus.publish(RunEvent::progress(id.clone(), 1, 2));
@@ -832,7 +913,7 @@ mod tests {
     /// 断线重连：从 `Last-Event-ID` 之后续传，不重复也不跳号。
     #[test]
     fn reconnect_resumes_after_last_seen() {
-        let mut bus = EventBus::new();
+        let bus = EventBus::new();
         let id = RunId::new(&mut rng());
         for i in 0..5 {
             bus.publish(RunEvent::progress(id.clone(), i, 5));
@@ -849,7 +930,7 @@ mod tests {
     /// 在线订阅者按发布顺序收到。
     #[test]
     fn live_subscriber_receives_in_order() {
-        let mut bus = EventBus::new();
+        let bus = EventBus::new();
         let id = RunId::new(&mut rng());
         let sub = bus.subscribe(&id, None);
 
@@ -871,7 +952,7 @@ mod tests {
     /// 慢订阅者**不能阻塞**发布者 —— 卡住的 SSE 连接不该拖住别人的任务。
     #[test]
     fn slow_subscriber_does_not_block_the_publisher() {
-        let mut bus = EventBus::new();
+        let bus = EventBus::new();
         let id = RunId::new(&mut rng());
         // 队列只容 2 条
         let slow = bus.subscribe_with_capacity(&id, None, 2);
@@ -899,7 +980,7 @@ mod tests {
 
     #[test]
     fn ended_run_can_still_be_replayed() {
-        let mut bus = EventBus::new();
+        let bus = EventBus::new();
         let id = RunId::new(&mut rng());
         bus.publish(RunEvent::started(id.clone(), "sign"));
         bus.publish(RunEvent::finished(
@@ -921,7 +1002,7 @@ mod tests {
 
     #[test]
     fn unsubscribe_stops_delivery() {
-        let mut bus = EventBus::new();
+        let bus = EventBus::new();
         let id = RunId::new(&mut rng());
         let sub = bus.subscribe(&id, None);
         assert_eq!(bus.subscriber_count(&id), 1);
@@ -937,7 +1018,7 @@ mod tests {
 
     #[test]
     fn streams_are_isolated_per_run() {
-        let mut bus = EventBus::new();
+        let bus = EventBus::new();
         let (a, b) = two_run_ids();
         bus.publish(RunEvent::started(a.clone(), "sign"));
         bus.publish(RunEvent::started(b.clone(), "exchange"));
@@ -950,7 +1031,7 @@ mod tests {
 
     #[test]
     fn unknown_run_yields_empty_everything() {
-        let mut bus = EventBus::new();
+        let bus = EventBus::new();
         let id = RunId::new(&mut rng());
         assert!(bus.is_empty(&id));
         assert!(bus.replay(&id, None).is_empty());
@@ -964,7 +1045,7 @@ mod tests {
     /// 这是续传能成立的前提。
     #[test]
     fn seq_is_strictly_increasing_and_matches_history() {
-        let mut bus = EventBus::new();
+        let bus = EventBus::new();
         let id = RunId::new(&mut rng());
         for i in 0..20 {
             bus.publish(RunEvent::progress(id.clone(), i, 20));

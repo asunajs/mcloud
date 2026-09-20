@@ -278,19 +278,19 @@ async fn logout_revokes_immediately() {
 async fn unknown_api_paths_are_json_not_html() {
     let (app, token) = initialized().await;
 
-    let (status, _, body) = send(
-        &app,
-        request(Method::GET, "/api/accounts", None, Some(&token)),
-    )
-    .await;
+    // ⚠ 探针必须是一条**永远不会被路由**的路径。
+    // 这条断言原先用 `/api/accounts` —— 当时它确实没实现；P5 把账号清单落地后
+    // 它变成真接口，于是断言从 404 变成了 200。**失败的不是兜底，是探针过期了。**
+    const NOWHERE: &str = "/api/no-such-route";
+    let (status, _, body) = send(&app, request(Method::GET, NOWHERE, None, Some(&token))).await;
     // 前端路由的回退会把未知路径交给 index.html，而那对 `/api` 是灾难性的：
     // 接口路径写错会表现成"返回一段 HTML"，前端解析失败且毫无线索
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "not_found");
-    assert!(body["message"].as_str().unwrap().contains("/api/accounts"));
+    assert!(body["message"].as_str().unwrap().contains(NOWHERE));
 
     // 未登录时优先报未登录（先问"你是谁"，再谈"有没有这个接口"）
-    let (status, _, _) = send(&app, request(Method::GET, "/api/accounts", None, None)).await;
+    let (status, _, _) = send(&app, request(Method::GET, NOWHERE, None, None)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
