@@ -67,10 +67,42 @@ func Dir() (string, error) {
 }
 
 // Load 读取 test/golden 下的一个向量文件。
+//
+// ⚠ name 必须是**字面量**：scripts/check-golden-vectors.cjs 靠正则
+// `golden.Load("…")` 判断"这份向量有没有人读"。把文件名藏进包装函数
+// 会让探测静默失配，把读得好好的向量标成"死向量" —— 那种失真比漏检更坏。
 func Load(name string) ([]byte, error) {
 	d, e := Dir()
 	if e != nil {
 		return nil, e
 	}
 	return os.ReadFile(filepath.Join(d, name))
+}
+
+// FixtureDir 返回 test/fixtures 的绝对路径。
+//
+// 与 [Dir] 的区别是**这一层装的是什么**：
+//
+//   - `test/golden/*.json` 是**向量** —— 由规则算出（或由参考实现的库产出），
+//     回答"这个变换的结果应该是什么"；
+//   - `test/fixtures/**` 是**夹具** —— 由真实数据脱敏而来，
+//     回答"真实世界长什么样"。
+//
+// 两者都是"生成侧 ≠ 消费侧"的对拍素材，但只有前者参与
+// check-golden-vectors.cjs 的"有没有人读"探测。
+func FixtureDir() (string, error) {
+	r, e := Root()
+	if e != nil {
+		return "", e
+	}
+	return filepath.Join(r, "test", "fixtures"), nil
+}
+
+// LoadFixture 读取 test/fixtures 下的一个夹具（相对路径，如 `legacy/state.json`）。
+func LoadFixture(relPath string) ([]byte, error) {
+	d, e := FixtureDir()
+	if e != nil {
+		return nil, e
+	}
+	return os.ReadFile(filepath.Join(d, filepath.FromSlash(relPath)))
 }

@@ -30,9 +30,11 @@
 | `run` | ✅ | RunID / 四态结论 / 需人工 / Seq 语义 / 五类事件流；**顺带补上了枚举的 JSON 编解码（见下）** |
 | `model` | ✅ | Account / RunRecord / 能力注册表 7 个枚举 / AccountState / SmidState / Schedule / Pipeline / Exchange / Webui |
 | `stage` | ✅ | 三阶段存储生命周期 / 四类迁移错误 / RunExecution；**`RunStage` 是 tag 枚举，形状由 serde 产出后对拍** |
-| `legacy` `traits` | ⬜ | 未开始；外加 `error` 后半的 `classify_body` ~400 行 |
+| `legacy` | ✅ | 旧文档 14 个类型 / 规整规则 / 账号视图 / 引用解析；**带来了第九份黄金向量（形状）** |
+| `traits` | ⬜ | 未开始；外加 `error` 后半的 `classify_body` ~400 行 |
 
-- 落点 `internal/core`，**225 条测试**；读 `test/golden/*.json` 经 `internal/golden`，不复制向量。
+- 落点 `internal/core`，**252 条测试**；读 `test/golden/*.json` 经 `internal/golden`，
+  读 `test/fixtures/legacy/*.json` 经 `internal/golden.LoadFixture`，都不复制。
 - 门禁**九条**（新增 `jsontags`）—— 见 `docs/dev-gates.md`。
 - `auth-vectors.json` 从"只有 Rust 读"变成**两边都读**。
 - 步 1 的退出判据是"黄金向量在 Go 侧逐字段复算通过"，**尚未达成**：
@@ -63,6 +65,15 @@
   `Failed` 是 `summary→manual_steps`。单个结构体做不到，
   只能按 Kind 分派 `MarshalJSON`；而**逐字段比对会把这个差异整个放过**，
   只有整串比对抓得到。
+- ⚠⚠ **`legacy` 是最容易"静默读空"的一层**：旧文档的所有字段都带
+  `#[serde(default)]` ⇒ **字段名写错不报错，只静默读到零值** —— 表现是
+  "历史数据读出来是空的"，没有任何线索指向字段名。
+  而 Rust 侧对这批形状**一个断言都没有**。⇒ 新增第九份向量
+  `legacy-shape-vectors.json`，且它的生成器 `scripts/gen-legacy-shape-vectors.rs`
+  是 **path 依赖真实的 mcloud-core**（不是镜像类型定义）—— 镜像会抄错，
+  `ScheduleTarget` 那次已经证明过一次。
+  向量两节：`$serializedShapes`（8 个可序列化类型的空/填充整串）
+  与 `$fixtureKeys`（夹具里实际出现的键名，用反射读 tag 逐条认领）。
 - ⚠ **测试夹具的 RNG 必须逐模块对齐 Rust 侧各自那一份，不能就近复用**：
   `run.rs` 与 `stage.rs` 各自定义了 `SeededRng`，算法不同
   （前者是 `s*31+7` 的 u8 LCG，**周期恰好 16 —— 正是 UUID 的字节数**）。

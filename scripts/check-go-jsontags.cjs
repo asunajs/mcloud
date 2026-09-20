@@ -58,6 +58,24 @@ const UNTAGGED_ALLOWED = {
     '签名所需的 (sign, salt) 对，由 crypto 的返回值组装，不整块落库',
   'internal/core/stage.go:StageError':
     'Rust 侧 derive `Debug, Clone, PartialEq, Eq, thiserror::Error`，**不** Serialize；对外文案走 `Error()`，不整块 marshal',
+  'internal/core/legacy.go:LegacyError':
+    'Rust 侧 derive `Debug, Clone, PartialEq, Eq, thiserror::Error`，**不** Serialize；对外文案走 `Error()`',
+  'internal/core/legacy.go:ParseBad':
+    '解析失败的**报告条目**（下标 + 信息），进迁移报告而非 JSON',
+  'internal/core/legacy.go:LegacyAccountView':
+    'Rust 侧只 derive `Debug, Clone, PartialEq, Eq` —— 迁移期的**中间派生结果**，不落库也不出响应',
+  'internal/core/legacy.go:LegacyTarget':
+    'Rust 侧只 derive `Debug, Clone, PartialEq, Eq` —— 描述"旧版会怎么做"的中间结果',
+  'internal/core/legacy.go:ReferenceAdvice':
+    'Rust 侧只 derive `Debug, Clone, PartialEq, Eq` —— 迁移诊断，交给报告而不是 JSON',
+  'internal/capabilities/registry.go:Capability':
+    'Rust 侧**没有** derive `Serialize`：对外形状由 `mcloud-app::payload` 手工拼装（camelCase，与 serde 的 snake_case 默认不同）。刻意不加 tag —— 加了会让人以为它序列化出来就是给前端的那个形状',
+  'internal/exec/exec.go:Concurrency':
+    '并发闸**配置**（全局上限），进程内存里用，不进 JSON',
+  'internal/exec/exec.go:Admission':
+    '一次 run 准入的**判定结果**（Kind + 重复的 runId / 被挡的键与占用者），进程内存里用，不进 JSON；Rust 侧是 enum，无 Serialize',
+  'internal/exec/exec.go:Delivery':
+    '事件总线的一次**投递记录**，进程内存里用，不进 JSON',
   'internal/app/app.go:Deps': '组装根的**依赖集**，不是数据模型',
   'internal/server/server.go:Deps': '组装根的**依赖集**，不是数据模型',
 };

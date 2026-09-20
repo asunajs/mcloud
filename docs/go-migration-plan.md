@@ -319,6 +319,27 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 | **17** | **两个变体的枚举容易顺手写 `if/else`，从而破坏漏态守卫** | `if k == B { return "b" }; return "a"` 会让**任何**越界值都有名字 ⇒ "已知态有几个"再也数不出来 ⇒ 真值表守卫**静默失效** | `String()` 一律 `switch` + 末尾 `return ""`。这个错是 `countKnownStates` 抓出来的（`CapabilityKind` / `AccountMode` 都踩了），`Role` / `SessionKind` 一并改齐 |
 | **18** ⭐ | **tag 枚举（`#[serde(tag = "…")]`）的不同变体，字段顺序可能不同** | `RunStage::Done` 是 `stage→outcome→manual_steps→summary`，`RunStage::Failed` 是 `stage→summary→manual_steps`。Go 没有 sum type，用一个结构体 + Kind 近似时**只能按其中一种顺序输出** ⇒ 另一种必然与 serde 不同 | 按 Kind **分派** `MarshalJSON`（每个变体一个匿名结构体）。⚠ **逐字段比对会把这个差异整个放过** —— 它只证明"字段都在"，不证明"顺序也一样"；只有整串比对抓得到 |
 | **19** ⭐ | **测试夹具的 RNG 必须逐模块对齐，不能就近复用** | Rust 侧**每个模块各自定义** `SeededRng`，算法不同：`run.rs` 那份是 `s*31+7` 的 **u8 LCG，周期恰好 16 —— 正是 UUID 的字节数** ⇒ 连取两次拿到**同一个 id**；`stage.rs` 那份是 splitmix64，还专门用进程内计数器把种子岔开，并在注释里写明了原因 | 夹具 RNG 逐个模块照抄 Rust 侧那一份（含 `rng()` 的计数器语义）。⚠ 这条我踩了：**就近**复用了 `run_test.go` 那份，而 `runRng` 的注释里本来就写着"别混用" |
+| **20** ⭐ | **浮点转整型：Rust 的 `as` 是 saturating 且定义明确，Go 是**实现相关**的** | `n as usize` 对 NaN→0、Inf→usize::MAX，靠它把极端输入挡在 `idx <= len` 之外；而 Go 规范说浮点转整型**超出范围时行为由实现决定** ⇒ 可能拿到一个碰巧合法的数 | 显式 `math.IsNaN` / `math.IsInf` 挡掉再转。⚠ 判小数部分要写 `n - math.Trunc(n) != 0`，别写 `n != math.Trunc(n)` —— 后者对 Inf 是 `false`（不排除），而 Rust 的 `fract()` 对 Inf 给 NaN（排除） |
+| **21** ⭐ | **Go 的 map 遍历顺序是随机的**，Rust 的 `BTreeMap` 不是 | 凡是"取第一个满足条件者"的逻辑（第一个冲突、第一个匹配）在 Go 侧**每次运行都可能不同** —— 而报错内容是要进报告给人看的 | 显式排序后再取第一个。⚠ 这条断言**一开始没承重**：只造一组冲突时排不排序报的都是它（反向测试照样绿），必须**两组以上**才问得出"顺序"这件事 |
+| **22** | **nil slice 与空 slice 的差别，在反序列化侧同样存在** | Rust 的 `#[serde(default)] Vec<T>` 缺失时是 `vec![]`（序列化成 `[]`），Go 是 nil（序列化成 `null`）。这个病在 marshal 侧已经处理过（`RunReport.ManualSteps`），但**unmarshal 侧要单独再归一一次** | 给含 slice 的类型写 `UnmarshalJSON` 归一化（`type plain X` 绕开递归）。⚠ 只有整串比对抓得到 —— 逐字段断言里 `len(nil)` 与 `len([]T{})` 都是 0 |
+
+### ⭐⭐ 第九份向量的做法变了：**path 依赖真实的 mcloud-core，不镜像类型定义**
+
+前八份向量需要"参考实现的形状"时，做法是在生成器里**镜像**一份类型定义再让 serde
+序列化（`gen-enum-json-vectors.rs` 就是这么写的）。那份镜像抄错过一次：
+`ScheduleTarget` 漏抄了 `#[serde(tag = "kind")]`，产出的是 serde 默认的外部标签
+—— 与库里已存的形状完全不同，而**类型系统抓不到**，只有整串比对抓到了。
+
+`legacy` 这一批有 14 个类型、七八十个字段，镜像的抄错概率只会更高。
+所以 `scripts/gen-legacy-shape-vectors.rs` 改成 **path 依赖真实的
+`legacy/crates/mcloud-core`**（`legacy/` 是只读的对拍基准，依赖它只是读）：
+
+- 用的是冻结那一刻的类型定义**本身**，没有第二份可以与之分叉的副本；
+- 而"全默认实例"靠 `serde_json::from_value::<T>(json!({}))` 得到 ——
+  这批类型大多没 derive `Default`，但所有字段都带 `#[serde(default)]`。
+
+⇒ **判据：需要"参考实现说形状是什么"时，先问能不能直接依赖它；
+只有在依赖不上（crate 已删 / 依赖拉不全）时才镜像，且镜像必须配整串比对。**
 
 ⚠ #13/#14 是**同一个病**的两个面（枚举 JSON），所以判据也共用一条：
 **"有没有 MarshalJSON"这件事必须能被一条断言问出来** —— `enum_test.go` 里的
