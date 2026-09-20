@@ -1,6 +1,6 @@
 # docs/ 索引
 
-13 篇文档 + `capture/` 原始素材。**先看「该读哪篇」那张表，再进去。**
+17 篇文档 + `capture/` 原始素材。**先看「该读哪篇」那张表，再进去。**
 
 > 这份索引的存在理由：`docs/` 有 5,000 多行，而此前唯一的入口是 `README.md` 里一段
 > **叙述式**文字（"要参考 Go 项目前先读 …"）—— 扫不到全貌，于是
@@ -17,13 +17,18 @@
 
 | 你现在要做什么 | 先读这个 |
 | --- | --- |
-| 改代码 / 跑门禁 / 看项目全貌 | [`../README.md`](../README.md)（权威；进度与「现状须知」都在那里） |
+| 看项目全貌 / 为什么重写 | [`../README.md`](../README.md)（只做导航，短） |
+| 敲命令 / 查参数 | [`cli-usage.md`](./cli-usage.md) —— CLI 操作手册 |
+| 改代码 / 跑门禁 / 搞清分层 | [`dev-gates.md`](./dev-gates.md) —— 七条门禁 + 分层铁律 |
+| 加文件 / 起新目录 / 查命名 | [`repo-layout.md`](./repo-layout.md) —— 目录结构 + kebab-case 规则 |
+| 看**现在能跑什么、还差什么** | [`status.md`](./status.md) —— 实现进度与逐项须知 |
 | 实现某个**业务能力**（签到、领取、抢兑…） | [`business-feature-inventory.md`](./business-feature-inventory.md) —— 旧项目 19 项逐条拆到"照着能写代码" |
 | 参考 Go 项目 caiyun 的实现 | [`caiyun-go-feature-inventory.md`](./caiyun-go-feature-inventory.md) —— 上面那篇的对照篇 |
 | 接**新的端**（安卓 / 邮箱 / 小程序） | [`client-profiles.md`](./client-profiles.md) —— 各端差异真正大在请求头与设备串 |
 | 写任何带"**码**"的请求 | [`device-and-source-codes.md`](./device-and-source-codes.md) —— 这些码是**调用参数**，不是端常量 |
 | 做**登录**（PC 客户端 / PC Web / App） | 见下面「登录协议」一族，按端选 |
 | 写**抓包文档**（提交前必读） | [`sanitize-guide.md`](./sanitize-guide.md) —— 脱敏 SOP + 守卫用法 + 泄露后如何改写历史 |
+| 判断某个值**能不能进版本库** | [`credential-boundary.md`](./credential-boundary.md) —— 界线是"能不能进 GitHub" |
 | 写**任何前端页面 / 组件** | [`webui-design-guide.md`](./webui-design-guide.md) —— 视觉与交互的**唯一依据**，含移动端硬要求 |
 
 ---
@@ -68,6 +73,11 @@
 
 | 文档 | 一句话 | 状态 |
 | --- | --- | --- |
+| [`dev-gates.md`](./dev-gates.md) | 七条门禁 + 分层铁律（依赖方向的可执行断言） | **规范**（改代码前必读） |
+| [`repo-layout.md`](./repo-layout.md) | 目录结构 + 文件命名（kebab-case 及三类豁免） | **规范**（加文件前必读） |
+| [`status.md`](./status.md) | 实现进度与现状须知：现在能跑什么、还差什么 | **实况**（最后核对 2026-09-19） |
+| [`cli-usage.md`](./cli-usage.md) | CLI 操作手册：子命令、签到七个要点、退出码、迁移 | **规范** |
+| [`credential-boundary.md`](./credential-boundary.md) | 凭据边界：哪些值能进 GitHub、哪些只能进日志 | **规范** |
 | [`sanitize-guide.md`](./sanitize-guide.md) | 抓包脱敏 SOP、标识守卫用法、真实值泄露后如何改写历史 | 最后核对 2026-09-19 |
 | [`docs-audit-20260919.md`](./docs-audit-20260919.md) | 本文档全库体检报告（过期项、矛盾项、待优化项） | 一次性产物，**可归档** |
 
@@ -97,12 +107,15 @@
 
 | 争什么 | 以谁为准 |
 | --- | --- |
-| **实现进度**、当前测试数、门禁条数 | [`../README.md`](../README.md) 的「现状须知」与「门禁」 |
+| **实现进度**、当前测试数、当前能力边界 | [`status.md`](./status.md) 的「一句话总览」与逐项须知 |
+| **门禁条数与怎么跑** | [`dev-gates.md`](./dev-gates.md) |
+| **文件放哪 / 叫什么名** | [`repo-layout.md`](./repo-layout.md) |
+| **CLI 参数与语义** | [`cli-usage.md`](./cli-usage.md) |
 | **实现顺序**（先做哪项能力） | [`rust-rewrite-plan.md`](./rust-rewrite-plan.md) §7.1 |
 | **单项能力的实现规格** | [`business-feature-inventory.md`](./business-feature-inventory.md) |
 | **上游协议细节**（字段、状态机、错误码） | 对应的 `upstream-*.md` |
 | **跨端头 / 设备串** | [`client-profiles.md`](./client-profiles.md) |
-| **哪些值能进版本库** | [`sanitize-guide.md`](./sanitize-guide.md) |
+| **哪些值能进版本库** | [`credential-boundary.md`](./credential-boundary.md)（界线）+ [`sanitize-guide.md`](./sanitize-guide.md)（做法） |
 | **前端长什么样 / 怎么写** | [`webui-design-guide.md`](./webui-design-guide.md)（技术选型仍以 [`rust-rewrite-plan.md`](./rust-rewrite-plan.md) §2.2 为准） |
 
 ---

@@ -5,6 +5,14 @@
 #   source scripts/toolchain.sh
 #   cargo test -p mcloud-core            # 现在可以了
 #
+# ── 这是唯一的实现 ───────────────────────────────────────────────────
+#
+# `scripts/gates.sh` 与 `.githooks/run-gates.sh` 都 **source 本文件**，
+# 自己不重复写一遍。历史上这段逻辑有三份拷贝，并且已经分叉过：
+# hook 那份少了 INCLUDE / LIB 的导出，导致 Windows 上 `clippy` / `test`
+# 在 hook 里链接失败、在 `gates.sh` 里却能过 —— 同一仓库、同一组命令、
+# 两个不同结论。**不要再复制这段代码**，改这里。
+#
 # ── 为什么必须有这个文件 ─────────────────────────────────────────────
 #
 # 本机 Rust 不在默认的 `~/.rustup`（那里是空的）。直接跑 `cargo` 会命中
@@ -13,7 +21,7 @@
 # partially installed toolchain`、把正在用的 toolchain 组件删了重装。
 # 那比构建失败危险得多。
 #
-# 两条必须同时满足：
+# Windows 上两条必须同时满足：
 #   1. `RUSTUP_HOME` / `CARGO_HOME` 指向真实位置（`E:/...` 正斜杠形式；
 #      用 MSYS 的 `/e/...` 会被拼成 `E:/e/...` 而再次触发联网）。
 #   2. 工具链的真实 `bin` 目录**放在 PATH 最前面**，让 `cargo` / `rustc`
@@ -23,48 +31,108 @@
 # link.exe 并报 `link: extra operand`，所以 MSVC 的 `Hostx64/x64`
 # 也必须进 PATH。
 #
-# 逻辑与 `scripts/gates.sh` 的头部**保持一致**（那里是权威实现）。
-# 改一处要同步另一处 —— 两边分叉的后果是"门禁能过、手工跑不过"，
-# 那正是最难排查的一类。
+# ── 按平台分支，而不是探测某台机器的路径 ────────────────────────────
+#
+# 三种环境被同等对待：本机 Windows+Git Bash / macOS 与 Linux /
+# 已显式设好 RUSTUP_HOME 的场景。见下面 case 各段自己的说明。
+#
+# 只做**定位**：不安装、不联网。找不到就报错（调用方决定是退出还是继续）。
 
-# 只在 Windows / Git Bash 下处理；其他平台原样不动。
-if [ -d /e/devtools/.rustup/toolchains ]; then
-  export RUSTUP_HOME="${RUSTUP_HOME:-E:/devtools/.rustup}"
-  export CARGO_HOME="${CARGO_HOME:-E:/devtools/.cargo}"
+# 幂等：被 source 两次不重复往 PATH 里塞。
+if [ -n "${MCLOUD_TOOLCHAIN_READY:-}" ]; then
+  return 0 2>/dev/null || exit 0
+fi
 
-  # 钉住工具链，避免 rustup 去找别的通道
-  RUSTUP_TOOLCHAIN_BIN=""
-  for d in /e/devtools/.rustup/toolchains/stable-*/bin; do
-    [ -d "$d" ] && RUSTUP_TOOLCHAIN_BIN="$d" && break
-  done
-  if [ -n "$RUSTUP_TOOLCHAIN_BIN" ]; then
-    export PATH="$RUSTUP_TOOLCHAIN_BIN:$PATH"
-    # 形如 stable-x86_64-pc-windows-msvc
-    TOOLCHAIN_NAME=$(basename "$(dirname "$RUSTUP_TOOLCHAIN_BIN")")
-    export RUSTUP_TOOLCHAIN="$TOOLCHAIN_NAME"
-  fi
+_mcloud_platform="$(uname -s 2>/dev/null || echo unknown)"
 
-  # MSVC：版本目录随安装变化，所以扫而不是写死
-  for d in /c/BuildTools/VC/Tools/MSVC/*/bin/Hostx64/x64; do
-    if [ -x "$d/link.exe" ]; then
-      export PATH="$d:$PATH"
+case "$_mcloud_platform" in
+  MINGW* | MSYS* | CYGWIN*)
+    # ── Windows + Git Bash ──────────────────────────────────────────
+    # 两个坑见文件头的说明（rustup shim / GNU link）。
+    #
+    # INCLUDE / LIB 必须是 **Windows 原生路径**（`C:/...`），因为它们是交给
+    # MSVC 的 cl.exe / link.exe 读的，不认 `/c/...` 这种 Git Bash 形式。
+    # 不做 cygpath 往返（目录含空格时容易拼错），直接用 `C:/...` ——
+    # 正斜杠 Windows 工具完全可以接受。
+    export RUSTUP_HOME="${RUSTUP_HOME:-E:/devtools/.rustup}"
+    export CARGO_HOME="${CARGO_HOME:-E:/devtools/.cargo}"
+
+    # 取已安装的 stable 工具链目录（不写死 triple，换机器也能用）
+    _tc_bin=""
+    for d in /e/devtools/.rustup/toolchains/stable-*/bin; do
+      [ -d "$d" ] && _tc_bin="$d" && break
+    done
+
+    if [ -n "$_tc_bin" ]; then
+      export PATH="$_tc_bin:$PATH"
+      # 形如 stable-x86_64-pc-windows-msvc。钉住它，避免 rustup 去找别的通道。
+      export RUSTUP_TOOLCHAIN="$(basename "$(dirname "$_tc_bin")")"
+    else
+      echo "!! 找不到 Rust 工具链：\$RUSTUP_HOME=$RUSTUP_HOME 下没有 toolchains/stable-*/bin" >&2
+      return 1 2>/dev/null || exit 1
+    fi
+
+    # MSVC 工具集：版本目录随安装变化，所以扫而不是写死
+    _msvc_bin=""
+    for d in /c/BuildTools/VC/Tools/MSVC/*/bin/Hostx64/x64; do
+      if [ -x "$d/link.exe" ]; then
+        _msvc_bin="$d"
+        break
+      fi
+    done
+
+    if [ -n "$_msvc_bin" ]; then
+      export PATH="$_msvc_bin:$PATH"
 
       # 从 .../VC/Tools/MSVC/<ver>/bin/Hostx64/x64 回到 <ver>：3 层 dirname
-      MSVC_VER=$(dirname "$(dirname "$(dirname "$d")")")
-      MSVC_VER_WIN="C:${MSVC_VER#/c}"
+      _msvc_ver=$(dirname "$(dirname "$(dirname "$_msvc_bin")")")
+      _msvc_ver_win="C:${_msvc_ver#/c}"
 
-      SDK_INC=""
+      _sdk_inc=""
       for v in "/c/Program Files (x86)/Windows Kits/10"/Include/*; do
-        [ -d "$v/ucrt" ] && SDK_INC="$v" && break
+        [ -d "$v/ucrt" ] && _sdk_inc="$v" && break
       done
 
-      if [ -n "$SDK_INC" ]; then
-        SDK_INC_WIN="C:${SDK_INC#/c}"
-        SDK_LIB_WIN="${SDK_INC_WIN/\/Include\//\/Lib\/}"
-        export INCLUDE="$MSVC_VER_WIN/include;$SDK_INC_WIN/ucrt;$SDK_INC_WIN/shared;$SDK_INC_WIN/um"
-        export LIB="$MSVC_VER_WIN/lib/x64;$SDK_LIB_WIN/ucrt/x64;$SDK_LIB_WIN/um/x64"
+      if [ -n "$_sdk_inc" ]; then
+        _sdk_inc_win="C:${_sdk_inc#/c}"
+        _sdk_lib_win="${_sdk_inc_win/\/Include\//\/Lib\/}"
+        export INCLUDE="$_msvc_ver_win/include;$_sdk_inc_win/ucrt;$_sdk_inc_win/shared;$_sdk_inc_win/um"
+        export LIB="$_msvc_ver_win/lib/x64;$_sdk_lib_win/ucrt/x64;$_sdk_lib_win/um/x64"
+      else
+        echo "!! 找不到 Windows SDK 的 Include 目录（要 /c/Program Files (x86)/Windows Kits/10/Include/<ver>/ucrt）" >&2
+        return 1 2>/dev/null || exit 1
       fi
-      break
+    else
+      echo "!! 找不到 MSVC 的 link.exe（要 /c/BuildTools/VC/Tools/MSVC/*/bin/Hostx64/x64/link.exe）" >&2
+      return 1 2>/dev/null || exit 1
     fi
-  done
+    ;;
+
+  Darwin | Linux)
+    # ── macOS / Linux ───────────────────────────────────────────────
+    # 装好的 rustup 自己在 PATH 上，不需要补任何东西。
+    # 这一段**故意是空的**，但保留它 —— 它让"在类 Unix 上跑"成为一条
+    # 被写下来的路径，而不是靠 case 落空悄悄跳过。
+    # 要在这里加东西之前，先读文件头 Windows 那段的两个坑，
+    # 确认不是把某台机器的特殊路径又写了进来。
+    ;;
+
+  *)
+    echo "!! 未识别的平台：$_mcloud_platform" >&2
+    echo "   本脚本只在 Windows + Git Bash 与 macOS / Linux 上验证过。" >&2
+    echo "   若你在别的环境（WSL / 容器 / BSD）上跑，请把结论补进 docs/dev-gates.md 的「跨环境」一节。" >&2
+    # 不退出：平台不认识不等于工具链不可用（比如 WSL 里 rustup 装好了）。
+    # 让下面的 rustc 探测去决定成败。
+    ;;
+esac
+
+if ! command -v rustc >/dev/null 2>&1; then
+  echo "!! 找不到 rustc（当前平台：$_mcloud_platform）。" >&2
+  echo "   Windows + Git Bash：确认 \$RUSTUP_HOME（默认 E:/devtools/.rustup）下有 toolchains/stable-*/bin。" >&2
+  echo "   macOS / Linux：     确认 rustup 已装且在 PATH 上（rustup show）。" >&2
+  echo "   本脚本只定位、不安装 —— 也不要靠它联网装工具链。" >&2
+  return 1 2>/dev/null || exit 1
 fi
+
+export MCLOUD_TOOLCHAIN_READY=1
+export MCLOUD_RUSTC_VERSION="$(rustc --version 2>&1)"

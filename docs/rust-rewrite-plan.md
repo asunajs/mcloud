@@ -1,7 +1,7 @@
 # mcloud-sign Rust 重写方案
 
 > 状态：**提案（写于动工之前）**。本文是 P0 开工前的规划快照，自 `mcloud-sign`
-> 仓库同步而来；**实施进度以本仓库 `README.md` 的「现状须知」为准**，本文不再更新
+> 仓库同步而来；**实施进度以本仓库 [`status.md`](./status.md) 为准**（门禁见 [`dev-gates.md`](./dev-gates.md)），本文不再更新
 > （同步进来的原因：原文档悬空引用了它，而且原仓库是公开的，里面不该留带真实标识的内部文档）。
 > 目标项目位置：`/Users/catlair/mobile/workspace/mcloud`（与 `auto-flow` / `macro-recorder` / `mold-management` 同级）。
 > 取代：`docs/REFACTOR_PLAN_20260916.md`（该文基于 TS→TS 渐进优化 + 复用 Vue 前端，已被本方案取代）。
@@ -958,7 +958,7 @@ P6 的**视觉与组件基建可在 P2 后并行启动**（接口先冻结 `open
 
 > **2026-09-19 订正上表两处**：① 门禁清单原先写成"分层 / 产物解耦"两项来凑够六条，
 > 于是**漏掉了黄金向量守卫**。实际六项是 `check-deps.sh`（一条，内含分层与产物解耦两个断言）
-> 加 `check-identifiers.cjs`、`check-golden-vectors.cjs` —— 以 `README.md`「门禁」一节为准。
+> 加 `check-identifiers.cjs`、`check-golden-vectors.cjs` —— 以 [`dev-gates.md`](./dev-gates.md) 为准。
 > ② 末数 **554 → 586**：拉取云端那 9 个提交（`mcloud-app` 组装层等）落地后，新模块另有自己的 lib 测试。
 
 **旧数据实测**（`Documents/workspace/mcloud-sign`）：账号 2 / 登录态 2 / **凭据回填 2** / 组合 1 / 历史 96 条 / **问题 0 条**；

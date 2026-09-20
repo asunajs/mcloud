@@ -22,6 +22,17 @@
 //! RunStatus::Running ──┬── Done   ── RunOutcome::{Success, PartialSuccess, ManualRequired}
 //!                      └── Failed ── RunOutcome::Failed
 //! ```
+//!
+//! # 事件模型（[`Seq`] / [`RunEvent`] / [`Sequenced`]）
+//!
+//! 模块后半是**运行过程中的事件流**。它与上面的"终局判定"是两条互补的线：
+//! `RunOutcome` 回答"这一趟算成没成"，事件流回答"这一趟**是怎么跑的**"。
+//!
+//! 旧项目把它放在内存里（`api/src/runner.ts` 的 `AsyncRunState`），
+//! 于是有三个洞（进程重启即丢、晚连的人看不到前面、断线无法续传）。
+//! 这里的 [`Seq`] 就是为"续传"设计的：客户端把最后收到的序号带回来，
+//! 服务端接着发 —— 序号一旦重复或跳号，前端就会显示一个**错的进度**，
+//! 而且是静默的。所以序号语义被钉成一个独立的类型，而不是随手一个 `u64`。
 
 use serde::{Deserialize, Serialize};
 
@@ -304,6 +315,385 @@ impl RunReport {
     }
 }
 
+// ── 事件流 ──────────────────────────────────────────────────────────────────
+
+/// 运行事件的序号。
+///
+/// 从 **1** 起单调递增，**0 是哨兵**：表示"这个 run 还没有发过任何事件"。
+/// 因此 0 永远不会作为一条事件的序号出现，这带来两个便利：
+/// 落库侧可以拿 `0` 当"没有下界"（不用为 `None` 单写一条 SQL），
+/// SSE 的 `Last-Event-ID` 缺失时也可以安心地按 0 处理。
+///
+/// # 为什么要 newtype，而不是直接用 `u64`
+///
+/// 因为**"已看到"与"下一个要取"是两个不同的值**，而它们都是 `u64`，
+/// 编译器分不出来。这个仓库里真的踩过：客户端报 `3`，
+/// 服务端照着"下一个要取"去查，于是从 5 开始发，**4 号被静默跳过**。
+///
+/// 所以两个构造器的名字就是为区分这件事而存在的：
+///
+/// | 想表达 | 用哪个 | 内部值 |
+/// |---|---|---|
+/// | "我从头开始" | [`Seq::start`] | 0 |
+/// | "我已经看到 3 了"（要 4、5、…） | [`Seq::seen(3)`](Seq::seen) | 3 |
+/// | "我要取 4 之后的"（**要 5、6、…**） | [`Seq::resume_after(3)`](Seq::resume_after) | 4 |
+///
+/// 注意后两行：`seen(3)` 与 `resume_after(3)` 的**参数一样、结果差 1**。
+/// 凡是准备把 `Seq` 传给"从某处开始取"的接口，先想清楚手里这个是
+/// "客户端已经看到的值"还是"我们已经发到的值"，再选构造器。
+///
+/// # 饱和而不是回绕
+///
+/// [`Seq::next`] 在 `u64::MAX` 处停住（`saturating_add`）而不是绕回 0。
+/// 绕回会让序号**变小**，于是续传的 `seq > after` 条件永远为假，
+/// 这个 run 从此再也发不出任何事件 —— 一个到不了、但代价是彻底静默的分支。
+/// 饱和的代价是"到了上限之后序号不再递增"（本地库里到不了），
+/// 但至少事件还在走。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Seq(u64);
+
+impl Seq {
+    /// "还没发过任何事件" —— 内部值 0。
+    ///
+    /// 传它等于传 `None`：两者都表示"从头来"。
+    pub const fn start() -> Self {
+        Self(0)
+    }
+
+    /// 客户端说"**我已经看到** `seen` 了"，下一个要给它的是 `seen + 1`。
+    ///
+    /// 这是 SSE 的 `Last-Event-ID` 那种语义，也是 `run_events_after` 的
+    /// `after` 参数那种语义（SQL 里就是 `seq > seen`）。
+    pub const fn seen(seen: u64) -> Self {
+        Self(seen)
+    }
+
+    /// 我们已经发到 `last`，**下一个要取的**是 `last + 1`。
+    ///
+    /// ⚠ 与 [`Seq::seen`] 差 1。传错会**静默跳过一条事件** ——
+    /// 前端不会报错，只是进度条少一步；排查时几乎没人会怀疑到这里。
+    /// 见测试 `resume_after_and_seen_are_off_by_one`。
+    ///
+    /// 内部值饱和在 `u64::MAX`：`resume_after(u64::MAX)` 与 `seen(u64::MAX)`
+    /// 得到同一个值，也就是"已经到头了"。
+    pub const fn resume_after(last: u64) -> Self {
+        Self(last.saturating_add(1))
+    }
+
+    /// 从库里存着的整数原样还原。
+    ///
+    /// 与 [`Seq::resume_after`] 的区别就体现在这里：**存的是序号本身**，
+    /// 不是"上一条"或"下一条"。所以直接按原值还原，
+    /// 用 `resume_after(seq - 1)` 也能得到同一个数，但那是在绕圈子表达
+    /// "这就是 seq"，读的人得先算一遍才知道对不对。
+    ///
+    /// 负数按 0 处理（SQLite 的 INTEGER 是有符号的，理论上能存进负数）——
+    /// 落到 0 意味着"从头来"，是安全的退路；断言 panic 会让一条脏数据
+    /// 把整次回放打断。
+    pub const fn from_stored(stored: i64) -> Self {
+        if stored <= 0 {
+            Self(0)
+        } else {
+            Self(stored as u64)
+        }
+    }
+
+    /// 取下一个序号并前进。见类型文档的"饱和而不是回绕"。
+    pub const fn next(&mut self) -> Self {
+        self.0 = self.0.saturating_add(1);
+        *self
+    }
+
+    /// 内部值。落库、比较、拼 SQL 都用它。
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+/// 手写而不是 `derive(Default)`。
+///
+/// 两者结果一样（都是 0），但 `#[derive]` 的默认值是"类型零值"，
+/// 而这里的 0 是**有含义的哨兵**（"还没发过"）。手写一遍是为了让
+/// 读代码的人看到我们确实想过这件事 —— 而不是"编译器替他决定了一个 0"。
+impl Default for Seq {
+    fn default() -> Self {
+        Self::start()
+    }
+}
+
+/// 日志级别。
+///
+/// 只有三档，且**不含** `Debug`/`Trace`：这套日志是给**用户**看的
+/// （前端面板、推送正文），不是给开发者调试的。多出来的档位只会
+/// 诱使调用方把内部细节写进去，而那些东西既不该进前端也不该进推送。
+///
+/// 变体顺序即严重程度，`Ord` 依赖它在声明里保持一致 ——
+/// 与 `ErrorKind` 的排列规则相同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLevel {
+    /// 正常进展，用户看着安心用的。
+    Info,
+    /// 没成功但不算失败，以及"要人去做点什么"的提示。
+    Warn,
+    /// 这一条出错了。注意"某一条出错"未必让整个 run 失败（见 [`RunOutcome`]）。
+    Error,
+}
+
+impl LogLevel {
+    /// 稳定的小写名字。落库、进 JSON、进前端 class 名都用它。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warn => "warn",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl std::fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 运行过程中的一条事件。
+///
+/// # 五态，且是 `tag` 式而不是结构体 + 可选字段
+///
+/// 五类事件的字段差别很大：`Progress` 有 done/total，`Finished` 有
+/// outcome/manual_steps/summary，`Log` 有 level/message。
+/// 用一个结构体塞全部字段的话，大部分字段对大部分行是 `None` ——
+/// 于是"`Progress` 一定有 total"这种不变式就没人保证了。
+///
+/// `#[serde(tag = "type")]` 让 JSON 长这样：
+///
+/// ```json
+/// {"type":"progress","runId":"…","done":3,"total":20}
+/// {"type":"log","runId":"…","level":"warn","message":"…"}
+/// ```
+///
+/// 这个形状是**外部契约**：进 `run_events.payload`、进 SSE 的 `data:`、
+/// 前端直接 `switch (ev.type)`。所以 `rename_all = "snake_case"` 不能随手改。
+///
+/// # 字段名 `runId` 为什么是驼峰
+///
+/// 其余字段是 snake_case，`runId` 保持旧项目的驼峰 —— 因为它已经出现在
+/// 前端的 API 契约与库里的历史数据里，改名会让"新旧数据混读"多一条分支。
+/// 这一条**不受**仓库的文件命名规则影响（那条只约束文件名，见
+/// `docs/repo-layout.md`），也不受 Rust 的 `snake_case` 风格约束 ——
+/// 它是序列化后的外部名字。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RunEvent {
+    /// 开跑。
+    Started {
+        #[serde(rename = "runId")]
+        run_id: RunId,
+        /// 能力 code（如 `sign` / `msg-push`）。
+        capability: String,
+    },
+
+    /// 一条日志。
+    Log {
+        #[serde(rename = "runId")]
+        run_id: RunId,
+        level: LogLevel,
+        message: String,
+    },
+
+    /// 进度。`done` / `total` 都用 `u32` —— 一个 run 的步数量级是"账号数"，
+    /// 现实里到不了四十亿，用 `u64` 只是让前端的 JSON 数字看起来更吓人。
+    Progress {
+        #[serde(rename = "runId")]
+        run_id: RunId,
+        done: u32,
+        total: u32,
+    },
+
+    /// 终局之一：正常结算（**不等于成功**）。
+    ///
+    /// 带 `outcome` 与完整 `manual_steps`：丢掉待办的话，
+    /// 回看历史就只剩一句"需人工"，而"要人去做什么"恰恰是这条结论的全部价值。
+    Finished {
+        #[serde(rename = "runId")]
+        run_id: RunId,
+        outcome: RunOutcome,
+        manual_steps: Vec<ManualStep>,
+        summary: Option<String>,
+    },
+
+    /// 终局之二：执行器自己崩了（还没到能力层做判定的时候）。
+    ///
+    /// 与 [`RunEvent::Finished`] 的区别是**没有 outcome** ——
+    /// 上游错误、panic 恢复、超时这些都没跑到"这一步成没成"的判断，
+    /// 硬塞一个 `RunOutcome::Failed` 会假装我们知道得比实际多。
+    Errored {
+        #[serde(rename = "runId")]
+        run_id: RunId,
+        message: String,
+    },
+}
+
+impl RunEvent {
+    /// 开跑事件。
+    pub fn started(run_id: RunId, capability: impl Into<String>) -> Self {
+        Self::Started {
+            run_id,
+            capability: capability.into(),
+        }
+    }
+
+    /// 日志事件。
+    pub fn log(run_id: RunId, level: LogLevel, message: impl Into<String>) -> Self {
+        Self::Log {
+            run_id,
+            level,
+            message: message.into(),
+        }
+    }
+
+    /// 进度事件。
+    ///
+    /// 不做 `done > total` 的校验：调用方可能是"总步数后来才确定"的场景
+    /// （先报到 3 再到 20）。真正要守的是 [`RunEvent::percent`] 里的除零。
+    pub const fn progress(run_id: RunId, done: u32, total: u32) -> Self {
+        Self::Progress {
+            run_id,
+            done,
+            total,
+        }
+    }
+
+    /// 终局之一：正常结算。
+    pub fn finished(
+        run_id: RunId,
+        outcome: RunOutcome,
+        manual_steps: &[ManualStep],
+        summary: Option<String>,
+    ) -> Self {
+        Self::Finished {
+            run_id,
+            outcome,
+            manual_steps: manual_steps.to_vec(),
+            summary,
+        }
+    }
+
+    /// 终局之二：执行器出错。
+    pub fn errored(run_id: RunId, message: impl Into<String>) -> Self {
+        Self::Errored {
+            run_id,
+            message: message.into(),
+        }
+    }
+
+    pub const fn run_id(&self) -> &RunId {
+        match self {
+            Self::Started { run_id, .. }
+            | Self::Log { run_id, .. }
+            | Self::Progress { run_id, .. }
+            | Self::Finished { run_id, .. }
+            | Self::Errored { run_id, .. } => run_id,
+        }
+    }
+
+    /// 稳定的小写名字，与 JSON 里的 `type` 标签、库里的 `kind` 列**同源**。
+    ///
+    /// 库里的 `kind` 列由它决定（见 `mcloud-io` 的 `event_kind`），
+    /// 两者冗余但不漂移。单独存一列是为了让"只看 `errored`"能走 SQL 的
+    /// `WHERE kind = ?`，不必把每个 payload 都解一遍。
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Started { .. } => "started",
+            Self::Log { .. } => "log",
+            Self::Progress { .. } => "progress",
+            Self::Finished { .. } => "finished",
+            Self::Errored { .. } => "errored",
+        }
+    }
+
+    /// 是不是"这条 run 已经结束了"的事件。
+    ///
+    /// [`crate::stage::RunExecution`] 靠它在发布侧守住"终局事件至多且最后一条"。
+    /// `Errored` 也算终局：执行器崩了，这个 run 不会再有后续事件。
+    pub const fn is_terminal(&self) -> bool {
+        matches!(self, Self::Finished { .. } | Self::Errored { .. })
+    }
+
+    /// 是不是开场那条。
+    ///
+    /// 单独给一个方法而不是让调用方去 `matches!`：前端第一次连上时
+    /// 要区分"这个 run 还没开始"与"开始了但还没发日志"，两处都用它。
+    pub const fn is_started(&self) -> bool {
+        matches!(self, Self::Started { .. })
+    }
+
+    /// 终局事件的业务判定。只有 [`RunEvent::Finished`] 有 ——
+    /// `Errored` 返回 `None`，理由见该变体的文档。
+    pub const fn outcome(&self) -> Option<RunOutcome> {
+        match self {
+            Self::Finished { outcome, .. } => Some(*outcome),
+            _ => None,
+        }
+    }
+
+    /// 进度百分比（0–100），只对 [`RunEvent::Progress`] 有值。
+    ///
+    /// `total == 0` 返回 `None` 而不是 0 或 100：
+    /// 一个"总共 0 步"的进度条画出来是**满的**（任何比例都无意义，
+    /// 前端多半会除零拿到 `NaN`，然后渲染成一个空条或全条）。
+    /// 返回 `None` 让前端有机会写"暂无法估算"，比给它一个假数字好。
+    ///
+    /// 用整数算而不是浮点：百分比要进 JSON，`33.333333333333336` 这种值
+    /// 在前端显示出来很难看，而且同样的输入在两端可能因为浮点细节不一致。
+    pub const fn percent(&self) -> Option<u32> {
+        match self {
+            Self::Progress { done, total, .. } if *total > 0 => {
+                // 先乘后除会溢出吗：done 最大 u32::MAX，乘 100 后仍在 u64 里，
+                // 所以这里显式转 u64 再算，结果落回 u32（0..=100 * 100 / 1 也在范围内）
+                Some(((*done as u64 * 100) / (*total as u64)) as u32)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// 带序号的事件 —— 落库与投递的最小单位。
+///
+/// # 为什么把 `seq` 与 `event` 绑在一起
+///
+/// 因为它们必须**同批次确定**：序号由发布侧（`EventBus`）分配，
+/// 而分配之后到真正写库之间，进程可能崩。重启后重放同一批时，
+/// 如果序号是"写的时候再算"，重放就会得到**新的**序号 ——
+/// 于是同一个事件在库里出现两次、序号不同，客户端会看到重复进度。
+///
+/// 绑在一起之后，"重放同一批"是幂等的：`(run_id, seq)` 是主键，
+/// 落库侧 `ON CONFLICT DO NOTHING` 就把它挡住了。
+/// 这不是纸上谈兵 —— 崩在"写完库、还没告诉总线"确实是**正常路径**。
+///
+/// # 字段是 `pub` 的
+///
+/// 这是个纯数据载体，没有需要守的不变式（序号合法性由 [`Seq`] 自己保证），
+/// 加 getter 只会让 `Sequenced { seq, event }` 的字面量构造变得啰嗦。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Sequenced {
+    pub seq: Seq,
+    pub event: RunEvent,
+}
+
+impl Sequenced {
+    pub const fn new(seq: Seq, event: RunEvent) -> Self {
+        Self { seq, event }
+    }
+
+    /// 序号 + 事件体的便捷解构（`for (seq, event) in batch` 那种写法用得上）。
+    pub fn into_parts(self) -> (Seq, RunEvent) {
+        (self.seq, self.event)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,5 +881,172 @@ mod tests {
         let json = serde_json::to_string(&id).expect("应能序列化");
         // 透明包装：JSON 里就是裸字符串，不是 {"0": "..."}
         assert_eq!(json, format!("\"{}\"", id.as_str()));
+    }
+
+    // ── 事件流 ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn seq_starts_at_one_not_zero() {
+        let mut seq = Seq::start();
+        // 0 是"还没发过"的哨兵，所以第一条事件必须是 1
+        assert_eq!(seq.value(), 0);
+        assert_eq!(seq.next().value(), 1);
+        assert_eq!(seq.next().value(), 2);
+        assert_eq!(seq.value(), 2, "next 要推进自身，不是只返回");
+    }
+
+    /// 这条测试存在的唯一理由：`seen(n)` 与 `resume_after(n)` **差 1**，
+    /// 而它们是同一个参数。传错会静默跳过一条事件，排查时没人会想到这里。
+    #[test]
+    fn resume_after_and_seen_are_off_by_one() {
+        // 「我已经看到 3 了」→ 下一个要给它的是 4
+        assert_eq!(Seq::seen(3).value(), 3);
+        // 「我们发到 3 了」→ 下一个要取的是 4
+        assert_eq!(Seq::resume_after(3).value(), 4);
+        // 于是直接拿 seen(3) 当"下一个要取"就对了；
+        // 拿 resume_after(3) 当"已看到"就会跳过 4 号
+        assert_ne!(Seq::seen(3), Seq::resume_after(3));
+        // 从头是 0，与 seen(0) 等价
+        assert_eq!(Seq::start(), Seq::seen(0));
+    }
+
+    #[test]
+    fn seq_saturates_instead_of_wrapping() {
+        let mut seq = Seq::seen(u64::MAX);
+        // 绕回 0 会让"seq > after"永远为假，这个 run 从此再也发不出事件
+        assert_eq!(seq.next().value(), u64::MAX);
+        assert_eq!(Seq::resume_after(u64::MAX), Seq::seen(u64::MAX));
+    }
+
+    #[test]
+    fn seq_restores_from_stored_values() {
+        assert_eq!(Seq::from_stored(7), Seq::seen(7));
+        // 脏数据退到"从头来"，而不是 panic 打断整次回放
+        assert_eq!(Seq::from_stored(0), Seq::start());
+        assert_eq!(Seq::from_stored(-3), Seq::start());
+    }
+
+    #[test]
+    fn seq_serializes_as_a_bare_number() {
+        let json = serde_json::to_string(&Seq::seen(12)).expect("应能序列化");
+        // 透明包装：不是 {"0": 12}
+        assert_eq!(json, "12");
+    }
+
+    #[test]
+    fn event_json_shape_is_the_external_contract() {
+        let id = RunId::new(&mut rng());
+
+        let json = serde_json::to_string(&RunEvent::progress(id.clone(), 3, 20)).expect("ok");
+        assert!(json.contains("\"type\":\"progress\""));
+        assert!(json.contains("\"runId\""), "runId 保持驼峰：这是外部契约");
+        assert!(json.contains("\"done\":3") && json.contains("\"total\":20"));
+
+        let json = serde_json::to_string(&RunEvent::log(id.clone(), LogLevel::Warn, "风控退避"))
+            .expect("ok");
+        assert!(json.contains("\"type\":\"log\""));
+        assert!(json.contains("\"level\":\"warn\""), "级别是小写蛇形");
+        assert!(json.contains("\"message\":\"风控退避\""));
+
+        let json = serde_json::to_string(&RunEvent::errored(id, "又挂了")).expect("ok");
+        assert!(json.contains("\"type\":\"errored\""));
+    }
+
+    #[test]
+    fn event_kind_matches_the_json_tag() {
+        let id = RunId::new(&mut rng());
+        for ev in [
+            RunEvent::started(id.clone(), "sign"),
+            RunEvent::log(id.clone(), LogLevel::Info, "hi"),
+            RunEvent::progress(id.clone(), 1, 2),
+            RunEvent::finished(id.clone(), RunOutcome::Success, &[], None),
+            RunEvent::errored(id.clone(), "boom"),
+        ] {
+            let json = serde_json::to_string(&ev).expect("ok");
+            // 库里的 kind 列与 JSON 里的 type 必须同源 —— 漂移了就没法按 kind 查
+            let expected = format!("\"type\":\"{}\"", ev.kind());
+            assert!(json.contains(&expected), "{json} 里应当有 {expected}");
+        }
+    }
+
+    /// 终局事件至多两类，且 `Errored` **不带** outcome ——
+    /// 它表示"还没跑到能力层判定"，硬塞一个 Failed 是假装知道得比实际多。
+    #[test]
+    fn only_finished_carries_an_outcome() {
+        let id = RunId::new(&mut rng());
+
+        let fin = RunEvent::finished(id.clone(), RunOutcome::ManualRequired, &[], None);
+        assert_eq!(fin.outcome(), Some(RunOutcome::ManualRequired));
+        assert!(fin.is_terminal());
+        assert!(!fin.is_started());
+
+        let err = RunEvent::errored(id.clone(), "又挂了");
+        assert_eq!(err.outcome(), None, "执行器出错时还没做业务判定");
+        assert!(err.is_terminal());
+
+        let started = RunEvent::started(id, "sign");
+        assert!(started.is_started());
+        assert!(!started.is_terminal());
+        assert_eq!(started.outcome(), None);
+    }
+
+    #[test]
+    fn percent_is_integer_and_guards_zero_total() {
+        let id = RunId::new(&mut rng());
+        assert_eq!(RunEvent::progress(id.clone(), 3, 10).percent(), Some(30));
+        assert_eq!(RunEvent::progress(id.clone(), 0, 10).percent(), Some(0));
+        assert_eq!(RunEvent::progress(id.clone(), 10, 10).percent(), Some(100));
+        // 除零：给 None 而不是 0/100 —— 一个假数字会让前端画出一条错的进度条
+        assert_eq!(RunEvent::progress(id.clone(), 0, 0).percent(), None);
+        // 非进度事件没有百分比
+        assert_eq!(RunEvent::started(id.clone(), "sign").percent(), None);
+        // 三分之一：整数除法，不进 JSON 里塞 33.333333333333336
+        assert_eq!(RunEvent::progress(id, 1, 3).percent(), Some(33));
+    }
+
+    #[test]
+    fn finished_event_round_trips_with_manual_steps() {
+        let step = ManualStep::new(
+            "msg-push",
+            None,
+            "请前往 App 手动打开消息通知",
+            ManualTarget::MobileApp,
+        );
+        let ev = RunEvent::finished(
+            RunId::new(&mut rng()),
+            RunOutcome::ManualRequired,
+            std::slice::from_ref(&step),
+            Some("3 个账号已签到，1 个需手动".into()),
+        );
+
+        let json = serde_json::to_string(&ev).expect("应能序列化");
+        let back: RunEvent = serde_json::from_str(&json).expect("应能反序列化");
+        assert_eq!(back, ev);
+        // 待办要一字不差地回来 —— 丢掉它，回看历史就只剩一句"需人工"
+        match back {
+            RunEvent::Finished { manual_steps, .. } => assert_eq!(manual_steps, vec![step]),
+            other => panic!("应当是 Finished，实得 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sequenced_binds_seq_and_event_together() {
+        let id = RunId::new(&mut rng());
+        let item = Sequenced::new(Seq::seen(4), RunEvent::started(id, "sign"));
+        assert_eq!(item.seq.value(), 4);
+        assert!(item.event.is_started());
+
+        let (seq, ev) = item.into_parts();
+        assert_eq!(seq.value(), 4);
+        assert!(ev.is_started());
+    }
+
+    #[test]
+    fn log_level_order_matches_declaration() {
+        // Ord 依赖声明顺序，谁把 Error 挪到 Info 前面就该挂
+        assert!(LogLevel::Info < LogLevel::Warn);
+        assert!(LogLevel::Warn < LogLevel::Error);
+        assert_eq!(LogLevel::Warn.as_str(), "warn");
+        assert_eq!(LogLevel::Error.to_string(), "error");
     }
 }

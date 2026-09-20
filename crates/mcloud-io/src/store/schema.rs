@@ -19,7 +19,7 @@ use rusqlite::Connection;
 /// 但一旦有了外部用户的库文件，"已应用的迁移"就是历史，只能往后追加 ——
 /// 否则老库的 `user_version` 会说谎：它声称已到 v2，而 v2 的语句已经不是你写的那句了。
 /// 判断标准很简单：**有没有可能存在一个不是本机跑出来的库**。没有，就可以改；有，就只能加。
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// 迁移清单：索引 i（0-based）对应版本 i+1。
 ///
@@ -332,6 +332,59 @@ pub const ALL_MIGRATIONS: &[&str] = &[
 
     COMMIT;
     "#,
+    // ── v8：`run_events` —— 运行事件流落库 ───────────────────────────────────
+    //
+    // # 为什么必须落库（而不是只在内存里广播）
+    //
+    // 旧项目的事件只活在内存（`api/src/runner.ts` 的 `AsyncRunState`），实测有三个洞：
+    //
+    // 1. **进程重启即丢**。用户第二天打开页面看"昨晚那次签到到底怎么了" —— 没有了。
+    //    只剩 `runs` 表里一行 `Done`，谁也不知道那 20 个账号里哪一个失败了。
+    // 2. **晚连的人看不到前面**。前端在 run 开始 3 秒后才打开页面，
+    //    于是这 3 秒的日志永远拿不到 —— 而那几条恰恰是最关键的"在干什么"。
+    // 3. **续传没有锚点**。断了要重连时，只能"整个重放"或"接下来什么都不给"。
+    //    前者重复、后者丢事件，两者都会让前端显示一个错的进度。
+    //
+    // `seq` 就是给第 3 条用的：客户端把最后收到的 `seq` 带回来
+    // （`GET /api/runs/:id/events?after=<seq>`），服务端从 `seq + 1` 接着发。
+    // 这也是为什么 `(run_id, seq)` 必须**唯一** —— 序号一旦重复，
+    // "继续发"就会变成"永远跳过某条"，而那是静默的、没人会发现。
+    //
+    // # 为什么事件体存 JSON 而不是拆列
+    //
+    // 五类事件的字段差别很大（`Progress` 有 done/total，`Finished` 有 outcome/
+    // manual_steps/summary，`Log` 有 level/message）。拆成宽表的话大部分列对大部分行是
+    // NULL，而且每加一个事件类型都要动 schema —— 而这恰恰是最容易变的东西。
+    // 拆列的唯一好处是"能按 message 内容做 SQL 查询"，但我们不需要：
+    // 查事件永远是"某个 run 的全部事件，按 seq 排"，用不到 JSON 内部的字段。
+    //
+    // # 为什么不用 `REFERENCES runs(id)` 的外键
+    //
+    // 会。删 run 时事件没清 → 库越用越大；而 SQLite 的外键默认**不生效**
+    // （要 `PRAGMA foreign_keys=ON`），所以写了也是假的。这里改用索引 + 显式清理：
+    // 删 run 时必须同时删它的事件（`delete_run_events`），由 store 层的测试把关。
+    //
+    // # 保留策略
+    //
+    // 事件量按"一个 run 几百条"估，不做自动清理 —— 但 `delete_run_events` 要有，
+    // 否则将来想清也没有称手的工具。真要限制总量时加一条
+    // `DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE started_at < ?)`
+    // 即可，不必改 schema。
+    r#"
+    -- run_id 不设外键（理由见上）。seq 由发布侧（EventBus）统一分配，从 1 起。
+    CREATE TABLE IF NOT EXISTS run_events (
+        run_id     TEXT NOT NULL,
+        seq        INTEGER NOT NULL,
+        kind       TEXT NOT NULL,
+        payload    TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, seq)
+    );
+
+    -- 主键已经把 (run_id, seq) 做成唯一，且天然支持
+    -- "某个 run 按 seq 序取出"（最常走的查询）；这条索引给"按时间查最近的事件"用。
+    CREATE INDEX IF NOT EXISTS idx_run_events_created ON run_events (created_at DESC);
+    "#,
 ];
 
 /// 执行未应用的迁移。
@@ -460,6 +513,8 @@ mod tests {
             // v3
             "users",
             "sessions",
+            // v8
+            "run_events",
         ] {
             let count: i64 = conn
                 .query_row(
@@ -717,5 +772,94 @@ mod tests {
             )
             .unwrap();
         assert_eq!(nickname, "账号2", "升级不该动老数据");
+    }
+
+    /// v8 是**建表**而非加列，所以断言的重点与 v3…v7 不同。
+    ///
+    /// v3…v7 的形态都是 `ALTER TABLE ... ADD COLUMN`，它们的风险是
+    /// "库改一半、版本没升"，所以要盯事务。v8 用的是 `CREATE TABLE IF NOT EXISTS`，
+    /// 它本身幂等，真正需要盯的是**语义约束有没有落到 DDL 上** ——
+    /// 因为约束一旦漏了，补起来要动数据，而那时库里已经有重复行了。
+    #[test]
+    fn v8_migration_creates_run_events_with_a_unique_sequence() {
+        let v8 = ALL_MIGRATIONS[7].to_lowercase();
+        assert!(
+            v8.contains("create table if not exists run_events"),
+            "v8 要建 run_events 表"
+        );
+        // (run_id, seq) 必须唯一 —— 依赖它做续传锚点，重复序号会让客户端静默跳过事件
+        assert!(
+            v8.contains("primary key (run_id, seq)"),
+            "run_events 的 (run_id, seq) 必须唯一，否则续传会漏事件"
+        );
+        // 只建表，不该顺手改别的表 —— 改别的表属于另一版
+        assert!(
+            !v8.contains("alter table"),
+            "v8 只该建 run_events；改已有表属于另一版"
+        );
+    }
+
+    /// `(run_id, seq)` 的唯一性要在真库上验一遍，不能只看 SQL 文本。
+    #[test]
+    fn run_events_reject_a_duplicate_sequence() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        let insert = "INSERT INTO run_events (run_id, seq, kind, payload, created_at) \
+                      VALUES (?1, ?2, 'log', '{}', '2026-09-20T00:00:00Z')";
+        conn.execute(insert, rusqlite::params!["run-a", 1]).unwrap();
+        conn.execute(insert, rusqlite::params!["run-a", 2]).unwrap();
+
+        // 同一 run 重复序号 → 拒绝（这正是续传锚点被破坏的样子）
+        assert!(
+            conn.execute(insert, rusqlite::params!["run-a", 2]).is_err(),
+            "同一 run 的 seq 不能重复"
+        );
+        // 不同 run 可以用同一个 seq —— 序号是**每个 run 各自**的计数
+        conn.execute(insert, rusqlite::params!["run-b", 1])
+            .unwrap_or_else(|e| panic!("不同 run 的 seq 应当互不干扰: {e}"));
+
+        // 最常走的查询是"某个 run 按 seq 序取出"，验证索引/主键真的能用且有序
+        let seqs: Vec<i64> = conn
+            .prepare("SELECT seq FROM run_events WHERE run_id = ?1 ORDER BY seq")
+            .unwrap()
+            .query_map(["run-a"], |r| r.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(seqs, vec![1, 2]);
+    }
+
+    /// v7 老库升到 v8：`runs` 里的历史记录一条都不能动，且新表是空的。
+    ///
+    /// 空表是对的：v8 之前的事件**根本没落过库**（旧项目只放内存），
+    /// 所以没有东西可以回填 —— 造一批假事件反而会污染"那次运行到底发生了什么"。
+    #[test]
+    fn v7_database_gains_run_events_and_keeps_runs() {
+        let conn = Connection::open_in_memory().unwrap();
+        for sql in &ALL_MIGRATIONS[..7] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 7).unwrap();
+        conn.execute(
+            "INSERT INTO runs (id, account_id, capability, status, started_at, message) \
+             VALUES ('run-old', '19****01', 'sign', 'Done', '2026-09-19T00:00:00Z', '旧记录')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let message: String = conn
+            .query_row("SELECT message FROM runs WHERE id = 'run-old'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(message, "旧记录", "升级不该动 runs 里的历史");
+
+        let events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM run_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(events, 0, "v8 之前没有事件记录，不许凭空造");
     }
 }

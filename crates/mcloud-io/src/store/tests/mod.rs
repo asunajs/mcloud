@@ -81,6 +81,7 @@ mod cloud_stats;
 mod credentials;
 mod isolation;
 mod reopen;
+mod run_events;
 mod runs;
 mod smid;
 mod state;

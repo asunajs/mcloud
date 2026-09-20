@@ -14,9 +14,9 @@
 
 import { computed, defineVaporComponent, onMounted, onUnmounted, ref } from 'vue'
 import { currentSession, setupStatus, signOut, type User } from './api'
-import { AuthPage } from './pages/AuthPage'
-import { DashboardPage } from './pages/DashboardPage'
-import { PlaceholderPage } from './pages/PlaceholderPage'
+import { AuthPage } from './pages/auth-page'
+import { DashboardPage } from './pages/dashboard-page'
+import { PlaceholderPage } from './pages/placeholder-page'
 import { IconClose, IconMenu, IconMoon, IconMore, IconSun } from './ui/icons'
 import { DOCK_IDS, NAV_ITEMS, navItem, parseHash, type PageId } from './ui/nav'
 import { currentTheme, toggleTheme, type Theme } from './ui/theme'

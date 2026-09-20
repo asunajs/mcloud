@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# 提交前门禁：秒级、纯静态的四条。
+#
+# 详情与"为什么是这四条"见同目录 README.md。
+# 手动安装：bash scripts/install-hooks.sh
+#
+# 这个文件本身很薄 —— 逻辑都在 run-gates.sh 里，两个 hook 共用。
+
+exec "$(dirname "$0")/run-gates.sh" pre-commit

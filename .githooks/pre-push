@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# 推送前门禁：七条全跑（含需要编译的 clippy / test / golden）。
+#
+# 为什么不放在 pre-commit：见同目录 README.md 的"两道闸，各拦各的"。
+# 手动安装：bash scripts/install-hooks.sh
+#
+# pre-push 的参数（<remote> <url>）我们不关心 —— 检查范围由 run-gates.sh
+# 自己按"本地领先远程的提交"算，比解析 stdin 那几行更直接。
+
+exec "$(dirname "$0")/run-gates.sh" pre-push

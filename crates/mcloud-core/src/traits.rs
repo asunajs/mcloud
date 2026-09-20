@@ -12,6 +12,7 @@ use crate::model::{
     Account, AccountId, AccountState, CloudStats, ExchangeConfig, Pipeline, RunRecord, Schedule,
     SmidState, WebuiConfig,
 };
+use crate::run::{RunId, Seq, Sequenced};
 use crate::user::{Session, User, UserId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -445,6 +446,73 @@ pub trait StateStore {
     /// "匹配不到账号"的历史会被 `MigrationIssue::UnresolvedRunAccount` 报出来
     /// （那才是它该被看到的地方），而不是塞进某个用户的列表里冒充"他的历史"。
     async fn list_runs(&self, scope: Scope<'_>, limit: usize) -> Result<Vec<RunRecord>, Error>;
+
+    /// 追加一批运行事件（落库，供重启后回看与断线续传）。
+    ///
+    /// # 为什么是"一批"而不是"一条"
+    ///
+    /// 调用方（[`crate::RunExecution`] 的使用者）通常在一次上游交互之后
+    /// 手里已经攒了若干条（一条 `Progress` + 几条 `Log`）。按条写的话，
+    /// 每条都是一次事务 + 一次 fsync —— 而事件量恰恰是在"20 个账号依次签到"
+    /// 这种场景下最大的。按批写同时还给了实现一个**天然的顺序边界**：
+    /// 批内的 `seq` 一定是连续的，跨批才需要看下一批的第一个。
+    ///
+    /// # 幂等
+    ///
+    /// `seq` 由 [`crate::RunExecution`] 的持有者统一分配，**同一批重复写不会产生重复行**
+    /// （表上 `(run_id, seq)` 是主键，实现应当用它做 `ON CONFLICT DO NOTHING`）。
+    /// 这不是可有可无的讲究：进程在"写完库、还没来得及告诉总线"时崩掉，
+    /// 重启后重放同一批是**正常路径**，不是异常。
+    ///
+    /// # 范围
+    ///
+    /// 事件本身不带 `owner`，归属由它所属的 run 决定 ——
+    /// 所以实现必须**顺着 `run_id` 校验这次写入落在范围内**，
+    /// 否则一个用户能往别人的 run 里塞日志。
+    async fn append_run_events(
+        &self,
+        scope: Scope<'_>,
+        run_id: &RunId,
+        events: &[Sequenced],
+    ) -> Result<(), Error>;
+
+    /// 读某个 run 的事件，`seq` 严格大于 `after`，按 `seq` 升序。
+    ///
+    /// `after = None` 表示从头开始（等价于 `after = Some(0)`，
+    /// 因为序号从 1 起、0 从不出现）。
+    ///
+    /// # 这是 SSE 续传的落库侧
+    ///
+    /// 浏览器把 `Last-Event-ID`（就是上一个 `seq`）带回来，服务端就调这个方法。
+    /// 之所以不用"时间戳 + 分页"：同一毫秒内的两个事件无法区分先后，
+    /// 于是要么重复推、要么漏推，两者都会让前端显示一个错的进度。
+    ///
+    /// # 为什么不返回"还有没有更多"
+    ///
+    /// 由调用方拿最后一条的 `seq` 再问一次即可（`len == limit` 就说明多半还有）。
+    /// 在 trait 上多返回一个 `bool` 会让所有实现都要多算一次 `COUNT(*)`，
+    /// 而那个值在"事件流是推的"这个场景下并不需要精确。
+    async fn run_events_after(
+        &self,
+        scope: Scope<'_>,
+        run_id: &RunId,
+        after: Option<Seq>,
+        limit: usize,
+    ) -> Result<Vec<Sequenced>, Error>;
+
+    /// 删掉某个 run 的全部事件。
+    ///
+    /// `run_events` 上**没有外键**（SQLite 的外键默认不生效，写了也是假的），
+    /// 所以清理必须显式做，否则事件表只增不减 —— 而它按"一个 run 几百条"增长，
+    /// 是这张库最先撑起来的一张表。
+    ///
+    /// 目前还没有删除 run 的入口（`runs` 表是只追加的历史），这个方法先备着，
+    /// 给将来的"清理 30 天前历史"用。它现在也**已被测试用到**：
+    /// 删事件之后 `run_events_after` 必须返回空，这条覆盖了删除路径本身。
+    ///
+    /// 返回删掉的行数 —— 调用方要靠它确认"确实清干净了"，而不是"没报错所以大概清了"。
+    /// 重复删除返回 0，**不是错误**：那就是"我要的状态已经达成了"。
+    async fn delete_run_events(&self, scope: Scope<'_>, run_id: &RunId) -> Result<usize, Error>;
 
     /// 把尚未归属的数据认领给某个用户：**账号、定时任务、组合一起认领**。
     ///

@@ -17,8 +17,9 @@ pub mod error;
 pub mod legacy;
 pub mod model;
 pub mod pure;
-pub mod run;
+pub mod run; // 运行语义：RunId、四态判定、事件模型
 pub mod sanitize;
+pub mod stage; // 运行生命周期状态机
 pub mod traits;
 pub mod user;
 
@@ -49,7 +50,10 @@ pub use model::{
     FieldSpec, Group, Pipeline, PipelineStatus, PipelineStep, RiskLevel, RunRecord, RunStatus,
     Schedule, ScheduleStatus, ScheduleTarget, SelectOption, SmidState, WEBUI_PAGES, WebuiConfig,
 };
-pub use run::{ManualStep, ManualTarget, RunId, RunOutcome, RunReport};
+pub use run::{
+    LogLevel, ManualStep, ManualTarget, RunEvent, RunId, RunOutcome, RunReport, Seq, Sequenced,
+};
+pub use stage::{RunExecution, RunStage, StageError};
 pub use traits::{
     ClaimedRows, Clock, ConfigStore, FixedClock, HttpClient, HttpMethod, HttpRequest, HttpResponse,
     Scope, StateStore, UserStore,

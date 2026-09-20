@@ -15,8 +15,8 @@
 
 use chrono::{DateTime, Utc};
 use mcloud_core::{
-    Account, AccountId, AccountState, ClaimedRows, CloudStats, Error, RunRecord, RunStatus, Scope,
-    SmidState, StateStore, UserId,
+    Account, AccountId, AccountState, ClaimedRows, CloudStats, Error, RunEvent, RunId, RunRecord,
+    RunStatus, Scope, Seq, Sequenced, SmidState, StateStore, UserId,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
@@ -108,6 +108,87 @@ fn validate_owned(conn: &Connection, scope: Scope<'_>, id: &AccountId) -> Result
     found
         .map(|_| ())
         .ok_or_else(|| Error::NotFound(format!("账号 {}", id.as_str())))
+}
+
+/// 确认这个 run 在范围内 —— **`run_events` 的归属校验全在这里**。
+///
+/// # 为什么要顺着 `runs` 查，而不是给事件表加一个 `owner` 列
+///
+/// 事件行上没有 `owner`，只有 `run_id`。给事件表加一列"冗余的 owner"看起来省事，
+/// 但那会立刻带来一个经典问题：**同一份事实两个存储位置，迟早不一致** ——
+/// 而修复方式只能靠"记得两个地方一起改"。顺着 `runs` 查一次只有一次 JOIN 的成本，
+/// 换来的是"归属只有一个来源"。
+///
+/// # 为什么 `account_id` 为空的 run 只有 `Scope::Local` 能用
+///
+/// 与 [`StateStore::list_runs`] 对它们的可见性完全一致：那种 run 无法归属
+/// （旧数据导入时"匹配不到账号"的历史），所以它不出现任何人的列表里。
+/// 若这里放行 `Scope::User`，服务层就能往一个自己看不见的 run 里塞日志 ——
+/// 用户看不到，但它占着库。
+///
+/// # 为什么必须先确认 run 存在
+///
+/// 不确认的话 `run_events` 会接受任何 `run_id`，于是"事件表里有 500 行、
+/// `runs` 里一行都没有"这种状态可以出现（写错 id、或 run 行被删之后又有人补写）。
+/// 这类孤儿行会让"按 run 查事件"永远返回空，而排查时又看不出问题在哪。
+///
+/// 返回 `NotFound`（不是 `Internal`）：对调用者而言，"这个 run 不是你的"与
+/// "这个 run 不存在"本来就是同一个结论，而且**报什么错本身不能泄漏它存在** ——
+/// 这条与 `update_run` / `runs.rs` 的 `updating_a_missing_or_foreign_run_is_an_error`
+/// 是同一条理由。
+fn validate_run_in_scope(conn: &Connection, scope: Scope<'_>, run_id: &RunId) -> Result<(), Error> {
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM runs \
+             WHERE id = ?1 \
+               AND (?2 IS NULL OR account_id IN (SELECT id FROM accounts WHERE owner = ?2))",
+            params![run_id.as_str(), scope.owner().map(UserId::as_str)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(map_sqlite)?;
+    found
+        .map(|_| ())
+        .ok_or_else(|| Error::NotFound(format!("运行记录 {}", run_id.as_str())))
+}
+
+/// 事件在库里的 `kind` 列取值（= JSON 里的 `type` 标签）。
+///
+/// # 为什么单独存一列，而不是每次从 JSON 里解
+///
+/// 它让"只看某一类事件"（比如排障时只想看 `errored`）能走 SQL 的 `WHERE kind = ?`，
+/// 不必把每个 payload 都解一遍。JSON 里**也**有 `type`，两者冗余但同源 ——
+/// 都由这个函数产出，不会漂移。
+fn event_kind(event: &RunEvent) -> &'static str {
+    match event {
+        RunEvent::Started { .. } => "started",
+        RunEvent::Log { .. } => "log",
+        RunEvent::Progress { .. } => "progress",
+        RunEvent::Finished { .. } => "finished",
+        RunEvent::Errored { .. } => "errored",
+    }
+}
+
+/// 把事件序列化成落库的 payload。
+///
+/// 序列化失败在这里是 `Internal` 而不是丢弃：`RunEvent` 全是 `String`/数字/枚举，
+/// 正常不可能失败。真失败了说明类型定义里混进了不可序列化的东西 ——
+/// 那是**程序缺陷**，静默丢一条事件只会让排查更晚。
+fn serialize_event(event: &RunEvent) -> Result<String, Error> {
+    serde_json::to_string(event)
+        .map_err(|e| Error::Internal(format!("运行事件序列化失败（类型定义有问题）: {e}")))
+}
+
+/// 从 payload 还原事件。
+///
+/// # 解不出来时给的是 `Internal`，不是"跳过这条"
+///
+/// 这个选择影响排障体验：跳过会让前端看到一个**少了中间几条**的进度
+/// （比如 `progress 3/20` 之后直接跳到 `9/20`），而人只会怀疑"是不是漏发了"，
+/// 不会想到是库里有一条坏了。直接报错至少能把"哪一行坏了"暴露出来。
+fn deserialize_event(payload: &str) -> Result<RunEvent, Error> {
+    serde_json::from_str(payload)
+        .map_err(|e| Error::Internal(format!("运行事件反序列化失败（payload: {payload}）: {e}")))
 }
 
 /// rusqlite 对 `DateTime<Utc>` 的存取统一走 RFC 3339 字符串，
@@ -631,6 +712,104 @@ impl StateStore for SqliteStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(map_sqlite)?;
         Ok(rows)
+    }
+
+    /// 追加运行事件。
+    async fn append_run_events(
+        &self,
+        scope: Scope<'_>,
+        run_id: &RunId,
+        events: &[Sequenced],
+    ) -> Result<(), Error> {
+        if events.is_empty() {
+            // 空批不校验归属：没有东西可写，报"不属于你"会让一个无害的调用
+            // 看起来像越权。但也不开事务 —— 空事务只是白跑一趟。
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().expect("数据库锁中毒");
+        validate_run_in_scope(&conn, scope, run_id)?;
+
+        let tx = conn.transaction().map_err(map_sqlite)?;
+        let now = dt_to_string(&Utc::now());
+        {
+            let mut stmt = tx
+                .prepare(
+                    r#"
+                    INSERT INTO run_events (run_id, seq, kind, payload, created_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5)
+                    ON CONFLICT(run_id, seq) DO NOTHING
+                    "#,
+                )
+                .map_err(map_sqlite)?;
+            for sequenced in events {
+                stmt.execute(params![
+                    run_id.as_str(),
+                    // seq 是 u64，SQLite 的 INTEGER 是有符号 64 位。
+                    // 超过 i64::MAX 会回绕成负数 —— 现实中到不了（`Seq` 自己会先饱和），
+                    // 所以这里用 `as i64` 而不是报错：报错会给一个跑不到的分支加一条错误路径。
+                    sequenced.seq.value() as i64,
+                    event_kind(&sequenced.event),
+                    serialize_event(&sequenced.event)?,
+                    now,
+                ])
+                .map_err(map_sqlite)?;
+            }
+        }
+        tx.commit().map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    async fn run_events_after(
+        &self,
+        scope: Scope<'_>,
+        run_id: &RunId,
+        after: Option<Seq>,
+        limit: usize,
+    ) -> Result<Vec<Sequenced>, Error> {
+        let conn = self.conn.lock().expect("数据库锁中毒");
+        validate_run_in_scope(&conn, scope, run_id)?;
+
+        // `after = None` → 从头开始。序号从 1 起、0 从不出现，
+        // 所以用 0 做下界与"没有下界"等价 —— 不必写两种 SQL。
+        let from = after.map_or(0, Seq::value) as i64;
+        let mut stmt = conn
+            .prepare(
+                "SELECT seq, payload FROM run_events \
+                 WHERE run_id = ?1 AND seq > ?2 \
+                 ORDER BY seq ASC LIMIT ?3",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![run_id.as_str(), from, limit as i64], |row| {
+                let seq: i64 = row.get(0)?;
+                let payload: String = row.get(1)?;
+                Ok((seq, payload))
+            })
+            .map_err(map_sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_sqlite)?;
+
+        rows.into_iter()
+            .map(|(seq, payload)| {
+                let event = deserialize_event(&payload)?;
+                // 存的是 `seq` 本身（不是"seen"那种语义），所以直接按原值还原。
+                // 用 `resume_after(seq - 1)` 也能得到同一个值，但那是在绕圈子里
+                // 表达"这就是 seq"，读的人得先算一遍才知道对不对。
+                Ok(Sequenced::new(Seq::from_stored(seq), event))
+            })
+            .collect()
+    }
+
+    async fn delete_run_events(&self, scope: Scope<'_>, run_id: &RunId) -> Result<usize, Error> {
+        let conn = self.conn.lock().expect("数据库锁中毒");
+        validate_run_in_scope(&conn, scope, run_id)?;
+        let affected = conn
+            .execute(
+                "DELETE FROM run_events WHERE run_id = ?1",
+                params![run_id.as_str()],
+            )
+            .map_err(map_sqlite)?;
+        Ok(affected)
     }
 
     /// 认领未归属的数据（`owner IS NULL`）：账号、定时任务、组合。

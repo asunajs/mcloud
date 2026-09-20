@@ -9,13 +9,16 @@
 //!
 //! # 状态
 //!
-//! 目前落地的是**纯函数部分**：并发语义与互斥键。这两块不需要 IO，
+//! 已落地的是**纯函数与纯内存部分**：并发语义、互斥键、run 准入、
+//! 运行生命周期、事件总线。这些都不需要 IO，
 //! 因此现在就能被测住，而不是等到 P5 靠真机试跑验证。
-//! 真正需要 IO 的部分（跑任务、落库、SSE）在 P5 接。
+//! 真正需要 IO 的部分（跑任务、落库、SSE 的 HTTP 侧）在 P5 接 ——
+//! 本层只保证"给它事件，它按序号存好并交给订阅者"。
 
 #![forbid(unsafe_code)]
 
-use mcloud_core::{AccountMode, RunId};
+use mcloud_core::{AccountMode, LogLevel, RunEvent, RunId, Seq, Sequenced};
+use std::collections::HashMap;
 
 /// 并发闸配置。
 #[derive(Debug, Clone, Copy)]
@@ -241,6 +244,259 @@ impl RunRegistry {
     /// 该 runId 是否已被受理过（含已完成）。
     pub fn has_seen(&self, run_id: &RunId) -> bool {
         self.accepted.contains_key(run_id)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 事件总线
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 单条订阅者的投递结果。
+///
+/// 慢订阅者**不阻塞**发布者 —— 这是刻意的：
+/// 一个卡住的 SSE 连接不该让别人的任务停在半路。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Delivery {
+    /// 这次真的投出去几条。
+    pub delivered: usize,
+    /// 因为订阅者队列满而**丢弃**几条。
+    ///
+    /// 丢的不是"最老的"而是"最新的"（见 [`EventBus::publish`]）——
+    /// 保留最老的，是为了让订阅者至少知道"这个 run 从哪儿开始、发生了什么"；
+    /// 丢掉最老的会让前端从中间开始，看到的进度是断的。
+    pub dropped: usize,
+}
+
+/// 某个 run 的事件流。
+///
+/// 同时承担两个职责：**广播**（给在线的订阅者）与**回放**（给刚连上的订阅者）。
+/// 这两件事必须在一起，否则会出现旧项目那种症状：
+/// 前端在 run 开始后才打开页面，于是**先前的日志全丢了**。
+#[derive(Debug, Default)]
+struct RunStream {
+    /// 已发布的事件（保留全部，供回放与续传）。
+    ///
+    /// P5 落库之后这里可以改成"只保留内存里的尾部 + 从 `run_events` 表读更早的"；
+    /// 现在先全留，因为一个 run 的事件量在几百条量级。
+    history: Vec<Sequenced>,
+    /// 订阅者：id → 待投递队列。
+    subscribers: HashMap<u64, Subscriber>,
+    /// 序号游标。
+    seq: Seq,
+}
+
+#[derive(Debug)]
+struct Subscriber {
+    /// 还没被取走的队列。
+    queue: Vec<Sequenced>,
+    /// 队列上限 —— 满了就丢新来的，并计入 `dropped`。
+    capacity: usize,
+    dropped: usize,
+}
+
+impl Subscriber {
+    fn new(capacity: usize) -> Self {
+        Self {
+            queue: Vec::new(),
+            capacity,
+            dropped: 0,
+        }
+    }
+}
+
+/// 每个订阅者的默认队列上限。
+///
+/// 取值理由：一个 run 的事件通常几十到几百条；留 1024 足够让一个**正常**的
+/// SSE 消费者（按序读、偶尔慢一拍）不丢东西，同时把"彻底卡死"的连接限制在
+/// 有限内存内。真丢的时候 [`Delivery::dropped`] 会说出来，不会静默。
+const DEFAULT_SUBSCRIBER_CAPACITY: usize = 1024;
+
+/// run 事件总线：发布、回放、续传。
+///
+/// # 为什么不用 `tokio::sync::broadcast`
+///
+/// 那个类型是最接近的现成答案，但它有三个不合用的地方：
+///
+/// 1. **它只在在线时有效**：订阅者迟到了就收不到之前的事件。
+///    而我们的主用例恰恰是"用户打开页面看一个正在跑的 run"，
+///    甚至"run 已经跑完了才来看历史"。
+/// 2. **它不保证跨订阅者一致**：`broadcast` 的环形缓冲是按"最慢的订阅者"推进的，
+///    一个卡住的订阅者会让别人丢事件 —— 而 SSE 客户端卡住是常态（手机切后台）。
+/// 3. **它把序号语义留给了调用方**，而序号正是 SSE 续传的锚点。
+///
+/// 这里换成"每个订阅者一条队列 + 全量历史"：迟到的订阅者能从历史补齐，
+/// 卡住的订阅者只影响自己（丢的事件数会被报出来），序号由总线统一分配。
+#[derive(Debug, Default)]
+pub struct EventBus {
+    streams: HashMap<RunId, RunStream>,
+    next_subscriber_id: u64,
+}
+
+impl EventBus {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 开始跟踪一个 run。重复调用是安全的（幂等）。
+    ///
+    /// 返回该 run 当前的序号游标，供调用方把它交给 [`mcloud_core::stage::RunExecution`]
+    /// 之外的发布逻辑使用。
+    pub fn open(&mut self, run_id: &RunId) -> Seq {
+        self.streams.entry(run_id.clone()).or_default().seq
+    }
+
+    /// 发布一条事件，返回被分配的序号。
+    ///
+    /// 序号由总线统一分配 —— 调用方**不要**自己算，
+    /// 否则并发发布时会撞号，而撞号的后果是客户端永久跳过某个事件。
+    ///
+    /// # 投递策略：队列满时丢**最新**的
+    ///
+    /// 不是丢最老的。理由：前端至少要能从这个 run 的开头看起。
+    /// 丢最老的会让它从中间开始，进度条与日志都对不上；
+    /// 丢最新的则只是"后面几条没看到"，且下次续传时能从序号接上。
+    pub fn publish(&mut self, event: RunEvent) -> (Seq, Vec<Delivery>) {
+        let run_id = event.run_id().clone();
+        let stream = self.streams.entry(run_id).or_default();
+        let seq = stream.seq.next();
+        let item = Sequenced::new(seq, event);
+        stream.history.push(item.clone());
+
+        let mut deliveries = Vec::with_capacity(stream.subscribers.len());
+        for sub in stream.subscribers.values_mut() {
+            if sub.queue.len() < sub.capacity {
+                sub.queue.push(item.clone());
+                deliveries.push(Delivery {
+                    delivered: 1,
+                    dropped: 0,
+                });
+            } else {
+                sub.dropped += 1;
+                deliveries.push(Delivery {
+                    delivered: 0,
+                    dropped: 1,
+                });
+            }
+        }
+
+        (seq, deliveries)
+    }
+
+    /// 订阅一个 run 的事件。
+    ///
+    /// `since` = 客户端已收到的最后一条序号（SSE 的 `Last-Event-ID`），
+    /// 传 `None` 或 `Seq::start()` 表示"从头"。
+    ///
+    /// ⚠ **`since` 是"已看到的值"，不是"下一个要取的值"**：传 `Seq::seen(3)`
+    /// 会补发 4、5、…；传 `Seq::resume_after(3)`（内部值 4）会从 **5** 开始 ——
+    /// 那会静默跳过 4 号。两个构造器的名字就是为区分这件事而存在的。
+    pub fn subscribe(&mut self, run_id: &RunId, since: Option<Seq>) -> u64 {
+        self.subscribe_with_capacity(run_id, since, DEFAULT_SUBSCRIBER_CAPACITY)
+    }
+
+    /// 同上，但显式指定队列上限（测试"丢事件"时用得上）。
+    pub fn subscribe_with_capacity(
+        &mut self,
+        run_id: &RunId,
+        since: Option<Seq>,
+        capacity: usize,
+    ) -> u64 {
+        let from = since.map_or(0, |s| s.value());
+        let stream = self.streams.entry(run_id.clone()).or_default();
+
+        let mut sub = Subscriber::new(capacity);
+        // 回放：把 since 之后的历史直接灌进队列
+        for item in stream.history.iter().filter(|i| i.seq.value() > from) {
+            if sub.queue.len() < sub.capacity {
+                sub.queue.push(item.clone());
+            } else {
+                // 连回放都装不下：这条订阅者从一开始就跟不上
+                sub.dropped += 1;
+            }
+        }
+
+        let id = self.next_subscriber_id;
+        self.next_subscriber_id += 1;
+        stream.subscribers.insert(id, sub);
+        id
+    }
+
+    /// 取走订阅者当前所有待投递事件（非阻塞）。
+    pub fn drain(&mut self, run_id: &RunId, subscriber: u64) -> Vec<Sequenced> {
+        let Some(stream) = self.streams.get_mut(run_id) else {
+            return Vec::new();
+        };
+        let Some(sub) = stream.subscribers.get_mut(&subscriber) else {
+            return Vec::new();
+        };
+        std::mem::take(&mut sub.queue)
+    }
+
+    /// 该订阅者累计被丢了多少条。
+    ///
+    /// 暴露它是为了**让丢事件可见** —— 旧项目所有投递失败都吞成日志，
+    /// 于是"前端少了半截日志"从来没人发现。
+    pub fn dropped(&self, run_id: &RunId, subscriber: u64) -> usize {
+        self.streams
+            .get(run_id)
+            .and_then(|s| s.subscribers.get(&subscriber))
+            .map_or(0, |s| s.dropped)
+    }
+
+    /// 取消订阅。
+    pub fn unsubscribe(&mut self, run_id: &RunId, subscriber: u64) -> bool {
+        self.streams
+            .get_mut(run_id)
+            .is_some_and(|s| s.subscribers.remove(&subscriber).is_some())
+    }
+
+    /// 该 run 已发布的事件条数。
+    pub fn len(&self, run_id: &RunId) -> usize {
+        self.streams.get(run_id).map_or(0, |s| s.history.len())
+    }
+
+    pub fn is_empty(&self, run_id: &RunId) -> bool {
+        self.len(run_id) == 0
+    }
+
+    /// 回放某 run 从 `since` 之后的所有事件（不建订阅）。
+    ///
+    /// 给"run 已结束、用户来看历史"这条路径用 —— 那时没有在线订阅者，
+    /// 也不需要订阅，直接读一遍即可。
+    pub fn replay(&self, run_id: &RunId, since: Option<Seq>) -> Vec<Sequenced> {
+        let from = since.map_or(0, |s| s.value());
+        self.streams
+            .get(run_id)
+            .map(|s| {
+                s.history
+                    .iter()
+                    .filter(|i| i.seq.value() > from)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 当前订阅者数量。
+    pub fn subscriber_count(&self, run_id: &RunId) -> usize {
+        self.streams.get(run_id).map_or(0, |s| s.subscribers.len())
+    }
+
+    /// 忘掉一个 run 的全部事件与订阅者。
+    ///
+    /// **只在 run 的事件已落库之后调**（P5）：
+    /// 落库前清掉等于把历史丢了。
+    pub fn forget(&mut self, run_id: &RunId) -> bool {
+        self.streams.remove(run_id).is_some()
+    }
+
+    /// 日志事件的便捷构造 + 发布。
+    ///
+    /// 单独给一个方法是因为"打日志"是最高频的调用，
+    /// 每次手写 `RunEvent::log(...)` 会诱使调用方自己去拼字符串。
+    pub fn log(&mut self, run_id: &RunId, level: LogLevel, message: impl Into<String>) -> Seq {
+        let (seq, _) = self.publish(RunEvent::log(run_id.clone(), level, message));
+        seq
     }
 }
 
@@ -542,5 +798,204 @@ mod tests {
         assert!(reg.release(&id));
         assert!(reg.release(&id), "重复释放不该报错");
         assert_eq!(reg.running(), 0);
+    }
+
+    // ── 事件总线 ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn seq_is_assigned_by_the_bus() {
+        let mut bus = EventBus::new();
+        let id = RunId::new(&mut rng());
+        let (s1, _) = bus.publish(RunEvent::started(id.clone(), "sign"));
+        let (s2, _) = bus.publish(RunEvent::progress(id.clone(), 1, 3));
+        let (s3, _) = bus.publish(RunEvent::log(id.clone(), LogLevel::Info, "hi"));
+        assert_eq!((s1.value(), s2.value(), s3.value()), (1, 2, 3));
+        assert_eq!(bus.len(&id), 3);
+    }
+
+    /// 迟到的订阅者必须能看全 —— 旧项目这里会丢事件。
+    #[test]
+    fn late_subscriber_receives_earlier_events() {
+        let mut bus = EventBus::new();
+        let id = RunId::new(&mut rng());
+        bus.publish(RunEvent::started(id.clone(), "sign"));
+        bus.publish(RunEvent::progress(id.clone(), 1, 2));
+
+        // 事件已经发完了才订阅（用户打开页面时 run 早就开始了）
+        let sub = bus.subscribe(&id, None);
+        let got = bus.drain(&id, sub);
+        assert_eq!(got.len(), 2, "迟到的订阅者应补齐历史");
+        assert!(got[0].event.is_started());
+        assert_eq!(got[1].seq.value(), 2);
+    }
+
+    /// 断线重连：从 `Last-Event-ID` 之后续传，不重复也不跳号。
+    #[test]
+    fn reconnect_resumes_after_last_seen() {
+        let mut bus = EventBus::new();
+        let id = RunId::new(&mut rng());
+        for i in 0..5 {
+            bus.publish(RunEvent::progress(id.clone(), i, 5));
+        }
+        // 客户端说"我收到 3 号了" —— `since` 是**已看到的值**（`Seq::seen`），
+        // 所以 3 号不重发，从 4 号接着来
+        let sub = bus.subscribe(&id, Some(Seq::seen(3)));
+        let got = bus.drain(&id, sub);
+        assert_eq!(got.len(), 2, "只该补 4、5 两条");
+        assert_eq!(got[0].seq.value(), 4);
+        assert_eq!(got[1].seq.value(), 5);
+    }
+
+    /// 在线订阅者按发布顺序收到。
+    #[test]
+    fn live_subscriber_receives_in_order() {
+        let mut bus = EventBus::new();
+        let id = RunId::new(&mut rng());
+        let sub = bus.subscribe(&id, None);
+
+        bus.publish(RunEvent::started(id.clone(), "sign"));
+        bus.publish(RunEvent::progress(id.clone(), 1, 2));
+        bus.publish(RunEvent::finished(
+            id.clone(),
+            mcloud_core::RunOutcome::Success,
+            &[],
+            None,
+        ));
+
+        let got = bus.drain(&id, sub);
+        let seqs: Vec<u64> = got.iter().map(|i| i.seq.value()).collect();
+        assert_eq!(seqs, vec![1, 2, 3]);
+        assert!(got[2].event.is_terminal());
+    }
+
+    /// 慢订阅者**不能阻塞**发布者 —— 卡住的 SSE 连接不该拖住别人的任务。
+    #[test]
+    fn slow_subscriber_does_not_block_the_publisher() {
+        let mut bus = EventBus::new();
+        let id = RunId::new(&mut rng());
+        // 队列只容 2 条
+        let slow = bus.subscribe_with_capacity(&id, None, 2);
+        let healthy = bus.subscribe(&id, None);
+
+        for i in 0..5 {
+            let (_, deliveries) = bus.publish(RunEvent::progress(id.clone(), i, 5));
+            // 发布永远成功，不因某人满而失败
+            assert_eq!(deliveries.len(), 2, "两个订阅者都该收到一次投递结果");
+        }
+
+        // 慢的那位丢了 3 条（5 发、容 2），且**被记下来**而不是静默
+        assert_eq!(bus.dropped(&id, slow), 3);
+        let slow_got = bus.drain(&id, slow);
+        assert_eq!(slow_got.len(), 2, "满队列只留得下 2 条");
+        // 丢的是**最新**的：留下的应是 1、2 号，不是 4、5 号。
+        // 前端至少能从开头看起，进度语义不断。
+        assert_eq!(slow_got[0].seq.value(), 1);
+        assert_eq!(slow_got[1].seq.value(), 2);
+
+        // 正常的订阅者一条不丢
+        assert_eq!(bus.dropped(&id, healthy), 0);
+        assert_eq!(bus.drain(&id, healthy).len(), 5);
+    }
+
+    #[test]
+    fn ended_run_can_still_be_replayed() {
+        let mut bus = EventBus::new();
+        let id = RunId::new(&mut rng());
+        bus.publish(RunEvent::started(id.clone(), "sign"));
+        bus.publish(RunEvent::finished(
+            id.clone(),
+            mcloud_core::RunOutcome::ManualRequired,
+            &[],
+            None,
+        ));
+
+        // 没有订阅者，直接回放（"用户来看历史"这条路径）
+        let all = bus.replay(&id, None);
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            all[1].event.outcome(),
+            Some(mcloud_core::RunOutcome::ManualRequired),
+            "回放要保住四态判定，不能压成成功"
+        );
+    }
+
+    #[test]
+    fn unsubscribe_stops_delivery() {
+        let mut bus = EventBus::new();
+        let id = RunId::new(&mut rng());
+        let sub = bus.subscribe(&id, None);
+        assert_eq!(bus.subscriber_count(&id), 1);
+
+        assert!(bus.unsubscribe(&id, sub));
+        assert_eq!(bus.subscriber_count(&id), 0);
+        assert!(!bus.unsubscribe(&id, sub), "重复退订应报 false");
+
+        // 退订后再发布不该 panic，也不该给已退订的人投递
+        let (_, deliveries) = bus.publish(RunEvent::started(id.clone(), "sign"));
+        assert!(deliveries.is_empty());
+    }
+
+    #[test]
+    fn streams_are_isolated_per_run() {
+        let mut bus = EventBus::new();
+        let (a, b) = two_run_ids();
+        bus.publish(RunEvent::started(a.clone(), "sign"));
+        bus.publish(RunEvent::started(b.clone(), "exchange"));
+        bus.publish(RunEvent::progress(b.clone(), 1, 2));
+
+        assert_eq!(bus.len(&a), 1);
+        assert_eq!(bus.len(&b), 2);
+        assert_eq!(bus.replay(&a, None).len(), 1);
+    }
+
+    #[test]
+    fn unknown_run_yields_empty_everything() {
+        let mut bus = EventBus::new();
+        let id = RunId::new(&mut rng());
+        assert!(bus.is_empty(&id));
+        assert!(bus.replay(&id, None).is_empty());
+        assert_eq!(bus.subscriber_count(&id), 0);
+        // 对不存在的 run drain 也不该 panic
+        assert!(bus.drain(&id, 42).is_empty());
+        assert!(!bus.forget(&id));
+    }
+
+    /// 序号在同一个 run 内**严格递增**，且与历史里的排列一致 ——
+    /// 这是续传能成立的前提。
+    #[test]
+    fn seq_is_strictly_increasing_and_matches_history() {
+        let mut bus = EventBus::new();
+        let id = RunId::new(&mut rng());
+        for i in 0..20 {
+            bus.publish(RunEvent::progress(id.clone(), i, 20));
+        }
+        let history = bus.replay(&id, None);
+        let seqs: Vec<u64> = history.iter().map(|i| i.seq.value()).collect();
+        assert!(seqs.windows(2).all(|w| w[0] < w[1]), "序号不递增: {seqs:?}");
+
+        // 从任意位置续传，拿到的应恰好是它之后那些，且不重不漏。
+        //
+        // 用 `Seq::seen(last)`（"我已经看到 last 了"）而不是 `resume_after(last)`
+        // （"下一个要取 last+1"）：`since` 参数的语义是**前者**。
+        // 传后者会让过滤条件 `> last+1` 把 `last+1` 自己也跳过 —— 静默少一条。
+        for last in [1u64, 7, 19] {
+            let after = bus.replay(&id, Some(mcloud_core::Seq::seen(last)));
+            let expected = 20usize - last as usize;
+            assert_eq!(after.len(), expected, "seen({last}) 条数不对");
+            assert_eq!(
+                after.first().map(|i| i.seq.value()),
+                Some(last + 1),
+                "续传应从 last+1 开始"
+            );
+        }
+
+        // 边界：`last = 20`（已追平）→ 空，而不是报错或重发
+        assert!(
+            bus.replay(&id, Some(mcloud_core::Seq::seen(20))).is_empty(),
+            "追平之后没有可补的"
+        );
+        // 边界：`None` 与 `seen(0)` 等价（0 号从不发出）
+        assert_eq!(bus.replay(&id, None).len(), 20);
+        assert_eq!(bus.replay(&id, Some(mcloud_core::Seq::seen(0))).len(), 20);
     }
 }
