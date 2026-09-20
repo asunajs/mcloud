@@ -76,6 +76,12 @@ const UNTAGGED_ALLOWED = {
     '一次 run 准入的**判定结果**（Kind + 重复的 runId / 被挡的键与占用者），进程内存里用，不进 JSON；Rust 侧是 enum，无 Serialize',
   'internal/exec/exec.go:Delivery':
     '事件总线的一次**投递记录**，进程内存里用，不进 JSON',
+  'internal/upstream/login.go:SliderPuzzle':
+    '一次滑块挑战的**内存表示**（两张图 + 加密的缺口坐标）；Rust 侧 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
+  'internal/upstream/login.go:PollOutcome':
+    '一次扫码轮询的**判定结果**（Go 无 sum type，用"类别 + 字段"近似），进程内存里用，不进 JSON',
+  'internal/upstream/login.go:SendSmsOutcome':
+    '一次发码响应的**判定结果**，同上；Rust 侧是 enum，无 Serialize',
   'internal/app/app.go:Deps': '组装根的**依赖集**，不是数据模型',
   'internal/server/server.go:Deps': '组装根的**依赖集**，不是数据模型',
 };
