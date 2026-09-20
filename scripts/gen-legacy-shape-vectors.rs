@@ -46,6 +46,7 @@
 //! 生成器跑在 /tmp 下，相对路径会指到别处；而 `$fixtureKeys` 要读
 //! `test/fixtures/legacy/*.json`，只能从仓库根算起。
 
+use mcloud_core::PipelineStep;
 use mcloud_core::legacy::{
     LegacyAccountConfig, LegacyBinding, LegacyConfig, LegacyLogEntry, LegacyPipeline, LegacyRun,
     LegacySchedule, LegacyStep,
@@ -179,6 +180,115 @@ fn main() {
     );
 
     out.insert("$serializedShapes".to_string(), Value::Array(shapes));
+
+    // ── $pipelineStepDecode / $pipelineStepEncode ────────────────────────
+    //
+    // `PipelineStep` 是**唯一一个会被嵌进 JSON 再读回来**的 core 类型
+    // （`pipelines.steps` 列），而它的 `body` / `continue_on_error` 是
+    // `Option<Value>` / `Option<bool>`。
+    //
+    // ⚠ Go 侧对应的是 `json.RawMessage` / `*bool`，而 `json.RawMessage` 的
+    // `UnmarshalJSON` 会把 `null` 存成**字面的四个字节**（不是 nil）——
+    // 于是"往返之后 `== nil` 判定反转"，而**再序列化出来还是 `null`**，
+    // 光看 JSON 文本一个字都看不出来。
+    //
+    // ⇒ 所以这里逐条实测 serde 的宽严与**编码形状**，而不是照 `Option` 的
+    // 直觉推。要钉三件事：
+    //   1. 缺席与 null 是不是同一个结果（都是 None？）；
+    //   2. 未知字段、类型不符、顶层不是对象，各收还是拒；
+    //   3. `None` 序列化出来是 `null` 还是**字段消失**。
+    let mut step_encode: Vec<Value> = Vec::new();
+    for (label, step) in [
+        (
+            "both-none",
+            PipelineStep {
+                task: "prizes".to_string(),
+                body: None,
+                continue_on_error: None,
+            },
+        ),
+        (
+            "both-some",
+            PipelineStep {
+                task: "receive".to_string(),
+                body: Some(json!({"onlyNew": true})),
+                continue_on_error: Some(true),
+            },
+        ),
+        (
+            "body-null-value",
+            PipelineStep {
+                task: "receive".to_string(),
+                body: Some(Value::Null),
+                continue_on_error: Some(false),
+            },
+        ),
+        // ⚠ 这条是给 Go 侧的 `MarshalJSON` 用的：`json.Marshal` 会对
+        // `json.RawMessage` 的内容**再做一遍 HTML 转义**（`<` → `\u003c`），
+        // 而 serde_json **不转义**。没有含 `<` / `&` 的 body 时，
+        // "必须走 marshalJSON"这件事在 Go 侧**没有任何断言看得见**。
+        (
+            "body-html-chars",
+            PipelineStep {
+                task: "receive".to_string(),
+                body: Some(json!({"note": "<a&b>"})),
+                continue_on_error: None,
+            },
+        ),
+    ] {
+        step_encode.push(json!({
+            "label": label,
+            "json": serde_json::to_string(&step).expect("PipelineStep 必然能序列化"),
+        }));
+    }
+    out.insert("$pipelineStepEncode".to_string(), Value::Array(step_encode));
+
+    let mut step_decode: Vec<Value> = Vec::new();
+    for (label, raw) in [
+        (
+            "full-nulls",
+            r#"{"task":"prizes","body":null,"continue_on_error":null}"#,
+        ),
+        (
+            "body-present",
+            r#"{"task":"prizes","body":{"a":1},"continue_on_error":true}"#,
+        ),
+        ("optionals-absent", r#"{"task":"prizes"}"#),
+        ("task-absent", r#"{"body":null,"continue_on_error":null}"#),
+        (
+            "unknown-field",
+            r#"{"task":"prizes","body":null,"continue_on_error":null,"extra":1}"#,
+        ),
+        (
+            "body-string",
+            r#"{"task":"prizes","body":"not-an-object","continue_on_error":null}"#,
+        ),
+        (
+            "coe-string",
+            r#"{"task":"prizes","body":null,"continue_on_error":"yes"}"#,
+        ),
+        ("top-level-array", r#"[]"#),
+    ] {
+        match serde_json::from_str::<PipelineStep>(raw) {
+            Ok(v) => step_decode.push(json!({
+                "label": label,
+                "input": raw,
+                "ok": true,
+                "task": v.task,
+                // 显式区分"缺席/null ⇒ None"与"真的给了一个值"
+                "bodyIsNone": v.body.is_none(),
+                "bodyText": v.body.as_ref().map(|b| b.to_string()),
+                "coeIsNone": v.continue_on_error.is_none(),
+            })),
+            Err(e) => step_decode.push(json!({
+                "label": label,
+                "input": raw,
+                "ok": false,
+                "error": e.to_string(),
+            })),
+        }
+    }
+    out.insert("$pipelineStepDecode".to_string(), Value::Array(step_decode));
 
     // ── $fixtureKeys ─────────────────────────────────────────────────────
     //

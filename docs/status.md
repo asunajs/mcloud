@@ -16,14 +16,14 @@
 
 ## Go 侧迁移实况（2026-09-20 起）
 
-**当前：步 1（`mcloud-core`）收尾中（只剩 `error` 后半的 `classify_body`）；步 4 已落地 `capabilities`（注册表 + `login`）、`exec`、`app::payload`，并为此**前置**补了步 2 的 `upstream::login`。步 3（`mcloud-io`）已开工：schema / store / store::user 三块落地，剩 `store::config`、`legacy_import`、`fixture` / HTTP 客户端 / 随机源。**
+**当前：步 1（`mcloud-core`）收尾中（只剩 `error` 后半的 `classify_body`）；步 4 已落地 `capabilities`（注册表 + `login`）、`exec`、`app::payload`，并为此**前置**补了步 2 的 `upstream::login`。步 3（`mcloud-io`）已开工：schema / store / store::user / store::config / 时间列格式对齐五块落地，剩 `legacy_import`、`fixture` / HTTP 客户端 / 随机源。**
 
 > ⚠ **有三个会话在同一棵树上并行迁移**（步 1 = `core`、步 2 = `upstream`、步 3 = `io`、步 4 = 组装层）。
 > 已付出的可见代价：`docs/go-migration-plan.md` 的 §6.1 一度出现**两组 `#20`**，
-> 现已统一为**全局连续 + 追加式**（步 1 = 1–27，步 4 = 28–39，步 3 = 40–41）。
+> 现已统一为**全局连续 + 追加式**（步 1 = 1–27，步 4 = 28–39 与 42–45，步 3 = 40–41 与 46–47）。
 > ⚠ 动 `docs/`、共享脚本、门禁白名单前**先看 `git status`**：
 > 白名单条目若指向**未提交**的文件，干净检出会让 `jsontags` 门禁变红 ——
-> 条目与文件必须**同进同出**。
+> 条目与文件必须**同进同出**（**两个方向都算**：文件先落地而条目没跟上，同样会让 HEAD 变红）。
 
 > 步 4 的落点见下方「步 4 实况」一节 —— 它**没有**按 `capabilities → exec → app → server/cli`
 > 一口气做完：`capabilities::login` 与 `app` 的绝大多数模块**依赖步 2（`mcloud-upstream`）与
@@ -46,7 +46,7 @@
 | `legacy` | ✅ | 旧文档 14 个类型 / 规整规则 / 账号视图 / 引用解析；**带来了第九份黄金向量（形状）** |
 | `traits` | ✅ | HTTP 请求/响应形状 / Clock / Scope / ClaimedRows / 三个 store 接口；**带来了第十份黄金向量（形状）** |
 
-- 落点 `internal/core`，**267 条测试**（全项目 530 条）；读 `test/golden/*.json` 经 `internal/golden`，
+- 落点 `internal/core`，**269 条测试**（全项目 570 条）；读 `test/golden/*.json` 经 `internal/golden`，
   读 `test/fixtures/legacy/*.json` 经 `internal/golden.LoadFixture`，都不复制。
 - ⚠ **步 1 只剩 `error` 后半的 `classify_body` ~400 行**（那台"响应体分类机"）。
   它之所以一直排在最后：写出来之后**没有消费者**（用到它的层还没迁），
@@ -123,14 +123,14 @@
 | `store` | ✅ | `StateStore` 全套（账号 / 登录态 / smid / 云朵快照 / 运行记录 / 事件流） |
 | `store::user` | ✅ | `UserStore` + `IssueSession`（口令 / 会话 / 清理过期） |
 | `datetime`（新增） | ✅ | 与 chrono **逐字节一致**的时间写法，见下 |
-| `store::config` | ⬜ | 726 行 + 574 行测试 |
+| `store::config` | ✅ | 定时任务 / 任务组合 / 抢兑配置 / 界面偏好 / 导入台账（14 个方法）；**JSON 列存原文，只有 `enabled` / `cron` / `last_status` 单独成列** |
 | `legacy_import` | ⬜ | ~1,600 行 + 1,163 行测试 —— **"老库只读导入结果一致"这条退出判据的载体** |
 | `fixture` / `reqwest_client` / `random` | ⬜ | 398 / 232 / 54 行 |
 
 - **驱动 = `modernc.org/sqlite` v1.59.0（纯 Go，免 cgo）**，方案 §8 早已拍板。
   实测它吃下了带 `BEGIN/COMMIT` 的**多语句**迁移 —— 这一点不显然
   （`Exec` 多语句是驱动相关的），所以先写 schema 测试再往下走。
-- 落点 `internal/io`（**包名是 `mcloudio`**，目录名与包名刻意不同）；**76 条测试**。
+- 落点 `internal/io`（**包名是 `mcloudio`**，目录名与包名刻意不同）；**95 条测试**。
 - ⚠⚠ **时间列必须与 chrono 逐字节一致**（`internal/io/datetime.go`）：
   `sessions.expires_at` / `users.created_at` / `runs.started_at` 都在 SQL 里做
   **字符串比较与排序**，而 chrono 写 `+00:00` + AutoSi（0/3/6/9 位）、
@@ -144,6 +144,21 @@
 - ⚠ **照抄 SQL 时注释里的反引号要全部去掉**：Go 的原始字符串用反引号作定界符，
   `schema.rs` 里 SQLite 标识符引用（`` `sha256` `` / `` `raw` ``）会把字面量**当场截断**，
   而编译器报的错指不到"注释里有个反引号"（§6.1 #40）。
+- ⚠ **Go 的 `?` 是顺序绑定，Rust 的 rusqlite 支持 `?1`/`?2` 编号**：
+  Rust 侧一条查询里同一个值可以复用（`(?1 IS NULL OR owner = ?1)`），
+  Go 必须**重复传参**（`ownerArg(scope), ownerArg(scope)`）。照抄 SQL 时这里会静默差一个参数 ——
+  好在它**会在运行期报** `missing argument with index 2`（反向测试已确认），不是静默错。
+- ⚠⚠ **`PipelineStep` 是唯一"嵌进 JSON 再读回来"的 core 类型**（`pipelines.steps` 列），
+  而它的 `body` 是 `json.RawMessage` —— 这个类型**既不 raw、也不 null 保真**（§6.1 #46）：
+  ① 写的时候 `json.Marshal` 会对内容**再跑一遍 HTML 转义**，必须走 `marshalJSON`；
+  ② 读的时候 `null` 被存成**字面的四个字节**，往返后 `Body == nil` 反转，
+  而**再序列化出来还是 `null`** ⇒ **逐字节比对看不见**，只有 `== nil` 会变。
+  向量 `$pipelineStepEncode` / `$pipelineStepDecode`（serde 真跑）钉住形状与宽严。
+- ⚠⚠ **参考实现里"没有"的函数，新加一个就是新契约**（§6.1 #47）：
+  `ParseScheduleStatus` / `ParsePipelineStatus` 是迁 `model` 时自己加的，
+  我按"未知归 `error`"写；而参考实现的做法在 **io 层**（`schedule_status_from_str`）——
+  未知返回 `None`，**刚好相反**。且当时测试是绿的（照着实现写的）。
+  已改成返回 `(状态, bool)`。
 
 ### 步 4 实况（2026-09-20 起）
 

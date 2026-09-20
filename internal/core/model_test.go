@@ -522,9 +522,17 @@ func TestScheduleStatusTruthTable(t *testing.T) {
 		{ScheduleError, "error"},
 		{ScheduleSkipped, "skipped"},
 	})
-	// ⚠ 未知值归 **error** 而不是 ok：把一次真失败记成成功，历史就永远查不出。
-	if got := ParseScheduleStatus("nonsense"); got != ScheduleError {
-		t.Fatalf("未知值实得 %v，期望 error", got)
+	// ⚠ 未知值**不归任何默认值**（`ok` 与 `error` 都是错的答案）——
+	// Rust 侧的判据："一个来路不明的状态会让界面显示错误的结论"。
+	// 这条曾经被我写成"归 error"，且测试照着实现写、一起绿。
+	if got, ok := ParseScheduleStatus("nonsense"); ok {
+		t.Fatalf("未知值应当认不出来，实得 %v", got)
+	}
+	if got, ok := ParseScheduleStatus("error"); !ok || got != ScheduleError {
+		t.Fatalf("error 应能读回，实得 %v ok=%v", got, ok)
+	}
+	if got, ok := ParseScheduleStatus("skipped"); !ok || got != ScheduleSkipped {
+		t.Fatalf("skipped 应能读回，实得 %v ok=%v", got, ok)
 	}
 }
 
@@ -541,8 +549,16 @@ func TestPipelineStatusTruthTable(t *testing.T) {
 	if PipelinePartial.String() == ScheduleSkipped.String() {
 		t.Fatal("两族的第三态不该撞在一起")
 	}
-	if got := ParsePipelineStatus("nonsense"); got != PipelineError {
-		t.Fatalf("未知值实得 %v，期望 error", got)
+	if got, ok := ParsePipelineStatus("nonsense"); ok {
+		t.Fatalf("未知值应当认不出来，实得 %v", got)
+	}
+	// ⚠ 两族第三态不同，所以 `skipped` 在组合这一列里必须**认不出来**
+	// （合并两个解析函数会让它被读成合法值）。
+	if got, ok := ParsePipelineStatus("skipped"); ok {
+		t.Fatalf("组合没有 skipped 态，不该读出来：%v", got)
+	}
+	if got, ok := ParsePipelineStatus("partial"); !ok || got != PipelinePartial {
+		t.Fatalf("partial 应能读回，实得 %v ok=%v", got, ok)
 	}
 }
 

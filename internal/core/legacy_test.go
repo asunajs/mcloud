@@ -795,6 +795,20 @@ type legacyShapeVectors struct {
 		File  string   `json:"file"`
 		Paths []string `json:"paths"`
 	} `json:"$fixtureKeys"`
+	PipelineStepEncode []struct {
+		Label string `json:"label"`
+		JSON  string `json:"json"`
+	} `json:"$pipelineStepEncode"`
+	PipelineStepDecode []struct {
+		Label      string  `json:"label"`
+		Input      string  `json:"input"`
+		OK         bool    `json:"ok"`
+		Error      string  `json:"error"`
+		Task       string  `json:"task"`
+		BodyIsNone bool    `json:"bodyIsNone"`
+		BodyText   *string `json:"bodyText"`
+		CoeIsNone  bool    `json:"coeIsNone"`
+	} `json:"$pipelineStepDecode"`
 }
 
 func loadLegacyShapeVectors(t *testing.T) legacyShapeVectors {
@@ -809,6 +823,10 @@ func loadLegacyShapeVectors(t *testing.T) legacyShapeVectors {
 	}
 	if len(v.SerializedShapes) == 0 || len(v.FixtureKeys) == 0 {
 		t.Fatalf("向量缺段：shapes=%d fixtureKeys=%d", len(v.SerializedShapes), len(v.FixtureKeys))
+	}
+	if len(v.PipelineStepEncode) == 0 || len(v.PipelineStepDecode) == 0 {
+		t.Fatalf("向量缺段：stepEncode=%d stepDecode=%d",
+			len(v.PipelineStepEncode), len(v.PipelineStepDecode))
 	}
 	return v
 }
@@ -1096,3 +1114,113 @@ func itoa64(v int64) string {
 	}
 	return string(buf[i:])
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `PipelineStep` 的编解码
+//
+// 它是**唯一一个嵌进 JSON 再读回来**的 core 类型（`pipelines.steps` 列），
+// 所以也是唯一一处"字段级的形状差异会在**往返之后**才显形"的地方。
+// 上面那批 `$serializedShapes` 只覆盖"写出去长什么样"，覆盖不到这里。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestPipelineStepEncodeMatchesSerdeVectors 比对 `pipelines.steps` 那一列的编码形状。
+//
+// 期望值由 serde 真跑出来（`$pipelineStepEncode`），钉两件事：
+//
+//   - `None` 序列化成 **`null`，不是字段消失**（Rust 侧那两个字段没有
+//     `skip_serializing_if`）⇒ Go 侧不能顺手加 `omitempty`；
+//   - `Some(Value::Null)` 与 `None` **编码后无法区分** —— 所以下面解码时把
+//     `body: null` 归一成 nil **不丢信息**，那是 JSON 本身就不区分的东西。
+func TestPipelineStepEncodeMatchesSerdeVectors(t *testing.T) {
+	v := loadLegacyShapeVectors(t)
+	want := map[string]PipelineStep{
+		"both-none": {Task: "prizes"},
+		"both-some": {
+			Task:            "receive",
+			Body:            json.RawMessage(`{"onlyNew":true}`),
+			ContinueOnError: boolPtr(true),
+		},
+		"body-null-value": {
+			Task:            "receive",
+			Body:            json.RawMessage("null"),
+			ContinueOnError: boolPtr(false),
+		},
+		// ⚠ 这条专门守 `MarshalJSON` **必须走 [marshalJSON]**：
+		// 默认路径会对 `json.RawMessage` 的内容再做一遍 HTML 转义
+		// （`<a&b>` → `\u003ca\u0026b\u003e`），而 serde_json 不转义。
+		// 没有它，"用 `json.Marshal` 也能过"——因为其余用例里没有 `<`。
+		"body-html-chars": {
+			Task: "receive",
+			Body: json.RawMessage(`{"note":"<a&b>"}`),
+		},
+	}
+	for _, c := range v.PipelineStepEncode {
+		step, ok := want[c.Label]
+		if !ok {
+			t.Fatalf("向量里的 %q 没有对应的 Go 实例 —— 补上，别删向量", c.Label)
+		}
+		if got := mustMarshalLegacy(t, step); got != c.JSON {
+			t.Fatalf("%s 与 serde 的输出不一致:\n实得 %s\n期望 %s", c.Label, got, c.JSON)
+		}
+	}
+}
+
+// TestPipelineStepDecodeMatchesSerdeVectors 比对"哪些输入该收、哪些该拒"。
+//
+// ⚠ 三条**反直觉**的实测结论都钉在这里，每一条我都差点按直觉写反：
+//
+//   - `body` 可以是**任意 JSON 值**，不只对象（`"not-an-object"` 被收成 String）
+//     —— 字段名叫 `body`、注释写着"请求体"，很容易写成"必须是对象"；
+//   - 未知字段被**忽略**（serde 没有 `deny_unknown_fields`）；
+//   - `task` **必填** —— 而 Go 的 `string` 零值会**静默接受**缺失，
+//     于是"某一步没有任务名"变成"任务名是空串"，错在别处才报出来。
+//
+// 用 `json.Unmarshal`（而不是 `decodeJSONStrict`）：与 `internal/io`
+// 读那一列的方式一致，也是这条断言的题设。
+func TestPipelineStepDecodeMatchesSerdeVectors(t *testing.T) {
+	v := loadLegacyShapeVectors(t)
+	for _, c := range v.PipelineStepDecode {
+		t.Run(c.Label, func(t *testing.T) {
+			var step PipelineStep
+			err := json.Unmarshal([]byte(c.Input), &step)
+
+			if gotOK := err == nil; gotOK != c.OK {
+				t.Fatalf("serde %s 而 Go %s（输入 %s）\nserde 说：%s\nGo 说：%v",
+					acceptVerdict(c.OK), acceptVerdict(gotOK), c.Input, c.Error, err)
+			}
+			if !c.OK {
+				return
+			}
+
+			if step.Task != c.Task {
+				t.Errorf("task：Go %q / serde %q", step.Task, c.Task)
+			}
+			if got := step.Body == nil; got != c.BodyIsNone {
+				t.Errorf("body 的 None 判定：Go %v / serde %v\n"+
+					"⚠ json.RawMessage 把 null 存成**字面的四个字节**（不是 nil），"+
+					"归一那一步不能省 —— 少了它 JSON 文本一模一样，只有 == nil 会变",
+					got, c.BodyIsNone)
+			}
+			// 解出来的内容也要一致：`bodyText` 是 serde 侧 `Value::to_string()`。
+			if c.BodyText == nil {
+				if step.Body != nil {
+					t.Errorf("serde 说 body 是 None，Go 却解出了 %s", step.Body)
+				}
+			} else if string(step.Body) != *c.BodyText {
+				t.Errorf("body 内容：Go %s / serde %s", step.Body, *c.BodyText)
+			}
+			if got := step.ContinueOnError == nil; got != c.CoeIsNone {
+				t.Errorf("continue_on_error 的 None 判定：Go %v / serde %v", got, c.CoeIsNone)
+			}
+		})
+	}
+}
+
+func acceptVerdict(ok bool) string {
+	if ok {
+		return "收"
+	}
+	return "拒"
+}
+
+func boolPtr(b bool) *bool { return &b }

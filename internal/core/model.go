@@ -35,6 +35,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -725,16 +726,26 @@ func (s ScheduleStatus) String() string {
 	return ""
 }
 
-// ParseScheduleStatus 从存储里读回。未知值归 [ScheduleError] ——
-// "上次成功"会让一次真失败被历史掩盖，反过来只是多提示一次。
-func ParseScheduleStatus(raw string) ScheduleStatus {
+// ParseScheduleStatus 从存储里读回；认不出来返回 `false`。
+//
+// ⚠ **不归到任何默认值**。Rust 侧同一件事的注释是：
+// "认不出来就当作'没有状态'，而不是硬塞一个默认值 —— 一个来路不明的状态
+// 会让界面显示错误的结论"。硬塞 `error` 会让一行被手改/损坏的数据在界面上
+// 表现成"上次执行失败"，而那是查不出原因的。
+//
+// ⚠ 与 [ScheduleStatus.UnmarshalJSON] **刻意不同**：那条路走 `enum.go` 那张表，
+// 未知文本**报错**（对齐 serde 的默认宽严），管的是**外部契约**；
+// 这里管的是**本地存储的容错**，两者不是同一件事，别合并。
+func ParseScheduleStatus(raw string) (ScheduleStatus, bool) {
 	switch raw {
 	case "ok":
-		return ScheduleOK
+		return ScheduleOK, true
+	case "error":
+		return ScheduleError, true
 	case "skipped":
-		return ScheduleSkipped
+		return ScheduleSkipped, true
 	}
-	return ScheduleError
+	return 0, false
 }
 
 // Schedule 是定时任务定义（旧 `data/schedules.json` → `schedules` 表）。
@@ -800,15 +811,21 @@ func (s PipelineStatus) String() string {
 	return ""
 }
 
-// ParsePipelineStatus 从存储里读回。未知值归 [PipelineError]。
-func ParsePipelineStatus(raw string) PipelineStatus {
+// ParsePipelineStatus 从存储里读回；认不出来返回 `false`。
+//
+// 判据与 [ParseScheduleStatus] 完全一致（不归默认值、与 `UnmarshalJSON` 刻意不同）。
+// ⚠ 两族的**第三态不同**（`partial` vs `skipped`），所以解析也必须分开写 ——
+// 合并成一个函数会让 `skipped` 在组合那一列里被读成合法值。
+func ParsePipelineStatus(raw string) (PipelineStatus, bool) {
 	switch raw {
 	case "ok":
-		return PipelineOK
+		return PipelineOK, true
+	case "error":
+		return PipelineError, true
 	case "partial":
-		return PipelinePartial
+		return PipelinePartial, true
 	}
-	return PipelineError
+	return 0, false
 }
 
 // PipelineStep 是组合中的单个步骤。
@@ -818,6 +835,57 @@ type PipelineStep struct {
 	Body json.RawMessage `json:"body"`
 	// ContinueOnError 是该步失败后是否继续；nil 表示取组合级 `stop_on_error` 的反值。
 	ContinueOnError *bool `json:"continue_on_error"`
+}
+
+// MarshalJSON 走 [marshalJSON] 而不是默认路径。
+//
+// ⚠ 默认路径**不是直通**：`json.Marshal` 拿到 `json.RawMessage` 之后会把它
+// 的内容**再做一遍 HTML 转义**（`<` → `\u003c`），而 serde_json 不转义。
+// `body` 是上游请求体的原文，转义之后逐字节就与 Rust 侧不同了。
+func (s PipelineStep) MarshalJSON() ([]byte, error) {
+	return marshalJSON(struct {
+		Task            string          `json:"task"`
+		Body            json.RawMessage `json:"body"`
+		ContinueOnError *bool           `json:"continue_on_error"`
+	}{s.Task, s.Body, s.ContinueOnError})
+}
+
+// UnmarshalJSON 对齐 serde 的四条**实测**语义
+// （见 `test/golden/legacy-shape-vectors.json` 的 `$pipelineStepDecode`）：
+//
+//  1. `task` **必填** —— 缺席报错（Rust 侧没有 `#[serde(default)]`）。
+//     ⚠ Go 的 `string` 零值会**静默接受**缺失，于是"某一步没有任务名"
+//     变成"任务名是空串"，直到执行时才在别处报一个指不到源头的错。
+//  2. `body` / `continue_on_error` 缺席与 `null` 等价（都是 `None`）。
+//  3. `body` **接受任意 JSON 值，不只对象** —— serde 实测 `"not-an-object"`
+//     被收成 `Some(String)`。⚠ 别加"必须是对象"的校验：那会拒掉存量数据，
+//     而字段名 `body` 加注释里的"请求体"很容易让人这么写。
+//  4. 未知字段被**忽略**（serde 默认，没有 `deny_unknown_fields`）。
+//
+// ⚠ 归一 `null` 那一步是必须的，理由不在 JSON 文本上：
+// `json.RawMessage` 的 `UnmarshalJSON` 把 `null` 存成**字面的四个字节**，
+// 于是往返一圈之后 `Body == nil` 从 true 反转成 false —— 而**再序列化出来
+// 还是 `null`**，逐字节比对看不出任何差别，只有 `== nil` 这种判定会变。
+// 这个错是 `io` 的 config 往返测试抓出来的（`reflect.DeepEqual` 不认文本）。
+func (s *PipelineStep) UnmarshalJSON(data []byte) error {
+	var w struct {
+		Task            *string         `json:"task"`
+		Body            json.RawMessage `json:"body"`
+		ContinueOnError *bool           `json:"continue_on_error"`
+	}
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	if w.Task == nil {
+		return fmt.Errorf("步骤缺少 task 字段")
+	}
+	// 缺席（零长度）与显式 `null` 都归一成 nil，让往返是恒等映射。
+	body := bytes.TrimSpace(w.Body)
+	if bytes.Equal(body, []byte("null")) {
+		body = nil
+	}
+	*s = PipelineStep{Task: *w.Task, Body: body, ContinueOnError: w.ContinueOnError}
+	return nil
 }
 
 // Pipeline 是任务组合定义（旧 `data/pipelines.json` → `pipelines` 表）。

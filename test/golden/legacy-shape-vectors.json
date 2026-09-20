@@ -87,6 +87,89 @@
     }
   ],
   "$generator": "scripts/gen-legacy-shape-vectors.rs",
+  "$pipelineStepDecode": [
+    {
+      "bodyIsNone": true,
+      "bodyText": null,
+      "coeIsNone": true,
+      "input": "{\"task\":\"prizes\",\"body\":null,\"continue_on_error\":null}",
+      "label": "full-nulls",
+      "ok": true,
+      "task": "prizes"
+    },
+    {
+      "bodyIsNone": false,
+      "bodyText": "{\"a\":1}",
+      "coeIsNone": false,
+      "input": "{\"task\":\"prizes\",\"body\":{\"a\":1},\"continue_on_error\":true}",
+      "label": "body-present",
+      "ok": true,
+      "task": "prizes"
+    },
+    {
+      "bodyIsNone": true,
+      "bodyText": null,
+      "coeIsNone": true,
+      "input": "{\"task\":\"prizes\"}",
+      "label": "optionals-absent",
+      "ok": true,
+      "task": "prizes"
+    },
+    {
+      "error": "missing field `task` at line 1 column 38",
+      "input": "{\"body\":null,\"continue_on_error\":null}",
+      "label": "task-absent",
+      "ok": false
+    },
+    {
+      "bodyIsNone": true,
+      "bodyText": null,
+      "coeIsNone": true,
+      "input": "{\"task\":\"prizes\",\"body\":null,\"continue_on_error\":null,\"extra\":1}",
+      "label": "unknown-field",
+      "ok": true,
+      "task": "prizes"
+    },
+    {
+      "bodyIsNone": false,
+      "bodyText": "\"not-an-object\"",
+      "coeIsNone": true,
+      "input": "{\"task\":\"prizes\",\"body\":\"not-an-object\",\"continue_on_error\":null}",
+      "label": "body-string",
+      "ok": true,
+      "task": "prizes"
+    },
+    {
+      "error": "invalid type: string \"yes\", expected a boolean at line 1 column 54",
+      "input": "{\"task\":\"prizes\",\"body\":null,\"continue_on_error\":\"yes\"}",
+      "label": "coe-string",
+      "ok": false
+    },
+    {
+      "error": "invalid length 0, expected struct PipelineStep with 3 elements at line 1 column 2",
+      "input": "[]",
+      "label": "top-level-array",
+      "ok": false
+    }
+  ],
+  "$pipelineStepEncode": [
+    {
+      "json": "{\"task\":\"prizes\",\"body\":null,\"continue_on_error\":null}",
+      "label": "both-none"
+    },
+    {
+      "json": "{\"task\":\"receive\",\"body\":{\"onlyNew\":true},\"continue_on_error\":true}",
+      "label": "both-some"
+    },
+    {
+      "json": "{\"task\":\"receive\",\"body\":null,\"continue_on_error\":false}",
+      "label": "body-null-value"
+    },
+    {
+      "json": "{\"task\":\"receive\",\"body\":{\"note\":\"<a&b>\"},\"continue_on_error\":null}",
+      "label": "body-html-chars"
+    }
+  ],
   "$serializedShapes": [
     {
       "empty": "{\"version\":null,\"caiyun\":[]}",

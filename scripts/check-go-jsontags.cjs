@@ -139,6 +139,14 @@ const UNTAGGED_ALLOWED = {
     '一次发码响应的**判定结果**，同上；Rust 侧是 enum，无 Serialize',
   'internal/app/app.go:Deps': '组装根的**依赖集**，不是数据模型',
   'internal/server/server.go:Deps': '组装根的**依赖集**，不是数据模型',
+  // `imports` 表的**一行**。字段名对应 SQL 列名，不是 JSON 键 ——
+  // 它由 `scanImport` 逐列读出来，从不经过 `json.Unmarshal`。
+  // 对外展示走 `Summary()`（刻意不含 `Raw`，那段可能带凭据）。
+  // ⚠ 若哪天要把导入台账吐给前端（比如 CLI `--json` 列导入历史），
+  // 正确做法是**另写一个带 tag 的响应体**并从这里删掉 ——
+  // 它现在是"数据库的形状"，与"响应的形状"是两件事。
+  'internal/io/configstore.go:ImportRecord':
+    'Rust 侧只 derive `Debug, Clone, PartialEq, Eq`（**不** Serialize）—— 它是 imports 表的行，字段名对应 SQL 列名',
 };
 
 function walk(dir, out = []) {
