@@ -24,13 +24,17 @@
 | `error` | ✅ 前半 | ErrorKind / Error / classify_status / classify_business_code；**后半的 `classify_body` 那台"响应体分类机"未迁** |
 | `auth` | ✅ | 含全部原版怪癖（只去一处 `Basic ` 前缀、token 在 `:` 处截断、`Number() \|\| 0`） |
 | `pure` | ✅ | 日键 / 增量 / 开抢时刻 / 脱敏 |
+| `cron` | ✅ | 5/6 段分流、日与周 OR、周日 `0`/`7` 归一化、时区为参数、4 年上界返回 false |
+| `sanitize` | ✅ | header 白名单 / JSON 递归脱敏 / token 形状打码 / 199 号段重映射 / `scan_for_leaks` 自检 / `build_fixture_entry` |
 | `model` | ⚠ 仅 `AccountId` + `CloudStats` | 其余类型（Account / Schedule / Pipeline / WebuiConfig…）等消费者落地时再带过来 |
-| `cron` `legacy` `run` `sanitize` `stage` `traits` `user` | ⬜ | 未开始 |
+| `legacy` `run` `stage` `traits` `user` | ⬜ | 未开始；依赖顺序 `user` → `run` → `model` → `stage` → `legacy` → `traits` |
 
-- 落点 `internal/core`，**88 条测试**；读 `test/golden/*.json` 经 `internal/golden`，不复制向量。
+- 落点 `internal/core`，**128 条测试**；读 `test/golden/*.json` 经 `internal/golden`，不复制向量。
 - `auth-vectors.json` 从"只有 Rust 读"变成**两边都读**。
 - 步 1 的退出判据是"6 份黄金向量在 Go 侧逐字段复算通过"，**尚未达成**
   （`app-signin-vectors` / `login-crypto-vectors` 的消费者在步 2 / 待接线）。
+- ⚠ `cron` 与 `sanitize` **没有黄金向量** —— 它们的规格来自 Rust 侧的单元测试
+  （`sanitize` 的 5 个测试文件共 348 行），迁移时是**逐条平移**的，不是照文档重写。
 
 ---
 

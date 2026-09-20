@@ -295,19 +295,28 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 
 **退出判据**：6 份黄金向量在 Go 侧逐字段复算通过。
 
-### 步 1 已实测出来的三条（写进这里，免得后面的模块重踩）
+### 步 1 已实测出来的八条（写进这里，免得后面的模块重踩）
 
 | 现象 | 根因 | 做法 |
 | --- | --- | --- |
 | PKCS7 去填充要**自己校验** | Go 标准库只给裸分组与模式，没有 `decrypt_padded_mut::<Pkcs7>` 的等价物 | 手写 unpad 并校验（末字节 ∈ 1..blockSize 且尾部全等于它）。**不判的后果不是"少一个检查"，而是用错密钥时静默产出半个凭据** |
 | gzip 的 OS 字节 | Rust 侧要改 `buf[9]` 是因为 `flate2` 没暴露该字段；Go 的 `compress/gzip` 有公开的 `Header.OS`（默认 255） | 用 `Header.OS = 19`，**判据不变**：输出第 10 个字节 == 19 |
 | 取 error 类别用 `errors.As` | Go 的惯例是 `fmt.Errorf("…: %w", err)` 包一层（Rust 的 `?` 不会），裸类型断言在那种情况下**静默返回 ok=false** | `errors.As`；并专门写一条"包一层之后还取得出来"的测试 |
+| **`json.Marshal` 会转义 HTML** | Go 默认把 `<` `>` `&` 转成 `\u003c` 等，`serde_json` 不转。而占位符就是 `<REDACTED>` | 一律走自写的 `marshalJSON`，内部 `Encoder.SetEscapeHTML(false)`。**这条的隐蔽性在于夹具解析回来完全正确**，只有人眼与按文本扫描的守卫看得见 |
+| **默认解 JSON 数字会丢精度** | 默认给 `float64`（53 位有效位），19 位标识末几位**静默归零**，且重映射出的合成值同样"看起来是随机的" | 解析一律 `Decoder.UseNumber()`，数字保持字面量；写入时也写回 `json.Number` 而不是字符串 |
+| **`Encoder.Encode` 补尾换行** | `serde_json::to_vec` 不补 | `marshalJSON` 里 `bytes.TrimSuffix(…, "\n")` |
+| **`time.Date` 不报错、会归一化** | 夏令时"跳过"的那一小时里没有那个本地时刻，Rust 的 `.earliest()` 给 `None`，Go 的 `time.Date` 把它挪到邻点（02:30 → 01:30 或 03:30） | 构造后**把墙钟读回来逐字段比对**，不一致就 `continue`。不校验 = 凭空多跑一次，且跑在用户没写的那个时刻上 |
+| **无符号自增会回绕** | `value += step`（`uint32`）：`59 + 4294967295` 回绕成 58。Rust debug 构建直接 panic，**Go 无溢出 panic，只会静默回绕**；位图去重让**结果**恰好相同，所以它在结果上不可见 | 先判"再加一步就超上界"再自增。判据只能靠**循环次数**，不能靠结果 |
 
 ⚠ 另有一条与语言无关、但 Go 侧更容易犯的：**黄金向量门禁靠正则
 `golden.Load("…")` 的字面量判断"这份向量有没有人读"**。把文件名藏进
 `loadGolden(t, name)` 这类包装函数会让探测**静默失配**，把读得好好的向量
 标成"死向量" —— 那种失真比漏检更坏，它教人忽略报告。所以各包的取向量函数
 必须把字面量写进 `golden.Load` 调用里。
+
+⚠ **`cron` 与 `sanitize` 没有黄金向量** —— 它们的规格来自 Rust 侧的单元测试
+（`sanitize` 拆成 5 个文件、348 行）。迁移这两块时是**逐条平移测试**，
+不是照文档重写；新增的断言只针对"换语言新长出来的坑"，不重新定义语义。
 
 ⚠ **注意其中一份是"死向量"**：`test/golden/login-crypto-vectors.json` 有生成器
 （`scripts/gen-login-crypto-vectors.cjs`）、但**没有任何测试读它**（`gates-go.sh` 的 golden
@@ -415,7 +424,7 @@ PC 与 App 是**两套客户端**，同名同形的常量值可能不同，而"�
 | --- | --- | --- | --- |
 | **0** | 骨架 + 守卫先行：`go.mod` / `internal/` 八层 / `cmd/` 两个入口 / `scripts/gates-go.sh` / `check-go-deps.sh` / 三处共享守卫改造 | **八项门禁全绿**；依赖断言经**反向测试**证明能抓错 | ✅ **已完成** |
 | **冻结** | Rust 侧冻结到 `legacy/`（`bash scripts/freeze-rust.sh`）| 冻结后 **Rust 七条 + Go 八条同时全绿**；`legacy/test` 以符号链接入库（模式 120000）| ✅ **已完成**（`333d05c`，2026-09-20）|
-| **1** | `mcloud-core`（纯计算，标准库覆盖最好） | 6 份黄金向量在 Go 侧逐字段复算通过 | 🔄 **进行中**：`crypto` / `error`（前半）/ `auth` / `pure` 已落（88 条测试）；余 `cron` `legacy` `model` `run` `sanitize` `stage` `traits` `user` |
+| **1** | `mcloud-core`（纯计算，标准库覆盖最好） | 6 份黄金向量在 Go 侧逐字段复算通过 | 🔄 **进行中**：`crypto` / `error`（前半）/ `auth` / `pure` / `cron` / `sanitize` 已落（128 条测试）；余 `user` → `run` → `model` → `stage` → `legacy` → `traits`（按依赖顺序） |
 | **2** | `mcloud-upstream`（协议层） | 同一条抓包请求 Rust/Go **双跑**，header 顺序 / percent-encode / 签名串逐字节一致 | ⬜ |
 | **3** | `mcloud-io`（唯一 IO 层） | 纯 Go sqlite 驱动下 schema v1→v7 迁移 + 老库只读导入结果一致 | ⬜ |
 | **4** | `capabilities` → `exec` → `app` → `server` / `cli` | 19 项能力逐项打勾；CLI 参数互斥与四态输出一致；`api_contract` 契约测试平移，前端不动 | ⬜ |
