@@ -67,6 +67,16 @@ bash scripts/gates-go.sh test deps        # 只跑指定的几条
   **编译期**保证。Go 的 `io.Reader` 是引用语义，并发共用一个源是 data race，
   而它**不一定**让测试变红：可能只是偶发产生错误数据（签名对不上、`deviceId` 错一位），
   于是被当成"上游抽风"。`-race` 是那条编译期保证在 Go 侧的替代品。
+
+  ⚠ **`-race` 在 Windows 上需要 cgo，cgo 需要一个 C 编译器**（`go env CC`，默认 `gcc`）。
+  没有它时 `go test -race` 报 `requires cgo`，**与代码无关**，但会让 `test` 红到
+  一条提交都推不出去。`scripts/gates-go.sh` 因此**先探测**：`go env CC` 命不中
+  就降级成不带 `-race` 的 `go test`，并在横幅、该条结果行、末尾汇总行**三处**标出
+  "未跑 -race"。装上 mingw-w64 / w64devkit 后自动恢复，不用改脚本。
+
+  降级是**有意为之且必须看得见**：一个"拦住一切"的检查最后会被 `--no-verify`
+  整体绕过，连带把其余七条一起废掉 —— 那样的价值是 0。宁可少一条保证但看得见，
+  不要"文档写着有、实际一次没跑"。
 - **`vet` 过了不代表静态检查这关过了。** 它只覆盖"几乎肯定是错"的一小撮检查。
   补齐要引 `golangci-lint`，而那是外部依赖 —— 骨架阶段刻意零第三方依赖。
   引进来之前，**不要拿 `vet` 当 `clippy` 用**。
@@ -87,7 +97,7 @@ bash scripts/gates-go.sh test deps        # 只跑指定的几条
 | 入口 | 什么时候 | 覆盖面 |
 | --- | --- | --- |
 | `pre-commit` | 每次提交 | `fmt` `deps` `filenames` `idents`（不需要编译的那四条） |
-| `pre-push` | 每次推送 | 全七条 |
+| `pre-push` | 每次推送 | Go 侧**八条**全跑（Rust 侧冻结后改跑这个，见下） |
 
 装一次即可：`bash scripts/install-hooks.sh`（细节见 `.githooks/README.md`）。
 
