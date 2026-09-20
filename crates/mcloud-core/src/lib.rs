@@ -17,6 +17,7 @@ pub mod error;
 pub mod legacy;
 pub mod model;
 pub mod pure;
+pub mod run;
 pub mod sanitize;
 pub mod traits;
 pub mod user;
@@ -38,13 +39,17 @@ pub use crypto::{
     rsa_pkcs1v15_encrypt_base64_with_b64_key, sha1_hex_upper, sha256_hex, shift_head10_to_back,
     shift_tail10_to_front, sign_salt,
 };
-pub use error::{Error, ErrorKind, classify_status};
+pub use error::{
+    Classified, Error, ErrorKind, FailureClass, body_snippet, classify_body,
+    classify_business_code, classify_status,
+};
 pub use model::{
     Account, AccountId, AccountMode, AccountState, CapabilityKind, CloudStats,
     DEFAULT_EXCHANGE_WINDOWS, DEFAULT_WEBUI_PAGE, ExchangeBinding, ExchangeConfig, FieldKind,
     FieldSpec, Group, Pipeline, PipelineStatus, PipelineStep, RiskLevel, RunRecord, RunStatus,
     Schedule, ScheduleStatus, ScheduleTarget, SelectOption, SmidState, WEBUI_PAGES, WebuiConfig,
 };
+pub use run::{ManualStep, ManualTarget, RunId, RunOutcome, RunReport};
 pub use traits::{
     ClaimedRows, Clock, ConfigStore, FixedClock, HttpClient, HttpMethod, HttpRequest, HttpResponse,
     Scope, StateStore, UserStore,

@@ -120,24 +120,66 @@ for name in "${ORDER[@]}"; do
   fi
 
   printf '\n\033[1m──── %s ────\033[0m\n' "$name"
-  if eval "$cmd" 2>&1 | tee -a "$GATE_LOG"; then
-    printf '\033[32m✓ %s 通过\033[0m\n' "$name"
-  else
+
+  # 写盘被拦时**自动重试**：本机（Windows + 杀毒软件实时扫描）会让 cargo
+  # 随机地写不进 target/ 里的某一个文件，而每次撞上的文件都不一样。
+  # 同一份代码换个时刻再跑通常就过了 —— 所以重试是这里**唯一**有效的对策。
+  #
+  # 只对 "写不进去" 这一种失败重试（`拒绝访问/os error 5/LNK1104/permission denied`），
+  # 编译错误与测试失败一律立即返回 —— 否则会把真问题掩盖成"重试五次都失败"。
+  attempt=1
+  max_attempts=5
+  while :; do
+    if eval "$cmd" 2>&1 | tee -a "$GATE_LOG"; then
+      printf '\033[32m✓ %s 通过\033[0m\n' "$name"
+      break
+    fi
+
+    # 真·写盘被拦：cargo 打印的是 `error:` 开头的行，且带下面这些字样之一
+    if [ "$attempt" -lt "$max_attempts" ] \
+      && grep -qE "^(error|error\[)" "$GATE_LOG" \
+      && grep -qE "拒绝访问|os error 5|LNK1104|permission denied" "$GATE_LOG"; then
+      attempt=$((attempt + 1))
+      printf '\033[33m· %s 写盘被拦，第 %d 次重试…\033[0m\n' "$name" "$attempt"
+      : > "$GATE_LOG" # 重试前清掉上一次的输出，判别只看本次
+      sleep 3
+      continue
+    fi
+
     printf '\033[31m✗ %s 失败\033[0m\n' "$name"
     FAILED+=("$name")
-  fi
+    break
+  done
 done
 
 echo
 echo "工具链: $RUSTC_VER"
 
-# 沙箱（或只读挂载）会把 cargo 写 target/ 拦成 "拒绝访问 (os error 5)"，
-# 这看起来像编译错误、实际是权限问题。识别出来单独提示，免得白排查半天。
-if [ ${#FAILED[@]} -gt 0 ] && grep -qs "os error 5" "$GATE_LOG"; then
+# 写盘被拦的问题单独提示，免得白排查半天。
+#
+# 这里必须**区分警告与错误**：cargo 在收尾时会报
+#   warning: failed to garbage collect finalized incremental compilation
+#            session directory ...: 拒绝访问。 (os error 5)
+# 这条**不影响构建结果**（增量缓存清不掉而已），但它的字样与真失败一模一样，
+# 最初版本的 `grep -qs "os error 5"` 因此在"构建成功"时也会打印下面这段
+# "环境问题、不是代码问题"的提示 —— 反过来会让人以为失败都是环境问题。
+#
+# 判据：只看**以 `error` 开头**的行（cargo 的真失败都以它打头），
+# 并且排除 toolchain 缺失那类提前退出。
+if [ ${#FAILED[@]} -gt 0 ] && grep -qE "^(error|error\[)" "$GATE_LOG"; then
   echo
-  echo "提示：上面出现 \"拒绝访问 (os error 5)\" —— 这不是代码问题。"
-  echo "      cargo 需要写 target/ 与 cargo registry，被沙箱或只读挂载拦了。"
-  echo "      在允许写这两处的环境里重跑即可（或先把它们加进白名单）。"
+  if grep -qE "^(error\[)|^error: could not compile" "$GATE_LOG"; then
+    echo "上面有编译错误 —— 这可能是代码问题，也可能是写盘被拦（两者输出很像）。"
+    echo "若错误里带 \"拒绝访问 (os error 5)\" / LNK1104，则是环境拦了 target/ 的写。"
+  fi
+  if grep -qE "拒绝访问|os error 5|LNK1104" "$GATE_LOG"; then
+    echo
+    echo "提示：出现 \"拒绝访问 (os error 5)\" —— 这通常不是代码问题。"
+    echo "      cargo 需要写 target/ 与 cargo registry，被沙箱或杀毒软件拦了。"
+    echo "      本仓库的做法是**重试**（同一份代码换个时刻就能过）；"
+    echo "      在允许写这两处的环境里跑会更稳。"
+    echo "      注意：只出现在 warning 行（incremental 清理）时可以忽略。"
+  fi
 fi
 
 if [ ${#FAILED[@]} -gt 0 ]; then
