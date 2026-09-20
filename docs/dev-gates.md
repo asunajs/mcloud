@@ -95,31 +95,58 @@ bash scripts/gates-go.sh test deps        # 只跑指定的几条
 
 ## 耗时
 
-> ### ⚠⚠ 本节数据是 **Windows + Git Bash** 上测的，在 macOS 上**不成立**
+> ### ⚠⚠ 引用本节数字前，先看它是在**哪个平台**测的
 >
-> macOS 实测（arm64 / rustc 1.91.1，2026-09-20）：改 `mcloud-core/src/lib.rs`
-> **一行**后，`cargo check --workspace` = **1 分 58 秒**（`/usr/bin/time -p` → `real 118.71`）。
+> 两个平台都测过"改 `mcloud-core` 一行"这个最典型的动作：
 >
-> 差 4 倍的原因**不是平台 API**，是**这个 workspace 长大了**：`mcloud-core` 之上
-> 7 个 crate 全都要重新 check。这是单 workspace 的固有代价，不是调参能解决的
-> （`incremental` 已按 `0c65b35` 关掉，那解决的是另一个问题）。
+> | 平台 | 命令 | 耗时 |
+> | --- | --- | --- |
+> | macOS arm64 / rustc 1.91.1 | `cargo check --workspace` | **1 分 58 秒**（`real 118.71`） |
+> | Windows + Git Bash / rustc 1.96.1 | `cargo test --workspace --no-run` | **97 秒**（8/8 crate 重编） |
 >
-> ⇒ **引用本节任何一个数字之前，先看它是在哪个平台、什么时候测的。**
-> 下面保留原始数据（它在 Windows 上仍然有效），但**不要再把"30 秒"当成
-> "这台机器上的日常"** —— 它已经导致过一次误判（"不需要换语言"）。
+> **同一量级、互相印证。** 慢的原因**不是平台 API**，是**这个 workspace 长大了**：
+> `mcloud-core` 之上 7 个 crate 全都要重新编译。这是单 workspace 的固有代价，
+> 不是调参能解决的（`incremental` 已按 `0c65b35` 关掉，那解决的是另一个问题）。
+>
+> ⇒ **不要再把"30 秒"当成"日常"** —— 它已经导致过一次误判（"不需要换语言"）。
 > 背景与决策见 [`go-migration-plan.md`](./go-migration-plan.md) §1。
 
-**先说结论（Windows + Git Bash，6 核）：写代码后推送 30 秒左右，不需要 `sccache`。**
+### ★ 真正决定体验的是"你改了哪一层"
 
-实测（6 核，一次只跑一个构建 —— 否则数据全废，见下「怎么量才准」）：
+**改底层 crate = 全量重编。这是 Rust crate 模型的固有代价，不是配置能修的。**
 
-| 场景 | 耗时 |
-| --- | --- |
-| **写代码后推送（真正的日常）** | **~30s** |
-| 全量七条门禁单跑 | 23s |
-| `git push` 带全七条 hook | 26s |
+依赖链 —— 7 个 crate 全部直接或间接依赖 `mcloud-core`，最深 4 层：
 
-拆开看：
+```
+mcloud-core                            ← 最底层
+   ├── upstream      → core
+   ├── io            → core
+   ├── capabilities  → core, upstream                (2 层)
+   ├── exec          → core, capabilities            (3 层)
+   ├── server        → core, io, exec, capabilities  (4 层)
+   ├── app           → core, upstream, capabilities, io
+   └── cli           → core, capabilities, upstream
+```
+
+**实测：加一行注释（不改语义）后 `cargo test --workspace --no-run`：**
+
+| 改哪个 crate | 重编几个 | 耗时 |
+| --- | --- | --- |
+| `mcloud-core`（最底层） | **8 / 8** | **97s** |
+| `mcloud-io`（中间层） | 4 / 8 | 14s |
+| `mcloud-cli`（最顶层叶子） | **1 / 8** | **4s** |
+| 什么都不改（热） | 0 | 1s |
+
+**差 24 倍。** 而日常开发改的正是底层 —— 领域模型、事件模型、错误分类都在
+`mcloud-core`，能力在 `mcloud-capabilities`。所以**日常就是 ~97 秒一次重编**，
+再叠加 `clippy`（另一套 fingerprint，产物不共用）与跑测试本身，
+一次推送的真实体感是 **2–3 分钟**。
+
+> 这一节此前写的是"写代码后推送 30 秒左右" —— **那个数字是错的**，
+> 它量的是"改文档 / 改配置"这种最省事的场景。是用户纠正的：
+> **「不是 rust 慢，是改了底层后需要全量编译」。**
+
+### 各门禁本身
 
 | 门禁 | 热 target | 说明 |
 | --- | --- | --- |
@@ -127,8 +154,11 @@ bash scripts/gates-go.sh test deps        # 只跑指定的几条
 | `deps` | ~1s | 纯静态 |
 | `filenames` | 跳过 / ~1s | 无增删改名时跳过 |
 | `idents` | ~3s | 纯静态 |
-| `clippy --all-targets` | **首次 33s ／ 紧接再跑 2s** | 纯静态分析，不编 crate |
-| `test --workspace` | **~20s** | 需重编本仓 8 个 crate |
+| `clippy --all-targets` | 首次 33s ／ 紧接再跑 2s | 纯静态分析 |
+| `test --workspace` | 热 1s ／ 改底层 97s | 成本由"改了哪一层"决定 |
+
+**静态四条加起来才 ~6s。** 慢的全部是编译类，而编译类的成本由"改了哪一层"
+决定，与门禁设计无关 —— 这也是为什么**砍门禁条数省不下任何东西**。
 
 > ### ⚠ 这里曾有两个 bug，把耗时抬到 8 分钟以上（都已修）
 >
