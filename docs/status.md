@@ -5,12 +5,32 @@
 > ⚠ **2026-09-20：Rust 侧已冻结到 `legacy/`，本仓库正在迁往 Go。**
 > 下面这张表描述的是**冻结那一刻**的 Rust 实现 —— 它仍然有效、也仍然是对拍基准，
 > 但"进度"从此按 Go 侧算。迁移方案与顺序见 [`go-migration-plan.md`](./go-migration-plan.md)。
-> Go 侧目前**只有骨架**（`internal/` 八层 + `cmd/` 两个入口 + 八条门禁），**业务尚未迁移**。
+> Go 侧进度见下方「Go 侧迁移实况」一节。
 >
-> - 最后核对：2026-09-19 收工（Rust 侧）；Go 侧尚未开始，无从核对
+> - 最后核对：2026-09-19 收工（Rust 侧）；Go 侧 2026-09-20 起
 > - 规划（**写于动工前**，进度不要以它为准）：[`rust-rewrite-plan.md`](./rust-rewrite-plan.md)
 > - 实现顺序（先做哪项能力）：同文档 §7.1
 > - 门禁怎么跑：[`dev-gates.md`](./dev-gates.md)
+
+---
+
+## Go 侧迁移实况（2026-09-20 起）
+
+**当前：步 1（`mcloud-core`）进行中。**
+
+| `mcloud-core` 的模块 | Go 侧 | 说明 |
+| --- | --- | --- |
+| `crypto` | ✅ | 哈希 / AES(CBC,ECB) / DES / RSA / gzip / 签名头 / getTn |
+| `error` | ✅ 前半 | ErrorKind / Error / classify_status / classify_business_code；**后半的 `classify_body` 那台"响应体分类机"未迁** |
+| `auth` | ✅ | 含全部原版怪癖（只去一处 `Basic ` 前缀、token 在 `:` 处截断、`Number() \|\| 0`） |
+| `pure` | ✅ | 日键 / 增量 / 开抢时刻 / 脱敏 |
+| `model` | ⚠ 仅 `AccountId` + `CloudStats` | 其余类型（Account / Schedule / Pipeline / WebuiConfig…）等消费者落地时再带过来 |
+| `cron` `legacy` `run` `sanitize` `stage` `traits` `user` | ⬜ | 未开始 |
+
+- 落点 `internal/core`，**88 条测试**；读 `test/golden/*.json` 经 `internal/golden`，不复制向量。
+- `auth-vectors.json` 从"只有 Rust 读"变成**两边都读**。
+- 步 1 的退出判据是"6 份黄金向量在 Go 侧逐字段复算通过"，**尚未达成**
+  （`app-signin-vectors` / `login-crypto-vectors` 的消费者在步 2 / 待接线）。
 
 ---
 

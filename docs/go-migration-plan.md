@@ -295,6 +295,20 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 
 **退出判据**：6 份黄金向量在 Go 侧逐字段复算通过。
 
+### 步 1 已实测出来的三条（写进这里，免得后面的模块重踩）
+
+| 现象 | 根因 | 做法 |
+| --- | --- | --- |
+| PKCS7 去填充要**自己校验** | Go 标准库只给裸分组与模式，没有 `decrypt_padded_mut::<Pkcs7>` 的等价物 | 手写 unpad 并校验（末字节 ∈ 1..blockSize 且尾部全等于它）。**不判的后果不是"少一个检查"，而是用错密钥时静默产出半个凭据** |
+| gzip 的 OS 字节 | Rust 侧要改 `buf[9]` 是因为 `flate2` 没暴露该字段；Go 的 `compress/gzip` 有公开的 `Header.OS`（默认 255） | 用 `Header.OS = 19`，**判据不变**：输出第 10 个字节 == 19 |
+| 取 error 类别用 `errors.As` | Go 的惯例是 `fmt.Errorf("…: %w", err)` 包一层（Rust 的 `?` 不会），裸类型断言在那种情况下**静默返回 ok=false** | `errors.As`；并专门写一条"包一层之后还取得出来"的测试 |
+
+⚠ 另有一条与语言无关、但 Go 侧更容易犯的：**黄金向量门禁靠正则
+`golden.Load("…")` 的字面量判断"这份向量有没有人读"**。把文件名藏进
+`loadGolden(t, name)` 这类包装函数会让探测**静默失配**，把读得好好的向量
+标成"死向量" —— 那种失真比漏检更坏，它教人忽略报告。所以各包的取向量函数
+必须把字面量写进 `golden.Load` 调用里。
+
 ⚠ **注意其中一份是"死向量"**：`test/golden/login-crypto-vectors.json` 有生成器
 （`scripts/gen-login-crypto-vectors.cjs`）、但**没有任何测试读它**（`gates-go.sh` 的 golden
 门禁自己会把它标成 `⚠ 无任何测试读取（死向量）`，**不失败**）。它覆盖
@@ -401,7 +415,7 @@ PC 与 App 是**两套客户端**，同名同形的常量值可能不同，而"�
 | --- | --- | --- | --- |
 | **0** | 骨架 + 守卫先行：`go.mod` / `internal/` 八层 / `cmd/` 两个入口 / `scripts/gates-go.sh` / `check-go-deps.sh` / 三处共享守卫改造 | **八项门禁全绿**；依赖断言经**反向测试**证明能抓错 | ✅ **已完成** |
 | **冻结** | Rust 侧冻结到 `legacy/`（`bash scripts/freeze-rust.sh`）| 冻结后 **Rust 七条 + Go 八条同时全绿**；`legacy/test` 以符号链接入库（模式 120000）| ✅ **已完成**（`333d05c`，2026-09-20）|
-| **1** | `mcloud-core`（纯计算，标准库覆盖最好） | 6 份黄金向量在 Go 侧逐字段复算通过 | ⬜ |
+| **1** | `mcloud-core`（纯计算，标准库覆盖最好） | 6 份黄金向量在 Go 侧逐字段复算通过 | 🔄 **进行中**：`crypto` / `error`（前半）/ `auth` / `pure` 已落（88 条测试）；余 `cron` `legacy` `model` `run` `sanitize` `stage` `traits` `user` |
 | **2** | `mcloud-upstream`（协议层） | 同一条抓包请求 Rust/Go **双跑**，header 顺序 / percent-encode / 签名串逐字节一致 | ⬜ |
 | **3** | `mcloud-io`（唯一 IO 层） | 纯 Go sqlite 驱动下 schema v1→v7 迁移 + 老库只读导入结果一致 | ⬜ |
 | **4** | `capabilities` → `exec` → `app` → `server` / `cli` | 19 项能力逐项打勾；CLI 参数互斥与四态输出一致；`api_contract` 契约测试平移，前端不动 | ⬜ |
