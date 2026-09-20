@@ -58,13 +58,26 @@ cd "$(dirname "$0")/.."
 # 它在 Git Bash（bash 4.4/5.x）上测不出来，只在 macOS 上现形。
 #
 # `case` 分派是 3.2 就能跑的等价写法，没有理由为它要求 bash 4。
+# ── 冻结探测 ────────────────────────────────────────────────────────
+#
+# Rust 侧冻结后（`crates/` 与 `Cargo.toml` 已移到 `legacy/`，见
+# scripts/freeze-rust.sh），Cargo workspace 在 `legacy/` 下。
+#
+# 这里**自动探测**而不是写死路径：写死会在冻结的那一刻悄悄坏掉，而
+# "门禁坏了"的表现是它报一个与代码无关的错（找不到 Cargo.toml）——
+# 那种错会让人先去怀疑代码，方向一开始就错了。
+CARGO_MANIFEST=""
+if [ -f legacy/Cargo.toml ]; then
+  CARGO_MANIFEST="--manifest-path legacy/Cargo.toml"
+fi
+
 GATE_NAMES="test clippy fmt deps filenames idents golden"
 
 gate_cmd() {
   case "$1" in
-    test)      echo "cargo test --workspace" ;;
-    clippy)    echo "cargo clippy --all-targets -- -D warnings" ;;
-    fmt)       echo "cargo fmt --check" ;;
+    test)      echo "cargo test --workspace $CARGO_MANIFEST" ;;
+    clippy)    echo "cargo clippy --all-targets $CARGO_MANIFEST -- -D warnings" ;;
+    fmt)       echo "cargo fmt $CARGO_MANIFEST --check" ;;
     deps)      echo "bash scripts/check-deps.sh" ;;
     filenames) echo "bash scripts/check-filenames.sh" ;;
     idents)    echo "node scripts/check-identifiers.cjs" ;;

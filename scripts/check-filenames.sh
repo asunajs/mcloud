@@ -87,7 +87,16 @@ offenders=""
 # 一旦每个文件 fork 一次，几百个文件的耗时是数量级差异。
 while IFS= read -r path; do
   [ -z "$path" ] && continue
-  case "$path" in *.rs) continue ;; esac        # Rust 源走 snake_case，编译器管
+  # Rust 源走 snake_case，Go 源走 Go 自己的命名规则 —— 两者都由工具链赋予
+  # 语义，改名即失效，所以都不在 kebab-case 的管辖范围：
+  #
+  #   *.rs        文件名就是模块名，`mod my-mod;` 不合法
+  #   *_test.go   `go test` 只认 `_test.go` 后缀
+  #   *_GOOS.go / *_GOARCH.go   构建约束按字面匹配后缀（foo_linux.go / foo_amd64.go）
+  #
+  # 这与上面 is_exempt() 的豁免表**不是**一回事：那是"按路径点名的例外"，
+  # 这是"整类文件不适用这条规则"，理由与 Rust 那条完全相同。
+  case "$path" in *.rs|*.go) continue ;; esac
   is_exempt "$path" && continue
 
   base="${path##*/}"

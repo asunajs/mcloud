@@ -29,6 +29,21 @@ FORBIDDEN_EDGES=("mcloud-cli:mcloud-server")
 
 cd "$(dirname "$0")/.."
 
+# ── 冻结探测 ────────────────────────────────────────────────────────
+#
+# 与 scripts/gates.sh 同一套探测：Rust 侧冻结后（`crates/` 与 `Cargo.toml`
+# 已移到 `legacy/`，见 scripts/freeze-rust.sh），`cargo tree` 要在 `legacy/`
+# 下解析，否则报的是"找不到 Cargo.toml"这种与分层无关的错。
+#
+# ⚠ 用**字符串**而不是数组：bash 3.2 在 `set -u` 下展开空数组
+#    （`"${ARR[@]}"`）会报 unbound variable —— macOS 自带的 /bin/bash 就是 3.2。
+#    空值时下面的 `$MANIFEST` 展开为空串，命令仍然合法。
+#    （下面的 `$MANIFEST` 故意不加引号，原因同上。）
+MANIFEST=""
+if [ -f legacy/Cargo.toml ]; then
+  MANIFEST="--manifest-path legacy/Cargo.toml"
+fi
+
 fail=0
 
 # 用这里的 <<< 而不是 `echo | grep`：grep -q 命中即退出会让 echo 吃到 SIGPIPE，
@@ -39,7 +54,7 @@ dep_in_tree() {
 
 for crate in "${PURE_CRATES[@]}"; do
   # 只看 normal（生产）依赖；dev-dependencies 允许用临时目录等测试工具
-  tree=$(cargo tree -p "${crate}" --edges normal --prefix none --no-dedupe 2>/dev/null || true)
+  tree=$(cargo tree -p "${crate}" $MANIFEST --edges normal --prefix none --no-dedupe 2>/dev/null || true)
 
   if [ -z "$tree" ]; then
     echo "!! 无法解析 ${crate} 的依赖树（crate 是否存在？）"
@@ -66,7 +81,7 @@ for crate in "${PURE_CRATES[@]}"; do
 done
 
 for crate in "${COMPOSITION_ROOTS[@]}"; do
-  tree=$(cargo tree -p "${crate}" --edges normal --prefix none --no-dedupe 2>/dev/null || true)
+  tree=$(cargo tree -p "${crate}" $MANIFEST --edges normal --prefix none --no-dedupe 2>/dev/null || true)
 
   if [ -z "$tree" ]; then
     echo "!! 无法解析 ${crate} 的依赖树"
@@ -85,7 +100,7 @@ done
 for edge in "${FORBIDDEN_EDGES[@]}"; do
   from="${edge%%:*}"
   to="${edge##*:}"
-  tree=$(cargo tree -p "${from}" --edges normal --prefix none --no-dedupe 2>/dev/null || true)
+  tree=$(cargo tree -p "${from}" $MANIFEST --edges normal --prefix none --no-dedupe 2>/dev/null || true)
 
   if [ -z "$tree" ]; then
     echo "!! 无法解析 ${from} 的依赖树"

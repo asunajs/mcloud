@@ -421,25 +421,53 @@ function decodeBase64Payloads(text) {
 
 // ─────────────────────────── 主流程 ───────────────────────────
 
-/** 哪些 golden 文件真的被 Rust 侧读了（`include_str!`）。 */
-function consumedByRust() {
+/**
+ * 哪些 golden 文件真的被读了。
+ *
+ * 两种语言的读取形态都要认，**不能只认 Rust 那一种**：
+ *
+ *   Rust  `include_str!("…/xxx.json")`
+ *   Go    `golden.Load("xxx.json")`（见 internal/golden/golden.go）
+ *
+ * 只认一边的后果不是报错，而是**把 Go 侧真读了的向量标成"死向量"** ——
+ * 于是这条防线的输出从"谁没被读"变成"谁没被 Rust 读"，而后者在迁移后
+ * 是个越来越没意义的问句（Rust 侧已被冻结）。
+ */
+function consumedByTests() {
   const used = new Set();
+
+  // `cargo fmt` 会把超长的 `include_str!("…")` 折成多行（相对路径在
+  // `src/<模块>/tests/` 下尤其容易顶到 max_width），所以括号与字面量
+  // 之间可能有换行 —— 这里容忍空白，不然会误报"死向量"。
+  const RS_RE = /include_str!\(\s*"([^"]+)"\s*\)/g;
+  const GO_RE = /golden\.Load\(\s*"([^"]+)"\s*\)/g;
+
   const walk = (dir) => {
-    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+    let ents;
+    try {
+      ents = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return; // 目录不存在不是错误：`legacy/` 在冻结之前本来就没有
+    }
+    for (const ent of ents) {
       const p = path.join(dir, ent.name);
-      if (ent.isDirectory()) walk(p);
-      else if (ent.name.endsWith(".rs")) {
-        // `cargo fmt` 会把超长的 `include_str!("…")` 折成多行（相对路径在
-        // `src/<模块>/tests/` 下尤其容易顶到 max_width），所以括号与字面量
-        // 之间可能有换行 —— 这里容忍空白，不然会误报"死向量"。
-        for (const m of fs.readFileSync(p, "utf8").matchAll(/include_str!\(\s*"([^"]+)"\s*\)/g)) {
-          const base = path.basename(m[1]);
-          if (base.endsWith(".json")) used.add(base);
-        }
+      if (ent.isDirectory()) {
+        walk(p);
+        continue;
+      }
+      const re = ent.name.endsWith(".rs") ? RS_RE : ent.name.endsWith(".go") ? GO_RE : null;
+      if (!re) continue;
+      for (const m of fs.readFileSync(p, "utf8").matchAll(re)) {
+        const base = path.basename(m[1]);
+        if (base.endsWith(".json")) used.add(base);
       }
     }
   };
-  walk(path.join(ROOT, "crates"));
+
+  // 三个落点都扫：冻结前的 Rust（crates/）、冻结后的 Rust（legacy/crates/）、Go 侧。
+  for (const root of ["crates", "legacy/crates", "internal", "cmd"]) {
+    walk(path.join(ROOT, root));
+  }
   return used;
 }
 
@@ -450,7 +478,7 @@ function main() {
     process.exit(1);
   }
 
-  const used = consumedByRust();
+  const used = consumedByTests();
   const failures = [];
   const identityProblems = [];
   let checked = 0;
@@ -528,7 +556,7 @@ function main() {
       sectionReport.push({ file, section, ok, total: entries.length });
     }
     if (!QUIET && fileLines.length) {
-      console.log(`\n[${file}]${used.has(file) ? "" : "   ⚠ 尚无 Rust 测试读取"}`);
+      console.log(`\n[${file}]${used.has(file) ? "" : "   ⚠ 尚无测试读取"}`);
       console.log(fileLines.join("\n"));
     }
   }
@@ -556,7 +584,7 @@ function main() {
 
   console.log("\n── 消费者 ──");
   for (const f of files) {
-    console.log(`  ${used.has(f) ? "✓ 有 Rust 测试读取" : "⚠ 无任何 Rust 测试读取（死向量）"}  ${f}`);
+    console.log(`  ${used.has(f) ? "✓ 有测试读取" : "⚠ 无任何测试读取（死向量）"}  ${f}`);
   }
 
   const totalProblems = failures.length + identityProblems.length;

@@ -1,6 +1,21 @@
-# Rust
+# Rust（冻结后 Cargo workspace 在 legacy/ 下 —— 见 legacy/README.md）
 /target/
+/legacy/target/
 **/*.rs.bk
+
+# Go
+#
+# `go build ./cmd/mcloud` 把二进制写在**当前目录**（不是 target/），所以按名字挡。
+# 它们既可重新生成、又内含本机路径，没有入库的理由。
+/mcloud
+/mcloud-server
+# `go test -c` 的产物
+*.test
+# 覆盖率产物
+coverage.out
+# go.work 是本地多模块开发用的；本仓库是单 module，用不上
+go.work
+go.work.sum
 
 # 运行时数据（本地凭据，绝不入库）
 /data/*.db
