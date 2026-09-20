@@ -397,7 +397,9 @@ AES_CBCDecrypt(e){
 | 原生族实拍 | 0 / 2 | **3 / 3 ✓** |
 
 覆盖面：在 14 条"可打印 IV"候选里 **11 条命中**（3 个接口）；
-另外 3 条分别是微软遥测 ×2（与本协议无关）与 `ILog` ×1（**另一套仍未解开**的信封）。
+另外 3 条分别是微软遥测 ×2（与本协议无关）与 `ILog` ×1。
+⚠ 其中 `ILog` 那一条的归类**已在 §8.2 更正**（它是原生族、IV 是二进制，
+"可打印 IV"这个判断当时落在了 base64 字符串上而非解码后的字节上）。
 
 ⚠ **"前 16 字节可打印"不是本族的充分条件** —— `encodeData` 也是可打印 IV（§4）。
 这条指纹只用于在**已知是 `hcy-cool-flag` 整包信封**的前提下挑钥匙。
@@ -413,6 +415,76 @@ Rust 消费者见 `crates/mcloud-core/src/crypto/tests/app.rs` 的三条 `app_co
 ⚠ **仍未解开**：`ILog`（`queryRights` / `IControl` / `thirdlogin` / `getSmsCode` 也各有解不开的条目）。
 `ILog` 的体同样是"可打印 IV"，但它**不属于**这把钥匙 —— 说明 H5 侧还有别的信封。
 **别把不同信封互相套用。**
+
+### 8.2 ⚠⚠ 三更正（2026-09-20 同日）：钥匙还按**运行环境**切换；`ILog` 是原生族
+
+#### 更正一：H5 那把钥匙不是常量，是「运行环境」的函数
+
+H5 离线包 `index-af02d869.js` 原文（就在 §8.1 那把钥匙的定义旁边）：
+
+```js
+const Kr = {cpid:"255", puzzleCodePivotal:"CREATPUZZLE03F9A",
+            userZonePivotal:"qPqDw263XgFgL3u8", clienttype:"937",
+            coolFlagPivotal:"h7DLzCTAjn+altjy2a9E9FSt7AC6pmx1", coolFlagTerminalType:"3"};
+const _r = T("h5_env");
+let $r = "10000000003";
+!_r || "dev2Prod" === _r || (
+    Kr.userZonePivotal = "2ErfJus1Ofr@2o24",
+    Kr.coolFlagPivotal = "PVGDwmcvfs1uV3d1",   // ← 16 字节 ⇒ AES-128
+    $r = "1111");
+```
+
+默认值出自同一文件的 `localStorage.getItem("h5_env") || "dev2Prod"`：
+
+| `h5_env` | `coolFlagPivotal` | 算法 | `userZonePivotal` | `logProjectId` |
+|---|---|---|---|---|
+| 未设置 / `dev2Prod` | `h7DLzCTAjn+altjy2a9E9FSt7AC6pmx1` | **AES-256** | `qPqDw263XgFgL3u8` | `10000000003` |
+| 其它任意值 | `PVGDwmcvfs1uV3d1` | **AES-128** | `2ErfJus1Ofr@2o24` | `1111` |
+
+真机没设 `h5_env` ⇒ 走 `dev2Prod` ⇒ 用 AES-256 那把，与 §8.1 的实拍 3/3 命中一致。
+
+> ⇒ **「按谁发的分」之外还有「按哪个环境分」这一维。**
+> 只按"谁发的"挑钥匙，在把 `h5_env` 设过的设备上会**静默失效**。
+
+#### 更正二：`ILog` 是**原生**请求，不是"H5 侧的可打印 IV 信封"
+
+§8.1 收尾把 `ILog` 归成"体同样是可打印 IV，但不属于这把钥匙 ⇒ H5 侧还有别的信封"。
+**这个归类是错的** —— 错在判据落在了 base64 字符串上，而不是解码后的字节上。
+
+| 项 | 事实 |
+|---|---|
+| URL | `https://ose.caiyun.feixin.10086.cn/richlifeApp/devapp/ILog` |
+| 头 | `x-yun-uni` + `x-yun-api-version` + `hcy-cool-flag: 1` + **`hcy-ios-option-enc: 2`** ⇒ **原生** |
+| 日志里的体 | **明文 XML**（`<recordOprLogEx>` / `<key>` …）—— 再次印证"日志永远显示明文" |
+| 线上体 | `base64(IV(16) ‖ CT)`，但 **IV 是二进制**（42/43 条） |
+| **响应** | AES-192 `2olBaQGYnEKoStYomsd1n7ax` 解出 **40 / 65** 条 → `<?xml …?>\n<result resultCode="0" desc="SUCCESS"/>\n`（其余 25 条长度不对齐，非钥匙问题）|
+| **请求** | **钥匙未知**（见下）|
+
+**请求方向的穷举结果（全部落空）**：
+
+- 11623 个「全可打印」候选（16/24/32 字符，取自 H5 全部 JS + iOS 二进制 `strings`）
+  × {前 16 字节作 IV, 零 IV, 末 16 字节作 IV, ECB} —— **0 命中**；
+- 再补**无填充 CBC** 与 IV 偏移 1 / 2 / 4 / 8 / 16 / 32 —— **仍 0**（排除了"填充非 PKCS7"这个解释）；
+- 判据始终是**强判据**：明文里必须出现 `<recordOprLogEx`（App 日志给了明文）。
+
+⇒ 钥匙很可能是**运行期派生**或**服务端下发**，不在可打印字面量里。
+注意 `ILog` 多带一个 `hcy-ios-option-enc`，而二进制里存在按 option 取钥匙的选择器
+`getAESKeyWithEncryptBodyOption:` —— **"option 号 → 哪把钥匙"这张表还没拿到**。
+
+#### 判据教训（值得单独记一笔）
+
+**「IV 可不可打印」必须落在 base64 解码后的字节上。**
+base64 字母表本身就是可打印 ASCII —— 看 base64 字符串会**永远得到"可打印"**，
+据此把 `ILog` 误判成 H5 族。**这正是上一轮犯的错。**
+正确做法：先 `b64decode`，再看 `raw[..16]` 的字节值域。
+
+#### 顺带一个正面结论
+
+AES-192 这把钥匙的适用范围**按信封算，不按域名算** ——
+`ose.caiyun.feixin.10086.cn`（OSE 平台）与 `yun.139.com` 是两套子系统，同一把钥匙照样能解它的响应。
+
+黄金向量：`hcyCoolFlagBodyEnvelope192` 新增 1 条 **ILog 响应实拍**（跨主机证据，明文是通用成功 XML、无标识）；
+`constants` 新增 `BODY_AES_KEY_128_H5_NONPROD`；Rust 侧新增两条测试钉住本节两个结论。
 
 **怎么确认的**（三步，都可复现）：
 

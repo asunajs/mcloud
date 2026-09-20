@@ -402,3 +402,81 @@ fn sha1_upper_matches_pc_client_encrypt_by_hash() {
     assert_eq!(hashed, hashed.to_ascii_uppercase());
     assert_eq!(hashed.len(), 40, "SHA-1 是 40 位十六进制");
 }
+
+#[test]
+fn app_cool_flag_h5_key_also_switches_with_h5_env() {
+    // H5 那把钥匙**不是常量**，而是「运行环境」的函数。原文（H5 离线包
+    // `AIOfflinePKG/stable/ai-helper/assets/index-af02d869.js`）：
+    //
+    //   const Kr = { ..., coolFlagPivotal: "h7DLzCTAjn+altjy2a9E9FSt7AC6pmx1", ... };
+    //   const _r = T("h5_env");
+    //   !_r || "dev2Prod" === _r || (
+    //       Kr.userZonePivotal = "2ErfJus1Ofr@2o24",
+    //       Kr.coolFlagPivotal = "PVGDwmcvfs1uV3d1",
+    //       $r = "1111");
+    //
+    // 默认值来自同一文件的 `localStorage.getItem("h5_env") || "dev2Prod"`。
+    // 真机没设 `h5_env` ⇒ 走 dev2Prod ⇒ 用 AES-256 那把（与实拍命中一致）。
+    let v = app_business_vectors();
+    let c = &v["constants"];
+    let prod = c["BODY_AES_KEY_256_H5"].as_str().unwrap();
+    let non_prod = c["BODY_AES_KEY_128_H5_NONPROD"].as_str().unwrap();
+
+    assert_eq!(prod.len(), 32, "dev2Prod 用 32 字节 ⇒ AES-256");
+    assert_eq!(non_prod.len(), 16, "非 dev2Prod 用 16 字节 ⇒ AES-128");
+    // 两把必须真的不同，否则这条测试没有信息量
+    assert_ne!(prod, non_prod);
+    // 且非 dev2Prod 那把不能与另外两族撞车 —— 撞了就说明我把常量写错了
+    for other in [
+        c["BODY_AES_KEY"].as_str().unwrap(),
+        c["BODY_AES_KEY_192"].as_str().unwrap(),
+    ] {
+        assert_ne!(non_prod, other, "环境变体钥匙不该与其它族相同");
+    }
+    // ⚠ 这条结论的意义：**"按谁发的分"之外还有"按哪个环境分"这一维。**
+    // 只按"谁发的"挑钥匙，在把 `h5_env` 设过的设备上会**静默失效**。
+}
+
+#[test]
+fn app_cool_flag_envelope_192_also_covers_the_ose_ilog_host() {
+    // 适用范围按**信封**算，不按域名算：`ose.caiyun.feixin.10086.cn/richlifeApp/devapp/ILog`
+    // 与 `yun.139.com` 是两套子系统，但同一把 AES-192 钥匙照样能解它的响应。
+    let v = app_business_vectors();
+    let key = v["constants"]["BODY_AES_KEY_192"].as_str().unwrap();
+    let case = v["hcyCoolFlagBodyEnvelope192"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"].as_str().unwrap().contains("ILog"))
+        .expect("ILog 那条实拍应在 192 分节里");
+
+    let iv = hex::decode(case["ivHex"].as_str().unwrap()).unwrap();
+    assert_eq!(iv.len(), 16);
+    // ⚠ 这条断言钉住一个**判据教训**：IV 的可打印性必须落在 **base64 解码后的字节**上。
+    // 看 base64 字符串永远"可打印"（base64 字母表本身就是可打印 ASCII），
+    // 据此会把 ILog 误判成 H5 族 —— 这正是上一轮犯过的错。
+    assert!(
+        !iv.iter().all(|b| (0x20..0x7f).contains(b)),
+        "ILog 是原生请求，IV 是二进制；若这里变可打印，说明判据落错了层"
+    );
+
+    let payload = case["payloadB64"].as_str().unwrap();
+    let expect = case["plaintext"].as_str().unwrap();
+    assert_eq!(
+        aes_dynamic_iv_decrypt(key, payload).unwrap(),
+        expect,
+        "ILog 响应应能用 AES-192 解出"
+    );
+    assert!(expect.contains("resultCode"), "ILog 响应是 XML 结果体");
+    // 反向：另外两族都开不出它
+    for other in [
+        v["constants"]["BODY_AES_KEY"].as_str().unwrap(),
+        v["constants"]["BODY_AES_KEY_256_H5"].as_str().unwrap(),
+    ] {
+        assert_ne!(
+            aes_dynamic_iv_decrypt(other, payload).ok().as_deref(),
+            Some(expect),
+            "换别的族不该解出同一段明文"
+        );
+    }
+}
