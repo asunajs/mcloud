@@ -84,11 +84,18 @@ const (
 //
 // ⚠ 它同时是**落库形式**（`role` 列存 `admin`/`user`）与调试形式 ——
 // 两者在这里恰好一致，所以不必拆成两个函数。
+//
+// ⚠ 未知值返回**空串**，不能写成 `if r == RoleAdmin { … }; return "user"`。
+// 那种写法会让任何越界值都有名字，于是"已知态有几个"再也数不出来 ——
+// 枚举漏态守卫就静默失效了。两个变体的枚举最容易顺手写成 if/else。
 func (r Role) String() string {
-	if r == RoleAdmin {
+	switch r {
+	case RoleUser:
+		return "user"
+	case RoleAdmin:
 		return "admin"
 	}
-	return "user"
+	return ""
 }
 
 // ParseRole 从存储里读回。无法识别的值一律降级为 [RoleUser] ——
@@ -114,12 +121,15 @@ const (
 	SessionCLI
 )
 
-// String 返回存储与展示用的文本。
+// String 返回存储与展示用的文本。未知值返回空串（理由同 [Role.String]）。
 func (k SessionKind) String() string {
-	if k == SessionWeb {
+	switch k {
+	case SessionWeb:
 		return "web"
+	case SessionCLI:
+		return "cli"
 	}
-	return "cli"
+	return ""
 }
 
 // ParseSessionKind 从存储里读回。未知值降级为 [SessionCLI]（对齐 Rust 侧）。
@@ -157,13 +167,20 @@ func (PasswordHash) String() string { return "<已隐藏>" }
 func (PasswordHash) GoString() string { return `core.PasswordHash("<已隐藏>")` }
 
 // User 是系统用户。
+// ⚠ 每个字段的 `json` tag 都是外部契约：Rust 侧 `User` 派生了 `Serialize`，
+// 字段名是 **snake_case**（`password_hash` / `created_at` …）；
+// 而 Go 不带 tag 会输出字段名原样（`PasswordHash` / `CreatedAt` …）。
+//
+// 这一处**曾经整个漏写**（`user` 那一步带过来的），而且没有任何测试变红 ——
+// 因为往返测试用什么字段名都是绿的。现在由黄金向量（`cloud-stats` 那一条的
+// 同类）守着，形状由 **serde** 给出，不是从命名规则推的。
 type User struct {
-	ID   UserID
-	Name string
+	ID   UserID `json:"id"`
+	Name string `json:"name"`
 	// PasswordHash 是 argon2id 编码串（**自带盐与参数**）。
-	PasswordHash PasswordHash
-	Role         Role
-	CreatedAt    time.Time
+	PasswordHash PasswordHash `json:"password_hash"`
+	Role         Role         `json:"role"`
+	CreatedAt    time.Time    `json:"created_at"`
 }
 
 // NewUser 构造一个系统用户。
@@ -201,12 +218,19 @@ func (u User) String() string {
 //
 // **只存 token 的哈希**：明文只在签发那一刻返回一次。这样即便库被读走，
 // 也无法直接拿来冒充登录（与口令存哈希是同一个理由）。
+// 字段名的理由同 [User]。
 type Session struct {
 	// TokenHash 是 `sha256(token)` 的十六进制。
-	TokenHash string
-	UserID    UserID
-	ExpiresAt time.Time
-	Kind      SessionKind
+	TokenHash string `json:"token_hash"`
+	UserID    UserID `json:"user_id"`
+	// ExpiresAt 序列化成 RFC3339（`…Z`）。
+	//
+	// ⚠ 两端在**秒以下**不一定同形：chrono 用 AutoSi（0/3/6/9 位），
+	// Go 的 `time.Time` 用 RFC3339Nano（去掉末尾的 0）。整秒时两者一致，
+	// 所以向量里只钉整秒 —— 亚秒精度是**已知未对齐**的一条，真要用到时
+	// 得显式格式化，不能指望默认行为一致。
+	ExpiresAt time.Time   `json:"expires_at"`
+	Kind      SessionKind `json:"kind"`
 }
 
 // NewSession 构造一个会话。

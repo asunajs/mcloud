@@ -41,7 +41,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
-GATE_NAMES="build vet fmt test deps filenames idents golden"
+GATE_NAMES="build vet fmt test deps filenames idents golden jsontags"
 
 # ⚠ 为什么用显式包路径，而不是惯用的 `./...`：
 #   `./...` 会把 `legacy/target/`（7 GB 的 cargo 构建产物）也遍历一遍。
@@ -81,11 +81,12 @@ gate_run() {
     filenames) bash scripts/check-filenames.sh ;;
     idents)    node scripts/check-identifiers.cjs ;;
     golden)    node scripts/check-golden-vectors.cjs ;;
+    jsontags)  node scripts/check-go-jsontags.cjs ;;
     *)         return 127 ;;
   esac
 }
 
-ORDER=(build vet fmt test deps filenames idents golden)
+ORDER=(build vet fmt test deps filenames idents golden jsontags)
 if [ $# -gt 0 ]; then
   ORDER=("$@")
 fi
@@ -126,5 +127,5 @@ if [ ${#FAILED[@]} -gt 0 ]; then
   echo "完整输出: $LOG"
   exit 1
 fi
-printf '\033[32m八项门禁全绿\033[0m\n'
+printf "\033[32m九项门禁全绿\033[0m\n"
 : > "$LOG"

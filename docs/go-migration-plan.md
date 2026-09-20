@@ -314,8 +314,11 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 | **打印脱敏在 Go 里要多挡两条路** | Rust 只有 `{:?}` 一条；Go 有 `%v`（走 Stringer）、`%+v`（**展开字段，不走 struct 的 Stringer**）、`%#v`（走 GoStringer） | 把敏感字段做成**有 Stringer 的具名类型**（`PasswordHash`）—— struct 级 Stringer 挡不住 `%+v`。⚠ 副作用：断言失败信息里也只印 `<已隐藏>`，比较处要显式 `string(v)` |
 | **⚠⚠ Rust 的 serde 枚举序列化成**文本**，Go 的 `type X int` 序列化成**数字** | 前者带 `#[serde(rename_all = …)]`，输出 `{"outcome":"manual_required","level":"warn","role":"admin"}`；后者默认输出 `{"outcome":2,"level":1,"role":0}`。两边读**同一批** `run_events.payload`、同一张 `users.role` 列 ⇒ 这是**外部契约换了个形状**，而它既不编译错也不运行时错，只在真跑起来之后表现为"另一侧读出来的东西不对" | 凡是会进 JSON 的枚举都必须**显式**实现 `MarshalJSON`/`UnmarshalJSON`，收在 `internal/core/enum.go` 一张名字表里（下标即枚举值，所以顺序必须与常量声明一致）。⚠ 漏写的三条后果都不在编译期：`SelectXxx` 这类测试照旧全绿 |
 | **serde 对未知变体 / `null` / 数字一律拒收** | serde 没有"宽松枚举"这回事，三个都失败。而 Go 侧若没有 `UnmarshalJSON`，`2` 会被当成合法值读进来 —— 那正是它自己写出来的形状 | 解码侧走同一张表，三者都报错。⚠ `null` 要**单独挡**：`encoding/json` 把 null 解进 `string` 是**静默成功**（留空串、不报错），不挡的话它会走到"未知的文本 \"\"" 那条报错，行为对但信息指错方向 |
+| **15** ⭐ | **Rust 的 serde **结构体字段名**默认 snake_case，Go 不带 tag 输出**字段名原样** | `password_hash` vs `PasswordHash`、`cloud_count` vs `CloudCount`。与 #13 同一个病（"进 JSON 的东西两边默认形状不同"），只是落在字段名上。**已犯三次**（`CloudStats` / `User`+`Session` / `model` 那批），三次都是靠"改坏了却不响"发现的 | 每个字段显式写 `json:"…"`，并由 `scripts/check-go-jsontags.cjs`（第九条门禁）兜住。⚠ **往返测试救不了** —— 它用什么字段名都是绿的，只证明"解得回来"，不证明"同名" |
+| **16** | **亚秒精度两端不同形**：chrono 用 AutoSi（0/3/6/9 位小数），Go 的 `time.Time` 用 RFC3339Nano（**去掉末尾的 0**） | 整秒时一致，亚秒时 `…:00.100Z` 与 `…:00.1Z` 不同 —— 而它只在"恰好带毫秒/微秒"的那部分记录上出现，所以是**偶发**的 | 向量里只钉**整秒**时刻（诚实地说"这条没对齐"）；真要用亚秒就**显式格式化**，别指望默认行为一致 |
+| **17** | **两个变体的枚举容易顺手写 `if/else`，从而破坏漏态守卫** | `if k == B { return "b" }; return "a"` 会让**任何**越界值都有名字 ⇒ "已知态有几个"再也数不出来 ⇒ 真值表守卫**静默失效** | `String()` 一律 `switch` + 末尾 `return ""`。这个错是 `countKnownStates` 抓出来的（`CapabilityKind` / `AccountMode` 都踩了），`Role` / `SessionKind` 一并改齐 |
 
-⚠ 这三条是**同一个病**的三个面（枚举 JSON），所以判据也共用一条：
+⚠ #13/#14 是**同一个病**的两个面（枚举 JSON），所以判据也共用一条：
 **"有没有 MarshalJSON"这件事必须能被一条断言问出来** —— `enum_test.go` 里的
 第一条断言是"序列化结果的首字符必须是 `\"`"，它专门用来接住"漏写了 MarshalJSON"
 这种改动（反向测试已确认：拆掉 `RunOutcome.MarshalJSON` 会让整串比对立刻变红）。

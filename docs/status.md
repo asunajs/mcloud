@@ -29,9 +29,11 @@
 | `model` | ⚠ 仅 `AccountId` + `CloudStats` | 其余类型（Account / Schedule / Pipeline / WebuiConfig…）等消费者落地时再带过来 |
 | `user` | ✅ | 口令哈希（argon2id PHC 串）/ 会话 token / 数据隔离判据；**带来了第七份黄金向量** |
 | `run` | ✅ | RunID / 四态结论 / 需人工 / Seq 语义 / 五类事件流；**顺带补上了枚举的 JSON 编解码（见下）** |
-| `legacy` `stage` `traits` | ⬜ | 未开始；依赖顺序 `model` → `stage` → `legacy` → `traits` |
+| `model` | ✅ | Account / RunRecord / 能力注册表 7 个枚举 / AccountState / SmidState / Schedule / Pipeline / Exchange / Webui |
+| `stage` `legacy` `traits` | ⬜ | 未开始 |
 
-- 落点 `internal/core`，**182 条测试**；读 `test/golden/*.json` 经 `internal/golden`，不复制向量。
+- 落点 `internal/core`，**209 条测试**；读 `test/golden/*.json` 经 `internal/golden`，不复制向量。
+- 门禁**九条**（新增 `jsontags`）—— 见 `docs/dev-gates.md`。
 - `auth-vectors.json` 从"只有 Rust 读"变成**两边都读**。
 - 步 1 的退出判据是"黄金向量在 Go 侧逐字段复算通过"，**尚未达成**：
   `app-signin-vectors` 的消费者在步 2 接线，而 `login-crypto-vectors.json`
@@ -56,6 +58,12 @@
   `user` 那一步的 `Role` / `SessionKind` 就已经是这个状态（它的测试只比 `String()`，
   所以没露出来）。现在收进 `internal/core/enum.go` 一张名字表，
   并由第八份黄金向量 `enum-json-vectors.json`（**serde 产出**）逐条对拍。
+- ⚠⚠ **同一个病还有第二个面：结构体字段名**。Rust 的 serde 默认 snake_case，
+  Go 不带 tag 输出字段名原样 ⇒ `password_hash` vs `PasswordHash`。
+  这个版本已修三处：`CloudStats`（pure 带过来的）、`User` + `Session`（user 带过来的）、
+  `model` 那批。⚠ **往返测试救不了它**（用什么字段名都是绿的），
+  所以新增了第九条门禁 `scripts/check-go-jsontags.cjs`：
+  混合 tag 直接失败、全无 tag 必须进白名单并写明理由。
 
 ---
 

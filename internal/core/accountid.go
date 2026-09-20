@@ -50,13 +50,18 @@ func NewAccountID(id string) AccountID { return AccountID(id) }
 func (a AccountID) String() string { return string(a) }
 
 // CloudStats 是某一天的云朵快照。
+//
+// ⚠ 每个字段都必须带 `json:"…"`：Rust 侧 `CloudStats` 派生了 `Serialize`，
+// 字段名是 **snake_case**（`account_id` / `cloud_count` …）；
+// 而 Go 不带 tag 会输出**字段名原样**（`AccountID` / `CloudCount` …）。
+// 同一个字段两个名字，且不报错 —— 与枚举那条是同一个病（§6.1 #13）。
 type CloudStats struct {
-	AccountID AccountID
+	AccountID AccountID `json:"account_id"`
 	// Date 是 `YYYY-MM-DD`（按 [LocalTZ]）。
-	Date       string
-	CloudCount int64
+	Date       string `json:"date"`
+	CloudCount int64  `json:"cloud_count"`
 	// CloudDiff 是与上一个**有记录**之日之差。
-	CloudDiff int64
+	CloudDiff int64 `json:"cloud_diff"`
 	// CloudDiffWeek 是与 7 天前（或最早记录）之差。
-	CloudDiffWeek int64
+	CloudDiffWeek int64 `json:"cloud_diff_week"`
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/catlair/mcloud/internal/golden"
 )
@@ -25,7 +26,10 @@ type enumTextVector struct {
 	Text    string `json:"text"`
 }
 
-type eventJSONVector struct {
+// kindJSONVector 是一段"整串 JSON + 它的名字"。
+//
+// 事件、tag 枚举、结构体三种都用它 —— 它们的共同点是：**都比整串**。
+type kindJSONVector struct {
 	Kind string `json:"kind"`
 	JSON string `json:"json"`
 }
@@ -37,9 +41,11 @@ type enumDecodeVector struct {
 }
 
 type enumJSONVectors struct {
-	EnumText  []enumTextVector   `json:"$enumText"`
-	EventJSON []eventJSONVector  `json:"$eventJson"`
-	Decode    []enumDecodeVector `json:"$decode"`
+	EnumText   []enumTextVector   `json:"$enumText"`
+	EventJSON  []kindJSONVector   `json:"$eventJson"`
+	TaggedJSON []kindJSONVector   `json:"$taggedJson"`
+	StructJSON []kindJSONVector   `json:"$structJson"`
+	Decode     []enumDecodeVector `json:"$decode"`
 }
 
 func loadEnumJSONVectors(t *testing.T) enumJSONVectors {
@@ -52,9 +58,10 @@ func loadEnumJSONVectors(t *testing.T) enumJSONVectors {
 	if err := json.Unmarshal(raw, &v); err != nil {
 		t.Fatalf("解析黄金向量失败: %v", err)
 	}
-	if len(v.EnumText) == 0 || len(v.EventJSON) == 0 || len(v.Decode) == 0 {
-		t.Fatalf("黄金向量缺段：enumText=%d eventJson=%d decode=%d",
-			len(v.EnumText), len(v.EventJSON), len(v.Decode))
+	if len(v.EnumText) == 0 || len(v.EventJSON) == 0 || len(v.Decode) == 0 ||
+		len(v.TaggedJSON) == 0 || len(v.StructJSON) == 0 {
+		t.Fatalf("黄金向量缺段：enumText=%d eventJson=%d tagged=%d struct=%d decode=%d",
+			len(v.EnumText), len(v.EventJSON), len(v.TaggedJSON), len(v.StructJSON), len(v.Decode))
 	}
 	return v
 }
@@ -122,6 +129,75 @@ func enumByVariant(t *testing.T, enumName, variant string) any {
 			return SessionWeb
 		case "Cli":
 			return SessionCLI
+		}
+	case "Group":
+		switch variant {
+		case "Daily":
+			return GroupDaily
+		case "Activity":
+			return GroupActivity
+		case "Query":
+			return GroupQuery
+		case "Exchange":
+			return GroupExchange
+		case "Maintenance":
+			return GroupMaintenance
+		}
+	case "CapabilityKind":
+		switch variant {
+		case "Action":
+			return KindAction
+		case "Query":
+			return KindQuery
+		}
+	case "RiskLevel":
+		switch variant {
+		case "Low":
+			return RiskLow
+		case "Medium":
+			return RiskMedium
+		case "High":
+			return RiskHigh
+		}
+	case "AccountMode":
+		switch variant {
+		case "Sequential":
+			return ModeSequential
+		case "Parallel":
+			return ModeParallel
+		}
+	case "FieldKind":
+		switch variant {
+		case "Text":
+			return FieldText
+		case "Number":
+			return FieldNumber
+		case "Bool":
+			return FieldBool
+		case "Select":
+			return FieldSelect
+		case "MultiSelect":
+			return FieldMultiSelect
+		case "Json":
+			return FieldJSON
+		}
+	case "ScheduleStatus":
+		switch variant {
+		case "Ok":
+			return ScheduleOK
+		case "Error":
+			return ScheduleError
+		case "Skipped":
+			return ScheduleSkipped
+		}
+	case "PipelineStatus":
+		switch variant {
+		case "Ok":
+			return PipelineOK
+		case "Error":
+			return PipelineError
+		case "Partial":
+			return PipelinePartial
 		}
 	}
 	t.Fatalf("黄金向量里的 %s.%s 在本包没有对应值 —— 要么 Go 侧漏了这一态，要么向量写错了", enumName, variant)
@@ -198,6 +274,116 @@ func TestRunEventJSONMatchesSerdeVectors(t *testing.T) {
 	}
 }
 
+// TestTaggedEnumJSONMatchesSerdeVectors 比对内部标签枚举（ScheduleTarget）。
+//
+// ⚠ 这一类最容易被写成 serde 的**默认外部标签**（`{"capability":{"code":…}}`）。
+// 我在生成器里就漏抄过 `tag = "kind"` —— 类型系统抓不到，
+// 只有这种整串比对抓得到（那次的输出是 `{"capability":{"code":"sign"}}`，
+// 与库里已存的 `{"kind":"capability","code":"sign"}` 完全不同）。
+func TestTaggedEnumJSONMatchesSerdeVectors(t *testing.T) {
+	v := loadEnumJSONVectors(t)
+	want := map[string]ScheduleTarget{
+		"schedule-target-capability": NewScheduleTargetCapability("sign"),
+		"schedule-target-pipeline":   NewScheduleTargetPipeline("p-1"),
+	}
+	for _, c := range v.TaggedJSON {
+		got, err := marshalJSON(want[c.Kind])
+		if err != nil {
+			t.Fatalf("%s 序列化失败: %v", c.Kind, err)
+		}
+		if string(got) != c.JSON {
+			t.Fatalf("%s 与 serde 的输出不一致:\n实得 %s\n期望 %s", c.Kind, got, c.JSON)
+		}
+	}
+}
+
+// TestStructJSONMatchesSerdeVectors 比对结构体的**整串**形状。
+//
+// 这条接的是"枚举那条"的同类洞，只是换到了字段名上：
+// Rust 的字段名默认 **snake_case**，Go 不带 tag 会输出**字段名原样**。
+// 而且它还顺带钉住两件逐字段比对一定会放过的事：
+//
+//  1. `owner` 带 `skip_serializing_if` ⇒ nil 时**字段消失**，不是 `null`；
+//  2. 其余 `Option` 是 `null` ⇒ **不能**顺手加 `omitempty`。
+//
+// （`account-owner-none` 与 `account-owner-some` 两条正是为此。）
+func TestStructJSONMatchesSerdeVectors(t *testing.T) {
+	v := loadEnumJSONVectors(t)
+
+	boolSpec := NewFieldSpecBool("skipWait", "跳过等待", true).
+		WithHelp("关闭后等到整点开抢")
+	textSpec := NewFieldSpecText("phone", "手机号").MarkRequired()
+	selectSpec := FieldSpec{
+		Key: "prize", Label: "奖品", Kind: FieldSelect,
+		Options: []SelectOption{{Label: "云朵", Value: json.RawMessage("7")}},
+	}
+
+	owner := NewUserID("u-1")
+	nickname := "小号"
+
+	// ⚠ 与生成器里的 `AccountShape` 同形：只取能钉住字段名的那几个字段。
+	// 时间列不进这条比对（两端秒以下精度不一定同形，见文档 §6.1）。
+	acctNone := struct {
+		ID        AccountID `json:"id"`
+		Owner     *UserID   `json:"owner,omitempty"`
+		Nickname  *string   `json:"nickname"`
+		Enabled   bool      `json:"enabled"`
+		SortOrder int64     `json:"sort_order"`
+	}{ID: NewAccountID("19900001234"), Nickname: &nickname, Enabled: true}
+
+	acctSome := acctNone
+	acctSome.Owner = &owner
+	acctSome.Nickname = nil
+	acctSome.SortOrder = 3
+
+	// ⚠ `CloudStats` 单独钉一条：它**一度漏写了全部 json tag**
+	// （`pure` 那一步带过来的），而反向测试证明改坏它**没有任何测试变红** ——
+	// 这个洞是靠"改坏了却不响"发现的，不是靠测试。
+	cloudStats := CloudStats{
+		AccountID: NewAccountID("19900001234"), Date: "2026-09-20",
+		CloudCount: 120, CloudDiff: 7, CloudDiffWeek: 30,
+	}
+
+	// ⚠ **整秒**的 UTC 时刻：两端都是 `…T03:40:00Z`。
+	// 亚秒精度是**已知未对齐**的一条（chrono AutoSi vs Go 的 RFC3339Nano），
+	// 别在这里假装它对齐了 —— 见 [Session.ExpiresAt] 的注释。
+	wholeSecond := time.Unix(1_784_000_400, 0).UTC()
+	user := User{
+		ID: NewUserID("u-1"), Name: "admin",
+		PasswordHash: PasswordHash("$argon2id$v=19$m=19456,t=2,p=1$abc$def"),
+		Role:         RoleAdmin, CreatedAt: wholeSecond,
+	}
+	session := Session{
+		TokenHash: "e3b0c442", UserID: NewUserID("u-1"),
+		ExpiresAt: wholeSecond, Kind: SessionWeb,
+	}
+
+	want := map[string]any{
+		"field-spec-bool":    boolSpec,
+		"field-spec-text":    textSpec,
+		"field-spec-select":  selectSpec,
+		"user":               user,
+		"session":            session,
+		"cloud-stats":        cloudStats,
+		"account-owner-none": acctNone,
+		"account-owner-some": acctSome,
+	}
+
+	for _, c := range v.StructJSON {
+		target, ok := want[c.Kind]
+		if !ok {
+			t.Fatalf("黄金向量里的 %q 在本测试里没有对应构造", c.Kind)
+		}
+		got, err := marshalJSON(target)
+		if err != nil {
+			t.Fatalf("%s 序列化失败: %v", c.Kind, err)
+		}
+		if string(got) != c.JSON {
+			t.Fatalf("%s 与 serde 的输出不一致:\n实得 %s\n期望 %s", c.Kind, got, c.JSON)
+		}
+	}
+}
+
 // TestEnumDecodeMatchesSerdeVectors 比对"哪些输入该收、哪些该拒"。
 //
 // ⚠ `2` 那一条是重点：它是 Go 侧**没有** MarshalJSON 时写出来的东西。
@@ -265,6 +451,13 @@ func TestEnumRoundTripsThroughJSON(t *testing.T) {
 		LevelInfo, LevelWarn, LevelError,
 		RoleUser, RoleAdmin,
 		SessionWeb, SessionCLI,
+		GroupDaily, GroupActivity, GroupQuery, GroupExchange, GroupMaintenance,
+		KindAction, KindQuery,
+		RiskLow, RiskMedium, RiskHigh,
+		ModeSequential, ModeParallel,
+		FieldText, FieldNumber, FieldBool, FieldSelect, FieldMultiSelect, FieldJSON,
+		ScheduleOK, ScheduleError, ScheduleSkipped,
+		PipelineOK, PipelineError, PipelinePartial,
 	}
 	for _, v := range values {
 		raw, err := marshalJSON(v)

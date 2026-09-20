@@ -85,6 +85,160 @@ enum SessionKind {
     Cli,
 }
 
+// ── 以下镜像 model.rs ────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Group {
+    Daily,
+    Activity,
+    Query,
+    Exchange,
+    Maintenance,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CapabilityKind {
+    Action,
+    Query,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RiskLevel {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AccountMode {
+    Sequential,
+    Parallel,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FieldKind {
+    Text,
+    Number,
+    Bool,
+    Select,
+    MultiSelect,
+    Json,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ScheduleStatus {
+    Ok,
+    Error,
+    Skipped,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PipelineStatus {
+    Ok,
+    Error,
+    Partial,
+}
+
+#[derive(Serialize)]
+#[serde(transparent)]
+struct AccountId(String);
+
+// ⚠ `tag = "kind"` **不能漏**：漏了会退回 serde 默认的**外部标签**
+// （`{"capability":{"code":"sign"}}`），与库里已存的形状完全不同。
+// 我第一次抄镜像时就漏了它 —— 这个错误类型系统抓不到，只有整串比对抓得到。
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ScheduleTarget {
+    Capability { code: String },
+    Pipeline { id: String },
+}
+
+#[derive(Serialize)]
+struct UserId(String);
+
+#[derive(Serialize)]
+struct SelectOption {
+    label: String,
+    value: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    help: Option<String>,
+}
+
+#[derive(Serialize)]
+struct FieldSpec {
+    key: String,
+    label: String,
+    kind: FieldKind,
+    #[serde(default)]
+    required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<Vec<SelectOption>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    help: Option<String>,
+}
+
+/// 只取 `Account` 里能钉住"字段名与 Option 形状"的那几个字段。
+///
+/// ⚠ 不照抄整个结构体：`chrono::DateTime<Utc>` 的秒以下精度在两端
+/// 不一定同形（chrono 用 AutoSi，Go 的 time.Time 用 RFC3339Nano），
+/// 把时间列进整串比对会引入一个与本次无关的失败点。
+/// 这里关心的是 **`owner` 的 `skip_serializing_if`** 与 **其余 Option 是 null 不是省略**。
+/// `User` —— **一度整个漏写了 json tag**（`user` 那一步带过来的），
+/// 而往返测试用什么字段名都是绿的，所以改坏它完全不响。
+///
+/// ⚠ 时间列只取**整秒**：chrono 用 AutoSi（0/3/6/9 位小数），
+/// Go 的 `time.Time` 用 RFC3339Nano（去掉末尾的 0）。整秒时两者一致，
+/// 亚秒是**已知未对齐**的一条 —— 别在这里假装它对齐了。
+#[derive(Serialize)]
+struct UserShape {
+    id: UserId,
+    name: String,
+    password_hash: String,
+    role: Role,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Serialize)]
+struct SessionShape {
+    token_hash: String,
+    user_id: UserId,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    kind: SessionKind,
+}
+
+/// `CloudStats` —— 单独钉它是因为它**一度漏写了全部 json tag**。
+///
+/// Rust 侧字段名默认 snake_case（`cloud_count`），而 Go 不带 tag 会输出
+/// **字段名原样**（`CloudCount`）。反向测试证明：改坏它**没有任何测试变红**，
+/// 所以这里补一条整串期望值把那条路堵上。
+#[derive(Serialize)]
+struct CloudStatsShape {
+    account_id: AccountId,
+    date: String,
+    cloud_count: i64,
+    cloud_diff: i64,
+    cloud_diff_week: i64,
+}
+
+#[derive(Serialize)]
+struct AccountShape {
+    id: AccountId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<UserId>,
+    nickname: Option<String>,
+    enabled: bool,
+    sort_order: i64,
+}
+
 #[derive(Serialize)]
 struct ManualStep {
     capability: String,
@@ -143,6 +297,17 @@ fn decode(name: &str, raw: &str, ok: bool) -> Value {
     json!({ "type": name, "json": raw, "ok": ok })
 }
 
+/// 把 `v` 序列化成**整串**存进向量。
+///
+/// ⚠ 必须存 `to_string` 的结果，不能存 `to_value`：后者是 `Value::Object`，
+/// 默认实现是 `BTreeMap`（键会**按字典序重排**），字段顺序这一信息就丢了。
+fn push_json(out: &mut Vec<Value>, name: &str, v: impl Serialize) {
+    out.push(json!({
+        "kind": name,
+        "json": serde_json::to_string(&v).expect("必然能序列化"),
+    }));
+}
+
 fn rejects<T: for<'de> Deserialize<'de>>(raw: &str) -> bool {
     serde_json::from_str::<T>(raw).is_err()
 }
@@ -174,7 +339,142 @@ fn main() {
         text("Role", "Admin", Role::Admin),
         text("SessionKind", "Web", SessionKind::Web),
         text("SessionKind", "Cli", SessionKind::Cli),
+        // ── model.rs ──
+        text("Group", "Daily", Group::Daily),
+        text("Group", "Activity", Group::Activity),
+        text("Group", "Query", Group::Query),
+        text("Group", "Exchange", Group::Exchange),
+        text("Group", "Maintenance", Group::Maintenance),
+        text("CapabilityKind", "Action", CapabilityKind::Action),
+        text("CapabilityKind", "Query", CapabilityKind::Query),
+        text("RiskLevel", "Low", RiskLevel::Low),
+        text("RiskLevel", "Medium", RiskLevel::Medium),
+        text("RiskLevel", "High", RiskLevel::High),
+        text("AccountMode", "Sequential", AccountMode::Sequential),
+        text("AccountMode", "Parallel", AccountMode::Parallel),
+        text("FieldKind", "Text", FieldKind::Text),
+        text("FieldKind", "Number", FieldKind::Number),
+        text("FieldKind", "Bool", FieldKind::Bool),
+        text("FieldKind", "Select", FieldKind::Select),
+        // ⚠ `MultiSelect` 是重点：snake_case 会插下划线推成 `multi_select`，
+        // 而 `lowercase` 会给 `multiselect`。这两个串只差一个字符，
+        // 写错之后前端 `switch (kind)` 永远走 default —— 且不报错。
+        text("FieldKind", "MultiSelect", FieldKind::MultiSelect),
+        text("FieldKind", "Json", FieldKind::Json),
+        text("ScheduleStatus", "Ok", ScheduleStatus::Ok),
+        text("ScheduleStatus", "Error", ScheduleStatus::Error),
+        text("ScheduleStatus", "Skipped", ScheduleStatus::Skipped),
+        text("PipelineStatus", "Ok", PipelineStatus::Ok),
+        text("PipelineStatus", "Error", PipelineStatus::Error),
+        text("PipelineStatus", "Partial", PipelineStatus::Partial),
     ];
+
+    let mut tagged_json: Vec<Value> = Vec::new();
+    push_json(&mut tagged_json, "schedule-target-capability", ScheduleTarget::Capability { code: "sign".to_string() });
+    push_json(&mut tagged_json, "schedule-target-pipeline", ScheduleTarget::Pipeline { id: "p-1".to_string() });
+
+    let mut struct_json: Vec<Value> = Vec::new();
+    push_json(
+        &mut struct_json,
+        "field-spec-bool",
+        FieldSpec {
+                key: "skipWait".to_string(),
+                label: "跳过等待".to_string(),
+                kind: FieldKind::Bool,
+                required: false,
+                default: Some(json!(true)),
+                options: None,
+                help: Some("关闭后等到整点开抢".to_string()),
+            },
+    );
+    push_json(
+        &mut struct_json,
+        "field-spec-text",
+        FieldSpec {
+            key: "phone".to_string(),
+            label: "手机号".to_string(),
+            kind: FieldKind::Text,
+            required: true,
+            default: None,
+            options: None,
+            help: None,
+        },
+    );
+    push_json(
+        &mut struct_json,
+        "field-spec-select",
+        FieldSpec {
+            key: "prize".to_string(),
+            label: "奖品".to_string(),
+            kind: FieldKind::Select,
+            required: false,
+            default: None,
+            options: Some(vec![SelectOption {
+                label: "云朵".to_string(),
+                value: json!(7),
+                help: None,
+            }]),
+            help: None,
+        },
+    );
+    // 整秒的 UTC 时刻，两端都应当是 `2026-09-20T10:00:00Z`。
+    let whole_second =
+        chrono::DateTime::from_timestamp(1_784_000_400, 0).expect("整秒时刻必然可构造");
+
+    push_json(
+        &mut struct_json,
+        "user",
+        UserShape {
+            id: UserId("u-1".to_string()),
+            name: "admin".to_string(),
+            password_hash: "$argon2id$v=19$m=19456,t=2,p=1$abc$def".to_string(),
+            role: Role::Admin,
+            created_at: whole_second,
+        },
+    );
+    push_json(
+        &mut struct_json,
+        "session",
+        SessionShape {
+            token_hash: "e3b0c442".to_string(),
+            user_id: UserId("u-1".to_string()),
+            expires_at: whole_second,
+            kind: SessionKind::Web,
+        },
+    );
+    push_json(
+        &mut struct_json,
+        "cloud-stats",
+        CloudStatsShape {
+            account_id: AccountId("19900001234".to_string()),
+            date: "2026-09-20".to_string(),
+            cloud_count: 120,
+            cloud_diff: 7,
+            cloud_diff_week: 30,
+        },
+    );
+    push_json(
+        &mut struct_json,
+        "account-owner-none",
+        AccountShape {
+            id: AccountId("19900001234".to_string()),
+            owner: None,
+            nickname: Some("小号".to_string()),
+            enabled: true,
+            sort_order: 0,
+        },
+    );
+    push_json(
+        &mut struct_json,
+        "account-owner-some",
+        AccountShape {
+            id: AccountId("19900001234".to_string()),
+            owner: Some(UserId("u-1".to_string())),
+            nickname: None,
+            enabled: true,
+            sort_order: 3,
+        },
+    );
 
     let step = ManualStep {
         capability: "backup-gift".to_string(),
@@ -267,6 +567,8 @@ fn main() {
     );
     out.insert("$enumText".to_string(), Value::Array(enum_text));
     out.insert("$eventJson".to_string(), Value::Array(event_json));
+    out.insert("$taggedJson".to_string(), Value::Array(tagged_json));
+    out.insert("$structJson".to_string(), Value::Array(struct_json));
     out.insert("$decode".to_string(), Value::Array(decode_cases));
 
     // ⚠ 用 serde_json 自己序列化，不手拼 —— 手拼会漏转义、多尾逗号。

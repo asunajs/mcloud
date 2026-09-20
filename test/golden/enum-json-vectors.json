@@ -137,6 +137,126 @@
       "enum": "SessionKind",
       "text": "cli",
       "variant": "Cli"
+    },
+    {
+      "enum": "Group",
+      "text": "daily",
+      "variant": "Daily"
+    },
+    {
+      "enum": "Group",
+      "text": "activity",
+      "variant": "Activity"
+    },
+    {
+      "enum": "Group",
+      "text": "query",
+      "variant": "Query"
+    },
+    {
+      "enum": "Group",
+      "text": "exchange",
+      "variant": "Exchange"
+    },
+    {
+      "enum": "Group",
+      "text": "maintenance",
+      "variant": "Maintenance"
+    },
+    {
+      "enum": "CapabilityKind",
+      "text": "action",
+      "variant": "Action"
+    },
+    {
+      "enum": "CapabilityKind",
+      "text": "query",
+      "variant": "Query"
+    },
+    {
+      "enum": "RiskLevel",
+      "text": "low",
+      "variant": "Low"
+    },
+    {
+      "enum": "RiskLevel",
+      "text": "medium",
+      "variant": "Medium"
+    },
+    {
+      "enum": "RiskLevel",
+      "text": "high",
+      "variant": "High"
+    },
+    {
+      "enum": "AccountMode",
+      "text": "sequential",
+      "variant": "Sequential"
+    },
+    {
+      "enum": "AccountMode",
+      "text": "parallel",
+      "variant": "Parallel"
+    },
+    {
+      "enum": "FieldKind",
+      "text": "text",
+      "variant": "Text"
+    },
+    {
+      "enum": "FieldKind",
+      "text": "number",
+      "variant": "Number"
+    },
+    {
+      "enum": "FieldKind",
+      "text": "bool",
+      "variant": "Bool"
+    },
+    {
+      "enum": "FieldKind",
+      "text": "select",
+      "variant": "Select"
+    },
+    {
+      "enum": "FieldKind",
+      "text": "multi_select",
+      "variant": "MultiSelect"
+    },
+    {
+      "enum": "FieldKind",
+      "text": "json",
+      "variant": "Json"
+    },
+    {
+      "enum": "ScheduleStatus",
+      "text": "ok",
+      "variant": "Ok"
+    },
+    {
+      "enum": "ScheduleStatus",
+      "text": "error",
+      "variant": "Error"
+    },
+    {
+      "enum": "ScheduleStatus",
+      "text": "skipped",
+      "variant": "Skipped"
+    },
+    {
+      "enum": "PipelineStatus",
+      "text": "ok",
+      "variant": "Ok"
+    },
+    {
+      "enum": "PipelineStatus",
+      "text": "error",
+      "variant": "Error"
+    },
+    {
+      "enum": "PipelineStatus",
+      "text": "partial",
+      "variant": "Partial"
     }
   ],
   "$eventJson": [
@@ -163,6 +283,50 @@
     {
       "json": "{\"type\":\"errored\",\"runId\":\"64234443-2463-4483-a4a3-c4c3a4e38403\",\"message\":\"上游 500\"}",
       "kind": "errored"
+    }
+  ],
+  "$structJson": [
+    {
+      "json": "{\"key\":\"skipWait\",\"label\":\"跳过等待\",\"kind\":\"bool\",\"required\":false,\"default\":true,\"help\":\"关闭后等到整点开抢\"}",
+      "kind": "field-spec-bool"
+    },
+    {
+      "json": "{\"key\":\"phone\",\"label\":\"手机号\",\"kind\":\"text\",\"required\":true}",
+      "kind": "field-spec-text"
+    },
+    {
+      "json": "{\"key\":\"prize\",\"label\":\"奖品\",\"kind\":\"select\",\"required\":false,\"options\":[{\"label\":\"云朵\",\"value\":7}]}",
+      "kind": "field-spec-select"
+    },
+    {
+      "json": "{\"id\":\"u-1\",\"name\":\"admin\",\"password_hash\":\"$argon2id$v=19$m=19456,t=2,p=1$abc$def\",\"role\":\"admin\",\"created_at\":\"2026-07-14T03:40:00Z\"}",
+      "kind": "user"
+    },
+    {
+      "json": "{\"token_hash\":\"e3b0c442\",\"user_id\":\"u-1\",\"expires_at\":\"2026-07-14T03:40:00Z\",\"kind\":\"web\"}",
+      "kind": "session"
+    },
+    {
+      "json": "{\"account_id\":\"19900001234\",\"date\":\"2026-09-20\",\"cloud_count\":120,\"cloud_diff\":7,\"cloud_diff_week\":30}",
+      "kind": "cloud-stats"
+    },
+    {
+      "json": "{\"id\":\"19900001234\",\"nickname\":\"小号\",\"enabled\":true,\"sort_order\":0}",
+      "kind": "account-owner-none"
+    },
+    {
+      "json": "{\"id\":\"19900001234\",\"owner\":\"u-1\",\"nickname\":null,\"enabled\":true,\"sort_order\":3}",
+      "kind": "account-owner-some"
+    }
+  ],
+  "$taggedJson": [
+    {
+      "json": "{\"kind\":\"capability\",\"code\":\"sign\"}",
+      "kind": "schedule-target-capability"
+    },
+    {
+      "json": "{\"kind\":\"pipeline\",\"id\":\"p-1\"}",
+      "kind": "schedule-target-pipeline"
     }
   ]
 }

@@ -205,3 +205,125 @@ func (k *SessionKind) UnmarshalJSON(data []byte) error {
 	*k = SessionKind(v)
 	return nil
 }
+
+// ── 以下来自 `model.rs` ───────────────────────────────────────────────────────
+//
+// ⚠ 这一批尤其要照黄金向量写，别照"命名规则"推：
+// `MultiSelect` 的 snake_case 是 **`multi_select`**（带下划线），
+// 而 `lowercase` 会给 `multiselect` —— 两个串只差一个字符，
+// 写错之后前端 `switch (kind)` 永远走 default，且**不报错**。
+
+// groupJSON 对应 Rust 侧 `model.rs` 的 `#[serde(rename_all = "snake_case")]`。
+var groupJSON = enumJSON{
+	typeName: "Group",
+	names:    []string{"daily", "activity", "query", "exchange", "maintenance"},
+}
+
+// MarshalJSON 输出 `daily` / `activity` / `query` / `exchange` / `maintenance`。
+func (g Group) MarshalJSON() ([]byte, error) { return groupJSON.marshal(int(g)) }
+
+// UnmarshalJSON 是 [Group.MarshalJSON] 的逆。
+func (g *Group) UnmarshalJSON(data []byte) error {
+	v, err := groupJSON.unmarshal(data)
+	if err != nil {
+		return err
+	}
+	*g = Group(v)
+	return nil
+}
+
+var capabilityKindJSON = enumJSON{typeName: "CapabilityKind", names: []string{"action", "query"}}
+
+// MarshalJSON 输出 `action` / `query`。
+func (k CapabilityKind) MarshalJSON() ([]byte, error) { return capabilityKindJSON.marshal(int(k)) }
+
+// UnmarshalJSON 是 [CapabilityKind.MarshalJSON] 的逆。
+func (k *CapabilityKind) UnmarshalJSON(data []byte) error {
+	v, err := capabilityKindJSON.unmarshal(data)
+	if err != nil {
+		return err
+	}
+	*k = CapabilityKind(v)
+	return nil
+}
+
+var riskLevelJSON = enumJSON{typeName: "RiskLevel", names: []string{"low", "medium", "high"}}
+
+// MarshalJSON 输出 `low` / `medium` / `high`。
+func (r RiskLevel) MarshalJSON() ([]byte, error) { return riskLevelJSON.marshal(int(r)) }
+
+// UnmarshalJSON 是 [RiskLevel.MarshalJSON] 的逆。
+func (r *RiskLevel) UnmarshalJSON(data []byte) error {
+	v, err := riskLevelJSON.unmarshal(data)
+	if err != nil {
+		return err
+	}
+	*r = RiskLevel(v)
+	return nil
+}
+
+var accountModeJSON = enumJSON{typeName: "AccountMode", names: []string{"sequential", "parallel"}}
+
+// MarshalJSON 输出 `sequential` / `parallel`。
+func (m AccountMode) MarshalJSON() ([]byte, error) { return accountModeJSON.marshal(int(m)) }
+
+// UnmarshalJSON 是 [AccountMode.MarshalJSON] 的逆。
+func (m *AccountMode) UnmarshalJSON(data []byte) error {
+	v, err := accountModeJSON.unmarshal(data)
+	if err != nil {
+		return err
+	}
+	*m = AccountMode(v)
+	return nil
+}
+
+var fieldKindJSON = enumJSON{
+	typeName: "FieldKind",
+	names:    []string{"text", "number", "bool", "select", "multi_select", "json"},
+}
+
+// MarshalJSON 输出 `text` / `number` / `bool` / `select` / `multi_select` / `json`。
+func (k FieldKind) MarshalJSON() ([]byte, error) { return fieldKindJSON.marshal(int(k)) }
+
+// UnmarshalJSON 是 [FieldKind.MarshalJSON] 的逆。
+func (k *FieldKind) UnmarshalJSON(data []byte) error {
+	v, err := fieldKindJSON.unmarshal(data)
+	if err != nil {
+		return err
+	}
+	*k = FieldKind(v)
+	return nil
+}
+
+var scheduleStatusJSON = enumJSON{typeName: "ScheduleStatus", names: []string{"ok", "error", "skipped"}}
+
+// MarshalJSON 输出 `ok` / `error` / `skipped`。
+func (s ScheduleStatus) MarshalJSON() ([]byte, error) { return scheduleStatusJSON.marshal(int(s)) }
+
+// UnmarshalJSON 是 [ScheduleStatus.MarshalJSON] 的逆。
+func (s *ScheduleStatus) UnmarshalJSON(data []byte) error {
+	v, err := scheduleStatusJSON.unmarshal(data)
+	if err != nil {
+		return err
+	}
+	*s = ScheduleStatus(v)
+	return nil
+}
+
+var pipelineStatusJSON = enumJSON{typeName: "PipelineStatus", names: []string{"ok", "error", "partial"}}
+
+// MarshalJSON 输出 `ok` / `error` / `partial`。
+//
+// ⚠ 与 [ScheduleStatus] **别混**：那族第三态是 `skipped`，这里是 `partial`。
+// Rust 侧刻意分成两个枚举（旧版组合没有 skipped、却有 partial）。
+func (s PipelineStatus) MarshalJSON() ([]byte, error) { return pipelineStatusJSON.marshal(int(s)) }
+
+// UnmarshalJSON 是 [PipelineStatus.MarshalJSON] 的逆。
+func (s *PipelineStatus) UnmarshalJSON(data []byte) error {
+	v, err := pipelineStatusJSON.unmarshal(data)
+	if err != nil {
+		return err
+	}
+	*s = PipelineStatus(v)
+	return nil
+}
