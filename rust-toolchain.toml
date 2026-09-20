@@ -4,8 +4,16 @@
 # 它本身就是 1.91.1，但写 `channel = "1.91.1"` 会被 rustup 视为**另一个工具链**，
 # 触发从 static.rust-lang.org 下载 rustc/cargo/rust-std（实测卡住 19 分钟）。
 #
-# 版本要求在 Cargo.toml 的 `rust-version`（MSRV）里声明，
-# 需要完全可复现的 CI 环境时在 CI 里单独钉版本号。
+# 版本要求在 Cargo.toml 的 `rust-version`（MSRV）里声明。
+#
+# ⚠ `channel = "stable"` 意味着**通道内会自动跟进**：本机现在是 1.96.1，
+# 而 `rustup` 会把 stable 更新到更新的版本（实测撞到过 1.98.1 —— 它当时
+# 正在删掉正在用的组件去装新版，被中断了）。
+#
+# 这在只有一个开发者、只在一台机器上跑的情况下是可接受的：工具链的
+# 漂移会**当场暴露**（下一次 `cargo build` 就见分晓），而不是推迟到别处。
+# 但如果你以后要在第二台机器或别处跑门禁，**先把这里换成一个具体版本号** ——
+# 否则两边跑的根本不是同一个编译器，门禁结论无法互相印证。
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]
