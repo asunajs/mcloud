@@ -156,6 +156,7 @@
 | `app` 其余 | ⬜ | `login` / `run` / `smid` / `session` / `migration` / `signin/*` 等**依赖 `upstream` 其余部分与 `io`**，步 2 收尾 / 步 3 落地前迁不了 |
 | `upstream::login` | ✅ | 为使 `capabilities::login` 能落地而**提前做的前置**：信封 / 端档案 / 请求体 / 滑块 / 口令哈希 / 判定（**33 条测试**）。步 2 的其余部分（`signin` 协议族）仍未迁 |
 | `upstream::app_client` | ✅ | App 端（iOS）档案：16 段 `x-yun-client-info` 与 14 段 `x-DeviceInfo` **不同值**、三种 `os_version` 写法、`mobile` 前缀的 `Authorization`、未登录占位头（**10 条测试**）。它是整个签到链路的前置 |
+| `upstream::app_login` | ✅ | App 端验证码登录（`632` 行）：三层封装（明文 JSON → AES-128-ECB hex → **末 10 位错位**）、`hcy-cool-flag` **主动不发**、滑块 H5 的 `data` 只有两个头、`9441`/`9103`/`9999` 三态判定（**18 条测试**）。中心断言 `appLoginWire` 取自 Rust 侧 `crypto/tests/app.rs`（抓包侧独立脚本算出），Go 复算同一串 ⇒ 真跨实现对拍 |
 | `upstream::app_signin` | ✅ **整族落地** | 常量（由 `app-signin-vectors` 的 `constants` 钉住）/ `Diagnose` / H5 与原生头 / 百分号编码 / 取值 helper + 建会话三段 + 签到与状态（`infoV3` / `startSignIn` / `taskListV3` / `doTaskPost`）+ 领取族（`receiveV3` / `receiveRevivalReward` / `multiple` / `receiveTaskExpansion`）+ 记录族（`cloudRecordV2` / `record` / `backupgift/*`）+ **发送层**（`Upstream` 上的 15 个方法）（**113 条测试，整包合计**）。`app-signin-vectors.json` 从"只有 Rust 读"变成**两边都读** |
 | `cli` / `server` | ⬜ | 在 `app` 之后 |
 
