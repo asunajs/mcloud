@@ -125,7 +125,7 @@ include_str!("../../../test/golden/auth-vectors.json")      // → 仓库根/tes
 include_str!("../../../test/golden/auth-vectors.json")      // → legacy/test/...  ✗
 ```
 
-**17 处**（`grep -rnE "include_str!" crates --include='*.rs'` 可复测），
+**17 处**（复测用 `grep -rnE "include_str!" legacy/crates --include='*.rs'`），
 `cargo test` 会直接编译不过。
 
 **解法：`legacy/test -> ../test` 符号链接。** 于是源码**一字未改** ——

@@ -16,7 +16,7 @@
 | 日志、运行期输出（库 / `Debug` / CLI） | **保留** | 本地排障资产，且不可直接复用 |
 | 进版本库的一切（夹具、黄金向量、源码字面量、注释示例、base64） | **必须脱敏** | 仓库全量留痕，推上去就收不回来 |
 
-**注意方向**：`crates/mcloud-core/src/sanitize.rs`（HAR → fixture）遮蔽 `userDomainId` 是**对的**，
+**注意方向**：`legacy/crates/mcloud-core/src/sanitize.rs`（HAR → fixture）遮蔽 `userDomainId` 是**对的**，
 它是"进版本库的静态文件"；别因为"日志里可以留"就去放宽它。
 
 ---

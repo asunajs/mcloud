@@ -1,6 +1,6 @@
 // Package mcloudio 是**唯一**允许做 IO 的层：HTTP 客户端、SQLite、系统随机源。
 //
-// 对应 Rust 侧的 crates/mcloud-io。
+// 对应 Rust 侧的 legacy/crates/mcloud-io。
 //
 // # ⚠ 包名不是 io
 //

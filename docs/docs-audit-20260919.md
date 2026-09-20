@@ -59,7 +59,7 @@ mcloud-cli           → core, capabilities, server         可执行入口     
 
 `mcloud-cli` 出现了**两次**，依赖列表完全不同。
 
-**实测的真相**（`crates/mcloud-cli/Cargo.toml`）：
+**实测的真相**（`legacy/crates/mcloud-cli/Cargo.toml`）：
 
 ```toml
 mcloud-core, mcloud-capabilities, mcloud-upstream, mcloud-app, mcloud-io

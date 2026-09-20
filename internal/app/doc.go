@@ -1,6 +1,6 @@
 // Package app 是组装层：把 io 的实现注入 core 定义的契约，供两个产物共用。
 //
-// 对应 Rust 侧的 crates/mcloud-app。
+// 对应 Rust 侧的 legacy/crates/mcloud-app。
 //
 // # 分层铁律
 //

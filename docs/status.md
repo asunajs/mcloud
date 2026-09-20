@@ -96,8 +96,8 @@
 ### ⚠ 夹具回放（L2）尚无消费者
 
 此前本文件写着"`mcloud-upstream` 的 L2 夹具回放已跑通  
-（`crates/mcloud-upstream/tests/l2_replay.rs`）"—— **那个文件不存在**，  
-`crates/mcloud-upstream/tests/` 是个**空目录**。
+（`legacy/crates/mcloud-upstream/tests/l2_replay.rs`）"—— **那个文件不存在**，  
+`legacy/crates/mcloud-upstream/tests/` 是个**空目录**。
 
 现状是：`mcloud fixture extract` 往 `test/fixtures/http/` 写，但**没有任何消费者**，  
 所以那 31 个夹具目前一个断言都没跑。这是规划 §6.3 里要补的一环，  

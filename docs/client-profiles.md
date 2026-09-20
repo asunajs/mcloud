@@ -437,7 +437,7 @@ x-yun-client-info (16 段)  = 上面那串 + "aVBhZA==|0|;"
 **③ 上面两段讲的是设备串（`deviceInfo`）里的字段。还有第三种指纹**，
 与它**完全不同源、不同形状、不同生命周期**：cMPassport 风控侧的 `smid`。
 
-（2026-09-19 追加，实现见 `crates/mcloud-upstream/src/smid.rs` 与 `crates/mcloud-app/src/smid.rs`。）
+（2026-09-19 追加，实现见 `legacy/crates/mcloud-upstream/src/smid.rs` 与 `legacy/crates/mcloud-app/src/smid.rs`。）
 
 它产出两样东西，**绑账号的是前者、会变的后者**：
 

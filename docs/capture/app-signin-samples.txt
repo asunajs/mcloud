@@ -935,7 +935,7 @@ H5 只是**没渲染它**。
 | 谁在用 | 原生 App 的 A 族/B 族请求（登录、`querySpecTokenV2`…） | 签到页 H5 的 `isDeviceId: true` 请求 |
 | 承载位置 | **请求头** `deviceid` | **查询参数**（GET）或 **请求体字段**（POST） |
 | 形状 | `B` + … | `B` + 88 字符 base64（→ **64 字节**） |
-| 来源 | 数美设备指纹 `POST …/deviceprofile/v4`，`code==1100` 时取 `"B" + detail.deviceId`（本项目实现见 `crates/mcloud-upstream/src/smid.rs`） | **同一个接口、同一条取值规则** —— 只是由 H5 的 `fp.min.js` 发起（见 §4.1） |
+| 来源 | 数美设备指纹 `POST …/deviceprofile/v4`，`code==1100` 时取 `"B" + detail.deviceId`（本项目实现见 `legacy/crates/mcloud-upstream/src/smid.rs`） | **同一个接口、同一条取值规则** —— 只是由 H5 的 `fp.min.js` 发起（见 §4.1） |
 | 本次签到抓包 | **一次都没出现** | `startSignIn` / `doTaskPost` 上有 |
 
 > ✅ **两条线不是"两个东西"**（2026-09-19 晚更正）。早先记成"不是同一个值、
@@ -1032,7 +1032,7 @@ window._smConf = {
 ```
 
 这四项 + `apiPath = /deviceprofile/v4` + `os: 'web'` + `encode: 5` + `compress: 2`
-**与 `crates/mcloud-upstream/src/smid.rs` 的常量逐字相同**，公钥也与
+**与 `legacy/crates/mcloud-upstream/src/smid.rs` 的常量逐字相同**，公钥也与
 `mcloud_core::SKLAND_PUBLIC_KEY_B64` 一个字不差。
 ⇒ 签到页的指纹客户端与本项目的 `smid` 客户端是**同一个**，纯 Rust 上报即可拿到同一个 id。
 

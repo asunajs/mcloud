@@ -1,6 +1,6 @@
 // Package cli 是产物之一：命令行。
 //
-// 对应 Rust 侧的 crates/mcloud-cli（clap derive）。
+// 对应 Rust 侧的 legacy/crates/mcloud-cli（clap derive）。
 //
 // # 分层铁律
 //

@@ -95,7 +95,7 @@ body = base64( IV(16 字节，二进制) ‖ AES-192-CBC/PKCS7(
 
 黄金向量：`test/golden/app-business-crypto-vectors.json` 的 `hcyCoolFlagBodyEnvelope192`
 （5 条**实拍**，请求与响应两个方向都有，明文里无标识故可直接入库）；
-Rust 消费者在 `crates/mcloud-core/src/crypto/tests/app.rs`。
+Rust 消费者在 `legacy/crates/mcloud-core/src/crypto/tests/app.rs`。
 
 ### 1.2 ⚠⚠ 同日再更正：**第三把钥匙 —— H5 / WebView 那一层**（AES-256）
 

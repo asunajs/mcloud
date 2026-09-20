@@ -15,7 +15,7 @@ type Client struct {
 // NewClient 返回一个默认配置的客户端。
 //
 // ⚠ 迁移时这里要长出真正的实现：cookie jar、gzip / brotli / deflate 解压、
-// 超时与重试。Rust 侧对应 crates/mcloud-io 里的 reqwest 封装。
+// 超时与重试。Rust 侧对应 legacy/crates/mcloud-io 里的 reqwest 封装。
 // 注意 Go 的 net/http **只自动解 gzip**，brotli 要自己接 transport。
 func NewClient() *Client {
 	return &Client{Client: &http.Client{}}

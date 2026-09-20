@@ -2,7 +2,7 @@
   "$generator": "scripts/gen-crypto-vectors.cjs",
   "$source": "mcloud-sign TS 原版：crypto-js 4.x + node:crypto + CompressionStream",
   "$cryptoJsVersion": "4.2.0",
-  "$note": "Rust 侧（crates/mcloud-core/src/crypto.rs）必须复现本文件全部 expect* 字段。随机性路径（动态 IV、RSA PKCS#1 v1.5 填充）无法字节级对拍，改为单向/自持密钥验证，见对应条目的 note。补（2026-09-19）：smid* 四段由 crates/mcloud-upstream/src/smid.rs 的测试消费（它们的落点在那里，不在 core）。",
+  "$note": "Rust 侧（legacy/crates/mcloud-core/src/crypto.rs）必须复现本文件全部 expect* 字段。随机性路径（动态 IV、RSA PKCS#1 v1.5 填充）无法字节级对拍，改为单向/自持密钥验证，见对应条目的 note。补（2026-09-19）：smid* 四段由 legacy/crates/mcloud-upstream/src/smid.rs 的测试消费（它们的落点在那里，不在 core）。",
   "constants": {
     "SIGN_SALT_MAP": {
       "1": "seedMdYYLIZfbCxg",
