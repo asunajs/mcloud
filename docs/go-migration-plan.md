@@ -400,6 +400,7 @@ PC 与 App 是**两套客户端**，同名同形的常量值可能不同，而"�
 | 步 | 内容 | 退出判据 | 状态 |
 | --- | --- | --- | --- |
 | **0** | 骨架 + 守卫先行：`go.mod` / `internal/` 八层 / `cmd/` 两个入口 / `scripts/gates-go.sh` / `check-go-deps.sh` / 三处共享守卫改造 | **八项门禁全绿**；依赖断言经**反向测试**证明能抓错 | ✅ **已完成** |
+| **冻结** | Rust 侧冻结到 `legacy/`（`bash scripts/freeze-rust.sh`）| 冻结后 **Rust 七条 + Go 八条同时全绿**；`legacy/test` 以符号链接入库（模式 120000）| ✅ **已完成**（`333d05c`，2026-09-20）|
 | **1** | `mcloud-core`（纯计算，标准库覆盖最好） | 6 份黄金向量在 Go 侧逐字段复算通过 | ⬜ |
 | **2** | `mcloud-upstream`（协议层） | 同一条抓包请求 Rust/Go **双跑**，header 顺序 / percent-encode / 签名串逐字节一致 | ⬜ |
 | **3** | `mcloud-io`（唯一 IO 层） | 纯 Go sqlite 驱动下 schema v1→v7 迁移 + 老库只读导入结果一致 | ⬜ |
@@ -409,16 +410,34 @@ PC 与 App 是**两套客户端**，同名同形的常量值可能不同，而"�
 
 | 项 | 结果 |
 | --- | --- |
-| `go build ./...` | 通过（**零第三方依赖** —— 骨架刻意不引，好让"能编译"这条判据不被下载失败干扰） |
-| `go vet ./...` | 通过 |
-| `gofmt -l .` | 空 |
-| `go test -race ./...` | 通过 |
+| `go build $GO_PKGS` | 通过（**零第三方依赖** —— 骨架刻意不引，好让"能编译"这条判据不被下载失败干扰） |
+| `go vet $GO_PKGS` | 通过 |
+| `gofmt -l ./cmd ./internal` | 空 |
+| `go test -race $GO_PKGS` | 通过 |
 | `check-go-deps.sh` | 通过；**并做了反向测试**：往纯层塞 `net/http`、往 CLI 塞 `server`，两条都被抓出且退出码 1 |
 | `check-filenames.sh` | 144 个文件通过 |
 | `check-identifiers.cjs` | 351 个文件通过；**并做了反向测试**：往 `.go` 里塞未登记号码，被抓出 |
 | `check-golden-vectors.cjs` | 131 条断言全绿；**并做了反向测试**：临时让 Go 读一条死向量，消费者探测确实变绿 |
 
 > 📌 反向测试不是形式 —— 一条**只会在正确情况下通过**的断言不是断言。
+>
+> ⚠ 这里**不是** `./...`，理由见下面第 3 条。`GO_PKGS = ./cmd/... ./internal/...`，
+> 定义在 `scripts/gates-go.sh`。
+
+### 冻结暴露的四个问题（2026-09-20）
+
+冻结本身只做了两件事（`git mv` + 一个符号链接），却当场弄红了三个门禁。
+四个问题都是"只有真跑一遍才会出现"的，记在这里免得下次迁移重踩：
+
+| # | 现象 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| 1 | `cargo fmt` 报 `Failed to find targets` | workspace 根是**虚拟 manifest**（只有 `[workspace]`）；一旦用 `--manifest-path` 指过去，`cargo fmt` 就推不出要格式化哪些 target。冻结前它在仓库根跑，靠 CWD 能推出来，所以一直没暴露 | `cargo fmt` 必须同时带 `--all` |
+| 2 | `check-filenames.sh` 报 `legacy/Cargo.lock` 不是 kebab-case | 豁免表是**按路径点名**的：`Cargo.toml` 有根级 + `*/` 两条，而 `Cargo.lock` / `rust-toolchain.toml` 只有根级一条 —— 一进 `legacy/` 就掉出豁免 | 豁免表补 `*/Cargo.lock`、`*/rust-toolchain.toml` |
+| 3 | `go test ./...` 报 `open legacy/target/debug/deps/xxxx: no such file or directory` | `./...` 会遍历 `legacy/target/`（7 GB cargo 构建产物）。**cargo 正在改写那个目录时**，Go 撞上刚被删的临时目录 ⇒ 门禁红了而代码一行问题都没有。第一次跑就撞上（当时两套门禁并行跑） | 改用显式包路径 `GO_PKGS`；`gofmt` 范围与之对齐 |
+| 4 | （第 3 条的代价）新加一个顶层 Go 目录会被**静默漏掉** | 显式路径不会自己发现新目录 | `check-go-deps.sh` 补一条断言：所有 `.go` 文件必须在 `cmd/` 或 `internal/` 下 |
+
+> 📌 第 3 条最值得记：**门禁偶发变红比门禁缺失更危险** ——
+> 缺失是已知的；偶发会被当成"环境问题"，于是人学会"重跑一次就好"，防线从此失效。
 
 ---
 
