@@ -322,8 +322,8 @@ Authorization: Basic base64("mobile:<手机号>:<authToken>")
 
 | 项 | 值 |
 |---|---|
-| 密钥 | **不止一把** —— 见下面的 §8.0 |
-| IV | 16 字节**二进制**，拼在载荷前面 —— ⚠ **不是** `encodeData` 那种"16 个可打印 ASCII" |
+| 密钥 | **不止一把，按「谁发的」分** —— 见 §8.0 与 §8.1 |
+| IV | 16 字节，拼在载荷前面。**原生**用随机**字节**（二进制）；**H5/WebView** 用随机**字符**（全可打印）|
 | 方向 | **双向**（请求体 + 响应体都用它）|
 
 ### 8.0 ⚠⚠ 更正（2026-09-20）：钥匙**不止一把**，这一节写的那把只覆盖发码链路
@@ -347,9 +347,72 @@ Authorization: Basic base64("mobile:<手机号>:<authToken>")
 黄金向量：`hcyCoolFlagBodyEnvelope192`（5 条实拍，双向）；Rust 消费者见
 `crates/mcloud-core/src/crypto/tests/app.rs`。
 
-⚠ **还有解不开的**：`user/getUser` 的体是 `base64(IV(16 个**可打印 ASCII**) ‖ CT)`
-（形态像 `encodeData`，但 `clientKey` 也开不了），`ILog` / `queryRights` / `IControl` /
-`thirdlogin` / `getSmsCode` 也各有解不开的条目。**别把不同信封互相套用。**
+### 8.1 ⚠⚠ 再更正（2026-09-20 同日）：第三把钥匙 —— **H5 / WebView 那一层**
+
+§8.0 收尾时写下的"`user/getUser` 的体是 `base64(IV(16 个**可打印 ASCII**) ‖ CT)`，
+形态像 `encodeData` 但 `clientKey` 也开不了" —— **现在解开了**，而且原因不在钥匙，
+在**调用方**：那是 **H5 / WebView** 发的，和原生那两把**不是同一个调用方**。
+
+**第三把钥匙**：
+
+| 项 | 值 |
+|---|---|
+| 钥匙 | `h7DLzCTAjn+altjy2a9E9FSt7AC6pmx1`（**32 字节 → AES-256**）|
+| 格式 | 与原生**完全同形**：`base64(IV(16) ‖ AES-CBC/PKCS7(key, IV, 明文))`，双向 |
+| 出处 | iOS App 沙盒的 **H5 离线包**：`Data/Documents/AIOfflinePKG/stable/ai-helper/assets/index-af02d869.js` 里 `Kr.coolFlagPivotal` |
+| 调用点 | `AES_CBCDecrypt({ data, key: coolFlagPivotal, getIVFromEncrypt: true })` |
+
+H5 侧实现原文（同一文件，`AES_CBCDecrypt`）：
+
+```js
+AES_CBCDecrypt(e){
+  let {data:t, iv:n}=e, {pivotal:o="", key:i="", padding:a="Pkcs7", getIVFromEncrypt:s=false}=e;
+  o = o || i;                                  // 实际密钥 = pivotal || key
+  const r = M.enc.Base64.parse(t);
+  if (s) {                                     // getIVFromEncrypt
+    n = M.lib.WordArray.create(r.words.slice(0,4));                        // IV = 前 16 字节
+    t = M.enc.Base64.stringify(M.lib.WordArray.create(r.words.slice(4)));   // CT = 其余
+  } else n = M.enc.Utf8.parse(n);
+  return M.AES.decrypt(t, M.enc.Utf8.parse(o), {iv:n, mode:M.mode.CBC, padding:M.pad[a]})
+          .toString(M.enc.Utf8).toString()
+}
+```
+
+**⇒ 判据：三把钥匙是「谁发的」的函数，不是版本号。**
+
+| 谁发的 | 钥匙 | 算法 | IV 来源 | 前 16 字节 | 头特征 |
+|---|---|---|---|---|---|
+| **App 原生**（`FXHttpBaseAccessor`）| `2olBaQGYnEKoStYomsd1n7ax` | AES-192 | 随机字节 | 二进制 | `x-yun-uni` + `x-yun-api-version` |
+| **H5 / WebView**（`coolFlagPivotal`）| `h7DLzCTAjn+altjy2a9E9FSt7AC6pmx1` | **AES-256** | 请求：`Bn.generateRandomString(16)`（随机**字符**）| 请求**全可打印** | `origin: mcloudlocal://` + `sec-fetch-*` |
+| **发码链路** `user/sms/getSmsCode` | `uDjGSA8auFlbwDkY` | AES-128 | — | — | — |
+
+⚠ **指纹只在请求侧成立**：响应侧的 IV 由**服务端**生成，两族都是二进制，
+所以**响应不能靠 IV 区分** —— 要么看头判断是哪个客户端发的，要么两把都试。
+
+**四组交叉对照（全部干净，可在 Rust 里复现）**：
+
+| | AES-256（H5 那把）| AES-192（原生那把）|
+|---|---|---|
+| WebView 族实拍 | **3 / 3 ✓** | 0 / 3 |
+| 原生族实拍 | 0 / 2 | **3 / 3 ✓** |
+
+覆盖面：在 14 条"可打印 IV"候选里 **11 条命中**（3 个接口）；
+另外 3 条分别是微软遥测 ×2（与本协议无关）与 `ILog` ×1（**另一套仍未解开**的信封）。
+
+⚠ **"前 16 字节可打印"不是本族的充分条件** —— `encodeData` 也是可打印 IV（§4）。
+这条指纹只用于在**已知是 `hcy-cool-flag` 整包信封**的前提下挑钥匙。
+
+**踩坑记录（值得单独记一笔）**：这一把之所以最后才找到，是因为我按
+`[A-Za-z0-9]` 过滤候选钥匙 —— 而它**含一个 `+`**，被整批滤掉了
+（21173 个候选 × 4 种模式全部落空，其中就包括真凶）。
+**候选集的"字符类"和"长度档位"一样，是会漏掉答案的筛子。**
+
+黄金向量：`hcyCoolFlagWebViewEnvelope256`（3 条，双向，已按脱敏 SOP 换值不换形）；
+Rust 消费者见 `crates/mcloud-core/src/crypto/tests/app.rs` 的三条 `app_cool_flag_*` 测试。
+
+⚠ **仍未解开**：`ILog`（`queryRights` / `IControl` / `thirdlogin` / `getSmsCode` 也各有解不开的条目）。
+`ILog` 的体同样是"可打印 IV"，但它**不属于**这把钥匙 —— 说明 H5 侧还有别的信封。
+**别把不同信封互相套用。**
 
 **怎么确认的**（三步，都可复现）：
 

@@ -181,6 +181,35 @@ const VERIFIERS = {
     return { actual: pt, expected: e.plaintext, extra: `AES-192，方向=${e.direction}` };
   },
 
+  // WebView / H5 那一层：同一套信封格式，**第三把钥匙**，AES-256。
+  //
+  // 这里额外钉住一件 192 分支没有的事：**IV 的可打印性**。
+  // H5 用 `Bn.generateRandomString(16)` 造 IV（随机**字符**），原生用随机**字节** ——
+  // 所以「前 16 字节能不能打印」就是「这个载荷是哪一层发的」的指纹。
+  // 指纹一旦漂移（比如某天 H5 改成随机字节），这条断言会先响，
+  // 而不是等到线上解不开才发现。
+  hcyCoolFlagWebViewEnvelope256: (e, c) => {
+    const iv = Buffer.from(e.ivHex, "hex");
+    if (iv.length !== 16) throw new Error(`ivHex 应为 16 字节，实际 ${iv.length}`);
+    const raw = unb64(e.payloadB64);
+    if (!raw.subarray(0, 16).equals(iv)) {
+      throw new Error(`载荷前置 IV 与 ivHex 不一致：${raw.subarray(0, 16).toString("hex")}`);
+    }
+    const printable = iv.every((b) => b >= 0x20 && b < 0x7f);
+    if (e.ivKind === "ascii" && !printable) {
+      throw new Error(`ivKind=ascii 但 IV 不是全可打印：${e.ivHex}`);
+    }
+    if (e.ivKind === "binary" && printable) {
+      throw new Error(`ivKind=binary 但 IV 恰好全可打印：${e.ivHex}（换一条真实 IV）`);
+    }
+    const pt = aesCbcDecrypt(c.BODY_AES_KEY_256_H5, iv, raw.subarray(16), 32);
+    return {
+      actual: pt,
+      expected: e.plaintext,
+      extra: `AES-256，方向=${e.direction}，IV=${e.ivKind}`,
+    };
+  },
+
   // —— 签名头（PC 端 `signHeader` 与 App 签到页 `h5Signature` 同一个算式）——
   //
   // 两段分开登记（不是一个别名）是有意的：它们的**消费方不同** ——

@@ -249,6 +249,147 @@ fn app_cool_flag_body_envelope_192_is_not_the_128_bit_key() {
 }
 
 #[test]
+fn app_cool_flag_webview_envelope_256_decrypts_every_real_capture() {
+    // **第三把钥匙：H5 / WebView 那一层**（2026-09-20 定案）。
+    // 出处不是二进制，而是 iOS App 沙盒里的 **H5 离线包**：
+    //   Data/Documents/AIOfflinePKG/stable/ai-helper/assets/index-af02d869.js
+    // 里 `Kr.coolFlagPivotal = "h7DLzCTAjn+altjy2a9E9FSt7AC6pmx1"`，
+    // 调用点 `AES_CBCDecrypt({ data, key: coolFlagPivotal, getIVFromEncrypt: true })`。
+    //
+    // 四组交叉对照（全部干净）：
+    //   WebView × AES-256 = 3/3 ；原生 × AES-256 = 0/2
+    //   WebView × AES-192 = 0/3 ；原生 × AES-192 = 3/3
+    let v = app_business_vectors();
+    let key = v["constants"]["BODY_AES_KEY_256_H5"].as_str().unwrap();
+
+    // 32 字节 ⇒ AES-256。⚠ 这把钥匙**含一个 `+`** —— 曾经因为它不在 `[A-Za-z0-9]` 里，
+    // 穷举二进制字面量时被整批漏掉（21173 个候选全落空）。断言长度顺便钉住这件事。
+    assert_eq!(key.len(), 32, "32 字节 ⇒ AES-256");
+    assert!(
+        key.contains('+'),
+        "这把钥匙含非字母数字字符，别按「纯字母数字」筛候选"
+    );
+
+    let cases = v["hcyCoolFlagWebViewEnvelope256"].as_array().unwrap();
+    assert!(cases.len() >= 3, "至少要有请求与响应两个方向的样本");
+    let mut directions = std::collections::BTreeSet::new();
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let payload = case["payloadB64"].as_str().unwrap();
+        directions.insert(case["direction"].as_str().unwrap().to_string());
+
+        let raw = b64_decode(payload).unwrap();
+        assert_eq!(
+            hex::encode(&raw[..16]),
+            case["ivHex"].as_str().unwrap(),
+            "{name}: 前置 IV 与 ivHex 不一致"
+        );
+        assert_eq!((raw.len() - 16) % 16, 0, "{name}: 密文不是整块");
+
+        // 指纹断言：`ivKind` 是"这条载荷由哪一层发出"的声明，必须与字节事实相符。
+        let printable = raw[..16].iter().all(|b| (0x20..0x7f).contains(b));
+        match case["ivKind"].as_str().unwrap() {
+            "ascii" => assert!(printable, "{name}: 声明 ascii，但 IV 不可打印"),
+            "binary" => assert!(!printable, "{name}: 声明 binary，但 IV 全可打印"),
+            other => panic!("{name}: 未知 ivKind {other}"),
+        }
+
+        assert_eq!(
+            aes_dynamic_iv_decrypt(key, payload).unwrap(),
+            case["plaintext"].as_str().unwrap(),
+            "{name}"
+        );
+    }
+    assert!(
+        directions.contains("request") && directions.contains("response"),
+        "信封是**双向**的，向量里两个方向都要有：{directions:?}"
+    );
+}
+
+#[test]
+fn app_cool_flag_families_are_keyed_by_who_sent_it_not_by_version() {
+    // 这条锁的是本轮的**核心结论**：三把钥匙是「**谁发的**」的函数，不是版本号。
+    //   · 原生 App（FXHttpBaseAccessor）→ AES-192 `2olBaQGYnEKoStYomsd1n7ax`
+    //   · H5 / WebView（`coolFlagPivotal`）→ AES-256 `h7DLzCTAjn+altjy2a9E9FSt7AC6pmx1`
+    // 所以**两把钥匙必须互不开**：拿错钥匙不是"降级成乱码"，而是解不开。
+    let v = app_business_vectors();
+    let k192 = v["constants"]["BODY_AES_KEY_192"].as_str().unwrap();
+    let k256 = v["constants"]["BODY_AES_KEY_256_H5"].as_str().unwrap();
+    assert_eq!(
+        (k192.len(), k256.len()),
+        (24, 32),
+        "24→AES-192 / 32→AES-256"
+    );
+
+    for case in v["hcyCoolFlagBodyEnvelope192"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let payload = case["payloadB64"].as_str().unwrap();
+        let expect = case["plaintext"].as_str().unwrap();
+        assert_eq!(
+            aes_dynamic_iv_decrypt(k192, payload).unwrap(),
+            expect,
+            "{name}"
+        );
+        // 用 `assert_ne!` 而不是 `is_err()`：换错钥匙时 PKCS7 有 1/256 的概率碰巧合法，
+        // 那时解出的是乱码而不是 Err —— 判据要盯"明文对不对"，不是"报不报错"。
+        assert_ne!(
+            aes_dynamic_iv_decrypt(k256, payload).ok().as_deref(),
+            Some(expect),
+            "{name}: AES-256 那把不该能开出原生族的明文"
+        );
+    }
+
+    for case in v["hcyCoolFlagWebViewEnvelope256"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let payload = case["payloadB64"].as_str().unwrap();
+        let expect = case["plaintext"].as_str().unwrap();
+        assert_eq!(
+            aes_dynamic_iv_decrypt(k256, payload).unwrap(),
+            expect,
+            "{name}"
+        );
+        assert_ne!(
+            aes_dynamic_iv_decrypt(k192, payload).ok().as_deref(),
+            Some(expect),
+            "{name}: AES-192 那把不该能开出 WebView 族的明文"
+        );
+    }
+}
+
+#[test]
+fn app_cool_flag_iv_printability_tracks_the_sending_layer() {
+    // 「前 16 字节能不能打印」= 「哪一层发的」的**指纹**，不是协议约定：
+    //   · H5 的 IV 由 `Bn.generateRandomString(16)` 生成 —— 随机**字符**
+    //   · 原生的 IV 是随机**字节**
+    //
+    // ⚠ 这是**统计指纹**：16 个随机字节恰好全落在可打印区间的概率约 (95/256)^16 ≈ 1.4e-7。
+    // 所以它**几乎**不会误判，但理论上会。这条断言的作用是"指纹一旦漂移先响"——
+    // 若哪天某条原生实拍的 IV 恰好全可打印，测试失败本身就是要的信息（说明这条判据不牢），
+    // 而不是"改断言把它压下去"。
+    let v = app_business_vectors();
+
+    for case in v["hcyCoolFlagBodyEnvelope192"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let raw = b64_decode(case["payloadB64"].as_str().unwrap()).unwrap();
+        assert!(
+            !raw[..16].iter().all(|b| (0x20..0x7f).contains(b)),
+            "{name}: 原生族的 IV 应基本不可能全可打印"
+        );
+    }
+
+    // ⚠ 反向**不能**断言："可打印 IV ⇒ WebView 族"不成立 ——
+    // `encodeData` 也是可打印 IV（见 `app_encode_data_is_a_16_ascii_iv_prefix_not_a_binary_one`）。
+    // 所以这条指纹只用来在**已知是 hcy-cool-flag 整包信封**的前提下挑钥匙。
+    let req_ascii = v["hcyCoolFlagWebViewEnvelope256"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["ivKind"] == "ascii")
+        .count();
+    assert!(req_ascii >= 2, "WebView 族的请求侧样本应至少 2 条");
+}
+
+#[test]
 fn sha1_upper_matches_pc_client_encrypt_by_hash() {
     let v = pc_vectors();
     for case in v["sha1Upper"].as_array().unwrap() {

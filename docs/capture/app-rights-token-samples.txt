@@ -87,7 +87,7 @@ body = base64( IV(16 字节，二进制) ‖ AES-192-CBC/PKCS7(
 
 | 项 | 值 |
 |---|---|
-| 钥匙 | `2olBaQGYnEKoStYomsd1n7ax`（**24 字节 → AES-192**，不是 AES-128）|
+| 钥匙 | `2olBaQGYnEKoStYomsd1n7ax`（**24 字节 → AES-192**，不是 AES-128）—— **原生**那一层 |
 | 出处 | 旧项目 `packages/core/src/utils/encrypt.ts:3` 的 `REFRESH_TOKEN_KEY` |
 | ⚠ 关键线索 | 该文件导出的 `aesDecryptWithDynamicIV` **全仓无人调用** —— 旧项目只用它**加密** note 的 refreshToken 体，从没用它解过码。钥匙一直在仓库里，只是没人把它和这个头连起来 |
 | 命中面 | **396 条**实拍（跨 10 个 HAR、30+ 个 URL×方向），含 `querySpecTokenV2` / `queryAvailableBenefit` / `queryUserBenefits` / `getUser` / `avatar/get` / `refreshToken` / `queryUserMemberCards` … |
@@ -97,9 +97,31 @@ body = base64( IV(16 字节，二进制) ‖ AES-192-CBC/PKCS7(
 （5 条**实拍**，请求与响应两个方向都有，明文里无标识故可直接入库）；
 Rust 消费者在 `crates/mcloud-core/src/crypto/tests/app.rs`。
 
-⚠ **别把它当成"唯一钥匙"**：`user/getUser` 的体是 `base64(IV(16 个**可打印 ASCII**) ‖ CT)`
-（形态像 `encodeData`，但 clientKey 也开不了）；`ILog` / `queryRights` / `IControl` /
-`thirdlogin` / `getSmsCode` 等也各有解不开的条目。
+### 1.2 ⚠⚠ 同日再更正：**第三把钥匙 —— H5 / WebView 那一层**（AES-256）
+
+§1.1 收尾时写的"`user/getUser` 的体是 `base64(IV(16 个可打印 ASCII) ‖ CT)`，
+形态像 `encodeData` 但 clientKey 也开不了" —— **已解开**。
+原因不在钥匙，在**调用方**：那条 `getUser` 是 **WebView** 发的，不是原生。
+
+| 项 | 值 |
+|---|---|
+| 钥匙 | `h7DLzCTAjn+altjy2a9E9FSt7AC6pmx1`（**32 字节 → AES-256**）|
+| 格式 | 与原生**完全同形**（`base64(IV(16) ‖ AES-CBC/PKCS7(key, IV, 明文))`），双向 |
+| 出处 | iOS App 沙盒的 **H5 离线包**：`Data/Documents/AIOfflinePKG/stable/ai-helper/assets/index-af02d869.js` 的 `Kr.coolFlagPivotal` |
+| 调用点 | `AES_CBCDecrypt({ data, key: coolFlagPivotal, getIVFromEncrypt: true })` |
+| 四组交叉对照 | WebView×256 = **3/3** ；原生×256 = 0/2 ；WebView×192 = 0/3 ；原生×192 = **3/3** |
+| 覆盖面 | 14 条"可打印 IV"候选里 11 条命中（3 个接口）|
+
+**判据（一句话）：三把钥匙是「谁发的」的函数，不是版本号。**
+`x-yun-uni` + `x-yun-api-version` = 原生；`origin: mcloudlocal://` + `sec-fetch-*` = WebView。
+**请求侧**还能看 IV：H5 用 `Bn.generateRandomString(16)`（随机**字符** ⇒ 全可打印），
+原生用随机**字节**。⚠ **响应侧两族都是二进制 IV**（服务端生成），不能靠 IV 区分。
+
+完整推导、H5 源码原文与踩坑记录见 `docs/upstream-app-business-api.md` §8.1。
+黄金向量 `hcyCoolFlagWebViewEnvelope256`；Rust 测试三条 `app_cool_flag_*`。
+
+⚠ **仍未解开**：`ILog`（它的体同样是"可打印 IV"，但**不属于**这把钥匙）；
+`queryRights` / `IControl` / `thirdlogin` / `getSmsCode` 也各有解不开的条目。
 **在拿到证据之前，不要把这几种信封互相套用。**
 
 ---

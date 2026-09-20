@@ -797,9 +797,11 @@ cargo test -- --ignored                             # 真实链路 smoke（需 M
 | `auth-service/auth/tyrzLogin` | body 带 `type` / `channel` | body 无这两个字段，`marketName=newsign_139mail` |
 | `market/signin/page/infoV3` | 不带端口的 `/market/...` | `caiyun.feixin.10086.cn:7071/ycloud/...` |
 | `noteRefreshToken` | `note.mcloud.139.com/noteServer/...` | `note-njs.yun.139.com/yun-note/...`（另一个域） |
-| `auth/refreshToken` | 注释称"明文 JSON 接口" | 真实请求与响应都是**加密载荷**（`hcy-cool-flag` 整包信封，**AES-192** `2olBaQGYnEKoStYomsd1n7ax`；见 `upstream-app-business-api.md` §8.0）|
+| `auth/refreshToken` | 注释称"明文 JSON 接口" | 真实请求与响应都是**加密载荷**（`hcy-cool-flag` 整包信封）|
 
 另有两个信封上的坑要记住：这类接口的 `code` 可能是**字符串**（`"0"`）而不是数字；`success: false` 必须**优先于** `code` 判失败 —— 把 `success` 折进 `code` 会得到 `0`，于是失败被判成成功。
+
+⚠ `hcy-cool-flag` 整包信封的钥匙**按「谁发的」分，不是版本号**：**App 原生**用 **AES-192** `2olBaQGYnEKoStYomsd1n7ax`（§8.0），**H5 / WebView** 用 **AES-256** `h7DLzCTAjn+altjy2a9E9FSt7AC6pmx1`（§8.1），格式完全同形 `base64(IV(16) ‖ AES-CBC/PKCS7)`、双向。选钥匙看头：`x-yun-uni` + `x-yun-api-version` ⇒ 原生；`origin: mcloudlocal://` + `sec-fetch-*` ⇒ WebView。
 
 **密码学对拍的具体落法**（`test/golden/crypto-vectors.json`，由 `scripts/gen-crypto-vectors.cjs` 从 TS 原版库直接产出）：
 
