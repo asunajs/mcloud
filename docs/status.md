@@ -168,7 +168,8 @@
 | `capabilities::login` | ✅ | 扫码状态机（推进 / 终态不可逆 / 自身 TTL / 码的映射 / 限流非终态）+ 短信链路（滑块降级 / 配额 / 登录）+ 登录结果 → `auth` 与领域对象（**22 条测试**）。前置的 `upstream::login` 已先落地 |
 | `exec` | ✅ | 并发闸 / 互斥键 / 参数摘要 / 准入（幂等 + 互斥一起判）/ 事件总线（**35 条测试**）。对应 `mcloud-exec/src/lib.rs` |
 | `app::payload` | ✅ | `/api/capabilities` 与 `/api/version` 的响应体（**7 条测试**）。纯：只依赖 `capabilities` + `core` |
-| `app` 其余 | ⬜ | `login` / `run` / `smid` / `session` / `migration` / `signin/*` 等**只依赖 `io`**（`upstream` 那侧已整族落地），步 3 落地前迁不了 |
+| `app::smid` | ✅ | 生命周期那一层：东八区 14 位时间（跨 UTC 午夜那条已钉）/ `UploadContext` / 绑定与复用（复用路径**一次写都不发**）/ 主动换特征 = 旧 id 作废 / `DeviceID`（库里有就**不打网络**）与 `ReportDeviceID`（每次都真上报）/ 落库失败就丢掉 id 不返回（**12 条测试**）。库里那串读不出来是**报错**不是重掷 |
+| `app` 其余 | ⬜ | `login` / `run` / `session` / `migration` / `signin/*`。`upstream` 已整族落地，所以除 `migration`（真依赖 `mcloud_io::import_legacy`）外**不再被步 2 挡**，只等步 3 |
 | `upstream::login` | ✅ | 为使 `capabilities::login` 能落地而**提前做的前置**：信封 / 端档案 / 请求体 / 滑块 / 口令哈希 / 判定（**33 条测试**）。步 2 的其余部分（`signin` 协议族）仍未迁 |
 | `upstream::app_client` | ✅ | App 端（iOS）档案：16 段 `x-yun-client-info` 与 14 段 `x-DeviceInfo` **不同值**、三种 `os_version` 写法、`mobile` 前缀的 `Authorization`、未登录占位头（**10 条测试**）。它是整个签到链路的前置 |
 | `upstream::app_login` | ✅ | App 端验证码登录（`632` 行）：三层封装（明文 JSON → AES-128-ECB hex → **末 10 位错位**）、`hcy-cool-flag` **主动不发**、滑块 H5 的 `data` 只有两个头、`9441`/`9103`/`9999` 三态判定（**18 条测试**）。中心断言 `appLoginWire` 取自 Rust 侧 `crypto/tests/app.rs`（抓包侧独立脚本算出），Go 复算同一串 ⇒ 真跨实现对拍 |

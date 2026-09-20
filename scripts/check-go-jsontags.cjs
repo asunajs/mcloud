@@ -80,6 +80,10 @@ const UNTAGGED_ALLOWED = {
     '一次上报的**时间与上一次的 deviceId**。时间由调用方给（东八区），旧 deviceId 只在本次请求里用；Rust 侧同样是纯入参结构，不 Serialize',
   'internal/upstream/smid.go:SmRule':
     'DES 规则表的**一条**（密钥 + 混淆后的键名），是常量表的元素不是数据模型；Rust 侧这条 rule 表也是 `const` 不是 Serialize',
+  'internal/app/smid.go:UploadContext':
+    '一次上报的时间上下文（14 位东八区时间 + nowMillis + 上一次的 deviceId），**只**喂给上游算法；Rust 侧 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
+  'internal/app/smid.go:FingerprintBinding':
+    '一次绑定的**结果**（特征 + 库里两列 + 是否新绑），内存里用；Rust 侧同样只 derive `Debug, Clone, PartialEq, Eq`',
   'internal/upstream/app_login.go:AppSendSmsOutcome':
     '一次发码的**判定结果**（分类 + 配额余量 / captchaType / code+msg），进程内存里用；Rust 侧是 `enum`，**不** Serialize',
   'internal/upstream/app_login.go:AppLoginOutcome':
