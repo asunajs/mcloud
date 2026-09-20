@@ -1,6 +1,6 @@
 {
   "$source": "iOS App（/Applications/mCloud.app/Wrapper/mCloud_iPhone.app/mCloud_iPhone）的字符串常量 + macOS 客户端 app.asar 的 out/renderer/api/api.js + App 自有网络日志（har/，gitignore）",
-  "$note": "App 业务接口（形态 B）的两把「锁」。**算法本身是实拍全量验证过的**（见 $evidence）；但 encodeData 的向量是**合成**的 —— 原因见各条 note。",
+  "$note": "App 业务接口（形态 B）的两把「锁」。**算法本身是实拍全量验证过的**（见 $evidence）；但 encodeData 的向量是**合成**的 —— 原因见各条 note。\n\n**2026-09-20 补**：`hcy-cool-flag` 的**整包信封**不是一把钥匙 —— 除 `hcyCoolFlagEnvelope`（AES-128，发码链路，有活体探针）外，还有 `hcyCoolFlagBodyEnvelope192`（AES-192，396 条实拍，覆盖 `querySpecTokenV2` / `queryUserBenefits` / `queryAvailableBenefit` / `getUser` / `avatar/get` / `refreshToken` 等）。**判据是逐条实拍，不是\"哪把更新\"。**",
   "$convention": "encodeData 的 base64 解码结果是 32 字节 = 前 16 字节 IV(ASCII) + 后 16 字节密文。解密时必须从**载荷内部**切 IV，不能拿 ivAscii 当 AES 的 IV 再喂整个载荷（CBC 只有第一块依赖 IV，会伪装成「第一块乱码、其余正确」）。PKCS7 去补取**明文**末字节。",
   "$evidence": {
     "signatureSha256": "**6165 / 6165 条实拍请求逐字命中，且跨三个 version 都命中**：V1.0 6162 条、V6.1 2 条、V1.1 1 条 —— 所以公式里的 version 是**按请求头原样代入**（带 V），不是把 `V1.0` 写死。唯一命中的形态：version 原样带 V、字段名 timeStamp 大写 S、字段顺序 clientId→clientKey→msgId→timeStamp→version",
@@ -10,7 +10,8 @@
     "signatureDoesNotCoverBody": "6165 条带签名的请求里 body 有 6161 种不同取值（encodeData 每请求都变），而 6165 条签名全部等于「仅那 5 个字段」的 SHA256 ⇒ 签名与 body 无关（反证，不是探针）",
     "liveProbe": "用自算签名打了一次只读的 general/getStatus（真服务器、用户自己的登录态），返回 resultCode:200 且 msgId 原样回传 ⇒ 服务端确实在校验签名，算法在活服务器上成立",
     "hcyCoolFlagKeyDiscovery": "iOS 二进制里 16 字符候选 201124 个 × {AES-ECB, AES-CBC(零/前16/后16 IV)} 全部试过，唯一命中 uDjGSA8auFlbwDkY；判定用的是**已知明文**（见 §hcyCoolFlagEnvelope 的 note），不是靠'解出可打印字符'这种弱判据。脚本 scripts/crack-cool-flag-response.py",
-    "hcyCoolFlagLiveProbe": "把请求体按同格式加密后发出去，服务端**不再**回 01000019 Illegal base64 character 7b，而是正常处理并回 200059554（且响应也是同格式加密）⇒ 算法在真服务器上成立"
+    "hcyCoolFlagLiveProbe": "把请求体按同格式加密后发出去，服务端**不再**回 01000019 Illegal base64 character 7b，而是正常处理并回 200059554（且响应也是同格式加密）⇒ 算法在真服务器上成立",
+    "hcyCoolFlagBodyEnvelope192": "旧项目 `mcloud-sign/har/` 里 **396 条**实拍（跨 10 个 HAR、30+ 个 URL×方向）逐条解开，**零例外**；同一批条目上 `uDjGSA8auFlbwDkY`（AES-128）**0 命中** ⇒ 至少两把钥匙，按链路分。钥匙字面量来自旧项目 `packages/core/src/utils/encrypt.ts:3` 的 `REFRESH_TOKEN_KEY`，而它导出的解码函数 `aesDecryptWithDynamicIV` **全仓无人调用**（旧项目只用它加密 note 的 refreshToken 体）。"
   },
   "constants": {
     "APP_CLIENT_ID": "iosapp",
@@ -18,7 +19,8 @@
     "PC_CLIENT_ID": "pcapp",
     "PC_CLIENT_KEY": "6lXUhuJGkkAr5HXr",
     "SIGNATURE_FIELD_ORDER": "clientId, clientKey, msgId, timeStamp, version",
-    "BODY_AES_KEY": "uDjGSA8auFlbwDkY"
+    "BODY_AES_KEY": "uDjGSA8auFlbwDkY",
+    "BODY_AES_KEY_192": "2olBaQGYnEKoStYomsd1n7ax"
   },
   "signatureSha256": [
     {
@@ -107,6 +109,48 @@
       "plaintext": "{\"success\":true,\"code\":\"200\",\"message\":\"ok\",\"data\":null}",
       "payloadB64": "AAECAwQFBgcICQoLDA0OD6uH90ObYvZB3KrUHvNrE1LGJwAjT/fiONMDyiijh/7Ai7xDOjwr4ZiA3fqdbXiZC585NHmfkOY0H8DpjMR2PDY=",
       "note": "**合成**，只为把**加密**方向也钉进向量（前两条只验解密方向）。IV 固定便于对拍。"
+    }
+  ],
+  "hcyCoolFlagBodyEnvelope192": [
+    {
+      "name": "实拍（请求）：签到链路 querySpecTokenV2 —— **明文无标识**，可直接入库",
+      "direction": "request",
+      "ivHex": "2f2b868a04afa33d3e6cdfe42efc2498",
+      "plaintext": "{\"toSourceId\":\"001005\"}",
+      "payloadB64": "LyuGigSvoz0+bN/kLvwkmKrYaJTzFTLVPl3XiP9PToGQ5A+OQ67QrJElRy2QuOB8",
+      "note": "**实拍**，出自旧项目 `mcloud-sign/har/*.har`（`Authorization` 前缀 `mobile` ⇒ App 流量）。该 HAR 目录已在旧项目的 `.gitignore` 里，故这里是唯一入库副本；明文里没有手机号 / userDomainId，所以不必合成。"
+    },
+    {
+      "name": "实拍（请求）：queryUserMemberCards",
+      "direction": "request",
+      "ivHex": "49f63755c49eff231cb2f7aef08c8764",
+      "plaintext": "{\"channelId\":\"10011\",\"sourceType\":\"1\",\"version\":\"mCloud13.0.0\"}",
+      "payloadB64": "SfY3VcSe/yMcsveu8IyHZBAsQk5qOR1sCLCTWA9CkxnsjerWZIpsV+RYhbJG9uWi7R++3tgwa3/mq99I/2RwOlH0eTxCvHuhNOhXvDrZrv0=",
+      "note": "**实拍**，出自旧项目 `mcloud-sign/har/*.har`（`Authorization` 前缀 `mobile` ⇒ App 流量）。该 HAR 目录已在旧项目的 `.gitignore` 里，故这里是唯一入库副本；明文里没有手机号 / userDomainId，所以不必合成。"
+    },
+    {
+      "name": "实拍（请求）：同一条接口的第三个 toSourceId —— 证明加密与 toSourceId 取值无关",
+      "direction": "request",
+      "ivHex": "39ee73e9b520beeb3b143c7790f6422c",
+      "plaintext": "{\"toSourceId\":\"010001\"}",
+      "payloadB64": "Oe5z6bUgvus7FDx3kPZCLB9Gbyw/QMgArGBeba50kccnB0MI8RxFAngZec0ZH1AS",
+      "note": "**实拍**，出自旧项目 `mcloud-sign/har/*.har`（`Authorization` 前缀 `mobile` ⇒ App 流量）。该 HAR 目录已在旧项目的 `.gitignore` 里，故这里是唯一入库副本；明文里没有手机号 / userDomainId，所以不必合成。"
+    },
+    {
+      "name": "实拍（请求）：群订阅提醒列表 —— 分页参数，无标识",
+      "direction": "request",
+      "ivHex": "b0f2799dc7e9bdd7a7cee1da465443ec",
+      "plaintext": "{\"pageNumber\":1,\"pageSize\":30}",
+      "payloadB64": "sPJ5ncfpvdenzuHaRlRD7GmQKxsmrVBRtyzfJKLBx0rTF45+gUGo9NXGq6iHQ+yt",
+      "note": "**实拍**，出自旧项目 `mcloud-sign/har/*.har`（`Authorization` 前缀 `mobile` ⇒ App 流量）。该 HAR 目录已在旧项目的 `.gitignore` 里，故这里是唯一入库副本；明文里没有手机号 / userDomainId，所以不必合成。"
+    },
+    {
+      "name": "实拍（响应）：list",
+      "direction": "response",
+      "ivHex": "31c4ee12f92cb4f587ba61687246e5bd",
+      "plaintext": "{\"success\":true,\"code\":\"0000\",\"message\":\"请求成功\",\"data\":{\"total\":0,\"list\":[],\"pageNum\":1,\"pageSize\":30,\"size\":0,\"startRow\":0,\"endRow\":0,\"pages\":0,\"prePage\":0,\"nextPage\":0,\"isFirstPage\":true,\"isLastPage\":true,\"hasPreviousPage\":false,\"hasNextPage\":false,\"navigatePages\":8,\"navigatepageNums\":[],\"navigateFirstPage\":0,\"navigateLastPage\":0}}",
+      "payloadB64": "McTuEvkstPWHumFockblvT72AdwA7Mg/562+LUgr5P2DD4ct3SYN5kMz3l3yqQwUUt0Hg131cNu3AqnbE2qW3qv9FP6XZAPtWAsn8Dr/65qRfkzJpbbyUXiA9GqupFQfc8+IJuItVFA1UaN2t+mgoEyCmxFPYCieNSWSJ6HpF0EwdFigPAT7i+tkHsEdOibpt98Mc2IYxWcExjE573KUwDEcIuZ0bK2Xeemd4rqOyCCJotgD0pXMQM3TNnaLGsAXhLtUiJn5Lnnr2uiSOWS7VCg3bOj5JZ7G2Bystyp6unCc8Ckc6erYG5OQNfQsymRwtW5QXfP3xdnzXc7omJJwZ3S4yzF8BJbl8u53qjq92Sis6gsWdtJVQmUiE0M/IJj3qjJpUxQlee7FnKc1NRsTzInVatyRAZhQoHw2BQUD64ujjknESiRe396DlqJFfn7nsdIs02LP211ThKAdeuQVYJ6XxrQ2kD1NmwGj3pcTI/s=",
+      "note": "**实拍**，出自旧项目 `mcloud-sign/har/*.har`（`Authorization` 前缀 `mobile` ⇒ App 流量）。该 HAR 目录已在旧项目的 `.gitignore` 里，故这里是唯一入库副本；明文里没有手机号 / userDomainId，所以不必合成。"
     }
   ]
 }

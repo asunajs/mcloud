@@ -116,6 +116,138 @@ fn app_login_encrypt_length_rule_matches_the_capture() {
     }
 }
 
+// ── App 业务接口（形态 B）：`signature` / `encodeData` / `hcy-cool-flag` 整包信封 ──
+//
+// 这三条都吃 test/golden/app-business-crypto-vectors.json。常量**从向量文件里读**，
+// 不在这里抄一遍 —— 否则"改了向量没改代码"两边会一起漂。
+
+#[test]
+fn app_signature_field_order_is_rebuilt_from_the_captured_input() {
+    // 逐条把 `clientId=…&clientKey=…&msgId=…&timeStamp=…&version=…` 拼出来与实拍串比对：
+    // 这一条锁的是**字段顺序**，不是哈希算法。顺序错了哈希必错，
+    // 但"哈希对了"不足以说明顺序对（也可能是向量抄错），所以两件事分开断言。
+    let v = app_business_vectors();
+    let c = &v["constants"];
+    let (cid, ckey) = (
+        c["APP_CLIENT_ID"].as_str().unwrap(),
+        c["APP_CLIENT_KEY"].as_str().unwrap(),
+    );
+
+    let cases = v["signatureSha256"].as_array().unwrap();
+    assert!(!cases.is_empty());
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let input = case["input"].as_str().unwrap();
+        let rebuilt = format!(
+            "clientId={cid}&clientKey={ckey}&msgId={}&timeStamp={}&version={}",
+            case["msgId"].as_str().unwrap(),
+            case["timeStamp"].as_str().unwrap(),
+            case["version"].as_str().unwrap(),
+        );
+        assert_eq!(rebuilt, input, "{name}: 字段顺序/取值与实拍串不一致");
+        assert_eq!(
+            sha256_hex(input.as_bytes()),
+            case["expect"].as_str().unwrap(),
+            "{name}"
+        );
+        // ⚠ `version` 是**按请求头原样代入**（带 V），不是把 `V1.0` 写死。
+        assert!(case["version"].as_str().unwrap().starts_with('V'), "{name}");
+    }
+}
+
+#[test]
+fn app_encode_data_is_a_16_ascii_iv_prefix_not_a_binary_one() {
+    // `encodeData` 与整包信封**长得像但不是同一个约定**：这里的前 16 字节必须是
+    // 可打印 ASCII（实拍 6158/6158 都是），整包信封那边是二进制。
+    // 这条断言存在的意义就是"别把两者互相套用"。
+    let v = app_business_vectors();
+    let key = v["constants"]["APP_CLIENT_KEY"].as_str().unwrap();
+    for case in v["encodeDataDecrypt"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let payload = case["encodeData"].as_str().unwrap();
+        let raw = b64_decode(payload).unwrap();
+        assert_eq!(raw.len(), 32, "{name}: 16 IV + 16 密文（手机号一块就够）");
+        assert_eq!(
+            &raw[..16],
+            case["ivAscii"].as_str().unwrap().as_bytes(),
+            "{name}: 前置 IV 必须是那 16 个 ASCII 字符"
+        );
+        assert_eq!(
+            aes_dynamic_iv_decrypt(key, payload).unwrap(),
+            case["plaintext"].as_str().unwrap(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn app_cool_flag_body_envelope_192_decrypts_every_real_capture() {
+    // **这是 App 整包信封的真钥匙**（2026-09-20 定案）。
+    // 证据：旧项目 `mcloud-sign/har/` 里 396 条实拍（`Authorization` 前缀 `mobile` ⇒ App 流量）
+    // 逐条解开、零例外；同一批条目上 AES-128 那把 **0 命中**。
+    let v = app_business_vectors();
+    let key = v["constants"]["BODY_AES_KEY_192"].as_str().unwrap();
+
+    // 钥匙字面量与旧项目 `packages/core/src/utils/encrypt.ts:3` 的 `REFRESH_TOKEN_KEY` 同一把，
+    // 长度 24 ⇒ **AES-192**。这两条一起断言，免得有人"顺手"把它归一化成 16 字节。
+    assert_eq!(key.len(), 24, "24 字节 ⇒ AES-192，不是 AES-128");
+    assert_eq!(key, REFRESH_TOKEN_KEY);
+
+    let cases = v["hcyCoolFlagBodyEnvelope192"].as_array().unwrap();
+    assert!(cases.len() >= 5, "至少要有请求与响应两个方向的实拍");
+    let mut directions = std::collections::BTreeSet::new();
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let payload = case["payloadB64"].as_str().unwrap();
+        directions.insert(case["direction"].as_str().unwrap().to_string());
+
+        let raw = b64_decode(payload).unwrap();
+        assert_eq!(
+            hex::encode(&raw[..16]),
+            case["ivHex"].as_str().unwrap(),
+            "{name}: 前置 IV 与 ivHex 不一致"
+        );
+        assert_eq!((raw.len() - 16) % 16, 0, "{name}: 密文不是整块");
+        assert_eq!(
+            aes_dynamic_iv_decrypt(key, payload).unwrap(),
+            case["plaintext"].as_str().unwrap(),
+            "{name}"
+        );
+    }
+    assert!(
+        directions.contains("request") && directions.contains("response"),
+        "信封是**双向**的，向量里两个方向都要有：{directions:?}"
+    );
+}
+
+#[test]
+fn app_cool_flag_body_envelope_192_is_not_the_128_bit_key() {
+    // 这条锁的是"**至少两把钥匙，按链路分**"这个结论本身：
+    // 发码链路那把 AES-128 钥匙在整包信封的实拍上**解不出正确明文**。
+    // 只断言"结果不等于期望明文"而不是"必定报错" ——
+    // 换错钥匙时 PKCS7 有 1/256 的概率碰巧合法，那时解出的是乱码而不是 Err。
+    let v = app_business_vectors();
+    let k192 = v["constants"]["BODY_AES_KEY_192"].as_str().unwrap();
+    let k128 = v["constants"]["BODY_AES_KEY"].as_str().unwrap();
+    assert_ne!(k192, k128, "两把钥匙必须不同 —— 否则这条测试没有意义");
+
+    for case in v["hcyCoolFlagBodyEnvelope192"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let payload = case["payloadB64"].as_str().unwrap();
+        let expect = case["plaintext"].as_str().unwrap();
+        assert_eq!(
+            aes_dynamic_iv_decrypt(k192, payload).unwrap(),
+            expect,
+            "{name}"
+        );
+        assert_ne!(
+            aes_dynamic_iv_decrypt(k128, payload).ok().as_deref(),
+            Some(expect),
+            "{name}: AES-128 那把不该能开出这条明文"
+        );
+    }
+}
+
 #[test]
 fn sha1_upper_matches_pc_client_encrypt_by_hash() {
     let v = pc_vectors();

@@ -158,6 +158,29 @@ const VERIFIERS = {
     return { actual: payload, expected: e.payloadB64, extra: `方向=${e.direction}` };
   },
 
+  /**
+   * **第二把**整包信封钥匙（2026-09-20 补）。
+   *
+   * 与 `hcyCoolFlagEnvelope` **格式完全相同**（`base64(IV(16 字节二进制) ‖ CT)`、双向），
+   * 差别只在钥匙与算法强度：`BODY_AES_KEY_192`（24 字节 → **AES-192**）。
+   *
+   * 为什么两把都要留：**它们的证据来源不同** ——
+   * `BODY_AES_KEY`（AES-128）是在发码链路上用已知明文暴力命中 + 活体探针验证的；
+   * `BODY_AES_KEY_192` 是在旧项目 396 条实拍上逐条解开的，而同一批条目上 AES-128 那把 **0 命中**。
+   * 换句话说：这不是"新钥匙取代旧钥匙"，而是"**至少两把，按链路分**"。
+   * 判据只能是逐条实拍，不能是"哪把更晚发现"。
+   */
+  hcyCoolFlagBodyEnvelope192: (e, c) => {
+    const iv = Buffer.from(e.ivHex, "hex");
+    if (iv.length !== 16) throw new Error(`ivHex 应为 16 字节，实际 ${iv.length}`);
+    const raw = unb64(e.payloadB64);
+    if (!raw.subarray(0, 16).equals(iv)) {
+      throw new Error(`载荷前置 IV 与 ivHex 不一致：${raw.subarray(0, 16).toString("hex")}`);
+    }
+    const pt = aesCbcDecrypt(c.BODY_AES_KEY_192, iv, raw.subarray(16), 24);
+    return { actual: pt, expected: e.plaintext, extra: `AES-192，方向=${e.direction}` };
+  },
+
   // —— 签名头（PC 端 `signHeader` 与 App 签到页 `h5Signature` 同一个算式）——
   //
   // 两段分开登记（不是一个别名）是有意的：它们的**消费方不同** ——

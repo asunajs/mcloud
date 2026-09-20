@@ -322,9 +322,34 @@ Authorization: Basic base64("mobile:<手机号>:<authToken>")
 
 | 项 | 值 |
 |---|---|
-| 密钥 | **`uDjGSA8auFlbwDkY`**（16 字符 ASCII；与 `clientKey` **不同**）|
+| 密钥 | **不止一把** —— 见下面的 §8.0 |
 | IV | 16 字节**二进制**，拼在载荷前面 —— ⚠ **不是** `encodeData` 那种"16 个可打印 ASCII" |
 | 方向 | **双向**（请求体 + 响应体都用它）|
+
+### 8.0 ⚠⚠ 更正（2026-09-20）：钥匙**不止一把**，这一节写的那把只覆盖发码链路
+
+上面那套格式（`base64(IV(16 字节二进制) ‖ AES-CBC/PKCS7(...))`、双向）是对的，
+但**钥匙写窄了**。用旧项目 `mcloud-sign/har/`（`Authorization` 前缀 `mobile` ⇒ App 流量）
+的实拍重跑：
+
+| 钥匙 | 长度 / 算法 | 在 **396 条**带 flag 实拍上的命中 | 覆盖 |
+|---|---|---|---|
+| `uDjGSA8auFlbwDkY` | 16 字节 / AES-128 | **0** | 只在这节描述的**发码链路**上验证过（活体探针 D）|
+| **`2olBaQGYnEKoStYomsd1n7ax`** | **24 字节 / AES-192** | **396 / 396** | `querySpecTokenV2`、`queryAvailableBenefit`、`queryUserBenefits`、`getUser`、`avatar/get`、`refreshToken`、`queryUserMemberCards` … 跨 10 个 HAR、30+ 个 URL×方向 |
+
+⇒ **至少两把钥匙，按链路分**。判据只能是**逐条实拍**，不是"哪把更晚发现"。
+
+第二把的出处值得单独记一笔：它就是旧项目 `packages/core/src/utils/encrypt.ts:3` 的
+`REFRESH_TOKEN_KEY`，而同一文件导出的解码函数 `aesDecryptWithDynamicIV`
+**全仓无人调用** —— 旧项目只用它**加密** note 的 refreshToken 体，从没用它解过码。
+**钥匙一直在仓库里，缺的只是"把它和这个头连起来"这一步。**
+
+黄金向量：`hcyCoolFlagBodyEnvelope192`（5 条实拍，双向）；Rust 消费者见
+`crates/mcloud-core/src/crypto/tests/app.rs`。
+
+⚠ **还有解不开的**：`user/getUser` 的体是 `base64(IV(16 个**可打印 ASCII**) ‖ CT)`
+（形态像 `encodeData`，但 `clientKey` 也开不了），`ILog` / `queryRights` / `IControl` /
+`thirdlogin` / `getSmsCode` 也各有解不开的条目。**别把不同信封互相套用。**
 
 **怎么确认的**（三步，都可复现）：
 
@@ -357,6 +382,12 @@ Authorization: Basic base64("mobile:<手机号>:<authToken>")
 
 > **实现侧目前不发这个头。** 解开它的价值是"再也不用猜"，
 > 不是"必须带上"（发码接口上不发时响应语义与抓包完全一致）。
-> 完整证据与一处**仍未确认**的矛盾（App 自己带这个头却拿到明文响应）
-> 见 `docs/capture/app-sms-login-samples.txt` §1.2 (f)。
+> 完整证据见 `docs/capture/app-sms-login-samples.txt` §1.2。
+>
+> ✅ **2026-09-20：那条"仍未确认的矛盾"结案了 —— 它不是矛盾。**
+> `app-sms-login-samples.txt` §1.2 (f) 记的是"App 自己带这个头、体是明文，响应却是明文"。
+> 真相是：**App 日志记的是加密前的请求与解密后的响应**，所以它永远是明文。
+> 线上两头都是密文（同一条 `user/getUser`：日志明文 vs 抓包密文，逐条对上）。
+> ⇒ 那一节列的两个候选解释（服务端灰度 / 头集合是整理稿）**都不需要**；
+> 需要改的是"拿日志当线"这个取证习惯。
 

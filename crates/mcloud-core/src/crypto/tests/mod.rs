@@ -180,6 +180,19 @@ fn pc_vectors() -> Value {
     serde_json::from_str(PC_VECTORS).expect("向量文件必须是合法 JSON")
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// App 业务接口（形态 B）的三把锁：`signature` / `encodeData` / `hcy-cool-flag` 整包信封。
+// 向量与出处见 test/golden/app-business-crypto-vectors.json ——
+// **本文件是它唯一的 Rust 消费者**（少了它，黄金向量门禁会把它标成"死向量"）。
+// ─────────────────────────────────────────────────────────────────────────
+
+const APP_BUSINESS_VECTORS: &str =
+    include_str!("../../../../../test/golden/app-business-crypto-vectors.json");
+
+fn app_business_vectors() -> Value {
+    serde_json::from_str(APP_BUSINESS_VECTORS).expect("向量文件必须是合法 JSON")
+}
+
 mod app;
 mod gzip;
 mod hash;

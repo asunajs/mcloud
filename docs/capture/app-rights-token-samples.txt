@@ -54,15 +54,53 @@ Pragma             = no-cache
 
 设备串各段含义见 `docs/client-profiles.md` §5.3，此处不重复。
 
-### ⚠ `hcy-cool-flag` 在这几个接口上是**明文**
+### ⚠⚠ 更正（2026-09-20）：带 `hcy-cool-flag` 的体**是密文**，上一版写反了
 
-`queryAvailableBenefit` / `queryUserBenefits` / `queryRights` / `refreshToken` **四个都带**
-`hcy-cool-flag: 1`（`queryRights` 与权益两个还带 `hcy-ios-option-enc: 1`），
-但**请求体与响应体全是明文**。
+上一版写的是"四个接口都带 `hcy-cool-flag: 1`，但**请求体与响应体全是明文**" —— **错**。
+错因不是算法，是**取证面**：把 **App 日志**当成了线上形态。
+App 日志记的是**加密前的请求 / 解密后的响应**（这正是它比代理抓包强的地方，
+也正是它的陷阱 —— 看到明文不等于线上是明文）。
 
-⇒ 再次印证：**这个头是逐接口的声明，不是"整套链路都加密"的开关**。
-不要因为看到它就去做 base64 解码 —— 会把明文 JSON 解坏。
-（它的加密形态见 `docs/upstream-app-business-api.md` §8，只有 `getSmsCode` 那条链路用到。）
+**两条独立证据**：
+
+| 证据 | 事实 |
+|---|---|
+| 同一条 `user/getUser`，两个来源 | App 日志的体是明文 `{"userDomainId":…}`；代理抓包的线上体是 base64 密文。**同端点两处形态不同，因为一个是"日志"、一个是"线"** |
+| 旧项目 `mcloud-sign/har/` 里 **396 条**带 flag 的实拍 | 逐条解开、**零例外**；请求与响应**双向**都是密文 |
+
+⇒ 这个头声明的是"**我这个请求体已加密**"，而且**响应也按同一格式加密**（双向）。
+**本文件 §2–§8 里贴的所有"请求体 / 响应"都是 App 日志里的逻辑明文，不是线上字节。**
+要发真实请求（或要逐字节对齐抓包）就得按 §1.1 的信封加密。
+
+> `queryRights` 与权益两个接口还额外带 `hcy-ios-option-enc: 1`；
+> 实测这个头**不触发**任何加解密（见 `docs/capture/app-sms-login-samples.txt` §1.2 (d) 用例 C）。
+
+### §1.1 整包信封（真钥匙：**AES-192**，2026-09-20 定案）
+
+```text
+body = base64( IV(16 字节，二进制) ‖ AES-192-CBC/PKCS7(
+                 key = "2olBaQGYnEKoStYomsd1n7ax",     ← 24 字节
+                 iv  = IV,
+                 plain = 明文的 UTF-8 字节 ) )
+响应：同一个格式（双向）。
+```
+
+| 项 | 值 |
+|---|---|
+| 钥匙 | `2olBaQGYnEKoStYomsd1n7ax`（**24 字节 → AES-192**，不是 AES-128）|
+| 出处 | 旧项目 `packages/core/src/utils/encrypt.ts:3` 的 `REFRESH_TOKEN_KEY` |
+| ⚠ 关键线索 | 该文件导出的 `aesDecryptWithDynamicIV` **全仓无人调用** —— 旧项目只用它**加密** note 的 refreshToken 体，从没用它解过码。钥匙一直在仓库里，只是没人把它和这个头连起来 |
+| 命中面 | **396 条**实拍（跨 10 个 HAR、30+ 个 URL×方向），含 `querySpecTokenV2` / `queryAvailableBenefit` / `queryUserBenefits` / `getUser` / `avatar/get` / `refreshToken` / `queryUserMemberCards` … |
+| 与 §8 的关系 | §8 那把 `uDjGSA8auFlbwDkY`（AES-128）**在同一批 396 条上 0 命中** ⇒ **至少两把钥匙、按链路分**：发码链路用 128 那把（有活体探针佐证），其余用这把 192 的 |
+
+黄金向量：`test/golden/app-business-crypto-vectors.json` 的 `hcyCoolFlagBodyEnvelope192`
+（5 条**实拍**，请求与响应两个方向都有，明文里无标识故可直接入库）；
+Rust 消费者在 `crates/mcloud-core/src/crypto/tests/app.rs`。
+
+⚠ **别把它当成"唯一钥匙"**：`user/getUser` 的体是 `base64(IV(16 个**可打印 ASCII**) ‖ CT)`
+（形态像 `encodeData`，但 clientKey 也开不了）；`ILog` / `queryRights` / `IControl` /
+`thirdlogin` / `getSmsCode` 等也各有解不开的条目。
+**在拿到证据之前，不要把这几种信封互相套用。**
 
 ---
 
@@ -195,6 +233,108 @@ Content-Type: application/json;charset=UTF-8
    `"20260603221142"` / `"20991231235959"`（后者 = 9999-12-31，上游用"永不过期"的哨兵值）。
 4. `orderID` 是**三段拼起来的**：`<13 位数字>_<uuid>_<订单类型名>`，
    下划线分隔、末段是 PascalCase 英文 —— 不是不透明随机串，别整体当 id 哈希。
+
+---
+
+### ⚠⚠ 同一个能力有**两个**接口：原生走 V1，WebView 走 V2
+
+**这条差点被我记错，所以单独写一节。**
+
+在 App 日志里 `grep queryAvailableBenefitV2` 会得到 66 处 —— 但那**不是原生调用**。
+按 `API Name:` 行统计，原生栈实际只调这两个：
+
+| API Name（原生，`FXHttpBaseAccessor` 的 `API Response` 块） | 次数 |
+|---|---|
+| `https://ypqy.mcloud.139.com/isbo2/openApi/queryAvailableBenefit`（**V1**） | 14 |
+| `https://ypqy.mcloud.139.com/isbo2/openApi/queryUserBenefits` | 10 |
+
+那 66 处 V2 全部出现在 **WebView 的 JS console 行**上：
+
+```text
+[MCBaseWebViewController.m:7156][-[MCBaseWebViewController userContentController:didReceiveScriptMessage:]]
+  [iPhone_wkwebview_js_log][Info] logg…
+```
+
+⇒ **H5 页面自己发的是 `queryAvailableBenefitV2`**，而且请求体是**另一种形态**：
+
+| 调用方 | 路径 | 请求体 |
+|---|---|---|
+| **原生 App** | `queryAvailableBenefit`（V1） | `{"account":{"accountType":"1","accountName":"19900000001","nationCode":"+86"}}` |
+| **WebView / H5** | `queryAvailableBenefitV2` | `{"account":{"userDomainId":"1990000000000000001"}}` |
+| 同上，查单个权益 | `queryAvailableBenefitV2` | `{"account":{"userDomainId":"1990000000000000001"},"benefitNo":"RHR135"}` |
+| **WebView / H5** | `queryUserBenefits` | `{"account":{"userDomainId":"1990000000000000001"},"isNeedBenefit":0}` |
+| **原生 App** | `queryUserBenefits` | `{"isNeedBenefit":1,"account":{"accountType":"1","accountName":"19900000001","nationCode":"+86"}}` |
+
+判据是 HAR 的 `_application`（`docs/client-profiles.md` 的老办法）：这批 `ypqy` 条目
+**8 条全部**是 `com.apple.WebKit.Networking`，**没有一条**是原生。
+
+> **⇒ 这是"同一条接口在原生与 WebView 上不同"的第 3 个实例**
+> （前两个：`querySpecTokenV2` 的 `toSourceId` / 设备头段数；`hcy-cool-flag` 的有无）。
+> 但这次**连路径都不同**（V1 vs V2），不只是头和参数 —— 比前两个更难发现。
+
+#### 顺带一条方法论坑：App 日志里"接口名"出现在**两种**地方
+
+| 位置 | 含义 |
+|---|---|
+| `API Name:` + `*************Request Start***************` | **原生栈真的发了**这个请求 |
+| `[iPhone_wkwebview_js_log]` 行里的 URL | **H5 页面自己发的**（App 只是把 JS console 转出来） |
+
+**`grep <接口名> FXTrace*.log` 会把两者混在一起。** 判断"到底谁在调"必须按
+`API Name:` 行统计，或看 HAR 的 `_application` —— 只看 grep 命中数会得出反的结论
+（我这一轮就先得出了"原生也在调 V2"的错结论）。
+
+### V2 的响应字段比 V1 **多**（同一个 `benefitNo` 的完整形态）
+
+V1 的条目只有 `benefitNo` / `benefitValue` / 可选 `reserve3`；
+**V2 带 `benefitNo` 查询时**返回的条目是这样的（实测，脱敏后逐字）：
+
+```json
+{"benefitNo":"RHR135","benefitValue":"500000",
+ "benefitName":"aitokens","benefitDesc":"aitokens",
+ "benefitIconUrl":"https://eos.guangzhou-2.cmecloud.cn/…/RHR135.png",
+ "isCalExtreme":1,"strategy":2,
+ "benefitStatus":"2","benefitUsed":"100000",
+ "reserve1":"","reserve2":"","reserve3":"[50万 tokens/月]Token",
+ "includeMemberBenefit":"0"}
+```
+
+三点：
+
+1. **`benefitValue` 是总量、`benefitUsed` 是已用量** —— 两者都是**字符串**。
+   算剩余量要自己减，且要处理 `"0"`。
+2. **`reserve1` / `reserve2` / `reserve3` 在 V2 里都出现**（空的是 `""`），
+   而 V1 里**只有非空的 `reserve3` 才出现**（§2 的坑 2）。
+   ⇒ 同一份数据的两个视图，**键的存在性不同**，别用同一套解析。
+3. `benefitStatus: "2"` / `strategy: 2` / `includeMemberBenefit: "0"` 的含义**未查，不猜**。
+
+### ⚠ 这批响应走的是 **gzip + chunked**（不是应用层协议）
+
+`ypqy.mcloud.139.com` 的响应头实测：
+
+```text
+Content-Type: application/json
+Content-Encoding: gzip
+Transfer-Encoding: chunked
+Vary: Origin
+```
+
+⚠ **Reqable 导出的 HAR 里，有几条把 chunked 的原始帧留了下来**，看起来像
+"base64 密文"，其实解出来是：
+
+```text
+140\r\n            ← 十六进制块长（0x140 = 320 字节）
+<320 字节 gzip>    ← 1f 8b 08 …
+\r\n
+0\r\n\r\n          ← 结束
+```
+
+⇒ **这是 HTTP 层的分块，不是上游发明的编码。** 应用层就是普通 JSON。
+用 `reqwest` 的话要**打开 `gzip` feature**（`reqwest = { features = ["gzip"] }`），
+否则拿到的是压缩字节。
+
+> 踩坑记录：我第一次看到 `MTQwDQofiwgAAAAA…` 这种响应，第一反应是
+> "`hcy-cool-flag` 的密文"，差点写进文档。**判据是响应头，不是响应的长相** ——
+> `Content-Encoding: gzip` + `Transfer-Encoding: chunked` 一票否决了那个猜想。
 
 ---
 

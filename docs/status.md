@@ -122,6 +122,14 @@
 另有：`refreshToken` 的真实流量是**加密载荷**（原实现注释却说是明文 JSON 接口）；
 `auth/refreshToken`、`querySpecTokenV2` 这类接口的 `code` 是**字符串**不是数字。
 
+> ✅ 上面"加密载荷"这条 **2026-09-20 已定案**（此前只有结论、没有钥匙）：
+> 带 `hcy-cool-flag` 的请求与响应都是
+> `base64(IV(16 字节二进制) ‖ AES-192-CBC/PKCS7("2olBaQGYnEKoStYomsd1n7ax", IV, 明文))`，
+> 双向；**396 条实拍零例外**。钥匙就藏在旧项目
+> `packages/core/src/utils/encrypt.ts:3` 的 `REFRESH_TOKEN_KEY`，而它导出的解码函数
+> **全仓无人调用** —— 见 `docs/upstream-app-business-api.md` §8.0。
+> ⚠ 它与发码链路的 `uDjGSA8auFlbwDkY`（AES-128）**不是同一把**，别互搬。
+
 ---
 
 ## 按任务指路

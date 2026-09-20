@@ -186,6 +186,56 @@ encodeData = base64( 16 字符 ASCII 动态 IV ‖ 16 字节密文 )
 > **那些接口的服务端没有开这个选项**（或者客户端带了头但体是明文、服务端宽容处理）。
 > 上表的观察仍然成立，但"逐接口"这个结论现在有了机制解释，不再是"说不清"。
 
+### 3.1 ⚠⚠ 上面两段"更正"都要再更正一次（2026-09-20，最后一次）
+
+**"整个窗口里裸 base64 响应是 0 条"这句话，是本文件最危险的一句。**
+它不是观测错了，是**观测面错了**：这张表统计的是 **App 日志**，
+而 **App 日志记的是解密后的响应** —— 所以它**永远**是明文 JSON。
+拿它去统计"响应是不是密文"，等于拿放大镜数空气。
+
+用**代理抓包**（不是日志）重跑，同一批业务接口的结论是：
+
+| 观测面 | 看到的形态 |
+|---|---|
+| App 日志（本文件 §3 那张表用的） | 全是明文 —— 因为日志是**解密后**的 |
+| 代理抓包 / 旧项目 `har/*.har`（**396 条**实拍） | 全是 `base64(IV(16 字节二进制) ‖ AES-192-CBC/PKCS7)` 密文，**双向** |
+
+⇒ **§3 那句"那些接口的服务端没有开这个选项"是错的。服务端开了，而且响应也是密文。**
+
+正确的表述（一句话）：
+**`hcy-cool-flag` 是"我这个请求体已加密"的声明，请求与响应双向生效；
+它出现在 25 个原生接口上（见 §3.2），不是逐接口的例外。**
+
+### 3.2 带这个头的原生接口清单（App 日志逐块统计，36875 个请求块）
+
+25 个接口**全部**带、且**只在带的时候**是密文（`0` 的那一侧是不带的）：
+
+```text
+/isbo/openApi/queryGroupRoleList          /isbo/openApi/queryUserGroupMessageCnt
+avatar/get                                hcy/file/online/file/queryDispatchConfig
+hcy/group/dynamic/collect/overview        hcy/group/manage/message/msgCenterStatus
+hcy/group/manage/myCreateGroupList        hcy/group/manage/myJoinList
+hcy/group/manage/subscribe/remind/list    richlifeApp/devapp/IControl
+richlifeApp/devapp/IOutLink/queryRecentFriendLinkList
+ose.caiyun.feixin.10086.cn …/ILog          ose.caiyun.feixin.10086.cn …/saes_user.IUser
+vsbo…/cloudSEE/openApi/queryGotone        vsbo…/cloudSEE/openApi/queryRights
+vsbo…/cloudSEE/openApi/querySubscribeRelation
+ypqy.mcloud.139.com/isbo2/openApi/queryAvailableBenefit
+ypqy.mcloud.139.com/isbo2/openApi/queryUserBenefits
+user/auth/refreshToken                    user/getUser
+user/querySpecTokenV2                     user/route/qryRoutePolicy
+user/status/query                         user/version/check
+aas.caiyun.feixin.10086.cn …saes_CYTrdPty.IConfig
+```
+
+> ⚠ **签到链路的 `user/querySpecTokenV2` 就在这张表里** —— 它的线上体是密文，
+> 而 App 日志里是 `{"toSourceId":"001005"}`。实现侧**不发**这个头时服务端按明文解析
+> （已端到端跑通），所以**不影响现状**；但"照抄 App 的线上字节"就必须加密。
+
+钥匙、格式、黄金向量见
+[`app-rights-token-samples.txt`](./app-rights-token-samples.txt) §1.1 与
+[`../upstream-app-business-api.md`](../upstream-app-business-api.md) §8.0。
+
 ---
 
 ## 4. 响应信封有**六种**（别写一个通用解析器）
