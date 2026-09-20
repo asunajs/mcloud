@@ -36,6 +36,12 @@
   `app-signin-vectors` 的消费者在步 2 接线，而 `login-crypto-vectors.json`
   至今仍是**死向量**（有生成器 `scripts/gen-login-crypto-vectors.cjs`、无消费者），
   且它的 `§guid32` 连拼接规则都没在向量里给出 —— 详见 `go-migration-plan.md` §6.1 末尾。
+- ⚠⚠ **别照门禁那行"✓ 有测试读取"判定进度**：它的消费者探测扫**四个落点**
+  （`crates/` / `legacy/crates/` / `internal/` / `cmd/`），命中任一即算有消费者，
+  **不区分是哪一侧在读**。所以 `app-signin-vectors.json` 至今显示 ✓，
+  而读它的**只有已冻结的 Rust 侧**。
+  **Go 侧实际读了 5 份**：`crypto` / `pcclient-crypto` / `app-business-crypto` /
+  `auth` / `password-hash`（见 `internal/core/*_test.go` 里的 `golden.Load`）。
 - ⚠ `user` 是第一个引入**第三方依赖**（`golang.org/x/crypto`，只为 argon2）的模块。
   它只给**裸 KDF**，PHC 串的编解码要自己写；且 `v=16` 与 `$argon2d$` 两条
   Go 侧**物理上算不出来**，已在向量的 `$crossLanguageGaps` 里登记为
