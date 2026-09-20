@@ -9,15 +9,15 @@
 #
 # ── 为什么 hook 不直接调 gates.sh ──────────────────────────────────
 #
-# `gates.sh` 跑的是 `cargo test --workspace` 这种全量命令。这在 CI 上是对的
-# （CI 的工作就是"从零验证整棵树"），但放在提交路径上会带来两个问题：
+# `gates.sh` 跑的是 `cargo test --workspace` 这种全量命令。它适合"从零验证
+# 整棵树"这种一次性场景，但放在提交路径上会带来两个问题：
 #
 #   1. 慢。改一个错别字也要等 clippy + 全量测试，于是人开始用 `--no-verify`。
 #   2. 不知道自己在查什么。它没有任何"这次改动碰了哪些文件"的概念，
 #      所以没法说出"你这次只改了文档，却挂了 filenames"这种有用的信息。
 #
-# 这里保持与 gates.sh **同一组命令**（一致性是刻意的，否则本地绿 CI 红），
-# 但按 hook 的职责切分集合，并在可判定时跳过。
+# 这里保持与 gates.sh **同一组命令**（一致性是刻意的：本地与手动跑必须得出
+# 同一个结论），但按 hook 的职责切分集合，并在可判定时跳过。
 
 set -uo pipefail
 
@@ -159,7 +159,8 @@ if [ ${#FAILED[@]} -gt 0 ]; then
   echo
   echo "修好再提交/推送。若确信是环境问题（Windows 上 target/ 偶发写盘被拦）："
   echo "  git commit --no-verify   /   git push --no-verify"
-  echo "但绕过之后 CI 仍会拦（见 .githooks/README.md）。"
+  echo
+  echo "⚠ 绕过之后**没有东西会替你补上** —— 本仓库没有 CI（见 .githooks/README.md）。"
   exit 1
 fi
 

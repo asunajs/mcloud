@@ -8,8 +8,10 @@
 //! 纯密码学（哈希/对称/非对称/压缩）是**无 IO 的纯计算**，因此也在这里（[`crypto`]），
 //! 这样 [`crate::upstream`] 之外的上游模块无需引入 `reqwest` 就能签名。
 //!
-//! 这条约束由 CI 断言（见 `docs/rust-rewrite-plan.md` §3.2），
+//! 这条约束由 `scripts/check-deps.sh` 断言（门禁第 4 条，见 [`docs/dev-gates.md`]），
 //! 它同时也是"能对某个函数单独测试"的成立前提。
+//!
+//! [`docs/dev-gates.md`]: ../../../docs/dev-gates.md
 
 pub mod auth;
 pub mod crypto;

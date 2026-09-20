@@ -121,7 +121,8 @@ impl FixtureHttpClient {
 
     /// 自检：把所有已加载 fixture 重新序列化后扫一遍泄漏。
     ///
-    /// 这是"脱敏是否真的生效"的最后一道闸 —— 在 CI 里对所有 fixture 跑一次。
+    /// 这是"脱敏是否真的生效"的最后一道闸 —— 由 `cargo test` 对所有 fixture 跑一次
+    /// （这里就是它唯一的调用时机：没有 CI，测试就是那道闸）。
     pub fn audit_leaks(&self) -> Vec<String> {
         let queue = self.queue.lock().expect("fixture 队列锁中毒");
         let mut leaks = Vec::new();

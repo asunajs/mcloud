@@ -1,6 +1,7 @@
 //! mcloud-io —— IO 实现层。
 //!
-//! 这是**唯一**允许依赖 `reqwest` / `rusqlite` 的 crate（由 CI 断言保证）。
+//! 这是**唯一**允许依赖 `reqwest` / `rusqlite` 的 crate（由 `scripts/check-deps.sh`
+//! 断言，门禁第 4 条）。
 //! 上游层与能力层只看到 `mcloud_core` 里的 trait，因此可以被替换成
 //! fixture 客户端 / 内存 store 进行离线验证。
 

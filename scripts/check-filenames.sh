@@ -47,7 +47,13 @@ is_exempt() {
     */.npmrc|*/.gitignore|*/.gitattributes) return 0 ;;
     */index.html) return 0 ;;                 # Vite / 静态站点按字面找它
     */package.json|*/package-lock.json|*/tsconfig.json) return 0 ;;
-    */.github/workflows/*) return 0 ;;        # CI 按路径发现，文件名无语义
+    # GitHub Actions 按**路径**发现 workflow，文件名本身无语义。
+    # 本仓库目前没有 CI（2026-09-20 删掉了 ci.yml，理由见 docs/dev-gates.md），
+    # 这条豁免保留 —— 它约束的是"万一再加回来时该怎么写"，
+    # 而且它的理由（按路径发现）与当前有没有 CI 无关。
+    # 注意：这里**不豁免** workflow 的命名风格，只豁免 kebab-case 检查，
+    # 因为生态惯例就是 `ci.yml` / `release.yml` 这类短横线名，本就合规。
+    */.github/workflows/*) return 0 ;;
     # vendor 的第三方 skill：`SKILL.md` 是 agent skill 规范的固定名，
     # 且内容是上游原样文件 —— 改名等于改动 vendor 产物，
     # 会让"固定版本 + 校验和"这条来源声明失效（见 THIRD-PARTY-NOTICES.md）

@@ -850,7 +850,7 @@ cargo test -- --ignored                             # 真实链路 smoke（需 M
 | 阶段 | 目标 | 主要交付 | 验收 | 状态 |
 | --- | --- | --- | --- | --- |
 | **P0 骨架 + spike** | 地基与风险出清 | Cargo workspace 空壳；`fixture extract`；`FixtureHttpClient`；黄金向量生成脚本；**Vapor + TSX + daisyUI 骨架 spike** | `cargo test` 全绿；spike 结论明确（Vapor+daisyUI 基础链路可用 / 需局部 VDOM 回退） | ✅ **已完成** |
-| **P1 纯逻辑层** | `mcloud-core` | 类型、trait、错误分类、时间窗口、偏移、归并、增量计算、**crypto（纯密码学）** | L1 覆盖 ≥70%；`cargo test -p mcloud-core <fn>` 可单跑；零 IO 依赖（CI 断言）；**crypto 对拍 TS 黄金向量全绿**（`test/golden/crypto-vectors.json`，脚本 `scripts/gen-crypto-vectors.cjs`） | ✅ **已完成** |
+| **P1 纯逻辑层** | `mcloud-core` | 类型、trait、错误分类、时间窗口、偏移、归并、增量计算、**crypto（纯密码学）** | L1 覆盖 ≥70%；`cargo test -p mcloud-core <fn>` 可单跑；零 IO 依赖（`check-deps.sh` 断言）；**crypto 对拍 TS 黄金向量全绿**（`test/golden/crypto-vectors.json`，脚本 `scripts/gen-crypto-vectors.cjs`） | ✅ **已完成** |
 | **P2 IO 层** | `mcloud-io` | reqwest client（重试/幂等/熔断）、SQLite store + 迁移、push 渠道、调度、`Random`/`Clock` 生产实现。**身份解析与旧数据映射的纯逻辑先落在 `mcloud-core`**（`auth.rs` / `legacy.rs`） | 旧 data/*.json 可导入且幂等；`FixtureHttpClient` 未命中必须报错；**身份解析对拍 TS 黄金向量全绿**（`test/golden/auth-vectors.json`）；**旧数据映射对拍脱敏夹具全绿**（`test/fixtures/legacy/`） | 🟡 **基本完成**（缺 push 10 渠道、调度引擎） |
 | **P2.5 端到端首条链路：账号登录** ★ | 打通"两个产物 + 用户体系 + 首个真实上游流程" | 系统用户 / 会话 / 云盘账号归属（§3.7）；`mcloud-app` 组装层与**两个产物**骨架（§3.2）；移动云盘**短信登录 + 扫码登录** → `auth`；CLI 与 WebUI 两条入口**共用同一状态机** | 见 §7.0 | ⬜ **当前阶段** |
 | **P3 上游接口** | `mcloud-upstream` | **不照抄旧 TS**：按**重新抓取的真实流量**逐域重写（四批见 §7.1）+ prost 直播间编解码 | 每个接口 = 夹具回放 + 请求逐字段断言（URL/body/headers），**未命中即失败** | ⬜ 待抓包 |
@@ -1218,7 +1218,8 @@ MySQL / Redis / 多用户+RBAC / K8s / 监控栈 / API+Worker 双进程各自的
 | `mcloud-server` | axum 路由 + SSE + OpenAPI + 内嵌前端产物 | ❌（用 `mcloud-app`） |
 | `mcloud-cli` | clap CLI（`login` / `run` / `serve` / `user` …）+ `fixture extract` | ❌（用 `mcloud-app`） |
 
-> "允许 IO"= 该 crate 的依赖树里可以出现 `reqwest` / `rusqlite`；其余 crate 一律由 CI 断言禁止。
+> "允许 IO"= 该 crate 的依赖树里可以出现 `reqwest` / `rusqlite`；其余 crate 一律由
+> `scripts/check-deps.sh`（门禁第 4 条）断言禁止，见 [`dev-gates.md`](./dev-gates.md)。
 > `mcloud-app` 是本次新增（§3.2）：`mcloud-cli` 与 `mcloud-server` 都依赖它，前者不碰 axum。
 
 ---
@@ -1254,7 +1255,8 @@ MySQL / Redis / 多用户+RBAC / K8s / 监控栈 / API+Worker 双进程各自的
 - [ ] 前端类型全部来自 `openapi.json` 生成物，CI 有 `--check`（D5 关闭）
 - [ ] Vapor 全量（无 VDOM 依赖、无 interop）；daisyUI 类名全部字面量，窄屏（≤768px）全页面可用
 - [ ] `web/src/ui/` 自有组件层的纯逻辑（排序/分页/筛选/时刻→cron/趋势路径/JSON 校验）有单测
-- [ ] `mcloud-core` / `mcloud-capabilities` 依赖树不含 `reqwest` / `rusqlite`（CI 断言）
+- [x] `mcloud-core` / `mcloud-capabilities` 依赖树不含 `reqwest` / `rusqlite`
+      （`scripts/check-deps.sh` 断言，门禁第 4 条）
 - [ ] `exchange` 仍在独立页面，不进入通用任务列表
 
 **凭据边界**
