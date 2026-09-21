@@ -13,9 +13,9 @@
 //
 // # 什么仍然不在这里
 //
-// 轮询节奏（间隔与 TTL）依然由能力层的 [capabilities.QrLogin.NextDelayMS] 回答，
+// 轮询节奏（间隔与 TTL）依然由能力层的 [capabilities.QrLogin.NextDelay] 回答，
 // 本层只负责"照它说的等"。**两条退出路径**都保留：
-// 终态（能力层判的）与"下次别再问了"（`NextDelayMS` 返回 0）——
+// 终态（能力层判的）与"下次别再问了"（`NextDelay` 返回 0）——
 // 后者存在的理由是"某天状态机多加了一种停止条件"时不至于变成死循环。
 //
 // # 凭据边界
@@ -145,30 +145,29 @@ type LoginContext struct {
 	Platform upstream.PcPlatform
 	// DeviceID 是设备指纹（`windowMachine`）—— **必须持久化且永不漂移**。
 	DeviceID string
-	// ttlSeconds 是二维码等待窗口（秒）——**只有扫码流程读它**，
+	// ttl 是二维码等待窗口——**只有扫码流程读它**，
 	// 所以字段私有，用 [LoginContext.WithTTL] 改。短信流程写
 	// [NewLoginContext] 即可，不会被这个只属于另一条链路的旋钮打扰。
-	ttlSeconds int64
+	ttl time.Duration
 }
 
-// NewLoginContext 构造常规上下文（二维码有效期取默认
-// [capabilities.QRTTLSeconds] 秒）。
+// NewLoginContext 构造常规上下文（二维码有效期取默认 [capabilities.QRTTL]）。
 //
 // ⚠ 默认值**必须**来自能力层的常量，不能在这里再写一个 120：
 // "两处各写一份、后来只改了一处"在 Go 里不报错，只会让 CLI 显示的
 // 有效期与状态机实际用的有效期悄悄分叉（同 §6.1 #67 那条教训）。
 func NewLoginContext(scope core.Scope, platform upstream.PcPlatform, deviceID string) LoginContext {
 	return LoginContext{
-		Scope:      scope,
-		Platform:   platform,
-		DeviceID:   deviceID,
-		ttlSeconds: capabilities.QRTTLSeconds,
+		Scope:    scope,
+		Platform: platform,
+		DeviceID: deviceID,
+		ttl:      capabilities.QRTTL,
 	}
 }
 
 // WithTTL 放宽二维码有效期。用于"把码发给别人扫"（终端打印、远程协助）。
-func (c LoginContext) WithTTL(seconds int64) LoginContext {
-	c.ttlSeconds = seconds
+func (c LoginContext) WithTTL(d time.Duration) LoginContext {
+	c.ttl = d
 	return c
 }
 
@@ -184,7 +183,7 @@ const TooFrequentBackoff = 30 * time.Second
 
 // QRLogin 是扫码登录的完整驱动：出码 → 轮询 → 成功后落库。
 //
-// 退出条件全部交给状态机（[capabilities.QrLogin.NextDelayMS]）：
+// 退出条件全部交给状态机（[capabilities.QrLogin.NextDelay]）：
 // 成功、失败、超时三种情况都返回 0，所以这个循环**不可能**出现
 // "该停没停"（客户端源码专门为它写过 `clearInterval` 的提醒）。
 func QRLogin(
@@ -199,7 +198,7 @@ func QRLogin(
 	wait Waiter,
 ) (LoginOutcome, *core.Error) {
 	qr := capabilities.StartQrLogin(
-		loginContext.Platform, loginContext.DeviceID, rng, clock.Now()).WithTTL(loginContext.ttlSeconds)
+		loginContext.Platform, loginContext.DeviceID, rng, clock.Now()).WithTTL(loginContext.ttl)
 	observer.OnQR(qr.QrPayload())
 
 	for {
@@ -246,11 +245,11 @@ func QRLogin(
 
 		// 兜底：状态机的 0 是"别再问了"的唯一裁判（终态与超时都在上面处理过）。
 		// 留着这一支是为了让"某天状态机多加了一种停止条件"时不会变成死循环。
-		delayMS := qr.NextDelayMS(clock.Now())
-		if delayMS == 0 {
+		delay := qr.NextDelay(clock.Now())
+		if delay == 0 {
 			return LoginOutcome{}, core.NewTimeout(qrTimeoutMessage)
 		}
-		if waitErr := wait.Wait(ctx, time.Duration(delayMS)*time.Millisecond); waitErr != nil {
+		if waitErr := wait.Wait(ctx, delay); waitErr != nil {
 			return LoginOutcome{}, waitErr
 		}
 	}
@@ -258,7 +257,7 @@ func QRLogin(
 
 // qrTimeoutMessage 是超时文案。
 //
-// 两处退出（TTL 到了、`NextDelayMS` 返回 0）共用同一句：它们对调用方是
+// 两处退出（TTL 到了、`NextDelay` 返回 0）共用同一句：它们对调用方是
 // **同一件事**（本轮不再等），分别写会让文案在某一处悄悄变掉。
 const qrTimeoutMessage = "二维码已超时（本轮不再等待）。重新执行即可换一张新码"
 

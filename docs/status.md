@@ -283,7 +283,7 @@
 > 说的是同一件事，这里补的是**它没写下来的判据与边界**。两者不冲突，别只看一行就下结论。
 >
 > ⭐ 本轮反向测试又挖出两个真缺口，已补断言并记进方案 §6.1（#67 / #68）：
-> · 把 `capabilities.QRTTLSeconds` 改成 121，**一条测试都没变红** —— 现有断言比的是
+> · 把 `capabilities.QRTTL` 改成 121，**一条测试都没变红** —— 现有断言比的是
 >   顶层与 `signin` 的**相对**一致，两边都走同一个函数，恒等；于是"CLI 又硬编码了一份
 >   120"完全查不出来 ⇒ 补 `TestQrTTLDefaultComesFromTheRegistryNotFromASecondLiteral`
 >   （读 flag 默认值文本并与注册表常量比，这样改源头会让期望值跟着走）

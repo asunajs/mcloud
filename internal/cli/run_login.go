@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/skip2/go-qrcode"
 
@@ -121,7 +122,10 @@ func runLoginQR(deps *Deps, out *output, a *QrArgs) error {
 
 	outcome, perr := app.QRLogin(
 		ctx, store, up,
-		app.NewLoginContext(scopeForNewAccounts(owner), platform, deviceID).WithTTL(a.TTLSeconds),
+		// `--ttl-seconds` 是**秒**（用户单位），能力层是 [time.Duration]
+		// ⇒ 换算只在这一处，不渗进内部类型。
+		app.NewLoginContext(scopeForNewAccounts(owner), platform, deviceID).
+			WithTTL(time.Duration(a.TTLSeconds)*time.Second),
 		upstream.NewLoginDataDecryptorProduction(),
 		deps.Clock, deps.Random, observer, deps.waiter())
 	if perr != nil {

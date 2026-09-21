@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -390,7 +391,7 @@ func TestQrTTLDefaultComesFromTheRegistryNotFromASecondLiteral(t *testing.T) {
 	if qr == nil {
 		t.Fatal("login 下没有 qr")
 	}
-	want := strconv.FormatInt(capabilities.QRTTLSeconds, 10)
+	want := strconv.FormatInt(int64(capabilities.QRTTL/time.Second), 10)
 	if got := defaultOf(t, qr.Flags(), "ttl-seconds"); got != want {
 		t.Errorf("--ttl-seconds 的默认值应来自能力注册表（%s），实得 %s\n"+
 			"第二份字面量的代价是：改了那边，这个开关不跟着变，而没人会注意", want, got)

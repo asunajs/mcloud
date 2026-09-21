@@ -14,7 +14,7 @@
 //
 // # 两个刻意的设计
 //
-//   - **本层不 sleep**：`NextDelayMS` 只回答"下次隔多久、要不要停"，
+//   - **本层不 sleep**：`NextDelay` 只回答"下次隔多久、要不要停"，
 //     等多久交给调用方。于是"轮询节奏"能被单测直接断言，
 //     "每次等 1 秒"不需要靠真的等 1 秒来验证。
 //   - **终态不可逆**：一旦出结果（成功或失败），后续 `Poll` 直接返回同一结论且**不发请求**。
@@ -31,18 +31,22 @@ import (
 	"github.com/catlair/mcloud/internal/upstream"
 )
 
-// QRPolllIntervalMS 是扫码轮询间隔。
+// QRPollInterval 是扫码轮询间隔。
+//
 // 实测客户端是 `setInterval` 1000ms（见 docs/upstream-login-protocol.md §3）。
-const QRPolllIntervalMS uint64 = 1000
+// ⚠ 用 [time.Duration] 而不是"毫秒数"：Go 里一段时间就是 `time.Duration`，
+// 传裸数字（尤其还带着 `MS` 后缀）等于把单位塞进名字里 —— 哪天有人按秒传，
+// 编译器不会说话，只有轮询会忽然快 1000 倍。
+const QRPollInterval = time.Second
 
-// QRTTLSeconds 是二维码在我们这一侧的有效期。
+// QRTTL 是二维码在我们这一侧的有效期。
 //
 // # 这是一个**产品取值**，不是实测值
 //
 // 归档里 `200059542 二维码已失效` 只出现过 1 次，推不出时长。这里取 120 秒：
 // 宁可早一点失效让用户重新出码（代价是一次点击），
 // 也不要让用户对着一个已经无效的码干等（代价是"这软件坏了"）。
-const QRTTLSeconds int64 = 120
+const QRTTL = 120 * time.Second
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 扫码
@@ -114,8 +118,8 @@ func (k QrFailureKind) String() string {
 // QrFailure 是一次扫码失败。
 type QrFailure struct {
 	Kind QrFailureKind
-	// TTLSeconds 在 [FailureTTLElapsed] 下有效。
-	TTLSeconds int64
+	// TTL 在 [FailureTTLElapsed] 下有效：我们这一侧的等待窗口。
+	TTL time.Duration
 	// Code 在 [FailureRejected] 下有效（`nil` = 响应里没有 code）。
 	Code *int64
 	// Message 在 [FailureRejected] 下有效。
@@ -125,7 +129,9 @@ type QrFailure struct {
 func (f QrFailure) Error() string {
 	switch f.Kind {
 	case FailureTTLElapsed:
-		return fmt.Sprintf("二维码等待超时（%d 秒）", f.TTLSeconds)
+		// ⚠ 秒只出现在**给人看**的这一句里：内部一律 `time.Duration`，
+		// 秒是用户单位（`--ttl-seconds`），不该渗进类型里。
+		return fmt.Sprintf("二维码等待超时（%d 秒）", int(f.TTL/time.Second))
 	case FailureExpiredUpstream:
 		return "二维码已失效"
 	case FailureSessionMismatch:
@@ -167,10 +173,10 @@ func (p QrProgress) IsTerminal() bool {
 
 // QrLogin 是扫码登录会话。
 type QrLogin struct {
-	profile    *upstream.ClientProfile
-	sessionID  string
-	startedAt  time.Time
-	ttlSeconds int64
+	profile   *upstream.ClientProfile
+	sessionID string
+	startedAt time.Time
+	ttl       time.Duration
 	// finished 是终态缓存。`nil` = 还在进行中。
 	finished *QrProgress
 }
@@ -183,10 +189,10 @@ func StartQrLogin(
 	platform upstream.PcPlatform, deviceID string, rng core.Random, now time.Time,
 ) *QrLogin {
 	return &QrLogin{
-		profile:    upstream.NewClientProfile(platform, deviceID),
-		sessionID:  upstream.NewSessionID(rng),
-		startedAt:  now,
-		ttlSeconds: QRTTLSeconds,
+		profile:   upstream.NewClientProfile(platform, deviceID),
+		sessionID: upstream.NewSessionID(rng),
+		startedAt: now,
+		ttl:       QRTTL,
 	}
 }
 
@@ -205,28 +211,28 @@ func (q *QrLogin) SessionID() string { return q.sessionID }
 //
 // 用于"把二维码发给别人扫"的场景（比如终端里打印出来、或者远程协助）——
 // 那时 120 秒不够，而重出一次码的代价只是重新扫。
-func (q *QrLogin) WithTTL(seconds int64) *QrLogin {
-	q.ttlSeconds = seconds
+func (q *QrLogin) WithTTL(d time.Duration) *QrLogin {
+	q.ttl = d
 	return q
 }
 
-// NextDelayMS 回答下次该隔多久再问；`0` = 别再问了。
+// NextDelay 回答下次该隔多久再问；`0` = 别再问了。
 //
 // 终态与超时都返回 0 —— 调用方只认这一个判断，
 // 不需要自己再记一套"成功了吗 / 超时了吗"。
-func (q *QrLogin) NextDelayMS(now time.Time) uint64 {
+func (q *QrLogin) NextDelay(now time.Time) time.Duration {
 	if q.finished != nil {
 		return 0
 	}
 	if q.IsExpired(now) {
 		return 0
 	}
-	return QRPolllIntervalMS
+	return QRPollInterval
 }
 
 // IsExpired 报告是否已超过我们这一侧的 TTL。
 func (q *QrLogin) IsExpired(now time.Time) bool {
-	return !now.Before(q.startedAt.Add(time.Duration(q.ttlSeconds) * time.Second))
+	return !now.Before(q.startedAt.Add(q.ttl))
 }
 
 // Poll 轮询一次并推进状态。
@@ -245,7 +251,7 @@ func (q *QrLogin) Poll(
 
 	if q.IsExpired(now) {
 		done := QrProgress{Kind: QrFailed, Reason: QrFailure{
-			Kind: FailureTTLElapsed, TTLSeconds: q.ttlSeconds,
+			Kind: FailureTTLElapsed, TTL: q.ttl,
 		}}
 		q.finished = &done
 		return done, nil

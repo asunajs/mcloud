@@ -652,10 +652,10 @@ func TestRealWaiterStopsWaitingWhenTheContextIsCancelled(t *testing.T) {
 // 判据：改 [capabilities.QRTTLSeconds] 时，这里的期望值**跟着变** ——
 // 于是"两处各写一份、后来只改了一处"不会静默通过（同 §6.1 #67 那条教训）。
 func TestLoginContextTTLComesFromTheRegistryNotASecondLiteral(t *testing.T) {
-	if got := NewLoginContext(loginScope(), upstream.PlatformWindows, "DEV-1").ttlSeconds; got != capabilities.QRTTLSeconds {
-		t.Errorf("默认 TTL 应取自能力层常量 %d，实得 %d", capabilities.QRTTLSeconds, got)
+	if got := NewLoginContext(loginScope(), upstream.PlatformWindows, "DEV-1").ttl; got != capabilities.QRTTL {
+		t.Errorf("默认 TTL 应取自能力层常量 %v，实得 %v", capabilities.QRTTL, got)
 	}
-	if got := NewLoginContext(loginScope(), upstream.PlatformWindows, "DEV-1").WithTTL(600).ttlSeconds; got != 600 {
+	if got := NewLoginContext(loginScope(), upstream.PlatformWindows, "DEV-1").WithTTL(600 * time.Second).ttl; got != 600*time.Second {
 		t.Errorf("WithTTL 应能放宽，实得 %d", got)
 	}
 }

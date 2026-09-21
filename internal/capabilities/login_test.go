@@ -197,7 +197,7 @@ func TestQrLoginWalksNotScannedScannedSuccess(t *testing.T) {
 		"62AA2BDA29F99744536E142A83CA5B03-ENDIN", &seqRandom{}, now())
 
 	var kinds []QrProgressKind
-	for qr.NextDelayMS(now()) != 0 {
+	for qr.NextDelay(now()) != 0 {
 		progress, err := qr.Poll(context.Background(), up, "tid", plainDecryptor{}, now())
 		if err != nil {
 			t.Fatalf("轮询失败: %v", err)
@@ -256,7 +256,7 @@ func TestQrLoginStopsPollingOnceTerminal(t *testing.T) {
 	if client.sent() != 1 {
 		t.Errorf("终态之后不得再发请求，实得 %d", client.sent())
 	}
-	if qr.NextDelayMS(now()) != 0 {
+	if qr.NextDelay(now()) != 0 {
 		t.Error("终态必须让调用方停下来")
 	}
 }
@@ -266,11 +266,11 @@ func TestQrLoginGivesUpAtItsOwnTTLWithoutAskingUpstream(t *testing.T) {
 	up := upstream.NewUpstream(client)
 	qr := StartQrLogin(upstream.PlatformWindows, "dev", &seqRandom{}, now())
 
-	later := now().Add(time.Duration(QRTTLSeconds) * time.Second)
+	later := now().Add(QRTTL)
 	if !qr.IsExpired(later) {
 		t.Error("过了 TTL 应判为过期")
 	}
-	if qr.NextDelayMS(later) != 0 {
+	if qr.NextDelay(later) != 0 {
 		t.Error("过期后不应再要求轮询")
 	}
 
@@ -281,8 +281,8 @@ func TestQrLoginGivesUpAtItsOwnTTLWithoutAskingUpstream(t *testing.T) {
 	if progress.Kind != QrFailed || progress.Reason.Kind != FailureTTLElapsed {
 		t.Fatalf("应因超时失败，实得 %s / %s", progress.Kind, progress.Reason.Kind)
 	}
-	if progress.Reason.TTLSeconds != QRTTLSeconds {
-		t.Errorf("失败原因应带回 TTL，实得 %d", progress.Reason.TTLSeconds)
+	if progress.Reason.TTL != QRTTL {
+		t.Errorf("失败原因应带回 TTL，实得 %v", progress.Reason.TTL)
 	}
 	if client.sent() != 0 {
 		t.Errorf("超时就不该再打扰上游，实得 %d", client.sent())
@@ -312,7 +312,7 @@ func TestQrLoginMapsTheDocumentedTerminalCodes(t *testing.T) {
 			if progress.Kind != QrFailed || progress.Reason.Kind != c.want {
 				t.Fatalf("期望失败 %s，实得 %s / %s", c.want, progress.Kind, progress.Reason.Kind)
 			}
-			if qr.NextDelayMS(now()) != 0 {
+			if qr.NextDelay(now()) != 0 {
 				t.Error("失败也是终态，必须让调用方停下来")
 			}
 		})
@@ -339,7 +339,7 @@ func TestQrLoginKeepsPollingThroughRateLimit(t *testing.T) {
 	if first.IsTerminal() {
 		t.Error("限流不得是终态 —— 否则调用方会去换码，反而更深地撞风控")
 	}
-	if qr.NextDelayMS(now()) != QRPolllIntervalMS {
+	if qr.NextDelay(now()) != QRPollInterval {
 		t.Error("限流后应继续按原节奏轮询（总时长仍受 TTL 约束）")
 	}
 
@@ -427,7 +427,7 @@ func TestQrPayloadIsBuiltLocallyWithTheSessionID(t *testing.T) {
 }
 
 func TestQrLoginWithTTLOverridesTheDeadline(t *testing.T) {
-	qr := StartQrLogin(upstream.PlatformWindows, "dev", &seqRandom{}, now()).WithTTL(600)
+	qr := StartQrLogin(upstream.PlatformWindows, "dev", &seqRandom{}, now()).WithTTL(600 * time.Second)
 	if qr.IsExpired(now().Add(2 * time.Minute)) {
 		t.Error("覆盖成 600 秒后，2 分钟不该过期")
 	}

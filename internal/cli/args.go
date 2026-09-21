@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -228,4 +229,7 @@ func newVersionCommand(deps *Deps, out *output) *cobra.Command {
 
 // qrTTLSeconds 的默认值取注册表里那份，**不在 CLI 再写一个 120**：
 // 那会变成第二份真相，改了那边不改这里就是"码过期时间两边不一样"。
-func qrTTLSeconds() int64 { return capabilities.QRTTLSeconds }
+//
+// ⚠ 秒是**用户单位**（`--ttl-seconds 600` 是给人看的），能力层存的是
+// [time.Duration] —— 换算只发生在边界上这一次，不渗进内部类型。
+func qrTTLSeconds() int64 { return int64(capabilities.QRTTL / time.Second) }
