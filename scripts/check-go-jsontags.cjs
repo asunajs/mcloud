@@ -214,6 +214,16 @@ const UNTAGGED_ALLOWED = {
     '导入报告的**一条问题**（类别 + 文件 + 下标 + 原因），对外走 [MigrationIssue.String]；Rust 侧同样不 Serialize',
   'internal/io/legacy_import.go:MigrationReport':
     '导入报告本身，对外走 [MigrationReport.ToJSON] 的**手拼**结构 —— 那串键由它自己定，不给结构体加 tag 才不会有两份契约',
+
+  // ── app::login：Rust 侧一律只 derive `Debug, Clone[, Copy]`，**不** Serialize ──
+  'internal/app/login.go:LoginOutcome':
+    '登录成功的**内存**结果（账号 id + 已解密的 userInfo），对外只走 `Summary()` 那句掩码文本；⚠ `UserInfo any` 的形状由**上游**决定，给它加 tag 等于把上游的字段约定写成我们自己的契约（同 `QrProgress` 那条理由）',
+  'internal/app/login.go:LoginContext':
+    '一次登录的**入参打包**（scope / 平台 / 设备指纹 / TTL），是调用点防"摆错顺序"的手段不是数据模型；Rust 侧 derive `Debug, Clone, Copy`，**不** Serialize',
+  'internal/app/login.go:SmsCodeSent':
+    '一次发码的**结果**（配额余量 + 是否过了滑块），喂给前端渲染一句提示；Rust 侧 derive `Debug, Clone, Copy, PartialEq, Eq`，**不** Serialize',
+  'internal/app/login.go:SmsCredential':
+    '短信登录的**入参**（手机号 + **6 位明文验证码**）。⚠⚠ 它**绝不能**进 JSON —— 一旦可序列化，验证码就会顺着日志与响应体出去；Rust 侧 derive `Debug, Clone, Copy`，**不** Serialize',
 };
 
 function walk(dir, out = []) {
