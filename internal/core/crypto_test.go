@@ -1167,6 +1167,86 @@ func TestAppCoolFlagEnvelope192IsNotThe128BitKey(t *testing.T) {
 	}
 }
 
+func TestAppCoolFlagSmsLinkEnvelope128BothDirections(t *testing.T) {
+	// **发码链路那把 AES-128**：三把钥匙里只有它此前**没被正向解过一次** ——
+	// `BODY_AES_KEY` 只在 `…192IsNotThe128BitKey` 里当过反例。
+	// 反例不能代替正例：钥匙错 1/256 的概率会碰上合法 PKCS7，
+	// 那时"解不出正确明文"这条断言两边都成立，而只有正向解通才证明钥匙挑对了。
+	//
+	// 三条用例的方向也不对称，值得分别钉住：前两条是**实拍响应**（只验解密方向），
+	// 第三条是**合成请求**、IV 固定，专门把**加密**方向进向量（见它的 note）。
+	// 加密方向可比是"CBC + 固定 IV + PKCS7 是确定性的"这件事的形式化，别丢。
+	v := appBusinessVectors(t)
+	c := obj(t, v["constants"], "constants")
+	k128 := str(t, c, "BODY_AES_KEY")
+	k192, k256 := str(t, c, "BODY_AES_KEY_192"), str(t, c, "BODY_AES_KEY_256_H5")
+
+	// 16 字节 ⇒ AES-128。⚠ 仓库里还有第二把 16 字节钥匙
+	// （`BODY_AES_KEY_128_H5_NONPROD`，H5 非 dev2Prod），**别拿它当这条的钥匙**。
+	if len(k128) != 16 {
+		t.Fatalf("16 字节 ⇒ AES-128，实际 %d", len(k128))
+	}
+	if k128 == str(t, c, "BODY_AES_KEY_128_H5_NONPROD") {
+		t.Fatal("发码链路那把与 H5 非 prod 那把不该是同一个字面量")
+	}
+
+	cases := seg(t, v, "hcyCoolFlagEnvelope")
+	if len(cases) != 3 {
+		t.Fatalf("这一族应有 3 条（2 实拍响应 + 1 合成请求），实际 %d 条", len(cases))
+	}
+	seen := map[string]int{}
+	for _, raw := range cases {
+		cs := obj(t, raw, "128 信封用例")
+		name, direction := str(t, cs, "name"), str(t, cs, "direction")
+		payload := str(t, cs, "payloadB64")
+		want := str(t, cs, "plaintext")
+		seen[direction]++
+
+		decoded, err := B64Decode(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := hex.EncodeToString(decoded[:16]); got != str(t, cs, "ivHex") {
+			t.Fatalf("%s: 前置 IV 与 ivHex 不一致：%s", name, got)
+		}
+		if (len(decoded)-16)%16 != 0 {
+			t.Fatalf("%s: 密文不是整块", name)
+		}
+
+		switch direction {
+		case "response":
+			got, err := AESDynamicIVDecrypt(k128, payload)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if got != want {
+				t.Fatalf("%s：得到 %q，期望 %q", name, got, want)
+			}
+		case "request":
+			// 加密方向：固定 IV ⇒ 逐字节可比，不是"能解回来"这种弱判据。
+			got, err := AESDynamicIVEncrypt(k128, want, iv16(t, str(t, cs, "ivHex")))
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if got != payload {
+				t.Fatalf("%s：加密方向逐字节不符\n得到 %s\n期望 %s", name, got, payload)
+			}
+		default:
+			t.Fatalf("%s: 未知 direction %q", name, direction)
+		}
+
+		// 同一条载荷上，另外两把必须开不出这份明文。
+		for _, other := range []struct{ label, key string }{{"192", k192}, {"256", k256}} {
+			if wrong, err := AESDynamicIVDecrypt(other.key, payload); err == nil && wrong == want {
+				t.Fatalf("%s: AES-%s 那把不该能开出这条", name, other.label)
+			}
+		}
+	}
+	if seen["response"] != 2 || seen["request"] != 1 {
+		t.Fatalf("两个方向都要有，实得 %v", seen)
+	}
+}
+
 func TestAppCoolFlagWebViewEnvelope256DecryptsEveryRealCapture(t *testing.T) {
 	// **第三把钥匙：H5 / WebView 那一层**（2026-09-20 定案）。
 	// 出处不是二进制，而是 iOS App 沙盒里的 **H5 离线包**，其中
