@@ -9,5 +9,11 @@
 # 手动安装：bash scripts/install-hooks.sh
 #
 # 这个文件本身很薄 —— 逻辑都在 scripts/gates-go.sh 里，两个 hook 共用。
+#
+# ⚠ 用 `bash <路径>` 而不是直接 `exec <路径>`：`scripts/*.sh` 在库里是 **100644**
+#    （没有 x 位），直接 exec 会得到 `Permission denied`，hook 在提交路径上**拦住每一次提交**。
+#    而"给 scripts/ 补 x 位"是第二份真相 —— 全部文档与用法都写的是 `bash scripts/gates-go.sh`，
+#    那就让 x 位不参与这个契约。本文件自己必须可执行（git 对没有 x 位的 hook 直接静默跳过），
+#    这一点由 `bash scripts/install-hooks.sh` 保证。
 
-exec "$(dirname "$0")/../scripts/gates-go.sh" fmt deps filenames idents jsontags
+exec bash "$(dirname "$0")/../scripts/gates-go.sh" fmt deps filenames idents jsontags

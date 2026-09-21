@@ -32,8 +32,13 @@ git config core.hooksPath .githooks
 
 echo "已安装：core.hooksPath = .githooks"
 echo
-echo "  pre-commit  跑 fmt / deps / filenames / idents      （秒级）"
-echo "  pre-push    跑七条全量，含 clippy / test / golden    （分钟级）"
+# ⚠ 这里刻意**不列**具体是哪几条门禁 —— 列了就是第二份真相，而它已经过期过一次：
+#    本行原文写着「pre-push 跑七条全量，含 clippy」，那是 **Rust 侧**的说法
+#    （Go 侧既没有 clippy，条数也不是七）。判据只有一个来源：`.githooks/README.md`
+#    与 `scripts/gates-go.sh` 的头部注释。
+echo "  pre-commit  秒级那几条：不需要编译的静态检查"
+echo "  pre-push    全量：再加需要编译与跑测试的那几条"
 echo
-echo "验证：git commit 时应当看到「提交前门禁（快）」的输出。"
+echo "具体是哪几条、为什么这样分：见 .githooks/README.md"
+echo "验证：git commit 时应当看到「──── fmt ────」这样的分节输出。"
 echo "卸载：bash scripts/install-hooks.sh --unset"

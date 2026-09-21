@@ -7,4 +7,7 @@
 # ⚠ 2026-09-20 起跑的是 **Go 侧九条**；Rust 侧已冻结到 legacy/，不再自动跑。
 #    pre-push 的参数（<remote> <url>）我们不关心 —— 范围就是全部，不用解析 stdin。
 
-exec "$(dirname "$0")/../scripts/gates-go.sh"
+# ⚠ 用 `bash <路径>` 而不是直接 `exec <路径>` —— 理由见同目录 pre-commit 的说明
+#    （`scripts/*.sh` 在库里没有 x 位，直接 exec 会拦住每一次推送）。
+
+exec bash "$(dirname "$0")/../scripts/gates-go.sh"

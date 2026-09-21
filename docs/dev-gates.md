@@ -418,15 +418,15 @@ Rust 源文件不在管辖范围 —— 文件名就是模块名，`mod my-mod;`
 ### 第 7 条是抓包侧的自检
 
 `test/golden/*.json` 是要进版本库的产物，但"有人手工改坏一个字符"只有真算一遍才发现。
-它用 Node `crypto` 独立实现算**122 条**向量，与 Rust 侧**互为交叉验证** ——
+它用 Node `crypto` 独立实现算**133 条**向量，与 Go 侧**互为交叉验证** ——
 一边过一边不过，说明其中一边错了。
 
-它同时做两件 Rust 侧做不到的事：
+它同时做两件别处做不到的事：
 
-- 对**每个** golden 文件跑脱敏扫描（Rust 只扫 `include_str!` 进来的那些）；
+- 对**每个** golden 文件跑脱敏扫描（Rust 侧的守卫只扫 `include_str!` 进来的那些）；
 - 列出**没有任何测试读取**的向量文件
-  （`login-crypto-vectors.json` 目前是这唯一一种状态；
-  `app-business-crypto-vectors.json` 已随 Go 侧 `crypto` 落地而有消费者）。
+  （**当前一个都没有**：最后一份 `login-crypto-vectors.json` 于 2026-09-21
+  接上消费者，见 `go-migration-plan.md` §6.1 末尾）。
 
 覆盖范围是**显式**的：没有校验器的段会被**打印出来**，不假装通过。
 

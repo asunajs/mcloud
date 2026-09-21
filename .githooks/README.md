@@ -22,7 +22,27 @@ hook 就跟代码一起被 review、被同步，也不需要谁记得"上一台�
 
 > ⚠ **2026-09-20 起跑的是 Go 侧门禁**（Rust 侧已冻结到 `legacy/`，不再自动跑）。
 > 分工没变，只是命令从 `cargo` 那套换成了 `go` 那套 —— 两个 hook 都只是
-> `exec scripts/gates-go.sh <几条>`，逻辑不重复。
+> `exec bash scripts/gates-go.sh <几条>`，逻辑不重复。
+
+## ⚠⚠ 这个 hook 有**两层**各自都足以让它静默失效的东西
+
+2026-09-21 实测发现：**这两层同时成立**，于是门禁**一次都没自动跑过**，
+而任何地方都不报错 —— 提交照样成功，只是"以为有门禁"。
+
+| 层 | 现象 | 为什么静默 |
+|---|---|---|
+| **1. `core.hooksPath` 没设** | git 默认看 `.git/hooks/`，那里是空的 | 没配就是没配，git 不认为这是异常 |
+| **2. hook 没有 x 位** | 本目录的文件一度以 **`100644`** 入库（`git ls-files -s .githooks/` 可验） | **git 对没有 x 位的 hook 直接跳过，不报错** |
+
+⇒ 装的时候**两件都要做**，`scripts/install-hooks.sh` 已经都做了
+（`chmod +x` + `git config core.hooksPath`），并把 mode 变更提交进库。
+
+⚠ 还有**第三层**，同样是"静默跳过"：hook 里若写成 `exec scripts/gates-go.sh`
+（不带 `bash`），而 `scripts/*.sh` 在库里也是 **100644** ⇒ `Permission denied`，
+**每一次提交都被拦住**。反过来（`exec bash …`）则完全不依赖那个 x 位。
+**判据：路径上任何一环缺 x 位，"跳过"与"拦住"都不报出真正的原因** ——
+所以要么让 x 位成为契约的一部分（全部补上并提交），要么让路径不依赖它。
+本仓库选后者（文档与用法一律写 `bash scripts/gates-go.sh`）。
 
 | hook | 跑什么 | 为什么是这些 |
 |---|---|---|

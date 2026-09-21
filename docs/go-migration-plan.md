@@ -418,7 +418,7 @@ Rust 侧 PC 与 App 两条发码路径的余量字段分别是 `u32` 与 `i64` �
 ⚠ 编号按**发现的先后**排，与步号无关 —— 这张表是**追加式**的，
 重编别人的条目会让正在引用它的人指向错处。
 当前：步 1 = 1–27 与 56，步 4 = 28–39 与 42–45，步 3 = 40–41 与 46–47。
-（40/41 与 46/47 由 io 那侧先占；步 4 续接在 45 之后，48/49/50/51/52/53/54/55/56/57/58/59/60/61/62/63/64/65/66 已接在 47 之后；步 4（cli）= 67–71；步 4（app 的 login / app_login）= 72–74；步 4（`cli::signin` 收口 + `server` 接线）= 75–85；步 4（判据复核）= 86–87 ——
+（40/41 与 46/47 由 io 那侧先占；步 4 续接在 45 之后，48/49/50/51/52/53/54/55/56/57/58/59/60/61/62/63/64/65/66 已接在 47 之后；步 4（cli）= 67–71；步 4（app 的 login / app_login）= 72–74；步 4（`cli::signin` 收口 + `server` 接线）= 75–85；步 4（判据复核）= 86–87；步 2（黄金向量接线）= 88–89 ——
 **加之前看表尾**，别再撞号。⚠ 这张表是**分节**的，只看自己那一节一定会撞。）
 
 | 现象 | 根因 | 做法 |
@@ -489,14 +489,14 @@ serde 测试、也没有 `tests/` 目录），形状只隐含在 `rename_all` �
 （`sanitize` 拆成 5 个文件、348 行）。迁移这两块时是**逐条平移测试**，
 不是照文档重写；新增的断言只针对"换语言新长出来的坑"，不重新定义语义。
 
-⚠ **注意其中一份是"死向量"**：`test/golden/login-crypto-vectors.json` 有生成器
-（`scripts/gen-login-crypto-vectors.cjs`）、但**没有任何测试读它**（`gates-go.sh` 的 golden
-门禁自己会把它标成 `⚠ 无任何测试读取（死向量）`，**不失败**）。它覆盖
-`aesEcbEncrypt/Decrypt`、`sha1Password`、`md5SafeVerify`、`puzzleAnswer`、`guid32`。
-⇒ 这一份在 Go 侧**不是"照搬已有断言"，而是"第一次真正接上断言"**：Rust 侧这些函数
-目前**处于无断言状态**（是"本来就没测"，不是"测过又丢了"）。另外它的 `§guid32`
-（uuid → md5 的具体拼接）**向量里没给出规则**，门禁会明确跳过它 ——
-所以"接上消费者"只解决一半，剩下那半得回原始出处补。
+✅ **`test/golden/login-crypto-vectors.json` 已于 2026-09-21 接上消费者**
+（生成器 `scripts/gen-login-crypto-vectors.cjs`；消费者
+`internal/upstream/login_crypto_vectors_test.go` + `internal/app/device_test.go`）。
+它覆盖 `aesEcbEncrypt/Decrypt`、`sha1Password`、`md5SafeVerify`、`puzzleAnswer`、`guid32`。
+在此之前它长期被 golden 门禁标成 `⚠ 无任何测试读取（死向量）`（**不失败**），
+是仓里唯一一份有生成器却没人读的向量。
+⇒ 这一份在 Go 侧**不是"照搬已有断言"，而是"第一次真正接上断言"**：
+Rust 侧这些函数此前**处于无断言状态**（是"本来就没测"，不是"测过又丢了"）。
 
 ⚠⚠ **2026-09-21 步 1 收口时逐节核过，三处更正**：
 (1) **这份向量不属步 1**。它覆盖的五个函数落在 `internal/upstream/login.go`，
@@ -508,12 +508,28 @@ serde 测试、也没有 `tests/` 目录），形状只隐含在 `rename_all` �
 | `puzzleAnswer` | **有**正向断言（Rust `login/tests/puzzle.rs` 5 条；Go `TestPuzzleAnswer…` / `TestPuzzleVerfycodeEncryptRoundTrips`） |
 | `aesEcbHexDecrypt` / `aesEcbEncrypt` | 行为**有**正向断言（Go `core/crypto_test.go` 用 App 那把钥匙钉了 ECB 双向；PC 登录钥匙走的是另一份向量 `pcclient-crypto-vectors.json` 的 `loginDataDecrypt`） |
 | `sha1Password` | **有**（`pcclient-crypto-vectors.json` 的 `sha1Upper`，期望值 openssl 产出，Go `login_test.go` 在读） |
-| `md5SafeVerify` | **两侧都没有实现** —— 它对应的 TS 路径 `safeVerifyCodeEncrypt` 在 Rust 侧明确记着"暂未实现：实测没走到那条分支"（`legacy/crates/mcloud-upstream/src/login.rs`）。⇒ 接这条之前先回答"**要不要实现**"，而不是补断言 |
-| `guid32` | 拼接规则向量里没给（`-ENDIN` 那串在两侧都只是**被当字面量用**，没有"uuid → md5 → 加后缀"的生成断言） |
+| `md5SafeVerify` | **两侧都没有实现** —— 它对应的 TS 路径 `safeVerifyCodeEncrypt` 在 Rust 侧明确记着"暂未实现：实测没走到那条分支"（`legacy/crates/mcloud-upstream/src/login.rs`）。⇒ 接这条之前先回答"**要不要实现**"，而不是补断言。**2026-09-21 定论：先不实现**（没消费者），但把**规则**钉住 —— `TestLoginVectorMd5SafeVerifyIsUppercaseMd5` 断言 `ToUpper(MD5(secinfo))`，实现那天直接照抄 |
+| `guid32` | 拼接规则**向量里给了**（`uuidV4` + `expectHexUpper` + 生成器的 `getGUID32`），是 `MD5(UTF8(uuid))` 取大写 hex。**但两侧都刻意不复刻它**：Go 与冻结的 Rust 都是 `hex(16 个随机字节)`，而上游只看得到那 32 个字符，分辨不出两者 ⇒ 钉的是**形态**（`<32 位大写 HEX>-ENDIN`，`internal/app/device_test.go`），不是推导过程。Node 侧另有一条独立实现复算，锁的是**向量文件自身**输入输出对得上 |
 
 ⇒ 所以"接上这份向量"真正要做的不是从零补判据，而是**把已有的行为断言改成从向量读期望值**
-（#43 同源），外加 `md5SafeVerify` 那条要先定"实现与否"。
-⚠ 别为此**新写一份重复断言** —— 同一件事两份期望值，将来只会分叉。
+（#43 同源）。**2026-09-21 已接完**，实际做法与上面这条预判有出入，值得记下来：
+不是"改已有的断言"，而是**新写一份**（`login_crypto_vectors_test.go`）——
+因为两份向量文件的段名**完全不相交**（这份是 `sha1Password` / `puzzleAnswer` /
+`aesEcbHexDecrypt` / `aesEcbEncrypt` / `md5SafeVerify` / `guid32`，
+`pcclient` 那份是 `sha1Upper` / `puzzleLeftDecrypt` / `loginDataDecrypt` /
+`puzzleAesCbcIvPrefixed`），**合并不了**。
+⚠ 所以"别写重复断言"那条仍然成立，但它的判据是**段名是否重合**，
+不是"函数是否相同" —— 同一个函数可以被两份向量从不同角度锁。
+
+⚠⚠ **顺带更正两处旧说法**（都不是 Go 侧的问题，是文档写错了）：
+1. `check-golden-vectors.cjs` 的 `NOT_VERIFIED_REASONS` 里 `guid32` 写着
+   "uuid→md5 的具体拼接未在向量里给出" —— **给出来了**（生成器里逐字写着）。
+   该条已删除，并补了独立实现（`md5hexUpper(uuidV4)` 与 `deviceFingerprint` 对拍），
+   Node 侧断言 131 → **133**。
+2. 上表 `guid32` 那行原写"两侧都只是被当字面量用" —— 对，但**结论下反了**：
+   这不是"缺规则、待补"，而是**规则已知、两侧都刻意不实现**（理由见该行）。
+   判据：**能在同一端的两个接口上取不同值吗？能就不许钉端档案** ——
+   这里换成"上游分辨得出 md5(uuid) 与随机字节吗？分辨不出就不必复刻"。
 
 ### 步 4（cli）已实测出来的三条（编号接在最后，2026-09-21）
 
@@ -554,6 +570,8 @@ serde 测试、也没有 `tests/` 目录），形状只隐含在 `rename_all` �
 | **85** ⭐ | **判据的输入本身可能是脏的 —— 而脏法恰好让判据「看起来在正常工作」** | `check-go-deps.sh` 用 `grep -xF`（**整行相等**）判「闭包里有没有这个依赖」。运行环境（沙箱）有时会往 `go` 的 **stdout** 塞一句 `Brokered program policy check unavailable`，而且**没有换行** ⇒ 它**粘到某几行的行首**，于是 `internal/io` 那个依赖「凭空消失」，门禁报出 `!! internal/app 未依赖 internal/io —— 组装根必须把 IO 实现接上`。⚠ 那是**指向一个根本不存在的分层问题**的话，且它**偶发** —— 典型的「会被当成环境问题、学会重跑一次就好」。⚠ 更阴的是：同一污染下**纯层那几条反而"通过"了**（因为"没找到 net/http"和"输出被污染"长得一样） | 判据从「整行相等」改成「**定界符 + 子串**」：`deps_of` 用 `-f '\|{{.ImportPath}}\|'`，`has_dep` 用 `grep -qF "\|$1\|"` —— 前面粘了什么都无所谓，而 `\|net/http\|` 仍**不会**命中 `\|net/http/httputil\|`（**别改成裸子串**，那会让纯层那条当场失效）。两条验证见 `docs/dev-gates.md`「偶发红」。⚠ 通则：**输入不可信时，要么让判据准确报出原因，要么让它不依赖那个形状** |
 | **86** ⭐⭐ | **判据里的数字取自「旧项目」而不是「冻结基准」⇒ 迁移永远达不到它，而且会让已经完成的迁移看起来没做完** | 步 4 的退出判据写着「19 项能力逐项打勾」。**19 是旧 TS 项目** `packages/api/src/tasks/*` 的任务数（`rust-rewrite-plan.md` §1.2 抄的就是它），而**冻结基准自己的注册表只有 3 项** —— 两侧注释都写着「P4 会补齐全部 19 项」。同理 `POST /api/runs`：`legacy/crates/mcloud-server/src/routes/mod.rs` 里自己写着「写的那一半要等 P4」，**基准里从未实现**。⚠ 这两条在文档里被记成「还差的一处」，于是一个**已对位**的迁移被记成没做完 —— 它不会让任何测试变红，只会让此后每次做进度汇报都重复一遍错的结论 | 判据要**逐条回到冻结基准去核**：注册表 `Rust 3 项 = Go 3 项`（code 集合 `diff` 为空）、路由 **15 条**逐条对位（`internal/server/routes_test.go` 盯着）。⚠ 通则：**判据里的任何数字都要问「它量的是基准，还是量的是更早那个项目」** —— 后者属**功能开发**（P4/P5），不是迁移缺口；两者混进同一条判据，迁移做完了也打不上勾 |
 | **87** ⭐ | **「路由表是否完整」在 HTTP 面上测不出来** | 想用状态码区分「路由存在」与「落到兜底」，实测**做不到**：① 会话闸包在整个 mux **外层** ⇒ 未登录时**所有** `/api` 路径都是 401（包括不存在的那些）；② 兜底模式 `/api/` **不带方法** ⇒ 它把「方法不匹配」与「路径不存在」**一并吞成 404**（实测全程没有 405、没有 `Allow` 头）。于是 `GET /api/runs/1/events`（路由在、资源不在）与 `/api/nope`（路由不在）在 HTTP 面上**长得一模一样** | 把裸路由表抽成 `Server.routes()`（**不带中间件**），测试直接问 `mux.Handler(req)`「命中了哪个模式」：命中**带方法**的模式 = 路由在；命中 `/api/` = 没命中。⚠ 必须配一条**对照**断言（不存在的路径**必须**落到兜底）—— 否则有人注册了贪婪模式时，上面对位断言会**静默失去判别力**。⚠ 反向测试三条（删一条路由 / 改错方法 / 注册贪婪模式）已确认全部变红 |
+| **88** ⭐ | **「豁免清单」里的理由会过期，而它过期时没有任何东西会变红** | `check-golden-vectors.cjs` 的 `NOT_VERIFIED_REASONS` 是一张**借口表**（"这一段为什么没验"）。其中 `guid32: "uuid→md5 的具体拼接未在向量里给出"` —— 而生成器 `gen-login-crypto-vectors.cjs` 里的 `getGUID32` **逐字给了**（`MD5(Utf8.parse(uuidV4))` 取大写 hex）。于是 2 条**本来能算**的向量长期挂在"未覆盖"清单里，输出上看起来像"这一节已经交代过了"。⚠ 它不会让任何断言变红 —— **借口的作用恰恰是让人不再看那一段** | 删掉该条并补独立实现（`md5hexUpper(e.uuidV4)` 与 `deviceFingerprint` 对拍），断言 131 → 133。⚠ 通则：**借口表要定期回头核**，尤其当它引用的"缺失信息"其实在**生成器**里时 —— 生成器与向量文件是两个地方，只读其中一个会得出相反结论 |
+| **89** ⭐ | **用向量里的 `name` / 键当循环源的断言，键一改名就静默少测一条** | 向量的 `constants` 段是按**键名**对齐 Go 常量的：`for key := range constants { want, ok := asserted[key]; … }`。把向量里的 `HASHTEXT` 改名或删掉，循环体照样跑完、**一条也不报** —— 因为循环源是**向量**里的键，少掉的那个只是不再被遍历到。表现与"全绿"**完全一样** | 判据要**双向**：① 向量里的每个键都必须被断言、或登记进"无对应物"表；② `asserted` 里的每个键都必须在向量里，否则报「Go 侧在断言一个已不存在的名字」。⚠ 同族：`vectorSection()` 对**空数组**直接 `t.Fatalf` —— 段名写错时拿到空数组，而"循环零次"与"全部通过"在输出上**长得一模一样**。⚠ 反向测试两条（加一个没人接的常量 / 把一个常量改名）已确认全部变红 |
 
 ### 6.2 `mcloud-upstream`（8,064 行）—— 向量兜底最厚
 
@@ -703,7 +721,7 @@ PC 与 App 是**两套客户端**，同名同形的常量值可能不同，而"�
 | `check-go-deps.sh` | 通过；**并做了反向测试**：往纯层塞 `net/http`、往 CLI 塞 `server`，两条都被抓出且退出码 1 |
 | `check-filenames.sh` | 144 个文件通过 |
 | `check-identifiers.cjs` | 351 个文件通过；**并做了反向测试**：往 `.go` 里塞未登记号码，被抓出 |
-| `check-golden-vectors.cjs` | 131 条断言全绿；**并做了反向测试**：临时让 Go 读一条死向量，消费者探测确实变绿 |
+| `check-golden-vectors.cjs` | 133 条断言全绿；**并做了反向测试**：临时让 Go 读一条死向量，消费者探测确实变绿 |
 
 > 📌 反向测试不是形式 —— 一条**只会在正确情况下通过**的断言不是断言。
 >

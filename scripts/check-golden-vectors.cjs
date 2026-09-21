@@ -326,6 +326,32 @@ const VERIFIERS = {
   }),
   aesEcbEncrypt: (e) => ({ actual: aesEcbEncrypt(e.key, e.plainText), expected: e.expectB64 }),
 
+  /**
+   * `getGUID32()`：`MD5(UTF8(uuid))` 取**大写** hex，再拼 `-ENDIN` 得设备指纹。
+   *
+   * 规则逐字来自生成器（`scripts/gen-login-crypto-vectors.cjs` 的 `getGUID32`），
+   * 所以本脚本能独立算一遍。
+   *
+   * ⚠ 这条验的是**向量文件自身**（声明的输入与输出对得上），
+   * 不是"某一侧复刻了 md5(uuid)" —— **两侧都没有复刻**：
+   * Go 与冻结的 Rust 都是 `hex(16 个随机字节)`，而上游只看得到那 32 个字符，
+   * 分辨不出两者（见 `internal/app/device_test.go`）。
+   * 别把这条的 ✓ 读成"这条路径被实现了"。
+   */
+  guid32: (e, c) => {
+    const actual = md5hexUpper(e.uuidV4);
+    if (e.expectLen !== undefined && actual.length !== e.expectLen) {
+      throw new Error(`长度应为 ${e.expectLen}，实得 ${actual.length}`);
+    }
+    if (e.deviceFingerprint !== undefined) {
+      const want = actual + (c.DEVICE_FINGERPRINT_SUFFIX ?? "-ENDIN");
+      if (e.deviceFingerprint !== want) {
+        throw new Error(`设备指纹对不上：\n      向量 ${e.deviceFingerprint}\n      算出 ${want}`);
+      }
+    }
+    return { actual, expected: e.expectHexUpper, extra: `${e.uuidV4} → md5 大写` };
+  },
+
   // —— 原版编译产物（auth-vectors.json）——
   padBase64: (e) => {
     const pad = e.input.length % 4 === 0 ? "" : "=".repeat(4 - (e.input.length % 4));
@@ -362,7 +388,6 @@ const NOT_VERIFIED_REASONS = {
   gzip: "向量自己声明不做字节级对拍（deflate 输出因实现而异）",
   rsaPkcs1v15B64: "需公钥加密，Node 侧要做 DER 包装，收益低",
   rsaSelfKeyPair: "同上",
-  guid32: "uuid→md5 的具体拼接未在向量里给出",
   smidTn: "getTn 的排序/缩放规则未在本脚本复刻（同 §getTn）；由 Rust 侧 + 生成侧两份实现交叉",
   smidDesRules: "同 §desEcbNoPaddingB64：Node 的 des-ecb 需 legacy provider，故只由 Rust 侧断言",
   receiveRevivalReward: "纯响应体计数（cardType/rewardClouds/totalClouds），无算法可复算；由 Rust 侧解析断言",

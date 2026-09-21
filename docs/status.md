@@ -104,9 +104,13 @@
    （期望值取自 `pcclient-crypto-vectors.json` 那一份，不是没测，是没接**这一份**）；  
    `md5SafeVerify` 是**两侧都没实现**的 TS 路径（Rust 侧 `login.rs` 记着  
    "`safeVerifyCodeEncrypt` 暂未实现：实测没走到那条分支"）⇒ 先定要不要实现，别补断言；  
-   `§guid32` 仍缺拼接规则（`-ENDIN` 那串两侧都只是被当字面量用），  
-   接的时候要用实拍值反推、**不许照实现现编**。逐节表见 `go-migration-plan.md` §6.1 末尾。  
-   ⇒ 下面那条"尚未达成"就是这次复核要更正的。
+   `§guid32` 的规则**向量里给了**（生成器 `getGUID32` = `MD5(UTF8(uuid))` 取大写），  
+   但**两侧都刻意不复刻**它（Go 与冻结的 Rust 都是 `hex(16 个随机字节)`，
+   上游分辨不出两者）⇒ 钉**形态**即可。逐节表见 `go-migration-plan.md` §6.1 末尾。  
+   ⇒ 下面那条"尚未达成"就是这次复核要更正的。  
+   ✅ **2026-09-21 已接完**：消费者 = `internal/upstream/login_crypto_vectors_test.go`  
+   （7 条）+ `internal/app/device_test.go`（1 条），门禁那行 `⚠ 死向量` 已转 ✓，
+   反向测试 6/6 如期变红（`target/revtest-login-vectors.py`）。
 
 - ⚠ **步 1 只剩 `error` 后半的 `classify_body` ~400 行**（那台"响应体分类机"）。  
   它之所以一直排在最后：写出来之后**没有消费者**（用到它的层还没迁），  
@@ -123,15 +127,20 @@
   ⇒ **2026-09-21 复核：这句话把两步的账混在了一个判据里，据此判"步 1 未达成"是错的。**  
   `app-signin-vectors` 与 `login-crypto-vectors` 的消费者都在**步 2**（`internal/upstream`），  
   与 core 无关；core 读的 8 份**逐节都有正向断言**（最后一处 `hcyCoolFlagEnvelope`  
-  这次补上，见收口第 3 条）。⇒ **步 1 判据达成**，例外只有收口第 2 条那一台分类机。
+  这次补上，见收口第 3 条）。⇒ **步 1 判据达成**，例外只有收口第 2 条那一台分类机。  
+  ✅ 补记（同日）：`login-crypto-vectors.json` 的消费者已落地，**`§guid32` 的规则也在** ——  
+  原文"连拼接规则都没在向量里给出"是看漏了生成器。见 `go-migration-plan.md` §6.1 末尾。
 - ⚠⚠ **别照门禁那行"✓ 有测试读取"判定进度**：它的消费者探测扫**四个落点**  
   （`crates/` / `legacy/crates/` / `internal/` / `cmd/`），命中任一即算有消费者，  
   **不区分是哪一侧在读**。所以 `app-signin-vectors.json` 至今显示 ✓，  
   而读它的**只有已冻结的 Rust 侧**。  
-  Go 侧实际读了 **9 份**：`crypto` / `pcclient-crypto` / `app-business-crypto` /  
-  `auth` / `password-hash` / `enum-json` / `legacy-shape` / `traits-shape` /  
-  `datetime-format`  
-  （见 `internal/core/*_test.go` 与 `internal/io/*_test.go` 里的 `golden.Load`）。
+  Go 侧实际读了 **11 份**（= `test/golden/` 的全部）：`crypto` / `pcclient-crypto` /  
+  `app-business-crypto` / `auth` / `password-hash` / `enum-json` / `legacy-shape` /  
+  `traits-shape` / `datetime-format` / `app-signin` / `login-crypto`  
+  （见 `internal/core/*_test.go`、`internal/io/*_test.go`、`internal/upstream/*_test.go`  
+  与 `internal/app/device_test.go` 里的 `golden.Load`）。  
+  ⇒ **2026-09-21 起，"✓ 有测试读取"与"Go 侧读了"这两个集合已经重合** ——  
+  但这是**当前**的事实，不是这条判据的性质（它仍不区分哪一侧）。
 - ⚠ `user` 是第一个引入**第三方依赖**（`golang.org/x/crypto`，只为 argon2）的模块。  
   它只给**裸 KDF**，PHC 串的编解码要自己写；且 `v=16` 与 `$argon2d$` 两条  
   Go 侧**物理上算不出来**，已在向量的 `$crossLanguageGaps` 里登记为  
@@ -442,6 +451,27 @@
 
 门禁：**合并后在合并树上重跑，九项全绿**（那轮跑的是合并前的脚本，见上）。
 
+### 收尾整理：这一轮找出来的"不对的地方"（2026-09-21）
+
+用户原话是"先提交，然后整理那些不对的地方"。逐条如下，**前四条都已修**：
+
+| # | 不对的地方 | 症状（为什么一直没人发现） | 处置 |
+| --- | --- | --- | --- |
+| 1 | **两个 git hook 从未生效**（三层，各自都足以让它静默失效） | ① `core.hooksPath` 根本没设过；② 更要命的是**它们以 `100644` 入库**（`git ls-files -s .githooks/` 可验），而 git 对**没有 x 位**的 hook 是**直接跳过**、不报错；③ 装好之后立刻暴露第三层：hook 里写的是 `exec scripts/gates-go.sh`，而 `scripts/*.sh` 也是 `100644` ⇒ `Permission denied`，**每一次提交都被拦住**。⇒ 门禁**一次都没自动跑过** | `bash scripts/install-hooks.sh`（它本来就 chmod +x 并写明了理由）；**把 mode 变更（644→755）提交进库**；hook 改成 `exec bash …/gates-go.sh`（不依赖 x 位，与文档里的 `bash scripts/gates-go.sh` 一致）。⚠ 判据：**路径上任何一环缺 x 位，"跳过"与"拦住"都不报出真正的原因** |
+| 2 | `scripts/install-hooks.sh` 打印的是**过期的指引** | 原文"pre-push 跑七条全量，含 clippy"是 **Rust 侧**的说法（Go 侧既没有 clippy，条数也不是七）。⚠ 它是**第二份真相**，而真相处（`GATE_NAMES`）改了它不会跟着改 | 删掉具体条数，改成指向 `.githooks/README.md` 与 `gates-go.sh` 头注释 |
+| 3 | 步 4 判据里的 **"19 项能力 / `POST /api/runs` 未实现"** | 19 取自**旧 TS 项目**，冻结基准的注册表只有 3 项（code 集合与 Go **完全相同**）；`POST /api/runs` 在 `legacy/.../routes/mod.rs` 里自己写着"要等 P4"。⇒ 一个**已对位**的迁移被记成没做完 | 见 §6.1 **#86**；`docs/go-migration-plan.md` 与本文档同步更正 |
+| 4 | **`login-crypto-vectors.json` 是死向量** | 有生成器、无消费者，golden 门禁每轮打 `⚠ 无任何测试读取（死向量）` 但**不失败** ⇒ 可以无限期挂着 | 接上消费者：`internal/upstream/login_crypto_vectors_test.go`（7 条）+ `internal/app/device_test.go`（1 条）。⚠ 与预判不同：**不是"改已有断言"，是新写一份** —— 两份向量文件的段名**完全不相交**（见 §6.1 末尾） |
+| 5 | `check-golden-vectors.cjs` 里 `guid32` 的**豁免理由过期** | 写着"uuid→md5 的具体拼接未在向量里给出"，而生成器里 `getGUID32` **逐字给了**。⇒ 2 条本来能算的向量长期挂在"未覆盖"清单里 | 删该条 + 补独立实现，断言 131 → **133**。见 §6.1 **#88** |
+
+**新长出来的两条通则**（已进 §6.1）：**#88** 借口表会过期且过期时不报错；
+**#89** 用向量的 `name` / 键当循环源的断言，键一改名就**静默少测一条**（判据必须双向）。
+
+**反向测试**：新断言 6 个变异全部如期变红
+（`target/revtest-login-vectors.py`；改实现 3 条 + 改向量文件 3 条）。
+
+**验收**：`922 个测试`（914 → +8）、`九项门禁全绿`、golden **133 条断言全绿**、
+`test/golden/` **11 份向量全部有消费者**（此前 10/11）。
+
 ---
 
 ## 一句话总览
@@ -478,11 +508,11 @@
 > 这里曾经把 554 写成"当前数"—— 那是**拉取云端之前**本机的数。  
 > 云端那 9 个提交带进来的 `mcloud-app` 等新模块另有自己的 lib 测试，落地后实跑是 **586**。
 
-**门禁实况（2026-09-21，Go 侧）**：**914 个测试通过**，**九条门禁全绿**  
-（黄金向量那段是 **131 条断言**，见 [`dev-gates.md`](./dev-gates.md)）。  
+**门禁实况（2026-09-21，Go 侧）**：**922 个测试通过**，**九条门禁全绿**  
+（黄金向量那段是 **133 条断言**，见 [`dev-gates.md`](./dev-gates.md)）。  
 ⚠ 上面「当前数见下方门禁实况」指的就是这一段 —— 它早先写的是 **Rust 侧**
 （2026-09-19：586 个 / 七条），那是**冻结前**的数，别拿它当现状。
-Go 侧逐包：core 270 / upstream 150 / io 150 / app 117 / cli 116 / server 44 /
+Go 侧逐包：core 270 / upstream 157 / io 150 / app 118 / cli 116 / server 44 /
 exec 35 / capabilities 32。
 
 ---

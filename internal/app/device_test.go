@@ -1,10 +1,13 @@
 package app
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/catlair/mcloud/internal/golden"
 )
 
 // seqRng 已在 signin_test.go 里定义（字节脚本回绕），这里复用。
@@ -21,6 +24,102 @@ func TestDeviceIDMatchesTheCapturedShape(t *testing.T) {
 	if !strings.HasSuffix(id, "-ENDIN") {
 		t.Errorf("应带 -ENDIN 后缀，实得 %q", id)
 	}
+}
+
+// TestDeviceFingerprintMatchesTheGoldenVectorShape 用黄金向量
+// `test/golden/login-crypto-vectors.json` 的 `§guid32` 钉住**形态**。
+//
+// # 为什么只钉形态，不复刻 `MD5(uuid)`
+//
+// 客户端是 `getGUID32() = MD5(随机 UUID).toString(Hex).toUpperCase()`，再拼 `-ENDIN`
+// （规则逐字写在生成器 `scripts/gen-login-crypto-vectors.cjs` 里）。
+// 但**上游只看得到那 32 个字符**：它分辨不出这个值来自 `md5(uuid)` 还是来自
+// 16 个随机字节 —— 两者都是 128 位均匀随机，字节分布完全一样。
+// 所以「怎么算出来的」是**客户端内部实现**，不是要对位的边界（见 plan §6.0）。
+//
+// ⚠ 这不是 Go 单方面的偷懒：**冻结的 Rust 侧也是
+// `hex::encode_upper(16 个随机字节)`**（`legacy/crates/mcloud-app/src/device.rs`），
+// 同样没有 `md5(uuid)`。向量里那两行 `uuidV4 → expectHexUpper` **两侧都没复刻**；
+// 现在照它补一个函数，只会新长出一个没有消费者的 `md5(uuid)`。
+//
+// 反过来，**形态是边界**：`<32 位大写 HEX>-ENDIN` 直接进二维码的 `dID`，
+// 形态错了上游就按 `dID + sID` 定位不到会话（轮询永远停在"未找到设备的二维码信息"）。
+func TestDeviceFingerprintMatchesTheGoldenVectorShape(t *testing.T) {
+	raw, err := golden.Load("login-crypto-vectors.json")
+	if err != nil {
+		t.Fatalf("读黄金向量失败: %v", err)
+	}
+	// 用带 tag 的结构体而不是 map[string]any：字段名拼错会**编译期**就报出来，
+	// 而 map 版本会静默取到零值 —— 于是断言变成"零值 == 零值"，永远绿。
+	var vectors struct {
+		Constants struct {
+			DeviceFingerprintSuffix string `json:"DEVICE_FINGERPRINT_SUFFIX"`
+		} `json:"constants"`
+		Guid32 []struct {
+			UUID              string `json:"uuidV4"`
+			ExpectHexUpper    string `json:"expectHexUpper"`
+			ExpectLen         int    `json:"expectLen"`
+			DeviceFingerprint string `json:"deviceFingerprint"`
+		} `json:"guid32"`
+	}
+	if err := json.Unmarshal(raw, &vectors); err != nil {
+		t.Fatalf("解析黄金向量失败: %v", err)
+	}
+
+	if got := vectors.Constants.DeviceFingerprintSuffix; got != DeviceIDSuffix {
+		t.Errorf("后缀常量：向量 %q vs 代码 %q", got, DeviceIDSuffix)
+	}
+	if len(vectors.Guid32) == 0 {
+		t.Fatal("§guid32 是空数组 —— 这样得到的「全绿」什么都没测")
+	}
+
+	for _, e := range vectors.Guid32 {
+		if len(e.ExpectHexUpper) != e.ExpectLen {
+			t.Errorf("%s: expectLen 说 %d，值却是 %d 位", e.UUID, e.ExpectLen, len(e.ExpectHexUpper))
+		}
+		// 向量的位数必须等于 Go 生成侧的位数 —— 这条把向量里的数字
+		// 与 `NewDeviceID` 的实际输出**绑在一起**，而不是各自说各自的。
+		if e.ExpectLen != len(NewDeviceID(&seqRng{script: []byte{0}}))-len(DeviceIDSuffix) {
+			t.Errorf("%s: 向量说 %d 位，Go 生成的是 %d 位",
+				e.UUID, e.ExpectLen, len(NewDeviceID(&seqRng{script: []byte{0}}))-len(DeviceIDSuffix))
+		}
+		if !isUpperHex(e.ExpectHexUpper) {
+			t.Errorf("%s: expectHexUpper 不是全大写十六进制：%q", e.UUID, e.ExpectHexUpper)
+		}
+		if want := e.ExpectHexUpper + DeviceIDSuffix; e.DeviceFingerprint != want {
+			t.Errorf("%s: 设备指纹应为 %q，向量写的是 %q", e.UUID, want, e.DeviceFingerprint)
+		}
+	}
+
+	// Go 生成侧的实际输出：32 位大写 HEX + 后缀。
+	// `TestDeviceIDMatchesTheCapturedShape` 钉的是**某个种子下的确定值**，
+	// 这条钉的是**形状**（换种子也得成立）。
+	id := NewDeviceID(&seqRng{script: []byte{0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
+		0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44}})
+	body, ok := strings.CutSuffix(id, DeviceIDSuffix)
+	if !ok {
+		t.Fatalf("设备 id 必须带 %s 后缀，实得 %q", DeviceIDSuffix, id)
+	}
+	if !isUpperHex(body) {
+		t.Errorf("后缀前必须是全大写十六进制，实得 %q", body)
+	}
+	if len(body) != vectors.Guid32[0].ExpectLen {
+		t.Errorf("实得 %d 位，向量说 %d 位", len(body), vectors.Guid32[0].ExpectLen)
+	}
+}
+
+// isUpperHex 判断 s 是否非空且全为大写十六进制字符。
+func isUpperHex(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9') && !(c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 // TestDeviceIDIsStableAcrossReads：

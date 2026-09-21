@@ -18,7 +18,7 @@
 >   **与其它文档冲突时以它为准**。
 > - 骨架已就位：`internal/` 八层 + `cmd/` 两个入口 + `bash scripts/gates-go.sh`（**九条门禁**）。
 >   **业务已迁完**（2026-09-21）：`core` / `upstream` / `io` / `capabilities` / `exec` /
->   `app` / `server` / `cli` 八层全部落地，**914 条测试**；`cli` 的 12 个叶子命令
+>   `app` / `server` / `cli` 八层全部落地，**922 条测试**；`cli` 的 12 个叶子命令
 >   **全部接上真后端**（缺口表已退役），`cmd/mcloud-server` **也接上了** `internal/server`
 >   （不再是占位退 2）。
 >   ⭕ **迁移已对位，没有缺口**：`capabilities` 注册表 Go 侧 3 项
