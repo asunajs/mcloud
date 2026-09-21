@@ -2,9 +2,9 @@
 
 > 状态：**实况**（这里写的是"现在能跑什么、还差什么"，不是计划）
 >
-> ⚠ **2026-09-20：Rust 侧已冻结到 `legacy/`，本仓库正在迁往 Go。**
-> 下面这张表描述的是**冻结那一刻**的 Rust 实现 —— 它仍然有效、也仍然是对拍基准，
-> 但"进度"从此按 Go 侧算。迁移方案与顺序见 [`go-migration-plan.md`](./go-migration-plan.md)。
+> ⚠ **2026-09-20：Rust 侧已冻结到 `legacy/`，本仓库正在迁往 Go。**  
+> 下面这张表描述的是**冻结那一刻**的 Rust 实现 —— 它仍然有效、也仍然是对拍基准，  
+> 但"进度"从此按 Go 侧算。迁移方案与顺序见 [`go-migration-plan.md`](./go-migration-plan.md)。  
 > Go 侧进度见下方「Go 侧迁移实况」一节。
 >
 > - 最后核对：2026-09-19 收工（Rust 侧）；Go 侧 2026-09-20 起
@@ -14,271 +14,274 @@
 
 ---
 
+
 ## Go 侧迁移实况（2026-09-20 起）
 
-**当前：步 1（`mcloud-core`）✅ **收口**（2026-09-21，判据与一条例外见下方"步 1 收口"）；**步 2（`mcloud-upstream`）已整族落地**（`login` / `client` / `app_client` / `app_login` / `app_signin` 全族 / `smid`，150 条测试）；**步 3（`mcloud-io`）已整族落地**（schema / store / store::user / store::config / datetime / **legacy_import** / fixture / HTTP 客户端 / 随机源，150 条测试）；步 4 已落地 `capabilities`（注册表 + `login`）、`exec`、`app::payload` / `smid` / `session` / **`signin/*` 整族**。
+**当前：步 1（`mcloud-core`）✅ 收口（2026-09-21，判据与一条例外见下方"步 1 收口"）；**&#x6B65; 2（`mcloud-upstream`）已整族落&#x5730;**（`login` / `client` / `app_client` / `app_login` / `app_signin` 全族 / `smid`，150 条测试）；**&#x6B65; 3（`mcloud-io`）已整族落地\*\*（schema / store / store::user / store::config / datetime / **legacy_import** / fixture / HTTP 客户端 / 随机源，150 条测试）；步 4 已落地 `capabilities`（注册表 + `login`）、`exec`、`app::payload` / `smid` / `session` / **`signin/*` 整族**。
 
-⇒ **`app::migration` / `cli` / `server` 的阻塞已解除**（此前全被步 3 挡着）。**
+⇒ **`app::migration` / `cli` / `server` 的阻塞已解除**（此前全被步 3 挡着）。\**
 
-> ✅ **2026-09-21 起并发结束**，全部由本会话接手（此前最多三个会话在同一棵树上）。
-> 已付出的可见代价：`docs/go-migration-plan.md` 的 §6.1 一度出现**两组 `#20`**，
-> 现已统一为**全局连续 + 追加式**（步 1 = 1–27，步 4 = 28–39 与 42–45，步 3 = 40–41 与 46–47）。
-> ⚠ 动 `docs/`、共享脚本、门禁白名单前**先看 `git status`**：
-> 白名单条目若指向**未提交**的文件，干净检出会让 `jsontags` 门禁变红 ——
+> ✅ **2026-09-21 起并发结束**，全部由本会话接手（此前最多三个会话在同一棵树上）。  
+> 已付出的可见代价：`docs/go-migration-plan.md` 的 §6.1 一度出现**两组 `#20`**，  
+> 现已统一为**全局连续 + 追加式**（步 1 = 1–27，步 4 = 28–39 与 42–45，步 3 = 40–41 与 46–47）。  
+> ⚠ 动 `docs/`、共享脚本、门禁白名单前**先看 `git status`**：  
+> 白名单条目若指向**未提交**的文件，干净检出会让 `jsontags` 门禁变红 ——  
 > 条目与文件必须**同进同出**（**两个方向都算**：文件先落地而条目没跟上，同样会让 HEAD 变红）。
 
-> 步 4 的落点见下方「步 4 实况」一节 —— 它**没有**按 `capabilities → exec → app → server/cli`
-> 一口气做完：`capabilities::login` 与 `app` 的绝大多数模块**依赖步 2（`mcloud-upstream`）与
-> 步 3（`mcloud-io`）**，那两步还没迁，所以先落了不依赖它们的三块；
-> 之后为了解开 `capabilities::login`，又**回头补了步 2 的 `upstream::login` 那一块**
+> 步 4 的落点见下方「步 4 实况」一节 —— 它**没有**按 `capabilities → exec → app → server/cli`  
+> 一口气做完：`capabilities::login` 与 `app` 的绝大多数模块**依赖步 2（`mcloud-upstream`）与  
+> 步 3（`mcloud-io`）**，那两步还没迁，所以先落了不依赖它们的三块；  
+> 之后为了解开 `capabilities::login`，又**回头补了步 2 的 `upstream::login` 那一块**  
 > （只补到够用为止，步 2 的 `signin` 协议族仍未迁）。
 
-| `mcloud-core` 的模块 | Go 侧 | 说明 |
-| --- | --- | --- |
-| `crypto` | ✅ | 哈希 / AES(CBC,ECB) / DES / RSA / gzip / 签名头 / getTn |
-| `error` | ✅ 前半 | ErrorKind / Error / classify_status / classify_business_code；**后半的 `classify_body` 那台"响应体分类机"未迁** ⇒ 2026-09-21 定案：不补进 core，见下方「步 1 收口」第 2 条 |
-| `auth` | ✅ | 含全部原版怪癖（只去一处 `Basic ` 前缀、token 在 `:` 处截断、`Number() \|\| 0`） |
-| `pure` | ✅ | 日键 / 增量 / 开抢时刻 / 脱敏 |
-| `cron` | ✅ | 5/6 段分流、日与周 OR、周日 `0`/`7` 归一化、时区为参数、4 年上界返回 false |
-| `sanitize` | ✅ | header 白名单 / JSON 递归脱敏 / token 形状打码 / 199 号段重映射 / `scan_for_leaks` 自检 / `build_fixture_entry` |
-| `user` | ✅ | 口令哈希（argon2id PHC 串）/ 会话 token / 数据隔离判据；**带来了第七份黄金向量** |
-| `run` | ✅ | RunID / 四态结论 / 需人工 / Seq 语义 / 五类事件流；**顺带补上了枚举的 JSON 编解码（见下）** |
-| `model` | ✅ | Account / RunRecord / 能力注册表 7 个枚举 / AccountState / SmidState / Schedule / Pipeline / Exchange / Webui |
-| `stage` | ✅ | 三阶段存储生命周期 / 四类迁移错误 / RunExecution；**`RunStage` 是 tag 枚举，形状由 serde 产出后对拍** |
-| `legacy` | ✅ | 旧文档 14 个类型 / 规整规则 / 账号视图 / 引用解析；**带来了第九份黄金向量（形状）** |
-| `traits` | ✅ | HTTP 请求/响应形状 / Clock / Scope / ClaimedRows / 三个 store 接口；**带来了第十份黄金向量（形状）** |
+| `mcloud-core` 的模块 | Go 侧 | 说明                                                                                                                                          |
+| ----------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crypto`          | ✅    | 哈希 / AES(CBC,ECB) / DES / RSA / gzip / 签名头 / getTn                                                                                          |
+| `error`           | ✅ 前半 | ErrorKind / Error / classify_status / classify_business_code；**后半的 `classify_body` 那台"响应体分类机"未迁** ⇒ 2026-09-21 定案：不补进 core，见下方「步 1 收口」第 2 条 |
+| `auth`            | ✅    | 含全部原版怪癖（只去一处 `Basic ` 前缀、token 在 `:` 处截断、`Number() \|\| 0`）                                                                                 |
+| `pure`            | ✅    | 日键 / 增量 / 开抢时刻 / 脱敏                                                                                                                         |
+| `cron`            | ✅    | 5/6 段分流、日与周 OR、周日 `0`/`7` 归一化、时区为参数、4 年上界返回 false                                                                                           |
+| `sanitize`        | ✅    | header 白名单 / JSON 递归脱敏 / token 形状打码 / 199 号段重映射 / `scan_for_leaks` 自检 / `build_fixture_entry`                                               |
+| `user`            | ✅    | 口令哈希（argon2id PHC 串）/ 会话 token / 数据隔离判据；**带来了第七份黄金向量**                                                                                      |
+| `run`             | ✅    | RunID / 四态结论 / 需人工 / Seq 语义 / 五类事件流；**顺带补上了枚举的 JSON 编解码（见下）**                                                                               |
+| `model`           | ✅    | Account / RunRecord / 能力注册表 7 个枚举 / AccountState / SmidState / Schedule / Pipeline / Exchange / Webui                                       |
+| `stage`           | ✅    | 三阶段存储生命周期 / 四类迁移错误 / RunExecution；**`RunStage` 是 tag 枚举，形状由 serde 产出后对拍**                                                                   |
+| `legacy`          | ✅    | 旧文档 14 个类型 / 规整规则 / 账号视图 / 引用解析；**带来了第九份黄金向量（形状）**                                                                                          |
+| `traits`          | ✅    | HTTP 请求/响应形状 / Clock / Scope / ClaimedRows / 三个 store 接口；**带来了第十份黄金向量（形状）**                                                                 |
 
-- 落点 `internal/core`，**270 条测试**；读 `test/golden/*.json` 经 `internal/golden`，
-  读 `test/fixtures/legacy/*.json` 经 `internal/golden.LoadFixture`，都不复制。
-  ⚠ **全项目的条数不在这里维护**（抄一次就 stale 一次）：
+- 落点 `internal/core`，**270 条测试**；读 `test/golden/*.json` 经 `internal/golden`，  
+  读 `test/fixtures/legacy/*.json` 经 `internal/golden.LoadFixture`，都不复制。  
+  ⚠ **全项目的条数不在这里维护**（抄一次就 stale 一次）：  
   `grep -rho '^func Test' internal/*/*_test.go | wc -l` 现算。
 
 #### 步 1 收口（2026-09-21 实测）
 
 判据是 §7 那行"黄金向量在 Go 侧逐字段复算通过"。逐条核过：
 
-1. **模块对位：17/17。** Rust 侧 `mcloud-core/src` 的 17 个源文件（含 `lib.rs`、
+1. **模块对位：17/17。** Rust 侧 `mcloud-core/src` 的 17 个源文件（含 `lib.rs`、  
    `test_support.rs`）在 `internal/core` 全有落点。
-2. **公开 API 对位：164 个 `pub` 项里 156 个按名字对上**（比对要先做
-   `snake_case`→`PascalCase` 归一，否则整表都是假阳性 —— 我第一版就这么误报过一批），
-   剩下 8 个：4 个只是改名（`AES_FIXED_IV` / `DEFAULT_EXCHANGE_WINDOWS` /
-   `SIGN_SALT_MAP` / `WEBUI_PAGES`，Go 侧逐一对到了实现），
-   另 4 个是同一件事 —— **`classify_body` 及其 `Classified` / `FailureClass` / `body_snippet`**。
-   ⇒ **定案：不补进 core。** 依据不是"还没轮到它"，而是**冻结基准里它就没有消费者**：
-   `grep -rn "classify_body\|Classified" legacy/crates` 除 `mcloud-core` 自身
-   （定义处 + 自己的单测 + `lib.rs` 再导出）外**零命中**。
-   而 Go 侧判据的三块已经各在其位：HTTP 状态归 `core.ClassifyStatus`
-   （`internal/io/client.go` 就在用），信封归 `upstream.Envelope`
-   （`Success` 先于 `Code` 那条顺序也在那儿）。
-   **补进去就是一台没人开的分类机**，正是本文件反复警告的"写下来就没人再看"。
-   ⇒ 归属改挂到**第一个真需要"状态 + 响应体一步判完"的调用点**（步 4 的 `exec` / `server`
+2. **公开 API 对位：164 个 `pub` 项里 156 个按名字对上**（比对要先做  
+   `snake_case`→`PascalCase` 归一，否则整表都是假阳性 —— 我第一版就这么误报过一批），  
+   剩下 8 个：4 个只是改名（`AES_FIXED_IV` / `DEFAULT_EXCHANGE_WINDOWS` /  
+   `SIGN_SALT_MAP` / `WEBUI_PAGES`，Go 侧逐一对到了实现），  
+   另 4 个是同一件事 —— **`classify_body` 及其 `Classified` / `FailureClass` / `body_snippet`**。  
+   ⇒ **定案：不补进 core。** 依据不是"还没轮到它"，而是**冻结基准里它就没有消费者**：  
+   `grep -rn "classify_body\|Classified" legacy/crates` 除 `mcloud-core` 自身  
+   （定义处 + 自己的单测 + `lib.rs` 再导出）外**零命中**。  
+   而 Go 侧判据的三块已经各在其位：HTTP 状态归 `core.ClassifyStatus`  
+   （`internal/io/client.go` 就在用），信封归 `upstream.Envelope`  
+   （`Success` 先于 `Code` 那条顺序也在那儿）。  
+   **补进去就是一台没人开的分类机**，正是本文件反复警告的"写下来就没人再看"。  
+   ⇒ 归属改挂到**第一个真需要"状态 + 响应体一步判完"的调用点**（步 4 的 `exec` / `server`  
    错误映射），届时按 Go 的形状写，而不是照 Rust 的签名平移。
-3. **向量：core 读 8 份，且逐节都有正向断言** —— 这次把最后一处补上了：
-   `app-business-crypto-vectors.json` 的 `hcyCoolFlagEnvelope`（发码链路那把 AES-128，
-   3 条）此前**只被当过反例**（`…192IsNotThe128BitKey` 用它证明"128 那把解不开 192 族"），
-   **从没正向解过一次**。新增 `TestAppCoolFlagSmsLinkEnvelope128BothDirections`
-   补两个方向：2 条实拍响应走解密、1 条合成请求走**加密**（固定 IV ⇒ 逐字节可比）。
-   ⚠ **反例不能代替正例**：拿错钥匙有 1/256 的概率碰上合法 PKCS7，
-   那时"解不出正确明文"这条在两边都成立。
+3. **向量：core 读 8 份，且逐节都有正向断言** —— 这次把最后一处补上了：  
+   `app-business-crypto-vectors.json` 的 `hcyCoolFlagEnvelope`（发码链路那把 AES-128，  
+   3 条）此前**只被当过反例**（`…192IsNotThe128BitKey` 用它证明"128 那把解不开 192 族"），  
+   **从没正向解过一次**。新增 `TestAppCoolFlagSmsLinkEnvelope128BothDirections`  
+   补两个方向：2 条实拍响应走解密、1 条合成请求走**加密**（固定 IV ⇒ 逐字节可比）。  
+   ⚠ **反例不能代替正例**：拿错钥匙有 1/256 的概率碰上合法 PKCS7，  
+   那时"解不出正确明文"这条在两边都成立。  
    ⚠ 反向测试已做：把钥匙换成 `BODY_AES_KEY_192`，两个方向**同时变红**。
-4. **§6.1 那四个坑逐条核过**：① `Below()` 是拒绝采样且取值序列被钉住
-   （`crypto_test.go`，注释里写明了"别简化成 `% n`"）；② argon2 的盐走注入的
-   `Random`（`HashPassword(plain, rng)`）；③ DES 的豁免理由在 `crypto.go` 文件头
-   （"协议层必须能用…设备指纹（DES/RSA）"+ 三条坑里的补零口径）；
-   ④ 四态穷尽用 `countKnownStates` 真值表守卫兜住（`run_test.go`，
+4. **§6.1 那四个坑逐条核过**：① `Below()` 是拒绝采样且取值序列被钉住  
+   （`crypto_test.go`，注释里写明了"别简化成 `% n`"）；② argon2 的盐走注入的  
+   `Random`（`HashPassword(plain, rng)`）；③ DES 的豁免理由在 `crypto.go` 文件头  
+   （"协议层必须能用…设备指纹（DES/RSA）"+ 三条坑里的补零口径）；  
+   ④ 四态穷尽用 `countKnownStates` 真值表守卫兜住（`run_test.go`，  
    判据是"`String()` 对越界值返回空串"）。
-5. **⚠ 步 1 的判据里从来不该含 `login-crypto-vectors.json`**：它覆盖的是
-   `puzzleAnswer` / `aesEcb*` / `sha1Password` / `md5SafeVerify` / `guid32` ——
-   落点在 `internal/upstream/login.go`，**属步 2**。而且它并非"完全无断言"：
-   `puzzleAnswer` / `aesEcb*` / `sha1Password` 三族**行为两侧都已正向钉过**
-   （期望值取自 `pcclient-crypto-vectors.json` 那一份，不是没测，是没接**这一份**）；
-   `md5SafeVerify` 是**两侧都没实现**的 TS 路径（Rust 侧 `login.rs` 记着
-   "`safeVerifyCodeEncrypt` 暂未实现：实测没走到那条分支"）⇒ 先定要不要实现，别补断言；
-   `§guid32` 仍缺拼接规则（`-ENDIN` 那串两侧都只是被当字面量用），
-   接的时候要用实拍值反推、**不许照实现现编**。逐节表见 `go-migration-plan.md` §6.1 末尾。
+5. **⚠ 步 1 的判据里从来不该含 `login-crypto-vectors.json`**：它覆盖的是  
+   `puzzleAnswer` / `aesEcb*` / `sha1Password` / `md5SafeVerify` / `guid32` ——  
+   落点在 `internal/upstream/login.go`，**属步 2**。而且它并非"完全无断言"：  
+   `puzzleAnswer` / `aesEcb*` / `sha1Password` 三族**行为两侧都已正向钉过**  
+   （期望值取自 `pcclient-crypto-vectors.json` 那一份，不是没测，是没接**这一份**）；  
+   `md5SafeVerify` 是**两侧都没实现**的 TS 路径（Rust 侧 `login.rs` 记着  
+   "`safeVerifyCodeEncrypt` 暂未实现：实测没走到那条分支"）⇒ 先定要不要实现，别补断言；  
+   `§guid32` 仍缺拼接规则（`-ENDIN` 那串两侧都只是被当字面量用），  
+   接的时候要用实拍值反推、**不许照实现现编**。逐节表见 `go-migration-plan.md` §6.1 末尾。  
    ⇒ 下面那条"尚未达成"就是这次复核要更正的。
 
-- ⚠ **步 1 只剩 `error` 后半的 `classify_body` ~400 行**（那台"响应体分类机"）。
-  它之所以一直排在最后：写出来之后**没有消费者**（用到它的层还没迁），
-  而"写下来就没人再看"的代码正是这个项目反复吃亏的地方。
-  ⇒ **2026-09-21 复核更正**：不只是"用到它的层还没迁"——**冻结基准里它也没有调用点**
-  （见上方收口第 2 条），所以这条判据成立的方式是"两边都没人用"。
+- ⚠ **步 1 只剩 `error` 后半的 `classify_body` ~400 行**（那台"响应体分类机"）。  
+  它之所以一直排在最后：写出来之后**没有消费者**（用到它的层还没迁），  
+  而"写下来就没人再看"的代码正是这个项目反复吃亏的地方。  
+  ⇒ **2026-09-21 复核更正**：不只是"用到它的层还没迁"——**冻结基准里它也没有调用点**  
+  （见上方收口第 2 条），所以这条判据成立的方式是"两边都没人用"。  
   结论从"步 1 的尾巴"改为"挂到步 4 的第一个真实调用点"。
 - 门禁**九条**（新增 `jsontags`）—— 见 `docs/dev-gates.md`。
 - `auth-vectors.json` 从"只有 Rust 读"变成**两边都读**。
-- 步 1 的退出判据是"黄金向量在 Go 侧逐字段复算通过"，**尚未达成**：
-  `app-signin-vectors` 的消费者在步 2 接线，而 `login-crypto-vectors.json`
-  至今仍是**死向量**（有生成器 `scripts/gen-login-crypto-vectors.cjs`、无消费者），
-  且它的 `§guid32` 连拼接规则都没在向量里给出 —— 详见 `go-migration-plan.md` §6.1 末尾。
-  ⇒ **2026-09-21 复核：这句话把两步的账混在了一个判据里，据此判"步 1 未达成"是错的。**
-  `app-signin-vectors` 与 `login-crypto-vectors` 的消费者都在**步 2**（`internal/upstream`），
-  与 core 无关；core 读的 8 份**逐节都有正向断言**（最后一处 `hcyCoolFlagEnvelope`
+- 步 1 的退出判据是"黄金向量在 Go 侧逐字段复算通过"，**尚未达成**：  
+  `app-signin-vectors` 的消费者在步 2 接线，而 `login-crypto-vectors.json`  
+  至今仍是**死向量**（有生成器 `scripts/gen-login-crypto-vectors.cjs`、无消费者），  
+  且它的 `§guid32` 连拼接规则都没在向量里给出 —— 详见 `go-migration-plan.md` §6.1 末尾。  
+  ⇒ **2026-09-21 复核：这句话把两步的账混在了一个判据里，据此判"步 1 未达成"是错的。**  
+  `app-signin-vectors` 与 `login-crypto-vectors` 的消费者都在**步 2**（`internal/upstream`），  
+  与 core 无关；core 读的 8 份**逐节都有正向断言**（最后一处 `hcyCoolFlagEnvelope`  
   这次补上，见收口第 3 条）。⇒ **步 1 判据达成**，例外只有收口第 2 条那一台分类机。
-- ⚠⚠ **别照门禁那行"✓ 有测试读取"判定进度**：它的消费者探测扫**四个落点**
-  （`crates/` / `legacy/crates/` / `internal/` / `cmd/`），命中任一即算有消费者，
-  **不区分是哪一侧在读**。所以 `app-signin-vectors.json` 至今显示 ✓，
-  而读它的**只有已冻结的 Rust 侧**。
-  Go 侧实际读了 **9 份**：`crypto` / `pcclient-crypto` / `app-business-crypto` /
-  `auth` / `password-hash` / `enum-json` / `legacy-shape` / `traits-shape` /
-  `datetime-format`
+- ⚠⚠ **别照门禁那行"✓ 有测试读取"判定进度**：它的消费者探测扫**四个落点**  
+  （`crates/` / `legacy/crates/` / `internal/` / `cmd/`），命中任一即算有消费者，  
+  **不区分是哪一侧在读**。所以 `app-signin-vectors.json` 至今显示 ✓，  
+  而读它的**只有已冻结的 Rust 侧**。  
+  Go 侧实际读了 **9 份**：`crypto` / `pcclient-crypto` / `app-business-crypto` /  
+  `auth` / `password-hash` / `enum-json` / `legacy-shape` / `traits-shape` /  
+  `datetime-format`  
   （见 `internal/core/*_test.go` 与 `internal/io/*_test.go` 里的 `golden.Load`）。
-- ⚠ `user` 是第一个引入**第三方依赖**（`golang.org/x/crypto`，只为 argon2）的模块。
-  它只给**裸 KDF**，PHC 串的编解码要自己写；且 `v=16` 与 `$argon2d$` 两条
-  Go 侧**物理上算不出来**，已在向量的 `$crossLanguageGaps` 里登记为
+- ⚠ `user` 是第一个引入**第三方依赖**（`golang.org/x/crypto`，只为 argon2）的模块。  
+  它只给**裸 KDF**，PHC 串的编解码要自己写；且 `v=16` 与 `$argon2d$` 两条  
+  Go 侧**物理上算不出来**，已在向量的 `$crossLanguageGaps` 里登记为  
   "Rust 是 mismatch、Go 是 error"（详见 `go-migration-plan.md` §6.1）。
-- ⚠ `cron` 与 `sanitize` **没有黄金向量** —— 它们的规格来自 Rust 侧的单元测试
+- ⚠ `cron` 与 `sanitize` **没有黄金向量** —— 它们的规格来自 Rust 侧的单元测试  
   （`sanitize` 的 5 个测试文件共 348 行），迁移时是**逐条平移**的，不是照文档重写。
-- ⚠⚠ **枚举的 JSON 形状是 `run` 这一步顺手补上的一个既有洞**，不是新需求：
-  Rust 侧每个进 JSON 的枚举都带 `#[serde(rename_all = …)]`，序列化成**文本**；
-  而 Go 的 `type X int` 默认序列化成**数字**。两边读同一批 `run_events.payload`
-  与同一张 `role` 列 ⇒ 同一个字段有两个形状，且**不报错**。
-  `user` 那一步的 `Role` / `SessionKind` 就已经是这个状态（它的测试只比 `String()`，
-  所以没露出来）。现在收进 `internal/core/enum.go` 一张名字表，
+- ⚠⚠ **枚举的 JSON 形状是 `run` 这一步顺手补上的一个既有洞**，不是新需求：  
+  Rust 侧每个进 JSON 的枚举都带 `#[serde(rename_all = …)]`，序列化成**文本**；  
+  而 Go 的 `type X int` 默认序列化成**数字**。两边读同一批 `run_events.payload`  
+  与同一张 `role` 列 ⇒ 同一个字段有两个形状，且**不报错**。  
+  `user` 那一步的 `Role` / `SessionKind` 就已经是这个状态（它的测试只比 `String()`，  
+  所以没露出来）。现在收进 `internal/core/enum.go` 一张名字表，  
   并由第八份黄金向量 `enum-json-vectors.json`（**serde 产出**）逐条对拍。
-- ⚠ **`stage` 这一步新钉住一条**：tag 枚举（`#[serde(tag = "stage")]`）的
-  **不同变体字段顺序不同** —— `Done` 是 `outcome→manual_steps→summary`，
-  `Failed` 是 `summary→manual_steps`。单个结构体做不到，
-  只能按 Kind 分派 `MarshalJSON`；而**逐字段比对会把这个差异整个放过**，
+- ⚠ **`stage` 这一步新钉住一条**：tag 枚举（`#[serde(tag = "stage")]`）的  
+  **不同变体字段顺序不同** —— `Done` 是 `outcome→manual_steps→summary`，  
+  `Failed` 是 `summary→manual_steps`。单个结构体做不到，  
+  只能按 Kind 分派 `MarshalJSON`；而**逐字段比对会把这个差异整个放过**，  
   只有整串比对抓得到。
-- ⚠⚠ **`legacy` 是最容易"静默读空"的一层**：旧文档的所有字段都带
-  `#[serde(default)]` ⇒ **字段名写错不报错，只静默读到零值** —— 表现是
-  "历史数据读出来是空的"，没有任何线索指向字段名。
-  而 Rust 侧对这批形状**一个断言都没有**。⇒ 新增第九份向量
-  `legacy-shape-vectors.json`，且它的生成器 `scripts/gen-legacy-shape-vectors.rs`
-  是 **path 依赖真实的 mcloud-core**（不是镜像类型定义）—— 镜像会抄错，
-  `ScheduleTarget` 那次已经证明过一次。
-  向量两节：`$serializedShapes`（8 个可序列化类型的空/填充整串）
+- ⚠⚠ **`legacy` 是最容易"静默读空"的一层**：旧文档的所有字段都带  
+  `#[serde(default)]` ⇒ **字段名写错不报错，只静默读到零值** —— 表现是  
+  "历史数据读出来是空的"，没有任何线索指向字段名。  
+  而 Rust 侧对这批形状**一个断言都没有**。⇒ 新增第九份向量  
+  `legacy-shape-vectors.json`，且它的生成器 `scripts/gen-legacy-shape-vectors.rs`  
+  是 **path 依赖真实的 mcloud-core**（不是镜像类型定义）—— 镜像会抄错，  
+  `ScheduleTarget` 那次已经证明过一次。  
+  向量两节：`$serializedShapes`（8 个可序列化类型的空/填充整串）  
   与 `$fixtureKeys`（夹具里实际出现的键名，用反射读 tag 逐条认领）。
-- ⚠⚠ **`traits` 是"两侧都跑得通、但写出来的不是同一份东西"最典型的一层**：
-  `HttpRequest` 的注释写着"golden request 对拍依赖它逐字段可比"，
-  而 Rust 侧对它**只断言过一个枚举的一个变体**。第十份向量
-  `traits-shape-vectors.json`（同样 path 依赖真实 mcloud-core）实测出四条
-  Go 侧会**静默接受**的坏形状：`body` 的 base64 串、`headers: null`、
-  缺席的 `method` / `url` / `status`、1 元组的 header。
-  其中 `body` 那条最要命 —— `encoding/json` 对 `[]byte` 有**专门的** base64 分支，
-  于是两侧各自序列化、各自解析都成功，只有两边文件逐字节 diff 才看得见。
+- ⚠⚠ **`traits` 是"两侧都跑得通、但写出来的不是同一份东西"最典型的一层**：  
+  `HttpRequest` 的注释写着"golden request 对拍依赖它逐字段可比"，  
+  而 Rust 侧对它**只断言过一个枚举的一个变体**。第十份向量  
+  `traits-shape-vectors.json`（同样 path 依赖真实 mcloud-core）实测出四条  
+  Go 侧会**静默接受**的坏形状：`body` 的 base64 串、`headers: null`、  
+  缺席的 `method` / `url` / `status`、1 元组的 header。  
+  其中 `body` 那条最要命 —— `encoding/json` 对 `[]byte` 有**专门的** base64 分支，  
+  于是两侧各自序列化、各自解析都成功，只有两边文件逐字节 diff 才看得见。  
   详见 `go-migration-plan.md` §6.1 #23–#27。
-- ⚠ **测试夹具的 RNG 必须逐模块对齐 Rust 侧各自那一份，不能就近复用**：
-  `run.rs` 与 `stage.rs` 各自定义了 `SeededRng`，算法不同
-  （前者是 `s*31+7` 的 u8 LCG，**周期恰好 16 —— 正是 UUID 的字节数**）。
-  `stage.rs` 还专门用一个进程内计数器把种子岔开，并在注释里写明了原因。
+- ⚠ **测试夹具的 RNG 必须逐模块对齐 Rust 侧各自那一份，不能就近复用**：  
+  `run.rs` 与 `stage.rs` 各自定义了 `SeededRng`，算法不同  
+  （前者是 `s*31+7` 的 u8 LCG，**周期恰好 16 —— 正是 UUID 的字节数**）。  
+  `stage.rs` 还专门用一个进程内计数器把种子岔开，并在注释里写明了原因。  
   迁移时我照样踩了（就近复用了 `run_test.go` 那份），详见 §6.1 #19。
-- ⚠⚠ **同一个病还有第二个面：结构体字段名**。Rust 的 serde 默认 snake_case，
-  Go 不带 tag 输出字段名原样 ⇒ `password_hash` vs `PasswordHash`。
-  这个版本已修三处：`CloudStats`（pure 带过来的）、`User` + `Session`（user 带过来的）、
-  `model` 那批。⚠ **往返测试救不了它**（用什么字段名都是绿的），
-  所以新增了第九条门禁 `scripts/check-go-jsontags.cjs`：
+- ⚠⚠ **同一个病还有第二个面：结构体字段名**。Rust 的 serde 默认 snake_case，  
+  Go 不带 tag 输出字段名原样 ⇒ `password_hash` vs `PasswordHash`。  
+  这个版本已修三处：`CloudStats`（pure 带过来的）、`User` + `Session`（user 带过来的）、  
+  `model` 那批。⚠ **往返测试救不了它**（用什么字段名都是绿的），  
+  所以新增了第九条门禁 `scripts/check-go-jsontags.cjs`：  
   混合 tag 直接失败、全无 tag 必须进白名单并写明理由。
 
 ### 步 3 实况（2026-09-20 起）
 
 **这是全项目唯一的 IO 层**（8,697 行），也是 `app` / `cli` / `server` 的阻塞点。
 
-| `mcloud-io` 的模块 | Go 侧 | 说明 |
-| --- | --- | --- |
-| `store::schema` | ✅ | schema v1→v8 的 8 条幂等迁移链；**18 条测试**逐级验证 |
-| `store` | ✅ | `StateStore` 全套（账号 / 登录态 / smid / 云朵快照 / 运行记录 / 事件流） |
-| `store::user` | ✅ | `UserStore` + `IssueSession`（口令 / 会话 / 清理过期） |
-| `datetime`（新增） | ✅ | 与 chrono **逐字节一致**的时间写法，见下 |
-| `store::config` | ✅ | 定时任务 / 任务组合 / 抢兑配置 / 界面偏好 / 导入台账（14 个方法）；**JSON 列存原文，只有 `enabled` / `cron` / `last_status` 单独成列** |
-| `legacy_import` | ✅ | **"老库只读导入结果一致"这条退出判据的载体**（~1,600 行 + 1,163 行测试）：账号清单 → 身份映射 → 6 个数据文件 → 凭据回填；`asign.json` + 6 文件原样归档（**21 条测试**）。五条硬判据见下方「`legacy_import` 的五条硬判据」 |
-| `random` + `SystemClock` | ✅ | 生产随机源（`crypto/rand`，取不到熵就 panic 而不是退化成弱随机）与真实时钟（归一化 UTC）；**3 条测试**。放 io 是因为取熵 / 读时钟都是 IO |
-| `reqwest_client`（→ `client.go`） | ✅ | 重试策略（指数退避 + 抖动，硬上限）+ 真实 HTTP 客户端；**17 条测试**。⭐ 两处刻意不同于 Rust 侧：**不声明 brotli**（标准库解不开，声明了会把响应变乱码）、**关掉 `net/http` 自动解压**由自己管 `Accept-Encoding` |
-| `fixture` | ✅ | L2 夹具回放：按 `METHOD host/path`（**丢 query**）匹配、多条按顺序消费且用尽保留最后一条、`body_json` 优先、**未命中即报错不回退真网**、`AuditLeaks` 自检（请求段也要扫）；`BuildEntry` 从 `core.BuildFixtureEntry` 收口，录制与回放同一份形状（**16 条测试**） |
+| `mcloud-io` 的模块                 | Go 侧 | 说明                                                                                                                                                                                    |
+| ------------------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `store::schema`                 | ✅    | schema v1→v8 的 8 条幂等迁移链；**18 条测试**逐级验证                                                                                                                                                |
+| `store`                         | ✅    | `StateStore` 全套（账号 / 登录态 / smid / 云朵快照 / 运行记录 / 事件流）                                                                                                                                  |
+| `store::user`                   | ✅    | `UserStore` + `IssueSession`（口令 / 会话 / 清理过期）                                                                                                                                          |
+| `datetime`（新增）                  | ✅    | 与 chrono **逐字节一致**的时间写法，见下                                                                                                                                                            |
+| `store::config`                 | ✅    | 定时任务 / 任务组合 / 抢兑配置 / 界面偏好 / 导入台账（14 个方法）；**JSON 列存原文，只有 `enabled` / `cron` / `last_status` 单独成列**                                                                                     |
+| `legacy_import`                 | ✅    | **"老库只读导入结果一致"这条退出判据的载体**（~1,600 行 + 1,163 行测试）：账号清单 → 身份映射 → 6 个数据文件 → 凭据回填；`asign.json` + 6 文件原样归档（**21 条测试**）。五条硬判据见下方「`legacy_import` 的五条硬判据」                                     |
+| `random` + `SystemClock`        | ✅    | 生产随机源（`crypto/rand`，取不到熵就 panic 而不是退化成弱随机）与真实时钟（归一化 UTC）；**3 条测试**。放 io 是因为取熵 / 读时钟都是 IO                                                                                              |
+| `reqwest_client`（→ `client.go`） | ✅    | 重试策略（指数退避 + 抖动，硬上限）+ 真实 HTTP 客户端；**17 条测试**。⭐ 两处刻意不同于 Rust 侧：**不声明 brotli**（标准库解不开，声明了会把响应变乱码）、**关掉 `net/http` 自动解压**由自己管 `Accept-Encoding`                                           |
+| `fixture`                       | ✅    | L2 夹具回放：按 `METHOD host/path`（**丢 query**）匹配、多条按顺序消费且用尽保留最后一条、`body_json` 优先、**未命中即报错不回退真网**、`AuditLeaks` 自检（请求段也要扫）；`BuildEntry` 从 `core.BuildFixtureEntry` 收口，录制与回放同一份形状（**16 条测试**） |
 
-- **驱动 = `modernc.org/sqlite` v1.59.0（纯 Go，免 cgo）**，方案 §8 早已拍板。
-  实测它吃下了带 `BEGIN/COMMIT` 的**多语句**迁移 —— 这一点不显然
+- **驱动 = `modernc.org/sqlite` v1.59.0（纯 Go，免 cgo）**，方案 §8 早已拍板。  
+  实测它吃下了带 `BEGIN/COMMIT` 的**多语句**迁移 —— 这一点不显然  
   （`Exec` 多语句是驱动相关的），所以先写 schema 测试再往下走。
-- 落点 `internal/io`（**包名是 `mcloudio`**，目录名与包名刻意不同）；**150 条测试**。
-  `Client` 现在是**真的** HTTP 客户端了（此前只是骨架），`FixtureClient` 也已能
+- 落点 `internal/io`（**包名是 `mcloudio`**，目录名与包名刻意不同）；**150 条测试**。  
+  `Client` 现在是**真的** HTTP 客户端了（此前只是骨架），`FixtureClient` 也已能  
   加载并回放抓包夹具并有消费者（见下方「夹具回放」）。
-- ⭐ **`mcloud-io` 至此整族落地**，步 3 完成 ⇒ `app::migration` / `cli` / `server`
+- ⭐ **`mcloud-io` 至此整族落地**，步 3 完成 ⇒ `app::migration` / `cli` / `server`  
   的阻塞解除。
 
 ### `legacy_import` 的五条硬判据（都做了反向测试，实测变红）
 
-| 判据 | 为什么 |
-| --- | --- |
-| **掩码冲突 → 中止，一行都不写** | 两个手机号前 2 后 2 相同时会塌缩成同一个 `AccountID`，历史数据混在一起且**不报错**。代价必须是"迁移没做"，不是"迁移做错了" |
-| **缺文件 → 报出来，其余照导** | 老库本来就可能少一个文件；整体失败会让"少一个文件"变成"什么都导不进来" |
-| **整份 JSON 坏 → 大声失败** | 静默当空对象继续，等于把"缺了 12 条历史"报成"导入成功" |
-| **一条记录坏 → 只丢自己** | 一条 `ok: 1`（类型错）不该带走同一份文件里另外 3 条好的 |
+| 判据                      | 为什么                                                                                       |
+| ----------------------- | ----------------------------------------------------------------------------------------- |
+| **掩码冲突 → 中止，一行都不写**     | 两个手机号前 2 后 2 相同时会塌缩成同一个 `AccountID`，历史数据混在一起且**不报错**。代价必须是"迁移没做"，不是"迁移做错了"                |
+| **缺文件 → 报出来，其余照导**      | 老库本来就可能少一个文件；整体失败会让"少一个文件"变成"什么都导不进来"                                                     |
+| **整份 JSON 坏 → 大声失败**    | 静默当空对象继续，等于把"缺了 12 条历史"报成"导入成功"                                                           |
+| **一条记录坏 → 只丢自己**        | 一条 `ok: 1`（类型错）不该带走同一份文件里另外 3 条好的                                                         |
 | **凭据回填**不受哈希门控，**按状态判** | 老库的 `state.json` 早就导过了，走哈希门控就永远不会补上 —— 于是同一个版本的程序会产出**两种库形态**（老库 NULL、新库有值），而这两种在别处长得分毫不差 |
 
-⚠ `Authorization` 是**整串**原样落库（`Basic …`，铁律 2）—— 任何"拆开再拼回去"
+⚠ `Authorization` 是**整串**原样落库（`Basic …`，铁律 2）—— 任何"拆开再拼回去"  
 的写法都会被那条整串断言抓到。
-- ⚠⚠ **时间列必须与 chrono 逐字节一致**（`internal/io/datetime.go`）：
-  `sessions.expires_at` / `users.created_at` / `runs.started_at` 都在 SQL 里做
-  **字符串比较与排序**，而 chrono 写 `+00:00` + AutoSi（0/3/6/9 位）、
-  Go 的 `RFC3339Nano` 写 `Z` + 去尾零。混着的后果是 `+`(0x2B) < `Z`(0x5A)
-  让**同一时刻的 Rust 行永远排在 Go 行之前** —— 不报错，只在比较与排序时显形。
-  规则由第十一份向量 `datetime-format-vectors.json` 钉（**chrono 0.4.45 真跑**：
+
+- ⚠⚠ **时间列必须与 chrono 逐字节一致**（`internal/io/datetime.go`）：  
+  `sessions.expires_at` / `users.created_at` / `runs.started_at` 都在 SQL 里做  
+  **字符串比较与排序**，而 chrono 写 `+00:00` + AutoSi（0/3/6/9 位）、  
+  Go 的 `RFC3339Nano` 写 `Z` + 去尾零。混着的后果是 `+`(0x2B) < `Z`(0x5A)  
+  让**同一时刻的 Rust 行永远排在 Go 行之前** —— 不报错，只在比较与排序时显形。  
+  规则由第十一份向量 `datetime-format-vectors.json` 钉（**chrono 0.4.45 真跑**：  
   17 条写出 + 19 条读取），详见 `go-migration-plan.md` §6.1 #16 / #41。
-- ⚠ 读取侧 Go **严格更严**：实测四种 chrono 收而 Go 拒（空格代替 `T`、
-  小写 `t`/`z`、闰秒 `12:00:60`）。方向安全，且这四种 chrono 自己从不写出来 ——
+- ⚠ 读取侧 Go **严格更严**：实测四种 chrono 收而 Go 拒（空格代替 `T`、  
+  小写 `t`/`z`、闰秒 `12:00:60`）。方向安全，且这四种 chrono 自己从不写出来 ——  
   逐条登记在 `chronoAcceptsGoRejects` 里**待复查**（名单里出现不了的条目会判失败）。
-- ⚠ **照抄 SQL 时注释里的反引号要全部去掉**：Go 的原始字符串用反引号作定界符，
-  `schema.rs` 里 SQLite 标识符引用（`` `sha256` `` / `` `raw` ``）会把字面量**当场截断**，
+- ⚠ **照抄 SQL 时注释里的反引号要全部去掉**：Go 的原始字符串用反引号作定界符，  
+  `schema.rs` 里 SQLite 标识符引用（`` `sha256` `` / `` `raw` ``）会把字面量**当场截断**，  
   而编译器报的错指不到"注释里有个反引号"（§6.1 #40）。
-- ⚠ **Go 的 `?` 是顺序绑定，Rust 的 rusqlite 支持 `?1`/`?2` 编号**：
-  Rust 侧一条查询里同一个值可以复用（`(?1 IS NULL OR owner = ?1)`），
-  Go 必须**重复传参**（`ownerArg(scope), ownerArg(scope)`）。照抄 SQL 时这里会静默差一个参数 ——
+- ⚠ **Go 的 `?` 是顺序绑定，Rust 的 rusqlite 支持 `?1`/`?2` 编号**：  
+  Rust 侧一条查询里同一个值可以复用（`(?1 IS NULL OR owner = ?1)`），  
+  Go 必须**重复传参**（`ownerArg(scope), ownerArg(scope)`）。照抄 SQL 时这里会静默差一个参数 ——  
   好在它**会在运行期报** `missing argument with index 2`（反向测试已确认），不是静默错。
-- ⚠⚠ **`PipelineStep` 是唯一"嵌进 JSON 再读回来"的 core 类型**（`pipelines.steps` 列），
-  而它的 `body` 是 `json.RawMessage` —— 这个类型**既不 raw、也不 null 保真**（§6.1 #46）：
-  ① 写的时候 `json.Marshal` 会对内容**再跑一遍 HTML 转义**，必须走 `marshalJSON`；
-  ② 读的时候 `null` 被存成**字面的四个字节**，往返后 `Body == nil` 反转，
-  而**再序列化出来还是 `null`** ⇒ **逐字节比对看不见**，只有 `== nil` 会变。
+- ⚠⚠ **`PipelineStep` 是唯一"嵌进 JSON 再读回来"的 core 类型**（`pipelines.steps` 列），  
+  而它的 `body` 是 `json.RawMessage` —— 这个类型**既不 raw、也不 null 保真**（§6.1 #46）：  
+  ① 写的时候 `json.Marshal` 会对内容**再跑一遍 HTML 转义**，必须走 `marshalJSON`；  
+  ② 读的时候 `null` 被存成**字面的四个字节**，往返后 `Body == nil` 反转，  
+  而**再序列化出来还是 `null`** ⇒ **逐字节比对看不见**，只有 `== nil` 会变。  
   向量 `$pipelineStepEncode` / `$pipelineStepDecode`（serde 真跑）钉住形状与宽严。
-- ⚠⚠ **参考实现里"没有"的函数，新加一个就是新契约**（§6.1 #47）：
-  `ParseScheduleStatus` / `ParsePipelineStatus` 是迁 `model` 时自己加的，
-  我按"未知归 `error`"写；而参考实现的做法在 **io 层**（`schedule_status_from_str`）——
-  未知返回 `None`，**刚好相反**。且当时测试是绿的（照着实现写的）。
+- ⚠⚠ **参考实现里"没有"的函数，新加一个就是新契约**（§6.1 #47）：  
+  `ParseScheduleStatus` / `ParsePipelineStatus` 是迁 `model` 时自己加的，  
+  我按"未知归 `error`"写；而参考实现的做法在 **io 层**（`schedule_status_from_str`）——  
+  未知返回 `None`，**刚好相反**。且当时测试是绿的（照着实现写的）。  
   已改成返回 `(状态, bool)`。
 
 ### 步 4 实况（2026-09-20 起）
 
-| 模块 | Go 侧 | 说明 |
-| --- | --- | --- |
-| `capabilities` 注册表 | ✅ | `Capability` / `REGISTRY` / `get` / `list_visible` / `list_batchable`（**10 条测试**）。对应 `capabilities/src/lib.rs` |
-| `capabilities::login` | ✅ | 扫码状态机（推进 / 终态不可逆 / 自身 TTL / 码的映射 / 限流非终态）+ 短信链路（滑块降级 / 配额 / 登录）+ 登录结果 → `auth` 与领域对象（**22 条测试**）。前置的 `upstream::login` 已先落地 |
-| `exec` | ✅ | 并发闸 / 互斥键 / 参数摘要 / 准入（幂等 + 互斥一起判）/ 事件总线（**35 条测试**）。对应 `mcloud-exec/src/lib.rs` |
-| `app::payload` | ✅ | `/api/capabilities` 与 `/api/version` 的响应体（**7 条测试**）。纯：只依赖 `capabilities` + `core` |
-| `app::smid` | ✅ | 生命周期那一层：东八区 14 位时间（跨 UTC 午夜那条已钉）/ `UploadContext` / 绑定与复用（复用路径**一次写都不发**）/ 主动换特征 = 旧 id 作废 / `DeviceID`（库里有就**不打网络**）与 `ReportDeviceID`（每次都真上报）/ 落库失败就丢掉 id 不返回（**12 条测试**）。库里那串读不出来是**报错**不是重掷 |
-| `app::session` | ✅ | **网络路径**的会话（`332` 行）：cookie 里是明文 token、库里只有 `sha256(token)`；用户不存在与口令错误给**同一个**结论（否则登录页变成用户名枚举器）；没带 cookie / 已过期 / 已撤销三种都导出"去登录"；撤销**立刻生效**且幂等；空 token 决不能被当成一次登录（**8 条测试**）。不碰 HTTP（cookie 与状态码在 `server`） |
-| `app::signin/*` | ✅ **整族落地** | 签到业务层（9 个文件）：`UserTimestamp`（**微秒**不是毫秒）/ 建会话**三步不夹别的 IO** / **已签就不发** `startSignIn` / 成败只看**回查 `infoV3`**（`startSignIn` 回的是调用前快照）/ `PlanReceive` 按 `cloudType` 三路分流 / `ReceiveAll` 一条失败不拖垮其余 / 翻倍与备份好礼的**门槛判定**（门槛不成立一个请求都不发）（**18 条测试**） |
-| `app::device` | ✅ | 设备指纹的本地持久化：PC 端 32 位大写 HEX + `-ENDIN` / App 端纯 32 位 / `deviceShort` 12 位**不落盘** / 空白文件算"没有" / 原子写（**9 条测试**） |
-| `app::user` | ✅ | 首个管理员的初始化：只有一条路径（CLI 与 WebUI 共用一次 bootstrap）、**只负责从零到一**、口令下限在写库**之前**判、认领历史数据失败**不能当什么都没发生**（**7 条测试**） |
-| `app::cloud` | ✅ | 云朵余额采集：历史窗口取**全量**（近 7 天会静默少算）、同一天重复采集**不以今天为基准**、先写日快照再写当前值（**9 条测试**） |
-| `app::migration` | ✅ | 迁移的**执行策略**（`483` 行）：先归档 **再建库** 后导入、预演走 `DiagnoseLegacy`（内存库上同一条路径）、**库里一个用户都没有时落到 `Scope::Local` 而不是报错**（CLI 那条"先 migrate 再 init"全靠它）、`has_legacy_data` 只要求**任一**文件存在、渲染放在这一层不放在 CLI（**11 条测试**，全用真实 SQLite + `test/fixtures/legacy/` 的真实脱敏夹具） |
-| `app` 其余 | ⬜ | `login`（828）/ `app_login`（910）/ `run`（748）。步 2 / 步 3 都已整族落地 ⇒ **全部不再被挡**，只剩工作量 |
-| `upstream::login` | ✅ | 为使 `capabilities::login` 能落地而**提前做的前置**：信封 / 端档案 / 请求体 / 滑块 / 口令哈希 / 判定（**33 条测试**）。步 2 的其余部分（`signin` 协议族）仍未迁 |
-| `upstream::app_client` | ✅ | App 端（iOS）档案：16 段 `x-yun-client-info` 与 14 段 `x-DeviceInfo` **不同值**、三种 `os_version` 写法、`mobile` 前缀的 `Authorization`、未登录占位头（**10 条测试**）。它是整个签到链路的前置 |
-| `upstream::app_login` | ✅ | App 端验证码登录（`632` 行）：三层封装（明文 JSON → AES-128-ECB hex → **末 10 位错位**）、`hcy-cool-flag` **主动不发**、滑块 H5 的 `data` 只有两个头、`9441`/`9103`/`9999` 三态判定（**18 条测试**）。中心断言 `appLoginWire` 取自 Rust 侧 `crypto/tests/app.rs`（抓包侧独立脚本算出），Go 复算同一串 ⇒ 真跨实现对拍 |
-| `upstream::smid` | ✅ | 设备指纹（`733` 行）：`smid` 拼接 / `priId` / `tn`（**`tn` 还是空串时算摘要**）/ 25 条 DES 规则整表对拍 TS 侧向量 / 特征体绑定账号（`SmFingerprint`）与每次现算的一半（`SmUpload`）/ 上报与 `deviceId`（拼 `B` 前缀）（**18 条测试**）。⭐ `ep` **复现不了**是算法性质（PKCS#1 v1.5 随机填充 + 盲化），不是随机源没注入到位 —— 断言显式排除它并另开一条钉住 |
+| 模块                     | Go 侧       | 说明                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `capabilities` 注册表     | ✅          | `Capability` / `REGISTRY` / `get` / `list_visible` / `list_batchable`（**10 条测试**）。对应 `capabilities/src/lib.rs`                                                                                                                                                                                                                                                                                     |
+| `capabilities::login`  | ✅          | 扫码状态机（推进 / 终态不可逆 / 自身 TTL / 码的映射 / 限流非终态）+ 短信链路（滑块降级 / 配额 / 登录）+ 登录结果 → `auth` 与领域对象（**22 条测试**）。前置的 `upstream::login` 已先落地                                                                                                                                                                                                                                                                        |
+| `exec`                 | ✅          | 并发闸 / 互斥键 / 参数摘要 / 准入（幂等 + 互斥一起判）/ 事件总线（**35 条测试**）。对应 `mcloud-exec/src/lib.rs`                                                                                                                                                                                                                                                                                                                    |
+| `app::payload`         | ✅          | `/api/capabilities` 与 `/api/version` 的响应体（**7 条测试**）。纯：只依赖 `capabilities` + `core`                                                                                                                                                                                                                                                                                                                 |
+| `app::smid`            | ✅          | 生命周期那一层：东八区 14 位时间（跨 UTC 午夜那条已钉）/ `UploadContext` / 绑定与复用（复用路径**一次写都不发**）/ 主动换特征 = 旧 id 作废 / `DeviceID`（库里有就**不打网络**）与 `ReportDeviceID`（每次都真上报）/ 落库失败就丢掉 id 不返回（**12 条测试**）。库里那串读不出来是**报错**不是重掷                                                                                                                                                                                                    |
+| `app::session`         | ✅          | **网络路径**的会话（`332` 行）：cookie 里是明文 token、库里只有 `sha256(token)`；用户不存在与口令错误给**同一个**结论（否则登录页变成用户名枚举器）；没带 cookie / 已过期 / 已撤销三种都导出"去登录"；撤销**立刻生效**且幂等；空 token 决不能被当成一次登录（**8 条测试**）。不碰 HTTP（cookie 与状态码在 `server`）                                                                                                                                                                                         |
+| `app::signin/*`        | ✅ **整族落地** | 签到业务层（9 个文件）：`UserTimestamp`（**微秒**不是毫秒）/ 建会话**三步不夹别的 IO** / **已签就不发** `startSignIn` / 成败只看**回查 `infoV3`**（`startSignIn` 回的是调用前快照）/ `PlanReceive` 按 `cloudType` 三路分流 / `ReceiveAll` 一条失败不拖垮其余 / 翻倍与备份好礼的**门槛判定**（门槛不成立一个请求都不发）（**18 条测试**）                                                                                                                                                         |
+| `app::device`          | ✅          | 设备指纹的本地持久化：PC 端 32 位大写 HEX + `-ENDIN` / App 端纯 32 位 / `deviceShort` 12 位**不落盘** / 空白文件算"没有" / 原子写（**9 条测试**）                                                                                                                                                                                                                                                                                       |
+| `app::user`            | ✅          | 首个管理员的初始化：只有一条路径（CLI 与 WebUI 共用一次 bootstrap）、**只负责从零到一**、口令下限在写库**之前**判、认领历史数据失败**不能当什么都没发生**（**7 条测试**）                                                                                                                                                                                                                                                                                           |
+| `app::cloud`           | ✅          | 云朵余额采集：历史窗口取**全量**（近 7 天会静默少算）、同一天重复采集**不以今天为基准**、先写日快照再写当前值（**9 条测试**）                                                                                                                                                                                                                                                                                                                            |
+| `app::migration`       | ✅          | 迁移的**执行策略**（`483` 行）：先归档 **再建库** 后导入、预演走 `DiagnoseLegacy`（内存库上同一条路径）、**库里一个用户都没有时落到 `Scope::Local` 而不是报错**（CLI 那条"先 migrate 再 init"全靠它）、`has_legacy_data` 只要求**任一**文件存在、渲染放在这一层不放在 CLI（**11 条测试**，全用真实 SQLite + `test/fixtures/legacy/` 的真实脱敏夹具）                                                                                                                                                   |
+| `app::run`             | ✅          | 跨账号编排（`748` 行）：受理 → 记 `Running` 行 → 跑 → 写终态，**锁在 defer 里释放**（任务失败也放）；单账号失败**不整批停**（只记自己那一行）；**需人工 > 普通失败**（且它在历史里是 `Done` 不是 `Failed` —— 它确实跑完了，只是没达成目标）；被挡下的账号记下**是谁占着**；进度是**整批计数**（第 `index` 个账号的流里写 `index+1 / N`）（**10 条测试**）。⭐ "先记 Running"这条顺序只有**在任务进行中往里看**才测得出来（跑完之后与"直接写终态"长得一模一样，见方案 §6.1 #63）                                                                                         |
+| `app` 其余               | ⬜          | `login`（828）/ `app_login`（910）。步 2 / 步 3 都已整族落地 ⇒ **全部不再被挡**，只剩工作量                                                                                                                                                                                                                                                                                                                                 |
+| `upstream::login`      | ✅          | 为使 `capabilities::login` 能落地而**提前做的前置**：信封 / 端档案 / 请求体 / 滑块 / 口令哈希 / 判定（**33 条测试**）。步 2 的其余部分（`signin` 协议族）仍未迁                                                                                                                                                                                                                                                                                     |
+| `upstream::app_client` | ✅          | App 端（iOS）档案：16 段 `x-yun-client-info` 与 14 段 `x-DeviceInfo` **不同值**、三种 `os_version` 写法、`mobile` 前缀的 `Authorization`、未登录占位头（**10 条测试**）。它是整个签到链路的前置                                                                                                                                                                                                                                                 |
+| `upstream::app_login`  | ✅          | App 端验证码登录（`632` 行）：三层封装（明文 JSON → AES-128-ECB hex → **末 10 位错位**）、`hcy-cool-flag` **主动不发**、滑块 H5 的 `data` 只有两个头、`9441`/`9103`/`9999` 三态判定（**18 条测试**）。中心断言 `appLoginWire` 取自 Rust 侧 `crypto/tests/app.rs`（抓包侧独立脚本算出），Go 复算同一串 ⇒ 真跨实现对拍                                                                                                                                                            |
+| `upstream::smid`       | ✅          | 设备指纹（`733` 行）：`smid` 拼接 / `priId` / `tn`（**`tn` 还是空串时算摘要**）/ 25 条 DES 规则整表对拍 TS 侧向量 / 特征体绑定账号（`SmFingerprint`）与每次现算的一半（`SmUpload`）/ 上报与 `deviceId`（拼 `B` 前缀）（**18 条测试**）。⭐ `ep` **复现不了**是算法性质（PKCS#1 v1.5 随机填充 + 盲化），不是随机源没注入到位 —— 断言显式排除它并另开一条钉住                                                                                                                                                  |
 | `upstream::app_signin` | ✅ **整族落地** | 常量（由 `app-signin-vectors` 的 `constants` 钉住）/ `Diagnose` / H5 与原生头 / 百分号编码 / 取值 helper + 建会话三段 + 签到与状态（`infoV3` / `startSignIn` / `taskListV3` / `doTaskPost`）+ 领取族（`receiveV3` / `receiveRevivalReward` / `multiple` / `receiveTaskExpansion`）+ 记录族（`cloudRecordV2` / `record` / `backupgift/*`）+ **发送层**（`Upstream` 上的 15 个方法）（**113 条测试，整包合计**）。`app-signin-vectors.json` 从"只有 Rust 读"变成**两边都读** |
-| `cli` / `server` | ⬜ | 在 `app` 之后 |
+| `cli` / `server`       | ⬜          | 在 `app` 之后                                                                                                                                                                                                                                                                                                                                                                                         |
 
 - 落点 `internal/capabilities`、`internal/exec`（包名 `mcloudexec`）、`internal/app/payload.go`。
-- ⚠ **`app` 现在仍只是"组装根接上了 IO"那个骨架**（`internal/app/app.go` 只有一个 `Deps`）。
+- ⚠ **`app` 现在仍只是"组装根接上了 IO"那个骨架**（`internal/app/app.go` 只有一个 `Deps`）。  
   payload 是第一个真正有内容的模块。
-- ⚠ `core.MarshalJSON` / `core.ParseJSON` 这次**导出**了：产物层要拼对外 payload，
+- ⚠ `core.MarshalJSON` / `core.ParseJSON` 这次**导出**了：产物层要拼对外 payload，  
   而"不转义 HTML + 不补尾换行"这两条规则**必须只有一份实现**（详见方案 §6.1 #22）。
-- ⚠ `core.Version` 是新增常量 —— Go 没有 `env!("CARGO_PKG_VERSION")`，
+- ⚠ `core.Version` 是新增常量 —— Go 没有 `env!("CARGO_PKG_VERSION")`，  
   它得与 `legacy/Cargo.toml` 的 `version` **手工同步**（不同步的表现只是两个产物报的版本号不一样）。
 
 ---
 
 ## 一句话总览
 
-| 层            | 状态                                                   |
-| ------------ | ---------------------------------------------------- |
-| CLI：初始化 / 登录 | ✅ 可用（扫码 + 短信，PC 端与 App 端）                            |
-| CLI：签到（云朵中心） | ✅ 端到端跑通（含领取、复活卡）                                     |
-| 上游接口层        | ⚠ **逐块重写中** —— 只有 `login` 与 `app_signin` 是完整的，其余仍是骨架 |
-| 服务入口         | ⚠ 能起，但**只有"会话"这一层**，跑任务的那批路由仍在 P5                    |
-| WebUI        | ⚠ 登录与初始化是真接口，**主界面仍是 P0 spike 的占位数据**                |
-| 运行时层         | ⚠ 事件模型 / 生命周期 / 事件总线 / `run_events` 表已落地，编排与调度接入中    |
+| 层            | 状态                                                                                                                                           |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| CLI：初始化 / 登录 | ✅ 可用（扫码 + 短信，PC 端与 App 端）                                                                                                                    |
+| CLI：签到（云朵中心） | ✅ 端到端跑通（含领取、复活卡）                                                                                                                             |
+| 上游接口层        | ⚠ **逐块重写中** —— 只有 `login` 与 `app_signin` 是完整的，其余仍是骨架                                                                                         |
+| 服务入口         | ⚠ 能起，但**只有"会话"这一层**，跑任务的那批路由仍在 P5                                                                                                            |
+| WebUI        | ⚠ 登录与初始化是真接口，**主界面仍是 P0 spike 的占位数据**                                                                                                        |
+| 运行时层         | ⚠ 事件模型 / 生命周期 / 事件总线 / `run_events` 表已落地，编排与调度接入中                                                                                            |
 | 夹具回放（L2）     | 🟡 **回放器已就绪**（`internal/io/fixture.go`，17 条测试）；已有消费者 `TestEveryArchivedFixtureIsLeakFree`（31 份抓包夹具全量自检），⭕ 但上游协议层**还没真的加载这批夹具跑一遍**（见下方「夹具回放」） |
 
 ---
@@ -354,9 +357,9 @@
 （`legacy/crates/mcloud-upstream/tests/l2_replay.rs`）"—— **那个文件不存在**，  
 `legacy/crates/mcloud-upstream/tests/` 是个**空目录**。
 
-现状是：`mcloud fixture extract` 往 `test/fixtures/http/` 写，消费者目前**只有一条**
-—— `io` 包的 `TestEveryArchivedFixtureIsLeakFree`（把 31 份夹具全量加载跑脱敏自检）。
-上游协议层**还没有**真的加载这批夹具把响应解析一遍，所以"回放器已跑通"这句话
+现状是：`mcloud fixture extract` 往 `test/fixtures/http/` 写，消费者目前**只有一条**  
+—— `io` 包的 `TestEveryArchivedFixtureIsLeakFree`（把 31 份夹具全量加载跑脱敏自检）。  
+上游协议层**还没有**真的加载这批夹具把响应解析一遍，所以"回放器已跑通"这句话  
 仍然**不能**按"L2 回放已接上"来理解。这是规划 §6.3 里要补的一环。
 
 已确认可用的样本（写回放时直接照着接）：
@@ -387,7 +390,8 @@
 > 带 `hcy-cool-flag` 的请求与响应都是  
 > `base64(IV(16 字节二进制) ‖ AES-192-CBC/PKCS7("2olBaQGYnEKoStYomsd1n7ax", IV, 明文))`，  
 > 双向；**396 条实拍零例外**。钥匙就藏在旧项目  
-> `packages/core/src/utils/encrypt.ts:3` 的 `REFRESH_TOKEN_KEY`，*而它导出的解码函数  &#xA;****全仓无人调用****&#x20;—— 见 `docs/upst`*`ream-app-business-api.md` §8.0。  
+> `packages/core/src/utils/encrypt.ts:3` 的 `REFRESH_TOKEN_KEY`，*而它导出的解码函数    
+> **全仓无人调用**\** —— 见 `docs/upst`*`ream-app-business-api.md` §8.0。  
 > ⚠ 它与发码链路的 `uDjGSA8auFlbwDkY`（AES-128）**不是同一把**，别互搬。
 >
 > ✅ **同日再更正：这类信封其实有不止一把钥匙，按「谁发的」分** ——  
@@ -397,8 +401,6 @@
 > 判据：`x-yun-uni` + `x-yun-api-version` ⇒ 原生；`origin: mcloudlocal://` + `sec-fetch-*` ⇒ WebView。  
 > ⚠ **钥匙是「谁发的」的函数，不是版本号** —— 别按"最新版就该用最新那把"去猜。  
 > 见 `docs/upstream-app-business-api.md` §8.1。
-
-
 
 ---
 

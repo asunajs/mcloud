@@ -82,6 +82,19 @@ const UNTAGGED_ALLOWED = {
     'DES 规则表的**一条**（密钥 + 混淆后的键名），是常量表的元素不是数据模型；Rust 侧这条 rule 表也是 `const` 不是 Serialize',
   'internal/app/smid.go:UploadContext':
     '一次上报的时间上下文（14 位东八区时间 + nowMillis + 上一次的 deviceId），**只**喂给上游算法；Rust 侧 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
+  // ── CLI 的参数结构体 ──
+  // 它们全是 clap 的 `#[derive(Args)]`（解析命令行用），**没有** serde 的 Serialize，
+  // 也从不被序列化 —— 进 JSON 的只有 `--json` 那一支的输出（在 output.go 里单独构造）。
+  'internal/cli/args.go:SigninArgs':
+    '签到那一大套参数（`--list` / `--status-only` / `--db` …）；Rust 侧是 `#[derive(Args)]` + `#[command(flatten)]`',
+  'internal/cli/args_login.go:QrArgs':
+    '`login qr` 的参数；Rust 侧是 `#[derive(Args)]` 的 `QrArgs`',
+  'internal/cli/args_login.go:SmsArgs':
+    '`login sms` 的参数；Rust 侧是 `#[derive(Args)]` 的 `SmsArgs`',
+  'internal/cli/args_other.go:MigrateArgs':
+    '`migrate` 的参数（`--dry-run` 等）；Rust 侧是 `#[derive(Args)]` 的 `MigrateArgs`',
+  'internal/cli/cli.go:Deps':
+    '一次 CLI 运行的**外部世界**（三个流 + 时钟 + 随机源），不是数据模型 —— Rust 侧这里直接读 `std::io::stdout()`',
   'internal/app/smid.go:FingerprintBinding':
     '一次绑定的**结果**（特征 + 库里两列 + 是否新绑），内存里用；Rust 侧同样只 derive `Debug, Clone, PartialEq, Eq`',
   'internal/app/user.go:InitOutcome':
@@ -90,6 +103,12 @@ const UNTAGGED_ALLOWED = {
     '一次迁移的**入参**（从哪读 / 写到哪 / 归档到哪），由 CLI 或启动自检填；Rust 侧只 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
   'internal/app/migration.go:MigrationOutcome':
     '迁移的**结论**，机器可读形态由 `OutcomeToJSON` 另行拼出（键名是 camelCase 的外部契约），结构体本身不进 JSON；Rust 侧 `report` 虽是 `Value`，但它是 `MigrationReport::to_json()` 的产物，同样不是这个结构体的序列化',
+  'internal/app/run.go:RunPlan':
+    '一次跨账号运行的**入参集**（能力 / 账号列表 / 参数摘要），不是数据模型；Rust 侧是 `run_many` 的四个参数',
+  'internal/app/run.go:AccountRun':
+    '单个账号那趟的**结果**（账号 + 报告 + 被谁挡下 + 是否跳过），内存里汇总用；Rust 侧只 derive `Debug, Clone, PartialEq, Eq`',
+  'internal/app/run.go:RunSummary':
+    '整批运行的**汇总**（每账号一条 + 计数），由它渲染摘要行与 JSON；Rust 侧同样只 derive `Debug, Clone, PartialEq, Eq`',
   'internal/app/signin.go:SignInReport':
     '一次签到的**结论**（调用前 / 调用后 / 本次快照），喂给 CLI 与汇报层；Rust 侧只 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
   'internal/app/signin.go:SignInOptions':
