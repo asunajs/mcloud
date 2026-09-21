@@ -16,7 +16,9 @@
 
 ## Go 侧迁移实况（2026-09-20 起）
 
-**当前：步 1（`mcloud-core`）收尾中（只剩 `error` 后半的 `classify_body`）；**步 2（`mcloud-upstream`）已整族落地**（`login` / `client` / `app_client` / `app_login` / `app_signin` 全族 / `smid`，150 条测试）；步 4 已落地 `capabilities`（注册表 + `login`）、`exec`、`app::payload`。步 3（`mcloud-io`）已开工：schema / store / store::user / store::config / 时间列格式对齐五块落地，剩 `legacy_import`、`fixture` / HTTP 客户端 / 随机源。**
+**当前：步 1（`mcloud-core`）✅ **收口**（2026-09-21，判据与一条例外见下方"步 1 收口"）；**步 2（`mcloud-upstream`）已整族落地**（`login` / `client` / `app_client` / `app_login` / `app_signin` 全族 / `smid`，150 条测试）；**步 3（`mcloud-io`）已整族落地**（schema / store / store::user / store::config / datetime / **legacy_import** / fixture / HTTP 客户端 / 随机源，150 条测试）；步 4 已落地 `capabilities`（注册表 + `login`）、`exec`、`app::payload` / `smid` / `session`。
+
+⇒ **`app::migration` / `cli` / `server` 的阻塞已解除**（此前全被步 3 挡着）。**
 
 > ✅ **2026-09-21 起并发结束**，全部由本会话接手（此前最多三个会话在同一棵树上）。
 > 已付出的可见代价：`docs/go-migration-plan.md` 的 §6.1 一度出现**两组 `#20`**，
@@ -34,7 +36,7 @@
 | `mcloud-core` 的模块 | Go 侧 | 说明 |
 | --- | --- | --- |
 | `crypto` | ✅ | 哈希 / AES(CBC,ECB) / DES / RSA / gzip / 签名头 / getTn |
-| `error` | ✅ 前半 | ErrorKind / Error / classify_status / classify_business_code；**后半的 `classify_body` 那台"响应体分类机"未迁** |
+| `error` | ✅ 前半 | ErrorKind / Error / classify_status / classify_business_code；**后半的 `classify_body` 那台"响应体分类机"未迁** ⇒ 2026-09-21 定案：不补进 core，见下方「步 1 收口」第 2 条 |
 | `auth` | ✅ | 含全部原版怪癖（只去一处 `Basic ` 前缀、token 在 `:` 处截断、`Number() \|\| 0`） |
 | `pure` | ✅ | 日键 / 增量 / 开抢时刻 / 脱敏 |
 | `cron` | ✅ | 5/6 段分流、日与周 OR、周日 `0`/`7` 归一化、时区为参数、4 年上界返回 false |
@@ -124,7 +126,7 @@
 | `store::user` | ✅ | `UserStore` + `IssueSession`（口令 / 会话 / 清理过期） |
 | `datetime`（新增） | ✅ | 与 chrono **逐字节一致**的时间写法，见下 |
 | `store::config` | ✅ | 定时任务 / 任务组合 / 抢兑配置 / 界面偏好 / 导入台账（14 个方法）；**JSON 列存原文，只有 `enabled` / `cron` / `last_status` 单独成列** |
-| `legacy_import` | ⬜ | ~1,600 行 + 1,163 行测试 —— **"老库只读导入结果一致"这条退出判据的载体** |
+| `legacy_import` | ✅ | **"老库只读导入结果一致"这条退出判据的载体**（~1,600 行 + 1,163 行测试）：账号清单 → 身份映射 → 6 个数据文件 → 凭据回填；`asign.json` + 6 文件原样归档（**21 条测试**）。五条硬判据见下方「`legacy_import` 的五条硬判据」 |
 | `random` + `SystemClock` | ✅ | 生产随机源（`crypto/rand`，取不到熵就 panic 而不是退化成弱随机）与真实时钟（归一化 UTC）；**3 条测试**。放 io 是因为取熵 / 读时钟都是 IO |
 | `reqwest_client`（→ `client.go`） | ✅ | 重试策略（指数退避 + 抖动，硬上限）+ 真实 HTTP 客户端；**17 条测试**。⭐ 两处刻意不同于 Rust 侧：**不声明 brotli**（标准库解不开，声明了会把响应变乱码）、**关掉 `net/http` 自动解压**由自己管 `Accept-Encoding` |
 | `fixture` | ✅ | L2 夹具回放：按 `METHOD host/path`（**丢 query**）匹配、多条按顺序消费且用尽保留最后一条、`body_json` 优先、**未命中即报错不回退真网**、`AuditLeaks` 自检（请求段也要扫）；`BuildEntry` 从 `core.BuildFixtureEntry` 收口，录制与回放同一份形状（**16 条测试**） |
@@ -132,9 +134,24 @@
 - **驱动 = `modernc.org/sqlite` v1.59.0（纯 Go，免 cgo）**，方案 §8 早已拍板。
   实测它吃下了带 `BEGIN/COMMIT` 的**多语句**迁移 —— 这一点不显然
   （`Exec` 多语句是驱动相关的），所以先写 schema 测试再往下走。
-- 落点 `internal/io`（**包名是 `mcloudio`**，目录名与包名刻意不同）；**128 条测试**。
+- 落点 `internal/io`（**包名是 `mcloudio`**，目录名与包名刻意不同）；**150 条测试**。
   `Client` 现在是**真的** HTTP 客户端了（此前只是骨架），`FixtureClient` 也已能
-  加载并回放抓包夹具 —— ⭕ **`test/fixtures/http/` 仍无消费者**（见下方「夹具回放」）。
+  加载并回放抓包夹具并有消费者（见下方「夹具回放」）。
+- ⭐ **`mcloud-io` 至此整族落地**，步 3 完成 ⇒ `app::migration` / `cli` / `server`
+  的阻塞解除。
+
+### `legacy_import` 的五条硬判据（都做了反向测试，实测变红）
+
+| 判据 | 为什么 |
+| --- | --- |
+| **掩码冲突 → 中止，一行都不写** | 两个手机号前 2 后 2 相同时会塌缩成同一个 `AccountID`，历史数据混在一起且**不报错**。代价必须是"迁移没做"，不是"迁移做错了" |
+| **缺文件 → 报出来，其余照导** | 老库本来就可能少一个文件；整体失败会让"少一个文件"变成"什么都导不进来" |
+| **整份 JSON 坏 → 大声失败** | 静默当空对象继续，等于把"缺了 12 条历史"报成"导入成功" |
+| **一条记录坏 → 只丢自己** | 一条 `ok: 1`（类型错）不该带走同一份文件里另外 3 条好的 |
+| **凭据回填**不受哈希门控，**按状态判** | 老库的 `state.json` 早就导过了，走哈希门控就永远不会补上 —— 于是同一个版本的程序会产出**两种库形态**（老库 NULL、新库有值），而这两种在别处长得分毫不差 |
+
+⚠ `Authorization` 是**整串**原样落库（`Basic …`，铁律 2）—— 任何"拆开再拼回去"
+的写法都会被那条整串断言抓到。
 - ⚠⚠ **时间列必须与 chrono 逐字节一致**（`internal/io/datetime.go`）：
   `sessions.expires_at` / `users.created_at` / `runs.started_at` 都在 SQL 里做
   **字符串比较与排序**，而 chrono 写 `+00:00` + AutoSi（0/3/6/9 位）、
@@ -202,7 +219,7 @@
 | 服务入口         | ⚠ 能起，但**只有"会话"这一层**，跑任务的那批路由仍在 P5                    |
 | WebUI        | ⚠ 登录与初始化是真接口，**主界面仍是 P0 spike 的占位数据**                |
 | 运行时层         | ⚠ 事件模型 / 生命周期 / 事件总线 / `run_events` 表已落地，编排与调度接入中    |
-| 夹具回放（L2）     | 🟡 **回放器已就绪**（`internal/io/fixture.go`，16 条测试），⭕ 但 `test/fixtures/http/` **仍无消费者** —— 下一步是让上游协议层真的加载这批夹具跑一遍（见下方「夹具回放」）     |
+| 夹具回放（L2）     | 🟡 **回放器已就绪**（`internal/io/fixture.go`，17 条测试）；已有消费者 `TestEveryArchivedFixtureIsLeakFree`（31 份抓包夹具全量自检），⭕ 但上游协议层**还没真的加载这批夹具跑一遍**（见下方「夹具回放」） |
 
 ---
 
@@ -271,15 +288,16 @@
 搬了只是把旧形态再抄一遍。新 HAR 抓好后：`mcloud fixture extract` → 按新流量写接口  
 → 用夹具离线回放并断言请求逐字段正确。
 
-### ⚠ 夹具回放（L2）尚无消费者
+### ⚠ 夹具回放（L2）仍只有一个消费者
 
 此前本文件写着"`mcloud-upstream` 的 L2 夹具回放已跑通  
 （`legacy/crates/mcloud-upstream/tests/l2_replay.rs`）"—— **那个文件不存在**，  
 `legacy/crates/mcloud-upstream/tests/` 是个**空目录**。
 
-现状是：`mcloud fixture extract` 往 `test/fixtures/http/` 写，但**没有任何消费者**，  
-所以那 31 个夹具目前一个断言都没跑。这是规划 §6.3 里要补的一环，  
-**别按"已经有了"来理解**。
+现状是：`mcloud fixture extract` 往 `test/fixtures/http/` 写，消费者目前**只有一条**
+—— `io` 包的 `TestEveryArchivedFixtureIsLeakFree`（把 31 份夹具全量加载跑脱敏自检）。
+上游协议层**还没有**真的加载这批夹具把响应解析一遍，所以"回放器已跑通"这句话
+仍然**不能**按"L2 回放已接上"来理解。这是规划 §6.3 里要补的一环。
 
 已确认可用的样本（写回放时直接照着接）：
 

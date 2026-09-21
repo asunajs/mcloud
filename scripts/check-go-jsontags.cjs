@@ -157,6 +157,18 @@ const UNTAGGED_ALLOWED = {
   // 它现在是"数据库的形状"，与"响应的形状"是两件事。
   'internal/io/configstore.go:ImportRecord':
     'Rust 侧只 derive `Debug, Clone, PartialEq, Eq`（**不** Serialize）—— 它是 imports 表的行，字段名对应 SQL 列名',
+
+  // ── legacy_import：Rust 侧同样**不** Serialize，一律 derive Debug/Clone/PartialEq ──
+  'internal/io/legacy_import.go:LegacySource':
+    '旧数据的**两个路径**（asign.json 与数据目录），进程内存里用；Rust 侧 derive `Debug, Clone, PartialEq, Eq`',
+  'internal/io/legacy_import.go:LegacyFile':
+    '归档清单里的**一项**（文件名 + 绝对路径）；Rust 侧 `(String, String)` 元组，不是结构体',
+  'internal/io/legacy_import.go:LegacyImportError':
+    '实现了 error，对外走 `Error()` 文案；Rust 侧 thiserror 的 `#[error(...)]`，不进 JSON',
+  'internal/io/legacy_import.go:MigrationIssue':
+    '导入报告的**一条问题**（类别 + 文件 + 下标 + 原因），对外走 [MigrationIssue.String]；Rust 侧同样不 Serialize',
+  'internal/io/legacy_import.go:MigrationReport':
+    '导入报告本身，对外走 [MigrationReport.ToJSON] 的**手拼**结构 —— 那串键由它自己定，不给结构体加 tag 才不会有两份契约',
 };
 
 function walk(dir, out = []) {
