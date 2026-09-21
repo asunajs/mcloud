@@ -84,6 +84,43 @@ export const runSetup = (name: string, password: string) =>
 export const signIn = (name: string, password: string) =>
   request<SessionInfo>('/api/session', { method: 'POST', body: JSON.stringify({ name, password }) })
 
+/** 云盘账号一行（对位后端 `routes.go` 的 `accountPayload`）。 */
+export interface Account {
+  id: string
+  /** 展示名（昵称 → 脱敏手机号 → id），**由后端挑好**，前端不再自己选。 */
+  displayName: string
+  nickname: string | null
+  phoneMasked: string | null
+  /** `pc` / `mobile`；旧导入的数据可能是 null。 */
+  platform: string | null
+  enabled: boolean
+  sortOrder: number
+  cloudCurrent: number | null
+  cloudUpdatedAt: string | null
+  /** 令牌到期时间（epoch 毫秒）。 */
+  authExpire: number
+  /** "是否过期"由**服务端时钟**给结论，前端不拿本地时钟再比一次（§5.9 同理）。 */
+  authExpired: boolean
+  lastOkAt: string | null
+  failStreak: number
+  note: string | null
+}
+
+export const listAccounts = () => request<{ accounts: Account[] }>('/api/accounts')
+
+/** 一天的云朵快照（差值由采集侧算好落库，见后端 `cloudStats` 注释）。 */
+export interface CloudStatRow {
+  /** `YYYY-MM-DD`，按**服务端本地时区**切日。 */
+  date: string
+  cloudCount: number
+  cloudDiff: number
+  cloudDiffWeek: number
+}
+
+/** 某个账号最近 `days` 天的云朵日快照。id 里有 `*` 等字符，必须 encode。 */
+export const getCloudStats = (id: string, days = 7) =>
+  request<{ stats: CloudStatRow[] }>(`/api/accounts/${encodeURIComponent(id)}/cloud-stats?days=${days}`)
+
 /** 当前身份；未登录时抛 `ApiError`（code = `unauthorized`）。 */
 export const currentSession = () => request<SessionInfo>('/api/session')
 

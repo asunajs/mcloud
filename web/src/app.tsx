@@ -15,6 +15,7 @@
 import { computed, defineVaporComponent, onMounted, onUnmounted, ref } from 'vue'
 import { currentSession, setupStatus, signOut, type User } from './api'
 import { AuthPage } from './pages/auth-page'
+import { AccountsPage } from './pages/accounts-page'
 import { DashboardPage } from './pages/dashboard-page'
 import { PlaceholderPage } from './pages/placeholder-page'
 import { IconClose, IconMenu, IconMoon, IconMore, IconSun } from './ui/icons'
@@ -212,6 +213,8 @@ export default defineVaporComponent(() => {
 
           {page.value === 'dashboard' ? (
             <DashboardPage user={user.value} onGo={go} />
+          ) : page.value === 'accounts' ? (
+            <AccountsPage />
           ) : (
             <PlaceholderPage id={page.value} onGo={go} />
           )}
