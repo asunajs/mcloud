@@ -2,7 +2,7 @@
 
 > 状态：**规范**（改代码前必读；跑门禁是完成定义的一部分）
 >
-> - 入口：**Rust 侧** `bash scripts/gates.sh`（七条）/ **Go 侧** `bash scripts/gates-go.sh`（八条）——
+> - 入口：**Rust 侧** `bash scripts/gates.sh`（七条）/ **Go 侧** `bash scripts/gates-go.sh`（九条）——
 >   都是"一条命令跑完全部，任一条失败即非零退出"。**迁移期两套并存、互不替代**，见下面「迁移期」。
 > - 权威说明：本文；分层表与 `scripts/check-deps.sh` 的可执行断言**互为镜像**，改一处要改另一处
 
@@ -35,7 +35,7 @@ source）。**不要复制那段代码** —— 它已经因为有三份拷贝�
 
 ---
 
-## 迁移期：Go 侧八条（2026-09-20 起）
+## 迁移期：Go 侧九条（2026-09-20 起）
 
 Rust → Go 迁移期间**两套门禁并存，互不替代**：Rust 侧仍是上面七条
 （`gates.sh` 在 `legacy/Cargo.toml` 存在时会**自动**加 `--manifest-path`，不用手改），
@@ -48,15 +48,19 @@ bash scripts/gates-go.sh test deps        # 只跑指定的几条
 
 | # | 门禁 | 管什么 | 从哪来 |
 | --- | --- | --- | --- |
-| 1 | `go build ./...` | 能编译 | Go 版 |
-| 2 | `go vet ./...` | 静态检查 —— ⚠ **≠ clippy，覆盖窄得多** | Go 版 |
-| 3 | `gofmt -l .` | 格式 | Go 版 |
-| 4 | `go test -race ./...` | 测试 **+ 竞态** | Go 版 |
+| 1 | `go build $GO_PKGS` | 能编译 | Go 版 |
+| 2 | `go vet $GO_PKGS` | 静态检查 —— ⚠ **≠ clippy，覆盖窄得多** | Go 版 |
+| 3 | `gofmt -l ./cmd ./internal` | 格式 | Go 版 |
+| 4 | `go test -race $GO_PKGS` | 测试 **+ 竞态** | Go 版 |
 | 5 | `bash scripts/check-go-deps.sh` | Go 侧分层铁律 | Go 版 |
 | 6 | `bash scripts/check-filenames.sh` | 文件名规则 | **复用** |
 | 7 | `node scripts/check-identifiers.cjs` | 不得有真实标识 | **复用** |
 | 8 | `node scripts/check-golden-vectors.cjs` | 黄金向量能算出自己 | **复用** |
 | 9 | `node scripts/check-go-jsontags.cjs` | 结构体字段的 `json` tag 不许漏写 | Go 版 |
+
+> ⚠ 1–4 写的是 `$GO_PKGS` 而**不是**惯用的 `./...`：`./...` 会去遍历 `legacy/target/`
+> （7 GB 的 cargo 构建产物），既慢、又会在 cargo 同时改写它时撞上刚被删的临时目录
+> 而**偶发失败**。定义与理由见 `scripts/gates-go.sh` 顶部。
 
 **6–8 刻意复用同一份脚本，不重写** —— 它们与语言无关（扫文件名 / 扫文本里的真实标识 /
 独立复算向量），重写一遍等于给自己造第二份真相，而两份真相迟早分叉，
@@ -92,6 +96,16 @@ Rust 的 `#[derive(Serialize)]` 默认给 **snake_case** 字段名（`password_h
   **编译期**保证。Go 的 `io.Reader` 是引用语义，并发共用一个源是 data race，
   而它**不一定**让测试变红：可能只是偶发产生错误数据（签名对不上、`deviceId` 错一位），
   于是被当成"上游抽风"。`-race` 是那条编译期保证在 Go 侧的替代品。
+
+  ⚠ **`-race` 在 Windows 上需要 cgo，cgo 需要一个 C 编译器**（`go env CC`，默认 `gcc`）。
+  没有它时 `go test -race` 报 `requires cgo`，**与代码无关**，但会让 `test` 红到
+  一条提交都推不出去。`scripts/gates-go.sh` 因此**先探测**：`go env CC` 命不中
+  就降级成不带 `-race` 的 `go test`，并在横幅、该条结果行、末尾汇总行**三处**标出
+  "未跑 -race"。装上 mingw-w64 / w64devkit 后自动恢复，不用改脚本。
+
+  降级是**有意为之且必须看得见**：一个"拦住一切"的检查最后会被 `--no-verify`
+  整体绕过，连带把其余七条一起废掉 —— 那样的价值是 0。宁可少一条保证但看得见，
+  不要"文档写着有、实际一次没跑"。
 - **`vet` 过了不代表静态检查这关过了。** 它只覆盖"几乎肯定是错"的一小撮检查。
   补齐要引 `golangci-lint`，而那是外部依赖 —— 骨架阶段刻意零第三方依赖。
   引进来之前，**不要拿 `vet` 当 `clippy` 用**。
@@ -111,8 +125,8 @@ Rust 的 `#[derive(Serialize)]` 默认给 **snake_case** 字段名（`password_h
 
 | 入口 | 什么时候 | 覆盖面 |
 | --- | --- | --- |
-| `pre-commit` | 每次提交 | `fmt` `deps` `filenames` `idents`（不需要编译的那四条） |
-| `pre-push` | 每次推送 | 全七条 |
+| `pre-commit` | 每次提交 | `fmt` `deps` `filenames` `idents` `jsontags`（不需要编译的那五条） |
+| `pre-push` | 每次推送 | Go 侧**九条**全跑（Rust 侧冻结后改跑这个，见下） |
 
 装一次即可：`bash scripts/install-hooks.sh`（细节见 `.githooks/README.md`）。
 
@@ -120,31 +134,58 @@ Rust 的 `#[derive(Serialize)]` 默认给 **snake_case** 字段名（`password_h
 
 ## 耗时
 
-> ### ⚠⚠ 本节数据是 **Windows + Git Bash** 上测的，在 macOS 上**不成立**
+> ### ⚠⚠ 引用本节数字前，先看它是在**哪个平台**测的
 >
-> macOS 实测（arm64 / rustc 1.91.1，2026-09-20）：改 `mcloud-core/src/lib.rs`
-> **一行**后，`cargo check --workspace` = **1 分 58 秒**（`/usr/bin/time -p` → `real 118.71`）。
+> 两个平台都测过"改 `mcloud-core` 一行"这个最典型的动作：
 >
-> 差 4 倍的原因**不是平台 API**，是**这个 workspace 长大了**：`mcloud-core` 之上
-> 7 个 crate 全都要重新 check。这是单 workspace 的固有代价，不是调参能解决的
-> （`incremental` 已按 `0c65b35` 关掉，那解决的是另一个问题）。
+> | 平台 | 命令 | 耗时 |
+> | --- | --- | --- |
+> | macOS arm64 / rustc 1.91.1 | `cargo check --workspace` | **1 分 58 秒**（`real 118.71`） |
+> | Windows + Git Bash / rustc 1.96.1 | `cargo test --workspace --no-run` | **97 秒**（8/8 crate 重编） |
 >
-> ⇒ **引用本节任何一个数字之前，先看它是在哪个平台、什么时候测的。**
-> 下面保留原始数据（它在 Windows 上仍然有效），但**不要再把"30 秒"当成
-> "这台机器上的日常"** —— 它已经导致过一次误判（"不需要换语言"）。
+> **同一量级、互相印证。** 慢的原因**不是平台 API**，是**这个 workspace 长大了**：
+> `mcloud-core` 之上 7 个 crate 全都要重新编译。这是单 workspace 的固有代价，
+> 不是调参能解决的（`incremental` 已按 `0c65b35` 关掉，那解决的是另一个问题）。
+>
+> ⇒ **不要再把"30 秒"当成"日常"** —— 它已经导致过一次误判（"不需要换语言"）。
 > 背景与决策见 [`go-migration-plan.md`](./go-migration-plan.md) §1。
 
-**先说结论（Windows + Git Bash，6 核）：写代码后推送 30 秒左右，不需要 `sccache`。**
+### ★ 真正决定体验的是"你改了哪一层"
 
-实测（6 核，一次只跑一个构建 —— 否则数据全废，见下「怎么量才准」）：
+**改底层 crate = 全量重编。这是 Rust crate 模型的固有代价，不是配置能修的。**
 
-| 场景 | 耗时 |
-| --- | --- |
-| **写代码后推送（真正的日常）** | **~30s** |
-| 全量七条门禁单跑 | 23s |
-| `git push` 带全七条 hook | 26s |
+依赖链 —— 7 个 crate 全部直接或间接依赖 `mcloud-core`，最深 4 层：
 
-拆开看：
+```
+mcloud-core                            ← 最底层
+   ├── upstream      → core
+   ├── io            → core
+   ├── capabilities  → core, upstream                (2 层)
+   ├── exec          → core, capabilities            (3 层)
+   ├── server        → core, io, exec, capabilities  (4 层)
+   ├── app           → core, upstream, capabilities, io
+   └── cli           → core, capabilities, upstream
+```
+
+**实测：加一行注释（不改语义）后 `cargo test --workspace --no-run`：**
+
+| 改哪个 crate | 重编几个 | 耗时 |
+| --- | --- | --- |
+| `mcloud-core`（最底层） | **8 / 8** | **97s** |
+| `mcloud-io`（中间层） | 4 / 8 | 14s |
+| `mcloud-cli`（最顶层叶子） | **1 / 8** | **4s** |
+| 什么都不改（热） | 0 | 1s |
+
+**差 24 倍。** 而日常开发改的正是底层 —— 领域模型、事件模型、错误分类都在
+`mcloud-core`，能力在 `mcloud-capabilities`。所以**日常就是 ~97 秒一次重编**，
+再叠加 `clippy`（另一套 fingerprint，产物不共用）与跑测试本身，
+一次推送的真实体感是 **2–3 分钟**。
+
+> 这一节此前写的是"写代码后推送 30 秒左右" —— **那个数字是错的**，
+> 它量的是"改文档 / 改配置"这种最省事的场景。是用户纠正的：
+> **「不是 rust 慢，是改了底层后需要全量编译」。**
+
+### 各门禁本身
 
 | 门禁 | 热 target | 说明 |
 | --- | --- | --- |
@@ -152,8 +193,11 @@ Rust 的 `#[derive(Serialize)]` 默认给 **snake_case** 字段名（`password_h
 | `deps` | ~1s | 纯静态 |
 | `filenames` | 跳过 / ~1s | 无增删改名时跳过 |
 | `idents` | ~3s | 纯静态 |
-| `clippy --all-targets` | **首次 33s ／ 紧接再跑 2s** | 纯静态分析，不编 crate |
-| `test --workspace` | **~20s** | 需重编本仓 8 个 crate |
+| `clippy --all-targets` | 首次 33s ／ 紧接再跑 2s | 纯静态分析 |
+| `test --workspace` | 热 1s ／ 改底层 97s | 成本由"改了哪一层"决定 |
+
+**静态四条加起来才 ~6s。** 慢的全部是编译类，而编译类的成本由"改了哪一层"
+决定，与门禁设计无关 —— 这也是为什么**砍门禁条数省不下任何东西**。
 
 > ### ⚠ 这里曾有两个 bug，把耗时抬到 8 分钟以上（都已修）
 >

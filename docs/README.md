@@ -29,7 +29,7 @@
 | [`rust-rewrite-plan.md`](./rust-rewrite-plan.md) | 动工前的规划快照（技术选型、分层、19 项能力风险序、实现顺序 §7.1） | **提案**（写于动工前，进度以 README 为准） |
 | [`business-feature-inventory.md`](./business-feature-inventory.md) | 旧 TS 项目 19 项能力逐条拆解 + 运行时层缺口 + 硬编码清单 | 编排中 |
 | [`caiyun-go-feature-inventory.md`](./caiyun-go-feature-inventory.md) | Go 参考项目对照（24 条任务、抢兑子系统、搬/不搬总表） | 编排中 |
-| [`go-migration-plan.md`](./go-migration-plan.md) | **Rust → Go 的执行方案**：冻结策略、目录与包映射、八条门禁、逐 crate 要点、顺序与每步退出判据 —— **与任何文档冲突时以它为准** | **执行中**（Rust 侧已冻结） |
+| [`go-migration-plan.md`](./go-migration-plan.md) | **Rust → Go 的执行方案**：冻结策略、目录与包映射、九条门禁、逐 crate 要点、顺序与每步退出判据 —— **与任何文档冲突时以它为准** | **执行中**（Rust 侧已冻结） |
 | [`rust-to-golang-migration.md`](./rust-to-golang-migration.md) | 上面那篇的**评估篇**：规模/依赖对照/四条结构性难点/工作量与是否值得（数字为 2026-09-20 实测，会过期） | 评估（**已决策**） |
 
 ### 登录协议（按端分文件，互为姊妹篇）

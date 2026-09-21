@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 推送前门禁：八条全跑（含需要编译的 build / vet / test）。
+# 推送前门禁：九条全跑（含需要编译的 build / vet / test）。
 #
 # 为什么不放在 pre-commit：见同目录 README.md 的"两道闸，各拦各的"。
 # 手动安装：bash scripts/install-hooks.sh
 #
-# ⚠ 2026-09-20 起跑的是 **Go 侧八条**；Rust 侧已冻结到 legacy/，不再自动跑。
+# ⚠ 2026-09-20 起跑的是 **Go 侧九条**；Rust 侧已冻结到 legacy/，不再自动跑。
 #    pre-push 的参数（<remote> <url>）我们不关心 —— 范围就是全部，不用解析 stdin。
 
 exec "$(dirname "$0")/../scripts/gates-go.sh"

@@ -200,18 +200,23 @@ Go 的 `//go:embed` **不能跨目录**，而黄金向量是全仓共享资产�
 
 ## 5. 门禁
 
-### 5.1 八条，与 Rust 侧七条的对应关系
+### 5.1 九条，与 Rust 侧七条的对应关系
 
 | # | Go 侧 | Rust 侧对应 |
 | --- | --- | --- |
-| 1 | `go build ./...` | `cargo build`（"能编译"的最直接判据） |
-| 2 | `go vet ./...` | `cargo clippy --all-targets -- -D warnings`（**覆盖窄得多**，见 5.3） |
-| 3 | `gofmt -l .` | `cargo fmt --check` |
-| 4 | `go test -race ./...` | `cargo test --workspace`（**多一个 `-race`**，见 5.2） |
+| 1 | `go build $GO_PKGS` | `cargo build`（"能编译"的最直接判据） |
+| 2 | `go vet $GO_PKGS` | `cargo clippy --all-targets -- -D warnings`（**覆盖窄得多**，见 5.3） |
+| 3 | `gofmt -l ./cmd ./internal` | `cargo fmt --check` |
+| 4 | `go test -race $GO_PKGS` | `cargo test --workspace`（**多一个 `-race`**，见 5.2） |
 | 5 | `bash scripts/check-go-deps.sh` | `bash scripts/check-deps.sh` |
 | 6 | `bash scripts/check-filenames.sh` | **同一个脚本，复用** |
 | 7 | `node scripts/check-identifiers.cjs` | **同一个脚本，复用** |
 | 8 | `node scripts/check-golden-vectors.cjs` | **同一个脚本，复用** |
+| 9 | `node scripts/check-go-jsontags.cjs` | **Go 独有**（Rust 侧无对应物：serde 的字段名由派生保证，Go 没有） |
+
+⚠ `$GO_PKGS` = `./cmd/... ./internal/...`，**不要写成 `./...`** ——
+后者会走进 `legacy/target/`（7 GB 构建产物），既慢又会偶发失败。
+第 3 条同理：`gofmt -l .` 会去格式化那 26 万个 `.o` 旁边的文件。
 
 入口：`bash scripts/gates-go.sh`（支持 `bash scripts/gates-go.sh test deps` 只跑指定几条）。
 
@@ -678,8 +683,8 @@ PC 与 App 是**两套客户端**，同名同形的常量值可能不同，而"�
 
 | 步 | 内容 | 退出判据 | 状态 |
 | --- | --- | --- | --- |
-| **0** | 骨架 + 守卫先行：`go.mod` / `internal/` 八层 / `cmd/` 两个入口 / `scripts/gates-go.sh` / `check-go-deps.sh` / 三处共享守卫改造 | **八项门禁全绿**；依赖断言经**反向测试**证明能抓错 | ✅ **已完成** |
-| **冻结** | Rust 侧冻结到 `legacy/`（`bash scripts/freeze-rust.sh`）| 冻结后 **Rust 七条 + Go 八条同时全绿**；`legacy/test` 以符号链接入库（模式 120000）| ✅ **已完成**（`333d05c`，2026-09-20）|
+| **0** | 骨架 + 守卫先行：`go.mod` / `internal/` 八层 / `cmd/` 两个入口 / `scripts/gates-go.sh` / `check-go-deps.sh` / 三处共享守卫改造 | **八项门禁全绿**〔当时是八项 —— 第九条 `jsontags` 是 2026-09-21 才补的，见 §5.1〕；依赖断言经**反向测试**证明能抓错 | ✅ **已完成** |
+| **冻结** | Rust 侧冻结到 `legacy/`（`bash scripts/freeze-rust.sh`）| 冻结后 **Rust 七条 + Go 八条同时全绿**〔同上：按当时的条数记〕；`legacy/test` 以符号链接入库（模式 120000）| ✅ **已完成**（`333d05c`，2026-09-20）|
 | **1** | `mcloud-core`（纯计算，标准库覆盖最好） | 黄金向量在 Go 侧逐字段复算通过 | ✅ **已完成**（2026-09-21）：`internal/core` **270 条测试**，17/17 模块对位，core 读的 **8 份向量逐节都有正向断言**（最后缺的那一节 `hcyCoolFlagEnvelope` 于本次补上，见 §6.1 #56）。**一条例外**：`error` 后半的 `classify_body` 那台分类机**不补进 core** —— 它在**冻结基准里就没有调用点**（core 之外零命中），补进去就是一台没人开的机器；判据的三块 Go 侧已各在其位（`core.ClassifyStatus` + `upstream.Envelope`），归属改挂到步 4 第一个真需要"状态 + 响应体一步判完"的调用点。⚠ 判据要按"**Go 侧**读了几份向量"算，别照门禁那行 `✓ 有测试读取` —— 它不区分是哪一侧在读（见 `status.md`）。⚠ 也别把**步 2 的账算进步 1**：`app-signin-vectors` 与 `login-crypto-vectors` 的消费者在 `internal/upstream`，与 core 无关 |
 | **2** | `mcloud-upstream`（协议层） | 同一条抓包请求 Rust/Go **双跑**，header 顺序 / percent-encode / 签名串逐字节一致 | ✅ **已完成**（2026-09-21 补记）：`internal/upstream` **150 条测试**，`login` / `client` / `app_client` / `app_login` / `app_signin` 全族 / `smid` **整族落地**；`app-signin-vectors.json` 从"只有 Rust 读"变成**两边都读**。⚠ 判据里的"双跑"是**逐块**做的（每条链路各自与 Rust 侧的中心断言对拍，例如 `app_login` 的 `appLoginWire`），不是一次跑通全部接口 —— 见 `status.md` 的步 2 分块表 |
 | **3** | `mcloud-io`（唯一 IO 层） | 纯 Go sqlite 驱动下 schema v1→**v8** 迁移 + 老库只读导入结果一致 | ✅ **已完成**（2026-09-21 补记）：`internal/io` **150 条测试**，schema v1→v8 的 8 条幂等迁移链、`legacy_import`（**21 条**，五条硬判据见 `status.md`）、`fixture` 回放、HTTP 客户端、`datetime`（与 chrono **逐字节**一致）。驱动 = `modernc.org/sqlite`（纯 Go，免 cgo）。⚠ 判据原文写的是 v7，实测做到的是 **v8** |

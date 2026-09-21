@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Go 侧门禁一键跑 —— `scripts/gates.sh`（Rust 侧）的 Go 版。
 #
-# 八条，与 Rust 侧七条的对应关系：
+# 九条，与 Rust 侧七条的对应关系：
 #
 #   build      ≈ cargo build（"能编译"的最直接判据）
 #   vet        ≈ cargo clippy --all-targets -- -D warnings（**覆盖窄得多**，见下）
@@ -11,8 +11,9 @@
 #   filenames  = 同一个脚本，**复用**
 #   idents     = 同一个脚本，**复用**
 #   golden     = 同一个脚本，**复用**
+#   jsontags   = Go 独有（字段名那个洞，见「第 9 条」那节）
 #
-# ⚠ 后三条刻意复用 Rust 侧那三个脚本，不重写。
+# ⚠ filenames / idents / golden 三条刻意复用 Rust 侧那三个脚本，不重写。
 #   它们与语言无关（扫文件名 / 扫文本里的真实标识 / 独立复算向量），
 #   重写一遍等于给自己造第二份真相 —— 而两份真相迟早会分叉，
 #   分叉的那天没有人知道该信哪一份。
@@ -71,12 +72,53 @@ gate_fmt() {
   return 0
 }
 
+# ── `-race` 跑不跑得了：先探测，再决定 ──────────────────────────────
+#
+# `go test -race` 在 **Windows** 上必须开 cgo，而 cgo 必须有一个 Go 能用的
+# C 编译器（`go env CC`，默认 gcc）。两道缺一，go 报的是：
+#     go: -race requires cgo; enable cgo by setting CGO_ENABLED=1
+#     cgo: C compiler "gcc" not found: exec: "gcc": executable file not found
+# 两条都**不是代码问题**，但它们会让 `test` 红 —— 而 `test` 一红，这台机器
+# 一条提交都推不出去。
+# （2026-09-20 实测：Windows 机器上没有 gcc，且本机网络取不到 mingw-w64。）
+#
+# ⚠ 这里是**降级**，不是静默放过：
+#   · 降级会大声说 —— 横幅、该条门禁的结果行、末尾汇总行，三处都标出来；
+#   · 理由是：一个"拦住一切"的检查，最后会被 `--no-verify` 整体绕过，
+#     连带把其余七条一起废掉 —— 那样的实际价值是 **0**。
+#     宁可少一条保证但**看得见**，不要"文档写着有、实际一次没跑"。
+#
+# 装上 mingw-w64 / w64devkit（或任何能让 `go env CC` 命中的编译器）后，
+# 下面这个函数自己会恢复成带 -race，不用改脚本。
+race_available() {
+  local cc
+  cc="$(go env CC 2>/dev/null)"
+  [ -n "$cc" ] || return 1
+  command -v "$cc" >/dev/null 2>&1
+}
+
+RACE_SKIPPED=0
+
+gate_test() {
+  if race_available; then
+    # CGO_ENABLED 在没有 C 编译器时默认是 0，而 -race 要求 1 —— 显式设上。
+    CGO_ENABLED=1 go test -race $GO_PKGS
+    return $?
+  fi
+  RACE_SKIPPED=1
+  printf '\033[33m⚠ -race 不可用：cgo 需要 C 编译器「%s」，本机没有。\033[0m\n' "$(go env CC)"
+  printf '\033[33m  ⇒ 本轮**不**做竞态检测（Rust 侧由 `&mut R` 在编译期保证的那条，\033[0m\n'
+  printf '\033[33m     在 Go 侧唯一替代品就是 -race —— 它现在没跑）。\033[0m\n'
+  printf '\033[33m  ⇒ 装 mingw-w64 / w64devkit 后自动恢复，无需改脚本。\033[0m\n'
+  go test $GO_PKGS
+}
+
 gate_run() {
   case "$1" in
     build)     go build $GO_PKGS ;;
     vet)       go vet $GO_PKGS ;;
     fmt)       gate_fmt ;;
-    test)      go test -race $GO_PKGS ;;
+    test)      gate_test ;;
     deps)      bash scripts/check-go-deps.sh ;;
     filenames) bash scripts/check-filenames.sh ;;
     idents)    node scripts/check-identifiers.cjs ;;
@@ -90,6 +132,33 @@ ORDER=(build vet fmt test deps filenames idents golden jsontags)
 if [ $# -gt 0 ]; then
   ORDER=("$@")
 fi
+
+# 校验门禁名：**在跑之前**按名字查表，不靠退出码。
+#
+# ⚠ 为什么不能沿用"退出码 127 = 未知门禁"（原写法）：
+#   127 同时是 shell 的 "command not found" 退出码。于是
+#   **Go 没装时**，`go build` 返回 127，脚本会打印
+#       !! 未知门禁: build（可选：build vet fmt test deps filenames idents golden）
+#   ——把"这台机器没有 Go"报成了"这个脚本写错了"，而且是**列着 build 自己
+#   告诉你它不存在**，看上去自相矛盾，非常耗排查时间。
+#   （2026-09-20 实测：Windows 机器上没装 Go，第一条门禁就报这个。）
+#
+#   这与 Rust 侧踩过的坑是同一类：把环境问题翻译成"你的东西有问题"。
+#   按名字查表后，名字合法但命令失败就是正常的"✗ build 失败"，
+#   终端会打出真实原因（`go: command not found`）。
+is_known_gate() {
+  case " $GATE_NAMES " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+for name in "${ORDER[@]}"; do
+  if ! is_known_gate "$name"; then
+    echo "!! 未知门禁: $name（可选：$GATE_NAMES）"
+    exit 2
+  fi
+done
 
 FAILED=()
 # 日志放 target/（已在 .gitignore 里），用 gates-go- 前缀与 Rust 侧区分开 ——
@@ -108,13 +177,14 @@ for name in "${ORDER[@]}"; do
   if gate_run "$name" >"$RUN_LOG" 2>&1; then
     cat "$RUN_LOG"
     cat "$RUN_LOG" >> "$LOG"
-    printf '\033[32m✓ %s 通过\033[0m\n' "$name"
-  else
-    rc=$?
-    if [ "$rc" -eq 127 ]; then
-      echo "!! 未知门禁: $name（可选：$GATE_NAMES）"
-      exit 2
+    if [ "$name" = "test" ] && [ "$RACE_SKIPPED" = "1" ]; then
+      printf '\033[33m⚠ %s 通过（降级：未跑 -race）\033[0m\n' "$name"
+    else
+      printf '\033[32m✓ %s 通过\033[0m\n' "$name"
     fi
+  else
+    # 名字的合法性已在上面按表校验过，所以走到这里就是**真的失败了** ——
+    # 不要再拿退出码去猜"是不是未知门禁"（127 撞车，见上面 is_known_gate）。
     cat "$RUN_LOG"
     cat "$RUN_LOG" >> "$LOG"
     printf '\033[31m✗ %s 失败\033[0m\n' "$name"
@@ -127,5 +197,9 @@ if [ ${#FAILED[@]} -gt 0 ]; then
   echo "完整输出: $LOG"
   exit 1
 fi
-printf "\033[32m九项门禁全绿\033[0m\n"
+if [ "$RACE_SKIPPED" = "1" ]; then
+  printf '\033[33m九项门禁通过 —— ⚠ 但 test 未跑 -race（本机缺 C 编译器）\033[0m\n'
+else
+  printf '\033[32m九项门禁全绿\033[0m\n'
+fi
 : > "$LOG"

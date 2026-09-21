@@ -26,12 +26,12 @@ hook 就跟代码一起被 review、被同步，也不需要谁记得"上一台�
 
 | hook | 跑什么 | 为什么是这些 |
 |---|---|---|
-| `pre-commit` | `fmt` `deps` `filenames` `idents` | 秒级、纯静态。**每条都能在一次编辑之后立刻修掉** |
+| `pre-commit` | `fmt` `deps` `filenames` `idents` `jsontags` | 秒级、纯静态。**每条都能在一次编辑之后立刻修掉** |
 | `pre-push` | 再加 `build` `vet` `test` `golden` | 要编译、要跑测试。**跑了才有意义，但不必每次保存都跑** |
 
 这个分法不是随手切的，判据是"**发现问题的时刻与修复成本**"：
 
-- `fmt` / `filenames` / `deps` / `idents` 这四条，问题一旦产生就**立刻可修且必然要修**。
+- `fmt` / `filenames` / `deps` / `idents` / `jsontags` 这五条，问题一旦产生就**立刻可修且必然要修**。
   让它们过夜再修，代价只是下次改到那儿时又看到一次。放 pre-commit。
 - `build` / `vet` / `test` / `golden` 需要编译，`test` 是测试执行本身。
   每次 `git commit` 都跑会让"改一行注释提交一下"变慢——
