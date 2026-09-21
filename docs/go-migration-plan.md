@@ -7,7 +7,7 @@
 > 状态：**执行方案** —— 谁来做、按什么顺序做、每一步怎么算做完。
 >
 > - 评估（写于**决定之前**，论证"要不要迁"）：[`rust-to-golang-migration.md`](./rust-to-golang-migration.md)
-> - 冻结后的约定：[`../legacy/README.md`](../legacy/README.md)
+> - 冻结后的约定：[`../legacy/README.md`](./freeze-record.md)
 > - 门禁规范：[`dev-gates.md`](./dev-gates.md)
 > - 拍板日期：2026-09-20
 

@@ -748,6 +748,33 @@ function decodeBase64Payloads(text) {
   return out;
 }
 
+/**
+ * 只有 **Go 侧（同级仓库 mcloud）** 消费者的向量。
+ *
+ * 2026-09-21 剥离之后，`test/golden/` 是两个仓库各一份实体副本。这六份是
+ * Rust 冻结**之前**为"钉住 Go 侧要复刻的形状"补的，Rust 侧从来没人读它们
+ * （判据：`grep -rn include_str crates/ | grep <名字>` 全为 0）。
+ * 不列出来，它们会在"消费者"一节被印成**死向量** —— 那是假警报，
+ * 而假警报的代价是让人开始忽略真警报。
+ *
+ * ⚠ 这份表是**手维护**的，与 `NOT_VERIFIED_REASONS` 同一类风险：表过期不会自报。
+ * 所以命中时反过来查一次 —— 本仓库若真有了消费者，就把"表里有死条目"算进失败。
+ *
+ * Go 侧的消费者（各自 `golden.Load("<名字>")`）：
+ * `internal/io/datetime_test.go` / `internal/core/enum_test.go` /
+ * `internal/core/legacy_test.go` / `internal/app/device_test.go` +
+ * `internal/upstream/login_crypto_vectors_test.go` / `internal/core/user_test.go` /
+ * `internal/core/traits_test.go`。
+ */
+const GO_SIDE_ONLY = new Set([
+  "datetime-format-vectors.json",
+  "enum-json-vectors.json",
+  "legacy-shape-vectors.json",
+  "login-crypto-vectors.json",
+  "password-hash-vectors.json",
+  "traits-shape-vectors.json",
+]);
+
 // ─────────────────────────── 主流程 ───────────────────────────
 
 /**
@@ -976,11 +1003,28 @@ function main() {
   }
 
   console.log("\n── 消费者 ──");
+  let staleGoSide = [];
   for (const f of files) {
-    console.log(`  ${used.has(f) ? "✓ 有测试读取" : "⚠ 无任何测试读取（死向量）"}  ${f}`);
+    if (used.has(f)) {
+      if (GO_SIDE_ONLY.has(f)) staleGoSide.push(f);
+      console.log(
+        `  ✓ 有测试读取  ${f}` +
+          (GO_SIDE_ONLY.has(f)
+            ? `   ⚠ 但它也在"只有 Go 侧消费者"表里 ⇒ **表过期**，请删掉这条`
+            : ""),
+      );
+    } else if (GO_SIDE_ONLY.has(f)) {
+      console.log(`  · 本仓库无消费者，**Go 侧有**（同级仓库 mcloud）  ${f}`);
+    } else {
+      console.log(`  ⚠ 无任何测试读取（死向量）  ${f}`);
+    }
   }
 
-  const tableProblems = deadReasons.length + reasonCheck.problems.length;
+  for (const f of staleGoSide) {
+    console.log(`  ✗ GO_SIDE_ONLY 里有死条目 \`${f}\`：本仓库已经有它的消费者了，请从表里删掉`);
+  }
+  const tableProblems =
+    deadReasons.length + reasonCheck.problems.length + staleGoSide.length;
   const totalProblems = failures.length + identityProblems.length + tableProblems;
   console.log(
     `\n${totalProblems === 0 ? "✓ 通过" : "✗ 失败"}：断言 ${checked} 条全绿` +
