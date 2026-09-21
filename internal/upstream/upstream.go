@@ -1,5 +1,5 @@
 // 接口调用上下文与请求构造 —— 对应 Rust 侧
-// legacy/crates/mcloud-upstream/src/lib.rs 的 `Upstream` 与 login.rs 的请求构造段。
+// ../mcloud-rust/crates/mcloud-upstream/src/lib.rs 的 `Upstream` 与 login.rs 的请求构造段。
 //
 // # 为什么"能发请求"是**注入**进来的
 //

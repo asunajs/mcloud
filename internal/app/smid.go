@@ -1,6 +1,6 @@
 // 账号绑定的 smid 设备特征，以及"拿特征换 `deviceId`"的编排。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-app/src/smid.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-app/src/smid.rs。
 //
 // # 本层管的是**生命周期**
 //

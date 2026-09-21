@@ -5,7 +5,7 @@
  * 为什么需要它：
  *   Rust 重写最容易悄悄跑偏的地方就是加密。凭肉眼比对代码不可靠，
  *   所以这里**直接调用原版用的同一套库**（crypto-js 4.x + node:crypto），
- *   把输入/输出固化成 JSON，让 Rust 侧断言逐字节一致（见 legacy/crates/mcloud-core/src/crypto.rs）。
+ *   把输入/输出固化成 JSON，让 Rust 侧断言逐字节一致（见 ../mcloud-rust/crates/mcloud-core/src/crypto.rs）。
  *
  * 用法（必须在 mcloud-sign 仓库里跑，因为需要它的 node_modules 提供 crypto-js）：
  *   NODE_PATH=/Users/catlair/Documents/workspace/mcloud-sign/node_modules \
@@ -227,7 +227,7 @@ const SM_UA =
  * 即**改名但不加密**），`name` = `obfuscated_name`。
  *
  * ⚠ 这份表在向量里的用途是**产出期望值**，所以它必须"照搬"而不是"重新推导" ——
- * 真正的独立交叉验证是 Rust 侧那份 [`RULES`](legacy/crates/mcloud-upstream/src/smid.rs)，
+ * 真正的独立交叉验证是 Rust 侧那份 [`RULES`](../mcloud-rust/crates/mcloud-upstream/src/smid.rs)，
  * 两边写歪同一条就会对不上（Node 用 crypto-js，Rust 用自带 DES 实现）。
  */
 const SM_DES_RULE = {
@@ -375,9 +375,9 @@ async function main() {
     $source: "mcloud-sign TS 原版：crypto-js 4.x + node:crypto + CompressionStream",
     $cryptoJsVersion: require("crypto-js/package.json").version,
     $note:
-      "Rust 侧（legacy/crates/mcloud-core/src/crypto.rs）必须复现本文件全部 expect* 字段。" +
+      "Rust 侧（../mcloud-rust/crates/mcloud-core/src/crypto.rs）必须复现本文件全部 expect* 字段。" +
       "随机性路径（动态 IV、RSA PKCS#1 v1.5 填充）无法字节级对拍，改为单向/自持密钥验证，见对应条目的 note。" +
-      "补（2026-09-19）：smid* 四段由 legacy/crates/mcloud-upstream/src/smid.rs 的测试消费（它们的落点在那里，不在 core）。",
+      "补（2026-09-19）：smid* 四段由 ../mcloud-rust/crates/mcloud-upstream/src/smid.rs 的测试消费（它们的落点在那里，不在 core）。",
     constants: {
       SIGN_SALT_MAP,
       REFRESH_TOKEN_KEY,

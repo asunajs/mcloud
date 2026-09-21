@@ -12,7 +12,7 @@ import (
 
 // `smid show` / `reset` / `refresh` 三条叶子的**命令行编排**。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-cli/src/smid_cmd.rs（187 行）。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-cli/src/smid_cmd.rs（187 行）。
 //
 // # 这一层只剩两件事
 //

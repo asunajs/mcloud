@@ -1,4 +1,4 @@
-// 错误分类 —— 对应 Rust 侧 legacy/crates/mcloud-core/src/error.rs（前 197 行）。
+// 错误分类 —— 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/error.rs（前 197 行）。
 //
 // 分类的唯一目的是回答两个问题：**能不能重试**、**能不能把原文给用户看**。
 //

@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// 本文件对应 Rust 侧 legacy/crates/mcloud-core/src/model.rs 的 11 条测试，
+// 本文件对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/model.rs 的 11 条测试，
 // 外加 Go 侧新长出来的那几条（打印脱敏的三条路、SmidState 拒绝序列化、
 // 空数组不是 null、枚举真值表）。
 //

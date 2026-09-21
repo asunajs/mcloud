@@ -95,7 +95,7 @@ base64 那条规则拦的就是它）。因此：
 
     # 导出 HAR，喂给夹具抽取器
     scripts/applog-capture.py har har/2026-09-19-核心域.har --path /user/
-    cargo run -p mcloud-cli -- fixture extract \
+    go run ./cmd/mcloud fixture extract \
         --har har/2026-09-19-核心域.har --out test/fixtures/http
 
 # 日志目录
@@ -539,7 +539,7 @@ def cmd_har(args) -> int:
     count = to_har(kept, args.out)
     print(f"已写出 {count} 条到 {args.out}（配对 {len(entries)} 条，"
           f"未配对请求 {unpaired_req} / 未配对响应 {unpaired_resp}）")
-    print(f"\n下一步：\n  cargo run -p mcloud-cli -- fixture extract "
+    print(f"\n下一步：\n  go run ./cmd/mcloud fixture extract "
           f"--har {args.out} --out test/fixtures/http")
     return 0
 

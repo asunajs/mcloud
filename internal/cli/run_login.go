@@ -19,7 +19,7 @@ import (
 
 // 登录两条叶子（`login qr` / `login sms`）的**命令行编排**。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-cli/src/login_cmd.rs + support.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-cli/src/login_cmd.rs + support.rs。
 //
 // # 这一层只剩两件事
 //

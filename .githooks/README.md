@@ -20,7 +20,9 @@ hook 就跟代码一起被 review、被同步，也不需要谁记得"上一台�
 
 ## 两道闸，各拦各的
 
-> ⚠ **2026-09-20 起跑的是 Go 侧门禁**（Rust 侧已冻结到 `legacy/`，不再自动跑）。
+> ⚠ **2026-09-20 起跑的是 Go 侧门禁**（Rust 侧已冻结，不再自动跑；2026-09-21 那套
+> Rust 实现与其执行器 `run-gates.sh` 已整体剥离为同级仓库
+> [`../mcloud-rust/`](../../mcloud-rust/)，归档在那边的 `.githooks/`）。
 > 分工没变，只是命令从 `cargo` 那套换成了 `go` 那套 —— 两个 hook 都只是
 > `exec bash scripts/gates-go.sh <几条>`，逻辑不重复。
 
@@ -90,7 +92,12 @@ git commit --no-verify      # 跳过 pre-commit
 git push --no-verify        # 跳过 pre-push
 ```
 
-门禁真的坏在环境上时可以用（本机 Windows 上 `target/` 会偶发被写盘拦截，
-见 `scripts/gates.sh` 里的重试逻辑）。
+门禁真的坏在环境上时可以用（Windows 上 `target/` 会偶发被写盘拦截）。
+
+> ⚠ 那句"环境抖动不该被翻译成你写错了代码"的重试逻辑，目前只在 **Rust 侧**那份里
+> （`scripts/gates.sh` 的写盘重试）；2026-09-21 它随代码移入
+> [`../mcloud-rust/scripts/gates.sh`](../../mcloud-rust/scripts/gates.sh)。
+> **Go 侧的 `scripts/gates-go.sh` 没有等价重试** —— 如果这台机器再次出现写盘被拦，
+> 那是这里的一个真实缺口，别当成"门禁在报假警"。
 
 但既然没有兜底，绕过的正确姿势就只剩一条：**修好环境问题再提交**。

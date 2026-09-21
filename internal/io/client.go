@@ -17,7 +17,7 @@ import (
 
 // Client 是真实 HTTP 客户端（net/http + 系统根证书）。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-io/src/reqwest_client.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-io/src/reqwest_client.rs。
 //
 // ⚠ 它**必须是本包的类型**。scripts/check-go-deps.sh 断言「组装根
 // （app / server）必须依赖本包」，那条断言挡的是"没人接上 IO 实现"这个

@@ -38,7 +38,7 @@ func TestDeviceIDMatchesTheCapturedShape(t *testing.T) {
 // 所以「怎么算出来的」是**客户端内部实现**，不是要对位的边界（见 plan §6.0）。
 //
 // ⚠ 这不是 Go 单方面的偷懒：**冻结的 Rust 侧也是
-// `hex::encode_upper(16 个随机字节)`**（`legacy/crates/mcloud-app/src/device.rs`），
+// `hex::encode_upper(16 个随机字节)`**（`../mcloud-rust/crates/mcloud-app/src/device.rs`），
 // 同样没有 `md5(uuid)`。向量里那两行 `uuidV4 → expectHexUpper` **两侧都没复刻**；
 // 现在照它补一个函数，只会新长出一个没有消费者的 `md5(uuid)`。
 //

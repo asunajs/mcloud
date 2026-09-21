@@ -1,4 +1,4 @@
-// 上游响应信封与接口基址 —— 对应 Rust 侧 legacy/crates/mcloud-upstream/src/lib.rs。
+// 上游响应信封与接口基址 —— 对应 Rust 侧 ../mcloud-rust/crates/mcloud-upstream/src/lib.rs。
 //
 // # 状态
 //

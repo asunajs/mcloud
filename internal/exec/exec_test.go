@@ -1,6 +1,6 @@
 // 执行器的测试。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-exec/src/lib.rs 的 `#[cfg(test)]` 模块，
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-exec/src/lib.rs 的 `#[cfg(test)]` 模块，
 // **外加**两条 Go 侧才成立的断言（map 遍历顺序随机化、并发安全），见文件末尾。
 package mcloudexec
 

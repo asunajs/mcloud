@@ -1,6 +1,6 @@
 // Package core 是纯计算层：领域类型、纯函数、以及被注入的契约定义。
 //
-// 对应 Rust 侧的 legacy/crates/mcloud-core。
+// 对应 Rust 侧的 ../mcloud-rust/crates/mcloud-core。
 //
 // # 分层铁律
 //

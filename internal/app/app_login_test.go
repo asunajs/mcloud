@@ -9,7 +9,7 @@ import (
 	"github.com/catlair/mcloud/internal/upstream"
 )
 
-// 本文件对应 Rust 侧 legacy/crates/mcloud-app/src/app_login.rs 的 `mod tests`。
+// 本文件对应 Rust 侧 ../mcloud-rust/crates/mcloud-app/src/app_login.rs 的 `mod tests`。
 //
 // 设备指纹与号码都是**合成值**（`AAA…` / `199` 号段），不含真实标识。
 

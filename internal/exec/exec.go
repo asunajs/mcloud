@@ -1,6 +1,6 @@
 // 执行器：并发闸、互斥键、run 准入、事件总线。
 //
-// 对应 Rust 侧的 legacy/crates/mcloud-exec/src/lib.rs。
+// 对应 Rust 侧的 ../mcloud-rust/crates/mcloud-exec/src/lib.rs。
 //
 // # 已落地的是**纯函数与纯内存部分**
 //

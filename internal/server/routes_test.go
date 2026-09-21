@@ -12,7 +12,7 @@ import (
 // # 判据的来源
 //
 // 期望值**不是**从 Go 侧实现反推的（那样只能证明"写过的都写了"），而是逐条抄
-// `legacy/crates/mcloud-server/src/auth.rs` 与 `src/routes/*.rs` 里的 `.route(...)`
+// `../mcloud-rust/crates/mcloud-server/src/auth.rs` 与 `src/routes/*.rs` 里的 `.route(...)`
 // —— 冻结基准一共 **15 条**（另有 `/api/{*rest}` 一条兜底）。
 //
 // # 为什么必须在裸路由表上测

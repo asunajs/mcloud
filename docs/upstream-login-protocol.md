@@ -13,7 +13,7 @@
 >   [`upstream-app-business-api.md`](./upstream-app-business-api.md)（iOS App 业务接口）。
 >   全库索引见 [`docs/README.md`](./README.md)。
 >
-> 依据 `docs/rust-rewrite-plan.md` §7.0 硬约束：**本文件内容全部来自实测，未落笔任何猜测性接口**。
+> 依据 `../mcloud-rust/docs/rust-rewrite-plan.md` §7.0 硬约束：**本文件内容全部来自实测，未落笔任何猜测性接口**。
 
 ---
 

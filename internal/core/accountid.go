@@ -1,4 +1,4 @@
-// 账号标识与时区常量 —— 对应 Rust 侧 legacy/crates/mcloud-core/src/model.rs
+// 账号标识与时区常量 —— 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/model.rs
 // 的 AccountId，以及 lib.rs 的 PRODUCT_NAME / TZ_NAME / local_tz。
 //
 // ⚠ model.rs 的其余部分（Account / Schedule / Pipeline / WebuiConfig …）

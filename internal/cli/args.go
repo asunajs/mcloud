@@ -25,7 +25,7 @@ const (
 
 // SigninArgs 是签到（云朵中心）的参数。
 //
-// 对应 `legacy/crates/mcloud-cli/src/args.rs` 的 `SigninArgs`。
+// 对应 `../mcloud-rust/crates/mcloud-cli/src/args.rs` 的 `SigninArgs`。
 // 根命令与 `signin` 子命令共用这一份定义（见 [registerSigninFlags] 的注释）。
 //
 // # 三态字段怎么办

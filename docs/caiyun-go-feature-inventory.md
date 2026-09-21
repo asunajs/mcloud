@@ -5,7 +5,7 @@
 > clone 于 `/tmp/caiyun-ref`，本文所有行号对该 commit 有效：**`1b2cf07`**。
 > 体量：`backend/` 337 个 `.go` / 61,215 行；`internal/core/tasks/` 30 个任务文件；`internal/services/exchange_*.go` 25 个。
 >
-> **它不替代**[`docs/rust-rewrite-plan.md`](./rust-rewrite-plan.md)：方案定"做什么、按什么风险顺序做"（§7.1），
+> **它不替代**[`rust-rewrite-plan.md`](../../mcloud-rust/docs/rust-rewrite-plan.md)：方案定"做什么、按什么风险顺序做"（§7.1），
 > 本文定"参考实现里每一条到底怎么跑、哪一处不能照抄"。两者的取舍基线是方案 §2.4 ——
 > **不采纳 MySQL / Redis / 多用户+RBAC / K8s / 监控栈 / API+Worker 双进程**；
 > 本项目形态是**本地优先、单进程、多账号、零外部服务依赖**；多账号保留且强化。
@@ -202,7 +202,7 @@ Go 侧没有第四态，但它的机制值得单独理解，因为**它解释了
 | ③ | `PrepareActivitySession`：GET 活动 H5 门户拿 JSESSIONID，门户映射 `yunClound/1073`、`hcyview/1075`、`huiyuanri/1170`、`yunpanpage/2073` | `fun_ai`、`make_wish`、`poster`、`token_pk` |
 | ④ | 只要 mail cookie | `garden` |
 
-**两套 query-string MD5 签名**（与 `legacy/crates/mcloud-core/src/crypto.rs:43` 的 `SIGN_SALT_MAP` 可对照）：
+**两套 query-string MD5 签名**（与 `../mcloud-rust/crates/mcloud-core/src/crypto.rs:43` 的 `SIGN_SALT_MAP` 可对照）：
 caiyun 域用 saltKey `1`/`2` 两把盐 + 头 `x-request-id/x-timestamp/x-nonce/x-signature`；
 cpactiv 域用 `appId=12345681`（应用级白盒常量，非账号凭据）+ 常量盐 + 头 `sign/requestId/appId/token/timestamp`，
 且 **token 未到手前用空 token 签名**。
@@ -244,7 +244,7 @@ cpactiv 域用 `appId=12345681`（应用级白盒常量，非账号凭据）+ �
 
 ## 3. 抢兑子系统（Go 项目真正的重头，也是我们错误模型的对照源）
 
-`legacy/crates/mcloud-core/src/error.rs:1-10` 已经对齐了它的两条约定（错误分类决定重试策略；对外绝不回传 `err.Error()`）。
+`../mcloud-rust/crates/mcloud-core/src/error.rs:1-10` 已经对齐了它的两条约定（错误分类决定重试策略；对外绝不回传 `err.Error()`）。
 本节给出"到底对齐到哪一步"。
 
 ### 3.1 一次下单的 11 步（顺序即护栏，不可乱）
@@ -315,7 +315,7 @@ cpactiv 域用 `appId=12345681`（应用级白盒常量，非账号凭据）+ �
 不重试集合的权威定义在 `:331-342`（5 项）。**分类标签与重试性是两个正交表** ——
 标签另外用于落库统计（`repository/exchange_record_repo.go:127-147`）。
 
-**与 Rust `ErrorKind`（`legacy/crates/mcloud-core/src/error.rs:13-40`）的差集，必须逐条决定**：
+**与 Rust `ErrorKind`（`../mcloud-rust/crates/mcloud-core/src/error.rs:13-40`）的差集，必须逐条决定**：
 
 | Go kind | Rust 现状 | 动作 |
 | --- | --- | --- |
@@ -611,7 +611,7 @@ Vue3 + Element Plus + Pinia，12 个 view。**没有 schema 驱动表单**（因
 | 域名 | `MarketURL`（`caiyun.feixin.10086.cn/market`）、`Market7071URL`（同主机 `:7071`）、`MobileMarketURL`（`m.mcloud.139.com/ycloud`）、`AIYunURL`（`ai.yun.139.com`） | `core/api/caiyun.go:11-14` |
 | 版本 | `MarketClientVersion="12.5.4"`；抢兑里 **下单 13.0.0 / 列表 12.5.3 / UA 12.5.4 / 死代码 12.4.0** | 同上；`services/exchange_executor.go:20-21`、`core/api/get_product.go:20`、`utils/http_client.go:27,33` |
 | 源/渠道码 | `MarketSourceID="1097"`；抢兑 `source/targetSource = 1097/001005`；`activityId="sign_in_3"`；`ChannelSrc="10200153"`；cpactiv `appId=12345681` | `services/exchange_executor.go:22-25`、`core/tasks/tasklist.go`、§2.3 |
-| 签名盐 | saltKey `1`/`2` 两把（应用级白盒常量，非账号凭据） | 我们已有：`legacy/crates/mcloud-core/src/crypto.rs:43` `SIGN_SALT_MAP` |
+| 签名盐 | saltKey `1`/`2` 两把（应用级白盒常量，非账号凭据） | 我们已有：`../mcloud-rust/crates/mcloud-core/src/crypto.rs:43` `SIGN_SALT_MAP` |
 | 阈值 | 熔断 10/30s/半开 5；JWT 失败自动停 3；令牌窗口 2/5/2min；`stale running` 15min；滑块重试 3；AI 抽奖 5；funai 抽奖 5 | §4.3、§4.4、§3 |
 | 魔法数 | 月卡奖品 `1001`；`alreadyDrawn = 50 - surplus`；配额 `20`；`OffsetJitter=±3`；`MaxMultipartSize=8MiB` | `services/exchange_monthly_service.go:119-130`、`core/tasks/wechat.go:121`、`core/tasks/invitefriends.go`、`services/exchange_executor.go:141`、`app/api/config.go:56` |
 

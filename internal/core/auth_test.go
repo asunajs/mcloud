@@ -1,6 +1,6 @@
 // 账号身份解析的黄金向量测试。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-core/src/auth.rs 的 `mod tests`。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/auth.rs 的 `mod tests`。
 // 向量由 scripts/gen-auth-vectors.cjs **直接 import 原版编译产物**产出。
 //
 // ⚠ 取向量那三个 helper 把文件名以**字面量**写进 golden.Load：黄金向量门禁靠

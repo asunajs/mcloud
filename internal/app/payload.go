@@ -1,6 +1,6 @@
 // 能力注册表与版本信息 → **前端要吃的 JSON**。
 //
-// 对应 Rust 侧的 legacy/crates/mcloud-app/src/payload.rs。
+// 对应 Rust 侧的 ../mcloud-rust/crates/mcloud-app/src/payload.rs。
 
 package app
 

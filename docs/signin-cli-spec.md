@@ -4,7 +4,7 @@
 > 读完本文件应当**不需要再回头读 Rust**。
 >
 > 判据来源（每条结论都带 `文件:行`）：
-> - Rust（对位基准，只读）：`legacy/crates/mcloud-cli/src/signin_run.rs`（225 行）、
+> - Rust（对位基准，只读）：`../mcloud-rust/crates/mcloud-cli/src/signin_run.rs`（225 行）、
 >   `signin_one.rs`（558 行）、`signin_output.rs`（481 行）、`args.rs:96-330`
 > - Go（已就位）：`internal/app/{signin,signin_receive,signin_bonus,cloud,smid,device,app_login}.go`、
 >   `internal/upstream/app_signin*.go`、`internal/cli/{args,cli,output,unmigrated,run_user}.go`

@@ -2,13 +2,26 @@
 
 > 状态：**实况**（这里写的是"现在能跑什么、还差什么"，不是计划）
 >
-> ⚠ **2026-09-20：Rust 侧已冻结到 `legacy/`，本仓库正在迁往 Go。**  
-> 下面这张表描述的是**冻结那一刻**的 Rust 实现 —— 它仍然有效、也仍然是对拍基准，  
-> 但"进度"从此按 Go 侧算。迁移方案与顺序见 [`go-migration-plan.md`](./go-migration-plan.md)。  
-> Go 侧进度见下方「Go 侧迁移实况」一节。
+> ⚠ **2026-09-20：Rust 侧已冻结到 `legacy/`；2026-09-21 该目录已整体剥离为同级仓库
+> [`../mcloud-rust/`](../../mcloud-rust/)。**  
+> 下面那张表描述的是**冻结那一刻**的 Rust 实现 —— 它仍然有效、也仍然是对拍基准，  
+> 但代码与产物都不再位于本仓库；"进度"从此按 Go 侧算。迁移方案与顺序见
+> [`go-migration-plan.md`](./go-migration-plan.md)。  
+> Go 侧进度见下方「Go 侧迁移实况」一节。  
+> ⚠ 剥离带来一条**新约束**：`test/golden/` 与 `test/fixtures/legacy/` 从此是
+> 两个仓库各一份**实体副本**（原来 `legacy/test` 是指向本仓库的符号链接），
+> 而**没有任何门禁盯着两边是否一致** —— 改一份向量的 `expect*` 必须两边都落。
+> 动了哪些文件、为什么：[`../mcloud-rust/docs/freeze-record.md`](../../mcloud-rust/docs/freeze-record.md) 的「剥离补记」。
+>
+> ✅ **剥离后两侧各跑过一次全量门禁（2026-09-21，剥离当日）**：Go 侧 `bash scripts/gates-go.sh` →
+> **九项门禁全绿**（927 个测试函数、`-race` 全量）；Rust 侧在同级仓库 `bash scripts/gates.sh` →
+> **七项门禁全绿**、**714 个测试通过**（与冻结记录里那个数字一致，说明搬动没碰行为）。
+> ⚠ Rust 侧**第一次**跑报了 30 条 `读夹具 … No such file` —— 那是搬过来的 `target/` 里
+> 烘着旧绝对路径的产物（`env!` 是编译期常量），`cargo clean -p` 重编后消失。
+> 判据见 [`../mcloud-rust/docs/freeze-record.md`](../../mcloud-rust/docs/freeze-record.md) 的「剥离补记」。
 >
 > - 最后核对：2026-09-19 收工（Rust 侧）；Go 侧 2026-09-20 起
-> - 规划（**写于动工前**，进度不要以它为准）：[`rust-rewrite-plan.md`](./rust-rewrite-plan.md)
+> - 规划（**写于动工前**，进度不要以它为准）：[`rust-rewrite-plan.md`](../../mcloud-rust/docs/rust-rewrite-plan.md)
 > - 实现顺序（先做哪项能力）：同文档 §7.1
 > - 门禁怎么跑：[`dev-gates.md`](./dev-gates.md)
 
@@ -75,7 +88,7 @@
    `SIGN_SALT_MAP` / `WEBUI_PAGES`，Go 侧逐一对到了实现），  
    另 4 个是同一件事 —— **`classify_body` 及其 `Classified` / `FailureClass` / `body_snippet`**。  
    ⇒ **定案：不补进 core。** 依据不是"还没轮到它"，而是**冻结基准里它就没有消费者**：  
-   `grep -rn "classify_body\|Classified" legacy/crates` 除 `mcloud-core` 自身  
+   `grep -rn "classify_body\|Classified" ../mcloud-rust/crates` 除 `mcloud-core` 自身  
    （定义处 + 自己的单测 + `lib.rs` 再导出）外**零命中**。  
    而 Go 侧判据的三块已经各在其位：HTTP 状态归 `core.ClassifyStatus`  
    （`internal/io/client.go` 就在用），信封归 `upstream.Envelope`  
@@ -131,7 +144,7 @@
   ✅ 补记（同日）：`login-crypto-vectors.json` 的消费者已落地，**`§guid32` 的规则也在** ——  
   原文"连拼接规则都没在向量里给出"是看漏了生成器。见 `go-migration-plan.md` §6.1 末尾。
 - ⚠⚠ **别照门禁那行"✓ 有测试读取"判定进度**：它的消费者探测扫**四个落点**  
-  （`crates/` / `legacy/crates/` / `internal/` / `cmd/`），命中任一即算有消费者，  
+  （`crates/` / `../mcloud-rust/crates/` / `internal/` / `cmd/`），命中任一即算有消费者，  
   **不区分是哪一侧在读**。所以 `app-signin-vectors.json` 至今显示 ✓，  
   而读它的**只有已冻结的 Rust 侧**。  
   Go 侧实际读了 **11 份**（= `test/golden/` 的全部）：`crypto` / `pcclient-crypto` /  
@@ -288,7 +301,7 @@
 - ⚠ `core.MarshalJSON` / `core.ParseJSON` 这次**导出**了：产物层要拼对外 payload，  
   而"不转义 HTML + 不补尾换行"这两条规则**必须只有一份实现**（详见方案 §6.1 #22）。
 - ⚠ `core.Version` 是新增常量 —— Go 没有 `env!("CARGO_PKG_VERSION")`，  
-  它得与 `legacy/Cargo.toml` 的 `version` **手工同步**（不同步的表现只是两个产物报的版本号不一样）。
+  它得与 `../mcloud-rust/Cargo.toml` 的 `version` **手工同步**（不同步的表现只是两个产物报的版本号不一样）。
 
 ### 步 4 实况补充：Go 侧 `cli` 落地（2026-09-21，追加，不改上表那一行）
 
@@ -355,11 +368,11 @@
   于是留了一个注入缝 `leakScan`，否则没有任何办法证明它不是死代码。
 - ⚠⚠ **判据账要算对（2026-09-21 更正，这一条之前记错了）**：步 4 那句
   "19 项能力逐项打勾"里，**19 这个数取自旧 TS 项目**（`packages/api/src/tasks/*`
-  的 19 个 `TaskModule`，见 `rust-rewrite-plan.md` §1.2），**不是冻结基准的条目数**。
+  的 19 个 `TaskModule`，见 `../mcloud-rust/docs/rust-rewrite-plan.md` §1.2），**不是冻结基准的条目数**。
   实测两侧注册表：**Rust 3 项、Go 3 项，code 集合逐项相同**
   （`sign` / `exchange` / `cloud-snapshot`；两侧注释都写着"P4 会补齐全部 19 项"）。
   ⇒ **注册表这一项在迁移上已对位**，"还差 16 项"是把**功能开发**记成了迁移缺口。
-  ⚠ 同理 `POST /api/runs`：`legacy/crates/mcloud-server/src/routes/mod.rs` 自己写着
+  ⚠ 同理 `POST /api/runs`：`../mcloud-rust/crates/mcloud-server/src/routes/mod.rs` 自己写着
   "写的那一半要等 P4"，**基准里从未实现** ⇒ 也不是缺口。
   ⇒ 结论：**CLI 与 app 都无关，`capabilities` 也不是** —— 这两个数当初就被误当成了判据。
 - ⭐ **并发做法的结论**：这一块（`signin`，Rust 侧 1,264 行）用**三条线并行**做完 ——
@@ -648,7 +661,7 @@ $ bash scripts/gates-go.sh                                        # 全量
 那是关于 `legacy/` 的**可证伪断言**，没有任何东西核过它。
 若有一句是假的，说明对应的 Go 结构体**缺 tag**（Rust 写 snake_case、Go 写字段名原样），**静默**。
 
-⇒ 写探针逐条回 `legacy/crates` 按名字找声明、读 derive 列表：**23 条全对**；
+⇒ 写探针逐条回 `../mcloud-rust/crates` 按名字找声明、读 derive 列表：**23 条全对**；
 另 9 条在 Rust 侧找不到声明，且**理由本身就写着**"Rust 侧是元组 / 四个独立参数 /
 组装根的依赖集" —— 一致，不是漏。
 
@@ -775,6 +788,17 @@ exec 35 / capabilities 32。
 ⚠ 所以"WebUI 主界面仍是占位数据"的**原因不是缺接口**，而是**跑任务那条路本身还没建**
 （P4/P5 的功能开发）—— 别把它记成迁移没做完。`openapi.json` 导出同理，是新功能。
 
+> 2026-09-21 追加：Go 侧在冻结基准之外**自扩 1 条** —— `GET /api/status`
+> （`internal/server/routes.go` 的 `getStatus`：产品名+版本、`schedulerRunning`、最近一次 run）。
+> 它**不进** `routes_test.go` 那张 15 条对位表 —— 那张表只回答"基准要求有的都在吗"，
+> 把自己扩的混进去会让"移植漏了"与"我们改坏了"两种失效分不开；
+> 它自己的断言在 `internal/server/status_test.go`（含"未登录必须 401"、"版本必须与
+> `/api/version` 同源"、"没 run 时是 null 而不是 `{}`"）。
+> 动机是 WebUI 侧栏底部那一行：原先那里把 `name` 与 `role` 并排显示，
+> 而初始用户这两个字段字面都是 `admin`（详见 [`webui-design-guide.md`](./webui-design-guide.md) §4.5）。
+> ⚠ `schedulerRunning` 当前**恒 false**，与上面运行时层那条"调度接入中"是同一件事 ——
+> 接口宁可显式报 false 也不省略这一项，省略的表现是界面一片绿而绿的意思是"在跑"。
+
 > 更早（2026-09-17）时 `mcloud-server` 只有 lib、没有 `serve` 命令，CLI 能跑而 WebUI  
 > 没有后端可连，前端只能靠 `vite dev` 单独起。这一条已经过去了。
 
@@ -808,8 +832,8 @@ exec 35 / capabilities 32。
 ### ⚠ 夹具回放（L2）仍只有一个消费者
 
 此前本文件写着"`mcloud-upstream` 的 L2 夹具回放已跑通  
-（`legacy/crates/mcloud-upstream/tests/l2_replay.rs`）"—— **那个文件不存在**，  
-`legacy/crates/mcloud-upstream/tests/` 是个**空目录**。
+（`../mcloud-rust/crates/mcloud-upstream/tests/l2_replay.rs`）"—— **那个文件不存在**，  
+`../mcloud-rust/crates/mcloud-upstream/tests/` 是个**空目录**。
 
 现状是：`mcloud fixture extract` 往 `test/fixtures/http/` 写，消费者目前**只有一条**  
 —— `io` 包的 `TestEveryArchivedFixtureIsLeakFree`（把 31 份夹具全量加载跑脱敏自检）。  

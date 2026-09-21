@@ -228,7 +228,7 @@ async function main() {
       $generator: "scripts/gen-auth-vectors.cjs",
       $source: `原版编译产物 ${path.relative(SRC, COMPILED_AUTH)}（经 shim 引用 @asunajs/runtime dist）`,
       $note:
-        "Rust 侧 legacy/crates/mcloud-core/src/auth.rs 必须复现全部 expect*。" +
+        "Rust 侧 ../mcloud-rust/crates/mcloud-core/src/auth.rs 必须复现全部 expect*。" +
         "malformed=true 的用例只要求识别为「不可用」，不要求逐字复刻乱码（原版在编码病态输入下产出乱码 platform，属实现缺陷，不应继承）。",
       parseAuth: parseAuthCases,
       padBase64: padCases,

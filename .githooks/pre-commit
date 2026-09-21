@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # 提交前门禁：秒级、不需要完整编译的五条（Go 侧）。
 #
-# ⚠ 2026-09-20 起 Rust 侧已冻结到 legacy/，hook 只跑 Go 门禁 ——
+# ⚠ 2026-09-20 起 Rust 侧已冻结，hook 只跑 Go 门禁 ——
 #    留着旧 hook 会让每次提交都跑一遍 2 分钟的 cargo，而那边已经不再改动。
-#    要手工跑 Rust 那七条：bash scripts/gates.sh（它会自动加 --manifest-path）。
+#    2026-09-21 Rust 实现整体剥离为同级仓库 `../mcloud-rust/`：
+#    要手工跑那七条，去那边 `bash scripts/gates.sh`（本仓库已无 Cargo workspace）。
 #
 # 详情与"为什么是这五条"见同目录 README.md。
 # 手动安装：bash scripts/install-hooks.sh

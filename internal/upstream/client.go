@@ -1,6 +1,6 @@
 // 端档案（**雏形**）：请求头里"我们是哪个客户端、哪台设备"。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-upstream/src/client.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-upstream/src/client.rs。
 //
 // 完整的多端档案设计见 docs/client-profiles.md；这里先落地 PC 端
 // **登录链路必需**的那部分 —— 等接第二端时再按那份文档长成完整形态。

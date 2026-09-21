@@ -1,6 +1,6 @@
 // App 端（iOS 客户端）验证码登录的**驱动**。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-app/src/app_login.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-app/src/app_login.rs。
 //
 // # 与 PC 那条链路（[QRLogin] / [SmsLogin]）刻意分开，因为**形状**不同
 //

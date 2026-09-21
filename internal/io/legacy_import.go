@@ -14,7 +14,7 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 // 旧项目（mcloud-sign）数据导入：`asign.json` + `packages/api/data/*.json` → SQLite
 //
-// 对应 Rust 侧 legacy/crates/mcloud-io/src/legacy_import/。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-io/src/legacy_import/。
 //
 // # 幂等靠什么成立
 //

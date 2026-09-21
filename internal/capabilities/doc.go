@@ -1,6 +1,6 @@
 // Package capabilities 是能力注册表 —— CLI 与 WebUI 的唯一契约来源。
 //
-// 对应 Rust 侧的 legacy/crates/mcloud-capabilities。
+// 对应 Rust 侧的 ../mcloud-rust/crates/mcloud-capabilities。
 //
 // # 分层铁律
 //

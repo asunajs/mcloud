@@ -23,10 +23,14 @@ if [ ! -d .githooks ]; then
   exit 1
 fi
 
-# pre-commit / pre-push 必须是可执行的。Windows 上 git 会用 sh 跑它们，
-# 位不一定重要；但在 macOS/Linux 上少了 x 位 git 会直接静默跳过 ——
+# 只有 pre-commit / pre-push 是**启用**的 hook，它们必须是可执行的。Windows 上 git
+# 会用 sh 跑它们，位不一定重要；但在 macOS/Linux 上少了 x 位 git 会直接静默跳过 ——
 # 而"静默跳过"正是最难发现的那种失效，所以这里显式补上。
-chmod +x .githooks/pre-commit .githooks/pre-push .githooks/run-gates.sh 2>/dev/null || true
+#
+# （这里原先还 chmod 了 `.githooks/run-gates.sh` —— 那个 Rust 时代的执行器
+#   2026-09-21 已随 Rust 基准移入同级仓库 `../mcloud-rust/.githooks/` 归档，
+#   本仓库不再有它。）
+chmod +x .githooks/pre-commit .githooks/pre-push 2>/dev/null || true
 
 git config core.hooksPath .githooks
 

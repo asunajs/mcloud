@@ -1,4 +1,4 @@
-// 运行生命周期状态机 —— 对应 Rust 侧 legacy/crates/mcloud-core/src/stage.rs。
+// 运行生命周期状态机 —— 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/stage.rs。
 //
 // # 为什么需要一个显式状态机
 //

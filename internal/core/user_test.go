@@ -1,6 +1,6 @@
 // 系统用户与会话的测试。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-core/src/user.rs 的 `#[cfg(test)]` 模块，
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/user.rs 的 `#[cfg(test)]` 模块，
 // **外加**一份黄金向量消费者（见文件后半）—— Rust 侧没有那一半，
 // 因为那份向量的用途恰恰是"跨语言对拍"，在单语言内部没有意义。
 package core

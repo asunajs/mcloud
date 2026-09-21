@@ -2,21 +2,27 @@
 
 > 状态：**规范**（加文件前必读；命名由 `bash scripts/check-filenames.sh` 强制执行）
 >
-> - 相关：[`dev-gates.md`](./dev-gates.md)（门禁总表；本文的规则 = Rust 侧第 5 条 / Go 侧第 6 条）
+> - 相关：[`dev-gates.md`](./dev-gates.md)（门禁总表；本文的规则 = Go 侧第 6 条；
+>   Rust 剥离后该条在其门禁体系里编号 5，脚本两边共用）
 
 ---
 
 ## 目录结构
 
 ```
-crates/         8 个 crate（分层见 dev-gates.md）
+cmd/            Go 产物入口（mcloud / mcloud-server）
+internal/       Go 实现八层（分层见 dev-gates.md 与 go-migration-plan.md §5）
+web/            WebUI：Vue Vapor（无虚拟 DOM）+ TSX + daisyUI
+docs/           文档（本目录）
+data/           运行时数据与凭据（**绝不入库**，见 credential-boundary.md）
 scripts/        门禁与夹具生成器
   gen-*.cjs       —— 夹具一律从真实产物生成，不手写期望值
-  check-*.cjs     —— 门禁（分层 / 标识 / 黄金向量）
-  check-*.sh      —— 门禁（分层 bash 版 / 文件名）
+  check-*.cjs     —— 门禁（标识 / 黄金向量 / json tag）
+  check-*.sh      —— 门禁（Go 分层 / 文件名）
+  gates-go.sh     —— Go 侧九条一键入口
   applog-capture.py / reqable-capture.py —— 抓包侧工具
   h5-device-id.py —— **取证用**：从 WebView 的 localStorage 里读官方 App 实发的
-                     `deviceId`（只读）。日常**不需要它** —— 那个值 Rust 自己就能算
+                     `deviceId`（只读）。日常**不需要它** —— 那个值本项目自己就能算
                      （`mcloud smid refresh`）。留着是为了"拿真值对拍"。
                      带 `--self-test`（合成库往返 + 形状正反例 + 归属排序），改动后跑一遍
 test/
@@ -25,10 +31,15 @@ test/
     http/         `mcloud fixture extract` 现抽的 HTTP 夹具 —— **本机测试数据，不入库**
                   （来源 HAR 含登录凭据，且每人抓到的流量不同；干净与否由 L2 用例的
                   `audit_leaks` 兜底，而不是靠提交前人眼审）
-  golden/       与 TS 原实现对拍的黄金向量（进版本库）
-web/            WebUI：Vue Vapor（无虚拟 DOM）+ TSX + daisyUI
+  golden/       与 TS 原实现对拍的黄金向量（进版本库；同级仓库 mcloud-rust
+                另存一份副本，两侧守卫脚本**互为交叉验证**）
+har/            原始抓包（含凭据，**不入库**）
 proto/          （规划中）
 ```
+
+> **Rust 实现（8 crate workspace、`gen-*.rs` 向量生成器、`gates.sh` 等）已于
+> 2026-09-21 剥离到同级仓库 [`../mcloud-rust/`](../../mcloud-rust/)。**
+> 本仓库不再有 `.rs` 源文件与 `Cargo.toml`。
 
 ---
 
@@ -36,12 +47,14 @@ proto/          （规划中）
 
 | 范围 | 规则 | 例 |
 | --- | --- | --- |
-| 非 Rust 文件（文档 / 前端 / 脚本 / 夹具 / JSON） | **kebab-case**：全小写、`-` 分隔，不用空格与下划线 | `rust-rewrite-plan.md`、`app.tsx`、`gen-auth-vectors.cjs` |
-| Rust 源文件 | **snake_case** | `test_support.rs`、`reqwest_client.rs` |
-| 生态固定名 | 不改 | `README.md`、`LICENSE`、`Cargo.toml`、`THIRD-PARTY-NOTICES.md` |
+| 非 Go 文件（文档 / 前端 / 脚本 / 夹具 / JSON） | **kebab-case**：全小写、`-` 分隔，不用空格与下划线 | `dev-gates.md`、`app.tsx`、`gen-auth-vectors.cjs` |
+| Go 源文件 | **snake_case**，且 `_test.go` / `_GOOS.go` / `_GOARCH.go` 后缀有工具链语义 | `golden_vectors_test.go`、`store_config.go` |
+| 生态固定名 | 不改 | `README.md`、`LICENSE`、`package.json`、`THIRD-PARTY-NOTICES.md` |
 
-Rust 那条不是风格偏好而是**语言强制**：文件名就是模块名，而 `mod` 只接受标识符，
-`mod my-mod;` 不合法。
+Go 那条不是风格偏好而是**工具链强制**：`go test` 只认 `_test.go` 后缀，
+构建约束按字面匹配 `_linux.go` / `_amd64.go`，改名即失效。
+（Rust 的同款约束 —— 文件名就是模块名 —— 见 `../mcloud-rust/docs/dev-gates.md`「第 5 条」，
+那边的 `check-filenames.sh` 副本管着它。）
 
 夹具名由 `mcloud fixture extract` 的 `slugify` 统一
 （HAR 名实测带中文 / 空格 / 下划线 / 大写；中文保留，其余折成 `-`）。
@@ -70,7 +83,8 @@ import { AuthPage } from './pages/auth-page'   // 路径 kebab，标识符 Pasca
 只有下一个人加文件时"照着旁边那个写"，错误便自我复制。
 
 ⇒ 现在由 `bash scripts/check-filenames.sh` 强制执行 —— 它是**两套门禁共用**的一条
-（Rust 侧第 5 条 / Go 侧第 6 条），所以别记成"第几条"，记成"文件名那条"。
+（Go 侧第 6 条；Rust 剥离后其第 5 条归 `../mcloud-rust`，脚本各仓一份），
+所以别记成"第几条"，记成"文件名那条"。
 
 ### 判据
 
@@ -90,7 +104,7 @@ import { AuthPage } from './pages/auth-page'   // 路径 kebab，标识符 Pasca
 2. **上游原样取出的证据** —— 改名会破坏"文件里能搜到的符号 ↔ 文件名"的对应，
    而这份素材的价值恰恰在于可逐字对照：
    `docs/capture/apiServer.js`、`docs/capture/pcclient-api.js`、
-   `test/fixtures/legacy/$meta.json`（被 `include_str!` 按字面引用，
+   `test/fixtures/legacy/$meta.json`（被 `../mcloud-rust` 的 `include_str!` 按字面引用，
    也由 `scripts/gen-legacy-fixtures.cjs` 按名生成）。
 3. **生成物 / 依赖目录** —— `node_modules/` / `target/` / `dist/`。
 

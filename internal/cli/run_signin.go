@@ -3,7 +3,7 @@ package cli
 // `mcloud signin` 的**编排层**：选账号 → 解析设备形态 → 按互斥组走一条子功能 →
 // 把结果交给渲染层 → 定退出码。
 //
-// 对位 Rust 侧 legacy/crates/mcloud-cli/src/signin_run.rs（多账号）与
+// 对位 Rust 侧 ../mcloud-rust/crates/mcloud-cli/src/signin_run.rs（多账号）与
 // signin_one.rs（单账号）。渲染归 `signin_render.go`（另一条线），
 // 协议与业务判定在 `internal/app` / `internal/upstream`。
 //

@@ -1,6 +1,6 @@
 // 能力声明与注册表。
 //
-// 对应 Rust 侧的 legacy/crates/mcloud-capabilities/src/lib.rs。
+// 对应 Rust 侧的 ../mcloud-rust/crates/mcloud-capabilities/src/lib.rs。
 
 package capabilities
 

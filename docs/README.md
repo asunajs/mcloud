@@ -6,7 +6,7 @@
 | --- | --- |
 | 看项目全貌 / 为什么重写 | [`../README.md`](../README.md)（只做导航，短） |
 | 敲命令 / 查参数 | [`cli-usage.md`](./cli-usage.md) —— CLI 操作手册 |
-| 改代码 / 跑门禁 / 搞清分层 | [`dev-gates.md`](./dev-gates.md) —— 门禁（Rust 七条 / Go 九条）+ 分层铁律 |
+| 改代码 / 跑门禁 / 搞清分层 | [`dev-gates.md`](./dev-gates.md) —— Go 侧九条门禁 + 分层铁律（Rust 侧七条已随代码移入 `../mcloud-rust/docs/dev-gates.md`） |
 | 加文件 / 起新目录 / 查命名 | [`repo-layout.md`](./repo-layout.md) —— 目录结构 + kebab-case 规则 |
 | 看**现在能跑什么、还差什么** | [`status.md`](./status.md) —— 实现进度与逐项须知 |
 | 实现某个**业务能力**（签到、领取、抢兑…） | [`business-feature-inventory.md`](./business-feature-inventory.md) —— 旧项目 19 项逐条拆到"照着能写代码" |
@@ -24,13 +24,17 @@
 
 ### 规划与盘点
 
+> **已随 Rust 代码剥离（2026-09-21）**：下表标注 ↗ 的文档移入同级仓库
+> [`../mcloud-rust/docs/`](../../mcloud-rust/docs/)；`go-migration-plan.md` 留本仓库（权威），
+> 那边存了只读副本。
+
 | 文档 | 一句话 | 状态 |
 | --- | --- | --- |
-| [`rust-rewrite-plan.md`](./rust-rewrite-plan.md) | 动工前的规划快照（技术选型、分层、19 项能力风险序、实现顺序 §7.1） | **提案**（写于动工前，进度以 README 为准） |
 | [`business-feature-inventory.md`](./business-feature-inventory.md) | 旧 TS 项目 19 项能力逐条拆解 + 运行时层缺口 + 硬编码清单 | 编排中 |
 | [`caiyun-go-feature-inventory.md`](./caiyun-go-feature-inventory.md) | Go 参考项目对照（24 条任务、抢兑子系统、搬/不搬总表） | 编排中 |
 | [`go-migration-plan.md`](./go-migration-plan.md) | **Rust → Go 的执行方案**：冻结策略、目录与包映射、九条门禁、逐 crate 要点、顺序与每步退出判据 —— **与任何文档冲突时以它为准** | **执行中**（Rust 侧已冻结） |
-| [`rust-to-golang-migration.md`](./rust-to-golang-migration.md) | 上面那篇的**评估篇**：规模/依赖对照/四条结构性难点/工作量与是否值得（数字为 2026-09-20 实测，会过期） | 评估（**已决策**） |
+| [`rust-rewrite-plan.md`](../../mcloud-rust/docs/rust-rewrite-plan.md) ↗ | 动工前的规划快照（技术选型、分层、19 项能力风险序、实现顺序 §7.1） | **提案**（写于动工前，进度以 README 为准） |
+| [`rust-to-golang-migration.md`](../../mcloud-rust/docs/rust-to-golang-migration.md) ↗ | 下面那篇的**评估篇**：规模/依赖对照/四条结构性难点/工作量与是否值得（数字为 2026-09-20 实测，会过期） | 评估（**已决策**） |
 
 ### 登录协议（按端分文件，互为姊妹篇）
 
@@ -62,7 +66,7 @@
 
 | 文档 | 一句话 | 状态 |
 | --- | --- | --- |
-| [`dev-gates.md`](./dev-gates.md) | 门禁（Rust 七条 / Go 九条）+ 分层铁律（依赖方向的可执行断言） | **规范**（改代码前必读） |
+| [`dev-gates.md`](./dev-gates.md) | Go 侧九条门禁 + 分层铁律（依赖方向的可执行断言）；Rust 七条在 `../mcloud-rust/docs/dev-gates.md` | **规范**（改代码前必读） |
 | [`repo-layout.md`](./repo-layout.md) | 目录结构 + 文件命名（kebab-case 及三类豁免） | **规范**（加文件前必读） |
 | [`status.md`](./status.md) | 实现进度与现状须知：现在能跑什么、还差什么 | **实况**（最后核对 2026-09-19） |
 | [`cli-usage.md`](./cli-usage.md) | CLI 操作手册：子命令、签到七个要点、退出码、迁移 | **规范** |
@@ -101,12 +105,12 @@
 | **门禁条数与怎么跑** | [`dev-gates.md`](./dev-gates.md) |
 | **文件放哪 / 叫什么名** | [`repo-layout.md`](./repo-layout.md) |
 | **CLI 参数与语义** | [`cli-usage.md`](./cli-usage.md) |
-| **实现顺序**（先做哪项能力） | [`rust-rewrite-plan.md`](./rust-rewrite-plan.md) §7.1 |
+| **实现顺序**（先做哪项能力） | [`rust-rewrite-plan.md`](../../mcloud-rust/docs/rust-rewrite-plan.md) §7.1（历史快照）→ 现行顺序以 [`go-migration-plan.md`](./go-migration-plan.md) 为准 |
 | **单项能力的实现规格** | [`business-feature-inventory.md`](./business-feature-inventory.md) |
 | **上游协议细节**（字段、状态机、错误码） | 对应的 `upstream-*.md` |
 | **跨端头 / 设备串** | [`client-profiles.md`](./client-profiles.md) |
 | **哪些值能进版本库** | [`credential-boundary.md`](./credential-boundary.md)（界线）+ [`sanitize-guide.md`](./sanitize-guide.md)（做法） |
-| **前端长什么样 / 怎么写** | [`webui-design-guide.md`](./webui-design-guide.md)（技术选型仍以 [`rust-rewrite-plan.md`](./rust-rewrite-plan.md) §2.2 为准） |
+| **前端长什么样 / 怎么写** | [`webui-design-guide.md`](./webui-design-guide.md)（技术选型仍以 [`rust-rewrite-plan.md`](../../mcloud-rust/docs/rust-rewrite-plan.md) §2.2 为准） |
 
 ---
 
@@ -123,7 +127,7 @@
 > - 采集环境：<OS / 客户端版本>
 > - 采集方式：<抓包工具 / CDP / 反汇编 / 活体探针>
 > - 配套文档：`docs/xxx.md`（同族互链）
-> - 依据 `docs/rust-rewrite-plan.md` §7.0：**本文件全部来自实测，未落笔任何猜测性接口**。
+> - 依据 `../mcloud-rust/docs/rust-rewrite-plan.md` §7.0：**本文件全部来自实测，未落笔任何猜测性接口**。
 ```
 
 两条硬要求：

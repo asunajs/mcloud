@@ -1,5 +1,5 @@
 // 账号身份解析 —— 与 TS 原版逐字对齐。
-// 对应 Rust 侧 legacy/crates/mcloud-core/src/auth.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/auth.rs。
 //
 // # 为什么这层必须精确到"怪癖"
 //

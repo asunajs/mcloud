@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// 本文件对应 Rust 侧 legacy/crates/mcloud-core/src/stage.rs 的 12 条测试，
+// 本文件对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/stage.rs 的 12 条测试，
 // 外加 Go 侧新长出来的（`errors.As` 那一条、阶段真值表）。
 //
 // ⚠ `RunStage` 的**整串**形状由 serde 产出、在 enum_test.go 里对拍

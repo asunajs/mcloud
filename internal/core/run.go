@@ -1,5 +1,5 @@
 // 运行语义：`RunID`、运行结果四态、"需人工"的结构化出口，以及运行事件流。
-// 对应 Rust 侧 legacy/crates/mcloud-core/src/run.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/run.rs。
 //
 // # 为什么单独成模块
 //

@@ -1,6 +1,6 @@
 // 移动云盘登录：扫码与短信两条链路的**状态机**。
 //
-// 对应 Rust 侧的 legacy/crates/mcloud-capabilities/src/login.rs。
+// 对应 Rust 侧的 ../mcloud-rust/crates/mcloud-capabilities/src/login.rs。
 //
 // # 为什么状态机在这里，而不是在 upstream::login
 //

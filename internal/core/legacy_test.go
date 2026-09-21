@@ -1,6 +1,6 @@
 package core
 
-// 本文件对应 Rust 侧 legacy/crates/mcloud-core/src/legacy/tests/ 的 17 条测试，
+// 本文件对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/legacy/tests/ 的 17 条测试，
 // 外加 Go 侧新长出来的两批：
 //   - 第九份黄金向量 `legacy-shape-vectors.json` 的消费者（形状比对）；
 //   - `internal/golden.LoadFixture` 读真实夹具的键名认领断言。

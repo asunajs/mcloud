@@ -12,7 +12,7 @@ import (
 	"github.com/catlair/mcloud/internal/upstream"
 )
 
-// 本文件对应 Rust 侧 legacy/crates/mcloud-app/src/login.rs 的 `mod tests`。
+// 本文件对应 Rust 侧 ../mcloud-rust/crates/mcloud-app/src/login.rs 的 `mod tests`。
 //
 // 测试用的号码一律是 **199 开头的合成号**（脱敏号段），不含任何真实标识。
 

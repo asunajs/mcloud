@@ -1,6 +1,6 @@
 package core
 
-// 跨测试文件共享的**断言** —— 对应 Rust 侧 legacy/crates/mcloud-core/src/test_support.rs。
+// 跨测试文件共享的**断言** —— 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/test_support.rs。
 //
 // 这里放的不是测试数据，而是"逻辑微妙、抄一份就会跑偏"的东西。
 // 典型例子就是下面的标识扫描：它的边界判定有讲究（见函数注释），

@@ -12,7 +12,7 @@ import (
 
 // `mcloud signin` 的**渲染层**：一个账号这一趟的结果 → 人看的几行，或 `--json` 的那个对象。
 //
-// 对位 Rust 侧 legacy/crates/mcloud-cli/src/signin_output.rs，以及 signin_run.rs /
+// 对位 Rust 侧 ../mcloud-rust/crates/mcloud-cli/src/signin_output.rs，以及 signin_run.rs /
 // signin_one.rs 里与输出有关的那几段。
 //
 // # 这一层只有数据进出

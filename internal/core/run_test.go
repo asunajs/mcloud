@@ -1,6 +1,6 @@
 // 运行语义的测试。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-core/src/run.rs 的 `#[cfg(test)]` 模块，
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/run.rs 的 `#[cfg(test)]` 模块，
 // **外加**四张枚举真值表（见文件末尾）—— Go 没有 Rust 的 `match` 穷尽性检查，
 // "新增一个态、某个 switch 没处理"不再有编译错误，那道保证由表来兜。
 package core

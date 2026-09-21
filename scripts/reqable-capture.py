@@ -58,7 +58,7 @@
     scripts/reqable-capture.py har har/2026-09-18-签到.har --host 139.com
 
     # 转夹具（下一步，见 README 的门禁与夹具章节）
-    cargo run -p mcloud-cli -- fixture extract --har har/xxx.har --out test/fixtures/http
+    go run ./cmd/mcloud fixture extract --har har/xxx.har --out test/fixtures/http
 """
 
 from __future__ import annotations

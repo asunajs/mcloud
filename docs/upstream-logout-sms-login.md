@@ -10,7 +10,7 @@
 >   [`upstream-app-sms-login.md`](./upstream-app-sms-login.md)（iOS App 短信）、
 >   [`upstream-app-business-api.md`](./upstream-app-business-api.md)（iOS App 业务接口）。
 >   全库索引见 [`docs/README.md`](./README.md)。
-> - 依据 `docs/rust-rewrite-plan.md` §7.0：本文件全部来自实测，无猜测性内容
+> - 依据 `../mcloud-rust/docs/rust-rewrite-plan.md` §7.0：本文件全部来自实测，无猜测性内容
 
 ---
 

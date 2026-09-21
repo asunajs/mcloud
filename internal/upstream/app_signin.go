@@ -1,6 +1,6 @@
 // 移动云盘 **App 端签到（云朵中心）** —— H5 链路的上游接口层。
 //
-// 对应 Rust 侧的 legacy/crates/mcloud-upstream/src/app_signin/。
+// 对应 Rust 侧的 ../mcloud-rust/crates/mcloud-upstream/src/app_signin/。
 //
 // # 为什么这一层看起来"不像一个 App 接口"
 //

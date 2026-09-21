@@ -1,6 +1,6 @@
 // 移动云盘 **App 端（手机客户端）验证码登录**。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-upstream/src/app_login.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-upstream/src/app_login.rs。
 //
 // # 规格来源
 //

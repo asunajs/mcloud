@@ -1,6 +1,6 @@
 // App 端（手机客户端）档案：iOS App 的请求头与设备串。
 //
-// 对应 Rust 侧的 legacy/crates/mcloud-upstream/src/app_client.rs。
+// 对应 Rust 侧的 ../mcloud-rust/crates/mcloud-upstream/src/app_client.rs。
 //
 // # 与 PC 端的差别不是"多几个头"，而是**另一套设备串语法**
 //

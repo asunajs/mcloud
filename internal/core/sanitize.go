@@ -1,5 +1,5 @@
 // HAR → fixture 的脱敏规则。**纯函数**，因此脱敏逻辑本身可以单测。
-// 对应 Rust 侧 legacy/crates/mcloud-core/src/sanitize.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/sanitize.rs。
 //
 // # 为什么必须脱敏
 //

@@ -1,6 +1,6 @@
 // 登录的**驱动**：把能力层的状态机接到真实的等待与渲染上。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-app/src/login.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-app/src/login.rs。
 //
 // # 为什么等待被做成注入项（[Waiter]），而不是直接 `time.Sleep`
 //

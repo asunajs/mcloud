@@ -1,6 +1,6 @@
 // Package server 是产物之一：HTTP 接口 + WebUI 静态资源。
 //
-// 对应 Rust 侧的 legacy/crates/mcloud-server（axum + tower-http）。
+// 对应 Rust 侧的 ../mcloud-rust/crates/mcloud-server（axum + tower-http）。
 //
 // # 分层铁律
 //

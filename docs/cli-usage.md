@@ -2,7 +2,9 @@
 
 > 状态：**规范**（命令行操作手册；实现进度见 [`status.md`](./status.md)）
 >
-> - 入口：`cargo run -p mcloud-cli -- help`
+> - 入口：`go run ./cmd/mcloud -- help`（或 `go build ./cmd/mcloud` 后的 `./mcloud help`）
+> - （2026-09-21 前本文写的是 Rust CLI 的 `cargo run -p mcloud-cli`；Rust 版命令在
+>   同级仓库 `../mcloud-rust/` 下照原文可用。）
 > - 相关：[`credential-boundary.md`](./credential-boundary.md)（哪些值不能进版本库）
 
 ---
@@ -10,9 +12,9 @@
 ## 最常用的一条：什么都不带
 
 ```bash
-cargo run -p mcloud-cli                      # = mcloud signin，对**全部启用**的账号各签一次
-cargo run -p mcloud-cli -- --list            # 先看下标：1、2、3…
-cargo run -p mcloud-cli -- --account 2       # 只跑下标 2 那个
+go run ./cmd/mcloud                          # = mcloud signin，对**全部启用**的账号各签一次
+go run ./cmd/mcloud -- --list                # 先看下标：1、2、3…
+go run ./cmd/mcloud -- --account 2           # 只跑下标 2 那个
 ```
 
 **顶层与 `mcloud signin` 收同一套参数**，所以上面两条也可以写成
@@ -104,7 +106,7 @@ cargo run -p mcloud-cli -- --account 2       # 只跑下标 2 那个
 而真实原因是**参数问题** —— 重试一万次也没用。
 
 ⚠ 这个 `deviceId` **就是 `smid` 那条线换回来的 `"B"+detail.deviceId`** ——
-**纯 Rust 就能拿到，不需要浏览器、也不需要装官方 App**。
+**本工具自己就能算（`mcloud smid refresh`），不需要浏览器、也不需要装官方 App**。
 
 曾经记成"它是另一个东西、构造不出来（密钥未知）"，那是把两件事看混了。真相：
 
@@ -215,7 +217,7 @@ mcloud signin --account 2 --receive --cloud-type 2
 两种范围共用同一句，所以"某条查询漏了归属条件"在结构上不可能发生。
 
 **WebUI 那侧确实要**：`POST /api/session` 登录、每个请求带 cookie 解析出 `UserId`，
-再据此取 `Scope::User(谁)`。两条硬规则（见 [`rust-rewrite-plan.md`](./rust-rewrite-plan.md) §3.7）：
+再据此取 `Scope::User(谁)`。两条硬规则（见 [`rust-rewrite-plan.md`](../../mcloud-rust/docs/rust-rewrite-plan.md) §3.7）：
 
 - **没初始化就只暴露初始化**：库里没有用户时，除 `/api/setup` 与健康检查外一律 `503`；
 - **其余接口一律要会话**，且**白名单**判定豁免（新加的路由默认是"需要登录"）。
@@ -229,7 +231,7 @@ CLI 新建的云盘账号会归**库里首个用户**（没有用户则保持无
 ## 旧数据迁移
 
 ```bash
-cargo run -p mcloud-cli -- migrate --repo-root <旧项目路径> --dry-run
+go run ./cmd/mcloud -- migrate --repo-root <旧项目路径> --dry-run
 ```
 
 `--dry-run` 是"在内存库上跑**完全相同**的路径再丢掉库"，不是另写一套只检查不写入的代码
@@ -252,7 +254,7 @@ cargo run -p mcloud-cli -- migrate --repo-root <旧项目路径> --dry-run
 
 ```bash
 cd web && npm install && npm run build      # 前端产物到 web/dist
-cd .. && cargo run -p mcloud-server         # API + 前端，默认 http://127.0.0.1:8787
+go run ./cmd/mcloud-server                   # API + 前端，默认 http://127.0.0.1:8787
 ```
 
 首次打开是**初始化页**（建首个管理员）；之后就一直是登录页。

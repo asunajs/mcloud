@@ -1,6 +1,6 @@
 // Package upstream 是协议层：上游接口的请求构造、响应解析与签名。
 //
-// 对应 Rust 侧的 legacy/crates/mcloud-upstream。
+// 对应 Rust 侧的 ../mcloud-rust/crates/mcloud-upstream。
 //
 // # 分层铁律
 //

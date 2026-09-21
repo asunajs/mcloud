@@ -1,5 +1,5 @@
 // cron 表达式：解析 + 「下次什么时候触发」。
-// 对应 Rust 侧 legacy/crates/mcloud-core/src/cron.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/cron.rs。
 //
 // # 为什么自己写，而不是引一个库
 //

@@ -1,6 +1,6 @@
 // 旧项目（mcloud-sign）数据文档的读取与迁移映射 —— **纯逻辑，无 IO**。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-core/src/legacy.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/legacy.rs。
 //
 // # 为什么单独一层
 //

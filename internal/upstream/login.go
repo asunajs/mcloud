@@ -1,6 +1,6 @@
 // 移动云盘 PC 客户端登录协议（扫码 / 短信 / 账密 / 退出登录）。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-upstream/src/login.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-upstream/src/login.rs。
 //
 // # 规格来源
 //

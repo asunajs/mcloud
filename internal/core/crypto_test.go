@@ -1,6 +1,6 @@
 // 密码学原语的黄金向量测试。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-core/src/crypto/tests/（9 个文件）。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/crypto/tests/（9 个文件）。
 // 向量本身不复制到 testdata/ —— 经 internal/golden 读仓库根那一份，
 // 保持"单一真相"（理由见 internal/golden/golden.go）。
 package core

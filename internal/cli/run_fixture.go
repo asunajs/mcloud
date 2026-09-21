@@ -13,7 +13,7 @@ import (
 
 // `fixture extract` —— HAR → 脱敏 fixture 的抽取器。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-cli/src/fixture_extract.rs（769 行）。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-cli/src/fixture_extract.rs（769 行）。
 //
 // # 为什么在**生成侧**脱敏
 //

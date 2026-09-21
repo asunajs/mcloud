@@ -10,7 +10,7 @@
 > 每端的版本号、UA、认证方式都不一样。
 >
 > 本文钉住三件事：**差异在哪、证据在哪、哪些还不知道**。
-> 依据 `docs/rust-rewrite-plan.md` §7.0 的硬约束：**不写任何猜测性的头值或常量** ——
+> 依据 `../mcloud-rust/docs/rust-rewrite-plan.md` §7.0 的硬约束：**不写任何猜测性的头值或常量** ——
 > 所以下面凡是"已实测"的行，都能追到一份真实流量；凡是推断的，都显式标了"未确认"。
 
 ---
@@ -213,7 +213,7 @@ timeStamp(ms) = x-yun-user-timestamp(μs) / 1000 + 28_800_000
 
 #### 3.3.2 `x-yun-uni` 就是 `userDomainId`（**补上了计划里那个"落空"的缺口**）
 
-`docs/rust-rewrite-plan.md` §7.2 记着一个缺口：*"`user_domain_id` 落空 ——
+`../mcloud-rust/docs/rust-rewrite-plan.md` §7.2 记着一个缺口：*"`user_domain_id` 落空 ——
 真实登录响应的 `userInfo` 里没有 `userId`，需要用它的接口得另找来源"*。
 App 日志给出了答案，**三个名字是同一个值**（下面用合成值 `1990000000000000001`
 示意形状，真值不落仓库）：
@@ -437,7 +437,7 @@ x-yun-client-info (16 段)  = 上面那串 + "aVBhZA==|0|;"
 **③ 上面两段讲的是设备串（`deviceInfo`）里的字段。还有第三种指纹**，
 与它**完全不同源、不同形状、不同生命周期**：cMPassport 风控侧的 `smid`。
 
-（2026-09-19 追加，实现见 `legacy/crates/mcloud-upstream/src/smid.rs` 与 `legacy/crates/mcloud-app/src/smid.rs`。）
+（2026-09-19 追加，实现见 `../mcloud-rust/crates/mcloud-upstream/src/smid.rs` 与 `../mcloud-rust/crates/mcloud-app/src/smid.rs`。）
 
 它产出两样东西，**绑账号的是前者、会变的后者**：
 
@@ -602,7 +602,7 @@ scripts/applog-capture.py snapshot /tmp/fxlog   # 抢一份出来，防滚动
 scripts/applog-capture.py summary               # 接口分布（默认剔掉那两个轮询）
 scripts/applog-capture.py dump 领云朵            # 完整请求 + 响应（凭据头默认打码）
 scripts/applog-capture.py har har/x.har --path /user/
-cargo run -p mcloud-cli -- fixture extract --har har/x.har --out test/fixtures/http
+go run ./cmd/mcloud fixture extract --har har/x.har --out test/fixtures/http
 ```
 
 **日志比代理抓包更强**：它有 `*************Request Start***************` 块，

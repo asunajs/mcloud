@@ -1,5 +1,5 @@
 // 纯密码学原语 —— 与 TS 原版实现**逐字节**对齐。
-// 对应 Rust 侧 legacy/crates/mcloud-core/src/crypto.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/crypto.rs。
 //
 // # 为什么在 core 而不是 io 层
 //

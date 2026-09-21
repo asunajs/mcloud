@@ -29,7 +29,7 @@ const SchemaVersion int64 = 8
 // 每个元素必须是幂等 SQL（用 IF NOT EXISTS），
 // 这样重复执行不会炸，也让"重跑迁移"成为安全操作。
 //
-// ⚠ 这段 SQL 与 Rust 侧 legacy/crates/mcloud-io/src/store/schema.rs 的
+// ⚠ 这段 SQL 与 Rust 侧 ../mcloud-rust/crates/mcloud-io/src/store/schema.rs 的
 // ALL_MIGRATIONS **逐字对应**（只把注释里的反引号去掉了 —— Go 的原始字符串
 // 用反引号定界，注释里再出现反引号会把字面量截断）。改这里必须同时改那边，
 // 否则两套实现的库文件会在某个版本上分叉，而 user_version 看不出来。

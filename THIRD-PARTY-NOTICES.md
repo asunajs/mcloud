@@ -57,7 +57,11 @@ SOFTWARE.
 
 ---
 
-## 关于 Rust 依赖
+## 关于依赖的许可
 
-`Cargo.lock` 里各依赖的许可随其 crate 自身分发，不在此重复列举。
-如需汇总，可用 `cargo deny` 或 `cargo about` 生成。
+本仓库（Go 实现）的依赖清单在 `go.mod` / `go.sum` 与 `web/package-lock.json` 里，
+各依赖的许可随其自身分发，不在此重复列举。
+
+> Rust 那一版（`Cargo.lock` + `cargo deny` / `cargo about` 的汇总办法）已随
+> Rust 实现移入同级仓库
+> [`../mcloud-rust/THIRD-PARTY-NOTICES.md`](../mcloud-rust/THIRD-PARTY-NOTICES.md)。

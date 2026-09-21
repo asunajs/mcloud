@@ -1,6 +1,6 @@
 // IO trait —— 全部外部世界从这里进入。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-core/src/traits.rs（681 行）。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/traits.rs（681 行）。
 //
 // 具体实现在 `internal/io`（ReqwestClient / SqliteStore / SystemClock），
 // 测试与调试台用 fixture client / 内存 store / [FixedClock] 替换。

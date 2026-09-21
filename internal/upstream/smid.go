@@ -1,6 +1,6 @@
 // smid 设备指纹 —— 请求头 `deviceid` 是怎么来的。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-upstream/src/smid.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-upstream/src/smid.rs。
 //
 // # 它不是"我们本地算出来的一个串"
 //

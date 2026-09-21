@@ -10,7 +10,7 @@
 >
 > | 已拍板 | |
 > | --- | --- |
-> | Rust 侧 | **冻结到 [`legacy/`](./legacy/README.md)** —— 只读，留作对拍基准 |
+> | Rust 侧 | **已移出本仓库**（2026-09-21）—— 冻结基准在**仓库外**的 `../mcloud-rust/`，只读、留作对拍基准 |
 > | 范围 | **全部 8 个 crate** |
 > | 节奏 | 先落骨架与门禁，业务分批迁 |
 >
@@ -26,12 +26,12 @@
 >   服务端 15 条路由也逐条对位（有断言盯着，见 `internal/server/routes_test.go`）。
 >   ⚠ 常被误记成"还差 16 项能力"与"`POST /api/runs` 未落" —— **那两项冻结基准里也没有**：
 >   19 项来自**旧 TS 项目**的 `packages/api/src/tasks/*`，而 `POST /api/runs` 在
->   `legacy/crates/mcloud-server/src/routes/mod.rs` 里自己写着"要等 P4"。
+>   `../mcloud-rust/crates/mcloud-server/src/routes/mod.rs`（同级仓库） 里自己写着"要等 P4"。
 >   它们属**功能开发**（P4/P5），**不是迁移缺口**。
 >   进度与判据：[`docs/status.md`](./docs/status.md)。
-> - ⚠ **下面所有 Rust 说明在当前阶段仍然有效** —— 冻结执行前 `cargo` 那套照常能用；
->   冻结之后改用 `cargo <cmd> --manifest-path legacy/Cargo.toml`（**不要 `cd legacy`**，
->   理由见 `legacy/README.md`）。
+> - ⚠ **下面关于 Rust 的说明都成了历史背景**：Rust 基准 2026-09-21 已整体剥离到
+>   仓库外的 `../mcloud-rust/`（那边自带七条门禁与自己的 README）。本仓库现在
+>   **只留 Go 实现** —— 在这里跑 `cargo` 已经没有 workspace 可指。
 
 **这个 README 只做导航。** 详细内容按"你要做什么"分派到 `docs/`，
 不要在这里继续堆 —— 它以前有 459 行，每一节都在说"另有一篇更权威的文档"。
@@ -56,31 +56,29 @@
 ## 快速开始
 
 ```bash
-cargo run -p mcloud-cli                        # 对全部启用账号各签一次（等价于 mcloud signin）
-cargo run -p mcloud-cli -- --list              # 先看下标 1、2、3…
-
-cd web && npm install && npm run build && cd ..   # 前端产物到 web/dist
-cargo run -p mcloud-server                        # API + 前端，默认 http://127.0.0.1:8787
-
-# ── Go 侧（迁移后主线）──────────────────────────────────────────────
 go run ./cmd/mcloud                            # 对全部启用账号各签一次（等价于 mcloud signin）
 go run ./cmd/mcloud --list                     # 先看下标 1、2、3…
+
+cd web && npm install && npm run build && cd ..   # 前端产物到 web/dist
 go run ./cmd/mcloud-server                     # API + 前端产物（含 SPA 回退），默认 127.0.0.1:8787
 go run ./cmd/mcloud-server --help              # 五个选项：--db / --host / --port / --web-dir / --secure-cookie
 
 bash scripts/install-hooks.sh                  # 装一次：提交/推送时自动跑门禁
-bash scripts/gates.sh                          # Rust 侧七条门禁，一条命令跑完，全绿才算完成
-bash scripts/gates.sh clippy fmt               # 也可以只跑其中几条（调试时用）
-bash scripts/gates-go.sh                       # Go 侧九条门禁（迁移期两套并存）
+bash scripts/gates-go.sh                       # 九条门禁，一条命令跑完，全绿才算完成
+bash scripts/gates-go.sh filenames idents      # 也可以只跑其中几条（调试时用）
 ```
+
+> ⚠ **Rust 侧的命令已不在本仓库**：`cargo run -p mcloud-cli` / `cargo run -p mcloud-server`
+> 与七条门禁 `bash scripts/gates.sh` 都要在 `../mcloud-rust/` 下跑。本仓库里没有
+> Cargo workspace —— 在这里跑只会得到"找不到 Cargo.toml"这种与代码无关的错。
 
 > ⚠ Go 工具链在 `/opt/homebrew/bin`，非交互 shell 的 `PATH` 里没有 ⇒ 先
 > `export PATH="/opt/homebrew/bin:$PATH"`。
 
-> 迁移期**两套门禁并存**，互不替代：Rust 侧 `gates.sh`（`legacy/Cargo.toml` 存在时会
-> **自动**加 `--manifest-path`，不用手改）、Go 侧 `gates-go.sh`。
-> 哪些是 Go 自己的、哪些是**复用** Rust 侧脚本，见
-> [`docs/dev-gates.md`](./docs/dev-gates.md) §迁移期。
+> 原"迁移期两套门禁并存"一节已随剥离收敛：Rust 七条（`gates.sh`）现在
+> `../mcloud-rust/` 里自跑自的；本仓库只剩 Go 侧九条。
+> 哪些门禁是**复用**自 Rust 时代的语言无关脚本，见
+> [`docs/dev-gates.md`](./docs/dev-gates.md)。
 
 首次用先 `mcloud user init`（建首个管理员）→ `mcloud login qr`（终端出码，手机扫）。
 
@@ -91,7 +89,7 @@ bash scripts/gates-go.sh                       # Go 侧九条门禁（迁移期�
 
 | 你现在要做什么 | 读这个 |
 | --- | --- |
-| 参与 / 了解 **Rust → Go 迁移** | [`docs/go-migration-plan.md`](./docs/go-migration-plan.md) —— 执行方案；冻结约定见 [`legacy/README.md`](./legacy/README.md) |
+| 参与 / 了解 **Rust → Go 迁移** | [`docs/go-migration-plan.md`](./docs/go-migration-plan.md) —— 执行方案；冻结约定见 [`../mcloud-rust/docs/freeze-record.md`](../mcloud-rust/docs/freeze-record.md) |
 | 敲命令 / 查参数 / 看签到怎么配定时任务 | [`docs/cli-usage.md`](./docs/cli-usage.md) |
 | 跑门禁 / 搞清哪层能依赖哪层 | [`docs/dev-gates.md`](./docs/dev-gates.md) |
 | 加文件、起新目录、查命名规则 | [`docs/repo-layout.md`](./docs/repo-layout.md) —— **文件名与标识符的规则不同，别改错** |

@@ -345,7 +345,7 @@ Authorization: Basic base64("mobile:<手机号>:<authToken>")
 **钥匙一直在仓库里，缺的只是"把它和这个头连起来"这一步。**
 
 黄金向量：`hcyCoolFlagBodyEnvelope192`（5 条实拍，双向）；Rust 消费者见
-`legacy/crates/mcloud-core/src/crypto/tests/app.rs`。
+`../mcloud-rust/crates/mcloud-core/src/crypto/tests/app.rs`。
 
 ### 8.1 ⚠⚠ 再更正（2026-09-20 同日）：第三把钥匙 —— **H5 / WebView 那一层**
 
@@ -410,7 +410,7 @@ AES_CBCDecrypt(e){
 **候选集的"字符类"和"长度档位"一样，是会漏掉答案的筛子。**
 
 黄金向量：`hcyCoolFlagWebViewEnvelope256`（3 条，双向，已按脱敏 SOP 换值不换形）；
-Rust 消费者见 `legacy/crates/mcloud-core/src/crypto/tests/app.rs` 的三条 `app_cool_flag_*` 测试。
+Rust 消费者见 `../mcloud-rust/crates/mcloud-core/src/crypto/tests/app.rs` 的三条 `app_cool_flag_*` 测试。
 
 ⚠ **仍未解开**：`ILog`（`queryRights` / `IControl` / `thirdlogin` / `getSmsCode` 也各有解不开的条目）。
 `ILog` 的体同样是"可打印 IV"，但它**不属于**这把钥匙 —— 说明 H5 侧还有别的信封。

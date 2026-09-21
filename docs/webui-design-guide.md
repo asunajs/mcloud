@@ -5,10 +5,12 @@
 >
 > - 生效范围：`web/` 下的一切界面代码（含 `src/ui/` 组件层）
 > - 权威关系：**视觉与交互冲突时以本文为准**；功能范围以
->   [`rust-rewrite-plan.md`](./rust-rewrite-plan.md) §4.1 的页面表为准；
+>   [`rust-rewrite-plan.md`](../../mcloud-rust/docs/rust-rewrite-plan.md) §4.1 的页面表为准；
 >   技术选型理由见 §2.2，本文不重复论证，只落地
 > - 写新页面/新组件前**先读本文**；本文没有覆盖到的形态，先补本文再写码
 > - 最后核对：**2026-09-19**
+> - 2026-09-21 补充：**daisyUI 官方 skill（`saadeghi/daisyui`）为写码前置条件**，
+>   它和 Tailwind 的分工见新增的 §1.1；两条"不报错但样式不对"的陷阱见 §9.2。
 
 ---
 
@@ -23,12 +25,57 @@
 所以本文的作用是：**把决定权收口**。凡是"哪种更好看"的问题，答案在这里；
 写码时不需要再即兴决定。**新增形态请改本文，而不是就地发挥。**
 
-配合两条已经写进方案的硬约束（见 [`rust-rewrite-plan.md`](./rust-rewrite-plan.md) §2.2.2）：
+配合两条已经写进方案的硬约束（见 [`rust-rewrite-plan.md`](../../mcloud-rust/docs/rust-rewrite-plan.md) §2.2.2）：
 
 1. **类名必须是字面量** —— Tailwind 只识别源码里字面出现的类名，
    `btn-${variant}` 这种拼接在生产构建后会**静默失效**（样式没了但不报错）。
    动态一律走查表：`btnTheme[variant]`。**这是本项目的头号样式 bug 来源。**
 2. **不能创建 `tailwind.config.js`** —— Tailwind 4 是 CSS-first，已废弃该文件。
+
+### 1.1 daisyUI 与 Tailwind CSS：谁管什么（2026-09-21 补，按官方 skill 核对）
+
+本文通篇在用这两个东西，但它们是**两层**，混着用就会出 §9.1 那类静默失效：
+
+| 层 | 版本（`web/package.json`） | 管什么 | 入口 |
+| --- | --- | --- | --- |
+| **Tailwind CSS** | `tailwindcss ^4.3.3` + `@tailwindcss/vite ^4.3.3` | 原子工具类：布局、间距、字号、响应式前缀（`flex`/`p-4`/`md:hidden`）；`@theme` 令牌命名空间 | `web/src/app.css:1` 的 `@import "tailwindcss"` |
+| **daisyUI** | `daisyui ^5.7.38`（devDependency） | 组件类名（`drawer`/`dock`/`menu`/`card`…）、语义色（`base-100`/`primary`/`error`…）、主题档位（`--depth`/`--radius-*`） | `web/src/app.css:5` 的 `@plugin "daisyui"` |
+
+三条容易踩的边界，都是实测口径：
+
+- **daisyUI 是 Tailwind 的 CSS 插件，不是 Vite 插件。** 写进 `vite.config.ts` 的 `plugins`
+  会报 `handler is not a function`；只能在 CSS 里 `@plugin "daisyui"`（该注释已在 `vite.config.ts` 顶部）。
+- **两套主题变量各查各的注册表。** `--color-*` / `--radius-*` / `--size-*` / `--border` / `--depth` / `--noise`
+  归 daisyUI 的 `@plugin "daisyui/theme"`；`--font-*` / `--spacing` / `--text-*` / `--breakpoint-*` 归 Tailwind 的 `@theme`。
+  写错块**不报错、直接被吞**（§9.1②，字体那条就是这么发现的）。
+- **语义色就是 Tailwind 颜色**，所以照常带透明度用：`text-base-content/60`、`border-base-300`。
+  反过来 **daisyUI 语义色不要配 `dark:`** —— 主题切换走 `data-theme`，颜色自己会变；
+  真需要"所有主题都不变"的颜色（图表、SVG）才用 Tailwind 具名色阶（§3.4 的禁令与此一致）。
+
+**用类的优先序**（照官方 skill 的 usage 规则 1→4，和本文 §5 的口径相同）：
+先用 daisyUI 组件类 → 不够再用 Tailwind 工具类补（`btn px-10`）→ 只有被特异性挡住才在末尾加 `!`
+（`btn bg-red-500!`，不许常用）→ **daisyUI 没有对应组件就用 Tailwind 手搭，不要写自定义 CSS**。
+
+#### 官方 skill 是"类名存在性"的权威，写码前必须读
+
+本项目装的是 daisyUI 作者本人发布的官方 skill：`saadeghi/daisyui`（skills.sh 源），
+用户级装在 `~/.qoder/skills/daisyui/`，会话里以 `daisyui` 这个 skill 名激活。规矩：
+
+1. **写任何 HTML/JSX 之前**先激活它，并按它的"组件发现协议"走：
+   先按**功能**找候选组件（不看名字是否对得上），再读候选的 `components/*.md`，然后才动手。
+2. 用到哪个组件就读哪个：`components/drawer.md`、`components/dock.md`、`components/menu.md`…
+   语法与 `#### Rules` 一节是硬约束。§4.3 的 `drawer` 骨架、§4.4 的 `dock` 都已照它复核过：
+   `drawer-open` 是**常驻分栏 modifier**（"always visible on large screens"），
+   展开态由 `drawer-toggle` 这个隐藏 checkbox + `label for` 驱动 —— 这正是 §9.2③ 那个 bug 的判据。
+3. 记不准类名时**查产物**，不要凭记忆：组件源码就在 `web/node_modules/daisyui/components/<name>.css`，
+   一行压缩 CSS 里能直接看到全部规则（§9.2③ 的 `position: sticky` 就是这么抓到的）。
+   改名过的组件尤其要查 —— 例如 5 里 `btm-nav` 已废弃、现名 `dock`。
+
+> **一处刻意的偏离**：skill 的 usage 规则 12 是"用户没点变体就用最朴素的 `btn`"。
+> 本项目**不照这一条** —— §2.3① 与 §3.4 规定一屏只有一个实心 `btn-primary`（主行动），
+> 次要一律 `-soft` / `-ghost`。这是产品纪律不是技术限制，权威关系见本文头部的声明。
+> 除这一条外，skill 的所有规则优先于个人习惯。
+
 
 ---
 
@@ -176,7 +223,7 @@ Nexus 用 `1`（stock 值，它没改）。**我们取 `0`**：
 
 ### 2.4 「涨红跌绿」不可动
 
-这是**业务约定，不是配色偏好**（见 [`rust-rewrite-plan.md`](./rust-rewrite-plan.md) 与旧项目日志语义）：
+这是**业务约定，不是配色偏好**（见 [`rust-rewrite-plan.md`](../../mcloud-rust/docs/rust-rewrite-plan.md) 与旧项目日志语义）：
 
 - **涨 = 红**（`text-error`），**跌 = 绿**（`text-success`）
 - 与 A 股习惯一致，**与 daisyUI 默认语义相反**（daisyUI 里 success 是绿、error 是红）
@@ -446,6 +493,17 @@ daisyUI 的 `drawer` 结构是**固定三层**，顺序错了就不工作：
 - `min-h-screen` 加在 `drawer-content` 上，且内容是 `flex-col` + `main` 用 `flex-1`
   —— 否则窄屏时底部 dock 会浮在半空。
 
+> ⭐ **2026-09-21 按 daisyUI 官方 skill 复核骨架，三条补充（上面原文不改）**：
+>
+> 1. **开关抽屉的 `label` 要带部件类 `drawer-button`**（`class="btn btn-square btn-ghost drawer-button lg:hidden"`）。
+>    它提供 `outline: 2px solid` + `outline-offset: 2px`，键盘 Tab 到汉堡包时才有焦点环。
+>    上面的骨架里漏了这个类，`web/src/app.tsx` 的两个 `label`（打开 / 侧栏内关闭）已补上；新页面照抄时带上。
+> 2. **`drawer-open` 是"常驻分栏"的 modifier，不是"当前展开"** —— 官方原文：
+>    *"To make the sidebar visible on larger screens, use `lg:drawer-open`"*。
+>    窄屏挂上它会把 256px 侧栏变成真实栅格列、压瘪内容，实测 493px 视口下内容区只剩 237px（§9.2③）。
+> 3. **另有 `is-drawer-open:` / `is-drawer-close:` 两个 variant**，用来做"收起时只显示图标、展开时显示文字"的侧栏。
+>    本项目当前**不做**这种形态（§4.1 定的是侧栏常驻 + 移动端抽屉），记在这里是为了将来要时不用重新翻文档。
+
 ### 4.4 底部导航（`dock`）
 
 ```tsx
@@ -467,6 +525,58 @@ daisyUI 的 `drawer` 结构是**固定三层**，顺序错了就不工作：
 - **只放 5 项**：总览 / 任务 / 兑换 / 历史 / 更多（「更多」打开侧栏抽屉）。
   9 个页面全塞进 dock 会挤成不可点。
 - dock 只在 `<768px` 显示：`md:hidden`。
+
+> ⭐ **2026-09-21 更正（上面那条「更多」已作废）**：5 格**全部放页面** ——
+> 总览 / 账号 / 任务 / 兑换 / 历史。
+> **Why:** 「更多」点开的是侧栏抽屉，而抽屉在 navbar 左上角的汉堡包那里**已经有一个入口**
+> （同一个 `label for="nav-drawer"`）⇒ 这一格不换来任何新的可达性，
+> 只是把既有导航复制了一遍。用户原话："如果最底部的更多只是打开侧边栏，那就没有存在的意义"。
+> **代价（明写出来，别当成无损）**：抽屉入口只剩左上角那一处，单手在大屏上够不着；
+> 换来的是第 5 格是**真页面**（账号是仅次于总览的高频项，且是已落地的两个真页面之一）。
+> 定时 / 调试台 / 设置 3 个页面仍只走抽屉。
+> 实测（493px 视口）：5 格标签无一截断，`账号` 的激活态与 `aria-current="page"` 正常，
+> 汉堡包仍能开抽屉且抽屉里 8 个页面齐全。
+
+### 4.5 侧栏底部那一行：后端自述（2026-09-21 补）
+
+```tsx
+<div class="border-t border-base-300 p-3 text-xs leading-5">
+  <div class="flex items-center gap-2 px-1">
+    <span class={dot} aria-hidden="true" />   {/* status-success / -error / -neutral animate-pulse */}
+    <span class="font-medium">{head}</span>   {/* mcloud v0.1.0 */}
+  </div>
+  <div class="px-1 opacity-70">{最近执行 …}</div>
+</div>
+```
+
+这一格放什么，是被一轮反馈推出来的。三条边界都记在这里：
+
+1. **不重复身份**。原先这里放「用户名 badge + 角色」，而初始用户的 `name` 与 `role`
+   字面**都是 `admin`** ⇒ 左下角并排两个 admin（用户原话："显示两个用户名意义不明"）。
+   现在身份**只在 navbar 一处**，`role` 收进那枚 badge 的 `title`。
+2. **显示后端事实，不显示前端推断**。数据源是 `GET /api/status`
+   （对位 `internal/server/routes.go` 的 `getStatus`），只有后端确实知道的三件事：
+   产品名+版本（与 `--version`、`/api/version` **同源**，不是第二份真相）、
+   `schedulerRunning`、最近一次 run。
+   刻意**不**放账号数 / 任务数 —— 那是各自页面的内容，搬进常驻侧栏
+   等于把"同一个数字出现在两个地方"再犯一遍。
+3. **`schedulerRunning` 当前恒 `false`，界面就得跟着说「定时调度未启用」**。
+   Go 侧还没有把 `schedules` 表变成"到点触发"的循环
+   （`docs/status.md` 运行时层那条"调度接入中"）。只报任务数的话，
+   用户会以为存进去的任务在跑 —— 那是**界面替后端编结论**。
+
+三条实现细节（都是会被打的那种）：
+
+- **红点只在真失败时红**。取数分三态 `pending / up / down`，`pending` 用
+  `status-neutral animate-pulse`。把 pending 并进失败，首屏就闪一下红点，
+  而红点的语义是"后端挂了"，看到的人当场去重启服务。
+- **`lastRun.status` 只当文字，不当颜色**。它是存储层生命周期
+  （`running` / `done` / `failed`），而 `done` 里含"部分成 / 需人工"三种业务结论 ——
+  拿它决定红绿就是替后端编一个它没给过的结论（与 §2.4、与"云朵增减不是状态"同一类）。
+- **不轮询**。这一行说的是"进页面时后端是什么样"，每分钟自己刷一次
+  只会让人以为那个时间戳在动。取数时机就两个：会话恢复后、登录/初始化成功后。
+  登出时把 `backend` 与状态一起清回 `pending` —— 这一行报的是**这个人**的数据，
+  不清的话下一个人登录后先看到上一个人的"最近执行"。
 
 ---
 
@@ -561,6 +671,34 @@ const balanceBadge = {
 ```
 
 **账号健康度**（`status` 点）：绿 = 正常，红 = 连续失败，黄 = 有告警但可用。
+
+> ⭐ **2026-09-21 补：`badge-soft` + 颜色类是一条会咬人的规则**（按 daisyUI 官方 skill 复核产物得出）。
+>
+> `web/node_modules/daisyui/components/badge.css` 里 `badge-soft` 的实现是：
+> ```css
+> .badge-soft { color: var(--badge-color, var(--color-base-content));
+>               background-color: color-mix(in oklab, var(--badge-color, …) 8%, var(--color-base-100)) }
+> ```
+> **文字用颜色的原色，底色只掺 8%** —— 于是可读性完全取决于"这个颜色在当前主题里离 `base-100` 有多远"。
+> 而 daisyUI 的 `neutral` 定义就是 *"A dark neutral color"*，**两个主题里都是深色**：
+>
+> | 写法 | light | dark |
+> | --- | --- | --- |
+> | `badge-soft badge-neutral` | 16.2:1 ✓ | **1.23:1 ✗ 黑字压黑底** |
+> | `badge-soft`（不给颜色类） | 14.7:1 ✓ | 12.2:1 ✓ |
+> | `badge-ghost` | 16.7:1 ✓ | 15.6:1 ✓ |
+>
+> （比值来源：`getComputedStyle` 解析出的 `color` / `background-color` —— 这些值都是**不透明**的
+> `lab()` / `oklab()`，按 WCAG 相对亮度算对比度；同一批颜色另用测试带截图肉眼复核过。）
+>
+> **本项目的规矩**：中性/次要标记一律写**裸 `badge badge-soft`**，不要 `badge-neutral`。
+> 已按这条改掉 4 处：navbar 用户名、账号页计数、平台标签（`手机`）、总览行数计数。
+> §4.3 骨架里用户名原本写的 `badge badge-ghost` 也仍然可用 —— 两者都随主题走，
+> 只是 `badge-soft` 与其余状态标记同族，优先它。
+>
+> 反过来这条规则也咬**浅色主题**：`badge-soft badge-success/warning/error` 在 light 下只有
+> 1.87 / 1.69 / 2.64:1（亮色文字压 8% 浅底），见 §十二 未决项。
+
 
 ### 5.5 趋势图（手写 SVG）
 
@@ -739,6 +877,8 @@ overscroll-behavior: contain;
 - [ ] **主题切换按钮在窄屏也够得着**（不能被挤掉或挤出屏幕）
 - [ ] 深色模式下无"浅字压浅底"
 - [ ] 长文本已 `break-words`
+- [ ] **抽屉展开时内容区仍是满屏宽**（`.drawer-content` 宽度 == 视口宽；不是被 256px 侧栏挤成一条，见 §9.2③）
+- [ ] **逐跳切页后 `main h1` 跟着 `location.hash` 变**（空态页尤其容易停在第一跳，见 §9.2④）
 
 ---
 
@@ -808,6 +948,59 @@ class={btnVariant[variant]}       // ✅ 查表，值必须是完整字面量
 > ```
 > 看到的值和源码里写的一致才算生效。§2.3④ 的字体坑就是这么发现的。
 
+### 9.2 静默失效陷阱追加（2026-09-21 实测，都是真实踩过的）
+
+§9.1 立了两条，这里再补两条同样「不报错、类型检查过、构建成功」的。
+共同点还是那句：**只能靠产物核对 + 真机量一遍，不要指望工具链报错。**
+
+**③ 移动端抽屉用 JS 挂 `drawer-open` —— 内容被挤瘪**
+
+§4.3 的骨架是对的（根 div 只有 `drawer lg:drawer-open`，展开态由 `#nav-drawer` 这个 checkbox 驱动）。
+实现时一度"顺手"加了 `drawerOpen ? 'drawer drawer-open lg:drawer-open' : ...`，
+以为这样才是"打开抽屉"。**`drawer-open` 不是展开态，是常驻分栏变体**：
+
+```css
+.drawer { display: grid; grid-auto-columns: max-content auto }
+.drawer-open > .drawer-toggle ~ .drawer-side { display: block; position: sticky; width: auto }
+```
+
+⇒ 窄屏挂上它，256px 侧栏占掉**一列真实栅格**，`.drawer-content` 只剩剩下的那条。
+实测（493px 视口）：`grid-template-columns: 256px 237px`、内容区 **493 → 237px**、
+`.drawer-side` 的 `position` 从 `fixed` 变 `sticky`。这就是"打开侧边栏右边一堆挤在一起的字符"。
+
+正确形态：移动端靠 `.drawer-toggle:checked ~ .drawer-side` 走**浮层**（`fixed` + 半透明 overlay），
+`drawer-open` 只以 `lg:` 前缀出现。JS 里的开关状态**只**绑 checkbox 的 `checked`，不碰类名。
+
+**④ Vapor 组件在 setup 里读 `props.x` 的快照 —— 切页时正文不动**
+
+Vapor 没有重渲染：函数体就是 setup，**一个实例只跑一次**。
+空态页 `<PlaceholderPage id={page.value} />` 落在 `createIf` 的**同一个 else 分支**里，
+页面之间切换（定时 → 调试台 → 设置）不会重建实例，于是 setup 里的
+`const item = navItem(props.id)` 永远停在第一次进来的那个页面。
+实测表现很迷惑人：**navbar 标题跟着变（那是 app.tsx 里的响应式插值），正文的标题/图标/说明纹丝不动**。
+
+编译器（`vue-jsx-vapor`）对这两件事的处理不一样，可以直接看产物确认：
+
+```bash
+node -e "const t=require('./web/node_modules/vue-jsx-vapor/dist/api.cjs'),fs=require('fs');
+console.log(t.transformVueJsxVapor(fs.readFileSync('web/src/app.tsx','utf8'),'app.tsx').code)"
+```
+
+- 文本插值 `{item.value.title}` → `_setNodes(x, () => item.value.title)`：**响应式**，会跟着变。
+- 组件元素 `<item.value.icon />` → `_createComponent(item.value.icon, {...})`：setup 里**只求值一次**。
+- props 传的是 getter（`id: () => page.value`），所以 `props.id` 本身是响应式的 ——
+  问题出在 setup 把它抄成了常量。
+
+⇒ 两种改法：**要么** setup 里一律用 `computed(() => ...props.x)`（只够救文本，救不了图标这类组件元素）；
+**要么**在调用点给 `key`：`<PlaceholderPage key={page.value} id={page.value} />`，
+它编译成 `_createKeyedFragment(() => page.value, () => _createComponent(PlaceholderPage, {...}))`，
+key 变了整棵子树重建，标题/图标/说明一起跟上。**当前用的是 key**：一个 props 决定整页形态的组件，
+重建比逐字段响应式更省心，也不会漏掉下一个新增字段。
+
+> **怎么核对**：切页不能只看"有没有报错"，要逐跳量 `main h1` 的文本是否跟着 `location.hash` 变。
+> 本次两条都是这么发现的：`#/schedules → #/debug → #/settings` 三跳，
+> 修复前 `h1` 一直是「定时任务」，修复后逐跳对上。
+
 ### Vapor 边界（写页面时会撞上的）
 
 - **仅 Composition API**；没有 `getCurrentInstance()`、`app.config.globalProperties`。
@@ -827,6 +1020,10 @@ class={btnVariant[variant]}       // ✅ 查表，值必须是完整字面量
 4. 逻辑抽成纯函数放 `ui/`，配 vitest 用例（方案 §6.1 的 L1'）。
 5. 跑 §7.4 的移动端清单。
 6. 桌面 + 移动、浅色 + 深色，**四种组合都过一遍**。
+
+> 第 1 步之前还有一步：**激活 daisyUI 官方 skill 并读对应组件指南**（§1.1）。
+> 顺序不能反 —— 先凭记忆写完类名再去核对，等于把"是否存在这个类"交给运气，
+> 而 daisyUI 5 改过名的组件（`btm-nav` → `dock`）正是这么踩的。
 
 ---
 
@@ -849,6 +1046,10 @@ class={btnVariant[variant]}       // ✅ 查表，值必须是完整字面量
 - [ ] **主题切换可用**：navbar 有开关、点了生效、刷新后仍在（§3.2）
 - [ ] **两个主题都试过**：`light` 与 `dark` 下各看一遍，`primary` 都是品牌色而非默认紫（§3.3）
 - [ ] 深色模式下无对比度问题
+- [ ] **浅色模式下也无对比度问题** —— 特别是 `badge-soft` + 颜色类（§5.4 补充：文字是原色、底色只掺 8%）
+- [ ] **写码前激活了 daisyUI 官方 skill，且用到的组件指南读过**（§1.1）；
+  类名对不上产物时以 `web/node_modules/daisyui/components/<name>.css` 为准
+- [ ] 切页时**正文与 URL 对得上**：逐跳量 `main h1`（§9.2④，Vapor 的 props 快照坑）
 
 ---
 
@@ -860,11 +1061,13 @@ class={btnVariant[variant]}       // ✅ 查表，值必须是完整字面量
 | 2 | `openapi-typescript` 生成链路（方案 §4.3）—— 类型目前**仍是手写**的 `api.ts` | P5 接口冻结后 |
 | 3 | vitest 尚未引入（方案 §6.1 L1' 需要） | 写 `ui/` 纯函数时 |
 | 4 | 抽屉侧栏在**极窄屏（<320px）** 的宽度是否需要收窄为 `w-56` | 移动端首次自测后 |
-| 5 | 是否要 vendored 一份 daisyUI 文档文本供 AI 参考（方案 §2.2.6 的建议） | 视 AI 写码的实际出错率 |
+| 5 | 是否要 vendored 一份 daisyUI 文档文本供 AI 参考（方案 §2.2.6 的建议） | 视 AI 写码的实际出错率。<br>**2026-09-21 追加**：已装 daisyUI 作者发布的官方 skill（`saadeghi/daisyui`，用户级 `~/.qoder/skills/daisyui/`），本条的"要不要再 vendored 一份"暂时不用答 —— 见 §1.1 |
 | 6 | **字体落地**：§2.3④ 的 `--font-sans` 已在 `app.css` 生效，但**只写拉丁子集 + 中文走系统回落**，字体文件**尚未自托管**（目前实际渲染仍是 Segoe UI / 雅黑）。要自托管就选一个可变量重字体，**不要**链 Google Fonts | 有设计稿或首次做视觉验收时 |
 | 7 | ~~`--depth: 0` 会不会让 `btn` 失去按下的反馈~~ **已核实不会**：`:hover` 的加深是硬编码 7%、`:active` 是 `translate:0 .5px`，两者都**不经过 `--depth`**。`--depth` 只管内阴影/浮雕，拿掉它正好。无需补偿 | — |
 | 8 | `btn-soft` 会带一条 `border-style:solid`（边框色是主色 10% 混底）。这与 §2.3②「阴影而非边框」并存，视觉上可接受（很淡），但若实测偏"描边感"，要在 `app.css` 里统一清掉软按钮的 border | 首次视觉验收时 |
+| 9 | **浅色主题下状态 badge 读不清**：`badge-soft badge-success / warning / error` 在 light 下实测 1.87 / 1.69 / 2.64:1（机制见 §5.4 补充；dark 下同一批类是 7.08 / 7.76 / 4.97:1，没问题）。候选解法：**(a)** 在 `app.css` 的 light 主题块里把这三个语义色压暗（与 §3.3「两个主题的品牌色必须都微调」同源，改动最小、不动类名）；**(b)** 状态标记改 `badge-outline` 或实心；**(c)** 接受现状。**未定，等用户拍** —— 这动的是 §2.4/§3.4 的状态色语义，属视觉决策不是技术决策。<br>**2026-09-21 已定：保留现状（=候选 (c)）**。用户原话"停，不用计算了，保留"，当场把注意力转到"左下角两个 admin"（→ §4.5）。`app.css` 的两个主题块与所有 `badge-soft badge-*` 类名**均未改动**；重新打开的时机仍是做视觉验收 | 下次做视觉验收时一并定 |
+| 10 | 侧栏底部那一行现在报的是**后端自述**（`GET /api/status`，见 §4.5）。等调度循环真接上时，`schedulerRunning` 要改成**从运行时取**而不是常量，而那一行的「定时调度未启用」必须一起消失 —— 二者任漏其一就是说谎 | 接调度器那天（`docs/status.md` 运行时层那条） |
 
-> 本文与 [`rust-rewrite-plan.md`](./rust-rewrite-plan.md) 的分工：
+> 本文与 [`rust-rewrite-plan.md`](../../mcloud-rust/docs/rust-rewrite-plan.md) 的分工：
 > **方案定"用什么技术、有哪些页面"；本文定"长什么样、怎么写"。**
 > 两者冲突时，技术选型以方案为准，视觉与交互以本文为准。

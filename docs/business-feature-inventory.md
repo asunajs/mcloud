@@ -123,7 +123,7 @@
 
 旧项目**没有**这个功能：`sign` 里 `ctx.logger.info("当前云朵：…")` 之后那行 `ctx.state.totalCloud = total` 被注释掉了（`packages/core/src/tasks/sign/task.ts` 内，方案 D1 记为 `sign/task.ts:45`），所以余额只进日志、不进状态 ⇒ 无法回答"这账号现在还有多少云朵、今天涨了多少"（D2）。
 
-新项目已按此增设能力声明（`legacy/crates/mcloud-capabilities/src/lib.rs`，`code: "cloud-snapshot"`，`CapabilityKind::Query`，输出含 `updatedAt`）。待补的是上游：`GET …/market/signin/page/infoV3?client=app`（旧写法，实测前缀见 §5.1）与 `…/market/signin/public/cloudRecord?type=1&pageNumber=1&pageSize=100`（`packages/core/src/tasks/after.ts:24`），落 `cloud_stats` 日快照表。
+新项目已按此增设能力声明（`../mcloud-rust/crates/mcloud-capabilities/src/lib.rs`，`code: "cloud-snapshot"`，`CapabilityKind::Query`，输出含 `updatedAt`）。待补的是上游：`GET …/market/signin/page/infoV3?client=app`（旧写法，实测前缀见 §5.1）与 `…/market/signin/public/cloudRecord?type=1&pageNumber=1&pageSize=100`（`packages/core/src/tasks/after.ts:24`），落 `cloud_stats` 日快照表。
 
 ### 2.2 档 2 · 日常核心：`sign` → `receive` → `revival` → `auth-refresh` → `after`
 

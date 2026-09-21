@@ -50,10 +50,12 @@ GATE_NAMES="build vet fmt test deps filenames idents golden jsontags"
 ALL=($GATE_NAMES)
 
 # ⚠ 为什么用显式包路径，而不是惯用的 `./...`：
-#   `./...` 会把 `legacy/target/`（7 GB 的 cargo 构建产物）也遍历一遍。
+#   `./...` 曾把 `legacy/target/`（7 GB 的 cargo 构建产物）也遍历一遍
+#   —— legacy/ 已于 2026-09-21 剥离为同级仓库 mcloud-rust，该遍历问题不复存在；
+#   显式包范围**保留**：它还顺带把"只测交付物"写进了定义。
 #   两个后果，都不是理论上的：
 #     ① 慢 —— 几万个与 Go 无关的文件；
-#     ② **偶发失败** —— cargo 正在改写那个目录时，Go 会撞上刚被删掉的临时目录，
+#     ② **偶发失败** —— 当时 cargo 正在改写那个目录，Go 会撞上刚被删掉的临时目录，
 #        报 `pattern ./...: open legacy/target/debug/deps/xxxx: no such file or directory`，
 #        门禁于是红了，而代码一行问题都没有。
 #        （2026-09-20 冻结后第一次跑就撞上：那轮 Go 门禁与 Rust 门禁是同时在跑的。）
@@ -64,7 +66,8 @@ GO_PKGS="./cmd/... ./internal/..."
 # gofmt -l 只**列出**未格式化的文件，退出码仍是 0 —— 所以不能直接当门禁用，
 # 必须自己判"输出是否为空"。这一步很容易写错成 `gofmt -l . && echo ok`。
 #
-# ⚠ 范围与 GO_PKGS 对齐（不用 `.`）：`gofmt -l .` 同样会走进 legacy/target。
+# ⚠ 范围与 GO_PKGS 对齐（不用 `.`）：历史上 `gofmt -l .` 会走进 legacy/target，
+#   剥离后继续用显式范围，理由见上。
 gate_fmt() {
   local out
   out="$(gofmt -l ./cmd ./internal 2>&1)"

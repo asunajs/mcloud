@@ -1,4 +1,4 @@
-// 纯函数层 —— 对应 Rust 侧 legacy/crates/mcloud-core/src/pure.rs。
+// 纯函数层 —— 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/pure.rs。
 //
 // 这些是原 TS 版本里"藏在任务函数内部、只能靠真机试跑验证"的逻辑，
 // 现在被提出来成为可验证的最小单元：日快照增量、开抢时刻、时间纠偏。

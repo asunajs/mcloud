@@ -1,6 +1,6 @@
 {
   "$source": "2026-09-19 Reqable 抓包（iOS App mCloud 12.6.0 的签到页 H5）+ 账号 B 纯协议复现",
-  "$note": "Rust 侧 legacy/crates/mcloud-upstream/src/app_signin.rs 消费本文件；Node 侧 scripts/check-golden-vectors.cjs 独立复算 h5Signature。",
+  "$note": "Rust 侧 ../mcloud-rust/crates/mcloud-upstream/src/app_signin.rs 消费本文件；Node 侧 scripts/check-golden-vectors.cjs 独立复算 h5Signature。",
   "$evidence": {
     "har": "har/signin-2026-09-19-full.har（已 gitignore）",
     "doc": "docs/capture/app-signin-samples.txt",

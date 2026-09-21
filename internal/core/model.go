@@ -1,4 +1,4 @@
-// 领域模型 —— 对应 Rust 侧 legacy/crates/mcloud-core/src/model.rs。
+// 领域模型 —— 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/model.rs。
 //
 // # 多账号是一等公民
 //

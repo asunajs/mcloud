@@ -1,5 +1,5 @@
 // 系统用户、会话，以及"云盘账号归属"——**纯逻辑**部分。
-// 对应 Rust 侧 legacy/crates/mcloud-core/src/user.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/user.rs。
 //
 // # 为什么这一层是新的
 //

@@ -1,6 +1,6 @@
 // Package mcloudexec 是任务编排层。
 //
-// 对应 Rust 侧的 legacy/crates/mcloud-exec。
+// 对应 Rust 侧的 ../mcloud-rust/crates/mcloud-exec。
 //
 // # ⚠ 包名不是 exec
 //

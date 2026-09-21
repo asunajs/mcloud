@@ -1,4 +1,4 @@
-// 纯函数层的测试 —— 对应 Rust 侧 legacy/crates/mcloud-core/src/pure.rs 的 `mod tests`。
+// 纯函数层的测试 —— 对应 Rust 侧 ../mcloud-rust/crates/mcloud-core/src/pure.rs 的 `mod tests`。
 //
 // 这一层没有黄金向量（它是原 TS 项目里"藏在任务函数内部、只能靠真机试跑验证"
 // 的逻辑，从来没有独立实现可供对拍），所以断言全部是**手写的边界值**。

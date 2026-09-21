@@ -10,7 +10,7 @@
 
 因为签到页的 `fp.min.js` 就是数美设备指纹，它的 `getDeviceId()` 返回
 `'B' + localStorage['SMID']`，而 `SMID` 是它往 `slw.h5cmpassport.com:9090/deviceprofile/v4`
-上报后拿回的 `detail.deviceId` —— 与 `legacy/crates/mcloud-upstream/src/smid.rs` 是**同一个客户端**
+上报后拿回的 `detail.deviceId` —— 与 `../mcloud-rust/crates/mcloud-upstream/src/smid.rs` 是**同一个客户端**
 （host / organization / appId / RSA 公钥逐字相同）。
 
 **那这个脚本还留着干什么？** 拿**官方实发值**跟 Rust 产出对拍 ——

@@ -1,6 +1,6 @@
 // **网络路径**的会话：登录本系统（WebUI 用；**CLI 刻意不用**）。
 //
-// 对应 Rust 侧 legacy/crates/mcloud-app/src/session.rs。
+// 对应 Rust 侧 ../mcloud-rust/crates/mcloud-app/src/session.rs。
 //
 // # 为什么只有网络路径需要"你是谁"
 //

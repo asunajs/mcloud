@@ -43,10 +43,8 @@ is_exempt() {
   case "$1" in
     # ① 生态固定名
     Cargo.toml|Cargo.lock|README.md|LICENSE|THIRD-PARTY-NOTICES.md|rust-toolchain.toml) return 0 ;;
-    # 嵌套一级的那几个：Rust 冻结到 legacy/ 之后，Cargo.toml / Cargo.lock /
-    # rust-toolchain.toml 都从仓库根挪进了 legacy/ —— 它们与上面那行是**同一批
-    # 生态固定名**，只是换了层级。豁免按"路径点名"，所以层级一变就得补一条。
-    # （2026-09-20 冻结时漏了 Cargo.lock 与 rust-toolchain.toml，门禁当场抓到。）
+    # 嵌套层级的生态固定名（docs/README.md 等）。豁免按"路径点名"，层级一变就得补。
+    # （历史：Rust 曾冻结进 legacy/ 时漏了 Cargo.lock 与 rust-toolchain.toml，门禁当场抓到。）
     */Cargo.toml|*/Cargo.lock|*/rust-toolchain.toml|*/README.md|*/LICENSE) return 0 ;;
     */.npmrc|*/.gitignore|*/.gitattributes) return 0 ;;
     */index.html) return 0 ;;                 # Vite / 静态站点按字面找它
@@ -69,7 +67,8 @@ is_exempt() {
     #
     # 旧项目 mcloud-sign 的**原样导出件**：`$meta.json` 这个名字本身就带 `$`，
     # 是旧项目的数据文件名。改名会破坏"新库这一份 ↔ 旧项目那一份"的一一对应，
-    # 而这层对应正是迁移测试的价值所在（`legacy/tests/fixtures.rs` 按名断言）。
+    # 而这层对应正是迁移测试的价值所在（`internal/core/legacy_test.go` 按名断言；
+    #  Rust 那份同名断言在剥离后的同级仓库 `../mcloud-rust/crates/mcloud-core/src/legacy/tests/fixtures.rs`）。
     test/fixtures/legacy/\$meta.json) return 0 ;;
     # ③ 生成物 / 依赖
     */node_modules/*|*/target/*|*/dist/*) return 0 ;;

@@ -3,8 +3,8 @@
 > 依据：`docs/capture/app-sms-login-samples.txt`（2026-09-18 22:54-22:56 实测抓包）
 > + 反汇编 `MCLoginCryptoUtil` / `MCLoginService`
 > + 活体探针（合成号码打真实上游）。
-> 实现：`legacy/crates/mcloud-upstream/src/app_login.rs`、`app_client.rs`；
-> 密码学原语：`legacy/crates/mcloud-core/src/crypto.rs`。
+> 实现：`../mcloud-rust/crates/mcloud-upstream/src/app_login.rs`、`app_client.rs`；
+> 密码学原语：`../mcloud-rust/crates/mcloud-core/src/crypto.rs`。
 >
 > **登录协议一族**（按端分文件，本篇是 **iOS App 短信**那一支）：
 > [`upstream-login-protocol.md`](./upstream-login-protocol.md)（PC 客户端扫码）、
@@ -404,17 +404,18 @@ App 客户端开 WebView 是它的实现选择（面前坐着真人，它没必�
 ## 8. 怎么复核（不需要成功登录）
 
 ```bash
-# 1. 离线：黄金向量 + 逐字段断言
-cargo test -p mcloud-core crypto::tests::app_login
-cargo test -p mcloud-upstream app_login
-cargo test -p mcloud-app app_login
+# 1. 离线：黄金向量 + 逐字段断言（三层各管一段，-run 收窄到本链路）
+go test ./internal/core     -run TestAppLogin -v
+go test ./internal/upstream -run TestAppLogin
+go test ./internal/app      -run 'TestAppSmsLogin|TestAppSendSmsCode'
 
 # 2. 联网：合成号码打真实上游，只看错误码
-#    （见 legacy/crates/mcloud-upstream/src/app_login.rs 的测试与
-#      docs/capture/app-sms-login-samples.txt §6.2）
+#    （用例在 internal/upstream/app_login_test.go；
+#      docs/capture/app-sms-login-samples.txt §6.2 是抓下来的真值。
+#      Rust 那份同名用例在 ../mcloud-rust/crates/mcloud-upstream/src/app_login.rs，已冻结）
 
 # 3. 端到端：走真实 CLI（合成号码；设备与库都写到 /tmp，不碰本机数据）
-cargo run -q -p mcloud-cli -- login sms --client app \
+go run ./cmd/mcloud login sms --client app \
   --phone 19900000000 --db /tmp/probe-app.db \
   --app-device-file /tmp/probe-device-app.txt
 ```
