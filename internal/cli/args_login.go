@@ -1,9 +1,6 @@
 package cli
 
 import (
-	"fmt"
-	"strings"
-
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -51,7 +48,7 @@ func newLoginCommand(deps *Deps, out *output) *cobra.Command {
 		Use:   "qr",
 		Short: "扫码登录：终端里画出二维码，用手机扫",
 		RunE: func(*cobra.Command, []string) error {
-			return notMigrated("login qr")
+			return runLoginQR(deps, out, qr)
 		},
 	}
 	qrFlags := qrCmd.Flags()
@@ -71,7 +68,7 @@ func newLoginCommand(deps *Deps, out *output) *cobra.Command {
 		Use:   "sms",
 		Short: "短信验证码登录",
 		RunE: func(*cobra.Command, []string) error {
-			return runLoginSms(out, sms)
+			return runLoginSms(deps, out, sms)
 		},
 	}
 	smsFlags := smsCmd.Flags()
@@ -99,17 +96,6 @@ func newLoginCommand(deps *Deps, out *output) *cobra.Command {
 
 	cmd.AddCommand(qrCmd, smsCmd)
 	return cmd
-}
-
-// runLoginSms 目前只跑"参数面"这一半，真正的登录还没迁。
-//
-// 为什么手机号必填要判在这里、判在 [notMigrated] **之前**：少了这一句，
-// 忘给号码时会先收到一条"后端未迁移"，于是"我漏了参数"要等到后端迁完那天才暴露。
-func runLoginSms(out *output, a *SmsArgs) error {
-	if !a.given("phone") || strings.TrimSpace(a.Phone) == "" {
-		return fmt.Errorf("--phone 是必填的: %w", ErrUsage)
-	}
-	return notMigrated("login sms")
 }
 
 // newSmidCommand 建 `smid show|reset|refresh`。

@@ -232,9 +232,23 @@ func TestLoginParameterSurface(t *testing.T) {
 			"login", "sms", "--phone", "19900000001", "--send-only", "--code", "123456"}, ExitUsage},
 		{"sms 默认 client 是 pc", []string{"login", "sms", "--phone", "19900000001"}, ExitRun},
 	} {
-		_, stderr, code := runCLI(t, "", tc.argv...)
+		// ⚠ 三条路径**必须**给临时目录：`--db` / `--device-file` 的默认值是
+		// `data/…`（相对当前目录），跑参数面用例就会在包目录下建出一个 data/，
+		// 而设备指纹一旦落盘，"指纹已存在"就成了跨用例的隐藏状态。
+		// 后端没接上时这些文件根本不会被创建，所以这个坑是在 login 接上之后才现形的。
+		dir := t.TempDir()
+		argv := append([]string{}, tc.argv...)
+		argv = append(argv, "--db", dir+"/state.db", "--device-file", dir+"/device.txt")
+		// ⚠ `--app-device-file` 只有 `login sms` 认。给 `qr` 也加上会得到一个
+		// "unknown flag" —— 用例照样红，但红的理由从"平台名不认"变成了
+		// "我给了一个不存在的参数"，于是它**不再**在断言它该断言的那件事。
+		if tc.argv[1] == "sms" {
+			argv = append(argv, "--app-device-file", dir+"/device-app.txt")
+		}
+
+		_, stderr, code := runCLI(t, "", argv...)
 		if code != tc.want {
-			t.Errorf("%s：%v 应退 %d，实得 %d（stderr=%q）", tc.name, tc.argv, tc.want, code, stderr)
+			t.Errorf("%s：%v 应退 %d，实得 %d（stderr=%q）", tc.name, argv, tc.want, code, stderr)
 		}
 	}
 }
@@ -293,6 +307,8 @@ func TestNoLeafIsSilentlyUnimplemented(t *testing.T) {
 		"user init":    true,
 		"user list":    true,
 		"migrate":      true,
+		"login qr":     true,
+		"login sms":    true,
 	}
 	gaps := UnmigratedBackends()
 

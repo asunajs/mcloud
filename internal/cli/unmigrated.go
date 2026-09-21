@@ -19,9 +19,6 @@ import (
 var unmigrated = map[string]string{
 	"signin": "缺多账号编排与四态渲染：Rust 侧 signin_run.rs / signin_one.rs / " +
 		"signin_output.rs（约 1,264 行）。app 层的 CloudSignIn / OpenSignInSession 已在",
-	"login qr": "缺 PC 端登录会话与终端二维码绘制：Rust 侧 login_cmd.rs 的 qr 分支" +
-		"（upstream::login 已迁，capabilities.QRTTLSeconds 也在这边）",
-	"login sms": "缺发码 → 验证码 → 落库的命令行编排与滑块人工出口：Rust 侧 login_cmd.rs 的 sms 分支",
 	"smid show": "缺按账号列出 SmidState 的读取与摘要渲染：Rust 侧 smid_cmd.rs" +
 		"（app.EnsureFingerprint / RotateFingerprint / ReportDeviceID 已在）",
 	"smid reset":   "缺 reset 的落库与可选立即上报编排：Rust 侧 smid_cmd.rs",

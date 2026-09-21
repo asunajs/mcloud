@@ -275,7 +275,7 @@ const SmsMaxAttempts = 3
 // SmsCodeSent 是发短信验证码的结果。
 type SmsCodeSent struct {
 	// RemainGetTimes 是配额余量（上游给的 `remainGetTimes`）。
-	RemainGetTimes *uint32
+	RemainGetTimes *int64
 	// SolvedSlider 报告是否经过了一次滑块校验（用于给用户一句"过了一次风控"的提示）。
 	SolvedSlider bool
 }

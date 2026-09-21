@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/catlair/mcloud/internal/app"
 	"github.com/catlair/mcloud/internal/core"
 	mcloudio "github.com/catlair/mcloud/internal/io"
 )
@@ -47,9 +48,46 @@ type Deps struct {
 	Clock  core.Clock
 	Random core.Random
 
+	// HTTP 是出站请求用的客户端。
+	//
+	// 做成字段而不是在调用点 `mcloudio.NewClient()`，理由与上面三个流同一条：
+	// 登录与签到这两条叶子**真的会打上游**，而 CLI 的产品形态是"打了什么、
+	// 打了几次、终端上印了什么"—— 这些只有把客户端换掉才测得出来。
+	// ⚠ nil 表示"用真实的那一个"（[Deps.http] 惰性构造），
+	// 于是 `DefaultDeps()` 不必为了一次 `--version` 去建连接池。
+	//
+	// ⚠⚠ 测试里**不许**留空：nil 会连到真实上游，而"连不上"的表现是
+	// 卡在超时上、**不是**变红 —— 见 helpers_test.go 里 [refusingClient] 那条。
+	HTTP core.HTTPClient
+
+	// Waiter 是扫码轮询的等待器（登录那条循环最长要等 120 秒）。
+	//
+	// 与 [Deps.HTTP] 同一条理由，且更紧迫：Go 的 `time.Sleep` 就是真的睡，
+	// 没有 tokio `start_paused` 那种虚拟化定时器（方案 §6.1 #72）。
+	// 硬写 `app.RealWaiter{}` 的话，一条"轮询到成功"的用例要真等好几个轮询间隔，
+	// 而**挂住**的测试在 CI 里看起来就是超时 —— 没人会去读它为什么超时。
+	// ⚠ nil 表示"用真的那个"（[Deps.waiter] 惰性构造）。
+	Waiter app.Waiter
+
 	// line 是 Stdin 上的**共享**读取器。必须共享：每次调用新建一个 bufio.Reader
 	// 会把上一次多读进缓冲区的行丢掉 —— "读两次口令"于是变成"读同一行两次"。
 	line *bufio.Reader
+}
+
+// waiter 返回等待器（惰性构造真的那个）。
+func (d *Deps) waiter() app.Waiter {
+	if d.Waiter != nil {
+		return d.Waiter
+	}
+	return app.RealWaiter{}
+}
+
+// http 返回出站客户端（惰性构造真实的那个）。
+func (d *Deps) http() core.HTTPClient {
+	if d.HTTP != nil {
+		return d.HTTP
+	}
+	return mcloudio.NewClient()
 }
 
 // DefaultDeps 是真实世界那一份。

@@ -317,7 +317,7 @@ type SmsLogin struct {
 	// random 是发码请求里的 `random`：**24 位**十六进制（不是 UUID）。
 	random string
 	// remainGetTimes 是服务端给的配额余量。跟踪它是为了不把配额无谓耗光。
-	remainGetTimes *uint32
+	remainGetTimes *int64
 }
 
 // StartSmsLogin 开始一次短信登录。
@@ -338,7 +338,7 @@ func (s *SmsLogin) Phone() string { return s.phone }
 func (s *SmsLogin) Profile() *upstream.ClientProfile { return s.profile }
 
 // RemainGetTimes 返回配额余量（服务端每次成功发码时返回）。
-func (s *SmsLogin) RemainGetTimes() *uint32 { return s.remainGetTimes }
+func (s *SmsLogin) RemainGetTimes() *int64 { return s.remainGetTimes }
 
 // Random 返回本轮发码用的 `random`。换一次发码要换一个值，所以失败重试时用 [SmsLogin.Reroll]。
 func (s *SmsLogin) Random() string { return s.random }

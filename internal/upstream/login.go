@@ -649,7 +649,11 @@ const (
 type SendSmsOutcome struct {
 	Kind SendSmsKind
 	// RemainGetTimes 在 [SmsSent] 下有效：配额余量，调用方应当跟踪以免无谓消耗。
-	RemainGetTimes *uint32
+	//
+	// ⚠ 用 `*int64` 而不是无符号窄类型：它是上游给的一个**计数**，
+	// Go 里计数就是带符号的整型。收窄成 `uint32` 会让"某天上游给个负数"
+	// 变成一次静默的绕回（4294967295 次余量），而那种错只在真跑时才看得见。
+	RemainGetTimes *int64
 	// CaptchaType 在 [SmsNeedSlider] / [SmsSliderExhausted] 下有效。
 	CaptchaType *int64
 	// Code / Message 在 [SmsOther] 下有效。
@@ -686,8 +690,7 @@ func ClassifySendSms(envelope *Envelope) SendSmsOutcome {
 		if ok {
 			if obj, isObj := payload.(map[string]any); isObj {
 				if n, ok := asInt64(obj["remainGetTimes"]); ok && n >= 0 {
-					remain := uint32(n)
-					return SendSmsOutcome{Kind: SmsSent, RemainGetTimes: &remain}
+					return SendSmsOutcome{Kind: SmsSent, RemainGetTimes: &n}
 				}
 			}
 		}
