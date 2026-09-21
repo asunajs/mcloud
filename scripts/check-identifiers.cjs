@@ -37,6 +37,17 @@ const path = require("node:path");
 
 const REPO_ROOT = path.join(__dirname, "..");
 
+/**
+ * 本脚本自己的相对路径。
+ *
+ * 它**也会被扫** —— 这是有意的：这个文件里抄一条真实值当例子就是事故
+ * （本文件的头注释记着第一版正是这么栽的：跑起来第一件事就是抓到它自己）。
+ *
+ * ⚠ 但它**不能**用来证明「某条 `ALLOWED` 还活着」：表就在这个文件里，
+ * 加一条假条目就等于自证。所以 `allowedSeen` 不收本文件的命中 —— 见那里。
+ */
+const SELF_REL = "scripts/check-identifiers.cjs";
+
 /** 合成号段前缀。 */
 const SYNTHETIC_PREFIX = "199";
 
@@ -157,6 +168,34 @@ const TEXT_EXT = new Set([
   // `h5-device-id.py`）—— 它们天天跟真实流量打交道，是最容易把真实标识顺手写进
   // 字面量的一类文件。漏了它，守卫就漏掉了风险最高的一角。
   ".py",
+  // `.tsx` 是前端组件的后缀。它与上面 `.go` / `.py` 是**同一种漏法**：
+  // `.ts` 在表里、`.tsx` 不在，差一个字母，而"不在"的表现同样是静默通过。
+  // （实测：`web/src/pages/*.tsx` 六个文件当时一个都没被扫到。）
+  ".tsx",
+  // `.csv` 是**抓包导出的请求/响应表**（`docs/capture/thirdlogin-*.csv`）。
+  // 抓包产物是本仓库里最可能夹带真实号码的一类文件 —— 它不在表里的时候，
+  // 守卫恰好对"风险最高的一角"闭着眼。见 docs/capture 的说明。
+  ".csv",
+  // 无后缀 —— `LICENSE` / `.gitignore` / `.githooks/pre-commit` 这些。
+  // 它们里有两类**真脚本**（`.githooks/` 下的钩子），漏掉同样是静默的。
+  "",
+]);
+
+/**
+ * 刻意**不扫**的后缀。每条要写理由。
+ *
+ * ⚠ 这张表与 `TEXT_EXT` **合起来**必须覆盖仓库里出现过的每一个后缀 ——
+ * 有第三种情况就失败（见 `checkExtensionCoverage`）。
+ *
+ * 为什么要有这张表：`TEXT_EXT` 是手维护的，而它**已经漏过三次**
+ * （`.go` / `.py` / `.tsx`+`.csv` 都是事后补的）。漏了不会自报，
+ * 表现是"扫了 503 个文件，通过"。有了这张表，**新增一类文件必须显式做一次
+ * 决定**（扫，或者写理由不扫），而不是被静默跳过。
+ */
+const NOT_SCANNED_EXT = new Map([
+  [".mod", "go.mod：模块名与依赖声明，是构建清单、不含用户数据"],
+  [".sum", "go.sum：依赖校验和清单，同上"],
+  [".lock", "Cargo.lock（legacy 侧的依赖版本清单），同上"],
 ]);
 
 function trackedFiles() {
@@ -191,12 +230,36 @@ function decodedPayloads(text) {
   return out;
 }
 
-function scan(label, text, violations) {
+/**
+ * 本次真正**命中**过的 `ALLOWED` 值 —— 只有它被用来放行一次违规时才算。
+ *
+ * ⚠ 这与 `ALLOWED.size` 是两回事，而且必须分开：
+ * `ALLOWED.size` 量的是**表**，`allowedSeen.size` 量的是**事实**。
+ * 末尾那行摘要如果打印表的大小，就等于说"登记了 12 条"——
+ * 哪怕其中 11 条早就不存在了也照说不误（这正是门禁脚本上一轮踩过的坑：
+ * 横幅量的是清单，不是这一次真的跑了什么）。
+ *
+ * ⚠⚠ **本文件自己的命中不算数**（`countAlive = false`）。
+ * 表的正文就写在 `SELF_REL` 里，而 `SELF_REL` 也在扫描范围内 ——
+ * 若把它算进去，**每一条 `ALLOWED` 都必然"还活着"**（被自己的正文命中），
+ * 下面的死条目检查就**永远不会失败**：随便加一条假条目都能自证。
+ * 实测踩到：加一条**仓库里根本没有**的假值（`["1370…009", "假条目"]`）后，
+ * 仍然报"登记表 13 条、本次命中 13 条"、退 0。
+ * ⚠ 写这段说明时踩了同一个坑：注释里抄了一个**形状完整**的假号码当例子，
+ * 本脚本扫到自己、当场变红 —— 举例子时把数字串打断（上面那串里的 `…`）。
+ * ⇒ 判据是「**别处**还有没有这个值」，不是「这个值在不在仓库里」。
+ */
+const allowedSeen = new Set();
+
+function scan(label, text, violations, countAlive = true) {
   for (const [kind, re] of SHAPES) {
     for (const m of text.matchAll(re)) {
       const value = m[1];
       if (value.startsWith(SYNTHETIC_PREFIX)) continue;
-      if (ALLOWED.has(value)) continue;
+      if (ALLOWED.has(value)) {
+        if (countAlive) allowedSeen.add(value);
+        continue;
+      }
       violations.push({ label, kind, value });
     }
   }
@@ -206,7 +269,11 @@ function scan(label, text, violations) {
   // 给前 6 后 4 足够定位（`grep` 一下就找到）。
   for (const m of text.matchAll(SENSITIVE_KEY_VALUE)) {
     const [, key, value] = m;
-    if (ALLOWED.has(value) || isObviousPlaceholder(value)) continue;
+    if (ALLOWED.has(value)) {
+      if (countAlive) allowedSeen.add(value);
+      continue;
+    }
+    if (isObviousPlaceholder(value)) continue;
     const masked = `${value.slice(0, 6)}…${value.slice(-4)}`;
     violations.push({
       label,
@@ -216,15 +283,35 @@ function scan(label, text, violations) {
   }
 }
 
+/**
+ * 仓库里出现过的后缀，有没有**既不在 `TEXT_EXT`、也不在 `NOT_SCANNED_EXT`** 的。
+ *
+ * 返回 `后缀 → 文件名[]`（空的 Map = 覆盖完整）。
+ * 这是把"守卫扫哪些文件"从**静默**改成**显式**的那一下。
+ */
+function checkExtensionCoverage(files) {
+  const unregistered = new Map();
+  for (const rel of files) {
+    if (rel.startsWith("target/") || rel.startsWith("node_modules/")) continue;
+    const ext = path.extname(rel);
+    if (TEXT_EXT.has(ext) || NOT_SCANNED_EXT.has(ext)) continue;
+    if (!unregistered.has(ext)) unregistered.set(ext, []);
+    unregistered.get(ext).push(rel);
+  }
+  return unregistered;
+}
+
 function main() {
   const violations = [];
+  const problems = [];
+  const files = trackedFiles();
+  const vendorSeen = new Set();
   let scanned = 0;
-  let vendorSkipped = 0;
 
-  for (const rel of trackedFiles()) {
+  for (const rel of files) {
     if (rel.startsWith("target/") || rel.startsWith("node_modules/")) continue;
     if (VENDOR_SOURCE_PATHS.includes(rel)) {
-      vendorSkipped += 1;
+      vendorSeen.add(rel);
       continue;
     }
     if (!TEXT_EXT.has(path.extname(rel))) continue;
@@ -237,12 +324,66 @@ function main() {
     }
     scanned += 1;
 
-    scan(rel, text, violations);
+    // 本文件自己的命中可以**报违规**（抄了真实值当例子就是事故），
+    // 但不许用来证明 `ALLOWED` 条目还活着 —— 表正文就在本文件里。见 `allowedSeen`。
+    const countAlive = rel !== SELF_REL;
+    scan(rel, text, violations, countAlive);
     decodedPayloads(text).forEach((decoded, i) => {
-      scan(`${rel}（base64 载荷 #${i + 1}）`, decoded, violations);
+      scan(`${rel}（base64 载荷 #${i + 1}）`, decoded, violations, countAlive);
     });
   }
 
+  // ── 下面几条查的都是**表本身**，不是扫出来的违规。分开报，别混在一起 ──
+
+  // 1. 覆盖范围：有后缀两边都不在 ⇒ 有人加了一类新文件，守卫静默跳过了它。
+  const unregistered = checkExtensionCoverage(files);
+  if (unregistered.size > 0) {
+    problems.push(
+      "以下后缀既不在 TEXT_EXT（要扫）也不在 NOT_SCANNED_EXT（写理由不扫）——\n" +
+        "  这类文件现在**被静默跳过**。请二选一：加进 TEXT_EXT，或加进 NOT_SCANNED_EXT 并写明理由。\n" +
+        [...unregistered.entries()]
+          .sort((a, b) => b[1].length - a[1].length)
+          .map(([ext, list]) => `    ${ext === "" ? "(无后缀)" : ext}  ×${list.length}：${list.slice(0, 3).join(", ")}${list.length > 3 ? " …" : ""}`)
+          .join("\n"),
+    );
+  }
+
+  // 2. `ALLOWED` 里的死条目 —— **别处**已经找不到这个值了，这条理由过期了。
+  //    与 check-go-jsontags.cjs 的 stale 检查同一套判据（那边早就有，这边一直没有）。
+  //    ⚠ 判据的措辞是"别处"：本文件自己的命中不算（见 allowedSeen），
+  //    否则这条检查是恒真的空操作。
+  const staleAllowed = [...ALLOWED.keys()].filter((v) => !allowedSeen.has(v));
+  if (staleAllowed.length > 0) {
+    problems.push(
+      "ALLOWED 里有**对不上**的条目（那个值已经不在仓库里了）—— 请删掉：\n" +
+        staleAllowed.map((v) => `    ${v}`).join("\n"),
+    );
+  }
+
+  // 3. `VENDOR_SOURCE_PATHS` 的豁免必须**真的在豁免一个东西**。
+  //    这个清单自己漏过一次（见上面注释）：漏的表现是"没报错"，不是"报错"。
+  const deadVendor = VENDOR_SOURCE_PATHS.filter((p) => !vendorSeen.has(p));
+  if (deadVendor.length > 0) {
+    problems.push(
+      "VENDOR_SOURCE_PATHS 里有**对不上**的路径（文件改名 / 删除 / 路径写错）——\n" +
+        "  豁免没生效，而这**不会**让扫描失败，只是悄悄不再豁免它。请修正或删掉：\n" +
+        deadVendor.map((p) => `    ${p}`).join("\n"),
+    );
+  }
+  const noopVendor = VENDOR_SOURCE_PATHS.filter(
+    (p) => vendorSeen.has(p) && !TEXT_EXT.has(path.extname(p)),
+  );
+  if (noopVendor.length > 0) {
+    problems.push(
+      "VENDOR_SOURCE_PATHS 里有**空豁免**（后缀本来就不在扫描范围里，豁不豁免都一样）——\n" +
+        "  它会让人以为「这一角已经处理过了」。请删掉或说明：\n" +
+        noopVendor.map((p) => `    ${p}`).join("\n"),
+    );
+  }
+
+  // ⚠ 两段都报完再退出，**不要**在 problems 那里提前 exit ——
+  // 否则"表过期"会把"扫出真实标识"挡在报告之外，而那才是更要紧的那条。
+  // （反向测试也依赖这一点：两条守卫要能各自单独观测到。）
   if (violations.length) {
     console.error(
       `检查失败：发现 ${violations.length} 处疑似真实标识。\n` +
@@ -261,15 +402,27 @@ function main() {
         `  scripts/check-identifiers.cjs 的 ALLOWED 表。\n` +
         `真实值一律不准登记 —— 必须改成 ${SYNTHETIC_PREFIX} 号段。`,
     );
-    process.exit(1);
   }
 
+  if (problems.length > 0) {
+    console.error(`\n守卫自身的问题：\n`);
+    for (const p of problems) console.error(`  ✗ ${p}\n`);
+    console.error(
+      "这几条查的是**表**（扫哪些文件 / 哪些值算例外），不是扫出来的违规 ——\n" +
+        "表过期不会自报，表现是「通过」，所以单独拦一次。\n",
+    );
+  }
+
+  if (violations.length || problems.length) process.exit(1);
+
+  // ⚠ 摘要里的两个数都取**观测值**，不取表的大小：
+  // `allowedSeen` 是本次真命中过的，`vendorSeen` 是本次真跳过的。
+  // 表的大小另有 `ALLOWED.size` / `VENDOR_SOURCE_PATHS.length` 可看，
+  // 但那两个数是"我们登记了什么"，不是"这次发生了什么"。
   console.log(
     `检查通过：扫了 ${scanned} 个文本文件（字面 + base64 解码后），` +
-      `共发现 ${ALLOWED.size} 个已登记的非 ${SYNTHETIC_PREFIX} 值，无未登记的疑似真实标识。` +
-      (vendorSkipped > 0
-        ? `（另有 ${vendorSkipped} 个上游源码素材按来源豁免，见 VENDOR_SOURCE_PATHS）`
-        : ""),
+      `登记表 ${ALLOWED.size} 条、本次命中 ${allowedSeen.size} 条，无未登记的疑似真实标识。` +
+      `（另有 ${vendorSeen.size} 个上游源码素材按来源豁免，见 VENDOR_SOURCE_PATHS）`,
   );
 }
 

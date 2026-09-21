@@ -546,7 +546,7 @@ Go 侧 17+ 张表（迁移 `001` 建 17 张，23 个 `.sql`，`GET_LOCK('caiyun_
 | 存储 | 内容 | 判定 |
 | --- | --- | --- |
 | **env** | 170 处读取，**构造期与调用期混用**，core 层完全靠现读 | 业务参数全在这一层 ⇒ **不搬这个做法** |
-| `system_configs` KV 表 | 种子 15 行，**其中 12 行无人读**（`task_concurrency`/`task_schedule`/`token_cache_ttl`/`exchange_schedule_time_1|2`/`exchange_update_time`/`exchange_enable_priority`/`exchange_default_timeout`/`exchange_max_global_concurrency`/`exchange_auto_retry_failed`/`exchange_log_retention_days`/`product_categories`） | **不搬**；`exchange_enabled` 更是**只有展示消费者 = 死旋钮，且缺省 fail-open** |
+| `system_configs` KV 表 | 种子 15 行，**其中 12 行无人读**（`task_concurrency`/`task_schedule`/`token_cache_ttl`/`exchange_schedule_time_1\|2`/`exchange_update_time`/`exchange_enable_priority`/`exchange_default_timeout`/`exchange_max_global_concurrency`/`exchange_auto_retry_failed`/`exchange_log_retention_days`/`product_categories`） | **不搬**；`exchange_enabled` 更是**只有展示消费者 = 死旋钮，且缺省 fail-open** |
 | `task_configs` | 只有全局 `is_enabled`/`sort_order`/`run_in_batch` | ✅ 搬表，见 §5.4 |
 | `internal/core/config/`（YAML + `FeaturesConfig` 10 个 bool） | **零 importer、仓库内零 YAML 文件**；作者已在 `pkg/config/config.go:1-6` 留注释承认"曾经造成两条分叉的配置路径"，然后**以另一形式重新长出同一个坑** | **不搬** |
 

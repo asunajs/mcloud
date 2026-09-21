@@ -126,11 +126,11 @@ export const CHANNEL_SRC = { web: "10000034", pc: "10200153", android: "10000023
 | 409 / 1005 云朵中心入口 | `tasks/app/runners.ts:99-130` | 走 **`mrp.mcloud.139.com`** 的 `…/market/signin/page/doTask?client=app&deviceId=…` |
 | 刷新令牌 | `apis/auth.ts:151-166` | `refreshToken(clientType = "414")`（形参）+ 固定 `x-yun-app-channel` / `x-huawei-channelsrc` = `10000023` |
 | 云笔记 | `apis/note.ts:20-26` | `x-huawei-channelsrc: 10001400`、`APP_CP: android`、`CP_VERSION: 3.2.0`、`User-Agent: mobile` |
-| 分享（建/删外链） | `apis/share.ts:48-56` | `mcloud-channel: 1000101`、`x-huawei-channelsrc` / `x-yun-app-channel` / `x-yun-channel-source` = `10000034`、`x-yun-client-info: ‖9|7.14.4|edge|…`（**冒充 Edge/Linux**） |
+| 分享（建/删外链） | `apis/share.ts:48-56` | `mcloud-channel: 1000101`、`x-huawei-channelsrc` / `x-yun-app-channel` / `x-yun-channel-source` = `10000034`、`x-yun-client-info: ‖9\|7.14.4\|edge\|…`（**冒充 Edge/Linux**） |
 | AI 工作台 | `apis/ai-workbench.ts:163-175` | `x-yun-app-channel: sourceChannel`（形参，默认 `10175`）；`getCloudTaskStatus` 的**请求体**也带同一个 `sourceChannel` |
 | AI 相机 / 上传 10 图 | `tasks/ai-tasks.ts:28,143` | `x-yun-app-channel: 10214200` + `x-yun-client-info: ‖8‖…`（**一个几乎空的设备串**） |
 | AI 相机对话体 | `tasks/ai-tasks.ts:110` | body `sourceChannel: "101"` |
-| 玩 AI 抽红包 | `tasks/play-ai-special/task.ts:202-203` | `x-yun-client-info: 6‖2|12.6.0‖iPhone|DE3B…‖ios 18.7…`（**冒充 iPhone**）+ `x-yun-app-channel: 101` |
+| 玩 AI 抽红包 | `tasks/play-ai-special/task.ts:202-203` | `x-yun-client-info: 6‖2\|12.6.0‖iPhone\|DE3B…‖ios 18.7…`（**冒充 iPhone**）+ `x-yun-app-channel: 101` |
 | 邮箱 | `apis/mail139.ts:100,132` | XML 里 `<string name="channel">10242000</string>` |
 | 红包派对 | `tasks/cloud-phone-redpack/api.ts:8,126` | `CHANNEL_SRC = "red-mcloudapp-001"`（**非数字**）；`getRcsToken(targetSourceId = "0")` |
 | 通知任务列表 | `apis/task.ts:37-46` | `clientVersion: "11.2.1"` —— **与真机不同**，见 `README.md` 的"旧 TS 与真实流量不一致"对拍表 |
