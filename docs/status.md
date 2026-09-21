@@ -466,8 +466,21 @@
 **新长出来的两条通则**（已进 §6.1）：**#88** 借口表会过期且过期时不报错；
 **#89** 用向量的 `name` / 键当循环源的断言，键一改名就**静默少测一条**（判据必须双向）。
 
-**反向测试**：新断言 6 个变异全部如期变红
-（`target/revtest-login-vectors.py`；改实现 3 条 + 改向量文件 3 条）。
+**反向测试**：新断言 **6 个变异全部如期变红**。
+⚠ 脚本在 `target/`（**gitignored**），所以把变异逐条记在这里 ——
+否则下一个人只看到"做过反向测试"，复现不了：
+
+| 变异打在哪 | 改什么 | 应变红的目标 |
+| --- | --- | --- |
+| 实现 | 口令前缀少一个冒号（`"fetion.com.cn:"` → 无冒号） | `TestLoginVectorSha1PasswordHashesWithTheSourcePrefix` |
+| 实现 | 滑块 IV 改一个字符（`PuzzleAESIV` 末位 `'4'` → `'5'`） | `TestLoginVectorPuzzleAnswerMatchesTheRealCaptures` |
+| 实现 | 设备 id 后缀多一个字符（`DeviceIDSuffix` → `"-ENDINN"`） | `TestDeviceFingerprintMatchesTheGoldenVectorShape` |
+| **数据** | 向量里**加**一个没人接的常量 | `TestLoginVectorConstantsAllHaveAGoCounterpart`（正向） |
+| **数据** | 向量里把一个常量**改名** | 同上（反向：Go 侧在断言一个已不存在的名字） |
+| **数据** | 向量里**改一位密文** | `…AesEcbEncryptsToTheSameBytes` + `…TwoSectionsDescribeTheSameCiphertext` |
+
+⭐ 后三条是这一轮的新东西：**变异打在"数据"那一侧**。
+只变异实现会漏掉"数据的键名漂移"这类失效（见 §6.1 #89）。
 
 **验收**：`922 个测试`（914 → +8）、`九项门禁全绿`、golden **133 条断言全绿**、
 `test/golden/` **11 份向量全部有消费者**（此前 10/11）。
