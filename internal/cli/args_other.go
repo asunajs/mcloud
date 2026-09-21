@@ -110,7 +110,7 @@ func newFixtureCommand(deps *Deps, out *output) *cobra.Command {
 		Use:   "extract",
 		Short: "HAR → 脱敏 fixture",
 		RunE: func(*cobra.Command, []string) error {
-			return notMigrated("fixture extract")
+			return runFixtureExtract(out, har, dir, dryRun)
 		},
 	}
 	extract.Flags().StringVar(&har, "har", defaultFixtureHarDir, "单个 .har 文件或包含 .har 的目录")

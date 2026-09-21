@@ -19,8 +19,6 @@ import (
 var unmigrated = map[string]string{
 	"signin": "缺多账号编排与四态渲染：Rust 侧 signin_run.rs / signin_one.rs / " +
 		"signin_output.rs（约 1,264 行）。app 层的 CloudSignIn / OpenSignInSession 已在",
-	"fixture extract": "缺 HAR → 脱敏 fixture 的抽取器：Rust 侧 fixture_extract.rs（769 行）。" +
-		"io 层只有**回放**侧（FixtureClient），脱敏黑名单那半在 core.Sanitize",
 }
 
 // UnmigratedBackends 返回"参数面已就位、后端还没迁"的子命令及各缺哪一层。

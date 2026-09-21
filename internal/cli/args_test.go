@@ -303,16 +303,17 @@ func TestCompletionSubcommandStaysOff(t *testing.T) {
 // 反过来也管住"后端补上了却忘了把表里那行删掉" —— 那时它会以另一种方式红。
 func TestNoLeafIsSilentlyUnimplemented(t *testing.T) {
 	implemented := map[string]bool{
-		"capabilities": true,
-		"version":      true,
-		"user init":    true,
-		"user list":    true,
-		"migrate":      true,
-		"login qr":     true,
-		"login sms":    true,
-		"smid show":    true,
-		"smid reset":   true,
-		"smid refresh": true,
+		"capabilities":    true,
+		"version":         true,
+		"user init":       true,
+		"user list":       true,
+		"migrate":         true,
+		"login qr":        true,
+		"login sms":       true,
+		"smid show":       true,
+		"smid reset":      true,
+		"smid refresh":    true,
+		"fixture extract": true,
 	}
 	gaps := UnmigratedBackends()
 
