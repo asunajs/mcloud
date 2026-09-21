@@ -109,22 +109,32 @@ func runCLIWithDeps(
 	return out.String(), errOut.String(), code
 }
 
-// assertExitWith 跑一条命令并核对退出码。
+// assertAccepted 跑一条**参数合法**的命令，判据是"解析器放行了它"。
 //
-// `want == ExitRun` 时额外要求 stderr 里有"尚未迁移"：这一条把"解析器接受了"
-// 与"真的走到后端了"分开钉。少了它，一个把互斥关系写反的改动只要还能退非零，
-// 用例就照样绿 —— 而那正是"看起来被断言了、其实没有"。
-func assertExitWith(t *testing.T, head, argv []string, want int) {
+// ⚠ 它**故意**不断言退出码等于某个具体值。这条命令现在真的会跑后端，
+// 跑起来成不成功取决于库里的状态（空库退 0、账号越界退 1），
+// 而"参数合法"这件事**只能**用"不是用法错（退 2）"来钉。
+//
+// 它取代了早先的 `assertExitWith(..., ExitRun)` —— 那个版本还要求 stderr 里有
+// "尚未迁移"，而全部叶子落地之后这句话不会再出现了。
+func assertAccepted(t *testing.T, head, argv []string) {
+	t.Helper()
+	full := append(append([]string{}, head...), argv...)
+	_, stderr, code := runCLI(t, "", full...)
+	if code == ExitUsage {
+		t.Errorf("%v 参数合法，却被判成用法错误：stderr=%q", full, stderr)
+	}
+}
+
+// assertUsageRejected 跑一条**参数非法**的命令：退 2，且 stdout 干净。
+func assertUsageRejected(t *testing.T, head, argv []string) {
 	t.Helper()
 	full := append(append([]string{}, head...), argv...)
 	stdout, stderr, code := runCLI(t, "", full...)
-	if code != want {
-		t.Errorf("%v 应退 %d，实得 %d\n  stderr=%q", full, want, code, stderr)
+	if code != ExitUsage {
+		t.Errorf("%v 应退 %d，实得 %d\n  stderr=%q", full, ExitUsage, code, stderr)
 	}
-	if want == ExitRun && !strings.Contains(stderr, "尚未迁移") {
-		t.Errorf("%v 该被解析器接受并走到后端缺口，stderr=%q", full, stderr)
-	}
-	if want == ExitUsage && stdout != "" {
+	if stdout != "" {
 		t.Errorf("%v 用法错误不该往 stdout 写东西，实得 %q", full, stdout)
 	}
 }

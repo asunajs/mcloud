@@ -29,8 +29,19 @@ import (
 // 它是这一族里**已知唯一一个"不带就失败"**的接口（H5 标了 `isDeviceId: true`）。
 // 所以让它凑不出空值 —— 漏发在编译期就暴露。
 //
-// ⚠ 这里要的是 **H5 那个 65 字节 blob**（iOS `SMSdk.getDeviceId()`），
-// **不是** `smid` 产出的 `B<uuid>`。两者同名不同物。
+// ⚠ 这里要的**就是** [DeviceID] 换回来的那个值（`"B"` + 88 字符 base64），
+// 也就是 `app.DeviceID` / CLI `--device-id` 传下来的那一个。
+//
+// 早先这里写的是"H5 那个 65 字节 blob，**不是** `smid` 产出的 `B<uuid>`" ——
+// 那句是**误读**，已作废：签到页的 `fp.min.js` 与本项目的 `upstream::smid`
+// 打的是同一个 `deviceprofile/v4`（同 host / organization / appId / 公钥，
+// 逐字比对过），所以两边拿到的是同一个值。
+// 反证也在：账号 A/B 上用 `smid` 现产出的 id 打 `receiveV3`，**真领到了**
+// （见 docs/capture/app-signin-samples.txt §9.1）。
+//
+// ⚠ 真正要注意的是另一件事：**不带就报错**（回 `615`），
+// 而同一个值在签到（`infoV3` / `startSignIn`）上是**可以不带**的 ——
+// 别把"签到能不带"外推到这一族。
 //
 // # `cloudType` 为什么是可选
 //

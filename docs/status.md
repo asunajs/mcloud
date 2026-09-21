@@ -20,11 +20,13 @@
 **当前：步 1（`mcloud-core`）✅ 收口（2026-09-21，判据与一条例外见下方"步 1 收口"）；**&#x6B65; 2（`mcloud-upstream`）已整族落&#x5730;**（`login` / `client` / `app_client` / `app_login` / `app_signin` 全族 / `smid`，150 条测试）；**&#x6B65; 3（`mcloud-io`）已整族落地\*\*（schema / store / store::user / store::config / datetime / **legacy_import** / fixture / HTTP 客户端 / 随机源，150 条测试）；步 4 已落地 `capabilities`（注册表 + `login`）、`exec`、`app::payload` / `smid` / `session` / **`signin/*` 整族**。
 
 ⇒ **`app::migration` / `cli` / `server` 的阻塞已解除**（此前全被步 3 挡着）。\**
-⇒ **`server` 已于本轮整包落地**（26 条测试）；**`cli` 的参数面 / 退码 / 输出约定 / 口令边界
-   已落地**（24 条测试，七条叶子刻意不接、登记在 `internal/cli/unmigrated.go`）。
+⇒ **`server` 已于本轮整包落地**（26 条测试）。
 ⇒ **`app` 层已全部落地**（2026-09-21）：最后两块 `login`（扫码与短信的驱动，14 条）
-   与 `app_login`（App 端，13 条）已补上 —— 此后 **`cli` 那七条叶子不再有
-   "缺 app 层"这个理由**，只剩工作量（见下方「Go 侧 `cli` 落地」的缺口清单）。
+   与 `app_login`（App 端，13 条）已补上。
+⇒ ⭐ **`cli` 全部叶子落地**（2026-09-21，**116 条测试**）—— 那张「缺口表」
+   （`internal/cli/unmigrated.go`，登记"哪条叶子还没接后端、缺 Rust 侧哪个文件"）
+   **已随最后一条叶子一起退役**：它自己的用例就写着"表空了就该整个删掉"。
+   位置由 `TestEveryLeafActuallyRuns` 守着（12 个叶子逐个跑，一个都不许出现占位错误）。
 
 > ✅ **2026-09-21 起并发结束**，全部由本会话接手（此前最多三个会话在同一棵树上）。  
 > 已付出的可见代价：`docs/go-migration-plan.md` 的 §6.1 一度出现**两组 `#20`**，  
@@ -267,7 +269,7 @@
 | `upstream::smid`       | ✅          | 设备指纹（`733` 行）：`smid` 拼接 / `priId` / `tn`（**`tn` 还是空串时算摘要**）/ 25 条 DES 规则整表对拍 TS 侧向量 / 特征体绑定账号（`SmFingerprint`）与每次现算的一半（`SmUpload`）/ 上报与 `deviceId`（拼 `B` 前缀）（**18 条测试**）。⭐ `ep` **复现不了**是算法性质（PKCS#1 v1.5 随机填充 + 盲化），不是随机源没注入到位 —— 断言显式排除它并另开一条钉住                                                                                                                                                  |
 | `upstream::app_signin` | ✅ **整族落地** | 常量（由 `app-signin-vectors` 的 `constants` 钉住）/ `Diagnose` / H5 与原生头 / 百分号编码 / 取值 helper + 建会话三段 + 签到与状态（`infoV3` / `startSignIn` / `taskListV3` / `doTaskPost`）+ 领取族（`receiveV3` / `receiveRevivalReward` / `multiple` / `receiveTaskExpansion`）+ 记录族（`cloudRecordV2` / `record` / `backupgift/*`）+ **发送层**（`Upstream` 上的 15 个方法）（**113 条测试，整包合计**）。`app-signin-vectors.json` 从"只有 Rust 读"变成**两边都读** |
 | `server`               | ✅          | HTTP 层（`1,481` 行 Rust）：**领域错误 → HTTP 的映射**（`statusAndCode` 用兜底而不是逐个列，新增 `ErrorKind` 默认落 500 而不是让人挑一个"看起来合适"的 4xx；5xx 走类别文案**不回吐原文** —— 那些原文里实测带过 SQL 片段与上游响应体）、免登录**白名单**（漏登记 = 默认要登录）、未初始化的闸门（查库失败时**不给结论**）、会话 cookie（`HttpOnly` + `SameSite=Lax`，`Secure` 按部署）、账号/运行/定时任务三组路由、`SSE` 事件流（`Last-Event-ID` 与 `?after=` 同语义，先订阅再读库，队列满时重订阅**不静默跳过**）（**26 条测试**，用 `httptest` 起真服务器验状态码 / cookie 属性 / SSE 帧 / 错误体形状）。⭐ 见下方「服务端」两节 |
-| `cli`                  | 🟡          | 参数面 / 退码 / 输出约定 / 口令边界已在；**`login qr·sms`、`smid show·reset·refresh`、`fixture extract` 已接上真后端**（合计 **38 条测试**）。⭕ **还剩一条叶子**：`signin` 编排与四态渲染（约 1,264 行），登记在机器可读的表 `internal/cli/unmigrated.go`，点名缺 Rust 侧哪个文件；接了真后端的是 `version` / `capabilities` / `user init·list` / `migrate` / `login qr·sms` / `smid show·reset·refresh` / `fixture extract`。⭐ 见下方「Go 侧 `cli` 落地」 |
+| `cli`                  | ✅ **全部叶子** | 参数面 / 退码 / 输出约定 / 口令边界 + **12 个叶子全部接上真后端**（**116 条测试**）：`version` / `capabilities` / `user init·list` / `migrate` / `login qr·sms` / `smid show·reset·refresh` / `fixture extract` / **`signin`（编排 1,444 行 + 渲染 584 行，42 条用例）**。⭕ 缺口表 `unmigrated.go` **已退役**（表空了就该整个删掉）；位置由 `TestEveryLeafActuallyRuns` 守着。⭐ 见下方「Go 侧 `cli` 落地」 |
 
 - 落点 `internal/capabilities`、`internal/exec`（包名 `mcloudexec`）、`internal/app/payload.go`。
 - ⚠ **`app` 现在仍只是"组装根接上了 IO"那个骨架**（`internal/app/app.go` 只有一个 `Deps`）。  
@@ -320,11 +322,22 @@
   （后者走 `app.MigrationPlanFromRepoRoot` + `app.RunMigration`，`--dry-run` 一条写都不发）、
   `login qr·sms`（**12 条**）、`smid show·reset·refresh`（**11 条**）、
   `fixture extract`（**15 条**）。
-- **还剩一条叶子**，仍写在机器可读的表 `internal/cli/unmigrated.go` 里：
-  每条点名缺的是 Rust 侧哪个文件、约多少行，并有测试要求
-  "已注册的叶子要么有实现、要么在这张表里"，**不会有叶子被静默漏掉**。
-  缺口清单：`signin`（多账号编排 + 四态渲染，Rust 侧 `signin_run.rs` / `signin_one.rs` /
-  `signin_output.rs` 约 1,264 行；`app` 侧的 `CloudSignIn` / `OpenSignInSession` **已在**）。
+- ⭐ **`signin` 落地（最后一条叶子，2026-09-21）**：拆成**两条零编译依赖的线**并行做
+  —— 渲染层 `signin_render.go`（584 行，纯函数：结果 → 终端行 / `--json`）与编排层
+  `run_signin.go`（1,444 行），规格由第三条只读线产出（`docs/signin-cli-spec.md`，366 行）。
+  切法是"渲染层不调编排、编排层不写渲染"，两边各自只写自己的文件 ⇒ 同包也不会撞编译。
+  - 编排层覆盖 21 个 flag；**分支优先级照抄 Rust**（`--records > --prizes > --raw >
+    --status-only > 签到主路`），否则行为静默分叉。
+  - ⚠ **下标是"完整列表里的位置"，含停用账号** —— 一旦随启用状态变动，
+    同一个数字在不同时刻会指到不同账号上。
+  - ⚠ 三个**刻意**与 Rust 分叉的地方（都写在代码注释里）：进度行一律走 **stderr**；
+    `--prizes --json` 用 typed 结构、**不带** `raw`（Rust 那份会把 `userDomainId`
+    带出来）；"有账号但全停用"**不**再打"库里还没有账号"那句误导文案。
+  - 反向测试 **42 条全部实测变红**。
+- ⭐ **缺口表已退役**：`internal/cli/unmigrated.go`（连同 `notMigrated`、两条对价用例）
+  随最后一条叶子一起删掉 —— 表自己的用例就写着"表空了就该整个删掉"。
+  ⚠ 退役之后"某个叶子又变回没实现"就**没有守卫**了，所以补了
+  `TestEveryLeafActuallyRuns`（12 个叶子逐个跑，一个都不许出现占位错误）。
 - ⭐ **`fixture extract` 的核心判据是 fail closed**：写盘**之前**把整份产物再扫一遍，
   发现残留就**一个字节都不写**并报错退出。⭐ 这条分支**真实数据触发不了** ——
   脱敏规则刻意铺得比自检规则更宽（阈值 32 vs 40），否则每次抽取都会报警；
@@ -332,7 +345,10 @@
 - ⚠ **判据账要算对**：步 4 那句"19 项能力逐项打勾"现在**卡在 `capabilities` 注册表的条目数**
   （Go 侧实测 3 项：`sign` / `exchange` / `cloud-snapshot`），**不在 CLI** ——
   CLI 这边 `mcloud capabilities` 把那 3 项如实渲染出来了。
-- ⚠ **本轮未提交**（`internal/cli/*` + `cmd/mcloud/main.go` + `go.mod`/`go.sum` 仍在工作区）。
+- ⭐ **并发做法的结论**：这一块（`signin`，Rust 侧 1,264 行）用**三条线并行**做完 ——
+  一条只读调研出规格、两条各写一个文件（渲染 / 编排）。
+  ⚠ 能并行的前提是**先钉契约**：`signinView` 的字段形状先定死，两条线之间零编译依赖，
+  否则 Go 按包编译会让"一方改到一半"直接卡住另一方。
   期间撞到过一次 `jsontags` 报"白名单里有对不上的条目"，**那是并行会话在飞编辑**
   `scripts/check-go-jsontags.cjs` 与 `internal/server/{auth,error,routes}.go` 的瞬时状态 ——
   他们的 `012c55a`（server 整包，26 条测试）已在 2026-09-21 落地，之后 `gates-go.sh` → 九项门禁全绿。

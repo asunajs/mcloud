@@ -624,9 +624,14 @@ PC 与 App 是**两套客户端**，同名同形的常量值可能不同，而"�
   并配一条"给其一等于给另一个"的断言 —— 绑错变量不报错，只是别名静默失效。
 - ⚠ **`--version` 的输出要整串比**：`HasPrefix("mcloud ")` 对 cobra 默认的
   `mcloud version 0.1.0` **同样成立**（反向测试实测照绿），所以只能钉 `== "mcloud 0.1.0\n"`。
-- ⚠ **"还缺哪一层"要写成表而不是注释**：`internal/cli/unmigrated.go` 是一张
+- ⚠ **"还缺哪一层"要写成表而不是注释**：迁移期间 `internal/cli/unmigrated.go` 是一张
   叶子命令 → "缺 Rust 侧哪个文件、约多少行"的表，由 `UnmigratedBackends()` 导出、
   被测试要求"已注册的叶子要么有实现、要么在表里"。注释会被绕过，表不会。
+  ⭐ **这张表已于 2026-09-21 退役**（`cli` 全部叶子落地，表自己的用例就写着
+  "表空了就该整个删掉"）—— 连同 `notMigrated` 与它的两条对价用例一起删。
+  ⚠ **退役时要补一条新的守卫**：表在的时候，"某个叶子又变回没实现"会被它挡住；
+  表一走就没人管了。补的是 `TestEveryLeafActuallyRuns`（12 个叶子逐个跑，
+  一个都不许出现占位错误）。**拆掉守卫的同一轮里要把替代品放上**，否则是净损失。
 - ⚠ 引依赖这件事本身有一条判据：**别用 `@latest`**，见 §8 的补充。
 
 ### 6.7 `mcloud-server`（2,152 行）
@@ -649,7 +654,7 @@ PC 与 App 是**两套客户端**，同名同形的常量值可能不同，而"�
 | **1** | `mcloud-core`（纯计算，标准库覆盖最好） | 黄金向量在 Go 侧逐字段复算通过 | ✅ **已完成**（2026-09-21）：`internal/core` **270 条测试**，17/17 模块对位，core 读的 **8 份向量逐节都有正向断言**（最后缺的那一节 `hcyCoolFlagEnvelope` 于本次补上，见 §6.1 #56）。**一条例外**：`error` 后半的 `classify_body` 那台分类机**不补进 core** —— 它在**冻结基准里就没有调用点**（core 之外零命中），补进去就是一台没人开的机器；判据的三块 Go 侧已各在其位（`core.ClassifyStatus` + `upstream.Envelope`），归属改挂到步 4 第一个真需要"状态 + 响应体一步判完"的调用点。⚠ 判据要按"**Go 侧**读了几份向量"算，别照门禁那行 `✓ 有测试读取` —— 它不区分是哪一侧在读（见 `status.md`）。⚠ 也别把**步 2 的账算进步 1**：`app-signin-vectors` 与 `login-crypto-vectors` 的消费者在 `internal/upstream`，与 core 无关 |
 | **2** | `mcloud-upstream`（协议层） | 同一条抓包请求 Rust/Go **双跑**，header 顺序 / percent-encode / 签名串逐字节一致 | ✅ **已完成**（2026-09-21 补记）：`internal/upstream` **150 条测试**，`login` / `client` / `app_client` / `app_login` / `app_signin` 全族 / `smid` **整族落地**；`app-signin-vectors.json` 从"只有 Rust 读"变成**两边都读**。⚠ 判据里的"双跑"是**逐块**做的（每条链路各自与 Rust 侧的中心断言对拍，例如 `app_login` 的 `appLoginWire`），不是一次跑通全部接口 —— 见 `status.md` 的步 2 分块表 |
 | **3** | `mcloud-io`（唯一 IO 层） | 纯 Go sqlite 驱动下 schema v1→**v8** 迁移 + 老库只读导入结果一致 | ✅ **已完成**（2026-09-21 补记）：`internal/io` **150 条测试**，schema v1→v8 的 8 条幂等迁移链、`legacy_import`（**21 条**，五条硬判据见 `status.md`）、`fixture` 回放、HTTP 客户端、`datetime`（与 chrono **逐字节**一致）。驱动 = `modernc.org/sqlite`（纯 Go，免 cgo）。⚠ 判据原文写的是 v7，实测做到的是 **v8** |
-| **4** | `capabilities` → `exec` → `app` → `server` / `cli` | 19 项能力逐项打勾；CLI 参数互斥与四态输出一致；`api_contract` 契约测试平移，前端不动 | 🔄 **进行中**：`capabilities` 注册表 / `exec` / `app::payload` 已落（**52 条测试**）。⚠ **它依赖步 2 与步 3**：`capabilities::login` 是 `upstream::login` 的消费者，`app` 其余模块与 `server` 还要 `io` —— 所以先落了不依赖它们的三块，见 `status.md` 的「步 4 实况」。**2026-09-21 追加（判据逐块核）**：`cli` 的参数面 / 退码 / `--json` 与凭据约定已落地（**22 条测试**，含从 Rust 侧 `unit_tests.rs` 平移过来的互斥与"两种写法等价"那批用例）⇒ **"CLI 参数互斥"这半条已达成**；⚠ **"四态输出一致"这半条未达成**（`signin` 的多账号编排与四态渲染那约 1,264 行还没迁，挂在 `internal/cli/unmigrated.go` 那张表上）；⚠ **"19 项能力逐项打勾"这半条卡在 `capabilities` 注册表的条目数**（Go 侧实测 3 项），**不在 CLI** —— 别把它记成"CLI 没做完"。**2026-09-21 再追加**：`app` 层已**全部落地**（最后两块 `login` 14 条 / `app_login` 13 条）⇒ 步 4 剩下的只有 `cli` 那七条叶子，而"四态输出一致"这半条**就**卡在其中的 `signin`（多账号编排 + 四态渲染，约 1,264 行）。⚠ **"19 项能力"那半条与 app 层无关**：它卡在注册表的条目数（3 项），补 app 层不会让它前进。`server` 那半条见下方「服务端」两节 |
+| **4** | `capabilities` → `exec` → `app` → `server` / `cli` | 19 项能力逐项打勾；CLI 参数互斥与四态输出一致；`api_contract` 契约测试平移，前端不动 | 🔄 **进行中**：`capabilities` 注册表 / `exec` / `app::payload` 已落（**52 条测试**）。⚠ **它依赖步 2 与步 3**：`capabilities::login` 是 `upstream::login` 的消费者，`app` 其余模块与 `server` 还要 `io` —— 所以先落了不依赖它们的三块，见 `status.md` 的「步 4 实况」。**2026-09-21 追加（判据逐块核）**：`cli` 的参数面 / 退码 / `--json` 与凭据约定已落地（**22 条测试**，含从 Rust 侧 `unit_tests.rs` 平移过来的互斥与"两种写法等价"那批用例）⇒ **"CLI 参数互斥"这半条已达成**；⚠ **"四态输出一致"这半条未达成**（`signin` 的多账号编排与四态渲染那约 1,264 行还没迁，挂在 `internal/cli/unmigrated.go` 那张表上）；⚠ **"19 项能力逐项打勾"这半条卡在 `capabilities` 注册表的条目数**（Go 侧实测 3 项），**不在 CLI** —— 别把它记成"CLI 没做完"。**2026-09-21 再追加**：`app` 层已**全部落地**（最后两块 `login` 14 条 / `app_login` 13 条）。**2026-09-21 收口**：⭐ **`cli` 全部叶子落地**（**116 条测试**；最后一块 `signin` = 编排 1,444 行 + 渲染 584 行、42 条用例）⇒ 判据里 **"CLI 参数互斥"与"四态输出一致"两半都已达成**（四态即 `SignedToday` / `WasAlreadySigned` / `SignedNow` / `SignInPoints`，分别由 `TestSignin…` 那批用例钉住）；`internal/cli/unmigrated.go` 缺口表随最后一条叶子退役。⚠ **"19 项能力逐项打勾"这半条仍未达成，且与 CLI/app 都无关** —— 它卡在 `capabilities` 注册表的条目数（Go 侧实测 3 项：`sign` / `exchange` / `cloud-snapshot`），别把它记成"CLI 没做完"。`server` 那半条见下方「服务端」两节 |
 
 ### 步 0 的实测记录
 

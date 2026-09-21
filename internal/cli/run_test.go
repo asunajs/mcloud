@@ -302,18 +302,23 @@ func TestUnknownFlagIsUsageError(t *testing.T) {
 	}
 }
 
-// TestNotMigratedNamesTheMissingLayer：撞缺口时用户要能看到"缺哪一层"。
+// TestZeroArgSigninOnAnEmptyDatabaseIsNotAnError：零参数签到撞上空库**不是错误**。
 //
-// ⚠ 这条同时钉住退出码是 1 而不是 2：参数是完全正确的，这台二进制只是还没带上
-// 那段实现。退 2 会让调用方以为是自己写错了命令。
-func TestNotMigratedNamesTheMissingLayer(t *testing.T) {
-	_, stderr, code := runCLI(t, "", "--list")
-	if code != ExitRun {
-		t.Fatalf("--list 的参数是对的，应作为运行错误退 1，实得 %d", code)
+// 这条取代了 `TestNotMigratedNamesTheMissingLayer`（它钉的是"缺口信息里要点名缺哪一层"，
+// 而缺口表已经随全部叶子落地退役了）。同一个位置换成一条**行为**判据：
+//
+// 空库时 `mcloud signin` 该打印"库里还没有账号"并**退 0** —— 不是退 1。
+// 一个没有账号的库是**正常状态**（刚装好就是这样），把它报成运行错误会让
+// 定时任务/CI 把"还没登录"当成"签到挂了"。
+//
+// ⚠ `--db` 必须显式给：默认值是相对路径 `data/…`，不给就会在包目录下建出真库。
+func TestZeroArgSigninOnAnEmptyDatabaseIsNotAnError(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "state.db")
+	stdout, stderr, code := runCLI(t, "", "--db", db)
+	if code != ExitSuccess {
+		t.Fatalf("空库不是错误，应退 0，实得 %d（stderr=%q）", code, stderr)
 	}
-	for _, want := range []string{"signin_run.rs", "app 层", "go-migration-plan.md"} {
-		if !strings.Contains(stderr, want) {
-			t.Errorf("缺口信息里该有 %q，实得 %q", want, stderr)
-		}
+	if !strings.Contains(stdout, "还没有账号") {
+		t.Errorf("该说明库里还没有账号，实得 stdout=%q", stdout)
 	}
 }

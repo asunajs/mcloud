@@ -16,8 +16,13 @@
 >
 > - **执行方案：[`docs/go-migration-plan.md`](./docs/go-migration-plan.md)** ——
 >   **与其它文档冲突时以它为准**。
-> - 骨架已就位：`internal/` 八层 + `cmd/` 两个入口 + `bash scripts/gates-go.sh`（八条门禁）。
->   **业务尚未迁移**，Go 侧目前只打印"尚未迁移"就退出。
+> - 骨架已就位：`internal/` 八层 + `cmd/` 两个入口 + `bash scripts/gates-go.sh`（**九条门禁**）。
+>   **业务已基本迁完**（2026-09-21）：`core` / `upstream` / `io` / `capabilities` / `exec` /
+>   `app` / `server` / `cli` 八层全部落地，**896 条测试**；`cli` 的 12 个叶子命令
+>   **全部接上真后端**（缺口表已退役）。
+>   ⚠ **唯一还差的一处**：`cmd/mcloud-server` 这个入口还没接上 `internal/server`
+>   （那一层本身已完成，26 条测试）—— 它现在仍打印一句占位就退 2。
+>   进度与判据：[`docs/status.md`](./docs/status.md)。
 > - ⚠ **下面所有 Rust 说明在当前阶段仍然有效** —— 冻结执行前 `cargo` 那套照常能用；
 >   冻结之后改用 `cargo <cmd> --manifest-path legacy/Cargo.toml`（**不要 `cd legacy`**，
 >   理由见 `legacy/README.md`）。

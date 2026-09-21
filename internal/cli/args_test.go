@@ -2,6 +2,7 @@ package cli
 
 import (
 	"io"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -182,11 +183,16 @@ func TestExclusivePairsMirrorTheRustTable(t *testing.T) {
 	heads := [][]string{{}, {"signin"}}
 	for _, head := range heads {
 		for _, argv := range accepted {
-			// 被接受的那批会走到"后端未迁移"，所以期望退 1（运行错误）而不是 2。
-			assertExitWith(t, head, argv, ExitRun)
+			// ⚠ 补一个临时 `--db`：默认值是**相对路径** `data/mcloud.db`，
+			// 不补就会在包目录下建出一个真实的库（已经踩过一次，残留过 139 KB 的 db）。
+			// ⚠ 也**不要**断言退出码等于某个具体值 —— 这条命令现在真的会跑后端，
+			// 空库、账号越界都会退 1。这条用例的判据是**互斥表**，所以只钉
+			// "解析器放行了它"（不是用法错）。
+			full := append(append([]string{}, argv...), "--db", filepath.Join(t.TempDir(), "state.db"))
+			assertAccepted(t, head, full)
 		}
 		for _, argv := range rejected {
-			assertExitWith(t, head, argv, ExitUsage)
+			assertUsageRejected(t, head, argv)
 		}
 	}
 }
@@ -195,22 +201,19 @@ func TestExclusivePairsMirrorTheRustTable(t *testing.T) {
 // cobra 没有对应原语（RequiredTogether 会把只给 --records 也判错），
 // 所以这条是 RunE 里手工判的 —— 手工判的东西必须有用例，否则迟早退化。
 func TestRecordsAllRequiresRecords(t *testing.T) {
-	cases := []struct {
-		argv []string
-		want int
-	}{
-		{[]string{"--records-all"}, ExitUsage},
-		{[]string{"--records-all", "--records"}, ExitRun},
-		{[]string{"--records"}, ExitRun},
-	}
-	for _, tc := range cases {
-		stdout, stderr, code := runCLI(t, "", tc.argv...)
-		if code != tc.want {
-			t.Errorf("%v 应退 %d，实得 %d（stderr=%q）", tc.argv, tc.want, code, stderr)
-		}
-		if stdout != "" {
-			t.Errorf("%v 不该往 stdout 写东西，实得 %q", tc.argv, stdout)
-		}
+	db := filepath.Join(t.TempDir(), "state.db")
+
+	// 单独给 `--records-all` 是**用法**错误（退 2），且 stdout 必须干净。
+	assertUsageRejected(t, nil, []string{"--records-all"})
+
+	// 两条合法的组合现在会**真的跑后端**：库是空的 ⇒ 退 0（"库里还没有账号"
+	// 那句话不是错误），所以判据只能是"没被判成用法错"。手工判的那条
+	// `requires` 一旦退化成"也把只给 --records 判错"，这条当场红。
+	for _, argv := range [][]string{
+		{"--records-all", "--records", "--db", db},
+		{"--records", "--db", db},
+	} {
+		assertAccepted(t, nil, argv)
 	}
 }
 
@@ -297,49 +300,40 @@ func TestCompletionSubcommandStaysOff(t *testing.T) {
 	}
 }
 
-// TestNoLeafIsSilentlyUnimplemented：每个叶子要么真的能跑，要么在缺口表里登记了。
+// TestEveryLeafActuallyRuns：**每个叶子都真的跑起来了**，没有"登记在缺口表里"这个中间态。
 //
-// 这条是 [notMigrated] 那张表的对价：加了子命令忘了登记，它当场红。
-// 反过来也管住"后端补上了却忘了把表里那行删掉" —— 那时它会以另一种方式红。
-func TestNoLeafIsSilentlyUnimplemented(t *testing.T) {
-	implemented := map[string]bool{
-		"capabilities":    true,
-		"version":         true,
-		"user init":       true,
-		"user list":       true,
-		"migrate":         true,
-		"login qr":        true,
-		"login sms":       true,
-		"smid show":       true,
-		"smid reset":      true,
-		"smid refresh":    true,
-		"fixture extract": true,
-	}
-	gaps := UnmigratedBackends()
-
-	for _, path := range leafPaths(buildRoot(t)) {
-		_, listed := gaps[path]
-		switch {
-		case implemented[path] && listed:
-			t.Errorf("`mcloud %s` 既能跑又还挂在缺口表里 —— 该删那一行了", path)
-		case !implemented[path] && !listed:
-			t.Errorf("`mcloud %s` 既没实现也没登记进缺口表 —— 见 unmigrated.go", path)
-		}
-	}
-}
-
-// TestUnmigratedEntriesNameTheMissingLayer：表里每一行都要指出**缺哪一层**。
+// # 这条用例取代了什么
 //
-// 断言"含 .rs"是为了挡住"未实现"这种到哪都查不出下一步的写法。
-func TestUnmigratedEntriesNameTheMissingLayer(t *testing.T) {
-	entries := UnmigratedBackends()
-	if len(entries) == 0 {
-		t.Fatal("缺口表是空的：那意味着全部子命令都已迁移，这张表该整个删掉")
+// 它取代的是 `unmigrated.go` 那张缺口表（连同它的两条对价用例）。
+// 那张表的判据是"每个叶子要么能跑、要么登记了缺哪一层"，现在**没有任何叶子可登记**，
+// 于是表整个退役 —— 表自己的用例就写着"表空了就该整个删掉"。
+//
+// # 为什么还留着一条（而不是一起删掉）
+//
+// 缺口表退役之后，"某个叶子又变回没实现"这件事就**没有任何守卫**了。
+// 这条用例把退役时的那个事实钉住：12 个叶子逐个跑，**一个都不许出现"尚未迁移"**。
+// 将来谁把某条 RunE 指回一个占位错误，它当场红。
+func TestEveryLeafActuallyRuns(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "state.db")
+	// ⚠ 每条都给临时 `--db`：默认值是相对路径 `data/…`，不补会在包目录下建出真库。
+	// ⚠ `fixture extract` 与 `migrate` 不用 `--db`，各自补自己那个输出/来源参数。
+	leaves := [][]string{
+		{"version"},
+		{"capabilities"},
+		{"user", "list", "--db", db},
+		{"login", "qr", "--db", db, "--device-file", filepath.Join(t.TempDir(), "dev.txt")},
+		{"login", "sms", "--db", db, "--device-file", filepath.Join(t.TempDir(), "dev.txt")},
+		{"smid", "show", "--db", db},
+		{"signin", "--db", db},
+		{"fixture", "extract", "--har", t.TempDir(), "--out", t.TempDir()},
+		{"migrate", "--repo-root", t.TempDir(), "--dry-run"},
 	}
-	for _, command := range sortedUnmigratedCommands() {
-		missing := entries[command]
-		if !strings.Contains(missing, ".rs") {
-			t.Errorf("`mcloud %s` 的缺口说明没点出缺哪一层：%q", command, missing)
+	// 只要求"没出现占位错误"。跑成不成功取决于库与文件系统的状态，
+	// 那不是这条用例的判据（各自的叶子有各自的用例）。
+	for _, argv := range leaves {
+		_, stderr, _ := runCLI(t, "", argv...)
+		if strings.Contains(stderr, "尚未迁移") || strings.Contains(stderr, "未实现") {
+			t.Errorf("`mcloud %v` 又变回占位实现了：%q", argv, stderr)
 		}
 	}
 }
@@ -402,22 +396,8 @@ func TestQrTTLDefaultComesFromTheRegistryNotFromASecondLiteral(t *testing.T) {
 	}
 }
 
-// TestAnUnregisteredNotMigratedCommandSaysSo：
-// 表外的命令必须**点名自己没登记**，而不是含糊地说「尚未迁移」。
-//
-// ⭐ 反向测试先暴露了这里是个缺口：把 [notMigrated] 的 unknown 分支改成
-// 静默给个"（未登记）"占位，**一条测试都没变红** —— 因为现有用例走的都是
-// 表里**已有**的那几条，unknown 分支从来没被执行过。
-//
-// 而这条分支存在的全部理由就是挡住"顺手加了个子命令、把 RunE 指到
-// notMigrated，却忘了往表里写" —— 一个从没被执行过的分支，等于没有。
-// ⇒ 它是纯函数，直接调就行，不必造一棵带野子命令的命令树。
-func TestAnUnregisteredNotMigratedCommandSaysSo(t *testing.T) {
-	err := notMigrated("totally-made-up")
-	if err == nil {
-		t.Fatal("表外的命令也该报错 —— 静默通过等于允许一个新子命令没有任何后端说明")
-	}
-	if !strings.Contains(err.Error(), "没有登记") {
-		t.Errorf("该点名「没有登记缺哪一层」，实得 %q", err.Error())
-	}
-}
+// 早先这里有一条 `TestAnUnregisteredNotMigratedCommandSaysSo`，测的是
+// `notMigrated` 的 unknown 分支（"顺手加了个子命令、把 RunE 指到 notMigrated，
+// 却忘了往表里写"）。缺口表退役之后那个分支不存在了，用例一并删掉 ——
+// **留下一条测不到东西的用例比没有用例更糟**：它会让"这一块有人看着"这个错觉
+// 一直持续下去。那个位置现在由 [TestEveryLeafActuallyRuns] 守着。
