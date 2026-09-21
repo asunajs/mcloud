@@ -2,7 +2,7 @@
 
 > 状态：**规范**（加文件前必读；命名由 `bash scripts/check-filenames.sh` 强制执行）
 >
-> - 相关：[`dev-gates.md`](./dev-gates.md)（七条门禁，本文的规则是其中第 5 条）
+> - 相关：[`dev-gates.md`](./dev-gates.md)（门禁总表；本文的规则 = Rust 侧第 5 条 / Go 侧第 6 条）
 
 ---
 
@@ -69,7 +69,8 @@ import { AuthPage } from './pages/auth-page'   // 路径 kebab，标识符 Pasca
 一路活到被用户点名 —— 违规的表现极其安静：**编译能过、测试全绿、界面正常**，
 只有下一个人加文件时"照着旁边那个写"，错误便自我复制。
 
-⇒ 现在由 `bash scripts/check-filenames.sh` 强制执行，是七条门禁里的第 5 条。
+⇒ 现在由 `bash scripts/check-filenames.sh` 强制执行 —— 它是**两套门禁共用**的一条
+（Rust 侧第 5 条 / Go 侧第 6 条），所以别记成"第几条"，记成"文件名那条"。
 
 ### 判据
 

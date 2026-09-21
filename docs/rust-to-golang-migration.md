@@ -23,7 +23,8 @@
 配套资产（**这些是迁移时真正的价值所在，且与语言无关**）：
 
 - 626 个测试（`cargo test --workspace`，2026-09-20 实测全绿）
-- 6 份黄金向量、脚本侧 122 条断言（`node scripts/check-golden-vectors.cjs`）
+- 6 份黄金向量、脚本侧 122 条断言（`node scripts/check-golden-vectors.cjs`，2026-09-20 实测）
+  —— ⚠ 这条会**单向增长**（向量只加不减），现值见 `docs/dev-gates.md`；本文其余数字同理
 - 七条门禁（`docs/dev-gates.md`）+ `pre-commit` / `pre-push` 钩子
 - 一批抓包实证文档（`docs/upstream-*.md`、`docs/capture/`）
 

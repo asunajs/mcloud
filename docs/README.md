@@ -6,7 +6,7 @@
 | --- | --- |
 | 看项目全貌 / 为什么重写 | [`../README.md`](../README.md)（只做导航，短） |
 | 敲命令 / 查参数 | [`cli-usage.md`](./cli-usage.md) —— CLI 操作手册 |
-| 改代码 / 跑门禁 / 搞清分层 | [`dev-gates.md`](./dev-gates.md) —— 七条门禁 + 分层铁律 |
+| 改代码 / 跑门禁 / 搞清分层 | [`dev-gates.md`](./dev-gates.md) —— 门禁（Rust 七条 / Go 九条）+ 分层铁律 |
 | 加文件 / 起新目录 / 查命名 | [`repo-layout.md`](./repo-layout.md) —— 目录结构 + kebab-case 规则 |
 | 看**现在能跑什么、还差什么** | [`status.md`](./status.md) —— 实现进度与逐项须知 |
 | 实现某个**业务能力**（签到、领取、抢兑…） | [`business-feature-inventory.md`](./business-feature-inventory.md) —— 旧项目 19 项逐条拆到"照着能写代码" |
@@ -62,7 +62,7 @@
 
 | 文档 | 一句话 | 状态 |
 | --- | --- | --- |
-| [`dev-gates.md`](./dev-gates.md) | 七条门禁 + 分层铁律（依赖方向的可执行断言） | **规范**（改代码前必读） |
+| [`dev-gates.md`](./dev-gates.md) | 门禁（Rust 七条 / Go 九条）+ 分层铁律（依赖方向的可执行断言） | **规范**（改代码前必读） |
 | [`repo-layout.md`](./repo-layout.md) | 目录结构 + 文件命名（kebab-case 及三类豁免） | **规范**（加文件前必读） |
 | [`status.md`](./status.md) | 实现进度与现状须知：现在能跑什么、还差什么 | **实况**（最后核对 2026-09-19） |
 | [`cli-usage.md`](./cli-usage.md) | CLI 操作手册：子命令、签到七个要点、退出码、迁移 | **规范** |

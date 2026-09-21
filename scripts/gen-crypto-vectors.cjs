@@ -125,7 +125,17 @@ function aesDynamicIvEncrypt(data, key, ivHex) {
   };
 }
 
-/** runtime/src/node.ts: rsaEncrypt —— PKCS#1 v1.5，输出 base64（确定性填充，可字节级对拍） */
+/**
+ * runtime/src/node.ts: rsaEncrypt —— PKCS#1 v1.5，输出 base64。
+ *
+ * ⚠⚠ **不是确定性的，别指望字节级对拍**：PKCS#1 v1.5 的填充块 `00 02 || PS || 00 || M`
+ * 里 `PS` 是**随机非零字节**，所以同一份明文两次加密得到**不同**密文。
+ * （旧注释写的"确定性填充，可字节级对拍"是错的，与 `rsaPkcs1v15B64` 向量自己的
+ * `byteExact: false` 直接矛盾 —— 那条向量存两次采样、并靠"两次必须不同"来锁这件事。）
+ * 见方案 §6.1 #49：注入了确定性随机源 ≠ 输出可复现。
+ *
+ * 于是这个函数的产出只用于**采样**；能断言的是不变量（长度、整数值 < n、两次不同）。
+ */
 function rsaEncryptB64(message, publicKeyBase64) {
   const formattedKey = `-----BEGIN PUBLIC KEY-----\n${publicKeyBase64
     .match(/.{1,64}/g)

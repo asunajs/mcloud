@@ -85,6 +85,99 @@ function aesEcbEncrypt(keyStr, plainStr) {
   return b64(Buffer.concat([c.update(Buffer.from(plainStr, "utf8")), c.final()]));
 }
 
+// ─────────────────────────── 单 DES ───────────────────────────
+//
+// ⚠ `des-ecb` 在本机 Node 22 / OpenSSL 3.5 上**不可用**
+// （`error:0308010C:digital envelope routines::unsupported` —— 单 DES 被挪进了
+// legacy provider）。但**"不可用"不等于"做不了"**：
+//
+//   `des-ede3-ecb` 是 3DES，三把子密钥相同时
+//   E_K(D_K(E_K(x))) == E_K(x)，即**退化成单 DES**。
+//
+// 所以把 8 字节密钥复制成 24 字节喂给 `des-ede3-ecb` 即可，不需要 legacy provider。
+// 这条是**实测**出来的，不是推断：`desEcbNoPaddingB64` 那 18 条向量逐字节全过。
+//
+// 早先这里挂着一句"Node 的 des-ecb 需 legacy provider"，于是整段被当成"验不了"
+// 豁免掉了 —— 那是把"某个 API 名不可用"当成了"这个算法不可验证"。
+
+/** 密钥归一化：UTF-8 字节 → **截到 8 / 不足补 0**（向量名 `key-short-zero-padded` 锁的就是它）。 */
+function normalizeKey8(keyStr) {
+  const k = Buffer.alloc(8);
+  Buffer.from(keyStr, "utf8").copy(k, 0, 0, 8);
+  return k;
+}
+
+/** 明文零补到 8 的整数倍（**已对齐时不追加整块**，空串仍是空串）。 */
+function zeroPad8(buf) {
+  if (buf.length % 8 === 0) return buf;
+  const out = Buffer.alloc(Math.ceil(buf.length / 8) * 8);
+  buf.copy(out);
+  return out;
+}
+
+function desKey24(keyStr) {
+  const k = normalizeKey8(keyStr);
+  return Buffer.concat([k, k, k]);
+}
+
+function desEcbEncryptNoPad(keyStr, msgBuf) {
+  const c = crypto.createCipheriv("des-ede3-ecb", desKey24(keyStr), null);
+  c.setAutoPadding(false);
+  return Buffer.concat([c.update(msgBuf), c.final()]);
+}
+
+function desEcbDecryptNoPad(keyStr, ctBuf) {
+  const c = crypto.createDecipheriv("des-ede3-ecb", desKey24(keyStr), null);
+  c.setAutoPadding(false);
+  return Buffer.concat([c.update(ctBuf), c.final()]);
+}
+
+/** 手工去 PKCS#7 补位（`des-ede3-ecb` 上关掉了自动补位，得自己剥）。 */
+function pkcs7Unpad8(buf) {
+  const n = buf[buf.length - 1];
+  if (n < 1 || n > 8) throw new Error(`PKCS#7 补位字节非法：${n}`);
+  return buf.subarray(0, buf.length - n);
+}
+
+/**
+ * `getTn` —— 设备指纹序列化（原实现 `shared/src/smid/index.ts`）。
+ *
+ * 规则：键名排序后逐值拼接；number **整数** ×10000、**小数** floor(×10000)；
+ * object（非 null）递归；其余走 `String(v)`（所以 `null` → `"null"`）。
+ *
+ * ⚠ **这条的自检强度弱于上面那些**：生成侧 `gen-crypto-vectors.cjs` 也是 JS，
+ * 同一套语义 ⇒ 它只锁"**向量文件与规则一致**"（手工改坏一个字符会被抓出来），
+ * 锁不了"规则本身对不对" —— 后者由 Go 侧 `core.GetTn` 的用例负责。
+ * 相比之下 DES 那段是真交叉验证（Node OpenSSL vs 生成侧 crypto-js，两套实现）。
+ *
+ * ⚠ 已知差异：JS 的 `JSON.parse` 把 `7.0` 读成整数 7，而 serde_json 会当 f64
+ * （决定要不要 floor）。向量里没有 `x.0` 形式的字面量，所以这里不受影响；
+ * 真加进去了，本脚本与 Go 侧会给出不同答案。
+ */
+function getTn(obj) {
+  return Object.keys(obj)
+    .sort()
+    .map((k) => {
+      const v = obj[k];
+      if (typeof v === "number") {
+        const scaled = v * 10000;
+        return String(Number.isInteger(v) ? scaled : Math.floor(scaled));
+      }
+      if (v !== null && typeof v === "object") return getTn(v);
+      return String(v);
+    })
+    .join("");
+}
+
+/** 从 SPKI DER 公钥里取模数 / 指数，返回**整数值的十进制串**（不受十六进制补零写法影响）。 */
+function rsaModExpDecimal(publicKeyB64) {
+  const jwk = crypto
+    .createPublicKey({ key: unb64(publicKeyB64), format: "der", type: "spki" })
+    .export({ format: "jwk" });
+  const dec = (b64url) => BigInt("0x" + Buffer.from(b64url, "base64url").toString("hex")).toString(10);
+  return { modulus: dec(jwk.n), exponent: dec(jwk.e) };
+}
+
 // ─────────────────── 每段一个校验器 ───────────────────
 //
 // 每个校验器收 (entry, constants)，返回 { actual, expected }。
@@ -376,24 +469,143 @@ const VERIFIERS = {
     }
     return { actual, expected: e.expect, extra: "md5(uid) 前 16 位 = 上报体的 AES 密钥" };
   },
+  smidTn: (e) => ({
+    actual: md5hex(getTn(e.target)),
+    expected: e.expect,
+    extra: "md5(getTn(target))，target.tn 为空串时求摘要",
+  }),
+
+  // —— 单 DES（见上面「单 DES」一节：`des-ecb` 不可用，但 3DES 退化可用）——
+  desEcbNoPaddingB64: (e) => {
+    const key = normalizeKey8(e.key);
+    const msg = zeroPad8(Buffer.from(e.message, "utf8"));
+    const actual = b64(desEcbEncryptNoPad(e.key, msg));
+    const keyKind =
+      Buffer.from(e.key, "utf8").length === 8
+        ? "密钥 8 字节整"
+        : Buffer.from(e.key, "utf8").length < 8
+          ? "密钥零补到 8"
+          : "密钥截到 8";
+    return { actual, expected: e.expect, extra: `${keyKind}（${key.toString("hex")}），明文 ${msg.length} 字节` };
+  },
+  desEcbPkcs7Decrypt: (e) => ({
+    actual: pkcs7Unpad8(desEcbDecryptNoPad(e.key, unb64(e.cipherB64))).toString("utf8"),
+    expected: e.expectPlain ?? e.expect,
+    extra: "手工剥 PKCS#7 补位",
+  }),
+
+  // —— getTn（纯字符串变换，见上面 getTn 的强度说明）——
+  getTn: (e) => ({
+    actual: getTn(e.input),
+    expected: e.expect,
+    extra: "键名排序 → 整数×10000 / 小数 floor(×10000) / 对象递归 / 其余 String(v)",
+  }),
+
+  // —— RSA PKCS#1 v1.5 加密 ——
+  //
+  // ⚠ 这条**没有可对拍的期望值**：PKCS#1 v1.5 的填充字节是随机的，所以向量自己
+  // 声明 `byteExact: false`。能锁的只有**不变量**，而它们由下面的 `throw` 承担
+  // （返回的 actual === expected 是刻意空转的，别把它当断言）。
+  //
+  // 其中"两次采样必须不同"这条是**判别力最强**的一条：它直接钉住"含随机填充"，
+  // 与生成器里那句"确定性填充，可字节级对拍"的旧注释互斥 —— 两个说法只能活一个。
+  rsaPkcs1v15B64: (e) => {
+    const { modulus } = rsaModExpDecimal(e.publicKeyB64);
+    const n = BigInt(modulus);
+    for (const s of e.samples) {
+      const buf = unb64(s);
+      if (buf.length !== e.modulusBytes) {
+        throw new Error(`采样长度应为 ${e.modulusBytes} 字节，实得 ${buf.length}`);
+      }
+      if (BigInt("0x" + buf.toString("hex")) >= n) {
+        throw new Error(`密文整数值不小于 n —— 这不是一把合法公钥加密出来的`);
+      }
+    }
+    if (new Set(e.samples).size !== e.samples.length) {
+      throw new Error(
+        `两次采样出现了相同值 —— 说明填充是确定的，与向量自己的 byteExact:false / "含随机填充" 矛盾`
+      );
+    }
+    // 上面几条 `throw` 才是真断言；这里返回一对相同的字面量，是让框架的
+    // `actual === expected` 空转通过（这条向量没有可对拍的期望值）。
+    return {
+      actual: "不变量成立",
+      expected: "不变量成立",
+      extra: `${e.samples.length} 次采样均为 ${e.modulusBytes} 字节、< n 且互不相同`,
+    };
+  },
+};
+
+/**
+ * **对象形**（非数组）的段：结构是"一个对象装好几组期望值"，套不进逐条 entry 的形状。
+ *
+ * 校验器返回 `[{name, actual, expected, extra}]` —— 与数组段的条目同形，
+ * 于是计数、失败格式、`--quiet` 全部复用同一套。
+ */
+const DICT_VERIFIERS = {
+  // 自持密钥对：DER 公钥解出的 n/e 必须与向量里那四个字段同值，且 `cases` 的密文
+  // 必须能被配对的私钥解回原 message —— 这是一条**字节级**的独立复算。
+  rsaSelfKeyPair: (obj) => {
+    const { modulus, exponent } = rsaModExpDecimal(obj.publicKeyB64);
+    const out = [
+      {
+        name: "modulus",
+        actual: modulus,
+        expected: BigInt("0x" + obj.modulusHex).toString(10),
+        extra: "DER 解出的 n 与 modulusHex 同值",
+      },
+      {
+        name: "exponent",
+        actual: exponent,
+        // ⚠ 按**整数值**比，不按写法比：生成器把 exponentHex 走了一遍
+        // `BigInt(...).toString(16)`，前导零被吃掉（`010001` → `10001`），
+        // 而 modulusHex 是字节对齐的。两者写法不同但值必须相同。
+        expected: BigInt("0x" + obj.exponentHex).toString(10),
+        extra: "DER 解出的 e 与 exponentHex 同值（十六进制补零写法有意不同）",
+      },
+    ];
+    const priv = crypto.createPrivateKey({
+      key: unb64(obj.privateKeyPkcs8B64),
+      format: "der",
+      type: "pkcs8",
+    });
+    for (const c of obj.cases ?? []) {
+      const plain = crypto
+        .privateDecrypt({ key: priv, padding: crypto.constants.RSA_PKCS1_PADDING }, unb64(c.cipherB64))
+        .toString("utf8");
+      out.push({ name: `cases:${c.name}`, actual: plain, expected: c.message, extra: "私钥解密回原文" });
+    }
+    return out;
+  },
 };
 
 /** 段名 → 一句话说明"为什么没验"。没列出来的段会在末尾统一提醒。 */
+// ⚠ 这张表是**会过期**的：它曾经有 14 条，其中 6 条在 2026-09-21 被实测推翻 ——
+//   不是"条件变了"，而是**当时就没验过**：
+//     · `desEcbNoPaddingB64` / `desEcbPkcs7Decrypt` —— 理由写"Node 的 des-ecb 需
+//       legacy provider"（**半真**：API 名确实不可用），但由此推出"所以验不了"是错的，
+//       3DES 退化成单 DES 即可，21 条向量逐字节全过；
+//     · 同两条还写"补位规则（零/空格）未确认"—— 向量名 `key-short-zero-padded` /
+//       `key-long-truncated` 就是**专门锁这个**的，本文件 `normalizeKey16` 的注释
+//       早就把这条道理讲过了（同一个文件里两处自相矛盾）；
+//     · `getTn` 写"规则未在向量里给出"—— 向量里 4 条 input→expect 齐全，
+//       而且 `scripts/gen-crypto-vectors.cjs` 里就躺着一份 JS 实现；
+//     · `rsaPkcs1v15B64` / `rsaSelfKeyPair` 写"DER 包装收益低"—— 包装只有 15 行，
+//       也已经在生成器里。
+//   ⇒ 教训：**"某个 API 名不可用"不等于"这个算法不可验证"**；写豁免理由时，
+//   要给出的是"验不了"，不是"想不出怎么验"。宁可写"本脚本没有第二份实现（抄一份
+//   就是第二份真相）"，也不要写一个听起来合理的借口 —— 后者没人会回头复查。
 const NOT_VERIFIED_REASONS = {
-  parseAuth: "语义由 Rust 侧 auth.rs 锁定（本脚本不做 TS 行为复刻）",
+  parseAuth: "语义由 `internal/core/auth.go` 锁定（本脚本不做 TS 行为复刻）",
   identity: "同上（含 legacyKey/accountId 派生规则）",
-  desEcbNoPaddingB64: "Node 的 des-ecb 需 legacy provider；补位规则（零/空格）未确认",
-  desEcbPkcs7Decrypt: "同上",
-  getTn: "字符串变换，规则未在向量里给出",
   gzip: "向量自己声明不做字节级对拍（deflate 输出因实现而异）",
-  rsaPkcs1v15B64: "需公钥加密，Node 侧要做 DER 包装，收益低",
-  rsaSelfKeyPair: "同上",
-  smidTn: "getTn 的排序/缩放规则未在本脚本复刻（同 §getTn）；由 Rust 侧 + 生成侧两份实现交叉",
-  smidDesRules: "同 §desEcbNoPaddingB64：Node 的 des-ecb 需 legacy provider，故只由 Rust 侧断言",
-  receiveRevivalReward: "纯响应体计数（cardType/rewardClouds/totalClouds），无算法可复算；由 Rust 侧解析断言",
-  infoV3: "纯响应体（余额 / 签到日历），无算法可复算；由 Rust 侧 parse_sign_in_status 断言",
-  startSignIn: "同上；由 Rust 侧 parse_start_sign_in 断言",
-  prizeRecords: "纯响应体（奖品记录一条），无算法可复算；由 Rust 侧 parse_prize_records 断言",
+  smidDesRules:
+    "整张改名表（25 条 DES 规则 + 每键一把密钥）在本脚本里没有第二份实现 —— 抄一份进来就是「第二份真相」；由 Go 侧 `internal/upstream` 的 smid 用例断言。⚠ DES 本身**不是**障碍了，见上面「单 DES」",
+  receiveRevivalReward:
+    "纯响应体计数（cardType/rewardClouds/totalClouds），无算法可复算；由 Go 侧 `upstream.ParseRevivalReward` 断言",
+  infoV3: "纯响应体（余额 / 签到日历），无算法可复算；由 Go 侧 `upstream.ParseSignInStatus` 断言",
+  startSignIn: "同上；由 Go 侧 `upstream.ParseStartSignIn` 断言",
+  prizeRecords: "纯响应体（奖品记录一条），无算法可复算；由 Go 侧 `upstream.ParsePrizeRecords` 断言",
 };
 
 // ─────────────────── 脱敏扫描（镜像 Rust 侧守卫）───────────────────
@@ -534,12 +746,39 @@ function main() {
       // `constants` 是各段共用的常量表，也不是段。
       if (section.startsWith("$") || section === "constants") continue;
       if (!Array.isArray(entries)) {
-        // 单条实拍的段写成**对象**（`infoV3` / `startSignIn` / `receiveRevivalReward`）。
-        // ⚠ 这些也必须出现在"未覆盖"清单里 —— 早先这里直接 `continue`，
+        // 对象形的段（`infoV3` / `startSignIn` / `rsaSelfKeyPair`…）。
+        // 有 `DICT_VERIFIERS` 的就跑，返回的条目与数组段**同形**，计数与报错复用同一套。
+        // ⚠ 没有校验器的**必须**出现在"未覆盖"清单里 —— 早先这里直接 `continue`，
         // 于是它们在报告里**彻底消失**，整份输出读起来像"所有段都验过了"。
         // **没验就得说出来**，这是本脚本存在的理由（见文件头）。
         if (entries && typeof entries === "object") {
-          noVerifier.set(section, [...(noVerifier.get(section) ?? []), file]);
+          const verifyDict = DICT_VERIFIERS[section];
+          if (!verifyDict) {
+            noVerifier.set(section, [...(noVerifier.get(section) ?? []), file]);
+            continue;
+          }
+          let rows;
+          try {
+            rows = verifyDict(entries);
+          } catch (err) {
+            failures.push(`${file} §${section}\n      算不出来：${err.message}`);
+            rows = [];
+          }
+          let okDict = 0;
+          for (const r of rows) {
+            const label = `${file} §${section} ${r.name}`.trim();
+            if (r.actual === r.expected) {
+              okDict++;
+              checked++;
+              if (!QUIET) fileLines.push(`    ✓ ${label}${r.extra ? `  (${r.extra})` : ""}`);
+            } else {
+              failures.push(
+                `${label}\n      期望 ${r.expected}\n      实得 ${r.actual}` +
+                  (r.extra ? `\n      ${r.extra}` : "")
+              );
+            }
+          }
+          if (rows.length) sectionReport.push({ file, section, ok: okDict, total: rows.length });
         }
         continue;
       }
