@@ -385,7 +385,7 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 ⚠ 编号按**发现的先后**排，与步号无关 —— 这张表是**追加式**的，
 重编别人的条目会让正在引用它的人指向错处。
 当前：步 1 = 1–27 与 56，步 4 = 28–39 与 42–45，步 3 = 40–41 与 46–47。
-（40/41 与 46/47 由 io 那侧先占；步 4 续接在 45 之后，48/49/50/51/52/53/54/55/56/57/58/59/60/61/62/63/64/65/66 已接在 47 之后；步 4（cli）= 67–71 ——
+（40/41 与 46/47 由 io 那侧先占；步 4 续接在 45 之后，48/49/50/51/52/53/54/55/56/57/58/59/60/61/62/63/64/65/66 已接在 47 之后；步 4（cli）= 67–71；步 4（app 的 login / app_login）= 72–74 ——
 **加之前看表尾**，别再撞号。⚠ 这张表是**分节**的，只看自己那一节一定会撞。）
 
 | 现象 | 根因 | 做法 |
@@ -491,6 +491,14 @@ serde 测试、也没有 `tests/` 目录），形状只隐含在 `rename_all` �
 | **69** | **`return` 的多个操作数是**从左到右求值**的，于是测试助手把缓冲区读成了空串** | `return out.String(), errOut.String(), Main(deps, args)` 读起来像"跑完再取输出"，实际三个操作数**在 `Main` 之前**就求值完了 ⇒ 助手返回的 stdout/stderr **恒为空**。表现很迷惑人：断言"包含某行"的用例集体变红，而断言"stderr 为空"的用例**假绿**（本来就空） | 先 `code := Main(deps, args)`，再 `return out.String(), errOut.String(), code`，并在助手注释里写明这条求值顺序。⚠ 判据：**凡"跑一遍再收集副作用"的助手，收集动作不能在 `return` 表达式里** |
 | **70** ⭐ | **比**相对一致**的断言测不出「第二份字面量」** | CLI 的 `--ttl-seconds` 默认值必须取自能力注册表（[`capabilities.QRTTLSeconds`]）。现有断言比的是顶层与 `signin` 两侧的**相对**一致，而两边调的是同一个函数 ⇒ **恒等**；于是把源头改成 121 **一条测试都没变红**，而「CLI 又硬编码了一份 120」完全查不出来 —— 它的表现是「改了注册表那边的码有效期，CLI 这个开关没跟着变」 | 判据要读 flag 默认值的**文本**并与源头常量比（`TestQrTTLDefaultComesFromTheRegistryNotFromASecondLiteral`）：改源头会让期望值跟着走，硬编码的那份才现形。⚠ 反向测试要**改源头**而不是改消费侧 —— 把 CLI 改成硬编码 120 是无效的，两边值相同，任何断言都不会变红 |
 | **71** | **从没被执行过的分支等于没有** | `notMigrated` 的 unknown 分支（「加了子命令却没往表里登记」）在现有用例里**从来走不到** —— 用例走的都是表里**已有**的条目。把那个分支改成静默占位，**一条测试都没变红**。而它存在的**全部**理由就是挡住那种漏登记 | 纯函数的分支**直接调**即可，不必造一棵带野子命令的命令树（`TestAnUnregisteredNotMigratedCommandSaysSo`）。⚠ 判据表（这里是「还剩哪些没迁」那张表）往往比它保护的分支**更常被改**，于是那个分支会因为没有用例而悄悄失效 |
+
+### 步 4（app 的 `login` / `app_login`）已实测出来的三条（编号接在最后，2026-09-21）
+
+| 现象 | 根因 | 做法 |
+| --- | --- | --- |
+| **72** ⭐ | **Rust 靠运行时把定时器**虚拟化**（tokio `start_paused`），Go 没有对应物 —— 于是「等待」必须做成注入项** | 扫码那条循环要真的等：轮询间隔 1 秒、被限频（`200059545`）后**退避 30 秒再继续**。Rust 侧靠 `start_paused` 让这些睡眠瞬间过去；Go 的 `time.Sleep` 就是真的等 ⇒ 「退避了几次、每次多久」要么测不了，要么让测试真睡 60 秒 | 把等收敛成 `Waiter` 接口（生产 `RealWaiter` 响应 ctx 取消，测试 `recordingWaiter` 只记时长）。⚠ 反向测试已确认：把限频那支改成「当终态直接返回」→ `TestQrLoginBacksOffOnRateLimitInsteadOfGivingUp` 变红。⚠ 注意**别把它做成 `NoWait` 就用完事**：那时"该退避却没退避"同样测不出来（没人等），真正承重的是**记录下来的时长** |
+| **73** ⭐ | **Rust 的「值语义 + 返回新值」，在 Go 里是指针上的**原地修改** | `AppProfile.with_user_domain_id(domain)` 在 Rust 里消费 `self` 返回新值；Go 版 `WithUserDomainID` 改的是 receiver 并返回同一个指针。照抄过去，`ProfileWithStoredDomainID`（一个**只读**动作：查一下库里有没有用户域）就会顺手改掉调用方手上那份档案 —— 而调用方并不知道，下一次请求忽然就带上了之前那个账号的 `x-yun-uni`（填错会把请求定位到**别人**的用户域，且不报错） | 回填前 `clone := *profile`，改克隆体。并留一条断言钉住"调用方那份没被改"（`TestProfileWithStoredDomainIDDoesNotMutateTheCallerProfile`）。⚠ 反向测试已确认：换成直接改 receiver 后那条立刻变红。⚠ 与 #51（交出内部切片 = 交出写权限）同源：**Rust 侧由编译器兜住的"不要改别人的东西"，在 Go 里要靠一条断言** |
+| **74** ⭐ | **表单体字段断言写成 `body["mode"] != 0` 时**恒真**，报错是「实得 0，期望 0」** | `core.ParseJSON` 走 `UseNumber`（19 位 `userDomainId` 不能丢精度），于是解析出来的数字是 `json.Number` 而不是 `float64`。`json.Number("0") != 0` 两边类型不同 ⇒ 恒真 ⇒ **断言永远通过**。而报错文案打印的是值的文本（`0`），于是错误信息是"实得 0，期望 0" —— 看起来像实现没写对 | 从解析值里取数字一律走 helper（`loginInt`，认 `json.Number` / `float64` / `int64`）。⚠ 与 #48 同根（都是 `UseNumber`），但**面**不同：#48 是对象整体比对（用 `sameValue`），这条是单字段断言（用 helper）。⚠ 判据：**一条只会永远通过的断言比没有断言更危险，因为它是绿的** |
 
 ### 6.2 `mcloud-upstream`（8,064 行）—— 向量兜底最厚
 
@@ -607,9 +615,9 @@ PC 与 App 是**两套客户端**，同名同形的常量值可能不同，而"�
 | **0** | 骨架 + 守卫先行：`go.mod` / `internal/` 八层 / `cmd/` 两个入口 / `scripts/gates-go.sh` / `check-go-deps.sh` / 三处共享守卫改造 | **八项门禁全绿**；依赖断言经**反向测试**证明能抓错 | ✅ **已完成** |
 | **冻结** | Rust 侧冻结到 `legacy/`（`bash scripts/freeze-rust.sh`）| 冻结后 **Rust 七条 + Go 八条同时全绿**；`legacy/test` 以符号链接入库（模式 120000）| ✅ **已完成**（`333d05c`，2026-09-20）|
 | **1** | `mcloud-core`（纯计算，标准库覆盖最好） | 黄金向量在 Go 侧逐字段复算通过 | ✅ **已完成**（2026-09-21）：`internal/core` **270 条测试**，17/17 模块对位，core 读的 **8 份向量逐节都有正向断言**（最后缺的那一节 `hcyCoolFlagEnvelope` 于本次补上，见 §6.1 #56）。**一条例外**：`error` 后半的 `classify_body` 那台分类机**不补进 core** —— 它在**冻结基准里就没有调用点**（core 之外零命中），补进去就是一台没人开的机器；判据的三块 Go 侧已各在其位（`core.ClassifyStatus` + `upstream.Envelope`），归属改挂到步 4 第一个真需要"状态 + 响应体一步判完"的调用点。⚠ 判据要按"**Go 侧**读了几份向量"算，别照门禁那行 `✓ 有测试读取` —— 它不区分是哪一侧在读（见 `status.md`）。⚠ 也别把**步 2 的账算进步 1**：`app-signin-vectors` 与 `login-crypto-vectors` 的消费者在 `internal/upstream`，与 core 无关 |
-| **2** | `mcloud-upstream`（协议层） | 同一条抓包请求 Rust/Go **双跑**，header 顺序 / percent-encode / 签名串逐字节一致 | ⬜ |
-| **3** | `mcloud-io`（唯一 IO 层） | 纯 Go sqlite 驱动下 schema v1→v7 迁移 + 老库只读导入结果一致 | ⬜ |
-| **4** | `capabilities` → `exec` → `app` → `server` / `cli` | 19 项能力逐项打勾；CLI 参数互斥与四态输出一致；`api_contract` 契约测试平移，前端不动 | 🔄 **进行中**：`capabilities` 注册表 / `exec` / `app::payload` 已落（**52 条测试**）。⚠ **它依赖步 2 与步 3**：`capabilities::login` 是 `upstream::login` 的消费者，`app` 其余模块与 `server` 还要 `io` —— 所以先落了不依赖它们的三块，见 `status.md` 的「步 4 实况」。**2026-09-21 追加（判据逐块核）**：`cli` 的参数面 / 退码 / `--json` 与凭据约定已落地（**22 条测试**，含从 Rust 侧 `unit_tests.rs` 平移过来的互斥与"两种写法等价"那批用例）⇒ **"CLI 参数互斥"这半条已达成**；⚠ **"四态输出一致"这半条未达成**（`signin` 的多账号编排与四态渲染那约 1,264 行还没迁，挂在 `internal/cli/unmigrated.go` 那张表上）；⚠ **"19 项能力逐项打勾"这半条卡在 `capabilities` 注册表的条目数**（Go 侧实测 3 项），**不在 CLI** —— 别把它记成"CLI 没做完"。`server` 那半条见下方「服务端」两节 |
+| **2** | `mcloud-upstream`（协议层） | 同一条抓包请求 Rust/Go **双跑**，header 顺序 / percent-encode / 签名串逐字节一致 | ✅ **已完成**（2026-09-21 补记）：`internal/upstream` **150 条测试**，`login` / `client` / `app_client` / `app_login` / `app_signin` 全族 / `smid` **整族落地**；`app-signin-vectors.json` 从"只有 Rust 读"变成**两边都读**。⚠ 判据里的"双跑"是**逐块**做的（每条链路各自与 Rust 侧的中心断言对拍，例如 `app_login` 的 `appLoginWire`），不是一次跑通全部接口 —— 见 `status.md` 的步 2 分块表 |
+| **3** | `mcloud-io`（唯一 IO 层） | 纯 Go sqlite 驱动下 schema v1→**v8** 迁移 + 老库只读导入结果一致 | ✅ **已完成**（2026-09-21 补记）：`internal/io` **150 条测试**，schema v1→v8 的 8 条幂等迁移链、`legacy_import`（**21 条**，五条硬判据见 `status.md`）、`fixture` 回放、HTTP 客户端、`datetime`（与 chrono **逐字节**一致）。驱动 = `modernc.org/sqlite`（纯 Go，免 cgo）。⚠ 判据原文写的是 v7，实测做到的是 **v8** |
+| **4** | `capabilities` → `exec` → `app` → `server` / `cli` | 19 项能力逐项打勾；CLI 参数互斥与四态输出一致；`api_contract` 契约测试平移，前端不动 | 🔄 **进行中**：`capabilities` 注册表 / `exec` / `app::payload` 已落（**52 条测试**）。⚠ **它依赖步 2 与步 3**：`capabilities::login` 是 `upstream::login` 的消费者，`app` 其余模块与 `server` 还要 `io` —— 所以先落了不依赖它们的三块，见 `status.md` 的「步 4 实况」。**2026-09-21 追加（判据逐块核）**：`cli` 的参数面 / 退码 / `--json` 与凭据约定已落地（**22 条测试**，含从 Rust 侧 `unit_tests.rs` 平移过来的互斥与"两种写法等价"那批用例）⇒ **"CLI 参数互斥"这半条已达成**；⚠ **"四态输出一致"这半条未达成**（`signin` 的多账号编排与四态渲染那约 1,264 行还没迁，挂在 `internal/cli/unmigrated.go` 那张表上）；⚠ **"19 项能力逐项打勾"这半条卡在 `capabilities` 注册表的条目数**（Go 侧实测 3 项），**不在 CLI** —— 别把它记成"CLI 没做完"。**2026-09-21 再追加**：`app` 层已**全部落地**（最后两块 `login` 14 条 / `app_login` 13 条）⇒ 步 4 剩下的只有 `cli` 那七条叶子，而"四态输出一致"这半条**就**卡在其中的 `signin`（多账号编排 + 四态渲染，约 1,264 行）。⚠ **"19 项能力"那半条与 app 层无关**：它卡在注册表的条目数（3 项），补 app 层不会让它前进。`server` 那半条见下方「服务端」两节 |
 
 ### 步 0 的实测记录
 
