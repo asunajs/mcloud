@@ -113,7 +113,7 @@ func newSmidCommand(deps *Deps, out *output) *cobra.Command {
 		Use:   "show",
 		Short: "列出每个账号绑定的设备特征与最近换到的 deviceId",
 		RunE: func(*cobra.Command, []string) error {
-			return notMigrated("smid show")
+			return runSmidShow(out, showDB)
 		},
 	}
 	show.Flags().StringVar(&showDB, "db", defaultDB, "SQLite 文件")
@@ -127,7 +127,7 @@ func newSmidCommand(deps *Deps, out *output) *cobra.Command {
 		Use:   "reset",
 		Short: "更换某个账号的设备特征：新特征落库，旧的 deviceId 当场作废",
 		RunE: func(*cobra.Command, []string) error {
-			return notMigrated("smid reset")
+			return runSmidReset(deps, out, resetDB, resetAccount, resetReport)
 		},
 	}
 	resetFlags := reset.Flags()
@@ -146,7 +146,7 @@ func newSmidCommand(deps *Deps, out *output) *cobra.Command {
 		Use:   "refresh",
 		Short: "不换特征，只再上报一次换一个新的 deviceId",
 		RunE: func(*cobra.Command, []string) error {
-			return notMigrated("smid refresh")
+			return runSmidRefresh(deps, out, refreshDB, refreshAccount)
 		},
 	}
 	refreshFlags := refresh.Flags()

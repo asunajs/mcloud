@@ -267,7 +267,7 @@
 | `upstream::smid`       | ✅          | 设备指纹（`733` 行）：`smid` 拼接 / `priId` / `tn`（**`tn` 还是空串时算摘要**）/ 25 条 DES 规则整表对拍 TS 侧向量 / 特征体绑定账号（`SmFingerprint`）与每次现算的一半（`SmUpload`）/ 上报与 `deviceId`（拼 `B` 前缀）（**18 条测试**）。⭐ `ep` **复现不了**是算法性质（PKCS#1 v1.5 随机填充 + 盲化），不是随机源没注入到位 —— 断言显式排除它并另开一条钉住                                                                                                                                                  |
 | `upstream::app_signin` | ✅ **整族落地** | 常量（由 `app-signin-vectors` 的 `constants` 钉住）/ `Diagnose` / H5 与原生头 / 百分号编码 / 取值 helper + 建会话三段 + 签到与状态（`infoV3` / `startSignIn` / `taskListV3` / `doTaskPost`）+ 领取族（`receiveV3` / `receiveRevivalReward` / `multiple` / `receiveTaskExpansion`）+ 记录族（`cloudRecordV2` / `record` / `backupgift/*`）+ **发送层**（`Upstream` 上的 15 个方法）（**113 条测试，整包合计**）。`app-signin-vectors.json` 从"只有 Rust 读"变成**两边都读** |
 | `server`               | ✅          | HTTP 层（`1,481` 行 Rust）：**领域错误 → HTTP 的映射**（`statusAndCode` 用兜底而不是逐个列，新增 `ErrorKind` 默认落 500 而不是让人挑一个"看起来合适"的 4xx；5xx 走类别文案**不回吐原文** —— 那些原文里实测带过 SQL 片段与上游响应体）、免登录**白名单**（漏登记 = 默认要登录）、未初始化的闸门（查库失败时**不给结论**）、会话 cookie（`HttpOnly` + `SameSite=Lax`，`Secure` 按部署）、账号/运行/定时任务三组路由、`SSE` 事件流（`Last-Event-ID` 与 `?after=` 同语义，先订阅再读库，队列满时重订阅**不静默跳过**）（**26 条测试**，用 `httptest` 起真服务器验状态码 / cookie 属性 / SSE 帧 / 错误体形状）。⭐ 见下方「服务端」两节 |
-| `cli`                  | 🟡          | 参数面 / 退码 / 输出约定 / 口令边界已在（**24 条测试**）。⭕ **七条叶子刻意不接**，写成机器可读的表 `internal/cli/unmigrated.go`（`signin` / `login qr·sms` / `smid show·reset·refresh` / `fixture extract`），每条点名缺 Rust 侧哪个文件；接了真后端的是 `version` / `capabilities` / `user init·list` / `migrate`。⭐ 见下方「Go 侧 `cli` 落地」 |
+| `cli`                  | 🟡          | 参数面 / 退码 / 输出约定 / 口令边界已在；**`login qr·sms` 与 `smid show·reset·refresh` 已接上真后端**（合计 **23 条测试**）。⭕ **还剩两条叶子**，写成机器可读的表 `internal/cli/unmigrated.go`（`signin` 编排与四态渲染约 1,264 行 / `fixture extract` 769 行），每条点名缺 Rust 侧哪个文件；接了真后端的是 `version` / `capabilities` / `user init·list` / `migrate` / `login qr·sms` / `smid show·reset·refresh`。⭐ 见下方「Go 侧 `cli` 落地」 |
 
 - 落点 `internal/capabilities`、`internal/exec`（包名 `mcloudexec`）、`internal/app/payload.go`。
 - ⚠ **`app` 现在仍只是"组装根接上了 IO"那个骨架**（`internal/app/app.go` 只有一个 `Deps`）。  
@@ -316,14 +316,15 @@
   有断言钉住"两次输入不一致要拒"，以及"`$argon2id$` 与口令明文不得出现在任何输出里"；
   `user list` 逐字段打印而**不用 `%+v`**（后者会展开 `PasswordHash`）。
   ⚠ 本轮**没有新建任何凭据、也没有打印过任何真实标识**，测试数据全是 `199` 开头的合成号。
-- **接了真后端的四条**：`version` / `capabilities` / `user init·list` / `migrate`
-  （后者走 `app.MigrationPlanFromRepoRoot` + `app.RunMigration`，`--dry-run` 一条写都不发）。
-- **其余七条叶子刻意**没**接**，写成一张机器可读的表 `internal/cli/unmigrated.go`：
+- **接了真后端的**：`version` / `capabilities` / `user init·list` / `migrate`
+  （后者走 `app.MigrationPlanFromRepoRoot` + `app.RunMigration`，`--dry-run` 一条写都不发）、
+  `login qr·sms`（**12 条**）、`smid show·reset·refresh`（**11 条**）。
+- **还剩两条叶子**，仍写在机器可读的表 `internal/cli/unmigrated.go` 里：
   每条点名缺的是 Rust 侧哪个文件、约多少行，并有测试要求
   "已注册的叶子要么有实现、要么在这张表里"，**不会有叶子被静默漏掉**。
   缺口清单：`signin`（多账号编排 + 四态渲染，Rust 侧 `signin_run.rs` / `signin_one.rs` /
   `signin_output.rs` 约 1,264 行；`app` 侧的 `CloudSignIn` / `OpenSignInSession` **已在**）、
-  `login qr` / `login sms`、`smid show·reset·refresh`、`fixture extract`（769 行）。
+  `fixture extract`（769 行）。
 - ⚠ **判据账要算对**：步 4 那句"19 项能力逐项打勾"现在**卡在 `capabilities` 注册表的条目数**
   （Go 侧实测 3 项：`sign` / `exchange` / `cloud-snapshot`），**不在 CLI** ——
   CLI 这边 `mcloud capabilities` 把那 3 项如实渲染出来了。

@@ -310,6 +310,9 @@ func TestNoLeafIsSilentlyUnimplemented(t *testing.T) {
 		"migrate":      true,
 		"login qr":     true,
 		"login sms":    true,
+		"smid show":    true,
+		"smid reset":   true,
+		"smid refresh": true,
 	}
 	gaps := UnmigratedBackends()
 

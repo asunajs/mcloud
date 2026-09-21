@@ -75,17 +75,32 @@ func TestRunCLINeverDialsUpstream(t *testing.T) {
 // 联网 + 休眠的慢用例 —— 而那一天它不会报错，只是变慢，然后偶尔超时。
 func runCLI(t *testing.T, stdin string, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
-	var out, errOut bytes.Buffer
-	waiter := &instantWaiter{}
-
-	deps := &Deps{
-		Stdout: &out,
-		Stderr: &errOut,
-		Stdin:  strings.NewReader(stdin),
+	return runCLIWithDeps(t, &Deps{
 		Clock:  mcloudio.SystemClock{},
 		Random: mcloudio.SystemRandom{},
-		HTTP:   refusingClient{},
-		Waiter: waiter,
+	}, stdin, args...)
+}
+
+// runCLIWithDeps 跑一次完整命令行，外部世界由调用方给（[Deps] 里没设的字段在这里补齐）。
+//
+// 它是 [runCLI] 与 run_login_test.go 那条 `runLoginCLI` 的共同底座 ——
+// 两处各自拼一遍 Deps 的话，"其中一边忘了装等待器"这种差别不会报错，
+// 只会让那半边用例忽然开始真睡。
+func runCLIWithDeps(
+	t *testing.T, deps *Deps, stdin string, args ...string,
+) (stdout, stderr string, code int) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	deps.Stdout = &out
+	deps.Stderr = &errOut
+	deps.Stdin = strings.NewReader(stdin)
+	// 两道闸：不联网、不真睡。调用方**显式**给过就尊重它
+	// （脚本化上游的用例自己传 [core.HTTPClient] 进来）。
+	if deps.HTTP == nil {
+		deps.HTTP = refusingClient{}
+	}
+	if deps.Waiter == nil {
+		deps.Waiter = &instantWaiter{}
 	}
 	// ⚠ 先跑、再取两个流的内容。写成 `return out.String(), errOut.String(), Main(...)`
 	// 是错的：Go 按从左到右求值返回式的三个操作数，前两个会在 Main 之前取，

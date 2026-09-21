@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -80,19 +79,11 @@ func runLoginCLI(
 	t *testing.T, http core.HTTPClient, stdin string, args ...string,
 ) (stdout, stderr string, code int) {
 	t.Helper()
-	var out, errOut bytes.Buffer
-	deps := &Deps{
-		Stdout: &out,
-		Stderr: &errOut,
-		Stdin:  strings.NewReader(stdin),
+	return runCLIWithDeps(t, &Deps{
 		Clock:  core.NewFixedClock(cliNow()),
 		Random: &cliRng{next: 3},
 		HTTP:   http,
-		Waiter: &instantWaiter{},
-	}
-	// ⚠ 先跑再取两个流（否则拿到的是空串，而空串会让一大类断言静默通过）。
-	code = Main(deps, args)
-	return out.String(), errOut.String(), code
+	}, stdin, args...)
 }
 
 // loginTempPaths 给出一次运行要用的三个临时路径。
