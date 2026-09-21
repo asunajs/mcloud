@@ -608,6 +608,88 @@ const NOT_VERIFIED_REASONS = {
   prizeRecords: "纯响应体（奖品记录一条），无算法可复算；由 Go 侧 `upstream.ParsePrizeRecords` 断言",
 };
 
+/**
+ * 本次**真的被查到**的豁免条目（= 真的有段落在「未覆盖」清单里）。
+ *
+ * ⚠ 与 `Object.keys(NOT_VERIFIED_REASONS).length` 是两回事：那个量的是**表**，
+ * 这个量的是**事实**。向量文件里把段名改掉（或删掉整段）之后，表里那一条
+ * 就**再也不会被查到** —— 而"没被查到"的表现是它**不打印**，也就是静默失效。
+ * 判据同 §6.1 **#92 / #93**：**表过期不会自报**。
+ */
+const usedReasons = new Set();
+
+/** 递归收集 Go 源文件（仓库相对路径）。 */
+function walkGo(dir, out = []) {
+  const abs = path.join(ROOT, dir);
+  if (!fs.existsSync(abs)) return out;
+  for (const e of fs.readdirSync(abs, { withFileTypes: true })) {
+    const rel = path.posix.join(dir, e.name);
+    if (e.isDirectory()) walkGo(rel, out);
+    else if (e.name.endsWith(".go")) out.push(rel);
+  }
+  return out;
+}
+
+/**
+ * 豁免理由里点名的**消费者**必须真的存在。
+ *
+ * 这张表的 **key** 有守卫（段名对不上会红），**理由文字**没有 ——
+ * 而其中大部分是**可证伪**的：「由 Go 侧 `upstream.ParsePrizeRecords` 断言」
+ * 「语义由 `internal/core/auth.go` 锁定」。
+ *
+ * ⚠ 判据：理由若说"这一节有人管"，那就要**指得出是谁**。指不出来，这条豁免就是
+ * 把「没人验」伪装成「已交代」—— 而它是最坏的一种豁免，因为读的人会**因此不再看那一段**。
+ *
+ * ⚠⚠ 与 Rust 侧那些**冻结**的注释不同（那种只可能一开始就错、不会后来变错），
+ * **这些引用会烂**：把 `ParsePrizeRecords` 改个名，豁免照样打印，
+ * 而这一节从此**真的没人验**。
+ *
+ * 只核对**反引号点名**的引用；纯叙述（"同上" / "向量自己声明…"）不做机械核对，
+ * 但会**列出来**，让"这条没人核过"是可见的。
+ */
+function checkReasonConsumers() {
+  const problems = [];
+  const narration = [];
+  const goAll = [...walkGo("internal"), ...walkGo("cmd")];
+  const src = new Map(goAll.map((f) => [f, fs.readFileSync(path.join(ROOT, f), "utf8")]));
+  const prod = goAll.filter((f) => !f.endsWith("_test.go"));
+  const tests = goAll.filter((f) => f.endsWith("_test.go"));
+
+  for (const [section, reason] of Object.entries(NOT_VERIFIED_REASONS)) {
+    const refs = [...reason.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+    if (refs.length === 0) {
+      narration.push(section);
+      continue;
+    }
+    for (const ref of refs) {
+      // ① 带 `/` 的当路径：文件或目录都要真的在
+      if (ref.includes("/")) {
+        if (!fs.existsSync(path.join(ROOT, ref))) {
+          problems.push(`§${section} 的理由点名了 \`${ref}\`，但它在仓库里**不存在**`);
+        }
+        continue;
+      }
+      // ② `pkg.Symbol`：符号要在**生产代码**里定义，且被某个 `_test.go` 引用
+      const m = /^(?:[a-z_]\w*\.)?([A-Z]\w+)$/.exec(ref);
+      if (!m) continue; // 既不是路径也不是导出符号 ⇒ 不判
+      const sym = m[1];
+      const defined = prod.filter((f) => new RegExp(`func\\s+(?:\\([^)]*\\)\\s*)?${sym}\\b`).test(src.get(f)));
+      const usedBy = tests.filter((f) => new RegExp(`\\b${sym}\\b`).test(src.get(f)));
+      if (defined.length === 0) {
+        problems.push(
+          `§${section} 的理由说「由 \`${ref}\` 断言」，但 \`${sym}\` 在 internal/ 与 cmd/ 里**没有定义**`,
+        );
+      } else if (usedBy.length === 0) {
+        problems.push(
+          `§${section} 的理由说「由 \`${ref}\` 断言」，但**没有任何 \`_test.go\` 引用 \`${sym}\`**` +
+            `（定义在 ${defined.join(", ")}）—— 这一节其实没人验`,
+        );
+      }
+    }
+  }
+  return { problems, narration };
+}
+
 // ─────────────────── 脱敏扫描（镜像 Rust 侧守卫）───────────────────
 //
 // Rust 侧 `mcloud_core::test_support::assert_only_synthetic_identifiers` 只作用于
@@ -692,7 +774,17 @@ function consumedByTests() {
         walk(p);
         continue;
       }
-      const re = ent.name.endsWith(".rs") ? RS_RE : ent.name.endsWith(".go") ? GO_RE : null;
+      // ⚠ **Go 侧必须限 `_test.go`**：本检查的结论被打印成「✓ 有测试读取」，
+      // 而"某个 `.go` 文件里出现过这个字面量"比那句话**弱**：
+      // 生产代码里的一个 `golden.Load("x.json")` 会被读成"有测试在读它"。
+      // ⇒ 判据要**至少**和它印出来的那句话一样强。
+      // （Rust 侧不这么限：那边的向量是 `include_str!` 进 `tests/` 模块或
+      //  `#[cfg(test)] mod tests`，文件名不带 `_test` 后缀；且 Rust 已冻结。）
+      const re = ent.name.endsWith(".rs")
+        ? RS_RE
+        : ent.name.endsWith("_test.go")
+          ? GO_RE
+          : null;
       if (!re) continue;
       for (const m of fs.readFileSync(p, "utf8").matchAll(re)) {
         const base = path.basename(m[1]);
@@ -701,11 +793,20 @@ function consumedByTests() {
     }
   };
 
-  // 三个落点都扫：冻结前的 Rust（crates/）、冻结后的 Rust（legacy/crates/）、Go 侧。
-  for (const root of ["crates", "legacy/crates", "internal", "cmd"]) {
-    walk(path.join(ROOT, root));
-  }
-  return used;
+  // 落点清单：冻结前的 Rust（crates/）、冻结后的 Rust（legacy/crates/）、Go 侧。
+  //
+  // ⚠ 这份清单是**手维护**的，而它已经腐过一次：Rust 基准 2026-09-21 移出本仓库
+  // 之后，前两个落点**整个消失**，而 `walk()` 的 `try/catch` 把"目录不存在"当
+  // 正常情况静默返回 —— 于是清单说什么、实际扫了什么，两边开始分叉，且**不会自报**。
+  // （与 §6.1 **#94** 同一类：手维护的"扫哪些文件"表会静默漏掉一整类。）
+  //
+  // ⇒ 两道保险：① 只扫**真的存在**的落点；② 把**实际扫到的落点打印出来**，
+  // 让"清单"与"事实"当场对得上（与"未覆盖的段"一贯的做法相同）。
+  const roots = ["crates", "legacy/crates", "internal", "cmd"].filter((r) =>
+    fs.existsSync(path.join(ROOT, r)),
+  );
+  for (const root of roots) walk(path.join(ROOT, root));
+  return { used, roots };
 }
 
 function main() {
@@ -715,12 +816,24 @@ function main() {
     process.exit(1);
   }
 
-  const used = consumedByTests();
+  const { used, roots: scannedRoots } = consumedByTests();
   const failures = [];
   const identityProblems = [];
+  const scanProblems = [];
   let checked = 0;
   const sectionReport = [];
   const noVerifier = new Map(); // 段名 → [文件…]
+
+  // ⚠ 一个落点都没扫到 ⇒ 这条检查是**空转**的：`used` 必然为空，于是每个向量都
+  // 被印成"死向量"—— 而"死向量"只是**警告**、不进退出码。合起来就是
+  // "所有向量都没人读"这句话在门禁里**不会失败**。
+  // ⇒ "扫不到东西"本身要算失败（同 §6.1 **#92**：跑不了就得说，不能报绿）。
+  if (scannedRoots.length === 0) {
+    scanProblems.push(
+      "一个落点都没扫到（crates / legacy/crates / internal / cmd 全不存在）" +
+        " —— 这条检查在空转，别把下面的「死向量」当成结论",
+    );
+  }
 
   for (const file of files) {
     const raw = fs.readFileSync(path.join(GOLDEN_DIR, file), "utf8");
@@ -834,9 +947,32 @@ function main() {
     console.log("\n── 本脚本**未覆盖**的段（不算通过，别当背书）──");
     for (const [section, inFiles] of noVerifier) {
       const why = NOT_VERIFIED_REASONS[section] ?? "没有对应校验器";
+      // ⚠ 记录"这条豁免**这次真的被用到了**"——表里剩下的、没被记到的就是**死条目**。
+      if (NOT_VERIFIED_REASONS[section] !== undefined) usedReasons.add(section);
       console.log(`  · §${section.padEnd(24)} ${why}`);
       console.log(`    ${inFiles.join(", ")}`);
     }
+  }
+
+  // ── 豁免表自己的两个洞（与 §6.1 #92/#93 同一类：表过期不会自报）──
+  const deadReasons = Object.keys(NOT_VERIFIED_REASONS).filter((k) => !usedReasons.has(k));
+  const reasonCheck = checkReasonConsumers();
+  console.log("\n── 豁免表自查 ──");
+  console.log(
+    `  ${deadReasons.length === 0 ? "✓" : "✗"} 条目 ${Object.keys(NOT_VERIFIED_REASONS).length} 条、` +
+      `本次命中 ${usedReasons.size} 条（未被命中的 = 段名已不存在）`,
+  );
+  for (const k of deadReasons) {
+    console.log(`      ✗ 死条目 \`${k}\`：没有任何向量段叫这个名字了，请删掉或改对`);
+  }
+  console.log(
+    `  ${reasonCheck.problems.length === 0 ? "✓" : "✗"} 理由点名的消费者都能解析` +
+      `（${Object.keys(NOT_VERIFIED_REASONS).length - reasonCheck.narration.length} 条有引用，` +
+      `${reasonCheck.narration.length} 条纯叙述）`,
+  );
+  for (const p of reasonCheck.problems) console.log(`      ✗ ${p}`);
+  if (reasonCheck.narration.length) {
+    console.log(`      · 纯叙述（**没人机械核过**，自己看一眼）：${reasonCheck.narration.join(", ")}`);
   }
 
   console.log("\n── 脱敏（镜像 Rust 侧守卫）──");
@@ -846,16 +982,20 @@ function main() {
     for (const p of identityProblems) console.log(`  ✗ ${p}`);
   }
 
-  console.log("\n── 消费者 ──");
+  console.log(`\n── 消费者（实际扫到的落点：${scannedRoots.join(" ") || "**一个都没有**"}）──`);
   for (const f of files) {
     console.log(`  ${used.has(f) ? "✓ 有测试读取" : "⚠ 无任何测试读取（死向量）"}  ${f}`);
   }
 
-  const totalProblems = failures.length + identityProblems.length;
+  const tableProblems = deadReasons.length + reasonCheck.problems.length;
+  const totalProblems =
+    failures.length + identityProblems.length + tableProblems + scanProblems.length;
   console.log(
     `\n${totalProblems === 0 ? "✓ 通过" : "✗ 失败"}：断言 ${checked} 条全绿` +
-      (totalProblems ? `，问题 ${totalProblems} 处` : "")
+      (totalProblems ? `，问题 ${totalProblems} 处` : "") +
+      (tableProblems ? `（其中**豁免表自身** ${tableProblems} 处 —— 见上面「豁免表自查」）` : ""),
   );
+  for (const p of scanProblems) console.log(`  ✗ ${p}`);
   if (failures.length) {
     console.log("\n── 失败明细 ──");
     for (const f of failures) console.log(`  ✗ ${f}`);

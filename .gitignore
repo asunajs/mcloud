@@ -1,7 +1,12 @@
-# Rust（冻结后 Cargo workspace 在 legacy/ 下 —— 见 legacy/README.md）
+# 脚本工作产物。
+#
+# ⚠ `target/` **不是** Go 的产物目录（Go 不用它）：它是本地脚本的工作区 ——
+#   `scripts/gates-go.sh` 把完整输出写在 `target/gates-go-last.log`，
+#   一次性分析脚本也把中间结果放这里。
+#
+# （Rust 时代的 `/legacy/target/` 与 `**/*.rs.bk` 已随 Rust 基准一起移出本仓库，
+#   留着只是让人以为这里还有 Rust 代码。）
 /target/
-/legacy/target/
-**/*.rs.bk
 
 # Go
 #
@@ -71,7 +76,7 @@ har/
 
 # HTTP 夹具是**本机**测试数据，不进版本库（`mcloud fixture extract` 现抽现用）。
 # 它脱敏过，但每个人抓到的流量都不一样，提交上来既占体积又是环境特定的；
-# 干净与否由 `cargo test -p mcloud-upstream` 里的 `audit_leaks` 兜底。
+# 干净与否由 `go test ./internal/io -run TestAudit`（`FixtureClient.AuditLeaks`）兜底。
 test/fixtures/http/
 
 # 前端
