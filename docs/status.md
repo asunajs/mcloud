@@ -18,7 +18,7 @@
 
 **当前：步 1（`mcloud-core`）收尾中（只剩 `error` 后半的 `classify_body`）；**步 2（`mcloud-upstream`）已整族落地**（`login` / `client` / `app_client` / `app_login` / `app_signin` 全族 / `smid`，150 条测试）；步 4 已落地 `capabilities`（注册表 + `login`）、`exec`、`app::payload`。步 3（`mcloud-io`）已开工：schema / store / store::user / store::config / 时间列格式对齐五块落地，剩 `legacy_import`、`fixture` / HTTP 客户端 / 随机源。**
 
-> ⚠ **有三个会话在同一棵树上并行迁移**（步 1 = `core`、步 2 = `upstream`、步 3 = `io`、步 4 = 组装层）。
+> ✅ **2026-09-21 起并发结束**，全部由本会话接手（此前最多三个会话在同一棵树上）。
 > 已付出的可见代价：`docs/go-migration-plan.md` 的 §6.1 一度出现**两组 `#20`**，
 > 现已统一为**全局连续 + 追加式**（步 1 = 1–27，步 4 = 28–39 与 42–45，步 3 = 40–41 与 46–47）。
 > ⚠ 动 `docs/`、共享脚本、门禁白名单前**先看 `git status`**：
@@ -125,12 +125,15 @@
 | `datetime`（新增） | ✅ | 与 chrono **逐字节一致**的时间写法，见下 |
 | `store::config` | ✅ | 定时任务 / 任务组合 / 抢兑配置 / 界面偏好 / 导入台账（14 个方法）；**JSON 列存原文，只有 `enabled` / `cron` / `last_status` 单独成列** |
 | `legacy_import` | ⬜ | ~1,600 行 + 1,163 行测试 —— **"老库只读导入结果一致"这条退出判据的载体** |
-| `fixture` / `reqwest_client` / `random` | ⬜ | 398 / 232 / 54 行 |
+| `random` + `SystemClock` | ✅ | 生产随机源（`crypto/rand`，取不到熵就 panic 而不是退化成弱随机）与真实时钟（归一化 UTC）；**3 条测试**。放 io 是因为取熵 / 读时钟都是 IO |
+| `reqwest_client`（→ `client.go`） | ✅ | 重试策略（指数退避 + 抖动，硬上限）+ 真实 HTTP 客户端；**17 条测试**。⭐ 两处刻意不同于 Rust 侧：**不声明 brotli**（标准库解不开，声明了会把响应变乱码）、**关掉 `net/http` 自动解压**由自己管 `Accept-Encoding` |
+| `fixture` | ⬜ | 398 行 —— L2 夹具回放 |
 
 - **驱动 = `modernc.org/sqlite` v1.59.0（纯 Go，免 cgo）**，方案 §8 早已拍板。
   实测它吃下了带 `BEGIN/COMMIT` 的**多语句**迁移 —— 这一点不显然
   （`Exec` 多语句是驱动相关的），所以先写 schema 测试再往下走。
-- 落点 `internal/io`（**包名是 `mcloudio`**，目录名与包名刻意不同）；**95 条测试**。
+- 落点 `internal/io`（**包名是 `mcloudio`**，目录名与包名刻意不同）；**112 条测试**。
+  `Client` 现在是**真的** HTTP 客户端了（此前只是骨架）。
 - ⚠⚠ **时间列必须与 chrono 逐字节一致**（`internal/io/datetime.go`）：
   `sessions.expires_at` / `users.created_at` / `runs.started_at` 都在 SQL 里做
   **字符串比较与排序**，而 chrono 写 `+00:00` + AutoSi（0/3/6/9 位）、
