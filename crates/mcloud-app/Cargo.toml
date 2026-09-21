@@ -1,0 +1,29 @@
+[package]
+name = "mcloud-app"
+description = "mcloud 组装层：把 IO 实现注入 core 的 trait，供 CLI 与 server 两个产物共用。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+mcloud-core = { workspace = true }
+mcloud-upstream = { workspace = true }
+mcloud-capabilities = { workspace = true }
+# 执行器：跨账号编排要用它的准入表与事件总线（见 src/run.rs）
+mcloud-exec = { workspace = true }
+mcloud-io = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+# 生成设备指纹（32 位大写十六进制）是纯计算
+hex = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+# `start_paused` 让"等 1000ms 再轮询"在单测里变成虚拟时间，测试不必真的等
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

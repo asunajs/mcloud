@@ -1,0 +1,387 @@
+{
+  "$generator": "scripts/gen-auth-vectors.cjs",
+  "$source": "原版编译产物 packages/core/dist/core/src/auth/utils.js（经 shim 引用 @asunajs/runtime dist）",
+  "$note": "Rust 侧 crates/mcloud-core/src/auth.rs 必须复现全部 expect*。malformed=true 的用例只要求识别为「不可用」，不要求逐字复刻乱码（原版在编码病态输入下产出乱码 platform，属实现缺陷，不应继承）。",
+  "parseAuth": [
+    {
+      "name": "plain",
+      "input": "MjoxOTkwMDAwMDAwMTpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr",
+      "expect": {
+        "phone": "19900000001",
+        "token": "ak|bk|ck|1893456000000|fk",
+        "auth": "Basic MjoxOTkwMDAwMDAwMTpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr",
+        "platform": "2",
+        "expire": 1893456000000
+      },
+      "malformed": false
+    },
+    {
+      "name": "with-basic-prefix",
+      "input": "Basic MjoxOTkwMDAwMDAwMTpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr",
+      "expect": {
+        "phone": "19900000001",
+        "token": "ak|bk|ck|1893456000000|fk",
+        "auth": "Basic MjoxOTkwMDAwMDAwMTpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr",
+        "platform": "2",
+        "expire": 1893456000000
+      },
+      "malformed": false
+    },
+    {
+      "name": "padding-stripped",
+      "input": "MjoxOTkwMDAwMDAwMTpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr",
+      "expect": {
+        "phone": "19900000001",
+        "token": "ak|bk|ck|1893456000000|fk",
+        "auth": "Basic MjoxOTkwMDAwMDAwMTpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr",
+        "platform": "2",
+        "expire": 1893456000000
+      },
+      "malformed": false
+    },
+    {
+      "name": "basic-and-stripped",
+      "input": "Basic MjoxOTkwMDAwMDAwMTpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr",
+      "expect": {
+        "phone": "19900000001",
+        "token": "ak|bk|ck|1893456000000|fk",
+        "auth": "Basic MjoxOTkwMDAwMDAwMTpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr",
+        "platform": "2",
+        "expire": 1893456000000
+      },
+      "malformed": false
+    },
+    {
+      "name": "platform-4",
+      "input": "NDoxOTkwMDAwMDAwMjpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr",
+      "expect": {
+        "phone": "19900000002",
+        "token": "ak|bk|ck|1893456000000|fk",
+        "auth": "Basic NDoxOTkwMDAwMDAwMjpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr",
+        "platform": "4",
+        "expire": 1893456000000
+      },
+      "malformed": false
+    },
+    {
+      "name": "token-without-expire",
+      "input": "MjoxOTkwMDAwMDAwMTpha3xia3xjaw==",
+      "expect": {
+        "phone": "19900000001",
+        "token": "ak|bk|ck",
+        "auth": "Basic MjoxOTkwMDAwMDAwMTpha3xia3xjaw==",
+        "platform": "2",
+        "expire": 0
+      },
+      "malformed": false
+    },
+    {
+      "name": "token-short-fields",
+      "input": "MjoxOTkwMDAwMDAwMTphfGI=",
+      "expect": {
+        "phone": "19900000001",
+        "token": "a|b",
+        "auth": "Basic MjoxOTkwMDAwMDAwMTphfGI=",
+        "platform": "2",
+        "expire": 0
+      },
+      "malformed": false
+    },
+    {
+      "name": "token-expire-not-numeric",
+      "input": "MjoxOTkwMDAwMDAwMTphfGJ8Y3xub3RhbnVtYmVyfGQ=",
+      "expect": {
+        "phone": "19900000001",
+        "token": "a|b|c|notanumber|d",
+        "auth": "Basic MjoxOTkwMDAwMDAwMTphfGJ8Y3xub3RhbnVtYmVyfGQ=",
+        "platform": "2",
+        "expire": 0
+      },
+      "malformed": false
+    },
+    {
+      "name": "token-expire-zero",
+      "input": "MjoxOTkwMDAwMDAwMTphfGJ8Y3wwfGQ=",
+      "expect": {
+        "phone": "19900000001",
+        "token": "a|b|c|0|d",
+        "auth": "Basic MjoxOTkwMDAwMDAwMTphfGJ8Y3wwfGQ=",
+        "platform": "2",
+        "expire": 0
+      },
+      "malformed": false
+    },
+    {
+      "name": "token-expire-negative",
+      "input": "MjoxOTkwMDAwMDAwMTphfGJ8Y3wtMXxk",
+      "expect": {
+        "phone": "19900000001",
+        "token": "a|b|c|-1|d",
+        "auth": "Basic MjoxOTkwMDAwMDAwMTphfGJ8Y3wtMXxk",
+        "platform": "2",
+        "expire": -1
+      },
+      "malformed": false
+    },
+    {
+      "name": "token-expire-float",
+      "input": "MjoxOTkwMDAwMDAwMTphfGJ8Y3wxLjV8ZA==",
+      "expect": {
+        "phone": "19900000001",
+        "token": "a|b|c|1.5|d",
+        "auth": "Basic MjoxOTkwMDAwMDAwMTphfGJ8Y3wxLjV8ZA==",
+        "platform": "2",
+        "expire": 1.5
+      },
+      "malformed": false
+    },
+    {
+      "name": "phone-only-two-fields",
+      "input": "MjoxOTkwMDAwMDAwMTo=",
+      "expect": {
+        "phone": "19900000001",
+        "token": "",
+        "auth": "Basic MjoxOTkwMDAwMDAwMTo=",
+        "platform": "2",
+        "expire": 0
+      },
+      "malformed": false
+    },
+    {
+      "name": "empty-token",
+      "input": "MjoxOTkwMDAwMDAwMTo=",
+      "expect": {
+        "phone": "19900000001",
+        "token": "",
+        "auth": "Basic MjoxOTkwMDAwMDAwMTo=",
+        "platform": "2",
+        "expire": 0
+      },
+      "malformed": false
+    },
+    {
+      "name": "empty-phone",
+      "input": "Mjo6YWt8Ymt8Y2t8MTg5MzQ1NjAwMDAwMHxmaw==",
+      "expect": {
+        "phone": "",
+        "token": "ak|bk|ck|1893456000000|fk",
+        "auth": "Basic Mjo6YWt8Ymt8Y2t8MTg5MzQ1NjAwMDAwMHxmaw==",
+        "platform": "2",
+        "expire": 1893456000000
+      },
+      "malformed": false
+    },
+    {
+      "name": "colon-in-token-truncated",
+      "input": "MjoxOTkwMDAwMDAwMTphOmI6Yw==",
+      "expect": {
+        "phone": "19900000001",
+        "token": "a",
+        "auth": "Basic MjoxOTkwMDAwMDAwMTphOmI6Yw==",
+        "platform": "2",
+        "expire": 0
+      },
+      "malformed": false
+    },
+    {
+      "name": "token-with-pipe-only",
+      "input": "MjoxOTkwMDAwMDAwMTp8fHx8",
+      "expect": {
+        "phone": "19900000001",
+        "token": "||||",
+        "auth": "Basic MjoxOTkwMDAwMDAwMTp8fHx8",
+        "platform": "2",
+        "expire": 0
+      },
+      "malformed": false
+    },
+    {
+      "name": "empty-string",
+      "input": "",
+      "expect": null,
+      "malformed": false
+    },
+    {
+      "name": "lowercase-basic-prefix",
+      "input": "basic MjoxOTkwMDAwMDAwMTpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr",
+      "expect": {
+        "auth": "Basic basic MjoxOTkwMDAwMDAwMTpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr",
+        "platform": "m�\"p�������������酭�����������������",
+        "expire": 0
+      },
+      "malformed": true
+    },
+    {
+      "name": "no-colon-at-all",
+      "input": "anVzdG9uZWZpZWxk",
+      "expect": {
+        "auth": "Basic anVzdG9uZWZpZWxk",
+        "platform": "justonefield",
+        "expire": 0
+      },
+      "malformed": false
+    },
+    {
+      "name": "too-many-colons",
+      "input": "cDpwaDp0bzprOmVu",
+      "expect": {
+        "phone": "ph",
+        "token": "to",
+        "auth": "Basic cDpwaDp0bzprOmVu",
+        "platform": "p",
+        "expire": 0
+      },
+      "malformed": false
+    },
+    {
+      "name": "not-base64-at-all",
+      "input": "!!!not-base64!!!",
+      "expect": {
+        "auth": "Basic !!!not-base64!!!",
+        "platform": "��~m�\u001e�",
+        "expire": 0
+      },
+      "malformed": true
+    },
+    {
+      "name": "plain-text",
+      "input": "hello world",
+      "expect": {
+        "auth": "Basic hello world",
+        "platform": "��e�\n+�",
+        "expire": 0
+      },
+      "malformed": true
+    }
+  ],
+  "padBase64": [
+    {
+      "name": "len-0",
+      "input": "",
+      "expect": ""
+    },
+    {
+      "name": "len-1",
+      "input": "A",
+      "expect": "A==="
+    },
+    {
+      "name": "len-2",
+      "input": "AB",
+      "expect": "AB=="
+    },
+    {
+      "name": "len-3",
+      "input": "ABC",
+      "expect": "ABC="
+    },
+    {
+      "name": "len-4",
+      "input": "ABCD",
+      "expect": "ABCD"
+    },
+    {
+      "name": "len-5",
+      "input": "ABCDE",
+      "expect": "ABCDE==="
+    },
+    {
+      "name": "len-6",
+      "input": "ABCDEF",
+      "expect": "ABCDEF=="
+    },
+    {
+      "name": "len-7",
+      "input": "ABCDEFG",
+      "expect": "ABCDEFG="
+    },
+    {
+      "name": "len-8",
+      "input": "ABCDEFGH",
+      "expect": "ABCDEFGH"
+    },
+    {
+      "name": "already-padded",
+      "input": "MjoxOTkwMDAwMDAwMTpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr",
+      "expect": "MjoxOTkwMDAwMDAwMTpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr"
+    }
+  ],
+  "identity": [
+    {
+      "name": "auth-only",
+      "account": {
+        "auth": "MjoxOTkwMDAwMDAwMTpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr"
+      },
+      "parsedPhone": "19900000001",
+      "legacyKey": "19900000001",
+      "accountId": "19****01",
+      "label": "19****01"
+    },
+    {
+      "name": "auth-and-nickname",
+      "account": {
+        "auth": "MjoxOTkwMDAwMDAwMTpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr",
+        "nickname": "账号A"
+      },
+      "parsedPhone": "19900000001",
+      "legacyKey": "19900000001",
+      "accountId": "19****01",
+      "label": "账号A"
+    },
+    {
+      "name": "explicit-phone-wins",
+      "account": {
+        "auth": "MjoxOTk5OTk5OTk5OTpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr",
+        "phone": "19900000001",
+        "nickname": "账号A"
+      },
+      "parsedPhone": "19999999999",
+      "legacyKey": "19900000001",
+      "accountId": "19****01",
+      "label": "账号A"
+    },
+    {
+      "name": "nickname-fallback-when-auth-invalid",
+      "account": {
+        "auth": "!!!not-base64!!!",
+        "nickname": "账号B"
+      },
+      "parsedPhone": null,
+      "legacyKey": "账号B",
+      "accountId": "账号B",
+      "label": "账号B"
+    },
+    {
+      "name": "placeholders-when-both-missing",
+      "account": {
+        "auth": "!!!not-base64!!!"
+      },
+      "parsedPhone": null,
+      "legacyKey": "account",
+      "accountId": "account",
+      "label": "账号"
+    },
+    {
+      "name": "empty-auth-with-nickname",
+      "account": {
+        "auth": "",
+        "nickname": "账号C"
+      },
+      "parsedPhone": null,
+      "legacyKey": "账号C",
+      "accountId": "账号C",
+      "label": "账号C"
+    },
+    {
+      "name": "cjk-nickname",
+      "account": {
+        "auth": "MjoxOTkwMDAwMDAwMTpha3xia3xja3wxODkzNDU2MDAwMDAwfGZr",
+        "nickname": "移动云盘·测试"
+      },
+      "parsedPhone": "19900000001",
+      "legacyKey": "19900000001",
+      "accountId": "19****01",
+      "label": "移动云盘·测试"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+# cargo 构建缓存（约 7.5 GB，带着冻结时的编译产物）
+/target/
+**/*.rs.bk
+
+# 门禁日志（gates.sh 写的）
+target/gates-*.log
+
+# HTTP 夹具是本机测试数据（来源 HAR 含登录凭据），不入库
+test/fixtures/http/
+
+# 运行时数据 / 凭据，绝不入库
+/data/*.db
+/data/*.db-*
+
+# 原始 HAR 含真实登录凭据
+har/
+*.har
+
+# 杂项
+.DS_Store
+*.log

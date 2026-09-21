@@ -1,0 +1,289 @@
+{
+  "$generator": "scripts/gen-login-crypto-vectors.cjs",
+  "$source": "移动云盘 PC 端 /out/renderer/common/utils.js（asar 提取，未入库）",
+  "$cryptoJsVersion": "4.1.1",
+  "$note": "Rust 侧必须复现本文件全部 expect* 字段。puzzleAnswer 四条来自真实抓包，用同版本 crypto-js 复算逐字节命中，是密钥/IV/模式/padding/分段正确性的硬证据。",
+  "constants": {
+    "AES_ECB_KEY_PROD": "qPqDw263XgFgL3u8",
+    "AES_ECB_KEY_TEST": "2ErfJus1Ofr@2o24",
+    "PUZZLE_KEY": "CREATPUZZLE03F9A",
+    "PUZZLE_IV": "E526E1F3F9765444",
+    "HASHTEXT": "fetion.com.cn:",
+    "ENV_PROD": 0,
+    "ENV_TEST": [
+      11,
+      22
+    ],
+    "DEVICE_FINGERPRINT_SUFFIX": "-ENDIN"
+  },
+  "puzzleAnswer": [
+    {
+      "name": "real-1",
+      "plainText": "461",
+      "expectB64": "RTUyNkUxRjNGOTc2NTQ0NPXSgBfdneawSGgfCa/g/Rg=",
+      "soMatchesRealCapture": true,
+      "realCaptureB64": "RTUyNkUxRjNGOTc2NTQ0NPXSgBfdneawSGgfCa/g/Rg=",
+      "ivAscii": "E526E1F3F9765444",
+      "ivIsConstant": true,
+      "cipherB64": "9dKAF92d5rBIaB8Jr+D9GA==",
+      "totalBytes": 32
+    },
+    {
+      "name": "real-2",
+      "plainText": "391",
+      "expectB64": "RTUyNkUxRjNGOTc2NTQ0NEA6F1MQJO7Ejcwfa1IsHCs=",
+      "soMatchesRealCapture": true,
+      "realCaptureB64": "RTUyNkUxRjNGOTc2NTQ0NEA6F1MQJO7Ejcwfa1IsHCs=",
+      "ivAscii": "E526E1F3F9765444",
+      "ivIsConstant": true,
+      "cipherB64": "QDoXUxAk7sSNzB9rUiwcKw==",
+      "totalBytes": 32
+    },
+    {
+      "name": "coord-0",
+      "plainText": "0",
+      "expectB64": "RTUyNkUxRjNGOTc2NTQ0NG6XwPfnQCf5PzPLnRE/uk0=",
+      "synthetic": true,
+      "cipherB64": "bpfA9+dAJ/k/M8udET+6TQ==",
+      "totalBytes": 32
+    },
+    {
+      "name": "coord-3-digit",
+      "plainText": "999",
+      "expectB64": "RTUyNkUxRjNGOTc2NTQ0NHyYtjBNCjM+BweOV3ziF7M=",
+      "synthetic": true,
+      "cipherB64": "fJi2ME0KMz4HB45XfOIXsw==",
+      "totalBytes": 32
+    },
+    {
+      "name": "coord-4-digit",
+      "plainText": "1234",
+      "expectB64": "RTUyNkUxRjNGOTc2NTQ0NClhh5Qceib9KgoVFAM9b1Y=",
+      "synthetic": true,
+      "cipherB64": "KWGHlBx6Jv0qChUUAz1vVg==",
+      "totalBytes": 32
+    },
+    {
+      "name": "coord-boundary-15",
+      "plainText": "AAAAAAAAAAAAAAA",
+      "expectB64": "RTUyNkUxRjNGOTc2NTQ0NP2XDCoQLyg9oERNLFjrwOY=",
+      "synthetic": true,
+      "cipherB64": "/ZcMKhAvKD2gRE0sWOvA5g==",
+      "totalBytes": 32
+    },
+    {
+      "name": "coord-boundary-16",
+      "plainText": "AAAAAAAAAAAAAAAA",
+      "expectB64": "RTUyNkUxRjNGOTc2NTQ0NGjEtYl6sVVZ6jaRBgyCBPgZXyjgGcHgLUtdnOx+SwRZ",
+      "synthetic": true,
+      "cipherB64": "aMS1iXqxVVnqNpEGDIIE+BlfKOAZweAtS12c7H5LBFk=",
+      "totalBytes": 48
+    },
+    {
+      "name": "coord-boundary-17",
+      "plainText": "AAAAAAAAAAAAAAAAA",
+      "expectB64": "RTUyNkUxRjNGOTc2NTQ0NGjEtYl6sVVZ6jaRBgyCBPh79GAw3Zg4giOcbg3z4Daj",
+      "synthetic": true,
+      "cipherB64": "aMS1iXqxVVnqNpEGDIIE+Hv0YDDdmDiCI5xuDfPgNqM=",
+      "totalBytes": 48
+    }
+  ],
+  "aesEcbHexDecrypt": [
+    {
+      "name": "prod__len-4",
+      "key": "qPqDw263XgFgL3u8",
+      "inputHex": "d44b81365b487f5edef9411756db79b2",
+      "expectPlain": "461",
+      "expectDecrypt": "461"
+    },
+    {
+      "name": "prod__len-15",
+      "key": "qPqDw263XgFgL3u8",
+      "inputHex": "2b98919c801837227e30f6252a81cf3b",
+      "expectPlain": "0123456789abcde",
+      "expectDecrypt": "0123456789abcde"
+    },
+    {
+      "name": "prod__len-16",
+      "key": "qPqDw263XgFgL3u8",
+      "inputHex": "615001a93e66599e258d3b73eeea0d94109d762751dd275bc58fb71ac0a3ede0",
+      "expectPlain": "0123456789abcdef",
+      "expectDecrypt": "0123456789abcdef"
+    },
+    {
+      "name": "prod__len-17",
+      "key": "qPqDw263XgFgL3u8",
+      "inputHex": "615001a93e66599e258d3b73eeea0d942d3213800ad65cdd08b06bca3db0f6f4",
+      "expectPlain": "0123456789abcdefg",
+      "expectDecrypt": "0123456789abcdefg"
+    },
+    {
+      "name": "prod__empty",
+      "key": "qPqDw263XgFgL3u8",
+      "inputHex": "109d762751dd275bc58fb71ac0a3ede0",
+      "expectPlain": "",
+      "expectDecrypt": ""
+    },
+    {
+      "name": "prod__json-min",
+      "key": "qPqDw263XgFgL3u8",
+      "inputHex": "56162f863c974df8292a8a53d86a7d27",
+      "expectPlain": "{\"a\":1}",
+      "expectDecrypt": "{\"a\":1}"
+    },
+    {
+      "name": "test__len-4",
+      "key": "2ErfJus1Ofr@2o24",
+      "inputHex": "9f477157ffc8c56195cba70445967d75",
+      "expectPlain": "461",
+      "expectDecrypt": "461"
+    },
+    {
+      "name": "test__len-15",
+      "key": "2ErfJus1Ofr@2o24",
+      "inputHex": "7ab1477c962d953507f5610364575be5",
+      "expectPlain": "0123456789abcde",
+      "expectDecrypt": "0123456789abcde"
+    },
+    {
+      "name": "test__len-16",
+      "key": "2ErfJus1Ofr@2o24",
+      "inputHex": "a43ff77d4e023d29cea0584cdce49fcfea4536269e4d85b52e316662d1e53beb",
+      "expectPlain": "0123456789abcdef",
+      "expectDecrypt": "0123456789abcdef"
+    },
+    {
+      "name": "test__len-17",
+      "key": "2ErfJus1Ofr@2o24",
+      "inputHex": "a43ff77d4e023d29cea0584cdce49fcfa388e11b745eeeb66e6821859a9f13af",
+      "expectPlain": "0123456789abcdefg",
+      "expectDecrypt": "0123456789abcdefg"
+    },
+    {
+      "name": "test__empty",
+      "key": "2ErfJus1Ofr@2o24",
+      "inputHex": "ea4536269e4d85b52e316662d1e53beb",
+      "expectPlain": "",
+      "expectDecrypt": ""
+    },
+    {
+      "name": "test__json-min",
+      "key": "2ErfJus1Ofr@2o24",
+      "inputHex": "2af4362c6b552c2fe02925511d46b270",
+      "expectPlain": "{\"a\":1}",
+      "expectDecrypt": "{\"a\":1}"
+    }
+  ],
+  "aesEcbEncrypt": [
+    {
+      "name": "prod__len-4",
+      "key": "qPqDw263XgFgL3u8",
+      "plainText": "461",
+      "expectB64": "1EuBNltIf17e+UEXVtt5sg=="
+    },
+    {
+      "name": "prod__len-15",
+      "key": "qPqDw263XgFgL3u8",
+      "plainText": "0123456789abcde",
+      "expectB64": "K5iRnIAYNyJ+MPYlKoHPOw=="
+    },
+    {
+      "name": "prod__len-16",
+      "key": "qPqDw263XgFgL3u8",
+      "plainText": "0123456789abcdef",
+      "expectB64": "YVABqT5mWZ4ljTtz7uoNlBCddidR3SdbxY+3GsCj7eA="
+    },
+    {
+      "name": "prod__len-17",
+      "key": "qPqDw263XgFgL3u8",
+      "plainText": "0123456789abcdefg",
+      "expectB64": "YVABqT5mWZ4ljTtz7uoNlC0yE4AK1lzdCLBryj2w9vQ="
+    },
+    {
+      "name": "prod__empty",
+      "key": "qPqDw263XgFgL3u8",
+      "plainText": "",
+      "expectB64": "EJ12J1HdJ1vFj7cawKPt4A=="
+    },
+    {
+      "name": "prod__json-min",
+      "key": "qPqDw263XgFgL3u8",
+      "plainText": "{\"a\":1}",
+      "expectB64": "VhYvhjyXTfgpKopT2Gp9Jw=="
+    },
+    {
+      "name": "test__len-4",
+      "key": "2ErfJus1Ofr@2o24",
+      "plainText": "461",
+      "expectB64": "n0dxV//IxWGVy6cERZZ9dQ=="
+    },
+    {
+      "name": "test__len-15",
+      "key": "2ErfJus1Ofr@2o24",
+      "plainText": "0123456789abcde",
+      "expectB64": "erFHfJYtlTUH9WEDZFdb5Q=="
+    },
+    {
+      "name": "test__len-16",
+      "key": "2ErfJus1Ofr@2o24",
+      "plainText": "0123456789abcdef",
+      "expectB64": "pD/3fU4CPSnOoFhM3OSfz+pFNiaeTYW1LjFmYtHlO+s="
+    },
+    {
+      "name": "test__len-17",
+      "key": "2ErfJus1Ofr@2o24",
+      "plainText": "0123456789abcdefg",
+      "expectB64": "pD/3fU4CPSnOoFhM3OSfz6OI4Rt0Xu62bmghhZqfE68="
+    },
+    {
+      "name": "test__empty",
+      "key": "2ErfJus1Ofr@2o24",
+      "plainText": "",
+      "expectB64": "6kU2Jp5NhbUuMWZi0eU76w=="
+    },
+    {
+      "name": "test__json-min",
+      "key": "2ErfJus1Ofr@2o24",
+      "plainText": "{\"a\":1}",
+      "expectB64": "KvQ2LGtVLC/gKSVRHUaycA=="
+    }
+  ],
+  "sha1Password": [
+    {
+      "password": "Passw0rd!",
+      "expectHexUpper": "39290415B4DD352FDC23004DECC712DB4C8A900B"
+    },
+    {
+      "password": "123456",
+      "expectHexUpper": "871D0A9E95ABA22B4604224CFBA24E605FABBC34"
+    },
+    {
+      "password": "p@ss 中文",
+      "expectHexUpper": "849A6686EA33CF24EB09892D4772B29675AC6E66"
+    }
+  ],
+  "md5SafeVerify": [
+    {
+      "input": "sec-info-sample",
+      "expectHexUpper": "9AD003363AA05E237FF1ABED01F040FA"
+    },
+    {
+      "input": "1234",
+      "expectHexUpper": "81DC9BDB52D04DC20036DBD8313ED055"
+    }
+  ],
+  "guid32": [
+    {
+      "uuidV4": "11111111-2222-4333-8444-555555555555",
+      "expectHexUpper": "26BA38211165F94678008565888189FD",
+      "expectLen": 32,
+      "deviceFingerprint": "26BA38211165F94678008565888189FD-ENDIN"
+    },
+    {
+      "uuidV4": "8f14e45f-ceea-467a-9c1b-000000000001",
+      "expectHexUpper": "9DF27477AE1949774FC1605A971018D5",
+      "expectLen": 32,
+      "deviceFingerprint": "9DF27477AE1949774FC1605A971018D5-ENDIN"
+    }
+  ]
+}

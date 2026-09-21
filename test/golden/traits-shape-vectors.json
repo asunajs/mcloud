@@ -1,0 +1,196 @@
+{
+  "$decode": [
+    {
+      "json": "\"GET\"",
+      "ok": true,
+      "type": "HttpMethod"
+    },
+    {
+      "json": "\"get\"",
+      "ok": false,
+      "type": "HttpMethod"
+    },
+    {
+      "json": "\"Get\"",
+      "ok": false,
+      "type": "HttpMethod"
+    },
+    {
+      "json": "\"POST\"",
+      "ok": true,
+      "type": "HttpMethod"
+    },
+    {
+      "json": "\"PATCH\"",
+      "ok": false,
+      "type": "HttpMethod"
+    },
+    {
+      "json": "0",
+      "ok": false,
+      "type": "HttpMethod"
+    },
+    {
+      "json": "null",
+      "ok": false,
+      "type": "HttpMethod"
+    },
+    {
+      "json": "{\"method\":\"GET\",\"url\":\"https://example.com/a\"}",
+      "ok": true,
+      "type": "HttpRequest"
+    },
+    {
+      "json": "{\"method\":\"GET\",\"url\":\"https://example.com/a\",\"headers\":[]}",
+      "ok": true,
+      "type": "HttpRequest"
+    },
+    {
+      "json": "{\"method\":\"GET\",\"url\":\"https://example.com/a\",\"headers\":null}",
+      "ok": false,
+      "type": "HttpRequest"
+    },
+    {
+      "json": "{\"method\":\"POST\",\"url\":\"https://example.com/a\",\"body\":null}",
+      "ok": true,
+      "type": "HttpRequest"
+    },
+    {
+      "json": "{\"method\":\"POST\",\"url\":\"https://example.com/a\",\"body\":[123,34]}",
+      "ok": true,
+      "type": "HttpRequest"
+    },
+    {
+      "json": "{\"method\":\"POST\",\"url\":\"https://example.com/a\",\"body\":\"eyJhIjox\"}",
+      "ok": false,
+      "type": "HttpRequest"
+    },
+    {
+      "json": "{\"method\":\"get\",\"url\":\"https://example.com/a\"}",
+      "ok": false,
+      "type": "HttpRequest"
+    },
+    {
+      "json": "{\"url\":\"https://example.com/a\"}",
+      "ok": false,
+      "type": "HttpRequest"
+    },
+    {
+      "json": "{\"method\":\"GET\"}",
+      "ok": false,
+      "type": "HttpRequest"
+    },
+    {
+      "json": "{\"method\":\"GET\",\"url\":null}",
+      "ok": false,
+      "type": "HttpRequest"
+    },
+    {
+      "json": "{\"method\":null,\"url\":\"https://example.com/a\"}",
+      "ok": false,
+      "type": "HttpRequest"
+    },
+    {
+      "json": "{\"method\":\"GET\",\"url\":\"https://example.com/a\",\"headers\":[[\"x-a\"]]}",
+      "ok": false,
+      "type": "HttpRequest"
+    },
+    {
+      "json": "{\"status\":200}",
+      "ok": true,
+      "type": "HttpResponse"
+    },
+    {
+      "json": "{\"status\":200,\"body\":[]}",
+      "ok": true,
+      "type": "HttpResponse"
+    },
+    {
+      "json": "{\"status\":200,\"body\":[123]}",
+      "ok": true,
+      "type": "HttpResponse"
+    },
+    {
+      "json": "{\"status\":200,\"body\":null}",
+      "ok": false,
+      "type": "HttpResponse"
+    },
+    {
+      "json": "{\"headers\":[],\"body\":[]}",
+      "ok": false,
+      "type": "HttpResponse"
+    }
+  ],
+  "$enumText": [
+    {
+      "asStr": "GET",
+      "enum": "HttpMethod",
+      "isRead": true,
+      "text": "GET",
+      "variant": "Get"
+    },
+    {
+      "asStr": "POST",
+      "enum": "HttpMethod",
+      "isRead": false,
+      "text": "POST",
+      "variant": "Post"
+    },
+    {
+      "asStr": "PUT",
+      "enum": "HttpMethod",
+      "isRead": false,
+      "text": "PUT",
+      "variant": "Put"
+    },
+    {
+      "asStr": "DELETE",
+      "enum": "HttpMethod",
+      "isRead": false,
+      "text": "DELETE",
+      "variant": "Delete"
+    }
+  ],
+  "$roundTrip": [
+    {
+      "input": "{\"method\":\"GET\",\"url\":\"https://example.com/a\"}",
+      "json": "{\"method\":\"GET\",\"url\":\"https://example.com/a\",\"headers\":[]}",
+      "same": false
+    },
+    {
+      "input": "{\"status\":200}",
+      "json": "{\"status\":200,\"headers\":[],\"body\":[]}",
+      "same": false
+    }
+  ],
+  "$structJson": [
+    {
+      "json": "{\"method\":\"GET\",\"url\":\"https://example.com/a\",\"headers\":[]}",
+      "kind": "request-get-minimal"
+    },
+    {
+      "json": "{\"method\":\"POST\",\"url\":\"https://example.com/b\",\"headers\":[[\"x-a\",\"1\"],[\"x-b\",\"2\"]]}",
+      "kind": "request-post-headers"
+    },
+    {
+      "json": "{\"method\":\"POST\",\"url\":\"https://example.com/c\",\"headers\":[[\"content-type\",\"application/json\"]],\"body\":[123,34,110,34,58,49,44,34,112,104,111,110,101,34,58,34,49,57,57,48,48,48,48,49,50,51,52,34,125]}",
+      "kind": "request-json-body"
+    },
+    {
+      "json": "{\"method\":\"POST\",\"url\":\"https://example.com/d\",\"headers\":[[\"Content-Type\",\"application/x-www-form-urlencoded\"]],\"body\":[123,34,97,34,58,49,125]}",
+      "kind": "request-content-type-kept"
+    },
+    {
+      "json": "{\"method\":\"POST\",\"url\":\"https://example.com/e\",\"headers\":[[\"x-trace\",\"t-1\"],[\"content-type\",\"application/json\"]],\"body\":[123,34,97,34,58,49,125],\"timeout_ms\":3000,\"idempotency_key\":\"run-1\"}",
+      "kind": "request-full"
+    },
+    {
+      "json": "{\"status\":200,\"headers\":[],\"body\":[123,34,97,34,58,49,125]}",
+      "kind": "response-200"
+    },
+    {
+      "json": "{\"status\":404,\"headers\":[[\"content-type\",\"text/plain\"]],\"body\":[]}",
+      "kind": "response-empty-body"
+    }
+  ]
+}

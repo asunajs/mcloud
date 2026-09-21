@@ -1,0 +1,16 @@
+[package]
+name = "mcloud-exec"
+description = "mcloud 执行器：runId、并发闸、事件总线。（P0 骨架）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+mcloud-core = { workspace = true }
+mcloud-capabilities = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }

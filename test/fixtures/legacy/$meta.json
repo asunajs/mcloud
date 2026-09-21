@@ -1,0 +1,24 @@
+{
+  "$generator": "scripts/gen-legacy-fixtures.cjs",
+  "$source": "旧项目 mcloud-sign 的真实运行数据（packages/api/data/ 与 asign.json）",
+  "$note": "**已脱敏**：凭据类字段（auth/token/deviceId/cloudPhoneRedpackToken/session…）为同长度规律串；手机号按首次出现顺序重映射为 19900000001 起；userDomainId 重映射为 199 开头的 19 位替补号；auth 用映射后的手机号重建 —— 因此夹具里的 auth 仍可被 parse_auth 解析，链路能端到端测。**保留**的是字段名、可选性与数值形状（长度、是否纯数字），夹具因此仍贴近真实数据。界线：标识信息（手机号、userDomainId）在**日志**里保留 —— 日志是本地排障资产、且不可直接复用；但本目录是进版本库的静态文件，一旦推到远端就全量留痕、收不回来，因此标识一律清掉。",
+  "$accountLink": "asign.json 的 caiyun[i].nickname ↔ history.json 的 runs[].account（旧版存的是展示名，不是手机号）；state.json 的键是手机号原文（旧版 accountKey），迁移后要换成掩码 AccountId。",
+  "$phoneAssignment": {
+    "$rule": "按首次出现顺序重映射为 19900000001 起；原号码属 PII，不写入夹具",
+    "$assigned": [
+      "19900000001",
+      "19900000002"
+    ]
+  },
+  "$sourceSha256": {
+    "asign.json": "5fbfc37a232289d5aab0c50146526206fc8a41b2136a0c7f7b1d4e93cabe253a",
+    "state.json": "2a18531489942b839413e14d5fdc2959bbfb70e15c1bacc2489d292677af6526",
+    "history.json": "dc6245609ef6d2d46f1549d5be5d92c30011f7f5abab4f752754c23c0709cbf1",
+    "pipelines.json": "22c0961205bf8f3650c7ff7b6bc9709e71d07b9f3275e4b22f876a087073a39a",
+    "schedules.json": "a39c475e0db93dc086de828510a988f10eb814fd0e2cb6d72ee9160aba3dd410",
+    "exchange.json": "e866280076d6dc171fac695b64e99fc4fd636adfe5446f4e87f7d5c18260c30b",
+    "webui.json": "e4a35933aa14fc0068543098a73e88c4713412f2f2093ce298eca2c586b24b84"
+  },
+  "$configPath": "asign.json（旧项目根目录）",
+  "$dataDir": "packages/api/data/"
+}

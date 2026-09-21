@@ -1,0 +1,215 @@
+{
+  "$comment": "由**真实的** mcloud-core（path 依赖，非镜像）的 serde 产出。⚠ 这批形状在 Rust 侧原本一个断言都没有 —— 而所有字段都带 #[serde(default)]，字段名写错只会静默读到零值。另含 $fixtureKeys：直接由 serde_json 解析 test/fixtures/legacy/*.json 得出的**实际出现的键名**（不经过任何类型），用作字段名的客观真值。",
+  "$fixtureKeys": [
+    {
+      "file": "asign.json",
+      "paths": [
+        "$.caiyun",
+        "$.caiyun[].auth",
+        "$.caiyun[].nickname",
+        "$.version"
+      ]
+    },
+    {
+      "file": "state.json",
+      "paths": [
+        "$.accounts",
+        "$.accounts.{}",
+        "$.accounts.{}.cloudPhoneRedpackToken",
+        "$.accounts.{}.deviceId",
+        "$.accounts.{}.jwtToken",
+        "$.accounts.{}.userDomainId"
+      ]
+    },
+    {
+      "file": "history.json",
+      "paths": [
+        "$.$fixtureNote",
+        "$.runs",
+        "$.runs[].account",
+        "$.runs[].durationMs",
+        "$.runs[].end",
+        "$.runs[].error",
+        "$.runs[].logs",
+        "$.runs[].logs[].date",
+        "$.runs[].logs[].level",
+        "$.runs[].logs[].msg",
+        "$.runs[].logs[].type",
+        "$.runs[].ok",
+        "$.runs[].result",
+        "$.runs[].result.ok",
+        "$.runs[].start",
+        "$.runs[].task"
+      ]
+    },
+    {
+      "file": "pipelines.json",
+      "paths": [
+        "$.pipelines",
+        "$.pipelines[].createdAt",
+        "$.pipelines[].description",
+        "$.pipelines[].id",
+        "$.pipelines[].lastDurationMs",
+        "$.pipelines[].lastRunAt",
+        "$.pipelines[].lastStatus",
+        "$.pipelines[].name",
+        "$.pipelines[].steps",
+        "$.pipelines[].steps[].task",
+        "$.pipelines[].stopOnError",
+        "$.pipelines[].updatedAt"
+      ]
+    },
+    {
+      "file": "schedules.json",
+      "paths": [
+        "$.schedules"
+      ]
+    },
+    {
+      "file": "exchange.json",
+      "paths": [
+        "$.bindings",
+        "$.enabled",
+        "$.scheduleIds",
+        "$.updatedAt",
+        "$.windows"
+      ]
+    },
+    {
+      "file": "webui.json",
+      "paths": [
+        "$.backgroundRun",
+        "$.lastPage",
+        "$.logExpanded",
+        "$.rememberLastPage",
+        "$.updatedAt"
+      ]
+    }
+  ],
+  "$generator": "scripts/gen-legacy-shape-vectors.rs",
+  "$pipelineStepDecode": [
+    {
+      "bodyIsNone": true,
+      "bodyText": null,
+      "coeIsNone": true,
+      "input": "{\"task\":\"prizes\",\"body\":null,\"continue_on_error\":null}",
+      "label": "full-nulls",
+      "ok": true,
+      "task": "prizes"
+    },
+    {
+      "bodyIsNone": false,
+      "bodyText": "{\"a\":1}",
+      "coeIsNone": false,
+      "input": "{\"task\":\"prizes\",\"body\":{\"a\":1},\"continue_on_error\":true}",
+      "label": "body-present",
+      "ok": true,
+      "task": "prizes"
+    },
+    {
+      "bodyIsNone": true,
+      "bodyText": null,
+      "coeIsNone": true,
+      "input": "{\"task\":\"prizes\"}",
+      "label": "optionals-absent",
+      "ok": true,
+      "task": "prizes"
+    },
+    {
+      "error": "missing field `task` at line 1 column 38",
+      "input": "{\"body\":null,\"continue_on_error\":null}",
+      "label": "task-absent",
+      "ok": false
+    },
+    {
+      "bodyIsNone": true,
+      "bodyText": null,
+      "coeIsNone": true,
+      "input": "{\"task\":\"prizes\",\"body\":null,\"continue_on_error\":null,\"extra\":1}",
+      "label": "unknown-field",
+      "ok": true,
+      "task": "prizes"
+    },
+    {
+      "bodyIsNone": false,
+      "bodyText": "\"not-an-object\"",
+      "coeIsNone": true,
+      "input": "{\"task\":\"prizes\",\"body\":\"not-an-object\",\"continue_on_error\":null}",
+      "label": "body-string",
+      "ok": true,
+      "task": "prizes"
+    },
+    {
+      "error": "invalid type: string \"yes\", expected a boolean at line 1 column 54",
+      "input": "{\"task\":\"prizes\",\"body\":null,\"continue_on_error\":\"yes\"}",
+      "label": "coe-string",
+      "ok": false
+    },
+    {
+      "error": "invalid length 0, expected struct PipelineStep with 3 elements at line 1 column 2",
+      "input": "[]",
+      "label": "top-level-array",
+      "ok": false
+    }
+  ],
+  "$pipelineStepEncode": [
+    {
+      "json": "{\"task\":\"prizes\",\"body\":null,\"continue_on_error\":null}",
+      "label": "both-none"
+    },
+    {
+      "json": "{\"task\":\"receive\",\"body\":{\"onlyNew\":true},\"continue_on_error\":true}",
+      "label": "both-some"
+    },
+    {
+      "json": "{\"task\":\"receive\",\"body\":null,\"continue_on_error\":false}",
+      "label": "body-null-value"
+    },
+    {
+      "json": "{\"task\":\"receive\",\"body\":{\"note\":\"<a&b>\"},\"continue_on_error\":null}",
+      "label": "body-html-chars"
+    }
+  ],
+  "$serializedShapes": [
+    {
+      "empty": "{\"version\":null,\"caiyun\":[]}",
+      "filled": "{\"version\":2,\"caiyun\":[{\"auth\":\"Basic x\",\"nickname\":\"账号1\"}]}",
+      "type": "LegacyConfig"
+    },
+    {
+      "empty": "{\"auth\":\"\"}",
+      "filled": "{\"auth\":\"Basic x\",\"nickname\":\"账号1\",\"phone\":\"19900000001\"}",
+      "type": "LegacyAccountConfig"
+    },
+    {
+      "empty": "{\"task\":\"\",\"account\":\"\",\"ok\":false,\"start\":\"\",\"end\":\"\",\"durationMs\":null,\"logs\":[],\"result\":null,\"error\":null}",
+      "filled": "{\"task\":\"sign\",\"account\":\"账号1\",\"ok\":true,\"start\":\"2026-09-16T12:00:00.000Z\",\"end\":\"2026-09-16T12:00:01.000Z\",\"durationMs\":1000,\"logs\":[{\"level\":3,\"type\":\"info\",\"msg\":\"m\",\"date\":\"d\"}],\"result\":{\"a\":1},\"error\":\"e\"}",
+      "type": "LegacyRun"
+    },
+    {
+      "empty": "{\"level\":null,\"type\":null,\"msg\":null,\"date\":null}",
+      "filled": "{\"level\":3,\"type\":\"info\",\"msg\":\"m\",\"date\":\"d\"}",
+      "type": "LegacyLogEntry"
+    },
+    {
+      "empty": "{\"id\":\"\",\"name\":\"\",\"description\":null,\"steps\":[],\"account\":null,\"accounts\":null,\"accountMode\":null,\"stopOnError\":null,\"createdAt\":null,\"updatedAt\":null,\"lastRunAt\":null,\"lastStatus\":null,\"lastError\":null,\"lastDurationMs\":null}",
+      "filled": "{\"id\":\"p-1\",\"name\":\"n\",\"description\":\"d\",\"steps\":[{\"task\":\"prizes\",\"body\":null,\"continueOnError\":null,\"account\":null}],\"account\":\"旧单值\",\"accounts\":[\"a\",\"b\"],\"accountMode\":\"parallel\",\"stopOnError\":true,\"createdAt\":\"c\",\"updatedAt\":\"u\",\"lastRunAt\":\"l\",\"lastStatus\":\"ok\",\"lastError\":\"e\",\"lastDurationMs\":2481}",
+      "type": "LegacyPipeline"
+    },
+    {
+      "empty": "{\"task\":\"\",\"body\":null,\"continueOnError\":null,\"account\":null}",
+      "filled": "{\"task\":\"prizes\",\"body\":{\"b\":1},\"continueOnError\":true,\"account\":\"旧单值\"}",
+      "type": "LegacyStep"
+    },
+    {
+      "empty": "{\"id\":\"\",\"name\":\"\",\"task\":null,\"pipelineId\":null,\"cron\":\"\",\"timezone\":null,\"account\":null,\"body\":null,\"enabled\":null,\"createdAt\":null,\"lastRunAt\":null,\"lastStatus\":null,\"lastError\":null}",
+      "filled": "{\"id\":\"s-1\",\"name\":\"n\",\"task\":\"sign\",\"pipelineId\":\"p-1\",\"cron\":\"0 9 * * *\",\"timezone\":\"Asia/Shanghai\",\"account\":1,\"body\":{\"b\":1},\"enabled\":true,\"createdAt\":\"c\",\"lastRunAt\":\"l\",\"lastStatus\":\"ok\",\"lastError\":\"e\"}",
+      "type": "LegacySchedule"
+    },
+    {
+      "empty": "{\"account\":null,\"prizeId\":null,\"prizeName\":null}",
+      "filled": "{\"account\":1,\"prizeId\":7,\"prizeName\":\"云朵\"}",
+      "type": "LegacyBinding"
+    }
+  ]
+}

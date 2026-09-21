@@ -1,0 +1,198 @@
+{
+  "$source": "iOS App（/Applications/mCloud.app/Wrapper/mCloud_iPhone.app/mCloud_iPhone）的字符串常量 + macOS 客户端 app.asar 的 out/renderer/api/api.js + App 自有网络日志（har/，gitignore）",
+  "$note": "App 业务接口（形态 B）的两把「锁」。**算法本身是实拍全量验证过的**（见 $evidence）；但 encodeData 的向量是**合成**的 —— 原因见各条 note。\n\n**2026-09-20 补**：`hcy-cool-flag` 的**整包信封**不是一把钥匙 —— 除 `hcyCoolFlagEnvelope`（AES-128，发码链路，有活体探针）外，还有 `hcyCoolFlagBodyEnvelope192`（AES-192，396 条实拍，覆盖 `querySpecTokenV2` / `queryUserBenefits` / `queryAvailableBenefit` / `getUser` / `avatar/get` / `refreshToken` 等）。**判据是逐条实拍，不是\"哪把更新\"。**\n\n**2026-09-20 再补**：又找到**第三把**（`hcyCoolFlagWebViewEnvelope256`，AES-256）—— 它属于 **H5 / WebView** 那一层实现，与原生那两把**不是同一个调用方**。三把钥匙是「**谁发的**」的函数，不是版本号：原生 App 用 AES-192，H5 用 AES-256，发码链路用 AES-128。**别按「最新版就该用最新那把」去猜**。\n\n**2026-09-20 三补（两条更正）**：(1) **H5 那把钥匙还会按运行环境切换** —— `index-af02d869.js` 里 `localStorage.getItem(\"h5_env\") || \"dev2Prod\"`，非 `dev2Prod` 时 `coolFlagPivotal` 换成 `PVGDwmcvfs1uV3d1`（**AES-128**）。真机未设 `h5_env` ⇒ 走 `dev2Prod` ⇒ 用 AES-256 那把，故实拍命中。**「按谁发的分」之外还有「按哪个环境分」这一维。** (2) **`ILog` 的归属更正**：它不是「H5 侧的可打印 IV 信封」—— 它是**原生**请求（带 `x-yun-uni`），IV 是**二进制**（42/43 条），响应吃 AES-192。判据教训：**「IV 可不可打印」必须落在 base64 解码后的字节上**，看 base64 字符串会得出反的结论。",
+  "$convention": "encodeData 的 base64 解码结果是 32 字节 = 前 16 字节 IV(ASCII) + 后 16 字节密文。解密时必须从**载荷内部**切 IV，不能拿 ivAscii 当 AES 的 IV 再喂整个载荷（CBC 只有第一块依赖 IV，会伪装成「第一块乱码、其余正确」）。PKCS7 去补取**明文**末字节。",
+  "$evidence": {
+    "signatureSha256": "**6165 / 6165 条实拍请求逐字命中，且跨三个 version 都命中**：V1.0 6162 条、V6.1 2 条、V1.1 1 条 —— 所以公式里的 version 是**按请求头原样代入**（带 V），不是把 `V1.0` 写死。唯一命中的形态：version 原样带 V、字段名 timeStamp 大写 S、字段顺序 clientId→clientKey→msgId→timeStamp→version",
+    "encodeDataDecrypt": "两层验证：(1) 本窗口 6158 / 6158 条带 encodeData 的请求全部解出，明文去重后只有 1 种、长度 11；(2) **逐条跨字段核对** —— 每条解出的明文与**同一请求** Authorization 头里的手机号相等，6158 / 6158 零例外。第二层把'明文是手机号'从统计推断变成逐条证据。另：IV 恒为可打印 ASCII（6158 / 6158，0 条二进制）—— 与 hcyCoolFlagEnvelope 的**二进制** IV 相反，别互相套用。",
+    "keyDiscovery": "iOS 二进制里没有 clientKey 字面量。用 5632 个 16 字符候选做 SHA256 比对命中；再用同一把 key 做 AES-CBC 解密交叉验证（合法 PKCS7 + 全可打印 ⇒ 唯一候选）",
+    "howToReverify": "python3 -c 见 docs/upstream-app-business-api.md §5；数据源 har/applog-*/（gitignore）",
+    "signatureDoesNotCoverBody": "6165 条带签名的请求里 body 有 6161 种不同取值（encodeData 每请求都变），而 6165 条签名全部等于「仅那 5 个字段」的 SHA256 ⇒ 签名与 body 无关（反证，不是探针）",
+    "liveProbe": "用自算签名打了一次只读的 general/getStatus（真服务器、用户自己的登录态），返回 resultCode:200 且 msgId 原样回传 ⇒ 服务端确实在校验签名，算法在活服务器上成立",
+    "hcyCoolFlagKeyDiscovery": "iOS 二进制里 16 字符候选 201124 个 × {AES-ECB, AES-CBC(零/前16/后16 IV)} 全部试过，唯一命中 uDjGSA8auFlbwDkY；判定用的是**已知明文**（见 §hcyCoolFlagEnvelope 的 note），不是靠'解出可打印字符'这种弱判据。脚本 scripts/crack-cool-flag-response.py",
+    "hcyCoolFlagLiveProbe": "把请求体按同格式加密后发出去，服务端**不再**回 01000019 Illegal base64 character 7b，而是正常处理并回 200059554（且响应也是同格式加密）⇒ 算法在真服务器上成立",
+    "hcyCoolFlagBodyEnvelope192": "旧项目 `mcloud-sign/har/` 里 **396 条**实拍（跨 10 个 HAR、30+ 个 URL×方向）逐条解开，**零例外**；同一批条目上 `uDjGSA8auFlbwDkY`（AES-128）**0 命中** ⇒ 至少两把钥匙，按链路分。钥匙字面量来自旧项目 `packages/core/src/utils/encrypt.ts:3` 的 `REFRESH_TOKEN_KEY`，而它导出的解码函数 `aesDecryptWithDynamicIV` **全仓无人调用**（旧项目只用它加密 note 的 refreshToken 体）。**适用范围按「信封」算，不按域名算**：2026-09-20 又验证了 `ose.caiyun.feixin.10086.cn/richlifeApp/devapp/ILog`（另一套子系统）的**响应**同样吃这把钥匙，40 / 65 条解出同一段成功 XML（其余 25 条是长度不对齐，非钥匙问题）。⚠ 同一接口的**请求**方向解不开 —— 试过 11623 个「全可打印」候选 × {前16IV, 零IV, 末16IV, ECB} 四结构 + 无填充 CBC，**全 0**；故这把钥匙对 ILog 只覆盖响应方向。",
+    "hcyCoolFlagWebViewEnvelope256": "**第三把钥匙，属于另一族实现**：iOS App 沙盒的 H5 离线包 `Data/Documents/AIOfflinePKG/stable/ai-helper/assets/index-af02d869.js` 里 `Kr.coolFlagPivotal = \"h7DLzCTAjn+altjy2a9E9FSt7AC6pmx1\"`（**32 字节 → AES-256**），调用点是 `AES_CBCDecrypt({data, key: coolFlagPivotal, getIVFromEncrypt: true})`。**四组交叉对照全部干净**：(1) WebView 族 × AES-256 = 3/3 命中；(2) 原生族 × AES-256 = 0/2；(3) WebView 族 × AES-192 = 0/3；(4) 原生族 × AES-192 = 3/3。判据（可操作）：**载荷前 16 字节是否全为可打印 ASCII** —— H5 的 IV 由 `Bn.generateRandomString(16)` 生成（随机**字符**），原生的 IV 是随机**字节**，所以「IV 可不可打印」就是「哪一层发的」的指纹。**响应侧两者都是二进制 IV**（IV 由服务端生成），所以响应只能靠**头**区分（H5 带 `origin: mcloudlocal://` + `sec-fetch-*`；原生带 `x-yun-uni` + `x-yun-api-version`），或两把都试。覆盖：在 14 条「可打印 IV」候选里 11 条命中（3 个接口），另外 3 条是微软遥测 ×2 与 `ILog` ×1（后者是**另一套仍未解开**的信封）。⚠ 前 16 字节可打印**不是**本族的充分条件 —— `encodeData` 也是可打印 IV，两者别混。"
+  },
+  "constants": {
+    "APP_CLIENT_ID": "iosapp",
+    "APP_CLIENT_KEY": "BOFlEUINUdSugD6u",
+    "PC_CLIENT_ID": "pcapp",
+    "PC_CLIENT_KEY": "6lXUhuJGkkAr5HXr",
+    "SIGNATURE_FIELD_ORDER": "clientId, clientKey, msgId, timeStamp, version",
+    "BODY_AES_KEY": "uDjGSA8auFlbwDkY",
+    "BODY_AES_KEY_192": "2olBaQGYnEKoStYomsd1n7ax",
+    "BODY_AES_KEY_256_H5": "h7DLzCTAjn+altjy2a9E9FSt7AC6pmx1",
+    "BODY_AES_KEY_128_H5_NONPROD": "PVGDwmcvfs1uV3d1"
+  },
+  "signatureSha256": [
+    {
+      "name": "toolBox/load/recommend 第 1 条",
+      "clientId": "iosapp",
+      "version": "V1.0",
+      "msgId": "78184fef42d2e6f4fc1c63ed77935dd9",
+      "timeStamp": "1789799167012",
+      "expect": "fa96bf76f3f0db3e94eb7f7876d73bd62366606210321b5f18f9cd81e2a9672c",
+      "input": "clientId=iosapp&clientKey=BOFlEUINUdSugD6u&msgId=78184fef42d2e6f4fc1c63ed77935dd9&timeStamp=1789799167012&version=V1.0"
+    },
+    {
+      "name": "toolBox/load/recommend 第 2 条",
+      "clientId": "iosapp",
+      "version": "V1.0",
+      "msgId": "913a7511725f139f9baa3c02de854a5c",
+      "timeStamp": "1789799168011",
+      "expect": "dd422de217537a74e638765841dc33e7c89a4094df4c9fd6e27e809dc3be3f32",
+      "input": "clientId=iosapp&clientKey=BOFlEUINUdSugD6u&msgId=913a7511725f139f9baa3c02de854a5c&timeStamp=1789799168011&version=V1.0"
+    },
+    {
+      "name": "toolBox/load/recommend 第 3 条",
+      "clientId": "iosapp",
+      "version": "V1.0",
+      "msgId": "4bc01d3dfa8ac8c0c74d04db3987cea3",
+      "timeStamp": "1789799169012",
+      "expect": "f302547332ccf5b6f3bf9235afb402587cbde05caf216d475eba48e91509f255",
+      "input": "clientId=iosapp&clientKey=BOFlEUINUdSugD6u&msgId=4bc01d3dfa8ac8c0c74d04db3987cea3&timeStamp=1789799169012&version=V1.0"
+    },
+    {
+      "name": "toolBox/v5/queryToolBoxInfos（version=V6.1）",
+      "clientId": "iosapp",
+      "version": "V6.1",
+      "msgId": "ac4c42ee91dd3bc8c0cfa792557d45a8",
+      "timeStamp": "1789802371496",
+      "expect": "01e988836e6f13c6231ee728b04e2222a1fdb282fd5a5c2a33da672fdca6159e",
+      "input": "clientId=iosapp&clientKey=BOFlEUINUdSugD6u&msgId=ac4c42ee91dd3bc8c0cfa792557d45a8&timeStamp=1789802371496&version=V6.1"
+    },
+    {
+      "name": "pDynamicInfo/queryBatchList（version=V1.1）",
+      "clientId": "iosapp",
+      "version": "V1.1",
+      "msgId": "7111048a5629828a28febec3fe5b3099",
+      "timeStamp": "1789804326172",
+      "expect": "b63bbc2d3bc9058f8ab121ae4ad425ef4ec33fe72b9a0f0b5b58b24f19324845",
+      "input": "clientId=iosapp&clientKey=BOFlEUINUdSugD6u&msgId=7111048a5629828a28febec3fe5b3099&timeStamp=1789804326172&version=V1.1"
+    }
+  ],
+  "encodeDataDecrypt": [
+    {
+      "name": "合成：明文 19900000000",
+      "ivAscii": "AbCdEfGhIjKlMnOp",
+      "plaintext": "19900000000",
+      "encodeData": "QWJDZEVmR2hJaktsTW5PcOyp3iD8NDTUplPw/wyT/z0=",
+      "note": "**合成向量**（用已确认的算法算出来的，不是实拍）。实拍样本的明文是真实手机号，而密钥公开 ⇒ 实拍密文等于公布手机号，故不入库。"
+    },
+    {
+      "name": "合成：明文 19900000001",
+      "ivAscii": "Zq3xWvYpNmLk8Rst",
+      "plaintext": "19900000001",
+      "encodeData": "WnEzeFd2WXBObUxrOFJzdHRHTRhFqa4KRsGtk+OrKZs=",
+      "note": "**合成向量**（用已确认的算法算出来的，不是实拍）。实拍样本的明文是真实手机号，而密钥公开 ⇒ 实拍密文等于公布手机号，故不入库。"
+    }
+  ],
+  "hcyCoolFlagEnvelope": [
+    {
+      "name": "实拍：服务端报「动态解密错误」的那条",
+      "direction": "response",
+      "ivHex": "77970a27e1e0d8c181e3c0e2791d6fb0",
+      "plaintext": "{\"success\":false,\"code\":\"01000019\",\"message\":\"动态解密错误，错误信息:Illegal base64 character 7b\",\"data\":null}",
+      "payloadB64": "d5cKJ+Hg2MGB48DieR1vsNQMt0ZUMrgXMmKqCy7vm60u5iJfemtgeXW07oPE2C4iq27MNKSA7kkb+mrM3Lp3wJ3SO6xWgddIXW4HDAHBc0gfHK2d8EeYdkDMQ9HEg2nGS/y/NqJ4s8/qzuFeDbHDPfYf1iW1VTNaC+WwdC46hOaXj7PpNvcDuLVCPPnS6U/C",
+      "note": "**实拍**。带 hcy-cool-flag 但发明文请求体 ⇒ 服务端 base64 解码撞上 `{`(0x7b)，回这条错误；**错误响应本身也是加密的** —— 这就是密钥被反推出来的入口。明文里没有任何标识，故可直接入库（与 encodeData 那两条不同）。"
+    },
+    {
+      "name": "实拍：加密请求体被正常处理后的业务响应",
+      "direction": "response",
+      "ivHex": "052f9b34dd1dc63da62120a57071851c",
+      "plaintext": "{\"success\":false,\"code\":\"200059554\",\"message\":\"请先获取滑块拼图验证码\",\"data\":{\"captchaType\":2}}",
+      "payloadB64": "BS+bNN0dxj2mISClcHGFHL3kinTviWXgGWMwtNRtwaJ1zfBKdCVbXA0WLI5Q7Y0L4iWv1/YEq4QW0MRn0AgJH41JOd1YP2WedyDm00kFUEJMj/Fjp44kLNE9xEUvB0NsnSaNYeo+06fw9PuX9BAnloop3CJr/ugY9EXLvtIp6Vo=",
+      "note": "**实拍**。请求体按同格式加密 ⇒ 服务端解密成功、走正常业务分支，回 200059554（请先过滑块）。注意这条响应是**裸 base64**（172 字符、无 JSON 引号），而上一条是**JSON 引号包着的**（194 字符）——同一个载荷格式、两种包装，解析时两种都要认。"
+    },
+    {
+      "name": "合成：加密方向（IV = 000102…0f）",
+      "direction": "request",
+      "ivHex": "000102030405060708090a0b0c0d0e0f",
+      "plaintext": "{\"success\":true,\"code\":\"200\",\"message\":\"ok\",\"data\":null}",
+      "payloadB64": "AAECAwQFBgcICQoLDA0OD6uH90ObYvZB3KrUHvNrE1LGJwAjT/fiONMDyiijh/7Ai7xDOjwr4ZiA3fqdbXiZC585NHmfkOY0H8DpjMR2PDY=",
+      "note": "**合成**，只为把**加密**方向也钉进向量（前两条只验解密方向）。IV 固定便于对拍。"
+    }
+  ],
+  "hcyCoolFlagBodyEnvelope192": [
+    {
+      "name": "实拍（请求）：签到链路 querySpecTokenV2 —— **明文无标识**，可直接入库",
+      "direction": "request",
+      "ivHex": "2f2b868a04afa33d3e6cdfe42efc2498",
+      "plaintext": "{\"toSourceId\":\"001005\"}",
+      "payloadB64": "LyuGigSvoz0+bN/kLvwkmKrYaJTzFTLVPl3XiP9PToGQ5A+OQ67QrJElRy2QuOB8",
+      "note": "**实拍**，出自旧项目 `mcloud-sign/har/*.har`（`Authorization` 前缀 `mobile` ⇒ App 流量）。该 HAR 目录已在旧项目的 `.gitignore` 里，故这里是唯一入库副本；明文里没有手机号 / userDomainId，所以不必合成。"
+    },
+    {
+      "name": "实拍（请求）：queryUserMemberCards",
+      "direction": "request",
+      "ivHex": "49f63755c49eff231cb2f7aef08c8764",
+      "plaintext": "{\"channelId\":\"10011\",\"sourceType\":\"1\",\"version\":\"mCloud13.0.0\"}",
+      "payloadB64": "SfY3VcSe/yMcsveu8IyHZBAsQk5qOR1sCLCTWA9CkxnsjerWZIpsV+RYhbJG9uWi7R++3tgwa3/mq99I/2RwOlH0eTxCvHuhNOhXvDrZrv0=",
+      "note": "**实拍**，出自旧项目 `mcloud-sign/har/*.har`（`Authorization` 前缀 `mobile` ⇒ App 流量）。该 HAR 目录已在旧项目的 `.gitignore` 里，故这里是唯一入库副本；明文里没有手机号 / userDomainId，所以不必合成。"
+    },
+    {
+      "name": "实拍（请求）：同一条接口的第三个 toSourceId —— 证明加密与 toSourceId 取值无关",
+      "direction": "request",
+      "ivHex": "39ee73e9b520beeb3b143c7790f6422c",
+      "plaintext": "{\"toSourceId\":\"010001\"}",
+      "payloadB64": "Oe5z6bUgvus7FDx3kPZCLB9Gbyw/QMgArGBeba50kccnB0MI8RxFAngZec0ZH1AS",
+      "note": "**实拍**，出自旧项目 `mcloud-sign/har/*.har`（`Authorization` 前缀 `mobile` ⇒ App 流量）。该 HAR 目录已在旧项目的 `.gitignore` 里，故这里是唯一入库副本；明文里没有手机号 / userDomainId，所以不必合成。"
+    },
+    {
+      "name": "实拍（请求）：群订阅提醒列表 —— 分页参数，无标识",
+      "direction": "request",
+      "ivHex": "b0f2799dc7e9bdd7a7cee1da465443ec",
+      "plaintext": "{\"pageNumber\":1,\"pageSize\":30}",
+      "payloadB64": "sPJ5ncfpvdenzuHaRlRD7GmQKxsmrVBRtyzfJKLBx0rTF45+gUGo9NXGq6iHQ+yt",
+      "note": "**实拍**，出自旧项目 `mcloud-sign/har/*.har`（`Authorization` 前缀 `mobile` ⇒ App 流量）。该 HAR 目录已在旧项目的 `.gitignore` 里，故这里是唯一入库副本；明文里没有手机号 / userDomainId，所以不必合成。"
+    },
+    {
+      "name": "实拍（响应）：list",
+      "direction": "response",
+      "ivHex": "31c4ee12f92cb4f587ba61687246e5bd",
+      "plaintext": "{\"success\":true,\"code\":\"0000\",\"message\":\"请求成功\",\"data\":{\"total\":0,\"list\":[],\"pageNum\":1,\"pageSize\":30,\"size\":0,\"startRow\":0,\"endRow\":0,\"pages\":0,\"prePage\":0,\"nextPage\":0,\"isFirstPage\":true,\"isLastPage\":true,\"hasPreviousPage\":false,\"hasNextPage\":false,\"navigatePages\":8,\"navigatepageNums\":[],\"navigateFirstPage\":0,\"navigateLastPage\":0}}",
+      "payloadB64": "McTuEvkstPWHumFockblvT72AdwA7Mg/562+LUgr5P2DD4ct3SYN5kMz3l3yqQwUUt0Hg131cNu3AqnbE2qW3qv9FP6XZAPtWAsn8Dr/65qRfkzJpbbyUXiA9GqupFQfc8+IJuItVFA1UaN2t+mgoEyCmxFPYCieNSWSJ6HpF0EwdFigPAT7i+tkHsEdOibpt98Mc2IYxWcExjE573KUwDEcIuZ0bK2Xeemd4rqOyCCJotgD0pXMQM3TNnaLGsAXhLtUiJn5Lnnr2uiSOWS7VCg3bOj5JZ7G2Bystyp6unCc8Ckc6erYG5OQNfQsymRwtW5QXfP3xdnzXc7omJJwZ3S4yzF8BJbl8u53qjq92Sis6gsWdtJVQmUiE0M/IJj3qjJpUxQlee7FnKc1NRsTzInVatyRAZhQoHw2BQUD64ujjknESiRe396DlqJFfn7nsdIs02LP211ThKAdeuQVYJ6XxrQ2kD1NmwGj3pcTI/s=",
+      "note": "**实拍**，出自旧项目 `mcloud-sign/har/*.har`（`Authorization` 前缀 `mobile` ⇒ App 流量）。该 HAR 目录已在旧项目的 `.gitignore` 里，故这里是唯一入库副本；明文里没有手机号 / userDomainId，所以不必合成。"
+    },
+    {
+      "name": "实拍（响应）：ILog —— **跨主机**证明（同一个 AES-192 信封也覆盖 OSE 平台）",
+      "direction": "response",
+      "ivHex": "156581530830a4089299c2ee909bd8ff",
+      "plaintext": "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<result resultCode=\"0\" desc=\"SUCCESS\"/>\n",
+      "payloadB64": "FWWBUwgwpAiSmcLukJvY/0aLhr4m8GVju46KwjzaGfbfHfsWA8fCttbnpVYWpyKStv2R5mGS5TX9MAkFi1TKZ5RndGInpnhPVzsfip/cRHxXN0FOCErtFdIJ3wuV8PCg/GhMGf+lhM3LHACO6z4Ps9iF8dQ2/CFdU4cgrYSAdWU=",
+      "note": "**实拍**（明文是通用成功 XML、无任何标识，故不必合成）。这条的价值是**跨主机**：`https://ose.caiyun.feixin.10086.cn/richlifeApp/devapp/ILog` 与 `yun.139.com` 是两套子系统，但**同一个 AES-192 钥匙、同一种 `base64(IV(16) ‖ CT)` 信封**照样能解 —— 说明这把钥匙的适用范围按**协议信封**算，不按域名算。⚠ 同一接口的**请求**方向**解不开**（试过 11623 个可打印候选 × 4 种结构 + 无填充 CBC，全 0），故只入库响应方向；见 `docs/upstream-app-business-api.md` §8.2。"
+    }
+  ],
+  "hcyCoolFlagWebViewEnvelope256": [
+    {
+      "name": "WebView 族（请求）：真实 IV 为 16 个可打印字符 —— 这是 H5 实现独有的指纹",
+      "direction": "request",
+      "ivKind": "ascii",
+      "ivHex": "4434327061625070366a663864546e57",
+      "ivAscii": "D42pabPp6jf8dTnW",
+      "plaintext": "{\"userDomainId\":\"1990000000000000001\"}",
+      "payloadB64": "RDQycGFiUHA2amY4ZFRuVynln/cg8kIcr/jG4cPWlmBmIf3T4+vLGiFEn+5B1rXlU3vSlthRaB1juuffEoY1NQ==",
+      "note": "**合成（换值不换形）**：IV 与明文长度取自真实实拍（iOS 12.6.0 WebView 的 `user-njs.yun.139.com/user/getUser`），但明文里的 `userDomainId` 已按 `docs/sanitize-guide.md` 换成 `199` 号段等长值后**重新加密** —— 真实明文含账号标识，守卫解码 base64 后会报。**真实实拍本身已用同一把钥匙逐条验证 3/3**（iOS 12.6.0 + Android 13.0.0 各若干条），见 `$evidence.hcyCoolFlagWebViewEnvelope256`。"
+    },
+    {
+      "name": "WebView 族（请求）：另一条真实 IV（Android 13.0.0）",
+      "direction": "request",
+      "ivKind": "ascii",
+      "ivHex": "464a6d3354446a7272426e3278475963",
+      "ivAscii": "FJm3TDjrrBn2xGYc",
+      "plaintext": "{\"userDomainId\":\"1990000000000000002\"}",
+      "payloadB64": "RkptM1REanJyQm4yeEdZY+ZJPIFP6l4zJt8SDfNvMmEC3bbGoFV3ClNBJzW09zq9T52M187Ax79aAFapvBtGzQ==",
+      "note": "**合成（换值不换形）**，同第 1 条。IV 来自真实实拍 —— 换一条是为了证明**IV 是每请求随机的**，不是固定串。"
+    },
+    {
+      "name": "WebView 族（响应）：响应侧 IV 是**二进制**（服务端生成），但同一把钥匙",
+      "direction": "response",
+      "ivKind": "binary",
+      "ivHex": "01b606795b669a58c55962d29ce545ce",
+      "plaintext": "{\"success\":true,\"code\":\"0000\",\"message\":\"请求成功\",\"data\":{\"cutoverStatus\":1,\"belongsToPlatform\":2,\"phoneNumber\":\"19900000000\",\"userDomainId\":\"1990000000000000001\",\"siteCode\":\"10003\"}}",
+      "payloadB64": "AbYGeVtmmljFWWLSnOVFzpQ0cjkA2ErjtgCYnIM3JSopV2REzois8u/n+4yzCfszYqmaqef31slCmk3AOJoINzITttFBXaKecdLByRpn7kxawTBYBzr527KTiWnhOW4p/Zqcv83qfXiGBMLSKVtWhAjIw1+VVhZ4LCF5vwU2yXMJKIzBKMhjpVXedSHx467k+f5pQXDf0FKcQ6y4VhX+L24QvdkqwMCo0muQ0IAK6XMv5FqRpGw6VO+FdCoLzSBhv17RQj8P0wzqfVWKVeIR9Q==",
+      "note": "**合成（换值不换形）**：IV（16 字节二进制）取自真实响应的前 16 字节，明文结构照真实响应（2421 字节的那份）压缩，`phoneNumber` / `userDomainId` 已换 `199` 号段。保留二进制 IV 是**刻意的** —— 它证明「响应侧没有可打印 IV 这个指纹可用」。"
+    }
+  ]
+}

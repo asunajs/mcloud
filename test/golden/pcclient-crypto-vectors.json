@@ -1,0 +1,55 @@
+{
+  "$source": "PC 客户端 mCloud 的 common/utils.js（macOS 4.2.1 的 app.asar 提取，与新抓包用的 Windows 8.8.6.20260829 为同一份源码）",
+  "$note": "本文件只锁**登录协议用到**的三个原语。puzzleAesCbcIvPrefixed 的 expectB64 不是本地生成的，而是 2026-09-17 抓包归档里两条**真实请求体原文**（docs/capture/logout-sms-requests.txt 的两条带滑块发码请求）；反向解密它们得到的明文（461 / 391，拖动像素偏移）是密钥正确性的直接证据。loginDataDecrypt 的向量由 openssl 独立生成（ECB/PKCS7 是标准模式，无 crypto-js 特有行为），因为本地没有 crypto-js 可用于生成。",
+  "constants": {
+    "PUZZLE_AES_KEY": "CREATPUZZLE03F9A",
+    "PUZZLE_AES_IV": "E526E1F3F9765444",
+    "LOGIN_AES_KEY": "qPqDw263XgFgL3u8",
+    "LOGIN_AES_KEY_TEST": "2ErfJus1Ofr@2o24",
+    "PASSWORD_HASH_PREFIX": "fetion.com.cn:"
+  },
+  "puzzleAesCbcIvPrefixed": [
+    {
+      "name": "real-traffic-drag-461",
+      "plaintext": "461",
+      "expectB64": "RTUyNkUxRjNGOTc2NTQ0NPXSgBfdneawSGgfCa/g/Rg=",
+      "note": "真实抓包原文；解密得 461 + 13 字节 0x0d（PKCS7 填充）"
+    },
+    {
+      "name": "real-traffic-drag-391",
+      "plaintext": "391",
+      "expectB64": "RTUyNkUxRjNGOTc2NTQ0NEA6F1MQJO7Ejcwfa1IsHCs=",
+      "note": "真实抓包原文；两次拖动轨迹不同 → 只有答案密文段变，前 16 字节固定"
+    }
+  ],
+  "puzzleLeftDecrypt": [
+    {
+      "name": "live-puzzle-left-370",
+      "cipherB64": "OOBDgzP07ivqAWF0QQumGDO16EgXdAOr+1Hrqp/xJIg=",
+      "expectPlain": "370",
+      "note": "2026-09-18 一次真实 /user/verfycode 调用的 data.puzzleLeft 原文（账号用 199 合成号段）。它用的是同一个公开密钥 CREATPUZZLE03F9A，但 IV 是每次随机的 → 只能用**解密**方向做向量。同响应里 picWidth=680，370 落在图宽内 ⇒ 服务端把缺口横坐标直接给了出来，滑块无需图像识别。"
+    }
+  ],
+  "loginDataDecrypt": [
+    {
+      "name": "userinfo-openssl-vector",
+      "cipherHex": "40f2e4cc768a87f7e7d61e66054458511b1c2301fbe413ea4001bfb4186e3d81d67759d5742cbcfb501d6fe2972f30a6aac1b78bfb4515a8d57cefc3aacc9417",
+      "expectPlain": "{\"account\":\"19900000000\",\"userId\":\"1990000000000000001\"}",
+      "note": "openssl enc -aes-128-ecb 生成；手机号已用 199 号段合成"
+    },
+    {
+      "name": "invalid-pkcs7-padding",
+      "cipherHex": "9965abd7e14894b05dea4fc87489ed14",
+      "expectError": true,
+      "note": "openssl 加密 `AAAAAAAABBBBBBBB` 后只取首块；末字节 0x42 不是合法填充，必须报错而不是返回乱码"
+    }
+  ],
+  "sha1Upper": [
+    {
+      "name": "encryptByHash",
+      "input": "fetion.com.cn:pass1234",
+      "expect": "B54F67954008FC6228B9B0790A3137697AB057C8",
+      "note": "openssl sha1 生成；输入是 HASHTEXT 前缀 + 口令"
+    }
+  ]
+}
