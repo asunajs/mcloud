@@ -84,6 +84,8 @@ const UNTAGGED_ALLOWED = {
     '一次上报的时间上下文（14 位东八区时间 + nowMillis + 上一次的 deviceId），**只**喂给上游算法；Rust 侧 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
   'internal/app/smid.go:FingerprintBinding':
     '一次绑定的**结果**（特征 + 库里两列 + 是否新绑），内存里用；Rust 侧同样只 derive `Debug, Clone, PartialEq, Eq`',
+  'internal/app/user.go:InitOutcome':
+    '一次初始化的**结果**（建出来的用户 + 认领到多少行），喂给 CLI 打印；Rust 侧是手写 Debug 的 struct，**不** Serialize',
   'internal/app/signin.go:SignInReport':
     '一次签到的**结论**（调用前 / 调用后 / 本次快照），喂给 CLI 与汇报层；Rust 侧只 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
   'internal/app/signin.go:SignInOptions':
