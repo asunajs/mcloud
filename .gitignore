@@ -31,6 +31,15 @@ go.work.sum
 # 任何人跑一次迁移再 `git add .` 就会把真实凭据提交上去。
 /data/legacy-source/
 
+# ⚠ 上面那组 `/data/...` 只挡了**仓库根**这一处，而 CLI 的默认库路径是
+# **相对**的 `data/mcloud.db` —— 在哪个目录下跑就在哪个目录下建一个。
+# 实测已经出过一次：`internal/cli/data/mcloud.db`（跑测试时 cwd 是包目录）。
+# 库文件里是本机凭据，任何位置的都不要。
+**/data/*.db
+**/data/*.db-journal
+**/data/*.db-wal
+**/data/*.db-shm
+
 # 扫码登录的二维码图片（`--qr-out`）：里面是本机的设备指纹与会话 sID。
 # 它不属于"凭据"（扫完即失效），但同样是过程产物，没有入库的理由。
 /data/*.svg

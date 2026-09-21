@@ -20,7 +20,9 @@
 **当前：步 1（`mcloud-core`）✅ 收口（2026-09-21，判据与一条例外见下方"步 1 收口"）；**&#x6B65; 2（`mcloud-upstream`）已整族落&#x5730;**（`login` / `client` / `app_client` / `app_login` / `app_signin` 全族 / `smid`，150 条测试）；**&#x6B65; 3（`mcloud-io`）已整族落地\*\*（schema / store / store::user / store::config / datetime / **legacy_import** / fixture / HTTP 客户端 / 随机源，150 条测试）；步 4 已落地 `capabilities`（注册表 + `login`）、`exec`、`app::payload` / `smid` / `session` / **`signin/*` 整族**。
 
 ⇒ **`app::migration` / `cli` / `server` 的阻塞已解除**（此前全被步 3 挡着）。\**
-⇒ **`server` 已于本轮整包落地**（26 条测试），`app` 只剩 `login` / `app_login` 两块。
+⇒ **`server` 已于本轮整包落地**（26 条测试）；**`cli` 的参数面 / 退码 / 输出约定 / 口令边界
+   已落地**（24 条测试，七条叶子刻意不接、登记在 `internal/cli/unmigrated.go`）。
+   `app` 只剩 `login` / `app_login` 两块。
 
 > ✅ **2026-09-21 起并发结束**，全部由本会话接手（此前最多三个会话在同一棵树上）。  
 > 已付出的可见代价：`docs/go-migration-plan.md` 的 §6.1 一度出现**两组 `#20`**，  
@@ -262,7 +264,7 @@
 | `upstream::smid`       | ✅          | 设备指纹（`733` 行）：`smid` 拼接 / `priId` / `tn`（**`tn` 还是空串时算摘要**）/ 25 条 DES 规则整表对拍 TS 侧向量 / 特征体绑定账号（`SmFingerprint`）与每次现算的一半（`SmUpload`）/ 上报与 `deviceId`（拼 `B` 前缀）（**18 条测试**）。⭐ `ep` **复现不了**是算法性质（PKCS#1 v1.5 随机填充 + 盲化），不是随机源没注入到位 —— 断言显式排除它并另开一条钉住                                                                                                                                                  |
 | `upstream::app_signin` | ✅ **整族落地** | 常量（由 `app-signin-vectors` 的 `constants` 钉住）/ `Diagnose` / H5 与原生头 / 百分号编码 / 取值 helper + 建会话三段 + 签到与状态（`infoV3` / `startSignIn` / `taskListV3` / `doTaskPost`）+ 领取族（`receiveV3` / `receiveRevivalReward` / `multiple` / `receiveTaskExpansion`）+ 记录族（`cloudRecordV2` / `record` / `backupgift/*`）+ **发送层**（`Upstream` 上的 15 个方法）（**113 条测试，整包合计**）。`app-signin-vectors.json` 从"只有 Rust 读"变成**两边都读** |
 | `server`               | ✅          | HTTP 层（`1,481` 行 Rust）：**领域错误 → HTTP 的映射**（`statusAndCode` 用兜底而不是逐个列，新增 `ErrorKind` 默认落 500 而不是让人挑一个"看起来合适"的 4xx；5xx 走类别文案**不回吐原文** —— 那些原文里实测带过 SQL 片段与上游响应体）、免登录**白名单**（漏登记 = 默认要登录）、未初始化的闸门（查库失败时**不给结论**）、会话 cookie（`HttpOnly` + `SameSite=Lax`，`Secure` 按部署）、账号/运行/定时任务三组路由、`SSE` 事件流（`Last-Event-ID` 与 `?after=` 同语义，先订阅再读库，队列满时重订阅**不静默跳过**）（**26 条测试**，用 `httptest` 起真服务器验状态码 / cookie 属性 / SSE 帧 / 错误体形状）。⭐ 见下方「服务端」两节 |
-| `cli`                  | 🟡          | 命令与参数解析已在（**22 条测试**），⭕ 部分子命令还指着旧实现 |
+| `cli`                  | 🟡          | 参数面 / 退码 / 输出约定 / 口令边界已在（**24 条测试**）。⭕ **七条叶子刻意不接**，写成机器可读的表 `internal/cli/unmigrated.go`（`signin` / `login qr·sms` / `smid show·reset·refresh` / `fixture extract`），每条点名缺 Rust 侧哪个文件；接了真后端的是 `version` / `capabilities` / `user init·list` / `migrate`。⭐ 见下方「Go 侧 `cli` 落地」 |
 
 - 落点 `internal/capabilities`、`internal/exec`（包名 `mcloudexec`）、`internal/app/payload.go`。
 - ⚠ **`app` 现在仍只是"组装根接上了 IO"那个骨架**（`internal/app/app.go` 只有一个 `Deps`）。  
@@ -271,6 +273,62 @@
   而"不转义 HTML + 不补尾换行"这两条规则**必须只有一份实现**（详见方案 §6.1 #22）。
 - ⚠ `core.Version` 是新增常量 —— Go 没有 `env!("CARGO_PKG_VERSION")`，  
   它得与 `legacy/Cargo.toml` 的 `version` **手工同步**（不同步的表现只是两个产物报的版本号不一样）。
+
+### 步 4 实况补充：Go 侧 `cli` 落地（2026-09-21，追加，不改上表那一行）
+
+> 上表 `cli` 那一行（🟡 "参数面 / 退码 / 输出约定 / 口令边界已在（24 条测试）"）
+> 说的是同一件事，这里补的是**它没写下来的判据与边界**。两者不冲突，别只看一行就下结论。
+>
+> ⭐ 本轮反向测试又挖出两个真缺口，已补断言并记进方案 §6.1（#67 / #68）：
+> · 把 `capabilities.QRTTLSeconds` 改成 121，**一条测试都没变红** —— 现有断言比的是
+>   顶层与 `signin` 的**相对**一致，两边都走同一个函数，恒等；于是"CLI 又硬编码了一份
+>   120"完全查不出来 ⇒ 补 `TestQrTTLDefaultComesFromTheRegistryNotFromASecondLiteral`
+>   （读 flag 默认值文本并与注册表常量比，这样改源头会让期望值跟着走）
+> · 把 `notMigrated` 的 unknown 分支改成静默占位，也**一条都没变红** —— 现有用例走的
+>   都是表里**已有**的那几条，那个分支从来没被执行过。而它存在的全部理由就是挡住
+>   "顺手加了个子命令却忘了登记" ⇒ 它是纯函数，直接调即可（`TestAnUnregisteredNotMigratedCommandSaysSo`）
+
+- **参数面**：`mcloud-cli` 那套 clap 定义逐条搬齐 —— 签到 21 个开关、`login qr` /
+  `login sms`、`smid`、`user`、`migrate`、`fixture`、`capabilities`、`version`
+  （12 条叶子路径，由 `TestCommandTreeMatchesTheDocumentedSurface` 钉住清单）。
+  顶层与 `signin` 子命令**调同一个 `registerSigninFlags`**（= clap 的 `flatten`），
+  并有一条断言**逐项比对两侧的每个 flag 的 `DefValue` / `Usage` / `Type`** ——
+  因为"后来有人把参数抄成两份"在 Go 里**不报错**，只会静默漂移。
+- **互斥表照搬 Rust 的语义，不重推**：写开关之间**可以**叠加
+  （`--receive --backup-gift` 合法），只读开关与写开关**必须**互斥。
+  成对表在 `internal/cli/args.go`，测试直接跑 Rust 侧 `unit_tests.rs` 里那批
+  接受/拒绝清单（顶层与子命令两种写法各跑一遍）。
+- **退码 = 0 成功 / 1 运行错 / 2 用法错**（clap 的语义）。
+  ⚠ 这条踩到一个真缺陷：cobra 的 `execute()` 顺序是
+  ParseFlags → `PersistentPreRunE` → `ValidateRequiredFlags` → `ValidateFlagGroups` → RunE，
+  所以"是否已进入执行"这个标记**不能**在 `PersistentPreRunE` 里设 ——
+  那样 `--list --account 1` 会退 1（Rust 退 2）。现在的做法是包一层 `RunE`。
+  ⚠ 另一条：**只构造命令树看不到 `completion`**（cobra 在 `ExecuteC` 里才注册），
+  所以"有没有多出用户不该看到的子命令"必须**实跑**才问得出来。
+- **`--json` 约定**：stdout 只有一份干净 JSON，进度与提示**一律**走 stderr；
+  错误走一行紧凑"用法"而不是 cobra 那整屏 help。
+- **凭据边界**：口令**只从 stdin 读**（TTY 走 `term.ReadPassword` 不回显，
+  非 TTY 退回读一行 —— 管道里 `echo pw | mcloud user init` 要能跑），
+  **任何情况下都不存在 `--password` 这个参数**（参数进 shell 历史与 `ps`）。
+  有断言钉住"两次输入不一致要拒"，以及"`$argon2id$` 与口令明文不得出现在任何输出里"；
+  `user list` 逐字段打印而**不用 `%+v`**（后者会展开 `PasswordHash`）。
+  ⚠ 本轮**没有新建任何凭据、也没有打印过任何真实标识**，测试数据全是 `199` 开头的合成号。
+- **接了真后端的四条**：`version` / `capabilities` / `user init·list` / `migrate`
+  （后者走 `app.MigrationPlanFromRepoRoot` + `app.RunMigration`，`--dry-run` 一条写都不发）。
+- **其余七条叶子刻意**没**接**，写成一张机器可读的表 `internal/cli/unmigrated.go`：
+  每条点名缺的是 Rust 侧哪个文件、约多少行，并有测试要求
+  "已注册的叶子要么有实现、要么在这张表里"，**不会有叶子被静默漏掉**。
+  缺口清单：`signin`（多账号编排 + 四态渲染，Rust 侧 `signin_run.rs` / `signin_one.rs` /
+  `signin_output.rs` 约 1,264 行；`app` 侧的 `CloudSignIn` / `OpenSignInSession` **已在**）、
+  `login qr` / `login sms`、`smid show·reset·refresh`、`fixture extract`（769 行）。
+- ⚠ **判据账要算对**：步 4 那句"19 项能力逐项打勾"现在**卡在 `capabilities` 注册表的条目数**
+  （Go 侧实测 3 项：`sign` / `exchange` / `cloud-snapshot`），**不在 CLI** ——
+  CLI 这边 `mcloud capabilities` 把那 3 项如实渲染出来了。
+- ⚠ **本轮未提交**（`internal/cli/*` + `cmd/mcloud/main.go` + `go.mod`/`go.sum` 仍在工作区）。
+  期间撞到过一次 `jsontags` 报"白名单里有对不上的条目"，**那是并行会话在飞编辑**
+  `scripts/check-go-jsontags.cjs` 与 `internal/server/{auth,error,routes}.go` 的瞬时状态 ——
+  他们的 `012c55a`（server 整包，26 条测试）已在 2026-09-21 落地，之后 `gates-go.sh` → 九项门禁全绿。
+  ⇒ 这正好复现了上面那条铁律：**白名单条目与文件必须同进同出**。
 
 ---
 

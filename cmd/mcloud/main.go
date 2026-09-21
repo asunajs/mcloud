@@ -1,18 +1,18 @@
 // Command mcloud 是命令行产物（对应 Rust 侧的 mcloud-cli）。
 //
-// 现状：**骨架**。业务实现待迁移，见 docs/go-migration-plan.md。
+// 退出码约定（见 internal/cli 的 Main）：0 = 跑完了；1 = 运行错误；
+// 2 = 用法错误。业务层面的 fail 属 info 级，**不**影响退出码。
 //
-// ⚠ 本文件刻意不引入任何第三方依赖（cobra 等），好让 `go build ./...`
-// 在零下载的情况下就能跑通 —— 骨架的第一条退出判据是"能编译、门禁能跑"，
-// 不是"功能可用"。引入依赖是迁移的第一步实现动作，不是骨架的事。
+// 本文件只做两件事：把真实的流接上，把退出码交给进程。
+// 分发与参数全在 internal/cli —— 那里必须是可测的，而 os.Exit 不是。
 package main
 
 import (
-	"fmt"
 	"os"
+
+	"github.com/catlair/mcloud/internal/cli"
 )
 
 func main() {
-	fmt.Fprintln(os.Stderr, "mcloud: Go 侧骨架，业务尚未迁移（见 docs/go-migration-plan.md）")
-	os.Exit(2)
+	os.Exit(cli.Main(cli.DefaultDeps(), os.Args[1:]))
 }

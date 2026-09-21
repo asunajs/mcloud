@@ -385,7 +385,7 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 ⚠ 编号按**发现的先后**排，与步号无关 —— 这张表是**追加式**的，
 重编别人的条目会让正在引用它的人指向错处。
 当前：步 1 = 1–27 与 56，步 4 = 28–39 与 42–45，步 3 = 40–41 与 46–47。
-（40/41 与 46/47 由 io 那侧先占；步 4 续接在 45 之后，48/49/50/51/52/53/54/55/56/57/58/59/60/61/62/63/64/65/66 已接在 47 之后 ——
+（40/41 与 46/47 由 io 那侧先占；步 4 续接在 45 之后，48/49/50/51/52/53/54/55/56/57/58/59/60/61/62/63/64/65/66 已接在 47 之后；步 4（cli）= 67–71 ——
 **加之前看表尾**，别再撞号。⚠ 这张表是**分节**的，只看自己那一节一定会撞。）
 
 | 现象 | 根因 | 做法 |
@@ -482,6 +482,16 @@ serde 测试、也没有 `tests/` 目录），形状只隐含在 `rename_all` �
 （#43 同源），外加 `md5SafeVerify` 那条要先定"实现与否"。
 ⚠ 别为此**新写一份重复断言** —— 同一件事两份期望值，将来只会分叉。
 
+### 步 4（cli）已实测出来的三条（编号接在最后，2026-09-21）
+
+| 现象 | 根因 | 做法 |
+| --- | --- | --- |
+| **67** ⭐ | **退码分"用法错 / 运行错"的那个标记，在 cobra 里放错了钩子就恒为真** | 想区分"参数就没解析对（退 2）"与"跑起来才失败（退 1）"，最顺手的是在 `PersistentPreRunE` 里设 `dispatched = true`。⚠ 但 cobra 的 `execute()` 顺序是 ParseFlags → `PersistentPreRunE` → `ValidateRequiredFlags` → `ValidateFlagGroups` → RunE —— **互斥检查在钩子之后**，于是 `--list --account 1` 被设过标记、报成运行错退 1（Rust 侧 clap 退 2，脚本里 `&&` 的走向就此不同） | 标记只能由**包一层 `RunE`** 来设（`traceDispatch` 递归包住每个子命令的 `RunE`）。⚠ 反向测试已确认：改回 `PersistentPreRunE` 之后那条退码断言立刻变红（实测退 1） |
+| **68** | **"只构造命令树"的断言看不到 cobra 延迟注册的默认命令** | cobra 的 `completion`（以及 `help`）是在 `ExecuteC` 里**临时挂上去**的，`rootCmd.Commands()` 在跑之前根本没有。于是"这个产物的叶子清单必须恰好是那 12 条"这条断言对"多出一个 `completion` 子命令"**完全不敏感** —— 反向测试（去掉 `DisableDefaultCmd`）实测**照样是绿的** | "有没有多出用户不该看到的命令"这类判据只能**实跑**（`TestCompletionSubcommandStaysOff` 走 `Main()`，断言 `mcloud completion bash` 退 2）。⚠ 与 #62/#63 同源：**不在真实时机上观察，就等于没观察** —— 这次是"构造态 vs 运行态" |
+| **69** | **`return` 的多个操作数是**从左到右求值**的，于是测试助手把缓冲区读成了空串** | `return out.String(), errOut.String(), Main(deps, args)` 读起来像"跑完再取输出"，实际三个操作数**在 `Main` 之前**就求值完了 ⇒ 助手返回的 stdout/stderr **恒为空**。表现很迷惑人：断言"包含某行"的用例集体变红，而断言"stderr 为空"的用例**假绿**（本来就空） | 先 `code := Main(deps, args)`，再 `return out.String(), errOut.String(), code`，并在助手注释里写明这条求值顺序。⚠ 判据：**凡"跑一遍再收集副作用"的助手，收集动作不能在 `return` 表达式里** |
+| **70** ⭐ | **比**相对一致**的断言测不出「第二份字面量」** | CLI 的 `--ttl-seconds` 默认值必须取自能力注册表（[`capabilities.QRTTLSeconds`]）。现有断言比的是顶层与 `signin` 两侧的**相对**一致，而两边调的是同一个函数 ⇒ **恒等**；于是把源头改成 121 **一条测试都没变红**，而「CLI 又硬编码了一份 120」完全查不出来 —— 它的表现是「改了注册表那边的码有效期，CLI 这个开关没跟着变」 | 判据要读 flag 默认值的**文本**并与源头常量比（`TestQrTTLDefaultComesFromTheRegistryNotFromASecondLiteral`）：改源头会让期望值跟着走，硬编码的那份才现形。⚠ 反向测试要**改源头**而不是改消费侧 —— 把 CLI 改成硬编码 120 是无效的，两边值相同，任何断言都不会变红 |
+| **71** | **从没被执行过的分支等于没有** | `notMigrated` 的 unknown 分支（「加了子命令却没往表里登记」）在现有用例里**从来走不到** —— 用例走的都是表里**已有**的条目。把那个分支改成静默占位，**一条测试都没变红**。而它存在的**全部**理由就是挡住那种漏登记 | 纯函数的分支**直接调**即可，不必造一棵带野子命令的命令树（`TestAnUnregisteredNotMigratedCommandSaysSo`）。⚠ 判据表（这里是「还剩哪些没迁」那张表）往往比它保护的分支**更常被改**，于是那个分支会因为没有用例而悄悄失效 |
+
 ### 6.2 `mcloud-upstream`（8,064 行）—— 向量兜底最厚
 
 ⚠ **本层的铁律是"跨端常量不许互搬"**（这条在 Rust 侧已经踩过两次）：
@@ -562,6 +572,23 @@ PC 与 App 是**两套客户端**，同名同形的常量值可能不同，而"�
 - ✅ 好消息：参数互斥在 cobra 里是 `MarkFlagsMutuallyExclusive`，比 Rust 侧手写
   `conflicts_with_all` **更省事**。但"只读开关与写开关互斥"这条语义要照搬。
 
+#### 2026-09-21 落地时的实测补充（追加）
+
+- ⚠ **clap 的 `requires` 在 cobra 里没有对应物**：`MarkFlagsRequiredTogether` 是
+  **对称**的（"两个都得给"），照它写会把 `--records` 也变成必填。
+  只能手写 `validate()`，并且**必须** `fmt.Errorf("…: %w", ErrUsage)` ——
+  否则退码从 2 掉到 1（用法错被报成运行错）。
+- ⚠ **`ValueEnum` 的等价做法是把校验放进 `Set`**（自定义 `pflag.Value`）：
+  这样失败发生在**解析期**，退 2；若顺手改成 `RunE` 里判，同一条错误退 1。
+- `visible_alias` → 第二个 flag 绑**同一个变量**（`--h5-device-id` = `--device-id`），
+  并配一条"给其一等于给另一个"的断言 —— 绑错变量不报错，只是别名静默失效。
+- ⚠ **`--version` 的输出要整串比**：`HasPrefix("mcloud ")` 对 cobra 默认的
+  `mcloud version 0.1.0` **同样成立**（反向测试实测照绿），所以只能钉 `== "mcloud 0.1.0\n"`。
+- ⚠ **"还缺哪一层"要写成表而不是注释**：`internal/cli/unmigrated.go` 是一张
+  叶子命令 → "缺 Rust 侧哪个文件、约多少行"的表，由 `UnmigratedBackends()` 导出、
+  被测试要求"已注册的叶子要么有实现、要么在表里"。注释会被绕过，表不会。
+- ⚠ 引依赖这件事本身有一条判据：**别用 `@latest`**，见 §8 的补充。
+
 ### 6.7 `mcloud-server`（2,152 行）
 
 `axum` + `tower-http`(fs) → `net/http` + `chi`，静态用 `http.FileServer`。
@@ -582,7 +609,7 @@ PC 与 App 是**两套客户端**，同名同形的常量值可能不同，而"�
 | **1** | `mcloud-core`（纯计算，标准库覆盖最好） | 黄金向量在 Go 侧逐字段复算通过 | ✅ **已完成**（2026-09-21）：`internal/core` **270 条测试**，17/17 模块对位，core 读的 **8 份向量逐节都有正向断言**（最后缺的那一节 `hcyCoolFlagEnvelope` 于本次补上，见 §6.1 #56）。**一条例外**：`error` 后半的 `classify_body` 那台分类机**不补进 core** —— 它在**冻结基准里就没有调用点**（core 之外零命中），补进去就是一台没人开的机器；判据的三块 Go 侧已各在其位（`core.ClassifyStatus` + `upstream.Envelope`），归属改挂到步 4 第一个真需要"状态 + 响应体一步判完"的调用点。⚠ 判据要按"**Go 侧**读了几份向量"算，别照门禁那行 `✓ 有测试读取` —— 它不区分是哪一侧在读（见 `status.md`）。⚠ 也别把**步 2 的账算进步 1**：`app-signin-vectors` 与 `login-crypto-vectors` 的消费者在 `internal/upstream`，与 core 无关 |
 | **2** | `mcloud-upstream`（协议层） | 同一条抓包请求 Rust/Go **双跑**，header 顺序 / percent-encode / 签名串逐字节一致 | ⬜ |
 | **3** | `mcloud-io`（唯一 IO 层） | 纯 Go sqlite 驱动下 schema v1→v7 迁移 + 老库只读导入结果一致 | ⬜ |
-| **4** | `capabilities` → `exec` → `app` → `server` / `cli` | 19 项能力逐项打勾；CLI 参数互斥与四态输出一致；`api_contract` 契约测试平移，前端不动 | 🔄 **进行中**：`capabilities` 注册表 / `exec` / `app::payload` 已落（**52 条测试**）。⚠ **它依赖步 2 与步 3**：`capabilities::login` 是 `upstream::login` 的消费者，`app` 其余模块与 `server` 还要 `io` —— 所以先落了不依赖它们的三块，见 `status.md` 的「步 4 实况」 |
+| **4** | `capabilities` → `exec` → `app` → `server` / `cli` | 19 项能力逐项打勾；CLI 参数互斥与四态输出一致；`api_contract` 契约测试平移，前端不动 | 🔄 **进行中**：`capabilities` 注册表 / `exec` / `app::payload` 已落（**52 条测试**）。⚠ **它依赖步 2 与步 3**：`capabilities::login` 是 `upstream::login` 的消费者，`app` 其余模块与 `server` 还要 `io` —— 所以先落了不依赖它们的三块，见 `status.md` 的「步 4 实况」。**2026-09-21 追加（判据逐块核）**：`cli` 的参数面 / 退码 / `--json` 与凭据约定已落地（**22 条测试**，含从 Rust 侧 `unit_tests.rs` 平移过来的互斥与"两种写法等价"那批用例）⇒ **"CLI 参数互斥"这半条已达成**；⚠ **"四态输出一致"这半条未达成**（`signin` 的多账号编排与四态渲染那约 1,264 行还没迁，挂在 `internal/cli/unmigrated.go` 那张表上）；⚠ **"19 项能力逐项打勾"这半条卡在 `capabilities` 注册表的条目数**（Go 侧实测 3 项），**不在 CLI** —— 别把它记成"CLI 没做完"。`server` 那半条见下方「服务端」两节 |
 
 ### 步 0 的实测记录
 
@@ -640,6 +667,14 @@ PC 与 App 是**两套客户端**，同名同形的常量值可能不同，而"�
 ```bash
 go env -w GOPROXY=https://goproxy.cn,direct
 ```
+
+⚠ **2026-09-21 实测补充（CLI 落地时引的那两个）**：
+
+- `proxy.golang.org` 在本机是**直接 i/o timeout**，不是"慢"；换 `goproxy.cn` 才拉得动。
+- 但**没有走上面那条 `go env -w`** —— 它写进全局配置，会改变别人/别的会话的构建走向。
+  只在当条命令的环境里设（`GOPROXY=… go get …`）。要固化成仓库设置是另一个决定，得单独拍板。
+- **钉具体版本，不用 `@latest`**：本次落的是 `cobra v1.10.1` + `golang.org/x/term v0.46.0`。
+  理由是 §1 那条原则的延续 —— "骨架能编译"这类判据不该随上游发版漂移。
 
 ---
 
