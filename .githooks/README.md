@@ -49,6 +49,13 @@ hook 就跟代码一起被 review、被同步，也不需要谁记得"上一台�
 | `pre-commit` | `fmt` `deps` `filenames` `idents` `jsontags` | 秒级、纯静态。**每条都能在一次编辑之后立刻修掉** |
 | `pre-push` | 再加 `build` `vet` `test` `golden` | 要编译、要跑测试。**跑了才有意义，但不必每次保存都跑** |
 
+> ⚠ 跑子集时，`gates-go.sh` 末尾的横幅会**明说"本次 5/9 条"并列出未跑的那几条**
+> （`门禁通过：fmt deps filenames idents jsontags（本次 5/9 条）` +
+> `⚠ 未跑：build vet test golden`）。**这是刻意的**：早先它无条件打
+> "九项门禁全绿"，于是 `pre-commit` 那 5 条子集也打出"全绿" —— 把 5/9 报成 9/9。
+> 判据：**这条横幅是要被抄进 `docs/status.md` 的**（"门禁实况：九项门禁全绿"），
+> 它必须说清"这次到底验了什么"，否则抄进去的那句话没人能再复核。
+
 这个分法不是随手切的，判据是"**发现问题的时刻与修复成本**"：
 
 - `fmt` / `filenames` / `deps` / `idents` / `jsontags` 这五条，问题一旦产生就**立刻可修且必然要修**。

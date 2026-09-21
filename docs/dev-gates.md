@@ -65,6 +65,21 @@ bash scripts/gates-go.sh test deps        # 只跑指定的几条
 > （7 GB 的 cargo 构建产物），既慢、又会在 cargo 同时改写它时撞上刚被删的临时目录
 > 而**偶发失败**。定义与理由见 `scripts/gates-go.sh` 顶部。
 
+> ⚠⚠ **只跑子集时，末尾横幅会明说"本次 N/9 条"并列出未跑的**：
+>
+> ```
+> $ bash scripts/gates-go.sh fmt deps filenames idents jsontags    # pre-commit 那 5 条
+> 门禁通过：fmt deps filenames idents jsontags（本次 5/9 条）
+> ⚠ 未跑：build vet test golden
+>   ⇒ 别把这当成"全绿"：上面这几条**这次没验**。
+> ```
+>
+> **这是刻意的**：早先它无条件打"九项门禁全绿"，于是 `… fmt`（以及每次 `git commit`
+> 的 5 条子集）也报"全绿"，把 5/9 报成 9/9 —— 而这句话正是会被抄进 `docs/status.md`
+> 的那句（"门禁实况：九项门禁全绿"），抄错一次就再也说不清。
+> ⚠ 同理，清单只有**一份**：`ORDER` 从 `GATE_NAMES` **派生**（见 §6.1 **#92**）。
+> 抄一份进 `ORDER` 曾经让"加了门禁但默认不跑"变成**静默**事件。
+
 **6–8 刻意复用同一份脚本，不重写** —— 它们与语言无关（扫文件名 / 扫文本里的真实标识 /
 独立复算向量），重写一遍等于给自己造第二份真相，而两份真相迟早分叉，
 分叉那天没人知道该信哪一份。

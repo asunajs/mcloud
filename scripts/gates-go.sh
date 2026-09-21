@@ -42,7 +42,12 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
+# ⚠⚠ 这是**唯一**一份清单。下面的 `ORDER` 与末尾横幅都必须从它派生，别再手写第二份 ——
+#   早先 `ORDER=(build vet fmt test …)` 是把它逐字重抄的一遍，于是
+#   **加了门禁却忘了加进 `ORDER` ⇒ 它默认永远不跑，而且什么都不报**
+#   （`is_known_gate` 只保证"名字合法"，不保证"它会被跑到"）。
 GATE_NAMES="build vet fmt test deps filenames idents golden jsontags"
+ALL=($GATE_NAMES)
 
 # ⚠ 为什么用显式包路径，而不是惯用的 `./...`：
 #   `./...` 会把 `legacy/target/`（7 GB 的 cargo 构建产物）也遍历一遍。
@@ -124,11 +129,18 @@ gate_run() {
     idents)    node scripts/check-identifiers.cjs ;;
     golden)    node scripts/check-golden-vectors.cjs ;;
     jsontags)  node scripts/check-go-jsontags.cjs ;;
-    *)         return 127 ;;
+    *)
+      # 名字已过 `is_known_gate`（它在 GATE_NAMES 里），却走到这里 ⇒ **本函数的
+      # case 漏了它**，即"登记了门禁但没实现"。别让它以 `✗ <名字> 失败` 收场 ——
+      # 那会让人去查这条门禁本身，而问题在脚本这张表上。
+      printf '!! 门禁 "%s" 登记在 GATE_NAMES 里，但 gate_run 没有它的实现分支\n' "$1" >&2
+      return 127
+      ;;
   esac
 }
 
-ORDER=(build vet fmt test deps filenames idents golden jsontags)
+# 默认顺序 = 上面那份清单本身（派生，不重抄）。
+ORDER=($GATE_NAMES)
 if [ $# -gt 0 ]; then
   ORDER=("$@")
 fi
@@ -197,9 +209,39 @@ if [ ${#FAILED[@]} -gt 0 ]; then
   echo "完整输出: $LOG"
   exit 1
 fi
+# ── 横幅必须说清**这次到底跑了哪几条** ─────────────────────────────────
+#
+# ⚠ 早先这里无条件打"九项门禁全绿"，于是 `bash scripts/gates-go.sh fmt` 也打出
+#   "九项门禁全绿" —— 把"跑了 1/9"报成"9/9"。而 **pre-commit 跑的正是 5 条子集**，
+#   所以**每一次提交**都打印一句"九项门禁全绿"。
+#   这条横幅是要被抄进 `docs/status.md` 的（"门禁实况：九项门禁全绿"），
+#   抄错一次就再也说不清 —— 与"绿只对**跑的那个版本**成立"是同一条。
+#
+# ⚠ 条数从 `${#ALL[@]}` 派生（不写字面量）；中文数字查表是为了保住文档里
+#   已经在用的"九项门禁全绿"这个说法，超出表长就退回阿拉伯数字。
+CN_NUM=(零 一 二 三 四 五 六 七 八 九 十 十一 十二)
+N_ALL=${#ALL[@]}
+if [ "$N_ALL" -lt "${#CN_NUM[@]}" ]; then CN_ALL="${CN_NUM[$N_ALL]}"; else CN_ALL="$N_ALL"; fi
+
+RACE_NOTE=""
 if [ "$RACE_SKIPPED" = "1" ]; then
-  printf '\033[33m九项门禁通过 —— ⚠ 但 test 未跑 -race（本机缺 C 编译器）\033[0m\n'
+  RACE_NOTE=" —— ⚠ 但 test 未跑 -race（本机缺 C 编译器）"
+fi
+
+SKIPPED=""
+for g in "${ALL[@]}"; do
+  case " ${ORDER[*]} " in
+    *" $g "*) ;;
+    *) SKIPPED="$SKIPPED $g" ;;
+  esac
+done
+
+if [ -z "$SKIPPED" ]; then
+  printf '\033[32m%s项门禁全绿%s\033[0m\n' "$CN_ALL" "$RACE_NOTE"
 else
-  printf '\033[32m九项门禁全绿\033[0m\n'
+  printf '\033[32m门禁通过：%s（本次 %d/%d 条）%s\033[0m\n' \
+    "${ORDER[*]}" "${#ORDER[@]}" "$N_ALL" "$RACE_NOTE"
+  printf '\033[33m⚠ 未跑：%s\033[0m\n' "${SKIPPED# }"
+  printf '\033[33m  ⇒ 别把这当成"全绿"：上面这几条**这次没验**。\033[0m\n'
 fi
 : > "$LOG"
