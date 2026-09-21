@@ -127,13 +127,14 @@
 | `legacy_import` | ⬜ | ~1,600 行 + 1,163 行测试 —— **"老库只读导入结果一致"这条退出判据的载体** |
 | `random` + `SystemClock` | ✅ | 生产随机源（`crypto/rand`，取不到熵就 panic 而不是退化成弱随机）与真实时钟（归一化 UTC）；**3 条测试**。放 io 是因为取熵 / 读时钟都是 IO |
 | `reqwest_client`（→ `client.go`） | ✅ | 重试策略（指数退避 + 抖动，硬上限）+ 真实 HTTP 客户端；**17 条测试**。⭐ 两处刻意不同于 Rust 侧：**不声明 brotli**（标准库解不开，声明了会把响应变乱码）、**关掉 `net/http` 自动解压**由自己管 `Accept-Encoding` |
-| `fixture` | ⬜ | 398 行 —— L2 夹具回放 |
+| `fixture` | ✅ | L2 夹具回放：按 `METHOD host/path`（**丢 query**）匹配、多条按顺序消费且用尽保留最后一条、`body_json` 优先、**未命中即报错不回退真网**、`AuditLeaks` 自检（请求段也要扫）；`BuildEntry` 从 `core.BuildFixtureEntry` 收口，录制与回放同一份形状（**16 条测试**） |
 
 - **驱动 = `modernc.org/sqlite` v1.59.0（纯 Go，免 cgo）**，方案 §8 早已拍板。
   实测它吃下了带 `BEGIN/COMMIT` 的**多语句**迁移 —— 这一点不显然
   （`Exec` 多语句是驱动相关的），所以先写 schema 测试再往下走。
-- 落点 `internal/io`（**包名是 `mcloudio`**，目录名与包名刻意不同）；**112 条测试**。
-  `Client` 现在是**真的** HTTP 客户端了（此前只是骨架）。
+- 落点 `internal/io`（**包名是 `mcloudio`**，目录名与包名刻意不同）；**128 条测试**。
+  `Client` 现在是**真的** HTTP 客户端了（此前只是骨架），`FixtureClient` 也已能
+  加载并回放抓包夹具 —— ⭕ **`test/fixtures/http/` 仍无消费者**（见下方「夹具回放」）。
 - ⚠⚠ **时间列必须与 chrono 逐字节一致**（`internal/io/datetime.go`）：
   `sessions.expires_at` / `users.created_at` / `runs.started_at` 都在 SQL 里做
   **字符串比较与排序**，而 chrono 写 `+00:00` + AutoSi（0/3/6/9 位）、
@@ -201,7 +202,7 @@
 | 服务入口         | ⚠ 能起，但**只有"会话"这一层**，跑任务的那批路由仍在 P5                    |
 | WebUI        | ⚠ 登录与初始化是真接口，**主界面仍是 P0 spike 的占位数据**                |
 | 运行时层         | ⚠ 事件模型 / 生命周期 / 事件总线 / `run_events` 表已落地，编排与调度接入中    |
-| 夹具回放（L2）     | ❌ **尚无消费者** —— `test/fixtures/http/` 里的夹具一个断言都没跑     |
+| 夹具回放（L2）     | 🟡 **回放器已就绪**（`internal/io/fixture.go`，16 条测试），⭕ 但 `test/fixtures/http/` **仍无消费者** —— 下一步是让上游协议层真的加载这批夹具跑一遍（见下方「夹具回放」）     |
 
 ---
 
