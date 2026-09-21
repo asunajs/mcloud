@@ -84,6 +84,22 @@ const UNTAGGED_ALLOWED = {
     '一次上报的时间上下文（14 位东八区时间 + nowMillis + 上一次的 deviceId），**只**喂给上游算法；Rust 侧 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
   'internal/app/smid.go:FingerprintBinding':
     '一次绑定的**结果**（特征 + 库里两列 + 是否新绑），内存里用；Rust 侧同样只 derive `Debug, Clone, PartialEq, Eq`',
+  'internal/app/signin.go:SignInReport':
+    '一次签到的**结论**（调用前 / 调用后 / 本次快照），喂给 CLI 与汇报层；Rust 侧只 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
+  'internal/app/signin.go:SignInOptions':
+    '签到的两个开关（`force` / `deviceId`），**函数入参**不是数据模型；Rust 侧是 `Option<&str>` 两个参数',
+  'internal/app/signin_receive.go:RecordsQuery':
+    '流水查询的**入参集**（分页 + 区间 + 类型），Rust 侧是四个独立参数不是结构体',
+  'internal/app/signin_receive.go:ReceiveTarget':
+    '一条待领账目的**中间形态**（协议层解析结果 + 计划动作），内存里用',
+  'internal/app/signin_receive.go:ReceiveAction':
+    '一条账目的**计划动作**（走哪条接口 + 带什么参数），内存里用；Rust 侧是 `enum`',
+  'internal/app/signin_receive.go:ReceiveOutcome':
+    '一条账目的**领取结果**（结局 + 数量 / 失败原因），喂给 CLI；Rust 侧是 `enum`',
+  'internal/app/signin_bonus.go:MultipleOutcome':
+    '「签到翻倍」的**结果**（结局 + 倍数与合计 / 失败原因），喂给 CLI；Rust 侧是 `enum`',
+  'internal/app/signin_bonus.go:BackupGiftOutcome':
+    '「备份好礼」的**结果**（结局 + 数量 / 失败原因），喂给 CLI；Rust 侧是 `enum`',
   'internal/io/client.go:RetryPolicy':
     'HTTP 重试策略（次数 / 退避基数 / 上限），**构造参数**不是数据模型；Rust 侧 derive `Debug, Clone, Copy`，**不** Serialize',
   'internal/upstream/app_login.go:AppSendSmsOutcome':
