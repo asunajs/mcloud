@@ -250,7 +250,8 @@
 | `app::device` | ✅ | 设备指纹的本地持久化：PC 端 32 位大写 HEX + `-ENDIN` / App 端纯 32 位 / `deviceShort` 12 位**不落盘** / 空白文件算"没有" / 原子写（**9 条测试**） |
 | `app::user` | ✅ | 首个管理员的初始化：只有一条路径（CLI 与 WebUI 共用一次 bootstrap）、**只负责从零到一**、口令下限在写库**之前**判、认领历史数据失败**不能当什么都没发生**（**7 条测试**） |
 | `app::cloud` | ✅ | 云朵余额采集：历史窗口取**全量**（近 7 天会静默少算）、同一天重复采集**不以今天为基准**、先写日快照再写当前值（**9 条测试**） |
-| `app` 其余 | ⬜ | `login`（828）/ `app_login`（910）/ `run`（748）/ `migration`（483）。步 2 / 步 3 都已整族落地 ⇒ **全部不再被挡**，只剩工作量 |
+| `app::migration` | ✅ | 迁移的**执行策略**（`483` 行）：先归档 **再建库** 后导入、预演走 `DiagnoseLegacy`（内存库上同一条路径）、**库里一个用户都没有时落到 `Scope::Local` 而不是报错**（CLI 那条"先 migrate 再 init"全靠它）、`has_legacy_data` 只要求**任一**文件存在、渲染放在这一层不放在 CLI（**11 条测试**，全用真实 SQLite + `test/fixtures/legacy/` 的真实脱敏夹具） |
+| `app` 其余 | ⬜ | `login`（828）/ `app_login`（910）/ `run`（748）。步 2 / 步 3 都已整族落地 ⇒ **全部不再被挡**，只剩工作量 |
 | `upstream::login` | ✅ | 为使 `capabilities::login` 能落地而**提前做的前置**：信封 / 端档案 / 请求体 / 滑块 / 口令哈希 / 判定（**33 条测试**）。步 2 的其余部分（`signin` 协议族）仍未迁 |
 | `upstream::app_client` | ✅ | App 端（iOS）档案：16 段 `x-yun-client-info` 与 14 段 `x-DeviceInfo` **不同值**、三种 `os_version` 写法、`mobile` 前缀的 `Authorization`、未登录占位头（**10 条测试**）。它是整个签到链路的前置 |
 | `upstream::app_login` | ✅ | App 端验证码登录（`632` 行）：三层封装（明文 JSON → AES-128-ECB hex → **末 10 位错位**）、`hcy-cool-flag` **主动不发**、滑块 H5 的 `data` 只有两个头、`9441`/`9103`/`9999` 三态判定（**18 条测试**）。中心断言 `appLoginWire` 取自 Rust 侧 `crypto/tests/app.rs`（抓包侧独立脚本算出），Go 复算同一串 ⇒ 真跨实现对拍 |

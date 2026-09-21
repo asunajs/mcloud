@@ -86,6 +86,10 @@ const UNTAGGED_ALLOWED = {
     '一次绑定的**结果**（特征 + 库里两列 + 是否新绑），内存里用；Rust 侧同样只 derive `Debug, Clone, PartialEq, Eq`',
   'internal/app/user.go:InitOutcome':
     '一次初始化的**结果**（建出来的用户 + 认领到多少行），喂给 CLI 打印；Rust 侧是手写 Debug 的 struct，**不** Serialize',
+  'internal/app/migration.go:MigrationPlan':
+    '一次迁移的**入参**（从哪读 / 写到哪 / 归档到哪），由 CLI 或启动自检填；Rust 侧只 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
+  'internal/app/migration.go:MigrationOutcome':
+    '迁移的**结论**，机器可读形态由 `OutcomeToJSON` 另行拼出（键名是 camelCase 的外部契约），结构体本身不进 JSON；Rust 侧 `report` 虽是 `Value`，但它是 `MigrationReport::to_json()` 的产物，同样不是这个结构体的序列化',
   'internal/app/signin.go:SignInReport':
     '一次签到的**结论**（调用前 / 调用后 / 本次快照），喂给 CLI 与汇报层；Rust 侧只 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
   'internal/app/signin.go:SignInOptions':
