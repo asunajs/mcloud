@@ -224,6 +224,10 @@ const UNTAGGED_ALLOWED = {
     '一次发码的**结果**（配额余量 + 是否过了滑块），喂给前端渲染一句提示；Rust 侧 derive `Debug, Clone, Copy, PartialEq, Eq`，**不** Serialize',
   'internal/app/login.go:SmsCredential':
     '短信登录的**入参**（手机号 + **6 位明文验证码**）。⚠⚠ 它**绝不能**进 JSON —— 一旦可序列化，验证码就会顺着日志与响应体出去；Rust 侧 derive `Debug, Clone, Copy`，**不** Serialize',
+  'internal/app/app_login.go:AppCodeOutcome':
+    '一次发码的**结果**（Go 无 sum type，用"类别 + 字段"近似），喂给前端渲染一句提示或一条 H5 兜底地址；Rust 侧是 `enum AppCodeOutcome`，**不** Serialize',
+  'internal/app/app_login.go:AppLoginContext':
+    '一次 App 登录的**入参打包**（scope / 设备档案 / 凭据），与 `SmsCredential` 同理：**里面装着明文验证码**，一旦可序列化就会顺着日志出去；Rust 侧 derive `Debug, Clone, Copy`，**不** Serialize',
 };
 
 function walk(dir, out = []) {

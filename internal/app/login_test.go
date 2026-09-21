@@ -80,6 +80,12 @@ type loginStore struct {
 	core.StateStore
 	accounts []core.Account
 	states   []core.AccountState
+	// owners 记下每次写库时的归属。
+	//
+	// 它是为了让**隔离**这条契约在假实现里也成立：读的时候对不上归属就当没有，
+	// 于是"别人的账号读不出来"这条断言在这个 stub 上也是真的 ——
+	// 否则那条用例只是在验证"我写进去的东西能读出来"，什么也没守住。
+	owners []*core.UserID
 }
 
 func (s *loginStore) UpsertAccount(_ context.Context, _ core.Scope, account *core.Account) error {
@@ -88,10 +94,32 @@ func (s *loginStore) UpsertAccount(_ context.Context, _ core.Scope, account *cor
 }
 
 func (s *loginStore) UpsertAccountState(
-	_ context.Context, _ core.Scope, state *core.AccountState,
+	_ context.Context, scope core.Scope, state *core.AccountState,
 ) error {
 	s.states = append(s.states, *state)
+	s.owners = append(s.owners, scope.Owner())
 	return nil
+}
+
+// GetAccountState 按"账号 id + 归属"读登录态，对不上归属就当没有。
+func (s *loginStore) GetAccountState(
+	_ context.Context, scope core.Scope, id core.AccountID,
+) (*core.AccountState, error) {
+	for i, state := range s.states {
+		if state.AccountID != id {
+			continue
+		}
+		owner := s.owners[i]
+		if scope.IsLocal() || owner == nil {
+			found := state
+			return &found, nil
+		}
+		if scope.Owner() != nil && *owner == *scope.Owner() {
+			found := state
+			return &found, nil
+		}
+	}
+	return nil, nil
 }
 
 // loginClock 是逐次读表都往前跳一小时的时钟：用来造"已经超时"，
