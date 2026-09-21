@@ -109,6 +109,10 @@ const UNTAGGED_ALLOWED = {
     '单个账号那趟的**结果**（账号 + 报告 + 被谁挡下 + 是否跳过），内存里汇总用；Rust 侧只 derive `Debug, Clone, PartialEq, Eq`',
   'internal/app/run.go:RunSummary':
     '整批运行的**汇总**（每账号一条 + 计数），由它渲染摘要行与 JSON；Rust 侧同样只 derive `Debug, Clone, PartialEq, Eq`',
+  'internal/server/auth.go:Config':
+    '服务端的**启动参数**（cookie 是否带 Secure / 会话 TTL …），由 main 组装时填，不进 JSON',
+  'internal/server/auth.go:AuthUser':
+    '已认证身份（User + Session），存在 `context` 里；出网的形状是 `userPayload` 逐字段列白的 map，不是这个结构体',
   'internal/app/signin.go:SignInReport':
     '一次签到的**结论**（调用前 / 调用后 / 本次快照），喂给 CLI 与汇报层；Rust 侧只 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
   'internal/app/signin.go:SignInOptions':

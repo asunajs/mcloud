@@ -20,6 +20,7 @@
 **当前：步 1（`mcloud-core`）✅ 收口（2026-09-21，判据与一条例外见下方"步 1 收口"）；**&#x6B65; 2（`mcloud-upstream`）已整族落&#x5730;**（`login` / `client` / `app_client` / `app_login` / `app_signin` 全族 / `smid`，150 条测试）；**&#x6B65; 3（`mcloud-io`）已整族落地\*\*（schema / store / store::user / store::config / datetime / **legacy_import** / fixture / HTTP 客户端 / 随机源，150 条测试）；步 4 已落地 `capabilities`（注册表 + `login`）、`exec`、`app::payload` / `smid` / `session` / **`signin/*` 整族**。
 
 ⇒ **`app::migration` / `cli` / `server` 的阻塞已解除**（此前全被步 3 挡着）。\**
+⇒ **`server` 已于本轮整包落地**（26 条测试），`app` 只剩 `login` / `app_login` 两块。
 
 > ✅ **2026-09-21 起并发结束**，全部由本会话接手（此前最多三个会话在同一棵树上）。  
 > 已付出的可见代价：`docs/go-migration-plan.md` 的 §6.1 一度出现**两组 `#20`**，  
@@ -260,7 +261,8 @@
 | `upstream::app_login`  | ✅          | App 端验证码登录（`632` 行）：三层封装（明文 JSON → AES-128-ECB hex → **末 10 位错位**）、`hcy-cool-flag` **主动不发**、滑块 H5 的 `data` 只有两个头、`9441`/`9103`/`9999` 三态判定（**18 条测试**）。中心断言 `appLoginWire` 取自 Rust 侧 `crypto/tests/app.rs`（抓包侧独立脚本算出），Go 复算同一串 ⇒ 真跨实现对拍                                                                                                                                                            |
 | `upstream::smid`       | ✅          | 设备指纹（`733` 行）：`smid` 拼接 / `priId` / `tn`（**`tn` 还是空串时算摘要**）/ 25 条 DES 规则整表对拍 TS 侧向量 / 特征体绑定账号（`SmFingerprint`）与每次现算的一半（`SmUpload`）/ 上报与 `deviceId`（拼 `B` 前缀）（**18 条测试**）。⭐ `ep` **复现不了**是算法性质（PKCS#1 v1.5 随机填充 + 盲化），不是随机源没注入到位 —— 断言显式排除它并另开一条钉住                                                                                                                                                  |
 | `upstream::app_signin` | ✅ **整族落地** | 常量（由 `app-signin-vectors` 的 `constants` 钉住）/ `Diagnose` / H5 与原生头 / 百分号编码 / 取值 helper + 建会话三段 + 签到与状态（`infoV3` / `startSignIn` / `taskListV3` / `doTaskPost`）+ 领取族（`receiveV3` / `receiveRevivalReward` / `multiple` / `receiveTaskExpansion`）+ 记录族（`cloudRecordV2` / `record` / `backupgift/*`）+ **发送层**（`Upstream` 上的 15 个方法）（**113 条测试，整包合计**）。`app-signin-vectors.json` 从"只有 Rust 读"变成**两边都读** |
-| `cli` / `server`       | ⬜          | 在 `app` 之后                                                                                                                                                                                                                                                                                                                                                                                         |
+| `server`               | ✅          | HTTP 层（`1,481` 行 Rust）：**领域错误 → HTTP 的映射**（`statusAndCode` 用兜底而不是逐个列，新增 `ErrorKind` 默认落 500 而不是让人挑一个"看起来合适"的 4xx；5xx 走类别文案**不回吐原文** —— 那些原文里实测带过 SQL 片段与上游响应体）、免登录**白名单**（漏登记 = 默认要登录）、未初始化的闸门（查库失败时**不给结论**）、会话 cookie（`HttpOnly` + `SameSite=Lax`，`Secure` 按部署）、账号/运行/定时任务三组路由、`SSE` 事件流（`Last-Event-ID` 与 `?after=` 同语义，先订阅再读库，队列满时重订阅**不静默跳过**）（**26 条测试**，用 `httptest` 起真服务器验状态码 / cookie 属性 / SSE 帧 / 错误体形状）。⭐ 见下方「服务端」两节 |
+| `cli`                  | 🟡          | 命令与参数解析已在（**22 条测试**），⭕ 部分子命令还指着旧实现 |
 
 - 落点 `internal/capabilities`、`internal/exec`（包名 `mcloudexec`）、`internal/app/payload.go`。
 - ⚠ **`app` 现在仍只是"组装根接上了 IO"那个骨架**（`internal/app/app.go` 只有一个 `Deps`）。  
