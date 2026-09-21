@@ -48,17 +48,72 @@
 | `legacy` | ✅ | 旧文档 14 个类型 / 规整规则 / 账号视图 / 引用解析；**带来了第九份黄金向量（形状）** |
 | `traits` | ✅ | HTTP 请求/响应形状 / Clock / Scope / ClaimedRows / 三个 store 接口；**带来了第十份黄金向量（形状）** |
 
-- 落点 `internal/core`，**269 条测试**（全项目 570 条）；读 `test/golden/*.json` 经 `internal/golden`，
+- 落点 `internal/core`，**270 条测试**；读 `test/golden/*.json` 经 `internal/golden`，
   读 `test/fixtures/legacy/*.json` 经 `internal/golden.LoadFixture`，都不复制。
+  ⚠ **全项目的条数不在这里维护**（抄一次就 stale 一次）：
+  `grep -rho '^func Test' internal/*/*_test.go | wc -l` 现算。
+
+#### 步 1 收口（2026-09-21 实测）
+
+判据是 §7 那行"黄金向量在 Go 侧逐字段复算通过"。逐条核过：
+
+1. **模块对位：17/17。** Rust 侧 `mcloud-core/src` 的 17 个源文件（含 `lib.rs`、
+   `test_support.rs`）在 `internal/core` 全有落点。
+2. **公开 API 对位：164 个 `pub` 项里 156 个按名字对上**（比对要先做
+   `snake_case`→`PascalCase` 归一，否则整表都是假阳性 —— 我第一版就这么误报过一批），
+   剩下 8 个：4 个只是改名（`AES_FIXED_IV` / `DEFAULT_EXCHANGE_WINDOWS` /
+   `SIGN_SALT_MAP` / `WEBUI_PAGES`，Go 侧逐一对到了实现），
+   另 4 个是同一件事 —— **`classify_body` 及其 `Classified` / `FailureClass` / `body_snippet`**。
+   ⇒ **定案：不补进 core。** 依据不是"还没轮到它"，而是**冻结基准里它就没有消费者**：
+   `grep -rn "classify_body\|Classified" legacy/crates` 除 `mcloud-core` 自身
+   （定义处 + 自己的单测 + `lib.rs` 再导出）外**零命中**。
+   而 Go 侧判据的三块已经各在其位：HTTP 状态归 `core.ClassifyStatus`
+   （`internal/io/client.go` 就在用），信封归 `upstream.Envelope`
+   （`Success` 先于 `Code` 那条顺序也在那儿）。
+   **补进去就是一台没人开的分类机**，正是本文件反复警告的"写下来就没人再看"。
+   ⇒ 归属改挂到**第一个真需要"状态 + 响应体一步判完"的调用点**（步 4 的 `exec` / `server`
+   错误映射），届时按 Go 的形状写，而不是照 Rust 的签名平移。
+3. **向量：core 读 8 份，且逐节都有正向断言** —— 这次把最后一处补上了：
+   `app-business-crypto-vectors.json` 的 `hcyCoolFlagEnvelope`（发码链路那把 AES-128，
+   3 条）此前**只被当过反例**（`…192IsNotThe128BitKey` 用它证明"128 那把解不开 192 族"），
+   **从没正向解过一次**。新增 `TestAppCoolFlagSmsLinkEnvelope128BothDirections`
+   补两个方向：2 条实拍响应走解密、1 条合成请求走**加密**（固定 IV ⇒ 逐字节可比）。
+   ⚠ **反例不能代替正例**：拿错钥匙有 1/256 的概率碰上合法 PKCS7，
+   那时"解不出正确明文"这条在两边都成立。
+   ⚠ 反向测试已做：把钥匙换成 `BODY_AES_KEY_192`，两个方向**同时变红**。
+4. **§6.1 那四个坑逐条核过**：① `Below()` 是拒绝采样且取值序列被钉住
+   （`crypto_test.go`，注释里写明了"别简化成 `% n`"）；② argon2 的盐走注入的
+   `Random`（`HashPassword(plain, rng)`）；③ DES 的豁免理由在 `crypto.go` 文件头
+   （"协议层必须能用…设备指纹（DES/RSA）"+ 三条坑里的补零口径）；
+   ④ 四态穷尽用 `countKnownStates` 真值表守卫兜住（`run_test.go`，
+   判据是"`String()` 对越界值返回空串"）。
+5. **⚠ 步 1 的判据里从来不该含 `login-crypto-vectors.json`**：它覆盖的是
+   `puzzleAnswer` / `aesEcb*` / `sha1Password` / `md5SafeVerify` / `guid32` ——
+   落点在 `internal/upstream/login.go`，**属步 2**。而且它并非"完全无断言"：
+   `puzzleAnswer` / `aesEcb*` / `sha1Password` 三族**行为两侧都已正向钉过**
+   （期望值取自 `pcclient-crypto-vectors.json` 那一份，不是没测，是没接**这一份**）；
+   `md5SafeVerify` 是**两侧都没实现**的 TS 路径（Rust 侧 `login.rs` 记着
+   "`safeVerifyCodeEncrypt` 暂未实现：实测没走到那条分支"）⇒ 先定要不要实现，别补断言；
+   `§guid32` 仍缺拼接规则（`-ENDIN` 那串两侧都只是被当字面量用），
+   接的时候要用实拍值反推、**不许照实现现编**。逐节表见 `go-migration-plan.md` §6.1 末尾。
+   ⇒ 下面那条"尚未达成"就是这次复核要更正的。
+
 - ⚠ **步 1 只剩 `error` 后半的 `classify_body` ~400 行**（那台"响应体分类机"）。
   它之所以一直排在最后：写出来之后**没有消费者**（用到它的层还没迁），
   而"写下来就没人再看"的代码正是这个项目反复吃亏的地方。
+  ⇒ **2026-09-21 复核更正**：不只是"用到它的层还没迁"——**冻结基准里它也没有调用点**
+  （见上方收口第 2 条），所以这条判据成立的方式是"两边都没人用"。
+  结论从"步 1 的尾巴"改为"挂到步 4 的第一个真实调用点"。
 - 门禁**九条**（新增 `jsontags`）—— 见 `docs/dev-gates.md`。
 - `auth-vectors.json` 从"只有 Rust 读"变成**两边都读**。
 - 步 1 的退出判据是"黄金向量在 Go 侧逐字段复算通过"，**尚未达成**：
   `app-signin-vectors` 的消费者在步 2 接线，而 `login-crypto-vectors.json`
   至今仍是**死向量**（有生成器 `scripts/gen-login-crypto-vectors.cjs`、无消费者），
   且它的 `§guid32` 连拼接规则都没在向量里给出 —— 详见 `go-migration-plan.md` §6.1 末尾。
+  ⇒ **2026-09-21 复核：这句话把两步的账混在了一个判据里，据此判"步 1 未达成"是错的。**
+  `app-signin-vectors` 与 `login-crypto-vectors` 的消费者都在**步 2**（`internal/upstream`），
+  与 core 无关；core 读的 8 份**逐节都有正向断言**（最后一处 `hcyCoolFlagEnvelope`
+  这次补上，见收口第 3 条）。⇒ **步 1 判据达成**，例外只有收口第 2 条那一台分类机。
 - ⚠⚠ **别照门禁那行"✓ 有测试读取"判定进度**：它的消费者探测扫**四个落点**
   （`crates/` / `legacy/crates/` / `internal/` / `cmd/`），命中任一即算有消费者，
   **不区分是哪一侧在读**。所以 `app-signin-vectors.json` 至今显示 ✓，

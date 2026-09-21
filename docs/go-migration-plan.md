@@ -295,6 +295,13 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 
 **退出判据**：6 份黄金向量在 Go 侧逐字段复算通过。
 
+⚠ **这句"6 份"写于动工前**（那时全仓只有 6 份向量）。收口时的实测口径是：
+仓库里共 11 份，**core 读 8 份**（`crypto` / `pcclient-crypto` / `app-business-crypto` /
+`password-hash` / `enum-json` / `auth` / `legacy-shape` / `traits-shape`），
+其余 3 份的消费者在别的步（`datetime-format` → 步 3，`app-signin` 与
+`login-crypto` → 步 2）。⇒ **别照"6"这个数验收**，照上面那串文件名验收。
+（2026-09-21 步 1 收口时按"逐节都被正向引用"核过，见 §6.1 #56。）
+
 ### 步 1 已实测出来的二十七条（写进这里，免得后面的模块重踩）
 
 
@@ -377,8 +384,8 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 
 ⚠ 编号按**发现的先后**排，与步号无关 —— 这张表是**追加式**的，
 重编别人的条目会让正在引用它的人指向错处。
-当前：步 1 = 1–27，步 4 = 28–39 与 42–45，步 3 = 40–41 与 46–47。
-（40/41 与 46/47 由 io 那侧先占；步 4 续接在 45 之后，48/49/50/51/52/53/54/55 已接在 47 之后 ——
+当前：步 1 = 1–27 与 56，步 4 = 28–39 与 42–45，步 3 = 40–41 与 46–47。
+（40/41 与 46/47 由 io 那侧先占；步 4 续接在 45 之后，48/49/50/51/52/53/54/55/56 已接在 47 之后 ——
 **加之前看表尾**，别再撞号。⚠ 这张表是**分节**的，只看自己那一节一定会撞。）
 
 | 现象 | 根因 | 做法 |
@@ -395,6 +402,7 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 | **53** | **`_ = f()` 接不住多返回值** | Rust 的 `let _ = f()` 能吞掉任意个返回值（`smid` 测试里就是这么写的）；Go 的 `_ = client.Send(…)` 对两返回值函数是**编译错误**（`assignment mismatch`）。这类错误只在编译期出现一次、很好修，但它会诱使人改成 `client.Send(…)` 裸调用 —— 那就把 `err` 一起丢了 | 写 `_, _ = f()`（显式丢弃两个），或在确实要忽略时加一行注释说明为什么可以忽略。⚠ 别用 `_ = f()` 的 Rust 直觉去写 Go |
 | **54** ⭐ | **报告里的**计数字段**是最容易没有断言的地方** —— 它会被所有测试跑过，却从没被任何断言读过 | `MigrationReport.CredentialsFilled` 存在了整整一轮：8 条测试都跑过 `ImportLegacy`，报告里那个数字一直是 2，**没有一条读它**。直到做反向测试（把 `fillCredentials` 整段换成恒零）才发现**一条都不变红** —— 也就是说"凭据到底有没有回填"此前完全没有判据，而"看起来像没登录"正是这个项目最不想要的错误方向 | 判据：**报告里每多一个计数字段，就要有一条断言读它**；发现方式固定是反向测试（删掉产出它的那一段，看有没有变红）。⚠ 别把"测试跑过了这段代码"当成"这段代码被断言了" —— 跑过只证明它不崩 |
 | **55** | **"逐条容错"在 Go 里是手写出来的，编译器不兜底** | Rust 侧 `filter_map` + `Result` 天然逐条；Go 的 `for` 循环里 `continue`（丢这一条）/ `return parsed`（丢剩下全部）/ `break` 三种**都编译得过**，长得也几乎一样。而 `core.ParseJSONTo` 对"形状不合"只返回 `false` 不报错 ⇒ 默认行为取决于写的人有没有写对那一行 | "一条坏记录不拖垮其余"必须有**专属断言**：数组里放 [好 / 类型错 / 不是对象 / 外键认不出] 四种，断言**好的那几条仍然落库**且问题条目数正好。⚠ 反向测试已确认：把 `continue` 换成 `return parsed` 后 `TestOneBadRunRecordDoesNotTakeDownTheRest` 变红 |
+| **56** ⭐ | **一个值只在**反例**里出现过，看起来"被断言了"，其实正向路径从没验过** | `hcyCoolFlagEnvelope`（发码链路那把 AES-128，3 条实拍/合成）在 Go 侧的"存在感"来自 `TestAppCoolFlagEnvelope192IsNotThe128BitKey` —— 它拿 128 那把去解 **192 族**的载荷并断言"解不出正确明文"。于是这份向量**被读了、键也用了**，而它自己那 3 条**一条都没正向解过**。表现是：若 128 那把字面量抄错一个字符，全部门禁照样绿 | 盘点口径要落到**"每一节都被正向引用过"**，不是"这份文件被 `golden.Load` 过"。⚠ 判据：**反例只证明"两把不是一把"，不证明"这把是对的"** —— 钥匙错有 1/256 的概率碰上合法 PKCS7，那时"解不出正确明文"两边都成立。补的正向断言两个方向都要（响应解密 + 固定 IV 的加密逐字节），且反向测试确认换错钥匙时**同时**变红 |
 ⚠ #13/#14 是**同一个病**的两个面（枚举 JSON），所以判据也共用一条：
 **"有没有 MarshalJSON"这件事必须能被一条断言问出来** —— `enum_test.go` 里的
 第一条断言是"序列化结果的首字符必须是 `\"`"，它专门用来接住"漏写了 MarshalJSON"
@@ -446,6 +454,23 @@ serde 测试、也没有 `tests/` 目录），形状只隐含在 `rename_all` �
 目前**处于无断言状态**（是"本来就没测"，不是"测过又丢了"）。另外它的 `§guid32`
 （uuid → md5 的具体拼接）**向量里没给出规则**，门禁会明确跳过它 ——
 所以"接上消费者"只解决一半，剩下那半得回原始出处补。
+
+⚠⚠ **2026-09-21 步 1 收口时逐节核过，三处更正**：
+(1) **这份向量不属步 1**。它覆盖的五个函数落在 `internal/upstream/login.go`，
+是**步 2 的账** —— 此前把它挂在步 1 的判据下，导致"core 已经迁完"被读成"步 1 未达成"。
+(2) "Rust 侧**处于无断言状态**"这句**只对一小半**，逐节实测：
+
+| 节 | 实测状态（两侧都是） |
+| --- | --- |
+| `puzzleAnswer` | **有**正向断言（Rust `login/tests/puzzle.rs` 5 条；Go `TestPuzzleAnswer…` / `TestPuzzleVerfycodeEncryptRoundTrips`） |
+| `aesEcbHexDecrypt` / `aesEcbEncrypt` | 行为**有**正向断言（Go `core/crypto_test.go` 用 App 那把钥匙钉了 ECB 双向；PC 登录钥匙走的是另一份向量 `pcclient-crypto-vectors.json` 的 `loginDataDecrypt`） |
+| `sha1Password` | **有**（`pcclient-crypto-vectors.json` 的 `sha1Upper`，期望值 openssl 产出，Go `login_test.go` 在读） |
+| `md5SafeVerify` | **两侧都没有实现** —— 它对应的 TS 路径 `safeVerifyCodeEncrypt` 在 Rust 侧明确记着"暂未实现：实测没走到那条分支"（`legacy/crates/mcloud-upstream/src/login.rs`）。⇒ 接这条之前先回答"**要不要实现**"，而不是补断言 |
+| `guid32` | 拼接规则向量里没给（`-ENDIN` 那串在两侧都只是**被当字面量用**，没有"uuid → md5 → 加后缀"的生成断言） |
+
+⇒ 所以"接上这份向量"真正要做的不是从零补判据，而是**把已有的行为断言改成从向量读期望值**
+（#43 同源），外加 `md5SafeVerify` 那条要先定"实现与否"。
+⚠ 别为此**新写一份重复断言** —— 同一件事两份期望值，将来只会分叉。
 
 ### 6.2 `mcloud-upstream`（8,064 行）—— 向量兜底最厚
 
@@ -544,7 +569,7 @@ PC 与 App 是**两套客户端**，同名同形的常量值可能不同，而"�
 | --- | --- | --- | --- |
 | **0** | 骨架 + 守卫先行：`go.mod` / `internal/` 八层 / `cmd/` 两个入口 / `scripts/gates-go.sh` / `check-go-deps.sh` / 三处共享守卫改造 | **八项门禁全绿**；依赖断言经**反向测试**证明能抓错 | ✅ **已完成** |
 | **冻结** | Rust 侧冻结到 `legacy/`（`bash scripts/freeze-rust.sh`）| 冻结后 **Rust 七条 + Go 八条同时全绿**；`legacy/test` 以符号链接入库（模式 120000）| ✅ **已完成**（`333d05c`，2026-09-20）|
-| **1** | `mcloud-core`（纯计算，标准库覆盖最好） | 黄金向量在 Go 侧逐字段复算通过 | 🔄 **进行中**：`crypto` / `error`（前半）/ `auth` / `pure` / `cron` / `sanitize` / `user` 已落（**143 条测试**）。按 Rust 侧 src 行数口径约 **50%**；余 `run`（1,123 行）→ `model` → `stage` → `legacy` → `traits`，另 `error` 后半的 `classify_body`。⚠ 判据要按"**Go 侧**读了几份向量"算，别照门禁那行 `✓ 有测试读取` —— 它不区分是哪一侧在读（见 `status.md`） |
+| **1** | `mcloud-core`（纯计算，标准库覆盖最好） | 黄金向量在 Go 侧逐字段复算通过 | ✅ **已完成**（2026-09-21）：`internal/core` **270 条测试**，17/17 模块对位，core 读的 **8 份向量逐节都有正向断言**（最后缺的那一节 `hcyCoolFlagEnvelope` 于本次补上，见 §6.1 #56）。**一条例外**：`error` 后半的 `classify_body` 那台分类机**不补进 core** —— 它在**冻结基准里就没有调用点**（core 之外零命中），补进去就是一台没人开的机器；判据的三块 Go 侧已各在其位（`core.ClassifyStatus` + `upstream.Envelope`），归属改挂到步 4 第一个真需要"状态 + 响应体一步判完"的调用点。⚠ 判据要按"**Go 侧**读了几份向量"算，别照门禁那行 `✓ 有测试读取` —— 它不区分是哪一侧在读（见 `status.md`）。⚠ 也别把**步 2 的账算进步 1**：`app-signin-vectors` 与 `login-crypto-vectors` 的消费者在 `internal/upstream`，与 core 无关 |
 | **2** | `mcloud-upstream`（协议层） | 同一条抓包请求 Rust/Go **双跑**，header 顺序 / percent-encode / 签名串逐字节一致 | ⬜ |
 | **3** | `mcloud-io`（唯一 IO 层） | 纯 Go sqlite 驱动下 schema v1→v7 迁移 + 老库只读导入结果一致 | ⬜ |
 | **4** | `capabilities` → `exec` → `app` → `server` / `cli` | 19 项能力逐项打勾；CLI 参数互斥与四态输出一致；`api_contract` 契约测试平移，前端不动 | 🔄 **进行中**：`capabilities` 注册表 / `exec` / `app::payload` 已落（**52 条测试**）。⚠ **它依赖步 2 与步 3**：`capabilities::login` 是 `upstream::login` 的消费者，`app` 其余模块与 `server` 还要 `io` —— 所以先落了不依赖它们的三块，见 `status.md` 的「步 4 实况」 |
