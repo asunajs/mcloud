@@ -21,8 +21,13 @@
 >   `app` / `server` / `cli` 八层全部落地，**913 条测试**；`cli` 的 12 个叶子命令
 >   **全部接上真后端**（缺口表已退役），`cmd/mcloud-server` **也接上了** `internal/server`
 >   （不再是占位退 2）。
->   ⭕ **还差的一处不在迁移上**：`capabilities` 注册表目前只有 3 项能力
->   （判据要求 19 项），以及跑任务那条路 `POST /api/runs` 未落。
+>   ⭕ **迁移已对位，没有缺口**：`capabilities` 注册表 Go 侧 3 项
+>   （`sign` / `exchange` / `cloud-snapshot`）与冻结基准**逐项一致**；
+>   服务端 15 条路由也逐条对位（有断言盯着，见 `internal/server/routes_test.go`）。
+>   ⚠ 常被误记成"还差 16 项能力"与"`POST /api/runs` 未落" —— **那两项冻结基准里也没有**：
+>   19 项来自**旧 TS 项目**的 `packages/api/src/tasks/*`，而 `POST /api/runs` 在
+>   `legacy/crates/mcloud-server/src/routes/mod.rs` 里自己写着"要等 P4"。
+>   它们属**功能开发**（P4/P5），**不是迁移缺口**。
 >   进度与判据：[`docs/status.md`](./docs/status.md)。
 > - ⚠ **下面所有 Rust 说明在当前阶段仍然有效** —— 冻结执行前 `cargo` 那套照常能用；
 >   冻结之后改用 `cargo <cmd> --manifest-path legacy/Cargo.toml`（**不要 `cd legacy`**，

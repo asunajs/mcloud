@@ -212,6 +212,20 @@ func (s *Server) requireSetup(next http.Handler) http.Handler {
 //
 // 中间件顺序：`requireSetup` 在外层，先跑。
 func (s *Server) Handler() http.Handler {
+	return s.requireSetup(s.requireSession(s.routes()))
+}
+
+// routes 是**裸路由表**（不带任何中间件）。
+//
+// ⚠ 单独抽出来是给测试用的，且必须是这样：路由表的"是否逐条对位冻结基准"
+// **只能在这个粒度上测**。从 HTTP 面测不出来 —— 会话闸包在整个 mux 外层，
+// 于是"未登录"对所有路径都是 401；而兜底模式 `/api/` 不带方法，
+// 会把"方法不匹配"与"路径不存在"**一并吞成 404**（实测：全程没有 405、没有
+// `Allow` 头）。也就是说 `GET /api/runs/1/events`（路由在、资源不在）与
+// `/api/nope`（路由不在）在 HTTP 面上**长得一模一样**。
+//
+// 只有问 `ServeMux` "这条请求命中了哪个模式"才能把两者分开。
+func (s *Server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/health", s.health)
@@ -233,7 +247,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/", s.apiNotFound)
 	mux.HandleFunc("/api", s.apiNotFound)
 
-	return s.requireSetup(s.requireSession(mux))
+	return mux
 }
 
 // registerAPIRoutes 挂业务路由（能力清单 / 账号 / 运行 / 定时任务）。
