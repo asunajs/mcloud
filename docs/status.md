@@ -20,7 +20,9 @@
 **当前：步 1（`mcloud-core`）✅ 收口（2026-09-21，判据与一条例外见下方"步 1 收口"）；**&#x6B65; 2（`mcloud-upstream`）已整族落&#x5730;**（`login` / `client` / `app_client` / `app_login` / `app_signin` 全族 / `smid`，150 条测试）；**&#x6B65; 3（`mcloud-io`）已整族落地\*\*（schema / store / store::user / store::config / datetime / **legacy_import** / fixture / HTTP 客户端 / 随机源，150 条测试）；步 4 已落地 `capabilities`（注册表 + `login`）、`exec`、`app::payload` / `smid` / `session` / **`signin/*` 整族**。
 
 ⇒ **`app::migration` / `cli` / `server` 的阻塞已解除**（此前全被步 3 挡着）。\**
-⇒ **`server` 已于本轮整包落地**（26 条测试）。
+⇒ **`server` 已整包落地并接上入口**（2026-09-21）：HTTP 层 26 条测试，入口层
+   （参数面 / 退出码 / 静态资源与 SPA 回退 / 真监听起服务）再 **17 条**，
+   共 **43 条**。`cmd/mcloud-server` 不再打印占位退 2。
 ⇒ **`app` 层已全部落地**（2026-09-21）：最后两块 `login`（扫码与短信的驱动，14 条）
    与 `app_login`（App 端，13 条）已补上。
 ⇒ ⭐ **`cli` 全部叶子落地**（2026-09-21，**116 条测试**）—— 那张「缺口表」
@@ -354,6 +356,59 @@
   他们的 `012c55a`（server 整包，26 条测试）已在 2026-09-21 落地，之后 `gates-go.sh` → 九项门禁全绿。
   ⇒ 这正好复现了上面那条铁律：**白名单条目与文件必须同进同出**。
 
+### 步 4 收口：`server` 入口接线（2026-09-21）
+
+`internal/server` 那 26 条测试测的是**处理器**，而 `cmd/mcloud-server` 一直是
+"打印一句占位就退 2" —— 也就是说**没接线**（不是后端没写）。本轮把它接上，
+新增三个文件 + 17 条测试（包内共 **43 条**）：
+
+| 文件 | 职责 |
+| --- | --- |
+| `internal/server/server.go`（改写） | `Deps`（外部世界）/ `Options` / `ParseArgs` / 退出码常量 |
+| `internal/server/static.go`（新） | `App(webDir)`：静态资源 + SPA 回退 |
+| `internal/server/run.go`（新） | `Main`（解析 + 退出码）/ `Run`（开库 → 监听 → 横幅 → 阻塞） |
+
+⭐ **三个承重判断，都做了反向测试（13/13 如期变红）**：
+
+1. **静态资源必须挂在会话中间件的外层。** `Server.requireSession` 的默认是
+   "除白名单一律要会话"，把静态挂进 mux 会让**首屏 401**（现象是白屏）。
+   Rust 侧靠 `router.fallback_service(...)` 挂在中间件外；Go 的 `ServeMux`
+   没有 fallback 这个概念 ⇒ 改成**先按路径分流**（`/api` 走 API，其余走静态）。
+   ⚠ 这条断言是 `App` 存在的唯一理由，别处一条测试都不会红。
+2. **`webDir` 不存在时只挂 API，非 `/api` 路径拿到的是 401（不是 404）。**
+   这是**对的**：没有静态层时那个请求落在会话闸的默认分支上，
+   与 Rust 侧 `web_dir.filter(is_dir)` 给出 `None` 时同一条路。
+3. **先开库再监听。** 反过来的话，库打不开时端口已经被占过一下，
+   而"端口被占用"是最容易被误读的失败（人第一反应是查谁占了端口）。
+   ⚠ 这条**光断言"没调 Serve"是钉不住的**（把监听提到开库之前，`Serve` 照样不会被调，
+   断言照样绿 —— 反向测试实测）。所以测试**先把端口占住**：顺序对了报的是**库**的错，
+   顺序反了报的是**端口**的错，两个分支的文案不同，断言才有判别力。
+
+⭐ **顺带修掉两处**：
+
+- `internal/server/server.go:Deps` 里的 `HTTP *mcloudio.Client` 字段**是死代码**
+  （除注释外零引用：跑任务那条路没落地，其余路由全是读库）。删掉并在注释里写明
+  "等真有调用点再加" —— 摆一个没人读的字段只会让"接线的缺口"看起来像已经填上了。
+- `/api`（**没有尾斜杠**）原先会吃 `ServeMux` 的一个 301 到 `/api/`，
+  那是 Go 的产物不是我们的契约（Rust 侧那里就是 404）⇒ 补一条精确匹配，
+  两种写法给出**同一个**错误形状。
+
+⚠ **方案 §6.7 写的 `net/http + chi` 与实际不符**：Go 侧**没有引 `chi`**
+（`go.mod` 里没有），用的是标准库 `ServeMux` —— Go 1.22 起它自带方法 + 通配路由，
+`chi` 那一层在这里没有换来任何东西。方案那一行已改。
+
+⇒ 上面这三条 + 两条顺带修掉的，已记进方案 **§6.1 #81–#84**
+（⚠ 那两条**先发生**的 `cli::signin` 教训占用 #79 / #80，本轮顺延，别重编）。
+
+⚠⚠ **收尾时还揪出一条"偶发、且指向错误方向"的门禁红**：`deps` 偶尔报
+「`internal/app` / `internal/server` 未依赖 `internal/io`」，而它们**明明依赖** ——
+根因是运行环境有时往 `go` 的 stdout 塞一句**没有换行**的
+`Brokered program policy check unavailable`，它粘到 `go list` 输出的行首，
+让「整行相等」那条判据**凭空找不到依赖**。
+⇒ 判据改成「**定界符 + 子串**」（`-f '|{{.ImportPath}}|'` + `grep -qF "|X|"`），
+精确性不丢；两条验证（模拟污染 + 注入真违规）都实测过。
+详见 `docs/dev-gates.md`「偶发红」一节 + 方案 §6.1 **#85**。
+
 ---
 
 ## 一句话总览
@@ -363,7 +418,7 @@
 | CLI：初始化 / 登录 | ✅ 可用（扫码 + 短信，PC 端与 App 端）                                                                                                                    |
 | CLI：签到（云朵中心） | ✅ 端到端跑通（含领取、复活卡）                                                                                                                             |
 | 上游接口层        | ⚠ **逐块重写中** —— 只有 `login` 与 `app_signin` 是完整的，其余仍是骨架                                                                                         |
-| 服务入口         | ⚠ 能起，但**只有"会话"这一层**，跑任务的那批路由仍在 P5                                                                                                            |
+| 服务入口         | ✅ **Go 侧已接线**：API 四组业务路由（含 SSE）+ 前端产物与 SPA 回退；⭕ 跑任务那条路（`POST /api/runs`）未落 |
 | WebUI        | ⚠ 登录与初始化是真接口，**主界面仍是 P0 spike 的占位数据**                                                                                                        |
 | 运行时层         | ⚠ 事件模型 / 生命周期 / 事件总线 / `run_events` 表已落地，编排与调度接入中                                                                                            |
 | 夹具回放（L2）     | 🟡 **回放器已就绪**（`internal/io/fixture.go`，17 条测试）；已有消费者 `TestEveryArchivedFixtureIsLeakFree`（31 份抓包夹具全量自检），⭕ 但上游协议层**还没真的加载这批夹具跑一遍**（见下方「夹具回放」） |
@@ -397,13 +452,26 @@
 
 ## 逐项须知
 
-### 服务入口：能起，但只有"会话"这一层
+### 服务入口：Go 侧已接线，前端产物与 API 都在
 
-`cargo run -p mcloud-server` 起 API + 前端产物，路由目前只有  
-`/api/health`、`/api/setup`、`/api/session`（白名单免登录，其余一律要会话）。
+> ⚠ 这一节早先写的是 Rust 侧（冻结那一刻）的样子：`cargo run -p mcloud-server`
+> 起 API + 前端产物，但路由只有 `/api/health` / `/api/setup` / `/api/session`。
+> 那是**旧**状态 —— 下面按 **Go 侧**重写。
 
-跑任务的那一批（accounts / capabilities / runs / schedules）、SSE 与 `openapi.json`  
-导出仍在 P5 —— 所以 **WebUI 登录与初始化是真接口，主界面仍是 P0 spike 的占位数据**。
+`go run ./cmd/mcloud-server`（默认 `127.0.0.1:8787`）现在能起来，并同时提供：
+
+- **API**：健康 / 初始化 / 会话，加上 accounts、capabilities、runs（含 SSE 事件流）、
+  schedules 四组业务路由 —— 白名单免登录（只有 `/api/health`、`/api/setup`
+  与 `POST /api/session`），其余一律要会话；
+- **前端产物**：`web/dist` 的静态文件 + SPA 回退（非 `/api` 的未知路径交给
+  `index.html`，前端路由自己处理）。目录不存在时**只挂 API**，并在启动横幅里说明 ——
+  开发期先 `cd web && npm run dev` 是常态。
+
+命令行五个选项与 Rust 侧逐项对齐（`--db` / `--host` / `--port` / `--web-dir` /
+`--secure-cookie`），退出码同一套口径：0 正常、1 运行错误、2 用法错误。
+
+⭕ **仍缺**：跑任务的那条路（`POST /api/runs`）没落地 —— 所以 **WebUI 登录与初始化是
+真接口，主界面仍是 P0 spike 的占位数据**；`openapi.json` 导出也还没做。
 
 > 更早（2026-09-17）时 `mcloud-server` 只有 lib、没有 `serve` 命令，CLI 能跑而 WebUI  
 > 没有后端可连，前端只能靠 `vite dev` 单独起。这一条已经过去了。

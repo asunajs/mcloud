@@ -59,15 +59,26 @@ FORBIDDEN_IMPORTS=(
 
 fail=0
 
-# 某包的生产依赖闭包（每行一个 import path）。
+# 某包的生产依赖闭包（每行一个 import path，两侧带 `|` 定界符）。
+#
+# ⚠⚠ 为什么要有定界符，而不是直接用 `grep -xF` 判整行相等：
+#   运行环境（沙箱）有时会往 `go` 的 stdout 里塞一句**没有换行**的
+#   `Brokered program policy check unavailable`。它没有换行 ⇒ **粘到某几行的行首**，
+#   于是 `grep -xF`（整行相等）再也找不到那个依赖 —— 而报出来的话是
+#   「组装根必须把 IO 实现接上」，**指向一个根本不存在的分层问题**。
+#   ⚠ 这类「偶发、且把人指向错误方向」的红比门禁缺失更危险：人会学会「重跑一次就好」。
+#   ⇒ 判据从「整行相等」改成「**定界符 + 子串**」：前面粘了什么都无所谓，
+#     而 `|net/http|` 仍然**不会**命中 `|net/http/httputil|` —— 精确性没有丢。
+#   ⚠ 别改成裸子串（`grep -qF "$1"`）：那会让 `net/http` 误命中 `net/http/httputil`，
+#     纯层那条断言当场失效。
 deps_of() {
-  go list -deps -f '{{.ImportPath}}' "$1" 2>/dev/null
+  go list -deps -f '|{{.ImportPath}}|' "$1" 2>/dev/null
 }
 
-# 精确整行匹配 —— 用 -x 是为了让 "net/http" 不会误命中 "net/http/httputil"。
+# 判「闭包里有没有这个 import path」。定界符的来由见 [deps_of]。
 # 用这里的 <<< 而不是 `echo | grep`：grep -q 命中即退出会让 echo 吃到 SIGPIPE。
 has_dep() {
-  grep -qxF "$1" <<<"$2"
+  grep -qF "|$1|" <<<"$2"
 }
 
 # ── 纯层 ────────────────────────────────────────────────────────────

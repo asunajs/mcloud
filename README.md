@@ -17,11 +17,12 @@
 > - **执行方案：[`docs/go-migration-plan.md`](./docs/go-migration-plan.md)** ——
 >   **与其它文档冲突时以它为准**。
 > - 骨架已就位：`internal/` 八层 + `cmd/` 两个入口 + `bash scripts/gates-go.sh`（**九条门禁**）。
->   **业务已基本迁完**（2026-09-21）：`core` / `upstream` / `io` / `capabilities` / `exec` /
->   `app` / `server` / `cli` 八层全部落地，**896 条测试**；`cli` 的 12 个叶子命令
->   **全部接上真后端**（缺口表已退役）。
->   ⚠ **唯一还差的一处**：`cmd/mcloud-server` 这个入口还没接上 `internal/server`
->   （那一层本身已完成，26 条测试）—— 它现在仍打印一句占位就退 2。
+>   **业务已迁完**（2026-09-21）：`core` / `upstream` / `io` / `capabilities` / `exec` /
+>   `app` / `server` / `cli` 八层全部落地，**913 条测试**；`cli` 的 12 个叶子命令
+>   **全部接上真后端**（缺口表已退役），`cmd/mcloud-server` **也接上了** `internal/server`
+>   （不再是占位退 2）。
+>   ⭕ **还差的一处不在迁移上**：`capabilities` 注册表目前只有 3 项能力
+>   （判据要求 19 项），以及跑任务那条路 `POST /api/runs` 未落。
 >   进度与判据：[`docs/status.md`](./docs/status.md)。
 > - ⚠ **下面所有 Rust 说明在当前阶段仍然有效** —— 冻结执行前 `cargo` 那套照常能用；
 >   冻结之后改用 `cargo <cmd> --manifest-path legacy/Cargo.toml`（**不要 `cd legacy`**，
@@ -56,11 +57,20 @@ cargo run -p mcloud-cli -- --list              # 先看下标 1、2、3…
 cd web && npm install && npm run build && cd ..   # 前端产物到 web/dist
 cargo run -p mcloud-server                        # API + 前端，默认 http://127.0.0.1:8787
 
+# ── Go 侧（迁移后主线）──────────────────────────────────────────────
+go run ./cmd/mcloud                            # 对全部启用账号各签一次（等价于 mcloud signin）
+go run ./cmd/mcloud --list                     # 先看下标 1、2、3…
+go run ./cmd/mcloud-server                     # API + 前端产物（含 SPA 回退），默认 127.0.0.1:8787
+go run ./cmd/mcloud-server --help              # 五个选项：--db / --host / --port / --web-dir / --secure-cookie
+
 bash scripts/install-hooks.sh                  # 装一次：提交/推送时自动跑门禁
 bash scripts/gates.sh                          # Rust 侧七条门禁，一条命令跑完，全绿才算完成
 bash scripts/gates.sh clippy fmt               # 也可以只跑其中几条（调试时用）
-bash scripts/gates-go.sh                       # Go 侧八条门禁（迁移期两套并存）
+bash scripts/gates-go.sh                       # Go 侧九条门禁（迁移期两套并存）
 ```
+
+> ⚠ Go 工具链在 `/opt/homebrew/bin`，非交互 shell 的 `PATH` 里没有 ⇒ 先
+> `export PATH="/opt/homebrew/bin:$PATH"`。
 
 > 迁移期**两套门禁并存**，互不替代：Rust 侧 `gates.sh`（`legacy/Cargo.toml` 存在时会
 > **自动**加 `--manifest-path`，不用手改）、Go 侧 `gates-go.sh`。

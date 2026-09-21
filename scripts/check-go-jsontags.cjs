@@ -194,6 +194,8 @@ const UNTAGGED_ALLOWED = {
     '一次发码响应的**判定结果**，同上；Rust 侧是 enum，无 Serialize',
   'internal/app/app.go:Deps': '组装根的**依赖集**，不是数据模型',
   'internal/server/server.go:Deps': '组装根的**依赖集**，不是数据模型',
+  'internal/server/server.go:Options':
+    '`mcloud-server` 的**启动参数**（库路径 / 监听地址 / 前端目录 / cookie 是否带 Secure），由 flag 填、由 [Run] 读，不进 JSON；Rust 侧是 clap 的 `#[derive(Parser)]`，**没有** serde 的 Serialize',
   // `imports` 表的**一行**。字段名对应 SQL 列名，不是 JSON 键 ——
   // 它由 `scanImport` 逐列读出来，从不经过 `json.Unmarshal`。
   // 对外展示走 `Summary()`（刻意不含 `Raw`，那段可能带凭据）。

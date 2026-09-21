@@ -225,7 +225,13 @@ func (s *Server) Handler() http.Handler {
 
 	// 兜底：`/api` 下不存在的路径必须**明确报 404**，不能落到前端 index.html ——
 	// 那会让"路径写错"表现成"返回了一段 HTML"，前端解析失败且毫无线索。
+	//
+	// ⚠ 两条都要：`"/api/"` 是子树模式（管 `/api/x`），而 `/api` 本身
+	// **不**在它里面 —— Go 的 `ServeMux` 会先给 `/api` 一个 301 到 `/api/`。
+	// 那个 301 是 Go 的产物，不是我们的契约（Rust 侧这里就是 404），
+	// 所以显式补一条精确匹配，让两种写法给出**同一个**错误形状。
 	mux.HandleFunc("/api/", s.apiNotFound)
+	mux.HandleFunc("/api", s.apiNotFound)
 
 	return s.requireSetup(s.requireSession(mux))
 }
