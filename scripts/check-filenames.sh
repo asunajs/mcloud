@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 文件名门禁：非 Rust 文件一律 kebab-case。
 #
-# 规则出处：`docs/rust-rewrite-plan.md` §3.1 与 `README.md` §文件命名。
+# 规则出处：本仓库 `docs/repo-layout.md`「文件命名」（判据的唯一现行来源）。
+# 最早写在 Rust 重写方案 §3.1，该文档已随代码移入同级仓库 `../mcloud-rust/docs/`。
 #
 # # 为什么值得单独一条门禁
 #
@@ -127,7 +128,7 @@ if [ "$fail" -ne 0 ]; then
     [ -n "$line" ] && printf '!! %s\n' "$line"
   done
   echo
-  echo "文件名门禁未通过。规则见 docs/rust-rewrite-plan.md §3.1："
+  echo "文件名门禁未通过。规则见 docs/repo-layout.md「文件命名」："
   echo "  非 Rust 文件一律 kebab-case（全小写、- 分隔、不用空格与下划线）。"
   echo
   echo "重命名用 git mv 以保留历史："
