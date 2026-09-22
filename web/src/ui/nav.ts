@@ -6,7 +6,7 @@
  *
  * 与设计指南的对应关系：
  *  - 侧栏导航项 9 条封顶、不设二级菜单 → §4.1
- *  - dock 只放 5 项（总览/任务/兑换/历史/更多）→ §4.4、§7.2
+ *  - dock 只放 5 项，且**全是页面**（总览/账号/任务/兑换/历史）→ §4.4、§7.2
  */
 
 import type { JSX } from 'vue-jsx-vapor'
@@ -122,9 +122,17 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
 ] as const
 
-/** 底部 dock 里直接点得到的 5 项（第 5 项是「更多」而不是页面）。 */
+/**
+ * 底部 dock 里直接点得到的 5 项，**全是页面**。
+ *
+ * 原先第 5 项是「更多」，点开的是侧栏抽屉 —— 而抽屉在 navbar 左上角的汉堡包
+ * 那里已经有一个入口了（同一个 `label for="nav-drawer"`）。
+ * ⇒ 一个只重复既有导航的 dock 位，不值一格；这一格给账号。
+ * 其余 3 个页面（定时 / 调试台 / 设置）仍只走抽屉，不加第二条入口。
+ */
 export const DOCK_IDS: readonly PageId[] = [
   'dashboard',
+  'accounts',
   'tasks',
   'exchange',
   'history',

@@ -11,6 +11,7 @@
 
 import { onMounted, ref } from 'vue'
 import { ApiError, listAccounts, type Account } from '../api'
+import { fmtTime } from '../ui/time'
 
 type LoadState = 'loading' | 'error' | 'ready'
 
@@ -34,10 +35,6 @@ const healthOf = (a: Account): { dot: string; label: string } => {
   if (a.failStreak > 0) return { dot: 'status status-warning', label: `连续失败 ${a.failStreak} 次` }
   return { dot: 'status status-success', label: '正常' }
 }
-
-/** rfc3339 → 本地短日期时间；null 给破折号而不是空。 */
-const fmtTime = (iso: string | null): string =>
-  iso ? new Date(iso).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'
 
 const cloudCell = (a: Account) =>
   a.cloudCurrent === null ? (
@@ -80,7 +77,7 @@ export const AccountsPage = () => {
     <div class="flex flex-wrap items-center justify-between gap-2">
       <div class="flex flex-wrap items-center gap-2">
         <h1 class="text-base font-medium">账号管理</h1>
-        <span class="badge badge-soft badge-neutral">{accounts.value.length}</span>
+        <span class="badge badge-soft">{accounts.value.length}</span>
       </div>
       <button
         type="button"
@@ -159,7 +156,7 @@ export const AccountsPage = () => {
           <div class="card-body gap-2 p-4">
             <div class="flex items-center justify-between gap-2">
               <span class="break-words font-medium">{a.displayName}</span>
-              <span class="badge badge-soft badge-neutral">{platformLabel(a.platform)}</span>
+              <span class="badge badge-soft">{platformLabel(a.platform)}</span>
             </div>
             <div class="flex items-center justify-between text-sm">
               <span class="opacity-70">云朵</span>

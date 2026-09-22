@@ -44,6 +44,38 @@ func (s *Server) getCapabilities(w http.ResponseWriter, _ *http.Request, _ *Auth
 	writeJSON(w, http.StatusOK, app.CapabilitiesPayloadOf())
 }
 
+// getStatus 是"后端自述"：界面上那一行状态用它。
+//
+// 判据是**只放后端确实知道的事实**，一件都不推断：
+// 版本来自 [app.VersionPayloadOf]（与 `--version`、`/api/version` 同一份），
+// 最近一次执行直接复用 [runPayload]（不另起一个 run 的形状）。
+//
+// 刻意**不**在这里放账号数 / 任务数：那些是各自页面的内容，
+// 搬进常驻侧栏就等于把"同一个数字出现在两个地方"再犯一遍。
+func (s *Server) getStatus(w http.ResponseWriter, r *http.Request, auth *AuthUser) {
+	// limit 1：这一行只关心"最近一次"，而 ListRuns 已按 started_at DESC 排。
+	runs, err := s.store.ListRuns(r.Context(), scopeOf(auth), 1)
+	if err != nil {
+		ErrDomain(asDomain(err)).Write(w)
+		return
+	}
+	var lastRun any
+	if len(runs) > 0 {
+		lastRun = runPayload(runs[0])
+	}
+	version := app.VersionPayloadOf()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name":    version.Name,
+		"version": version.Version,
+		// ⚠ 当前**恒为 false**：Go 侧还没有把 `schedules` 表变成"到点触发"的
+		// 循环（`docs/status.md` 运行时层那条写着"调度接入中"）。
+		// 于是保存了定时任务也**不会自己跑** —— 这一项宁可显式报 false，
+		// 也不能省略：省略的表现是界面上一片绿，而绿的意思是"在跑"。
+		"schedulerRunning": false,
+		"lastRun":          lastRun,
+	})
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 账号
 // ─────────────────────────────────────────────────────────────────────────────

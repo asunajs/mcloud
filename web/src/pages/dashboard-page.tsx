@@ -131,7 +131,7 @@ export const DashboardPage = (props: DashboardPageProps) => {
       <div class="flex flex-wrap items-center gap-2">
         <h1 class="text-base font-medium">账号云朵总览</h1>
         {state.value === 'ready' ? (
-          <span class="badge badge-soft badge-neutral">{rows.value.length}</span>
+          <span class="badge badge-soft">{rows.value.length}</span>
         ) : null}
       </div>
       <button

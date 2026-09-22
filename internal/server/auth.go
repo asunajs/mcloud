@@ -128,12 +128,15 @@ func (s *Server) authed(h func(http.ResponseWriter, *http.Request, *AuthUser)) h
 }
 
 // current 解析请求里的会话。
-func (s *Server) current(headers http.Header) (*AuthUser, *core.Error) {
+//
+// ctx 取自请求本身：客户端断开/上游超时要能传进那次 DB 查询，
+// 塞 context.Background() 等于每笔未完成的会话解析都成了孤儿查询。
+func (s *Server) current(ctx context.Context, headers http.Header) (*AuthUser, *core.Error) {
 	token := cookieToken(headers)
 	if token == "" {
 		return nil, nil
 	}
-	user, session, perr := app.CurrentByToken(context.Background(), s.store, token, s.Now())
+	user, session, perr := app.CurrentByToken(ctx, s.store, token, s.Now())
 	if perr != nil {
 		return nil, perr
 	}
@@ -171,7 +174,7 @@ func (s *Server) requireSession(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		auth, perr := s.current(r.Header)
+		auth, perr := s.current(r.Context(), r.Header)
 		if perr != nil {
 			ErrDomain(perr).Write(w)
 			return
@@ -196,7 +199,7 @@ func (s *Server) requireSession(next http.Handler) http.Handler {
 // ⇒ 别因为"没有红过"就以为它不重要，也别因为写了它就以为它被断言了。
 func (s *Server) requireSetup(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		count, err := s.store.CountUsers(context.Background())
+		count, err := s.store.CountUsers(r.Context())
 		if err == nil && count == 0 && !isSetupAllowed(r.URL.Path) {
 			ErrSetupRequired().Write(w)
 			return
@@ -257,6 +260,7 @@ func (s *Server) routes() *http.ServeMux {
 func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/version", s.authed(s.getVersion))
 	mux.HandleFunc("GET /api/capabilities", s.authed(s.getCapabilities))
+	mux.HandleFunc("GET /api/status", s.authed(s.getStatus))
 
 	mux.HandleFunc("GET /api/accounts", s.authed(s.listAccounts))
 	mux.HandleFunc("GET /api/accounts/{id}/cloud-stats", s.authed(s.cloudStats))

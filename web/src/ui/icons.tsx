@@ -104,15 +104,6 @@ export const IconSettings = (props: IconProps): JSX.Element => (
   </svg>
 )
 
-/** 更多：三点。 */
-export const IconMore = (props: IconProps): JSX.Element => (
-  <svg {...base} class={props.class} stroke-width={2.25}>
-    <circle cx="5" cy="12" r="0.5" />
-    <circle cx="12" cy="12" r="0.5" />
-    <circle cx="19" cy="12" r="0.5" />
-  </svg>
-)
-
 /** 菜单：汉堡（移动端抽屉开关）。 */
 export const IconMenu = (props: IconProps): JSX.Element => (
   <svg {...base} class={props.class}>

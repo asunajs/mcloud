@@ -126,3 +126,28 @@ export const currentSession = () => request<SessionInfo>('/api/session')
 
 /** 登出。 */
 export const signOut = () => request<void>('/api/session', { method: 'DELETE' })
+
+/**
+ * 后端自述（对位 `routes.go` 的 `getStatus`）。侧栏底部那一行用它。
+ *
+ * ⚠ `lastRun.status` 是**存储层的生命周期**（running / done / failed），
+ * 不等于业务结论 —— `done` 可以是"全成 / 部分成 / 需人工"三种。
+ * 所以那一行只把它当**文字**显示，不拿它决定红绿（后端 `runPayload` 同一条警告）。
+ */
+export interface ServiceStatus {
+  name: string
+  version: string
+  /** 调度循环在不在跑。**当前后端恒报 false**：定时任务存得下来但不会自己触发。 */
+  schedulerRunning: boolean
+  /** 最近一次执行；库里一条记录都没有时为 null。 */
+  lastRun: {
+    id: string
+    capability: string
+    status: string
+    startedAt: string
+    finishedAt: string | null
+  } | null
+}
+
+/** 拉一次后端自述。这条请求成功与否本身就是"连没连上后端"的判据。 */
+export const serviceStatus = () => request<ServiceStatus>('/api/status')
