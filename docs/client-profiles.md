@@ -1,7 +1,7 @@
 # 各端差异与设备指纹（**PC 已实现；iOS App 已实测落地；其余端待实现**）
 
-> 状态：PC 端已落地为 `mcloud-upstream::client::ClientProfile`；
-> **iOS App 端已落地为 `mcloud-upstream::app_client`（2026-09-18 实测，见 §3.3 / §5.3）**；
+> 状态：PC 端已落地为 `upstream.ClientProfile`（`internal/upstream/client.go`）；
+> **iOS App 端已落地为 `internal/upstream/app_client.go`（2026-09-18 实测，见 §3.3 / §5.3）**；
 > 安卓 / 邮箱端 / 微信小程序端**仍未实现**（§7）。
 >
 > 记这条的直接原因：P2.5 做登录时发现 Windows 客户端版本是 `8.8.6.20260829`、
@@ -19,7 +19,7 @@
 
 - **请求头差异很大**：认证头、设备指纹头、渠道头、埋点头、签名头，**每端一套**（§3 有实测对照）。
 - **请求体差异比原先估计的大**：原先以为登录链路只随端变 `clientType` / `cpid` / `version` 三个公共参数
-  （见 `docs/upstream-login-protocol.md` §6），但 iOS App 实测推翻了这一点：
+  （见 `docs/upstream/login-protocol.md` §6），但 iOS App 实测推翻了这一点：
   它还多了 `pintype=8`、`extInfo.ifOpenAccount` 由数字变**字符串**、
   而且**整个请求体是加密的**（PC 是明文 JSON）。
   也就是说"请求体差异很小"这个判断**只对 PC 内部的 win/mac 之间成立，跨端不成立**。
@@ -43,12 +43,12 @@
 | A | `test/fixtures/http/`（30 份夹具 / 709 条真实请求） | 各端真实发过哪些头（§3 按 UA 分组统计） |
 | B | PC 客户端 `common/utils.js: sendRequest`（L226-289） | PC 端每个头的构造逻辑与条件分支（§4） |
 | C | PC 客户端 `apiServer.js: getClientDeviceInfo`（L613-635） | 设备指纹怎么生成、怎么持久化（§5） |
-| D | `docs/capture/*` + `docs/upstream-*.md` | 登录链路实测（该链路只出现 `x-yun-tid`） |
+| D | `docs/capture/*` + [`docs/upstream/`](./upstream/) 那一族 | 登录链路实测（该链路只出现 `x-yun-tid`） |
 | **E** | **`docs/capture/app-sms-login-samples.txt`**（iOS App 自身 FXTrace 网络日志） | **iOS App 端的头集合、设备串、业务常量（§3.3 / §5.3），且是逐字节可复算的** |
 
 A 是**多端**证据（UA 分组天然按端分开），B/C 是 **PC 单端**的代码级证据，
 E 是 **iOS App 单端**的证据 —— 它比 A 强，因为 A 只统计"发过哪些头"，
-E 还给了"头里每个字段长什么样"，并且能用二进制反汇编交叉验证（见 `docs/upstream-app-sms-login.md` §2）。
+E 还给了"头里每个字段长什么样"，并且能用二进制反汇编交叉验证（见 `docs/upstream/app-sms-login.md` §2）。
 
 > E 的取值来源要特别说明：**不是**代理抓的，而是 App 自己写在沙盒里的网络日志
 > （`~/Library/Containers/…/Documents/log/FXTrace*.log`，`Action_outputNetworkingLog:`）。
@@ -76,7 +76,7 @@ E 还给了"头里每个字段长什么样"，并且能用二进制反汇编交�
 
 ### 3.0 一条**实测确认**的结论：登录接口强制要求设备头
 
-2026-09-18 实现扫码登录时撞上的（已写进 `docs/upstream-login-protocol.md` §3 的补正）：
+2026-09-18 实现扫码登录时撞上的（已写进 `docs/upstream/login-protocol.md` §3 的补正）：
 
 | 请求头 | `/user/thirdlogin` 响应 |
 |---|---|
@@ -87,7 +87,7 @@ E 还给了"头里每个字段长什么样"，并且能用二进制反汇编交�
 而不是像"参数不合法"。这一条把"头必须逐端对齐"从设计原则变成了**排查经验**：
 以后任何接口返回莫名其妙的业务码，第一个该试的是"把该端的头补齐"。
 
-PC 端这套头已落地为 `mcloud-upstream::client::ClientProfile`（含设备信息串的构造）。
+PC 端这套头已落地为 `upstream.ClientProfile`（含设备信息串的构造 `upstream.DeviceInfo`）。
 
 ### 3.1 跨端**共有**的头（做 profile 时的公共部分）
 
@@ -145,7 +145,7 @@ PC 端这套头已落地为 `mcloud-upstream::client::ClientProfile`（含设备
 登录链路里 App 端**没有**出现的头（反过来说明它们不是必需的）：
 `x-yun-tid`、`x-kpcc-*`、`sign`、`reqtmp`、`yun-encrypt-index`、`yun-encrypt-key`、
 `Authorization`。**特别地：没有 `yun-encrypt-*`** —— 这条很关键，
-它排除了"App 端走国密会话密钥"的猜测，实际用的是另一套（见 `docs/upstream-app-sms-login.md` §2）。
+它排除了"App 端走国密会话密钥"的猜测，实际用的是另一套（见 `docs/upstream/app-sms-login.md` §2）。
 
 #### 3.3.1 已登录请求：`Authorization` 与头超集（同源证据）
 
@@ -178,7 +178,7 @@ PC 端这套头已落地为 `mcloud-upstream::client::ClientProfile`（含设备
 | `anonymous` | `0`（未登录 `1`） | **B** | |
 | `timeStamp` | 13 位（**毫秒**） | **B** | 与 `x-yun-user-timestamp`（16 位微秒）**单位不同**，且**差一个整 8 小时** —— 见下 |
 | `msgId` | 32 位小写 hex | **B** | 每请求一个，**响应会原样回同一个值**（可做关联） |
-| `signature` | 64 位小写 hex | **B** | = `SHA256("clientId=iosapp&clientKey=…&msgId=…&timeStamp=…&version=…")` —— 见 [`upstream-app-business-api.md`](./upstream-app-business-api.md) |
+| `signature` | 64 位小写 hex | **B** | = `SHA256("clientId=iosapp&clientKey=…&msgId=…&timeStamp=…&version=…")` —— 见 [`app-business-api.md`](./upstream/app-business-api.md) |
 | `businessId` | `600` 等 | **B** | 只有部分接口有 |
 | `service_identifier_key` | **按服务变** | **B** | **与主机一一对应**（已查清，见下）—— 不能钉成端常量 |
 | `x-yun-uni` | 19 位十进制 | **A** | **就是 `userDomainId`** —— 见 §3.3.2 |
@@ -235,7 +235,7 @@ App 日志给出了答案，**三个名字是同一个值**（下面用合成值
   编一个会让上游定位到别人的用户域。但 **`thirdlogin` 一返回它就有了**
   （就在响应里，字段名 `userDomainId`），并且已经落进库。
   原始观察与真机收口记在
-  [`upstream-app-sms-login.md`](./upstream-app-sms-login.md) §7.4；
+  [`app-sms-login.md`](./upstream/app-sms-login.md) §7.4；
 - 这也是**唯一**一处 `check-identifiers.cjs` 的 19 位规则会命中的真实值形态，
   所以从日志导出的 HAR **只落 `har/`**（已 gitignore），脱敏交给 `mcloud fixture extract`。
 
@@ -270,7 +270,7 @@ App 日志给出了答案，**三个名字是同一个值**（下面用合成值
 App 端对"字符串数字"的容忍度看起来比 PC 端高，但**不要**据此把 PC 端的字段也改成字符串 ——
 两端各按各的实测来。
 
-> **代码位置**：`mcloud-upstream::app_client`（`AppDevice` / `AppProfile`）。
+> **代码位置**：`internal/upstream/app_client.go`（`upstream.AppDevice` / `upstream.AppProfile`）。
 > 该模块**故意不提供 `Android` 变体**：安卓端的 `clientType` / `cpid` / 设备串语法都没有实测，
 > 先造一个只会让"传错端"变成一个可以静默通过的选项。
 
@@ -409,7 +409,7 @@ x-yun-client-info (16 段)  = 上面那串 + "aVBhZA==|0|;"
    不要"顺手归一化"成一个写法 —— 上游是按正则解析的。
    代码里保留 `os_version` 一个字段 + 三段拼接（`AppDevice::{device_info, x_user_agent, yun_user_agent}`）。
 
-> **代码位置**：`mcloud-upstream::app_client::AppDevice`。
+> **代码位置**：`upstream.AppDevice`。
 > `device_id` / `device_short` 由调用方注入（生命周期不同，见 §5.4），
 > 其余字段有实测默认值（`AppDevice::ipad`）。
 
@@ -417,7 +417,7 @@ x-yun-client-info (16 段)  = 上面那串 + "aVBhZA==|0|;"
 
 **PC**：`windowDeviceInfo` / `windowMachine` 存在 `localStorage`，
 **必须在首次运行后持久化且永不漂移**：换了 deviceId 等于换了台设备，
-服务端会按 `dID + sID` 联合定位会话（见 `docs/upstream-login-protocol.md` §4 的
+服务端会按 `dID + sID` 联合定位会话（见 `docs/upstream/login-protocol.md` §4 的
 `200059541 未找到设备的二维码信息`）。
 
 **App**：只有第 6 段（`deviceId`）持久化，第 7 段（`deviceShort`）**不持久化**。
@@ -543,16 +543,16 @@ iOS 的 `clientType`=`412` / `cpid`=`55` / 渠道号=`10000020` / `version`=`12.
   ~~App 的 `signature`（64 位小写 hex）与 `msgId` 的算法**都没解**~~
   → **已解开（2026-09-19）**：`signature = SHA256("clientId=iosapp&clientKey=…&msgId=…
   &timeStamp=…&version=…")`，6165/6165 条实拍逐字命中；见
-  [`upstream-app-business-api.md`](./upstream-app-business-api.md)；
+  [`app-business-api.md`](./upstream/app-business-api.md)；
 - **安卓 / 小程序端 UA 完整串**（PC 与 iOS App 的已实测拿到，见 §3.3）；
 - **App 设备串第 7 段（`deviceShort`）按什么变**：已知它**不是**每安装稳定值（§5.4），
   但只有两个观测点，定不出规则；
 - ~~业务接口请求体里的 `encodeData` 用什么算法/密钥~~
   → **已解开（2026-09-19）**：`base64(16 字符 ASCII 的 IV ‖ AES-128-CBC/PKCS7(key, iv, 手机号))`，
   6159/6159 个样本全部解出、明文去重后只有 1 种长度 11（即手机号）；见
-  [`upstream-app-business-api.md`](./upstream-app-business-api.md)；
+  [`app-business-api.md`](./upstream/app-business-api.md)；
 - ~~**`hcy-cool-flag` 触发的那条加密响应用什么密钥**（App 端 `getSmsCode` 的坑，
-  详见 `docs/upstream-app-sms-login.md` §7.1）—— 这是登录链路上**唯一**没解开的加密点。
+  详见 `docs/upstream/app-sms-login.md` §7.1）—— 这是登录链路上**唯一**没解开的加密点。
   ⚠ 注意它与上面那个 `encodeData` **不是同一回事**（方向相反：一个是请求、一个是响应），
   **别拿 `encodeData` 的密钥去试它**。~~
   → **已解开（2026-09-19 深夜）**：密钥 **`uDjGSA8auFlbwDkY`**，格式
@@ -620,9 +620,9 @@ go run ./cmd/mcloud fixture extract --har har/x.har --out test/fixtures/http
 
 ## 8. 与现有代码的关系
 
-- `mcloud-upstream::login`（PC 链路）**只发 `x-yun-tid`**（证据 D 是该链路唯一实测到的头）。
+- `internal/upstream/login.go`（PC 链路）**只发 `x-yun-tid`**（证据 D 是该链路唯一实测到的头）。
   不要往里摊 PC 的那一堆头 —— 否则别的端接进来时会被迫改登录逻辑。
-- **App 链路的头由 `mcloud-upstream::app_client::AppProfile` 提供**，
+- **App 链路的头由 `upstream.AppProfile`（`app_client.go`）提供**，
   请求构造函数（`app_login::send_sms_code_request` / `thirdlogin_request`）通过
   `with_app_headers(request, profile, timestamp)` 叠加，
   这样"换端"= 换 profile，不动业务逻辑。**登录链路的两个函数没有硬编码任何头值。**
@@ -633,8 +633,8 @@ go run ./cmd/mcloud fixture extract --har har/x.har --out test/fixtures/http
 
   | 层 | 位置 | 职责 |
   |---|---|---|
-  | 算法 | `mcloud-upstream::smid` | 特征体 → `data` → 上报 → `B…`；**只管一次调用，不碰库** |
-  | 生命周期 | `mcloud-app::smid` | 读库里的特征、没有就生成并绑账号、上报、存 `deviceId`；`rotate` 时同一条语句清掉旧 `deviceId` |
+  | 算法 | `internal/upstream/smid.go` | 特征体 → `data` → 上报 → `B…`；**只管一次调用，不碰库** |
+  | 生命周期 | `internal/app/smid.go` | 读库里的特征、没有就生成并绑账号、上报、存 `deviceId`；`rotate` 时同一条语句清掉旧 `deviceId` |
   | 落库 | `account_state.smid_fingerprint` / `smid_device_id`（**v5 引入，schema 现为 v7**） | 见 §6 那两行新层 |
   | 入口 | `mcloud smid show / reset [--report] / refresh` | 只打印摘要（特征 fp 摘要 + 平台/尺寸/dpr/触屏/CPU + 打码的 `deviceId`），**不打印 UA** |
 
@@ -642,9 +642,9 @@ go run ./cmd/mcloud fixture extract --har har/x.har --out test/fixtures/http
 
 | 层 | PC | App |
 |---|---|---|
-| 端常量 | `mcloud-upstream::login::PcPlatform` | `mcloud-upstream::app_client::ios` |
-| 端档案 | `mcloud-upstream::client::ClientProfile` | `mcloud-upstream::app_client::AppProfile` |
-| 请求构造 | `mcloud-upstream::login::*` | `mcloud-upstream::app_login::*` |
-| 驱动 | `mcloud-app::login::{sms_send_code, sms_login}` | `mcloud-app::app_login::{app_send_sms_code, app_sms_login}` |
+| 端常量 | `upstream.PcPlatform` | `app_client.go` 的 `IOS*` 常量组 |
+| 端档案 | `upstream.ClientProfile` | `upstream.AppProfile` |
+| 请求构造 | `internal/upstream/login.go` | `internal/upstream/app_login.go` |
+| 驱动 | `app.SmsSendCode` / `app.SmsLogin` | `app.AppSendSmsCode` / `app.AppSmsLogin` |
 | 落库 | `persist_login`（前缀 `pc`） | `persist_login_with_prefix`（前缀 `mobile`） |
 | 入口 | `mcloud login sms --client pc` | `mcloud login sms --client app` |

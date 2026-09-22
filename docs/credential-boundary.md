@@ -3,7 +3,7 @@
 > 状态：**规范**（写任何抓包产物、夹具、测试字面量、文档示例前必读）
 >
 > - 配套：[`sanitize-guide.md`](./sanitize-guide.md)（"换了不换形"的具体做法）
-> - 守卫：`scripts/check-identifiers.cjs`（第 6 条门禁）+ `mcloud-core::sanitize`
+> - 守卫：`scripts/check-identifiers.cjs`（第 6 条门禁）+ `internal/core/sanitize.go`
 
 ---
 

@@ -2,7 +2,7 @@
 
 > 状态：**结论已定；取值只收有出处的**（2026-09-19）。
 >
-> 直接动因：`mcloud-upstream::app_signin` 的 `TO_SOURCE_ID` 初版注释写成了"App 端的常量"，
+> 直接动因：`internal/upstream/app_signin.go` 的 `ToSourceID` 初版注释写成了"App 端的常量"，
 > 而依据是 PC 客户端包里的默认值 —— 被指出这是**跨端外推**。
 > 查下去发现比"跨端"更糟：**同一个 PC 客户端文件里，同一条接口就有三个不同的合法值**。
 >
@@ -231,11 +231,11 @@ export const CHANNEL_SRC = { web: "10000034", pc: "10200153", android: "10000023
 
 | 位置 | 现状 | 备注 |
 |---|---|---|
-| `mcloud-upstream::app_signin::TO_SOURCE_ID` | `"001005"`，作为**本功能默认值**；`query_spec_token_body(to_source_id)` 已经是形参 | 注释已改为"调用方参数"，并写明 PC 那个 `001003` 不能拿来换 |
-| `mcloud-upstream::app_signin::SOURCE_ID` | `"1002"`（URL 的 `sourceid` / `tyrzLogin` 体的 `sourceId`） | **与 `TO_SOURCE_ID` 不是同一个码** |
-| `mcloud-upstream::app_client::ios::CHANNEL` | `"10000020"`，在 `AppProfile::headers()` 里 | 属"每端常量"；接 AI / 分享类接口时**要能按调用覆盖** |
-| `mcloud-upstream::client::HUAWEI_CHANNEL_SRC` | `"10200153"`（PC） | 与旧项目 `CHANNEL_SRC.pc` 同值 —— 这是**唯一**一处旧项目与本仓库能对上的渠道码 |
-| `mcloud-upstream::app_client::ios::AUTH_PREFIX` | `"mobile"`，**故意无默认值** | 见 §6 第 4 条 |
+| `upstream.ToSourceID` | `"001005"`，作为**本功能默认值**；`query_spec_token_body(to_source_id)` 已经是形参 | 注释已改为"调用方参数"，并写明 PC 那个 `001003` 不能拿来换 |
+| `upstream.SourceID` | `"1002"`（URL 的 `sourceid` / `tyrzLogin` 体的 `sourceId`） | **与 `TO_SOURCE_ID` 不是同一个码** |
+| `upstream.IOSChannel` | `"10000020"`，在 `AppProfile.Headers()` 里 | 属"每端常量"；接 AI / 分享类接口时**要能按调用覆盖** |
+| `client.go` 的私有常量 `huaweiChannelSrc` | `"10200153"`（PC） | 与旧项目 `CHANNEL_SRC.pc` 同值 —— 这是**唯一**一处旧项目与本仓库能对上的渠道码 |
+| `upstream.IOSAuthPrefix` | `"mobile"`，**故意无默认值** | 见 §6 第 4 条 |
 
 **下一批接口（任务列表 / 领云朵 / 分享）落地时的动作**：
 先把该接口在抓包里的码抄进构造函数当形参，**不要**先加到 `AppProfile::headers()` 里。
@@ -262,4 +262,4 @@ export const CHANNEL_SRC = { web: "10000034", pc: "10200153", android: "10000023
 - `docs/client-profiles.md` —— 各端差异与设备指纹（**每端常量**那一层的完整清单）；
 - `docs/capture/app-signin-samples.txt` §2.1 —— App 原生三个 `toSourceId` 的原始样本与纠错记录；
 - `docs/capture/apiServer.js` —— §2 引用的 PC 客户端源码（vendor 素材，按来源豁免脱敏）；
-- `docs/upstream-app-business-api.md` —— B 族的 `signature` / `encodeData`（**与本文的码无关**，别混）。
+- `docs/upstream/app-business-api.md` —— B 族的 `signature` / `encodeData`（**与本文的码无关**，别混）。

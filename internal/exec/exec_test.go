@@ -23,7 +23,7 @@ import (
 // 这里用 splitmix64：8 字节一组混匀，每个 runId 的 16 字节都被打散。
 //
 // ⚠ 别就近复用别的包那份 RNG：Rust 侧**每个模块各自定义** `SeededRng`，
-// 算法并不相同（见 go-migration-plan.md §6.1 #19）。
+// 算法并不相同（见 migration-pitfalls.md #19）。
 type seededRng struct{ s uint64 }
 
 func newSeededRng() *seededRng { return &seededRng{s: 11} }

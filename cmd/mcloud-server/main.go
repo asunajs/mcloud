@@ -14,7 +14,7 @@
 // （库打不开、端口被占）；2 = 用法错误。
 //
 // ⚠ 与 cmd/mcloud 一样，刻意不引入第三方依赖 —— 接线时也要守住这条
-// （`internal/server` 只用标准库 `net/http`，见 docs/go-migration-plan.md §6.7）。
+// （`internal/server` 只用标准库 `net/http`，见 docs/archive/go-migration-crate-notes.md §6.7）。
 package main
 
 import (

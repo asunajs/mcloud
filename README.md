@@ -1,9 +1,10 @@
 # mcloud
 
-移动云盘自动化工具。**Rust 重写版** —— 由原 Node/TypeScript 项目
-[`mcloud-sign`](https://github.com/catlair/mcloud-sign) 重写而来。
+移动云盘自动化工具。**Go 实现** —— 前身是 Rust 重写版（已冻结为同级仓库
+`../mcloud-rust/`），再往前是原 Node/TypeScript 项目
+[`mcloud-sign`](https://github.com/catlair/mcloud-sign)。
 
-> ## ⚠ 当前状态：正在从 Rust 迁往 Go（2026-09-20 起）
+> ## ⚠ 当前状态：Go 已接棒（2026-09-20 起迁，2026-09-21 对位完成）
 >
 > 动因是**编译体验**：改一行 `mcloud-core`，`cargo check --workspace` 实测 **118 秒**
 > （macOS arm64）。代码只会更多，**再往后就来不及切了**，所以现在切。
@@ -48,7 +49,9 @@
 + IO 实现（io，全项目唯一）+ 组装与产物（app / server / cli）。
 外部世界一律走 4 个注入 trait：`HttpClient`、`Clock`、`StateStore`、`Random`。
 
-> 依赖方向不是文档约定，是**可执行断言**（`scripts/check-deps.sh` 真读 `Cargo.toml` 断言）。
+> 依赖方向不是文档约定，是**可执行断言**：Go 侧由 `scripts/check-go-deps.sh` 真读 import
+> 断言（它现在是九条门禁里的第 5 条）；Rust 侧那条 `scripts/check-deps.sh` 读的是
+> `Cargo.toml`，脚本随基准一起搬到了 `../mcloud-rust/`。
 > 完整分层图、约束表与"为什么必须这样"见 [`docs/dev-gates.md`](./docs/dev-gates.md)。
 > ⚠ 迁到 Go 之后这条约束**降级成 lint 约定**（Go 的接口是结构性实现，
 > "纯层不许有 IO"不再是编译期事实）—— 所以 Go 侧的 `check-go-deps.sh` 比 Rust 侧那条更必需。
@@ -82,8 +85,10 @@ bash scripts/gates-go.sh filenames idents      # 也可以只跑其中几条（�
 
 首次用先 `mcloud user init`（建首个管理员）→ `mcloud login qr`（终端出码，手机扫）。
 
-> ⚠ 服务端目前只有"会话"这一层（`/api/health` `/api/setup` `/api/session`）——
-> WebUI 登录与初始化是真接口，**主界面仍是占位数据**。详见 [`docs/status.md`](./docs/status.md)。
+> ⚠ 服务端已经挂上四组业务路由（accounts / capabilities / runs（含 SSE 事件流）/ schedules）
+> 加会话与初始化，另有冻结基准之外自扩的 `GET /api/status`。
+> 但 **WebUI 主界面仍是占位数据** —— 原因**不是缺接口**，是"跑任务"那条路本身还没建
+> （P4/P5 的功能开发）。细节与判据见 [`docs/status.md`](./docs/status.md)。
 
 ## 要做什么 → 读哪一部分
 
@@ -98,8 +103,11 @@ bash scripts/gates-go.sh filenames idents      # 也可以只跑其中几条（�
 | 实现某个业务能力（签到、领取、抢兑…） | [`docs/business-feature-inventory.md`](./docs/business-feature-inventory.md) |
 | 接**新的端**（安卓 / 邮箱 / 小程序） | [`docs/client-profiles.md`](./docs/client-profiles.md) |
 | 写任何带"**码**"的请求 | [`docs/device-and-source-codes.md`](./docs/device-and-source-codes.md) |
-| 做**登录**（PC 客户端 / PC Web / App） | [`docs/upstream-login-protocol.md`](./docs/upstream-login-protocol.md) 一族，按端选 |
-| 写**前端页面 / 组件** | [`docs/webui-design-guide.md`](./docs/webui-design-guide.md)（视觉与交互唯一依据） |
+| 做**登录**（PC 客户端 / PC Web / App） | [`docs/upstream/login-protocol.md`](./docs/upstream/login-protocol.md) 一族，按端选 |
+| 写**前端页面 / 组件** | [`docs/webui-design-guide.md`](./docs/webui-design-guide.md)（视觉与交互）→ [`docs/webui-components.md`](./docs/webui-components.md)（组件与移动端）→ [`docs/webui-code-guide.md`](./docs/webui-code-guide.md)（代码组织与验收） |
+| 改 `mcloud signin` 的**编排逻辑**（不只是查参数） | [`docs/signin-cli-spec.md`](./docs/signin-cli-spec.md) |
+| 动手前想知道**这里曾经踩过什么坑** | [`docs/migration-pitfalls.md`](./docs/migration-pitfalls.md)（编号登记表，新条目接在最后） |
+| 想知道某件事**当初为什么这么判** / 看历史流水 | [`docs/archive/`](./docs/archive/) —— 归档不删，但**别当现状读** |
 | 不知道读哪篇 | **[`docs/README.md`](./docs/README.md)** —— 全库索引 + 「权威关系」表 |
 
 > 文档之间冲突时以谁为准，在 [`docs/README.md`](./docs/README.md) 的「权威关系」表里

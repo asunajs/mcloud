@@ -22,7 +22,7 @@ hook 就跟代码一起被 review、被同步，也不需要谁记得"上一台�
 
 > ⚠ **2026-09-20 起跑的是 Go 侧门禁**（Rust 侧已冻结，不再自动跑；2026-09-21 那套
 > Rust 实现与其执行器 `run-gates.sh` 已整体剥离为同级仓库
-> [`../mcloud-rust/`](../../mcloud-rust/)，归档在那边的 `.githooks/`）。
+> [`../mcloud-rust/`](../../mcloud-rust)，归档在那边的 `.githooks/`）。
 > 分工没变，只是命令从 `cargo` 那套换成了 `go` 那套 —— 两个 hook 都只是
 > `exec bash scripts/gates-go.sh <几条>`，逻辑不重复。
 

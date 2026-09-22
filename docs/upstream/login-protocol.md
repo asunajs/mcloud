@@ -7,11 +7,11 @@
 > - 采集时间：2026-09-17
 > - 采集环境：Windows 11 (10.0.26100.1591)，客户端版本 `8.8.6.20260829`
 > - **登录协议一族**（按端分文件，本篇是 **PC 客户端扫码**那一支）：
->   [`upstream-logout-sms-login.md`](./upstream-logout-sms-login.md)（PC 客户端退出+短信）、
->   [`upstream-web-qr-login.md`](./upstream-web-qr-login.md)（PC Web 扫码）、
->   [`upstream-app-sms-login.md`](./upstream-app-sms-login.md)（iOS App 短信）、
->   [`upstream-app-business-api.md`](./upstream-app-business-api.md)（iOS App 业务接口）。
->   全库索引见 [`docs/README.md`](./README.md)。
+>   [`logout-sms-login.md`](./logout-sms-login.md)（PC 客户端退出+短信）、
+>   [`web-qr-login.md`](./web-qr-login.md)（PC Web 扫码）、
+>   [`app-sms-login.md`](./app-sms-login.md)（iOS App 短信）、
+>   [`app-business-api.md`](./app-business-api.md)（iOS App 业务接口）。
+>   全库索引见 [`docs/README.md`](../README.md)。
 >
 > 依据 `../mcloud-rust/docs/rust-rewrite-plan.md` §7.0 硬约束：**本文件内容全部来自实测，未落笔任何猜测性接口**。
 
@@ -109,9 +109,9 @@ let cpid       = isMacPc ? '332' : '277';   // Windows=277, macOS=332
 > `x-yun-client-info`、`x-DeviceInfo`（同一个值、两个头）、`x-MM-Source: "000"`、
 > `x-huawei-channelSrc: "10200153"`、`x-UserAgent: "PC"`。
 > 其中 `x-yun-client-info` / `x-DeviceInfo` 的值就是设备信息串（见 §7 与
-> [`docs/client-profiles.md`](./client-profiles.md) §5.2）。
+> [`docs/client-profiles.md`](../client-profiles.md) §5.2）。
 >
-> 实现落点：`mcloud-upstream::client::ClientProfile`，并由单测逐个断言这五个头存在 ——
+> 实现落点：`upstream.ClientProfile`（`internal/upstream/client.go`），并由单测逐个断言这五个头存在 ——
 > 少了任何一个都会退化成 `9999`，而那种失败看起来像"登录被拒"，极难定位。
 
 ### 轮询节奏
@@ -157,7 +157,7 @@ if (result.data) {
 > **补全（2026-09-17 晚，补到 `common/utils.js` 实现后）**：解密参数为
 > **AES-128-ECB / PKCS7**，密钥 `qPqDw263XgFgL3u8`（非生产环境为 `2ErfJus1Ofr@2o24`），
 > 且 `decryptByAes` 的**输入是 hex 而不是 base64**（同文件里的 `encryptByAes` 才输出 base64，
-> 两者不是一对逆运算）。已落地于 `mcloud-upstream::login::LoginDataDecryptor`，
+> 两者不是一对逆运算）。已落地于 `upstream.LoginDataDecryptor`（`internal/upstream/login.go`），
 > 向量见 `test/golden/pcclient-crypto-vectors.json`。
 >
 > **端到端确认（2026-09-18）**：扫码登录已真机跑通（CLI 出码 → 手机扫码确认 →
@@ -259,7 +259,7 @@ windowMachine    = 62AA2BDA29F99744536E142A83CA5B03-ENDIN
 windowDeviceInfo = ||11|8.8.6.20260829|PC|TGktMjAyNjA4MjgxNjI5|...| Windows 11 (10.0.26100.1591)|1920X1020|Q2hpbmVzZSAoU2ltcGxpZmllZCk=
 ```
 
-`windowDeviceInfo` 为 `|` 分隔（14 段，字段表见 [`docs/client-profiles.md`](./client-profiles.md) §5.2），
+`windowDeviceInfo` 为 `|` 分隔（14 段，字段表见 [`docs/client-profiles.md`](../client-profiles.md) §5.2），
 `TGktMjAyNjA4MjgxNjI5` 解码得 `Li-202608281629`（设备型号码）。
 代码内的兜底模板（原生接口失败时使用）：
 ```js

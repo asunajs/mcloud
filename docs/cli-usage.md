@@ -38,7 +38,7 @@ go run ./cmd/mcloud -- --account 2           # 只跑下标 2 那个
 | --- | --- |
 | `user init` / `user list` | 建首个管理员（网页端要用，也是历史账号的认领触发点）/ 看看有哪些人 |
 | `login qr` | 扫码登录移动云盘账号：终端出码，手机扫（`--qr-out` 可另存一张图片） |
-| `login sms` | 短信验证码登录：发码 → 输验证码。被风控要求滑块时**自动过**（缺口位置由服务端加密下发，见 `upstream-logout-sms-login.md` §2.2.1）。⚠ `--client app` 那个"自动过"是**借 PC 端那套**取题与编码、换 App 的头发出去（围魏救赵）；App 自身的滑块**未实现自动化**，真机走的仍是开 WebView 由 H5 发码那条（见 `capture/app-sms-login-samples.txt` §2.2 的澄清） |
+| `login sms` | 短信验证码登录：发码 → 输验证码。被风控要求滑块时**自动过**（缺口位置由服务端加密下发，见 `logout-sms-login.md` §2.2.1）。⚠ `--client app` 那个"自动过"是**借 PC 端那套**取题与编码、换 App 的头发出去（围魏救赵）；App 自身的滑块**未实现自动化**，真机走的仍是开 WebView 由 H5 发码那条（见 `capture/app-sms-login-samples.txt` §2.2 的澄清） |
 | `migrate` | 把旧项目 mcloud-sign 的数据迁移到 SQLite（`--dry-run` 预演） |
 | `signin` | 签到（云朵中心）。**不带任何参数就是对全部启用账号各签一次**；`--account <下标>` 只跑一个（`--list` 查下标），`--phone <完整手机号>` 给老账号补一次。另有 `--status-only` / `--force` / `--json`。**纯协议**，不开浏览器、不开 WebView；成败只看回查 `infoV3`（见 [`status.md`](./status.md)） |
 | `smid show` / `reset` / `refresh` | 看每个账号绑定的**设备特征**（cMPassport 风控那套，旧项目拿它的结果当请求头 `deviceid` 发）、`reset` 换一个（旧的 `deviceId` 当场作废，`--report` 顺手再上报）、`refresh` 不换特征只再上报一次。输出**只有摘要**：UA 与 `canvas` 识别位不落终端。⚠ 本项目目前**还没有任何请求发这个头**，取值的那一半已就位（见 [`client-profiles.md`](./client-profiles.md) §5.4 ③） |
@@ -48,7 +48,7 @@ go run ./cmd/mcloud -- --account 2           # 只跑下标 2 那个
 
 ---
 
-## 签到（`signin`）—— 六个要记住的
+## 签到（`signin`）—— 七个要记住的
 
 链路：**换 SSO token → 取服务端时间戳 → 签名建会话 → 查 `infoV3` → `startSignIn` → 回查 `infoV3`**。
 全程纯协议、无浏览器、无 WebView（协议与坑见 `capture/app-signin-samples.txt`）。
@@ -81,8 +81,18 @@ go run ./cmd/mcloud -- --account 2           # 只跑下标 2 那个
 
 ### 4. 每次查询都会顺手记一次余额
 
-`mcloud-app::cloud::record_cloud`：`infoV3.beforeTotal` → `accounts.cloud_current` +
-`cloud_stats` 日快照（日增 / 周增在 `mcloud-core::pure::next_cloud_stats` 里算，是纯函数）。
+`app.RecordCloud`：余额 → `accounts.cloud_current` + `cloud_stats` 日快照
+（日增 / 周增在 `core.NextCloudStats` 里算，是纯函数）。
+
+> ⚠ **2026-09-22 按代码订正两处**：① 上面这两处函数名当时是 Rust 路径
+>   （`mcloud-app::cloud::record_cloud` / `mcloud-core::pure::next_cloud_stats`），
+>   Rust 已剥离为同级仓库，落点改成本仓库的 `app.RecordCloud` / `core.NextCloudStats`。
+>   ② 原文写的是 `infoV3.beforeTotal`，而 `runStatusOnly` 实落的是
+>   **`status.BeanTotal`（上游 `total`）** —— `run_signin.go:631` 那条注释就是为了
+>   挡住这个：`beforeTotal` 不随领取变动，记它等于让趋势图永远是一条直线
+>   （`run_signin.go:645`；`beforeTotal` 这个名字现在挂在 `--raw` 的
+>   `CloudTotal` 上，`signin_render.go:453-458`）。下面那段「`before` 指领取前」
+>   的语义仍然成立，成立的是**上游那个字段**，不是我们落库选的那个。
 
 注意那个 `before` 指的是**领取前**、不是"签到前"—— 签到只是打卡、云朵要另外领，
 所以它签到前后**不变**，不是"签到完余额就该 +3"。
@@ -115,9 +125,15 @@ go run ./cmd/mcloud -- --account 2           # 只跑下标 2 那个
 - `getDeviceId()` 返回 `'B' + localStorage['SMID']`，而 `SMID` 就是它往
   `slw.h5cmpassport.com:9090/deviceprofile/v4` 上报特征后拿回的 `detail.deviceId`；
 - 那套配置 —— organization / appId / RSA 公钥 / host —— 写在签到页 HTML 的
-  `window._smConf` 里，与 `mcloud-upstream::smid` 的常量**逐字相同**。
+  `window._smConf` 里，与 `internal/upstream/smid.go` 的常量**逐字相同**。
 
-守卫：`smid::tests::the_signin_page_fingerprint_sdk_is_this_same_client`。
+守卫：`smid::tests::the_signin_page_fingerprint_sdk_is_this_same_client` —— 那是 **Rust 基准**里的测试名，
+基准现已移到同级仓库 [`../mcloud-rust`](../../mcloud-rust)。
+⚠ **Go 侧目前没有把这条守卫钉过来**：`test/golden/app-signin-vectors.json` 与 `crypto-vectors.json`
+里存着从签到页抄下来的 `SM_ORGANIZATION` / `SM_API_HOST`，Go 侧也有同值的
+`upstream.SmOrganization` / `upstream.SmAPIHost`（`internal/upstream/smid.go`），
+但**没有任何一条断言把两边对上**（全仓搜不到读这两个黄金键的代码 —— `smid_test.go` 是拿常量拼期望值，
+不是拿黄金值校验常量）。补一条"常量 ≡ 黄金向量"的用例即可等价还原。
 
 ⇒ 所以 `--receive` **一个额外参数都不用给**：不传 `--device-id` 时自动从库里
 这个账号的 `smid_device_id` 取，库里没有就**现上报一次换一个**：

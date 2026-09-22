@@ -5,11 +5,11 @@
 > - 采集时间：2026-09-17 22:05-22:07
 > - 采集环境：Windows 11，客户端 `8.8.6.20260829`
 > - **登录协议一族**（按端分文件，本篇是 **PC 客户端退出+短信**那一支）：
->   [`upstream-login-protocol.md`](./upstream-login-protocol.md)（PC 客户端扫码）、
->   [`upstream-web-qr-login.md`](./upstream-web-qr-login.md)（PC Web 扫码）、
->   [`upstream-app-sms-login.md`](./upstream-app-sms-login.md)（iOS App 短信）、
->   [`upstream-app-business-api.md`](./upstream-app-business-api.md)（iOS App 业务接口）。
->   全库索引见 [`docs/README.md`](./README.md)。
+>   [`login-protocol.md`](./login-protocol.md)（PC 客户端扫码）、
+>   [`web-qr-login.md`](./web-qr-login.md)（PC Web 扫码）、
+>   [`app-sms-login.md`](./app-sms-login.md)（iOS App 短信）、
+>   [`app-business-api.md`](./app-business-api.md)（iOS App 业务接口）。
+>   全库索引见 [`docs/README.md`](../README.md)。
 > - 依据 `../mcloud-rust/docs/rust-rewrite-plan.md` §7.0：本文件全部来自实测，无猜测性内容
 
 ---
@@ -160,8 +160,8 @@ AES-128-CBC 解密 → 明文 "370"，而同响应里 picWidth = 680 ⇒ 落在�
 > （`user-njs.yun.139.com`），取图接口同样裸请求即可，`puzzleLeft` 同样用
 > `CREATPUZZLE03F9A` 直接解出坐标，提交同样用固定 IV `E526E1F3F9765444`。
 > 也就是说**这不是某一端的实现技巧，而是协议面的能力**：谁算得出答案，服务端就认。
-> 详见 [`upstream-app-sms-login.md`](./upstream-app-sms-login.md) §7.2 与
-> [`capture/app-sms-login-samples.txt`](./capture/app-sms-login-samples.txt) §2.1。
+> 详见 [`app-sms-login.md`](./app-sms-login.md) §7.2 与
+> [`capture/app-sms-login-samples.txt`](../capture/app-sms-login-samples.txt) §2.1。
 
 实现落点：`SliderPuzzle::answer()`（自检 + 解密）、`mcloud_app::login::sms_send_code`
 （降级循环：取图 → 解坐标 → 重发 → 挑战作废则重新取图，上限 3 次）。
@@ -303,7 +303,7 @@ POST https://user-njs.yun.139.com/user/thirdlogin
 1. **退出登录**：本地清态优先，`logout` 调用 fire-and-forget，失败不阻断。
 2. **发码**：`random` 用两个随机 hex 片段拼接（24 位），不要用标准 UUID。
 3. **滑块**：`puzzleVerfycode` = `base64(IV ‖ AES-128-CBC/PKCS7(key='CREATPUZZLE03F9A', iv='E526E1F3F9765444', 像素偏移))`，
-   注意字段名拼写 `verfy`。已在 `mcloud-upstream::login::puzzle_verfycode_encrypt` 落地，
+   注意字段名拼写 `verfy`。已在 `upstream.NewSendSmsCodeBodyWithSlider`（内部调 `core.AESDynamicIVEncrypt(PuzzleAESKey, …, puzzleAESIV)`）落地，
    并用两条真实抓包密文做了逐字节重放断言。
 4. **滑块重试**：捕获 `200059553` 后必须**重新调 `/user/verfycode` 换新挑战**，不能复用旧挑战。
 5. **配额**：跟踪 `remainGetTimes`，避免无谓消耗。

@@ -15,7 +15,7 @@
 // # 为什么没有 `Android`
 //
 // `clientType` / `cpid` / 设备串语法在 Android 上是另一组值，**没有实测**。
-// 按项目铁律（docs/rust-rewrite-plan.md §7.0：抓包前不写猜测性接口代码），
+// 按项目铁律（../mcloud-rust/docs/rust-rewrite-plan.md §7.0：抓包前不写猜测性接口代码），
 // 这里不预先造一个 `Android` 变体 ——
 // 那只会让"传错端"变成一个可以静默通过的选项。
 //

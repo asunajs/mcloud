@@ -4,14 +4,14 @@
 > + macOS 客户端 `app.asar` 源码（`out/renderer/api/api.js`）
 > + App 自有网络日志（`har/applog-2026-09-19-0842/`，gitignore）
 > + 活体探针（§7、§8）。
-> 依据 `docs/rust-rewrite-plan.md` §7.0：本文只记实测；推断显式标注。
+> 依据 `../mcloud-rust/docs/rust-rewrite-plan.md` §7.0：本文只记实测；推断显式标注。
 >
 > **登录协议一族**（按端分文件，本篇是 **iOS App 已登录业务接口**那一支）：
-> [`upstream-app-sms-login.md`](./upstream-app-sms-login.md)（iOS App 短信登录，本篇的前置）、
-> [`upstream-login-protocol.md`](./upstream-login-protocol.md)（PC 客户端扫码）、
-> [`upstream-logout-sms-login.md`](./upstream-logout-sms-login.md)（PC 客户端退出+短信）、
-> [`upstream-web-qr-login.md`](./upstream-web-qr-login.md)（PC Web 扫码）。
-> 全库索引见 [`docs/README.md`](./README.md)。
+> [`app-sms-login.md`](./app-sms-login.md)（iOS App 短信登录，本篇的前置）、
+> [`login-protocol.md`](./login-protocol.md)（PC 客户端扫码）、
+> [`logout-sms-login.md`](./logout-sms-login.md)（PC 客户端退出+短信）、
+> [`web-qr-login.md`](./web-qr-login.md)（PC Web 扫码）。
+> 全库索引见 [`docs/README.md`](../README.md)。
 
 这两把锁属于 `docs/capture/app-api-families.txt` 里的**形态 B**
 （`signature` 族：带 `signature`、不带 `x-yun-uni`）。
@@ -228,7 +228,7 @@ node scripts/check-golden-vectors.cjs
 
 > 这个脚本是**抓包侧**的产物：向量文件此前没有任何消费者（Rust 侧只 `include_str!` 了
 > `auth- / crypto- / pcclient-` 三个），属于"写下来就没人再看"的死文件。
-> 它同时补上第 5 道门禁扫不到的洞 —— 见 `docs/rust-rewrite-plan.md` §6.4。
+> 它同时补上第 5 道门禁扫不到的洞 —— 见 `../mcloud-rust/docs/rust-rewrite-plan.md` §6.4。
 
 ---
 

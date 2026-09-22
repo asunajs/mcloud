@@ -100,7 +100,7 @@
 3. **`Description` 里内嵌 env 提示**（`task_catalog.go:262` 写着 `CAIYUN_MAKEWISH_PRIZE`）——
    等于把参数文档写进任务名的旁边，接口仍不自描述。
 
-⇒ 新落点不变：`mcloud-core::FieldSpec` → `mcloud-capabilities::REGISTRY`，
+⇒ 新落点不变：`core.FieldSpec` → `capabilities.All()`（`internal/capabilities/registry.go`），
 WebUI 表单 / API 校验 / 组合步骤参数 / CLI `--help` 同源生成（方案 §3.3、D3）。
 本文 §5 是这套设计**必要性的证据**，不是要照抄的对象。
 
@@ -632,7 +632,7 @@ Vue3 + Element Plus + Pinia，12 个 view。**没有 schema 驱动表单**（因
 | 3 | **门户预热是否必需** | Go 每次签到前重跑 28 个请求（含 6 条 `visitlog/journaling` 埋点 + JSESSIONID）；旧 TS 无埋点 | 做**最小请求集**对照实验：只发 `infoV3 → startSignIn` 能否成功。若不能，再逐步加埋点，找出真正被服务端校验的那一条 |
 | 4 | **下单是 GET** | Go 与旧 TS 一致：`GET exchangeV2` | 实测确认上游是否仍接受 GET；若提供 POST 变体则改用 POST + 幂等键（§3.4 的重复下单面会显著缩小） |
 | 5 | **`exchangeList` 与 `exchangeV2` 不同前缀** | 前者 `caiyun…/market/signin/page/exchangeList`，后者 `m.mcloud…/ycloud/signin/page/exchangeV2` | 两条分别实测，不要假设同一个 base |
-| 6 | **数美 deviceId 是否进原生头** | Go 发 `deviceId` 头 + `.thumbcache_*` cookie（活动/H5 域） | **沿用上文已核对的结论**：我们那批 App 抓包里原生请求头 `deviceid` 一次都没出现，带 `deviceId` 的 178 条夹具**全是 H5 / WebView**。所以这条**不是"补上 deviceid"**，而是等一条**原生**抓包再逐端点判断（详见 `docs/rust-rewrite-plan.md` §7 的 smid 段与 `docs/client-profiles.md` §5.4 ③） |
+| 6 | **数美 deviceId 是否进原生头** | Go 发 `deviceId` 头 + `.thumbcache_*` cookie（活动/H5 域） | **沿用上文已核对的结论**：我们那批 App 抓包里原生请求头 `deviceid` 一次都没出现，带 `deviceId` 的 178 条夹具**全是 H5 / WebView**。所以这条**不是"补上 deviceid"**，而是等一条**原生**抓包再逐端点判断（详见 `../mcloud-rust/docs/rust-rewrite-plan.md` §7 的 smid 段与 `docs/client-profiles.md` §5.4 ③） |
 | 7 | **红包派对域无 `code`** | Go 与旧 TS 都用 `header.status` | 该域必须显式 `UnknownEnvelope` 之外的第四类判据，实测确认字段仍叫 `status` |
 | 8 | **复活卡月度上限** | 旧 TS 本地 `revival.json` 记 2 次；Go 侧无本地额度、全靠服务端文案 | 实测服务端拒绝文案（Go 的双条件 `Contains("复活卡") && Contains("已领取")` 说明文案会变），决定我们是否保留本地额度 |
 | 9 | **`tasklist` 接口族** | Go 用 `doTaskPost` / `GET /signin/task/click?key&id` / `POST /signin/task/receiveTask` / `POST /signin/task/receiveV2` 四件混用 | 逐条实测哪个是现役；`click` 是 GET 且**幂等**，可以按 §1.3 开读重试 |

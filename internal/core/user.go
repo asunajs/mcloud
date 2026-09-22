@@ -65,7 +65,7 @@ func NewUserID(id string) UserID { return UserID(id) }
 // String 返回底层字符串（实现 fmt.Stringer，便于日志与拼接）。
 func (u UserID) String() string { return string(u) }
 
-// Role 是角色。**只有两级**，不做细粒度授权矩阵（见 docs/rust-rewrite-plan.md §9 的非目标）。
+// Role 是角色。**只有两级**，不做细粒度授权矩阵（见 ../mcloud-rust/docs/rust-rewrite-plan.md §9 的非目标）。
 type Role int
 
 const (

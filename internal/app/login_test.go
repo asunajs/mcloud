@@ -542,7 +542,7 @@ func TestSmsSendCodeGivesUpAfterTheAttemptLimit(t *testing.T) {
 // 的结论。
 //
 // `5010047` 是 2026-09-18 用非法号码真实调用发码接口观察到的
-// （见 docs/upstream-logout-sms-login.md §4）。
+// （见 docs/upstream/logout-sms-login.md §4）。
 func TestSmsSendCodeSurfacesUpstreamFailureVerbatim(t *testing.T) {
 	client := &loginHTTP{responses: []any{
 		map[string]any{

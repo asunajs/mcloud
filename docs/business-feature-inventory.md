@@ -1,8 +1,13 @@
-# 待实现业务功能盘点（旧项目 → Rust 新项目）
+# 待实现业务功能盘点（旧项目 → 本项目）
+
+> **标题口径（2026-09-22）**：这一份最初写的是"旧项目 → **Rust** 新项目"，正文里"新项目落点""§0 表头"
+> 沿用当时的说法。**Rust 那一版已经冻结并剥离为同级仓库 [`../mcloud-rust`](../../mcloud-rust)**，
+> 当前在写的是 Go（本仓库 `internal/`）。所以看本文时把"落点"读成 Go 落点，
+> 遇到 `mcloud-<crate>::…` 这种写法就是 Rust 基准里的旧名字（除历史引用外已逐条改成 Go 的 `pkg.Symbol`）。
 
 > **这份文档是什么**：把旧项目 `/Users/catlair/Documents/workspace/mcloud-sign` 里**真实存在的业务功能**逐条拆到"能照着写代码"的粒度 —— 每条给：做什么、上游请求序列、判据分支、副作用等级、幂等与并发、依赖与共享状态、新项目落点。
 >
-> **和 `docs/rust-rewrite-plan.md` 的分工**：方案的 §1.2 只给了 19 项的名字与风险序、§7.1 给了实现顺序、§1.3–1.5 给了加密原语与已知缺陷。**本文补的是中间那层：每项能力内部的流程与判据**。两文冲突时以 §7.1 的顺序为准，以本文为单项实现规格。
+> **和 `../mcloud-rust/docs/rust-rewrite-plan.md` 的分工**（该方案随 Rust 剥离住在那边）：它的 §1.2 只给了 19 项的名字与风险序、§7.1 给了实现顺序、§1.3–1.5 给了加密原语与已知缺陷。**本文补的是中间那层：每项能力内部的流程与判据**。两文冲突时以 §7.1 的顺序为准，以本文为单项实现规格。
 >
 > **证据口径**：`path:line` 指向旧项目文件，均为本次通读时逐条打开核对过的。**未经真实流量验证的上游路径，本文一律标注旧代码写法**，并在 §5 汇成"动代码前必须实测"清单 —— 新项目的基本原则仍是"按新抓包重写，不从旧 TS 搬"（方案 §6.3）。
 >
@@ -12,7 +17,7 @@
 
 ## 0. 一页总览
 
-| # | 能力 | 产出物 | 副作用 | 需人工 | Rust 侧现状 |
+| # | 能力 | 产出物 | 副作用 | 需人工 | Rust 侧现状（基准冻结时，2026-09-19） |
 | --- | --- | --- | --- | --- | --- |
 | 1 | `prizes` 待领取奖品 | 只读列表 | 无 | 否 | 无 |
 | 2 | `cloud-snapshot` 云朵快照 | 本地日快照 | 无（新能力，旧项目缺，见 D1/D2） | 否 | **仅注册表声明**（`capabilities::REGISTRY`） |
@@ -37,12 +42,29 @@
 
 （`cloud-snapshot` 是新项目按 D1/D2 增设的，不在旧项目 19 项里；旧项目 19 项 = 表中 1、3–20。）
 
-**当前 Rust 侧可跑的东西**（2026-09-19 订正）：登录（PC 短信/扫码、App 短信）、账号会话与归属、
-设备指纹 smid、**App 端签到（云朵中心）全链路**、旧数据迁移、`mcloud-app::cloud` / `signin` 的上游封装。
+> **Go 侧现状（2026-09-22 逐条 grep 核对，读的是本仓库代码）** —— 上表那一列是 Rust 基准冻结时的记录，别拿它当现状：
+>
+> - **已有实现且 CLI 可达**：#1 待领取奖品（`app.PendingPrizes` + `mcloud signin --prizes`）、
+>   #2 云朵快照（`app.RecordCloud` / `core.NextCloudStats`）、#3 签到（`app.CloudSignIn`）、
+>   #4 领取（`app.ReceiveCloud` / `ReceiveAll`，`--receive`）、#5 复活卡（`app.ReceiveRevivalReward`，`--revive`）、
+>   #8 任务拓展（`app.ReceiveTaskExpansion` 一族）、#13 备份礼（`app.ClaimBackupGift`，`--backup-gift`）；
+>   另有**连签倍数**（`app.ClaimMultiple`，`--multiple`），它不在旧项目那 19 项的编号里。
+> - **只有声明**：#20 `exchange` 抢兑 —— 注册表里有 `Code: "exchange"`、存储里有 `exchange_config` 表，
+>   上游"抢兑"那条接口在本仓库搜不到。
+> - **仍无**：#6 凭证刷新（`core`/`upstream` 里只有 `RefreshToken` 这类**登录链**的痕迹，不是独立的续期能力）、
+>   #7 `after` 收尾、#9 App 任务矩阵、#10 AI 头像、#11 消息推送、#12 公告、#14 云朵大作战、
+>   #15 小红花、#16/17 拍拍与 AI 抽奖、#18 红包派对、#19 直播口令 —— 这些在 `internal/` `cmd/` 里按关键词全查不到。
+>
+> 所以下面那段"19 项业务能力：0 项可执行"已经**不再成立**（它写于 2026-09-19 的 Rust 侧）。
+> 仍然成立的是它后半句：剩下那些项缺的不是单个接口，是它们共用的那一层（§3）。
+
+**当时 Rust 侧可跑的东西**（2026-09-19 订正；这几条线如今都在 Go 侧，同值结论见上面那条 09-22 核对）：
+登录（PC 短信/扫码、App 短信）、账号会话与归属、
+设备指纹 smid、**App 端签到（云朵中心）全链路**、旧数据迁移、`internal/app/cloud.go` / `signin.go` 的上游封装。
 **schema 现为 v7**（v4 归属 → v5 smid 两列 → v6 `account_state.phone` → v7 `Authorization` 整串存）。
 **19 项业务能力：0 项可执行** —— 缺的不是接口，是它们下面那一层（§3）。
 
-> 上面这段的上一版写的是"schema v4 / v5、`mcloud-app::cloud` / `signin` 并行工作流**未提交**"。
+> 上面这段的上一版写的是"schema v4 / v5、`mcloud-app::cloud` / `signin` 并行工作流**未提交**"（那是 Rust 时期的写法与状态，照原文留着）。
 > 那描述的是两份盘点刚写完、实现还在飞的时候；现在那些提交已经落地
 > （云端 9 个 + 本地 1 个），语境消失，故订正。
 
@@ -68,7 +90,7 @@
 2. **无默认值合并**：只有 CLI 与 `runHc1t` 走 `defaultAccountConfig → common → user` 三级深合并（`packages/cli/src/index.ts:68-78`），API 路径直接把裸账号对象当 `ctx.config`（`packages/api/src/account.ts:133-140`）⇒ 经 API 触发时 `ctx.config.云朵大作战` 常整体 `undefined`，全靠代码里 `?? 默认值` 兜底，`开启兑换` 永远 falsy；
 3. **配置默认值三处打架**（schema / 代码常量 / 文档各写一份），见 §5.4。
 
-新落点：`mcloud-core::FieldSpec` → `mcloud-capabilities::REGISTRY`，参数、账号定位、执行模式**三者分离**，WebUI 表单 / API 校验 / 组合步骤参数 / CLI `--help` 同源生成（方案 §3.3、D3）。
+新落点：`core.FieldSpec` → `capabilities.All()`（`internal/capabilities/registry.go`），参数、账号定位、执行模式**三者分离**，WebUI 表单 / API 校验 / 组合步骤参数 / CLI `--help` 同源生成（方案 §3.3、D3）。
 
 ### 1.2 判据：旧项目同一代码库混用**三套**信封
 
@@ -117,7 +139,7 @@
 - **上游**：`GET https://m.mcloud.139.com/ycloud/prizeApi/checkPrize/getUserPrizeLogPageV2`（`packages/core/src/apis/task.ts:70`），入参 `(pageNumber=1, pageSize=10)`。
 - **判据**（`packages/core/src/tasks/prize-records.ts:8-30`）：`err || !data?.result?.result` ⇒ 打"无待领取奖品"；`filter(r => r.flag === 1)` ⇒ 待领取；过期时间按 `Asia/Shanghai` 格式化输出。
 - **已知不足（重写要修）**：① **只读第 1 页 10 条**，多于 10 条静默截断；② `flag` 的其他取值没有任何解释；③ 双层 `result.result` 信封是本域特有形状，`tryRequest` 未必兜得住。
-- **新落点**：`mcloud-upstream` 新增 prize 模块（抓包确认 `getUserPrizeLogPageV2` 是否还在）→ `mcloud-capabilities::prizes`，参数 `pageNumber/pageSize`，输出 `prizeName/prizeId/expireTime/flag`。
+- **新落点**：`internal/upstream` 新增 prize 模块（抓包确认 `getUserPrizeLogPageV2` 是否还在）→ 注册表里加一条能力（**这条两侧都还没有**：Go 的 `capabilities.All()` 目前只有 sign / exchange / cloud-snapshot 三条；奖品那边现有的 `app.PendingPrizes` 与 CLI `--prizes` 是签到页的待领取奖品，不是这个），参数 `pageNumber/pageSize`，输出 `prizeName/prizeId/expireTime/flag`。
 
 #### `cloud-snapshot` 云朵余额快照（新能力）
 
@@ -143,7 +165,7 @@
 - **判据**：`todaySignIn === true` 即"今日已签到"直接返回；复查后仍非 true ⇒ `网盘签到失败`（**只是日志**）。
 - **副作用**：记账（得云朵）。幂等由服务端"今日已签"保证，可重复调。
 - **实测差异**：我们抓到的 App/H5 真实流量是 `GET https://m.mcloud.139.com/ycloud/signin/page/startSignIn?client=app&deviceId=…`（`docs/capture/app-signin-samples.txt:336`）—— 前缀 `/ycloud/`、**带 `deviceId` 查询参数**。见 §5.1。
-- **新落点**：`mcloud-upstream::app_signin`（已有）+ PC/H5 版 `signin` 模块；`mcloud-capabilities::sign`；云朵数写入 `cloud_stats`（替代 D1 那行注释掉的代码）。
+- **新落点**：`internal/upstream/app_signin*.go`（已有）+ PC/H5 版 `signin` 模块；注册表里 `Code: "sign"` 那条（编排在 `app.CloudSignIn`）；云朵数写入 `cloud_stats`（替代 D1 那行注释掉的代码）。
 
 #### `receive` 领取云朵（`sign/task.ts:121-127`）
 
@@ -170,7 +192,7 @@
 
 **这个任务在旧项目里实际不生效。** 它调 `refreshAuthToken(ctx)`（`packages/core/src/tasks/auth-service.ts:61-75`），而该函数只是 `authTokenRefresh` + 正则取 `<token>` 后**把新 token 当返回值交出去**；任务层 `await refreshAuthToken(ctx); return { ok: true }` —— **返回值直接丢弃，既不落配置也不改 ctx**。真正的刷新发生在 `after`（下一条）。
 
-同名字段另有 `user-njs.yun.139.com/user/auth/refreshToken`（`apis/auth.ts:153`）与 `note.mcloud.139.com/noteServer/api/authTokenRefresh.do`（`:175`）两个不同体系的"刷新"接口 —— 全仓还有 `refreshAuth / checkAndRefreshAuth / refreshJwtToken` 三个**无人调用**的封装（死代码）。⇒ 新项目应把"续期"收敛成**一处**（`mcloud-app::session` 的生命周期，方案 §3.7），并按端区分主站 / 笔记 / 邮箱三套 token。
+同名字段另有 `user-njs.yun.139.com/user/auth/refreshToken`（`apis/auth.ts:153`）与 `note.mcloud.139.com/noteServer/api/authTokenRefresh.do`（`:175`）两个不同体系的"刷新"接口 —— 全仓还有 `refreshAuth / checkAndRefreshAuth / refreshJwtToken` 三个**无人调用**的封装（死代码）。⇒ 新项目应把"续期"收敛成**一处**（`internal/app/session.go` 的生命周期，方案 §3.7），并按端区分主站 / 笔记 / 邮箱三套 token。
 
 #### `after` 收尾（`packages/core/src/tasks/after.ts`）
 
@@ -335,10 +357,10 @@
 | 层 | 旧项目实际做法 | 新项目落点 / 缺口 |
 | --- | --- | --- |
 | 执行与并发 | `runner.ts`：`running` Map 的 **join 语义**（第二个请求复用第一个的 promise）、`force` 旁路、历史截断 200 条、`asyncRun` 仅内存上限 100（D4） | `mcloud-exec`：目前**只有** `Concurrency::effective_parallelism` 这一个纯函数。缺 runId、锁（要含参数维度）、`runs`/`run_events` 落库、SSE 事件流 |
-| 调度 | `scheduler.ts`：croner，`protect:true`（**跳过不排队**）、5 或 6 段 cron、时区默认 `Asia/Shanghai`、**无错过补偿**、部分失败也记 `error` | `mcloud-io::sched` + 表 `schedules`（v4 已有归属字段，schema 现为 v7）。"错过不补"要显式保留还是改，属待拍板项 |
+| 调度 | `scheduler.ts`：croner，`protect:true`（**跳过不排队**）、5 或 6 段 cron、时区默认 `Asia/Shanghai`、**无错过补偿**、部分失败也记 `error` | Go 侧拆两处：`core.ParseCron` / `core.NextFire`（`internal/core/cron.go`）+ `schedules` 表读写（`SqliteStore` 的 `UpsertSchedule` / `ListSchedules`，`internal/io/configstore.go`，v4 已有归属字段，schema 现为 v7）；**按时触发的循环还没有**（`NextFire` 唯一的非测试消费者是 `routes.go`，只用来显示下次执行时间）。"错过不补"要显式保留还是改，属待拍板项 |
 | 组合流水线 | `pipelines.ts`：步骤 ≤30、`stopOnError` 默认 true、**步骤间不传数据**（只共享 `state.json` 与进程全局）、stopped 后仍输出 `skipped` 占位、`ok = ≥1 步执行且全 ok`、账号默认串行防风控 | `mcloud-capabilities` + `mcloud-exec`。旧模型"步骤间不传数据"是 `app` 那种大杂烩的根因；新方案要允许显式的 run 内产物传递（`after` 删文件依赖它） |
-| 账号状态存储 | `storage.ts`：`DATA_DIR` **相对 cwd**、读失败静默回落 `{}`、写 tmp+rename、**无锁**；`account.ts`：`accountKey = phone‖nickname‖"account"`、label 掩码 `前2****后2`、`findAccount` 序号**从 1 起**、state 合并方向 `fresh 覆盖 saved`、`writeConfigFile` 带 `.bak` | `mcloud-io::store`（SQLite）已完成（schema 现为 v7）；`AccountState` 是**整行覆盖**写，`SmidState` 是**窄写**（两者契约相反，改动时别串台） |
-| 推送 10 渠道 | `shared/src/push/index.ts:104-281`：`pushplus`(明文 http) / `serverChan`(token 进 URL) / `workWeixin`(两步取 token，**token 失败仍继续拼 URL**) / `workWeixinBot` / `tgBot`(缺 token/chat_id 主动跳过；`proxy` 配置**从不生效**) / `bark` / `twoIm`(key/sid 平铺进 query) / `dingTalk`(可选 secret 加签；content 加**前导空格**绕关键词；动态 `import("crypto-js")` 失败会冒泡) / `email`(nodemailer，tjs 运行时直接跳过；缺 pass/from/host **静默 return**) / `customPost`(url/body 占位符**字符串替换后 JSON.parse**，可配数组)。所有渠道失败**一律吞成日志**；**只有 CLI 主流程结束才推送，API / 定时路径从不推送** | `mcloud-io::push`（方案 §1.6 定"渠道保留、发送层重做"）。必须补的三件事：**定时路径也要能推送**、失败可见（进 `run_events`）、**正文脱敏** —— 现正文是全量日志，存在手机号/邮箱明文外泄路径（`auth-service.ts:118`、`app/runners.ts:270`） |
+| 账号状态存储 | `storage.ts`：`DATA_DIR` **相对 cwd**、读失败静默回落 `{}`、写 tmp+rename、**无锁**；`account.ts`：`accountKey = phone‖nickname‖"account"`、label 掩码 `前2****后2`、`findAccount` 序号**从 1 起**、state 合并方向 `fresh 覆盖 saved`、`writeConfigFile` 带 `.bak` | `internal/io/store.go` 的 `SqliteStore`（SQLite）已完成（schema 现为 v7）；`AccountState` 是**整行覆盖**写，`SmidState` 是**窄写**（两者契约相反，改动时别串台） |
+| 推送 10 渠道 | `shared/src/push/index.ts:104-281`：`pushplus`(明文 http) / `serverChan`(token 进 URL) / `workWeixin`(两步取 token，**token 失败仍继续拼 URL**) / `workWeixinBot` / `tgBot`(缺 token/chat_id 主动跳过；`proxy` 配置**从不生效**) / `bark` / `twoIm`(key/sid 平铺进 query) / `dingTalk`(可选 secret 加签；content 加**前导空格**绕关键词；动态 `import("crypto-js")` 失败会冒泡) / `email`(nodemailer，tjs 运行时直接跳过；缺 pass/from/host **静默 return**) / `customPost`(url/body 占位符**字符串替换后 JSON.parse**，可配数组)。所有渠道失败**一律吞成日志**；**只有 CLI 主流程结束才推送，API / 定时路径从不推送** | **Go 侧没有**（Rust 基准同样没有；只有 `core.HmacSHA256Base64` 是给钉钉加签留的原语）（方案 §1.6 定"渠道保留、发送层重做"）。必须补的三件事：**定时路径也要能推送**、失败可见（进 `run_events`）、**正文脱敏** —— 现正文是全量日志，存在手机号/邮箱明文外泄路径（`auth-service.ts:118`、`app/runners.ts:270`） |
 | CLI | `packages/cli/src/index.ts`：**只有一个"跑全流程"入口**，任务顺序固定，无参数解析、无交互（D9）；账号配置三级合并在这里才做 | `mcloud-cli`：已有 `user / login / smid / capabilities / version / fixture extract`。缺：按能力跑单任务、组合、调度管理、推送测试 |
 | WebUI | 7 页；`WEBUI_PAGES` 白名单只有 6 项（`tasks/pipelines/schedules/accounts/history/config`）**漏了 exchange** ⇒ 停在兑换页时 `normalize` 把 `lastPage` 回落成 `tasks`，"记住上次页面"对该页失效（`api/src/webui-config.ts:16-24,55-62`）；`data/webui.json` 存偏好而非 localStorage；路由在 `index.ts` 平铺注册、**无鉴权、无限流、无全局错误中间件**（D7） | `mcloud-server`：目前只有 `/api/health`、`/api/setup`、`/api/session`（+ 404 兜底）。缺：capabilities / runs / schedules / pipelines / exchange / debug 全部业务路由与 OpenAPI |
 

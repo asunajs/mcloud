@@ -13,7 +13,7 @@ import (
 //
 // 隔离规则是逐方法写在 SQL 里的，这组测试是唯一把它们串起来的地方 ——
 // 漏掉任何一处（"忘了加 `owner` 条件"）都会在这里被抓住，
-// 而漏掉一处不会有任何编译期提示（这正是 `docs/rust-rewrite-plan.md` §3.7 的要点）。
+// 而漏掉一处不会有任何编译期提示（这正是 `../mcloud-rust/docs/rust-rewrite-plan.md` §3.7 的要点）。
 
 // newUser 建一个用户并落库。
 func newUser(t *testing.T, s *SqliteStore, id string) core.UserID {

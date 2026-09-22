@@ -12,7 +12,7 @@
 > （起因：`web/src/pages/` 下三个 `AuthPage.tsx` 违背了已写在文档里的
 > kebab-case 规则，而那条规则当时**只写在文档里、没有断言**）。
 >
-> 同时门禁的说明整体从 `README.md` 移到了 [`dev-gates.md`](./dev-gates.md)。
+> 同时门禁的说明整体从 `README.md` 移到了 [`dev-gates.md`](../dev-gates.md)。
 > §2.3 指出的那个真实缺陷（两处"六项"内容不同、`rust-rewrite-plan` 漏掉黄金向量）
 > **已在 9/20 一并修掉**：现在计数的**唯一来源**是 `dev-gates.md` 的七条表，
 > 其余文档只链接过去、不再各写一份。
@@ -138,12 +138,12 @@ cargo test / clippy / fmt --check / check-deps.sh / check-identifiers.cjs / chec
 
 | 文档 | 被引用次数 | 问题 |
 | --- | --- | --- |
-| `upstream-web-qr-login.md` | **0** | 563 行的联网登录协议文档，README 与其它文档都没链它 |
+| `web-qr-login.md` | **0** | 563 行的联网登录协议文档，README 与其它文档都没链它 |
 | `ltsc-store-yingyongbao-guide.md` | **0** | 与 mcloud 项目无关的 Windows 运维文档，混在 `docs/` 里（**已删除**，见 4.1 末） |
 
-`upstream-web-qr-login.md` 尤其可惜 —— 它和 `upstream-login-protocol.md`（PC 客户端）、
-`upstream-logout-sms-login.md` 是同一族的证据，但后两者互相链了，它没有。
-**建议**：在 `upstream-login-protocol.md` 与 `upstream-logout-sms-login.md` 顶部补"同族文档"互链，
+`web-qr-login.md` 尤其可惜 —— 它和 `login-protocol.md`（PC 客户端）、
+`logout-sms-login.md` 是同一族的证据，但后两者互相链了，它没有。
+**建议**：在 `login-protocol.md` 与 `logout-sms-login.md` 顶部补"同族文档"互链，
 并在 README 的文档索引段加一条。
 
 `ltsc-store-yingyongbao-guide.md` 属于"本机环境搭建"而非项目内容，
@@ -201,7 +201,7 @@ commit `1b2cf07` 才是权威锚点）" —— 现在该文档已经写了 commi
 
 | 写法 | 用在哪 |
 | --- | --- |
-| `> 状态：**已确认**。来源为…` | `upstream-login-protocol.md` |
+| `> 状态：**已确认**。来源为…` | `login-protocol.md` |
 | `> 状态：PC 端已落地…；iOS App 端已落地…` | `client-profiles.md` |
 | `> **这份文档是什么**：…` | `business-feature-inventory.md` |
 | `> **定位**：…` | `caiyun-go-feature-inventory.md` |
@@ -233,7 +233,7 @@ commit `1b2cf07` 才是权威锚点）" —— 现在该文档已经写了 commi
 - **`docs/capture/` 9 个素材文件齐全**，与文档引用一一对应
 - **`sanitize-guide.md` 与守卫实现一致** —— `VENDOR_SOURCE_PATHS`、base64 二次扫描、
   "过度脱敏"判据、`--force-with-lease` 流程都对得上
-- **`device-and-source-codes.md`、`upstream-app-business-api.md` 的"状态：已定/已实测"** 属实，
+- **`device-and-source-codes.md`、`app-business-api.md` 的"状态：已定/已实测"** 属实，
   内容与 `mcloud-upstream` 常量逐条对得上
 - **`.gitignore` 与文档声明一致** —— `.workbuddy-ai/*` 忽略、`har/` 忽略、
   `test/fixtures/http/` 忽略，三条都在

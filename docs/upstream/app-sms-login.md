@@ -7,11 +7,11 @@
 > 密码学原语：`../mcloud-rust/crates/mcloud-core/src/crypto.rs`。
 >
 > **登录协议一族**（按端分文件，本篇是 **iOS App 短信**那一支）：
-> [`upstream-login-protocol.md`](./upstream-login-protocol.md)（PC 客户端扫码）、
-> [`upstream-logout-sms-login.md`](./upstream-logout-sms-login.md)（PC 客户端退出+短信）、
-> [`upstream-web-qr-login.md`](./upstream-web-qr-login.md)（PC Web 扫码）、
-> [`upstream-app-business-api.md`](./upstream-app-business-api.md)（iOS App 已登录业务接口）。
-> 全库索引见 [`docs/README.md`](./README.md)。
+> [`login-protocol.md`](./login-protocol.md)（PC 客户端扫码）、
+> [`logout-sms-login.md`](./logout-sms-login.md)（PC 客户端退出+短信）、
+> [`web-qr-login.md`](./web-qr-login.md)（PC Web 扫码）、
+> [`app-business-api.md`](./app-business-api.md)（iOS App 已登录业务接口）。
+> 全库索引见 [`docs/README.md`](../README.md)。
 
 ---
 
@@ -241,7 +241,7 @@ https://yun.139.com/fe/captcha/?data=<base64(JSON)>
 > `01000019 动态解密错误…Illegal base64 character 7b`，而是正常处理并回
 > `200059554`（且响应也是同格式加密）⇒ 算法在真服务器上成立。
 >
-> 证据、矩阵、向量：[`capture/app-sms-login-samples.txt`](./capture/app-sms-login-samples.txt) §1.2；
+> 证据、矩阵、向量：[`capture/app-sms-login-samples.txt`](../capture/app-sms-login-samples.txt) §1.2；
 > 向量 `test/golden/app-business-crypto-vectors.json` 的 `hcyCoolFlagEnvelope`（3 条，含 2 条实拍）；
 > 工具 `scripts/probe-hcy-cool-flag.py` / `scripts/crack-cool-flag-response.py`。
 
@@ -265,7 +265,7 @@ hcy-cool-flag → "<192 个 base64 字符>"        // 裸 JSON 字符串，144 �
 > **5991 / 5991 条**都带 `hcy-cool-flag: 1`，响应**全是明文 JSON**；
 > `hcy/group/manage/*`、`isbo2/*` 同样带它。整个窗口里"裸 base64 响应"是 **0 条**。
 > 所以这是**逐接口**的行为，不是全局能力声明。
-> 详见 [`capture/app-api-families.txt`](./capture/app-api-families.txt) §3。
+> 详见 [`capture/app-api-families.txt`](../capture/app-api-families.txt) §3。
 
 已排除的解（详见 `docs/capture/app-sms-login-samples.txt` §1.1）：
 `MCLoginCryptoUtil` 那套、`MCStateCryptoHelper` 的 SM4-ECB（含带自己的
@@ -300,11 +300,11 @@ App 客户端开 WebView 是它的实现选择（面前坐着真人，它没必�
 3. **编码对齐 PC 端**（同一个第一方滑块）：实测取新题解出 `466`、
    按 `base64(固定IV ‖ AES-128-CBC/PKCS7('CREATPUZZLE03F9A', 固定IV, 坐标))` 填进去，
    上游回 `{"success":true,"code":"0000","data":{"remainGetTimes":8,...}}` —— **短信真的发出去了**。
-   PC 端早有一条同构的记录（`docs/upstream-logout-sms-login.md` §2.2），
+   PC 端早有一条同构的记录（`docs/upstream/logout-sms-login.md` §2.2），
    这次是**独立复现**：两端走的是同一台主机、同一个密钥、同一个提交格式。
 
 完整四步与两个 IV 的区别见
-[`capture/app-sms-login-samples.txt`](./capture/app-sms-login-samples.txt) §2.1。
+[`capture/app-sms-login-samples.txt`](../capture/app-sms-login-samples.txt) §2.1。
 
 **实现侧已改为"协议优先、H5 兜底"**：`AppSendSmsOutcome::NeedCaptcha` 之后
 自动取图 → 解坐标 → 带答案重发（有上限，因为该接口**计失败次数**），
@@ -329,20 +329,20 @@ App 客户端开 WebView 是它的实现选择（面前坐着真人，它没必�
 > **补测确认（2026-09-19）**：`x-yun-uni` 头、请求体里的 `userDomainId`、
 > 请求体里的 `userId` **是同一个 19 位值**（同一份日志里 5839 / 11982 / 38 次）。
 > 也就是说它不是"另一个 id"，而是同一个 id 的三个名字 ——
-> 这条同时补上了 `docs/rust-rewrite-plan.md` §7.2 那个"`user_domain_id` 落空"的缺口：
+> 这条同时补上了 `../mcloud-rust/docs/rust-rewrite-plan.md` §7.2 那个"`user_domain_id` 落空"的缺口：
 > **任何一条已登录请求的头里就带着它**，不必为此再登录一次。
-> 计数与出处见 [`client-profiles.md`](./client-profiles.md) §3.3.2。
+> 计数与出处见 [`client-profiles.md`](../client-profiles.md) §3.3.2。
 
 > **真机登录收口（2026-09-19）**：跑通一次完整的 App 短信登录后，
 > **`userDomainId` 就在 `thirdlogin` 的响应里** —— 猜测里那个"本地缓存的上一会话"
 > 是多虑了。CLI 打印的响应字段清单同时证实了另外两件事：
 >
 > - 字段名是 `userDomainId`，而 `userId` **根本不在响应里**（详见
->   [`upstream-login-protocol.md`](./upstream-login-protocol.md) §5 的收口说明）；
+>   [`login-protocol.md`](./login-protocol.md) §5 的收口说明）；
 > - `userid`（全小写）是**另一个**字段，与 `userDomainId` 同时出现、值不同。
 >
 > 落库结果：`account_state.user_domain_id` 有值（19 位），`jwt_token` 201 字符，
-> `auth_expire` 正好在 30 天后 —— 与 PC 扫码登录那次（§3.4 / `upstream-login-protocol.md` §5）
+> `auth_expire` 正好在 30 天后 —— 与 PC 扫码登录那次（§3.4 / `login-protocol.md` §5）
 > 的各项数值一致。
 >
 > **所以"首次登录拿不到"只对登录握手期间的请求成立**（那时确实还没有这个值，

@@ -13,7 +13,18 @@
 cmd/            Go 产物入口（mcloud / mcloud-server）
 internal/       Go 实现八层（分层见 dev-gates.md 与 go-migration-plan.md §5）
 web/            WebUI：Vue Vapor（无虚拟 DOM）+ TSX + daisyUI
-docs/           文档（本目录）
+docs/           文档（本目录）—— 索引在 README.md，"谁说了算"也在那篇
+  upstream/       上游协议取证，**按端一篇**：login-protocol / logout-sms-login /
+                  web-qr-login / app-sms-login / app-business-api
+  archive/        归档：**不删、但别当现状读**（实况流水、逐 crate 要点、
+                  签到规格的历史段、一次性体检报告）
+  capture/        抓包原始素材与上游客户端源码（豁免规则见下面 §豁免第 2 类）
+  其余扁平放一层         规范类（dev-gates / repo-layout / credential-boundary /
+                  sanitize-guide）、实况类（status / go-migration-plan /
+                  migration-pitfalls）、手册类（cli-usage / signin-cli-spec）、
+                  盘点与对照（business- / caiyun-go- / client-profiles /
+                  device-and-source-codes）、前端三篇（webui-design-guide /
+                  webui-components / webui-code-guide）
 data/           运行时数据与凭据（**绝不入库**，见 credential-boundary.md）
 scripts/        门禁与夹具生成器
   gen-*.cjs       —— 夹具一律从真实产物生成，不手写期望值
@@ -38,7 +49,7 @@ proto/          （规划中）
 ```
 
 > **Rust 实现（8 crate workspace、`gen-*.rs` 向量生成器、`gates.sh` 等）已于
-> 2026-09-21 剥离到同级仓库 [`../mcloud-rust/`](../../mcloud-rust/)。**
+> 2026-09-21 剥离到同级仓库 [`../mcloud-rust/`](../../mcloud-rust)。**
 > 本仓库不再有 `.rs` 源文件与 `Cargo.toml`。
 
 ---
