@@ -1,7 +1,7 @@
 # 脚本工作产物。
 #
 # ⚠ `target/` **不是** Go 的产物目录（Go 不用它）：它是本地脚本的工作区 ——
-#   `scripts/gates-go.sh` 把完整输出写在 `target/gates-go-last.log`，
+#   `scripts/gates-go.js` 把完整输出写在 `target/gates-go-last.log`，
 #   一次性分析脚本也把中间结果放这里。
 #
 # （Rust 时代的 `/legacy/target/` 与 `**/*.rs.bk` 已随 Rust 基准一起移出本仓库，
@@ -84,6 +84,10 @@ web/node_modules/
 web/dist/
 web/dist-debug/
 web/.vite/
+
+# 根工具链（scripts/ 与钩子共用的 zx）。node_modules 永不入库；
+# package.json / package-lock.json 是有意入库的依赖声明（见 AGENTS.md §3）。
+/node_modules/
 
 # WorkBuddy 工作数据（记忆 / 计划 / 任务 / 待办）—— **默认全部忽略**。
 # 这些文件按用途会长篇记录真实标识（配置路径、账号掩码、真值对照），

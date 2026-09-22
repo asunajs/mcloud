@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "semi": false,
+  "singleQuote": true,
+  "printWidth": 100,
+  "trailingComma": "all",
+  "arrowParens": "always",
+  "endOfLine": "lf",
+  "proseWrap": "preserve",
+  "sortPackageJson": false,
+  "ignorePatterns": [
+    "node_modules/",
+    "web/dist/",
+    "target/",
+    "data/",
+    ".workbuddy/",
+    ".workbuddy-ai/",
+    ".codebuddy/",
+    ".qoder/",
+    "docs/capture/",
+    "test/golden/",
+    "test/fixtures/",
+    "package-lock.json",
+    "web/package-lock.json",
+    "*.har",
+    "*.txt",
+    "docs/archive/"
+  ]
+}

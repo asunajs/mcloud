@@ -1,6 +1,6 @@
 # 目录结构与文件命名
 
-> 状态：**规范**（加文件前必读；命名由 `bash scripts/check-filenames.sh` 强制执行）
+> 状态：**规范**（加文件前必读；命名由 `node scripts/check-filenames.js` 强制执行）
 >
 > - 相关：[`dev-gates.md`](./dev-gates.md)（门禁总表；本文的规则 = Go 侧第 6 条；
 >   Rust 剥离后该条在其门禁体系里编号 5，脚本两边共用）
@@ -34,8 +34,9 @@ data/           运行时数据与凭据（**绝不入库**，见 credential-bou
 scripts/        门禁与夹具生成器
   gen-*.cjs       —— 夹具一律从真实产物生成，不手写期望值
   check-*.cjs     —— 门禁（标识 / 黄金向量 / json tag）
-  check-*.sh      —— 门禁（Go 分层 / 文件名）
-  gates-go.sh     —— Go 侧九条一键入口
+  check-filenames.js / check-go-deps.js —— 门禁（文件名 / Go 分层。2026-09-22 起
+                    门禁体系整体是 zx（node），旧 `.sh` 版已删，见 dev-gates.md 迁移补记）
+  gates-go.js / gates-web.js / gates-scope.js —— 编排 / 分类器；install-hooks.js / shots.js 同属这套
   applog-capture.py / reqable-capture.py —— 抓包侧工具
   h5-device-id.py —— **取证用**：从 WebView 的 localStorage 里读官方 App 实发的
                      `deviceId`（只读）。日常**不需要它** —— 那个值本项目自己就能算
@@ -82,7 +83,7 @@ Go 那条不是风格偏好而是**工具链强制**：`go test` 只认 `_test.g
 | 文件 | 文件名 | 里面导出的东西 |
 | --- | --- | --- |
 | WebUI 页面 | `auth-page.tsx` | `export const AuthPage = …` —— **保持 PascalCase** |
-| 脚本 | `check-filenames.sh` | 函数名随意（shell 一般 snake_case / 小写） |
+| 脚本 | `check-filenames.js` | 函数名随意（脚本内部按语言惯例，shell 一般 snake_case、js 一般 camelCase） |
 | 文档 | `dev-gates.md` | 中文标题随意 |
 
 React 要求**组件名首字母大写**，那是语言 / 框架的硬要求，不受本仓库的文件名约定影响。
@@ -98,7 +99,7 @@ import { AuthPage } from './pages/auth-page'   // 路径 kebab，标识符 Pasca
 一路活到被用户点名 —— 违规的表现极其安静：**编译能过、测试全绿、界面正常**，
 只有下一个人加文件时"照着旁边那个写"，错误便自我复制。
 
-⇒ 现在由 `bash scripts/check-filenames.sh` 强制执行 —— 它是**两套门禁共用**的一条
+⇒ 现在由 `node scripts/check-filenames.js` 强制执行 —— 它是**两套门禁共用**的一条
 （Go 侧第 6 条；Rust 剥离后其第 5 条归 `../mcloud-rust`，脚本各仓一份），
 所以别记成"第几条"，记成"文件名那条"。
 
@@ -124,4 +125,4 @@ import { AuthPage } from './pages/auth-page'   // 路径 kebab，标识符 Pasca
    也由 `scripts/gen-legacy-fixtures.cjs` 按名生成）。
 3. **生成物 / 依赖目录** —— `node_modules/` / `target/` / `dist/`。
 
-新增豁免要同时满足"它属于上述三类之一"与"在 `scripts/check-filenames.sh` 的注释里写清属于哪一类"。
+新增豁免要同时满足"它属于上述三类之一"与"在 `scripts/check-filenames.js` 的注释里写清属于哪一类"。

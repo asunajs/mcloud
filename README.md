@@ -17,7 +17,7 @@
 >
 > - **执行方案：[`docs/go-migration-plan.md`](./docs/go-migration-plan.md)** ——
 >   **与其它文档冲突时以它为准**。
-> - 骨架已就位：`internal/` 八层 + `cmd/` 两个入口 + `bash scripts/gates-go.sh`（**九条门禁**）。
+> - 骨架已就位：`internal/` 八层 + `cmd/` 两个入口 + `node scripts/gates-go.js`（**九条门禁**）。
 >   **业务已迁完**（2026-09-21）：`core` / `upstream` / `io` / `capabilities` / `exec` /
 >   `app` / `server` / `cli` 八层全部落地，**922 条测试**；`cli` 的 12 个叶子命令
 >   **全部接上真后端**（缺口表已退役），`cmd/mcloud-server` **也接上了** `internal/server`
@@ -49,12 +49,12 @@
 + IO 实现（io，全项目唯一）+ 组装与产物（app / server / cli）。
 外部世界一律走 4 个注入 trait：`HttpClient`、`Clock`、`StateStore`、`Random`。
 
-> 依赖方向不是文档约定，是**可执行断言**：Go 侧由 `scripts/check-go-deps.sh` 真读 import
+> 依赖方向不是文档约定，是**可执行断言**：Go 侧由 `scripts/check-go-deps.js` 真读 import
 > 断言（它现在是九条门禁里的第 5 条）；Rust 侧那条 `scripts/check-deps.sh` 读的是
 > `Cargo.toml`，脚本随基准一起搬到了 `../mcloud-rust/`。
 > 完整分层图、约束表与"为什么必须这样"见 [`docs/dev-gates.md`](./docs/dev-gates.md)。
 > ⚠ 迁到 Go 之后这条约束**降级成 lint 约定**（Go 的接口是结构性实现，
-> "纯层不许有 IO"不再是编译期事实）—— 所以 Go 侧的 `check-go-deps.sh` 比 Rust 侧那条更必需。
+> "纯层不许有 IO"不再是编译期事实）—— 所以 Go 侧的 `check-go-deps.js` 比 Rust 侧那条更必需。
 
 ## 快速开始
 
@@ -66,9 +66,10 @@ cd web && npm install && npm run build && cd ..   # 前端产物到 web/dist
 go run ./cmd/mcloud-server                     # API + 前端产物（含 SPA 回退），默认 127.0.0.1:8787
 go run ./cmd/mcloud-server --help              # 五个选项：--db / --host / --port / --web-dir / --secure-cookie
 
-bash scripts/install-hooks.sh                  # 装一次：提交/推送时自动跑门禁
-bash scripts/gates-go.sh                       # 九条门禁，一条命令跑完，全绿才算完成
-bash scripts/gates-go.sh filenames idents      # 也可以只跑其中几条（调试时用）
+npm install                                    # 根目录装一次：门禁脚本是 zx（node），依赖钉在根 package.json
+node scripts/install-hooks.js                  # 装一次：提交/推送时自动跑门禁
+node scripts/gates-go.js                       # 九条门禁，一条命令跑完，全绿才算完成
+node scripts/gates-go.js filenames idents      # 也可以只跑其中几条（调试时用）
 ```
 
 > ⚠ **Rust 侧的命令已不在本仓库**：`cargo run -p mcloud-cli` / `cargo run -p mcloud-server`

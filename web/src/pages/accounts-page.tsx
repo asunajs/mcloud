@@ -32,7 +32,8 @@ const platformLabel = (p: string | null): string =>
 const healthOf = (a: Account): { dot: string; label: string } => {
   if (!a.enabled) return { dot: 'status', label: '已停用' }
   if (a.authExpired) return { dot: 'status status-error', label: '登录已过期' }
-  if (a.failStreak > 0) return { dot: 'status status-warning', label: `连续失败 ${a.failStreak} 次` }
+  if (a.failStreak > 0)
+    return { dot: 'status status-warning', label: `连续失败 ${a.failStreak} 次` }
   return { dot: 'status status-success', label: '正常' }
 }
 
@@ -112,9 +113,10 @@ export const AccountsPage = () => {
         <p class="text-sm opacity-70">还没有云盘账号。</p>
         <p class="max-w-prose break-words text-xs opacity-60">
           登录目前走命令行：
-          <code class="ml-1 rounded bg-base-200 px-1 py-0.5">mcloud login sms --client app --phone 手机号</code>
-          或
-          <code class="ml-1 rounded bg-base-200 px-1 py-0.5">mcloud login qr</code>
+          <code class="ml-1 rounded bg-base-200 px-1 py-0.5">
+            mcloud login sms --client app --phone 手机号
+          </code>
+          或<code class="ml-1 rounded bg-base-200 px-1 py-0.5">mcloud login qr</code>
           ，成功后回到本页刷新即可看到。
         </p>
       </div>

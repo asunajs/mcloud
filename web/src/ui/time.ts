@@ -6,4 +6,12 @@
 
 /** rfc3339 → 本地短日期时间；null 给破折号而不是空。 */
 export const fmtTime = (iso: string | null): string =>
-  iso ? new Date(iso).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'
+  iso
+    ? new Date(iso).toLocaleString('zh-CN', {
+        hour12: false,
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    : '—'

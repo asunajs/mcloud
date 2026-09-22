@@ -1,0 +1,19 @@
+{
+  "name": "mcloud-tooling",
+  "private": true,
+  "type": "module",
+  "description": "仓库工具链（脚本侧）。运行时是 Go、前端在 web/ 自带 package.json；这份只管 scripts/ 与钩子共用的 zx。",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "fmt": "node scripts/fmt.js",
+    "fmt:check": "node scripts/fmt.js --check"
+  },
+  "dependencies": {
+    "zx": "^8.8.5"
+  },
+  "devDependencies": {
+    "oxfmt": "^0.70.0"
+  }
+}

@@ -3,7 +3,7 @@
 这个目录是**入库的** hooks 实现。Git 默认不看它，要跑一次安装：
 
 ```bash
-bash scripts/install-hooks.sh
+node scripts/install-hooks.js
 ```
 
 那一步做的事就是把 `core.hooksPath` 指到这里：
@@ -24,7 +24,10 @@ hook 就跟代码一起被 review、被同步，也不需要谁记得"上一台�
 > Rust 实现与其执行器 `run-gates.sh` 已整体剥离为同级仓库
 > [`../mcloud-rust/`](../../mcloud-rust)，归档在那边的 `.githooks/`）。
 > 分工没变，只是命令从 `cargo` 那套换成了 `go` 那套 —— 两个 hook 都只是
-> `exec bash scripts/gates-go.sh <几条>`，逻辑不重复。
+> `node scripts/gates-go.js <几条>` 一类的薄派发，逻辑不重复。
+> **2026-09-22 追加**：被派发的脚本整体从 bash 迁到 zx（`.sh` → `.js`，见
+> `docs/dev-gates.md` 的迁移补记）—— 两道闸的分工、横幅判据、自守判据**都没变**，
+> 变的只是文件名与解释器；hook 壳仍是 bash（git 只认固定文件名，且壳要 x 位）。
 
 ## ⚠⚠ 这个 hook 有**两层**各自都足以让它静默失效的东西
 
@@ -36,22 +39,22 @@ hook 就跟代码一起被 review、被同步，也不需要谁记得"上一台�
 | **1. `core.hooksPath` 没设** | git 默认看 `.git/hooks/`，那里是空的 | 没配就是没配，git 不认为这是异常 |
 | **2. hook 没有 x 位** | 本目录的文件一度以 **`100644`** 入库（`git ls-files -s .githooks/` 可验） | **git 对没有 x 位的 hook 直接跳过，不报错** |
 
-⇒ 装的时候**两件都要做**，`scripts/install-hooks.sh` 已经都做了
+⇒ 装的时候**两件都要做**，`scripts/install-hooks.js` 已经都做了
 （`chmod +x` + `git config core.hooksPath`），并把 mode 变更提交进库。
 
-⚠ 还有**第三层**，同样是"静默跳过"：hook 里若写成 `exec scripts/gates-go.sh`
-（不带 `bash`），而 `scripts/*.sh` 在库里也是 **100644** ⇒ `Permission denied`，
-**每一次提交都被拦住**。反过来（`exec bash …`）则完全不依赖那个 x 位。
+⚠ 还有**第三层**，同样是"静默跳过"：hook 里若写成 `exec scripts/gates-go.js`
+（不带 `node`），而 `scripts/` 下的脚本在库里也是 **100644** ⇒ `Permission denied`，
+**每一次提交都被拦住**。反过来（`node …` / `bash …` 显式给解释器）则完全不依赖那个 x 位。
 **判据：路径上任何一环缺 x 位，"跳过"与"拦住"都不报出真正的原因** ——
 所以要么让 x 位成为契约的一部分（全部补上并提交），要么让路径不依赖它。
-本仓库选后者（文档与用法一律写 `bash scripts/gates-go.sh`）。
+本仓库选后者（文档与用法一律写 `node scripts/gates-go.js`）。
 
 | hook | 跑什么 | 为什么是这些 |
 |---|---|---|
 | `pre-commit` | `fmt` `deps` `filenames` `idents` `jsontags` | 秒级、纯静态。**每条都能在一次编辑之后立刻修掉** |
 | `pre-push` | 再加 `build` `vet` `test` `golden` | 要编译、要跑测试。**跑了才有意义，但不必每次保存都跑** |
 
-> ⚠ 跑子集时，`gates-go.sh` 末尾的横幅会**明说"本次 5/9 条"并列出未跑的那几条**
+> ⚠ 跑子集时，`gates-go.js` 末尾的横幅会**明说"本次 5/9 条"并列出未跑的那几条**
 > （`门禁通过：fmt deps filenames idents jsontags（本次 5/9 条）` +
 > `⚠ 未跑：build vet test golden`）。**这是刻意的**：早先它无条件打
 > "九项门禁全绿"，于是 `pre-commit` 那 5 条子集也打出"全绿" —— 把 5/9 报成 9/9。
@@ -67,10 +70,10 @@ hook 就跟代码一起被 review、被同步，也不需要谁记得"上一台�
 |---|---|
 | 每一次提交（**恒跑**，不参与派发） | `filenames` `idents` |
 | 触及 `*.go` / `go.mod` / `go.sum` | 追加 `fmt` `deps` `jsontags` |
-| 触及 `web/**` 下任何文件 | 追加 web 的 `typecheck`（`scripts/gates-web.sh`） |
+| 触及 `web/**` 下任何文件 | 追加 web 的 `typecheck`（`scripts/gates-web.js`） |
 | 空提交 / 只改文档素材 | 只剩恒跑那两条 |
 
-分类器是 `scripts/gates-scope.sh`，规则与它的安全前提写在该文件开头，改之前先读那里。
+分类器是 `scripts/gates-scope.js`，规则与它的安全前提写在该文件开头，改之前先读那里。
 
 **为什么要改**（两句话）：① 改一行 `docs/*.md` 也要过 `gofmt` / `deps` / `jsontags`，
 而这三条对一份 markdown 什么也验不出来；② 更要紧的是反过来 ——
@@ -87,14 +90,15 @@ hook 就跟代码一起被 review、被同步，也不需要谁记得"上一台�
 3. **分类器不确定时全跑，不是全跳**（拿不到暂存清单：未诞生分支、git 报错）。
    ⇒ 失效方向只有一个：**多验**。"少验"在这里不可接受。
 
-外加一条自守：`gates-scope.sh` 在派发前用 `bash -n` 过一遍 `gates-go.sh` / `gates-web.sh` /
-它自己 / `check-filenames.sh` / `check-go-deps.sh` / 两个 hook。引号没闭合、`fi` 少了那类错的
+外加一条自守：`gates-scope.js` 在派发前先把门禁文件过一遍语法 —— 迁移后按扩展名选检查器
+（`.js` 用 `node --check`，`.sh` 与两个 hook 用 `bash -n`；迁移期两类并存才这么分，
+文件不存在就跳过）。抓的不是逻辑错，是"整个文件根本读不进来"那类 —— 它的
 **现象恰好是"门禁跑了、而且绿了"** —— 最贵的一种假绿，所以让"给门禁的门禁"每次提交先跑一遍。
 分类器自己不通时 hook **拦住提交**（不是放行）：这个仓库没有 CI 兜底，见下面那节。
 
 > ⚠ 上面那段"本次 5/9 条"是写死五条时的例子。现在横幅照旧说清"这次跑了哪几条 + 未跑的是谁"，
 > 只是**条数会随范围变**（只改文档 ⇒ `filenames idents` 2/9；改了 Go ⇒ 5/9；还改了前端 ⇒
-> 另加 `gates-web.sh` 那一行）。判据没变：**没跑的一定要列出来**，别让人把子集读成全绿。
+> 另加 `gates-web.js` 那一行）。判据没变：**没跑的一定要列出来**，别让人把子集读成全绿。
 
 > ⚠ 一条已知边界，别当成能修：**范围取自暂存区，而门禁验的是工作区** —— `git add` 之后
 > 又改一笔没重新 `add`，两者就不一致。Go 侧从第一天起是同一处境（`go build` 读工作区）。
@@ -141,7 +145,7 @@ git push --no-verify        # 跳过 pre-push
 > ⚠ 那句"环境抖动不该被翻译成你写错了代码"的重试逻辑，目前只在 **Rust 侧**那份里
 > （`scripts/gates.sh` 的写盘重试）；2026-09-21 它随代码移入
 > [`../mcloud-rust/scripts/gates.sh`](../../mcloud-rust/scripts/gates.sh)。
-> **Go 侧的 `scripts/gates-go.sh` 没有等价重试** —— 如果这台机器再次出现写盘被拦，
+> **Go 侧的 `scripts/gates-go.js` 没有等价重试** —— 如果这台机器再次出现写盘被拦，
 > 那是这里的一个真实缺口，别当成"门禁在报假警"。
 
 但既然没有兜底，绕过的正确姿势就只剩一条：**修好环境问题再提交**。

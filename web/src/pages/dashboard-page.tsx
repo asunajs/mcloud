@@ -13,13 +13,7 @@
  */
 
 import { computed, onMounted, ref } from 'vue'
-import {
-  ApiError,
-  getCloudStats,
-  listAccounts,
-  type Account,
-  type CloudStatRow,
-} from '../api'
+import { ApiError, getCloudStats, listAccounts, type Account, type CloudStatRow } from '../api'
 import type { PageId } from '../ui/nav'
 
 interface AccountRow {
@@ -82,9 +76,7 @@ export const DashboardPage = (props: DashboardPageProps) => {
     try {
       const { accounts } = await listAccounts()
       // 单账号的历史拉失败不拖垮整页：那条的云朵/增量落到"未采集"。
-      const histories = await Promise.allSettled(
-        accounts.map((a) => getCloudStats(a.id, 7)),
-      )
+      const histories = await Promise.allSettled(accounts.map((a) => getCloudStats(a.id, 7)))
       rows.value = accounts.map((account, i) => {
         const h = histories[i]
         const stats = h.status === 'fulfilled' ? h.value.stats : []
@@ -99,14 +91,10 @@ export const DashboardPage = (props: DashboardPageProps) => {
 
   onMounted(() => void load())
 
-  const total = computed(() =>
-    rows.value.reduce((sum, r) => sum + (r.cloud ?? 0), 0),
-  )
+  const total = computed(() => rows.value.reduce((sum, r) => sum + (r.cloud ?? 0), 0))
   /** 今日增量：一条"今天"的数都没有时显示破折号，而不是假装 0。 */
   const anyToday = computed(() => rows.value.some((r) => r.todayGain !== null))
-  const todayGain = computed(() =>
-    rows.value.reduce((sum, r) => sum + (r.todayGain ?? 0), 0),
-  )
+  const todayGain = computed(() => rows.value.reduce((sum, r) => sum + (r.todayGain ?? 0), 0))
   const healthyCount = computed(
     () =>
       rows.value.filter(
@@ -116,8 +104,7 @@ export const DashboardPage = (props: DashboardPageProps) => {
 
   /** 涨跌符号。**只给数，不给颜色** —— 云朵减少多半是正常花费，
    * 把它染成"异常色"会让人误以为账号出问题了（状态列只反映账号健康度）。 */
-  const gainText = (n: number | null) =>
-    n === null ? '—' : n > 0 ? `+${n}` : String(n)
+  const gainText = (n: number | null) => (n === null ? '—' : n > 0 ? `+${n}` : String(n))
 
   const cloudBadge = (cloud: number | null) =>
     cloud === null ? (
@@ -130,9 +117,7 @@ export const DashboardPage = (props: DashboardPageProps) => {
     <div class="flex flex-wrap items-center justify-between gap-2">
       <div class="flex flex-wrap items-center gap-2">
         <h1 class="text-base font-medium">账号云朵总览</h1>
-        {state.value === 'ready' ? (
-          <span class="badge badge-soft">{rows.value.length}</span>
-        ) : null}
+        {state.value === 'ready' ? <span class="badge badge-soft">{rows.value.length}</span> : null}
       </div>
       <button
         type="button"
@@ -217,8 +202,7 @@ export const DashboardPage = (props: DashboardPageProps) => {
       {/* 移动端卡片流（同一数据，不写两套逻辑；每项带标签，§7.3） */}
       <div class="grid gap-3 md:hidden">
         {rows.value.map((r) => {
-          const healthy =
-            r.account.enabled && !r.account.authExpired && r.account.failStreak === 0
+          const healthy = r.account.enabled && !r.account.authExpired && r.account.failStreak === 0
           return (
             <div class="card bg-base-100 shadow-sm">
               <div class="card-body gap-2 p-4">
@@ -248,9 +232,10 @@ export const DashboardPage = (props: DashboardPageProps) => {
 
       <p class="text-xs opacity-60">
         添加账号走命令行：
-        <code class="mx-1 rounded bg-base-200 px-1 py-0.5">mcloud login sms --client app --phone 手机号</code>
-        或
-        <code class="mx-1 rounded bg-base-200 px-1 py-0.5">mcloud login qr</code>
+        <code class="mx-1 rounded bg-base-200 px-1 py-0.5">
+          mcloud login sms --client app --phone 手机号
+        </code>
+        或<code class="mx-1 rounded bg-base-200 px-1 py-0.5">mcloud login qr</code>
         ；云朵数在首次采集/签到后出现。
       </p>
     </>
@@ -278,7 +263,9 @@ export const DashboardPage = (props: DashboardPageProps) => {
             <p class="text-sm opacity-70">还没有云盘账号。</p>
             <p class="max-w-prose break-words text-xs opacity-60">
               运行
-              <code class="mx-1 rounded bg-base-200 px-1 py-0.5">mcloud login sms --client app --phone 手机号</code>
+              <code class="mx-1 rounded bg-base-200 px-1 py-0.5">
+                mcloud login sms --client app --phone 手机号
+              </code>
               添加后回来刷新。
             </p>
           </div>

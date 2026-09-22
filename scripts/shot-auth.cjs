@@ -156,7 +156,9 @@ class Cdp {
 
   const shot = await cdp.send('Page.captureScreenshot', { format: 'png' })
   fs.writeFileSync(out, Buffer.from(shot.data, 'base64'))
-  console.log(`wrote ${out} (${fs.statSync(out).size} bytes) @ ${width}x${height}${dark ? ' [dark]' : ''}`)
+  console.log(
+    `wrote ${out} (${fs.statSync(out).size} bytes) @ ${width}x${height}${dark ? ' [dark]' : ''}`,
+  )
 
   ws.close()
   process.exit(0)

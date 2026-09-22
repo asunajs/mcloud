@@ -35,13 +35,13 @@
 //
 // 用法：node scripts/check-go-jsontags.cjs
 
-'use strict';
+'use strict'
 
-const fs = require('fs');
-const path = require('path');
+const fs = require('fs')
+const path = require('path')
 
-const ROOT = path.resolve(__dirname, '..');
-const SCAN_DIRS = ['cmd', 'internal'];
+const ROOT = path.resolve(__dirname, '..')
+const SCAN_DIRS = ['cmd', 'internal']
 
 // 白名单：`相对路径:结构体名` → 为什么不进 JSON。
 //
@@ -87,8 +87,7 @@ const UNTAGGED_ALLOWED = {
   // 也从不被序列化 —— 进 JSON 的只有 `--json` 那一支的输出（在 output.go 里单独构造）。
   'internal/cli/args.go:SigninArgs':
     '签到那一大套参数（`--list` / `--status-only` / `--db` …）；Rust 侧是 `#[derive(Args)]` + `#[command(flatten)]`',
-  'internal/cli/args_login.go:QrArgs':
-    '`login qr` 的参数；Rust 侧是 `#[derive(Args)]` 的 `QrArgs`',
+  'internal/cli/args_login.go:QrArgs': '`login qr` 的参数；Rust 侧是 `#[derive(Args)]` 的 `QrArgs`',
   'internal/cli/args_login.go:SmsArgs':
     '`login sms` 的参数；Rust 侧是 `#[derive(Args)]` 的 `SmsArgs`',
   'internal/cli/args_other.go:MigrateArgs':
@@ -154,14 +153,11 @@ const UNTAGGED_ALLOWED = {
     'multiple 的解析结果（本次额外领到的豆），同上',
   'internal/upstream/app_signin_records.go:CloudRecords':
     'cloudRecordV2 的解析结果（一页流水 + 分页总数），手工构造，不做反序列化',
-  'internal/upstream/app_signin_records.go:PrizeRecordItem':
-    '奖品流水里的一条，同上',
+  'internal/upstream/app_signin_records.go:PrizeRecordItem': '奖品流水里的一条，同上',
   'internal/upstream/app_signin_records.go:PrizeRecords':
     '奖品流水的整份解析结果（条目 + 分页），同上',
-  'internal/upstream/app_signin_records.go:BackupGift':
-    '备用礼包的状态解析结果，同上',
-  'internal/upstream/app_signin_records.go:BackupGiftReceive':
-    '领取备用礼包的结果解析结果，同上',
+  'internal/upstream/app_signin_records.go:BackupGift': '备用礼包的状态解析结果，同上',
+  'internal/upstream/app_signin_records.go:BackupGiftReceive': '领取备用礼包的结果解析结果，同上',
   'internal/core/auth.go:AuthInfo':
     'Rust 侧只 derive `Clone, PartialEq`——**刻意不** Serialize（里面是 token）',
   'internal/core/crypto.go:SignSaltPair':
@@ -170,8 +166,7 @@ const UNTAGGED_ALLOWED = {
     'Rust 侧 derive `Debug, Clone, PartialEq, Eq, thiserror::Error`，**不** Serialize；对外文案走 `Error()`，不整块 marshal',
   'internal/core/legacy.go:LegacyError':
     'Rust 侧 derive `Debug, Clone, PartialEq, Eq, thiserror::Error`，**不** Serialize；对外文案走 `Error()`',
-  'internal/core/legacy.go:ParseBad':
-    '解析失败的**报告条目**（下标 + 信息），进迁移报告而非 JSON',
+  'internal/core/legacy.go:ParseBad': '解析失败的**报告条目**（下标 + 信息），进迁移报告而非 JSON',
   'internal/core/legacy.go:LegacyAccountView':
     'Rust 侧只 derive `Debug, Clone, PartialEq, Eq` —— 迁移期的**中间派生结果**，不落库也不出响应',
   'internal/core/legacy.go:LegacyTarget':
@@ -180,12 +175,10 @@ const UNTAGGED_ALLOWED = {
     'Rust 侧只 derive `Debug, Clone, PartialEq, Eq` —— 迁移诊断，交给报告而不是 JSON',
   'internal/capabilities/registry.go:Capability':
     'Rust 侧**没有** derive `Serialize`：对外形状由 `mcloud-app::payload` 手工拼装（camelCase，与 serde 的 snake_case 默认不同）。刻意不加 tag —— 加了会让人以为它序列化出来就是给前端的那个形状',
-  'internal/exec/exec.go:Concurrency':
-    '并发闸**配置**（全局上限），进程内存里用，不进 JSON',
+  'internal/exec/exec.go:Concurrency': '并发闸**配置**（全局上限），进程内存里用，不进 JSON',
   'internal/exec/exec.go:Admission':
     '一次 run 准入的**判定结果**（Kind + 重复的 runId / 被挡的键与占用者），进程内存里用，不进 JSON；Rust 侧是 enum，无 Serialize',
-  'internal/exec/exec.go:Delivery':
-    '事件总线的一次**投递记录**，进程内存里用，不进 JSON',
+  'internal/exec/exec.go:Delivery': '事件总线的一次**投递记录**，进程内存里用，不进 JSON',
   'internal/upstream/login.go:SliderPuzzle':
     '一次滑块挑战的**内存表示**（两张图 + 加密的缺口坐标）；Rust 侧 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
   'internal/upstream/login.go:PollOutcome':
@@ -232,45 +225,45 @@ const UNTAGGED_ALLOWED = {
     '一次 App 登录的**入参打包**（scope / 设备档案 / 凭据），与 `SmsCredential` 同理：**里面装着明文验证码**，一旦可序列化就会顺着日志出去；Rust 侧 derive `Debug, Clone, Copy`，**不** Serialize',
   'internal/cli/run_fixture.go:ExtractReport':
     '一次抽取的**结论**（各类计数 + 写出的文件 + 自检残留），只喂给 `renderExtractReport` 打进终端；Rust 侧这个函数是逐行 `println!` 的计数，没有 serde。⚠ 它**不该**进 JSON —— 计数是给人看的报告，不是对外契约',
-};
+}
 
 function walk(dir, out = []) {
-  const abs = path.join(ROOT, dir);
-  if (!fs.existsSync(abs)) return out;
+  const abs = path.join(ROOT, dir)
+  if (!fs.existsSync(abs)) return out
   for (const entry of fs.readdirSync(abs, { withFileTypes: true })) {
-    const rel = path.join(dir, entry.name);
+    const rel = path.join(dir, entry.name)
     if (entry.isDirectory()) {
       // ⚠ 只走 Go 源码目录：别进 testdata / target 之类。
-      walk(rel, out);
+      walk(rel, out)
     } else if (entry.name.endsWith('.go') && !entry.name.endsWith('_test.go')) {
-      out.push(rel);
+      out.push(rel)
     }
   }
-  return out;
+  return out
 }
 
 // 抓 `type X struct {` … 到行首的 `}` 为止。
 //
 // ⚠ 只认"行首的 `}`"：Go 的 struct 声明结束时 `}` 一定在第 0 列。
 // 内联的匿名 `struct{…}{…}`（marshalJSON 里那些）不以 `type` 开头，不会被抓到。
-const STRUCT_RE = /^type ([A-Za-z_]\w*) struct \{$/;
+const STRUCT_RE = /^type ([A-Za-z_]\w*) struct \{$/
 
 function structsOf(src) {
-  const lines = src.split('\n');
-  const found = [];
+  const lines = src.split('\n')
+  const found = []
   for (let i = 0; i < lines.length; i++) {
-    const m = STRUCT_RE.exec(lines[i]);
-    if (!m) continue;
-    const fields = [];
+    const m = STRUCT_RE.exec(lines[i])
+    if (!m) continue
+    const fields = []
     for (let j = i + 1; j < lines.length; j++) {
-      if (lines[j] === '}') break;
-      const body = lines[j].trim();
-      if (!body || body.startsWith('//')) continue;
-      fields.push(body);
+      if (lines[j] === '}') break
+      const body = lines[j].trim()
+      if (!body || body.startsWith('//')) continue
+      fields.push(body)
     }
-    found.push({ name: m[1], fields });
+    found.push({ name: m[1], fields })
   }
-  return found;
+  return found
 }
 
 // 一个"字段行"的粗略判定：行首是大写字母 ⇒ 导出字段。
@@ -278,82 +271,80 @@ function structsOf(src) {
 // ⚠ 排除只有**一个** token 的行 —— 那是嵌入字段（`Base`）或类型名，
 // 不是"名字 + 类型"。
 function isExportedField(line) {
-  const head = line.split(/\s+/)[0];
-  if (!head) return false;
-  if (!/^[A-Z]/.test(head)) return false;
-  return /\s/.test(line);
+  const head = line.split(/\s+/)[0]
+  if (!head) return false
+  if (!/^[A-Z]/.test(head)) return false
+  return /\s/.test(line)
 }
 
 function main() {
-  const files = SCAN_DIRS.flatMap((d) => walk(d));
-  const mixed = [];
-  const untaggedNotAllowed = [];
-  const allowedSeen = new Set();
-  let tagged = 0;
+  const files = SCAN_DIRS.flatMap((d) => walk(d))
+  const mixed = []
+  const untaggedNotAllowed = []
+  const allowedSeen = new Set()
+  let tagged = 0
 
   for (const rel of files) {
-    const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+    const src = fs.readFileSync(path.join(ROOT, rel), 'utf8')
     for (const st of structsOf(src)) {
-      const exported = st.fields.filter(isExportedField);
-      if (exported.length === 0) continue; // 全是非导出字段 ⇒ 不进 JSON，跳过
-      const withTag = exported.filter((l) => l.includes('json:"'));
-      const key = `${rel}:${st.name}`;
+      const exported = st.fields.filter(isExportedField)
+      if (exported.length === 0) continue // 全是非导出字段 ⇒ 不进 JSON，跳过
+      const withTag = exported.filter((l) => l.includes('json:"'))
+      const key = `${rel}:${st.name}`
 
       if (withTag.length === exported.length) {
-        tagged++;
-        continue;
+        tagged++
+        continue
       }
       if (withTag.length > 0) {
-        const missing = exported.filter((l) => !l.includes('json:"'));
-        mixed.push({ key, missing });
-        continue;
+        const missing = exported.filter((l) => !l.includes('json:"'))
+        mixed.push({ key, missing })
+        continue
       }
       if (UNTAGGED_ALLOWED[key]) {
-        allowedSeen.add(key);
+        allowedSeen.add(key)
       } else {
-        untaggedNotAllowed.push(key);
+        untaggedNotAllowed.push(key)
       }
     }
   }
 
-  let failed = false;
+  let failed = false
 
   if (mixed.length > 0) {
-    failed = true;
-    console.error('✗ 以下结构体**部分**字段缺 `json` tag —— 不可能"一半进 JSON"：\n');
+    failed = true
+    console.error('✗ 以下结构体**部分**字段缺 `json` tag —— 不可能"一半进 JSON"：\n')
     for (const m of mixed) {
-      console.error(`  ${m.key}`);
-      for (const f of m.missing) console.error(`      缺: ${f}`);
+      console.error(`  ${m.key}`)
+      for (const f of m.missing) console.error(`      缺: ${f}`)
     }
-    console.error('');
+    console.error('')
   }
 
   if (untaggedNotAllowed.length > 0) {
-    failed = true;
-    console.error('✗ 以下结构体**整个**没有 `json` tag，且不在白名单里：\n');
-    for (const k of untaggedNotAllowed) console.error(`  ${k}`);
+    failed = true
+    console.error('✗ 以下结构体**整个**没有 `json` tag，且不在白名单里：\n')
+    for (const k of untaggedNotAllowed) console.error(`  ${k}`)
     console.error(
       '\n  若它确实不进 JSON，把它加进 scripts/check-go-jsontags.cjs 的' +
         ' UNTAGGED_ALLOWED 并**写明理由**；\n' +
         '  若它要进 JSON，就给它加 snake_case 的 tag —— ' +
         '字段名是外部契约，由 test/golden/enum-json-vectors.json（serde 产出）比对。\n',
-    );
+    )
   }
 
   // 白名单里已经不存在的条目 = 该复查了（结构体改名 / 加上了 tag）。
-  const stale = Object.keys(UNTAGGED_ALLOWED).filter((k) => !allowedSeen.has(k));
+  const stale = Object.keys(UNTAGGED_ALLOWED).filter((k) => !allowedSeen.has(k))
   if (stale.length > 0) {
-    failed = true;
-    console.error('✗ 白名单里有已经对不上的条目（结构体改名或已加上 tag）—— 请删掉：\n');
-    for (const k of stale) console.error(`  ${k}`);
-    console.error('');
+    failed = true
+    console.error('✗ 白名单里有已经对不上的条目（结构体改名或已加上 tag）—— 请删掉：\n')
+    for (const k of stale) console.error(`  ${k}`)
+    console.error('')
   }
 
-  if (failed) process.exit(1);
+  if (failed) process.exit(1)
 
-  console.log(
-    `jsontags 通过：${tagged} 个结构体字段齐全，${allowedSeen.size} 个按白名单不进 JSON`,
-  );
+  console.log(`jsontags 通过：${tagged} 个结构体字段齐全，${allowedSeen.size} 个按白名单不进 JSON`)
 }
 
-main();
+main()

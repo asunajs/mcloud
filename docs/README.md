@@ -140,7 +140,7 @@
 | --- | --- | --- |
 | **实现进度**、当前测试数、当前能力边界 | [`status.md`](./status.md) | 各篇抬头写"现状以 `status.md` 为准"，正文不抄数字 |
 | **门禁条数与怎么跑** | [`dev-gates.md`](./dev-gates.md) | `go-migration-plan.md` §5 只写"为什么是这九条" |
-| **文件放哪 / 叫什么名** | [`repo-layout.md`](./repo-layout.md) | 脚本 `check-filenames.sh` 的注释指向它 |
+| **文件放哪 / 叫什么名** | [`repo-layout.md`](./repo-layout.md) | 脚本 `check-filenames.js` 的注释指向它 |
 | **CLI 参数与语义** | [`cli-usage.md`](./cli-usage.md) | `signin-cli-spec.md` 只写编排层，参数不重复定义 |
 | **签到链路的编排规格**（状态机、副作用边界） | [`signin-cli-spec.md`](./signin-cli-spec.md) §1–§5 | 历史段在 `archive/`，只作证据不作现行 |
 | **迁移还剩哪些步、每步退出判据** | [`go-migration-plan.md`](./go-migration-plan.md) | 逐 crate 要点在 `archive/` |

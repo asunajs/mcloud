@@ -119,7 +119,9 @@ export interface CloudStatRow {
 
 /** 某个账号最近 `days` 天的云朵日快照。id 里有 `*` 等字符，必须 encode。 */
 export const getCloudStats = (id: string, days = 7) =>
-  request<{ stats: CloudStatRow[] }>(`/api/accounts/${encodeURIComponent(id)}/cloud-stats?days=${days}`)
+  request<{ stats: CloudStatRow[] }>(
+    `/api/accounts/${encodeURIComponent(id)}/cloud-stats?days=${days}`,
+  )
 
 /** 当前身份；未登录时抛 `ApiError`（code = `unauthorized`）。 */
 export const currentSession = () => request<SessionInfo>('/api/session')

@@ -2,20 +2,26 @@
 
 > 状态：**规范**（改代码前必读；跑门禁是完成定义的一部分）
 >
-> - 入口：`bash scripts/gates-go.sh`（九条）—— "一条命令跑完全部，任一条失败即非零退出"。
-> - 权威说明：本文；分层表与 `scripts/check-go-deps.sh` 的可执行断言**互为镜像**，改一处要改另一处
+> - 入口：`node scripts/gates-go.js`（九条）—— "一条命令跑完全部，任一条失败即非零退出"。
+> - 权威说明：本文；分层表与 `scripts/check-go-deps.js` 的可执行断言**互为镜像**，改一处要改另一处
 > - **Rust 侧已随代码剥离**（2026-09-21）：七条门禁、crate 分层铁律、编译耗时实测、
 >   跨环境核证与 macOS 首跑记录，全部移入同级仓库
 >   [`../mcloud-rust/docs/dev-gates.md`](../../mcloud-rust/docs/dev-gates.md)。
 >   下面第 6–8 条是那三件**与语言无关**的脚本，从 Rust 门禁体系沿用至今，两边各跑各的。
+> - **2026-09-22 迁移补记**：门禁体系（`gates-go` / `gates-web` / `gates-scope` /
+>   `check-filenames` / `check-go-deps` / `install-hooks` / `shots`）整体由 bash 迁到
+>   **zx（Node ESM）**，仓库根 `package.json` 钉了 zx 依赖 —— 克隆后先 `npm install`，
+>   否则分类器在第一条门禁之前就因缺模块而起不来（node 会指名 `zx`，不是代码问题）。
+>   迁移按"逐条外部行为与退出码不变"验收：九条全跑的 stdout 与旧 bash 版**逐字节一致**，
+>   并各做过反向测试。剩下的 bash 只有 `.githooks/` 两个薄壳（git 只认固定文件名 + x 位）。
 
 ---
 
 ## 一条命令
 
 ```bash
-bash scripts/gates-go.sh                  # 全跑
-bash scripts/gates-go.sh test deps        # 只跑指定的几条
+node scripts/gates-go.js                  # 全跑
+node scripts/gates-go.js test deps        # 只跑指定的几条
 ```
 
 
@@ -27,8 +33,8 @@ bash scripts/gates-go.sh test deps        # 只跑指定的几条
 | 2 | `go vet $GO_PKGS` | 静态检查 —— ⚠ **≠ clippy，覆盖窄得多** | Go 版 |
 | 3 | `gofmt -l ./cmd ./internal` | 格式 | Go 版 |
 | 4 | `go test -race $GO_PKGS` | 测试 **+ 竞态** | Go 版 |
-| 5 | `bash scripts/check-go-deps.sh` | Go 侧分层铁律 | Go 版 |
-| 6 | `bash scripts/check-filenames.sh` | 文件名规则 | **复用** |
+| 5 | `node scripts/check-go-deps.js` | Go 侧分层铁律 | Go 版 |
+| 6 | `node scripts/check-filenames.js` | 文件名规则 | **复用** |
 | 7 | `node scripts/check-identifiers.cjs` | 不得有真实标识 | **复用** |
 | 8 | `node scripts/check-golden-vectors.cjs` | 黄金向量能算出自己 | **复用** |
 | 9 | `node scripts/check-go-jsontags.cjs` | 结构体字段的 `json` tag 不许漏写 | Go 版 |
@@ -37,12 +43,12 @@ bash scripts/gates-go.sh test deps        # 只跑指定的几条
 > 本仓库的时期 —— 当时 `./...` 会去遍历 `legacy/target/`（7 GB 的 cargo 构建产物，
 > 就装在那个目录里），既慢、又会在 cargo 同时改写它时撞上刚被删的临时目录而**偶发失败**。
 > 2026-09-21 Rust 已剥离到同级仓库，遍历问题不复存在，但**显式包范围保留**：
-> 它顺带把"只测交付物"这件事写进了定义里。理由的现版本见 `scripts/gates-go.sh` 顶部。
+> 它顺带把"只测交付物"这件事写进了定义里。理由的现版本见 `scripts/gates-go.js` 顶部。
 
 > ⚠⚠ **只跑子集时，末尾横幅会明说"本次 N/9 条"并列出未跑的**：
 >
 > ```
-> $ bash scripts/gates-go.sh fmt deps filenames idents jsontags    # pre-commit 那 5 条
+> $ node scripts/gates-go.js fmt deps filenames idents jsontags    # pre-commit 那 5 条
 > 门禁通过：fmt deps filenames idents jsontags（本次 5/9 条）
 > ⚠ 未跑：build vet test golden
 >   ⇒ 别把这当成"全绿"：上面这几条**这次没验**。
@@ -117,7 +123,7 @@ Rust 的 `#[derive(Serialize)]` 默认给 **snake_case** 字段名（`password_h
 
   ⚠ **`-race` 在 Windows 上需要 cgo，cgo 需要一个 C 编译器**（`go env CC`，默认 `gcc`）。
   没有它时 `go test -race` 报 `requires cgo`，**与代码无关**，但会让 `test` 红到
-  一条提交都推不出去。`scripts/gates-go.sh` 因此**先探测**：`go env CC` 命不中
+  一条提交都推不出去。`scripts/gates-go.js` 因此**先探测**：`go env CC` 命不中
   就降级成不带 `-race` 的 `go test`，并在横幅、该条结果行、末尾汇总行**三处**标出
   "未跑 -race"。装上 mingw-w64 / w64devkit 后自动恢复，不用改脚本。
 
@@ -128,7 +134,7 @@ Rust 的 `#[derive(Serialize)]` 默认给 **snake_case** 字段名（`password_h
   补齐要引 `golangci-lint`，而那是外部依赖 —— 骨架阶段刻意零第三方依赖。
   引进来之前，**不要拿 `vet` 当 `clippy` 用**。
 
-⚠ 两个易踩的实现细节（都已在 `scripts/gates-go.sh` 里处理，改脚本时别退化）：
+⚠ 两个易踩的实现细节（都已在 `scripts/gates-go.js` 里处理，改脚本时别退化）：
 `gofmt -l` **退出码恒为 0**，必须自己判输出是否为空；每条门禁的输出写**单独**日志文件，
 否则前面通过的门禁留下的字样会污染诊断（Rust 侧踩过这个坑）。
 
@@ -146,20 +152,20 @@ Rust 的 `#[derive(Serialize)]` 默认给 **snake_case** 字段名（`password_h
 | `pre-commit` | 每次提交 | `fmt` `deps` `filenames` `idents` `jsontags`（不需要编译的那五条） |
 | `pre-push` | 每次推送 | Go 侧**九条**全跑 |
 
-装一次即可：`bash scripts/install-hooks.sh`（细节见 `.githooks/README.md`）。
+装一次即可：`node scripts/install-hooks.js`（细节见 `.githooks/README.md`）。
 Rust 侧冻结后 hook 就不再碰 cargo；Rust 仓库自己的验证方式见
 [`../mcloud-rust/README.md`](../../mcloud-rust/README.md)。
 
 > ⚠ **上面那张表在 2026-09-22 之后只算"档位"，不再是"固定清单"**，两件事同时变了：
 >
-> **① web 侧有了门禁（此前是零）。** `scripts/gates-web.sh` 两条：
+> **① web 侧有了门禁（此前是零）。** `scripts/gates-web.js` 两条：
 >
 > | 门禁 | 命令 | 实测 | 档位 |
 > | --- | --- | --- | --- |
 > | `typecheck` | `npm --prefix web run typecheck`（`tsmc --noEmit`） | 1.8 s | pre-commit |
 > | `build` | `npm --prefix web run build`（`vite build`，自报 250 ms 左右） | 0.8 s | pre-push |
 >
-> （实测 = **单跑一条** `bash scripts/gates-web.sh <名>` 的墙钟，含 npm 启动那截；
+> （实测 = **单跑一条** `node scripts/gates-web.js <名>` 的墙钟，含 npm 启动那截；
 > 两条合计 2.4 s。数字会变，量法别变。）
 >
 > 分档沿用原来那句判据（**发现问题的时刻与副作用**，不是快慢）：`typecheck` 纯静态、
@@ -168,7 +174,7 @@ Rust 侧冻结后 hook 就不再碰 cargo；Rust 仓库自己的验证方式见
 > 见 [`webui-code-guide.md`](./webui-code-guide.md) §12 未决项 3），
 > 类型与打包都绿不等于页面跑得对。那条只能靠真机核验，别把它记成"有测试了"。
 >
-> **② `pre-commit` 改成按暂存范围派发**（`scripts/gates-scope.sh` 分类）：
+> **② `pre-commit` 改成按暂存范围派发**（`scripts/gates-scope.js` 分类）：
 >
 > ```
 > *.go / go.mod / go.sum  → 追加 fmt deps jsontags
@@ -185,8 +191,10 @@ Rust 侧冻结后 hook 就不再碰 cargo；Rust 仓库自己的验证方式见
 >    泄漏真实标识。按语言把它切掉，等于给最不该漏的那条开一个永远存在的洞。
 > 3. **分类器不确定时全跑**（拿不到暂存清单 ⇒ 最保守一档），失效方向只能是"多验"。
 >
-> 另外分类器自己兼了一条"**给门禁的门禁**"：派发之前先 `bash -n` 一遍
-> `scripts/gates-{go,web,scope}.sh`、两个复用脚本与两个 hook。抓的不是逻辑错，
+> 另外分类器自己兼了一条"**给门禁的门禁**"：派发之前先按扩展名过一遍语法 ——
+> `.js` 用 `node --check`、`.sh` 与两个 hook 用 `bash -n`（2026-09-22 迁 zx 后
+> 两类并存才这么分，见开头那条迁移补记），覆盖门禁脚本自己与被改的 hook。
+> 抓的不是逻辑错，
 > 是"引号没闭合、`fi` 少了"这类**现象恰好是门禁跑了而且绿了**的假绿。
 >
 > 实测（2026-09-22，反向测试）：暂存一个 `web/**` 文件 ⇒ 只跑 `filenames idents` +
@@ -258,7 +266,7 @@ Rust 源文件从来不在管辖范围 —— 那边文件名就是模块名，`
 
 **根因**：运行环境（沙箱）有时会往 `go` 的 **stdout** 里塞一句
 `Brokered program policy check unavailable`，而且**没有换行** ⇒ 它**粘到 `go list`
-输出的某几行行首**。`check-go-deps.sh` 原先用 `grep -xF`（**整行相等**）判依赖，
+输出的某几行行首**。`check-go-deps.js` 原先用 `grep -xF`（**整行相等**）判依赖，
 于是那个依赖「凭空消失」。同一份日志里还能看到它粘在脚本自己那几行 `ok …` 前面。
 
 **修法**：判据从「整行相等」改成「**定界符 + 子串**」——
@@ -276,7 +284,7 @@ Rust 源文件从来不在管辖范围 —— 那边文件名就是模块名，`
    `!! internal/exec 依赖了 net/http —— 违反 IO 隔离约束`（**精确性没有丢**），还原后转绿。
 
 > 📌 这条属于"**偶发、且把人指向错误方向**"的红 —— 比门禁缺失更危险的那一类
-> （见 §6.1 与 `scripts/gates-go.sh` 顶部那条 `./...` 的注释）：
+> （见 §6.1 与 `scripts/gates-go.js` 顶部那条 `./...` 的注释）：
 > 一旦学会"重跑一次就好"，防线就再也不起作用了。
 > ⇒ 判据的输入**不可信**时，要么让它**准确报出**原因，要么让判据**不依赖那个形状**。
 
@@ -288,7 +296,7 @@ Rust 源文件从来不在管辖范围 —— 那边文件名就是模块名，`
 Go 侧的分层是 `internal/` 八层，与 Rust 的 8-crate 分层**互为映射**：
 包结构、依赖方向断言与"哪些保证从编译期挪到了运行期/门禁"的完整理由，
 见 [`go-migration-plan.md`](./go-migration-plan.md) §5，可执行断言在
-`scripts/check-go-deps.sh`（违反即非零退出，而不是文档里写"请勿依赖"）。
+`scripts/check-go-deps.js`（违反即非零退出，而不是文档里写"请勿依赖"）。
 
 原 Rust `crates/` 的分层表与 `check-deps.sh` 镜像文档，随代码移入
 [`../mcloud-rust/docs/dev-gates.md`](../../mcloud-rust/docs/dev-gates.md)。

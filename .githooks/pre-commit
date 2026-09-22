@@ -9,18 +9,20 @@
 # ⚠ 2026-09-22 起从"写死五条"改成"按范围派发"，并且**加上了 web 侧**
 #   （此前整个仓库对 `web/**` 一条自动检查都没有）。
 #   为什么这样切是安全的、哪两条永远不跳过 —— 判据全在
-#   `scripts/gates-scope.sh` 的开头与 `.githooks/README.md`，改之前先读那两处。
+#   `scripts/gates-scope.js` 的开头与 `.githooks/README.md`，改之前先读那两处。
 #
-# 详情见同目录 README.md。手动安装：bash scripts/install-hooks.sh
+# ⚠ 2026-09-22 起被派发的三个脚本已从 bash 迁到 zx（node）：本文件**只剩**
+#   "调分类器 → 解析 KEY= → 按名字派发"这一层薄壳。git 只认固定文件名
+#   （pre-commit / pre-push）且要 x 位，所以这层壳仍是 bash —— 逻辑全部在 .js 里。
 #
-# 这个文件本身很薄 —— 逻辑在 scripts/gates-scope.sh（分谁）与
-# scripts/gates-go.sh、scripts/gates-web.sh（跑什么）里，两个 hook 共用。
+# 详情见同目录 README.md。手动安装：node scripts/install-hooks.js
 #
-# ⚠ 用 `bash <路径>` 而不是直接 `exec <路径>`：`scripts/*.sh` 在库里是 **100644**
-#    （没有 x 位），直接 exec 会得到 `Permission denied`，hook 在提交路径上**拦住每一次提交**。
-#    而"给 scripts/ 补 x 位"是第二份真相 —— 全部文档与用法都写的是 `bash scripts/gates-go.sh`，
-#    那就让 x 位不参与这个契约。本文件自己必须可执行（git 对没有 x 位的 hook 直接静默跳过），
-#    这一点由 `bash scripts/install-hooks.sh` 保证。
+# 这个文件本身很薄 —— 逻辑在 scripts/gates-scope.js（分谁）与
+# scripts/gates-go.js、scripts/gates-web.js（跑什么）里，两个 hook 共用。
+#
+# ⚠ 用 `node <路径>` 调用：脚本在库里没有 x 位也不该有 —— x 位不参与契约，
+#    本文件自己必须可执行（git 对没有 x 位的 hook 直接静默跳过），
+#    这一点由 `node scripts/install-hooks.js` 保证。
 #
 # ⚠ 这里**不再用 `exec`**：现在要按顺序跑两个脚本并汇总退出码，
 #    `exec` 会把 shell 换掉，第一条的失败就再也传不到第二次的判定上。
@@ -35,7 +37,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
-scope_out="$(bash scripts/gates-scope.sh)"
+scope_out="$(node scripts/gates-scope.js)"
 scope_code=$?
 if [ "$scope_code" -ne 0 ]; then
   # 分类器自己不通 ⇒ 这道闸无法判断该跑什么。此时**不放行**：
@@ -54,16 +56,16 @@ printf '\033[1m提交门禁：按暂存范围派发 —— %s\033[0m\n' "$note"
 FAILED=()
 
 # ⚠ 不加引号的 `$go_gates` 是**故意的**：那是一串门禁名，要按空格切成多个参数。
-#   值只可能来自 `gates-scope.sh` 里写死的三张名单（不含通配符与空格），
+#   值只可能来自 `gates-scope.js` 里写死的三张名单（不含通配符与空格），
 #   所以这里不需要数组，也不会被 glob 展开。
 if [ -n "$go_gates" ]; then
   # shellcheck disable=SC2086
-  bash scripts/gates-go.sh $go_gates || FAILED+=("gates-go.sh")
+  node scripts/gates-go.js $go_gates || FAILED+=("gates-go.js")
 fi
 
 if [ -n "$web_gates" ]; then
   # shellcheck disable=SC2086
-  bash scripts/gates-web.sh $web_gates || FAILED+=("gates-web.sh")
+  node scripts/gates-web.js $web_gates || FAILED+=("gates-web.js")
 else
   # 跳过要**说出来**：静默跳过与"跑了且绿"在终端上长得一样，
   # 而这两件事的差别正是这套门禁存在的理由。

@@ -129,7 +129,9 @@ export const AuthPage = (props: AuthPageProps) => {
    * 这里用**查表**而不是 `input-${state}` —— Tailwind 只认字面量（§9.1①）。
    */
   const inputClass = (invalid: boolean, extra = '') =>
-    invalid ? `input input-bordered input-error w-full ${extra}` : `input input-bordered w-full ${extra}`
+    invalid
+      ? `input input-bordered input-error w-full ${extra}`
+      : `input input-bordered w-full ${extra}`
 
   return (
     <div class="relative flex min-h-screen items-center justify-center bg-base-200 p-4">

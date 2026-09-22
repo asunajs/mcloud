@@ -25,6 +25,11 @@
 >   **本文的进度结论没有变化**。写作约定（Go 落点怎么标、归档怎么读）在
 >   [`README.md`](./README.md) 末尾两节；逐项 Go 现状的核对记录在
 >   [`business-feature-inventory.md`](./business-feature-inventory.md) 抬头那条 09-22 块里。
+> - **2026-09-22（同日第二轮）**：**门禁体系从 bash 迁到 zx** ——
+>   `gates-go` / `gates-web` / `gates-scope` / `check-filenames` / `check-go-deps` /
+>   `install-hooks` / `shots` 全部改为 `.js`（旧 `.sh` 已删），依赖钉在仓库根
+>   `package.json`（zx），克隆后先 `npm install`。剩下的 bash 只有 `.githooks/`
+>   两个薄壳。验收口径与逐条差异测试见 [`dev-gates.md`](./dev-gates.md) 抬头「迁移补记」。
 > - 规划（**写于动工前**，进度不要以它为准）：[`rust-rewrite-plan.md`](../../mcloud-rust/docs/rust-rewrite-plan.md)
 > - 实现顺序（先做哪项能力）：同文档 §7.1
 > - 门禁怎么跑：[`dev-gates.md`](./dev-gates.md)

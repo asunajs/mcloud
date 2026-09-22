@@ -3,6 +3,9 @@
 #
 # ⚠ 2026-09-20 起跑的是 **Go 侧九条**；Rust 侧已冻结到 legacy/，不再自动跑。
 #    2026-09-22 追加 web 两条。
+#    2026-09-22 起被派发的脚本已从 bash 迁到 zx（node）；本文件只剩
+#    "调两个脚本并汇总退出码"这层薄壳 —— git 只认固定文件名且要 x 位，
+#    壳保持 bash，逻辑全在 .js 里（与 pre-commit 同一约定）。
 #
 # # 为什么这里**不**按范围派发（pre-commit 那样）
 #
@@ -15,10 +18,7 @@
 #   少了这层兜底之后，被 pre-commit 跳掉的那些检查由谁补 —— 没有答案就是净损失。
 #
 # 为什么不放在 pre-commit：见同目录 README.md 的"两道闸，各拦各的"。
-# 手动安装：bash scripts/install-hooks.sh
-#
-# ⚠ 用 `bash <路径>` 而不是直接 `exec <路径>` —— 理由见同目录 pre-commit 的说明
-#    （`scripts/*.sh` 在库里没有 x 位，直接 exec 会拦住每一次推送）。
+# 手动安装：node scripts/install-hooks.js
 #
 # ⚠ 不用 `exec`：现在有两个脚本要跑，且两条都得算进退出码。
 #   早先这里是 `exec bash scripts/gates-go.sh` —— 那种写法下第二条永远轮不到，
@@ -29,8 +29,8 @@ cd "$(dirname "$0")/.."
 
 FAILED=()
 
-bash scripts/gates-go.sh || FAILED+=("gates-go.sh")
-bash scripts/gates-web.sh || FAILED+=("gates-web.sh")
+node scripts/gates-go.js || FAILED+=("gates-go.js")
+node scripts/gates-web.js || FAILED+=("gates-web.js")
 
 if [ ${#FAILED[@]} -gt 0 ]; then
   printf '\033[31m推送门禁未通过：%s\033[0m\n' "${FAILED[*]}"

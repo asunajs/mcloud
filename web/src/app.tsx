@@ -388,12 +388,8 @@ export default defineVaporComponent(() => {
               <span class={backendDot.value} aria-hidden="true" />
               <span class="font-medium">{backendHead.value}</span>
             </div>
-            {backendLine2.value ? (
-              <div class="px-1 opacity-70">{backendLine2.value}</div>
-            ) : null}
-            {backendLine3.value ? (
-              <div class="px-1 opacity-70">{backendLine3.value}</div>
-            ) : null}
+            {backendLine2.value ? <div class="px-1 opacity-70">{backendLine2.value}</div> : null}
+            {backendLine3.value ? <div class="px-1 opacity-70">{backendLine3.value}</div> : null}
           </div>
         </div>
       </div>

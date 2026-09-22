@@ -1,0 +1,186 @@
+#!/usr/bin/env node
+// Go 侧依赖方向门禁 —— 唯一现役实现。2026-09-22 由 bash 版逐条迁移而来，
+// 三类断言、判据与输出文案不变。
+//
+// # 为什么这条门禁**必需**
+//
+// Rust 时代「纯层不许有 IO」是**编译期事实**：crate 的 Cargo.toml 里根本没有
+// reqwest，想违反也违反不了。Go 的接口是**结构性实现** —— 任何包都能满足
+// `internal/core` 定义的契约，所以「这一层不许有 IO」从编译期事实
+// **降级成 lint 约定**。没有这条门禁，它就只是一句写在文档里的话。
+//
+// 这不是"Go 更差"，是"Go 的这条防线换了个位置"：从编译器挪到了这里。
+//
+// # 三类断言
+//
+//   PURE_PKGS            纯层：不得含 IO 包、也不得依赖 internal/io
+//   COMPOSITION_ROOTS    组装根：**必须**依赖 internal/io（反方向也要断言）
+//   FORBIDDEN_EDGES      产物之间不得互相依赖，只能共用 internal/app
+//
+// ⚠ 用 `go list -deps` 而**不加** `-test`：前者是生产依赖 ——
+//   测试里允许用临时目录、假随机源之类的工具，不该被这条约束管到。
+//   加了 `-test` 会把测试依赖也算进来，等于把约束放宽到没有。
+import process from 'node:process'
+import { $, cd } from 'zx'
+
+cd(new URL('..', import.meta.url).pathname)
+
+const MODULE = 'github.com/catlair/mcloud'
+
+// 纯层：必须既不含 IO 库、也不依赖本仓 IO 层
+const PURE_PKGS = ['core', 'upstream', 'capabilities', 'exec']
+
+// 组装根：**必须**依赖 internal/io —— 它负责把 io 的实现注入 core 定义的契约。
+// 如果把组装根也当成"纯层"，门禁会永远红；而如果把组装根的检查整个去掉，
+// 又会出现"没人接上 IO 实现"的静默死配置。所以两个方向都要断言。
+const COMPOSITION_ROOTS = ['app', 'server']
+
+// 产物之间的**禁止**依赖。
+//
+// CLI 与 HTTP 服务是两个独立产物，它们只能共用 internal/app。
+// 一旦 CLI 依赖了 server，命令行工具就会连带拿到路由 / 静态资源那一整套 ——
+// 而这件事**不会让任何测试变红**，只会让二进制悄悄变大、
+// 让"CLI 能在没有 HTTP 环境的地方跑"这条性质消失。所以要在这里挡住。
+const FORBIDDEN_EDGES = ['cli:server']
+
+// 纯层禁止出现的 import path。
+//
+// 只列两个标准库入口而不是穷举 —— 判据是"它是不是 IO 的出入口"：
+//   net/http      HTTP 客户端与服务的唯一入口
+//   database/sql  数据库的唯一入口
+// 再加本仓的 IO 层（那是把上面两个包起来的地方）。
+const FORBIDDEN_IMPORTS = ['net/http', 'database/sql', `${MODULE}/internal/io`]
+
+let fail = false
+const say = console.log
+
+// 某包的生产依赖闭包（每行一个 import path，两侧带 `|` 定界符）。
+//
+// ⚠⚠ 为什么要有定界符，而不是拿整行相等去比：
+//   运行环境（沙箱）有时会往 `go` 的 stdout 里塞一句**没有换行**的
+//   `Brokered program policy check unavailable`。它没有换行 ⇒ **粘到某几行的行首**，
+//   于是"整行相等"再也找不到那个依赖 —— 而报出来的话是
+//   「组装根必须把 IO 实现接上」，**指向一个根本不存在的分层问题**。
+//   ⚠ 这类「偶发、且把人指向错误方向」的红比门禁缺失更危险：人会学会「重跑一次就好」。
+//   ⇒ 判据用「**定界符 + 子串**」：前面粘了什么都无所谓，
+//     而 `|net/http|` 仍然**不会**命中 `|net/http/httputil|` —— 精确性没有丢。
+//   ⚠ 别改成裸子串（`deps.includes(path)`）：那会让 `net/http` 误命中
+//     `net/http/httputil`，纯层那条断言当场失效。
+async function depsOf(pkg) {
+  const r = await $`go list -deps -f ${'|{{.ImportPath}}|'} ${pkg}`.quiet().nothrow()
+  return r.stdout
+}
+const hasDep = (path, deps) => deps.includes(`|${path}|`)
+
+// ── 纯层 ────────────────────────────────────────────────────────────
+for (const p of PURE_PKGS) {
+  const deps = await depsOf(`./internal/${p}`)
+
+  if (deps.trim() === '') {
+    say(`!! 无法解析 ${MODULE}/internal/${p} 的依赖图（包是否存在？）`)
+    fail = true
+    continue
+  }
+
+  let pkgBad = false
+  for (const bad of FORBIDDEN_IMPORTS) {
+    if (hasDep(bad, deps)) {
+      say(`!! internal/${p} 依赖了 ${bad} —— 违反 IO 隔离约束`)
+      fail = true
+      pkgBad = true
+    }
+  }
+
+  // 只在没报错时才打 ok。否则同一行会既报错又说 ok，
+  // 读日志的人会以为这条过了 —— 那比不打更糟。
+  if (!pkgBad) say(`ok internal/${p}（纯层）`)
+}
+
+// ── 组装根 ──────────────────────────────────────────────────────────
+for (const p of COMPOSITION_ROOTS) {
+  const deps = await depsOf(`./internal/${p}`)
+
+  if (deps.trim() === '') {
+    say(`!! 无法解析 ${MODULE}/internal/${p} 的依赖图`)
+    fail = true
+    continue
+  }
+
+  if (!hasDep(`${MODULE}/internal/io`, deps)) {
+    say(`!! internal/${p} 未依赖 internal/io —— 组装根必须把 IO 实现接上`)
+    fail = true
+  } else {
+    say(`ok internal/${p}（组装根，允许含 IO）`)
+  }
+}
+
+// ── 产物之间 ────────────────────────────────────────────────────────
+for (const edge of FORBIDDEN_EDGES) {
+  const [from, to] = edge.split(':')
+  const deps = await depsOf(`./internal/${from}`)
+
+  if (deps.trim() === '') {
+    say(`!! 无法解析 ${MODULE}/internal/${from} 的依赖图`)
+    fail = true
+    continue
+  }
+
+  if (hasDep(`${MODULE}/internal/${to}`, deps)) {
+    say(`!! internal/${from} 依赖了 internal/${to} —— 产物之间不得互相依赖，只能共用 internal/app`)
+    fail = true
+  } else {
+    say(`ok internal/${from} 未依赖 internal/${to}`)
+  }
+}
+
+// ── 测试专用包不得被生产代码依赖 ────────────────────────────────────
+//
+// internal/golden 会读磁盘，它只供 `_test.go` 使用。测试的 import 不在
+// `go list -deps`（不带 -test）的输出里，所以这条能干净地判出"生产代码
+// 误用了它"。若某天它出现在生产依赖图里，说明有东西放错了层。
+// ⚠ 用显式包路径而不是 `./...`：显式范围把"只测交付物"写进定义，
+//   也避开历史上遍历构建产物目录（legacy/target/ 时代）的偶发失败。
+const allPkgs = (await $`go list ./cmd/... ./internal/...`.quiet().nothrow()).stdout
+  .split('\n')
+  .filter(Boolean)
+  .filter((pkg) => pkg !== `${MODULE}/internal/golden`)
+for (const pkg of allPkgs) {
+  if (hasDep(`${MODULE}/internal/golden`, await depsOf(pkg))) {
+    say(`!! ${pkg} 依赖了 internal/golden —— 它只供测试使用`)
+    fail = true
+  }
+}
+say('ok 生产代码未依赖 internal/golden')
+
+// ── 覆盖性：所有 .go 文件都必须在 cmd/ 或 internal/ 下 ──────────────
+//
+// 上面几条用的是**显式包路径**（不用 `./...`，理由见上）。
+// 代价是"新加一个顶层目录会被静默漏掉"。这条断言就是那个代价的对价：
+// 漏掉的那一刻它会红，而不是让新目录**永远不被任何 Go 门禁扫到**。
+//
+// 用 `git ls-files` 而不是遍历文件系统：构建产物与编辑器临时文件不该参与判断。
+const stray = (await $`git ls-files *.go`.quiet().nothrow()).stdout
+  .split('\n')
+  .filter(Boolean)
+  .filter((f) => !f.startsWith('cmd/') && !f.startsWith('internal/'))
+if (stray.length > 0) {
+  say('!! 以下 .go 文件不在 cmd/ 或 internal/ 下，不会被任何 Go 门禁覆盖：')
+  for (const f of stray) say(f)
+  say('   → 要么把它挪进去，要么在 gates-go.sh 的 GO_PKGS 与本脚本里显式加上它。')
+  fail = true
+} else {
+  say('ok 所有 .go 文件都在 cmd/ 或 internal/ 下')
+}
+
+if (fail) {
+  say('')
+  say('依赖方向门禁未通过。请把 IO 实现下沉到 internal/io，')
+  say('纯层只依赖 internal/core 中定义的契约。')
+  say('分层表见 docs/dev-gates.md「分层铁律」。')
+  process.exit(1)
+}
+
+say('')
+say(
+  `依赖方向门禁通过：${PURE_PKGS.join(' ')} 均不含 ${FORBIDDEN_IMPORTS.join(' ')}，且未依赖 internal/io`,
+)
