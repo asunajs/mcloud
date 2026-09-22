@@ -42,13 +42,17 @@ func (o *output) note(format string, args ...any) {
 // json 把值以两空格缩进打到 stdout。
 //
 // 缩进不是装饰：Rust 侧 `to_string_pretty` 就是 pretty，两边输出可以逐字对拍。
+// ⚠ 必须关 HTML 转义（同 core.marshalJSON 的坑 #32）：`json.MarshalIndent`
+// 默认把 `<>&` 转成 `\u003c…`，而 serde 不会 —— 开着它谈"逐字对拍"是假的。
 func (o *output) json(value any) error {
-	encoded, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(value); err != nil {
 		return fmt.Errorf("序列化输出失败: %w", err)
 	}
-	encoded = append(encoded, '\n')
-	_, err = o.stdout.Write(encoded)
+	_, err := o.stdout.Write(buf.Bytes())
 	return err
 }
 

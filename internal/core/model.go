@@ -627,12 +627,16 @@ const (
 	TargetPipeline
 )
 
-// String 返回 JSON 里的 `kind` 标签。未知值返回空串。
+// String 返回 JSON 里的 `kind` 标签。未知值返回空串（枚举漏态守卫的判据，
+// 理由同 [CapabilityKind.String] —— 兜底归约成某个已知值会让真值表守卫失效）。
 func (k ScheduleTargetKind) String() string {
-	if k == TargetPipeline {
+	switch k {
+	case TargetCapability:
+		return "capability"
+	case TargetPipeline:
 		return "pipeline"
 	}
-	return "capability"
+	return ""
 }
 
 // ScheduleTarget 是定时任务的执行目标（旧版的 `task?` 与 `pipelineId?` 二选一）。
@@ -939,10 +943,10 @@ type ExchangeBinding struct {
 	PrizeName *string `json:"prize_name"`
 }
 
-// DefaultExchangeWindows 是抢兑窗口的默认值（旧 `exchange-schedule.ts` 的 `DEFAULT_WINDOWS`）。
+// defaultExchangeWindows 是抢兑窗口的默认值（旧 `exchange-schedule.ts` 的 `DEFAULT_WINDOWS`）。
 //
 // 这两个时刻是 10 点与 12 点开抢前的 20 秒 —— **提前量由旧版实测得出，不是随手写的。**
-var DefaultExchangeWindows = []string{"09:59:40", "11:59:40"}
+var defaultExchangeWindows = []string{"09:59:40", "11:59:40"}
 
 // ExchangeConfig 是定时抢兑配置（旧 `data/exchange.json`，单行表）。
 type ExchangeConfig struct {
@@ -958,13 +962,13 @@ type ExchangeConfig struct {
 	UpdatedAt   *time.Time `json:"updated_at"`
 }
 
-// NewExchangeConfig 返回默认配置：默认**关闭**，窗口取 [DefaultExchangeWindows]。
+// NewExchangeConfig 返回默认配置：默认**关闭**，窗口取 [defaultExchangeWindows]。
 //
 // ⚠ 默认关闭不是保守，是**必须**：抢兑会真的扣云朵，默认开启等于
 // 用户一升级就自动开始花钱。
 func NewExchangeConfig() ExchangeConfig {
-	windows := make([]string, len(DefaultExchangeWindows))
-	copy(windows, DefaultExchangeWindows)
+	windows := make([]string, len(defaultExchangeWindows))
+	copy(windows, defaultExchangeWindows)
 	return ExchangeConfig{
 		Enabled:     false,
 		Windows:     windows,
@@ -977,8 +981,8 @@ func NewExchangeConfig() ExchangeConfig {
 // 界面偏好
 // ─────────────────────────────────────────────────────────────────────────────
 
-// WebuiPages 是允许记忆的页面标识（与前端左侧菜单一致）。
-var WebuiPages = []string{"tasks", "pipelines", "schedules", "accounts", "history", "config"}
+// webuiPages 是允许记忆的页面标识（与前端左侧菜单一致）。
+var webuiPages = []string{"tasks", "pipelines", "schedules", "accounts", "history", "config"}
 
 // DefaultWebuiPage 是界面偏好默认页。
 const DefaultWebuiPage = "tasks"
@@ -1005,7 +1009,7 @@ func NewWebuiConfig() WebuiConfig {
 // ⚠ 这是**安全**检查不只是整洁：`last_page` 会进前端的路由，
 // 不收白名单就是一个不受限的路径输入。
 func (c *WebuiConfig) NormalizePage() {
-	for _, p := range WebuiPages {
+	for _, p := range webuiPages {
 		if c.LastPage == p {
 			return
 		}

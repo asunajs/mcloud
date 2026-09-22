@@ -82,9 +82,9 @@ const Client = "app"
 // 上游不校验的字段一旦哪天开始校验，错的那个是**静默失效**，不会报错。
 const ToSourceID = "001005"
 
-// H5SignSaltKey 是 H5 签名用的盐值编号 —— [core.SignSaltMap] 里的 `sekaMdYYLIZfbCfm`。
+// H5SignSaltKey 是 H5 签名用的盐值编号 —— core 的 signSaltMap 里的 `sekaMdYYLIZfbCfm`。
 //
-// 单列成常量而不是在调用点写 `2`：`SignSaltMap` 哪天被改动，
+// 单列成常量而不是在调用点写 `2`：签名盐表哪天被改动，
 // 这里会有一条测试直接失败，而不是变成"签到忽然回 401"。
 const H5SignSaltKey uint8 = 2
 

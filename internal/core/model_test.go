@@ -351,10 +351,10 @@ func TestNewExchangeConfigDefaultsToDisabledWithDefaultWindows(t *testing.T) {
 	if c.Enabled {
 		t.Fatal("抢兑默认必须是**关闭**的：它会真的扣云朵，默认开启等于一升级就自动花钱")
 	}
-	if len(c.Windows) != len(DefaultExchangeWindows) {
-		t.Fatalf("窗口数实得 %d，期望 %d", len(c.Windows), len(DefaultExchangeWindows))
+	if len(c.Windows) != len(defaultExchangeWindows) {
+		t.Fatalf("窗口数实得 %d，期望 %d", len(c.Windows), len(defaultExchangeWindows))
 	}
-	for i, w := range DefaultExchangeWindows {
+	for i, w := range defaultExchangeWindows {
 		if c.Windows[i] != w {
 			t.Fatalf("窗口[%d] 实得 %q，期望 %q", i, c.Windows[i], w)
 		}

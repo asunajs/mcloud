@@ -90,7 +90,7 @@ func TestLoginVectorConstantsAllHaveAGoCounterpart(t *testing.T) {
 		"AES_ECB_KEY_PROD": LoginAESKey,
 		"AES_ECB_KEY_TEST": LoginAESKeyTest,
 		"PUZZLE_KEY":       PuzzleAESKey,
-		"PUZZLE_IV":        string(PuzzleAESIV[:]),
+		"PUZZLE_IV":        string(puzzleAESIV[:]),
 		"HASHTEXT":         PasswordHashPrefix,
 	}
 
@@ -291,7 +291,7 @@ func TestLoginVectorPuzzleAnswerMatchesTheRealCaptures(t *testing.T) {
 		// 实拍那两条自带 `ivAscii`，合成的那六条省略了它（生成器只给实拍写）；
 		// 两者都必须等于同一个常量，否则"前缀恒定"就不是常量造成的。
 		if iv, ok := e["ivAscii"]; ok {
-			if got, want := vectorString(t, iv), string(PuzzleAESIV[:]); got != want {
+			if got, want := vectorString(t, iv), string(puzzleAESIV[:]); got != want {
 				t.Errorf("%s: 向量声明的 IV 是 %q，代码里是 %q", name, got, want)
 			}
 		}
@@ -300,7 +300,7 @@ func TestLoginVectorPuzzleAnswerMatchesTheRealCaptures(t *testing.T) {
 		}
 
 		plain := vectorString(t, e["plainText"])
-		got, err := core.AESDynamicIVEncrypt(PuzzleAESKey, plain, PuzzleAESIV)
+		got, err := core.AESDynamicIVEncrypt(PuzzleAESKey, plain, puzzleAESIV)
 		if err != nil {
 			t.Errorf("%s: %v", name, err)
 			continue
@@ -322,7 +322,7 @@ func TestLoginVectorPuzzleAnswerMatchesTheRealCaptures(t *testing.T) {
 		if total, ok := e["totalBytes"].(float64); ok && len(payload) != int(total) {
 			t.Errorf("%s: 载荷 %d 字节，向量说 %d", name, len(payload), int(total))
 		}
-		if len(payload) < 16 || string(payload[:16]) != string(PuzzleAESIV[:]) {
+		if len(payload) < 16 || string(payload[:16]) != string(puzzleAESIV[:]) {
 			t.Errorf("%s: 前 16 字节不是常量 IV", name)
 		}
 		if cipher, ok := e["cipherB64"]; ok {

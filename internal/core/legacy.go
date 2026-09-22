@@ -522,13 +522,13 @@ func NormalizePipelineAccounts(accounts []any, legacyAccount *any) []any {
 //   - `remember_last_page`：`raw !== false` → **缺省就是 `true`**；
 //   - `log_expanded` / `background_run`：`raw === true` → **缺省就是 `false`**。
 //
-// `last_page` 不在 [WebuiPages] 白名单内则回落到 [DefaultWebuiPage]。
+// `last_page` 不在 [webuiPages] 白名单内则回落到 [DefaultWebuiPage]。
 //
 // 返回的是**新领域类型** [WebuiConfig]，不另设一个"规整后"的孪生类型 ——
 // 两个只差字段类型的结构体，迟早会有一边忘记同步。
 func NormalizeWebui(raw *LegacyWebuiFile) WebuiConfig {
 	page := DefaultWebuiPage
-	if raw.LastPage != nil && containsString(WebuiPages, *raw.LastPage) {
+	if raw.LastPage != nil && containsString(webuiPages, *raw.LastPage) {
 		page = *raw.LastPage
 	}
 	return WebuiConfig{

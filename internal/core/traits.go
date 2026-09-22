@@ -187,7 +187,19 @@ func NewRequestPost(url string) HTTPRequest {
 
 // Header 追加一个头（链式）。
 func (r HTTPRequest) WithHeader(key, value string) HTTPRequest {
-	r.Headers = append(r.Headers, HeaderPair{key, value})
+	return r.appendHeader(key, value)
+}
+
+// appendHeader 返回**带着新 Headers 副本**的 r。
+//
+// ⚠ 必须拷贝而不是直接 append：接收者是值，但底层数组仍与调用方共享 ——
+// cap>len 时一次 append 会写穿到原请求（或另一个同源副本）的 Headers 尾部。
+// Rust 的 `Vec` 移动语义没有这个洞，翻译过来风险是 Go 新引入的。
+func (r HTTPRequest) appendHeader(key, value string) HTTPRequest {
+	headers := make([]HeaderPair, len(r.Headers)+1)
+	copy(headers, r.Headers)
+	headers[len(r.Headers)] = HeaderPair{key, value}
+	r.Headers = headers
 	return r
 }
 
@@ -207,8 +219,7 @@ func (r HTTPRequest) WithJSONBody(value any) (HTTPRequest, error) {
 			return r, nil
 		}
 	}
-	r.Headers = append(r.Headers, HeaderPair{"content-type", "application/json"})
-	return r, nil
+	return r.appendHeader("content-type", "application/json"), nil
 }
 
 // WithTimeoutMS 设置超时（链式）。

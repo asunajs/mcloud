@@ -24,6 +24,7 @@ package capabilities
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"time"
 
@@ -33,7 +34,7 @@ import (
 
 // QRPollInterval 是扫码轮询间隔。
 //
-// 实测客户端是 `setInterval` 1000ms（见 docs/upstream-login-protocol.md §3）。
+// 实测客户端是 `setInterval` 1000ms（见 docs/upstream/login-protocol.md §3）。
 // ⚠ 用 [time.Duration] 而不是"毫秒数"：Go 里一段时间就是 `time.Duration`，
 // 传裸数字（尤其还带着 `MS` 后缀）等于把单位塞进名字里 —— 哪天有人按秒传，
 // 编译器不会说话，只有轮询会忽然快 1000 倍。
@@ -647,8 +648,13 @@ func userInfoField(userInfo any, name string) (string, bool) {
 }
 
 // asError 把存储层返回的 `error` 归一成 `*core.Error`。
+//
+// ⚠ 用 errors.As 而不是裸类型断言：store 常见 `fmt.Errorf("…: %w", coreErr)`
+// 包一层，裸断言会把那些错误压平成 Internal，丢掉原本的类别与状态码
+// （同 [core.KindOf] 那条纪律）。
 func asError(err error, context string) *core.Error {
-	if ce, ok := err.(*core.Error); ok {
+	var ce *core.Error
+	if errors.As(err, &ce) {
 		return ce
 	}
 	return core.NewInternal(fmt.Sprintf("%s: %v", context, err))

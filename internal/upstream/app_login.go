@@ -76,7 +76,7 @@
 // ## 两个 IV 不是一回事（最容易搞错的地方）
 //
 //   - **取题**响应的 `puzzleLeft`：**动态 IV**，就藏在它自己的前 16 字节里；
-//   - **提交**答案的 `puzzleVerfycode`：**固定 IV** `E526E1F3F9765444`（[PuzzleAESIV]）。
+//   - **提交**答案的 `puzzleVerfycode`：**固定 IV** `E526E1F3F9765444`（[puzzleAESIV]）。
 //
 // 实测把提交侧也换成随机 IV 会失败。
 //
@@ -230,7 +230,7 @@ func NewAppSendSmsCodeBody(phone, puzzleVerfycode string) AppSendSmsCodeBody {
 // NewAppSendSmsCodeBodyWithSlider 是带滑块的发码请求体：在基础 body 上填上
 // **已编码**的滑块答案。
 //
-// # 为什么直接复用 PC 端的编码（[PuzzleAESKey] + [PuzzleAESIV]）
+// # 为什么直接复用 PC 端的编码（[PuzzleAESKey] + [puzzleAESIV]）
 //
 // 因为实测证明这就是**同一个第一方滑块**：取图接口是同一个 `/user/verfycode`、
 // 同一台主机，编码出来也是同样的 `base64(固定IV ‖ AES-128-CBC/PKCS7)`。
@@ -240,7 +240,7 @@ func NewAppSendSmsCodeBody(phone, puzzleVerfycode string) AppSendSmsCodeBody {
 // 单独成函数而不是给 [NewAppSendSmsCodeBody] 加参数，理由与 PC 端同款：
 // 走滑块是**异常路径**，让它在调用点显式可见比埋一个 `Option` 更难忽略。
 func NewAppSendSmsCodeBodyWithSlider(phone, sliderAnswer string) (AppSendSmsCodeBody, *core.Error) {
-	encoded, err := core.AESDynamicIVEncrypt(PuzzleAESKey, sliderAnswer, PuzzleAESIV)
+	encoded, err := core.AESDynamicIVEncrypt(PuzzleAESKey, sliderAnswer, puzzleAESIV)
 	if err != nil {
 		return AppSendSmsCodeBody{}, asCoreError(err, "加密滑块答案失败")
 	}

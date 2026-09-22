@@ -13,8 +13,10 @@ import (
 // 退 2；放进 RunE 就变成运行错误退 1，而脚本正是靠这个差值区分
 // "我的参数写错了"和"这次没跑成"。
 //
-// 接受的大小写与 clap 一致：ValueEnum 认 kebab-case 的字面量，
-// 这里额外容忍大小写（`--platform macOS` 不该因为驼峰而失败）。
+// 接受的大小写与 clap 一致：ValueEnum 默认**大小写敏感**，只认变体的
+// kebab-case 字面量（`Macos` → `macos`）。这里若用 EqualFold 放宽，
+// `--platform macOS` 在 Rust 侧退 2、在 Go 侧退 0 —— 可接受输入集是
+// 冻结的对拍面，不能被"顺手更友好"改掉。
 type enumValue struct {
 	allowed []string
 	dest    *string
@@ -33,7 +35,7 @@ func (e *enumValue) String() string {
 
 func (e *enumValue) Set(raw string) error {
 	for _, option := range e.allowed {
-		if strings.EqualFold(raw, option) {
+		if raw == option {
 			*e.dest = option
 			return nil
 		}

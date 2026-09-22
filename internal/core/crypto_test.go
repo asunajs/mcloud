@@ -328,16 +328,16 @@ func TestConstantsMatchTheVectorFile(t *testing.T) {
 	// 常量单独钉一次：它们是"从 TS 源码抄来的事实"，
 	// 改了它们等于换了密钥，必须有人主动改这里。
 	salts := obj(t, c["SIGN_SALT_MAP"], "SIGN_SALT_MAP")
-	if got := str(t, salts, "1"); got != SignSaltMap[0].Salt {
+	if got := str(t, salts, "1"); got != signSaltMap[0].Salt {
 		t.Fatalf("盐 1 不一致：%s", got)
 	}
-	if got := str(t, salts, "2"); got != SignSaltMap[1].Salt {
+	if got := str(t, salts, "2"); got != signSaltMap[1].Salt {
 		t.Fatalf("盐 2 不一致：%s", got)
 	}
 	if got := str(t, c, "REFRESH_TOKEN_KEY"); got != RefreshTokenKey {
 		t.Fatalf("REFRESH_TOKEN_KEY 不一致：%s", got)
 	}
-	if got := str(t, c, "AES_FIXED_IV"); got != string(AESFixedIV[:]) {
+	if got := str(t, c, "AES_FIXED_IV"); got != string(aesFixedIV[:]) {
 		t.Fatalf("AES_FIXED_IV 不一致：%s", got)
 	}
 	if got := str(t, c, "SKLAND_PUBLIC_KEY"); got != SklandPublicKeyB64 {
@@ -671,13 +671,13 @@ func TestSignHeaderMatchesTSVectors(t *testing.T) {
 }
 
 func TestUnknownSaltFallsBackToFirst(t *testing.T) {
-	if got := SignSalt(99); got != SignSaltMap[0].Salt {
+	if got := SignSalt(99); got != signSaltMap[0].Salt {
 		t.Fatalf("未知 saltKey 应回落到第一个盐：%s", got)
 	}
-	if got := SignSalt(1); got != SignSaltMap[0].Salt {
+	if got := SignSalt(1); got != signSaltMap[0].Salt {
 		t.Fatalf("saltKey=1：%s", got)
 	}
-	if got := SignSalt(2); got != SignSaltMap[1].Salt {
+	if got := SignSalt(2); got != signSaltMap[1].Salt {
 		t.Fatalf("saltKey=2：%s", got)
 	}
 }

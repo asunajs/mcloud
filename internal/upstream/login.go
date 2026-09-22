@@ -6,8 +6,8 @@
 //
 // 全部依据实测，不含任何猜测性字段：
 //
-//   - docs/upstream-login-protocol.md：扫码登录（本地拼装二维码 + `thirdlogin` 轮询 + 状态机）
-//   - docs/upstream-logout-sms-login.md：退出登录、短信登录全链路（含滑块降级）
+//   - docs/upstream/login-protocol.md：扫码登录（本地拼装二维码 + `thirdlogin` 轮询 + 状态机）
+//   - docs/upstream/logout-sms-login.md：退出登录、短信登录全链路（含滑块降级）
 //   - 客户端 `common/utils.js`（从本机 `mCloud.app` 的 `app.asar` 提取）：三个密码学原语的实现与密钥，
 //     对应 `test/golden/pcclient-crypto-vectors.json`
 //
@@ -114,7 +114,7 @@ func (p PcPlatform) Cpid() string {
 // 改它等于把自己伪装成另一个版本的客户端（上游按版本分流）。
 //
 // 两个值都来自实测而非挑选：
-//   - Windows `8.8.6.20260829`：抓包归档里的真实请求体（docs/upstream-login-protocol.md 证据链 A）；
+//   - Windows `8.8.6.20260829`：抓包归档里的真实请求体（docs/upstream/login-protocol.md 证据链 A）；
 //   - macOS `4.2.1`：本机 `mCloud.app/Contents/Resources/app.asar` 的 `package.json`。
 //
 // 所以它**必须跟着平台走**：mac 的 `clientType` 配 Windows 的版本号，
@@ -506,7 +506,7 @@ func NewSendSmsCodeBodyWithSlider(
 	platform PcPlatform, phone, random, sliderAnswer string,
 ) (SendSmsCodeBody, *core.Error) {
 	body := NewSendSmsCodeBody(platform, phone, random)
-	encoded, err := core.AESDynamicIVEncrypt(PuzzleAESKey, sliderAnswer, PuzzleAESIV)
+	encoded, err := core.AESDynamicIVEncrypt(PuzzleAESKey, sliderAnswer, puzzleAESIV)
 	if err != nil {
 		return body, asCoreError(err, "加密滑块答案失败")
 	}
@@ -533,11 +533,11 @@ func PasswordHash(password string) string {
 // PuzzleAESKey 是滑块答案的 AES 密钥（客户端 `encryptByAesCBC` 的 `aesKey`）。
 const PuzzleAESKey = "CREATPUZZLE03F9A"
 
-// PuzzleAESIV 是滑块答案的 AES IV。
+// puzzleAESIV 是滑块答案的 AES IV。
 //
 // **硬编码**，不是服务端下发的挑战值 —— 协议文档里曾把它推测为"服务端挑战标识"
 // （因为两次请求间保持不变），从源码看它就是这一行常量。
-var PuzzleAESIV = [16]byte{'E', '5', '2', '6', 'E', '1', 'F', '3', 'F', '9', '7', '6', '5', '4', '4', '4'}
+var puzzleAESIV = [16]byte{'E', '5', '2', '6', 'E', '1', 'F', '3', 'F', '9', '7', '6', '5', '4', '4', '4'}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 响应语义

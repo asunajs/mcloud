@@ -6,7 +6,7 @@
     "signatureSha256": "**6165 / 6165 条实拍请求逐字命中，且跨三个 version 都命中**：V1.0 6162 条、V6.1 2 条、V1.1 1 条 —— 所以公式里的 version 是**按请求头原样代入**（带 V），不是把 `V1.0` 写死。唯一命中的形态：version 原样带 V、字段名 timeStamp 大写 S、字段顺序 clientId→clientKey→msgId→timeStamp→version",
     "encodeDataDecrypt": "两层验证：(1) 本窗口 6158 / 6158 条带 encodeData 的请求全部解出，明文去重后只有 1 种、长度 11；(2) **逐条跨字段核对** —— 每条解出的明文与**同一请求** Authorization 头里的手机号相等，6158 / 6158 零例外。第二层把'明文是手机号'从统计推断变成逐条证据。另：IV 恒为可打印 ASCII（6158 / 6158，0 条二进制）—— 与 hcyCoolFlagEnvelope 的**二进制** IV 相反，别互相套用。",
     "keyDiscovery": "iOS 二进制里没有 clientKey 字面量。用 5632 个 16 字符候选做 SHA256 比对命中；再用同一把 key 做 AES-CBC 解密交叉验证（合法 PKCS7 + 全可打印 ⇒ 唯一候选）",
-    "howToReverify": "python3 -c 见 docs/upstream-app-business-api.md §5；数据源 har/applog-*/（gitignore）",
+    "howToReverify": "python3 -c 见 docs/upstream/app-business-api.md §5；数据源 har/applog-*/（gitignore）",
     "signatureDoesNotCoverBody": "6165 条带签名的请求里 body 有 6161 种不同取值（encodeData 每请求都变），而 6165 条签名全部等于「仅那 5 个字段」的 SHA256 ⇒ 签名与 body 无关（反证，不是探针）",
     "liveProbe": "用自算签名打了一次只读的 general/getStatus（真服务器、用户自己的登录态），返回 resultCode:200 且 msgId 原样回传 ⇒ 服务端确实在校验签名，算法在活服务器上成立",
     "hcyCoolFlagKeyDiscovery": "iOS 二进制里 16 字符候选 201124 个 × {AES-ECB, AES-CBC(零/前16/后16 IV)} 全部试过，唯一命中 uDjGSA8auFlbwDkY；判定用的是**已知明文**（见 §hcyCoolFlagEnvelope 的 note），不是靠'解出可打印字符'这种弱判据。脚本 scripts/crack-cool-flag-response.py",
@@ -161,7 +161,7 @@
       "ivHex": "156581530830a4089299c2ee909bd8ff",
       "plaintext": "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<result resultCode=\"0\" desc=\"SUCCESS\"/>\n",
       "payloadB64": "FWWBUwgwpAiSmcLukJvY/0aLhr4m8GVju46KwjzaGfbfHfsWA8fCttbnpVYWpyKStv2R5mGS5TX9MAkFi1TKZ5RndGInpnhPVzsfip/cRHxXN0FOCErtFdIJ3wuV8PCg/GhMGf+lhM3LHACO6z4Ps9iF8dQ2/CFdU4cgrYSAdWU=",
-      "note": "**实拍**（明文是通用成功 XML、无任何标识，故不必合成）。这条的价值是**跨主机**：`https://ose.caiyun.feixin.10086.cn/richlifeApp/devapp/ILog` 与 `yun.139.com` 是两套子系统，但**同一个 AES-192 钥匙、同一种 `base64(IV(16) ‖ CT)` 信封**照样能解 —— 说明这把钥匙的适用范围按**协议信封**算，不按域名算。⚠ 同一接口的**请求**方向**解不开**（试过 11623 个可打印候选 × 4 种结构 + 无填充 CBC，全 0），故只入库响应方向；见 `docs/upstream-app-business-api.md` §8.2。"
+      "note": "**实拍**（明文是通用成功 XML、无任何标识，故不必合成）。这条的价值是**跨主机**：`https://ose.caiyun.feixin.10086.cn/richlifeApp/devapp/ILog` 与 `yun.139.com` 是两套子系统，但**同一个 AES-192 钥匙、同一种 `base64(IV(16) ‖ CT)` 信封**照样能解 —— 说明这把钥匙的适用范围按**协议信封**算，不按域名算。⚠ 同一接口的**请求**方向**解不开**（试过 11623 个可打印候选 × 4 种结构 + 无填充 CBC，全 0），故只入库响应方向；见 `docs/upstream/app-business-api.md` §8.2。"
     }
   ],
   "hcyCoolFlagWebViewEnvelope256": [

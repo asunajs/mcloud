@@ -59,10 +59,10 @@ type SignSaltPair struct {
 	Salt string
 }
 
-// SignSaltMap 对应 core/src/auth/sign.ts 的 SALT_MAP。签名盐值只有两个，用 u8 索引。
+// signSaltMap 对应 core/src/auth/sign.ts 的 SALT_MAP。签名盐值只有两个，用 u8 索引。
 //
 // ⚠ 顺序有意义：[SignSalt] 的"未知 key 回落到第一个"依赖它。
-var SignSaltMap = []SignSaltPair{
+var signSaltMap = []SignSaltPair{
 	{1, "seedMdYYLIZfbCxg"},
 	{2, "sekaMdYYLIZfbCfm"},
 }
@@ -72,8 +72,8 @@ var SignSaltMap = []SignSaltPair{
 // **24 字节 → AES-192**（不是 AES-256，这个坑很常见）。
 const RefreshTokenKey = "2olBaQGYnEKoStYomsd1n7ax"
 
-// AESFixedIV 是 runtime/src/crypto.ts: aesEncrypt 的固定 IV。
-var AESFixedIV = [16]byte{
+// aesFixedIV 是 runtime/src/crypto.ts: aesEncrypt 的固定 IV。
+var aesFixedIV = [16]byte{
 	'0', '1', '0', '2', '0', '3', '0', '4',
 	'0', '5', '0', '6', '0', '7', '0', '8',
 }
@@ -277,7 +277,7 @@ func aesCBCPKCS7Decrypt(key, iv, data []byte) ([]byte, error) {
 // 对齐 runtime/src/crypto.ts: aesEncrypt。
 func AESCBCFixedIVEncryptHex(key, message string) (string, error) {
 	k := jsPadKey16(key)
-	ct, err := aesCBCPKCS7Encrypt(k[:], AESFixedIV[:], []byte(message))
+	ct, err := aesCBCPKCS7Encrypt(k[:], aesFixedIV[:], []byte(message))
 	if err != nil {
 		return "", err
 	}
@@ -295,7 +295,7 @@ func AESCBCFixedIVDecryptHex(key, cipherHex string) (string, error) {
 	if err != nil {
 		return "", NewParse(fmt.Sprintf("AES 密文不是合法 hex: %v", err))
 	}
-	pt, err := aesCBCPKCS7Decrypt(k[:], AESFixedIV[:], ct)
+	pt, err := aesCBCPKCS7Decrypt(k[:], aesFixedIV[:], ct)
 	if err != nil {
 		return "", err
 	}
@@ -667,9 +667,9 @@ func Gunzip(data []byte) ([]byte, error) {
 // SignSalt 取签名盐值；未知 saltKey 回落到第一个（对齐原实现的 `|| SALT_MAP[1]`）。
 func SignSalt(saltKey uint8) string {
 	if saltKey == 2 {
-		return SignSaltMap[1].Salt
+		return signSaltMap[1].Salt
 	}
-	return SignSaltMap[0].Salt
+	return signSaltMap[0].Salt
 }
 
 // GenerateSignature 计算 md5(salt + id + timestamp + nonce + other + salt)。

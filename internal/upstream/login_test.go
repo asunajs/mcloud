@@ -193,7 +193,7 @@ func TestConstantsMatchTheGoldenVector(t *testing.T) {
 		got  string
 	}{
 		{"PUZZLE_AES_KEY", PuzzleAESKey},
-		{"PUZZLE_AES_IV", string(PuzzleAESIV[:])},
+		{"PUZZLE_AES_IV", string(puzzleAESIV[:])},
 		{"LOGIN_AES_KEY", LoginAESKey},
 		{"LOGIN_AES_KEY_TEST", LoginAESKeyTest},
 	}

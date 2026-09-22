@@ -226,7 +226,7 @@ func TestLoginParameterSurface(t *testing.T) {
 	}{
 		{"qr 默认平台", []string{"login", "qr"}, ExitRun},
 		{"qr --platform macos", []string{"login", "qr", "--platform", "macos"}, ExitRun},
-		{"qr 平台名大小写都认", []string{"login", "qr", "--platform", "macOS"}, ExitRun},
+		{"qr 平台名大小写敏感（clap 默认，macOS 是用法错误）", []string{"login", "qr", "--platform", "macOS"}, ExitUsage},
 		{"qr 不认的平台是用法错误", []string{"login", "qr", "--platform", "linux"}, ExitUsage},
 		{"sms 缺 --phone", []string{"login", "sms"}, ExitUsage},
 		{"sms --phone", []string{"login", "sms", "--phone", "19900000001"}, ExitRun},
