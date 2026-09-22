@@ -43,7 +43,8 @@ cd "$(dirname "$0")/.."
 is_exempt() {
   case "$1" in
     # ① 生态固定名
-    Cargo.toml|Cargo.lock|README.md|LICENSE|THIRD-PARTY-NOTICES.md|rust-toolchain.toml) return 0 ;;
+    # AGENTS.md：Agent 规范文件，工具按这个字面名找（与 README.md 同一类，改名即失效）。
+    Cargo.toml|Cargo.lock|README.md|LICENSE|THIRD-PARTY-NOTICES.md|rust-toolchain.toml|AGENTS.md) return 0 ;;
     # 嵌套层级的生态固定名（docs/README.md 等）。豁免按"路径点名"，层级一变就得补。
     # （历史：Rust 曾冻结进 legacy/ 时漏了 Cargo.lock 与 rust-toolchain.toml，门禁当场抓到。）
     */Cargo.toml|*/Cargo.lock|*/rust-toolchain.toml|*/README.md|*/LICENSE) return 0 ;;
