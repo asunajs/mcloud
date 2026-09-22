@@ -238,4 +238,16 @@
 Go 侧逐包：core 270 / upstream 157 / io 150 / app 118 / cli 116 / server 44 /
 exec 35 / capabilities 32。
 
+**门禁实况（2026-09-22，Go 侧全量 + web 侧首跑）**：**1052 个测试通过**，
+Go **九条门禁全绿**（golden 段 **167 条断言**），web **两条全绿**（`gates-web.sh` 两条合计
+墙钟 2.4 s：`typecheck` + `vite build`）。逐包：core 289 / upstream 208 / io 156 / cli 135 / app 131 /
+**server 62**（昨天 44 —— 静态层的压缩与缓存头补了 10 条）/ capabilities 36 / exec 35。  
+⚠ 这个数是**工作区**实跑，而工作区里有并行会话在飞的改动 ⇒ 它是"这一刻的树绿不绿"，
+不是"某一个提交带进来的数"。  
+**同日起 `pre-commit` 改成按暂存范围派发**（此前写死五条）：恒跑 `filenames` `idents`，
+触及 `*.go` 加 `fmt deps jsontags`，触及 `web/**` 加 `typecheck`；
+`pre-push` **不看范围**，跑 Go 九条 + web 两条。分类器与安全前提见
+[`dev-gates.md`](./dev-gates.md)「在哪里跑」与 [`.githooks/README.md`](../.githooks/README.md)。
+⇒ **提交档不含编译与测试**，"提交前必须全绿"仍然要求手动跑上面那两个全量。
+
 ---

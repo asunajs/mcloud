@@ -150,6 +150,52 @@ Rust 的 `#[derive(Serialize)]` 默认给 **snake_case** 字段名（`password_h
 Rust 侧冻结后 hook 就不再碰 cargo；Rust 仓库自己的验证方式见
 [`../mcloud-rust/README.md`](../../mcloud-rust/README.md)。
 
+> ⚠ **上面那张表在 2026-09-22 之后只算"档位"，不再是"固定清单"**，两件事同时变了：
+>
+> **① web 侧有了门禁（此前是零）。** `scripts/gates-web.sh` 两条：
+>
+> | 门禁 | 命令 | 实测 | 档位 |
+> | --- | --- | --- | --- |
+> | `typecheck` | `npm --prefix web run typecheck`（`tsmc --noEmit`） | 1.8 s | pre-commit |
+> | `build` | `npm --prefix web run build`（`vite build`，自报 250 ms 左右） | 0.8 s | pre-push |
+>
+> （实测 = **单跑一条** `bash scripts/gates-web.sh <名>` 的墙钟，含 npm 启动那截；
+> 两条合计 2.4 s。数字会变，量法别变。）
+>
+> 分档沿用原来那句判据（**发现问题的时刻与副作用**，不是快慢）：`typecheck` 纯静态、
+> 报错当场可修 ⇒ 提交档；`build` 要往 `web/dist/` 写东西，与 Go 侧 `build` 同类 ⇒ 推送档。
+> ⚠ 这两条**只保证"编得出来"**：web 侧至今没有测试运行器（vitest 未装，
+> 见 [`webui-code-guide.md`](./webui-code-guide.md) §12 未决项 3），
+> 类型与打包都绿不等于页面跑得对。那条只能靠真机核验，别把它记成"有测试了"。
+>
+> **② `pre-commit` 改成按暂存范围派发**（`scripts/gates-scope.sh` 分类）：
+>
+> ```
+> *.go / go.mod / go.sum  → 追加 fmt deps jsontags
+> web/** 下任何文件        → 追加 typecheck
+> 恒跑，不参与派发         → filenames idents
+> ```
+>
+> 于是"改一行 `docs/*.md` 也要过一遍 Go 工具链"和"改 `.tsx` 时五条一条都验不到前端"
+> 这两件事同时没了。三条让它成立的前提，破一条就变成**净损失**：
+>
+> 1. **`pre-push` 不看范围，全跑**（Go 九条 + web 两条）—— 提交档省下的必须在推送前补齐。
+>    ⚠ 想给 `pre-push` 也加范围派发之前，先回答"被跳过的那些由谁补"。
+> 2. **`filenames` 与 `idents` 恒跑**：脱敏那条扫的是**文本**，`.md` / `.json` 一样能
+>    泄漏真实标识。按语言把它切掉，等于给最不该漏的那条开一个永远存在的洞。
+> 3. **分类器不确定时全跑**（拿不到暂存清单 ⇒ 最保守一档），失效方向只能是"多验"。
+>
+> 另外分类器自己兼了一条"**给门禁的门禁**"：派发之前先 `bash -n` 一遍
+> `scripts/gates-{go,web,scope}.sh`、两个复用脚本与两个 hook。抓的不是逻辑错，
+> 是"引号没闭合、`fi` 少了"这类**现象恰好是门禁跑了而且绿了**的假绿。
+>
+> 实测（2026-09-22，反向测试）：暂存一个 `web/**` 文件 ⇒ 只跑 `filenames idents` +
+> `web:typecheck`；在 `web/src` 放一个类型错误的文件 ⇒ 钩子退出码 **1**，提交被拦住；
+> 删掉之后恢复绿。分类另用 `stdin` 档逐条核过（含"Go+web 同时改""只改文档""删除也算"）。
+>
+> ⚠ 一个已知且**不打算在这里修**的错位：范围取自暂存区，而门禁验的是工作区那一份
+> （Go 侧从第一天起同处境）。部分暂存（`git add -p`）在意这一点的人要自己负责。
+
 
 ---
 

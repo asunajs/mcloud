@@ -1,13 +1,41 @@
 #!/usr/bin/env bash
-# 推送前门禁：九条全跑（含需要编译的 build / vet / test）。
+# 推送前门禁：**全套，不看范围**（Go 九条，含要编译的 build / vet / test + web 两条，含 build）。
+#
+# ⚠ 2026-09-20 起跑的是 **Go 侧九条**；Rust 侧已冻结到 legacy/，不再自动跑。
+#    2026-09-22 追加 web 两条。
+#
+# # 为什么这里**不**按范围派发（pre-commit 那样）
+#
+# 因为 pre-commit 从 2026-09-22 起是按暂存范围跑的，它**允许**"这次只改了 .md
+# 所以没跑 Go 的三条静态门禁""这次没碰 web/ 所以没 typecheck"。
+# ⇒ 那半边空白必须有人无条件补上，否则"按范围跳过"就只是把检查**删掉**了。
+# 这一道就是那个兜底：推之前全跑，一次都不跳过。
+#
+# ⚠ 所以这两道闸是**一对**：想给 pre-push 也加范围派发之前，先想清楚
+#   少了这层兜底之后，被 pre-commit 跳掉的那些检查由谁补 —— 没有答案就是净损失。
 #
 # 为什么不放在 pre-commit：见同目录 README.md 的"两道闸，各拦各的"。
 # 手动安装：bash scripts/install-hooks.sh
 #
-# ⚠ 2026-09-20 起跑的是 **Go 侧九条**；Rust 侧已冻结到 legacy/，不再自动跑。
-#    pre-push 的参数（<remote> <url>）我们不关心 —— 范围就是全部，不用解析 stdin。
-
 # ⚠ 用 `bash <路径>` 而不是直接 `exec <路径>` —— 理由见同目录 pre-commit 的说明
 #    （`scripts/*.sh` 在库里没有 x 位，直接 exec 会拦住每一次推送）。
+#
+# ⚠ 不用 `exec`：现在有两个脚本要跑，且两条都得算进退出码。
+#   早先这里是 `exec bash scripts/gates-go.sh` —— 那种写法下第二条永远轮不到，
+#   而 web 门禁于是会变成"看起来登记了、实际一次没跑"。
+set -uo pipefail
 
-exec bash "$(dirname "$0")/../scripts/gates-go.sh"
+cd "$(dirname "$0")/.."
+
+FAILED=()
+
+bash scripts/gates-go.sh || FAILED+=("gates-go.sh")
+bash scripts/gates-web.sh || FAILED+=("gates-web.sh")
+
+if [ ${#FAILED[@]} -gt 0 ]; then
+  printf '\033[31m推送门禁未通过：%s\033[0m\n' "${FAILED[*]}"
+  printf '\033[31m⇒ 这套门禁没有 CI 兜底，修好再推；真要跳过（环境坏了）才用 git push --no-verify。\033[0m\n'
+  exit 1
+fi
+
+printf '\033[32m推送门禁全绿：Go 九条 + web 两条（这两组的逐条明细见上面各自的横幅）\033[0m\n'

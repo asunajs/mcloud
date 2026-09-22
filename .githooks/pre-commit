@@ -1,20 +1,81 @@
 #!/usr/bin/env bash
-# 提交前门禁：秒级、不需要完整编译的五条（Go 侧）。
+# 提交前门禁：**按这次暂存了什么**派发（Go 侧的静态几条 + 前端的 typecheck）。
 #
-# ⚠ 2026-09-20 起 Rust 侧已冻结，hook 只跑 Go 门禁 ——
+# ⚠ 2026-09-20 起 Rust 侧已冻结，hook 只跑 Go/web 门禁 ——
 #    留着旧 hook 会让每次提交都跑一遍 2 分钟的 cargo，而那边已经不再改动。
 #    2026-09-21 Rust 实现整体剥离为同级仓库 `../mcloud-rust/`：
 #    要手工跑那七条，去那边 `bash scripts/gates.sh`（本仓库已无 Cargo workspace）。
 #
-# 详情与"为什么是这五条"见同目录 README.md。
-# 手动安装：bash scripts/install-hooks.sh
+# ⚠ 2026-09-22 起从"写死五条"改成"按范围派发"，并且**加上了 web 侧**
+#   （此前整个仓库对 `web/**` 一条自动检查都没有）。
+#   为什么这样切是安全的、哪两条永远不跳过 —— 判据全在
+#   `scripts/gates-scope.sh` 的开头与 `.githooks/README.md`，改之前先读那两处。
 #
-# 这个文件本身很薄 —— 逻辑都在 scripts/gates-go.sh 里，两个 hook 共用。
+# 详情见同目录 README.md。手动安装：bash scripts/install-hooks.sh
+#
+# 这个文件本身很薄 —— 逻辑在 scripts/gates-scope.sh（分谁）与
+# scripts/gates-go.sh、scripts/gates-web.sh（跑什么）里，两个 hook 共用。
 #
 # ⚠ 用 `bash <路径>` 而不是直接 `exec <路径>`：`scripts/*.sh` 在库里是 **100644**
 #    （没有 x 位），直接 exec 会得到 `Permission denied`，hook 在提交路径上**拦住每一次提交**。
 #    而"给 scripts/ 补 x 位"是第二份真相 —— 全部文档与用法都写的是 `bash scripts/gates-go.sh`，
 #    那就让 x 位不参与这个契约。本文件自己必须可执行（git 对没有 x 位的 hook 直接静默跳过），
 #    这一点由 `bash scripts/install-hooks.sh` 保证。
+#
+# ⚠ 这里**不再用 `exec`**：现在要按顺序跑两个脚本并汇总退出码，
+#    `exec` 会把 shell 换掉，第一条的失败就再也传不到第二次的判定上。
+#
+# ⚠ 范围取自**暂存区**（`git diff --cached`），而门禁验的是**工作区**那一份 ——
+#   两者可以不一致（`git add` 之后又改了一笔没重新 add）。这不是这里能修的，
+#   Go 侧从第一天起就是同一处境（`go build` 读的是工作区）。
+#   后果只有一个方向值得记：**暂存了 web 文件但工作区已删掉它**时，
+#   typecheck 验的是"还在这一份"，而派发认为"该验"。真在意部分暂存（`git add -p`）
+#   的人得走 `git stash --keep-index` 那一套 —— 那是共享工作区的禁区，本仓库不做。
+set -uo pipefail
 
-exec bash "$(dirname "$0")/../scripts/gates-go.sh" fmt deps filenames idents jsontags
+cd "$(dirname "$0")/.."
+
+scope_out="$(bash scripts/gates-scope.sh)"
+scope_code=$?
+if [ "$scope_code" -ne 0 ]; then
+  # 分类器自己不通 ⇒ 这道闸无法判断该跑什么。此时**不放行**：
+  # 让它响，比"跳过检查让提交过去"好 —— 没有 CI 兜底（见 README「没有第二道防线」）。
+  printf '\033[31m门禁分类失败（退出码 %s），本次提交被拦住\033[0m\n' "$scope_code" >&2
+  exit 1
+fi
+
+# `sed -n 's/^KEY=//p'` 而不是 eval：值里是门禁名，eval 等于把门禁的输出当脚本执行。
+go_gates="$(printf '%s\n' "$scope_out" | sed -n 's/^GATES_GO=//p')"
+web_gates="$(printf '%s\n' "$scope_out" | sed -n 's/^GATES_WEB=//p')"
+note="$(printf '%s\n' "$scope_out" | sed -n 's/^NOTE=//p')"
+
+printf '\033[1m提交门禁：按暂存范围派发 —— %s\033[0m\n' "$note"
+
+FAILED=()
+
+# ⚠ 不加引号的 `$go_gates` 是**故意的**：那是一串门禁名，要按空格切成多个参数。
+#   值只可能来自 `gates-scope.sh` 里写死的三张名单（不含通配符与空格），
+#   所以这里不需要数组，也不会被 glob 展开。
+if [ -n "$go_gates" ]; then
+  # shellcheck disable=SC2086
+  bash scripts/gates-go.sh $go_gates || FAILED+=("gates-go.sh")
+fi
+
+if [ -n "$web_gates" ]; then
+  # shellcheck disable=SC2086
+  bash scripts/gates-web.sh $web_gates || FAILED+=("gates-web.sh")
+else
+  # 跳过要**说出来**：静默跳过与"跑了且绿"在终端上长得一样，
+  # 而这两件事的差别正是这套门禁存在的理由。
+  printf '\033[33mweb 门禁：本次未触及 web/ ⇒ 跳过（pre-push 会全跑）\033[0m\n'
+fi
+
+if [ ${#FAILED[@]} -gt 0 ]; then
+  printf '\033[31m提交门禁未通过：%s\033[0m\n' "${FAILED[*]}"
+  printf '\033[31m⇒ 修好再提交。真要跳过（环境坏了）才用 git commit --no-verify —— 没有 CI 兜底。\033[0m\n'
+  exit 1
+fi
+
+printf '\033[32m提交门禁通过（本次范围：%s%s）\033[0m\n' \
+  "${go_gates:-—}" "${web_gates:+ + web:$web_gates}"
+printf '\033[33m  ⇒ 这不是"全绿"：编译与测试档（build vet test golden + web:build）在 pre-push。\033[0m\n'
