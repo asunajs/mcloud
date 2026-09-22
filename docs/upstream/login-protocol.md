@@ -109,7 +109,7 @@ let cpid       = isMacPc ? '332' : '277';   // Windows=277, macOS=332
 > `x-yun-client-info`、`x-DeviceInfo`（同一个值、两个头）、`x-MM-Source: "000"`、
 > `x-huawei-channelSrc: "10200153"`、`x-UserAgent: "PC"`。
 > 其中 `x-yun-client-info` / `x-DeviceInfo` 的值就是设备信息串（见 §7 与
-> [`docs/client-profiles.md`](../client-profiles.md) §5.2）。
+> [`docs/client-profiles-fingerprint-and-landing.md`](../client-profiles-fingerprint-and-landing.md) §5.2）。
 >
 > 实现落点：`upstream.ClientProfile`（`internal/upstream/client.go`），并由单测逐个断言这五个头存在 ——
 > 少了任何一个都会退化成 `9999`，而那种失败看起来像"登录被拒"，极难定位。
@@ -213,7 +213,8 @@ if (result.data) {
 > `fromUserInfo.userid` 读的也是本地镜像（来源是原生账号记录 `userData.userid`），
 > 同样不是响应字段。**不要把它并进用户域标识的兜底链。**
 >
-> 实现侧两条名字都认（`mcloud_capabilities::login::account_and_state_from_login_with_prefix`），
+> 实现侧两条名字都认（`capabilities.AccountAndStateFromLoginWithPrefix`；
+> Rust 侧叫 `mcloud_capabilities::login::account_and_state_from_login_with_prefix`），
 > 实测命中的是 `userDomainId` 分支。
 >
 > 唯一的剩余差异：PC 客户端**不发** `x-yun-uni` 头（该头是 App 独有），
@@ -259,7 +260,8 @@ windowMachine    = 62AA2BDA29F99744536E142A83CA5B03-ENDIN
 windowDeviceInfo = ||11|8.8.6.20260829|PC|TGktMjAyNjA4MjgxNjI5|...| Windows 11 (10.0.26100.1591)|1920X1020|Q2hpbmVzZSAoU2ltcGxpZmllZCk=
 ```
 
-`windowDeviceInfo` 为 `|` 分隔（14 段，字段表见 [`docs/client-profiles.md`](../client-profiles.md) §5.2），
+`windowDeviceInfo` 为 `|` 分隔（14 段，字段表见
+[`docs/client-profiles-fingerprint-and-landing.md`](../client-profiles-fingerprint-and-landing.md) §5.2），
 `TGktMjAyNjA4MjgxNjI5` 解码得 `Li-202608281629`（设备型号码）。
 代码内的兜底模板（原生接口失败时使用）：
 ```js

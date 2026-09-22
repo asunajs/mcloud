@@ -218,7 +218,7 @@ export const CHANNEL_SRC = { web: "10000034", pc: "10200153", android: "10000023
    `openAIWebChat` 是 `001248` vs `001005`（§2 结论 2）。
 4. **不设"看起来合理"的默认值。** 默认值等于"一个会静默生效的猜测"：
    上游哪天开始校验，错的那个**不报错、只是不生效**。
-   `app_client::ios::AUTH_PREFIX` 故意不给默认值，是同一条理由。
+   `upstream.IOSAuthPrefix`（Rust 侧 `app_client::ios::AUTH_PREFIX`）故意不给默认值，是同一条理由。
 5. **`sourceid` ≠ `targetSourceId`。** 签到页 URL 里两个都有，值不同：
    `sourceid=1002`（页面自身）vs `targetSourceId=001005`（票据入口）。
 6. **名字撞车要先分辨，别合并**：`deviceid`（头，cMPassport 那套 `B…`）vs
@@ -231,14 +231,14 @@ export const CHANNEL_SRC = { web: "10000034", pc: "10200153", android: "10000023
 
 | 位置 | 现状 | 备注 |
 |---|---|---|
-| `upstream.ToSourceID` | `"001005"`，作为**本功能默认值**；`query_spec_token_body(to_source_id)` 已经是形参 | 注释已改为"调用方参数"，并写明 PC 那个 `001003` 不能拿来换 |
-| `upstream.SourceID` | `"1002"`（URL 的 `sourceid` / `tyrzLogin` 体的 `sourceId`） | **与 `TO_SOURCE_ID` 不是同一个码** |
+| `upstream.ToSourceID` | `"001005"`，作为**本功能默认值**；`upstream.QuerySpecTokenBody(toSourceID)` 已经是形参 | 注释已改为"调用方参数"，并写明 PC 那个 `001003` 不能拿来换 |
+| `upstream.SourceID` | `"1002"`（URL 的 `sourceid` / `tyrzLogin` 体的 `sourceId`） | **与 `upstream.ToSourceID` 不是同一个码** |
 | `upstream.IOSChannel` | `"10000020"`，在 `AppProfile.Headers()` 里 | 属"每端常量"；接 AI / 分享类接口时**要能按调用覆盖** |
 | `client.go` 的私有常量 `huaweiChannelSrc` | `"10200153"`（PC） | 与旧项目 `CHANNEL_SRC.pc` 同值 —— 这是**唯一**一处旧项目与本仓库能对上的渠道码 |
 | `upstream.IOSAuthPrefix` | `"mobile"`，**故意无默认值** | 见 §6 第 4 条 |
 
 **下一批接口（任务列表 / 领云朵 / 分享）落地时的动作**：
-先把该接口在抓包里的码抄进构造函数当形参，**不要**先加到 `AppProfile::headers()` 里。
+先把该接口在抓包里的码抄进构造函数当形参，**不要**先加到 `AppProfile.Headers()` 里。
 
 ---
 
@@ -259,7 +259,7 @@ export const CHANNEL_SRC = { web: "10000034", pc: "10200153", android: "10000023
 
 ## 9. 交叉引用
 
-- `docs/client-profiles.md` —— 各端差异与设备指纹（**每端常量**那一层的完整清单）；
+- `docs/client-profiles.md` —— 各端差异与请求头（§1 ~ §4）；**每端常量**那一层（§6）与三种指纹（§5）在拆出的姊妹篇 `docs/client-profiles-fingerprint-and-landing.md`；
 - `docs/capture/app-signin-samples.txt` §2.1 —— App 原生三个 `toSourceId` 的原始样本与纠错记录；
 - `docs/capture/apiServer.js` —— §2 引用的 PC 客户端源码（vendor 素材，按来源豁免脱敏）；
 - `docs/upstream/app-business-api.md` —— B 族的 `signature` / `encodeData`（**与本文的码无关**，别混）。

@@ -27,7 +27,7 @@
 //
 // 我们正是"没有原生能力"的那种客户端，所以**照抄这个模板**是最忠实的选择：
 // 它是客户端源码里的公开常量，不是我们编的。14 段的字段表见
-// docs/client-profiles.md §5.2。
+// docs/client-profiles-fingerprint-and-landing.md §5.2。
 package upstream
 
 import "fmt"
@@ -58,7 +58,7 @@ const (
 // `clientType` / `cpid` / 版本号是**按平台**变的（见 [PcPlatform]），
 // 但这条兜底模板只有 Windows 版有实测依据。macOS 分支暂时复用同一串常量：
 // 它们本身是客户端源码里的公开值（不是编的），只是"mac 客户端到底发什么"
-// **尚无实测** —— 这一点记在 docs/client-profiles.md 的未知项里，
+// **尚无实测** —— 这一点记在 docs/client-profiles-fingerprint-and-landing.md 的未知项（§7）里，
 // 拿到 macOS 流量后要回来替换。
 func DeviceInfo(platform PcPlatform, deviceID string) string {
 	return fmt.Sprintf(

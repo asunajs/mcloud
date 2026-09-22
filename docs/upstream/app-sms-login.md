@@ -61,7 +61,7 @@ return [NSString stringWithFormat:@"%@%@", a, b];     // 末 10 位 + 其余
 | ≤ 10 | 恒等变换（`p = 0`，两段拼回原串） | 返回空串 |
 | > 10 | 末 10 位 + 其余 | 去掉前 10 位 + 前 10 位 |
 
-实现侧对应 [`mcloud_core::shift_tail10_to_front`] / [`shift_head10_to_back`]，
+实现侧对应 `core.ShiftTail10ToFront` / `core.ShiftHead10ToBack`（`internal/core/crypto.go`），
 两者对 ≤ 10 的输入都返回原串。
 
 ---
@@ -293,7 +293,8 @@ App 客户端开 WebView 是它的实现选择（面前坐着真人，它没必�
 
 **补测（2026-09-19）三步就把它钉死了**：
 
-1. **取图接口就在同一台主机上** —— `base::USER_YUN`（`user-njs.yun.139.com`）
+1. **取图接口就在同一台主机上** —— `upstream.BaseUserYun`（Rust 侧 `base::USER_YUN`；
+   `user-njs.yun.139.com`）
    同时服务 `getSmsCode` 与 `/user/verfycode`，**裸请求即可**（无鉴权、无设备头、无 tid）；
 2. **活体探针判别字段是否被读**：只改 `puzzleVerfycode` 一个字段，
    空串回 `200059554`，非空则**不再回它** ⇒ 服务端确实在处理；
@@ -306,7 +307,8 @@ App 客户端开 WebView 是它的实现选择（面前坐着真人，它没必�
 完整四步与两个 IV 的区别见
 [`capture/app-sms-login-samples.txt`](../capture/app-sms-login-samples.txt) §2.1。
 
-**实现侧已改为"协议优先、H5 兜底"**：`AppSendSmsOutcome::NeedCaptcha` 之后
+**实现侧已改为"协议优先、H5 兜底"**：`upstream.AppSmsNeedCaptcha`（Rust 侧
+`AppSendSmsOutcome::NeedCaptcha`）之后
 自动取图 → 解坐标 → 带答案重发（有上限，因为该接口**计失败次数**），
 只有重试用尽才把 H5 地址交给用户。
 
@@ -348,7 +350,8 @@ App 客户端开 WebView 是它的实现选择（面前坐着真人，它没必�
 > **所以"首次登录拿不到"只对登录握手期间的请求成立**（那时确实还没有这个值，
 > 编一个会让上游定位到别人的用户域）；一旦 `thirdlogin` 返回，它就有了、也存下来了。
 
-> ⚠ **一个尚未接上的环节（留给代码线）**：`AppProfile::with_user_domain_id` 目前
+> ⚠ **一个尚未接上的环节（留给代码线）**：`AppProfile.WithUserDomainID`（Rust 侧
+> `AppProfile::with_user_domain_id`）目前
 > **只在测试里被调用过** —— 生产路径没有把库里存的 `user_domain_id` 回填进 App 档案。
 > 现在还不痛，因为 App 端**还没有任何已登录接口**（CLI 只有 `login` / `fixture` /
 > `migrate` / `capabilities` / `user`）。
@@ -356,7 +359,8 @@ App 客户端开 WebView 是它的实现选择（面前坐着真人，它没必�
 > 届时先接这条线，再写接口。
 
 > **已接上代码线（2026-09-19，接着上面那条）**：库里存的 `user_domain_id` 现在会回填进 App 档案 ——
-> `mcloud_app::app_login::profile_with_stored_domain_id`，CLI 的 `login sms --client app`
+> `app.ProfileWithStoredDomainID`（`internal/app/app_login.go`；Rust 侧
+> `mcloud_app::app_login::profile_with_stored_domain_id`），CLI 的 `login sms --client app`
 > 在建档案后立刻调用。
 >
 > 值得留意的是它**也**回填了登录握手的两个请求（发码与 `thirdlogin`），
@@ -373,7 +377,7 @@ App 客户端开 WebView 是它的实现选择（面前坐着真人，它没必�
 
 - **`getSmsCode` 的 `random` 是硬编码常量 `qwert`** —— 跨 2026-08-12 ~ 09-18 的
   **4 次**抓包逐字节相同。一个真正随机的值不可能跨一个月不变。
-  所以它**不做成参数**（`app_login::SEND_SMS_RANDOM`）：参数会暗示"这里该变化"，
+  所以它**不做成参数**（`upstream.SendSmsRandom`，Rust 侧 `app_login::SEND_SMS_RANDOM`）：参数会暗示"这里该变化"，
   而客户端从不变化它。
 - **`thirdlogin` 的 `random` 只有 1 个样本**（`hOjseB`，6 字符）。
   "每次不同"是从"客户端为什么要随机"推的，**不是实测到的** ——

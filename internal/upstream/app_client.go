@@ -10,7 +10,8 @@
 // 而它的 `x-yun-client-info` 在设备串之后再追加两段（`x-DeviceName` 的 base64、`0`）
 // 并以 `;` 收尾 —— 所以那个头是 **16 段**。
 //
-// 两套串的字段表见 docs/client-profiles.md；本文件只实现**已抓到的 iOS 形态**。
+// 两套串的字段表见 docs/client-profiles-fingerprint-and-landing.md（§5.2 PC / §5.3 App）；
+// 本文件只实现**已抓到的 iOS 形态**。
 //
 // # 为什么没有 `Android`
 //

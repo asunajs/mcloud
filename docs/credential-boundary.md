@@ -47,7 +47,8 @@
 
 ### header 走白名单，不走黑名单
 
-判据在 `sanitize::is_allowed_header`。黑名单在真实流量上被证伪：
+判据在 `core.IsAllowedHeader`（`internal/core/sanitize.go`；Rust 侧叫
+`sanitize::is_allowed_header`）。黑名单在真实流量上被证伪：
 `cookieToken` / `cookieTokenKey` / `x-yun-tid` / `hecaiyundata2021jssdkcross`
 这些**名字不在名单里**的 cookie / 追踪头带着可直接复用的凭据原样通过，
 自检报出三万余处残留 —— 一份夹具都写不出来。

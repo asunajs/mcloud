@@ -62,6 +62,8 @@
 登录（PC 短信/扫码、App 短信）、账号会话与归属、
 设备指纹 smid、**App 端签到（云朵中心）全链路**、旧数据迁移、`internal/app/cloud.go` / `signin.go` 的上游封装。
 **schema 现为 v7**（v4 归属 → v5 smid 两列 → v6 `account_state.phone` → v7 `Authorization` 整串存）。
+> ⚠ 这一句写于 v8 之前：**Go 侧现在到 v8**（`internal/io/schema.go` 的 `SchemaVersion = 8`，
+> v8 那一条引入 `run_events` 表 ⇒ 运行事件流落库）。v4→v7 那条演化线仍然有效。
 **19 项业务能力：0 项可执行** —— 缺的不是接口，是它们下面那一层（§3）。
 
 > 上面这段的上一版写的是"schema v4 / v5、`mcloud-app::cloud` / `signin` 并行工作流**未提交**"（那是 Rust 时期的写法与状态，照原文留着）。
@@ -111,6 +113,20 @@
 
 ⇒ 新项目的落点：`runId`（uuid v4）作为幂等单元 + 写操作在能力声明里标 `CapabilityKind::Action` 并强制"状态预检 → 执行 → 复查"三段（`mcloud-exec`，P5）。**HTTP 层零自动重试**这条对写操作必须保持（读重试只允许用于幂等 GET）。
 
+> 2026-09-22 补：这句写于迁移之前，当时的"落点"是计划。现在前两件已经有 Go 实现 ——
+> `core.RunID`（幂等单元）、`exec.MutexKey`（键里带 `exec.ParamsDigest` 的参数维度，正是
+> 上面批评旧 `runner` 缺的那一维）、`exec.RunRegistry.Admit`，能力性质是
+> `core.KindAction` / `core.KindQuery`（`internal/core/model.go`）。
+> ⚠ **"状态预检 → 执行 → 复查"三段仍未被结构性地强制** —— 它要靠各能力的编排自己写，
+> 目前没有断言盯着。相反，**"写操作不许盲目重试"那一条已经被结构强制了**，
+> 比原文设想的"靠约定"更强：传输层确实有自动重试（`io.Client.Send`，按 `RetryPolicy`），
+> 但**两个条件必须同时成立**才重试 —— 错误类别可重试（`core.ErrorKind.IsRetryable`）
+> **且**请求可重试（`core.HTTPRequest.IsRetryable`：读天然可，写必须带
+> `WithIdempotencyKey`）。判据在 `internal/io/client.go`，
+> 三条用例钉住（`TestReadRequestsRetryButWritesNeedAnIdempotencyKey` 等）。
+> ⇒ 落地形态与旧项目相反但目标一致：旧项目靠"整个传输层不重试"，
+> 本项目允许读重试、把写重试关在幂等键后面。
+
 ### 1.4 "需人工"不是一句日志
 
 旧项目用 `logger.info("需手动完成: …")` 表达"这个任务我做不了，得你去 App 里点"，返回值仍是成功 ⇒ 前端与推送都看不到。五个能力有这类出口：
@@ -145,7 +161,8 @@
 
 旧项目**没有**这个功能：`sign` 里 `ctx.logger.info("当前云朵：…")` 之后那行 `ctx.state.totalCloud = total` 被注释掉了（`packages/core/src/tasks/sign/task.ts` 内，方案 D1 记为 `sign/task.ts:45`），所以余额只进日志、不进状态 ⇒ 无法回答"这账号现在还有多少云朵、今天涨了多少"（D2）。
 
-新项目已按此增设能力声明（`../mcloud-rust/crates/mcloud-capabilities/src/lib.rs`，`code: "cloud-snapshot"`，`CapabilityKind::Query`，输出含 `updatedAt`）。待补的是上游：`GET …/market/signin/page/infoV3?client=app`（旧写法，实测前缀见 §5.1）与 `…/market/signin/public/cloudRecord?type=1&pageNumber=1&pageSize=100`（`packages/core/src/tasks/after.ts:24`），落 `cloud_stats` 日快照表。
+新项目已按此增设能力声明（Go 侧在 `internal/capabilities/registry.go` 的 `All()`；Rust 基准在
+`../mcloud-rust/crates/mcloud-capabilities/src/lib.rs`，`code: "cloud-snapshot"`，`core.KindQuery`，输出含 `updatedAt`）。待补的是上游：`GET …/market/signin/page/infoV3?client=app`（旧写法，实测前缀见 §5.1）与 `…/market/signin/public/cloudRecord?type=1&pageNumber=1&pageSize=100`（`packages/core/src/tasks/after.ts:24`），落 `cloud_stats` 日快照表。
 
 ### 2.2 档 2 · 日常核心：`sign` → `receive` → `revival` → `auth-refresh` → `after`
 
@@ -224,6 +241,10 @@
 5. 留下的文件 ID 写进 `ctx.state.files`，由 `after` 删除。
 
 > ⚠ 副作用分级：`file/create + complete` 是**写用户网盘**。任一步失败都可能留下孤儿文件（`after` 只删 `state.files` 里记着的）。新实现必须有"本 run 创建了什么"的事务式清单（`mcloud-exec` 的 run 维度产物），并在失败路径也执行清理。
+>
+> 2026-09-22 补：这一条**在 Go 侧仍是缺口** —— `internal/exec` 当前只有并发闸
+> （`Concurrency`）、互斥键（`MutexKey` + `ParamsDigest`）、准入（`RunRegistry`）与事件总线
+> （`EventBus`），**没有** "run 内产物清单" 这一层，也没有失败路径的补偿钩子。
 
 #### `app` App 任务矩阵（`packages/core/src/tasks/app/`）—— 体量最大的一项
 
@@ -348,7 +369,8 @@
 - **配置双轨**：`exchange` 注册在通用表里但 `hidden`（`GET /api/tasks` 不列，`POST /api/tasks/exchange/run` **不检查 hidden 仍可直跑**）；另有独立轨 `GET /api/exchange/prizes`（**免登录**、走 `ofetch` 绕过项目 HTTP 层）+ `GET/PUT /api/exchange/schedule`。`data/exchange.json` = `{enabled, windows[], bindings[{account,prizeId,prizeName}], scheduleIds[], updatedAt}`；保存语义是**先按 `scheduleIds` 全删再按 (账号 × 窗口) 全建**（`windowToCron("HH:mm:ss") → "ss mm HH * * *"`，时区 `Asia/Shanghai`；`HH:mm` 自动补 `:00`；去重后字典序；空则报错），**用户手工建的 exchange schedule 不归它管**（不在 `scheduleIds` 里）。⚠ 每次保存重写全部 cron ⇒ `createdAt/lastRunAt` 丢失；且因 body 传的是**数字 prizeId**，**定时抢兑路径跳过 limit 预检与库存判据**。
   - **补充（2026-09-19 用户订正）**：`GET /api/exchange/prizes` 那个"**免登录**"**既不是刻意设计也不算缺陷** ——
     本地单机工具，免不免登录在效果上一样，当时只是懒得写。⇒ 新项目把它当**普通待补的鉴权缺口**处理即可
-    （按 `mcloud-server` 的统一会话鉴权补齐），不必为它保留例外，也**不必**在上游"接口是否公开"这层继续展开论证。
+    （按服务端的统一会话鉴权补齐；Go 侧已是这个口径 —— `internal/server` 白名单之外一律要会话），
+    不必为它保留例外，也**不必**在上游"接口是否公开"这层继续展开论证。
 
 ---
 
@@ -357,12 +379,24 @@
 | 层 | 旧项目实际做法 | 新项目落点 / 缺口 |
 | --- | --- | --- |
 | 执行与并发 | `runner.ts`：`running` Map 的 **join 语义**（第二个请求复用第一个的 promise）、`force` 旁路、历史截断 200 条、`asyncRun` 仅内存上限 100（D4） | `mcloud-exec`：目前**只有** `Concurrency::effective_parallelism` 这一个纯函数。缺 runId、锁（要含参数维度）、`runs`/`run_events` 落库、SSE 事件流 |
-| 调度 | `scheduler.ts`：croner，`protect:true`（**跳过不排队**）、5 或 6 段 cron、时区默认 `Asia/Shanghai`、**无错过补偿**、部分失败也记 `error` | Go 侧拆两处：`core.ParseCron` / `core.NextFire`（`internal/core/cron.go`）+ `schedules` 表读写（`SqliteStore` 的 `UpsertSchedule` / `ListSchedules`，`internal/io/configstore.go`，v4 已有归属字段，schema 现为 v7）；**按时触发的循环还没有**（`NextFire` 唯一的非测试消费者是 `routes.go`，只用来显示下次执行时间）。"错过不补"要显式保留还是改，属待拍板项 |
+| 调度 | `scheduler.ts`：croner，`protect:true`（**跳过不排队**）、5 或 6 段 cron、时区默认 `Asia/Shanghai`、**无错过补偿**、部分失败也记 `error` | Go 侧拆两处：`core.ParseCron` / `core.NextFire`（`internal/core/cron.go`）+ `schedules` 表读写（`SqliteStore` 的 `UpsertSchedule` / `ListSchedules`，`internal/io/configstore.go`，v4 已有归属字段，schema 现为 v8）；**按时触发的循环还没有**（`NextFire` 唯一的非测试消费者是 `routes.go`，只用来显示下次执行时间）。"错过不补"要显式保留还是改，属待拍板项 |
 | 组合流水线 | `pipelines.ts`：步骤 ≤30、`stopOnError` 默认 true、**步骤间不传数据**（只共享 `state.json` 与进程全局）、stopped 后仍输出 `skipped` 占位、`ok = ≥1 步执行且全 ok`、账号默认串行防风控 | `mcloud-capabilities` + `mcloud-exec`。旧模型"步骤间不传数据"是 `app` 那种大杂烩的根因；新方案要允许显式的 run 内产物传递（`after` 删文件依赖它） |
-| 账号状态存储 | `storage.ts`：`DATA_DIR` **相对 cwd**、读失败静默回落 `{}`、写 tmp+rename、**无锁**；`account.ts`：`accountKey = phone‖nickname‖"account"`、label 掩码 `前2****后2`、`findAccount` 序号**从 1 起**、state 合并方向 `fresh 覆盖 saved`、`writeConfigFile` 带 `.bak` | `internal/io/store.go` 的 `SqliteStore`（SQLite）已完成（schema 现为 v7）；`AccountState` 是**整行覆盖**写，`SmidState` 是**窄写**（两者契约相反，改动时别串台） |
+| 账号状态存储 | `storage.ts`：`DATA_DIR` **相对 cwd**、读失败静默回落 `{}`、写 tmp+rename、**无锁**；`account.ts`：`accountKey = phone‖nickname‖"account"`、label 掩码 `前2****后2`、`findAccount` 序号**从 1 起**、state 合并方向 `fresh 覆盖 saved`、`writeConfigFile` 带 `.bak` | `internal/io/store.go` 的 `SqliteStore`（SQLite）已完成（schema 现为 v8）；`AccountState` 是**整行覆盖**写，`SmidState` 是**窄写**（两者契约相反，改动时别串台） |
 | 推送 10 渠道 | `shared/src/push/index.ts:104-281`：`pushplus`(明文 http) / `serverChan`(token 进 URL) / `workWeixin`(两步取 token，**token 失败仍继续拼 URL**) / `workWeixinBot` / `tgBot`(缺 token/chat_id 主动跳过；`proxy` 配置**从不生效**) / `bark` / `twoIm`(key/sid 平铺进 query) / `dingTalk`(可选 secret 加签；content 加**前导空格**绕关键词；动态 `import("crypto-js")` 失败会冒泡) / `email`(nodemailer，tjs 运行时直接跳过；缺 pass/from/host **静默 return**) / `customPost`(url/body 占位符**字符串替换后 JSON.parse**，可配数组)。所有渠道失败**一律吞成日志**；**只有 CLI 主流程结束才推送，API / 定时路径从不推送** | **Go 侧没有**（Rust 基准同样没有；只有 `core.HmacSHA256Base64` 是给钉钉加签留的原语）（方案 §1.6 定"渠道保留、发送层重做"）。必须补的三件事：**定时路径也要能推送**、失败可见（进 `run_events`）、**正文脱敏** —— 现正文是全量日志，存在手机号/邮箱明文外泄路径（`auth-service.ts:118`、`app/runners.ts:270`） |
 | CLI | `packages/cli/src/index.ts`：**只有一个"跑全流程"入口**，任务顺序固定，无参数解析、无交互（D9）；账号配置三级合并在这里才做 | `mcloud-cli`：已有 `user / login / smid / capabilities / version / fixture extract`。缺：按能力跑单任务、组合、调度管理、推送测试 |
 | WebUI | 7 页；`WEBUI_PAGES` 白名单只有 6 项（`tasks/pipelines/schedules/accounts/history/config`）**漏了 exchange** ⇒ 停在兑换页时 `normalize` 把 `lastPage` 回落成 `tasks`，"记住上次页面"对该页失效（`api/src/webui-config.ts:16-24,55-62`）；`data/webui.json` 存偏好而非 localStorage；路由在 `index.ts` 平铺注册、**无鉴权、无限流、无全局错误中间件**（D7） | `mcloud-server`：目前只有 `/api/health`、`/api/setup`、`/api/session`（+ 404 兜底）。缺：capabilities / runs / schedules / pipelines / exchange / debug 全部业务路由与 OpenAPI |
+
+> **2026-09-22 逐条核对：这张表的"新项目落点 / 缺口"一列写于迁移之前，好几个"缺"字已经过期**：
+>
+> - **执行与并发**：`internal/exec` 已不止一个纯函数 —— `core.RunID`、`exec.MutexKey`
+>   （键里含 `exec.ParamsDigest`，正是这里点名的"参数维度"）、`exec.RunRegistry.Admit`
+>   （join / force 的准入判定）、`exec.EventBus`（SSE 的进程内那一半）；
+>   `runs` 与 `run_events` 都已落库（`SqliteStore.InsertRun` / `AppendRunEvents`，
+>   schema **v8** 引入后者），`GET /api/runs/{id}/events` 是真接口。
+>   ⚠ 仍缺的是**编排接入**与下面那行的按时触发循环。
+> - **调度**：那半句"按时触发的循环还没有"**本次复测仍然成立** ——
+>   `core.NextFire` 的非测试消费者只有 `internal/server/routes.go`，用途是显示下次执行时间。
+> - **组合流水线 / 推送 / WebUI** 三行**未逐条复测**，别当现状读。
 
 ---
 

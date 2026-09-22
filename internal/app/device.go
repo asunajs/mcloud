@@ -18,7 +18,7 @@ package app
 // `MD5(随机 UUID)` 的大写十六进制。
 //
 // 也就是说这是"按安装随机生成"的值 —— **不需要真实硬件信息**，
-// 我们自己生成完全成立（见 `docs/client-profiles.md` §5.1）。
+// 我们自己生成完全成立（见 `docs/client-profiles-fingerprint-and-landing.md` §5.1）。
 
 import (
 	"encoding/hex"
@@ -126,7 +126,7 @@ func NewAppDeviceID(rng core.Random) string {
 // 持久化（那会声称一个已被证伪的稳定性）。它随每次运行新生成。
 //
 // **未确定的部分**：它到底按什么变（每次启动 / 每天 / 某个事件）只有两个观测点，
-// 定不下来。记录在 `docs/client-profiles.md` §5.4 的待确认项里。
+// 定不下来。记录在 `docs/client-profiles-fingerprint-and-landing.md` §5.4 的待确认项里。
 func NewAppDeviceShort(rng core.Random) string {
 	var bytes [6]byte
 	rng.FillBytes(bytes[:])

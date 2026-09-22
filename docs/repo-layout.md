@@ -25,6 +25,11 @@ docs/           文档（本目录）—— 索引在 README.md，"谁说了算"
                   盘点与对照（business- / caiyun-go- / client-profiles /
                   device-and-source-codes）、前端三篇（webui-design-guide /
                   webui-components / webui-code-guide）
+  ⚠ **一篇拆多篇的写法**：文件名用"主题前缀 + 各篇自己的后缀"
+                  （`caiyun-go-exchange-and-runtime.md`、
+                  `client-profiles-fingerprint-and-landing.md`），
+                  **`§` 编号沿用拆分前那一版并在每篇抬头互链** ——
+                  这样"见 §5.2 / §8.4"这类跨篇引用不会因拆分而失效
 data/           运行时数据与凭据（**绝不入库**，见 credential-boundary.md）
 scripts/        门禁与夹具生成器
   gen-*.cjs       —— 夹具一律从真实产物生成，不手写期望值

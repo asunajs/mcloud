@@ -17,8 +17,8 @@
 | 加文件 / 起新目录 / 查命名 | [`repo-layout.md`](./repo-layout.md) —— 目录结构 + kebab-case 规则 |
 | 动**迁移**相关的东西（还剩哪些步、当初踩过什么） | [`go-migration-plan.md`](./go-migration-plan.md) + [`migration-pitfalls.md`](./migration-pitfalls.md) |
 | 实现某个**业务能力**（签到、领取、抢兑…） | [`business-feature-inventory.md`](./business-feature-inventory.md) —— 旧 TS 项目 19 项逐条拆到"照着能写代码" |
-| 参考 Go 项目 caiyun 的实现 | [`caiyun-go-feature-inventory.md`](./caiyun-go-feature-inventory.md) —— 上面那篇的对照篇 |
-| 接**新的端**（安卓 / 邮箱 / 小程序） | [`client-profiles.md`](./client-profiles.md) —— 各端差异主要在请求头与设备串 |
+| 参考 Go 项目 caiyun 的实现 | [`caiyun-go-feature-inventory.md`](./caiyun-go-feature-inventory.md)（§0 ~ §2 总览与能力逐条）—— 上面那篇的对照篇；抢兑与运行时见 [`caiyun-go-exchange-and-runtime.md`](./caiyun-go-exchange-and-runtime.md)，取舍与参数面见 [`caiyun-go-parameters-and-decisions.md`](./caiyun-go-parameters-and-decisions.md) |
+| 接**新的端**（安卓 / 邮箱 / 小程序） | [`client-profiles.md`](./client-profiles.md)（§1 ~ §4 端差异与请求头）+ [`client-profiles-fingerprint-and-landing.md`](./client-profiles-fingerprint-and-landing.md)（§5 ~ §8 设备指纹 · 落地形状 · 未知项） |
 | 写任何带"**码**"的请求（sourceid / channel / 设备码） | [`device-and-source-codes.md`](./device-and-source-codes.md) —— 这些码是**调用参数**，不是端常量 |
 | 做**登录**（PC 客户端 / PC Web / App） | [`upstream/`](./upstream/) 那一族，按端选（见下表） |
 | 写**抓包文档**（提交前必读） | [`sanitize-guide.md`](./sanitize-guide.md) —— 脱敏 SOP + 守卫用法 + 泄露后如何改写历史 |
@@ -37,7 +37,9 @@
 | [`go-migration-plan.md`](./go-migration-plan.md) | **Rust → Go 的执行方案**：冻结策略、目录与包映射、九条门禁、顺序与每步退出判据 | **执行中** |
 | [`migration-pitfalls.md`](./migration-pitfalls.md) | 实测踩坑登记（`§6.1 #1…#100` 那张表的**活文档**：编号沿用，新条目接在最后） | **活文档** |
 | [`business-feature-inventory.md`](./business-feature-inventory.md) | 旧 TS 项目 19 项能力逐条拆解 + 运行时层缺口 + 硬编码清单 | 编排中（抬头有 2026-09-22 的 Go 侧现状核对） |
-| [`caiyun-go-feature-inventory.md`](./caiyun-go-feature-inventory.md) | Go 参考项目对照（24 条任务、抢兑子系统、搬 / 不搬总表） | 编排中 |
+| [`caiyun-go-feature-inventory.md`](./caiyun-go-feature-inventory.md) | **① 总览 · 四条公共语义 · 能力逐条（§0 ~ §2）** | 2026-09-22 拆三篇 |
+| [`caiyun-go-exchange-and-runtime.md`](./caiyun-go-exchange-and-runtime.md) | **② 抢兑子系统与运行时层（§3 ~ §4）** —— 下单响应分支表、分类→重试决策表、锁与令牌桶、cron 与事件 | 同上，`§` 编号连续 |
+| [`caiyun-go-parameters-and-decisions.md`](./caiyun-go-parameters-and-decisions.md) | **③ 参数面 · 硬编码 · 冲突 · 搬 / 不搬 · 验收步（§5 ~ §9）** —— 含 §8.4 那张**缺陷登记表**（`C-*` / `R-*` / `T-*` 编号，另两篇引用缺陷时用它） | 同上，`§` 编号连续 |
 
 > **已随 Rust 代码剥离（2026-09-21）**：动工前的规划快照与两份 Rust 时期的文档住在同级仓库
 > [`../../mcloud-rust/docs/`](../../mcloud-rust/docs) ——
@@ -73,7 +75,8 @@
 
 | 文档 | 一句话 | 状态 |
 | --- | --- | --- |
-| [`client-profiles.md`](./client-profiles.md) | 各端请求头 / 设备串差异、三种指纹（设备串 / smid / deviceShort）、未知项清单 | PC + iOS App 已落地；其余端待实现 |
+| [`client-profiles.md`](./client-profiles.md) | **① 端差异与请求头**（§1 结论 · §2 证据来源 · §3 按 UA 分组的实测头 · §4 PC 代码级证据） | 2026-09-22 拆两篇；PC + iOS App 已落地，其余端待实现 |
+| [`client-profiles-fingerprint-and-landing.md`](./client-profiles-fingerprint-and-landing.md) | **② 设备指纹与落地形状**（§5 三种指纹 · §6 落地形状 · §7 未知项 · §8 与代码的关系） | 同上，`§` 编号连续 |
 | [`device-and-source-codes.md`](./device-and-source-codes.md) | 设备码 / 来源码 / 渠道码的分类判据与取值谱 | 结论已定 |
 
 ### 前端（三篇，同一个项目的三份）
@@ -144,7 +147,7 @@
 | **踩过的坑（编号登记表）** | [`migration-pitfalls.md`](./migration-pitfalls.md) | 别处写 `§6.1 #92` 就是本文的 `#92`；**新条目接在最后** |
 | **单项能力的实现规格** | [`business-feature-inventory.md`](./business-feature-inventory.md) | 对照篇只写"caiyun 怎么做"，不覆写规格 |
 | **上游协议细节**（字段、状态机、错误码） | `docs/upstream/` 里对应那一篇 | 盘点与 CLI 文档只引用，不重抄抓包 |
-| **跨端头 / 设备串** | [`client-profiles.md`](./client-profiles.md) | 与 `upstream/` 的分工：那五篇是一条链路一次取证，本篇是**横向对比** |
+| **跨端头 / 设备串** | [`client-profiles.md`](./client-profiles.md) + [`client-profiles-fingerprint-and-landing.md`](./client-profiles-fingerprint-and-landing.md) | 与 `upstream/` 的分工：那五篇是一条链路一次取证，本篇是**横向对比** |
 | **码值（sourceid / channel / 设备码）** | [`device-and-source-codes.md`](./device-and-source-codes.md) | 代码注释里那几处"见设备码文档"都指它 |
 | **哪些值能进版本库** | [`credential-boundary.md`](./credential-boundary.md)（界线）+ [`sanitize-guide.md`](./sanitize-guide.md)（做法） | 一条定界线、一条定操作，不合并 |
 | **前端长什么样 / 怎么写** | `webui-design-guide.md` → `webui-components.md` → `webui-code-guide.md` | 技术选型那条仍以 [`rust-rewrite-plan.md`](../../mcloud-rust/docs/rust-rewrite-plan.md) §2.2（历史快照）为出处，现行约束看 `webui-design-guide.md` |
@@ -187,4 +190,4 @@ Rust 剥离之后，仓库里同时出现过两套路径写法，读者分不清
 
 1. **状态要点名**：是"已实测确认"还是"提案"还是"编排中"，别让读者猜。
 2. **不确定的显式标注**，最好集中成一节「未知项（不猜，等证据）」——
-   [`client-profiles.md`](./client-profiles.md) §7 是范本。
+   [`client-profiles-fingerprint-and-landing.md`](./client-profiles-fingerprint-and-landing.md) §7 是范本。

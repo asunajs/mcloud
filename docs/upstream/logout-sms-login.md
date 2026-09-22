@@ -163,12 +163,14 @@ AES-128-CBC 解密 → 明文 "370"，而同响应里 picWidth = 680 ⇒ 落在�
 > 详见 [`app-sms-login.md`](./app-sms-login.md) §7.2 与
 > [`capture/app-sms-login-samples.txt`](../capture/app-sms-login-samples.txt) §2.1。
 
-实现落点：`SliderPuzzle::answer()`（自检 + 解密）、`mcloud_app::login::sms_send_code`
-（降级循环：取图 → 解坐标 → 重发 → 挑战作废则重新取图，上限 3 次）。
+实现落点：`upstream.SliderPuzzle.Answer()`（自检 + 解密；Rust 侧 `SliderPuzzle::answer()`）、
+`app.SmsSendCode`（Rust 侧 `mcloud_app::login::sms_send_code`；
+降级循环：取图 → 解坐标 → 重发 → 挑战作废则重新取图，上限 3 次）。
 
 向量落库于 `test/golden/pcclient-crypto-vectors.json` 的 `puzzleLeftDecrypt`，
-单测 `puzzle_left_decrypts_to_the_gap_coordinate` 盯着它；
-`SliderPuzzle::answer()` 还会做两道自检（必须是十进制数、必须落在图宽内），
+单测 `TestPuzzleAnswerDecryptsTheLiveCoordinate`（`internal/upstream/login_test.go`；
+Rust 侧那个同名测试叫 `puzzle_left_decrypts_to_the_gap_coordinate`）盯着它；
+`SliderPuzzle.Answer()` 还会做两道自检（必须是十进制数、必须落在图宽内），
 宁可报错也不把一个荒谬坐标发上去 —— 滑块失败次数是有限的。
 
 > **这修正了本文原先的落地假设**（"把两张图交给用户看、让他量缺口位置"）。

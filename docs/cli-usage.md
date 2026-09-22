@@ -41,7 +41,7 @@ go run ./cmd/mcloud -- --account 2           # 只跑下标 2 那个
 | `login sms` | 短信验证码登录：发码 → 输验证码。被风控要求滑块时**自动过**（缺口位置由服务端加密下发，见 `logout-sms-login.md` §2.2.1）。⚠ `--client app` 那个"自动过"是**借 PC 端那套**取题与编码、换 App 的头发出去（围魏救赵）；App 自身的滑块**未实现自动化**，真机走的仍是开 WebView 由 H5 发码那条（见 `capture/app-sms-login-samples.txt` §2.2 的澄清） |
 | `migrate` | 把旧项目 mcloud-sign 的数据迁移到 SQLite（`--dry-run` 预演） |
 | `signin` | 签到（云朵中心）。**不带任何参数就是对全部启用账号各签一次**；`--account <下标>` 只跑一个（`--list` 查下标），`--phone <完整手机号>` 给老账号补一次。另有 `--status-only` / `--force` / `--json`。**纯协议**，不开浏览器、不开 WebView；成败只看回查 `infoV3`（见 [`status.md`](./status.md)） |
-| `smid show` / `reset` / `refresh` | 看每个账号绑定的**设备特征**（cMPassport 风控那套，旧项目拿它的结果当请求头 `deviceid` 发）、`reset` 换一个（旧的 `deviceId` 当场作废，`--report` 顺手再上报）、`refresh` 不换特征只再上报一次。输出**只有摘要**：UA 与 `canvas` 识别位不落终端。⚠ 本项目目前**还没有任何请求发这个头**，取值的那一半已就位（见 [`client-profiles.md`](./client-profiles.md) §5.4 ③） |
+| `smid show` / `reset` / `refresh` | 看每个账号绑定的**设备特征**（cMPassport 风控那套，旧项目拿它的结果当请求头 `deviceid` 发）、`reset` 换一个（旧的 `deviceId` 当场作废，`--report` 顺手再上报）、`refresh` 不换特征只再上报一次。输出**只有摘要**：UA 与 `canvas` 识别位不落终端。⚠ 本项目目前**还没有任何请求发这个头**，取值的那一半已就位（见 [`client-profiles-fingerprint-and-landing.md`](./client-profiles-fingerprint-and-landing.md) §5.4 ③） |
 | `fixture extract` | 从 HAR 流量包抽取脱敏 fixture（用于离线回放）。脱敏有残留则 fail closed，拒绝写出 |
 | `capabilities` | 打印能力注册表（`--json` 与 `GET /api/capabilities` 同形状） |
 | `version` | 打印版本与运行时信息（`--json` 与 `GET /api/version` 一致） |
@@ -226,14 +226,15 @@ mcloud signin --account 2 --receive --cloud-type 2
 
 数据库就在本机：能跑 CLI 的人本来就能直接 `sqlite3` 读库，
 给他加一道"你是谁"**不增加任何安全性**，却让本地运维变别扭。
-所以 CLI 一律用 `Scope::Local`（不过滤，能操作所有人的账号）。
+所以 CLI 一律用 `core.ScopeLocal()`（Rust 侧叫 `Scope::Local`；不过滤，能操作所有人的账号）。
 
 隔离是给**网络上的用户**准备的（WebUI：A 看不到 B 的账号）—— 那里用户拿不到库文件，
 边界才有意义。过滤逻辑只有一份：查询写 `(?n IS NULL OR owner = ?n)`，
 两种范围共用同一句，所以"某条查询漏了归属条件"在结构上不可能发生。
 
 **WebUI 那侧确实要**：`POST /api/session` 登录、每个请求带 cookie 解析出 `UserId`，
-再据此取 `Scope::User(谁)`。两条硬规则（见 [`rust-rewrite-plan.md`](../../mcloud-rust/docs/rust-rewrite-plan.md) §3.7）：
+再据此取 `core.ScopeUser(&谁)`（Rust 侧写法 `Scope::User(谁)`）。
+两条硬规则（见 [`rust-rewrite-plan.md`](../../mcloud-rust/docs/rust-rewrite-plan.md) §3.7）：
 
 - **没初始化就只暴露初始化**：库里没有用户时，除 `/api/setup` 与健康检查外一律 `503`；
 - **其余接口一律要会话**，且**白名单**判定豁免（新加的路由默认是"需要登录"）。
