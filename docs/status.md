@@ -1588,8 +1588,15 @@ accepted 那半**层与契约各钉一次** —— 契约有码可钉，**层没
   `node scripts/gates-go.js` ⇒ **十项门禁全绿**，总耗时 **26.5s**
   （逐条：build 6.0s，vet 1.7s，fmt 0.7s，test 5.3s，deps 11.0s，filenames 0.7s，idents 0.6s，
   golden 0.3s，jsontags 0.1s，md-tables 0.2s）。
-- ⛔ **未提交**：工作树里另有对方的在飞改动（`web/src/pages/*`、`internal/**` 多处在改），
-  按 AGENTS.md §2 只点名自己那份文件、等对方落定再谈提交。
+- ✅ **已提交为 `5fd4248`（2026-09-23），但走的不是常规口径**：当时工作树两侧都被对方的在飞改动铺满
+  （`web/src/pages/*` 四张新页、`internal/**` 直播与刷新那一整片，索引里还压着对方暂存的 46 份），
+  只点本轮那两份新文件会提出一片**编译不过**的快照 —— `app.tsx` 直接 import 那四张未跟踪的页，
+  本轮页面又 import 未跟踪的 `ui/dialog.tsx`。用户当场拍板"打成一个整树快照 commit" ⇒ 156 份一次入库。
+  ⚠ 这与 AGENTS.md §2.2「提交只点名自己的文件」相反，算**用户当场改口径**，不是新惯例。
+  提交前手动全量重跑过：Go **十项全绿 8.5s**、web **2 条全绿 3.9s**（上面那两组数字属于更早的树状态）。
+- ⚠ 刻意**没**入库、仍是未跟踪的 4 份：`internal/server/zz_dbg_test.go` 与 `zz_debug_test.go`
+  （调试残留：只有 `t.Logf`、零断言）、`data/server-device.txt` 与 `data/server-device-app.txt`
+  （运行时设备身份；`.gitignore` 里那条是 `/data/device*.txt`，名字已经漂了 ⇒ **待补一条 `/data/server-device*.txt`**）。
 
 ### 五、遗留（本轮没做、也不该顺手做）
 
