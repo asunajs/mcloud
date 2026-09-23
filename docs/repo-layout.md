@@ -37,7 +37,13 @@ scripts/        门禁与夹具生成器
   check-filenames.js / check-go-deps.js —— 门禁（文件名 / Go 分层。2026-09-22 起
                     门禁体系整体是 zx（node），旧 `.sh` 版已删，见 dev-gates.md 迁移补记）
   gates-go.js / gates-web.js / gates-scope.js —— 编排 / 分类器；install-hooks.js / shots.js 同属这套
-  applog-capture.py / reqable-capture.py —— 抓包侧工具
+  applog-capture.py / reqable-capture.py / reqable-detail-masked.py
+                  —— 抓包侧工具（代理通路 + 打印前脱敏）。**逐条命令与前置条件不在这里**，
+                     见 capture-tools.md；本文只登记归属
+  probe-live-room.js —— 开播窗口的核对清单（权威那份在脚本的 `ITEMS` 里，见坑表 #116）；
+                    `--wire` 是抓包前置自检
+  asar-extract.cjs —— 从 PC 端 `app.asar` 里 list / cat / grep / save（自己解析头部，不联网）
+  probe-hcy-cool-flag.py / crack-cool-flag-response.py —— 活体探针与已知明文攻击（一次性）
   h5-device-id.py —— **取证用**：从 WebView 的 localStorage 里读官方 App 实发的
                      `deviceId`（只读）。日常**不需要它** —— 那个值本项目自己就能算
                      （`mcloud smid refresh`）。留着是为了"拿真值对拍"。

@@ -1607,3 +1607,62 @@ accepted 那半**层与契约各钉一次** —— 契约有码可钉，**层没
 4. 弹窗 `busy` 那类**值 prop** 是否随父更新：没测。本页不依赖它（禁用与文案都写成本页元素的属性/子节点）。
 5. dock 那几枚（33px）、主题切换（32px）、抽屉按钮（40px）仍在 44 以下 —— 那是**全局件**，
    与 §7.4 那条一起留给用户拍板，本轮没自改判据。
+
+## 补记（2026-09-23，把"抓包工具与使用说明"接上准则那一轮）
+
+用户 2026-09-23 的指令口径：继续优化抓包准则，**当前缺的是抓包工具和使用说明**。
+准则那份文件自己声明"只管纪律、不管命令"，而命令此前**没有任何一处成文** ——
+散在各脚本抬头注释与 `client-profiles-fingerprint-and-landing.md` §7 里。
+
+### 一、落点
+
+| 文件 | 内容 | 分工 |
+| --- | --- | --- |
+| `docs/capture-tools.md`（新，242 行） | 通路 **A~F** 一张表（A Reqable 代理 / B App 自写日志 / C asar 静态 / D 活体探针 / E 浏览器 CDP / F 官方实发 `deviceId` 对拍）+ 每条通路的命令、前置自检、各自的坑，一次取证的固定动作 0→8，工具→落档抬头映射 | **工具与命令的唯一权威**；纪律不落这里 |
+| `docs/capture-guidelines.md` | "不管什么"表与 §8 分工表各加一行；**§2 抓前计划七项 → 八项**（新增"走哪条通路"，反例＝只想到代理那条、日志窗口当场滚没了）；§1.1 / §3 / §6 各加指针 | 只指路，不抄命令 |
+| `docs/client-profiles-fingerprint-and-landing.md` §7 | 那份 applog 命令块**改成指针**（复述就会和工具章对不上）；⚠ 两组实测数字（轮询占比、43 MB 覆盖多长）**仍以本文为出处**，那边只引不抄 | 数字仍归这篇 |
+| `docs/repo-layout.md` | scripts 段补齐抓包侧归属（`reqable-detail-masked.py` / `probe-live-room.js` / `asar-extract.cjs` / 两份探针此前没登记） | 只列归属 |
+| `docs/README.md`、`AGENTS.md` §0 | 索引与真相源地图各加一行；顺手把 `AGENTS.md` 那句"登记表 #1–#131"的**抄数字**改成"条数看文件抬头"（实际已到 #142，且 #131 有重号） | 与 README 同口径 |
+| `docs/migration-pitfalls.md` #133 抬头 | 它引的 skill `mobile-app-log-capture` **在本仓与用户目录下都已找不到** ⇒ 补一条指路到 `capture-tools.md` §0；那条规则（"原生层走日志、WebView 走代理"）现已在本仓成文 | 引用不落空。**⚠ 这一处本轮没提**（锚点在别人未提交的那一节里，见 §四.4） |
+
+### 二、核验（照抄当轮 stdout）
+
+- **本次只跑三条静态门禁**（本轮零 Go 改动 ⇒ 没跑 build / vet / test / golden，也不构成"十项全绿"）：
+  md-tables「38 个文件、没有一行比表头多格」、filenames「187 个文件均为 kebab-case」、
+  idents「扫了 424 个文本文件（字面 + base64 解码后）… 无未登记的疑似真实标识」。全绿。
+- 新文档与准则里的相对链接逐条做存在性检查：无 MISS。
+- 文中的"现状"来自当天一次**只读**实测：`networksetup -getsecurewebproxy Wi-Fi` = `Enabled: Yes` /
+  `127.0.0.1:9000`；`reqable-capture.py summary --all` 返回"总记录 0 条"（桥是通的）；
+  `applog-capture.py list` 读到当日 5 份日志，最末一份 4.5 MB 跨 15:18 → 20:42。
+
+### 三、三条未核实（写成疑问，都不阻塞）
+
+1. `reqable-capture.py status` 当次超时（`TimeoutException: /capture/live/status`）而 `summary` 正常。
+   **单次观察，未查原因** ⇒ 要核：Reqable 开着，两条各跑三次看是否稳定复现。
+2. 本会话那个 `reqable` MCP 连接器（46 个工具）当次两次只读调用（`/capture/live/filter`、
+   `/collection/list`）**都超时** ⇒ 文档只把**脚本**那条算"已验证可用"，MCP 那条标"开关怎么开未实测"。
+   要核：在 Reqable 界面里找到那个本地服务开关、开对之后再跑一次，才升成日常通路。
+3. `applog-capture.py` 有可执行位、另两份 `.py` 没有（`./scripts/reqable-capture.py` 实测
+   `permission denied`）⇒ 文档统一写 `python3 …`。**补齐 x 位**还是**按 AGENTS §3.5 收口成 zx**，待用户拍板。
+
+### 四、遗留（本轮没做、也不该顺手做）
+
+1. 通路 **E（浏览器侧 CDP）本仓没有脚本** —— 2026-09-18 那次是 Windows + Edge 直连，
+   原始 JSONL 在本机临时目录、未入库。再要一次 Web 端取证得**先重建工具**（新工具按 §3.5 用 zx）。
+2. `docs/capture/app-api-families.txt` 里那份 applog 复跑步骤**没动**：素材文件按准则 §6
+   "只进不出、只追加不改写"，它与工具章的分工是"当时跑了什么"vs"现在该怎么跑"。
+3. ⚠ `status.md` 现在 **1860+ 行**（本轮只追加一节）—— 按 AGENTS §3.9 早该谈拆分方案；
+   这份文档的性质是补记流水，拆法（按季度 / 按主题）留给用户拍板，不自改。
+4. 提交口径（用户 2026-09-23 拍板"只提抓包文档这一轮"）：进同一个 commit 的是
+   **抓包这一族的成文 + 它所依赖的那一份工具脚本** —— 工具章（本轮新增）、准则
+   （并行会话今日定稿、本轮在它上面接指路）、`reqable-detail-masked.py`
+   （准则 §1.2 让人**必须**走的脱敏入口）。其余一律留在工作树：Go / jwttoken 那一轮、
+   两份抓包素材、别人混在同一文件里的段落。
+   ⚠ 混改文件按 **hunk 级**造暂存 —— `git add -p` 是交互式的（本会话不能用），
+   `git stash --keep-index` 是共享工作区禁区（hook 说明里点名），所以走
+   "HEAD + 只属于本轮的改动 → `hash-object` + `update-index`"，提交前后逐条
+   `git diff --cached` 核过。
+   ⚠ 提交后仍有**两个名字指向未入库文件**：`docs/capture/app-live-ws-samples.txt`
+   （本轮只在 §6 拿它当"抬头怎么写"的实例）与脚本产出 `probe-live-room-2026-09-23.md`
+   —— 都由各自作者落定。`docs/migration-pitfalls.md` 那一行指路也留在工作树没提
+   （它的锚点在别人未提交的那一节里）。

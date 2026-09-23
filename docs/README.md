@@ -22,6 +22,8 @@
 | 接**新的端**（安卓 / 邮箱 / 小程序） | [`client-profiles.md`](./client-profiles.md)（§1 ~ §4 端差异与请求头）+ [`client-profiles-fingerprint-and-landing.md`](./client-profiles-fingerprint-and-landing.md)（§5 ~ §8 设备指纹 · 落地形状 · 未知项） |
 | 写任何带"**码**"的请求（sourceid / channel / 设备码） | [`device-and-source-codes.md`](./device-and-source-codes.md) —— 这些码是**调用参数**，不是端常量 |
 | 做**登录**（PC 客户端 / PC Web / App） | [`upstream/`](./upstream/) 那一族，按端选（见下表） |
+| **要抓包**（抓什么 / 抓多少 / 什么时候停 / 什么不许抓） | [`capture-guidelines.md`](./capture-guidelines.md) —— **抓包准则**（动抓包之前必读） |
+| **抓包用哪个工具、命令、前置条件** | [`capture-tools.md`](./capture-tools.md) —— 通路 A~F 与一次取证的固定动作 |
 | 写**抓包文档**（提交前必读） | [`sanitize-guide.md`](./sanitize-guide.md) —— 脱敏 SOP + 守卫用法 + 泄露后如何改写历史 |
 | 判断某个值**能不能进版本库** | [`credential-boundary.md`](./credential-boundary.md) —— 界线是"能不能进 GitHub" |
 | 写**前端页面 / 组件** | [`webui-design-guide.md`](./webui-design-guide.md)（视觉与交互）→ 组件与移动端见 [`webui-components.md`](./webui-components.md) → 代码组织与验收见 [`webui-code-guide.md`](./webui-code-guide.md) |
@@ -99,6 +101,8 @@
 | [`dev-gates.md`](./dev-gates.md) | Go 侧十条门禁 + 分层铁律（依赖方向的可执行断言） | **规范**（改代码前必读） |
 | [`repo-layout.md`](./repo-layout.md) | 目录结构 + 文件命名（kebab-case 及三类豁免） | **规范**（加文件前必读） |
 | [`credential-boundary.md`](./credential-boundary.md) | 凭据边界：哪些值能进 GitHub、哪些只能进日志 | **规范** |
+| [`capture-guidelines.md`](./capture-guidelines.md) | **抓包准则**：抓包面选谁、抓前计划（最大请求数 / 停止条件）、过滤纪律、落档与合规红线 | **规范**（动抓包前必读） |
+| [`capture-tools.md`](./capture-tools.md) | **抓包工具与通路**：代理 / App 日志 / asar 静态 / 活体探针 / CDP / 对拍，各自命令与前置自检、一次取证的固定动作 | **规范**（2026-09-23 成文；§1.3 有三条未核实现状） |
 | [`sanitize-guide.md`](./sanitize-guide.md) | 抓包脱敏 SOP、标识守卫用法、真实值泄露后如何改写历史 | 最后核对 2026-09-19 |
 
 ### `docs/archive/`（归档：不删，但**不当现状读**）
@@ -155,6 +159,8 @@
 | **跨端头 / 设备串** | [`client-profiles.md`](./client-profiles.md) + [`client-profiles-fingerprint-and-landing.md`](./client-profiles-fingerprint-and-landing.md) | 与 `upstream/` 的分工：那五篇是一条链路一次取证，本篇是**横向对比** |
 | **码值（sourceid / channel / 设备码）** | [`device-and-source-codes.md`](./device-and-source-codes.md) | 代码注释里那几处"见设备码文档"都指它 |
 | **哪些值能进版本库** | [`credential-boundary.md`](./credential-boundary.md)（界线）+ [`sanitize-guide.md`](./sanitize-guide.md)（做法） | 一条定界线、一条定操作，不合并 |
+| **抓包纪律**（何时抓 / 抓多少 / 停止条件 / 合规红线 / 抓包面选谁） | [`capture-guidelines.md`](./capture-guidelines.md) | `sanitize-guide.md` 只管脱敏；`status.md` 只记实况，**不装准则** |
+| **抓包用什么工具 / 命令 / 前置条件 / 通路怎么选** | [`capture-tools.md`](./capture-tools.md) | 准则只写纪律并指过去；`repo-layout.md` 只列脚本归属 |
 | **前端长什么样 / 怎么写** | `webui-design-guide.md` → `webui-components.md` → `webui-code-guide.md` | 技术选型那条仍以 [`rust-rewrite-plan.md`](../../mcloud-rust/docs/rust-rewrite-plan.md) §2.2（历史快照）为出处，现行约束看 `webui-design-guide.md` |
 | **实现顺序**（先做哪项能力） | [`go-migration-plan.md`](./go-migration-plan.md) | `rust-rewrite-plan.md` §7.1 是历史快照 |
 

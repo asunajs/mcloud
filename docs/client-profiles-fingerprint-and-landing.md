@@ -281,16 +281,10 @@ App 的 `FXTrace*.log` **每个文件封顶 ~10 MB，只保留最近 5 个**。
 **所以：抓到之后立刻 `cp` 出来**（`/tmp` 或 `har/`，注意后者已 gitignore），
 不要指望回头再读。本次能挖到 §3.3.1 那批证据，纯粹是因为当时顺手扫了一遍。
 
-工具已就位（`scripts/applog-capture.py`），把上面两件事都兜住了：
-
-```bash
-scripts/applog-capture.py list                  # 文件、体积、时间跨度（含窗口告警）
-scripts/applog-capture.py snapshot /tmp/fxlog   # 抢一份出来，防滚动
-scripts/applog-capture.py summary               # 接口分布（默认剔掉那两个轮询）
-scripts/applog-capture.py dump 领云朵            # 完整请求 + 响应（凭据头默认打码）
-scripts/applog-capture.py har har/x.har --path /user/
-go run ./cmd/mcloud fixture extract --har har/x.har --out test/fixtures/http
-```
+工具已就位（`scripts/applog-capture.py`），把上面两件事都兜住了 ——
+**逐条命令、`--all` / `--show-secrets` 的口径、"窗口按体积滚"这条判据**都归
+[`capture-tools.md`](./capture-tools.md) §2，本文不复述（复述就会和那边对不上）。
+上面那两组实测数字（轮询占比、43 MB 覆盖多长）**仍以本文为出处**，那边只引不抄。
 
 **日志比代理抓包更强**：它有 `*************Request Start***************` 块，
 里面是 `API Name` / `Method` / `Service` / **`HTTP Header`（整块 dump）** / `HTTP Body`，

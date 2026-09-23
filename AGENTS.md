@@ -9,7 +9,9 @@
 | --- | --- |
 | 门禁与分层铁律 | [`docs/dev-gates.md`](docs/dev-gates.md) |
 | 迁移决策与对拍口径（与其它文档冲突时以它为准） | [`docs/go-migration-plan.md`](docs/go-migration-plan.md) |
-| 实测判据登记表 #1–#131（踩过的坑） | [`docs/migration-pitfalls.md`](docs/migration-pitfalls.md) |
+| 实测判据登记表（踩过的坑。**条数看文件抬头**，别在这里抄数字） | [`docs/migration-pitfalls.md`](docs/migration-pitfalls.md) |
+| **抓包纪律**（何时抓 / 抓多少 / 停止条件 / 合规红线 / 抓包面选谁） | [`docs/capture-guidelines.md`](docs/capture-guidelines.md) |
+| **抓包工具与通路**（用什么 / 命令 / 前置自检 / 通路怎么选 / 落档抬头怎么写） | [`docs/capture-tools.md`](docs/capture-tools.md) |
 | 文档索引与目录约定 | [`docs/README.md`](docs/README.md)、[`docs/repo-layout.md`](docs/repo-layout.md) |
 | WebUI 视觉 / 组件 / 代码约定 | [`docs/webui-design-guide.md`](docs/webui-design-guide.md)、[`docs/webui-code-guide.md`](docs/webui-code-guide.md)、[`docs/webui-components.md`](docs/webui-components.md) |
 | 进度与实况记录 | [`docs/status.md`](docs/status.md) |
