@@ -1627,9 +1627,12 @@ accepted 那半**层与契约各钉一次** —— 契约有码可钉，**层没
 
 ### 二、核验（照抄当轮 stdout）
 
-- **本次只跑三条静态门禁**（本轮零 Go 改动 ⇒ 没跑 build / vet / test / golden，也不构成"十项全绿"）：
-  md-tables「38 个文件、没有一行比表头多格」、filenames「187 个文件均为 kebab-case」、
-  idents「扫了 424 个文本文件（字面 + base64 解码后）… 无未登记的疑似真实标识」。全绿。
+- **本次只跑三条静态门禁**（本轮零 Go 改动 ⇒ 没跑 build / vet / test / golden，也不构成"十项全绿"）。提交那次 hook 的 stdout：
+  filenames「190 个文件均为 kebab-case」、idents「扫了 425 个文本文件（字面 + base64 解码后），
+  无未登记的疑似真实标识」、md-tables「38 个文件、没有一行比表头多格」；横幅写 **本次 3/10 条**
+  （未跑：build vet fmt test deps golden jsontags）。
+  ⚠ 那两个文件数随**当轮暂存面**变 ⇒ 别拿它们当「跑没跑」的证据（与 AGENTS §1.1 那份
+  `gates-go-last.log` 空不空的坑同族）；要引就引横幅里的 N/10。
 - 新文档与准则里的相对链接逐条做存在性检查：无 MISS。
 - 文中的"现状"来自当天一次**只读**实测：`networksetup -getsecurewebproxy Wi-Fi` = `Enabled: Yes` /
   `127.0.0.1:9000`；`reqable-capture.py summary --all` 返回"总记录 0 条"（桥是通的）；
