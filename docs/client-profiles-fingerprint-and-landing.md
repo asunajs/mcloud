@@ -323,7 +323,7 @@ go run ./cmd/mcloud fixture extract --har har/x.har --out test/fixtures/http
   |---|---|---|
   | 算法 | `internal/upstream/smid.go` | 特征体 → `data` → 上报 → `B…`；**只管一次调用，不碰库** |
   | 生命周期 | `internal/app/smid.go` | 读库里的特征、没有就生成并绑账号、上报、存 `deviceId`；`rotate` 时同一条语句清掉旧 `deviceId` |
-  | 落库 | `account_state.smid_fingerprint` / `smid_device_id`（**v5 引入，schema 现为 v8**） | 见 §6 那两行新层 |
+  | 落库 | `account_state.smid_fingerprint` / `smid_device_id`（**v5 引入，schema 现为 v9**） | 见 §6 那两行新层 |
   | 入口 | `mcloud smid show / reset [--report] / refresh` | 只打印摘要（特征 fp 摘要 + 平台/尺寸/dpr/触屏/CPU + 打码的 `deviceId`），**不打印 UA** |
 
 端档案的调用链（**从 CLI 一路到上游**，可以直接照着读）：

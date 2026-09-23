@@ -44,6 +44,21 @@ const JS_TS = ['**/*.js', '**/*.cjs', '**/*.mjs', '**/*.ts', '**/*.tsx']
 const MD = ['**/*.md']
 const patterns = withMd ? [...JS_TS, ...MD] : JS_TS
 
+// ⚠⚠ 给了子路径就**只扫它** —— 这不是优化，是**正确性**。
+//
+// 早先这里两处都写成 `${patterns} ${extra}`：`extra` 是**追加**到全仓 glob 上的。
+// 于是 `node scripts/fmt.js scripts/my-new.js`（想"只格式化我刚写的那一个文件"）
+// 实际会扫**全仓** —— 在**共享工作树**里这就等于顺手改了别人正在改的文件。
+// 实测踩到：只想格式化自己新写的两个脚本，结果把 `web/src/pages/accounts-page.tsx`
+// （另一个会话在飞的改动）一起重排了。
+// 头部那句"末尾参数**限定**扫描子路径"一直就是这么写的 ⇒ 这是**代码没做到文档**，
+// 按 §3.2 修代码，不是改文档。
+//
+// ⚠ 顺带说明为什么这条在别的仓库没这么要紧：单工作树里"多格式化了几个文件"
+// 只是噪声；这里 worktree 与 git 索引都是**共享**的（AGENTS.md §2），
+// 多动的那几个文件可能是别人还没提交的在飞改动 —— 那已经不是噪声了。
+const targets = extra.length > 0 ? extra : patterns
+
 const mode = check ? '--check' : list ? '--list-different' : '--write'
 
 if (withMd && !check && !list) {
@@ -55,9 +70,8 @@ if (withMd && !check && !list) {
 const t0 = Date.now()
 // write 档的 oxfmt 只报统计不列文件名 ⇒ 先花 <1s 拿一份"会被改"的清单，
 // 跑完才说得出"这次动了哪些"。check/list 档自己就列，不必多跑。
-const pre =
-  mode === '--write' ? await $`npx oxfmt --list-different ${patterns} ${extra}`.nothrow() : null
-const r = await $`npx oxfmt ${mode} ${patterns} ${extra}`.nothrow()
+const pre = mode === '--write' ? await $`npx oxfmt --list-different ${targets}`.nothrow() : null
+const r = await $`npx oxfmt ${mode} ${targets}`.nothrow()
 const text = `${r.stdout}`
 if (text !== '' && !text.endsWith('\n')) process.stdout.write(`${text}\n`)
 else process.stdout.write(text)

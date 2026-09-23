@@ -657,8 +657,42 @@ type StateStore interface {
 	// `at` 由调用方给（[Clock]），实现不自己取时间 —— 测试才能钉住。
 	SetAccountCloud(ctx context.Context, scope Scope, id AccountID, count int64, at time.Time) error
 
+	// SetAccountEnabled 开关一个账号（**窄写**：只动 `enabled` 一列）。
+	//
+	// 与 [StateStore.SetAccountCloud] 同一个理由：界面上那个开关不该有机会
+	// 把昵称、排序、云朵余额按它**读到的那份旧快照**写回去。
+	//
+	// # 停用在这里只是"别再参与批量"，不是"抹掉凭据"
+	//
+	// 停用的语义边界：批量入口（如 `mcloud signin` 不带 `--index` 时）会跳过它，
+	// 而**显式指名**仍然会跑（并给一句提示）。凭据、登录态、历史一律保留 ——
+	// "停用"是暂停，不是删除；要清除凭据请用 [StateStore.DeleteAccount]。
+	SetAccountEnabled(ctx context.Context, scope Scope, id AccountID, enabled bool) error
+
 	// ListAccounts 该范围内可见的账号，按 `sort_order` 升序。
 	ListAccounts(ctx context.Context, scope Scope) ([]Account, error)
+
+	// DeleteAccount 删掉一个账号**以及它名下的一切**。
+	//
+	// # 为什么必须显式删干净
+	//
+	// 建表语句里**没有可用的外键**（SQLite 的 `PRAGMA foreign_keys` 默认关闭，
+	// 与本库同风格的 [StateStore.DeleteRunEvents] 就是这条前提的既成先例）。
+	// 于是"删掉 accounts 一行"并不会带走 `account_state` 里的凭据 ——
+	// 留下的是**一个没人认领、却仍然能冒充那个手机号登录**的活凭据。
+	// 所以实现要在**同一个事务**里连带删除：
+	// `account_state`、`cloud_stats`、该账号的 `runs` 及这些 run 的 `run_events`。
+	// 半途而废会留下"账号没了、凭据还在"，而那正是最坏的一半。
+	//
+	// # 为什么**不**动 schedules / pipelines 的 `account_ids`
+	//
+	// 那两列的语义是"**空数组 = 全部账号**"（见 [Schedule.AccountIDs]）。
+	// 删掉数组里最后一个 id 会把它**静默地从"只跑这一个"变成"跑全部"**，
+	// 那是比悬空 id 严重得多的越权。悬空 id 交给读取方处理，
+	// 界面上照原样显示那个 id（它同时是"这里还指着一个已删除的账号"的线索）。
+	//
+	// 不在该范围内时返回 [KindNotFound]（与写路径同一口径，理由见 `validateOwned`）。
+	DeleteAccount(ctx context.Context, scope Scope, id AccountID) error
 
 	// GetAccountState 读取账号登录态（含凭据）。
 	//
@@ -728,6 +762,46 @@ type StateStore interface {
 	//
 	// 所以它也**不动 `updated_at`** —— 补一个缺口不是新快照。
 	FillAccountCredentials(ctx context.Context, scope Scope, id AccountID, authorization, phone *string) error
+
+	// RotateAccountAuth 用**刷新出来的新凭据**换掉库里那一套（窄写，跨两张表）。
+	//
+	// 只碰四样：`account_state.jwt_token` / `.authorization` / `.updated_at`
+	// 与 `accounts.auth_expire`。其余列（`device_id` / `user_domain_id` /
+	// `smid_*` / 昵称 / 余额 / 排序…）一律不动 —— 刷新换的是"这把钥匙"，
+	// 不是"这台设备长什么样"，也不是"这个账号叫什么"。
+	//
+	// # 为什么是"覆盖"而不是 [StateStore.FillAccountCredentials] 那种"填空缺"
+	//
+	// 填空缺在这里恰好是**错的**：库里那串旧 auth 有值，且正是被替换的对象。
+	// 走"空着才填"就永远填不进去，症状是"刷新跑了、什么也没变"。
+	//
+	// # 为什么这四列必须在**一个事务**里
+	//
+	// 凭据（`account_state`）与它的过期时刻（`accounts`）是同一件事的两半。
+	// 分开写，中间崩溃留下的是"整串新、`auth_expire` 旧" —— 于是列表页显示
+	// "还有 N 天过期"，而那个 N 属于已被替换的旧串，下一次刷新判定也跟着错。
+	// 这一半和那一半**各自都合法**，事后看不出发生过什么（与
+	// [StateStore.SetSmidFingerprint] 同一个理由）。
+	//
+	// # `auth_expire` 为 nil 时写 NULL，**不保留旧值**
+	//
+	// 旧值描述的是已被替换的那串 token，留着它等于宣称一个已经不存在的过期时间。
+	// "没有过期信息"由读取方判为"该刷新了"，那是安全的一侧。
+	//
+	// # `at` 由调用方给
+	//
+	// 与 [StateStore.SetAccountCloud] 同因：实现不自己取时间，测试才钉得住。
+	// 这一次**要**动 `updated_at` —— 换过凭据确实是新快照（与 smid 那条相反）。
+	//
+	// # 为什么要求 `account_state` 那一行**已存在**
+	//
+	// 没有凭据行就没有"旧的一套"可换，此时返回 [KindNotFound] 而不是"悄悄建一行
+	// 只有两列的登录态"：后者会留下一行 `device_id` / `user_domain_id` 全空的状态，
+	// 而调用方（能力层）本该先读到旧凭据才可能来刷新 —— 读不到就是没有。
+	RotateAccountAuth(
+		ctx context.Context, scope Scope, id AccountID,
+		authorization, jwtToken SecretValue, authExpire *int64, at time.Time,
+	) error
 
 	// UpsertCloudStats 按 `account + date` UPSERT 日快照。
 	UpsertCloudStats(ctx context.Context, scope Scope, stats *CloudStats) error
@@ -891,6 +965,19 @@ type ConfigStore interface {
 
 	// DeleteSchedule 删除；返回是否真的删掉了一行（不可见等价于不存在）。
 	DeleteSchedule(ctx context.Context, scope Scope, id string) (bool, error)
+
+	// MarkScheduleFire 推进调度水位（`last_fire_at`），**只碰那一列**。
+	//
+	// 与 [UpsertSchedule] 分开是必须的：循环在触发的那一刻手上只有"几秒前读到的
+	// 那一份"，用整行覆盖会把别人刚编辑的 cron / body 打回旧值。
+	// 返回"有没有写到这一行"—— 写不到（不可见、已删）就不该去打上游。
+	MarkScheduleFire(ctx context.Context, scope Scope, id string, fireAt time.Time) (bool, error)
+
+	// RecordScheduleRun 写执行记账（`last_run_at` / `last_status` / `last_error`），
+	// 同样**只碰这几列**。nil 的含义逐列不同，实现处写明 —— 界面上那行
+	// "上次执行"从 v2 起就没人写，本方法是第一个写入方。
+	RecordScheduleRun(ctx context.Context, scope Scope, id string,
+		ranAt *time.Time, status ScheduleStatus, lastError *string) (bool, error)
 
 	UpsertPipeline(ctx context.Context, scope Scope, pipeline *Pipeline) error
 

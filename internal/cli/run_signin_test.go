@@ -396,14 +396,17 @@ func TestSigninWithOnlyDisabledAccountsSaysWhyNothingRan(t *testing.T) {
 	}
 }
 
-// `--account 0` 是**运行**错误（退 1），不是用法错误：它不是解析期能判的，
-// 而 Rust 那边 `usize` 同样是在动手之后才拒的。
-func TestSigninAccountZeroIsARunError(t *testing.T) {
+// `--account 0` 是**用法**错误（退 2）：下标从 1 起，写 0 一定是调用写错了。
+//
+// ⚠ 判据**不是**"解析期能不能判"—— 跨层校验发生在 RunE 里、性质仍然是用法错误
+// （[ErrUsage] 的注释里 `--records-all` 那条就是这个道理）。判据是
+// "**改调用**能不能好 / 重试能不能好"：换个下标立刻就好 ⇒ 用法错误。
+func TestSigninAccountZeroIsAUsageError(t *testing.T) {
 	env := signinFixture(t, signinAcct{id: "19****01", enabled: true})
 
 	stdout, stderr, code := signinCLIAt(t, &signinScript{}, env, "--account", "0")
-	if code != ExitRun {
-		t.Fatalf("应退 %d，实得 %d\n  stderr=%q", ExitRun, code, stderr)
+	if code != ExitUsage {
+		t.Fatalf("下标写错是用法错误，应退 %d，实得 %d\n  stderr=%q", ExitUsage, code, stderr)
 	}
 	if !strings.Contains(stderr, "下标从 1 开始") {
 		t.Errorf("该说清下标从 1 开始: %q", stderr)
@@ -413,14 +416,15 @@ func TestSigninAccountZeroIsARunError(t *testing.T) {
 	}
 }
 
-// ⚠ 负数是 Go 侧才有的输入（Rust 的 `usize` 在 clap 那层就拒了），
-// 而 `accounts[-1]` 会 panic。它必须被当成"从 1 开始"的同一个错。
+// ⚠ 负数的危害是 `accounts[-1]` 会 panic；它与 `--account 0` 是同一个错
+// （下标从 1 起），必须合并成同一句话。⚠ 与越界一样退 **2**（用法错误）：
+// 换个下标就能好，重试不会。
 func TestSigninAccountNegativeDoesNotBecomeHuge(t *testing.T) {
 	env := signinFixture(t, signinAcct{id: "19****01", enabled: true})
 
 	_, stderr, code := signinCLIAt(t, &signinScript{}, env, "--account", "-1")
-	if code != ExitRun {
-		t.Fatalf("应退 %d（而不是 panic 或天文数字），实得 %d\n  stderr=%q", ExitRun, code, stderr)
+	if code != ExitUsage {
+		t.Fatalf("应退 %d（而不是 panic 或天文数字），实得 %d\n  stderr=%q", ExitUsage, code, stderr)
 	}
 	if !strings.Contains(stderr, "下标从 1 开始") {
 		t.Errorf("负数该被当成「从 1 开始」的同一个错: %q", stderr)
@@ -434,8 +438,8 @@ func TestSigninAccountOutOfRangeNamesTheCount(t *testing.T) {
 	)
 
 	_, stderr, code := signinCLIAt(t, &signinScript{}, env, "--account", "3")
-	if code != ExitRun {
-		t.Fatalf("应退 %d，实得 %d\n  stderr=%q", ExitRun, code, stderr)
+	if code != ExitUsage {
+		t.Fatalf("越界是用法错误（重试不会变好），应退 %d，实得 %d\n  stderr=%q", ExitUsage, code, stderr)
 	}
 	if !strings.Contains(stderr, "超出范围") || !strings.Contains(stderr, "一共 2 个账号") {
 		t.Errorf("越界要报出总数（用户是照着 --list 手打的）: %q", stderr)

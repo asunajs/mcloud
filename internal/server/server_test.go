@@ -19,6 +19,7 @@ import (
 	"github.com/catlair/mcloud/internal/app"
 	"github.com/catlair/mcloud/internal/core"
 	mcloudio "github.com/catlair/mcloud/internal/io"
+	"github.com/catlair/mcloud/internal/upstream"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -30,6 +31,13 @@ import (
 // ⚠ 它不是"弱随机"：测试里的随机只用于**会话 token 与口令盐**，
 // 而这两个值在断言里从来不比字面量（比的是"能登录/登不出"），
 // 所以确定性不会把任何一条断言变成自证。
+//
+// 补记（2026-09-22，写 accounts_write_test.go 时实测）：**状态只有一个字节**，
+// 而 `x → 31x+7 (mod 256)` 的环长整除 32 —— 于是"再取 32 字节"会给出**一模一样**的那一份。
+// 后果：同一台服务端**第二次** `POST /api/session` 会拿同一个 token，
+// `sessions.token_hash` 唯一 ⇒ 500「内部错误」，线索为零。
+// 需要"同一个身份再登录一次"的用例请**复用** setup 发过的那份 cookie；
+// 真要第二个身份就用 [secondUser]（它按名字另起一颗种子，正是为此）。
 type fixedRandom struct{ next byte }
 
 func (r *fixedRandom) FillBytes(dst []byte) {
@@ -40,6 +48,20 @@ func (r *fixedRandom) FillBytes(dst []byte) {
 }
 
 func newRandom() *fixedRandom { return &fixedRandom{next: 3} }
+
+// 预置口令哈希：argon2id 的 PHC 串，由 core.HashPassword 用固定种子的
+// [fixedRandom]（admin 用 next:3，第二用户用 next:200）离线生成一次后固化。
+//
+// ⚠ 它是**真哈希**而不是占位串 —— [TestSeededAdminAndSecondUserHashesAreReal]
+// 每次跑都会拿 argon2 验一遍"口令对得上、错口令对不上"。
+// 把常量改坏（形状或字节）不会让快路径变红（签发会话不碰哈希），
+// 变红的就是那条守卫用例，这正是它存在的理由。
+const (
+	adminPHC       = "$argon2id$v=19$m=19456,t=2,p=1$ZCNEQyRjBIPko8TDpOOEAw$Cvwwu08wDbmu7asW9L2LSyOG4Zgvf+/wqQ1dy4M25Y8"
+	adminPassword  = "correct-horse"
+	secondUserPHC  = "$argon2id$v=19$m=19456,t=2,p=1$P6hfiH9on0i/KN8I/+gfyA$rfVFHS2K1acNdXFkGcp5Zrpj1ZYknAlo4xRGMEi8nGA"
+	secondPassword = "another-horse"
+)
 
 // fixedNow 是整组测试用的"当前时刻"。
 //
@@ -61,32 +83,95 @@ type harness struct {
 // newHarness 起一台**还没初始化**的服务端。
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	client := refusingClient{}
+	store, hub := newStoreWithHub(t, client)
+	rng := newRandom()
+	return &harness{
+		server: New(store, newClock(), rng, Config{}, hub,
+			newTestRefresher(t, store, client), newTestRunWorld(t, client)),
+		store: store,
+		rng:   rng,
+	}
+}
+
+// newStoreWithHub 起一份内存库 + 一份登录会话表。
+//
+// 默认装 [refusingClient]：本包的用例绝大多数与上游无关，
+// 而"意外走到上游"在测试里的失败形态是**卡住两分钟**，不是变红。
+// 要跑登录流程的用例自己传脚本客户端（见 login_test.go）。
+func newStoreWithHub(t *testing.T, client core.HTTPClient) (*mcloudio.SqliteStore, *app.LoginHub) {
+	t.Helper()
 	store, err := mcloudio.OpenInMemory()
 	if err != nil {
 		t.Fatalf("开内存库失败: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	rng := newRandom()
-	return &harness{
-		server: New(store, newClock(), rng, Config{}),
-		store:  store,
-		rng:    rng,
-	}
+	return store, newTestHub(t, store, client)
 }
 
-// initialized 走完初始化，并把 cookie 记下来。
+// newTestHub 用临时目录当设备指纹落点（**不许**写进仓库的 data/）。
+func newTestHub(t *testing.T, store *mcloudio.SqliteStore, client core.HTTPClient) *app.LoginHub {
+	t.Helper()
+	dir := t.TempDir()
+	return app.NewLoginHub(
+		store, upstream.NewUpstream(client), newClock(), newRandom(),
+		dir+"/device.txt", dir+"/device-app.txt", &pollCappedWaiter{})
+}
+
+// replaceLoginHub 换掉会话表（换成带脚本客户端的那一份）。
+func (h *harness) replaceLoginHub(t *testing.T, client core.HTTPClient) {
+	t.Helper()
+	h.server.hub = newTestHub(t, h.store, client)
+}
+
+// newTestRefresher 装配"刷凭据"那一份常驻世界，设备档案落在临时目录
+// （**不许**写进仓库的 data/，那是别人正在用的库旁边）。
+func newTestRefresher(t *testing.T, store *mcloudio.SqliteStore, client core.HTTPClient) *app.AuthRefresher {
+	t.Helper()
+	return app.NewAuthRefresher(
+		store, upstream.NewUpstream(client), newClock(), newRandom(),
+		t.TempDir()+"/device-app.txt",
+	)
+}
+
+// replaceRefresher 换掉刷新装配（换成带脚本客户端的那一份）。
+//
+// 它**不**与 [replaceLoginHub] 合并成"换掉出站客户端"：登录那批用例只该换登录的
+// 那条路，让刷新仍然装着 [refusingClient] 是**故意的** —— 否则一次误挂到刷新上的
+// 用例会安静地消费掉本来给登录准备的脚本响应，报出来的错在另一半链路上。
+func (h *harness) replaceRefresher(t *testing.T, client core.HTTPClient) {
+	t.Helper()
+	h.server.refresher = newTestRefresher(t, h.store, client)
+}
+
+// initialized 造出初始管理员并拿到登录 cookie（写进 h.cookie）。
+//
+// ⚠ 这里**刻意不走** `POST /api/setup`：那条路每次要跑**两遍** argon2
+// （建用户时哈希一遍、登录时校验一遍），而 -race 下 tsan 会给 argon2 那
+// 19 MiB 的工作集逐字节插桩 —— 实测单次约 1.4s、其中约 75% 是 argon2+tsan，
+// 本包近九成用例都要这一步（2026-09-22 计时）。用例关心的是"有一个已登录
+// 身份"，不是哈希函数吞吐，所以直接用预置 PHC 落一行用户、再照
+// [app.SignIn] 的形状签发会话。
+//
+// 真实链路**没有失去覆盖**：setup 门禁、cookie 属性、口令错误不可区分、
+// login 系列与刷新用例都仍然打真 HTTP 走真 argon2（本文件与 login_test.go），
+// 预置串本身由 [TestSeededAdminAndSecondUserHashesAreReal] 把守。
 func (h *harness) initialized(t *testing.T) *harness {
 	t.Helper()
-	rec := h.do(t, "POST", "/api/setup",
-		`{"name":"admin","password":"correct-horse"}`, nil)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("初始化应 201，实得 %d：%s", rec.Code, rec.Body.String())
+	ctx := context.Background()
+	user := core.NewUser("admin", "admin",
+		core.PasswordHash(adminPHC), core.RoleAdmin, fixedNow)
+	if err := h.store.UpsertUser(ctx, &user); err != nil {
+		t.Fatalf("建用户失败: %v", err)
 	}
-	cookies := rec.Result().Cookies()
-	if len(cookies) == 0 {
-		t.Fatal("初始化应顺手把会话发出去 —— 否则用户刚设完口令又被要求输一遍")
+	// 与 setupCreate 对外的可观察结果同形：SessionWeb、WebSessionDays 天、
+	// token 走服务端同一份 rng（明文只在这里出现一次）。
+	token, _, err := mcloudio.IssueSession(ctx, h.store, user.ID,
+		fixedNow.Add(app.WebSessionDays*24*time.Hour), core.SessionWeb, h.rng)
+	if err != nil {
+		t.Fatalf("签发会话失败: %v", err)
 	}
-	h.cookie = cookies[0]
+	h.cookie = &http.Cookie{Name: CookieName, Value: token}
 	return h
 }
 
@@ -297,12 +382,9 @@ func TestSessionCookieIsHttpOnlyAndSameSiteLax(t *testing.T) {
 }
 
 func TestSecureCookieIsHonouredWhenDeployedBehindTLS(t *testing.T) {
-	store, err := mcloudio.OpenInMemory()
-	if err != nil {
-		t.Fatalf("开内存库失败: %v", err)
-	}
-	defer func() { _ = store.Close() }()
-	srv := New(store, newClock(), newRandom(), Config{SecureCookie: true})
+	store, hub := newStoreWithHub(t, refusingClient{})
+	srv := New(store, newClock(), newRandom(), Config{SecureCookie: true}, hub,
+		newTestRefresher(t, store, refusingClient{}), newTestRunWorld(t, refusingClient{}))
 
 	rec := httptest.NewRequest("POST", "/api/setup",
 		strings.NewReader(`{"name":"admin","password":"correct-horse"}`))
@@ -702,6 +784,74 @@ func TestScheduleRoundTripsAndIsScopedToItsOwner(t *testing.T) {
 	}
 }
 
+// TestScheduleEditKeepsWhatOnlyTheSchedulerOwns：改一次任务不许洗掉调度器那两列。
+//
+// `PUT` 是"全量覆盖"，但它覆盖的只是**用户能填的那几样**。`last_fire_at`（水位）
+// 与 `miss_policy`（这一行选过的补跑策略）不是：
+//   - 水位被写回去 ⇒ 已处理过的那一次会**再跑一遍**，而签到与换凭据都不可逆；
+//   - 策略被洗成 NULL ⇒ 用户"这行我要补跑"的选择被能力默认盖掉，界面上还看不出来。
+//
+// 两条都只能靠这一条用例钉：请求体里根本没有这两栏，所以"少发一个字段"这种
+// 改坏不会被任何入参校验发现。
+func TestScheduleEditKeepsWhatOnlyTheSchedulerOwns(t *testing.T) {
+	h := newHarness(t).initialized(t)
+	ctx := context.Background()
+	scope := core.ScopeUser(userIDOf(t, h))
+
+	putScheduleRow := func(name string) {
+		t.Helper()
+		rec := h.do(t, "PUT", "/api/schedules/daily",
+			`{"name":`+quoteJSON(name)+`,"cron":"0 9 * * *",`+
+				`"target":{"kind":"capability","code":"sign"}}`, nil)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("保存应成功，实得 %d：%s", rec.Code, rec.Body.String())
+		}
+	}
+	scheduleRow := func() map[string]any {
+		t.Helper()
+		list, _ := decode(t, h.do(t, "GET", "/api/schedules", "", nil))["schedules"].([]any)
+		if len(list) != 1 {
+			t.Fatalf("应有 1 条定时任务，实得 %d", len(list))
+		}
+		row, _ := list[0].(map[string]any)
+		return row
+	}
+
+	putScheduleRow("每日签到")
+	// 新建的那一行：两栏都该是"没有人动过"，而不是被猜出一个值。
+	if got := scheduleRow(); got["lastFireAt"] != nil || got["missPolicy"] != nil {
+		t.Fatalf("新建的任务不该带水位与策略，实得 %v / %v", got["lastFireAt"], got["missPolicy"])
+	}
+
+	// 模拟调度器与"将来的任务页"各写一列。
+	fireAt := fixedNow.Add(-time.Hour)
+	if written, err := h.store.MarkScheduleFire(ctx, scope, "daily", fireAt); err != nil || !written {
+		t.Fatalf("预置水位失败: written=%v err=%v", written, err)
+	}
+	row, err := h.store.GetSchedule(ctx, scope, "daily")
+	if err != nil || row == nil {
+		t.Fatalf("读不回定时任务: %v", err)
+	}
+	policy := core.MissSkip
+	row.MissPolicy = &policy
+	if err := h.store.UpsertSchedule(ctx, scope, row); err != nil {
+		t.Fatalf("预置补跑策略失败: %v", err)
+	}
+
+	putScheduleRow("改了名的签到")
+	got := scheduleRow()
+	if got["name"] != "改了名的签到" {
+		t.Fatalf("改名没生效，实得 %v", got["name"])
+	}
+	if got["missPolicy"] != "skip" {
+		t.Errorf("一次编辑不该把补跑策略洗成跟随默认，实得 %v", got["missPolicy"])
+	}
+	if got["lastFireAt"] != fireAt.UTC().Format(time.RFC3339) {
+		t.Errorf("一次编辑不该回退水位，实得 %v，应为 %s",
+			got["lastFireAt"], fireAt.UTC().Format(time.RFC3339))
+	}
+}
+
 func TestScheduleIsRejectedWhenTheTargetDoesNotExist(t *testing.T) {
 	h := newHarness(t).initialized(t)
 	rec := h.do(t, "PUT", "/api/schedules/ghost",
@@ -750,31 +900,49 @@ func userIDOf(t *testing.T, h *harness) *core.UserID {
 }
 
 // secondUser 建第二个用户并登录，返回它的会话 cookie。
+//
+// 走预置 PHC 快路径的理由同 [initialized]：用例关心的是"第二个身份"，
+// 不是哈希吞吐。串的真实性由 [TestSeededAdminAndSecondUserHashesAreReal] 把守。
 func secondUser(t *testing.T, h *harness, name string) *http.Cookie {
 	t.Helper()
 	// ⚠ 随机源要**按名字错开**：每次都从同一个种子起会让会话 token 撞车
 	// （sessions.token_hash 是唯一的），而报错是"UNIQUE constraint failed"，
 	// 看上去像存储层的锅 —— 真实原因是夹具自己退化成了常量。
 	rng := &fixedRandom{next: byte(len(name)*17 + 5)}
-	// ⚠⚠ §6.1 #38 的第二个病例：这里**不能**让两个调用共用一个 `perr`。
-	// `HashPassword` 返回 `error`（接口），`SignIn` 返回 `*core.Error`；
-	// 同一个作用域里后者只是**赋值**，于是成功的 nil `*core.Error`
-	// 被塞进 `error` 接口 ⇒ `perr != nil` **恒真**，而 `%v` 打印 `<nil>`。
-	// 我第一次就踩了它，报错是"登录失败: <nil>" —— 一个线索都没有。
-	hash, herr := core.HashPassword("another-horse", rng)
-	if herr != nil {
-		t.Fatalf("哈希失败: %v", herr)
-	}
-	user := core.NewUser(name, name, hash, core.RoleUser, fixedNow)
+	user := core.NewUser(name, name,
+		core.PasswordHash(secondUserPHC), core.RoleUser, fixedNow)
 	if err := h.store.UpsertUser(context.Background(), &user); err != nil {
 		t.Fatalf("建用户失败: %v", err)
 	}
-	_, token, _, sperr := app.SignIn(context.Background(), h.store,
-		name, "another-horse", rng, fixedNow)
-	if sperr != nil {
-		t.Fatalf("登录失败: %v", sperr)
+	token, _, err := mcloudio.IssueSession(context.Background(), h.store, user.ID,
+		fixedNow.Add(app.WebSessionDays*24*time.Hour), core.SessionWeb, rng)
+	if err != nil {
+		t.Fatalf("签发会话失败: %v", err)
 	}
 	return &http.Cookie{Name: CookieName, Value: token}
+}
+
+// TestSeededAdminAndSecondUserHashesAreReal：预置 PHC 串必须**真是**那两个口令的哈希。
+//
+// [initialized] 与 [secondUser] 的快路径不经过 argon2，所以把常量改坏
+// （换形状、动一个字节）它们**不会**变红 —— 那条由本用例把守：
+// 对口令必须验得过，错口令必须验不过。
+// 它同时兜住真实链路：本包所有"走 POST /api/session 重新登录"的用例
+// 都会拿这份串跑一次真 argon2 校验。
+func TestSeededAdminAndSecondUserHashesAreReal(t *testing.T) {
+	for _, c := range []struct{ label, password, phc string }{
+		{"admin", adminPassword, adminPHC},
+		{"secondUser", secondPassword, secondUserPHC},
+	} {
+		ok, err := core.VerifyPassword(c.password, core.PasswordHash(c.phc))
+		if err != nil || !ok {
+			t.Fatalf("%s 的预置串应与口令 %q 匹配: ok=%v err=%v", c.label, c.password, ok, err)
+		}
+		ok, err = core.VerifyPassword(c.password+"x", core.PasswordHash(c.phc))
+		if err != nil || ok {
+			t.Fatalf("%s 的预置串不该匹配错口令: ok=%v err=%v", c.label, ok, err)
+		}
+	}
 }
 
 // seedRun 往**当前登录者**名下塞一个 run 加三条事件；terminal 控制最后一条

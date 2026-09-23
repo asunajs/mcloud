@@ -2,7 +2,7 @@
 
 > 状态：**规范**（改代码前必读；跑门禁是完成定义的一部分）
 >
-> - 入口：`node scripts/gates-go.js`（九条）—— "一条命令跑完全部，任一条失败即非零退出"。
+> - 入口：`node scripts/gates-go.js`（十条）—— "一条命令跑完全部，任一条失败即非零退出"。
 > - 权威说明：本文；分层表与 `scripts/check-go-deps.js` 的可执行断言**互为镜像**，改一处要改另一处
 > - **Rust 侧已随代码剥离**（2026-09-21）：七条门禁、crate 分层铁律、编译耗时实测、
 >   跨环境核证与 macOS 首跑记录，全部移入同级仓库
@@ -12,7 +12,8 @@
 >   `check-filenames` / `check-go-deps` / `install-hooks` / `shots`）整体由 bash 迁到
 >   **zx（Node ESM）**，仓库根 `package.json` 钉了 zx 依赖 —— 克隆后先 `npm install`，
 >   否则分类器在第一条门禁之前就因缺模块而起不来（node 会指名 `zx`，不是代码问题）。
->   迁移按"逐条外部行为与退出码不变"验收：九条全跑的 stdout 与旧 bash 版**逐字节一致**，
+>   迁移按"逐条外部行为与退出码不变"验收：九条（**迁移当时的条数**；第 10 条
+>   `md-tables` 是同日稍后补的，见下表）全跑的 stdout 与旧 bash 版**逐字节一致**，
 >   并各做过反向测试。剩下的 bash 只有 `.githooks/` 两个薄壳（git 只认固定文件名 + x 位）。
 
 ---
@@ -25,7 +26,7 @@ node scripts/gates-go.js test deps        # 只跑指定的几条
 ```
 
 
-## Go 侧九条
+## Go 侧十条
 
 | # | 门禁 | 管什么 | 从哪来 |
 | --- | --- | --- | --- |
@@ -38,6 +39,7 @@ node scripts/gates-go.js test deps        # 只跑指定的几条
 | 7 | `node scripts/check-identifiers.cjs` | 不得有真实标识 | **复用** |
 | 8 | `node scripts/check-golden-vectors.cjs` | 黄金向量能算出自己 | **复用** |
 | 9 | `node scripts/check-go-jsontags.cjs` | 结构体字段的 `json` tag 不许漏写 | Go 版 |
+| 10 | `node scripts/check-md-tables.cjs` | markdown 表格不许比表头多格 | Go 版（**仓库级**，见下） |
 
 > ⚠ 1–4 写的是 `$GO_PKGS` 而**不是**惯用的 `./...`：这条定义诞生于 Rust 还住在
 > 本仓库的时期 —— 当时 `./...` 会去遍历 `legacy/target/`（7 GB 的 cargo 构建产物，
@@ -45,12 +47,12 @@ node scripts/gates-go.js test deps        # 只跑指定的几条
 > 2026-09-21 Rust 已剥离到同级仓库，遍历问题不复存在，但**显式包范围保留**：
 > 它顺带把"只测交付物"这件事写进了定义里。理由的现版本见 `scripts/gates-go.js` 顶部。
 
-> ⚠⚠ **只跑子集时，末尾横幅会明说"本次 N/9 条"并列出未跑的**：
+> ⚠⚠ **只跑子集时，末尾横幅会明说"本次 N/10 条"并列出未跑的**：
 >
 > ```
 > $ node scripts/gates-go.js fmt deps filenames idents jsontags    # pre-commit 那 5 条
-> 门禁通过：fmt deps filenames idents jsontags（本次 5/9 条）
-> ⚠ 未跑：build vet test golden
+> 门禁通过：fmt deps filenames idents jsontags（本次 5/10 条）
+> ⚠ 未跑：build vet test golden md-tables
 >   ⇒ 别把这当成"全绿"：上面这几条**这次没验**。
 > ```
 >
@@ -59,6 +61,23 @@ node scripts/gates-go.js test deps        # 只跑指定的几条
 > 的那句（"门禁实况：九项门禁全绿"），抄错一次就再也说不清。
 > ⚠ 同理，清单只有**一份**：`ORDER` 从 `GATE_NAMES` **派生**（见 §6.1 **#92**）。
 > 抄一份进 `ORDER` 曾经让"加了门禁但默认不跑"变成**静默**事件。
+
+**第 10 条（`md-tables`）为什么也算 Go 侧门禁** —— 它与第 6/7 条同类，是**仓库级**的
+文本检查，不是 Go 专属；放在这个入口只是因为这里已经是"一条命令跑完全部"的那个入口。
+它管的是一件**渲染期才会丢东西**的事：
+
+| 判据 | 内容 |
+| --- | --- |
+| 拦什么 | 源码里某一行表格的**单元格数 > 表头格数** |
+| 为什么必须拦 | markdown 渲染会**静默丢掉**多出来的那几格 —— 源文件里看得见，渲染出来看不见 |
+| 为什么**只拦这一个方向** | "比表头**少**格"是另一类缺陷（漏写一格 / 硬换行续行），判据不同 ⇒ 混进同一条门禁会让"红了"不再指向单一原因（见 §6.1 **#127**） |
+| **扫描面** | **`git ls-files --cached --others --exclude-standard '*.md'`**（跟踪 + 未跟踪未忽略）—— 与 `check-filenames.js` 同一约定。⚠⚠ **别改成手写文件清单，也别改成 fs 遍历**：前者漏掉的不自报（`THIRD-PARTY-NOTICES.md` 与 `.githooks/README.md` 就曾在清单外，见 **#131**），后者会把 `.gitignore` 特意排除的 `.workbuddy-ai/` 记忆文件重新拉进来 |
+| 排除项 | 随仓库共享的**第三方技能目录**（`VENDOR_DIRS`，现为 `.workbuddy/skills/`）—— 上游内容，改了也会被下次更新覆盖。⚠ 排除**个数会打印在输出里**，不静默 |
+| 拿不到清单 | `git` 失败 ⇒ **退 1 并说明原因**，不许退化成"0 个文件、通过"（反向测试：`GIT_DIR=/nonexistent`） |
+| 豁免 | `docs/migration-pitfalls.md` 里 #124 那一行**自己就是受害者**（历史遗留），按**行首编号**豁免；豁免名单带**过期反向检查**（见 §6.1 **#116**） |
+
+⚠ 写文档的人容易踩的是**写侧**：正文里想打出字面量 `|` 必须转义成 `\|`；
+**`&#124;` 在行内代码里不生效**（实测过，见 **#124**）。
 
 **6–8 刻意复用同一份脚本，不重写** —— 它们与语言无关（扫文件名 / 扫文本里的真实标识 /
 独立复算向量），重写一遍等于给自己造第二份真相，而两份真相迟早分叉，
@@ -149,8 +168,8 @@ Rust 的 `#[derive(Serialize)]` 默认给 **snake_case** 字段名（`password_h
 
 | 入口 | 什么时候 | 覆盖面 |
 | --- | --- | --- |
-| `pre-commit` | 每次提交 | `fmt` `deps` `filenames` `idents` `jsontags`（不需要编译的那五条） |
-| `pre-push` | 每次推送 | Go 侧**九条**全跑 |
+| `pre-commit` | 每次提交 | `filenames` `idents` `md-tables` + `fmt` `deps` `jsontags`（不需要编译的那六条；前三恒跑、后三看范围） |
+| `pre-push` | 每次推送 | Go 侧**十条**全跑 |
 
 装一次即可：`node scripts/install-hooks.js`（细节见 `.githooks/README.md`）。
 Rust 侧冻结后 hook 就不再碰 cargo；Rust 仓库自己的验证方式见
@@ -179,16 +198,19 @@ Rust 侧冻结后 hook 就不再碰 cargo；Rust 仓库自己的验证方式见
 > ```
 > *.go / go.mod / go.sum  → 追加 fmt deps jsontags
 > web/** 下任何文件        → 追加 typecheck
-> 恒跑，不参与派发         → filenames idents
+> 恒跑，不参与派发         → filenames idents md-tables
 > ```
 >
 > 于是"改一行 `docs/*.md` 也要过一遍 Go 工具链"和"改 `.tsx` 时五条一条都验不到前端"
 > 这两件事同时没了。三条让它成立的前提，破一条就变成**净损失**：
 >
-> 1. **`pre-push` 不看范围，全跑**（Go 九条 + web 两条）—— 提交档省下的必须在推送前补齐。
+> 1. **`pre-push` 不看范围，全跑**（Go 十条 + web 两条）—— 提交档省下的必须在推送前补齐。
 >    ⚠ 想给 `pre-push` 也加范围派发之前，先回答"被跳过的那些由谁补"。
-> 2. **`filenames` 与 `idents` 恒跑**：脱敏那条扫的是**文本**，`.md` / `.json` 一样能
+> 2. **`filenames` / `idents` / `md-tables` 恒跑**：脱敏那条扫的是**文本**，`.md` / `.json` 一样能
 >    泄漏真实标识。按语言把它切掉，等于给最不该漏的那条开一个永远存在的洞。
+>    `md-tables` 是同一个形状的第三例 —— 它扫的是**整个 `docs/**`**（不是"这次暂存的那几个"），
+>    而它要拦的恰恰是"**只改文档**"那类提交；那类提交在派发下只剩恒跑这一档，
+>    ⇒ 不把它放进恒跑，它**永远不会在该响的时候响**。
 > 3. **分类器不确定时全跑**（拿不到暂存清单 ⇒ 最保守一档），失效方向只能是"多验"。
 >
 > 另外分类器自己兼了一条"**给门禁的门禁**"：派发之前先按扩展名过一遍语法 ——
@@ -197,7 +219,7 @@ Rust 侧冻结后 hook 就不再碰 cargo；Rust 仓库自己的验证方式见
 > 抓的不是逻辑错，
 > 是"引号没闭合、`fi` 少了"这类**现象恰好是门禁跑了而且绿了**的假绿。
 >
-> 实测（2026-09-22，反向测试）：暂存一个 `web/**` 文件 ⇒ 只跑 `filenames idents` +
+> 实测（2026-09-22，反向测试）：暂存一个 `web/**` 文件 ⇒ 只跑 `filenames idents md-tables` +
 > `web:typecheck`；在 `web/src` 放一个类型错误的文件 ⇒ 钩子退出码 **1**，提交被拦住；
 > 删掉之后恢复绿。分类另用 `stdin` 档逐条核过（含"Go+web 同时改""只改文档""删除也算"）。
 >

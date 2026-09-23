@@ -1,6 +1,11 @@
 caiyun 参考项目 · 抢兑子系统与运行时层（§3 抢兑 · §4 运行时）
 
 > 状态：与 [`caiyun-go-feature-inventory.md`](./caiyun-go-feature-inventory.md) 同一轮盘点、同一 commit（`1b2cf07`），2026-09-22 从该文件逐字拆出。要动抢兑或运行时那一层之前读这篇。
+>
+> ⚠ **2026-09-22 追加了 §3.9**（本项目实拍 × 参考项目做法：逐条对照）。
+> 那一节是**新写的**，**只做对照、不下"搬/不搬"的结论** —— 那类判断的唯一权威在
+> [`caiyun-go-parameters-and-decisions.md`](./caiyun-go-parameters-and-decisions.md) §8；
+> §3.1 ~ §3.8 与 §4 全部**逐字未改**。
 
 > **本篇 2026-09-22 拆成三篇**（内容逐字未改，只按主题分段）：
 > [① 总览 · 四条公共语义 · 能力逐条（§0 ~ §2）](./caiyun-go-feature-inventory.md) ｜ [② 抢兑子系统 · 运行时层（§3 ~ §4）](./caiyun-go-exchange-and-runtime.md) ｜ [③ 参数面 · 硬编码 · 冲突 · 搬不搬 · 验收步（§5 ~ §9）](./caiyun-go-parameters-and-decisions.md)
@@ -148,7 +153,7 @@ caiyun 参考项目 · 抢兑子系统与运行时层（§3 抢兑 · §4 运行
 | --- | --- |
 | 失败即 `滑块验证码识别失败：%v` → kind `other` → 重试 → 耗尽 → 任务 failed | **验证码这一层没有"请你去 App 点一下"的出口**：全仓"人工/手动"字样在兑换侧只命中一处，而且是**任务级**（`repository/exchange_schedule.go:211` 的"仅一次任务已尝试过，等待人工处理"），不是识别级 ⇒ 正是 §1.4 要补的第四态 |
 | 每次重试**重新拉一次滑块、重新识别** | N 次重试 = N 次付费识别；offset 不缓存 |
-| 取 deviceId 失败用**硬编码兜底 deviceId**（`services/exchange_executor.go:27-29`，全服务共用同一个假设备号） | 风控负资产 ⇒ **不搬**；我们已有账号绑定的 `smid_fingerprint`/`smid_device_id`（v5 引入，schema 现为 v8） |
+| 取 deviceId 失败用**硬编码兜底 deviceId**（`services/exchange_executor.go:27-29`，全服务共用同一个假设备号） | 风控负资产 ⇒ **不搬**；我们已有账号绑定的 `smid_fingerprint`/`smid_device_id`（v5 引入，schema 现为 v9） |
 
 ### 3.7 数据模型与审计
 
@@ -166,6 +171,78 @@ PII：WebSocket 载荷用**未脱敏**的 `account_name`（= remark 或 `<真实
 `/tasks/batch`（上限一处写 100、另一处 `binding max=50` ⇒ **两套上限**）、`/tasks/:id/execute`（入队，带 `Idempotency-Key`）、
 `/records`（统计窗口固定 30 天）、`/records/export`（硬上限 10000 + `escapeCSVFormula` 防公式注入 —— **这条要搬**）、
 `/immediate`、`/products/search|categories|update`、`/exchange/config`（public，fail-open）、`/admin/exchange/config`（**PUT 无条件写 5 个 bool** ⇒ 单字段 PATCH 会把其他开关静默关掉，见 X-B14）。
+
+### 3.9 本项目实拍 × 参考项目做法：逐条对照
+
+> **2026-09-22 新加的一节**，正文 §3.1 ~ §3.8 **逐字未改**。
+>
+> **先把三个角色分清**（本节与 `capture/app-exchange-samples.txt` §6.1 都按这套叫法）：
+>
+> | 角色 | 是谁 | 它的盘点在哪 |
+> | --- | --- | --- |
+> | **原项目** | `mcloud-sign`（**TypeScript**）—— 本项目的前身 | [`business-feature-inventory.md`](./business-feature-inventory.md)（文中简称"旧 TS 盘点篇"） |
+> | **参考项目** | **caiyun**（**Go** + Vue3，`3238614968/caiyun`，commit `1b2cf07`）—— 一个**外部**的、上游同域的实现 | 本篇 + `caiyun-go-*.md` 另三篇 |
+> | **本项目** | mcloud（**Go**）—— ⚠ 转 Go 的动机是**编译体验**（`cargo check --workspace` 实测 `real 118.71`，见 [`go-migration-plan.md`](./go-migration-plan.md) §1），**与参考项目用什么语言无关** | 抓包在 [`capture/app-exchange-samples.txt`](./capture/app-exchange-samples.txt)（⚠ 本文别处也叫"本仓库"，同一个东西） |
+>
+> ⚠⚠ **"本项目也是 Go"不构成与参考项目的任何关系** —— 不是同源、不是同族、
+> 也不因为语言相同就"更好搬"。⚠ 同理，本文里的"**搬**"指的是
+> **参考项目（caiyun）的做法要不要采用**（§8 的题），**不是**本项目 Rust → Go 的那次迁移。
+> 可对照的只有**上游协议边界**（线上字节 / code / 字段名 / 时序），与实现语言无关。
+>
+> 本项目在真机 App 上抓到了 4 轮兑换（3 错 1 成），逐字实拍与判据链在
+> [`capture/app-exchange-samples.txt`](./capture/app-exchange-samples.txt) §5.2 / §5.3 / §5.4。
+> 本节**只做对照、只摆事实** —— 即"**它怎么做 / 我们实测是什么 / 差在哪**"。
+> ⚠ **"搬 / 不搬 / 先修再搬"的结论不在本节下**，那类判断的唯一权威是
+> [`caiyun-go-parameters-and-decisions.md`](./caiyun-go-parameters-and-decisions.md) §8；
+> 本节与它冲突时以它为准。**别把这里的事实读成裁决。**
+> ⚠ 本文的"Go 侧"仍指参考项目 caiyun，不是本项目。
+
+| # | 参考项目（`exchangeV2`）怎么做 | 本项目实拍（`exchangeV3`） | 对照结论 |
+| --- | --- | --- | --- |
+| 1 | `GET …/exchangeV2?prizeId=…&puzzleOffset=…&smsCode=` —— **写操作走 GET**（§3.1 第 7 步） | `POST …/exchangeV3` + JSON body（`content-type: application/json;charset=UTF-8`） | 两代接口的**方法就不同**：`V2` = GET + query，`V3` = POST + JSON。⚠ 这不只是写法差别 —— §3.4 那张"重复扣云朵成立条件"表里，**"上游超时但实际成功"那一行是长在 GET 上的**；本仓库是 POST，**前提不同** |
+| 2 | 成功判定**只看 `msg EqualFold "success"`**（§3.2）；且抢兑域与商品列表域是**两套**成功定义（§3.2）。⚠ 原项目那边更乱：同一代码库混用**三套**信封（旧 TS 盘点篇 §1.2） | 成功 `{"code":0,"msg":"success"}`；失败 `{"code":514,"msg":"验证失败"}` | 两边判据**不同源**：它判 `msg`，本项目 H5 调用点判 **`code`**（逐字见 `capture/app-exchange-samples.txt` §1.3 的 code 表）。⚠ 本次实拍两者**恰好同向**（成功时 msg 也是 `success`）—— 那是巧合，**不是等价** |
+| 3 | 滑块**本地无 CV**：取题后把 `{puzzle,picture}` POST 给**远端付费识别**（`{CAIYUN_SMS_API_BASE_URL:-https://ydyp.apisky.cn}/api/sms/solve`，取返回的 `data.offset`）（§3.6） | `puzzleOffset` 实测 = **拼图块左缘在底图 680×400 里的 x**；**本地图像算法算得出来**（两个独立探针在 4 张图上**互相一致**；⚠ "与真值差 4px"**只对唯一成功那笔成立** —— 量出 `140`、提交 `144`。另外三条的"真值"无从得知，它们只能证明两个探针**彼此**一致） | 它给了一条"**不写 CV 也能长期跑**"的现成路子（代价是外部依赖 + 每次重试重付费）；本仓库实测则说明"**自己算**"也可行。⚠ 两条路的**精度口径不一样**：它拿的是第三方给的 offset，我们是自己算的。⚠⚠ **2026-09-22 补记（纠正本行原文）**：本行原写"我们的 4px 恰好压在容忍度下界（`[4, 41)`）上"—— **那个 `[4, 41)` 已被真机实测推翻**（`0` 偏差也通过、`+10` 被拒 ⇒ 容忍度约 **±4~9px**），见 [`capture/app-exchange-samples.txt`](./capture/app-exchange-samples.txt) §5.3.1。⭐ 另有一条**结构性**事实：**它本地没有任何 CV** ⇒ 本项目那个 Go 侧解算器**在参考项目里没有可对位的实现**（§8 若决定落地成正式能力，是**自研**，不是"搬"） |
+| 4 | `finalOffset = offset + rand(-3..3)` 抖动（§3.6） | 唯一成功那笔：提交 `144`、量出 `140`（差 4） | 两边**落在同一个量级**（个位数像素）；差 4px 那笔**过了** ⇒ 这个量级**能过**。⚠ 但只有**一条**样本，别把它读成"安全区间"。⚠ 它加抖动是为**规避风控**（让每次提交的值不同），**不是精度补偿** —— 别把它当成容错机制来理解。⭐⭐ **2026-09-22 补记：两个独立来源互相印证。** 它抖 `rand(-3..3)`（幅度 ≤3px），本项目真机实测的容忍窗口是 **±4~9px** ⇒ **它的抖动幅度落在窗口之内**。两边是**独立来源**（它的线上经验 vs 我们的真机实测），**不是**谁从对方推出来的 ⇒ 这是本节里少见的"两边真能对上"的对照。⚠ 但"落在窗口内"**不等于**它是容错机制：本项目实测 `0` 偏差**直接过**、`+10` 才被拒 ⇒ **我们不需要抖**（§5.3.1 ③） |
+| 5 | 它的分类器吃的是**渲染后的失败消息文本**（含 `http_status=` / `body=`），**不是码**；本仓库实拍那句 `验证失败` 在该表的 12 类子串里没有对应项 ⇒ 按文本落 `other` ⇒ **默认重试**；且"每次重试重新拉一次滑块、重新识别"（§3.3 / §3.6） | `514` = `验证失败`；**三条 `514` 期间余额一直是 10505 ⇒ 不扣豆**；H5 侧 `setTimeout(oe, 500)` 是**重新取题** | ⭐ **两边"取题 → 发 → 答错 → 重取题"这个循环是一致的**（本项目 4 组实拍的记录号交替，见 `capture/app-exchange-samples.txt` §1.7）。⚠ 但**取题的主路径是"兑换前"**（它第 5 步在下单第 7 步之前；本项目每条 `exchangeV3` 之前都有一条 `getSlide`）—— 重试路径上再取一次是**附加的**，不是取题的**唯一入口**。再加上本仓库实测 **`514` 不扣豆** ⇒ 这一档重试的**代价只有一次请求**。⚠ 但"安全"**仅对 `514` 成立** —— §3.4 表里"上游超时但实际成功"那条路，本仓库**没有实证** |
+| 6 | 重复兑换靠**上游文案**兜（stop 白名单 `已兑完 / 已兑换 / 今日已兑换 / 本月已兑换 …`，§3.2） | 服务端侧有**可查的状态**：同一件商品成功后 `exchangeList` 的 `limit` 由 `0` → `2`（已兑换），`updateTime` 随之刷新 | 它**只能**靠文案（因为它那条线没有可查的个人状态）；本仓库实测**多一条可查的服务端状态**（`limit`）。⇒ 事实层面：它 §3.4 表里"上游超时但实际成功"那一行**缺的判据**，本仓库这条线**有**（它没有，不代表我们该怎么用 —— 用法不在本节） |
+| 7 | `clientVersion` 在**参考项目自己那里**就**四值互相矛盾**（`13.0.0` / `12.5.3` / `12.5.4` / `12.4.0`，§6 与 X-B10） | 实拍恒为 **`12.6.0`**（= `upstream.CaiyunAppVersion`），而 `appversion` 头是另一个值 `12.6.0.0`（四段） | 同一个字段名，**两边取值不同**（`13.0.0` vs `12.6.0`），且参考项目内部就四值矛盾 ⇒ **两边没有任何可对位的关系**（它内部那份矛盾见 X-B10，那是它自己的缺陷） |
+| 8 | 数美设备指纹 → `B` 前缀 `deviceId` + `.thumbcache_*` cookie（§3.6） | 抓包里 `exchangeV3` 带 `deviceId`（`B` + 88 字符），且 cookie 里**确实有** `.thumbcache_<md5(organization)>`（形状与 [`capture/app-signin-samples.txt`](./capture/app-signin-samples.txt) 记的一致；具体值已按 [`sanitize-guide.md`](./sanitize-guide.md) 换成形状） | ⭐ **两边是同一套**（交叉印证）。⚠ 它"取不到就用**硬编码兜底 deviceId**"（§3.6）那半句是它自认的风控负资产，读的时候别把它当成"可行做法" |
+| 9 | 验证码这层**没有"请你去 App 点一下"的出口**（§3.6 表第一行；第四态缺失见 §1.4） | 本仓库的 `core.RiskLevel` / `Capability.NeedsConfirmation()` 已就位 | 它那边"算不出来就只能 failed"（全仓"人工/手动"字样在兑换侧只命中一处、且是**任务级**的）；本仓库**已有第四态的载体**，它**没有** |
+
+⭐ **2026-09-22 第四轮补一条实测**（**只摆事实**，不下"搬 / 不搬"的结论）：
+
+参考项目 §3.2 的 stop 白名单里有 `已兑换 / 今日已兑换 / 本月已兑换`；
+而本项目实测**"同一账号 + 同一 `prizeId` 再发一次"**回的是
+
+```json
+{"code":2301,"msg":"重复兑奖"}
+```
+
+（逐字样本见 [`capture/app-exchange-samples.txt`](./capture/app-exchange-samples.txt) §5.5）
+
+⚠ **两边的"文案"对不上** —— 而它的分类器吃的是**渲染后的失败消息文本**（§3.3 / X-B6）
+⇒ `重复兑奖` 在它那 12 类子串里**一个都不命中** ⇒ 落 `other` ⇒ **默认重试**。
+⇒ 事实层面：**"靠上游文案兜"这条路，在换了一代接口之后文案就会变**；
+而它的分类器**没有码可依据**（本项目的 `code` 是**数值**、可判等）。
+⚠ 这一条**不构成**"我们该怎么做"的结论 —— 那类判断的唯一权威是
+[`caiyun-go-parameters-and-decisions.md`](./caiyun-go-parameters-and-decisions.md) §8。
+
+⭐ **2026-09-22 第五轮再补一条**（同一族，仍只摆事实）：
+
+本项目那 4 件"已兑"的奖品里，`limit` 有两种取值 —— `2`（**这件**已兑）与 `4`（**同组别的件**已兑）；
+而 `4` 的**字段依据**是 `probability2` 里的 `monthGroupLimit`（**数组** —— 列出"每月只能兑其中一件"
+的那组 prizeId）+ `limitMonthQuantity`（逐字样本见 [`capture/app-exchange-samples.txt`](./capture/app-exchange-samples.txt) **§5.6**）。
+
+⚠ 与上面那条同一个形态：**"已兑"这个状态，上游在列表侧（`limit`，数值）与下单侧（`2301`，四位码）
+用了两套表达，且两边都不带文案** ⇒ 谁照参考项目那样"吃渲染后的失败文案"，换一代接口就会失配。
+⚠ 仍然**不下"搬 / 不搬"的结论**。
+
+**读它代码时顺手记下的一族坑**：X-B1（重试自锁）、X-B2（本地锁消息与上游拒绝共用一张子串表）、
+X-B6（拿**渲染后的消息**做分类）、X-B7（stop 白名单里孤零零一条 `"不足"`）、
+X-B16（锁 key 用 `AccountID==0 ? ID : AccountID` ⇒ 跨用户共享锁）。
+逐条证据在 [`caiyun-go-parameters-and-decisions.md`](./caiyun-go-parameters-and-decisions.md) §8.4 的 X 段（**那里是权威，这里不重复**）。
+⇒ 值得记的是它们的**共同形态**：「**把不同来源的东西塞进同一个判据**」——
+与 [`migration-pitfalls.md`](./migration-pitfalls.md) **#101**（判据在退化的输入上不报错、只给错答案）**同族**。
 
 ---
 

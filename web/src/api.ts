@@ -139,7 +139,12 @@ export const signOut = () => request<void>('/api/session', { method: 'DELETE' })
 export interface ServiceStatus {
   name: string
   version: string
-  /** 调度循环在不在跑。**当前后端恒报 false**：定时任务存得下来但不会自己触发。 */
+  /**
+   * 调度循环在不在跑。**现在是运行时实况**（后端起了循环才为真），不再是常量。
+   *
+   * 它为假时定时任务页会顶一条黄色提示：那一页列出的"下次执行"仍然算得出来，
+   * 只是到点没有进程去跑 —— 少这一句，列表看着就像在工作。
+   */
   schedulerRunning: boolean
   /** 最近一次执行；库里一条记录都没有时为 null。 */
   lastRun: {
@@ -153,3 +158,373 @@ export interface ServiceStatus {
 
 /** 拉一次后端自述。这条请求成功与否本身就是"连没连上后端"的判据。 */
 export const serviceStatus = () => request<ServiceStatus>('/api/status')
+
+/**
+ * 添加一个账号：把一串**已经在用户手里**的 `auth` 交给后端。
+ *
+ * ⚠ 这条的入参就是凭据本体，所以三条纪律一起成立：
+ *  - 不进任何日志/缓存键（不写 console，不写 localStorage，不放进 URL）；
+ *  - 响应是后端的**展示形状**（`Account`），不是入参的回显；
+ *  - 失败文案由后端给，那些句子是我们自己写的，**不含**用户贴进来的那串。
+ */
+export const addAccount = (auth: string) =>
+  request<Account>('/api/accounts', { method: 'POST', body: JSON.stringify({ auth }) })
+
+/** 启用/停用一个账号。**只**动那一列（整行覆盖会把昵称、排序一起抹掉）。 */
+export const setAccountEnabled = (id: string, enabled: boolean) =>
+  request<Account>(`/api/accounts/${encodeURIComponent(id)}/enabled`, {
+    method: 'PUT',
+    body: JSON.stringify({ enabled }),
+  })
+
+/** 删除账号，连同它的凭据与历史（连带范围由后端存储层定）。 */
+export const deleteAccount = (id: string) =>
+  request<void>(`/api/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' })
+
+/** 一次刷新的结论（对位后端 `auth_refresh.go` 的 `refreshAuthPayload`）。**里面没有凭据**。 */
+export interface RefreshAuthResult {
+  accountId: string
+  /** `pc` / `mobile`：库里那一串 `Authorization` 的第一段，原样回传。 */
+  end: string
+  /**
+   * 判据档位（稳定英文码）：`needed` / `not-yet` / `manual-only`。中文由界面翻。
+   *
+   * ⚠ 这条路由**固定直接换 token**，所以 `not-yet` 只会和 `rotated: true` 一起出现
+   * （= "还没到批量那条路用的提前量，但按你这次点击换了"）。界面不看它，
+   * 只看 `rotated` 与那一行的"已过期 / 还在期内"。
+   */
+  decision: string
+  /** 真的换成了新凭据。`false` + `decision` 说明"没打上游"或"不需要打"。 */
+  rotated: boolean
+  /** epoch **毫秒**；null = 那一侧根本没有过期信息。 */
+  beforeExpire: number | null
+  afterExpire: number | null
+}
+
+/**
+ * 换一个新 token：会**打一次上游**，并把库里那套凭据轮换掉。
+ *
+ * ⚠ `platform` 只在走 PC 那一支时才有意义（库里 `accounts.platform` 记的是**端别**
+ * `pc`/`mobile`，不是操作系统，所以 Windows/macOS 只能由点这一枚的人拍板；
+ * 留空即后端默认 windows）。响应回的是后端的展示形状（`Account`），不是入参回显；
+ * 新 token 只落库，**不在这条响应里**。
+ *
+ * 上游最慢实测 28.4 秒且**不自动重试**（重试会白打一遍，而且刷新是轮换真凭据的），
+ * 所以调用方要自己挡住连点。
+ */
+export const refreshAccountAuth = (id: string, platform: '' | 'windows' | 'macos' = '') =>
+  request<{ refresh: RefreshAuthResult; account: Account }>(
+    `/api/accounts/${encodeURIComponent(id)}/refresh-auth`,
+    { method: 'POST', body: JSON.stringify({ platform }) },
+  )
+
+/**
+ * 登录移动云盘账号：两条路共用的一张"会话表"。
+ *
+ * 为什么是轮询而不是 SSE：一次登录最长 120 秒，而这期间只有四个阶段值要通知；
+ * 页面刷新后要能续上，而续上靠的正是服务端那张表（见 `internal/server/login.go`）。
+ */
+export type LoginPhase = 'waiting' | 'scanned' | 'succeeded' | 'failed'
+
+/** 一次登录会话的结论。**里面没有任何凭据**，成功只给掩码形状的 accountId。 */
+export interface LoginSession {
+  phase: LoginPhase
+  accountId: string | null
+  message: string
+  /** 还能再领几次验证码；null = 上游没给这个配额。只在短信那条路有值。 */
+  remainGetTimes: number | null
+  solvedSlider: boolean
+  /** 需要人工过滑块时的兜底地址；空串 = 不需要。 */
+  captchaUrl: string
+  /** 短信那条路由发码响应带回的会话 id。 */
+  sessionId?: string
+}
+
+/** 出码（扫码那条路）。成功后立刻有一条后台轮询在跑，所以它是"真的产生了资源"。 */
+export const startQrLogin = (platform: '' | 'windows' | 'macos' = '') =>
+  request<{ sessionId: string; qrUrl: string }>('/api/login/qr', {
+    method: 'POST',
+    body: JSON.stringify({ platform }),
+  })
+
+/** 那张码的 SVG 地址。给 `<img src>` 用，后端已经打了 `no-store`。 */
+export const qrImageHref = (sessionId: string) =>
+  `/api/login/qr/${encodeURIComponent(sessionId)}/image.svg`
+
+/** 问一次会话结论（扫码与短信共用这个出口）。 */
+export const loginSession = (sessionId: string) =>
+  request<LoginSession>(`/api/login/qr/${encodeURIComponent(sessionId)}`)
+
+/**
+ * 发一次 App 端短信验证码。
+ *
+ * ⚠ `phone` 是**完整**手机号（掩码号发不出短信）：它是入参，
+ * 不进 URL、不进日志、不出现在任何响应里 —— 界面上那句"已发到 199****2716"
+ * 由响应带回的 `accountId`（掩码形状）渲染。
+ */
+export const sendAppLoginCode = (phone: string) =>
+  request<LoginSession>('/api/login/sms/app', {
+    method: 'POST',
+    body: JSON.stringify({ phone }),
+  })
+
+/** 用验证码换登录。重复提交是幂等的（后端挡住第二次落库）。 */
+export const verifyAppLoginCode = (sessionId: string, code: string) =>
+  request<LoginSession>(`/api/login/sms/app/${encodeURIComponent(sessionId)}/verify`, {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  })
+
+/**
+ * 发一次 PC 端短信验证码。
+ *
+ * 与 App 那条的差别都在后端：PC 端要 `platform`（Windows / macOS 两份端档案），
+ * 滑块由后端自动解，所以这一支**不会**带回 `captchaUrl`。
+ * 入参口径同上：完整手机号只进不出。
+ */
+export const sendPcLoginCode = (phone: string, platform: '' | 'windows' | 'macos' = '') =>
+  request<LoginSession>('/api/login/sms/pc', {
+    method: 'POST',
+    body: JSON.stringify({ phone, platform }),
+  })
+
+/** PC 端填码。幂等口径与 [verifyAppLoginCode] 同一条。 */
+export const verifyPcLoginCode = (sessionId: string, code: string) =>
+  request<LoginSession>(`/api/login/sms/pc/${encodeURIComponent(sessionId)}/verify`, {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 执行面：触发、订阅、历史
+//
+// 形状的三个权威分别是后端 `runs.go`（受理）、`core.RunEvent.MarshalJSON`
+// （事件）、`routes.go` 的 `runPayload`（历史行）。这边**不推断**任何一位：
+// 例如 `status` 是存储层生命周期、业务结论只在 `finished` 事件里 ——
+// 在历史那一档补一个假的"成功/失败"就是替后端编造它没给过的结论。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 一条历史运行（对位 `runPayload`）。 */
+export interface RunRecord {
+  id: string
+  /** 掩码账号 id；批量编排那种没有归属账号的是 null。 */
+  accountId: string | null
+  capability: string
+  /** `running` / `done` / `failed` —— **生命周期**，不是业务结论（见上）。 */
+  status: string
+  startedAt: string
+  finishedAt: string | null
+  cloudGained: number | null
+  cloudAfter: number | null
+  /** 那一趟的结论一句话（由任务自己写）。后端给的是 `*string` ⇒ 可能是 null。 */
+  message: string | null
+}
+
+export const listRuns = (limit = 50) =>
+  request<{ limit: number; runs: RunRecord[] }>(`/api/runs?limit=${limit}`)
+
+/** `POST /api/runs` 的受理响应：202 **先于**结果，配对就是库里那一条。 */
+export interface RunAccepted {
+  capability: string
+  runs: { accountId: string; runId: string }[]
+}
+
+/**
+ * 起跑一趟。参数按**能力声明**的 key 送，多一个键后端就 400（`不认识的参数：…`）。
+ *
+ * ⚠ 这条**不是**幂等的：`live-room` 会把口令投出去。调用方必须挡住连点，
+ * 并且在确认弹窗里把影响面说清楚（§6.4）。
+ */
+export const triggerRun = (capability: string, params: Record<string, unknown>) =>
+  request<RunAccepted>('/api/runs', {
+    method: 'POST',
+    body: JSON.stringify({ capability, params }),
+  })
+
+/**
+ * 事件流地址。给 `EventSource` 用 —— 它自己带 cookie（同源），
+ * 重连时带 `Last-Event-ID`，所以这里不手工拼 `?after=`。
+ */
+export const runEventsUrl = (runId: string) => `/api/runs/${encodeURIComponent(runId)}/events`
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 直播小红花：只读探针
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 一个直播间（对位 `liveRoomProbePayload` 的 `rooms[]`）。 */
+export interface LiveRoomRow {
+  roomId: string
+  title: string
+  /** 上游原始数字码。 */
+  status: number
+  /** 稳定英文码：`not-started` / `live` / `ended` / `unknown`。中文由界面翻。 */
+  statusToken: string
+  /** 预告开播时间，上游给的**本地**字符串（`2026-09-23 14:30:00`）；非预告为空串。 */
+  expectStartTime: string
+  anchor: string
+}
+
+/** 小红花余额；null = 这次没读到（配 `balanceError` 一起看）。 */
+export interface RedFlowerBalance {
+  flowerCnt: number
+  /** 中文串（`2026年12月31日`），**不要**拿去 `Date.parse`。 */
+  validDate: string
+  hasNotReceived: number
+  quarterDrawn: number
+  prizeId: number
+  secondPrizeId: number
+}
+
+/** `GET /api/accounts/{id}/live-room` 的结论。**里面没有任何凭据**。 */
+export interface LiveRoomProbe {
+  accountId: string
+  /** 门：那个主播现在有没有在播的房间（= 现在去听有没有口令）。 */
+  koulingLive: boolean
+  /** **所有**在播房间数（不限主播）。与 `koulingLive` 一起才分得开两种"没有"。 */
+  liveCount: number
+  /** 只列那个主播的房间，**含预告场**（预告的时间就是"下一场几点"）。 */
+  rooms: LiveRoomRow[]
+  /** 后端自述要听的那个主播昵称。 */
+  anchor: string
+  balance: RedFlowerBalance | null
+  balanceError: string
+}
+
+export const probeLiveRoom = (id: string) =>
+  request<LiveRoomProbe>(`/api/accounts/${encodeURIComponent(id)}/live-room`)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 定时任务 + 能力表
+//
+// 权威是后端那两处：`routes.go` 的 `schedulePayload`（对外形状）与 `scheduleBody`
+// （收的形状）。这一族有一个**不对称**必须记住：
+//
+//   - 读出来是 `accountIds`（camelCase，跟其余展示字段一起手工拼的），
+//   - 写回去是 `account_ids`（snake_case，Go struct tag 直译）。
+//
+// 两边都不是笔误，也不有一处兜底：把提交的键写成 `accountIds`，
+// Go 那边解不进 `AccountIDs` ⇒ 请求**照样 200**，只是把那一行的账号列表洗成空
+// （空 = "跑全部账号"），于是一条只管两个号的任务变成打所有号。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 执行目标：`kind` 决定看 `code` 还是 `id`（对位 `core.ScheduleTarget` 的两个分支）。 */
+export interface ScheduleTarget {
+  /** `capability` / `pipeline`。 */
+  kind: string
+  code?: string
+  id?: string
+}
+
+/** 一条定时任务（对位 `schedulePayload` 的那 15 个键）。 */
+export interface ScheduleRow {
+  id: string
+  name: string
+  target: ScheduleTarget | null
+  cron: string
+  timezone: string
+  /** ⚠ 读侧 camelCase；写侧是 `account_ids`。见上面那段。 */
+  accountIds: string[]
+  /** 参数对象；库里可能是 null。 */
+  body: unknown
+  enabled: boolean
+  /**
+   * 下次触发（rfc3339），**由服务端按 cron + 时区算**。
+   * null 有两种来路：这一行停用了、或那条 cron 永远不触发 —— 界面上都写"不会触发"，
+   * 但**不**把"停用"这一种说成"配置错了"（那是同一格子的两件事）。
+   */
+  nextFireAt: string | null
+  /** 调度循环写的水位："已处理过哪一个触发点"。 */
+  lastFireAt: string | null
+  /** 这一行**自己**选过的补跑策略；null = 跟随能力声明的默认（默认值不在这里说）。 */
+  missPolicy: string | null
+  createdAt: string | null
+  lastRunAt: string | null
+  /** `ok` / `error` / `skipped`；null = 从没跑过。 */
+  lastStatus: string | null
+  lastError: string | null
+}
+
+export const listSchedules = () => request<{ schedules: ScheduleRow[] }>('/api/schedules')
+
+/**
+ * 保存时的请求体（对位 `scheduleBody`）。
+ *
+ * id 在**路径**里：同一条路径重复提交是同一个结果，所以这条是 `PUT` 而不是 `POST`，
+ * 而后端刻意不发明 id —— 那样"改一条"与"建一条"就分不出来了。
+ */
+export interface ScheduleDraft {
+  name: string
+  target: ScheduleTarget
+  cron: string
+  /** 留空即后端默认（`Asia/Shanghai`）。 */
+  timezone?: string
+  /** 空数组 = 跑全部账号。 */
+  account_ids: string[]
+  /**
+   * 参数。后端解进 `any`，所以形状上什么都收；**语义上只认对象** ——
+   * 到点时 `scheduleParams` 解不进对象就记一行 `error`（"这条定时任务的参数不是一个 JSON 对象"）。
+   * 新建/编辑那条路由界面挡住（必须是对象）；行内翻启用那一条**原样带回库里那份**，
+   * 因为旧导入进来的非对象参数是既成事实，不该被一次翻开关洗掉。
+   */
+  body: unknown
+  enabled: boolean
+}
+
+export const putSchedule = (id: string, draft: ScheduleDraft) =>
+  request<{ schedule: ScheduleRow }>(`/api/schedules/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(draft),
+  })
+
+/**
+ * 删一条任务。连带范围问过存储层：`DeleteSchedule` 只动 `schedules` 那一行，
+ * 执行历史（`runs`）与账号都不跟着走 —— 界面上那句影响面照这个说。
+ */
+export const deleteSchedule = (id: string) =>
+  request<void>(`/api/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' })
+
+/** 一个参数声明（对位 `core.FieldSpec`）。 */
+export interface CapabilityField {
+  key: string
+  label: string
+  /** `text` / `number` / `bool` / `select` / `multi_select` / `json`。 */
+  kind: string
+  required: boolean
+  default?: unknown
+  /**
+   * ⚠ `value` 是 `json.RawMessage`（后端注释写明："保留**字面字节**，前端靠它回传"）——
+   * 也就是它在线格式上是一个 **JSON 值**而不是字符串：`select` 那一项回的是
+   * `{label:"串行", value:"sequential"}`，那个 `value` 解析后带引号。
+   * 拿它当 `string` 直接送进 `<option value>` 会看到界面上一对引号。
+   * 本页只用 `key` 做参数键名校验，没碰这一栏。
+   */
+  options?: { label: string; value: unknown }[]
+  help?: string | null
+}
+
+/** 一个能力（对位 `app.CapabilityPayload`；⚠ 这一族的键是 camelCase）。 */
+export interface CapabilityRow {
+  code: string
+  title: string
+  group: string
+  kind: string
+  description: string
+  /** true = 任务中心不给选，但**仍是合法的调度目标**（`auth-refresh` 就是这一档）。 */
+  hidden: boolean
+  runInBatch: boolean
+  risk: string
+  needsConfirmation: boolean
+  defaultAccountMode: string
+  params: CapabilityField[]
+  output: CapabilityField[]
+}
+
+export interface CapabilitiesPayload {
+  all: CapabilityRow[]
+  visible: string[]
+  batchable: string[]
+  groups: string[]
+}
+
+/** 拉能力表。定时任务页要它做两件事：目标下拉的选项、参数 JSON 的合法键名。 */
+export const listCapabilities = () => request<CapabilitiesPayload>('/api/capabilities')

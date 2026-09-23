@@ -66,7 +66,16 @@ func TestParseArgsMirrorsTheRustFlagSurface(t *testing.T) {
 	if err != nil {
 		t.Fatalf("空参数应能解析：%v", err)
 	}
-	want := Options{DB: "data/mcloud.db", Host: "127.0.0.1", Port: 8787, WebDir: "web/dist"}
+	// 前五项抄自 Rust 侧 `Args` 的 default_value。**写成字面量**而不是引用
+	// [DefaultPCDeviceFile] 那类常量：这条的作用正是"默认值漂了要变红"，
+	// 拿被测的常量当期望值就等于什么都没断言。
+	//
+	// 后两项是本仓库自己加的（冻结基准里没有）：登录要落两份设备指纹，
+	// 而它们的默认值与 CLI 那两份**故意不同名** —— 漂移会让两端抢同一台"机器身份"。
+	want := Options{
+		DB: "data/mcloud.db", Host: "127.0.0.1", Port: 8787, WebDir: "web/dist",
+		PCDeviceFile: "data/server-device.txt", AppDeviceFile: "data/server-device-app.txt",
+	}
 	if opts != want {
 		t.Fatalf("默认值不对：\n实得 %+v\n期望 %+v", opts, want)
 	}
@@ -80,12 +89,14 @@ func TestParseArgsMirrorsTheRustFlagSurface(t *testing.T) {
 	opts, err = ParseArgs([]string{
 		"--db", "/tmp/x.db", "--host", "0.0.0.0", "--port", "9000",
 		"--web-dir", "/srv/dist", "--secure-cookie",
+		"--device-file", "/tmp/pc.txt", "--app-device-file", "/tmp/app.txt",
 	}, io.Discard)
 	if err != nil {
 		t.Fatalf("解析失败：%v", err)
 	}
 	if opts.DB != "/tmp/x.db" || opts.Host != "0.0.0.0" || opts.Port != 9000 ||
-		opts.WebDir != "/srv/dist" || !opts.SecureCookie {
+		opts.WebDir != "/srv/dist" || !opts.SecureCookie ||
+		opts.PCDeviceFile != "/tmp/pc.txt" || opts.AppDeviceFile != "/tmp/app.txt" {
 		t.Fatalf("覆盖后的值不对：%+v", opts)
 	}
 

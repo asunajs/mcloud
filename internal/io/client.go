@@ -19,7 +19,7 @@ import (
 //
 // 对应 Rust 侧 ../mcloud-rust/crates/mcloud-io/src/reqwest_client.rs。
 //
-// ⚠ 它**必须是本包的类型**。scripts/check-go-deps.sh 断言「组装根
+// ⚠ 它**必须是本包的类型**。scripts/check-go-deps.js 断言「组装根
 // （app / server）必须依赖本包」，那条断言挡的是"没人接上 IO 实现"这个
 // **静默死配置**：编译能过、跑起来什么都没发生。若组装层直接持
 // *http.Client，那条断言就失去了意义。

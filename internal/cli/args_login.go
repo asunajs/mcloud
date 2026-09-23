@@ -132,7 +132,7 @@ func newSmidCommand(deps *Deps, out *output) *cobra.Command {
 	}
 	resetFlags := reset.Flags()
 	resetFlags.StringVar(&resetAccount, "account", "",
-		"账号 id（`mcloud smid show` 里那一列，形如 19****01）")
+		"账号 id（mcloud smid show 里那一列，形如 19****01）")
 	resetFlags.StringVar(&resetDB, "db", defaultDB, "SQLite 文件")
 	resetFlags.BoolVar(&resetReport, "report", false,
 		"换完立刻上报一次，把新的 deviceId 也拿到手。"+

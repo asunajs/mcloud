@@ -91,7 +91,7 @@ func TestRunsEveryAccountAndRecordsRunsAndEvents(t *testing.T) {
 		Capability:   "signin",
 		Accounts:     []core.AccountID{runAccount("01"), runAccount("02")},
 		ParamsDigest: "d0",
-	}, &seqRandom{next: 1}, func(context.Context, core.AccountID) (core.RunReport, error) {
+	}, &seqRandom{next: 1}, func(context.Context, core.AccountID, RunProgress) (core.RunReport, error) {
 		return okReport(), nil
 	})
 	if err != nil {
@@ -157,8 +157,6 @@ func TestRunsEveryAccountAndRecordsRunsAndEvents(t *testing.T) {
 		}
 		// ⭐ 进度必须**真的在走**：`Done` 不递增的写法（忘了 `done++`）一样能
 		// 发出 progress 事件，而前端那条进度条从此永远停在 0%。
-		// ⭐ 进度必须**真的在走**：`Done` 不递增的写法（忘了 `done++`）一样能
-		// 发出 progress 事件，而前端那条进度条从此永远停在 0%。
 		// ⚠ 进度是**整批**的计数（每个账号的流里都写"这是第几个"），
 		// 所以第 index 个账号的流里是 `index+1 / 2`。
 		if last.Event.Done != uint32(index+1) || last.Event.Total != 2 {
@@ -178,7 +176,7 @@ func TestOneFailingAccountDoesNotStopTheOthers(t *testing.T) {
 		Capability:   "signin",
 		Accounts:     []core.AccountID{runAccount("01"), bad},
 		ParamsDigest: "d0",
-	}, &seqRandom{next: 1}, func(_ context.Context, target core.AccountID) (core.RunReport, error) {
+	}, &seqRandom{next: 1}, func(_ context.Context, target core.AccountID, _ RunProgress) (core.RunReport, error) {
 		if target == bad {
 			return core.RunReport{}, core.NewBadRequest("模拟上游失败")
 		}
@@ -241,7 +239,7 @@ func TestNeedingAHumanOutranksAPlainFailure(t *testing.T) {
 		Capability:   "signin",
 		Accounts:     []core.AccountID{manual, runAccount("02")},
 		ParamsDigest: "d0",
-	}, &seqRandom{next: 1}, func(_ context.Context, target core.AccountID) (core.RunReport, error) {
+	}, &seqRandom{next: 1}, func(_ context.Context, target core.AccountID, _ RunProgress) (core.RunReport, error) {
 		if target == manual {
 			return manualReport(), nil
 		}
@@ -296,7 +294,7 @@ func TestAHeldLockSkipsOnlyThatAccount(t *testing.T) {
 		Capability:   "signin",
 		Accounts:     []core.AccountID{runAccount("01"), runAccount("02")},
 		ParamsDigest: "d0",
-	}, rng, func(context.Context, core.AccountID) (core.RunReport, error) {
+	}, rng, func(context.Context, core.AccountID, RunProgress) (core.RunReport, error) {
 		return okReport(), nil
 	})
 	if err != nil {
@@ -343,7 +341,7 @@ func TestLocksAreReleasedEvenWhenTheTaskFails(t *testing.T) {
 		Capability:   "signin",
 		Accounts:     []core.AccountID{runAccount("01")},
 		ParamsDigest: "d0",
-	}, &seqRandom{next: 1}, func(context.Context, core.AccountID) (core.RunReport, error) {
+	}, &seqRandom{next: 1}, func(context.Context, core.AccountID, RunProgress) (core.RunReport, error) {
 		return core.RunReport{}, core.NewInternal("炸了")
 	}); err != nil {
 		t.Fatalf("单账号失败不该让整批报错: %v", err)
@@ -357,7 +355,7 @@ func TestLocksAreReleasedEvenWhenTheTaskFails(t *testing.T) {
 		Capability:   "signin",
 		Accounts:     []core.AccountID{runAccount("01")},
 		ParamsDigest: "d0",
-	}, &seqRandom{next: 9}, func(context.Context, core.AccountID) (core.RunReport, error) {
+	}, &seqRandom{next: 9}, func(context.Context, core.AccountID, RunProgress) (core.RunReport, error) {
 		return okReport(), nil
 	})
 	if err != nil {
@@ -384,7 +382,7 @@ func TestDifferentParamsDoNotBlockEachOther(t *testing.T) {
 		Capability:   "signin",
 		Accounts:     []core.AccountID{runAccount("01")},
 		ParamsDigest: "d0",
-	}, rng, func(context.Context, core.AccountID) (core.RunReport, error) {
+	}, rng, func(context.Context, core.AccountID, RunProgress) (core.RunReport, error) {
 		return okReport(), nil
 	})
 	if err != nil {
@@ -404,7 +402,7 @@ func TestEmptyTargetsAreReportedAsFailed(t *testing.T) {
 		Capability:   "signin",
 		Accounts:     nil,
 		ParamsDigest: "d0",
-	}, &seqRandom{next: 1}, func(context.Context, core.AccountID) (core.RunReport, error) {
+	}, &seqRandom{next: 1}, func(context.Context, core.AccountID, RunProgress) (core.RunReport, error) {
 		return okReport(), nil
 	})
 	if err != nil {
@@ -435,7 +433,7 @@ func TestTheTaskSeesTheAccountItWasGiven(t *testing.T) {
 		Capability:   "signin",
 		Accounts:     want,
 		ParamsDigest: "d0",
-	}, &seqRandom{next: 1}, func(_ context.Context, account core.AccountID) (core.RunReport, error) {
+	}, &seqRandom{next: 1}, func(_ context.Context, account core.AccountID, _ RunProgress) (core.RunReport, error) {
 		seen = append(seen, account)
 		return okReport(), nil
 	}); err != nil {
@@ -468,7 +466,7 @@ func TestTheRunningRowIsVisibleWhileTheTaskIsStillGoing(t *testing.T) {
 		Capability:   "signin",
 		Accounts:     []core.AccountID{target},
 		ParamsDigest: "d0",
-	}, &seqRandom{next: 1}, func(_ context.Context, account core.AccountID) (core.RunReport, error) {
+	}, &seqRandom{next: 1}, func(_ context.Context, account core.AccountID, _ RunProgress) (core.RunReport, error) {
 		runs, err := store.ListRuns(ctx, runScope(), 10)
 		if err != nil {
 			return core.RunReport{}, err
@@ -491,5 +489,220 @@ func TestTheRunningRowIsVisibleWhileTheTaskIsStillGoing(t *testing.T) {
 	}
 	if seen[0].FinishedAt != nil {
 		t.Errorf("还没跑完不该有结束时刻，实得 %v", seen[0].FinishedAt)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 异步触发面：预分配的 runId 与过程话
+//
+// 这两件都是 `POST /api/runs` 带来的，而它带来的**只有**这两件：
+// 响应必须在动手之前就把 runId 交出去（前端拿它订阅事件流），
+// 而一条要跑几十秒的任务必须往那个流里写过程话。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestPreallocatedRunIDsAreUsedInOrder 钉住"预分配就是最终 id"。
+//
+// ⚠ 若这里回退成"跑到哪个才分配哪个"，异步那条路会坏得很难查：
+// 响应里给出的第二个 id 与库里那一行的 id **不是同一个**，
+// 于是前端订阅第一个账号能出日志、订阅第二个永远空白，
+// 而后端看起来什么都没做错（它确实跑完了）。
+func TestPreallocatedRunIDsAreUsedInOrder(t *testing.T) {
+	store := storeWithAccounts(t)
+	_, _, runner := newRunner(t, store)
+	ctx := context.Background()
+
+	// 分配用的随机源与运行用的**不是同一个**：这样"实得 id 等于预分配 id"
+	// 才不是因为两边恰好抽到了同一串字节。
+	alloc := &seqRandom{next: 200}
+	want := []core.RunID{core.NewRunID(alloc), core.NewRunID(alloc)}
+
+	summary, err := runner.Run(ctx, RunPlan{
+		Capability:   "signin",
+		Accounts:     []core.AccountID{runAccount("01"), runAccount("02")},
+		ParamsDigest: "d0",
+		RunIDs:       want,
+	}, &seqRandom{next: 1}, func(context.Context, core.AccountID, RunProgress) (core.RunReport, error) {
+		return okReport(), nil
+	})
+	if err != nil {
+		t.Fatalf("运行失败: %v", err)
+	}
+	ran := summary.Ran()
+	if len(ran) != 2 {
+		t.Fatalf("两个都该跑，实得 %d", len(ran))
+	}
+	for i := range want {
+		if ran[i].RunID != want[i] {
+			t.Errorf("第 %d 个账号的 runId 应是预分配那个 %v，实得 %v", i, want[i], ran[i].RunID)
+		}
+	}
+
+	// 库里的行也必须是这两个 id（历史页与事件流靠同一个 id 对上）。
+	runs, err := store.ListRuns(ctx, runScope(), 10)
+	if err != nil {
+		t.Fatalf("列举历史失败: %v", err)
+	}
+	byID := map[core.RunID]bool{}
+	for _, run := range runs {
+		byID[core.RunID(run.ID)] = true
+	}
+	for _, id := range want {
+		if !byID[id] {
+			t.Errorf("库里没有 runId %v 那一行", id)
+		}
+	}
+}
+
+// TestMismatchedPreallocatedRunIDsFailBeforeAnything 钉住"数量不等不猜、不补齐"。
+//
+// 少给一个的话最容易"顺手"用随机源补上，而那会让**响应里给出的 id**
+// 与**实际用的 id**在最后一个账号上不一致 —— 表现是"最后一个账号永远没日志"。
+// 空 runId 更糟：它会落进 `runs` 主键，成为一条谁也查不到的记录。
+func TestMismatchedPreallocatedRunIDsFailBeforeAnything(t *testing.T) {
+	store := storeWithAccounts(t)
+	_, _, runner := newRunner(t, store)
+	ctx := context.Background()
+
+	_, err := runner.Run(ctx, RunPlan{
+		Capability:   "signin",
+		Accounts:     []core.AccountID{runAccount("01"), runAccount("02")},
+		ParamsDigest: "d0",
+		RunIDs:       []core.RunID{core.NewRunID(&seqRandom{next: 7})},
+	}, &seqRandom{next: 1}, func(context.Context, core.AccountID, RunProgress) (core.RunReport, error) {
+		t.Fatal("参数不合法时一个账号都不该开跑")
+		return core.RunReport{}, nil
+	})
+	if err == nil {
+		t.Fatal("数量不等必须报错")
+	}
+	if !strings.Contains(err.Error(), "runId") {
+		t.Errorf("报错要点名 runId，实得 %v", err)
+	}
+	runs, lerr := store.ListRuns(ctx, runScope(), 10)
+	if lerr != nil {
+		t.Fatalf("列举历史失败: %v", lerr)
+	}
+	if len(runs) != 0 {
+		t.Errorf("失败要在动手之前，库里不该留下一行，实得 %d", len(runs))
+	}
+}
+
+// TestProgressMessagesBecomeLogEventsInBothChannels 钉住过程话**同时**走两条路。
+//
+// 只发总线不落库 ⇒ 刷新页面日志就没了；只落库不发总线 ⇒ 前端得轮询数据库。
+// 两边都写才叫"在线能看到、事后也查得到"，所以这里两条都要断言。
+//
+// ⚠ 还有一处容易写错的是**序号**：过程话必须与 `started` 走同一次发布，
+// 序号由总线统一发。各自开一条写路径的话，`(run_id, seq)` 会撞或跳号，
+// 而 SSE 的 `?after=` 续传读的就是那个 seq。
+func TestProgressMessagesBecomeLogEventsInBothChannels(t *testing.T) {
+	store := storeWithAccounts(t)
+	_, bus, runner := newRunner(t, store)
+	ctx := context.Background()
+	target := runAccount("01")
+
+	summary, err := runner.Run(ctx, RunPlan{
+		Capability:   "signin",
+		Accounts:     []core.AccountID{target},
+		ParamsDigest: "d0",
+	}, &seqRandom{next: 1}, func(_ context.Context, _ core.AccountID, progress RunProgress) (core.RunReport, error) {
+		progress(core.LevelInfo, "开门中…")
+		progress(core.LevelWarn, "该主播有 2 间在播，本次只听第一间")
+		return okReport(), nil
+	})
+	if err != nil {
+		t.Fatalf("运行失败: %v", err)
+	}
+	runID := summary.Ran()[0].RunID
+
+	events, err := store.RunEventsAfter(ctx, runScope(), runID, nil, 100)
+	if err != nil {
+		t.Fatalf("读事件失败: %v", err)
+	}
+
+	// 落库那一份：两条 log 都在，级别与消息一字不差，且夹在 started 与 finished 之间。
+	var logged []core.RunEvent
+	for _, item := range events {
+		if item.Event.Kind == core.EventLog {
+			logged = append(logged, item.Event)
+		}
+	}
+	if len(logged) != 2 {
+		t.Fatalf("应有两条 log 事件，实得 %d（全部事件：%v）", len(logged), events)
+	}
+	if logged[0].Level != core.LevelInfo || logged[0].Message != "开门中…" {
+		t.Errorf("第一条 log 不符：%+v", logged[0])
+	}
+	if logged[1].Level != core.LevelWarn || !strings.Contains(logged[1].Message, "只听第一间") {
+		t.Errorf("第二条 log 不符：%+v", logged[1])
+	}
+	if logged[0].RunID != runID {
+		t.Errorf("log 事件要挂在**这个账号**的 runId 上，实得 %v", logged[0].RunID)
+	}
+	// 顺序：started → log → log → progress/finished，seq 严格递增。
+	var prev uint64
+	for i, item := range events {
+		if i > 0 && uint64(item.Seq) <= prev {
+			t.Fatalf("序号必须递增，第 %d 条起不对：%v", i, events)
+		}
+		prev = uint64(item.Seq)
+	}
+	if events[0].Event.Kind != core.EventStarted {
+		t.Errorf("第一条仍是 started，实得 %v", events[0].Event.Kind)
+	}
+
+	// 总线那一份（在线订阅者走这条路）：内容必须与库里**同源同序**。
+	replayed := bus.Replay(runID, core.Seq(0))
+	if len(replayed) != len(events) {
+		t.Fatalf("总线与库条数不一致（%d 对 %d），说明有一边是另写的",
+			len(replayed), len(events))
+	}
+	for i := range events {
+		if replayed[i].Event.Kind != events[i].Event.Kind ||
+			replayed[i].Seq != events[i].Seq {
+			t.Errorf("第 %d 条两边不同：总线 %+v / 库 %+v", i+1, replayed[i], events[i])
+		}
+	}
+}
+
+// TestProgressOfTheRightAccount：过程话只能进**自己那个**账号的流。
+//
+// 串行跑两个账号时，如果 progress 闭包抓住了上一个账号的 runId，
+// 现象是"日志混在别人的那一行下面"—— 界面上看着完全正常，
+// 而只有把两个账号的消息写成不同的时候才会暴露。
+func TestProgressOfTheRightAccount(t *testing.T) {
+	store := storeWithAccounts(t)
+	_, _, runner := newRunner(t, store)
+	ctx := context.Background()
+
+	summary, err := runner.Run(ctx, RunPlan{
+		Capability:   "signin",
+		Accounts:     []core.AccountID{runAccount("01"), runAccount("02")},
+		ParamsDigest: "d0",
+	}, &seqRandom{next: 1}, func(_ context.Context, account core.AccountID, progress RunProgress) (core.RunReport, error) {
+		progress(core.LevelInfo, "只属于"+account.String())
+		return okReport(), nil
+	})
+	if err != nil {
+		t.Fatalf("运行失败: %v", err)
+	}
+	ran := summary.Ran()
+	if len(ran) != 2 {
+		t.Fatalf("两个都该跑，实得 %d", len(ran))
+	}
+	for _, entry := range ran {
+		events, err := store.RunEventsAfter(ctx, runScope(), entry.RunID, nil, 100)
+		if err != nil {
+			t.Fatalf("读事件失败: %v", err)
+		}
+		var messages []string
+		for _, item := range events {
+			if item.Event.Kind == core.EventLog {
+				messages = append(messages, item.Event.Message)
+			}
+		}
+		if len(messages) != 1 || messages[0] != "只属于"+entry.Account.String() {
+			t.Errorf("账号 %v 的流里出现了别人的过程话：%v", entry.Account, messages)
+		}
 	}
 }

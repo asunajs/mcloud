@@ -422,6 +422,19 @@ SYNTH001|1|RCS|1792245335331|AAAA…（201 字符）
 两者的关系**未验证** —— 不要互换，也不要拿它去覆盖 `account_state.jwt_token`
 （那条教训见 `docs/credential-boundary.md`）。
 
+> **补记（2026-09-22，实现 `auth refresh` 时按同一份日志复核）：上面那句"关系未验证"已经推翻。**
+>
+> 实拍到的关系是**同一个东西**：`/user/auth/refreshToken` 响应里那个 `token`，
+> 编成 `Basic base64("mobile:<手机号>:<token>")` 之后，在**同一次会话的后续请求头**里逐字命中
+> （次日那个窗口同样命中）。⇒ 刷新换的就是 `Authorization` 第三段那个 authToken，
+> 所以 `RotateAccountAuth` 覆盖 `jwt_token` / `authorization` 是有直接证据的那一步，
+> 不是"拿没验证过的值去顶"。
+>
+> ⚠ 上面那条"不要互换"的告诫**仍然有效**，但理由变了：不是"关系未知"，而是
+> **必须先把整串重拼再整串写**（端别段与手机号段要从库里原串里取，不能凭猜），
+> 单换第三段会造出"PC 的 token 配 App 的前缀"那一类矛盾串。
+> 判据、三面口径与**仍未实测的 PC 那一支**见 [`../auth-refresh.md`](../auth-refresh.md)。
+
 ---
 
 ## 5. 待领取：`market/signin/page/pointsNotClaimed`（**语义未定案**）

@@ -21,18 +21,18 @@ import (
 // 判断标准很简单：**有没有可能存在一个不是本机跑出来的库**。没有，就可以改；有，就只能加。
 //
 // ⚠ 方案文档 §6.3 的退出判据写作"schema v1→v7"，那是 v8（run_events）之前的口径。
-// 以本常量为准：当前是 **8**。
-const SchemaVersion int64 = 8
+// 以本常量为准：当前是 **9**。
+const SchemaVersion int64 = 9
 
 // allMigrations 是迁移清单：索引 i（0-based）对应版本 i+1。
 //
 // 每个元素必须是幂等 SQL（用 IF NOT EXISTS），
 // 这样重复执行不会炸，也让"重跑迁移"成为安全操作。
 //
-// ⚠ 这段 SQL 与 Rust 侧 ../mcloud-rust/crates/mcloud-io/src/store/schema.rs 的
-// ALL_MIGRATIONS **逐字对应**（只把注释里的反引号去掉了 —— Go 的原始字符串
-// 用反引号定界，注释里再出现反引号会把字面量截断）。改这里必须同时改那边，
-// 否则两套实现的库文件会在某个版本上分叉，而 user_version 看不出来。
+// 这份清单是 schema 的**唯一真相源**。v1–v8 是在与 Rust 实现并行开发的时期
+// 逐字对应着写的，但 2026-09-21 Rust 冻结并剥离为同级仓库后，那条同步义务
+// **已终结**：改或加迁移都**不**需要、也不应该去对照 `../mcloud-rust` ——
+// 那边的 schema.rs 是冻结快照，不再跟改。
 var allMigrations = []string{
 	// v1：账号 + 云朵日快照 + 运行记录
 	`
@@ -366,11 +366,14 @@ var allMigrations = []string{
 	// 拆列的唯一好处是"能按 message 内容做 SQL 查询"，但我们不需要：
 	// 查事件永远是"某个 run 的全部事件，按 seq 排"，用不到 JSON 内部的字段。
 	//
-	// # 为什么不用 REFERENCES runs(id) 的外键
+	// # 为什么 run_events 不用 REFERENCES runs(id) 的外键
 	//
-	// 会。删 run 时事件没清 → 库越用越大；而 SQLite 的外键默认**不生效**
-	// （要 PRAGMA foreign_keys=ON），所以写了也是假的。这里改用索引 + 显式清理：
-	// 删 run 时必须同时删它的事件（DeleteRunEvents），由 store 层的测试把关。
+	// 本仓库的 DSN 把 `foreign_keys(1)` 钉在**每条连接**上（见 store.go 的 Open），
+	// 所以 schema 里声明的级联（如 v3 的 `sessions … ON DELETE CASCADE`）**是真正生效的**
+	// —— 新增 REFERENCES 会当场起作用，别按"默认不生效、写了是假的"的旧口径想。
+	// 即便如此，事件的删除仍以**显式清理**（DeleteRunEvents）为第一道、库级联只是兜底：
+	// "哪些行属于这个 run"是业务语义，不该下放给 schema；而删 run 不清事件
+	// 会让库越用越大。删用户 / 删 run 都不能只喊一声"CASCADE 会管"，由 store 层测试把关。
 	//
 	// # 保留策略
 	//
@@ -392,6 +395,36 @@ var allMigrations = []string{
     -- 主键已经把 (run_id, seq) 做成唯一，且天然支持
     -- "某个 run 按 seq 序取出"（最常走的查询）；这条索引给"按时间查最近的事件"用。
     CREATE INDEX IF NOT EXISTS idx_run_events_created ON run_events (created_at DESC);
+    `,
+	// ── v9：schedules 的两列 —— 调度循环要能"择时"且能"只写记账" ─────────────
+	//
+	// v1–v8 期间这张表是"可存可读、但没有人照着它择时"的：`last_run_at` /
+	// `last_status` / `last_error` 三列自落下那天起**没有任何写入方**
+	// （`PUT /api/schedules` 只是把它们原样搬回去）。加上服务进程内的调度循环，
+	// 这两列补的是循环缺的两样东西。
+	//
+	// # `miss_policy` —— 错过触发点补不补（逐行一个，不是全局开关）
+	//
+	// 用户 2026-09-22 的口径是"看任务情况：必须准时的不需要补，其他的需要"。
+	// 为什么不能只在能力表里写死：那等于"改一个能力的脾气，会静默改掉用户
+	// 已经建好的那些定时任务"。为什么这一列**可空**：NULL 表示"没有人显式选过"，
+	// 此时跟随能力声明的默认；建表时替用户拍一个值填进去，就是把"没人选过"
+	// 谎报成"他选了"（[core.MissPolicy] 的三态纪律）。
+	//
+	// # `last_fire_at` —— 已处理过的那个触发时刻
+	//
+	// 循环靠它算下一个点，且它**不能**复用 `last_run_at`：按 [core.MissSkip]
+	// 弃掉的那一次不会留下任何运行，用 `last_run_at` 当水位的话，下一个 tick
+	// 会把同一次错过重新捡起来 —— 表现成"每刷一次页面就多一条 skipped"。
+	//
+	// 与前几版同理：ALTER 不能 IF NOT EXISTS，必须包事务。
+	`
+    BEGIN;
+
+    ALTER TABLE schedules ADD COLUMN miss_policy  TEXT;
+    ALTER TABLE schedules ADD COLUMN last_fire_at TEXT;
+
+    COMMIT;
     `,
 }
 

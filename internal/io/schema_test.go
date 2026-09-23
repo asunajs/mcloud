@@ -502,3 +502,81 @@ func TestV7DatabaseGainsRunEventsAndKeepsRuns(t *testing.T) {
 		t.Fatalf("v8 之前没有事件记录，不许凭空造，实得 %d 条", events)
 	}
 }
+
+// TestV9MigrationAddsTheScheduleColumnsInATransaction v9 是**加列**，
+// 所以沿用 v3…v6 的断言形态：事务包装 + 两条 ALTER + 不许顺手建表。
+//
+// 事务这一条不是形式主义：`ALTER TABLE … ADD COLUMN` 在 SQLite 里没有
+// `IF NOT EXISTS`，两条挨着写时若第一条成功、第二条失败而版本没升，
+// 下次启动会再执行一遍第一条并当场报错，库就永久卡在中间态。
+func TestV9MigrationAddsTheScheduleColumnsInATransaction(t *testing.T) {
+	v9 := strings.ToLower(allMigrations[8])
+	if !strings.Contains(v9, "begin;") || !strings.Contains(v9, "commit;") {
+		t.Fatal("v9 必须在显式事务里执行")
+	}
+	for _, want := range []string{
+		"alter table schedules add column miss_policy",
+		"alter table schedules add column last_fire_at",
+	} {
+		if !strings.Contains(v9, want) {
+			t.Fatalf("v9 缺少 %q", want)
+		}
+	}
+	if strings.Contains(v9, "create ") {
+		t.Fatal("v9 只该是两条 ALTER + 事务包装；建新表属于另一版")
+	}
+}
+
+// TestV8DatabaseGainsScheduleColumnsWithBothLeftNull 盯的是"历史行不许回填"。
+//
+// 两列都**刻意**留 NULL，各有各的后果：
+//
+//   - `miss_policy` 回填成任何一个值，都等于在本机没人知情的情况下替全体用户
+//     拍了"错过要不要补"。回填 `catch_up` 尤其危险：升级后第一次启动会立刻
+//     给每个存量任务补跑一次，而签到与换凭据都是不可逆动作。
+//     NULL 才是准确说法（跟随能力声明的默认，见 [core.MissPolicy]）。
+//   - `last_fire_at` 回填成"现在"会让循环以为已经跑过本次；回填成零值时间
+//     则会让所有历史任务的第一次都算"错过"。留 NULL = 从下一个触发点开始。
+func TestV8DatabaseGainsScheduleColumnsWithBothLeftNull(t *testing.T) {
+	db := openRawDB(t)
+	for _, sqlText := range allMigrations[:8] {
+		mustExec(t, db, sqlText)
+	}
+	mustExec(t, db, "PRAGMA user_version = 8")
+	mustExec(t, db, `INSERT INTO schedules (id, name, target, cron, timezone,
+	                                       account_ids, body, enabled)
+		VALUES ('sched-old', '每日签到', '{"kind":"capability","code":"sign"}',
+		        '0 30 7 * * *', 'Asia/Shanghai', '[]', NULL, 1)`)
+
+	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatalf("迁移失败: %v", err)
+	}
+
+	for _, col := range []string{"miss_policy", "last_fire_at"} {
+		if cols := tableColumns(t, db, "schedules"); !hasColumn(cols, col) {
+			t.Fatalf("缺列 %s: %v", col, cols)
+		}
+	}
+
+	var policy, fired sql.NullString
+	err := db.QueryRow("SELECT miss_policy, last_fire_at FROM schedules WHERE id = 'sched-old'").
+		Scan(&policy, &fired)
+	if err != nil {
+		t.Fatalf("读新列失败: %v", err)
+	}
+	if policy.Valid {
+		t.Errorf("历史行的补跑策略该留 NULL（没人选过），实得 %q", policy.String)
+	}
+	if fired.Valid {
+		t.Errorf("历史行的水位该留 NULL（还没触发过），实得 %q", fired.String)
+	}
+
+	// 同一行上原有的列一条不动
+	var name string
+	if err := db.QueryRow("SELECT name FROM schedules WHERE id = 'sched-old'").Scan(&name); err != nil {
+		t.Fatalf("读 name 失败: %v", err)
+	}
+	if name != "每日签到" {
+		t.Fatalf("升级不该动已有列，实得 %q", name)
+	}
+}

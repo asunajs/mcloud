@@ -82,6 +82,40 @@ const UNTAGGED_ALLOWED = {
     'DES 规则表的**一条**（密钥 + 混淆后的键名），是常量表的元素不是数据模型；Rust 侧这条 rule 表也是 `const` 不是 Serialize',
   'internal/app/smid.go:UploadContext':
     '一次上报的时间上下文（14 位东八区时间 + nowMillis + 上一次的 deviceId），**只**喂给上游算法；Rust 侧 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
+  'internal/app/login_hub.go:LoginSessionView':
+    '登录会话对外的**结论**（阶段 / 掩码账号 id / 人话失败原因 / 验证码余量），内存里在组装根之间传递；出网那一步由 `internal/server/login.go` 的 `loginSessionPayload` **逐字段**抄成响应体 —— 那里写明不给它补 tag 的理由：这个结构体将来会加字段，而"加了就自动出网"正是凭据泄漏最常见的路径',
+  // ── 刷新 auth 这一条链路（2026-09-22 登记）──
+  // 这六个都是**内存里的入参 / 中间结论**，而刷新恰恰是"轮换真凭据"的操作，
+  // 所以对外形状刻意**不**由结构体自动 marshal：
+  //  - `RefreshReport` 出网走 `internal/server/auth_refresh.go` 的 `refreshAuthPayload`
+  //    （逐字段列白的 map），理由与上面 `LoginSessionView` 同一条；
+  //  - `RefreshedCredential` **就是那套新凭据本体**（token + 整串 + 到期时刻）——
+  //    它一旦能被 marshal，离泄漏只差一次"顺手把 report 整个写出去"；
+  //  - 其余四个（入参集 / 状态机中间结论 / CLI 参数 / 上游响应解析结果）根本不面向网络。
+  'internal/app/auth_refresh.go:RefreshDeps':
+    '一次刷新的**入参集**（上游 / 库 / scope / 时钟 / 随机 / 端档案），不是数据模型；Rust 侧这里是六个独立参数',
+  'internal/app/auth_refresh.go:RefreshReport':
+    '一次刷新的**结论**（端别 / 判到哪档 / 是否换掉 / 前后到期时刻），出网由 `refreshAuthPayload` 逐字段抄；⚠ 里面**没有**凭据，补 tag 也不会漏，但那条纪律只有一处实现',
+  'internal/capabilities/auth_refresh.go:RefreshOutcome':
+    '状态机的**中间结论**（判据 + 换到的新凭据 / 失败原因），内存里交给 app 层落库；Rust 侧是 `enum`，不 Serialize',
+  'internal/capabilities/auth_refresh.go:RefreshedCredential':
+    '**新凭据本体**（整串 `Authorization` + token + 到期毫秒），两个字段是 `core.SecretValue` —— 而它 `String()` 只挡打印、**不挡 `encoding/json`**（见 `internal/core/model.go` 那句"JSON 序列化不受影响"）。所以给它补 tag = 一旦哪个 handler 整个 marshal 出去，新 token 就**原样出网**；落库走 `RotateAccountAuth` 窄写，这条路不经过 JSON',
+  'internal/cli/args_auth.go:AuthRefreshArgs':
+    '`auth refresh` 的参数（`--account` / `--all` / `--lead-days` / `--platform` 等）；Rust 侧是 `#[derive(Args)]`，进 JSON 的只有 `--json` 那支另构造的输出',
+  'internal/upstream/auth_refresh.go:RefreshTokenResult':
+    'refreshToken 响应的**解析结果**：`Token` 就是新 token 本体（同上，`string` 而不是 `SecretValue`，因为它一出这道门就会被包进 `RefreshedCredential`），`ExpireSeconds` 是"还能用多久"。两者都只在内存里换算，出网只出现在上面那个逐字段列白的 map 里',
+  // ── 编排入口与受理配对（2026-09-23 登记，调度循环那一步带来的）──
+  // 这一族是"跑一个账号"的**入参集 / 内存结论**：字段里装着库句柄、scope、
+  // 上游客户端与登录态，一旦能被整体 marshal，离泄漏只差一次"顺手把结果写出去"。
+  // 对外形状一律在 server 层逐字段列白（见 `runPairings`、`refreshAuthPayload`）。
+  'internal/app/signin_run.go:SignInRun':
+    '签到那一趟的**入参集**（库 / scope / 上游 / 设备档案 / 时钟 / 随机 / 是否领取 / 进度回调），不是数据模型；Rust 侧这里是 `run_signin` 的一组独立参数',
+  'internal/app/signin_run.go:SignInAccountResult':
+    '一个账号这一趟的**内存产出**（签到结论 + 逐条领取 + 余额快照），外层交给编排层换算成 `core.RunReport` 与事件流；出网的那份是另构造的响应体，不整块 marshal',
+  'internal/app/auth_refresh_run.go:RefreshRun':
+    '刷新那一趟的**入参集**（同 `SignInRun` 一族），字段里有 `core.StateStore` 与 `core.Scope`：给它们补 tag 无意义，而"整个结构体能序列化"这件事本身会被误用；`LeadDays` 与 `PCPlatform` 是**这台机器定的数**，刻意不对外',
+  'internal/server/run_dispatch.go:acceptedRun':
+    '一次受理的**内存配对**（账号 ↔ runId）。对外那份由 `internal/server/runs.go` 的 `runPairings` 逐字段抄成 `{"account":…,"runId":…}` —— 理由同 `LoginSessionView`：这个结构体会加字段（比如内部序号、重试次数），而"加了就自动出网"正是契约漂移最常见的路径',
   // ── CLI 的参数结构体 ──
   // 它们全是 clap 的 `#[derive(Args)]`（解析命令行用），**没有** serde 的 Serialize，
   // 也从不被序列化 —— 进 JSON 的只有 `--json` 那一支的输出（在 output.go 里单独构造）。
@@ -92,6 +126,12 @@ const UNTAGGED_ALLOWED = {
     '`login sms` 的参数；Rust 侧是 `#[derive(Args)]` 的 `SmsArgs`',
   'internal/cli/args_other.go:MigrateArgs':
     '`migrate` 的参数（`--dry-run` 等）；Rust 侧是 `#[derive(Args)]` 的 `MigrateArgs`',
+  'internal/cli/args_live.go:LiveRoomArgs':
+    '`live-room` 的参数（`--kouling-only` / `--listen-seconds` …）；与上面几条同理 —— ' +
+    '它只被 pflag 绑进 flagset，从不序列化。⚠ `--json` 那一支的输出是 ' +
+    '`run_live_room.go` 里**单独构造**的 map（键名 snake_case 且刻意不用这个结构体），' +
+    '理由与 `QrProgress` 那条同源：把 CLI 参数结构体当响应体用，' +
+    '会让"加一个内部开关"顺手改掉外部契约',
   'internal/cli/cli.go:Deps':
     '一次 CLI 运行的**外部世界**（三个流 + 时钟 + 随机源），不是数据模型 —— Rust 侧这里直接读 `std::io::stdout()`',
   'internal/app/smid.go:FingerprintBinding':
@@ -108,6 +148,80 @@ const UNTAGGED_ALLOWED = {
     '单个账号那趟的**结果**（账号 + 报告 + 被谁挡下 + 是否跳过），内存里汇总用；Rust 侧只 derive `Debug, Clone, PartialEq, Eq`',
   'internal/app/run.go:RunSummary':
     '整批运行的**汇总**（每账号一条 + 计数），由它渲染摘要行与 JSON；Rust 侧同样只 derive `Debug, Clone, PartialEq, Eq`',
+  // ── 直播口令 / 小红花这一条链（2026-09-22 登记，同日补 `live_room_task.go` 三个、
+  //    同日再补 `live_room_probe.go` 一个 ⇒ ④ 那类现在是九个）──
+  // 23 个结构体，分四类，理由各不相同（别合并成一句"都是内存里的"）：
+  //
+  //  ① **MSync 报文体**（`live_msync.go` 五个）：它们的外部契约是 **wire 字节**
+  //     （由 `EncodeMSync` / `EncodeProvision` 产出，逐字节与 protobufjs 对拍过）。
+  //     补 `json` tag 会造出一套**没人用、也没人核**的第二序列化，而它一旦被误用
+  //     （某处顺手 `json.Marshal` 打日志），字段名与 protobuf 字段号对不上 ——
+  //     "看起来结构对了、实际全错"，正是最难查的一类。
+  //  ② **上游解析结果**（`live_flower.go` / `live_room.go` 八个）：里面**含凭据**
+  //     （`LiveUserToken.AccessToken` 是 WS 凭据、`ApplyRoomResult.AppKey` 是进房凭据），
+  //     且 `RedFlowerDrawOutcome.Message` 存的是**上游原文**。能自动 marshal 就离
+  //     "顺手把整个结构写进日志/响应"只差一步 —— 与 `RefreshedCredential` 同一条纪律。
+  //  ③ **状态机返回值**（`FrameActions`）：一帧处理完的动作集合，只在内存里被驱动层消费。
+  //  ④ **编排层结论**（`app` 侧八个）：出网走 CLI 渲染层 / WebUI 的**另拼响应体**
+  //     （理由与 `LoginSessionView` 逐字相同：这个结构体会加字段，而"加了就自动出网"
+  //     正是凭据泄漏最常见的路径）。其中 `LiveRoomGate.JWT` **就是凭据本体**、
+  //     `LiveRoomDriver` 含 `core.Random` / `core.Clock`（根本不可序列化）。
+  'internal/upstream/live_msync.go:JID':
+    '① MSync 的 `JID`（appKey / name / domain / clientResource）；外部契约是 wire 字节，不是 JSON',
+  'internal/upstream/live_msync.go:MSyncMessage':
+    '① MSync 报文**本体**（`MSYNC_V1`），逐字节对拍 protobufjs 产出；字段号才是契约',
+  'internal/upstream/live_msync.go:Provision':
+    '① PROVISION 的 payload（osType / appSign / compressType…）；同上，wire 字节才是契约',
+  'internal/upstream/live_msync.go:MessageContent':
+    '① `MessageBody.Content` 的一条（type + text），入站解析的中间结果',
+  'internal/upstream/live_msync.go:MessageBody':
+    '① 弹幕文本所在的那一层（`contents[0].text`），入站三级兜底的最终落点',
+  'internal/upstream/live_flower.go:RedFlowerBalance':
+    '② `user/info` 的解析结果（余额的唯一判据）；对外只出**数字**，不出这个结构',
+  'internal/upstream/live_flower.go:FirstParticipateOutcome':
+    '② `firstParticipate/give` 的结论；`Message` 存**上游原文**，整块 marshal 等于把上游回显自动带出网',
+  'internal/upstream/live_flower.go:RedFlowerDrawResult':
+    '② 一次 `draw` 成功时的 `result`（prizeId / flowerNum / prizeName）；内存里换算成报告字段',
+  'internal/upstream/live_flower.go:RedFlowerDrawOutcome':
+    '② 一次 `draw` 的判定（含原始码与上游原文 `Message`）；同上，不整块出网',
+  'internal/upstream/live_room.go:LiveUserToken':
+    '② `userToken` 的解析结果 —— `AccessToken` **就是 WS 凭据**，是这条链上最不能自动 marshal 的一个',
+  'internal/upstream/live_room.go:LiveRoom':
+    '② `tabContentList` 里的一间房（只留判据用得到的字段）；出网的是**门的结论**，不是房间列表',
+  'internal/upstream/live_room.go:RoomBeat':
+    '② `roomBeat` 的解析结果；`ChatRoomID` 用指针表达"没有聊天室"（坑表 #107 那条结构性事实）',
+  'internal/upstream/live_room.go:ApplyRoomResult':
+    '② `member/apply` 的解析结果 —— `AppKey` 是进房凭据；同上，不整块出网',
+  'internal/upstream/live_ws.go:FrameActions':
+    '③ 一帧处理完之后的**动作集合**（要回发的帧 + 弹幕 + 新口令 + 归类），状态机返回值',
+  'internal/app/live_room.go:KoulingGate':
+    '④ 门的判定（是否开 / 房间 / LiveCount 的两种"没有"）；出网走渲染层另拼',
+  'internal/app/live_room.go:RedFlowerDrawRecord':
+    '④ 一个口令的抽取记录（口令 + 判定）；同上，出网由渲染层逐字段拼',
+  'internal/app/live_room.go:RedFlowerReport':
+    '④ 六步链的**结论**（前后余额 / 首次参与 / 逐口令结果 / 无效与未分类口令）；⚠ 它将来会加字段（比如"这次用的凭据"），而"加了就自动出网"正是泄漏最常见的路径',
+  'internal/app/live_room_drive.go:LiveRoomGate':
+    '④ 门的结论 + **直播侧 JWT 本体**（`JWT` 字段）—— 这条链上最不该能被 marshal 的一个',
+  'internal/app/live_room_drive.go:LiveRoomDriver':
+    '④ 注入依赖集（上游 / 拨号器 / 随机源 / 时钟 / 手机号）；含接口与时钟，根本不可序列化',
+  'internal/app/live_room_task.go:LiveRoomParams':
+    '④ 一趟运行里**由使用者决定**的那几件事（`Codes` / `ListenSeconds` / 两个开关）；' +
+    '外部契约是**能力声明**（`capabilities.liveRoomParams` 的那几个 key）与 CLI 的 flag 名，' +
+    '两者都由 `internal/server/runs.go` 按声明逐键取值、不由这个结构体自动 marshal —— ' +
+    '补 tag 等于给"字段名 = 契约"造出第二个定义处，而漂移的表现是界面上填了、后端没收成',
+  'internal/app/live_room_task.go:LiveRoomRun':
+    '④ 跑一个账号需要的**世界**（库 / scope / 驱动 / 设备 / 参数 / 进度回调）；' +
+    '含 `core.StateStore`、`upstream.AppDevice` 与函数字段 `Progress`，根本不可序列化',
+  'internal/app/live_room_task.go:LiveRoomAccountResult':
+    '④ 一个账号这一趟的**结论**（门的判定 / 口令 / 六步链报告 / 是否重听过）；' +
+    '出网由 CLI 的 `liveRoomJSON` 与 `runs.message`（`RunReport()` 那句话）**分别另拼**。' +
+    '⚠ 它带 `Gate`（房间列表）与 `Codes`，而 `HasJWT` 刻意只存"有没有"——' +
+    '整个 marshal 出去会把"凭据缺席"这件事变成一次随手可得的结构导出',
+  'internal/app/live_room_probe.go:LiveRoomProbe':
+    '④ 只读探针的**结论**（门的判定 + 那个主播的房间日程 + 余额），出网由 ' +
+    '`internal/server/live_room_probe.go` 的 `liveRoomProbePayload` 逐字段另拼。' +
+    '给它补 tag 尤其危险：它内嵌 `KoulingGate`（含房间列表），而它读的那条链上' +
+    '到处是凭据 —— "加了字段就自动出网"正是这里要挡的那一类',
   'internal/server/auth.go:Config':
     '服务端的**启动参数**（cookie 是否带 Secure / 会话 TTL …），由 main 组装时填，不进 JSON',
   'internal/server/auth.go:AuthUser':
@@ -128,6 +242,21 @@ const UNTAGGED_ALLOWED = {
     '「签到翻倍」的**结果**（结局 + 倍数与合计 / 失败原因），喂给 CLI；Rust 侧是 `enum`',
   'internal/app/signin_bonus.go:BackupGiftOutcome':
     '「备份好礼」的**结果**（结局 + 数量 / 失败原因），喂给 CLI；Rust 侧是 `enum`',
+  // ── 滑块题面解算（`internal/core/slide.go`）──
+  // 这四个都是**一次解算的中间物 / 报告**：像素平面、包围盒、候选、解算报告。
+  // 它们**不进 JSON** —— 对外只有一个整数 `puzzleOffset` 进 `exchangeV3` 的请求体，
+  // 而那个 body 是调用方**按实拍键序手工拼**的字符串（键序也是契约的一部分，
+  // 走结构体 marshal 会按字母序重排）。解算报告只进 CLI 打印与日志。
+  // ⚠ 真要把它出网时，正确做法是**另写一个带 tag 的响应体**，
+  //   而不是给这四个补 tag —— 补了就等于把**内部量度的约定**写进对外契约
+  //   （`Metric` 一律"越小越好"、`Gray8` 在调色板图下其实是**索引**）。
+  'internal/core/slide.go:SlideImage':
+    '一张已解码的题面图的**像素平面**（浮点灰度 / 整数灰度或调色板索引 / alpha），纯计算中间物',
+  'internal/core/slide.go:SlideBox': '拼图块在拼图图里的**包围盒**（四个整数），纯计算中间物',
+  'internal/core/slide.go:SlideCandidate':
+    '一个**候选落点与它的度量**（`Metric` 一律"越小越好"），纯计算中间物',
+  'internal/core/slide.go:SlideSolution':
+    '一次解算的**报告**（两个口径各自的最优 + 自检量 + 共识值），喂给 CLI 打印与日志',
   'internal/io/client.go:RetryPolicy':
     'HTTP 重试策略（次数 / 退避基数 / 上限），**构造参数**不是数据模型；Rust 侧 derive `Debug, Clone, Copy`，**不** Serialize',
   'internal/upstream/app_login.go:AppSendSmsOutcome':

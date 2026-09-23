@@ -33,7 +33,7 @@
 | 12 | `notice` 公告任务 | 云朵 | 记账 | `未开启` 需人工 | 无 |
 | 13 | `backup-gift` 备份礼 | 云朵/权益 | 记账（GET 却是写） | 否 | 无 |
 | 14 | `hc1t` 云朵大作战 | 游戏次数/排名 | 记账 + **建立邀请关系** | 否 | 无 |
-| 15 | `red-flower` 小红花 | 小红花/奖品 | 记账，口令一次性 | 否 | 无 |
+| 15 | `red-flower` 小红花 | 小红花/奖品 | 记账 + **投口令（写，按账号）** | 否 | 无 |
 | 16 | `play-ai-special` 拍拍 | 抽奖 | 记账 | 两个子任务设计内跳过 | 无 |
 | 17 | `play-ai-lottery` 玩 AI 抽奖 | 抽奖 | 记账 | 否 | 无 |
 | 18 | `cloud-phone-redpack` 红包派对 | **现金（分）** | **真给云机装 APK** | 三类任务需人工 | 无 |
@@ -61,9 +61,9 @@
 **当时 Rust 侧可跑的东西**（2026-09-19 订正；这几条线如今都在 Go 侧，同值结论见上面那条 09-22 核对）：
 登录（PC 短信/扫码、App 短信）、账号会话与归属、
 设备指纹 smid、**App 端签到（云朵中心）全链路**、旧数据迁移、`internal/app/cloud.go` / `signin.go` 的上游封装。
-**schema 现为 v7**（v4 归属 → v5 smid 两列 → v6 `account_state.phone` → v7 `Authorization` 整串存）。
-> ⚠ 这一句写于 v8 之前：**Go 侧现在到 v8**（`internal/io/schema.go` 的 `SchemaVersion = 8`，
-> v8 那一条引入 `run_events` 表 ⇒ 运行事件流落库）。v4→v7 那条演化线仍然有效。
+**schema 现在到 v9**。版本链只有一处真相（`internal/io/schema.go` 的 `SchemaVersion` 与那份迁移清单），
+这里只点名最近两条：v8 = `run_events` 表（运行事件流落库），v9 = `schedules` 的
+`miss_policy` + `last_fire_at`（调度循环要能择时、要能只写记账）。
 **19 项业务能力：0 项可执行** —— 缺的不是接口，是它们下面那一层（§3）。
 
 > 上面这段的上一版写的是"schema v4 / v5、`mcloud-app::cloud` / `signin` 并行工作流**未提交**"（那是 Rust 时期的写法与状态，照原文留着）。
@@ -109,7 +109,7 @@
 - 写操作大量使用 **GET**：`exchangeV2`（下单）、`market/signin/page/receiveV2`（领云朵）、`market/backupgift/receive`、`hecheng1T/beinvite|finish|exchange`。
 - 唯一的传输层保护是**默认零重试**（`packages/shared/src/http/base.ts:64` `retry: options.retry ?? 0`；`createTaskHttp` 硬编码 `:192 retry: 0`）。
 - 并发闸只有一层且是**进程内**的：`runner` 用 `${task.name}:${accountLabel}` 作 key，**已存在 promise 就直接返回同一个结果**（`packages/api/src/runner.ts:29-33,106-115`）。key 里**不含参数** ⇒ 同账号带不同 `prizeId`/`codes` 的第二次请求，拿回的是第一次的结果。这是全套代码里最危险的语义（方案 §3.5 的"同(能力+账号)互斥"必须补上参数维度或显式拒绝）。
-- 天然幂等只有两处靠服务端：`redFlower/draw` 的 `200112`（口令已兑换）、任务状态预检（`userStatus===1` 跳过）。
+- 天然幂等只有两处靠服务端：`redFlower/draw` 的 `200112`（**同一账号**第二次请求同一条**正确**口令）、任务状态预检（`userStatus===1` 跳过）。
 
 ⇒ 新项目的落点：`runId`（uuid v4）作为幂等单元 + 写操作在能力声明里标 `CapabilityKind::Action` 并强制"状态预检 → 执行 → 复查"三段（`mcloud-exec`，P5）。**HTTP 层零自动重试**这条对写操作必须保持（读重试只允许用于幂等 GET）。
 
@@ -303,7 +303,7 @@
 | 1 | `POST liveRoomFeedback/user/info` | `code!==0` ⇒ **整账号放弃**（返回 `{0,[]}`） |
 | 2 | `POST visitlog/journaling` × 5（`National_LiveRoomFeedback_{pv,client,client_isApp,login,flowerBtn}`，`sourceid=1007`，`marketName=National_LiveRoomFeedback`） | 串行、无并发 |
 | 3 | `POST liveRoomFeedback/firstParticipate/give` | `0` 成功；`200110` = 无首次资格（静默） |
-| 4 | `POST liveRoomFeedback/redFlower/draw?code=<encode>` × N | `0`+result 成功；`200112` **已兑换（不当无效、不从共享缓存剔除）**；其他数字 ⇒ **无效口令**；响应无法解析 ⇒ 只 warn、**不判无效以免误伤** |
+| 4 | `POST liveRoomFeedback/redFlower/draw?code=<encode>` × N | `0`+result 成功；`200112` **同一账号已兑过这条口令（不当无效、不从共享缓存剔除）**；其他数字 ⇒ **无效口令**；响应无法解析 ⇒ 只 warn、**不判无效以免误伤** |
 | 5 | `GET liveRoomFeedback/redFlower/queryRevivalFlowers` | 只读余额 |
 | 6 | 再 `POST user/info` | 终值核对 |
 
@@ -379,9 +379,9 @@
 | 层 | 旧项目实际做法 | 新项目落点 / 缺口 |
 | --- | --- | --- |
 | 执行与并发 | `runner.ts`：`running` Map 的 **join 语义**（第二个请求复用第一个的 promise）、`force` 旁路、历史截断 200 条、`asyncRun` 仅内存上限 100（D4） | `mcloud-exec`：目前**只有** `Concurrency::effective_parallelism` 这一个纯函数。缺 runId、锁（要含参数维度）、`runs`/`run_events` 落库、SSE 事件流 |
-| 调度 | `scheduler.ts`：croner，`protect:true`（**跳过不排队**）、5 或 6 段 cron、时区默认 `Asia/Shanghai`、**无错过补偿**、部分失败也记 `error` | Go 侧拆两处：`core.ParseCron` / `core.NextFire`（`internal/core/cron.go`）+ `schedules` 表读写（`SqliteStore` 的 `UpsertSchedule` / `ListSchedules`，`internal/io/configstore.go`，v4 已有归属字段，schema 现为 v8）；**按时触发的循环还没有**（`NextFire` 唯一的非测试消费者是 `routes.go`，只用来显示下次执行时间）。"错过不补"要显式保留还是改，属待拍板项 |
+| 调度 | `scheduler.ts`：croner，`protect:true`（**跳过不排队**）、5 或 6 段 cron、时区默认 `Asia/Shanghai`、**无错过补偿**、部分失败也记 `error` | Go 侧拆两处：`core.ParseCron` / `core.NextFire`（`internal/core/cron.go`）+ `schedules` 表读写（`SqliteStore` 的 `UpsertSchedule` / `ListSchedules`，`internal/io/configstore.go`，v4 已有归属字段，schema 现为 v9）。**2026-09-23 循环已落地**：`internal/server/scheduler.go`，随 `mcloud-server` 起停。对齐旧 `protect` 的是 `exec.RunRegistry`（同一账号同一参数在跑 ⇒ 记 `skipped` 不排队）。与旧实现**刻意不同**的一处：错过**分档**（`capabilities.CAPABILITY.MissPolicyOnMiss` + 每行 `miss_policy` 覆盖，准点型 skip / 日型 catch-up）—— 用户 2026-09-22 拍板"必须准时的不需要补，其他的需要"，旧那句"无错过补偿"不再是目标 |
 | 组合流水线 | `pipelines.ts`：步骤 ≤30、`stopOnError` 默认 true、**步骤间不传数据**（只共享 `state.json` 与进程全局）、stopped 后仍输出 `skipped` 占位、`ok = ≥1 步执行且全 ok`、账号默认串行防风控 | `mcloud-capabilities` + `mcloud-exec`。旧模型"步骤间不传数据"是 `app` 那种大杂烩的根因；新方案要允许显式的 run 内产物传递（`after` 删文件依赖它） |
-| 账号状态存储 | `storage.ts`：`DATA_DIR` **相对 cwd**、读失败静默回落 `{}`、写 tmp+rename、**无锁**；`account.ts`：`accountKey = phone‖nickname‖"account"`、label 掩码 `前2****后2`、`findAccount` 序号**从 1 起**、state 合并方向 `fresh 覆盖 saved`、`writeConfigFile` 带 `.bak` | `internal/io/store.go` 的 `SqliteStore`（SQLite）已完成（schema 现为 v8）；`AccountState` 是**整行覆盖**写，`SmidState` 是**窄写**（两者契约相反，改动时别串台） |
+| 账号状态存储 | `storage.ts`：`DATA_DIR` **相对 cwd**、读失败静默回落 `{}`、写 tmp+rename、**无锁**；`account.ts`：`accountKey = phone‖nickname‖"account"`、label 掩码 `前2****后2`、`findAccount` 序号**从 1 起**、state 合并方向 `fresh 覆盖 saved`、`writeConfigFile` 带 `.bak` | `internal/io/store.go` 的 `SqliteStore`（SQLite）已完成（schema 现为 v9）；`AccountState` 是**整行覆盖**写，`SmidState` 是**窄写**（两者契约相反，改动时别串台） |
 | 推送 10 渠道 | `shared/src/push/index.ts:104-281`：`pushplus`(明文 http) / `serverChan`(token 进 URL) / `workWeixin`(两步取 token，**token 失败仍继续拼 URL**) / `workWeixinBot` / `tgBot`(缺 token/chat_id 主动跳过；`proxy` 配置**从不生效**) / `bark` / `twoIm`(key/sid 平铺进 query) / `dingTalk`(可选 secret 加签；content 加**前导空格**绕关键词；动态 `import("crypto-js")` 失败会冒泡) / `email`(nodemailer，tjs 运行时直接跳过；缺 pass/from/host **静默 return**) / `customPost`(url/body 占位符**字符串替换后 JSON.parse**，可配数组)。所有渠道失败**一律吞成日志**；**只有 CLI 主流程结束才推送，API / 定时路径从不推送** | **Go 侧没有**（Rust 基准同样没有；只有 `core.HmacSHA256Base64` 是给钉钉加签留的原语）（方案 §1.6 定"渠道保留、发送层重做"）。必须补的三件事：**定时路径也要能推送**、失败可见（进 `run_events`）、**正文脱敏** —— 现正文是全量日志，存在手机号/邮箱明文外泄路径（`auth-service.ts:118`、`app/runners.ts:270`） |
 | CLI | `packages/cli/src/index.ts`：**只有一个"跑全流程"入口**，任务顺序固定，无参数解析、无交互（D9）；账号配置三级合并在这里才做 | `mcloud-cli`：已有 `user / login / smid / capabilities / version / fixture extract`。缺：按能力跑单任务、组合、调度管理、推送测试 |
 | WebUI | 7 页；`WEBUI_PAGES` 白名单只有 6 项（`tasks/pipelines/schedules/accounts/history/config`）**漏了 exchange** ⇒ 停在兑换页时 `normalize` 把 `lastPage` 回落成 `tasks`，"记住上次页面"对该页失效（`api/src/webui-config.ts:16-24,55-62`）；`data/webui.json` 存偏好而非 localStorage；路由在 `index.ts` 平铺注册、**无鉴权、无限流、无全局错误中间件**（D7） | `mcloud-server`：目前只有 `/api/health`、`/api/setup`、`/api/session`（+ 404 兜底）。缺：capabilities / runs / schedules / pipelines / exchange / debug 全部业务路由与 OpenAPI |
@@ -394,8 +394,10 @@
 >   `runs` 与 `run_events` 都已落库（`SqliteStore.InsertRun` / `AppendRunEvents`，
 >   schema **v8** 引入后者），`GET /api/runs/{id}/events` 是真接口。
 >   ⚠ 仍缺的是**编排接入**与下面那行的按时触发循环。
-> - **调度**：那半句"按时触发的循环还没有"**本次复测仍然成立** ——
->   `core.NextFire` 的非测试消费者只有 `internal/server/routes.go`，用途是显示下次执行时间。
+> - **调度**：那半句"按时触发的循环还没有"**已被 2026-09-23 那一轮推翻** ——
+>   循环在 `internal/server/scheduler.go`，随 `mcloud-server` 起停，`core.NextFire`
+>   现在有第二个非测试消费者。⚠ 这条"仍然成立"是**当天复测**写的，隔天就过期：
+>   复测结论只保证写下那一刻，别把日期-less 的"现状"当承诺。
 > - **组合流水线 / 推送 / WebUI** 三行**未逐条复测**，别当现状读。
 
 ---

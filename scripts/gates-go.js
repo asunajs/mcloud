@@ -2,7 +2,7 @@
 // Go 侧门禁一键跑 —— 唯一现役实现。2026-09-22 由 bash 版（250 行）逐条迁移而来：
 // 横幅文案、退出码、日志落盘约定（含成功时清空 last.log）保持一致。
 //
-// 九条：
+// 十条：
 //
 //   build      "能编译"的最直接判据
 //   vet        静态检查 —— ⚠ **覆盖很窄**，见下
@@ -13,6 +13,8 @@
 //   idents     scripts/check-identifiers.cjs
 //   golden     scripts/check-golden-vectors.cjs
 //   jsontags   scripts/check-go-jsontags.cjs
+//   md-tables  scripts/check-md-tables.cjs（**仓库级**的文档表格检查，不是 Go 专属 ——
+//              与 filenames / idents 同类；见 docs/migration-pitfalls.md #124）
 //
 // 用法：
 //   node scripts/gates-go.js              # 全跑
@@ -52,6 +54,7 @@ const GATE_NAMES = [
   'idents',
   'golden',
   'jsontags',
+  'md-tables',
 ]
 const ALL = [...GATE_NAMES]
 
@@ -170,6 +173,8 @@ const gateRun = (fd, name) => {
       return runToLog(fd, 'node', ['scripts/check-identifiers.cjs'])
     case 'golden':
       return runToLog(fd, 'node', ['scripts/check-golden-vectors.cjs'])
+    case 'md-tables':
+      return runToLog(fd, 'node', ['scripts/check-md-tables.cjs'])
     case 'jsontags':
       return runToLog(fd, 'node', ['scripts/check-go-jsontags.cjs'])
     default:
@@ -263,7 +268,8 @@ if (failed.length > 0) {
 //   抄错一次就再也说不清 —— 与"绿只对**跑的那个版本**成立"是同一条。
 //
 // ⚠ 条数从 ALL 派生（不写字面量）；中文数字查表是为了保住文档里
-//   已经在用的"九项门禁全绿"这个说法，超出表长就退回阿拉伯数字。
+//   已经在用的"十项门禁全绿"这个说法，超出表长就退回阿拉伯数字。
+//   （上面 265–268 行引的是**当时**的横幅文案，属于历史，不随条数改。）
 const CN_NUM = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十', '十一', '十二']
 const cnAll = ALL.length < CN_NUM.length ? CN_NUM[ALL.length] : String(ALL.length)
 

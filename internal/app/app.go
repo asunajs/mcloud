@@ -5,7 +5,7 @@ import mcloudio "github.com/catlair/mcloud/internal/io"
 // Deps 是组装层持有的注入依赖。
 //
 // ⚠ 它现在只有一个字段，但**不要因为"暂时用不上"就删掉这个结构体或那个字段**。
-// scripts/check-go-deps.sh 断言「组装根必须依赖 internal/io」，方向与
+// scripts/check-go-deps.js 断言「组装根必须依赖 internal/io」，方向与
 // 「纯层不许依赖 io」同样重要 —— 它挡的是"没人接上 IO 实现"这个**静默死配置**：
 // 编译能过、跑起来什么都没发生，而没有任何测试会变红。
 type Deps struct {

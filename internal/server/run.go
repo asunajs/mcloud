@@ -7,11 +7,13 @@ package server
 // cmd/mcloud-server/main.go 是唯一的 os.Exit 落点。
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"sync"
 
 	"github.com/catlair/mcloud/internal/core"
 	mcloudio "github.com/catlair/mcloud/internal/io"
@@ -75,7 +77,9 @@ func Run(deps *Deps, opts Options, stdout io.Writer) error {
 	}
 	defer func() { _ = listener.Close() }()
 
-	srv := New(store, deps.clock(), deps.random(), Config{SecureCookie: opts.SecureCookie})
+	srv := New(store, deps.clock(), deps.random(),
+		Config{SecureCookie: opts.SecureCookie},
+		deps.loginHub(store, opts), deps.refresher(store, opts), deps.runWorld(opts))
 
 	// 横幅打的是 listener **实际**绑上的地址，不是 `--host:--port`：
 	// `--port 0` 是合法的（让内核挑一个），打参数会印出一个谁也没在听的端口。
@@ -86,5 +90,27 @@ func Run(deps *Deps, opts Options, stdout io.Writer) error {
 		fmt.Fprintln(stdout, "  （前端目录不存在，只提供 API；开发时用 cd web && npm run dev）")
 	}
 
-	return deps.serve(listener, srv.App(opts.WebDir))
+	// 调度循环随进程起停（为什么搬进服务进程、以及"一份库只跑一个进程"那条
+	// 约束，见 [startScheduler] 的文件头）。
+	ctx, cancel := context.WithCancel(context.Background())
+	var loop sync.WaitGroup
+	loop.Add(1)
+	go func() {
+		defer loop.Done()
+		// 循环那一份问题只能打在这里：一轮读库失败时连一行 `schedules` 都没读到，
+		// 错误无处可写，界面上会表现成"什么都没发生"。
+		srv.startScheduler(ctx, func(problem string) {
+			fmt.Fprintln(stdout, "  调度："+problem)
+		})
+	}()
+
+	err = deps.serve(listener, srv.App(opts.WebDir))
+	cancel()
+	// 等循环退出**再**返回：`defer store.Close()` 就在返回那一刻执行，不等的话
+	// 最后一轮 tick 可能正要把水位写进一个已经关掉的库。
+	// ⚠ 这里等的只是"判点与推水位"那一步（几十毫秒）。已经起跑的任务**不**等 ——
+	// 它在 [launchRun] 那个脱离调用方上下文的 goroutine 里，与"客户端关了页面、
+	// 口令照样投完"是同一条设计。
+	loop.Wait()
+	return err
 }

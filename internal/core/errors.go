@@ -241,6 +241,29 @@ func NewInternal(msg string) *Error { return &Error{variant: variantInternal, ms
 // NewFixtureMiss 构造"fixture 未命中"。
 func NewFixtureMiss(msg string) *Error { return &Error{variant: variantFixtureMiss, msg: msg} }
 
+// WithPrefix 返回一个**同类别**、正文加了前缀的副本。
+//
+// # 它解决的是什么
+//
+// 一条链上同一个接口会被调用多次（小红花六步链里 `user/info` 出现两次、
+// `journaling` 出现五次），而它们的错误消息**逐字相同**
+// （"user/info 响应没有 result"）。不带步名的错误会让人分不清是哪一次出的问题。
+//
+// ⚠ 刻意**不**做成 `fmt.Errorf("…: %w", err)`：那会把返回类型从 `*core.Error`
+// 降成 `error`，于是 [Error.Kind] / [Error.Status] 要用 [KindOf] 才能拿回来
+// —— 而 `KindOf` 只能给 `ErrorKind`，拿不回 `Status`。类别是重试策略的依据，
+// 在"包一层加个前缀"这种场景里把它降级是不划算的。
+//
+// ⚠ 前缀会同时出现在 [Error.Message] 与 [Error.Error] 里，但**不会**影响
+// [Error.PublicMessage]（那是按类别取的白名单文案）—— 所以前缀里可以放
+// 内部信息（步名），不会外泄。
+func (e *Error) WithPrefix(prefix string) *Error {
+	if e == nil {
+		return nil
+	}
+	return &Error{variant: e.variant, msg: prefix + e.msg, status: e.status}
+}
+
 // Error 实现 error 接口 —— **带**类别前缀，对应 Rust 的 Display。
 //
 // 前缀在**日志**里很有用（一眼看出类别），但直接端给使用者就很怪 ——

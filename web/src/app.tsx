@@ -24,7 +24,13 @@ import {
 import { AuthPage } from './pages/auth-page'
 import { AccountsPage } from './pages/accounts-page'
 import { DashboardPage } from './pages/dashboard-page'
+import { ExchangePage } from './pages/exchange-page'
+import { HistoryPage } from './pages/history-page'
+import { LiveRedFlowerPage } from './pages/live-redflower-page'
 import { PlaceholderPage } from './pages/placeholder-page'
+import { SchedulesPage } from './pages/schedules-page'
+import { TasksPage } from './pages/tasks-page'
+import { statusLabel } from './ui/history'
 import { IconClose, IconMenu, IconMoon, IconSun } from './ui/icons'
 import { DOCK_IDS, NAV_ITEMS, navItem, parseHash, type PageId } from './ui/nav'
 import { fmtTime } from './ui/time'
@@ -36,12 +42,10 @@ type View = 'loading' | 'setup' | 'login' | 'app'
  *  把它并进"失败"，首屏会闪一下红点，而红点是"后端挂了"的意思。 */
 type BackendState = 'pending' | 'up' | 'down'
 
-/** `lastRun.status` 的中文。查表而不是 `if` 链，见设计指南 §9.1①。 */
-const RUN_STATUS_LABEL: Record<string, string> = {
-  running: '进行中',
-  done: '已结束',
-  failed: '失败',
-}
+/** `lastRun.status` 的中文口径**只有一份** —— 在 `ui/history.ts` 里，
+ *  与「历史与日志」页共用（那边列表上的徽标就是同一组值）。
+ *  这里曾经自己抄了一张三行的表：加第四档时两处必然漂移，
+ *  而漂移的表现是侧栏显示 `running` 这种原文码、历史页显示中文。 */
 
 export default defineVaporComponent(() => {
   const view = ref<View>('loading')
@@ -94,7 +98,7 @@ export default defineVaporComponent(() => {
     const b = backend.value
     if (backendState.value !== 'up' || !b) return ''
     if (!b.lastRun) return '尚无执行记录'
-    const label = RUN_STATUS_LABEL[b.lastRun.status] ?? b.lastRun.status
+    const label = statusLabel(b.lastRun.status)
     return `最近执行 ${fmtTime(b.lastRun.startedAt)} · ${label}`
   })
 
@@ -313,10 +317,20 @@ export default defineVaporComponent(() => {
             <DashboardPage user={user.value} onGo={go} />
           ) : page.value === 'accounts' ? (
             <AccountsPage />
+          ) : page.value === 'redflower' ? (
+            <LiveRedFlowerPage />
+          ) : page.value === 'exchange' ? (
+            <ExchangePage />
+          ) : page.value === 'schedules' ? (
+            <SchedulesPage />
+          ) : page.value === 'tasks' ? (
+            <TasksPage />
+          ) : page.value === 'history' ? (
+            <HistoryPage onGo={go} />
           ) : (
             /**
              * `key` 不是可有可无的装饰：空态页落在 `createIf` 的同一个 else 分支里，
-             * 页面之间切换（定时 → 调试台 → 设置）**不会重跑 setup**，
+             * 页面之间切换（调试台 → 设置 → 任务中心）**不会重跑 setup**，
              * 而 Vapor 没有重渲染，于是 `navItem(props.id)` 那份快照永远停在第一次进来的页面 ——
              * 实测表现为导航栏标题跟着变、正文的标题/图标/说明纹丝不动。
              * 给了 key，key 变了就重建实例，快照才是当前页。

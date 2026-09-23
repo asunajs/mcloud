@@ -485,6 +485,19 @@ func AuthFromUserInfoWithPrefix(userInfo any, prefix string) (string, *core.Erro
 	if err != nil {
 		return "", err
 	}
+	return authFromParts(prefix, account, authToken)
+}
+
+// authFromParts 是"三段拼成整串"这件事**唯一**的一份写法。
+//
+// 刷新那条链路（[CredentialFromRefresh]）也要拼同一个串，但它的三段来自
+// 已解码的当前凭据而非登录结果。各写一份 base64 拼接的话，
+// 一边改了分隔符/前缀顺序、另一边没改，表现是"刷新成功后账号立刻用不了" ——
+// 那是最贵的一种不一致，所以宁可不省这点参数差异。
+func authFromParts(prefix, account, authToken string) (string, *core.Error) {
+	if account == "" || authToken == "" {
+		return "", core.NewParse("拼 auth 缺少账号或 token")
+	}
 	raw := base64.StdEncoding.EncodeToString([]byte(prefix + ":" + account + ":" + authToken))
 	return "Basic " + raw, nil
 }

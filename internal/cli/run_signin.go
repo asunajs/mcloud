@@ -244,16 +244,26 @@ func selectSigninTargets(out *output, accounts []core.Account, a *SigninArgs) ([
 	if wanted, requested := a.accountRequested(); requested {
 		// 下标从 1 开始：`--account 0` 一定是搞错了，早点说清楚。
 		//
-		// ⚠ 负数是 Go 侧才有的输入（Rust 的 `usize` 在 clap 那层就拒了），
-		// 而 `accounts[-1]` 会 panic。所以这里判 `<= 0`，
-		// 与"从 1 开始"合并成同一句话 —— 这也是**运行**错误（退 1），不是用法错误。
+		// ⚠⚠ 两处都带 [ErrUsage]（**退 2**），不是运行错误。判据就是退出码契约那两句
+		// （[ErrUsage] 的注释）：脚本靠 1 / 2 的差判断"是我的调用写错了"还是
+		// "这次真的没跑成"。"库里没有第 N 个账号"**重试不会变好** ——
+		// 只能改调用（换个下标，或先登录一个）⇒ 它是"调用写错了"那一档。
+		//
+		// ⚠ 这里一度判成运行错误（退 1），与 `live-room --account <越界>`（退 2）
+		// **不一致** —— 而两者是**同一件事**（按序号点了一个不存在的账号），
+		// 同一个 CLI 里不该分两档。⚠ 当时那条注释的理由是"Rust 的 `usize` 在 clap
+		// 那层就拒了"—— 那是**照抄原项目的副产品**，不是判据（见坑表 #122）。
+		//
+		// ⚠ 负数在这里一并挡掉：`accounts[-1]` 会 panic，而它与 `--account 0`
+		// 是同一个错（下标从 1 起），合并成同一句话。
 		if wanted <= 0 {
-			return nil, fmt.Errorf("`--account` 的下标从 1 开始（`--account 1` 是第一个账号）")
+			return nil, fmt.Errorf(
+				"`--account` 的下标从 1 开始（`--account 1` 是第一个账号）: %w", ErrUsage)
 		}
 		if wanted > len(accounts) {
 			return nil, fmt.Errorf(
-				"下标 %d 超出范围：库里一共 %d 个账号（用 `mcloud signin --list` 看清单）",
-				wanted, len(accounts))
+				"下标 %d 超出范围：库里一共 %d 个账号（用 `mcloud signin --list` 看清单）: %w",
+				wanted, len(accounts), ErrUsage)
 		}
 		account := accounts[wanted-1]
 		if !account.Enabled {

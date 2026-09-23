@@ -67,11 +67,13 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request, auth *AuthUse
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":    version.Name,
 		"version": version.Version,
-		// ⚠ 当前**恒为 false**：Go 侧还没有把 `schedules` 表变成"到点触发"的
-		// 循环（`docs/status.md` 运行时层那条写着"调度接入中"）。
-		// 于是保存了定时任务也**不会自己跑** —— 这一项宁可显式报 false，
-		// 也不能省略：省略的表现是界面上一片绿，而绿的意思是"在跑"。
-		"schedulerRunning": false,
+		// 这一项从**运行时**取，不是常量：循环起没起只有进程自己知道。
+		//
+		// ⚠ 界面上那一行（"定时调度未启用，任务不会自动触发"）由它驱动，
+		// 所以报假的代价是让用户对着一条**永远不会跑**的任务等。
+		// 目前只有 `mcloud-server` 会起这个循环（见 `run.go`）：
+		// 单独构造的 `Server`（测试夹具）没起，于是这一项是 false —— 那也是真话。
+		"schedulerRunning": s.SchedulerRunning(),
 		"lastRun":          lastRun,
 	})
 }
@@ -582,6 +584,14 @@ func (s *Server) putSchedule(w http.ResponseWriter, r *http.Request, auth *AuthU
 		schedule.LastRunAt = existing.LastRunAt
 		schedule.LastStatus = existing.LastStatus
 		schedule.LastError = existing.LastError
+		// `miss_policy` 跟着留：请求体里**没有**这一栏（`PUT` 是全量覆盖，
+		// 而它带的只是"用户能填的那几样"），不接过来就等于"改一次 cron 把
+		// 用户选过的补跑策略洗成跟随默认"。水位那一列由存储层自己在
+		// `ON CONFLICT` 里排除，不在这里管（见 [core.Schedule.LastFireAt]）。
+		//
+		// ⚠ 这一路目前**只能留、不能设**：请求体没有 `miss_policy` 栏，
+		// 任务页建起来那天要一起补上写入与校验（未知文本得 400，不能静默变 NULL）。
+		schedule.MissPolicy = existing.MissPolicy
 	}
 	if schedule.CreatedAt == nil {
 		schedule.CreatedAt = &now
@@ -662,6 +672,16 @@ func schedulePayload(schedule core.Schedule, now time.Time) map[string]any {
 		"body":       schedule.Body,
 		"enabled":    schedule.Enabled,
 		"nextFireAt": nextFire,
+		// `lastFireAt` 是**调度循环写的水位**（"已处理过哪一个触发点"），
+		// 与上面那个"下一次什么时候跑"是一对：调度上线后用户第一个问题就是
+		// "为什么没跑 / 跑到了哪一步"，没有这一列就只能靠 `lastRunAt` 猜，
+		// 而一次按策略弃掉的错过**不留**任何 run 记录，那一列会一动不动。
+		//
+		// `missPolicy` 只报**这一行自己选过的**（null = 没有人选过，跟随能力声明的
+		// 默认）。默认值住在能力表里，不在这里替它说话 —— 同一句话说两处，
+		// 改能力表那天这里就会变成谎话。
+		"lastFireAt": rfc3339Of(schedule.LastFireAt),
+		"missPolicy": schedule.MissPolicy,
 		"createdAt":  rfc3339Of(schedule.CreatedAt),
 		"lastRunAt":  rfc3339Of(schedule.LastRunAt),
 		"lastStatus": schedule.LastStatus,

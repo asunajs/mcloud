@@ -5,7 +5,7 @@
 // # 分层铁律
 //
 // **不得** import github.com/catlair/mcloud/internal/server —— 由
-// scripts/check-go-deps.sh 的 FORBIDDEN_EDGES 断言。两个产物只共用 internal/app。
+// scripts/check-go-deps.js 的 FORBIDDEN_EDGES 断言。两个产物只共用 internal/app。
 //
 // # 约定：零参数 + 下标
 //

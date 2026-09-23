@@ -109,11 +109,17 @@ func runCLIWithDeps(
 	return out.String(), errOut.String(), code
 }
 
-// assertAccepted 跑一条**参数合法**的命令，判据是"解析器放行了它"。
+// assertAccepted 跑一条**参数合法**的命令，判据是"它没被判成用法错（退 2）"。
+//
+// ⚠⚠ **只在"这条命令真的会跑起来、且它跑起来之后不可能因为别的理由退 2"时才用它**
+// （2026-09-22 补）。它用的代理是"退出码不是 2"，而退出码**只有三档**、
+// 表达不了"是**哪一层**拦下的"：`--account <越界>` 与互斥违规**同码不同层**
+// （前者是 RunE 里手工判的用法错误，后者是 cobra 在 RunE **之前**拦的）。
+// ⇒ 只要用例里出现"会被 RunE 判成用法错"的输入，这个代理就不再可靠 ——
+// 那时要钉的是**层**，用 [assertParsesCleanly]。
 //
 // ⚠ 它**故意**不断言退出码等于某个具体值。这条命令现在真的会跑后端，
-// 跑起来成不成功取决于库里的状态（空库退 0、账号越界退 1），
-// 而"参数合法"这件事**只能**用"不是用法错（退 2）"来钉。
+// 跑起来成不成功取决于库里的状态（空库退 0），而"参数合法"不等于"这次跑成了"。
 //
 // 它取代了早先的 `assertExitWith(..., ExitRun)` —— 那个版本还要求 stderr 里有
 // "尚未迁移"，而全部叶子落地之后这句话不会再出现了。
@@ -123,6 +129,39 @@ func assertAccepted(t *testing.T, head, argv []string) {
 	_, stderr, code := runCLI(t, "", full...)
 	if code == ExitUsage {
 		t.Errorf("%v 参数合法，却被判成用法错误：stderr=%q", full, stderr)
+	}
+}
+
+// assertParsesCleanly 只验**解析期**：pflag 解析 + cobra 的 flag-group 校验，**不进 RunE**。
+//
+// ⚠ 为什么需要它（2026-09-22）：互斥表那张用例原来的判据是"退出码不是 2"，而它
+// 把两个层**混成了一个码** —— `--account 3`（空库、越界）从这一版起**也是**退 2
+// （用法错误：重试不会变好，只能改调用），于是"不是 2"不再等于"解析器放行了它"。
+// ⚠⚠ 这不是把断言放松，而是把它**对准它一直声称的那一层**：用例的判据原文就是
+// "解析器放行了它"，而退出码表达不了"哪一层拦下的" ⇒ **要钉层就直接调那一层**。
+//
+// ⚠ 它**不**覆盖"命令能跑起来"这件事 —— 需要那个的用例继续用 [assertAccepted]。
+func assertParsesCleanly(t *testing.T, head, argv []string) {
+	t.Helper()
+
+	root := buildRoot(t)
+	cmd := root
+	if len(head) > 0 {
+		sub := findCommand(root, head[0])
+		if sub == nil {
+			t.Fatalf("命令树里没有 %q 这个子命令 —— 用例会静默变成空跑", head[0])
+		}
+		cmd = sub
+	}
+
+	// ⚠ 两处都要：`ParseFlags` 只跑 pflag，互斥/成组校验是 `ValidateFlagGroups`
+	// 做的，而 cobra 是在 `execute()` 里、ParseFlags **之后**才调它。
+	if err := cmd.ParseFlags(argv); err != nil {
+		t.Errorf("%v 在解析期就该放行，实得 %v", argv, err)
+		return
+	}
+	if err := cmd.ValidateFlagGroups(); err != nil {
+		t.Errorf("%v 不该被判成互斥违规，实得 %v", argv, err)
 	}
 }
 

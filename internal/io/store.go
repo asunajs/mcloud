@@ -38,13 +38,22 @@ type SqliteStore struct {
 //
 // ⚠ 迁移走 [context.Background]：这是**启动期**的一次性动作，与请求无关，
 // 而 Rust 侧的 `SqliteStore::open` 同样不接受取消信号。
+// # ⚠ busy_timeout 管的是**跨进程**，与本包的并发模型无关
+//
+// `MaxOpenConns(1)` 只串行化**本进程**的写；而现实里同一份 `data/*.db`
+// 常同时被 CLI 与 server（还有并行实验）打开。SQLite 的忙等默认是 **0**
+// —— 撞锁当场抛 `SQLITE_BUSY`（"database is locked"），用户看到的是一句
+// 与业务无关的裸错。给 5 秒：WAL 下单个写事务是毫秒级的，等待几乎从不
+// 真的用满；真用满了就是有人持了长事务，那时报错反而是对的。
+// 判据由 TestSameFileFromTwoHandlesSurvivesLockContention 把守
+// （把 DSN 里这个 pragma 删掉，它会红）。
 func Open(path string) (*SqliteStore, error) {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, core.NewInternal(fmt.Sprintf("创建数据目录失败 %s: %v", dir, err))
 		}
 	}
-	return openDSN("file:" + path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	return openDSN("file:" + path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 }
 
 // OpenInMemory 返回一个内存库，用于单测。
@@ -96,6 +105,14 @@ func mapSQLite(err error) *core.Error {
 
 // rowScanner 让 `*sql.Row` 与 `*sql.Rows` 共用同一个扫描函数。
 type rowScanner interface{ Scan(dest ...any) error }
+
+// sqlQuerier 让 `*sql.DB` 与 `*sql.Tx` 共用同一份归属校验 SQL。
+//
+// 只声明**用得到的那一个方法**：接口宽一分，能塞进来的实现就多一分
+// （而这里没有第二个实现要适配，扩到 Exec 只会让人以为"这个助手也能写"）。
+type sqlQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
 
 // ownerArg 把 [core.Scope] 的归属转成 SQL 参数（nil = 不过滤）。
 func ownerArg(scope core.Scope) any {
@@ -215,12 +232,18 @@ func ptrTime(ns sql.NullString) *time.Time {
 
 // validateOwned 校验账号属于该用户；否则返回 [core.NewNotFound]。
 //
+// # 为什么入参是"能查的东西"而不是 `*sql.DB`
+//
+// 事务里也要用它（见 [SqliteStore.DeleteAccount]）：把校验与写入放进同一个事务
+// 才有"要么整串删掉、什么都没删"的保证。收 `*sql.DB` 会逼出第二份校验 SQL，
+// 而两份隔离判据迟早漂移 —— 漂移的那一份是**越权**，不是"查询慢一点"。
+//
 // # 为什么写入路径用 NotFound 而不是 Forbidden
 //
 // 写入路径没法像读取路径那样返回 nil，但**对外结论必须与读取路径一致**：
 // 读取说"没有这个账号"，写入却说"你不能写这个账号"，两者的差异本身就告诉调用方
 // "这个 id 是存在的"，账号 id 空间于是变成可枚举的。
-func validateOwned(ctx context.Context, db *sql.DB, scope core.Scope, id core.AccountID) error {
+func validateOwned(ctx context.Context, db sqlQuerier, scope core.Scope, id core.AccountID) error {
 	var found int64
 	err := db.QueryRowContext(ctx,
 		"SELECT 1 FROM accounts WHERE id = ? AND (? IS NULL OR owner = ?)",
@@ -486,6 +509,87 @@ func (s *SqliteStore) SetAccountCloud(
 	return nil
 }
 
+// SetAccountEnabled 开关一个账号（窄写：只动 `enabled`）。
+func (s *SqliteStore) SetAccountEnabled(
+	ctx context.Context, scope core.Scope, id core.AccountID, enabled bool,
+) error {
+	if err := validateOwned(ctx, s.db, scope, id); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE accounts SET enabled = ? WHERE id = ?", boolToInt(enabled), id.String()); err != nil {
+		return mapSQLite(err)
+	}
+	return nil
+}
+
+// DeleteAccount 删账号，连带它名下的凭据、云朵快照与运行历史。
+//
+// 五张表的删除在**同一个事务**里：见 [core.StateStore.DeleteAccount] ——
+// 半途而废留下的"账号没了、凭据还在"是这里最坏的一种结果，
+// 而它**看不出来**（列表里已经没有那一行了）。
+//
+// # 为什么 `run_events` 要顺着 `runs` 删、而不是 JOIN accounts
+//
+// 事件表只有 `run_id`，既没有 `account_id` 也没有 `owner`（冗余列迟早与主表不一致，
+// 见 [validateRunInScope]）。所以先在事务里取出该账号的 run id 列表，再按列表删。
+// 不用 `DELETE ... WHERE run_id IN (SELECT ... FROM runs WHERE account_id = ?)`：
+// 那条 SQL 在删 runs 之后就读不到 run id 了，于是删除顺序被隐式绑死在一条语句上。
+func (s *SqliteStore) DeleteAccount(ctx context.Context, scope core.Scope, id core.AccountID) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return mapSQLite(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// 归属校验放在事务**内**：校验与删除之间账号被别人改掉时，
+	// 事务至少保证"要么整串删掉、什么都没删"，不会删到别人名下。
+	if err := validateOwned(ctx, tx, scope, id); err != nil {
+		return err
+	}
+
+	rows, err := tx.QueryContext(ctx, "SELECT id FROM runs WHERE account_id = ?", id.String())
+	if err != nil {
+		return mapSQLite(err)
+	}
+	var runIDs []string
+	for rows.Next() {
+		var runID string
+		if err := rows.Scan(&runID); err != nil {
+			_ = rows.Close()
+			return mapSQLite(err)
+		}
+		runIDs = append(runIDs, runID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return mapSQLite(err)
+	}
+	_ = rows.Close()
+
+	for _, runID := range runIDs {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM run_events WHERE run_id = ?", runID); err != nil {
+			return mapSQLite(err)
+		}
+	}
+
+	for _, stmt := range []string{
+		"DELETE FROM runs WHERE account_id = ?",
+		"DELETE FROM cloud_stats WHERE account_id = ?",
+		"DELETE FROM account_state WHERE account_id = ?",
+		"DELETE FROM accounts WHERE id = ?",
+	} {
+		if _, err := tx.ExecContext(ctx, stmt, id.String()); err != nil {
+			return mapSQLite(err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return mapSQLite(err)
+	}
+	return nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // account_state
 // ─────────────────────────────────────────────────────────────────────────────
@@ -561,6 +665,61 @@ func (s *SqliteStore) UpsertAccountState(ctx context.Context, scope core.Scope, 
 		optTime(state.UpdatedAt),
 	)
 	if err != nil {
+		return mapSQLite(err)
+	}
+	return nil
+}
+
+// ── 换凭据（刷新 auth）──
+
+// RotateAccountAuth 用刷新出来的新凭据换掉库里那一套（窄写，跨两张表一个事务）。
+//
+// 契约与"为什么这四列必须同事务"见 [core.StateStore.RotateAccountAuth]。
+// 实现这边只补两条落地理由：
+//
+//   - **不用** `INSERT ... ON CONFLICT`：那条路会在"登录态行根本不存在"时凭空建一行
+//     `device_id` / `user_domain_id` 全空的状态，而窄写的语义是"换"不是"建"。
+//     所以用 UPDATE + 影响行数判定（见下）。
+//   - 归属校验放进事务**内**：与 [SqliteStore.DeleteAccount] 同因 ——
+//     校验与写之间账号被别人改掉时，事务至少保证"两半一起改、或一起不改"。
+func (s *SqliteStore) RotateAccountAuth(
+	ctx context.Context, scope core.Scope, id core.AccountID,
+	authorization, jwtToken core.SecretValue, authExpire *int64, at time.Time,
+) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return mapSQLite(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := validateOwned(ctx, tx, scope, id); err != nil {
+		return err
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE account_state SET jwt_token = ?, authorization = ?, updated_at = ?
+		 WHERE account_id = ?
+		`, optSecret(&jwtToken), optSecret(&authorization), formatTime(at), id.String())
+	if err != nil {
+		return mapSQLite(err)
+	}
+	// 0 行**不算成功**：没有凭据行就没有"旧的一套"可换。静默通过的话，紧接着
+	// `accounts.auth_expire` 会被写成新值 —— 留下"过期时刻是新的、凭据行不存在"
+	// 的库，比整串不写更糟（列表页会显示一个凭据支撑不了的剩余天数）。
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return mapSQLite(err)
+	}
+	if affected == 0 {
+		return core.NewNotFound("账号 " + id.String())
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE accounts SET auth_expire = ? WHERE id = ?", optI64(authExpire), id.String(),
+	); err != nil {
+		return mapSQLite(err)
+	}
+	if err := tx.Commit(); err != nil {
 		return mapSQLite(err)
 	}
 	return nil

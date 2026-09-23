@@ -9,8 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/skip2/go-qrcode"
-
 	"github.com/catlair/mcloud/internal/app"
 	"github.com/catlair/mcloud/internal/capabilities"
 	"github.com/catlair/mcloud/internal/core"
@@ -57,7 +55,7 @@ func (o *terminalObserver) OnQR(payload string) {
 	}
 
 	o.out.human("用移动云盘 App 扫描下面的二维码：\n")
-	if art, err := renderQR(payload); err != nil {
+	if art, err := app.QRText(payload); err != nil {
 		o.out.human("（终端画不出二维码：%v）", err)
 	} else {
 		o.out.human("%s", art)
@@ -389,75 +387,24 @@ func loginInfoFields(userInfo any) []string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 二维码
+// 二维码：渲染本身住在 [app.QRText] / [app.QRSVG]
 // ─────────────────────────────────────────────────────────────────────────────
 
-// qrQuietModules 是二维码四周留白的模块数（规范要求的 4）。
-const qrQuietModules = 4
-
-// renderQR 把载荷渲染成终端可打印的字符画。
+// writeQRSVG 把载荷写成 SVG 文件。
 //
-// 用半高块字符（对位 Rust 侧 `Dense1x2`）：同样的信息量只占一半行数，
-// 否则一屏放不下一个足够大的二维码（太小手机扫不出来）。
-//
-// **但它只在等宽字体 + 正确行距下成立**，所以同时提供 [writeQRSVG]：
-// 字符画变形的概率远高于"用户以为的偶然"。
-func renderQR(payload string) (string, error) {
-	code, err := qrcode.New(payload, qrcode.Medium)
-	if err != nil {
-		return "", fmt.Errorf("二维码内容过长或无法编码: %w", err)
-	}
-	return code.ToSmallString(false), nil
-}
-
-// writeQRSVG 把二维码写成 SVG 图片。
-//
-// 用 SVG 而不是 PNG：与 Rust 侧**同一产物**（那边也是 SVG），
-// 浏览器与 macOS 预览都能直接打开，扫描体验与位图没差别，
-// 而且不需要把图像编码库拖进来（这里按矩阵直接写 rect/path）。
+// 字节由 [app.QRSVG] 出（与 WebUI 那条路共用同一份实现，理由见那个文件），
+// 这里只剩"落到用户给的路径上"这一步 —— 那是 CLI 独有的职责（服务端不写文件）。
 func writeQRSVG(payload, path string) error {
-	code, err := qrcode.New(payload, qrcode.Medium)
+	svg, err := app.QRSVG(payload)
 	if err != nil {
-		return fmt.Errorf("二维码内容过长或无法编码: %w", err)
+		return err
 	}
-	bitmap := code.Bitmap()
-	if len(bitmap) == 0 || len(bitmap[0]) == 0 {
-		return fmt.Errorf("二维码矩阵是空的")
-	}
-
-	modules := len(bitmap) + qrQuietModules*2
-	// 每模块 8px 左右：太小手机对焦困难，太大一屏放不下。
-	// Rust 侧是 `min_dimensions(360, 360)`，这里同口径取"总尺寸至少 360"。
-	scale := 8
-	if modules*scale < 360 {
-		scale = (360 + modules - 1) / modules
-	}
-	side := modules * scale
-
-	var svg strings.Builder
-	fmt.Fprintf(&svg,
-		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%d\" height=\"%d\" "+
-			"viewBox=\"0 0 %d %d\" shape-rendering=\"crispEdges\">\n",
-		side, side, side, side)
-	svg.WriteString("<rect width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>\n")
-	svg.WriteString("<path fill=\"#000000\" d=\"")
-	for y, row := range bitmap {
-		for x, dark := range row {
-			if !dark {
-				continue
-			}
-			fmt.Fprintf(&svg, "M%d %dh%dv%dh-%dz",
-				(x+qrQuietModules)*scale, (y+qrQuietModules)*scale, scale, scale, scale)
-		}
-	}
-	svg.WriteString("\"/>\n</svg>\n")
-
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("创建目录 %s 失败: %w", dir, err)
 		}
 	}
-	if err := os.WriteFile(path, []byte(svg.String()), 0o644); err != nil {
+	if err := os.WriteFile(path, svg, 0o644); err != nil {
 		return fmt.Errorf("写二维码 %s 失败: %w", path, err)
 	}
 	return nil

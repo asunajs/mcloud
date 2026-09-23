@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/catlair/mcloud/internal/app"
@@ -63,14 +64,60 @@ type Server struct {
 	rng    core.Random
 	config Config
 	bus    *mcloudexec.EventBus
+	// hub 是登录会话表（扫码 / App 验证码）。
+	//
+	// 它与 [Server.bus] 同一条理由住在这里而不是处理器里：**生命周期比一次请求长** ——
+	// 出码那次请求起了一轮后台轮询，读结论的是另外几次请求。
+	hub *app.LoginHub
+	// refresher 是"刷一个账号的凭据"那份常驻装配（见 [app.AuthRefresher]）。
+	//
+	// 它像 [Server.hub] 一样住在 Server 上而不是在处理器里现拼：拼它要一个
+	// **注入的**出站 HTTP 客户端，而本包自己不造真实客户端 —— 那样"测试里漏注入
+	// 假客户端"会表现成"真的打了上游"（而且刷新会把真凭据换掉），不是失败。
+	refresher *app.AuthRefresher
+	// runs 是"跑任务"那份常驻装配（见 [RunWorld]）。
+	//
+	// 第三个同一条理由住在这里的东西，而它多两分：除了出站客户端，它还得换掉
+	// **WebSocket 拨号器**（收口令那一步开的是 WS，不是 HTTP），并且它持有
+	// [mcloudexec.RunRegistry] —— 登记表必须跨请求，每次现拼一份的话
+	// "同一账号不许并发跑"这一条守卫一句都不成立。
+	//
+	// ⚠ 它是 [New] 的必填项：留 nil 只可能是装配漏了一行，
+	// 而那时 `POST /api/runs` 会回 500 而不是编译不过。
+	runs *RunWorld
+	// schedulerOn 记着调度循环在不在跑（`GET /api/status` 的那个字段）。
+	//
+	// 它是 [Server.startScheduler] 自己写的：起循环置真、退出置假（defer 那一条
+	// 覆盖 ctx 结束与 panic 两种走法）。用 [atomic.Bool] 而不是普通 bool 是因为
+	// 读它的是另一个 goroutine 里的 HTTP 请求。
+	schedulerOn atomic.Bool
 }
 
 // New 组装服务端状态。
 //
 // 事件总线由本函数创建而不是让调用方传进来：总线**没有配置项**，
 // 而多一个参数就多一种"两个处理器拿到不同总线"的接错法。
-func New(db *mcloudio.SqliteStore, clock core.Clock, rng core.Random, cfg Config) *Server {
-	return &Server{store: db, clock: clock, rng: rng, config: cfg, bus: mcloudexec.NewEventBus()}
+//
+// `hub` 反过来**必须**由调用方给（见 [Run]）：它要一个出站 HTTP 客户端，
+// 而本包自己不造真实客户端 —— 那样"测试里漏注入假客户端"会表现成
+// "真的打了上游"（卡在超时上、不变红），而不是一个响亮的失败。
+//
+// 2026-09-22 补记：`refresher` 同一条理由，而它多一分风险 —— 刷新是**写库**并
+// 轮换真凭据的动作，漏注入的后果不是慢，是库里那一套 `authorization` / `jwt_token`
+// 被覆盖成另一套（窄写四列，见 `docs/auth-refresh.md` §4）。
+// ⚠ 覆盖之后旧串还能不能用、会不会影响端上正登着的会话，**未实测**（同一篇 §8）。
+//
+// 同一条补记给 `runs`：它是"跑任务"那一份，出站面比前两个多一条 WS，
+// 而且它必须与 [Server.bus] 配套 —— 事件的发布方与订阅方共用同一条总线，
+// 登记表则决定"同一账号不许并发跑"，两者都跨请求，所以只能在这里递进来一次。
+func New(
+	db *mcloudio.SqliteStore, clock core.Clock, rng core.Random,
+	cfg Config, hub *app.LoginHub, refresher *app.AuthRefresher, runs *RunWorld,
+) *Server {
+	return &Server{
+		store: db, clock: clock, rng: rng, config: cfg,
+		bus: mcloudexec.NewEventBus(), hub: hub, refresher: refresher, runs: runs,
+	}
 }
 
 // Store 是存储（组装层与处理器都从这里取）。
@@ -264,9 +311,35 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /api/accounts", s.authed(s.listAccounts))
 	mux.HandleFunc("GET /api/accounts/{id}/cloud-stats", s.authed(s.cloudStats))
+	// 直播小红花页的第一屏：那一号**现在**有没有那场直播、有多少朵。
+	// 只读，但**会打上游**（五枪，见 [Server.probeLiveRoom] 的注释），
+	// 所以它与 `refresh-auth` 一样共用 [Deps.HTTP] 那一道闸，测试里漏注入就是真出门。
+	mux.HandleFunc("GET /api/accounts/{id}/live-room", s.authed(s.probeLiveRoom))
+	// 账号的三条写面。凭据**只进不出**：这三条的响应里没有 `authorization`
+	// 与 `jwtToken` 这两个键（出网形状见 [accountPayload]）。
+	mux.HandleFunc("POST /api/accounts", s.authed(s.addAccount))
+	mux.HandleFunc("PUT /api/accounts/{id}/enabled", s.authed(s.setAccountEnabled))
+	mux.HandleFunc("DELETE /api/accounts/{id}", s.authed(s.deleteAccount))
+	// 第四条写面：换 token。它与上面三条同一套纪律（凭据只进不出），
+	// 但**会打上游** —— 所以它的出站客户端与登录那几条共用 [Deps.HTTP] 那一道闸。
+	mux.HandleFunc("POST /api/accounts/{id}/refresh-auth", s.authed(s.refreshAccountAuth))
 
 	mux.HandleFunc("GET /api/runs", s.authed(s.listRuns))
 	mux.HandleFunc("GET /api/runs/{id}/events", s.authed(s.runEvents))
+	// 触发执行。它**不是**冻结基准里的路由（基准自己写着"要等 P4"），
+	// 是本仓库新增的那一组之一 —— 所以登记在 routes_test.go 的 `goAdded` 表里，
+	// 而不是那张 15 条的对位表里。
+	mux.HandleFunc("POST /api/runs", s.authed(s.triggerRun))
+
+	// 登录两条路。它们**不是**免登录接口：这里的"登录"指的是登录**移动云盘账号**，
+	// 而操作者必须先是本服务的已登录用户 —— 否则任何人都能拿这台服务当发码代理。
+	mux.HandleFunc("POST /api/login/qr", s.authed(s.startQRLogin))
+	mux.HandleFunc("GET /api/login/qr/{id}", s.authed(s.loginSessionView))
+	mux.HandleFunc("GET /api/login/qr/{id}/image.svg", s.authed(s.qrImage))
+	mux.HandleFunc("POST /api/login/sms/app", s.authed(s.sendAppLoginCode))
+	mux.HandleFunc("POST /api/login/sms/app/{id}/verify", s.authed(s.verifyAppLoginCode))
+	mux.HandleFunc("POST /api/login/sms/pc", s.authed(s.sendPcLoginCode))
+	mux.HandleFunc("POST /api/login/sms/pc/{id}/verify", s.authed(s.verifyPcLoginCode))
 
 	mux.HandleFunc("GET /api/schedules", s.authed(s.listSchedules))
 	mux.HandleFunc("PUT /api/schedules/{id}", s.authed(s.putSchedule))

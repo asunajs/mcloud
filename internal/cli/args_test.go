@@ -183,18 +183,47 @@ func TestExclusivePairsMirrorTheRustTable(t *testing.T) {
 	heads := [][]string{{}, {"signin"}}
 	for _, head := range heads {
 		for _, argv := range accepted {
-			// ⚠ 补一个临时 `--db`：默认值是**相对路径** `data/mcloud.db`，
+			// ⚠ 仍然补一个临时 `--db`：默认值是**相对路径** `data/mcloud.db`，
 			// 不补就会在包目录下建出一个真实的库（已经踩过一次，残留过 139 KB 的 db）。
-			// ⚠ 也**不要**断言退出码等于某个具体值 —— 这条命令现在真的会跑后端，
-			// 空库、账号越界都会退 1。这条用例的判据是**互斥表**，所以只钉
-			// "解析器放行了它"（不是用法错）。
 			full := append(append([]string{}, argv...), "--db", filepath.Join(t.TempDir(), "state.db"))
-			assertAccepted(t, head, full)
+
+			// ① **层**的判据：这条用例声称的是"**解析器**放行了它"，而退出码只有三档、
+			// **表达不了"哪一层拦下的"**（`2` 同时属于解析期的 flag-group 校验与 RunE 期
+			// 手工判的用法错误）⇒ 判据要**对准层**，直接调那一层。
+			// 起因：`--account <越界>` 从退 1 改成退 2（2026-09-22，坑表 #126）之后，
+			// 这里原来那句 `code != ExitUsage` 当场红 —— 而它红得**像实现错了**（坑表 #127）。
+			assertParsesCleanly(t, head, full)
+
+			// ② **契约**的判据：解析期放行**不等于**"跑起来也不会被判成用法错" ——
+			// 后者是**另一层**的事（`--records-all` 缺 `--records` 就在 RunE 里判）。
+			// 所以这里**继续**端到端跑一遍：不然将来有人往 accepted 里塞一条 RunE 层会被
+			// 判错的组合，本用例会**静默放行**（那正是把"只到解析期"当成"放宽"的代价）。
+			//
+			// ⚠⚠ 唯一的例外是"点了库里的第 N 个账号"：本用例的库是**空的**，
+			// 任何下标都越界 ⇒ 那**就是**用法错误（#126），端到端断言在这里不成立。
+			// 例外**写进条件里、并具名**，不是把整条用例的端到端断言一起砍掉。
+			if !namesAnAccountIndex(argv) {
+				assertAccepted(t, head, full)
+			}
 		}
 		for _, argv := range rejected {
 			assertUsageRejected(t, head, argv)
 		}
 	}
+}
+
+// namesAnAccountIndex 判断 argv 里有没有按**序号**点账号的 `--account`。
+//
+// ⚠ 它存在只为一件事：把"本用例的库是**空的** ⇒ 任何下标都越界 ⇒ 那**就是**用法错误"
+// 这个**例外具名**，而不是用"整条用例都别端到端跑"来回避一条特例（坑表 #127 的教训：
+// 判据要么对准层，要么把例外写清楚 —— 别用"放宽全部"换一句好看的解释）。
+func namesAnAccountIndex(argv []string) bool {
+	for _, a := range argv {
+		if a == "--account" || strings.HasPrefix(a, "--account=") {
+			return true
+		}
+	}
+	return false
 }
 
 // TestRecordsAllRequiresRecords：clap 的 `requires` 是**单向**的，
@@ -264,8 +293,10 @@ func TestLoginParameterSurface(t *testing.T) {
 func TestCommandTreeMatchesTheDocumentedSurface(t *testing.T) {
 	root := buildRoot(t)
 	want := []string{
+		"auth refresh",
 		"capabilities",
 		"fixture extract",
+		"live-room",
 		"login qr",
 		"login sms",
 		"migrate",
@@ -311,31 +342,127 @@ func TestCompletionSubcommandStaysOff(t *testing.T) {
 // # 为什么还留着一条（而不是一起删掉）
 //
 // 缺口表退役之后，"某个叶子又变回没实现"这件事就**没有任何守卫**了。
-// 这条用例把退役时的那个事实钉住：12 个叶子逐个跑，**一个都不许出现"尚未迁移"**。
+// 这条用例把退役时的那个事实钉住：叶子逐个跑，**一个都不许出现"尚未迁移"**。
 // 将来谁把某条 RunE 指回一个占位错误，它当场红。
+//
+// # 它跑的那份清单在哪
+//
+// 在 [leafSmokeRuns]（包级函数，不是函数内局部量）—— 因为
+// [TestEveryLeafActuallyRunsIsComplete] 要拿它对着命令树查完整性。
+// ⚠ 加叶子时**两处都要看**：漏一行的表现是这两条**一起绿**，
+// 而"某个叶子其实没人跑"没有任何输出（2026-09-22 实测踩到过，见那条用例的说明）。
 func TestEveryLeafActuallyRuns(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "state.db")
-	// ⚠ 每条都给临时 `--db`：默认值是相对路径 `data/…`，不补会在包目录下建出真库。
-	// ⚠ `fixture extract` 与 `migrate` 不用 `--db`，各自补自己那个输出/来源参数。
-	leaves := [][]string{
+	// 只要求"没出现占位错误"。跑成不成功取决于库与文件系统的状态，
+	// 那不是这条用例的判据（各自的叶子有各自的用例）。
+	for _, argv := range leafSmokeRuns(t, db) {
+		_, stderr, _ := runCLI(t, "", argv...)
+		if strings.Contains(stderr, "尚未迁移") || strings.Contains(stderr, "未实现") {
+			t.Errorf("`mcloud %v` 又变回占位实现了：%q", argv, stderr)
+		}
+	}
+}
+
+// leafSmokeRuns 返回"每个叶子跑一次"的 argv 表（`db` 是调用方给的临时库路径）。
+//
+// ⚠ 每条都给临时 `--db`：默认值是相对路径 `data/…`，不补会在包目录下建出真库。
+// ⚠ `fixture extract` 与 `migrate` 不用 `--db`，各自补自己那个输出/来源参数。
+// ⚠ 用**函数**而不是包级变量：临时路径必须按调用方各自求值；
+// 写成包级变量就得在包初始化时求值，那些"临时"路径会变成进程级共享的固定路径。
+func leafSmokeRuns(t *testing.T, db string) [][]string {
+	t.Helper()
+	return [][]string{
 		{"version"},
 		{"capabilities"},
 		{"user", "list", "--db", db},
 		{"login", "qr", "--db", db, "--device-file", filepath.Join(t.TempDir(), "dev.txt")},
 		{"login", "sms", "--db", db, "--device-file", filepath.Join(t.TempDir(), "dev.txt")},
 		{"smid", "show", "--db", db},
+		// ⚠ `smid reset` / `smid refresh` / `auth refresh` 这三条是 2026-09-22 补进来的：
+		// 在此之前清单里只有 10 条而叶子有 14 条 —— 也就是说这条用例的名字
+		// （"每个叶子都真的跑起来了"）**当时是假的**，而它照样全绿。
+		// 三条都实测过：空库上是"没有账号"这类正常输出，不联网、不落盘；
+		// `auth refresh` 得补 `--all`，否则它自己要 `--account`/`--all` ⇒ 退 2 用法错。
+		{"smid", "reset", "--db", db},
+		{"smid", "refresh", "--db", db},
+		{"auth", "refresh", "--all", "--db", db},
 		{"signin", "--db", db},
 		{"fixture", "extract", "--har", t.TempDir(), "--out", t.TempDir()},
 		{"migrate", "--repo-root", t.TempDir(), "--dry-run"},
+		// `live-room` **不需要**额外的临时路径：空库会在
+		// `len(targets)==0` 那个分支直接返回，**早于** `LoadOrCreateAppDeviceID`
+		// ⇒ 既不联网也不落盘。⚠ 反过来，如果哪天把设备解析挪到选账号之前，
+		// 这条就会在包目录下建出 `data/app-device.txt`（默认值是相对路径）——
+		// 那时必须在这里补 `--app-device-file`，否则它静默地污染工作树。
+		{"live-room", "--db", db},
 	}
-	// 只要求"没出现占位错误"。跑成不成功取决于库与文件系统的状态，
-	// 那不是这条用例的判据（各自的叶子有各自的用例）。
-	for _, argv := range leaves {
-		_, stderr, _ := runCLI(t, "", argv...)
-		if strings.Contains(stderr, "尚未迁移") || strings.Contains(stderr, "未实现") {
-			t.Errorf("`mcloud %v` 又变回占位实现了：%q", argv, stderr)
+}
+
+// leafSmokeExcluded 是**故意**不进 [leafSmokeRuns] 的叶子 → 理由。
+//
+// ⚠ 这份白名单会被 [TestEveryLeafActuallyRunsIsComplete] **反向检查**：
+// 登记了一个不是叶子的路径（写错名，或那条叶子后来被删/改名了）也会红。
+// 与门禁里那几张白名单同一条纪律 —— **过期的白名单比没有白名单更坏**，
+// 因为它会让下一个人以为"这里排除某样东西是有意的"。
+var leafSmokeExcluded = map[string]string{
+	"user init": "交互式：裸跑会打印 `设置口令: ` 并在 stdin 上等输入" +
+		"（实测不给输入就是挂住）。它由 run_test.go 的 TestUserInitThenList / " +
+		"TestUserInitReadsPasswordFromStdinNotFromFlags / " +
+		"TestUserInitRejectsWeakOrMismatchedPasswords / TestUserInitTwiceRefusesSecondAdmin " +
+		"四条覆盖（都注入 stdin 或 --password）—— 那条路径才是它的判据",
+}
+
+// TestEveryLeafActuallyRunsIsComplete：上面那份 smoke 清单**一个叶子都不漏**。
+//
+// # 为什么必须有这条
+//
+// [TestEveryLeafActuallyRuns] 的名字是"每个叶子都真的跑起来了"，但它跑的是一份
+// **手写清单**。2026-09-22 实测：那份清单当时只有 10 条，而命令树上有 14 个叶子 ——
+// 也就是说那个名字**当时是假的**，而它照样全绿，没有任何输出提示这件事。
+// ⇒ 手写清单与命令树之间必须有机器判据，否则"加了个叶子忘了加进来"永远静默。
+// 这条红的时候**不要**放宽它，去补 [leafSmokeRuns]（或写清排除理由）。
+func TestEveryLeafActuallyRunsIsComplete(t *testing.T) {
+	covered := map[string]bool{}
+	for _, argv := range leafSmokeRuns(t, filepath.Join(t.TempDir(), "state.db")) {
+		covered[commandPathOf(argv)] = true
+	}
+
+	onTree := map[string]bool{}
+	for _, leaf := range leafPaths(buildRoot(t)) {
+		onTree[leaf] = true
+		if covered[leaf] || leafSmokeExcluded[leaf] != "" {
+			continue
 		}
+		t.Errorf("叶子 `%s` 既不在 smoke 清单里、也没登记排除理由 —— "+
+			"`TestEveryLeafActuallyRuns` 声称「每个叶子都真的跑起来了」，"+
+			"而它漏了这个：要么在 leafSmokeRuns 里补一行，"+
+			"要么在 leafSmokeExcluded 里写清为什么它不能跑", leaf)
 	}
+
+	// 反向：白名单里挂了命令树上不存在的路径 ⇒ 那条叶子改名或被删了，
+	// 而这条理由从此再不会被任何人读到（它只会让人误以为"排除是有意的"）。
+	for name, reason := range leafSmokeExcluded {
+		if onTree[name] {
+			continue
+		}
+		t.Errorf("leafSmokeExcluded 里的 `%s` 不是命令树上的叶子（改名了？删了？）：%s",
+			name, reason)
+	}
+}
+
+// commandPathOf 从一条 smoke argv 里取出它打的那个子命令路径（遇到第一个 flag 就停）。
+//
+// ⚠ 不能用"取前 N 个 token"：`login sms` 是两个、`version` 是一个，
+// 而 `signin` 后面直接就跟 flag。判据只能是"flag 之前的都是路径"。
+func commandPathOf(argv []string) string {
+	var parts []string
+	for _, tok := range argv {
+		if strings.HasPrefix(tok, "-") {
+			break
+		}
+		parts = append(parts, tok)
+	}
+	return strings.Join(parts, " ")
 }
 
 // leafPaths 把命令树摊平成 "login qr" 这样的叶子路径。

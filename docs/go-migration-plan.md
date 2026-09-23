@@ -208,7 +208,7 @@ Go 的 `//go:embed` **不能跨目录**，而黄金向量是全仓共享资产�
 
 ## 5. 门禁
 
-### 5.1 九条，与 Rust 侧七条的对应关系
+### 5.1 十条，与 Rust 侧七条的对应关系
 
 | # | Go 侧 | Rust 侧对应 |
 | --- | --- | --- |
@@ -216,17 +216,23 @@ Go 的 `//go:embed` **不能跨目录**，而黄金向量是全仓共享资产�
 | 2 | `go vet $GO_PKGS` | `cargo clippy --all-targets -- -D warnings`（**覆盖窄得多**，见 5.3） |
 | 3 | `gofmt -l ./cmd ./internal` | `cargo fmt --check` |
 | 4 | `go test -race $GO_PKGS` | `cargo test --workspace`（**多一个 `-race`**，见 5.2） |
-| 5 | `bash scripts/check-go-deps.sh` | `bash scripts/check-deps.sh` |
-| 6 | `bash scripts/check-filenames.sh` | **同一个脚本，复用** |
+| 5 | `node scripts/check-go-deps.js` | `bash scripts/check-deps.sh` |
+| 6 | `node scripts/check-filenames.js` | **同一个脚本，复用** |
 | 7 | `node scripts/check-identifiers.cjs` | **同一个脚本，复用** |
 | 8 | `node scripts/check-golden-vectors.cjs` | **同一个脚本，复用** |
 | 9 | `node scripts/check-go-jsontags.cjs` | **Go 独有**（Rust 侧无对应物：serde 的字段名由派生保证，Go 没有） |
+| 10 | `node scripts/check-md-tables.cjs` | **无对应物，且与语言无关** —— 仓库级文档检查（表格不许比表头多格，见 `dev-gates.md`） |
 
 ⚠ `$GO_PKGS` = `./cmd/... ./internal/...`，**不要写成 `./...`** ——
 后者会走进 `legacy/target/`（7 GB 构建产物），既慢又会偶发失败。
 第 3 条同理：`gofmt -l .` 会去格式化那 26 万个 `.o` 旁边的文件。
 
-入口：`bash scripts/gates-go.sh`（支持 `bash scripts/gates-go.sh test deps` 只跑指定几条）。
+入口：`node scripts/gates-go.js`（支持 `node scripts/gates-go.js test deps` 只跑指定几条）。
+
+> ⚠ 本表第 5–8 行的命令名是 **2026-09-22 之后的真名**（那天整套门禁脚本由 bash 迁到
+> zx / Node）。同一批文件在迁移前叫 `*.sh` —— 若在别处（`status.md`、坑表）读到
+> `bash scripts/gates-go.sh` 这类写法，那是**当时**的记录，不是现在能跑的命令。
+> 当前条数与逐条明细以 [`dev-gates.md`](./dev-gates.md) 为准。
 
 ### 5.2 为什么 `test` 必须带 `-race`
 
@@ -303,7 +309,7 @@ Go 的 `io.Reader` 是引用语义，并发用同一个源是 data race，而它
 | **1** | `mcloud-core`（纯计算，标准库覆盖最好） | 黄金向量在 Go 侧逐字段复算通过 | ✅ **已完成**（2026-09-21）：`internal/core` **270 条测试**，17/17 模块对位，core 读的 **8 份向量逐节都有正向断言**（最后缺的那一节 `hcyCoolFlagEnvelope` 于本次补上，见 §6.1 #56）。**一条例外**：`error` 后半的 `classify_body` 那台分类机**不补进 core** —— 它在**冻结基准里就没有调用点**（core 之外零命中），补进去就是一台没人开的机器；判据的三块 Go 侧已各在其位（`core.ClassifyStatus` + `upstream.Envelope`），归属改挂到步 4 第一个真需要"状态 + 响应体一步判完"的调用点。⚠ 判据要按"**Go 侧**读了几份向量"算，别照门禁那行 `✓ 有测试读取` —— 它不区分是哪一侧在读（见 `status.md`）。⚠ 也别把**步 2 的账算进步 1**：`app-signin-vectors` 与 `login-crypto-vectors` 的消费者在 `internal/upstream`，与 core 无关 |
 | **2** | `mcloud-upstream`（协议层） | 同一条抓包请求 Rust/Go **双跑**，header 顺序 / percent-encode / 签名串逐字节一致 | ✅ **已完成**（2026-09-21 补记）：`internal/upstream` **150 条测试**，`login` / `client` / `app_client` / `app_login` / `app_signin` 全族 / `smid` **整族落地**；`app-signin-vectors.json` 从"只有 Rust 读"变成**两边都读**。⚠ 判据里的"双跑"是**逐块**做的（每条链路各自与 Rust 侧的中心断言对拍，例如 `app_login` 的 `appLoginWire`），不是一次跑通全部接口 —— 见 `status.md` 的步 2 分块表 |
 | **3** | `mcloud-io`（唯一 IO 层） | 纯 Go sqlite 驱动下 schema v1→**v8** 迁移 + 老库只读导入结果一致 | ✅ **已完成**（2026-09-21 补记）：`internal/io` **150 条测试**，schema v1→v8 的 8 条幂等迁移链、`legacy_import`（**21 条**，五条硬判据见 `status.md`）、`fixture` 回放、HTTP 客户端、`datetime`（与 chrono **逐字节**一致）。驱动 = `modernc.org/sqlite`（纯 Go，免 cgo）。⚠ 判据原文写的是 v7，实测做到的是 **v8** |
-| **4** | `capabilities` → `exec` → `app` → `server` / `cli` | 19 项能力逐项打勾；CLI 参数互斥与四态输出一致；`api_contract` 契约测试平移，前端不动 | 🔄 **进行中**：`capabilities` 注册表 / `exec` / `app::payload` 已落（**52 条测试**）。⚠ **它依赖步 2 与步 3**：`capabilities::login` 是 `upstream::login` 的消费者，`app` 其余模块与 `server` 还要 `io` —— 所以先落了不依赖它们的三块，见 `status.md` 的「步 4 实况」。**2026-09-21 追加（判据逐块核）**：`cli` 的参数面 / 退码 / `--json` 与凭据约定已落地（**22 条测试**，含从 Rust 侧 `unit_tests.rs` 平移过来的互斥与"两种写法等价"那批用例）⇒ **"CLI 参数互斥"这半条已达成**；⚠ **"四态输出一致"这半条未达成**（`signin` 的多账号编排与四态渲染那约 1,264 行还没迁，挂在 `internal/cli/unmigrated.go` 那张表上）；⚠ **"19 项能力逐项打勾"这半条卡在 `capabilities` 注册表的条目数**（Go 侧实测 3 项），**不在 CLI** —— 别把它记成"CLI 没做完"。**2026-09-21 再追加**：`app` 层已**全部落地**（最后两块 `login` 14 条 / `app_login` 13 条）。**2026-09-21 收口**：⭐ **`cli` 全部叶子落地**（**116 条测试**；最后一块 `signin` = 编排 1,444 行 + 渲染 584 行、42 条用例）⇒ 判据里 **"CLI 参数互斥"与"四态输出一致"两半都已达成**（四态即 `SignedToday` / `WasAlreadySigned` / `SignedNow` / `SignInPoints`，分别由 `TestSignin…` 那批用例钉住）；`internal/cli/unmigrated.go` 缺口表随最后一条叶子退役。⚠ **"19 项能力逐项打勾"这半条仍未达成，且与 CLI/app 都无关** —— 它卡在 `capabilities` 注册表的条目数（Go 侧实测 3 项：`sign` / `exchange` / `cloud-snapshot`），别把它记成"CLI 没做完"。`server` 那半条见下方「服务端」两节。**2026-09-21 最终收口**：⭐ **`server` 也接上入口了** —— `cmd/mcloud-server` 不再打印占位退 2；`internal/server` 由 26 条加到 **43 条**（新增 `static.go` 静态 + SPA 回退、`run.go` 入口；`server.go` 改写为 `Deps` / `Options` / `ParseArgs`），判据里的 **"`api_contract` 契约测试平移"这半条已达成**（26 条逐项覆盖那份契约，含两个状态码 201/204）。⚠ **整条步 4 仍未完成**，卡在**同一处**：**"19 项能力逐项打勾"**（`capabilities` 注册表 Go 侧实测 3 项）。⇒ **2026-09-21 判据复核（更正）**：⭐ 那句「19 项能力逐项打勾」里的 **19 取自旧 TS 项目**，**不是冻结基准的条目数** —— 实测 **Rust 3 项 = Go 3 项**（code 集合 `diff` 为空：`sign` / `exchange` / `cloud-snapshot`），两侧注释都写着"P4 会补齐全部 19 项"；`POST /api/runs` 在 `legacy/.../routes/mod.rs` 里自己写着"要等 P4"，**基准里从未实现**。⇒ 这两个数都属**功能开发**（P4/P5），**不是迁移缺口**。同时补了一条**路由表逐条对位**的断言（`internal/server/routes_test.go`，15 条 + 兜底；三条反向测试已确认变红）。⚠ 也就是说：**步 4 的判据里已经没有一条是"迁移没做完"** —— 剩下的都是基准自己也没建的 P4 功能。详见 §6.1 **#86/#87** |
+| **4** | `capabilities` → `exec` → `app` → `server` / `cli` | 19 项能力逐项打勾；CLI 参数互斥与四态输出一致；`api_contract` 契约测试平移，前端不动 | 🔄 **进行中**：`capabilities` 注册表 / `exec` / `app::payload` 已落（**52 条测试**）。⚠ **它依赖步 2 与步 3**：`capabilities::login` 是 `upstream::login` 的消费者，`app` 其余模块与 `server` 还要 `io` —— 所以先落了不依赖它们的三块，见 `status.md` 的「步 4 实况」。**2026-09-21 追加（判据逐块核）**：`cli` 的参数面 / 退码 / `--json` 与凭据约定已落地（**22 条测试**，含从 Rust 侧 `unit_tests.rs` 平移过来的互斥与"两种写法等价"那批用例）⇒ **"CLI 参数互斥"这半条已达成**；⚠ **"四态输出一致"这半条未达成**（`signin` 的多账号编排与四态渲染那约 1,264 行还没迁，挂在 `internal/cli/unmigrated.go` 那张表上）；⚠ **"19 项能力逐项打勾"这半条卡在 `capabilities` 注册表的条目数**（Go 侧实测 3 项），**不在 CLI** —— 别把它记成"CLI 没做完"。**2026-09-21 再追加**：`app` 层已**全部落地**（最后两块 `login` 14 条 / `app_login` 13 条）。**2026-09-21 收口**：⭐ **`cli` 全部叶子落地**（**116 条测试**；最后一块 `signin` = 编排 1,444 行 + 渲染 584 行、42 条用例）⇒ 判据里 **"CLI 参数互斥"与"四态输出一致"两半都已达成**（四态即 `SignedToday` / `WasAlreadySigned` / `SignedNow` / `SignInPoints`，分别由 `TestSignin…` 那批用例钉住）；`internal/cli/unmigrated.go` 缺口表随最后一条叶子退役。⚠ **"19 项能力逐项打勾"这半条仍未达成，且与 CLI/app 都无关** —— 它卡在 `capabilities` 注册表的条目数（Go 侧实测 3 项：`sign` / `exchange` / `cloud-snapshot`），别把它记成"CLI 没做完"。`server` 那半条见下方「服务端」两节。**2026-09-21 最终收口**：⭐ **`server` 也接上入口了** —— `cmd/mcloud-server` 不再打印占位退 2；`internal/server` 由 26 条加到 **43 条**（新增 `static.go` 静态 + SPA 回退、`run.go` 入口；`server.go` 改写为 `Deps` / `Options` / `ParseArgs`），判据里的 **"`api_contract` 契约测试平移"这半条已达成**（26 条逐项覆盖那份契约，含两个状态码 201/204）。⚠ **整条步 4 仍未完成**，卡在**同一处**：**"19 项能力逐项打勾"**（`capabilities` 注册表 Go 侧实测 3 项）。⇒ **2026-09-21 判据复核（更正）**：⭐ 那句「19 项能力逐项打勾」里的 **19 取自旧 TS 项目**，**不是冻结基准的条目数** —— 实测 **Rust 3 项 = Go 3 项**（code 集合 `diff` 为空：`sign` / `exchange` / `cloud-snapshot`），两侧注释都写着"P4 会补齐全部 19 项"；`POST /api/runs` 在 `legacy/.../routes/mod.rs` 里自己写着"要等 P4"，**基准里从未实现**。⇒ 这两个数都属**功能开发**（P4/P5），**不是迁移缺口**。同时补了一条**路由表逐条对位**的断言（`internal/server/routes_test.go`，15 条 + 兜底；三条反向测试已确认变红）。⚠ 也就是说：**步 4 的判据里已经没有一条是"迁移没做完"** —— 剩下的都是基准自己也没建的 P4 功能。详见 §6.1 **#86/#87**。**2026-09-22 补记（注册表 3 → 4，判据口径不变）**：`capabilities` 注册表现在是 **4** 项 —— 新登记了 `live-room`（直播口令 → 小红花，`group=activity` / `KindAction` / `RiskHigh` / **`RunInBatch=false`**）。⚠ **这不改变上面任何一条判据**，别把它读成"19 项又走近一步"或"对位出现分歧"：**迁移对位那一组仍是 3 项**（`sign` / `exchange` / `cloud-snapshot`，与冻结基准 code 集合 `diff` 仍为空），`live-room` 是**新增能力**，它那条链在原项目里是 **TS 实现**（`packages/api/src/tasks/*` 那一族），`legacy/` 里没有对应 crate ⇒ **无基准可对，也就无从"对位"**。⇒ 注册表条目数从此**不再等于**迁移进度：写"Go 侧实测 N 项"时必须同时说是**哪一组**（对位组 3 项 / 全表 4 项），否则下一个人会拿 4 去和基准的 3 对账，得出"多了 1 项"这种反向结论。登记它的理由与"为什么 `RunInBatch=false`"写在 `internal/capabilities/registry.go` 的条目注释里（可用窗口只有主播开播那一小时，塞进日常编排只会每天白连一次 WS）|
 
 ### 步 0 的实测记录
 

@@ -39,6 +39,27 @@ func (u *Upstream) Call(ctx context.Context, request core.HTTPRequest) (*Envelop
 	return ParseEnvelope(response.Body)
 }
 
+// Raw 发请求并返回**原始响应**（不解析信封）。
+//
+// # 为什么需要它
+//
+// [Call] 一定走 [ParseEnvelope]，而那是给 JSON 用的。目前唯一的调用方是
+// **小红书主页**（HTML）—— 喂给它 `ParseEnvelope` 只会得到一句
+// "响应不是 JSON"，而那句错误会掩盖真正的问题（页面被风控挡了、或者
+// 拿到了一个空壳页）。
+//
+// 非 2xx 仍然是错误，与 [Call] 同一口径：那时响应体通常也不是我们要的东西。
+func (u *Upstream) Raw(ctx context.Context, request core.HTTPRequest) (core.HTTPResponse, *core.Error) {
+	response, err := u.http.Send(ctx, request)
+	if err != nil {
+		return core.HTTPResponse{}, asCoreError(err, "发送请求失败")
+	}
+	if !response.IsSuccess() {
+		return core.HTTPResponse{}, errorFromStatus(response.Status)
+	}
+	return response, nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 请求构造
 // ─────────────────────────────────────────────────────────────────────────────

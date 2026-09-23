@@ -91,17 +91,46 @@ func TestStatusHasNoRunYet(t *testing.T) {
 	}
 }
 
-// TestStatusReportsTheSchedulerIsNotRunning：
-// Go 侧还没有把 schedules 变成"到点触发"的循环，接口必须报 false。
+// TestStatusReportsTheSchedulerState：`schedulerRunning` 报的是**运行时实况**。
 //
-// 这一条是**钉住现状**的测试：接上调度器那天它会红，那时改实现并同步改这条，
-// 而不是让它一直绿着说谎。
-func TestStatusReportsTheSchedulerIsNotRunning(t *testing.T) {
+// 这一条以前钉的是"恒 false"（后端确实没有循环），那句谎话有个正当用途：
+// 让界面别把"存得下来"显示成"在自动跑"。循环真接上之后（`scheduler.go`），
+// 常量这一档就成了谎报 —— 于是这里改钉**两个方向**：
+//   - 没起循环（本夹具就是这种服务端：只构造 `Server`，不起后台）⇒ false；
+//   - 起了循环 ⇒ true。
+//
+// 只测第一个方向等于什么都没测：把字段写回常量 `false` 依然通过，
+// 而那时侧栏会在**每台正常工作的服务**上说"定时调度未启用"。
+func TestStatusReportsTheSchedulerState(t *testing.T) {
 	h := newHarness(t).initialized(t)
+	ask := func() map[string]any {
+		return decode(t, h.do(t, "GET", "/api/status", "", nil))
+	}
 
-	status := decode(t, h.do(t, "GET", "/api/status", "", nil))
-	if status["schedulerRunning"] != false {
-		t.Errorf("schedulerRunning 应为 false，实得 %v", status["schedulerRunning"])
+	if status := ask(); status["schedulerRunning"] != false {
+		t.Errorf("没起循环时该报 false，实得 %v", status["schedulerRunning"])
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		h.server.startScheduler(ctx, func(string) {})
+	}()
+	if !waitSchedulerFlag(t, h, true) {
+		t.Fatal("起了循环后开关位没变真（等 5 秒）")
+	}
+	if status := ask(); status["schedulerRunning"] != true {
+		t.Errorf("起了循环该报 true，实得 %v", status["schedulerRunning"])
+	}
+	cancel()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ctx 结束后循环没退，不能再关库")
+	}
+	if status := ask(); status["schedulerRunning"] != false {
+		t.Errorf("循环退了该回到 false，实得 %v", status["schedulerRunning"])
 	}
 }
 

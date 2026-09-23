@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/catlair/mcloud/internal/core"
 )
@@ -252,7 +253,7 @@ func (s *SqliteStore) ListImports(ctx context.Context) ([]ImportRecord, error) {
 // 否则某条查询会静默少一列而不报错。`owner` 固定放最后。
 const (
 	scheduleColumns = "id, name, target, cron, timezone, account_ids, body, enabled, " +
-		"created_at, last_run_at, last_status, last_error, owner"
+		"created_at, last_run_at, last_status, last_error, miss_policy, last_fire_at, owner"
 	pipelineColumns = "id, name, description, steps, account_ids, account_mode, " +
 		"stop_on_error, created_at, updated_at, last_run_at, last_status, last_error, " +
 		"last_duration_ms, owner"
@@ -323,12 +324,14 @@ func scanSchedule(row rowScanner) (core.Schedule, error) {
 		id, name, cron, timezone, accountIDsText string
 		targetText, bodyText                     sql.NullString
 		enabled                                  int64
-		createdAt, lastRunAt                     sql.NullString
+		createdAt, lastRunAt, lastFireAt         sql.NullString
 		lastStatus, lastError                    sql.NullString
+		missPolicyText                           sql.NullString
 		owner                                    sql.NullString
 	)
 	if err := row.Scan(&id, &name, &targetText, &cron, &timezone, &accountIDsText,
-		&bodyText, &enabled, &createdAt, &lastRunAt, &lastStatus, &lastError, &owner); err != nil {
+		&bodyText, &enabled, &createdAt, &lastRunAt, &lastStatus, &lastError,
+		&missPolicyText, &lastFireAt, &owner); err != nil {
 		return core.Schedule{}, err
 	}
 
@@ -351,6 +354,15 @@ func scanSchedule(row rowScanner) (core.Schedule, error) {
 			last = &v
 		}
 	}
+	// 同一条纪律（见 [core.ParseMissPolicy]）：认不出的文本给 nil，
+	// 也就是"跟随能力默认"，而不是硬塞 `catch_up` —— 后者会让一行损坏的数据
+	// 在每次重启时凭空多跑一趟真上游。
+	var miss *core.MissPolicy
+	if missPolicyText.Valid {
+		if v, ok := core.ParseMissPolicy(missPolicyText.String); ok {
+			miss = &v
+		}
+	}
 
 	return core.Schedule{
 		ID:         id,
@@ -362,6 +374,8 @@ func scanSchedule(row rowScanner) (core.Schedule, error) {
 		AccountIDs: ids,
 		Body:       textToRaw(bodyText),
 		Enabled:    enabled != 0,
+		MissPolicy: miss,
+		LastFireAt: ptrTime(lastFireAt),
 		CreatedAt:  ptrTime(createdAt),
 		LastRunAt:  ptrTime(lastRunAt),
 		LastStatus: last,
@@ -395,17 +409,38 @@ func (s *SqliteStore) UpsertSchedule(ctx context.Context, scope core.Scope, sche
 	if schedule.LastStatus != nil {
 		lastStatus = schedule.LastStatus.String()
 	}
+	// ⚠ 同一条纪律（见 [core.ParseScheduleStatus] 那条注释）：能写进库的文本必须
+	// 是这一族自己认得出的那几个。这里不静默写 NULL —— 未知策略写进去，
+	// 读回来就成了"没人选过"，那是把脏数据洗成合法。
+	var missPolicy any
+	if schedule.MissPolicy != nil {
+		text := schedule.MissPolicy.String()
+		if _, ok := core.ParseMissPolicy(text); !ok {
+			return core.NewBadRequest(
+				"定时任务 " + schedule.ID + " 的补跑策略是未知值，不落库")
+		}
+		missPolicy = text
+	}
 
 	if err := ensureNotOwnedByOther(ctx, s.db, scope,
 		"SELECT owner FROM schedules WHERE id = ?", schedule.ID, "定时任务"); err != nil {
 		return err
 	}
 
+	// ⚠ 语句里**不写注释块**：这是一条反引号包起来的原始串，注释里出现一个
+	// 反引号就会把字符串就地截断（`last_fire_at` 那种写法尤其容易顺手写出）。
+	//
+	// ⚠ **`last_fire_at` 刻意不在 DO UPDATE 那一串里**：它是调度循环的水位，
+	// 只有 [MarkScheduleFire] 能动。编辑一行定时任务（改 cron、改名、换账号）
+	// 不该把"哪些触发点已经处理过"倒回去 —— 前端那次 PUT 带回来的是它**早先读到**
+	// 的那一份，跟着覆盖就会让已处理的那一次再跑一遍，而那一遍是带真上游请求的
+	// （签到与换凭据都是不可逆动作）。
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO schedules (
 			id, name, target, cron, timezone, account_ids, body, enabled,
-			created_at, last_run_at, last_status, last_error, owner
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			created_at, last_run_at, last_status, last_error, owner,
+			miss_policy, last_fire_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name        = excluded.name,
 			target      = excluded.target,
@@ -417,13 +452,15 @@ func (s *SqliteStore) UpsertSchedule(ctx context.Context, scope core.Scope, sche
 			last_run_at = excluded.last_run_at,
 			last_status = excluded.last_status,
 			last_error  = excluded.last_error,
-			-- 归属可以在这条语句里被"认领"（无主 → 本人），但不能被换成别人：
-			-- 换成别人的情况已由上面两道校验挡住。
+			miss_policy = excluded.miss_policy,
 			owner       = excluded.owner`,
+		// 归属可以在这条语句里被"认领"（无主 → 本人），但不能被换成别人：
+		// 换成别人的情况已由上面两道校验挡住。
 		schedule.ID, schedule.Name, target, schedule.Cron, schedule.Timezone,
 		accountIDs, optRawToText(schedule.Body), boolToInt(schedule.Enabled),
 		optTime(schedule.CreatedAt), optTime(schedule.LastRunAt),
-		lastStatus, optStr(schedule.LastError), userIDArg(schedule.Owner))
+		lastStatus, optStr(schedule.LastError), userIDArg(schedule.Owner),
+		missPolicy, optTime(schedule.LastFireAt))
 	if err != nil {
 		return mapSQLite(err)
 	}
@@ -468,6 +505,86 @@ func (s *SqliteStore) ListSchedules(ctx context.Context, scope core.Scope) ([]co
 		return nil, mapSQLite(err)
 	}
 	return out, nil
+}
+
+// MarkScheduleFire 窄写调度水位：**只碰** `last_fire_at` 一列。
+//
+// # 为什么不复用 UpsertSchedule
+//
+// 循环在触发的那一刻要把水位抬上去（不等任务跑完 —— 一趟签到要几十秒，
+// 等完再抬的话这段时间里每个 tick 都会再捡一次同一个触发点）。
+// 而那一刻它手上只有"我读到的那一份 schedule"，可能是几秒前读的：
+// 用整行覆盖会把别人（WebUI 上正在编辑的人）刚写进去的 cron / body 打回旧值。
+// 窄写让"改定义"与"推进水位"两件事互不打扰，与 `RotateAccountAuth` 同一条理由。
+//
+// 返回的 `bool` 是"有没有真的写到这一行"：不可见（别人的）或已被删 ⇒ false，
+// 调用方要据此决定"这一趟到底跑不跑"—— 抬不动水位就不要打上游，
+// 否则会出现"库里说没跑过、上游已经被真打了一枪"。
+func (s *SqliteStore) MarkScheduleFire(
+	ctx context.Context, scope core.Scope, id string, fireAt time.Time,
+) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		"UPDATE schedules SET last_fire_at = ? WHERE id = ? AND "+ownerVisibleByID,
+		optTime(&fireAt), id, ownerArg(scope), ownerArg(scope))
+	if err != nil {
+		return false, mapSQLite(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, mapSQLite(err)
+	}
+	return n > 0, nil
+}
+
+// RecordScheduleRun 窄写执行记账：只碰 `last_run_at` / `last_status` /
+// `last_error` 三列，且**只碰给了值的那些**。
+//
+// 这三列自 v2 落下起没有任何写入方（`PUT /api/schedules` 只原样搬运），
+// 本方法是第一个。判据与 [MarkScheduleFire] 同一条：跑完一趟之后要写的
+// 只有"上一次跑得怎么样"，定义那一半不许动。
+//
+// # 两个 nil 的含义**刻意不同**
+//
+//   - `ranAt == nil` ⇒ **那一列不动**。它说的是"跑过"这件事，而按
+//     [core.MissSkip] 弃掉的错过、以及撞锁被挡下的那一趟**都没跑**：
+//     把上一次真跑的时刻抹掉，界面上就变成"这个任务从来不执行"。
+//     没有哪一刻该被写进这一列时，宁可不写。
+//   - `lastError == nil` ⇒ **写 NULL**。清空它本身就是结论（"这次跑干净了，
+//     上次那条错误别再显示"）。留着的话，`last_status = ok` 配一句旧错误
+//     在界面上并排出现，那正是查不出原因的形态。
+//
+// ⚠ 别把两条凑成对称的"nil 一律不动"：那会让一次成功的执行清不掉错误，
+// 而"不动"那一半是这里唯一会丢信息的写法。
+func (s *SqliteStore) RecordScheduleRun(
+	ctx context.Context, scope core.Scope, id string,
+	ranAt *time.Time, status core.ScheduleStatus, lastError *string,
+) (bool, error) {
+	// 与 [UpsertSchedule] 里 `miss_policy` 那一道同纪律：能进库的文本必须是
+	// 这一族自己认得出的。未知值写成 NULL 等于把脏数据洗成"没有状态"。
+	text := status.String()
+	if _, ok := core.ParseScheduleStatus(text); !ok {
+		return false, core.NewBadRequest(
+			"定时任务 " + id + " 的执行状态是未知值，不落库")
+	}
+
+	set := "last_status = ?, last_error = ?"
+	args := []any{text, optStr(lastError)}
+	if ranAt != nil {
+		set += ", last_run_at = ?"
+		args = append(args, optTime(ranAt))
+	}
+	args = append(args, id, ownerArg(scope), ownerArg(scope))
+
+	res, err := s.db.ExecContext(ctx,
+		"UPDATE schedules SET "+set+" WHERE id = ? AND "+ownerVisibleByID, args...)
+	if err != nil {
+		return false, mapSQLite(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, mapSQLite(err)
+	}
+	return n > 0, nil
 }
 
 // DeleteSchedule 删除；返回是否真的删掉了一行（不可见等价于不存在）。

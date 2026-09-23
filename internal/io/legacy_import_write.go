@@ -584,12 +584,16 @@ func writeSchedules(
 		}
 
 		if err := store.UpsertSchedule(ctx, scope, &core.Schedule{
-			ID:         id,
-			Owner:      scope.Owner(),
-			Name:       name,
-			Target:     target,
-			Cron:       schedule.Cron,
-			Timezone:   timezone,
+			ID:       id,
+			Owner:    scope.Owner(),
+			Name:     name,
+			Target:   target,
+			Cron:     schedule.Cron,
+			Timezone: timezone,
+			// ⚠ `MissPolicy` 与 `LastFireAt` 刻意不填（保持 nil）。
+			// 旧文件里没有这两样：填成任何一个策略，都是替用户拍板"错过要不要补"，
+			// 而那一趟可能是一次不可逆的真上游请求；填成"刚刚触发过"更是凭空造水位。
+			// nil 的语义正是"没人选过 ⇒ 跟随能力声明的默认"（见 [core.MissPolicy]）。
 			AccountIDs: accountIDs,
 			Body:       rawMessageOf(schedule.Body),
 			Enabled:    enabled,

@@ -31,6 +31,8 @@ import (
 // 换成本地时区会让断言随机器变化。
 var (
 	scheduleCreatedAt = time.Date(2026, 9, 16, 1, 0, 0, 0, time.UTC)
+	// scheduleFiredAt 是夹具里"上一次处理掉的触发时刻"（v9 的 `last_fire_at`）。
+	scheduleFiredAt   = time.Date(2026, 9, 17, 7, 30, 0, 0, time.UTC)
 	pipelineCreatedAt = time.Date(2026, 9, 16, 1, 57, 41, 0, time.UTC)
 	pipelineUpdatedAt = time.Date(2026, 9, 16, 2, 24, 7, 0, time.UTC)
 )
@@ -52,6 +54,11 @@ func configSchedule(id string) core.Schedule {
 	sc.Body = json.RawMessage(`{"codes":["口令"]}`)
 	sc.Enabled = true
 	sc.CreatedAt = &scheduleCreatedAt
+	// v9 那两列也进夹具：`TestScheduleRoundtripKeepsEveryField` 是整结构体比对，
+	// 只有夹具里带值才能守住"漏写一列 / 漏读一列"。
+	miss := core.MissCatchUp
+	sc.MissPolicy = &miss
+	sc.LastFireAt = &scheduleFiredAt
 	return sc
 }
 

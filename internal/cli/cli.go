@@ -60,6 +60,18 @@ type Deps struct {
 	// 卡在超时上、**不是**变红 —— 见 helpers_test.go 里 [refusingClient] 那条。
 	HTTP core.HTTPClient
 
+	// WebSocket 是弹幕长连接用的拨号器（`live-room` 那条链要它）。
+	//
+	// 与 [Deps.HTTP] 同一条理由：`ListenWS` 是**长连接**，而"连上之后收到什么帧、
+	// 我们又回了什么"只有把连接换掉才测得出来 —— 打真上游的那次得等主播开播。
+	// ⚠ nil 表示"用真实的那一个"（[Deps.websocket] 惰性构造）。
+	//
+	// ⚠⚠ 它与 [Deps.Random] 是**联动**的：握手 key 与每一帧的掩码 key 都从
+	// 随机源取（见 `internal/io` 的说明）。测试里给了假拨号器就不必再管随机源；
+	// 给了真拨号器而随机源是假的，得到的是一串**可复现**的掩码 —— 那正是
+	// `websocket_test.go` 逐字节断言握手的前提，不是缺陷。
+	WebSocket core.WebSocketDialer
+
 	// Waiter 是扫码轮询的等待器（登录那条循环最长要等 120 秒）。
 	//
 	// 与 [Deps.HTTP] 同一条理由，且更紧迫：Go 的 `time.Sleep` 就是真的睡，
@@ -88,6 +100,18 @@ func (d *Deps) http() core.HTTPClient {
 		return d.HTTP
 	}
 	return mcloudio.NewClient()
+}
+
+// websocket 返回 WebSocket 拨号器（惰性构造真实的那个）。
+//
+// ⚠ 随机源**必须**从 [Deps.Random] 走：拨号器自己不去摸 `crypto/rand`，
+// 否则测试里那条"掩码逐字节可复现"的性质就没了，而它正是
+// `internal/io/websocket_test.go` 唯一能证明"掩码真的生效"的手段。
+func (d *Deps) websocket() core.WebSocketDialer {
+	if d.WebSocket != nil {
+		return d.WebSocket
+	}
+	return mcloudio.NewWebSocketDialer(d.Random)
 }
 
 // DefaultDeps 是真实世界那一份。
@@ -250,11 +274,17 @@ func newRootCommand(deps *Deps) *cobra.Command {
 
 	root.AddCommand(signin)
 	root.AddCommand(newLoginCommand(deps, out))
+	// `auth` 排在 `login` 后面：两条都是"凭据"的事，先登录后维护。
+	root.AddCommand(newAuthCommand(deps, out))
 	root.AddCommand(newUserCommand(deps, out))
 	root.AddCommand(newSmidCommand(deps, out))
 	root.AddCommand(newMigrateCommand(deps, out))
 	root.AddCommand(newFixtureCommand(deps, out))
 	root.AddCommand(newCapabilitiesCommand(deps, out))
+	// `live-room` 排在能力表之后、`version` 之前：它是**唯一**一条
+	// "只在特定时间窗里有效"的命令（主播开播那几小时），
+	// 放在最前面会让人以为它是日常该跑的。
+	root.AddCommand(newLiveRoomCommand(deps, out))
 	root.AddCommand(newVersionCommand(deps, out))
 
 	return root

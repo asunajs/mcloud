@@ -5,7 +5,7 @@
 // # 分层铁律
 //
 // 本包是**组装根**之一，**必须** import github.com/catlair/mcloud/internal/io
-// —— 由 scripts/check-go-deps.sh 断言"必须"，不只是"允许"。
+// —— 由 scripts/check-go-deps.js 断言"必须"，不只是"允许"。
 //
 // 允许依赖：core、upstream、capabilities、io。
 //

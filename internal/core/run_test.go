@@ -209,7 +209,7 @@ func TestLegacyStatusFallbackIsLossyButSafe(t *testing.T) {
 }
 
 func TestRunReportRoundTripsThroughJSON(t *testing.T) {
-	// ⚠ 账号 id 用合成标识（199 号段）而不是 Rust 测试里的 `15****42`：
+	// ⚠ 账号 id 用合成标识（199 号段）：
 	// 值本身不参与跨语言对拍，而真实形状的号码会被仓库的脱敏守卫拦下。
 	acct := NewAccountID("19900001234")
 	step := NewManualStep("backup-gift", &acct, "未开启备份，请前往 App 手动开启", TargetMobileApp)

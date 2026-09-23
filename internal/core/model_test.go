@@ -536,6 +536,65 @@ func TestScheduleStatusTruthTable(t *testing.T) {
 	}
 }
 
+func TestMissPolicyTruthTable(t *testing.T) {
+	assertEnumNames(t, "MissPolicy", MissPolicy.String, []struct {
+		value MissPolicy
+		text  string
+	}{
+		{MissCatchUp, "catch_up"},
+		{MissSkip, "skip"},
+	})
+	// 与 [ParseScheduleStatus] 同一条纪律：来路不明的文本**不归默认值**。
+	// 塞成 catch_up 的后果不是显示错误，而是"每次重启凭空多跑一趟真上游"。
+	if got, ok := ParseMissPolicy("nonsense"); ok {
+		t.Fatalf("未知值应当认不出来，实得 %v", got)
+	}
+	// ⚠ `skipped` 是 [ScheduleStatus] 那一族的词，这里必须认不出来
+	// （两族共用一个解析函数 = 把"补跑策略"读成"上次执行结果"）。
+	if got, ok := ParseMissPolicy("skipped"); ok {
+		t.Fatalf("MissPolicy 没有 skipped 这一档，不该读出来：%v", got)
+	}
+	if got, ok := ParseMissPolicy("skip"); !ok || got != MissSkip {
+		t.Fatalf("skip 应能读回，实得 %v ok=%v", got, ok)
+	}
+	// ⚠ `skip` 与 `catch_up` 只差在字面，但 `catch_up` **带下划线**：
+	// 写成 `catchup` 时前端 `switch` 走 default 且不报错，与 FieldKind 那条同理。
+	if got, ok := ParseMissPolicy("catchup"); ok {
+		t.Fatalf("没有 catchup 这一档（正确字面是 catch_up），实得 %v", got)
+	}
+	if got, ok := ParseMissPolicy("catch_up"); !ok || got != MissCatchUp {
+		t.Fatalf("catch_up 应能读回，实得 %v ok=%v", got, ok)
+	}
+}
+
+// TestMissPolicyJSONIsTextNotNumber 钉住"对外是文本"这一条：
+// Go 的 `type X int` 默认序列化成**数字**，而界面与库里都按文本走。
+// 漏写 MarshalJSON 时只有这一条会红 —— String / Parse 那两侧照旧全绿。
+func TestMissPolicyJSONIsTextNotNumber(t *testing.T) {
+	skip := MissSkip
+	data, err := MarshalJSON(skip)
+	if err != nil {
+		t.Fatalf("序列化 MissPolicy: %v", err)
+	}
+	if string(data) != `"skip"` {
+		t.Fatalf("期望带引号的文本，实得 %s", data)
+	}
+	var back MissPolicy
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("反序列化: %v", err)
+	}
+	if back != MissSkip {
+		t.Fatalf("往返之后变了：%v", back)
+	}
+	// 数字形态必须**报错**：那是"库里被人手工填了 1"的形状，读成合法值等于猜意图
+	if err := json.Unmarshal([]byte(`1`), &back); err == nil {
+		t.Fatal("数字不该被接受")
+	}
+	if err := json.Unmarshal([]byte(`"nope"`), &back); err == nil {
+		t.Fatal("未知文本该报错，而不是归默认值")
+	}
+}
+
 func TestPipelineStatusTruthTable(t *testing.T) {
 	assertEnumNames(t, "PipelineStatus", PipelineStatus.String, []struct {
 		value PipelineStatus

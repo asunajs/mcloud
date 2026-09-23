@@ -71,6 +71,18 @@ export const IconExchange = (props: IconProps): JSX.Element => (
   </svg>
 )
 
+/** 直播小红花：五瓣花（花心 + 五片花瓣圆）。 */
+export const IconFlower = (props: IconProps): JSX.Element => (
+  <svg {...base} class={props.class}>
+    <circle cx="12" cy="12" r="2.4" />
+    <circle cx="12" cy="6.5" r="3.1" />
+    <circle cx="17.2" cy="10.3" r="3.1" />
+    <circle cx="15.2" cy="16.5" r="3.1" />
+    <circle cx="8.8" cy="16.5" r="3.1" />
+    <circle cx="6.8" cy="10.3" r="3.1" />
+  </svg>
+)
+
 /** 定时任务：时钟。 */
 export const IconSchedule = (props: IconProps): JSX.Element => (
   <svg {...base} class={props.class}>

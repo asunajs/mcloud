@@ -13,7 +13,8 @@
 | 看**现在能跑什么、还差什么** | [`status.md`](./status.md) —— 一页总览 + 按任务指路 |
 | 敲命令 / 查参数 | [`cli-usage.md`](./cli-usage.md) —— CLI 操作手册 |
 | 改签到那条链路的**编排逻辑** | [`signin-cli-spec.md`](./signin-cli-spec.md) —— `mcloud signin` 的编排层规格 |
-| 改代码 / 跑门禁 / 搞清分层 | [`dev-gates.md`](./dev-gates.md) —— Go 侧九条门禁 + 分层铁律 |
+| 改**刷新 auth / 换 token**（该不该刷、哪一端的头、四个触发面口径、哪些还没实测） | [`auth-refresh.md`](./auth-refresh.md) —— 参考实现（旧项目）把它当**每轮任务收尾的常规动作**，本仓同样到点就换，没有"先批准"那道闸（§1）；⚠ 要留神的是 PC 那一支**形状未实测**（§8 待验证） |
+| 改代码 / 跑门禁 / 搞清分层 | [`dev-gates.md`](./dev-gates.md) —— Go 侧十条门禁 + 分层铁律 |
 | 加文件 / 起新目录 / 查命名 | [`repo-layout.md`](./repo-layout.md) —— 目录结构 + kebab-case 规则 |
 | 动**迁移**相关的东西（还剩哪些步、当初踩过什么） | [`go-migration-plan.md`](./go-migration-plan.md) + [`migration-pitfalls.md`](./migration-pitfalls.md) |
 | 实现某个**业务能力**（签到、领取、抢兑…） | [`business-feature-inventory.md`](./business-feature-inventory.md) —— 旧 TS 项目 19 项逐条拆到"照着能写代码" |
@@ -34,8 +35,8 @@
 | 文档 | 一句话 | 状态 |
 | --- | --- | --- |
 | [`status.md`](./status.md) | 现在能跑什么、还差什么；按任务指路 | **实况**（最后核对 2026-09-22） |
-| [`go-migration-plan.md`](./go-migration-plan.md) | **Rust → Go 的执行方案**：冻结策略、目录与包映射、九条门禁、顺序与每步退出判据 | **执行中** |
-| [`migration-pitfalls.md`](./migration-pitfalls.md) | 实测踩坑登记（`§6.1 #1…#100` 那张表的**活文档**：编号沿用，新条目接在最后） | **活文档** |
+| [`go-migration-plan.md`](./go-migration-plan.md) | **Rust → Go 的执行方案**：冻结策略、目录与包映射、十条门禁、顺序与每步退出判据 | **执行中** |
+| [`migration-pitfalls.md`](./migration-pitfalls.md) | 实测踩坑登记（`§6.1` 那张表的**活文档**：编号沿用，新条目接在最后。⚠ **当前条数看文件抬头**，这里不抄数字） | **活文档** |
 | [`business-feature-inventory.md`](./business-feature-inventory.md) | 旧 TS 项目 19 项能力逐条拆解 + 运行时层缺口 + 硬编码清单 | 编排中（抬头有 2026-09-22 的 Go 侧现状核对） |
 | [`caiyun-go-feature-inventory.md`](./caiyun-go-feature-inventory.md) | **① 总览 · 四条公共语义 · 能力逐条（§0 ~ §2）** | 2026-09-22 拆三篇 |
 | [`caiyun-go-exchange-and-runtime.md`](./caiyun-go-exchange-and-runtime.md) | **② 抢兑子系统与运行时层（§3 ~ §4）** —— 下单响应分支表、分类→重试决策表、锁与令牌桶、cron 与事件 | 同上，`§` 编号连续 |
@@ -57,6 +58,7 @@
 | --- | --- | --- |
 | [`cli-usage.md`](./cli-usage.md) | 子命令、签到七个要点、退出码、迁移 | **规范** |
 | [`signin-cli-spec.md`](./signin-cli-spec.md) | `mcloud signin` 编排层规格（状态机、参数、副作用边界） | **规范**（§1–§5 为现行；历史段见 `archive/`） |
+| [`auth-refresh.md`](./auth-refresh.md) | **刷新 auth**（换 token）这一条链路：证据分档（App 实拍 / PC 未实测）、判据三档、单位陷阱、CLI + HTTP + WebUI + 调度四面口径、凭据边界 | **规范 + 证据**（2026-09-22 落地，2026-09-23 接上调度那一面） |
 
 ### 上游协议（`docs/upstream/`，按端分文件、互为姊妹篇）
 
@@ -94,7 +96,7 @@
 
 | 文档 | 一句话 | 状态 |
 | --- | --- | --- |
-| [`dev-gates.md`](./dev-gates.md) | Go 侧九条门禁 + 分层铁律（依赖方向的可执行断言） | **规范**（改代码前必读） |
+| [`dev-gates.md`](./dev-gates.md) | Go 侧十条门禁 + 分层铁律（依赖方向的可执行断言） | **规范**（改代码前必读） |
 | [`repo-layout.md`](./repo-layout.md) | 目录结构 + 文件命名（kebab-case 及三类豁免） | **规范**（加文件前必读） |
 | [`credential-boundary.md`](./credential-boundary.md) | 凭据边界：哪些值能进 GitHub、哪些只能进日志 | **规范** |
 | [`sanitize-guide.md`](./sanitize-guide.md) | 抓包脱敏 SOP、标识守卫用法、真实值泄露后如何改写历史 | 最后核对 2026-09-19 |
@@ -120,6 +122,9 @@
 | `app-api-families.txt` | App 业务接口的两套互斥形态（A：`x-yun-uni` 无 `signature`；B：反之） |
 | `app-signin-samples.txt` | App 签到链路抓包样本 |
 | `app-rights-token-samples.txt` | App 权益 / token / 待领取族样本（`queryAvailableBenefit`、`queryUserBenefits`、`refreshToken`、`queryRights`、`pointsNotClaimed`） |
+| `app-exchange-samples.txt` | App **兑换**族样本（含 `§5.5`/`§5.6`）—— 判据：上游码**只判等、不判形状**（`2301` 是四位） |
+| `app-live-redflower-samples.txt` | App **直播口令 / 小红花**族样本（`§5.x`）—— ⚠ `§6` 那条"WS 结构性地抓不到"的判据（`chatRoomId: null`）在这里；实现落点见 [`status.md`](./status.md) |
+| `probe-live-room-<日期>.md` | **脚本产出**（`scripts/probe-live-room.js`）—— 开播后每次核对都往这里**追加**一次运行记录与原始输出。⚠ 清单的权威版本在**脚本里**，这里只是记录（坑表 #116） |
 | `app-sms-login-samples.txt` | App 短信登录抓包样本（**含 `§0` 的取证方法**） |
 | `web-qr-login-samples.txt` | PC Web 扫码登录样本 |
 | `logout-sms-requests.txt` | PC 客户端退出 + 短信请求 |
@@ -139,7 +144,7 @@
 | 争什么 | 以谁为准 | 别处怎么处理 |
 | --- | --- | --- |
 | **实现进度**、当前测试数、当前能力边界 | [`status.md`](./status.md) | 各篇抬头写"现状以 `status.md` 为准"，正文不抄数字 |
-| **门禁条数与怎么跑** | [`dev-gates.md`](./dev-gates.md) | `go-migration-plan.md` §5 只写"为什么是这九条" |
+| **门禁条数与怎么跑** | [`dev-gates.md`](./dev-gates.md) | `go-migration-plan.md` §5 只写"为什么是这十条" |
 | **文件放哪 / 叫什么名** | [`repo-layout.md`](./repo-layout.md) | 脚本 `check-filenames.js` 的注释指向它 |
 | **CLI 参数与语义** | [`cli-usage.md`](./cli-usage.md) | `signin-cli-spec.md` 只写编排层，参数不重复定义 |
 | **签到链路的编排规格**（状态机、副作用边界） | [`signin-cli-spec.md`](./signin-cli-spec.md) §1–§5 | 历史段在 `archive/`，只作证据不作现行 |

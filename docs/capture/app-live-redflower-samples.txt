@@ -1,0 +1,631 @@
+直播 / 小红花（`kouling` 直播口令 + `red-flower` 抽小红花）抓包计划与静态证据
+================================================================
+
+> 目标：把「进直播间 → 拿口令 → 抽小红花」这条链路，从「旧项目 TS 里看得到」
+> 推进到「**本仓库有实拍**」，为将来落 Go 代码铺信息面。
+>
+> ⭐ **2026-09-22 用户拍板**：**重抓一次真机包**，**两块一起**
+> （小红花 6 个接口 + 直播约 20 个接口含 WebSocket 长连）。
+>
+> ⭐⭐ **同日已抓完一轮，实拍见 §5**。结论分两半：
+> - **小红花那六个接口全抓到了**（含余额字段、判据码 `200108`/`200110`、埋点形态）；
+> - **直播只走到房间心跳** —— `roomBeat` 回 `status:0` + `expectStartTime: 2026-09-23 14:30:00`
+>   + **`chatRoomId: null`** ⇒ **今天没开播，WS/弹幕/口令结构性抓不到**（不是抓漏了）。
+>   ⇒ 剩的要在 **9-23 14:30 之后**再抓一次。
+>
+> ⚠⚠ **开工前先看清三件事 —— 别把它当成"从零开始"**：
+>
+> 1. **仓库里已经有一批 2026-09-17 的夹具**（7 份、约 1.4 MB，凭据已 `<REDACTED>`）：
+>    `test/fixtures/http/` 下的 `领小红花.json`、`领小红花2.json`、`领小红花18.json`、
+>    `小红花登录.json`、`直播716.json`、`直播723.json`、`直播wss.json`（**750 KB，WS 帧**）。
+>    接口清单见 §0。**重抓 = 更新 + 补缺**，旧样本里的**协议结构**（尤其 WS）仍然有效。
+> 2. **静态证据很全**（旧项目 TS，§1）：请求顺序、判据码（`200110` / `200112`）、
+>    WS 的两个 md5 签名头、MSync 字段、口令解析的 4 个分支 —— **逐字都在**。
+>    ⇒ 抓包是去**对拍它今天还成不成立**，不是去猜。
+> 3. **Go 侧零实现**：`business-feature-inventory.md` 明写 #15 小红花、#19 直播口令
+>    在 `internal/` `cmd/` 里按关键词**全查不到**。
+>
+> ⚠ 术语（沿用 `business-feature-inventory.md`，**不生造**）：
+> **原项目** = `mcloud-sign`（TypeScript，本仓库前身）；**参考项目** = caiyun（Go，外部同行）；
+> **本项目** = mcloud（Go）。本文档列前者时一律标"**旧项目**"，它**不是本仓库的实证**。
+
+## 0. 已有家底（2026-09-17 那批夹具里的接口，逐字）
+
+### 0.1 小红花：`m.mcloud.139.com/ycloud/liveRoomFeedback/…`
+
+| 接口 | 方法 | 出处 |
+| --- | --- | --- |
+| `live/info` | POST | 领小红花18、小红花登录 |
+| `user/info` | POST | 领小红花、小红花登录 |
+| `redFlower/draw` | POST | 领小红花 |
+| `redFlower/queryRevivalFlowers` | GET | 领小红花2、领小红花18 |
+| `user/getRedFlowerTop10List` | GET | 领小红花18、小红花登录 |
+| `firstParticipate/give` | POST | 领小红花18、小红花登录 |
+
+旁挂（同一批里）：`GET manager/commonMarketconfig/getRuleInfo`、`GET prize/prizepool/list`、
+三份动画资源 `GET img.mcloud.139.com/portal/yunClound/liveRoomFeedback/animate{new,revive,stage}/data.json`、
+以及 `POST wx.10086.cn/website/bind/oneKeySignIn/sign`（领小红花2，**外站**，注意它不属 `/ycloud`）。
+
+⚠ **旧项目那 5 条埋点 `visitlog/journaling` 在这批夹具里一个都没出现** ——
+要么当时没抓全，要么 H5 埋点走了别的域。重抓时**要特意确认它还在不在**（§6 问题 4）。
+
+### 0.2 直播：`v.cmcc-cs.cn/cmlive`、`videoim.cmcc-cs.cn`
+
+| 分组 | 接口 |
+| --- | --- |
+| 登录链 | `POST user/auth/cmpassLoginByCmToken`、`POST user/unifyAuth/getCmPassToken`、`POST user/customer/userToken`、`POST base/plugin/getPluginPass` |
+| 房间 | `POST room/front/roomBeat`、`POST room/front/leaveRoom`、`GET room/front/shelves`、`POST room/front/imHistory/<roomId>` |
+| 粉丝 / 礼物 | `GET room/fans/getFocusStatus`、（wss 那份是 `getFocusStatusNew`）、`GET gift/gift/giftBox` |
+| 自己 | `GET user/auth/getCurrentUserInfoNew`、`POST user/customer/actionReport` |
+| 频道 | `GET channel/channel/tabList`、`GET channel/channel/tabContentList` |
+| WS | `GET videoim.cmcc-cs.cn:20102/ws/info`、`POST videoim.cmcc-cs.cn:20103/v3/room/member/apply` 与 `/quit` |
+| 历史弹幕 | `GET v.cmcc-cs.cn/prd-cmlives/imChatRoomHistoryMessage/<roomId>_<n>.json`（旧样本里 `145453_2..14` 共 13 片） |
+| 外站 | `POST om.mrp.139.com/UOP-API/api/hcyLogin/versionConfig`、`POST h.139.com/ccopapi/auth/loginByToken/<token>` |
+
+⚠ **公共头里的 `sourceCode=017027`** 是这一族的标志（`device-and-source-codes.md`：
+`017027` 命中 238 次、"直播系列"专属，`直播登录.har` **只有这一个值**）⇒ 重抓时拿它当**过滤器**。
+
+## 1. 静态证据（旧项目 TS 逐字 —— 是**线索**，不是本仓库实证）
+
+### 1.1 `red-flower` 口令抽小红花：六个请求，顺序固定
+
+（`packages/core/src/tasks/red-flower/standalone.ts:23-96`，base `https://m.mcloud.139.com/ycloud`）
+
+| # | 请求 | 判据 |
+| --- | --- | --- |
+| 1 | `POST liveRoomFeedback/user/info` | `code!==0` ⇒ **整账号放弃**（返回 `{0,[]}`） |
+| 2 | `POST visitlog/journaling` × 5（`National_LiveRoomFeedback_{pv,client,client_isApp,login,flowerBtn}`），`sourceid=1007`，`marketName=National_LiveRoomFeedback` | 串行、**无并发** |
+| 3 | `POST liveRoomFeedback/firstParticipate/give` | `0` 成功；**`200110` = 无首次资格**（静默） |
+| 4 | `POST liveRoomFeedback/redFlower/draw?code=<encode>` × N | `0` + result 成功；**`200112` 同一账号已兑过这条口令**（不当无效、不从共享缓存剔除）；其他数字 ⇒ **无效口令**；响应无法解析 ⇒ 只 warn、**不判无效以免误伤** |
+| 5 | `GET liveRoomFeedback/redFlower/queryRevivalFlowers` | 只读余额 |
+| 6 | 再 `POST user/info` | 终值核对 |
+
+- **头**：`activityid: sign_in_3`、`appversion: 12.6.0.0`、referer
+  `…/portal/yunClound/index.html?path=National_LiveRoomFeedback`、iPad UA。
+  ⚠ `activityid` 是 **`sign_in_3`** —— 与签到同族，不是直播专属。
+- **可变状态**：调用前 `ctx.http.clearAuth()`（`packages/api/src/tasks/red-flower.ts:19`），
+  **该入口没有 `restoreAuth`**（`kouling` 那条链用 `finally` 恢复）⇒ 新项目 HTTP 客户端
+  **不应持有可变凭据**（凭据随请求传入）。
+- **参数**：`codes: string[]`；**缺省则自动走 `kouling` 的抓取链**（§1.2），
+  跨账号进程内缓存 **5 h**（`live-room-kouling.ts:454-455`）。
+- **旧项目的真实 bug**：`:20-21` 把 `DrawRedFlowerResult`（`{total,invalidCodes}`）当数字赋给 `gained`。
+
+### 1.2 `kouling` 直播口令：门 + 双源（WS / 小红书）
+
+**门（`hasActiveLiveRoom`）**，三请求：
+
+1. `user-njs.yun.139.com/user/querySpecTokenV2 {toSourceId:"017027"}`
+2. `v.cmcc-cs.cn/cmlive/api/user/auth/cmpassLoginByCmToken`
+3. `GET …/api/channel/channel/tabContentList?tabId=127&contentType=0&pageNo=1&channelId=134`
+   → 过滤 `room.status===1`（`1`=直播中、`6`=已结束）**且 `anchor === "中国移动云盘"` 精确相等**
+   （⚠ 主播改名即失效）
+
+⚠ **门的行为很怪，重抓时要注意**：SSO/登录失败时 `return true` 放行（"避免因临时故障漏掉口令"）；
+但真的拉到列表且**目标房间数 0** ⇒ `return false` ⇒ **整个任务跳过**（不抓、不领）。
+
+**源 A · WebSocket**（`Promise.all` 双源之一）：
+
+`getCurrentUserInfoNew` → `POST api/user/customer/userToken`（→ `access_token`，约 66 字符 **`A03` 前缀**）
+→ `POST api/room/front/roomBeat {roomId, channelId:134, sourceApp:0}`（→ `chatRoomId`，缺失回退 `String(roomId)`）
+→ `POST https://videoim.cmcc-cs.cn:20103/v3/room/member/apply {roomId:chatRoomId, userName/invoker:"cmlive_c_<phone>"}`
+
+`apply` 的头（`apis/live-room-chat.ts:96-116`）：`timestamp`（完整 ms 串）、`deviceinfo`（**40 B hex 形态**）、
+`appkey: cmos/ngvlcs`、`authorization: Bearer <token>`、`version: v23.0.2`，再加**两个签名头**：
+
+```text
+systemmd5 = md5(deviceInfoBytes ‖ utf8(ts 末 10 位))
+tokenmd5  = md5("Bearer " + token[0:10] + ts 末 10 位 + token[10:])
+```
+
+→ **`wss://videoim.cmcc-cs.cn:20102/ws/<serverId(0-999)>/<sessionId base36-13>/websocket`**
+（`User-Agent` 是 Android Chrome、`Origin: https://v.cmcc-cs.cn`）。
+
+- **SockJS 文本帧**：`"o"` ⇒ 发 PROVISION；`"h"` ⇒ **回 `"h"`**（被动心跳）；
+  非 `a["` 前缀 ⇒ debug 忽略；数据帧 `a["<base64 MSync>"]`。
+- **MSync**（`packages/core/src/live-room/proto.ts`，proto3 **内联字符串、无 .proto 文件、无 codegen**）：
+  `version=MSYNC_V1`、`guid=JID{appKey:"cmos#ngvlcs", name:"cmlive_c_<phone>", domain, clientResource:"js_<ts>"}`、
+  `auth="$t$"+accessToken`、`crypto=0`、`userAgent` iPad、`command`、`deviceId=0`、`encryptType=[0]`、
+  `timestamp` 8 B 大端、`identification` 随机 16 B、`deviceInfo` 固定 40 B hex（应用级常量）。
+  PROVISION 的 payload = `Provision{osType:7 OS_JS, version:"23.0.2", networkType:1 WIFI,
+  appSign:"cmlive_cmos_js_sdk", compressType:[0], encryptType:[0], deviceUuid:String(Date.now()),
+  resource, auth:"$t$"+token, deviceName:"webim", province_code:""}`。
+- ⭐ **关键时序**：`command===3`（PROVISION 响应）后**必须再发 UNREAD(1)**，服务器才开始推弹幕。
+  之后只处理 `SYNC(0)` / `NOTICE(2)`：`SYNC → CommSyncUL.meta.payload → MessageBody.contents[0].text`；
+  `NOTICE → NoticePayload.meta.payload → MessageBody`；**每层解不开就直接把 payload 当 `MessageBody`
+  再解一次**（双兜底），再失败则 debug 打印前 64 字节 hex。
+- **口令解析**（`live-room/kouling.ts`，文件头注释给了 5 个样例、实现是 **4 个分支按顺序累加**）：
+  ① `小红花口令[：:]\s*(.+)`；② 按行扫 `(?:复制)?口令\s*\d*\s*[：:]$` 结尾的行 ⇒ 取**下一行**
+  （前提该行不以 `口令` 开头、不含 `无随机`），同一行内多口令用带前瞻的正则切分；
+  ③ `口令是(.+)`；④ **纯数字编号 `1:X 2:Y 无随机`** —— 仅当 ①②③ 都没命中**且文本含"无随机"**时兜底。
+  ⚠ **跨帧拼接**：整条弹幕以 `isKoulingHead` 结尾 ⇒ 把**下一帧整条 trim** 当口令。
+  ⚠ **提问过滤**：含 `?`/`？` ⇒ 丢弃；去句尾语气词（`呀啊吧呢嘛哦`）后整条等于
+  `什么/啥/多少/几/哪个/哪些` 之一 ⇒ 丢弃。
+  ⚠ 旧项目 `__tests__` 里 **8 条口令单测可直接当黄金用例** —— 将来落代码时先搬它。
+  `timeout=0` ⇒ 收到一个即返回；上限硬收敛到 **180000 ms**。
+
+**源 B · 小红书**：`GET https://www.xiaohongshu.com/user/profile/<24 位 hex>`
+（**硬编码主播主页、无凭据**，UA/referer 伪装桌面 Chrome）→ 四级候选抽取
+（内嵌 JSON `displayTitle|title|desc` → 服务端渲染标签 → `<meta content>` → 全文降级），
+**按页面顺序第一条命中即返回**。⚠ HTML 改版即**静默返回 `[]`**（只有 debug 日志）。
+
+**领取**：`clearAuth()` → `drawRedFlowerForAccount`（复用 §1.1 那 6 步判据）→ `finally restoreAuth`。
+有 `invalidCodes` ⇒ 重听一次（`getLiveKouling(60000)`）→ 从共享缓存剔除 → **只投新口令**。
+
+## 2. 这次要抓什么（按风险从低到高）
+
+| # | 要抓的东西 | 怎么拿到 | 风险 |
+| --- | --- | --- | --- |
+| 1 | **有没有在直播的房间**（门的第 3 步 `tabContentList`） | 打开 App 进直播入口 | 零（只读）；⚠ 但**非直播时段房间数为 0** ⇒ 门的第 3 步拿不到，整条链走不通 |
+| 2 | **小红花六步**的今天版本（尤其 `user/info` 与 `draw`） | App 里点小红花 | ⚠ `draw` 是**写操作**（`give` 只读）；口令错只回无效码、不扣花 |
+| 3 | **登录链 4 条**（`cmpassLoginByCmToken` / `getCmPassToken` / `userToken` / `getPluginPass`） | 进直播间时自动发 | 零 |
+| 4 | **`apply` 的两个签名头**与 `member/apply` 请求体 | 同上 | 零；⭐ **这是可黄金对拍的部分**（`systemmd5` / `tokenmd5` 能复算） |
+| 5 | **WS 帧序列**（`o` → PROVISION → `3` → UNREAD(1) → 弹幕 `a["…"]`） | 在直播间**停留 ≥ 1 分钟**等弹幕 | 低；⚠ **必须停留**，只进不出拿不到弹幕 |
+| 6 | **一条真实口令**及其弹幕原文 | 等主播发口令 | ⚠ 取决于当天有没有播；拿不到也不算失败（结构照样能抓） |
+| 7 | **`draw` 用一个有效口令**的响应（`code 0`） | 拿到口令后投 | ⚠⚠ **会真抽小红花**（不可逆）；**投之前先问** |
+| 8 | ~~**`200112` 已兑换**的响应~~ ⛔ **已移除（2026-09-23）** | ~~同一个口令**再投一次**~~ | ⚠⚠ 它要"**同一账号**把同一条**正确**口令投第二次"才出得来。而**口令全场通用、不存在消耗** ⇒ "投两次造样本"这条路**不该走**（探针 `probe-live-room.js` 已删该分支）。**只能等真实触发**。 |
+
+⇒ **1–6 是只读或低风险，可以直接抓**；**7 要投口令 ⇒ 抓到口令后先停，回来问**（8 已移除）。
+
+## 3. 判据链（这条链路到底成没成）
+
+- **门成立** = `tabContentList` 里存在 `status===1` 且 `anchor==="中国移动云盘"` 的房间；
+- **WS 通** = 看到 `o` 帧后有 PROVISION 发出、收到 `command===3`、随后有 `a["…"]` 数据帧；
+- **拿到口令** = 数据帧解出的文本命中 §1.2 那 4 个分支之一；
+- **抽到小红花** = `draw` 回 `code 0` 且 `result` 非空；**`user/info` 的余额前后有差**；
+- ⚠ **对拍量要选对**：`user/info` 才是终值核对的那一个（六步的第 1 步与第 6 步**都是它**），
+  别拿 `queryRevivalFlowers`（只读"复活花"）当余额 —— 与 `app-exchange-samples.txt` §1.5 那个
+  "`beforeTotal` 不是余额"是**同一类坑**。
+
+## 4. 硬约束（操作前必读）
+
+1. **通路只能走代理**。⚠ 已经踩过一次：App 的 FXTrace 日志**只记原生网络层**，
+   H5/WebView 发出的请求**一条都不记**（`app-exchange-samples.txt` §0 那条，读了 34 个批次零命中）。
+   小红花走 `m.mcloud.139.com`（H5 站）⇒ **必走代理**。
+2. **代理环境已就绪**（2026-09-22 实测）：Reqable 本机 **PID 13312、监听 `*:9000` 全网卡**，
+   本机局域网 IP = **`192.168.3.182`** ⇒ 真机代理填 **`192.168.3.182:9000`**。
+   ⚠ 上次经验：**iPad App（`com.apple.WebKit.Networking`）直接信任了 CA，没有遇到证书固定**
+   ⇒ 这次优先同样走 iPad，别换设备。
+3. **别在抓包时乱点**：直播的 `roomBeat` 是心跳，进出房间会刷很多；
+   抓"一条干净的路径"比"抓全"有用。
+4. **凭据边界**：仓库只允许 `199` 开头的合成标识；`authorization` / `jwttoken` / cookie
+   不得进文档与 fixture（现有那批已是 `<REDACTED>`，保持）。
+
+## 5. 实拍（2026-09-22，iPad 真机）
+
+> **环境**：iPad（`com.apple.WebKit.Networking`，pid 19523）、MCloudApp `12.6.0`、iOS 18.7、
+> 账号 **`159****7542`**（移动号段 —— 与 `app-exchange-samples.txt` §5.5 用的是同一个）。
+> 代理 Reqable `*:9000`。**时刻**用响应头 `date`（GMT），本地 = GMT+8。
+> ⚠ **凭据一律不落本文档**；`jwttoken` / `Authorization` / cookie 只记**形态与字段含义**。
+
+### 5.1 小红花：`m.mcloud.139.com/ycloud/liveRoomFeedback/…`
+
+**公共请求头（六个请求全带）**：
+
+```text
+host: m.mcloud.139.com
+activityid: sign_in_3                      ⭐ 与签到同族，不是直播专属
+appversion: 12.6.0.0
+jwttoken: <JWT>                            （cookie 里另有一份 jwtToken，内容相同）
+user-agent: Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15
+            (KHTML, like Gecko) MCloudApp/12.6.0 iPad AppLanguage/zh-CN
+referer: https://m.mcloud.139.com/portal/yunClound/index.html
+         ?path=National_LiveRoomFeedback&sourceid=1007&token=<…>&targetSourceId=001005
+origin: https://m.mcloud.139.com
+sec-fetch-site: same-origin
+```
+
+另有：`x-tingyun: c=B|pedlnAWR7Sg;x=<32hex>;u=base64#QkZKQUpESkhGRUM`（**只有部分请求带**）、
+cookie `JSESSIONID` / `userDomainId=1039…956` / `cookieToken` /
+`cookieTokenKey`（base64，解出 `mobile:159****7542:…`）/ 神策与 GrowingIO 的一堆埋点 cookie。
+
+⚠ **三个请求的"请求体形态"各不相同，别统一成 JSON**：
+
+| 请求 | content-type | 请求体 |
+| --- | --- | --- |
+| `user/info`、`live/info` | `application/json` | `{}`（`content-length: 2`） |
+| `visitlog/journaling` | **`application/x-www-form-urlencoded;charset=UTF-8`** | 见下 |
+| `firstParticipate/give`、`redFlower/draw` | **无 content-type**（`content-length: 0`） | 空 |
+
+**逐条（按时间）**
+
+| # | ID | `date`(GMT) | 请求 | 响应（逐字） |
+| --- | --- | --- | --- | --- |
+| 1 | 5050 | 09:04:12 | `GET user/getRedFlowerTop10List` | `{"code":0,"msg":"success","result":[{"userMobile":"139****4265","flowerCnt":2055},{"userMobile":"178****5219","flowerCnt":2050},{"userMobile":"188****1300","flowerCnt":2050},{"userMobile":"131****0713","flowerCnt":2040},{"userMobile":"183****4197","flowerCnt":2015},{"userMobile":"138****3849","flowerCnt":2005},{"userMobile":"138****9850","flowerCnt":2000},{"userMobile":"158****2660","flowerCnt":1990},{"userMobile":"136****8005","flowerCnt":1975},{"userMobile":"136****7167","flowerCnt":1975}]}` |
+| 2 | 5078 | 09:04:13 | `POST user/info` body `{}` | `{"code":0,"msg":"success","result":{"isQuarterDrawed":0,"flowerCnt":235,"prizeId":0,"secondPrizeId":0,"redFlowerValidDate":"2026年12月31日","hasNotReceivedRedFlower":0}}` |
+| 3 | 5079 | 09:04:13 | `POST firstParticipate/give` body 空 | `{"code":200110,"msg":"您已参与过活动，无法获得首次参与惊喜奖"}` |
+| 4 | 5084 | 09:04:13 | `POST live/info` body `{}` | `{"code":0,"msg":"success","result":[]}` |
+| 5 | 5195 | 09:04:27 | `POST redFlower/draw?code=%E6%B5%8B%E8%AF%95`（= `测试`）body 空 | `{"code":200108,"msg":"口令不对耶，口令需当场直播获取才有效哦"}` |
+| 6 | 5423 | 09:05:09 | `POST visitlog/journaling` | `{"code":0,"msg":"success"}` |
+| 7 | 5424 | 09:05:09 | `POST redFlower/draw?code=%E4%BD%A0%E5%A5%BD`（= `你好`）body 空 | 同 #5（`200108`） |
+| 8 | 5425 | 09:05:09 | `POST user/info` body `{}` | 同 #2 —— **`flowerCnt` 仍是 `235`** |
+
+**#6 的请求体**（form-urlencoded，逐字）：
+
+```text
+module=uservisit&optkeyword=National_LiveRoomFeedback_flowerBtn&sourceid=1007&marketName=National_LiveRoomFeedback
+```
+
+⭐⭐ **`user/info` 的字段语义**（这才是"余额"那一个）：
+
+| 字段 | 值 | 含义 |
+| --- | --- | --- |
+| `flowerCnt` | `235` | ⭐ **小红花数量**（#2 与 #8 两次都是 235 ⇒ 两次 `draw` 失败，**余额一分未动**） |
+| `redFlowerValidDate` | `2026年12月31日` | ⭐ **小红花有效期**（中文串，不是时间戳） |
+| `isQuarterDrawed` | `0` | 季度奖是否已抽 |
+| `prizeId` / `secondPrizeId` | `0` / `0` | 一/二等奖 id |
+| `hasNotReceivedRedFlower` | `0` | 是否有"未领取"的小红花 |
+
+⚠ 别拿 `getRedFlowerTop10List` 的 `flowerCnt` 当自己的余额 —— 那是**别人的排行榜**
+（第一名 2055）。与 `app-exchange-samples.txt` §1.5「`beforeTotal` 不是余额」**同一类坑**。
+
+⭐⭐ **实拍出的顺序与旧项目 §1.1 不完全一致**：
+
+- 首屏（09:04:12–13）：`getRedFlowerTop10List` → `user/info` → `firstParticipate/give` → `live/info`
+- 点"领小红花"按钮（09:05:09）：**先** `visitlog/journaling`(`_flowerBtn`) → `draw` → **再** `user/info`
+
+⇒ 旧项目把 5 条埋点放在 `user/info` 之后、当成一次性前奏；实拍显示 **`_flowerBtn` 是"点按钮"
+那一刻发的**，且 **`draw` 之后会再刷一次 `user/info`**（终值核对）—— 后半段与旧项目第 6 步一致。
+
+### 5.2 直播：`v.cmcc-cs.cn/cmlive`（⭐ 未开播，链路只走到一半）
+
+**房间是纯 H5 页面**（不是原生）：
+
+```text
+GET https://v.cmcc-cs.cn/cmlive/live/room
+    ?id=147606&cmliveChannelId=134&targetSourceId=017027&cmpassToken=<…>
+```
+
+（埋点 cookie `$latest_landing_page` 里还留着先进过的另一间：**`id=146662`**，同 `channelId=134`。）
+
+**唯一抓到的业务 API：`POST /cmlive/api/room/front/roomBeat`**（ID 5645，09:05:44）
+
+请求头：
+
+```text
+Content-Type: application/json
+Authorization: <JWT>                                    ⭐ 见下
+X-Requested-With: XMLHttpRequest
+X-Tingyun: c=B|pedlnAWR7Sg;x=<32hex>;u=base64#RFMxNTkwOTM5NzU0Mg     （尾部 base64 = DS159****7542）
+Referer: https://v.cmcc-cs.cn/cmlive/live/room?id=147606&cmliveChannelId=134&targetSourceId=017027
+Origin: https://v.cmcc-cs.cn
+```
+
+请求体（逐字）：`{"roomId":"147606","channelId":"134","sourceApp":0}`
+
+响应（逐字，删去无关的 null 字段后）：
+
+```json
+{"rtnMsg":null,"rtnCode":"0","object":{
+  "status":0,
+  "channelId":134,
+  "title":"中秋佳节云相伴！看直播赢好礼",
+  "descrip":"中秋佳节云相伴！看直播赢好礼",
+  "expectStartTime":"2026-09-23 14:30:00",
+  "pullUrl":null,"chatRoomId":null,"startTime":null,"endTime":null,
+  "uv":null,"likeCount":null,"playbackUrl":null,"duration":null,
+  "anchor":{"id":1430,"authorId":56,"nickname":"中国移动云盘",
+            "totalReward":477452,"agentId":"…","channelId":134},
+  "activities":[],
+  "ext":{"realtime":"1","txreportable":"0","sanchor":"1","sfocus":"1","renter":"1",
+         "sbox":"1","slike":"1","rlike":"1","tenter":"60","rreward":"1","squicklive":"1",
+         "sshelves":"1","sreward":"0","txtranscode":"1","spubmsg":"1","tlike":"60",
+         "rchat":"1","sreport":"1","rfocus":"1","order":"1"},
+  "channelSubcribeStatus":1,"roomStyle":1,"msgList":null}}
+```
+
+⭐⭐⭐ 这一个响应把"为什么抓不了"钉死了：
+
+| 字段 | 值 | 说明 |
+| --- | --- | --- |
+| `rtnCode` | **`"0"`（字符串）** | ⚠⚠ 与 `/ycloud` 侧的 `code`（**数字**）**是两套约定**，别共用解析 |
+| `object.status` | **`0`** | ⭐ **未开播**（旧项目：`1`=直播中、`6`=已结束 ⇒ `0` 是那两种之外的一档） |
+| `expectStartTime` | **`2026-09-23 14:30:00`** | ⭐⭐ **明天 14:30 才开播** |
+| `chatRoomId` | **`null`** | ⭐⭐ **没有聊天室** ⇒ `member/apply` 与 WS **根本不会发** |
+| `pullUrl` | `null` | 没有拉流地址 |
+| `anchor.nickname` | **`中国移动云盘`** | ✅ 门的"精确相等"判据**今天仍成立** |
+| `channelId` | `134` | ✅ 与旧项目 §1.2 一致 |
+
+⭐⭐ **直播侧凭据是独立的一套**，和签到/兑换那串 `pc:` / `mobile:` 凭据**不是同一个东西**：
+
+```json
+// Authorization: <JWT> 的 payload（标准 JWT，头带 "typ":"JWT"）
+{"phone":"159****7542","exp":1792659943,"userId":47776930,"iat":1790067943}
+```
+
+- 传送方式：标准 `Authorization` 头（**不是** `jwttoken` 头 + cookie 那一套）
+- ⭐ 多了个 **`userId: 47776930`**（直播侧用户 ID，新信息）
+- 有效期 `exp - iat` ≈ **30 天**（1792659943 − 1790067943 = 2592000 s）
+
+⚠ **一条都没出现**：`tabContentList`（门第 3 步）、`getCurrentUserInfoNew`、
+`user/customer/userToken`、`videoim…:20103/v3/room/member/apply`、
+`videoim…:20102/ws/info`、以及任何 WebSocket 帧。
+⇒ **这是结构性的**（`chatRoomId: null`），不是"没抓到、下次努力"。
+
+### 5.3 「门」的实证：主动打一次 `tabContentList`（只读，2026-09-22 15:2x）
+
+上一轮那个"结构性抓不到"只解释了**WS 那半段**。但「门」本身（`hasActiveLiveRoom`
+的第 3 步 `tabContentList`）是个 **GET**，不需要开播也能打 ⇒ 抓包没抓到**不等于它不能打**。
+用一个临时探针（`target/attic/live-probe`，全程只读）主动走了一遍：
+
+```text
+① POST user-njs.yun.139.com/user/querySpecTokenV2  {"toSourceId":"017027"}   ⇒ SSO token 42 字符
+② POST v.cmcc-cs.cn/cmlive/api/user/auth/cmpassLoginByCmToken
+   body {"cmpassToken":"<SSO>"}  ⇒ {"rtnMsg":null,"rtnCode":"0","object":"<JWT 180 字符>"}
+③ GET  …/api/channel/channel/tabList?channelId=134
+④ GET  …/api/channel/channel/tabContentList?tabId=<id>&contentType=0&pageNo=1&channelId=134
+```
+
+⭐ 三个"这一步到底成不成立"的答案：
+
+- **`querySpecTokenV2` 用 `toSourceId=017027` 也能换到 SSO token** ⇒ 库里那份
+  `authorization` 凭据**在直播这一族上也认**（不必另外准备凭据）。
+- **`cmpassLoginByCmToken` 的 `object` 就是那串 JWT**（不是包着它的对象），
+  拿它直接当 `Authorization` 用即可。
+- 全程 `rtnCode` 都是**字符串 `"0"`** ✅ 再证两套响应约定。
+
+**③ `tabList`** ⇒ 两个 tab：`127 盘盘福利`、`129 精彩回放`。
+
+**④ `tabContentList`**（每个 tab 各 8 间房，逐间实拍）：
+
+| tab | id | status | channel | expectStartTime | anchor | title |
+| --- | --- | --- | --- | --- | --- | --- |
+| 127 | 147490 | **1** | 29 | 2026-09-22 16:30 | 福建移动 | 折扣福利大流量 |
+| 127 | 147473 | 0 | 51 | 2026-09-22 18:00 | 福建移动 | 权益特惠购 |
+| 127 | 147062 | 0 | 243 | 2026-09-23 00:00 | 移动心选 | 爱购商城福利 |
+| 127 | 147421 | 0 | 51 | 2026-09-23 09:30 | 福建移动 | 权益特惠购 |
+| 127 | **147606** | **0** | **134** | **2026-09-23 14:30** | **中国移动云盘** | 中秋佳节云相伴！看直播赢好礼 |
+| 127 | 147422 | 0 | 51 | 2026-09-23 15:00 | 福建移动 | 福小伴伴你生活 |
+| 127 | 147491 | 0 | 29 | 2026-09-23 16:30 | 福建移动 | 折扣福利大流量 |
+| 127 | 147423 | 0 | 51 | 2026-09-23 18:00 | 福建移动 | 超级星期三流量加油站 |
+| 129 | **147606** | 0 | 134 | 2026-09-23 14:30 | 中国移动云盘 | 中秋佳节云相伴！看直播赢好礼 |
+| 129 | **147608** | 0 | 134 | 2026-09-29 14:30 | 中国移动云盘 | 国庆出游AI搞定攻略！赢出行好礼！ |
+| 129 | 146662 | **6** | 134 | 2026-08-12 14:30 | 中国移动云盘 | 云盘提效小妙招！下单赢办公礼！ |
+| 129 | 146619 | 6 | 134 | 2026-08-06 14:30 | 中国移动云盘 | 马上立秋！快来赢奶茶饮品！ |
+| 129 | 146502 | 6 | 134 | 2026-08-04 14:30 | 中国移动云盘 | 暑期美照秒存云盘！赢夏日好礼 |
+| 129 | 146438 | 6 | 134 | 2026-07-30 14:30 | 中国移动云盘 | 智用AI高效复盘！赢惊喜好礼 |
+| 129 | 146367 | 6 | 134 | 2026-07-28 09:30 | 中国移动云盘 | 职场小白进阶攻略！赢办公实用礼！ |
+| 129 | 146316 | 6 | 134 | 2026-07-23 14:30 | 中国移动云盘 | 暑你最会玩！云盘相伴快乐一夏！ |
+
+⭐⭐⭐ 由这张表钉死四件事：
+
+1. **`status` 的三档语义实拍确认**：`1` = 直播中、`6` = 已结束、**`0` = 未开播（预告）**。
+   `6` 那批的 `expectStartTime` 全在 7–8 月，`0` 那批全在未来 ⇒ 自洽。
+2. ⭐⭐ **今天 15:2x，「中国移动云盘」没有一间 `status===1`** ⇒ 门判定 **false**
+   ⇒ 整个 `kouling` 任务会跳过。与"直播没开"**完全一致**，且是**服务端数据**证实的。
+3. ⭐⭐ **只看 `status===1` 会误判**：`tabId=127` 里就有一间 `status=1`
+   （147490「福建移动」）⇒ **主播名那个过滤条件才是真正干活的**，
+   旧项目两个条件都要求是对的。
+4. ⚠ **`channelId` 不能当过滤条件**：查询参数写 `channelId=134`，
+   但返回的房间 `channelId` 有 `29 / 51 / 243 / 134` 四种 ⇒ 它是**房间的归属**，
+   不是"我拉的是哪个频道"。
+
+⭐ **下一场**：`147606` 中秋场，`expectStartTime = 2026-09-23 14:30:00`，`status=0`；
+再下一场 `147608` 国庆场 `09-29 14:30`。⇒ **开播窗口与 §5.2 的 `roomBeat` 对上了**。
+
+⚠ 探针自身的两个坑（都当场抓到、已修，记坑表 #108）：
+`Envelope.Payload()` 取的是 `data` / `result` 键 —— **直播侧没有这两个键**
+⇒ 它回 `(nil, false)` 且**不报错**，表现为"登录成功却取不到 token"；
+以及上游解码保号（`json.Number`）⇒ 只写 `case float64` 的取值助手会**静默返回 0**
+（表现为"tab id 全是 0、拉到 0 间房"）。
+
+## 6. 抓完要回答的问题
+
+### 已答（2026-09-22 实拍）
+
+**1. `tabContentList` 今天还回房间吗？`anchor` 还是 `中国移动云盘` 吗？**
+→ ✅✅ **已用实证答掉**（§5.3，抓包没走到 ≠ 它不能打：这是个 GET，主动打了一次）。
+- **回**：两个 tab 各 8 间房，`rtnCode` 全 `"0"` ⇒ **接口活着**。
+- **`anchor` 逐字仍是 `中国移动云盘`** ✅，`channelId=134` ✅ ⇒ 门的判据**不用改**。
+- ⭐⭐ **但今天门判定为 false**：该主播**没有一间 `status===1`**
+  （147606 是 `status=0`、09-23 14:30 才开）⇒ 整个 `kouling` 任务会跳过。
+- ⚠⭐ **`status===1` 单独不够**：`tabId=127` 里就有别的在播房间（147490「福建移动」）
+  ⇒ **主播名那个条件才是真正干活的**；⚠ `channelId` **不能**当过滤条件
+  （返回房间的 `channelId` 有 `29/51/243/134` 四种）。
+- ⭐ 顺带钉死 `status` 三档：`1` 直播中 / `6` 已结束 / **`0` 未开播**。
+
+**2. `activityid` 还是 `sign_in_3` 吗？`sourceCode` 还是 `017027` 吗？**
+→ **两个都是** ✅。`activityid: sign_in_3`（`/ycloud` 侧六个请求全带）；
+`targetSourceId=017027`（直播房间页 URL 与 `roomBeat` 的 `Referer` 里都有）。
+
+**3. `draw` 的判据码还一样吗？有没有新码？**
+→ ⭐⭐ **有新增**。`200110` **实拍确认**（`firstParticipate/give`，
+`您已参与过活动，无法获得首次参与惊喜奖`）；另拿到 **`200108`**（`draw`，
+`口令不对耶，口令需当场直播获取才有效哦`）= **无效口令**。
+⚠ `200108` **旧项目没记过** —— 它只笼统写"其他数字 ⇒ 无效口令"。
+⇒ 已实测的判据（**各归各的接口**，不是一张共用码表，见 §8.2）：`draw` 的 `0` 成功 /
+`200108` 无效口令 / `200112` **同一账号已兑过这条口令**（**仍未露面**）；`firstParticipate/give` 的 `200110` 无首次资格。
+⚠⚠ 沿用 `app-exchange-samples.txt` §1.3：**码只判等、不判形状**（那边 `2301` 是四位、
+其余三位）⇒ 这里也别按"都是 2001xx"推。
+
+**4. 那 5 条 `visitlog/journaling` 埋点今天还在吗？**
+→ ✅ **在**。9-17 那批夹具里一条都没有，**是当时没抓全**（不是走了别的域）。
+实拍到的形态：
+`POST /ycloud/visitlog/journaling`，**`application/x-www-form-urlencoded;charset=UTF-8`**，
+body = `module=uservisit&optkeyword=<…>&sourceid=1007&marketName=National_LiveRoomFeedback`。
+⚠ 同一个接口也服务别的活动（实拍另见 `marketName=National_Activity`、
+`optkeyword=National_Activity_pv` / `National_Activity_clickLabel_myCollect`，且那边
+**`sourceid` 是空串**）⇒ **`marketName` 才是区分活动的键**，不是路径。
+
+**5. WS 的 `systemmd5` / `tokenmd5` 还是那个公式吗？`deviceinfo` 还是 40 B hex 吗？**
+→ ⏸ **没抓到**，且**今天结构上抓不到**（`chatRoomId: null`，见 §5.2）。要等开播。
+
+**6. `member/apply` 的 `version` 还是 `v23.0.2` 吗？**
+→ ⏸ 同上，没抓到。
+
+**7. 弹幕里有没有出现口令？命中 4 个分支里的哪一个？**
+→ ⏸ **没开播 ⇒ 没有弹幕**。口令的 4 个分支今天**无法验证**。
+
+**8. `wx.10086.cn/website/bind/oneKeySignIn/sign` 今天还在调吗？**
+→ ❌ **今天一次都没出现**。9-17 那批有，这次没有 ⇒ 它**不是小红花主链路的必发请求**，
+更像偶发/另一条路。暂不追。
+
+### 结论：链路走到哪了
+
+| 环节 | 状态 |
+| --- | --- |
+| 小红花六步的**字段与顺序** | ✅ 全实拍（`user/info` 余额、`draw` 口令走 query、`give` 回 `200110`、`live/info` 空数组） |
+| 小红花**判据码** | ✅ `0` / `200108` / `200110` 三个已实拍；`200112`（同一账号已兑过这条口令）**缺** |
+| 直播**房间与心跳** | ✅ `roomBeat` 实拍，含 `status` / `expectStartTime` / `anchor` |
+| 直播**凭据形态** | ✅ 实拍（独立 JWT，含 `userId`） |
+| 直播**登录链** | ✅ **第 1、2 条已实证**（`querySpecTokenV2(017027)` → `cmpassLoginByCmToken` ⇒ JWT）；后两条（`getCmPassToken` / `getPluginPass`）未测 |
+| 直播**「门」`tabContentList`** | ✅ **实证**（§5.3）：接口活着、`anchor` 未变、**今天判定 false** |
+| **WS / 弹幕 / 口令** | ⏸ **结构性抓不到**（未开播，`chatRoomId: null`） |
+
+⭐ **下一次窗口：2026-09-23 14:30**（`expectStartTime`）。要补 §6 的 5/6/7
+（⚠ **`200112` 不在此列** —— §6 第 8 项已移除，见那里），
+必须在那个时间之后、且直播间真的在推流时再抓一次。
+
+## 7. 操作记录（抓完后补）
+
+- **时间**：2026-09-22 17:03–17:06（本地 GMT+8；响应头 `date` 09:03–09:06 GMT）。
+- **设备/通路**：iPad，进程 `com.apple.WebKit.Networking`；Reqable 本机 `*:9000` 全网卡监听，
+  真机代理填 `192.168.3.182:9000`。**没有遇到证书固定**（与上次抓兑换一致）。
+- **操作**：打开 App → 进 `National_LiveRoomFeedback`（小红花页）→ 点"领小红花"按钮并
+  输入 `测试`、`你好` 两个假口令各投一次 → 进直播间 `id=147606`（未开播）。
+- **抓到量**：抓包池该时段共 600+ 条；命中 `liveRoomFeedback` 的 **120 条**（含静态资源），
+  其中**业务接口 8 条**（§5.1 那张表）；命中 `cmcc-cs.cn` 的 **72 条**，其中
+  **业务 API 只有 `roomBeat` 1 条**，其余全是 H5 页面与 JS 包。
+- **过滤条件**：`m.mcloud.139.com` / `v.cmcc-cs.cn` / `videoim.cmcc-cs.cn` 等 host；
+  再用关键词 `liveRoomFeedback`、`marketName=National_LiveRoomFeedback`、`cmlive/api`、`room/front`
+  逐个圈端点。
+
+⚠⚠ **两个"过滤"上的坑，下次别再踩**：
+
+1. **`sourceCode=017027` 当过滤器是错的** —— 它只出现在直播房间页的 **URL 参数**
+   `targetSourceId=017027` 里，**不在 `/ycloud` 侧**（小红花那边是 `targetSourceId=001005`）。
+   用它过滤 ⇒ 小红花那一族**一条都筛不出来**。
+2. **关键词会命中 JS 包**，而且**多条件并联是 AND 不是 OR**。
+   实测 `firstParticipate` + `queryRevivalFlowers` + `getRedFlowerTop10List` + `live/info` 四条并联
+   ⇒ 只回 1 条（那个同时含四个串的 JS 包），**真正的请求反而全被滤掉了**。
+   ⇒ **每个关键词单独过滤一次**，再人工取并集。
+
+---
+
+## 8. 补记（2026-09-22 20:04 第二轮实拍）：兑换提交链与 `prizepool/list` 字段
+
+> ⚠ 本节是对 §5.1 / §6 的**追加**，不改动上面任何原文。
+> 上一轮把「点兑换按钮」记成了"未走到"，因而 §6 的"提交入口无样本"这个口径**只在上一轮成立**；
+> 本轮同一台设备、同一账号（成文一律掩码：`15****`）把「领 / 兑」真点了 **4 次**，
+> 每次都停在**服务端那句"红花数不够"**上 ⇒ 提交请求**有样本**，成功体**仍无样本**。
+
+### 8.1 一次点击的完整序列（4 次逐字相同）
+
+```
+POST /ycloud/visitlog/journaling   module=uservisit&optkeyword=National_LiveRoomFeedback_exchangeBtn&sourceid=1007&marketName=…
+POST /ycloud/visitlog/journaling   …optkeyword=National_LiveRoomFeedback_exchangeBtn_260429004…
+POST /ycloud/liveRoomFeedback/check?prizeId=260429004      ← 提交本体
+GET  /ycloud/prize/prizepool/list?marketName=National_LiveRoomFeedback   ← 刷列表
+POST /ycloud/liveRoomFeedback/user/info                                ← 刷余额
+```
+
+- ⭐ 两个**新 `optkeyword`**（§5.1 那 5 条之外）：`_exchangeBtn`（按钮）**与** `_exchangeBtn_<prizeId>`（带奖品号）
+  ⇒ 一次点击发**两条**埋点，不是"只带奖品号的那一条"。
+- **`check` 的形状**（第三种请求形态，本族已知三种：JSON `{}` / form-urlencoded / 这一种）：
+  参数走 **query**，`content-length: 0`，**没有 body 且没有 `content-type` 头**。
+  ⇒ 发请求的助手不能假设"POST 必带 content-type"。
+  请求头同 `user/info`（`jwttoken` + `activityid: sign_in_3` + 会话 cookie），但**没有** `showloading`。
+- 响应：`{"code":200103,"msg":"红花数不够，快去围观直播间领取红花攒兑奖机会吧"}` —— **4 发全 `200103`**
+  （用 `红花数不够` 反查命中 4 条，用 `check\?prizeId=260429004` 反查同样 4 条 ⇒ 没有别的码、没有别的奖品）。
+- ⚠ `check` 通过之后的**成功体形状无样本**（账号 235 朵 < 该奖品 300 朵），
+  也**不能断言** `check` 就是最终写操作 —— 实测它之后只有两个刷新请求，所以"check 即提交"是最合理解读，但**未观测**。
+
+### 8.2 ⭐⭐ 业务码是**三层**的，不是一张码表
+
+> ⚠ 含义只在「**接口 × 码**」上成立。把这四个码并列成一张表 ⇒ 会诱导出一个跨接口共用的
+> `switch (code)`，而 `200103` 只在 `check` 上是"红花数不够"，换个接口它什么都可能。
+
+| 层 | 成员 | 归属 | 处置 |
+| --- | --- | --- | --- |
+| HTTP 状态 | `401` / `403` / `429` / `5xx` | **跨接口通用**、与业务无关 | 归到凭据 / 签名 / 限流，**不许**当成"这次业务失败" |
+| 信封通用码 | `0` = 成功 | 通用（`/ycloud` 数字 `code`、直播侧字符串 `rtnCode`，见 §5.2 与 #107）。⚠ 除 `0` 外**没有证据**说还有哪个码跨接口一致 ⇒ 不猜 | 非 0 才往下分派 |
+| 接口专属码 | `200108`→`draw`、`200110`→`firstParticipate/give`、`200103`→`check`、`200112`→`draw`（仍未露面） | **每个只属自己那个接口** | 各自的 classifier，互不共享 |
+
+⚠⚠ 通用层那条 `401` **判的是"鉴权面出问题了"，不是"未登录"**：
+`docs/signin-cli-spec.md:133` 记的是"时间戳量级写错的表现就是 401"，`:236` 更直白
+（"401 在日志里和盐抄错了长得一模一样"）⇒ 界面与日志都不许把它渲染成"token 已过期"。
+⚠ 直播那一族（独立 JWT、约 30 天）的"未登录"**长什么样未实测**（HTTP 401 还是 `rtnCode` 某码）⇒ 未探明，别按 `sign` 那族的形状套。
+
+### 8.3 `prizepool/list` 全量 46 件到手，字段语义钉死
+
+| 字段 | 实测含义 | 依据 |
+| --- | --- | --- |
+| `porder` | **兑换所需小红花数**：券/会员类 `30/60/100/200/300`；返花类（`type=1043`）`5/10/15/20` | 1043 那几件的 `porder` 与 `prizeName`「N朵小红花」的 N **逐件一致** ⇒ 交叉验证成立；点的那件 `porder=300` > 余额 235 ⇒ 正好对上 `200103` |
+| `type` | `1043` 返小红花 / `1035` 第三方券与会员 / `1065` 云盘自有会员与空间 | 1043 全叫「N朵小红花」且 `memo` 是回跳活动页 URL；1035/1065 的 `memo` 是 prizeId 字符串 |
+| `onLine` | `1` 在售 / `0` 下架（46 件里在售约 24 件） | — |
+| `count` / `totalCount` | 剩余 / 总库存 | 古茗15元券 `62/430`；1043 那几件剩几十万，量级自洽 |
+| `dailyCount` / `dailyRemainderCount` | 每日额度 / **今日剩余**（1043 为 `null`） | 那件 `dailyRemainderCount=2` ⇒ **今日额度 ≠ 总库存**，两者不能混显 |
+| `probability` | **字符串**，只在 1043 有值（`"1"` / `"10"` / `"89"`…）= 返花权重 | 其余类型一律 `null` |
+| `probability2` | **一个 JSON 字符串**（`"{\"limitMonthQuantity\":1,\"multi\":true}"`）= 每月限兑件数 | 要先解一层字符串（同 #105） |
+| `startTime` / `endTime` / `updateTime` | 时间戳用**破折号**：`"2026-12-31 23-59-59"` | ⚠ 按 `HH:mm:ss` 解析会静默失败；`user/info` 的 `redFlowerValidDate` 又是中文串「2026年12月31日」⇒ 本族**至少三种日期字面量** |
+| `groupId` / `sort` | 档位分组 `1..6` / 展示序（在售的才有小值） | 观察项，**未当作判据用** |
+
+### 8.4 两条过程坑（本轮又踩 / 新发现）
+
+1. ⚠⭐ **`#106` 的第二次**：关键词过滤会把**跑抓取这件事自己的流量**捞进来 ——
+   本轮 `prizepool` 命中的一条实测是 Qoder 的上报请求体（里面正是我打的"prizepool"那个词）。
+   ⇒ 这族的过滤**必须先叠 `application = com.apple.WebKit.Networking`**，再上关键词；单靠关键词必然混。
+   ⚠ 同轮还出现"记录被自己滚掉"：上一轮那批 ID（4807–5447）本轮已 `not found` ⇒ **要留证据当场就抄下来**，别指望回头再翻池子。
+2. ⚠⚠ **抓包头里带真号**：`cookieTokenKey` 与埋点里的 `phn` 是手机号的 **base64**。
+   ⇒ 这条链上任何"把 curl / HAR 原文贴进文档"的习惯都会漏号；成文前必须剥 cookie（本节按既有规矩一律掩码）。
+
+### 8.5 ⭐ 用户补的两条事实（**不是抓包抓出来的**，成文于此以便实现层有据）
+
+1. ⭐⭐ **`401` 判的是"服务端主动挡你"，范围比"未登录"宽得多。**
+   签名错、时间戳量级写错、风控、token 失效……**都表现为 401**（本仓库早有实证：
+   `docs/signin-cli-spec.md:133` 记的就是"时间戳量级写错的表现是 401"，`:236` 更说
+   "401 在日志里和盐抄错了长得一模一样"）。
+   ⇒ 成文与实现都按这一条裁：**通用层只分类到"被挡下了"**，具体原因要么由响应体另给，
+   要么就承认不知道；界面**不许**把它渲染成"token 已过期"，也不许据此自动换凭据。
+   ⚠ 直播那一族（独立 JWT）的"被挡下"长什么样**未实测**（HTTP 401 还是 `rtnCode` 某码）⇒ 未探明。
+2. ⭐⭐ **每场直播只发两个口令，且全世界共用同一对。**
+   ⇒ 三条直接后果，都影响实现而不只是文案：
+   ① **收口令的停止条件应该是"收满 2 条"而不是"听满 N 秒"** —— 默认 60 秒是拿时间当预算，
+      而真实预算是 2 条；主播喊完这两条之后，再听多久都只是白连着 WS。
+   ② **口令是全局共享物** ⇒ 去重必须跨账号、跨批次（同一个口令对第二个账号仍然是有效的，
+      所以"见过"不等于"能丢"；真正该丢的是**这个账号已经投过**的那一对）。
+   ③ **`200112`（已兑换）的字面意思就是"这个账号把这个口令投过一次了"**：
+      服务端记的是**本账号**对该口令的兑换状态（[app.RetryPlan] 的排除表正是为此存在 ——
+      不排除的话重听那一轮会把同一批再投一遍，全部换回 200112，看起来像"口令坏了"）。
+      ⚠ 不要外推成"别人用掉了所以我只会拿到 200112"：口令全局共用说的是**获取**（弹幕里谁都能看到这两条），
+      兑换额度是**按账号**算的，与谁先看到无关。
+      ⚠ 界面上它不能标成失败、也不能并进"无效口令"（[upstream.CodeRedFlowerAlreadyDrawn] 的注释
+      已经钉了"不该剔掉口令"）。
+   ⚠⚠ 这条同时给"自动盯播"定了个硬时限：口令的有效期是**当场**（`200108` 的原文就是
+   "需当场直播获取才有效"），所以定时任务的合理形态是**开播后尽快**跑，
+   而不是"每天固定时间跑一遍"——那正是 [capabilities] 里 `live-room` 的 `RunInBatch:false` 的同一个理由。
+
+---
+
+## 9. 补记（2026-09-22，实现落地那一轮）：这一族要的是**云盘侧**那份 JWT
+
+> 来源：WebUI 探针与 CLI 的**实机第一跑**（两个账号都回 `90001 未登录`），
+> 对着本文档 §5.1 与 `app-signin-samples.txt` §2.4 复核之后定下来的判据。
+> 判据正文进 `docs/migration-pitfalls.md` **#128**，这里只记抓包侧的对照。
+
+1. ⭐⭐ **`liveRoomFeedback/*` 与 `visitlog/journaling` 落在 `m.mcloud.139.com/ycloud`**，
+   与**签到同域同族**（公共头里那个 `activityid: sign_in_3` 就是证据）。
+   它们要的 `jwttoken` 是 **`tyrzLogin` 那一份**（实拍 905 字符，与 cookie `jwtToken` 同值），
+   **不是** `cmpassLoginByCmToken` 换到的直播侧 JWT。
+   ⇒ 把后者带给这一族，实机两个账号都回 `{"code":90001,"msg":"未登录"}`；
+   ⚠ 而 `90001` 按 §8.5 那条同族的口径裁：**它说的是"被挡下了"**，不自动等于"这一号没登录"。
+2. ⭐ **埋点不是"第七条外站请求"**：§5.1 那句"公共请求头（**六个请求全带**）"里就含 `jwttoken`，
+   所以 `visitlog/journaling` 那一枪**也带**云盘侧 JWT。
+   第一版按"埋点嘛，大概不用凭据"实现（不带 `jwttoken`），被 `TestLiveRoomRunAccountSixStepsUseCloudJWT`
+   按头断言抓出来 —— ⚠ 该断言看的是**头**，若只看"请求发出去了"则**两种写法都绿**。
+3. ⇒ 于是"看一眼"（`GET /api/accounts/{id}/live-room`）实际是**八枪**：门那三步
+   （`querySpecTokenV2(017027)` → `cmpassLoginByCmToken` → `tabContentList` 两个页签）
+   带 `Authorization`，云盘侧建会话三步（`querySpecTokenV2(001005)` → `/ycloud/api/timestamp`
+   → `tyrzLogin`）+ 余额 `user/info` 带 `jwttoken`。
+   多这三枪换的是"读得到余额 vs 永远 90001"，没有更省的走法。
+4. ⭐ **不扣花实证（补 §5.1 那张表第 5/7/8 行与 `flowerCnt` 那格）**：本轮用**一条不存在的口令**跑完整批（两个账号），
+   结果 `235 → 235`、`110 → 110`，两格余额**一帧未动**（成文一律掩码：`15****` / `19****`）。
+   ⇒ 与 §5.1 同向：`200108`（口令无效）那一支**不扣**小红花；"投了无效口令"是安全的核验手段，
+   而"投了一条真口令"会**真的换走一朵**（`draw` 是写操作，动的是**这个账号**的兑换状态 ——
+   ⚠ 口令本身**全场通用、不存在消耗**，见 §8 那节）。
+   界面与 CLI 的确认文案据此才敢写"这一趟会真的投口令"。
+5. ⚠ **两套凭据不是"两套登录态"**：库里每一行**同时**存着两支刷新凭据，
+   所以账号列表上那个「PC 端 / 手机端」标签与这条链**无关**
+   （标签说的是"这一号当初怎么加进来的"）。第一版界面据此把 PC 端标成警示、
+   又让探针"优先挑手机端"，两处都在暗示一个不存在的相关性 —— 实机修好凭据域之后
+   两个标签的账号都读得到余额，那两处已按上述事实改掉。
+   判据正文：`docs/migration-pitfalls.md` #128，界面侧见 `web/src/pages/live-redflower-page.tsx` 的注释。

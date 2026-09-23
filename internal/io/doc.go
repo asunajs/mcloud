@@ -18,11 +18,11 @@
 // 第二个方向同样要断言，理由不是对称美学：没人接上 IO 实现是一个
 // **静默的死配置** —— 编译能过、跑起来什么都没发生。
 //
-// 两条都由 scripts/check-go-deps.sh 断言。
+// 两条都由 scripts/check-go-deps.js 断言。
 //
 // # ⚠ 与 Rust 侧的一处语义差异
 //
 // Rust 里"这一层不许有 IO"是**编译期事实**（纯层根本没依赖 reqwest）。
 // Go 的接口是结构性实现 —— 任何包都能满足 core 定义的接口，所以这条约束
-// 从编译期事实**降级成 lint 约定**。这正是 check-go-deps.sh 必须存在的原因。
+// 从编译期事实**降级成 lint 约定**。这正是 check-go-deps.js 必须存在的原因。
 package mcloudio

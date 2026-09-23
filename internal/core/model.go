@@ -535,6 +535,20 @@ type AccountState struct {
 	// 一旦落库，就会被永久当成原文使用，现象只是"忽然回 90001 未登录"。
 	//
 	// 补录手机号时只写 [AccountState.Phone] 即可 —— 下次照旧现拼，前缀闸照旧生效。
+	//
+	// # 唯一的例外：刷新换 token（2026-09-22 补记）
+	//
+	// [StateStore.RotateAccountAuth] 会往这一列写**重新拼出来**的整串。它不算违反
+	// 上面那条，因为"拼"的三个来源里没有一个是本地编的：端别与手机号
+	// **逐字取自库里那一串**（也就是登录时服务端给的那一串），
+	// 只有 token 是上游这次新发的 —— 与客户端自己
+	// （`"Basic "+btoa("pc:"+account+":"+authToken)`）的做法同形。
+	//
+	// 为什么必须更新这一列而不是只更新 [AccountState.JWTToken]：
+	// 上面那句"读取侧优先采信整串"在这里是**同一个**理由 ——
+	// 只换 `jwt_token` 会让刷新静默无效（用的还是旧整串）。
+	// 拼错的风险由"拼完解回来核对端别/手机号/token"那道闸拦
+	// （见 capabilities 的 `CredentialFromRefresh`）。
 	Authorization *SecretValue `json:"authorization"`
 	UpdatedAt     *time.Time   `json:"updated_at"`
 }
@@ -752,6 +766,53 @@ func ParseScheduleStatus(raw string) (ScheduleStatus, bool) {
 	return 0, false
 }
 
+// MissPolicy 是"错过了触发点，要不要补跑一次"。
+//
+// 分两档是因为任务有两种脾气，把它们合成一档就会两头错：
+//
+//   - 日型任务（签到、到期换凭据）绑的是"今天这一趟"，服务停到下午才起来，
+//     补跑仍然达成目的 ⇒ 要补。
+//   - 准点型任务（抢兑、直播口令）绑的是**那个时刻本身**：抢兑的窗口已过、
+//     主播那一场已经结束，补跑只会白打上游，甚至在错误的时点花掉不可逆的额度 ⇒ 不补。
+//
+// ⚠ 这一档**不是**旧项目的行为：旧实现（croner `protect:true`）从头到尾只有
+// "错过即弃"，本档是 Go 侧新增的选择，取值由能力的声明给默认（见
+// `capabilities.Capability.MissPolicyOnMiss`）。
+type MissPolicy int
+
+const (
+	// MissCatchUp 表示错过了就起来补跑一次（只补**最近那一次**，不逐次追补）。
+	MissCatchUp MissPolicy = iota
+	// MissSkip 表示错过了就弃掉，等下一个触发点。
+	MissSkip
+)
+
+// String 返回落库与 JSON 用的文本。未知值返回空串。
+func (p MissPolicy) String() string {
+	switch p {
+	case MissCatchUp:
+		return "catch_up"
+	case MissSkip:
+		return "skip"
+	}
+	return ""
+}
+
+// ParseMissPolicy 从存储里读回；认不出来返回 `false`。
+//
+// ⚠ 与 [ParseScheduleStatus] 同一条纪律：**不归默认值**。把来路不明的文本
+// 塞成 `catch_up`，后果是"每次重启都凭空多跑一趟真上游"，
+// 而界面上只会显示"上次执行成功"。
+func ParseMissPolicy(raw string) (MissPolicy, bool) {
+	switch raw {
+	case "catch_up":
+		return MissCatchUp, true
+	case "skip":
+		return MissSkip, true
+	}
+	return 0, false
+}
+
 // Schedule 是定时任务定义（旧 `data/schedules.json` → `schedules` 表）。
 type Schedule struct {
 	ID    string  `json:"id"`
@@ -770,6 +831,20 @@ type Schedule struct {
 	// Body 是透传给能力的参数。
 	Body    json.RawMessage `json:"body"`
 	Enabled bool            `json:"enabled"`
+
+	// MissPolicy 是"错过触发点补不补"。nil = **没有人显式选过**，跟随能力声明的默认
+	// （`capabilities.Capability.MissPolicyOnMiss`）。
+	//
+	// ⚠ 不留这一列而只在能力表里写死，表现是"改一个能力的脾气会静默改掉
+	// 用户已经建好的那些定时任务"；反过来若这列恒有值，就没有"跟随能力默认"这回事了
+	// —— 所以是**可空覆盖**，不是"建时快照一份"。
+	MissPolicy *MissPolicy `json:"miss_policy"`
+	// LastFireAt 是**已处理过**的那个触发时刻（真跑了、或按策略弃掉都算处理）。
+	//
+	// ⚠ 它**不能**由 [Schedule.LastRunAt] 代替：一个按 [MissSkip] 弃掉的错过
+	// 不会留下任何运行，拿 `last_run_at` 当水位的话，下一个 tick 又会把
+	// 同一次错过重新捡起来 —— 表现成"每次刷新页面都多一条 skipped"。
+	LastFireAt *time.Time `json:"last_fire_at"`
 
 	CreatedAt  *time.Time      `json:"created_at"`
 	LastRunAt  *time.Time      `json:"last_run_at"`

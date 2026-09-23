@@ -23,7 +23,28 @@ type RunPlan struct {
 	// 参与互斥键：**同一个账号、同一个能力、不同参数**不该互相挡 ——
 	// 手动签到与定时签到用不同参数时是两件事。
 	ParamsDigest string
+
+	// RunIDs 与 Accounts **一一对应**，由调用方预分配；nil 表示"跑到哪个才分配哪个"。
+	//
+	// 存在的理由只有异步触发那一条路：`POST /api/runs` 必须**在动手之前**就把
+	// runId 回给前端（前端拿它去订阅 `GET /api/runs/{id}/events`），而账号是串行跑的、
+	// 第二个要等第一个跑完才轮到 —— 现分配的话响应里只能给出第一个。
+	// 留空是同步调用方（CLI、测试）的默认。
+	//
+	// ⚠ 长度不等时不猜、不补齐：直接报错返回。一个空 runId 会落进 `runs` 主键，
+	// 那比一次失败糟得多。
+	RunIDs []core.RunID
 }
+
+// RunProgress 是"往**当前这个账号**的事件流里写一条人话"。
+//
+// 它作为参数交给 [RunTask] 而不是让任务自己去拿总线：任务手上没有 runId
+// （每个账号一个），而序号必须由总线统一发 —— 否则 SSE 的断线续传（`?after=`）
+// 与 `run_events` 的 `(run_id, seq)` 主键会对不上。
+//
+// ⚠ 这条通道只给**过程话**。结构化结果走 [core.RunReport]（终局事件与 `runs.message`），
+// 事件种类与 JSON 形状是**冻结契约**（与 Rust 侧逐字一致），不为了传数据新增一类。
+type RunProgress func(level core.LogLevel, message string)
 
 // AccountRunKind 是单个账号在本次运行里的两种结局。
 type AccountRunKind int
@@ -119,7 +140,14 @@ func outcomeWord(outcome core.RunOutcome) string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // RunTask 是"针对单个账号做一件事"：成功给 [core.RunReport]、失败给 error。
-type RunTask func(ctx context.Context, account core.AccountID) (core.RunReport, error)
+//
+// `progress` 由 [Runner] 给，写进去的每一条都会成为**这个账号那一次 run** 的
+// `log` 事件（既进总线也落库）。它不是可选的装饰：一条要跑几十秒的任务
+// 如果没有过程话，界面上的表现就是"进度条停在那里不动"，
+// 而用户分不清是卡住了还是在等上游。
+type RunTask func(
+	ctx context.Context, account core.AccountID, progress RunProgress,
+) (core.RunReport, error)
 
 // Runner 是跨账号运行器。
 //
@@ -177,9 +205,19 @@ func (r *Runner) Run(
 	eventsWritten := 0
 	done := uint32(0)
 
-	for _, account := range plan.Accounts {
+	// 预分配的 runId 必须与账号**一一对应**。长度不等不报错的话，多出来的账号
+	// 会拿到一个空 runId 去落 `runs` 主键 —— 那是一条谁也查不到的记录。
+	if plan.RunIDs != nil && len(plan.RunIDs) != len(plan.Accounts) {
+		return RunSummary{}, core.NewInternal(fmt.Sprintf(
+			"预分配的 runId 数量与账号不等：%d 对 %d", len(plan.RunIDs), len(plan.Accounts)))
+	}
+
+	for i, account := range plan.Accounts {
 		key := mcloudexec.NewMutexKey(plan.Capability, account.String(), plan.ParamsDigest)
 		runID := core.NewRunID(rng)
+		if plan.RunIDs != nil {
+			runID = plan.RunIDs[i]
+		}
 
 		admission := r.registry.Admit(runID, key)
 		if admission.Kind != mcloudexec.AdmissionAdmitted {
@@ -246,6 +284,12 @@ func (r *Runner) runOne(
 	batch := []core.Sequenced{
 		r.publish(core.NewEventStarted(runID, plan.Capability)),
 	}
+	// 过程话与开场那条**同源**（同一个 runID、同一条总线），所以进同一个 batch 落库：
+	// 序号是发布时分配的，分两条路写会让"库里的 seq 顺序"与"写入顺序"脱节，
+	// 而断线续传读的正是 seq 单调。
+	progress := func(level core.LogLevel, message string) {
+		batch = append(batch, r.publish(core.NewEventLog(runID, level, message)))
+	}
 	accountID := account
 	if err := r.store.InsertRun(ctx, r.scope, &core.RunRecord{
 		ID:         runID.String(),
@@ -259,7 +303,7 @@ func (r *Runner) runOne(
 		return AccountRun{}, 0, done, err
 	}
 
-	report, taskErr := task(ctx, account)
+	report, taskErr := task(ctx, account, progress)
 	if taskErr != nil {
 		batch = append(batch, r.publish(core.NewEventErrored(runID, taskErr.Error())))
 		report = core.NewRunReportFailed(taskErr.Error())

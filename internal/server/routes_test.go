@@ -83,4 +83,54 @@ func TestTheRouteTableMatchesTheFrozenBaseline(t *testing.T) {
 		t.Errorf("不存在的路径命中了带方法的路由 %q —— "+
 			"注册了过于贪婪的模式，上面对位断言会因此失去判别力", pattern)
 	}
+
+	// Go 侧**新增**的写面：不在冻结基准里，所以上面那张表一条都不动。
+	//
+	// 单列一张表是为了让"这是谁定的形状"一眼可分辨：冻结那 15 条改了要过对拍，
+	// 这几条是本项目自己定的 HTTP 面，改它只需要改前端与文档。
+	// 但它们同样需要"删掉就变红"的守卫 —— 路由被误删时 HTTP 面看不出来（见上）。
+	goAdded := []struct{ method, path string }{
+		{"POST", "/api/accounts"},
+		{"PUT", "/api/accounts/1/enabled"},
+		{"DELETE", "/api/accounts/1"},
+		// 2026-09-22 加：第四条账号写面（换 token）。它同样要"删掉就变红"——
+		// 这条路径被误删的表现是前端点了按钮拿到 404，而 404 在界面上像"账号没了"。
+		{"POST", "/api/accounts/1/refresh-auth"},
+		// 触发执行。它在冻结基准里**没有**（那边 `routes/mod.rs` 自己写着"要等 P4"），
+		// 所以进的是这张表：删掉它的表现是"点了开始什么也没发生（404）"，
+		// 而 HTTP 面上 404 与"路径不存在"完全同形（见本用例开头的实测记录）。
+		{"POST", "/api/runs"},
+		// 2026-09-22 加：直播小红花页的只读探针（余额 + 那个主播的房间日程）。
+		// 它是**读**路由却进这张表而不是冻结那张：形状由本项目自己定（那边基准没有）。
+		// 删掉它的表现与刷新那条一样是 404，而界面上 404 会显示成"这个账号没有直播数据"——
+		// 一个假结论，所以"路由在不在"这件事必须有守卫。
+		{"GET", "/api/accounts/1/live-room"},
+		{"POST", "/api/login/qr"},
+		{"GET", "/api/login/qr/1"},
+		{"GET", "/api/login/qr/1/image.svg"},
+		{"POST", "/api/login/sms/app"},
+		{"POST", "/api/login/sms/app/1/verify"},
+		{"POST", "/api/login/sms/pc"},
+		{"POST", "/api/login/sms/pc/1/verify"},
+	}
+	for _, rt := range goAdded {
+		req := httptest.NewRequest(rt.method, rt.path, nil)
+		_, pattern := mux.Handler(req)
+		if !strings.Contains(pattern, " ") {
+			t.Errorf("%s %s 没有命中带方法的路由（命中 %q）—— 这条写面被删了",
+				rt.method, rt.path, pattern)
+			continue
+		}
+		if !strings.HasPrefix(pattern, rt.method+" ") {
+			t.Errorf("%s %s 命中了 %q —— 方法对不上", rt.method, rt.path, pattern)
+		}
+	}
+
+	// 写面的方法必须是**收窄**的：`GET /api/accounts/1/enabled` 不该命中任何东西
+	// （命中兜底 = 404，命中 PUT = 把"读一个开关"变成"改一个开关"）。
+	getWrongMethod := httptest.NewRequest(http.MethodGet, "/api/accounts/1/enabled", nil)
+	if _, pattern := mux.Handler(getWrongMethod); pattern != "/api/" {
+		t.Errorf("GET /api/accounts/1/enabled 命中了 %q，期望兜底 %q —— "+
+			"读操作会改到状态", pattern, "/api/")
+	}
 }

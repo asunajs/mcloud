@@ -231,11 +231,12 @@ export const DashboardPage = (props: DashboardPageProps) => {
       </div>
 
       <p class="text-xs opacity-60">
-        添加账号走命令行：
-        <code class="mx-1 rounded bg-base-200 px-1 py-0.5">
-          mcloud login sms --client app --phone 手机号
-        </code>
-        或<code class="mx-1 rounded bg-base-200 px-1 py-0.5">mcloud login qr</code>
+        添加与登录都在
+        <button type="button" class="link link-primary mx-1" onClick={() => props.onGo('accounts')}>
+          账号管理
+        </button>
+        那一页（扫码 / 短信 / 粘贴 auth）；命令行那条路也还在：
+        <code class="mx-1 rounded bg-base-200 px-1 py-0.5">mcloud login qr</code>
         ；云朵数在首次采集/签到后出现。
       </p>
     </>
@@ -261,8 +262,11 @@ export const DashboardPage = (props: DashboardPageProps) => {
         <div class="card bg-base-100 shadow-sm">
           <div class="card-body items-center gap-3 py-12 text-center">
             <p class="text-sm opacity-70">还没有云盘账号。</p>
+            <button type="button" class="btn btn-primary" onClick={() => props.onGo('accounts')}>
+              去账号管理添加
+            </button>
             <p class="max-w-prose break-words text-xs opacity-60">
-              运行
+              命令行那条路也还在：
               <code class="mx-1 rounded bg-base-200 px-1 py-0.5">
                 mcloud login sms --client app --phone 手机号
               </code>

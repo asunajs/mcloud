@@ -87,6 +87,90 @@ func TestDefaultAccountModeIsSequential(t *testing.T) {
 	}
 }
 
+// TestEveryCapabilityDeclaresMissPolicy 钉住"补跑策略必须逐条显式声明"。
+//
+// 判据不是"字段填了没填"（Go 里零值也算填了），而是这一条：
+// [core.MissPolicy] 的零值是 `MissCatchUp`，也就是说**忘了填**会静默变成
+// "错过了就多打一次真上游"。签到那一档漏填看不出问题，抢兑那一档漏填
+// 就是"窗口过了还去扣一次云朵"。
+//
+// 反向改坏这里的方式：把某条的 `MissPolicyOnMiss` 删掉 ⇒ 本用例红。
+func TestEveryCapabilityDeclaresMissPolicy(t *testing.T) {
+	for _, cap := range All() {
+		if cap.MissPolicyOnMiss == nil {
+			t.Errorf("%s 没声明错过时补不补 —— 零值是 catch_up，等于替它决定多跑一趟", cap.Code)
+		}
+	}
+}
+
+// TestResolveMissPolicyPutsTheRowBeforeTheCapability 定的是三档优先级：
+// 那一行选过的 > 能力声明的 > 谁都没说（⇒ 不补）。
+//
+// ⚠ 顺序反了的表现最难查：用户在界面上勾了"不补跑"，某天改了一次能力的默认，
+// 于是他的那一行又开始每天多跑一趟 —— 而库里存着的明明是他选的那个值。
+func TestResolveMissPolicyPutsTheRowBeforeTheCapability(t *testing.T) {
+	cap, ok := Get("sign")
+	if !ok {
+		t.Fatal("sign 必须在注册表中")
+	}
+	if got := ResolveMissPolicy(cap, nil); got != core.MissCatchUp {
+		t.Errorf("没给定时任务时该跟随能力声明，实得 %v", got)
+	}
+
+	skip := core.MissSkip
+	row := &core.Schedule{MissPolicy: &skip}
+	if got := ResolveMissPolicy(cap, row); got != core.MissSkip {
+		t.Errorf("用户那一行选了 skip，能力默认不该盖过它，实得 %v", got)
+	}
+
+	// 谁都没说 ⇒ skip：这一档是"没有授权就不额外打上游"，不是"随便挑一个默认"
+	undeclared := Capability{Code: "没有声明的能力"}
+	if got := ResolveMissPolicy(undeclared, &core.Schedule{}); got != core.MissSkip {
+		t.Errorf("两样都没声明时该不补跑，实得 %v", got)
+	}
+}
+
+func TestAuthRefreshIsRegisteredForScheduling(t *testing.T) {
+	cap, ok := Get("auth-refresh")
+	if !ok {
+		t.Fatal("auth-refresh 必须在注册表中 —— 定时任务的 target 要能指到它")
+	}
+	// 通用列表里没有它（它有自己的入口），但 [Get] 找得到：
+	// `Hidden` 管的是"出现在哪份清单里"，不是"能不能被寻址"。
+	for _, listed := range ListVisible() {
+		if listed.Code == "auth-refresh" {
+			t.Error("auth-refresh 不该出现在通用任务列表：那枚按钮的语义是'现在就换'")
+		}
+	}
+	for _, listed := range ListBatchable() {
+		if listed.Code == "auth-refresh" {
+			t.Error("auth-refresh 不进组合编排：它是'到期才换'，不是每天该跑的一步")
+		}
+	}
+	if cap.Group != core.GroupMaintenance {
+		t.Errorf("它是维护型，实得 %v", cap.Group)
+	}
+	if cap.NeedsConfirmation() {
+		t.Error("Medium 不该弹确认框：判据是'花掉不可逆额度'，刷新不消耗额度")
+	}
+}
+
+// TestAuthRefreshParamsHaveNoForceSwitch 守的是参数面，不是实现。
+//
+// `force` 的语义是"人拍板现在就换"。它一旦成为**定时任务的参数**，
+// 就等于"每个触发点都硬换一次 token"，而没人会为此再确认第二次。
+// 手动那条路（账号页那一枚按钮）走的是另一条路由、恒 force，
+// 与本能力的参数面无关 —— 所以这里挡的是"以后有人图省事把它接进来"。
+func TestAuthRefreshParamsHaveNoForceSwitch(t *testing.T) {
+	cap, _ := Get("auth-refresh")
+	for _, spec := range cap.Params() {
+		switch spec.Key {
+		case "force", "leadDays", "lead_days":
+			t.Errorf("参数面不该有 %s：定时任务里没有人，越闸的授权也就没有来源", spec.Key)
+		}
+	}
+}
+
 func TestVisibleListExcludesHidden(t *testing.T) {
 	visible := map[string]bool{}
 	for _, cap := range ListVisible() {
@@ -163,6 +247,40 @@ func TestAllCannotBeUsedToMutateTheRegistry(t *testing.T) {
 		}
 		if code == "sign" && len(got.Params()) == 0 {
 			t.Error("All() 交出了注册表本体：sign 的参数被外部清空")
+		}
+	}
+}
+
+// TestPointerFieldsAreCopiedToo 补的是 [TestAllCannotBeUsedToMutateTheRegistry]
+// **挡不住**的那一半。
+//
+// `copy(out, registry)` 只复制字段值：指针字段复制的是**地址**，
+// 于是 `*got.MissPolicyOnMiss = …` 改的就是注册表本体，且比改字段更隐蔽 ——
+// 改字段只污染这一次拿到的那份，改指针目标会污染**之后所有人**拿到的那一份，
+// 包括本包自己的 [Get]。而表现是"某个能力某天开始补跑了"，没有任何一处代码写着补跑。
+func TestPointerFieldsAreCopiedToo(t *testing.T) {
+	sign, ok := Get("sign")
+	if !ok {
+		t.Fatal("sign 必须在注册表中")
+	}
+	if sign.MissPolicyOnMiss == nil {
+		t.Fatal("sign 该显式声明补跑策略（见 [TestEveryCapabilityDeclaresMissPolicy]）")
+	}
+
+	original := *sign.MissPolicyOnMiss
+	*sign.MissPolicyOnMiss = core.MissPolicy(99) // 越界值：一眼能看出是被人改过的
+
+	again, _ := Get("sign")
+	if again.MissPolicyOnMiss == nil || *again.MissPolicyOnMiss != original {
+		t.Fatalf("Get 交出了指向注册表的指针：改一份等于改全体（实得 %v，原值 %v）",
+			again.MissPolicyOnMiss, original)
+	}
+	for _, listed := range All() {
+		if listed.Code != "sign" {
+			continue
+		}
+		if listed.MissPolicyOnMiss == nil || *listed.MissPolicyOnMiss != original {
+			t.Fatalf("All 同样漏了指针那一半：%v", listed.MissPolicyOnMiss)
 		}
 	}
 }

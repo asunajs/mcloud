@@ -13,13 +13,14 @@
 //
 // ⚠ 这一条是整个设计的前提，不成立就不要改这个文件：
 //
-//   1. **pre-push 不跳过。** 它跑的是全套（Go 九条 + web 两条），
+//   1. **pre-push 不跳过。** 它跑的是全套（Go 十条 + web 两条），
 //      所以"提交时按范围省下来的"必须在推送前补齐 —— 推才是影响别人的动作。
 //      两道闸的分工见 `.githooks/README.md`。
-//   2. **两条与语言无关的守卫恒跑**：`filenames`（命名）与 `idents`（脱敏）。
-//      脱敏那条要扫的是**文本**，`.md` / `.json` / `.py` 一样能泄漏真实标识 ——
-//      把它按语言切掉，等于给"最不该漏的那一条"开一个永远存在的洞。
-//      ⇒ 分类器的输出里这两条**不在可跳的集合里**，不是"这次没匹配上"。
+//   2. **三条与语言无关的仓库级守卫恒跑**：`filenames`（命名）、`idents`（脱敏）
+//      与 `md-tables`（文档表格）。脱敏那条要扫的是**文本**，`.md` / `.json` / `.py`
+//      一样能泄漏真实标识 —— 把它按语言切掉，等于给"最不该漏的那一条"开一个永远存在的洞。
+//      `md-tables` 同理：它扫的是整个 `docs/**`，而它要拦的恰是"只改文档"那类提交。
+//      ⇒ 分类器的输出里这三条**不在可跳的集合里**，不是"这次没匹配上"。
 //   3. **分类器不确定时是全跑，不是全跳。** 见下面 `fallback` 那条分支：
 //      拿不到暂存清单（未诞生分支、git 报错）时给"什么都跑"，
 //      因为"少验"在这里是不可接受的失效方向。
@@ -54,8 +55,12 @@ cd(new URL('..', import.meta.url).pathname)
 
 const MODE = process.argv[2] ?? 'staged'
 
-// 恒跑的那两条（语言无关的守卫，见上面第 2 条前提）。
-const ALWAYS = 'filenames idents'
+// 恒跑的那三条（仓库级文本守卫，见上面第 2 条前提）。
+// ⚠ `md-tables` 也必须恒跑，理由与 `filenames` / `idents` 同构：它扫的是**整个仓库**的
+//   `docs/**/*.md`，不是"这次暂存的那几个" —— 所以按范围派发没有意义（改 `.go` 的提交
+//   同样可能撞上一份早就坏掉的表格）。而它要拦的正是"**只改文档**"那类提交里的缺陷，
+//   偏偏那类提交在派发下只剩恒跑这一档 ⇒ 不进恒跑就等于**永远不在它该响的时候响**。
+const ALWAYS = 'filenames idents md-tables'
 // 只有 Go 代码被碰到才加的三条静态门禁。
 const GO_STATIC = 'fmt deps jsontags'
 // 只有 web 被碰到才加的那一条。
@@ -85,6 +90,7 @@ function selfCheckSyntax() {
     'scripts/check-identifiers.cjs',
     'scripts/check-golden-vectors.cjs',
     'scripts/check-go-jsontags.cjs',
+    'scripts/check-md-tables.cjs',
     '.githooks/pre-commit',
     '.githooks/pre-push',
   ]
@@ -170,7 +176,7 @@ if (touched.some((f) => f.startsWith('web/'))) {
 
 let note
 if (files.trim() === '') {
-  note = '暂存区没有文件变更（空提交？），只跑恒过的两条'
+  note = '暂存区没有文件变更（空提交？），只跑恒过的三条'
 } else if (web !== '' && go !== ALWAYS) {
   note = '同时改了 Go 与前端 ⇒ 两侧静态门禁都跑'
 } else if (web !== '') {
@@ -178,7 +184,7 @@ if (files.trim() === '') {
 } else if (go !== ALWAYS) {
   note = '触及 *.go ⇒ 加跑 fmt deps jsontags'
 } else {
-  note = '只触及文档/素材 ⇒ 只跑恒过的两条（filenames idents）'
+  note = '只触及文档/素材 ⇒ 只跑恒过的三条（filenames idents md-tables）'
 }
 
 out(go, web, note)

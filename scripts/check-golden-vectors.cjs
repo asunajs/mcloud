@@ -625,6 +625,29 @@ const NOT_VERIFIED_REASONS = {
   startSignIn: '同上；由 Go 侧 `upstream.ParseStartSignIn` 断言',
   prizeRecords:
     '纯响应体（奖品记录一条），无算法可复算；由 Go 侧 `upstream.ParsePrizeRecords` 断言',
+  // ── 直播口令 / 小红花这一条链（2026-09-22 登记）──
+  //
+  // ⚠ 这五节的处境与上面几条**不同**，值得说清楚：上面几条是"没有算法可复算"，
+  // 而 `msyncFrames` 是**有**算法、且**已经在 JS 侧算过**了 ——
+  // 向量的期望值就是生成器（`scripts/gen-live-room-vectors.cjs`）用**原项目自己的
+  // protobufjs** 逐字节产出的，来源与版本记在向量的 `$evidence` 里。
+  // 在本脚本里再写一份 protobufjs 编码器，等于把同一份证据算第二遍 ——
+  // 而第二份实现错了的话，它会与第一份"互相印证"，比没有更糟。
+  // 所以这里只声明"谁在验"，把复算留在**只有一份**的那个位置。
+  msyncFrames:
+    'MSync 报文的编码算法由原项目的 protobufjs 逐字节产出期望值（见向量 `$evidence`），' +
+    'Go 侧由 `upstream.EncodeMSync` 断言；本脚本刻意不复算第二份',
+  msyncInbound:
+    '入站弹幕的三级兜底解码（SYNC / NOTICE / 整段当 MessageBody），无独立算法可复算；' +
+    '由 Go 侧 `upstream.ExtractDanmakuText` 断言',
+  memberApplySignatures:
+    '两个 md5 签名头的算式（`systemMd5` / `tokenMd5`），由 Go 侧 `upstream.SystemMD5` 断言',
+  koulingExtract:
+    '口令解析的四个分支（含 Go RE2 没有前瞻那处的等价重写），纯文本规则；' +
+    '由 Go 侧 `upstream.ExtractKouling` 断言',
+  xiaohongshuExtract:
+    '小红书主页的四级候选提取（内嵌 JSON → 服务端渲染元素 → meta → 全文行兜底）；' +
+    '由 Go 侧 `upstream.ExtractKoulingFromXiaohongshuHTML` 断言',
 }
 
 /**

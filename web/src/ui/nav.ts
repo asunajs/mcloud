@@ -15,6 +15,7 @@ import {
   IconDashboard,
   IconDebug,
   IconExchange,
+  IconFlower,
   IconHistory,
   IconSchedule,
   IconSettings,
@@ -25,6 +26,7 @@ export type PageId =
   | 'dashboard'
   | 'accounts'
   | 'tasks'
+  | 'redflower'
   | 'exchange'
   | 'schedules'
   | 'history'
@@ -50,10 +52,14 @@ interface NavItem {
 }
 
 /**
- * 8 个页面。顺序即侧栏顺序（按使用频率排：总览与账号最常用）。
+ * 9 个页面。顺序即侧栏顺序（按使用频率排：总览与账号最常用）。
  *
- * 注意：设计方案里说 9 个页面，实际清单是 8 个 ——
- * 「登录/初始化」不是侧栏页面（它是门禁），不该占一个导航位。
+ * 补记（2026-09-22）：这一栏原先记的是"设计方案说 9 个、实际清单 8 个 ——
+ * 「登录/初始化」不是侧栏页面（它是门禁），不该占一个导航位"。那句仍然成立，
+ * 现在满 9 条是**新加了一页**（直播小红花），不是把登录页放了回来。
+ *
+ * ⚠ 9 条是 §4.1 的封顶数：再加页面要么并进已有页，要么先改设计指南，
+ * 不要静默开第 10 条。
  */
 export const NAV_ITEMS: readonly NavItem[] = [
   {
@@ -68,7 +74,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     id: 'accounts',
     label: '账号',
     title: '账号管理',
-    blurb: '添加、凭据校验、启停与云朵余额。',
+    blurb: '扫码/短信登录、粘贴 auth 添加、启停、删除与云朵余额。',
     href: '#/accounts',
     icon: IconAccount,
   },
@@ -79,6 +85,14 @@ export const NAV_ITEMS: readonly NavItem[] = [
     blurb: '配置并触发签到、抽奖等任务。',
     href: '#/tasks',
     icon: IconTask,
+  },
+  {
+    id: 'redflower',
+    label: '小红花',
+    title: '直播小红花',
+    blurb: '看直播间余额与排期，按口令批量领取小红花。',
+    href: '#/live-redflower',
+    icon: IconFlower,
   },
   {
     id: 'exchange',
@@ -128,7 +142,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
  * 原先第 5 项是「更多」，点开的是侧栏抽屉 —— 而抽屉在 navbar 左上角的汉堡包
  * 那里已经有一个入口了（同一个 `label for="nav-drawer"`）。
  * ⇒ 一个只重复既有导航的 dock 位，不值一格；这一格给账号。
- * 其余 3 个页面（定时 / 调试台 / 设置）仍只走抽屉，不加第二条入口。
+ * 其余 4 个页面（小红花 / 定时 / 调试台 / 设置）仍只走抽屉，不加第二条入口。
  */
 export const DOCK_IDS: readonly PageId[] = [
   'dashboard',

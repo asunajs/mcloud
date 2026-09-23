@@ -12,5 +12,5 @@
 // # 分层铁律
 //
 // 与 core / upstream / capabilities 同属**纯层**，禁止任何 IO，
-// 由 scripts/check-go-deps.sh 断言。
+// 由 scripts/check-go-deps.js 断言。
 package mcloudexec

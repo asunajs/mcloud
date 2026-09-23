@@ -310,6 +310,26 @@ func (s *ScheduleStatus) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// missPolicyJSON 管 [MissPolicy] 的对外文本。
+//
+// ⚠ 这一族**没有** Rust 基准：`miss_policy` 是 Go 侧为"服务进程内装调度循环"
+// 新长的列（旧实现只有"错过即弃"一种行为，从来没有这一档）。所以这两个名字
+// 是本地契约，改它只要一起改 `ParseMissPolicy` 与库里的存量文本。
+var missPolicyJSON = enumJSON{typeName: "MissPolicy", names: []string{"catch_up", "skip"}}
+
+// MarshalJSON 输出 `catch_up` / `skip`。
+func (p MissPolicy) MarshalJSON() ([]byte, error) { return missPolicyJSON.marshal(int(p)) }
+
+// UnmarshalJSON 是 [MissPolicy.MarshalJSON] 的逆。
+func (p *MissPolicy) UnmarshalJSON(data []byte) error {
+	v, err := missPolicyJSON.unmarshal(data)
+	if err != nil {
+		return err
+	}
+	*p = MissPolicy(v)
+	return nil
+}
+
 var pipelineStatusJSON = enumJSON{typeName: "PipelineStatus", names: []string{"ok", "error", "partial"}}
 
 // MarshalJSON 输出 `ok` / `error` / `partial`。

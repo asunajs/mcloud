@@ -4,7 +4,7 @@
 //
 // # 分层铁律
 //
-// 本包**禁止任何 IO**，由 scripts/check-go-deps.sh 断言：
+// 本包**禁止任何 IO**，由 scripts/check-go-deps.js 断言：
 //
 //   - 不得 import net/http、database/sql；
 //   - 不得 import github.com/catlair/mcloud/internal/io。

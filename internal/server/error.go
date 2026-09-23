@@ -117,6 +117,16 @@ const (
 	apiSetupRequired
 	// apiBadBody 是请求体不是合法 JSON，或字段不符合契约。
 	apiBadBody
+	// apiNotImplemented 是"这个能力已登记、但本服务还没接上执行"。
+	//
+	// 为什么不是 4xx：请求本身没写错，缺的那一半在我们这边。
+	// 为什么不是 500：那会把"还没做"报成"坏了"，而前端的处置完全不同 ——
+	// 前者该把这个入口藏起来，后者该重试或报障。
+	//
+	// ⚠ 它是**唯一**一条"5xx 但原文照出"的：detail 是我们自己写的
+	// "某某能力还没有接上执行"，不带路径、SQL 或上游响应体，
+	// 而这一句恰好是使用者的错（点了界面上一个还不该出现的按钮）。
+	apiNotImplemented
 )
 
 // APIError 是接口错误。
@@ -144,6 +154,14 @@ func ErrBadBody(detail string) APIError {
 	return APIError{kind: apiBadBody, detail: detail}
 }
 
+// ErrNotImplemented 能力已登记、但本服务还没接上执行。
+//
+// detail 同样是可行动的一句话（哪一个能力、要等什么），见 [apiNotImplemented]
+// 那条"5xx 但原文照出"的例外说明。
+func ErrNotImplemented(detail string) APIError {
+	return APIError{kind: apiNotImplemented, detail: detail}
+}
+
 // statusAndCode 给出状态码与响应体里的 `code`。
 //
 // `code` 是给前端 `switch` 用的稳定标识，**不是** [core.ErrorKind.String] ——
@@ -156,6 +174,8 @@ func (e APIError) statusAndCode() (int, string) {
 		return http.StatusServiceUnavailable, "setup_required"
 	case apiBadBody:
 		return http.StatusBadRequest, "bad_request"
+	case apiNotImplemented:
+		return http.StatusNotImplemented, "not_implemented"
 	}
 
 	switch e.domain.Kind() {
@@ -194,6 +214,12 @@ func (e APIError) Message() string {
 	case apiSetupRequired:
 		return "还没初始化首个管理员，请先完成初始化"
 	case apiBadBody:
+		return e.detail
+	// ⚠ 这是"5xx 一律用类别文案"那一条的**例外**，且只此一处：
+	// detail 是我们自己写的一句话（哪个能力、缺的是哪一半），
+	// 不带路径、不带 SQL、不带上游响应体；而它恰恰是使用者的错
+	// （点了界面上一个还不该出现的按钮），类别文案只会变成"内部错误"。
+	case apiNotImplemented:
 		return e.detail
 	}
 

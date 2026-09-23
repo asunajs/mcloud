@@ -17,13 +17,19 @@
 >
 > - **执行方案：[`docs/go-migration-plan.md`](./docs/go-migration-plan.md)** ——
 >   **与其它文档冲突时以它为准**。
-> - 骨架已就位：`internal/` 八层 + `cmd/` 两个入口 + `node scripts/gates-go.js`（**九条门禁**）。
+> - 骨架已就位：`internal/` 八层 + `cmd/` 两个入口 + `node scripts/gates-go.js`（**十条门禁**）。
 >   **业务已迁完**（2026-09-21）：`core` / `upstream` / `io` / `capabilities` / `exec` /
->   `app` / `server` / `cli` 八层全部落地，**922 条测试**；`cli` 的 12 个叶子命令
+>   `app` / `server` / `cli` 八层全部落地，**922 条测试**（2026-09-21 的实测值）；`cli` 的
+>   **全部 14 个叶子命令**（⚠ 这个数会随新增命令变 —— 权威是
+>   `internal/cli/args_test.go` 的 `TestCommandTreeMatchesTheDocumentedSurface`
+>   与 `docs/cli-usage.md` 的子命令表，别照抄本行的数字）
 >   **全部接上真后端**（缺口表已退役），`cmd/mcloud-server` **也接上了** `internal/server`
 >   （不再是占位退 2）。
 >   ⭕ **迁移已对位，没有缺口**：`capabilities` 注册表 Go 侧 3 项
 >   （`sign` / `exchange` / `cloud-snapshot`）与冻结基准**逐项一致**；
+>   〔2026-09-22 补记：注册表全表现在 **4** 项，新增 `live-room`（直播口令 → 小红花）。
+>   **对位的那一组仍是这 3 项**，`live-room` 在原项目里是 **TS 实现**、`legacy/` 里无对应
+>   crate ⇒ **属新增能力、不是迁移缺口**。见 `docs/go-migration-plan.md` 步 4 的补记〕
 >   服务端 15 条路由也逐条对位（有断言盯着，见 `internal/server/routes_test.go`）。
 >   ⚠ 常被误记成"还差 16 项能力"与"`POST /api/runs` 未落" —— **那两项冻结基准里也没有**：
 >   19 项来自**旧 TS 项目**的 `packages/api/src/tasks/*`，而 `POST /api/runs` 在
@@ -50,7 +56,7 @@
 外部世界一律走 4 个注入 trait：`HttpClient`、`Clock`、`StateStore`、`Random`。
 
 > 依赖方向不是文档约定，是**可执行断言**：Go 侧由 `scripts/check-go-deps.js` 真读 import
-> 断言（它现在是九条门禁里的第 5 条）；Rust 侧那条 `scripts/check-deps.sh` 读的是
+> 断言（它现在是十条门禁里的第 5 条）；Rust 侧那条 `scripts/check-deps.sh` 读的是
 > `Cargo.toml`，脚本随基准一起搬到了 `../mcloud-rust/`。
 > 完整分层图、约束表与"为什么必须这样"见 [`docs/dev-gates.md`](./docs/dev-gates.md)。
 > ⚠ 迁到 Go 之后这条约束**降级成 lint 约定**（Go 的接口是结构性实现，
@@ -68,7 +74,7 @@ go run ./cmd/mcloud-server --help              # 五个选项：--db / --host / 
 
 npm install                                    # 根目录装一次：门禁脚本是 zx（node），依赖钉在根 package.json
 node scripts/install-hooks.js                  # 装一次：提交/推送时自动跑门禁
-node scripts/gates-go.js                       # 九条门禁，一条命令跑完，全绿才算完成
+node scripts/gates-go.js                       # 十条门禁，一条命令跑完，全绿才算完成
 node scripts/gates-go.js filenames idents      # 也可以只跑其中几条（调试时用）
 ```
 
@@ -80,7 +86,7 @@ node scripts/gates-go.js filenames idents      # 也可以只跑其中几条（�
 > `export PATH="/opt/homebrew/bin:$PATH"`。
 
 > 原"迁移期两套门禁并存"一节已随剥离收敛：Rust 七条（`gates.sh`）现在
-> `../mcloud-rust/` 里自跑自的；本仓库只剩 Go 侧九条。
+> `../mcloud-rust/` 里自跑自的；本仓库只剩 Go 侧十条。
 > 哪些门禁是**复用**自 Rust 时代的语言无关脚本，见
 > [`docs/dev-gates.md`](./docs/dev-gates.md)。
 

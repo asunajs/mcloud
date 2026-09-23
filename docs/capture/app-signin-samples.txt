@@ -1340,9 +1340,17 @@ H5 弹窗文案（逐字）：
    所以不存在"两个池子"的问题。**但** `receiveRevivalReward` 的 `totalClouds`
    与 `infoV3.total` 是不是同一个数，**仍没有同刻实拍对拍**，所以还是**不接进 `record_cloud`**。
    余额的权威来源是 `infoV3.total`（§3.6.5）。
-8. **`exchangeV3`（兑换）仍未实现**：它标了 `isDeviceId: true`，与 `receiveV3` 同族，
-   `deviceId` 的取值通路已经通了（§4.2），所以它现在是**可做**的 ——
+8. **`exchangeV3`（兑换）仍未实现，但已**有真机实拍**（2026-09-22）**：它标了 `isDeviceId: true`，
+   与 `receiveV3` 同族，`deviceId` 的取值通路已经通了（§4.2），所以它现在是**可做**的 ——
    只是规划把它排在最高风险档（并发抢兑 + 幂等），没到那一批。
+   > **2026-09-22 补记（状态从"零实拍"变成"有实拍"）**：三条接口的请求/响应**逐字实拍**已到手，
+   > 见同目录 [`app-exchange-samples.txt`](./app-exchange-samples.txt) §5.1 / §5.2 / §5.3。
+   > 要点：兑换是 `POST /ycloud/signin/page/exchangeV3`（JSON body，含 `deviceId`）；
+   > 滑块是 `POST /ycloud/auth-service/slide/getSlide`（**空 `{}` body + `x-www-form-urlencoded`**，
+   > 与兑换不是同一个 content-type）；`puzzleOffset` 的量纲已实测
+   > （= 拼图块左缘在 680×400 底图里的 x），**服务端容忍度夹在 `[4, 41)` 像素**。
+   > 与参考项目的逐条对照见 [`../caiyun-go-exchange-and-runtime.md`](../caiyun-go-exchange-and-runtime.md) §3.9。
+   > ⇒ ⚠ **"实现"这一步仍未做** —— 卡点是排期与风险档，**不是信息不足**。
 9. **`doTaskPost`（`initTaskStatus`）的 `deviceId` 行为**：实现侧按 `isDeviceId: true`
    做成必填，但**没有单独实测**过不带会怎样。与 `receiveV3` 同族的推断，不是实证。
 10. **两条"可领"的路都没有实拍**（2026-09-19）：
