@@ -44,8 +44,8 @@
 //! CARGO_NET_OFFLINE=true cargo run --quiet > /tmp/datetime-format-vectors.json
 //! ```
 //!
-//! ⚠ `chrono` 版本必须与冻结侧解析到的**同一份**（`Cargo.lock` 里是
-//! 0.4.45）—— 小数位数的取舍是版本相关的实现细节。
+//! ⚠ `chrono` 版本必须与 `Cargo.lock` 里解析到的**同一份**（0.4.45）——
+//! 小数位数的取舍是版本相关的实现细节。
 
 use chrono::{DateTime, Utc};
 use std::fmt::Write as _;

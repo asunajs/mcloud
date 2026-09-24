@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# 推送前门禁：调 run-gates.sh pre-push（全套七条，不跳过）。
+#
+# 为什么 pre-push 不按范围收窄：pre-commit 已经允许"这次只改了 .md 所以
+# 只跑快的四条" —— 那半边空白必须有人无条件补上，否则"按范围跳过"就只是
+# 把检查删掉了。这一道就是那个兜底。详见同目录 README.md 与 run-gates.sh 文件头。
+#
+# ⚠ git 只认固定文件名（pre-push）且本文件必须有 x 位 ——
+#    没有 x 位时 git **静默跳过**，不报错。装法见 README.md。
+set -uo pipefail
+
+exec bash "$(dirname "$0")/run-gates.sh" pre-push

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# 提交前门禁：调 run-gates.sh pre-commit（快的四条，按暂存区收窄）。
+#
+# 这层壳只做派发 —— 逻辑（跑哪些、怎么收窄、失败重试）全在 run-gates.sh，
+# 与 pre-push 共用同一份。设计与判据见同目录 README.md。
+#
+# ⚠ git 只认固定文件名（pre-commit）且本文件必须有 x 位 ——
+#    没有 x 位时 git **静默跳过**，不报错。装法见 README.md。
+set -uo pipefail
+
+exec bash "$(dirname "$0")/run-gates.sh" pre-commit

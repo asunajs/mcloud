@@ -1,7 +1,8 @@
 # 门禁与分层铁律（Rust 侧）
 
-> 状态：**冻结**（2026-09-20 冻结，2026-09-21 随代码从 mcloud 仓库剥离到本仓库）。
-> 本文即剥离前 `mcloud/docs/dev-gates.md` 的 **Rust 部分原文**（"七条门禁"、
+> 状态：**活跃**（2026-09-20 曾冻结，2026-09-21 随代码从 mcloud 仓库剥离到
+> 本仓库，2026-09-24 解冻恢复开发，git hooks 同日重新启用）。
+> 本文主体即剥离前 `mcloud/docs/dev-gates.md` 的 **Rust 部分原文**（"七条门禁"、
 > 耗时实测、跨环境核证、文件名/黄金向量两条、分层铁律），行号顺序未动，
 > 仅按 Rust 侧语境重新聚拢；Go 侧九条留在
 > [`../../mcloud/docs/dev-gates.md`](../../mcloud/docs/dev-gates.md)。
@@ -40,9 +41,16 @@ bash scripts/gates.sh test clippy        # 只跑指定的几条
 
 ## 在哪里跑
 
-本仓库**没有自动钩子**：mcloud 的 `pre-commit` / `pre-push` 在 2026-09-20
-Rust 冻结后已改跑 Go 侧门禁（旧 Rust hook 归档在 `.githooks/run-gates.sh`，
-已停用）。这边要验证就手动跑 `bash scripts/gates.sh`。
+两条路（2026-09-24 解冻起）：
+
+- **自动**：git hooks 已启用（`git config core.hooksPath .githooks`，
+  每个克隆跑一次）。pre-commit 跑快的四条并按暂存区收窄，pre-push 跑全套；
+  两者都派发给 `.githooks/run-gates.sh`，设计与判据见其
+  [README](../.githooks/README.md)。
+- **手动全量**：`bash scripts/gates.sh`。
+
+（历史：mcloud 的 hook 在 2026-09-20 Rust 冻结后改跑 Go 侧门禁，本仓库的
+Rust hook 只作归档、不被调用 —— 该状态持续到 2026-09-24 解冻。）
 
 ## 耗时
 
@@ -261,7 +269,8 @@ golden     122 条断言全绿
 ```
 
 > ⚠ 上面是 **2026-09-20 那一跑的快照，不是现值**。黄金向量的断言数此后随向量增长
-> （现 **167 条**，见 `mcloud/docs/status.md`（同级仓库））；Rust 侧那几个数在冻结后就不再动。
+> （现 **167 条**，见 `mcloud/docs/status.md`（同级仓库））；上面 Rust 侧那几个数字
+> 是冻结前那一跑的记录，冻结期间未再复跑（解冻后要现值就重跑一次，别引用快照）。
 > 这一节要证的只有一件事：**当时七条没有一条因为平台而失败** ——
 > 别把上面几个数字当"当前计数"引用（这就是本文档反复踩的"第二份真相"）。
 

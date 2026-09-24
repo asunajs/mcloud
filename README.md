@@ -1,15 +1,14 @@
-# mcloud-rust —— 移动云盘自动化工具的 Rust 实现（已冻结）
+# mcloud-rust —— 移动云盘自动化工具的 Rust 实现
 
 > 本仓库是 [mcloud](../mcloud/) 的 **Rust 实现**，2026-09-21 从该仓库的
-> `legacy/` 目录整体剥离而来。当前项目活动实现是 **Go**（在 `../mcloud/`）。
+> `legacy/` 目录整体剥离而来。
 >
-> **这里不再开发。** 代码保持 2026-09-20 冻结时的原样 —— 七项门禁全绿、
-> 714 个测试通过（`cargo test --workspace`）。发现 bug 去 Go 侧修，
-> 不要改这里（理由见 [`docs/freeze-record.md`](./docs/freeze-record.md)）。
+> **2026-09-24 解冻，恢复为独立活跃项目。** 此前 2026-09-20 至 2026-09-24
+> 曾整体冻结、只读保留作 Go 侧的对拍基准；冻结与剥离的完整记录（含"当时
+> 为什么不许改"）见 [`docs/freeze-record.md`](./docs/freeze-record.md)，
+> 那是**历史文档**，其禁令已随解冻失效。
 >
-> ⚠ "原样"精确到什么程度：`crates/` 与 `Cargo.*` 与冻结快照**逐字节一致**，
-> 改动只落在注释、门禁脚本与向量文件的 `$note` 一行上 ——
-> 全部列在 [`docs/freeze-record.md`](./docs/freeze-record.md) 的「剥离补记」里。
+> 解冻后与 Go 侧的关系：**各自独立开发**（见下文「与 Go 侧的关系」）。
 
 ---
 
@@ -20,11 +19,11 @@ crates/         8 个 crate（分层铁律见 docs/dev-gates.md）
 scripts/        七项门禁与黄金向量生成器
 test/
   fixtures/     夹具（legacy/ = 旧项目 mcloud-sign 的脱敏导出件）
-  golden/       与 TS 原实现对拍的黄金向量
-docs/           Rust 侧文档（门禁与分层 / 冻结记录 / 历史规划）
-.githooks/      **只有归档**：Rust 时代的门禁执行器，本仓库不启用任何 hook
+  golden/       黄金向量（与另一侧实现交叉复算）
+docs/           Rust 侧文档（门禁与分层 / 冻结与剥离记录 / 历史规划）
+.githooks/      入库的 pre-commit / pre-push 门禁（每个克隆跑一次安装，见其 README）
 .cargo/         incremental = false（绕开本机写盘故障，见其内注释）
-target/         cargo 构建缓存（不入库；带着冻结时的编译产物，别从头编）
+target/         cargo 构建缓存（不入库）
 ```
 
 ⚠ 两个 "legacy" 不是一回事：`test/fixtures/legacy/` 是**旧 TS 项目**
@@ -35,32 +34,42 @@ target/         cargo 构建缓存（不入库；带着冻结时的编译产物�
 ## 怎么跑
 
 ```bash
-bash scripts/gates.sh                        # 七项门禁一键跑
-cargo test --workspace                       # 只跑测试
-node scripts/check-golden-vectors.cjs        # 只复算黄金向量
+git config core.hooksPath .githooks   # 每个克隆跑一次：启用提交/推送门禁
+bash scripts/gates.sh                 # 七项门禁一键跑（全量，手动）
+cargo test --workspace                # 只跑测试
+node scripts/check-golden-vectors.cjs # 只复算黄金向量
 ```
 
 仓库根就是 Cargo workspace 根，**不需要** `--manifest-path`
 （那是寄居 `mcloud/legacy/` 时期的用法）。
+
+提交与推送路径上会自动跑门禁（pre-commit 快查、pre-push 全查，按改动范围
+收窄），执行器是 `.githooks/run-gates.sh`；设计与判据见
+[`.githooks/README.md`](./.githooks/README.md)。
 
 ## 文档
 
 | 文档 | 是什么 |
 | --- | --- |
 | [`docs/dev-gates.md`](./docs/dev-gates.md) | Rust 侧七条门禁 + 分层铁律 + 编译耗时实测 |
-| [`docs/freeze-record.md`](./docs/freeze-record.md) | 2026-09-20 冻结记录原文（为什么冻结、不许改的理由）＋ **2026-09-21 剥离补记**：移出时逐字节核过什么、改了哪些注释 |
-| [`docs/rust-rewrite-plan.md`](./docs/rust-rewrite-plan.md) | 动工前的 Rust 重写规划快照（提案，进度以冻结记录为准） |
-| [`docs/rust-to-golang-migration.md`](./docs/rust-to-golang-migration.md) | Rust → Go 迁移评估报告（规模 / 难点 / 工作量，数字为 2026-09-20 实测） |
-| [`docs/go-migration-plan.md`](./docs/go-migration-plan.md) | Rust → Go 执行方案（**权威在 mcloud 仓库**，此处为只读副本） |
+| [`docs/freeze-record.md`](./docs/freeze-record.md) | **历史文档**：2026-09-20 冻结记录原文（为什么冻结、当时不许改的理由）＋ 2026-09-21 剥离补记 ＋ 2026-09-24 解冻标注 |
+| [`docs/rust-rewrite-plan.md`](./docs/rust-rewrite-plan.md) | 动工前的 Rust 重写规划快照（历史提案） |
+| [`docs/rust-to-golang-migration.md`](./docs/rust-to-golang-migration.md) | Rust → Go 迁移评估报告（历史文档，数字为 2026-09-20 实测） |
+| [`docs/go-migration-plan.md`](./docs/go-migration-plan.md) | Rust → Go 执行方案（历史文档，权威在 mcloud 仓库，此处为只读副本） |
 
 ## 与 Go 侧（mcloud）的关系
 
-- Go 侧的黄金向量守卫与本仓库**互为交叉验证**：`test/golden/*.json`
-  两边各存一份副本，独立复算（Node 侧脚本两边共用同一份逻辑）。
-- Go 侧代码注释里大量"对应 Rust 侧 `crates/...`"的对位说明，
-  指向的就是本仓库的路径（剥离前写作 `legacy/crates/...`）。
+- **2026-09-24 起各自独立开发**：本仓库恢复活跃，不再充当对拍基准；
+  mcloud 侧继续演进它自己的 Go 实现。
+- 黄金向量（`test/golden/*.json`）两边各存一份副本，曾经互为交叉验证。
+  现在各自维护 —— 新增或修改向量时**跨仓一致性靠人**（没有门禁盯这一点，
+  这是剥离时的有意取舍，见 freeze-record）。
+- **抓包素材（HAR / capture）只保留在 Go 侧** mcloud 仓库，本仓库不收
+  （`.gitignore` 里的 `har/`、`test/fixtures/http/` 即此）。
+- mcloud 侧代码注释里"对应 Rust 侧 `crates/...`"的对位说明，
+  指向的仍是本仓库的路径（剥离前写作 `legacy/crates/...`）。
 
 ## 历史
 
 冻结前的完整开发历史在 mcloud 仓库的 git 记录里（`git log -- legacy/ crates/`
-及其之前的路径）；本仓库从剥离时快照起重新计史。
+及其之前的路径）；本仓库从剥离时快照起重新计史，2026-09-24 解冻后在本仓库继续。

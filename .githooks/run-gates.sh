@@ -1,24 +1,14 @@
 #!/usr/bin/env bash
-# 【历史脚本归档 · Rust 时代】本文件 2026-09-21 随 Rust 实现从 mcloud 仓库剥离进来。
+# pre-commit / pre-push 共用的门禁执行器（2026-09-24 随解冻重新启用；
+# 2026-09-21 剥离进来时只作归档，冻结期间不被任何东西调用）。
 #
-# ⚠⚠ 在 mcloud-rust 里它同样**不被任何东西调用**：本仓库是冻结基准，不开发、
-#     也不需要自动门禁（hook 挂在提交路径上，而这里的提交只有剥离那一次）。
-#     归档而不是删掉：里面那套"按改动范围缩小检查、没碰就不跑"的设计与理由
-#     仍然成立，Go 侧（同级仓库 mcloud）暂时没有等价物 —— 将来要加时从这里抄，
-#     别重新想一遍。两道闸的判据见 mcloud/.githooks/README.md。
-#
-#     要手工跑 Rust 门禁：bash scripts/gates.sh
-#     （本仓库的仓库根就是 Cargo workspace 根，不需要 --manifest-path；
-#      寄居在 mcloud/legacy/ 时期的那个写法已随剥离删除。）
-#
-# ─────────────────────────────────────────────────────────────────
-# pre-commit / pre-push 共用的门禁执行器。
-#
-# **不要单独跑它** —— 它是被两个 hook 调用的。想手动跑门禁用：
+# **不要单独跑它** —— 它是被两个 hook 调用的（壳见同目录 pre-commit /
+# pre-push）。想手动跑门禁用：
 #   bash scripts/gates.sh
 #
 # 本文件只做一件 `scripts/gates.sh` 做不到的事：**按 git 暂存区/待推送范围
 # 缩小检查范围**，以及在没有相关改动时直接放过（见下面"跳过"一节）。
+# 设计判据与两层静默失效的坑见同目录 README.md。
 #
 # ── 为什么 hook 不直接调 gates.sh ──────────────────────────────────
 #
@@ -199,7 +189,9 @@ gate_cmd() {
   case "$1" in
     test)      echo "cargo test --workspace" ;;
     clippy)    echo "cargo clippy --all-targets -- -D warnings" ;;
-    fmt)       echo "cargo fmt --check" ;;
+    # ⚠ `--all` 必须有：workspace 根是**虚拟 manifest**，不带它 cargo fmt
+    # 认不出要格式化哪些 target（与 scripts/gates.sh 的 gate_cmd 逐字一致）。
+    fmt)       echo "cargo fmt --all --check" ;;
     deps)      echo "bash scripts/check-deps.sh" ;;
     filenames) echo "bash scripts/check-filenames.sh" ;;
     idents)    echo "node scripts/check-identifiers.cjs" ;;

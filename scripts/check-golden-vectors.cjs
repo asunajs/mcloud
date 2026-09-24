@@ -427,7 +427,7 @@ const VERIFIERS = {
    *
    * ⚠ 这条验的是**向量文件自身**（声明的输入与输出对得上），
    * 不是"某一侧复刻了 md5(uuid)" —— **两侧都没有复刻**：
-   * Go 与冻结的 Rust 都是 `hex(16 个随机字节)`，而上游只看得到那 32 个字符，
+   * Go 与 Rust 都是 `hex(16 个随机字节)`，而上游只看得到那 32 个字符，
    * 分辨不出两者（见 `internal/app/device_test.go`）。
    * 别把这条的 ✓ 读成"这条路径被实现了"。
    */
@@ -640,8 +640,8 @@ function walkGo(dir, out = []) {
  * ⚠ 判据：理由若说"这一节有人管"，那就要**指得出是谁**。指不出来，这条豁免就是
  * 把「没人验」伪装成「已交代」—— 而它是最坏的一种豁免，因为读的人会**因此不再看那一段**。
  *
- * ⚠⚠ 与 Rust 侧那些**冻结**的注释不同（那种只可能一开始就错、不会后来变错），
- * **这些引用会烂**：把 `ParsePrizeRecords` 改个名，豁免照样打印，
+ * ⚠⚠ 与向量文件里那些**写死的** `$note` 不同（那份只可能一开始就错、
+ * 不会后来变错），**这些引用会烂**：把 `ParsePrizeRecords` 改个名，豁免照样打印，
  * 而这一节从此**真的没人验**。
  *
  * 只核对**反引号点名**的引用；纯叙述（"同上" / "向量自己声明…"）不做机械核对，
@@ -752,7 +752,7 @@ function decodeBase64Payloads(text) {
  * 只有 **Go 侧（同级仓库 mcloud）** 消费者的向量。
  *
  * 2026-09-21 剥离之后，`test/golden/` 是两个仓库各一份实体副本。这六份是
- * Rust 冻结**之前**为"钉住 Go 侧要复刻的形状"补的，Rust 侧从来没人读它们
+ * 为"钉住 Go 侧要复刻的形状"补的，Rust 侧从来没人读它们
  * （判据：`grep -rn include_str crates/ | grep <名字>` 全为 0）。
  * 不列出来，它们会在"消费者"一节被印成**死向量** —— 那是假警报，
  * 而假警报的代价是让人开始忽略真警报。
@@ -786,8 +786,8 @@ const GO_SIDE_ONLY = new Set([
  *   Go    `golden.Load("xxx.json")`（见 internal/golden/golden.go）
  *
  * 只认一边的后果不是报错，而是**把 Go 侧真读了的向量标成"死向量"** ——
- * 于是这条防线的输出从"谁没被读"变成"谁没被 Rust 读"，而后者在迁移后
- * 是个越来越没意义的问句（Rust 侧已被冻结）。
+ * 于是这条防线的输出从"谁没被读"变成"谁没被 Rust 读"，而 Go 侧那份
+ * 消费者从此看不见（本仓库只扫得到 `crates/`，Go 消费者在同级仓库）。
  */
 function consumedByTests() {
   const used = new Set();
@@ -816,7 +816,7 @@ function consumedByTests() {
       // 生产代码里的一个 `golden.Load("x.json")` 会被读成"有测试在读它"。
       // ⇒ 判据要**至少**和它印出来的那句话一样强。
       // （Rust 侧不这么限：那边的向量是 `include_str!` 进 `tests/` 模块或
-      //  `#[cfg(test)] mod tests`，文件名不带 `_test` 后缀；且 Rust 已冻结。）
+      //  `#[cfg(test)] mod tests`，文件名不带 `_test` 后缀。）
       const re = ent.name.endsWith(".rs")
         ? RS_RE
         : ent.name.endsWith("_test.go")
