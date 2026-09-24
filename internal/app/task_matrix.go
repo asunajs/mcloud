@@ -58,8 +58,9 @@ var TaskMatrixMarketNames = []string{
 // ② 结果播报（`results.ts:33`，命中就**不出现在报告里**）。
 // 任务列表照样拉、专属 runner 照样跑 ⇒ 把它读成"这 11 个 id 永远不做"是**错**的。
 //
-// 本层今天只有读的那一半，所以这个常量**没有调用点** —— 登记在此是为了接写侧时
-// 那一次盲点点击有出处，不是因为"已经用上了"。
+// 本层读它的是 [taskMatrixSkipsClick]（写侧 default 分支那一发盲点）。⚠ 它**不**挡
+// 专属 runner —— 那张表在 `task_matrix_dispatch.go` 里只用于"命中就不发这一发打卡"，
+// 而"runner 照跑"那一半是旧实现的实情，改这个常量的时候两边都要回看。
 var TaskMatrixNeverClick = []int64{117, 437, 991, 406, 385, 480, 1022, 1018, 603, 1021, 120}
 
 // TaskMatrixFetches 是这一次聚合**注定要发**的请求数（2 × 8）。
@@ -79,8 +80,9 @@ type TaskMatrixFailure struct {
 
 // TaskMatrix 是聚合后的那张表。
 //
-// ⚠ 本结构体**不进 JSON**（未登记 json tag 白名单 ⇒ 门禁会红）：
-// 今天它没有调用点，界面上出现它之前要先决定"这是一条能力还是 `task-list` 的第二页"。
+// ⚠ 本结构体**不进 JSON**（未登记 json tag 白名单 ⇒ 门禁会红）：它的读数由
+// `task_matrix_run.go` 那段翻成 [TaskMatrixRunResult] 后才进结论，
+// 直接把这一份交给界面会把"有几组没读到"那一格丢掉。
 type TaskMatrix struct {
 	// Items 是聚合 + 去 HTML + 排序 + 去重之后的条目，**未过"要不要做"那道门**。
 	Items []upstream.TaskV2Item

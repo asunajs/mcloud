@@ -1,12 +1,12 @@
 package server
 
-// 执行分派的**签到页那一族**：十三个能力共用同一份世界装配。
+// 执行分派的**签到页那一族**：十四个能力共用同一份世界装配。
 //
 // # 为什么单独一个文件
 //
 // `run_dispatch.go` 承载的是"分派表 + 起跑 + 互斥键"这套骨架；本文件全是
 // **同一形状的叶子**：取账号 → 装世界 → 交给 `internal/app` 那条链。
-// 十三个各写一份 builder 的话，真正会漂移的是那段共用装配
+// 十四个各写一份 builder 的话，真正会漂移的是那段共用装配
 // （尤其"必须接票池"那一句），所以装配只留 [Server.signInWorld] 一处，
 // 外壳只留 [buildSignInChain] 一处。
 //
@@ -296,6 +296,39 @@ func buildAiAvatarRun(
 			ctx context.Context, w app.SignInWorld, account core.AccountID,
 		) (app.AiAvatarResult, *core.Error) {
 			return app.AiAvatarRun{SignInWorld: w, Wait: s.runs.waiter}.RunAccount(ctx, account)
+		}),
+	}, nil
+}
+
+// buildAppTaskRun 接「App 任务矩阵」的**写侧**：读整张表 → 逐条判定 → 打卡 / 跑玩法 → 复查。
+//
+// 它与 [buildAiAvatarRun] 同样**不走** [buildSignInChain] 共用外壳，因为要多塞一份
+// [app.Waiter]：这条链每发出一枪要等 500ms（旧实现那句 `sleep(500)`，为什么保留写在
+// `internal/app/task_matrix_run.go` 的 `taskMatrixPace` 旁边）。用共用外壳的话，
+// 十几条待做任务就是接线用例里真睡十几秒 —— 而这一层要断言的从来不是"睡了"，
+// 是"该等的等了几次"（判据在 `internal/app/task_matrix_run_test.go`）。
+//
+// ⚠ 这一条**会写用户的账**（`task/click` 一发出去，云朵可能当场入账且没有撤销那一口），
+// 且注册表里 `RunInBatch: false` ⇒ 调度不会替它跑，只有界面上点那一下会真发出去。
+// "本仓缺端点族"的那些任务一律不补打卡 —— 那条取向与它的代价写在
+// `internal/app/task_matrix_dispatch.go` 文件头。
+func buildAppTaskRun(
+	ctx context.Context, s *Server, scope core.Scope,
+	capability capabilities.Capability, raw map[string]json.RawMessage,
+) (runSpec, *core.Error) {
+	world, targets, perr := s.signInWorld(ctx, scope, capability, raw)
+	if perr != nil {
+		return runSpec{}, perr
+	}
+	return runSpec{
+		scope: scope,
+		plan: app.RunPlan{
+			Capability: capability.Code, Accounts: targets, ParamsDigest: "",
+		},
+		task: signInTaskFor(world, func(
+			ctx context.Context, w app.SignInWorld, account core.AccountID,
+		) (app.TaskMatrixRunResult, *core.Error) {
+			return app.TaskMatrixRun{SignInWorld: w, Wait: s.runs.waiter}.RunAccount(ctx, account)
 		}),
 	}, nil
 }

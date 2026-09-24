@@ -85,8 +85,20 @@ const (
 	// 拍板"切"的时候改的是 `internal/app/play_ai_run.go` 里取票那一句，不是这里的声明。
 	CodePlayAISpecial = "play-ai-special"
 
-	// CodeAiAvatar 是「AI 头像」（#10 · 旧实现 `ai-avatar`）这一族的名字。
+	// CodeAppTask 是「App 任务矩阵」（#9 · 旧实现 `appTask`）这一族的名字。
 	//
+	// 它与 [CodeTaskList] 是**两张表**：那一条打 `taskListV3`（签到页那张，只查），
+	// 这一条打 `taskListV2` 按 2 市场名 × 8 group 聚合出来的那张 App 任务矩阵，
+	// 并且**会发写请求**（每做一条一发 `task/click`）。
+	//
+	// ⚠ `docs/business-feature-inventory.md` §2.3 的意见是"`app` 不该是一个能力，
+	// 应拆成 `task-list`（查询）+ 每种玩法一个能力"。今天登记成**一条**是刻意的过渡：
+	// 十四种玩法里只接上两种（另外十二种缺的是端点族，不是分派逻辑），
+	// 现在就按玩法拆 code 会得到十条"未实现"，界面上比一条"这一趟没接上 12 条玩法"
+	// 更难读。等玩法逐条接上后再拆（拆的时候这条 code 的**历史行**要迁移，别留两份）。
+	CodeAppTask = "app-task"
+
+	// CodeAiAvatar 是「AI 头像」（#10 · 旧实现 `ai-avatar`）这一族的名字。	//
 	// 取值沿用 `docs/business-feature-inventory.md` §2.3 里那个小写名。
 	//
 	// ⚠ 这一条是本注册表里**唯一会往用户网盘写东西**的一条（`image/upload` 一发出去，
@@ -260,6 +272,31 @@ func taskListOutput() []core.FieldSpec {
 		core.NewFieldSpecText("waitCount", "未完成"),
 		core.NewFieldSpecText("finishedCount", "已完成"),
 		core.NewFieldSpecText("unknownCount", "状态读不出"),
+	}
+}
+
+// appTaskOutput 对应 `TaskRunCounts`（见 `internal/app/task_matrix_run.go`）。
+//
+// ⚠ 那两格"没做成"的必须**分开设**：`toolGapCount` 是**本工具的**缺口（缺端点族，
+// 用户去 App 里点也没用），`manualCount` 是**要用户去做的**（未开备份）。
+// 合成一格的表现是：界面喊"有 N 条要你处理"，用户去了 App 发现什么都没得点。
+//
+// `notAcknowledgedCount`（发了枪、复查仍未完成）是这条链最该被看见的一格 ——
+// 它是"上游根本不认这种做法"的第一个信号，今天零实测。
+//
+// ⚠ 与 [receiveOutput] 头上那条同一件事：这一族 `Output` 今天是**形状声明**，
+// 后端没有按这些 key 逐字段回填，web 侧也还没读 `capability.output`
+// （2026-09-24 查过：`web/src` 里 `.output` 零命中）。
+// 这一趟真正给用户看的数，走的是 `TaskMatrixRunResult.SummaryLine()` ⇒
+// 终局事件的 `message` 与 `runs.summary`。改了上面六格**不会**改变任何实际输出。
+func appTaskOutput() []core.FieldSpec {
+	return []core.FieldSpec{
+		core.NewFieldSpecText("pendingCount", "待做条数"),
+		core.NewFieldSpecText("clickedCount", "已上报"),
+		core.NewFieldSpecText("failedCount", "上报失败"),
+		core.NewFieldSpecText("notAcknowledgedCount", "上报了但未认"),
+		core.NewFieldSpecText("toolGapCount", "本工具未接玩法"),
+		core.NewFieldSpecText("manualCount", "需人工"),
 	}
 }
 
@@ -660,6 +697,28 @@ var registry = []Capability{
 		MissPolicyOnMiss:   missPolicyPtr(core.MissCatchUp),
 		Params:             accountSelector,
 		Output:             taskListOutput,
+	},
+	{
+		Code:  CodeAppTask,
+		Title: "App 任务（做任务）",
+		Group: core.GroupDaily,
+		Kind:  core.KindAction,
+		Description: "把 App 任务矩阵里能做的做掉：逐条 `task/click` 上报，" +
+			"缺端点族的那些**明说不做**（会写用户的账，且不可撤销）",
+		// ⛔ 不进编排（`RunInBatch: false`）—— 这一条与 `notice` 那条的区别在这一点：
+		// `notice` 的写请求由查询读数**判出来**（不该领时一个请求都不发），
+		// 而这一条只要表里有待做任务就**必然**发写请求，且今天一次真打都没有
+		// （`task/click` 有实拍、`mrp doTask` 那一发零实拍）。
+		// 让它每天自动跑，等于拿用户的账号替一个未验证的节奏打卡。
+		// 手工点一次是拿到第一个实拍的最快路径，与 `msg-push` 同一处置。
+		RunInBatch: false,
+		// High：它一次跑动可以发十几枪写请求，而"这条任务上游认不认"我们只能靠
+		// 第二趟复查读数推断（`currstep` / `process` 的口径至今未验证）。
+		Risk:               core.RiskHigh,
+		DefaultAccountMode: core.ModeSequential,
+		MissPolicyOnMiss:   missPolicyPtr(core.MissSkip),
+		Params:             accountSelector,
+		Output:             appTaskOutput,
 	},
 	{
 		Code:        CodeNotice,

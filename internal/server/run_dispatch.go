@@ -151,9 +151,10 @@ type runBuilder func(
 // （注册表、本表、`runs.capability` 那一列），拼错**不会编译报错也不会红**，
 // 只会让一条已经接好的能力安静地回 501。
 //
-// 表里**没有**空位了：注册表那十七条现在全部接上了执行（2026-09-24 最后三条是
-// `cloud-phone-redpack` / `play-ai-special` / `ai-avatar` —— 前两条只接了**只读那一半**，
-// 第三条接的是写那一半，代价与"为什么不进编排"写在 `registry.go` 那一条的注释里）。于是 501
+// 表里**没有**空位了：注册表那十八条现在全部接上了执行（2026-09-24 这一天接上四条：
+// `cloud-phone-redpack` / `play-ai-special` 只接了**只读那一半**，`ai-avatar` 与
+// `app-task` 接的是写那一半 —— 代价与"为什么不进编排"写在 `registry.go` 各那一条的注释里）。
+// 于是 501
 // 那一支只剩"注册表里根本没这个 code"的邻近情形（`runs_test.go` 的
 // [TestRegisteredButUnwiredCapabilityIsNotImplemented]）—— 别把"全接上了"写成
 // "这条用例不再需要"：那是唯一一处能证明"没接时不会假装受理 202"的地方。
@@ -187,6 +188,9 @@ var runBuilders = map[string]runBuilder{
 	// AI 头像也借签到页那张票（§1.12 的临时态），但它**不走**共用外壳：那条链要
 	// 多带一份"等一会"的注入点（理由见 `buildAiAvatarRun` 的注释）。
 	capabilities.CodeAiAvatar: buildAiAvatarRun,
+	// App 任务矩阵的**写侧**（每做一条任务一发 `task/click`）。同 AI 头像那一条：
+	// 它也要那份 `Waiter` 注入点，所以不走共用外壳（见 `buildAppTaskRun` 的注释）。
+	capabilities.CodeAppTask: buildAppTaskRun,
 }
 
 // builderFor 查这一条能力接上了执行没有。

@@ -620,6 +620,30 @@ const UNTAGGED_ALLOWED = {
     '`hcy/file/list` 条目里本族要用的**两格**（`fileId` / `name`）。实拍那一条有十余格（`category`/`type`/`createdAt`/两套审计…），刻意只取两格 ⇒ marshal 会让"我们只看这两格"看起来像"上游只有这两格"（与 `PrizesResult` 那条理由同族，但这里的裁剪比例更大）',
   'internal/upstream/app_ai_avatar.go:CloudFileList':
     '`hcy/file/list` 的一页（条目 + `nextPageCursor`）。⚠ 本族**不翻页**（旧实现固定 `pageSize:100` 一次），多于 100 个文件时后面那些**静默匹配不到** —— 带着一个"从不使用"的游标出网，等于对外承诺一个我们这边**永远不会翻**的分页协议；另外 `nil` 与空列表这一对在 JSON 里也分不开（同 `CloudPhoneRuleConfigList` 那条理由）',
+
+  // ── App 任务矩阵写侧（#9 那一族，2026-09-24 登记：`task/click` + `mrp doTask` + 分派/执行层）──
+  // 这一族**共用**一条理由：它是"决定 → 打枪 → 回查"的内存中间态，对外只有
+  // `core.RunReport` 的 `Summary` 那一句人话（`internal/server/run_dispatch_app_task_test.go`
+  // 钉的就是"小结能在事件流里看见"）。给它们补 tag 的实际代价是：
+  // 那几格的**分档语义**会被写成字段名，而其中几档至今零实测。
+  'internal/upstream/app_task_click.go:TaskClick':
+    '`signin/task/click` 的解析结果（`Notice` = `result.msg`、`Message` = 顶层 `msg`，两枚指针）。⚠ **四发实拍没有一条带回 `result`** ⇒ `Notice` 今天恒为 nil，它是"旧实现读所以我们留着"的那一格；把它 marshal 出去会让一个**从未观测到**的字段看起来像契约的一部分（判据只有 `code==0` 那一句，写在 `ParseTaskClick` 头注）',
+  'internal/app/task_matrix_dispatch.go:TaskStepPlan':
+    '分派层交回的**决定**（走哪一态、带哪枚 `key`、等不等）。它是纯内存的一次函数返回值，`Kind` / `Paced` 这些档位出网会被读成"上游认识的字段"',
+  'internal/app/task_matrix_dispatch.go:taskStepInput':
+    '分派要的外部事实（备份读数 + 本地日历日）。⚠ `BackupKnown` 与 `BackupOn` **必须分两格**：旧实现那句是严格 `=== false`，"没读到"与"读到 false"是两回事 —— 而 marshal 之后 `BackupOn:false` 与"没读到"在 JSON 里长得一模一样，正是这一对要防的误读',
+  'internal/app/task_matrix_dispatch.go:taskRunnerSpec':
+    '专属玩法常量表的一条（名字 + 要不要发入口上报 + 最后一发带哪枚 `key`）。它是**常量表的元素**不是数据模型（与 `upstream.SmRule` 同一条理由）；且那枚 `FinalKey` 的两档之一**零实拍**',
+  'internal/app/task_matrix_run.go:TaskMatrixRun':
+    '这一条链的**入口装配**（内嵌 `SignInWorld` + `Wait` 注入点 + `SkipVerify`）。⚠ 它内嵌的 `SignInWorld` 带着 `Store` 与换到的会话，一旦可序列化就顺着日志出去（同 `SmsCredential` / `AppLoginInput` 那两条：里面装凭据的入参打包永不补 tag）',
+  'internal/app/task_matrix_run.go:TaskStepRecord':
+    '对**一条任务**做过什么的记录（处置类别 / runner 名 / 理由 / 失败原文）。`Kind` 的中文语义由 `String()` 给人看；`Err` 是**上游原文**，把它结构化出网等于把上游的错误文案写成契约',
+  'internal/app/task_matrix_run.go:TaskVerifyRecord':
+    '复查趟对一条任务的读数（四档 + 该去哪个 App + 补打卡说明）。⚠ "补打卡"那一发用的 `key` **零实拍**，说明文本里就写着这件事 ⇒ 出网会让一个未验证的写法看起来是既定协议',
+  'internal/app/task_matrix_run.go:TaskRunCounts':
+    '一次运行的计数（读 / 待做 / 打卡 / 玩法 / 失败 / 缺口 / 规则跳过 / 需人工 + 复查四格）。它是 `SummaryLine()` 那一句人话的**原料**，界面上今天没有任何一格按 key 读它（`capability.output` 在 `web/src` 里零命中）⇒ 补 tag 只会造出一份没人兑现、也没人测试的"字段契约"',
+  'internal/app/task_matrix_run.go:TaskMatrixRunResult':
+    '一个账号这一趟的产出（`Steps` / `Verified` / `Counts` / `Notes`）。对外只经 `RunReport()` 的 `Summary`；`Steps[].Err` 与 `Notes[]` 里是上游原文与人话，marshal 会把"给人看的那一句"拆成一份没人对齐的结构',
 }
 
 function walk(dir, out = []) {

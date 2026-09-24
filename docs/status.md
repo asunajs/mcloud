@@ -3090,3 +3090,114 @@ CDP 会话一关就**释放**设备尺寸覆写 ⇒ "窄屏量到 40px"其实量
 3. ⚗ §3.9 偏大：`docs/status.md` 本文件已 **3000+ 行**（Q16 拆分方案仍待批）；
    `internal/cli/run_signin_test.go` **1662 行**、`internal/io/schema.go` **561 行**（v11 那条又加了一大块）、
    `internal/server/routes.go` **755 行**。
+
+---
+
+## 补记（2026-09-24，#9 App 任务矩阵的**写侧**接上执行：第十八条能力 `app-task`，做任务 + 复查）
+
+### 一、起因与"那一堆"到底差多少
+
+用户一句 **"appTask 里面那一堆都没实现啊"**。成文侧此前停在"读侧 16 次拉全、**没有调用点**"（上面「#9 的
+`taskListV2`」那一轮 + Q17）。这一轮把**决定 → 打枪 → 回查**整串接上，并把界面上的入口做出来。
+
+⚠ 但"那一堆"这个数字要说准：旧实现 `appTask` 有 **14 条专属玩法（runner）**，本仓今天接上 **2 条**
+（409 云朵中心入口、1005），另外 **12 条不是分派逻辑没写，是它们要的端点族本仓根本没有**
+（上传三枪 / 云笔记 / 外链 / 邮箱会话 / AI 工作台 / AI 相机）。所以这一轮的产出是
+**「能跑的整串跑通 + 跑不了的逐条点名为什么跑不了」**，那 12 条登记在
+`taskMatrixToolGaps`，其中四条的前置就是待拍板 P1。
+
+### 二、三层落点
+
+| 层 | 文件 | 干什么 |
+| --- | --- | --- |
+| 上游 | `internal/upstream/app_task_click.go`（190 行 / **8 条**测试） | 两口：`TaskClickRequest`（**`key` 是参数不是常量**，四发实拍分属三个域，表在文件头）、`MrpDoTaskRequest` / `AppMrpDoTask`（**零实拍** ⇒ 不判 `code`，只交回传输层与 JSON 失败） |
+| 决定 | `internal/app/task_matrix_dispatch.go`（463 行 / **18 条**） | `PlanTaskStep` 五态：`StepClick` / `StepRunner` / `StepBlockedToolGap` / `StepBlockedByRule` / `StepNeedsHuman`；runner 表 2 条 + 缺口表 12 条；复查侧 `PlanVerifyClick` / `ClassifyVerifiedTask` |
+| 执行 | `internal/app/task_matrix_run.go`（567 行 / **15 条**） | `TaskMatrixRun.RunAccount`：读表 → 逐条 `apply` → 第二趟 `verify`；`taskExecutor` 带跨条状态（`done` 集合、惰性 deviceId、434 跑前进度） |
+| 接线 | `internal/server/run_dispatch.go` + `run_dispatch_app_task_test.go`（**2 条**） | `buildAppTaskRun`（与 `buildAiAvatarRun` 同走专用外壳：要 `Waiter` 注入点），能力注册表第 **18** 条 |
+
+### 三、⭐ 与旧实现刻意不同那一格：缺口 ⇒ **一枪不发**
+
+旧实现对"没有专属 runner"的任务一律**盲点** `task/click`（只有 `SKIP_TASK_LIST` 那张表例外）。
+本仓多一档 `StepBlockedToolGap`：那 12 条**明说不做**，并且把锅记成**工具的**（`toolGapCount`）——
+不与"用户得自己去 App 做"（`manualCount`）混成一格。
+
+理由不是洁癖：那 12 条的玩法我们没做，打卡会让上游把账记成"做了"。界面上那是一句假话，
+而它在用户那一侧的表现是"任务列表里这一条从此灰了，可我从没做过这件事"。
+
+### 四、⭐ 本轮确立的语义：`fired`（动过枪）≠ `acked`（上游认了）
+
+`apply` 的第二个返回值 `fired` 口径是"**为这一条发出过请求**"，`exec.done` 以它为准。于是：
+
+- 业务失败那一发（`code != 0`）落进复查的**"做了没认"**（`VerifyFailed` + `Counts.Failed`），
+  **不**落"仍待办"。成没成另有两处承载（`record.Err` 原文、`Counts.Failed`），不必借 `done` 传。
+- 补打卡那一发同理（`verify` 里无条件置真）。
+
+两档的差别只在给用户那一句：`仍待办` 的意思是"这一条我们没碰，你去 App 里做"，而我们明明碰了。
+✅ **反向验证真做过**：把 `StepClick` 那一支改成"成功才置 `fired`" ⇒
+`TestTaskMatrixRunContinuesAfterClickFailure` 一条红（其余 32 条不红，说明这一格只有它在钉），改回即复绿。
+
+### 五、旧实现那三处不对称，逐字落码并被钉住
+
+1. **default 盲点不过 `currstep` 门、不等 500ms**；runner 走 `handleTaskClick` **过** `currstep == 0` 门
+   且等 500ms —— 节奏**按条**记（一条 runner 只等一次，不管它内部几发）。
+2. `month` 门逐字 `marketname === "sign_in_3" && curMonthBackup === false && getDate() < 20`
+   ⇒ 严格等于（**"没读到"不挡**）、20 号当天不挡、本地日历走 `appTaskLocation()`（UTC+8）。
+3. `SKIP_TASK_LIST` 只挡盲点与播报，**不挡 runner**；434 在 `currstep == 22` 那一格是例外。
+
+### 六、测试夹具那边踩到的三处
+
+- `mxStatusBody` **必须带 `result.cal`**：`ParseSignInStatus` 对它是必填 ⇒ 缺了那一条 `BackupKnown=false`、
+  门不挡，红成"门有 bug"（其实是夹具不合法）。
+- 打卡成功夹具逐字取实拍 `{"code":0,"msg":"success"}`，**不给** `result` —— 四发实拍没有一条带回它，
+  所以 `TaskClick.Notice` 恒 nil 是**事实**而不是解析漏掉。
+- 接线用例**独立成一份** `run_dispatch_app_task_test.go`，不再往 638 行那份上叠（§3.9）；
+  计数断言 `{taskListV2: 32, click: 3, doTask: 1, infoV3: 1}` + `tyrzLogin: 1` +
+  `waits.count(500ms) == 1` + forbid 列表 13 项。
+
+### 七、门禁（照抄当轮 stdout）
+
+- `node scripts/gates-go.js` ⇒ 横幅"**十项门禁全绿**"（10/10），总耗时 **49.1s**，逐条：
+  build 1.4 / vet 0.6 / fmt 0.1 / test **43.0** / deps 3.3 / filenames 0.2 / idents 0.3 / golden 0.1 /
+  jsontags 0.1 / md-tables 0.1。同轮其它读数：golden「断言 **167** 条全绿」、脱敏「**13** 个文件…均只出现
+  199 开头的合成标识」、jsontags「**91** 个结构体字段齐全，**211** 个按白名单不进 JSON」、
+  md-tables「**39** 个文件、没有一行比表头多格」。
+  ⚠ 上一节写那份 41 条用例的分布时用的是 `grep -c '^func Test'`，**不是**跑数；`-run 'Task'` 在 app /
+  upstream 两包各命中 49 / 51 条，那里面**混着别族**带 Task 字样的用例，别当本族的数抄。
+- jsontags 这一关本轮**红了第一次**：新增 9 个无 tag 结构体 ⇒ 按 §1.5 逐条登记理由
+  （一族共用一条："它是决定 → 打枪 → 回查的内存中间态，对外只有 `RunReport.Summary`"），
+  其中 `TaskClick` 那条登记时把理由写反了（写成"实拍带回 `result`"），**已按事实改写**。
+- web 两条本轮没跑（**没动 `web/`**：这一族今天只在"运行"页按能力码出现，没有专属界面）。
+
+### 八、成文侧就地改了什么（不叠补记）
+
+- `pending-decisions.md`：**Q17** 那一问（要不要登记成能力）已被本轮落地回答 ⇒ 就地改写成剩下的问句
+  "要不要按玩法拆 code"；**Q13** 里"`task/click` 有实现没接链"那半句订正（已接链，且那三口本不是一族）；
+  **P1** 里"#9 的凑备份那一半进不来"改写成"#9 那四条要上传的玩法进不来"；**R15** 那句
+  "只能等接写侧后……"的前置已消失 ⇒ 改成"手工点一次就能补"。
+- 新增三条要样本：**R24** 打完卡上游会不会把 `state` 改成 `FINISH`（复查四格的地基，四发实拍回答的是
+  "这一口回什么"，不是"下一次拉表长什么样"）；**R25** `randomCloudTask` 这枚 key 零实拍 + 481/478 两道门读的
+  `currstep` 档位没样本；**R26** 入口上报整口零实拍。
+- `business-feature-inventory.md` §2.3 / §2.4 两处按现状改写，并留一条耻辱柱：
+  "仍无 #9 做任务那一半"那句把 `doTaskPost`（属签到）与 `receiveTask`（属 #12 notice）算进 #9 的缺口，本身是错记。
+
+### 九、界面侧：本轮**没动 `web/`**，为什么够用
+
+`tasks-page.tsx` 的表单与分组是**照 `/api/capabilities` 的声明泛型渲染**的（那文件头就写了"这里要服务
+**任意**能力"），风险徽章与"确认执行"弹窗同理按 `cap.risk` 出 —— 所以 `app-task` 这条 `RiskHigh`
+自动拿到二次确认那一句，与本仓其它高风险能力同一条路。`runInBatch` 那一格在 `web/src` 里
+**只有 `api.ts` 的类型声明、没有消费者** ⇒ "不进编排"今天是后端口径，界面上不体现。
+
+❓ **"界面上这一条点得到"本轮没做真机核验**（8787 是用户自己在用的实例，不去抢；
+而这一条点下去**会真发写请求**，不是看一眼就能核的）。要核它得怎么做：在 8787 刷新任务页，
+只看"每日"分组里有没有「App 任务（做任务）」这一条与那枚高风险徽章 —— **不要点确认**，
+真打那一趟的补样路径是 R24 / R25 / R26，得由用户决定何时跑。
+
+### 十、遗留
+
+1. ❓ **真打一次都没有**：`task/click` 那两口今天只经夹具（`RunInBatch:false`，只有人点界面才会真发）。
+   补样路径就是 R24 / R25 / R26 那三格，同一次手工跑一起拿。
+2. ⚠ `app-task` 的 `jwttoken` 仍借**签到页**那张（AGENTS §1.12 临时态）—— 这一族没有自己的换票链实拍。
+3. ⚠ **12 条玩法未接**，其中 106 / 113 / 522 / 1014 的前置在 P1（要 `#35` 那条上传族）。
+4. ⚗ §3.9 偏大：`internal/app/task_matrix_run_test.go` **835 行**（本轮新建，已是本族最大的一份，
+   再叠就该按"决定 / 执行 / 复查"拆三份）、`task_matrix_run.go` **567**、`task_matrix_dispatch.go` **463**；
+   本文件 **3100+ 行**（Q16 的拆分方案仍待批）。

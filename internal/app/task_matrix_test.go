@@ -519,9 +519,9 @@ func TestAppTaskMatrixTwoRoundsShareOneTicket(t *testing.T) {
 
 // TestTaskMatrixNeverClickIsTheOldList：那份 `SKIP_TASK_LIST` 逐字登记。
 //
-// ⚠ 它今天**没有调用点**（只读的那一半用不上），钉住它是为了接写侧时
-// 那次"盲点" `task/click` 有出处 —— 见 [TaskMatrixNeverClick] 那条注释，
-// 尤其"它挡的不是做不做"那一句。
+// 写侧的调用点是 [taskMatrixSkipsClick]（default 分支那次盲点），**行为**在
+// `task_matrix_run_test.go` 那侧钉；这里只钉"表本身没被改错"——
+// 尤其 [TaskMatrixNeverClick] 注释里那句"它挡的不是做不做"。
 func TestTaskMatrixNeverClickIsTheOldList(t *testing.T) {
 	want := []int64{117, 437, 991, 406, 385, 480, 1022, 1018, 603, 1021, 120}
 	if len(TaskMatrixNeverClick) != len(want) {

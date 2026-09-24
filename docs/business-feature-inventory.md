@@ -65,7 +65,7 @@
 >   + 能力 `CodeExchange`。⚠ **三层都在夹具/实拍样本上跑绿；2026-09-24 只读那一半已由本仓真打成功
 >   （55 件 / 9 组，见 `docs/status.md` 同一天的那一节），但**下单**那一半仍一条没由本仓发过** ——
 >   这一族会真扣豆，第一次真跑要按 `docs/capture/app-exchange-samples.txt` §5.4 那三条判据人工对账）。
-> - **只有声明**：**没有了** —— 注册表**十七条**在 `runBuilders` 里十七条（自检用例
+> - **只有声明**：**没有了** —— 注册表**十八条**在 `runBuilders` 里十八条（自检用例
 >   `TestEveryRegisteredCapabilityIsWired` 要求差集为空 ⇒ 将来登记新能力却不接执行会直接红）。
 >   ⚠ "只有声明"与"没有实现"不是一回事，前者缺的是一行接线；接线判据里那条"501"现在
 >   **只能靠临时摘掉一份 builder 来验**（`TestRegisteredButUnwiredCapabilityIsNotImplemented`、
@@ -85,13 +85,34 @@
 >   ⚠ **两族都有零样本的路径** ⇒ 只钉"发得出"不钉语义（#18 见 R9 / R10，#16 见 R11 / R12）。
 >   **这一格刻意不抄行数与用例数**：同一数字在两处成文迟早不一致（本文件下方那条耻辱柱就是这么来的），
 >   逐口与用例现场看 §2.4 那两节，最近一轮的跑数看 [`status.md`](status.md)。
-> - **仍无**：#7 `after` 收尾、#9 App 任务矩阵里**做任务**那一半（`doTaskPost` / `task/click` / `receiveTask`
->   三条上游口在 `internal/upstream` 里**有实现但没接链**）、#14 云朵大作战（活动期次已过，见 §2.4）。
->   ⚠ #9 的**读**那一半（旧项目那 16 次 `taskListV2`）2026-09-24 已落码：上游口
->   `internal/upstream/app_task_list_v2.go` ＋ 聚合 `internal/app/task_matrix.go`。
->   但它**没有调用点** —— 没登记成能力、界面上出现不了，所以"落了码"不等于"这一项可用"；
->   要不要登记成能力 = 见 [`pending-decisions.md`](pending-decisions.md)。
->   ⚠ 上面那句"仍无"里**曾包含 #10 AI 头像**，2026-09-24 第二轮已不成立（见下一条）。
+> - **仍无**：#7 `after` 收尾、#14 云朵大作战（活动期次已过，见 §2.4）。
+>   ⚠ **#9 App 任务矩阵**这一格**同日两个批次已不成立**（读侧 → 写侧都接上了，见下一条）。
+>   耻辱柱留一句：本文件此前写"仍无 #9 做任务那一半（`doTaskPost` / `task/click` / `receiveTask`
+>   三条上游口有实现但没接链）"—— 那**三口压根不是一族**：#9 写侧用的是 `signin/task/click`
+>   与 `mrp …/page/doTask`（本轮两口都已接上调用点），而 `doTaskPost` 是**签到那一族**的
+>   "上报任务状态"、`receiveTask` 是 **#12 notice** 的入账口（两者到今天仍只在 `internal/upstream`
+>   里实现、领域层**刻意没接**，理由分别写在 `task_list_run.go` 与 `notice_run.go` 文件头）。
+>   把它们算进 #9 的缺口，会让"补上 #9"这件事看起来需要动两个别的族的链。
+> - **#9 App 任务矩阵**（同日两个批次：读侧聚合 → **写侧接上执行**）：能力 `app-task`
+>   （注册表第 **18** 条，`Risk:RiskHigh`、⚠ `RunInBatch:false` ⇒ 只有界面上点那一下会真发写请求）。
+>   读侧 = `internal/upstream/app_task_list_v2.go` ＋ `internal/app/task_matrix.go`
+>   （2 市场名 × 8 group = 16 次串行、逐次容错、摊平 → 剥 HTML → 按 id 升序 → 按 name 去重）；
+>   写侧 = `task_matrix_dispatch.go`（**决定**：打卡 / 走 runner / 缺玩法不发 / 门挡 / 需人工，
+>   一个请求都不发）＋ `task_matrix_run.go`（**执行 + 复查**）。
+>   ⭐ **与旧实现刻意不同的一处**：旧实现只要 `state!=="FINISH"` 就**无脑补一发** `task/click`，
+>   而 14 种玩法里 12 种缺的是**端点族**（上传、139 邮箱子链、建删外链…）——
+>   盲点那一发会让上游把这条记成完成，于是界面上"完成 N 条"、**用户账上多了一条没做过的事**。
+>   本仓那 12 条报成"本工具还没接上玩法"（`toolGapCount`），一枪不发。
+>   ⚠ **三个"仍未"**：① **一次都没真打过** —— 本族那一发 `task/click`（`m.mcloud.139.com`）
+>   只有**两发**实拍（另两发同名端点在 `:7071`，属别的族），`mrp doTask` 那一发**零实拍**，
+>   而"打完之后上游会不会把 `state` 改成 `FINISH`"**从未观测** ⇒ 复查那四格是**夹具读数**，不是上游行为的证据；
+>   ② 12 种玩法没接（缺端点族，不是缺分派逻辑）；③ 旧实现 `107`（云笔记）那个"runner 恒不选中"的
+>   bug **不迁**，但要说清它原来漏在哪：旧实现那里**盲点照发**（`107` 不在 `SKIP_TASK_LIST` 里）
+>   而玩法不跑 ⇒ 上游把这条记成完成、用户其实什么都没做。本仓把 `107` 归进"缺玩法"那一档，
+>   **一枪不发**并在结论里点名（`toolGapCount`）—— 这一条正是 §2.3 那句 bug 的处置。
+>   `jwttoken` 这一页**使用公共来源**（临时态，§1.12）。
+>   ⚠ 再上面那句"仍无"里**曾同时包含 #9 与 #10**：#9 由本条订正，
+>   #10 AI 头像是 2026-09-24 更早那个批次订正的（见下一条）。
 > - **#10 AI 头像**（同日两个批次：上游层八口 → **编排层接上执行**）：能力 `ai-avatar`（注册表第 17 条，
 >   `RunInBatch:false`）＋ `internal/app/ai_avatar_{png,run,files}.go` —— 生成、轮询、抽奖判定、
 >   网盘按文件名找回**四件事都已落地**，八口上游全有调用点。⚠ 两个"仍未"：
@@ -326,7 +347,40 @@
 - **结果四象限**：完成 / 失败 / 无需做 / **需前往云盘或邮箱完成**（§1.4）。
 - **实测 bug**：`107`（云笔记）**恒跳过** —— 该 runner 读的是 `http` 返回值形状，与 `apis/note.ts` 实际返回不符，条件永远不成立。重写时先补一条"107 能被选中"的断言再动逻辑。
 - **新落点**：`app` 不该是一个能力，应拆成 `task-list`（查询）+ 每种玩法一个能力（`upload-file` / `create-note` / `create-and-delete-link` / `mail-read` …），由**组合流水线**（§3.3）拼回旧行为。这样每种玩法各自可测、可控风险、可单独禁用。
-- **Go 侧现状（2026-09-24）**：**只有读的那一半，且没有调用点**。上游口 = `internal/upstream/app_task_list_v2.go`（一口一次一个 group，body 逐字按夹具实拍，`activityid` 跟 `marketname` 走）；聚合 = `internal/app/task_matrix.go` 的 `AppTaskMatrix`（16 次串行、逐次容错并登记失败组、摊平 → 剥 HTML → 按 `id` 升序 → 按 `name` 去重保留 id 小的；`Pending()` 是 `enable !== 1` / `state === "FINISH"` 那道门）。三处**刻意不照抄旧 TS**（串行而非并发、十六次全挂才整体报错、`name` 缺席的条目各留各的）写在文件头。**未做**：能力登记与 WebUI 接线（= 要拍板，见 [`pending-decisions.md`](pending-decisions.md)）、任务码分发表与所有 runner（`task/click`、`doTaskPost`、139 邮箱子链…）、② 那口 `:7071`（属 #12 且实拍缺环）。⚠ `groupState.taskFinishState` 与 `process` **两格只存不判**（语义未验证）；"上游认不认 `activityid` 随市场名变"**一次真打都没有**。
+- **Go 侧现状（2026-09-24 第二轮改写，前一轮写的是"只有读的那一半、没有调用点"）**：
+  **读 + 写都接上了**，是能力注册表里的第 **18** 条（码 `app-task`，`Risk:RiskHigh`、
+  ⚠ `RunInBatch:false` ⇒ 调度与"全选批量"都不替它跑，只有界面上点那一下会真发写请求）。
+  三层各管一件事，**分派不碰网络、执行不做判断**：
+  ① 上游口 `internal/upstream/app_task_list_v2.go`（一口一个 group，body 逐字按夹具实拍，
+  `activityid` 跟 `marketname` 走）＋ `internal/upstream/app_task_click.go`
+  （`signin/task/click` 的**可变 `key`** 与 `mrp …/page/doTask`；文件头那张表写明
+  三支**同名** `task/click` 分属三个域）；
+  ② 读侧聚合 `internal/app/task_matrix.go` 的 `AppTaskMatrix`（16 次串行、逐次容错并登记失败组、
+  摊平 → 剥 HTML → 按 `id` 升序 → 按 `name` 去重保留 id 小的；`Pending()` 是
+  `enable !== 1` / `state === "FINISH"` 那道门）；
+  ③ 写侧 `task_matrix_dispatch.go`（**纯函数**：一条任务交回一个决定 —— 打卡 / 走 runner /
+  **缺端点族所以不发** / 按规则不发 / 要人去 App 做）＋ `task_matrix_run.go`
+  （决定落成请求 + 第二趟复查 + 那句人话小结）。
+  ⭐ **与旧实现刻意不同的一处**（这是本轮最重要的一条，改之前先回 `task_matrix_dispatch.go`
+  文件头看证据）：旧实现只要 `state!=="FINISH"` 就**无脑补一发** `task/click`，
+  而 14 种玩法里 **12 种缺的是端点族**（上传三枪、139 邮箱子链、建删外链、笔记…）——
+  那一发会让上游把这条记成完成 ⇒ 界面上"完成 N 条"、用户账上多了一条**没做过的事**，
+  而这一族**没有撤销那一口**。本仓那 12 条报成"本工具还没接上玩法"、**一枪不发**，
+  界面上用 `toolGapCount`（工具的锅）与 `manualCount`（要用户去 App 点的）**两格分开**。
+  ⚠ **三条门的语义按旧实现逐字落**（不是"顺手统一"）：default 那次盲点**不过** `currstep` 门、
+  **不等** 500ms；走 runner 的那两条过 `currstep==0` 门且**等** 500ms；
+  每月那一组挡在 `marketname==="sign_in_3" && curMonthBackup===false && 本地日<20`
+  —— 严格等于 ⇒ **"没读到备份状态"不挡**，且 20 号当天不挡（本地日历，不是 UTC）。
+  `SKIP_TASK_LIST` 只挡盲点与播报、**不**挡 runner（见上面那条订正）。
+  ⚠ **仍未做的三件**：① **一次都没真打过** —— `task/click` 四发实拍、`mrp doTask` 那一发**零实拍**，
+  而"打完上游会不会把 `state` 改成 `FINISH`"这件事**从未观测** ⇒ 复查那四格是**夹具读数**，
+  不是上游行为的证据（拿到第一个实拍的最快路径是手工点一次，这也是它 `RunInBatch:false` 的理由）；
+  ② 那 12 种玩法没接（其中上传那一族 = **P1** / 待办 R 项）；③ ② 那口 `:7071` 的 `taskListV2`
+  属 #12 `notice`、**不并入**这一族（实拍缺环）。
+  ⚠ `groupState.taskFinishState` 与 `process` **两格只存不判**（语义未验证）；
+  "上游认不认 `activityid` 随市场名变"**一次真打都没有**。
+  旧实现那个 `107` 恒跳过的 bug 不迁：本仓 `107` 走的是"缺玩法"那一档（**明说**不做，
+  而不是悄悄发一发盲点把账记成完成）。
 
 #### `ai-avatar` AI 头像（`packages/core/src/tasks/ai-avatar/`）
 
