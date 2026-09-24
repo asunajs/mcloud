@@ -218,6 +218,8 @@ func TestStartSignInPercentEncodesTheDeviceID(t *testing.T) {
 }
 
 func TestTaskListV3AndDoTaskPostBodies(t *testing.T) {
+	// ⚠ 这一条只钉请求体；`taskListV3` 的**解析**用例在 `app_task_list_test.go`
+	// （那条链挪过去了，这里留着是因为 `doTaskPost` 的体也在这个函数里一起钉）。
 	task, err := TaskListV3Request("jwt", "https://referer", 1)
 	if err != nil {
 		t.Fatalf("构造失败: %v", err)
@@ -249,23 +251,8 @@ func TestTaskListV3AndDoTaskPostBodies(t *testing.T) {
 	}
 }
 
-// `taskListV3` 的 `result` 是**数组**，不是对象 —— 解析错的话这里会立刻响。
-func TestParseTaskListExpectsAnArray(t *testing.T) {
-	items, err := ParseTaskList(envelopeFrom(t, map[string]any{
-		"code": 0, "msg": "success", "result": []any{map[string]any{"taskId": "1"}},
-	}))
-	if err != nil {
-		t.Fatalf("解析失败: %v", err)
-	}
-	if len(items) != 1 {
-		t.Errorf("应有一条任务，实得 %d", len(items))
-	}
-	if _, err := ParseTaskList(envelopeFrom(t, map[string]any{
-		"code": 0, "msg": "success", "result": map[string]any{"taskId": "1"},
-	})); err == nil {
-		t.Error("result 是对象时应报错")
-	}
-}
+// `taskListV3` 的请求与解析挪到了 `app_task_list.go`，
+// 对应的用例在 `app_task_list_test.go`（那里钉的是类型化之后的字段表）。
 
 // 缺 `cal` 必须报错 —— 它是"今天签没签"的唯一依据，静默给个空日历等于假装没签。
 func TestParseSignInStatusRequiresTheCalendar(t *testing.T) {

@@ -436,3 +436,45 @@ func wsStringsEqual(a, b []string) bool {
 	}
 	return true
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WS 升级请求的头
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestLiveWSUpgradeUAIsTheSameAsTheHTTPOne 钉住"同一个 host 只发一套 UA"。
+//
+// ⭐ 依据是 2026-09-23 的实拍（`docs/capture/app-live-ws-samples.txt` §一）：
+// 真实 H5 客户端在 **WS 升级请求**上发的 UA，与**同一次抓包里 HTTP 侧**
+// （`member/apply`）那份**逐字相同**，都是 `… MCloudApp/12.6.0 iPad AppLanguage/zh-CN`。
+//
+// ⚠ 改之前这里是**照抄原项目**的 Android Chrome UA，而同一个文件的
+// [LiveWSInfoRequest] 一直用 iPad 那份 ⇒ **同一个 host 两套 UA**。
+// 这条测试把那处不一致钉死：以后谁再把 WS 的 UA 单独换掉，它会红。
+//
+// ⚠⚠ 它**只**钉"两处一致"，**不**钉"服务端认哪个" —— 我们没有那个判据（坑表 #136）。
+func TestLiveWSUpgradeUAIsTheSameAsTheHTTPOne(t *testing.T) {
+	upgrade := wsHeaderValue(LiveWSHeaders(), "User-Agent")
+	if upgrade == "" {
+		t.Fatal("WS 升级请求没有 User-Agent 头")
+	}
+	if upgrade != LiveUserAgent {
+		t.Fatalf("WS 升级请求的 UA 该与 HTTP 侧那份一致：\n  WS   = %q\n  HTTP = %q",
+			upgrade, LiveUserAgent)
+	}
+	if info := wsHeaderValue(LiveWSInfoRequest().Headers, "User-Agent"); info != upgrade {
+		t.Fatalf("`/ws/info` 与 WS 升级请求该发同一套 UA：\n  info    = %q\n  upgrade = %q",
+			info, upgrade)
+	}
+}
+
+// wsHeaderValue 取头表里某个头的值（名字不区分大小写）；没有则返回空串。
+//
+// ⚠ [core.HeaderPair] 是 `[2]string`（`[0]` = 名、`[1]` = 值），**不是**具名字段。
+func wsHeaderValue(headers []core.HeaderPair, name string) string {
+	for _, pair := range headers {
+		if strings.EqualFold(pair[0], name) {
+			return pair[1]
+		}
+	}
+	return ""
+}

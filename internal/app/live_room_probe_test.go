@@ -16,6 +16,12 @@ package app
 //
 // ⚠ 措辞**不要**写成"消耗掉了那两个口令"：口令是**全场通用**的，投过也不影响别人
 // （五条事实见 `internal/upstream/live_flower.go` 文件头；2026-09-23 改）。
+//
+// ⚠ 下面每一处 `ProbeLiveRoom` 的最后一个参数都是 `nil` —— 那是"没有票池"，
+// 探针会退化成**这一条探针自己建一条会话**（口径见 `sessionSource`）。
+// 本文件钉的是"该发哪些枪、不该发哪些枪、哪一枪带哪份 JWT"，与票存在哪儿无关；
+// "连点两次只建一条"是票池的事，测在 `signin_session_pool_test.go`。
+// 若哪天把这些 `nil` 换成同一个池，本文件的次数断言会跟着变 —— 那不是回归。
 
 import (
 	"context"
@@ -73,7 +79,7 @@ func TestProbeLiveRoomReadsBalanceWithoutTouchingAnything(t *testing.T) {
 		balances: []string{liveUserInfoBody(235)},
 	})...)
 	probe, perr := ProbeLiveRoom(context.Background(), upstream.NewUpstream(client),
-		probeProfile(), probeCredential(), testClock(), testRng())
+		probeProfile(), probeCredential(), testClock(), testRng(), nil)
 	if perr != nil {
 		t.Fatalf("门开着、余额也读到了，不该失败：%s", perr.Message())
 	}
@@ -117,7 +123,7 @@ func TestProbeLiveRoomReadsBalanceWithTheCloudSessionJWT(t *testing.T) {
 		balances: []string{liveUserInfoBody(235)},
 	})...)
 	if _, perr := ProbeLiveRoom(context.Background(), upstream.NewUpstream(client),
-		probeProfile(), probeCredential(), testClock(), testRng()); perr != nil {
+		probeProfile(), probeCredential(), testClock(), testRng(), nil); perr != nil {
 		t.Fatalf("探针不该失败：%s", perr.Message())
 	}
 	if got := jwtHeaderOn(t, client, "/liveRoomFeedback/user/info", "jwttoken"); got != liveTestH5JWT {
@@ -147,7 +153,7 @@ func TestProbeLiveRoomStillReadsBalanceWhenGateClosed(t *testing.T) {
 		balances: []string{liveUserInfoBody(88)},
 	})...)
 	probe, perr := ProbeLiveRoom(context.Background(), upstream.NewUpstream(client),
-		probeProfile(), probeCredential(), testClock(), testRng())
+		probeProfile(), probeCredential(), testClock(), testRng(), nil)
 	if perr != nil {
 		t.Fatalf("没开播是正常结论，不该失败：%s", perr.Message())
 	}
@@ -189,7 +195,7 @@ func TestProbeLiveRoomKeepsGateWhenCloudSessionFails(t *testing.T) {
 	}
 	client := liveTaskScriptWith(routes...)
 	probe, perr := ProbeLiveRoom(context.Background(), upstream.NewUpstream(client),
-		probeProfile(), probeCredential(), testClock(), testRng())
+		probeProfile(), probeCredential(), testClock(), testRng(), nil)
 	if perr != nil {
 		t.Fatalf("云盘会话坏了不该让整条探针失败：%s", perr.Message())
 	}
@@ -220,7 +226,7 @@ func TestProbeLiveRoomKeepsGateWhenBalanceReadFails(t *testing.T) {
 		balances: []string{liveUserInfoWithoutResultBody},
 	})...)
 	probe, perr := ProbeLiveRoom(context.Background(), upstream.NewUpstream(client),
-		probeProfile(), probeCredential(), testClock(), testRng())
+		probeProfile(), probeCredential(), testClock(), testRng(), nil)
 	if perr != nil {
 		t.Fatalf("余额读不到不该让整条探针失败：%s", perr.Message())
 	}
@@ -240,7 +246,7 @@ func TestProbeLiveRoomKeepsGateWhenBalanceReadFails(t *testing.T) {
 func TestProbeLiveRoomFailsWhenGateFails(t *testing.T) {
 	probe, perr := ProbeLiveRoom(context.Background(),
 		upstream.NewUpstream(alwaysFailingClient{}),
-		probeProfile(), probeCredential(), testClock(), testRng())
+		probeProfile(), probeCredential(), testClock(), testRng(), nil)
 	if perr == nil {
 		t.Fatal("门失败必须报错")
 	}

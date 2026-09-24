@@ -39,6 +39,10 @@
 //
 //	① **只在本次直播有效**：直播时间外不可用，**上一场的口令也不能用**。
 //	   上游原话就是 `200108` 那句"口令需当场直播获取才有效哦"。
+//	   ⇒ ⚠⚠ **推论（2026-09-23 用户纠正）**：**任何"历史口令"都是废值** ——
+//	   不要保存、不要跨场复用、**不要拿已结束场次的弹幕当口令来源**。
+//	   所以那条"公开 CDN 的历史弹幕"（`docs/capture/app-live-ws-samples.txt` §9）
+//	   **只能用来取证**（验抽取器 / 看形态 / 看出现次数），**不是一条取口令的路**。
 //	② **全场通用**：所有用户共用同一批口令 ⇒ **不存在"消耗口令"这回事**，
 //	   也不存在"我把口令用掉了别人就没得用"。
 //	③ **每场两个固定口令**（小概率会多一个随机口令）⇒ 收集那一步拿到 2~3 条是正常形状，
@@ -101,7 +105,39 @@ const (
 //	| 200108 | `redFlower/draw?code=`          | 口令无效（**需当场直播获取**）| 实拍         |
 //	| 200110 | `firstParticipate/give`         | 已参与过，无首次惊喜奖        | 实拍         |
 //	| 200103 | `liveRoomFeedback/check?prizeId=` | 红花数不够                 | 实拍（4 发全）|
-//	| 200112 | **未验证**                      | 已兑换                      | **零实拍**   |
+//	| 200112 | `redFlower/draw?code=`           | 已兑换                      | 实拍（2026-09-23）|
+//	| 200118 | `redFlower/draw?code=`           | 口令已失效（**本场已结束**）  | 实拍（2026-09-23，见 [CodeRedFlowerKoulingExpired]）|
+//
+// # ⭐⭐ 客户端（H5）自己认的**全部**码 —— 供对拍，本文件只实现有实拍的那几个
+//
+// 来源：`har/liveRoomFeedback.0cdf4040.js`（H5 活动页的 JS，本仓库抓下来的）。
+// 它的 `drawRedFlower` 回调里有一张**码 → 弹窗**的映射表（原文见
+// `docs/capture/app-live-redflower-samples.txt` §10.6）。⭐ 这份表比上游 `msg` 有用：
+// `msg` 只是一句话，而它给出**厂商自己的分类标签 + 用户文案 + 该走哪个弹窗**。
+//
+//	| 码     | 客户端标签          | 官方文案                                   | 本文件 |
+//	| ------ | ------------------- | ------------------------------------------ | ------ |
+//	| 200107 | `popEmptyCode`      | 请输入口令                                 | ❌ 未实现 |
+//	| 200108 | `popErrorCode`      | 口令不对耶 / 口令需**单场**直播获取才有效哦~ | ✅ |
+//	| 200109 | `popNotLive`        | 需在直播期间内兑换哦                        | ❌ 未实现 |
+//	| 200118 | `popNotLive`        | 需在直播期间内兑换哦                        | ✅ |
+//	| 200110 | `pop_invalidPhone`  | 您无法参与活动~                            | ✅（但那是 `give` 的码）|
+//	| 200101 | `pop_invalidPhone`  | 您无法参与活动~                            | ❌ 未实现 |
+//	| 609    | `pop_invalidPhone`  | 您无法参与活动~                            | ❌ 未实现 |
+//	| 200111 | `popNotApp`         | 该活动仅限在云盘APP参与哦                   | ❌ 未实现 |
+//	| 200112 | `popRepeatCode`     | 口令已兑换过了 / 每个口令只能兑换一次        | ✅ |
+//	| 200114 | `pop_monthFlower`   | —                                          | ❌ 未实现 |
+//	| 200115 | `pop_quarterFlower` | —                                          | ❌ 未实现 |
+//
+// ⚠⚠ 上表里有**两个**码映射到 `popNotLive`（`200109` 与 `200118`）⇒
+// 「需在直播期间内兑换哦」那个弹窗**不是 `200118` 专属的**。
+// ⚠ `200109` 在**什么情形下**出现，本仓**未测**（现有实拍里它一次都没出现过：
+// 我们那两枪拿到的是 `200118`）—— 别按"没直播就回 `200109`"去推，那是猜的。
+// 要核它得：在**窗口已关**且**没有任何直播活动**时投一条真口令，看回哪个码。
+//
+// ⚠⚠ **"客户端标签"是命名依据，不是行为契约**（坑表 **#136**）：它说明"这个码**叫什么**"，
+// **不**说明"服务端会不会校验某个头"。两件事别混。
+// ⚠ 表里没有的码，H5 直接 `$toast(o.msg)`（弹上游原文）⇒ 客户端也**没有**穷举所有码。
 //
 // ⚠ `200103` 那条接口（兑换提交那一步）本文件**不提供** —— 与下面"不提供
 // `getRedFlowerTop10List`"是同一条纪律：不提供就不会被误用。
@@ -123,22 +159,57 @@ const (
 	CodeFirstParticipateAlreadyJoined int64 = 200110
 	// CodeRedFlowerAlreadyDrawn 是 `200112`：**已兑换**。
 	//
-	// ⚠⚠ **零实拍**：2026-09-22 那轮拿到的两个口令都是无效的，至 2026-09-23 仍无样本。
-	// 取值来自原项目 `tasks/red-flower/standalone.ts:72` 的字面量 ——
-	// **连它出自哪个接口都没验证**：语义"已兑换"听起来更像兑换那一步
-	// （`liveRoomFeedback/check?prizeId=`），而不是 `draw`。
-	// ⇒ **不要拿它去断言 `draw` 的行为**。
+	// ⭐ **2026-09-23 实拍**（此前标的是"零实拍"，取值只靠原项目字面量）：
+	// 同一账号把**同一条**正确口令投第二次 ⇒
+	// `{"code":200112,"msg":"口令已兑换过了，每个口令只能兑换一次!"}`。
+	// 原始样本见 `docs/capture/app-live-redflower-samples.txt` §10.2。
 	//
-	// ⚠⚠ 2026-09-23 纠正：**口令全场通用，不存在"被消耗"这回事** ——
-	// 早先这里（以及 `scripts/probe-live-room.js`）写过"同一个口令投第二次会回 `200112`"，
-	// 那是把"口令一次性"这个**未验证的前提**当成了结论，已删。
-	// 若 `draw` 真回了 `200112`，合理读法是"**这个账号**已经用这条口令兑过"，
-	// 而不是"口令被别人用掉了"。
+	// ⭐ **"每个口令只能兑换一次"是按账号算的** —— **用户口述**（2026-09-23 明确）：
+	// **两个不同账号投同一条口令，各自都会成功** ⇒ 与文件头第 ② 条"口令全场通用、
+	// 不存在消耗"**不冲突**（"一次"限制的是**账号 × 口令**这一对，不是口令本身）。
+	// ⚠ 本仓**没有这一条的实拍**（2026-09-23 17:09 想补，撞上直播窗口关闭 ⇒ 回 `200118`）。
+	// ⚠⚠ **别把"本仓没实拍"读成"这个说法是揣测"** —— 一手口述在本仓是**一等证据**
+	// （与"用户拍板"同档），**不许**因为缺抓包就标成"未定"（坑表 **#142**）。
 	//
 	// 语义上它与 [CodeRedFlowerInvalidKouling] **不同**：已兑换说明口令本身是**对的**，
 	// 所以它**不该**被当成无效口令（否则会把一个有效口令从缓存里剔掉，
 	// 让同一批账号里后面的那几个白跑一趟）。
 	CodeRedFlowerAlreadyDrawn int64 = 200112
+	// CodeRedFlowerKoulingExpired 是 `200118`：**这条口令认识、但已经失效了**（本场已结束）。
+	//
+	// ⭐ **2026-09-23 17:09 实拍**（直播窗口已关、`gateOpen: false`）：
+	// 两条**真但已过期**的口令各投一次 ⇒ 都回 `200118`。
+	// ⭐⭐ **两条独立证据面同答**：
+	//   ① **服务端实验**证明"服务端确实这么判"（上面那一枪 + 乱码对照）；
+	//   ② **客户端那张表**给出官方命名 —— `200118` ⇒ **`popNotLive`**、
+	//      文案「**需在直播期间内兑换哦**」（`har/liveRoomFeedback.0cdf4040.js`，
+	//      原文见 `docs/capture/app-live-redflower-samples.txt` §10.6）。
+	// ⚠⚠ 上游原文（[RedFlowerDrawOutcome.Message]）解析了却**从不输出**
+	// ⇒ 别指望从我们自己的产物里读到它。
+	// ⚠ 而"**口令级**还是**场次级**"这一格**只有实验能答**：同账号、同样"直播已关"，
+	// 投**乱码 / 不存在的口令**仍回 `200108`
+	// ⇒ `200118` 是**口令级**的码（"我认识它、它失效了"），**不是**场次级（"没直播一律挡"）。
+	// ⭐ 它顺带证明：服务端**记得住过去场次的口令**（否则认不出来）—— 与文件头第 ① 条同向；
+	// 且**"过期"判断排在"这个账号兑换过没有"之前** ⇒ 窗口外**问不出** `200112` 那条悬案。
+	//
+	// ⭐ **2026-09-23 20:2x 已开分支**：[ClassifyRedFlowerDraw] 把它落进
+	// [RedFlowerDrawKoulingExpired]（`String()` = `"kouling_expired"`）⇒
+	// `app` 收进 `RedFlowerReport.ExpiredCodes`、CLI 的人读输出打
+	// 「**口令已失效（本场已结束）**」、`--json` 出 `expiredCodes`。
+	// ⚠ 早先这里写着"本文件刻意不为它开分支 ⇒ CLI 打「未分类口令」" ——
+	// **那句已过期**：它把"**直播结束了**"和"**口令抄错了**"印成同一句话，
+	// 而后者（`200108`）才是"口令不对"。判据与做法见 `docs/migration-pitfalls.md` #140。
+	//
+	// ⭐ **两条不变量由测试钉住**：`TestClassifyRedFlowerDrawOnExpiredKouling`
+	// （`live_flower_test.go`）—— 它**不许**被判成无效口令（否则白重听 60 秒）、
+	// 也**不许**被判成成功。
+	// ⚠ 该测试的信封是**最小信封**（只有 `code`）：`200118` 的上游原文**仍无实拍**
+	// （[RedFlowerDrawOutcome.Message] 解析了却从不输出），别把 `msg` 写进向量
+	// —— 那等于把"我没抓到"写成"原文是这样"。
+	//
+	// ⚠ 边界：只有**两条**真口令 + **两条**不存在口令的对照，全在**同一场已结束的直播 +
+	// 同一个账号**上；"它对所有过期口令都这样吗"**没测**。
+	CodeRedFlowerKoulingExpired int64 = 200118
 )
 
 // LiveRoomPageReferer 拼小红花活动页的 `Referer`。
@@ -428,6 +499,25 @@ const (
 	// 单独一类而不是并进 [RedFlowerDrawOther]：前者是"上游说了个别的码"，
 	// 后者是"上游这次没按信封说话"—— 两者的排查方向完全不同。
 	RedFlowerDrawUnparsable
+	// RedFlowerDrawKoulingExpired 是 [CodeRedFlowerKoulingExpired]（`200118`）——
+	// **这条口令认识、但它已经失效了**（本场直播已结束）。
+	//
+	// ⭐ 2026-09-23 17:09 实拍（capture §10.5）：同账号、同样"直播已关"，
+	// 投**真但已过期**的口令 ⇒ `200118`；投**乱码 / 不存在的口令** ⇒ `200108`
+	// ⇒ 它**不是**"口令抄错了"，也**不是**"上游回了个没分类的码"。
+	//
+	// ⚠ 与 [RedFlowerDrawOther] 分开的理由在**人读的那句话**上：
+	// 两者原本都打「未分类口令」，而这一格**最常见**的成因恰恰是"**直播已经结束了**"
+	// —— 那句文案把人往"口令抄错了"（[RedFlowerDrawInvalidKouling]）那边引，
+	// 排查方向一开始就错。
+	//
+	// ⚠⚠ 它**不是**无效口令：口令本身是**对的**（错的回 `200108`）。
+	// 所以 [RedFlowerDrawOutcome.RejectedKouling] 必须对它返回 `false` ——
+	// 否则会触发一次毫无意义的 60 秒重听。
+	//
+	// ⚠ 排在 `iota` 的**末尾**是刻意的：中间插入会改掉后面那些的数值，
+	// 而数值一旦被人读去当判据就收不回来。
+	RedFlowerDrawKoulingExpired
 )
 
 func (k RedFlowerDrawKind) String() string {
@@ -442,6 +532,8 @@ func (k RedFlowerDrawKind) String() string {
 		return "other"
 	case RedFlowerDrawUnparsable:
 		return "unparsable"
+	case RedFlowerDrawKoulingExpired:
+		return "kouling_expired"
 	}
 	return ""
 }
@@ -483,7 +575,7 @@ func RedFlowerDrawRequest(code, jwt string) core.HTTPRequest {
 
 // ClassifyRedFlowerDraw 判定 `draw` 的结果。
 //
-// **不返回错误**：五种结果里只有两种是"故障"（[RedFlowerDrawOther] /
+// **不返回错误**：六种结果里只有两种是"故障"（[RedFlowerDrawOther] /
 // [RedFlowerDrawUnparsable]），而它们该不该中断整批由调用方决定 ——
 // 逐个口令重试是正常路径，不该让一个口令的异常把其余口令一起带走。
 func ClassifyRedFlowerDraw(envelope *Envelope) RedFlowerDrawOutcome {
@@ -520,6 +612,8 @@ func ClassifyRedFlowerDraw(envelope *Envelope) RedFlowerDrawOutcome {
 		out.Kind = RedFlowerDrawAlreadyDrawn
 	case CodeRedFlowerInvalidKouling:
 		out.Kind = RedFlowerDrawInvalidKouling
+	case CodeRedFlowerKoulingExpired:
+		out.Kind = RedFlowerDrawKoulingExpired
 	default:
 		out.Kind = RedFlowerDrawOther
 	}

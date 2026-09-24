@@ -11,6 +11,7 @@
 | --- | --- |
 | 看项目全貌 / 为什么重写 | [`../README.md`](../README.md)（只做导航，短） |
 | 看**现在能跑什么、还差什么** | [`status.md`](./status.md) —— 一页总览 + 按任务指路 |
+| 看**哪些事还等用户拍板**（挡路的 / 不挡路的 / 缺样本的） | [`pending-decisions.md`](./pending-decisions.md) —— 只做索引，事实仍在出处那一节 |
 | 敲命令 / 查参数 | [`cli-usage.md`](./cli-usage.md) —— CLI 操作手册 |
 | 改签到那条链路的**编排逻辑** | [`signin-cli-spec.md`](./signin-cli-spec.md) —— `mcloud signin` 的编排层规格 |
 | 改**刷新 auth / 换 token**（该不该刷、哪一端的头、四个触发面口径、哪些还没实测） | [`auth-refresh.md`](./auth-refresh.md) —— 参考实现（旧项目）把它当**每轮任务收尾的常规动作**，本仓同样到点就换，没有"先批准"那道闸（§1）；⚠ 要留神的是 PC 那一支**形状未实测**（§8 待验证） |
@@ -128,6 +129,8 @@
 | `app-rights-token-samples.txt` | App 权益 / token / 待领取族样本（`queryAvailableBenefit`、`queryUserBenefits`、`refreshToken`、`queryRights`、`pointsNotClaimed`） |
 | `app-exchange-samples.txt` | App **兑换**族样本（含 `§5.5`/`§5.6`）—— 判据：上游码**只判等、不判形状**（`2301` 是四位） |
 | `app-live-redflower-samples.txt` | App **直播口令 / 小红花**族样本（`§5.x`）—— ⚠ `§6` 那条"WS 结构性地抓不到"的判据（`chatRoomId: null`）在这里；实现落点见 [`status.md`](./status.md) |
+| `app-live-ws-samples.txt` | App **直播 WS 帧**样本（2026-09-23 实拍）—— `command` 取值、心跳周期（推翻"ack 后补 UNREAD"）、`member/apply` 签名算式实拍验证（⚠ `§8.4` 反证 `SystemMD5` 的"必须 hex 解码"前提）；`§9` = **历史弹幕**（**公开 CDN**、无需鉴权、键是直播房间号）—— ⚠⚠ 但它是**"回放"产物、只能跑**已结束**的场次，而**口令只在本场有效** ⇒ **它给出的口令全部过期、拿不到可用的口令**，用途只剩"**弹幕取证**"（验抽取器 / 看形态 / 看出现次数）。⚠⚠ 抓包面是 **WebView** ⇒ 进程名是 `com.apple.WebKit.Networking`，不是 `mCloud` |
+| `app-play-ai-samples.txt` | **拍拍**（#16 `play-ai-special`）的证据面 —— ⚠ **全文没有实拍**：唯一样本是一份 2026-06-29 的归档（13 条），而它**缺链路前半段**（换票两步、`journaling` 埋点、`chat/v2/add` 三条零条）。§3 = `jwttoken` 来源（AGENTS §1.12 证据侧要求），§5 = 缺哪几条、只能在活动窗口内补，§6 = 刻意不解释的格子（含"`90001` 那一支是**借**签到族实测立的，本族仍零样本"） |
 | `probe-live-room-<日期>.md` | **脚本产出**（`scripts/probe-live-room.js`）—— 开播后每次核对都往这里**追加**一次运行记录与原始输出。⚠ 清单的权威版本在**脚本里**，这里只是记录（坑表 #116） |
 | `app-sms-login-samples.txt` | App 短信登录抓包样本（**含 `§0` 的取证方法**） |
 | `web-qr-login-samples.txt` | PC Web 扫码登录样本 |

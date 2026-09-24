@@ -18,18 +18,11 @@ import (
 
 // SignInStatus 只查状态，不签到（CLI 的 `--status-only`）。
 func SignInStatus(
-	ctx context.Context,
-	up *upstream.Upstream,
-	profile *upstream.AppProfile,
-	credential *SignInCredential,
-	clock core.Clock,
-	rng core.Random,
+	ctx context.Context, src *SignInSessionSource,
 ) (upstream.SignInStatus, *core.Error) {
-	referer, jwt, perr := OpenSignInSession(ctx, up, profile, credential, clock, rng)
-	if perr != nil {
-		return upstream.SignInStatus{}, perr
-	}
-	return up.AppSignInStatus(ctx, jwt, referer)
+	return do(ctx, src, func(s SignInSession) (upstream.SignInStatus, *core.Error) {
+		return src.up.AppSignInStatus(ctx, s.jwt, s.referer)
+	})
 }
 
 // SignInStatusRaw 同上，但返回 **`infoV3` 的原始响应体**（不解析）。
@@ -37,18 +30,11 @@ func SignInStatus(
 // 排障用：字段对不上时，只有原文能说清是"响应里没有"还是"我们没解析出来" ——
 // 「模板没渲染」不等于「响应没有」，这条区别只有原文能给出。
 func SignInStatusRaw(
-	ctx context.Context,
-	up *upstream.Upstream,
-	profile *upstream.AppProfile,
-	credential *SignInCredential,
-	clock core.Clock,
-	rng core.Random,
+	ctx context.Context, src *SignInSessionSource,
 ) (any, *core.Error) {
-	referer, jwt, perr := OpenSignInSession(ctx, up, profile, credential, clock, rng)
-	if perr != nil {
-		return nil, perr
-	}
-	return up.AppSignInStatusRaw(ctx, jwt, referer)
+	return do(ctx, src, func(s SignInSession) (any, *core.Error) {
+		return src.up.AppSignInStatusRaw(ctx, s.jwt, s.referer)
+	})
 }
 
 // RecordsQuery 是 `cloudRecordV2` 的查询条件。
@@ -75,20 +61,12 @@ type RecordsQuery struct {
 // `--status-only` 回答"**现在有多少**"（`infoV3.total`）；这一条回答"**这些是怎么来的**"。
 // 余额对不上时，只有流水能指出差在哪一笔 —— 光看两个余额是永远对不出来的。
 func CloudRecords(
-	ctx context.Context,
-	up *upstream.Upstream,
-	profile *upstream.AppProfile,
-	credential *SignInCredential,
-	query RecordsQuery,
-	clock core.Clock,
-	rng core.Random,
+	ctx context.Context, src *SignInSessionSource, query RecordsQuery,
 ) (upstream.CloudRecords, *core.Error) {
-	referer, jwt, perr := OpenSignInSession(ctx, up, profile, credential, clock, rng)
-	if perr != nil {
-		return upstream.CloudRecords{}, perr
-	}
-	return up.AppCloudRecords(ctx, jwt, referer,
-		query.AiDou, query.Filter, query.PageNumber, query.PageSize)
+	return do(ctx, src, func(s SignInSession) (upstream.CloudRecords, *core.Error) {
+		return src.up.AppCloudRecords(ctx, s.jwt, s.referer,
+			query.AiDou, query.Filter, query.PageNumber, query.PageSize)
+	})
 }
 
 // PendingPrizes 查**待领取奖品**（`record` 的「待领取」页签）。只读。
@@ -98,25 +76,23 @@ func CloudRecords(
 // 旧项目 `mcloud-sign` 的 `printPendingPrizes`：把"中了但还没领"的奖品列出来，
 // 连过期时间一起 —— 免得奖品躺着过期。
 //
-// ⚠ 当前版 H5 的列表项**只显示「中奖时间」**（`insertTime`），
-// **没有 `expireTime`** —— 旧项目那个字段名在新接口上不存在，别照抄。
+// ⚠ 分页：这一条**只取一页**（`pageSize` 由调用方给），所以多于那一页会**静默截断** ——
+// 旧项目 `printPendingPrizes` 就是这么写的（`pageNumber=1,pageSize=10`），我们照搬了行为，
+// 但它被列为"重写要修"的一条（`docs/business-feature-inventory.md` §2.1 `prizes`）。
+//
+// ⚠ 字段名以**实拍**为准：`expireTime` 在响应里**是存在的**（中奖后 14 天到期），
+// 只是当前版 H5 的**列表项模板**只渲染「中奖时间 `insertTime`」。
+// 「模板没渲染」不等于「响应没有」—— 这一句此前在这里写反过，正确结论见
+// [upstream.PrizeRecordItem.ExpireTime] 那段（实拍与更正都在那里）。
 //
 // `pageSize` 只取一页：这条的用途是"看有没有待领的"，不是把历史全拉下来。
 func PendingPrizes(
-	ctx context.Context,
-	up *upstream.Upstream,
-	profile *upstream.AppProfile,
-	credential *SignInCredential,
-	pageSize int64,
-	clock core.Clock,
-	rng core.Random,
+	ctx context.Context, src *SignInSessionSource, pageSize int64,
 ) (upstream.PrizeRecords, *core.Error) {
-	referer, jwt, perr := OpenSignInSession(ctx, up, profile, credential, clock, rng)
-	if perr != nil {
-		return upstream.PrizeRecords{}, perr
-	}
-	return up.AppPrizeRecords(ctx, jwt, referer,
-		upstream.PrizeMarketName, upstream.PrizeStatusPending, 1, pageSize)
+	return do(ctx, src, func(s SignInSession) (upstream.PrizeRecords, *core.Error) {
+		return src.up.AppPrizeRecords(ctx, s.jwt, s.referer,
+			upstream.PrizeMarketName, upstream.PrizeStatusPending, 1, pageSize)
+	})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -159,22 +135,15 @@ type ReceiveTarget struct {
 //
 // 这是**已知唯一一个不带就失败**的接口（H5 标了 `isDeviceId: true`）。
 //
-// ⚠ 会话在这里**又建了一次**。自检 / 探测场景下多两次请求无所谓；
-// 真要做"签到 + 领取"一条龙时，应该走 [ReceiveAll]（它只建一次）。
+// ⚠ 会话走 [SignInSessionSource]：与同一条链上的别的请求**共用**这一轮那一条，
+// 不再自己开一条（自检 / 探测那档单独跑时，源里也只有它需要的那一条）。
 func ReceiveCloud(
-	ctx context.Context,
-	up *upstream.Upstream,
-	profile *upstream.AppProfile,
-	credential *SignInCredential,
-	target ReceiveTarget,
-	clock core.Clock,
-	rng core.Random,
+	ctx context.Context, src *SignInSessionSource, target ReceiveTarget,
 ) (upstream.ReceiveResult, *core.Error) {
-	referer, jwt, perr := OpenSignInSession(ctx, up, profile, credential, clock, rng)
-	if perr != nil {
-		return upstream.ReceiveResult{}, perr
-	}
-	return up.AppReceiveV3(ctx, jwt, referer, target.CloudID, target.CloudType, target.DeviceID)
+	return do(ctx, src, func(s SignInSession) (upstream.ReceiveResult, *core.Error) {
+		return src.up.AppReceiveV3(ctx, s.jwt, s.referer,
+			target.CloudID, target.CloudType, target.DeviceID)
+	})
 }
 
 // ReceiveRevivalReward 用复活卡 / 回馈卡（`receiveRevivalReward`）。
@@ -191,20 +160,16 @@ func ReceiveCloud(
 // 两个证据不一致：H5 定义里**没有** `isDeviceId`（⇒ 不发），
 // 老抓包里却带了一个 `deviceid` **头**。哪个是服务端真正要求的**未验证**，
 // 所以留成可选参数 —— 真出问题时能一次 A/B 试出来（`receiveV3` 就是这么定的）。
+// ⚠ 命中 `90001` 时 [SignInSessionSource.Call] 会刷一次票**并把这一笔重放**。
+// "卡用掉就没了"与"重放会不会用掉两张"这里**都没有样本** ——
+// 要核它得在有效期内拿一个号连发两次同一笔 `receiveRevivalReward` 并比对卡数
+// （口径来自用户 2026-09-23：重放对读写一视同仁；见 `signin_session.go` 头注第 3 条）。
 func ReceiveRevivalReward(
-	ctx context.Context,
-	up *upstream.Upstream,
-	profile *upstream.AppProfile,
-	credential *SignInCredential,
-	deviceID *string,
-	clock core.Clock,
-	rng core.Random,
+	ctx context.Context, src *SignInSessionSource, deviceID *string,
 ) (upstream.RevivalReward, *core.Error) {
-	referer, jwt, perr := OpenSignInSession(ctx, up, profile, credential, clock, rng)
-	if perr != nil {
-		return upstream.RevivalReward{}, perr
-	}
-	return up.AppReceiveRevivalReward(ctx, jwt, referer, deviceID)
+	return do(ctx, src, func(s SignInSession) (upstream.RevivalReward, *core.Error) {
+		return src.up.AppReceiveRevivalReward(ctx, s.jwt, s.referer, deviceID)
+	})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -366,28 +331,15 @@ const (
 // 之所以要有它：把"该领哪个"交给用户，等于让用户去猜 `cloudType` 的含义，
 // 而猜错的表现是"领到 0 朵"，**看起来像上游没发**。
 //
-// # 会话只建一次
+// # 会话只建一条
 //
-// `infoV3` 与随后每个领取请求共用同一条会话 —— 见 [OpenSignInSession]。
-//
-// # 单条失败不中断
-//
-// 一条失败（例如月度那条回 `1302` 未开备份）不影响其余条目：它们本来就是
-// 互不相干的账。失败进 [ReceiveOutcomeFailed]，由调用方决定怎么报。
+// `infoV3` 与随后每个领取请求共用 [SignInSessionSource] 里那一条会话 ——
+// 但每条请求**各自**过一遍 `Call`：撞 `90001` 时刷一次票、把**那一条**重放一次，
+// 后面的条目接着用新票。整批共用一次刷新，而不是"一过期整批重来"。
 func ReceiveAll(
-	ctx context.Context,
-	up *upstream.Upstream,
-	profile *upstream.AppProfile,
-	credential *SignInCredential,
-	deviceID string,
-	clock core.Clock,
-	rng core.Random,
+	ctx context.Context, src *SignInSessionSource, deviceID string,
 ) ([]ReceiveOutcome, *core.Error) {
-	referer, jwt, perr := OpenSignInSession(ctx, up, profile, credential, clock, rng)
-	if perr != nil {
-		return nil, perr
-	}
-	status, perr := up.AppSignInStatus(ctx, jwt, referer)
+	status, perr := SignInStatus(ctx, src)
 	if perr != nil {
 		return nil, perr
 	}
@@ -408,7 +360,9 @@ func ReceiveAll(
 			if action.AcceptDate != "" {
 				acceptDate = &action.AcceptDate
 			}
-			expansion, perr := up.AppReceiveTaskExpansion(ctx, jwt, referer, acceptDate)
+			expansion, perr := do(ctx, src, func(s SignInSession) (upstream.ReceiveTaskExpansion, *core.Error) {
+				return src.up.AppReceiveTaskExpansion(ctx, s.jwt, s.referer, acceptDate)
+			})
 			if perr != nil {
 				outcomes = append(outcomes, ReceiveOutcome{
 					Kind:      ReceiveOutcomeFailed,
@@ -423,8 +377,13 @@ func ReceiveAll(
 				CloudCount: expansion.CloudCount,
 			})
 		case ReceiveActionImmediate:
-			result, perr := up.AppReceiveV3(ctx, jwt, referer,
-				action.CloudID, &action.CloudType, deviceID)
+			result, perr := do(ctx, src, func(s SignInSession) (upstream.ReceiveResult, *core.Error) {
+				// 先拷一份再取地址：`AppReceiveV3` 收的是 `*int64`，
+				// 把计划项里的字段地址交出去等于给它一个改我们账目的口子。
+				cloudType := action.CloudType
+				return src.up.AppReceiveV3(ctx, s.jwt, s.referer,
+					action.CloudID, &cloudType, deviceID)
+			})
 			if perr != nil {
 				outcomes = append(outcomes, ReceiveOutcome{
 					Kind:      ReceiveOutcomeFailed,

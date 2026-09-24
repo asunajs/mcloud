@@ -312,6 +312,54 @@ func TestDiagnoseKeepsTheTwoReceiveFailuresApart(t *testing.T) {
 	}
 }
 
+// `90001` 必须是**类型化**的"会话过期"。
+//
+// 反向改坏各有一处会红：① 把 [EnsureOKWithHint] 里那一支改回 `NewBadRequest`
+// ⇒ `IsSessionExpired` 那一条红；② 顺手把别的码也判成过期 ⇒ 循环那一条红；
+// ③ 把这个变体的 kind 分开（判成 `KindAuth`）⇒ kind 与 `Error()` 渲染两条红。
+func TestNotLoggedInIsTypedAsSessionExpired(t *testing.T) {
+	_, err := EnsureOKWithHint(envelopeFrom(t, map[string]any{
+		"code": CodeNotLoggedIn, "msg": "未登录",
+	}))
+	if err == nil {
+		t.Fatal("90001 应判失败")
+	}
+	if !err.IsSessionExpired() {
+		t.Errorf("90001 必须带'会话过期'这个变体 —— app 层靠它决定刷新重放: %v", err)
+	}
+	// 加了变体**不等于**改了分类：对外文案与健康判定必须逐字不变。
+	if err.Kind() != core.KindBadRequest {
+		t.Errorf("kind 应仍是 BadRequest（否则 90001 的对外文案会跟着变）: %v", err.Kind())
+	}
+	if !strings.HasPrefix(err.Error(), "参数错误: ") {
+		t.Errorf("Error() 渲染须与加变体前一致: %q", err.Error())
+	}
+	if !strings.Contains(err.Message(), "会话没建起来") {
+		t.Errorf("Diagnose 的提示仍应在正文里: %q", err.Message())
+	}
+	// 包一层前缀是这一族的常态（同一接口在一次运行里被调多次），
+	// 变体不能被洗掉 —— 否则"该重放"在最常见的那条路径上失效。
+	if !err.WithPrefix("infoV3: ").IsSessionExpired() {
+		t.Error("WithPrefix 之后仍应是会话过期")
+	}
+	if !core.IsSessionExpired(err) {
+		t.Error("任意 error 版本也应认这个变体")
+	}
+	if core.IsSessionExpired(nil) || core.IsSessionExpired(core.NewBadRequest("别的错")) {
+		t.Error("nil 与其他错误不得判成会话过期")
+	}
+	// 其余已知码**不是**"刷新会话就能自救"：614/615 是参数问题、11029 是真忙。
+	for _, code := range []int64{CodeReceiveFailed, CodeReceiveFailedAlt, CodeReceiveTooBusy} {
+		_, other := EnsureOKWithHint(envelopeFrom(t, map[string]any{"code": code, "msg": "活动太火爆"}))
+		if other == nil {
+			t.Fatalf("%d 应判失败", code)
+		}
+		if other.IsSessionExpired() {
+			t.Errorf("%d 不是会话过期 —— 重建会话救不了它", code)
+		}
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 建会话三段
 // ─────────────────────────────────────────────────────────────────────────────

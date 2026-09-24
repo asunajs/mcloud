@@ -54,13 +54,21 @@ const (
 
 // LiveWSHeaders 是 WS 升级请求要带的头。
 //
-// ⚠ 与 `/cmlive` 那套 HTTP 头**不是**同一组：这里是
-// **Android Chrome** 的 UA + `Origin: https://v.cmcc-cs.cn`
-// —— 原项目如此，而它跟 HTTP 侧的 iPad UA 明显不是一个客户端。
-// 这一族没有实拍（未开播），照抄原项目。
+// ⚠ 与 `/cmlive` 那套 HTTP 头**不是**同一组，只有 `Origin` 是共用的。
+//
+// UA 用 [LiveUserAgent]（iPad）—— ⭐ 2026-09-23 实拍
+// （`docs/capture/app-live-ws-samples.txt` §一）证明**真实 H5 客户端在 WS 升级请求上
+// 发的就是它**，且与**同一次抓包里 HTTP 侧那份逐字相同**。
+// ⚠ 早先这里是**照抄原项目**的 Android Chrome UA，注释写着"这一族没有实拍（未开播）"——
+// 那句现在**不成立**（已经实拍到了）。那个值既没有实拍支撑，又与同文件的
+// [LiveWSInfoRequest]（一直用 iPad UA）**自相矛盾**：同一个 host 发两套 UA。
+//
+// ⚠⚠ 但**别把这次改动当成"修复"**：我们**没有**任何"服务端校验 UA"的判据 ——
+// 实拍只能证明客户端**发了什么**，证明不了服务端**认什么**（坑表 **#136** 的教训）。
+// 两个 UA 都是真实客户端在用的值 ⇒ 这次只是**抄得更准**，不是"修好了什么"。
 func LiveWSHeaders() []core.HeaderPair {
 	return []core.HeaderPair{
-		{"User-Agent", "Mozilla/5.0 (Linux; Android 14) Chrome/128.0.0.0 Mobile Safari/537.36"},
+		{"User-Agent", LiveUserAgent},
 		{"Origin", LiveOrigin},
 	}
 }

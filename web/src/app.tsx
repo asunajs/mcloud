@@ -29,6 +29,7 @@ import { HistoryPage } from './pages/history-page'
 import { LiveRedFlowerPage } from './pages/live-redflower-page'
 import { PlaceholderPage } from './pages/placeholder-page'
 import { SchedulesPage } from './pages/schedules-page'
+import { SettingsPage } from './pages/settings-page'
 import { TasksPage } from './pages/tasks-page'
 import { statusLabel } from './ui/history'
 import { IconClose, IconMenu, IconMoon, IconSun } from './ui/icons'
@@ -327,6 +328,8 @@ export default defineVaporComponent(() => {
             <TasksPage />
           ) : page.value === 'history' ? (
             <HistoryPage onGo={go} />
+          ) : page.value === 'settings' ? (
+            <SettingsPage />
           ) : (
             /**
              * `key` 不是可有可无的装饰：空态页落在 `createIf` 的同一个 else 分支里，

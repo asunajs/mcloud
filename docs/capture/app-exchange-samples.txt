@@ -13,7 +13,12 @@
 > 把 `limit` 那几个取值的**字段依据**钉死（`monthGroupLimit` **数组** + `limitMonthQuantity`）
 > —— 见 **§5.6**；顺带把 §5.5 ⑤ 那句"`420`/`421` 没有零豆替代"修正成
 > "`421` **有**探针候选，但那一发**只被一道闸挡、有成交风险** ⇒ 要拍板"。
-> ⚠ 但"信息齐了"**不等于"代码写了"** —— 兑换能力**仍未实现**（见下面「实现状态」）。
+> ⭐⭐ **2026-09-24 第六轮：仍是零提交，但这一族第一次由本仓的 Go 代码真打上游** ——
+> 走新建的只读接口 `GET /api/accounts/{id}/exchange-prizes`，两个真账号各 55 件 / 9 组，
+> `limit` 各自成立那一条从**另一侧**复现（见 **§5.7**）。
+> ⚠ 但"信息齐了"**不等于"代码写了"**：这一句在 2026-09-24 前成立 ——
+> 兑换的代码**已写完并接上执行**（`upstream/app_exchange*.go` + `app/exchange_*.go` +
+> `server/run_dispatch_exchange.go` + 能力 `CodeExchange`），见下面「实现状态」。
 
 ## 0. 当前状态（2026-09-22）
 
@@ -77,6 +82,14 @@
     同响应里 `beforeTotal = 8027` ≠ `8705` ⇒ **再证 §1.5**。
   - ⚠⚠ 探针自己犯了个**静默错**（已修）：`probability2` 里 `limitMonthQuantity` 是**数字**、
     `monthGroupLimit` 是**数组** ⇒ 按"都是数字"读会**静默归零**（坑表 **#105**）。
+- ⭐⭐ **2026-09-24 第六轮：本仓的 Go 代码第一次真打这一族，仍是零提交**（§5.7）。
+  走的是新建的只读接口 `GET /api/accounts/{id}/exchange-prizes`（一次性预览实例 + 库副本，
+  主库与 8788 那个实例没动），两个真账号**各 55 件 / 9 组**、组键仍不连续。
+  - ⭐ **`limit` 各自成立**从另一侧复现：同一组四件音乐会员月卡，一号全 `0`、另一号 `2` + 三个 `4`
+    （与 §5.6 的字段依据自洽；"哪一个账号兑过"本轮**未确认**）。⇒ 选品接口按账号建，不是审美。
+  - ⭐ **公共来源那张 `jwttoken` 在 `exchangeList` 上被认**（`code 0`）⇒ AGENTS §1.12 那一处兜底
+    今天有了一格实测；⚠ 但**不可外推**到别的页面（R5）。
+  - ⚠ **本仓仍未发过一枪 `exchangeV3`**：§5.2 那三条下单实拍来自真机 App。
 - **接口形态已定位**：`exchangeV3` / `exchangeList` / `getSlide` 三条，出处
   `har/h5-signin/newsignin.336f18c3.js`（证据见 §1，逐字）。
 - **（历史）抓包前仓库零实拍**。当时两条通路都查过：
@@ -99,12 +112,14 @@
   ⚠ 顺带确认：仓库里 `infoV3` / `startSignIn` 的实拍**也不是抓 App 的包**，
   而是 `app-signin-samples.txt` §0 说的"**纯协议可达** —— 账号 B 在无浏览器条件下
   端到端跑通"。即：**我们自己发请求**拿到的。
-- **实现状态**：`app-signin-samples.txt`「仍未实现」清单第 8 条 ——
-  `deviceId` 取值通路已通（§4.2），所以 `exchangeV3` 是**可做**的，
-  卡在规划把它排进「并发抢兑 + 幂等」最高风险档，没到那一批。
-  ⚠ **到第四轮为止，卡点只剩"排期与风险档"**：§6 九条里八条有结论、
-  一条（`smsCode`）明确搁置 ⇒ **不再是"信息不足"**。
-  ⚠⚠ 但**别把"信息齐了"记成"已实现"** —— 兑换的**代码一行都没写**。
+- **实现状态（2026-09-24 改写）**：兑换**已实现并接上执行** —— 上游层
+  `internal/upstream/app_exchange.go` / `app_exchange_slide.go`、判定与链
+  `internal/app/exchange_plan.go` / `exchange_run.go` / `exchange_list.go`、
+  接线 `internal/server/run_dispatch_exchange.go`、能力 `CodeExchange`（注册表第十七条），
+  另有只读选品接口 `GET /api/accounts/{id}/exchange-prizes`（§5.7）。
+  ⚠ 卡点**不再是"代码没写"**，只剩两样：① 本仓**没发过一枪下单**（要拍板 = P2），
+  ② §6 九条里 `smsCode` 那一格由用户 2026-09-22 明确**搁置**。
+  ⚠⚠ 也别反过来读成"跑通了"：下单那一半的可信范围**止于夹具与那三条真机实拍**。
 - **⚠ 与参考项目不是同一条接口**：`docs/caiyun-go-exchange-and-runtime.md` §3 写的是
   `GET …/ycloud/signin/page/exchangeV2?prizeId=…&puzzleOffset=…&smsCode=`（**GET**），
   而本仓库 H5 定义是 `POST …/ycloud/signin/page/exchangeV3`（**POST + JSON body**）。
@@ -635,6 +650,18 @@ content-length: 2
 | `picture` | base64，179708~280920 字符 | 每次换图，长度不等 |
 | `puzzle` | base64，4228~12856 字符 | 96×400，**通高竖条** |
 
+> ⭐ **2026-09-23 补：那两段 base64 是「带填充的标准 base64」（实现时要钉的那一格）**。
+> 表格原来只记了字符数，没记**编码形态**，而 Go 侧解它必须先回答"Std 还是 Raw"。
+> 从 Reqable 的响应缓存（`…/com.reqable.macosx/tmp/10c86a8d-…`，293926 字节）把那一条
+> 原文重新解了一遍：两段都以 `=` 结尾（`…gg==` / `…YII=`）、长度 280920 / 12856 都是 4 的倍数，
+> `base64.StdEncoding` 解出 **210688 / 9641 字节**，且与 `target/slide-evidence/picture.png`、
+> `puzzle.png` **逐字节相同**；两份 PNG 的 IHDR 分别是 `680×400 bitdepth 8 colortype 3`（调色板）、
+> `96×400 colortype 6`（RGBA）—— 与上表 `picWidth` / `puzzleWidth` 那三个字符串读数一致。
+> ⚠ 无填充的 `RawStdEncoding` **零样本**，所以实现里**不给**它兜底：那条兜底会把
+> "上游换了编码"变成"默默少解尾部几个字节"，而解算器在残缺图上照样会吐一个很像答案的数。
+> 落点：`internal/upstream/app_exchange_slide.go`，反向用例
+> `TestParseSlidePuzzleRejectsUnpaddedBase64`。
+
 ⭐ **拼图块在竖条里的位置**：竖条高 400 = 底图全高，块**保留原 y**，
 但块的 **y 每次随机**（4 条实测分别落在 `j∈[57,152]` / `[197,292]` / `[207,302]` / `[287,382]`）。
 块的 **x 恒从 `i=0` 起**（包围盒 `i∈[0,94]`，宽 95，而 `puzzleWidth` 报 96）。
@@ -1067,6 +1094,41 @@ REPLAY_DB=target/replay.db REPLAY_ACCOUNT='15****' \
 而且**不报任何错**。根因是 `probability2` 这**一个** JSON 串里混着两种类型：
 `limitMonthQuantity` 是**数字**、`monthGroupLimit` 是**数组** ⇒ 按"都是数字"读，
 后者**静默归零**。判据与修法记在 [`../migration-pitfalls.md`](../migration-pitfalls.md) **#105**。
+
+### 5.7 2026-09-24 第六轮：**本仓的 Go 代码第一次真打 `exchangeList`**（只读，一枪提交都没发）
+
+现场：一次性预览实例（**库副本** + 端口 8793 + 自己的设备文件），打的是库里那**两个真账号**。
+发出去的每一枪都是**读**；副本里 `schedules` 已清空、`runs` 恒 `0`；主库 `data/mcloud.db`
+与 8788 那个在跑的实例**逐字未动**（动手前后各查一次行数）。界面侧同一批读数的落点见
+[`../status.md`](../status.md)「兑换页的选品只读接口」那一节，这里只记**接口面**的结论。
+
+- **形状复核（与 §5.1 同一份接口，隔两天）**：两个账号**各 55 件、9 组**，组键仍是
+  `0,1,2,5,7,8,9,11,15`（**不连续**）。`260630012` 价格仍 `50`、`totalCount` 仍 `400000`，
+  而 `count` `399291 → 399282` ⇒ §5.1 那句"`count` 是时刻量、别当常量"**再中一次**。
+- ⭐ **`limit` 是各自的**（§5.1 抬头那句话经本仓复现）：同一件商品在两个账号上不同 ——
+
+  | prizeId | 名称 | 组 | 账号 A | 账号 B |
+  | --- | --- | --- | --- | --- |
+  | `251230051` | QQ音乐绿钻会员月卡 | 2 | `limit 0` | `limit 4` |
+  | `251230052` | 酷狗音乐会员月卡 | 2 | `limit 0` | `limit 4` |
+  | `251230053` | 网易云音乐VIP会员月卡 | 2 | `limit 0` | `limit 2` |
+  | `251230057` | 网易云音乐SVIP会员月卡 | 2 | `limit 0` | `limit 4` |
+
+  其余 51 件两号都是 `limit 0`；间隔一分钟各复取两次，四格**都稳定**。
+  这四件正是 §5.6 钉过的那一组"音乐会员月卡 · 组内互斥"（`monthGroupLimit` + `limitMonthQuantity`），
+  今天从**另一侧**印证了同一条：一号全 0、另一号"一个 `2` + 三个 `4`"，与 §5.6 的字段依据自洽。
+  ⚠ **但"是哪一个账号兑过"本轮没确认** —— 没读那个 `pc` 账号的余额（`cloud_current` 是空的），
+  别把它认成 §5.5 / §5.6 那个 `total 8705` 的移动号。
+  ⭐ 接口设计侧的结论：这一族**必须按账号**出清单（新建的
+  `GET /api/accounts/{id}/exchange-prizes` 就是这么建的），旧项目那条全局 `/api/exchange/prizes`
+  等于把 A 号的可兑状态念给 B 号听。
+- ⭐ **本仓这一枪带的仍是"公共来源"的 `jwttoken`**（签到页那份配方，AGENTS §1.12 的临时态），
+  上游回 `code 0` 且清单完整 ⇒ **兑换页这一格不再只是推断**。
+  ⚠ 别外推成"公共票哪一口都认"：其余页面仍零证据（登记在 `pending-decisions.md` R5）。
+- ⚠ **判档顺序在真数据上露面的一格**：那四件今天 `dailyRemainderCount` 与 `minRemainderCount` **都是 0**，
+  而本仓给 B 号报的是 `exchanged_this_group` / `exchanged_this_prize`（不是 `min_remainder_zero`）
+  ⇒ `limit` 那两档**盖在**余量档之前，与旧实现"先 `limit` 预检再谈库存"（§2.5 那一行）同向。
+- ⚠ **仍没有本仓发的 `exchangeV3` 实拍**：§5.2 那三条下单来自真机 App，不是本仓打的（要拍板：P2）。
 
 ## 6. 抓包要回答的问题（假设清单）
 

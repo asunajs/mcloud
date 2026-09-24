@@ -99,8 +99,10 @@ func (s *Server) probeLiveRoom(w http.ResponseWriter, r *http.Request, auth *Aut
 		return
 	}
 
+	// 票走 `s.runs.sessions` 那份**进程级**票池：界面上连着按几次"看一眼"应当只建一条
+	// 会话，而不是每次重新打三枪（口径见 `internal/app/signin_session_pool.go` 头注）。
 	probe, perr := app.ProbeLiveRoom(ctx, s.runs.upstream, profile,
-		&credential, s.clock, s.rng)
+		&credential, s.clock, s.rng, s.runs.sessions)
 	if perr != nil {
 		// 门坏了**如实报错**，不降级成"没有直播"：那是原项目那句"失败即放行"的
 		// 表现方式，而它把"凭据过期"盖成了"今天没开播"（判据见 [app.OpenKoulingGate]）。

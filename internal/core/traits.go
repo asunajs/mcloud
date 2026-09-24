@@ -1000,4 +1000,21 @@ type ConfigStore interface {
 	WebuiConfig(ctx context.Context) (WebuiConfig, error)
 
 	PutWebuiConfig(ctx context.Context, config *WebuiConfig) error
+
+	// NotifyConfig 取推送配置（同样是**单行表**、**无归属**，理由同 [ConfigStore.ExchangeConfig]）。
+	//
+	// 读不到那一行时返回 [DefaultNotifyConfig]（关闭 + info + 一家没配），**不**返回 nil、
+	// 也**不**写盘 —— 与上面两条同一条口径："只读地看一眼配置"不该产生副作用。
+	//
+	// ⚠ 这一族里装着各家密钥（`SecretValue`）。**出网一律走 server 层的脱敏视图**，
+	// 不要把这一份整个 marshal 出去：`SecretValue.String()` 只挡打印，不挡 `encoding/json`。
+	NotifyConfig(ctx context.Context) (NotifyConfig, error)
+
+	// PutNotifyConfig 覆盖推送配置（整块写，`id` 恒为 1）。
+	//
+	// 存储层**不做** [NotifyConfig.Validate] 那类校验：门槛文本按原样存、按原样读回
+	// （空串是"没填 ⇒ 跟随 info"这一格的有效信息，存之前归一会把往返打断），
+	// 而"这一份能不能用"是 server 层在保存前判的事 —— 它要给用户指出缺哪个字段，
+	// 那句话的措辞不该由 SQL 层决定。
+	PutNotifyConfig(ctx context.Context, config *NotifyConfig) error
 }

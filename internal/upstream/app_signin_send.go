@@ -106,17 +106,20 @@ func (u *Upstream) AppStartSignIn(
 	return ParseStartSignIn(envelope)
 }
 
-// AppTaskListV3 取任务列表（`taskListV3`）。
+// AppTaskListV3 取任务列表（`taskListV3`）。**只读**。
+//
+// 返回类型化的 [TaskList]（字段表与"为什么只取这六个"见 `app_task_list.go`）——
+// 原来这里交的是 `[]any`，那是"还没有能力读它"时的临时态。
 func (u *Upstream) AppTaskListV3(
 	ctx context.Context, jwt, referer string, client uint8,
-) ([]any, *core.Error) {
+) (TaskList, *core.Error) {
 	request, perr := TaskListV3Request(jwt, referer, client)
 	if perr != nil {
-		return nil, perr
+		return TaskList{}, perr
 	}
 	envelope, perr := u.Call(ctx, request)
 	if perr != nil {
-		return nil, perr
+		return TaskList{}, perr
 	}
 	return ParseTaskList(envelope)
 }

@@ -400,6 +400,18 @@ func (r *signinRun) one(ctx context.Context, target signinTarget) signinOutcome 
 
 	h5DeviceID := r.h5DeviceID(ctx, target.accountID)
 
+	// 这一趟（一个账号的一条分支）共用**一条** jwttoken：票装在 source 里，
+	// 各能力函数向它要，撞 `90001` 时由它刷一次、重放一次。
+	// 口径与不做的事见 `internal/app/signin_session.go` 头注；
+	// 这里传的是签到页那套参数 ⇒ **jwttoken 使用公共来源**（`AGENTS.md` §1.12）。
+	//
+	// ⚠ 这里**不接** [app.SessionPool]，是刻意的：一次 CLI 调用对每个账号只跑一轮，
+	// 池里那个键今天没有任何可复用对象（池按 账号×配方 持票，跨的是**轮**）。
+	// "同一账号连点多次只取一张票"那件事发生在服务端（`internal/server/run_dispatch.go`
+	// 的 `world.sessions`），不在命令行。哪天 CLI 支持一个账号跑多轮，
+	// 在这里换 `app.NewSessionPool().Source(...)` 即可，app 层不用动。
+	src := app.NewSignInSessionSource(r.up, profile, &credential, r.deps.Clock, r.deps.Random)
+
 	// 进度行在**发请求之前**打 —— 那才是这行的用处（等待期间看得见进度）。
 	//
 	// ⚠ 一律走 **stderr**（`out.note`）：这是与 Rust 的**刻意差异** ——
@@ -410,15 +422,15 @@ func (r *signinRun) one(ctx context.Context, target signinTarget) signinOutcome 
 
 	switch {
 	case r.args.Records:
-		r.runRecords(ctx, &outcome, profile, credential)
+		r.runRecords(ctx, &outcome, src)
 	case r.args.Prizes:
-		r.runPrizes(ctx, &outcome, profile, credential)
+		r.runPrizes(ctx, &outcome, src)
 	case r.args.Raw:
-		r.runRaw(ctx, &outcome, profile, credential)
+		r.runRaw(ctx, &outcome, src)
 	case r.args.StatusOnly:
-		r.runStatusOnly(ctx, &outcome, profile, credential)
+		r.runStatusOnly(ctx, &outcome, src)
 	default:
-		r.runSignIn(ctx, &outcome, target.accountID, profile, credential, h5DeviceID)
+		r.runSignIn(ctx, &outcome, target.accountID, src, h5DeviceID)
 	}
 	return outcome
 }
@@ -520,8 +532,7 @@ func (r *signinRun) branchLine(view signinView) string {
 // 账本顺序固定：改名前的云朵在前、改名后的 AI 豆在后 ——
 // 这样人看的输出与 `--json` 的键序一致。
 func (r *signinRun) runRecords(
-	ctx context.Context, outcome *signinOutcome,
-	profile *upstream.AppProfile, credential app.SignInCredential,
+	ctx context.Context, outcome *signinOutcome, src *app.SignInSessionSource,
 ) {
 	ledgers := []struct {
 		key   string
@@ -533,7 +544,7 @@ func (r *signinRun) runRecords(
 	}
 	pages := make([]signinLedgerPage, 0, len(ledgers))
 	for _, ledger := range ledgers {
-		page, perr := r.ledger(ctx, profile, credential, ledger.book)
+		page, perr := r.ledger(ctx, src, ledger.book)
 		if perr != nil {
 			outcome.view.failure = perr
 			return
@@ -565,19 +576,20 @@ func (r *signinRun) runRecords(
 // （后到的非 nil 会覆盖先到的），而规格 §2.3 记的是"保留先到的"。
 // 两者只在两页给的 `total` 不一致时才有差别（那是上游数据有问题），
 // 这里按规格的"保留先到的"实现，并把差别留在这里。
-func (r *signinRun) ledger(
-	ctx context.Context, profile *upstream.AppProfile,
-	credential app.SignInCredential, book int64,
+//
+// 翻页**共用一条会话**（`src` 在调用方那一层）：旧写法是每页现建一条，
+// 于是 `--records-all` 翻 20 页就是 20 次 `tyrzLogin`。
+func (r *signinRun) ledger(ctx context.Context, src *app.SignInSessionSource, book int64,
 ) (signinLedgerPage, *core.Error) {
 	collected := make([]any, 0, recordPageSize)
 	var total *int64
 	for pageNumber := int64(1); pageNumber <= recordMaxPages; pageNumber++ {
-		page, perr := app.CloudRecords(ctx, r.up, profile, &credential, app.RecordsQuery{
+		page, perr := app.CloudRecords(ctx, src, app.RecordsQuery{
 			AiDou:      book,
 			Filter:     upstream.RecordFilterAll,
 			PageNumber: pageNumber,
 			PageSize:   recordPageSize,
-		}, r.deps.Clock, r.deps.Random)
+		})
 		if perr != nil {
 			return signinLedgerPage{}, perr
 		}
@@ -600,11 +612,9 @@ func (r *signinRun) ledger(
 //
 // 不落库是有意的：奖品列表不是余额，记进 `cloud_stats` 只会往趋势图里塞噪声。
 func (r *signinRun) runPrizes(
-	ctx context.Context, outcome *signinOutcome,
-	profile *upstream.AppProfile, credential app.SignInCredential,
+	ctx context.Context, outcome *signinOutcome, src *app.SignInSessionSource,
 ) {
-	page, perr := app.PendingPrizes(
-		ctx, r.up, profile, &credential, prizePageSize, r.deps.Clock, r.deps.Random)
+	page, perr := app.PendingPrizes(ctx, src, prizePageSize)
 	if perr != nil {
 		outcome.view.failure = perr
 		return
@@ -617,10 +627,9 @@ func (r *signinRun) runPrizes(
 // 不落库是有意的 —— 原始响应没被解析成余额，记一条"余额未知"的历史
 // 只会往趋势图里塞噪声。`--raw` 是拿来看的，不是拿来攒数据的。
 func (r *signinRun) runRaw(
-	ctx context.Context, outcome *signinOutcome,
-	profile *upstream.AppProfile, credential app.SignInCredential,
+	ctx context.Context, outcome *signinOutcome, src *app.SignInSessionSource,
 ) {
-	value, perr := app.SignInStatusRaw(ctx, r.up, profile, &credential, r.deps.Clock, r.deps.Random)
+	value, perr := app.SignInStatusRaw(ctx, src)
 	if perr != nil {
 		outcome.view.failure = perr
 		return
@@ -641,10 +650,9 @@ func (r *signinRun) runRaw(
 // ⚠ **会落库余额**，而且记的是 `bean_total`（上游 `total`）**不是** `beforeTotal` ——
 // 后者不随领取变化，记它等于让趋势图永远是一条直线（见 [app.RecordCloud]）。
 func (r *signinRun) runStatusOnly(
-	ctx context.Context, outcome *signinOutcome,
-	profile *upstream.AppProfile, credential app.SignInCredential,
+	ctx context.Context, outcome *signinOutcome, src *app.SignInSessionSource,
 ) {
-	status, perr := app.SignInStatus(ctx, r.up, profile, &credential, r.deps.Clock, r.deps.Random)
+	status, perr := app.SignInStatus(ctx, src)
 	if perr != nil {
 		outcome.view.failure = perr
 		return
@@ -656,14 +664,16 @@ func (r *signinRun) runStatusOnly(
 }
 
 // runSignIn 是签到主路，外加四个写开关。
+//
+// 主路与四个开关**共用** `src` 里那一条会话（一轮一条 jwttoken）。
 func (r *signinRun) runSignIn(
 	ctx context.Context, outcome *signinOutcome, accountID core.AccountID,
-	profile *upstream.AppProfile, credential app.SignInCredential, h5DeviceID *string,
+	src *app.SignInSessionSource, h5DeviceID *string,
 ) {
-	report, perr := app.CloudSignIn(ctx, r.up, profile, &credential, app.SignInOptions{
+	report, perr := app.CloudSignIn(ctx, src, app.SignInOptions{
 		DeviceID: h5DeviceID,
 		Force:    r.args.Force,
-	}, r.deps.Clock, r.deps.Random)
+	})
 	if perr != nil {
 		outcome.view.failure = perr
 		return
@@ -680,16 +690,16 @@ func (r *signinRun) runSignIn(
 	// ⚠⚠ 它们**失败也不让整个账号失败**：用途恰恰是"看上游到底回什么码"，
 	// 抛出去就只剩一句错误信息（规格 §6.2 第 8 条）。
 	if r.args.Receive {
-		outcome.extras = append(outcome.extras, r.receive(ctx, profile, credential, h5DeviceID))
+		outcome.extras = append(outcome.extras, r.receive(ctx, src, h5DeviceID))
 	}
 	if r.args.Revive {
-		outcome.extras = append(outcome.extras, r.revive(ctx, profile, credential))
+		outcome.extras = append(outcome.extras, r.revive(ctx, src))
 	}
 	if r.args.Multiple {
-		outcome.extras = append(outcome.extras, r.multiple(ctx, profile, credential))
+		outcome.extras = append(outcome.extras, r.multiple(ctx, src))
 	}
 	if r.args.BackupGift {
-		outcome.extras = append(outcome.extras, r.backupGift(ctx, profile, credential))
+		outcome.extras = append(outcome.extras, r.backupGift(ctx, src))
 	}
 }
 
@@ -721,8 +731,7 @@ func (r *signinRun) recordCloud(ctx context.Context, accountID core.AccountID, c
 // ⚠ `ok` = "这次调用没出错"，**不等于"领到了"**。自动模式下每条账目各自的
 // 成败在 `items` 里；`ok` 仍是 `true`。别把 `ok` 实现成"领到了"。
 func (r *signinRun) receive(
-	ctx context.Context, profile *upstream.AppProfile,
-	credential app.SignInCredential, h5DeviceID *string,
+	ctx context.Context, src *app.SignInSessionSource, h5DeviceID *string,
 ) signinExtra {
 	device := ""
 	if h5DeviceID != nil {
@@ -743,11 +752,11 @@ func (r *signinRun) receive(
 		// ── 显式模式（自检用）：我说领哪一笔就领哪一笔 ──────────────────
 		head := fmt.Sprintf("指定领取：再发一次 receiveV3（cloudId=%q，cloudType=%s，deviceId %s）",
 			r.args.CloudID, optionInt64(cloudType), deviceNote)
-		result, perr := app.ReceiveCloud(ctx, r.up, profile, &credential, app.ReceiveTarget{
+		result, perr := app.ReceiveCloud(ctx, src, app.ReceiveTarget{
 			CloudID:   r.args.CloudID,
 			CloudType: cloudType,
 			DeviceID:  device,
-		}, r.deps.Clock, r.deps.Random)
+		})
 		if perr != nil {
 			return signinExtra{
 				key:     "receive",
@@ -767,7 +776,7 @@ func (r *signinRun) receive(
 	// 这是日常该走的路。把"该领哪个"交给用户，等于让用户去猜 `cloudType` 的含义，
 	// 而猜错的表现是"领到 0 朵"——看起来像上游没发。
 	head := fmt.Sprintf("按 infoV3 的账目自动分流领取（deviceId %s）", deviceNote)
-	outcomes, perr := app.ReceiveAll(ctx, r.up, profile, &credential, device, r.deps.Clock, r.deps.Random)
+	outcomes, perr := app.ReceiveAll(ctx, src, device)
 	if perr != nil {
 		return signinExtra{
 			key:     "receive",
@@ -800,9 +809,7 @@ func (r *signinRun) receive(
 // ⚠ `deviceid` 头**只取显式 `--device-id`，故意不回落库**：
 // H5 的 `receiveRevivalReward` 定义里没有 `isDeviceId`，默认就该一个头都不带。
 // `nil` = 不带，与"给了个空串"是两件事。
-func (r *signinRun) revive(
-	ctx context.Context, profile *upstream.AppProfile, credential app.SignInCredential,
-) signinExtra {
+func (r *signinRun) revive(ctx context.Context, src *app.SignInSessionSource) signinExtra {
 	var device *string
 	if explicit, given := explicitH5DeviceID(r.args); given {
 		device = &explicit
@@ -810,8 +817,7 @@ func (r *signinRun) revive(
 	head := fmt.Sprintf("再发一次 receiveRevivalReward（用复活卡/回馈卡，deviceid 头%s）",
 		optionGiven(device != nil, "已给", "不带"))
 
-	reward, perr := app.ReceiveRevivalReward(
-		ctx, r.up, profile, &credential, device, r.deps.Clock, r.deps.Random)
+	reward, perr := app.ReceiveRevivalReward(ctx, src, device)
 	if perr != nil {
 		return signinExtra{
 			key:     "revive",
@@ -844,11 +850,9 @@ func (r *signinRun) revive(
 //
 // ⚠ `ok` = "这次调用没出错"，**不等于"领到了"**：三种"按逻辑就没领"
 // （已领过 / 没开备份 / 判不了）也是 `ok: true`。领没领到看 `claimed`。
-func (r *signinRun) multiple(
-	ctx context.Context, profile *upstream.AppProfile, credential app.SignInCredential,
-) signinExtra {
+func (r *signinRun) multiple(ctx context.Context, src *app.SignInSessionSource) signinExtra {
 	const head = "领签到翻倍（`multiple`，每月一次）"
-	outcome, perr := app.ClaimMultiple(ctx, r.up, profile, &credential, r.deps.Clock, r.deps.Random)
+	outcome, perr := app.ClaimMultiple(ctx, src)
 	if perr != nil {
 		return signinExtra{
 			key:     "multiple",
@@ -871,11 +875,9 @@ func (r *signinRun) multiple(
 //
 // 门槛（`curMonth` 前置、再看 `state`）由 [app.ClaimBackupGift] 自己判。
 // `ok` / `claimed` 的约定与 `--multiple` 完全一致。
-func (r *signinRun) backupGift(
-	ctx context.Context, profile *upstream.AppProfile, credential app.SignInCredential,
-) signinExtra {
+func (r *signinRun) backupGift(ctx context.Context, src *app.SignInSessionSource) signinExtra {
 	const head = "领备份好礼（`backupgift`，每月一次）"
-	outcome, perr := app.ClaimBackupGift(ctx, r.up, profile, &credential, r.deps.Clock, r.deps.Random)
+	outcome, perr := app.ClaimBackupGift(ctx, src)
 	if perr != nil {
 		return signinExtra{
 			key:     "backupGift",

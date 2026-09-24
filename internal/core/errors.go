@@ -190,6 +190,14 @@ const (
 	variantParse
 	variantInternal
 	variantFixtureMiss
+	// variantSessionExpired 是"上游回 `90001 未登录`"这一**专用变体**。
+	//
+	// 它与 [variantBadRequest] 是**两个变体、同一个 kind** —— 与 [variantFixtureMiss]
+	// 同一个先例。为什么要多这一个：调用方需要区分"这次失败该刷新会话再来一遍"
+	// 和"这次失败是参数错了、刷新一万次也没用"，而两者在 kind 上必须同为
+	// `KindBadRequest`（对外文案与健康判定都不该变）。只靠消息文本匹配中文提示串
+	// 是拿不住的：`Diagnose` 的提示改一个字，重放逻辑就**静默失效**。
+	variantSessionExpired
 )
 
 // Error 对应 Rust 的 enum Error。
@@ -241,6 +249,19 @@ func NewInternal(msg string) *Error { return &Error{variant: variantInternal, ms
 // NewFixtureMiss 构造"fixture 未命中"。
 func NewFixtureMiss(msg string) *Error { return &Error{variant: variantFixtureMiss, msg: msg} }
 
+// NewSessionExpired 构造"会话已失效（上游 `90001 未登录`）"。
+//
+// 它**只**给这一码用：含义是"凭据没错，但这张 H5 会话票不能用了，重建一次会话" ——
+// 处置是刷新会话，不是重新登录，也不是改参数。
+//
+// ⚠ kind 刻意仍是 [KindBadRequest]（见 [Error.Kind]）：`90001` 的对外文案与健康判定
+// 和以前**逐字不变**，变的只是调用方能不能认出"这一类该重放"。
+// 把它判成 [KindAuth] 是错的 —— 那会写出"账号凭据已失效，请重新登录"，
+// 而重新登录**不是**这张两小时票的处方。
+func NewSessionExpired(msg string) *Error {
+	return &Error{variant: variantSessionExpired, msg: msg}
+}
+
 // WithPrefix 返回一个**同类别**、正文加了前缀的副本。
 //
 // # 它解决的是什么
@@ -286,7 +307,9 @@ func (e *Error) Error() string {
 		return "网络错误: " + e.msg
 	case variantUpstream:
 		return fmt.Sprintf("上游错误 %d: %s", e.status, e.msg)
-	case variantBadRequest:
+	case variantBadRequest, variantSessionExpired:
+		// 与 [Error.Kind] 同理：**渲染必须逐字不变**，`90001` 的错误串今天已经
+		// 出现在日志与黄金向量里，分家会让"加了个变体"变成一次对拍失败。
 		return "参数错误: " + e.msg
 	case variantNotFound:
 		return "不存在: " + e.msg
@@ -320,7 +343,8 @@ func (e *Error) Kind() ErrorKind {
 		return KindNetwork
 	case variantUpstream:
 		return KindUpstream
-	case variantBadRequest:
+	case variantBadRequest, variantSessionExpired:
+		// ⚠ 这两个变体**必须**同类：分开就等于改了 `90001` 的对外文案与健康判定。
 		return KindBadRequest
 	case variantNotFound:
 		return KindNotFound
@@ -339,6 +363,25 @@ func (e *Error) Status() uint16 { return e.status }
 // 单独给出是因为它**在 kind 上看不出来**（与 Internal 同类），
 // 而测试与调试台恰恰只关心这一个变体。
 func (e *Error) IsFixtureMiss() bool { return e.variant == variantFixtureMiss }
+
+// IsSessionExpired 报告这是否是"会话已失效（上游 `90001 未登录`）"。
+//
+// 存在的理由与 [Error.IsFixtureMiss] 同一个：**kind 上看不出来**（与 BadRequest 同类），
+// 而"该不该刷新会话再重放一次"这件事必须按变体判，不能按消息文本判。
+//
+// ⚠ nil 收件者返回 false —— 调用方普遍写成 `IsSessionExpired(err)` 这种帮助函数，
+// 而它们在"没有错误"的分支上也会被叫到。
+func (e *Error) IsSessionExpired() bool { return e != nil && e.variant == variantSessionExpired }
+
+// IsSessionExpired 是 [Error.IsSessionExpired] 的**任意 error** 版本。
+//
+// 用 [errors.As] 而不是裸断言，理由与 [KindOf] 完全一样：调用方会
+// `fmt.Errorf("…: %w", err)` 包一层，裸断言在那种情况下静默判 false ——
+// 于是"该重放"在最需要它的地方失效，而且不报错。
+func IsSessionExpired(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.IsSessionExpired()
+}
 
 // PublicMessage 返回可对外暴露的文案（不含任何原文细节）。
 func (e *Error) PublicMessage() string { return e.Kind().PublicMessage() }

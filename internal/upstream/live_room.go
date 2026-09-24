@@ -516,8 +516,20 @@ func TimestampSuffix10(timestamp string) string {
 //
 //	md5(deviceInfo 的 48 字节 ‖ utf8(timestamp 末 10 位))
 //
-// ⚠ 第一段是**解码后的字节**（48 字节），不是那 96 个 hex 字符 ——
-// 传错的表现是"签名不对"，而它看起来和"算法抄错了"一模一样。
+// ⚠ 第一段是**解码后的字节**（48 字节），不是那 96 个 hex 字符。
+//
+// # ⚠⚠ 服务端**不校验**这个头（2026-09-23 实证）
+//
+// `docs/capture/app-live-ws-samples.txt` §8.6：在**正在播**的房间里发
+// `member/apply`，把 `systemMd5` 打成 `0000…0`（32 个 0）**照样回
+// `{"code":0,"msg":"接口调用成功"}`**；`tokenMd5` 一起打成全 0 也过。
+// ⇒ 这条算式**不是闸门**，"传错口径"**不会**表现成"签名不对"
+// （早先这句注释就是错的，见坑表 **#136**）。
+//
+// ⇒ 所以这里保持"解码后的字节"**不是为了过闸**，而是为了与实拍客户端的
+// 算式对照；实拍客户端的输入是**头值本身**（它的头值是 `other/unknown`，非 hex），
+// 两种口径服务端**都收**。真要改口径，判据只能是"与实拍客户端一致"，
+// 不能是"服务端认不认" —— 后者不成立。
 func SystemMD5(deviceInfoHex, timestamp string) (string, *core.Error) {
 	deviceInfo, err := hex.DecodeString(deviceInfoHex)
 	if err != nil {
@@ -532,8 +544,12 @@ func SystemMD5(deviceInfoHex, timestamp string) (string, *core.Error) {
 //	md5("Bearer " + token[0:10] + ts 末 10 位 + token[10:])
 //
 // ⚠ 它不是"对 token 求哈希"：时间戳被**插在 token 的第 10 个字符之后**。
-// 这个形状只能照抄 —— 任何"看起来更合理"的写法（比如 `md5(token + ts)`）
-// 都会得到一个长度正确、但服务端不认的签名。
+// 这个形状是 2026-09-23 **实拍验证**过的（两条记录逐字命中，见
+// `docs/capture/app-live-ws-samples.txt` §8.3）—— 它描述的是**客户端怎么算**。
+//
+// ⚠⚠ 但服务端**不校验**它（§8.6 实证：`tokenMd5` 打成全 0 也回 `code: 0`）。
+// 早先这里写着"任何看起来更合理的写法都会得到一个服务端不认的签名"——
+// **那句是错的**：服务端不认**任何**签名。见坑表 **#136**。
 //
 // `token[0:10]` 在 JS 里按 UTF-16 码元切；access_token 是 ASCII（`A03` 前缀），
 // 所以按字节切等价。**短于 10 字符时** JS 的 `slice(0,10)` 返回整串、
@@ -554,7 +570,11 @@ func TokenMD5(accessToken, timestamp string) string {
 //	Content-Type: application/json      Accept: */*
 //	Version: v23.0.2                    timestamp: <13 位毫秒>
 //	Authorization: Bearer <token>       Origin: https://v.cmcc-cs.cn
-//	deviceInfo: <48 字节 hex>            systemMd5 / tokenMd5
+//	deviceInfo: <头值是**字符串**（实拍客户端是 other/unknown，我们是 96 位 hex）>
+//	systemMd5 / tokenMd5                ⚠ 服务端**不校验**这两个头（§8.6）
+//
+// ⚠ `deviceInfo` 这个头装的是**字符串**，不是 48 字节二进制 —— 早先这句写的是
+// "48 字节 hex"，读起来像"头里是二进制"。值是 hex **字面量**（96 个字符）。
 //
 // ⚠ **不**加 `appkey` 头。原项目加了 `appkey: cmos/ngvlcs`，但实拍那 19 个头里
 // **没有它** —— 那个值是从 apply 的**响应**（`data.appKey`）里抄来的，

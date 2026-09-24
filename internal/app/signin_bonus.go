@@ -103,6 +103,7 @@ const (
 // ClaimMultiple 领签到翻倍（`multiple`）—— **写请求**，每月一次。
 //
 // 自己先取一次 `infoV3` 判门槛（[PlanMultiple]），不成立就**一个请求都不发**。
+// 查门槛与领翻倍共用 [SignInSessionSource] 里那一条会话（一轮一条）。
 //
 // # 它解决什么
 //
@@ -110,18 +111,9 @@ const (
 // 旧项目 `mcloud-sign` 把它放在 `signIn` 里顺手做掉（`executeSignInMultiple`），
 // 很容易被忽略 —— 而它是一条**独立的、每月一次的**收入。
 func ClaimMultiple(
-	ctx context.Context,
-	up *upstream.Upstream,
-	profile *upstream.AppProfile,
-	credential *SignInCredential,
-	clock core.Clock,
-	rng core.Random,
+	ctx context.Context, src *SignInSessionSource,
 ) (MultipleOutcome, *core.Error) {
-	referer, jwt, perr := OpenSignInSession(ctx, up, profile, credential, clock, rng)
-	if perr != nil {
-		return MultipleOutcome{}, perr
-	}
-	status, perr := up.AppSignInStatus(ctx, jwt, referer)
+	status, perr := SignInStatus(ctx, src)
 	if perr != nil {
 		return MultipleOutcome{}, perr
 	}
@@ -137,7 +129,9 @@ func ClaimMultiple(
 		}
 	}
 
-	result, perr := up.AppClaimMultiple(ctx, jwt, referer)
+	result, perr := do(ctx, src, func(s SignInSession) (upstream.MultipleResult, *core.Error) {
+		return src.up.AppClaimMultiple(ctx, s.jwt, s.referer)
+	})
 	if perr != nil {
 		return MultipleOutcome{Kind: MultipleOutcomeFailed, Error: perr.Error()}, nil
 	}
@@ -220,19 +214,13 @@ const (
 // ClaimBackupGift 领「备份好礼」（`backupgift/receive`）—— **写请求**，每月一次。
 //
 // 先查一次状态判门槛（[PlanBackupGift]），不成立就**一个请求都不发**。
+// 查与领共用 [SignInSessionSource] 那一条会话。
 func ClaimBackupGift(
-	ctx context.Context,
-	up *upstream.Upstream,
-	profile *upstream.AppProfile,
-	credential *SignInCredential,
-	clock core.Clock,
-	rng core.Random,
+	ctx context.Context, src *SignInSessionSource,
 ) (BackupGiftOutcome, *core.Error) {
-	referer, jwt, perr := OpenSignInSession(ctx, up, profile, credential, clock, rng)
-	if perr != nil {
-		return BackupGiftOutcome{}, perr
-	}
-	gift, perr := up.AppBackupGift(ctx, jwt, referer)
+	gift, perr := do(ctx, src, func(s SignInSession) (upstream.BackupGift, *core.Error) {
+		return src.up.AppBackupGift(ctx, s.jwt, s.referer)
+	})
 	if perr != nil {
 		return BackupGiftOutcome{}, perr
 	}
@@ -248,7 +236,9 @@ func ClaimBackupGift(
 		}
 	}
 
-	result, perr := up.AppReceiveBackupGift(ctx, jwt, referer)
+	result, perr := do(ctx, src, func(s SignInSession) (upstream.BackupGiftReceive, *core.Error) {
+		return src.up.AppReceiveBackupGift(ctx, s.jwt, s.referer)
+	})
 	if perr != nil {
 		return BackupGiftOutcome{Kind: BackupGiftOutcomeFailed, Error: perr.Error()}, nil
 	}

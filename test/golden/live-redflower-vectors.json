@@ -1,0 +1,77 @@
+{
+  "$source": "Reqable 抓包，2026-09-23 16:27–16:40（本机系统代理 127.0.0.1:9000）。取证面 = App（mCloud_iPhone，pid 94901）内 WebView 打开的 H5「直播小红花」界面，抓包里进程名是 com.apple.WebKit.Networking（pid 94913），不是 mCloud。页面 URL = https://m.mcloud.139.com/portal/yunClound/index.html?path=National_LiveRoomFeedback&sourceid=1007&targetSourceId=001005。记录 ID：600（成功）/ 621（重放）/ 511（错误口令）/ 622（余额）。凭据按 docs/sanitize-guide.md 换形，未落本文档。",
+  "draw": {
+    "code": "中秋美好存云盘",
+    "expectQuery": "?code=%E4%B8%AD%E7%A7%8B%E7%BE%8E%E5%A5%BD%E5%AD%98%E4%BA%91%E7%9B%98",
+    "expectReferer": "https://m.mcloud.139.com/portal/yunClound/index.html?path=National_LiveRoomFeedback&sourceid=1007&targetSourceId=001005",
+    "expectHeaders": {
+      "activityid": "sign_in_3",
+      "appversion": "12.6.0.0",
+      "origin": "https://m.mcloud.139.com",
+      "user-agent": "Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) MCloudApp/12.6.0 iPad AppLanguage/zh-CN"
+    }
+  },
+  "drawResponses": [
+    {
+      "name": "成功：同一条口令第一次投（记录 600）",
+      "raw": {
+        "code": 0,
+        "msg": "success",
+        "result": {
+          "prizeId": 250305007,
+          "flowerNum": 10,
+          "prizeName": "10朵小红花",
+          "prizeType": 1043,
+          "revivalFlowers": null
+        }
+      },
+      "expectKind": "succeeded",
+      "expectCode": 0,
+      "expectMessage": "success",
+      "expectFlowerNum": 10,
+      "expectPrizeName": "10朵小红花",
+      "expectPrizeId": 250305007,
+      "expectPrizeType": 1043,
+      "expectRejectedKouling": false
+    },
+    {
+      "name": "重放：同一条口令第二次投（记录 621）—— 200112 的第一份实拍",
+      "raw": {
+        "code": 200112,
+        "msg": "口令已兑换过了，每个口令只能兑换一次!"
+      },
+      "expectKind": "already_drawn",
+      "expectCode": 200112,
+      "expectMessage": "口令已兑换过了，每个口令只能兑换一次!",
+      "expectRejectedKouling": false
+    },
+    {
+      "name": "错误口令（记录 511，实际提交的是「中盘盘盘盘盘盘盘盘盘盘盘」）",
+      "raw": {
+        "code": 200108,
+        "msg": "口令不对耶，口令需当场直播获取才有效哦"
+      },
+      "expectKind": "invalid_kouling",
+      "expectCode": 200108,
+      "expectMessage": "口令不对耶，口令需当场直播获取才有效哦",
+      "expectRejectedKouling": true
+    }
+  ],
+  "userInfo": {
+    "name": "余额（记录 622，成功那一枪之后）：245 = 基线 235 + 10",
+    "raw": {
+      "code": 0,
+      "msg": "success",
+      "result": {
+        "isQuarterDrawed": 0,
+        "flowerCnt": 245,
+        "prizeId": 0,
+        "secondPrizeId": 0,
+        "redFlowerValidDate": "2026年12月31日",
+        "hasNotReceivedRedFlower": 0
+      }
+    },
+    "expectFlowerCnt": 245,
+    "expectRedFlowerValidDate": "2026年12月31日"
+  }
+}

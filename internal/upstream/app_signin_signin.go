@@ -1,10 +1,12 @@
-// 签到主体：`infoV3`（权威判据）/ `startSignIn`（执行签到）/
-// `taskListV3`（任务列表）/ `doTaskPost`（上报任务状态）。
+// 签到主体：`infoV3`（权威判据）/ `startSignIn`（执行签到）/ `doTaskPost`（上报任务状态）。
 //
 // 对应 Rust 侧的 app_signin/sign_in.rs。
 //
-// ⚠ 这四个接口**全部需要 `jwttoken` 头** —— 没有建会话（[TyrzLoginRequest]）
+// ⚠ 这几条接口**全部需要 `jwttoken` 头** —— 没有建会话（[TyrzLoginRequest]）
 // 就调它们，一律回 `90001 未登录`。
+//
+// 任务清单（`taskListV3`）在 `app_task_list.go` —— 它现在是一条独立能力，
+// 字段表与证据都归到那一页去维护了。
 package upstream
 
 import (
@@ -42,24 +44,6 @@ func StartSignInRequest(jwt, referer string, deviceID *string) core.HTTPRequest 
 		request = request.WithHeader("isdeviceid", "true")
 	}
 	return request
-}
-
-// TaskListV3Request 构造 `POST /ycloud/signin/task/taskListV3` —— 任务列表。
-//
-// `client`：`1` = App/H5 已登录（真实客户端），`0` = 匿名。两者都能返回数据，
-// 但字段取值会变（如 `button.canReceive`），所以做成参数而不是常量。
-func TaskListV3Request(jwt, referer string, client uint8) (core.HTTPRequest, *core.Error) {
-	body := map[string]any{
-		"client":        client,
-		"clientVersion": TaskClientVersion,
-		"marketname":    MarketName,
-	}
-	request, err := core.NewRequestPost(
-		fmt.Sprintf("%s/ycloud/signin/task/taskListV3", BaseMcloud)).WithJSONBody(body)
-	if err != nil {
-		return request, asCoreError(err, "序列化请求体失败")
-	}
-	return WithH5Headers(request, referer, &jwt, "true"), nil
 }
 
 // DoTaskPostRequest 构造 `POST /ycloud/signin/page/doTaskPost` —— 上报任务状态。
@@ -136,17 +120,4 @@ func ParseStartSignIn(envelope *Envelope) (SignInResult, *core.Error) {
 	return out, nil
 }
 
-// ParseTaskList 解析 `taskListV3` 的响应，返回任务数组。
-//
-// 这一条的 `result` 是**数组**（不是对象）—— 所以走 [EnsureOKWithHint] 后拿到的是切片。
-func ParseTaskList(envelope *Envelope) ([]any, *core.Error) {
-	payload, err := EnsureOKWithHint(envelope)
-	if err != nil {
-		return nil, err
-	}
-	items, ok := payload.([]any)
-	if !ok {
-		return nil, core.NewParse("taskListV3 的 result 不是数组（该接口不带信封字段，只有 result）")
-	}
-	return items, nil
-}
+// 任务清单的解析（`result` 是数组那一族）在 `app_task_list.go` 的 [ParseTaskList]。

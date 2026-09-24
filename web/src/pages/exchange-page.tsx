@@ -8,17 +8,28 @@
  *  ④ 手动兑换表单 + 二次确认（`RiskHigh` ⇒ §5.8 必须弹确认并写清影响面）；
  *  ⑤ 最近兑换记录。
  *
- * # ⚠ 后端现状：这一页有两处"未就绪"，页面上如实显示、不伪造
+ * **后端现状：五块都接上了，剩两处「未测试」**
  *
- * 1. **执行面没接**：`internal/server/run_dispatch.go` 的 `runBuilders` 只登记了
- *    `sign` / `live-room` / `auth-refresh` 三条，**`exchange` 不在表里**
- *    （该文件注释原文：「表里没有的两条（`exchange` / `cloud-snapshot`）是
- *    **真的还没接**」）。⇒ 从这一页点"兑换"会回 **501**，页面把后端那句
- *    原样显示出来，不改写成"操作失败"这种含糊话。
+ * 1. **奖品列表已接真接口**（2026-09-24）：`GET /api/accounts/{id}/exchange-prizes`
+ *    —— 后端只打**一枪** `exchangeList`（`internal/server/exchange_prizes.go` →
+ *    `internal/app/exchange_list.go`），不下单、也**不读余额**。
+ *    ⚠ 代价写在界面上而不是藏在代码里：这一口的 `canOrder` **不含余额那一挡**，
+ *    所以"可兑"比下单前的真判据**宽** —— 云朵不够要到第 ④ 块那一单里才被挡
+ *    （那一挡有钱包错误码、有小结，不会静默扣豆）。
+ *    ⚠ 为什么按账号：清单里 `limit` 那五档有三档问的是"**这一号**本月兑过什么"，
+ *    拿 A 号的清单给 B 号下单等于看错表。⭐ 这一条今天有实测：同一件奖品在两个真账号上
+ *    `limit` 一个 0 一个 4（见 `docs/status.md` 2026-09-24 那一节的「四」）。
+ * 2. ⚠ **只读的这一半已真打过、下单的这一半没有**（2026-09-24）：③ 那一块用库里两个真账号
+ *    经一次性预览实例真打成功（55 件 / 9 组，读数在 `docs/status.md` 同一节），
+ *    **这一屏看到的是真实数据、且真机核验过**（桌面表格 + 390px 卡片 + "选这件"回填）。
+ *    但第 ④ 块那条链（`exchange` 运行 ⇒ `exchangeV3`）**至今没由本仓发过一次**，
+ *    app / server 两层都只在夹具上跑绿 ⇒ 点下去会发生什么，可信范围止于夹具。
  *
- * 2. **奖品列表没有接口**：旧项目走独立轨 `GET /api/exchange/prizes`
- *    （见 `docs/business-feature-inventory.md` §exchange），本仓库尚未建。
- *    ⇒ 列表区显示空态 + 说明，**不拿占位数据充数**。
+ * **已经接上的是执行面**：注册表十七条能力在 `runBuilders` 里十七条全部有 builder
+ * （漏接的会被 `TestEveryRegisteredCapabilityIsWired` 拦下），`exchange` 是其中一条。
+ * ⇒ 从这一页点"兑换"**不再是 501**，它会一路打到上游并
+ * **真扣云朵、不可回滚** —— 所以第 ④ 块那个 `RiskHigh` 二次确认（§5.8）是这一页唯一的人为闸门，
+ * 别为了"少一步"把它去掉。
  *
  * # 参数面从哪来
  *
@@ -40,14 +51,21 @@ import {
   ApiError,
   listAccounts,
   listCapabilities,
+  listExchangePrizes,
   listRuns,
   triggerRun,
   type Account,
   type CapabilityField,
   type CapabilityRow,
+  type ExchangePrizeList,
+  type ExchangePrizeRow,
   type RunRecord,
 } from '../api'
 import { ConfirmDialog, closeDialog, openDialog } from '../ui/dialog'
+import {
+  ExchangePrizeCards,
+  ExchangePrizeTable,
+} from '../ui/exchange-prizes'
 import {
   PHASE_BADGE,
   PHASE_LABEL,
@@ -108,6 +126,20 @@ export const ExchangePage = () => {
   const accounts = ref<Account[]>([])
   const runs = ref<RunRecord[]>([])
 
+  /**
+   * ③ 可兑奖品：一次**只读**取数（`GET /api/accounts/{id}/exchange-prizes`）。
+   *
+   * ⚠ 三个状态各是各的，**不许**把"读失败"洗成"清单为空"：后端的
+   * `exchangePrizes` 就是按这条写的（失败回 5xx，不回 200 + 空数组），
+   * 前端如果 `catch { prizes = [] }`，那个 5xx 就白做了 —— 界面上会念成
+   * "今天没有可兑的奖品"，而真相可能是"这一号的票过期了"。
+   */
+  const prizeList = ref<ExchangePrizeList | null>(null)
+  const prizeState = ref<LoadState>('loading')
+  const prizeError = ref('')
+  /** 看**哪一个账号**的清单（清单按账号算，见文件头那一条）。 */
+  const prizeAccountId = ref('')
+
   /** 当前时刻（每秒推进一次），只用来驱动倒计时；不参与任何请求。 */
   const now = ref(new Date())
   let timer: ReturnType<typeof setInterval> | null = null
@@ -122,6 +154,34 @@ export const ExchangePage = () => {
   /** 提交中的标志：挡住连点（`triggerRun` 不幂等，见 `api.ts` 那条警告）。 */
   const submitting = ref(false)
 
+  /** 启用中的账号：③ 那一块只在这些里面挑（停用的号读清单只会白挨一次 90001）。 */
+  const enabledAccounts = computed(() => accounts.value.filter((a) => a.enabled))
+
+  /**
+   * 读第 ③ 块。**一次点按一下枪**：后端那一口只打 `exchangeList`，
+   * 不下单、也不读余额（口径见 `internal/server/exchange_prizes.go` 文件头）。
+   */
+  const loadPrizes = async (id: string) => {
+    if (id === '') {
+      prizeList.value = null
+      prizeState.value = 'ready'
+      prizeError.value = ''
+      return
+    }
+    prizeState.value = 'loading'
+    prizeError.value = ''
+    try {
+      prizeList.value = await listExchangePrizes(id)
+      prizeState.value = 'ready'
+    } catch (e) {
+      // ⚠ 清空读数 + 进错误态，**不**留一份"看起来像空清单"的东西（见上面那段）。
+      prizeList.value = null
+      prizeState.value = 'error'
+      // 401 **不**翻成"登录已过期"：那串是"所有主动挡你的行为"，原因可能是别的。
+      prizeError.value = e instanceof ApiError ? e.message : '无法连接后端'
+    }
+  }
+
   const load = async () => {
     state.value = 'loading'
     errorMessage.value = ''
@@ -135,7 +195,18 @@ export const ExchangePage = () => {
       accounts.value = accountList.accounts
       // 只留兑换这一条能力的记录 —— 通用执行历史在「历史与日志」那一页。
       runs.value = runList.runs.filter((r) => r.capability === 'exchange')
+      // 选品器跟着"表单里第一个已选账号"走，没选就用第一个启用中的号。
+      //
+      // ⚠ 只在**当前选择已经不存在**时才改它：兑完一单会重跑 `load()`，
+      // 那时把用户手工挑的账号洗回默认，等于每兑一次就把他正看的那一页换掉。
+      if (!accounts.value.some((a) => a.id === prizeAccountId.value)) {
+        const picked = form.accounts.find((id) =>
+          accounts.value.some((a) => a.id === id && a.enabled),
+        )
+        prizeAccountId.value = picked ?? enabledAccounts.value[0]?.id ?? ''
+      }
       state.value = 'ready'
+      void loadPrizes(prizeAccountId.value)
     } catch (e) {
       errorMessage.value = e instanceof ApiError ? e.message : '无法连接后端'
       state.value = 'error'
@@ -174,6 +245,25 @@ export const ExchangePage = () => {
   )
   const anyCloud = computed(() => accounts.value.some((a) => a.cloudCurrent !== null))
   const lastRun = computed(() => runs.value[0] ?? null)
+
+  /** ② 那一格里"奖品列表"的读数：读到了就是件数，没读到就是 `—`（不写 0）。 */
+  const prizeStatValue = computed(() => {
+    if (prizeState.value === 'loading') return '…'
+    return prizeList.value === null ? '—' : prizeList.value.total
+  })
+  /**
+   * ② 那一格的副文案。**必须报"是哪个账号、何时读的"**：清单是按账号算的时刻量，
+   * 一个不带账号与时刻的件数会被读成"这一页所有号的奖品总数"。
+   */
+  const prizeStatDesc = computed(() => {
+    if (prizeAccountId.value === '') return '没有启用中的账号'
+    if (prizeState.value === 'loading') return '读上游中…'
+    if (prizeState.value === 'error') return '这一号没读出来'
+    const name =
+      accounts.value.find((a) => a.id === prizeAccountId.value)?.displayName ??
+      prizeAccountId.value
+    return `${name} · 读于 ${fmtTime(prizeList.value?.readAt ?? '')}`
+  })
 
   // ───────────────────────────────────────────────────────────────────────────
   // 参数表单（按声明渲染）
@@ -322,8 +412,8 @@ export const ExchangePage = () => {
       </div>
       <div class="stat">
         <div class="stat-title">奖品列表</div>
-        <div class="stat-value text-2xl">—</div>
-        <div class="stat-desc">接口待建</div>
+        <div class="stat-value text-2xl">{prizeStatValue.value}</div>
+        <div class="stat-desc">{prizeStatDesc.value}</div>
       </div>
       <div class="stat">
         <div class="stat-title">最近兑换</div>
@@ -336,25 +426,114 @@ export const ExchangePage = () => {
   )
 
   /**
-   * ③ 奖品列表 —— 后端接口未建，如实空态（§5.10：空态要给出下一步，不写"暂无数据"）。
+   * "选这件"：只把 `prizeId` 回填到第 ④ 块那一栏，**不**提交、**不**改别的字段。
+   *
+   * 所以按钮永远可点，连 `canOrder` 为假的那几件也给点 —— 它填进去的是**读数**，
+   * 判"能不能下单"是下一趟运行里后端的事（那一趟会现读清单、按 `limit` 与余量重判）。
+   * ⚠ 回填用 `prizeId` 而不是名称：实拍里同名的件不止一个（"…月卡 / …年卡"这一类前缀
+   * 相同），而 `LocateExchangePrize` 对纯数字走 id 精确匹配，名称走**全等**匹配。
+   */
+  const pickPrize = (p: ExchangePrizeRow) => {
+    form.prizeIdOrName = String(p.prizeId)
+    submitError.value = ''
+  }
+
+  /** 换账号看清单：只重读 ③ 这一块，不动表单（选中的账号与奖品是用户填的，不该被看列表洗掉）。 */
+  const switchPrizeAccount = (id: string) => {
+    prizeAccountId.value = id
+    void loadPrizes(id)
+  }
+
+  /**
+   * ③ 奖品列表 —— 已接真接口（`GET /api/accounts/{id}/exchange-prizes`，只读一枪）。
+   *
+   * 四种情形分开渲染，**每种说的都是自己的那句真话**（§5.10：空态要给下一步）：
+   * 没账号 / 读失败 / 读到但是清单为空 / 读到有内容。
+   * 后两种最容易混：读失败时把列表清空，界面上就是"今天没有可兑的"，那是假话。
    */
   const prizeCard = () => (
     <div class="card bg-base-100 shadow-sm">
       <div class="card-body gap-3">
-        <h2 class="card-title text-base">可兑奖品</h2>
-        <div class="flex flex-col items-center gap-2 py-8 text-center">
-          <span class="text-base-content/30">
-            <IconExchange class="size-8" />
-          </span>
-          <p class="text-sm opacity-70">奖品列表接口还没有建。</p>
-          <p class="max-w-prose break-words text-xs opacity-60">
-            它走的是
-            <code class="mx-1 rounded bg-base-200 px-1 py-0.5">
-              GET /ycloud/signin/page/exchangeList
-            </code>
-            ，本仓库尚无对应路由。在那之前，直接在下面按 <b>奖品 ID 或名称</b> 兑换即可。
-          </p>
+        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <h2 class="card-title text-base">可兑奖品</h2>
+          <div class="flex flex-wrap items-center gap-2">
+            {/* 清单是**按账号**的：`limit` 那五档里有三档问的是"这一号本月兑过什么"。 */}
+            <select
+              class="select select-sm w-auto min-h-11 md:min-h-0"
+              aria-label="看哪个账号的奖品清单"
+              value={prizeAccountId.value}
+              disabled={enabledAccounts.value.length === 0}
+              onChange={(e) => switchPrizeAccount((e.target as HTMLSelectElement).value)}
+            >
+              {enabledAccounts.value.length === 0 ? (
+                <option value="">（没有启用中的账号）</option>
+              ) : (
+                enabledAccounts.value.map((a) => <option value={a.id}>{a.displayName}</option>)
+              )}
+            </select>
+            <button
+              type="button"
+              class="btn btn-sm btn-soft min-h-11 md:min-h-0"
+              disabled={prizeState.value === 'loading' || prizeAccountId.value === ''}
+              onClick={() => void loadPrizes(prizeAccountId.value)}
+            >
+              {prizeState.value === 'loading' ? '读上游中…' : '重新读'}
+            </button>
+          </div>
         </div>
+
+        {prizeAccountId.value === '' ? (
+          <div class="alert alert-soft text-sm">
+            <span class="break-words">
+              一个启用中的账号都没有，这一栏无从读起 —— 先去「账号」页登录一个。
+            </span>
+          </div>
+        ) : prizeState.value === 'error' ? (
+          <div class="alert alert-soft alert-error text-sm" role="alert">
+            <IconAlert class="size-4" />
+            <span class="break-words">
+              这一次没读出来：{prizeError.value} —— 读失败不会显示成"今天没有可兑的"，
+              那两种结论得分开。（下一步：到「账号」页刷新这一号的登录态，或再点一次「重新读」。）
+            </span>
+          </div>
+        ) : prizeState.value === 'loading' ? (
+          <div class="flex justify-center py-8">
+            <span class="loading loading-spinner loading-md text-primary" />
+          </div>
+        ) : prizeList.value === null ? (
+          <p class="py-6 text-center text-sm opacity-70">还没有读数。</p>
+        ) : prizeList.value.prizes.length === 0 ? (
+          /* 真读到了一次、上游给的清单就是空 —— 这一句与上面那句"没读出来"不是一回事。 */
+          <div class="flex flex-col items-center gap-2 py-8 text-center">
+            <span class="text-base-content/30">
+              <IconExchange class="size-8" />
+            </span>
+            <p class="text-sm opacity-70">
+              这一号此刻看见的清单是空的（上游回了 0 件）。
+            </p>
+            <p class="max-w-prose break-words text-xs opacity-60">
+              仍然可以在下面按 <b>奖品 ID 或名称</b> 兑换 —— 下单那一趟会自己重读清单。
+            </p>
+          </div>
+        ) : (
+          <>
+            <ExchangePrizeTable prizes={prizeList.value.prizes} onPick={pickPrize} />
+            <ExchangePrizeCards prizes={prizeList.value.prizes} onPick={pickPrize} />
+          </>
+        )}
+
+        <p class="text-xs leading-5 opacity-60">
+          上面这一块只<b class="font-medium">读</b>：一次点按一下 <code>exchangeList</code>，
+          一条写操作都不发、也<b class="font-medium">不读余额</b>。
+          所以"可兑"这一栏比下单前的真判据<b class="font-medium">宽</b> ——
+          云朵不够要到下面那一单里才会被挡（那一挡有错误码与小结，不会静默扣豆）。
+          {prizeList.value ? (
+            <>
+              {' '}清单还是<b class="font-medium">时刻量</b>：同一件在下一分钟可能已被别人兑掉，
+              这里的数只代表「读于 {fmtTime(prizeList.value.readAt)}」那一刻。
+            </>
+          ) : null}
+        </p>
       </div>
     </div>
   )
@@ -510,9 +689,11 @@ export const ExchangePage = () => {
       <div class="card-body gap-3">
         <h2 class="card-title text-base">最近兑换</h2>
         {runs.value.length === 0 ? (
+          /* ⚠ 这一句以前写的是"执行面尚未接通时，这里不会有数据"。那句已经不成立：
+             执行面接上了（`exchange` 在 `runBuilders` 里有 builder），所以空列表
+             **只可能**是"这一号还没在这一页兑过"。留着那句会让人不必要地去查后端。 */
           <p class="py-6 text-center text-sm opacity-70">
-            还没有兑换记录。执行面尚未接通时，这里不会有数据 ——
-            那不是"没兑过"，而是"这一条路还没打开"。
+            还没有兑换记录 —— 这一栏只记从这一页（或定时任务）发起的兑换。
           </p>
         ) : (
           <>
@@ -599,10 +780,11 @@ export const ExchangePage = () => {
             <span class="break-words">
               云朵与抢兑规则见
               <code class="mx-1 rounded bg-base-200 px-1 py-0.5">docs/business-feature-inventory.md</code>
-              §exchange；命令行那条路也还在：
-              <code class="mx-1 rounded bg-base-200 px-1 py-0.5">
-                mcloud signin --exchange --prize 奖品
-              </code>
+              {' '}§exchange。这一条<b class="font-medium">只有"这一页"与"定时任务"两个入口</b> ——
+              <code class="mx-1 rounded bg-base-200 px-1 py-0.5">mcloud signin</code>
+              上<b class="font-medium">没有</b>{' '}
+              <code class="mx-1 rounded bg-base-200 px-1 py-0.5">--exchange</code> 这一栏
+              （命令行面刻意不收，见 <code class="mx-1 rounded bg-base-200 px-1 py-0.5">docs/pending-decisions.md</code> 的 Q5）。
             </span>
           </p>
         </>

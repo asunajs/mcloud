@@ -10,6 +10,13 @@
 // （坑表 #107：那不是"抓漏了"）。窗口一过就得再等一天，而**漏掉一条是静默的** ——
 // 你只会以为核完了。这份脚本把"每条能不能自动核 / 判据是什么 / 结果写到哪里"固定下来。
 //
+// ⭐ **2026-09-23 的窗口用掉了**：清单里 **2 条已实拍**
+// （`member-apply-headers` / `ws-frame-order`，结论在各条的 `evidence`，
+// 原始证据在 `docs/capture/app-live-ws-samples.txt`），**1 条仍无样本**
+// （`journaling-optkeywords` —— 它**不在** cmlive H5 的进房链路上）。
+// ⚠ 已实拍的**不从清单里删**：服务端可能变，下次开播要**回归**；
+// `--run` 会把这一批单独列出来，别把它当成"还没核"。
+//
 // # 权威性（⚠ 别在别处再抄一份）
 //
 // 下面的 `ITEMS` 就是**唯一**一份清单。`docs/status.md` 的「未验证清单」与
@@ -286,6 +293,10 @@ const WIRE_STEPS = [
   {
     id: 'journaling-optkeywords',
     title: '`visitlog/journaling` 其余 4 个 `optkeyword` 服务端认不认',
+    evidence:
+      '⚠ 2026-09-23 实拍**零样本**：抓包 201 条里 `visitlog` / `journaling` / `_flowerBtn` ' +
+      '**全部零命中**，而**进房链路完整**抓到了 ⇒ **它不在 cmlive H5 的进房链路上**。' +
+      '⭐ 触发面是**活动站入口**或**点小红花按钮** —— 从 cmlive 直播间里找它**永远找不到**。',
     lookFor:
       'App 抓包里 `POST m.mcloud.139.com/ycloud/visitlog/journaling` 的**每一条**：' +
       '`optkeyword` 是什么、响应体的 `code` 是什么。' +
@@ -299,20 +310,39 @@ const WIRE_STEPS = [
   },
   {
     id: 'member-apply-headers',
-    title: 'WS 握手签名头 `systemmd5` / `tokenmd5` 的真实取值 + `member/apply` 的 `version`',
+    title: '`member/apply` 的签名头与 body（⚠ WS 升级请求**不带** `systemmd5` / `tokenmd5`）',
+    verified: '2026-09-23',
+    evidence:
+      '✅ 实拍：`Version: v23.0.2`（原先标着"未实拍"）、body 里 **`message` 在**（空串）、' +
+      '`deviceInfo: other/unknown`（**非 hex**）。' +
+      '⭐⭐ 签名算式**实拍验证通过**：`tokenMd5 = md5("Bearer " + t[:10] + ts10 + t[10:])`、' +
+      '`systemMd5 = md5(**deviceInfo 头值字符串** + ts10)` —— 两条记录都逐字命中。' +
+      '⚠⚠ **WS 升级请求里没有 `systemmd5` / `tokenmd5`** —— 它们只属于 `/cmlive/api/*`。' +
+      '⭐⭐ **这一格已收口**：反证实验（`systemMd5` 与 `tokenMd5` **两个头都打成 32 个 0**）' +
+      '照样回 `code: 0`「接口调用成功」⇒ **服务端根本不校验这两个头**（capture 文档 §8.6，坑表 **#136**）。',
     lookFor:
-      'App 抓包里 `POST videoim.cmcc-cs.cn:20103/v3/room/member/apply` 的**请求头**，' +
-      '逐字记下 `systemmd5` / `tokenmd5` / `version` / `timestamp` / `deviceInfo` / `Authorization`，' +
-      '以及 body 里 `invoker` / `message` / `roomId` / `userName` 四个键在不在、顺序如何。',
+      '✅ **不必再抓** —— 它没有可核的闸门了。⚠ 只有两种情况会把它重新打开：' +
+      '① `Version` 变了（换版本时把 §8.6 那个反证实验重跑一次，复现命令只有一行）；' +
+      '② 想核 body 的**键序**（09-23 实拍是 `roomId` / `message` / `userName` / `invoker`）—— ' +
+      '⚠ 但键序**不是**服务端会看的判据（JSON 对象本身无序），别为它改实现。',
     why:
-      '这三个值现在都是**按算式实现**（`systemmd5 = md5(deviceInfo 的 48 字节 ‖ ts 末 10 位)`、' +
-      '`tokenmd5 = md5("Bearer " + t[:10] + ts10 + t[10:])`、`version = "v23.0.2"`），' +
-      '算式已与 `apis/live-room-chat.ts` 逐字对拍过 —— 但**服务端认不认**只有实拍能答。' +
-      '⭐ 附带能判一件事：原项目**漏了** body 里的 `message`（Go 补上了），App 的 body 能定这一处。',
+      '⚠⚠ 这里早先写着"算式已与 `apis/live-room-chat.ts` 逐字对拍过 —— 但**服务端认不认**只有实拍能答"，' +
+      '**那句是错的**（坑表 **#136**）：它把**客户端算法**当成了**服务端契约**。' +
+      '真去问服务端的结果是它**一个签名都不看**（§8.6）⇒ 这一格**没有可核的闸门**，' +
+      '`SystemMD5` 也因此**不需要改**（它与实拍客户端的差异是真的，但没有功能后果）。' +
+      '⭐ 这一条确实判下来一件事：原项目**漏了** body 里的 `message`（Go 补上了），实拍 body 确认该补。',
   },
   {
     id: 'ws-frame-order',
     title: 'WS 帧的真实顺序 / `command` 取值 / 「ack 之后必须补 UNREAD」',
+    verified: '2026-09-23',
+    evidence:
+      '✅ 实拍（133 帧 / 73.6 s）：`o` → C(`cmd=3`) → S(`cmd=3`) → C(`cmd=1`) → S(`cmd=1`) ' +
+      '→ S(`cmd=2`) → C(`cmd=0`) → S(`cmd=0`) …；`command`：' +
+      '**0 = ack / 1 = 心跳 / 2 = 推送（弹幕）/ 3 = PROVISION**。' +
+      '⚠⚠ **`cmd=1` 是每 ~15 s 一次的周期心跳**（+608 / +15537 / +30665 / +45561 / +60583 ms），' +
+      '**不是**"PROVISION 之后补发一次"。' +
+      '⚠ **`h` 全程没出现**（SockJS 要静默 25 s 才发）⇒ "心跳回什么"**仍未判定**。',
     lookFor:
       'App 抓包里 `wss://videoim.cmcc-cs.cn:20102/ws/<serverId>/<sessionId>/websocket` 上' +
       '**双向**帧的次序：`"o"` → PROVISION(`command=3`?) → 客户端是否补了 UNREAD(`command=1`)；' +
@@ -345,16 +375,40 @@ const ITEMS = [
     id: 'journaling-optkeywords',
     title: '`visitlog/journaling` 其余 4 个 `optkeyword` 服务端认不认',
     probe: null,
+    // ⚠ 2026-09-23 实拍：这一条**仍然没有答案**，而且**抓包答不了它**。
+    evidence:
+      '⚠ 2026-09-23 实拍**零样本**：抓包 201 条里 `visitlog` / `journaling` / `_flowerBtn` ' +
+      '**全部零命中**，而**进房链路完整**抓到了（`cmpassLoginByCmToken` → `roomBeat` → ' +
+      '`ws/info` → WS 升级 → `member/apply`）⇒ **它不在 cmlive H5 的进房链路上**。' +
+      '⭐ 触发面是**活动站入口**或**点小红花按钮**；下次要造样本就从这两条路走。',
   },
   {
     id: 'member-apply-headers',
-    title: 'WS 握手签名头 `systemmd5` / `tokenmd5` 的真实取值 + `member/apply` 的 `version`',
+    title: '`member/apply` 的签名头与 body（⚠ WS 升级请求**不带** `systemmd5` / `tokenmd5`）',
     probe: null,
+    verified: '2026-09-23',
+    evidence:
+      '✅ 实拍：`Version: v23.0.2`（原先标着"未实拍"）、body 里 **`message` 在**（空串）、' +
+      '`deviceInfo: other/unknown`（**非 hex**）。' +
+      '⭐⭐ 签名算式**实拍验证通过**（两条记录都逐字命中）：' +
+      '`tokenMd5 = md5("Bearer " + t[:10] + ts10 + t[10:])`、' +
+      '`systemMd5 = md5(**deviceInfo 头值字符串** + ts10)` —— ' +
+      '⚠ 而 `SystemMD5` 强制 hex 解码，喂实拍值会当场报错（见 capture 文档 §8.4）。' +
+      '⚠⚠ **WS 升级请求里没有 `systemmd5` / `tokenmd5`** —— 它们只属于 `/cmlive/api/*` 这一路。',
   },
   {
     id: 'ws-frame-order',
     title: 'WS 帧的真实顺序 / `command` 取值 / 「ack 之后必须补 UNREAD」',
     probe: null,
+    verified: '2026-09-23',
+    evidence:
+      '✅ 实拍（133 帧 / 73.6 s）：`o` → C(`cmd=3`) → S(`cmd=3`) → C(`cmd=1`) → S(`cmd=1`) ' +
+      '→ S(`cmd=2`) → C(`cmd=0`) → S(`cmd=0`) …；`command` 取值：' +
+      '**0 = ack / 1 = 心跳 / 2 = 推送（弹幕）/ 3 = PROVISION**；' +
+      '弹幕文本在 `MSync.9.2.6.4.2`（与 Go 的 `ExtractDanmakuText(cmd=2)` 路径吻合）。' +
+      '⚠⚠ **`cmd=1` 是每 ~15 s 一次的周期心跳**（+608 / +15537 / +30665 / +45561 / +60583 ms），' +
+      '**不是**"PROVISION 之后补发一次"；Go 只发一次（见 capture 文档 §七）。' +
+      '⚠ **`h` 全程没出现**（SockJS 要静默 25 s 才发）⇒ "心跳回什么"**仍未判定**。',
   },
 ]
 
@@ -400,10 +454,26 @@ function rawBlock(result) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function printChecklist() {
+  const verified = ITEMS.filter((item) => item.verified)
   console.log('开播后要核的清单（共 %d 条）：\n', ITEMS.length)
   for (const [i, item] of ITEMS.entries()) {
     console.log(`  ${i + 1}. ${item.title}`)
-    console.log(`     ${item.probe ? '✅ 可自动核' : '🔌 要抓包（见 --wire）'}`)
+    // ⭐ `verified` = **已实拍**（结论在 `evidence`，原始证据在 `docs/capture/`）。
+    // ⚠ 它**不从清单里删** —— 服务端可能变，下次开播仍要**回归**一次。
+    const mark = item.verified
+      ? `✅ 已实拍（${item.verified}）—— 留作回归`
+      : item.probe
+        ? '✅ 可自动核'
+        : '🔌 要抓包（见 --wire）'
+    console.log(`     ${mark}`)
+    if (item.evidence) console.log(`     ${item.evidence}`)
+  }
+  if (verified.length > 0) {
+    console.log(
+      `\nℹ 其中 ${verified.length} 条已于 ${verified[0].verified} 实拍` +
+        '（结论见上，原始证据在 `docs/capture/app-live-ws-samples.txt`）' +
+        '—— ⚠ 仍建议**回归**一次，服务端可能变。',
+    )
   }
   console.log('\n自动核：node scripts/probe-live-room.js --run')
   console.log('抓包步骤：node scripts/probe-live-room.js --wire')
@@ -424,7 +494,9 @@ if (WIRE) {
   }
   console.log('\n要核的三条（每条的判据与"为什么 CLI 答不了"）：\n')
   for (const step of WIRE_STEPS) {
-    console.log(`  · ${step.title}`)
+    const mark = step.verified ? `✅ 已实拍（${step.verified}）` : '🔌 待核'
+    console.log(`  · ${step.title}  ${mark}`)
+    if (step.evidence) console.log(`      实拍结论：${step.evidence}`)
     console.log(`      看什么：${step.lookFor}`)
     console.log(`      为什么：${step.why}\n`)
   }
@@ -496,8 +568,16 @@ const reportLines = [
   '| --- | --- | --- |',
   ...results.map((r) => {
     const mark =
-      r.status === 'ok' ? '✅ 拿到' : r.status === 'wire' ? '🔌 要抓包' : '❌ 没拿到'
-    return `| ${r.title} | ${mark} | ${r.detail ?? '（见 --wire）'} |`
+      r.status === 'ok'
+        ? '✅ 拿到'
+        : r.status === 'wire'
+          ? r.verified
+            ? '✅ 已实拍'
+            : '🔌 要抓包'
+          : '❌ 没拿到'
+    // `evidence` 兜在 `detail` 之后：抓包那几条没有 `detail`，但**有实拍结论** ——
+    // 报告里若只写"（见 --wire）"，将来读这份留档的人就看不出它其实已经核过了。
+    return `| ${r.title} | ${mark} | ${r.detail ?? r.evidence ?? '（见 --wire）'} |`
   }),
   '',
   notLive ? '⚠ **前置不成立**（现在没在播）⇒ 后两条**不适用**，不是"核过了没拿到"。\n' : '',
@@ -515,11 +595,20 @@ console.log(
 // （"门没开 ⇒ 当然收不到口令"），上面那句「后两条不适用」已经说清了；
 // 再打一遍「❌ 试过却没拿到的有 2 条」会**自相矛盾**，把"今天没开播"渲染成失败。
 if (!notLive) {
-  const wire = results.filter((r) => r.status === 'wire').length
-  console.log(
-    `\nℹ 这一趟不跑的还有 ${wire} 条（都要抓包，见 \`--wire\`）` +
-      '⇒ 退 0 只代表**这一趟会跑的**都拿到了，**不等于**整份清单核完了。',
-  )
+  const pending = results.filter((r) => r.status === 'wire' && !r.verified)
+  const verified = results.filter((r) => r.status === 'wire' && r.verified)
+  if (pending.length > 0) {
+    console.log(
+      `\nℹ 这一趟不跑的还有 ${pending.length} 条（都要抓包，见 \`--wire\`）` +
+        '⇒ 退 0 只代表**这一趟会跑的**都拿到了，**不等于**整份清单核完了。',
+    )
+  }
+  if (verified.length > 0) {
+    console.log(
+      `\n✅ 另有 ${verified.length} 条**已实拍**（${verified[0].verified}，` +
+        '见 `docs/capture/app-live-ws-samples.txt`）—— ⚠ 仍建议下次开播**回归**一次。',
+    )
+  }
   if (attempted.length > 0) {
     console.log(`\n❌ 试过却没拿到的有 ${attempted.length} 条：`)
     for (const r of attempted) console.log(`   · ${r.title} —— ${r.detail}`)

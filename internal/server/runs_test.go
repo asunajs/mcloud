@@ -43,7 +43,11 @@ import (
 // 那是别人正在用的库旁边）。
 func newTestRunWorld(t *testing.T, client core.HTTPClient) *RunWorld {
 	t.Helper()
-	return newRunWorld(client, refusingDialer{}, newRandom(), t.TempDir()+"/server-device-app.txt")
+	world := newRunWorld(client, refusingDialer{}, newRandom(), t.TempDir()+"/server-device-app.txt")
+	// 测试里**不真睡**：AI 头像那条链的节奏是"提交后 8 次 × 3 秒查询"，
+	// 真等会让一条接线用例花掉两分钟（口径见 [RunWorld.waiter] 那条注释）。
+	world.waiter = app.NoWait{}
+	return world
 }
 
 // replaceRunWorld 换掉执行面（换成带脚本客户端的那一份）。
@@ -292,18 +296,33 @@ func TestBlankCapabilityIsABadRequestNotAMissingResource(t *testing.T) {
 // 而那条流永远不会有任何事件 —— 界面上的表现是"进度条停在那儿"，
 // 与"任务还在跑"一模一样。这一条把"受理"与"会做"钉死成同一件事。
 //
-// ⚠ 这一份清单就是"还有哪两条没接"的实况：`sign` 在 2026-09-22 接上了，
-// 于是它**不**再出现在这里 —— 接上一条能力时要顺手把它从这一行删掉，
-// 否则这条用例会因为"它居然被受理了"而红，那是**对的**红。
+// ⚠ **2026-09-23 起这一支在真实配置下已经不可达**：注册表十七条全部接上了执行
+// （见 [TestEveryRegisteredCapabilityIsWired]）。所以这一条改成"临时摘掉一条再打"，
+// 逐条摘一遍。为什么不只留一条：那样测的是"我摘掉的那一条会 501"，
+// 而这一条的意义是**任何**一条没接上时都不会假装受理 —— 十七条共用同一个分支，
+// 逐条走一遍的成本就是十六个 501（一个请求都不往上游发，因为 builder 查不到就返回了）。
+//
+// ⚠ 这里动的是包级变量 [runBuilders]。本包没有 `t.Parallel()`，而那十七条摘掉之后
+// 走不到任何 goroutine（分派表查不到就直接回 501），所以不存在与后台读写同一张 map
+// 的窗口。将来若给本包加并行，这一条必须改成注入表而不是改全局。
 func TestRegisteredButUnwiredCapabilityIsNotImplemented(t *testing.T) {
 	h := newHarness(t).initialized(t)
 	seedLoginAccount(t, h, fullPhone)
 
-	for _, code := range []string{"exchange", "cloud-snapshot"} {
+	for _, capability := range capabilities.All() {
+		code := capability.Code
+		builder, wired := runBuilders[code]
+		if !wired {
+			t.Errorf("%s 本来就没接上 —— 这条用例假设十七条全在表里，请一并回看 %s",
+				code, "TestEveryRegisteredCapabilityIsWired")
+			continue
+		}
+		delete(runBuilders, code)
 		rec := h.do(t, "POST", "/api/runs",
 			`{"capability":`+quoteJSON(code)+`,"params":{}}`, nil)
+		runBuilders[code] = builder // 立刻放回：这张表是**进程级共享**的
 		if rec.Code != http.StatusNotImplemented {
-			t.Errorf("%s 还没接上执行，应 501，实得 %d：%s",
+			t.Errorf("%s 摘掉 builder 后应 501，实得 %d：%s",
 				code, rec.Code, brief(rec.Body.String()))
 			continue
 		}
@@ -315,9 +334,17 @@ func TestRegisteredButUnwiredCapabilityIsNotImplemented(t *testing.T) {
 		if message, _ := body["message"].(string); !strings.Contains(message, "还没有接上执行") {
 			t.Errorf("%s 的 501 该说清是哪个能力没接上，实得 %q", code, message)
 		}
+		// 放回之后必须重新认得这一条：漏了恢复会让后面每一条都"看起来 501 是对的"。
+		if _, back := runBuilders[code]; !back {
+			t.Fatalf("%s 没放回分派表 —— 后面的用例全在测一份残缺的表", code)
+		}
 	}
 	if ids := storedRunIDs(t, h); len(ids) != 0 {
 		t.Errorf("没受理的请求不该留下运行记录：%v", ids)
+	}
+	// 收尾自检：这张表恢复原样了（十七条），否则污染的是整个测试二进制。
+	if got := len(runBuilders); got != len(capabilities.All()) {
+		t.Errorf("分派表被改坏了：现有 %d 条，注册表 %d 条", got, len(capabilities.All()))
 	}
 }
 

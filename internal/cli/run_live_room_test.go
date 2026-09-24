@@ -60,11 +60,16 @@ const (
 
 	// liveRoomDrawAlreadyDrawnBody 是 `200112`（这个口令已经兑换过）。
 	//
-	// ⚠⚠ **这条 `msg` 是合成的**：码取自原项目 `standalone.ts:72` 的字面量，
-	// 而它到 2026-09-22 **仍无实拍**（那一轮拿到的两个口令都是无效的）。
-	// 这里只要码对得上就够 —— 而正因为它是合成的，**别把这段中文抄进任何文档**，
-	// 那会把"编的"变成"看起来像实拍的"。
-	liveRoomDrawAlreadyDrawnBody = `{"code":200112,"msg":"（合成样本，不是实拍原文）"}`
+	// ⭐ 2026-09-23：从**合成**换成了**实拍原文**（同一账号把同一条正确口令投第二次）。
+	// 上游原话：「口令已兑换过了，每个口令只能兑换一次!」
+	// 原始样本见 `docs/capture/app-live-redflower-samples.txt` §10.2。
+	//
+	// ⭐ 那句「每个口令只能兑换一次」**是按账号算的** —— **用户口述**：
+	// 两个不同账号投同一条口令，**各自都会成功** ⇒ 与"口令**全场通用、不存在消耗**"
+	// **不冲突**，别拿它去改那条结论。
+	// ⚠⚠ 早先这里写的是"适用范围**仍未判定**（按账号还是全场）" —— **那句是错的**
+	// （坑表 **#142**：把"本仓无实拍"当成了"这个说法没依据"）。
+	liveRoomDrawAlreadyDrawnBody = `{"code":200112,"msg":"口令已兑换过了，每个口令只能兑换一次!"}`
 
 	// liveRoomDrawNoCodeBody 是**信封里没有 `code`** 的响应（判定为 Unparsable）。
 	//
@@ -72,6 +77,16 @@ const (
 	// 必须是 `null`，而"码是 0"与"根本没有码"是两件事 ——
 	// 没有这个样本，那个 `null` 分支就没被断言过。
 	liveRoomDrawNoCodeBody = `{"msg":"（合成样本：信封里没有 code）"}`
+
+	// liveRoomDrawExpiredBody 是 `200118`（**这条口令认识、但本场直播已经结束了**）。
+	//
+	// ⚠⚠ 它**不是**实拍原文 —— 它是"**最小信封**"（只有 `code`）：
+	// `200118` 的上游原文（`msg`）本仓**仍无实拍**（`RedFlowerDrawOutcome.Message`
+	// 解析了却从不输出）⇒ 这里**刻意不写 `msg`**。编一句"像真的"文案进来，
+	// 下一个人会把它当成抓包原文。
+	// ⭐ 对本用例没有损失：非 0 的分支**只看 `code`**。
+	// ⭐ 实拍那一枪见 `docs/capture/app-live-redflower-samples.txt` §10.5。
+	liveRoomDrawExpiredBody = `{"code":200118}`
 
 	// liveRoomDanmakuText 是弹幕**原文** —— 注意它带着 `小红花口令：` 那个头。
 	//
@@ -914,11 +929,14 @@ func TestLiveRoomJSONIsCleanAndCarriesBothBalances(t *testing.T) {
 //
 // # 为什么这条断言值得单独写
 //
-// `otherCodes` 是个**集合** —— `200112`（已兑换）与任何一个我们没见过的码
-// 都落进去 ⇒ 光看它**分不出抓到的是哪一个**。而未验证清单里正有一条
-// 「`200112` 至今没有样本」（见 [upstream.CodeRedFlowerAlreadyDrawn]）。
-// 没有 `draws[].upstreamCode`，那条**只能靠代理抓包**才能关掉 ——
-// 而"要另起一套工具"正是这类核对项最容易一直拖下去的原因。
+// 已兑换（`200112`）在报告里是**隐身**的：不进 `InvalidCodes`、也不进 `OtherCodes`
+// ⇒ 只靠报告根本看不出"这个口令其实回了一个已兑换"。而没有 `draws[].upstreamCode`
+// 时就**只剩代理抓包**这一条路能看见它 ——
+// "要另起一套工具"正是这类核对项最容易一直拖下去的原因。
+//
+// ⭐ 2026-09-23 实拍到了第一条真 `200112`（capture §10.2）；本条断言的价值
+// 从"将来好关清单"变成"**别把这个字段再弄丢**"：它是现在**唯一**能在
+// 非抓包场合看见已兑换的出口。
 //
 // 三条判据，缺一条这个字段就没被真正钉住：
 //   - 原始码如实带出来（`200112` 就是 `200112`，不是"某个未分类码"）；
@@ -974,6 +992,82 @@ func TestLiveRoomJSONCarriesTheRawUpstreamDrawCode(t *testing.T) {
 	if draws[2].UpstreamCode != nil {
 		t.Errorf("信封里没有 code 时该是 null（不是 0 —— 「码是 0」与「没解出码」是两件事），实得 %v",
 			*draws[2].UpstreamCode)
+	}
+}
+
+// TestLiveRoomSaysKoulingExpiredNotUnclassified 钉住 `200118` 有**自己那一栏**，
+// 且两条出口（`--json` 与默认的人读输出）说的是同一件事。
+//
+// # 为什么两条都要钉
+//
+// 只钉 `--json` ⇒ 默认的人读输出仍可能打「未分类口令」；
+// 只钉人读 ⇒ 脚本 / WebUI 拿不到那一栏。
+//
+// ⚠ 这一格**最常见**的成因是"**直播已经结束了**"，而它原本与"上游回了个没分类的码"
+// 共用「未分类口令」一个词 —— 那句话把人往"口令抄错了"（`200108`）那边引，
+// 排查方向一开始就错（坑表 **#140** 做法 ④）。
+func TestLiveRoomSaysKoulingExpiredNotUnclassified(t *testing.T) {
+	// ── ① `--json`：单独一栏 + 原始码如实带出 ──────────────────────────
+	db := liveRoomSeed(t)
+	routes := append(liveRoomGateOpen(liveRoomTabLive),
+		liveRoomSixStepRoutesDraws(10, 10, []string{liveRoomDrawExpiredBody})...)
+	client := newLiveRoomRoutes(routes...)
+
+	stdout, stderr, code := runLiveRoomCLI(t, client, &liveRoomDialer{conns: []*liveRoomWSConn{{}}}, db,
+		"--skip-kouling", "--codes", liveRoomKouling, "--json")
+	client.assertRouted(t)
+	if code != ExitSuccess {
+		t.Fatalf("应退 0，实得 %d\n  stdout=%q\n  stderr=%q", code, stdout, stderr)
+	}
+
+	var payload struct {
+		LiveRoom []struct {
+			ExpiredCodes []string `json:"expiredCodes"`
+			InvalidCodes []string `json:"invalidCodes"`
+			OtherCodes   []string `json:"otherCodes"`
+			Draws        []struct {
+				UpstreamCode *int64 `json:"upstreamCode"`
+			} `json:"draws"`
+		} `json:"liveRoom"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("stdout 不是一份干净 JSON：%v\n  stdout=%q", err, stdout)
+	}
+	if len(payload.LiveRoom) != 1 {
+		t.Fatalf("应只有一条账号记录，实得 %q", stdout)
+	}
+	got := payload.LiveRoom[0]
+	if len(got.ExpiredCodes) != 1 || got.ExpiredCodes[0] != liveRoomKouling {
+		t.Errorf("过期口令要**单独成一栏**，实得 %v", got.ExpiredCodes)
+	}
+	if len(got.InvalidCodes) != 0 {
+		t.Errorf("`200118` **不是**无效口令（口令本身是对的，错的才回 `200108`）：%v", got.InvalidCodes)
+	}
+	if len(got.OtherCodes) != 0 {
+		t.Errorf("`200118` 已有自己那一栏，不该同时落进未分类：%v", got.OtherCodes)
+	}
+	if len(got.Draws) != 1 || got.Draws[0].UpstreamCode == nil || *got.Draws[0].UpstreamCode != 200118 {
+		t.Errorf("原始码要如实带出来（200118），实得 %+v", got.Draws)
+	}
+
+	// ── ② 人读输出：说"已失效"，不说"未分类" ──────────────────────────
+	// ⚠ 用**新的一套** client + 库：上面那一套的路由已被 `assertRouted` 消费完。
+	db2 := liveRoomSeed(t)
+	routes2 := append(liveRoomGateOpen(liveRoomTabLive),
+		liveRoomSixStepRoutesDraws(10, 10, []string{liveRoomDrawExpiredBody})...)
+	client2 := newLiveRoomRoutes(routes2...)
+
+	human, humanErr, humanCode := runLiveRoomCLI(t, client2, &liveRoomDialer{conns: []*liveRoomWSConn{{}}}, db2,
+		"--skip-kouling", "--codes", liveRoomKouling)
+	client2.assertRouted(t)
+	if humanCode != ExitSuccess {
+		t.Fatalf("应退 0，实得 %d\n  stdout=%q\n  stderr=%q", humanCode, human, humanErr)
+	}
+	if !strings.Contains(human, "口令已失效（本场已结束）") {
+		t.Errorf("人读输出应说清口令已失效，实得 %q", human)
+	}
+	if strings.Contains(human, "未分类口令") {
+		t.Errorf("人读输出**不该**再打「未分类口令」—— 那句话把人往「口令抄错了」那边引：%q", human)
 	}
 }
 

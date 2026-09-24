@@ -39,21 +39,23 @@ func TestEveryDispatchKeyIsARegisteredCapability(t *testing.T) {
 			t.Errorf("分派表里有 %q，注册表里没有这个能力：这一条永远不会被命中", code)
 		}
 	}
-	// 反方向也要看一眼，但它**不是**失败条件：注册表里本来就有"登记了还没接上"
-	// 的能力（那正是 501 那条用例负责的）。这里只把实况打出来，让人看见差集。
-	for _, capability := range capabilities.All() {
-		if _, wired := runBuilders[capability.Code]; !wired {
-			t.Logf("还没接上执行：%s（%s）", capability.Code, capability.Title)
-		}
-	}
+	// 反方向（"注册表里有、表里没有"）由 [TestEveryRegisteredCapabilityIsWired] 判，
+	// 这里不重复一遍：两处各判一次的话，将来放宽时只会改到一处。
 }
 
-// TestUnwiredCapabilitiesAreExactlyTheKnownTwo：接上几条 = 分派表几条。
+// TestEveryRegisteredCapabilityIsWired：接上几条 = 注册表几条，差集为空。
 //
-// 与 [TestRegisteredButUnwiredCapabilityIsNotImplemented] 是一对：那边钉"没接的确实回 501"，
-// 这一条钉"表里没有偷偷多出第四行"。多出来的那一行要么没有用例（不该存在），
-// 要么就该同时出现在受理用例里。
-func TestUnwiredCapabilitiesAreExactlyTheKnownTwo(t *testing.T) {
+// 与 [TestRegisteredButUnwiredCapabilityIsNotImplemented] 是一对：那边钉"没接的确实回 501"
+// （现在只剩临时摘掉一条这一种验法），这一条钉"注册表里不会多出一行没人接"。
+// 多出来那一行的表现不是 501 就是"界面上点得到、后端什么都不做"。
+//
+// 2026-09-23：`exchange` 接上之后，注册表十四条**全部**有 builder（此前长期是
+// "只剩 exchange 没接"，因为它不可逆、要真扣云朵）。2026-09-24 又登记两条
+// （`cloud-phone-redpack` 与 `play-ai-special`，都只接了**只读那一半**），2026-09-24 再接
+// 一条 `ai-avatar`（写那一半）：十四条 → 十七条。
+// ⚠ 这条用例因此从"名单比对"变成"必须为空" —— 将来登记新能力时必须同时接执行，
+// 否则这里红；那是**对的**红（`docs/business-feature-inventory.md` §2.2 那条口径）。
+func TestEveryRegisteredCapabilityIsWired(t *testing.T) {
 	var unwired []string
 	for _, capability := range capabilities.All() {
 		if _, wired := runBuilders[capability.Code]; !wired {
@@ -61,13 +63,13 @@ func TestUnwiredCapabilitiesAreExactlyTheKnownTwo(t *testing.T) {
 		}
 	}
 	slices.Sort(unwired)
-	if want := []string{"cloud-snapshot", "exchange"}; !slices.Equal(unwired, want) {
-		t.Fatalf("未接上执行的能力应是 %v，实得 %v", want, unwired)
+	if len(unwired) != 0 {
+		t.Fatalf("注册表里有 %d 条还没接上执行：%v", len(unwired), unwired)
 	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 接上了的两条新链：受理 → 终局
+// 接上了的链：受理 → 终局（签到与刷新凭据这两条最早接上的）
 // ─────────────────────────────────────────────────────────────────────────────
 
 // TestSignInIsAcceptedAndReachesTerminalEvent：`sign` 走的是同一条 202 + 事件流。
@@ -162,14 +164,32 @@ func assertRunCapability(t *testing.T, h *harness, rows []map[string]any, want s
 // TestParallelModeIsRefusedOnEveryWiredCapability：串行那条闸门**不分能力**。
 //
 // 判据共用一处（[sequentialOnly]），所以用例也共用一条：只测 `live-room` 的话，
-// 新接的 `sign` 完全可以漏掉这一拦而没人发现 —— 而界面上那个下拉对每条能力都渲染。
+// 新接的能力完全可以漏掉这一拦而没人发现 —— 而界面上那个下拉对每条能力都渲染。
+//
+// 名单**取自分派表**而不是手写：2026-09-23 签到页那一族一次接上五条，
+// 手写的清单在那一天就已经少了一半 —— 遍历表才是"每条接上的都测到"。
+//
+// ⚠ 参数也不能手写一份 code→参数 的映射，理由与上面同族、而且更隐蔽：
+// 2026-09-23 接上 `exchange` 当天这一条就红了，红成的不是"并行没拦住"，
+// 而是"「奖品」不能为空" —— builder 里**便宜的参数校验排在账号解析之前**
+// （那条顺序本身是对的，见 [buildExchangeRun]），于是一条只给
+// `accountMode` 的通用请求根本走不到串行闸门。现在按**声明**补齐必填栏。
 func TestParallelModeIsRefusedOnEveryWiredCapability(t *testing.T) {
 	h := newHarness(t).initialized(t)
 	seedLoginAccount(t, h, fullPhone)
 
-	for _, code := range []string{"sign", "auth-refresh", "live-room"} {
-		rec := h.do(t, "POST", "/api/runs",
-			`{"capability":`+quoteJSON(code)+`,"params":{"accountMode":"parallel"}}`, nil)
+	var codes []string
+	for code := range runBuilders {
+		codes = append(codes, code)
+	}
+	slices.Sort(codes)
+	if len(codes) < 2 {
+		t.Fatalf("分派表空了？实得 %v", codes)
+	}
+	for _, code := range codes {
+		body := `{"capability":` + quoteJSON(code) + `,"params":` +
+			parallelParams(t, code) + `}`
+		rec := h.do(t, "POST", "/api/runs", body, nil)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("%s 的并行应 400，实得 %d：%s",
 				code, rec.Code, brief(rec.Body.String()))
@@ -181,6 +201,50 @@ func TestParallelModeIsRefusedOnEveryWiredCapability(t *testing.T) {
 	}
 	if ids := storedRunIDs(t, h); len(ids) != 0 {
 		t.Errorf("被拒的请求留下了运行记录：%v", ids)
+	}
+}
+
+// parallelParams 造一份"账号执行方式=并行"的参数体，并按声明补上必填栏。
+//
+// 只补 `Required && Default == nil` 的栏：有默认值的那一栏后端自己会落到默认
+// （[runParams.take]），补了反而把"缺省走默认"这条路径从本用例里挪走。
+// 值是合成的（一串 `1`）—— 本用例在起跑前就返回 400，一个上游请求也不会发出去，
+// 所以这里不需要"真的存在的那件奖品"。
+func parallelParams(t *testing.T, code string) string {
+	t.Helper()
+	capability, found := capabilities.Get(code)
+	if !found {
+		t.Fatalf("分派表里的 %q 在注册表里没有：先看 [TestEveryDispatchKeyIsARegisteredCapability]", code)
+	}
+	items := []string{`"accountMode":"parallel"`}
+	for _, field := range capability.Params() {
+		if !field.Required || len(field.Default) > 0 {
+			continue
+		}
+		items = append(items, quoteJSON(field.Key)+":"+syntheticValue(field))
+	}
+	return "{" + strings.Join(items, ",") + "}"
+}
+
+// syntheticValue 给一栏造一个"类型对得上"的读数：判的是闸门，不是取值。
+func syntheticValue(field core.FieldSpec) string {
+	switch field.Kind {
+	case core.FieldNumber:
+		return "1"
+	case core.FieldBool:
+		return "true"
+	case core.FieldMultiSelect:
+		return `["1"]`
+	case core.FieldJSON:
+		return `{}`
+	case core.FieldSelect:
+		// 下拉的合法值只有声明里那几个：优先取第一个，别造一个选项里没有的串。
+		if len(field.Options) > 0 {
+			return string(field.Options[0].Value)
+		}
+		return `"1"`
+	default: // FieldText
+		return `"1"`
 	}
 }
 

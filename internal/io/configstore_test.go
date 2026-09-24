@@ -448,15 +448,19 @@ func TestRepeatedPutKeepsTheSingleRowTablesAtOneRow(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		exchange := core.NewExchangeConfig()
 		webui := core.NewWebuiConfig()
+		notify := notifyConfigForRoundtrip()
 		if err := s.PutExchangeConfig(ctx, &exchange); err != nil {
 			t.Fatalf("第 %d 次写抢兑配置: %v", i+1, err)
 		}
 		if err := s.PutWebuiConfig(ctx, &webui); err != nil {
 			t.Fatalf("第 %d 次写界面偏好: %v", i+1, err)
 		}
+		if err := s.PutNotifyConfig(ctx, &notify); err != nil {
+			t.Fatalf("第 %d 次写推送配置: %v", i+1, err)
+		}
 	}
 
-	for _, table := range []string{"exchange_config", "webui_config"} {
+	for _, table := range []string{"exchange_config", "webui_config", "notify_config"} {
 		var count int64
 		if err := s.db.QueryRowContext(ctx,
 			"SELECT COUNT(*) FROM "+table).Scan(&count); err != nil {
@@ -913,3 +917,182 @@ func TestAccountStateUpsertClearsFieldsThatWereLeftOut(t *testing.T) {
 		t.Fatalf("旧的 deviceId 必须被清掉，否则重新登录后还会拿旧设备号去用: %v", *loaded.DeviceID)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 推送配置（v10 的 `notify_config`）
+// ─────────────────────────────────────────────────────────────────────────────
+
+// notifyConfigForRoundtrip 是一份"十家全配 + 自由键 + 显式标题"的配置。
+//
+// ⚠ `Extra` 里只放**字符串与布尔**：JSON 数字回来是 `float64`，
+// 放进去会让 `reflect.DeepEqual` 因为宽度而红 —— 那不是这一条要测的东西
+// （整块 JSON 列的往返一致性才是）。
+func notifyConfigForRoundtrip() core.NotifyConfig {
+	title := "云盘跑完了"
+	minute := int64(60000)
+	return core.NotifyConfig{
+		Enabled:   true,
+		Title:     &title,
+		OnlyError: true,
+		MinLevel:  core.NotifyLevelDebug,
+		UpdatedAt: timePtr(time.Date(2026, 9, 24, 3, 4, 5, 0, time.UTC)),
+		Channels: core.NotifyChannels{
+			Pushplus: &core.PushplusConfig{
+				Token: core.NewSecretValue("pushplus-token"),
+				Extra: map[string]any{"topic": "mcloud", "callbackUrl": "https://x.test/cb"},
+			},
+			ServerChan: &core.ServerChanConfig{Token: core.NewSecretValue("scu-token")},
+			WorkWeixin: &core.WorkWeixinConfig{
+				CorpID: core.NewSecretValue("corp"), CorpSecret: core.NewSecretValue("secret"),
+				AgentID: &minute, ToUser: "u1|u2", MsgType: "markdown",
+			},
+			WorkWeixinBot: &core.WorkWeixinBotConfig{URL: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=k"},
+			TGBot:         &core.TGBotConfig{APIHost: "tg.example.test", Token: core.NewSecretValue("1:abc"), ChatID: "-100"},
+			Bark:          &core.BarkConfig{Key: core.NewSecretValue("bark-key"), Level: "timeSensitive"},
+			TwoIM:         &core.TwoIMConfig{Key: core.NewSecretValue("im-key"), SID: core.NewSecretValue("7"), MsgType: "text", Query: map[string]any{"mode": "2"}},
+			DingTalk:      &core.DingTalkConfig{Token: core.NewSecretValue("ding-token"), Secret: core.NewSecretValue("SEC-ding")},
+			Email: &core.EmailConfig{
+				Host: "smtp.example.test", Port: intPtr(465),
+				From: core.NewSecretValue("me@example.test"), Pass: core.NewSecretValue("authcode"),
+				To: "a@example.test,b@example.test",
+			},
+			CustomPost: []core.CustomPostConfig{{
+				Method: "put", URL: "https://hook.example.test/{title}",
+				Headers: map[string]string{"x-kind": "mcloud"}, Timeout: &minute,
+				Data: map[string]any{"text": "{text}"},
+			}},
+		},
+	}
+}
+
+func TestNotifyConfigDefaultsWhenTheRowIsAbsent(t *testing.T) {
+	ctx := context.Background()
+	s := store(t)
+
+	got, err := s.NotifyConfig(ctx)
+	if err != nil {
+		t.Fatalf("读默认推送配置: %v", err)
+	}
+	if !reflect.DeepEqual(got, core.DefaultNotifyConfig()) {
+		t.Fatalf("默认不符：\n实得 %+v\n期望 %+v", got, core.DefaultNotifyConfig())
+	}
+	// 默认必须是**关闭**的：这一族会把运行正文发到第三方与用户邮箱，
+	// "配置一迁过来就往外发"不是保真，是意外。
+	if got.Enabled {
+		t.Fatal("默认应关闭")
+	}
+	// 与抢兑那条同纪律：读默认值不该建行。
+	var count int64
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM notify_config").Scan(&count); err != nil {
+		t.Fatalf("数行数: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("读默认值不该建行，实得 %d 行", count)
+	}
+}
+
+func TestNotifyConfigRoundtripKeepsEveryChannel(t *testing.T) {
+	ctx := context.Background()
+	s := store(t)
+	toSave := notifyConfigForRoundtrip()
+
+	if err := s.PutNotifyConfig(ctx, &toSave); err != nil {
+		t.Fatalf("写推送配置: %v", err)
+	}
+	got, err := s.NotifyConfig(ctx)
+	if err != nil {
+		t.Fatalf("读回推送配置: %v", err)
+	}
+	if !reflect.DeepEqual(got, toSave) {
+		t.Fatalf("往返之后不一致：\n实得 %+v\n期望 %+v", got, toSave)
+	}
+	// 密钥要**原样**回来：`SecretValue` 的打印是脱敏的，一旦某处把 `String()`
+	// 的结果当值存进去，这里就会红（而它红的时候正是"推送再也发不出去"的前夜）。
+	if got.Channels.DingTalk.Secret.Value() != "SEC-ding" {
+		t.Fatalf("钉钉密钥往返不符: %q", got.Channels.DingTalk.Secret)
+	}
+}
+
+func TestNotifyConfigKeepsAnEmptyMinLevelAsEmpty(t *testing.T) {
+	// 空门槛是**有效信息**（"没填 ⇒ 跟随 info"）。读取时替它填成 `info`，
+	// 会让界面 PUT 回来的那一份与库里的那一份对不上，也会让"我改过没有"看不出来。
+	ctx := context.Background()
+	s := store(t)
+	cfg := core.DefaultNotifyConfig()
+	cfg.MinLevel = ""
+	if err := s.PutNotifyConfig(ctx, &cfg); err != nil {
+		t.Fatalf("写配置: %v", err)
+	}
+	got, err := s.NotifyConfig(ctx)
+	if err != nil {
+		t.Fatalf("读回: %v", err)
+	}
+	if got.MinLevel != "" {
+		t.Fatalf("空门槛应原样读回，实得 %q", got.MinLevel)
+	}
+
+	// 库里那一列没写默认值兜底 ⇒ 手工建的行仍是 schema 的 'info'。
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM notify_config"); err != nil {
+		t.Fatalf("清行: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT INTO notify_config (id) VALUES (1)"); err != nil {
+		t.Fatalf("手工建行: %v", err)
+	}
+	handwritten, err := s.NotifyConfig(ctx)
+	if err != nil {
+		t.Fatalf("读手工行: %v", err)
+	}
+	if handwritten.MinLevel != core.NotifyLevelInfo || handwritten.Enabled {
+		t.Fatalf("schema 默认应关闭 + info，实得 %+v", handwritten)
+	}
+}
+
+func TestNotifyConfigExplicitNullChannelsColumnIsAnError(t *testing.T) {
+	// `fromJSON` 那道 `null` 闸门在这一列上的效果：库里被写成 `"null"` 时**报错**，
+	// 而不是静默读成"一家都没配"（后者与"用户真的清空了渠道"长得一模一样）。
+	ctx := context.Background()
+	s := store(t)
+	if err := s.PutNotifyConfig(ctx, ptrOf(notifyConfigForRoundtrip())); err != nil {
+		t.Fatalf("写配置: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE notify_config SET channels = 'null' WHERE id = 1"); err != nil {
+		t.Fatalf("改脏列: %v", err)
+	}
+	if _, err := s.NotifyConfig(ctx); err == nil {
+		t.Fatal("显式 null 的 channels 列应报错")
+	} else if !strings.Contains(err.Error(), "null") {
+		t.Fatalf("错误里应说明是 null，实得 %v", err)
+	}
+}
+
+func TestNotifyConfigUnknownChannelKeyIsDroppedSilently(t *testing.T) {
+	// 库里出现一个**没有的**渠道键（旧版 config.json 里有 `PushDeer` 之类的历史键）时，
+	// 读出来是"这一家不存在"，而不是报错 —— 与十个结构体的 `omitempty` 同口径。
+	// 这一条钉的是"我们不会因为我改了字段名就读不出用户配的东西"，
+	// 反过来说：改名会**静默丢配置**，所以渠道名常量的字面量由
+	// `TestNotifyChannelNamesAreTheOldChannelMapLiterals` 钉住。
+	ctx := context.Background()
+	s := store(t)
+	if err := s.PutNotifyConfig(ctx, ptrOf(core.DefaultNotifyConfig())); err != nil {
+		t.Fatalf("写配置: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE notify_config SET channels = '{"pushplus":{"token":"t"},"pushDeer":{"token":"t"}}' WHERE id = 1`); err != nil {
+		t.Fatalf("改列: %v", err)
+	}
+	got, err := s.NotifyConfig(ctx)
+	if err != nil {
+		t.Fatalf("读回: %v", err)
+	}
+	if got.Channels.Pushplus == nil || got.Channels.Pushplus.Token.Value() != "t" {
+		t.Fatalf("认得的那家要读出来，实得 %+v", got.Channels.Pushplus)
+	}
+	if names := got.Channels.Names(); len(names) != 1 {
+		t.Fatalf("不认得的那家不该凭空出现，实得 %v", names)
+	}
+}
+
+func ptrOf[T any](v T) *T { return &v }
+
+func intPtr(v int) *int { return &v }

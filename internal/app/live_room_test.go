@@ -38,12 +38,19 @@ import (
 const (
 	liveTestJWT = "test-jwt-not-a-real-credential"
 
-	liveJournalingBody            = `{"code":0,"msg":"success","result":null}`
-	liveGiveGainedBody            = `{"code":0,"msg":"success","result":{"flowerNum":3}}`
-	liveGiveNoQualificationBody   = `{"code":200110,"msg":"您已参与过活动，无法获得首次参与惊喜奖"}`
-	liveDrawInvalidBody           = `{"code":200108,"msg":"口令不对耶，口令需当场直播获取才有效哦"}`
-	liveDrawAlreadyBody           = `{"code":200112,"msg":"该口令已兑换"}`
-	liveDrawOtherBody             = `{"code":200199,"msg":"活动尚未开始"}`
+	liveJournalingBody          = `{"code":0,"msg":"success","result":null}`
+	liveGiveGainedBody          = `{"code":0,"msg":"success","result":{"flowerNum":3}}`
+	liveGiveNoQualificationBody = `{"code":200110,"msg":"您已参与过活动，无法获得首次参与惊喜奖"}`
+	liveDrawInvalidBody         = `{"code":200108,"msg":"口令不对耶，口令需当场直播获取才有效哦"}`
+	liveDrawAlreadyBody         = `{"code":200112,"msg":"该口令已兑换"}`
+	liveDrawOtherBody           = `{"code":200199,"msg":"活动尚未开始"}`
+	// ⚠⚠ 这一条**不是**实拍原文 —— 它是"最小信封"（只有 `code`）：
+	// `200118` 的上游原文（`msg`）本仓**仍无实拍**（`RedFlowerDrawOutcome.Message`
+	// 解析了却从不输出）⇒ 这里**刻意不写 `msg`**。编一句"像真的"文案进来，
+	// 下一个人会把它当成抓包原文（同一条纪律见 `internal/upstream/live_flower_test.go`
+	// 的 `TestClassifyRedFlowerDrawOnExpiredKouling` 函数头）。
+	// ⭐ 对本用例没有损失：非 0 的分支**只看 `code`**。
+	liveDrawExpiredBody           = `{"code":200118}`
 	liveRevivalBody               = `{"code":0,"msg":"success","result":0}`
 	liveUserInfoWithoutResultBody = `{"code":0,"msg":"success"}`
 )
@@ -62,6 +69,20 @@ func liveDrawOKBody(flowerNum int64) string {
 // ─────────────────────────────────────────────────────────────────────────────
 // 测试替身与工具
 // ─────────────────────────────────────────────────────────────────────────────
+
+// flowerSource 造一个"票已经在了"的 [SignInSessionSource]，让六步链的用例
+// 不必为了建会话再补三枪响应（那会把每条用例的脚本都改写一遍，而且
+// [liveStepOf] 认不出 `tyrzLogin` 会当场 Fatal）。
+//
+// 档案与凭据给**真值**而不是 nil：万一哪条用例的响应让链撞上了 `90001`，
+// 刷新会真的去打三枪 —— 那时该响的是"脚本里没有更多响应了"，
+// 而不是一个空指针 panic（后者会把"票会刷新"这件事演成一次崩溃）。
+func flowerSource(up *upstream.Upstream, jwt string) *SignInSessionSource {
+	cred := SignInCredential{authorization: "Basic x", accountID: core.NewAccountID("19****01")}
+	src := NewSignInSessionSource(up, testProfile(), &cred, testClock(), testRng())
+	src.session = &SignInSession{referer: "https://referer.test", jwt: jwt}
+	return src
+}
 
 // liveStepOf 把一个请求归到六步链 / 直播链里的某一步。
 //
@@ -221,7 +242,7 @@ func TestRedFlowerSessionWalksSixStepChain(t *testing.T) {
 	}}
 	up := upstream.NewUpstream(client)
 
-	report, err := RunRedFlower(context.Background(), up, NewRedFlowerSession(liveTestJWT, codes))
+	report, err := RunRedFlower(context.Background(), flowerSource(up, liveTestJWT), NewRedFlowerSession(codes))
 	if err != nil {
 		t.Fatalf("整条链不该失败：%s", err.Message())
 	}
@@ -289,8 +310,8 @@ func TestRedFlowerSessionDeduplicatesCodes(t *testing.T) {
 	}}
 	up := upstream.NewUpstream(client)
 
-	session := NewRedFlowerSession(liveTestJWT, []string{"AAA", "AAA", " AAA ", "BBB"})
-	report, err := RunRedFlower(context.Background(), up, session)
+	session := NewRedFlowerSession([]string{"AAA", "AAA", " AAA ", "BBB"})
+	report, err := RunRedFlower(context.Background(), flowerSource(up, liveTestJWT), session)
 	if err != nil {
 		t.Fatalf("整条链不该失败：%s", err.Message())
 	}
@@ -331,8 +352,8 @@ func TestRedFlowerNoQualificationDoesNotAbortBatch(t *testing.T) {
 	}}
 	up := upstream.NewUpstream(client)
 
-	report, err := RunRedFlower(context.Background(), up,
-		NewRedFlowerSession(liveTestJWT, []string{"AAA"}))
+	report, err := RunRedFlower(context.Background(), flowerSource(up, liveTestJWT),
+		NewRedFlowerSession([]string{"AAA"}))
 	if err != nil {
 		t.Fatalf("`200110` 不该让整条链失败：%s", err.Message())
 	}
@@ -365,8 +386,8 @@ func TestRedFlowerAlreadyDrawnIsNotInvalidKouling(t *testing.T) {
 	}}
 	up := upstream.NewUpstream(client)
 
-	report, err := RunRedFlower(context.Background(), up,
-		NewRedFlowerSession(liveTestJWT, []string{"AAA"}))
+	report, err := RunRedFlower(context.Background(), flowerSource(up, liveTestJWT),
+		NewRedFlowerSession([]string{"AAA"}))
 	if err != nil {
 		t.Fatalf("`200112` 不该让整条链失败：%s", err.Message())
 	}
@@ -403,8 +424,8 @@ func TestRedFlowerInvalidKoulingDrivesRetry(t *testing.T) {
 	}}
 	up := upstream.NewUpstream(client)
 
-	report, err := RunRedFlower(context.Background(), up,
-		NewRedFlowerSession(liveTestJWT, []string{"AAA", "BBB"}))
+	report, err := RunRedFlower(context.Background(), flowerSource(up, liveTestJWT),
+		NewRedFlowerSession([]string{"AAA", "BBB"}))
 	if err != nil {
 		t.Fatalf("单个口令无效不该让整条链失败：%s", err.Message())
 	}
@@ -446,8 +467,8 @@ func TestRedFlowerOtherCodeIsNotTreatedAsInvalidKouling(t *testing.T) {
 	}}
 	up := upstream.NewUpstream(client)
 
-	report, err := RunRedFlower(context.Background(), up,
-		NewRedFlowerSession(liveTestJWT, []string{"AAA"}))
+	report, err := RunRedFlower(context.Background(), flowerSource(up, liveTestJWT),
+		NewRedFlowerSession([]string{"AAA"}))
 	if err != nil {
 		t.Fatalf("未分类的业务码不该让整条链失败：%s", err.Message())
 	}
@@ -459,6 +480,51 @@ func TestRedFlowerOtherCodeIsNotTreatedAsInvalidKouling(t *testing.T) {
 	}
 	if retry, _ := RetryPlan([]string{"AAA"}, report.InvalidCodes); retry {
 		t.Fatal("未分类的码不该触发重听")
+	}
+}
+
+// TestRedFlowerExpiredKoulingIsItsOwnBucket 钉住 `200118` 有**自己那一栏**。
+//
+// # 为什么非要有这一栏
+//
+// 它原本与"上游回了个没分类的码"共用 `OtherCodes` ⇒ 人读的输出两件事都打
+// 「未分类口令」，而这一格**最常见**的成因恰恰是"**直播已经结束了**" ——
+// 那句话把人往"口令抄错了"（`200108`）那边引，排查方向一开始就错（坑表 **#140** 做法 ④）。
+//
+// ⚠ 两条不变量与 upstream 侧那条用例同源：它**不是**无效口令（否则白重听 60 秒）、
+// 也**不是**成功。这里额外钉"它**不**落进另外两栏"，以及**人读的那句话**说了什么。
+func TestRedFlowerExpiredKoulingIsItsOwnBucket(t *testing.T) {
+	client := &scriptedUpstream{responses: []string{
+		liveUserInfoBody(100),
+		liveJournalingBody, liveJournalingBody, liveJournalingBody,
+		liveJournalingBody, liveJournalingBody,
+		liveGiveNoQualificationBody,
+		liveDrawExpiredBody,
+		liveRevivalBody,
+		liveUserInfoBody(100),
+	}}
+	up := upstream.NewUpstream(client)
+
+	report, err := RunRedFlower(context.Background(), flowerSource(up, liveTestJWT),
+		NewRedFlowerSession([]string{"AAA"}))
+	if err != nil {
+		t.Fatalf("过期口令不该让整条链失败：%s", err.Message())
+	}
+	if !liveStringsEqual(report.ExpiredCodes, []string{"AAA"}) {
+		t.Fatalf("过期口令应记进 ExpiredCodes，实际 %v", report.ExpiredCodes)
+	}
+	if len(report.InvalidCodes) != 0 {
+		t.Fatalf("过期口令**不是**无效口令（口令本身是对的）：%v", report.InvalidCodes)
+	}
+	if len(report.OtherCodes) != 0 {
+		t.Fatalf("`200118` 已有自己那一栏，不该同时落进未分类：%v", report.OtherCodes)
+	}
+	if retry, _ := RetryPlan([]string{"AAA"}, report.InvalidCodes); retry {
+		t.Fatal("过期口令不该触发重听 —— 重听也只会再拿一次 `200118`")
+	}
+	// ⭐ 用户可见的那句话：说清是"失效"，不是"未分类"。
+	if line := report.SummaryLine(); !strings.Contains(line, "口令已失效（本场已结束）") {
+		t.Fatalf("人读的那句话应说清口令已失效，实际 %q", line)
 	}
 }
 
@@ -478,8 +544,8 @@ func TestRedFlowerDrawWithoutResultIsNotSuccess(t *testing.T) {
 	}}
 	up := upstream.NewUpstream(client)
 
-	report, err := RunRedFlower(context.Background(), up,
-		NewRedFlowerSession(liveTestJWT, []string{"AAA"}))
+	report, err := RunRedFlower(context.Background(), flowerSource(up, liveTestJWT),
+		NewRedFlowerSession([]string{"AAA"}))
 	if err != nil {
 		t.Fatalf("不该失败：%s", err.Message())
 	}
@@ -515,7 +581,7 @@ func TestRedFlowerEmptyCodesSkipsDraw(t *testing.T) {
 	}}
 	up := upstream.NewUpstream(client)
 
-	report, err := RunRedFlower(context.Background(), up, NewRedFlowerSession(liveTestJWT, nil))
+	report, err := RunRedFlower(context.Background(), flowerSource(up, liveTestJWT), NewRedFlowerSession(nil))
 	if err != nil {
 		t.Fatalf("没有口令不该失败：%s", err.Message())
 	}
@@ -544,9 +610,9 @@ func TestRedFlowerEmptyCodesSkipsDraw(t *testing.T) {
 // 与"发出去失败了"会各自偷偷前进一次 —— 少投一个口令是**静默**的：
 // 余额会告诉你有问题，但不会告诉你是哪一个。
 func TestRedFlowerSessionNextDoesNotAdvance(t *testing.T) {
-	session := NewRedFlowerSession(liveTestJWT, []string{"AAA"})
+	session := NewRedFlowerSession([]string{"AAA"})
 
-	step, _, err := session.Next()
+	step, _, err := session.Next(liveTestJWT)
 	if err != nil {
 		t.Fatalf("构造请求失败：%s", err.Message())
 	}
@@ -555,7 +621,7 @@ func TestRedFlowerSessionNextDoesNotAdvance(t *testing.T) {
 	}
 	// 连叫三次，状态与返回值都不该变。
 	for i := 0; i < 3; i++ {
-		again, _, _ := session.Next()
+		again, _, _ := session.Next(liveTestJWT)
 		if again != StepBalanceBefore {
 			t.Fatalf("第 %d 次重叫之后步骤变了：%v", i+1, again)
 		}
@@ -573,8 +639,8 @@ func TestRunRedFlowerStopsWithoutAdvancingOnSendFailure(t *testing.T) {
 	client := &scriptedUpstream{} // 一条响应都没有 ⇒ 第一个请求就失败
 	up := upstream.NewUpstream(client)
 
-	session := NewRedFlowerSession(liveTestJWT, []string{"AAA"})
-	_, err := RunRedFlower(context.Background(), up, session)
+	session := NewRedFlowerSession([]string{"AAA"})
+	_, err := RunRedFlower(context.Background(), flowerSource(up, liveTestJWT), session)
 	if err == nil {
 		t.Fatal("发送失败必须返回错误")
 	}
@@ -596,8 +662,8 @@ func TestRunRedFlowerStopsOnUnparsableEnvelopeWithStepName(t *testing.T) {
 	client := &scriptedUpstream{responses: []string{liveUserInfoWithoutResultBody}}
 	up := upstream.NewUpstream(client)
 
-	session := NewRedFlowerSession(liveTestJWT, []string{"AAA"})
-	_, err := RunRedFlower(context.Background(), up, session)
+	session := NewRedFlowerSession([]string{"AAA"})
+	_, err := RunRedFlower(context.Background(), flowerSource(up, liveTestJWT), session)
 	if err == nil {
 		t.Fatal("`result` 缺失必须返回错误")
 	}
@@ -624,8 +690,8 @@ func TestRunRedFlowerDoesNotFailOnMissingRevivalFlowers(t *testing.T) {
 	}}
 	up := upstream.NewUpstream(client)
 
-	report, err := RunRedFlower(context.Background(), up,
-		NewRedFlowerSession(liveTestJWT, []string{"AAA"}))
+	report, err := RunRedFlower(context.Background(), flowerSource(up, liveTestJWT),
+		NewRedFlowerSession([]string{"AAA"}))
 	if err != nil {
 		t.Fatalf("复活花解析失败不该让整条链失败：%s", err.Message())
 	}

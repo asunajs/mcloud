@@ -300,6 +300,12 @@ func RequireInt64(payload any, key string) (int64, *core.Error) {
 //
 // **不**把上游原文放进对外文案：`core.Error` 的对外文案走白名单，
 // detail 只进日志（理由见 [errorFromStatus]）。
+//
+// ⚠ `90001` 单独走 [core.NewSessionExpired]：它是唯一一个"**换个动作就能自救**"的码
+// （重建 H5 会话再重放一次），而 app 层必须能把这件事**类型化地**认出来。
+// 其余已知码仍回 `BadRequest`。对外文案与 `Error()` 渲染**逐字不变**
+// （那个变体的 kind 就是 BadRequest，见 core/errors.go），所以这次改动不影响
+// 日志串与黄金向量。
 func EnsureOKWithHint(envelope *Envelope) (any, *core.Error) {
 	payload, err := envelope.EnsureOK()
 	if err == nil {
@@ -307,8 +313,11 @@ func EnsureOKWithHint(envelope *Envelope) (any, *core.Error) {
 	}
 	if code, ok := envelope.Code(); ok {
 		if hint, known := Diagnose(code); known {
-			wrapped := core.NewBadRequest(fmt.Sprintf("%s（%s）", err.Message(), hint))
-			return nil, wrapped
+			msg := fmt.Sprintf("%s（%s）", err.Message(), hint)
+			if code == CodeNotLoggedIn {
+				return nil, core.NewSessionExpired(msg)
+			}
+			return nil, core.NewBadRequest(msg)
 		}
 	}
 	return nil, err

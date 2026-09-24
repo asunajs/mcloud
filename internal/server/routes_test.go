@@ -105,6 +105,9 @@ func TestTheRouteTableMatchesTheFrozenBaseline(t *testing.T) {
 		// 删掉它的表现与刷新那条一样是 404，而界面上 404 会显示成"这个账号没有直播数据"——
 		// 一个假结论，所以"路由在不在"这件事必须有守卫。
 		{"GET", "/api/accounts/1/live-room"},
+		// 2026-09-24 加：兑换页的只读选品器。同一条理由（本项目自己定的 HTTP 面，
+		// 删掉表现为 404，而界面上会把 404 念成"今天没有可兑的奖品"）。
+		{"GET", "/api/accounts/1/exchange-prizes"},
 		{"POST", "/api/login/qr"},
 		{"GET", "/api/login/qr/1"},
 		{"GET", "/api/login/qr/1/image.svg"},

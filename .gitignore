@@ -53,7 +53,12 @@ go.work.sum
 # 设备指纹（`--device-file` / `--device-app-file`）：**每安装**一次生成、
 # 之后永久不变的那份本地状态。它不是凭据，但换个仓库就等于换一台设备 ——
 # 那是环境特定的东西，跟数据库同理，没有入库的理由。
-/data/device*.txt
+# ⚠⚠ 通配写成 `*device*.txt` 而**不是** `device*.txt` —— 见坑表 #138。
+# `device*.txt` 只挡**以 `device` 开头**的，而 server 那套（`internal/server/server.go` 的
+# `DefaultPCDeviceFile` / `DefaultAppDeviceFile`）建出来的是 **`server-device.txt` /
+# `server-device-app.txt`**：同一类文件、同一套理由，只因为名字多了个前缀就**漏在门外**
+# （实测 `git status` 里两个 `??`，`git add .` 会把它们提交上去）。
+/data/*device*.txt
 
 # 截图脚本（`scripts/shots.sh`）用的 Edge 调试 profile 与临时响应头。
 # 这是**浏览器自己的状态**（缓存、Crashpad 转储、Cookie 库），

@@ -29,34 +29,83 @@
 | 8 | `task-expansion` 任务拓展 | 云朵 | **在用户网盘真建随机文件** | 否 | 无 |
 | 9 | `app` App 任务矩阵 | 云朵/抽奖次数 | 记账 + 上传 + 建删外链 + 发邮件 | 部分任务码需人工 | 无 |
 | 10 | `ai-avatar` AI 头像 | 头像 + 抽奖 | **上传文件到网盘** | 否 | 无 |
-| 11 | `msg-push` 消息推送任务 | 云朵 | 记账 | 需先在 App 开启推送 | 无 |
-| 12 | `notice` 公告任务 | 云朵 | 记账 | `未开启` 需人工 | 无 |
+| 11 | `msg-push` 消息推送任务 | 云朵 | 记账 | 需先在 App 开启推送 | 已接执行，**零样本** |
+| 12 | `notice` 公告任务 | 云朵 | 记账 | `未开启` 需人工 | 已接执行，入账口方向待验 |
 | 13 | `backup-gift` 备份礼 | 云朵/权益 | 记账（GET 却是写） | 否 | 无 |
 | 14 | `hc1t` 云朵大作战 | 游戏次数/排名 | 记账 + **建立邀请关系** | 否 | 无 |
 | 15 | `red-flower` 小红花 | 小红花/奖品 | 记账 + **投口令（写，按账号）** | 否 | 无 |
 | 16 | `play-ai-special` 拍拍 | 抽奖 | 记账 | 两个子任务设计内跳过 | 无 |
-| 17 | `play-ai-lottery` 玩 AI 抽奖 | 抽奖 | 记账 | 否 | 无 |
+| 17 | `play-ai-lottery` 玩 AI 抽奖 | 抽奖 | 记账 | 否 | 已接执行（能力 `fun-ai`）|
 | 18 | `cloud-phone-redpack` 红包派对 | **现金（分）** | **真给云机装 APK** | 三类任务需人工 | 无 |
 | 19 | `kouling` 直播口令 | 小红花 | 入群足迹 + WS 长连 | 否 | 无 |
-| 20 | `exchange` 抢兑 | 奖品记录 | **真扣云朵、不可回滚** | 需短信码的奖品必失败 | 仅注册表声明 |
+| 20 | `exchange` 抢兑 | 奖品记录 | **真扣云朵、不可回滚** | 需短信码的奖品必失败 | 已接执行（能力 `exchange`，2026-09-24；⚠ **未真打上游**）|
 
 （`cloud-snapshot` 是新项目按 D1/D2 增设的，不在旧项目 19 项里；旧项目 19 项 = 表中 1、3–20。）
 
-> **Go 侧现状（2026-09-22 逐条 grep 核对，读的是本仓库代码）** —— 上表那一列是 Rust 基准冻结时的记录，别拿它当现状：
+> **Go 侧现状（2026-09-22 逐条 grep 核对；2026-09-23 就地更正三条；2026-09-24 再更正"现状"整段 —— 读的都是本仓库代码）** —— 上表那一列是 Rust 基准冻结时的记录，别拿它当现状：
 >
 > - **已有实现且 CLI 可达**：#1 待领取奖品（`app.PendingPrizes` + `mcloud signin --prizes`）、
 >   #2 云朵快照（`app.RecordCloud` / `core.NextCloudStats`）、#3 签到（`app.CloudSignIn`）、
 >   #4 领取（`app.ReceiveCloud` / `ReceiveAll`，`--receive`）、#5 复活卡（`app.ReceiveRevivalReward`，`--revive`）、
->   #8 任务拓展（`app.ReceiveTaskExpansion` 一族）、#13 备份礼（`app.ClaimBackupGift`，`--backup-gift`）；
+>   #8 任务拓展（`app.ReceiveTaskExpansion` 一族，**只有 CLI 那一条路**）、#13 备份礼（`app.ClaimBackupGift`，`--backup-gift`）；
 >   另有**连签倍数**（`app.ClaimMultiple`，`--multiple`），它不在旧项目那 19 项的编号里。
-> - **只有声明**：#20 `exchange` 抢兑 —— 注册表里有 `Code: "exchange"`、存储里有 `exchange_config` 表，
->   上游"抢兑"那条接口在本仓库搜不到。
-> - **仍无**：#6 凭证刷新（`core`/`upstream` 里只有 `RefreshToken` 这类**登录链**的痕迹，不是独立的续期能力）、
->   #7 `after` 收尾、#9 App 任务矩阵、#10 AI 头像、#11 消息推送、#12 公告、#14 云朵大作战、
->   #15 小红花、#16/17 拍拍与 AI 抽奖、#18 红包派对、#19 直播口令 —— 这些在 `internal/` `cmd/` 里按关键词全查不到。
+> - **已接进服务端执行面**（`runBuilders` 里有键 ⇒ 界面"开始"与定时任务的 `target.code` 指得到）：
+>   **#6 凭证刷新**（`app.NewAuthRefresher` / `app.RefreshRun` + 能力 `CodeAuthRefresh`，
+>   另有 `mcloud auth refresh` 与账号页那枚按钮）、
+>   **#15 小红花 + #19 直播口令**（同一条链的两半：`internal/upstream/live_room.go` / `live_flower.go` / `live_ws.go`
+>   + `internal/app/live_room*.go` + 能力 `CodeLiveRoom`，`RunInBatch=false`）、
+>   **#1 #2 #3 #4 #5 与连签倍数 / #13**（2026-09-23 那一批接线：`sign` / `receive` / `multiple` /
+>   `backup-gift` / `revival` / `prizes` / `cloud-snapshot` 七个 code 共用 `run_dispatch_signin.go` 那一层装配）、
+>   **任务清单查询**（从 #9 里拆出来的**只查不做**那一半：`app.TaskList` + `CodeTaskList`，`RunInBatch=false`）、
+>   **#11 消息推送**（`app.ClaimMsgPush` + `CodeMsgPush`，`RunInBatch=false` —— ⚠ 这一族**零抓包样本**）、
+>   **#12 公告任务**（`app.ClaimNotice` + `CodeNotice`）、
+>   **#17 玩 AI 抽奖**（`app.FunaiDraw` + `CodeFunAI`，每日 1 次由 `app.FunaiDailyDrawLimit` 钉住）、
+>   **#20 抢兑**（2026-09-24：`upstream.AppExchangeList` / `AppGetSlide` / `AppExchangeV3`
+>   + `app.PlanExchange` / `app.LocateExchangePrize` / `app.Exchange` + `run_dispatch_exchange.go`
+>   + 能力 `CodeExchange`。⚠ **三层都在夹具/实拍样本上跑绿；2026-09-24 只读那一半已由本仓真打成功
+>   （55 件 / 9 组，见 `docs/status.md` 同一天的那一节），但**下单**那一半仍一条没由本仓发过** ——
+>   这一族会真扣豆，第一次真跑要按 `docs/capture/app-exchange-samples.txt` §5.4 那三条判据人工对账）。
+> - **只有声明**：**没有了** —— 注册表**十七条**在 `runBuilders` 里十七条（自检用例
+>   `TestEveryRegisteredCapabilityIsWired` 要求差集为空 ⇒ 将来登记新能力却不接执行会直接红）。
+>   ⚠ "只有声明"与"没有实现"不是一回事，前者缺的是一行接线；接线判据里那条"501"现在
+>   **只能靠临时摘掉一份 builder 来验**（`TestRegisteredButUnwiredCapabilityIsNotImplemented`、
+>   `TestSchedulerRecordsWhyADueRowCouldNotRun` 的 `unwire` 那一格）。
+> - **只读那一半已接执行、写侧仍未接**（#16 与 #18，2026-09-24 同一天的两个批次；⚠ 这一格是新增的分类，
+>   既不要读成"已可用"，也不要读成"没有实现" —— 界面上看得到读数与清单，但**一件任务都不代做**）：
+>   **#16 拍拍**：①`newyear/user/info` ＋ ②`newyear/task/list` 两口已接（能力 `play-ai-special`、
+>   `internal/app/play_ai_run.go`、**复用签到页那份票池**）；③`task/step/click`**写**、
+>   ④`blindbox/lottery`**写**、⑤`ai/image/aiRecognize`（**会往用户网盘写文件** ⇒ **P1**）三口**没有调用点**。
+>   ⚠ 该族的 `jwttoken` **使用公共来源**（临时态，§1.12）：夹具里六条 `newyear/*` 条条带 `jwttoken`，
+>   而**归档中没有换票那一步** ⇒ 特有取法仍是样本缺口（两步已按旧 TS 落成代码，切不切 = **P5**）。
+>   另：这一族**比其余 H5 接口少两个头**（`appversion`、`activityid`），故自写头集合而不复用 `WithH5Headers`。
+>   **#18 红包派对**：只读那一半（两枪换票 ＋ 三枪查询）已接（能力 `cloud-phone-redpack`、
+>   `internal/app/cloud_phone_run.go`、**独立的活动站票池**，与 #16 在这一格上答案相反）；
+>   签到 / 逐任务 / 装机 / 答题 / 完成登记**一件不代做** —— 产出是**现金（分）**且会**真给云机装 APK**，
+>   装机链迁不迁 = **P3**。
+>   ⚠ **两族都有零样本的路径** ⇒ 只钉"发得出"不钉语义（#18 见 R9 / R10，#16 见 R11 / R12）。
+>   **这一格刻意不抄行数与用例数**：同一数字在两处成文迟早不一致（本文件下方那条耻辱柱就是这么来的），
+>   逐口与用例现场看 §2.4 那两节，最近一轮的跑数看 [`status.md`](status.md)。
+> - **仍无**：#7 `after` 收尾、#9 App 任务矩阵里**做任务**那一半（`doTaskPost` / `task/click` / `receiveTask`
+>   三条上游口在 `internal/upstream` 里**有实现但没接链**）、#14 云朵大作战（活动期次已过，见 §2.4）。
+>   ⚠ #9 的**读**那一半（旧项目那 16 次 `taskListV2`）2026-09-24 已落码：上游口
+>   `internal/upstream/app_task_list_v2.go` ＋ 聚合 `internal/app/task_matrix.go`。
+>   但它**没有调用点** —— 没登记成能力、界面上出现不了，所以"落了码"不等于"这一项可用"；
+>   要不要登记成能力 = 见 [`pending-decisions.md`](pending-decisions.md)。
+>   ⚠ 上面那句"仍无"里**曾包含 #10 AI 头像**，2026-09-24 第二轮已不成立（见下一条）。
+> - **#10 AI 头像**（同日两个批次：上游层八口 → **编排层接上执行**）：能力 `ai-avatar`（注册表第 17 条，
+>   `RunInBatch:false`）＋ `internal/app/ai_avatar_{png,run,files}.go` —— 生成、轮询、抽奖判定、
+>   网盘按文件名找回**四件事都已落地**，八口上游全有调用点。⚠ 两个"仍未"：
+>   **一次都没真打过**（`rabactive/*` 六口零实拍，见 R16 – R20）、**清理那一半没接**
+>   （写进用户网盘的图今天没人删 = **P1**；`TempFileIDs` 出不了 app 层 = **R20**）。
 >
-> 所以下面那段"19 项业务能力：0 项可执行"已经**不再成立**（它写于 2026-09-19 的 Rust 侧）。
-> 仍然成立的是它后半句：剩下那些项缺的不是单个接口，是它们共用的那一层（§3）。
+> **耻辱柱（六处，都是隔一两天就被本仓库代码自己推翻的）**：上面这一段的 09-22 版本把 #6 写成"只有登录链的痕迹"、
+> 把 #15/#19 写进"仍无、按关键词全查不到"，09-23 版本又把 #2 写成"登记了但没接执行、回 501"、
+> 把 #11/#12/#17 写进"仍无、按关键词全查不到"，09-24 同一格落后三次（#20 已接上执行仍写"只有声明"；
+> #16/#18 的只读那一半已接执行，还写"能力与执行面都没接"；#10 编排层已落地并接上执行，仍写在"仍无"里）。
+> 这些都在随后一两轮里落了地，
+> 而引这段落的下游文档（含本轮的三方对照表）当时就照抄错了。⇒ **这段"现状"是易腐的，引用前先 grep 一遍。**
+
+> 仍然成立的那半句：剩下那些项缺的不是单个接口，是它们共用的那一层（§3）。
 
 **当时 Rust 侧可跑的东西**（2026-09-19 订正；这几条线如今都在 Go 侧，同值结论见上面那条 09-22 核对）：
 登录（PC 短信/扫码、App 短信）、账号会话与归属、
@@ -64,7 +113,8 @@
 **schema 现在到 v9**。版本链只有一处真相（`internal/io/schema.go` 的 `SchemaVersion` 与那份迁移清单），
 这里只点名最近两条：v8 = `run_events` 表（运行事件流落库），v9 = `schedules` 的
 `miss_policy` + `last_fire_at`（调度循环要能择时、要能只写记账）。
-**19 项业务能力：0 项可执行** —— 缺的不是接口，是它们下面那一层（§3）。
+**当时（2026-09-19）那 19 项业务能力：0 项可执行** —— 缺的不是接口，是它们下面那一层（§3）。
+这一句**今天已不成立**：可执行面看上面那张"Go 侧现状"，§3 那一层则一条一条在被补。
 
 > 上面这段的上一版写的是"schema v4 / v5、`mcloud-app::cloud` / `signin` 并行工作流**未提交**"（那是 Rust 时期的写法与状态，照原文留着）。
 > 那描述的是两份盘点刚写完、实现还在飞的时候；现在那些提交已经落地
@@ -155,7 +205,13 @@
 - **上游**：`GET https://m.mcloud.139.com/ycloud/prizeApi/checkPrize/getUserPrizeLogPageV2`（`packages/core/src/apis/task.ts:70`），入参 `(pageNumber=1, pageSize=10)`。
 - **判据**（`packages/core/src/tasks/prize-records.ts:8-30`）：`err || !data?.result?.result` ⇒ 打"无待领取奖品"；`filter(r => r.flag === 1)` ⇒ 待领取；过期时间按 `Asia/Shanghai` 格式化输出。
 - **已知不足（重写要修）**：① **只读第 1 页 10 条**，多于 10 条静默截断；② `flag` 的其他取值没有任何解释；③ 双层 `result.result` 信封是本域特有形状，`tryRequest` 未必兜得住。
-- **新落点**：`internal/upstream` 新增 prize 模块（抓包确认 `getUserPrizeLogPageV2` 是否还在）→ 注册表里加一条能力（**这条两侧都还没有**：Go 的 `capabilities.All()` 目前只有 sign / exchange / cloud-snapshot 三条；奖品那边现有的 `app.PendingPrizes` 与 CLI `--prizes` 是签到页的待领取奖品，不是这个），参数 `pageNumber/pageSize`，输出 `prizeName/prizeId/expireTime/flag`。
+- **新落点（已落地，2026-09-23 就地更正）**：`internal/upstream/app_signin_records.go` 的 `PrizeRecordRequest`
+  （`GET /ycloud/signin/public/record?marketname&status&type&pageNumber&pageSize`）+ `ParsePrizeRecords`
+  → `app.PendingPrizes` → CLI `mcloud signin --prizes`。
+  ⚠ 旧口 `.../checkPrize/getUserPrizeLogPageV2` **不是"两侧都还没有"，是已经打不通**：裸请求回 `501 参数校验异常`，
+  把参数换成 `pageNumber` 直接 `404`（实测记在 `PrizeRecordRequest` 的注释里）⇒ 它没有"待确认是否还在"这一步了，
+  现役口就是上面那条。旧项目"只读第 1 页 10 条"那条不足**仍在**（`PendingPrizes` 目前也只取一页），
+  能力登记（注册表里给 `prizes` 一个 code）本轮补。
 
 #### `cloud-snapshot` 云朵余额快照（新能力）
 
@@ -227,6 +283,9 @@
      真正的风险只有**漏记**（没进 `state.files` 的 ID = 云盘侧孤儿文件残留）。所以"归属到 run"落地成
      **我们自己的 run 产物清单 + 失败路径也清理**，不是"向上游查归属"。
      （真正会"错删"的是 §2.3 `ai-avatar` 那种**按文件名匹配**找回 ID 的写法 —— 同名即碰撞，那才是要改成一跳拿 ID 的地方。）
+   - **Go 侧现状（2026-09-24）**：`batchTrash` 在仓库里**零实拍** ⇒ `after` 这一支与 §2.3 的上传族一起冻结；
+     清理要用的 "run 产物清单" 那一层**已经先建好了**（`internal/exec/artifacts.go`，它不依赖抓包），
+     但**还没有调用点**。同上指路 [`status.md`](status.md)。
 
 ### 2.3 档 3 · 活动类：`task-expansion` / `app` / `ai-avatar` / `msg-push` / `notice` / `backup-gift`
 
@@ -237,26 +296,37 @@
 1. `GET https://mrp.mcloud.139.com/market/signin/page/taskExpansion`（`apis/signin.ts:56`）取任务与 `acceptDate`；
 2. **建随机文件凑备份**：`POST personal-kd-njs.yun.139.com/hcy/file/create`（`apis/file.ts:64`，入参含 `contentHash`+`SHA256`、`fileRenameMode:"auto_rename"`，返回 `{fileId, uploadId, rapidUpload, partInfos[].uploadUrl, exist}`）→ `PUT <uploadUrl>` → `POST hcy/file/complete`（`:96`）。**"像备份来的"靠的是安卓渠道那组头**：`opType==="backup"` ⇒ `x-yun-op-type: 2` + `x-yun-sub-op-type: 200`（`file.ts:32-41`，`sub = op*100`；`channelSrc` 默认 `10000023`），而 `upload` / PC / Web 分支拿到的是 `1`。
 3. `sleep(backupWaitTime || 20)` 秒，等备份被识别；
+   - **Go 侧现状（2026-09-24）**：上面这三枪里只有"**建目录**"那一型有实拍（`test/fixtures/http/3d.json` 两条），
+     **上传文件那一型 + `PUT uploadUrl` + `file/complete` 三条零样本** ⇒ 这一族按 v4 是**接口层冻结**，不动手。
+     缺格清单、鉴权归属那一格的订正、补法 ⇒ [`status.md`](status.md)「上传族与 `after` 清理」那一节。
 4. 复查 + `GET https://mrp.mcloud.139.com/market/signin/page/receiveTaskExpansion?acceptDate=${acceptDate}`（`apis/signin.ts:65`，**未 percent-encode**，且我们抓包样本里**没有出现 `acceptDate` 参数** —— §5.5）；
 5. 留下的文件 ID 写进 `ctx.state.files`，由 `after` 删除。
 
 > ⚠ 副作用分级：`file/create + complete` 是**写用户网盘**。任一步失败都可能留下孤儿文件（`after` 只删 `state.files` 里记着的）。新实现必须有"本 run 创建了什么"的事务式清单（`mcloud-exec` 的 run 维度产物），并在失败路径也执行清理。
 >
-> 2026-09-22 补：这一条**在 Go 侧仍是缺口** —— `internal/exec` 当前只有并发闸
+> 2026-09-22 补：这一条**在 Go 侧仍是缺口** —— `internal/exec` 当时只有并发闸
 > （`Concurrency`）、互斥键（`MutexKey` + `ParamsDigest`）、准入（`RunRegistry`）与事件总线
 > （`EventBus`），**没有** "run 内产物清单" 这一层，也没有失败路径的补偿钩子。
+>
+> 2026-09-24 更新（上一条已不成立，就地改准）：**账本那一层已建** ——
+> `internal/exec/artifacts.go` 的 `ArtifactLedger`（登记幂等、三元组不全直接报错、
+> `exist:true` 走 `RegisterCreated` 不入账、按账号切清单、`Forget` 把未清理的交回）。
+> ⚠ 它**目前没有任何调用点**：真正往账上记东西的前提是"上传链能拿到 `fileId`"（仍零实拍 ⇒ 冻结），
+> 清理那一条 `batchTrash` 也在冻结面里。所以 §2.2 第 3 条与上面这三枪的状态是
+> "账本 ready、进出口没接"，不是"已落地"。缺格清单与解冻条件见 [`status.md`](status.md)「上传族与 `after` 清理」那一节。
 
 #### `app` App 任务矩阵（`packages/core/src/tasks/app/`）—— 体量最大的一项
 
 不是"一个任务"，而是**一个读取任务列表 + 按任务码分发**的执行器：
 
-- 列表：`GET https://m.mcloud.139.com/ycloud/signin/task/taskListV2`（`tasks/app/helpers.ts:50`）与 `GET https://caiyun.feixin.10086.cn:7071/ycloud/signin/task/taskListV2`（`apis/task.ts:39`）两处封装，**8 组 marketName × 2 = 16 次**串行拉取；点击上报 `…/ycloud/signin/task/click`（`helpers.ts:10`）与 `:7071/…/taskClickV2`（`runners.ts:223`）；通用完成 `GET https://mrp.mcloud.139.com/market/signin/page/doTask?client=app&deviceId=${encodeURIComponent(deviceId)}`（`runners.ts:103,125`）。
+- 列表：**两口同名 `taskListV2`、同形 `POST`、不同链**。①`tasks/app/helpers.ts:40-71` 打 `https://m.mcloud.139.com/ycloud/signin/task/taskListV2`，body `{marketname, clientVersion, group}` ＋ 请求头 `appversion: "12.6.0.0"`、`activityid: <本次的 marketname>`，按 **2 个 marketName（`sign_in_3` / `newsign_139mail`）× 8 个 group（`new` `beiyong1` `beiyong2` `cloudEmail` `time` `day` `month` `hidden`）= 16 次**串行拉取，某一次失败就跳过那一组。②`apis/task.ts:36-46`（`getEmailTaskList`）打 `https://caiyun.feixin.10086.cn:7071/ycloud/signin/task/taskListV2`，body `{marketname:"newsign_139mail", clientVersion:"11.2.1", group:"month"}`、**只一次**、不带那两枚头 —— 它服务的是 #12 `notice` 那条链（找 id `1021`），**不属于这一族**，且本仓实拍里那一环**没出现**。 ⚠ 订正（2026-09-24）：本文件此前把这两口写成"`GET` ×2 处、8 组 marketName × 2"，方法名与乘数都记反了，按旧 TS 逐字订正（本仓夹具的实拍也是 `POST`）。点击上报 `…/ycloud/signin/task/click`（`helpers.ts:10`）与 `:7071/…/taskClickV2`（`runners.ts:223`）；通用完成 `GET https://mrp.mcloud.139.com/market/signin/page/doTask?client=app&deviceId=${encodeURIComponent(deviceId)}`（`runners.ts:103,125`）。
 - **任务码分发表**（每个码是一种独立玩法，各带专属实现）：`106` 上传文件、`107` 云笔记、`434` 建外链后立即删、`113` PC `authTokenRefresh`、`409/1005` `page/doTask?client=app&deviceId=`、`522` 循环上传、`472/473/1004/1014/1020/1028` 走 **139 邮箱**链路。
 - **139 邮箱子链**（`runners.ts:193,287` + `apis/mail139.ts`）：`querySpecTokenV2(toSourceId 001003)` → `mail.10086.cn/login/inlogin.action`（**XML 请求**）→ 缓存 `sid/rmkey` → `RmWeb/mail`（XML，判 `S_OK`）→ PE/gzip 日志上报 → `disk:convertPdfFromYunFile` → DES 解 account + RSA 解手机号 → `getUserTaskAndCloudStatusExternal` → AI 对话 SSE。这是全项目最长的一条依赖链，跨 4 个域。
-- **`SKIP_TASK_LIST`**：`[117,437,991,406,385,480,1022,1018,603,1021,120]`（明确不做）。
+- **`SKIP_TASK_LIST`**：`[117,437,991,406,385,480,1022,1018,603,1021,120]`。⚠ **它挡的不是"做不做"**（本文件原先写成"明确不做"，2026-09-24 按旧 TS 订正）：命中 ⇒ ① 通用那次"盲点" `task/click` **不发**（`tasks.ts:101-103`）、② 结果播报里**不出现**（`results.ts:33`）；任务列表照样拉、各自的专属 runner 照样跑。读成"这 11 个 id 永远不做"会漏掉一整批玩法。
 - **结果四象限**：完成 / 失败 / 无需做 / **需前往云盘或邮箱完成**（§1.4）。
 - **实测 bug**：`107`（云笔记）**恒跳过** —— 该 runner 读的是 `http` 返回值形状，与 `apis/note.ts` 实际返回不符，条件永远不成立。重写时先补一条"107 能被选中"的断言再动逻辑。
 - **新落点**：`app` 不该是一个能力，应拆成 `task-list`（查询）+ 每种玩法一个能力（`upload-file` / `create-note` / `create-and-delete-link` / `mail-read` …），由**组合流水线**（§3.3）拼回旧行为。这样每种玩法各自可测、可控风险、可单独禁用。
+- **Go 侧现状（2026-09-24）**：**只有读的那一半，且没有调用点**。上游口 = `internal/upstream/app_task_list_v2.go`（一口一次一个 group，body 逐字按夹具实拍，`activityid` 跟 `marketname` 走）；聚合 = `internal/app/task_matrix.go` 的 `AppTaskMatrix`（16 次串行、逐次容错并登记失败组、摊平 → 剥 HTML → 按 `id` 升序 → 按 `name` 去重保留 id 小的；`Pending()` 是 `enable !== 1` / `state === "FINISH"` 那道门）。三处**刻意不照抄旧 TS**（串行而非并发、十六次全挂才整体报错、`name` 缺席的条目各留各的）写在文件头。**未做**：能力登记与 WebUI 接线（= 要拍板，见 [`pending-decisions.md`](pending-decisions.md)）、任务码分发表与所有 runner（`task/click`、`doTaskPost`、139 邮箱子链…）、② 那口 `:7071`（属 #12 且实拍缺环）。⚠ `groupState.taskFinishState` 与 `process` **两格只存不判**（语义未验证）；"上游认不认 `activityid` 随市场名变"**一次真打都没有**。
 
 #### `ai-avatar` AI 头像（`packages/core/src/tasks/ai-avatar/`）
 
@@ -264,6 +334,31 @@
 
 - **副作用**：向用户网盘**上传**头像图，随后靠"文件名匹配"找回它 —— 同名碰撞即错删/错用（`file/create` 本身返回 `fileId`，旧代码这里没用它）。改成"上传响应里拿 ID"。
 - **参数**：`AI新头像.{开启=false, 每日生成次数}` 有三份不一致的默认值（schema 10 / 代码 5 / 文档 5 且标 1-20），§5.4；`开启` 这个门同样只在 CLI 生效。
+- **Go 侧现状（2026-09-24 第二轮改写，前一轮写的是"只有上游层、跑不起来"）**：**编排层已落地并接上执行** ——
+  这一项今天**点得到、跑得通（夹具上）**，是能力注册表里的第 **17** 条（码 `ai-avatar`，
+  `Kind:KindAction`、`Risk:RiskMedium`、⚠ `RunInBatch:false` ⇒ 调度与"全选批量"都不会替它跑，只有界面上点那一下会真发）。
+  **上游层八口**（`internal/upstream/app_ai_avatar.go`：`getHashLeft` / `draw` / `ai/image/merge` /
+  `ai/image/getStatus` / `image/upload` / `image/getWorkList` / `image/catalogFullPath`
+  ＋ 网盘侧 `hcy/file/list`）现在**每一口都有调用点**。三处与别的族刻意不同，都写在代码注释里：
+  ① 本仓库**第三套请求头集合**（旧 TS 的 `createHttp` 主实例：`content-type` **恒发**，
+  且 `jwttoken` 只对三台主机发 ⇒ `hcy/file/list` 那口**有 authorization、没有 jwttoken**，不是漏写）；
+  ② 两种信封共存（`rabactive` 是 `{code:0, result}`，网盘侧是 `{code:"0000", success, data}`）；
+  ③ `draw` 做成**三态**（抽中 / `408` 叫停 / 真失败），因为"停止"与"重试"的分叉
+  不能靠错误消息的中文子串判。
+  **app 层三份文件**（对应上面那条链的每一环）：`ai_avatar_png.go` 自写 **200×200 噪点 PNG 编码器**
+  （零第三方依赖，裸 base64 去 `data:` 前缀，与旧 `utils/png-generator.ts` 同形）；
+  `ai_avatar_run.go` 是编排 —— 生成 5 轮 × 每轮最多 2 次尝试、合成轮询 **8 次 × 3s**、
+  轮间 2s、抽奖每一枪之间 1s（读不到剩余额度时兜底抽 5 枪，最后一枪不等），
+  三处等待都走 `Waiter` 注入点（生产真等，测试用记录型钉"几次、多久"）；
+  `ai_avatar_files.go` 是"按**文件名**找回"那两函数（纯函数，同名即错配的风险写在文件头）。
+  ⚠ **本仓与旧实现的一处刻意不同**：抽奖某一枪**请求压根没发出去**时本仓**停手**（`AiAvatarDrawBlocked`），
+  旧实现是 `continue` 下一枪 —— 协议层分不开"上游回非 0"与"没发出去"，就按更保守那档办。登记成 Q21。
+  **仍未做的两件**：① **清理**（`batchTrash` 零实拍 ⇒ 写进网盘的那两张图今天没人删，见 P1 / R19 / R20）；
+  ② **一次都没真打过** —— `rabactive/*` 六口**零实拍**，测试只钉"发得出、形状不串台"，不钉语义；
+  档位表（`3`/`4`）、`408`、"路径末段就是 `fileId`"三格全部标成未验证，见
+  [`pending-decisions.md`](pending-decisions.md) 的 **R16 – R20**；参数面（每日几张）与 `imageUrl` 不设白名单
+  登记在 **Q18 – Q21**。
+  `jwttoken` 这一页**使用公共来源**（临时态，AGENTS §1.12）：抓到该页特有取法时要主动更正。
 
 #### `msg-push` / `notice` / `backup-gift`（同构：查状态 → 领）
 
@@ -317,6 +412,31 @@
 - **`play-ai-special`**：活动站会话（`querySpecToken` → `tyrzLogin(marketName shake_shake, sourceId 1314)`）+ **专用 HTTP 客户端**（同样 `setAuth` 空实现）+ 十余条 `visitlog/journaling` 埋点 + `newyear/task/step/click` + `ai.yun.139.com/api/image/aiRecognize` 与 `chat/v2/add`（**SSE**）+ `blindbox/lottery`。
   - ⚠ 三处设备画像互相矛盾：iPad UA、`x-DeviceInfo` 写 iPhone、另一套 client-info —— 真机上到底哪个生效必须实测（§5.6）。
   - 春日/夏日/秋日拍拍是**同一实现的不同期次**，不是三个能力（方案 §1.2 注）。
+  - **Go 侧现状（2026-09-24）**：
+    ①…⑤ 五口的上游层 + 30 条用例在 `internal/upstream/app_play_ai.go`；
+    **三样前置**（换票两步 / `visitlog/journaling` 埋点 / `chat/v2/add` 请求侧）在
+    `internal/upstream/app_play_ai_session.go`（743 行）+ 32 条用例 ⇒ 上面那句
+    "活动站会话（`querySpecToken` → `tyrzLogin(shake_shake, 1314)`）"**代码侧已经能建这一页自己的票**了：
+    `PlayAIQuerySpecTokenRequest`（**GET** `m.mcloud.139.com/ycloud/api/cloud/userdomain/v2/querySpecToken?targetSourceId=001005`，
+    与本仓已实现的 **POST** `querySpecTokenV2` 是**两个不同端点**）→ `PlayAITyrzLoginRequest`（复用 `TyrzLoginRequest`，
+    差别只有 body 六键与多一枚 `type: signupPlatform` 头）。
+    ⚠ 但①…⑤**仍然收调用方注入的 jwt** ⇒ 这一页"jwttoken 使用公共来源"（AGENTS §1.12 临时态）**没被切换**，
+    切换 = 多发两个本仓零实拍的上游请求 = **待拍板 P5**；缺的是实拍，不是线索。
+    签名已比对：旧 TS `auth/sign.ts` 的 `SALT_MAP[2]` 与本仓 `core/crypto.go` 的 `H5SignSaltKey=2`
+    **同盐同序同空段** ⇒ 埋点与换票都吃注入签名，本层不自己算。
+    ⚠ `chat/v2/add` **只构造请求、不发送**，SSE 响应**零解析**（零样本 ⇒ 不猜形状）。
+    **只读那一半（①②）已于 2026-09-24 接上执行**：能力登记 `play-ai-special`（注册表第十六条）
+    ＋ `internal/app/play_ai_run.go`（288 行编排，14 条用例）＋ server 接线挂在签到族那个共用外壳
+    `buildSignInChain` 上（`internal/server/run_dispatch_signin.go`）⇒ 复用的正是**签到页那一份票池**。
+    ⚠ 票**借**签到页那一条（`RecipeSignInPage`），referer 与 `showloading` **不借**（各按这一页实拍收成方法）⇒
+    含义与风险记成 **R12**；`90001` 在 newyear 信封里被单独立成"会话过期 ⇒ 刷一次重放一次"，
+    而**本族零样本、这一码从未在这六条里拍到过**，判据是签到族借来的 ⇒ **R11**（不是结论）。
+    ③`task/step/click` / ④`blindbox/lottery` / ⑤`aiRecognize` **仍未接**，各自卡在：
+    ③④ 吃那两条埋点前置门槛（旧 TS 的 `aiCameraHandler` 把埋点当**前置门槛**、失败就整件任务放弃，
+    而上游认不认这些埋点**未测试** ⇒ **P6** / R8）；④ 的额度语义未验证（见下一条）；
+    ⑤ 会**往用户网盘写文件**（`uploadToCloud:true`）⇒ **P1**。
+    ⚠ 抽奖那一步旧实现是**按 `totalLotteryCount` 循环抽**（与 `play-ai-lottery` 的"只抽一次"**不是一回事**，
+    接线时别把两族混成一个额度）。
 - **`play-ai-lottery`**：`POST auth-service/auth/getAccount {marketName:"National_playAI", sourceId:"1108"}` → `funai/api/page/getmodule`（读 `drawTimes`）→ `page/lottery`（**只抽一次**，不看剩余次数循环）。
   - ⚠ 用 `err.message.includes("500")` 判"次数用完" ⇒ 真故障会被误吞成正常结束。新实现要有明确业务码。
 
@@ -334,6 +454,29 @@
   - 未知码 ⇒ `info("需手动完成: <name> (<reason>)")`。
 - **状态码语义**（`statusText`，`:85-91`）：`0` 未完成 / `1` 已完成跳过 / `3` 奖品已兑完跳过 / `4` 明天再来跳过 / **`2` 未定义但会进入执行分支**；`completeTask` 的失败判据是 `!isNil(data.data?.status) && status!==1` ⇒ **status 缺省视为成功**（宽松）。
 - ⚠ **先记账后动作**：`installApp/completeCloudUse/answerTopic` 都先 `userCompleteTask` 再执行实际动作 ⇒ 后续失败时任务已标记完成。新实现要么先做后记，要么把"登记完成"当作显式的最后一步。
+  - **Go 侧现状（2026-09-24）**：上游协议层**五份文件**（`app_cloud_phone{,_headers,_task,_install,_topic}.go`，
+    非测试合计 2737 行）、21 个 `(u *Upstream)` 入口、上游侧用例全绿；
+    **只读那一半已经接上执行**（能力 `cloud-phone-redpack` + `internal/app/cloud_phone_run.go` ＋
+    `cloud_phone_session.go` 那份**独立的活动站票池**，26 条顶层用例 ⇒ 界面上看得见余额与任务清单，
+    但**一件任务都不代做**）；**写侧**（签到 / 逐任务 / 装机 / 答题 / 完成登记）**仍无调用点**
+    —— 真扣豆 + 真装 APK，等 **P3**。
+  - ⚠ **整族的响应侧零实拍**（夹具 39 条里 `cpactiv.buy.139.com` 只有 10 条，且装机链那七条一条没拍到）
+    ⇒ 下面这些"取层"钉的是**与旧 TS 字面量一致**，不是"上游真这么回"（记成样本缺口 **R9**，不是缺陷）。
+  - **七条口的路径与 body 已按旧 TS 逐字对齐**（`api.ts:115-171`，基址 `https://cpactiv.buy.139.com/cloudphone-market`，
+    `req()` 一律 `POST` + body `{version:"SYS_CONFIG_Y", ...data}`）：
+    `/thirdapi/huawei/thirdQueryUserRelationshipV2` `{pageNumber:1,pageSize:10,status}`、
+    `/user/gethwToken` `{}`、`/redpacket/configAppList` `{platformType:1}`、
+    `/app/activity/instanceApkInstallStatus` `{hwToken,apkList:[packageName],instanceIdList:[instanceId]}`、
+    `/app/activity/apkInstall` `{instanceId,appId,hwToken}`、`/app/activity/appInstallTaskStatus` `{taskId,hwToken}`、
+    `/redpacket/userInstallApp` `{taskId,appId,platformType:1}` ＋ **`existed` 仅在非 nil 时才带**（`isNil` 那一格）。
+  - **两处取层的准确写法**（订正前一处会**把锁屏机送去装 APK**）：
+    云机列表 = `data.(data.data 是对象 ? data.data : data).subscribeDetails`（`task.ts:193-195`），
+    锁屏位 = 条目里的 `subsProdInstances[0].lockStatus`（`task.ts:274-281`，**不是**条目顶层那个同名键；
+    旧实现先 `find` 一台未锁的、找不到退回 `phones[0]` 再判 `==="Y"` 放弃）；
+    装没装 = `statusData.data` 是数组则取 `[0]`、否则 `.list[0]`，再 `.instanceList[0].installStatus === 2`（`task.ts:310-313`，
+    **严格等于数字** ⇒ 我们这里"字符串 `"2"`"读成 nil，与旧实现同宽）。
+    另：`configAppList` 的 `id`（记账用）与 `packageId`（`apkInstall` 的 `appId`，旧实现 `String()` 过）是**两个不同来源**，不可互换。
+  - **`userInstallApp` 本轮补上了**（前一轮点名"没做的事"）：构造器 + 发送方法，只判信封。
 
 ### 2.5 档 5 · 最高风险：`kouling` / `exchange`
 
@@ -371,6 +514,32 @@
     本地单机工具，免不免登录在效果上一样，当时只是懒得写。⇒ 新项目把它当**普通待补的鉴权缺口**处理即可
     （按服务端的统一会话鉴权补齐；Go 侧已是这个口径 —— `internal/server` 白名单之外一律要会话），
     不必为它保留例外，也**不必**在上游"接口是否公开"这层继续展开论证。
+- **Go 侧落点（2026-09-24，三层都在夹具上跑绿；只读那一半已真打上游、`exchangeV3` 仍未真打）**：
+  - 上游：`internal/upstream/app_exchange.go`（`exchangeList` 解析 + `exchangeV3` 下单，
+    **业务码是数据不是错误** —— `ParseExchangeResult` 不走 `EnsureOKWithHint`，因为 `514` 可重来而
+    `2301` 再怎么试都不成交）、`app_exchange_slide.go`（`getSlide`，form-urlencoded + 两张图，
+    与那一族不同主机路径，故**单独一份**且不许复用请求构造）。
+    逐条 URL/字段/码都能在 `docs/capture/app-exchange-samples.txt` §5 指到原文 —— 这一族是全仓库
+    **唯一**"写操作有三条真机实拍"的链路。
+  - 判定：`internal/app/exchange_plan.go`（`LocateExchangePrize` 只认 id 与**全等**名称，不做前缀匹配；
+    `PlanExchange` 十七档；`PlanExchangeWait`）。
+  - 链：`internal/app/exchange_run.go`（`ExchangeSliderRounds = 2` 且只有 `514` 允许再来一轮；
+    `code 0` 后**回查 `infoV3` 的余额差 == 价格**才算成交，查不动/对不上落 `Unknown` 而**不重发**；
+    取不到 `deviceId` ⇒ 一枪不发）。
+  - 接线：`internal/server/run_dispatch_exchange.go`（必填 `prizeIdOrName` 空 ⇒ **400 且不落运行记录**；
+    互斥键吃 `prize` + `skipWait` —— 旧实现 lockKey 不含 prizeId 那个缺口就是上面"幂等缺口"那一行）。
+  - 只读选品接口（2026-09-24 新建）：`internal/server/exchange_prizes.go` 的
+    `GET /api/accounts/{id}/exchange-prizes`（挂在 `s.authed` 里）+ `web/src/ui/exchange-prizes.tsx`。
+    **按账号**而不是照旧项目开一条全局 `/api/exchange/prizes` —— `limit` 本来就是各账号自己的状态
+    （见上面 §5.1 那条 ⚠ 与 §5.6），全局一条等于把别人的可兑状态念给你听。
+    只打 `exchangeList` 一枪、**不读余额** ⇒ 界面上的 `canOrder` 在"云朵不够"那一档偏宽。
+    这一条已于 2026-09-24 用库里两个真账号**经本仓代码真打成功**（55 件 / 9 组、四档 `plan` 露面），
+    读数与边界见 [`status.md`](status.md)「兑换页的选品只读接口」那一节。
+  - **与旧实现的三处刻意不同**：① 不接 `visitlog/journaling` 两条埋点（登记为待拍板，见下）；
+    ② 下单走实拍那一条 **`exchangeV3`（POST + JSON）**，不是旧项目 `2.5` 上面那行的 `exchangeV2` GET；
+    ③ `skipWait` **默认 `true`** —— 实拍那一笔成功发生在 `12:16` CST，不在"整点前 10ms"窗口里
+    ⇒ "等整点"是旧实现的时序取向而**非上游硬条件**，没有理由让一趟运行在没人看着时挂到下一个整点。
+    `offset` 那一栏**没有**进参数面（由本地图像匹配算出，交给用户填一个数等于把扣豆成败押在猜数上）。
 
 ---
 

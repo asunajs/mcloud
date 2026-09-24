@@ -54,6 +54,28 @@ type RunWorld struct {
 	deviceFile string
 	rng        core.Random
 
+	// sessions 是**跨请求**的会话票池，与上面那张登记表同一个意义：
+	// 界面上连点三次签到是三次请求，而它们应当共用同一张 `jwttoken`
+	// （用户 2026-09-23 的口径；判据与"为什么不设 TTL"见 `internal/app/signin_session_pool.go`）。
+	// 每次请求新建一份 ⇒ 它形同不存在，表现就是每次都重打三枪。
+	sessions *app.SessionPool
+
+	// cloudPhoneSessions 是**红包派对活动站**那张票的跨请求池。
+	//
+	// 它与上面那份**不是同一个池、也不能共用**：签到那一条交的是 `jwttoken`，
+	// 这一族每个请求要的是活动站自己的 `token`（签名算式都不一样，见
+	// `internal/app/cloud_phone_session.go` 文件头）。
+	// 共用一份池的表现是两条链互相顶票 ⇒ 每次都重建。
+	cloudPhoneSessions *app.CloudPhoneSessionPool
+
+	// waiter 是能力链里"等一会"的注入点（今天只有 AI 头像那条用到：合成轮询 8×3 秒）。
+	//
+	// 默认是 [app.RealWaiter]（真的等），只有测试夹具顶掉它（`newTestRunWorld`）。
+	// ⚠ 这里**不**开一个 `Deps` / 命令行选项：那条链的三处等待是**判据的一部分**
+	// （上游要 3 秒才合成得完），不是一个"用户可配置的时长"，开一栏等于承诺一个不存在的配置面。
+	// 与登录那条的 [Deps.QRWaiter] 同族但不同处：那一个是"轮询扫码"的用户可见节奏。
+	waiter app.Waiter
+
 	// deviceShort 在**构造时**定一次：一次运行（乃至一个进程）对应一种设备形态。
 	// 放进账号循环会让每个账号拿到不同的 `device_short`（CLI 那侧的同名注释同义）。
 	deviceShort string
@@ -77,12 +99,15 @@ func newRunWorld(
 	rng core.Random, deviceFile string,
 ) *RunWorld {
 	return &RunWorld{
-		upstream:    upstream.NewUpstream(client),
-		dialer:      dialer,
-		registry:    mcloudexec.NewRunRegistry(),
-		deviceFile:  deviceFile,
-		rng:         rng,
-		deviceShort: app.NewAppDeviceShort(rng),
+		upstream:           upstream.NewUpstream(client),
+		dialer:             dialer,
+		registry:           mcloudexec.NewRunRegistry(),
+		deviceFile:         deviceFile,
+		rng:                rng,
+		sessions:           app.NewSessionPool(),
+		cloudPhoneSessions: app.NewCloudPhoneSessionPool(),
+		waiter:             app.RealWaiter{},
+		deviceShort:        app.NewAppDeviceShort(rng),
 	}
 }
 
@@ -126,12 +151,42 @@ type runBuilder func(
 // （注册表、本表、`runs.capability` 那一列），拼错**不会编译报错也不会红**，
 // 只会让一条已经接好的能力安静地回 501。
 //
-// 表里没有的两条（`exchange` / `cloud-snapshot`）是**真的还没接**：
-// 兑换是不可逆消耗、快照要另一条采集链，两者都在待办里，不在本轮范围内。
+// 表里**没有**空位了：注册表那十七条现在全部接上了执行（2026-09-24 最后三条是
+// `cloud-phone-redpack` / `play-ai-special` / `ai-avatar` —— 前两条只接了**只读那一半**，
+// 第三条接的是写那一半，代价与"为什么不进编排"写在 `registry.go` 那一条的注释里）。于是 501
+// 那一支只剩"注册表里根本没这个 code"的邻近情形（`runs_test.go` 的
+// [TestRegisteredButUnwiredCapabilityIsNotImplemented]）—— 别把"全接上了"写成
+// "这条用例不再需要"：那是唯一一处能证明"没接时不会假装受理 202"的地方。
+//
+// ⚠ `exchange` 接上 ≠ 真跑过：它是**不可逆消耗**（真扣云朵），本仓的领域层用例
+// 是夹具/回放，"链跑成真扣豆"那一格仍标待验证（怎么验见
+// `internal/server/run_dispatch_exchange.go` 文件头与 `docs/capture/app-exchange-samples.txt` §5.4）。
 var runBuilders = map[string]runBuilder{
-	capabilities.CodeLiveRoom:    buildLiveRoomRun,
-	capabilities.CodeSign:        buildSignInRun,
-	capabilities.CodeAuthRefresh: buildAuthRefreshRun,
+	capabilities.CodeLiveRoom:      buildLiveRoomRun,
+	capabilities.CodeSign:          buildSignInRun,
+	capabilities.CodeAuthRefresh:   buildAuthRefreshRun,
+	capabilities.CodeCloudSnapshot: buildCloudSnapshotRun,
+	capabilities.CodeReceive:       buildReceiveRun,
+	capabilities.CodeMultiple:      buildClaimRun(app.ClaimKindSignInMultiple),
+	capabilities.CodeBackupGift:    buildClaimRun(app.ClaimKindBackupGift),
+	capabilities.CodeRevival:       buildClaimRun(app.ClaimKindRevival),
+	capabilities.CodePrizes:        buildPrizesRun,
+	capabilities.CodeTaskList:      buildTaskListRun,
+	capabilities.CodeNotice:        buildNoticeRun,
+	capabilities.CodeMsgPush:       buildMsgPushRun,
+	capabilities.CodeFunAI:         buildFunaiRun,
+	capabilities.CodeExchange:      buildExchangeRun,
+	// 红包派对这一条**不在**上面那一族的世界里：它用的是活动站自己的票，
+	// 所以走 [Server.cloudPhoneWorld] 那份装配（为什么不共用写在
+	// `run_dispatch_cloud_phone.go` 文件头）。
+	capabilities.CodeCloudPhoneRedpack: buildCloudPhoneRedpackRun,
+	// 拍拍这一条**在**上面那一族的世界里：它今天借的就是签到页那张 `jwttoken`
+	// （§1.12 的临时态，留痕与"哪天改"写在 `internal/app/play_ai_run.go` 文件头），
+	// 所以它复用 [Server.signInWorld] 与那一份票池，不另起一份装配。
+	capabilities.CodePlayAISpecial: buildPlayAISpecialRun,
+	// AI 头像也借签到页那张票（§1.12 的临时态），但它**不走**共用外壳：那条链要
+	// 多带一份"等一会"的注入点（理由见 `buildAiAvatarRun` 的注释）。
+	capabilities.CodeAiAvatar: buildAiAvatarRun,
 }
 
 // builderFor 查这一条能力接上了执行没有。
@@ -191,7 +246,14 @@ func (s *Server) launchRun(
 		out = append(out, acceptedRun{Account: account, RunID: plan.RunIDs[i]})
 	}
 
-	runner := app.NewRunner(s.store, spec.scope, s.clock, s.runs.registry, s.bus)
+	// 推送接在这里，而不是接在某个具体能力上：**任何**一条走这条路的能力，收尾都该
+	// 按同一份配置推一次 —— 各能力自己推就会各写一份门槛判断（那正是旧项目
+	// "有的能力推了、有的没推"的成因）。
+	//
+	// `s.notify` 为 nil 时 [app.WithRunNotify] 等于不接：运行器不攒过程话、
+	// 收尾一句都不推（见 `internal/app/run.go` 的 `RunSummary.Notify`）。
+	runner := app.NewRunner(s.store, spec.scope, s.clock, s.runs.registry, s.bus,
+		app.WithRunNotify(s.notify.RunNotify()))
 	// ⚠ 脱开调用方的上下文：HTTP 那条路上客户端关掉页面，不该把一趟**已经往上游
 	// 投了口令**的运行半途掐掉（那会留下一条永远 `running` 的记录，而真实动作
 	// 已经发生了）；调度那条路上进程收尾时同样让它跑完而不是腰斩。
@@ -234,35 +296,6 @@ func buildLiveRoomRun(
 			ParamsDigest: liveRoomDigest(params),
 		},
 		task: liveRoomTask(s.store, scope, s.runs, s.clock, s.rng, device, params),
-	}, nil
-}
-
-// buildSignInRun 是"每日签到"这一条。
-//
-// 参数面**只有** `accounts` 与 `accountMode` 两栏（[capabilities.accountSelector]），
-// 而且这**是**对拍面：`sign` 的声明与 Rust 侧逐字对齐，所以这里不能顺手加一栏
-// "要不要领取"。领取是这条链的固有部分 —— 声明里那半句"并领取奖励"就是它的承诺，
-// 于是 `Receive` 在这个调用点上显式写 `true`（理由见 [app.SignInRun.Receive]）。
-func buildSignInRun(
-	ctx context.Context, s *Server, scope core.Scope,
-	capability capabilities.Capability, raw map[string]json.RawMessage,
-) (runSpec, *core.Error) {
-	targets, perr := s.selectedAccounts(newRunParams(capability, raw), scope, ctx)
-	if perr != nil {
-		return runSpec{}, perr
-	}
-	device, perr := s.runs.appDevice()
-	if perr != nil {
-		return runSpec{}, perr
-	}
-	return runSpec{
-		scope: scope,
-		plan: app.RunPlan{
-			Capability:   capability.Code,
-			Accounts:     targets,
-			ParamsDigest: signInDigest(),
-		},
-		task: signInTask(s.store, scope, s.runs, s.clock, s.rng, device),
 	}, nil
 }
 
@@ -311,7 +344,7 @@ type runConclusion interface {
 
 // accountRunTask 把领域层的"跑一个账号"接成编排层的 [app.RunTask]。
 //
-// ⚠ 三条链共用它的唯一理由就是那个 nil 陷阱：`perr` 是 `*core.Error`，
+// ⚠ 所有链共用它的唯一理由就是那个 nil 陷阱：`perr` 是 `*core.Error`，
 // 一个 nil 的它装进 `error` 接口之后是**非空**接口，于是"这个账号跑成功了"
 // 会被编排层记成一次失败（而且错误串还是空的）。各写一遍的话，
 // 漏掉那一处的调用点不会报错，只会让历史列表里多出一堆没来由的红色。
@@ -354,35 +387,13 @@ func liveRoomTask(
 			Device:   device,
 			Params:   params,
 			Progress: progress,
+			// 票池是**跨请求**那一份：连着点三次"领取小红花"只建一条会话。
+			Sessions: world.sessions,
 		}.RunAccount(ctx, account)
 	})
 }
 
-// signInTask 同 [liveRoomTask]，只是链换成"签到 + 领取"。
-//
-// `dialer` 这里用不上：签到整条链都是 HTTP，不碰弹幕 WS。所以它虽然共用 [RunWorld]，
-// 只取其中的出站 HTTP 那一份。
-func signInTask(
-	store core.StateStore, scope core.Scope, world *RunWorld,
-	clock core.Clock, rng core.Random, device upstream.AppDevice,
-) app.RunTask {
-	return accountRunTask(func(
-		ctx context.Context, account core.AccountID, progress app.RunProgress,
-	) (app.SignInAccountResult, *core.Error) {
-		return app.SignInRun{
-			Store:    store,
-			Scope:    scope,
-			Upstream: world.upstream,
-			Device:   device,
-			Clock:    clock,
-			Random:   rng,
-			Receive:  true,
-			Progress: progress,
-		}.RunAccount(ctx, account)
-	})
-}
-
-// authRefreshTask 同 [signInTask]，链换成"到期才换凭据"。
+// authRefreshTask 同 [liveRoomTask]，链换成"到期才换凭据"。
 func authRefreshTask(
 	store core.StateStore, scope core.Scope, world *RunWorld,
 	clock core.Clock, rng core.Random, device upstream.AppDevice, leadDays float64,

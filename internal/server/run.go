@@ -79,7 +79,10 @@ func Run(deps *Deps, opts Options, stdout io.Writer) error {
 
 	srv := New(store, deps.clock(), deps.random(),
 		Config{SecureCookie: opts.SecureCookie},
-		deps.loginHub(store, opts), deps.refresher(store, opts), deps.runWorld(opts))
+		deps.loginHub(store, opts), deps.refresher(store, opts), deps.runWorld(opts),
+		// 推送：WebUI 手动跑与调度到点跑**两条路**都在收尾推（同一个 Runner，见
+		// [Server.launchRun]）。默认**不响**，因为 `notify_config.enabled` 的默认值是关。
+		WithNotifyWorld(deps.notifyWorld(store)))
 
 	// 横幅打的是 listener **实际**绑上的地址，不是 `--host:--port`：
 	// `--port 0` 是合法的（让内核挑一个），打参数会印出一个谁也没在听的端口。

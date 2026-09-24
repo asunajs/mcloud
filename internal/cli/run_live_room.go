@@ -100,6 +100,8 @@ func runLiveRoom(deps *Deps, out *output, a *LiveRoomArgs) error {
 	run := app.LiveRoomRun{
 		Store: store,
 		Scope: scope,
+		// ⚠ `Sessions` 不给（= 轮级票，见 [app.SessionPool] 与 CLI 签到那侧的同款注释）：
+		// 一次调用里每个账号只跑一轮，"连点两次共用一张票"是服务端那一路的事。
 		Driver: app.LiveRoomDriver{
 			Upstream: upstream.NewUpstream(deps.http()),
 			Dialer:   deps.websocket(),
@@ -305,6 +307,7 @@ func liveRoomJSON(outcome liveRoomOutcome) map[string]any {
 		payload["gained"] = report.Gained()
 		payload["succeeded"] = report.Succeeded()
 		payload["invalidCodes"] = report.InvalidCodes
+		payload["expiredCodes"] = report.ExpiredCodes
 		payload["otherCodes"] = report.OtherCodes
 		payload["revivalFlowers"] = report.RevivalFlowers
 		payload["draws"] = liveRoomDrawsJSON(report.Draws)
@@ -316,11 +319,23 @@ func liveRoomJSON(outcome liveRoomOutcome) map[string]any {
 //
 // # 为什么非要有这个字段
 //
-// `otherCodes` 只说"这个口令被归进了未分类那一类"，而"未分类"是个**集合**：
-// `200112`（已兑换）与任何一个我们没见过的码都会落进去 ⇒
-// 在输出上**分不出来**。而"抓到一个真的 `200112`"正是未验证清单里的一条
-// （它至今没有样本，见 [upstream.CodeRedFlowerAlreadyDrawn]）——
-// 没有这个字段，那条**只能靠代理抓包**才能关掉，而那是最容易一直拖下去的一条。
+// 报告上 `200112`（已兑换）是**隐身**的：它既不进 `InvalidCodes`
+// （[upstream.RedFlowerDrawOutcome.RejectedKouling] 只认 `200108`，已兑换说明口令本身是对的），
+// 也不进 `OtherCodes`（那一栏只收 [upstream.RedFlowerDrawOther]）⇒
+// 一个"已兑换"的口令在 `SummaryLine` 里**一行都不会出现**，只剩"成功 0 朵"这个
+// 看不出原因的结果。
+//
+// ⚠ 早先这里写的是"`200112` 与没见过的码都落进未分类那一栏" —— **理由是错的**
+// （结论对）：已兑换有自己那一类 [upstream.RedFlowerDrawAlreadyDrawn]，根本不进那栏。
+// 真正需要这个字段的理由是上面那句"它在报告里隐身"。
+//
+// ⭐ 2026-09-23：抓包拿到了第一条真 `200112`
+// （`{"code":200112,"msg":"口令已兑换过了，每个口令只能兑换一次!"}`，见 capture §10.2），
+// 未验证清单里的这一条已关掉。⭐ 而"这个一次"的适用范围**有答案**：
+// **按账号**算 —— **两个不同账号投同一条口令，各自都会成功**（**用户口述**：
+// 2026-09-22 两次纠正、2026-09-23 定稿）⇒ ⚠ **不存在"口令被消耗"**。
+// ⚠⚠ 早先这里写着"仍无证据，别往下写" —— **那句是错的**（坑表 **#142**）：
+// 把"本仓无实拍"当成了"这个说法没依据"。
 //
 // ⚠ 只出 `upstreamCode`（一个整数），**不出** [upstream.RedFlowerDrawOutcome.Message]：
 // 那是上游原文，jsontags 白名单里写明它"能自动 marshal 就离顺手把整个结构写进

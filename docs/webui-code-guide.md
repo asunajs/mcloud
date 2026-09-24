@@ -143,6 +143,54 @@ const Dialog = (props: DialogProps) => {
 > ⚠ 顺带一条排查噪声：改完 `build` 后浏览器可能仍在跑**旧哈希**的那份 JS
 > （`index.html` 是 `no-cache`，但 `#hash` 跳转不触发重新加载）。
 > 先看 `document.querySelector('script[src]').src` 里的哈希与 `dist/` 是否一致，再判"没修好"。
+> 用 CDP 驱动 headless Edge 核验时（2026-09-23 推送设置页那一轮），同一件事的表现是
+> **"改了三遍页面纹丝不动"**：`/assets/*` 是内容哈希名 ⇒ 响应头带 `immutable`，
+> 换哈希后浏览器**根本不发请求**就直接用缓存那份。⇒ 每条 CDP 会话起手先
+> `Network.setCacheDisabled {cacheDisabled:true}`，再看产物哈希确认跑的是新 bundle。
+
+#### 补记（2026-09-23 实测、2026-09-24 成文，推送设置页那一轮）：两条"后端/回调里的一行"造成的整页静默失效
+
+同一族第三条与第四条：都不报错、`typecheck` 过、`build` 成功、门禁甚至**全绿**。
+
+**⑤ 后端 nil slice 出网成 `null` ⇒ 前端整页不渲染，而测试读成"空清单"通过**
+
+`internal/server/notify_view.go` 里 `configured` / `sendable` 取自 `config.Channels.Names()`
+一类的 helper，一家都没配时返回 **nil slice**；Go 的 `json.Marshal` 把 nil slice 编成
+`null`（不是 `[]`）。前端 `applyView` 里那句 `next.configured.includes(name)` 当场抛
+`TypeError` ⇒ `load()` 落进 catch、`state` 停在 `'error'`。
+实测表现：**设置页一张卡都没有**（`document.querySelectorAll('.card').length === 0`），
+而同一位置读 `view.value` 有值 —— 因为赋 `view.value` 的那一行在抛错**之前**。
+
+⚠ 这一现场曾被误归因成"Vapor 在函数体里读 ref 只读一次"（§9.2④ 那一族的形状很像），
+追到响应体才看清真根因。⇒ 记一条判据：**"某个 ref 读了不重读"这种结论，必须先排除
+"该 ref 所属的那次渲染压根没走到成功分支"** —— 先看 `state`/`status` 停在哪个值、
+再看接口响应体的**字面量**，别看代码形状像什么就上结论。
+
+两处收口：① 后端在出网前把 nil 裁成 `[]core.NotifyChannel{}`（注释写明 `null` 在界面上
+不是"列表为空"而是"这格坏了"）；② 测试侧的取值 helper 原来写 `raw, _ := view[key].([]any)`
+—— 类型断言失败时 `raw` 是 `nil`，`len(nil)==0` 读成"空清单"，于是**后端坏了、门禁绿着**。
+改成显式判"这一格在不在"+"是不是数组"，另加一条**线格式断言**直接扫响应体的字节
+（含 `"configured":[]`、不含 `"configured":null`）。
+
+> **怎么核对**：数组形态的接口字段要有一个测试**断 JSON 文本本身**（`rec.Body.String()`），
+> 只断"解码后的长度"永远抓不到 `null`。
+
+**⑥ `forEach` 回调里的 `return` 不是 `break` ⇒ 错误条目被丢出数组，提示念成另一句**
+
+`web/src/ui/notify-form.ts` 的 `buildCustomPostRows` 在 `forEach` 回调里遇到非法值时写的是
+`row.__error__ = …; return`，本意是"这一条打完标记就不再填后面的字段"。
+`return` 退出的是**回调**，`rows.push(row)` 在回调之后 —— 于是这条**压根没进数组**，
+下面那句"扫一遍有没有 `__error__`"成了永不命中的死代码。后果不是少一句提示，是**报错内容错**
+（下面两条按代码读出，未逐条实测）：
+库里原有两条、第 1 条 headers 填了半截 JSON ⇒ 界面念「这一家一条都没有」；
+残缺数组下第 2 条坏 ⇒ 念成「第 1 条没有填地址」，**条号错位**。
+改成 `break`（内层 `for` 退出）+ 照常 `rows.push(row)`。
+
+> **怎么核对**：这类"数组里带着标记往下走"的构造，反向验证要**造一条坏数据**看它报哪一句。
+> 本轮真机（`customPost` 第 1 条的 `headers` 填成半截 JSON）⇒ 修复后念的是
+> 「第 1 条：请求头（headers） 还不是合法 JSON：先写成完整的一串对象，例如 {"topic":"xx"}」，
+> 弹窗不关、错误落在窗内的 `.alert-error`，`window.__net` 读回 `net:0`（一个请求都没出网）。
+> 判据回指代码注释：`ui/notify-form.ts` 的 `buildCustomPostRows` 头注。
 
 ### 产物大小怎么读（2026-09-21 实测，别再判成"没做 tree shaking"）
 

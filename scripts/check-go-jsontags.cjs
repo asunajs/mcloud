@@ -116,6 +116,252 @@ const UNTAGGED_ALLOWED = {
     '刷新那一趟的**入参集**（同 `SignInRun` 一族），字段里有 `core.StateStore` 与 `core.Scope`：给它们补 tag 无意义，而"整个结构体能序列化"这件事本身会被误用；`LeadDays` 与 `PCPlatform` 是**这台机器定的数**，刻意不对外',
   'internal/server/run_dispatch.go:acceptedRun':
     '一次受理的**内存配对**（账号 ↔ runId）。对外那份由 `internal/server/runs.go` 的 `runPairings` 逐字段抄成 `{"account":…,"runId":…}` —— 理由同 `LoginSessionView`：这个结构体会加字段（比如内部序号、重试次数），而"加了就自动出网"正是契约漂移最常见的路径',
+  // ── 签到页那一族（2026-09-23 登记，`receive` / 三条开关 / `prizes` / 快照接上执行带来的）──
+  // 同一族规矩：`SignInWorld` 是**入参集**（装着库句柄与 scope），另外四个是**内存结论**
+  // （外层换算成 `core.RunReport` 与事件流才出网，且对外只出现小结那一句人话）。
+  // ⚠ `ClaimResult.Gained` 一类字段将来要进界面时，走 server 层逐字段列白的响应体，
+  // 而不是在这里补 tag —— 与上面 `LoginSessionView` 那条同一条理由。
+  'internal/app/signin_world.go:SignInWorld':
+    '跑签到页那一趟的**入参集**（库 / scope / 上游 / 设备档案 / 时钟 / 随机 / 票池 / 进度回调），字段里全是句柄；Rust 侧这里是一组独立参数，不 Serialize',
+  // ── 推送（通知）那一族（2026-09-24 登记，`internal/core/mail.go` 带来的）──
+  // ⚠ 同一族里登记的都是**不面向网络**的那几个：`NotifyConfig` 与十个渠道配置
+  //（库里那一行 `notify_config` 存的就是它）带 tag 进 JSON，所以"凭据不整体出网"
+  // 那条纪律落在 server 层：对外走逐字段列白的**脱敏视图**（落在
+  // `internal/server/notify_config.go`，随该文件落地），并要有一条测试钉
+  // "响应体里不许出现任何已配的密钥"。
+  'internal/core/mail.go:MailMessage':
+    '一封要交给 SMTP 实现的**内存信**（`Username` / `Password` 是授权码本体）。它一旦能被整体 marshal，"顺手把消息写进日志或响应"就等于把授权码出网；`SecretValue.String()` 只挡打印、不挡 `encoding/json`（见 `internal/core/model.go`），所以这里靠"没有 tag"挡。推送正文对外只有小结那一句，走 app 层的字符串，不经过这个结构',
+  'internal/upstream/notify.go:NotifyResult':
+    '一家渠道这一次的**内存结论**（渠道名 + 三档 + 一句人话）。`Reason` 里放的是"缺哪个字段 / HTTP 状态码 / 渠道回的那句 / 传输层错误的**类别**"（见 `transportReason`），本身不含凭据；但不给 tag 是为了让"整个 report 被顺手 marshal 出去"这条路走不通 —— 对外那一族形状将来在 server 层逐字段列白（同 `LoginSessionView` 的理由：结构体会加字段，而"加了就自动出网"是契约漂移最常见的那条路）',
+  // ⚠ 上面那条"将来在 server 层逐字段列白"今天**已落地**：`internal/server/notify.go`
+  // 的试发响应与 `notify_view.go` 的脱敏视图都是逐字段构造的 map，这四个结构体
+  // 一个都没有被整块 marshal 过。
+  'internal/app/notify_run.go:NotifyLogLine':
+    '一条要进推送正文的**过程话**（档位 + 时刻 + 文本）。它是 `FormatNotifyBody` 的入参，出网的是**拼好的那一段字符串**（正文），不是这一条的形状；补 tag 会把"正文里每行长什么样"（`[info 14:00:00]…`）变成两份真相',
+  'internal/app/notify_run.go:NotifyInput':
+    '一次收尾推送的**入参集**（这一趟的结论 + 过程话），字段里装着 `core.RunReport` 与切片；Rust 侧这里是 `dispatch_notify` 的一组独立参数，不 Serialize',
+  'internal/app/notify_run.go:RunNotifyResult':
+    '一次收尾推送的**内存结论**（跳过原因 / 逐家结果 / 家数）。`Report` 就是上面那个 `NotifyResult` 的切片（同样不 marshal）；对外只有 `SummaryLine()` 那**一句人话**，走 `RunSummary` 的字符串，所以这一族刻意没有 JSON 形状 —— 界面要逐家展示时走 server 层列白，不在这里补 tag',
+  'internal/io/mail.go:SMTPSender':
+    'SMTP **发送器本身**（组装根持有的句柄）：`TLSConfig` 里可能装着客户端证书私钥，`dial` 是函数（marshal 到它直接报错）。它是依赖不是数据模型，同 `SignInRun` / `RefreshRun` 那一族',
+  'internal/app/signin_claims_run.go:ClaimRun':
+    '三条月度开关共用的**入参 + 档位**（`Kind` 决定发哪个请求），不是数据模型；分派表把它建出来后只调用 `RunAccount`',
+  'internal/app/signin_claims_run.go:ClaimResult':
+    '一次领取的**内存结论**（档位 / 领到多少 / 原因），出网那份是 `core.RunReport` 里逐字段构造的 summary 与待办；⚠ 它带 `Account`，整体 marshal 等于把账号标识塞进每条响应',
+  'internal/app/receive_run.go:ReceiveResult':
+    '一次领取的**内存结论**（逐条实况 + deviceId 失败原因），同上只经 `RunReport` 出网；`Outcomes` 里装着上游原文，不是对外契约',
+  'internal/app/cloud_snapshot_run.go:CloudSnapshotResult':
+    '一次余额采集的**内存结论**（余额原值 + 写进去的那条日快照）。落库走 `RecordCloud` 的窄写，出网走 `RunReport` 那句话；给 `Stats` 补 tag 会把 `core.CloudStats` 的形状间接变成契约',
+  'internal/app/prizes_run.go:PrizesResult':
+    '一次奖品查询的**内存结论**（`[]upstream.PrizeRecordItem`）—— 字段形状由上游决定，整块 marshal 等于把上游的字段约定写进我们自己的契约（同 `QrProgress` 那条理由）',
+  // ── 新链路批（2026-09-23 登记：`task-list` / `notice` / `msg-push` / `fun-ai`）──
+  // 同一族规矩，但**分两类**登记（别合并成一句"都是内存里的"）：
+  //
+  //  · `internal/upstream/app_*.go` 那八个是**上游响应的解析结果**：字段名与形状
+  //    由上游决定，而且它们大量用指针表达"上游没给"（≠ 给了 0）。补 tag 会先把
+  //    "上游的字段约定"写成"我们的对外契约"，而这两件事在本仓库是分开的。
+  //  · `internal/app/*_run.go` 那八个是**一次运行的内存结论**：对外只经
+  //    `core.RunReport`（小结那一句人话 + 待办）出网；`Error` / `Reason` 两格
+  //    装的是**上游原文**，整块 marshal 等于把上游文案当结构化字段承诺给前端。
+  //
+  // ⚠ 界面将来要逐字段展示某一格时，走 server 层**逐字段列白**的响应体
+  //（同 `LoginSessionView` / `runPairings` 那条理由），不要在这里补 tag。
+  'internal/upstream/app_task_list.go:TaskItem':
+    '`taskListV3` 的**一条**任务（内存解析结果）。实拍里 `state`/`limitType` 的取值集只见过两三种，补 tag 会把这份未穷举的枚举变成契约',
+  'internal/upstream/app_task_list.go:TaskList':
+    '`taskListV3` 的整份解析结果（条目 + 顶层 `taskFinishState`）。后者语义**未验证**（只存不判），更不能对外承诺它的形状',
+  'internal/upstream/app_task_list_v2.go:TaskV2Item':
+    '`taskListV2` 的一条任务（嵌 `app_task_list.go:TaskItem` 那六个共用字段 + 这一口才读的 `enable`/`currstep`/`process`/`marketname`）。⚠ 嵌进来的那份 tag 归外层结构体管，所以它必须与 `TaskItem` 同进同退；且 `process` 在实拍三条里恒 0 而 `state` 已是 `FINISH` ⇒ "进度"这一格口径未验证，不能承诺给前端',
+  'internal/upstream/app_task_list_v2.go:TaskListV2':
+    '`taskListV2` **一个 group** 的解析结果。`GroupFinishStates` 是"只存不判"那格（实拍一次 `{}`、一次给 `2`，而同批条目全 `FINISH` ⇒ 不是完成度）；`Group` 是请求时回填的键名，不属于响应字段',
+  'internal/app/task_matrix.go:TaskMatrixFailure':
+    '一次拉取的失败记录，`Err` 是 `*core.Error`（其对外文案走白名单、原文只进日志）⇒ 整块 marshal 等于把上游原文当结构化字段承诺给前端',
+  'internal/app/task_matrix.go:TaskMatrix':
+    '十六次拉取聚合出的内存结论。今天**没有调用点**（这条链没登记成能力）；`Items` 的语义是"按 name 去重、保留 id 小的那条"，去重取向是刻意不同③，补 tag 会把它变成对外契约',
+  'internal/upstream/app_notice.go:NoticeTaskSlot':
+    '公告任务的一个槽（`cloudStatus`/`sum`/`progress`/`taskStatus`）。四个字段全是指针，"上游没给"与"给了 0"必须分得开；`cloudStatus` 的语义仍是**猜的对应关系**',
+  'internal/upstream/app_notice.go:NoticeTaskInfo':
+    '`getTaskInfo` 的整份解析结果（两个槽）。槽本身也是指针 ⇒ marshal 出去会得到 `null`，而前端无法区分"没给这一槽"与"给了但空"',
+  'internal/upstream/app_notice.go:NoticeReward':
+    '`reward` 的解析结果 —— 实拍响应**连 `result` 都没有**，所以这一格唯一确定的事实是"它常常是 nil"。把它变成对外字段会教前端把空当 0 显示',
+  'internal/upstream/app_notice.go:ReceiveTask':
+    '`receiveTask` 的解析结果。**本链尚未接入这一口**（零样本），登记它是为了"以后接的时候不用再讨论要不要 tag"',
+  'internal/upstream/app_msg_push.go:MsgPushStatus':
+    '`msgPushOn/task/status` 的解析结果。⚠ 这一族**零抓包样本**，字段名来自旧项目的文字描述；此时补 tag 等于给一个未经证实的形状加契约',
+  'internal/upstream/app_msg_push.go:MsgPushObtain':
+    '`task/obtain` 的解析结果（只有 `obtainCode`）。同上：零样本；而且"缺它不等于成功"这条判据只在内存里成立',
+  'internal/upstream/app_funai.go:FunaiModule':
+    '`funai/api/page/getmodule` 的解析结果（模块 id + 三个计数 + 活动起止）。`drawTimes`/`drawsUsed` 的语义**未验证**，起止时刻的时区解释也是我们的选择，都不能写成对外字段',
+  'internal/upstream/app_funai.go:FunaiLottery':
+    '`funai/api/page/lottery` 的解析结果（奖品名 / `isWin` / 上游认下的 moduleId）。`prizeType` 的取值表没有成文，`isWin` 只有一档样本 ⇒ 本链不据此分支，更不对外解释它',
+  'internal/app/task_list_run.go:TaskListResult':
+    '一次任务清单查询的**内存结论**（条目 + 顶层读数），出网那份是 `SummaryLine()` 的一句话；条目形状由上游决定（同 `PrizesResult` 那条理由）',
+  'internal/app/task_list_run.go:TaskListCounts':
+    '从 `TaskListResult` **算出来**的四个计数（含"状态读不出"那一格）。它是小结的中间量，不是数据模型；"未知"那一格的存在恰恰说明它不该被当成枚举契约',
+  'internal/app/notice_run.go:NoticeOutcome':
+    '公告任务链的**中间结论**（档位 + 领之前/复查之后的两槽读数 + 上游原文），由 `NoticeRun` 投影成 `NoticeResult`；两代结论都 marshal 会让"复查没跑成"与"复查没给数"在 JSON 里长得一样',
+  'internal/app/notice_run.go:NoticeResult':
+    '一个账号这一趟的**内存结论**，出网只经 `RunReport`（小结一句 + 待办）。`Gained` 实拍**恒 nil**，补 tag 会让前端把它显示成 0 —— 而那正好是这条链刻意不解释的东西',
+  'internal/app/msg_push_run.go:MsgPushOutcome':
+    '消息推送链的**中间结论**（档位 + 三个读数 + 上游原文），由 `MsgPushRun` 投影成 `MsgPushResult`；零样本的一族更不该把它的形状钉成契约',
+  'internal/app/msg_push_run.go:MsgPushResult':
+    '一个账号这一趟的**内存结论**，出网只经 `RunReport`。`Reason` / `Error` 两格装上游原文（同 `NoticeResult` 那条理由）',
+  'internal/app/funai_run.go:FunaiOutcome':
+    '抽奖链的**中间结论**（档位 + 判据 + 模块 id + 奖品名），由 `FunaiRun` 投影成 `FunaiResult`；`ModuleID` 是排障对账用的，不是对外字段',
+  'internal/app/funai_run.go:FunaiResult':
+    '一个账号这一趟的**内存结论**，出网只经 `RunReport`。⚠ `PrizeName` 为 nil **不等于**"没中奖"（实拍只有一档 `isWin`），这个区别在 JSON 里会被抹平，所以刻意不 marshal',
+  // ── 兑换族（2026-09-23 登记，`exchange` 上游层落地带来的）──
+  // 同一族规矩，但这一族多一条**只对它成立**的理由：它的字段形状里大量是
+  // "上游没给"（指针）与"取值集没穷举"（`limit` 五档里两档零样本、`probability2`
+  // 里三个开关语义未验证），而对外契约一旦成文，前端就会把"没给"显示成 0、
+  // 把没见过的档当成不存在 —— 这两件事在这条链上都是**会扣豆**的误判。
+  'internal/upstream/app_exchange.go:ExchangeMonthQuota':
+    '`probability2` 的二次解析结果（本月名额 + 同组奖品 id）。⚠ 那两个字段一个是**数字**、一个是**字符串数组**（坑表 #105 的静默归零就是按"都是数字"读它），补 tag 会把这份异形约定写成对外契约',
+  'internal/upstream/app_exchange.go:ExchangePrize':
+    '`exchangeList` 里的**一件**奖品（内存解析结果）。除 `prizeId` 外全是指针，且 `limit` 的 `1`/`3` 两档**零样本或两处文案冲突** —— 它的形状目前只够内部判定，不够对外承诺',
+  'internal/upstream/app_exchange.go:ExchangeList':
+    '`exchangeList` 的整份解析结果（按 groupId 分组的映射 + 排序后的键）。实拍键**不连续**（`0,1,2,5,7,8,9,11,15`），marshal 出去会让前端按"下标数组"理解它',
+  'internal/upstream/app_exchange.go:ExchangeOrder':
+    '`exchangeV3` 成交那一条的订单（`oid` / 花费 / 两个时间 / 链接）。`insertTime` 是**带时区**的 ISO 串而列表里那两个是裸串，两种时间口径混在一个对外结构里迟早出事；出网走 `RunReport` 的小结那一句',
+  'internal/upstream/app_exchange.go:ExchangeResult':
+    '`exchangeV3` 的解析结果（业务码 + 文案 + 订单）。⚠ **码是数据不是错误**：`514` 可以重来而 `2301` 不该再试，整块 marshal 等于把"读 code 分流"这件事推给前端',
+  'internal/upstream/app_exchange_slide.go:SlidePuzzle':
+    '`getSlide` 的题面（两张 PNG 原文 + 三个尺寸读数）。它是**喂给解算器的中间量**：两张图各 ~200KB，一旦能被整体 marshal，一次误打日志就是几百 KB 的题面；且 `puzzleWidth`（96）与像素包围盒宽（95）差 1，这个偏差只在内存里判过，不该被当成对外字段',
+  // ── 兑换族·领域层（2026-09-23 登记，`exchange` 判定与链落地带来的）──
+  // 与上游层同一族规矩，多一条：**这条链的字段里"没给"与"没做"都比 0 有意义**
+  // （余额差没核到 ≠ 核到 0；一枪没发 ≠ 发了没成），marshal 出去一定会被显示层读成 0。
+  'internal/app/exchange_plan.go:ExchangeWait':
+    '整点等待的**判定结果**（要不要等 + 等到什么时候）。它是 `skipWait=false` 那条路的中间量，出网只有小结里那一句；把 `Until` 写成对外字段等于承诺一个"上游几点开抢"的口径 —— 而我们**只有一个反例**（自己的成功样本发生在 12:16）',
+  'internal/app/exchange_run.go:ExchangeOptions':
+    '一次兑换的**入参与三个注入点**（`DeviceID` / `Wait` / `Solve` 都是函数）。marshal 它要么静默丢掉三个注入点、要么炸 —— 两种都比"不 marshal"差',
+  'internal/app/exchange_run.go:ExchangeOutcome':
+    '兑换链的**中间结论**（档位 + 判据快照 + 前后两次余额 + 轮数/枪数 + 上游码与原文），由 `ExchangeRun` 投影成 `ExchangeResult`。⚠ `Status` 的零值是 `NotAttempted`，序列化后前端读不到这一格就会按"没字段"处理，而这条链上"没判成"与"没成交"是两件事',
+  'internal/app/exchange_run.go:ExchangeRun':
+    '一条能力的**装配体**（内嵌 `SignInWorld`，带库句柄、票池与出站 HTTP），与 `FunaiRun` / `ClaimRun` 同规：它压根不是数据',
+  'internal/app/exchange_run.go:ExchangeResult':
+    '一个账号这一趟的**内存结论**，出网只经 `RunReport`（小结一句 + 待办）。⚠ 真扣豆那条链的"花了多少豆"要靠**两次余额读数之差**才算得出（判据链第 2 条），整体 marshal 会让前端拿 `Balance` 当花费',
+  // ── run 产物账本（2026-09-24 登记，`internal/exec` 那一层带来的）──
+  // 它是**内存里的账**：谁在哪个账号名下造了哪个上游对象、清掉了没有。
+  // 对外形状将来落在 app/server 层的"待清理清单"响应体里（逐字段列白），不在这里。
+  'internal/exec/artifacts.go:Artifact':
+    '一条产物的登记（类型 + 账号 + 上游 ID），纯内存账本的键；⚠ 它会被拼进日志与 run 事件的诊断文本，' +
+    '所以"能整体 marshal"这件事本身是风险 —— 补 tag 只会让它更容易被顺手写进响应体，' +
+    '而清理清单出网时必须连"用谁的凭据删"一起表达，那是响应体的事，不是这个结构体的事',
+  // ── 红包派对族（#18，2026-09-24 登记，`internal/upstream/app_cloud_phone*.go` 落地带来的）──
+  // 与签到/exchange 那一族同一族规矩（上游解析结果 + 请求侧入参集），但这一族
+  // 有**两个只对它成立**的加重理由：
+  //  ① `CloudPhoneAuth.Token` 与 `CloudPhoneTokenValidate.Token` **就是活动站凭据本体**
+  //     （夹具里那两格本来就是 `<REDACTED>`），能整体 marshal = 离泄漏只差一次误打日志，
+  //     与 `RefreshedCredential` 同一条纪律；
+  //  ② 这一族**至今零接线、零真打**（12 个端点只有 `test/fixtures/http/红包派对.json`
+  //     一份归档作证据），字段形状里"取值集没穷举"的比例远高于其它族 ⇒
+  //     现在补 tag 等于把一个没被任何调用方用过一次的形状写成对外契约。
+  //
+  // ⚠ 请求侧那几个（`CloudPhoneAuth` / `CloudPhoneBilogFields`）**从不**被 marshal：
+  // body 一律走 [CloudPhoneRequest] / [CloudPhoneRawRequest] 现拼 map，
+  // 键集合随"这一条实拍有没有给那个键"而变 —— 给结构体补 tag 会造出一条
+  // "看起来能发、实际多发了两格空串"的旁路，而多一格键的请求**夹具里不存在**。
+  'internal/upstream/app_cloud_phone.go:CloudPhoneAuth':
+    '一次请求的**签名入参集**（requestId / timestamp / token / 两个设备位），只喂给签名函数与头部构造。⚠ `Token` 是活动站凭据本体（夹具里那格是 `<REDACTED>`），补 tag = 开一条"顺手 marshal 整个 auth 进日志"的路；`Timestamp` 刻意是 string 而不是 int64，因为**单位（秒/毫秒）未核实**，收成整数就是替调用方赌一个单位',
+  'internal/upstream/app_cloud_phone.go:CloudPhoneHeader':
+    '信封 `header` 的解析结果，五个字段全是指针 —— 这一族的判据是"上游给没给这一位"（`status` 缺失与给了 `"200"` 是两条不同的结论）。⚠ `RespMsg` **零样本**（夹具里连键都没出现过），留着只为"哪天给了别丢"，更不该写成对外字段',
+  'internal/upstream/app_cloud_phone.go:CloudPhoneTokenValidate':
+    '换活动站 token 那一条的解析结果。⚠ `Token` 同上，是凭据本体；`ExpireTime` 在**同一份夹具的另一条**上是 13 位毫秒时间戳、在这一条上是 `3600` —— 同名两义且哪一义都没成文说过，所以它**不许**当 TTL 用（`AGENTS.md` §1.12），补 tag 会诱使下游拿它算到期',
+  'internal/upstream/app_cloud_phone.go:CloudPhoneAccountInfo':
+    '红包账户余额（**产出是钱**）。`CanAmount` 用 `*int64`：0 是"确实没有可兑余额"这一条结论，nil 是"上游没给、我们不知道" —— marshal 出去两者都长得像没字段或 0，而这一族上把"不知道"显示成"没有"是**会让用户以为余额被清零**的误判。单位是分，`/100` 归展示层',
+  'internal/upstream/app_cloud_phone.go:CloudPhoneToastInfo':
+    '`isShowCloud` 一个格子，语义**未验证**（一条样本都没有对照组，名字与成文那句"播报金额"也对不上）。它唯一合法的用途是"读出来、不解释"，进 JSON 一定会被下游当成某个开关',
+  'internal/upstream/app_cloud_phone_install.go:CloudPhoneInstance':
+    '云手机实例列表里的一条。声明出来的只有 `InstanceId`/`LockStatus` 两格（键名出处是**旧 TS** `task.ts:274-283`，不是实拍 —— 该端点响应体在夹具里根本没有条目），其余全在 `Raw map[string]any` 里。marshal 它会得到一份"两格是推的、`Raw` 里是什么没人负责"的对外形状',
+  'internal/upstream/app_cloud_phone_install.go:CloudPhoneApp':
+    '`configAppList` 的一条应用。四个键（`packageName`/`id`/`packageId`/`apkName`）的出处同样是旧 TS，**零实拍**；⚠ `ID` 与 `PackageID` 是**两个不同的值**（装 APK 用后者、记账用前者），类型连旧实现自己都是 `as number` 硬转 ⇒ 收成 `any` 原样交出去。这种"两格容易用反、类型未知"的形状不该对外承诺',
+  'internal/upstream/app_cloud_phone_install.go:CloudPhoneInstallSubmit':
+    '`apkInstall` 的回执 `{Success, TaskID}`。⚠ `Success` 是**三态**：`nil` = 上游没给这一格、`false` = 给了且是假 —— 旧实现把两者合并成"跳过这个应用"，我们刻意分开（"读不到"与"读到否"是两句话）。过一遍 JSON 之后 `nil` 与 `false` 在前端那里又会合回去，而这一位决定要不要往云机发第二枪',
+  'internal/upstream/app_cloud_phone_install.go:CloudPhoneInstanceList':
+    '实例列表 + 一个 `Nested` 布尔（本次是从 `data.data` 那层取到的）。`Nested` 是**接线期诊断位**："取错层"与"列表真的为空"在只交 `Instances` 的版本里长得一模一样；它描述的是我们的读法，不是上游数据，不该出网',
+  'internal/upstream/app_cloud_phone_task.go:CloudPhoneTaskItem':
+    '任务表里的一条（十个可选位 + 四个额度读数）。⚠ `prizeType` 实拍**全是** `1`、`configTaskBuyList` 实拍**恒是空数组**、`userCanCompleteNum = periodCanNum − userCompleteNum` 只在 9 个条目上成立（是**观察**不是承诺）—— 这一族的取值集远未穷举，形状现在只够内部分发（按 `taskCode`），不够对外承诺',
+  'internal/upstream/app_cloud_phone_task.go:CloudPhoneSignDay':
+    '签到日历里的一格（实拍 44 格）。六个字段全是裸指针/整数而**不带档位语义**：这一格的 `status` 与任务条目那个 `userStatus` **是两本字典**（实拍 `0` 出现在今天与过去全部日子、`2` 出现在响应日期之后的七天），刻意不复用 [CloudPhoneUserStatus] 去"顺手对齐"；`1`/`3`/`4` 在本样本里一件都没有 ⇒ 补 tag 会让前端把它当成一份已穷举的枚举显示出去',
+  'internal/upstream/app_cloud_phone_task.go:CloudPhoneTaskList':
+    '任务表整份解析结果（四张表 + 日历 + 三个顶层读数）。`Buy` 的**元素形状零样本**（按"同一张表的结构"解，只有键名 `configTaskBuyList` 有实拍）；`SecondConfirmStatus` **只有** `configTaskLoginList` 那一条口给（另一条口连这个键都没有），补 tag 会让前端以为两条口都有这一位、缺失即 0。⚠ 另有四个键（`aiAppLink`/`aiH5Link`/`iconLink`/`iconUrl`）刻意**不声明**：前两个是带 token 的第三方跳转地址，不该成文更不该出网',
+  'internal/upstream/app_cloud_phone_task.go:CloudPhoneCompleteTask':
+    '登记一次任务完成的解析结果（只有 `status`）。⚠ 本层**有意偏离**旧实现：旧实现把"缺这一位"当成功（`isNil` 那半句），这里保持 nil —— marshal 出去"缺"会变成 `null`，前端读成 0 就是失败、读成"无字段"又是成功，两种都把我们刻意保留的那个区别抹掉了',
+  'internal/upstream/app_cloud_phone_task.go:CloudPhoneRuleText':
+    '规则文案（`code`/`title`/`ruleText`）。⚠ `ruleText` 实拍是**HTML 片段**（带 `<div class="rule_name">` 这类标签），本层原样交出不清洗 —— 进 JSON 会变成"前端直接 innerHTML 也行"的暗示，而转义责任在展示层',
+  'internal/upstream/app_cloud_phone_task.go:CloudPhoneAnnouncement':
+    '公告：内嵌 [CloudPhoneRuleText] 再加四个读数。⚠ 内嵌是**为了少写四行赋值**，上游那一层是**平铺**的；一旦 marshal，Go 的嵌入语义会把字段摊平 —— 于是"我们的组合方式"看起来像上游的字段约定（正是 §1.4 要防的那类混淆）',
+  'internal/upstream/app_cloud_phone_task.go:CloudPhoneRuleConfigList':
+    '公告列表。`data.list` 不是数组（含缺失）⇒ `Items` 为 **nil**，给了空数组 ⇒ **空切片**：这个区别只在内存里有意义（调用方 `len()` 两者都是 0，但"形状变了"要能看出来），一旦 marshal，nil 与空都成 `null`/`[]` 并被前端当成同一个结论',
+  'internal/upstream/app_cloud_phone_task.go:CloudPhoneBilogFields':
+    '一条埋点的三个**可选**位（`action` 必填，两个 extra 可缺）。请求 body 由 `CloudPhoneBilogUploadRequest` 现拼 map，"缺就不发这一格"是实拍行为；给结构体补 tag 等于造一条会多发 `"extra1":""` 的旁路请求，而**带空串的这条夹具里不存在**。⚠ `Extra2` 实拍那一枚是账号标识，成文与测试一律用掩码形态',
+  'internal/upstream/app_cloud_phone_task.go:CloudPhoneBilogRet':
+    '`bilog/upload` 的解析结果（只有 `ret`，实拍两条都是 `1`）。它**是不是**成功判据未验证（没有非 1 的对照样本，成文也没提这一位）⇒ 一条埋点的读数更不该成为对外字段',
+  // ── 红包派对族的**app 编排层**（2026-09-24 接上 `cloud-phone-redpack` 只读那一半）──
+  // 与 `SignInWorld` / `CloudPhoneAssets` 上游层同一族规矩；这一处多一条只对它成立的：
+  // 这一族**没有票失效判据**（零样本），对外只有 `SummaryLine()` 那一句人话，
+  // 把中间量摊成字段等于把"这一格上游没给"与"这一格是 0"混给前端显示。
+  'internal/app/cloud_phone_run.go:CloudPhoneWorld':
+    '跑红包派对那一趟的**入参集**（库 / scope / 上游 / 设备档案 / 时钟 / 随机 / 活动站票池 / 进度回调），字段里全是句柄；与 `SignInWorld` 同规，Rust 侧这里是一组独立参数、不 Serialize',
+  'internal/app/cloud_phone_run.go:CloudPhoneAssets':
+    '一次只读盘点的**三格内存读数**（余额 / 清单 / 播报）。前两格是上游解析结果（形状由上游决定，同 `PrizesResult` 那条理由），第三格**刻意为指针**："这一枪没打或打挂了"与"打了、播报位是空的"在内存里分得开，marshal 出去两者都是 `null`；`Toast` 里还含 `isShowCloud` 那个语义未验证的读数',
+  'internal/app/cloud_phone_run.go:CloudPhoneResult':
+    '一个账号这一趟的**内存结论**（账号 + 档位 + 读数 + 错误原文），出网只经 `core.RunReport`（小结一句 + 待办）。⚠ `Status` 零值是 `CloudPhoneDone`，序列化时前端拿不到这一格就会按"成功"理解；`Error` 装的是上游文案，整块 marshal 等于把它当结构化字段承诺出去（同 `NoticeResult` 那条理由）',
+  // ── 拍拍族（#16，2026-09-24 登记，`internal/upstream/app_play_ai.go` 落地带来的）──
+  // 同一族规矩，两个只对它成立的加重理由：
+  //  ① 这一族的**证据只有一份**（`test/fixtures/http/夏日拍拍大作战.json` 13 条），
+  //     而它和 `docs/business-feature-inventory.md` §2.4 写的是**两套机制**
+  //     （文档说有 `querySpecToken`/`tyrzLogin` 换会话，夹具里一条都没有）⇒ 形状未定；
+  //  ② `PlayAIRecognizeParams.DataURL` 是**整张图的 base64**（几百 KB 起），
+  //     与 `SlidePuzzle` 那两条 PNG 是同一条纪律。
+  'internal/upstream/app_play_ai.go:PlayAIUserStatus':
+    '`newyear/user/info` 的解析结果（只有 `totalLotteryCount`，指针）。⚠ 0 是"抽过了"、nil 是"上游没给这一格"，而**抽奖次数就是这一页唯一的动作判据** —— marshal 出去前端把两者都读成"没有次数"，正好是最坏的那种误判。`result` 整体缺失是**报错**而不是 nil（实拍两条都有），所以这一层已经没有"缺"这个形态可承诺了',
+  'internal/upstream/app_play_ai.go:PlayAIUserTask':
+    '`newyear/task/list` 的一条任务。键名是**混着**的：`groupId` 驼峰而 `recordid`/`currstep` 全小写（签到任务表那族是全小写 `groupid`），且 `recordid` 实拍是 `null` 或**字符串**、从没数字形态。测试是把它摊成"键 → 有没有给"来逐字段核对的（见 `playAITestTaskProbe`），补 tag 不会让这些区别消失，只会把它们写进契约',
+  'internal/upstream/app_play_ai.go:PlayAIPrize':
+    '一次中奖的奖品（14 个可选位，**全是指针** —— 一次真成功的抽奖不该因为缺某一格被报成解析错误）。⚠ `prizeType`/`type`/`firstMonthGet`/`high` 的取值表**没有成文**、只有一条样本；`buttonLink` 的查询串里**带一次性 token**；`oid` 上游两个形态（数字 / 字符串）都出现过。这三件事任何一件进 JSON 都会变成对外承诺',
+  'internal/upstream/app_play_ai.go:PlayAILotteryResult':
+    '`blindbox/lottery` 的解析结果（`Prize` 一格）。`Prize` 为 nil **不等于**"没中奖"（实拍只有一档样本，"没中奖长什么样"仍无答案），这个区别进 JSON 一定会被读成"奖品为空"',
+  'internal/upstream/app_play_ai.go:PlayAIRecognizeParams':
+    '图片识别的**请求侧入参集**（三个都必填）：`UserID` 是 19 位账号标识（本仓不存真值，测试用 `199…` 合成号）、`DataURL` 是**整条 data URL**（实拍这个键装的就带 `data:image/jpg;base64,` 前缀，原样收、不拼不剥）、`ImageExt` 与它的前缀实拍一致但"必须一致"**未验证** ⇒ 不自动推也不校验。body 由 `PlayAIRecognizeBody` 现拼八键 map，从不整体 marshal 这个结构体 —— ⚠ 补 tag 的代价与 `SlidePuzzle` 同一条：一次误打日志就是几百 KB 图像数据，里面还带着账号标识',
+  'internal/upstream/app_play_ai.go:PlayAIRecognizeResult':
+    '识别结果的解析。`hasText` 实拍 `false`（指针：折成"没给"就等于丢掉一个真实取值）；`content`/`hasQuestion`/`language` 三格**只有 null 样本** ⇒ 形态未验证；`fileId` 指向这次写进云盘的那个文件，是清理那一族（`hcy/file/get`，接口层冻结中）的入参来源 —— 它出网要连"用谁的凭据删"一起表达，那是响应体的事不是这个结构体的事',
+  // ── 拍拍族的**换票与埋点层**（`app_play_ai_session.go`，2026-09-24 登记）──
+  // 与上面那一条族级前言同一口径，两条各自成立的理由：
+  //  ① 这一层的形状出处**只有旧 TS**（`apis/auth.ts:45-97`、`tasks/play-ai-special/*`），
+  //     夹具 13 条里连一次都没出现过换票、`journaling`、`chat/v2/add` ⇒ 无实拍；
+  //  ② 它的产物是**凭据**（`jwttoken`）与"以谁的身份问一句"（`userId`），
+  //     两者一旦带上 tag，`encoding/json` 就会绕过 `core.SecretValue.String()`
+  //     那层只挡打印的守卫（见 `docs/sanitize-guide.md`）。
+  'internal/upstream/app_play_ai_session.go:PlayAISession':
+    '换票成功后的会话凭据。`JWTToken` 是**凭据本体**：整结构体不给 tag，因为 `SecretValue` 那种"只挡打印"的守卫对 `encoding/json` 无效，一旦出 tag 就会随任意一次结果序列化泄漏。`Mobile` 是回显手机号（只用于"确认签给谁"，展示层要自己掩码）。⚠ 它同时带 `UserDomainID` 与 `JWTToken`，正是最不该被顺手 marshal 的组合',
+  'internal/upstream/app_play_ai_session.go:PlayAIChatParams':
+    'SSE 对话那一枪的入参（**请求侧**，本层不解析 SSE 响应：零样本）。`UserID` 是账号标识不是凭据，填错等于以别人身份提问；`FileName` 刻意不由 `taskId` 推导（旧 TS 那一格过 JS double 会丢 19 位 id 的末几位，见字段注释）⇒ 收成调用方给的字符串。这三格没有一行是"对外契约"，出网只会让人误以为本页 chat 的 body 已经对拍过',
+  // ── 拍拍族的**app 编排层**（2026-09-24 接上 `play-ai-special` 只读那一半）──
+  // 与上面 `cloud_phone_run.go` 那一族同规：出网只经 `core.RunReport`（小结一句 + 待办），
+  // 中间量摊成字段就等于把"上游没给这一格"与"这一格是 0"混给前端显示。
+  // 只对它成立的一条加重理由：这一族**只有只读那一半**，而 `Board` 里两格都是
+  // **未对拍形状的上游解析结果**（归档 13 条、零实拍链路）⇒ 一旦带 tag 就成了对外承诺。
+  'internal/app/play_ai_run.go:PlayAIBoard':
+    '只读两枪的**内存读数**（① 状态 + ② 任务表）。①那一格唯一的值 `totalLotteryCount` 语义未验证（是累计获得还是还剩），②那一格 `state` 只支撑两个实拍值 ⇒ marshal 出去等于承诺一份我们没能对拍的上游形状。真实动作判据（"该不该抽"）本来也不在这一层',
+  'internal/app/play_ai_run.go:PlayAITaskCounts':
+    '从任务表**算出来**的四个计数（内存中间量，仅供 `SummaryLine` 与测试读）。⚠ `Unknown` 那一档的存在本身就是判据的一部分："上游给了这一族没见过的值"不能折进"未完成"；一旦出 tag，前端只会拿 `Total-Done` 当剩余，那一档就静默消失了',
+  'internal/app/play_ai_run.go:PlayAIResult':
+    '一个账号这一趟的**内存结论**（账号 + 档位 + 读数 + 错误原文），对外只有 `RunReport()` 那一句人话。⚠ `Status` 零值是 `PlayAIReadDone`，序列化时前端拿不到这一格就按"成功"理解；`Error` 装上游文案（同 `NoticeResult` 那条理由）；`Board` 里还嵌着上一条那个不该承诺的上游形状',
+  // ── AI 头像族（#10，2026-09-24 登记，生成链 + 抽奖链接上执行带来的）──
+  // 与 `play_ai_run.go` / `exchange_run.go` 同一族规矩（装配体不是数据、结论只经
+  // `RunReport` 出网），两条只对它成立的加重理由：
+  //  ① 这一族**会往用户网盘写文件**，而 `TempFileIDs` 是"该删哪几个"的唯一依据 ——
+  //     它出网时必须连"用谁的凭据删"一起表达，而今天**没有**清理调用点
+  //     （`recyclebin/batchTrash` 零实拍，P1），所以这份 id 清单是内部账不是契约；
+  //  ② `rabactive` 那六口**零实拍**（`docs/capture/` 里 `grep rabactive` 一条没有），
+  //     `Prizes` / `Note` 里的文案是上游原文，钉成字段等于承诺一份没对拍过的形状。
+  'internal/app/signin_world.go:SignInOpening':
+    '跑一条链要**同时**拿在手里的三样（App 档案 / 登录态凭据 / 会话来源），字段全是句柄与凭据：`Credential` 里的 `Authorization` 是 `core.SecretValue`，而它的 `String()` **只挡打印不挡 `encoding/json`**（见 `internal/core/model.go`）⇒ 一次整体 marshal 就把整串凭据递出去。对外形状一律在 server 层逐字段列白（同 `LoginSessionView` / `runPairings`）',
+  'internal/app/ai_avatar_run.go:AiAvatarRun':
+    '一条能力的**装配体**（内嵌 `SignInWorld` 再加一个 `Wait` 注入点），与 `ExchangeRun` / `ClaimRun` 同规：装着库句柄与出站 HTTP，压根不是数据',
+  'internal/app/ai_avatar_run.go:AiAvatarResult':
+    '一个账号这一趟的**内存结论**（张数 / 抽奖档位与次数 / 奖品名 / 待清理文件 id / 备注），出网只经 `core.RunReport` 的 `SummaryLine()` 那一句人话（那句话刻意**只报个数**、不报 id 串）。⚠ `Status` 零值是 `AiAvatarDone`（"有产出"），前端拿不到这一格就会把"走完了但零产出"显示成成功；`DrawPhase` 的四档与 `AiAvatarFailed` 是同一件事的两个视角，摊成字段会被读成两个独立状态',
   // ── CLI 的参数结构体 ──
   // 它们全是 clap 的 `#[derive(Args)]`（解析命令行用），**没有** serde 的 Serialize，
   // 也从不被序列化 —— 进 JSON 的只有 `--json` 那一支的输出（在 output.go 里单独构造）。
@@ -354,6 +600,26 @@ const UNTAGGED_ALLOWED = {
     '一次 App 登录的**入参打包**（scope / 设备档案 / 凭据），与 `SmsCredential` 同理：**里面装着明文验证码**，一旦可序列化就会顺着日志出去；Rust 侧 derive `Debug, Clone, Copy`，**不** Serialize',
   'internal/cli/run_fixture.go:ExtractReport':
     '一次抽取的**结论**（各类计数 + 写出的文件 + 自检残留），只喂给 `renderExtractReport` 打进终端；Rust 侧这个函数是逐行 `println!` 的计数，没有 serde。⚠ 它**不该**进 JSON —— 计数是给人看的报告，不是对外契约',
+
+  // ── AI 头像族（#10，2026-09-24 登记：`rabactive/*` 六口 + `hcy/file/list` 上游层落地带来的）──
+  // 这一族有一条**只对它成立**的理由：`rabactive/*` 六口**零实拍**（文件头那条"证据分两半"）。
+  // 别的族是"实拍有，但档位表/语义没穷举"，这一族是**连一份响应样本都没有** ——
+  // 此时补 tag 等于把"从旧 TS 的类型声明反推出来的字段名"钉成对外契约，
+  // 而它唯一的支持证据是一份**没被上游确认过**的 TypeScript interface。
+  // `hcy/file/list` 那一头虽有实拍，但它的 `items[]` 有十余格、我们只取两格，
+  // 补 tag 会让"只取两格"这件事看起来像"上游只有两格"。
+  'internal/upstream/app_ai_avatar.go:AiAvatarPrize':
+    '`image/draw` 抽出的一格奖品名（`prizeName` / `contentName` 两枚指针）。两格**谁才是奖品名**未验证（零样本），旧实现按 `contentName || prizeName` 的优先序拼文案 —— 那个优先序只在内存里成立；marshal 出去会被读成"两个字段各有一个确定含义"',
+  'internal/upstream/app_ai_avatar.go:AiAvatarDrawResult':
+    '抽一次的**三态**结论（抽中 / 被 `408` 叫停 / 真失败）。三态里两态是"空值 + 一个布尔"，marshal 之后 `Stopped:false` 与"这一枪没打"在 JSON 里长得一样；而这一格存在的理由恰恰是让调用方**不必**读错误串就能分档（见 `ParseAiAvatarDraw` 的头注）',
+  'internal/upstream/app_ai_avatar.go:AiAvatarTask':
+    '`ai/image/merge` 与 `ai/image/getStatus` **共用**的解析结果（`taskId` / `status` / `imageUrl` 三枚指针）。⚠ `status` 的档位表（`3` 成功、`4` 失败）是从旧实现的分支形状**反推**的、零实拍 ⇒ 补 tag 会把一份没穷举的枚举写成契约；共用一个结构也是刻意的（同一段代码要吃两种形状），它不是"上游的字段约定"',
+  'internal/upstream/app_ai_avatar.go:AiAvatarWork':
+    '`image/getWorkList` 的一条作品（`id` + 两枚图片 URL）。`id` 在旧 TS 声明成 string 而活动接口常回数字，本层把两种都折成串 —— 这个折法是内部处置，写进契约就变成了"这一格是字符串"的承诺',
+  'internal/upstream/app_ai_avatar.go:CloudFile':
+    '`hcy/file/list` 条目里本族要用的**两格**（`fileId` / `name`）。实拍那一条有十余格（`category`/`type`/`createdAt`/两套审计…），刻意只取两格 ⇒ marshal 会让"我们只看这两格"看起来像"上游只有这两格"（与 `PrizesResult` 那条理由同族，但这里的裁剪比例更大）',
+  'internal/upstream/app_ai_avatar.go:CloudFileList':
+    '`hcy/file/list` 的一页（条目 + `nextPageCursor`）。⚠ 本族**不翻页**（旧实现固定 `pageSize:100` 一次），多于 100 个文件时后面那些**静默匹配不到** —— 带着一个"从不使用"的游标出网，等于对外承诺一个我们这边**永远不会翻**的分页协议；另外 `nil` 与空列表这一对在 JSON 里也分不开（同 `CloudPhoneRuleConfigList` 那条理由）',
 }
 
 function walk(dir, out = []) {

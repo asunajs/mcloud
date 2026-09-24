@@ -117,17 +117,28 @@ Go 的 app 层已把这套约定做进返回值（`MultipleOutcomeFailed` / `Bac
 
 | 段 | 上游接口 | app 层 | upstream 层 | 抓包依据 |
 | --- | --- | --- | --- | --- |
-| ① | `POST /user/querySpecTokenV2`（原生 A 族头 + `Authorization`） | `app.OpenSignInSession` 第一段（`signin.go:280-284`） | `AppQuerySpecToken`（`app_signin_send.go:22`）；`ToSourceID = "001005"`（`app_signin.go:83`） | 抓包 §2.1.1 |
-| ② | `GET /ycloud/api/timestamp` | 同函数第二段（`signin.go:289-293`） | `AppH5Timestamp`（`app_signin_send.go:45`）、`SignH5Request`（`app_signin_session.go:106`） | 抓包 §2.2 |
-| ③ | `POST /ycloud/auth-service/auth/tyrzLogin` | 同函数第三段（`signin.go:296-299`） | `AppH5Login`（`app_signin_send.go:54`）；`SigninPageURL`（`app_signin_session.go:29`） | 抓包 §2.3 |
-| ④ | `GET /ycloud/signin/page/infoV3?client=app` 与 `GET /ycloud/signin/page/startSignIn?client=app` | `CloudSignIn`（`signin.go:394-438`） | `AppSignInStatus`（`app_signin_send.go:69`）、`AppStartSignIn`（`:99`） | 抓包 §3.1 / §3.2 |
+| ① | `POST /user/querySpecTokenV2`（原生 A 族头 + `Authorization`） | `app.OpenSignInSession` 第一段（`signin.go:289-293`） | `AppQuerySpecToken`（`app_signin_send.go:22`）；`ToSourceID = "001005"`（`app_signin.go:83`） | 抓包 §2.1.1 |
+| ② | `GET /ycloud/api/timestamp` | 同函数第二段（`signin.go:297-302`） | `AppH5Timestamp`（`app_signin_send.go:45`）、`SignH5Request`（`app_signin_session.go:106`） | 抓包 §2.2 |
+| ③ | `POST /ycloud/auth-service/auth/tyrzLogin` | 同函数第三段（`signin.go:304-309`） | `AppH5Login`（`app_signin_send.go:54`）；`SigninPageURL`（`app_signin_session.go:29`） | 抓包 §2.3 |
+| ④ | `GET /ycloud/signin/page/infoV3?client=app` 与 `GET /ycloud/signin/page/startSignIn?client=app` | `CloudSignIn`（`signin.go:405-440`） | `AppSignInStatus`（`app_signin_send.go:69`）、`AppStartSignIn`（`:99`） | 抓包 §3.1 / §3.2 |
 
-`app.OpenSignInSession`（`signin.go:271-301`）把 ①②③ 抽了出来，返回 `(referer, jwtToken)`。
-**它不对外暴露 jwt** —— 除签到主路外，其余每个子功能各自**再建一次会话**
-（`app.SignInStatus` `signin_receive.go:28`、`SignInStatusRaw` `:47`、`CloudRecords` `:86`、
-`PendingPrizes` `:114`、`ReceiveCloud` `:173`、`ReceiveRevivalReward` `:203`、
-`ReceiveAll` `:386`、`ClaimMultiple` `signin_bonus.go:120`、`ClaimBackupGift` `:231`）。
-⇒ **编排层无法共享会话，也不要试图共享**（要共享得先改 app 层签名）。
+`app.OpenSignInSession`（`signin.go:280-310`）把 ①②③ 抽了出来，返回 `(referer, jwtToken)`。
+**它现在只有一个调用方** —— `app.SignInSessionSource.buildLocked`（`signin_session.go`）：
+每个子功能不再各自建会话，而是向**这一轮那一条**会话要票
+（`SignInStatus` / `CloudRecords` / `ReceiveCloud` / `ReceiveAll` / `ClaimMultiple` /
+`ClaimBackupGift` / `CloudSignIn` 一律收 `src *SignInSessionSource`）。
+⇒ 上面那张"账单"里的 ①②③ 是**每轮一次**、不是**每个子功能一次**：
+`--receive` 与签到主路同跑一趟，只有三枪建会话，业务请求仍各算各的。
+
+三条口径与"不做的事"成文在 `internal/app/signin_session.go` 文件头；
+中途撞 `90001` 时由 source **刷一次、重放那一条请求一次**（读写一视同仁），
+仍失败就交回调用方按任务失败处理。
+
+⚠ 上面这句"每轮一次"是**CLI 这一路**的口径：一次 `mcloud signin` 对每个账号只跑一轮，
+票就活在这一轮里（`internal/cli/run_signin.go` 里刻意不接池，理由写在那处注释）。
+服务端不是这样 —— 那里的作用域是**「账号 × 页面」跨轮复用**（界面上连点三次签到共用一张票，
+不频繁取新票），由 `app.SessionPool` 持有；键为什么是"配方"而不是页面名、为什么不设 TTL，
+见 `internal/app/signin_session_pool.go` 头注，使用口径见 `AGENTS.md` §1.12 的"作用域口径"。
 
 ⚠ 三个不可省的细节（`signin.go:43-51` 顶部三条判据）：
 1. `x-yun-user-timestamp` 是**微秒**（`UserTimestamp`，`signin.go:51`）；写错量级的表现是 401。
@@ -151,7 +162,7 @@ Go 的 app 层已把这套约定做进返回值（`MultipleOutcomeFailed` / `Bac
 | `--revive` | ① ② ③ → `receiveRevivalReward` | 4 |
 | `--multiple` | ① ② ③ → `infoV3` →（门槛成立才）`multiple` | 4 或 5 |
 | `--backup-gift` | ① ② ③ → `backupgift/info` →（门槛成立才）`backupgift/receive` | 4 或 5 |
-| 签到 + `--receive` | 两段会话：主路 4~6 + `--receive` 4+（**会话建两次**） | 8+ |
+| 签到 + `--receive` | **一轮一条会话**（① ② ③ 只打一次）→ 主路 `infoV3` → `startSignIn` → `infoV3` → `--receive` 的 `infoV3` → 每条动作一个请求 | 未签 **7 + 动作数**；今天已签 **5 + 动作数**（旧口径"会话建两次 / 8+"自 2026-09-23 起作废，见上面 §2.1 那段） |
 
 ### 2.3 `--records` 分页循环（编排层职责）
 

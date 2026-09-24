@@ -356,6 +356,9 @@ overscroll-behavior: contain;
 > ⇒ 隔一两百毫秒再断言，别拿"读出来是旧的"当"界面坏了"。
 > ③ 顺带一条只有真机看得见的：badge 表里只给修饰类（`badge-soft badge-success`）会**丢掉基类 `badge`**，
 > 渲染成无样式裸文字，而 typecheck 与 build **全绿** —— 基类要么写在模板里（`` `badge ${mod}` ``），要么整条写全。
+> ④ 用 CDP 驱动 headless Edge 量窄屏时（2026-09-24 踩的）：`Emulation.setDeviceMetricsOverride`
+> 是**跟着那条会话的**，WebSocket 一关就释放。⇒ 下一趟不带覆写的 eval 量的是**桌面 1280 档**，
+> 那句"窄屏按钮只有 40px"就是这么造出来的假现场。窄屏读数要在**同一条会话里**量完，或每次 eval 前重设覆写。
 - [ ] 长文本已 `break-words`
 - [ ] **抽屉展开时内容区仍是满屏宽**（`.drawer-content` 宽度 == 视口宽；不是被 256px 侧栏挤成一条，见 §9.2③）
 - [ ] **逐跳切页后 `main h1` 跟着 `location.hash` 变**（空态页尤其容易停在第一跳，见 §9.2④）

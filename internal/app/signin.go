@@ -268,6 +268,15 @@ func (c SignInCredential) String() string {
 //
 // 抽出来是因为 [SignInStatus] 与 [SignIn] 的前三步**逐字相同**；
 // 复制一份的话，"签名少了一个头"这种错只会修在其中一条路径上。
+//
+// ⚠ 现在它**只有一个调用方**：[SignInSessionSource.buildLocked]。
+// 业务代码要会话请找 source，不要再自己开一条 —— "一轮一个 `jwttoken`"
+// 这条口径就是靠这个收敛住的（见 `signin_session.go` 头注）。
+//
+// **jwttoken 使用公共来源**（`AGENTS.md` §1.12 那句注释要求的留痕）：这一条链
+// 用的是签到页那一套参数（`marketName` / `sourceId` 见 `upstream` 的常量），
+// 别的页面若后来查明"要按本页自己的参数换票"，改的是 source 的构造参数、
+// 并**同时**改掉这里与调用点的这句注释。
 func OpenSignInSession(
 	ctx context.Context,
 	up *upstream.Upstream,
@@ -391,21 +400,12 @@ type SignInOptions struct {
 //
 // ⚠ 但**领取类接口（`receiveV3` 领云朵 / AI 豆）不带就报错**（回 `615`）——
 // 所以"签到能不带"**不能**外推到同族的别的接口。
+// ⚠ 建会话不在本函数里：它取 [SignInSessionSource] 当前那一条，所以"签到 + 领取"
+// 这一轮只建**一条**会话（旧写法是每条能力各建一条，一轮 N×3 枪）。
 func CloudSignIn(
-	ctx context.Context,
-	up *upstream.Upstream,
-	profile *upstream.AppProfile,
-	credential *SignInCredential,
-	options SignInOptions,
-	clock core.Clock,
-	rng core.Random,
+	ctx context.Context, src *SignInSessionSource, options SignInOptions,
 ) (SignInReport, *core.Error) {
-	referer, jwt, perr := OpenSignInSession(ctx, up, profile, credential, clock, rng)
-	if perr != nil {
-		return SignInReport{}, perr
-	}
-
-	before, perr := up.AppSignInStatus(ctx, jwt, referer)
+	before, perr := SignInStatus(ctx, src)
 	if perr != nil {
 		return SignInReport{}, perr
 	}
@@ -414,11 +414,13 @@ func CloudSignIn(
 		return SignInReport{Before: before, After: before}, nil
 	}
 
-	result, perr := up.AppStartSignIn(ctx, jwt, referer, options.DeviceID)
+	result, perr := do(ctx, src, func(s SignInSession) (upstream.SignInResult, *core.Error) {
+		return src.up.AppStartSignIn(ctx, s.jwt, s.referer, options.DeviceID)
+	})
 	if perr != nil {
 		return SignInReport{}, perr
 	}
-	after, perr := up.AppSignInStatus(ctx, jwt, referer)
+	after, perr := SignInStatus(ctx, src)
 	if perr != nil {
 		return SignInReport{}, perr
 	}

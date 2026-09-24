@@ -431,6 +431,37 @@ func TestProbeLiveRoomIsNotReachableByPost(t *testing.T) {
 	}
 }
 
+// TestTwoProbeClicksShareOneSession ⭐ 钉住"界面上连着看这一屏"在服务端真的复用票。
+//
+// 判据本身（"接了池 ⇒ 两轮只建一条会话"）测在 `internal/app` 那侧，
+// 这里只补服务端**独有**的那一半：处理器用的是 `RunWorld` 里那一份**跨请求**的池，
+// 而不是每次请求现造一条。漏接的表现是每一次 GET 都多打三枪，
+// 而响应体一个字都没变 —— 所以只能数请求。
+func TestTwoProbeClicksShareOneSession(t *testing.T) {
+	h := newHarness(t).initialized(t)
+	id := seedProbeAccount(t, h)
+
+	client := probeRoutes(probeBalanceBody)
+	h.replaceRunWorld(t, client)
+
+	for i := 0; i < 2; i++ {
+		payload := liveRoomGet(t, h, id)
+		// 两次的读数都得在（复用票不等于只给第一次结论）。余额具体是多少由上面
+		// 那批端到端用例管，本条只管"这一屏连着看两次，票没重取"。
+		if payload["balance"] == nil || payload["balanceError"] != "" {
+			t.Fatalf("第 %d 次没读到余额：%v", i+1, payload)
+		}
+	}
+	if n := client.count("/ycloud/auth-service/auth/tyrzLogin"); n != 1 {
+		t.Errorf("两次探针该共用 1 条云盘会话，tyrzLogin 实得 %d 次", n)
+	}
+	// 省下的只有"建会话"：门是每次点开都要重新问的（两页签 × 两次）。
+	// 少了这一句，"把整个探针结果缓存起来"那种改法也能让上面那条继续绿。
+	if n := client.count("tabContentList"); n != 4 {
+		t.Errorf("两次探针各查两个页签（合计 4），实得 %d 次", n)
+	}
+}
+
 // TestLiveRoomStatusToken 钉住状态码 → 稳定英文码那张表。
 //
 // 为什么不靠上面的端到端用例覆盖：`status == 6`（回放）与"上游哪天多一档"

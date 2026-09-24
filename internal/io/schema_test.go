@@ -177,6 +177,8 @@ func TestExpectedTablesExistAfterMigration(t *testing.T) {
 		"users", "sessions",
 		// v8
 		"run_events",
+		// v10
+		"notify_config",
 	} {
 		var count int64
 		if err := db.QueryRow(
@@ -197,7 +199,10 @@ func TestSingleRowConfigTablesRejectASecondRow(t *testing.T) {
 	if err := Migrate(context.Background(), db); err != nil {
 		t.Fatalf("迁移失败: %v", err)
 	}
-	for _, table := range []string{"exchange_config", "webui_config"} {
+	// 三张单行配置表都要有闸：v10 加了 `notify_config` 之后**漏在这一处最容易**——
+	// 建表语句写全了、跑绿了，唯独忘了 CHECK，于是哪天多插一行而"读出来的是哪一行"
+	// 变成 SQLite 的心情。（这条断言的存在就是为了那一格。）
+	for _, table := range []string{"exchange_config", "webui_config", "notify_config"} {
 		if _, err := db.Exec("INSERT INTO " + table + " (id) VALUES (1)"); err != nil {
 			t.Fatalf("%s 第一行应能插入: %v", table, err)
 		}
@@ -578,5 +583,29 @@ func TestV8DatabaseGainsScheduleColumnsWithBothLeftNull(t *testing.T) {
 	}
 	if name != "每日签到" {
 		t.Fatalf("升级不该动已有列，实得 %q", name)
+	}
+}
+
+// TestV10MigrationCreatesTheSingleRowNotifyTable v10 是**建表**（不是 ALTER），
+// 所以它不需要事务包装，但需要两样别的东西：单行闸 `CHECK (id = 1)`，
+// 和"默认关闭"这一条安全默认 —— 建表时把 `enabled` 默认写成 1，
+// 等于"程序一升级就往外推运行正文"。
+func TestV10MigrationCreatesTheSingleRowNotifyTable(t *testing.T) {
+	// 先把连续空格压成一个：迁移语句里用了对齐的空白，逐字比对会因缩进变化而假红。
+	v10 := strings.Join(strings.Fields(strings.ToLower(allMigrations[9])), " ")
+	for _, want := range []string{
+		"create table if not exists notify_config",
+		"check (id = 1)",
+		"enabled integer not null default 0",
+		"min_level text not null default 'info'",
+		"channels text not null default '{}'",
+	} {
+		if !strings.Contains(v10, want) {
+			t.Fatalf("v10 里缺这一句：%s\n实得 %s", want, v10)
+		}
+	}
+	// `title` 必须**可空且没有默认值**：NULL 才是"没人填过"（见迁移那段注释）。
+	if strings.Contains(v10, "title text not null") || strings.Contains(v10, "title text default") {
+		t.Fatalf("title 不该被钉成 NOT NULL、也不该有默认值：%s", v10)
 	}
 }

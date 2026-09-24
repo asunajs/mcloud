@@ -104,6 +104,15 @@ func testProfile() *upstream.AppProfile {
 		"67F4C56A00000000000000000000315C", "8A708867DBC3"))
 }
 
+// signinSource 用脚本客户端造**一轮**的会话源。
+//
+// 建会话那三枪就排在脚本最前面 —— 所以"这一轮到底建了几条会话"在这些用例里
+// 是可数的（[SignInSessionSource.Opens]），而不是靠读日志。
+func signinSource(client *scriptedUpstream, cred *SignInCredential) *SignInSessionSource {
+	return NewSignInSessionSource(upstream.NewUpstream(client), testProfile(),
+		cred, testClock(), testRng())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 建会话
 // ─────────────────────────────────────────────────────────────────────────────
@@ -181,8 +190,8 @@ func TestSignInSkipsStartSignInWhenAlreadySigned(t *testing.T) {
 	}}
 	cred := SignInCredential{authorization: "Basic x", accountID: core.NewAccountID("19****01")}
 
-	report, perr := CloudSignIn(context.Background(), upstream.NewUpstream(client),
-		testProfile(), &cred, SignInOptions{}, testClock(), testRng())
+	report, perr := CloudSignIn(context.Background(), signinSource(client, &cred),
+		SignInOptions{})
 	if perr != nil {
 		t.Fatalf("签到失败: %v", perr)
 	}
@@ -215,8 +224,8 @@ func TestSignInTrustsTheRecheckNotTheStartSignInField(t *testing.T) {
 	}}
 	cred := SignInCredential{authorization: "Basic x", accountID: core.NewAccountID("19****01")}
 
-	report, perr := CloudSignIn(context.Background(), upstream.NewUpstream(client),
-		testProfile(), &cred, SignInOptions{}, testClock(), testRng())
+	report, perr := CloudSignIn(context.Background(), signinSource(client, &cred),
+		SignInOptions{})
 	if perr != nil {
 		t.Fatalf("应判为成功（回查已签），实得错误: %v", perr)
 	}
@@ -245,8 +254,7 @@ func TestSignInFailsWhenTheRecheckSaysNotSigned(t *testing.T) {
 	}}
 	cred := SignInCredential{authorization: "Basic x", accountID: core.NewAccountID("19****01")}
 
-	_, perr := CloudSignIn(context.Background(), upstream.NewUpstream(client),
-		testProfile(), &cred, SignInOptions{}, testClock(), testRng())
+	_, perr := CloudSignIn(context.Background(), signinSource(client, &cred), SignInOptions{})
 	if perr == nil {
 		t.Fatal("回查显示未签就应当失败 —— 只看 code == 0 会把「已签过」误报成成功")
 	}
@@ -269,8 +277,8 @@ func TestForceSendsStartSignInButDoesNotCountAsSignedNow(t *testing.T) {
 	}}
 	cred := SignInCredential{authorization: "Basic x", accountID: core.NewAccountID("19****01")}
 
-	report, perr := CloudSignIn(context.Background(), upstream.NewUpstream(client),
-		testProfile(), &cred, SignInOptions{Force: true}, testClock(), testRng())
+	report, perr := CloudSignIn(context.Background(), signinSource(client, &cred),
+		SignInOptions{Force: true})
 	if perr != nil {
 		t.Fatalf("自检模式下已签也发，应成功: %v", perr)
 	}
@@ -430,8 +438,7 @@ func TestReceiveAllSendsNoQueryParamWhenAcceptDateIsEmpty(t *testing.T) {
 	}}
 	cred := SignInCredential{authorization: "Basic x", accountID: core.NewAccountID("19****01")}
 
-	outcomes, perr := ReceiveAll(context.Background(), upstream.NewUpstream(client),
-		testProfile(), &cred, "DEV", testClock(), testRng())
+	outcomes, perr := ReceiveAll(context.Background(), signinSource(client, &cred), "DEV")
 	if perr != nil {
 		t.Fatalf("领取失败: %v", perr)
 	}
@@ -465,8 +472,7 @@ func TestReceiveAllKeepsGoingWhenOneItemFails(t *testing.T) {
 	}}
 	cred := SignInCredential{authorization: "Basic x", accountID: core.NewAccountID("19****01")}
 
-	outcomes, perr := ReceiveAll(context.Background(), upstream.NewUpstream(client),
-		testProfile(), &cred, "DEV", testClock(), testRng())
+	outcomes, perr := ReceiveAll(context.Background(), signinSource(client, &cred), "DEV")
 	if perr != nil {
 		t.Fatalf("单条失败不该让整批失败: %v", perr)
 	}
@@ -546,8 +552,7 @@ func TestClaimMultipleSendsNoWriteRequestWhenTheGateIsClosed(t *testing.T) {
 				statusPayload(`"cal":[]` + comma(c.status) + c.status),
 			}}
 			cred := SignInCredential{authorization: "Basic x", accountID: core.NewAccountID("19****01")}
-			got, perr := ClaimMultiple(context.Background(), upstream.NewUpstream(client),
-				testProfile(), &cred, testClock(), testRng())
+			got, perr := ClaimMultiple(context.Background(), signinSource(client, &cred))
 			if perr != nil {
 				t.Fatalf("门槛不成立不该报错: %v", perr)
 			}
@@ -602,8 +607,7 @@ func TestClaimBackupGiftReportsFailureInsteadOfFailing(t *testing.T) {
 	}}
 	cred := SignInCredential{authorization: "Basic x", accountID: core.NewAccountID("19****01")}
 
-	got, perr := ClaimBackupGift(context.Background(), upstream.NewUpstream(client),
-		testProfile(), &cred, testClock(), testRng())
+	got, perr := ClaimBackupGift(context.Background(), signinSource(client, &cred))
 	if perr != nil {
 		t.Fatalf("失败应进结果而不是返回错误: %v", perr)
 	}

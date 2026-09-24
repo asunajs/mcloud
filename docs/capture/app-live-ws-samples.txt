@@ -1,0 +1,642 @@
+# 直播 WS 实拍样本（2026-09-23，中国移动云盘直播间）
+
+> 取证面 = **App**（`/Applications/mCloud.app`）里的 **H5 直播间**（WebView）。
+> ⚠⚠ 抓到的记录进程名是 **`com.apple.WebKit.Networking`**，**不是** `mCloud`
+> —— `scripts/reqable-capture.py` 默认的 `--app mCloud` 会**一条都抓不到**。
+> 这与 `mobile-app-log-capture` 那条规则一致：**原生层走 App 日志，WebView 走代理**；
+> 直播间是 H5 ⇒ 只能走代理，而代理里它挂在 WebKit 的进程名下。
+>
+> **原始 HAR（含未脱敏值）留在 `har/live-room-raw-2026-09-23.json`**（`har/` 已 gitignore，201 条 / 2.6 MB）。
+> 本文只记**结构与判据**，值按 `docs/sanitize-guide.md` 换形（换值不换形）。
+
+- 开播窗口：`roomBeat.expectStartTime = 2026-09-23 14:30:00`；实际抓包 **15:17–15:19**（本地）。
+- 两条 WS 连接：`wss://videoim.cmcc-cs.cn:20102/ws/711/5lniabk4/websocket`（**133 帧 / 73.6 s**）
+  与 `wss://videoim.cmcc-cs.cn:20102/ws/227/c23o3q3s/websocket`（**139 帧 / 66.5 s**）。
+  ⚠ 路径里 `711` / `227` 是**服务端 id**，`5lniabk4` / `c23o3q3s` 是 **13 字符 sessionId**。
+- 门与口令：门开着、3 间房在播；**收到 2 条口令**（`一键9图出圈` / `中秋美好存云盘`）
+  —— ⭐ **"每场两条固定"的第一次实拍确认**。
+- ⭐⭐ **16:4x 又补了一个反证实验（§8.6）**：`member/apply` 的 `systemMd5` / `tokenMd5`
+  **两个头都打成全 0，服务端照样回 `code: 0`** ⇒ **它根本不校验这两个签名头**。
+  这推翻了 §8.4 早先那句"待决：服务端认哪一种" —— **答案不是认哪一种，是两种都不看**。
+- ⭐⭐ **纯 Go 也拿全了那两条口令**（§9.5），与本节抬头**逐字一致** ⇒ 三个独立证据面同答。
+
+---
+
+## 一、WS 升级请求（记录 632）
+
+```
+GET wss://videoim.cmcc-cs.cn:20102/ws/711/5lniabk4/websocket
+Host: videoim.cmcc-cs.cn:20102
+Origin: https://v.cmcc-cs.cn
+User-Agent: Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) MCloudApp/12.6.0 iPad AppLanguage/zh-CN
+Sec-WebSocket-Version: 13
+Sec-WebSocket-Key: <24 字符 base64，随机>
+Sec-WebSocket-Extensions: permessage-deflate
+Upgrade: websocket
+Connection: Upgrade
+Accept: */*
+Accept-Language: zh-CN,zh-Hans;q=0.9
+Accept-Encoding: gzip, deflate, br, zstd
+Pragma: no-cache
+Cache-Control: no-cache
+Sec-Fetch-Site: same-site
+Sec-Fetch-Mode: websocket
+Sec-Fetch-Dest: websocket
+Priority: u=3, i
+Cookie: <GA / 神策 SDK 的 cookie，**不含**鉴权凭据>
+```
+
+响应：
+
+```
+101 Switching Protocols
+Server: cmos/1.12.1
+Date: Wed, 23 Sep 2026 07:17:11 GMT
+Connection: upgrade
+upgrade: websocket
+sec-websocket-accept: <RFC 6455 由 Sec-WebSocket-Key 算出>
+```
+
+### ⭐⭐ 三条判据
+
+1. **没有 `systemmd5` / 没有 `tokenmd5`。**
+   这两个头属于 **`/cmlive/api/*` 的 HTTP 请求**（`member/apply` 那一路，见 `app-live-redflower-samples.txt`），
+   **WS 升级请求一个都不带**。原先清单里"WS 握手签名头的真实取值"这个说法**不成立** ——
+   WS 侧的身份**只在 PROVISION 帧的 `auth` 字段里**（`$t$<JWT>`）。
+2. **UA 是 iPad UA**（`MCloudApp/12.6.0 iPad AppLanguage/zh-CN`），
+   ⚠ 与 `internal/upstream/live_ws.go` 的 `LiveWSHeaders()` 写的
+   **Android Chrome UA** 不同 —— 那一处注释说"这一族没有实拍、照抄原项目"，**实拍推翻了照抄的那份**。
+   ⭐ 它**逐字等于同一次抓包里 HTTP 侧那份**（`member/apply`，见 §8.2）—— 两处都带 `iPad AppLanguage/zh-CN`。
+   ⚠⚠ 但它与常量 `LiveUserAgent` **并不逐字相等**：常量是 `CPU OS 18_5`
+   （来自更早那批夹具，`红包派对.json` / `直播723.json` 等），这次实拍是 **`CPU OS 18_7`**
+   —— 那台 iPad 中间升过系统（`app-signin-samples.txt` §0 也是 `18_7`）。
+   ⇒ **iOS 小版本是会变的**，别拿整串 UA 当判据：可变的那一段（`CPU OS 18_x`）
+   与不变的那一段（`MCloudApp/12.6.0 iPad AppLanguage/zh-CN`）要分开看。
+   （`LiveWSHeaders()` 已按本次实拍改成用 `LiveUserAgent` —— ⚠ 那是"**抄得更准**"，
+   不是"修好了什么"：没有任何"服务端校验 UA"的判据，见坑表 **#136** 的口径。）
+3. **服务端没接受 `permessage-deflate`**：响应里**没有** `Sec-WebSocket-Extensions`
+   ⇒ 帧是**未压缩**的原文（下面所有帧都能直接 base64 解，与此一致）。
+
+---
+
+## 二、帧序列（记录 632，133 帧）
+
+### 前 12 帧
+
+| # | 方向 | SockJS 帧 | 长度 | `command` |
+| --- | --- | --- | --- | --- |
+| 0 | S→C | `o` | 1 | — |
+| 1 | C→S | `["<b64>"]` | 471 | **3** |
+| 2 | S→C | `a["<b64>"]` | 103 | **3** |
+| 3 | C→S | `["<b64>"]` | 126 | **1** |
+| 4 | S→C | `a["<b64>"]` | 87 | **1** |
+| 5 | S→C | `a["<b64>"]` | 387 | **2** |
+| 6 | C→S | `["<b64>"]` | 417 | **0** |
+| 7 | S→C | `a["<b64>"]` | 429 | **2** |
+| 8 | C→S | `["<b64>"]` | 464 | **0** |
+| 9 | S→C | `a["<b64>"]` | 94 | **0** |
+| 10 | S→C | `a["<b64>"]` | 94 | **0** |
+| 11 | S→C | `a["<b64>"]` | 426 | **2** |
+| 12 | C→S | `["<b64>"]` | 464 | **0** |
+
+- **末帧** `[132]` 是**空串**（C→S，`len=0`）—— 连接关闭。
+- 全程**没有** `h`（见下面「心跳」）。
+
+### 方向 × 前缀（统计）
+
+| 前缀 | 方向 | 条数 |
+| --- | --- | --- |
+| `o` | S→C | 1 |
+| `a[` | **S→C** | **85** |
+| `[` | **C→S** | **46** |
+| `""` | C→S | 1（关闭） |
+
+⭐ 前缀与方向的对应是**满的**（85/85 与 46/46，零反例）：
+**服务端推 `a["…"]`、客户端发 `["…"]`** —— 与 `live_ws.go` 的 `sockJSFrameDataPrefix` / `encodeFrame` 一致。
+
+---
+
+## 三、`command` 的取值（MSync 字段 8）
+
+| 值 | 方向 | 含义 | 实拍长度 |
+| --- | --- | --- | --- |
+| **0** | **双向** | **ack / 回执**（payload 只带被确认的 msgId，**无文本**） | C 464 B（×38）/ S 94 B（×39） |
+| **1** | C→S 发起，S 回 | **应用层心跳** | C 126 B（×5）/ S 87 B（×4，另 1 次 149 B） |
+| **2** | **S→C** | **业务推送（弹幕）** ⭐ 口令在这一类里 | 387 / 419 / 420 / 426 / 429 / 471 / 502 / 521 / 524 / 592 / 598 / 622 B |
+| **3** | C→S，S 回 | **PROVISION 握手**（**唯一**带 `GUID` + `auth` + payload 的帧） | C 471 B / S 103 B |
+
+⚠⚠ **与 `live_msync.go` 的枚举命名不符**：那边写的是 `CmdSync = 0`（注释"服务端推弹幕用的命令"）、
+`CmdNotice = 2`（注释"另一条服务端推送路径"）。实拍里 **`0` 是 ack、`2` 才是弹幕**。
+⭐ **但功能上恰好能工作**：`ExtractDanmakuText` 对 `0` 与 `2` 都试，
+而 `0` 的 payload（`{1:{1:0} 2:msgId 3:msgId}`）走 `DecodeCommSyncULMetaPayload` 解不出文本 ⇒ 空；
+`2` 走 `DecodeNoticeMetaPayload` 解得出来。**所以是"命名与注释错、路径歪打正着"**。
+
+### 3.1 弹幕文本的路径（逐字节核过）
+
+```
+MSync.9 (payload)
+  .2 (Message)
+    .6 (Content)
+      .4 (content 元素，repeated)
+        .2 = "小红花口令：一键9图出圈"      ← 文本在这里
+```
+
+实拍帧 `[43]`（S→C，`command=2`，622 B）完整形状：
+
+```
+MSync {
+  1: 0                              (version)
+  2: GUID { 1:"cmos#ngvlcs" 2:"cmlive_c_19900000000" 3:"cmosim.com" 4:"webim_<13位>" }
+  8: 2                              (command)
+  9: Payload {
+    1: { 2:"2026092314303164901183000000000" (roomId)  3:"conference.cmosim.com" }
+    2: Message {
+      1: <19 位 msgId>              (msgId；实拍是 19 位十进制，按脱敏口径换形)
+      2: JID { … }                  (发送者；name = cmlive_c_<手机号>)
+      3: JID { … }                  (房间)
+      4: 1790147851719              (毫秒时间戳)
+      5: 1
+      6: Content {
+        1: 3
+        2: { 2:"cmlive_c_19900000000"  3:"cmosim.com" }
+        3: { 2:<roomId>  3:"cmosim.com" }
+        4: { 1:0  2:"小红花口令：一键9图出圈" }        ← ⭐
+        5: [ {1:"isFans" 2:1 3:1} {1:"origin" 2:2 3:2} {1:"msgType" 2:2 3:4}
+             {1:"userName" 2:7 6:"用户1150"} {1:"userType" 2:2 3:5}
+             {1:"avatarUrl" 2:7 6:"null"} {1:"sex" 2:7 6:"undefined"}
+             {1:"userLevel" 2:2 3:2} {1:"cmliveAccount" 2:7 6:<32 位大写 hex>} ]
+      }
+    }
+  }
+}
+```
+
+⭐ **与 Go 对拍吻合**：`ExtractDanmakuText(cmd=2)` → `DecodeNoticeMetaPayload`（取 `payload.2`）
+→ `decodeMetaPayload`（取 `.6`）→ `firstContentText`（`MessageBody.4.2`）—— **逐字段对得上**。
+
+⚠ 但 `command` 的**命名**要按实拍改（见上）；`CmdSync`/`CmdNotice` 两个名字现在是**反的**。
+
+### 3.2 ack 的形状
+
+```
+C→S  cmd=0  464 B：{ 2:GUID  8:0  9:{1:{1:<msgId> 2:JID 3:JID 5:1 6:Content{…}}}  11:0  13:…  14:…  15:… }
+S→C  cmd=0   94 B：{ 1:0  2:GUID  8:0  9:{1:{1:0}  2:<msgId>  3:<msgId>} }
+```
+
+⇒ **客户端每收到一条 `command=2` 就回一条 `command=0`**（带被确认的 msgId），
+服务端再回一条 `command=0` 作**回执**。实拍里 `464 B` 客户端帧 ×38、`94 B` 服务端帧 ×39。
+
+⚠⚠ **`live_ws.go` 的 `OnFrame` 不回 ack**（只对 `cmd=3` 特判、其余只提取文本）。
+⇒ 这是与真实客户端的一处**行为差异**，见下「五、与 Go 实现的差异」。
+
+---
+
+## 四、心跳 ⭐（本次最意外的发现）
+
+**客户端 `command=1` 的时间点**（记录 632，`t` 相对首帧）：
+
+| # | 帧号 | t (ms) | 与上一次的间隔 |
+| --- | --- | --- | --- |
+| 1 | `[3]` | **+608** | —（紧跟 PROVISION ack） |
+| 2 | `[37]` | **+15537** | 14929 ms |
+| 3 | `[58]` | **+30665** | 15128 ms |
+| 4 | `[81]` | **+45561** | 14896 ms |
+| 5 | `[103]` | **+60583** | 15022 ms |
+
+⇒ ⭐⭐ **`command=1` 是约 15 秒一次的周期性心跳**，**不是**"PROVISION 之后补发一次"。
+第一条（+608 ms）恰好在 PROVISION ack（+515 ms）之后，**看起来像"补发"**，
+但它只是**心跳序列的第一拍**。
+
+服务端每次都回一条 `command=1`（87 B），payload 带**服务端毫秒时间戳**：
+
+```
+S→C cmd=1 87 B：{ 1:0  2:GUID  8:1  9:{1:{1:0}  3:1790147831967} }
+                                                    ↑ 服务端时间戳（毫秒）
+```
+
+### 4.1 为什么全程没有 `h`
+
+SockJS 的 `h` 只在**连接静默 25 秒**后才发。而这条连接 73.6 秒里发了 133 帧
+（业务帧每 1–2 秒一条）⇒ **从未静默到 25 秒** ⇒ **`h` 一次都没出现**。
+
+⚠⚠ ⇒ **"心跳回的是什么"这个问题在本次实拍里仍然无法回答** ——
+`h` 的回复（`"h"` 还是 `[""]`，即坑表 #117 那两份实现的分歧）**本轮没有样本**。
+**判为"未判定"，不许猜**。要拍到它，得让连接**真的静默 25 秒以上**
+（例如进房后挂着不动、且那一场没人发弹幕）。
+
+---
+
+## 五、MSync 报文的字段形状（实拍 vs Go）
+
+实拍**客户端**帧的顶层字段（逐字节核过，非推断）：
+
+| 字段 | 含义 | 实拍 `cmd=3` | 实拍 `cmd=1` | 实拍 `cmd=0` | `live_msync.go` 现在 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | version | **不写** | 不写 | 不写 | 不写 ✓ |
+| 2 | GUID | ✓ 68 B | **不写** | **不写** | **每条都写** ⚠ |
+| 3 | auth (`$t$…`) | ✓ 101 B | **不写** | **不写** | **每条都写** ⚠ |
+| 6 | userAgent | **不写** | **不写** | **不写** | **每条都写** ⚠ |
+| 7 | pov | **不写** | **不写** | **不写** | **每条都写 0** ⚠ |
+| 8 | command | 3 | 1 | 0 | ✓ |
+| 9 | payload | ✓ 167 B | **不写** | ✓ | ✓ |
+| 10 | deviceId | **写 0** | **不写** | **不写** | **不写** ⚠ |
+| 11 | encryptType | `0`（**wire 0**） | `0` | `0` | packed（**wire 2**）⚠ |
+| 13 | deviceInfo | **96 B ASCII** | 96 B | 96 B | **48 B 二进制** ⚠ |
+| 14 | timestamp | **4 B 大端「秒」** | 4 B | 4 B | **8 B 大端「毫秒」** ⚠ |
+| 15 | identification | **16 B** | 16 B | 16 B | **23 B** ⚠ |
+
+### 5.1 三个"每帧都带"的字段，实拍只在 `cmd=3` 带
+
+实拍 `cmd=1`（126 B）**只有 5 个顶层字段**：`8 / 11 / 13 / 14 / 15`。原始字节：
+
+```
+40 01                          → field 8  varint 1     (command=1)
+58 00                          → field 11 varint 0     (encryptType)
+6a 60 <96 ASCII bytes>         → field 13 len=96       (deviceInfo)
+72 04 6a b3 7c f7              → field 14 len=4        (timestamp)
+7a 10 63 6d 6f 73 5f 69 6d 32 …→ field 15 len=16       (identification)
+```
+
+⇒ **服务端靠连接本身认会话**，心跳/ack 帧**不重复带身份**。
+而 Go 的 `LiveMSyncFrame` 每条都填 `GUID` + `auth` + `userAgent` + `pov`。
+
+### 5.2 `deviceInfo`（字段 13）= **96 字节 ASCII hex 串**
+
+实拍值（两条 WS 记录**逐字相同** ⇒ 每设备固定，不是每连接生成）：
+
+```
+830652084dda69b6b957e2c3a7bd9b18db65922e29051b1b342ccf15bebc0fdb   ← 前 64 字符
+d9c03439bcd8fff7ea316192960629f2                                     ← 后 32 字符（**逐字是 ASCII**）
+```
+
+⚠⚠ **前 64 字符与 `live_msync.go` 的 `LiveDeviceInfoHex` 相同，后 32 字符不同**
+（那边是 `cc96f61dadab12f3cab1e66cb28ec05b`）。
+更关键的是**形状**：实拍是 **96 字节的 ASCII 文本**，而 Go 的 `LiveDeviceInfo()`
+返回 `hex.DecodeString(...)` = **48 字节二进制** —— **长度差一倍**。
+
+⭐ 后 32 字符是 **ASCII 的 16 位 hex**（`ea316192960629f2`），像是"一个 64 位随机数的 hex 写法"。
+⇒ `deviceInfo` 更像 **`<32 字节固定前缀> + <16 字符 hex>`**，而不是一整块 48 字节二进制。
+
+### 5.3 `timestamp`（字段 14）= **4 字节大端 Unix 秒**
+
+`6ab37cf7` = **1790147831**（`2026-09-23 07:17:11Z`，与首帧时刻吻合）。
+逐帧递增（1790147831 → …833 → …834 → …839 → …840 …）。
+
+⚠ Go 的 `LiveTimestampBytes(millis)` 写 **8 字节大端毫秒**（`0x000001A0…`）。
+实拍是 **4 字节大端秒**。⚠ 而**服务端**回的 `payload.3` **是毫秒**（`1790147831967`）
+—— **两个方向的时间单位不同**。
+
+### 5.4 `identification`（字段 15）= **16 字节：ASCII `cmos_im2` + 8 字节变化值**
+
+```
+63 6d 6f 73 5f 69 6d 32   = "cmos_im2"（8 字节 ASCII）
+a1 05 dd 9f d3 d5 c7 7a   = 8 字节变化值
+```
+
+- 实拍里后 8 字节**在变**（同一连接内 `…c77a` → `…c77b` → `…c872` → `…c873` → `…c870` → `…c871`）。
+- 两条 WS 记录的**起始值不同**（`…c77a` vs `…c971`）⇒ 每连接重新起算。
+- ⚠ Go 的 `LiveIdentification` = `"cmos_im"`（**7 字节，没有 `2`**）+ **16 字节随机** = **23 字节**。
+  ⇒ 前缀、长度都不对。
+
+### 5.5 PROVISION 的 payload（字段 9）
+
+```
+1: 7                       (osType = OS_JS)
+2: "23.0.2"                (version，**不带 v 前缀**)
+4: "cmlive_cmos_js_sdk"    (appSign)
+5: 0                       (compressType，wire 0)
+6: 0                       (encryptType，wire 0)
+9: ""                      (deviceUuid —— **空串**！字段在、长度为 0)
+12: "webim"                (deviceName)
+13: "webim_<13位毫秒>"      (resource)
+14: "$t$<101 字符 JWT>"     (auth)
+```
+
+⚠⚠ **与 Go 的两处不符**：
+1. **没有字段 3（`networkType`）** —— Go 写 `NetworkType: 1`（`ProvisionNetwork`）。
+   实拍未设置 ⇒ proto3 默认 0 ⇒ **不写**。
+2. **`deviceUuid` 是空串** —— Go 写 `fmt.Sprintf("%d", now.UnixMilli())`（13 字符）。
+   ⭐ 而 `resource`（字段 13）才是那个 `webim_<毫秒>`。
+
+✅ `provinceCode`（字段 15）实拍也没有 —— 与 Go"给空串 ⇒ 不写"一致。
+✅ `osType=7` / `version="23.0.2"` / `appSign="cmlive_cmos_js_sdk"` / `deviceName="webim"` 一致。
+
+---
+
+## 六、`visitlog/journaling`：**本轮零样本**
+
+抓包 201 条里，`visitlog` / `journaling` / `_flowerBtn` **全部零命中**。
+
+⭐ **这不是"抓漏了"** —— 进房链路**完整抓到了**：
+`cmpassLoginByCmToken` → `getCurrentUserInfoNew` → `roomBeat` → `focusStatus` → `userToken`
+→ `giftBox` → `shelves` → `ws/info` → **WS 升级** → `member/apply`（OPTIONS + POST）。
+**一条都不缺**，而 `journaling` **一次都没出现**。
+
+⇒ **判据**：`journaling` **不在 cmlive H5 的进房链路上**。
+它的 5 个 `optkeyword` 是 `National_LiveRoomFeedback_{pv,client,client_isApp,login,flowerBtn}`、
+`marketName=National_LiveRoomFeedback`（见 `business-feature-inventory.md` §活动类），
+走的是 **`m.mcloud.139.com/ycloud/visitlog/journaling`（`/ycloud` 侧）**
+—— 触发面是**活动站入口**或**点小红花按钮**，本轮**直接开 H5 链接、没点按钮** ⇒ 不发。
+
+⚠ 所以"其余 4 个 `optkeyword` 服务端认不认"**仍未验证**，且**抓包永远答不了这一条**
+（要么真发一次看响应体，要么就一直没答案）。
+
+---
+
+## 七、与 Go 实现的差异汇总（**待决，本轮未改 `internal/`**）
+
+| # | 差异 | 影响面 | 能否本地验证 |
+| --- | --- | --- | --- |
+| 1 | **心跳只发一次**（`unreadSent` 置位后不再发）vs 实拍 **每 15 s 一次** | 长驻收口令时可能被服务端判超时 | ❌ 要下次开播 |
+| 2 | **不回 ack** vs 实拍每条 `cmd=2` 回一条 `cmd=0` | 服务端可能重推或不推后续 | ❌ 要下次开播 |
+| 3 | WS UA = **Android Chrome** vs 实拍 **iPad UA** | 服务端若校验 UA 则握手失败 | ❌ 要下次开播 |
+| 4 | `GUID` / `auth` / `userAgent` / `pov` **每条都带** vs 实拍**只在 `cmd=3` 带** | 报文与真实客户端不同 | ❌ |
+| 5 | `deviceId`(10) **不写** vs 实拍 `cmd=3` **写 0** | 同上 | ❌ |
+| 6 | `deviceInfo`(13) **48 B 二进制** vs 实拍 **96 B ASCII** | 同上；且**值本身**后 32 字符不同 | ❌ |
+| 7 | `timestamp`(14) **8 B 毫秒** vs 实拍 **4 B 秒** | 同上 | ❌ |
+| 8 | `identification`(15) **`cmos_im`+16B=23 B** vs 实拍 **`cmos_im2`+8B=16 B** | 同上 | ❌ |
+| 9 | repeated 用 **packed(wire 2)** vs 实拍 **非 packed(wire 0)** | 字节不同；解码侧两种都认 | ❌ |
+| 10 | PROVISION 写了 `networkType=1` / `deviceUuid=毫秒` vs 实拍**都不写** | 同上 | ❌ |
+| 11 | `command` 枚举**命名反了**（`CmdSync=0` / `CmdNotice=2`） | **仅注释**，路径歪打正着 | ✅ 可以只改注释 |
+
+⚠⚠ **这些差异一条都没有"服务端认不认"的判据** —— 要等下一次开播。
+⇒ 本轮**只取证、不改实现**；`test/golden/live-room-vectors.json` 的 `msyncFrames`
+固化的仍是**原项目的形状**，与实拍**不一致**这件事已记进
+`docs/status.md` 的未验证清单与坑表。
+
+---
+
+## 八、`member/apply` 实拍 + 签名算式**实拍验证** ⭐⭐
+
+### 8.1 OPTIONS 预检的 `Access-Control-Request-Headers`
+
+```
+authorization,content-type,deviceinfo,systemmd5,timestamp,tokenmd5,version
+```
+
+⭐ 服务端 CORS 放行的**正好这 7 个头** —— `systemmd5` / `tokenmd5` / `version` / `deviceinfo`
+**都在这一路**（`/v3/room/member/apply`），**与 WS 无关**。再证 §一 第 1 条。
+
+### 8.2 POST 请求头与 body（逐字）
+
+```
+Host: videoim.cmcc-cs.cn:20103
+Content-Type: application/json
+Accept: */*
+Version: v23.0.2                 ← ✅ 实拍确认（原先标着"未实拍"）
+timestamp: 1790147831472         ← 13 位毫秒
+Authorization: Bearer <98 字符 token>
+Origin: https://v.cmcc-cs.cn
+User-Agent: <iPad UA，与 WS 那份逐字相同>
+deviceInfo: other/unknown        ← ⚠⚠ **不是** 48 字节 hex
+systemMd5: <32 位小写 hex>
+tokenMd5: <32 位小写 hex>
+Content-Type: application/json
+
+{"roomId":"2026092314303164901183000000000","message":"","userName":"cmlive_c_19900000000","invoker":"cmlive_c_19900000000"}
+```
+
+⭐ `message` **在**（值为空串）⇒ `ApplyRoomRequest` 补它是**对的**（原项目漏了）。
+⭐ body 的键序：`roomId` / `message` / `userName` / `invoker`。
+
+### 8.3 ⭐⭐ 签名算式实拍验证（两条记录**都**逐字命中）
+
+拿实拍的 `(deviceInfo 头值, timestamp, 期望 md5)` 三元组反推算式：
+
+| 候选算式 | 结果 |
+| --- | --- |
+| `md5(deviceInfo **头值字符串** + ts 末 10 位)` | ✅ **两条都命中** |
+| `md5(WS 的 96 字符 deviceInfo + ts 末 10 位)` | ❌ |
+| `md5(WS 的 deviceInfo **解码后 48 字节** + ts 末 10 位)` | ❌ |
+| `md5("Bearer " + t[:10] + ts10 + t[10:])` | ✅ **两条都命中** |
+| `md5(t + ts10)`、`md5("Bearer " + t + ts10)` | ❌ |
+
+复现：`go run ./target/attic/sigcheck`（程序读 `har/` 里未脱敏那份；**它自己不在版本库里**，
+`target/` 已 gitignore）。值不在这里贴 —— 原始三元组在 `har/live-room-raw-2026-09-23.json`。
+
+⇒ **两条结论**：
+
+1. ⭐ **`tokenMd5` 的算式实拍验证通过** —— 含"时间戳被插在第 10 个字符之后"这个反直觉的形状。
+   它从"抄原项目"升到了"实拍"。
+2. ⭐ **`systemMd5` 的算式也定下来了** —— 输入是 `deviceInfo` **头值字符串**本身，
+   不是解码后的字节（三条候选里只有它命中两条记录）。
+
+⚠⚠ **但 8.3 回答的是"客户端怎么算"，不是"服务端认不认"。** 这两件事**不一样** ——
+实拍只能看见客户端**发了什么**，看不见服务端**拿它做了什么**。
+⇒ 所以 8.3 定不了 `SystemMD5` 的口径该不该改。**定它的是 §8.6**（那里有一个反证实验）。
+
+### 8.4 ⚠ 一个**看起来是问题、其实不是**的差异：`SystemMD5` 强制 hex 解码
+
+> ⚠ **本节是"一个假警报"的记录，别只读结论。** 先读 §8.6 ——
+> 那里证明了服务端**根本不校验**这两个头。本节说的那个"不一致"**存在**，
+> 但它**不影响能不能过闸**，因为**没有闸**。
+
+`internal/upstream/live_room.go`：
+
+```go
+func SystemMD5(deviceInfoHex, timestamp string) (string, *core.Error) {
+    deviceInfo, err := hex.DecodeString(deviceInfoHex)   // ← 强制 hex
+    ...
+    payload := append(deviceInfo, []byte(TimestampSuffix10(timestamp))...)
+    return core.MD5Hex(payload), nil
+}
+```
+
+- 它把「**发出去的 `deviceInfo` 头值**」与「**参与签名的输入**」**绑成同一个参数**，并**强制 hex 解码**。
+- 实拍证明（§8.3）：**客户端**的签名输入 = **头值本身**；而 H5 客户端的头值是 **`other/unknown`（非 hex）**。
+- ⇒ 拿实拍的 `deviceInfo` 喂进 `SystemMD5` 会**当场报错**（"deviceInfo 不是合法 hex"）。
+- ⚠ `TestSystemMD5UsesDecodedBytesNotHex` 钉的正是"**要解码**"这一支 —— **实拍不支持它**。
+
+⚠⚠ **但"实拍不支持它"只说明"它不是客户端的算法"，不说明"它会失败"** ——
+早先这里接着写的是"⇒ 待决：服务端认哪一种"，那是把**客户端行为**当成了**服务端契约**。
+真正去问服务端的结果是 §8.6：**它两种都不看**。
+
+⭐ 又一条（这条仍然成立）：`test/fixtures/http/直播716.json`（**2026-09-17**）里的
+`deviceInfo` 是 **48 字节 hex**，与 **2026-09-23** 的 H5（`other/unknown`）**不同**
+⇒ **同一个头在不同客户端/版本下取值不同**，"照抄其中一份"都会漏掉另一份。
+
+### 8.5 `auth` 与 `Authorization` 用**同一个** token
+
+- WS PROVISION 的 `auth` = `"$t$" + <98 字符>`（共 **101** 字符）
+- 同一次进房的 `member/apply` 的 `Authorization` = `"Bearer " + <**同一个** 98 字符>`
+- ⭐ 两条 WS 记录各对应一次 `member/apply`，token **逐字相同**（只差前缀）
+  ⇒ 印证 `"$t$"+accessToken` 与 `"Bearer "+accessToken` 用的是**同一个** token。
+
+### 8.6 ⭐⭐ 反证实验：服务端**根本不校验**这两个签名头（2026-09-23 16:4x，纯 Go）
+
+**为什么要做**：§8.3 只说了"客户端怎么算"，而 §8.4 那个"不一致"要不要修，
+取决于**服务端校验什么**。这一条只有去问服务端才知道。
+
+**设计**：`deviceInfo` 头**固定**为同一串 96 位 hex，**只改签名算法**
+（唯一自变量），跑 5 组；其中第 ① 组是**对照**（复刻实拍客户端那种形态），
+第 ④⑤ 组是**反证**（发一个明知是错的签名）。
+
+房间 147606（正在播）、`POST /v3/room/member/apply`、`Version: v23.0.2`、账号 `15****42`：
+
+| 组 | `deviceInfo` 头 | `systemMd5` | `tokenMd5` | 结果 |
+| --- | --- | --- | --- | --- |
+| ① 对照 | `other/unknown` | `md5(头值 + ts10)` | 正常 | ✅ `code: 0`「接口调用成功」 |
+| ② | 96 位 hex | `md5(hex 串 + ts10)` | 正常 | ✅ `code: 0` |
+| ③ | 96 位 hex | `md5(解码后 48 字节 + ts10)`（= 现状） | 正常 | ✅ `code: 0` |
+| ④ **反证** | 96 位 hex | **`0000…0`（32 个 0）** | 正常 | ✅ `code: 0` |
+| ⑤ **反证** | 96 位 hex | **`0000…0`** | **`0000…0`** | ✅ `code: 0` |
+
+⭐⭐ **判读**：
+
+1. ① 过 ⇒ 我们的**请求形状**（头集合 / body / `Authorization`）是对的
+   —— 否则本实验的结论无效，这一条是它的前提。
+2. **④⑤ 过 ⇒ 服务端不校验 `systemMd5`、也不校验 `tokenMd5`。**
+   ⇒ §8.4 那个"待决"**有了答案，而且答案不是"认哪一种"，是"两种都不看"**。
+3. ⇒ **不需要改 `SystemMD5`**：它"与实拍客户端算法不同"是真的，
+   但那个差异**没有任何功能后果**（没有闸门）。改它只增加风险、不增加通过率。
+4. ⚠⚠ **"签名对不上"从来不是这条链的失败模式** —— 早先把 `systemMd5` 的算式
+   当成"服务端认不认"的判据，**方向就错了**。
+
+⚠ **结论的边界（别推论过头）**：这只覆盖**这一个接口 + 这一个版本（`v23.0.2`）
++ 这一个房间 + 这一个账号**。**不能**推广到 `/cmlive/api/*`（那一族是另一套头）、
+也不能推广到"以后版本也不校验"。`Authorization` 是**真校验**的（本实验全程带着它）。
+
+复现：`REPLAY_ACCOUNT='15****42' go run ./target/attic/live-apply-probe 147606`
+（**写操作**，但就是 `mcloud live-room` 每次跑都会做的那一步"进房"，可重复调用；
+**不投任何口令**）。见坑表 **#136**。
+
+---
+
+## 九、历史弹幕（公开 CDN）—— ⚠⚠ **不是"第二条拿口令的路"**
+
+> ⚠⚠ **2026-09-23 用户纠正**：**口令只在它被发出的那一场有效**（"口令的五条事实"第 1 条）。
+> 而这条路的产物**只能**来自**已经结束**的场次（§9.3：在播的场次零分片）
+> ⇒ 它给出的口令**抽出来就已经过期**、**没有任何使用价值**
+> ⇒ **它对"拿口令"这件事价值为零**。
+> ⭐ **"还能用的口令"只有一条路：WS 实时弹幕**（§9.5）。
+> ⚠ 本节保留的是**协议事实**与**取证方法**，**不是**一条取口令的备选路径 —— 别照它去做产品。
+> 它剩下的用途见 §9.4：**校验抽取器 / 看真实弹幕形态 / 看出现次数分布**。
+
+WS 只能听到**连上之后**的那几条。这一节记的是**另一条**拉弹幕的路：
+真实 H5 客户端同时还会拉一份**历史弹幕**（夹具 `直播wss.json` 的记录 0 与 7..21）。
+
+### 9.1 两个端点：一个要鉴权、一个**不要**
+
+```text
+POST https://v.cmcc-cs.cn/cmlive/api/room/front/imHistory/<liveRoomId>
+     → {"rtnMsg":null,"rtnCode":"0","object":"prd-cmlives"}
+     ⚠ 要 Authorization（直播侧 JWT）；body 是 {}（Content-Length: 2）
+     ⭐ 它回的那个 `object` 就是下一步的 **bucket 名**
+
+GET  https://v.cmcc-cs.cn/<bucket>/imChatRoomHistoryMessage/<liveRoomId>_<n>.json?reqType=json
+     ⭐⭐ **一个鉴权头都没有** —— 夹具里那条请求只有 Accept / X-Requested-With / UA
+     ⇒ 这一步**纯 Go 直连就能做，连登录都不需要**
+```
+
+响应是一个**数组**，每条的形状：
+
+```json
+{"payload":{"bodies":[{"msg":"小红花口令：…","type":"txt"}]}, "timestamp":…, "from":"…"}
+```
+
+⇒ 弹幕文本在 **`payload.bodies[].msg`**（一条弹幕可以有**多个** body，要拼起来）。
+
+### 9.2 键是**直播房间号**，不是聊天室号；编号从 **1** 起
+
+两条实测（2026-09-23）：
+
+| 键 | 结果 |
+| --- | --- |
+| `145453_1`（直播房间号） | **200**（162 KB） |
+| `145453_2` … `_14` | **200** |
+| `145453_15` | **403**（到此为止） |
+| `147606_1` … `_25` | **403**（全空） |
+| `<31 位聊天室号>_1` | **403** ⇒ 键**不是**聊天室号 |
+| `<另一场的聊天室号>_1` | **403** |
+
+⭐ 终止条件就是"**第一个非 200**"。`403` 在这条路上表示**分片不存在**
+（S3 对不存在的 key 也回 403），**不是**"我没登录"——
+⚠ 本仓库的 `mcloudio.NewClient()` 会把 403 归成 `KindAuth`（"凭据失效"）并**返回 error**，
+所以探针里这条路用的是裸 `net/http`（能看见状态码）。
+
+### 9.3 ⚠⚠ 它是**回放**产物：正在播的那场**零分片**
+
+```
+2026-09-23 16:2x，房间 147606 **正在播**（roomBeat: status=1、主播"中国移动云盘"、
+聊天室 id 前 14 位 = 20260923143031，正是本场开播时刻）
+imHistory/147606 → {"object":"prd-cmlives"}     ← bucket 确认无误
+147606_1.json    → 403                          ← 但这场的分片**根本还没生成**
+```
+
+⇒ **历史那条路取不到正在进行的这场**。它是**场后**（或回放页 `tabId=129`）用的。
+⇒ 想拿**当场**的口令，只有 WS 实时弹幕这一条路。
+
+### 9.4 场后复盘的实证（房间 145453，一场**已结束**的直播）
+
+纯 Go 拉完 14 片，共 **1168 条弹幕**，过 `ExtractKouling` 后**去重得 4 条**：
+
+| 抽出来的口令 | 出现次数 | 出处弹幕（实拍原文） | 判 |
+| --- | --- | --- | --- |
+| `毕业之旅MClaw相伴` | **248** | `小红花口令：毕业之旅MClaw相伴` | ✅ **真口令** |
+| `MClaw全能小助手` | **18** | `口令1:MClaw全能小助手 口令2:毕业之旅MClaw相伴` | ✅ **真口令** |
+| `相伴什么` | 1 | `口令是相伴什么` | ⚠ 已知假阳性（行为契约，见 `live_room_vectors_test.go`） |
+| `毕业之旅MC` | 1 | `MClaw全能小助手 口令2：毕业之旅MC` | ⚠ **发弹幕的人自己打漏了**（真值是 `毕业之旅MClaw相伴`），不是抽取器的错 |
+
+⚠⚠ **先把这张表的意义钉住**（2026-09-23 用户纠正）：房间 145453 那场**已经结束**
+⇒ 表里这两条口令**是过期值，拿不到任何地方去用**。
+这张表的用处**不是**"取口令"，是**拿真实语料验抽取器** —— 别把下面两条判据读成
+"这能当取口令的第二条路"。
+
+⭐⭐ **两条判据**：
+
+1. **一场就是两条**（与"口令的五条事实"第 3 条一致）—— 这是**跨场次**的计数旁证。
+   ⚠ 它佐证的是"每场两条"这条**规律**，**不是**任何具体口令的**值**：
+   口令按场次隔离，145453 的这两条对 147606 **一点用都没有**。
+2. **出现次数能分开"真口令"与"噪声"**：真口令被全场**刷屏**（248 / 18），
+   噪声**只出现 1 次**。
+   ⚠ 但**不能拿它当实时过滤条件** —— 当场收到口令的那一刻，它也只有 1 次。
+   它的用处是**校验抽取器**与**看真实弹幕形态**，**不是**取口令。
+
+⭐ 这 1168 条弹幕是**真实语料**，比 `live-room-vectors.json` 里手抄的 34 条
+覆盖面大得多 —— 拿它跑一遍抽取器，能看见真实弹幕里的各种残缺形态。
+⭐ **这才是这条路真正的价值**：它是**抽取器的回归语料**，不是一条取口令的路径。
+
+### 9.5 当场实跑：**纯 Go 拿全了两条**（房间 147606）
+
+同一场、同一个账号、同一条命令（`mcloud live-room --kouling-only --account 1`），
+连跑两次：
+
+```text
+第 1 次（--listen-seconds 45）：收到 1 个口令：中秋美好存云盘
+第 2 次（--listen-seconds 45）：收到 2 个口令：一键9图出圈 / 中秋美好存云盘
+```
+
+⭐⭐ **两条**：`一键9图出圈`、`中秋美好存云盘`
+（前者与 §3.1 那条弹幕文本路径抽出来的 `小红花口令：一键9图出圈` 逐字对上）。
+
+⭐⭐ **这是同一个答案的第三个独立证据面** —— 三者逐字一致：
+
+| 证据面 | 时间 | 得到的两条 |
+| --- | --- | --- |
+| 代理抓的 **WS 帧**（本文 §3.1） | 15:17–15:19 | `一键9图出圈` / `中秋美好存云盘` |
+| 抓包同期的**门与口令**（本文抬头） | 15:17–15:19 | 同上 |
+| **纯 Go** 的 `mcloud live-room --kouling-only` | 16:2x | 同上 |
+
+⇒ **"这场就是这两条"可以定案了**；`一键9图出圈` 与 §3.1 里那条
+`MSync.9.2.6.4.2` 的弹幕文本逐字对上，**两条路互证**。
+
+⚠⚠ **值得单独记的一条**：**"只收到 1 条"不等于"这场只有 1 条"**。
+第 1 次那 45 秒里，另一条的弹幕**根本没出现过** ——
+按"口令的五条事实"第 4 条，进房会**以该用户的名义**发一条；
+⇒ 自己进房只触发**其中一条**，另一条要等**别人进房**（或主播喊）才刷出来。
+**所以听一次不一定够，得多听一会儿 / 重跑一次。**
+
+### 9.6 取证工具
+
+`target/attic/live-history/main.go`（**gitignored**，同 `sigcheck` / `live-probe`）：
+
+```bash
+go run ./target/attic/live-history 145453            # 场后复盘：只拉历史，不登录
+go run ./target/attic/live-history 147606 --login --room-beat   # 当场：问 bucket + 看聊天室 id
+```
+
+只读（只发 `imHistory` 与那些公开 CDN GET），**不投任何口令**。
+⚠⚠ 它拉到的口令**全是过期值**（口令只在其原场次有效）⇒ **别拿它的输出当"可用的口令"**，
+它的定位是**弹幕取证工具**（见本节抬头那条警告）。
+
+

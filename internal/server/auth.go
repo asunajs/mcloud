@@ -85,6 +85,13 @@ type Server struct {
 	// ⚠ 它是 [New] 的必填项：留 nil 只可能是装配漏了一行，
 	// 而那时 `POST /api/runs` 会回 500 而不是编译不过。
 	runs *RunWorld
+	// notify 是"推送"那一份常驻装配（见 [NotifyWorld]）。
+	//
+	// 第四个同一条理由住在这里的东西。它**可以**是 nil，而那不是漏装配：
+	// 单独构造的 `Server`（测试夹具）本来就不该带一副能往第三方发消息的面孔。
+	// nil 的表现是"推送这一族不响 + `POST /api/notify/test` 回 500"，
+	// 而**不是**静默成功 —— 配置读写那两条只用库，与它无关，照常工作。
+	notify *NotifyWorld
 	// schedulerOn 记着调度循环在不在跑（`GET /api/status` 的那个字段）。
 	//
 	// 它是 [Server.startScheduler] 自己写的：起循环置真、退出置假（defer 那一条
@@ -113,11 +120,34 @@ type Server struct {
 func New(
 	db *mcloudio.SqliteStore, clock core.Clock, rng core.Random,
 	cfg Config, hub *app.LoginHub, refresher *app.AuthRefresher, runs *RunWorld,
+	opts ...ServerOption,
 ) *Server {
-	return &Server{
+	s := &Server{
 		store: db, clock: clock, rng: rng, config: cfg,
 		bus: mcloudexec.NewEventBus(), hub: hub, refresher: refresher, runs: runs,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
+}
+
+// ServerOption 是[New]的可选装配项。
+//
+// 用变参而不是往参数表上再加第七个位置：`New` 已有三个调用点（进程入口 + 两份测试夹具），
+// 而推送这一族**允许不接**（见 [Server.notify]）—— 摊进必填项就会逼每一个
+// 只关心登录、跑任务的调用方多造一份用不到的装配。
+type ServerOption func(*Server)
+
+// WithNotifyWorld 接上推送的发送侧。
+//
+// 传 nil 与"根本不调这一条"是同一个结果（[Server.notify] 留空 ⇒ 这一族不响）。
+// 它存在的意义不是开一个"关掉推送"的开关 —— 那个开关是配置里的 `enabled` ——
+// 而是让组装根那一行（`run.go`）把"这里接上了出站发消息的能力"写得看得见。
+func WithNotifyWorld(world *NotifyWorld) ServerOption {
+	return func(s *Server) { s.notify = world }
 }
 
 // Store 是存储（组装层与处理器都从这里取）。
@@ -315,6 +345,11 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	// 只读，但**会打上游**（五枪，见 [Server.probeLiveRoom] 的注释），
 	// 所以它与 `refresh-auth` 一样共用 [Deps.HTTP] 那一道闸，测试里漏注入就是真出门。
 	mux.HandleFunc("GET /api/accounts/{id}/live-room", s.authed(s.probeLiveRoom))
+	// 兑换页的第 ③ 块：这一号**此刻**看得见的清单，以及每一件挡在哪一条判据上。
+	// 同样只读、同样会打上游（一枪 `exchangeList` + 建会话那三枪），
+	// 所以也走 [Deps.HTTP] 那一道闸。形状与"为什么不叫 `/api/exchange/prizes`"
+	// 写在 `exchange_prizes.go` 文件头。
+	mux.HandleFunc("GET /api/accounts/{id}/exchange-prizes", s.authed(s.exchangePrizes))
 	// 账号的三条写面。凭据**只进不出**：这三条的响应里没有 `authorization`
 	// 与 `jwtToken` 这两个键（出网形状见 [accountPayload]）。
 	mux.HandleFunc("POST /api/accounts", s.authed(s.addAccount))
@@ -344,6 +379,18 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/schedules", s.authed(s.listSchedules))
 	mux.HandleFunc("PUT /api/schedules/{id}", s.authed(s.putSchedule))
 	mux.HandleFunc("DELETE /api/schedules/{id}", s.authed(s.deleteSchedule))
+
+	// 推送这一族。三条都**不是**冻结基准里的路由（那边没有这一族），
+	// 所以同样登记在 routes_test.go 的 `goAdded` 表里。
+	//
+	// ⚠ 读写的是**全安装一份**的 `notify_config`（单行表、无归属），而 GET 的响应
+	// 是脱敏视图：各家凭据只出"有没有填 + 字符数"（判据与那张字段表见 `notify_view.go`）。
+	mux.HandleFunc("GET /api/notify/config", s.authed(s.getNotifyConfig))
+	mux.HandleFunc("PUT /api/notify/config", s.authed(s.putNotifyConfig))
+	// 试发**会往站外发消息**（用户手机上就多一条），所以它单列一条 POST，
+	// 而不是在 `PUT /api/notify/config` 里顺手带一个 `test: true` 标志 ——
+	// 后者会让"我只改了个标题"也可能变成"十家各收到一条测试"。
+	mux.HandleFunc("POST /api/notify/test", s.authed(s.testNotify))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

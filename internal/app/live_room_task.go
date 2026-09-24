@@ -124,6 +124,13 @@ type LiveRoomRun struct {
 	// （只听第一间、门没开），CLI 与服务端必须看到同一份判级，否则界面上一片绿、
 	// 终端里一片黄。
 	Progress RunProgress
+
+	// Sessions 是进程内的会话票池（同一账号这一份票跨轮复用）。可为 nil ⇒ 回落成
+	// "这一轮那一条"，理由与接线点见 [SignInRun.Sessions] 的同一句。
+	//
+	// ⚠ 这一条链今天**借用**签到页那一份配方（`RecipeSignInPage`）——
+	// 见下面取票那一段的"jwttoken 使用公共来源"。
+	Sessions *SessionPool
 }
 
 // LiveRoomAccountResult 是一个账号这一趟的全部产出。
@@ -237,17 +244,28 @@ func (r LiveRoomRun) RunAccount(
 	//
 	// ⚠ 为什么建在**这里**而不是开门之前：SSO token 很短命（换完几十秒内就要用），
 	// 而中间夹着一整段听弹幕（默认 60 秒）。放在投之前才是"拿到口令 → 立刻用它"。
-	_, h5JWT, perr := OpenSignInSession(ctx, driver.Upstream, profile,
-		&credential, r.Driver.Clock, r.Driver.Random)
-	if perr != nil {
-		// 这一次**不降级**：这一趟的目的就是投口令，会话建不起来就是整趟失败，
-		// 而不是"余额没读到"那种可以带着结论回去的情况。
+	//
+	// **jwttoken 使用公共来源**（`AGENTS.md` §1.12 要求留痕的那句）：这条六步链要的票
+	// 是签到页那一套参数换的（`upstream.MarketName` / `SourceID`），直播页自己的取法
+	// **尚未抓包确认**；哪天查明这一页要按自己的参数换票，改的是这里的**配方**
+	// （`SessionRecipe` 新增一个取值 + [OpenSignInSession] 按配方取那三个参数），
+	// 并**同时**改掉这句注释与 [RecipeSignInPage] 那一条。
+	//
+	// ⚠ 走 [SessionPool] 而不是就地 new 一条：界面上"连点三次领取小红花"应当只建一条会话
+	// （用户 2026-09-23 的口径），而且这一条链刷出来的新票**只该顶掉它自己那一条**，
+	// 不连带签到页那张 —— 键里那个配方就是为这件事存在的（今天两页同配方，所以是同一条）。
+	src := sessionSource(r.Sessions, driver.Upstream, profile, &credential,
+		r.Driver.Clock, r.Driver.Random, RecipeSignInPage)
+	// 先逼它建一条：建会话失败时这一趟**不降级**（这一趟的目的就是投口令，
+	// 会话建不起来就是整趟失败，而不是"余额没读到"那种可以带着结论回去的情况）。
+	// 放在这里也保住了原来那句 `[小红花·建云盘会话]` 的措辞 —— 让链的第一步去建，
+	// 失败会被包成"[起始余额] …"，看不出是建会话坏了。
+	if _, perr := src.Session(ctx); perr != nil {
 		return outcome, perr.WithPrefix("[小红花·建云盘会话] ")
 	}
 
 	r.progress(core.LevelInfo, fmt.Sprintf("投 %d 个口令…", len(outcome.Codes)))
-	report, perr := RunRedFlower(ctx, driver.Upstream,
-		NewRedFlowerSession(h5JWT, outcome.Codes))
+	report, perr := RunRedFlower(ctx, src, NewRedFlowerSession(outcome.Codes))
 	if perr != nil {
 		// 第一轮就失败时**不**带报告：那一趟连起始余额都可能没读到，
 		// 递一份"0 → 0（进账 0）"出去会被读成"投了但没进账"。
@@ -268,8 +286,10 @@ func (r LiveRoomRun) RunAccount(
 		outcome.Report = &report
 		if toDraw := PickNewCodes(fresh, outcome.Codes, report.InvalidCodes); len(toDraw) > 0 {
 			r.progress(core.LevelInfo, fmt.Sprintf("又收到 %d 个新口令，再投一轮…", len(toDraw)))
-			second, perr := RunRedFlower(ctx, driver.Upstream,
-				NewRedFlowerSession(opened.JWT, toDraw))
+			// 第二轮**沿用同一个 source**（口径："一轮任务一条 `jwttoken`"）。
+			// 早先这里传的是 `opened.JWT`（直播侧那一份），而六步链要的是云盘侧的 ——
+			// 状态机自己收票之后这个口子没了（见 [NewRedFlowerSession]），票只能来自 `src`。
+			second, perr := RunRedFlower(ctx, src, NewRedFlowerSession(toDraw))
 			if perr != nil {
 				// 第二轮失败时保留**第一轮**那份：它是完整跑完的。
 				return outcome, perr
@@ -354,6 +374,10 @@ func mergeRedFlowerReports(first, second RedFlowerReport) *RedFlowerReport {
 	// 而它恰恰是最该看到的一条（意味着弹幕里那条口令是过期的 / 抄错了）。
 	merged.InvalidCodes = MergeKouling(first.InvalidCodes, second.InvalidCodes)
 	merged.OtherCodes = append(append([]string{}, first.OtherCodes...), second.OtherCodes...)
+	// ⚠ 过期口令**直接追加**即可，不需要 [MergeKouling] 去重：
+	// [PickNewCodes] 只挑"既不在第一批、也不在无效表"的口令，而过期口令
+	// **在第一批里** ⇒ 第二轮根本不会重投它（与 `OtherCodes` 同一处境）。
+	merged.ExpiredCodes = append(append([]string{}, first.ExpiredCodes...), second.ExpiredCodes...)
 	if second.RevivalFlowers != 0 {
 		merged.RevivalFlowers = second.RevivalFlowers
 	}
@@ -379,6 +403,12 @@ func (r *RedFlowerReport) notesSuffix() string {
 	var parts []string
 	if len(r.InvalidCodes) > 0 {
 		parts = append(parts, "无效口令 "+strings.Join(r.InvalidCodes, " / "))
+	}
+	if len(r.ExpiredCodes) > 0 {
+		// ⚠⚠ 这句是**用户可见的**，措辞按坑表 #140 做法 ④ 定：
+		// 说"口令已失效（本场已结束）"，**不说**「未分类口令」——
+		// 后者把人往"口令抄错了"（无效口令）那边引，而这两件事的排查方向完全不同。
+		parts = append(parts, "口令已失效（本场已结束）"+strings.Join(r.ExpiredCodes, " / "))
 	}
 	if len(r.OtherCodes) > 0 {
 		// ⚠ 与无效口令分开说：它们是"上游回了个我们没分类的码"，

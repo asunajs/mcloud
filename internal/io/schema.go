@@ -21,8 +21,8 @@ import (
 // 判断标准很简单：**有没有可能存在一个不是本机跑出来的库**。没有，就可以改；有，就只能加。
 //
 // ⚠ 方案文档 §6.3 的退出判据写作"schema v1→v7"，那是 v8（run_events）之前的口径。
-// 以本常量为准：当前是 **9**。
-const SchemaVersion int64 = 9
+// 以本常量为准：当前是 **10**。
+const SchemaVersion int64 = 10
 
 // allMigrations 是迁移清单：索引 i（0-based）对应版本 i+1。
 //
@@ -425,6 +425,43 @@ var allMigrations = []string{
     ALTER TABLE schedules ADD COLUMN last_fire_at TEXT;
 
     COMMIT;
+    `,
+	// ── v10：notify_config —— 推送（通知）配置落库 ─────────────────────────────
+	//
+	// # 为什么又是单行表
+	//
+	// 与前两张（`exchange_config` / `webui_config`）同一条理由：推送配置全局唯一一份，
+	// 用 `CHECK (id = 1)` 钉住，免得"读出来的是哪一行"变成运气问题。
+	// 推送的"这份配置属于谁"由 server 层的鉴权决定，不由这一行的列决定 ——
+	// 真要按用户分那是**改语义**（单行 → 每用户一行），见 core.ConfigStore 里那条注释。
+	//
+	// # 为什么整块渠道配置存成一列 JSON
+	//
+	// 十个渠道各有自己的字段（还有 `Extra` 这种用户自由键），拆成列会让 schema 跟着
+	// 渠道参数不停改版，而且拆完之后"读一份配置"要 JOIN 十次。
+	// 需要被 SQL 查询的维度这里**一个都没有**：推送配置永远是整块读、整块写。
+	// 三个标量（`enabled` / `only_error` / `min_level`）单独成列是有理由的 ——
+	// 它们是界面上那一排开关，也是"这次到底发不发"的判据，读它们不该带出全部凭据。
+	//
+	// # 默认值方向：关闭 + info
+	//
+	// `enabled DEFAULT 0` 是这一版唯一的安全相关默认：这一族会把运行正文发到**第三方**
+	// （以及用户自己的邮箱），"配置一迁过来就往外发"不是保真，是意外。
+	// `min_level DEFAULT 'info'` 复刻旧实现的默认门槛。
+	// `title` 可空且**没有默认值**：NULL 表示"没有人填过"，读取侧走
+	// [core.DefaultNotifyTitle]；填一个默认标题进库会把"没填"谎报成"填了这个"，
+	// 而将来要改默认文案时（就像本轮把旧值 `mcloud-v2 运行推送` 改掉那次）
+	// 库里那一行会跟不上 —— 判据同 `miss_policy` 那一列。
+	`
+    CREATE TABLE IF NOT EXISTS notify_config (
+        id         INTEGER PRIMARY KEY CHECK (id = 1),
+        enabled    INTEGER NOT NULL DEFAULT 0,
+        title      TEXT,
+        only_error INTEGER NOT NULL DEFAULT 0,
+        min_level  TEXT NOT NULL DEFAULT 'info',
+        channels   TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT
+    );
     `,
 }
 

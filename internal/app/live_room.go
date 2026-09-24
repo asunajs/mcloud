@@ -217,6 +217,17 @@ type RedFlowerReport struct {
 	// ⚠ 单独留一栏：它们是"上游说了个我们没分类的码"，与"口令错"排查方向
 	// 完全不同。混进 `InvalidCodes` 会触发一次毫无意义的 60 秒重听。
 	OtherCodes []string
+	// ExpiredCodes 是 [upstream.RedFlowerDrawKoulingExpired]（`200118`）——
+	// **这条口令认识、但本场直播已经结束了**。
+	//
+	// ⚠⚠ 单独一栏的理由在**用户可见的那句话**上：它原本与"上游回了个没分类的码"
+	// 共用「未分类口令」一个词，而这一格**最常见**的成因恰恰是"直播已经结束了"
+	// —— 那句话把人往"口令抄错了"（[upstream.RedFlowerDrawInvalidKouling]）那边引，
+	// 排查方向一开始就错（坑表 **#140**）。
+	//
+	// ⚠ 它**不是**无效口令：口令本身是**对的**。所以既不进 `InvalidCodes`、
+	// 也不触发那次 60 秒重听 —— 重听也只会再拿一次 `200118`。
+	ExpiredCodes []string
 }
 
 // Gained 是本次进账几朵（⑥ − ①）。
@@ -241,15 +252,10 @@ func (r RedFlowerReport) Succeeded() int {
 
 // RedFlowerSession 是六步链的状态机。
 //
-// 用法（顺序固定）：
-//
-//	for !session.Done() {
-//	    _, request, err := session.Next()   // 当前该发什么
-//	    envelope, err := up.Call(ctx, request)
-//	    session.Feed(envelope)              // 推进
-//	}
+// 用法（顺序固定）：由 [RunRedFlower] 驱动 —— 它每取一步都从
+// [SignInSessionSource] 拿**当前那条会话的票**，本状态机自己**不持有**票。
+// 手工驱动时是 `session.Next(jwt)` → `up.Call` → `session.Feed`。
 type RedFlowerSession struct {
-	h5JWT string
 	codes []string
 
 	step           RedFlowerStep
@@ -261,19 +267,17 @@ type RedFlowerSession struct {
 
 // NewRedFlowerSession 构造一次六步链。
 //
-// `h5JWT` 是**云盘侧**（`tyrzLogin` 换的那一份），不是门换到的直播侧 JWT：
-// 这一族的六个请求全打在 `m.mcloud.139.com/ycloud`，拿直播侧那份去投实测回
-// `90001 未登录`（判据与实拍对照见 [ProbeLiveRoom] 的补记）。
-// 名字刻意不叫 `jwt` —— 这条链上同时存在两份 JWT，摆错的那一种表现是
-// "六个请求全部未登录"，而不是编译错误。
+// ⚠ 它**不收 JWT**：这一族六个请求全打在 `m.mcloud.139.com/ycloud`，要的是
+// **云盘侧** `tyrzLogin` 那一份，不是门换到的直播侧 JWT（拿后者去投实测回
+// `90001 未登录`，判据与实拍对照见 [ProbeLiveRoom] 的补记）。
+// 票由 [RunRedFlower] 在每一步现取 —— 这里刻意留不了"先把票存起来"的口子：
+// 原先构造函数收一个 `h5JWT`，而调用点确实有人把直播侧那份传了进来
+// （编译得过、请求也发得出去，只是每一枪都不登录）。
 //
 // `codes` 的顺序**有意义**（决定先投哪个口令）：**同一账号**对同一条**正确**口令的
 // 第二次请求会回 `200112`，所以"先投最新的那个"能让日志里第一条就是最有信息量的。
-func NewRedFlowerSession(h5JWT string, codes []string) *RedFlowerSession {
-	return &RedFlowerSession{
-		h5JWT: h5JWT,
-		codes: MergeKouling(codes),
-	}
+func NewRedFlowerSession(codes []string) *RedFlowerSession {
+	return &RedFlowerSession{codes: MergeKouling(codes)}
 }
 
 // Done 报告链是否已走完。
@@ -289,33 +293,34 @@ func (s *RedFlowerSession) Codes() []string {
 	return out
 }
 
-// Next 返回**当前这一步**要发的请求。**不推进状态**。
+// Next 返回**当前这一步**要发的请求（用调用方现给的那份 `h5JWT`）。**不推进状态**。
 //
 // 推进只发生在 [Feed]。这样"构造失败"与"发送失败"都不会让状态机偷偷前进一步
 // —— 少投一个口令是**静默**的（余额会告诉你有问题，但不会告诉你是哪个）。
-func (s *RedFlowerSession) Next() (RedFlowerStep, core.HTTPRequest, *core.Error) {
+// 也正因为不推进，[RunRedFlower] 在刷完票后可以**原样再取一次这一步**。
+func (s *RedFlowerSession) Next(h5JWT string) (RedFlowerStep, core.HTTPRequest, *core.Error) {
 	switch s.step {
 	case StepBalanceBefore:
-		request, err := upstream.RedFlowerUserInfoRequest(s.h5JWT)
+		request, err := upstream.RedFlowerUserInfoRequest(h5JWT)
 		return StepBalanceBefore, request, err
 
 	case StepJournaling:
 		// ⚠ 埋点发的是**固定 5 条**，顺序即 [upstream.LiveRoomJournalingEvents]。
 		// 其中只有 `_flowerBtn` 是实拍证实的，其余 4 条照抄原项目（理由见那边注释）。
 		event := upstream.LiveRoomJournalingEvents[s.journalingSent]
-		return StepJournaling, upstream.LiveRoomJournalingRequest(event, s.h5JWT), nil
+		return StepJournaling, upstream.LiveRoomJournalingRequest(event, h5JWT), nil
 
 	case StepFirstParticipate:
-		return StepFirstParticipate, upstream.FirstParticipateGiveRequest(s.h5JWT), nil
+		return StepFirstParticipate, upstream.FirstParticipateGiveRequest(h5JWT), nil
 
 	case StepDraw:
-		return StepDraw, upstream.RedFlowerDrawRequest(s.codes[s.drawIndex], s.h5JWT), nil
+		return StepDraw, upstream.RedFlowerDrawRequest(s.codes[s.drawIndex], h5JWT), nil
 
 	case StepRevivalFlowers:
-		return StepRevivalFlowers, upstream.QueryRevivalFlowersRequest(s.h5JWT), nil
+		return StepRevivalFlowers, upstream.QueryRevivalFlowersRequest(h5JWT), nil
 
 	case StepBalanceAfter:
-		request, err := upstream.RedFlowerUserInfoRequest(s.h5JWT)
+		request, err := upstream.RedFlowerUserInfoRequest(h5JWT)
 		return StepBalanceAfter, request, err
 	}
 	return StepDone, core.HTTPRequest{}, nil
@@ -372,6 +377,9 @@ func (s *RedFlowerSession) Feed(envelope *upstream.Envelope) *core.Error {
 		if outcome.Kind == upstream.RedFlowerDrawOther {
 			s.report.OtherCodes = append(s.report.OtherCodes, s.codes[s.drawIndex])
 		}
+		if outcome.Kind == upstream.RedFlowerDrawKoulingExpired {
+			s.report.ExpiredCodes = append(s.report.ExpiredCodes, s.codes[s.drawIndex])
+		}
 		s.drawIndex++
 		if s.drawIndex >= len(s.codes) {
 			s.step = StepRevivalFlowers
@@ -406,29 +414,46 @@ func (s *RedFlowerSession) Report() RedFlowerReport {
 	copy(out.Draws, s.report.Draws)
 	out.InvalidCodes = append([]string(nil), s.report.InvalidCodes...)
 	out.OtherCodes = append([]string(nil), s.report.OtherCodes...)
+	out.ExpiredCodes = append([]string(nil), s.report.ExpiredCodes...)
 	return out
 }
 
 // RunRedFlower 把六步链一口气跑完（`Next` → `Call` → `Feed` 的循环）。
+//
+// 每一步都过一遍 [SignInSessionSource.Call]：票是这一轮那一条，
+// 中途回 `90001` 时刷一次、把**当前这一步**重放一次（`Next` 不推进状态，
+// 所以重放发的还是同一步、同一份账）。
 //
 // # 为什么"解析失败"要**中止**而不是跳过
 //
 // 六步里每一步的响应都带着后面要用到的信息（余额、判定）。解析失败意味着
 // "上游换了信封形状"或"我们打错了端点"，继续跑只会把同一个问题重复六遍，
 // 而且日志里看不出是哪一步开始的。中止 + 把错误原样带回去，排查面最小。
+//
+// ⚠ 唯一会被**重放**的写请求是 `draw`（第④步，按口令逐个投）。重放只在
+// `90001 未登录` 时发生 —— 那一次的响应说明服务端**没有**受理这条口令；
+// 而"票过期发生在服务端受理之后"这种情形没有样本，属**待验证**
+// （怎么测：活窗口里让一笔 `draw` 在过期票上跑，看余额有没有动）。
 func RunRedFlower(
-	ctx context.Context, up *upstream.Upstream, session *RedFlowerSession,
+	ctx context.Context, src *SignInSessionSource, session *RedFlowerSession,
 ) (RedFlowerReport, *core.Error) {
+	up := src.up
 	for !session.Done() {
-		step, request, err := session.Next()
+		var step RedFlowerStep
+		err := src.Call(ctx, func(s SignInSession) *core.Error {
+			var request core.HTTPRequest
+			var perr *core.Error
+			step, request, perr = session.Next(s.jwt)
+			if perr != nil {
+				return perr
+			}
+			envelope, perr := up.Call(ctx, request)
+			if perr != nil {
+				return perr
+			}
+			return session.Feed(envelope)
+		})
 		if err != nil {
-			return session.Report(), err
-		}
-		envelope, err := up.Call(ctx, request)
-		if err != nil {
-			return session.Report(), wrapStepError(step, err)
-		}
-		if err := session.Feed(envelope); err != nil {
 			return session.Report(), wrapStepError(step, err)
 		}
 	}

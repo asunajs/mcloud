@@ -7,7 +7,11 @@
 // 这条链上有三处"少写一句就静默出错"的地方：
 //
 //   - 档案里的 `x-yun-uni`（用户域）必须**从库里那个账号回填**，拿别人的或拿不到
-//     的表现是"凭据都在、却回 90001 未登录"；
+//     的表现是"凭据都在、却回 90001 未登录"；（这一处连同"取凭据 + 拿票"一起
+//     收在 [SignInWorld.Source]，几条走签到页的链共用那一份）
+//     ⚠ 接了 [SignInSessionSource] 之后这条**不会**被"自动刷票"掩盖：
+//     刷的那条会话用的是同一个档案，域不对照样回 90001，最终报的是
+//     "jwttoken 刷新后重放仍失败"——刷新只是让同一个错更贵，不是更含糊。
 //   - 余额落库取 `infoV3.total`（现行余额），取 `beforeTotal` 会让趋势图变成
 //     一条直线（见 [RecordCloud] 那张表）；
 //   - 领取不带 H5 `deviceId` 会回 `615` —— 而 `615` 在日志里不像"少了个头"。
@@ -55,6 +59,13 @@ type SignInRun struct {
 
 	// Progress 收"给人看的过程话"，可为 nil（理由同 [LiveRoomRun.Progress]）。
 	Progress RunProgress
+
+	// Sessions 是进程内的会话票池：同一账号在签到页这一份票**跨轮复用**，
+	// 于是界面上连点三次签到只建一条会话（口径与理由见 `signin_session_pool.go` 头注）。
+	//
+	// 可为 nil ⇒ 回落成"这一轮那一条"（CLI 单次调用与测试用；服务端那条路**必须**接，
+	// 接线点见 `internal/server/run_dispatch.go`）。
+	Sessions *SessionPool
 }
 
 // SignInAccountResult 是一个账号这一趟的全部产出。
@@ -85,12 +96,12 @@ type SignInAccountResult struct {
 func (r SignInRun) RunAccount(
 	ctx context.Context, account core.AccountID,
 ) (SignInAccountResult, *core.Error) {
-	profile, perr := ProfileWithStoredDomainID(ctx, r.Store, r.Scope,
-		upstream.NewAppProfile(r.Device), account)
-	if perr != nil {
-		return SignInAccountResult{}, perr
-	}
-	credential, perr := CredentialFromAccount(ctx, r.Store, r.Scope, account)
+	// 装配那三步（回填用户域 → 取凭据 → 拿票）在 [SignInWorld.Source]：
+	// 与"只领不签""只查不签"那几条链**共用一份**，理由写在那文件的头注。
+	// 这一趟用的票在 source 里：签到与领取都向它要，所以整趟最多建一条会话
+	// （旧写法是每步各开一条）。接了池时它可能**比这一趟更老** —— 上一次点击建的那条
+	// 还没被上游判死，就继续用它（口径见 `signin_session_pool.go`）。
+	src, perr := r.world().Source(ctx, account)
 	if perr != nil {
 		return SignInAccountResult{}, perr
 	}
@@ -100,34 +111,36 @@ func (r SignInRun) RunAccount(
 	// 签到不带它也能签上（2026-09-19 实测），但领取不带会回 `615` ——
 	// 所以这一趟只要开了 `Receive` 就必须有它。换不到时**降级继续**（不整趟失败）：
 	// 那是风控侧的问题，签到本身仍然做得完，而把整趟判失败会连带丢掉一次成功的签到。
-	deviceID, perr := DeviceID(ctx, r.Upstream, r.Store, r.Scope, account, r.Clock, r.Random)
+	deviceID, perr := r.world().DeviceIDFor(ctx, account)
 	if perr != nil {
 		if r.Receive {
 			// 说清"这次没有它 ⇒ 领取会回 615"，否则 `615` 会变成一个没人看得懂的码。
 			r.progress(core.LevelWarn, fmt.Sprintf(
 				"⚠ 取 H5 deviceId 失败，本次领取大概率回 615：%s", perr.Error()))
 		}
-		return r.finish(ctx, account, profile, credential, nil)
+		return r.finish(ctx, account, src, nil)
 	}
-	return r.finish(ctx, account, profile, credential, &deviceID)
+	return r.finish(ctx, account, src, &deviceID)
 }
 
 // finish 是"凭据与档案都齐了"之后的那一段：签到 → 记余额 → 领取。
 //
 // 单独成函数只为了让上面那条降级支路不必把三步抄两遍（抄两遍的话，
 // 第二步将来只会修在其中一条上）。
+//
+// `src` 在这一趟**开头**建（[SignInRun.RunAccount]），签到与领取共用它：
+// 一轮只有一条 `jwttoken`（口径见 `signin_session.go` 头注）。
 func (r SignInRun) finish(
 	ctx context.Context,
 	account core.AccountID,
-	profile *upstream.AppProfile,
-	credential SignInCredential,
+	src *SignInSessionSource,
 	deviceID *string,
 ) (SignInAccountResult, *core.Error) {
 	r.progress(core.LevelInfo, "以 iOS App 身份签到…")
-	report, perr := CloudSignIn(ctx, r.Upstream, profile, &credential,
+	report, perr := CloudSignIn(ctx, src,
 		// ⚠ `Force` **不给**：它是协议自检那一档（今天已签也发一次写请求），
 		// 定时任务天天跑，开了它等于每天多打一次没人要的写请求、多记一次风控数。
-		SignInOptions{DeviceID: deviceID}, r.Clock, r.Random)
+		SignInOptions{DeviceID: deviceID})
 	if perr != nil {
 		return SignInAccountResult{Report: report}, perr
 	}
@@ -149,14 +162,14 @@ func (r SignInRun) finish(
 	if !r.Receive {
 		return outcome, nil
 	}
-	// 领取要**再建一次会话**（[ReceiveAll] 内部），因为它读的是"签到之后"的账目：
-	// 刚签上的那一笔要出现在 `receiveList` 里才算数。
+	// 领取**复用**上面那条会话，不再另开一条：它读的仍是"签到之后"的账目
+	// （刚签上的那一笔要出现在 `receiveList` 里才算数），但票可以是同一张 ——
+	// 票本来活 2 小时，[CloudSignIn] 那一步刚把它验过一次。
 	device := ""
 	if deviceID != nil {
 		device = *deviceID
 	}
-	outcome.Received, perr = ReceiveAll(ctx, r.Upstream, profile, &credential,
-		device, r.Clock, r.Random)
+	outcome.Received, perr = ReceiveAll(ctx, src, device)
 	if perr != nil {
 		// ⚠ 这里**不**把 perr 交回去：签到那一半已经真的成了，整趟报失败会
 		// 让调度把一次成功的签到记成 error，而下一轮补跑会**再签一次**。
@@ -253,6 +266,43 @@ func (res SignInAccountResult) receivedTotal() int64 {
 		}
 	}
 	return total
+}
+
+// SignInRunFrom 从一份 [SignInWorld] 造出签到那条链（`Receive` 仍由调用点显式给）。
+//
+// 为什么要有它：装配世界的那八个字段现在由服务端一处、CLI 一处填，
+// 再让每个调用点手抄一遍 `SignInRun{Store: w.Store, ...}` 的话，
+// **漏抄一个字段不会报错**（Go 允许少写字段），而漏掉 `Sessions` 的表现
+// 恰好是"界面上连点三次签到 = 重打三枪"。
+func SignInRunFrom(w SignInWorld, receive bool) SignInRun {
+	return SignInRun{
+		Store:    w.Store,
+		Scope:    w.Scope,
+		Upstream: w.Upstream,
+		Device:   w.Device,
+		Clock:    w.Clock,
+		Random:   w.Random,
+		Receive:  receive,
+		Progress: w.Progress,
+		Sessions: w.Sessions,
+	}
+}
+
+// world 把这份装配交成 [SignInWorld] 的形状（字段同名同义，逐字搬一遍）。
+//
+// 为什么不直接内嵌：内嵌会把 `SignInRun` 的**构造点**改成 `World: SignInWorld{...}`，
+// 而 CLI、服务端与一批测试都在按字段名平铺填它。多一个 accessor 换的是"构造点不动"。
+func (r SignInRun) world() SignInWorld {
+	return SignInWorld{
+		Store:    r.Store,
+		Scope:    r.Scope,
+		Upstream: r.Upstream,
+		Device:   r.Device,
+		Clock:    r.Clock,
+		Random:   r.Random,
+		Sessions: r.Sessions,
+		Progress: r.Progress,
+	}
 }
 
 func (r SignInRun) progress(level core.LogLevel, message string) {

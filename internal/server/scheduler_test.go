@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -414,6 +415,11 @@ func TestSchedulerIgnoresDisabledAndUnownedRows(t *testing.T) {
 // ⚠ 每条自带 `at` 与预置水位：`exchange` 默认不补跑，拿"错过的点"喂它只会走到
 // "按策略弃掉"那一条分支（记 `skipped`），永远到不了"能力还没接上执行"。所以那一条
 // 必须是**准点迟到**的 —— 顺序判据在这里：先问"这个点还要不要跑"，再问"跑得起来吗"。
+//
+// ⚠ "能力还没接上"那一格靠**临时摘掉分派表里的一行**来造（`unwire`）：
+// 2026-09-23 之前可以直接用 `exchange`（那时它是唯一没接的），接上之后
+// 真实配置下这一支已经不可达 —— 但它是 [launchScheduled] 里那条顺序判据唯一的判据，
+// 删掉用例等于把"先查 builder、后查参数"这个顺序放成无判据状态。
 func TestSchedulerRecordsWhyADueRowCouldNotRun(t *testing.T) {
 	// 两个"现在"：`atLate` 距离那个点已经一天（算错过），`atOnTime` 只迟到 30 秒
 	// （在 [schedulerGrace] 之内，不算错过）。
@@ -427,6 +433,9 @@ func TestSchedulerRecordsWhyADueRowCouldNotRun(t *testing.T) {
 		// schedule 已经判到点，只差"跑不了"那一半原因。
 		schedule func(watermark time.Time) core.Schedule
 		want     string
+		// 起跑前从 [runBuilders] 里临时摘掉的 code，用例结束放回（本包无 `t.Parallel()`，
+		// 且这一条走到 `abandon` 就返回、不会起 goroutine，所以摘表没有并发风险）。
+		unwire string
 	}{
 		{
 			name:      "组合还没接上执行",
@@ -442,7 +451,8 @@ func TestSchedulerRecordsWhyADueRowCouldNotRun(t *testing.T) {
 			schedule: func(watermark time.Time) core.Schedule {
 				return capabilitySchedule("job", "exchange", ptrTime(watermark))
 			},
-			want: "还没有接上执行",
+			want:   "还没有接上执行",
+			unwire: "exchange",
 		},
 		{
 			name:      "参数里有声明不认识的键",
@@ -455,6 +465,20 @@ func TestSchedulerRecordsWhyADueRowCouldNotRun(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h, accountID := newSchedulerHarness(t)
+			if tc.unwire != "" {
+				builder, wired := runBuilders[tc.unwire]
+				if !wired {
+					t.Fatalf("这条用例的前提是 %q 已经接上（否则不需要摘表），实得分派表 %v",
+						tc.unwire, slices.Sorted(maps.Keys(runBuilders)))
+				}
+				delete(runBuilders, tc.unwire)
+				defer func() {
+					runBuilders[tc.unwire] = builder
+					if _, ok := runBuilders[tc.unwire]; !ok {
+						t.Errorf("临时摘掉的 %q 没放回去", tc.unwire)
+					}
+				}()
+			}
 			schedule := tc.schedule(tc.watermark)
 			schedule.ID = "job"
 			seedSchedule(t, h, schedule, core.ScopeUser(userIDOf(t, h)))

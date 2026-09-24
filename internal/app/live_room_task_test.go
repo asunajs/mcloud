@@ -64,7 +64,7 @@ const (
 
 	// liveTestH5JWT 是 `tyrzLogin` 回的那一份，与直播侧的 [liveTestJWT] **必须不同值** ——
 	// 六步链到底带的是哪一份，只有两个值不一样时才断得出来（断言在
-	// [TestLiveRoomSixStepsUseCloudSessionJWT]）。
+	// [TestLiveRoomRunAccountSixStepsUseCloudJWT]）。
 	liveTestH5JWT = "test-h5-jwt-not-a-real-credential"
 )
 

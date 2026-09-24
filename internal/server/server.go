@@ -128,6 +128,15 @@ type Deps struct {
 	// 假拨号器 —— 与 [Deps.HTTP] 那一条是同一个设计。
 	// 与 internal/cli 的 `Deps.WebSocket` 同一条理由、同一个形状。
 	WebSocket core.WebSocketDialer
+
+	// Mail 是 SMTP 出口，只有推送配了 email 那一家才用得到。
+	//
+	// ⚠ nil 表示"用真的那个"（[Deps.mail] 惰性构造 [mcloudio.NewSMTPSender]）。
+	// ⚠⚠ 测试里**不许**留空：nil 会真去连库里填的那台 SMTP 服务器并把授权码发过去，
+	// 而"连不上"的表现是卡到超时（默认 15–30 秒），**不是**变红 ——
+	// 与 [Deps.HTTP]、[Deps.WebSocket] 同一条警告、同一个夹具设计
+	// （本包的用例要么顶掉它，要么根本不配 email 这一家）。
+	Mail core.MailSender
 }
 
 // DefaultDeps 是真实世界那一份。
@@ -168,6 +177,26 @@ func (d *Deps) websocket() core.WebSocketDialer {
 		return d.WebSocket
 	}
 	return mcloudio.NewWebSocketDialer(d.Random)
+}
+
+// mail 是 SMTP 出口。
+//
+// 与 [Deps.http] 同一条惰性口径：nil ⇒ 用真的那一份。
+func (d *Deps) mail() core.MailSender {
+	if d.Mail != nil {
+		return d.Mail
+	}
+	return mcloudio.NewSMTPSender()
+}
+
+// notifyWorld 装配"推送"那一条路的常驻世界（见 [NotifyWorld]）。
+//
+// 出站面孔全部复用已有的那几份：HTTP 走 [Deps.http]（与登录、刷新、跑任务是
+// **同一副**网络面孔，测试里也就只需要顶掉一处）、SMTP 走 [Deps.mail]、
+// 时刻走 [Deps.clock]（钉钉加签的时间戳与正文里那串时刻都由它来，
+// 本仓库的业务代码不许直接 `time.Now()`）。
+func (d *Deps) notifyWorld(store *mcloudio.SqliteStore) *NotifyWorld {
+	return NewNotifyWorld(store, d.http(), d.mail(), d.clock())
 }
 
 // loginHub 组装登录会话表。

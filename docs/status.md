@@ -53,16 +53,18 @@
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | CLI：初始化 / 登录 | ✅ 可用（扫码 + 短信，PC 端与 App 端）                                                                                                                    |
 | CLI：签到（云朵中心） | ✅ 端到端跑通（含领取、复活卡）                                                                                                                             |
-| 上游接口层        | ⚠ **逐块重写中** —— 只有 `login` 与 `app_signin` 是完整的，其余仍是骨架                                                                                         |
+| 上游接口层        | ⚠ **分族推进中**（2026-09-24）—— 登录 / App 签到 / 直播间 / 兑换 / 红包派对 / 拍拍 / AI 头像 / 任务清单等各族**已落码**（`internal/upstream/` 三十六份非测试文件）。⚠ 但**证据分两半**：有实拍的族钉的是语义，零实拍的族只钉"发得出、形状不串台"（缺口逐条在 [`pending-decisions.md`](pending-decisions.md) §三）。**还没落码**的是 `file/create` 那一族上传与 `batchTrash`（= P1） |
 | 服务入口         | ✅ **Go 侧已接线**：API 四组业务路由（含 SSE）+ 前端产物与 SPA 回退；**15 条路由逐条对位冻结基准**（有断言盯着）。⚠ `POST /api/runs` **基准里也没有**（P4 功能，非迁移缺口） |
-| WebUI        | ⚠ 登录与初始化是真接口，**主界面仍是 P0 spike 的占位数据**                                                                                                        |
+| WebUI        | ✅ 九张页面里**七张是真接口**（总览 / 账号 / 直播间小红花 / 兑换 / 定时 / 任务 / 历史）。⚠ 只剩 `debug`（调试台）与 `settings`（设置）两张走 `placeholder-page.tsx` 空态 |
 | 运行时层         | ✅ 事件模型 / 生命周期 / 事件总线 / `run_events` 表 + 编排已落地；**2026-09-23 起调度循环就在服务进程内**（`internal/server/scheduler.go`，到点按 `schedules` 触发）。⚠ 只有"任务组合（pipeline）"那一类目标**还没接上执行**，到点会记一句 `error` 而不是静默 |
 | 夹具回放（L2）     | 🟡 **回放器已就绪**（`internal/io/fixture.go`，17 条测试）；已有消费者 `TestEveryArchivedFixtureIsLeakFree`（31 份抓包夹具全量自检），⭕ 但上游协议层**还没真的加载这批夹具跑一遍**（见下方「夹具回放」） |
 
 > **追加（2026-09-22 第三轮，只补充不改上面那几行）**：上表「WebUI」那一行是这一轮**之前**的状态。
 > 现在**账号这一条线是真的**：粘贴 auth 添加、启用开关、删除、扫码出码 + 轮询、App 端短信发码 + 校验，
 > 全部走真接口（详见文末「追加：账号写入面与登录会话接进 WebUI」）。
-> 仍是占位的只剩 `placeholder-page.tsx` 那六个页面（任务 / 兑换 / 定时 / 历史 / 调试台 / 设置）。
+> 仍是占位的只剩两张：**调试台**与**设置**（`placeholder-page.tsx`）。任务 / 兑换 / 定时 / 历史四张
+> 已在随后的几轮里接上真接口（2026-09-24 按 `web/src/app.tsx` 的分页判定与 `grep '/api/'` 就地更正；
+> 这一段原先写的是"那六个页面"）。
 
 ---
 
@@ -103,8 +105,10 @@
 
 ⭕ **迁移侧没有缺口**：15 条路由逐条对位冻结基准（`internal/server/routes_test.go` 盯着），
 `POST /api/runs` **基准里也没有**（`routes/mod.rs` 写明"要等 P4"）。
-⚠ 所以"WebUI 主界面仍是占位数据"的**原因不是缺接口**，而是**跑任务那条路本身还没建**
-（P4/P5 的功能开发）—— 别把它记成迁移没做完。`openapi.json` 导出同理，是新功能。
+⚠ 这一段当时接着写的结论是"**WebUI 主界面仍是占位数据**，原因不是缺接口，而是跑任务那条路本身还没建
+（P4/P5 的功能开发）"。**后半句已经兑现**（`POST /api/runs` 与调度都接上了，任务 / 兑换 / 定时 / 历史
+四张页面走真接口），前半句在 2026-09-24 就地作废：现在占位的只剩调试台与设置两张。
+`openapi.json` 导出同理，是新功能。
 
 > 2026-09-21 追加：Go 侧在冻结基准之外**自扩 1 条** —— `GET /api/status`
 > （`internal/server/routes.go` 的 `getStatus`：产品名+版本、`schedulerRunning`、最近一次 run）。
@@ -507,6 +511,10 @@ typecheck 3.9 s + build 1.7 s；跑在临时库 + 8790，验完即拆，没碰 8
 
 ⇒ **下一次窗口：2026-09-23 14:30 之后**（`expectStartTime`），到时补
 WS 签名头（`systemmd5` / `tokenmd5`）、`member/apply` 的 `version`、以及一条真口令。
+⭐ **2026-09-23 补记（窗口用掉了，三条都有结果）**：① ⚠ **WS 升级请求里根本没有
+`systemmd5` / `tokenmd5`** —— 它们是 `member/apply` 那一路的头，这句"补 WS 签名头"
+的说法**本身不成立**；② ✅ `version = v23.0.2` 实拍确认；③ ⭐ 真口令**收到 2 条**。
+原始证据 → [`capture/app-live-ws-samples.txt`](./capture/app-live-ws-samples.txt)。
 ⚠ **`draw` 的 `200112` 不在这一趟的清单里了**（2026-09-23 改）：它要"同一账号把同一条
 **正确**口令投第二次"才出得来，而探针**只收口令、不投口令**（见下面那节五条事实）。
 
@@ -607,9 +615,13 @@ WS 签名头（`systemmd5` / `tokenmd5`）、`member/apply` 的 `version`、以�
 - **退出码**：「今天没开播」退 **0**（门开不开由服务端数据决定，与"今天已经签过了"同一档）；
   只有"门那三步走不通""六步链解析失败"才退 1。
 
-**未验证清单**（下次开播窗口 2026-09-23 14:30 之后补齐）：
+**未验证清单**（⚠ 2026-09-23 的窗口**已用掉**：2 条已实拍、1 条仍无样本 —— 见本节末尾的实拍补记）：
 ⚠ 2026-09-22 复核：前 4 条已**拿原项目源码逐字对拍**（见文末那条补记），
-所以它们现在是"**抄得对、但服务端认不认仍未知**" —— **仍未实拍**，开播后照样要核。
+即"**抄得对**"这一半当时就已确认；而"**服务端认不认**"这一半 2026-09-23 有了答案 ——
+但答案**不是**"认哪一种"，而是 ⭐⭐ **服务端根本不校验 `systemmd5` / `tokenmd5`**
+（capture 文档 §8.6 的反证实验：两个头都打成 32 个 0 照样回 `code: 0`；坑表 **#136**）
+⇒ 那两条**当场收口** —— 不是"实拍过了"，是**没有闸门可实拍**。
+⚠ 真正还没收口的只剩 `optkeyword` 那一条，而它**抓包答不了**（进房全程零命中）。
 
 ⭐⭐ **开播后请跑 `node scripts/probe-live-room.js --run`**（2026-09-22 加）——
 下面这 6 条的**权威清单在脚本里**（`ITEMS`），脚本会把能自动核的核掉、
@@ -622,14 +634,197 @@ WS 签名头（`systemmd5` / `tokenmd5`）、`member/apply` 的 `version`、以�
 `internal/io/client.go` 的 transport 没设 `Proxy`（Go 里 = 不走代理），WS 也是手写直连
 ⇒ 跑 CLI 时 Reqable 里**一条记录都没有**（坑表 **#120**）。
 `node scripts/probe-live-room.js --wire` 会把前置条件与四条步骤打出来。
+⭐ 这条**不只管这一族** —— 它是准则（抓包面必须是**我们没参与的那一端**）：
+见 [`capture-guidelines.md`](./capture-guidelines.md) §1.1。
 
 - WS 握手签名头（`systemmd5` / `tokenmd5`）的**真实取值**（现在按算式实现，取的是 48 字节 `DEVICE_INFO`）——✅ 算式已与 `apis/live-room-chat.ts` 逐字对拍；
 - `member/apply` 的 `version`（`LiveApplyVersion = "v23.0.2"` 是**唯一**取自原项目、没有实拍的常量）——✅ 已与原件对拍；
-- 一条**真口令**；`draw` 的 `200112`（**同一账号**第二次请求同一条**正确**口令 ⇒ 已兑换，
-  **至今没有样本**）——❌ **只能等实拍**（原件里也没有样本）；
-  ⚠ 它**出不来**的另一个原因：探针只收口令、不投口令（2026-09-23 改），所以"投两次"这条造样本的路已删；
+- 一条**真口令**；`draw` 的 `200112` —— ⭐⭐ **2026-09-23 16:53 拿到首个实拍样本**（见本节末尾那条补记）；
+  ⚠ 原先这里写着"**至今没有样本**、只能等实拍"，**现在不再是待办**；
+  它过去出不来是因为探针**只收口令、不投口令**（2026-09-23 改），而**投真口令**（`--codes`）就能造出它；
 - `visitlog/journaling` 的 5 个 `optkeyword` —— 只有 `_flowerBtn` 有实拍；✅ 另 4 条的名字与**顺序**已与 `tasks/red-flower/standalone.ts` 对拍（同名同序），`sourceid="1007"` 与 body 参数顺序也对上；
 - WS 帧的**真实顺序**与 `command` 取值、以及"ack 之后必须补 UNREAD"这条（原项目如此，实拍没有）——⚠ 见坑表 **#117**：原项目里**两份实现互相矛盾**，Go 跟的是被任务调用的那份（`tasks/live-room-kouling.ts`），已逐字对拍。
+
+### ⭐ 2026-09-23 实拍补记（窗口用掉了：**2 条已实拍、1 条仍无样本**）
+
+原始证据 → [`capture/app-live-ws-samples.txt`](./capture/app-live-ws-samples.txt)
+（WS 帧逐帧、签名算式验证、字段形状对照，全在里面）。
+权威清单在 `scripts/probe-live-room.js` 的 `ITEMS`（⚠ **别在这里再抄一份**，坑表 **#116**）。
+
+| 清单条目 | 2026-09-23 的结果 |
+| --- | --- |
+| WS 握手签名头 `systemmd5` / `tokenmd5` | ⭐⭐ **前提被推翻**：**WS 升级请求一个都不带** —— 它们只在 `POST /v3/room/member/apply` 这一路（OPTIONS 预检的 `Access-Control-Request-Headers` 里明列）。WS 侧身份只在 PROVISION 帧的 `auth` |
+| `member/apply` 的 `version` | ✅ **`v23.0.2` 实拍确认**（原先标着"未实拍"）；body 里 **`message` 在**（空串）⇒ Go 补它对 |
+| 一条真口令 / `draw` 的 `200112` | ⭐ 口令**收到 2 条**（`一键9图出圈` / `中秋美好存云盘`）⇒ **"每场两条固定"首次实拍确认**；⭐⭐ `200112` **16:53 拿到首个样本**（同一账号再投 ⇒ 两条都回 `200112`，见本节末尾补记） |
+| `visitlog/journaling` 的 5 个 `optkeyword` | ⚠ **零样本**，且**证明它不在 cmlive H5 的进房链路上**（进房全程 0 次）⇒ "认不认"仍未验证，且**抓包答不了**它 |
+| WS 帧顺序 / `command` 取值 / "ack 后补 UNREAD" | ⭐⭐ **已答**（见下） |
+
+#### ⭐⭐ 三条新事实（原来都不在清单里）
+
+1. ⭐⭐ **签名算式实拍验证通过**：
+   `tokenMd5 = md5("Bearer " + t[:10] + ts10 + t[10:])` 与
+   `systemMd5 = md5(**deviceInfo 头值字符串** + ts10)` —— 两条记录**都逐字命中**
+   （复现：`go run ./target/attic/sigcheck`，读 `har/` 里未脱敏那份）。
+   ⚠⚠ 但它答的是「**客户端怎么算**」，**不是**「服务端认不认」—— 这两件事不一样。
+   ⚠ `SystemMD5` 强制 `hex.DecodeString`，而实拍的 `deviceInfo` 头是 **`other/unknown`（非 hex）**
+   ⇒ 拿实拍值喂它会当场报错；`TestSystemMD5UsesDecodedBytesNotHex` 钉的正是"要解码"那一支。
+   ⭐⭐ **16:4x 补了反证实验，这条已经判定**（capture 文档 §8.6）：`systemMd5` 与 `tokenMd5`
+   **两个头都打成全 0**，`member/apply` 照样回 `code: 0`「接口调用成功」
+   ⇒ **服务端根本不校验这两个头** ⇒ **不需要改 `SystemMD5`**（那个差异没有功能后果）。
+   ⚠⚠ 早先这里写的是"服务端若只校验自洽则能过，**待实拍判定**" —— 那句把
+   「客户端算法」当成了「服务端契约」，**是错的**（坑表 **#136**）。
+   ⭐ 又：`test/fixtures/http/直播716.json`（**09-17**）的 `deviceInfo` 是 **48 字节 hex**，
+   与 **09-23** 的 H5（`other/unknown`）**不同** ⇒ 同一个头在不同客户端/版本下取值不同。
+2. **WS 的 UA 是 iPad UA**（`MCloudApp/12.6.0 …`），**不是** `live_ws.go` 的 `LiveWSHeaders()`
+   里那个 Android Chrome —— 那一处注释写着"没有实拍、照抄原项目"，**实拍推翻了照抄的那份**。
+   ⭐ 它**逐字等于** HTTP 侧的 `LiveUserAgent`。
+3. **`h` 全程没出现**：SockJS 只在**静默 25 s** 后才发它，而这条连接每 1–2 s 就有业务帧
+   ⇒ 坑表 **#117** 那两份实现的分歧（心跳回 `"h"` 还是 `[""]`）**本轮仍无法判定**。
+   ⚠ 判为**未判定**，不许猜。
+
+#### ⭐⭐ `command` 的取值（实拍）与"补 UNREAD"的真相
+
+| 值 | 方向 | 含义 |
+| --- | --- | --- |
+| **0** | 双向 | **ack / 回执**（payload 只带被确认的 msgId，**无文本**） |
+| **1** | C→S 发起、S 回 | **应用层心跳** |
+| **2** | **S→C** | **业务推送（弹幕）** ⭐ 口令在这一类里（文本路径 `MSync.9.2.6.4.2`） |
+| **3** | C→S、S 回 | **PROVISION 握手**（唯一带 `GUID` + `auth` + payload 的帧） |
+
+⚠⚠ **`cmd=1` 是约 15 秒一次的周期心跳**（实拍 5 次：+608 / +15537 / +30665 / +45561 / +60583 ms，
+间隔 14929 / 15128 / 14896 / 15022 ms），**不是**"PROVISION 之后补发一次"。
+第一条恰好在 PROVISION ack（+515 ms）之后 93 ms，**看起来像补发** —— 这就是原项目那句
+「关键：触发服务器推送消息」的来历。
+⚠ 而 `live_ws.go` 的 `unreadSent` 置位后**不再发** ⇒ 与真实客户端不同（见下面「差异」）。
+⚠ `live_msync.go` 的枚举**命名是反的**（`CmdSync = 0` 注释写"推弹幕"、`CmdNotice = 2` 写"另一条推送"），
+实拍是 `0 = ack`、`2 = 弹幕`。⭐ **功能上歪打正着**：`ExtractDanmakuText` 对 0 与 2 都试，
+而 0 的 payload 解不出文本 ⇒ 只有 2 命中。
+
+#### ⚠⚠ 报文形状的系统性差异（**本轮未改 `internal/`**）
+
+实拍客户端帧与 `live_msync.go` 在 **字段 2 / 3 / 6 / 7 / 10 / 11 / 13 / 14 / 15**、
+**心跳频率**、**是否回 ack** 上都不同（逐项表在 capture 文档 §五 与 §七）。
+⚠⚠ **一条都没有"服务端认不认"的判据** ⇒ 本轮**只取证、不改实现**；
+`test/golden/live-room-vectors.json` 的 `msyncFrames` 固化的仍是**原项目的形状**，
+与实拍**不一致**这件事现在有了实拍对照。
+
+#### ⭐ 2026-09-23 补记：纯 Go 的 CLI 也拿全了那两条口令；顺带记下"历史弹幕"的协议事实
+
+**当场实跑**：同一场（房间 147606）、同一账号、同一条命令
+（`mcloud live-room --kouling-only --account 1`）连跑两次 ——
+第 1 次「收到 **1** 个口令」、第 2 次「收到 **2** 个口令：`一键9图出圈` / `中秋美好存云盘`」。
+⭐ 这两条与同日抓包（§3.1 的 `MSync.9.2.6.4.2`）**逐字一致** ⇒ **第三个独立证据面**
+（代理抓 WS 帧 / 抓包同期的门与口令 / 纯 Go 实跑，三者同答）。
+⚠⚠ **"只收到 1 条"不等于"这场只有 1 条"** —— 自己进房只触发**其中一条**，
+另一条要等**别人进房**才刷出来 ⇒ **听一次不一定够**（坑表 **#135**）。
+
+⚠⚠ **另一条路只用于"弹幕取证"，不是第二条拿口令的路**（2026-09-23 用户纠正）：
+**口令只在它被发出的那一场有效**，而这条路**只能**跑**已结束**的场次
+⇒ 它给出的口令**抽出来就已过期、没有任何使用价值**。它剩下的用途是
+**校验抽取器 / 看真实弹幕形态 / 看出现次数分布**。协议事实（历史弹幕走**公开 CDN**、**一个鉴权头都不带**）：
+`POST /cmlive/api/room/front/imHistory/<直播房间号>` 给 bucket，
+再 `GET https://v.cmcc-cs.cn/<bucket>/imChatRoomHistoryMessage/<直播房间号>_<n>.json?reqType=json`
+（编号从 **1** 起，**遇到第一个非 200 就停**；键是**直播房间号**，不是聊天室号）。
+实证（房间 145453，一场**已结束**的直播）：14 片 / **1168 条**弹幕 → 去重 4 条，
+其中**真口令两条**（出现 **248** / **18** 次），噪声两条（各 **1** 次）
+⇒ ⭐ **出现次数能分开"真口令"与"噪声"**（但**不能当实时过滤条件**，当场那一刻它也是 1 次）。
+⚠⚠ **它替不了当场**：正在播的 147606 **零分片**（`1..25` 全 403，而 `imHistory` 的 bucket 确认无误）
+⇒ 分片是**回放**产物。
+工具 `target/attic/live-history`（gitignored，纯 Go、只读）。
+详情 → [`capture/app-live-ws-samples.txt`](./capture/app-live-ws-samples.txt) §9。
+
+#### ⭐⭐ 2026-09-23 16:53：`draw` 的 `200112` **首个实拍样本**（同一账号、两条口令）
+
+**怎么造出来的**：不走"只听不投"的探针，而是**直接投真口令** ——
+
+```bash
+mcloud live-room --account 1 --skip-kouling --codes "一键9图出圈,中秋美好存云盘"
+```
+
+| 次 | 结果 |
+| --- | --- |
+| 第 1 次 | 小红花 **245 → 250**（进账 **5**，**成功 1/2**） |
+| 第 2 次（`--json`） | 两条都回 **`200112`**；`gained: 0`、`succeeded: 0`、`failed: false`、`invalidCodes: null`、`retried: false` |
+
+⭐⭐ **判读**：
+
+1. ⭐ **`200112` 本身就是"这条口令是对的"的判据** —— 口令若是错的，回的是 `200108`
+   （`CodeRedFlowerInvalidKouling`）⇒ 两条口令**都验证为真**。
+2. ⭐⭐ **两条现在都已在 `15****42` 名下领到，且"谁领的"已定案（不再是推断）**：
+   - `中秋美好存云盘` = **App 的 H5 活动页**在 **16:29:56** 领的（`code:0`、`flowerNum:10`、
+     余额 `235 → 245`），紧接着同一条再投就回 `200112`；
+   - `一键9图出圈` = **第 1 次那轮 Go 当场领的**（余额 `245 → 250`）。
+   ⚠ 三条实证互锁：① `一键9图出圈` 在**全量抓包 3231 条**里出现 **0 次**（App 从没投过它）；
+   ② 余额自 16:29:56 起直到 **16:46:41** 恒为 **245**，而 Go 那一趟是从 245 起涨的
+   ⇒ 若此前有人领过它，Go 那趟**不可能进账 5**；③ `draw` 的 `flowerNum` 与 `user/info`
+   的 `flowerCnt` 增量**逐字自洽**（`10` ↔ `235→245`）。
+   ⭐ ② 顺带证明：**此前那次"没有输出"的 90 秒运行什么都没领**。
+   原始证据 → [`capture/app-live-redflower-samples.txt`](./capture/app-live-redflower-samples.txt) §10.4。
+3. ⭐⭐ **口径被实证**：`200112` = **同一账号**第二次请求同一条**正确**口令 ⇒ 已兑换
+   —— 与"口令全场通用、**不存在消耗**"（五条事实第 2 条）**不矛盾**。
+4. ⭐ **Go 侧行为顺带验了**：`200112` **没有**被并进 `RejectedKouling()`
+   ⇒ `invalidCodes: null`、`retried: false` ⇒ **没触发"重听一次"**，也没把两条口令记成无效。
+5. ⚠ **这一格从"零实拍"变成"有样本"** —— 它过去出不来，是因为探针**只收不投**；
+   要造它就必须**真投**（`--codes`）。
+6. ⚠⚠ **一个结构性事实（顺带发现，未改代码）**：本地 `mcloud live-room` **不落库** ——
+   `runs` / `run_events` 两张表**都是 0 行**，`account_state.updated_at` 停在**前一天**；
+   唯一调 `InsertRun` 的 `app.NewRunner` **只有服务端**在用（`internal/server/run_dispatch.go`），
+   CLI 拿到 `Store` 只**读**（`ProfileWithStoredDomainID` / `CredentialFromAccount`）。
+   ⇒ **同一条业务、两个产物，持久化行为不同**：WebUI 里看得到历史、CLI 跑完看不到。
+   ⚠ 再叠上"`--json` 只出 `upstreamCode`、不出 `Result.FlowerNum`"
+   ⇒ **这次明明改动了服务端状态，却在自己的产物里复核不了**，只能靠抓包那条独立证据面
+   （而它存在属于运气，不是设计）。判据与做法 → 坑表 **#139**。
+
+#### ⭐⭐ 2026-09-23 17:09：新码 `200118`（直播窗口已关）
+
+窗口关掉之后（`gateOpen: false`、`live/info` 回 `result: []`），拿**第二个账号** `19****16`
+投那两条**真但已过期**的口令（本想给"**`200112` 按账号去重**"这条**用户口述的事实**补一张实拍）。结果两条都回
+**`200118`**（**新码**），而**同账号、同样"直播已关"**下投乱码 / 不存在的口令仍回 **`200108`**。
+
+⭐⭐ ⇒ **`200118` 是口令级的码**：「**这条口令我认识，但它已经失效了**」（场次窗口关了），
+与"口令抄错了"（`200108`）**分得开**。
+⭐⭐ **官方命名也拿到了**（同日补）：厂商自己的 H5 里有张**码 → 弹窗**映射表
+（`har/liveRoomFeedback.0cdf4040.js`）—— `200118` ⇒ **`popNotLive`**、
+文案「**需在直播期间内兑换哦**」⇒ 与实验结论**逐义相符**（**两条独立证据面同答**）。
+⚠ 那张表**本仓库此前从没记过**，还顺带给出了另外 10 个码的归属（见 capture §10.6）。
+
+⚠⚠ **注意：这次"没问成"的只是"补一张实拍"** —— 那条悬案**本身早有答案**：
+**`200112` 是按账号去重的**（**两个不同账号投同一条口令，各自都会成功**，**用户口述** 2026-09-23）。
+⚠ 别把"本仓缺实拍"读成"这个说法是揣测"（坑表 **#142**）。
+⭐ 想补实拍就等**下一场直播窗口内**、拿**账号 1 已领过的那条**、用**账号 2** 投
+（`code:0` ⇒ 按账号；`200112` ⇒ 全场）—— ⚠ 窗口外会被 `200118` 挡住。
+
+⚠ **一个用户可见的缺陷（当轮只报告；同日已开类）**：CLI 原先把 `200118` 打成「**未分类口令**」，
+而这一格最常见的成因恰恰是"**直播已经结束了**" —— 文案却把人往"口令抄错了"那边引。
+⇒ 建议给 `200118` 单开一类、文案改成"口令已失效（本场已结束）"；
+⚠ 落点跨 `internal/upstream/live_flower.go`（判据码表）与 `internal/app/live_room*.go` /
+`internal/cli/`（文案）—— 记这条时另一个会话在改后者，故**先只报告**。
+
+⭐⭐ **2026-09-23 20:3x 已兑现（类已开）**：
+① `internal/upstream/live_flower.go` 加 `RedFlowerDrawKoulingExpired`
+（`String()` = `"kouling_expired"`，**刻意加在 `iota` 末尾**，不动已有数值）；
+② `internal/app/live_room.go` 的 `RedFlowerReport` 加 `ExpiredCodes` 一栏、
+`live_room_task.go` 的人读输出打「**口令已失效（本场已结束）**」；
+③ `internal/cli/run_live_room.go` 的 `--json` 出 `expiredCodes`。
+⭐ 上面那条"当前落进 `Other`"的绊线**按预期红过并兑现** ——
+`TestClassifyRedFlowerDrawOnExpiredKouling` 的断言已改成新类。
+⚠ **上游请求数 0**（纯本地改归类与文案）。
+⚠⚠ 当轮那条"按 AGENTS.md §2 **未动**"**收窄**：§2 只禁 `git add` / commit，**不禁编辑**
+—— 拿它当"不代修"的理由是**自己发明的闸门**（同 AGENTS.md §1.11：自造默认不许挡活）。
+
+⭐ **但那个归类本身已经被测试钉住了**（2026-09-23 补）：
+`internal/upstream/live_flower_test.go` 的 `TestClassifyRedFlowerDrawOnExpiredKouling`
+钉两条**不变量** —— `200118` **不许**被判成无效口令（否则白重听 60 秒）、
+也**不许**被判成成功 —— 外加一条"当前落进 `Other`"的**绊线**。
+⇒ 谁给 `200118` 单开一类，那条绊线**会红**（**红是预期的**，改它的时候同时改判据码表
+与 capture §10.5）；而把它改成 `invalid_kouling` 会让**两条不变量一起红**。
+⚠ 该测试的信封是**最小信封**（只有 `code`）：`200118` 的**上游原文仍无实拍**
+（`RedFlowerDrawOutcome.Message` 解析了却从不输出）⇒ **别**往黄金向量里补 `msg`。
+⭐ 反向测试做过：把 `200118` 改成判 `invalid_kouling` ⇒ 该用例**红**（两条断言都报），
+还原后 `live_flower.go` 的 sha256 与改前**逐字相符**。
+
+原始证据 → [`capture/app-live-redflower-samples.txt`](./capture/app-live-redflower-samples.txt) §10.5；
+判据与做法 → 坑表 **#140**。
 
 **反向测试 56/56**：`.workbuddy-ai/tmp/reverse-live-room.py` 覆盖编解码（含 `pov` 零值写入）、
 四条口令分支、WS 握手三处、帧状态机、驱动层的结构性跳过与双源容错、以及 CLI 层的用法闸 /
@@ -728,8 +923,11 @@ build 4.5s / vet 1.5s / test 1m35s 带 `-race` / deps 5.7s / filenames 0.3s / id
 | `member/apply` 的 `version` | 同上：字面量 `"v23.0.2"` | ✅ 与 `LiveApplyVersion` 一致 |
 | 5 条 `optkeyword` | `tasks/red-flower/standalone.ts:40-44` | ✅ **同名同序**；`sourceid` 默认值 `"1007"` 与 body 的**参数顺序**也一致 |
 
-⇒ 这 4 条从"照抄原项目、无实拍"变成"**照抄已复核**"，但**仍未实拍** ——
-开播窗口之后要核的仍是"服务端认不认"，而不是"抄得对不对"。
+⇒ 这 4 条从"照抄原项目、无实拍"变成"**照抄已复核**"。
+⚠ 当时紧接着写的是"开播窗口之后要核的仍是'服务端认不认'，而不是'抄得对不对'" ——
+这句**只对其中一条成立**：2026-09-23 的反证实验（capture 文档 §8.6，坑表 **#136**）证明
+`systemmd5` / `tokenmd5` **服务端根本不校验** ⇒ 那两条**没有"认不认"可核**；
+`version` 已实拍确认（`v23.0.2`）；只剩 `optkeyword` 仍无样本、且**抓包答不了**它。
 
 ⭐ **本轮真正的收获是坑表 #117**：审 WS 层时先读到的是
 `dist/…/live-room/client.js`（`LiveRoomClient`），它与 Go 侧**两处都对不上**
@@ -817,6 +1015,11 @@ build 1.8s / vet 0.7s / fmt 0.1s / test 1m05s / deps 3.9s / filenames 0.3s / ide
 
 **#120：`--wire` 那三条的取证面是 App，不是 CLI** —— 这条是**本轮自我复核时发现的**，
 上一轮写进脚本的第一版方案（"跑一遍 `mcloud live-room`，用 Reqable 抓"）**根本不通**：
+
+> ⭐ **这条已抽象成准则** —— 抓包面必须是**我们没参与的那一端**：
+> 见 [`capture-guidelines.md`](./capture-guidelines.md) §1.1
+> （含"App 内 WebView 的进程名是 `com.apple.WebKit.Networking`、不是 App 名"那一格）。
+> ⚠ 本节保留为**当轮发现过程**的记录（`pgrep` 恒真那条也在下面），**不再当准则的出处**。
 
 - `internal/io/client.go` 的 `http.Transport` 是**显式构造**的、**没设 `Proxy` 字段** ——
   Go 里那是"**不走代理**"，**不会**回落到 `http.ProxyFromEnvironment`
@@ -1596,7 +1799,8 @@ accepted 那半**层与契约各钉一次** —— 契约有码可钉，**层没
   提交前手动全量重跑过：Go **十项全绿 8.5s**、web **2 条全绿 3.9s**（上面那两组数字属于更早的树状态）。
 - ⚠ 刻意**没**入库、仍是未跟踪的 4 份：`internal/server/zz_dbg_test.go` 与 `zz_debug_test.go`
   （调试残留：只有 `t.Logf`、零断言）、`data/server-device.txt` 与 `data/server-device-app.txt`
-  （运行时设备身份；`.gitignore` 里那条是 `/data/device*.txt`，名字已经漂了 ⇒ **待补一条 `/data/server-device*.txt`**）。
+  （运行时设备身份；`.gitignore` 那条 `/data/device*.txt` 名字漂了、**挡不住它们**
+  ⇒ ⭐ **2026-09-23 已修**：通配改成 `/data/*device*.txt`，见坑表 **#138**）。
 
 ### 五、遗留（本轮没做、也不该顺手做）
 
@@ -1607,6 +1811,62 @@ accepted 那半**层与契约各钉一次** —— 契约有码可钉，**层没
 4. 弹窗 `busy` 那类**值 prop** 是否随父更新：没测。本页不依赖它（禁用与文案都写成本页元素的属性/子节点）。
 5. dock 那几枚（33px）、主题切换（32px）、抽屉按钮（40px）仍在 44 以下 —— 那是**全局件**，
    与 §7.4 那条一起留给用户拍板，本轮没自改判据。
+
+## 补记（2026-09-23，一轮一个 `jwttoken` + 撞 `90001` 刷一次重放一次那一轮）
+
+用户 2026-09-23 两条拍板（原话口径）：**一轮任务使用同一个 jwttoken**（任务属于同一页面，
+或归属未知时共用那一条默认票）；**遇到 `90001` 就尝试刷新票** —— 刷新失败**以 jwttoken 失败**
+通知用户，成功则**用新票重放那一条请求**，重放仍失败按**任务失败**处理。
+三条口径与"不做的事"（不落库、不自造 TTL、不限刷几次）成文在
+`internal/app/signin_session.go` 文件头，本文件不重复。
+
+⚠ **本节里"作用域 = 一轮"那一条当天就被放宽了**：同一天的最后一节把持有者改成
+**「账号 × 页面」跨轮复用**（`app.SessionPool`），"一轮之内共享"成了它的**下界**而不是终判。
+下面那张落点表记录的是**本轮**改了什么（仍然准确），现行口径看文末那一节。
+
+### 一、落点
+
+| 文件 | 内容 | 反向改坏它，谁会红 |
+| --- | --- | --- |
+| `internal/core/errors.go` | 新增 `variantSessionExpired` + `NewSessionExpired` + `IsSessionExpired`（方法与 `errors.As` 两版）。⚠ 变体刻意映射回 `KindBadRequest`：`Error()` 前缀、`Kind()`、可重试性、账号健康度分类**逐字节不变** | `TestNotLoggedInIsTypedAsSessionExpired`（`internal/upstream`）里那三条：变体、`Kind() == KindBadRequest`、`Error()` 仍以"参数错误: "开头 —— 把变体单独判成一个新 kind 就是红在这里（不是 core 自己的表，那里**没有**这一族的用例） |
+| `internal/upstream/app_signin.go` | `EnsureOKWithHint` 里 `90001` 那一支改走 `NewSessionExpired`（消息与提示串不变） | 同上那条测试 + 下面 `signin_session_test.go` 那三条（走真 `AppSignInStatus`，**分类链在测试范围内**，不是手工造错误） |
+| `internal/app/signin_session.go`（新，263 行） | `SignInSession`（`referer` 与 `jwttoken` **成对**）+ `SignInSessionSource`（`Session` / `Refresh` / `Call` / `do`） | 见下一行那 11 条 |
+| `internal/app/signin_session_test.go`（新，11 条） | 一轮一条会话、非 `90001` 不刷、刷一次重放一次、重放仍失败带前缀、刷新失败那句用户看得见、并发复用别人建好的、`drop` 只清失败那条、**跨能力共享**、**刷新写在源上**、**六步链中途过期** | 每条都写了反向改坏点（例：去掉 `cached()` 短路 ⇒ 计数变 3；把重放写成循环 ⇒ `tyrzLogin` 变 3） |
+| `signin_receive.go` / `signin_bonus.go` / `signin.go` / `signin_run.go` | **10 个**签到侧能力函数（`SignInStatus` / `SignInStatusRaw` / `CloudRecords` / `PendingPrizes` / `ReceiveCloud` / `ReceiveRevivalReward` / `ReceiveAll` / `ClaimMultiple` / `ClaimBackupGift` / `CloudSignIn`）签名改收 `src *SignInSessionSource`；一个账号一轮一个 `src`（`signin_run.go`），`OpenSignInSession` 收敛到**只剩一个调用方** | `signin_test.go` 那批（含新增 `signinSource` 夹具）+ `signin_session_test.go` 的跨能力那条 |
+| `live_room.go` / `live_room_task.go` / `live_room_probe.go` | 六步链的票不再由 `RedFlowerSession` 持有，改在 `Next(jwt)` 构造请求那一刻注入；`RunRedFlower` 每一步过一遍 `Call`；探针与任务两条入口改成建 source（探针当时对外签名不变 —— 下一轮为接票池加了 `sessions` 一位） | `live_room_test.go`（`flowerSource` 夹具）+ `signin_session_test.go` 那条中途过期用例；任务与探针两支由 `live_room_task_test.go` / `live_room_probe_test.go` 现有断言守着（本轮未改它们，靠计数不红） |
+| `internal/cli/run_signin.go` | 一个账号一条分支一个 `src`，`--records-all` 的分页也共用同一条会话 | `run_signin_test.go`（按端点分派的夹具） |
+
+### 二、顺手修掉的一处真缺陷（不是"重构副产物"）
+
+`live_room_task.go` **重听那一轮**曾把**直播侧** JWT 传进**云盘侧**的参数位 ——
+零测试红，因为它只在"第一轮有无效口令"时才走到。修法不是补一个参数，
+而是**取消那个参数位**（票由 source 在建请求时给），并把这一族判据登记成坑表 **#134**。
+
+### 三、门禁与实况（照抄当轮 stdout）
+
+- `node scripts/gates-go.js` ⇒ **十项门禁全绿**，总耗时 **22.5s**
+  （逐条：build 1.0s，vet 0.4s，fmt 0.1s，test 16.0s，deps 3.8s，filenames 0.2s，idents 0.5s，
+  golden 0.2s，jsontags 0.1s，md-tables 0.1s）；文档改完后**再跑一次仍十项全绿 36.0s**
+  （两次耗时差属于本机负载，不构成判据）。
+- `go test -count=1 ./...` 全绿。web 侧本轮零改动 ⇒ 没跑 `gates-web.js`。
+- 成文同步：`docs/signin-cli-spec.md` §2.1 那段"编排层不要试图共享会话"已按实况**改写**
+  （它现在描述的是改之前的代码），§2.2 那张账单里"会话建两次 / 8+"一行一并改掉；
+  坑表 **#128⑤** 从"不自动换凭据重试"改写成**两层口径**（外圈 `Authorization` 仍不自动换、
+  内圈 `jwttoken` 刷一次重放一次），并新增 **#134**。
+- ⚠ **本轮未提交**（用户没要求）。HEAD 那份整树快照 `5fd4248` 里**没有** `signin_session.go` ——
+  它抓的是本轮改接**之前**的树，所以 HEAD 自身可编；本轮全部改动仍在工作树。
+
+### 四、遗留（本轮没做、也不该顺手做）
+
+1. ❓ **写请求重放是否幂等**未实测：`startSignIn` 有 §3.2 那条旁证，`receiveV3` / `draw` **没有任何样本**。
+   要核：活窗口里拿一个号连发两次同一笔 `receiveV3`，比对云朵余额。
+2. ❓ **一轮内 `90001` 连续出现会不会刷 N 次**没数过。要核：喂一条必回 `90001` 的坏会话跑一轮多能力，
+   数 `tyrzLogin` 的次数 —— 有那个数之后再谈要不要加闸门（**不**先假设上游会腻）。
+3. 三处 **`jwttoken` 使用公共来源** 的标注（`signin.go`、`live_room_probe.go`、`live_room_task.go`、
+   `cli/run_signin.go`）是**临时态**：哪天抓到"直播页按自己的参数换票"，按 `AGENTS.md` §1.12
+   **主动更正** —— 改的是 `NewSignInSessionSource` 的构造参数**与那四句注释**，不留"顺手兼容"。
+4. "把作用域从一轮扩出去"这件事本轮**没答**（存哪、按什么键、失效怎么判）—— 下一轮答了：
+   进程内、按「账号 × 页面配方 × 凭据指纹」、只由 `90001` 判死。仍**不落库**。
 
 ## 补记（2026-09-23，把"抓包工具与使用说明"接上准则那一轮）
 
@@ -1669,3 +1929,1062 @@ accepted 那半**层与契约各钉一次** —— 契约有码可钉，**层没
    （本轮只在 §6 拿它当"抬头怎么写"的实例）与脚本产出 `probe-live-room-2026-09-23.md`
    —— 都由各自作者落定。`docs/migration-pitfalls.md` 那一行指路也留在工作树没提
    （它的锚点在别人未提交的那一节里）。
+
+## 补记（2026-09-23，票的作用域从"一轮"放宽成「账号 × 页面」：`app.SessionPool` 那一轮）
+
+用户 2026-09-23 的使用场景（原话口径，同日两条拍板的延伸）：短期内**超过节流窗口**连点三次签到
+⇒ 三次共用同一张 `jwttoken`；之后去点领取小红花 ⇒ 取**并使用那一页自己的**那张；
+再回头点领取云朵 ⇒ 带的**还是签到页那张**（没被顶掉）。
+⚠ **WebUI 下连点三次签到也必须是同一张票，不许频繁请求新票。**
+
+⇒ 上一节那一条"一轮一个 `jwttoken`"只解决了一半：一趟之内不再各建各的，
+但**两次点击**之间还是各建各的（三次点击 = 三次 `tyrzLogin`），而真实客户端是"页面开着就用到底"。
+
+### 一、两条拍板（本轮之前用问句要的答案，用户当天给的）
+
+| 议题 | 拍板 |
+| --- | --- |
+| 票池活多久 | **进程内常驻、不设 TTL**：失效判据只有上游那句 `90001`（与 `signin_session.go` 同一取向）。代价如实登记：票自然过期后的**第一次**点击会先撞一次 `90001` 再由 `Call` 刷一次重放 ⇒ 用户多等一次往返，不是失败 |
+| 小红花页现在要不要拆成自己那张票 | **先只落结构**（键 / 池 / 按配方各自刷新），页面配方等抓包。今天两页共用签到页那套参数，调用点仍标"jwttoken 使用公共来源"（`AGENTS.md` §1.12） |
+
+### 二、落点
+
+| 文件 | 内容 | 反向改坏它，谁会红 |
+| --- | --- | --- |
+| `internal/app/signin_session_pool.go`（新） | `SessionRecipe`（键里那一位是**换票配方**不是页面名）+ `SessionPool`（按 (账号, 配方, 凭据指纹) 持 `*SignInSessionSource`，懒建、并发安全、同账号旧凭据整体作废）+ `sessionSource`（**没接池就回落成轮级**） | `signin_session_pool_test.go` 那 9 条 |
+| `internal/app/signin_session_pool_test.go`（新，9 条） | ① 同键只一条 + **取票零请求**；② 跨两轮共用一张票；③ 两配方**互不挤掉**（`A → B → 回头 A` 三枪带 `JWT-A / JWT-B / JWT-A`）；④ 某页撞 `90001` **只刷它那一条**（另一页 `Opens()` 不变）；⑤ 换登录凭据 ⇒ 旧条目整体作废；⑥ 键里只有指纹、没有凭据原文；⑦ 账号隔离；⑧ 并发同键返回**同一实例**；⑨ 无池回落成轮级 | 每条注释里写了它自己那条反例（例：把池写成"一个账号一条槽位"⇒ ③④ 一起红，而 ①② 仍绿 —— 那正是今天只有一个配方时会漏掉的那种错） |
+| `signin_run.go` / `live_room_task.go` / `live_room_probe.go` | 三条入口各加一位票池：`SignInRun.Sessions`、`LiveRoomRun.Sessions`、`ProbeLiveRoom(..., sessions)`；取票统一走 `sessionSource(..., RecipeSignInPage)` | `TestSignInRunTwoRoundsShareOneToken`、`TestLiveRoomTwoRoundsShareOneToken`、`TestTwoProbesShareOneSession` —— 三条都带**"不接池 ⇒ 每轮各建一条"的对照**，所以"接线被改回 `NewSignInSessionSource`"这种退化必红（实测：改坏后三条同时红，读数分别是 `tyrzLogin 2 次` / 票变 `JWT-2`） |
+| `internal/server/run_dispatch.go` | `RunWorld` 多一位 `sessions`（与 `registry` 同属"跨请求那份"），`newRunWorld` 装配一次；签到任务、小红花任务、探针三条路都从 `world.sessions` 拿 | 服务端 `TestTwoProbeClicksShareOneSession`（两次 GET 只一次 `tyrzLogin`，但页签仍 4 次 —— 省的是建会话，不是重新问门）。实测反例：把 `sessions` 置 `nil` ⇒ 本条红成"实得 2 次" |
+| `internal/cli/run_signin.go` / `run_live_room.go` | **刻意不接池**并写明理由：CLI 一次调用对每个账号只跑一轮，池里那个键没有可复用对象 | `TestSessionSourceFallsBackToRoundLevelWithoutPool`（回落那一支的定义） |
+| `docs/signin-cli-spec.md` §2.1 | 那段"每轮一次"标成**CLI 这一路**的口径，并指回服务端那一条「账号 × 页面」跨轮 | 门禁 `md-tables`（表格完整性）；内容漂移由人核 |
+| `AGENTS.md` §1.12 末条、坑表 **#134⑥** | 作用域口径成文（含"WebUI 连点不许频繁取新票"）；#134 的标题与第⑥条改成现行口径 | —— |
+
+### 三、门禁与实况（照抄当轮 stdout）
+
+- `go build ./...` + `go test ./internal/app/ ./internal/server/ ./internal/cli/` 三个包全绿。
+- 票池那 9 条 + 接线那 3 条（app）+ 1 条（server）逐条 `--- PASS`。
+- 全量 `node scripts/gates-go.js` ⇒ **十项门禁全绿**，总耗时 **28.7s**
+  （逐条：build 1.3s，vet 0.5s，fmt 0.1s，test 23.4s，deps 2.8s，filenames 0.2s，idents 0.2s，
+  golden 0.1s，jsontags 0.1s，md-tables 0.1s）。代码与文档各改完一遍后共跑过两次 uncached
+  全量：29.3s 与 28.7s，两次都是十项全绿；本行文字落地后又复检一次，仍十项全绿
+  （那次 `test 0.6s` 是**缓存命中**，别拿它当"这套测试只要 0.6s"）。
+- ⚠ **本轮未提交**（用户没要求）。HEAD 现在到 `26c722c`（别人那两轮只提了抓包文档与脚本），
+  本轮与前一轮（`signin_session.go` 那一族）的全部 Go 改动仍在工作树。
+
+### 四、遗留（本轮没做、也不该顺手做）
+
+1. ❓ **小红花页到底有没有特有取法**未实拍。要核：按 `docs/capture-guidelines.md` 与工具章
+   在小红花页面重抓一遍，比对 `querySpecTokenV2` 的参数与 referer 落在哪一环；
+   查到那天按 §1.12 **主动更正** —— 新增配方 + `OpenSignInSession` 按配方取参 + 改掉三处
+   "使用公共来源"的注释，**池与刷新逻辑一行不用改**（本轮把这句话测成了 ③④ 两条用例）。
+2. ❓ **票自然过期那一次点击的体验**未实测（会先撞 `90001` 再重放，理论上多等一次往返）。
+   要核：活窗口里放一张票隔夜再用，数往返与耗时。不做 TTL 的理由见池的文件头。
+3. ❓ **调度那一趟与手点那一趟共用一份池**（同一个 `RunWorld`）—— 结构上成立，
+   但没有一条用例真的把"调度 + HTTP 点击"两条路同时跑起来。要核：起一次 server，
+   让调度到点跑签到，同时在界面上点一次，数 `tyrzLogin`。
+
+## 补记（2026-09-23，签到页那一族接上执行：`SignInWorld` + 六个新 builder 那一轮）
+
+用户当轮指令是"先按两个参考项目把业务逻辑迁完、不因为缺抓包停工"（v4 口径见计划：
+**无抓包时接口层冻结、业务层继续**）。本轮把 `internal/app` 里**早就写好的判据**接成
+**可寻址的能力** —— 上游接口一个都没新增。
+
+### 一、落点
+
+| 文件 | 内容 | 反向改坏它，谁会红 |
+| --- | --- | --- |
+| `internal/app/signin_world.go`（新） | `SignInWorld`（跑签到页那一趟的世界）+ `Source`（档案→凭据→票，三处"少写一句就静默出错"写在头注）+ `DeviceIDFor`；`SignInRun` 改为经它跑（`SignInRunFrom` / `world()` 两个换算） | `TestClaimRunWithoutCredentialDoesNotGoOut`（取凭据失败**零出网**）、`TestSignInFamilySharesOneSessionPerAccount`（漏接票池 ⇒ `tyrzLogin` 变 2 次） |
+| `internal/app/signin_claims_run.go`（新） | `ClaimKind` / `ClaimStatus` / `ClaimResult` / `ClaimRun`：三条月度·一次性开关共用一份四态映射（"未开备份"落 `ManualRequired` 而不是成功） | `TestClaimRunKindPicksTheChain`（档位接错 ⇒ 端点计数红）、`TestClaimResultMapsStatusToOutcome`（逐字小结 + 档位表） |
+| `internal/app/receive_run.go` / `cloud_snapshot_run.go` / `prizes_run.go`（新） | "只领不签"、余额快照、只读列奖品各一条；**读失败一律交回 `*core.Error`**（编排层多发一条 `errored`、原文进 `runs.message`），只有"发了请求但失败"折成失败结论 | `TestReceiveRun*`、`TestCloudSnapshotRun*`、`TestPrizesRun*` 三条同名错误通道用例 |
+| `internal/capabilities/registry.go` | 注册表 **5 → 10** 项：新增 `receive` / `multiple` / `backup-gift` / `revival` / `prizes`（`revival` = `RunInBatch:false` + `RiskHigh`，理由写在声明处） | `capabilities` 包那批自检（MissPolicy / 查询型不可批量 / `All()` 不可被改） |
+| `internal/server/run_dispatch_signin.go`（新） | `Server.signInWorld`（**一份装配**）+ 泛型 `signInTaskFor` + 六个 builder；`runBuilders` 到 **9** 条 | `run_dispatch_signin_test.go`：每条 code 受理到终局、**每条 code 打自己那条链的端点**（`buildClaimRun` 传错 `kind` 编译不报错，只有这条会红） |
+| `internal/server/run_dispatch_test.go`、`runs_test.go` | 未接名单收成 `exchange` 一条；"并行被拒"改成**遍历分派表**（手写清单在接上五条的那天就少了一半） | —— |
+| `scripts/check-go-jsontags.cjs` | 六个新结构体进 `UNTAGGED_ALLOWED`（入参集 / 内存结论，出网一律走 `RunReport` 那句话） | 门禁 `jsontags` |
+| 坑表 **#143** | "反向验证做完了、其实没改到文件"：替换要 `assert`，"已验过"只能在看到 stdout 之后写 | —— |
+
+### 二、门禁与实况（照抄当轮 stdout）
+
+- `go test ./internal/... -count=1` ⇒ 八个有测试的包**全 ok**（`golden` 无测试文件）。
+- 全量 `node scripts/gates-go.js`（本轮代码与文档都落地后跑的那一次）⇒ **十项门禁全绿**，
+  总耗时 **27.8s**（逐条：build 0.9s，vet 0.4s，fmt 0.1s，test **22.9s**，deps 2.8s，
+  filenames 0.2s，idents 0.2s，golden 0.1s，jsontags 0.1s，md-tables 0.1s）。
+  ⚠ 本轮中途还有一次 `test 0.6s` 的全绿读数，那是**缓存命中**，别拿它当"这套测试只要 0.6s"。
+- 反向验证**真做过三处**（每次都带"改动是否落到文件上"的断言）：档位接错 ⇒ 端点用例红；
+  `Kind` 分支改错 ⇒ `TestClaimRunKindPicksTheChain` 红；`cloud-snapshot` 写库失败被吞 ⇒
+  交回错误那条红。
+
+### 三、遗留（本轮没做、也不该顺手做）
+
+1. ❓ **`revival` 的本地月额度**：上游没有"还剩几张卡"的查询口，本地额度表**没建**
+   （要动 schema v10 + `io` + `core` + `StateStore` + 各处 fake）。现在唯一防线是
+   `RunInBatch:false` + `RiskHigh` 弹框 ⇒ **手工点两次 = 用掉两张卡**。建不建，待拍板（Q11）。
+2. ❓ **`multiple` / `backup-gift` 与签到同一天跑的先后顺序**未实测（旧项目是"签完再翻"）。
+   要核：活体拿一个号跑 `sign → multiple`，比对翻倍基数是不是**含今日签到**那笔。
+3. ❓ **`prizes` 只取一页**（`pageSize=10`）多于十条会**静默截断** —— 照搬旧项目行为，
+   已登记在 `docs/business-feature-inventory.md` §2.1；补法（翻页拉全）等界面那一层。
+4. ⚠ `receiveOutput` / `prizeListOutput` / `claimOutput` 三份 `Output` 声明目前只是给前端的
+   **形状说明**，后端不逐字段回填 —— 界面要用时要另构造响应体，别当契约兑现处。
+5. ⚠ **本轮未提交**（用户没要求）。`docs/status.md` 已 2000+ 行 —— 拆分方案待提（§3.9）。
+
+## 补记（2026-09-24，新链路批：`task-list` / `notice` / `msg-push` / `fun-ai` 四条落地并接上执行）
+
+用户口径仍是"先按两个参考项目把业务逻辑迁完、不因缺抓包停工"（v4：**接口层冻结、业务层继续**）。
+与上一轮不同，这一轮**四条各自带来一条新上游接口**（`taskListV3` / `openEmailsms/*` /
+`msgPushOn/*` / `funai/api/*`），注册表 **10 → 14** 项，`runBuilders` **9 → 13** 条。
+真打上游**一条都没打**：本轮全部在脚本夹具上跑。
+
+### 一、落点
+
+| 文件 | 内容 | 反向改坏它，谁会红 |
+| --- | --- | --- |
+| `internal/upstream/app_task_list.go`（新） | `taskListV3` 请求 + **类型化**解析（`TaskItem` / `TaskList`，`result` 不是数组就报错；顶层 `taskFinishState` 只存不判） | `TestParseTaskListExpectsArray`（把"非数组"改成"降级成空表"就红）、`TestParseTaskListKeepsMissingFieldsAsNil` |
+| `internal/upstream/app_notice.go`（新） | `getTaskInfo` / `reward` 两口 + 另三口（`receiveTask` / `reportAppNoticeStatus` / `task/click`）**实现但刻意不接链** | `app_notice_test.go` 逐槽断言（含"上游没给这一槽"≠"给了空槽"） |
+| `internal/upstream/app_msg_push.go`（新） | `task/status` / `task/obtain`；⚠ **零抓包样本**，形状口径只有旧 TS 一处；`onDuaration`（上游错拼）由常量 + 测试钉住"不许改对" | `app_msg_push_test.go`：把键名"改对"成 `onDuration` 立刻红 |
+| `internal/upstream/app_funai.go`（新） | `page/getmodule` / `page/lottery`；活动起止按东八区解释成时刻；抽奖体里的 `moduleId` **必须**来自上一次查询 | `app_funai_test.go`（14 条） |
+| `internal/app/task_list_run.go` / `notice_run.go` / `msg_push_run.go` / `funai_run.go`（新） | 四条"跑一个账号"那一段。共同形状：**读判据失败一律交回 `*core.Error`**，只有"发了写请求但失败"折成失败结论；门槛不成立 ⇒ **一条写请求都不发** | 各份 `*_run_test.go`：`…SendsNoWriteRequestWhenTheGateIsClosed`（把 `Manual`/`Unknown` 那几格改成"照发"就红） |
+| `internal/app/msg_push_run_test.go`（新，**本轮主 agent 补**） | 四档判定 + "缺 `obtainCode` 不伪造成成功" + `pushOn` 缺失**不**判 Manual + 四态映射（含待办上的能力 code 取注册表那一个） | 把 `case !ok:` 折成 `Obtained` ⇒ `TestMsgPushMissingObtainCodeIsNotFakedAsSuccess` 红（实测红在"实得 0 / 小结念成已领"） |
+| `internal/capabilities/registry.go` | 四个 code 常量 + 四条声明 + 四份 `Output`（`task-list` 查询型不进编排；`msg-push` 零样本 ⇒ `RunInBatch:false`，这一格与它的 `Risk` 是 **agent 侧默认（非用户要求）**） | `capabilities` 包那批自检（`All()` 不可被改 / 查询型不可批量 / MissPolicy 指针深拷） |
+| `internal/server/run_dispatch_signin.go` | 抽出泛型外壳 `buildSignInChain`（这一族十条共用），新增四个 builder；`runBuilders` 到 **13** 条 | `run_dispatch_signin_test.go`：`wiredSignInCodes` 十一个各"受理→终局"；`TestNewChainDispatchHitsItsOwnEndpoint` 按**次数**判链（notice 是"查→领→复查"三枪） |
+| `internal/app/notice_run.go` / `msg_push_run.go` | 两个能力 code 从字面量改成引用 `capabilities.CodeNotice` / `CodeMsgPush`（一处定义） | 上面那条待办 code 断言 |
+| `scripts/check-go-jsontags.cjs` | 十八个新结构体进 `UNTAGGED_ALLOWED`，分两类写理由（上游解析结果 / 一次运行的内存结论） | 门禁 `jsontags` |
+| 坑表 **#144 / #145** | #144：子代理回报的"已落地 + 用例条数 + 门禁全绿"**不等于工作树里有文件**，核实只认 `git status` / `ls` / 当轮 stdout；#145：把"我搜 `msgPush` 没搜到"写成"开源 Go 没有这个功能"（本仓库成文里就记着 `messagepush`） | —— |
+| `docs/business-feature-inventory.md` §0 | "Go 侧现状"整段就地改写（#11/#12/#17 从"仍无"移进"已接执行"，#2 那句"回 501"已被上一轮推翻），耻辱柱从三条并成四条 | —— |
+
+### 二、门禁与实况（照抄当轮 stdout）
+
+- 全量 `node scripts/gates-go.js`（代码与文档都落地后那一次）⇒ **十项门禁全绿**，
+  总耗时 **31.5s**（逐条：build 1.5s，vet 0.5s，fmt 0.1s，test **25.9s**，deps 2.8s，
+  filenames 0.2s，idents 0.2s，golden 0.1s，jsontags 0.1s，md-tables 0.1s）。
+  `jsontags` 那一格的读数是"78 个结构体字段齐全，139 个按白名单不进 JSON"。
+- 反向验证**真做过三处**，每次都带"改动是否落到文件上"的判断（脚本先 `includes(from)` 再替换，
+  落不上就 `exit 1`，见坑表 #143）：
+  ① `runBuilders` 里把 `CodeNotice` 配成 `buildMsgPushRun` ⇒ `TestNewChainDispatchHitsItsOwnEndpoint/notice`
+  红在"应把 `openEmailsms/getTaskInfo` 打 2 次，实得 0 次"；
+  ② `ClaimMsgPush` 里"缺 `obtainCode`"折成成功 ⇒ `TestMsgPushMissingObtainCodeIsNotFakedAsSuccess` 红；
+  ③ 删掉 `case MsgPushPlanManual:` 的提前 `return` ⇒ "门槛不成立就一条写请求都不发"红在"obtain 实得 1 次"。
+  三处改完都已还原，还原后该包重跑为绿。
+- 夹具关键词**重扫过整棵树**（31 份 + 那份同名镜像目录 `test/fixtures/http/http/`）：
+  `msgPush` / `pushOn` / `onDuaration` / `obtainCode` **零命中**（⇒ `msg-push` 仍是零样本，
+  注册表那一格的取态不变）；`funai` / `openEmailsms` / `taskListV3` 各命中两份（同一夹具的两个副本）。
+
+### 三、遗留（本轮没做、也不该顺手做）
+
+1. ❓ **`notice` 的入账方向是猜的**：`cloudStatus` 哪个值是"未领"，实拍两条定不出方向
+   （两个槽 `taskStatus` 相同而 `cloudStatus` 不同）。要核：拿一个**从没开过通知**的号打一次
+   `getTaskInfo`，看未入账态长什么样。判反的表现是**漏领**，不是"白发一次写请求"。
+2. ❓ **`notice` 领云朵到底走哪一口**：旧项目那条链是 `reward` + `taskListV2` 找 id `1021` +
+   `reportAppNoticeStatus?status=1`。本轮只接了 `getTaskInfo → reward → 复查`，
+   另三口**有实现、没接链**。`taskListV2` 连实现都没有（本仓库只有 `V3`）。
+   ⚠ 这一条后半句今天要不带限定语才不误导：2026-09-24 仓里有了 `taskListV2` 这一口，
+   但那是 **#9 那一族**的 `m.mcloud.139.com` 版本；`notice` 要的 `:7071` 那一份**仍无实现**，
+   两口的域名、body、头集合都不同（差异与出处见 `internal/upstream/app_task_list_v2.go` 文件头）。
+3. ❓ **`msg-push` 全族零样本**：方法（`obtain` 用 GET 带 body）、`obtainCode` 非 0 的例文、
+   `pushOn` 有几种取值，三格全空。接进执行面是为了**手工点一次拿到第一个样本**；
+   ⚠ 它进编排没有样本支撑 ⇒ 现在是 `RunInBatch:false`。
+4. ❓ **`fun-ai` 的三个计数**（`drawTimes` / `drawsUsed` / `todayGetLotteryCount`）语义未验证，
+   判定只用前两个的差；`isWin` 只有一档样本 ⇒ **不据此分支**，"没中奖长什么样"仍无答案。
+5. ❓ **`task-list` 只查不做**（`doTaskPost` / `task/click` 未接），且 `taskListV3` 的请求体里
+   `client` 这一格**夹具与抓包不一致**（抓包有、`每月阅读任务.json` 无）；`clientVersion`
+   三个取值（11.2.1 / 11.4.0 / 12.6.0）各在哪些请求上也没定。⇒ 三条都待拍板。
+6. ⚠ **四条的 `jwttoken` 一律走公共来源**（`RecipeSignInPage`，签到页那张票顶到这四页用）。
+   按 AGENTS.md §1.12 这是**临时态**：抓到某一页的特有取法 ⇒ 改那一处接线并把样本补进
+   `docs/capture/`。跨主机带 referer（`caiyun.feixin.10086.cn:7071` / `m.mcloud.139.com`）
+   上游认不认，**没有样本**。
+7. ⚠ 四条的 `Output` 声明目前只是给前端的**形状说明**，后端不逐字段回填（同上一轮第 4 条）。
+8. ⚠ **本轮未提交**（用户没要求）。`docs/status.md` 已 2000+ 行 —— 拆分方案仍待提（§3.9）。
+
+## 补记（2026-09-24，抢兑 `exchange`：三层落地 + 接上执行，真扣豆那一族）
+
+用户口径仍是"先按两个参考项目把业务逻辑迁完、不因缺抓包停工"。这一轮补的是**最后一条**
+注册了却没接执行的能力（#20），也是全仓库**唯一**"写操作有三条真机实拍"的链路
+（`docs/capture/app-exchange-samples.txt` §5：4 条 `exchangeV3` 三错一成、3 条 `exchangeList`、
+余额 `10505 → 8705 == 商品价格 1800` 那条对拍）。注册表 **14 条不变**（`exchange` 早就登记着），
+`runBuilders` **13 → 14** ⇒ "只有声明"那一格从此清空。真打上游**一条都没打**：三层全部在夹具/实拍样本上跑。
+
+### 一、落点
+
+| 文件 | 内容 | 反向改坏它，谁会红 |
+| --- | --- | --- |
+| `internal/upstream/app_exchange.go`（新） | `exchangeList` 解析（按 `groupId` 分组、**键不连续**、价格两拼法 `pOrder`/`POrder` 都认、`probability2` 是**二次解码的 JSON 串**）+ `exchangeV3` 下单 + **十条业务码常量**（`501/514/407/415/2301/610/614/615/420/421`） | `app_exchange_test.go` 15 条：`TestExchangeListRequestMatchesCapture` / `TestExchangeV3RequestBodyIsByteIdenticalToCapture`（逐字节对实拍）、`TestParseExchangeListPriceFallsBackToCapitalSpelling`（M1）、`TestExchangeV3NullOffsetIsLiteralNull`（M2）、`TestParseExchangeResultKeepsBusinessCodes`（码是数据不是错误） |
+| `internal/upstream/app_exchange_slide.go`（新） | `getSlide`：不同主机路径 + `form-urlencoded` + 响应是**两张图**，故**单独一份、不许复用兑换族的请求构造**；`puzzleLeft` 实拍恒 `null` ⇒ **刻意不读** | `app_exchange_slide_test.go` 5 条：`TestParseSlidePuzzleIgnoresPuzzleLeft`、`TestParseSlidePuzzleRejectsUnpaddedBase64` |
+| `internal/app/exchange_plan.go`（新） | `LocateExchangePrize`（只认 id 与**全等**名称）+ `PlanExchange` **十七档** + `PlanExchangeWait`（东八区、与钟面时区无关） | `exchange_plan_test.go` 14 条：`TestLocateExchangePrizeDoesNotMatchByPrefix`（M3）、`TestPlanExchangeAllowsFullyQualifiedPrize`（余额边界 50/50 放行、49 挡 ⇒ M4）、`TestExchangePlanReasonsAreAllDifferent`（十七档各说各话） |
+| `internal/app/exchange_run.go`（新） | 链本身：**只有 `514` 允许再来一轮**、上限两轮；`code 0` 后回查 `infoV3` 余额差 `== 价格` 才算成交，查不动/对不上落 `Unknown` 且**绝不重发**；取不到 `deviceId` ⇒ 一枪不发；`ExchangeSliderRounds = 2`；八档结论的**零值是"没尝试"**不是"成功" | `exchange_run_test.go` 22 条：`TestExchangeStopsAfterSecondSliderFailure`（M5）、`TestExchangeCodeZeroWithWrongBalanceDiffIsUnknown`（M6）、`TestExchangeBusinessCodesAreDataNotRetried`、`TestExchangeStatusZeroValueIsNotSuccess`、`TestExchangeSummaryLineHasNoCredentialShapes` |
+| `internal/server/run_dispatch_exchange.go`（新） | 接线：`prizeIdOrName` 空 ⇒ **400 且不落运行记录**（先参数后账号，与 `liveRoomRequest` 同一顺序）；`TrimSpace` 后的那一份同时进领域层与指纹；`exchangeDigest(prize, skipWait)` | `run_dispatch_exchange_test.go` 6 条：`TestExchangeWithoutPrizeIsRefusedBeforeLaunch`、`TestExchangeDigestIsNotEmptyAndCarriesThePrize`（M7）、`TestExchangeDefaultSkipsWait` |
+| `internal/server/run_dispatch.go` | 分派表加 `CodeExchange` 一行；头注从"只剩 exchange 没接"改写成"表里没有空位" | `TestEveryRegisteredCapabilityIsWired`（差集必须为空） |
+| `internal/server/runs_test.go` | "登记了但没接 ⇒ 501"那条用例改成**遍历注册表 + 临时摘掉一份 builder 再打、逐条摘一遍**（末尾自检 `len(runBuilders)==len(All())`）：真实配置下这一支已不可达 | 把 `delete` 去掉 ⇒ 十四条全 202，那条立刻红 |
+| `internal/server/run_dispatch_test.go` | 同上；并行闸门那条改成**按声明补齐必填栏**（`parallelParams`/`syntheticValue`），不再手写 code→参数 映射 | `TestParallelModeIsRefusedOnEveryWiredCapability`（摘掉 `sequentialOnly` ⇒ 十四条一起红在"应 400 实得 202"，实测过） |
+| `internal/server/scheduler_test.go` | "跑不了的三种情形"加 `unwire` 字段：仍打 `exchange`（它的准点迟到时序已调好），起跑前 `delete(runBuilders,…)` + `defer` 放回 | 不放回 ⇒ 后面的用例红；不摘表 ⇒ 红在"「奖品」不能为空"（本轮就红过一次，那是**对的**红） |
+| `scripts/check-go-jsontags.cjs` | 兑换族 **11 个**结构体进 `UNTAGGED_ALLOWED`（上游 6 + 领域 5），分两类写理由（解析结果 / 一次运行的内存结论） | 门禁 `jsontags` |
+| 坑表 **#146 / #147 / #148** | #146 夹具把判据字段钉成常量；#147 拿被测常量做断言；#148 遍历式的通用用例只发自己那一栏参数 | —— |
+| `web/src/pages/exchange-page.tsx` | **只改文案，没改逻辑**：页头那段"后端现状"写着"`runBuilders` 只有三条 ⇒ 点兑换回 501"（接上之后已是**假话**），改成"执行面已接 + 剩一处未就绪（奖品列表没有对外只读接口）+ 两侧都未真机核验"；页脚那句让用户敲 `mcloud signin --exchange --prize 奖品` 同样是**假话**（`internal/cli` 里搜不到 `exchange`，`docs/cli-usage.md` 也没有），改成"这一条只有本页与定时任务两个入口" | ⚠ **web 侧没有测试运行器**，这两处只能靠 `gates-web`（typecheck + build）+ 人读，**没做真机核验** |
+| `docs/business-feature-inventory.md` §0 / §2.5 | #20 从"只有声明"移进"已接执行"（并标 ⚠ 未真打）；§2.5 补一段「Go 侧落点」，写清与旧实现**三处刻意不同**（不接两条 `visitlog` 埋点、下单走实拍那条 `exchangeV3` POST、`skipWait` 默认 `true`）；耻辱柱第四条 | —— |
+
+### 二、门禁与实况（照抄当轮 stdout）
+
+- 全量 `node scripts/gates-go.js`（代码与文档都落地后那一次）⇒ **十项门禁全绿**，
+  总耗时 **20.1s**（逐条：build 1.0s，vet 0.5s，fmt 0.1s，test **15.1s**，deps 2.9s，
+  filenames 0.2s，idents 0.2s，golden 0.1s，jsontags 0.1s，md-tables 0.1s）；
+  `jsontags` 那一格读数是 **78 个结构体字段齐全，150 个按白名单不进 JSON**。
+  ⚠ 本轮中途红过一次 `fmt`：`internal/upstream/app_exchange_test.go` 里两处 map 字面量的
+  中文键没对齐（gofmt 按显示宽度补空格），`gofmt -w` 后即绿 —— 记在这里是因为
+  **中文键的 map 每次加一条都要重排**，手写对齐必然红门禁。
+- 本轮新增 **62 条**用例（上游 20 + 领域 36 + 接线 6）。
+- 反向验证**真做过七处**（每处都先断言"改动落到文件上了"，再 `cmp` 校验还原，见坑表 #143）：
+  M1 价格只认小写 ⇒ `TestParseExchangeListPriceFallsBackToCapitalSpelling` 红在"只有 POrder 时也该拿到价格，实得 <nil>"；
+  M2 `offset` 为 nil 时写 `0` 而不是 `null` ⇒ `TestExchangeV3NullOffsetIsLiteralNull` 红；
+  M3 名称改前缀匹配 ⇒ `TestLocateExchangePrizeDoesNotMatchByPrefix` 红在"只给前缀应判没找到，实得 0（可以下单）"；
+  M4 余额判据 `>` 改 `<` ⇒ `TestPlanExchangeAllowsFullyQualifiedPrize` 等三条红；
+  M5 轮次上限 2→3 ⇒ **第一次没红**（用例拿 `ExchangeSliderRounds` 自己断言，见 #147），改成字面量后才红在"实得 4 / 3"；
+  M6 成交不看余额差 ⇒ `TestExchangeCodeZeroWithWrongBalanceDiffIsUnknown` 红；
+  M7 指纹不吃 `skipWait` ⇒ `TestExchangeDigestIsNotEmptyAndCarriesThePrize` 红在"换了 skipWait 指纹没变"。
+  另加一处：摘掉 `sequentialOnly` ⇒ 并行闸门十四条全红（受理成 202）。七处改完都已还原，还原后三包重跑为绿。
+- ⚠ **web 侧只改了两处假文案**（见上表最后一行），**没有**新加界面，也**没有**真机核验过
+  "点开始 → 兑换"这一条路（web 侧只有 typecheck + build，没有测试运行器 ⇒ 只能标"未测试"，
+  要核它得：起 `mcloud-server` 拿**测试号**打一件便宜奖品，或先把执行面挡在闸门之后只验表单编排）。
+
+### 三、遗留（本轮没做、也不该顺手做）
+
+1. ❓❗ **整条链没真打过上游**：这是**唯一**"跑对了会真扣豆、跑错了也可能真扣豆"的能力。
+   第一次真跑的验收口径 = 抓包 §5.4 那三条（`code 0` + 两次 `infoV3.total` 差 == 价格 + `prizes` 里有那一行），
+   且要拿一件**便宜、且 `smsCode` 用不上**的奖品人工盯着跑。
+2. ❓ **`420` / `421`（用户级每日 / 每月配额）一次都没露面**：`msg` 文案只有 H5 那张表，
+   Go 侧把它们落在 `default` 那一档（结论 `Failed`、不重发）。要不要为它们先补一发探针 ⇒ **待拍板**。
+3. ❓ **`limit == 1` 零样本**、**`limit == 3` 两处文案互相冲突**（`ExchangePlanLimitThree` 那一行取的是哪一种 ⇒ 待拍板）。
+4. ❓ **`skipWait=false` 的等待做到什么程度**：现在只"等到下一个整点前 20 秒"（`ExchangeWaitLeadIntoHour`），
+   旧实现还有一段 `:59:40` 预热（2 条埋点 + 取题 + 匹配）。要不要照搬那段窗口 ⇒ **待拍板**（默认档是 `true`，今天走不到）。
+5. ❓ **下单前那两条 `ycloud/visitlog/journaling` 埋点没接**（旧实现有：`newsignin_index_to_exchange`
+   + `newsignin_index_exchange_times`，中间 `sleep(500)`）。本仓库**只有一份** `journaling` 构造器
+   （`upstream.LiveRoomJournalingRequest`，挂在直播间那一台主机、form 体），与兑换这两条不同形。
+   补不补是"像不像另一个客户端"的问题，**没有样本**说明缺了会怎样。
+6. ❓ **`smsCode` 何时非空：有意搁置**（用户 2026-09-22 裁定），四条实拍全是空串 ⇒ 需短信码的奖品必然失败，
+   而失败原因目前落在 `default` 那一档，界面上看不出"是因为要验证码"。
+7. ❓ **并发写链要不要收口**（两格）：① 两件不同奖品不再互斥 ⇒ 同一账号可并发跑两条下单，
+   而这一族请求里**没有幂等键**、两条并发给同一账号会回什么**没有样本** ⇒ 要不要加"同一账号一次只跑一条"；
+   ② 名字与 id 指向同一件商品却是两把锁 ⇒ 要不要起跑前解析成 id 再进指纹（要多打一次 `exchangeList`）。
+   两处都写进了 `exchangeDigest` / 那条用例的注释，登记为**待用户拍板**。
+8. ❓ **`Hidden: true` + 定时任务**：这一条能不能被 schedule 指到（`target.code = "exchange"`）？
+   今天**能**（调度那一层不看 `Hidden`，本轮的 `unwire` 用例就是走 `exchange` 走的调度），
+   而"无人值守 + 真扣豆"这一组合要不要额外挡一道 ⇒ **待拍板**。
+9. ⚠ **`jwttoken` 走公共来源**（`RecipeSignInPage`，签到页那张票顶到兑换用）：按 AGENTS.md §1.12 是**临时态**，
+   抓到兑换页的特有取法 ⇒ 改那一处并把样本补进 `docs/capture/`。
+10. ❓ **兑换要不要命令行面**：`internal/cli` 里搜不到 `exchange`，`docs/cli-usage.md`（**冻结对拍面**）
+    也没有这一栏 ⇒ 现在只有"界面 + 定时任务 + `POST /api/runs`"三个入口。要不要补 `mcloud signin --exchange`
+    那种形态 = **待用户拍板**（补就要同时改 `docs/cli-usage.md` 与那份参数面）。
+11. ⚠ **本轮未提交**（用户没要求）。`docs/status.md` 已 2100+ 行 —— 拆分方案仍待提（§3.9）。
+
+## 补记（2026-09-24，上传族与 `after` 清理：接口层**冻结**登记 —— 缺哪几格、要什么样的样本）
+
+用户口径不变（v4：**无抓包时接口层冻结、业务层继续**）。这一族的结论是**不动手**：
+四枪里真正上传文件的那三枪零样本，硬写出来的"能编译的实现"在第一次真跑时既可能传不上去、
+又可能留下删不掉的孤儿文件（写用户网盘 ⇒ 副作用不可回滚）。依赖它的 #7 `after` 清理一并挂住。
+下面登记的是"**具体缺哪一格**"和"**补它需要抓到什么**"，不是"这一族不能做"。
+
+### 一、夹具实况（本轮逐条 grep 过 `test/fixtures/http/*.json`，头名可信、头值一律 `<REDACTED>`）
+
+| 环节 | 实拍条数 | 已经有出处 | 仍缺 |
+| --- | --- | --- | --- |
+| `POST personal-kd-njs.yun.139.com/hcy/file/create`（**建目录**那一型） | 2（`3d.json`） | 明文 JSON 体（`{fileRenameMode:"refuse",name,parentFileId,type:"folder"}`）、头名一组（`Authorization` / `X-Yun-Api-Version` / `X-Yun-App-Channel` / `X-Yun-Client-Info` / `Origin: https://yun.139.com`）、响应信封 `{code:"0000",data{fileId,exist,type,uploadId,partInfos},message,success}` | **上传文件**那一型（`contentHash`+`SHA256`+`fileRenameMode:"auto_rename"` ⇒ 回 `partInfos[].uploadUrl`）**零样本**：两条实拍都是 `type:"folder"`，`uploadId`/`partInfos` 都回 `null` |
+| `PUT <uploadUrl>`（预签名直传） | 0 | — | 整条零样本（主机是预签名 URL，与 hcy 不同域，连头面都不知道） |
+| `POST …/hcy/file/complete` | 0 | — | 请求体、判据、信封**全缺** |
+| `POST …/hcy/recyclebin/batchTrash` | 0 | — | 请求体（ID 列表的字段名与形状）、判据**全缺** |
+| 只读侧 `hcy/file/{list,checkExists,sourceOptions,get}` | 6（`ref.json` 5 + 拍拍 1） | 头名、信封、`data` 形状都有 | 不缺（只读不阻塞，将来要接"按 ID 复查"时可直接用） |
+
+### 二、"hcy 域鉴权归属"这一格：**订正**上一轮口调的结论
+
+上一轮调研时说过一句"personal-kd 域的鉴权归属**无任何成文**"。那句话**不对**，就地改准（不留原文）：
+
+- 仓库里 personal-kd 有 **4 份夹具、十余条实拍**，其中两条是**写**操作（`hcy/file/create` 建目录，
+  返回 `code "0000"` 成功），客户端画像是**安卓 App**（`Authorization` 与 `x-DeviceInfo` 同现）。
+- 归属因此**指向** App 形态 A 那一串：`Authorization: Basic base64("mobile:<手机号>:<authToken>")`
+  （成文见 [`client-profiles.md`](client-profiles.md) §3.3.1 与 [`capture/app-api-families.txt`](capture/app-api-families.txt) §1 形态 A）。
+  Go 侧这个构造器**早就有**：`upstream.AppAuthorization` + `IOSAuthPrefix`（不给默认前缀，理由写在
+  `internal/upstream/app_client.go:71-80`），且 App 短信登录那条链 2026-09-21 端到端实测通过。
+- ⚠ 但**头值全部脱敏** ⇒ "personal-kd 认的就是 `mobile:` 这一串"仍是**推断**，不是实拍结论；
+  要坐实它得在本地拿真实凭据重放一次（结果不入库）。⇒ 只有"这一串到底哪来的"从缺口降级成"待确认"，
+  **上传三枪的体与判据照旧是硬缺口**。
+
+### 三、补样本的口径（写清楚，免得下次重新推一遍）
+
+1. 要抓的动作：在**已授权的那台测试号**上跑一次"往云盘传一个小文件、再把它删掉"，
+   抓完整四枪（`file/create` 文件型 → `PUT uploadUrl` → `file/complete` → `recyclebin/batchTrash`）
+   的**请求体 + 响应体**；只补前面三枪也能让上传落地，第四枪才有 `after`。
+2. 通路、命令、前置自检 ⇒ [`capture-tools.md`](capture-tools.md)；抓多少、停止条件、合规红线 ⇒ [`capture-guidelines.md`](capture-guidelines.md)。
+3. ⚠ 这一步**会真写用户网盘**（留下文件，且旧实现的清理靠人记 ID）。⇒ 我不自行决定去做。
+4. 另一半缺口**不在协议层，且不依赖抓包**：`internal/exec` 至今**没有** "run 内产物清单" 那一层
+   （§2.2 那条 2026-09-22 的注记仍然成立：只有并发闸 / 互斥键 / 准入 / 事件总线），
+   也没有失败路径的补偿钩子 ⇒ 即使四枪样本齐了，"失败也要清理"仍要先建这一层。
+   **这一层可以先做**（纯内部设计），登记为下一步候选，不拿抓包当它的阻塞。
+
+### 四、❓ 待用户拍板（一条，问句）
+
+**现在要不要去抓一条真实上传？** 三个档位：
+① **不抓** ⇒ 这一族继续接口层冻结，`after` 挂住（**agent 侧默认，非用户要求**）；
+② **只补只读** ⇒ 接"按 ID 复查"这类读侧，写侧仍冻结；
+③ **抓完整四枪** ⇒ 授权往测试号网盘写一个小文件再删掉，这一族解冻。
+"要不要真跑"这一问与"要不要现在抓"这一问是**同一个代价**（都得真动网盘），所以合并拍板。
+
+## 补记（2026-09-24，`internal/exec` 的 run 产物账本：上一节里"不依赖抓包的那一半"先做掉）
+
+上一节把上传族按 v4 冻在接口层，但同时记下了一句"**另一半缺口不在协议层**"——
+`internal/exec` 没有"本 run 造了哪些上游对象"这一层，因而 `after` 的"失败路径也要清理"无从挂。
+那一半**不需要任何抓包**，所以这一轮先把它建掉。
+
+### 一、落点
+
+| 文件 | 内容 | 反向改坏它，谁会红 |
+| --- | --- | --- |
+| `internal/exec/artifacts.go`（新建 300 行） | `ArtifactLedger`：`Register`（幂等、三元组不全直接 `BadRequest`）、`RegisterCreated`（`exist:true` **不入账**）、`Pending` / `PendingFor`（按「账号 → 类型 → ID」排序）、`MarkRemoved`（要对齐整个三元组）、`Count`、`Forget`（**把未清理的交回调用方**）、`Runs`；`Artifact{Kind,Account,ID}` + `ArtifactCloudFile` | 见下面 M1–M5 |
+| `internal/exec/artifacts_test.go`（新建 12 条用例，含 4 个子用例） | 幂等 / 四格缺一即拒 / 已存在不登记 / 顺序确定性（读 200 次）/ 按账号切 / 错三元组销不掉 / run 之间隔离 / `Forget` 交回剩余 / `Runs` 有序 / 并发（`-race`）/ 零值不可用 / 诊断文本不含凭据 | 同上 |
+| `scripts/check-go-jsontags.cjs` | 登记 `internal/exec/artifacts.go:Artifact` 一条（无 tag 结构体白名单） | 删掉这条 ⇒ 门禁第 9 条红 |
+| `docs/business-feature-inventory.md` | §2.2 第 3 条与 §2.3 那条 2026-09-22 的"Go 侧仍是缺口"**就地改写**（不再成立），并写明"账本 ready、进出口没接" | —— |
+
+### 二、门禁与反向验证
+
+- `go vet ./internal/exec`、`go test ./internal/exec -count=1 -race` ⇒ **ok**（`0.5s`）；
+  `gofmt -l internal/exec` ⇒ 空；静态四条（`deps` / `filenames` / `idents` / `jsontags`）逐条跑过，本层四条全绿。
+  ⚠ 本轮**没有**跑十项全量：跑的时候两个后台 agent 正在 `internal/upstream` 里写新族文件，
+  第 5 条 `check-go-deps` 当时报的是"`internal/upstream` 依赖图解析不了"（他们写到一半），
+  那不是本层的红 —— 按 AGENTS §2.7 只归因不动手，全量等两族落地后单点跑。
+- 五处变异，每处都先断言"改动确实落到文件上"（`cmp`）再跑、跑完 `cmp` 还原：
+  M1 `RegisterCreated` 不看 `preExisting` ⇒ `TestRegisterCreatedSkipsPreExistingObjects` 红；
+  M2 排序里去掉账号维度 ⇒ `TestArtifactLedgerPendingIsDeterministicallyOrdered` 红；
+  M3 `Valid()` 少判 ID ⇒ `TestArtifactLedgerRejectsIncompleteRegistrations/缺_ID` 红；
+  M4 `PendingFor` 的账号过滤失效 ⇒ `TestArtifactLedgerSplitsPendingByAccount` 红；
+  M5 `Forget` 永远返回 nil ⇒ `TestForgetHandsBackLeftovers` 红。
+
+### 三、设计上的三个"为什么不那样写"（都写在代码注释里，这里只留索引）
+
+1. **账本带账号**：清理用的是**该账号自己的**凭据，只记一串 ID 会要求调用方再分组一次，
+   而分错组在上游只表现为"没删掉" ⇒ 又回到漏记。分组放在这一层，`PendingFor` 直接给按账号切好的清单。
+2. **`exist:true` 做成入参**（`RegisterCreated`）：这是"错删用户原有文件"**唯一真实的成因**。
+   用户 2026-09-19 已订正过：按唯一 `fileId` 删**不会**删到别人名下，真正的错删来自
+   把"本来就在用户网盘上的东西"（秒传命中 / `fileRenameMode:"refuse"` 撞上已有目录）登记成自己的产物。
+   散在各调用方判 ⇒ 漏一处就是"上传成功"后面跟一次误删，所以集中成一个函数、一条用例钉住。
+3. **`Forget` 有返回值**：账本消失 ≠ 文件消失。留一个无返回值的 `Forget` 就等于允许"没人负责这批东西"，
+   那正是旧项目 `ctx.state.files` 的失效形状。
+
+### 四、遗留（本层）
+
+1. ⚠ **没有任何调用点**：今天没有一条链会往账上记东西 —— 上传三枪零实拍（上一节），
+   所以 `#9` 的"建随机文件凑备份"、`#10` 的头像上传、`#7` 的清理都还没接。
+   这一层是"先建好的地基"，不是"已落地的功能"，措辞上不许混。
+2. ❓ **目录递归删除**：`ArtifactCloudFile` 把文件与目录合成一档（`hcy/file/create` 两种都回 `fileId`），
+   但 `batchTrash` 对**非空目录**的行为**零样本** ⇒ 本层刻意不判，注释里也没写结论（`artifacts.go` 那条 `Valid` 上方）。
+   要判它：拿一条"往一个非空目录上打 `batchTrash`"的实拍（同一测试号，删自己刚建的那一个）。
+3. ❓ **`Kind` 是开放字符串而不是枚举**：新增产物类型（外链 / 笔记 / 相册快照）时不要求所有读侧 switch 出新码。
+   代价是"打错一个类型字符串"不会被编译期挡住 —— `Valid()` 只管空串，这一点写在注释里，没有对应测试能钉。
+4. ⚠ **本轮未提交**（用户没要求）。`docs/status.md` 已 2200+ 行，拆分方案在本节末尾第 五 小节（待拍板）。
+
+### 五、`docs/status.md` 拆分方案（**待拍板**，本轮没动）
+
+文件已 2269 行、25 个 `##` 小节，其中 **20 节是"某一轮做了什么"的补记**（append-only 历史），
+5 节是"现在能信什么"（`一句话总览` / `按任务指路` / `逐项须知` / `历史流水账（已折叠）` / 门禁实况那几段）。
+按 AGENTS.md §3.9「长文件主动拆」，这一句已经欠了很多轮（前几节的末尾各写了一次"仍待提"）。**方案**：
+
+1. 新建 `docs/status-log.md`，把 20 节补记**整段搬过去、不改字**（它们已被引用，改写比重排贵）。
+   `status.md` 只留一节「轮次索引」：一行一轮（日期 + 一句话 + 跳到 `status-log.md` 的锚点）。
+2. 引用面先量过再动：全仓 **141 处 `status.md` 引用、分布在 45 个文件**。
+   搬之前逐条判定"指的是现状节还是某一轮"，落在后者的改成 `status-log.md`，
+   并**保留一条 `status.md` 里的旧锚点跳转**（一行 `⇒ 已移到 status-log.md`），
+   免得一觉醒来 141 处里有一半是死链。
+3. `docs/README.md` 的目录表加一行；门禁第 10 条（`md-tables`）与文件名门禁自动覆盖新文件，无需登记。
+4. 验收：搬完 `git diff --stat` 只应有"整段移动 + 索引新增"两类改动；跑 `node scripts/gates-go.js md-tables` 与全量各一次。
+
+⚠ 这一条**不做**的理由也写清楚：搬历史会打断别人正在引的链接，而两族新链子（#16/#18）此刻还在落地中
+（`internal/upstream` 有 agent 在飞）⇒ 等这一批收口、`status.md` 不再当轮增长时再搬，成本最低。
+**要不要搬、什么时候搬 = 待用户拍板**。
+
+## 补记（2026-09-24，#16 拍拍 + #18 红包派对：上游协议层落地，编排与接线没动）
+
+盘点表 §0 那一格今天又落后过一次（耻辱柱第五条的同族），所以先说清**这一轮到底交付了什么形状**：
+两族的**上游协议层**（怎么构造请求、响应怎么解、哪些格子是"上游没给"）已经成文并带测试；
+**能力登记、app 层编排、分派表接线、WebUI 一层都没动**。⇒ 用户侧今天点不到这两件事，
+它们仍是"仍无（从能力角度）"，只是不再是"连代码都没有"。
+
+### 一、落点
+
+| 文件 | 行数 | 内容 |
+| --- | --- | --- |
+| `internal/upstream/app_play_ai.go` | 1043 | 拍拍五口（① `newyear/user/info` ② `task/list` ③ `task/step/click`**写** ④ `blindbox/lottery`**写** ⑤ `ai/image/aiRecognize`），两套信封各判各的 |
+| `internal/upstream/app_play_ai_test.go` | 1326 / 29 条 | 请求形态逐字（含 GET 不带 `origin`、POST 带）、指针四态（0/1/缺/null）、两套信封互喂必红、发送层"恰好一条请求" |
+| `internal/upstream/app_cloud_phone.go` | 828 | 红包派对的**公共层**：签名 `md5(requestId+APP_ID+token+SIGN_SALT+timestamp)`、`{version,header,data}` 信封与错误文案优先级、`token/validate`、`userAccountInfo`（**产出是钱**）、`toastInfo`、`CloudPhoneData` 兜住上游的双层怪形状 |
+| `internal/upstream/app_cloud_phone_task.go` | 708 | 任务表 / 签到日历 / 规则文案 / 公告 / 埋点 `bilog/upload` / `completeTask` |
+| `internal/upstream/app_cloud_phone_install.go` | 785 | 云机**安装链**七条口（关系列表 → 取 hwToken → 装没装 → `apkInstall` → 任务状态 → 记账 → `configAppList`），路径与读法**按旧 TS 订正**，见下一节 |
+| `internal/upstream/app_cloud_phone_topic.go` | 275 | 话题答题一族 |
+| `internal/upstream/app_cloud_phone*_test.go` | 三份 | 核心 / 任务 / 装机 / 话题各一组（本轮结束时**仍在补**，见"遗留"第 1 条） |
+| `scripts/check-go-jsontags.cjs` | +22 条白名单 | 两族的 22 个无 tag 结构体逐条登记（每条写明"为什么不补 tag"，不是同一句话抄 22 遍） |
+
+### 二、我（主线）独立复核过的三件事，不是照抄 agent 的转述
+
+子代理报告**不可信**是本项目登记过的坑（#144），所以这三条我自己用夹具数过头名：
+
+1. **"这一族比其余 H5 接口少两个头"——成立，而且原来说法数字错了。**
+   `test/fixtures/http/夏日拍拍大作战.json` 13 条：六条 `newyear/*` 的头集合是
+   `accept / jwttoken / showloading / referer / sec-fetch-* / user-agent / cookie`（两条 POST 另有
+   `content-type` 与 `origin`），**`appversion`、`activityid`、`deviceid` 三个一个都没有**；
+   而同份归档第 0–3 条（`user-service/mobile/query` 与 `api/activity/*`）**三条全带** ⇒ 不是脱敏抹的
+   （脱敏只换值，头名保留）。⇒ 这一族不复用 `WithH5Headers`。
+   ⚠ 顺带订正：`WithH5Headers` 实际只加 `activityid` + `appversion` 两个头（`app_signin.go:198-215` 逐行看过），
+   `deviceid` 它也不发（那是 `FunaiModuleRequest` 一类调用点自己补的）—— 原注释写"会多加那三个头"是**错的**，已就地改写。
+2. **"jwttoken 就是这一族实拍带的头、归档里没有换票那一步"——成立，但"特有取法无从得知"这句**当场被旧 TS 推翻了一半。**
+   六条 `newyear/*` 条条带 `jwttoken`；整份归档 grep `querySpecToken` / `tyrzLogin` / `shake_shake` / `1314`
+   **零命中**（连 body 里都没有）⇒ 归档确实没拍到换票那一步，这一点成立。
+   ⚠ 但"没拍到"不等于"没有出处"：旧 TS 的 `packages/core/src/tasks/play-ai-special/task.ts:50-70`
+   **就是这一页的特有取法**，而且是两步一条链：
+   `GET …/ycloud/api/cloud/userdomain/v2/querySpecToken?targetSourceId=001005&hideLoading=true`（带四个签名头）
+   → `POST …/ycloud/auth-service/auth/tyrzLogin`，body 是
+   `{token, openAccount:false, marketName:"shake_shake", sourceId:"1314", type:"signupPlatform", channel:null}`
+   ＋ 一个 `type: signupPlatform` 头，响应的 `result.token` 才是这一页的 `jwttoken`。
+   本仓**已经有同一个端点**（`TyrzLoginRequest` / `TyrzLoginBody`，`app_signin_session.go:114-147`），
+   差别只在**参数**：签到那一份的 body 是 `{marketName, openAccount: 0（数字）, sourceId, token}` 四键、
+   没有 `type`/`channel`，也不带 `type` 头 ⇒ 与 §1.12 事实②"URL 可能相同而参数不同"是同一个形状。
+   而本仓实现的是 `querySpecTokenV2`（**POST** `user-njs.yun.139.com/user/…`），
+   旧 TS 这一页走的是 **GET 的 `querySpecToken`（`m.mcloud.139.com/ycloud/…`）——两个不同端点**。
+   ⇒ 于是"这一页走公共来源"的**理由要换**：不是"取法无从得知"，而是"取法只有旧 TS 一处出处、
+   本仓没有一条实拍支持那两步的参数与头" ⇒ 要不要按它建这一页自己的票，**已记成待拍板 P5**（不是样本缺口挡路，
+   是"多两个无实拍的上游请求"这一取舍该用户定）。当前代码继续走公共来源，注释里那句"特有取法仍未拍到"**照实保留**。
+   ⑤ `aiRecognize` 反过来**不带** `jwttoken`，走 `Authorization` + `x-yun-tid` + `x-DeviceInfo` 那套原生头。
+3. **"未实现端点确实无样本"——成立。** grep `chat/v2/add` / `visitlog` / `journaling` 在整份归档
+   **零命中** ⇒ 不实现、不猜形状；文档说的"十余条埋点"在这一页既无支持证据也无反对证据（= 未测试）。
+
+### 三、这一轮踩到的两处，都已就地修
+
+- **带尾号的掩码手机号又出现了一次**：`app_cloud_phone.go` 两处写了实拍那枚 `159****7542`
+  （前一轮订正过这条纪律：**掩码不带尾号**，机检抓不到、只能人工审）。已改成"只记形态、不复述原值"。
+  ⚠ 报告里 agent 说"全部改写为 `19****`"是**不实**的 —— 这是"复核报告 vs 实况"的又一次命中。
+- **两份 agent 相继死于 provider 报错**（`REQUESTED_RANGE_NOT_SATISFIABLE`），一度留下 `undefined: citoa`
+  让整个 `internal/upstream` **包级编译不过**（连带别人跑不了测试）。**主线没有动手修**：
+  再查时该 helper 已由后落地的那份写入（`app_play_ai_test.go:1096` 的 `playAITestItoa`），
+  `go vet` + `go test -race` 整包重跑为绿（29 条）。⇒ 教训照记：**后台 agent 的半成品会把整包点着**，
+  收回来第一件事必须是 `go build ./...` / `go vet`，而不是先读它的报告。
+
+### 四、遗留（本轮没做、也不该顺手做）
+
+1. ✅ **`#18` 的三份测试现已全绿**（当时那条红的 `app_cloud_phone_topic_test.go` 由主线把断言与
+   当时的源码口径对齐后转绿；**那条红的确切根因没有单独归档** —— 它和下面那一节的口径订正落在同一轮里，
+   现在已被 72 条断言覆盖，再考古没有收益）。本族四份测试文件合计 **72 条**：
+   核心 18 / 任务 18 / 装机 25 / 话题 11。
+2. ⚠ **两族都没有调用点**：没登记能力、没进 `runBuilders`、没有 app 层编排 ⇒ 今天谁也点不到它们。
+   #18 尤其**不该**被"顺手接上"：它**产出现金**且**真给云机装 APK**，且**会往用户网盘写文件**
+   （⑤ 的 `uploadToCloud`）—— 那是 §6 第 6 步明写要"独立确认交互"的一类，属**待拍板**（`docs/pending-decisions.md` 的 P3）。
+3. ❓ **`#16` 拍拍的期次**：`PlayAIMarketName = "National_PlayAISpecial"` 写死是刻意的（换期必须改代码 + 过一次测试），
+   但**这一期现在还活着吗**没有任何证据（§5.9 那条：抓包前无法区分"接口下线"与"我这端点写错"，两者都表现为非零码）。
+   ⇒ 真打之前先确认当期入口，这一条也在待拍板表里。
+4. ⚠ **破千行的文件现在是四个而不是两个**：`app_play_ai.go` 1043、`app_play_ai_test.go` 1326、
+   `app_play_ai_session_test.go` 1147、`app_cloud_phone_install_test.go` 1017 ⇒ 按 §3.9 提的方案不变：
+   把 ⑤ `aiRecognize`（构造 / 原生头 / 解析）切到 `app_play_ai_recognize.go` + `..._recognize_test.go`，
+   符号全在 `PlayAI*` / `playAI*` 前缀下 ⇒ **切分不需要改名**。**仍未切**：理由从"测试还在补"变成
+   "同包内切文件与下一节的口径订正撞在一起"，排在接线之前做。
+5. ✅ 十项全量门禁**已跑**（在下一轮：`node scripts/gates-go.js` ⇒ "十项门禁全绿"，冷跑 33.6s，
+   逐条 build 1.6 / vet 0.6 / fmt 0.1 / test 27.7 / deps 2.9 / filenames 0.2 / idents 0.2 /
+   golden 0.1 / jsontags 0.1 / md-tables 0.1）。⚠ **本轮仍不提交** —— 用户没要求。
+
+## 补记（2026-09-24，主线复核两份 agent 落地：#18 装机链按旧 TS 订正 + #16 三样前置）
+
+上一节结束时两件事同时成立：**#18 那份装机文件是我自己"推"出来的形状**，**#16 的"特有取法"还停在
+"只有旧 TS 一处出处"的口头结论上**。这一轮把这两件都落到代码里，并且**改掉了上一节表格里的两个数字**
+（`app_cloud_phone_install.go` 383→785、`app_play_ai.go` 1008→1043）—— 表格只写"现在能信什么"，演变史在这一节。
+
+### 一、#18 装机链：把"零实拍"拆成"零实拍"与"无出处"两档
+
+上一轮的七条路径与键名（裸尾段 + 凭字面量猜的 `list`/`records`/`instances`）**是我造的**，
+它唯一的问题是**看起来像结论**。旧 TS 的 `cloud-phone-redpack/api.ts:43-172` + `task.ts:183-368`
+是一份**跑过的实现** ⇒ 按主提示词的接口真相顺序（样本 > 开源 Go > 旧 TS > 猜测），
+在**没有一条实拍**的这一格里，旧 TS 就是可用的最高一级；"不许凭空猜新接口"这条红线**没有被松动**——
+猜的那部分换成了有出处的，响应侧仍标"零实拍"。三处逐字对齐：
+
+| 格子 | 上一轮（我推的） | 现在（旧 TS 出处） |
+| --- | --- | --- |
+| 关系列表取层 | 顶层直接读 `lockStatus` | 列表在 `data.subscribeDetails`（外层还兼容 `data.data` 那一层，`task.ts:192-194`）；锁屏位在 `subscribeDetails[i].subsProdInstances[0].lockStatus`（`task.ts:274-283`） |
+| 装没装 | 顶层 `installStatus` | `data.list[0].instanceList[0].installStatus === 2`（`task.ts:310-313`） |
+| 七条路径 | 裸尾段 | `thirdapi/huawei/thirdQueryUserRelationshipV2`、`redpacket/configAppList`、`user/gethwToken`、`app/activity/{instanceApkInstallStatus,apkInstall,appInstallTaskStatus}`、`redpacket/userInstallApp` |
+
+顺带**补了上一轮点名"没做的事"**：`userInstallApp`（装机成功后往活动侧记账那一条）现在有构造器与发送方法。
+⚠ `userInstallApp` 的 `existed` 一键**只在 `existed != nil` 时才发**（旧 TS 那里就是 `if (existed !== undefined)`）——
+恒发会让"我们不知道"变成"上游被告知：没装过"。
+
+**取到的一条真缺陷**（不是风格问题）：订正前 `lockStatus` 从**顶层**读 ⇒ 对真实形状**永远读到 nil**，
+编排层照旧实现的脾气（nil 走"没锁"那一支）就会**把锁屏云机送去装 APK**，而那是真往用户设备上写东西。
+反向验证：`TestCloudPhoneInstanceLockStatusIsNested` 四档（顶层放一枚同名干扰键仍须读子层 / 子数组空 /
+无子数组 / 首项非对象）。
+
+### 二、新增测试的"不是空洞"证明：5 次变异，各自精确红
+
+`go test -overlay`（产物在 `/tmp`，仓库内无残留）：
+m1 放宽数字串（`"2"` 也算已装）⇒ `TestParseCloudPhoneInstallStatusWalksTheLegacyChain` 红；
+m2 改回顶层读锁屏 ⇒ 上面那条四档的 红；
+m3 `existed` 恒发 ⇒ `TestCloudPhoneInstallBodiesMatchLegacyTS` 红；
+m4 恢复凭空键兼容（`list`/`records`/`instances`）⇒ `TestParseCloudPhoneInstanceListIgnoresLegacyGuessedKeys` 红；
+m5 `id` 与 `packageId` 互换 ⇒ `TestParseCloudPhoneAppListKeepsIDAndPackageApart` 红（记账用 `id`、
+`apkInstall` 的 `apkList` 用 `String(packageId)`，旧 TS 两条不同源，互换即装错包）。
+
+装机测试文件现为 **1017 行 / 25 条**；本族四份合计 72 条（核心 18 / 任务 18 / 装机 25 / 话题 11）全绿。
+
+### 三、#16 三样前置落地成代码，但**没**改"这一页用公共 jwttoken"的临时态
+
+`internal/upstream/app_play_ai_session.go`（743 行）+ `..._session_test.go`（1147 行 / 32 条，agent 交付、主线复核）：
+换票两步（`querySpecToken` GET → `tyrzLogin`，第②步**复用**本仓已有的 `TyrzLoginRequest`，差别只有 body 六键与多一枚
+`type: signupPlatform` 头）、`visitlog/journaling` 埋点（body 是**字符串**，五种 keyword）、`chat/v2/add` **只构造请求**。
+签名比对结论 = **同**：旧 TS `auth/sign.ts` 的 `SALT_MAP[2]` 与本仓 `core/crypto.go` 的 `H5SignSaltKey=2`
+同盐同序同空段 ⇒ 直接吃调用方注入的签名，本层不自己算（`…CarriesTheInjectedSignatureVerbatim` 钉住）。
+
+⇒ 于是 `app_play_ai.go` 文件头那段 P5 的写法**过期了**（原文读起来像"实现还没有、要不要建票是个取舍"）。
+已就地改写为：**实现已经有了**，剩下的问题是"真打之前要不要改用它"，而那句**要一次实拍才能定论**。
+本层①…⑤仍然收调用方注入的 jwt ⇒ 注释里"**jwttoken 使用公共来源**"那句按 §1.12 **照实保留**，
+不因为"能换票了"就切过去 —— 切换是一次新的上游调用，P5 仍挂着。
+
+### 四、复核两份 agent 报告（坑 #144 的又一次执行）
+
+`grep -c '^func Test'` 与 `go test ./internal/upstream` 双双对上转述数字（task 18 / phone 18 / topic 11 /
+install 25 / session 32 / play_ai 29）⇒ 这轮**没有**出现"报告里有、树里不存在"。
+一处归因按 §2.7 处理：agent 报"install/topic 曾被主线改动带红 4 条"——那 4 条归我对齐（已做），
+我没有替对方改测试以外的东西。`scripts/check-go-jsontags.cjs` 新增 4 条白名单
+（`CloudPhoneApp`、`CloudPhoneInstallSubmit`、`PlayAISession`（**凭据本体**，给 tag 等于绕过 `SecretValue` 守卫）、
+`PlayAIChatParams`），并就地订正 `CloudPhoneInstance` 那条理由（原文还写着旧的取层说法）。
+现门禁输出：**78 个结构体字段齐全，177 个按白名单不进 JSON**。
+
+### 五、遗留（这一轮没做）
+
+1. ⚠ **两族仍然一个用户侧入口都没有**：没登记能力、没进 `runBuilders`、没有 app 层编排。
+   下一轮做接线，**涉及待拍板的格子先记录后跳过**（#18 的 P3 现扣与 `uploadToCloud` 写网盘、P4 期次；#16 的 P5 换票、P6 期次）。
+2. ❓ **装机链的响应侧仍零实拍** ⇒ 上面所有"读法"钉的是"与旧 TS 字面量一致"，**不是**"上游真这么回"。
+   要收这一格得抓一次真装机（有副作用：往云机装 APK），不在本轮范围。
+3. ⚠ **本轮未提交**（用户没要求）。门禁：本轮改动**之后**重跑 `node scripts/gates-go.js` ⇒
+   退出码 0、横幅"十项门禁全绿"，冷跑 **33.6s**（缓存命中那次 5.5s），与上一节遗留第 5 条同一次读数。
+
+## 补记（2026-09-24，#18 只读那一半接上执行：第十五条能力 + 一份独立的活动站票池）
+
+上一节遗留第 1 条是"两族一个用户侧入口都没有"。这一轮只补 **#18 的只读那一半**，
+理由是 P3 拍的问题**只覆盖写侧**（"装不装 APK / 装完删不删"），而"进去看不看得到钱和任务"
+不需要等那一句 ⇒ 按 §1.9 先落地已经实际可成功的部分，写侧继续挂在 P3。
+
+### 一、落点
+
+| 格子 | 落点 | 一句为什么 |
+| --- | --- | --- |
+| 能力登记 | `internal/capabilities/registry.go`：`CodeCloudPhoneRedpack = "cloud-phone-redpack"` + 注册条目（`GroupQuery` / `KindQuery` / `RunInBatch:false` / `RiskLow` / `MissCatchUp`）+ `cloudPhoneRedpackOutput()` | 它是**查询**：不进编排。⚠ `RunInBatch:false` 的实质理由不是"查询型一贯不进编排"，而是这一族**没有票失效判据**（零样本）⇒ 挂调度遇到自然过期只能攒失败历史 |
+| 注册表头注 | "共 10 项，分三组" → **"共 15 项，分四组"**；`runBuilders` 处"十四条"→ 十五条 | §2.6：计数与现实不符就地改，不叠"补记" |
+| app 编排 | 新建 `internal/app/cloud_phone_run.go`（306 行）：`CloudPhoneWorld` + `Source` + `CollectCloudPhoneAssets` 三枪 + `SummaryLine` / `RunReport` | 三枪失败处置**不一样**：余额 / 清单挂 ⇒ 整趟失败；播报挂 ⇒ 只留 `nil`，结论句追加"播报位没读到（不影响上面两句）" |
+| `deviceId` 的取法 | `CloudPhoneWorld.Source` 把它**包成闭包**交给会话源 | 换票那一枪才用得上它，而取它可能要上报设备指纹 ⇒ 一次"只看余额"不该顺手做那件事；给 nil ⇒ **出网前**报错，不回落空串 |
+| 会话与票池 | `cloud_phone_session.go`（上一轮建，359 行）本轮接上调用点：`CloudPhoneSessionPool` 按 (账号, 凭据指纹) 持有 | 键里**没有"配方"那一位**（与 `SessionPool` 不同）：这一族只有一张票，凭空加一位等于声称"这一族有多个页面各自的取法" |
+| 接线 | 新建 `internal/server/run_dispatch_cloud_phone.go`（101 行）+ `RunWorld.cloudPhoneSessions` | ⚠ **不共用** `sessions` 那一份：两个池键形状不同，共用一份 = 签到与红包派对**互相顶票**（AGENTS §1.12"换页面不许顶掉前一张"）。这一句也是它单开一个文件的原因 |
+
+### 二、测试与反向验证
+
+新两份，合计 **923 行 / 26 条**（`cloud_phone_session_test.go` 460/13、`cloud_phone_run_test.go` 463/13）。
+断言优先数**上游请求数与请求头上的票**，其次才读结构体字段 —— 计数对了而票发错，只有前者抓得住。
+
+- ⭐ `TestCloudPhoneRunTwoRoundsShareOneTicket`：接池 ⇒ `tokenValidate` 1 次、6 张票全是同一张；
+  **同一份脚本**跑对照那档（不接池）⇒ 2 次且第二轮换票。对照不成立就说明那个开关压根没接进去 ——
+  漏接池在界面上**毫无异常**（票照样有效），只有请求数会涨。
+- 其余各钉：两枪建会话（`querySpecTokenV2` → `tokenValidate`，第②枪 `token` 头位是**空串** = 旧 TS `getHeaders("")`）、
+  建会话是**懒**的（取票零请求）、`deviceID` 为 nil 时**出网前**失败且错误串点名它、
+  业务请求带活动站票且**零** `jwttoken` 头（这一族压根不用那张票）、`AuthFor` 每次重算
+  `requestId`/`timestamp`（⚠ 夹具坑：`testRng()` 每次返回新随机源，必须复用同一实例才有"每次不一样"的读数）、
+  `x-DeviceInfo` 第 7 段的前缀就是同一趟的 `timestamp`、失败**不自愈重建**（没有判据就不猜）、
+  `Describe` 只给"24 字符"不给票串。
+- **6 次变异各自精确红**：m1 忽略票池 / m2 撞错就重建会话 / m3 漏除 100（把分当元念）/
+  m4 把未定义档折进"未完成" / m5 `referer` 传空 / m6 不判 `deviceId` ⇒ 恢复后基线 ok。
+  ⚠ 这次的变异脚本落在 `target/`（上一节用的是 `go test -overlay` + `/tmp`），跑完**已删**，仓库内无残留。
+
+### 三、门禁（照抄当轮 stdout）
+
+`node scripts/gates-go.js` ⇒ 横幅"**十项门禁全绿**"（10/10），总耗时 **5.3s**，逐条：
+build 1.0 / vet 0.4 / fmt 0.1 / test **0.5** / deps 2.8 / filenames 0.2 / idents 0.2 / golden 0.1 /
+jsontags 0.1 / md-tables 0.1。⚠ 那个 0.5s 是 **test 缓存命中**，不是测试变快了；本轮早先那一次（jsontags 还红着的时候）
+是 **35.4s / test 30.3s**，两次的差只可能来自缓存。
+jsontags 新增 3 条白名单（`CloudPhoneWorld` = 入参集、`CloudPhoneAssets` = 三格内存读数（`Toast` 刻意为指针）、
+`CloudPhoneResult` = 内存结论，⚠ `Status` 零值是 `Done`），现 **78 个字段齐全 / 180 个按白名单不进 JSON**。
+本轮**未提交**（用户没要求）。
+
+### 四、遗留（这一轮没做、也不该顺手做）
+
+1. ⚠ **只读那一半 = 看得见钱和任务，一件都不代做**：结论句里明写"本工具今天一件都不代做"。
+   真装 APK、`userInstallApp` 记账、⑤ `uploadToCloud` 写网盘仍在 P3。
+2. ❓ **第②枪我们这条客户端发出去认不认，仍未测试**。归档里**有**这一枪
+   （`test/fixtures/http/红包派对.json` 含 `cloudphone-market/user/tokenValidate` 与那三枪读数的响应体，
+   `canAmount: "210"` 就是测试里那句"2.10 元"的出处），但"空 `token` 头位"这一格的对齐只做到了
+   **与旧 TS 字面量一致**。真打回非 200 时第一个要换的是把该位填成 `ssoToken`
+   （`upstream.CloudPhoneTokenValidateRequest` 头注写的是同一句）。
+3. ❓ **活动站票"过期了上游回什么"零样本** ⇒ 本族没有 §1.12 那句 `90001` 的对应物，
+   所以 `cloudPhoneCall` 只"确保有票然后发"，失败原样交回。要补这一格：抓一条明知过期的响应原文，
+   看它的 `header.status` 与 `errMsg` 是哪一码。
+4. ⚗ **破千行文件仍是四个**（`app_play_ai.go` 1043 / `app_play_ai_test.go` 1326 /
+   `app_play_ai_session_test.go` 1147 / `app_cloud_phone_install_test.go` 1017）⇒ §3.9 方案不变，排在接线之前做。
+
+
+## 补记（2026-09-24，#16 拍拍只读那一半接上执行：第十六条能力，票借签到页、referer 不借）
+
+上一节的遗留第 1 条写的是"两族一个用户侧入口都没有"里剩下的 #16。这一轮补 **#16 的只读那一半**
+（①`user/info` + ②`task/list`），与 #18 那一轮同一种处置：挡路的问题（P4 / P5 / P6 / P1）
+**全都只覆盖写侧或真打**，而"进去看一眼有什么任务、次数那一格读到多少"不需要等任何一句
+⇒ 按 §1.9 先落地已经实际可成功的部分。
+
+### 一、落点
+
+| 格子 | 落点 | 一句为什么 |
+| --- | --- | --- |
+| 能力登记 | `internal/capabilities/registry.go`：`CodePlayAISpecial = "play-ai-special"` + 注册条目（`Title:"拍拍盘点"` / `GroupQuery` / `KindQuery` / `RunInBatch:false` / `RiskLow` / `MissCatchUp`）+ `playAISpecialOutput()` 四格 | 它是**查询**：不进编排。⚠ `Output` 那一栏把"这一格语义未验证"**写进字段描述**（`lotteryCount`）—— 界面上"还剩 N 次"这种读法就是从这里长出来的，描述里不留那句 hedge 就等于把它交给前端猜 |
+| 注册表头注 | "共 **15** 项" → **"共 16 项"**、"别把 15 当成…" → 16；第四组那一条 bullet 补上 `play-ai-special`，并写明"**最后两条都只有只读那一半**、各看自己那一份文件头" | §2.6：计数与现实不符就地改，不叠"补记" |
+| app 编排 | 新建 `internal/app/play_ai_run.go`（288 行）：`PlayAIBoard` / `PlayAITaskCounts` / `PlayAIResult` / `ReadPlayAIBoard` / `PlayAIRun` / `SummaryLine` / `RunReport` | 两枪**都**是致命读（缺 ② 会被念成"这个号没事做"），所以不学 #18 那侧"播报挂了只留 nil"的宽容档 |
+| **票** | **借签到页那一张**：`PlayAIRun` 嵌 `SignInWorld`，接线走 `buildSignInChain` 那份共用外壳 ⇒ 与这一族其余十一条**同一个池、同一个配方** | §1.12：票 = 账号 × 页面，而这一页今天**没有**自己那张票（特有取法已实现但零实拍 ⇒ P5）。⚠ 与 #18 **相反**：那一条有自己的活动站票，**必须**另起一份池，共用就是互相顶票 —— 两族在"接不接同一个池"这一格上长得一样、答案相反，所以两边各留了一条用例（见下） |
+| **referer / showloading** | **不借**：`callPlayAIStatus` / `callPlayAITaskList` 用 `upstream.PlayAIPageReferer()`（旧 TS 逐字，B 档）+ `upstream.PlayAIShowLoading`（新常量，值 `"true"`） | "票借、页面身份不借"这个组合**零实拍** ⇒ 收成方法而不是写在调用点：这样"票从会话来、referer 从这一页来"只有**一个**写法（写在调用点的话，`s.referer` 顶上去看起来完全正常）。这一格是 R12 |
+| **上游层的一处行为改动** | `playAINewyearPayload`：`newyear/*` 信封里的 `90001` 现在分类成 `core.NewSessionExpired`，其余非零码仍是 `BadRequest` + 原文 | app 层那条"刷一次票、重放一次"的自救支路**只认这个变体**。本轮不补这一支，表现是它在这条链上永远不触发：池里那张过期的票会被一直打。⚠ **判据是借来的**（`90001` = `jwttoken` 没了/过期，实测在签到族；newyear 那六条全是 `code=0`）⇒ "刷了票重放能不能过"**未测试**，登记成 **R11** |
+| 接线 | `internal/server/run_dispatch_signin.go` 新增 `buildPlayAISpecialRun`（`buildSignInChain` 那一层糖）+ 分派表补一行；头注"十五条"→"十六条"，`run_dispatch_signin.go` 抬头"十一个"→"十二个"并补一句"共用这份装配的**前提**是共用这张票"（点名 #18 不满足） | 外壳只留一处：漏接票池这件事在 12 条链上会是 12 个漂移点 |
+
+### 二、测试与反向验证
+
+新建 `internal/app/play_ai_run_test.go`（**669 行 / 14 条**，全绿），上游侧另加 1 条
+（`TestPlayAINewyearNineZeroZeroOneIsSessionExpired`）。断言仍优先数**请求数与请求头**，其次才读结构体。
+
+- ⭐ `TestPlayAIRunBorrowsTheSignInTicketButNotItsPage`：两条业务请求的 `jwttoken` 都是签到页那张
+  （`JWT-1`），而 `referer` **等于** `PlayAIPageReferer()`、含 `National_PlayAISpecial`、**不含** `newsignin`。
+  正反两半都要写：只断言"是这一页那份"的话，代码改成借会话 referer 时失败信息长得一样，但反过来
+  只断言"不是签到页那份"就会放过"随便拼一个"。
+- ⭐ `TestPlayAIRunTwoRoundsShareOneTicket`：接池 ⇒ `tyrzLogin` 1 次、四条业务请求同一张票；
+  **同一份夹具**跑不接池那档 ⇒ 2 次且第二轮换票。⚠ 夹具坑：`liveTaskScript` 取**第一条**匹配路由，
+  所以"给 `tyrzLogin` 两条不同响应"不能靠往 `sessionRoutes()` 后面追加一条同名路由（追加那份永远轮不到，
+  判据会假绿）⇒ 抽了 `playAIScriptWithTickets` 直接换那一支的队列，注释里写明了原因。
+- `TestPlayAIRunRefreshesOnceOnExpiredSession`：① 第一枪 `90001` ⇒ 建会话合计 2 次、① 被打 2 次、
+  ②**不**被重放、重放那一枪带的是**新票** `JWT-2`、池里仍只有 1 条。
+- 其余各钉：只读两枪各一次且**顺序**对（① 在 ② 前）、三个写端点（`step/click` / `blindbox/lottery` /
+  `aiRecognize`）一次都不打、两枪都致命且失败时结论归零、`Counts` 五档（含 nil 与小写 `finish` ⇒ 未知）、
+  `SummaryLine` 六格逐字（0 与"上游没给"分开、未知档单独念、失败句空 err 也成句）、
+  给人看那句里不得出现 `mobile` / 凭据串片段、`RunReport` 两档、库里没凭据 ⇒ **零**请求。
+- **9 次变异、各自精确红**：m1 ① 挂了仍打 ② / m2 referer 借会话那份 / m3 `showloading` 给空串 /
+  m4 未知并进未完成 / m5 把未验证那格念成"还能抽 N 次" / m6 `Source` 漏接票池 /
+  m7 `90001` 不判成会话过期（app 侧与上游侧**各红一次**）/ m8 ② 挂了带出 ① 的残值。
+  ⚠ 其中两处**第一次跑成 GREEN**，都不是代码对而是测错了地方：m7 的锚点落在 `Diagnose` 不知道那一支
+  （`90001` 是已知的，走的是另一条 return）；m8 的判据打在 `RunAccount` 上，而失败支路自己构造了一份
+  不含 `Board` 的结论 ⇒ 残值被它**盖住**了。补了一条直接打 `ReadPlayAIBoard` 的用例
+  （`TestReadPlayAIBoardZeroesTheBoardOnSecondFailure`）才真正抓住 —— "run 层绿着"不等于"那层没写错"。
+  变异脚本跑完即删，仓库内无残留（`*.bak` 已核）。
+
+### 三、门禁（照抄当轮 stdout）
+
+`node scripts/gates-go.js` ⇒ 横幅"**十项门禁全绿**"（10/10）。两次读数：
+冷跑 **34.4s**（逐条 build 1.4 / vet 0.5 / fmt 0.1 / test **28.9** / deps 2.8 / filenames 0.2 / idents 0.2 /
+golden 0.1 / jsontags 0.1 / md-tables 0.1），紧接着的暖跑 **5.3s**（test **0.5** = 缓存命中）。
+jsontags 新增 3 条白名单（`PlayAIBoard` / `PlayAITaskCounts` / `PlayAIResult`，理由各写自己那一格），
+现 **78 个结构体字段齐全 / 183 个按白名单不进 JSON**。本轮**未提交**（用户没要求）。
+
+### 四、遗留
+
+1. ⚠ **只读 = 看得见任务和次数，一件都不代做**：③ 上报一步卡在埋点门槛（P6）、④ 抽奖卡在
+   `totalLotteryCount` 语义未验证且**不可回滚**、⑤ `aiRecognize` 会往网盘写图而清理族接口层冻结（P1）。
+   结论句里明写了"本工具只读：不做任务、不抽奖、不写网盘"。
+2. ❓ **R11**：`90001` 那一支的分类是借签到族的实测，本族零样本 ⇒ 刷票后重放救不救得回来**未测试**。
+3. ❓ **R12**："票借、referer 不借"这个组合零实拍；真打回非 0 时第一个要试的就是换回会话 referer
+   （换的地点只有那两处，改完两枪一起生效）。⚠ 但先确认 P4（这一期还在不在），否则两件事会混成一条报错。
+4. ❓ **`playAIBusinessError` 之外的非零码仍一律 BadRequest + 原文**，没有枚举：这是刻意的
+   （newyear 那族非零码**一个样本都没有**），别当成"漏了错误码表"。
+5. ⚗ §3.9 那四个破千行文件**仍在**（`app_play_ai.go` 本轮又长了约 22 行）。
+
+---
+
+## 补记（2026-09-24，#9 的 `taskListV2`：一口上游 + 16 次聚合（只读、**没有调用点**）那一轮）
+
+这一轮是 #9 App 任务矩阵的**前置**：旧实现"读那张表"要按 2 个市场名 × 8 个 group 打 16 次，
+而本仓库此前**只有** `taskListV3`（签到页那张，两口同端点前缀但 body 与响应都不同形）。
+做的只有读，**一件任务都不代做**，而且**没有接能力与界面**（为何不接 = Q17）。
+
+### 一、落点
+
+| 格子 | 落点 | 一句为什么 |
+| --- | --- | --- |
+| 上游口 | 新建 `internal/upstream/app_task_list_v2.go`（252 行）：`TaskListV2Request` / `TaskV2Item` / `TaskListV2` / `ParseTaskListV2` / `sortedResultGroupNames` / `parseGroupState` / `(u *Upstream).AppTaskListV2` ＋ 常量 `TaskListV2EmailMarketName`、数组 `TaskListV2Groups` | 与 `app_task_list.go`（V3）**分两份实现**，不折成一个解析器：V3 的 `result` 是**数组**、body 带 `client`；这一口带 `group`、`result` 是**按 group 键的对象**。折一起写就是"哪天形状变了，兼容代码顺手两种都吃"⇒ 链子不响 |
+| 请求头 | `WithH5Headers` 之后 **先 `dropHeader("activityid")` 再补** `activityid: <本次 marketname>` | 旧 TS 每次 POST 都带 `appversion` 与 `activityid: marketname`（`tasks/app/helpers.ts:48-63`）。⚠ `core.WithHeader` 是**追加** ⇒ 直接补会得到同名两枚，"哪枚生效"变成传输层的事 |
+| 聚合 | 新建 `internal/app/task_matrix.go`（222 行）：`AppTaskMatrix` / `normalizeTaskMatrix` / `Pending` / `SummaryLine` / `TaskMatrixFailure` / `TaskMatrixFetches()` / `TaskMatrixNeverClick` | 十六次怎么循环、失败几次算整体失败，是**业务口径** ⇒ 不在上游层（那层刻意不提供"帮我循环"的糖） |
+| 夹具 | 两条实拍取自本仓 `test/fixtures/http/3d.json`（同端点：`group=new` 回 `result:{}`、`group=beiyong1` 回三条 596/597/598） | 请求面与响应面**都有实拍**，不是按旧 TS 推。⚠ `appversion` / `activityid` 的**值**在夹具里是 `<REDACTED>` ⇒ 这一层只钉头名，取值出处是旧 TS |
+| json tag 白名单 | `scripts/check-go-jsontags.cjs` 加 4 条：`app_task_list_v2.go:TaskV2Item`、`:TaskListV2`、`task_matrix.go:TaskMatrixFailure`、`:TaskMatrix`（各写自己那一格的理由） | §1.5：`TaskMatrixFailure` 装的是 `*core.Error`（上游原文只进日志）；`TaskMatrix` 今天无调用点，"界面上怎么读"还没定 ⇒ 不给它承诺形状 |
+| 成文订正 | `business-feature-inventory.md`：§0 现状那条（`taskListV2` 从"仍无"里拿出来，改成"已落码但**没有调用点**"）、§2.3 那三处事实（两口都是 `POST` 不是 `GET`；**2 市场名 × 8 group** 不是"8 组 marketName × 2"；`:7071` 那一份属 #12 `notice` 且本仓实拍缺环）、`SKIP_TASK_LIST` 那句"明确不做"（它挡的是盲点点击与播报，**不是**"永远不做"） | §2.6：这三条与旧 TS 逐字核对过（`helpers.ts:40-71`、`apis/task.ts:36-46`、`tasks.ts:101-103` + `results.ts:33`），夹具实拍也支持 `POST` ⇒ 就地改写，不叠"补记"。本仓 `status.md`「新链路批」三·2 那句"`taskListV2` 连实现都没有"也补了限定语（现在有了，但那是 #9 那一族，`notice` 要的 `:7071` 那一份仍无） |
+
+### 二、测试与反向验证
+
+新建 `internal/upstream/app_task_list_v2_test.go`（353 行 / **11 条**）与
+`internal/app/task_matrix_test.go`（550 行 / **13 条**），全绿。断言仍优先数**请求数、顺序、请求头与 body 字节**，其次才读结构体。
+
+- ⭐ `TestTaskListV2RequestBodyIsTheCapturedBytes`：body 逐字 `{"clientVersion":"12.6.0","group":"new","marketname":"sign_in_3"}`（65 字节）、**不含** `"client"`、`activityid` 与 `content-type` 各**恰好一枚**。
+  这一条同时钉住"两口不同形"和"`WithHeader` 是追加"两件事。
+- ⭐ `TestAppTaskMatrixFetchesSixteenInOrder`：16 枪的 `(marketname, group)` 序列**逐枪比对**，而 `tyrzLogin` 恰好 **1** 次（十六次共用一条会话）。
+- ⭐ `TestAppTaskMatrixTwoRoundsShareOneTicket`（表驱动两档）：接池 ⇒ 第二轮仍 1 次建会话、末票 `JWT-1`；不接池 ⇒ 2 次、末票 `JWT-2`。⚠ 写这条时我第一版把预期反了（以为"接池"就该换新票），是**测试**错不是代码错。
+- 其余各钉：三个写口与 `taskListV3` 一次都不打；单组失败只登记（点名 `market/group` + 原文，`SummaryLine` 里出现 `1/16`）；十六次全挂必须报错且**不交半份结论**；同名两条留 id 小的（含 `currstep` 随条目走）；剥 HTML；**去重的键是剥完之后**的名字；`name`/`id` 缺席的条目各留各的（共 5 条，末位是 nil id + nil name）；`Pending` 五档；`90001` ⇒ 建会话 2 次、请求 17、重放那枪起**每一枪**都带新票；跨 group 摊平**跑 20 次**同一个顺序；`result` 是数组要点名响；`result.<group>` 不是数组也要响；业务码非 0 带原文且**不是** `SessionExpired`。
+- **14 次变异、各自精确红**（脚本在 `/tmp`，跑完即弃，仓库无残留）：m1 id 排成降序 / m2 无 id 不再排最后 / m3 去掉"全挂才失败" / m4 一次失败即中断 / m5 不剥 HTML / m6 `nil name` 也当同一个键 / m7 `Pending` 把缺 `enable` 当成 1 / m8 上游不排 group 键（这条要 `-count=30` 才稳定红 —— 它赌的是 Go 的 map 遍历顺序）/ m9 不剥 `activityid` / m10 body 混进 `client` / m11 数组形状不响 / m12+m12b `groups` 加 `hiddenabc`（上游侧与聚合侧**各红一次**）/ m13 缺 `result` 判成错误。
+  ⚠ 第一版脚本里三处变异**编译不过**（把 `if false {` 折进闭包、引用了不存在的 `f.Err`、`nil` 解引用），那种"红"不算判据 ⇒ 改成"排反 / 换 perr / 整段替换去重键"，逐条只动一个判据点。
+
+### 三、门禁（照抄当轮 stdout）
+
+`node scripts/gates-go.js` ⇒ 横幅"**十项门禁全绿**"（10/10）。两次读数：
+`go clean -testcache` 后的冷跑 **59.1s**（逐条 build 1.0 / vet 0.4 / fmt 0.1 / test **54.2** / deps 2.8 /
+filenames 0.2 / idents 0.2 / golden 0.1 / jsontags 0.1 / md-tables 0.1），紧接着的暖跑 **5.4s**（test **0.5** = 缓存命中）。
+golden 仍是 167 条断言（本轮没有新黄金向量：这一口没进对拍面）。
+jsontags 现 **78 个结构体字段齐全 / 187 个按白名单不进 JSON**。本轮**未提交**（用户没要求）。
+
+### 四、遗留
+
+1. ⚠ **它没有调用点**：`AppTaskMatrix`、`TaskMatrixNeverClick` 在仓库里除了自己的测试没人引用 ⇒ 界面上看不见、定时任务指不到。登记成能力还是当 `task-list` 的第二页 = **Q17**。
+2. ❓ **R13**：`activityid` 跟 `marketname` 变这件事**一次真打都没有**（判据只有旧 TS 的字面量）。
+   ⚠ 它不认的**表现不是报错**，是邮箱那八次可能被当签到页那张表回 ⇒ 读数看着对、其实是另一张表。
+3. ❓ **R14**：`newsign_139mail` 那一支**零响应样本**（夹具两条 `marketname` 全是 `sign_in_3`）。
+4. ❓ **R15**：`groupState.taskFinishState`（实拍 `2`）与 `process`（实拍恒 `0`）**两格只存不判** ——
+   所以 `SummaryLine` 里刻意**不报**额度、也不把 `groupState` 念成"完成度"。
+5. ❓ **`Pending` 的两档缺省是照抄旧 TS 字面量**（`enable` 缺席 ⇒ 跳、`state` 缺席 ⇒ 留），而实拍三条
+   **全是** `FINISH` + `enable=1` ⇒ "未完成"那一档在夹具里一条都没有。判反 = 该做的没做 / 做完的又做一遍，
+   要等第一次真打才能核。
+6. ⚠ **三处与旧 TS 刻意不同**（串行 / 全挂才响 / `name` 缺席各留各的）是实现层面的选择，没改任何判据；
+   反过来"旧实现那两市场名并发"这件事**没被复现**，将来若上游按并发限流，这里是最先看的地方。
+7. ⚗ §3.9 那四个破千行文件**仍在**（本轮四份新文件最大 550 行，未再添）。
+
+## 补记（2026-09-24，#10 AI 头像的**上游层八口**：`rabactive/*` 六口 + `hcy/file/list`（零真打、**没有调用点**）那一轮）
+
+这一轮做的是 #10 那一族**只剩的一块业务逻辑**（迁移批的收尾）：旧实现八口全在
+`packages/core/src/tasks/ai-avatar/api.ts`，本仓库此前**一口都没有**。
+做的只有**接口层**：噪点图生成、轮询节奏、抽奖判定、网盘找回四件事都在 app 层，**下一轮**才动。
+⚠ 本轮**没有发过一条真实请求**（这一族连一次实拍都没有，见下面「四·2」）。
+
+### 一、落点
+
+| 格子 | 落点 | 一句为什么 |
+| --- | --- | --- |
+| 上游八口 | 新建 `internal/upstream/app_ai_avatar.go`（676 行）：`getHashLeft` / `draw` / `ai/image/merge` / `ai/image/getStatus` / `image/upload` / `image/getWorkList` / `image/catalogFullPath` ＋ 网盘侧 `hcy/file/list`，八个 `App*` 发送方法 | 前缀是 `/market/rabactive/` 而**不是**这一族其它活动接口的 `/ycloud/`；拼错回 404 页，而 404 在 `ParseEnvelope` 那层念起来像"响应体不是合法 JSON"（⇒ 有专条测试钉它） |
+| 第三套请求头 | `AiAvatarHeaders`（旧 TS `createHttp` 主实例那套：`user-agent` + `deviceid` + `authorization` + `content-type` **恒发**，`jwttoken` 只对 `caiyun.feixin.10086.cn` / `mrp.mcloud.139.com` / `m.mcloud.139.com` 三台发） | 刻意**不复用** `WithH5Headers`：那会把 `activityid: sign_in_3`、签到页 `referer` 发进一个从不发它们的页。⇒ `hcy/file/list` 那口**有 authorization、没有 jwttoken**，这不是漏写 |
+| 两种信封共存 | `rabactive` 是 `{code:0, result}`；`hcy/file/list` 是 `{code:"0000", success:true, data:{items, nextPageCursor, parentFilePathInfo}}`（`code` 是**字符串**，靠 `asInt64` 认字符串数字才判得成 OK） | 唯一有实拍的那一口（`test/fixtures/http/ref.json` 两条真机流量）用的是**另一个**信封，不能想当然共用判定 |
+| `draw` 三态 | `AiAvatarDrawResult{Prize, Stopped}` + `ParseAiAvatarDraw`：`code==0` 抽中、`408` 叫停、其余非 0 交回错误 | 旧实现对非 0 分 `break` / `continue` 两档。判"停止"若靠错误消息的**中文子串**，改一个字就会把"停"念成"重试" ⇒ 对已拒绝的账号连打五枪 |
+| json tag 白名单 | `scripts/check-go-jsontags.cjs` 加 6 条（`AiAvatarPrize` / `AiAvatarDrawResult` / `AiAvatarTask` / `AiAvatarWork` / `CloudFile` / `CloudFileList`，各写自己的理由） | 这一族的登记理由比别的族更硬：`rabactive` 六口**连一份响应样本都没有**，补 tag 等于把"从旧 TS 的 interface 反推的字段名"钉成对外契约 |
+| 成文 | `business-feature-inventory.md`：§0「仍无」那条补上限定语（"落了码"≠"这一项可用"）、§2.3 `ai-avatar` 加「Go 侧现状（2026-09-24）」；`pending-decisions.md` 加 Q18 ＋ R16 – R19 | 三处刻意不同（第三套头 / 两种信封 / 三态）都写在代码注释里，成文只留指路。<br>⚠ 那两格**下一轮就已就地改写**（编排落地后"只做上游层"的 Q18 与"没有调用点"的 R19 都不再成立）：现在 Q18 是"默认值取哪一份"、Q19 – Q21 与 R20 是这一轮新增，见本节末四·2…5 |
+
+### 二、测试与反向验证
+
+新建 `internal/upstream/app_ai_avatar_test.go`（887 行 / **21 条**），全绿。
+⚠ 这一族的用例比别的族**更薄一档是刻意的**：六口零实拍 ⇒ 只钉两件可控的事
+—— ①**形状别串到另一条链上**（`/market/` vs `/ycloud/`、auth 与 jwttoken 的按主机分档、
+这一页从不发的 `activityid` / `referer` 不许渗进来、`file/list` 不许串台走第三套头）；
+②**"没给"不能念成"给了 0 / 空"**（`getHashLeft` 的 `null`、`upload` 的空串 id、
+`file/list` 与 `getWorkList` 的"形状变了 ⇒ 响"）。
+
+- ⭐ `TestAiAvatarRabactivePrefixIsMarketNotYcloud`：七条 URL（含 `getWorkList?type=` 与
+  `catalogFullPath?marketName=`）逐字比对，并另断言"整串里没有 `/ycloud/`"。
+- ⭐ `TestAiAvatarHeadersMatchLegacyMainInstance`：**GET 裸体也恰有一枚 `content-type`**（恒发，
+  与 `WithH5Headers` 的"有 body 才补"相反）；POST 也只一枚（先 `dropHeader` 后补）。
+- ⭐ `TestCloudFileListHasAuthorizationButNoJwtToken`：这一口 `Authorization` 在、`jwttoken` **不在**，
+  且 `x-yun-module-type:100` / `x-yun-op-type:1` / `x-yun-client-info` 都在（走的是 App 原生那套头）。
+- ⭐ `TestParseAiAvatarHashLeftNullIsNotZero`：`null` 与"没有 `result`"都是 `nil` 且**不报错**，
+  而 `0` 是 `&0` —— 两者必须分得开（读成 0 = 当天什么都不做且不报错）。
+- ⭐ `TestParseAiAvatarDrawDistinguishesStoppedFromFailed`：`408` 落在 `Stopped` 那一态、`Prize` 留空
+  （那一档响应体形状零样本，**不下钻**）。
+- 其余各钉：`merge` 恰两键且 base64 **原样透传**（去 `data:` 前缀是 app 层的活，本层不"顺手改对"）；
+  `imageExt` 逐字 `"jpg"`（与"喂进去的是 PNG"不矛盾，见常量注）；`upload` 两张图都在；
+  `marketName` **过**百分号编码（默认值全字母，编码前后一样 ⇒ 另传含 `+`/空格/`/` 的值才测得出）；
+  `catalogFullPath` 的切法（末尾斜杠 / 连续斜杠 / 无斜杠 / 只有根 / 缺键，逐档）；
+  `file/list` 用**实拍那份**解出 `items[].fileId/name`、`items` 不是数组要响、没有 `items` 给**非 nil 空列表**；
+  `getWorkList` 的数字 id 折成串、`result` 不是数组要响；`file/list` body **只有旧 builder 那五键**。
+- **19 次变异、各自精确红**（脚本在 `/tmp`，跑完即弃，仓库无残留）：m1 前缀写成 `/ycloud/` /
+  m2 `content-type` 改成有 body 才发 / m3 不先剥（POST 发两枚）/ m4 给 `file/list` 也补票 /
+  m5 `file/list` 照抄实拍那两份多余键 / m6 `null` 当 0 / m7 空串 id 放行 / m8 去掉 `408` 那一态 /
+  m9 不丢空段 / m10 "没有 result"报成解析失败 / m11、m13 形状变了兜成空（旧实现那两档）/
+  m12 条目只看 `fileId` / m14 不编码 `marketName` / m15 `imageExt` 写成 `png` /
+  m16 三个开关并成一个（空串也发 `deviceid`）/ m17 `merge` 多塞一键 /
+  m18 头集合渗进 H5 那三枚 / m19 `file/list` 串台走第三套头。还原后复绿。
+- ⚠ **刻意没写测试**的三格（写了就等于把未验证的东西钉成"以后都不能改"）：`status` 的档位表
+  （`3`/`4` 是从旧实现的分支形状反推的）、`408` 到底是不是"次数用完"、`catalogFullPath` 末段
+  是否就是 `fileId`。三格都登记进 R17 – R19，并各附一句"要核它得怎么做"。
+
+### 三、门禁（照抄当轮 stdout）
+
+`node scripts/gates-go.js` ⇒ 横幅"**十项门禁全绿**"（10/10）。两次读数：
+`go clean -testcache` 后的冷跑 **1m06s**（逐条 build 1.6 / vet 0.6 / fmt 0.1 / test **59.8** / deps 2.8 /
+filenames 0.2 / idents 0.2 / golden 0.1 / jsontags 0.1 / md-tables 0.1），紧接着的暖跑 **5.4s**（test **0.5** = 缓存命中）。
+golden 仍是 167 条断言（本轮没有新黄金向量：这一族没有任何实拍可对拍）。
+jsontags 现 **78 个结构体字段齐全 / 193 个按白名单不进 JSON**。本轮**未提交**（用户没要求）。
+
+### 四、遗留
+
+1. ⚠ **八口都没有调用点**：`AppAiAvatar*` 与 `AppCloudFileList` 除了自己的测试没人引用 ⇒
+   界面上看不见、定时任务指不到。登记成能力 = Q18（本轮的默认是"下一轮连编排一起"）。
+2. ❓ **R17**：`rabactive/*` 六口**整族零实拍**（本仓所有归档 `grep rabactive` 一条没有）⇒
+   六口的 URL、参数、信封只对齐到"与旧 TS 字面量一致"。**这一页在活动站 H5 里，要活动在线才补得了样**，
+   所以"等实测"在这里不是谨慎，得排进下一次抓包面。
+3. ❓ **R16**：`file/list` 按旧 builder 的**五键**发，实拍那一份是另一个客户端发的十余键。
+   不认的表现是"列不出文件"（只读，不会误删）。
+4. ❓ **R18**：`status` 的 `3`/`4` 档位与 `408` 的语义**未验证**；`getStatus` 的响应体只有一档样本都没有。
+5. ❓ **R19**：`upload` 是本仓**唯一往用户网盘写东西**的上游口之一，产物找回靠"按**文件名**匹配" ⇒
+   同名碰撞即错用/漏清；而 `internal/exec/artifacts.go` 的账本今天没有调用点，接线时必须接上。
+6. ⚠ **一处凭据边界风险（本轮发现，未处理）**：`test/fixtures/http/合成云朵.json` 里
+   `h.139.com/ccopapi/auth/loginByToken/<一串疑似真 token>` 的 **URL 路径段没有被脱敏**（两处）。
+   该文件**目前未被 git 跟踪** ⇒ 还没进历史，但一旦 `git add` 就会带着 token 入库。
+   现有脱敏门禁只扫**头值**与键名，**不扫 URL 路径**（这一格是缺口）。
+   要处理：把那一段替换成 `<REDACTED>`，并给脱敏门禁补一条"URL path 段里的高熵串"检查 —— 属另一件事，未做。
+7. ⚗ §3.9 偏大文件：本轮新增 `app_ai_avatar_test.go` **887 行**、`app_ai_avatar.go` **676 行**
+   （测试文件按请求面 / 解析面 / 发送层三段还能再拆，但尚未破千行 ⇒ 登记不拆）；
+   既有那四个破千行的文件仍在等方案。
+
+## 补记（2026-09-24，#10 AI 头像**编排层**落地并接上执行：第十七条能力，也是本仓唯一会往用户网盘写东西的那一条）
+
+上一轮只落了上游八口（零调用点）。这一轮补完剩下的四件事：噪点 PNG 生成、轮询节奏、
+抽奖判定、网盘产物找回，并把这一条登记成能力 `ai-avatar` 接进分派表。
+⚠ **本轮仍然一条真实请求都没发**（这一族至今零实拍，见下面「四·1」）⇒
+"跑通"今天只意味着**在脚本响应上整条链走到了终局**。
+
+### 一、落点
+
+| 格子 | 落点 | 一句为什么 |
+| --- | --- | --- |
+| 噪点图 | 新建 `internal/app/ai_avatar_png.go`（167 行）：200×200 随机 PNG，`IHDR` + `IDAT`（zlib **stored** 块）+ `IEND`，输出**裸 base64** | 自己写编码器而不用 `image/png`：要的是"随机源固定 ⇒ 字节固定"，标准库的过滤器选择会让同一份像素在不同 Go 版本下给出不同 IDAT；stored 是 deflate 里唯一"原样复制输入"的模式，没有压缩器行为可漂移。尺寸只留旧实现**真正用过**的 200×200（它那个 300 默认值从来没被用上） |
+| 两个纯判断 | 新建 `internal/app/ai_avatar_files.go`（127 行）：`aiAvatarImageFileName`（**先截 `?#` 再验扩展名**）、`collectAiAvatarFileIDs`（只看本次上传的作品 → 取两格图片 URL 的文件名 → 撞 `file/list` 的 `name`，**去重 + 排序**） | 这两处失效方式都是"匹配不上但没人报错"：文件名少一档 ⇒ 少找一个文件；匹配放宽一档 ⇒ **删错文件**。所以拆出来单独测，不混在编排里 |
+| 编排 | `internal/app/ai_avatar_run.go`（567 行）：`AiAvatarRun.RunAccount` = 生成五轮（每轮最多两次尝试、一次合成最多查八次）→ 读 `getHashLeft` 抽完当天次数 → 三枪找回 | 顺序照旧实现且**不能换**：找回要用生成那一族产出的上传 id。`deviceId` 换不到 ⇒ 整趟失败、**一枪不发**（旧实现同样跳过该账号，那一族每枪都带 `deviceid`） |
+| 三处 sleep | 全部走 `Waiter` 注入点（轮询 3s「先睡再查」、轮间 2s、抽奖间隔 1s，两处都是"最后一次不等"） | 那三个数是旧实现跑通过的那一份，改一个字等于换一次接口；不接注入点的话这些语义要么测不了，要么让测试真睡 24 秒 |
+| ⭐ 与旧实现**一处刻意不同** | 抽奖抽到某一枪**发不出去**时本仓**停手**（`AiAvatarDrawBlocked`），旧实现是 `continue` 下一枪 | 协议层把"上游回非 0 码"与"请求压根没发出去"合成同一个 `*core.Error`，分不开就按更保守那档办：宁多少抽一次，不对着一个坏会话连打五枪。要恢复旧行为得先做失败分型 —— 登记成 Q21，不靠猜 |
+| 能力登记 | 注册表第 **17** 条 `ai-avatar`：`Kind:Action`、`Risk:Medium`、**`RunInBatch:false`**、`MissPolicyOnMiss:skip`、参数只有账号两栏、输出 `generated`/`drawCount`/`drawPhase`/`drawPrizes`/`tempFileCount` | 挂上调度等于每天往用户网盘攒十来个没人删的文件（清理那一族零实拍、没接 = P1）；日型但**不补跑** —— 错过就让它过去，补跑是"替人授权一次额外执行" |
+| server 接线 | `internal/server/run_dispatch_signin.go` 新增 `buildAiAvatarRun`：这一族里**唯一不走共用外壳** `buildSignInChain` 的一条（除 `sign`），因为它要多塞一份 `s.runs.waiter` | 走外壳的话接线用例得真睡两分钟；而"等了多久、等了几次"本来就是这条链的判据，两处各钉一次 |
+| json tag 白名单 | `scripts/check-go-jsontags.cjs` 加 3 条：`SignInOpening` / `AiAvatarRun` / `AiAvatarResult` ⇒ 现 78 齐全 / 196 白名单 | `SignInOpening` 里装着 `Credential`（整串 `Authorization`），而 `SecretValue.String()` **只挡打印不挡 `encoding/json`** ⇒ 一次整体 marshal 就把凭据递出去 |
+| 实现顺手修的一处 | `SummaryLine` 里"抽奖"那半句的空格从前缀挪进各档：`Skipped` 档原先念成"抽奖 没抽（剩余 0）" | 由 `TestAiAvatarSummaryLineTellsEveryPhaseApart` 钉住（§2.6 就地修，不留补丁） |
+
+### 二、测试与反向验证
+
+新建 app 侧三套 **30 条顶层 + 44 条子档**：`ai_avatar_png_test.go` 7 条 /
+`ai_avatar_files_test.go` 4 条 / `ai_avatar_run_test.go` 19 条；server 侧接线 1 条
+（`TestAiAvatarDispatchHitsItsOwnChain`，把 `run_dispatch_signin_test.go` 从 443 行推到 638 行）。全绿。
+
+- ⭐ PNG 用**标准库当独立第三方**判：`image/png` 解回 200×200 并与期望像素逐格比、
+  `compress/zlib` 解压后校 ADLER、`hash/adler32` 对账长输入（越过 65521 那一格）。
+  这一族零实拍 ⇒ 没有"上游认过的那一份字节"可当基线，能钉的是**合法性 + 字节偏移 + 总长**
+  （120273 字节 / 160364 字符，算式写在用例里）。
+- ⭐ 编排的夹具结构：默认"五轮全成"的路由表放**最后**，每条用例只覆盖自己那一格 ⇒
+  别的端点始终有响应，"多打了不该打的"由各条自己的计数抓，不靠 404（404 会同时遮住两件事）。
+- ⭐ 会话只建一次：这条链一趟 28 枪，"每次点击重打三枪建会话"在别的链上只是浪费，
+  在这里会被 `TestAiAvatarRunFiveRoundsShareOneSession` 抓到；server 那条同样断言
+  `tyrzLogin == 1`，并在自己的脚本上把 28 枪的**分布**逐点数一遍。
+- **15 次变异、各自精确红**（run/files 两族）：抽奖"停手"改回 `continue` / 叫停那一档当没看见 /
+  找回不再以"真写过"为前提 / 负数判据不夹到 0 / 奖品名改成 `prizeName` 优先 / 合并"读不到判据"
+  与"判据是 0"两档 / 兜底 5→1 / 不去重 / 不排序 / 不先截查询串 / 扩展名放宽 / 不过滤本次作品 /
+  `pageSize` 100→50 / 每日轮数 5→3 + server 那条的两次（分派表把 `ai-avatar` 配成 `buildFunaiRun`、
+  把注入的 waiter 换成 `app.RealWaiter{}`）。还原后复绿。
+- ⭐⭐ **两条"改测试而不是改代码"的发现**（本轮最值钱的一格）：`兜底抽 5 枪` 与 `pageSize=100`
+  原先写成 `!= int(aiAvatarDrawFallback)` / `!= float64(aiAvatarFileListPageSize)` ——
+  **拿实现自己的常量当期望值**，把 5 改成 1、100 改成 50 时用例照样绿（实测漏网），
+  而这恰好是这两格判据的全部内容。现已钉成字面量并各补一次变异（M7 / M13）确认能红。
+  这是 §1.3"说得出反向改坏它哪条测试会红"的一种新失效：**能红的那条测试是假的**。
+- ⚠ **本条不能挡的**：把 `Wait` 传成"从不等"（`NoWait`）不会让 server 那条变红 ——
+  它只被"9 次等待"那三行钉住，而那三行的期望值就是字面量（`5×3s + 4×2s`，只抽一次 ⇒ 0 次 1s）。
+
+### 三、门禁（照抄当轮 stdout）
+
+`node scripts/gates-go.js` ⇒ 横幅"**十项门禁全绿**"（10/10），总耗时 **33.9s**
+（逐条：build 1.0 / vet 0.5 / fmt 0.1 / test 28.8 / deps 2.9 / filenames 0.2 / idents 0.2 /
+golden 0.1 / jsontags 0.1 / md-tables 0.1）。golden 仍是 **167 条断言**（本轮没有新黄金向量：
+这一族没有任何实拍可对拍）；jsontags **78 / 196**；脱敏与消费者两栏见当轮输出。本轮**未提交**（用户没要求）。
+
+> 成文改写（`pending-decisions.md` 的 Q18 – Q21 / R19 – R20 / P1、`business-feature-inventory.md` §2.3、
+> 坑表 #147）之后**复跑**同一套：横幅仍"十项门禁全绿"（10/10），总耗时 **5.4s**
+> （逐条：build 1.0 / vet 0.4 / fmt 0.1 / test **0.5（走缓存，代码未动）** / deps 2.8 /
+> filenames 0.2 / idents 0.2 / golden 0.1 / jsontags 0.1 / md-tables 0.1）。
+
+### 四、遗留
+
+1. ❓ **一次都没真打过**：`rabactive` 六口仍**零实拍**（R17 不变）。这一条能力的
+   `RunInBatch:false` 就是为此 —— 界面上点那一下，是拿到这一族第一个响应样本的**唯一**路径，
+   而它同时也是"往用户网盘写两个文件"的那一下。要核的三格仍登记在 R17 / R18 / R19。
+2. ❓ **Q19**：每日生成几张（今天钉成常量 5）要不要开成参数面 —— 旧项目自己就有三份不一致的
+   默认值（schema 10 / 代码 5 / 文档 5 且标 1-20，见 `business-feature-inventory.md` §5.4），
+   而开一栏等于改这一条能力的参数面与界面表单。
+3. ❓ **Q20**：合成图那个 `imageUrl` 由**上游响应给**，本仓拿它裸 GET（不带任何头），
+   且**没有 URL 白名单** ⇒ "上游给一个指向内网的地址"今天没有缓解。旧实现同样不设防，
+   所以这不是回退；登记成问题是因为它是一次**真打之后**才看得见后果的写法。
+4. ❓ **Q21**：`drawAll` 的"发不出去就停手"是本仓刻意不同，代价是**上游给了额度而我们少抽**。
+   恢复旧行为的前置是把失败分型（HTTP 层 vs 业务码）做进协议层，不靠猜。
+5. ❓ **R19 已就地更新，账本那一格另立 R20**：找回那三枪**已接线**（上一轮"没有调用点"那句已经不成立），
+   但"网盘里有同名文件时挑哪一份"仍未验（R19）；`internal/exec` 的产物账本**依然没有调用点** ——
+   它以 `core.RunID` 为键，而 `AiAvatarRun.RunAccount(ctx, account)` 拿不到 runId，
+   接它要先决定"runId 怎么传到 app 层"（那是编排层的口子，不是这条链的）。这一格现在登记在 **R20**，
+   并写明两条路（改签名 / 让 `RunReport` 带出 `TempFileIDs`）与"都没做也没验"。
+6. ❓ **Q18 已就地改写成"默认值取哪一份"**（schema 10 / 旧代码 5 / 旧文档 5）：原先那一问
+   （"要不要下一轮登记成能力并接 WebUI"）已由本轮落地回答，按 AGENTS §2.6 改写而不是叠补记。
+7. ⚠ **上一轮那条凭据边界风险仍未处理**：`test/fixtures/http/合成云朵.json` 里
+   `loginByToken/<一串疑似真 token>` 的 **URL 路径段没脱敏**（文件仍未被 git 跟踪），
+   且脱敏门禁**不扫 URL path** —— 这一格仍是缺口。
+8. ⚗ §3.9 偏大文件：本轮新增的 `ai_avatar_run_test.go` **1036 行 ⇒ 已破千**，登记待拆
+   （找回那一族 + 头集合断言可独立成 `ai_avatar_collect_test.go`，约 300 行）；
+   `run_dispatch_signin_test.go` 638 行尚可。既有那四个破千行的文件与 `docs/status.md`（本文件）仍在等方案。
+
+## 补记（2026-09-24，兑换页的选品只读接口 + 前端接真数据：**这一族第一次经本仓代码真打上游**）
+
+兑换族此前的状态是"三层都在夹具上跑绿、一条上游没真打"（`business-feature-inventory.md` §exchange 的
+「Go 侧落点」抬头就是这么写的）。这一轮建了只读选品接口并接进兑换页的"可兑奖品"那一块，
+然后拿库里的**两个真账号**在一次性预览实例上真打了一次 —— **只读**：只发清单那一枪，
+没碰下单、没触发任何 run。下面「四」是这一次读数。
+
+### 一、落点
+
+| 格子 | 落点 | 一句为什么 |
+| --- | --- | --- |
+| 接口 | 新建 `internal/server/exchange_prizes.go`（146 行）：`GET /api/accounts/{id}/exchange-prizes` | **按账号**而不是像旧项目那样开一条全局 `/api/exchange/prizes`：`limit` 本来就是各账号自己的状态（`docs/capture/app-exchange-samples.txt` §5.1 抬头），全局一条等于把别人的可兑状态念给你听。路由挂在 `s.authed` 里（`auth.go`），旧项目那个"免登录"的缺口因此不存在 |
+| 只读取舍 | 只打 `exchangeList` **一枪**，**不读余额**（`infoV3` 故意不打） | 这一屏回答的是"哪一件是哪一件"，余额是总览页那一栏的事。代价写死成一条断言：`canOrder` 在"云朵不够"那一档**偏宽**（见「五·1」） |
+| 出网形状 | 每件带 `plan`（slug）+ `reason`（后端话术原文）+ 三格余量 + `canOrder` | 话术全仓唯一出处在 `app` 层，前端**只留颜色表**；把 `ExchangePlan` 直接 marshal 成数字会把"档位顺序"变成对外契约（`exchange_plan.go` 的 `Slug` 头注） |
+| app 层 | 两处注释订正：`exchange_list.go`、`exchange_plan.go` 里指着旧路径的句子改指这一条按账号的路由 | §2.6 就地修，不留"注释说旧路径、代码做新路由" |
+| 前端 | 新建 `web/src/ui/exchange-prizes.tsx`（164 行：`PLAN_TONE` 覆盖十七档 + 表格/卡片两形态）；`web/src/api.ts` +59 行（→ 589）；`web/src/pages/exchange-page.tsx` 642 → **821 行** | 十七档**逐档**给色，漏档落 `badge-soft` 兜底而不是"没色"；窄屏走卡片、桌面走表格（§5.3 双形态） |
+
+### 二、测试与反向验证（夹具）
+
+`internal/server/exchange_prizes_test.go`（新建 217 行）**5 条顶层用例**，`-run TestExchangePrizes` 全绿（0.757s）：
+数值分组序（夹具里故意把 `"10"` 排在 `"2"` 前）、逐字段与 `plan`/`canOrder`/`reason`、
+**响应体里不许出现云盘侧 JWT / 整串 auth / 完整手机号**、连点两次只建一条会话、
+越权 / 不存在 / 匿名三种入口**零上游请求**、上游回 `code:610` 时**不降级成空清单**、
+`runs=nil` ⇒ 500、`POST` ⇒ 404。
+
+六个变异逐个变红：分组序（`left > right`）、`canOrder` 判据、slug 漏登记、失败降级、票复用、多打一枪。
+⚠ 其中"失败降级"那一次**第一版锚点没打上 ⇒ 假绿**（perl 锚的字符串与文件里的实际标点不一致），
+重新锚定才如期变红 —— 坑表 #143 的又一次现场：**变异跑绿先怀疑没打上，别怀疑判据**。
+
+### 三、门禁（照抄当轮 stdout）
+
+`node scripts/gates-go.js` ⇒ 横幅"**十项门禁全绿**"（10/10），总耗时 **33.5s**
+（逐条：build 1.2 / vet 0.5 / fmt 0.1 / test 28.2 / deps 2.9 / filenames 0.2 / idents 0.2 /
+golden 0.1 / jsontags 0.1 / md-tables 0.1）。golden 仍 **167 条断言**（本轮没有新黄金向量：
+线格式与冻结对拍面都没动）；jsontags **78 / 196**。
+`node scripts/gates-web.js` ⇒ 横幅"**web 门禁 2 条全绿**"，总耗时 **3.2s**（typecheck 2.5 / build 0.7）。
+本轮**未提交**（用户没要求）。
+
+> 成文改写（下面「四」「五」，加上 `business-feature-inventory.md` §exchange、
+> `pending-decisions.md` 的 P2 / R5 / 「已拍过」那一格、`app-exchange-samples.txt` §0 + §5.7、
+> `exchange_list.go` 与 `exchange_plan.go` 的注释）之后**复跑**同一两套：
+> Go 侧横幅仍"十项门禁全绿"（10/10），总耗时 **39.3s**（逐条：build 2.4 / vet 0.6 / fmt 0.1 /
+> test **32.2** / deps 3.2 / filenames 0.2 / idents 0.3 / golden 0.1 / jsontags 0.1 / md-tables 0.1）；
+> web 侧仍"web 门禁 2 条全绿"，总耗时 **3.8s**（typecheck 2.8 / build 1.0）。
+> ⚠ 那一次之后只剩这一段引用文字本身被改过（**代码未动**）⇒ 末尾再复跑一套：仍 10/10、**6.4s**
+> （test **1.0s 走缓存**，这是"代码没动"的证据，不是"测得更快"），web 两条仍全绿、3.6s。
+
+### 四、⭐ 真机核验：两个真账号、真实上游、**只读**
+
+现场：一次性预览实例（**库副本** + 端口 8793 + 自己的设备文件 + 为副本重设的管理员口令，口令不进成文）。
+⚠ 三条边界先说清：**主库 `data/mcloud.db` 与 8788 那个在跑的实例没动过**（动前动后各查一次：
+用户 1 行、schedule 1 行、账号 2 行，逐字未变）；副本里 `schedules` **已清空**、`runs` **恒 0**
+⇒ 这一趟不会有任何无人值守的执行；发出去的每一枪都是**读**（`exchangeList` + 建会话），
+下单那一族一次都没打。
+
+读数（2026-09-24 07:21 CST 那一刻。⚠ `count` 这类是**时刻量**，别当常量）：
+
+- 两个账号**各 55 件、9 组**，组键 `0,1,2,5,7,8,9,11,15` **不连续** ⇒ 与 §5.1 那份 2026-09-22 的实拍
+  **同一形状**，且本仓按**数值序**输出（`11` 排在 `9` 之后，不是字典序）。
+- 档位分布：`mobile` 那个账号 `go` 17 + `min_remainder_zero` 38；`pc` 那个账号 `go` 17 +
+  `min_remainder_zero` 34 + `exchanged_this_group` 3 + `exchanged_this_prize` 1。
+  ⇒ 十七档里**四档**第一次在真实上游数据上出现。
+- ⭐ **同一件奖品在两个账号上 `limit` 不同**（三件 0↔4、一件 0↔2；间隔一分钟各复取两次都稳定）
+  ⇒ "按账号出清单"这个接口设计是**必需的**，不是顺手。⚠ 这**不是新发现** ——
+  §5.1 抬头就写了"`limit` 也是各自的"、§5.6 给了字段依据（`monthGroupLimit` + `limitMonthQuantity`），
+  这里只是**经本仓代码复现**了一遍。
+- ⚠⚠ **订正上一轮那句"新证据"**：我上一轮把合成凭据换来的
+  `400 bad_request：上游返回 success=false: 暂无权限！` 记成了这一族的第一条真实上游读数 —— 那一句**不成立**，
+  §5.5 早已记过同一条（"唯一一条 Basic 凭据早过期（实测 暂无权限！）"）。准确说法是：
+  **本仓的错误分支走的是真实上游，回的码与 §5.5 那条一致**。按 §2.6 就地改，不叠补记。
+- 界面侧（**真数据**，不是注入响应）：桌面表格 55 行、状态列取后端 `reason` 原文；
+  换账号的那只 select 会重读并刷新"读于 …"那一句；点"选这件"把真实 `prizeId` 回填进表单（实测 `260630012`）；
+  390px 窄屏横向溢出 **0px**、表格形态隐藏、可见按钮与 select 高度 **44px**。
+- ⚠ 这一族**下单**那一半仍未真打：`exchangeV3` 的三条实拍还是 2026-09-22 从真机 App 抓来的那几笔
+  （§5.2），**不是**本仓发的 —— 那是 P2 管的事，本轮没碰。
+
+### 五、遗留
+
+1. ❓ `insufficient_cloud` 这一档**不会**出现在这一页（不读余额）⇒ 那一格的颜色今天只有代码依据。
+   "够不够"仍以链上 `PlanExchange` 那一枪为准（夹具上测过，真上游没测过）。
+2. ❓ 其余 13 档仍只有夹具依据。⚠ 其中 `limit == 3` 那一档**不是补样本能收口的**：
+   H5 文案与旧实现本来就打架（§5.1 表下那条 ⚠），已登记 Q2。
+3. ❓ 前端没有一处渲染 `startTime` / `endTime` ⇒ 上游那两格 `2026-12-31 23-59-59`（**时间用连字符**）
+   今天没有消费者。将来接"开抢倒计时"要按这个格式解析，别按 `HH:MM:SS` 猜。
+4. ⚠ 本轮拿到的是**本仓解析后的出网形状**，不是上游原始字节 ⇒ 要逐字归档得再走一次代理抓包
+   （`app-exchange-samples.txt` §1.6 通路②）。这不挡任何结论，但"原始字节这一族已有 §5.1 一份"别丢。
+5. ⚗ §3.9 偏大：`exchange-page.tsx` **821 行**（本轮从 642 推上来；再长就该把"选品那一块"拆成独立页面文件）、
+   `docs/status.md`（本文件）已 2900+ 行 = Q16 在等方案、`ai_avatar_run_test.go` 1036 行待拆。
+6. ⚠ 前两轮那条凭据边界风险**仍未处理**：`test/fixtures/http/合成云朵.json` 里
+   `loginByToken/<一串疑似真 token>` 的 URL 路径段没脱敏（文件仍未被 git 跟踪），脱敏门禁不扫 URL path。
+
+
+## 补记（2026-09-24，推送这一族落地：模型 → 发送 → 落库 → 编排 → server API → WebUI 设置页）
+
+前面好几轮的"落点"里都出现过 `notify`，但**成文一直没记这一族**（grep `status.md` 里"推送"只有直播间弹幕那几处）
+⇒ 这一节把 S8-a…S8-f 一次记全，重心放在**最后两格**（server API 与 WebUI）和这一轮修掉的三个缺陷上。
+
+### 一、落点
+
+| 层 | 落点 | 一句为什么 |
+| --- | --- | --- |
+| 模型 | 新建 `internal/core/notify.go`（492 行）+ `core/mail.go`（135 行）：十家各一个**具名结构** + `Extra` 自由键 + `Missing` 判据 | 住 core 是因为 server / io / app / upstream 四层都要同一份类型，依赖方向只允许它们都指向 core。旧实现是 `Record<string, unknown>` + `...config`，"必填项拼错键名"**不报错**、只是那一格静默不上线 ⇒ 收成字段 |
+| 发送 | 新建 `internal/upstream/notify.go`（401）+ `notify_channels.go`（268）+ `notify_two_step.go`（311） | 三处**刻意不同**于旧实现：逐家返回 `[NotifyResult]`（旧实现全塞 logger、`sendRequest` 一律 `undefined`，调用方无从知道"没配"还是"四家全挂"）；缺必填**不发**；Telegram 看 `ok`（旧只看 `errcode`/`code`/`err`，`{"ok":false,"error_code":401}` 会被判成"已发送"） |
+| 落库 | `internal/io/schema.go` **v10** 新增单行表 `notify_config`（`CHECK (id = 1)`）+ `configstore.go` 的 `NotifyConfig` / `PutNotifyConfig` | 单行、**无归属**：整安装共用一份（风险登记成 Q29，并由 `TestNotifyConfigIsOneRowSharedByEveryUser` 钉成既成事实） |
+| 邮件 | `internal/io/mail.go`（472）+ 进程内假服务器 `mail_fakeserver_test.go`（571） | 零第三方新增（§3.4）：`net/smtp` 没有导出的 AUTH LOGIN、也不管隐式 TLS，这两件各写一小段。465 ⇒ 隐式 TLS、其余端口 ⇒ STARTTLS，与旧 nodemailer `secure: port===465` 同一判据 |
+| 编排 | 新建 `internal/app/notify_run.go`（432）：门槛判定 → 正文组装（过 `core.ScrubText`）→ 逐家发送 → 一句小结，接在 `Runner.Run` 尾巴 | 正文**脱敏**是与旧实现不同的一处：这一句要经过 pushplus / Telegram / 邮件服务商的服务器，出网那句不该带可直接复用的凭据 |
+| server API | 新建 `internal/server/notify.go`（286）+ `notify_config.go`（496）+ `notify_view.go`（425）；路由挂在 `s.authed`：`GET/PUT /api/notify/config`、`POST /api/notify/test` | 写侧是**逐字段合并**（视图脱敏 ⇒ 界面拿不到原值 ⇒ 全量覆盖会把看不见的字段洗掉，且那种丢失不报错）。"去掉一整家"是**本族唯一发 `null`** 的口子，界面把它包成动词，比调用点手写 `{bark:null}` 难用错。试发**不看** `enabled`、**看** `minLevel`（走同一个 `FormatNotifyBody`，绕过就成了"试发收到了、正式跑不响"那种查不出的现象） |
+| WebUI | 新建 `web/src/pages/settings-page.tsx`（712）+ `notify-channel-form.tsx`（265）+ `ui/notify-form.ts`（293）+ `ui/notify-channels.ts`（157），`api.ts` 补那一族类型，路由 `#/settings` | 三张卡 = 总开关 / 十家渠道（按后端 `order`）/ 试发（只列已配的那几家）。字段表**前端不抄**：格数、顺序、档位全读后端 `fields[]`，`secret` 只出"填了没 + 几个字符"、`keys` 只出键名 ⇒ "留空 = 不改"是视图脱敏唯一可能的语义，不是偷懒 |
+
+### 二、测试与反向验证
+
+Go 侧这一族共 **145 条 `func Test`**（core 12+3、upstream 17+15+11、io/mail 23、app 27、server 17+20）。
+`internal/io/mail_fakeserver_test.go` 里没有 `Test*`，它是那 23 条共用的假服务器（能证明协议步骤、不能证明"真服务商声明什么"= R23）。
+
+### 三、这一轮修掉的三个缺陷（都过了门禁却都是真坏的）
+
+1. ⭐ **后端把 nil 清单发成 `null` ⇒ 设置页一张卡都没有**。`notifyPayloadOf` 里 `configured` / `sendable`
+   在一家都没配时是 nil slice，Go marshal 成 `null`；前端 `applyView` 那句 `next.configured.includes(name)`
+   抛 `TypeError` ⇒ `load()` 落 catch、`state` 停在 `'error'`。
+   ⚠ 收口有两处，第二处才是关键：原来那份 `names()` helper 写的是 `raw, _ := view[key].([]any)`，
+   类型断言失败时 `raw` 为 nil、`len(nil)==0` 读成"空清单"——**门禁全绿、界面全坏**。
+   改成显式判"这一格在不在 + 是不是数组"，另加 `TestNotifyConfigEmptyListsLeaveAsArraysNotNull`
+   直接扫**响应体字节**（含 `"configured":[]`、不含 `"configured":null`）。
+   ⇒ 教训成文：`docs/webui-code-guide.md` §9.2 补记（推送设置页那一轮）第⑤条。
+2. ⚠ **同一条现象曾被误归因成"Vapor 在函数体里读 ref 只读一次"**（`settings-page.tsx` 文件头那一节，
+   上一轮写的）。本轮追到响应体才看清：`view.value` 那时**已有值**，是 `state` 没到 `ready`。
+   按 §2.6 就地改写那一节：保留"分支条件把内容依赖的 ref 一起写进去 / 会自变的量在子节点位置读"
+   两条（与 `schedules-page.tsx` 同形的**约定**），删掉那套 Vapor 因果叙述，并留一行耻辱柱（错在哪、被什么推翻）。
+   顺带把 `ui/notify-form.ts` 与 `notify-channel-form.tsx` 里"草稿放进 ref ⇒ 输入框当场失焦"那句
+   **未实测的因果**降级成 ❓ + 怎么测 —— 非受控这一支本身真机核验过。
+3. **`buildCustomPostRows` 里 `forEach` 回调的 `return` 不是 `break`** ⇒ 带 `__error__` 的那条压根没进数组，
+   下面的错误扫描成死代码，界面上念成「这一家一条都没有」或条号错位。改 `break` + 照常 `push`。
+   另补三处 `min-h-11 md:min-h-0`（取消 / 删除这一家 / 再加一条），窄屏按钮 40 → 44px。
+   ⇒ 成文同 §9.2 补记第⑥条。
+
+### 四、真机核验（WebUI 没有测试运行器，这一节就是它的"测试"）
+
+驱动：headless Edge（CDP 9333）+ `target/verify-notify-webui.cjs`，服务 `./target/mcloud-server-verify -port 8791 -db target/verify-notify.db`。
+桌面 30 步 + 补测 31/32/33 + 窄屏 M1–M5 + 暗色，逐条读数与 7 张截图（`target/verify-01…07-*.png`）。核验过的关键点：
+
+- 三张卡渲染；Bark 填写→保存→重开**不回显**（占位「已配置（19 位）：留空表示不改」），"显示凭据"切了也不回显；
+- 非法 JSON 拦在弹窗内、`window.__net` 读回 `net:0`（一个请求都没出网）；`extra` 只出键名 `["group","sound"]`，
+  响应体里 `rawHasSecret:false` / `rawHasGlass:false`（值不出网）；
+- 总开关只送**改动的那几格**、`minLevel` 不被界面替填；`customPost` 整块替换且 `items[0].fields` 里
+  `url present=true length=28`（地址按凭据从严 = Q31）；删除走二次确认、影响面文案对得上；
+- ⭐ **试发是真发的**：`customPost` 指到本机 `target/verify-receiver.cjs`（8799）那份假收件箱，
+  接收端日志实录 `{"method":"POST","url":"/notify",…,"body":"{\"text\":\"核验正文\"}"}`，界面上逐家徽章「已发」。
+  ⇒ 这一条只证明**我们这一侧发出去了**，**十家真第三方一家都没发过**（无凭据 = R22 / R21 / R23 三格样本缺口）；
+- 窄屏无横向越界、dock 64px、`main` padding 96px、暗色 `theme=dark`。
+
+核验手法本身踩到三格，都已就地成文（CDP 缓存那格进 `docs/webui-code-guide.md` §9.2 补记那条排查噪声；
+读数那两格加本轮这条"窄屏覆写跟会话走"都在 `docs/webui-components.md` §7.4）：
+`/assets/*` 是 `immutable` ⇒ CDP 会话必须 `Network.setCacheDisabled`，否则"改了没生效"与旧 bundle 一模一样；
+CDP 会话一关就**释放**设备尺寸覆写 ⇒ "窄屏量到 40px"其实量的是 1280 桌面档；
+点完立刻读读到的是上一帧 ⇒ 动作与读数分两趟、中间等一轮渲染。
+
+### 五、门禁（照抄当轮 stdout）
+
+- `node scripts/gates-go.js` ⇒ 横幅"**十项门禁全绿**"（10/10），总耗时 **40.3s**，逐条：
+  build 1.8 / vet 0.5 / fmt 0.1 / test **33.6** / deps 3.5 / filenames 0.2 / idents 0.3 / golden 0.1 / jsontags 0.1 / md-tables 0.1。
+  同轮 stdout 里的其它读数：golden「断言 **167** 条全绿」、脱敏「**13** 个文件…均只出现 199 开头的合成标识」、
+  jsontags「**91** 个结构体字段齐全，**202** 个按白名单不进 JSON」、md-tables「39 个文件、16 行按坑表 #124 豁免」。
+- `node scripts/gates-web.js` ⇒ "**web 门禁 2 条全绿**"，总耗时 **4.0s**（typecheck 3.0 / build 1.0），产物 `index-BxeQhRtu.js`。
+  ⚠ 这一条是**改完注释后重跑**的那次；本节上面那份 Go 数字是**成文前那一次**的 stdout，
+  同一套再跑一遍 ⇒ 横幅一样"十项门禁全绿"，但耗时 **7.2s**、其中 test **0.6s** —— 那是**缓存命中**，
+  不是测试变快（40.3s / test 33.6s 那次才是真跑完的）。
+- ⚠ 这两套都是**整套树**跑的，含并行会话在飞的改动（`internal/server/run_dispatch.go`、`web/src/api.ts` 等）
+  ⇒ 全绿算的是"这棵树绿"，不是"只有我的改动时绿"。
+- 本轮**未提交**（用户没要求）。核验用的服务（8791）、接收端（8799）、headless Edge（9333）跑完即关，8788 不动；
+  `target/` 那三份 throwaway 脚本与截图按 gitignore 不入库。
+
+### 六、遗留
+
+1. ❓ **十家真第三方一家都没真发过**：`classifyChannelReply` 那三键是十家共用的判据，对某一家必然判松或判紧
+   （已知一处比旧实现松：`{"code":"200"}` 这里算已发）。补齐只有 R22 那一句：每家手工配一次、真发一条，
+   把响应体逐字记进 `docs/capture/`。企业微信换票那一枪的方法与参数位置（R21）、真 SMTP 服务商的原文（R23）同族。
+2. ❓ **"草稿放进 ref 会不会当场失焦"未实测** —— 本轮把这一族成文里那句确定性表述降级成了疑问。
+   要测：把 `DraftStore` 换成 `ref`，真机连打几个字量 `document.activeElement`。
+3. ⚠ 推送结论**今天不持久化**（只在 `RunSummary.Notify` 内存里）⇒ "某家长期失败而没人发现"是现状，登记 Q27；
+   CLI 那一路不推（Q26）；重试与否（无幂等键）Q22。
+4. ⚗ §3.9 偏大仍是那几份：`settings-page.tsx` **712 行**（三张卡 + 两个弹窗，再长就该把"试发"拆出去）、
+   `docs/status.md`（本文件）、`notify_config_test.go` 801 行。Q16（历史搬迁）等方案不变。

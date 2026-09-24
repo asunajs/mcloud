@@ -1,7 +1,7 @@
 package mcloudio
 
 // 本文件是 [core.ConfigStore] 的 SQLite 实现：定时任务、任务组合、抢兑配置、
-// 界面偏好，外加一张"旧数据导入台账"。
+// 界面偏好、推送配置，外加一张"旧数据导入台账"。
 //
 // 与 `store.go`（`StateStore`）分开的理由见 trait 定义处的注释：
 // 两者服务不同的调用方，合在一起会逼着"只想给能力层写个内存假实现"的人
@@ -9,7 +9,8 @@ package mcloudio
 //
 // # JSON 字段的取舍
 //
-// `target` / `account_ids` / `body` / `steps` / `windows` / `bindings` 一律存 TEXT（JSON 原文）。
+// `target` / `account_ids` / `body` / `steps` / `windows` / `bindings` / `channels`
+// 一律存 TEXT（JSON 原文）。
 // 它们都是"整块读写"的结构，拆成列只会让 schema 跟着能力参数的变化不停改版；
 // 而真正需要被 SQL 查询/排序的维度（`enabled`、`cron`、`last_status`）已经单独成列。
 //
@@ -892,6 +893,85 @@ func (s *SqliteStore) PutWebuiConfig(ctx context.Context, config *core.WebuiConf
 			updated_at         = excluded.updated_at`,
 		boolToInt(cfg.RememberLastPage), cfg.LastPage, boolToInt(cfg.LogExpanded),
 		boolToInt(cfg.BackgroundRun), optTime(cfg.UpdatedAt))
+	if err != nil {
+		return mapSQLite(err)
+	}
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 推送配置（单行表，**无归属**）
+// ─────────────────────────────────────────────────────────────────────────────
+
+// NotifyConfig 取推送配置；没有这一行时返回默认值（关闭 + info + 一家没配），且不写盘。
+//
+// 口径与 [SqliteStore.ExchangeConfig] / [SqliteStore.WebuiConfig] 完全一致：
+// 读操作不制造副作用，"这一族还没人配过"由默认值表达。
+//
+// # 三格标量为什么单独成列、渠道为什么整块存 JSON
+//
+// 见 schema.go 的 v10 那段。这里补一条读取侧的理由：`channels` 那一列里是**各家密钥**，
+// 而"这次发不发、门槛多高"三格是不含凭据就能回答的问题 ——
+// 分成列之后，将来要给日志或界面加一句"推送是开着的、门槛 info"，
+// 不必把整块凭据读进内存再丢掉。
+//
+// # 门槛文本按原样读回（包括空串）
+//
+// 空串是**有效信息**（"没填 ⇒ 跟随 info"，见 [core.NotifyConfig.Validate]），
+// 读取时替它填成 `info` 会让"我保存的到底是什么"这件事对不上 PUT 进去的那一份。
+func (s *SqliteStore) NotifyConfig(ctx context.Context) (core.NotifyConfig, error) {
+	var (
+		enabled, onlyError int64
+		minLevel, channels string
+		title              sql.NullString
+		updatedAt          sql.NullString
+	)
+	err := s.db.QueryRowContext(ctx,
+		"SELECT enabled, title, only_error, min_level, channels, updated_at "+
+			"FROM notify_config WHERE id = 1").
+		Scan(&enabled, &title, &onlyError, &minLevel, &channels, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return core.DefaultNotifyConfig(), nil
+	}
+	if err != nil {
+		return core.NotifyConfig{}, mapSQLite(err)
+	}
+	parsed, err := fromJSON[core.NotifyChannels](channels)
+	if err != nil {
+		return core.NotifyConfig{}, err
+	}
+	return core.NotifyConfig{
+		Enabled:   enabled != 0,
+		Title:     ptrStr(title),
+		OnlyError: onlyError != 0,
+		MinLevel:  core.NotifyLogLevel(minLevel),
+		Channels:  parsed,
+		UpdatedAt: ptrTime(updatedAt),
+	}, nil
+}
+
+// PutNotifyConfig 覆盖推送配置（单行表，`id` 恒为 1）。
+//
+// 这里**不**跑 [core.NotifyConfig.Validate]：保存前那句"哪一家缺哪个字段"由
+// server 层说（它要面向用户），存储层只负责"整块写进去、原样读回来"。
+func (s *SqliteStore) PutNotifyConfig(ctx context.Context, config *core.NotifyConfig) error {
+	channels, err := toJSON(config.Channels)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO notify_config (
+			id, enabled, title, only_error, min_level, channels, updated_at
+		) VALUES (1, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			enabled    = excluded.enabled,
+			title      = excluded.title,
+			only_error = excluded.only_error,
+			min_level  = excluded.min_level,
+			channels   = excluded.channels,
+			updated_at = excluded.updated_at`,
+		boolToInt(config.Enabled), optStr(config.Title), boolToInt(config.OnlyError),
+		string(config.MinLevel), channels, optTime(config.UpdatedAt))
 	if err != nil {
 		return mapSQLite(err)
 	}

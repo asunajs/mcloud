@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/catlair/mcloud/internal/core"
 	mcloudexec "github.com/catlair/mcloud/internal/exec"
@@ -84,6 +85,17 @@ type RunSummary struct {
 	Accounts []AccountRun
 	// Events 是落库的事件条数（观测用：SSE 断线续传读的就是它们）。
 	Events int
+	// Notify 是收尾那条推送的结论；`nil` = **这台运行器没接推送**。
+	//
+	// 为什么是指针而不是零值：三态里"没接"与"接了但门槛没过"是两句不同的话 ——
+	// 前者是部署形态（CLI 就不接），后者是配置问题（界面上要指得出来）。
+	// 压成零值会让"没接"读成"没发"，而排查方向完全相反。
+	//
+	// ⚠ 它**不**进 `run_events`：那张表按**单账号那一趟**组织（主键 `(run_id, seq)`），
+	// 而一次跨账号推送不属于其中任何一条 run —— 写进任意一条都会让那一趟的事件流
+	// 含进别人的事。现在的落点是调用方（调度记账、CLI 输出）；要持久化得另找位置，
+	// 已登记成待拍板（`docs/pending-decisions.md` Q23）。
+	Notify *RunNotifyResult
 }
 
 // Ran 是真的跑了的账号及其结果。
@@ -163,6 +175,29 @@ type Runner struct {
 	clock    core.Clock
 	registry *mcloudexec.RunRegistry
 	bus      *mcloudexec.EventBus
+	// notify 是收尾那条推送的编排；`nil` = 不推（CLI 与多数测试的默认形态）。
+	//
+	// 为什么挂在运行器而不是调用方：门槛要的"本次运行的全部过程话"只有这里攒得齐
+	// （过程话是从 [RunProgress] 那一路流出去的），让每个调用方自己抄一份就会
+	// 出现"服务端推、CLI 不推"这种同一件事两套形状的扩散。
+	// 接不接仍是调用方的事 —— 见 [WithRunNotify]。
+	notify *RunNotify
+}
+
+// RunnerOption 是运行器的可选项（用变参而不是把构造函数撑成七个参数：
+// 现有调用方一次都不用改，新选项也不会把签名越撑越长）。
+type RunnerOption func(*Runner)
+
+// WithRunNotify 给这台运行器接上"跑完一趟推一次"。
+//
+// 传 `nil` 等于不接（与不传同一个效果）：让"没接"只有一种表示法，
+// 免得 `WithRunNotify(nil)` 与"不调这个方法"将来分叉出两种行为。
+func WithRunNotify(notify *RunNotify) RunnerOption {
+	return func(r *Runner) {
+		if notify != nil {
+			r.notify = notify
+		}
+	}
 }
 
 // NewRunner 组装一次编排（`registry` / `bus` 由调用方持有并复用）。
@@ -172,8 +207,13 @@ func NewRunner(
 	clock core.Clock,
 	registry *mcloudexec.RunRegistry,
 	bus *mcloudexec.EventBus,
+	opts ...RunnerOption,
 ) *Runner {
-	return &Runner{store: store, scope: scope, clock: clock, registry: registry, bus: bus}
+	r := &Runner{store: store, scope: scope, clock: clock, registry: registry, bus: bus}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // Run 按计划跑一遍：逐账号准入 → 执行 → 发事件 → 落库。
@@ -205,6 +245,14 @@ func (r *Runner) Run(
 	eventsWritten := 0
 	done := uint32(0)
 
+	// 只有接了推送才攒过程话（见 [runLogSink] 的头注：一条直播链路能写几百行）。
+	// `nil` 是合法值 —— [runLogSink.add] 对 nil 接收者直接返回，
+	// 于是攒取那一步在没接推送时**一次分配都没有**，也不需要在调用点判空。
+	var sink *runLogSink
+	if r.notify != nil {
+		sink = &runLogSink{}
+	}
+
 	// 预分配的 runId 必须与账号**一一对应**。长度不等不报错的话，多出来的账号
 	// 会拿到一个空 runId 去落 `runs` 主键 —— 那是一条谁也查不到的记录。
 	if plan.RunIDs != nil && len(plan.RunIDs) != len(plan.Accounts) {
@@ -218,7 +266,6 @@ func (r *Runner) Run(
 		if plan.RunIDs != nil {
 			runID = plan.RunIDs[i]
 		}
-
 		admission := r.registry.Admit(runID, key)
 		if admission.Kind != mcloudexec.AdmissionAdmitted {
 			// 被挡下（或 runId 撞了 —— 刚生成的 runId 不该重复，真重复了说明
@@ -236,7 +283,10 @@ func (r *Runner) Run(
 			continue
 		}
 
-		entry, written, doneNow, perr := r.runOne(ctx, plan, account, runID, task, done, total)
+		// 攒给收尾那条推送的一份"记录器"。三件事都收在这一个闭包里：
+		// 时刻（只从注入的时钟取）、账号前缀、以及"没接推送时什么都不做"。
+		rec := r.logRecorder(sink, i, len(plan.Accounts))
+		entry, written, doneNow, perr := r.runOne(ctx, plan, account, runID, task, done, total, rec)
 		done = doneNow
 		if perr != nil {
 			return RunSummary{}, perr
@@ -251,12 +301,48 @@ func (r *Runner) Run(
 			reports = append(reports, entry.Report)
 		}
 	}
-	return RunSummary{
+	summary := RunSummary{
 		Capability: plan.Capability,
 		Outcome:    core.CombineOutcomes(reports),
 		Accounts:   entries,
 		Events:     eventsWritten,
-	}, nil
+	}
+
+	// 收尾推送。**放在返回之前、落库之后**：正文要含"这趟成没成"那句小结，
+	// 而那句只有等汇总出来了才有。
+	//
+	// 用 `ctx` 而不是另起一个背景上下文：这一趟如果是被"关掉页面"或"进程收尾"
+	// 取消掉的，那一条推送也不该硬发（发出去的话，用户收到一条说不清结局的消息）。
+	// 代价是"跑完了但推送没发出去"这一格会记成一次失败，而不是静默 —— 查得出来。
+	if r.notify != nil {
+		result := r.notify.Dispatch(ctx, NotifyInput{
+			Summary: summary.SummaryLine(),
+			Lines:   sink.collect(r.clock.Now()),
+		})
+		summary.Notify = &result
+	}
+	return summary, nil
+}
+
+// logRecorder 造一个"把过程话攒进收尾推送"的记录器；不推送时返回 nil（nil 安全）。
+//
+// 账号前缀只在**多账号**那一趟才加：单账号加它是纯噪声，而多账号不加就会
+// 分不清"这一句是谁的"（旧实现是每账号收尾打一句 `账号 ${index+1}`，同一个取向）。
+//
+// ⚠ 前缀用**序号**，不用 [core.AccountID]：后者由手机号派生（见 `core.AccountID` 头注），
+// 而推送正文要经过第三方服务器。序号是"本次运行内的第几个"，
+// 与界面上那张账号表的顺序同源（调用方传进来的 `plan.Accounts` 就是那个顺序）。
+func (r *Runner) logRecorder(sink *runLogSink, index, accounts int) runLogRecorder {
+	if sink == nil {
+		return nil
+	}
+	prefix := ""
+	if accounts > 1 {
+		prefix = "账号 " + strconv.Itoa(index+1) + "："
+	}
+	return func(level core.LogLevel, message string) {
+		sink.add(level, r.clock.Now(), prefix+message)
+	}
 }
 
 // runOne 跑单个账号。
@@ -271,6 +357,7 @@ func (r *Runner) runOne(
 	runID core.RunID,
 	task RunTask,
 	done, total uint32,
+	rec runLogRecorder,
 ) (AccountRun, int, uint32, error) {
 	// 保证"受理过就一定释放"。
 	//
@@ -289,6 +376,12 @@ func (r *Runner) runOne(
 	// 而断线续传读的正是 seq 单调。
 	progress := func(level core.LogLevel, message string) {
 		batch = append(batch, r.publish(core.NewEventLog(runID, level, message)))
+		// 同一条消息进第二个去处：收尾那条推送的正文。
+		//
+		// 刻意**不**从 `run_events` 回读：那要等落库、且跨账号时得按多个 runId 拼，
+		// 而"界面上看到的"与"推送里看到的"同源这件事，靠的是同一个 `progress` 入口，
+		// 不是靠两处读同一张表对上 —— 表里还有 started/finished 那几类不该进正文的行。
+		rec.record(level, message)
 	}
 	accountID := account
 	if err := r.store.InsertRun(ctx, r.scope, &core.RunRecord{
@@ -307,6 +400,11 @@ func (r *Runner) runOne(
 	if taskErr != nil {
 		batch = append(batch, r.publish(core.NewEventErrored(runID, taskErr.Error())))
 		report = core.NewRunReportFailed(taskErr.Error())
+		// 这一条是 `onlyError` 那道门槛**看得见**的唯一入口：
+		// 旧实现走的是 `logger.error(...)`，所以出错一定进正文；
+		// 本仓的错误经 [core.NewEventErrored] 走事件流，不攒进来的话
+		// "只推错误"的推送会在真的失败那一趟什么都没发。
+		rec.record(core.LevelError, "这一趟出错："+taskErr.Error())
 	}
 
 	batch = append(batch, r.publish(
