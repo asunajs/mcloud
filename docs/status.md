@@ -3285,3 +3285,104 @@ CDP 会话一关就**释放**设备尺寸覆写 ⇒ "窄屏量到 40px"其实量
    `internal/core/traits.go` **1035 行**（本轮只 +15，但已是全仓最大的 core 文件）；
    本文件 **3200+ 行**（Q16 的拆分方案仍待批）。
 4. ✅ 本轮 12 份文件（4 新增 / 8 修改）已提交为 `b0b9dc3`；工作树干净，没有刻意留着不入库的东西。
+
+## 补记（2026-09-24，#36 把上传那一族**接进 app-task 玩法**：106 / 522 / beiyong1 三条从此真会往用户网盘写文件）
+
+### 一、起因与"这一轮到底交付了什么"
+
+用户那句"appTask 里面那一堆都没实现啊"要的是 **#9 那张 16 次拉全的表接上写侧**。上一轮（#35）
+落了上传族四枪却**没有调用点**，`taskMatrixToolGaps` 里还挂着 12 条。本轮把其中**三条**接进执行链：
+
+| 任务 | 旧实现那一支 | 接上之后本仓做什么 |
+| --- | --- | --- |
+| 106 | `106: uploadRandomFile(ctx)` | 前置打卡 → 传**一个**文件（循环体那一拍**没有**） |
+| 522 | 循环 `uploadRandomFile` + `process >= 100` 停表 | 前置打卡 → 最多传 `Rounds`（5）个，**每轮后等一拍** ⇒ 一趟最多 6 拍 |
+| `beiyong1` 组里"名字写着上传 + 图/照" | `handleTaskClick` **之外**那句裸 `uploadRandomFile` | 打卡（受 `currstep` 门）→ 那一拍 → 传一个 |
+
+`taskMatrixRunners` 2 → **4** 条、`taskMatrixToolGaps` 12 → **10** 条。⚠ 剩下那 10 条里的
+**113 / 1014** 卡的**不是上传族**（一条卡 `authTokenRefresh.do`＝新登记的 Q32，一条卡
+`convertPdfFromYunFile`），别把"上传接上了"读成"这四条只差接线"。
+
+### 二、落点
+
+| 层 | 文件 | 干什么 |
+| --- | --- | --- |
+| 分派 | `internal/app/task_matrix_dispatch.go`（+145 行） | 新增 `taskUploadShape`（`Rounds` / `StopAtProcess` / `Channel` / `Op` / `Ext` / `PaceEachRound`）与 `taskUploadOne()`；`TaskStepPlan.Upload`、`TaskRunnerSpec.Upload`；106 / 522 进 runner 表；`stepForBeiyong1` 按**任务名**交 Upload |
+| 执行 | `internal/app/task_matrix_run.go`（+303 行 / 820 行） | `cloudUploader`（三样前置逐条拦：随机源、`deviceid`、`Authorization`）、`runUploads`（上限 + 停表 + 三态结局 + 逐轮原因）、`apply` 的 `paced` 局部、`runRunner` 的前置失败早退、`SummaryLine` 新增两句、`CloudFileIDs` 一路带到结果 |
+| 记录 | `internal/app/task_matrix_run.go` 的 `TaskStepRecord` | `Uploads`（这一条**传出去**几个，秒传算、`exist` 不算）与 `UploadNote`（停表 / "已存在"这类**不算失败**的补充） |
+| 接线 | `internal/server/run_dispatch_app_task_test.go`（215 行） | 那条跨层用例从三条任务改成四条（补 107 缺口），并钉 `hcy/file/create` → `PUT` → `hcy/file/complete` 各 1 发 —— 这一族走的是**另一个基域**（`personal-kd-njs`），所以这一条同时钉住"106 真接到了网盘那一族" |
+| 登记 | `scripts/check-go-jsontags.cjs` | 新增 `taskUploadShape` 一条（常量表的元素不是数据模型；`StopAtProcess` 读的是语义未验证的 `process`＝R15；`Channel/Op/Ext` 决定的是零实拍那一发的请求体＝R27）；改写三条**过期**理由（"没有调用点"这一句对 `TaskMatrix` / `TaskMatrixRunResult` / `CloudUploadReceipt` 已不成立） |
+
+### 三、⭐ 这一轮的三条横向结论
+
+1. **门只管打卡，不管上传**。beiyong1 那一支旧实现的 `clickTaskWithStep` 在 `currstep != 0`
+   时返回的是 `true`（它只是**不点**，不是"这条别再往下走"），于是那一拍与后面的
+   `uploadRandomFile` 照做。读成"门挡住 ⇒ 整条什么都不做"的表现：`currstep` 非 0 的那些
+   上传任务一条都不做，而界面上它们仍显示"按规则跳过"。（变异 M5 就是这一格，红在
+   `TestTaskMatrixRunBeiyong1UploadsAfterThePace`。）
+2. **前置那一发"发了但失败" ⇒ 玩法整条不跑**。旧实现那句 `sleep(500)` 与 runner 调用都包在
+   `if (await clickTaskWithStep(...))` **里面**。只有 409 / 1005 时这一格的代价是"少一发入口
+   上报"；接上传之后它决定的是"**上游没认这条任务时还要不要往用户网盘写文件**"⇒ 必须照。
+   新增 `TestTaskMatrixRunPreambleClickFailureWritesNoFiles`（M3：去掉那句早退，只有它红）。
+3. **节奏按条记，不是一个 runner 一份**。`Paced`（玩法之后那一拍）与 `PaceEachRound`
+   （522 循环体那一拍）是两个来源，`apply` 里那个 `paced` 局部负责"两边各等一次、不叠成两次"。
+   混成一个的表现：要么 522 变成"连传 5 个零间隔"，要么 106 白等一拍 —— 都不报错。
+   （M4＝去掉 `!paced` 闸 ⇒ beiyong1 那条红；M6＝`PaceEachRound` 恒真 ⇒ 106 / beiyong1 与
+   **接线层**那条一起红。）
+
+### 四、夹具层踩到的一格（写给下一轮）
+
+`liveTaskScript` 与 server 侧 `probeScript` 对**没编路由**的 URL 回 404（刻意不给空体，为了把
+排查方向指对）。接上传之后这条口径变得有代价：少给一条 happy `task/click` 路由 ⇒ 前置那一发失败
+⇒ **整条玩法不跑**，于是"停表那一档"红成"为什么没停表"、"id 那几格"红成"为什么是空的"。
+四条相关用例因此各加一句**证明它真的走到了那一层**的守卫（`Steps[0].Err == ""`、`creates == 1`），
+`exist` 那一档的夹具更**刻意带回**上游那份别人的 `fileId` —— 否则"exist 也记 id"这一类错误
+只在"后两枪恰好 0 发"时才红。口径：**计数断言要能指名它挡住了什么**。
+
+### 五、成文就地订正（不留补记）
+
+- `internal/app/cloud_upload.go` 文件头那一节「这一族今天**没有调用点**」→「调用点：两条玩法在用」，
+  并写明"**有调用点 ≠ 跑通过**"，以及今天只兑现了"收 id"这一半、`DeleteCloudFiles` 仍没人调。
+- `docs/pending-decisions.md` **P1**：挡的不再是"接线"而是"跑通"；现在管三件事（① 这一族从未真打
+  ＋ R27 三枪零实拍 ＋ R28 鉴权画像未定；② 清理无调用点 ⇒ **真跑一次会在用户网盘留下 `asign-*.png`**；
+  ③ `batchTrash` 自身零实拍）。新增 **Q32**（113 那条前置用哪一口顶：旧实现 `refreshAuthToken` 走
+  `authTokenRefresh.do`，本仓**刻意不实现**那一个服务、返回值又被丢弃 ⇒ "拿已实测的
+  `user/auth/refreshToken` 顶"是**做另一件事**，与"留在缺口表"二选一，**待用户拍板**）。
+- `internal/upstream/app_task_list_v2.go`：`Process` 那一格从"纯交出不判"改准为"有一个消费者
+  （522 停表）"，⚠ 同时写明那是**照抄旧实现的读法**、语义仍未验证（R15）。
+- `docs/business-feature-inventory.md` §2.2 / §2.3 / §2.4：缺口改成"14 种玩法里 **10 种接不上**
+  （8 缺端点族 / 2 缺自己那一口）"，⭐ 标注这一条能力今天会**往用户网盘写文件**；§2.3 任务拓展
+  那一支**自己仍然没接**；§2.4 补"走 runner 的那四条"与"522 一趟 6 拍"。
+
+### 六、验证
+
+- 新增 **9 条** app 用例（`TestTaskRunnerUploadShapes`、`TestStepForBeiyong1UploadNameCarriesTheUploadShape`、
+  106 单传、522 循环、停表、前置失败不写文件、beiyong1 那一拍、两种"什么都不写"的结局、缺 `deviceId`）
+  ＋ 接线层那一条改写。
+- **反向验证六条**，全部如预期变红、跑完逐条还原（还原后 `gofmt -l` 空、`go vet ./internal/...` 干净、
+  `internal/app` 与 `internal/server` 两包测试回绿）：
+  (M1) 停表判据失效 → 只 `…StopsAtProcess` 红；(M2) `exist` 也记 id → 编排层与上游层各红一次；
+  (M3) 前置失败不早退 → 只 `…WritesNoFiles` 红；(M4) 末尾那一拍不看"前面等过没有" → beiyong1 那条红
+  （⚠ 直接删 `&& !paced` 不可编译：`paced` 会变成"声明未使用"，所以写成恒真形式）；
+  (M5) 门挡住连上传也不做 → beiyong1 那条红；(M6) 每轮那一拍恒发 → 106 / beiyong1 **与接线层**那条一起红。
+- **门禁**：本轮改动落定后跑过两次 `node scripts/gates-go.js`，都写「**十项门禁全绿**」。
+  第一次含**冷**的 test 档：**总耗时 43.6s**（逐条：build 1.1s，vet 0.4s，fmt 0.1s，test 37.9s，
+  deps 3.4s，filenames 0.2s，idents 0.3s，golden 0.1s，jsontags 0.1s，md-tables 0.1s）；
+  本节成文后又跑一次仍全绿，**总耗时 6.4s**（test 0.7s —— ⚠ 那是 go 的测试缓存命中，
+  门禁脚本没传 `-count=1`，所以"多少秒"这一格只在冷跑时才是全量耗时）。
+  ⚠ `node scripts/gates-web.js` 的
+  **typecheck 红**，红在 `web/src/pages/schedules-page.ts` 那四处（`RowRefs` 少 `editBtn`/`deleteBtn`、
+  `Expected 0 arguments`）—— 那是**别人在飞的 web 重构**（未跟踪的 `web/src/pages/*` 与删掉的
+  `ui/dialog.tsx`/`ui/icons.tsx`），**本轮零 web 改动**，按 §2 不碰不替它定格。
+
+### 七、遗留
+
+1. ❓ 这一族**从未真打上游**：三枪的形状、`exist`/`rapidUpload`/`uploadUrl` 到底回不回、
+   鉴权认哪套＝R27 / R28。补法同 P1 第三档（测试号传一个小文件再 `batchTrash` 掉）。
+2. ⚠ **清理那一半仍没接**（#37 候选）：`CloudFileIDs` 今天只进小结（"网盘新增 N 个（未清理）"、
+   "另有 N 个占位未传完，也要清理"），没有任何地方删它们 ⇒ **现在真跑一次 `app-task` 就会在用户
+   网盘留下 `asign-*.png`**。这是本轮之后新出现的代价，接之前别真跑。
+3. ⏭ **Q32**（113 的前置那一口拿什么顶）待拍板；1014 仍缺 `convertPdfFromYunFile`。
+4. ⚗ §3.9 偏大：`internal/app/task_matrix_run_test.go` **1262 行**（本轮 +428）、
+   `task_matrix_run.go` **820**（+303）、`run_dispatch_app_task_test.go` 215。下一轮再加就往
+   "读表 / 打卡 / 玩法 / 上传 / 复查"拆；`docs/status.md` 3300+ 行，Q16 的拆分方案仍待批。

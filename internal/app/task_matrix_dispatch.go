@@ -88,6 +88,15 @@ type TaskStepPlan struct {
 	// beiyong1 的"上传图/照"那一条旧实现是**先打卡、再上传** ⇒ 打卡照发，
 	// 上传那一半缺，得在结论里说出来。
 	ToolGap string
+	// Upload 非 nil ⇒ 这一条除了（可能有的）打卡之外，还要**往网盘传文件**（**写**）。
+	//
+	// 两个来源：① [StepRunner] 从 [taskRunnerSpec.Upload] 抄过来（106 / 522）；
+	// ② beiyong1 那一支按**任务名**决定（旧实现 `tasks.ts:73-77`）。
+	//
+	// ⚠ 为什么由分派层**抄一份**而不是让执行层自己去查 runner 表：
+	// 那样"这一条要做什么"就有两个真相源，而 beiyong1 那一支**根本没有 runner**
+	// （它是按名字判的），执行层必须能只凭 plan 就把两路都跑对。
+	Upload *taskUploadShape
 	// Paced 为真 ⇒ 真的发过枪之后等一点间隔（旧实现只在 `handleTaskClick` 里 `sleep(500)`，
 	// default 分支那次盲点**不等**。把两边混成一个的表现：
 	// 一天十几条任务全变成"零间隔连发"，那是真实客户端不会有的节奏。
@@ -171,6 +180,64 @@ func taskCurrStepOf(item upstream.TaskV2Item) int64 {
 	return *item.CurrStep
 }
 
+// taskProcessOf 读条目自己的 `process`；缺席当 0。
+//
+// ⚠ "当 0"不是偷懒，是照抄旧实现那句 `task.process >= 100`：JS 里 `undefined >= 100`
+// 为 **false** ⇒ 上游没给那一格时旧实现**不会**停。反向（没给就当满 100）的表现是
+// 一条都不传，而界面上说的是"上传 0 个"。
+//
+// ⚠ 这一格是**语义未验证**的读数（R15：实拍三条恒 0 而同批条目全 `FINISH`），
+// 拿它当停表之所以安全，是因为真正兜底的是 [taskUploadShape.Rounds] 那个上限。
+func taskProcessOf(item upstream.TaskV2Item) int64 {
+	if item.Process == nil {
+		return 0
+	}
+	return *item.Process
+}
+
+// taskUploadShape 是"这一条的第二半是往网盘传文件"的**参数集**。
+//
+// 做成数据而不是闭包，与 [taskRunnerSpec] 同一条理由：判据要能在没有网络的情况下被钉住。
+// 零值不成一档 —— 所以"要不要传"用 `*taskUploadShape` 是否为 nil 表达，这里不设 `None`。
+type taskUploadShape struct {
+	// Rounds 是**最多**传几个（旧 522 那句 `每月上传任务单日数量 ?? 5`）。
+	//
+	// ⚠ 本仓没有"每月上传任务单日数量"这一格配置（全仓 grep 零命中）⇒ 取旧实现的
+	// **默认值 5**，钉成 [taskMatrixUploadRoundsPerRun]。要开成参数面得连
+	// `docs/cli-usage.md` 与 WebUI 一起改，属 Q32 那一档，不在这里单方面决定。
+	Rounds int
+	// StopAtProcess > 0 ⇒ 每传一个之前先看条目自己的 `process`，达到就停（旧 522 的 100）。
+	//
+	// ⚠ 这一格读的是**语义未验证**的 `process`（R15：实拍三条恒 0 而同批条目全 `FINISH`）。
+	// 用它的理由不是"它靠谱"，是"旧实现读它"；而**上限 [Rounds] 挡住了最坏情况** ——
+	// 就算 `process` 永远读到 0，这一趟也最多传 5 个，不会变成"连传 100 个"。
+	StopAtProcess int64
+	// Channel 空 ⇒ 安卓档（旧 `uploadRandomFile` 不带 channelSrc 时的默认）。
+	Channel upstream.CloudChannel
+	// Op 空 ⇒ upload。⚠ 只有安卓档读它（`x-yun-op-type` 的 2 只在备份档出现）。
+	Op upstream.CloudOpType
+	// Ext 空 ⇒ `.png`（旧实现那句 `options.ext || ".png"`）。
+	Ext string
+	// PaceEachRound 为真 ⇒ **每传完一个**等一拍（旧 522 循环体末尾那句 `sleep(500)`，
+	// 包括最后一轮 ⇒ 与 [TaskStepPlan.Paced] 那一拍是**两次**等待，照抄）。
+	//
+	// 106 与 beiyong1 那一支的 runner 体里**没有**这一句 ⇒ 假。把它们混成一个
+	// 的表现：要么 522 变成"连传 5 个零间隔"，要么 106 白等一拍 —— 都不会报错，
+	// 只在"哪天被判成脚本"时最难查的那一类差异上。
+	PaceEachRound bool
+}
+
+// taskMatrixUploadRoundsPerRun 是 522 那一趟最多传几个（旧实现的 `?? 5` 那一档）。
+const taskMatrixUploadRoundsPerRun = 5
+
+// taskUploadOne 是"就传一个"那一档（106 与 beiyong1 的名字门共用它）。
+//
+// 单独一个函数是为了让"106 与 beiyong1 走的是同一档形状"这件事可断言
+// （旧实现两处都是裸的 `uploadRandomFile(ctx)`，没有任何参数差别）。
+func taskUploadOne() *taskUploadShape {
+	return &taskUploadShape{Rounds: 1}
+}
+
 // taskRunnerSpec 是一条专属 runner 的**外形**：它要不要先打卡、用什么 key。
 //
 // 为什么要把它做成数据而不是闭包：判据（"409 要先打卡、用 task2"）要能在
@@ -182,14 +249,24 @@ type taskRunnerSpec struct {
 	OpensEntry bool
 	// FinalKey 是 runner 自己那一发打卡的 `key`；空串 ⇒ 不打这一发。
 	FinalKey string
+	// Upload 非 nil ⇒ 这条 runner 的**最后一件事**是往网盘传文件（**写**：会在用户
+	// 网盘里留下真文件）。旧实现 `106: uploadRandomFile(ctx)` /
+	// `522: 循环 uploadRandomFile` 那两条的形状。
+	Upload *taskUploadShape
 }
 
 // taskMatrixRunners 是**本仓已经接上**的专属玩法表。
 //
-// ⚠ 表里只有两条，而旧实现有十四条 —— 其余十二条在 [taskMatrixToolGaps]。
-// 这两条是"整条链今天真的能跑完"的：入口上报（**零实拍**，见 `app_task_click.go` 文件头）
-// + 一发打卡（本族那一发只有**两发**实拍，都在 `m.mcloud.139.com`；另两发同名端点在
-// `:7071`，属 notice 与分享码那两族 —— 别把它们算成这一发的样本）。
+// ⚠ 表里四条，而旧实现有十四条 —— 其余十条在 [taskMatrixToolGaps]。
+// 前两条（409 / 1005）是"整条链今天真的能跑完"的：入口上报（**零实拍**，见
+// `app_task_click.go` 文件头）+ 一发打卡（本族那一发只有**两发**实拍，都在
+// `m.mcloud.139.com`；另两发同名端点在 `:7071`，属 notice 与分享码那两族 ——
+// 别把它们算成这一发的样本）。
+//
+// 后两条（106 / 522）是 2026-09-24 随上传族接上的，⚠ 它们**会往用户网盘写文件**，
+// 而那三枪**零实拍**（R27）+ 同一台主机的鉴权画像未定（R28）⇒ 今天能不能真跑通**没有结论**，
+// 只是"形状与顺序按旧实现落好了"。这一族挂在 `app-task` 那条能力上，而它
+// `RunInBatch:false`（调度与批量都不替它跑，只有界面上点那一下才会真发）。
 //
 // ⚠ 旧实现在跑 runner **之前**还有一发通用打卡（`handleTaskClick` 里那句
 // `clickTaskWithStep`，key 恒 `task`、受 `currstep == 0` 门约束）。
@@ -202,6 +279,22 @@ var taskMatrixRunners = map[int64]taskRunnerSpec{
 	// ⇒ 同一条任务在一趟里被打卡**两次**（前置那一发 + 这一发）。照抄：
 	// 改成一次是另一种行为，而我们读不到上游对"重复打卡"的处置。
 	1005: {Name: "云朵中心入口(新)", OpensEntry: true, FinalKey: taskClickKeyDefault},
+	// 旧实现 `runners.ts:41-44`：runner 只做一件事 —— `uploadRandomFile(ctx)`，
+	// **不带任何参数** ⇒ 根目录 + 安卓档 + `.png` + 一个。它**没有** `FinalKey`：
+	// 玩法自己不再打一发（前置那一发由 [PlanTaskStep] 按门决定）。
+	106: {Name: "上传一个随机文件", Upload: taskUploadOne()},
+	// 旧实现 `runners.ts:117-125`：`for i < (config.tasks?.每月上传任务单日数量 ?? 5)`，
+	// 每轮先看 `task.process >= 100` 就 break，传一个、等 500ms。
+	// ⚠ 旧实现那个循环**没有 break 之外的停止条件**：`process` 不涨它就固定传满 5 个
+	// （上限就是那格配置的默认值）。这里保持同一形状（[taskUploadShape.Rounds] 是上限，
+	// [taskUploadShape.StopAtProcess] 是那一格读数）。
+	// ⚠ `PaceEachRound` 是它**与 106 唯一的形状差别**（旧实现循环体里多那句 sleep）。
+	522: {
+		Name: "循环上传凑满 100 个",
+		Upload: &taskUploadShape{
+			Rounds: taskMatrixUploadRoundsPerRun, StopAtProcess: 100, PaceEachRound: true,
+		},
+	},
 }
 
 // taskMatrixToolGaps 是"旧实现有专属玩法、本仓还接不上"的那批，**逐条写明缺哪一族**。
@@ -209,15 +302,25 @@ var taskMatrixRunners = map[int64]taskRunnerSpec{
 // ⚠ 这张表的价值就在**理由文本**上：它直接进结论与界面，
 // 用户看一眼就知道"下次要补的是上传还是邮箱"。空话（"未实现"）等于没写。
 var taskMatrixToolGaps = map[int64]string{
-	106:  "上传文件要网盘那三枪（file/create → PUT → file/complete）：三枪 2026-09-24 已落码但**没有本条的调用点**，且 PUT/complete 零实拍（待拍板 P1）",
-	113:  "PC 客户端上传 = 同一族三枪 + PC 端 channelSrc（`CloudChannelPC` 已有）：缺的是本条的调用点与 PC 档实拍（P1）",
-	522:  "循环上传到 100 个 = 同一族三枪（已落码、缺本条的调用点），且进度字段 `process` 的口径未验证（P1）",
+	// ⚠ 113 缺的**不是**上传那一族（PC 档的三枪形状 `CloudChannelPC` 已落码并已接进 runner 表），
+	// 而是旧实现那条前置：`runners.ts:110-115` 先 `refreshAuthToken(ctx)`
+	// （= `aas.caiyun.feixin.10086.cn/tellin/authTokenRefresh.do`，XML 体、content-type 写 json），
+	// 而本仓**刻意不实现那一口**（理由写在 `internal/upstream/auth_refresh.go` 文件头：
+	// 零抓包、App 流量里从未出现，两条都未实测时选有实测的那条）。
+	// 于是这一条变成一个**真问题**而不是一个待办：旧实现那一发的返回值**被丢弃**
+	// （`refreshAuthToken` 交回新 token 而 `113` 没用它）⇒ 它对业务的全部作用就是
+	// "上游看到一次 PC 侧的 token 刷新请求"。要不要用本仓已实测的 `user/auth/refreshToken`
+	// 顶它（换掉的是另一个服务），**待拍板 Q32**。
+	113: "PC 客户端上传：三枪与 PC 档已落码，缺的是旧实现那一发前置 `authTokenRefresh.do`" +
+		"（本仓刻意不实现那一个服务，见 `internal/upstream/auth_refresh.go` 文件头）⇒ 用哪一口顶它待拍板 Q32",
 	107:  "创建云笔记要笔记服务那一族（note 鉴权 + 建 + 删），本仓未实现",
 	434:  "分享文件要外链那一族（getOutLink / delOutLink），本仓未实现",
 	472:  "体验 139 邮箱要邮箱会话那一族（autologin + PE 活跃上报 + 邮箱市场 click），本仓未实现",
 	473:  "同 472：邮箱会话那一族未实现",
 	1004: "给好友发邮件要邮箱会话 + 写信那一族，本仓未实现",
-	1014: "PDF 转换 = 上传那一族（已落码、缺本条的调用点）+ 邮箱侧转换接口（那一族整个未实现）（P1）",
+	// ⚠ 1014 的**上传那一半今天可用**（同一族三枪已接进 runner 表），挡它的是邮箱侧那一口
+	// `convertPdfFromYunFile`（本仓零实现、零实拍）。留在本表是为了不让它被当成"只差接线"。
+	1014: "PDF 转换 = 上传（已可用）+ 邮箱侧 `convertPdfFromYunFile`（那一口本仓零实现）⇒ 缺的不是上传族",
 	1020: "邮箱资产备份要邮箱会话那一族，本仓未实现",
 	1028: "AI 工作台要邮箱会话 + DES/RSA 派生 + SSE 对话那一族，本仓未实现",
 	585:  "AI 相机的玩法链本仓未实现",
@@ -240,7 +343,7 @@ func PlanTaskStep(item upstream.TaskV2Item, in taskStepInput) TaskStepPlan {
 	}
 
 	if spec, has := taskMatrixRunners[id]; has {
-		plan := TaskStepPlan{Kind: StepRunner, Runner: spec.Name, Paced: true}
+		plan := TaskStepPlan{Kind: StepRunner, Runner: spec.Name, Paced: true, Upload: spec.Upload}
 		key, click := taskClickGate(id, item, taskClickKeyDefault)
 		if !click {
 			// 旧实现这一格**不打卡**，但 runner 照样跑（`clickTaskWithStep` 直接回 true）。
@@ -270,26 +373,40 @@ func PlanTaskStep(item upstream.TaskV2Item, in taskStepInput) TaskStepPlan {
 // stepForBeiyong1 是 `case "beiyong1"` 那一支。
 //
 // 它与 default 的**关键差别**：这一支的打卡要过 `currstep == 0` 那道门
-// （因为它走的是 `handleTaskClick`），而 default 的盲点**不过门**。
+// （因为它走的是 `handleTaskClick`），而 default 盲点**不过门**。
 // 把两边混成一个的表现：给实拍那三条 `currstep` 为 4/6/8 的条目各发一发打卡
 // —— 上游记成"做了"，而我们一件都没做。
+//
+// ⚠ 那一支**还有第二半**（旧实现 `tasks.ts:72-83`）：打卡之后，
+// "名字里写着上传 + 图/照"的条目要**真往网盘传一个文件**。
+// 这里要说清一处**门只管打卡、不管上传**：旧实现的 `clickTaskWithStep` 在
+// `currstep != 0` 时返回的是 `true`（它只是**不点**，不是"这条别再往下走"），
+// 于是那句 `uploadRandomFile` 照样执行。所以本函数在 `!click` 那一支
+// **仍然**把 Upload 交出去（表现成 [StepBlockedByRule] + 一次真上传），
+// 而不是"门挡住 ⇒ 整条什么都不做"。把这两格混成一个的表现：
+// `currstep` 非 0 的那些上传任务从此一条都不做，而界面上它们仍显示"按规则跳过"。
 func stepForBeiyong1(id int64, item upstream.TaskV2Item) TaskStepPlan {
 	plan := TaskStepPlan{}
 	if reason, gap := taskMatrixToolGaps[id]; gap {
 		plan.ToolGap = reason
 	}
 	if name := taskNameOf(item); uploadNamedTask(name) {
-		plan.ToolGap = "任务名写着上传（" + name + "）：" +
-			"旧实现打卡后还要真往网盘传一个文件，那一族三枪本仓未实现（P1）"
+		// 旧实现这一句是裸的 `uploadRandomFile(ctx)` ⇒ 与 106 同一档形状。
+		plan.Upload = taskUploadOne()
+		plan.Reason = "任务名写着上传（" + name + "）⇒ 打卡之后按旧实现再传一个文件"
 	}
 	key, click := taskClickGate(id, item, taskClickKeyDefault)
 	if !click {
 		plan.Kind = StepBlockedByRule
-		plan.Reason = "beiyong1 这一组的打卡门是 currstep == 0，本条是 " +
+		gate := "beiyong1 这一组的打卡门是 currstep == 0，本条是 " +
 			strconv.FormatInt(taskCurrStepOf(item), 10)
-		if plan.ToolGap != "" {
-			plan.Reason += "；" + plan.ToolGap
+		if plan.Upload != nil {
+			gate += "（打卡不发，但上传照做 —— 见函数头那句「门只管打卡」）"
 		}
+		if plan.ToolGap != "" {
+			gate += "；" + plan.ToolGap
+		}
+		plan.Reason = gate
 		return plan
 	}
 	plan.Kind = StepClick

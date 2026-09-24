@@ -177,7 +177,7 @@ const UNTAGGED_ALLOWED = {
   'internal/app/task_matrix.go:TaskMatrixFailure':
     '一次拉取的失败记录，`Err` 是 `*core.Error`（其对外文案走白名单、原文只进日志）⇒ 整块 marshal 等于把上游原文当结构化字段承诺给前端',
   'internal/app/task_matrix.go:TaskMatrix':
-    '十六次拉取聚合出的内存结论。今天**没有调用点**（这条链没登记成能力）；`Items` 的语义是"按 name 去重、保留 id 小的那条"，去重取向是刻意不同③，补 tag 会把它变成对外契约',
+    '十六次拉取聚合出的内存结论。它的消费者是 app 层的执行链（`task_matrix_run.go` 两趟读表：待做集合与复查），聚合结果本身不出接口 ⇒ 对外形状由 `TaskMatrixRunResult` 那一格负责；`Items` 的语义是"按 name 去重、保留 id 小的那条"，去重取向是刻意不同③，补 tag 会把它变成对外契约',
   'internal/upstream/app_notice.go:NoticeTaskSlot':
     '公告任务的一个槽（`cloudStatus`/`sum`/`progress`/`taskStatus`）。四个字段全是指针，"上游没给"与"给了 0"必须分得开；`cloudStatus` 的语义仍是**猜的对应关系**',
   'internal/upstream/app_notice.go:NoticeTaskInfo':
@@ -634,6 +634,8 @@ const UNTAGGED_ALLOWED = {
     '分派要的外部事实（备份读数 + 本地日历日）。⚠ `BackupKnown` 与 `BackupOn` **必须分两格**：旧实现那句是严格 `=== false`，"没读到"与"读到 false"是两回事 —— 而 marshal 之后 `BackupOn:false` 与"没读到"在 JSON 里长得一模一样，正是这一对要防的误读',
   'internal/app/task_matrix_dispatch.go:taskRunnerSpec':
     '专属玩法常量表的一条（名字 + 要不要发入口上报 + 最后一发带哪枚 `key`）。它是**常量表的元素**不是数据模型（与 `upstream.SmRule` 同一条理由）；且那枚 `FinalKey` 的两档之一**零实拍**',
+  'internal/app/task_matrix_dispatch.go:taskUploadShape':
+    '一条玩法"要不要往网盘传文件、传几轮、什么形状"的**规格常量**（与 `taskRunnerSpec` 同一条理由：它是表的元素，不是数据模型）。三格语义全都依赖零实拍的那一族：`StopAtProcess` 读的 `process` 语义未验证（R15），`Channel` / `Op` / `Ext` 决定的是 `file/create` 文件型那一发的请求体，而那一发**本仓一条样本都没有**（R27）⇒ 出网会让"照旧实现落下来的形状"看起来像已被上游确认的协议',
   'internal/app/task_matrix_run.go:TaskMatrixRun':
     '这一条链的**入口装配**（内嵌 `SignInWorld` + `Wait` 注入点 + `SkipVerify`）。⚠ 它内嵌的 `SignInWorld` 带着 `Store` 与换到的会话，一旦可序列化就顺着日志出去（同 `SmsCredential` / `AppLoginInput` 那两条：里面装凭据的入参打包永不补 tag）',
   'internal/app/task_matrix_run.go:TaskStepRecord':
@@ -643,7 +645,7 @@ const UNTAGGED_ALLOWED = {
   'internal/app/task_matrix_run.go:TaskRunCounts':
     '一次运行的计数（读 / 待做 / 打卡 / 玩法 / 失败 / 缺口 / 规则跳过 / 需人工 + 复查四格）。它是 `SummaryLine()` 那一句人话的**原料**，界面上今天没有任何一格按 key 读它（`capability.output` 在 `web/src` 里零命中）⇒ 补 tag 只会造出一份没人兑现、也没人测试的"字段契约"',
   'internal/app/task_matrix_run.go:TaskMatrixRunResult':
-    '一个账号这一趟的产出（`Steps` / `Verified` / `Counts` / `Notes`）。对外只经 `RunReport()` 的 `Summary`；`Steps[].Err` 与 `Notes[]` 里是上游原文与人话，marshal 会把"给人看的那一句"拆成一份没人对齐的结构',
+    '一个账号这一趟的产出（`Steps` / `Verified` / `Counts` / `Notes` / `CloudFileIDs`）。对外只经 `RunReport()` 的 `Summary`；`Steps[].Err` 与 `Notes[]` 里是上游原文与人话，marshal 会把"给人看的那一句"拆成一份没人对齐的结构。⚠ `CloudFileIDs` 里**只有**网盘对象 id，刻意不带预签名 `uploadUrl`（那条纪律在 `internal/upstream/app_cloud_upload.go` 文件头），且它今天只是一张"该清理"的清单——清理那一半还没接（#37）',
 
   // ── 网盘上传族（#35，2026-09-24 登记：`file/create` + `PUT` + `complete` + `batchTrash`）──
   // 这一族有本仓**最硬**的一条不补 tag 理由：`CloudFileCreated.UploadURL` 是**预签名上传地址**
@@ -653,7 +655,7 @@ const UNTAGGED_ALLOWED = {
   'internal/upstream/app_cloud_upload.go:CloudFileCreated':
     '`file/create` 的解析结果。⚠⚠ `UploadURL` 是**预签名直传地址**（URL 里就是一次性 token），与 `auth` 整串同一条纪律"只进不出" —— 这个结构体一旦被 marshal，离泄漏只差一次"顺手把 create 的响应写进日志/响应体"，而 `core.SecretValue` 那层保护**不在这条路上**（它是裸 `*string`，因为上游给的本来就是明文串，包一层反而遮住"这里曾是 URL"）。另外三格 `*string` 与两个布尔的区别也必须留在内存：`Exist` / `RapidUpload` 是编排层**三态结局**的唯一判据（见 `app/cloud_upload.go:CloudUploadOutcome`），而本口**文件型**零实拍（唯一样本是建目录那一型）⇒ 字段名与"会不会回这一格"都还没被上游确认过',
   'internal/app/cloud_upload.go:CloudUploadReceipt':
-    '一次上传的**内存收据**（结局 + fileId + 实际发出去的名字）。`Outcome` 是 int 枚举且**零值刻意是"未上传"**：marshal 出去前端拿到 `0` 既读不成"未上传"也读不成"已上传"，而这一格的正误决定**要不要往清理那一族交 id**（交错就是删用户自己的文件）。今天它也**没有**对外路径 —— 这一族还没有调用点（见文件头那一节）',
+    '一次上传的**内存收据**（结局 + fileId + 实际发出去的名字）。`Outcome` 是 int 枚举且**零值刻意是"未上传"**：marshal 出去前端拿到 `0` 既读不成"未上传"也读不成"已上传"，而这一格的正误决定**要不要往清理那一族交 id**（交错就是删用户自己的文件）。调用点今天有了（app 层 106 / 522 与 beiyong1 那三条玩法），但它仍**不出接口**：对外只有小结里"网盘新增 N 个文件（未清理）"那一句 ⇒ 补 tag 等于把一份还没人兑现的清理协议写成形状',
   'internal/app/cloud_upload.go:CloudUploadOptions':
     '一次上传的**可调参数**，零值 = 旧实现 `uploadRandomFile` 那一档。默认值由 `channelOrDefault` / `extensionOrDefault` / 上游层那两处**依次**补齐，补 tag 会造出第二个"默认值真相"；且 `Op` 只有 android 档读（web/PC 档忽略它），这个"档位决定哪一格生效"的关系不是字段能表达的',
   'internal/app/cloud_upload.go:CloudUploader':

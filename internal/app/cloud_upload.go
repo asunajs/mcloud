@@ -5,13 +5,16 @@ package app
 // 对应旧实现 `packages/core/src/utils/file.ts` 的 `uploadFile` / `uploadRandomFile` /
 // `deleteFiles`（三个函数的全部逻辑都在这里，请求形状在 `internal/upstream`）。
 //
-// # 这一族今天**没有调用点**
+// # 调用点：两条玩法在用（2026-09-24 #36 接上）
 //
-// 等它的是四条要上传的玩法（106 / 113 / 522 / 1014，见
-// `docs/pending-decisions.md` P1 与 `internal/app/task_matrix_dispatch.go` 的
-// `taskMatrixToolGaps`）与 `after` 的清理那一半。把它们接上之前，这一层是
-// "能编译、被测试钉住形状、但一次都没真打过上游"的代码 —— 这是**登记过**的状态，
-// 不是"做完了一半"。
+// 用它的是 `task_matrix_run.go` 里的 `runUploads`：106（传一个）、522（循环凑满）
+// 与 beiyong1 那一支"名字写着上传"的条目。仍**没有**调用点的是 113（缺的是旧实现
+// 那一发前置 `authTokenRefresh.do`，本仓刻意不实现那个服务 ⇒ 待拍板 Q32）、
+// 1014（缺邮箱侧那一口 `convertPdfFromYunFile`）与**清理**那一半
+// （`DeleteCloudFiles` 今天没人调，见 #37 与 `docs/pending-decisions.md` P1）。
+//
+// ⚠ "有调用点"≠"跑通过"：这一层今天仍然是**能编译、被测试钉住形状、一次都没真打
+// 过上游**的代码（P1 / R27）—— 这是**登记过**的状态，不是"做完了一半"。
 //
 // # ⚠ 四枪里三枪零实拍：这一层只保证"顺序与判据照旧实现"
 //
@@ -32,6 +35,10 @@ package app
 // 于是那个文件留在用户网盘里。本层在**所有**分支都尽量把已知的 FileID 交回
 // （见 [CloudUploadReceipt]），错误照回。这不算改业务语义：它只多交一个信息，
 // 让调用方能选择清理，而不删就什么都不少做。
+//
+// ⚠ 调用点今天**只兑现了"收 id"这一半**：`task_matrix_run.go` 把这些 id 原样收进
+// [TaskMatrixRunResult.CloudFileIDs]，并在小结里明说"未清理"，但**不**回头删 ——
+// 删除那一枪（`DeleteCloudFiles`）仍没有调用点，挂在 #37 与 `after` 那一族上。
 
 import (
 	"context"

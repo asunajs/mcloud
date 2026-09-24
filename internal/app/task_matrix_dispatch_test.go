@@ -216,23 +216,79 @@ func TestStepForBeiyong1UsesTheStepGate(t *testing.T) {
 	}
 }
 
-// TestStepForBeiyong1UploadNameKeepsClickButRecordsGap ⭐ 打卡照发、缺的那一半明说。
+// TestStepForBeiyong1UploadNameCarriesTheUploadShape ⭐ 打卡与上传**两半都在**。
 //
-// 这一格是"部分能做"的唯一形态：旧实现是"打卡 + 真上传"，我们只有前半。
-// 判反的两个方向都错 —— 整条挡掉 = 少做本可做的打卡；只当成功 = 界面上看不见还缺上传。
-func TestStepForBeiyong1UploadNameKeepsClickButRecordsGap(t *testing.T) {
+// 旧实现那一支是"打卡（受门约束）+ 真往网盘传一个文件"。判反的两个方向都错：
+// 整条挡掉 = 少做本可做的打卡；只打卡不传 = 界面上看不见还缺后半，而这条**已经**
+// 接上了，缺口那一句就不该再说"缺上传"。
+func TestStepForBeiyong1UploadNameCarriesTheUploadShape(t *testing.T) {
 	item := dispatchItem(598, "beiyong1", "上传照片到云端", "WAIT", 0)
 	plan := PlanTaskStep(item, taskStepInput{})
 	if plan.Kind != StepClick {
 		t.Errorf("打卡那一半仍该发，实得 %v", plan.Kind)
 	}
-	if plan.ToolGap == "" || !strings.Contains(plan.ToolGap, "上传") {
-		t.Errorf("缺的上传那一半必须写进结论，实得 %q", plan.ToolGap)
+	if plan.Upload == nil || plan.Upload.Rounds != 1 {
+		t.Fatalf("名字写着上传 ⇒ 该带一个文件的形状，实得 %+v", plan.Upload)
 	}
-	// 名字不含"图/照"的 ⇒ 旧实现那一支也不会去上传 ⇒ 不该报缺口。
+	// 与 106 同一档形状：旧实现两处都是裸的 `uploadRandomFile(ctx)`，参数一个都不差。
+	if spec := taskMatrixRunners[106]; *spec.Upload != *plan.Upload {
+		t.Errorf("beiyong1 的上传应与 106 同形状，实得 %+v vs %+v", *plan.Upload, *spec.Upload)
+	}
+	if plan.ToolGap != "" {
+		t.Errorf("上传已接上 ⇒ 不该再报这一半的缺口，实得 %q", plan.ToolGap)
+	}
+	// ⭐ 门挡住（currstep=4）时**只挡打卡**：旧实现 `clickTaskWithStep` 回 true，
+	// 于是那一拍与后面那句上传都照做 ⇒ plan 必须仍带着 Upload。
+	blocked := PlanTaskStep(dispatchItem(598, "beiyong1", "上传照片到云端", "WAIT", 4),
+		taskStepInput{})
+	if blocked.Kind != StepBlockedByRule {
+		t.Errorf("currstep=4 那一发打卡仍该被挡，实得 %v", blocked.Kind)
+	}
+	if blocked.Upload == nil {
+		t.Errorf("门只管打卡、不管上传 ⇒ 被挡的条目仍要交回上传形状，实得 %+v", blocked)
+	}
+	if !strings.Contains(blocked.Reason, "上传照做") {
+		t.Errorf("结论要说出「挡了打卡但传文件」，否则界面上只看得到「跳过」，实得 %q",
+			blocked.Reason)
+	}
+	// 名字不含"图/照"的 ⇒ 旧实现那一支也不会去上传 ⇒ 不该带形状。
 	plain := dispatchItem(599, "beiyong1", "开启自动备份", "WAIT", 0)
-	if got := PlanTaskStep(plain, taskStepInput{}); got.ToolGap != "" {
-		t.Errorf("名字没写上传的条目不该报上传缺口，实得 %q", got.ToolGap)
+	if got := PlanTaskStep(plain, taskStepInput{}); got.Upload != nil {
+		t.Errorf("名字没写上传的条目不该带上传形状，实得 %+v", got.Upload)
+	}
+}
+
+// TestTaskRunnerUploadShapes ⭐ 106 与 522 的形状差别**只有**轮数、停表与那一拍。
+//
+// 为什么在分派层钉：这三格都是"发出去才看得见"的参数（传几个、什么时候停、
+// 每轮等不等），而执行层只是照它们转圈 —— 在这里钉住，执行层的用例就只判时序。
+func TestTaskRunnerUploadShapes(t *testing.T) {
+	one := taskMatrixRunners[106].Upload
+	if one == nil || one.Rounds != 1 || one.StopAtProcess != 0 || one.PaceEachRound {
+		t.Errorf(`106 应是"传一个、不停表、循环体里不等"，实得 %+v`, one)
+	}
+	if one.Channel != "" || one.Op != "" || one.Ext != "" {
+		t.Errorf("106 的 runner 是裸的 uploadRandomFile(ctx) ⇒ 三格都不该带（默认档由编排层补），实得 %+v", one)
+	}
+	loop := taskMatrixRunners[522].Upload
+	if loop == nil {
+		t.Fatal("522 应带上传形状")
+	}
+	if loop.Rounds != taskMatrixUploadRoundsPerRun || loop.StopAtProcess != 100 || !loop.PaceEachRound {
+		t.Errorf(`522 应是"最多 %d 个、process 到 100 就停、每轮等一拍"，实得 %+v`,
+			taskMatrixUploadRoundsPerRun, loop)
+	}
+	// 两条 runner 都**不**自己补一发打卡：旧实现那两个 runner 体里没有 clickTask。
+	for _, id := range []int64{106, 522} {
+		if spec := taskMatrixRunners[id]; spec.FinalKey != "" || spec.OpensEntry {
+			t.Errorf("id %d 的 runner 体里只有上传，不该带打卡或入口上报，实得 %+v", id, spec)
+		}
+	}
+	// 已接上的四条**互不重叠**缺口（接上后没删缺口条目，界面上会永远说"没接玩法"）。
+	for id := range taskMatrixRunners {
+		if _, gap := taskMatrixToolGaps[id]; gap {
+			t.Errorf("id %d 已接 runner，仍留在缺口表里", id)
+		}
 	}
 }
 

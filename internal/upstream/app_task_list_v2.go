@@ -101,14 +101,17 @@ func TaskListV2Request(jwt, referer, marketname, group string) (core.HTTPRequest
 //
 // ⚠ `process` 在实拍三条里**恒为 0**，而同三条的 `state` 已经是 `FINISH`、`currstep` 是 4/6/8
 // ⇒ "进度到底读哪个字段"这一格**未验证**（与 `app_task_list.go` 里 [TaskItem] 那条注释同一个洞）。
-// 这里声明它只为把它**原样交出去**，不参与任何判据。
+// 2026-09-24 起它有**一个**消费者：app 层 522（循环上传）照旧实现那句
+// `task.process >= 100` 读它当停表 ⇒ 不再是"纯交出不判"。⚠ 但那是**照抄旧实现的读法**，
+// 不等于这一格的语义验过（仍登记在 `docs/pending-decisions.md` R15）。
 type TaskV2Item struct {
 	TaskItem
 	// Enable 是 `enable` —— 旧实现的门是 `enable !== 1` ⇒ 跳过。
 	Enable *int64
 	// CurrStep 是 `currstep` —— 旧实现把它带进 `task/click` 的 `step` 参数。
 	CurrStep *int64
-	// Process 是 `process` —— 见上面那条"恒为 0"的说明，只交出不判。
+	// Process 是 `process` —— 见上面那条"恒为 0"的说明：今天只有 522 那一档停表读它，
+	// 语义未验证（R15）。
 	Process *int64
 	// MarketName 是 `marketname` —— 实拍 `sign_in_3`（邮箱那一支应是另一个值，本仓无样本）。
 	MarketName *string

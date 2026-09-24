@@ -20,6 +20,32 @@ package app
 // 代价是读取请求数翻倍（16 → 32，再加每做一条一枪打卡）。
 // 所以有 [TaskMatrixRun.SkipVerify] 这一格，但它在"真发过枪"时**不省**（理由写在那条注释里）。
 //
+// # 这一条链还会**往用户的网盘写文件**
+//
+// 2026-09-24 起，四条玩法里有两条（106 / 522）与 beiyong1 那一支的"名字写着上传"
+// 会真的打上传那三枪（`file/create` → `PUT` → `file/complete`），表现是网盘根目录
+// 多出 `asign-*.png`。所以这一族比打卡更要紧的两件事：
+//
+//   - 那三枪**零实拍**（`docs/pending-decisions.md` R27）⇒ 这里只保证"顺序与判据
+//     照旧实现"，**不**保证跑得通；跑不通的原文进 [TaskStepRecord.Err]。
+//   - 造出来的文件 id 一律交回 [TaskMatrixRunResult.CloudFileIDs]，**包括失败路径上
+//     已经占下坑的那一个**（编排层刻意多交，见 `cloud_upload.go` 文件头）。
+//     本仓的清理那一口（`batchTrash`）已落码但**还没接进这一条链**（#37）⇒
+//     今天跑过之后那些文件**留在网盘里**，小结里那一格会说出来。
+//
+// # 前置那一发挂了 ⇒ **整条玩法都不跑**（照旧实现，但这一格在接上传之前无关紧要）
+//
+// 旧实现 `handleTaskClick` 的形状是 `if (await clickTaskWithStep(...)) { runner(); push; sleep }`
+// ⇒ 前置那一发**返回 false**（发出去了但上游回了失败，或传输层挂了）时，runner 根本不跑。
+// 在只有 409 / 1005 那两条时这一格被混掉了也没人疼（少一发入口上报而已），
+// 接上上传之后它决定的是"**上游都没接这条任务，还要不要往用户网盘写一个文件**"⇒ 照抄。
+//
+// ⚠ 两格别混：`currstep != 0` 那一档 `clickTaskWithStep` **返回 true**（它只是不点），
+// 所以玩法照跑 —— 那是"门只管打卡、不管玩法"，见 `task_matrix_dispatch.go` 的 [stepForBeiyong1]。
+//
+// 一处**已知不忠实**且刻意保留的差异：前置挂了时旧实现连 `handleTaskClick` 末尾
+// 那一拍 sleep 也不等，我们仍等（[apply] 末尾）。方向是"多等不少发"，不会多打任何一枪。
+//
 // # 与旧实现不同的三处（各自注释里都有）
 //
 //  1. `done`（"这趟做了哪些"）只记**真的发过枪**的 id；
@@ -83,7 +109,17 @@ type TaskStepRecord struct {
 	// 那两格的全部意义就是**说清楚**。
 	Reason string
 	// Err 是发出去了但失败时的原文（多条用 `；` 串起来）；全成功时为空。
+	//
+	// ⚠ 它也收"因为缺前置所以**没**发"的那几条（取不到 deviceId、随机源没接）——
+	// 口径与 [runRunner] 里入口上报那一格一致：这里说的是"这一条没做成"，
+	// 至于有没有出网由 [TaskStepRecord.Kind] 与计数那几格说。
 	Err string
+	// Uploads 是这一条**传出去**的文件数（秒传也算，`exist` 不算）。
+	// 0 ⇒ 这一条没有上传那一半（它不参与那四格复查，只回答"这一条写了几发文件"）。
+	Uploads int
+	// UploadNote 是上传那一半里**不算失败**的补充：按 `process` 提前停了、
+	// 上游说"已存在"所以没传。真失败的原文进 [TaskStepRecord.Err]。
+	UploadNote string
 }
 
 // TaskVerifyRecord 是复查那一趟对一条任务的读数。
@@ -115,6 +151,11 @@ type TaskRunCounts struct {
 	RuleSkipped int
 	// NeedsHuman 是"要人去 App 操作"的条数。
 	NeedsHuman int
+	// Uploaded 是这一趟**往网盘传出去**的文件数（秒传也算，`exist` 不算）。
+	//
+	// ⚠ 它**不按任务计**（与其余各格不同）：522 一条就能传 5 个。所以它不进
+	// 复查那四格，只在小结里回答"这一趟在用户网盘里写了几个文件"。
+	Uploaded int
 	// DoneNow / NotAcknowledged / AlreadyWas / StillOpen 是复查那四格。
 	DoneNow         int
 	NotAcknowledged int
@@ -144,6 +185,15 @@ type TaskMatrixRunResult struct {
 	VerifiedAgain int
 	// Notes 是给人看的零散结论（434 的分享进度、补打卡那两枪、复查没读成）。
 	Notes []string
+	// CloudFileIDs 是这一趟在用户网盘里**造出来**的文件 id（含失败路径上已占坑的）。
+	//
+	// 它是**清理那一族的输入**，而今天还没有人消费它（#37：接进 `after` 的
+	// `batchTrash` 与 run 产物账本）⇒ 跑完这一条，那些 `asign-*.png` 会留在网盘里。
+	// 所以小结里必带"网盘新增 N 个文件（未清理）"那一句，不让人从计数量级去猜。
+	//
+	// ⚠ 这里**只放 id**：文件名删除那一口用不上；而 `create` 回的预签名地址里
+	// 就是一次性 token ⇒ 绝不外带（凭据边界，见各 `docs/capture/` 样本的抬头）。
+	CloudFileIDs []string
 }
 
 // RunAccount 跑一个账号：读表 → 逐条分派 → 复查。
@@ -154,11 +204,16 @@ type TaskMatrixRunResult struct {
 func (r TaskMatrixRun) RunAccount(
 	ctx context.Context, account core.AccountID,
 ) (TaskMatrixRunResult, *core.Error) {
-	src, perr := r.Source(ctx, account)
+	// 走 [SignInWorld.Open] 而不是 [SignInWorld.Source]：上传那三枪要 `Authorization`
+	// 整串（另一套鉴权，不是会话票），而档案与凭据只能从同一份装配里拿
+	// （理由见 `signin_world.go` 里 [SignInOpening] 那条注释）。
+	opening, perr := r.Open(ctx, account)
 	if perr != nil {
-		return TaskMatrixRunResult{Account: account, Notes: []string{}}, perr
+		return TaskMatrixRunResult{Account: account, Notes: []string{},
+			CloudFileIDs: []string{}}, perr
 	}
-	result := TaskMatrixRunResult{Account: account, Notes: []string{}}
+	src := opening.Source
+	result := TaskMatrixRunResult{Account: account, Notes: []string{}, CloudFileIDs: []string{}}
 
 	matrix, perr := AppTaskMatrix(ctx, src)
 	if perr != nil {
@@ -170,7 +225,7 @@ func (r TaskMatrixRun) RunAccount(
 	pending := matrix.Pending()
 	result.Counts.Pending = len(pending)
 
-	exec := newTaskExecutor(r, src, account)
+	exec := newTaskExecutor(r, opening, account)
 	gate := exec.backupGate(ctx)
 	for _, item := range pending {
 		plan := PlanTaskStep(item, gate)
@@ -189,6 +244,7 @@ func (r TaskMatrixRun) RunAccount(
 			}
 		}
 	}
+	result.CloudFileIDs = append(result.CloudFileIDs, exec.cloudFileIDs...)
 
 	// 一枪都没发时跳过复查是**无损**的；发过枪就不给跳（见 SkipVerify 那条注释）。
 	if r.SkipVerify && len(exec.done) == 0 {
@@ -292,26 +348,35 @@ func (r TaskMatrixRun) clickOnce(
 // taskExecutor 是"把决定变成请求"那一层带的**跨条状态**。
 type taskExecutor struct {
 	run     TaskMatrixRun
-	src     *SignInSessionSource
+	opening SignInOpening
 	account core.AccountID
 	// done 是这趟**真的发过枪**的 id 集合（复查那四格的输入）。
 	done map[int64]bool
+	// src 是 [opening] 里那条会话源的投影（读表、打卡与复查共用一张票）。
+	src *SignInSessionSource
 
-	// deviceID 是惰性取的（只有那两条入口类 runner 需要它）。
-	// 取失败时 [deviceErr] 记下原因：那两条各自记失败、其余任务照跑 ——
+	// deviceID 是惰性取的：那两条入口类 runner 与上传那三枪都要它
+	// （`deviceid` 是旧实现主 http 实例的静态头，每一枪都带）。
+	// 取失败时 [deviceErr] 记下原因：需要它的每一条各自记失败、其余任务照跑 ——
 	// 一个活动侧接口挂了不该让整趟变成"这个号没跑成"。
 	deviceID  string
 	deviceErr *core.Error
 	deviceGot bool
+
+	// cloudFileIDs 是这一趟在网盘里造出来的文件 id（进结果，等清理那一族消费）。
+	cloudFileIDs []string
 
 	// shareBefore 是跑之前从 434 的名字里读到的天数。
 	shareBefore *int
 }
 
 func newTaskExecutor(
-	r TaskMatrixRun, src *SignInSessionSource, account core.AccountID,
+	r TaskMatrixRun, opening SignInOpening, account core.AccountID,
 ) taskExecutor {
-	return taskExecutor{run: r, src: src, account: account, done: map[int64]bool{}}
+	return taskExecutor{
+		run: r, opening: opening, src: opening.Source, account: account,
+		done: map[int64]bool{}, cloudFileIDs: []string{},
+	}
 }
 
 // apply 执行一个决定，交回那条任务的记录与"**这一条今天动过没有**"。
@@ -322,6 +387,13 @@ func newTaskExecutor(
 // 用户会看到一条他其实已经打过、只是打失败的枪挂在"仍待办"里；真正该说的是
 // "做了、上游没认"（VerifyFailed / `notAcknowledgedCount`）。
 // 所以这里只在**真的发出过请求**时回 true；上游怎么回应由 [TaskStepRecord.Err] 说。
+//
+// ⚠ 这一条口径同样覆盖**上传那三枪**：一条"只传了文件、没打卡"的（beiyong1 那支
+// 被 `currstep` 门挡住的那些）也算动过 —— 它真的出网了，还在网盘里留下了东西。
+//
+// `paced` 只为不把两处时机叠成两次等待：beiyong1 那一支旧实现在**上传之前**等
+// （那一拍在 `handleTaskClick` 里，上传在它外面），runner 那一支在**玩法之后**等
+// （`handleTaskClick` 末尾）。两边各等一次，合起来才是旧实现的节奏。
 func (e *taskExecutor) apply(
 	ctx context.Context, item upstream.TaskV2Item, plan TaskStepPlan,
 ) (TaskStepRecord, bool) {
@@ -329,21 +401,50 @@ func (e *taskExecutor) apply(
 		TaskID: derefTaskID(item), Name: taskNameOf(item),
 		Group: taskGroupOf(item), Kind: plan.Kind, Runner: plan.Runner, Reason: plan.Reason,
 	}
-	var fired bool
+	var (
+		fired    bool
+		paced    bool
+		problems []string
+	)
 	switch plan.Kind {
 	case StepClick:
 		_, cerr := e.run.clickOnce(ctx, e.src, plan.ClickKey, record.TaskID)
 		fired = true // 请求发出去了就算动过 —— 成没成看 Err，见函数头
-		record.Err = errText(cerr)
+		problems = append(problems, errText(cerr))
+		if plan.Upload != nil {
+			// 打卡挂了就没有那一拍：旧实现那句 `sleep(500)` 在
+			// `if (await clickTaskWithStep(...))` **里面**，而打卡失败时它是 false。
+			if cerr == nil {
+				e.pace(ctx)
+				paced = true
+			}
+			sent, uploadProblems := e.runUploads(ctx, item, plan.Upload, &record)
+			fired = fired || sent
+			problems = append(problems, uploadProblems...)
+		}
 	case StepRunner:
-		fired = e.runRunner(ctx, record.TaskID, plan, &record)
-	case StepBlockedToolGap, StepBlockedByRule, StepNeedsHuman:
-		// 什么都不发。这正是这三态的意义。
+		// 玩法自己那段（含它的上传）把原因直接写进 record.Err，见 [runRunner]。
+		fired = e.runRunner(ctx, item, plan, &record)
+	case StepBlockedByRule:
+		// beiyong1 那一支的门**只挡打卡**：旧实现 `clickTaskWithStep` 在 `currstep != 0`
+		// 时返回 true（只是不点），于是那一拍与后面的"名字写着上传"都照做。
+		if plan.Upload != nil {
+			e.pace(ctx)
+			paced = true
+			sent, uploadProblems := e.runUploads(ctx, item, plan.Upload, &record)
+			fired = sent
+			problems = append(problems, uploadProblems...)
+		}
+	case StepBlockedToolGap, StepNeedsHuman:
+		// 什么都不发。这正是这两态的意义。
+	}
+	if text := joinProblems(problems); text != "" {
+		record.Err = text
 	}
 	if record.Reason == "" && plan.ToolGap != "" {
 		record.Reason = plan.ToolGap
 	}
-	if fired && plan.Paced {
+	if fired && plan.Paced && !paced {
 		e.pace(ctx)
 	}
 	return record, fired
@@ -351,14 +452,21 @@ func (e *taskExecutor) apply(
 
 // runRunner 跑一条专属玩法，交回"**有没有真的发出过请求**"（口径同 [apply]）。
 //
-// 今天的两条形状一样（`前置打卡(受门约束) → mrp 入口上报 → 自己的那一发打卡`），
-// 差别只在最后一发的 key，所以按 spec 走，不为两条各写一份。
+// 今天的四条按 spec 走，不为每条各写一份：前两条形状一样（`前置打卡(受门约束) →
+// mrp 入口上报 → 自己的那一发打卡`），差别只在最后一发的 key；
+// 后两条（106 / 522）没有 `OpensEntry`、没有 `FinalKey`，玩法本体就是上传那一半。
 //
 // ⚠ "取不到 deviceId"那一档**不算发过**：入口上报压根没出网（旧实现在那里会带一发
 // 空 `deviceId`，我们不跟着做，成文见 `app_task_click.go` 文件头）。
+//
+// ⭐ 前置那一发**发了但失败** ⇒ 后面的全部跳过（旧实现 `handleTaskClick` 的 `if`
+// 包着 runner 那一句）。这一格在只有 409 / 1005 时是"少一发入口上报"，
+// 接上传之后它决定"上游没接这条任务时还要不要往用户网盘写文件"⇒ 必须照。
+// 仍交回 `fired=true`：那一发打卡确实出网了（"动过"的口径见 [apply]）。
 func (e *taskExecutor) runRunner(
-	ctx context.Context, id int64, plan TaskStepPlan, record *TaskStepRecord,
+	ctx context.Context, item upstream.TaskV2Item, plan TaskStepPlan, record *TaskStepRecord,
 ) bool {
+	id := derefTaskID(item)
 	spec, ok := taskMatrixRunners[id]
 	if !ok {
 		record.Kind = StepBlockedToolGap
@@ -368,13 +476,15 @@ func (e *taskExecutor) runRunner(
 	fired := false
 	var problems []string
 	if plan.ClickKey != "" {
-		if _, cerr := e.run.clickOnce(ctx, e.src, plan.ClickKey, id); cerr != nil {
-			problems = append(problems, "前置打卡失败："+cerr.Error())
-		}
+		_, cerr := e.run.clickOnce(ctx, e.src, plan.ClickKey, id)
 		fired = true
+		if cerr != nil {
+			record.Err = "前置打卡失败：" + cerr.Error() + " ⇒ 按旧实现的门，这一条的玩法整条不跑"
+			return fired
+		}
 	}
 	if spec.OpensEntry {
-		deviceID, derr := e.entryDevice(ctx)
+		deviceID, derr := e.accountDeviceID(ctx)
 		switch {
 		case derr != nil:
 			problems = append(problems, "入口上报没做成（取不到 deviceId）："+derr.Error())
@@ -391,12 +501,22 @@ func (e *taskExecutor) runRunner(
 		}
 		fired = true
 	}
-	record.Err = strings.Join(problems, "；")
+	if spec.Upload != nil {
+		sent, uploadProblems := e.runUploads(ctx, item, spec.Upload, record)
+		fired = fired || sent
+		problems = append(problems, uploadProblems...)
+	}
+	record.Err = joinProblems(problems)
 	return fired
 }
 
-// entryDevice 惰性取 H5 `deviceId`（同一趟只取一次，失败也只试一次）。
-func (e *taskExecutor) entryDevice(ctx context.Context) (string, *core.Error) {
+// accountDeviceID 惰性取 H5 `deviceId`（同一趟只取一次，失败也只试一次）。
+//
+// 两个消费者：那两条入口类 runner（`mrp …/doTask` 的查询参数）、上传那三枪
+// （`deviceid` 头 —— 旧实现是主 http 实例的静态头，每一枪都带）。
+// 之所以只取一次：这一趟它不会变，而换不到时每次都重试会把一次活动侧故障
+// 放大成"每条任务多一枪"。
+func (e *taskExecutor) accountDeviceID(ctx context.Context) (string, *core.Error) {
 	if e.deviceGot {
 		return e.deviceID, e.deviceErr
 	}
@@ -425,6 +545,106 @@ func (e *taskExecutor) pace(ctx context.Context) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 上传那一半（106 / 522 与 beiyong1 的"名字写着上传"）
+// ─────────────────────────────────────────────────────────────────────────────
+
+// cloudUploader 装配"能往网盘传文件"那一层（编排见 `cloud_upload.go`）。
+//
+// 三样前置各有各的"缺了会怎样"，所以逐条拦、不赌：
+//   - `Authorization`：来自 [SignInOpening.Credential]（schema v7 起库里存的就是整串）。
+//     取不到时整趟早就在 [SignInWorld.Open] 报错了，不会走到这里。
+//   - `deviceid`：旧实现主 http 实例的静态头，**每一枪都带**。"少这一上游理不理"
+//     本仓零样本 ⇒ 按旧实现的处置办（它在取不到 deviceId 时根本不开这一趟，
+//     见 `ai_avatar_run.go` 里同一格的说法），这里记一条失败、一枪不发。
+//   - 随机源：文件名与内容都由它造（旧 `randomHex`）。没接上就是造不出**任何**一枪
+//     的请求体，报"本工具侧缺接线"而不是 panic。
+func (e *taskExecutor) cloudUploader(ctx context.Context) (CloudUploader, *core.Error) {
+	if e.run.Random == nil {
+		return CloudUploader{}, core.NewInternal(
+			"随机源没接：造不出文件名与内容（本工具侧缺接线）")
+	}
+	deviceID, derr := e.accountDeviceID(ctx)
+	if derr != nil {
+		return CloudUploader{}, core.NewInternal(
+			"这一族每一枪都带 deviceid 头，取不到 deviceId 就不发（零样本，不赌少一个头）：" +
+				derr.Error())
+	}
+	return CloudUploader{
+		Up:       e.src.up,
+		Rng:      e.run.Random,
+		Auth:     e.opening.Credential.Authorization(),
+		DeviceID: deviceID,
+	}, nil
+}
+
+// runUploads 跑"这一条的第二半：往网盘传文件"，交回**有没有真的发出过请求**与
+// 逐轮的原因（由调用方并进 [TaskStepRecord.Err]）。
+//
+// 三条判据都出自旧实现，各自"改了会怎样"：
+//
+//   - **上限就是 `Rounds`**，`process` 只是提前停：旧实现那个循环读的是循环外
+//     那个 `task` 对象的 `process`，它在**这一趟里不会变**（没人中途重拉表）⇒
+//     "凑满 100 个"靠的其实是那格配置的默认值 5，不是那个读数。这里同样读快照，
+//     形状一致：`process` 真会涨就提前停，不涨也不会多传。
+//     ⚠ `process` 的语义仍未验证（R15：实拍三条恒 0 而同批条目全 `FINISH`）。
+//   - **失败不中断循环**：旧 `uploadRandomFile` 把异常吞成 `false`，循环照转下一轮。
+//   - **文件 id 一律记账**，包括失败路径上已经占下坑的那一个（编排层刻意多交，
+//     见 `cloud_upload.go` 文件头）。`exist` 那一档**不记** —— 那一个不是我们造的，
+//     交给删除那一族就是删用户自己的东西。
+func (e *taskExecutor) runUploads(
+	ctx context.Context, item upstream.TaskV2Item, shape *taskUploadShape,
+	record *TaskStepRecord,
+) (bool, []string) {
+	uploader, uerr := e.cloudUploader(ctx)
+	if uerr != nil {
+		return false, []string{"上传没做成：" + uerr.Error()}
+	}
+	var (
+		sent     bool
+		problems []string
+		stopped  string
+		done     int
+	)
+	for round := 1; round <= shape.Rounds; round++ {
+		if shape.StopAtProcess > 0 && taskProcessOf(item) >= shape.StopAtProcess {
+			stopped = fmt.Sprintf("第 %d 个之前读到 process=%d 已达 %d ⇒ 停（这一格语义未验证，见 R15）",
+				round, taskProcessOf(item), shape.StopAtProcess)
+			break
+		}
+		receipt, perr := uploader.UploadRandom(ctx, CloudUploadOptions{
+			Channel: shape.Channel, Op: shape.Op, Ext: shape.Ext,
+		})
+		sent = true
+		if receipt.FileID != "" {
+			e.cloudFileIDs = append(e.cloudFileIDs, receipt.FileID)
+		}
+		switch {
+		case perr != nil:
+			problems = append(problems, fmt.Sprintf("第 %d 个上传失败：%s", round, perr.Error()))
+		case receipt.Outcome == CloudUploadExists:
+			problems = append(problems, fmt.Sprintf(
+				"第 %d 个没传：上游说同名文件已存在（%s）⇒ 不算我们造的，也不去删",
+				round, receipt.Name))
+		default:
+			done++
+		}
+		if shape.PaceEachRound {
+			// 旧实现那一拍在循环体末尾，**失败也等、末轮也等**（它把异常吞在函数里，
+			// 循环照转）。末轮之后 `handleTaskClick` 还有一次 ⇒ 522 一趟共 6 拍。
+			// 这里不"顺手省掉重复的那一拍"：省与不省都是节奏，而我们没有出处说哪个对。
+			e.pace(ctx)
+		}
+	}
+	record.Uploads = done
+	if stopped != "" {
+		record.UploadNote = stopped
+	} else if done == 0 && len(problems) == 0 {
+		record.UploadNote = "形状写着要传，但上限是 0 ⇒ 一个都不传（内部不一致）"
+	}
+	return sent, problems
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 计数与结论
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -434,6 +654,7 @@ func (e *taskExecutor) pace(ctx context.Context) {
 // 把它们混成"成功/失败"两档的表现是：`Clicked` 里混进失败的枪，而复查那趟
 // "做了却没认"的数不上涨 ⇒ 两头的数互相对不上，谁也不知道该信哪一个。
 func (c *TaskRunCounts) absorb(record TaskStepRecord) {
+	c.Uploaded += record.Uploads
 	failed := record.Err != ""
 	switch record.Kind {
 	case StepClick:
@@ -452,6 +673,11 @@ func (c *TaskRunCounts) absorb(record TaskStepRecord) {
 		c.ToolGap++
 	case StepBlockedByRule:
 		c.RuleSkipped++
+		// 这一态也可能真传了文件（beiyong1 的门只挡打卡）。传了却没失败时它既不进
+		// `Clicked` 也不进 `Ran`，只体现在 `Uploaded` 那一句里 —— 别把它念成"什么都没做"。
+		if failed {
+			c.Failed++
+		}
 	case StepNeedsHuman:
 		c.NeedsHuman++
 	}
@@ -486,6 +712,17 @@ func (res TaskMatrixRunResult) SummaryLine() string {
 	}
 	if c.Failed > 0 {
 		parts = append(parts, fmt.Sprintf("%d 条上报失败", c.Failed))
+	}
+	if c.Uploaded > 0 {
+		// ⚠ 刻意写明"**未清理**"：这一趟在用户网盘里写了文件，而今天没有任何地方删它们
+		// （清理那一口已落码但没接进这一条链，#37）。少这一句，跑过的人只能从数量级猜
+		// "是不是留下了一堆 asign-*"。
+		parts = append(parts, fmt.Sprintf("网盘新增 %d 个文件（未清理）", c.Uploaded))
+	}
+	if n := len(res.CloudFileIDs) - c.Uploaded; n > 0 {
+		// 传失败但**已经占下坑**的那些（编排层刻意多交 id，见 `cloud_upload.go` 文件头）。
+		// 不与上一句合并：那一格说"传成了几个"，这一格说"还有几个没传完也要删"。
+		parts = append(parts, fmt.Sprintf("另有 %d 个占位未传完，也要清理", n))
 	}
 	if c.ToolGap > 0 {
 		parts = append(parts, fmt.Sprintf("%d 条本工具还没接上玩法", c.ToolGap))
@@ -557,6 +794,22 @@ func errText(err *core.Error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// joinProblems 把若干段"这一条没做成的原因"拼成一句（空段丢掉，段间用 `；`）。
+//
+// 为什么要有这一枚而不是各处直接 `strings.Join`：三个调用点都会带空串（成功时
+// 错误文本本来就是空），拼出来若留着分隔符，界面上就会出现一条以"；"开头的空原因
+// —— 而 [TaskStepRecord.Err] 非空**就是**"这一条有失败"的判据（见 [TaskRunCounts.absorb]），
+// 多一个假失败比少一句解释严重得多。
+func joinProblems(parts []string) string {
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			kept = append(kept, part)
+		}
+	}
+	return strings.Join(kept, "；")
 }
 
 // appTaskLocation 是这一族"本地日历"的口径（东八区）。

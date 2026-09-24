@@ -3,17 +3,24 @@ package server
 // 「App 任务矩阵」（`app-task`）**写侧**的接线用例。
 //
 // 判据在 `internal/app/task_matrix_run_test.go`（打哪个域、缺口零枪、门挡不挡、
-// 复查那四格各是什么）；本文件只钉这一层独有的四件事：
+// 复查那四格各是什么、上传三枪的顺序与三态结局）；本文件只钉这一层独有的四件事：
 //
 //  1. **受理并跑到终局** —— 分派表里少一行不会编译报错，界面上的表现是"点了开始
 //     之后进度条停在那儿"，与"还在跑"一模一样。
-//  2. **打的是自己这一族的端点** —— `taskListV2` 32 次 + `task/click` 三发 +
-//     `mrp doTask` 一发。另两支**同名**的 `task/click`（`:7071/ycloud/signin/task/click`
-//     属 notice 链、`:7071/market/task/task/click` 属分享码族）与 `taskListV3`
+//  2. **打的是自己这一族的端点** —— `taskListV2` 32 次 + `task/click` 四发 +
+//     `mrp doTask` 一发 + 网盘那一族三枪各一发（`hcy/file/create` → `PUT` →
+//     `hcy/file/complete`，2026-09-24 #36 接上的那一半）。另两支**同名**的
+//     `task/click`（`:7071/ycloud/signin/task/click` 属 notice 链、
+//     `:7071/market/task/task/click` 属分享码族）与 `taskListV3`
 //     一枪都不该打：打在别的域上，本族的任务表不会动，复查永远"没认"，
-//     而界面上只看得见"没认"。
+//     而界面上只看得见"没认"。上传那三枪走的是**另一个基域**（`personal-kd-njs`），
+//     所以这一条顺带钉住"要传文件的那条玩法真的接到了网盘那一族"——接错的表现为
+//     "打卡成功、网盘一枪没打"，界面上只看得见一条"没做成"。
 //  3. **一趟只用一张票**（AGENTS §1.12）：32 读 + N 写共用同一条会话。
 //     这条链是全部能力里单趟请求数最多的一条，漏接那份票池的代价在这里最大。
+//     ⚠ 网盘那三枪**不吃这张票**：它带的是 `Authorization` 整串 + `deviceid` 头，
+//     与 jwttoken 是两套画像（成文见 `internal/upstream/app_cloud_upload.go` 文件头，
+//     该族该用哪一套仍登记为待判定）。
 //  4. **节奏真的走 server 那份注入点** —— [buildAppTaskRun] 把 `s.runs.waiter` 交给
 //     编排层；接错（写成 `app.RealWaiter{}`）的表现不是变红而是**真睡 500ms**，
 //     所以这里既数次数也认时长。
@@ -21,6 +28,7 @@ package server
 // ⚠ 这里的响应**全是合成夹具**。本族那一发 `task/click`（`m.mcloud.139.com`）只有**两发**
 // 实拍（形状见 `internal/upstream/app_task_click.go` 文件头那张表，且**四条实拍都不带
 // `result`** ⇒ 下面的成功响应也照那样写），`mrp doTask` 那一发**零实拍**，
+// 网盘那三枪（文件型 `create` / `PUT` / `complete`）**同样零实拍**，
 // 而"打完之后上游会不会把 `state` 改成 FINISH"一次真打都没测过 ⇒
 // 本条钉的是**接线**，不是上游行为。它是这一族第一次跑到终局，
 // 历史里此前没有 `app-task` 的成行（登记见 `docs/status.md`）。
@@ -41,6 +49,18 @@ const (
 
 	appTaskClickBody = `{"code":0,"msg":"success"}`
 	appTaskEntryBody = `{"code":0,"msg":"success"}`
+
+	// 上传那一族的端点（`personal-kd-njs.yun.139.com`，与上面四条**不同基域**）。
+	// PUT 那一枪没有固定路径（它打的是 `create` 回的那个预签名地址），所以按**主机**编路由。
+	appTaskCreateRoute   = "/hcy/file/create"
+	appTaskCompleteRoute = "/hcy/file/complete"
+	appTaskPutHost       = "synth-oss.example.invalid"
+
+	// ⚠ 信封与签到那族不同：`code` 是**字符串** `"0000"`，载荷在 `data`。
+	appTaskCreateBody = `{"code":"0000","success":true,"data":{"exist":false,"rapidUpload":false,` +
+		`"fileId":"SYNTH-FID-1","uploadId":"SYNTH-UID",` +
+		`"partInfos":[{"uploadUrl":"https://synth-oss.example.invalid/put/SYNTH-TOKEN"}]}}`
+	appTaskCompleteBody = `{"code":"0000","success":true}`
 )
 
 // appTaskItem 造一条任务条目（`state` 空串 ⇒ 不给那一格）。
@@ -75,11 +95,13 @@ func appTaskBody(items ...string) string {
 }
 
 func TestAppTaskDispatchHitsItsOwnChain(t *testing.T) {
-	// 三条任务，各代表一种处置：409 走专属玩法（前置打卡 + 入口上报 + 第二发打卡）、
-	// 777 走 default 盲点、106 缺上传那一族端点 ⇒ **一枪不发**。
+	// 四条任务，各代表一种处置：409 走专属玩法（前置打卡 + 入口上报 + 第二发打卡）、
+	// 777 走 default 盲点、107 缺笔记那一族玩法 ⇒ **一枪不发**（缺口小结靠它），
+	// 106 走"打卡 + 往网盘传一个文件"（#36 接上的那一半）。
 	table := appTaskBody(
 		appTaskItem(409, "day", "进入云朵中心", "WAIT", 0),
 		appTaskItem(777, "day", "看个广告", "WAIT", 0),
+		appTaskItem(107, "day", "创建一篇云笔记", "WAIT", 0),
 		appTaskItem(106, "day", "上传一个文件", "WAIT", 0),
 	)
 	h := newHarness(t).initialized(t)
@@ -93,6 +115,12 @@ func TestAppTaskDispatchHitsItsOwnChain(t *testing.T) {
 		{match: appTaskStatusRoute, bodies: []string{signInStatusClaimable}},
 		{match: appTaskClickRoute, bodies: []string{appTaskClickBody}},
 		{match: appTaskEntryRoute, bodies: []string{appTaskEntryBody}},
+		// 上传那一族三枪（106 那一条的第二半）。⚠ 三枪**全部零实拍**（R27）⇒ 这三份
+		// 响应只是"让链路走到终局"的夹具，不是上游行为证据；`uploadUrl` 按凭据同类
+		// 处理，用合成域，任何断言都比**主机**而不是整串 URL。
+		{match: appTaskCreateRoute, bodies: []string{appTaskCreateBody}},
+		{match: appTaskPutHost, bodies: []string{""}},
+		{match: appTaskCompleteRoute, bodies: []string{appTaskCompleteBody}},
 	}...)...)
 	h.replaceRunWorld(t, client)
 	waits := &recordingWaits{}
@@ -111,11 +139,16 @@ func TestAppTaskDispatchHitsItsOwnChain(t *testing.T) {
 	}{
 		// 两趟 × 2 市场名 × 8 group。
 		{appTaskListEndpoint, 32},
-		// 409 两发（前置 + 玩法那一发 `task2`）+ 777 一发；106 零发。
-		{appTaskClickRoute, 3},
+		// 409 两发（前置 + 玩法那一发 `task2`）+ 777 一发 + 106 的前置那一发；
+		// 107 走缺口 ⇒ 零发。
+		{appTaskClickRoute, 4},
 		{appTaskEntryRoute, 1},
 		// 备份门只在第一趟读一次（复查不需要它：门判的是"要不要开始做"）。
 		{appTaskStatusRoute, 1},
+		// ⭐ 106 那一条的第二半：三枪各一发，且**只有**它打这一族（409 / 777 / 107 都不该）。
+		{appTaskCreateRoute, 1},
+		{appTaskPutHost, 1},
+		{appTaskCompleteRoute, 1},
 	} {
 		if got := client.count(want.endpoint); got != want.times {
 			t.Errorf("%s 应打 %d 次，实得 %d 次（全部 URL：%v）",
@@ -136,21 +169,27 @@ func TestAppTaskDispatchHitsItsOwnChain(t *testing.T) {
 		}
 	}
 	if got := client.count("/ycloud/auth-service/auth/tyrzLogin"); got != 1 {
-		t.Errorf("32 读 + 4 写应共用一张票，建会话应 1 次，实得 %d 次（URL：%v）",
+		t.Errorf("32 读 + 4 打卡 + 1 入口 + 1 门 + 3 网盘应共用一张票，建会话应 1 次，实得 %d 次（URL：%v）",
 			got, urlsOf(client))
 	}
-	// ⭐ 3 发打卡里只有 409 那一条等 —— 它走 `handleTaskClick` 那一形状，
-	// 而节奏是**按条**记的（一条玩法 runner = 前置 + 入口 + 第二发，只等一次），
-	// 777 是 default 盲点、旧实现那里不等。混成一个节奏的表现是"三发零间隔连打"，
-	// 而那是真实客户端不会有的样子（成文见 `task_matrix_dispatch.go` 的 `Paced`）。
-	if got := waits.count(500 * time.Millisecond); got != 1 {
-		t.Errorf("该等 1 次 500ms（只有走 runner 的那条等），实得 %d 次（全部：%v）",
+	// ⭐ 节奏按条记：409 那条玩法等一拍，106 那条在"打卡成功之后"等一拍
+	// （旧实现 `handleTaskClick` 末尾那句 `sleep(500)`；上传那一族自己每轮也等，
+	// 但 106 的形状是"只传一个"，循环体那一拍只在 522 才有），777 是 default 盲点、不等。
+	// 混成一个节奏的表现是"四发零间隔连打"，而那是真实客户端不会有的样子
+	// （成文见 `task_matrix_dispatch.go` 的 `Paced` 与 `task_matrix_run.go` 的 `apply`）。
+	if got := waits.count(500 * time.Millisecond); got != 2 {
+		t.Errorf("该等 2 次 500ms（409 玩法 + 106 那一趟），实得 %d 次（全部：%v）",
 			got, waits.all())
 	}
-	// 小结要能在事件流里看见 —— 尤其"缺玩法的那些**明说不做**"那一句：
-	// 它是这一条与旧实现最大的行为差别，界面上看不见就等于没写。
+	// 小结要能在事件流里看见 —— 两句各钉一件事：
+	// ① "缺玩法的那些**明说不做**"（107）= 这一条与旧实现最大的行为差别；
+	// ② "网盘新增 N 个（未清理）" = 接线之后这一趟**真的会写用户网盘**，
+	//    界面上看不见这一句就等于把代价替用户藏起来了（清理那一半挂在 #37）。
 	if !anyMessageContains(events, "本工具还没接上玩法") {
 		t.Errorf("事件流里没有那句玩法缺口的小结：%v", messagesOf(events))
+	}
+	if !anyMessageContains(events, "未清理") {
+		t.Errorf("事件流里没有「这一趟写了网盘、还没清理」那一句：%v", messagesOf(events))
 	}
 	assertRunCapability(t, h, rows, "app-task")
 }

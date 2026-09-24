@@ -244,6 +244,62 @@ func mxHappy() []liveTaskRoute {
 	}
 }
 
+// mxUploads 是"往网盘传文件"那三枪的端点与夹具（#36 接进这一条链的那一半）。
+//
+// ⚠ 全部响应**都是合成**的：这一族在本仓所有归档里零实拍（R27）。所以这些用例
+// 钉的是"编排层把三枪按顺序发出去、id 记进账"，**不是**"上游会这样回"。
+const (
+	mxCreateEndpoint   = "/hcy/file/create"
+	mxCompleteEndpoint = "/hcy/file/complete"
+	// mxPutHost 是预签名直传地址的**主机**（路由按子串匹配）。真实那一枪的 URL 里
+	// 带一次性签名 ⇒ 夹具用合成域，且任何断言都**不**比整串 URL。
+	mxPutHost = "synth-oss.example.invalid"
+	mxPutURL  = "https://synth-oss.example.invalid/put/SYNTH-TOKEN"
+)
+
+// mxCreateOK 造一份 `file/create` 的成功响应；`n` 进 fileId，便于"传了几个就是几个 id"。
+func mxCreateOK(n int) string {
+	return `{"code":"0000","success":true,"data":{"exist":false,"rapidUpload":false,` +
+		`"fileId":"SYNTH-FID-` + itoa64(int64(n)) + `","uploadId":"SYNTH-UID",` +
+		`"partInfos":[{"uploadUrl":"` + mxPutURL + `"}]}}`
+}
+
+// mxUploadRoutes 给 n 轮上传用的三条路由（create 回 n 份不同的 fileId）。
+func mxUploadRoutes(n int) []liveTaskRoute {
+	creates := make([]string, 0, n)
+	for i := 1; i <= n; i++ {
+		creates = append(creates, mxCreateOK(i))
+	}
+	return []liveTaskRoute{
+		{mxCreateEndpoint, creates},
+		{mxPutHost, []string{""}},
+		{mxCompleteEndpoint, []string{`{"code":"0000","success":true}`}},
+	}
+}
+
+// mxUploadBodies 是"这一趟一个上传请求都没打"那一份断言要数的那三枚。
+func mxUploadCounts(script *liveTaskScript) (creates, puts, completes int) {
+	for _, request := range script.snapshot() {
+		switch {
+		case strings.Contains(request.URL, mxCreateEndpoint):
+			creates++
+		case strings.Contains(request.URL, mxCompleteEndpoint):
+			completes++
+		case strings.Contains(request.URL, mxPutHost):
+			puts++
+		}
+	}
+	return creates, puts, completes
+}
+
+// mxItemProcessAt 把条目里的 `process` 改成给定值（522 那一格停表用得上）。
+//
+// ⚠ [mxItem] 造的默认是 `"process":0`（与实拍那三条同形）。若停表与上限共用 0，
+// "把 process 判反方向"这种错不会红 ⇒ 这一格必须能单独给值。
+func mxItemProcessAt(item string, process int64) string {
+	return strings.Replace(item, `"process":0`, `"process":`+itoa64(process), 1)
+}
+
 // mxClicks 按发出顺序列出这一趟的**打卡** URL。
 func mxClicks(script *liveTaskScript) []string {
 	out := []string{}
@@ -363,9 +419,13 @@ func TestTaskMatrixRunClicksOnTheAppDomainAndVerifies(t *testing.T) {
 //
 // 这一条是"与旧实现刻意不同"那一段的行为落点：把它改回盲点打卡，本条立刻红，
 // 而红出来的正是"用户的账上多了一条没做过的事"。
+//
+// ⚠ 这里用的两个 id 是**仍缺端点族**的那两个（邮箱会话、笔记）。106 曾在这张表里，
+// 2026-09-24 上传族接上后它落到 runner 那一支了（用例见
+// [TestTaskMatrixRunUploadsOneFileForTask106]）—— 拿它当"缺口"样本会让这条测不到东西。
 func TestTaskMatrixRunNeverClicksToolGapTasks(t *testing.T) {
 	waiting := mxItems(
-		mxItem(106, "day", "上传一个文件", "WAIT", "", 0),
+		mxItem(107, "day", "创建云笔记", "WAIT", "", 0),
 		mxItem(472, "day", "体验 139 邮箱", "WAIT", "", 0),
 	)
 	script := mxScript([]string{"JWT-1"}, waiting, waiting, mxHappy()...)
@@ -539,7 +599,7 @@ func TestTaskMatrixRunSkipVerifyOnlyWhenNothingSent(t *testing.T) {
 		items []string
 		want  int
 	}{
-		{"一枪没发（只有缺口）", mxItems(mxItem(106, "day", "上传", "WAIT", "", 0)), 16},
+		{"一枪没发（只有缺口）", mxItems(mxItem(107, "day", "创建云笔记", "WAIT", "", 0)), 16},
 		{"发过一枪", mxItems(mxItem(777, "day", "看广告", "WAIT", "", 0)), 32},
 	} {
 		script := mxScript([]string{"JWT-1"}, c.items, nil, mxHappy()...)
@@ -834,5 +894,369 @@ func TestTaskMatrixRunEntryDeviceFailureDoesNotSinkTheRun(t *testing.T) {
 	}
 	if got := script.count(mxEntryEndpoint); got != 0 {
 		t.Errorf("换不到 id 就不该发出入口上报（旧实现会发一发空 deviceId），实得 %d", got)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 上传那一半（106 / 522 与 beiyong1 的"名字写着上传"）
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestTaskMatrixRunUploadsOneFileForTask106 ⭐ 主路径：打卡 → 三枪 → 记账。
+//
+// 反向改坏的三种样子都会被本条抓到：漏掉玩法（create 0 次）、把三枪打成两枪
+// （PUT 或 complete 缺席）、多打一发（计数恰好）。
+//
+// ⚠ 顺序**是**判据：`file/create` 占位 → `PUT` 预签名 → `file/complete`，
+// 换序在计数上看不出来，所以逐条比 URL 序列。
+func TestTaskMatrixRunUploadsOneFileForTask106(t *testing.T) {
+	first := mxItems(mxItem(106, "day", "上传一个文件", "WAIT", "", 0))
+	second := mxItems(mxItem(106, "day", "上传一个文件", "FINISH", "", 1))
+	script := mxScript([]string{"JWT-1"}, first, second,
+		append(mxUploadRoutes(1), mxHappy()...)...)
+	wait := &recordingWaiter{}
+	run := mxDefaultRun(t, script)
+	run.Wait = wait
+	res, perr := mxResult(t, run)
+	if perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	if n := script.count(mxClickEndpoint); n != 1 {
+		t.Errorf("106 只有前置那一发打卡（runner 体自己不打卡），实得 %d", n)
+	}
+	creates, puts, completes := mxUploadCounts(script)
+	if creates != 1 || puts != 1 || completes != 1 {
+		t.Errorf("该恰好三枪，实得 create %d / PUT %d / complete %d", creates, puts, completes)
+	}
+	var order []string
+	for _, url := range mxURLs(script) {
+		switch {
+		case strings.Contains(url, mxClickEndpoint):
+			order = append(order, "click")
+		case strings.Contains(url, mxCreateEndpoint):
+			order = append(order, "create")
+		case strings.Contains(url, mxPutHost):
+			order = append(order, "put")
+		case strings.Contains(url, mxCompleteEndpoint):
+			order = append(order, "complete")
+		}
+	}
+	if got := strings.Join(order, ">"); got != "click>create>put>complete" {
+		t.Errorf("时序应是 打卡>create>PUT>complete，实得 %s", got)
+	}
+	// 三枪的鉴权画像：`Authorization` 整串来自凭据、带 `deviceid`、**不**带 jwttoken
+	// （personal-kd 那台不在旧 TS 的 TARGET_HOSTNAMES 里，成文见 app_cloud_upload.go 文件头）。
+	var create *core.HTTPRequest
+	for i, request := range script.snapshot() {
+		if strings.Contains(request.URL, mxCreateEndpoint) {
+			create = &script.snapshot()[i]
+			break
+		}
+	}
+	if create == nil {
+		t.Fatal("没找到 create 那一枪")
+	}
+	if got := headerValue(*create, "Authorization"); got != wholeAuth {
+		t.Errorf("create 要带库里的整串 Authorization，实得 %q", got)
+	}
+	if got := headerValue(*create, "deviceid"); got != "BSYNTH-DEVICE-199" {
+		t.Errorf("create 要带库里那个 deviceId，实得 %q", got)
+	}
+	if got := headerValue(*create, "jwttoken"); got != "" {
+		t.Errorf("这一族不带 jwttoken（旧 TS 只对三台主机发它，personal-kd 不在其中），实得 %q", got)
+	}
+	// 计数与账本。
+	if res.Counts.Uploaded != 1 {
+		t.Errorf("应记 1 个文件，实得 %+v", res.Counts)
+	}
+	if len(res.CloudFileIDs) != 1 || res.CloudFileIDs[0] != "SYNTH-FID-1" {
+		t.Errorf("fileId 要一路带到结果（清理那一族的输入），实得 %v", res.CloudFileIDs)
+	}
+	if res.Steps[0].Uploads != 1 || res.Steps[0].Err != "" {
+		t.Errorf("这一条该记成「传了一个、没失败」，实得 %+v", res.Steps[0])
+	}
+	if res.Counts.Ran != 1 || res.Counts.Failed != 0 {
+		t.Errorf("类别仍是专属玩法，实得 %+v", res.Counts)
+	}
+	// 旧实现这一条只等**一拍**（runner 体里没有 sleep，只有 handleTaskClick 末尾那一句）。
+	if got := mxCountPaced(wait); got != 1 {
+		t.Errorf("106 应只等 1 拍（循环体里不等），实得 %d 次：%v", got, wait.durations)
+	}
+	if got := res.SummaryLine(); !strings.Contains(got, "网盘新增 1 个文件（未清理）") {
+		t.Errorf("写了文件却没处删，必须在小结里看得见，实得 %q", got)
+	}
+	if res.Counts.DoneNow != 1 {
+		t.Errorf("复查该认下这一条，实得 %+v", res.Counts)
+	}
+}
+
+// TestTaskMatrixRunUploadLoopForTask522 ⭐ 循环那一档：五轮 × 三枪，每轮之间等一拍。
+//
+// 这一条钉的是"上限兜住最坏情况"：`process` 那一格语义未验证（R15），实拍恒 0 ⇒
+// 停表永远不响，真正决定"这一趟写几个文件"的是 [taskMatrixUploadRoundsPerRun]。
+// 有人把上限当"反正会停"删掉，本条会红在计数上。
+func TestTaskMatrixRunUploadLoopForTask522(t *testing.T) {
+	first := mxItems(mxItem(522, "month", "上传满100个", "WAIT", "", 0))
+	second := mxItems(mxItem(522, "month", "上传满100个", "WAIT", "", 0))
+	script := mxScript([]string{"JWT-1"}, first, second,
+		append(mxUploadRoutes(taskMatrixUploadRoundsPerRun), mxHappy()...)...)
+	wait := &recordingWaiter{}
+	run := mxDefaultRun(t, script)
+	run.Wait = wait
+	res, perr := mxResult(t, run)
+	if perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	rounds := taskMatrixUploadRoundsPerRun
+	if creates, puts, completes := mxUploadCounts(script); creates != rounds ||
+		puts != rounds || completes != rounds {
+		t.Errorf("应 %d 轮各三枪，实得 create %d / PUT %d / complete %d",
+			rounds, creates, puts, completes)
+	}
+	if res.Counts.Uploaded != rounds || len(res.CloudFileIDs) != rounds {
+		t.Errorf("应传 %d 个、记 %d 个 id，实得 %+v / %v",
+			rounds, rounds, res.Counts, res.CloudFileIDs)
+	}
+	// 522 旧实现每轮末尾 sleep（含末轮），之后 `handleTaskClick` 再 sleep 一次
+	// ⇒ 共 rounds+1 拍。少一拍就是改了节奏，多一拍同理。
+	if got := mxCountPaced(wait); got != rounds+1 {
+		t.Errorf("应等 %d 拍（每轮一拍 + 末尾一拍），实得 %d：%v", rounds+1, got, wait.durations)
+	}
+	if got := res.SummaryLine(); !strings.Contains(got, "网盘新增 5 个文件（未清理）") {
+		t.Errorf("小结要说清写了几个，实得 %q", got)
+	}
+}
+
+// TestTaskMatrixRunUploadLoopStopsAtProcess：读到 `process` 已达 100 ⇒ 一个都不传。
+//
+// ⚠ 这一档**只钉形状**：`process` 的语义未验证（R15），这里给的是"旧实现那句
+// `task.process >= 100` 会停"的形状，不是"上游真的会填这一格"。
+func TestTaskMatrixRunUploadLoopStopsAtProcess(t *testing.T) {
+	first := mxItems(mxItemProcessAt(mxItem(522, "month", "上传满100个", "WAIT", "", 0), 100))
+	// ⚠ 那一发打卡要有成功路由：缺了它 404 会让前置那一发失败 ⇒ 玩法整条不跑，
+	// 这条用例红的是"为什么没停表"，而真正挡在前面的是打卡 —— 那已经是另一条用例（
+	// [TestTaskMatrixRunPreambleClickFailureWritesNoFiles]）钉的事了。
+	script := mxScript([]string{"JWT-1"}, first, first,
+		append(mxUploadRoutes(1), mxHappy()...)...)
+	wait := &recordingWaiter{}
+	run := mxDefaultRun(t, script)
+	run.Wait = wait
+	res, perr := mxResult(t, run)
+	if perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	if creates, puts, completes := mxUploadCounts(script); creates+puts+completes != 0 {
+		t.Errorf("process 已达上限 ⇒ 三枪都不该发，实得 %d/%d/%d", creates, puts, completes)
+	}
+	if n := script.count(mxClickEndpoint); n != 1 {
+		t.Errorf("停的是上传，那一发打卡照旧实现仍该打，实得 %d", n)
+	}
+	// 停表这一档本身不该有失败：有 Err 说明这一趟被别的一枪挡住了，
+	// 而"三枪 0 发"就成了一句碰巧成立的断言。
+	if text := res.Steps[0].Err; text != "" {
+		t.Errorf("只该停表、不该报失败（实得 %q）—— 先确认打卡那一枪有成功路由", text)
+	}
+	// 那一拍**照等**：旧实现末尾的 `sleep(500)` 在 `handleTaskClick` 里，条件是"打卡发出去了"
+	// 而不是"上传传成了" ⇒ 这一档只有 `handleTaskClick` 末尾那一拍，没有每轮那一拍。
+	if got := mxCountPaced(wait); got != 1 {
+		t.Errorf("停表只免掉每轮那一拍，末尾那一拍照旧实现仍该等，实得 %d：%v", got, wait.durations)
+	}
+	if res.Counts.Uploaded != 0 || len(res.CloudFileIDs) != 0 {
+		t.Errorf("停表时不该留下任何账，实得 %+v / %v", res.Counts, res.CloudFileIDs)
+	}
+	if note := res.Steps[0].UploadNote; !strings.Contains(note, "process=100") {
+		t.Errorf("为什么一个都没传要说清（否则界面上只看到「跑了玩法、0 个文件」），实得 %q", note)
+	}
+}
+
+// TestTaskMatrixRunPreambleClickFailureWritesNoFiles ⭐ 前置那一发挂了 ⇒ 整条玩法不跑。
+//
+// 旧实现 `handleTaskClick` 的 `if` 包着 runner 那一句。这一格在只有 409 / 1005 时
+// 只是"少一发入口上报"，接上传之后它决定的是"**上游都没接这条任务，还要不要往
+// 用户网盘写一个文件**"—— 那是这一条链上最贵的一种"多做了"。
+func TestTaskMatrixRunPreambleClickFailureWritesNoFiles(t *testing.T) {
+	first := mxItems(mxItem(106, "day", "上传一个文件", "WAIT", "", 0))
+	script := mxScript([]string{"JWT-1"}, first, first, append(
+		[]liveTaskRoute{{mxClickEndpoint, []string{mxClickBizFailure}}},
+		mxUploadRoutes(1)...)...)
+	res, perr := mxResult(t, mxDefaultRun(t, script))
+	if perr != nil {
+		t.Fatalf("单条失败不该让整趟报错: %v", perr)
+	}
+	if creates, puts, completes := mxUploadCounts(script); creates+puts+completes != 0 {
+		t.Errorf("前置打卡回失败 ⇒ 一枪上传都不该发，实得 %d/%d/%d", creates, puts, completes)
+	}
+	if len(res.CloudFileIDs) != 0 {
+		t.Errorf("网盘里不该多任何东西，实得 %v", res.CloudFileIDs)
+	}
+	if res.Counts.Uploaded != 0 {
+		t.Errorf("计数也不该涨，实得 %+v", res.Counts)
+	}
+	if got := res.Steps[0].Err; !strings.Contains(got, "整条不跑") {
+		t.Errorf("要说出「玩法被前置那一发挡住了」，否则只看到一条打卡失败，实得 %q", got)
+	}
+	// ⭐ 但它仍算"今天动过"：那一发确实出网了（口径见 apply 函数头）。
+	if res.Counts.Failed != 1 || res.Counts.NotAcknowledged != 1 {
+		t.Errorf("发过但没认 ⇒ 落在「做了没认」，不是「仍待办」，实得 %+v", res.Counts)
+	}
+}
+
+// TestTaskMatrixRunBeiyong1UploadsAfterThePace ⭐ beiyong1 那一支：门只挡打卡，不挡上传。
+//
+// 两档对照：`currstep=0` 打卡 + 等一拍 + 传一个；`currstep=4` **不打卡**、
+// 但仍等那一拍、仍传那一个（旧实现那句 `clickTaskWithStep` 回 true）。
+// 把两格混成一个的表现：实拍那三条 `currstep` 4/6/8 的上传任务一条都不做。
+func TestTaskMatrixRunBeiyong1UploadsAfterThePace(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		step      int64
+		wantClick int
+	}{
+		{"门放行（currstep=0）", 0, 1},
+		{"门挡住打卡（currstep=4）", 4, 0},
+	} {
+		first := mxItems(mxItem(598, "beiyong1", "上传照片到云端", "WAIT", "", c.step))
+		script := mxScript([]string{"JWT-1"}, first, first,
+			append(mxUploadRoutes(1), mxHappy()...)...)
+		wait := &recordingWaiter{}
+		run := mxDefaultRun(t, script)
+		run.Wait = wait
+		res, perr := mxResult(t, run)
+		if perr != nil {
+			t.Fatalf("%s 跑一趟失败: %v", c.name, perr)
+		}
+		if n := script.count(mxClickEndpoint); n != c.wantClick {
+			t.Errorf("%s：打卡应 %d 发，实得 %d", c.name, c.wantClick, n)
+		}
+		if creates, puts, completes := mxUploadCounts(script); creates != 1 ||
+			puts != 1 || completes != 1 {
+			t.Errorf("%s：门挡的是打卡，三枪仍该发，实得 %d/%d/%d",
+				c.name, creates, puts, completes)
+		}
+		// 那一拍在**上传之前**（旧实现：sleep 在 handleTaskClick 里，上传在它外面）。
+		if got := mxCountPaced(wait); got != 1 {
+			t.Errorf("%s：应等 1 拍且在上传之前，实得 %d：%v", c.name, got, wait.durations)
+		}
+		var order []string
+		for _, url := range mxURLs(script) {
+			switch {
+			case strings.Contains(url, mxClickEndpoint):
+				order = append(order, "click")
+			case strings.Contains(url, mxCreateEndpoint):
+				order = append(order, "create")
+			}
+		}
+		if c.wantClick == 1 && strings.Join(order, ">") != "click>create" {
+			t.Errorf("%s：应先打卡再上传，实得 %v", c.name, order)
+		}
+		if res.Counts.Uploaded != 1 || len(res.CloudFileIDs) != 1 {
+			t.Errorf("%s：这一条仍该记账，实得 %+v / %v", c.name, res.Counts, res.CloudFileIDs)
+		}
+		if c.step == 4 {
+			// 打卡被挡 ⇒ 类别是"按规则跳过"，但文件**真的传了** ⇒ 别念成"什么都没做"。
+			if res.Steps[0].Kind != StepBlockedByRule {
+				t.Errorf("门挡住时类别应是按规则跳过，实得 %+v", res.Steps[0])
+			}
+			if res.Counts.RuleSkipped != 1 {
+				t.Errorf("仍该按规则计一条，实得 %+v", res.Counts)
+			}
+			// ⭐ 这一条今天动过（传了三枪）⇒ 复查落"做了没认"，不是"仍待办"。
+			if res.Counts.NotAcknowledged != 1 {
+				t.Errorf("只传了文件也算动过，实得 %+v", res.Counts)
+			}
+		}
+	}
+}
+
+// TestTaskMatrixRunUploadOutcomesThatWriteNothing：`exist` 与"占位了但没传完"两档。
+//
+// 两档都**不该**被念成"传成功了"，但对**清理**的要求相反：
+//   - `exist` ⇒ 网盘里那一个不是我们造的 ⇒ 不交 id（交了就是删用户自己的东西）；
+//   - create 占下了坑却没传完（响应缺 uploadUrl、或 PUT 那一枪挂了）⇒ 必须交 id，
+//     否则它就是用户网盘里那个删不掉的孤儿。
+func TestTaskMatrixRunUploadOutcomesThatWriteNothing(t *testing.T) {
+	t.Run("上游说已存在", func(t *testing.T) {
+		first := mxItems(mxItem(106, "day", "上传一个文件", "WAIT", "", 0))
+		script := mxScript([]string{"JWT-1"}, first, first, append(
+			// 夹具**故意带上一个 fileId**：上游说"已存在"时把已存在那一个的 id 也交回来，
+			// 是最可能顺手记进清理名单的一种形状（删掉的就是用户自己的文件）。
+			[]liveTaskRoute{{mxCreateEndpoint,
+				[]string{`{"code":"0000","success":true,"data":{"exist":true,"rapidUpload":false,` +
+					`"fileId":"SYNTH-PREEXISTING"}}`}}},
+			append(mxUploadRoutes(1), mxHappy()...)...)...)
+		res, perr := mxResult(t, mxDefaultRun(t, script))
+		if perr != nil {
+			t.Fatalf("跑一趟失败: %v", perr)
+		}
+		if creates, puts, completes := mxUploadCounts(script); creates != 1 || puts+completes != 0 {
+			// creates==1 是"这一趟真的走到了上传"的凭据。只钉后两枪时，
+			// "前置那一发被 404 挡住 ⇒ 整条玩法没跑"也会让它偶然成立。
+			t.Errorf("已存在 ⇒ 只该发 create，实得 %d/%d/%d", creates, puts, completes)
+		}
+		if len(res.CloudFileIDs) != 0 {
+			t.Errorf("那一个不是我们造的，不该进清理名单，实得 %v", res.CloudFileIDs)
+		}
+		if res.Counts.Uploaded != 0 {
+			t.Errorf("没传成就不该计数，实得 %+v", res.Counts)
+		}
+		if got := res.Steps[0].Err; !strings.Contains(got, "已存在") {
+			t.Errorf("要说清「为什么一个都没传」，实得 %q", got)
+		}
+	})
+	t.Run("占位了但没传完（create 不给 uploadUrl）", func(t *testing.T) {
+		first := mxItems(mxItem(106, "day", "上传一个文件", "WAIT", "", 0))
+		script := mxScript([]string{"JWT-1"}, first, first, append(
+			// create 成功但**不给 uploadUrl** ⇒ 编排层判失败（零实拍最可能撞的那一格）。
+			[]liveTaskRoute{{mxCreateEndpoint,
+				[]string{`{"code":"0000","success":true,"data":{"fileId":"SYNTH-ORPHAN"}}`}}},
+			append(mxUploadRoutes(1), mxHappy()...)...)...)
+		res, perr := mxResult(t, mxDefaultRun(t, script))
+		if perr != nil {
+			t.Fatalf("跑一趟失败: %v", perr)
+		}
+		if creates, puts, completes := mxUploadCounts(script); creates != 1 || puts+completes != 0 {
+			t.Errorf("缺 uploadUrl ⇒ 占位之后就不该再发后两枪，实得 %d/%d/%d",
+				creates, puts, completes)
+		}
+		if len(res.CloudFileIDs) != 1 || res.CloudFileIDs[0] != "SYNTH-ORPHAN" {
+			t.Errorf("占过的坑必须交回去清理，实得 %v", res.CloudFileIDs)
+		}
+		if res.Counts.Uploaded != 0 {
+			t.Errorf("没传完不算「新增文件」，实得 %+v", res.Counts)
+		}
+		if got := res.SummaryLine(); !strings.Contains(got, "另有 1 个占位未传完") {
+			t.Errorf("这种「有 id 但没计数」的差值要单独说出来，实得 %q", got)
+		}
+	})
+}
+
+// TestTaskMatrixRunUploadNeedsDeviceID：换不到 deviceId ⇒ 三枪一枪都不发。
+//
+// 这一族每一枪都带 `deviceid` 头（旧实现是主 http 实例的静态头），而"少这一上游
+// 理不理"零样本 ⇒ 不赌，与入口上报那一格同一处置（记一条失败、继续跑别的任务）。
+func TestTaskMatrixRunUploadNeedsDeviceID(t *testing.T) {
+	first := mxItems(
+		mxItem(106, "day", "上传一个文件", "WAIT", "", 0),
+		mxItem(777, "day", "看个广告", "WAIT", "", 0),
+	)
+	script := mxScript([]string{"JWT-1"}, first, first,
+		append(mxUploadRoutes(1), mxHappy()...)...)
+	run := mxRun(t, mxStoreWithoutDeviceID(), script, NewSessionPool(), testClock(),
+		&recordingWaiter{})
+	res, perr := mxResult(t, run)
+	if perr != nil {
+		t.Fatalf("换不到 deviceId 不该让整趟失败: %v", perr)
+	}
+	if creates, puts, completes := mxUploadCounts(script); creates+puts+completes != 0 {
+		t.Errorf("换不到 id ⇒ 一枪都不发，实得 %d/%d/%d", creates, puts, completes)
+	}
+	if len(res.CloudFileIDs) != 0 {
+		t.Errorf("没发枪就不该有 id，实得 %v", res.CloudFileIDs)
+	}
+	if got := res.Steps[0].Err; !strings.Contains(got, "deviceId") {
+		t.Errorf("要写明卡在 deviceId，实得 %q", got)
+	}
+	// 另一条不该被带崩。
+	if got := res.Steps[1]; got.TaskID != 777 || got.Err != "" {
+		t.Errorf("777 的盲点不该被 106 带崩，实得 %+v", got)
 	}
 }
