@@ -644,6 +644,20 @@ const UNTAGGED_ALLOWED = {
     '一次运行的计数（读 / 待做 / 打卡 / 玩法 / 失败 / 缺口 / 规则跳过 / 需人工 + 复查四格）。它是 `SummaryLine()` 那一句人话的**原料**，界面上今天没有任何一格按 key 读它（`capability.output` 在 `web/src` 里零命中）⇒ 补 tag 只会造出一份没人兑现、也没人测试的"字段契约"',
   'internal/app/task_matrix_run.go:TaskMatrixRunResult':
     '一个账号这一趟的产出（`Steps` / `Verified` / `Counts` / `Notes`）。对外只经 `RunReport()` 的 `Summary`；`Steps[].Err` 与 `Notes[]` 里是上游原文与人话，marshal 会把"给人看的那一句"拆成一份没人对齐的结构',
+
+  // ── 网盘上传族（#35，2026-09-24 登记：`file/create` + `PUT` + `complete` + `batchTrash`）──
+  // 这一族有本仓**最硬**的一条不补 tag 理由：`CloudFileCreated.UploadURL` 是**预签名上传地址**
+  // （带一次性凭据），与 §"凭据边界"里 `auth` 整串同一级 —— 只进不出。下面逐条写各自成立的那一格。
+  'internal/upstream/app_cloud_upload.go:CloudFileCreateInput':
+    '`file/create` 的**请求侧入参集**（父目录 / 名字 / size / contentHash / 档位）。body 由 `CloudFileCreateRequest` 现拼那**十键** map（与旧 TS 逐字对齐），从不整体 marshal 这个结构体 ⇒ 补 tag 等于造一条会多发键的旁路请求，而"上游认不认多出来的键"零样本。默认值也刻意留在这里而不是 tag 里：`ParentFileID:""` ⇒ `/`、`Channel:""` ⇒ android，那是**旧实现的默认**，不是 JSON 的默认',
+  'internal/upstream/app_cloud_upload.go:CloudFileCreated':
+    '`file/create` 的解析结果。⚠⚠ `UploadURL` 是**预签名直传地址**（URL 里就是一次性 token），与 `auth` 整串同一条纪律"只进不出" —— 这个结构体一旦被 marshal，离泄漏只差一次"顺手把 create 的响应写进日志/响应体"，而 `core.SecretValue` 那层保护**不在这条路上**（它是裸 `*string`，因为上游给的本来就是明文串，包一层反而遮住"这里曾是 URL"）。另外三格 `*string` 与两个布尔的区别也必须留在内存：`Exist` / `RapidUpload` 是编排层**三态结局**的唯一判据（见 `app/cloud_upload.go:CloudUploadOutcome`），而本口**文件型**零实拍（唯一样本是建目录那一型）⇒ 字段名与"会不会回这一格"都还没被上游确认过',
+  'internal/app/cloud_upload.go:CloudUploadReceipt':
+    '一次上传的**内存收据**（结局 + fileId + 实际发出去的名字）。`Outcome` 是 int 枚举且**零值刻意是"未上传"**：marshal 出去前端拿到 `0` 既读不成"未上传"也读不成"已上传"，而这一格的正误决定**要不要往清理那一族交 id**（交错就是删用户自己的文件）。今天它也**没有**对外路径 —— 这一族还没有调用点（见文件头那一节）',
+  'internal/app/cloud_upload.go:CloudUploadOptions':
+    '一次上传的**可调参数**，零值 = 旧实现 `uploadRandomFile` 那一档。默认值由 `channelOrDefault` / `extensionOrDefault` / 上游层那两处**依次**补齐，补 tag 会造出第二个"默认值真相"；且 `Op` 只有 android 档读（web/PC 档忽略它），这个"档位决定哪一格生效"的关系不是字段能表达的',
+  'internal/app/cloud_upload.go:CloudUploader':
+    '一次上传的**注入点**（上游句柄 + 随机源 + `Auth` + `DeviceID`）。⚠ `Auth` 是 `Authorization` 头的**整串**（真凭据），一旦可序列化就顺着日志出去（同 `SmsCredential` / `AppLoginInput` 那两条：里面装凭据的入参打包永不补 tag）；`Up` 里还装着 HTTP 客户端，marshal 到它直接报错',
 }
 
 function walk(dir, out = []) {

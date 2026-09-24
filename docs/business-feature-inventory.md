@@ -100,13 +100,16 @@
 >   写侧 = `task_matrix_dispatch.go`（**决定**：打卡 / 走 runner / 缺玩法不发 / 门挡 / 需人工，
 >   一个请求都不发）＋ `task_matrix_run.go`（**执行 + 复查**）。
 >   ⭐ **与旧实现刻意不同的一处**：旧实现只要 `state!=="FINISH"` 就**无脑补一发** `task/click`，
->   而 14 种玩法里 12 种缺的是**端点族**（上传、139 邮箱子链、建删外链…）——
+>   而 14 种玩法里 12 种接不上 —— **8 种缺端点族**（139 邮箱子链、建删外链、笔记…），
+>   **4 种（上传那一族：106 / 113 / 522 / 1014）缺的是接线**：三枪与 `batchTrash` 已于
+>   2026-09-24 落码但**没有调用点**、且三枪零实拍（P1 / R27）——
 >   盲点那一发会让上游把这条记成完成，于是界面上"完成 N 条"、**用户账上多了一条没做过的事**。
 >   本仓那 12 条报成"本工具还没接上玩法"（`toolGapCount`），一枪不发。
 >   ⚠ **三个"仍未"**：① **一次都没真打过** —— 本族那一发 `task/click`（`m.mcloud.139.com`）
 >   只有**两发**实拍（另两发同名端点在 `:7071`，属别的族），`mrp doTask` 那一发**零实拍**，
 >   而"打完之后上游会不会把 `state` 改成 `FINISH`"**从未观测** ⇒ 复查那四格是**夹具读数**，不是上游行为的证据；
->   ② 12 种玩法没接（缺端点族，不是缺分派逻辑）；③ 旧实现 `107`（云笔记）那个"runner 恒不选中"的
+>   ② 12 种玩法没接（**8 种**缺端点族、**4 种**缺"把已落码的上传族接进来"，都不是缺分派逻辑）；
+>   ③ 旧实现 `107`（云笔记）那个"runner 恒不选中"的
 >   bug **不迁**，但要说清它原来漏在哪：旧实现那里**盲点照发**（`107` 不在 `SKIP_TASK_LIST` 里）
 >   而玩法不跑 ⇒ 上游把这条记成完成、用户其实什么都没做。本仓把 `107` 归进"缺玩法"那一档，
 >   **一枪不发**并在结论里点名（`toolGapCount`）—— 这一条正是 §2.3 那句 bug 的处置。
@@ -304,9 +307,12 @@
      真正的风险只有**漏记**（没进 `state.files` 的 ID = 云盘侧孤儿文件残留）。所以"归属到 run"落地成
      **我们自己的 run 产物清单 + 失败路径也清理**，不是"向上游查归属"。
      （真正会"错删"的是 §2.3 `ai-avatar` 那种**按文件名匹配**找回 ID 的写法 —— 同名即碰撞，那才是要改成一跳拿 ID 的地方。）
-   - **Go 侧现状（2026-09-24）**：`batchTrash` 在仓库里**零实拍** ⇒ `after` 这一支与 §2.3 的上传族一起冻结；
-     清理要用的 "run 产物清单" 那一层**已经先建好了**（`internal/exec/artifacts.go`，它不依赖抓包），
-     但**还没有调用点**。同上指路 [`status.md`](status.md)。
+   - **Go 侧现状（2026-09-24 本轮订正）**：`batchTrash` 的请求构造与发送口**已落码**
+     （`internal/upstream/app_cloud_upload.go` 的 `CloudBatchTrashRequest` / `AppCloudBatchTrash`，
+     编排侧 `cloud_upload.go` 的 `DeleteCloudFiles`，web 档固定），但**零实拍**且**没有调用点**
+     ⇒ `after` 这一支仍然不删任何东西。清理要用的 "run 产物清单" 那一层**也已经建好了**
+     （`internal/exec/artifacts.go`，它不依赖抓包），同样**没有调用点** ——
+     所以这一支现在是"**两半都 ready、中间没接**"。同上指路 [`status.md`](status.md)「网盘上传族四枪落码」那一轮。
 
 ### 2.3 档 3 · 活动类：`task-expansion` / `app` / `ai-avatar` / `msg-push` / `notice` / `backup-gift`
 
@@ -317,9 +323,15 @@
 1. `GET https://mrp.mcloud.139.com/market/signin/page/taskExpansion`（`apis/signin.ts:56`）取任务与 `acceptDate`；
 2. **建随机文件凑备份**：`POST personal-kd-njs.yun.139.com/hcy/file/create`（`apis/file.ts:64`，入参含 `contentHash`+`SHA256`、`fileRenameMode:"auto_rename"`，返回 `{fileId, uploadId, rapidUpload, partInfos[].uploadUrl, exist}`）→ `PUT <uploadUrl>` → `POST hcy/file/complete`（`:96`）。**"像备份来的"靠的是安卓渠道那组头**：`opType==="backup"` ⇒ `x-yun-op-type: 2` + `x-yun-sub-op-type: 200`（`file.ts:32-41`，`sub = op*100`；`channelSrc` 默认 `10000023`），而 `upload` / PC / Web 分支拿到的是 `1`。
 3. `sleep(backupWaitTime || 20)` 秒，等备份被识别；
-   - **Go 侧现状（2026-09-24）**：上面这三枪里只有"**建目录**"那一型有实拍（`test/fixtures/http/3d.json` 两条），
-     **上传文件那一型 + `PUT uploadUrl` + `file/complete` 三条零样本** ⇒ 这一族按 v4 是**接口层冻结**，不动手。
-     缺格清单、鉴权归属那一格的订正、补法 ⇒ [`status.md`](status.md)「上传族与 `after` 清理」那一节。
+   - **Go 侧现状（2026-09-24 本轮订正）**：这三枪**已按旧 TS 字面量落码**（上游层
+     `internal/upstream/app_cloud_upload.go` + 编排层 `internal/app/cloud_upload.go`），
+     但**没有调用点**，且实拍面**没变**：只有"建目录"那一型有实拍（`test/fixtures/http/3d.json` 两条），
+     **上传文件那一型 + `PUT uploadUrl` + `file/complete` 三条仍零样本**（R27），
+     同一台主机上"写操作认哪套鉴权画像"也没样本（R28）⇒ 所以"落码"到这里为止钉的是
+     **顺序与形状**，不是"上游认"。缺格清单与补法 ⇒ [`status.md`](status.md)
+     「网盘上传族四枪落码」与「上传族与 `after` 清理」两节。
+     ⚠ 原先这一格写的是"按 v4 是**接口层冻结、不动手**"，那一句已被本轮的实际取向取代：
+     旧 TS 这一族可运行 ⇒ 按 §1.9 先对齐落码、把未验证的格子逐条登记，而不是停住。
 4. 复查 + `GET https://mrp.mcloud.139.com/market/signin/page/receiveTaskExpansion?acceptDate=${acceptDate}`（`apis/signin.ts:65`，**未 percent-encode**，且我们抓包样本里**没有出现 `acceptDate` 参数** —— §5.5）；
 5. 留下的文件 ID 写进 `ctx.state.files`，由 `after` 删除。
 
@@ -332,9 +344,11 @@
 > 2026-09-24 更新（上一条已不成立，就地改准）：**账本那一层已建** ——
 > `internal/exec/artifacts.go` 的 `ArtifactLedger`（登记幂等、三元组不全直接报错、
 > `exist:true` 走 `RegisterCreated` 不入账、按账号切清单、`Forget` 把未清理的交回）。
-> ⚠ 它**目前没有任何调用点**：真正往账上记东西的前提是"上传链能拿到 `fileId`"（仍零实拍 ⇒ 冻结），
-> 清理那一条 `batchTrash` 也在冻结面里。所以 §2.2 第 3 条与上面这三枪的状态是
-> "账本 ready、进出口没接"，不是"已落地"。缺格清单与解冻条件见 [`status.md`](status.md)「上传族与 `after` 清理」那一节。
+> ⚠ 它**目前没有任何调用点**：真正往账上记东西的前提是"上传链能拿到 `fileId`"，而四枪
+> 今天**已落码但零实拍**（R27）⇒ 没有一条链敢真发；清理那一条 `batchTrash` 同理。
+> 所以 §2.2 第 3 条与上面这三枪的状态是
+> "账本 ready、上传族 ready、**中间那条线还没接**"，不是"已落地"。缺格清单与解冻条件见
+> [`status.md`](status.md)「网盘上传族四枪落码」那一轮。
 
 #### `app` App 任务矩阵（`packages/core/src/tasks/app/`）—— 体量最大的一项
 
@@ -363,8 +377,10 @@
   （决定落成请求 + 第二趟复查 + 那句人话小结）。
   ⭐ **与旧实现刻意不同的一处**（这是本轮最重要的一条，改之前先回 `task_matrix_dispatch.go`
   文件头看证据）：旧实现只要 `state!=="FINISH"` 就**无脑补一发** `task/click`，
-  而 14 种玩法里 **12 种缺的是端点族**（上传三枪、139 邮箱子链、建删外链、笔记…）——
-  那一发会让上游把这条记成完成 ⇒ 界面上"完成 N 条"、用户账上多了一条**没做过的事**，
+  而 14 种玩法里 **12 种接不上**（2026-09-24 本轮订正口径：**4 种缺的是"把已落码的上传族接进来"**
+  —— 106 / 113 / 522 / 1014，上传三枪与 `batchTrash` 已在 `app_cloud_upload.go` + `cloud_upload.go`；
+  **其余 8 种仍缺整个端点族**：139 邮箱子链、建删外链、笔记、AI 工作台、AI 相机…）——
+  旧实现那一发无脑 `task/click` 会让上游把这条记成完成 ⇒ 界面上"完成 N 条"、用户账上多了一条**没做过的事**，
   而这一族**没有撤销那一口**。本仓那 12 条报成"本工具还没接上玩法"、**一枪不发**，
   界面上用 `toolGapCount`（工具的锅）与 `manualCount`（要用户去 App 点的）**两格分开**。
   ⚠ **三条门的语义按旧实现逐字落**（不是"顺手统一"）：default 那次盲点**不过** `currstep` 门、
@@ -375,7 +391,9 @@
   ⚠ **仍未做的三件**：① **一次都没真打过** —— `task/click` 四发实拍、`mrp doTask` 那一发**零实拍**，
   而"打完上游会不会把 `state` 改成 `FINISH`"这件事**从未观测** ⇒ 复查那四格是**夹具读数**，
   不是上游行为的证据（拿到第一个实拍的最快路径是手工点一次，这也是它 `RunInBatch:false` 的理由）；
-  ② 那 12 种玩法没接（其中上传那一族 = **P1** / 待办 R 项）；③ ② 那口 `:7071` 的 `taskListV2`
+  ② 那 12 种玩法没接（**8 种缺端点族**；**4 种即 106 / 113 / 522 / 1014 缺接线** ——
+  上传那一族 2026-09-24 已落码但没有调用点，三枪仍零实拍 ⇒ **P1** / R27）；
+  ③ ② 那口 `:7071` 的 `taskListV2`
   属 #12 `notice`、**不并入**这一族（实拍缺环）。
   ⚠ `groupState.taskFinishState` 与 `process` **两格只存不判**（语义未验证）；
   "上游认不认 `activityid` 随市场名变"**一次真打都没有**。

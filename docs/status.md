@@ -53,7 +53,7 @@
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | CLI：初始化 / 登录 | ✅ 可用（扫码 + 短信，PC 端与 App 端）                                                                                                                    |
 | CLI：签到（云朵中心） | ✅ 端到端跑通（含领取、复活卡）                                                                                                                             |
-| 上游接口层        | ⚠ **分族推进中**（2026-09-24）—— 登录 / App 签到 / 直播间 / 兑换 / 红包派对 / 拍拍 / AI 头像 / 任务清单等各族**已落码**（`internal/upstream/` 三十六份非测试文件）。⚠ 但**证据分两半**：有实拍的族钉的是语义，零实拍的族只钉"发得出、形状不串台"（缺口逐条在 [`pending-decisions.md`](pending-decisions.md) §三）。**还没落码**的是 `file/create` 那一族上传与 `batchTrash`（= P1） |
+| 上游接口层        | ⚠ **分族推进中**（2026-09-24）—— 登录 / App 签到 / 直播间 / 兑换 / 红包派对 / 拍拍 / AI 头像 / 任务清单 / **网盘上传四枪**等各族**已落码**（`internal/upstream/` 四十一份非测试文件）。⚠ 但**证据分两半**：有实拍的族钉的是语义，零实拍的族只钉"发得出、形状不串台"（缺口逐条在 [`pending-decisions.md`](pending-decisions.md) §三）。上传族（`file/create` 文件型 → `PUT` → `file/complete` → `batchTrash`）**代码已落、没有调用点**，缺的接线与实拍都在 P1 |
 | 服务入口         | ✅ **Go 侧已接线**：API 四组业务路由（含 SSE）+ 前端产物与 SPA 回退；**15 条路由逐条对位冻结基准**（有断言盯着）。⚠ `POST /api/runs` **基准里也没有**（P4 功能，非迁移缺口） |
 | WebUI        | ✅ 九张页面里**七张是真接口**（总览 / 账号 / 直播间小红花 / 兑换 / 定时 / 任务 / 历史）。⚠ 只剩 `debug`（调试台）与 `settings`（设置）两张走 `placeholder-page.tsx` 空态 |
 | 运行时层         | ✅ 事件模型 / 生命周期 / 事件总线 / `run_events` 表 + 编排已落地；**2026-09-23 起调度循环就在服务进程内**（`internal/server/scheduler.go`，到点按 `schedules` 触发）。⚠ 只有"任务组合（pipeline）"那一类目标**还没接上执行**，到点会记一句 `error` 而不是静默 |
@@ -2201,7 +2201,8 @@ accepted 那半**层与契约各钉一次** —— 契约有码可钉，**层没
   `internal/upstream/app_client.go:71-80`），且 App 短信登录那条链 2026-09-21 端到端实测通过。
 - ⚠ 但**头值全部脱敏** ⇒ "personal-kd 认的就是 `mobile:` 这一串"仍是**推断**，不是实拍结论；
   要坐实它得在本地拿真实凭据重放一次（结果不入库）。⇒ 只有"这一串到底哪来的"从缺口降级成"待确认"，
-  **上传三枪的体与判据照旧是硬缺口**。
+  **上传三枪的体与判据照旧是硬缺口**。（⇒ 本轮这一族的**代码**已按旧 TS 字面量落码、但**没有调用点**，
+  见下面「网盘上传族四枪落码」那一轮；**样本**缺口不变，仍是 R27 / R28。）
 
 ### 三、补样本的口径（写清楚，免得下次重新推一遍）
 
@@ -3202,3 +3203,84 @@ CDP 会话一关就**释放**设备尺寸覆写 ⇒ "窄屏量到 40px"其实量
    再叠就该按"决定 / 执行 / 复查"拆三份）、`task_matrix_run.go` **567**、`task_matrix_dispatch.go` **463**；
    本文件 **3100+ 行**（Q16 的拆分方案仍待批）。
 5. ✅ 本轮 16 份文件（+3149 / −26）已提交为 `4df2ec9`；工作树里没有刻意留着不入库的东西。
+
+## 补记（2026-09-24，网盘**上传族四枪**落码：`file/create` → `PUT` → `file/complete` → `batchTrash`，接口层仍零真打）
+
+### 一、起因与"这一轮到底交付了什么"
+
+上一节（#9 写侧）里那 12 条缺口，有**四条**（106 / 113 / 522 / 1014）的前置是同一件事：
+"要往网盘传一个文件"。#7 `after` 的清理那一半（`batchTrash`）也是同一族。所以这一轮做的是
+**这一族的端点 + 编排**，把 P1 那一格从"缺端点族"改成"**缺接线与实拍**"。
+
+⚠ 说清楚**没做**的：这一族今天**没有任何调用点** —— 那四条玩法仍在 `taskMatrixToolGaps` 里
+（理由文本已就地改准，见 §五），界面上点不到"上传"这件事，`after` 也仍然不删东西。
+产出是"能编译、被 27 条测试钉住形状与顺序、一次都没真打过上游"的一族代码。
+
+### 二、落点
+
+| 层 | 文件 | 干什么 |
+| --- | --- | --- |
+| 传输 | `internal/core/traits.go`（+15 行） | 新增 `NewRequestPut`：此前**全仓没有任何一族发过 PUT**，网盘直传是第一发。与 POST 同样不带幂等键 ⇒ `IsRetryable()` 判**不可重试**（重放语义未验证，而代价是坏文件，所以宁可少发） |
+| 上游 | `internal/upstream/app_cloud_upload.go`（581 行 / **18 条**测试） | 四枪的请求构造 + 解析：`CloudFileCreateRequest` / `ParseCloudFileCreate`、`CloudUploadPutRequest`、`CloudFileCompleteRequest` / `ParseCloudFileComplete`、`CloudBatchTrashRequest` / `ParseCloudFileBatchTrash`，加 `(u *Upstream)` 四个入口；头集合 `CloudFileOpHeaders`（三档 channelSrc） |
+| 编排 | `internal/app/cloud_upload.go`（280 行 / **9 条**测试） | `CloudUploader.UploadContent` / `UploadRandom` / `DeleteCloudFiles`，三态结局 `CloudUploadOutcome` 与收据 `CloudUploadReceipt` |
+| 登记 | `scripts/check-go-jsontags.cjs` | 五个结构体进 `UNTAGGED_ALLOWED`，逐条写理由（最硬那条是 `CloudFileCreated.UploadURL` = **预签名地址**，一旦可 marshal 就是一条凭据外流路径） |
+
+### 三、⭐ 这一族的三条**横向**结论
+
+1. **`WithHeader` 是追加，旧 TS 是对象赋值** ⇒ 凡"要改一枚头的值"必须走 `setCloudHeader`
+   （`dropHeader` + 追加）。这一格不是审美：本仓第一版用追加写 `x-yun-op-type`，
+   于是 android **备份档**同时发出 `1` 与 `2` 两号线（旧实现只发 `2`），
+   被自家测试 `TestCloudFileOpHeadersPerChannel` 抓到（反向验证 (c)）。
+2. **预签名 `uploadUrl` 与 `auth` 同一条纪律：只进不出**。它不进日志、不进夹具、
+   **也不进错误文本** —— `TestAppCloudUploadPutSendsNothingOnSuccess` 里专门钉了一句
+   "错误串里不许出现那枚合成 token"。
+3. **三态拆成枚举而不是 bool**。旧实现的 `return false` 里混着"已存在所以什么都没做"与
+   "传失败了"，两档在**清理**侧是反的（前者不该删、后者该删）。`CloudUploadOutcome` 的
+   **零值刻意是"未上传"**：出错路径一律不设 Outcome，否则"忘了赋值"会念成"报了一次成功上传"。
+
+### 四、与旧实现**刻意不一致**的一处
+
+`PUT` 或 `complete` 失败时，本层**仍把已知的 `fileId` 交回**（旧实现在这两支直接 `return false`、
+不记账 ⇒ 网盘里已经有一个坑而没人知道它的 id，成了删不掉的孤儿）。这只多交一个信息、
+不改业务语义：错误照回，调用方可以**选择**清理。`TestUploadKeepsFileIDWhenLaterShotsFail` 钉这一格。
+
+### 五、成文就地订正（不留补记）
+
+- `docs/pending-decisions.md` **P1** 那一格：原写"四枪未实现 / `batchTrash` 零实拍所以没有清理"，
+  现改为"**端点族与编排已落码，P1 现在只管两件事**：① 四条玩法挪进执行表；② 三枪零实拍"。
+- 缺口表 `taskMatrixToolGaps` 里 106 / 113 / 522 / 1014 的**理由文本**同步改准
+  （"未实现"⇒"已落码、缺本条的调用点"）。连带把 `task_matrix_run_test.go` 那条
+  `Contains(Reason,"未实现")` 换成"非空"，**具体措辞与互不相同**仍由按表遍历的那条钉 ——
+  否则这一层锁住的是一个子串而不是"该补哪一族"。
+- `internal/app/ai_avatar_files.go` 文件头那句"本仓今天没有接清理（`batchTrash` 零实拍）"
+  改准为"请求构造与发送口已落码、仍零实拍、仍无调用点"，并把"换路"那条指向**文件型**那一发的实拍。
+- 新增 **R27**（四枪里三枪零实拍：`har/` 里 `grep file/complete|batchTrash` **零条**，
+  唯一实拍是 `test/fixtures/http/3d.json` 的 **folder 型** create）与
+  **R28**（同一台 `personal-kd` 上并存两套鉴权画像：`hcy/file/list` 走 Bearer + `x-yun-uni`，
+  旧 TS 的上传链走 Basic + `deviceid` 且无 uni —— **写操作认哪套没有样本**）。
+
+### 六、验证
+
+- **反向验证五条**，全部如预期变红、跑完还原：
+  (a) 两处 `content-type` 统一 ⇒ `TestCloudFileCreateBodyIsLegacyTenKeys`；
+  (b) android `sub-op-type` 固定 `100` ⇒ `…PerChannel/android/backup`；
+  (c) 用 `WithHeader` 代替 `setCloudHeader` ⇒ "应恰有一枚 `x-yun-op-type`，实得 2"；
+  (d) 把 `FileID` 赋值挪到全部成功之后 ⇒ `TestUploadKeepsFileIDWhenLaterShotsFail` 两支全红；
+  (e) 去掉 `DeleteCloudFiles` 的空列表闸 ⇒ `TestDeleteCloudFilesGuardsEmptyList`
+  （红在"编排层不该把空列表交给上游去判"那一句）。
+- **门禁**：`node scripts/gates-go.js` → **十项全绿**（当轮 stdout 原文「十项门禁全绿」，
+  逐条 build/vet/fmt/test/deps/filenames/idents/golden/jsontags/md-tables）；
+  `node scripts/gates-web.js` → **2 条全绿**（本轮未动 web，仍跑了一次确认）。
+- ⚠ **没跑过**的：真打上游一次都没有（往用户网盘写文件 = P1 第三档，要用户点头）。
+  界面也**看不见**这一族 —— 它没有入口，所以 web 侧没有可核验的东西。
+
+### 七、遗留
+
+1. ❓ 四枪的上游侧语义（`exist` / `rapidUpload` / `uploadUrl` 到底回不回、鉴权认哪套）＝ R27 / R28，
+   补法同 P1 第三档那一次真跑（测试号传一个 64 字节文件再 `batchTrash` 掉）。
+2. ⏭ 下一步候选（**不挡路**，可先做）：把 106 / 113 / 522（+1014 的一半）从缺口表挪进
+   `taskMatrixRunners`（`toolGapCount` 12→9），以及 #7 `after` 的清理接 `ArtifactLedger`（R20）。
+3. ⚗ §3.9 偏大：`internal/upstream/app_cloud_upload_test.go` **652 行**（本轮新建，
+   下一轮再加就往"头集合 / 请求构造 / 解析"三份拆）、`app_cloud_upload.go` **581**；
+   `internal/core/traits.go` **1035 行**（本轮只 +15，但已是全仓最大的 core 文件）；
+   本文件 **3200+ 行**（Q16 的拆分方案仍待批）。

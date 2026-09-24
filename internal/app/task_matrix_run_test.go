@@ -393,8 +393,11 @@ func TestTaskMatrixRunNeverClicksToolGapTasks(t *testing.T) {
 		t.Errorf("小结要写明几条没接上，实得 %q", got)
 	}
 	// ⭐ 缺口**理由**要逐条带到结论里（那是"下次补哪一族"的唯一出处）。
+	// 这里只钉"没被丢成空白"：**具体措辞与互不相同**由 `taskMatrix_dispatch_test.go`
+	// 里那条按表遍历的用例钉 —— 表已经改过口径（上传那一族 2026-09-24 从"未实现"
+	// 变成"已落码、缺调用点"），在这一层再锁一个子串就会锁住"该说哪一族"之外的东西。
 	for _, record := range res.Steps {
-		if record.Kind != StepBlockedToolGap || !strings.Contains(record.Reason, "未实现") {
+		if record.Kind != StepBlockedToolGap || record.Reason == "" {
 			t.Errorf("每条缺口要逐条说清缺什么，实得 %+v", record)
 		}
 	}

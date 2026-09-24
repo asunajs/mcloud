@@ -185,6 +185,21 @@ func NewRequestPost(url string) HTTPRequest {
 	return HTTPRequest{Method: MethodPost, URL: url, Headers: []HeaderPair{}}
 }
 
+// NewRequestPut 构造一个 PUT 请求。
+//
+// # 为什么现在才补
+//
+// [MethodPut] 一直在枚举里（黄金向量对的是**枚举形状**，不是构造函数），但此前
+// 没有任何一族发过 PUT —— 网盘直传那一枪是第一个：它的**目的端是预签名 URL**，
+// 主机与 hcy 接口域不同，body 是裸字节，所以既不用 [WithJSONBody] 也不走信封解析。
+//
+// ⚠ 与 POST 同样**不自带幂等键** ⇒ [HTTPRequest.IsRetryable] 判它不可重试。
+// 这不是保守：预签名 URL 通常一次写入对应一段偏移，重放同一条 PUT 的语义
+// **未验证**（零样本），而"重复写一段"的代价是用户上传出一个坏文件。
+func NewRequestPut(url string) HTTPRequest {
+	return HTTPRequest{Method: MethodPut, URL: url, Headers: []HeaderPair{}}
+}
+
 // Header 追加一个头（链式）。
 func (r HTTPRequest) WithHeader(key, value string) HTTPRequest {
 	return r.appendHeader(key, value)
