@@ -2495,7 +2495,7 @@ jsontags 0.1 / md-tables 0.1。⚠ 那个 0.5s 是 **test 缓存命中**，不�
 是 **35.4s / test 30.3s**，两次的差只可能来自缓存。
 jsontags 新增 3 条白名单（`CloudPhoneWorld` = 入参集、`CloudPhoneAssets` = 三格内存读数（`Toast` 刻意为指针）、
 `CloudPhoneResult` = 内存结论，⚠ `Status` 零值是 `Done`），现 **78 个字段齐全 / 180 个按白名单不进 JSON**。
-本轮**未提交**（用户没要求）。
+本轮未提交；现已随 2026-09-24 的整树快照 `963db10` 入库。
 
 ### 四、遗留（这一轮没做、也不该顺手做）
 
@@ -2566,7 +2566,7 @@ jsontags 新增 3 条白名单（`CloudPhoneWorld` = 入参集、`CloudPhoneAsse
 冷跑 **34.4s**（逐条 build 1.4 / vet 0.5 / fmt 0.1 / test **28.9** / deps 2.8 / filenames 0.2 / idents 0.2 /
 golden 0.1 / jsontags 0.1 / md-tables 0.1），紧接着的暖跑 **5.3s**（test **0.5** = 缓存命中）。
 jsontags 新增 3 条白名单（`PlayAIBoard` / `PlayAITaskCounts` / `PlayAIResult`，理由各写自己那一格），
-现 **78 个结构体字段齐全 / 183 个按白名单不进 JSON**。本轮**未提交**（用户没要求）。
+现 **78 个结构体字段齐全 / 183 个按白名单不进 JSON**。本轮未提交；现已随 2026-09-24 的整树快照 `963db10` 入库。
 
 ### 四、遗留
 
@@ -2618,7 +2618,7 @@ jsontags 新增 3 条白名单（`PlayAIBoard` / `PlayAITaskCounts` / `PlayAIRes
 `go clean -testcache` 后的冷跑 **59.1s**（逐条 build 1.0 / vet 0.4 / fmt 0.1 / test **54.2** / deps 2.8 /
 filenames 0.2 / idents 0.2 / golden 0.1 / jsontags 0.1 / md-tables 0.1），紧接着的暖跑 **5.4s**（test **0.5** = 缓存命中）。
 golden 仍是 167 条断言（本轮没有新黄金向量：这一口没进对拍面）。
-jsontags 现 **78 个结构体字段齐全 / 187 个按白名单不进 JSON**。本轮**未提交**（用户没要求）。
+jsontags 现 **78 个结构体字段齐全 / 187 个按白名单不进 JSON**。本轮未提交；现已随 2026-09-24 的整树快照 `963db10` 入库。
 
 ### 四、遗留
 
@@ -2695,7 +2695,7 @@ jsontags 现 **78 个结构体字段齐全 / 187 个按白名单不进 JSON**。
 `go clean -testcache` 后的冷跑 **1m06s**（逐条 build 1.6 / vet 0.6 / fmt 0.1 / test **59.8** / deps 2.8 /
 filenames 0.2 / idents 0.2 / golden 0.1 / jsontags 0.1 / md-tables 0.1），紧接着的暖跑 **5.4s**（test **0.5** = 缓存命中）。
 golden 仍是 167 条断言（本轮没有新黄金向量：这一族没有任何实拍可对拍）。
-jsontags 现 **78 个结构体字段齐全 / 193 个按白名单不进 JSON**。本轮**未提交**（用户没要求）。
+jsontags 现 **78 个结构体字段齐全 / 193 个按白名单不进 JSON**。本轮未提交；现已随 2026-09-24 的整树快照 `963db10` 入库。
 
 ### 四、遗留
 
@@ -2772,7 +2772,7 @@ jsontags 现 **78 个结构体字段齐全 / 193 个按白名单不进 JSON**。
 `node scripts/gates-go.js` ⇒ 横幅"**十项门禁全绿**"（10/10），总耗时 **33.9s**
 （逐条：build 1.0 / vet 0.5 / fmt 0.1 / test 28.8 / deps 2.9 / filenames 0.2 / idents 0.2 /
 golden 0.1 / jsontags 0.1 / md-tables 0.1）。golden 仍是 **167 条断言**（本轮没有新黄金向量：
-这一族没有任何实拍可对拍）；jsontags **78 / 196**；脱敏与消费者两栏见当轮输出。本轮**未提交**（用户没要求）。
+这一族没有任何实拍可对拍）；jsontags **78 / 196**；脱敏与消费者两栏见当轮输出。本轮未提交；现已随 2026-09-24 的整树快照 `963db10` 入库。
 
 > 成文改写（`pending-decisions.md` 的 Q18 – Q21 / R19 – R20 / P1、`business-feature-inventory.md` §2.3、
 > 坑表 #147）之后**复跑**同一套：横幅仍"十项门禁全绿"（10/10），总耗时 **5.4s**
@@ -2842,7 +2842,7 @@ golden 0.1 / jsontags 0.1 / md-tables 0.1）。golden 仍是 **167 条断言**�
 golden 0.1 / jsontags 0.1 / md-tables 0.1）。golden 仍 **167 条断言**（本轮没有新黄金向量：
 线格式与冻结对拍面都没动）；jsontags **78 / 196**。
 `node scripts/gates-web.js` ⇒ 横幅"**web 门禁 2 条全绿**"，总耗时 **3.2s**（typecheck 2.5 / build 0.7）。
-本轮**未提交**（用户没要求）。
+本轮未提交；现已随 2026-09-24 的整树快照 `963db10` 入库。
 
 > 成文改写（下面「四」「五」，加上 `business-feature-inventory.md` §exchange、
 > `pending-decisions.md` 的 P2 / R5 / 「已拍过」那一格、`app-exchange-samples.txt` §0 + §5.7、
@@ -2974,7 +2974,14 @@ CDP 会话一关就**释放**设备尺寸覆写 ⇒ "窄屏量到 40px"其实量
   不是测试变快（40.3s / test 33.6s 那次才是真跑完的）。
 - ⚠ 这两套都是**整套树**跑的，含并行会话在飞的改动（`internal/server/run_dispatch.go`、`web/src/api.ts` 等）
   ⇒ 全绿算的是"这棵树绿"，不是"只有我的改动时绿"。
-- 本轮**未提交**（用户没要求）。核验用的服务（8791）、接收端（8799）、headless Edge（9333）跑完即关，8788 不动；
+- ✅ **已提交为 `963db10`（2026-09-24，整树快照）**：工作树 171 项一起入库 —— 本链从"接线批"到这一族
+  （前面几节里那些"本轮未提交"现在都算已入库），另含另一条线在飞的直播间小红花与签到会话池那批
+  （两条线互咬：本链的 `app_play_ai*.go` / `app_task_list_v2_test.go` 调的 `core.IsSessionExpired`
+  出自那条线在 `internal/core/errors.go` 里新加、当时尚未入库的那三行 ⇒ 只提本链编译不过）。
+  ⚠ **刻意没入库的两份**：`internal/server/zz_dbg_test.go`、`internal/server/zz_debug_test.go`
+  （身份未确认的调试用例，按 §2「不替别人处置未跟踪文件」留在工作树）。
+  提交自洽性另在**暂存区那份树**的临时 worktree 里验过 `go build` / `go vet` / `go test ./...`（不含上面两份），跑完即删。
+  核验用的服务（8791）、接收端（8799）、headless Edge（9333）跑完即关，8788 不动；
   `target/` 那三份 throwaway 脚本与截图按 gitignore 不入库。
 
 ### 六、遗留
