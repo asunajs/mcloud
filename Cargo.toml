@@ -19,7 +19,7 @@ edition = "2024"
 rust-version = "1.91"
 license = "Apache-2.0"
 authors = ["catlair"]
-repository = "https://github.com/catlair/mcloud"
+repository = "https://github.com/catlair/mcloud-gost"
 
 [workspace.dependencies]
 # --- 内部 crate ---
