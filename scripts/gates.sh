@@ -65,6 +65,19 @@ cd "$(dirname "$0")/.."
 
 GATE_NAMES="test clippy fmt deps filenames idents golden"
 
+# 横幅算条数用的全量清单。**别在末尾写死"七项"** —— 见文件末尾的说明。
+ALL_GATES=($GATE_NAMES)
+
+# 中文数字查表：保住 README 与 docs/dev-gates.md 里"七项门禁"这个说法，
+# 同时让它跟着清单走而不是跟着字面量走。
+cn_count() {
+  case "$1" in
+    1) echo "一" ;; 2) echo "二" ;; 3) echo "三" ;; 4) echo "四" ;;
+    5) echo "五" ;; 6) echo "六" ;; 7) echo "七" ;; 8) echo "八" ;;
+    9) echo "九" ;; *) echo "$1" ;;
+  esac
+}
+
 gate_cmd() {
   case "$1" in
     test)      echo "cargo test --workspace" ;;
@@ -90,6 +103,9 @@ FAILED=()
 # 失败门禁的**名称 → 本次输出文件**。诊断只看本次输出，不看累积日志。
 FAILED_LOGS=()
 
+# 这次**实际跑过**的门禁名（横幅按它算条数，见文件末尾）。
+RAN=""
+
 # 同时留一份完整输出（跨门禁累积，供人工翻看）。
 # 不用 `mktemp -t` —— 它在 Git Bash 上会返回 `C:\Users\...\Temp\...` 这种
 # Windows 原生路径，与 MSYS 路径混用会让后续清理报 CanonicalizePath 错。
@@ -114,6 +130,7 @@ for name in "${ORDER[@]}"; do
   fi
 
   printf '\n\033[1m──── %s ────\033[0m\n' "$name"
+  RAN="$RAN $name"
 
   # 写盘被拦时**自动重试**：本机（Windows + 杀毒软件实时扫描）会让 cargo
   # 随机地写不进 target/ 里的某一个文件，而每次撞上的文件都不一样。
@@ -191,5 +208,31 @@ if [ ${#FAILED[@]} -gt 0 ]; then
   echo "完整输出: $GATE_LOG"
   exit 1
 fi
-printf '\033[32m七项门禁全绿\033[0m\n'
+
+# ── 横幅：条数从清单派生，不写死 ────────────────────────────────────
+#
+# 这里原来是无条件打印 `七项门禁全绿`，**完全不看这次跑了哪几条**。于是
+# `bash scripts/gates.sh fmt deps filenames idents golden`（不含编译类的
+# 快跑法）也报"七项全绿" —— 而这句话恰恰会被抄进 README 与"门禁实况"行，
+# 抄进去之后没人能再复核它量的是 7 条还是 5 条。
+#
+# 同级仓库 mcloud 的 Go 侧脚本同一个 bug 已改成从清单派生，理由逐字是：
+# **"绿"只对跑过的那个版本成立**。这边一并跟上。
+TOTAL=${#ALL_GATES[@]}
+RAN_COUNT=0
+NOT_RUN=""
+for gate in "${ALL_GATES[@]}"; do
+  case " $RAN " in
+    *" $gate "*) RAN_COUNT=$((RAN_COUNT + 1)) ;;
+    *) NOT_RUN="$NOT_RUN $gate" ;;
+  esac
+done
+
+if [ "$RAN_COUNT" -eq "$TOTAL" ]; then
+  printf '\033[32m%s项门禁全绿\033[0m\n' "$(cn_count "$TOTAL")"
+else
+  printf '\033[32m门禁通过：%s\033[0m\n' "${RAN# }"
+  printf '\033[33m  · 本次 %d/%d 条，未跑：%s —— 要"全绿"请跑 `bash scripts/gates.sh`\033[0m\n' \
+    "$RAN_COUNT" "$TOTAL" "${NOT_RUN# }"
+fi
 : > "$GATE_LOG"
