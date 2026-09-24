@@ -2995,3 +2995,98 @@ CDP 会话一关就**释放**设备尺寸覆写 ⇒ "窄屏量到 40px"其实量
    CLI 那一路不推（Q26）；重试与否（无幂等键）Q22。
 4. ⚗ §3.9 偏大仍是那几份：`settings-page.tsx` **712 行**（三张卡 + 两个弹窗，再长就该把"试发"拆出去）、
    `docs/status.md`（本文件）、`notify_config_test.go` 801 行。Q16（历史搬迁）等方案不变。
+
+## 补记（2026-09-24，云朵增量学会说"没有基准"：`*int64` + schema v11 + 界面 `—`，并顺手抓出 `%+d` 打指针地址）
+
+### 一、起因与实测读数（不是推断，是量出来的）
+
+用户在总览页问"这数量对吗"。界面上是"一个号 今日增量 `0`、另一个 `+6`"，
+而**当天两个号各真 +3** —— 那一格两个数都不是"今日增量"：
+
+- `+6` = 09-22 → 09-24 的**两日累计**（09-23 没采集，日增量的基准按既有口径就是"上一个**有记录**之日"）；
+  周增 `9` = 7440 − 7431 同理。
+- `0` = 那个号在 `cloud_stats` 里**只有今天这一行**，根本没有可减的基准 —— 旧实现把"没有基准"
+  写成了 `0`，于是界面念成"今天没涨"。同日连点两次不会翻倍（`RecordCloud` 先把今天那行滤掉再取基准，
+  这条语义与代码本来一致，实测过）。
+
+根因是**可空性没被表达**：`cloud_diff` 两列在 v2 建表时是 `NOT NULL`，Go 侧是 `int64`，
+于是"无基准"只能塌进 `0`。判据本仓早就成文过（`core.PickCloudValue` 的注："空"必须能被表达，
+`0` 必须能被表达，且二者不同），这一族漏了。
+
+### 二、落点（五层各改一处，都在同一句话上）
+
+- **core**：`CloudStats.CloudDiff` / `CloudDiffWeek` ⇒ `*int64`（nil = 这一条没有基准）；
+  `NextCloudStats` 完全无历史时交回两个 nil。
+  ⭐ 另加 `CloudStats.DiffClause()`：**"日增 / 周增 / 第一次采集"这一小句只有一个来源**，
+  CLI 与服务端运行历史共用。收成一处不是口味问题，见下面第三节那条实测。
+- **io**：`SchemaVersion` 10 ⇒ **11**。v11 按 SQLite 官方的"建新表 → 搬 → DROP → RENAME"重建
+  `cloud_stats`（SQLite 不能 ALTER 掉 `NOT NULL`；本表无外键，所以不需要 `PRAGMA foreign_keys=OFF`），
+  回填判据是**每账号 `MIN(date)` 那一行 ⇒ NULL、其余保持原值**（这个判据只在迁移那一刻成立：
+  旧规则是"无基准写 0"，所以每个账号的第一行必是 0）。刻意用关联子查询而不是窗口函数 —— 不预设驱动版本。
+  读写两头：`UpsertCloudStats` 走 `optI64`（能写 NULL），`CloudStatsSince` 用 `sql.NullInt64` 扫 + `ptrI64` 回填。
+- **app**：`CloudSnapshotResult.SummaryLine` 改成"余额 + `DiffClause()`"。
+- **cli**：`recordCloud` 那句"余额已记录：…"同样改走 `DiffClause()`。
+- **server / web**：路由把那两格原样递出指针（注释写明 **null ≠ 0**）；`api.ts` 的
+  `CloudStatRow.cloudDiff / cloudDiffWeek` ⇒ `number | null`；dashboard 的 `gainText(null)` 出 `—`、
+  `gainText(0)` 出 `0`（表格与移动卡片同一个函数）。
+
+### 三、⭐ 这一轮自己造、又被新断言抓住的缺陷：`%+d` 配 `*int64`
+
+改完类型后 `internal/cli/run_signin.go` 里那句 `fmt.Sprintf("… 日增 %+d …", stats.CloudDiff)`
+**编译过、`go vet` 过、十项门禁全绿**，实测打出来的是：
+
+- 指针为 nil ⇒ `日增 +0`（正是这一轮要消灭的那句假话）；
+- 指针有值 ⇒ `日增 +29261969976152`（**打的是地址**）。
+
+之所以一声不响：CLI 那条用例当时只断 `"余额已记录：10502 豆"` 这个前缀，增量那一小句没人钉。
+所以处置不是"记得判 nil"，而是**把措辞收进 `core.DiffClause`，让不判 nil 的写法无处可写**。
+（AGENTS §3.4 说 `go vet` 只覆盖"几乎肯定是错"的一小撮 —— 这条是它不在场的新证据。改指针类型的同一轮里，
+所有吃这两个字段的格式化都得逐个看，不能指望编译器。）
+
+### 四、测试与反向验证
+
+- core：`TestNoHistoryLeavesDeltasNilNotZero`（改名并改断 nil）、`TestZeroDiffIsAValueNotAnAbsentBaseline`、
+  `TestDiffClause*` 四条（**整串相等**，不是 `Contains` —— 地址那种错只有相等断言抓得住）；
+  `enum_test.go` 新增 `TestCloudStatsWithoutBaselineSerialisesAsNull`（键**在**且为 null，挡 `omitempty`）。
+  ⚠ 黄金向量 `test/golden/enum-json-vectors.json` 是 Rust 冻结前的逐字对照，**没往里加新用例**。
+- io：`TestCloudStatsFirstSnapshotRoundTripsAsNull`（三次采集夹住"UPSERT 少列"那种不报错的错）、
+  `TestV10DatabaseGainsNullableDiffsAndBackfillsTheFirstRow`（v10 库 + NOT NULL 时代的 0 → 迁移后
+  首行 NULL、非首行保持 6/9、余额不动、能写 NULL、复合主键仍拒重、`idx_cloud_stats_date` 还在、重跑不改行数）。
+- app：`cloud_snapshot_line_test.go` 四档（nil / 首次 / **0 是有读数** / 负数）。
+- server：`cloud_stats_route_test.go` 两条，断的是**原始响应文本**里 `"cloudDiff":null` 与 `"cloudDiff":0`
+  同时存在、键不缺失。✅ 反向验证真做过：把处理器改成"nil → 0" ⇒ 两条都红；改回来复绿。
+- cli：`TestSigninStatusOnly…` 加断"没有基准"那一档 + `TestSigninCloudLineWithBaseline`（有前一天 ⇒ `日增 +2，周增 +2`），
+  两条都过 `assertNoAddressInCloudLine`。✅ 反向验证真做过：把 `%+d` 配回指针 ⇒ 两条红（现场输出见上面那个地址），
+  改回 `DiffClause()` 复绿。
+
+### 五、数据面核验（真库副本，不是夹具）
+
+`target/ui-webui.db`（主库的 `.backup` 副本，8787 那份）重启后：`PRAGMA user_version` **10 → 11**，
+两列改为可空，**每个账号最早那一行回填成 NULL**、其余行原值不动（`3 / 6 / 9` 都还在），
+`cloud_count` 一格未动，`idx_cloud_stats_date` 仍在。8788 那个用户自留实例**没碰**。
+
+❓ **界面上那一格本轮没做成真机核验**：内置浏览器的调试通道被占用（8787 正是用户自己在用的那个实例，
+不去抢）。已核的是线格式（第四节 server 两条）与 `gainText` 的分支代码；
+**要核它得怎么做**：在 8787 刷新总览页，看"只有今天一行历史"的那个号那一格是不是从 `0` 变成 `—`。
+
+### 六、门禁（照抄当轮 stdout）
+
+- `node scripts/gates-go.js` ⇒ 横幅"**十项门禁全绿**"（10/10），总耗时 **1m10s**，逐条：
+  build 1.2 / vet 0.7 / fmt 0.1 / test **1m04s** / deps 3.0 / filenames 0.2 / idents 0.4 / golden 0.1 /
+  jsontags 0.1 / md-tables 0.1。同轮其它读数：golden「断言 **167** 条全绿」、脱敏「**13** 个文件…均只出现 199 开头的合成标识」、
+  jsontags「**91** 个结构体字段齐全，**202** 个按白名单不进 JSON」。
+- `node scripts/gates-web.js` ⇒ "**web 门禁 2 条全绿**"，总耗时 **3.9s**（typecheck 2.9 / build 0.9）。
+- ⚠ 这两套都是**整套树**跑的 ⇒ 全绿算的是"这棵树绿"。（本轮开工时 `git status` 只有我自己的那十几项，
+  没有别人的在飞改动。）
+- ⚠ 本节上面那份是**成文前**的 stdout。把这一节写进 `status.md` 后再跑一遍 ⇒ 横幅仍是"十项门禁全绿"，
+  但总耗时 **6.1s**、其中 test **0.5s** —— 那是**缓存命中**，不是测试变快（1m10s / test 1m04s 那次才是真跑完的）。
+
+### 七、遗留
+
+1. ⭐ **修复 ② 没做**：`runs.cloud_gained` / `cloud_after` 两列**全仓没有生产者**（只有 legacy 导入写 nil
+   与读路径），所以"最近运行"列表里那一族格子永远是空。这是同一个问题的另一半口径 ——
+   **要不要让 run 也带增量**（还是干脆去掉这两列）需要用户拍板，不是我能自造默认的。
+2. ❓ 界面那一格的真机核验没做成（见第五节）。
+3. ⚗ §3.9 偏大：`docs/status.md` 本文件已 **3000+ 行**（Q16 拆分方案仍待批）；
+   `internal/cli/run_signin_test.go` **1662 行**、`internal/io/schema.go` **561 行**（v11 那条又加了一大块）、
+   `internal/server/routes.go` **755 行**。

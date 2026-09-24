@@ -831,6 +831,9 @@ func (s *SqliteStore) FillAccountCredentials(
 // ─────────────────────────────────────────────────────────────────────────────
 
 // UpsertCloudStats 按 `account + date` UPSERT 日快照。
+//
+// 两个增量列**可以写 NULL**：NULL = 这一条没有基准（该账号的第一次采集），
+// 与"增量为 0"是两句话。判据与理由见 [core.CloudStats] 的字段注。
 func (s *SqliteStore) UpsertCloudStats(ctx context.Context, scope core.Scope, stats *core.CloudStats) error {
 	if err := validateOwned(ctx, s.db, scope, stats.AccountID); err != nil {
 		return err
@@ -843,7 +846,8 @@ func (s *SqliteStore) UpsertCloudStats(ctx context.Context, scope core.Scope, st
 			cloud_diff      = excluded.cloud_diff,
 			cloud_diff_week = excluded.cloud_diff_week
 		`,
-		stats.AccountID.String(), stats.Date, stats.CloudCount, stats.CloudDiff, stats.CloudDiffWeek)
+		stats.AccountID.String(), stats.Date, stats.CloudCount,
+		optI64(stats.CloudDiff), optI64(stats.CloudDiffWeek))
 	if err != nil {
 		return mapSQLite(err)
 	}
@@ -869,8 +873,8 @@ func (s *SqliteStore) CloudStatsSince(ctx context.Context, scope core.Scope, id 
 			accountID string
 			date      string
 			count     int64
-			diff      int64
-			diffWeek  int64
+			diff      sql.NullInt64
+			diffWeek  sql.NullInt64
 		)
 		if err := rows.Scan(&accountID, &date, &count, &diff, &diffWeek); err != nil {
 			return nil, mapSQLite(err)
@@ -879,8 +883,8 @@ func (s *SqliteStore) CloudStatsSince(ctx context.Context, scope core.Scope, id 
 			AccountID:     core.NewAccountID(accountID),
 			Date:          date,
 			CloudCount:    count,
-			CloudDiff:     diff,
-			CloudDiffWeek: diffWeek,
+			CloudDiff:     ptrI64(diff),
+			CloudDiffWeek: ptrI64(diffWeek),
 		})
 	}
 	if err := rows.Err(); err != nil {

@@ -715,8 +715,8 @@ func (r *signinRun) recordCloud(ctx context.Context, accountID core.AccountID, c
 		r.out.note("⚠ 余额没能落库（不影响本次签到）：%s", perr.Error())
 		return ""
 	}
-	return fmt.Sprintf("  余额已记录：%d 豆（日增 %+d，周增 %+d）",
-		stats.CloudCount, stats.CloudDiff, stats.CloudDiffWeek)
+	return fmt.Sprintf("  余额已记录：%d 豆（%s）",
+		stats.CloudCount, stats.DiffClause())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

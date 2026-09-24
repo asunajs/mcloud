@@ -5,6 +5,7 @@
 package core
 
 import (
+	"fmt"
 	"strconv"
 	"time"
 )
@@ -89,7 +90,8 @@ func PickCloudValue(sources []*int64) (int64, bool) {
 //   - CloudDiff：与上一个**有记录**之日之差；
 //   - CloudDiffWeek：与 7 天前（或更早）最近一条之差；若历史不足 7 天，
 //     退化为最早一条之差；
-//   - 完全无历史时两者均为 0（首次采集不虚报增量）。
+//   - **完全无历史时两者均为 nil**（不是 0）：0 是一句"今天没涨"的读数，
+//     而这里要说的是"没有可减的基准"。首次采集不虚报增量，也不虚报"零增量"。
 func NextCloudStats(accountID AccountID, date string, count int64, history []CloudStats) CloudStats {
 	var prev *CloudStats
 	if n := len(history); n > 0 {
@@ -120,12 +122,40 @@ func NextCloudStats(accountID AccountID, date string, count int64, history []Clo
 
 	out := CloudStats{AccountID: accountID, Date: date, CloudCount: count}
 	if prev != nil {
-		out.CloudDiff = count - prev.CloudCount
+		diff := count - prev.CloudCount
+		out.CloudDiff = &diff
 	}
 	if weekBase != nil {
-		out.CloudDiffWeek = count - weekBase.CloudCount
+		diffWeek := count - weekBase.CloudCount
+		out.CloudDiffWeek = &diffWeek
 	}
 	return out
+}
+
+// DiffClause 是快照增量那半句话，CLI 的"余额已记录"与服务端运行历史的
+// [CloudSnapshotResult]-类小结**共用同一份**（见 `internal/cli/run_signin.go`、
+// `internal/app/cloud_snapshot_run.go`）。
+//
+// # 为什么要收成一处（这不是"避免重复"的口味问题）
+//
+// 两个调用点各写一遍 nil 判断，是本项目 2026-09-24 真踩出来的坑：把 `CloudDiff`
+// 改成 `*int64` 之后，`fmt.Sprintf("%+d", stats.CloudDiff)` **照样编译、照样过 vet**，
+// 实测打出来的是 ——
+//   - 指针为 nil：`+0`（读起来正是我们刚刚要消灭的那句"今天没涨"）；
+//   - 指针有值：`+126914284740856`（`%+d` 打的是**地址**，不是数）。
+//
+// 而这两个形状都不会让任何一条既有断言变红：CLI 那边只断"余额已记录：10502 豆"，
+// 增量那一小句当时没人钉。所以"记得判 nil"不能作为规则，得让**不判 nil 的写法无处可写**。
+//
+// ⚠ 反过来说：新增第三个消费方时**不要**再自己解引用这两个字段拼句子，
+// 要么复用本函数，要么给它加一档措辞。
+func (s CloudStats) DiffClause() string {
+	if s.CloudDiff == nil || s.CloudDiffWeek == nil {
+		return "第一次采集，暂无增量基准"
+	}
+	// ⚠ `%+d` 配的是**解引用之后**的整数（nil 那一支在上面已经分流了）：
+	// 涨 → `+3`，持平 → `+0`，跌 → `-500`。
+	return fmt.Sprintf("日增 %+d，周增 %+d", *s.CloudDiff, *s.CloudDiffWeek)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

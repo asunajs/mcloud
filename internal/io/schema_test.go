@@ -609,3 +609,110 @@ func TestV10MigrationCreatesTheSingleRowNotifyTable(t *testing.T) {
 		t.Fatalf("title 不该被钉成 NOT NULL、也不该有默认值：%s", v10)
 	}
 }
+
+// TestV10DatabaseGainsNullableDiffsAndBackfillsTheFirstRow 钉 v11 那一次**重建**。
+//
+// 这一族要防的三件事，每一件的表现都是"读数错但不报错"：
+//  1. 重建时把行搬丢（老库升级后趋势图整段空掉）；
+//  2. 回填判错档：把"真的没涨"（后面的行里那个 0）也判成 NULL ⇒ 历史上一格好数据被抹掉；
+//     反过来不回填 ⇒ 每个新账号的第一条继续被念成"今日增量 0"，等于没修；
+//  3. 重建后**主键或索引没了** —— 复合主键一丢，同日重复采集就从"覆盖"变成"插第二条"，
+//     而趋势图上会开始长出重复的一天。
+func TestV10DatabaseGainsNullableDiffsAndBackfillsTheFirstRow(t *testing.T) {
+	db := openRawDB(t)
+	for _, sqlText := range allMigrations[:10] {
+		mustExec(t, db, sqlText)
+	}
+	mustExec(t, db, "PRAGMA user_version = 10")
+	// v10 那一版这两列是 NOT NULL，所以老库里"没有基准"只能长成 0 —— 这正是本迁移要治的形。
+	mustExec(t, db, `INSERT INTO cloud_stats (account_id, date, cloud_count, cloud_diff, cloud_diff_week) VALUES
+		('acc-1', '2026-09-22', 7434, 3, 3),
+		('acc-1', '2026-09-24', 7440, 6, 9),
+		('acc-2', '2026-09-24', 8708, 0, 0)`)
+
+	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatalf("迁移失败: %v", err)
+	}
+	if v := userVersion(t, db); v != SchemaVersion {
+		t.Fatalf("版本应升到 %d，实得 %d", SchemaVersion, v)
+	}
+
+	// ① 行一条不少
+	var rows int
+	if err := db.QueryRow("SELECT COUNT(*) FROM cloud_stats").Scan(&rows); err != nil {
+		t.Fatalf("数行失败: %v", err)
+	}
+	if rows != 3 {
+		t.Fatalf("重建不该丢行，实得 %d 行", rows)
+	}
+
+	// ② 每个账号最早那条 ⇒ NULL；后面的行里那个 0 是"真的没涨"，必须原样留着
+	nullDiff, nullWeek := readNullableDiff(t, db, "acc-1", "2026-09-22")
+	if nullDiff.Valid || nullWeek.Valid {
+		t.Fatalf("最早一条的差值应回填成 NULL，实得 diff=%v week=%v", nullDiff.Int64, nullWeek.Int64)
+	}
+	// acc-2 只有一行 ⇒ 它既是最新也是最早 ⇒ 同样 NULL（这就是"新加的号"那一档）
+	onlyDiff, onlyWeek := readNullableDiff(t, db, "acc-2", "2026-09-24")
+	if onlyDiff.Valid || onlyWeek.Valid {
+		t.Fatalf("单行账号的差值应回填成 NULL，实得 diff=%v week=%v", onlyDiff.Int64, onlyWeek.Int64)
+	}
+	// acc-1 的第二条：6 / 9 是**有基准**的读数，一个都不许动
+	laterDiff, laterWeek := readNullableDiff(t, db, "acc-1", "2026-09-24")
+	if !laterDiff.Valid || laterDiff.Int64 != 6 || !laterWeek.Valid || laterWeek.Int64 != 9 {
+		t.Fatalf("非最早那条应保持 6 / 9，实得 diff=%v week=%v", laterDiff.Int64, laterWeek.Int64)
+	}
+	// 余额列一列都不该被回填碰过
+	var count int64
+	if err := db.QueryRow("SELECT cloud_count FROM cloud_stats WHERE account_id='acc-1' AND date='2026-09-22'").
+		Scan(&count); err != nil {
+		t.Fatalf("读余额失败: %v", err)
+	}
+	if count != 7434 {
+		t.Fatalf("回填只动差值列，余额实得 %d", count)
+	}
+
+	// ③ 列真的可空了（老库上直接插 NULL 会因 NOT NULL 报错，这一条就是那条判据）
+	if _, err := db.Exec(`INSERT INTO cloud_stats VALUES ('acc-3', '2026-09-24', 100, NULL, NULL)`); err != nil {
+		t.Fatalf("升级后仍写不进 NULL: %v", err)
+	}
+	// ④ 复合主键与索引都得活着
+	if _, err := db.Exec(`INSERT INTO cloud_stats VALUES ('acc-3', '2026-09-24', 200, NULL, NULL)`); err == nil {
+		t.Fatalf("主键丢了：同一账号同一天插进了第二条")
+	}
+	var indexName string
+	if err := db.QueryRow("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_cloud_stats_date'").
+		Scan(&indexName); err != nil {
+		t.Fatalf("按日期那条索引没了（趋势图与清理都靠它）: %v", err)
+	}
+
+	// ⑤ 重跑安全：v11 已经应用过，第二次 Migrate 不该再动任何一行
+	before := snapshotRowCount(t, db)
+	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatalf("重跑迁移失败: %v", err)
+	}
+	if after := snapshotRowCount(t, db); after != before {
+		t.Fatalf("重跑迁移不该改行数：%d → %d", before, after)
+	}
+}
+
+// readNullableDiff 读一个账号某一天的两个可空差值。
+func readNullableDiff(t *testing.T, db *sql.DB, accountID, date string) (sql.NullInt64, sql.NullInt64) {
+	t.Helper()
+	var diff, week sql.NullInt64
+	err := db.QueryRow(
+		"SELECT cloud_diff, cloud_diff_week FROM cloud_stats WHERE account_id=? AND date=?",
+		accountID, date).Scan(&diff, &week)
+	if err != nil {
+		t.Fatalf("读 %s/%s 的差值失败: %v", accountID, date, err)
+	}
+	return diff, week
+}
+
+func snapshotRowCount(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM cloud_stats").Scan(&n); err != nil {
+		t.Fatalf("数行失败: %v", err)
+	}
+	return n
+}

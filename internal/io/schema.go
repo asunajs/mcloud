@@ -21,8 +21,8 @@ import (
 // 判断标准很简单：**有没有可能存在一个不是本机跑出来的库**。没有，就可以改；有，就只能加。
 //
 // ⚠ 方案文档 §6.3 的退出判据写作"schema v1→v7"，那是 v8（run_events）之前的口径。
-// 以本常量为准：当前是 **10**。
-const SchemaVersion int64 = 10
+// 以本常量为准：当前是 **11**。
+const SchemaVersion int64 = 11
 
 // allMigrations 是迁移清单：索引 i（0-based）对应版本 i+1。
 //
@@ -462,6 +462,71 @@ var allMigrations = []string{
         channels   TEXT NOT NULL DEFAULT '{}',
         updated_at TEXT
     );
+    `,
+	// ── v11：cloud_stats 的两个增量列改为可空 ─────────────────────────────────
+	//
+	// # 为什么要动这一张表
+	//
+	// v2 建表时 `cloud_diff` / `cloud_diff_week` 写的是 `NOT NULL`，于是
+	// [core.NextCloudStats] 在**完全没有历史**时只能把"没有基准"落成 `0`。
+	// 而 0 是一句有内容的读数（"今天没涨"），界面上与"这个号才第一次采到数"同形：
+	// 2026-09-24 的实况是一个当天真 +3 的号，因为它是该账号在 `cloud_stats` 里的
+	// 第一行，总览页念成"今日增量 0"。判据同 [core.PickCloudValue] 那条注释：
+	// "空"必须能被表达，`0` 必须能被表达，且二者不同。
+	//
+	// # 为什么是重建而不是 ALTER
+	//
+	// SQLite 没有"去掉 NOT NULL"的 ALTER（只能加列，不能改列约束），
+	// 所以走官方文档那套：建新表 → 搬数据 → 删旧表 → 改名 → 重建索引。
+	// 这张表**没有任何外键**（既不引用别人，也没有人引用它，v2 起就是裸的
+	// `account_id TEXT NOT NULL` + 复合主键），所以不必 `PRAGMA foreign_keys=OFF`，
+	// 也不存在改名后外键指向旧表名的问题。
+	//
+	// # 老数据怎么搬：每个账号最早那一条判成 NULL
+	//
+	// 不是"猜它当年是 0 所以是 NULL"，而是**这一列当时的写入路径决定的**：
+	// 唯一的写入口是 [core.NextCloudStats]，它在 history 为空时输出 0，而"某个账号
+	// 最早的一条"按定义就是"写它时历史为空"的那一条（同日重复采集走 UPSERT 覆盖同一行，
+	// 不会产生第二条；删快照只有整账号级，见 `DeleteAccount`）。
+	// 所以 `MIN(date)` 那一条的 0 一定是"无基准"，其余行里的 0 是"真的没涨"，原样保留。
+	//
+	// ⚠ 这一条**只在迁移那一刻成立**：迁移之后新写的第一行走的是可空列，直接落 NULL，
+	// 不需要再判。反过来说，如果将来出现"能删单个账号某一天快照"的入口，
+	// 这个回填判断就会失去依据 —— 那时要改的是写入侧，而不是再叠一次回填。
+	//
+	// # 为什么用子查询而不是窗口函数
+	//
+	// `ROW_NUMBER() OVER (…)` 要 SQLite ≥ 3.25，而本仓的驱动是纯 Go 的 modernc 移植；
+	// 关联子查询是 SQLite 一开始就有的东西，这里每账号只取一个 `MIN(date)`，
+	// 行数又小，没有为它引入版本前提的理由。
+	`
+    BEGIN;
+
+    CREATE TABLE IF NOT EXISTS cloud_stats_new (
+        account_id      TEXT NOT NULL,
+        date            TEXT NOT NULL,
+        cloud_count     INTEGER NOT NULL,
+        cloud_diff      INTEGER,
+        cloud_diff_week INTEGER,
+        PRIMARY KEY (account_id, date)
+    );
+
+    INSERT INTO cloud_stats_new (account_id, date, cloud_count, cloud_diff, cloud_diff_week)
+    SELECT
+        c.account_id,
+        c.date,
+        c.cloud_count,
+        CASE WHEN c.date = (SELECT MIN(m.date) FROM cloud_stats m WHERE m.account_id = c.account_id)
+             THEN NULL ELSE c.cloud_diff END,
+        CASE WHEN c.date = (SELECT MIN(m.date) FROM cloud_stats m WHERE m.account_id = c.account_id)
+             THEN NULL ELSE c.cloud_diff_week END
+    FROM cloud_stats c;
+
+    DROP TABLE cloud_stats;
+    ALTER TABLE cloud_stats_new RENAME TO cloud_stats;
+    CREATE INDEX IF NOT EXISTS idx_cloud_stats_date ON cloud_stats (date);
+
+    COMMIT;
     `,
 }
 

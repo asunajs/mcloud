@@ -136,6 +136,10 @@ func (s *Server) cloudStats(w http.ResponseWriter, r *http.Request, auth *AuthUs
 
 	// 差值（`cloudDiff` / `cloudDiffWeek`）由采集侧按 `core.NextCloudStats` 算好落库，
 	// 这里**不重算** —— 重算一遍等于让"图上显示的数"与"库里存的数"有两个来源。
+	//
+	// ⚠ 这两格**可以是 null**：null = 这一条快照没有基准（该账号的第一次采集），
+	// 与"增量为 0"是两句话。前端必须分开渲染（0 显示 `0`，null 显示 `—`），
+	// 否则新加的号会被念成"今天没涨"（2026-09-24 的实况，见 `core.CloudStats` 字段注）。
 	rows := make([]map[string]any, 0, len(stats))
 	for _, stat := range stats {
 		rows = append(rows, map[string]any{

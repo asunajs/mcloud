@@ -60,8 +60,15 @@ type CloudStats struct {
 	// Date 是 `YYYY-MM-DD`（按 [LocalTZ]）。
 	Date       string `json:"date"`
 	CloudCount int64  `json:"cloud_count"`
-	// CloudDiff 是与上一个**有记录**之日之差。
-	CloudDiff int64 `json:"cloud_diff"`
-	// CloudDiffWeek 是与 7 天前（或最早记录）之差。
-	CloudDiffWeek int64 `json:"cloud_diff_week"`
+	// CloudDiff 是与上一个**有记录**之日之差；**nil = 这一条根本没有基准**
+	// （该账号在它之前一条快照都没有）。
+	//
+	// ⚠ 为什么不能拿 0 代替"没有基准"：0 与"今天确实没涨"在界面上同形，而这两句话
+	// 的下一步动作完全不同 —— 前者是"这个号才第一次采到数"，后者是"签了没给豆"。
+	// 实况（2026-09-24）：一个当天真 +3 的号，因为它是该账号在 `cloud_stats` 里的
+	// 第一行，界面上念成"今日增量 0"。
+	// 判据与 [PickCloudValue] 那条同源："空"必须能被表达，`0` 必须能被表达，且二者不同。
+	CloudDiff *int64 `json:"cloud_diff"`
+	// CloudDiffWeek 是与 7 天前（或更早的最近一条）之差；nil 的含义与 [CloudDiff] 同。
+	CloudDiffWeek *int64 `json:"cloud_diff_week"`
 }

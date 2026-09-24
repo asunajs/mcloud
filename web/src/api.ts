@@ -108,13 +108,19 @@ export interface Account {
 
 export const listAccounts = () => request<{ accounts: Account[] }>('/api/accounts')
 
-/** 一天的云朵快照（差值由采集侧算好落库，见后端 `cloudStats` 注释）。 */
+/**
+ * 一天的云朵快照（差值由采集侧算好落库，见后端 `cloudStats` 注释）。
+ *
+ * ⚠ 两个差值是 `number | null`：**null 表示这一条没有基准**（该账号第一次采到数），
+ * 不是"增量为 0"。渲染时必须分开 —— `0` 念"今天没涨"，`null` 念"还没得比"，
+ * 混起来的表现是新加的号被读成"签了没给豆"。
+ */
 export interface CloudStatRow {
   /** `YYYY-MM-DD`，按**服务端本地时区**切日。 */
   date: string
   cloudCount: number
-  cloudDiff: number
-  cloudDiffWeek: number
+  cloudDiff: number | null
+  cloudDiffWeek: number | null
 }
 
 /** 某个账号最近 `days` 天的云朵日快照。id 里有 `*` 等字符，必须 encode。 */

@@ -3,6 +3,7 @@ package mcloudio
 import (
 	"context"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -130,6 +131,17 @@ func mustErr(t *testing.T, err error) error {
 func strPtr(s string) *string { return &s }
 
 func i64Ptr(v int64) *int64 { return &v }
+
+// nullText 把可选增量打印成"看得懂是哪一种空"。
+//
+// 测试里的失败分支**不能**解引用指针：那样"该为 NULL 却不是"会先 panic 再报错，
+// 而 panic 的现场没有断言信息可读。
+func nullText(p *int64) string {
+	if p == nil {
+		return "NULL"
+	}
+	return strconv.FormatInt(*p, 10)
+}
 
 func secretPtr(s string) *core.SecretValue { v := core.NewSecretValue(s); return &v }
 
@@ -711,6 +723,73 @@ func TestCloudStatsUpsertIsKeyedByAccountAndDate(t *testing.T) {
 	}
 	if stats[0].CloudCount != 1280 {
 		t.Fatalf("应被覆盖成 1280，实得 %d", stats[0].CloudCount)
+	}
+}
+
+// TestCloudStatsFirstSnapshotRoundTripsAsNull 钉"没有基准"能穿过 SQLite 走一个来回。
+//
+// v11 之前这两列是 `NOT NULL`，"无基准"只能落成 0；改成可空之后会漏的地方有三处，
+// 而且**只有一处会自己响**：
+//   - 写入侧把 `*int64` 原样交给 `database/sql` ⇒ 运行期报"unsupported type"（会响）；
+//   - 读取侧用裸 `int64` 扫 NULL ⇒ Scan 报错（会响）；
+//   - UPSERT 的 `DO UPDATE SET` 少列 ⇒ 第二次采集把旧值留在行上，**不报错**，
+//     只有读数错（该变 0 的那格仍是 NULL，或反过来）。
+//
+// 所以这条测试刻意写三次采集把第三种漏法夹住：同日重写必须**跟着变**，
+// 隔天采集必须把两个数都写进去。
+func TestCloudStatsFirstSnapshotRoundTripsAsNull(t *testing.T) {
+	ctx := context.Background()
+	s := storeWithUser(t)
+	id := core.NewAccountID("acc-1")
+	putAccount(t, s, "acc-1")
+	scope := core.ScopeUser(uidPtr())
+
+	// 第一次采集：没有历史 ⇒ 两个差值都是 nil（不是 0）
+	day1 := core.NextCloudStats(id, "2026-09-24", 8708, nil)
+	if err := s.UpsertCloudStats(ctx, scope, &day1); err != nil {
+		t.Fatalf("写首次快照: %v", err)
+	}
+	// 同日再采一次（余额变了）：基准仍是"今天之前"，所以依旧没有基准
+	day1Again := core.NextCloudStats(id, "2026-09-24", 8711, nil)
+	if err := s.UpsertCloudStats(ctx, scope, &day1Again); err != nil {
+		t.Fatalf("重写首次快照: %v", err)
+	}
+
+	stats, err := s.CloudStatsSince(ctx, scope, id, "2026-09-01")
+	if err != nil {
+		t.Fatalf("读快照: %v", err)
+	}
+	if len(stats) != 1 {
+		t.Fatalf("同日应只有一条，实得 %d", len(stats))
+	}
+	if stats[0].CloudCount != 8711 {
+		t.Fatalf("同日重写要把余额覆盖掉，实得 %d", stats[0].CloudCount)
+	}
+	if stats[0].CloudDiff != nil || stats[0].CloudDiffWeek != nil {
+		t.Fatalf("首次采集的两个差值必须是 NULL，实得 diff=%s week=%s",
+			nullText(stats[0].CloudDiff), nullText(stats[0].CloudDiffWeek))
+	}
+
+	// 第二天：有了基准 ⇒ 两个数都必须落库并读回来（少写一列会在这里红）
+	day2 := core.NextCloudStats(id, "2026-09-25", 8714, []core.CloudStats{stats[0]})
+	if err := s.UpsertCloudStats(ctx, scope, &day2); err != nil {
+		t.Fatalf("写次日快照: %v", err)
+	}
+	after, err := s.CloudStatsSince(ctx, scope, id, "2026-09-01")
+	if err != nil {
+		t.Fatalf("读快照（次日）: %v", err)
+	}
+	if len(after) != 2 {
+		t.Fatalf("应有两条，实得 %d", len(after))
+	}
+	if after[1].CloudDiff == nil || *after[1].CloudDiff != 3 {
+		t.Fatalf("次日的日增量应是 3，实得 %s", nullText(after[1].CloudDiff))
+	}
+	// 周增量这里同样是 3：历史只有一条，"退化到最早一条"与"日增量的基准"落到同一行。
+	// ⚠ 刻意不写成 6（那是第一次写进去的 8708 与 8714 之差）—— 基准必须是**读回来的那一行**，
+	// 同日重写的覆盖到底生效没有，正是靠这个数区分。
+	if after[1].CloudDiffWeek == nil || *after[1].CloudDiffWeek != 3 {
+		t.Fatalf("次日的周增量应是 3，实得 %s", nullText(after[1].CloudDiffWeek))
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -33,6 +34,20 @@ type cloudStore struct {
 
 func newCloudStore() *cloudStore {
 	return &cloudStore{stats: make(map[string]core.CloudStats)}
+}
+
+// deltaIs 断言一个**可选**增量等于 want。
+//
+// ⚠ 为什么不写成 `*got == want`：nil（没有基准）与 0（真的没涨）是两句话，
+// 失败信息必须分得开 —— 判据见 [core.CloudStats] 的字段注。
+func deltaIs(got *int64, want int64) bool { return got != nil && *got == want }
+
+// deltaText 把可选增量打印成"看得懂是哪一种空"。
+func deltaText(got *int64) string {
+	if got == nil {
+		return "nil（没有基准）"
+	}
+	return strconv.FormatInt(*got, 10)
 }
 
 func (s *cloudStore) CloudStatsSince(_ context.Context, _ core.Scope, _ core.AccountID, since string) ([]core.CloudStats, error) {
@@ -99,11 +114,12 @@ func TestFirstCollectionRecordsTheValueAndReportsNoDelta(t *testing.T) {
 	if stats.CloudCount != 5392 {
 		t.Errorf("实得 %d", stats.CloudCount)
 	}
-	if stats.CloudDiff != 0 {
-		t.Errorf("首次采集不该虚报增量，实得 %d", stats.CloudDiff)
+	// ⚠ 首次采集的两个增量必须是 **nil**，不是 0：0 会被界面念成"今天没涨"。
+	if stats.CloudDiff != nil {
+		t.Errorf("首次采集不该虚报增量，实得 %s", deltaText(stats.CloudDiff))
 	}
-	if stats.CloudDiffWeek != 0 {
-		t.Errorf("实得 %d", stats.CloudDiffWeek)
+	if stats.CloudDiffWeek != nil {
+		t.Errorf("首次采集不该虚报周增量，实得 %s", deltaText(stats.CloudDiffWeek))
 	}
 	if store.current == nil || *store.current != 5392 {
 		t.Errorf("当前值应被写入，实得 %v", store.current)
@@ -121,11 +137,11 @@ func TestDailyDeltaIsMeasuredAgainstThePreviousSnapshot(t *testing.T) {
 	if perr != nil {
 		t.Fatalf("%v", perr)
 	}
-	if stats.CloudDiff != 1192 {
-		t.Errorf("实得 %d", stats.CloudDiff)
+	if !deltaIs(stats.CloudDiff, 1192) {
+		t.Errorf("实得 %s", deltaText(stats.CloudDiff))
 	}
-	if stats.CloudDiffWeek != 1192 {
-		t.Errorf("历史不足 7 天时周增量退化为最早一条之差，实得 %d", stats.CloudDiffWeek)
+	if !deltaIs(stats.CloudDiffWeek, 1192) {
+		t.Errorf("历史不足 7 天时周增量退化为最早一条之差，实得 %s", deltaText(stats.CloudDiffWeek))
 	}
 }
 
@@ -144,8 +160,8 @@ func TestSecondCollectionOnTheSameDayIsIdempotent(t *testing.T) {
 	if perr != nil {
 		t.Fatalf("%v", perr)
 	}
-	if second.CloudDiff != 1192 {
-		t.Errorf("基准仍应是昨天那条 4200，而不是今天早些时候那条 5000，实得 %d", second.CloudDiff)
+	if !deltaIs(second.CloudDiff, 1192) {
+		t.Errorf("基准仍应是昨天那条 4200，而不是今天早些时候那条 5000，实得 %s", deltaText(second.CloudDiff))
 	}
 	if len(store.stats) != 2 {
 		t.Errorf("09-18 与 09-19 各一行，当天是 UPSERT 不是追加，实得 %d 行", len(store.stats))
@@ -166,11 +182,11 @@ func TestLongGapDoesNotSilentlyReportZeroGrowth(t *testing.T) {
 	if perr != nil {
 		t.Fatalf("%v", perr)
 	}
-	if stats.CloudDiff != 300 {
-		t.Errorf("实得 %d", stats.CloudDiff)
+	if !deltaIs(stats.CloudDiff, 300) {
+		t.Errorf("实得 %s", deltaText(stats.CloudDiff))
 	}
-	if stats.CloudDiffWeek != 300 {
-		t.Errorf("实得 %d", stats.CloudDiffWeek)
+	if !deltaIs(stats.CloudDiffWeek, 300) {
+		t.Errorf("实得 %s", deltaText(stats.CloudDiffWeek))
 	}
 	// 窗口必须是"取全量"而不是"近 7 天"
 	if store.lastSinceArg != HistoryFrom {
@@ -189,8 +205,8 @@ func TestHistoryBeforeTodayStillCountsWhenItPredatesTheWeek(t *testing.T) {
 	if perr != nil {
 		t.Fatalf("%v", perr)
 	}
-	if stats.CloudDiff != 1192 {
-		t.Errorf("今天那行必须被排除在基准之外，实得 %d", stats.CloudDiff)
+	if !deltaIs(stats.CloudDiff, 1192) {
+		t.Errorf("今天那行必须被排除在基准之外，实得 %s", deltaText(stats.CloudDiff))
 	}
 }
 

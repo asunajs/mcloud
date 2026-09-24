@@ -64,12 +64,16 @@ func (r CloudSnapshotRun) RunAccount(
 //
 // ⚠ `Stats` 为 nil 时（走不到：那时上一步已经返回错误了）只报余额原值，
 // 不编出"日增 0"—— 没写进库却把增量念一遍，表现是"界面说今天涨了、趋势图上却没有这一格"。
+//
+// ⚠ 增量本身为 nil（该账号的**第一次采集**，没有可减的基准）时同样不能念成 0：
+// 那句话的读法是"今天没涨"，而事实是"今天才有第一条数"。（判据同 [core.NextCloudStats] 的字段注。）
+// 这一档分流住在 [core.CloudStats.DiffClause] 里，**不在这里** —— CLI 的"余额已记录"
+// 念的是同一句话，两处各写一遍的话就会有一处漏掉 nil（那一处漏掉的实测后果见那里的注释）。
 func (res CloudSnapshotResult) SummaryLine() string {
 	if res.Stats == nil {
 		return fmt.Sprintf("余额 %d 豆", res.Count)
 	}
-	return fmt.Sprintf("余额 %d 豆；日增 %+d，周增 %+d",
-		res.Stats.CloudCount, res.Stats.CloudDiff, res.Stats.CloudDiffWeek)
+	return fmt.Sprintf("余额 %d 豆；%s", res.Stats.CloudCount, res.Stats.DiffClause())
 }
 
 func (res CloudSnapshotResult) RunReport() core.RunReport {

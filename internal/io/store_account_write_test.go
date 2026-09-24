@@ -113,7 +113,7 @@ func seedEverythingOn(t *testing.T, s *SqliteStore, accountID, runUUID string) c
 
 	if err := s.UpsertCloudStats(ctx, scope, &core.CloudStats{
 		AccountID: core.NewAccountID(accountID), Date: "2026-09-22",
-		CloudCount: 100, CloudDiff: 5, CloudDiffWeek: 20,
+		CloudCount: 100, CloudDiff: i64Ptr(5), CloudDiffWeek: i64Ptr(20),
 	}); err != nil {
 		t.Fatalf("建云朵快照: %v", err)
 	}

@@ -370,9 +370,14 @@ func TestStructJSONMatchesSerdeVectors(t *testing.T) {
 	// ⚠ `CloudStats` 单独钉一条：它**一度漏写了全部 json tag**
 	// （`pure` 那一步带过来的），而反向测试证明改坏它**没有任何测试变红** ——
 	// 这个洞是靠"改坏了却不响"发现的，不是靠测试。
+	//
+	// 这一条取的是**有基准**那一档（两个差值都是数）：黄金向量文件是 Rust 冻结前的
+	// 逐字对照，不为一族新增用例，所以"无基准 ⇒ `null`"那一档由
+	// [TestCloudStatsWithoutBaselineSerialisesAsNull] 在 Go 侧自己钉。
+	cloudDiff, cloudDiffWeek := int64(7), int64(30)
 	cloudStats := CloudStats{
 		AccountID: NewAccountID("19900001234"), Date: "2026-09-20",
-		CloudCount: 120, CloudDiff: 7, CloudDiffWeek: 30,
+		CloudCount: 120, CloudDiff: &cloudDiff, CloudDiffWeek: &cloudDiffWeek,
 	}
 
 	// ⚠ **整秒**的 UTC 时刻：两端都是 `…T03:40:00Z`。
@@ -412,6 +417,28 @@ func TestStructJSONMatchesSerdeVectors(t *testing.T) {
 		if string(got) != c.JSON {
 			t.Fatalf("%s 与 serde 的输出不一致:\n实得 %s\n期望 %s", c.Kind, got, c.JSON)
 		}
+	}
+}
+
+// TestCloudStatsWithoutBaselineSerialisesAsNull 钉"没有基准"那一档的**线格式**。
+//
+// 为什么它不在黄金向量文件里：那份是 Rust 冻结前的逐字对照（见上面那条测试的注释），
+// 而"无基准 ⇒ null"是 Go 侧这一版才有的语义（旧列是 `NOT NULL`，只能落 0）。
+// 往冻结文件里加用例会让"这是两端对照"那句话失去出处，所以在 Go 侧自己钉。
+//
+// ⚠ 反向改坏它的方式有两种，都要红：① 给字段加 `omitempty` ⇒ 键整个消失，
+// 前端 `row.cloudDiff` 变 `undefined`，界面把"没有基准"和"没有这一格"混成一谈；
+// ② 采集侧把 nil 落成 0 ⇒ 这里不红，但 [TestNoHistoryLeavesDeltasNilNotZero] 会红。
+func TestCloudStatsWithoutBaselineSerialisesAsNull(t *testing.T) {
+	got, err := marshalJSON(CloudStats{
+		AccountID: NewAccountID("19900001234"), Date: "2026-09-24", CloudCount: 8708,
+	})
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	want := `{"account_id":"19900001234","date":"2026-09-24","cloud_count":8708,"cloud_diff":null,"cloud_diff_week":null}`
+	if string(got) != want {
+		t.Fatalf("无基准的快照必须把两个差值序列化成 null:\n实得 %s\n期望 %s", got, want)
 	}
 }
 

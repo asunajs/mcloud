@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -1457,6 +1458,70 @@ func TestSigninStatusOnlyRecordsTheBeanTotalNotTheBeforeTotal(t *testing.T) {
 	}
 	if strings.Contains(stdout, "余额已记录：8027 豆") {
 		t.Errorf("记的是 beforeTotal（那张冻结的快照）—— 趋势图会变成直线:\n%s", stdout)
+	}
+	// ⚠ 增量那一小句也在这一行里，而**这个号在库里没有前一天** ⇒ 该说"没有基准"。
+	// 把 `*int64` 直接递进 `%+d` 时这里得到的是 `（日增 +0，周增 +0）` —— 一句看起来
+	// 完全正常的输出（nil 打 `+0`、有值打**指针地址**，见 `core.CloudStats.DiffClause` 的注），
+	// 而过去这条链上只断"余额已记录：10502 豆"，所以它当时一声不响地错了。
+	if !strings.Contains(stdout, "余额已记录：10502 豆（第一次采集，暂无增量基准）") {
+		t.Errorf("没有基准时不许念成 +0:\n%s", stdout)
+	}
+	assertNoAddressInCloudLine(t, stdout)
+}
+
+// TestSigninCloudLineWithBaseline 是有前一天那一档：念成带符号的数，而不是"没有基准"。
+//
+// ⚠ 与上一条**成对**：只有"nil → 那句话"的用例时，把判据写成"永远说没有基准"也能全绿。
+func TestSigninCloudLineWithBaseline(t *testing.T) {
+	env := signinFixture(t, signinAcct{id: "19****01", enabled: true,
+		auth: "Basic SYNTH", deviceID: signinDeviceID("A")})
+
+	// 前一天那条快照：固定时钟 cliNow() 是 2026-09-18（东八区 08:00），所以"昨天"是 09-17。
+	store := signinOpen(t, env.db)
+	yesterday := core.NextCloudStats(core.NewAccountID("19****01"), "2026-09-17", 10500, nil)
+	if err := store.UpsertCloudStats(context.Background(), core.ScopeLocal(), &yesterday); err != nil {
+		t.Fatalf("写昨天的快照失败: %v", err)
+	}
+
+	http := &signinScript{}
+	http.session().route("page/infoV3", signinInfoV3(true, 10502, nil))
+
+	stdout, stderr, code := signinCLIAt(t, http, env, "--status-only")
+	if code != ExitSuccess {
+		t.Fatalf("应退 0，实得 %d\n  stderr=%q", code, stderr)
+	}
+	// 只有两行历史 ⇒ 周增量的基准退化到最早那条，于是两个数都是 +2。
+	if !strings.Contains(stdout, "余额已记录：10502 豆（日增 +2，周增 +2）") {
+		t.Errorf("有基准时该照数念，实得:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "第一次采集") {
+		t.Errorf("库里明明有前一天，别念成第一次采集:\n%s", stdout)
+	}
+	assertNoAddressInCloudLine(t, stdout)
+}
+
+// cloudLineOf 取出"余额已记录"那一整行（没有就直接失败）。
+func cloudLineOf(t *testing.T, stdout string) string {
+	t.Helper()
+	for _, line := range strings.Split(stdout, "\n") {
+		if strings.Contains(line, "余额已记录") {
+			return strings.TrimSpace(line)
+		}
+	}
+	t.Fatalf("输出里没有余额那一行:\n%s", stdout)
+	return ""
+}
+
+// addressShaped 认"12 位以上的数"：`%+d` 打在 `*int64` 上会输出**地址**，而地址在这种
+// 机器上是十几位十进制数（实测 `+126914284740856`）。
+// 余额本身最多五六位，所以"这一行里出现 12 位以上的数"就是它现形的形状。
+var addressShaped = regexp.MustCompile(`\d{12,}`)
+
+func assertNoAddressInCloudLine(t *testing.T, stdout string) {
+	t.Helper()
+	line := cloudLineOf(t, stdout)
+	if got := addressShaped.FindString(line); got != "" {
+		t.Fatalf("余额那一行里出现了 %q（指针地址被当成数字打出来了）:\n%s", got, line)
 	}
 }
 
