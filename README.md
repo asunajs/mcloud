@@ -23,6 +23,7 @@ test/
 docs/           Rust 侧文档（门禁与分层 / 冻结与剥离记录 / 历史规划）
 .githooks/      入库的 pre-commit / pre-push 门禁（每个克隆跑一次安装，见其 README）
 .cargo/         incremental = false（绕开本机写盘故障，见其内注释）
+web             → ../mcloud/web 的符号链接（WebUI 只在 mcloud 维护，见下）
 target/         cargo 构建缓存（不入库）
 ```
 
@@ -61,6 +62,16 @@ node scripts/check-golden-vectors.cjs # 只复算黄金向量
 
 - **2026-09-24 起各自独立开发**：本仓库恢复活跃，不再充当对拍基准；
   mcloud 侧继续演进它自己的 Go 实现。
+- **WebUI 只维护 mcloud 那一版**：本仓库的 `web/` 是指向 `../mcloud/web` 的
+  **符号链接**，不落副本、不在这里改前端。构建产物 `web/dist` 也随之可用
+  （`mcloud-server` 默认 `--web-dir web/dist` 直接伺服）。
+  ⚠ Windows 上 git 会把符号链接检出成文本文件（见 freeze-record 的同类提醒），
+  需要时用 `mklink /D web ..\mcloud\web` 重建。
+- **API 接口完全按 Go 版输出**：路径、方法、payload 形状以
+  `../mcloud/internal/server/` 为唯一契约 —— 新增接口先看 Go 侧怎么定义，
+  已有接口的出网字段以 Go 版为准逐字对齐（差异清单见
+  [`docs/dev-gates.md`](./docs/dev-gates.md) 之外的 server 模块注释与
+  `crates/mcloud-server/src/routes/mod.rs`）。
 - 黄金向量（`test/golden/*.json`）两边各存一份副本，曾经互为交叉验证。
   现在各自维护 —— 新增或修改向量时**跨仓一致性靠人**（没有门禁盯这一点，
   这是剥离时的有意取舍，见 freeze-record）。

@@ -7,6 +7,10 @@
 //!
 //! 前端开发时用 `cd web && npm run dev`（vite 在 5173，已配好到 8787 的代理）；
 //! 要看生产形态就 `npm run build`，然后本进程会直接发 `web/dist`。
+//!
+//! ⚠ 仓库根的 `web/` 是指向 `../mcloud/web` 的**符号链接**：WebUI 只在
+//! mcloud（Go 侧）维护，本仓库不落副本、不改前端。所以 `npm run build`
+//! 构建的也是 Go 侧那一份源码 —— 这正是约定（见 `routes::mod` 的契约说明）。
 
 use anyhow::Context as _;
 use clap::Parser;

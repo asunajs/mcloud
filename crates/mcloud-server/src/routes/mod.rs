@@ -1,5 +1,16 @@
 //! API 路由 —— P5 的第一批，只包含**不依赖 P3 / P4 的那些**。
 //!
+//! # ⚠ 出网契约以 Go 版为唯一准绳（2026-09-24 约定）
+//!
+//! WebUI 只维护 mcloud（Go 侧）那一版 —— 本仓库根的 `web/` 是指向
+//! `../mcloud/web` 的符号链接。因此**本 server 的接口必须与 Go 版
+//! `internal/server/` 逐路由对齐**：路径、方法、payload 字段名与形状、
+//! 错误体 `{code, message}` 都以 Go 侧为契约来源。新增路由先看 Go 怎么定义；
+//! 改已有路由的出网字段 = 先改 Go，再跟过来 —— 反过来会让共享的那份
+//! WebUI 在某一侧静默坏掉。
+//!
+//! 已知差异（对齐前的欠账）见文件末尾「与 Go 版的差异清单」。
+//!
 //! # 为什么这一批能提前落地，而"跑任务"的那批不能
 //!
 //! 方案 §7 把服务端的路由整块挂在 P5，但那一块其实分两半：
@@ -74,3 +85,44 @@ mod tests {
         assert_eq!(clamp_limit(Some(20), 50, 200), 20);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 与 Go 版的差异清单（2026-09-24 盘点；对齐一份划掉一份，别让清单变墓碑）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 契约来源：`../mcloud/internal/server/auth.go`（路由注册表）与同目录处理器。
+// 这里只记**已知不一致**；一致的（version / capabilities 同源 payload、
+// accounts 列表与 cloud-stats、runs 列表与 SSE、error 的 {code,message} 码表、
+// session / setup / health 的路径与方法）不列 —— 清单是给"还没对齐"用的。
+//
+// ## A. 已有路由的出网差异
+//
+// 1. **RFC3339 时间格式**：Go 是 `Format(time.RFC3339)` ⇒ UTC 落 `…Z`；
+//    本侧 `to_rfc3339()` ⇒ `…+00:00`。两者都合法，但**不是同一段字节**。
+//    波及：session `expiresAt`、account `cloudUpdatedAt` / `lastOkAt`、
+//    schedule `nextFireAt` / `createdAt` / `lastRunAt`、run `startedAt` / `finishedAt`。
+// 2. **`GET /api/schedules` 少两个字段**：Go 的 `schedulePayload` 有
+//    `lastFireAt` / `missPolicy`，本侧没有 —— 而且 `mcloud_core::Schedule`
+//    模型与 SQLite schema 也还没有这两列（补齐 = 模型 + 迁移 + 读写 + payload）。
+// 3. **query 解析宽松度**：Go 的 `clampLimit` 对 `?days=abc` **静默回默认值**；
+//    本侧 `ApiQuery` 反序列化失败 → 400 `bad_request`。同一手势两种结论。
+// 4. **`PUT /api/schedules/{id}` 的 `enabled: null`**：Go 是 `*bool`，
+//    null ⇒ 保持缺省 true；本侧是 `bool`（`serde(default)` 只管**缺席**不管
+//    null）⇒ 400。`timezone: null` 两边都落默认，已一致。
+//
+// ## B. Go 有、本侧尚无的路由（按 auth.go 注册表逐条数）
+//
+// - `GET /api/status`
+// - 账号写面：`POST /api/accounts`、`PUT /api/accounts/{id}/enabled`、
+//   `DELETE /api/accounts/{id}`、`POST /api/accounts/{id}/refresh-auth`
+// - 账号只读：`GET /api/accounts/{id}/live-room`、`GET /api/accounts/{id}/exchange-prizes`
+// - `POST /api/runs`（执行能力 —— 等 P4 有可跑的东西）
+// - 登录族 7 条：`POST /api/login/qr`、`GET /api/login/qr/{id}`、
+//   `GET /api/login/qr/{id}/image.svg`、`POST /api/login/sms/app`、
+//   `POST /api/login/sms/app/{id}/verify`、`POST /api/login/sms/pc`、
+//   `POST /api/login/sms/pc/{id}/verify`
+// - 通知 3 条：`GET /api/notify/config`、`PUT /api/notify/config`、`POST /api/notify/test`
+//
+// ⚠ 补 B 组不是"照着 HTTP 层抄一遍"就完 —— 每条后面都要有真的实现
+// （登录族要接 `mcloud-capabilities::login`，账号写要登录链路，notify 要新能力）。
+// 路由空转返回"未实现"比 404 更糟：共享的 WebUI 会以为功能已经有了。

@@ -11,8 +11,10 @@
 //!
 //! # 契约没变
 //!
-//! 前端不消费 Rust 结构体，只消费 JSON 形状；形状一旦改动，
-//! P5 的 OpenAPI `--check` 会立刻发现（防止前后端类型静默漂移）。
+//! 前端不消费 Rust 结构体，只消费 JSON 形状 —— 而那份形状的**唯一来源是 Go 版**
+//! （2026-09-24 约定：WebUI 只维护 mcloud 那一版，本 server 的接口按 Go 版
+//! `internal/server/` 输出，见 `routes::mod`）。OpenAPI `--check` 管的是
+//! "Rust 自己别漂移"，与 Go 的对齐要靠 `routes::mod` 末尾那张差异清单收口。
 //!
 //! # 服务由**本产物**启动，不由 CLI 的 `serve` 子命令启动
 //!
