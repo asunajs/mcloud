@@ -427,7 +427,7 @@ func TestTaskMatrixRunBroadcastsUploadRounds(t *testing.T) {
 	if uploaded != 6 {
 		t.Errorf("六个文件该六行，实得 %d：\n%s", uploaded, log.joined())
 	}
-	if !log.has("上传文件成功 上传一个文件 106") {
+	if !log.has("上传文件成功（完整上传：create → PUT → complete 三枪都发了） 上传一个文件 106") {
 		t.Errorf("上传那行要带任务名与 id（清理那一族的输入就是这些 id），实得：\n%s", log.joined())
 	}
 	// 时机：上传发生在第一趟 ⇒ 它必须在组分节之前。
@@ -436,6 +436,64 @@ func TestTaskMatrixRunBroadcastsUploadRounds(t *testing.T) {
 		t.Errorf("上传那行要排在复查的分节之前，实得 up=%d section=%d：\n%s",
 			up, section, log.joined())
 	}
+}
+
+// TestTaskMatrixRunSaysWhichUploadBranch ⭐ 秒传与完整上传**不许**念成同一句。
+//
+// 为什么单开一条（而不是并进上面那条）：上面那条只数"几个文件几行"，两档合并成一句它照样绿。
+// 而缺的这一格是**读数面**：跑真号那一趟到底走没走到 `rapidUpload:true`，从前从程序自己的
+// 反馈里读不出来（`docs/pending-decisions.md` P1 剩下的第①件、R27 那句边界）。
+//
+// 反向改坏它的两处各自会红：
+//   - 把播报改回 `上传文件成功 %s %d`（丢掉括号那一格）⇒ 两个子测试都红；
+//   - 把 `uploadBranchWords` 里 `CloudUploadRapid` 那一档漏掉（落成"未知结局"）⇒ 秒传那半边红。
+func TestTaskMatrixRunSaysWhichUploadBranch(t *testing.T) {
+	first := mxItems(mxItem(106, "day", "上传一个文件", "WAIT", "", 0))
+	t.Run("秒传：只发 create", func(t *testing.T) {
+		script := mxScript([]string{"JWT-1"}, first, first, append(
+			// ⚠ 路由按**顺序**取第一条命中 ⇒ 这一条要排在 [mxUploadRoutes] 那份 create 之前。
+			// 夹具故意**不给** `partInfos`：秒传那一档本来就不该有直传地址。
+			[]liveTaskRoute{{mxCreateEndpoint, []string{
+				`{"code":"0000","success":true,"data":{"exist":false,"rapidUpload":true,` +
+					`"fileId":"SYNTH-RAPID"}}`}}},
+			append(mxUploadRoutes(1), mxHappy()...)...)...)
+		run := mxDefaultRun(t, script)
+		log := &mxLog{}
+		run.Progress = log.handle()
+		res, perr := mxResult(t, run)
+		if perr != nil {
+			t.Fatalf("跑一趟失败: %v", perr)
+		}
+		if creates, puts, completes := mxUploadCounts(script); creates != 1 ||
+			puts+completes != 0 {
+			t.Errorf("秒传该只发 create，实得 create/PUT/complete = %d/%d/%d",
+				creates, puts, completes)
+		}
+		if !log.hasAt(core.LevelInfo,
+			"上传文件成功（秒传：只发了 create，PUT 与 complete 没发） 上传一个文件 106") {
+			t.Errorf("秒传那一档要念得出\"后两枪没发\"，实得：\n%s", log.joined())
+		}
+		// 秒传**仍要清理**：网盘里确实有那一个文件（旧实现也是只记账不上传）。
+		if len(res.CloudFileIDs) != 1 || res.CloudFileIDs[0] != "SYNTH-RAPID" {
+			t.Errorf("秒传也要把 fileId 交进清理名单，实得 %v", res.CloudFileIDs)
+		}
+	})
+	t.Run("完整上传：三枪都发", func(t *testing.T) {
+		script := mxScript([]string{"JWT-1"}, first, first,
+			append(mxUploadRoutes(1), mxHappy()...)...)
+		run := mxDefaultRun(t, script)
+		log := &mxLog{}
+		run.Progress = log.handle()
+		if _, perr := mxResult(t, run); perr != nil {
+			t.Fatalf("跑一趟失败: %v", perr)
+		}
+		if !log.has("上传文件成功（完整上传：create → PUT → complete 三枪都发了） 上传一个文件 106") {
+			t.Errorf("另一档要念得出\"三枪都发了\"（否则两档又合成一句），实得：\n%s", log.joined())
+		}
+		if strings.Contains(log.joined(), "秒传") {
+			t.Errorf("完整上传那一趟不该出现\"秒传\"：\n%s", log.joined())
+		}
+	})
 }
 
 // TestTaskMatrixRunBroadcastsReadFailuresEarly 钉"没读到几组"那一行出现在**开头**。

@@ -765,7 +765,7 @@ func (e *taskExecutor) runUploads(
 	)
 	for round := 1; round <= shape.Rounds; round++ {
 		if shape.StopAtProcess > 0 && taskProcessOf(item) >= shape.StopAtProcess {
-			stopped = fmt.Sprintf("第 %d 个之前读到 process=%d 已达 %d ⇒ 停（这一格语义未验证，见 R15）",
+			stopped = fmt.Sprintf("第 %d 个之前读到 process=%d 已达 %d ⇒ 停（这一格仍是**相关性**读法，见 R15）",
 				round, taskProcessOf(item), shape.StopAtProcess)
 			break
 		}
@@ -795,8 +795,17 @@ func (e *taskExecutor) runUploads(
 			// 因为它一次只在做一条任务）。这里带上名字与 id：这一族一趟要做若干条，
 			// 而"传上去的那些文件后来要删"这件事必须能对上号（清理那一半的输入
 			// 就是这些 id，见 #37）。
-			e.run.progress(core.LevelInfo,
-				fmt.Sprintf("上传文件成功 %s %d", taskNameOf(item), derefTaskID(item)))
+			//
+			// ⭐ 括号里那一格是**这一轮新加的读数面**（P1 剩下的第①件）：从前"秒传"
+			// 与"走完三枪"念的是**同一句**，于是跑十趟也答不出"上游今天给没给过
+			// `rapidUpload:true`"。用词只说**我们发了几枪**，不解释上游为什么给秒传
+			// （那一句语义未验证，AGENTS.md §1.7）。
+			// 补上之后 2026-09-25 第六趟真跑的读数是：五发**全部**是"完整上传"那一档 ⇒
+			// 秒传至今零样本，而这一格**不是**"再跑几趟就有"（随机名 + 随机内容 ⇒ 撞不上），
+			// 要样本得故意重传同名同内容 —— 那是为补样造行为，本仓未做（口径见 R27）。
+			e.run.progress(core.LevelInfo, fmt.Sprintf(
+				"上传文件成功（%s） %s %d",
+				uploadBranchWords(receipt.Outcome), taskNameOf(item), derefTaskID(item)))
 		}
 		if shape.PaceEachRound {
 			// 旧实现那一拍在循环体末尾，**失败也等、末轮也等**（它把异常吞在函数里，
@@ -812,6 +821,26 @@ func (e *taskExecutor) runUploads(
 		record.UploadNote = "形状写着要传，但上限是 0 ⇒ 一个都不传（内部不一致）"
 	}
 	return sent, problems
+}
+
+// uploadBranchWords 把"这一次上传走了哪一档"念成**播报里括号中那一句**。
+//
+// 为什么不用 [CloudUploadOutcome.String]（"已上传 / 秒传 / 已存在"）：那一档说的是**结局**，
+// 而播报要说的是**我们发了几枪** —— 这一格的用途是回答"上游今天给没给过 `rapidUpload`"
+// （P1 剩下的第①件），拿"已上传"念它就等于什么都没念。
+//
+// ⚠ 两个措辞都只描述**本仓这一次的行为**，不解释上游为什么走这一档（语义未验证，§1.7）。
+// `CloudUploadExists` 与出错两档**读不到这里**（各自有自己的那句播报），
+// 零值那一档今天走不到 —— ⚠ 它**未被断言**，留一句"未知结局"是为了万一读到时
+// 界面不显示成一次成功。
+func uploadBranchWords(outcome CloudUploadOutcome) string {
+	switch outcome {
+	case CloudUploadDone:
+		return "完整上传：create → PUT → complete 三枪都发了"
+	case CloudUploadRapid:
+		return "秒传：只发了 create，PUT 与 complete 没发"
+	}
+	return "未知结局"
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

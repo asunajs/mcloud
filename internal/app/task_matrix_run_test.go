@@ -1062,8 +1062,10 @@ func TestTaskMatrixRunUploadLoopForTask522(t *testing.T) {
 
 // TestTaskMatrixRunUploadLoopStopsAtProcess：读到 `process` 已达 100 ⇒ 一个都不传。
 //
-// ⚠ 这一档**只钉形状**：`process` 的语义未验证（R15），这里给的是"旧实现那句
-// `task.process >= 100` 会停"的形状，不是"上游真的会填这一格"。
+// ⚠ 这一档**只钉形状**：这里给的是"旧实现那句 `task.process >= 100` 会停"的形状。
+// 2026-09-25 同日两趟真跑给了它一条**旁证**（不是证明）：522 那一趟传 5 个文件 ⇒ 复查读到
+// `process` 从 64 涨到 69；另一号该条早已 `process=100` 且当天读成 `FINISH`（见 R15 与
+// `docs/status.md`「同日第六趟真跑」）。上游从没**声明**过这一格是百分比 ⇒ 仍按未验证对待。
 func TestTaskMatrixRunUploadLoopStopsAtProcess(t *testing.T) {
 	first := mxItems(mxItemProcessAt(mxItem(522, "month", "上传满100个", "WAIT", "", 0), 100))
 	// ⚠ 那一发打卡要有成功路由：缺了它 404 会让前置那一发失败 ⇒ 玩法整条不跑，
