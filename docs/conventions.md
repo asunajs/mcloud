@@ -25,12 +25,12 @@
 | 工具链 | stable `1.91.1`，`rust-version = 1.82`，`edition 2021` |
 | 测试 | 全绿（58 条通过、0 失败，含 `mcloud-crypto` 黄金向量对拍） |
 | `cargo fmt --check` | ✅ 干净（0 漂移） |
-| `cargo clippy` | 1 处告警（见 §3.3） |
+| `cargo clippy --all-targets` | ✅ 干净（0 告警，含测试代码） |
 | 注释语言 | **中文**，术语（trait / crate / 标识符）保留英文 |
-| 版本控制 | **尚未 `git init`**（见 §10） |
+| 版本控制 | 已 `git init`，分支 `main`（见 §10.1） |
 
-**这些数字是写约定时的快照。** 格式已经干净，lint 只剩 1 条，因此
-`fmt --check` 可以直接当硬门禁（§9.2），lint 欠账见 §3.3。
+**这些数字是写约定时的快照。** 格式与 lint 都已干净，因此
+`fmt --check` 与 `clippy` 可以直接当硬门禁（§9.2）。
 
 ---
 
@@ -102,8 +102,10 @@ nightly-only 选项会被静默忽略（只在首次调用时打一行 warning�
 - **缩进**：Rust 4 空格；`toml`/`json`/`ts`/`tsx` 2 空格（`.editorconfig` 已设）。
 - **换行符**：一律 `LF`，文件末尾留一个换行。
 - **行宽**：`max_width = 100`。超过说明该拆表达式或提局部变量了。
-- **中文排版**：中文注释里，中英文之间**不加空格**（`用 reqwest 客户端`），
-  与现有代码保持一致；标点用全角。
+- **中文排版**：中文注释里，中英文之间**加一个空格**（`用 reqwest 客户端`、
+  `任务只依赖 mcloud-core 的 trait`）。这不是审美偏好——实测现有代码
+  **166 处加空格、0 处不加**，且不加空格会让中英混排难以断词。
+  标点用全角。
 - **注释语言**：**中文**。但标识符、类型名、crate 名、标准术语保持英文，
   不要硬译（写 `trait`，不写「特征」；写 `crate`，不写「箱子」）。
 - **文档注释**：公开项（`pub`）必须有 `///`，说明**为什么**而非复述签名。
@@ -158,35 +160,46 @@ perf = "warn"
 
 ### 3.2 刻意未启用【软约定】
 
-| 规则 | 现有告警数 | 不启用的原因 |
-|---|---|---|
-| `missing_debug_implementations` | 35 | 多为内部类型，噪音大于收益 |
-| `clippy::pedantic` | 112 | 大量风格偏好，会淹没真问题 |
-| `clippy::nursery` | 55 | 不稳定，跨版本易变 |
+| 规则 | 不启用的原因 |
+|---|---|
+| `missing_debug_implementations` | 多为内部类型，噪音大于收益 |
+| `clippy::pedantic` | 大量风格偏好，会淹没真问题 |
+| `clippy::nursery` | 不稳定，跨版本易变 |
+
+> 表中**刻意不写告警条数**：这些数字随代码量增长而变，写死必然过期
+> （曾写过一组，几个提交后即失效）。要复核就现场跑：
+> `cargo clippy --workspace --all-targets -- -W clippy::pedantic`
 
 这些靠 review 把关：**公开类型加 `#[derive(Debug)]`**，其余按需。
 
-### 3.3 已知告警（历史欠账，未清）
+### 3.3 告警欠账：当前为零
 
 ```bash
 cargo clippy --workspace --all-targets
 ```
 
-当前仅剩 **1 条**：
+**当前 0 告警**（含测试代码），因此可以直接当硬门禁。
 
-| 位置 | 告警 | 处理建议 |
-|---|---|---|
-| `mcloud-crypto/tests/golden.rs` | `field iv is never read` | 向量里的 `iv` 未被断言使用，补断言或删字段 |
-
-> 已完成：`very complex type`（3 处）已通过引入
-> `mcloud_engine::HttpClientFactory` 类型别名收敛；`min_broadcast` 死字段已移除。
-> 这就是**搭车清理**的范例——改到相关代码时顺手清账。
+> 已清理的历史欠账，留档说明「搭车清理」的用法：
+>
+> - `very complex type`（3 处）→ 引入 `mcloud_engine::HttpClientFactory` 类型别名收敛；
+> - `min_broadcast` 死字段 → 移除；
+> - `field iv is never read`（`mcloud-crypto/tests/golden.rs`）→
+>   核对向量后确认该字段在数据里并不存在，删除结构体字段而非补假断言。
+>
+> 也就是说：**清账不是让告警消失，而是先判断代码或数据哪一边错了。**
+> 最后一条本可以随手 `#[allow]` 掉，但那是把问题藏起来。
 
 ### 3.4 禁止项【硬约束 · review】
 
 - **禁止 `unwrap()` / `expect()` 出现在非测试代码**，除非能证明不可达。
-  既有豁免：`runner.rs` 的锁中毒 `expect`（毒锁意味着已 panic，继续无意义）、
-  `builder.rs` 的「最小客户端应可构建」。新增需在 review 中说明理由。
+  当前仅有两处豁免，新增需在 review 中说明理由：
+  1. `runner.rs` 的 `expect("inflight 锁中毒")`——毒锁意味着已有 panic，继续运行无意义；
+  2. `builder.rs` 的 `expect("最小客户端应可构建")`——退化客户端，构造参数是常量；
+  3. `event.rs` 的 `expect("cursor 在边界内")`——游标由 `char_indices` 保证落在字符边界。
+
+  > 注意 `event.rs` 那处在 `#[cfg(test)]` **之前**，属生产路径；
+  > 不要因为「看起来像测试」就忽略它。
 - **禁止 `panic!` / `todo!` / `unimplemented!` 进入主路径**。
   测试里可以用（`golden.rs` 用它给出可读的失败信息）。
 - **禁止 `dbg!`**。临时调试用 `tracing::debug!`。
@@ -205,10 +218,14 @@ cargo clippy --workspace --all-targets
 | 类型/trait | `UpperCamelCase` | `TaskContext`、`EventSink` |
 | 函数/方法 | `snake_case`，动词开头 | `generate_signature`、`accepts_basic` |
 | 常量 | `SCREAMING_SNAKE_CASE` | `AES_FIXED_IV`、`SALT_MAP` |
-| 新类型 | 包裹单字段，提供 `new` / `as_str` | `AccountId(pub String)` |
+| 新类型 | 包裹单字段，提供构造与取值方法 | `AccountId(pub String)` |
 
 **新类型（newtype）优先于裸 `String`**：`AccountId`、`DeviceId`、`RunId` 是范例。
 理由：签名/ID 混用是安全事件，类型系统是最便宜的防线。
+
+取值方法按语义取名，不要强求统一：`AccountId`/`DeviceId` 用 `as_str()`，
+`RunId` 用 `get()`（它本来就是数值）。构造用 `new(...)` 或元组字面量
+（`DeviceId` 目前只有元组构造，属可接受的现状）。
 
 任务名用 **kebab-case**（`ai-avatar`、`cloud-phone-redpack`），因为它是 wire 标识；
 Rust 里的注册表键沿用同一字符串，不要转成下划线。
@@ -330,7 +347,12 @@ pub enum RunEvent { Started{..}, Log{..}, Progress{..}, Finished{..} }
 - **新增凭证字段名必须同步加进 `redact()` 的 `KEYS`**，否则会静默泄漏。
 - 凭证按域名注入（`mcloud-upstream/src/endpoints.rs`），**这是安全边界，不许放宽**：
   `basic` 只给 `AUTH_DOMAINS`，`jwt` 只给 `JWT_HOSTS`（精确匹配，子域不算）。
-- 写盘保留 `.bak`，配置目录权限 `0600`。
+- 写盘保留 `.bak`（`JsonStore::write_atomic` 已实现，注意实际文件名是
+  `accounts.bak` 而非 `accounts.json.bak`——`with_extension` 会替换扩展名）。
+
+> **尚未实现、但必须遵守**：配置目录权限 `0600`。当前代码没有任何
+> `set_permissions` 调用，`data/` 目录按默认 umask 创建。这是安全欠账，
+> 见 §11。在它落地前，不要把含真实凭证的 `data/` 放在共享目录。
 
 ### 7.4 持久化
 
@@ -414,8 +436,8 @@ cargo clippy --workspace --all-targets
 cargo test --workspace              # 必须 0 failed
 ```
 
-三条全绿才能提交。**本次提交新引入的告警/失败由本次提交负责**，不许以
-「本来就有」为由放过（仅 §3.3 记录的那 1 条属既有欠账）。
+三条全绿才能提交。**本次提交新引入的告警/失败由本次提交负责**——
+当前 §3.3 记录的欠账为零，所以「本来就有」这个借口不存在。
 
 CI 尚未配置（见 §11），目前靠人工执行；配置后这三条即为合并门禁。
 
@@ -435,24 +457,25 @@ CI 尚未配置（见 §11），目前靠人工执行；配置后这三条即为
 
 ## 10. 仓库卫生
 
-### 10.1 版本控制【待办】
+### 10.1 版本控制
 
-仓库**尚未 `git init`**。这是当前最大的工程缺口——没有 diff 就无法 review，
-也无法回滚。建议尽快：
+仓库已初始化（分支 `main`），首次提交收录 64 个文件，`.gitignore` 排除
+`target` / `.cargo-home` / `node_modules` / `dist` / `data`。
+此后所有改动走提交，**不再直接改工作区不留痕**。
 
-```bash
-git init && git add -A && git commit -m "chore: 初始化仓库（P0 脚手架）"
-```
-
-`.gitignore` 至少覆盖：
+`.gitignore` 必须持续覆盖：
 
 ```gitignore
 /target
-/data
 /.cargo-home
 /web/node_modules
 /web/dist
+/data
+*.log
 ```
+
+> **不要提交 `data/`**：那是运行期账号与凭证数据。
+> 提交前用 `git status` 确认没有 `data/` 下的文件混入。
 
 ### 10.2 目录约定
 
@@ -488,14 +511,18 @@ data/         运行时数据（不入库）
 
 | # | 项 | 位置 | 类型 |
 |---|---|---|---|
-| 1 | 仓库未纳入 git | 根目录 | 工程 |
-| 2 | `des` 依赖已声明但 `des.rs` 未实现 | `mcloud-crypto` | 死依赖 |
-| 3 | 1 处 clippy 告警（`field iv is never read`） | 见 §3.3 | Lint |
-| 4 | `architecture.md` §9.2 SSE 示例用 camelCase，与代码不符 | `docs/architecture.md` | 文档 |
-| 5 | `Runner` 无测试 | `mcloud-engine/src/runner.rs` | 测试 |
-| 6 | `json_store` 在 async 中用阻塞 `std::fs` | `mcloud-store` | 并发 |
-| 7 | `FixedClock` 无法被其他 crate 测试使用 | `mcloud-store/src/clock.rs` | 可测性 |
-| 8 | 无 CI 配置，§9.2 的三条命令目前靠人工执行 | 根目录 | 工程 |
+| 1 | `des` 依赖已声明但 `des.rs` 未实现 | `mcloud-crypto` | 死依赖 |
+| 2 | `architecture.md` §9.2 SSE 示例用 camelCase，与代码不符 | `docs/architecture.md` | 文档 |
+| 3 | `Runner` 无测试（核心并发逻辑裸奔） | `mcloud-engine/src/runner.rs` | 测试 |
+| 4 | `json_store` 在 async 中用阻塞 `std::fs` | `mcloud-store` | 并发 |
+| 5 | `FixedClock` 是 `#[cfg(test)]` 私有项，其他 crate 用不到 | `mcloud-store/src/clock.rs` | 可测性 |
+| 6 | 无 CI 配置，§9.2 的三条命令靠人工执行 | 根目录 | 工程 |
+| 7 | `mcloud-server` 路由 0 测试；`upstream` 无 fixture 回放 | 见 §8.4 | 测试 |
+| 8 | SSE 只按 `run_id` 过滤，且同步 `create` 不产生可订阅事件 | `mcloud-server/src/routes/runs.rs` | 设计 |
+| 9 | 凭证目录权限 `0600` 未实现（无 `set_permissions`） | `mcloud-store` | 安全 |
+
+> 已完成：`git init` + 首次提交、`clippy` 归零、`fmt` 归零（见 §3.3、§10.1）。
+> 本文档**只记录，不擅自修改代码**——清账请在专门的提交里做，并同步删掉对应行。
 
 ---
 
