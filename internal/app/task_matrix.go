@@ -106,6 +106,35 @@ type TaskMatrix struct {
 	//
 	// ⚠ 它不是"错误"，是"这一组今天没读到"。全部读到时是空切片。
 	Failures []TaskMatrixFailure
+	// Markets 是**按市场名分开的**那一半读数，顺序与 [TaskMatrixMarketNames] 一致。
+	//
+	// 为什么要单独有一格（而不是只看 [TaskMatrix.Raw]）：这一族要两个市场名各拉八次，
+	// 而聚合把两边摊成一张表 ⇒ 只报总数时，"邮箱那一支一条都没回"与"两支各回一半"
+	// 在小结里长得**一模一样**。缺的正是这一格（本文 R14）。
+	//
+	// ⚠ 这一格只**记录**、不参与任何判定 ⇒ 它不会改哪一条任务做不做。
+	// 加它不改判据，只让"跑一趟"能把 R13 / R14 那两问答出来（AGENTS.md §1.13）。
+	Markets []TaskMatrixMarketCount
+}
+
+// TaskMatrixMarketCount 是**一个市场名**那一半边这一次拉到了什么。
+type TaskMatrixMarketCount struct {
+	// MarketName 是**我们发出去**的那个市场名（请求 body 的 `marketname`，
+	// 同时也是 `activityid` 头的取值 —— 见 [TaskListV2Request]）。
+	MarketName string
+	// Fetches 是这一半边发出的请求数（恒等于 [upstream.TaskListV2Groups] 的长度）。
+	Fetches int
+	// Failures 是这一半边**没读到**的次数。
+	Failures int
+	// Raw 是这一半边回来的条目数（**去重之前**，且只看这一边自己的响应）。
+	Raw int
+	// FieldValues 是这些响应条目里 `marketname` **字段**出现过的取值（去重、升序）。
+	//
+	// ⭐ 这一格就是 R13 的判据：请求带的市场名与响应里的字段值**对不对得上**，
+	// 只有真打才看得到 —— 若 `newsign_139mail` 那八次回来的条目仍写着 `sign_in_3`，
+	// 说明上游把 `activityid` 当成常量、我们读到的是**同一张表**（两批数据叠成一批）。
+	// 空的条目数组它自己就表达了（`Raw == 0` 时这一格必空）。
+	FieldValues []string
 }
 
 // taskNameTagPattern 对应旧 TS 的 `/<[^>]+>/g`。
@@ -122,21 +151,34 @@ var taskNameTagPattern = regexp.MustCompile(`<[^>]+>`)
 // 而空表在界面上的读法是"这个号今天没有任务"—— 与"一次都没读到"是两回事。
 // 判反的表现是：凭据失效的号被念成"没事可做"，于是没人去看它。
 func AppTaskMatrix(ctx context.Context, src *SignInSessionSource) (TaskMatrix, *core.Error) {
-	matrix := TaskMatrix{Failures: []TaskMatrixFailure{}}
+	matrix := TaskMatrix{Failures: []TaskMatrixFailure{}, Markets: []TaskMatrixMarketCount{}}
 	for _, marketName := range TaskMatrixMarketNames {
+		market := TaskMatrixMarketCount{MarketName: marketName, FieldValues: []string{}}
+		seen := map[string]bool{}
 		for _, group := range upstream.TaskListV2Groups {
 			list, perr := do(ctx, src, func(s SignInSession) (upstream.TaskListV2, *core.Error) {
 				return src.up.AppTaskListV2(ctx, s.jwt, s.referer, marketName, group)
 			})
 			matrix.Fetches++
+			market.Fetches++
 			if perr != nil {
 				matrix.Failures = append(matrix.Failures, TaskMatrixFailure{
 					MarketName: marketName, Group: group, Err: perr,
 				})
+				market.Failures++
 				continue
+			}
+			market.Raw += len(list.Items)
+			for _, item := range list.Items {
+				if item.MarketName != nil && !seen[*item.MarketName] {
+					seen[*item.MarketName] = true
+					market.FieldValues = append(market.FieldValues, *item.MarketName)
+				}
 			}
 			matrix.Items = append(matrix.Items, list.Items...)
 		}
+		sort.Strings(market.FieldValues)
+		matrix.Markets = append(matrix.Markets, market)
 	}
 	if len(matrix.Failures) == matrix.Fetches && matrix.Fetches > 0 {
 		// 一条错误就够排障了：带上前两次失败的市场名/组名与第一个错误原文。
@@ -147,6 +189,31 @@ func AppTaskMatrix(ctx context.Context, src *SignInSessionSource) (TaskMatrix, *
 	matrix.Raw = len(matrix.Items)
 	matrix.Items = normalizeTaskMatrix(matrix.Items)
 	return matrix, nil
+}
+
+// MarketSummaryLine 把 [TaskMatrix.Markets] 念成**一行**给人看的读数。
+//
+// 只念读数、不加解释（口径与 `noticeSlotReadings`、`FunaiReadings.Line` 一致）：
+// "邮箱那一支回了 0 条"究竟是"这个号没开邮箱任务"还是"上游不认我们这个 `activityid`"，
+// 这一句分辨不了，也不该在这一句里分辨（AGENTS.md §1.7）。
+//
+// 空表回空串 ⇒ 调用方**不给**这一行（没有读数可念时不播一句"没读数"）。
+func (m TaskMatrix) MarketSummaryLine() string {
+	if len(m.Markets) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(m.Markets))
+	for _, market := range m.Markets {
+		text := fmt.Sprintf("%s：读到 %d/%d 次、%d 条",
+			market.MarketName, market.Fetches-market.Failures, market.Fetches, market.Raw)
+		if len(market.FieldValues) == 0 {
+			text += "、响应里没带 marketname"
+		} else {
+			text += "、响应里的 marketname：" + strings.Join(market.FieldValues, "、")
+		}
+		parts = append(parts, text)
+	}
+	return "拉取明细 " + strings.Join(parts, "；")
 }
 
 // normalizeTaskMatrix 做那三步：去 HTML ⇒ 按 id 升序 ⇒ 按 name 去重保留先来。

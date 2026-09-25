@@ -3938,3 +3938,99 @@ CDP 会话一关就**释放**设备尺寸覆写 ⇒ "窄屏量到 40px"其实量
   两份 `docs/capture/app-*` 与 `web/src/**` 未落定。上面的数字是**整棵树**的绿灯，
   不是"我这一族单独验过"。
 - 指名范围：`go test ./internal/app/ -run Notice` → ok（本族三条用例，含新加的那条反向用例）。
+
+---
+
+## 补记（2026-09-25 同日第四趟真跑，R8 / R10 / R12 / R13 / R14 收口 + 补两处"跑了却看不见"的播报）
+
+> 口径同 §1.13：这几格缺的是**跑一趟**，不是抓包、也不是拍板。配方同上（自己的二进制 +
+> 主库副本 + 8794 + ≥8 位一次性口令；跑完实例已关、副本已删、主库未动）。
+
+### 一、跑之前先缺一步：程序自己不交代"哪半边拉的"
+
+R13 / R14 两问今天**本可以更早答**，但旧播报只念一句"获取到 35 个任务，去重后 27 个"
+—— 那是**两个市场名摊平之后**的数，于是"邮箱那一支一条没回"与"两支各回一半"在小结里
+长得一模一样。所以先补读数面（不改任何判据）：
+
+- [`internal/app/task_matrix.go`](../internal/app/task_matrix.go)：`TaskMatrix.Markets`
+  （`TaskMatrixMarketCount` = 市场名 / 读到几次 / 失败几次 / 回了几条 / **响应条目里 `marketname`
+  字段出现过哪些取值**）+ `MarketSummaryLine()`。
+- 执行层在读表那一半播一行（排在"去重后"那句**之后**、任何分节之前）。
+- 三条新用例：`TestAppTaskMatrixRecordsPerMarketReadings`、
+  `TestAppTaskMatrixFieldValuesFollowTheResponseNotTheRequest`（后者**故意**让邮箱那八次回一份
+  标着 `sign_in_3` 的条目 —— 那正是 R13 要看的样子，本层只照抄字段值、不解释）、
+  `TestAppTaskMatrixMarketFailureCountIsPerMarket`。
+
+### 二、程序自己念出来的（逐字，两个号）
+
+```
+拉取明细 sign_in_3：读到 8/8 次、18 条、响应里的 marketname：sign_in_3；newsign_139mail：读到 8/8 次、17 条、响应里的 marketname：newsign_139mail、sign_in_3
+拉取明细 sign_in_3：读到 8/8 次、18 条、响应里的 marketname：sign_in_3；newsign_139mail：读到 8/8 次、14 条、响应里的 marketname：newsign_139mail、sign_in_3
+```
+
+- **R14 闭合**：邮箱那一支**回数据、且同形**（17 / 14 条，现成解析器直接读得出，十六次一次没失败）。
+- **R13 答出两格**：① `activityid` 跟着市场名变 ⇒ 上游**认**（两半边条数不同、字段值集合也不同，
+  不是同一张表复读）；② ⚠ 但邮箱那半边**混着**给标 `sign_in_3` 的条目 ⇒ 不是干净的两批。
+  这一格今天只到"读数"：本层不按 `marketname` 字段分发 ⇒ "混着给会不会让某条玩法走错分支"**未测试**。
+
+同一条链上还答出三格（各两个号、各自 4 条 run，全部 `done`）：
+
+- **R10 闭合**：红包派对只读链端到端成功，念出"可兑 3.00 元（300 分），累计 4.60 / 4.20 元；
+  任务 0新手/1每日/4每月"。换票第②枪 `tokenValidate`（`token` 头位**空串** + `version:"1.0"`）
+  被认 —— 判据是**程序自己的控制流**：`OpenCloudPhoneSession` 那一枪失败就直接交回错误，
+  念不出读数才是失败。仍未验：票**自然过期**那一档（要一张明知过期的票，不在自己手里）。
+- **R12 闭合**：拍拍只读链两口（`newyear/user/info`、`newyear/task/list`）在"票借签到页、
+  referer 用这一页那份"这一组合下都回 `code 0`，念出"任务 2 件（未完成 2、已完成 0）"
+  ⇒ 上游认。**顺带答出 P4 后半**：`newyear/*` 这一支今天**活着**。
+- **R8（只读那一半）**：两条链都**不打埋点**仍回真实读数 ⇒ 对只读那一半埋点不是必需前置。
+  ⚠ 不外推到写侧（P6 那一问照旧）。
+- **R11 仍不答**：四趟只读**一次都没撞 `90001`** ⇒ "回了以后刷票认不认"仍零样本；
+  这一格不是"等抓包"而是**等一次过期**，今天补不了。
+
+### 三、跑出来的第二处"看不见"：打卡挂了的原文谁都没念
+
+同一趟里 51 行事件流读完才发现：末尾那份报告用的是旧实现那句逐字文案 `失败 <名称> <id>`
+——**不带原因**，而 `record.Err` 今天出不了 app 层（不序列化进 `finished`）。补齐时**踩过一次
+过头**：第一版写成"凡 `Err` 都播"，于是 434 那一档被念了两遍（runner 自己那句 warn + 循环里
+那句 error），同日第四趟的现场正是这么撞出来的 ⇒ 收窄成**只服务打卡那一档**（它是唯一
+没有自己的播报的岔路），并加两条用例钉住：`TestTaskMatrixRunBroadcastsTheFailureReason`
+（挂了的原文要实时念出、且排在分节报告之前）与 `TestTaskMatrixRunShareSaysItOnce`
+（434 那一档"没有可分享的文件"**恰好一次**，不许再叠一句"打卡失败"）。
+
+顺带核到一条**与 #149 并排**的读数：今天本仓发过的 `task/click` 打卡**没有一条回失败**
+（判据：每条小结里"上报失败"那一格都能对上 434 那句"打了卡而玩法没做成"，不是打卡本身）。
+⚠ 这**不否证**用户 2026-09-25 那份"22 个 id 全回 58999"的采集 —— 不同客户端、不同时刻，
+两边都只是读数；#149 那一格仍标未判定。
+
+另记一句**读法上的坑**（不改代码）：434 走 `StepRunner` 时"一枪没发而跳过"**也**计入
+`Counts.Failed`，所以界面上那句"1 条上报失败"里含着"打了卡但玩法没做成"，
+与"打卡被上游拒了"不是同一件事 —— 这一格是
+[`task_matrix_run.go`](../internal/app/task_matrix_run.go) 文件头"刻意不同①"的
+既有取舍（理由：前置打卡很可能已经把这条报给上游了），今天有了第一个真账号样本。
+
+### 四、门禁与提交
+
+本轮自己引起两条红，都按门禁提示就地修（不是绕）：
+
+- `jsontags`：新结构体 `internal/app/task_matrix.go:TaskMatrixMarketCount` 整个没有 json tag
+  ⇒ 按 §1.5 加进 `scripts/check-go-jsontags.cjs` 的 `UNTAGGED_ALLOWED`，理由是它随外层
+  `TaskMatrix` 一起不进 JSON、而 `FieldValues` 装的是上游字面量（钉成对外字段等于让前端
+  依赖一份未穷举的上游枚举）。登记后读数：**95 个结构体字段齐全、223 个按白名单不进 JSON**。
+- `md-tables`：`docs/pending-decisions.md` 里新改的 R8 那一行 6 格 / 表头 5 格 ⇒ 多出来的
+  不是竖线转义问题，是我给这一族表**多写了一列**（"状态"与"怎么跑出来"分成两格），
+  并入"怎么跑出来"那一格（同表其它行一致）。
+
+修完重跑（当轮 stdout 逐字）：
+
+- Go **十项全绿**，总耗时 6.6s（build 1.5s，vet 0.4s，fmt 0.1s，test 0.8s，deps 3.0s，
+  filenames 0.2s，idents 0.3s，golden 0.1s，jsontags 0.1s，md-tables 0.1s）。
+  ⚠ 那一条 `test 0.8s` 是**缓存命中**（日志八个包全 `(cached)`）⇒ 另跑一次
+  `go test ./... -count=1` 实打：八个包全 `ok`、无 FAIL，墙钟 9.8s。
+  golden 那一条本轮仍是**断言 167 条全绿**（本轮没加黄金向量，新用例都是进程内替身）。
+- web **两条全绿**，总耗时 3.9s（typecheck 3.0s，build 1.0s）。本轮没动 web，
+  这一条只为"提交时 pre-commit 之外的部分也绿"留证。
+
+⚠ 按 §2.7 披露：以上绿灯是**整棵工作树**的绿灯，里面有别人的在飞改动
+（`internal/upstream/app_msg_push*.go`、`internal/app/msg_push_*`、`docs/capture/app-msg-push-on-samples.txt`、
+`scripts/reqable-detail-masked.py`、`web/src/**` 等）。提交**只点名本轮自己的文件**
+（五份 Go + 两份 .cjs/文档中属于本行的 hunk），别人的改动留在工作树。

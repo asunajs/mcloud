@@ -548,3 +548,119 @@ func TestTaskMatrixFetchesMatchesTheLoop(t *testing.T) {
 		t.Errorf("今天这一族是 16 次，实得 %d（改了数组要一并回看文件头那三处口径）", got)
 	}
 }
+
+// taskMatrixMarketQueue 给"前八次回 cloud、后八次回 email"那一串响应。
+//
+// 为什么按**位置**给而不是按市场名分派：[liveTaskScript] 只按 URL 子串匹配，
+// 而两个市场名打的是**同一个** URL —— 唯一能分辨它们的，恰好是我们自己发出去的
+// 那个 body（`marketname`）。所以这里按请求顺序（先 sign_in_3 的八个 group，
+// 再 newsign_139mail 的八个 group）逐项给响应。
+func taskMatrixMarketQueue(cloud, email string) []string {
+	bodies := make([]string, 0, TaskMatrixFetches())
+	for range upstream.TaskListV2Groups {
+		bodies = append(bodies, cloud)
+	}
+	for range upstream.TaskListV2Groups {
+		bodies = append(bodies, email)
+	}
+	return bodies
+}
+
+// TestAppTaskMatrixRecordsPerMarketReadings ⭐ 两个市场名各拉到什么，要**分开**留下。
+//
+// 这一格存在的理由就是 R14：今天小结只念"获取到 N 个任务"，那是两边摊平之后的数
+// ⇒ "邮箱那一支一条都没回"与"两支各回一半"长得一模一样，跑十趟也答不出这一问。
+//
+// 反向改坏它的两处，各自会红：
+//   - 把 `market.Raw += len(list.Items)` 挪到市场名循环**外面**（两边各记全表）
+//     ⇒ 第二个断言红（email 半边念成 8 条）；
+//   - 把 `FieldValues` 的收集写成"只记第一个市场名的"（漏了 `seen` 按半边各自一份）
+//     ⇒ 第四个断言红（email 半边念出 sign_in_3）。
+func TestAppTaskMatrixRecordsPerMarketReadings(t *testing.T) {
+	cloudBody := taskMatrixBody("day", taskMatrixItem{id: 106, name: "传一个", state: "WAIT", enable: 1})
+	// 邮箱那一支：这一档给的是"回 0 条"（空对象，实拍 group `new` 那个形状）。
+	script := taskMatrixScript([]string{"JWT-1"},
+		liveTaskRoute{taskListV2Endpoint, taskMatrixMarketQueue(cloudBody, taskMatrixEmptyBody)})
+	matrix, perr := AppTaskMatrix(context.Background(),
+		taskMatrixSource(t, script, NewSessionPool()))
+	if perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	if len(matrix.Markets) != len(TaskMatrixMarketNames) {
+		t.Fatalf("每个市场名该各有一格，实得 %d 格", len(matrix.Markets))
+	}
+	cloud, email := matrix.Markets[0], matrix.Markets[1]
+	if cloud.MarketName != upstream.MarketName || email.MarketName != upstream.TaskListV2EmailMarketName {
+		t.Fatalf("两格要按请求顺序点各自的名，实得 %s / %s", cloud.MarketName, email.MarketName)
+	}
+	if cloud.Raw != 8 || cloud.Failures != 0 {
+		t.Errorf("云盘那半边应是 8 次全读到、8 条（八组各回同一条），实得 %+v", cloud)
+	}
+	if email.Raw != 0 || email.Failures != 0 || len(email.FieldValues) != 0 {
+		t.Errorf("邮箱那半边该只记它自己那八次的读数（0 条、不失败、没字段），实得 %+v", email)
+	}
+	if len(cloud.FieldValues) != 1 || cloud.FieldValues[0] != upstream.MarketName {
+		t.Errorf("响应条目里的 marketname 要照抄，实得 %v", cloud.FieldValues)
+	}
+	line := matrix.MarketSummaryLine()
+	for _, want := range []string{"sign_in_3：读到 8/8 次、8 条", "newsign_139mail：读到 8/8 次、0 条"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("那一行要念得出两半边，缺 %q（实得 %q）", want, line)
+		}
+	}
+	if !strings.Contains(line, "响应里没带 marketname") {
+		t.Errorf("回 0 条那一半边要念成\"没带\"，而不是悄悄留个空格：实得 %q", line)
+	}
+}
+
+// TestAppTaskMatrixFieldValuesFollowTheResponseNotTheRequest ⭐ R13 的探测器。
+//
+// 这一条**故意**让邮箱那八次回一份 `marketname` 写着 `sign_in_3` 的条目 ——
+// 那正是"我们换了市场名、上游仍给同一张表"的样子。本层不判断、只把**响应里那枚字段**
+// 记下来（反过来按请求名填 ⇒ 这一格永远念不出问题，而 R13 就永远答不上）。
+func TestAppTaskMatrixFieldValuesFollowTheResponseNotTheRequest(t *testing.T) {
+	sameTableItem := `{"id":901,"name":"邮箱侧也说是云盘","state":"WAIT","enable":1,` +
+		`"process":0,"groupid":"day","marketname":"sign_in_3"}`
+	emailBody := `{"code":0,"msg":"success","result":{"day":[` + sameTableItem + `]}}`
+	script := taskMatrixScript([]string{"JWT-1"}, liveTaskRoute{taskListV2Endpoint,
+		taskMatrixMarketQueue(taskMatrixEmptyBody, emailBody)})
+	matrix, perr := AppTaskMatrix(context.Background(),
+		taskMatrixSource(t, script, NewSessionPool()))
+	if perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	cloud, email := matrix.Markets[0], matrix.Markets[1]
+	if cloud.Raw != 0 || email.Raw != 8 {
+		t.Errorf("两半边的条数各记各的，实得 cloud=%d email=%d", cloud.Raw, email.Raw)
+	}
+	if len(email.FieldValues) != 1 || email.FieldValues[0] != upstream.MarketName {
+		t.Fatalf("字段值要照抄响应里的（这里正是 R13 要看的那一格），实得 %v", email.FieldValues)
+	}
+	if !strings.Contains(matrix.MarketSummaryLine(),
+		"newsign_139mail：读到 8/8 次、8 条、响应里的 marketname：sign_in_3") {
+		t.Errorf("那一行要能把\"请求换了名、响应没换\"念出来，实得 %q", matrix.MarketSummaryLine())
+	}
+}
+
+// TestAppTaskMatrixMarketFailureCountIsPerMarket：某一组挂了 ⇒ 只算在**它自己那半边**。
+//
+// 与 [TestAppTaskMatrixSingleGroupFailureDoesNotAbort] 是一对：那条钉整表口径，
+// 这一条钉分半边口径。反向改坏：把 `market.Failures++` 漏掉 ⇒ 那一行念成"8/8 次读到"，
+// 而实际只有 7 次拿到了东西 —— 残表被念成全表，正是本仓在 §刻意不同② 里防的那件事。
+func TestAppTaskMatrixMarketFailureCountIsPerMarket(t *testing.T) {
+	bodies := taskMatrixMarketQueue(taskMatrixEmptyBody, taskMatrixEmptyBody)
+	bodies[9] = `{"code":1,"msg":"系统繁忙"}` // email 的第二组
+	script := taskMatrixScript([]string{"JWT-1"}, liveTaskRoute{taskListV2Endpoint, bodies})
+	matrix, perr := AppTaskMatrix(context.Background(),
+		taskMatrixSource(t, script, NewSessionPool()))
+	if perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	if matrix.Markets[0].Failures != 0 || matrix.Markets[1].Failures != 1 {
+		t.Errorf("失败只该记在挂掉那半边，实得 cloud=%d email=%d",
+			matrix.Markets[0].Failures, matrix.Markets[1].Failures)
+	}
+	if !strings.Contains(matrix.MarketSummaryLine(), "newsign_139mail：读到 7/8 次") {
+		t.Errorf("那一行要念得出是哪半边缺了一组，实得 %q", matrix.MarketSummaryLine())
+	}
+}

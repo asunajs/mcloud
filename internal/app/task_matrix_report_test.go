@@ -69,6 +69,16 @@ func (l *mxLog) indexOf(want string) int {
 
 func (l *mxLog) joined() string { return strings.Join(l.texts, "\n") }
 
+// lineWith 返回第一枚含 `want` 的整行（没有 ⇒ 空串）—— 给"这一行里还得有原文"那类断言用。
+func (l *mxLog) lineWith(want string) string {
+	for _, text := range l.texts {
+		if strings.Contains(text, want) {
+			return text
+		}
+	}
+	return ""
+}
+
 // TestTaskGroupNameCN 钉那张组名表覆盖**全部**旧实现认识的组。
 //
 // 反向改坏的样子：漏一个键 ⇒ 那一组的分节标题变成英文原值（本条红）；
@@ -333,6 +343,14 @@ func TestTaskMatrixRunBroadcastsLiveThenReport(t *testing.T) {
 		!strings.Contains(got, "去重后 3 个") {
 		t.Errorf("第二行要说条数与去重后的条数，实得 %q", got)
 	}
+	// 第三行：**按市场名分开的**同一批读数，要紧贴在条数后面（它修饰的就是那个数）。
+	// 反向改坏它：把这一句挪到小结旁边 ⇒ 追实时日志的人跑到一半看不到"哪半边是空的"，
+	// 而那一格正是本文 R13 / R14 唯一能靠跑一趟拿到的证据。
+	if got := log.texts[2]; !strings.Contains(got, "拉取明细") ||
+		!strings.Contains(got, "sign_in_3：读到 8/8 次、3 条") ||
+		!strings.Contains(got, "newsign_139mail：读到 8/8 次、0 条") {
+		t.Errorf("第三行要把两个市场名分开念，实得 %q\n（全部：\n%s）", got, log.joined())
+	}
 	// 实时那三行：两条会出网（596 打卡 + 777 打卡），一条是缺口（107）。
 	for _, want := range []string{"尝试完成 备份一个文件 596", "尝试完成 看个广告 777"} {
 		if !log.has(want) {
@@ -538,5 +556,52 @@ func TestTaskCleanupLines(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestTaskMatrixRunBroadcastsTheFailureReason ⭐ 挂了的**原文**要当场出现在事件流里。
+//
+// 2026-09-25 那趟真跑里小结念"1 条上报失败"，而 51 行事件流**没有一个字**说哪一条、
+// 为什么挂 —— 因为那份报告用的是旧实现那句不带原因的逐字文案，而 `record.Err`
+// 今天出不了 app 层。这一条钉的就是补上的那一行（它是 R24 那一问的第一手证据来源）。
+//
+// 反向改坏它的两处，各自会红：
+//   - 删掉那一行 ⇒ 第一条断言红（原文又只剩在内存里）；
+//   - 把条件写成"凡是 Err 都播"⇒ `TestTaskMatrixRunShareSaysItOnce` 红
+//     （434 那种"一枪没发而跳过"被 runner 与这里各念一遍，同日实测就是这么撞出来的）；
+//   - 反过来把条件放宽成"只给玩法档播"⇒ 第一条断言红（打卡挂了的原文又没人念）。
+func TestTaskMatrixRunBroadcastsTheFailureReason(t *testing.T) {
+	first := mxItems(
+		mxItem(777, "day", "先坏的那条", "WAIT", "", 0),
+		mxItem(778, "day", "后面的那条", "WAIT", "", 0),
+	)
+	script := mxScript([]string{"JWT-1"}, first, first, append(
+		[]liveTaskRoute{{mxClickEndpoint, []string{mxClickBizFailure, mxClickOK}}},
+		mxHappy()[1:]...)...)
+	log := &mxLog{}
+	run := mxDefaultRun(t, script)
+	run.Progress = log.handle()
+	if _, perr := mxResult(t, run); perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	line := log.lineWith("打卡失败 先坏的那条 777")
+	if line == "" {
+		t.Fatalf("挂掉那条要当场播一行带上游原文，实得：\n%s", log.joined())
+	}
+	if !strings.Contains(line, "任务已过期") {
+		t.Errorf("那一行要带原文，实得 %q", line)
+	}
+	if !log.hasAt(core.LevelError, "打卡失败 先坏的那条") {
+		t.Errorf("这一行该是 error 档（它对应一次没做成的写操作），实得：\n%s", log.joined())
+	}
+	// 反方向：成功那条**不许多出一行**。
+	if log.has("打卡失败 后面的那条") {
+		t.Errorf("没挂的不该播失败原因：\n%s", log.joined())
+	}
+	// 时机：实时那一行排在**分节报告之前**（跟着动作走，不是等末尾）。
+	if live, section := log.indexOf("打卡失败 先坏的那条"),
+		log.indexOf("------【每日任务】------"); live < 0 || section < 0 || live > section {
+		t.Errorf("原因行要紧跟动作、排在分节之前，实得 live=%d section=%d：\n%s",
+			live, section, log.joined())
 	}
 }

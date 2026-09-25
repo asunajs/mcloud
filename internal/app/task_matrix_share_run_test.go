@@ -228,6 +228,40 @@ func TestTaskMatrixRunShareSendsNothingWithoutUploadedFiles(t *testing.T) {
 	}
 }
 
+// TestTaskMatrixRunShareSaysItOnce ⭐ 跳过那句话**只念一遍**。
+//
+// 2026-09-25 第四趟真跑撞出来的：那趟给"记录里有失败原文就播一行"写过一版无条件的话，
+// 于是 434 这一档出现两行同样的内容（runner 自己那句 warn + 循环里那句 error），
+// 而界面上"同一个任务挂了两次"会让人以为跑了两趟。
+// 所以那一行从此**只服务打卡那一档**（它今天是唯一没有自己的播报的岔路）。
+//
+// 反向改坏它：把循环里的条件从 `plan.Kind == StepClick` 放宽成 `record.Err != ""`
+// ⇒ 这一条红（实得 2 行）。
+func TestTaskMatrixRunShareSaysItOnce(t *testing.T) {
+	first := mxItems(mxItem(434, "day", mxShareTaskName, "WAIT", "", 0))
+	script := mxScript([]string{"JWT-1"}, first, first, append(
+		mxShareRoutes(mxOutLinkBody(mxLinkID), mxDelOutLinkOK), mxHappy()...)...)
+	log := &mxLog{}
+	run := mxDefaultRun(t, script)
+	run.Progress = log.handle()
+	if _, perr := mxResult(t, run); perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	var said int
+	for _, text := range log.texts {
+		if strings.Contains(text, "没有可分享的文件") {
+			said++
+		}
+	}
+	if said != 1 {
+		t.Errorf("那一格恰好念一次，实得 %d：\n%s", said, log.joined())
+	}
+	// 打卡那一枪今天没挂 ⇒ 也不许出现"打卡失败"那一句（它是上一行唯一的替补）。
+	if log.has("打卡失败") {
+		t.Errorf("打卡都成功时不该有那一句：\n%s", log.joined())
+	}
+}
+
 // TestTaskMatrixRunShareKeepsLinkVisibleWhenUpstreamGivesNoLinkID ⭐ 上游没给 linkID ⇒ 不许静默。
 //
 // 旧实现那句是 `if (linkId) await delOutLink(...)` ⇒ 拿不到 id 时**什么都不做**，

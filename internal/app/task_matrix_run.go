@@ -261,6 +261,14 @@ func (r TaskMatrixRun) RunAccount(
 	// 而少掉的那些是**同一条任务在几个组里都出现**（[normalizeTaskMatrix] 按 id 小的赢）。
 	r.progress(core.LevelInfo, "------【任务列表】------")
 	r.progress(core.LevelInfo, fmt.Sprintf("获取到 %d 个任务，去重后 %d 个", matrix.Raw, len(matrix.Items)))
+	// 按市场名再念一遍**同一批**读数（本文 R13 / R14 要的就是这一行）。
+	//
+	// 为什么上面那句不够：`获取到 46 个` 是两个市场名摊平之后的数，于是"邮箱那一支
+	// 一条都没回"与"两支各回一半"长得一模一样 —— 而这两档对"我们带的 `activityid`
+	// 上游认不认"是完全不同的证据。跑一趟只有一次机会留下这个读数（回去就要重跑整条链）。
+	if line := matrix.MarketSummaryLine(); line != "" {
+		r.progress(core.LevelInfo, line)
+	}
 	if result.ReadFailures > 0 {
 		// 这一句要紧贴在条数后面：`24 个`读起来像"全表就这些"，而它可能只是 13/16 组。
 		// 小结里也有同一格（[TaskMatrixRunResult.SummaryLine]），但那是三十行之后才出现，
@@ -279,6 +287,21 @@ func (r TaskMatrixRun) RunAccount(
 		}
 		record, fired := exec.apply(ctx, item, plan)
 		result.Steps = append(result.Steps, record)
+		// ⭐ 打卡挂了的**原文**当场播一行（其余岔路不播 —— 它们自己已经念过了）。
+		//
+		// 为什么只补 `StepClick` 这一档：2026-09-25 那趟真跑把事件流整个读下来，
+		// 上传（[taskExecutor.runUploads]）、入口上报、玩法那几条岔路**各自**都
+		// `progress` 了一句带原文的话，唯独打卡那一枪挂掉时**一个字都没有** ——
+		// 它的原文只进 [TaskStepRecord.Err]，而那份记录今天出不了 app 层
+		// （不序列化进 `finished`，末尾报告用的是旧实现那句不带原因的逐字文案 `失败 <名称> <id>`）。
+		// 反过来，若对所有 `Err != ""` 都播，434 那种"一枪没发而跳过"会连念两遍
+		// （runner 自己那句 warn + 这一句），而同一天实测正是这么撞出来的。
+		//
+		// 反向改坏它：删掉这一句 ⇒ `TestTaskMatrixRunBroadcastsTheFailureReason` 红。
+		if plan.Kind == StepClick && record.Err != "" {
+			r.progress(core.LevelError, fmt.Sprintf("打卡失败 %s %d：%s",
+				record.Name, record.TaskID, record.Err))
+		}
 		result.Counts.absorb(record)
 		if id, ok := taskIDOf(item); ok && fired {
 			exec.done[id] = true
