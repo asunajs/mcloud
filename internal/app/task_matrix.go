@@ -124,11 +124,14 @@ type TaskMatrix struct {
 	// 这两问光看代码答不出，而跑一趟如果没人念出来，跑十趟也答不出 ⇒ 与 [TaskMatrix.Markets]
 	// 同一条理由（AGENTS.md §1.13：缺口的默认处置是去跑，先得看得见）。
 	// 念出来之后今天已经答出两格：`taskFinishState` 与"组内是否全 `FINISH`"同日 18 次读数
-	// 零例外同向（`0`/`1`/`2` 三档；⚠ 这是**第五趟**的计数，第六趟没重新汇总逐组条数，只有
-	// `time` 那一组两遍都读到 `1` 且没跟着 `process` 动），`process` **不是恒 0**：同一趟内会涨，
-	// 跨趟还走出 `59→64→64→69`（每趟恰好传 5 个文件 ⇒ 每次 +5），另一号同一条读到 `100`
-	// 而它当天是 `FINISH`。
-	// ⚠ 两者都是**相关性观察** ⇒ 仍不改判据（结论与还缺哪一格见 R15）。
+	// 零例外同向（`0`/`1`/`2` 三档；⚠ 那是**第五趟**的计数。第六趟里 `time` 那一组两遍都读到 `1`
+	// 且没跟着 `process` 动；第七趟只留下**拉表前**那一遍的 `1`，复查后那遍没记），
+	// `process` **不是恒 0**：同一趟内会涨，跨趟还走出 `59→64→64→69→73`。
+	// ⚠ 别把涨的幅度读成固定步长：522 一趟**最多**传 5 个（`taskMatrixUploadRoundsPerRun`），
+	// 第六、七两趟都传满了 5 个，而复查读到的是 `69 → 73`（去重留的那一份）与 `74`
+	// （另一市场名给的那一份）两档 ⇒ "+4 还是 +5"取决于读哪一边，**不是**"每传一个涨一格"。
+	// 另一号同一条读到 `100` 而它当天是 `FINISH`。
+	// ⚠ 以上都是**相关性观察** ⇒ 仍不改判据（结论与还缺哪一格见 R15）。
 	//
 	// ⚠ 只**记录**、不参与任何判定：这两格该不该升格成判据是 R15 的**结论**，不是前提。
 	Groups []TaskMatrixGroupCount
@@ -358,6 +361,126 @@ func (g TaskMatrixGroupCount) line() string {
 		process = "process{" + strings.Join(values, "、") + "}"
 	}
 	return fmt.Sprintf("%s：%s、%d 条（FINISH %d）、%s", g.Group, states, g.Items, g.Finished, process)
+}
+
+// ProcessChangeLines 把**两遍拉表之间逐条 `process` 的对照**念成行（R15 剩下的归因那一格）。
+//
+// 为什么组读数那两行**不够**（它们已经把 `process` 念出来了）：那一格念的是**面值集合**
+// （`process{0、69}`），于是"64 涨到 69"只能读成"这一组里有一枚动了"，**指不出是哪一条**。
+// 而 R15 现在缺的正是这一问：涨的是我们自己上传那一条（522），还是同一趟里别的动作？
+// 集合那一行分辨不了，逐条对照可以 —— 它只需要把两遍的条目按 id 并排，**不需要**新请求。
+//
+// ⚠ 与组读数同一条取舍：**照抄面值、不加解释**（AGENTS.md §1.7）。这一句既不判
+// "`process` 是百分比"，也不判"涨的是不是我们造成的" —— 它只把**哪一条从几到几**交出来。
+//
+// 三档形状：
+//   - 两遍都有、面值不同 ⇒ 一行 `<名> <id>：A → B`；
+//   - 只出现在其中一遍 ⇒ 一行标"复查那遍没这条 / 拉表前没这条"。它同样是"这一组今天动过"
+//     的证据（去重按 name、组集合由上游决定），**吞掉**就等于把变化说成没有；
+//   - 两遍一致 ⇒ **不**出行，但**总结那一行始终给**（含对照条数与没 id 的条数）——
+//     否则"没有变化"与"这一格根本没跑"在事件流里是同一形状。
+//
+// `label` 只进行头（与 [TaskMatrix.GroupReadingLines] 同一用法）。
+func ProcessChangeLines(label string, first, second TaskMatrix) []string {
+	head := "process 逐条对照"
+	if label != "" {
+		head = fmt.Sprintf("process 逐条对照（%s）", label)
+	}
+	before, beforeNoID := indexByID(first.Items)
+	after, afterNoID := indexByID(second.Items)
+	// 并集按 id 升序：两遍各自都是这个次序（[normalizeTaskMatrix]），
+	// 而 Go 的 map 遍历随机 ⇒ 不排序的话同一份数据两次渲染出的行序不一样，
+	// 测试就钉不住"哪一行在前"（与 [sortedResultGroupNames] 同一条理由）。
+	ids := make([]int64, 0, len(before)+len(after))
+	for id := range before {
+		ids = append(ids, id)
+	}
+	for id := range after {
+		if _, ok := before[id]; !ok {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	var changes []string
+	moved, gone, added := 0, 0, 0
+	for _, id := range ids {
+		b, hasBefore := before[id]
+		a, hasAfter := after[id]
+		name := taskNameOf(a)
+		if name == "" {
+			name = taskNameOf(b)
+		}
+		switch {
+		case hasBefore && hasAfter:
+			if sameProcess(b.Process, a.Process) {
+				continue
+			}
+			moved++
+			changes = append(changes, fmt.Sprintf("%s %s %d：%s → %s", head, name, id,
+				processWords(b.Process), processWords(a.Process)))
+		case hasBefore:
+			gone++
+			changes = append(changes, fmt.Sprintf("%s %s %d：%s ⇒ 复查那遍没这条",
+				head, name, id, processWords(b.Process)))
+		default:
+			added++
+			changes = append(changes, fmt.Sprintf("%s %s %d：拉表前没这条 ⇒ 复查读到 %s",
+				head, name, id, processWords(a.Process)))
+		}
+	}
+	out := make([]string, 0, len(changes)+1)
+	// 总结那一行**在前**：读实时日志的人是自上而下的，"这一格跑了、对照了多少条"
+	// 得先于明细出现，否则零变化时只剩一片安静（同"没读到几组"那句为什么要放开头）。
+	summary := fmt.Sprintf("%s：对照 %d 条、面值变了 %d 条、消失 %d 条、新出现 %d 条",
+		head, len(ids), moved, gone, added)
+	if dropped := beforeNoID + afterNoID; dropped > 0 {
+		// 没 id 的条目**不能**当"没变化"：它是对照不了，两遍各有多少条这种条目本身就是事实。
+		summary += fmt.Sprintf("；另有 %d 条没有 id、未参与对照", dropped)
+	}
+	out = append(out, summary)
+	return append(out, changes...)
+}
+
+// indexByID 按 `id` 建索引，交回"没有 id 的条数"。
+//
+// 同一枚 id 出现两次时**保留先来的那条**（与 [normalizeTaskMatrix] 的去重取向一致：
+// 那里的"id 小的赢"是同一条理由的另一种形状 —— 宁要确定性，不要 map 顺序）。
+func indexByID(items []upstream.TaskV2Item) (map[int64]upstream.TaskV2Item, int) {
+	out := make(map[int64]upstream.TaskV2Item, len(items))
+	dropped := 0
+	for _, item := range items {
+		id, ok := taskIDOf(item)
+		if !ok {
+			dropped++
+			continue
+		}
+		if _, exists := out[id]; exists {
+			continue
+		}
+		out[id] = item
+	}
+	return out, dropped
+}
+
+// sameProcess 比较两枚面值，把"没给"与"给了 0"分成两档。
+//
+// 为什么不用 [taskProcessOf]（它把 nil 折成 0）：那一档是给**判据**用的（旧实现那句
+// `process >= 100`），而这里念的是"上游给了什么"。混用的表现是：一条从"没给"变成 `0`
+// 会被念成没变化，而那恰恰是要看得见的一格（R15 里"这一格是不是常常缺席"没有样本）。
+func sameProcess(before, after *int64) bool {
+	if before == nil || after == nil {
+		return before == nil && after == nil
+	}
+	return *before == *after
+}
+
+// processWords 是单枚面值的文本（"没给"而不是 0，理由同 [sameProcess]）。
+func processWords(value *int64) string {
+	if value == nil {
+		return "没给"
+	}
+	return fmt.Sprintf("%d", *value)
 }
 
 // normalizeTaskMatrix 做那三步：去 HTML ⇒ 按 id 升序 ⇒ 按 name 去重保留先来。

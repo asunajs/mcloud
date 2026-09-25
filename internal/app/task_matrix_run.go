@@ -331,7 +331,7 @@ func (r TaskMatrixRun) RunAccount(
 		r.progress(core.LevelInfo, result.SummaryLine())
 		return result, nil
 	}
-	r.verify(ctx, src, &result, &exec)
+	r.verify(ctx, src, matrix, &result, &exec)
 	// **逐条**播报复查读数（分节 + 组内四档），然后才是那句小结。
 	//
 	// ⚠ 顺序刻意：人是**从上往下**读日志的。把小结放前面会让"上游没认这几条"
@@ -429,8 +429,12 @@ func (e *taskExecutor) dayOfMonth() int {
 }
 
 // verify 打第二趟：重新拉表 → 补该补的那一发 → 按状态分四格。
+//
+// `first` 是**第一趟**那份表。传进来的唯一用途是逐条 `process` 的对照播报
+// （[ProcessChangeLines]）—— 那一格要的是"同一趟的前后两遍"，隔一趟再比就混进
+// 上游自己按日重置那一档，分辨不了（与组读数为什么要念两遍同一条理由，见 R15）。
 func (r TaskMatrixRun) verify(
-	ctx context.Context, src *SignInSessionSource,
+	ctx context.Context, src *SignInSessionSource, first TaskMatrix,
 	result *TaskMatrixRunResult, exec *taskExecutor,
 ) {
 	second, perr := AppTaskMatrix(ctx, src)
@@ -446,6 +450,13 @@ func (r TaskMatrixRun) verify(
 	// 任务完成而动"，而它只能靠**同一趟的前后两次**并排回答 —— 隔一天再跑就混进了
 	// "上游自己按日重置"这一档，分辨不了。两行都在，日志里一眼可见"有没有哪一组动过"。
 	for _, line := range second.GroupReadingLines("复查后") {
+		r.progress(core.LevelInfo, line)
+	}
+	// **逐条**对照两遍的 `process`（R15 归因那一格：组读数只给面值集合，指不出是哪一条动的）。
+	//
+	// 反向改坏它：删掉这一段 ⇒ `TestTaskMatrixRunBroadcastsProcessDiff` 红
+	// （它同时钉"变了的那一条要点名"与"总结那行要在明细之前"）。
+	for _, line := range ProcessChangeLines("复查后", first, second) {
 		r.progress(core.LevelInfo, line)
 	}
 	for _, item := range second.Items {

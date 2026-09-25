@@ -496,6 +496,42 @@ func TestTaskMatrixRunSaysWhichUploadBranch(t *testing.T) {
 	})
 }
 
+// TestTaskMatrixRunBroadcastsProcessDiff ⭐ 两遍之间逐条 `process` 的对照要进事件流。
+//
+// 为什么单独一条（并进上面那条组读数行不行）：组读数那一行念的是**面值集合**
+// （`process{0、64}`），它答不出"64 涨到 69 涨在哪一条"—— 而 R15 剩下的正是这一问
+// （是我们自己上传那一条在涨，还是同一趟里别的动作在涨）。逐条对照那一行才点得出名。
+//
+// 反向改坏它的三处，各自会红：
+//   - 删掉 `verify` 里那一段 ⇒ 前两条断言一起红；
+//   - 把总结那行放到明细**之后** ⇒ 第三条断言红（读实时日志的人先看到"跑了没"才对）；
+//   - 对照的是第一趟那份自己（`first`/`second` 传反）⇒ 第二条断言红（念成 69 → 64）。
+func TestTaskMatrixRunBroadcastsProcessDiff(t *testing.T) {
+	before := mxItems(mxItemProcessAt(mxItem(700, "new", "看一枪", "WAIT", "", 0), 64))
+	after := mxItems(mxItemProcessAt(mxItem(700, "new", "看一枪", "FINISH", "", 0), 69))
+	script := mxScript([]string{"JWT-1"}, before, after, mxHappy()...)
+	log := &mxLog{}
+	run := mxDefaultRun(t, script)
+	run.Progress = log.handle()
+	if _, perr := mxResult(t, run); perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	if !log.has("process 逐条对照（复查后） 看一枪 700：64 → 69") {
+		t.Errorf("涨的那一条要点了名，实得：\n%s", log.joined())
+	}
+	summary := "process 逐条对照（复查后）：对照 1 条、面值变了 1 条、消失 0 条、新出现 0 条"
+	if !log.has(summary) {
+		t.Errorf("零变化与\"没跑这一格\"要分得开 ⇒ 总结那行始终给，实得：\n%s", log.joined())
+	}
+	if a, b := log.indexOf(summary), log.indexOf("看一枪 700：64 → 69"); a < 0 || b < 0 || a > b {
+		t.Errorf("总结那行要在明细之前，实得 总结=%d 明细=%d：\n%s", a, b, log.joined())
+	}
+	// 时机：对照的是**两遍之间**，所以它必须排在复查那行组读数之后。
+	if a, b := log.indexOf("组读数（复查后）"), log.indexOf(summary); a < 0 || b < 0 || a > b {
+		t.Errorf("逐条对照要排在复查的组读数之后，实得 组读数=%d 对照=%d", a, b)
+	}
+}
+
 // TestTaskMatrixRunBroadcastsReadFailuresEarly 钉"没读到几组"那一行出现在**开头**。
 //
 // 小结里也有同一格，但那是三十行之后才出现；读实时日志的人在第一行就要知道

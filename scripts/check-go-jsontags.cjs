@@ -171,7 +171,7 @@ const UNTAGGED_ALLOWED = {
   'internal/upstream/app_task_list.go:TaskList':
     '`taskListV3` 的整份解析结果（条目 + 顶层 `taskFinishState`）。后者语义**未验证**（只存不判），更不能对外承诺它的形状',
   'internal/upstream/app_task_list_v2.go:TaskV2Item':
-    '`taskListV2` 的一条任务（嵌 `app_task_list.go:TaskItem` 那六个共用字段 + 这一口才读的 `enable`/`currstep`/`process`/`marketname`）。⚠ 嵌进来的那份 tag 归外层结构体管，所以它必须与 `TaskItem` 同进同退；且 `process` 在夹具三条里恒 0 而 `state` 已是 `FINISH`（2026-09-25 真号读到过 `0/9/59/64/69/100`、同一趟内会涨，跨趟每传 5 个文件 +5、涨到 100 那条当天是 `FINISH` ⇒ "进度是几分之几"仍只是相关性读法，不能承诺给前端',
+    '`taskListV2` 的一条任务（嵌 `app_task_list.go:TaskItem` 那六个共用字段 + 这一口才读的 `enable`/`currstep`/`process`/`marketname`）。⚠ 嵌进来的那份 tag 归外层结构体管，所以它必须与 `TaskItem` 同进同退；且 `process` 在夹具三条里恒 0 而 `state` 已是 `FINISH`（2026-09-25 真号读到过 `0/9/59/64/69/73/74/100`、同一趟内会涨、传 5 个文件之后涨 4 还是 5 要看读哪个市场名，涨到 100 那条当天是 `FINISH` ⇒ "进度是几分之几"仍只是相关性读法，不能承诺给前端',
   'internal/upstream/app_task_list_v2.go:TaskListV2':
     '`taskListV2` **一个 group** 的解析结果。`GroupFinishStates` 是"只存不判"那格（夹具一次 `{}`、一次给 `2` 而同批条目全 `FINISH`；真号读到 `0`/`1`/`2` 三档、与"组内是否全 `FINISH`"零例外同向 ⇒ 那是相关性、不是因果，仍不判）；`Group` 是请求时回填的键名，不属于响应字段',
   'internal/app/task_matrix.go:TaskMatrixFailure':

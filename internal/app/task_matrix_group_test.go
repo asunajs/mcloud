@@ -132,6 +132,66 @@ func TestTaskMatrixGroupReadingLines(t *testing.T) {
 	}
 }
 
+// TestProcessChangeLines ⭐ R15 的归因那一格：涨的是**哪一条**要点了名。
+//
+// 反向改坏它的四处，各自会红：
+//   - 面值相同也出行 ⇒ 第一条断言红（把"没动"念成"动了"，等于制造假样本）；
+//   - 把"没给"折成 0（用 [taskProcessOf] 而不是 [sameProcess]）⇒ 第二条断言红
+//     （"没给 → 0"这一格恰恰是要看见的，它不是没变化）；
+//   - 吞掉"只出现在一遍"的那条 ⇒ 第三条断言红；
+//   - 不排序 ⇒ 第四条断言红（明细行的次序变成 map 顺序，每次跑不一样）。
+func TestProcessChangeLines(t *testing.T) {
+	item := func(id int64, name string, process *int64) upstream.TaskV2Item {
+		return upstream.TaskV2Item{TaskItem: upstream.TaskItem{
+			TaskID: mxInt64(id), Name: strPtr(name)}, Process: process}
+	}
+	mx := func(items ...upstream.TaskV2Item) TaskMatrix { return TaskMatrix{Items: items} }
+	before := mx(
+		item(500, "没动的", mxInt64(0)),
+		item(522, "当月上传文件满100个", mxInt64(64)),
+		item(501, "从没给到 0", nil),
+		item(502, "消失的那条", mxInt64(3)),
+	)
+	after := mx(
+		item(500, "没动的", mxInt64(0)),
+		item(522, "当月上传文件满100个", mxInt64(69)),
+		item(501, "从没给到 0", mxInt64(0)),
+		item(503, "新出现的那条", mxInt64(7)),
+	)
+	lines := ProcessChangeLines("复查后", before, after)
+	if len(lines) != 5 {
+		t.Fatalf("一行总结 + 四行明细（没动的那条不出行），实得 %d 行：%v", len(lines), lines)
+	}
+	if want := "process 逐条对照（复查后）：对照 5 条、面值变了 2 条、消失 1 条、新出现 1 条"; lines[0] != want {
+		t.Errorf("总结那行不合：\n got %q\nwant %q", lines[0], want)
+	}
+	// 明细按 id 升序：501 / 502 / 503 / 522（500 没动 ⇒ 不出行）。
+	if want := "process 逐条对照（复查后） 从没给到 0 501：没给 → 0"; lines[1] != want {
+		t.Errorf("\"没给\"要单独成一档、不得折成 0：\n got %q\nwant %q", lines[1], want)
+	}
+	if want := "process 逐条对照（复查后） 消失的那条 502：3 ⇒ 复查那遍没这条"; lines[2] != want {
+		t.Errorf("只出现在一遍的条目也要出行：\n got %q\nwant %q", lines[2], want)
+	}
+	if want := "process 逐条对照（复查后） 新出现的那条 503：拉表前没这条 ⇒ 复查读到 7"; lines[3] != want {
+		t.Errorf("新出现的条目也要出行：\n got %q\nwant %q", lines[3], want)
+	}
+	if want := "process 逐条对照（复查后） 当月上传文件满100个 522：64 → 69"; lines[4] != want {
+		t.Errorf("明细要按 id 升序（否则每次跑出来顺序不一样）：\n got %q\nwant %q", lines[4], want)
+	}
+	// 没有任何条目 ⇒ 总结那行仍要给（"没跑这一格"与"跑了、没变化"不能同一形状）。
+	empty := ProcessChangeLines("", TaskMatrix{}, TaskMatrix{})
+	if len(empty) != 1 || !strings.HasPrefix(empty[0], "process 逐条对照：对照 0 条") {
+		t.Errorf("空表也要给总结那行、且不带空括号，实得 %v", empty)
+	}
+	// 没 id 的条目：不参与对照，但要在总结里报出来（不能读成"没变化"）。
+	noID := TaskMatrix{Items: []upstream.TaskV2Item{
+		{TaskItem: upstream.TaskItem{Name: strPtr("没 id")}}}}
+	if got := ProcessChangeLines("", noID, noID); len(got) != 1 ||
+		!strings.Contains(got[0], "另有 2 条没有 id、未参与对照") {
+		t.Errorf("没 id 的条数要报出来，实得 %v", got)
+	}
+}
+
 // TestTaskMatrixRunBroadcastsGroupReadingsTwice ⭐ R15 的"动没动"只能靠同一趟的两次并排。
 //
 // 这一条钉的是**播报**（前两行都在、且顺序对），不是判据：跑完之后"这一组从 2 变 3"
