@@ -211,6 +211,16 @@ const TEXT_EXT = new Set([
 const NOT_SCANNED_EXT = new Map([
   ['.mod', 'go.mod：模块名与依赖声明，是构建清单、不含用户数据'],
   ['.sum', 'go.sum：依赖校验和清单，同上'],
+  // ⚠ 这三条**只有在 `.gitignore` 那组 `**/data/**.db*` 还在的前提下才成立**：
+  // 库里是**整串真凭据**（`accounts.auth` 与设备标识），它不进扫描面不是因为"扫不出东西"，
+  // 而是因为 git 压根不该看见它 —— 2026-09-25 第一次撞到这一格时，`.db` 是作为
+  // **未跟踪但没被忽略**的文件出现在 `git ls-files -co` 里的（核验用的库副本开在
+  // `data/<名字>/` 下，而那时只挡了 `**/data/*.db` 一层）。所以这三条的理由与那条忽略
+  // 规则是一体的：删掉那边，这里就该改成"扫"或者直接让门禁红。
+  ['.db', 'SQLite 本机库（二进制，不是文本）；真凭据只应存在于被 .gitignore 挡住的 data/ 副本里'],
+  ['.db-wal', 'SQLite 预写日志，随 .db 同一族'],
+  ['.db-shm', 'SQLite 共享内存索引，随 .db 同一族'],
+  ['.db-journal', 'SQLite 回滚日志，随 .db 同一族'],
 ])
 
 function trackedFiles() {

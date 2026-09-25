@@ -44,6 +44,10 @@ go.work.sum
 **/data/*.db-journal
 **/data/*.db-wal
 **/data/*.db-shm
+**/data/**/*.db
+**/data/**/*.db-journal
+**/data/**/*.db-wal
+**/data/**/*.db-shm
 
 # 扫码登录的二维码图片（`--qr-out`）：里面是本机的设备指纹与会话 sID。
 # 它不属于"凭据"（扫完即失效），但同样是过程产物，没有入库的理由。
