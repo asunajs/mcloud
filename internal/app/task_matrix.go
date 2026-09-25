@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/catlair/mcloud/internal/core"
@@ -135,6 +136,17 @@ type TaskMatrix struct {
 	//
 	// ⚠ 只**记录**、不参与任何判定：这两格该不该升格成判据是 R15 的**结论**，不是前提。
 	Groups []TaskMatrixGroupCount
+	// Duplicates 是**被同名去重挡掉**的那几份条目（原样留着，与 [TaskMatrix.Items] 同一口径：
+	// 去过 HTML、按 id 升序）。
+	//
+	// 为什么要留这一份（去重已经把它丢了，读数不是还在 [TaskMatrix.Groups] 里吗）：
+	// 组读数那一格念的是**面值集合**，逐条对照那一格读的是**去重后**的表，
+	// 于是"输掉的这一份本来要不要做""它读的是几"这两问**只存在于输掉的那一份里**。
+	// 第九趟真跑（2026-09-25 晚）就是靠它才看得见：每趟 8 份里 5 份与留下的那份**不是同一个 id**
+	// （`去使用移动云手机` 留下 431 / 输掉 1055）—— 去重后的表里这些压根不出现。
+	//
+	// ⚠ 同样只**记录**、不参与判定：哪一条做不做仍只看 [Pending] 与分派表。
+	Duplicates []upstream.TaskV2Item
 }
 
 // TaskMatrixGroupCount 是**一次**拉取（一个市场名 × 一个请求组名）的组级读数。
@@ -268,7 +280,7 @@ func AppTaskMatrix(ctx context.Context, src *SignInSessionSource) (TaskMatrix, *
 			"任务表 %d 次拉取全部失败（首个：%s/%s）：", matrix.Fetches, first.MarketName, first.Group))
 	}
 	matrix.Raw = len(matrix.Items)
-	matrix.Items = normalizeTaskMatrix(matrix.Items)
+	matrix.Items, matrix.Duplicates = normalizeTaskMatrix(matrix.Items)
 	return matrix, nil
 }
 
@@ -442,6 +454,147 @@ func ProcessChangeLines(label string, first, second TaskMatrix) []string {
 	return append(out, changes...)
 }
 
+// DedupLossLines 念"同名去重时**输掉的那一份**读了什么"（R15 归因剩下的那一格）。
+//
+// 为什么需要多这一行（[ProcessChangeLines] 不是已经逐条对照了吗）：那一条读的是**去重后**
+// 的表，于是"两遍之间涨了 4"只能归到留下的那一份头上。而真跑的读数说明**输掉的那些里**
+// 才有分辨得出来的东西 —— 第九趟（2026-09-25 晚，两个测试号各一趟）实打实念出来的是：
+// 每趟丢掉 8 份，其中 5 份**与留下的那份 `id` 不同**（`开启备份领好礼` 留下 548 输掉 549、
+// `去使用移动云手机` 留下 431 输掉 1055 …），而 `process` 那两格两边**同值** ⇒
+// "两边恒差 1"那一说（第七、八两趟的形状）在这一趟不成立，见 `docs/pending-decisions.md` R15。
+// 这一行把输掉的那一份的**原样读数**交回来，仍然不加解释（AGENTS.md §1.7）。
+//
+// 只念"看得出差别"的那些：`id` 与 `process` 两边都一样 ⇒ 输掉的那一份**没带来任何新读数**，
+// 不出行（否则一次跑会平白多出七八行噪声，而 R15 要的不是"上游给了几份"）。
+// `id` 不同则一定出行：那说明"同名"根本不是同一条任务，去重把它丢掉是本层口径的一部分，
+// 要让人看得见。
+//
+// 两侧都念 `state` / `enable`（第十趟真跑 2026-09-25 晚读出来的形状）：光念 `process` 只能答
+// "差值归谁"，而那一趟的实际读数是**留下的与输掉的是两条不同 id 的任务、状态还可能相反** ——
+// `开启备份领好礼` 留下 548（`WAIT`）/ 输掉 549（`WAIT`）、`去使用移动云手机` 留下 431 / 输掉
+// 1055（`FINISH`）。"输掉的这一份本来要不要做"只有把**两边**的门都念出来才判得清
+// （留下的那一侧今天只能靠横看逐条播报对上，而 `FINISH` 的那条压根不出行）。
+//
+// 明细**按字面合行**：同一份读数被念第二遍时不另起一行，只在行尾标 `（同一读数重复 N 份）`。
+// 第九趟实拍就有这个形状（`开启备份领好礼` 549 在两个组里各出现一次，逐字相同 ⇒ 五份合成四行），
+// 分行会让"两份读数相同的输掉条目"看起来像一件事被念了两遍。
+// ⚠ 总结里 `不一样 N 份` 数的始终是**份**（条目数），只有另起一格的"合成 M 行"才是行数。
+//
+// ⚠ 总结那一行**始终给**（只要真丢掉过东西）：零明细时它买的就是"跑过了、只是没差别"，
+// 与"这一格没跑"是两种形状（口径同 [ProcessChangeLines]）。一条都没丢掉时**不给**行
+// （没有读数可念时不播一句"没读数"，同 [TaskMatrix.MarketSummaryLine]）。
+func DedupLossLines(label string, m TaskMatrix) []string {
+	if len(m.Duplicates) == 0 {
+		return nil
+	}
+	head := "同名去重输掉的那一份"
+	if label != "" {
+		head = fmt.Sprintf("同名去重（%s）输掉的那一份", label)
+	}
+	won := make(map[string]upstream.TaskV2Item, len(m.Items))
+	for _, item := range m.Items {
+		name := taskNameOf(item)
+		if name == "" {
+			continue
+		}
+		if _, exists := won[name]; !exists {
+			won[name] = item
+		}
+	}
+	// 合行要用**插入顺序**输出，所以另存一份 keys（不能遍历 map：Go 的顺序是随机的，
+	// 与 [ProcessChangeLines] 那里"不排序就钉不住行序"是同一条理由）。
+	var order []string
+	repeats := make(map[string]int, len(m.Duplicates))
+	differed, pending := 0, 0
+	for _, lost := range m.Duplicates {
+		win, ok := won[taskNameOf(lost)]
+		if !ok {
+			continue
+		}
+		winID, hasWinID := taskIDOf(win)
+		lostID, hasLostID := taskIDOf(lost)
+		sameRow := hasWinID && hasLostID && winID == lostID
+		if sameRow && sameProcess(win.Process, lost.Process) {
+			continue // 同一条、同面值 ⇒ 那一份没有新读数
+		}
+		differed++
+		if taskPending(lost) {
+			pending++
+		}
+		who := "同名但 id 不同 ⇒ 不是同一条"
+		if sameRow {
+			who = "同一条"
+		}
+		line := fmt.Sprintf("%s %s：%s｜留下 id=%s state=%s enable=%s process=%s 市场名 %s｜输掉 id=%s state=%s enable=%s process=%s 市场名 %s",
+			head, taskNameOf(lost), who, idWords(win), stateWords(win), enableWords(win),
+			processWords(win.Process), marketWords(win),
+			idWords(lost), stateWords(lost), enableWords(lost), processWords(lost.Process), marketWords(lost))
+		if _, seen := repeats[line]; !seen {
+			order = append(order, line)
+		}
+		repeats[line]++
+	}
+	details := make([]string, 0, len(order))
+	for _, line := range order {
+		if n := repeats[line]; n > 1 {
+			line = fmt.Sprintf("%s（同一读数重复 %d 份）", line, n)
+		}
+		details = append(details, line)
+	}
+	out := make([]string, 0, len(details)+1)
+	summary := fmt.Sprintf("%s：丢掉 %d 份、其中与留下的那份读得不一样 %d 份、那些里面按本仓那道门待做 %d 份",
+		head, len(m.Duplicates), differed, pending)
+	if len(details) != differed {
+		summary += fmt.Sprintf("（合成 %d 行）", len(details))
+	}
+	out = append(out, summary)
+	return append(out, details...)
+}
+
+// taskPending 是 [TaskMatrix.Pending] 那道门的**单条**形状（同一个判断，不换口径）。
+//
+// 只给 [DedupLossLines] 用来数"输掉的那些里还有几条本来要做" —— ⚠ 它**不**改变任何处置：
+// 去重照旧、分派照旧只看 [TaskMatrix.Pending]。
+func taskPending(item upstream.TaskV2Item) bool {
+	if item.Enable == nil || *item.Enable != 1 {
+		return false
+	}
+	return item.State == nil || *item.State != upstream.TaskStateFinish
+}
+
+// idWords、marketWords、stateWords 与 enableWords 把"这一份条目自己带的读数"念成词。
+//
+// `nil` 一律念"没给"，**不**折成 `0` / 空串（口径同 [processWords]：把"没有"洗成"零"
+// 会让"上游没带这一格"看起来像一次实测）。
+func idWords(item upstream.TaskV2Item) string {
+	id, ok := taskIDOf(item)
+	if !ok {
+		return "没给"
+	}
+	return strconv.FormatInt(id, 10)
+}
+
+func marketWords(item upstream.TaskV2Item) string {
+	if item.MarketName == nil || strings.TrimSpace(*item.MarketName) == "" {
+		return "没给"
+	}
+	return *item.MarketName
+}
+
+func stateWords(item upstream.TaskV2Item) string {
+	if item.State == nil || strings.TrimSpace(*item.State) == "" {
+		return "没给"
+	}
+	return *item.State
+}
+
+func enableWords(item upstream.TaskV2Item) string {
+	if item.Enable == nil {
+		return "没给"
+	}
+	return strconv.FormatInt(*item.Enable, 10)
+}
+
 // indexByID 按 `id` 建索引，交回"没有 id 的条数"。
 //
 // 同一枚 id 出现两次时**保留先来的那条**（与 [normalizeTaskMatrix] 的去重取向一致：
@@ -485,11 +638,14 @@ func processWords(value *int64) string {
 
 // normalizeTaskMatrix 做那三步：去 HTML ⇒ 按 id 升序 ⇒ 按 name 去重保留先来。
 //
+// 交回**两份**：留下的与**输掉的那一份**（后者进 [TaskMatrix.Duplicates]，只为 [DedupLossLines]
+// 那一行存在 —— 去重丢掉的是"整份读数"，不丢掉就答不出"两边不一致时另一边读的是几"）。
+//
 // 顺序**有讲究**：旧实现是先 sort 再 dedup（`index.ts:16-17`），所以"id 小的赢"
 // 是靠这个次序成立的。反过来做（先去重再排序）留下的就是**请求顺序**里第一条，
 // 而请求顺序由 group 数组决定、与 id 无关 ⇒ 会留下一条 id 更大的，
 // 将来接写侧时"这条任务做到第几步"（`currstep`）就跟着错。
-func normalizeTaskMatrix(items []upstream.TaskV2Item) []upstream.TaskV2Item {
+func normalizeTaskMatrix(items []upstream.TaskV2Item) (kept, dropped []upstream.TaskV2Item) {
 	out := make([]upstream.TaskV2Item, 0, len(items))
 	for _, item := range items {
 		if item.Name != nil {
@@ -520,19 +676,20 @@ func normalizeTaskMatrix(items []upstream.TaskV2Item) []upstream.TaskV2Item {
 	// 旧 TS 是 `uniqBy(t => t.name)`，`undefined` 会全撞成一个键 ⇒ 只剩第一条。
 	// 那是"少一条任务"的方向 errs，而任务表少一行的表现是**漏做**，不是报错。
 	seen := make(map[string]bool, len(out))
-	deduped := make([]upstream.TaskV2Item, 0, len(out))
+	kept = make([]upstream.TaskV2Item, 0, len(out))
 	for _, item := range out {
 		if item.Name == nil {
-			deduped = append(deduped, item)
+			kept = append(kept, item)
 			continue
 		}
 		if seen[*item.Name] {
+			dropped = append(dropped, item)
 			continue
 		}
 		seen[*item.Name] = true
-		deduped = append(deduped, item)
+		kept = append(kept, item)
 	}
-	return deduped
+	return kept, dropped
 }
 
 // Pending 是"这条任务还要不要做"那道门，逐条对应旧实现的主循环（`index.ts:34`）：
@@ -545,13 +702,13 @@ func normalizeTaskMatrix(items []upstream.TaskV2Item) []upstream.TaskV2Item {
 // ⚠ 两格都是"照抄字面量"，不是"实测过上游真的这么给"：实拍三条**全是** `FINISH` 且
 // `enable=1`，即"未完成"那一档在夹具里**一条都没有**（未测试）。
 // 因此这一格判反的后果（该做的没做 / 做完的又做一遍）要等第一次真打才能核。
+//
+// 单条那一半在 [taskPending]（[DedupLossLines] 数"输掉的那些里有几条本来要做"用的是**同一道门**，
+// 分成两处写迟早会飘）。
 func (m TaskMatrix) Pending() []upstream.TaskV2Item {
 	out := make([]upstream.TaskV2Item, 0, len(m.Items))
 	for _, item := range m.Items {
-		if item.Enable == nil || *item.Enable != 1 {
-			continue
-		}
-		if item.State != nil && *item.State == upstream.TaskStateFinish {
+		if !taskPending(item) {
 			continue
 		}
 		out = append(out, item)

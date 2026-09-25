@@ -257,8 +257,10 @@ func (r TaskMatrixRun) RunAccount(
 	// 与那句 `获取到 32 个任务，去重后 24 个`）。
 	//
 	// ⚠ "去重后"这一格必须是 `Raw` 与 `Read` 两个数：16 次拉取会给出重复的同名任务
-	// （实拍那两轮就是 32→24 与 35→27），只报后者会让人以为"这个号只有 24 条任务"，
-	// 而少掉的那些是**同一条任务在几个组里都出现**（[normalizeTaskMatrix] 按 id 小的赢）。
+	// （实拍那两轮就是 32→24 与 35→27），只报后者会让人以为"这个号只有 24 条任务"。
+	// 少掉的那些**不必**是同一条：去重键只有 `name` ⇒ 第九趟真跑念出来的是每趟丢掉 8 份、
+	// 其中 5 份**与留下的那份 `id` 不同**（`开启备份领好礼` 548 留下 / 549 输掉，两边同一市场名）。
+	// 那一格连同它的 `state` / `enable` 由 [DedupLossLines] 逐份念出来。
 	r.progress(core.LevelInfo, "------【任务列表】------")
 	r.progress(core.LevelInfo, fmt.Sprintf("获取到 %d 个任务，去重后 %d 个", matrix.Raw, len(matrix.Items)))
 	// 按市场名再念一遍**同一批**读数（本文 R13 / R14 要的就是这一行）。
@@ -275,6 +277,10 @@ func (r TaskMatrixRun) RunAccount(
 	// （"它是不是组内完成度""`process` 是不是进度"）跑十趟也答不出 —— 而答出它只需要
 	// 把两次读数并排看一眼。
 	for _, line := range matrix.GroupReadingLines("拉表前") {
+		r.progress(core.LevelInfo, line)
+	}
+	// 去重**输掉的那一份**读了什么（紧贴在组读数后面 —— 它俩是同一格读数的两半）。
+	for _, line := range DedupLossLines("拉表前", matrix) {
 		r.progress(core.LevelInfo, line)
 	}
 	if result.ReadFailures > 0 {
@@ -463,6 +469,12 @@ func (r TaskMatrixRun) verify(
 	// 反向改坏它：删掉这一段 ⇒ `TestTaskMatrixRunBroadcastsProcessDiff` 红
 	// （它同时钉"变了的那一条要点名"与"总结那行要在明细之前"）。
 	for _, line := range ProcessChangeLines("复查后", first, second) {
+		r.progress(core.LevelInfo, line)
+	}
+	// 复查那一遍的去重读数也要念：两遍是**两批读数**，只念拉表前那一遍就等于只留着一半证据。
+	// 第九趟真跑正是这个形状 —— 拉表前两边同读 `79`、复查后同读 `84`，而"输掉的那一份
+	// 与留下的那份 id 不同"那五行在两遍里各出现一次（少了后一遍就无从和 `process` 对照行对齐）。
+	for _, line := range DedupLossLines("复查后", second) {
 		r.progress(core.LevelInfo, line)
 	}
 	for _, item := range second.Items {
