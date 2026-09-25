@@ -30,8 +30,32 @@ async fn main() -> anyhow::Result<()> {
         registry: Arc::clone(app.registry()),
         store: Arc::clone(&app.handle.store),
         clock: Arc::clone(&app.handle.clock),
-        sink: Arc::clone(app.sink()),
+        hub: Arc::clone(app.hub()),
+        scheduler: Arc::clone(app.scheduler()),
+        pipelines: Arc::clone(&app.handle.pipelines),
+        cancel: Arc::clone(&app.handle.cancel),
     }));
+
+    // 启动调度器。
+    //
+    // 它自己会**立刻跑第一个 tick**，不等一个间隔 —— 定时器的第一次触发
+    // 是在一个间隔之后，那样每次重启都要白等 30 秒，而重启恰恰是
+    // "错过今天那一趟"最常见的原因。
+    let scheduler = Arc::clone(app.scheduler());
+    let stop = scheduler.stop_handle();
+    tokio::spawn(async move { scheduler.run_loop(stop).await });
+
+    // 日志攒批落盘：与调度同频，保证崩溃时最多丢掉几秒的日志。
+    let hub = Arc::clone(app.hub());
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            tick.tick().await;
+            if let Err(e) = hub.flush().await {
+                tracing::error!(error = %e, "日志落盘失败");
+            }
+        }
+    });
 
     let router = mcloud_server::app(state);
     let listener = tokio::net::TcpListener::bind(&addr)

@@ -2,10 +2,27 @@
 <html lang="zh-CN" data-theme="light">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover 是移动端 dock 的硬依赖：删了 iPhone 刘海里会出白条（组件指南 §4.4）。 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>mcloud-gost</title>
   </head>
-  <body>
+  <body class="bg-base-200">
+    <script>
+      // 在首次绘制前定下 data-theme，避免"先浅后深"的一闪（FOUC）。
+      // 必须内联、必须同步 —— 一旦被异步加载就失去意义。
+      // ⚠ 逻辑与 src/ui/theme.ts 保持一致（改一处要同步另一处）：
+      //   localStorage 优先，其次跟随系统偏好。
+      try {
+        var saved = localStorage.getItem('mcloud-gost-theme')
+        var theme = saved === 'light' || saved === 'dark'
+          ? saved
+          : (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+        document.documentElement.setAttribute('data-theme', theme)
+      } catch (e) {
+        // localStorage 可能被隐私模式禁用 —— 退化成默认浅色，不能让脚本报错白屏
+        document.documentElement.setAttribute('data-theme', 'light')
+      }
+    </script>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

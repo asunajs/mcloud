@@ -22,6 +22,7 @@ crates/
   mcloud-app         组装层
   mcloud-server      axum 路由 + SSE + CLI
 web/                 Vue Vapor + TSX + daisyUI
+scripts/             门禁脚本（gates-web.mjs）
 test/golden/         权威黄金向量（对拍用，从 mcloud 同步）
 docs/                设计文档
 ```
@@ -36,7 +37,9 @@ docs/                设计文档
 ## 构建与运行
 
 ```bash
-# 后端
+# ⚠ 构建顺序有依赖：前端产物在**编译期**被 rust-embed 内嵌，
+#   所以改过前端必须先 build 前端、再编译后端，否则二进制里还是旧产物。
+cd web && npm install && npm run build && cd ..
 cargo build --release
 cargo test --workspace
 
@@ -114,15 +117,20 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 
 ## 路线图
 
-| 阶段 | 内容 |
-|---|---|
-| P0 ✅ | 设计 + 脚手架 + 密码学对拍 + 服务/前端跑通 |
-| P1 | 上游认证链路（真实登录、token 刷新） |
-| P2 | `sign` / `receive` / `after` 端到端 |
-| P3 | 前端任务页联通 SSE、账号管理 |
-| P4 | 调度 + pipeline + 推送渠道 |
-| P5 | 其余任务增量接入 |
-| P6 | `rust-embed` 单二进制收口 |
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| P0 | 设计定稿 + 分层脚手架 | ✅ |
+| P1 | 密码学 + 黄金向量对拍 | ✅ |
+| P2 | axum 路由 + SSE 事件流 | ✅ |
+| P3 | Vue Vapor WebUI（4 页 + 主题 + 门禁） | ✅ |
+| P4 | `rust-embed` 单二进制 / 同源托管 | ✅ |
+| P5 | 上游认证链路（真实登录、token 刷新） | 待做 |
+| P6 | `sign` / `receive` / `after` 端到端 | 待做 |
+| P7 | 账号管理与调度 + 推送渠道 | 待做 |
+| P8 | 其余任务增量接入 | 待做 |
+
+> P5 是当前的关键路径：`mcloud-tasks/src/sign.rs` 里的端点是**占位**的，
+> 必须按真实抓包校正。上游接口的验证才是本项目最大的风险点，不是密码学。
 
 ## 注意
 

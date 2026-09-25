@@ -414,10 +414,16 @@ data: {"outcome":"success","durationMs":1832}
 
 前端用 `EventSource` 订阅，实现**运行过程实时可见**。
 
-### 9.3 单二进制
+### 9.3 单二进制与同源
 
-`rust-embed` 内嵌 `web/dist`，SPA fallback 到 `index.html`。
-开发态走 Vite dev server + `/api` 代理。
+`rust-embed` 在**编译期**把 `web/dist` 内嵌进二进制：
+
+- **同源**：一个进程同时发 API 与前端，因此**不需要 CORS**。
+  开发态由 Vite dev server + `/api` 代理抹平差异，避免"开发能登录、打包上去就登录不了"。
+- **构建顺序有依赖**：先 `npm run build` 再 `cargo build`。
+- **SPA 回落**：未知路径给 `index.html`，但 `/api/*` 必须返回 404 而不是 HTML ——
+  否则前端 `JSON.parse` 会报一个与真实原因无关的错。
+- 资产缺失时（例如只跑 `cargo test`）不 panic，只是没有页面可发。
 
 ---
 
@@ -494,13 +500,18 @@ SSE 封装为 `subscribeRun(runId, handlers)`，返回取消函数。
 
 ## 13. 里程碑
 
-| 阶段 | 交付 |
-|---|---|
-| **P0（本阶段）** | 设计定稿 + 可编译脚手架 + 前端骨架 |
-| P1 | `mcloud-crypto` 全向量通过 + 签名头可用 |
-| P2 | `mcloud-upstream` 认证链路跑通（真实登录） |
-| P3 | `sign` / `receive` / `after` 三个任务端到端 |
-| P4 | `mcloud-server` 路由 + SSE + 前端任务页联通 |
-| P5 | 调度 + pipeline + 推送渠道 |
-| P6 | 其余任务增量接入 |
-| P7 | 单二进制收口（rust-embed） |
+| 阶段 | 交付 | 状态 |
+|---|---|---|
+| P0 | 设计定稿 + 分层脚手架 | ✅ |
+| P1 | `mcloud-crypto` 全向量对拍通过 + 签名头可用 | ✅ |
+| P2 | `mcloud-server` 路由 + SSE 事件流 | ✅ |
+| P3 | Vue Vapor WebUI：4 页 + 主题 + 响应式 + 门禁 | ✅ |
+| P4 | `rust-embed` 单二进制 / 同源托管 | ✅ |
+| P5 | `mcloud-upstream` 认证链路跑通（真实登录） | 待做 |
+| P6 | `sign` / `receive` / `after` 三个任务端到端 | 待做 |
+| P7 | 账号管理 + 调度 + pipeline + 推送渠道 | 待做 |
+| P8 | 其余任务增量接入 | 待做 |
+
+> **P5 是关键路径。** `mcloud-tasks/src/sign.rs` 的端点目前是占位，
+> 必须按上游真实抓包校正 —— 接口的存活与签名的服务端一致性，
+> 才是本项目真正的风险点（密码学已由黄金向量锁死）。

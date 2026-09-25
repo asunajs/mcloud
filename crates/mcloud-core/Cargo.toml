@@ -6,12 +6,23 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# 测试替身（固定时钟等）。其他 crate 的 dev-dependencies 里启用它，
+# 避免各自复制一份行为不一致的假实现。见 docs/conventions.md §8.3。
+testkit = []
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
+# tokio 只用 **同步原语**（Notify），不引入 runtime ——
+# 本 crate 仍然禁止 IO。用 `default-features = false` 明确这一点。
+tokio = { workspace = true, default-features = false, features = ["sync"] }
+# cron 用于**校验**表达式。放在 core 而非调度器，是为了让"创建时校验"
+# 与"触发时解析"用同一个解析器，避免两处行为不一致。
+cron.workspace = true
 
 [lints]
 workspace = true

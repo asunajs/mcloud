@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::log::Seq;
 use crate::run::{RunId, TaskOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,7 +33,7 @@ impl LogLevel {
 }
 
 /// 运行事件。`tag` 决定 SSE 的 `event:` 名称。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RunEvent {
     Started {
@@ -88,6 +89,51 @@ impl RunEvent {
             message: message.into(),
             at_ms,
         }
+    }
+}
+
+/// 带流位置的事件。
+///
+/// 序号与事件**必须是同一个批次里定下来的**：序号由发布方分配。
+/// 若在写库时才重新计算，崩溃重放会给同一批事件算出新序号，
+/// 客户端就会看到重复的进度。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sequenced {
+    pub seq: Seq,
+    pub event: RunEvent,
+}
+
+impl Sequenced {
+    pub fn new(seq: Seq, event: RunEvent) -> Self {
+        Self { seq, event }
+    }
+}
+
+/// 按 run 递增的序号分配器。
+///
+/// 每条运行一个实例。放在这里而不是让每个发布方自己维护计数器，
+/// 是因为"序号连续且单调"是前端续传正确性的前提。
+#[derive(Debug, Default)]
+pub struct SeqAllocator {
+    next: std::sync::atomic::AtomicU64,
+}
+
+impl SeqAllocator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 取下一个序号。从 1 开始（0 是"还没有事件"的哨兵）。
+    pub fn next(&self) -> Seq {
+        Seq(self
+            .next
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1))
+    }
+
+    /// 当前已分配到哪儿（不含未分配的）。
+    pub fn current(&self) -> Seq {
+        Seq(self.next.load(std::sync::atomic::Ordering::SeqCst))
     }
 }
 
@@ -264,6 +310,43 @@ mod tests {
         // 不 panic 即可
         let _ = redact("token");
         let _ = redact("cookie:");
+    }
+
+    #[test]
+    fn seq_allocator_starts_at_one_and_is_monotonic() {
+        let a = SeqAllocator::new();
+        assert_eq!(a.next(), Seq(1), "从 1 开始：0 是'还没有事件'的哨兵");
+        assert_eq!(a.next(), Seq(2));
+        assert_eq!(a.next(), Seq(3));
+        assert_eq!(a.current(), Seq(3));
+    }
+
+    #[test]
+    fn seq_allocator_is_shared_safely() {
+        use std::sync::Arc;
+        let a = Arc::new(SeqAllocator::new());
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let a = Arc::clone(&a);
+            handles.push(std::thread::spawn(move || {
+                let mut got = Vec::new();
+                for _ in 0..50 {
+                    got.push(a.next().get());
+                }
+                got
+            }));
+        }
+        let mut all: Vec<u64> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
+        all.sort_unstable();
+        assert_eq!(all.len(), 400);
+        // 并发分配不得出现重复序号
+        all.dedup();
+        assert_eq!(all.len(), 400, "并发分配的序号不能重复");
+        assert_eq!(all[0], 1);
+        assert_eq!(*all.last().unwrap(), 400);
     }
 
     #[test]

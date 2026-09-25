@@ -35,6 +35,17 @@ pub enum Error {
     #[error("资源不存在：{0}")]
     NotFound(String),
 
+    /// 任务被主动中止。
+    ///
+    /// 与 `Task { .. }` 分开，是因为"中止"**不是失败** ——
+    /// 它不该计入错误率、不该触发告警、推送里也不该报红。
+    #[error("任务已中止")]
+    Cancelled,
+
+    /// 存储层错误（读写失败、格式损坏）。
+    #[error("存储错误：{0}")]
+    Storage(String),
+
     #[error("IO 错误：{0}")]
     Io(#[from] std::io::Error),
 
@@ -49,6 +60,11 @@ impl Error {
     /// 上游返回的错误是否为「需要重新登录」。
     ///
     /// 调用方据此决定是否触发凭证刷新，而不是盲目重试。
+    /// 是否为"用户主动中止"。用于决定要不要报红/告警。
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Error::Cancelled)
+    }
+
     pub fn is_auth_failure(&self) -> bool {
         match self {
             Error::AuthExpired | Error::Auth(_) => true,

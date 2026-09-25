@@ -21,6 +21,42 @@ impl std::fmt::Display for RunId {
     }
 }
 
+/// 运行的**生命周期**状态。
+///
+/// 与 [`TaskOutcome`] 是两回事，**刻意分开**：
+///
+/// - `RunStatus` 说"这次运行结束了没有"（存储层事实）
+/// - `TaskOutcome` 说"业务上成没成"（业务结论）
+///
+/// 混成一个字段会出事：`done`（已结束）里可能包含"部分成功""需人工处理"，
+/// 拿它去染红绿就是在替后端编一个它没给过的结论。
+/// 参考实现里把这条记为踩过的坑。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RunStatus {
+    /// 正在运行。
+    Running,
+    /// 正常结束（业务结果看 `outcome`）。
+    Done,
+    /// 被主动中止。
+    Cancelled,
+}
+
+impl RunStatus {
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, RunStatus::Running)
+    }
+
+    /// 中文标签。**只是文字**，不表示颜色语义。
+    pub fn label(self) -> &'static str {
+        match self {
+            RunStatus::Running => "进行中",
+            RunStatus::Done => "已结束",
+            RunStatus::Cancelled => "已中止",
+        }
+    }
+}
+
 /// 任务结果。
 ///
 /// 刻意区分 `Skipped`：活动未开启或条件不满足**不是失败**，
@@ -77,15 +113,25 @@ pub struct RunRecord {
     pub started_at_ms: i64,
     pub duration_ms: u64,
     pub outcome: TaskOutcome,
+    /// 生命周期状态。与 `outcome` 分工见 [`RunStatus`]。
+    #[serde(default = "default_done")]
+    pub status: RunStatus,
     /// 结构化明细，前端可直接渲染。
     #[serde(default)]
     pub details: serde_json::Value,
 }
 
+fn default_done() -> RunStatus {
+    // 老数据没有这个字段：它们都是跑完才落盘的，一律按"已结束"回填
+    RunStatus::Done
+}
+
 impl RunRecord {
     /// 是否应当在推送中被突出显示。
+    ///
+    /// 中止**不算**需要关注：那是用户自己点的，报红等于制造噪音。
     pub fn needs_attention(&self) -> bool {
-        self.outcome.is_failure()
+        self.status != RunStatus::Cancelled && self.outcome.is_failure()
     }
 }
 
@@ -108,6 +154,40 @@ mod tests {
     }
 
     #[test]
+    fn run_status_is_separate_from_outcome() {
+        // 生命周期与业务结论是两回事：中止的运行也可以有 failed 之外的 outcome
+        assert!(RunStatus::Done.is_terminal());
+        assert!(RunStatus::Cancelled.is_terminal());
+        assert!(!RunStatus::Running.is_terminal());
+        assert_eq!(RunStatus::Running.label(), "进行中");
+    }
+
+    #[test]
+    fn old_records_without_status_default_to_done() {
+        let j = r#"{"run_id":1,"task":"sign","account":"138","started_at_ms":0,"duration_ms":1,"outcome":{"status":"success","summary":"ok"},"details":null}"#;
+        let r: RunRecord = serde_json::from_str(j).expect("缺 status 的老记录应能解析");
+        assert_eq!(r.status, RunStatus::Done);
+    }
+
+    #[test]
+    fn cancelled_run_does_not_need_attention() {
+        let r = RunRecord {
+            run_id: RunId::new(1),
+            task: "sign".into(),
+            account: "138".into(),
+            started_at_ms: 0,
+            duration_ms: 1,
+            outcome: TaskOutcome::failed("被中止"),
+            status: RunStatus::Cancelled,
+            details: serde_json::Value::Null,
+        };
+        assert!(
+            !r.needs_attention(),
+            "用户自己点的中止不该报红 —— 那只是噪音"
+        );
+    }
+
+    #[test]
     fn only_failures_need_attention() {
         let base = RunRecord {
             run_id: RunId::new(1),
@@ -116,6 +196,7 @@ mod tests {
             started_at_ms: 0,
             duration_ms: 1,
             outcome: TaskOutcome::success("ok"),
+            status: RunStatus::Done,
             details: serde_json::Value::Null,
         };
         assert!(!base.needs_attention());

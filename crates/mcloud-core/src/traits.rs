@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use crate::account::{Account, AccountId};
 use crate::error::Result;
 use crate::event::RunEvent;
+use crate::log::{AppendOutcome, LogLine, Seq};
+use crate::pipeline::{Pipeline, PipelineId};
 use crate::run::{RunId, RunRecord};
+use crate::schedule::{Schedule, ScheduleId};
 
 // ── HTTP ────────────────────────────────────────────────────────────────
 
@@ -101,21 +104,81 @@ pub trait HttpClient: Send + Sync {
 // ── 存储 ────────────────────────────────────────────────────────────────
 
 /// 持久化抽象。
+///
+/// 拆成几个聚焦的子 trait（而不是一个 20 方法的大接口）：
+///
+/// - 任务只需要 `LogStore`，不该被迫依赖账号读写；
+/// - 换后端时（JSON ↔ SQLite）可以逐个替换；
+/// - 测试里可以只造假的那一个。
+///
+/// `Store` 是它们的组合，凡是"能注入一个后端"的地方都收 `Store`。
 #[async_trait]
-pub trait Store: Send + Sync {
+pub trait AccountStore: Send + Sync {
     async fn accounts(&self) -> Result<Vec<Account>>;
     async fn account(&self, id: &AccountId) -> Result<Option<Account>>;
     /// 保存账号。实现方必须**原子写**并保留备份。
     async fn save_account(&self, account: &Account) -> Result<()>;
     async fn remove_account(&self, id: &AccountId) -> Result<()>;
 
-    async fn append_run(&self, record: &RunRecord) -> Result<()>;
-    async fn runs(&self, limit: usize) -> Result<Vec<RunRecord>>;
-    async fn run(&self, id: RunId) -> Result<Option<RunRecord>>;
-
     /// 读取账号运行期状态（deviceId、jwtToken 缓存等）。
     async fn account_state(&self, id: &AccountId) -> Result<serde_json::Value>;
     async fn save_account_state(&self, id: &AccountId, state: &serde_json::Value) -> Result<()>;
+}
+
+/// 运行记录。
+#[async_trait]
+pub trait RunStore: Send + Sync {
+    /// 落盘一条运行记录。**同 `run_id` 已存在时是更新**（运行开始时先写
+    /// `running`，结束时回填结果）。
+    async fn upsert_run(&self, record: &RunRecord) -> Result<()>;
+    async fn runs(&self, limit: usize) -> Result<Vec<RunRecord>>;
+    async fn run(&self, id: RunId) -> Result<Option<RunRecord>>;
+    /// 列出仍在运行中的记录 —— 进程重启后据此把孤儿标记为已中止。
+    async fn running_runs(&self) -> Result<Vec<RunRecord>>;
+}
+
+/// 运行日志。
+#[async_trait]
+pub trait LogStore: Send + Sync {
+    /// 追加一批日志。超出上限时丢弃最旧的并返回 `Trimmed`。
+    async fn append_logs(&self, run_id: RunId, lines: &[LogLine]) -> Result<AppendOutcome>;
+    /// 取某次运行的日志。`after_seq` 用于断线重连续传。
+    async fn logs(&self, run_id: RunId, after_seq: Option<Seq>) -> Result<Vec<LogLine>>;
+    /// 删除某次运行的日志（运行记录被清理时一并删）。
+    async fn clear_logs(&self, run_id: RunId) -> Result<()>;
+}
+
+/// 定时任务。
+#[async_trait]
+pub trait ScheduleStore: Send + Sync {
+    async fn schedules(&self) -> Result<Vec<Schedule>>;
+    async fn schedule(&self, id: &ScheduleId) -> Result<Option<Schedule>>;
+    async fn save_schedule(&self, schedule: &Schedule) -> Result<()>;
+    async fn remove_schedule(&self, id: &ScheduleId) -> Result<()>;
+}
+
+/// 任务编排。
+#[async_trait]
+pub trait PipelineStore: Send + Sync {
+    async fn pipelines(&self) -> Result<Vec<Pipeline>>;
+    async fn pipeline(&self, id: &PipelineId) -> Result<Option<Pipeline>>;
+    async fn save_pipeline(&self, pipeline: &Pipeline) -> Result<()>;
+    async fn remove_pipeline(&self, id: &PipelineId) -> Result<()>;
+}
+
+/// 全部持久化能力的组合。
+///
+/// 用 trait 继承而不是把方法摊平：这样 `Arc<dyn Store>` 仍然是
+/// **一个**对象，注入时不用带五个 `Arc`。
+pub trait Store:
+    AccountStore + RunStore + LogStore + ScheduleStore + PipelineStore + Send + Sync
+{
+}
+
+/// 任何同时实现了全部子 trait 的类型自动成为 `Store`。
+impl<T> Store for T where
+    T: AccountStore + RunStore + LogStore + ScheduleStore + PipelineStore + Send + Sync
+{
 }
 
 // ── 时钟 ────────────────────────────────────────────────────────────────

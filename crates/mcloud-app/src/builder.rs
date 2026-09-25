@@ -5,14 +5,13 @@ use std::sync::Arc;
 
 use mcloud_core::{Account, HttpClient, Result};
 
-use crate::sink::BroadcastSink;
+use crate::hub::EventHub;
 use crate::AppHandle;
 
 /// 应用构建器。
 pub struct AppBuilder {
     data_dir: PathBuf,
     timeout_secs: u64,
-    broadcast_capacity: usize,
 }
 
 impl Default for AppBuilder {
@@ -20,7 +19,6 @@ impl Default for AppBuilder {
         Self {
             data_dir: PathBuf::from("data"),
             timeout_secs: 30,
-            broadcast_capacity: 256,
         }
     }
 }
@@ -44,7 +42,11 @@ impl AppBuilder {
     pub fn build(self) -> Result<App> {
         let store = Arc::new(mcloud_store::JsonStore::open(&self.data_dir)?);
         let clock = Arc::new(mcloud_store::SystemClock);
-        let sink = Arc::new(BroadcastSink::new(self.broadcast_capacity));
+        // 事件中枢取代原来的纯广播：它额外负责序号分配、内存重放与日志落盘。
+        let hub = Arc::new(EventHub::new(
+            Arc::clone(&store) as Arc<dyn mcloud_core::Store>,
+            Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>,
+        ));
 
         let mut registry = mcloud_engine::Registry::new();
         mcloud_tasks::register_all(&mut registry).map_err(mcloud_core::Error::Config)?;
@@ -81,9 +83,17 @@ impl AppBuilder {
             Arc::clone(&registry),
             Arc::clone(&store) as Arc<dyn mcloud_core::Store>,
             Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>,
-            Arc::clone(&sink) as Arc<dyn mcloud_core::EventSink>,
+            Arc::clone(&hub) as Arc<dyn mcloud_core::EventSink>,
             http_for,
         ));
+
+        let scheduler = Arc::new(mcloud_engine::Scheduler::new(
+            Arc::clone(&store) as Arc<dyn mcloud_core::Store>,
+            Arc::clone(&runner),
+            Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>,
+        ));
+        let pipelines = Arc::new(mcloud_engine::PipelineRunner::new(Arc::clone(&runner)));
+        let cancel = runner.cancel_registry();
 
         Ok(App {
             handle: AppHandle {
@@ -91,7 +101,10 @@ impl AppBuilder {
                 registry,
                 store,
                 clock,
-                sink,
+                hub,
+                scheduler,
+                pipelines,
+                cancel,
             },
             data_dir: self.data_dir,
         })
@@ -111,7 +124,10 @@ impl App {
     pub fn registry(&self) -> &Arc<mcloud_engine::Registry> {
         &self.handle.registry
     }
-    pub fn sink(&self) -> &Arc<BroadcastSink> {
-        &self.handle.sink
+    pub fn hub(&self) -> &Arc<EventHub> {
+        &self.handle.hub
+    }
+    pub fn scheduler(&self) -> &Arc<mcloud_engine::Scheduler> {
+        &self.handle.scheduler
     }
 }

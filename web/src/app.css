@@ -1,2 +1,276 @@
 @import "tailwindcss";
-@plugin "daisyui";
+
+/* daisyUI 5 通过 Tailwind 4 的 CSS-first 插件机制注册。
+   Tailwind 4 已弃用 tailwind.config.js —— 不要再创建它。 */
+@plugin "daisyui" {
+  /* 刻意**不用** dark 的 --prefersdark：那是"系统偏好深色时自动切"，
+     而本项目有自己的手动开关（见 index.html 的内联脚本 + src/ui/theme.ts）。
+     两者同时存在会互相抢状态 —— 用户手动选了浅色，系统主题一变就被顶回去，
+     按钮显示与实际样式不一致。所以「跟随系统」只作为**初始值**在 JS 里算。 */
+  themes: light --default, dark;
+}
+
+/* ---------------------------------------------------------------------------
+   主题身份：字体。
+
+   ⚠️ 这里**不能用 `@plugin "daisyui/theme"` 来设 `--font-sans`** ——
+   实测（vite build 产物核对）写在 daisyUI 主题块里会被静默丢掉，输出变成
+   `--font-sans: sans-serif`。原因：`--font-sans` 是 **Tailwind 自己的
+   `@theme` 命名空间变量**，不是 daisyUI 的主题变量。
+
+   正确做法：用 Tailwind 的 `@theme`，且**只写一次**（字体不随主题变）。
+   放在 daisyUI 插件之后，保证优先级。
+   --------------------------------------------------------------------------- */
+@theme {
+  /* 只写拉丁子集，中文走系统回落（PingFang SC / 雅黑）。
+     字体文件当前尚未自托管 —— 与 mcloud 的口径一致。 */
+  --font-sans: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+/* 形状档位：
+   --depth: 0        关掉 daisyUI 的浮雕内阴影，扁平化（现代感的关键一步）
+   --radius-box      .75rem 卡片/模态框，比默认 .5rem 更"软"
+   --radius-field    .5rem  按钮/输入框，比默认 .25rem 更舒展
+   --radius-selector .5rem  勾选框/开关，与 field 同比例
+   两个 @plugin 块是**独立**的，light 里定义的不会继承给 dark ⇒ 必须成对写。 */
+
+@plugin "daisyui/theme" {
+  name: "light";
+  default: true;
+  color-scheme: light;
+
+  /* 品牌色：靛蓝 #4f46e5。
+     primary-content 用白 —— 白字压在 #4f46e5 上是 **6.29:1**，
+     比原先的品牌红（3.91:1）更稳，超过 AA 的 4.5:1。 */
+  --color-primary: #4f46e5;
+  --color-primary-content: #fff;
+  --primary-gradient: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+  --primary-glow: rgba(79, 70, 229, 0.24);
+
+  /* 页面底色随品牌冷调。 */
+  --color-base-200: #f8fafc;
+
+  /* 浅色下这四个语义色**必须压暗**：daisyUI 给 light/dark 同一组高明度色，
+     压在浅底上只有 1.87 / 1.69 / 2.64 / 2.11 : 1 —— 而 `badge-soft` 的
+     **文字用的就是这个原色**，于是「已启用」在浅色下读不出来。
+     压暗后 4.61 / 4.96 / 5.28 / 4.80:1，均过 WCAG AA。
+
+     ⚠⚠ **dark 块里不要跟着抄这四个值**。形状变量要成对写（不写会回落成默认），
+     语义色相反 —— 深底上原色本来就有 7.08 / 7.76 / 4.97 / 6.26:1，抄过去反而弄坏深色主题。
+     ⚠ 挑值要**在真页面上量**：`-soft` 的底色是「8% 该色 + base-100」不是纯白，
+     按纯白算会高估。 */
+  --color-success: #0a7d55;
+  --color-warning: #8a6100;
+  --color-error: #c0233f;
+  --color-info: #0f7396;
+
+  --depth: 0;
+  --radius-box: 0.75rem;
+  --radius-field: 0.5rem;
+  --radius-selector: 0.5rem;
+}
+
+@plugin "daisyui/theme" {
+  name: "dark";
+  color-scheme: dark;
+
+  /* 深底上沿用浅色 #4f46e5 会糊在背景里（对 #07111f 只有 1.9:1），
+     提亮为 #6366f1（白字 4.47:1）。**深色的 primary 必须比浅色亮**，
+     沿用浅色那个明度会直接看不清。 */
+  --color-primary: #6366f1;
+  --color-primary-content: #fff;
+  --primary-gradient: linear-gradient(135deg, #818cf8 0%, #6366f1 100%);
+  --primary-glow: rgba(99, 102, 241, 0.28);
+
+  /* 深色底改随品牌冷调，与玻璃卡片 rgba(15,23,42,.72) 同族。 */
+  --color-base-200: #07111f;
+  --color-base-100: #0f172a;
+  --color-base-300: #1e293b;
+
+  --depth: 0;
+  --radius-box: 0.75rem;
+  --radius-field: 0.5rem;
+  --radius-selector: 0.5rem;
+}
+
+/* ---------------------------------------------------------------------------
+   换肤层：靛蓝主色 + 玻璃拟态 + 页面光斑。
+
+   为什么全部写成"未分层"的裸规则：Tailwind 4 与 daisyUI 的样式都住在 @layer 里，
+   而未分层规则**无条件优先于任何分层规则**（与选择器权重无关）。所以下面能用
+   `.card` 这种低权重选择器稳赢 utilities 层的 `bg-base-100` / `shadow-sm` ——
+   这正是「页面里 30 处卡片字面量一个都不用改」的前提。
+   ⚠ 反过来说：页面里新写背景/阴影/边框类不会顶掉玻璃，但会造成
+   "类名说一套、渲染另一套"的认知差 ⇒ 新页面一律不手调这三个属性。
+
+   base-100 **刻意保持不透明**：badge-soft / alert-soft 的底色是
+   `color-mix(8% 语义色, base-100)`，其对比度是在不透明底上量的。
+   让 base-100 透掉 ⇒ 所有 soft 徽章/提示条对比度作废，要重量。
+   玻璃只做在**容器级表面**，不传染给底色体系。
+   --------------------------------------------------------------------------- */
+
+:root {
+  --glass-bg: rgba(255, 255, 255, 0.68);
+  --glass-border: rgba(148, 163, 184, 0.22);
+  --glass-blur: blur(22px);
+  --glass-shadow: 0 18px 42px -28px rgba(15, 23, 42, 0.28),
+    0 1px 0 rgba(255, 255, 255, 0.8) inset;
+  /* 页面光斑（三层径向渐变） */
+  --page-blobs: radial-gradient(circle at 6% 2%, rgba(147, 197, 253, 0.42), transparent 32%),
+    radial-gradient(circle at 96% 22%, rgba(196, 181, 253, 0.3), transparent 22%),
+    radial-gradient(circle at 42% 108%, rgba(110, 231, 183, 0.2), transparent 20%);
+}
+
+[data-theme="dark"] {
+  --glass-bg: rgba(15, 23, 42, 0.72);
+  --glass-border: rgba(148, 163, 184, 0.18);
+  --glass-shadow: 0 18px 42px -30px rgba(0, 0, 0, 0.72),
+    0 1px 0 rgba(255, 255, 255, 0.08) inset;
+  --page-blobs: radial-gradient(circle at 6% 2%, rgba(18, 150, 219, 0.22), transparent 32%),
+    radial-gradient(circle at 96% 22%, rgba(124, 58, 237, 0.18), transparent 22%),
+    radial-gradient(circle at 42% 108%, rgba(16, 185, 129, 0.12), transparent 20%);
+}
+
+/* 页面光斑画在 body 上（index.html 给 body 的 bg-base-200 只设底色，
+   background-image 是另一属性，互不冲突）。
+   main 的 bg-base-200 不透明、会整块盖住 body ⇒ 就地透明化
+   （元素选择器权重虽低，但未分层 ⇒ 稳赢 utilities 层的类）。 */
+body {
+  background-image: var(--page-blobs);
+  background-attachment: fixed;
+}
+main,
+.min-h-screen.bg-base-200 {
+  background-color: transparent;
+}
+
+/* 玻璃表面清单：半透底 + blur(22px) + 1px 描边 + 外阴影带顶部内高光。
+   新组件要进玻璃面 ⇒ **加进这张清单**，不要在页面上手写玻璃。 */
+.card,
+.stats,
+.modal-box,
+.navbar,
+.dropdown-content,
+.drawer-side > div,
+.dock,
+.rounded-box.bg-base-100 {
+  background-color: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+}
+
+/* 主行动按钮上渐变 + 光晕。
+   同时承担「与 btn-error 去撞车」的职责：error 是**平涂**深红 #c0233f，
+   主行动是**渐变**靛蓝 —— 两者色相本来就分得开，再靠"渐变 vs 平涂"
+   强化区分，将来若品牌色再变也不至于混同。 */
+.btn-primary {
+  background-image: var(--primary-gradient);
+  border-color: transparent;
+  box-shadow: 0 4px 14px var(--primary-glow);
+}
+.btn-primary:not(:disabled):hover {
+  box-shadow: 0 6px 20px var(--primary-glow);
+}
+
+/* 品牌化补丁：daisyUI 的「激活/聚焦」默认走中性色，与靛蓝主色不符 ⇒ 统一收口到主色。 */
+
+/* 导航激活：默认 --menu-active-bg 是黑色药丸，换成主色渐变 + 光晕。 */
+.menu .menu-active {
+  background-color: transparent;
+  background-image: var(--primary-gradient);
+  color: var(--color-primary-content);
+  box-shadow: 0 4px 14px var(--primary-glow);
+}
+.menu .menu-active:hover {
+  background-color: transparent;
+}
+
+/* 移动端 dock 激活：指示点用 currentColor ⇒ 整项染主色即可。 */
+.dock-active {
+  color: var(--color-primary);
+}
+
+/* 输入聚焦：默认是黑白描边，观感生硬。换成主色描边 + 3px 光环；
+   input-error（校验失败）不干预，红框语义保留。 */
+.input:focus:not(.input-error),
+.select:focus:not(.input-error),
+.textarea:focus:not(.input-error) {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
+/* tabs 激活项：跟随主色。 */
+.tab.tab-active {
+  color: var(--color-primary);
+}
+
+/* 徽章一律不换行：daisyUI v5 的 .badge 没设 white-space ⇒ 表格里长文本列
+   把状态列压到 min-content（1 字宽）时徽章逐字竖排。 */
+.badge {
+  white-space: nowrap;
+}
+
+/* 分段控件（横向方块）：答案简短、项数少且能放一行的固定选择。
+   容器 padding 3px / radius 同 selector 档，激活项主色渐变 + 白字 + 光晕。
+   语义仍是原生 radio（sr-only 藏起来），分组靠 name、焦点态看 :focus-visible。 */
+.seg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding: 3px;
+  border-radius: var(--radius-selector);
+  background-color: var(--color-base-200);
+}
+.seg-item {
+  flex: 1 1 0;
+  min-width: max-content;
+  min-height: 44px; /* 触控目标（组件指南 §6.1）；桌面回到紧凑密度 */
+  padding: 6px 10px;
+  border-radius: calc(var(--radius-selector) - 3px);
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  text-align: center;
+  white-space: nowrap;
+  cursor: pointer;
+  color: color-mix(in oklab, var(--color-base-content) 72%, transparent);
+  transition:
+    background-color 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+    color 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+@media (min-width: 48rem) {
+  .seg-item {
+    min-height: 0;
+  }
+}
+.seg-item:hover:not(:has(:disabled)) {
+  background-color: color-mix(in oklab, var(--color-base-100) 70%, transparent);
+}
+.seg-item:has(:checked) {
+  background-color: transparent;
+  background-image: var(--primary-gradient);
+  color: var(--color-primary-content);
+  font-weight: 500;
+  box-shadow: 0 4px 14px var(--primary-glow);
+}
+.seg-item:has(:focus-visible) {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+.seg:has(:disabled) {
+  opacity: 0.6;
+}
+.seg:has(:disabled) .seg-item {
+  cursor: not-allowed;
+}
+
+/* 移动端细则（组件指南 §7.3）：底部安全区 + 抽屉独立滚动。 */
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.drawer-side {
+  overscroll-behavior: contain;
+}

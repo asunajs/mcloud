@@ -19,5 +19,9 @@ tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
 
+[dev-dependencies]
+# 复用 core 的测试替身（FixedClock）。见 conventions §8.3。
+mcloud-core = { workspace = true, features = ["testkit"] }
+
 [lints]
 workspace = true

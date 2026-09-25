@@ -376,7 +376,7 @@ pub enum RunEvent { Started{..}, Log{..}, Progress{..}, Finished{..} }
 |---|---|---|
 | `mcloud-crypto` | **黄金向量对拍**（`test/golden/*.json`） | ✅ 已有 `tests/golden.rs` |
 | `mcloud-upstream` | fixture 回放（录制真实响应，离线断言） | ⬜ 待补 |
-| `mcloud-engine` | 假 Task + 假 Store，断言事件序列与并发闸 | ⚠️ 仅注册表有测试 |
+| `mcloud-engine` | 假 Task + 假 Store，断言事件序列与并发闸 | ✅ `runner.rs` 已覆盖（见 §8.5） |
 | `mcloud-server` | `tower::ServiceExt::oneshot` 路由级测试 | ⬜ 待补 |
 | web | `tsc --noEmit` + 关键组件测试 | ⬜ 待建 |
 
@@ -402,9 +402,37 @@ pub enum RunEvent { Started{..}, Log{..}, Progress{..}, Finished{..} }
 - 断言要覆盖**边界**：`refresh_threshold_is_exclusive` 就同时测了「恰好 10 天不刷新」
   和「9 天刷新」——这种「阈值是开区间还是闭区间」的测试最值钱。
 - 涉及磁盘的测试用临时目录并在结束时清理（见 `json_store.rs` 的 `tmpdir`）。
-- **`FixedClock` 目前是 `mcloud-store` 里的 `#[cfg(test)]` 私有项**，其他 crate 的测试
-  用不到。engine 层要测时间相关逻辑时，把它提为 `#[cfg(any(test, feature = "testkit"))]`
-  的公开项，不要各自复制一份。
+- **共享测试替身放 `mcloud_core::testkit`**，用 `feature = "testkit"` 门控：
+
+  ```toml
+  # 其他 crate 的 dev-dependencies
+  mcloud-core = { workspace = true, features = ["testkit"] }
+  ```
+
+  `FixedClock` 已迁到这里（原先埋在 `mcloud-store` 的 `#[cfg(test)]` 里，
+  别的 crate 根本用不到）。**不要在各自 crate 里再复制一份**——那样迟早会出现
+  几个行为不一致的假实现，让测试结果取决于你碰巧用了哪一个。
+
+- **测试必须能快速失败**：涉及并发的用例一律给等待加超时
+  （`tokio::time::timeout`）。闸逻辑一坏，无超时的等待会让整条测试挂到 CI 超时，
+  那是比失败更难排查的形态。`runner.rs` 的 `wait_started` 是范例。
+
+### 8.5 已固化的行为契约（`runner.rs`）
+
+`Runner` 的并发闸是「同 `task:account` 不并发」的核心，改动它前先读这些测试
+（每条都是先写坏实现、确认测试真的变红之后才留下的）：
+
+| 契约 | 测试 |
+|---|---|
+| 闸键是 `task:account`，不串任务也不串账号 | `gate_key_is_scoped_by_task_and_account` |
+| 已在运行时**跳过而非排队** | `same_task_account_while_running_is_skipped_not_queued` |
+| **失败路径也必须释放闸**（否则任务从此再也跑不起来） | `gate_is_released_even_when_task_fails` |
+| 任务报错 → `Failed` 且仍落盘、仍发 `finished` | `task_error_becomes_failed_outcome_and_is_still_recorded` |
+| 跳过不是失败（不触发告警） | `skipped_outcome_is_preserved_as_success_path` |
+| 历史落盘失败**不**让整次运行算失败 | `history_write_failure_does_not_fail_the_run` |
+| run_id 递增、不占用被跳过的运行 | `run_ids_start_at_one_and_increase` |
+| 重启后从历史最大值 +1 续号 | `seed_run_id_continues_after_restart` |
+| 时间一律来自注入的 `Clock` | `record_time_comes_from_injected_clock` |
 
 ### 8.4 补测优先级
 
@@ -520,16 +548,14 @@ data/         运行时数据（不入库）
 |---|---|---|---|
 | 1 | `des` 依赖已声明但 `des.rs` 未实现 | `mcloud-crypto` | 死依赖 |
 | 2 | `architecture.md` §9.2 SSE 示例用 camelCase，与代码不符 | `docs/architecture.md` | 文档 |
-| 3 | `Runner` 无测试（核心并发逻辑裸奔） | `mcloud-engine/src/runner.rs` | 测试 |
-| 4 | `json_store` 在 async 中用阻塞 `std::fs` | `mcloud-store` | 并发 |
-| 5 | `FixedClock` 是 `#[cfg(test)]` 私有项，其他 crate 用不到 | `mcloud-store/src/clock.rs` | 可测性 |
-| 6 | MSRV 从 1.82 修正为 1.88（原值实测编译不过）；如要降低需先换掉 cookie_store | `Cargo.toml` | 工程 |
-| 7 | `mcloud-server` 路由 0 测试；`upstream` 无 fixture 回放 | 见 §8.4 | 测试 |
-| 8 | SSE 只按 `run_id` 过滤，且同步 `create` 不产生可订阅事件 | `mcloud-server/src/routes/runs.rs` | 设计 |
-| 9 | 凭证目录权限 `0600` 未实现（无 `set_permissions`） | `mcloud-store` | 安全 |
+| 3 | `json_store` 在 async 中用阻塞 `std::fs` | `mcloud-store` | 并发 |
+| 4 | `mcloud-server` 路由 0 测试；`upstream` 无 fixture 回放 | 见 §8.4 | 测试 |
+| 5 | SSE 只按 `run_id` 过滤，且同步 `create` 不产生可订阅事件 | `mcloud-server/src/routes/runs.rs` | 设计 |
+| 6 | 凭证目录权限 `0600` 未实现（无 `set_permissions`） | `mcloud-store` | 安全 |
 
 > 已完成：`git init` + 首次提交、`clippy` 归零、`fmt` 归零、CI 配置、
-> MSRV 修正（见 §3.3、§10.1、§9.2）。
+> MSRV 修正为 1.88、`Runner` 测试补齐（14 条，见 §8.5）、
+> `FixedClock` 迁到 `core::testkit`（见 §8.3）。
 >
 > 处理原则：清单项**默认只记录**。但若某项会让已落地的门禁必然失败
 > （例如声明 `rust-version = "1.82"` 而 CI 要用它编译），那属于门禁本身的

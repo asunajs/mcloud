@@ -1,5 +1,9 @@
-/target
-/.cargo-home
+# 不锚定根目录：`/target` 只会忽略顶层，而实际出现过
+# `crates/<某处>/.cargo-home/`（某次在子目录里跑了 cargo）——
+# 134MB 的 registry 副本，不忽略就会被提交。
+target/
+.cargo-home/
+
 /web/node_modules
 /web/dist
 /data

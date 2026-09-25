@@ -11,13 +11,7 @@ impl Clock for SystemClock {
     }
 }
 
-/// 固定时钟，测试用。
-#[cfg(test)]
-pub struct FixedClock(pub i64);
-
-#[cfg(test)]
-impl Clock for FixedClock {
-    fn now_ms(&self) -> i64 {
-        self.0
-    }
-}
+// 固定时钟已移到 `mcloud_core::testkit::FixedClock`：
+// 它之前是这里的 `#[cfg(test)]` 私有项，别处用不到，engine 层要测时间就得
+// 各写一份。统一放在 core（配合 `testkit` feature）后，所有 crate 共用同一个
+// 实现。见 docs/conventions.md §8.3。

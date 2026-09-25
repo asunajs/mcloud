@@ -4,9 +4,11 @@
 //! 供 `mcloud-cli` 与 `mcloud-server` 共用。
 
 pub mod builder;
+pub mod hub;
 pub mod sink;
 
 pub use builder::{App, AppBuilder};
+pub use hub::{Delivery, EventHub};
 pub use sink::BroadcastSink;
 
 use std::sync::Arc;
@@ -17,5 +19,19 @@ pub struct AppHandle {
     pub registry: Arc<mcloud_engine::Registry>,
     pub store: Arc<dyn mcloud_core::Store>,
     pub clock: Arc<dyn mcloud_core::Clock>,
-    pub sink: Arc<BroadcastSink>,
+    /// 事件中枢：日志收集、序号分配、SSE 重放都经它。
+    pub hub: Arc<EventHub>,
+    /// 定时调度器。
+    pub scheduler: Arc<mcloud_engine::Scheduler>,
+    /// 编排执行器。
+    pub pipelines: Arc<mcloud_engine::PipelineRunner>,
+    /// 运行中任务的取消登记表。
+    pub cancel: Arc<mcloud_engine::CancelRegistry>,
+}
+
+impl AppHandle {
+    /// 事件中枢也是 `EventSink`，任务通过它发日志。
+    pub fn sink(&self) -> Arc<dyn mcloud_core::EventSink> {
+        Arc::clone(&self.hub) as Arc<dyn mcloud_core::EventSink>
+    }
 }
