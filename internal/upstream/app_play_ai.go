@@ -163,6 +163,17 @@ const (
 	// ⚠ 实拍**只有 `true` 一档**：`false` 时上游回什么（还回不回 `fileId`？）零样本
 	// ⇒ 不参数化。要"识别但不落云盘"这一档，先补抓包。
 	PlayAIRecognizeUploadToCloud = true
+	// PlayAIRecognizeImageExt 是 ⑤ body 的 `imageExt` 目前**唯一有出处**的取值。
+	//
+	// 两处出处同一值：本族唯一定拍（`docs/capture/app-play-ai-samples.txt` §4）与
+	// 旧 TS 的两条链（#16 那一页、585 `ai-tasks.ts:77`）都写 `jpg`。
+	//
+	// ⚠ 它**仍做成参数**（见 [PlayAIRecognizeParams.ImageExt]）：这一格与 `base64` 前缀
+	// 是否要一致，本仓只有一条样本说不出来 ⇒ 常量只是给调用点一个**有出处的**取值，
+	// 不是"上游认这一档"的成文。
+	// ⚠ 与 [AiAvatarImageExt] 同为 `"jpg"` 是**巧合不是同源**：那是头像那一族 `merge`
+	// 接口的字段，两族各自抄各自的出处（合并成一个常量 = 将来一处改动同时改两条请求）。
+	PlayAIRecognizeImageExt = "jpg"
 
 	// PlayAILocalOrigin 是原生 WebView 侧发出的 `Origin`（⑤ 实拍逐字）。
 	//
@@ -788,6 +799,23 @@ func PlayAIRecognizeBody(params PlayAIRecognizeParams) map[string]any {
 //     要核它：抓一条未脱敏的同接口请求比对 `User-Agent` 与 `x-DeviceInfo`。
 //  3. `sec-fetch-*` / `accept-language` / `accept-encoding`：WebKit 自动加的头，
 //     本仓库其余接口都不发（现状如此），上游是否据此判什么 ⇒ 未测试。
+//
+// # `authorization` 是哪一枚
+//
+// 参数名故意叫 `authorization` 而不叫 `jwt`：这一发要的是**库里那串 `Basic …` 整串**
+// （带 `Basic ` 前缀，原样进头），与 ② `chat/v2/add` 用的是**同一枚** —— 实拍里这两条
+// 的 `Authorization` 逐字相同（同长、同指纹，见 `docs/capture/app-play-ai-samples.txt`）。
+//
+// ⚠ 参考实现取的**不是**这一枚：它的 `ctx.config.token`（`ai-tasks.ts:24`）是
+// `parseAuth(auth)` 摊出来的**第三段裸 authToken**（`utils/init-account.ts:52` +
+// `auth/utils.ts` 的 `doParseAuth` = "去 `Basic ` → base64 解码 → 按 `:` 拆三段"）。
+// 那一枚本仓**真跑过**，也被拒（见下面那条）⇒ 这一处**按实拍落，不按参考实现落**，
+// 与旧实现不同是**有意**的。
+//
+// ⚠ 两种接法都**实测被拒**过（`code:"01000002"` / `鉴权失败`，2026-09-26）：
+// 传 H5 那张 `jwttoken`、以及传 Basic 的第三段裸 authToken。纠正的来龙去脉成文在
+// [`internal/app/task_matrix_play_ai.go`](../app/task_matrix_play_ai.go) 文件头第一条。
+// 本层不判这一格 —— 三枚都是不透明串，协议层无从区分，只有按值钉的调用点测试判得住。
 func PlayAIRecognizeRequest(
 	profile *AppProfile, timestamp int64, authorization, tid string, params PlayAIRecognizeParams,
 ) (core.HTTPRequest, *core.Error) {

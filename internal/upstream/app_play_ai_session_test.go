@@ -17,8 +17,11 @@ package upstream
 //   - 每条测试的**名字与注释**都在说"我们发的是什么"，没有一条在说"上游要求什么"；
 //   - 判据类断言（两个 `Parse*`）钉的是"我们怎么处置这一段字节"，
 //     非成功码**一个实拍都没有** ⇒ 只钉"把码与原文带出来、不折成成功"（AGENTS.md §1.7）；
-//   - chat 那条**没有响应侧断言**：响应是 SSE 且零样本，本层不解析，
-//     所以这里只按方法名扫住"别偷偷加一个发送方法"（见最后一条）。
+//   - chat 这一条（**#16 拍拍那一套**）没有响应侧断言：响应是 SSE 且零样本，本层不解析，
+//     所以这里只按方法名扫住"别偷偷给**这一套**加发送方法"（见最后一条）。
+//     ⚠ 585 AI 相机那一套**有**发送口与响应侧用例，在
+//     [`app_play_ai_chat_sse_test.go`](app_play_ai_chat_sse_test.go) —— 两套不是同一份
+//     schema，别把这条扫描当成"整个 chat 族都不许发送"。
 //
 // # 隐私
 //
@@ -1087,19 +1090,33 @@ func TestPlayAIChatConstantsMatchTheirLegacyLines(t *testing.T) {
 	}
 }
 
-// TestPlayAIUpstreamHasNoChatSendMethodUntilOneCaptureExists 守住"响应零样本 ⇒ 不猜形状"这个口子。
+// TestPlayAIRoundOneHasNoChatSendMethodWhileTheCameraRoundDoes 守住"零样本 ⇒ 不猜形状"这一格，
+// 但**只守拍拍那一套**。
 //
-// 本层对 chat **只构造请求**：[Upstream.Call] 一律按 JSON 信封解析，而这一条回的是 SSE；
-// 与其猜事件名，不如留一个空口。反射扫的是**方法名**——它红了就是提醒：
-// 加 `(u *Upstream).PlayAIChat…` 之前，先补一条这一页的 SSE 实拍。
-// ⚠ 这条测试挡不住"有人用 [Upstream.Raw] 手解一段没见过的流"，那需要实拍才能判对错。
-func TestPlayAIUpstreamHasNoChatSendMethodUntilOneCaptureExists(t *testing.T) {
+// 原来这条是"整个 chat 族都不许有发送方法"（文件头那句声明的执行者）。2026-09-26 它**改向**了：
+// 585 AI 相机那一套开了口子（[`app_play_ai_chat_sse.go`](app_play_ai_chat_sse.go)），
+// 理由写在那一份的文件头 —— 一句话：那是一条**可点的玩法**，第一段读数可以由本程序真跑造出来，
+// 而拍拍那一页要等活动窗口，窗外补不了样（AGENTS.md §1.13 那条"缺抓包不是停工理由"的两种情形）。
+//
+// 于是本条钉两件事：① 拍拍那一套（`PlayAIChat` 之后不是 `Camera` 的）**仍然没有**发送口，
+// ② 585 那一套**恰好有一个**（多出来一个就是有人给拍拍补了口，或造出第三套还不上成文）。
+// ⚠ 它挡不住"有人用 [Upstream.Raw] 手解一段没见过的流"，那需要实拍才能判对错。
+func TestPlayAIRoundOneHasNoChatSendMethodWhileTheCameraRoundDoes(t *testing.T) {
 	methods := reflect.TypeOf(&Upstream{})
+	cameraSends := 0
 	for i := 0; i < methods.NumMethod(); i++ {
 		name := methods.Method(i).Name
-		if strings.HasPrefix(name, "PlayAIChat") {
-			t.Errorf("出现了 chat 的发送方法 %s：这一条的响应体零样本，解析层应等实拍（见文件头那节）", name)
+		if !strings.HasPrefix(name, "PlayAIChat") {
+			continue
 		}
+		if name == "PlayAIChatCamera" {
+			cameraSends++
+			continue
+		}
+		t.Errorf("出现了拍拍那一套的 chat 发送方法 %s：它的响应体仍零样本，解析层应等实拍（见文件头那节）", name)
+	}
+	if cameraSends != 1 {
+		t.Errorf("585 那一套应恰好有一个发送口（PlayAIChatCamera），实得 %d", cameraSends)
 	}
 	// 反过来：埋点与换票那三条**有**发送方法（它们回的是这一族已登记过形状的信封）。
 	// 缺席说明有人把整个发送层删了 —— 那会让 app 层只能自己去拼请求。

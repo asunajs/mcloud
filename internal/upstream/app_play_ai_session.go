@@ -76,14 +76,19 @@
 // ⇒ 处置：不发 + 测试钉"恰好没有这一枚"（钉的是我们的选择），并在真打不认账时把它列进
 // 第一个要复核的方向（与 `app_play_ai.go` 文件头那条"③④ 回非 0 先复核埋点"并列）。
 //
-// # chat/v2/add：**只构造请求，不解析响应**
+// # chat/v2/add：**拍拍（#16）这一套只构造请求，不解析响应**
 //
 // 响应是 **SSE**（`Accept: text/event-stream`）。本仓 [Upstream.Call] 一律 [ParseEnvelope]（JSON），
-// 而这一条的响应体**零样本** —— 于是既不猜事件名、也不写解析器，
-// 也**不提供** `(u *Upstream).PlayAIChat*` 那个发送方法：
-// 流式读取要 [core.HTTPClient] 目前没有的能力，而"先加个方法占位"的下一步一定是有人拿
-// [Upstream.Raw] 去解一段没见过的流。测试里有一条按方法名扫这个口子（它红了就是提醒：
-// 加发送方法之前先补一条 SSE 实拍）。
+// 而这一条的响应体**零样本** —— 于是这一族**不猜事件名、不写解析器**，
+// 也**不提供** `(u *Upstream).PlayAIChat` 那个发送方法（拍拍这一套至今仍是这样）。
+//
+// ⚠ **585 AI 相机那一套已经开了这个口子**：读法、判据与发送口在
+// [`app_play_ai_chat_sse.go`](app_play_ai_chat_sse.go)。开它的理由与"为什么拍拍这一套仍不开"
+// 都写在那一份的文件头（一句话：AI 相机是一条可点的玩法，第一段读数可以由本程序真跑造出来；
+// 拍拍那一页要等活动窗口）。**不要**把两套的 body / 头集合合并 —— 三处硬差别列在那一份里。
+//
+// 反射扫方法名那条测试（`app_play_ai_session_test.go` 的最后一条）因此**改向**了：
+// 它现在钉的是"拍拍那一套没有发送口、585 那一套恰好有一个"。
 package upstream
 
 import (
@@ -659,19 +664,10 @@ func PlayAIChatBody(params PlayAIChatParams) map[string]any {
 func PlayAIChatRequest(
 	profile *AppProfile, timestamp int64, authorization, tid string, params PlayAIChatParams,
 ) (core.HTTPRequest, *core.Error) {
-	// 五格必填。护栏的理由同 [PlayAIRecognizeRequest]：少一格就是发出一条出处里不存在
-	// 的请求，而 `userId` 那一条的后果是"以别人的账号去问"。
-	switch {
-	case params.UserID == "":
-		return core.HTTPRequest{}, core.NewBadRequest("chat/v2/add 的 userId 不能为空（填错会以别人的账号提问）")
-	case params.Dialogue == "":
-		return core.HTTPRequest{}, core.NewBadRequest("chat/v2/add 的 dialogue 不能为空（兜底串属 app 层，本层不内置）")
-	case params.InputTime == "":
-		return core.HTTPRequest{}, core.NewBadRequest("chat/v2/add 的 inputTime 不能为空（见 PlayAIChatInputTime）")
-	case params.FileID == "":
-		return core.HTTPRequest{}, core.NewBadRequest("chat/v2/add 的 fileId 不能为空（它来自 aiRecognize 的 data.fileId）")
-	case params.FileName == "":
-		return core.HTTPRequest{}, core.NewBadRequest("chat/v2/add 的 name 不能为空（旧 TS 那一格永不为空）")
+	// 五格必填。护栏与 585 那一套**共用一个函数**（见 [playAIChatParamGuard]）：
+	// 两页的这五格同名同义，两处各写一遍只会让"改一处忘一处"变成可能。
+	if perr := playAIChatParamGuard(params); perr != nil {
+		return core.HTTPRequest{}, perr
 	}
 	request, err := core.NewRequestPost(
 		fmt.Sprintf("%s/api/outer/assistant/chat/v2/add", PlayAIHostAI)).
@@ -684,10 +680,37 @@ func PlayAIChatRequest(
 	return request.WithHeader("Accept", PlayAIChatSSEAccept), nil
 }
 
+// playAIChatParamGuard 钉住 chat 两套（拍拍 / 585）共用的那五格必填。
+//
+// 为什么单独一个函数：五格在两页**同名同义**（`userId` / `dialogue` / `inputTime` /
+// `fileId` / `name`），两处各写一遍 switch 的下一次演变一定是"只改了一处"——
+// 而这类偏差的表现是一条空值请求安静地发出去。
+// 护栏的理由同 [PlayAIRecognizeRequest]：少一格就是发出一条出处里不存在
+// 的请求，而 `userId` 那一条的后果是"以别人的账号去问"。
+func playAIChatParamGuard(params PlayAIChatParams) *core.Error {
+	switch {
+	case params.UserID == "":
+		return core.NewBadRequest("chat/v2/add 的 userId 不能为空（填错会以别人的账号提问）")
+	case params.Dialogue == "":
+		return core.NewBadRequest("chat/v2/add 的 dialogue 不能为空（兜底串属 app 层，本层不内置）")
+	case params.InputTime == "":
+		return core.NewBadRequest("chat/v2/add 的 inputTime 不能为空（两套房两种格式：" +
+			"见 PlayAIChatInputTime 与 PlayAIChatCameraInputTime）")
+	case params.FileID == "":
+		return core.NewBadRequest("chat/v2/add 的 fileId 不能为空（它来自 aiRecognize 的 data.fileId）")
+	case params.FileName == "":
+		return core.NewBadRequest("chat/v2/add 的 name 不能为空（旧 TS 那一格永不为空）")
+	}
+	return nil
+}
+
 // PlayAIChatSSEAccept 是 `chat/v2/add` 的 `Accept`（旧 TS `task.ts:204`）。
 //
 // ⚠ 它同时是本层"响应是流式文本、不是一段 JSON"的**唯一**成文标记：
-// 看到 [ParseEnvelope] 出现在这条链上就是错的（本文件因此不解析、也不提供发送方法）。
+// 看到 [ParseEnvelope] 出现在这条链上就是错的（本文件因此**不解析**这一条，
+// 也不给**拍拍这一套**提供发送方法）。
+// 585 那一套的读法、判据与发送口在 [`app_play_ai_chat_sse.go`](app_play_ai_chat_sse.go)
+// —— 那里解释了"为什么这一族可以从零样本起步、由真跑补第一段读数"。
 const PlayAIChatSSEAccept = "text/event-stream"
 
 // ─────────────────────────────────────────────────────────────────────────────

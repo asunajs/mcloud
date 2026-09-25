@@ -16,12 +16,17 @@
 - **归档缺三段链路**，且**都是旧 TS 认为要紧的**：
   ① 换票（这一页自己的 `jwttoken` 从哪来）—— 旧 TS 有完整两步，归档**一条都没拍到**；
   ② `visitlog/journaling` 埋点 —— 旧实现把它当**门槛**（上报失败 ⇒ 整件任务放弃），归档**零条**；
-  ③ `chat/v2/add`（SSE）—— "拍照问AI"那件任务的第 5 步，归档**零条**。
+  ③ `chat/v2/add`（SSE）—— "拍照问AI"那件任务的第 5 步，**原归档（夏日拍拍大作战.json）零条**；
+  ⚠ **这一格 2026-09-26 已补**：`har/2026-09-25-playai-*.har` 里有**两条**真机完整流（§8）
+  ⇒ "零条"只对**那份 06-29 归档**成立，不再对本族成立。
 - ⚠ 这三段**不是**"可选的锦上添花"：旧 TS `aiCameraHandler` 里 ①② 拿不到就直接 `return`（见 §3、§4）。
   但"上游到底认不认"仍然**未测试** —— 旧实现的门槛是**它自己**的判断，不是上游的成文。
-- **代码侧进展（2026-09-24）**：上面 ①②③ 的**请求侧**都已按旧 TS 落地成
-  `internal/upstream/app_play_ai_session.go`（③ 只构造、**不发送**，SSE 响应零解析）。
-  ⇒ 归档缺口**没有因此变小**：这三段今天仍是"有出处、无实拍"，本文件的"缺样本"结论一条都不因此改。
+- **代码侧进展（2026-09-26 更正）**：上面 ①②③ 的**请求侧**都已按旧 TS 落地成
+  `internal/upstream/app_play_ai_session.go`（①②），③ 另落
+  `internal/upstream/app_play_ai_chat_sse.go`（**发送口 + 三档回退读法都已落码**，
+  585 那一套，玩法链见 `internal/app/task_matrix_play_ai.go`）。
+  ⇒ 缺口相应收窄：③ 的"响应零样本"已被 §8 那两条真机流补掉，本程序自己也**真跑通了一趟**
+  （`docs/status.md` 2026-09-26 那一节）。①② 那两格**子页版**仍无实拍。
 
 ## 1. 逐条清单（13 条，序号就是归档里的下标）
 
@@ -118,7 +123,11 @@ content-type  origin            ← 只有两条 POST（第 7/12 条）有
 2. **埋点 `visitlog/journaling`**：旧 TS 在这个页面一共发十余条，`optkeyword` 串的**六种形态**
    （入口三条 / 任务前三条 / `aiCamera` 内两条 / `redbook` 四条 patterns / 抽奖前两条）
    与它的 `content-type`（**归档里查不到**）⇒ 抓一条就够定"这一条到底长什么样"。
-3. **SSE `chat/v2/add`**：抓**一条完整流**（含首个事件与结束事件），否则本层只能构造请求、不能解析。
+3. **SSE `chat/v2/add`**：**已实拍**（2026-09-26 逐行读，两条完整流，见 §8）⇒ 本层现在既构造
+   请求、也解析响应（`internal/upstream/app_play_ai_chat_sse.go`），并已随 585 真跑通过一趟。
+   这一条原先写的"抓一条完整流，否则本层只能构造请求、不能解析"与"这一条仍然零样本"
+   都是**当时**的状态，现已不成立（就地改，不留补记）。
+   ⚠ 仍未补的是**失败那一侧**：② 的回绝/风控形状**零样本**（本程序真跑只见过 `code:"0000"`）。
 4. ⚠ 这三段**只能在活动窗口内补**（`docs/capture/capture-guidelines.md` 的"当期是否有活入口"那条）——
    这一期是**夏日**（归档 2026-06-29），今天（2026-09-24）很可能已经下线
    ⇒ "等实测"不是谨慎而是**拒改**，先按 §1.8/§1.11 的口径处置：能按旧 TS 落地的先落地并标未验证。
@@ -143,3 +152,56 @@ content-type  origin            ← 只有两条 POST（第 7/12 条）有
 ⇒ **本族会不会回这一码、回了以后刷票认不认，两个都仍无样本**（`docs/pending-decisions.md` **R11**，
 补法：真跑一次只读链，中途让票过期）。
 
+
+## 8. 585 ② `chat/v2/add` 的真机 SSE（2026-09-25 抓到、2026-09-26 逐行读）
+
+- **出处**：`har/2026-09-25-playai-*.har`（本机抓包，不可 clone 带走，见 `reference-workspace-on-external-ssd`）。
+  **观测只有两条**：一组读数（响应体 29604 字节 / **47** 条 `data:` 行）在
+  `noscrap` / `scratch` / `timed-now` / `timed-third` **四条 har 里逐字重复** ⇒ 同一次会话被导出了四次，
+  只算**一次**观测；另一组（248074 字节 / **386** 条 `data:` 行）在 `lottery` 与 `lottery-draw`
+  两条里重复 ⇒ 第二次观测。**不要**把"六条 har"写成"六条样本"。
+- **读法纪律**（本轮踩点）：先只看元数据（`status` / `mimeType` / `size` / 有没有 `text`）再解 body。
+  同一组 har 里**前面几条 chat 条目是 OPTIONS 或空体**，直接对每条取 body 会 `IndexError`，
+  更容易把"没 body"误读成"上游回了空流"。
+
+**逐行读数（只打键路径 + 类型 + 长度，值不外带）**：
+
+| 格 | 观测一（47 行） | 观测二（386 行） |
+| --- | --- | --- |
+| `data.flowResult.index` | 0→46，**严格 +1、零跳变** | 0→385，同样严格 +1 |
+| 每片 `outContent` 码点 | 1–3 | 1–13 |
+| **末条**（`finishReason:"stop"`）`outContent` | **0**（空串） | **0**（空串） |
+| 逐行累加之后 | **70** 码点，以句号收尾 | **2129** 码点，以句号收尾 |
+| 顶层 `code` 去重 | 只有 `"0000"` | 只有 `"0000"` |
+| `finishReason` 去重 | `processing` / `stop` | 同 |
+| `data.outContent`（**非** `flowResult` 那条路径）非空的行数 | **0** | **0** |
+
+- ⭐ **结论一：模型那句话只能"逐行拼"，读末条永远读不到。** 本层据此在
+  `internal/upstream/app_play_ai_chat_sse.go` 加了 [PlayAIChatSSERead.Answer]（正序累加
+  `data.flowResult.outContent`），而**判据那一侧没动** —— `Success`/`Code`/`Message` 仍按旧 TS
+  读倒序第一条可解析行（= 末条）。两件事分开，是因为实拍末条恰好"判据对、内容为空"。
+- ⭐ **结论二：`message` 与 `responseStatement` 都不是回答。** `message` 两条都是"请求成功"；
+  `data.responseStatement` 两条**逐字同值**（27 码点、sha1 前 10 位 `f402b3b882`、开头
+  "以上内容由通义qwen3"）⇒ 它是**免责声明/信封**，与问的是什么无关。
+  ⚠ 只到"这两条如此"：不据此写"它恒等于这一句"。
+- **末行 `data` 键集（11 格，两条并集=交集）**：`aiAlbumStatus` `aiDocStatus` `dialogueId`
+  `finishReason` `flowResult` `middleRecommend` `outputCommand` `recommend` `responseStatement`
+  `sessionId` `title`。本层只读其中四格（`flowResult.outContent` + 顶层 `code`/`message`/`success`），
+  **不**把这一组键摊成 schema（两次观测撑不起一份 schema）。
+  `recommend.queryList` 两条都是 3 条；`middleRecommend` 两条都是**含 1 个键的对象**。
+- **凭据**：这两条 ② 与同 har 里 ⑤ `aiRecognize` 的 `Authorization` **逐字同一枚**
+  （长度 302、sha1 前 12 位 `2c72db5d0783`）⇒ 值不进成文，见 `docs/sanitize-guide.md`。
+- ⭐ **本程序自己的真跑读数（2026-09-26 两趟，判据按 AGENTS.md §1.14 以程序输出为准）**：
+  ② 走完整条玩法，两趟都 `失败 0 条`、①② 都成功、链尾一次 `batchTrash` 覆盖这一趟记下的 2 份。
+  - **第一趟**（`Answer` 落码之前）：`档=data 行、data 行数=33、code=0000、message="请求成功"`，
+    因为读不到内容，播报落到了 `原文=` 那一档。
+  - **第二趟**（同一实现加上 `Answer` 之后）：`data 行数=41`、`code=0000`、
+    `message="请求成功"`，而**内容在 `模型回话=` 里念出来了** —— 一句 55 码点的中文回答
+    （大意是"这张图是纯黑空白、无法识别，请换清晰的图"），末尾**没有**再念 `原文`。
+    ⇒ "逐行累加 `flowResult.outContent`"这一读法**在真流上成立**，不只是对 har 拟合。
+  - ⚠ 两趟的 `data 行数` 不同（33 / 41），而问句与样图是同一份 ⇒ **行数不是稳定的量**，
+    别把"这次多少行"当判据；它只说明"这一趟上游切了这么多片"。
+  - 完整现场与两次对照的其它读数见 `docs/status.md`。
+- **仍未补的**：② 的**失败形状**（回绝 / 风控 / 额度不足）两条实拍都没有，本程序也只见过 `0000`
+  ⇒ 第三档"原文非空即成功"会不会把一段 HTML 报错页判成成功，仍是**代码行为**（有测试钉）
+  而**不是上游观测**。

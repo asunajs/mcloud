@@ -4777,3 +4777,101 @@ P1 剩下的第①件、R27 那句边界）。这一趟是**补完再跑**。
      语义仍无样本，不许写成"权益用完了"。
 
 
+
+## 补记（2026-09-26，同日第十六、十七趟真跑 + 585「AI 相机」两枪接进玩法表，#74~#76：凭据那一问被**真跑否掉两次**才由实拍定案，而"上游认了"≠"读到了模型那句话"）
+
+### 一、改了什么（三层，每层带反向判据）
+
+1. **上游层**（#74）：新文件 [`internal/upstream/app_play_ai_chat_sse.go`](../internal/upstream/app_play_ai_chat_sse.go)
+   —— 585 那一套 `chat/v2/add` 的**请求侧**（B 档逐字 `ai-tasks.ts:105-150`）、
+   **三档回退读法**（`:151-169`：倒序第一条可解析 `data:` 行 → 整体 JSON → 整段原文当一个字符串）
+   与**成功判据真值表**（`:46-51`，JS 严格相等那两格：`"0"` **不算**成功、`{"success":1}` **算**）。
+   三条变异各自有用例钉：倒序改正序 ⇒ 红；"命中第一条 `data:` 就停" ⇒ 红；
+   给第三档加"不是 JSON 就判失败" ⇒ 红（**那是有意照抄的过头判据**，改动要先给样本与理由）。
+2. **编排层**（#75）：新文件 [`internal/app/task_matrix_play_ai.go`](../internal/app/task_matrix_play_ai.go)
+   落 `runAICamera` —— ① `aiRecognize` 拿 `fileId` / `taskId`（**进清理账本**）→ ② `chat/v2/add` 发一问；
+   [`task_matrix_dispatch.go`](../internal/app/task_matrix_dispatch.go) 把 585 从缺口表移进 runner 表
+   ⇒ 玩法表现在**十一条**（409 / 1005 / 106 / 522 / 434 / 107 / 472 / 473 / 1014 / 1020 / 585），
+   缺口表剩 **113 / 1004 / 1028** 三条。
+3. **播报**（#76）：`playAICameraReadLine` 摊成**六格**（`档` / `data 行数` / `code` / `message` /
+   `模型回话` / `原文`）。两格的条件不是风格：`原文` **只在没读到回答时**念（读到回答后再拼一份
+   整条 SSE 原文，等于用一长串把要紧的那一句挤出这一行）。
+4. **新读数 `Answer`**（#76）：`PlayAIChatSSERead.Answer` 正序累加每一条 `data:` 里的
+   `data.flowResult.outContent`，而**判据那一侧一个字没动**（`Success` 仍按旧 TS 读末条）。
+   三条上游用例 + 两次变异：只取末行 ⇒ 两条红；顺手给 `data.outContent` 补回退 ⇒ 红。
+   app 侧一条 `TestTaskMatrixRunAICameraReadsOutTheModelSentence` 钉"念出回答、不念原文"，
+   把 `read.Answer` 那一支短路掉 ⇒ 当场红两格。
+
+### 二、凭据这一问：连着被真跑否掉两次，第三次不再猜
+
+顺序别记反，它决定"下一次真跑该先怀疑哪里"（全程成文在 `task_matrix_play_ai.go` 文件头）：
+
+1. 把旧实现的 `ctx.config.token` 读成"H5 那张票" ⇒ ① 带票出网 ⇒ `code:"01000002"` / `鉴权失败`。
+   ⚠ 同一趟里还顺带改了样图形态 ⇒ **两问都没收到答案**（两格一起变，结果无法归因）。
+2. 回去逐字读出处：`config` 是 `utils/init-account.ts:52` 用 `parseAuth(auth)` 摊平的 ⇒
+   `token` 是那串 Basic 的**第三段裸 authToken**（本仓云笔记 `runNote` 取的是同一枚）。
+   换成它再真跑 ⇒ **同样** `01000002` ⇒ 这一版也被否。
+3. **然后不再猜**：读 `har/2026-09-25-playai-*.har` 里真机那两条 ⇒ ①② 的 `Authorization`
+   **逐字同一枚整串**（长度 302、sha1 前 12 位 `2c72db5d0783`；值不进成文）。
+   ⇒ **参考实现这一处与真实客户端不一致**，本仓按实拍落。
+4. 本仓真跑确认：两枪**都成功** ⇒ 这一格收口为终判（不是"看起来对"，是程序自己说成功了）。
+
+### 三、真跑读出来的（两趟活体探针：库副本 + 另端口 + 一次性口令；号码与 id 不进成文）
+
+探针 `TestLiveProbeAICameraFamily` 走的是**生产那一趟**（`taskExecutor.runAICamera`），第二趟现场：
+
+```
+①② 的凭据：同一个 Authorization 整串，长度 302（值与内容都不打印）
+票的载荷：键 exp iat iss sub ／ 载荷里**没有** userDomainId 这一格
+① 之前：根目录那一页没读到（success=false: 请求头不合法(00010003)）⇒ 这一格只剩 batchTrash 那句上游原话
+播报[0] AI 相机对话已回 …：AI 相机响应：档=data 行、data 行数=41、code=0000、
+        message="请求成功"、模型回话="这张图片是纯黑色的空白画面，…请再次提问。"
+①② 走完整条玩法（585）：发过枪=true 失败 0 条 记账上传 1 次 新增 fileId 1 枚
+① 对照（裸 base64）：成功。fileId 长度 33、taskId 长度 19、hasText=false、推荐问句 3 条
+链尾清理：一次 batchTrash，覆盖这一趟记下的 2 份（id 不打印）
+```
+
+- ⭐ **`message` 不是回答**（实拍与真跑四例都是"请求成功"），而**末条 SSE 事件的 `outContent` 是空的**
+  ⇒ "读末条"这一支判成败够用、拿文本**永远拿不到**。`Answer` 那一格补的就是这一头，
+  而真跑第二趟念出了完整一句 ⇒ "逐行累加"在真流上成立，不只是对 har 拟合。
+- ⭐ **两趟的 `data 行数` 不同（33 / 41），问句与样图却是同一份** ⇒ 行数**不是**稳定的量，
+  只能读成"这一趟上游切了这么多片"，别当判据（登记成坑表 #170）。
+- ⭐ **样图前缀那一问收口**（R37）：同一趟里 `data:image/jpg;base64,…` 与**裸 base64** 两档 ①
+  **都成功** ⇒ 上游不以此前缀拒。⚠ 副作用一起记下：**一次真跑会往网盘落两张图**（链尾覆盖 2 份）。
+- ⭐ **`userId` 与票不同源这一格有了半边读数**：这张票的 JWT 载荷顶层只有 `exp/iat/iss/sub` 四键、
+  **没有** `userDomainId` ⇒ 旧实现 `parseJwtUserDomainId` 在**这张票上**取不到东西
+  （它还有第二档回退：把 `sub` 再当 JSON 解一遍，本层没读）。
+  ⇒ "两值是否恒等"**仍未测试**，不是收口。
+
+### 四、门禁（照抄当轮 stdout）
+
+**第十轮 · 585（`gates-go.js`，2026-09-26）**：**十项门禁全绿**（照抄当轮 stdout 的 N=10）。
+逐条：build 1.6s，vet 0.7s，fmt 0.1s，test 57.3s，deps 2.9s，filenames 0.2s，idents 0.3s，
+golden 0.1s，jsontags 0.1s，md-tables 0.1s；总耗时 1m03s。
+同轮另点名跑过 `go test ./internal/app/ ./internal/upstream/ -count=1`（两包全绿）。
+⚠ 本轮**没有**跑 `gates-web.js`（改动面全在 Go 与文档，web 侧一行未动）。
+
+### 五、现场与边界
+
+- 一次性材料：`target/camera17/`（副本库 `probe.db` + 设备档案 `device.txt`；副本上清
+  `schedules` / `sessions` / `users` / `pipelines`，保留 accounts）。**跑完目录整删**。
+  主库 `data/mcloud.db` md5 复核 `3761b6411af549f859ed4fbcb2e6baf6`（与开工前一致 ⇒ 未被覆写）。
+- ⚠ 探针打的是真上游的**写**：两趟各往测试号网盘**真落图**（① `uploadToCloud:true`；第二趟连对照档
+  一共两张），链尾各发一次 `batchTrash` 把这一趟记下的 2 份收走。② 是真问了一句（模型真答了）。
+- 凭据边界：`Authorization` 整串**只写长度与指纹**（302 / `2c72db5d0783`）；票、`x-yun-tid`、
+  JWT 载荷里的任何值都不进日志；真实 `fileId` / `dialogueId` / `sessionId` 不进成文
+  （只写"链尾一次 `batchTrash`，覆盖 2 份"）；② 的响应侧文本可截断后入日志（这一族响应不含凭据）。
+- ⚠ **回读那一发仍没有读数**：探针前后各一发的 `hcy/file/list` 用同一枚整串仍回 `00010003`
+  ⇒ "网盘里到底多没多一张图"仍只能靠 `batchTrash` 那句上游原话（与 R36 的回读是同一台、同一格）。
+- 本轮删掉的临时件：`target/probe_sse_shape.py`、`target/probe_sse_lines.py`（逐行读 SSE 形状那一份）、
+  `target/probe_auth_*.py`、`target/probe_har_*.py`、`target/camera17/*`。
+
+### 六、这一轮之后仍缺的（登记，不写成已验证）
+
+1. **R37 剩下的四格**（ⓐ `name`／`inputTime`／`sessionId` 三格偏离上游读不读；ⓑ `userId` 与票是否同源；
+   ⓒ 写没写进去 / 删没删干净（挡在 R16）；ⓓ ② 的**失败形状**）。
+2. **1028（AI 工作台）那一族的"累加器"说法要跟本轮对齐**：子代理报告里读的是
+   `data.flowResult.outContent` **与** `data.outContent`，而 585 这两族实拍里后者**逐行皆空** ⇒
+   动 1028 之前先按本轮口径确认它读的是哪一路（别把 585 的结论直接搬过去）。
+3. **旧 TS `upload10PictureTask`（`tasks/app/tasks.ts:81`）本仓没有对应分支** —— 本轮通读时发现的缺口，
+   尚未登记进玩法表或 `business-feature-inventory.md`。

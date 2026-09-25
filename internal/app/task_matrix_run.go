@@ -643,10 +643,13 @@ func (e *taskExecutor) apply(
 
 // runRunner 跑一条专属玩法，交回"**有没有真的发出过请求**"（口径同 [apply]）。
 //
-// 今天的六条按 spec 走，不为每条各写一份：前两条形状一样（`前置打卡(受门约束) →
-// mrp 入口上报 → 自己的那一发打卡`），差别只在最后一发的 key；
-// 中间两条（106 / 522）没有 `OpensEntry`、没有 `FinalKey`，玩法本体就是上传那一半；
-// 最后一条（434）既不打卡也不上传，本体是"分享 + 立刻取消分享"那一族（[runShare]）。
+// 表里每一条都按 spec 走，不为每条各写一份 switch。四族各自的形状：
+//   - 409 / 1005：`前置打卡(受门约束) → mrp 入口上报 → 自己的那一发打卡`，
+//     差别只在最后一发的 key；
+//   - 106 / 522：没有 `OpensEntry`、没有 `FinalKey`，玩法本体就是上传那一半；
+//   - 434 / 107：既不打卡也不上传，本体是"建一个再删一个"（分别是外链与云笔记）；
+//   - 472 / 473 / 1014 / 1020 / 585：自己开一条跨服务的链（见下面那五个分支，
+//     以及 585 与 1014 共有的"先写网盘再拿 id 干一件事"那一格）。
 //
 // ⚠ "取不到 deviceId"那一档**不算发过**：入口上报压根没出网（旧实现在那里会带一发
 // 空 `deviceId`，我们不跟着做，成文见 `app_task_click.go` 文件头）。
@@ -737,6 +740,17 @@ func (e *taskExecutor) runRunner(
 		sent, pdfProblems := e.runMailPDF(ctx, item, record)
 		fired = fired || sent
 		problems = append(problems, pdfProblems...)
+	}
+	if spec.AICamera {
+		// 585：① 识图（**写网盘**）→ ② 拿 fileId 问一句（回 SSE）。
+		//
+		// 它与 [MailPDF] 挨着放不是巧合：两条都是"自己往网盘造一个文件、再拿它的 id
+		// 干一件事"，所以两条都**必须**在链尾那条清理枪之前记账（见 `runMailPDF` 的
+		// 同一处口径）。区别在凭据：那一条全程一把（邮箱会话），这一条两枪两枚 ——
+		// 逐处取舍写在 `task_matrix_play_ai.go` 文件头。
+		sent, cameraProblems := e.runAICamera(ctx, item, record)
+		fired = fired || sent
+		problems = append(problems, cameraProblems...)
 	}
 	record.Err = joinProblems(problems)
 	return fired

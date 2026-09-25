@@ -294,12 +294,27 @@ type taskRunnerSpec struct {
 	// ⚠ **转换产物**不在清理链上：⑥ 零实拍、它给不给新 fileId 与落在哪个目录都不知道
 	// ⇒ 这一格登记为残留问句（`docs/pending-decisions.md` R36），别读成"跑完没留东西"。
 	MailPDF bool
+	// AICamera 为真 ⇒ 这条 runner 的**本体**是"① 识图（`aiRecognize`）→ ② 拿它给的
+	// fileId 问一句（`chat/v2/add`，回的是 SSE）"（玩法 585，旧实现 `ai-tasks.ts`）。
+	//
+	// 三个"与上面几格不同"都在这里，不在执行层：
+	//   - **两枪同一主机、同一枚凭据**：①② 都带库里那串 Basic 整串（实拍逐字相同），
+	//     而它**不是票**。旧实现两处各取 `ctx.config.token` / `ctx.config.auth`，
+	//     它自己那两枚就不相同 ⇒ 这是本条最容易接错的一格，逐处取舍写在
+	//     `internal/app/task_matrix_play_ai.go` 文件头。
+	//   - **它是本表唯一一条"响应不是一段 JSON"**的：② 回 SSE，判据是旧实现那三档回退，
+	//     所以它的"成功"必须连**命中哪一档**一起念（协议层
+	//     `internal/upstream/app_play_ai_chat_sse.go` 文件头那条"一段报错页也算成功"）。
+	//   - **它写盘、但产物不是我们传上去的**：① 的 `uploadToCloud` 实拍恒 true ⇒
+	//     一张白图落在用户网盘里，`data.fileId` 进 [taskExecutor.cloudFileIDs] 那条清理链。
+	//     ⚠ 与 [MailPDF] 同一类残留：① 说成功却没回 fileId 时**删不掉**（登记 R37）。
+	AICamera bool
 }
 
 // taskMatrixRunners 是**本仓已经接上**的专属玩法表。
 //
-// ⚠ 表里**十条**，而旧实现有十四条 —— 其余四条在 [taskMatrixToolGaps]
-// （113 / 1004 / 1028 / 585）。
+// ⚠ 表里**十一条**，而旧实现有十四条 —— 其余三条在 [taskMatrixToolGaps]
+// （113 / 1004 / 1028）。
 // 前两条（409 / 1005）是"整条链今天真的能跑完"的：入口上报（**零实拍**，见
 // `app_task_click.go` 文件头）+ 一发打卡（本族那一发只有**两发**实拍，都在
 // `m.mcloud.139.com`；另两发同名端点在 `:7071`，属 notice 与分享码那两族 ——
@@ -387,6 +402,18 @@ var taskMatrixRunners = map[int64]taskRunnerSpec{
 	// ⚠ 与 472 / 473 同一取向：`FinalKey` 留空 ⇒ 通用打卡那一支一个字都不念，
 	// 成败由 [MailBackup] 那一支按"发没发出去 / 非 2xx"分档播报。
 	1020: {Name: "邮箱资产备份", MailBackup: true},
+	// 旧实现 `packages/core/src/tasks/app/runners.ts:182-185`：runner 本体只有一句
+	// `completeAiCameraTask(ctx)` ⇒ 没有 `Upload`、没有 `FinalKey`、也不换任何会话。
+	//
+	// ⚠ 它是这一张表里**唯一一条两枪用两枚不同凭据**的（① 票 / ② Basic 整串），
+	// 也是唯一一条响应不是 JSON 的（② 回 SSE）—— 两处的逐字取舍与"选哪一档样图"
+	// 都写在 `internal/app/task_matrix_play_ai.go` 文件头。
+	//
+	// ⚠ 2026-09-26 接上：请求侧与读法已于本日落码（`internal/upstream/app_play_ai_chat_sse.go`），
+	// 但 ② 的响应**零实拍** ⇒ "接上"仍只到**形状**那一层。真正的缺口（`userId` 与旧实现
+	// 不同源、样图前缀比不比、`name` 那一格上游读不读）另有登记处：
+	// `docs/pending-decisions.md` **R37** —— 别再把它放回 [taskMatrixToolGaps]。
+	585: {Name: "AI 相机：识图后问一句", AICamera: true},
 }
 
 // taskMatrixToolGaps 是"旧实现有专属玩法、本仓还接不上"的那批，**逐条写明缺哪一族**。
@@ -429,7 +456,11 @@ var taskMatrixToolGaps = map[int64]string{
 	// `docs/pending-decisions.md` R35 / R36。
 	1028: "AI 工作台要 DES/RSA 派生 + SSE 对话那一族（本仓零实现）⇒ 缺的不是邮箱会话，" +
 		"而 `aiChatMessage` 这一格配置本仓也没有",
-	585: "AI 相机的玩法链本仓未实现",
+	// ⚠ 585（AI 相机）在 2026-09-26 从本表挪进 [taskMatrixRunners]：两枪（① `aiRecognize`、
+	// ② `chat/v2/add`）与那三档 SSE 读法都已落码（`app_play_ai_chat_sse.go` +
+	// `task_matrix_play_ai.go`）。别再放回本表（同上面 107 / 434 / 472 / 1014 那几格的写法）——
+	// 留着会让界面上永远显示"没接玩法"，而它真正的缺口（② 响应零实拍、`userId` 与旧实现
+	// 不同源）另有登记处：`docs/pending-decisions.md` R37。
 }
 
 // PlanTaskStep 决定对一条任务做什么。
