@@ -1,23 +1,28 @@
 package app
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 139 邮箱那一半（472 / 473：① 换票 → ② 换会话 → ③ 活跃 → ④ 打卡）
+// 139 邮箱那一族（会话 472 / 473：① 换票 → ② 换会话 → ③ 活跃 → ④ 打卡；
+// 资产侧 1020：①②→⑧，1014：①②→传一份 PDF→⑥）
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// 这一族的形状（四枪各发几次、失败时怎么说）在 `task_matrix_mail.go` 的
-// [runMailExperience] 与 [mailSessionFor]；四枪的请求面与响应判定在
-// `internal/upstream/app_mail139.go`（那里有 14 条形状用例）。
-// 这一节只判**编排层**：什么时候不发、同一趟复用不复用、失败时念哪一档、
-// 错误文本里带不带凭据。
+// 这一族的形状（每一枪发几次、失败时怎么说）在 `task_matrix_mail.go` 的
+// [runMailExperience]、[runMailBackup]、[runMailPDF] 与 [mailSessionFor]；
+// 请求面与响应判定在 `internal/upstream/app_mail139.go` 与 `app_mail139_assets.go`。
+// 这一层只判**编排层**：什么时候不发、同一趟复用不复用、失败时念哪一档、
+// 错误文本里带不带凭据、写进网盘的那一份清不清。
 //
-// ⭐ 这一节存在的另一半理由，是"一趟内换一次会话"那一格（472 与 473 是同名的两条）：
-// 旧实现靠 `ctx.state.mail139` 做到，而我们**只在成功时缓存** —— 没有这一节断言，
-// 把缓存写丢（每条各换一次）与写死（失败也不换第二回）都不会让任何测试变红，
-// 而前者是"多打两枪去敲邮箱"，后者是"473 永远做不了"。
+// ⭐ 这一节存在的另一半理由，是"一趟内换一次会话"那一格：旧实现靠 `ctx.state.mail139`
+// 做到，而我们**只在成功时缓存** —— 没有这一节断言，把缓存写丢（每条各换一次）与写死
+// （失败也不换第二回）都不会让任何测试变红，而前者是"多打两枪去敲邮箱"，
+// 后者是"下一条永远做不了"。资产侧那两条各自在拿到会话之后打**别的口**（一个先传文件），
+// 所以"共用一张会话"在会话族与资产族各有一条用例（[TestTaskMatrixRunMailAssetTasksShareOneSession]）。
 //
-// ⚠ 夹具**全是合成**的：② 的响应形状在本仓零实拍（实拍只捕获到请求面，
-// 成文见 `app_mail139.go` 文件头），③④ 连请求面都没有。所以这些用例钉的是
-// "编排层怎么处置每一种读数"，**不是**"上游会这样回"。
+// ⚠ 夹具**大部分是合成**的：② 的响应形状在本仓零实拍（实拍只捕获到请求面），
+// ③④ 连请求面都没有，⑥⑧ 两口的**成功响应**同样零样本。
+// 反过来说，2026-09-26 的真跑让**同一张会话**在另外两台子域上各拿到过一次真实读数
+// （⑤⑦ 都回 `code:"S_OK"`，成文 `docs/capture/app-mail139-samples.txt` §8）⇒
+// "这张票是活的"不再是假设，但那些读数**不**支持本文件任何一条断言：这些用例钉的仍是
+// "编排层怎么处置每一种读数"，不是"上游会这样回"。
 
 import (
 	"regexp"
@@ -48,6 +53,22 @@ const (
 	// mxMailNoSession 演"② 回了 200 但没给那两枚"—— 这正是本族**唯一有依据**的失败档
 	// （判据照旧实现：只看 `var.sid` / `var.rmkey`，谁都不看 code）。
 	mxMailNoSession = `{"var":{},"code":"S_ERROR"}`
+
+	// ── 资产侧那两口（玩法 1020 的 ⑧ / 玩法 1014 的 ⑥）──
+	//
+	// mxMailBackupEndpoint 按**路径**匹配（⑧ 与 ③ 同一台主机，两条路径互不为子串）。
+	mxMailBackupEndpoint = "/mailsms/sms/backup"
+	// mxMailDiskEndpoint 是 ⑤⑥ **共用**的路径（两口只换查询里的 `func`）⇒ 今天编排层
+	// 只发 ⑥，按它计数就是"转换那一发"；将来接 ⑤ 时必须改成按 `func=` 分，
+	// 与 [mxSpecTokenEndpoint] 同一口径（按 URL 分会把两口算成一口）。
+	mxMailDiskEndpoint = "/mw2/file/disk"
+	// mxMailConvertFunc 就是上一句"按 `func` 分"的那一枚，用来认"这一发是转换"。
+	mxMailConvertFunc = "disk:convertPdfFromYunFile"
+	// mxMailAssetOK / mxMailAssetNo 是这一族的两个读数：成功码是**字符串** `S_OK`
+	// （与签到族那个数字 `0` 不是一回事，成文在 `app_mail139_assets.go` 里
+	// `mailAssetOKCode` 那一条注释）。
+	mxMailAssetOK = `{"code":"S_OK"}`
+	mxMailAssetNo = `{"code":"S_ERROR","summary":"额度不足"}`
 )
 
 // mailSessionBody 是 ② 的成功响应（`var.sid` + `var.rmkey`）。
@@ -91,6 +112,57 @@ func mailSpecTokenCount(script *liveTaskScript) int {
 // uuidShape 是 [core.UUIDv4] 的规范形状。用它而不是比字面量：cguid 由随机源造，
 // 编排层不许把它的值钉成一个串（要钉的是"带带了、而且是个像样的 cguid"）。
 var uuidShape = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+// mailDiskDigitsShape 是 ⑤⑥ 那两枚查询参数的形状（旧 TS：`"0"+8 位十进制` 与
+// `0.` 后 15 位）。同样只比形状 —— 值由 [mailDiskRandoms] 从随机源造，钉字面量等于
+// 把"每一发都换一枚"这件事写成"永远是那一枚"。
+var mailDiskDigitsShape = regexp.MustCompile(`^0[0-9]{8}$`)
+
+var mailDiskRndShape = regexp.MustCompile(`^0\.[0-9]{15}$`)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 资产侧夹具：② 成功 + ⑧⑥ 两口的响应 + `file/create` 的自定义档
+// ─────────────────────────────────────────────────────────────────────────────
+
+// mailSessionOnly 只给 ② 编成功响应。资产侧那两条**不发** ③④ ⇒ 这里刻意不给它们路由：
+// 误发就是 404，而各条用例的 forbid 计数会立刻红在"多打了邮箱会话之外那一枪"上。
+func mailSessionOnly() []liveTaskRoute {
+	return []liveTaskRoute{{mxMailInLoginEndpoint, []string{mailSessionBody()}}}
+}
+
+// mailAssetRoutes 给 ⑧⑥ 两口编响应（顺序无关：两条路径互不为子串）。
+func mailAssetRoutes(backup, convert string) []liveTaskRoute {
+	return []liveTaskRoute{
+		{mxMailBackupEndpoint, []string{backup}},
+		{mxMailDiskEndpoint, []string{convert}},
+	}
+}
+
+// mailCreateBody 造一份**自定义**的 `file/create` 响应（演"这一趟没有 fileId"那一档）。
+// 三枪一起给，因为漏掉 PUT/complete 的路由会让"没传成"变成"传到一半撞 404"，
+// 那是另一件事（由 [TestTaskMatrixRunMailPDFSkipsConvertWithoutFileID] 之外的用例管）。
+func mailCreateBody(body string) []liveTaskRoute {
+	return []liveTaskRoute{
+		{mxCreateEndpoint, []string{body}},
+		{mxPutHost, []string{""}},
+		{mxCompleteEndpoint, []string{`{"code":"0000","success":true}`}},
+	}
+}
+
+// queryValue 取出 URL 查询里那一枚参数的值（按 `&` 截断）。
+//
+// ⚠ 要能匹配**非首位**的参数：⑤⑥ 那条 URL 的首位是 `func`，`sid` / `rnd` / `cguid`
+// 全在后面（旧 TS `buildQuery` 写死的顺序），只按 `?key=` 找会永远返回空串，
+// 红出来像"参数没带"。
+func queryValue(url, key string) string {
+	for _, sep := range []string{"?" + key + "=", "&" + key + "="} {
+		if _, rest, ok := strings.Cut(url, sep); ok {
+			value, _, _ := strings.Cut(rest, "&")
+			return value
+		}
+	}
+	return ""
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 分派：这两条该被认成玩法，而不是缺口
@@ -450,5 +522,359 @@ func TestTaskMatrixRunMailAutologinFailureStillClicks(t *testing.T) {
 	}
 	if !log.hasAt(core.LevelError, "邮箱任务失败") {
 		t.Errorf("③ 失败要 error 一行，实得：\n%s", log.joined())
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 资产侧（玩法 1020「邮箱资产备份」= ①②→⑧ / 玩法 1014「PDF 转换」= ①②→上传→⑥）
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestPlanTaskStepSelectsMailAssetTasks ⭐ 这两条走 runner，且各自只有一个资产侧开关。
+//
+// 反向改坏：把任一条挪回缺口表 ⇒ 红；给 1020 顺手挂 `FinalKey`（"邮箱任务都要打市场卡"
+// 那种想当然）⇒ 红；给 1014 挂上 `Upload` 那一份配置 ⇒ 也红（它要的是**固定内容**的
+// 那份 PDF，不是随机文件，见 [taskRunnerSpec.MailPDF]）。
+func TestPlanTaskStepSelectsMailAssetTasks(t *testing.T) {
+	for _, id := range []int64{1014, 1020} {
+		item := dispatchItem(id, "day", "邮箱资产侧玩法", "WAIT", 0)
+		plan := PlanTaskStep(item, taskStepInput{})
+		if plan.Kind != StepRunner {
+			t.Errorf("%d 该走专属玩法，实得 %v（%s）", id, plan.Kind, plan.Reason)
+		}
+		if plan.Runner == "" {
+			t.Errorf("%d 的结论要能说出是哪一条玩法做的，实得空", id)
+		}
+		spec, ok := taskMatrixRunners[id]
+		if !ok {
+			t.Fatalf("%d 不在 runner 表里", id)
+		}
+		if spec.MailPDF == spec.MailBackup {
+			t.Errorf("%d 的形状只该有一个资产侧开关（两个都真=同一趟既传 PDF 又备份），实得 %+v",
+				id, spec)
+		}
+		if spec.Mail || spec.Upload != nil || spec.Shares || spec.Notes ||
+			spec.FinalKey != "" || spec.OpensEntry {
+			t.Errorf("%d 不该带别的玩法开关，实得 %+v", id, spec)
+		}
+		if _, gap := taskMatrixToolGaps[id]; gap {
+			t.Errorf("%d 接上后没从缺口表删掉 ⇒ 界面上会永远显示'没接玩法'", id)
+		}
+	}
+}
+
+// TestTaskMatrixRunMailBackupSendsSessionThenBackup ⭐ 1020：会话两枪 + ⑧ 一枪，别的一枪没有。
+//
+// ⭐ 这一条的核心是 forbid 那一半：旧实现 1020 那一条 runner **只**取会话再打 ⑧
+// （`runners.ts:160-165`），它不碰 ③ 的活跃、也不碰 472 那一发市场打卡。
+// 把两条邮箱玩法抄成同一条的表现是多打两枪 —— 而 ③④ 今天真实回 404（实拍
+// `docs/capture/app-mail139-samples.txt` §2/§4），多打就是往上游发两句没人认的请求，
+// 事件流里还各带一行"失败"，把这一条本来成功的结果搅浑。
+func TestTaskMatrixRunMailBackupSendsSessionThenBackup(t *testing.T) {
+	waiting := mxItems(mxItem(1020, "day", "邮箱资产备份", "WAIT", "", 0))
+	script := mxScript([]string{"JWT-1"}, waiting, nil, append(
+		append(mailAssetRoutes(mxMailAssetOK, mxMailAssetOK), mailSessionOnly()...),
+		mxHappy()...)...)
+	log := &mxLog{}
+	res, perr := mxResult(t, mailRun(t, script, log.handle()))
+	if perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	if n := mailSpecTokenCount(script); n != 1 {
+		t.Errorf("① 该恰好一发（带 %s 的那一发），实得 %d", upstream.Mail139SourceID, n)
+	}
+	if n := script.count(mxMailInLoginEndpoint); n != 1 {
+		t.Errorf("② 该一发，实得 %d", n)
+	}
+	if n := script.count(mxMailBackupEndpoint); n != 1 {
+		t.Errorf("⑧ 该恰好一发，实得 %d", n)
+	}
+	for _, forbidden := range []string{mxMailAutoLoginEndpoint, mxMailClickEndpoint,
+		mxMailDiskEndpoint, mxCreateEndpoint, mxCompleteEndpoint, mxTrashEndpoint} {
+		if n := script.count(forbidden); n != 0 {
+			t.Errorf("1020 不该打 %s，实得 %d 次", forbidden, n)
+		}
+	}
+	if clicks := mxClicks(script); len(clicks) != 1 || !strings.Contains(clicks[0], "id=1020") {
+		t.Errorf("1020 只该有前置那一发通用打卡，实得 %v", clicks)
+	}
+	backup, has := mailRequest(script, mxMailBackupEndpoint)
+	if !has {
+		t.Fatal("没看到 ⑧ 那一枪")
+	}
+	// ⑧ 吃的是**这一趟**换到的那张会话（URL 里那枚 sid），不是别的号留下的。
+	if got := queryValue(backup.URL, "sid"); got != mxMailSID {
+		t.Errorf("⑧ 的 URL 要带 ② 换到的 sid，实得 %q", strings.Split(backup.URL, "?")[0])
+	}
+	// ⭐ 这一口经旧实现的**主实例**发 ⇒ 带 authorization（与 ③ 同一处置，成文在
+	// `app_mail139_assets.go` 的 [MailBackupRequest] 头注）。少了它是最难查的一种坏：
+	// 上游回 401，而事件流只念"备份失败"。
+	if got := headerValue(backup, "authorization"); got != wholeAuth {
+		t.Errorf("⑧ 要带库里的整串 authorization（这一口走主实例），实得非空=%v", got != "")
+	}
+	if got := string(backup.Body); got != "{}" {
+		t.Errorf("⑧ 的体是空对象（旧实现那一份），实得 %q", got)
+	}
+	if !log.has("邮箱备份已提交 邮箱资产备份 1020") {
+		t.Errorf("成功那一档要念「已提交」而不是「已完成」（成败由复查说），实得：\n%s", log.joined())
+	}
+	if strings.Contains(log.joined(), "邮箱备份失败") {
+		t.Errorf("全成功的一趟不许念失败：\n%s", log.joined())
+	}
+	if res.Counts.Ran != 1 || res.Counts.Failed != 0 {
+		t.Errorf("应记 1 条玩法、0 条失败，实得 %+v", res.Counts)
+	}
+}
+
+// TestTaskMatrixRunMailBackupFailureKeepsCredentialsOut ⭐ ⑧ 非 2xx ⇒ 一句失败、不泄 sid。
+//
+// ⚠ **这一条钉的边界要说清**（否则会被误读成"脱敏有测试了"）：夹具对没料到的端点回
+// `404 + "no route for <完整 URL>"`，而协议层 [errorFromStatus] 只把状态码写进错误文本
+// （体不进）⇒ 摘掉 `redactError` **不会**让本条红。那一格的反向用例在协议层：
+// `TestAppMailBackupRedactsTransportError`（它复刻了真实传输层错误那句含 URL 的形状）。
+//
+// 本条因此钉的是**编排层自己不 echo**：将来谁在 [runMailBackup] 那句 problem 里
+// 顺手补一段"发往 <URL>"（这是最常见的一种"方便排查"），sid 就会进结论与事件流 ——
+// 那时本条红。两个方向合起来才是这一族的凭据边界。
+func TestTaskMatrixRunMailBackupFailureKeepsCredentialsOut(t *testing.T) {
+	waiting := mxItems(mxItem(1020, "day", "邮箱资产备份", "WAIT", "", 0))
+	// 只给 ⑥ 与 ② 编路由、**不**给 ⑧ ⇒ 它撞夹具那句 404。
+	script := mxScript([]string{"JWT-1"}, waiting, nil, append(
+		append(mailAssetRoutes(mxMailAssetOK, mxMailAssetOK)[1:], mailSessionOnly()...),
+		mxHappy()...)...)
+	log := &mxLog{}
+	res, perr := mxResult(t, mailRun(t, script, log.handle()))
+	if perr != nil {
+		t.Fatalf("单条失败不该让整趟报错: %v", perr)
+	}
+	if n := script.count(mxMailBackupEndpoint); n != 1 {
+		t.Errorf("⑧ 该发出去过（它是唯一能知道上游认不认的手段），实得 %d", n)
+	}
+	text := res.Steps[0].Err
+	if !strings.Contains(text, "邮箱备份（⑧）失败") {
+		t.Errorf("要说清挂的是 ⑧，否则与'会话没换到'分不开，实得 %q", text)
+	}
+	if !strings.Contains(text, "HTTP 404") {
+		t.Errorf("上游的状态码要带进来，实得 %q", text)
+	}
+	for _, leak := range []string{mxMailSID, mxMailRMKey, "SSO-1"} {
+		if strings.Contains(text, leak) || strings.Contains(log.joined(), leak) {
+			t.Errorf("失败文本里带了凭据（sid/rmkey/票都只准待在内存里）：%q", leak)
+		}
+	}
+	if !log.hasAt(core.LevelError, "邮箱备份失败 邮箱资产备份 1020") {
+		t.Errorf("这一档必须是 error，实得：\n%s", log.joined())
+	}
+	if res.Counts.Failed != 1 || res.Counts.Ran != 0 {
+		t.Errorf("应落失败 1 条，实得 %+v", res.Counts)
+	}
+}
+
+// TestTaskMatrixRunMailPDFUploadsThenConverts ⭐ 1014：会话 → 传一份 PDF（三枪）→ ⑥。
+//
+// 三格判据各挡一种错：
+//   - **先换会话再传**：反过来会出现"会话都没换到，已经在用户网盘里写了一个文件"。
+//   - **⑥ 的 fileId 来自这一次上传的响应**：旧实现读 `ctx.state.files` 的末位，那是
+//     共享可变状态（同一趟里别的任务也往里塞）⇒ 用固定夹具时看不出来，一旦前一格
+//     传了 3 个文件就转错了对象。这里把 create 回的那一枚钉进 ⑥ 的体。
+//   - **链尾清掉传上去那一份**（转换产物不在这一条链上，R36）。
+func TestTaskMatrixRunMailPDFUploadsThenConverts(t *testing.T) {
+	waiting := mxItems(mxItem(1014, "day", "PDF 转换", "WAIT", "", 0))
+	script := mxScript([]string{"JWT-1"}, waiting, nil, append(
+		append(append(mailAssetRoutes(mxMailAssetOK, mxMailAssetOK), mailSessionOnly()...),
+			mxUploadRoutes(1)...), mxHappy()...)...)
+	log := &mxLog{}
+	res, perr := mxResult(t, mailRun(t, script, log.handle()))
+	if perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	if n := script.count(mxMailInLoginEndpoint); n != 1 {
+		t.Errorf("② 该一发，实得 %d", n)
+	}
+	if creates, puts, completes := mxUploadCounts(script); creates != 1 || puts != 1 ||
+		completes != 1 {
+		t.Errorf("该恰好三枪，实得 create %d / PUT %d / complete %d", creates, puts, completes)
+	}
+	if n := script.count(mxMailDiskEndpoint); n != 1 {
+		t.Errorf("⑥ 该恰好一发，实得 %d", n)
+	}
+	// 时序：会话（in）→ 占位（create）→ 转换（disk）。
+	in, create, convert := requestIndex(script, mxMailInLoginEndpoint),
+		requestIndex(script, mxCreateEndpoint), requestIndex(script, mxMailConvertFunc)
+	if !(in >= 0 && create > in && convert > create) {
+		t.Errorf("时序应为 换会话>传文件>转换，实得 %d / %d / %d（全部：%v）",
+			in, create, convert, mxURLs(script))
+	}
+	converted, has := mailRequest(script, mxMailConvertFunc)
+	if !has {
+		t.Fatal("没看到 ⑥ 那一枪")
+	}
+	// ⑥ 走的是旧 TS 原生 fetch 那一档 ⇒ **不**带 authorization（与 ⑧ 相反，两处都成文）。
+	if got := headerValue(converted, "authorization"); got != "" {
+		t.Errorf("⑥ 不该带 authorization（这一口在旧实现里没经过主实例），实得非空")
+	}
+	if !strings.Contains(headerValue(converted, "cookie"), "RMKEY=") {
+		t.Errorf("⑥ 靠 Cookie 里的会话认人，实得头集合 %v", headerNames(converted))
+	}
+	// 两枚随机参数：带上了、形状对（值由随机源造 ⇒ 只比形状）。
+	if got := queryValue(converted.URL, "cguid"); !mailDiskDigitsShape.MatchString(got) {
+		t.Errorf("⑥ 的 cguid 要形如 0+8 位十进制，实得 %q", got)
+	}
+	if got := queryValue(converted.URL, "rnd"); !mailDiskRndShape.MatchString(got) {
+		t.Errorf("⑥ 的 rnd 要形如 0.<15 位>，实得 %q", got)
+	}
+	body := string(converted.Body)
+	if !strings.Contains(body, "<string name=\"fileId\">SYNTH-FID-1</string>") {
+		t.Errorf("⑥ 转的必须是这一次传上去的那一份，实得 %q", body)
+	}
+	if !strings.Contains(body, `<int name="convertType">1</int>`) {
+		t.Errorf("⑥ 的 convertType 用旧实现那两处的定值 1，实得 %q", body)
+	}
+	if !strings.Contains(body, `<string name="fileName">asign-pdf-`) {
+		t.Errorf("⑥ 的 fileName 要跟上到网盘的那一个名字（同一枚时间戳），实得 %q", body)
+	}
+	// 网盘那一格进了清理账本，链尾删的是**同一枚** id。
+	if len(res.CloudFileIDs) != 1 || res.CloudFileIDs[0] != "SYNTH-FID-1" {
+		t.Errorf("传上去的 fileId 要进清理链，实得 %v", res.CloudFileIDs)
+	}
+	if n := mxTrashCount(script); n != 1 || !strings.Contains(mxTrashBodies(script)[0], "SYNTH-FID-1") {
+		t.Errorf("链尾该把这一份移进回收站，实得 %d 次 / %v", n, mxTrashBodies(script))
+	}
+	if res.Steps[0].Uploads != 1 || res.Counts.Uploaded != 1 {
+		t.Errorf("这一条要按'写了一个文件'记账，实得 %+v / %+v", res.Steps[0], res.Counts)
+	}
+	if !strings.Contains(log.joined(), "PDF 转换已提交") {
+		t.Errorf("成功那一档要念「已提交」（不念「已完成」：成败由复查说），实得：\n%s", log.joined())
+	}
+	if !strings.Contains(log.joined(), "PDF 素材已上传") {
+		t.Errorf("上传那一行要单独念（它说了走了哪一档），实得：\n%s", log.joined())
+	}
+	if strings.Contains(log.joined(), "PDF 转换失败") {
+		t.Errorf("全成功的一趟不许念失败：\n%s", log.joined())
+	}
+	if res.Counts.Ran != 1 || res.Counts.Failed != 0 {
+		t.Errorf("应记 1 条玩法、0 条失败，实得 %+v", res.Counts)
+	}
+}
+
+// TestTaskMatrixRunMailPDFSkipsConvertWithoutFileID ⭐ 上游说"同名已存在" ⇒ ⑥ 不发、也不删。
+//
+// 这一档刻意**不**"退回用别的 id 转一次"：手上这一枚没有，转哪个都是猜。
+// 反向改坏两种：把 `receipt.FileID == ""` 那一支删掉 ⇒ ⑥ 带着空 fileId 发出去
+// （协议层会拦，红成"⑥ 发了 1 次"）；把"已存在"当成成功 ⇒ 事件流念「已上传」。
+func TestTaskMatrixRunMailPDFSkipsConvertWithoutFileID(t *testing.T) {
+	waiting := mxItems(mxItem(1014, "day", "PDF 转换", "WAIT", "", 0))
+	script := mxScript([]string{"JWT-1"}, waiting, nil, append(append(append(
+		mailAssetRoutes(mxMailAssetOK, mxMailAssetOK), mailSessionOnly()...),
+		mailCreateBody(`{"code":"0000","success":true,"data":`+
+			`{"exist":true,"rapidUpload":false}}`)...), mxHappy()...)...)
+	log := &mxLog{}
+	res, perr := mxResult(t, mailRun(t, script, log.handle()))
+	if perr != nil {
+		t.Fatalf("这一档不该让整趟报错: %v", perr)
+	}
+	if n := script.count(mxMailDiskEndpoint); n != 0 {
+		t.Errorf("没有 fileId 就不该发 ⑥，实得 %d", n)
+	}
+	if n := script.count(mxCompleteEndpoint); n != 0 {
+		t.Errorf("同名已存在 ⇒ 后两枪都不发（旧实现同一处置），实得 %d", n)
+	}
+	if n := mxTrashCount(script); n != 0 {
+		t.Errorf("不是我们造的那一格不许删，实得 %d 次", n)
+	}
+	text := res.Steps[0].Err
+	if !strings.Contains(text, "没有 fileId") || !strings.Contains(text, "已存在") {
+		t.Errorf("要说清'为什么没转'与'上游那句是已存在'，实得 %q", text)
+	}
+	if !log.hasAt(core.LevelWarn, "PDF 转换跳过") {
+		t.Errorf("这一档是 warn（没做成、但也没写坏任何东西），实得：\n%s", log.joined())
+	}
+	if strings.Contains(log.joined(), "PDF 素材已上传") {
+		t.Errorf("没拿到 fileId 不许念「已上传」：\n%s", log.joined())
+	}
+	if len(res.CloudFileIDs) != 0 {
+		t.Errorf("没有新对象就不该有清理账，实得 %v", res.CloudFileIDs)
+	}
+	if res.Counts.Failed != 1 {
+		t.Errorf("没做成要落失败那一档（不是'跑过了'），实得 %+v", res.Counts)
+	}
+}
+
+// TestTaskMatrixRunMailPDFFailureStillTrashesUploadedFile ⭐ ⑥ 被拒 ⇒ 传上去那一份仍要删。
+//
+// 这一格钉的是**副作用收尾**：写已经发生了，玩法成没成不改变"要把它清掉"。
+// 反过来的写法（只在成功时记账）会留下一个用户网盘里没人认领的文件，
+// 而那正是本仓给这一族加清理链的全部理由。
+func TestTaskMatrixRunMailPDFFailureStillTrashesUploadedFile(t *testing.T) {
+	waiting := mxItems(mxItem(1014, "day", "PDF 转换", "WAIT", "", 0))
+	script := mxScript([]string{"JWT-1"}, waiting, nil, append(append(append(
+		mailAssetRoutes(mxMailAssetOK, mxMailAssetNo), mailSessionOnly()...),
+		mxUploadRoutes(1)...), mxHappy()...)...)
+	log := &mxLog{}
+	res, perr := mxResult(t, mailRun(t, script, log.handle()))
+	if perr != nil {
+		t.Fatalf("单条失败不该让整趟报错: %v", perr)
+	}
+	if n := script.count(mxMailDiskEndpoint); n != 1 {
+		t.Errorf("⑥ 该发出去过，实得 %d", n)
+	}
+	text := res.Steps[0].Err
+	if !strings.Contains(text, "PDF 转换（⑥）失败") {
+		t.Errorf("要说清挂的是 ⑥（不是会话、也不是上传），实得 %q", text)
+	}
+	if !strings.Contains(text, "S_ERROR") {
+		t.Errorf("上游那句 code 要带进来，实得 %q", text)
+	}
+	if !strings.Contains(text, "转换产物") {
+		t.Errorf("要写明产物那一格未知（R36），别让人以为'跑完什么都没留下'，实得 %q", text)
+	}
+	if n := mxTrashCount(script); n != 1 || !strings.Contains(mxTrashBodies(script)[0], "SYNTH-FID-1") {
+		t.Errorf("失败也要清理那一份素材，实得 %d 次 / %v", n, mxTrashBodies(script))
+	}
+	if !log.hasAt(core.LevelError, "PDF 转换失败 PDF 转换 1014") {
+		t.Errorf("⑥ 被拒是 error，实得：\n%s", log.joined())
+	}
+	if strings.Contains(log.joined(), "PDF 转换已提交") {
+		t.Errorf("上游没认就不许念「已提交」：\n%s", log.joined())
+	}
+	if res.Counts.Failed != 1 {
+		t.Errorf("应落失败 1 条，实得 %+v", res.Counts)
+	}
+}
+
+// TestTaskMatrixRunMailAssetTasksShareOneSession ⭐ 1014 + 1020 同一趟：①② 各一发。
+//
+// 与 [TestTaskMatrixRunMailReusesSessionAcrossTwoTasks] 同一格判据，但**必须单独有这一条**：
+// 共用会话那两格（472/473）走的是 [runMailExperience]，而资产侧这两条各自在拿到会话之后
+// 打**别的口**（一个先传文件）。把缓存改成只在某一族生效，上面那条不会红。
+// ⚠ 两条任务刻意不同名（读表按 name 去重、id 小的赢）。
+func TestTaskMatrixRunMailAssetTasksShareOneSession(t *testing.T) {
+	waiting := mxItems(
+		mxItem(1014, "day", "PDF 转换", "WAIT", "", 0),
+		mxItem(1020, "day", "邮箱资产备份", "WAIT", "", 0),
+	)
+	script := mxScript([]string{"JWT-1"}, waiting, nil, append(append(append(
+		mailAssetRoutes(mxMailAssetOK, mxMailAssetOK), mailSessionOnly()...),
+		mxUploadRoutes(1)...), mxHappy()...)...)
+	res, perr := mxResult(t, mailRun(t, script, (&mxLog{}).handle()))
+	if perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	if n := mailSpecTokenCount(script); n != 1 {
+		t.Errorf("两条共用一次换票，实得 %d", n)
+	}
+	if n := script.count(mxMailInLoginEndpoint); n != 1 {
+		t.Errorf("两条共用一次换会话，实得 %d", n)
+	}
+	if n := script.count(mxMailBackupEndpoint); n != 1 {
+		t.Errorf("⑧ 只属于 1020，该一发，实得 %d", n)
+	}
+	if n := script.count(mxMailDiskEndpoint); n != 1 {
+		t.Errorf("⑥ 只属于 1014，该一发，实得 %d", n)
+	}
+	if n := script.count(mxMailAutoLoginEndpoint) + script.count(mxMailClickEndpoint); n != 0 {
+		t.Errorf("资产侧这两条都不该碰 ③④，实得 %d", n)
+	}
+	if res.Counts.Ran != 2 || res.Counts.Failed != 0 {
+		t.Errorf("应记 2 条玩法，实得 %+v", res.Counts)
 	}
 }

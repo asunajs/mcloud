@@ -36,6 +36,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/catlair/mcloud/internal/core"
 	"github.com/catlair/mcloud/internal/upstream"
@@ -145,5 +146,159 @@ func (e *taskExecutor) runMailExperience(
 		return true, append(problems, problem)
 	}
 	e.run.progress(core.LevelInfo, fmt.Sprintf("邮箱市场已打卡 %s %d", name, id))
+	return true, problems
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 资产侧那两口（玩法 **1020 邮箱备份** / **1014 PDF 转换**）
+// ─────────────────────────────────────────────────────────────────────────────
+
+// mailDiskRandoms 造 ⑤⑥ 那两枚查询参数（形状按旧 TS：`cguid = "0" +
+// Math.floor(Math.random()*1e8)`、`rnd = Math.random().toFixed(15)`）。
+//
+// 为什么在编排层而不是协议层：[upstream] 是纯层，不许自取随机数（AGENTS.md 那一族
+// 口径成文在 `app_mail139_assets.go` 的 [mailDiskQuery] 头注），而这两枚**必须**每次不同
+// —— 它们是旧实现里"看着像参数、其实是防缓存"的那一类（零样本说上游比过它们的值）。
+//
+// ⚠ 这里用 `% 10` 取十进制位，**不**做拒绝采样：本仓对取模偏差的要求在**设备指纹**
+// 那一条（`core.Below` 的头注），这两枚值今天没有任何已知判据读它的分布。
+// 将来若拍到"上游认 cguid 的取值范围"，改的是这一处，并顺带删掉这句话。
+func mailDiskRandoms(r core.Random) (string, string) {
+	var b [15]byte
+	r.FillBytes(b[:])
+	digits := make([]byte, 0, len(b))
+	for _, v := range b {
+		digits = append(digits, byte('0'+v%10))
+	}
+	return "0" + string(digits[:8]), "0." + string(digits)
+}
+
+// mailPDFAsset 是玩法 1014 要上传的那一份**最小 PDF**（名字 + 字节），逐字按旧 TS
+// `runners.ts:285-311` 里 `pdfConvertTask` 拼的那一串（含那张 xref 表里的偏移量 ——
+// 它是**手写死的**，与真实对象位置并不严格对应；照抄，不"顺手修正"：
+// 上游收到过的就是这一份，而它读不读 xref **未测试**）。
+//
+// `ts` 由调用方给（同一个毫秒戳同时进文件名与正文 ⇒ 一趟里两份读数对得上）。
+func mailPDFAsset(ts int64) (string, []byte) {
+	uniqueText := "asign auto pdf " + strconv.FormatInt(ts, 10)
+	name := "asign-pdf-" + strconv.FormatInt(ts, 10) + ".pdf"
+	content := "" +
+		"%PDF-1.4\n" +
+		"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n" +
+		"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n" +
+		"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R " +
+		"/Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n" +
+		"4 0 obj\n<< /Length " + strconv.Itoa(len(uniqueText)+50) + " >>\nstream\n" +
+		"BT\n/F1 18 Tf\n72 720 Td\n(" + uniqueText + ") Tj\nET\n" +
+		"endstream\nendobj\n" +
+		"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n" +
+		"xref\n0 6\n0000000000 65535 f\n0000000009 00000 n\n0000000058 00000 n\n" +
+		"0000000115 00000 n\n0000000223 00000 n\n0000000378 00000 n\n" +
+		"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n444\n%%EOF\n"
+	return name, []byte(content)
+}
+
+// runMailBackup 跑玩法 **1020「邮箱资产备份」**：会话（①②）→ ⑧ `mailsms/sms/backup`。
+//
+// ⚠ 它与 [runMailExperience] 的**形状差别**（这是判据，不是风格）：旧实现这一条
+// 只取会话，**不打 ③、也不打 ④**（`runners.ts:160-165`），而它后面那一发就是任务本体
+// ⇒ 通用前置那一发仍由 [PlanTaskStep] 按 `currstep` 门决定。把两条混成一个的表现：
+// 要么给这一条多发一发 404 的市场打卡，要么该打的会话少一环。
+//
+// ⚠ ⑧ 是**写**：它请求的是"把这个号的短信/邮箱备份跑一次"。本仓**不判**它的响应
+// （协议层成文：只把"没发出去 / 非 2xx"交回），所以念出来的是"已提交"，
+// 而"这一条任务上游认没认"由复查那一趟说话。
+func (e *taskExecutor) runMailBackup(
+	ctx context.Context, item upstream.TaskV2Item,
+) (bool, []string) {
+	name, id := taskNameOf(item), derefTaskID(item)
+	session, fired, problems := e.mailSessionFor(ctx)
+	if len(problems) > 0 {
+		e.run.progress(core.LevelError, fmt.Sprintf("邮箱备份失败 %s %d：%s", name, id, problems[0]))
+		return fired, problems
+	}
+	fired = true
+	if berr := e.src.up.AppMailBackup(
+		ctx, session, e.opening.Credential.Authorization(),
+	); berr != nil {
+		problem := "邮箱备份（⑧）失败：" + berr.Error()
+		e.run.progress(core.LevelError, fmt.Sprintf("邮箱备份失败 %s %d：%s", name, id, berr.Error()))
+		return true, append(problems, problem)
+	}
+	e.run.progress(core.LevelInfo, fmt.Sprintf("邮箱备份已提交 %s %d", name, id))
+	return true, problems
+}
+
+// runMailPDF 跑玩法 **1014「PDF 转换」**：会话（①②）→ 往网盘传一份最小 PDF →
+// ⑥ `disk:convertPdfFromYunFile`（`convertType:1`）。
+//
+// 三处与旧实现一致、各自"改了会怎样"：
+//   - **顺序**：先换会话再传文件（旧实现 `pdfConvertTask` 排在 `getMail139Session` 之后）。
+//     反过来会多出一种表现：会话都没换到，却已经在用户网盘里写了一个文件。
+//   - **fileId 取自这一次上传的收据**，不是旧实现那句 `ctx.state.files` 的末位 ——
+//     那是旧实现"共享可变状态"的偷懒（同一趟里前面别的任务也往里塞）。本仓按
+//     收据取，表现是"转换的一定是这一条刚传上去的那一份"。⚠ 这是一处**与旧实现不同**
+//     的取舍，理由与 434 那一格的教训同源（[taskRunnerSpec.Shares] 那一条脆弱点）。
+//   - **传上去的那一份进清理链**（[taskExecutor.cloudFileIDs]）⇒ 链尾一次 `batchTrash`。
+//     ⚠ 但**转换产物**（⑥ 在网盘/邮箱那一侧生成的 PDF）**不在**这一条链上：
+//     ⑥ 的响应今天只有"上游说 `code`"这一格依据（零实拍），它给不给新 fileId、
+//     落在哪个目录**都不知道** ⇒ 这一格登记成残留问句（`docs/pending-decisions.md` R36），
+//     不假装"跑完什么都没留下"。
+func (e *taskExecutor) runMailPDF(
+	ctx context.Context, item upstream.TaskV2Item, record *TaskStepRecord,
+) (bool, []string) {
+	name, id := taskNameOf(item), derefTaskID(item)
+	session, fired, problems := e.mailSessionFor(ctx)
+	if len(problems) > 0 {
+		e.run.progress(core.LevelError, fmt.Sprintf("PDF 转换失败 %s %d：%s", name, id, problems[0]))
+		return fired, problems
+	}
+	fired = true
+	// ⑥ 要一个真实存在的 fileId ⇒ 先传（**写**）。时间戳读不到就不传（AGENTS.md §1.7：
+	// 一份 1970 年命名、内容里写着 0 的文件会照常留在用户网盘里）。
+	ts, ok := e.nowMillis()
+	if !ok {
+		problem := "PDF 转换没做：时钟没接，造不出文件名与内容里的时间戳（本工具侧缺接线）"
+		e.run.progress(core.LevelError, fmt.Sprintf("PDF 转换失败 %s %d：%s", name, id, problem))
+		return true, append(problems, problem)
+	}
+	uploader, uerr := e.cloudUploader(ctx)
+	if uerr != nil {
+		problem := "PDF 转换没做：" + uerr.Error()
+		e.run.progress(core.LevelError, fmt.Sprintf("PDF 转换失败 %s %d：%s", name, id, problem))
+		return true, append(problems, problem)
+	}
+	fileName, content := mailPDFAsset(ts)
+	receipt, perr := uploader.UploadContent(ctx, content, CloudUploadOptions{Name: fileName})
+	if receipt.FileID != "" {
+		e.cloudFileIDs = append(e.cloudFileIDs, receipt.FileID)
+		record.Uploads++
+	}
+	if perr != nil {
+		problem := "PDF 那份素材没传上去：" + perr.Error() + " ⇒ ⑥ 不发（没有 fileId 可转）"
+		e.run.progress(core.LevelError, fmt.Sprintf("PDF 转换失败 %s %d：%s", name, id, perr.Error()))
+		return true, append(problems, problem)
+	}
+	if receipt.FileID == "" {
+		// 三种"没有 fileId"都落到这里：上游说同名已存在、秒传没回 id、形状变了。
+		// 念"已存在"而不念"传好了"：这一档我们**没有**可转的那一枚。
+		problem := "PDF 那份素材没有 fileId（结局：" + receipt.Outcome.String() +
+			"）⇒ ⑥ 不发，也不去删一个不是我们造的坑"
+		e.run.progress(core.LevelWarn, fmt.Sprintf("PDF 转换跳过 %s %d：%s", name, id, problem))
+		return true, append(problems, problem)
+	}
+	e.run.progress(core.LevelInfo, fmt.Sprintf(
+		"PDF 素材已上传（%s） %s %d", uploadBranchWords(receipt.Outcome), name, id))
+	cguid, rnd := mailDiskRandoms(e.run.Random)
+	if cerr := e.src.up.AppMailConvertPDF(
+		ctx, session, cguid, rnd, receipt.Name, receipt.FileID, int64(len(content)),
+		upstream.MailPDFConvertType,
+	); cerr != nil {
+		problem := "PDF 转换（⑥）失败：" + cerr.Error() +
+			" ⇒ 刚传上去那一份仍会在链尾被移进回收站，但转换产物在不在、落在哪**未知**（R36）"
+		e.run.progress(core.LevelError, fmt.Sprintf("PDF 转换失败 %s %d：%s", name, id, cerr.Error()))
+		return true, append(problems, problem)
+	}
+	e.run.progress(core.LevelInfo, fmt.Sprintf("PDF 转换已提交 %s %d", name, id))
 	return true, problems
 }

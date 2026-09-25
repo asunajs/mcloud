@@ -243,13 +243,21 @@ func liveProbeWorld(t *testing.T) (TaskMatrixRun, core.AccountID, *liveProbeSink
 	return run, account, sink, client
 }
 
-// TestLiveProbeMail139Family 让 139 邮箱那一族的四枪各出一次真实读数。
+// TestLiveProbeMail139Family 让 139 邮箱那一族的四枪各出一次真实读数，
+// 并在会话成立时追加资产侧四口（⑤⑦ 只读 / ⑧⑥ 是写，各发一次）。
 //
-// 逐枪要看的是这三格（都在 `docs/pending-decisions.md` 里挂着）：
+// 逐枪要看的是这几格（都在 `docs/pending-decisions.md` 里挂着）：
 //   - ② 的真实响应**到底有没有** `var.sid` / `var.rmkey`（形状零样本 ⇒ 我们的解析器
 //     是按旧 TS 的文字形状写的）；
 //   - ③ 到底要不要 `authorization`（带与不带各发一次，比对状态码；这一口零实拍）；
-//   - ④ `taskClickV2` 对 472 认不认（回 `code` 就是上游的原话）。
+//   - ④ `taskClickV2` 对 472 认不认（回 `code` 就是上游的原话）；
+//   - ⑤ `disk:surplusNum` 与 ⑦ `mbox:getComposeId` 在**另外两台**子域上认不认这张会话
+//     —— R35 剩下的那一半靠这两发收窄（详见函数末尾那一档的注释）；
+//   - ⑧ `mailsms/sms/backup`（玩法 1020 的本体）与 ⑥ `disk:convertPdfFromYunFile`
+//     （玩法 1014 的本体）**认不认这一发**。这两口今天只有夹具依据 ⇒ 没有本探针就永远
+//     没有真实反馈，而 ⑧ 与 ③ 同机：两句读数不一样，R35 才能收到"路径"这一级。
+//   - 我们那两个解析器（[upstream.ParseMailSurplusNum] / [upstream.ParseMailComposeID]）
+//     在真实体上读不读得出来 —— 它们同样是零实拍落码的。
 //
 // ⚠ 472 今天**不在表里**也算读数：那一格的读数就是"回什么码"，不是"任务有没有被记成完成"。
 // 表里有没有这一条，由 ① 之前那次拉表说 —— 本探针不拉表（那是 app-task 的只读那一半）。
@@ -368,14 +376,16 @@ func TestLiveProbeMail139Family(t *testing.T) {
 		}
 		response, serr := client.Send(ctx, request)
 		sink.dump("④ taskClickV2（直发，看体）", response)
-		// ⑤ 对照枪（**只读**）：同一台 `:7071` 入口上的另一条路由。
+		// ④-对照枪（**只读**）：同一台 `:7071` 入口上的另一条路由。
+		// ⚠ 这一档刻意标成 "④-对照" 而不是 "⑤"：`app_mail139_assets.go` 文件头把资产侧
+		// 那四口编成 ⑤⑥⑦⑧，本函数末尾的 ⑤⑦ 两枪就是那两口的读数，同号会读串。
 		// 为什么要它：④ 回的是一个 **JSON 形状**的 404（`{code:"404", msg:"访问资源不存在"}`），
 		// 而 ③ 回的是 HTML 404 页 —— 两句不一样，说明 ④ 那一枪**到了应用**。
 		// 但"到了应用"仍有两种可能：整个 `:7071/ycloud/` 入口都不认，或只有
 		// `signin/task/taskClickV2` 这一条路由没了。这一枪专门把两者分开：
 		// 它 200 ⇒ 入口活着，挂的是那一条路由；它也 404 ⇒ 更可能是整片入口的问题。
 		controlResponse, _ := client.Send(ctx, upstream.NoticeTaskInfoRequest(s.jwt, s.referer))
-		sink.dump("⑤ 对照（同入口另一条只读路由 getTaskInfo）", controlResponse)
+		sink.dump("④-对照（同入口另一条只读路由 getTaskInfo）", controlResponse)
 		if serr != nil {
 			return struct{}{}, core.NewBadRequest(sink.mask(serr.Error()))
 		}
@@ -388,5 +398,166 @@ func TestLiveProbeMail139Family(t *testing.T) {
 	sink.say("④ 走完整条玩法：发过枪=%v 失败原因 %d 条", fired, len(problems))
 	for _, problem := range problems {
 		sink.say("④ 原因：%s", problem)
+	}
+
+	// ── ⑤⑦ 资产侧两口（**都只读**）：拿 ② 这张会话打**另外两台**子域
+	//
+	// 这一档要收的是 R35 剩下的那一半，而它的分量全在"打的不是同一台"：
+	//   - ③④ 都回 404，两台里 ③ 打的是 `mail.10086.cn` 本身 ⇒ 光看那两枪分不开
+	//     "这张会话无效" 与 "只有那两条路由没了"。
+	//   - ⑤ 打 `html5.mail.10086.cn`、⑦ 打 `appmail.mail.10086.cn`，用的正是 ② 换到的
+	//     同一枚 `sid` / `rmkey`。它们回 `S_OK` ⇒ 会话**是有效的**，③④ 的 404 只能是
+	//     那两条路由；它们也 404 ⇒ 范围从"两条路由"扩到"这一片 web 入口"。
+	// 两种读数都有用，所以这一档**不设**"前面挂了就不发"的闸（② 成了就有会话）。
+	//
+	// ⚠ 两口都**只发一次直发档**：生产路径（[upstream.Upstream.AppMailSurplusNum] /
+	// [upstream.Upstream.AppMailComposeID]）走的是同一个构造器，只多一道判定，
+	// 所以这里把**体形状**与**我们解析器的读数**都念出来，判定文本另发一次拿原话。
+	cguid, rnd := mailDiskRandoms(run.Random)
+	assetCounts, assetStatus, assetErr := run.Upstream.AppMailSurplusNum(ctx, session, cguid, rnd)
+	if assetErr != nil {
+		sink.say("⑤ surplusNum（生产路径）：%s", sink.mask(assetErr.Error()))
+	} else {
+		sink.say("⑤ surplusNum（生产路径）：权益计数=%q 状态=%q",
+			liveProbeClip(assetCounts, 24), liveProbeClip(assetStatus, 24))
+	}
+	surplusRequest, perr := upstream.MailSurplusNumRequest(session, cguid, rnd)
+	if perr != nil {
+		sink.say("⑤ 构造失败：%s", perr.Error())
+	} else {
+		surplusResponse, serr := client.Send(ctx, surplusRequest)
+		sink.dump("⑤ surplusNum（直发，看体）", surplusResponse)
+		if serr != nil {
+			sink.say("⑤ 直发错误：%s（URL 里有 sid ⇒ 已掩码）", sink.mask(serr.Error()))
+		}
+		counts, status, pererr := upstream.ParseMailSurplusNum(surplusResponse)
+		if pererr != nil {
+			sink.say("⑤ 我们的解析器读不出来：%s", pererr.Error())
+		} else {
+			sink.say("⑤ 解析结果：benefitSurplusCount=%q benefitStatus=%q（缺键即空串）",
+				liveProbeClip(counts, 24), liveProbeClip(status, 24))
+		}
+	}
+	composeID, composeErr := run.Upstream.AppMailComposeID(ctx, session)
+	if composeErr != nil {
+		sink.say("⑦ getComposeId（生产路径）：%s", sink.mask(composeErr.Error()))
+	} else {
+		// ⚠ 草稿号本身不是凭据，但它**是** ⑦ 那一发的唯一读数（"这一口认不认这张会话"
+		// 就看它给不给号）⇒ 只报长度，值不进日志（与票同一口径）。
+		sink.say("⑦ getComposeId（生产路径）：拿到号，长度 %d（值不打印）", len(composeID))
+	}
+	composeRequest, perr := upstream.MailComposeIDRequest(session)
+	if perr != nil {
+		sink.say("⑦ 构造失败：%s", perr.Error())
+	} else {
+		composeResponse, serr := client.Send(ctx, composeRequest)
+		sink.dump("⑦ getComposeId（直发，看体）", composeResponse)
+		if serr != nil {
+			sink.say("⑦ 直发错误：%s（URL 里有 sid ⇒ 已掩码）", sink.mask(serr.Error()))
+		}
+		idText, pererr := upstream.ParseMailComposeID(composeResponse)
+		if pererr != nil {
+			sink.say("⑦ 我们的解析器读不出来：%s", pererr.Error())
+		} else {
+			sink.say("⑦ 解析结果：拿到号，长度 %d（值不打印）", len(idText))
+		}
+	}
+
+	// ── ⑧⑥ 资产侧那两口**写**的（玩法 1020 / 1014）：走生产代码，各发一次 ──
+	//
+	// 为什么这两口不发"直发档"（与 ③⑤⑦ 不同）：那三档发的是**读**，多发一次只是多敲一下；
+	// ⑧ 请求的是"给这个号跑一次备份"、⑥ 请求的是"把这一份转成 PDF"，同一趟发两遍等于
+	// 让上游做两件事。生产路径那一句判定已经含了状态码（非 2xx 交回错误、⑥ 还带 `code`
+	// 与 `summary`）⇒ 一次就够拿到本族要的那格读数。
+	//
+	// ⑤⑦ 已经把"这张会话有效"钉住了（两台子域都回 `S_OK`）⇒ 这两口的失败**只能**归因到
+	// 它们各自那条路由，而不是"票不行"。这正是这一档存在的理由：R35 剩下的那一半按主机收，
+	// 而 ⑧ 与 ③ 同机（`mail.10086.cn`）—— 两句不一样就是"路径没了"，两句一样才需要
+	// 去看整个入口。
+	backupItem := liveProbeTaskItem(1020, "邮箱资产备份")
+	backupFired, backupProblems := executor.runMailBackup(ctx, backupItem)
+	sink.say("⑧ 走完整条玩法（1020）：发过枪=%v 失败 %d 条", backupFired, len(backupProblems))
+	for _, problem := range backupProblems {
+		sink.say("⑧ 原因：%s", sink.mask(problem))
+	}
+	// ⚠ ⑧ 的"成功"只到"上游没拒"：本层不解析体（零样本，见 `AppMailBackup` 头注），
+	// 所以这里念不念得出一句人话全凭上一行有没有 problems。
+	if len(backupProblems) == 0 {
+		sink.say("⑧ 没有失败 ⇒ 这一发是 2xx；**体长什么样仍然零样本**（本层不解析，别把这一行读成\"备份做完了\"）")
+	}
+
+	// ⑥ 要先往网盘写一份真文件（**写**，用户口径"包括上传网盘文件"）⇒ 链尾自己清掉。
+	// 生产链的清理在 [TaskMatrixRun.RunAccount] 末尾，探针只调 runner 不调整趟 ⇒
+	// 自己把 `executor.cloudFileIDs` 删掉；删不掉时**把 id 念出来**（只报长度会让人觉得
+	// "没留东西"，而那一格是要人手工去清的）。
+	pdfItem := liveProbeTaskItem(1014, "PDF 转换")
+	pdfFired, pdfProblems := executor.runMailPDF(ctx, pdfItem, &TaskStepRecord{TaskID: 1014})
+	sink.say("⑥ 走完整条玩法（1014）：发过枪=%v 失败 %d 条", pdfFired, len(pdfProblems))
+	for _, problem := range pdfProblems {
+		sink.say("⑥ 原因：%s", sink.mask(problem))
+	}
+	uploader, uerr := executor.cloudUploader(ctx)
+	if uerr != nil {
+		sink.say("⑥ 的清理没做：拿不到上传器（%s）⇒ 传上去那一份要手工清", sink.mask(uerr.Error()))
+	} else {
+		for _, fileID := range executor.cloudFileIDs {
+			sink.see(fileID) // 真实 fileId 不进成文（与预签名 URL 同一纪律）
+		}
+		sent, derr := uploader.DeleteCloudFiles(ctx, executor.cloudFileIDs)
+		switch {
+		case derr != nil:
+			sink.say("⑥ 链尾清理失败（发过枪=%v）：%s ⇒ 网盘里可能留着 %d 份素材，要手工清",
+				sent, sink.mask(derr.Error()), len(executor.cloudFileIDs))
+		case sent:
+			sink.say("⑥ 链尾清理：一次 batchTrash，覆盖这一趟记下的 %d 份素材（id 不打印）",
+				len(executor.cloudFileIDs))
+		default:
+			sink.say("⑥ 链尾清理：没要删的（这一趟没有新的 fileId ⇒ 与\"⑥ 没做成\"两档，别并成一句）")
+		}
+	}
+	// ⚠ 上面那一句**不**说"用户网盘恢复原状"：转换产物（⑥ 在邮箱/网盘那侧生成的那一份）
+	// 不在这条清理链上，它存不存在、落在哪至今零样本（R36）。
+	sink.say("⑥ 边界：转换产物**不在**上面那条清理链上（R36）⇒ 这一行不代表\"什么都没留下\"")
+
+	// ── 链尾**回读**（只读一发 `hcy/file/list`）：清理那句"上游没拒"到底是不是真的 ──
+	//
+	// 为什么要有这一档：`batchTrash` 的判据只有顶层 `success`（协议层成文），
+	// 而"删没删得掉"在**用户的网盘**里是另一件事。这一发把它变成读数：
+	// 根目录里还有没有以 `asign-` 开头的名字（本仓临时文件的前缀，见 [CloudUploadNamePrefix]）。
+	//
+	// ⚠ 三条边界，免得这一行被读成它没说的事：
+	//   - 只列**根目录一页**（`pageSize` 与 AI 头像那一族同档）⇒ 子目录里的看不到，
+	//     多于这一页的也看不到（那一格登记过：R16 / Q11 不翻页）；
+	//   - 回收站里的**不该**出现在这一页里 ⇒ "0 个"只到"清理链对得上下游"，
+	//     不等于"网盘里从来没有过"；
+	//   - 反过来"命中 N 个"也**不**自动等于缺陷：那可能是本仓之外留下的同名文件。
+	//     所以这里只念**数量**，名字不念（名字里可能带用户内容）。
+	page, lerr := run.Upstream.AppCloudFileList(ctx, opening.Profile,
+		UserTimestamp(run.Clock), opening.Credential.Authorization(), "/", 100)
+	if lerr != nil {
+		sink.say("⑥ 链尾回读没做成：%s ⇒ \"删干净了\"这一格仍只有 batchTrash 那句上游原话",
+			sink.mask(lerr.Error()))
+	} else {
+		leftovers := 0
+		for _, file := range page.Items {
+			if strings.HasPrefix(file.Name, CloudUploadNamePrefix) {
+				leftovers++
+			}
+		}
+		sink.say("⑥ 链尾回读：根目录这一页共 %d 项，其中前缀 %q 的 %d 个（回收站里的不算 ⇒ 见函数头那三条边界）",
+			len(page.Items), CloudUploadNamePrefix, leftovers)
+	}
+}
+
+// liveProbeTaskItem 造一条只有 id 与名字的条目：探针打的这两条玩法只读这两格
+// （[taskExecutor.runMailBackup] / [runMailPDF] 用 `taskNameOf` 与 `derefTaskID`），
+// 其余字段留空就是"上游没给"的形状 —— 那两族本来也不读别的键。
+func liveProbeTaskItem(id int64, name string) upstream.TaskV2Item {
+	taskID, taskName := id, name
+	enable := int64(1)
+	return upstream.TaskV2Item{
+		TaskItem:   upstream.TaskItem{TaskID: &taskID, Name: &taskName},
+		Enable:     &enable,
+		MarketName: strPtr(upstream.MarketName),
 	}
 }

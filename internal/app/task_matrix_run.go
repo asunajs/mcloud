@@ -723,6 +723,21 @@ func (e *taskExecutor) runRunner(
 		fired = fired || sent
 		problems = append(problems, mailProblems...)
 	}
+	if spec.MailBackup {
+		// 1020：会话（①②）+ ⑧ 那一发。它排在 [Mail] 之后不影响任何一条 —— 一条任务
+		// 只有一个开关会命中（`Mail` 是 472 / 473，`MailBackup` 是 1020）。
+		sent, backupProblems := e.runMailBackup(ctx, item)
+		fired = fired || sent
+		problems = append(problems, backupProblems...)
+	}
+	if spec.MailPDF {
+		// 1014：会话（①②）+ 传一份最小 PDF + ⑥。它是这一张表里**唯一一条要先写网盘**
+		// 的邮箱玩法 ⇒ 放在最后，让链尾那一条 `batchTrash` 清理链在它之后收口
+		// （口径与 [spec.Upload] 那几条一致：传上去的一定要记账，见 `runMailPDF`）。
+		sent, pdfProblems := e.runMailPDF(ctx, item, record)
+		fired = fired || sent
+		problems = append(problems, pdfProblems...)
+	}
 	record.Err = joinProblems(problems)
 	return fired
 }

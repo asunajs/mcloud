@@ -1,31 +1,39 @@
-# 139 邮箱会话那一族（玩法 472 / 473）· 活体探针实测
+# 139 邮箱那一族（会话 ①–④ + 资产侧 ⑤⑥⑦⑧）· 活体探针实测
 
 > 状态：**部分确认** —— ①② 已实拍到真实形状且与我们的解析器逐键对得上；③④ 两枪
 > 上游今天都回 404，而**归因已经做到"排除了我们这边三种解释"**（见 §3 §4），
 > 剩下那一格（"这一族在厂商侧是什么状态"）**探针答不了，需要真机一次点击**（§6）。
+> ⚠ 2026-09-26 资产侧两口（⑤⑦）补上了一个此前分不开的口：**这张会话本身是有效的**
+> —— 同一枚 `sid` / `rmkey` 在另外两台上回 `S_OK`（§8），所以 ③④ 的 404 只能是
+> **那两条路由**，不再是"整片邮箱 web 入口"或"凭据无效"。
+> ⚠⚠ 同日更晚的两次（带**写**的那两口 ⑧⑥，§9）把归因又收了一格并**换了一次方向**：
+> ⑥ 上游**认**（`S_OK`）⇒ 玩法 1014 这一条今天真做得成；⑧ 与 ③ 同一台、同样 404
+> ⇒ `mail.10086.cn` 这一台上今天只有 `/login/inlogin.action` 活着，"那两条路由没了"
+> 的说法要改成"这一台只还认换会话那一条"。
 >
-> 证据链 = ① 同一进程内两次真跑（第一次两档对照、第二次三档 + 同入口对照枪，
-> 读数一致）② 旧 TS 参考实现的 URL 逐字比对（§5）③ 探针走的是**生产代码同一条路径**
-> （`taskExecutor.mailSessionFor` / `runMailExperience` / `upstream.MailAutoLoginRequest`），
-> 不是另写的一份请求。
+> 证据链 = ① 同一进程内多次真跑（凌晨两次到 ①–④+对照枪，稍后两次带 ⑤⑦，更晚三次带
+> ⑧⑥；**各次的 ①–⑤⑦ 逐字一致**）② 旧 TS 参考实现的 URL 逐字比对（§5）③ 探针走的是
+> **生产代码同一条路径**（`taskExecutor.mailSessionFor` / `runMailExperience` /
+> `runMailBackup` / `runMailPDF` / `upstream.MailAutoLoginRequest`），不是另写的一份请求。
 >
-> - 采集时间：2026-09-26 凌晨，两次（间隔约 40 分钟）
+> - 采集时间：2026-09-26 凌晨两次（间隔约 40 分钟，到 ①–④）、同日稍后两次（带 ⑤⑦，
+>   两个账号各一次）、同日更晚三次（带 ⑥⑧ 两口的写，均为账号 0）
 > - 采集环境：Go 程序本机直连（**不是** App 发起）；设备档案 = iPad 形态 `MCloudApp/12.6.0`
 >   + `--app-device-file` 里那枚 32 位大写 hex `deviceId`；账号 = 库副本里两个已授权
->   测试号中的第 0 个（**号码不进成文**）
+>   测试号**各一次**（**号码不进成文**），两号的 ①–⑦ 读数逐字同型
 > - 采集方式：**通路 D 活体探针** —— `internal/app/live_probe_test.go` 里的
 >   `TestLiveProbeMail139Family`（Go test，四个环境变量全给才动，默认 `t.Skipf`），复跑命令：
 >   ```
->   MCLOUD_LIVE_PROBE_DB="$PWD/target/mail15/preview.db" \
+>   MCLOUD_LIVE_PROBE_DB="$PWD/target/mail16/probe.db" \
 >   MCLOUD_LIVE_PROBE_ACCOUNT_INDEX=0 \
->   MCLOUD_LIVE_PROBE_DEVICE_FILE="$PWD/target/mail15/app-device.txt" \
+>   MCLOUD_LIVE_PROBE_DEVICE_FILE="$PWD/target/mail16/device.txt" \
 >   MCLOUD_LIVE_PROBE_CONFIRM='确认写真实上游' \
 >   go test ./internal/app/ -run TestLiveProbeMail139Family -v -timeout 300s
 >   ```
 >   ⚠ 两枚路径**必须绝对**：`go test` 的工作目录是包目录，而库与设备档案都是
 >   "不存在就新建" —— 相对路径会静默造出一份空档、读数全废（本轮真踩到，坑表新格）。
 > - 原始素材：**没有 har**（探针不写网络日志），读数只在测试 stdout；
->   副本库 `target/mail15/preview.db` 与该次的一次性口令、SSE 转储**跑完即删**，
+>   副本库 `target/mail16/probe.db` 跑完即删，
 >   主库未动（md5 前后一致：`3761b6411af549f859ed4fbcb2e6baf6`）。
 >   ⇒ 可复现的只有上面那条命令 + 本文件；这两样之外没有第三份素材留存。
 > - 配套文档：`docs/upstream/app-mail139.md`（协议层成文）、`internal/upstream/app_mail139.go`
@@ -38,13 +46,19 @@
 
 ## 0. 一句话结论
 
-**换会话那两枪是真的能用，打卡那两枪今天上游不认。** ① 换到票（长度 42）、
+**换会话那两枪是真的能用，`mail.10086.cn` 上那两条老路径今天不认，而资产侧那两口一口成一口挂。**
+① 换到票（长度 42）、
 ② `inlogin.action` 回 `HTTP 200` + `code="S_OK"` 并在 `var` 里带着 `sid`(38) 与 `rmkey`(16)
 —— 我们按旧 TS 文字形状写的那份解析器**跟真实响应对得上**，`MailSession.OK()` 为真。
 ③ `autologin.action` 与 ④ `taskClickV2` 都回 `404`，而三档对照把它推到"不是我们这一侧的问题"：
 带不带 `authorization` 一样、裸拼与百分号编码一样、同一台 `:7071` 入口上的另一条只读路由回 `200`。
+**同日资产侧两口（⑤⑦）把最后那一格分开了**：同一张会话在 `html5` 与 `appmail` 两台上都回
+`S_OK` ⇒ 会话有效，③④ 的 404 挂在那两条路由，不在凭据、也不在整片入口（§8）。
+**更晚两口的写（⑧⑥，§9）把范围又挪了一次**：⑧ 与 ③ 同一台、同样 `404` ⇒ 那一台上
+只剩 `/login/inlogin.action` 活着；⑥ 却在 `html5` 那台上回 `S_OK` ⇒ **玩法 1014 这一条
+今天真能做成**（前提那份 PDF 也确实传进了网盘，链尾也确实清掉了）。
 
-## 1. 逐枪读数（2026-09-26 两次真跑一致，此处引第二次）
+## 1. 逐枪读数（2026-09-26 共七次真跑：凌晨两次只到 ①–④+对照枪，稍后两次带 ⑤⑦，更晚三次带 ⑥⑧；各次的 ①–⑤⑦ 逐字一致，此处引带 ⑤⑦ 的那两次）
 
 | 枪 | 请求 | 上游回话（原样） | 判读 |
 | --- | --- | --- | --- |
@@ -52,7 +66,16 @@
 | ② | `POST mail.10086.cn/login/inlogin.action?cguid=<客户端随机 UUID>`，体 297 字节（含票 ⇒ 不打印） | `HTTP 200`，`code="S_OK"`，`var.sid`、`var.rmkey` 都在 | 会话换到了；解析器与实拍一致（§2） |
 | ③ | `GET mail.10086.cn/login/autologin.action?sid=…&rmkey=…` | `HTTP 404`，体**不是 JSON**：3755 字节、开头 `<!DOCTYPE html> <!-- saved from url=(019…` | 一台**活着**的主机（② 就在它上面）对这一条路径给的是它自己的 404 页 |
 | ④ | `POST caiyun.feixin.10086.cn:7071/ycloud/signin/task/taskClickV2`（`marketname` / `clientVersion` / `taskId`） | `HTTP 404`，体是 JSON：`{code="404" msg="访问资源不存在"}` | 这一枪**到了应用**（不是网关/连通性），而应用说"没这个资源" |
-| ⑤ 对照 | `GET …:7071/ycloud/openemailsms-service/openEmailsms/getTaskInfo`（**只读**） | `HTTP 200`，`code="0" msg="success"`，两槽见 §4 | 用来把"整片 `:7071` 入口挂了"与"只有那一条路由没了"分开 |
+| ④-对照 | `GET …:7071/ycloud/openemailsms-service/openEmailsms/getTaskInfo`（**只读**） | `HTTP 200`，`code="0" msg="success"`，两槽见 §4 | 用来把"整片 `:7071` 入口挂了"与"只有那一条路由没了"分开 |
+| ⑤ | `POST html5.mail.10086.cn/mw2/file/disk?func=disk:surplusNum…`（**只读**，见 §8） | `HTTP 200`，`code="S_OK"`，`var={benefitStatus str<1> benefitSurplusCount str<1>}` | 资产侧那一族的读数，见 §8 |
+| ⑦ | `POST appmail.mail.10086.cn/RmWeb/mail?func=mbox:getComposeId&sid=…`（**只读**，见 §8） | `HTTP 200`，`code="S_OK"`，`var` 是**单引号**壳里的一枚号（长度 21） | 同上 |
+| ⑧ | `POST mail.10086.cn/mailsms/sms/backup?sid=…`，体 `{}`（**写**，见 §9） | 生产路径交回 `不存在: HTTP 404` | 与 ③ 同一台、同样 404 ⇒ 归因从"两条路由"改到"这一台只认 inlogin" |
+| ⑥ | `POST html5.mail.10086.cn/mw2/file/disk?func=disk:convertPdfFromYunFile…`（**写**，见 §9） | 生产路径**没报错** ⇒ 上游 `code=="S_OK"`（这一口的判据只有这一格） | 玩法 1014 今天做得成；也是这一族第一个"上游认"的写 |
+
+⚠ 编号口径：本文件的 ⑤⑥⑦⑧ 与 `internal/upstream/app_mail139_assets.go` 文件头那四口
+**同一套**（⑤ `surplusNum`、⑥ `convertPdfFromYunFile`、⑦ `getComposeId`、⑧ `sms/backup`）。
+④ 那一发旁边的对照枪标成 **④-对照**，不占号 —— 早先它写成"⑤ 对照"，与资产侧的 ⑤ 撞号，
+已于 2026-09-26 就地改掉（探针里的标签同步改）。
 
 ## 2. ② 的真实形状（键名 + 值长度，逐字照抄探针输出）
 
@@ -100,11 +123,11 @@ userType=str<1> weathercode=str<1>}}
 
 ④ 回的是 **JSON** 的 404（`{code:"404", msg:"访问资源不存在"}`），③ 回的是 HTML 的 —— 两句
 形状不同，说明 ④ 这一枪被**应用层**接住了。但"应用接住"还差一步归因，所以带了一发
-只读对照枪 ⑤（同一台 `caiyun.feixin.10086.cn:7071`、同一个 `/ycloud/` 前缀、另一条路由）：
+只读对照枪（同一台 `caiyun.feixin.10086.cn:7071`、同一个 `/ycloud/` 前缀、另一条路由）：
 它回 `HTTP 200` + `code="0" msg="success"`。
 
 ⇒ **入口活着，挂的是 `signin/task/taskClickV2` 这一条路由**（或者它吃的是别的形状）。
-⑤ 顺带读到 notice 那一族的实况（同一份输出）：
+对照枪顺带读到 notice 那一族的实况（同一份输出）：
 `taskOneInfo={cloudStatus="2" sum="200" taskStatus="3"}`、
 `taskTwoInfo={cloudStatus="0" progress="2" sum="100" taskStatus="2"}`。两点：
 ① 两槽的**键集合不同** —— `progress` 只出现在第二槽，第一槽没有 ⇒ 与 `internal/upstream/app_notice.go`
@@ -141,3 +164,89 @@ userType=str<1> weathercode=str<1>}}
 一句人话而不是 `1`，为的是"顺手 export 一个真值"打不到真上游。
 **探针这一形态（可复用仪器 vs 一次性用完删）是 agent 侧默认、非用户要求**，
 已写成问句挂在 `docs/pending-decisions.md`。
+
+## 8. 资产侧两口 ⑤⑦：把"会话有效"与"路由没了"分开的就是这两发
+
+同一张 ② 换到的会话（同一枚 `sid` / `rmkey`），打**另外两台**子域，两个账号各一次，
+读数逐字同型：
+
+```
+⑤ surplusNum（直发，看体）：HTTP 200，体形状 ={code="S_OK" summary=str<21>
+    var={benefitStatus=str<1> benefitSurplusCount=str<1>}}
+⑤ 解析结果：benefitSurplusCount="0" benefitStatus="1"（缺键即空串）
+⑦ getComposeId（直发，看体）：HTTP 200，体形状 (松散解)={code="S_OK" var=str<21>}
+⑦ 解析结果：拿到号，长度 21（值不打印）
+```
+
+**这一格收了什么**：
+
+1. **会话是有效的。** ③④ 的 404 之前有两种读法（"这一族在厂商侧已死" vs "这张票/这
+   两枚值不被认"），⑤⑦ 把后者**排除**了 —— 同一枚 `sid` 在 `html5` 与 `appmail` 两台上
+   都换到了 `S_OK` 与一枚可用的草稿号。⇒ R35 剩下的那一半收窄成一句话：
+   **挂的是 `login/autologin.action` 与 `signin/task/taskClickV2` 这两条路由**，
+   不再是"整片邮箱 web 入口"或"凭据"那一档（问句本身仍留着：厂商 App 今天走哪一条，
+   只能真机取证，见 §6）。
+2. **两个零实拍落码的解析器跟真实体对得上。** ⑤ 的 `var.benefitSurplusCount` /
+   `var.benefitStatus` 两枚键名逐字如旧 TS 所说；⑦ 的体是**单引号壳**（`(松散解)` 那一档），
+   即"先按严格 JSON 解、解不开再把单引号换成双引号"那一条**必须**存在 —— 只有严格档
+   就一行读数都拿不到。这是本仓第一次实拍到"邮箱这一族的体不是合法 JSON"。
+3. **`sid` 走百分号编码没有副作用**：⑤⑦ 的 URL 里 `sid` 都是编码后拼进去的（本号那枚是
+   hex 形态 ⇒ 编码为恒等变换），与 §3 档 C 的裸拼读数合起来看，编码这一手在这一族
+   **不是**风险位。
+
+**这两发没有说什么**（别顺手 extrapolate）：
+
+- ⑥⑧ 两口的写：当时是真缺口，同日更晚补上了（§9：⑧ 404、⑥ 被认）。⑧ 打的正是 ③ 那台
+  `mail.10086.cn`，而 §8-1 证明"那台活着、只有它的一部分路由没了"—— 打上之后才知道它属于哪一类。
+- ⑤ 的 `benefitSurplusCount="0"` 的**语义**仍没有样本（两号都是 `0`、`benefitStatus`
+  都是 `1`，上游一个字都没解释）。⚠ 不许写成"权益用完了"。但 §9 给它加了一条**边界**：
+  同一张会话里 ⑤ 回 `0` 的同时 ⑥ 被认 ⇒ 那一枚计数**至少不是**转换那一发的硬闸。
+  这一句是实测，不是解释 —— "那它到底管什么"仍待样本。
+- ⑦ 只**取号**，不发信：`mbox:getComposeId` 的产物是一枚草稿号，本仓不发
+  `mbox:compose` ⇒ 1004 那一发（真发一封邮件）仍然**没有落码**，等用户拍板。
+
+## 9. 资产侧那两口的**写**（⑧ / ⑥）：一条 404、一条被认，方向就此分开
+
+同日更晚三次（同一账号，间隔几分钟），探针走的是**生产代码**那两条 runner
+（[runMailBackup] / [runMailPDF]），不是另写的请求。三次的读数逐字一致。
+
+```
+⑧ 走完整条玩法（1020）：发过枪=true 失败 1 条
+⑧ 原因：邮箱备份（⑧）失败：不存在: HTTP 404
+播报[0] PDF 素材已上传（完整上传：create → PUT → complete 三枪都发了） PDF 转换 1014
+⑥ 走完整条玩法（1014）：发过枪=true 失败 0 条
+⑥ 链尾清理：一次 batchTrash，覆盖这一趟记下的 1 份素材（id 不打印）
+```
+
+**这一格收了什么**：
+
+1. **`mail.10086.cn` 这一台今天只认 `/login/inlogin.action`。** ③ 与 ⑧ 是同一台主机上
+   两条**不同**路径（`/login/autologin.action`、`/mailsms/sms/backup`），两次都 404，
+   而 ② 在同一台上 200。⇒ §8-1 那句"挂的是两条路由"要改口径：不是一条条孤立的死路由，
+   **这台主机上除了换会话那一条，本族试过的两条都不认**。而同一张会话在 `html5` 那台上
+   连 ⑥ 这种写都认 ⇒ 归因**更**不可能是凭据。R35 剩下的那一半因此**换了一次方向**：
+   要问的不再只是"472 那一发去哪了"，而是"`mail.10086.cn` 上这些老路径今天由谁接"。
+   ⚠ 这一句仍是**问句**（真机取证，§6），本文件不猜答案。
+2. **⑥ 是这一族第一个"上游认"的写。** 判据只有一格：生产路径没报错，而 `AppMailConvertPDF`
+   的判据就是 `code == "S_OK"` ⇒ 上游回的是 `S_OK`。所以**玩法 1014 这一条今天做得成**
+   （前提那份 PDF 确实进了网盘 —— 上传那三枪也真发了，见下面第 3 点）。
+   ⚠ "做得成"到"任务被记成完成"之间还差一趟复查读数：⑥ 没打 `signin/task/click`，
+   1014 是否被上游记成 FINISH 只有拉两遍表才知道（那一格今天**没**测：探针不拉表）。
+3. **上传那一族在真实账号上又一次走通，且形状如夹具**：`file/create` 收了一个
+   `.pdf` 名字、597 字节的内容（回 `uploadUrl`/`fileId`）、`PUT` 成功、`file/complete`
+   成功 ⇒ 这是 R27 那一格（"三枪的形状只有夹具依据"）**第三次**同型读数。
+4. **链尾一次 `batchTrash`，上游没拒**（三次各删各的那一枚）。⚠ "没拒"不等于"看不见" ——
+   见下面第 5 点。
+
+**这一格仍然没有说什么**：
+
+5. **转换产物落在哪（R36）没答。** 探针在清理之后补了一发**只读**回读
+   （`hcy/file/list` 列根目录一页），它自己挂了：
+   `参数错误: 上游返回 success=false: 请求头不合法(00010003)`。
+   ⇒ 两个结论都别越：既不能说"网盘里干净"，也不能说"留了东西"；这一发的头集合与
+   AI 头像那条链用的是同一个构造器（`CloudFileListRequest`），差别在**装配**
+   （`opening.Profile` 那一份），要收这一格得先拍到"这一口今天到底吃哪几枚头"。
+   登记进 `docs/pending-decisions.md`（探针回读那一档 + R36）。
+6. **⑧ 的 404 只有状态码。** 这一口刻意**不发**直发档（它是要真做事的那一发，
+   同一趟打两遍等于让上游做两件事）⇒ 体的形状今天仍是零样本。要形状就得只打一发直发档，
+   而那一走法与"生产代码认不认"分开成两次真跑 —— 是否值得，等 R35 的真机取证一起做。
