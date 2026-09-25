@@ -14,6 +14,7 @@ package upstream
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/catlair/mcloud/internal/core"
 )
@@ -187,6 +188,44 @@ func ParseRevivalReward(envelope *Envelope) (RevivalReward, *core.Error) {
 	}
 	out.LittleFirstTime = intAt(payload, "littleFirstTime")
 	return out, nil
+}
+
+// RevivalAlreadyClaimed 判断"这一发 `receiveRevivalReward` 上游其实是说本月已经领过了"。
+//
+// # 为什么需要它（2026-09-25 真账号实拍）
+//
+// 这一族**没有判活接口**（`docs/business-feature-inventory.md` §5.8：从未抓到），所以
+// "本月还剩几张卡"只能靠发一次写请求去撞。2026-09-25 真账号跑 `revival` 这条能力
+// （两个号各一发，两句一模一样）撞到的答案是：
+//
+//	HTTP 200，{"code":500,"msg":"本月已领取复活卡奖励"}
+//
+// 经 [Envelope.EnsureOK] 之后是一句 `参数错误: 上游返回 code=500: 本月已领取复活卡奖励`。
+// 它**不是**故障：本月这一档确实没得领，处置与"签到翻倍本月已领过"完全同档
+// （报"没领 + 依据"，不报失败）。判错方向的代价是不对称的 ——
+// 判成失败会让历史页每天一条红、并触发 `onlyError` 推送，而它下个月之前都不会自己好。
+//
+// # 匹配宽严
+//
+// 双条件：先要出现"已领取 / 已领过"，再要出现这一族的主体词（复活卡 / 回馈卡 / 奖励）。
+// 其中**只有"本月已领取复活卡奖励"是实拍**（上面那条），其余措辞是照两套旧实现放的：
+// caiyun `revivalreward.go` 用"复活卡 && 已领取"，旧 TS 用"本月已领取 + 奖励"，
+// 见 `docs/caiyun-go-parameters-and-decisions.md` T-11 那条对两套宽严不一致的记录。
+// ⚠ 所以**裸一句"本月已领取"（不带卡型也不带"奖励"）不在匹配面里** —— 它是刻意留严的：
+// 这一族没有判活接口，把认不出的文案折成"没领"就等于把真故障洗白，
+// 宁可漏认一档（报失败，人来判）也不误判一片。
+// 匹配不上的一律仍按失败处理。
+func RevivalAlreadyClaimed(err *core.Error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Message()
+	if !strings.Contains(msg, "已领取") && !strings.Contains(msg, "已领过") {
+		return false
+	}
+	return strings.Contains(msg, "复活卡") ||
+		strings.Contains(msg, "回馈卡") ||
+		strings.Contains(msg, "奖励")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -179,6 +179,12 @@ mcloud signin --account 2 --receive --cloud-type 2
 ⚠ 响应里的 `totalClouds` **没有**接进余额采集：H5 文案说复活卡产出的是**AI豆**，
 与 `infoV3.beforeTotal`（云朵余额）可能不是一个池子，现有实拍分不出来。
 
+这一族**没有判活接口**，"本月还剩几次"只能发一次写请求去撞。2026-09-25 真账号撞到的
+那句是 `{"code":500,"msg":"本月已领取复活卡奖励"}` —— 它**不是**运行失败：`--json` 的
+`revive` 报 `ok: true` + `claimed: false` + `message`（上游原话），退出码仍是成功，
+与 `--multiple` 的"本月已领过"同一档。认不出的文案仍报 `ok: false` + `error`，
+不折成"没领"（判据见 `internal/upstream/app_signin_receive.go` 的 `RevivalAlreadyClaimed`）。
+
 ### 自检参数
 
 - `--status-only`：只查不签；

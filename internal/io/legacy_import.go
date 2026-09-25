@@ -402,11 +402,15 @@ type MigrationIssue struct {
 	Path   string
 }
 
-// String 产出对外文案，与 Rust 侧 `thiserror` 的 `#[error(...)]` 逐字对应。
+// String 产出对外文案，句式与 Rust 侧 `thiserror` 的 `#[error(...)]` 对应。
+//
+// ⚠ **不带 Markdown 星号**：这些串会出现在网页端的导入结果里（不渲染 Markdown），
+// 也出现在终端输出里，星号只会原样显示成噪音（2026-09-25 真账号跑 `app-task` 那一轮
+// 在播报里撞见同一形状，顺手把这一族也清了）。
 func (i MigrationIssue) String() string {
 	switch i.Kind {
 	case IssueRecoveredAccountRef:
-		return fmt.Sprintf("%s：账号引用「%s」在旧版被当成序号（越界）因而**从未生效**，"+
+		return fmt.Sprintf("%s：账号引用「%s」在旧版被当成序号（越界）因而从未生效，"+
 			"但按手机号能唯一匹配到 %s；已按手机号导入，请确认目标是否正确",
 			i.At, i.Digits, i.Account)
 	case IssueDeadAccountRef:
@@ -437,7 +441,7 @@ func (i MigrationIssue) String() string {
 	case IssueBadRunTimestamp:
 		return fmt.Sprintf("%s 第 %d 条的起止时间非法（start=%q）；已跳过该条", i.File, i.Index, i.Start)
 	case IssueUnresolvedRunAccount:
-		return fmt.Sprintf("history.json 第 %d 条的展示名「%s」%s；该条已导入但**未归属账号**",
+		return fmt.Sprintf("history.json 第 %d 条的展示名「%s」%s；该条已导入但未归属账号",
 			i.Index, i.Label, i.Reason)
 	case IssueBadExchangeWindows:
 		return fmt.Sprintf("exchange.json 的抢兑时刻非法（%s）；已回落到默认窗口", i.Error)

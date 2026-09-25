@@ -1300,6 +1300,77 @@ func TestSigninReviveNeverFallsBackToTheStoredDevice(t *testing.T) {
 	})
 }
 
+// TestSigninReviveReportsAlreadyClaimedAsNotAnError：⚠ CLI 与网页端同一口径。
+//
+// 2026-09-25 真账号那一句 `{"code":500,"msg":"本月已领取复活卡奖励"}` 在两边都
+// 不能报成故障：这一族没有判活接口，"本月没得领"只能发一次写请求去撞，
+// 撞见这句就该报"没用掉卡"而不是"跑坏了"。判据本身在
+// [upstream.RevivalAlreadyClaimed]（那里逐措辞钉），这一条钉的是**接线**：
+// 分支写反或忘了接，只有这一条会红。
+func TestSigninReviveReportsAlreadyClaimedAsNotAnError(t *testing.T) {
+	env := signinFixture(t, signinAcct{id: "19****01", enabled: true,
+		auth: "Basic SYNTH", deviceID: signinDeviceID("A")})
+
+	claimed := &signinScript{}
+	claimed.session().
+		route("page/infoV3", signinSignsToday(nil)...).
+		route("page/startSignIn", signinStartOK()).
+		route("receiveRevivalReward", map[string]any{
+			"code": 500, "msg": "本月已领取复活卡奖励",
+		})
+
+	stdout, stderr, code := signinCLIAt(t, claimed, env, "--revive", "--json")
+	if code != ExitSuccess {
+		t.Fatalf("本月已领过不是运行失败，应退 %d，实得 %d\n  stderr=%q",
+			ExitSuccess, code, stderr)
+	}
+	if got := claimed.count("receiveRevivalReward"); got != 1 {
+		t.Errorf("这一档只能撞一次，实得 %d 次", got)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+		t.Fatalf("stdout 该是一份 JSON: %v\n%s", err, stdout)
+	}
+	extra, _ := decoded["revive"].(map[string]any)
+	if extra["ok"] != true || extra["claimed"] != false {
+		t.Errorf("该是「调用没出错 / 没领到」，实得 %v", extra)
+	}
+	if _, hasError := extra["error"]; hasError {
+		t.Errorf("这一档不该带 error 键（带了就是报失败）: %v", extra)
+	}
+	if msg, _ := extra["message"].(string); !strings.Contains(msg, "本月已领取复活卡奖励") {
+		t.Errorf("要留上游原话供排查，实得 %q", msg)
+	}
+
+	// 反向：认不出的文案仍报 `ok:false` + `error`，不折成"没领"。
+	unknown := &signinScript{}
+	unknown.session().
+		route("page/infoV3", signinSignsToday(nil)...).
+		route("page/startSignIn", signinStartOK()).
+		route("receiveRevivalReward", map[string]any{
+			"code": 500, "msg": "系统繁忙，请稍后重试",
+		})
+
+	stdout, _, code = signinCLIAt(t, unknown, env, "--revive", "--json")
+	if code != ExitSuccess {
+		t.Fatalf("extras 不驱动退出码，应退 %d，实得 %d", ExitSuccess, code)
+	}
+	decoded = map[string]any{}
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+		t.Fatalf("stdout 该是一份 JSON: %v\n%s", err, stdout)
+	}
+	extra, _ = decoded["revive"].(map[string]any)
+	if extra["ok"] != false {
+		t.Errorf("读不懂的文案必须报 ok:false，实得 %v", extra)
+	}
+	if msg, _ := extra["error"].(string); !strings.Contains(msg, "系统繁忙") {
+		t.Errorf("失败里要带上游原话，实得 %q", msg)
+	}
+	if _, hasClaimed := extra["claimed"]; hasClaimed {
+		t.Errorf("真失败那一支不该出现 claimed 键（会被读成「没领」）: %v", extra)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 输出流、失败隔离与退出码
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1463,7 +1534,7 @@ func TestSigninStatusOnlyRecordsTheBeanTotalNotTheBeforeTotal(t *testing.T) {
 	// 把 `*int64` 直接递进 `%+d` 时这里得到的是 `（日增 +0，周增 +0）` —— 一句看起来
 	// 完全正常的输出（nil 打 `+0`、有值打**指针地址**，见 `core.CloudStats.DiffClause` 的注），
 	// 而过去这条链上只断"余额已记录：10502 豆"，所以它当时一声不响地错了。
-	if !strings.Contains(stdout, "余额已记录：10502 豆（第一次采集，暂无增量基准）") {
+	if !strings.Contains(stdout, "余额已记录：10502 豆（暂无往日记录，算不出日增/周增）") {
 		t.Errorf("没有基准时不许念成 +0:\n%s", stdout)
 	}
 	assertNoAddressInCloudLine(t, stdout)

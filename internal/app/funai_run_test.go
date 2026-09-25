@@ -400,6 +400,101 @@ func TestFunaiRunSendsNoWriteRequestWhenTheGateIsClosed(t *testing.T) {
 	}
 }
 
+// TestFunaiRunQuotesReadingsOnTheNothingBranch ⭐ "没抽"那一档必须把上游读数带出来。
+//
+// 2026-09-25 真账号那轮的实际观感：界面上只留下"趣玩AI没抽：上游报的次数判据显示
+// 没有可用次数"，于是这一趟**答不出**任何一条判据问题（`drawTimes` 是几、`drawsUsed`
+// 满没满、活动期到哪天）。R3 与"次数判据语义"两格都只能靠**下一次真跑的读数**收口，
+// 所以读数进小结是功能而不是修饰。
+//
+// 反例：把 `SummaryLine` 里那段 `res.Status != FunaiDone` 的判断删掉 ⇒ 抽成那一档
+// 也跟着念抽奖**之前**的读数，[TestFunaiRunDrawsWithTheModuleIDFromTheResponse]
+// 那句逐字断言会红；反过来把整段追加拿掉 ⇒ 本条红。
+func TestFunaiRunQuotesReadingsOnTheNothingBranch(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		// wantSubs 是这一档读数里该出现的片段。
+		wantSubs []string
+	}{
+		{
+			"次数读到了",
+			funaiModuleBody("1-250730", 0, 0, "2025-05-28T00:00:00", "2026-12-31T23:59:59"),
+			[]string{"drawTimes=0", "drawsUsed=0", "todayGetLotteryCount=1",
+				"起 2025-05-28", "止 2026-12-31"},
+		},
+		{
+			// "缺"与 0 是两件事：这里三个计数在实拍里就全是 null。
+			"上游没给判据字段",
+			funaiNullCountsBody,
+			[]string{"drawTimes=缺", "drawsUsed=缺", "todayGetLotteryCount=缺"},
+		},
+		{
+			// 两界读不到就不念：念成空串会让人以为上游给了个空日期。
+			"活动期判不了",
+			funaiModuleBody("1-250730", 1, 0, "", ""),
+			[]string{"drawTimes=1"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			run, _ := funaiRuns(&poolSignInStore{*liveTaskStore()},
+				liveTaskRoute{funaiModuleEndpoint, []string{c.body}})
+			res, perr := run.RunAccount(context.Background(), core.NewAccountID(liveTestAccountID))
+			if perr != nil {
+				t.Fatalf("没得抽不是错误：%v", perr)
+			}
+			got := res.SummaryLine()
+			if !strings.HasPrefix(got, "趣玩AI没抽：") {
+				t.Fatalf("这一档仍应以'没抽：'+理由开头，实得 %q", got)
+			}
+			if !strings.Contains(got, "（读数：") {
+				t.Fatalf("没抽的那一趟是唯一还拿得到抽奖前读数的趟，小结里必须有读数：%q", got)
+			}
+			for _, want := range c.wantSubs {
+				if !strings.Contains(got, want) {
+					t.Errorf("读数里应有 %q，实得 %q", want, got)
+				}
+			}
+			switch c.name {
+			case "活动期判不了":
+				if strings.Contains(got, "起 ") || strings.Contains(got, "止 ") {
+					t.Errorf("两界读不到时不许念日期：%q", got)
+				}
+			case "上游没给判据字段":
+				if strings.Contains(got, "drawTimes=0") {
+					t.Errorf("缺的键念成 0 就把'上游没给'说成了'给了 0'：%q", got)
+				}
+			}
+		})
+	}
+}
+
+// TestFunaiRunDoesNotQuoteReadingsAfterDrawing：抽成了不念读数 ——
+// 那几格是 `page/getmodule` 在抽奖**之前**读的，`drawsUsed` 那时还没 +1。
+//
+// 反向改法是把 `SummaryLine` 的 `res.Status != FunaiDone` 改成无条件追加 ⇒ 这里红。
+func TestFunaiRunDoesNotQuoteReadingsAfterDrawing(t *testing.T) {
+	run, _ := funaiRuns(&poolSignInStore{*liveTaskStore()},
+		liveTaskRoute{funaiModuleEndpoint, []string{funaiModuleBody(
+			"1-250730", 1, 0, "2025-05-28T00:00:00", "2026-12-31T23:59:59")}},
+		liveTaskRoute{funaiLotteryEndpoint, []string{funaiCapturedBody}})
+	res, perr := run.RunAccount(context.Background(), core.NewAccountID(liveTestAccountID))
+	if perr != nil {
+		t.Fatalf("抽成了不该报错：%v", perr)
+	}
+	if res.Status != FunaiDone {
+		t.Fatalf("前置条件坏了：这一趟应抽成，实得 %v（%q）", res.Status, res.SummaryLine())
+	}
+	// 读数仍在结果里（它属于事实，只是不念），只是别出现在出网的那句话上。
+	if res.Readings.DrawsUsed == nil || *res.Readings.DrawsUsed != 0 {
+		t.Errorf("结果里应带着抽奖前的原始读数，实得 %v", res.Readings.DrawsUsed)
+	}
+	if got := res.SummaryLine(); strings.Contains(got, "读数") {
+		t.Errorf("抽成之后念抽奖前的读数会被读成'还剩这些'：%q", got)
+	}
+}
+
 // TestFunaiRunDailyLimitAcrossTwoRounds ⭐ "每天最多抽一次"这条规则本身。
 //
 // 这里**不接票池**（`Sessions` 留 nil），所以两轮各自都会重新建会话、重新读判据 ——

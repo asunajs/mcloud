@@ -210,6 +210,8 @@ const UNTAGGED_ALLOWED = {
     '一个账号这一趟的**内存结论**，出网只经 `RunReport`。`Reason` / `Error` 两格装上游原文（同 `NoticeResult` 那条理由）',
   'internal/app/funai_run.go:FunaiOutcome':
     '抽奖链的**中间结论**（档位 + 判据 + 模块 id + 奖品名），由 `FunaiRun` 投影成 `FunaiResult`；`ModuleID` 是排障对账用的，不是对外字段',
+  'internal/app/funai_run.go:FunaiReadings':
+    '抽奖判据的**原值**（三个计数 + 活动期两界），只经 `Line()` 念进小结那一串文本，从不出网。刻意不 marshal：这几格的**语义未验证**（哪个是"还能抽"、哪个是"累计获得"），钉成 JSON 形状就是替未验证的猜测建契约（同 `NoticeResult` / `MsgPushResult` 那两条理由）',
   'internal/app/funai_run.go:FunaiResult':
     '一个账号这一趟的**内存结论**，出网只经 `RunReport`。⚠ `PrizeName` 为 nil **不等于**"没中奖"（实拍只有一档 `isWin`），这个区别在 JSON 里会被抹平，所以刻意不 marshal',
   // ── 兑换族（2026-09-23 登记，`exchange` 上游层落地带来的）──

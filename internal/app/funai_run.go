@@ -27,7 +27,9 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/catlair/mcloud/internal/core"
@@ -209,6 +211,78 @@ const (
 	FunaiFailed
 )
 
+// FunaiReadings 是这一趟从 `page/getmodule` 读到的**判据原值**，只用于播报。
+//
+// # 为什么把数一路带到小结（2026-09-25 真账号那轮加的）
+//
+// 那一轮两个号都判成"没抽"，界面上只留下一句
+// "趣玩AI没抽：上游报的次数判据显示没有可用次数" —— 于是这一趟**答不出**任何一条
+// 判据问题：`drawTimes` 到底是几、`drawsUsed` 是不是满了、活动期到哪天，
+// 全都知道但全都没说。R3（"没中奖长什么样"）与"次数判据的语义"这两条
+// 都要靠**下一次真跑的读数**才能收口，所以读数必须进小结而不是只进日志。
+//
+// ⚠ 仍然只**照抄**、不解释：这几个键的语义未验证（见 [upstream.FunaiModule]），
+// 念成"今天还能抽 0 次"就是把猜测写成断言。
+type FunaiReadings struct {
+	// DrawTimes / DrawsUsed / TodayGetLotteryCount 是上游那三个计数，`nil` = 没给。
+	DrawTimes            *int64
+	DrawsUsed            *int64
+	TodayGetLotteryCount *int64
+	// StartTime / EndTime 是活动期两界，`nil` = 没给**或**形态不认识。
+	StartTime *time.Time
+	EndTime   *time.Time
+}
+
+// Line 把读数念成一句短语。缺的键念成"缺"而不是 0 ——
+// "上游没给这一格"与"上游给了 0"在判据上是两件事（与 `noticeSlotLabel` 同一口径）。
+func (r FunaiReadings) Line() string {
+	counters := []struct {
+		key   string
+		value *int64
+	}{
+		{"drawTimes", r.DrawTimes},
+		{"drawsUsed", r.DrawsUsed},
+		{"todayGetLotteryCount", r.TodayGetLotteryCount},
+	}
+	parts := make([]string, 0, len(counters)+2)
+	any := false
+	for _, c := range counters {
+		if c.value != nil {
+			any = true
+			parts = append(parts, fmt.Sprintf("%s=%d", c.key, *c.value))
+			continue
+		}
+		parts = append(parts, c.key+"=缺")
+	}
+	// 两界只在真读到时才念：那两格决定"不在期"这一档，而"没给"与"给了但解不开"
+	// 在这一层都是 nil，念出来反而像上游给了空串。
+	for _, bound := range []struct {
+		key   string
+		value *time.Time
+	}{{"起", r.StartTime}, {"止", r.EndTime}} {
+		if bound.value != nil {
+			any = true
+			parts = append(parts, bound.key+" "+bound.value.Format("2006-01-02"))
+		}
+	}
+	if !any {
+		// 五个键一个都没读到：这句话没有信息量，宁可不念。
+		return ""
+	}
+	return strings.Join(parts, "，")
+}
+
+// funaiReadingsOf 从上游解析结果里取播报要用的那几格。
+func funaiReadingsOf(module upstream.FunaiModule) FunaiReadings {
+	return FunaiReadings{
+		DrawTimes:            module.DrawTimes,
+		DrawsUsed:            module.DrawsUsed,
+		TodayGetLotteryCount: module.TodayGetLotteryCount,
+		StartTime:            module.StartTime,
+		EndTime:              module.EndTime,
+	}
+}
+
 // FunaiOutcome 是 [FunaiDraw] 的实况。
 type FunaiOutcome struct {
 	// Status 决定下面哪些字段有意义。
@@ -219,6 +293,8 @@ type FunaiOutcome struct {
 	ModuleID string
 	// PrizeName 是上游报的奖品名。`nil` = 上游没说，**不是**"没中奖"。
 	PrizeName *string
+	// Readings 是判据原值（抽奖那一枪发没发都带着它，见 [FunaiReadings]）。
+	Readings FunaiReadings
 	// Error 是 [FunaiFailed] 的失败原因。
 	Error string
 }
@@ -259,8 +335,10 @@ func FunaiDraw(
 	}
 
 	plan := PlanFunai(module, clock.Now())
+	readings := funaiReadingsOf(module)
 	if plan != FunaiPlanDraw {
-		return FunaiOutcome{Status: FunaiNothing, Plan: plan, ModuleID: module.ModuleID}, nil
+		return FunaiOutcome{Status: FunaiNothing, Plan: plan, ModuleID: module.ModuleID,
+			Readings: readings}, nil
 	}
 
 	lottery, perr := do(ctx, src, func(s SignInSession) (upstream.FunaiLottery, *core.Error) {
@@ -270,11 +348,13 @@ func FunaiDraw(
 	})
 	if perr != nil {
 		return FunaiOutcome{
-			Status: FunaiFailed, Plan: plan, ModuleID: module.ModuleID, Error: perr.Error(),
+			Status: FunaiFailed, Plan: plan, ModuleID: module.ModuleID,
+			Readings: readings, Error: perr.Error(),
 		}, nil
 	}
 	return FunaiOutcome{
-		Status: FunaiDone, Plan: plan, ModuleID: module.ModuleID, PrizeName: lottery.PrizeName,
+		Status: FunaiDone, Plan: plan, ModuleID: module.ModuleID,
+		Readings: readings, PrizeName: lottery.PrizeName,
 	}, nil
 }
 
@@ -301,6 +381,8 @@ type FunaiResult struct {
 	PrizeName *string
 	// Reason 是 [FunaiNothing] 的人话依据（由 [Plan.Reason] 填）。
 	Reason string
+	// Readings 是判据原值，随 [FunaiOutcome] 一路带到这里（为什么进小结见 [FunaiReadings]）。
+	Readings FunaiReadings
 	// Error 是 [FunaiFailed] 的失败原因。
 	Error string
 }
@@ -325,13 +407,15 @@ func (r FunaiRun) RunAccount(
 	}
 
 	result := FunaiResult{
-		Account: account, Status: outcome.Status, Plan: outcome.Plan, PrizeName: outcome.PrizeName,
-		Error: outcome.Error,
+		Account: account, Status: outcome.Status, Plan: outcome.Plan,
+		PrizeName: outcome.PrizeName, Readings: outcome.Readings, Error: outcome.Error,
 	}
 	switch outcome.Status {
 	case FunaiNothing:
 		result.Reason = outcome.Plan.Reason()
-		r.progress(core.LevelInfo, "趣玩AI没抽："+result.Reason)
+		// 念 [SummaryLine] 而不是自己拼一遍前半句：读数那一截只有一个来源，
+		// 否则将来小结加了数、播报还停在旧的那句话上。
+		r.progress(core.LevelInfo, result.SummaryLine())
 	case FunaiDone:
 		r.progress(core.LevelInfo, "趣玩AI已抽一次："+result.SummaryLine())
 	}
@@ -340,25 +424,40 @@ func (r FunaiRun) RunAccount(
 
 // SummaryLine 是给人看的一句话小结（进 `runs.message` 与终局事件，**出网**）。
 //
-// ⚠ 里面只有档位与奖品名，没有任何凭据形态的东西。
+// ⚠ 里面只有档位、奖品名与上游给的计数，没有任何凭据形态的东西。
+// 念计数而不解释它 —— 判据语义未验证（见 [FunaiReadings]），
+// "drawTimes=1 drawsUsed=1"翻成"今天还能抽 0 次"就是把猜测写成断言。
 func (res FunaiResult) SummaryLine() string {
+	line := ""
 	switch res.Status {
 	case FunaiDone:
 		if res.PrizeName == nil || *res.PrizeName == "" {
-			return "趣玩AI已抽一次（上游没报奖品名）"
+			line = "趣玩AI已抽一次（上游没报奖品名）"
+		} else {
+			line = "趣玩AI抽到「" + *res.PrizeName + "」"
 		}
-		return "趣玩AI抽到「" + *res.PrizeName + "」"
 	case FunaiFailed:
 		if res.Error == "" {
-			return "趣玩AI抽奖失败"
+			line = "趣玩AI抽奖失败"
+		} else {
+			line = "趣玩AI抽奖失败：" + res.Error
 		}
-		return "趣玩AI抽奖失败：" + res.Error
+	default:
+		// Reason 没填时退回按档位说：这一档不发请求，写成失败会让历史里多一条红色。
+		line = "趣玩AI没抽：" + res.Reason
+		if res.Reason == "" {
+			line = "趣玩AI没抽：" + res.Plan.Reason()
+		}
 	}
-	if res.Reason != "" {
-		return "趣玩AI没抽：" + res.Reason
+	if res.Status != FunaiDone {
+		// ⚠ **抽成了那一档不念读数**：这几格是 `page/getmodule` 的**抽奖之前**读的，
+		// 抽成之后 `drawsUsed` 已经变了，念出来会被读成"抽完还剩这些"——
+		// 与 `NoticeRun.project` 不许把领之前的槽当复查结果念，是同一类错。
+		if readings := res.Readings.Line(); readings != "" {
+			return line + "（读数：" + readings + "）"
+		}
 	}
-	// Reason 没填时退回按档位说：这一档不发请求，写成失败会让历史里多一条红色。
-	return "趣玩AI没抽：" + res.Plan.Reason()
+	return line
 }
 
 // RunReport 把三档结论映射到 [core.RunOutcome]。

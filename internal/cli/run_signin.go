@@ -819,6 +819,16 @@ func (r *signinRun) revive(ctx context.Context, src *app.SignInSessionSource) si
 
 	reward, perr := app.ReceiveRevivalReward(ctx, src, device)
 	if perr != nil {
+		// 上游那句"本月已领取复活卡奖励"不是故障，是"本月这一档没得领"
+		// （判据与实拍见 [upstream.RevivalAlreadyClaimed]）。CLI 与网页端
+		// （`app.ClaimRun`）必须同一口径，否则同一次真打两边给出两种结论。
+		if upstream.RevivalAlreadyClaimed(perr) {
+			return signinExtra{
+				key:     "revive",
+				human:   head + "\n" + fmt.Sprintf("  没有再用掉一张卡：%s", perr.Message()),
+				payload: map[string]any{"ok": true, "claimed": false, "message": perr.Message()},
+			}
+		}
 		return signinExtra{
 			key:     "revive",
 			human:   head + "\n" + fmt.Sprintf("  失败：%s", perr.Error()),

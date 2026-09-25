@@ -90,6 +90,13 @@ func NoticeRewardRequest(jwt, referer string) core.HTTPRequest {
 // 只把读数**照抄进结论**（见 `internal/app/notice_run.go` 的 [NoticeResult]）。
 type NoticeTaskSlot struct {
 	// CloudStatus 是 `cloudStatus` —— 实拍读数 `1` / `2`，语义**未验证**。
+	//
+	// ⚠ 2026-09-25 真账号那一趟**仍然没答出这一格**：两个号判成的都是"没领"，
+	// 于是拿到的读数是"已经领过之后"的 `cloudStatus`（那句判据把非"未领"值都读成
+	// 已入账），"未领"那一值长什么样始终没有样本。
+	// ⇒ 补样条件已写进 `internal/app/notice_run.go` 的 `noticeSlotReadings`：
+	// 下一次读到"发得出去写请求"的那个形态，小结里就带着这一格的**前后两份**读数。
+	// 问题登记在 `docs/pending-decisions.md` §三 R1。
 	CloudStatus *int64
 	// Sum 是 `sum` —— 实拍 `200` / `100`。看着像"这个槽值多少云朵"，
 	// ⚠ 但**没有任何证据**说领到手的数等于它：`reward` 的实拍响应里**没有 `result`**。

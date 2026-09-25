@@ -3022,8 +3022,10 @@ CDP 会话一关就**释放**设备尺寸覆写 ⇒ "窄屏量到 40px"其实量
 
 - **core**：`CloudStats.CloudDiff` / `CloudDiffWeek` ⇒ `*int64`（nil = 这一条没有基准）；
   `NextCloudStats` 完全无历史时交回两个 nil。
-  ⭐ 另加 `CloudStats.DiffClause()`：**"日增 / 周增 / 第一次采集"这一小句只有一个来源**，
+  ⭐ 另加 `CloudStats.DiffClause()`：**"日增 / 周增 / 暂无往日记录"这一小句只有一个来源**，
   CLI 与服务端运行历史共用。收成一处不是口味问题，见下面第三节那条实测。
+  （无基准那一档的措辞在 2026-09-25 那轮真跑里就地改过：原来写"第一次采集"，而 `history` 的契约
+  **不含当天** ⇒ 同一天连跑每次都走这一支，第五次读数上那句话就是错的。见本文末尾"补记（2026-09-25 全量真跑）"缺陷 ④。）
 - **io**：`SchemaVersion` 10 ⇒ **11**。v11 按 SQLite 官方的"建新表 → 搬 → DROP → RENAME"重建
   `cloud_stats`（SQLite 不能 ALTER 掉 `NOT NULL`；本表无外键，所以不需要 `PRAGMA foreign_keys=OFF`），
   回填判据是**每账号 `MIN(date)` 那一行 ⇒ NULL、其余保持原值**（这个判据只在迁移那一刻成立：
@@ -3666,10 +3668,15 @@ CDP 会话一关就**释放**设备尺寸覆写 ⇒ "窄屏量到 40px"其实量
 - ⚠ 上面是全量跑，而并行会话此刻在这棵树上动 `web/src/app.css` ⇒ 绿灯**包含**他们的改动，
   不能只当作"本轮文件绿"的证据（§2.7）。
 
-⚠ **撞车登记**：工作树里 `web/src/app.css` 那份换肤（红色主色 + 玻璃拟态 + 页面光斑，注释自称
-"见 `docs/webui-design-guide.md` 换肤附注"）**不是本轮改的**：那份文档第 92 行现在写的仍是
+⚠ **撞车登记（2026-09-25 已闭合）**：工作树里 `web/src/app.css` 那份换肤（红色主色 + 玻璃拟态 + 页面光斑，注释自称
+"见 `docs/webui-design-guide.md` 换肤附注"）**不是本轮改的**：那份文档当时第 92 行写的仍是
 "不做……玻璃拟态……"，也没有"换肤附注"那一节 ⇒ 成文与代码当场不一致。本轮**不提交**这个文件、
 也不替它改文档（§2.1：别人在飞的改动留在工作树；§2.6：不一致要报告而不是静默"对齐"）。
+**闭合方式**：换肤方（本会话，同日）已把三份成文就地改齐 —— `webui-design-guide.md` §2.1/§2.3②/§3.3/§3.5
+更新并新增 **§3.6 换肤附注**（机制、玻璃清单、`base-100` 不透明裁定、光斑、激活/聚焦收口、
+红主色 vs `error` 的区分）、`webui-components.md` §5.1/§5.2 卡片规则改写、`webui-code-guide.md`
+验收清单与未决项 8 同步；`check-md-tables.cjs` / `check-filenames.js` / `gates-web` 均绿。
+上面"不提交、不替改"的处置是当轮的正确决定，留作记录。
 
 ### 六、待拍板与遗留
 
@@ -3680,4 +3687,97 @@ CDP 会话一关就**释放**设备尺寸覆写 ⇒ "窄屏量到 40px"其实量
 | **Q37**（新） | `ui/dialog.tsx` 的 `ConfirmDialog` 两枚按钮 390px 实测高 **38px**（五个消费者）；全局给 `.btn` 加高仍是留给用户拍板的那一条（`webui-components.md` §6.1） |
 | `after` 那一支 | 旧实现链尾的"统一清理 + 打印今日云朵 + auth 维护"：本轮用 `cloud-snapshot` + `auth-refresh` 两步顶上后两半，**统一清理**仍分散在各条链自己收尾（§上一节遗留 3 就此关闭一半） |
 | ⚗ §3.9 偏大 | `web/src/pages/schedules-page.tsx` **1041**、`web/src/pages/task-run-list.tsx` 796、`internal/server/pipelines_test.go` 796、`pipeline_run_test.go` 681、`web/src/pages/tasks-page.tsx` 704、`internal/server/pipeline_run.go` 613、`web/src/ui/pipeline-draft.ts` 553、`web/src/api.ts` 848、`docs/status.md` 已 36xx 行（Q16 的拆分方案仍待批） |
-| 未动 | Q32、R21–R28 补样、P1–P6 挡路项、#30（`runs.cloud_gained` / `cloud_after` 没有生产者） |
+| 未动（2026-09-25 已闭合大半，剩这些） | 仍开的：Q32、Q35、Q36、Q37、P2（`exchange` 按口径不真打）、P3–P6、R1 / R3 等"下一次真跑必然答出"的补样、Q16 拆分方案。**已闭合**：P1（上传四枪真跑通）、R24 / R25 / R27 / R28（同一轮现场答出）、#30（重登记为 **Q39**，见下一节）。逐条见本文末尾"补记（2026-09-25 全量真跑）" |
+
+---
+
+## 补记（2026-09-25，除兑换外**全量真跑**：17 条能力逐个实打上游 + 内置一键全跑整链）
+
+> 口径来自用户当天两句：**"除了兑换……其他都实测，包括上传网盘文件"** 与
+> **"测试效果不是以抓包为准，而是 go 程序的运行反馈/json 信息为准"**（AGENTS.md §1.13）。
+> 所以下面每一格写的都是**程序自己念出来的那一句**（终态 + `run_events` + `runs.message`），
+> 不是 har 里有没有那一条。
+
+### 一、跑法与环境（不碰别人的实例）
+
+- 自己的二进制 + 主库副本（副本上清 `schedules`、重设一次性口令）+ **另端口** + 自己的 device-file；
+  两个已授权的测试号（号码不进成文）。逐条走 `POST /api/runs` → `GET /api/runs/{id}/events`（SSE），
+  终态再从 `runs` 表逐行读，不看界面。
+- 整链那一趟走 `POST /api/pipelines/all/run`：内置 14 步 × 2 号 = **28 条 run**，25 秒内全部收口。
+- 跑完销毁自建实例与副本目录，复核主库行数未变。
+
+### 二、逐条现场（17/18 条；`exchange` 按口径不真打）
+
+| 能力 | 终态 | 程序自己念出的那一句（原样摘要） | 这一趟答出了什么 |
+| --- | --- | --- | --- |
+| `sign` | done / success | "今天已经签过，本月已签 10 天；余额 8837 / 7474 豆" | "今天已签"那一档不重签、不报错 |
+| `receive` | done / success | 一趟"领到 0 豆（0 笔）；1 笔下月才可领"，另一趟"领到 60 豆（1 笔）" | 领云朵那一口**真到账过**（+60） |
+| `multiple` / `backup-gift` | done / success | "签到翻倍没领：本月已经领过一次翻倍" / "备份好礼没领：本月已经领过备份好礼" | 两族的"本月已领"良性档不进失败 |
+| `revival` | **failed**（跑当时） | "参数错误: 上游返回 code=500: 本月已领取复活卡奖励" | ⚠ 跑出来的缺陷 ① |
+| `prizes` | done / success | "待领取奖品 2 条：…" / "没有待领取的奖品" | 有货与空两档都有现场 |
+| `task-list` | done / success | "任务 17 条：未完成 7、已完成 10；分组 beiyong1 1、hiddenabc 1、month 1…（另有 1 组）"（两号各 17 条，未完成 7 / 8） | 16 次拉全的聚合表在两个号上各自成表 |
+| `app-task` | done / **partial_success** | "任务表 27 条（待做 13）；本次上报 9 条（打卡 8、玩法 1）；网盘新增 1 个文件（已移进回收站）；1 条本工具还没接上玩法；复查：认下 0、没认 10、此前已完成 13、仍待办 2"（另一号 24 条 / 上报 7 / 新增 6 个） | ⭐ 一次答出三格：上传族 + 清理端到端通（R27 / R28）、"打了不等于当场认"（R24）、`currstep=2` 那道门只传不打卡（R25） |
+| `notice` | done / success | "公告任务没领：能判的槽都读成已入账" | ⚠ **答不出 R1** ⇒ 缺陷 ② |
+| `msg-push` | done / success | "消息推送任务没领：secondTaskStatus 不是该领的那个值（pushOn=1 firstTaskStatus=3 secondTaskStatus=1）" | R2 的第一档现场读数（三格各有值，且都是"该领"以外那一档） |
+| `fun-ai` | done / success | "趣玩AI没抽：上游报的次数判据显示没有可用次数" | ⚠ 同 R3：读数没进小结 ⇒ 归进缺陷 ② |
+| `cloud-phone-redpack` | done / success | "红包派对可兑 3.00 元（300 分），累计 4.60 / 4.20 元；任务 0新手/1每日/4每月（读成未完成的 4 件，…）" | 只读那一半通；那句里的星号 = 缺陷 ③ |
+| `play-ai-special` | done / success | "拍拍任务 2 件（未完成 2、已完成 0）；抽奖次数那一格读到 0（是累计获得还是还剩，未验证）；本工具只读…" | 这一期入口**活着**（P4 那一问的一半） |
+| `live-room` | done / success | "[warn] 有 2 间在播，但没有一间是「中国移动云盘」" + "收到 0 个口令，本次只收不投" | 窗外那一档的行为：不报错、不投、只念实况 |
+| `cloud-snapshot` | done / success | "余额 8837 豆；第一次采集，暂无增量基准" | ⚠ 那句话**本身就是错的** ⇒ 缺陷 ④ |
+| `auth-refresh` | done / success | "还没到提前量，本次未刷（pc / mobile 端）" | 能力面走提前量那一档；与 WebUI"点即刷"是两条路，不冲突 |
+| `ai-avatar` | **failed** | "AI头像第 1~5 次生成失败：合成请求失败：参数错误: HTTP 405" → "读剩余次数失败…HTTP 404" → "AI头像第1次抽奖没发出去: HTTP 404" | ⚠ 整族停在**传输层** ⇒ R17 从"要实测"升级成"要人工抓包"；界面怎么摆 = **Q38** |
+
+### 三、跑出来的四处缺陷（各自带反向判据）
+
+| # | 现象（程序自己吐的） | 修法 | 反向判据 |
+| --- | --- | --- | --- |
+| ① | `revival` 把上游那句良性的"本月已领取复活卡奖励"报成 `failed` + "参数错误" | 三层各自认这句话：`RevivalAlreadyClaimed` 判据 → `ClaimRun` 落 `ClaimNothing` / success → CLI `--revive --json` 出 `ok:true + claimed:false`；`docs/cli-usage.md` §6 就地补现场 | `TestRevivalAlreadyClaimedRecognisesTheLandedWording`（上游层）、`TestRevivalReportsNothingNotFailureOnTheLandedWording`（编排层）、`TestSigninReviveReportsAlreadyClaimedAsNotAnError`（CLI 层）。⚠ 裸一句"本月已领取"**刻意不匹配** —— 宁可漏认一档报失败，也不误判一片把真故障洗白 |
+| ② | `notice` / `fun-ai` 的"没领 / 没抽"只有档位、没有读数 ⇒ 跑了一趟却答不出 R1 / R3 | 两族小结都追加"（读数：…）"，**照抄不解释**；`fun-ai` 抽成那一档刻意不念（那是抽奖**之前**的数，念出来会被读成"还剩这些"） | `TestNoticeRunReadsSlotsIntoTheNothingSummary`、`TestFunaiRunQuotesReadingsOnTheNothingBranch`、`TestFunaiRunDoesNotQuoteReadingsAfterDrawing`。已对 `fun-ai` 那一支做过双向 mutation：追加段改成"永远不念"⇒ 第一条红；改成"永远念"⇒ 后两条红。`notice` 那一格只有正向断言，**未做 mutation** |
+| ③ | 用户可见串里的 Markdown 星号原样显示（"…**本工具今天一件都不代做**）"） | 播报与对外错误串一律去星号、改用「」（`cloud_phone_run.go` / `run_login.go` / `signin_render.go` / `legacy_import.go`） | ⚠ **未被断言**（§1.6：web 无测试运行器，SSE 文本也没有测试钉字符串）⇒ 判据只有本节那些 SSE 原话 + 事后 `grep` 复核 |
+| ④ | `cloud-snapshot` 在同一天第二次采仍念"第一次采集" | `core.DiffClause` 那一档改成"暂无往日记录，算不出日增/周增" —— `history` 的契约**不含当天**，所以同日连跑每次都走这一支，"第一次采集"在第五次上就是错的 | `TestCloudSnapshotSummaryLineOnSameDayRepeatDoesNotClaimFirstCollection`（同天两次，第二次仍不许出现"第一次"）；`pure_test.go` / `run_signin_test.go` 那两处逐字断言同步改词 |
+
+顺带一处**跨两层的一致性**：`404` / `405` 的归类。`internal/io/client.go` 的 `statusError` 与
+`internal/upstream/envelope.go` 的 `errorFromStatus` 是两处做同一件事，此前两侧标签不一致
+（404 在 upstream 侧落到 `NewUpstream` = **可重试**）。现在统一 `404 → NotFound`、`405 → BadRequest`
+（io 侧额外带 `Allow`），`TestNotFoundAndMethodNotAllowedAreToldApart` + 三张分类表钉住。
+
+### 四、这一轮**没有**跑出来的（登记，不当成已验证）
+
+1. `exchange` —— 按用户口径不真打（真扣豆、不可回滚），仍是 P2。
+2. `fun-ai` 未中奖那一档（R3）、`notice` 的"哪一档算未领"（R1）：两族的读数这次**进小结了**，
+   所以这两问从"跑一趟看运气"变成"下一次真跑必然答出"。
+3. 链尾那条汇总推送：整链跑完 `run_events` 里 notify 事件 **0 条**，因为 `notify_config` **0 行**
+   ⇒ 只验到"没配渠道 ⇒ 不发、也不报错"那一档（新增 **R29**）。
+4. `runs.cloud_gained` / `cloud_after` 28 条 run **全 NULL**（含明明涨了 60 豆那一趟）
+   ⇒ 不是实测缺口，是**没有生产者**（新增 **Q39** = 任务 #30）。
+5. 内置 `all` 那一版在 `pipelines` 里**没有行** ⇒ `last_*` 四列无处写（本轮"pipelines 回写"
+   那一格读出来就是空白，Q36 的前提）。
+6. `ai-avatar` 整族（R16 / R18 / R19 / R20）全部阻塞在 R17：要人工在活动站 H5 里打开那一页抓一次。
+7. 三态里"已存在 / 秒传"两档**从今天的运行反馈里读不出有没有被走到**。这一条要说白：
+   "以运行反馈为准"意味着**程序不播报的字段仍是未知** —— 那是这条口径的边界，
+   不是它的漏洞；补法是下一轮让程序自己念出来，而不是回头翻 har。
+
+### 五、门禁（照抄当轮 stdout）
+
+- 首跑：`node scripts/gates-go.js` → **9/10，jsontags 红** ⇒ 红的是本轮自己造的新结构体
+  `internal/app/funai_run.go:FunaiReadings`（§1.5：加了没登记），其余九条绿（含 test 2m27s 真跑）。
+  处置按门禁自己给的那两条出路里的**第一条**：它确实不进 JSON（只经 `Line()` 念成小结文本），
+  登记进 `scripts/check-go-jsontags.cjs` 的 `UNTAGGED_ALLOWED` 并写明理由（语义未验证的格子
+  不 marshal 成契约），**没有**顺手给它加 tag。
+- 复跑：`node scripts/gates-go.js` → **十项门禁全绿**，总耗时 **13.5s**（逐条：build 3.3s，vet 0.8s，
+  fmt 0.3s，test 1.3s，deps 6.3s，filenames 0.4s，idents 0.5s，golden 0.3s，jsontags 0.1s，md-tables 0.2s）。
+  ⚠ 这一格 test **1.3s = 命中缓存**，全量证据是上面那次 2m27s 的首跑（改动的测试当时都真跑过）。
+- `node scripts/gates-web.js` → **2 条全绿**（typecheck 11.5s，build 2.1s）。本轮没动 web 侧代码，
+  跑它是为确认 `docs/status.md` 拼接与 fmt 之后的树仍然干净。
+- ⚠ 以上都是**全仓**跑，而并行会话此刻在这棵树上动 `web/src/app.css` 与三份 `docs/webui-*.md`
+  ⇒ 绿灯**包含**他们的在飞改动，不能只当作"本轮文件绿"的证据（§2.7）。
+
+### 六、待拍板与遗留（本轮增量）
+
+| 项 | 一句 |
+| --- | --- |
+| **Q38**（新） | `ai-avatar` 在界面上怎么摆：摘出可跑面 / 标"已知不通" / 保持现状（点一次红一条）。agent 侧默认 = 不动，因为"活动下线"与"我们少一环"今天分辨不了 |
+| **Q39**（新，= 任务 #30） | `runs.cloud_gained` / `cloud_after` 由谁填：`cloud-snapshot` 收尾写（改动小，但该列从此"属于快照那一条 run"）还是每条能力小结带出来（改动大，多数能力压根不知道涨了多少） |
+| **R29**（新） | 链尾汇总推送只验到"没配渠道 ⇒ 不发不报错"；配一家只看状态码的渠道再跑一次组合即可收口 |
+| **P1**（闭合） | 上传四枪真跑通 ⇒ 那一格从"挡路"改写成"剩三件不挡路的尾巴"（三态那两档、非空目录 R7、`ai-avatar` 那半条清理） |
+| ⚗ §3.9 偏大 | `docs/status.md` 又长一节，Q16 的拆分方案（拆出 `status-log.md`）仍是**待批**状态 |

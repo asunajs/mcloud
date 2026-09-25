@@ -147,7 +147,7 @@ func TestExactSevenDaysOldCountsAsWeekBase(t *testing.T) {
 
 func TestDiffClauseOnFirstCollectionSaysNoBaseline(t *testing.T) {
 	first := NextCloudStats("acc-1", "2026-09-16", 1286, nil)
-	if got := first.DiffClause(); got != "第一次采集，暂无增量基准" {
+	if got := first.DiffClause(); got != "暂无往日记录，算不出日增/周增" {
 		t.Fatalf("实得 %q", got)
 	}
 }
@@ -179,13 +179,13 @@ func TestDiffClauseGuardsEveryMissingBaseline(t *testing.T) {
 	one, week := int64(3), int64(9)
 	partial := CloudStats{AccountID: "acc-1", Date: "2026-09-16", CloudCount: 1289,
 		CloudDiff: &one, CloudDiffWeek: nil}
-	if got := partial.DiffClause(); got != "第一次采集，暂无增量基准" {
+	if got := partial.DiffClause(); got != "暂无往日记录，算不出日增/周增" {
 		t.Fatalf("周基准缺失时不许只念日增，实得 %q", got)
 	}
 	// 反向：`CloudDiff: nil, CloudDiffWeek: &week` 同一条分支，改坏判据（`&&`）会红在这里。
 	other := CloudStats{AccountID: "acc-1", Date: "2026-09-16", CloudCount: 1289,
 		CloudDiff: nil, CloudDiffWeek: &week}
-	if got := other.DiffClause(); got != "第一次采集，暂无增量基准" {
+	if got := other.DiffClause(); got != "暂无往日记录，算不出日增/周增" {
 		t.Fatalf("日基准缺失时同样不许念数字，实得 %q", got)
 	}
 }

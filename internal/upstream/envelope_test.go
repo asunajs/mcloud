@@ -118,6 +118,10 @@ func TestHTTPStatusMapsToErrorKind(t *testing.T) {
 		{429, core.KindRateLimited},
 		{408, core.KindTimeout},
 		{400, core.KindBadRequest},
+		// ⚠ 404 必须**显式**在表里：这一侧的 `default` 是 NewUpstream（可重试），
+		// 漏了那条 case 的表现不是"标签不好看"，是"为一个不存在的端点重试到死"。
+		{404, core.KindNotFound},
+		{405, core.KindBadRequest},
 		{503, core.KindUpstream},
 	}
 	for _, c := range cases {

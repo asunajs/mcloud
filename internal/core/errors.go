@@ -45,6 +45,9 @@ const (
 	//
 	// 两者刻意共用一个类别：若"不属于你"给出与"不存在"不同的错误，
 	// 响应差异本身就泄漏了资源是否存在，把 id 空间变成可枚举的。
+	//
+	// 它也接**上游的 404**（[ClassifyStatus]）：那一档的语义是"这个端点/资源在
+	// 上游不存在了"，与"参数错了"是两回事，混在一起就没法从历史里分辨活动下线。
 	KindNotFound
 	// KindParse 响应解析失败 —— 不重试（通常是上游改动，重试无意义）。
 	KindParse
@@ -142,8 +145,17 @@ func ClassifyStatus(status uint16) ErrorKind {
 		return KindTimeout
 	case status == 429:
 		return KindRateLimited
-	case status == 400 || status == 404 || status == 422:
+	case status == 400 || status == 405 || status == 422:
+		// `405` 归这一类而不是 Internal：它是"我们这条请求的方法/形状不对"，
+		// 与 400 同源，而且**重试不会自己好**。落到 Internal 的表现是历史里
+		// 一句"内部错误"，把最有信息量的那条线索（请求形状错了）洗成我们的锅。
 		return KindBadRequest
+	case status == 404:
+		// ⚠ 2026-09-25 真账号跑 ai-avatar 那条链撞出来的：404 曾经被归成
+		// "参数错误"，于是"端点根本不存在（活动下线 / 我们少一环）"与
+		// "某个参数填错了"在历史里长得一模一样，排查只能重打一遍。
+		// 归成 NotFound 后重试性不变（两类都不重试），只是把那一句分开了。
+		return KindNotFound
 	case status >= 500 && status <= 599:
 		return KindUpstream
 	}

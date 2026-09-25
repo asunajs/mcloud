@@ -214,6 +214,10 @@ func asInt64(value any) (int64, bool) {
 // **不带响应体原文**：上游的错误体里常常直接回显凭据，
 // 而 core.Error 的 Message 会进日志、PublicMessage 才是对外文案 ——
 // 两头都不该出现上游原文，所以这里只保留状态码。
+//
+// ⚠ 与 `internal/io.statusError` 是**两处**做同一件事（一处是传输层出口、
+// 一处是信封解析出口），改分类时两边都要改。2026-09-25 之前这两处的标签
+// 就不一致：io 侧 404 报"参数错误"、这一侧 404 走 `default` 报"上游服务异常"**并且可重试**。
 func errorFromStatus(status uint16) *core.Error {
 	detail := fmt.Sprintf("HTTP %d", status)
 	switch core.ClassifyStatus(status) {
@@ -225,6 +229,12 @@ func errorFromStatus(status uint16) *core.Error {
 		return core.NewTimeout(detail)
 	case core.KindBadRequest:
 		return core.NewBadRequest(detail)
+	case core.KindNotFound:
+		// ⚠ 这一条**必须显式写**：`default` 那支是 `NewUpstream`，而 upstream 是
+		// 可重试类别 —— 漏了它，404 会变成"重试到死"，把一个"端点不存在"
+		// 洗成一次超时。2026-09-25 真账号跑 ai-avatar 整族撞见 404/405 时，
+		// 最先把这条分支逼出来的就是这个默认值。
+		return core.NewNotFound(detail)
 	default:
 		return core.NewUpstream(status, detail)
 	}

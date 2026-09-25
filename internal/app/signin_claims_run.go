@@ -21,6 +21,7 @@ import (
 
 	"github.com/catlair/mcloud/internal/capabilities"
 	"github.com/catlair/mcloud/internal/core"
+	"github.com/catlair/mcloud/internal/upstream"
 )
 
 // ClaimKind 是"这一趟领哪一种"。
@@ -205,8 +206,19 @@ func (r ClaimRun) revival(
 	}
 	reward, perr := ReceiveRevivalReward(ctx, src, nil)
 	if perr != nil {
-		// 交回错误而不是折成 [ClaimFailed]：这一条**没有门槛可查**，
-		// "没有可用卡"与"网络 / 凭据坏了"只能从同一个返回里分出来，
+		// 先分"上游其实是说本月已领过"这一档（2026-09-25 真账号实拍：
+		// `code=500 / 本月已领取复活卡奖励`，两个号各撞见一次）。
+		// 判据见 [upstream.RevivalAlreadyClaimed] —— 它落在本文件抬头那句
+		// "'这个月已领过'不该变成历史里的一条红色"上。
+		if upstream.RevivalAlreadyClaimed(perr) {
+			r.progress(core.LevelWarn, "上游说本月已领过，没有再用掉一张卡")
+			// Reason 直接用上游那句（去掉类别前缀的正文）：小结会变成
+			// "复活卡没领：上游返回 code=500: 本月已领取复活卡奖励"，
+			// 与 msg-push 那一族"把读数原样报出来"的口径一致。
+			return r.nothing(account, perr.Message()), nil
+		}
+		// 其余交回错误而不是折成 [ClaimFailed]：这一条**没有门槛可查**，
+		// "网络 / 凭据坏了"与"上游给了句读不懂的话"只能从同一个返回里分出来，
 		// 而两者都该让这一趟报失败 —— 走错误那条路还会多发一条 `errored` 事件。
 		return ClaimResult{Kind: r.Kind, Account: account}, perr
 	}

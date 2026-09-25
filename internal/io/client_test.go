@@ -158,6 +158,8 @@ func TestStatusIsClassifiedTheSameWayCoreDoes(t *testing.T) {
 		{408, core.KindTimeout},
 		{429, core.KindRateLimited},
 		{422, core.KindBadRequest},
+		{404, core.KindNotFound},
+		{405, core.KindBadRequest},
 		{500, core.KindUpstream},
 		{503, core.KindUpstream},
 	}
@@ -211,6 +213,65 @@ func TestUpstreamBodyIsKeptForDiagnosticsButNeverPublished(t *testing.T) {
 	}
 	if perr.Status() != 500 {
 		t.Errorf("Status 应保留，实得 %d", perr.Status())
+	}
+}
+
+// TestNotFoundAndMethodNotAllowedAreToldApart：⭐ 404 与 405 各自说自己的话。
+//
+// 2026-09-25 真账号跑 ai-avatar 那一族整族撞 404/405 时，两者在历史里都是
+// 一句"参数错误: HTTP 4xx"，与"某个参数填错"完全同形 ⇒ 分不清"端点没了"
+// 还是"我们请求少了一环"，只能重打一遍。现在：
+//   - 404 归 [core.KindNotFound]（"资源不存在"），且**不重试**；
+//   - 405 归 bad_request，但错误串里留着上游给的 `Allow`（改哪一面，线索在响应里）。
+func TestNotFoundAndMethodNotAllowedAreToldApart(t *testing.T) {
+	cases := []struct {
+		status   int
+		allow    string
+		wantKind core.ErrorKind
+		wantIn   string
+	}{
+		{http.StatusNotFound, "", core.KindNotFound, "HTTP 404"},
+		{http.StatusMethodNotAllowed, "GET, HEAD", core.KindBadRequest,
+			"HTTP 405（Allow: GET, HEAD）"},
+	}
+	for _, c := range cases {
+		calls := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			calls++
+			if c.allow != "" {
+				w.Header().Set("Allow", c.allow)
+			}
+			w.WriteHeader(c.status)
+			// 响应体里放一句"像凭据"的话：4xx 那一支**不许**把它带进错误串。
+			_, _ = w.Write([]byte(`{"echo":"Basic SYNTH-CREDENTIAL"}`))
+		}))
+		_, err := NewClientWithPolicy(RetryPolicy{MaxAttempts: 3,
+			BaseDelay: time.Millisecond, MaxDelay: 2 * time.Millisecond}).
+			Send(context.Background(), core.NewRequestGet(server.URL))
+		server.Close()
+		if err == nil {
+			t.Errorf("%d 应报错", c.status)
+			continue
+		}
+		p, isCore := err.(*core.Error)
+		if !isCore {
+			t.Fatalf("%d 应返回 *core.Error，实得 %T", c.status, err)
+		}
+		if calls != 1 {
+			t.Errorf("%d 不该重试（两类都是不重试档），实得 %d 次", c.status, calls)
+		}
+		if p.Kind() != c.wantKind {
+			t.Errorf("%d 应归 %v，实得 %v（%q）", c.status, c.wantKind, p.Kind(), p.Error())
+		}
+		if !strings.Contains(p.Message(), c.wantIn) {
+			t.Errorf("内部消息应含 %q，实得 %q", c.wantIn, p.Message())
+		}
+		if strings.Contains(p.Message(), "SYNTH-CREDENTIAL") {
+			t.Errorf("%d 的响应体不该进错误串（常常回显凭据），实得 %q", c.status, p.Message())
+		}
+		if strings.Contains(p.PublicMessage(), "HTTP") {
+			t.Errorf("%d 的对外文案不该带内部细节，实得 %q", c.status, p.PublicMessage())
+		}
 	}
 }
 

@@ -441,16 +441,34 @@ func (res NoticeResult) SummaryLine() string {
 		return text + "（复查：" + noticeSlotLabel(res.TaskOne) +
 			"，" + noticeSlotLabel(res.TaskTwo) + "）"
 	case NoticeNothing:
-		return head + "没领：" + res.Reason
+		return head + "没领：" + res.Reason + noticeSlotReadings(res)
 	case NoticeManual:
-		return head + "没领：" + res.Reason + "，要去 App 里开启邮箱/短信通知"
+		return head + "没领：" + res.Reason + "，要去 App 里开启邮箱/短信通知" +
+			noticeSlotReadings(res)
 	case NoticeUnknown:
-		return head + "没领：" + res.Reason
+		return head + "没领：" + res.Reason + noticeSlotReadings(res)
 	}
 	if res.Error == "" {
 		return head + "失败"
 	}
 	return head + "失败：" + res.Error
+}
+
+// noticeSlotReadings 把两个槽的读数追加成一句"（读数：…）"。
+//
+// 为什么"没领"那一档也要念（2026-09-25 真账号那轮加的）：R1 问的就是
+// "`cloudStatus` 哪个值是未领"，而**唯一可能答出它的两趟**是
+// "判成没领"与"判成领了"这两趟 —— 原先只有后者念读数，于是真跑一趟
+// 仍然回答不了那个问题（那一轮跑出来就是一句没有下文的"能判的槽都读成已入账"）。
+// 读数本身仍**不解释**（照抄，见 [NoticeResult.SummaryLine] 头注）。
+//
+// 两个槽都没读到时返回**空串**：那时念出来的是"无槽，无槽"，
+// 一句没信息量的话占掉小结的一半。
+func noticeSlotReadings(res NoticeResult) string {
+	if res.TaskOne == nil && res.TaskTwo == nil {
+		return ""
+	}
+	return "（读数：" + noticeSlotLabel(res.TaskOne) + "，" + noticeSlotLabel(res.TaskTwo) + "）"
 }
 
 // noticeSlotLabel 把一个槽念成一句短语。**缺的键念成"缺"**，不念成 0 ——

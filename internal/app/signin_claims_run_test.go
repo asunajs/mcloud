@@ -385,6 +385,50 @@ func TestClaimRunReturnsTheErrorWhenTheGateQueryFails(t *testing.T) {
 	}
 }
 
+// TestRevivalReportsNothingNotFailureOnTheLandedWording：⭐ 上游那句"本月已领取复活卡奖励"
+// 必须落 [ClaimNothing]，**不**交回错误。
+//
+// 来自 2026-09-25 真账号那一趟（两个号各撞见一次，`code=500`）。判错的代价不对称：
+// 走错误那条 ⇒ 历史页每天一条红 + 触发 `onlyError` 推送，而这一档在下个月之前不会自己好。
+// 反向改法是把 [upstream.RevivalAlreadyClaimed] 那个分支删掉 —— 只有这一条会红。
+func TestRevivalReportsNothingNotFailureOnTheLandedWording(t *testing.T) {
+	run, script := claimRuns(&poolSignInStore{*liveTaskStore()}, liveTaskRoute{
+		revivalEndpoint, []string{`{"code":500,"msg":"本月已领取复活卡奖励"}`},
+	})
+	run.Kind = ClaimKindRevival
+	res, perr := run.RunAccount(context.Background(), core.NewAccountID(liveTestAccountID))
+	if perr != nil {
+		t.Fatalf("这句不是故障，不该交回错误：%v", perr)
+	}
+	if res.Status != ClaimNothing {
+		t.Errorf("应落「没领」这一档，实得 %v（%s）", res.Status, res.Error)
+	}
+	// 这一族没有判活接口 ⇒ "已领过"只能靠发一次写请求撞出来。撞不出来才是问题。
+	if got := script.count(revivalEndpoint); got != 1 {
+		t.Errorf("该打一次写请求去撞，实得 %d 次", got)
+	}
+	// 小结里要留着上游原话：排查时"没领"太模糊，得能看出是"额度用完了"还是别的。
+	if line := res.SummaryLine(); !strings.Contains(line, "本月已领取复活卡奖励") {
+		t.Errorf("小结该带读数，实得 %q", line)
+	}
+	if res.RunReport().Outcome != core.OutcomeSuccess {
+		t.Errorf("这一档在历史里不该是红的，实得 %v", res.RunReport().Outcome)
+	}
+
+	// 反向：认不出的文案仍走错误那条，不折成"没领"（那会把真故障洗白）。
+	other, otherScript := claimRuns(&poolSignInStore{*liveTaskStore()}, liveTaskRoute{
+		revivalEndpoint, []string{`{"code":500,"msg":"系统繁忙，请稍后重试"}`},
+	})
+	other.Kind = ClaimKindRevival
+	if _, perr := other.RunAccount(context.Background(),
+		core.NewAccountID(liveTestAccountID)); perr == nil {
+		t.Error("读不懂的文案必须交回错误，不许折成没领")
+	}
+	if got := otherScript.count(revivalEndpoint); got != 1 {
+		t.Errorf("反向用例同样该撞一次，实得 %d 次", got)
+	}
+}
+
 // TestClaimRunWithoutCredentialDoesNotGoOut：库里没凭据 ⇒ 一次出网都不该有。
 //
 // 这一条钉的是 [SignInWorld.Source] 的**顺序**：先取票再查库（写反了的表现是

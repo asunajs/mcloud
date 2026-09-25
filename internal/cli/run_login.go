@@ -50,7 +50,7 @@ func (o *terminalObserver) OnQR(payload string) {
 		if err := writeQRSVG(payload, o.qrOut); err != nil {
 			o.out.human("（写二维码图片失败：%v）", err)
 		} else {
-			o.out.human("\n二维码已写入图片，**打开它扫描**（比终端字符画可靠）：\n  %s\n", o.qrOut)
+			o.out.human("\n二维码已写入图片，打开它扫描（比终端字符画可靠）：\n  %s\n", o.qrOut)
 		}
 	}
 
@@ -263,7 +263,7 @@ func runLoginSmsApp(deps *Deps, out *output, a *SmsArgs) error {
 					outcome.Attempts, captchaType, outcome.LastAnswer)
 				out.human("改走兜底路径：请在浏览器打开下面这个地址，拖动拼图完成验证：")
 				out.human("\n%s\n", outcome.URL)
-				out.human("（**短信由该页面发出**，完成拖动后回到这里继续。不要再重新执行本命令）")
+				out.human("（短信由该页面发出，完成拖动后回到这里继续。不要再重新执行本命令）")
 				// 落到这里表示"码没发出来"。⚠ 它不是**错误**：该打印的都打印了，
 				// 用户接下来要做的是去浏览器里拖那一下。用 stopped 而不是 error，
 				// 就是为了不再补一句"失败" —— 那会让人以为命令没跑成，于是重新执行，

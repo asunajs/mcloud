@@ -151,7 +151,11 @@ func NextCloudStats(accountID AccountID, date string, count int64, history []Clo
 // 要么复用本函数，要么给它加一档措辞。
 func (s CloudStats) DiffClause() string {
 	if s.CloudDiff == nil || s.CloudDiffWeek == nil {
-		return "第一次采集，暂无增量基准"
+		// ⚠ 措辞说的是"**没有往日的记录**"，不是"第一次采集"（2026-09-25 真账号那轮改的）：
+		// `history` 按 [NextCloudStats] 的契约**不含当天**那一行 ⇒ 同一天连跑五次，
+		// 每一次都会走到这一支。当时那句"第一次采集"在一天里的第五次读数上就是错的，
+		// 而它恰好是这条能力最常被使用的形态（一天里多次采）。
+		return "暂无往日记录，算不出日增/周增"
 	}
 	// ⚠ `%+d` 配的是**解引用之后**的整数（nil 那一支在上面已经分流了）：
 	// 涨 → `+3`，持平 → `+0`，跌 → `-500`。

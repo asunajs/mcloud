@@ -427,7 +427,7 @@ func renderSigninAccounts(out *output, accounts []core.Account) {
 		out.human("%4d  %-12s  %-14s  %-6s  %s",
 			position+1, signinAccountID(account), nickname, platform, state)
 	}
-	out.human("\n不带 `--account` 直接跑，就是对**全部启用**的账号各签一次。")
+	out.human("\n不带 --account 直接跑，就是对全部启用的账号各签一次。")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

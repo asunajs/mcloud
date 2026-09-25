@@ -301,6 +301,10 @@ func TestSigninJSONFailureEntryShape(t *testing.T) {
 //
 // 表头是**手写字面量**（Rust 那边也是手写的），所以它与下面的行格式对不齐 ——
 // 这里连那点错位一起钉住：对齐目标是"与冻结的 Rust 输出逐字可 diff"。
+//
+// ⚠ 唯一一处例外：最后一行那句提示**去掉了 Markdown 星号**（"对全部启用的账号…"）。
+// 它是终端输出，星号只会原样显示成噪音；Rust 基准仓库也已移出本仓，那句"逐字可 diff"
+// 不再有对家可 diff。其余列宽/表头错位照旧逐字钉住。
 func TestSigninListMatchesTheRustColumns(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	renderSigninAccounts(&output{stdout: &stdout, stderr: &stderr}, []core.Account{
@@ -310,7 +314,7 @@ func TestSigninListMatchesTheRustColumns(t *testing.T) {
 	want := "下标  账号          昵称            登录端   状态\n" +
 		"   1  19****01      阿一              app     启用\n" +
 		"   2  19****02      -               -       停用\n" +
-		"\n不带 `--account` 直接跑，就是对**全部启用**的账号各签一次。\n"
+		"\n不带 --account 直接跑，就是对全部启用的账号各签一次。\n"
 	if got := stdout.String(); got != want {
 		t.Errorf("`--list` 的表与 Rust 逐字对不上:\n got=%q\nwant=%q", got, want)
 	}

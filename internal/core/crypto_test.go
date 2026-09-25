@@ -1408,7 +1408,8 @@ func TestClassifyStatusBoundaries(t *testing.T) {
 		{408, KindTimeout},
 		{429, KindRateLimited},
 		{400, KindBadRequest},
-		{404, KindBadRequest},
+		{404, KindNotFound}, // 不是"参数错误"：端点不存在与参数填错的下一步动作不同
+		{405, KindBadRequest},
 		{422, KindBadRequest},
 		{500, KindUpstream},
 		{599, KindUpstream},

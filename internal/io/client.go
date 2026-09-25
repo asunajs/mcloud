@@ -218,19 +218,43 @@ func (c *Client) sendOnce(ctx context.Context, request core.HTTPRequest) (core.H
 // 上游的 5xx 常常带着 traceId，那是排障唯一能拿到的线索。
 // 它只进 [core.Error.Message]（内部日志），[core.Error.PublicMessage]
 // 是固定的"上游服务异常"，所以不会外泄到 API 响应里。
+//
+// 其余类别只带状态码 +（有就带上）一个 `Allow` 头：响应体常常回显请求参数，
+// 按凭据边界不进错误串 —— 那是与上面 5xx 例外**相反**的取舍，因为 4xx 的
+// 响应体没有"只有它有线索"这层价值（405 有 `Allow`、404 有状态码本身）。
 func statusError(response core.HTTPResponse) *core.Error {
 	status := strconv.Itoa(int(response.Status))
+	detail := "HTTP " + status + allowDetail(response)
 	switch core.ClassifyStatus(response.Status) {
 	case core.KindAuth:
-		return core.NewAuth("HTTP " + status)
+		return core.NewAuth(detail)
 	case core.KindRateLimited:
-		return core.NewRateLimited("HTTP " + status)
+		return core.NewRateLimited(detail)
 	case core.KindTimeout:
-		return core.NewTimeout("HTTP " + status)
+		return core.NewTimeout(detail)
+	case core.KindNotFound:
+		return core.NewNotFound(detail)
 	case core.KindUpstream:
 		return core.NewUpstream(response.Status, string(response.Body))
 	}
-	return core.NewBadRequest("HTTP " + status)
+	return core.NewBadRequest(detail)
+}
+
+// allowDetail 在响应带 `Allow` 头时补一句"上游说这个 URL 只收哪些方法"。
+//
+// 2026-09-25 真账号跑 ai-avatar 那一族撞出来的：405 原先只剩一句
+// "参数错误: HTTP 405"，而"方法不对"与"参数不对"的下一步动作完全不同
+// （前者改请求形状、后者查参数），`Allow` 又是上游**主动**给的纠正信息，
+// 不含任何凭据形态的东西，值得单独进错误串。
+func allowDetail(response core.HTTPResponse) string {
+	for _, pair := range response.Headers {
+		if strings.EqualFold(pair[0], "allow") {
+			if allowed := strings.TrimSpace(pair[1]); allowed != "" {
+				return "（Allow: " + allowed + "）"
+			}
+		}
+	}
+	return ""
 }
 
 // mapTransportError 把传输层错误归类。

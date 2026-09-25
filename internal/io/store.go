@@ -832,8 +832,8 @@ func (s *SqliteStore) FillAccountCredentials(
 
 // UpsertCloudStats 按 `account + date` UPSERT 日快照。
 //
-// 两个增量列**可以写 NULL**：NULL = 这一条没有基准（该账号的第一次采集），
-// 与"增量为 0"是两句话。判据与理由见 [core.CloudStats] 的字段注。
+// 两个增量列**可以写 NULL**：NULL = 这一条没有**往日**可比的基准（第一天采，
+// 或同一天多次采），与"增量为 0"是两句话。判据与理由见 [core.CloudStats] 的字段注。
 func (s *SqliteStore) UpsertCloudStats(ctx context.Context, scope core.Scope, stats *core.CloudStats) error {
 	if err := validateOwned(ctx, s.db, scope, stats.AccountID); err != nil {
 		return err

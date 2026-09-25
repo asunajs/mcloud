@@ -252,7 +252,9 @@ func (res CloudPhoneResult) SummaryLine() string {
 		strconv.Itoa(len(assets.Tasks.Daily)) + "每日/" +
 		strconv.Itoa(len(assets.Tasks.Monthly)) + "每月"
 	if n := cloudPhonePendingTasks(assets.Tasks); n > 0 {
-		line += "（读成未完成的 " + strconv.Itoa(n) + " 件，**本工具今天一件都不代做**）"
+		// 这句走 SSE 与推送正文，界面**不渲染 Markdown** —— 2026-09-25 真账号跑出来
+		// 满屏星号（"…一件都不代做**）"），所以成文一律用「」。
+		line += "（读成未完成的 " + strconv.Itoa(n) + " 件，「本工具今天一件都不代做」）"
 	}
 	if assets.Toast == nil {
 		line += "；播报位没读到（不影响上面两句）"

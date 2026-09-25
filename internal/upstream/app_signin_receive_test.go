@@ -133,8 +133,64 @@ func TestReceiveRevivalRewardSendsAnEmptyObjectBody(t *testing.T) {
 	}
 }
 
+// TestRevivalAlreadyClaimedRecognisesTheLandedWording：⭐ 2026-09-25 真账号那句
+// `{"code":500,"msg":"本月已领取复活卡奖励"}` 必须判成"本月已领过"，不是故障。
+//
+// 走真链路而不是手搓错误串：判据读的是 [ParseRevivalReward] 经 `EnsureOK` 之后
+// **实际**产出的那句话（含 `上游返回 code=500: ` 前缀）。手搓会把"前缀把措辞隔开"
+// 这一类漂移留在测试里 —— 那正是判据与真实错误串错过时的表现。
+func TestRevivalAlreadyClaimedRecognisesTheLandedWording(t *testing.T) {
+	if RevivalAlreadyClaimed(nil) {
+		t.Error("没有错误时不该判成已领过")
+	}
+
+	_, perr := ParseRevivalReward(envelopeFrom(t, map[string]any{
+		"code": 500, "msg": "本月已领取复活卡奖励",
+	}))
+	if perr == nil {
+		t.Fatal("非 0 业务码必须报错（这一条测的是报错之后的分流）")
+	}
+	if !RevivalAlreadyClaimed(perr) {
+		t.Errorf("实拍那一句必须认成「本月已领过」，实得 %q", perr.Error())
+	}
+
+	// 两套旧实现的措辞形态都要落在匹配面里（caiyun 双条件 / 旧 TS 带"奖励"）。
+	for _, msg := range []string{
+		"本月已领取复活卡奖励",
+		"复活卡已领取",
+		"本月已领取回馈卡奖励",
+		"奖励已领过",
+	} {
+		if _, err := ParseRevivalReward(envelopeFrom(t, map[string]any{
+			"code": 500, "msg": msg,
+		})); err == nil {
+			t.Fatalf("非 0 码应报错: %q", msg)
+		} else if !RevivalAlreadyClaimed(err) {
+			t.Errorf("旧实现的措辞 %q 也应认成已领过", msg)
+		}
+	}
+
+	// ⚠ 反向：认不出的文案**不许**折成"没领"，否则真故障被洗白成一条不痛不痒的历史。
+	for _, msg := range []string{
+		"系统繁忙，请稍后重试",
+		"参数错误",
+		"本月没有可用的复活卡",
+		"本月已领取", // 裸一句没有主体词：留严，交人来判
+	} {
+		_, err := ParseRevivalReward(envelopeFrom(t, map[string]any{
+			"code": 500, "msg": msg,
+		}))
+		if err == nil {
+			t.Fatalf("非 0 码应报错: %q", msg)
+		}
+		if RevivalAlreadyClaimed(err) {
+			t.Errorf("认不出的文案 %q 不许判成已领过", msg)
+		}
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// 延期领取
+// 延期领取（cloudType == 1）
 // ─────────────────────────────────────────────────────────────────────────────
 
 // 真实客户端发的是**裸 GET**：`acceptDate` 取不到时 axios 会**整个键丢掉**，

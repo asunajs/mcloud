@@ -264,6 +264,64 @@ func TestNoticeRunSendsNoWriteRequestWhenTheGateIsClosed(t *testing.T) {
 	}
 }
 
+// TestNoticeRunReadsSlotsIntoTheNothingSummary：⭐ "没领"那一档也要把**读数**念出来。
+//
+// 2026-09-25 真账号那一趟跑出来的就是这一档，而它只留下一句
+// "公告任务没领：能判的槽都读成已入账" —— 于是这一趟**答不出** R1
+// （"`cloudStatus` 哪个值是未领"），尽管数就在手上。补上读数后，
+// 下一次真跑无论判成哪一档都会带着 `cloudStatus=` 的原样读数。
+// 反向改法：把 `noticeSlotReadings` 从 Nothing 那一支摘掉 ⇒ 这一条红。
+func TestNoticeRunReadsSlotsIntoTheNothingSummary(t *testing.T) {
+	run, _ := noticeRuns(&poolSignInStore{*liveTaskStore()},
+		liveTaskRoute{noticeInfoEndpoint, []string{noticeInfoBothClaimed}},
+		liveTaskRoute{noticeRewardEndpoint, []string{noticeOK}},
+	)
+	res, perr := run.RunAccount(context.Background(), core.NewAccountID(liveTestAccountID))
+	if perr != nil {
+		t.Fatalf("这一趟判得出来，不该报错：%v", perr)
+	}
+	if res.Status != NoticeNothing {
+		t.Fatalf("夹具该判成没领，实得 %v", res.Status)
+	}
+	summary := res.SummaryLine()
+	if !strings.Contains(summary, "cloudStatus=2") {
+		t.Errorf("没领那一档也要带上游读数：%q", summary)
+	}
+	// 照抄，不解释：这句未验证的映射不许出现在小结里（判据见 SummaryLine 头注）。
+	for _, forbidden := range []string{"已领", "未领", "未入账"} {
+		if strings.Contains(summary, forbidden) && !strings.Contains(summary, "没领") {
+			t.Errorf("小结不许替读数下结论，出现 %q：%q", forbidden, summary)
+		}
+	}
+	if strings.Contains(summary, "JWT-1") || strings.Contains(summary, "jwttoken") {
+		t.Errorf("小结里漏了凭据形态的东西：%q", summary)
+	}
+
+	// 一槽都没读到时**不**念"无槽，无槽"：那是占掉小结一半的没信息量的话。
+	empty, _ := noticeRuns(&poolSignInStore{*liveTaskStore()},
+		liveTaskRoute{noticeInfoEndpoint, []string{noticeInfoNoSlots}},
+	)
+	res, perr = empty.RunAccount(context.Background(), core.NewAccountID(liveTestAccountID))
+	if perr != nil {
+		t.Fatalf("判不了也不报错：%v", perr)
+	}
+	if got := res.SummaryLine(); strings.Contains(got, "无槽") {
+		t.Errorf("没读到槽时该一个字都不加，实得 %q", got)
+	}
+
+	// 只缺判据字段那一档：念"缺"而不是念 0（"没给"与"给了 0"是两件事）。
+	sparse, _ := noticeRuns(&poolSignInStore{*liveTaskStore()},
+		liveTaskRoute{noticeInfoEndpoint, []string{noticeInfoNoFields}},
+	)
+	res, perr = sparse.RunAccount(context.Background(), core.NewAccountID(liveTestAccountID))
+	if perr != nil {
+		t.Fatalf("判不了也不报错：%v", perr)
+	}
+	if got := res.SummaryLine(); !strings.Contains(got, "cloudStatus=缺") {
+		t.Errorf("缺的键要念成缺，实得 %q", got)
+	}
+}
+
 // TestNoticeRunReportsClaimedWhenTheRecheckFails：⭐ 复查挂了 ⇒ **交回错误**，
 // 但结论**仍是**"已领"，且不把领之前的读数当复查念。
 //
