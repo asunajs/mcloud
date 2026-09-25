@@ -231,7 +231,7 @@ func (s *Server) triggerRun(w http.ResponseWriter, r *http.Request, auth *AuthUs
 		return
 	}
 	// `done` 传 nil：这一路的结论走事件流给前端，不需要服务端自己记账。
-	accepted, perr := s.launchRun(r.Context(), spec, nil)
+	accepted, perr := s.launchRun(r.Context(), spec, notifyPerRun, nil)
 	if perr != nil {
 		ErrDomain(perr).Write(w)
 		return

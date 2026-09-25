@@ -376,6 +376,17 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/login/sms/pc", s.authed(s.sendPcLoginCode))
 	mux.HandleFunc("POST /api/login/sms/pc/{id}/verify", s.authed(s.verifyPcLoginCode))
 
+	// 任务组合这一族：清单读写 + 那枚"一键全跑"。四条都**不是**冻结基准里的路由
+	// （那边没有 pipelines 的对外面），所以同样登记在 routes_test.go 的 `goAdded` 表里。
+	//
+	// `run` 与 `POST /api/runs` 同族（受理即返回 202），差别只在它**给不出** runId 配对
+	// —— 一次组合有十七八步，后面的 runId 要等前面的跑完才分配得出来（判据见
+	// [Server.runPipelineRoute]）。
+	mux.HandleFunc("GET /api/pipelines", s.authed(s.listPipelines))
+	mux.HandleFunc("PUT /api/pipelines/{id}", s.authed(s.putPipeline))
+	mux.HandleFunc("DELETE /api/pipelines/{id}", s.authed(s.deletePipeline))
+	mux.HandleFunc("POST /api/pipelines/{id}/run", s.authed(s.runPipelineRoute))
+
 	mux.HandleFunc("GET /api/schedules", s.authed(s.listSchedules))
 	mux.HandleFunc("PUT /api/schedules/{id}", s.authed(s.putSchedule))
 	mux.HandleFunc("DELETE /api/schedules/{id}", s.authed(s.deleteSchedule))

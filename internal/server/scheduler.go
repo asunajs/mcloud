@@ -170,10 +170,7 @@ func (s *Server) fireScheduleIfDue(
 	// 一个触发周期只报一次：放在判点之前会让每个 tick 都重写一遍水位与记账，
 	// 界面上那句"上次执行"就不是任何一个真实时刻了。
 	if schedule.Target.Kind == core.TargetPipeline {
-		// 组合执行还没接上（在待办里）。到点也不跑，但要把"为什么没跑"留下 ——
-		// 否则用户只会看到一个永远不更新的"上次执行：空"。
-		return s.abandon(ctx, schedule, now, core.ScheduleError,
-			"任务组合还没接上执行，本条只支持单个能力")
+		return s.launchScheduledPipeline(ctx, schedule, now, point, missed)
 	}
 	capability, found := capabilities.Get(schedule.Target.Code)
 	if !found {
@@ -273,7 +270,8 @@ func (s *Server) launchScheduled(
 		var spec runSpec
 		spec, perr = builder(ctx, s, scopeOfSchedule(schedule), capability, raw)
 		if perr == nil {
-			_, perr = s.launchRun(ctx, spec, s.scheduleCompletion(ctx, schedule, now))
+			_, perr = s.launchRun(ctx, spec, notifyPerRun,
+				s.scheduleCompletion(ctx, schedule, now))
 		}
 	}
 	if perr != nil {
@@ -282,6 +280,92 @@ func (s *Server) launchScheduled(
 		return false, schedule.ID + "：" + perr.Message()
 	}
 	return true, ""
+}
+
+// launchScheduledPipeline 是"到点、目标是组合"那一条路。
+//
+// 它与 [Server.launchScheduled] 做的是同一件事，只是目标不是一条能力而是一串：
+// 判到点 → 推水位 → 交给**同一个** [Server.runPipeline]。走同一个执行器是硬要求，
+// 判据与 `run_dispatch.go` 抬头那条一致 —— 界面上那枚按钮与定时各跑一套的话，
+// "手工点是对的、夜里自动跑的那一版少三步"不会有任何测试会红。
+//
+// # 补跑策略：没有能力声明可跟随，所以只有两档
+//
+// [capabilities.ResolveMissPolicy] 的第一档是"这一行自己选过的"，第二档是
+// "该能力的默认"。组合**没有那第二档**：一条链里既有"错过就别补"的签到、
+// 也有"错过仍然值得领"的提醒，替它们 collectively 声明一个默认等于猜。
+// 所以这里只认用户自己选过的，没选过 ⇒ [core.MissSkip]（与 ResolveMissPolicy
+// 的兜底同一方向：补跑是替人授权一次额外执行，没人说过就不做）。
+func (s *Server) launchScheduledPipeline(
+	ctx context.Context, schedule *core.Schedule, now, point time.Time, missed bool,
+) (bool, string) {
+	id := schedule.Target.ID
+	pipeline, perr := s.pipelineToRun(ctx, scopeOfSchedule(schedule), id)
+	if perr != nil {
+		// 组合被删了、或这条链一步都跑不了（能力被改名）：都是"到点了但没能开始"。
+		return s.abandon(ctx, schedule, now, core.ScheduleError, perr.Message())
+	}
+	policy := core.MissSkip
+	if schedule.MissPolicy != nil {
+		policy = *schedule.MissPolicy
+	}
+	if missed && policy == core.MissSkip {
+		return s.abandon(ctx, schedule, now, core.ScheduleSkipped,
+			fmt.Sprintf("错过的触发点（%s）按「不补跑」弃掉，等下一个点",
+				point.In(core.LocalTZ()).Format(time.RFC3339)))
+	}
+	if missed {
+		// 选过"补跑"才走到这里。补**只补最近这一次**（水位抬到 now）：整条链一跑
+		// 就是几分钟，逐点追补等于把同一批任务连打几遍。与 [Server.launchScheduled]
+		// 里同一格的处理一模一样。
+		point = now
+	}
+	if perr := s.markFired(ctx, schedule, point); perr != nil {
+		return false, schedule.ID + "：" + perr.Message()
+	}
+	s.runPipelineAsync(ctx, scopeOfSchedule(schedule), pipeline,
+		s.pipelineScheduleCompletion(ctx, schedule, now))
+	return true, ""
+}
+
+// pipelineScheduleCompletion 是组合跑完之后那一步的记账（两条账，不是一条）：
+//
+//   - `schedules.last_*`：这一行定时任务"到点去没去、跑成什么样"；
+//   - `pipelines.last_*` 由 [Server.runPipelineAsync] 自己写，这里不重复。
+//
+// 上下文再脱开一次的理由与 [Server.scheduleCompletion] 完全相同。
+func (s *Server) pipelineScheduleCompletion(
+	ctx context.Context, schedule *core.Schedule, firedAt time.Time,
+) func(PipelineResult, *core.Error) {
+	return func(result PipelineResult, perr *core.Error) {
+		status, note := scheduledOutcomeForPipeline(result, perr)
+		detached := context.WithoutCancel(ctx)
+		if status == core.ScheduleSkipped {
+			s.recordScheduledRun(detached, schedule, nil, status, note)
+			return
+		}
+		s.recordScheduledRun(detached, schedule, &firedAt, status, note)
+	}
+}
+
+// scheduledOutcomeForPipeline 把一次组合执行的结论翻成 `schedules.last_status`。
+//
+// `ScheduleStatus` 只有 ok / error / skipped 三档，**没有** partial，所以组合那一档
+// 的 partial 在这里只能落进 error —— 这与 [scheduledOutcome] 对单条能力做的事一致
+// （"部分失败也记 error"：没有人当场看着时，把"一半没成"记成 ok 等于把它藏起来）。
+func scheduledOutcomeForPipeline(
+	result PipelineResult, perr *core.Error,
+) (core.ScheduleStatus, string) {
+	if perr != nil {
+		return core.ScheduleError, perr.Message()
+	}
+	if pipelineAllBlocked(result) {
+		return core.ScheduleSkipped, "所有账号都正被另一趟占着，本次不排队"
+	}
+	if result.OK() {
+		return core.ScheduleOK, ""
+	}
+	return core.ScheduleError, result.SummaryLine()
 }
 
 // scheduleCompletion 是跑完之后的那一步：把结论写回那一行。

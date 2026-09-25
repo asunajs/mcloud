@@ -1000,6 +1000,25 @@ type ConfigStore interface {
 
 	ListPipelines(ctx context.Context, scope Scope) ([]Pipeline, error)
 
+	// DeletePipeline 删除组合；返回是否真的删掉了一行（不可见等价于不存在）。
+	//
+	// 与 [DeleteSchedule] 同一条形状，因为要挡的是同一件事：**正在被定时任务引用的
+	// 组合**能不能删。判据放在调用方（见 `Server.deletePipeline`），这里只负责
+	// "删得掉就报 true"，不在 SQL 里替界面做决定。
+	DeletePipeline(ctx context.Context, scope Scope, id string) (bool, error)
+
+	// RecordPipelineRun 写一次组合执行的记账（`last_run_at` / `last_status` /
+	// `last_error` / `last_duration_ms`），**只碰这四列**。
+	//
+	// 与 [RecordScheduleRun] 同一条理由：一次一键全跑要跑几分钟，这期间用户可能
+	// 正在改这个组合的名字或步骤；拿整行 `UpsertPipeline` 回写会把他的编辑抹掉。
+	//
+	// `ranAt` / `durationMS` 为 nil ⇒ **那一列不动**，`lastError` 为 nil ⇒ **写 NULL**
+	// （清空它本身就是结论，与 [RecordScheduleRun] 那两个 nil 的不对称同一口径）。
+	RecordPipelineRun(ctx context.Context, scope Scope, id string,
+		ranAt *time.Time, status PipelineStatus, lastError *string,
+		durationMS *int64) (bool, error)
+
 	// ExchangeConfig 取单行抢兑配置：**无归属**，保持全局。
 	//
 	// 不是漏了：`exchange_config` 被 schema 的 `CHECK (id = 1)` 钉成单行表，

@@ -438,11 +438,14 @@ func TestSchedulerRecordsWhyADueRowCouldNotRun(t *testing.T) {
 		unwire string
 	}{
 		{
-			name:      "组合还没接上执行",
+			// 2026-09-25 之前这一格是"组合还没接上执行"（那个分支只记账不起跑）。
+			// 接上之后它判的是**同一件事的另一半**：到点了、目标那一行却已经不在
+			// （组合被删了、或能力 code 改了名），这一支仍然只记账、不发枪。
+			name:      "目标组合那一行已经没了",
 			at:        atLate,
 			watermark: missedNoon(),
 			schedule:  pipelineSchedule,
-			want:      "任务组合还没接上执行",
+			want:      "任务组合 does-not-exist",
 		},
 		{
 			name:      "能力登记了但没接上",
@@ -510,6 +513,10 @@ func missedNoon() time.Time {
 	return beijing(2026, time.September, 18, 14, 0, 0)
 }
 
+// pipelineSchedule 是一行"目标 = 一个**不存在**的组合"的定时任务（坏数据夹具）。
+//
+// 它专门给上面那一条用：真的组合要连 `pipelines` 表一起造，那是
+// `pipeline_scheduler_test.go` 那两条的夹具，不该塞进"跑不了"这一组。
 func pipelineSchedule(watermark time.Time) core.Schedule {
 	schedule := core.NewSchedule("job", "夹具任务", dailyNoon, core.TZName)
 	target := core.NewScheduleTargetPipeline("does-not-exist")

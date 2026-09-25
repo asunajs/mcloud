@@ -115,6 +115,13 @@ func TestTheRouteTableMatchesTheFrozenBaseline(t *testing.T) {
 		{"POST", "/api/login/sms/app/1/verify"},
 		{"POST", "/api/login/sms/pc"},
 		{"POST", "/api/login/sms/pc/1/verify"},
+		// 2026-09-25 加：任务组合（预设运行列表）那四条。它们全是本项目自己定的形状
+		// （冻结基准里没有），所以进这张表而不是那张。删掉任一条的表现都是 404，
+		// 而界面上 404 会念成"你没有存过预设"—— 一个假结论。
+		{"GET", "/api/pipelines"},
+		{"PUT", "/api/pipelines/1"},
+		{"DELETE", "/api/pipelines/1"},
+		{"POST", "/api/pipelines/1/run"},
 	}
 	for _, rt := range goAdded {
 		req := httptest.NewRequest(rt.method, rt.path, nil)

@@ -413,20 +413,22 @@ func liveRoomParams() []core.FieldSpec {
 	return append(accountSelector(),
 		core.NewFieldSpecText("codes", "口令").
 			WithHelp("留空 = 自动从弹幕与小红书收集；多个用换行或逗号分隔"),
-		core.NewFieldSpecText("listenSeconds", "听弹幕时长（秒）").
+		core.NewFieldSpecNumber("listenSeconds", "听弹幕时长（秒）").
 			// ⚠ 默认值写在**声明**里，而不是让服务端自己记一份：界面上那一栏
 			// 就是照这份声明渲染的，声明里的默认值与后端用的缺省不一致时，
 			// 表现是"界面显示 60、实际听了别的数"。
 			// CLI 那一侧的缺省是同一个人填的另一个数字（`--listen-seconds`，
 			// 见 docs/cli-usage.md），改这里要一并想到它。
+			// ⚠ 档位必须是 `number` 而不是 `text`：执行侧那一格 `json.Unmarshal` 到
+			// `int`，界面上送字符串必 400（判据见 [core.NewFieldSpecNumber]）。
 			WithDefault(json.RawMessage(`60`)).
 			WithHelp("默认 60。只在自动收集时生效"),
 		core.NewFieldSpecBool("koulingOnly", "只听不投", false).
 			// ⚠ 措辞是"不投"，**不是**"不消耗"：口令全场通用，不存在消耗
 			// （见 `internal/upstream/live_flower.go` 文件头五条事实②）。
-			WithHelp("只收口令并打印，**一个口令都不投给上游**"),
+			WithHelp("只收口令并打印，一个口令都不投给上游"),
 		core.NewFieldSpecBool("skipKouling", "只用给定口令", false).
-			WithHelp("跳过收集，直接投 `口令` 那一栏填的内容"),
+			WithHelp("跳过收集，直接投「口令」那一栏填的内容"),
 	)
 }
 
@@ -657,7 +659,7 @@ var registry = []Capability{
 		Title:       "用复活卡 / 回馈卡",
 		Group:       core.GroupActivity,
 		Kind:        core.KindAction,
-		Description: "用掉一张卡换回失效云朵（**卡用掉就没了，无法补发**）",
+		Description: "用掉一张卡换回失效云朵（卡用掉就没了，无法补发）",
 		// ⛔ 不进编排：上游**没有**"还剩几张卡"的查询口，所以这一条**没有门槛可查** ——
 		// 每天自动跑一次 = 每天用掉一张卡。旧项目与参考实现都是在本地记当月额度，
 		// 而本地那张表**还没建**（要动 schema 与 StateStore，已登记成待用户拍板的问题）。
@@ -675,7 +677,7 @@ var registry = []Capability{
 		Title:       "待领取奖品",
 		Group:       core.GroupQuery,
 		Kind:        core.KindQuery, // 只读：列出来，不领
-		Description: "查有没有待领取的奖品（奖品会过期；本工具**只列不领**）",
+		Description: "查有没有待领取的奖品（奖品会过期；本工具只列不领）",
 		// 查询型一律不进编排（与 `cloud-snapshot` 同一取态）。
 		RunInBatch:         false,
 		Risk:               core.RiskLow,
@@ -694,7 +696,7 @@ var registry = []Capability{
 		Title:       "任务清单",
 		Group:       core.GroupQuery,
 		Kind:        core.KindQuery, // 只读：列出来，不做任务
-		Description: "看这个账号有哪些任务、做没做（本工具**只查不做**，做任务要逐条接线）",
+		Description: "看这个账号有哪些任务、做没做（本工具只查不做，做任务要逐条接线）",
 		// 查询型不进编排（与 `prizes` / `cloud-snapshot` 同一取态）：它不改变任何状态，
 		// 自动跑它只是每天多打一次读请求。
 		RunInBatch:         false,
@@ -709,8 +711,8 @@ var registry = []Capability{
 		Title: "App 任务（做任务）",
 		Group: core.GroupDaily,
 		Kind:  core.KindAction,
-		Description: "把 App 任务矩阵里能做的做掉：逐条 `task/click` 上报，" +
-			"缺端点族的那些**明说不做**（会写用户的账，且不可撤销）；" +
+		Description: "把 App 任务矩阵里能做的做掉：逐条「task/click」上报，" +
+			"缺端点族的那些明说不做（会写用户的账，且不可撤销）；" +
 			"往网盘传的那些临时文件跑完自己移进回收站",
 		// ⛔ 不进编排（`RunInBatch: false`）—— 这一条与 `notice` 那条的区别在这一点：
 		// `notice` 的写请求由查询读数**判出来**（不该领时一个请求都不发），
@@ -752,7 +754,7 @@ var registry = []Capability{
 		Title:       "消息推送任务",
 		Group:       core.GroupActivity,
 		Kind:        core.KindAction,
-		Description: "查消息推送任务的第二次奖励，`secondTaskStatus == 2` 才领（**旧接口，尚无抓包样本**）",
+		Description: "查消息推送任务的第二次奖励，「secondTaskStatus == 2」才领（旧接口，尚无抓包样本）",
 		// ⛔ 不进编排：这一族的 URL / 方法 / 字段名**全部**来自
 		// `docs/business-feature-inventory.md` §2.3 对旧 TS 的文字描述，
 		// `test/fixtures/http/` 里一条 `msgPushOn` 都没有 ⇒ 接口层按"未验证"对待。
@@ -772,7 +774,7 @@ var registry = []Capability{
 		Title:       "趣玩AI抽奖",
 		Group:       core.GroupActivity,
 		Kind:        core.KindAction,
-		Description: "趣玩AI活动抽一次（本工具**每天只抽 1 次**，与旧项目一致；模块 id 现取不写死）",
+		Description: "趣玩AI活动抽一次（本工具每天只抽 1 次，与旧项目一致；模块 id 现取不写死）",
 		// 进编排：要不要抽由 `page/getmodule` 的读数判（活动期、剩余次数、今天有没有抽过），
 		// 判不了就**一个写请求都不发** ⇒ 每天挂一次不会花掉不该花的额度。
 		RunInBatch: true,
@@ -796,7 +798,7 @@ var registry = []Capability{
 		Title:       "红包派对盘点",
 		Group:       core.GroupQuery,
 		Kind:        core.KindQuery, // 只读：看钱和清单，一件任务都不代做
-		Description: "看这个号在红包派对里有多少可兑现金、还有哪些任务（**只盘点不代做**，装 APK 那一类要另行拍板）",
+		Description: "看这个号在红包派对里有多少可兑现金、还有哪些任务（只盘点不代做，装 APK 那一类要另行拍板）",
 		// 查询型不进编排（与 `prizes` / `task-list` / `cloud-snapshot` 同一取态）。
 		// 这一条还多一层理由：活动站那张票**没有失效判据**（"票过期了上游回什么"零样本，
 		// 见 `cloud_phone_session.go` 文件头），所以挂上调度后遇到过期只能攒失败历史 ——
@@ -821,7 +823,7 @@ var registry = []Capability{
 		Title:       "拍拍盘点",
 		Group:       core.GroupQuery,
 		Kind:        core.KindQuery, // 只读：看次数读数与任务表，抽奖与拍照都不做
-		Description: "看这个号在拍拍活动里的任务表与抽奖次数读数（**只盘点不代做**：不做任务、不抽奖、不写网盘）",
+		Description: "看这个号在拍拍活动里的任务表与抽奖次数读数（只盘点不代做：不做任务、不抽奖、不写网盘）",
 		// 查询型不进编排（与 `prizes` / `task-list` / `cloud-phone-redpack` 同一取态）。
 		// 这一条还多一层：这一期活动**还活着吗**没有证据（`marketName` 是夏日那一期，
 		// 归档时间 2026-06-29），挂上调度只会每天产一条"可能已经下线的端点"的失败历史。
@@ -851,7 +853,7 @@ var registry = []Capability{
 		Title:              "AI 头像生成与抽奖",
 		Group:              core.GroupActivity,
 		Kind:               core.KindAction,
-		Description:        "生成 5 张 AI 头像并抽完当天的次数（**会往你的网盘写文件**，这一条链不清理，产物留在网盘里）",
+		Description:        "生成 5 张 AI 头像并抽完当天的次数（会往你的网盘写文件，这一条链不清理，产物留在网盘里）",
 		RunInBatch:         false,
 		Risk:               core.RiskMedium,
 		DefaultAccountMode: core.ModeSequential,

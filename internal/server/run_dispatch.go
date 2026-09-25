@@ -212,6 +212,24 @@ type acceptedRun struct {
 	RunID   core.RunID
 }
 
+// runNotifyPolicy 决定这一趟跑完之后**推不推**。
+//
+// 为什么不是一个 bool：这里要表达的是"由谁推"，而它有两个合法答案 ——
+// 这一趟自己收尾推（默认），或**由上层统一推**（组合：十七八步各推一条 = 用户
+// 手机上十七八条消息，而旧实现是整条链跑完推一条，见 `pipeline_run.go` 抬头）。
+// bool 只说得了"不推"，说不了"不是我不推，是上面那层会推"。
+type runNotifyPolicy int
+
+const (
+	// notifyPerRun 是默认：跑完由运行器自己收尾推一条。
+	notifyPerRun runNotifyPolicy = iota
+	// suppressNotify 是"这一趟不推，上层会推"。**只有**组合执行在传它。
+	//
+	// ⚠ 传了它就必须真的在收尾补一条：否则表现成"这个服务端配了推送而一次全跑
+	// 什么也没收到"，那比多推几条更难查。唯一调用方是 [Server.runPipeline]。
+	suppressNotify
+)
+
 // launchRun 预分配 runId、后台起跑，返回账号↔runId 的配对。
 //
 // 它**不**写响应也不回 HTTP 状态：那两样是调用方的事（HTTP 回 202，调度记日志）。
@@ -230,7 +248,8 @@ type acceptedRun struct {
 // 是**编排自身**的错误（写库失败那一类），与"账号跑失败了"是两件事 ——
 // 后者已经合并在 `summary.Outcome` 里。
 func (s *Server) launchRun(
-	ctx context.Context, spec runSpec, done func(app.RunSummary, error),
+	ctx context.Context, spec runSpec, notify runNotifyPolicy,
+	done func(app.RunSummary, error),
 ) ([]acceptedRun, *core.Error) {
 	plan := spec.plan
 	// 一一对应在这里就验掉，不留给 [app.Runner.Run]：那里已经起了 goroutine，
@@ -256,8 +275,10 @@ func (s *Server) launchRun(
 	//
 	// `s.notify` 为 nil 时 [app.WithRunNotify] 等于不接：运行器不攒过程话、
 	// 收尾一句都不推（见 `internal/app/run.go` 的 `RunSummary.Notify`）。
+	// [suppressNotify] 那一路传的是**同一个 nil**，但含义不同：那里是"上层会推"，
+	// 判据见 [runNotifyPolicy]。
 	runner := app.NewRunner(s.store, spec.scope, s.clock, s.runs.registry, s.bus,
-		app.WithRunNotify(s.notify.RunNotify()))
+		app.WithRunNotify(s.runNotifyFor(notify)))
 	// ⚠ 脱开调用方的上下文：HTTP 那条路上客户端关掉页面，不该把一趟**已经往上游
 	// 投了口令**的运行半途掐掉（那会留下一条永远 `running` 的记录，而真实动作
 	// 已经发生了）；调度那条路上进程收尾时同样让它跑完而不是腰斩。
@@ -272,6 +293,17 @@ func (s *Server) launchRun(
 		}
 	}()
 	return out, nil
+}
+
+// runNotifyFor 把策略翻成运行器那一份依赖。
+//
+// 两个合法取值都会走到 [app.WithRunNotify]，区别只在传不传 nil —— 而"传 nil"
+// 有两种来源（没装配 / 上层接管），运行器分不清也不需要分清：分清它是本包的活。
+func (s *Server) runNotifyFor(policy runNotifyPolicy) *app.RunNotify {
+	if policy == suppressNotify {
+		return nil
+	}
+	return s.notify.RunNotify()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

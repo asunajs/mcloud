@@ -463,6 +463,17 @@ func NewFieldSpecText(key, label string) FieldSpec {
 	return FieldSpec{Key: key, Label: label, Kind: FieldText}
 }
 
+// NewFieldSpecNumber 构造一个"要送 JSON 数字"的字段。
+//
+// ⚠ 这一档与 [NewFieldSpecText] 不是一回事，别为了省事把数字栏声明成文本：
+// 执行侧走 `runParams.number()` ⇒ `json.Unmarshal` 到 `int`，**收到字符串就 400**
+// （`internal/server/runs_test.go` 的 `TestWrongParameterTypeSaysWhichField`
+// 拿 `{"listenSeconds":"60"}` 钉着这一条）。界面上那一格是输入框里的文本，
+// 前端只有看到 `kind == "number"` 才会在出线前换成数字。
+func NewFieldSpecNumber(key, label string) FieldSpec {
+	return FieldSpec{Key: key, Label: label, Kind: FieldNumber}
+}
+
 // NewFieldSpecBool 构造一个布尔字段，并写入默认值。
 //
 // ⚠ 默认值**总是**写（`true` 与 `false` 都写）：Rust 侧 `FieldSpec::bool`

@@ -530,6 +530,13 @@ func (s *Server) putSchedule(w http.ResponseWriter, r *http.Request, auth *AuthU
 			return
 		}
 	case core.TargetPipeline:
+		// 内置那一版**库里没有行**（`allRunPipeline` 每次现造），所以不能走下面的查库 ——
+		// 查了就是 400「没有这个组合: all」，表现成"手动那枚按钮能跑的东西，
+		// 定时却选不了"。到点执行那一路（`pipelineToRun`）第一行本来就认这个 id，
+		// 这里放行只是让**受理面**与**执行面**同一口径。
+		if body.Target.ID == PipelineRunAllID {
+			break
+		}
 		pipeline, err := s.store.GetPipeline(ctx, scope, body.Target.ID)
 		if err != nil {
 			ErrDomain(asDomain(err)).Write(w)

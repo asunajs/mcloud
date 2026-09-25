@@ -756,6 +756,69 @@ func (s *SqliteStore) ListPipelines(ctx context.Context, scope core.Scope) ([]co
 	return out, nil
 }
 
+// DeletePipeline 删除；返回是否真的删掉了一行（不可见等价于不存在）。
+func (s *SqliteStore) DeletePipeline(ctx context.Context, scope core.Scope, id string) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		"DELETE FROM pipelines WHERE id = ? AND "+ownerVisibleByID,
+		id, ownerArg(scope), ownerArg(scope))
+	if err != nil {
+		return false, mapSQLite(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, mapSQLite(err)
+	}
+	return n > 0, nil
+}
+
+// RecordPipelineRun 窄写执行记账：只碰 `last_run_at` / `last_status` /
+// `last_error` / `last_duration_ms` 四列。
+//
+// 与 [SqliteStore.RecordScheduleRun] 同一条纪律，三个方向都一样：
+//   - **窄写**而不是整行 `UpsertPipeline`：一次组合要跑几分钟，这期间用户可能正在
+//     改这个组合的名字或步骤，全量覆盖会把他的编辑打回几分钟前那份。
+//   - `lastError == nil` ⇒ **写 NULL**（跑干净了就别再显示上次那句错误）。
+//   - `ranAt == nil` / `durationMS == nil` ⇒ **那一列不动**：没有哪一刻该被写进
+//     "跑过"那一列时，宁可不写（与调度侧同一口径）。
+//
+// ⚠ 未知状态文本直接报错，不落库：与 [RecordScheduleRun] 里那道
+// `ParseScheduleStatus` 同理由 —— 把脏值写成 NULL 等于把"有状态但读不懂"
+// 洗成"从来没跑过"。
+func (s *SqliteStore) RecordPipelineRun(
+	ctx context.Context, scope core.Scope, id string,
+	ranAt *time.Time, status core.PipelineStatus, lastError *string,
+	durationMS *int64,
+) (bool, error) {
+	text := status.String()
+	if _, ok := core.ParsePipelineStatus(text); !ok {
+		return false, core.NewBadRequest(
+			"组合 " + id + " 的执行状态是未知值，不落库")
+	}
+
+	set := "last_status = ?, last_error = ?"
+	args := []any{text, optStr(lastError)}
+	if ranAt != nil {
+		set += ", last_run_at = ?"
+		args = append(args, optTime(ranAt))
+	}
+	if durationMS != nil {
+		set += ", last_duration_ms = ?"
+		args = append(args, *durationMS)
+	}
+	args = append(args, id, ownerArg(scope), ownerArg(scope))
+
+	res, err := s.db.ExecContext(ctx,
+		"UPDATE pipelines SET "+set+" WHERE id = ? AND "+ownerVisibleByID, args...)
+	if err != nil {
+		return false, mapSQLite(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, mapSQLite(err)
+	}
+	return n > 0, nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 抢兑配置（单行表，**无归属**）
 // ─────────────────────────────────────────────────────────────────────────────
