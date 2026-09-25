@@ -45,26 +45,22 @@ export interface CapabilityGroup {
 }
 
 /**
- * 任务中心**只列 `hidden === false`** 的能力。
+ * 任务中心**列全部**能力，`hidden` 的也在内。
  *
- * ⚠ `hidden` 的语义不是"废弃"，而是"**它有更合适的入口**"：
- * - `exchange` → 兑换中心页（那边有倒计时与奖品列表，混进通用列表既难用也危险）；
- * - `auth-refresh` → 账号页那枚按钮（通用列表那枚"立即执行"在用户心里是
- *   "**现在就换**"，而这条链承诺的恰好相反 —— 到点才换、没到点一行上游都不打）。
+ * 补记口径的来由（2026-09-25，"所有任务一页卡片化"那一轮）：这一页不再只是
+ * "单跑一条能力"的表单，而是**编排预设运行列表**的地方 —— 一份清单里完全可能
+ * 既要有签到、也要有 `auth-refresh`（收尾刷令牌）与 `exchange`（带参数兑换）。
+ * 所以 `hidden` 在这一页**不再是过滤条件**，只是"它另有专属入口"的一句提示。
  *
- * ⚠⚠ 但它们**仍是合法的调度目标**：定时任务选目标走的是另一条路（不看 `hidden`）。
- * 所以"这里不显示"**绝不等于**"这条能力不能跑" —— 别顺手把过滤加到别处。
- */
-export const visibleCapabilities = (all: readonly CapabilityRow[]): CapabilityRow[] =>
-  all.filter((c) => !c.hidden)
-
-/**
- * 按 `group` 归组，**丢掉空组**（没有能力的组不该占一个 tab），
- * 再按 [GROUP_ORDER] 排序；未登记的组按名字排在最后。
+ * ⚠ `hidden` 的语义仍然没变：它指"**有更合适的入口**"（`exchange` → 兑换中心页、
+ * `auth-refresh` → 账号页那枚按钮），不是"废弃"。这一页把它们摆出来不等于
+ * 那两个入口该撤 —— 撤掉的话，通用表单里那枚「立即执行」在用户心里是"**现在就换**"，
+ * 而 `auth-refresh` 那条链承诺的恰好相反（到点才换、没到点一发请求都不发）。
+ * 所以这一族**仍然**要在卡片上标出来，别让人以为在这里点就算强制刷新了。
  */
 export const groupCapabilities = (all: readonly CapabilityRow[]): CapabilityGroup[] => {
   const buckets = new Map<string, CapabilityRow[]>()
-  for (const cap of visibleCapabilities(all)) {
+  for (const cap of all) {
     const list = buckets.get(cap.group)
     if (list) list.push(cap)
     else buckets.set(cap.group, [cap])
@@ -77,6 +73,29 @@ export const groupCapabilities = (all: readonly CapabilityRow[]): CapabilityGrou
     .sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
     .map(([key, items]) => ({ key, label: GROUP_LABEL[key] ?? key, items }))
 }
+
+/**
+ * 「全部」那个 tab 的 key。
+ *
+ * 空串而不是编一个 `core.Group` 里没有的单词：它**不是**一个组，是"不按组筛"。
+ * 用假 code 的风险是哪天后端真加了一个同名组，两件事会静默合成一件事。
+ */
+export const ALL_GROUP_KEY = ''
+
+/** 把所有能力并成一组（「全部」那个 tab 用）。 */
+export const allInOneGroup = (all: readonly CapabilityRow[]): CapabilityGroup[] =>
+  all.length === 0 ? [] : [{ key: ALL_GROUP_KEY, label: '全部', items: [...all] }]
+
+/**
+ * tabs 的清单：「全部」在最左，后面按 `GROUP_ORDER` 排。
+ *
+ * 默认停在「全部」正是"不管什么平台，一页卡片看全"这句话的落法 ——
+ * 分组 tab 留着当**筛子**，不当**隔板**。
+ */
+export const tabsFor = (all: readonly CapabilityRow[]): CapabilityGroup[] => [
+  ...allInOneGroup(all),
+  ...groupCapabilities(all),
+]
 
 /** 徽标：文案 + **整条**类名。 */
 export interface Badge {
@@ -109,6 +128,16 @@ export const riskBadge = (risk: string): Badge =>
  */
 export const readOnlyBadge = (kind: string): Badge | null =>
   kind === 'query' ? { label: '只读', cls: 'badge badge-soft badge-info' } : null
+
+/**
+ * `hidden` 的能力标一句「另有专属入口」。
+ *
+ * 标它不是为了好看：`exchange` 在兑换中心页有倒计时与选品，`auth-refresh` 在账号页
+ * 那枚按钮点下去是"**现在就换**" —— 而这一页的通用表单给不了那两个语义。
+ * 不标出来，用户会以为这里的"立即执行"与那边的按钮是一回事。
+ */
+export const ownEntryBadge = (hidden: boolean): Badge | null =>
+  hidden ? { label: '另有专属入口', cls: 'badge badge-soft' } : null
 
 /**
  * 执行完一句反馈：`POST /api/runs` 回的是 **202 受理**，不是结果。

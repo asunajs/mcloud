@@ -1,5 +1,5 @@
 /**
- * 任务中心（`#/tasks`）—— 配置并触发各能力。
+ * 任务中心（`#/tasks`）—— 一页挑任务、排顺序、存成预设、开跑。
  *
  * # 与兑换中心那一页的分工
  *
@@ -8,20 +8,29 @@
  * 读来的声明**现算**的，控件按 `kind` 通用渲染 ——
  * 「新增能力零前端改动」（§5.6）在这个页面才是真的。
  *
- * # 只列 `hidden === false` 的能力
+ * # 参数表单编辑的是"清单里选中的那一步"，不是一份独立的临时表单
  *
- * `exchange` 与 `auth-refresh` 都有自己的入口（兑换中心页 / 账号页那枚按钮），
- * 混进通用列表会让同一枚「立即执行」背上两个语义。但它们**仍是合法的调度目标**
- * —— 定时任务选目标走的是另一条路，不看 `hidden`。判据在 `ui/task-groups.ts`。
+ * 早先这里是"点卡片选中能力 ⇒ 填参数 ⇒ 立即执行"。清单化之后多了一个坑：
+ * 同一个表单如果有两个出处（"临时预览"的那一份 与 清单里的那一份），用户改了参数
+ * 不知道改到哪儿去了。所以取消临时态：**点一张卡片就是把它加进清单**（已经在里面
+ * 就跳过去选中），表单直接读写那一步的 `body`；要单跑一步用表单里那枚「只跑这一步」。
+ *
+ * # 卡片墙列**全部**能力（含 `hidden`）
+ *
+ * 一份预设里可能既要有签到、也要有 `auth-refresh`（收尾刷令牌）与 `exchange`
+ * （带参数兑换），所以 `hidden` 在这里不再是过滤条件，只是卡片上一句「另有专属入口」
+ * （判据与语义都写在 `ui/task-groups.ts`）。分组 tab 留着当**筛子**、不当**隔板**：
+ * 「全部」那一栏在最左，也是默认落点。
  *
  * # 「受理」不等于「跑完」
  *
- * `POST /api/runs` 回的是 **202**，带的是 `runId` 列表，不是结果。
- * 所以这里只说"已受理"，真实结果稍后落库（**查询类能力甚至不落库** ——
+ * `POST /api/runs` 回 **202** + `runId` 列表；`POST /api/pipelines/{id}/run` 回 **202**
+ * + `{pipelineId, name, steps}`（**没有** runId 配对 —— 每一步的 runId 要等上一步跑完
+ * 才分配得出来）。两处都只说"已受理"，真实结果稍后落库（**查询类能力甚至不落库** ——
  * `core.KindQuery` 声明它不写运行历史）。
  */
 
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   ApiError,
   listAccounts,
@@ -35,18 +44,21 @@ import {
 } from '../api'
 import { ConfirmDialog, closeDialog, openDialog } from '../ui/dialog'
 import { IconAlert, IconTask } from '../ui/icons'
+import { LIST_LEVEL_PARAM_KEYS, stepBodyForWire } from '../ui/pipeline-draft'
 import {
   acceptedText,
-  groupCapabilities,
+  ownEntryBadge,
   readOnlyBadge,
   riskBadge,
+  tabsFor,
   type CapabilityGroup,
 } from '../ui/task-groups'
 import { fmtTime } from '../ui/time'
+import { pipelineDialogs, presetBar, runListCard, useRunList } from './task-run-list'
 
 type LoadState = 'loading' | 'error' | 'ready'
 
-/** 确认弹窗的 id（`ui/dialog.tsx` 靠 id 找 DOM，见那个文件头）。 */
+/** 单步确认弹窗的 id（预设那两条在 `task-run-list.tsx` 里，各自独立）。 */
 const CONFIRM_ID = 'task-confirm'
 
 /** 最近运行只显示这么多条 —— 完整历史在「历史与日志」那一页。 */
@@ -90,30 +102,41 @@ export const TasksPage = () => {
   const accounts = ref<Account[]>([])
   const runs = ref<RunRecord[]>([])
 
-  /** 当前 tab（`core.Group` 的文本值）。 */
+  /** 当前 tab（`core.Group` 的文本值；`''` = 「全部」）。 */
   const activeGroup = ref('')
-  /** 当前选中的能力 code；`null` = 还没选。 */
-  const selectedCode = ref<string | null>(null)
-  /** 参数值。键名就是声明里的 `key` —— 送错键后端 400（`不认识的参数：…`）。 */
-  const form = reactive<Record<string, unknown>>({})
   const submitting = ref(false)
+
+  /**
+   * 编排区（预设条 + 有序清单）的状态与动作。
+   * `refresh` 回指本文件的 `load`：组合自己**没有**进度视图，跑完只能回读一次历史
+   * 才看得到结局（这一格将来怎么补，记在 `docs/pending-decisions.md`）。
+   */
+  const m = useRunList({ capabilities, accounts, refresh: () => load() })
 
   let timer: ReturnType<typeof setInterval> | null = null
 
-  const groups = computed<CapabilityGroup[]>(() => groupCapabilities(capabilities.value))
+  const groups = computed<CapabilityGroup[]>(() => tabsFor(capabilities.value))
 
   const activeItems = computed<CapabilityRow[]>(
     () => groups.value.find((g) => g.key === activeGroup.value)?.items ?? [],
   )
 
-  const selected = computed<CapabilityRow | null>(
-    () => capabilities.value.find((c) => c.code === selectedCode.value) ?? null,
+  /** 表单编辑的就是清单里选中那一步；没有选中行 ⇒ 没有表单可填。 */
+  const selected = computed<CapabilityRow | null>(() => m.selectedCap.value)
+
+  /**
+   * 声明里的参数，**剔掉清单级那两格**。
+   *
+   * 判据在 `internal/server/pipeline_run.go:293-300`：组合执行时会用清单级账号
+   * 覆盖 `accounts`、把 `accountMode` 硬写成 `sequential`。留着这两格 = 给用户
+   * 两格"填了永远不生效"的输入。
+   */
+  const params = computed<CapabilityField[]>(() =>
+    (selected.value?.params ?? []).filter((f) => !LIST_LEVEL_PARAM_KEYS.includes(f.key)),
   )
 
-  const params = computed<CapabilityField[]>(() => selected.value?.params ?? [])
-
   const recentRuns = computed<RunRecord[]>(() =>
-    runs.value.filter((r) => r.capability === selectedCode.value).slice(0, RECENT_LIMIT),
+    runs.value.filter((r) => r.capability === selected.value?.code).slice(0, RECENT_LIMIT),
   )
 
   const load = async () => {
@@ -129,14 +152,12 @@ export const TasksPage = () => {
       accounts.value = accountList.accounts
       runs.value = runList.runs
 
-      // 分组变了（或首次进来）就把 tab 落回第一个**有能力的**组。
-      const list = groups.value
-      if (!list.some((g) => g.key === activeGroup.value)) {
-        activeGroup.value = list[0]?.key ?? ''
-      }
-      // 选中的能力可能已被摘掉（改了声明、或它本来就在别的组）⇒ 重新落位。
-      if (!capabilities.value.some((c) => c.code === selectedCode.value)) {
-        selectCapability(activeItems.value[0] ?? null)
+      // 预设那一族**单独容错**：读不到不该把整页换成错误态（理由见 `useRunList`）。
+      void m.reloadPipelines()
+
+      // 首次进来或分组变了 ⇒ 落回第一个 tab（只要有能力，那就是「全部」）。
+      if (!groups.value.some((g) => g.key === activeGroup.value)) {
+        activeGroup.value = groups.value[0]?.key ?? ''
       }
       state.value = 'ready'
     } catch (e) {
@@ -155,48 +176,12 @@ export const TasksPage = () => {
     if (timer !== null) clearInterval(timer)
   })
 
-  // ── 选择与表单 ──────────────────────────────────────────────────────────
+  // ── 表单绑定（读写都落在选中那一步的 body 上）──────────────────────────────
 
-  /**
-   * 换一个能力 ⇒ 表单**整体重建**。
-   *
-   * ⚠ 不能"保留旧值、只补新键"：两个能力的参数键会撞名（`accounts` / `accountMode`
-   * 是 `accountSelector()` 给的，几乎每个能力都有），撞上之后上一个能力填的
-   * 奖品名就会跟着送进下一个能力的请求里 —— 而后端只认自己声明的键，多一个就 400。
-   */
-  const selectCapability = (cap: CapabilityRow | null) => {
-    selectedCode.value = cap?.code ?? null
-    submitError.value = ''
-    notice.value = ''
-    for (const k of Object.keys(form)) delete form[k]
-    if (!cap) return
-    for (const f of cap.params) {
-      if (f.default !== undefined) form[f.key] = f.default
-      else if (f.kind === 'bool') form[f.key] = false
-      else if (f.kind === 'multi_select') form[f.key] = []
-      else form[f.key] = ''
-    }
-  }
-
-  /** 切 tab 时清空选择 —— 选中的能力未必属于新 tab。 */
-  const switchGroup = (key: string) => {
-    activeGroup.value = key
-    const first = groups.value.find((g) => g.key === key)?.items[0] ?? null
-    selectCapability(first)
-  }
-
-  /** 声明里那一栏是不是"账号多选"（`accountSelector()` 给的第一项）。 */
-  const isAccountField = (f: CapabilityField) => f.key === 'accounts'
-
-  const fieldValue = (f: CapabilityField): unknown => form[f.key]
+  const fieldValue = (f: CapabilityField): unknown => m.editBody()[f.key]
 
   const setField = (f: CapabilityField, v: unknown) => {
-    form[f.key] = v
-  }
-
-  const toggleAccount = (id: string, on: boolean) => {
-    const cur = Array.isArray(form.accounts) ? (form.accounts as string[]) : []
-    form.accounts = on ? [...cur, id] : cur.filter((x) => x !== id)
+    m.editBody()[f.key] = v
   }
 
   const missingRequired = computed(() =>
@@ -212,21 +197,14 @@ export const TasksPage = () => {
   )
 
   const canSubmit = computed(
-    () => state.value === 'ready' && selected.value !== null && missingRequired.value.length === 0,
+    () =>
+      state.value === 'ready' &&
+      m.selectedStep.value !== null &&
+      selected.value !== null &&
+      missingRequired.value.length === 0,
   )
 
-  /**
-   * 确认框里那句"将对 N 个账号"。
-   *
-   * ⚠ 留空 = **全部账号**（与 `accountSelector()` 声明的语义一致），
-   * 所以"一个都没勾"不等于"0 个目标"，那是 `accounts.value.length` 个。
-   */
-  const targetAccountCount = computed(() => {
-    const picked = Array.isArray(form.accounts) ? (form.accounts as string[]).length : 0
-    return picked === 0 ? accounts.value.length : picked
-  })
-
-  // ── 执行 ────────────────────────────────────────────────────────────────
+  // ── 只跑这一步 ────────────────────────────────────────────────────────────
 
   const askConfirm = () => {
     if (!canSubmit.value || submitting.value) return
@@ -240,22 +218,32 @@ export const TasksPage = () => {
     openDialog(CONFIRM_ID)
   }
 
+  /**
+   * 单跑选中的那一步。
+   *
+   * 账号与执行方式取**清单级**那一份，与整条链跑起来时同一口径（后端那两行覆盖
+   * 就在 `pipeline_run.go:293-300`）。如果这里改用步骤自己 body 里的 `accounts`，
+   * 就会出现"清单上选了 A、单跑却打了 B"。
+   */
   const doSubmit = async () => {
     const cap = selected.value
-    if (cap === null || submitting.value) return
+    const step = m.selectedStep.value
+    if (cap === null || step === null || submitting.value) return
     submitting.value = true
     submitError.value = ''
     notice.value = ''
     try {
-      // 只送声明里有的键 —— 多一个后端就 400。
-      const payload: Record<string, unknown> = {}
-      for (const f of cap.params) {
-        const v = fieldValue(f)
-        if (v !== undefined) payload[f.key] = v
-      }
+      // 只送声明里有的键 —— 多一个后端就 400；`number` 档在这里换成 JSON 数字，
+      // 空的省略（送字符串过去必 400，判据见 `ui/pipeline-draft.ts` 的 [numberWire]）。
+      const payload: Record<string, unknown> = stepBodyForWire(step.body, cap)
+      payload.accounts = [...m.list.value.accountIds]
+      payload.accountMode = 'sequential'
       const accepted = await triggerRun(cap.code, payload)
       closeDialog(CONFIRM_ID)
-      notice.value = acceptedText(cap.title, accepted.runs.map((r) => r.runId))
+      notice.value = acceptedText(
+        cap.title,
+        accepted.runs.map((r) => r.runId),
+      )
       await load()
     } catch (e) {
       // ⚠ 501 也走这里（`run_dispatch` 没接这条能力时）。**原样显示后端那句话**，
@@ -271,39 +259,6 @@ export const TasksPage = () => {
 
   /** 单个参数控件。按 `kind` 分支，控件一律 `w-full`（§5.6）。 */
   const fieldControl = (f: CapabilityField) => {
-    if (isAccountField(f)) {
-      return (
-        <fieldset class="fieldset">
-          <legend class="fieldset-legend">{f.label}</legend>
-          <div class="flex flex-col gap-2">
-            {accounts.value.length === 0 ? (
-              /* 空态要给出下一步（§5.10），不写"暂无数据"。 */
-              <p class="break-words text-sm opacity-70">
-                还没有云盘账号。留空代表「全部账号」，但现在一个都没有 —— 先去「账号」页添加，再回来跑任务。
-              </p>
-            ) : (
-              accounts.value.map((a) => (
-                <label class="flex min-h-11 cursor-pointer items-center gap-2 md:min-h-0">
-                  <input
-                    type="checkbox"
-                    class="checkbox checkbox-sm"
-                    checked={
-                      Array.isArray(form.accounts) && (form.accounts as string[]).includes(a.id)
-                    }
-                    onChange={(e) =>
-                      toggleAccount(a.id, (e.target as HTMLInputElement).checked)
-                    }
-                  />
-                  <span class="break-words text-sm">{a.displayName}</span>
-                </label>
-              ))
-            )}
-          </div>
-          {f.help ? <p class="break-words text-xs opacity-60">{f.help}</p> : null}
-        </fieldset>
-      )
-    }
-
     if (f.kind === 'bool') {
       return (
         <fieldset class="fieldset">
@@ -369,8 +324,30 @@ export const TasksPage = () => {
       )
     }
 
-    // `json` 与 `text` / `number` 都按文本处理：后端收的是 `json.RawMessage`，
-    // 送字符串它自己解；这里替它猜类型反而会在"用户想送数字"时送错。
+    if (f.kind === 'number') {
+      // 表单里存文本，出线时才换算成 JSON 数字（判据与理由见 [numberWire]）。
+      //
+      // ⚠ 显示这一格**不能只认 string**：声明里的默认值与库里存回来的是 **JSON 数字**，
+      // 只认 string 会把"默认 60"渲染成一个空框 —— 用户以为没填，实际送出去的是 60。
+      const shown = fieldValue(f)
+      return (
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">
+            {f.label}
+            {f.required ? <span class="text-error"> *</span> : null}
+          </legend>
+          <input
+            class="input input-bordered w-full"
+            inputmode="numeric"
+            value={shown === undefined || shown === null ? '' : String(shown)}
+            onInput={(e) => setField(f, (e.target as HTMLInputElement).value)}
+          />
+          {f.help ? <p class="break-words text-xs opacity-60">{f.help}</p> : null}
+        </fieldset>
+      )
+    }
+
+    // `json` 与 `text` 按文本处理：后端收的是 `json.RawMessage`，送字符串它自己解。
     return (
       <fieldset class="fieldset">
         <legend class="fieldset-legend">
@@ -421,7 +398,12 @@ export const TasksPage = () => {
               ? 'tab tab-active min-h-11 whitespace-nowrap md:min-h-0'
               : 'tab min-h-11 whitespace-nowrap md:min-h-0'
           }
-          onClick={() => switchGroup(g.key)}
+          onClick={() => {
+            // 换 tab **不动**清单与选中行：这一栏只是筛子。选中的那一步哪怕不在当前
+            // tab 里，也还在清单里、还在原来那个序号上 —— 清掉的话"在别的组挑一项"
+            // 就会把正在编辑的那一步踢出表单。
+            activeGroup.value = g.key
+          }}
         >
           {g.label}
         </button>
@@ -429,28 +411,46 @@ export const TasksPage = () => {
     </div>
   )
 
-  /** 能力卡片列表：点一张就选中它（选中态给描边，不靠 hover）。 */
+  /**
+   * 能力卡片墙：**一张卡片 = 清单里的一项**。
+   *
+   * 点整张卡就是"要跑它"（加到清单末尾并选中）；已经在清单里则跳过去选中。
+   * 右上角那个序号既是"它在清单里的第几步"，也是"再点一次不会多出一行"的预告 ——
+   * 要故意跑两次，用表单里那枚「再加一次这一步」。
+   *
+   * ⚠ 外壳是 `<button type="button">` 而不是带 `onClick` 的 `<div>`：这一枚是**整页的主交互**，
+   * 用 div 它就不进无障碍树（可访问性快照里只有一串 StaticText，看不出可点），键盘也到不了。
+   * `p-0` 抵掉按钮自带的内边距（内距由里面的 `card-body p-4` 给）；`text-left` 抵掉
+   * 按钮默认居中的文字。
+   */
   const cardList = () => (
     <div class="grid gap-3 md:grid-cols-2">
       {activeItems.value.map((cap) => {
-        const on = cap.code === selectedCode.value
+        const order = m.orderOf(cap.code)
+        const on = selected.value?.code === cap.code
         const risk = riskBadge(cap.risk)
         const ro = readOnlyBadge(cap.kind)
+        const own = ownEntryBadge(cap.hidden)
         return (
           <button
             type="button"
+            aria-pressed={on}
             class={
               on
-                ? 'card cursor-pointer border-2 border-primary bg-base-100 text-left shadow-sm'
-                : 'card cursor-pointer border-2 border-transparent bg-base-100 text-left shadow-sm'
+                ? 'card cursor-pointer border-2 border-primary bg-base-100 p-0 text-left shadow-sm'
+                : 'card cursor-pointer border-2 border-transparent bg-base-100 p-0 text-left shadow-sm'
             }
-            onClick={() => selectCapability(cap)}
+            onClick={() => m.useCapability(cap)}
           >
             <div class="card-body gap-2 p-4">
               <div class="flex flex-wrap items-center gap-2">
                 <span class="card-title text-sm">{cap.title}</span>
                 <span class={risk.cls}>{risk.label}</span>
                 {ro ? <span class={ro.cls}>{ro.label}</span> : null}
+                {own ? <span class={own.cls}>{own.label}</span> : null}
+                {order === null ? null : (
+                  <span class="badge badge-sm badge-primary">第 {order} 步</span>
+                )}
               </div>
               <p class="break-words text-xs opacity-70">{cap.description}</p>
               <code class="text-xs opacity-50">{cap.code}</code>
@@ -461,20 +461,22 @@ export const TasksPage = () => {
     </div>
   )
 
-  /** 参数表单**全宽**（§7.2 对任务中心的规定）。 */
+  /** 选中那一步的参数（§7.2：任务中心的表单**全宽**）。 */
   const formCard = () => {
     const cap = selected.value
-    if (cap === null) {
+    const step = m.selectedStep.value
+    if (cap === null || step === null) {
       return (
         <div class="card bg-base-100 shadow-sm">
           <div class="card-body items-center gap-2 py-8 text-center">
             <span class="text-base-content/30">
               <IconTask class="size-8" />
             </span>
-            <p class="text-sm opacity-70">还没有可执行的能力。</p>
+            <p class="text-sm opacity-70">还没有选中任何一步。</p>
             <p class="max-w-prose break-words text-xs opacity-60">
-              这一栏是照 <code>/api/capabilities</code> 的声明渲染的；
-              一个都没读到，说明后端没返回可见能力（或全部被 <code>hidden</code> 了）。
+              在下面的卡片墙点一张，它会带着默认参数进清单；参数在这一栏改，改完就是
+              清单里那一步的值。整张表照 <code>/api/capabilities</code> 的声明渲染 ——
+              一条都没读到，说明后端没返回能力。
             </p>
           </div>
         </div>
@@ -484,9 +486,22 @@ export const TasksPage = () => {
       <div class="card bg-base-100 shadow-sm">
         <div class="card-body gap-4">
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <h2 class="card-title text-base">执行「{cap.title}」</h2>
+            <h2 class="card-title text-base">
+              第 {m.selectedOrder.value} 步 · {cap.title} 的参数
+            </h2>
             <span class={riskBadge(cap.risk).cls}>{riskBadge(cap.risk).label}</span>
           </div>
+
+          {step.rawBody ? (
+            // 存量数据里这一步的 `body` 不是一个对象（`PipelineStep.Body` 收任意 JSON 值）。
+            // 不写这一句，用户会以为"参数不见了是我的错"。
+            <div class="alert alert-soft alert-warning text-sm" role="alert">
+              <span class="break-words">
+                这一步原先带的参数不是一个对象（原文 <code>{step.rawBody}</code>
+                ），填不进下面的格子； 已按默认值处理，<b>保存之后原文不再保留</b>。
+              </span>
+            </div>
+          ) : null}
 
           {params.value.length === 0 ? (
             <p class="text-sm opacity-70">这条能力没有参数，直接执行即可。</p>
@@ -515,11 +530,18 @@ export const TasksPage = () => {
           <div class="card-actions justify-end">
             <button
               type="button"
+              class="btn btn-soft min-h-11 md:min-h-0"
+              onClick={() => m.addAnother()}
+            >
+              再加一次这一步
+            </button>
+            <button
+              type="button"
               class="btn btn-primary min-h-11 md:min-h-0"
               disabled={!canSubmit.value || submitting.value}
               onClick={askConfirm}
             >
-              {submitting.value ? '执行中…' : '立即执行'}
+              {submitting.value ? '执行中…' : '只跑这一步'}
             </button>
           </div>
         </div>
@@ -527,7 +549,7 @@ export const TasksPage = () => {
     )
   }
 
-  /** 当前能力的最近几次运行（完整历史在「历史与日志」页）。 */
+  /** 当前那一步对应能力的最近几次运行（完整历史在「历史与日志」页）。 */
   const recentCard = () => {
     const cap = selected.value
     if (cap === null) return null
@@ -536,7 +558,9 @@ export const TasksPage = () => {
         <div class="card-body gap-3">
           <div class="flex flex-wrap items-center justify-between gap-2">
             <h2 class="card-title text-base">最近运行</h2>
-            <span class="text-xs opacity-60">只看「{cap.title}」最近 {RECENT_LIMIT} 次</span>
+            <span class="text-xs opacity-60">
+              只看「{cap.title}」最近 {RECENT_LIMIT} 次
+            </span>
           </div>
 
           {recentRuns.value.length === 0 ? (
@@ -553,7 +577,9 @@ export const TasksPage = () => {
                 //
                 // ⚠ 正文也不换行：JSX 把换行折成空格，中文里"噪音， 所以"那个空格很显眼。
                 <p class="break-words text-xs opacity-60">
-                  这条能力是<b>只读</b>的：它不写运行历史、不产生日志噪音，所以跑完也不会在这里多出一行 —— 那是设计如此，不是没跑。
+                  这条能力是<b>只读</b>
+                  的：它不写运行历史、不产生日志噪音，所以跑完也不会在这里多出一行 ——
+                  那是设计如此，不是没跑。
                 </p>
               ) : null}
             </div>
@@ -632,21 +658,26 @@ export const TasksPage = () => {
 
       {state.value === 'ready' ? (
         <>
-          {groups.value.length === 0 ? (
+          {presetBar(m)}
+          {runListCard(m)}
+
+          {groups.value.length <= 1 ? (
             <div class="alert alert-soft alert-warning text-sm" role="alert">
               <span class="break-words">
-                后端没有返回任何<b>可见</b>能力。要么注册表是空的，要么全被
-                <code class="mx-1">hidden</code> 了 —— 后者是设计如此，那些能力有自己的入口。
+                后端没有返回任何能力。这一栏是照 <code class="mx-1">/api/capabilities</code>
+                的声明渲染的 —— 注册表空了，或这条服务没装配能力表。
               </span>
             </div>
           ) : (
             <>
+              <h2 class="text-base font-medium">挑任务：点一张卡片就加进上面那份清单</h2>
               {tabsRow()}
               {cardList()}
-              {formCard()}
-              {recentCard()}
             </>
           )}
+
+          {formCard()}
+          {recentCard()}
         </>
       ) : null}
 
@@ -664,15 +695,19 @@ export const TasksPage = () => {
           <div class="flex flex-col gap-1">
             {/* ⚠ 不换行：JSX 会把换行折成空格，中文里"个账号 执行"那个空格很显眼。 */}
             <p>
-              将对 <b>{targetAccountCount.value}</b> 个账号执行{' '}
-              <b>{selected.value?.title ?? '（未选中）'}</b>。
+              将对 <b>{m.targetCount.value}</b> 个账号执行<b>这一步</b>：
+              <b>{selected.value?.title ?? '（未选中）'}</b>。清单里其它步骤不会跟着跑。
             </p>
             {selected.value?.risk === 'high' ? (
-              <p class="text-error">这条能力有<b>不可逆</b>的写操作，执行后无法撤销。</p>
+              <p class="text-error">
+                这条能力有<b>不可逆</b>的写操作，执行后无法撤销。
+              </p>
             ) : null}
           </div>
         }
       />
+
+      {pipelineDialogs(m)}
     </div>
   )
 }

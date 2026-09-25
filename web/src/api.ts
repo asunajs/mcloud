@@ -595,6 +595,114 @@ export interface CapabilitiesPayload {
 export const listCapabilities = () => request<CapabilitiesPayload>('/api/capabilities')
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 任务组合（预设运行列表）—— 「一键执行几乎全部」那条路的界面侧
+//
+// ⚠ 内外两套键名，与上面 schedules 那一族**同一处坑**：外层是 `pipelinePayload`
+// 现造的 map ⇒ camelCase（`accountIds` / `stopOnError` / `builtIn`）；
+// `steps` 里那一层是 [core.PipelineStep] 的 serde 冻结形状 ⇒ snake_case
+// （`continue_on_error`），写侧的请求体结构体 tag 也是 snake
+// （`pipelineBody` / `stepBody`：`account_ids` / `account_mode` / `stop_on_error`）。
+// 写错一侧不报错、只洗数据：把 `account_ids` 写成 `accountIds`，Go 那边解不进
+// `AccountIDs` ⇒ 200 照样回，只是那一行的账号列表变成空 —— 而空 = **跑全部账号**。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 组合里的**一步**（读侧，对位 `core.PipelineStep` 的序列化结果）。
+ *
+ * ⚠ `body` 是 `json.RawMessage` 出网：**语义上是对象，但类型上收任意 JSON 值**
+ * （模型层实测 `"not-an-object"` 也存得进去，见 `PipelineStep.UnmarshalJSON` 第 3 条）。
+ * 所以这里声明成 `unknown` 而不是 `Record<string, unknown>` —— 存量数据里真的可能
+ * 是一个字符串，界面必须能把它**显示出来**而不是当场崩。
+ */
+export interface PipelineStepRow {
+  task: string
+  body?: unknown
+  continue_on_error?: boolean | null
+}
+
+/** 一个组合（对位 `pipelinePayload` 那 13 个键）。 */
+export interface PipelineRow {
+  id: string
+  name: string
+  description: string | null
+  /** ⚠ 执行顺序 = 数组顺序，没有别的序号字段。 */
+  steps: PipelineStepRow[]
+  /** 空数组 = 全部启用账号（与能力声明的 `留空 = 全部账号` 同义）。 */
+  accountIds: string[]
+  /**
+   * 读侧可能是 `parallel`（存量数据），但**写侧只能是串行**：
+   * `pipelineRequests` 里那一发 `sequentialOnly` 会 400 掉并行。见 `ui/pipeline-draft.ts`。
+   */
+  accountMode: string
+  stopOnError: boolean
+  /** true = 内置「一键全跑」，库里没有它的行 ⇒ 改不了也删不了。 */
+  builtIn: boolean
+  createdAt: string | null
+  updatedAt: string | null
+  lastRunAt: string | null
+  /** `ok` / `error` / `partial`；null = 从没跑过（内置那一版**永远**是 null）。 */
+  lastStatus: string | null
+  lastError: string | null
+  lastDurationMs: number | null
+}
+
+/** 一步的**写侧**形状（对位 `stepBody`）。 */
+export interface PipelineStepPayload {
+  task: string
+  /** 只认对象：非对象在 `pipelineSteps` 那里解不进 `map[string]json.RawMessage` ⇒ 400。 */
+  body: Record<string, unknown>
+  continue_on_error: boolean | null
+}
+
+/** 保存组合的请求体（对位 `pipelineBody`；全量覆盖，id 在路径里）。 */
+export interface PipelinePayload {
+  name: string
+  description: string | null
+  steps: PipelineStepPayload[]
+  account_ids: string[]
+  /** 空串 = 后端落串行；界面一律显式送 `"sequential"`，不给"忘了填"留空间。 */
+  account_mode: string
+  stop_on_error: boolean
+}
+
+export const listPipelines = () => request<{ pipelines: PipelineRow[] }>('/api/pipelines')
+
+export const putPipeline = (id: string, payload: PipelinePayload) =>
+  request<{ pipeline: PipelineRow }>(`/api/pipelines/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+
+/**
+ * 删一个组合。
+ *
+ * 连带范围问过存储层与路由：`deletePipeline` 只动 `pipelines` 那一行，
+ * 执行历史不跟着走；**被定时引用时后端直接 400 并指名那几条任务**（不级联删），
+ * 所以界面上错误文案原样透出即可。内置那一版（`id === 'all'`）没有行，删它是 400。
+ */
+export const deletePipeline = (id: string) =>
+  request<void>(`/api/pipelines/${encodeURIComponent(id)}`, { method: 'DELETE' })
+
+/** `POST /api/pipelines/{id}/run` 的响应：只有"受理了什么"，**没有** runId 配对。 */
+export interface PipelineRunAccepted {
+  pipelineId: string
+  name: string
+  steps: number
+}
+
+/**
+ * 跑一个组合。**202 = 受理**，不是跑完。
+ *
+ * 与 [triggerRun] 的区别不只是"多步"：整条链的 runId 要等上一步跑完才分配得出来，
+ * 所以这一格响应里**没有** `runs` 数组 —— 界面上不许写"共 N 个目标正在执行"，
+ * 那个 N 是步数、不是目标数，两者在多大账号下差一个数量级。
+ */
+export const runPipeline = (id: string) =>
+  request<PipelineRunAccepted>(`/api/pipelines/${encodeURIComponent(id)}/run`, {
+    method: 'POST',
+  })
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 推送（通知）
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -669,8 +777,7 @@ export interface NotifyConfigView {
   channels: Record<string, NotifyChannelView>
 }
 
-export const getNotifyConfig = () =>
-  request<{ config: NotifyConfigView }>('/api/notify/config')
+export const getNotifyConfig = () => request<{ config: NotifyConfigView }>('/api/notify/config')
 
 /**
  * 保存推送配置。
@@ -705,8 +812,7 @@ export const putNotifyConfig = (patch: NotifyConfigPatch) =>
  * 用错的后果不是报错，是**静默清掉了那一家的凭据**。清空**单个**字段没有对应接口
  * （后端分不清"忘了填"与"要清空"，见 `docs/pending-decisions.md` Q30）。
  */
-export const deleteNotifyChannel = (name: string) =>
-  putNotifyConfig({ channels: { [name]: null } })
+export const deleteNotifyChannel = (name: string) => putNotifyConfig({ channels: { [name]: null } })
 
 /** 一家渠道的试发结论（`reason` 由后端保证不含 URL 与凭据）。 */
 export interface NotifyTestResult {
@@ -729,11 +835,7 @@ export interface NotifyTestReport {
  * 试发一条。`channels` 是**收窄**不是扩面：点了没配的渠道后端 400，
  * 前端也就不该给出这种选项（界面只在"已配的那几家"里挑）。
  */
-export const runNotifyTest = (body: {
-  title?: string
-  message?: string
-  channels?: string[]
-}) =>
+export const runNotifyTest = (body: { title?: string; message?: string; channels?: string[] }) =>
   request<NotifyTestReport>('/api/notify/test', {
     method: 'POST',
     body: JSON.stringify(body),

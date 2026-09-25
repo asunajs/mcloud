@@ -3561,3 +3561,119 @@ CDP 会话一关就**释放**设备尺寸覆写 ⇒ "窄屏量到 40px"其实量
 4. ⚗ §3.9 偏大：`internal/app/task_matrix_run.go` **962 行**（本轮 +92）、
    `task_matrix_run_test.go` **1469**（+213）、`task_matrix_report.go` 325、
    `task_matrix_report_test.go` 542。下一轮再加就往"读表 / 打卡 / 玩法 / 上传 / 复查 / 清理"拆。
+
+---
+
+## 补记（2026-09-25，#39「一键执行几乎全部」落成有序组合 + #44 任务中心一页卡片化：选能力、排顺序、存预设）
+
+用户 #1 那句"像原版本那样能一键执行几乎全部的功能"，基准是旧 CLI 的默认入口
+（`packages/cli/src/index.ts:127-152`：`await signIn(ctx)` → … → `await afterTask(ctx)`，
+一次跑完全部）。本仓**没有**照抄成"一段写死的串行代码"，而是把它落成**数据**：
+一条有序清单（`core.Pipeline` = `steps[{task, body, continue_on_error}]` + 组合级账号与
+失败策略）。内置那一版就是"全跑"，用户自己存的预设走**同一个执行器** —— 为"全跑"
+另写一套串行，等于同一份"逐步跑"的逻辑有两个会漏步骤的地方。
+#44（"所有任务在一页以卡片显示、可选、可存为预设运行列表、可编辑执行顺序"）是它的界面。
+
+### 一、后端：清单读写 → 触发 → 到点跑，三层的落点
+
+| 位置 | 内容 |
+| --- | --- |
+| `internal/server/pipeline_run.go`（613 行，新） | 执行器：逐步跑**复用** `runBuilders` + `launchRun`（与"界面点开始"、"调度到点"完全同一条路），组合层只多做三件事 —— 等这一步跑完、按 `ContinuesAfterFailure` 判要不要继续、把结论汇总成 `core.PipelineStatus`。内置 `allRunPipeline()` **14 步**（不含 `exchange` / `live-room` / `ai-avatar` / `task-list`，逐条理由在文件头）。`StopOnError=false`：一步失败**记账**而不是截断整条链 |
+| `internal/server/pipelines.go`（355 行，新） | `GET /api/pipelines`、`PUT /api/pipelines/{id}`、`DELETE /api/pipelines/{id}`：id 由调用方给（与 `putSchedule` 同一条理由）。保存前跑 `pipelineRequests` 预检 ⇒ 坏清单在受理**之前**就 400，不留"半条链在后台跑"。`deletePipeline` 拒删**正被定时任务引用**的组合 |
+| `internal/server/auth.go` | 上面三条 + `POST /api/pipelines/{id}/run` 四条路由都登记进 `routes_test.go` 的 `goAdded` 表（冻结基准里没有 pipelines 这一族） |
+| `internal/server/scheduler.go` | 删掉"任务组合还没接上执行"那一句 `abandon` ⇒ 新 `launchScheduledPipeline`：交给**同一个** `runPipeline`。补跑只有两档 —— 组合没有"该能力的默认"可跟随（一条链里既有"错过就别补"也有"错过仍值得领"，替它们 collectively 声明默认等于猜），没选过 ⇒ `MissSkip` |
+| `internal/server/run_dispatch.go` | `runNotifyPolicy` 两档（`notifyPerRun` / `suppressNotify`）+ `launchRun` 签名多一格；`runs.go`、`scheduler.go` 两个调用点跟着传 |
+| `internal/core/traits.go` + `internal/io/configstore.go` | `DeletePipeline`（返回"是否真删掉一行"）、`RecordPipelineRun`（**窄写** `last_*` 四列：一次全跑要几分钟，用整行 `Upsert` 会把这期间用户改过的名字与步骤抹掉）。这四列自 schema 落下起没人写，本层是第一个写入方 |
+| `internal/server/routes.go` | `putSchedule` 对目标=组合的**保留 id `all`** 放行：库里没有它的行，照原样查库就是 400「没有这个组合: all」——那副面孔是"界面上那枚按钮能跑的东西，定时却选不了"。到点执行那一路本来就认这个 id（`pipelineToRun` 第一行），这里只是让**受理面**与**执行面**同一口径 |
+
+三处**刻意与旧实现不同**（都写在 `pipeline_run.go` 抬头，不是照抄不动的地方）：
+
+- **步骤在外、账号在内**（旧实现相反）。差别只在上游看到的请求交错方式，每步内部仍逐账号
+  串行 ⇒ 防风控那条节奏没放宽。硬理由是 `runs` 表的形状："一行 = 一次能力 × 一个账号"，
+  反过来跑要先切成"单账号 × 单能力"再跑十七八次，多出十几条没人读的中间行，终局一样。
+- **组合内每一步都不自己推**（`suppressNotify`），链尾由 `runPipeline` 汇总推一条。
+  ⚠ 传了它就必须真的补一条，否则表现成"配了推送而一次全跑什么也没收到"，比多推更难查。
+- **`POST /api/pipelines/{id}/run` 回 202 但没有 runId 配对**：后面那步的 runId 要等前面跑完
+  才分配得出来，给了就是假配对。响应只说清"受理了哪一份、共几步"。
+
+⚠ 内置那一版在 `pipelines` 表里**没有行**，所以它没有 `last_*` 四列可写 —— 那不是遗漏：
+给"所有人共用的默认清单"造一行，等于让第一个改它的人替所有人改默认值。它的结局只看历史页与推送。
+
+### 二、Web：任务中心改成「卡片墙 + 有序清单 + 预设」三块
+
+| 位置 | 内容 |
+| --- | --- |
+| `web/src/pages/tasks-page.tsx`（现 704 行） | 卡片 = `<button type="button" aria-pressed>`（可点行按 `min-h-11`）。**点卡片就是把它加进清单**（已在里面则跳过去选中），参数表单直接读写**那一步**的 `body` —— 取消"临时预览表单"那第二出处，否则用户改了参数不知道改到哪儿去了。单跑一步用表单里那枚「只跑这一步」 |
+| `web/src/pages/task-run-list.tsx`（796 行，新） | 清单编辑器的状态 + 渲染：上下移、删步、`addAnother()` 产生相邻重名步并选中副本、载入预设、改名后经 `nextPipelineId` **另存为副本**（不覆盖原预设）、运行与删除各一次确认。全部是**函数返回 JSX**，状态靠闭包里的 ref 读 —— 没有 props 那一层（`docs/webui-code-guide.md` §9.2④） |
+| `web/src/ui/pipeline-draft.ts`（553 行，新） | 草稿 ↔ 出网体的**唯一**两个边界（`payloadFromRunList` / `runListFromPipeline`）+ 重排 / 预检 / 徽标这些纯规则。键名两侧不对称（写 snake_case：`account_ids` / `stop_on_error`；读 camelCase：`accountIds` / `stopOnError`）在这一处收敛 —— 提交时写成 `accountIds` 会 **200 照样回、账号列表被洗成空**，而空 = 跑全部账号 |
+| `web/src/ui/task-groups.ts`（154 行） | `hidden` **不再是过滤条件**：一份预设里可能既要有签到也要有 `auth-refresh`（收尾刷令牌）与 `exchange`（带参数兑换）。它的语义仍没变（"另有专属入口"，不是废弃），所以卡片上那句提示**留着** —— 撤掉账号页那枚按钮的话，通用列表里那枚「立即执行」在用户心里就成了"现在就换"，而 `auth-refresh` 承诺的恰好相反。新增「全部」那一栏（`ALL_GROUP_KEY = ''`：它不是一个组，编假组名哪天撞上真组就静默合成一件事） |
+| `web/src/api.ts`（848 行） | pipelines 四条的封装与行形状（外层 camelCase、`steps` 内层 snake） |
+
+两处**不给控件**是设计而非遗漏（都写了注释）：清单里每一步不给 `accounts` / `accountMode`
+（执行时 `pipelineRequests` 用组合级列表覆盖，`pipeline_run.go:293-300`）；定时任务表单在
+目标=组合时不给"跑哪些账号 / 参数（JSON）"两栏 —— 到点执行读的是组合自己那份清单，
+这一行上的那两格在它这条路上没有消费者。⚠ **不显示不等于不送**：保存仍把库里原样带回，
+免得翻一次目标类型就洗掉旧数据。
+
+### 三、本轮顺带修掉的两格
+
+| 现象 | 修法 | 这一格的断言情况 |
+| --- | --- | --- |
+| `live-room` 的 `listenSeconds` 声明成 **text** 档 ⇒ 界面渲染成文本框、送出的是 JSON **字符串**，而执行侧 `runParams.number()` 把它 `Unmarshal` 到 `int` | `core.NewFieldSpecNumber`（新）+ 注册表改 number 档 + web 按 `kind` 渲染 number 控件（前端在出线前换成数字） | ⚠ **改回 text 没有任何 Go 测试会红**（本轮实测：临时改回后 `go test ./...` 全绿）⇒ 按 §1.3 标成"未被断言"，判据只有实机那一格（控件类型 + 送出的是数字）。`TestWrongParameterTypeSaysWhichField` 钉的是**执行侧那一发 400**（`{"listenSeconds":"60"}` → 400 且指出"听弹幕时长"），它与声明档位**无关**，别把它当这一格的反向判据 |
+| `internal/capabilities/registry.go` 里若干用户可见串带 Markdown（`**粗体**` / 反引号）⇒ 界面把星号原样显示出来 | 逐条改成 `<b>` 或「」（`Description` / `Label` / `Help` 是 `/api/capabilities` 直接取的字符串，不经 Markdown 渲染） | 同样**未被断言**（web 无测试运行器，§1.6）⇒ 靠浏览器核验。事后复核：`grep` 该文件的 `Description:` / `Label:` / `WithHelp(` 三类行已无 `**`，剩下的星号全在注释里 |
+
+### 四、实机核验（§1.6：web 侧只有 typecheck + build，页面只能真机核）
+
+环境（自证，不碰别人的实例）：自己的二进制 + 库 `.backup` 副本
+`target/verify-44/preview.db`（副本上 `delete from schedules; delete from sessions;` 并重设一次性口令）
++ 自己的端口 8791 + 自己的 device-file，只发读请求；核验完销毁副本目录与进程。
+
+核验过：
+
+1. 卡片墙渲染 **18** 条能力（含 `hidden` 那两条带"另有专属入口"的标记）、分组 tab 与最左的「全部」。
+2. 点卡片进清单、上下移、删步、`addAnother()` 的相邻重名步**选中副本**而非原件。
+3. 存预设 → `PUT` 200 → 回读那一行显示正确；**改名后保存 = 另存成新 id**，原预设没被覆盖。
+4. 「只跑这一步」真打**只读**能力（拍拍盘点，2 个账号 done），历史页出现结果行。
+5. 运行确认弹窗里的步数与账号数是真实值；删除确认弹窗显示真实预设名（见本节末那条误测订正）。
+6. 400 的那句原话在界面上读得到（number 档填非数字，走上游**之前**的参数校验 ⇒ 没留 run 记录）。
+7. 定时任务页：目标切到"一份组合" ⇒ 选择器出内置那版（标 `（内置）· 14 步`）、保存成功、
+   行显示 组合「一键全跑（除兑换）」、再开编辑回填正确。两条测试行都存成"先存着，不参与调度"，
+   且实例已销毁 ⇒ 不会真到点打上游。
+8. 深色主题（内置浏览器改不了尺寸，用 `getComputedStyle` 读数而非截图）、390px 视口无横向滚动。
+
+没核验：内置全跑与用户预设的**整链真跑**（要打十几条能力、含写侧与不可逆那两步）、
+组合执行过程中的"跑到第几步"（今天**没有这一格** ⇒ 见 Q36）、链尾那条汇总推送的实际送达。
+
+⚠ **一条误测订正，不是缺陷**：上一段记的"Vapor 下删除弹窗会永远停在『没有目标』那一支"，
+经"真点击 + 等一个微任务"重读 ⇒ 它显示的是真实预设名 ⇒ **没有代码缺陷**，是读数时机。
+处置按 §2.6 就地改：`task-run-list.tsx` 抬头那段错误断言改写为实况，`schedules-page.tsx`
+已有的那条同源耻辱柱追加一行（同形状不再另立条目）。
+
+### 五、门禁（照抄当轮 stdout）
+
+- `node scripts/gates-go.js` → **十项全绿**，总耗时 **49.0s**（逐条：build 1.0s，vet 0.5s，
+  fmt 0.1s，test 43.7s，deps 3.0s，filenames 0.2s，idents 0.3s，golden 0.1s，jsontags 0.1s，
+  md-tables 0.1s）。
+- `node scripts/gates-web.js` → **2 条全绿**，总耗时 **3.4s**（typecheck 2.7s，build 0.7s）。
+- `go test ./internal/server/` → ok（3.45s）；新增三份测试：`pipelines_test.go` 796 行、
+  `pipeline_run_test.go` 681 行、`pipeline_scheduler_test.go` 274 行。
+- 本节落笔后又跑一次（改了 md 与用 `node scripts/fmt.js` 格式化了四份 ts/tsx）：
+  Go **十项全绿** 5.9s（test 那一格 0.7s = 命中缓存，不作全量证据）、web **2 条全绿** 3.4s。
+- ⚠ 上面是全量跑，而并行会话此刻在这棵树上动 `web/src/app.css` ⇒ 绿灯**包含**他们的改动，
+  不能只当作"本轮文件绿"的证据（§2.7）。
+
+⚠ **撞车登记**：工作树里 `web/src/app.css` 那份换肤（红色主色 + 玻璃拟态 + 页面光斑，注释自称
+"见 `docs/webui-design-guide.md` 换肤附注"）**不是本轮改的**：那份文档第 92 行现在写的仍是
+"不做……玻璃拟态……"，也没有"换肤附注"那一节 ⇒ 成文与代码当场不一致。本轮**不提交**这个文件、
+也不替它改文档（§2.1：别人在飞的改动留在工作树；§2.6：不一致要报告而不是静默"对齐"）。
+
+### 六、待拍板与遗留
+
+| 项 | 一句 |
+| --- | --- |
+| **Q35**（新） | 组合与调度要不要按 `RunInBatch` 拦 —— 今天不拦，而 `business-feature-inventory.md` §2.4 与 `run_dispatch_signin.go:280,312` 那三处成文说的是"会拦"。内置那 14 步里就含 `revival`（用卡不可逆）与 `app-task`（真打卡） |
+| **Q36**（新） | 组合要不要一份"现在跑到第几步"的进度面；三种形状与代价在表里，共同前提是内置那一版**没有行**可写状态 |
+| **Q37**（新） | `ui/dialog.tsx` 的 `ConfirmDialog` 两枚按钮 390px 实测高 **38px**（五个消费者）；全局给 `.btn` 加高仍是留给用户拍板的那一条（`webui-components.md` §6.1） |
+| `after` 那一支 | 旧实现链尾的"统一清理 + 打印今日云朵 + auth 维护"：本轮用 `cloud-snapshot` + `auth-refresh` 两步顶上后两半，**统一清理**仍分散在各条链自己收尾（§上一节遗留 3 就此关闭一半） |
+| ⚗ §3.9 偏大 | `web/src/pages/schedules-page.tsx` **1041**、`web/src/pages/task-run-list.tsx` 796、`internal/server/pipelines_test.go` 796、`pipeline_run_test.go` 681、`web/src/pages/tasks-page.tsx` 704、`internal/server/pipeline_run.go` 613、`web/src/ui/pipeline-draft.ts` 553、`web/src/api.ts` 848、`docs/status.md` 已 36xx 行（Q16 的拆分方案仍待批） |
+| 未动 | Q32、R21–R28 补样、P1–P6 挡路项、#30（`runs.cloud_gained` / `cloud_after` 没有生产者） |

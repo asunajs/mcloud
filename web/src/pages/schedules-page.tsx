@@ -4,9 +4,9 @@
  * # 这一页接的是哪三条路由
  *
  * `GET/PUT/DELETE /api/schedules`（对位 `routes.go` 的 `listSchedules` /
- * `putSchedule` / `deleteSchedule`），再加两份只读的配合数据：
+ * `putSchedule` / `deleteSchedule`），再加三份只读的配合数据：
  * `/api/capabilities`（目标选项 + 参数键名）、`/api/accounts`（勾账号）、
- * `/api/status`（调度循环在不在跑）。
+ * `/api/status`（调度循环在不在跑）、`/api/pipelines`（目标能选哪份组合）。
  *
  * # 三件界面上必须说清、但很容易糊掉的事
  *
@@ -37,6 +37,8 @@
  * 隔 120ms 再读，同一个 `ConfirmDialog` 连着换两行都显示正确 ⇒ prop 里那片 JSX 的**子节点
  * 位置**仍自带 effect。"只求值一次"这句的确切边界本轮没测完（值 prop 会不会跟新没验），
  * 要一份状态稳定可读，写成本页元素上的**属性**（`disabled={…}`）与**子节点**最稳。
+ * 同一形状 2026-09-25 在任务中心又误测一次（删除窗读到「—」），当场按真点击 + 等一个
+ * 微任务重读 ⇒ 显示的是真实预设名。**没有代码缺陷**，只是那个读数时机；不再另立一条。
  *
  * ⚠ 由此有一条写码纪律：本页这些"返回一片节点"的辅助函数里，**读 ref 只能发生在
  * JSX 子节点位置**。子节点位置的读取编译成 `createIf` / `setNodes` / `renderEffect`
@@ -52,11 +54,13 @@ import {
   deleteSchedule,
   listAccounts,
   listCapabilities,
+  listPipelines,
   listSchedules,
   putSchedule,
   serviceStatus,
   type Account,
   type CapabilityRow,
+  type PipelineRow,
   type ScheduleDraft,
   type ScheduleRow,
   type ScheduleTarget,
@@ -110,17 +114,31 @@ const NOTICE_ALERT = {
 
 type NoticeTone = keyof typeof NOTICE_ALERT
 
-/** 目标是不是"任务组合"。这一页不能建也不能改它，只能原样带回去（见 `targetLine`）。 */
+/** 目标是不是"任务组合"。 */
 const isPipeline = (target: ScheduleTarget | null): boolean => target?.kind === 'pipeline'
 
-/** 组合在本页的可见性：`GET /api/pipelines` 这条路由**还不存在**，所以列不出候选。 */
-const pipelineNote = (id: string) => `任务组合 ${id}（这一页不提供改目标：组合列表还没有对外接口）`
+/**
+ * 组合目标的说明句。
+ *
+ * 为什么这一行要说"账号与参数不归它管"：到点执行那一路走
+ * `scheduler.go` 的 `launchScheduledPipeline` ⇒ `pipelineToRun` ⇒ `pipelineRequests`，
+ * 用的全是**组合自己那份**清单（里面的账号、参数、串行顺序），调度行上的
+ * `account_ids` 与 `body` 在这一条路上没有任何消费者。界面上不把这句讲清，
+ * 表现就是"我在定时任务里勾了 A，夜里却把 B 也跑了"。
+ *
+ * ⚠ 这两个量（`accountIds` / `body`）在编辑组合目标的行时**照原样送回去**
+ * （见 [draftOfRow] 与 [save]），所以"这一格不生效"不等于"改它会丢数据"。
+ */
+const pipelineTargetNote = (name: string) =>
+  `任务组合「${name}」：到点跑的是这份清单自己记的账号与参数，这一行上的那两格对它不生效。`
 
 export const SchedulesPage = () => {
   const state = ref<LoadState>('loading')
   const rows = ref<ScheduleRow[]>([])
   const accounts = ref<Account[]>([])
   const caps = ref<CapabilityRow[]>([])
+  /** 目标能选的组合（含内置那一版：它没有行，但调度认这个 id）。 */
+  const pipelines = ref<PipelineRow[]>([])
   const errorMessage = ref('')
 
   /** null = 这一轮还没问到；不当成"没在跑"（首屏闪一条红警告是谎报）。 */
@@ -135,10 +153,12 @@ export const SchedulesPage = () => {
   /** 空串 = 新建；否则是**已存在**那一行的 id（id 不可改，它就是主键）。 */
   const editingId = ref('')
   const nameDraft = ref('')
-  /** 能力 code。`''` 只在编辑组合那一行出现（那时这一栏不显示）。 */
+  /** 这一行到点跑"一条能力"还是"一份组合"。它决定下面两栏哪一栏出现。 */
+  const targetKindDraft = ref<'capability' | 'pipeline'>('capability')
+  /** 能力 code。`''` = 库里一个能力都没有（新建时那一条会挡下保存）。 */
   const codeDraft = ref('')
-  /** 编辑组合时**原样带回**的目标；不是组合时为 null。 */
-  const pipelineDraft = ref<ScheduleTarget | null>(null)
+  /** 组合 id。只在 `targetKindDraft === 'pipeline'` 时有意义。 */
+  const pipelineIdDraft = ref('')
   const cronDraft = ref<CronDraft>(emptyCronDraft())
   const accountsDraft = ref<string[]>([])
   /** 参数文本框。提交时才 `JSON.parse`，中途允许它是半截的（边改边报红字没法打字）。 */
@@ -151,17 +171,19 @@ export const SchedulesPage = () => {
     state.value = 'loading'
     errorMessage.value = ''
     try {
-      // 四份一起拉：目标下拉与参数键名缺一样都会让表单**填不对**，
+      // 五份一起拉：目标下拉与参数键名缺一样都会让表单**填不对**，
       // 与其让某一格空着让人以为"没有能力"，不如整页报错重试。
-      const [s, a, c, status] = await Promise.all([
+      const [s, a, c, p, status] = await Promise.all([
         listSchedules(),
         listAccounts(),
         listCapabilities(),
+        listPipelines(),
         serviceStatus(),
       ])
       rows.value = s.schedules
       accounts.value = a.accounts
       caps.value = c.all
+      pipelines.value = p.pipelines
       schedulerOn.value = status.schedulerRunning
       state.value = 'ready'
     } catch (e) {
@@ -179,6 +201,9 @@ export const SchedulesPage = () => {
   const paramKeys = (code: string): string[] =>
     caps.value.find((c) => c.code === code)?.params.map((p) => p.key) ?? []
 
+  /** 组合 id → 展示名。内置那一版（`all`）也在 `/api/pipelines` 的清单里，所以查得到。 */
+  const pipelineName = (id: string) => pipelines.value.find((p) => p.id === id)?.name ?? id
+
   /**
    * 「执行」那一格。
    *
@@ -188,7 +213,8 @@ export const SchedulesPage = () => {
    */
   const targetText = (target: ScheduleTarget | null): string => {
     if (!target) return '（这一行没有目标，调度会跳过它）'
-    if (isPipeline(target)) return pipelineNote(target.id ?? '')
+    // 列表里那一格只放名字：整句说明（账号与参数不生效）太长了，放到编辑弹窗里说。
+    if (isPipeline(target)) return `组合「${pipelineName(target.id ?? '')}」`
     return capTitle(target.code ?? '')
   }
 
@@ -219,8 +245,9 @@ export const SchedulesPage = () => {
   const openNew = () => {
     editingId.value = ''
     nameDraft.value = ''
+    targetKindDraft.value = 'capability'
     codeDraft.value = caps.value.find((c) => !c.hidden)?.code ?? caps.value[0]?.code ?? ''
-    pipelineDraft.value = null
+    pipelineIdDraft.value = pipelines.value[0]?.id ?? ''
     cronDraft.value = emptyCronDraft()
     accountsDraft.value = []
     bodyDraft.value = '{}'
@@ -237,8 +264,11 @@ export const SchedulesPage = () => {
   const openEdit = (row: ScheduleRow) => {
     editingId.value = row.id
     nameDraft.value = row.name
-    codeDraft.value = row.target?.kind === 'capability' ? (row.target.code ?? '') : ''
-    pipelineDraft.value = isPipeline(row.target) ? row.target : null
+    targetKindDraft.value = isPipeline(row.target) ? 'pipeline' : 'capability'
+    codeDraft.value = row.target?.code ?? ''
+    // 切到"组合"时这一栏要有一个能选中的值：空串会让下拉显示第一项但提交空 id，
+    // 后端回的是"没有这个组合: "—— 一句看不出自己漏填了什么的话。
+    pipelineIdDraft.value = row.target?.id ?? pipelines.value[0]?.id ?? ''
     cronDraft.value = readCron(row.cron)
     accountsDraft.value = [...row.accountIds]
     bodyDraft.value = JSON.stringify(row.body ?? {}, null, 2)
@@ -274,8 +304,7 @@ export const SchedulesPage = () => {
       const unknown = Object.keys(parsed).filter((k) => !declared.includes(k))
       if (unknown.length > 0) {
         formError.value =
-          `不认识的参数：${unknown.join('、')}` +
-          `（这一项能填：${declared.join('、')}）`
+          `不认识的参数：${unknown.join('、')}` + `（这一项能填：${declared.join('、')}）`
         return null
       }
     }
@@ -293,17 +322,21 @@ export const SchedulesPage = () => {
       formError.value = '频率没填完：时刻 / 分钟那一栏还空着或超出范围'
       return
     }
-    if (pipelineDraft.value === null && codeDraft.value === '') {
+    if (targetKindDraft.value === 'capability' && codeDraft.value === '') {
       formError.value = '没有可执行的能力：先去账号页登录，或让后端注册一个能力'
+      return
+    }
+    if (targetKindDraft.value === 'pipeline' && pipelineIdDraft.value === '') {
+      formError.value = '还没有任务组合：先去任务中心挑几步并「保存为预设」。'
       return
     }
     const body = parseBody()
     if (body === null) return
 
-    const target: ScheduleTarget = pipelineDraft.value ?? {
-      kind: 'capability',
-      code: codeDraft.value,
-    }
+    const target: ScheduleTarget =
+      targetKindDraft.value === 'pipeline'
+        ? { kind: 'pipeline', id: pipelineIdDraft.value }
+        : { kind: 'capability', code: codeDraft.value }
     const id = editingId.value || newScheduleId()
     busyId.value = id
     try {
@@ -317,7 +350,9 @@ export const SchedulesPage = () => {
       })
       closeDialog(EDIT_ID)
       notice.value = {
-        text: editingId.value ? `已保存 ${nameDraft.value.trim()}` : `已新建 ${nameDraft.value.trim()}`,
+        text: editingId.value
+          ? `已保存 ${nameDraft.value.trim()}`
+          : `已新建 ${nameDraft.value.trim()}`,
         tone: 'success',
       }
       await load()
@@ -334,7 +369,7 @@ export const SchedulesPage = () => {
    * 列表一行 → 一份完整的 `PUT` 请求体。
    *
    * `PUT` 是全量覆盖，所以"只翻启用状态"也得把整行送回去。三处必须原样带、不能"整理"：
-   *  - `target`：组合那一种本页列不出候选，改不了就**别改**（见 `pipelineNote`）；
+   *  - `target`：原样带回。组合那一支只存 id，翻页不改目标；
    *  - `body`：库里存的是什么就送什么（可能是数组 —— 那是旧导入的形状，
    *    到点会报"参数不是一个 JSON 对象"，但那是**已有事实**，不该被一次翻开关洗掉）；
    *  - `account_ids`：读侧的键是 `accountIds`（不对称在 `api.ts` 顶部记着）。
@@ -437,7 +472,8 @@ export const SchedulesPage = () => {
     state.value === 'ready' && schedulerOn.value === false ? (
       <div class="alert alert-soft alert-warning text-sm" role="alert">
         <span class="break-words">
-          后端这一轮的定时调度没有运行，下面这些"下次执行"只是按 cron 算出来的时刻，到点不会有人去跑。
+          后端这一轮的定时调度没有运行，下面这些"下次执行"只是按 cron
+          算出来的时刻，到点不会有人去跑。
         </span>
       </div>
     ) : null
@@ -476,11 +512,7 @@ export const SchedulesPage = () => {
     if (!row.lastStatus) return <span class="badge badge-soft">从没跑过</span>
     const known = LAST_STATUS[row.lastStatus]
     const mod = known ? known.badge : 'badge-soft badge-warning'
-    return (
-      <span class={`badge ${mod}`}>
-        {known ? known.label : `未知状态 ${row.lastStatus}`}
-      </span>
-    )
+    return <span class={`badge ${mod}`}>{known ? known.label : `未知状态 ${row.lastStatus}`}</span>
   }
 
   /** 上次结果 + 那句错误。错误**不靠 tooltip**（§6.2：移动端没有 hover）。 */
@@ -488,9 +520,7 @@ export const SchedulesPage = () => {
     <div class="flex flex-col gap-1">
       <div class="flex items-center gap-2">
         {statusBadge(row)}
-        <span class="text-xs opacity-70">
-          {row.lastRunAt ? fmtTime(row.lastRunAt) : '—'}
-        </span>
+        <span class="text-xs opacity-70">{row.lastRunAt ? fmtTime(row.lastRunAt) : '—'}</span>
       </div>
       {row.lastError ? <span class="max-w-prose break-words text-xs">{row.lastError}</span> : null}
       <span class="text-xs opacity-60">错过时：{missPolicyText(row)}</span>
@@ -523,7 +553,12 @@ export const SchedulesPage = () => {
    */
   const rowMenu = (row: ScheduleRow) => (
     <div class="dropdown dropdown-end">
-      <div tabindex={0} role="button" class="btn btn-square btn-ghost min-h-11" aria-label={`${row.name} 的操作`}>
+      <div
+        tabindex={0}
+        role="button"
+        class="btn btn-square btn-ghost min-h-11"
+        aria-label={`${row.name} 的操作`}
+      >
         ⋯
       </div>
       <ul tabindex={0} class="menu dropdown-content z-50 w-40 rounded-box bg-base-100 p-2 shadow">
@@ -535,7 +570,11 @@ export const SchedulesPage = () => {
           </button>
         </li>
         <li>
-          <button type="button" class="text-error min-h-11 md:min-h-0" onClick={() => askDelete(row)}>
+          <button
+            type="button"
+            class="text-error min-h-11 md:min-h-0"
+            onClick={() => askDelete(row)}
+          >
             删除
           </button>
         </li>
@@ -654,8 +693,8 @@ export const SchedulesPage = () => {
           新建任务
         </button>
         <p class="max-w-prose text-left text-xs leading-5 opacity-60">
-          定时任务只有这一个入口：命令行没有 schedule 那一族命令，组合（pipeline）那一种也还没有对外的
-          读写接口，所以这一页建不了也改不了它。
+          定时任务只有这一个入口：命令行没有 schedule 那一族命令。目标可以是一条能力，也可以是
+          任务中心里存好的某份组合（预设）—— 组合自己记的账号与参数说了算。
         </p>
       </div>
     </div>
@@ -669,7 +708,9 @@ export const SchedulesPage = () => {
         class="select w-full"
         aria-label="频率"
         value={cronDraft.value.preset}
-        onChange={(e) => patchCron({ preset: (e.target as HTMLSelectElement).value as CronDraft['preset'] })}
+        onChange={(e) =>
+          patchCron({ preset: (e.target as HTMLSelectElement).value as CronDraft['preset'] })
+        }
       >
         {CRON_PRESETS.map((p) => (
           <option value={p}>{CRON_PRESET_LABEL[p]}</option>
@@ -768,8 +809,59 @@ export const SchedulesPage = () => {
         />
       </label>
 
-      {pipelineDraft.value ? (
-        <p class="text-sm leading-6 break-words">{pipelineNote(pipelineDraft.value.id ?? '')}</p>
+      <fieldset class="fieldset gap-2">
+        <legend class="fieldset-legend">到点跑什么</legend>
+        <label class="flex min-h-11 cursor-pointer items-center gap-2 text-sm">
+          <input
+            type="radio"
+            class="radio radio-sm radio-primary"
+            name="schedule-target-kind"
+            aria-label="一条能力"
+            checked={targetKindDraft.value === 'capability'}
+            onChange={() => (targetKindDraft.value = 'capability')}
+          />
+          <span>一条能力</span>
+        </label>
+        <label class="flex min-h-11 cursor-pointer items-center gap-2 text-sm">
+          <input
+            type="radio"
+            class="radio radio-sm radio-primary"
+            name="schedule-target-kind"
+            aria-label="一份组合"
+            checked={targetKindDraft.value === 'pipeline'}
+            onChange={() => (targetKindDraft.value = 'pipeline')}
+          />
+          <span>一份组合（任务中心存好的预设，按里面的顺序串行跑）</span>
+        </label>
+      </fieldset>
+
+      {targetKindDraft.value === 'pipeline' ? (
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">执行哪份组合</legend>
+          {pipelines.value.length === 0 ? (
+            /* 空态给下一步，不写"暂无数据"（§5.10）。 */
+            <p class="break-words text-sm opacity-70">
+              还没有组合：先去任务中心挑几步，再点「保存为预设」，回到这一栏就能选它。
+            </p>
+          ) : (
+            <select
+              class="select w-full"
+              aria-label="执行哪份组合"
+              value={pipelineIdDraft.value}
+              onChange={(e) => (pipelineIdDraft.value = (e.target as HTMLSelectElement).value)}
+            >
+              {pipelines.value.map((p) => (
+                <option value={p.id}>
+                  {p.name}
+                  {p.builtIn ? '（内置）' : ''} · {p.steps.length} 步
+                </option>
+              ))}
+            </select>
+          )}
+          <p class="fieldset-label break-words">
+            {pipelineTargetNote(pipelineName(pipelineIdDraft.value))}
+          </p>
+        </fieldset>
       ) : (
         <fieldset class="fieldset">
           <legend class="fieldset-legend">执行</legend>
@@ -794,46 +886,52 @@ export const SchedulesPage = () => {
 
       {cronFields()}
 
-      <fieldset class="fieldset gap-2">
-        <legend class="fieldset-legend">跑哪些账号</legend>
-        {accounts.value.length === 0 ? (
-          <p class="text-sm opacity-70">库里还没有账号：先去账号页登录一个。</p>
-        ) : (
-          accounts.value.map((a) => (
-            <label class="flex min-h-11 cursor-pointer items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                class="checkbox checkbox-sm checkbox-primary"
-                checked={accountsDraft.value.includes(a.id)}
-                aria-label={`账号 ${a.displayName}`}
-                onChange={(e) =>
-                  toggleAccount(a.id, (e.target as HTMLInputElement).checked)
-                }
-              />
-              <span class="break-words">{a.displayName}</span>
-              {a.enabled ? null : <span class="badge badge-soft">已停用</span>}
-            </label>
-          ))
-        )}
-        <p class="fieldset-label">
-          一格都没勾 = 到点跑全部启用账号。勾了的会盖掉下面 JSON 里的 accounts 键。
-        </p>
-      </fieldset>
+      {/* 组合那一支不给这两栏：到点执行读的是组合自己那份清单（账号与参数都在里面），
+          这一行上的 `account_ids` 与 `body` 在它这条路上没有消费者 —— 摆着就是
+          "填了永远不生效"那一格。不显示**不等于**不送：保存时仍把库里原样带回去
+          （见 [save] 里读的仍是这两份草稿），免得翻一次目标类型就洗掉旧数据。 */}
+      {targetKindDraft.value === 'capability' ? (
+        <>
+          <fieldset class="fieldset gap-2">
+            <legend class="fieldset-legend">跑哪些账号</legend>
+            {accounts.value.length === 0 ? (
+              <p class="text-sm opacity-70">库里还没有账号：先去账号页登录一个。</p>
+            ) : (
+              accounts.value.map((a) => (
+                <label class="flex min-h-11 cursor-pointer items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    class="checkbox checkbox-sm checkbox-primary"
+                    checked={accountsDraft.value.includes(a.id)}
+                    aria-label={`账号 ${a.displayName}`}
+                    onChange={(e) => toggleAccount(a.id, (e.target as HTMLInputElement).checked)}
+                  />
+                  <span class="break-words">{a.displayName}</span>
+                  {a.enabled ? null : <span class="badge badge-soft">已停用</span>}
+                </label>
+              ))
+            )}
+            <p class="fieldset-label">
+              一格都没勾 = 到点跑全部启用账号。勾了的会盖掉下面 JSON 里的 accounts 键。
+            </p>
+          </fieldset>
 
-      <fieldset class="fieldset gap-2">
-        <legend class="fieldset-legend">参数（JSON）</legend>
-        <textarea
-          class="textarea w-full font-mono"
-          rows={5}
-          spellcheck={false}
-          aria-label="参数 JSON"
-          value={bodyDraft.value}
-          onInput={(e) => (bodyDraft.value = (e.target as HTMLTextAreaElement).value)}
-        />
-        <p class="fieldset-label break-words">
-          能填的键：{keysHint()}。留 {'{}'} 即用各项自己的默认值。
-        </p>
-      </fieldset>
+          <fieldset class="fieldset gap-2">
+            <legend class="fieldset-legend">参数（JSON）</legend>
+            <textarea
+              class="textarea w-full font-mono"
+              rows={5}
+              spellcheck={false}
+              aria-label="参数 JSON"
+              value={bodyDraft.value}
+              onInput={(e) => (bodyDraft.value = (e.target as HTMLTextAreaElement).value)}
+            />
+            <p class="fieldset-label break-words">
+              能填的键：{keysHint()}。留 {'{}'} 即用各项自己的默认值。
+            </p>
+          </fieldset>
+        </>
+      ) : null}
 
       <label class="flex min-h-11 cursor-pointer items-center gap-2">
         <input
@@ -843,7 +941,9 @@ export const SchedulesPage = () => {
           aria-label="这条任务启用"
           onChange={(e) => (enabledDraft.value = (e.target as HTMLInputElement).checked)}
         />
-        <span class="text-sm">{enabledDraft.value ? '保存后立即参与调度' : '先存着，不参与调度'}</span>
+        <span class="text-sm">
+          {enabledDraft.value ? '保存后立即参与调度' : '先存着，不参与调度'}
+        </span>
       </label>
 
       {formError.value ? (
