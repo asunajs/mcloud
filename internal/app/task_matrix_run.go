@@ -126,7 +126,13 @@ type TaskStepRecord struct {
 type TaskVerifyRecord struct {
 	TaskID int64
 	Name   string
-	Class  TaskVerifyClass
+	// Group 是 `groupid`（`day` / `month` / `beiyong1` …）。
+	//
+	// 它只为**播报那一层**存在（`task_matrix_report.go` 要按组分节），
+	// 但它是结构体上的一格真事实：复查读到的那条任务属于哪一组，与第一趟
+	// [TaskStepRecord.Group] 同一个来源（[taskGroupOf]）。
+	Group string
+	Class TaskVerifyClass
 	// Label 是"该去哪个 App 做"（只有 [VerifyStillOpen] 带）。
 	Label string
 	// Note 是补打卡那一发的说明（481 / 478 那两条，key 零实拍）。
@@ -225,10 +231,30 @@ func (r TaskMatrixRun) RunAccount(
 	pending := matrix.Pending()
 	result.Counts.Pending = len(pending)
 
+	// 播报的**入口那两行**（旧实现 `index.ts` 里 `logger.start("------【任务列表】------")`
+	// 与那句 `获取到 32 个任务，去重后 24 个`）。
+	//
+	// ⚠ "去重后"这一格必须是 `Raw` 与 `Read` 两个数：16 次拉取会给出重复的同名任务
+	// （实拍那两轮就是 32→24 与 35→27），只报后者会让人以为"这个号只有 24 条任务"，
+	// 而少掉的那些是**同一条任务在几个组里都出现**（[normalizeTaskMatrix] 按 id 小的赢）。
+	r.progress(core.LevelInfo, "------【任务列表】------")
+	r.progress(core.LevelInfo, fmt.Sprintf("获取到 %d 个任务，去重后 %d 个", matrix.Raw, len(matrix.Items)))
+	if result.ReadFailures > 0 {
+		// 这一句要紧贴在条数后面：`24 个`读起来像"全表就这些"，而它可能只是 13/16 组。
+		// 小结里也有同一格（[TaskMatrixRunResult.SummaryLine]），但那是三十行之后才出现，
+		// 追实时日志的人看不到。
+		r.progress(core.LevelWarn, fmt.Sprintf("有 %d/%d 组没读到 ⇒ 这不是全表",
+			result.ReadFailures, matrix.Fetches))
+	}
+
 	exec := newTaskExecutor(r, opening, account)
 	gate := exec.backupGate(ctx)
 	for _, item := range pending {
 		plan := PlanTaskStep(item, gate)
+		// 动手**之前**先播一行（口径与"这一条会不会出网"见 [taskStepLiveLine]）。
+		if line, ok := taskStepLiveLine(item, plan); ok {
+			r.progress(line.Level, line.Text)
+		}
 		record, fired := exec.apply(ctx, item, plan)
 		result.Steps = append(result.Steps, record)
 		result.Counts.absorb(record)
@@ -252,6 +278,17 @@ func (r TaskMatrixRun) RunAccount(
 		return result, nil
 	}
 	r.verify(ctx, src, &result, &exec)
+	// **逐条**播报复查读数（分节 + 组内四档），然后才是那句小结。
+	//
+	// ⚠ 顺序刻意：人是**从上往下**读日志的。把小结放前面会让"上游没认这几条"
+	// 埋在一堆计数之后，而那句小结之下的每一行才是"具体哪一条"。
+	//
+	// ⚠ [TaskMatrixRunResult.Notes] 里的三格**不**各自占一行：434 的分享进度与
+	// "复查没读到"拼在小结尾巴上（[SummaryLine] 末尾），补打卡那一则挂在它所属
+	// 那一行的尾巴（见 [TaskVerifyLines]）⇒ 同一句话不会在事件流里出现两次。
+	for _, line := range TaskVerifyLines(result.Verified) {
+		r.progress(line.Level, line.Text)
+	}
 	r.progress(core.LevelInfo, result.SummaryLine())
 	return result, nil
 }
@@ -327,7 +364,8 @@ func (r TaskMatrixRun) verify(
 			exec.done[id] = true
 		}
 		class := ClassifyVerifiedTask(item, exec.done)
-		record := TaskVerifyRecord{TaskID: id, Name: taskNameOf(item), Class: class, Note: note}
+		record := TaskVerifyRecord{TaskID: id, Name: taskNameOf(item),
+			Group: taskGroupOf(item), Class: class, Note: note}
 		if class == VerifyStillOpen {
 			record.Label = VerifyMarketLabel(item)
 		}
@@ -620,13 +658,25 @@ func (e *taskExecutor) runUploads(
 		}
 		switch {
 		case perr != nil:
-			problems = append(problems, fmt.Sprintf("第 %d 个上传失败：%s", round, perr.Error()))
+			problem := fmt.Sprintf("第 %d 个上传失败：%s", round, perr.Error())
+			problems = append(problems, problem)
+			// 实时那一行**复用同一段文本**：上传是这一族唯一会往用户网盘写东西的动作，
+			// 事件流里的那一行与记录里的那一格**不许**说两句不同的话。
+			e.run.progress(core.LevelError,
+				fmt.Sprintf("上传文件失败 %s %d：%s", taskNameOf(item), derefTaskID(item), perr.Error()))
 		case receipt.Outcome == CloudUploadExists:
-			problems = append(problems, fmt.Sprintf(
-				"第 %d 个没传：上游说同名文件已存在（%s）⇒ 不算我们造的，也不去删",
-				round, receipt.Name))
+			problem := fmt.Sprintf("第 %d 个没传：上游说同名文件已存在（%s）⇒ 不算我们造的，也不去删",
+				round, receipt.Name)
+			problems = append(problems, problem)
+			e.run.progress(core.LevelWarn, problem)
 		default:
 			done++
+			// 旧实现那一句是 `logger.debug("上传文件成功")`（每条一行、不带任务名，
+			// 因为它一次只在做一条任务）。这里带上名字与 id：这一族一趟要做若干条，
+			// 而"传上去的那些文件后来要删"这件事必须能对上号（清理那一半的输入
+			// 就是这些 id，见 #37）。
+			e.run.progress(core.LevelInfo,
+				fmt.Sprintf("上传文件成功 %s %d", taskNameOf(item), derefTaskID(item)))
 		}
 		if shape.PaceEachRound {
 			// 旧实现那一拍在循环体末尾，**失败也等、末轮也等**（它把异常吞在函数里，

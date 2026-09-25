@@ -58,9 +58,16 @@ var TaskMatrixMarketNames = []string{
 // ② 结果播报（`results.ts:33`，命中就**不出现在报告里**）。
 // 任务列表照样拉、专属 runner 照样跑 ⇒ 把它读成"这 11 个 id 永远不做"是**错**的。
 //
-// 本层读它的是 [taskMatrixSkipsClick]（写侧 default 分支那一发盲点）。⚠ 它**不**挡
-// 专属 runner —— 那张表在 `task_matrix_dispatch.go` 里只用于"命中就不发这一发打卡"，
-// 而"runner 照跑"那一半是旧实现的实情，改这个常量的时候两边都要回看。
+// 本层有**两个**读者，各自只取旧实现那一半：
+//   - [taskMatrixSkipsClick]（写侧 default 分支那一发盲点）—— 命中就**不发**打卡；
+//   - `task_matrix_report.go` 的 [TaskVerifyLines] —— 命中就**不出播报行**。
+//
+// ⚠ 播报那一层只挡**行**、不挡**计数**（旧实现是连 `results.success` 一起 return 掉，
+// 于是那一档在界面上既看不见也不算数）。差异与理由写在那份文件的"刻意不同③"里，
+// 改这个常量的时候两边都要回看。
+//
+// ⚠ 它**不**挡专属 runner —— 那张表在 `task_matrix_dispatch.go` 里只用于
+// "命中就不发这一发打卡"，而"runner 照跑"那一半是旧实现的实情。
 var TaskMatrixNeverClick = []int64{117, 437, 991, 406, 385, 480, 1022, 1018, 603, 1021, 120}
 
 // TaskMatrixFetches 是这一次聚合**注定要发**的请求数（2 × 8）。
@@ -86,6 +93,13 @@ type TaskMatrixFailure struct {
 type TaskMatrix struct {
 	// Items 是聚合 + 去 HTML + 排序 + 去重之后的条目，**未过"要不要做"那道门**。
 	Items []upstream.TaskV2Item
+	// Raw 是**去重之前**的条目数（16 次拉取加起来的全部条目）。
+	//
+	// 它只为播报那一行存在（旧实现那句 `获取到 32 个任务，去重后 24 个`，
+	// `index.ts` 里 `logger.debug` 那一句），但这一格本身就是有用事实：
+	// `Raw` 与 [TaskMatrix.Items] 的差就是"上游在不同组里重复给了几条同名任务"，
+	// 而重复条目留下的那条由 id 决定（见 [normalizeTaskMatrix] 的顺序讲究）。
+	Raw int
 	// Fetches 是实际发出的请求数（恒等于 [TaskMatrixFetches]，除非中途整体失败）。
 	Fetches int
 	// Failures 是**没拿到**的那些组（顺序与请求顺序一致）。
@@ -130,6 +144,7 @@ func AppTaskMatrix(ctx context.Context, src *SignInSessionSource) (TaskMatrix, *
 		return TaskMatrix{}, first.Err.WithPrefix(fmt.Sprintf(
 			"任务表 %d 次拉取全部失败（首个：%s/%s）：", matrix.Fetches, first.MarketName, first.Group))
 	}
+	matrix.Raw = len(matrix.Items)
 	matrix.Items = normalizeTaskMatrix(matrix.Items)
 	return matrix, nil
 }

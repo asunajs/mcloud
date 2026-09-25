@@ -289,6 +289,10 @@ func taskListOutput() []core.FieldSpec {
 // （2026-09-24 查过：`web/src` 里 `.output` 零命中）。
 // 这一趟真正给用户看的数，走的是 `TaskMatrixRunResult.SummaryLine()` ⇒
 // 终局事件的 `message` 与 `runs.summary`。改了上面六格**不会**改变任何实际输出。
+//
+// ⚠ 2026-09-25 起事件流里**还多了一层逐条播报**（`internal/app/task_matrix_report.go`：
+// 组分节 + `成功/已完成/失败/需前往…完成` 四档行 + 每一发上传一行）。它不改上面这六格
+// —— 那六格是**计数**声明，播报是**过程**；两者今天都不经 `capability.output` 渲染。
 func appTaskOutput() []core.FieldSpec {
 	return []core.FieldSpec{
 		core.NewFieldSpecText("pendingCount", "待做条数"),

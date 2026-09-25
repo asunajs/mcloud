@@ -178,6 +178,8 @@ const UNTAGGED_ALLOWED = {
     '一次拉取的失败记录，`Err` 是 `*core.Error`（其对外文案走白名单、原文只进日志）⇒ 整块 marshal 等于把上游原文当结构化字段承诺给前端',
   'internal/app/task_matrix.go:TaskMatrix':
     '十六次拉取聚合出的内存结论。它的消费者是 app 层的执行链（`task_matrix_run.go` 两趟读表：待做集合与复查），聚合结果本身不出接口 ⇒ 对外形状由 `TaskMatrixRunResult` 那一格负责；`Items` 的语义是"按 name 去重、保留 id 小的那条"，去重取向是刻意不同③，补 tag 会把它变成对外契约',
+  'internal/app/task_matrix_report.go:TaskReportLine':
+    '一行**播报**（级别 + 已渲染好的人话）。它是纯内存形状：落库的是渲染后的 `run_events.message` 文本与 `level`，事件 JSON 形状已冻结（`kind=log` 那一份由 `core` 侧构造），所以这一格一旦补 tag 就等于新造一条"半结构化"的对外契约，而前端读的仍是那一句文本',
   'internal/upstream/app_notice.go:NoticeTaskSlot':
     '公告任务的一个槽（`cloudStatus`/`sum`/`progress`/`taskStatus`）。四个字段全是指针，"上游没给"与"给了 0"必须分得开；`cloudStatus` 的语义仍是**猜的对应关系**',
   'internal/upstream/app_notice.go:NoticeTaskInfo':

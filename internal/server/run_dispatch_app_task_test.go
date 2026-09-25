@@ -191,6 +191,30 @@ func TestAppTaskDispatchHitsItsOwnChain(t *testing.T) {
 	if !anyMessageContains(events, "未清理") {
 		t.Errorf("事件流里没有「这一趟写了网盘、还没清理」那一句：%v", messagesOf(events))
 	}
+	// ⭐ **逐条**播报要能一路走到事件流（app 层那几行经 `RunProgress` → `run_events` → SSE）。
+	//
+	// 为什么在 server 层再钉一遍、不在 app 层测完就算：这一条链是本仓**唯一会写用户的账**
+	// 的那一条，而"跑了四十多枪只有一行小结"那种状态一旦回退，界面上没人看得出来
+	// —— 只有事件流里的行能说清"这一趟动了哪几条"。
+	//
+	// ⚠ 夹具那一份表两趟共用（state 恒 `WAIT`）⇒ 三条做过的都落"失败"那一档（做了没认），
+	// 107 落"需前往"。这不是笔误，正是这一条要的读数。
+	for _, want := range []string{
+		"------【任务列表】------",
+		// 这一枚钉的是**两个数都在**：夹具把同一份表塞进 16 次响应 ⇒ 去重前是 64 条，
+		// 只报"4 条"会让人以为上游就给了四条（"去重后 4 个"那半句才是真相）。
+		"获取到 64 个任务，去重后 4 个",
+		"尝试完成 上传一个文件 106",
+		"上传文件成功 上传一个文件 106",
+		"跳过 创建一篇云笔记 107",
+		"------【每日任务】------",
+		"失败 上传一个文件 106",
+		"需前往云盘完成 创建一篇云笔记 107",
+	} {
+		if !anyMessageContains(events, want) {
+			t.Errorf("事件流里没有逐条播报的那一行 %q：%v", want, messagesOf(events))
+		}
+	}
 	assertRunCapability(t, h, rows, "app-task")
 }
 
