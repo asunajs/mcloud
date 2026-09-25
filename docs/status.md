@@ -3891,3 +3891,50 @@ CDP 会话一关就**释放**设备尺寸覆写 ⇒ "窄屏量到 40px"其实量
 | **R30**（改写，未闭合） | 从"缺实拍"改成"缺真打，而且今天跑到了却没发到"：先拍 Q41，再按原判据读**成对**那两行 |
 | **§3.9 偏大** | [`internal/app/task_matrix_run.go`](../internal/app/task_matrix_run.go) 本轮 1055 → **1080 行**，`task_matrix_run_test.go` 1469 行 ⇒ 拆分方案（run 侧按"读表 / 打卡 / 玩法 / 上传 / 分享 / 复查 / 清理"切）仍是**待批**，本文 Q16 同一格 |
 
+
+---
+
+## 补记（2026-09-25 同日第三趟，R1 / R3 收口：把 notice 与 fun-ai 再真跑一次，读小结里那两行读数）
+
+上一轮把两族的读数接进了"没领 / 没抽"那一档的小结，但当天那趟跑在改动**之前** ⇒ 那两问
+（R1「`cloudStatus` 哪个值是未领」、R3「次数判据语义 + 活动期到哪天」）当时仍答不出。
+按 §1.13（缺口的默认处置是去跑）同日再跑一趟。**跑法同上一节那条配方**（自己的二进制 +
+主库副本 + 另端口 + ≥8 位一次性口令；跑完实例已关、副本与二进制已删、主库行数与 mtime 未变）。
+
+### 一、程序自己念出来的（两个号、四条小结，逐字）
+
+```
+公告任务没领：能判的槽都读成已入账（读数：cloudStatus=2 taskStatus=3 sum=200 progress=缺，cloudStatus=0 taskStatus=2 sum=100 progress=1）
+公告任务没领：能判的槽都读成已入账（读数：cloudStatus=0 taskStatus=0 sum=200 progress=缺，cloudStatus=0 taskStatus=1 sum=100 progress=0）
+趣玩AI没抽：上游报的次数判据显示没有可用次数（读数：drawTimes=0，drawsUsed=0，todayGetLotteryCount=0，起 2025-05-28，止 2026-12-31）
+趣玩AI没抽：上游报的次数判据显示没有可用次数（读数：drawTimes=0，drawsUsed=0，todayGetLotteryCount=0，起 2025-05-28，止 2026-12-31）
+```
+
+- **R3 答出两格**：活动**今天还在期内**（止 2026-12-31），而判据三格**全 0** ⇒ "没抽"不是"活动过期"。
+  仍未答出的是 `drawTimes` 到底是"当期总次数"还是"今日可得"（两号同读数分辨不了），
+  以及未中奖那一档（要一个还有次数的号）。
+- **R1 仍不闭合，但读数面扩大了**：四槽读到 `cloudStatus` ∈ {0, 2}、`taskStatus` ∈ {0, 1, 2, 3}，
+  **没有一槽给过 1** ⇒ "哪个值是未领"依旧没有正面样本。
+
+### 二、这一趟跑出来的一处**文案越界**（改了，判定没动）
+
+第一行那句"能判的槽都读成**已入账**"与它自己带的读数矛盾：`cloudStatus=0` 既不是可领（1）
+也不是已入账（2），把它念成"已入账"就是一句没根据的肯定话（§1.7 的反方向 —— 同一个字段
+在两个方向上都可能说谎）。处置：`NoticeOutcomeNothing` 那一档改念
+**"能判的槽里没有一个读成可领"**，判定**照旧**（不发写请求），并补一条用例
+`TestNoticeRunZeroReadingIsNotNarratedAsSettled`（夹具复刻今天那两槽的 `0`；
+反向改法两处各自会红：把 0 当 2 用 → 念出"已入账"红；把可领值改成 0 → 真发 `reward` 也红）。
+`notice_run.go` 里那两处"实拍只有 1 / 2 两个读数"的说法同步改准（今天的 `0` 是实测，最高一级）。
+
+### 三、门禁与提交（照抄当轮 stdout）
+
+- `node scripts/gates-go.js` → **十项门禁全绿**，总耗时 **55.8s**（逐条：build 1.3s，vet 0.4s，
+  fmt 0.1s，**test 50.4s**，deps 3.0s，filenames 0.2s，idents 0.3s，golden 0.1s（断言 167 条），
+  jsontags 0.1s（95 个字段齐全、222 个按白名单不进 JSON），md-tables 0.1s）。
+- 本轮只动 Go 业务层与文档，web 侧一行未改 ⇒ 仍跑了一遍 `node scripts/gates-web.js` 作现场确认：
+  **2 条全绿**，总耗时 **3.4s**（typecheck 2.7s，build 0.7s）。
+- ⚠ **全仓绿灯包含别人的在飞改动**（§2.7）：这棵树此刻还有 `internal/app/msg_push_*`、
+  `internal/upstream/app_msg_push*`、`internal/cli/msg_push_fixture_replay_test.go`、
+  两份 `docs/capture/app-*` 与 `web/src/**` 未落定。上面的数字是**整棵树**的绿灯，
+  不是"我这一族单独验过"。
+- 指名范围：`go test ./internal/app/ -run Notice` → ok（本族三条用例，含新加的那条反向用例）。

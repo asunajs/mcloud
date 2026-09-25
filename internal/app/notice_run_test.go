@@ -39,6 +39,12 @@ const (
 	noticeInfoBothClaimed = `{"code":0,"msg":"success","result":{` +
 		`"taskOneInfo":{"cloudStatus":2,"sum":200,"taskStatus":3},` +
 		`"taskTwoInfo":{"cloudStatus":2,"sum":100,"taskStatus":3}}}`
+	// noticeInfoBothZero 复刻 **2026-09-25 真账号那一趟**读到的两槽（两个号里的一号）：
+	// `cloudStatus` 两槽都是 0，`taskStatus` 分别是 0 与 1。0 既不是可领（1）也不是
+	// 已入账（2）⇒ 语义未验证，见 `notice_run.go` 里那一段读数面。
+	noticeInfoBothZero = `{"code":0,"msg":"success","result":{` +
+		`"taskOneInfo":{"cloudStatus":0,"sum":200,"taskStatus":0},` +
+		`"taskTwoInfo":{"cloudStatus":0,"sum":100,"taskStatus":1}}}`
 	noticeInfoNoFields = `{"code":0,"msg":"success","result":{` +
 		`"taskOneInfo":{"sum":200},"taskTwoInfo":{"sum":100}}}`
 	noticeInfoNoSlots = `{"code":0,"msg":"success","result":{}}`
@@ -267,7 +273,7 @@ func TestNoticeRunSendsNoWriteRequestWhenTheGateIsClosed(t *testing.T) {
 // TestNoticeRunReadsSlotsIntoTheNothingSummary：⭐ "没领"那一档也要把**读数**念出来。
 //
 // 2026-09-25 真账号那一趟跑出来的就是这一档，而它只留下一句
-// "公告任务没领：能判的槽都读成已入账" —— 于是这一趟**答不出** R1
+// "公告任务没领：能判的槽都读成已入账"（旧文案，现已改写，见 project）—— 这一趟**答不出** R1
 // （"`cloudStatus` 哪个值是未领"），尽管数就在手上。补上读数后，
 // 下一次真跑无论判成哪一档都会带着 `cloudStatus=` 的原样读数。
 // 反向改法：把 `noticeSlotReadings` 从 Nothing 那一支摘掉 ⇒ 这一条红。
@@ -319,6 +325,36 @@ func TestNoticeRunReadsSlotsIntoTheNothingSummary(t *testing.T) {
 	}
 	if got := res.SummaryLine(); !strings.Contains(got, "cloudStatus=缺") {
 		t.Errorf("缺的键要念成缺，实得 %q", got)
+	}
+}
+
+// TestNoticeRunZeroReadingIsNotNarratedAsSettled：⭐ "没领"那一档**不许**替一个
+// 两档之外的读数下"已入账"的结论（2026-09-25 真账号那一趟读到的就是 `cloudStatus=0`）。
+//
+// 判据的形状：`cloudStatus` 的已知映射只有 `1=未领` / `2=已入账`（且那本身是猜的，
+// 见 `notice_run.go` 那两个常量），而 `0` 不在里面 ⇒ 判定照旧落"没领、一枪不发"
+// （保守那一侧不变），但**文案**必须只说"没有一槽读成可领"，不能说"都读成已入账"。
+// 反向改法有两处，各自会红：把 0 当 2 用（→ 念"已入账"，本条红）；
+// 或把 `noticeCloudStatusUnclaimed` 改成 0（→ 这一趟真发 `reward`，`res.Status` 变 Done，本条也红）。
+// 它钉不住的是"0 到底是什么"—— 那一问仍要拿一个从没开过通知的号读一次（R1）。
+func TestNoticeRunZeroReadingIsNotNarratedAsSettled(t *testing.T) {
+	run, _ := noticeRuns(&poolSignInStore{*liveTaskStore()},
+		liveTaskRoute{noticeInfoEndpoint, []string{noticeInfoBothZero}},
+		liveTaskRoute{noticeRewardEndpoint, []string{noticeOK}},
+	)
+	res, perr := run.RunAccount(context.Background(), core.NewAccountID(liveTestAccountID))
+	if perr != nil {
+		t.Fatalf("判成没领不该报错：%v", perr)
+	}
+	if res.Status != NoticeNothing {
+		t.Fatalf("两槽都读成 0 时仍该判没领（一枪不发），实得 %v", res.Status)
+	}
+	summary := res.SummaryLine()
+	if !strings.Contains(summary, "cloudStatus=0") {
+		t.Errorf("读数原样带上：%q", summary)
+	}
+	if strings.Contains(summary, "已入账") {
+		t.Errorf("0 不是已知两档之一，不许念成已入账：%q", summary)
 	}
 }
 
@@ -435,9 +471,9 @@ func TestNoticeResultMapsStatusToOutcome(t *testing.T) {
 	}{
 		{
 			name:    "没得领也算成功",
-			res:     NoticeResult{Status: NoticeNothing, Reason: "能判的槽都读成已入账"},
+			res:     NoticeResult{Status: NoticeNothing, Reason: "能判的槽里没有一个读成可领"},
 			want:    core.OutcomeSuccess,
-			summary: "公告任务没领：能判的槽都读成已入账",
+			summary: "公告任务没领：能判的槽里没有一个读成可领",
 		},
 		{
 			name:    "判不了也算成功（本次没发请求）",
