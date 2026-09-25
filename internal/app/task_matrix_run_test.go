@@ -460,15 +460,16 @@ func TestTaskMatrixRunClicksOnTheAppDomainAndVerifies(t *testing.T) {
 // 这一条是"与旧实现刻意不同"那一段的行为落点：把它改回盲点打卡，本条立刻红，
 // 而红出来的正是"用户的账上多了一条没做过的事"。
 //
-// ⚠ 这里用的两个 id 是**仍缺端点族**的那两个（都在 139 邮箱那一族）。106 曾在这张表里，
-// 2026-09-24 上传族接上后它落到 runner 那一支了（用例见
-// [TestTaskMatrixRunUploadsOneFileForTask106]）；107 也一样 —— 笔记那一族三口于
-// 2026-09-25 落码，它今天会**真的发三枪** ⇒ 再拿它当"缺口"样本，这一条测的就不是
-// "不发枪"而是"发错了还绿着"。
+// ⚠ 这里用的两个 id 是**仍缺端点族**的那两个（都在 139 邮箱那一族，缺的是各自那一口，
+// 不是会话那一族 —— 会话那三枪 2026-09-26 已落码，见 `task_matrix_mail.go`）。
+// 这张表换过三次样本，每次都是"某个缺口被补上 ⇒ 拿它演'不发枪'就成了假绿"：
+// 106 于 2026-09-24 落到 runner（用例见 [TestTaskMatrixRunUploadsOneFileForTask106]）、
+// 107 于 2026-09-25（笔记三口）、472 / 473 于今天（邮箱会话 + ④ 打卡）。
+// ⇒ 再拿它们当"缺口"样本，这一条测的就不是"不发枪"而是"发错了还绿着"（坑表 #161）。
 func TestTaskMatrixRunNeverClicksToolGapTasks(t *testing.T) {
 	waiting := mxItems(
-		mxItem(472, "day", "体验 139 邮箱", "WAIT", "", 0),
-		mxItem(473, "day", "阅读邮件", "WAIT", "", 0),
+		mxItem(1004, "day", "给好友发邮件", "WAIT", "", 0),
+		mxItem(1020, "day", "邮箱资产备份", "WAIT", "", 0),
 	)
 	script := mxScript([]string{"JWT-1"}, waiting, waiting, mxHappy()...)
 	res, perr := mxResult(t, mxDefaultRun(t, script))
@@ -641,7 +642,7 @@ func TestTaskMatrixRunSkipVerifyOnlyWhenNothingSent(t *testing.T) {
 		items []string
 		want  int
 	}{
-		{"一枪没发（只有缺口）", mxItems(mxItem(472, "day", "体验 139 邮箱", "WAIT", "", 0)), 16},
+		{"一枪没发（只有缺口）", mxItems(mxItem(1004, "day", "给好友发邮件", "WAIT", "", 0)), 16},
 		{"发过一枪", mxItems(mxItem(777, "day", "看广告", "WAIT", "", 0)), 32},
 	} {
 		script := mxScript([]string{"JWT-1"}, c.items, nil, mxHappy()...)

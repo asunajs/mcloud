@@ -277,12 +277,13 @@ func TestTaskStepLiveLine(t *testing.T) {
 			wantOK: false,
 		},
 		{
-			// ⚠ 刻意用 472（邮箱会话那一族，今天仍缺端点）而不是 107：笔记那一族
-			// 2026-09-25 已接上 runner ⇒ 拿它当"缺口"样本会让这一格测不到"不发枪"那一档。
-			name: "本工具没接玩法", item: item(472, "day", "体验 139 邮箱"),
+			// ⚠ 刻意用 1004（缺的是「写信那一族」）而不是 107 / 472：笔记三口于
+			// 2026-09-25、邮箱会话四枪于 2026-09-26 已接上 runner ⇒ 拿它们当"缺口"样本，
+			// 这一格就测不到"不发枪"那一档了（坑表 #161）。
+			name: "本工具没接玩法", item: item(1004, "day", "给好友发邮件"),
 			plan: TaskStepPlan{Kind: StepBlockedToolGap,
-				ToolGap: "邮箱会话那一族本仓未实现"},
-			wantText: "跳过 体验 139 邮箱 472：邮箱会话那一族本仓未实现",
+				ToolGap: "写信那一族本仓未实现"},
+			wantText: "跳过 给好友发邮件 1004：写信那一族本仓未实现",
 			wantLev:  core.LevelWarn, wantOK: true,
 		},
 		{
@@ -321,12 +322,12 @@ func TestTaskMatrixRunBroadcastsLiveThenReport(t *testing.T) {
 	first := mxItems(
 		mxItem(596, "beiyong1", "备份一个文件", "WAIT", "", 0),
 		mxItem(777, "day", "看个广告", "WAIT", "", 0),
-		mxItem(472, "day", "体验 139 邮箱", "WAIT", "", 0),
+		mxItem(1004, "day", "给好友发邮件", "WAIT", "", 0),
 	)
 	second := mxItems(
 		mxItem(596, "beiyong1", "备份一个文件", "FINISH", "", 1),
 		mxItem(777, "day", "看个广告", "FINISH", "", 1),
-		mxItem(472, "day", "体验 139 邮箱", "WAIT", "", 0),
+		mxItem(1004, "day", "给好友发邮件", "WAIT", "", 0),
 	)
 	log := &mxLog{}
 	run := mxDefaultRun(t, mxScript([]string{"JWT-1"}, first, second, mxHappy()...))
@@ -354,13 +355,13 @@ func TestTaskMatrixRunBroadcastsLiveThenReport(t *testing.T) {
 		!strings.Contains(got, "newsign_139mail：读到 8/8 次、0 条") {
 		t.Errorf("第三行要把两个市场名分开念，实得 %q\n（全部：\n%s）", got, log.joined())
 	}
-	// 实时那三行：两条会出网（596 打卡 + 777 打卡），一条是缺口（472）。
+	// 实时那三行：两条会出网（596 打卡 + 777 打卡），一条是缺口（1004）。
 	for _, want := range []string{"尝试完成 备份一个文件 596", "尝试完成 看个广告 777"} {
 		if !log.has(want) {
 			t.Errorf("缺实时行 %q：\n%s", want, log.joined())
 		}
 	}
-	if !log.hasAt(core.LevelWarn, "跳过 体验 139 邮箱 472") {
+	if !log.hasAt(core.LevelWarn, "跳过 给好友发邮件 1004") {
 		t.Errorf("缺口那条要 warn 一行并带上原因，实得：\n%s", log.joined())
 	}
 	// 实时行在分节**之前**（时机就是这一条的存在理由）。
@@ -376,8 +377,8 @@ func TestTaskMatrixRunBroadcastsLiveThenReport(t *testing.T) {
 	if !log.hasAt(core.LevelInfo, "成功 备份一个文件 596") {
 		t.Errorf("596 该念成'成功'，实得：\n%s", log.joined())
 	}
-	if !log.hasAt(core.LevelWarn, "需前往云盘完成 体验 139 邮箱 472") {
-		t.Errorf("472 没做也没完成 ⇒ 该念成'需前往…'，实得：\n%s", log.joined())
+	if !log.hasAt(core.LevelWarn, "需前往云盘完成 给好友发邮件 1004") {
+		t.Errorf("1004 没做也没完成 ⇒ 该念成'需前往…'，实得：\n%s", log.joined())
 	}
 	if last := log.texts[len(log.texts)-1]; last != res.SummaryLine() {
 		t.Errorf("最后一行要是小结原文，实得 %q\n（小结：%q）", last, res.SummaryLine())

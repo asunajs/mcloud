@@ -678,6 +678,9 @@ const UNTAGGED_ALLOWED = {
   // ── 云笔记那一族（#66，2026-09-25 随玩法 107 落地）──
   'internal/upstream/app_note.go:NoteCreateInput':
     '`createNote.do` 的**请求侧入参集**（`NoteID` / `Title` / `Phone`）。⚠ `Phone` 是**完整手机号** —— 与上面 `CloudOutLinkInput.Account`、`CloudUploader.Auth` 同一条"只进不出"：这一旦可序列化，离把号码写进日志只差一次"顺手 marshal 一下入参"。而 body 由 `NoteCreateRequest` 现拼那**二十六键** map（与在跑的 caiyun 逐字对齐，`tags: []`、`contents[]` 那一格是嵌套形状）⇒ 补 tag 等于造第二条会多发键的旁路请求，而"这一口认不认多出来的键"零实拍（本族三口今日仍无一条真实反馈，见 `docs/pending-decisions.md` R32）',
+  // ── 139 邮箱会话那一族（#67，2026-09-25 随玩法 472/473 落地）──
+  'internal/upstream/app_mail139.go:MailSession':
+    '两张字段（`SID` / `RMKey`）**都是会话凭据**，类型是 `core.SecretValue`：它的 `String()` 只挡打印，**不挡 `encoding/json`** ⇒ 一旦补上 tag，"顺手 marshal 一下这张会话"就会把 sid/rmkey 原文写进日志、错误文本或 fixture（三者都是本仓明令禁止的落点，见 `docs/sanitize-guide.md`）。这一族的③那一发更是把两枚直接拼进 URL、而传输层错误原样嵌 URL（`internal/io/client.go` 的 `mapTransportError`）⇒ 不给 tag 是"只进不出"这条边界在类型上的那一份，不是漏写。响应形状零实拍（② 那条只拍到请求面）⇒ 也没有任何外部契约要钉',
 }
 
 function walk(dir, out = []) {

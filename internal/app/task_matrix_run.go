@@ -547,6 +547,18 @@ type taskExecutor struct {
 
 	// shareBefore 是跑之前从 434 的名字里读到的天数。
 	shareBefore *int
+
+	// mailSession 是这一趟换到的 139 邮箱会话（② 的产物：`sid` + `rmkey`）。
+	//
+	// ⚠ **只在成功时缓存**，且这一趟之内有效（不跨轮、不进票池）—— 照旧实现的
+	// `ctx.state.mail139`，理由与"失败时下一条会重走 ①②"的取舍写在
+	// `task_matrix_mail.go` 的 [mailSessionFor] 头注。
+	//
+	// 为什么**不**接进 [CloudPhoneSessionPool] 那一类跨轮票池：那一族的键是
+	// (账号, 凭据指纹)，而邮箱会话的有效期**零样本**（`docs/pending-decisions.md`
+	// 里"sid/rmkey 能活多久"那一格）⇒ 跨轮复用等于自造一个 TTL，
+	// 而 AGENTS.md §1.12 明写不自造。
+	mailSession *upstream.MailSession
 }
 
 func newTaskExecutor(
@@ -699,6 +711,17 @@ func (e *taskExecutor) runRunner(
 		sent, noteProblems := e.runNote(ctx, item)
 		fired = fired || sent
 		problems = append(problems, noteProblems...)
+	}
+	if spec.Mail {
+		// 邮箱那一族（472 / 473）排在最后，同样**不消费**前面那些账：它自己开一条
+		// 四枪的链，跨两台主机，产物只有"④ 记上的那条进度"（见 `task_matrix_mail.go` 文件头）。
+		//
+		// ⚠ 它与前几格的**关键差别**在 [taskRunnerSpec.Mail] 那条注释上：这条 spec 的
+		// `ClickKey` 与 `FinalKey` 都是空 ⇒ 通用打卡那一支一个字都不念，
+		// 失败全靠 [runMailExperience] 自己按"哪一枪挂了"分档播报。
+		sent, mailProblems := e.runMailExperience(ctx, item)
+		fired = fired || sent
+		problems = append(problems, mailProblems...)
 	}
 	record.Err = joinProblems(problems)
 	return fired

@@ -271,11 +271,20 @@ type taskRunnerSpec struct {
 	// ⇒ 产物会留在用户的笔记回收站里，**进不了** [TaskMatrixRunResult.CloudFileIDs]
 	// 那条网盘清理链。这一格是已知残留，登记在 `docs/pending-decisions.md` **R32**。
 	Notes bool
+	// Mail 为真 ⇒ 这条 runner 的**本体**是"换一张 139 邮箱会话票（`toSourceId=001003`）
+	// → 用它活跃一次 → 再打一发**邮箱市场**的 `taskClickV2`"，四枪逐处取舍写在
+	// `internal/upstream/app_mail139.go` 文件头。
+	//
+	// 它与上面几格的分别：**这一条不往用户账号里留产物**（不传文件、不建笔记、不建外链），
+	// 但它是这一张表里**唯一一条跨两台服务**的：前三枪打的是 139 邮箱自己的
+	// （`user-njs.yun.139.com` 换票 + `mail.10086.cn` 两发），只有最后一发回到彩云 `:7071`。
+	// ⇒ "邮箱那三枪失败"与"任务没被上游认"是两种不同的失败，执行层分开念。
+	Mail bool
 }
 
 // taskMatrixRunners 是**本仓已经接上**的专属玩法表。
 //
-// ⚠ 表里六条，而旧实现有十四条 —— 其余八条在 [taskMatrixToolGaps]。
+// ⚠ 表里八条，而旧实现有十四条 —— 其余六条在 [taskMatrixToolGaps]。
 // 前两条（409 / 1005）是"整条链今天真的能跑完"的：入口上报（**零实拍**，见
 // `app_task_click.go` 文件头）+ 一发打卡（本族那一发只有**两发**实拍，都在
 // `m.mcloud.139.com`；另两发同名端点在 `:7071`，属 notice 与分享码那两族 ——
@@ -343,6 +352,17 @@ var taskMatrixRunners = map[int64]taskRunnerSpec{
 	// ⚠ 它同样**没有** `FinalKey`（旧 TS 那一条 runner 自己不再打一发；它在恒跳过的
 	// 那段代码之后，从未执行过 ⇒ 那一发到底存不存在**没有证据**，故不发）。
 	107: {Name: "创建并删除一个云笔记", Notes: true},
+	// 旧实现 `runners.ts:132-151`：472 与 473 **共用同一个 runner**，只在最后一发
+	// 市场 click 的 `taskId` 上分开（472 打 472、473 打 473）⇒ 这里是两格同样的开关。
+	//
+	// ⚠ 它并**不**做 PE 活跃上报：旧实现那句 `triggerMailPEvent` 只被 1004 用到
+	// （发邮件成功之后那一档），本仓早前的 gap 理由把 PE 算在 472 头上是**读错了出处**。
+	//
+	// ⚠ 这一条**没有** `FinalKey`：runner 自己那一发是**邮箱市场**的 `taskClickV2`
+	// （另一台主机、另一个 `marketname` 语义），由 [taskRunnerSpec.Mail] 那一支发，
+	// 不是本族 `task/click` 那一发。通用前置那一发仍由 [PlanTaskStep] 按 `currstep` 门决定。
+	472: {Name: "体验 139 邮箱", Mail: true},
+	473: {Name: "体验 139 邮箱", Mail: true},
 }
 
 // taskMatrixToolGaps 是"旧实现有专属玩法、本仓还接不上"的那批，**逐条写明缺哪一族**。
@@ -369,15 +389,22 @@ var taskMatrixToolGaps = map[int64]string{
 	// 434（分享文件）在 [taskMatrixRunners]：外链那一族两口已于 2026-09-25 落码
 	// （`internal/upstream/app_cloud_outlink.go`）。它今天仍**没有一次真打**，
 	// 但"本仓缺端点"这一档已经不成立了 —— 别再把它放回本表。
-	472:  "体验 139 邮箱要邮箱会话那一族（autologin + PE 活跃上报 + 邮箱市场 click），本仓未实现",
-	473:  "同 472：邮箱会话那一族未实现",
-	1004: "给好友发邮件要邮箱会话 + 写信那一族，本仓未实现",
+	// 472 / 473（体验 139 邮箱）在 [taskMatrixRunners]：邮箱会话那一族四枪已于
+	// 2026-09-25 落码（`internal/upstream/app_mail139.go`）。⚠ "接上"仍只到**形状**那一层：
+	// ② 只有请求面实拍（响应体零样本）、③④ 连请求面都只有旧 TS 那一份。
+	// 另外这一族**不需要** PE 活跃上报 —— 早前那格理由把它算在 472 头上是读错出处
+	// （`triggerMailPEvent` 只在 1004 那一支被调用），别再把它放回本表。
+	1004: "给好友发邮件要「写信那一族」（`mbox:getComposeId` + `mbox:compose`，本仓零实现、零实拍）" +
+		"⇒ 邮箱会话那一族已于 2026-09-25 落码（`app_mail139.go`），挡的不再是会话；" +
+		"而 compose 那一枪是**真发一封邮件**（旧实现默认发给自己，但收件人是配置项）⇒ 要不要发它待拍板",
 	// ⚠ 1014 的**上传那一半今天可用**（同一族三枪已接进 runner 表），挡它的是邮箱侧那一口
 	// `convertPdfFromYunFile`（本仓零实现、零实拍）。留在本表是为了不让它被当成"只差接线"。
 	1014: "PDF 转换 = 上传（已可用）+ 邮箱侧 `convertPdfFromYunFile`（那一口本仓零实现）⇒ 缺的不是上传族",
-	1020: "邮箱资产备份要邮箱会话那一族，本仓未实现",
-	1028: "AI 工作台要邮箱会话 + DES/RSA 派生 + SSE 对话那一族，本仓未实现",
-	585:  "AI 相机的玩法链本仓未实现",
+	1020: "邮箱资产备份要 `mail.10086.cn/mailsms/sms/backup` 那一口（本仓零实现、零实拍）" +
+		"⇒ 邮箱会话那一族已落码，缺的是这一口本身",
+	1028: "AI 工作台要 DES/RSA 派生 + SSE 对话那一族（本仓零实现）⇒ 缺的不是邮箱会话，" +
+		"而 `aiChatMessage` 这一格配置本仓也没有",
+	585: "AI 相机的玩法链本仓未实现",
 }
 
 // PlanTaskStep 决定对一条任务做什么。
