@@ -101,10 +101,12 @@ const (
 	// CodeAiAvatar 是「AI 头像」（#10 · 旧实现 `ai-avatar`）这一族的名字。	//
 	// 取值沿用 `docs/business-feature-inventory.md` §2.3 里那个小写名。
 	//
-	// ⚠ 这一条是本注册表里**唯一会往用户网盘写东西**的一条（`image/upload` 一发出去，
-	// 网盘里就多两个文件）。写在前面是为了让"要不要挂上调度"这一眼就看到代价：
-	// 清理那一族（`recyclebin/batchTrash`）**零实拍、今天没接**（待拍板 P1），
-	// 所以这一条 `RunInBatch: false` —— 每天自动跑一次等于每天攒十来个没人删的文件。
+	// ⚠ 这一条会**往用户网盘写东西**（`image/upload` 一发出去，网盘里就多两个文件；
+	// 注册表里另一条会写的是 `app-task`，它传 `asign-*.png`）。写在前面是为了让
+	// "要不要挂上调度"这一眼就看到代价：清理那一口（`recyclebin/batchTrash`）**零实拍**，
+	// 2026-09-25 起只在 `app-task` 那条链的链尾有调用点 —— **这一条链不删自己写的文件**
+	// （待拍板 P1），所以这一条 `RunInBatch: false` ——
+	// 每天自动跑一次等于每天攒十来个没人删的文件。
 	//
 	// ⚠ 这一族的 `jwttoken` 今天借的是**签到页那张**（AGENTS §1.12 的临时态）：
 	// rabactive 那六口**整族零实拍**，特有取法无从得知。
@@ -708,7 +710,8 @@ var registry = []Capability{
 		Group: core.GroupDaily,
 		Kind:  core.KindAction,
 		Description: "把 App 任务矩阵里能做的做掉：逐条 `task/click` 上报，" +
-			"缺端点族的那些**明说不做**（会写用户的账，且不可撤销）",
+			"缺端点族的那些**明说不做**（会写用户的账，且不可撤销）；" +
+			"往网盘传的那些临时文件跑完自己移进回收站",
 		// ⛔ 不进编排（`RunInBatch: false`）—— 这一条与 `notice` 那条的区别在这一点：
 		// `notice` 的写请求由查询读数**判出来**（不该领时一个请求都不发），
 		// 而这一条只要表里有待做任务就**必然**发写请求，且今天一次真打都没有
@@ -837,8 +840,10 @@ var registry = []Capability{
 	// 是上游直接报的一个次数读数 —— 而 ⚠ **那个读数的语义同样只来自旧代码的读法**，
 	// 本仓零样本（见 `internal/upstream/app_ai_avatar.go` 文件头）。
 	//
-	// 代价也直接：`image/upload` 会在用户网盘里落两个文件，而清理那一族
-	// （`recyclebin/batchTrash`）零实拍、没接（待拍板 P1）。所以：
+	// 代价也直接：`image/upload` 会在用户网盘里落两个文件，而清理那一口
+	// （`recyclebin/batchTrash`）零实拍、**这条链也没接**（2026-09-25 起只有 `app-task`
+	// 在链尾删自己写的那几个，见 `internal/app/task_matrix_run.go` 的 `cleanupCloudFiles`；
+	// 待拍板 P1）。所以：
 	//   - `RunInBatch: false` —— 挂上调度等于每天往网盘攒十来个没人删的文件；
 	//   - 手工点一次是本条唯一的使用方式，也是拿到**这一族第一个响应样本**的路径。
 	{
@@ -846,7 +851,7 @@ var registry = []Capability{
 		Title:              "AI 头像生成与抽奖",
 		Group:              core.GroupActivity,
 		Kind:               core.KindAction,
-		Description:        "生成 5 张 AI 头像并抽完当天的次数（**会往你的网盘写文件**，清理那一族还没接，产物先留在网盘里）",
+		Description:        "生成 5 张 AI 头像并抽完当天的次数（**会往你的网盘写文件**，这一条链不清理，产物留在网盘里）",
 		RunInBatch:         false,
 		Risk:               core.RiskMedium,
 		DefaultAccountMode: core.ModeSequential,

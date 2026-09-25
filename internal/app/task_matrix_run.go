@@ -30,8 +30,12 @@ package app
 //     照旧实现"，**不**保证跑得通；跑不通的原文进 [TaskStepRecord.Err]。
 //   - 造出来的文件 id 一律交回 [TaskMatrixRunResult.CloudFileIDs]，**包括失败路径上
 //     已经占下坑的那一个**（编排层刻意多交，见 `cloud_upload.go` 文件头）。
-//     本仓的清理那一口（`batchTrash`）已落码但**还没接进这一条链**（#37）⇒
-//     今天跑过之后那些文件**留在网盘里**，小结里那一格会说出来。
+//     2026-09-25 起链尾**自己删**：那一份名单一次交给 `batchTrash`
+//     （[TaskMatrixRun.cleanupCloudFiles]，播报见 [TaskCleanupLines]），结局进
+//     [TaskMatrixRunResult.Cleanup] 与小结那一句括号。想留着不看表现（调试 / 要看
+//     文件名长什么样）设 [TaskMatrixRun.KeepUploadedFiles]。
+//     ⚠ 删除那一枪**同样零实拍**（四枪里最后一枪），而且它是**写**：跑一次真上游就
+//     会把这一趟的文件移进回收站（不是彻底删除，去回收站还能捞）。
 //
 // # 前置那一发挂了 ⇒ **整条玩法都不跑**（照旧实现，但这一格在接上传之前无关紧要）
 //
@@ -90,6 +94,18 @@ type TaskMatrixRun struct {
 	// 真发了枪还关复查，结论就退化成"我们发了 N 枪、上游认没认不知道" ——
 	// 那是所有未实测写法里最没信息量的一种，所以 [RunAccount] 在发过枪时**无视**这一格。
 	SkipVerify bool
+
+	// KeepUploadedFiles 设真 ⇒ 这一趟传上网盘的临时文件**不删**，跑完留在用户网盘里。
+	//
+	// **零值 = 删**（跑完就移进回收站），这是刻意的反向命名：旧实现那一份
+	// （`after.ts:131-137` + `utils/file.ts:113` 的 `deleteFiles`）本来就是默认执行，
+	// 而"忘了一个开关"的后果两边不对称 —— 忘记"删"会在**用户的**网盘里留下
+	// `asign-*.png`，忘记"保留"只是测试夹具多打一发请求。所以默认删，
+	// 这一格只给"我要看着这些文件长什么样"与测试用。
+	//
+	// ⚠ 它只影响**这一趟自己造出来**的 id（[TaskMatrixRunResult.CloudFileIDs]）：
+	// 上游说"同名已存在"（`exist`）的那一枚从来不进这份名单，见 `cloud_upload.go` 文件头。
+	KeepUploadedFiles bool
 }
 
 // TaskStepRecord 是对**一条任务**做过什么的记录（进结论、界面与排障日志）。
@@ -193,13 +209,19 @@ type TaskMatrixRunResult struct {
 	Notes []string
 	// CloudFileIDs 是这一趟在用户网盘里**造出来**的文件 id（含失败路径上已占坑的）。
 	//
-	// 它是**清理那一族的输入**，而今天还没有人消费它（#37：接进 `after` 的
-	// `batchTrash` 与 run 产物账本）⇒ 跑完这一条，那些 `asign-*.png` 会留在网盘里。
-	// 所以小结里必带"网盘新增 N 个文件（未清理）"那一句，不让人从计数量级去猜。
+	// 它是**清理那一族的输入**，消费点就在同一次 [RunAccount] 的末尾（那一句
+	// `batchTrash` 走 [CloudUploader.DeleteCloudFiles]，播报见 [TaskCleanupLines]）。
+	// 2026-09-25 之前这一格只是"带出来给人看"，小结因此必带"（未清理）"那一句；
+	// 现在那句话按实际结局改写（[TaskMatrixRunResult.Cleanup]）。
 	//
 	// ⚠ 这里**只放 id**：文件名删除那一口用不上；而 `create` 回的预签名地址里
 	// 就是一次性 token ⇒ 绝不外带（凭据边界，见各 `docs/capture/` 样本的抬头）。
 	CloudFileIDs []string
+	// Cleanup 是清理那一节的结局（三档 + 一句原因）。零值 [TaskCleanupNotRun]
+	// 的含义就是字面"这趟没有要清理的东西"，所以它**不是**"没跑成"。
+	Cleanup TaskCleanupOutcome
+	// CleanupReason 是"没删成 / 刻意不删"的那句原因（成功与不跑时为空）。
+	CleanupReason string
 }
 
 // RunAccount 跑一个账号：读表 → 逐条分派 → 复查。
@@ -274,6 +296,7 @@ func (r TaskMatrixRun) RunAccount(
 
 	// 一枪都没发时跳过复查是**无损**的；发过枪就不给跳（见 SkipVerify 那条注释）。
 	if r.SkipVerify && len(exec.done) == 0 {
+		r.cleanupCloudFiles(ctx, &exec, &result)
 		r.progress(core.LevelInfo, result.SummaryLine())
 		return result, nil
 	}
@@ -289,8 +312,58 @@ func (r TaskMatrixRun) RunAccount(
 	for _, line := range TaskVerifyLines(result.Verified) {
 		r.progress(line.Level, line.Text)
 	}
+	// 清理排在**复查播报之后、小结之前**：旧实现那一节属于 `afterTask`，整条链跑完才做
+	// （`after.ts:131`），而小结必须带上清理的结局 —— 反过来写会让"网盘新增 N 个"
+	// 那一句先落地、再补一句"其实删了"，读的人要在两句之间自己回滚一次。
+	r.cleanupCloudFiles(ctx, &exec, &result)
 	r.progress(core.LevelInfo, result.SummaryLine())
 	return result, nil
+}
+
+// cleanupCloudFiles 把这一趟造出来的网盘文件移进回收站，并播那一节。
+//
+// 三格判据都出自旧实现（`after.ts:131-137` + `utils/file.ts:113-125`）：
+//
+//   - **一次删多个**：旧实现把跨任务累积的整份 `ctx.state.files` 一次交给 `batchTrash`，
+//     所以活体日志里是"一行 id 逗号相连 + 一句成功"。这里同样一发打完，
+//     不做"逐条删"（那是多发请求、多几个失败点，旧实现没有这个形状）。
+//   - **删的只有我们自己记下的 id**：名单只有 [taskExecutor.cloudFileIDs] 一个来源，
+//     而 `exist`（撞上用户已有同名文件）那一档刻意**不**记 id（`cloud_upload.go` 文件头）。
+//     这一格是"会不会删错东西"的唯一防线，所以它不接受任何外部传入的 id。
+//   - **失败不重跑**：旧实现失败只打一句 error。这里也一枪不打第二遍 —— 但要把
+//     结局记进结果并写进小结，因为"没删掉"意味着**用户网盘里留着东西**。
+//
+// ⚠ `batchTrash` 自身零实拍（R27 那一族第四枪）⇒ 本函数只保证"发的是旧实现那一份
+// 请求、判的是它那一句 `success`"。要核它：测试号跑一次上传再删，抓那一枪的请求体与响应。
+func (r TaskMatrixRun) cleanupCloudFiles(
+	ctx context.Context, exec *taskExecutor, result *TaskMatrixRunResult,
+) {
+	if len(result.CloudFileIDs) == 0 {
+		result.Cleanup = TaskCleanupNotRun
+		return
+	}
+	if r.KeepUploadedFiles {
+		result.Cleanup = TaskCleanupKept
+		result.CleanupReason = "这一趟设了 KeepUploadedFiles"
+		for _, line := range TaskCleanupLines(result.CloudFileIDs, result.Cleanup, result.CleanupReason) {
+			r.progress(line.Level, line.Text)
+		}
+		return
+	}
+	uploader, uerr := exec.cloudUploader(ctx)
+	if uerr != nil {
+		result.Cleanup = TaskCleanupFailed
+		result.CleanupReason = uerr.Error()
+	} else if _, derr := uploader.DeleteCloudFiles(ctx, result.CloudFileIDs); derr != nil {
+		result.Cleanup = TaskCleanupFailed
+		result.CleanupReason = derr.Error()
+	} else {
+		result.Cleanup = TaskCleanupDone
+		result.CleanupReason = ""
+	}
+	for _, line := range TaskCleanupLines(result.CloudFileIDs, result.Cleanup, result.CleanupReason) {
+		r.progress(line.Level, line.Text)
+	}
 }
 
 // backupGate 读一次 `infoV3` 拿"本月开没开自动备份"，交回分派要的外部事实。
@@ -764,15 +837,15 @@ func (res TaskMatrixRunResult) SummaryLine() string {
 		parts = append(parts, fmt.Sprintf("%d 条上报失败", c.Failed))
 	}
 	if c.Uploaded > 0 {
-		// ⚠ 刻意写明"**未清理**"：这一趟在用户网盘里写了文件，而今天没有任何地方删它们
-		// （清理那一口已落码但没接进这一条链，#37）。少这一句，跑过的人只能从数量级猜
-		// "是不是留下了一堆 asign-*"。
-		parts = append(parts, fmt.Sprintf("网盘新增 %d 个文件（未清理）", c.Uploaded))
+		// 这一句必须带**结局**：这一族会在用户网盘里写文件，而"写了之后删没删"是
+		// 跑过之后唯一需要人工跟进的事实。2026-09-25 之前这里恒写"（未清理）"
+		// （那时删除那一枪确实没有调用点），现在按 [TaskMatrixRunResult.Cleanup] 分流。
+		parts = append(parts, fmt.Sprintf("网盘新增 %d 个文件%s", c.Uploaded, res.cleanupPhrase()))
 	}
 	if n := len(res.CloudFileIDs) - c.Uploaded; n > 0 {
 		// 传失败但**已经占下坑**的那些（编排层刻意多交 id，见 `cloud_upload.go` 文件头）。
 		// 不与上一句合并：那一格说"传成了几个"，这一格说"还有几个没传完也要删"。
-		parts = append(parts, fmt.Sprintf("另有 %d 个占位未传完，也要清理", n))
+		parts = append(parts, fmt.Sprintf("另有 %d 个占位未传完，也在同一份清理名单里", n))
 	}
 	if c.ToolGap > 0 {
 		parts = append(parts, fmt.Sprintf("%d 条本工具还没接上玩法", c.ToolGap))
@@ -795,6 +868,25 @@ func (res TaskMatrixRunResult) SummaryLine() string {
 		line += "。" + strings.Join(res.Notes, "。")
 	}
 	return line
+}
+
+// cleanupPhrase 是小结里"网盘新增 N 个文件"后面那个括号。
+//
+// 用词刻意：**"移进回收站"而不是"已删除"** —— `batchTrash` 那一句的语义就是
+// 进回收站（旧实现的函数名也叫 `deleteFiles（移至回收站）`），说"已删除"会让人
+// 以为网盘里彻底没了、也就不会去回收站看那一份占位。
+func (res TaskMatrixRunResult) cleanupPhrase() string {
+	switch res.Cleanup {
+	case TaskCleanupDone:
+		return "（已移进回收站）"
+	case TaskCleanupKept:
+		return "（本次保留，未清理）"
+	case TaskCleanupFailed:
+		return fmt.Sprintf("（清理失败：%s）", res.CleanupReason)
+	}
+	// 落到这里只有"一个文件都没写过却带 Uploaded>0"这一种自相矛盾，
+	// 以及清理没跑成的兜底 ⇒ 保守地说"未清理"。
+	return "（未清理）"
 }
 
 // RunReport 把这一趟映射到四态结论。

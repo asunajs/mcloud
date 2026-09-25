@@ -54,7 +54,12 @@ const (
 	// PUT 那一枪没有固定路径（它打的是 `create` 回的那个预签名地址），所以按**主机**编路由。
 	appTaskCreateRoute   = "/hcy/file/create"
 	appTaskCompleteRoute = "/hcy/file/complete"
-	appTaskPutHost       = "synth-oss.example.invalid"
+	// appTaskTrashRoute 是链尾那一发清理（`batchTrash`，2026-09-25 #37 接上）。
+	// 它和上面三枪**同基域**、同一套鉴权画像，所以这一条也顺带钉住
+	// "写了网盘的那一趟真的回去删"——接错的表现代码里看不出来，只在用户网盘里
+	// 多出一堆 `asign-*.png`。
+	appTaskTrashRoute = "/hcy/recyclebin/batchTrash"
+	appTaskPutHost    = "synth-oss.example.invalid"
 
 	// ⚠ 信封与签到那族不同：`code` 是**字符串** `"0000"`，载荷在 `data`。
 	appTaskCreateBody = `{"code":"0000","success":true,"data":{"exist":false,"rapidUpload":false,` +
@@ -121,6 +126,9 @@ func TestAppTaskDispatchHitsItsOwnChain(t *testing.T) {
 		{match: appTaskCreateRoute, bodies: []string{appTaskCreateBody}},
 		{match: appTaskPutHost, bodies: []string{""}},
 		{match: appTaskCompleteRoute, bodies: []string{appTaskCompleteBody}},
+		// 清理那一枪（第四枪，同样零实拍）：给成功档，让这一趟演的是"跑通的一趟"。
+		// "上游拒了"那一档在 app 层钉（`TestTaskMatrixRunReportsCleanupFailure`）。
+		{match: appTaskTrashRoute, bodies: []string{`{"code":"0000","success":true,"result":{}}`}},
 	}...)...)
 	h.replaceRunWorld(t, client)
 	waits := &recordingWaits{}
@@ -149,6 +157,9 @@ func TestAppTaskDispatchHitsItsOwnChain(t *testing.T) {
 		{appTaskCreateRoute, 1},
 		{appTaskPutHost, 1},
 		{appTaskCompleteRoute, 1},
+		// ⭐ 链尾的清理：一趟**恰好一发**（旧实现那一份是把整份名单一次交给 batchTrash，
+		// 不是逐条删）。多发的表现是"删 N 次"，少发就是留文件在用户网盘里。
+		{appTaskTrashRoute, 1},
 	} {
 		if got := client.count(want.endpoint); got != want.times {
 			t.Errorf("%s 应打 %d 次，实得 %d 次（全部 URL：%v）",
@@ -183,13 +194,13 @@ func TestAppTaskDispatchHitsItsOwnChain(t *testing.T) {
 	}
 	// 小结要能在事件流里看见 —— 两句各钉一件事：
 	// ① "缺玩法的那些**明说不做**"（107）= 这一条与旧实现最大的行为差别；
-	// ② "网盘新增 N 个（未清理）" = 接线之后这一趟**真的会写用户网盘**，
-	//    界面上看不见这一句就等于把代价替用户藏起来了（清理那一半挂在 #37）。
+	// ② "网盘新增 N 个（已移进回收站）" = 接线之后这一趟**真的会写用户网盘、也真的回去删**，
+	//    界面上看不见那一句括号里的结局，就等于把代价与补救一起藏起来（#37 接上的那一半）。
 	if !anyMessageContains(events, "本工具还没接上玩法") {
 		t.Errorf("事件流里没有那句玩法缺口的小结：%v", messagesOf(events))
 	}
-	if !anyMessageContains(events, "未清理") {
-		t.Errorf("事件流里没有「这一趟写了网盘、还没清理」那一句：%v", messagesOf(events))
+	if !anyMessageContains(events, "网盘新增 1 个文件（已移进回收站）") {
+		t.Errorf("事件流里没有「这一趟写了网盘、也删了」那一句：%v", messagesOf(events))
 	}
 	// ⭐ **逐条**播报要能一路走到事件流（app 层那几行经 `RunProgress` → `run_events` → SSE）。
 	//
@@ -210,6 +221,11 @@ func TestAppTaskDispatchHitsItsOwnChain(t *testing.T) {
 		"------【每日任务】------",
 		"失败 上传一个文件 106",
 		"需前往云盘完成 创建一篇云笔记 107",
+		// 清理那一节也要能一路走到事件流：它是这一族**唯一**一句"用户网盘里现在还有没有
+		// 我们留下的东西"的成文播报，被滤掉就等于删没删都得去网盘翻。
+		"------【清理临时文件】------",
+		"删除文件 SYNTH-FID-1",
+		"删除文件成功",
 	} {
 		if !anyMessageContains(events, want) {
 			t.Errorf("事件流里没有逐条播报的那一行 %q：%v", want, messagesOf(events))

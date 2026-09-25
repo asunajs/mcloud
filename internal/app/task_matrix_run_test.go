@@ -23,6 +23,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -241,7 +242,36 @@ func mxHappy() []liveTaskRoute {
 		{mxClickEndpoint, []string{mxClickOK}},
 		{mxEntryEndpoint, []string{mxEntryOK}},
 		{mxStatusEndpoint, []string{mxStatusBody(mxBool(true))}},
+		// 清理那一枪的**默认档 = 删成功**。2026-09-25 起链尾真的会发这一枪
+		// （[TaskMatrixRun.KeepUploadedFiles] 没设时），所以"跑通的一趟"必须带上它，
+		// 否则每一跑都平白多一条"清理失败 404"。夹具取**第一条**匹配 ⇒ 想演
+		// "上游拒了"的用例把自定义那一支放在**前面**即可（见 mxTrashRoute）。
+		{mxTrashEndpoint, []string{mxTrashOKBody}},
 	}
+}
+
+// mxTrashOKBody 是 `batchTrash` 的成功响应（判据只有顶层 `success`）。
+const mxTrashOKBody = `{"code":"0000","message":"成功","success":true,"result":{}}`
+
+// mxTrashRoute 给清理那一枪指定响应（成功 / 被拒两档都用它）。
+func mxTrashRoute(body string) liveTaskRoute {
+	return liveTaskRoute{mxTrashEndpoint, []string{body}}
+}
+
+// mxTrashBodies 取出这一趟**清理那一枪**的请求体（最多一枚；没有则空）。
+func mxTrashBodies(script *liveTaskScript) []string {
+	var bodies []string
+	for _, request := range script.snapshot() {
+		if strings.Contains(request.URL, mxTrashEndpoint) {
+			bodies = append(bodies, string(request.Body))
+		}
+	}
+	return bodies
+}
+
+// mxTrashCount 数清理那一枪发了几次（"一次删多个"⇒ 期望恰好 1）。
+func mxTrashCount(script *liveTaskScript) int {
+	return len(mxTrashBodies(script))
 }
 
 // mxUploads 是"往网盘传文件"那三枪的端点与夹具（#36 接进这一条链的那一半）。
@@ -251,6 +281,10 @@ func mxHappy() []liveTaskRoute {
 const (
 	mxCreateEndpoint   = "/hcy/file/create"
 	mxCompleteEndpoint = "/hcy/file/complete"
+	// mxTrashEndpoint 是清理那一枪（第四枪）。它**不**在 [mxUploadRoutes] 里：
+	// 那一族只给"传出去"的三枪，删不删是链尾另一步（见 [mxTrashRoutes]），
+	// 这样"忘了接清理"与"接了但上游拒了"在夹具里是两件事。
+	mxTrashEndpoint = "/hcy/recyclebin/batchTrash"
 	// mxPutHost 是预签名直传地址的**主机**（路由按子串匹配）。真实那一枪的 URL 里
 	// 带一次性签名 ⇒ 夹具用合成域，且任何断言都**不**比整串 URL。
 	mxPutHost = "synth-oss.example.invalid"
@@ -981,8 +1015,8 @@ func TestTaskMatrixRunUploadsOneFileForTask106(t *testing.T) {
 	if got := mxCountPaced(wait); got != 1 {
 		t.Errorf("106 应只等 1 拍（循环体里不等），实得 %d 次：%v", got, wait.durations)
 	}
-	if got := res.SummaryLine(); !strings.Contains(got, "网盘新增 1 个文件（未清理）") {
-		t.Errorf("写了文件却没处删，必须在小结里看得见，实得 %q", got)
+	if got := res.SummaryLine(); !strings.Contains(got, "网盘新增 1 个文件（已移进回收站）") {
+		t.Errorf("写了几个、删没删必须在小结里看得见，实得 %q", got)
 	}
 	if res.Counts.DoneNow != 1 {
 		t.Errorf("复查该认下这一条，实得 %+v", res.Counts)
@@ -1021,7 +1055,7 @@ func TestTaskMatrixRunUploadLoopForTask522(t *testing.T) {
 	if got := mxCountPaced(wait); got != rounds+1 {
 		t.Errorf("应等 %d 拍（每轮一拍 + 末尾一拍），实得 %d：%v", rounds+1, got, wait.durations)
 	}
-	if got := res.SummaryLine(); !strings.Contains(got, "网盘新增 5 个文件（未清理）") {
+	if got := res.SummaryLine(); !strings.Contains(got, "网盘新增 5 个文件（已移进回收站）") {
 		t.Errorf("小结要说清写了几个，实得 %q", got)
 	}
 }
@@ -1258,5 +1292,178 @@ func TestTaskMatrixRunUploadNeedsDeviceID(t *testing.T) {
 	// 另一条不该被带崩。
 	if got := res.Steps[1]; got.TaskID != 777 || got.Err != "" {
 		t.Errorf("777 的盲点不该被 106 带崩，实得 %+v", got)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 清理那一半（#37：链尾那一发 `batchTrash`）
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestTaskMatrixRunTrashesUploadedFiles ⭐ 主路径：传了几个就一次删几个。
+//
+// 钉四件事，各自"改了会怎样"：
+//   - **恰好一发**（不是逐条删）：旧实现 `after.ts:135` 把整份名单一次交给
+//     `deleteFiles`，活体日志里就是一行 id 逗号相连 + 一句"删除文件成功"。
+//     改成逐条删的表现是多 N-1 发请求，界面上看不出差别 ⇒ 只能在这里数。
+//   - **body 里是这一趟那批 id**：少一个就是"网盘里留了东西"。
+//   - **id 那一行排在分节之后、结局之前**（清理失败时它是唯一能照着手动删的信息）。
+//   - 小结里那句括号跟着结局走（"已移进回收站"而不是"已删除"：`batchTrash` 的语义
+//     是进回收站，说"已删除"会让人不去回收站看那一份占位）。
+func TestTaskMatrixRunTrashesUploadedFiles(t *testing.T) {
+	first := mxItems(mxItem(106, "day", "上传一个文件", "WAIT", "", 0),
+		mxItem(522, "month", "当月上传文件满100个", "WAIT", "", 0))
+	second := mxItems(mxItem(106, "day", "上传一个文件", "FINISH", "", 1),
+		mxItem(522, "month", "当月上传文件满100个", "FINISH", "", 1))
+	script := mxScript([]string{"JWT-1"}, first, second,
+		append(mxUploadRoutes(1+taskMatrixUploadRoundsPerRun), mxHappy()...)...)
+	log := &mxLog{}
+	run := mxDefaultRun(t, script)
+	run.Progress = log.handle()
+	res, perr := mxResult(t, run)
+	if perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	rounds := 1 + taskMatrixUploadRoundsPerRun
+	if got := mxTrashCount(script); got != 1 {
+		t.Fatalf("清理应恰好一发（一次删多个），实得 %d 次", got)
+	}
+	if res.Cleanup != TaskCleanupDone {
+		t.Errorf("结局应是「删成了」，实得 %v / %q", res.Cleanup, res.CleanupReason)
+	}
+	if len(res.CloudFileIDs) != rounds {
+		t.Fatalf("该记 %d 个 id，实得 %v", rounds, res.CloudFileIDs)
+	}
+	body := mxTrashBodies(script)[0]
+	for _, id := range res.CloudFileIDs {
+		if !strings.Contains(body, `"`+id+`"`) {
+			t.Errorf("清理名单里少了 %s，实得 %s", id, body)
+		}
+	}
+	if n := strings.Count(body, "SYNTH-FID-"); n != rounds {
+		t.Errorf("名单应是 %d 枚 id 一次交出去，实得 %d 枚：%s", rounds, n, body)
+	}
+	// 播报那三行的**顺序**（计数对、顺序错也一样是缺陷：失败时人要靠 id 那一行手动删）。
+	section := log.indexOf("------【清理临时文件】------")
+	ids := log.indexOf("删除文件 SYNTH-FID-")
+	done := log.indexOf("删除文件成功")
+	if section < 0 || ids < 0 || done < 0 {
+		t.Fatalf("清理那一节三行都该在，实得：\n%s", log.joined())
+	}
+	if !(section < ids && ids < done) {
+		t.Errorf("顺序应为 分节<id行<结局，实得 %d/%d/%d：\n%s",
+			section, ids, done, log.joined())
+	}
+	if summary := log.indexOf("任务表 "); summary < 0 || summary < done {
+		t.Errorf("小结必须排在清理之后（它要带清理的结局），实得：\n%s", log.joined())
+	}
+	// ⚠ 位置的另一半：清理必须排在**复查那些行之后**（旧实现那一节属于 `afterTask`，
+	// 整条链跑完才做）。挪到前面的表现是"还没复查就先删了"，而复查读的就是网盘那些文件
+	// 对应的任务状态 —— 顺序错会让人以为删掉的东西是"复查之后又多出来的"。
+	if verify := log.indexOf("------【每日任务】------"); verify < 0 || section < verify {
+		t.Errorf("清理那节应排在复查分节之后，实得 verify=%d section=%d：\n%s",
+			verify, section, log.joined())
+	}
+	if !log.hasAt(core.LevelInfo, "删除文件成功") {
+		t.Errorf("成功那一行应是 info，实得：\n%s", log.joined())
+	}
+	if got := res.SummaryLine(); !strings.Contains(got, fmt.Sprintf("网盘新增 %d 个文件（已移进回收站）", rounds)) {
+		t.Errorf("小结要按结局改写那一句，实得 %q", got)
+	}
+}
+
+// TestTaskMatrixRunKeepsUploadedFilesWhenAsked 钉"刻意不删"那一档。
+//
+// 它必须**一枪不发**（不是"发了但当成没发"），并且那一行落 warn —— 这一档的读法是
+// "这些文件还在你的网盘里，是设置让它留的"，与"想删没删掉"（下一条，error）分开。
+func TestTaskMatrixRunKeepsUploadedFilesWhenAsked(t *testing.T) {
+	first := mxItems(mxItem(106, "day", "上传一个文件", "WAIT", "", 0))
+	script := mxScript([]string{"JWT-1"}, first, first,
+		append(mxUploadRoutes(1), mxHappy()...)...)
+	log := &mxLog{}
+	run := mxDefaultRun(t, script)
+	run.Progress = log.handle()
+	run.KeepUploadedFiles = true
+	res, perr := mxResult(t, run)
+	if perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	if got := mxTrashCount(script); got != 0 {
+		t.Errorf("设了保留就该一枪不发，实得 %d 次", got)
+	}
+	if res.Cleanup != TaskCleanupKept {
+		t.Errorf("结局应是「刻意留着」，实得 %v", res.Cleanup)
+	}
+	if !log.hasAt(core.LevelWarn, "未清理 1 个") {
+		t.Errorf("要播一行 warn 说明没删，实得：\n%s", log.joined())
+	}
+	if got := res.SummaryLine(); !strings.Contains(got, "（本次保留，未清理）") {
+		t.Errorf("小结要写清是「保留」不是「删了」，实得 %q", got)
+	}
+}
+
+// TestTaskMatrixRunReportsCleanupFailure 钉"发了那一枪而没成"那一档。
+//
+// 这一档最要紧的不是级别，而是**id 那一行仍在**：清理没成 ⇒ 那些文件还挂在用户网盘里，
+// 人必须能照着日志手动删。旧实现失败时只打一句 error（连 id 都看不到），这里不照抄。
+func TestTaskMatrixRunReportsCleanupFailure(t *testing.T) {
+	first := mxItems(mxItem(106, "day", "上传一个文件", "WAIT", "", 0))
+	routes := append(mxUploadRoutes(1),
+		mxTrashRoute(`{"code":"0000","message":"合成拒绝","success":false,"result":{}}`))
+	// ⚠ mxTrashRoute 那一条要排在 mxHappy **之前**：夹具取第一条匹配的路由。
+	routes = append(routes, mxHappy()...)
+	script := mxScript([]string{"JWT-1"}, first, first, routes...)
+	log := &mxLog{}
+	run := mxDefaultRun(t, script)
+	run.Progress = log.handle()
+	res, perr := mxResult(t, run)
+	if perr != nil {
+		t.Fatalf("清理没成不该让整趟报错: %v", perr)
+	}
+	if got := mxTrashCount(script); got != 1 {
+		t.Fatalf("仍该发那一发，实得 %d 次", got)
+	}
+	if res.Cleanup != TaskCleanupFailed {
+		t.Errorf("结局应是「没删掉」，实得 %v / %q", res.Cleanup, res.CleanupReason)
+	}
+	if len(res.CloudFileIDs) != 1 {
+		t.Errorf("没删成更要留着 id，实得 %v", res.CloudFileIDs)
+	}
+	if !log.hasAt(core.LevelError, "删除文件失败") {
+		t.Errorf("失败那一行应是 error，实得：\n%s", log.joined())
+	}
+	if !log.has("删除文件 SYNTH-FID-1") {
+		t.Errorf("失败时 id 那一行必须在（那是手动删的唯一线索），实得：\n%s", log.joined())
+	}
+	if got := res.SummaryLine(); !strings.Contains(got, "（清理失败：") {
+		t.Errorf("小结要带失败原因，实得 %q", got)
+	}
+}
+
+// TestTaskMatrixRunWithoutUploadsHasNoCleanupSection 反向：没写过网盘就不许播"清理"那一节。
+//
+// 旧实现那一节属于 `afterTask`（无论有没有文件都会打一句"无临时文件需要清理"），
+// 这里刻意不照抄：这一节出现在 app-task 链内，一个文件都没写过还播一节"清理"，
+// 读日志的人会以为这一趟写过东西然后删了。
+func TestTaskMatrixRunWithoutUploadsHasNoCleanupSection(t *testing.T) {
+	first := mxItems(mxItem(777, "day", "看个广告", "WAIT", "", 0))
+	script := mxScript([]string{"JWT-1"}, first, first, mxHappy()...)
+	log := &mxLog{}
+	run := mxDefaultRun(t, script)
+	run.Progress = log.handle()
+	res, perr := mxResult(t, run)
+	if perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	if got := mxTrashCount(script); got != 0 {
+		t.Errorf("没有文件就不该发清理那一枪，实得 %d 次", got)
+	}
+	if log.has("清理临时文件") {
+		t.Errorf("没写过网盘不该播那一节，实得：\n%s", log.joined())
+	}
+	if res.Cleanup != TaskCleanupNotRun {
+		t.Errorf("结局应是「没有要清理的东西」，实得 %v", res.Cleanup)
+	}
+	if got := res.SummaryLine(); strings.Contains(got, "网盘新增") {
+		t.Errorf("没写网盘就不该有那一句，实得 %q", got)
 	}
 }

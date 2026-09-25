@@ -657,7 +657,7 @@ const UNTAGGED_ALLOWED = {
   'internal/upstream/app_cloud_upload.go:CloudFileCreated':
     '`file/create` 的解析结果。⚠⚠ `UploadURL` 是**预签名直传地址**（URL 里就是一次性 token），与 `auth` 整串同一条纪律"只进不出" —— 这个结构体一旦被 marshal，离泄漏只差一次"顺手把 create 的响应写进日志/响应体"，而 `core.SecretValue` 那层保护**不在这条路上**（它是裸 `*string`，因为上游给的本来就是明文串，包一层反而遮住"这里曾是 URL"）。另外三格 `*string` 与两个布尔的区别也必须留在内存：`Exist` / `RapidUpload` 是编排层**三态结局**的唯一判据（见 `app/cloud_upload.go:CloudUploadOutcome`），而本口**文件型**零实拍（唯一样本是建目录那一型）⇒ 字段名与"会不会回这一格"都还没被上游确认过',
   'internal/app/cloud_upload.go:CloudUploadReceipt':
-    '一次上传的**内存收据**（结局 + fileId + 实际发出去的名字）。`Outcome` 是 int 枚举且**零值刻意是"未上传"**：marshal 出去前端拿到 `0` 既读不成"未上传"也读不成"已上传"，而这一格的正误决定**要不要往清理那一族交 id**（交错就是删用户自己的文件）。调用点今天有了（app 层 106 / 522 与 beiyong1 那三条玩法），但它仍**不出接口**：对外只有小结里"网盘新增 N 个文件（未清理）"那一句 ⇒ 补 tag 等于把一份还没人兑现的清理协议写成形状',
+    '一次上传的**内存收据**（结局 + fileId + 实际发出去的名字）。`Outcome` 是 int 枚举且**零值刻意是"未上传"**：marshal 出去前端拿到 `0` 既读不成"未上传"也读不成"已上传"，而这一格的正误决定**要不要往清理那一族交 id**（交错就是删用户自己的文件）。调用点今天有了（app 层 106 / 522 与 beiyong1 那三条玩法），但它仍**不出接口**：对外只有小结里"网盘新增 N 个文件（已移进回收站 / 本次保留 / 清理失败）"那一句括号 ⇒ 补 tag 等于把一份零实拍的清理协议写成形状',
   'internal/app/cloud_upload.go:CloudUploadOptions':
     '一次上传的**可调参数**，零值 = 旧实现 `uploadRandomFile` 那一档。默认值由 `channelOrDefault` / `extensionOrDefault` / 上游层那两处**依次**补齐，补 tag 会造出第二个"默认值真相"；且 `Op` 只有 android 档读（web/PC 档忽略它），这个"档位决定哪一格生效"的关系不是字段能表达的',
   'internal/app/cloud_upload.go:CloudUploader':

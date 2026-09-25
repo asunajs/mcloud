@@ -16,11 +16,12 @@ package app
 //
 // ⚠ 这个做法的真实风险写在这里而不是别处：**同名即错配**。用户网盘里如果本来就
 // 有一张同名的图，这里会把它的 `fileId` 当成活动产物交出去 —— 而清理那一族是**真删**。
-// 本仓今天**没有接上清理**：`hcy/recyclebin/batchTrash` 的请求构造与发送口已于
-// 2026-09-24 落码（`internal/upstream/app_cloud_upload.go` 的 `CloudBatchTrashRequest`
+// 本仓今天**没有为这一条链接上清理**：`hcy/recyclebin/batchTrash` 的请求构造与发送口
+// 已于 2026-09-24 落码（`internal/upstream/app_cloud_upload.go` 的 `CloudBatchTrashRequest`
 // / `AppCloudBatchTrash`，编排侧 `cloud_upload.go` 的 `DeleteCloudFiles`），
-// 但它**零实拍**（R27）且**没有调用点**（要不要真跑见 `docs/pending-decisions.md` P1）。
-// 所以这里只负责"找回并交回 id"，**不删任何东西**。
+// 2026-09-25 起它在 `app-task` 那条链上**有调用点**了（链尾一次删掉自己写的文件），
+// 但**这一条链仍不删** —— 它交回的 id 今天只有"带出来给人看"这一个用途，
+// 而那个删除口**零实拍**（R27）。所以这里只负责"找回并交回 id"，**不删任何东西**。
 // 接清理之前必须先解决这一格（怎么解：`file/create` 的响应里就有 `fileId`，
 // 拿到**文件型**那一发的实拍之后应当改成"直接用上传响应给的 id"，把这三枪整个绕开 ——
 // 该口的实拍也在 P1 那一次真跑的范围里）。

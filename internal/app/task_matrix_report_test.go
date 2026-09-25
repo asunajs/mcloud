@@ -473,3 +473,70 @@ func joinReportLines(lines []TaskReportLine) string {
 	}
 	return strings.Join(texts, "\n")
 }
+
+// TestTaskCleanupLines 钉清理那一节的纯函数形状（不必装会话、不必数枪）。
+//
+// 四类输入各钉一件事：空名单**不播**（没写过网盘就别谎称清理过）、三档结局的
+// 文本与级别、以及"id 那一行在任何结局之前"（失败时它是手动删的唯一线索）。
+func TestTaskCleanupLines(t *testing.T) {
+	ids := []string{"SYNTH-FID-1", "SYNTH-FID-2"}
+	if lines := TaskCleanupLines(nil, TaskCleanupDone, ""); len(lines) != 0 {
+		t.Errorf("没有要清理的东西不该播那一节，实得 %+v", lines)
+	}
+	for _, c := range []struct {
+		name    string
+		outcome TaskCleanupOutcome
+		reason  string
+		want    []string
+		levels  []core.LogLevel
+	}{
+		{
+			name:    "删成了",
+			outcome: TaskCleanupDone,
+			want: []string{
+				"------【清理临时文件】------",
+				"删除文件 SYNTH-FID-1,SYNTH-FID-2",
+				"删除文件成功",
+			},
+			levels: []core.LogLevel{core.LevelInfo, core.LevelInfo, core.LevelInfo},
+		},
+		{
+			name:    "刻意留着",
+			outcome: TaskCleanupKept,
+			reason:  "这一趟设了 KeepUploadedFiles",
+			want: []string{
+				"------【清理临时文件】------",
+				"删除文件 SYNTH-FID-1,SYNTH-FID-2",
+				"未清理 2 个：这一趟设了 KeepUploadedFiles",
+			},
+			// ⚠ 最后一行是 warn 不是 info：这一档的含义是"东西还在你的网盘里"。
+			levels: []core.LogLevel{core.LevelInfo, core.LevelInfo, core.LevelWarn},
+		},
+		{
+			name:    "想删没删掉",
+			outcome: TaskCleanupFailed,
+			reason:  "上游回了 success:false",
+			want: []string{
+				"------【清理临时文件】------",
+				"删除文件 SYNTH-FID-1,SYNTH-FID-2",
+				"删除文件失败：上游回了 success:false",
+			},
+			levels: []core.LogLevel{core.LevelInfo, core.LevelInfo, core.LevelError},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			lines := TaskCleanupLines(ids, c.outcome, c.reason)
+			if len(lines) != len(c.want) {
+				t.Fatalf("行数应 %d，实得 %d：%+v", len(c.want), len(lines), lines)
+			}
+			for i, line := range lines {
+				if line.Text != c.want[i] {
+					t.Errorf("第 %d 行应是 %q，实得 %q", i+1, c.want[i], line.Text)
+				}
+				if line.Level != c.levels[i] {
+					t.Errorf("第 %d 行级别应是 %v，实得 %v", i+1, c.levels[i], line.Level)
+				}
+			}
+		})
+	}
+}

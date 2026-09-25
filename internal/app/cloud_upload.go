@@ -5,16 +5,19 @@ package app
 // 对应旧实现 `packages/core/src/utils/file.ts` 的 `uploadFile` / `uploadRandomFile` /
 // `deleteFiles`（三个函数的全部逻辑都在这里，请求形状在 `internal/upstream`）。
 //
-// # 调用点：两条玩法在用（2026-09-24 #36 接上）
+// # 调用点：上传与**清理**都在用（2026-09-24 #36 接上传，2026-09-25 #37 接清理）
 //
-// 用它的是 `task_matrix_run.go` 里的 `runUploads`：106（传一个）、522（循环凑满）
-// 与 beiyong1 那一支"名字写着上传"的条目。仍**没有**调用点的是 113（缺的是旧实现
-// 那一发前置 `authTokenRefresh.do`，本仓刻意不实现那个服务 ⇒ 待拍板 Q32）、
-// 1014（缺邮箱侧那一口 `convertPdfFromYunFile`）与**清理**那一半
-// （`DeleteCloudFiles` 今天没人调，见 #37 与 `docs/pending-decisions.md` P1）。
+// 用它的是 `task_matrix_run.go`：`runUploads` 打前三枪（106 传一个、522 循环凑满、
+// beiyong1 那一支"名字写着上传"），链尾 `cleanupCloudFiles` 打第四枪（这一趟写过的
+// id 一次交给 `batchTrash`，除非设了 [TaskMatrixRun.KeepUploadedFiles]）。
+// 仍**没有**调用点的是 113（缺的是旧实现那一发前置 `authTokenRefresh.do`，本仓刻意
+// 不实现那个服务 ⇒ 待拍板 Q32）与 1014（缺邮箱侧那一口 `convertPdfFromYunFile`）；
+// 另外两条**会写网盘**的链（`ai-avatar` 与 `play-ai`）今天也仍不删自己造的文件，
+// 它们的清理挂在同一条 #37 的延长线上（见 `ai_avatar_files.go` / `play_ai_run.go` 文件头）。
 //
-// ⚠ "有调用点"≠"跑通过"：这一层今天仍然是**能编译、被测试钉住形状、一次都没真打
-// 过上游**的代码（P1 / R27）—— 这是**登记过**的状态，不是"做完了一半"。
+// ⚠ "有调用点"≠"跑通过"：这一层今天仍然是**能编译、被测试钉住形状、一次都没真打过
+// 上游**的代码（P1 / R27）—— 这是**登记过**的状态，不是"做完了一半"。
+// 四枪里文件型 `create`、`PUT`、`complete`、`batchTrash` **全部零实拍**。
 //
 // # ⚠ 四枪里三枪零实拍：这一层只保证"顺序与判据照旧实现"
 //
@@ -36,9 +39,11 @@ package app
 // （见 [CloudUploadReceipt]），错误照回。这不算改业务语义：它只多交一个信息，
 // 让调用方能选择清理，而不删就什么都不少做。
 //
-// ⚠ 调用点今天**只兑现了"收 id"这一半**：`task_matrix_run.go` 把这些 id 原样收进
-// [TaskMatrixRunResult.CloudFileIDs]，并在小结里明说"未清理"，但**不**回头删 ——
-// 删除那一枪（`DeleteCloudFiles`）仍没有调用点，挂在 #37 与 `after` 那一族上。
+// ⚠ 多交回来的 id **有人消费了**（2026-09-25 #37）：`task_matrix_run.go` 把它们收进
+// [TaskMatrixRunResult.CloudFileIDs]，链尾一次交给 `batchTrash`，并把结局播进事件流
+// （[TaskCleanupLines]）—— 所以"占位未传完"的那些也不再是孤儿。
+// 反过来，`exist:true`（撞上用户已有同名文件）那一枚**从不**进这份名单：
+// 拿它去删就是删用户自己的东西，这是本层唯一一道"错删"防线。
 
 import (
 	"context"

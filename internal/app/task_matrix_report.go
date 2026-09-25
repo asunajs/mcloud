@@ -20,8 +20,11 @@ package app
 //	失败   失败 <名称> <id>
 //	仍待办  需前往{云盘|邮箱}完成 <名称> <id>
 //	上传   上传文件成功
+//	清理   ------【清理临时文件】------ / 删除文件 <id,…> / 删除文件成功（旧 CLI 活体输出）
 //
 // 组名表与组序规则也照它，理由见下面两处各自的注释。
+// "清理"那一节另有两处小差异，写在 [TaskCleanupLines] 旁边（不进下面这个"四处"的编号，
+// 那四处都是**复查报告**那一块的取舍）。
 //
 // # 与旧实现**刻意不同**的四处
 //
@@ -45,6 +48,7 @@ package app
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/catlair/mcloud/internal/core"
 	"github.com/catlair/mcloud/internal/upstream"
@@ -258,4 +262,64 @@ func taskPlanReason(plan TaskStepPlan) string {
 		return plan.Reason
 	}
 	return plan.ToolGap
+}
+
+// TaskCleanupOutcome 是"这一趟造出来的网盘文件删了没有"那一档。
+//
+// 三档而不是 bool，因为"没删"有**两种完全不同的原因**：这一趟设了保留（故意的），
+// 和发了删除那一枪而没成（要人去补删）。把它们合成一档的表现是用户在网盘里
+// 看到一堆 `asign-*.png`，而日志里那句"清理失败"分不清是哪种。
+type TaskCleanupOutcome int
+
+const (
+	// TaskCleanupNotRun 是"这一趟根本没有需要清理的东西"。
+	TaskCleanupNotRun TaskCleanupOutcome = iota
+	// TaskCleanupDone 是删掉了（上游认了）。
+	TaskCleanupDone
+	// TaskCleanupKept 是刻意留着：[TaskMatrixRun.KeepUploadedFiles] 设了真。
+	TaskCleanupKept
+	// TaskCleanupFailed 是发了那一枪而没成 —— ⚠ 文件仍在用户网盘里。
+	TaskCleanupFailed
+)
+
+// TaskCleanupLines 播"清理临时文件"那一节。
+//
+// 文案基准是旧 CLI 的**活体输出**（不是注释）：
+//
+//	------【清理临时文件】------
+//	删除文件 <id>,<id>,…            ← 旧实现 `after.ts:134`，一次多个、逗号相连
+//	删除文件成功                     ← `utils/file.ts:120`
+//	删除文件失败 <原因>              ← 同函数那两行 error
+//
+// 与旧实现不同的两处，都是"这一条链自己判"带来的：
+//
+//   - **没有东西要清时整节不播**。旧实现那一节属于 `afterTask`（无论有没有文件都要打
+//     "无临时文件需要清理"），而这里是 app-task 链内的一步：一个文件都没写过还播一节
+//     "清理"会让人以为这一趟写过东西。
+//   - id 那一行落 **info**（旧实现是 debug）。本仓没有 debug 档，而它是这一节里
+//     唯一"清理失败之后还能照着手动删"的信息，不该被默认档位滤掉。
+func TaskCleanupLines(fileIDs []string, outcome TaskCleanupOutcome, reason string) []TaskReportLine {
+	if len(fileIDs) == 0 {
+		return nil
+	}
+	lines := []TaskReportLine{
+		{Level: core.LevelInfo, Text: "------【清理临时文件】------"},
+		{Level: core.LevelInfo, Text: "删除文件 " + strings.Join(fileIDs, ",")},
+	}
+	switch outcome {
+	case TaskCleanupDone:
+		lines = append(lines, TaskReportLine{Level: core.LevelInfo, Text: "删除文件成功"})
+	case TaskCleanupKept:
+		// warn 而不是 info：这一档的读法是"这些文件现在还在你的网盘里，是你（或这个
+		// 客户端的设置）让它留的"。`reason` 说清是谁设的。
+		lines = append(lines, TaskReportLine{Level: core.LevelWarn,
+			Text: fmt.Sprintf("未清理 %d 个：%s", len(fileIDs), reason)})
+	case TaskCleanupFailed:
+		lines = append(lines, TaskReportLine{Level: core.LevelError,
+			Text: "删除文件失败：" + reason})
+	case TaskCleanupNotRun:
+		// 有 id 却判成"不用清理"是调用方写错了。这里不静默：宁可少一行结局，
+		// 也不编造一句"成功"。
+	}
+	return lines
 }
