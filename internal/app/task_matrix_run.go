@@ -563,9 +563,10 @@ func (e *taskExecutor) apply(
 
 // runRunner 跑一条专属玩法，交回"**有没有真的发出过请求**"（口径同 [apply]）。
 //
-// 今天的四条按 spec 走，不为每条各写一份：前两条形状一样（`前置打卡(受门约束) →
+// 今天的五条按 spec 走，不为每条各写一份：前两条形状一样（`前置打卡(受门约束) →
 // mrp 入口上报 → 自己的那一发打卡`），差别只在最后一发的 key；
-// 后两条（106 / 522）没有 `OpensEntry`、没有 `FinalKey`，玩法本体就是上传那一半。
+// 中间两条（106 / 522）没有 `OpensEntry`、没有 `FinalKey`，玩法本体就是上传那一半；
+// 最后一条（434）既不打卡也不上传，本体是"分享 + 立刻取消分享"那一族（[runShare]）。
 //
 // ⚠ "取不到 deviceId"那一档**不算发过**：入口上报压根没出网（旧实现在那里会带一发
 // 空 `deviceId`，我们不跟着做，成文见 `app_task_click.go` 文件头）。
@@ -616,6 +617,13 @@ func (e *taskExecutor) runRunner(
 		sent, uploadProblems := e.runUploads(ctx, item, spec.Upload, record)
 		fired = fired || sent
 		problems = append(problems, uploadProblems...)
+	}
+	if spec.Shares {
+		// 外链那一族排在上传之后：它消费的是**这一趟前面那些任务**传上去的文件
+		// （口径与旧实现 `ctx.state.files` 完全一致，见 [runShare]）。
+		sent, shareProblems := e.runShare(ctx, item)
+		fired = fired || sent
+		problems = append(problems, shareProblems...)
 	}
 	record.Err = joinProblems(problems)
 	return fired
@@ -765,6 +773,116 @@ func (e *taskExecutor) runUploads(
 		record.UploadNote = "形状写着要传，但上限是 0 ⇒ 一个都不传（内部不一致）"
 	}
 	return sent, problems
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 分享那一半（434：建一条外链、再立刻取消它）
+// ─────────────────────────────────────────────────────────────────────────────
+
+// runShare 跑玩法 434 的本体，交回**有没有真的发出过请求**与逐格的原因。
+//
+// 形状逐字照旧实现 `runners.ts:68-88`：取 `ctx.state.files` 的**第一个** →
+// `getOutLink(account=手机号, [fileId], "")` → 上游给了 `linkID` 就 `delOutLink([linkID])`。
+// 这里的 `ctx.state.files` 就是 [taskExecutor.cloudFileIDs]（同一趟里那些上传任务写的账）。
+//
+// # 三处与旧实现**刻意不同**，全都在"留一条公开外链"这一侧
+//
+// 这一族的后果不对称：`getOutLink` 是**写**，它建出来的那条链接在删掉之前
+// 任何拿到 URL 的人都能打开。旧实现在三个岔路口都是**静默**的，这里三处都改成说话：
+//
+//   - 没有可分享的文件：旧实现 `logger.info` 一句就 return，那条任务**照样**被记进
+//     `doingList` ⇒ 报告念成"本次成功"。这里交回一条失败原因（[TaskStepRecord.Err]），
+//     因为那一发前置打卡很可能已经把这条任务报给上游了 —— "打了卡却没分享"是
+//     最该让人看见的一种不一致（门的例外：`currstep == 22` 也打，见 [taskClickGate]）。
+//   - 上游没给 `linkID`：旧实现那句 `if (linkId)` ⇒ 静默不删 ⇒ 网盘里留一条公开链接。
+//     这里播错误并记失败，文案里直接写"需手动去 App 里取消分享"。
+//   - `delOutLink` 的响应：旧实现把 `tryRequest` 的返回值整个丢弃 ⇒ 删失败也是静默。
+//     这里判它的码（见 `internal/upstream/app_cloud_outlink.go`），失败就报。
+//
+// # 两枪都不重试、也不补发
+//
+// 建外链发一次就够（重放的代价是多一条公开链接）；删失败时**不**在同一趟里补第二发 ——
+// 与清理那一族（[TaskMatrixRun.cleanupCloudFiles]）同一条纪律：一次失败的删除
+// 该由人决定要不要再试，而不是脚本自己循环写用户的账号。
+//
+// # 2026-09-25 真跑两趟：两趟都落在**上面第一条那一档**，两口仍零真打
+//
+// 跑的是 `app-task`（两个测试号各一趟，号码不进成文）。434 当天**在**两个号的待做表里、
+// 这个 runner **确实**被调用，而两趟的事件流都是同一句
+// `分享文件跳过 分享文件领好礼… 434：没有可分享的文件…` —— 随后 522 / 614 各真的往网盘
+// 传上去过文件（分别 5 个与 1 个，链尾也都成功移进回收站）。
+//
+// 卡住的是**表序**，不是接线：[normalizeTaskMatrix] 按 id 稳定升序排（对齐旧
+// `index.ts:16` 的 `sort((a,b)=>a.id-b.id)`），`Pending()` 保持那个次序，于是
+// 434 轮到它时排在它前面的那些条**这一趟里没有一条传过东西**（当天能上传的那几条 id
+// 都比它大：522 / 614；比它小的 106 在两号当天都是 `FINISH` ⇒ 根本不进待做表）。
+// 旧实现同形状，它今天能走到 `getOutLink` 靠的是
+// `ctx.state.files` 由更早的别的来源写进来（`utils/file.ts:59/90`、
+// `play-ai-special/task.ts:163`、`ai-avatar/task.ts:157`），**不是**靠任务表里
+// 恰好有上传排在前面 ⇒ 上面那条"最该让人看见的不一致"就是**旧实现自带的脆弱点**，
+// 本仓只是把它如实跑了两次。
+//
+// ⚠ 同一天接上 434 **之前**那两趟里，这一条念的是"本仓未实现"（tool gap），
+// 而 522 的上传同样排在它**后面** ⇒ 表序这一格有四个样本、两种二进制，
+// 不是今天偶然。
+//
+// 后果：`getOutLink` / `delOutLink` 两口今天**依旧零真打**（R30 不闭合）。要不要给这一条
+// 造一次可分享的文件（改表序 / 让它自己先传一个 / 从网盘既有文件里取一个）是**设计决定**，
+// 本仓未动 ⇒ 立成问句见 [`docs/pending-decisions.md`] **Q41**。
+func (e *taskExecutor) runShare(
+	ctx context.Context, item upstream.TaskV2Item,
+) (bool, []string) {
+	name, id := taskNameOf(item), derefTaskID(item)
+	if len(e.cloudFileIDs) == 0 {
+		// 旧实现那句 `没有可分享的文件，跳过分享任务`（`runners.ts:71`）+ 上面第一条差异。
+		problem := "没有可分享的文件：这一趟前面没有任务往网盘传过东西 ⇒ 分享那一半没做"
+		e.run.progress(core.LevelWarn, fmt.Sprintf("分享文件跳过 %s %d：%s", name, id, problem))
+		return false, []string{problem}
+	}
+	deviceID, derr := e.accountDeviceID(ctx)
+	if derr != nil {
+		return false, []string{"分享没做成：" + derr.Error()}
+	}
+	account := e.opening.Credential.Phone()
+	if account == "" {
+		// 这一格是 `commonAccountInfo.account`（旧实现传的就是登录手机号）。
+		// 错误文本里**不**echo 它：它是完整号码，而这一族的其它三处同样不带。
+		return false, []string{"分享没做成：这个号没有可用的手机号（commonAccountInfo 定位不到账号）⇒ 一枪不发"}
+	}
+	auth := e.opening.Credential.Authorization()
+	shared, perr := e.src.up.AppCloudGetOutLink(ctx, auth, deviceID, upstream.CloudOutLinkInput{
+		Account: account,
+		// 只分享**第一个**（旧实现 `files[0]`）。多文件会回几条 linkID 未测试，
+		// 所以这里不"顺手把这一趟传的都分享掉"。
+		FileIDs: []string{e.cloudFileIDs[0]},
+	})
+	if perr != nil {
+		problem := "分享失败：" + perr.Error()
+		e.run.progress(core.LevelError,
+			fmt.Sprintf("分享文件失败 %s %d：%s", name, id, perr.Error()))
+		return true, []string{problem}
+	}
+	// 请求**已经发出去了**：从这里往下每一档都算"这一条今天动过"（口径见 [apply]）。
+	if shared.LinkID == nil || *shared.LinkID == "" {
+		problem := "已建外链但上游没给 linkID ⇒ 没删：这条链接可能仍在用户的网盘里，" +
+			"需手动去 App 里取消分享（旧实现在这里静默跳过）"
+		e.run.progress(core.LevelError,
+			fmt.Sprintf("分享文件取消失败 %s %d：%s", name, id, problem))
+		return true, []string{problem}
+	}
+	e.run.progress(core.LevelInfo, fmt.Sprintf("分享文件成功 %s %d", name, id))
+	if derr := e.src.up.AppCloudDelOutLink(
+		ctx, auth, deviceID, account, []string{*shared.LinkID},
+	); derr != nil {
+		problem := "取消分享失败：" + derr.Error() + " ⇒ 那条外链仍在网盘里，需手动去 App 里取消"
+		e.run.progress(core.LevelError,
+			fmt.Sprintf("分享文件取消失败 %s %d：%s", name, id, derr.Error()))
+		return true, []string{problem}
+	}
+	// 旧实现这一句**没有**（它删完不吭声）。这里补一行 info：这一族是"建了又删"，
+	// 少了这一行，日志里只有"分享文件成功"，读的人会以为网盘里留着一条分享。
+	e.run.progress(core.LevelInfo, fmt.Sprintf("已取消分享 %s %d", name, id))
+	return true, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

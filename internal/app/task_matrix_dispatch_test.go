@@ -363,8 +363,9 @@ func TestPlanTaskStepRejectsItemsWithoutID(t *testing.T) {
 
 // TestTaskClickGateIs434ExceptionOnlyAt22：那个没有任何解释的字面量例外。
 //
-// 直接测门，不走 [PlanTaskStep]：434 现在落在缺口表里 ⇒ 分派那一层根本到不了门
-// （下面第二条用例就把这件事钉住，防止"例外其实早就失效了"没人发现）。
+// 门与分派**两处**一起测：434 已于 2026-09-25 接上外链那一族（进 [taskMatrixRunners]），
+// 于是那道门今天**真的**有了唯一一个能走到的例外入口 —— 22 那一格放行、21 那一格挡下，
+// 两边都必须落到"跑玩法"，因为旧实现的门只挡**打卡**、不挡 runner。
 func TestTaskClickGateIs434ExceptionOnlyAt22(t *testing.T) {
 	if _, ok := taskClickGate(434, dispatchItem(434, "day", "分享", "WAIT", 22), "task"); !ok {
 		t.Error("434 在 currstep=22 该放行（旧实现 specialMap 的字面量）")
@@ -375,8 +376,19 @@ func TestTaskClickGateIs434ExceptionOnlyAt22(t *testing.T) {
 	if _, ok := taskClickGate(435, dispatchItem(435, "day", "分享", "WAIT", 22), "task"); ok {
 		t.Error("22 这个例外只属于 434，别的 id 同一步数仍该挡")
 	}
-	if got := PlanTaskStep(dispatchItem(434, "day", "分享文件", "WAIT", 22), taskStepInput{}); got.Kind != StepBlockedToolGap {
-		t.Errorf("434 今天仍该报玩法缺口（分享那一族未接），实得 %v ⇒ 门与缺口表的关系变了要回看这条", got.Kind)
+	at22 := PlanTaskStep(dispatchItem(434, "day", "分享文件有好礼（1/7）", "WAIT", 22), taskStepInput{})
+	if at22.Kind != StepRunner || at22.ClickKey != taskClickKeyDefault || !at22.Paced {
+		t.Errorf("434 在 22 这一格该走玩法**并**补前置那一发，实得 %+v", at22)
+	}
+	if at22.Runner != "分享一个文件并立刻取消" {
+		t.Errorf("runner 名要能答「这一条是谁做的」，实得 %q", at22.Runner)
+	}
+	at21 := PlanTaskStep(dispatchItem(434, "day", "分享文件有好礼（1/7）", "WAIT", 21), taskStepInput{})
+	if at21.Kind != StepRunner || at21.ClickKey != "" {
+		t.Errorf("门挡住时该「只跑玩法、不打卡」，实得 %+v", at21)
+	}
+	if !strings.Contains(at21.Reason, "currstep") {
+		t.Errorf("那一格要说清为什么不打卡，实得 %q", at21.Reason)
 	}
 }
 

@@ -664,6 +664,11 @@ const UNTAGGED_ALLOWED = {
     '一次上传的**可调参数**，零值 = 旧实现 `uploadRandomFile` 那一档。默认值由 `channelOrDefault` / `extensionOrDefault` / 上游层那两处**依次**补齐，补 tag 会造出第二个"默认值真相"；且 `Op` 只有 android 档读（web/PC 档忽略它），这个"档位决定哪一格生效"的关系不是字段能表达的',
   'internal/app/cloud_upload.go:CloudUploader':
     '一次上传的**注入点**（上游句柄 + 随机源 + `Auth` + `DeviceID`）。⚠ `Auth` 是 `Authorization` 头的**整串**（真凭据），一旦可序列化就顺着日志出去（同 `SmsCredential` / `AppLoginInput` 那两条：里面装凭据的入参打包永不补 tag）；`Up` 里还装着 HTTP 客户端，marshal 到它直接报错',
+  // ── 外链那一族（#53，2026-09-25 随玩法 434 落地）──
+  'internal/upstream/app_cloud_outlink.go:CloudOutLinkInput':
+    '`getOutLink` 的**请求侧入参集**（`Account` + `FileIDs` + `DedicatedName`）。⚠ `Account` 是**完整手机号** —— 与 `CloudUploader.Auth` 同一条"只进不出"：这一旦可序列化，离把号码写进日志/响应体只差一次"顺手 marshal 一下入参"。body 由 `CloudGetOutLinkRequest` 现拼那**十一键** map（与旧 TS 逐字对齐，含 `subLinkType:0`、`encrypt:1` 这些**不能缺**的档位）⇒ 补 tag 会造出第二条旁路，而"这一口认不认多出来的键"零实拍',
+  'internal/upstream/app_cloud_outlink.go:CloudOutLink':
+    '`getOutLink` 的解析结果（只有 `LinkID` 那一格）。它是编排层**"能不能删"的唯一判据**：`nil` 与"给了空串"都要被上层播成失败（拿不到 id ⇒ 那条公开外链留在用户网盘里，见 `runShare` 函数头那三处刻意不同）。本口**零实拍** ⇒ 字段名与"会不会回 `getOutLinkResSet`"都还没被上游确认过，补 tag 等于把一份未证实的形状写成对外契约',
 }
 
 function walk(dir, out = []) {

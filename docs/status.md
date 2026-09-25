@@ -3788,3 +3788,106 @@ CDP 会话一关就**释放**设备尺寸覆写 ⇒ "窄屏量到 40px"其实量
 | **R29**（新） | 链尾汇总推送只验到"没配渠道 ⇒ 不发不报错"；配一家只看状态码的渠道再跑一次组合即可收口 |
 | **P1**（闭合） | 上传四枪真跑通 ⇒ 那一格从"挡路"改写成"剩三件不挡路的尾巴"（三态那两档、非空目录 R7、`ai-avatar` 那半条清理） |
 | ⚗ §3.9 偏大 | `docs/status.md` 又长一节，Q16 的拆分方案（拆出 `status-log.md`）仍是**待批**状态 |
+
+---
+
+## 补记（2026-09-25，434 建/删外链那一族落码 + 真跑两趟：**两口仍一枪没发出去**；顺带把用户给的 `58999` 采集登记成文）
+
+本轮由用户那一句"434：分享文件要外链那一族（getOutLink / delOutLink），本仓未实现"发起。
+它当时正是 `taskMatrixToolGaps[434]` 的原话 ⇒ 按"先动手"读成：把这一条接上并真跑一次。
+**结果是两件事都做了，但缺口没被消掉** —— 下面第三确是这一轮真正的产出。
+
+### 一、接了什么（三层各带反向判据）
+
+- **上游层**（新增 [`internal/upstream/app_cloud_outlink.go`](../internal/upstream/app_cloud_outlink.go)，358 行 +
+  `app_cloud_outlink_test.go` 16 条）：`POST yun.139.com/orchestration/personalCloud-rebuild/outlink/v1.0/getOutLink`
+  → 同前缀 `delOutLink`。请求面**逐字**照旧 TS `apis/share.ts`，两处刻意"不顺手统一"：
+  `getOutLink` 带那十三枚逐请求头、`delOutLink` **不带**（旧实现就是这样，两枚都在上游发过、哪一枚对没有样本）；
+  `x-deviceinfo` 与 `x-yun-client-info` **只差结尾的管道数**，各有测试钉住。
+  ⚠ 一处与旧实现**刻意不同**：旧 runner 判 `data?.code === "0"`（字符串字面相等），本仓走 `EnsureOK`
+  ⇒ `"0"` / `"0000"` / 数字 `0` 都算成功。放宽落在"少删一次公开外链"那侧更安全，文件头写清了两侧后果。
+- **分派层**：434 从 `taskMatrixToolGaps` 移进 `taskMatrixRunners`，`taskRunnerSpec` 新增 `Shares` 那一格
+  （它与 `Upload` 正相反：**消费**这一趟前面那些任务产出的文件，不生产）。
+- **执行层** [`runShare`](../internal/app/task_matrix_run.go)（+ `task_matrix_share_run_test.go` 5 条）：
+  取这一趟 `cloudFileIDs` 的**第一个** → 建外链 → **拿到 `linkID` 才删**。三处与旧实现刻意不同，
+  全在"留一条公开外链"那一侧：没有可分享的文件 / 上游没给 `linkID` / `delOutLink` 失败 ——
+  旧实现三处**全静默**（还把那条任务记成本趟成功），这里三处各播一行、各记一格 `Err`。
+- **§1.5 登记**：两个新结构体进 `scripts/check-go-jsontags.cjs` 的 `UNTAGGED_ALLOWED` 并写理由。
+
+### 二、真跑的配方（不碰别人的实例）
+
+自己的二进制 + `sqlite3 data/mcloud.db ".backup …"` 出来的**库副本** + 副本上清 `schedules` / `sessions` / `users`
++ 一次性口令走 stdin（`user init` **没有** `--password` 这个参数）+ `--port 8793` + 自己的 device-file 副本。
+判据只看**程序自己**吐出的：`run_events` 逐行、`runs.message` 那句小结、`finished` 事件里的 `outcome`。
+
+⚠ 一条读表坑（本轮踩了才知道）：`runs` 表**没有 `outcome` 列**（列是
+`id / account_id / capability / status / started_at / finished_at / cloud_gained / cloud_after / message`），
+整趟结局在 `finished` 那条**事件**的 payload 里。
+
+收尾：8793 上那个实例是本轮自己起的 ⇒ 自己关（已退，端口已释放），副本目录与两个专用二进制已删；
+主库 `data/mcloud.db` 的行数与 mtime 未变；8787 / 8788 上别人的实例全程未动。
+
+### 三、跑出来的那一格：434 **被跑到了**，但它前面没有可分享的文件
+
+两趟（两个测试号，号码不进成文）的现场，逐字取自事件流：
+
+```
+尝试完成 分享文件领好礼4/7 434（玩法 分享一个文件并立刻取消）
+[warn] 分享文件跳过 分享文件领好礼4/7 434：没有可分享的文件：这一趟前面没有任务往网盘传过东西 ⇒ 分享那一半没做
+```
+
+而**随后** 522 真的传了 5 个文件、另一号 614 真的传了 1 个（链尾照旧全数移进回收站），
+两趟小结各念"1 条上报失败"（就是这一格）、结局 `partial_success`。
+
+根因是**表序**，不是接线：待做表按 id 稳定升序（[`normalizeTaskMatrix`](../internal/app/task_matrix.go)，
+对齐旧 `index.ts:16` 的 `sort((a,b)=>a.id-b.id)`），而当天能上传的那几条 id 都比 434 大（522 / 614），
+比它小的 106 当天两个号都是 `FINISH` ⇒ 不进待做。
+⚠ 这一格有**四个样本、两种二进制**：同日接上 434 **之前**那两趟里，这一条念的是"本仓未实现"，
+而 522 的上传同样排在它后面 —— 所以不是今天偶然。旧实现能走到 `getOutLink` 靠的是
+`ctx.state.files` 由别的来源先写进来（`utils/file.ts:59/90`、`play-ai-special/task.ts:163`、
+`ai-avatar/task.ts:157`），本仓没有那三处的对应物。
+
+⇒ **`getOutLink` / `delOutLink` 至今零真打，R30 不闭合**；要不要给这一条造一次可分享的文件
+（改表序 / 自己先传一个 / 取网盘既有文件）是**设计决定**，未静默改 ⇒ 立成 **Q41**（三档代价写在表里）。
+⚠ 顺带读出**"以运行反馈为准"那条口径的第二个边界**（第一个是上一轮"没有跑出来的"第 7 条）：
+这一格**不会红** —— 整趟照常 `partial_success`，"今天根本没跑到"与"跑好了"在**结论**那一格同样安静，
+只有逐条播报里那一行 `[warn]` 说了真话。所以核这一族不能只看终态，得看**成对的两行**出没出现。
+
+### 四、`58999`：用户给的实况，本仓一个字都不解析
+
+用户中途给的那份线上采集（iOS / 13.1.1）里，同一口 `signin/task/click` 对 **22 个 id 全部**回
+`code=58999`，而 `message` 是"请尝试重新登录或重启手机"、`detail` 才是"任务不存在"。
+本仓改前 `grep 58999` 零命中 ⇒ 按 §1.8（用户口述的实况 = 最高一级判据）**先登记事实、不动代码**：
+
+- 坑表新增 **#149**（现象 + 根因 + 做法 + 反向判据）。根因那一格：`Envelope` 只认三组键
+  （`code` / `msg` 或 `message` / `data` 或 `result`），`detail` 与 `tipMsg` 一处都不读，
+  而 `Diagnose` 没有这一枚码 ⇒ 界面上只剩那句把人往**登录态**方向引的话，与 `detail` 说的不是一件事。
+- [`internal/upstream/app_task_click.go`](../internal/upstream/app_task_click.go) 文件头补一节 +
+  `ParseTaskClick` 头注逐字贴那份响应体。
+- **不推断成因**：那 22 个 id 当时在不在表里、发请求的是哪个客户端，采集里读不出来；
+  其 `key`+`id` 组合与本仓四条实拍不重合 ⇒ **不得**断言"我们发过去也会收到 58999"。
+  本轮自己那两趟真跑**没**观测到它（同样不据此断言它不会来）。
+- 要不要接回 `detail` = 新增 **Q40**（agent 侧默认不接，且写明这一条**不挡**任何链推进：判据仍是 `code`，非 0 即失败）。
+
+### 五、门禁（照抄当轮 stdout）
+
+- `node scripts/gates-go.js` → **十项门禁全绿**，总耗时 **1m03s**（逐条：build 1.5s，vet 0.7s，fmt 0.1s，
+  **test 56.6s**（非缓存：本轮新落 21 条测试函数 + 上层改动），deps 3.2s，filenames 0.2s，idents 0.3s，
+  golden 0.1s（断言 167 条），jsontags 0.1s（95 个字段齐全、222 个按白名单不进 JSON），md-tables 0.1s）。
+- `node scripts/gates-web.js` → **2 条全绿**（typecheck + build，总耗时 **4.0s**）。本轮**没动** web 代码，
+  跑它是为确认 `docs/status.md` 拼接之后的树仍然干净（§1.6：web 侧没有测试运行器，页面正确性只能真机核）。
+- ⚠ 以上都是**全仓**跑，而并行会话此刻在这棵树上动 `internal/app/msg_push_run.go`、
+  `internal/upstream/app_msg_push*.go` 与 `web/src/**`、三份 `docs/webui-*.md`
+  ⇒ 绿灯**包含**他们的在飞改动，不能只当作"本轮文件绿"的证据（§2.7）。
+- ⚠ 格式化只点名本轮自己的文件（`gofmt -w <具体路径>`）：`node scripts/fmt.js` **不带子路径会重排整棵树**，
+  上一轮被我自己实证过一次（见本文那一轮的第五条）。
+
+### 六、待拍板与遗留（本轮增量）
+
+| 项 | 一句 |
+| --- | --- |
+| **Q41**（新） | 要不要给 434 造一次可分享的文件：改表序 / 自己先传一个 / 取网盘既有文件（第三种要 `hcy/file/list`，今天仍阻塞在 R17，而且分享用户既有文件是**另一种后果**）。agent 侧默认 = **不改表序**，照旧实现 |
+| **Q40**（新） | 要不要给 `Envelope` 加只读 `detail` 并拼进失败文本与播报（`tipMsg` 同格待判）。agent 侧默认 = 不接 |
+| **R30**（改写，未闭合） | 从"缺实拍"改成"缺真打，而且今天跑到了却没发到"：先拍 Q41，再按原判据读**成对**那两行 |
+| **§3.9 偏大** | [`internal/app/task_matrix_run.go`](../internal/app/task_matrix_run.go) 本轮 1055 → **1080 行**，`task_matrix_run_test.go` 1469 行 ⇒ 拆分方案（run 侧按"读表 / 打卡 / 玩法 / 上传 / 分享 / 复查 / 清理"切）仍是**待批**，本文 Q16 同一格 |
+

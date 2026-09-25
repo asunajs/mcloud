@@ -253,20 +253,35 @@ type taskRunnerSpec struct {
 	// 网盘里留下真文件）。旧实现 `106: uploadRandomFile(ctx)` /
 	// `522: 循环 uploadRandomFile` 那两条的形状。
 	Upload *taskUploadShape
+	// Shares 为真 ⇒ 这条 runner 的**本体**是"把这一趟传上去的第一个文件分享出去、
+	// 再立刻取消分享"（**两次写**：建一条公开外链 + 删掉它）。
+	//
+	// 它与 [Upload] 的正相反：那一格**生产**文件，这一格**消费**别人生产的文件
+	// （旧实现 `runners.ts:69` 读的就是 `ctx.state.files`）。所以它有一个
+	// **旧实现自带的脆弱点**：同一趟里排在它前面的那些上传任务必须真的传上来过
+	// 东西，否则它没有可分享的文件（今天的处置见执行层 `runShare`）。
+	// ⚠ 2026-09-25 真跑两趟：两趟**都正好落在这一个脆弱点上**（待做表按 id 升序，
+	// 当天能上传的那几条 id 都比 434 大）⇒ 两口仍零真打。要不要给它造一次可分享的
+	// 文件是设计决定，未拍板 ⇒ `docs/pending-decisions.md` **Q41**。
+	Shares bool
 }
 
 // taskMatrixRunners 是**本仓已经接上**的专属玩法表。
 //
-// ⚠ 表里四条，而旧实现有十四条 —— 其余十条在 [taskMatrixToolGaps]。
+// ⚠ 表里五条，而旧实现有十四条 —— 其余九条在 [taskMatrixToolGaps]。
 // 前两条（409 / 1005）是"整条链今天真的能跑完"的：入口上报（**零实拍**，见
 // `app_task_click.go` 文件头）+ 一发打卡（本族那一发只有**两发**实拍，都在
 // `m.mcloud.139.com`；另两发同名端点在 `:7071`，属 notice 与分享码那两族 ——
 // 别把它们算成这一发的样本）。
 //
-// 后两条（106 / 522）是 2026-09-24 随上传族接上的，⚠ 它们**会往用户网盘写文件**，
+// 中间两条（106 / 522）是 2026-09-24 随上传族接上的，⚠ 它们**会往用户网盘写文件**，
 // 而那三枪**零实拍**（R27）+ 同一台主机的鉴权画像未定（R28）⇒ 今天能不能真跑通**没有结论**，
 // 只是"形状与顺序按旧实现落好了"。这一族挂在 `app-task` 那条能力上，而它
 // `RunInBatch:false`（调度与批量都不替它跑，只有界面上点那一下才会真发）。
+//
+// 最后一条（434）是 2026-09-25 随外链那一族接上的，形状与上面几条都不同：它**不生产**
+// 文件、只消费这一趟前面那些上传任务产出的文件（见 [taskRunnerSpec.Shares]）。
+// 它的两口同样**零 REST 实拍**（成文见 `internal/upstream/app_cloud_outlink.go` 文件头）。
 //
 // ⚠ 旧实现在跑 runner **之前**还有一发通用打卡（`handleTaskClick` 里那句
 // `clickTaskWithStep`，key 恒 `task`、受 `currstep == 0` 门约束）。
@@ -295,6 +310,13 @@ var taskMatrixRunners = map[int64]taskRunnerSpec{
 			Rounds: taskMatrixUploadRoundsPerRun, StopAtProcess: 100, PaceEachRound: true,
 		},
 	},
+	// 旧实现 `runners.ts:68-88`：取 `ctx.state.files` 的**第一个**建一条外链，
+	// 上游给了 `linkID` 就**立刻**再发一口把它删掉。
+	//
+	// 它**没有** `FinalKey`（runner 自己不再打一发）、也**没有** `Upload`（它不传文件）。
+	// 前置那一发仍由 [PlanTaskStep] 按门决定，而 434 恰好是那道门**唯一有例外**的一条
+	// （`currstep == 22` 也打，见 [taskClickGate]）⇒ 它是那张例外表今天唯一能走到的入口。
+	434: {Name: "分享一个文件并立刻取消", Shares: true},
 }
 
 // taskMatrixToolGaps 是"旧实现有专属玩法、本仓还接不上"的那批，**逐条写明缺哪一族**。
@@ -313,8 +335,10 @@ var taskMatrixToolGaps = map[int64]string{
 	// 顶它（换掉的是另一个服务），**待拍板 Q32**。
 	113: "PC 客户端上传：三枪与 PC 档已落码，缺的是旧实现那一发前置 `authTokenRefresh.do`" +
 		"（本仓刻意不实现那一个服务，见 `internal/upstream/auth_refresh.go` 文件头）⇒ 用哪一口顶它待拍板 Q32",
-	107:  "创建云笔记要笔记服务那一族（note 鉴权 + 建 + 删），本仓未实现",
-	434:  "分享文件要外链那一族（getOutLink / delOutLink），本仓未实现",
+	107: "创建云笔记要笔记服务那一族（note 鉴权 + 建 + 删），本仓未实现",
+	// 434（分享文件）在 [taskMatrixRunners]：外链那一族两口已于 2026-09-25 落码
+	// （`internal/upstream/app_cloud_outlink.go`）。它今天仍**没有一次真打**，
+	// 但"本仓缺端点"这一档已经不成立了 —— 别再把它放回本表。
 	472:  "体验 139 邮箱要邮箱会话那一族（autologin + PE 活跃上报 + 邮箱市场 click），本仓未实现",
 	473:  "同 472：邮箱会话那一族未实现",
 	1004: "给好友发邮件要邮箱会话 + 写信那一族，本仓未实现",
