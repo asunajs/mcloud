@@ -752,6 +752,18 @@ func (e *taskExecutor) runRunner(
 		fired = fired || sent
 		problems = append(problems, cameraProblems...)
 	}
+	if spec.Workbench {
+		// 1028：邮箱会话（①②）→ ①′ 派生 AI 域凭据 → ②′ 查前置 → ③′ 问一句 →
+		// 等 5 秒 → ④′ 再看一眼。它排在 [AICamera] 之后不影响任何一条（一条任务只有
+		// 一个开关会命中），但它**自己带一次等待**，所以放在链尾附近：那 5 秒不会
+		// 推到别的任务身上。
+		//
+		// ⚠ 与 [Mail] 那一支同族的一点：它的 `ClickKey` / `FinalKey` 都由 [PlanTaskStep]
+		// 的门决定（runner 自己不打本族 `task/click`），成败全靠 [runWorkbench] 分档播报。
+		sent, workbenchProblems := e.runWorkbench(ctx, item)
+		fired = fired || sent
+		problems = append(problems, workbenchProblems...)
+	}
 	record.Err = joinProblems(problems)
 	return fired
 }

@@ -302,19 +302,41 @@ type taskRunnerSpec struct {
 	//     而它**不是票**。旧实现两处各取 `ctx.config.token` / `ctx.config.auth`，
 	//     它自己那两枚就不相同 ⇒ 这是本条最容易接错的一格，逐处取舍写在
 	//     `internal/app/task_matrix_play_ai.go` 文件头。
-	//   - **它是本表唯一一条"响应不是一段 JSON"**的：② 回 SSE，判据是旧实现那三档回退，
+	//   - **它是本表两条"响应不是一段 JSON"里的第一条**（另一条是下面的 [Workbench]）：
+	//     ② 回 SSE，判据是旧实现那三档回退，
 	//     所以它的"成功"必须连**命中哪一档**一起念（协议层
 	//     `internal/upstream/app_play_ai_chat_sse.go` 文件头那条"一段报错页也算成功"）。
 	//   - **它写盘、但产物不是我们传上去的**：① 的 `uploadToCloud` 实拍恒 true ⇒
 	//     一张白图落在用户网盘里，`data.fileId` 进 [taskExecutor.cloudFileIDs] 那条清理链。
 	//     ⚠ 与 [MailPDF] 同一类残留：① 说成功却没回 fileId 时**删不掉**（登记 R37）。
 	AICamera bool
+	// Workbench 为真 ⇒ 这条 runner 的**本体**是"换一张邮箱会话（①②）→ ①′ 派生 AI 域
+	// 凭据（DES）→ ②′ 查前置状态（RSA，**只读**）→ ③′ 问一句（SSE）→ 等 5 秒 →
+	// ④′ 再看一眼同一口"（玩法 1028，旧实现 `runners.ts:345-448`）。
+	//
+	// 三个"与上面几格不同"都在这里，不在执行层：
+	//   - **它是本表唯一一条要自己解密上游返回值的**：①′ 把上游给的 DES 密文解成手机号，
+	//     再用它拼 Basic 与 RSA 输入 ⇒ 凭据链不是"库里那一枚"，而是**这一趟现换的**。
+	//     逐处口径与"手机号/密文一律不进日志"写在 `internal/app/task_matrix_workbench.go`
+	//     与 `internal/upstream/app_ai_workbench.go` 文件头。
+	//   - **它的 `userId` 只来自 ①′ 那一枪**（旧实现那句 `|| ""` ⇒ 取不到就直接放弃对话），
+	//     而 585 那一族用的是库里那份 `x-yun-uni` —— ⚠ 两者同不同源**未测试**，
+	//     所以两条各自取自己出处那一枚，不许合并（见 `task_matrix_workbench.go` 函数头）。
+	//   - **它不写网盘**（⇒ 不在清理链上），但会在 AI 工作台那边留下一次会话记录，
+	//     而本仓没有"删会话"那一口。
+	//
+	// ⚠ 它**没有** `FinalKey` 也没有 `Mail` 那一发市场打卡：旧实现这一条runner 后面
+	// 不再打本族 `task/click` ⇒ 通用前置那一发仍由 [PlanTaskStep] 按 `currstep` 门决定。
+	Workbench bool
 }
 
 // taskMatrixRunners 是**本仓已经接上**的专属玩法表。
 //
-// ⚠ 表里**十一条**，而旧实现有十四条 —— 其余三条在 [taskMatrixToolGaps]
-// （113 / 1004 / 1028）。
+// ⚠ 表里**十二条**，而旧实现有十四条 —— 其余两条在 [taskMatrixToolGaps]
+// （113 / 1004）。第十二条（1028）于 2026-09-26 随 `app_ai_workbench.go` 接上，
+// ⭐ **同日四枪都拿到了真实读数**（活体探针三趟，`docs/capture/app-ai-workbench-samples.txt`）
+// ⇒ 这一条不再是"只到形状"；它剩下的那一格是"上游三格回字符串 ⇒ 那道门永不成立，
+// 要不要放宽"（**R38**ⓐ），是本表**唯一一条由用户拍板**的判据取舍。
 // 前两条（409 / 1005）是"整条链今天真的能跑完"的：入口上报（**零实拍**，见
 // `app_task_click.go` 文件头）+ 一发打卡（本族那一发只有**两发**实拍，都在
 // `m.mcloud.139.com`；另两发同名端点在 `:7071`，属 notice 与分享码那两族 ——
@@ -405,15 +427,35 @@ var taskMatrixRunners = map[int64]taskRunnerSpec{
 	// 旧实现 `packages/core/src/tasks/app/runners.ts:182-185`：runner 本体只有一句
 	// `completeAiCameraTask(ctx)` ⇒ 没有 `Upload`、没有 `FinalKey`、也不换任何会话。
 	//
-	// ⚠ 它是这一张表里**唯一一条两枪用两枚不同凭据**的（① 票 / ② Basic 整串），
-	// 也是唯一一条响应不是 JSON 的（② 回 SSE）—— 两处的逐字取舍与"选哪一档样图"
-	// 都写在 `internal/app/task_matrix_play_ai.go` 文件头。
+	// ⚠ 它**不建会话、不换票**：两枪带的是**同一枚**凭据 —— 库里那串 Basic 整串
+	// （不是票）。这一格被两次真跑 + 一条实拍换出来，顺序别记反，全过程成文在
+	// `internal/app/task_matrix_play_ai.go` 文件头第一节。
+	// 它与下面 1028 是本表**仅有的两条**"响应不是一段 JSON"（② 回 SSE）。
 	//
 	// ⚠ 2026-09-26 接上：请求侧与读法已于本日落码（`internal/upstream/app_play_ai_chat_sse.go`），
 	// 但 ② 的响应**零实拍** ⇒ "接上"仍只到**形状**那一层。真正的缺口（`userId` 与旧实现
 	// 不同源、样图前缀比不比、`name` 那一格上游读不读）另有登记处：
 	// `docs/pending-decisions.md` **R37** —— 别再把它放回 [taskMatrixToolGaps]。
 	585: {Name: "AI 相机：识图后问一句", AICamera: true},
+	// 旧实现 `runners.ts:174-180`：先 `getMail139Session(ctx)`（与 472 / 1014 / 1020 共用
+	// [mailSessionFor]），再把 `aiWorkbenchTask` 那四步跑一遍 ⇒ 本条**有**邮箱会话那一半。
+	//
+	// ⚠ `FinalKey` 留空、也没有 `Mail` 那一发市场打卡：旧实现这一条 runner 后面
+	// 不再打本族 `task/click`（它"确认任务推进"靠的是链尾那一眼 ④，而那一发**不写**任何东西）。
+	//
+	// ⚠ 它是本表**凭据链最长**的一条（邮箱会话 → DES 解出的手机号 → Basic + RSA），
+	// 也是唯一一条 `userId` **不取自库里**的 —— 两处取舍与"为什么不许和 585 合并"成文在
+	// `internal/app/task_matrix_workbench.go` 文件头。
+	//
+	// ⚠ 2026-09-26 接上，**同日拿到四枪的真实读数**（活体探针三趟，落档
+	// `docs/capture/app-ai-workbench-samples.txt`）：①′ 派生凭据通、②′ 的 RSA 自证身份被认
+	// （对照枪 585 / 106 / 1020 都回 `result`，1028 自己回 `501 任务不存在`）、③′ 的 SSE 累得出模型原话。
+	// ⚠⚠ 最要紧的一格：**上游三格全回字符串 ⇒ 旧实现那道门在真实读数下永不成立**，
+	// 本层跟着**不放宽**（放宽等于替用户决定少发一次写）。
+	// 缺的那几格（要不要放宽、③′ 原始 SSE 未留存、问话要不要做成配置项、
+	// `userDomainId` 与库里那枚同不同源）登记在 `docs/pending-decisions.md` **R38**
+	// —— 别再把它放回 [taskMatrixToolGaps]。
+	1028: {Name: "AI 工作台：查前置后问一句", Workbench: true},
 }
 
 // taskMatrixToolGaps 是"旧实现有专属玩法、本仓还接不上"的那批，**逐条写明缺哪一族**。
@@ -454,8 +496,15 @@ var taskMatrixToolGaps = map[int64]string{
 	// 别再放回本表（同上面 107 / 434 / 472 那几格的写法）—— 它们**缺的已经不再是端点**，
 	// 留着会让界面上永远显示"没接玩法"，而真正的缺口（那两口零真实反馈）另有登记处：
 	// `docs/pending-decisions.md` R35 / R36。
-	1028: "AI 工作台要 DES/RSA 派生 + SSE 对话那一族（本仓零实现）⇒ 缺的不是邮箱会话，" +
-		"而 `aiChatMessage` 这一格配置本仓也没有",
+	// ⚠ 1028（AI 工作台）在 2026-09-26 从本表挪进 [taskMatrixRunners]：四枪与那两处派生
+	// （DES 解手机号、RSA 加密身份）+ 本族自己的 SSE 累加器都已落码
+	// （`internal/upstream/app_ai_workbench.go` + `internal/app/task_matrix_workbench.go`）。
+	// 别再放回本表（同上面 107 / 434 / 472 / 1014 / 585 那几格的写法）——
+	// 留着会让界面上永远显示"没接玩法"，而它真正的缺口另有登记处：
+	// `docs/pending-decisions.md` 本族那一格（四枪已于 2026-09-26 活体探针三趟拿到真实读数，
+	// 落档 `docs/capture/app-ai-workbench-samples.txt` ⇒ 剩下的两格是"那道门在真实读数下
+	// **永不成立**要不要放宽"与"③′ 的原始 SSE 未留存"；另：`aiChatMessage` 那一格配置
+	// 本仓仍没有，今天问的是出处那个兜底常量）。
 	// ⚠ 585（AI 相机）在 2026-09-26 从本表挪进 [taskMatrixRunners]：两枪（① `aiRecognize`、
 	// ② `chat/v2/add`）与那三档 SSE 读法都已落码（`app_play_ai_chat_sse.go` +
 	// `task_matrix_play_ai.go`）。别再放回本表（同上面 107 / 434 / 472 / 1014 那几格的写法）——
@@ -558,6 +607,13 @@ func stepForBeiyong1(id int64, item upstream.TaskV2Item) TaskStepPlan {
 // **不读** `button`（它是渲染字段，见 `app_task_list.go` 里那六个字段的取舍）⇒
 // 那一句今天**不可能触发**。登记在此而不是"顺手补个解析"：要补得先确认
 // 上游给不给这一格、给的是什么形状（一次实拍都没有）。
+//
+// ⚠ **将来接它时别照这一支的"传一个"写**：那一句走的是另一个函数
+// `upload10PictureTask`（`tasks/ai-tasks.ts:193-225`）—— 目标是**补满 10 张 `.jpg`**
+// （`remaining = max(0, 10 - task.process)`，已是 10 就直接算成），循环里每张之间还
+// `sleep(300)`，且"成功数 > 0"才算完成。口径与逐字判据成文在
+// `docs/business-feature-inventory.md` §2.4 那一条（含"本仓 `process` 目前只有一个消费者
+// = 522 停表"那一格，别以为它没人读）。
 func uploadNamedTask(name string) bool {
 	return strings.Contains(name, "上传") &&
 		(strings.Contains(name, "图") || strings.Contains(name, "照"))

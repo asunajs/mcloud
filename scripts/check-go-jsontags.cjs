@@ -76,6 +76,23 @@ const UNTAGGED_ALLOWED = {
     '一次 H5 请求的**四个签名头**（request-id / timestamp / nonce / signature），是内存里的计算结果，不落库也不出响应',
   'internal/upstream/app_signin_session.go:H5Login':
     'tyrzLogin 换回的**会话凭据**（jwt + 回显手机号），进程内存里用；Rust 侧 derive `Debug, Clone, PartialEq, Eq`，**不** Serialize',
+  // ── AI 工作台那一族（玩法 1028，2026-09-26 登记）──
+  // 四枪的**入参集 / 解析结果**全部不面向网络：请求体一律手工拼 `map[string]any`
+  // （键名与顺序按旧 TS 逐字，见 `app_ai_workbench.go` 的 `AIWorkbenchChatBody`），
+  // 响应侧是手解 `map[string]any` 后摊成这几个结构体。
+  // ⚠ 其中 `AIWorkbenchDomainAuth` 装的是**本族现换的凭据本体**（DES 解出的手机号 +
+  //   ①′ 的 token + 派生 Basic 整串，三格都是 `core.SecretValue`）——
+  //   而 `SecretValue.String()` 只挡打印、**不挡 `encoding/json`**（`internal/core/model.go`）。
+  //   给它补 tag = 将来谁"顺手把 auth 写进日志 / 响应"就把整串凭据原样带出去，
+  //   这正是本轮成文里那条"凭据只进不出"的最后一道闸，**不许**为了过门禁而加 tag。
+  'internal/upstream/app_ai_workbench.go:AIWorkbenchDomainAuth':
+    '①′ 派生出来的**凭据三格**（手机号 / token / Basic 整串，均 `core.SecretValue`），只在内存里传给 ②′③′；⚠ 刻意不 marshal（`String()` 挡不住 JSON，见 `internal/core/model.go`）',
+  'internal/upstream/app_ai_workbench.go:AIWorkbenchTaskStatus':
+    '②′④′ 的**解析结果**（`code` / 有没有 `result` / 两枚状态 / 那道门），供编排层分档念；对外那份是事件流里 `workbenchStatusLine` 拼出的一行人话，不是 JSON',
+  'internal/upstream/app_ai_workbench.go:AIWorkbenchChatParams':
+    '③′ 的**入参集**（`userId` / 问话 / `inputTime`），请求体由 `AIWorkbenchChatBody` 手工拼 `map[string]any`（键名与顺序按旧 TS 逐字）⇒ 这个结构体本身不进 JSON',
+  'internal/upstream/app_ai_workbench.go:AIWorkbenchChatRead':
+    '③′ SSE 的**解析结果**（事件数 / 末条 `code` / `message` / `sessionId` / 累出的回话），出网只出现在 `workbenchReadLine` 那一行播报里（且 `sessionId` **只念长度**，见 R38）',
   'internal/upstream/smid.go:SmUpload':
     '一次上报的**时间与上一次的 deviceId**。时间由调用方给（东八区），旧 deviceId 只在本次请求里用；Rust 侧同样是纯入参结构，不 Serialize',
   'internal/upstream/smid.go:SmRule':
@@ -352,6 +369,13 @@ const UNTAGGED_ALLOWED = {
   // 中间量摊成字段就等于把"上游没给这一格"与"这一格是 0"混给前端显示。
   // 只对它成立的一条加重理由：这一族**只有只读那一半**，而 `Board` 里两格都是
   // **未对拍形状的上游解析结果**（归档 13 条、零实拍链路）⇒ 一旦带 tag 就成了对外承诺。
+  // ── 585 AI 相机那一发的 **SSE 读数**（`app_play_ai_chat_sse.go`）──
+  // ⚠ 本条登记在 2026-09-26 补进：那条结构体随 585 那一轮（commit 29a1e08）进了仓，
+  // 而它的豁免**没跟着进那一笔提交** ⇒ HEAD 那棵树单独看是红在 jsontags 上的。
+  // 这一族的 SSE 形状**已有两条真机实拍**（`docs/capture/app-play-ai-samples.txt` §8，
+  // 判据收口见 `docs/pending-decisions.md` R37③）—— 不写"零实拍"。
+  'internal/upstream/app_play_ai_chat_sse.go:PlayAIChatSSERead':
+    '一次 SSE 响应的**内存读数**（命中哪一档 / 那一行原文 / 判据 / `code` 与文案 / data 行条数）。`Value any` 装的是上游原文解出来的通用值，逐行形状随档变 ⇒ 带 tag 就等于把"上游的 SSE 事件长什么样"钉成对外契约，而本仓对它只做过**读数**、没做过 schema。对外出网的是 app 层那句一行播报，不是这个形状；要展示按仓库规矩在 server 层逐字段列白',
   'internal/app/play_ai_run.go:PlayAIBoard':
     '只读两枪的**内存读数**（① 状态 + ② 任务表）。①那一格唯一的值 `totalLotteryCount` 语义未验证（是累计获得还是还剩），②那一格 `state` 只支撑两个实拍值 ⇒ marshal 出去等于承诺一份我们没能对拍的上游形状。真实动作判据（"该不该抽"）本来也不在这一层',
   'internal/app/play_ai_run.go:PlayAITaskCounts':

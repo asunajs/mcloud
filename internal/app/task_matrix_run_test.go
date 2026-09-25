@@ -461,17 +461,19 @@ func TestTaskMatrixRunClicksOnTheAppDomainAndVerifies(t *testing.T) {
 // 而红出来的正是"用户的账上多了一条没做过的事"。
 //
 // ⚠ 这里用的两个 id 是**仍缺端点族**的那两个：1004 缺 `mbox:compose` 那一口（真发一封信，
-// 待拍板），1028 缺 AI 工作台那一族。它们都**不是**"缺邮箱会话"—— 会话与资产侧那几口
+// 待拍板），113 缺旧实现那一发 `authTokenRefresh.do` 前置（本仓刻意不实现那个服务，
+// 用哪一口顶它待拍板 Q32）。它们都**不是**"缺邮箱会话"—— 会话与资产侧那几口
 // 已在 2026-09-25 / 26 落码（见 `task_matrix_mail.go` 与 `app_mail139_assets.go`）。
-// 这张表换过**四**次样本，每次都是"某个缺口被补上 ⇒ 拿它演'不发枪'就成了假绿"：
+// 这张表换过**五**次样本，每次都是"某个缺口被补上 ⇒ 拿它演'不发枪'就成了假绿"：
 // 106 于 2026-09-24 落到 runner（用例见 [TestTaskMatrixRunUploadsOneFileForTask106]）、
 // 107 于 2026-09-25（笔记三口）、472 / 473 于 2026-09-26（邮箱会话 + ④ 打卡）、
-// **1020 与 1014 于同一天稍后**（⑧ 备份、⑥ 转换 + 那份 PDF）—— 这一轮改表时它当场红了，
-// 正是 #161 要抓的那种假绿（坑表 #161 第四次生效）。
+// **1020 与 1014 于同一天稍后**（⑧ 备份、⑥ 转换 + 那份 PDF）、
+// **1028 于同一天再稍后**（AI 工作台四枪，见 `task_matrix_workbench.go`）——
+// 每一轮改表时它当场红了，正是 #161 要抓的那种假绿（坑表 #161 第四、五次生效）。
 func TestTaskMatrixRunNeverClicksToolGapTasks(t *testing.T) {
 	waiting := mxItems(
 		mxItem(1004, "day", "给好友发邮件", "WAIT", "", 0),
-		mxItem(1028, "day", "AI 工作台", "WAIT", "", 0),
+		mxItem(113, "day", "PC 客户端上传", "WAIT", "", 0),
 	)
 	script := mxScript([]string{"JWT-1"}, waiting, waiting, mxHappy()...)
 	res, perr := mxResult(t, mxDefaultRun(t, script))

@@ -31,7 +31,9 @@
 //	② AI 相机（585）`packages/core/src/tasks/ai-tasks.ts:105-150`
 //	              ⇒ 本文件的 [PlayAIChatCameraBody] / [PlayAIChatCameraRequest] + 发送口
 //	③ AI 工作台（1028）`packages/core/src/apis/ai-workbench.ts:161-285`
-//	              ⇒ 本仓**未实现**；③的头里连 `x-yun-tid`、`Origin` 都没有，UA 是桌面 Chrome，
+//	              ⇒ 本仓**另有一份**：[`app_ai_workbench.go`](app_ai_workbench.go)（那里连 SSE
+//	                累加器也是本族自己的一套，因为它的行**不带** `data:` 前缀也要 parse）。
+//	                ③的头里连 `x-yun-tid`、`Origin` 都没有，UA 是桌面 Chrome，
 //	                body 多 `continuationInfo` / `commands` / `aiWritingSetting` 三格、
 //	                `attachment` 是**空对象** —— **不要**复用本文件（差别见 `docs/pending-decisions.md` 里 1028 那一格）。
 //
