@@ -1,0 +1,130 @@
+# mcloud-gost
+
+移动云盘（中国移动云盘 / 139）自动化平台。后端 **Rust**，前端 **Vue Vapor + TSX**。
+
+> 设计详见 [`docs/architecture.md`](./docs/architecture.md)。
+
+## 状态
+
+**脚手架阶段**：分层骨架完整、密码学已用黄金向量对拍通过、服务可跑、前端可构建。
+上游接口尚未接入真实抓包（见「路线图」）。
+
+## 目录
+
+```
+crates/
+  mcloud-core        领域类型 + IO trait（零 IO）
+  mcloud-crypto      签名与加解密原语（纯 Rust，零 FFI）
+  mcloud-upstream    上游接口封装（唯一用 reqwest 的层）
+  mcloud-engine      任务注册表 / 运行器 / 并发闸 / 事件
+  mcloud-tasks       各任务业务编排
+  mcloud-store       持久化（JSON + 原子写）
+  mcloud-app         组装层
+  mcloud-server      axum 路由 + SSE + CLI
+web/                 Vue Vapor + TSX + daisyUI
+test/golden/         权威黄金向量（对拍用，从 mcloud 同步）
+docs/                设计文档
+```
+
+> 本仓库只放**干净的实现代码**。抓包记录、逆向素材、客户端分析
+> 都在上游仓库 [`mcloud`](../mcloud/)（`har/`、`test/golden/`、
+> `test/fixtures/`、`scripts/`），本仓库不复制这些内容。
+
+依赖只能自上而下：`core ← crypto/upstream/store ← engine ← tasks ← app ← server`。
+`core` / `crypto` / `engine` / `tasks` **禁止**直接做 IO。
+
+## 构建与运行
+
+```bash
+# 后端
+cargo build --release
+cargo test --workspace
+
+# 跑服务（默认 127.0.0.1:3000）
+MCLOUD_ADDR=127.0.0.1:38123 MCLOUD_DATA_DIR=./data cargo run -p mcloud-server
+
+# CLI
+cargo run -p mcloud-server --bin mcloud-cli -- tasks
+cargo run -p mcloud-server --bin mcloud-cli -- run sign 13800000000
+
+# 前端
+cd web && npm install && npm run dev     # 开发（代理到 38123）
+cd web && npm run build                  # 产物在 web/dist
+```
+
+> `CARGO_HOME` 说明：若 `~/.cargo` 不可写（沙箱环境），设置
+> `export CARGO_HOME="$PWD/.cargo-home"` 即可，仓库已忽略该目录。
+
+## HTTP 接口
+
+```
+GET  /api/version
+GET  /api/health
+GET  /api/capabilities          任务清单
+GET  /api/runs                  最近运行
+POST /api/runs                  启动运行 {task, account, body}
+GET  /api/runs/{id}             单次运行详情
+GET  /api/runs/{id}/events      ★ SSE 事件流
+```
+
+SSE 事件示例：
+
+```
+event: started
+data: {"type":"started","run_id":1,"task":"sign","account":"138...","at_ms":...}
+
+event: progress
+data: {"type":"progress","run_id":1,"step":1,"total":2,"label":"查询签到状态"}
+
+event: finished
+data: {"type":"finished","run_id":1,"outcome":{"status":"success","summary":"..."},"duration_ms":159}
+```
+
+## 密码学
+
+业务签名是 **MD5 + 固定盐**：
+
+```
+data = salt + id + timestamp + nonce + other + salt
+sign = MD5(data)          // 小写 hex
+salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
+```
+
+请求头：`x-request-id` / `x-timestamp` / `x-nonce` / `x-signature`。
+
+全部是标准算法，**纯 Rust 实现，无 FFI、无 native 依赖**。
+算法的来源与推导记录在上游 `mcloud` 仓库，本仓库只承载实现。
+
+### AES 的两套语义（易踩坑）
+
+原本并存两种行为，**不可混用**：
+
+| 场景 | 密钥处理 | 实际算法 |
+|---|---|---|
+| `rt.crypto.aesEncrypt`（固定 IV） | 截断/补零到 16 字节 | AES-128-CBC/PKCS7，输出 hex |
+| 刷新令牌（动态 IV） | 用原始密钥 | 24 字节密钥 → **AES-192**，`base64(IV‖CT)` |
+
+对应 API：`aes_encrypt_compat()` 与 `encrypt_with_dynamic_iv()`。
+
+## 测试
+
+- `cargo test --workspace` —— 58 个测试
+- 黄金向量对拍：`test/golden/crypto-vectors.json`（签名、MD5、SHA256、两种 AES 语义）
+- 对拍是**字节级**的；不一致就是 bug，不允许改期望值来变绿。
+
+## 路线图
+
+| 阶段 | 内容 |
+|---|---|
+| P0 ✅ | 设计 + 脚手架 + 密码学对拍 + 服务/前端跑通 |
+| P1 | 上游认证链路（真实登录、token 刷新） |
+| P2 | `sign` / `receive` / `after` 端到端 |
+| P3 | 前端任务页联通 SSE、账号管理 |
+| P4 | 调度 + pipeline + 推送渠道 |
+| P5 | 其余任务增量接入 |
+| P6 | `rust-embed` 单二进制收口 |
+
+## 注意
+
+个人账号自用。不要用于批量注册、刷量或商业分发。
+凭证只存本地，日志已做脱敏（`mcloud_core::event::redact`）。

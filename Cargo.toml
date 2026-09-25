@@ -1,0 +1,100 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mcloud-core",
+    "crates/mcloud-crypto",
+    "crates/mcloud-upstream",
+    "crates/mcloud-engine",
+    "crates/mcloud-tasks",
+    "crates/mcloud-store",
+    "crates/mcloud-app",
+    "crates/mcloud-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+authors = ["catlair"]
+
+# ── Lint 基线 ───────────────────────────────────────────────────────────
+#
+# 各 crate 必须写 `[lints] workspace = true` 才会继承这里。
+# 取值原则：只钉住「当前代码已全部满足」的规则，不制造历史欠账。
+# 更严的 clippy::pedantic / nursery / missing_debug_implementations 会产出
+# 大量既有告警，因此**刻意不启用**，新增代码靠 review 约束。
+#
+# 详见 docs/conventions.md 第 3 节。
+[workspace.lints.rust]
+# 纯 Rust 实现，不允许出现 unsafe。
+unsafe_code = "forbid"
+# 忽略 MustUse 返回值是真实缺陷（例如丢掉的 Result），必须拦住。
+unused_must_use = "deny"
+# 2018 版习惯用法（如多余的 extern crate、匿名的 trait 对象边界）。
+# priority = -1：该组内含 unused_must_use，必须让上面的 deny 优先，
+# 否则 clippy 会报 lint_groups_priority（同优先级组与单条规则冲突）。
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = "warn"
+# 四大组显式启用：当前代码零告警，作为新增代码的下限。
+style = "warn"
+suspicious = "warn"
+complexity = "warn"
+perf = "warn"
+
+[workspace.dependencies]
+# ── 内部 crate ───────────────────────────────────────────────────────────
+mcloud-core = { path = "crates/mcloud-core" }
+mcloud-crypto = { path = "crates/mcloud-crypto" }
+mcloud-upstream = { path = "crates/mcloud-upstream" }
+mcloud-engine = { path = "crates/mcloud-engine" }
+mcloud-tasks = { path = "crates/mcloud-tasks" }
+mcloud-store = { path = "crates/mcloud-store" }
+mcloud-app = { path = "crates/mcloud-app" }
+
+# ── 异步 ────────────────────────────────────────────────────────────────
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# ── 序列化 ──────────────────────────────────────────────────────────────
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ── 密码学（全部纯 Rust，无 FFI）────────────────────────────────────────
+md-5 = "0.10"
+sha2 = "0.10"
+aes = "0.8"
+cbc = "0.1"
+des = "0.8"
+cipher = { version = "0.4", features = ["block-padding"] }
+base64 = "0.22"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+
+# ── HTTP 客户端 ─────────────────────────────────────────────────────────
+reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "gzip", "rustls-tls"] }
+
+# ── Web 服务 ────────────────────────────────────────────────────────────
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+# ── 可观测 ──────────────────────────────────────────────────────────────
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ── 时间 / 调度 ─────────────────────────────────────────────────────────
+chrono = { version = "0.4", features = ["serde"] }
+cron = "0.12"
+
+# ── 错误 ────────────────────────────────────────────────────────────────
+thiserror = "2"
+anyhow = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

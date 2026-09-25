@@ -1,0 +1,33 @@
+[package]
+name = "mcloud-server"
+description = "HTTP 服务：axum 路由 + SSE 事件流；同时提供 CLI 入口"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mcloud-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "mcloud-cli"
+path = "src/bin/cli.rs"
+
+[dependencies]
+mcloud-core.workspace = true
+mcloud-app.workspace = true
+mcloud-engine.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

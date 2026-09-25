@@ -1,0 +1,17 @@
+[package]
+name = "mcloud-core"
+description = "移动云盘自动化：领域类型与 IO trait 定义（零 IO）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+
+[lints]
+workspace = true

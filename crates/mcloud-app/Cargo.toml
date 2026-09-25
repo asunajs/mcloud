@@ -1,0 +1,23 @@
+[package]
+name = "mcloud-app"
+description = "组装层：把 IO 实现注入 engine，供 CLI 与 server 共用"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+mcloud-core.workspace = true
+mcloud-engine.workspace = true
+mcloud-tasks.workspace = true
+mcloud-store.workspace = true
+mcloud-upstream.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

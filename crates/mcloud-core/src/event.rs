@@ -1,0 +1,275 @@
+//! 事件模型：任务运行过程中向外推送的结构化事件。
+//!
+//! 前端通过 SSE 消费这些事件，因此**必须可序列化且有稳定的 `type` 标签**。
+
+use serde::{Deserialize, Serialize};
+
+use crate::run::{RunId, TaskOutcome};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevel {
+    /// 是否达到给定的最低级别。
+    pub fn gte(self, min: LogLevel) -> bool {
+        self.rank() >= min.rank()
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            LogLevel::Debug => 0,
+            LogLevel::Info => 1,
+            LogLevel::Warn => 2,
+            LogLevel::Error => 3,
+        }
+    }
+}
+
+/// 运行事件。`tag` 决定 SSE 的 `event:` 名称。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RunEvent {
+    Started {
+        run_id: RunId,
+        task: String,
+        account: String,
+        at_ms: i64,
+    },
+    Log {
+        run_id: RunId,
+        level: LogLevel,
+        message: String,
+        at_ms: i64,
+    },
+    Progress {
+        run_id: RunId,
+        step: u32,
+        total: u32,
+        label: String,
+    },
+    Finished {
+        run_id: RunId,
+        outcome: TaskOutcome,
+        duration_ms: u64,
+    },
+}
+
+impl RunEvent {
+    /// SSE `event:` 名称。
+    pub fn event_name(&self) -> &'static str {
+        match self {
+            RunEvent::Started { .. } => "started",
+            RunEvent::Log { .. } => "log",
+            RunEvent::Progress { .. } => "progress",
+            RunEvent::Finished { .. } => "finished",
+        }
+    }
+
+    pub fn run_id(&self) -> RunId {
+        match self {
+            RunEvent::Started { run_id, .. }
+            | RunEvent::Log { run_id, .. }
+            | RunEvent::Progress { run_id, .. }
+            | RunEvent::Finished { run_id, .. } => *run_id,
+        }
+    }
+
+    /// 便捷构造：信息级日志。
+    pub fn info(run_id: RunId, message: impl Into<String>, at_ms: i64) -> Self {
+        RunEvent::Log {
+            run_id,
+            level: LogLevel::Info,
+            message: message.into(),
+            at_ms,
+        }
+    }
+}
+
+/// 脱敏：把可能出现的凭证替换掉。
+///
+/// 事件会被写入磁盘并展示在浏览器里，绝不能带出完整凭证。
+pub fn redact(input: &str) -> String {
+    const KEYS: [&str; 6] = [
+        "authorization",
+        "jwttoken",
+        "token",
+        "ssoToken",
+        "auth",
+        "cookie",
+    ];
+    let mut out = input.to_string();
+    for key in KEYS {
+        let mut search_from = 0usize;
+        // 每轮都可能因替换而改变后续偏移，故重新扫描
+        while let Some(key_start) = find_ascii_ci(&out, key, search_from) {
+            let key_end = key_start + key.len();
+
+            // key 与分隔符之间只允许空白或引号，避免 "authorization" 被 "auth" 命中
+            let Some(sep_rel) = out[key_end..].find(['=', ':']) else {
+                break;
+            };
+            let between = &out[key_end..key_end + sep_rel];
+            if !between
+                .chars()
+                .all(|c| c.is_whitespace() || c == '"' || c == '\'')
+            {
+                search_from = key_end;
+                if search_from >= out.len() {
+                    break;
+                }
+                continue;
+            }
+
+            // 跳过分隔符后的空白
+            let mut cursor = key_end + sep_rel + 1;
+            while cursor < out.len() {
+                let c = out[cursor..].chars().next().expect("cursor 在边界内");
+                if c.is_whitespace() {
+                    cursor += c.len_utf8();
+                } else {
+                    break;
+                }
+            }
+
+            // 带引号的值取到配对引号；裸值取到常见分隔符
+            let (val_start, val_end) = if out[cursor..].starts_with('"') {
+                let s = cursor + 1;
+                let e = out[s..].find('"').map(|i| s + i).unwrap_or(out.len());
+                (s, e)
+            } else if out[cursor..].starts_with('\'') {
+                let s = cursor + 1;
+                let e = out[s..].find('\'').map(|i| s + i).unwrap_or(out.len());
+                (s, e)
+            } else {
+                let e = out[cursor..]
+                    .find(['&', '"', '\'', ' ', ',', ';', '\n', '}', ']'])
+                    .map(|i| cursor + i)
+                    .unwrap_or(out.len());
+                (cursor, e)
+            };
+
+            if val_end > val_start {
+                out.replace_range(val_start..val_end, "***");
+            }
+
+            search_from = val_start + 3;
+            if search_from >= out.len() {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// ASCII 大小写不敏感查找，返回 `hay` 中的字节下标。
+///
+/// 刻意不用 `to_lowercase()`：那会改变非 ASCII 字符的字节长度，
+/// 导致下标错位、进而在切片时 panic。
+fn find_ascii_ci(hay: &str, needle: &str, from: usize) -> Option<usize> {
+    let h = hay.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() || h.len() < n.len() {
+        return None;
+    }
+    let last = h.len() - n.len();
+    let mut i = from;
+    while i <= last {
+        if !hay.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
+        if h[i..i + n.len()]
+            .iter()
+            .zip(n)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_level_ordering() {
+        assert!(LogLevel::Error.gte(LogLevel::Warn));
+        assert!(!LogLevel::Debug.gte(LogLevel::Info));
+        assert!(LogLevel::Info.gte(LogLevel::Info));
+    }
+
+    #[test]
+    fn event_name_is_stable() {
+        let e = RunEvent::info(RunId::new(1), "hi", 0);
+        assert_eq!(e.event_name(), "log");
+        assert_eq!(e.run_id(), RunId::new(1));
+    }
+
+    #[test]
+    fn redacts_token_like_values() {
+        let s = redact("authorization=abc123&foo=bar");
+        assert!(s.contains("authorization=***"), "got: {s}");
+        assert!(s.contains("foo=bar"), "无关字段不应被改动: {s}");
+    }
+
+    #[test]
+    fn redacts_json_style() {
+        let s = redact(r#"{"jwttoken":"eyJhbGciOi","ok":1}"#);
+        assert!(s.contains(r#""jwttoken":"***""#), "got: {s}");
+        assert!(s.contains(r#""ok":1"#), "无关字段不应被改动: {s}");
+    }
+
+    #[test]
+    fn redacts_quoted_key_variants() {
+        for input in [
+            r#""token": "abc123""#,
+            r#"'token': 'abc123'"#,
+            r#"token=abc123"#,
+            r#"token: abc123"#,
+            r#"TOKEN=abc123"#,
+        ] {
+            let out = redact(input);
+            assert!(!out.contains("abc123"), "未脱敏：{input} -> {out}");
+        }
+    }
+
+    #[test]
+    fn handles_non_ascii_without_panicking() {
+        // 中文会让字节下标与字符下标错位，旧实现会在此 panic
+        let s = redact("账号：张三，token=secret值，备注：测试");
+        assert!(!s.contains("secret值"), "got: {s}");
+        assert!(s.contains("张三"), "不应破坏无关中文：{s}");
+    }
+
+    #[test]
+    fn does_not_redact_key_prefix_words() {
+        // "author" 以 "auth" 开头，但不是凭证字段
+        let s = redact(r#"{"author":"张三","authenticationInfo":"x"}"#);
+        assert!(s.contains("张三"), "不应误伤 author 字段：{s}");
+    }
+
+    #[test]
+    fn empty_and_missing_values_are_safe() {
+        assert_eq!(redact(""), "");
+        assert_eq!(redact("token="), "token=");
+        // 不 panic 即可
+        let _ = redact("token");
+        let _ = redact("cookie:");
+    }
+
+    #[test]
+    fn find_ascii_ci_basic() {
+        assert_eq!(find_ascii_ci("Hello World", "world", 0), Some(6));
+        assert_eq!(find_ascii_ci("Hello", "xyz", 0), None);
+        assert_eq!(find_ascii_ci("aaa", "a", 1), Some(1));
+    }
+}

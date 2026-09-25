@@ -1,0 +1,19 @@
+[package]
+name = "mcloud-upstream"
+description = "移动云盘上游接口封装（端点、请求/响应类型、HTTP 客户端）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+mcloud-core.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

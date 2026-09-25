@@ -1,0 +1,24 @@
+# 编辑器统一设置，保证跨编辑器的空白与编码一致。
+# 与 rustfmt.toml 的 newline_style = "Unix" 对齐。
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+
+[*.rs]
+indent_size = 4
+
+[*.{toml,json,jsonc,yml,yaml,ts,tsx,js,mjs,cjs,css,html}]
+indent_size = 2
+
+[*.md]
+# Markdown 里行尾双空格是有意义的硬换行，不能裁掉。
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab

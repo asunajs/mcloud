@@ -1,0 +1,24 @@
+# rustfmt 配置 —— 只用 stable 选项。
+#
+# 本仓库工具链是 stable，任何 nightly-only 选项（例如
+# format_code_in_doc_comments、wrap_comments、group_imports）都会退化成
+# "unstable features are only available in nightly channel" 警告并被静默忽略。
+# 需要它们时先升级工具链决策，不要把无效配置写进来。
+#
+# 详见 docs/conventions.md 第 2 节。
+
+edition = "2021"
+
+# 中文注释与长字符串较多，100 列比默认的 100 更贴合现有排版，
+# 同时给 `cargo fmt` 一个明确上限。
+max_width = 100
+
+# 换行符统一 LF，和 .editorconfig 保持一致。
+newline_style = "Unix"
+
+# 结构体初始化与 ? 的惯用简写：减少噪音，不改变语义。
+use_field_init_shorthand = true
+use_try_shorthand = true
+
+# 每个 use 分组内部按字典序排列（分组之间的空行由 rustfmt 保留）。
+reorder_imports = true

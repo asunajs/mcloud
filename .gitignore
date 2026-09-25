@@ -1,0 +1,6 @@
+/target
+/.cargo-home
+/web/node_modules
+/web/dist
+/data
+*.log
