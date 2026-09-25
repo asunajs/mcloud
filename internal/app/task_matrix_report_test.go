@@ -699,3 +699,39 @@ func TestTaskMatrixRunBroadcastsTheFailureReason(t *testing.T) {
 			live, section, log.joined())
 	}
 }
+
+// TestTaskMatrixRunBroadcastsUpstreamDetail ⭐ 上游那句 `detail` 要走到**逐条播报**（Q40 / #149）。
+//
+// 为什么上游层已经钉过还要在 app 层钉一条：`detail` 是**信封层**读进来的，它到界面
+// 中间隔着三层（[core.Error] 正文 → [TaskStepRecord.Err] → `打卡失败 …` 那一行），
+// 而这三层里任何一层改成"只取 `message`"或"自己重拼一句"都会让这一格静默丢失 ——
+// 上游那条测试照样绿。
+//
+// 反向改坏它的两处，各自会红：
+//   - 把播报那句改成 `record.Name`+固定文案（丢掉 `Err`）⇒ 两条 `contains` 都红；
+//   - 把 [Envelope.Detail] 改成"什么类型都收 / 连 `tipMsg` 一起收"⇒ 第三条断言红。
+func TestTaskMatrixRunBroadcastsUpstreamDetail(t *testing.T) {
+	only := mxItems(mxItem(777, "day", "上游给了 detail 的那条", "WAIT", "", 0))
+	script := mxScript([]string{"JWT-1"}, only, only, append(
+		[]liveTaskRoute{{mxClickEndpoint, []string{mxClick58999}}}, mxHappy()[1:]...)...)
+	log := &mxLog{}
+	run := mxDefaultRun(t, script)
+	run.Progress = log.handle()
+	if _, perr := mxResult(t, run); perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	line := log.lineWith("打卡失败 上游给了 detail 的那条 777")
+	if line == "" {
+		t.Fatalf("没有那一行，实得：\n%s", log.joined())
+	}
+	if !strings.Contains(line, "任务不存在") {
+		t.Errorf("`detail` 那一句要出现在实时播报里（从前只剩误导的那句登录态），实得 %q", line)
+	}
+	if !strings.Contains(line, "请尝试重新登录或重启手机") {
+		t.Errorf("⚠ 不许**替换** `message`：本层不判哪一句对，两句都得在，实得 %q", line)
+	}
+	// `tipMsg` 没接 ⇒ 它的键名与值都不该出现在文本里（那条 `null` 是形状零样本）。
+	if strings.Contains(line, "tipMsg") {
+		t.Errorf("没读的那一格不许漏进播报，实得 %q", line)
+	}
+}

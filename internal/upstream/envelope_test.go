@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/catlair/mcloud/internal/core"
@@ -85,6 +86,105 @@ func TestBusinessFailureCarriesCodeAndMessage(t *testing.T) {
 	// 对外文案走白名单，不夹带上游原文
 	if got := err.PublicMessage(); got != "请求参数不合法" {
 		t.Errorf("对外文案实得 %q", got)
+	}
+}
+
+// 58999 那一份**逐字**取自 2026-09-25 用户提供的线上采集（iOS，客户端 13.1.1）：
+// `task/click` 对 22 个任务 id 全部回这一句。它之所以是夹具而不是编出来的样例，
+// 是因为要验的正是"`message` 与 `detail` 说的不是同一件事"这一格 —— 两句话都得是真的。
+const envelopeSample58999 = `{"code":58999,` +
+	`"message":"当前用户信息读取异常，请尝试重新登录或重启手机",` +
+	`"detail":"任务不存在","tipMsg":null}`
+
+// TestEnvelopeDetailReachesFailureText ⭐ 坑表 #149 / Q40 的落点判据。
+//
+// 反向改坏它的四处，各自会红：
+//   - 把 [Envelope.Detail] 写成"什么类型都收"（`fmt.Sprint(value)`）⇒ 第二条断言红
+//     （`smid` 那一口的 `detail` 是**载荷容器**，整块拼进文本等于把 deviceId 打进日志）；
+//   - 把"与 `message` 逐字相同就不拼"那一句删掉 ⇒ 第三条断言红（同一句出现两遍）；
+//   - 把截断删掉 ⇒ 第四条断言红（超长那一整段会原样进日志与逐条播报）；
+//   - 把 `EnsureOK` 里的 `withDetail` 调用整个删掉 ⇒ 第一条断言红（回到"只剩误导的那一句"）。
+func TestEnvelopeDetailReachesFailureText(t *testing.T) {
+	env := envelopeOf(t, envelopeSample58999)
+	_, err := env.EnsureOK()
+	if err == nil {
+		t.Fatal("58999 该判失败")
+	}
+	got := err.Error()
+	if !contains(got, "上游返回 code=58999") || !contains(got, "任务不存在") {
+		t.Errorf("失败文本要同时给出码与 `detail` 那一句，实得 %q", got)
+	}
+	if !contains(got, "请尝试重新登录或重启手机") {
+		t.Errorf("⚠ 不得**替换**掉 `message`：本层不判哪一句是对的，实得 %q", got)
+	}
+	// 对外文案仍然是白名单那一句：`detail` 与 `message` 一样**只进日志**。
+	if public := err.PublicMessage(); public != "请求参数不合法" || contains(public, "任务不存在") {
+		t.Errorf("对外文案不该带上游原文，实得 %q", public)
+	}
+
+	// `detail` 是对象（`smid` 那一口的形状）⇒ 读成"没给"，一个字都不拼。
+	objectDetail := envelopeOf(t, `{"code":1100,"message":"取到了","detail":{"deviceId":"SENTINEL-xyz"}}`)
+	_, err = objectDetail.EnsureOK()
+	if err == nil {
+		t.Fatal("code=1100 该判失败")
+	}
+	if contains(err.Error(), "SENTINEL") || contains(err.Error(), "detail") {
+		t.Errorf("`detail` 是载荷容器时不许拼进文本，实得 %q", err.Error())
+	}
+
+	// 与 `message` 逐字相同 ⇒ 不重复拼。（这里**不能**用"参数错误"当面值 ——
+	// 它是 [core.Error.Error] 给 BadRequest 加的类别前缀，会把计数读成 2。）
+	same := envelopeOf(t, `{"code":400,"message":"活动已结束","detail":"活动已结束"}`)
+	_, err = same.EnsureOK()
+	if err == nil {
+		t.Fatal("该判失败")
+	}
+	if n := strings.Count(err.Error(), "活动已结束"); n != 1 {
+		t.Errorf("同一句只该出现一次，实得 %d 次：%q", n, err.Error())
+	}
+
+	// 超长 ⇒ 截到上限并留省略号。
+	long := envelopeOf(t, `{"code":400,"message":"m","detail":"`+strings.Repeat("啊", envelopeDetailLimit+10)+`"}`)
+	_, err = long.EnsureOK()
+	if err == nil {
+		t.Fatal("该判失败")
+	}
+	if !strings.HasSuffix(err.Error(), "…") ||
+		strings.Count(err.Error(), "啊") != envelopeDetailLimit {
+		t.Errorf("超长要截到上限并带省略号，实得 %q", err.Error())
+	}
+
+	// 空串与纯空白 ⇒ 与"没有那一格"同档（不拼出个空尾巴）。
+	for _, body := range []string{`{"code":400,"message":"m","detail":""}`,
+		`{"code":400,"message":"m","detail":"  "}`} {
+		_, err = envelopeOf(t, body).EnsureOK()
+		if err == nil {
+			t.Fatalf("该判失败：%s", body)
+		}
+		if contains(err.Error(), "detail") {
+			t.Errorf("空白不该拼出尾巴，实得 %q", err.Error())
+		}
+	}
+
+	// `success=false` 那一支也走同一处（它同样可能带 `detail`）。
+	_, err = envelopeOf(t, `{"success":false,"detail":"活动已结束"}`).EnsureOK()
+	if err == nil || !contains(err.Error(), "活动已结束") {
+		t.Errorf("success=false 那一支也要拼上 detail，实得 %v", err)
+	}
+}
+
+// TestEnvelopeWithoutDetailKeepsTheOldText 钉住**没有**那一格时的形状不变。
+//
+// 反向改坏它：把 `withDetail` 写成"无论如何都拼个尾巴"⇒ 两条断言都红
+// （而全仓那些逐字断言失败文本的用例会成片红 —— 这条是它们的**前置**，不是冗余）。
+func TestEnvelopeWithoutDetailKeepsTheOldText(t *testing.T) {
+	_, err := envelopeOf(t, `{"code":514,"msg":"验证失败"}`).EnsureOK()
+	if err == nil || err.Error() != "参数错误: 上游返回 code=514: 验证失败" {
+		t.Errorf("没有 `detail` 时文本该逐字照旧，实得 %v", err)
+	}
+	_, err = envelopeOf(t, `{"code":514}`).EnsureOK()
+	if err == nil || err.Error() != "参数错误: 上游返回 code=514" {
+		t.Errorf("没消息时也不该多出冒号或尾巴，实得 %v", err)
 	}
 }
 

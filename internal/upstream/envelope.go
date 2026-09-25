@@ -151,6 +151,75 @@ func (e *Envelope) Payload() (any, bool) {
 	return nil, false
 }
 
+// envelopeDetailLimit 是 `detail` 进错误文本时的长度上限（按**字**数，不是字节）。
+//
+// 为什么要有上限而不是"照抄整句"：这一格的形状本仓没有约束力（见 [Envelope.Detail]），
+// 而失败文本会同时进日志与逐条播报。今天唯一的样本是五个字（"任务不存在"），
+// 上限只是防"上游哪天把整段 HTML 塞进来"，不针对任何已知样本。
+const envelopeDetailLimit = 160
+
+// Detail 返回 `detail` —— 上游把**真正的原因**写在这一格的那一句。
+//
+// 为什么单独有一个动作（`Message` 不是已经给人看的话了吗）：2026-09-25 用户提供的一次
+// 线上采集里，`task/click` 对 22 个任务 id 全部回
+// `{"code":58999,"message":"当前用户信息读取异常，请尝试重新登录或重启手机","detail":"任务不存在",…}`
+// —— 两格说的**不是同一件事**（一个把人往登录态引、一个说"任务不存在"），
+// 而从前只有 `message` 进错误文本，于是日志里只剩那一句误导人的话（坑表 **#149**、
+// `docs/pending-decisions.md` Q40）。
+//
+// ⚠ **只收字符串**。`detail` 这一格在别处是**载荷容器**：`smid` 那一口回的是
+// `{"code":1100,"detail":{"deviceId":…}}`（见 `smid.go` 自己的解析），
+// 把对象整块 `fmt` 进错误文本等于把标识类字段打进日志 ⇒ 非字符串一律读成"没给"。
+//
+// ⚠ 也**不解释**：本层只多交一句原话，不判它与 `message` 谁对（判据仍只有 `code`）。
+// 与 [Envelope.Message] 同一条边界：**只进日志**，不进对外文案（`core.Error.PublicMessage`
+// 是白名单，不会带出这一句）。
+func (e *Envelope) Detail() (string, bool) {
+	value, ok := e.field("detail")
+	if !ok {
+		return "", false
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", false
+	}
+	if strings.TrimSpace(text) == "" {
+		return "", false
+	}
+	return text, true
+}
+
+// withDetail 把 `detail` 拼在既有的失败文本后面；没有那一格时**原样交回**。
+//
+// 分隔符用 `｜` 而不是括号：`EnsureOKWithHint` 已经在失败文本尾巴上拼过一枚
+// `（<本仓的诊断>）`，两种东西必须看得出谁说的（上游原话 vs 本仓档位表）。
+//
+// 与 `message` 逐字相同时不拼：那一格只是重复，拼上去会让"上游给了两格"看起来成立。
+//
+// ⭐ "没有那一格时**原样交回**"这一支今天有过一次真账号实测：同日第八趟单跑 `revival`
+// 撞到 `code=500 本月已领取复活卡奖励`，事件流里那一句既没多出 `｜上游 detail：`、
+// 也没多出空冒号或空尾巴 ⇒ 旧文本逐字不变（正是 `TestEnvelopeWithoutDetailKeepsTheOldText`
+// 钉的那个形状，从此它不只由替身支撑）。
+// ⚠ 但这一发**分不清**"上游没带这个键"还是"带了却不是字符串"：本仓不留响应体原文
+// （上游错误体常回显凭据，见 [errorFromStatus] 那条注释）。而"真带上来的 `detail`
+// 拼出去长什么样"仍只有进程内替身 —— 别把它读成已线上验证（Q40 后半边）。
+func (e *Envelope) withDetail(base string) string {
+	detail, ok := e.Detail()
+	if !ok {
+		return base
+	}
+	if msg, hasMsg := e.Message(); hasMsg && strings.TrimSpace(msg) == detail {
+		return base
+	}
+	runes := []rune(detail)
+	if len(runes) > envelopeDetailLimit {
+		detail = string(runes[:envelopeDetailLimit]) + "…"
+	} else {
+		detail = string(runes)
+	}
+	return base + "｜上游 detail：" + detail
+}
+
 // EnsureOK 在业务失败时返回错误，成功时给出载荷（`nil` 表示本来就没有载荷）。
 //
 // 只做到"非 0 即失败"这一层：各期活动的"已抢完 / 云朵不足"码并不统一，
@@ -164,9 +233,9 @@ func (e *Envelope) EnsureOK() (any, *core.Error) {
 	// 多报一次失败只是噪声，把失败当成功会让调用方拿着一张空 token 继续往下跑。
 	if success, ok := e.Success(); ok && !success {
 		if msg, ok := e.Message(); ok {
-			return nil, core.NewBadRequest(fmt.Sprintf("上游返回 success=false: %s", msg))
+			return nil, core.NewBadRequest(e.withDetail(fmt.Sprintf("上游返回 success=false: %s", msg)))
 		}
-		return nil, core.NewBadRequest("上游返回 success=false")
+		return nil, core.NewBadRequest(e.withDetail("上游返回 success=false"))
 	}
 
 	code, hasCode := e.Code()
@@ -175,9 +244,9 @@ func (e *Envelope) EnsureOK() (any, *core.Error) {
 		return payload, nil
 	}
 	if msg, ok := e.Message(); ok {
-		return nil, core.NewBadRequest(fmt.Sprintf("上游返回 code=%d: %s", code, msg))
+		return nil, core.NewBadRequest(e.withDetail(fmt.Sprintf("上游返回 code=%d: %s", code, msg)))
 	}
-	return nil, core.NewBadRequest(fmt.Sprintf("上游返回 code=%d", code))
+	return nil, core.NewBadRequest(e.withDetail(fmt.Sprintf("上游返回 code=%d", code)))
 }
 
 // asInt64 把"可能是数字也可能是字符串"的值统一成 int64。

@@ -305,6 +305,12 @@ func (r TaskMatrixRun) RunAccount(
 		// 反过来，若对所有 `Err != ""` 都播，434 那种"一枪没发而跳过"会连念两遍
 		// （runner 自己那句 warn + 这一句），而同一天实测正是这么撞出来的。
 		//
+		// ⭐ 第八趟真跑（同日，两条 `app-task`）把这条规则的**前提**又确认了一遍：
+		// 两条 run 的小结都念"1 条上报失败"，事件流里都没有 `打卡失败 …` 那一行 ——
+		// 而那一条失败**都是 434 分享那一档**（`StepRunner`），它的实时行是 warn 那句
+		// `分享文件跳过 … 没有可分享的文件 …` ⇒ "小结计数有它、却没有带原因的行"**不是缺口**。
+		// 反过来读也不成立：不能因为"这一趟没出现打卡失败行"就断定播报漏了。
+		//
 		// 反向改坏它：删掉这一句 ⇒ `TestTaskMatrixRunBroadcastsTheFailureReason` 红。
 		if plan.Kind == StepClick && record.Err != "" {
 			r.progress(core.LevelError, fmt.Sprintf("打卡失败 %s %d：%s",

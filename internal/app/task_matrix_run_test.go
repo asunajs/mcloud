@@ -47,6 +47,12 @@ const (
 	mxClickOK         = `{"code":0,"msg":"success"}`
 	mxEntryOK         = `{"code":0,"msg":"success"}`
 	mxClickBizFailure = `{"code":1,"msg":"任务已过期"}`
+	// mxClick58999 **逐字**取自 2026-09-25 用户提供的线上采集（同一个形状也钉在
+	// `internal/upstream/envelope_test.go`）。放两份的理由不同：上游那份验"错误文本里有它"，
+	// 这一份验"**这一格能不能一路走到逐条播报那一行**"—— app 层不碰信封的键，
+	// 所以这一条是"接线没断"的证据，不是解析的证据。
+	mxClick58999 = `{"code":58999,"message":"当前用户信息读取异常，请尝试重新登录或重启手机",` +
+		`"detail":"任务不存在","tipMsg":null}`
 )
 
 func mxBool(v bool) *bool { return &v }
