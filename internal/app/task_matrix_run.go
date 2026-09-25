@@ -631,7 +631,7 @@ func (e *taskExecutor) apply(
 
 // runRunner 跑一条专属玩法，交回"**有没有真的发出过请求**"（口径同 [apply]）。
 //
-// 今天的五条按 spec 走，不为每条各写一份：前两条形状一样（`前置打卡(受门约束) →
+// 今天的六条按 spec 走，不为每条各写一份：前两条形状一样（`前置打卡(受门约束) →
 // mrp 入口上报 → 自己的那一发打卡`），差别只在最后一发的 key；
 // 中间两条（106 / 522）没有 `OpensEntry`、没有 `FinalKey`，玩法本体就是上传那一半；
 // 最后一条（434）既不打卡也不上传，本体是"分享 + 立刻取消分享"那一族（[runShare]）。
@@ -693,6 +693,13 @@ func (e *taskExecutor) runRunner(
 		fired = fired || sent
 		problems = append(problems, shareProblems...)
 	}
+	if spec.Notes {
+		// 笔记那一族**不消费**上面那些账：它自己开一条链（换票 → 建 → 移进回收站），
+		// 与网盘文件无关，所以放在 Shares 之后也不改变任何一条的形状。
+		sent, noteProblems := e.runNote(ctx, item)
+		fired = fired || sent
+		problems = append(problems, noteProblems...)
+	}
 	record.Err = joinProblems(problems)
 	return fired
 }
@@ -724,11 +731,32 @@ func (e *taskExecutor) entryReport(ctx context.Context, deviceID string) *core.E
 // pace 等那一点间隔。等不住（ctx 取消）时**静默返回**：
 // ctx 已经取消，后面每一枪都会自己失败，没必要在这里再造一条错误文本。
 func (e *taskExecutor) pace(ctx context.Context) {
+	_ = e.wait(ctx, taskMatrixPace)
+}
+
+// wait 是"等一会"的注入点（nil ⇒ [RealWaiter]，理由同 [TaskMatrixRun.Wait] 头上那句
+// "默认必须真的等"）。与 [pace] 分开：那一格把取消吞了，这一格要把原因交回调用方
+// —— 笔记那一族等不住时**要不要照发后一枪**是它自己的决定，见 [runNote]。
+func (e *taskExecutor) wait(ctx context.Context, d time.Duration) *core.Error {
 	wait := e.run.Wait
 	if wait == nil {
 		wait = RealWaiter{}
 	}
-	_ = wait.Wait(ctx, taskMatrixPace)
+	return wait.Wait(ctx, d)
+}
+
+// nowMillis 给"毫秒时间戳只能由调用方注入"那一族口径提供一个读数（上游层的请求构造
+// 函数不许读时钟，见 `internal/upstream/app_note.go` 里 `nowMillis` 那段）。
+//
+// ⚠ 时钟没接时交回 `false` 而不是"给个 0"：一个零值时间戳会**照常发出去**，
+// 而上游看到的是一条 1970 年建的笔记 —— 那比"这一条没做成"难查得多。
+// 同一格与 [dayOfMonth] 的处理**刻意不同**：那一格读不到 ⇒ 门不挡（保守放行），
+// 因为挡错会让用户今天没事做；这一格读不到 ⇒ 不发（保守拒绝），因为发出去的是**写**。
+func (e *taskExecutor) nowMillis() (int64, bool) {
+	if e.run.Clock == nil {
+		return 0, false
+	}
+	return e.run.Clock.Now().UnixMilli(), true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -979,6 +1007,108 @@ func (e *taskExecutor) runShare(
 	// 旧实现这一句**没有**（它删完不吭声）。这里补一行 info：这一族是"建了又删"，
 	// 少了这一行，日志里只有"分享文件成功"，读的人会以为网盘里留着一条分享。
 	e.run.progress(core.LevelInfo, fmt.Sprintf("已取消分享 %s %d", name, id))
+	return true, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 云笔记那一半（107：建一条随机笔记、再把它移进回收站）
+// ─────────────────────────────────────────────────────────────────────────────
+
+// noteRecycleWait 是"建完等到再删"的那一点间隔（旧实现 `runners.ts:63` 的 `sleep(2000)`）。
+//
+// 它与 [taskMatrixPace]（500ms）**不是一个值**，也不合并：那 500ms 是"发完一枪打卡之后"
+// 的通用节奏，这一格是"等上游把刚建的那条笔记落库"。⚠ 两格都没有出处说明为什么是这个数
+// （与 `taskMatrixPace` 头上同一句：旧实现为什么是 2000ms 没有成文）。
+const noteRecycleWait = 2 * time.Second
+
+// runNote 跑玩法 107 的本体，交回**有没有真的发出过请求**与逐格的原因。
+//
+// 形状来自**在跑的** Go 参考实现（caiyun `handleNoteTask` / `createTempNote`）：
+// 换 `app_auth` → 建一条随机笔记 → 等 2s → 移进回收站。
+// ⚠ **不是**旧 TS：那一条 runner 从没跑到过后两枪（成文见
+// [`internal/upstream/app_note.go`](../upstream/app_note.go) 文件头与
+// `docs/business-feature-inventory.md:383`）⇒ 这里连"照抄"都算不上，
+// 只能算"按一个在跑的实现落形状"。三口的判据缺口一并写在那儿。
+//
+// # `authToken` 从哪儿来
+//
+// 两家的调用方都是"配置里那枚 token"，而本仓没有那一格配置（登录态只有库里那串
+// `Authorization`）。它就是 `Basic base64("<前缀>:<手机号>:<authToken>")`，
+// 所以这里现拆：[core.ParseAuth] 交回的 `Token` 正是 `authToken`。
+// ⚠ 这一格是**推断**（"整串第三段 = 登录 token"由 [`internal/core/auth.go`](../core/auth.go)
+// 的 `ParseAuth` 成文支撑，不是"笔记服务认这一枚"的实测）⇒ 真跑时如果上游在这一口回
+// 鉴权失败，第一个要怀疑的就是它，而不是请求形状。
+//
+// # ⚠ 这一族的产物**删不到底**
+//
+// `moveToRecycleBin` 只是移进回收站，本仓没有物删那一口 ⇒ 每次真跑都会在用户的
+// 笔记回收站里留一条随机标题的笔记（直到上游自己清）。它**不**记进
+// [TaskMatrixRunResult.CloudFileIDs]：那一条链清的是网盘文件，把笔记 id 塞进去
+// 等于往另一个服务发删除。这一格登记在 `docs/pending-decisions.md` **R32**。
+func (e *taskExecutor) runNote(
+	ctx context.Context, item upstream.TaskV2Item,
+) (bool, []string) {
+	name, id := taskNameOf(item), derefTaskID(item)
+	if e.run.Random == nil {
+		return false, []string{"云笔记没做成：随机源没接，造不出 noteid 与标题（本工具侧缺接线）"}
+	}
+	authorization := e.opening.Credential.Authorization()
+	phone := e.opening.Credential.Phone()
+	authToken := ""
+	if info, ok := core.ParseAuth(authorization); ok && info.Token != nil {
+		authToken = *info.Token
+	}
+	if authToken == "" || phone == "" {
+		// 错误文本里**不带**任何一项的值：两枚都是凭据 / 号码（成文见 `docs/sanitize-guide.md`）。
+		return false, []string{
+			"云笔记没做成：这个号的登录态里拆不出 authToken 或手机号 ⇒ 一枪不发" +
+				"（笔记那一族的三口全靠它们，缺一个就凑不出发出去的东西）",
+		}
+	}
+	appAuth, perr := e.src.up.AppNoteAuthToken(ctx, authorization, authToken, phone)
+	if perr != nil {
+		// 与旧 TS 同向：这一口拿不到 `app_auth` ⇒ 后两枪**不发**，整条停在"没做成"。
+		// ⚠ 但旧实现在这里是**静默跳过**（`logger.info` 一句、还把那条任务记进"本次成功"），
+		// 这里交回失败原因，让它落在"这一条没做成"那一档。
+		problem := "换笔记鉴权失败：" + perr.Error() + " ⇒ 后两枪不发，不会在笔记里留下东西"
+		e.run.progress(core.LevelError, fmt.Sprintf("云笔记失败 %s %d：%s", name, id, problem))
+		return true, []string{problem}
+	}
+	// 一发出网了：从这里往下都算"这一条今天动过"（口径见 [apply]）。
+	now, hasNow := e.nowMillis()
+	if !hasNow {
+		return false, []string{
+			"建笔记没做成：时钟没接，`createtime` / `updatetime` / `visitTime` 三格没有值可填" +
+				"（本层不读 `time.Now()`，见 `app_note.go`）⇒ 不再发后两枪",
+		}
+	}
+	noteID := randomHex(e.run.Random, 32)
+	title := randomHex(e.run.Random, 3)
+	if cerr := e.src.up.AppNoteCreate(ctx, authorization, appAuth, upstream.NoteCreateInput{
+		NoteID: noteID, Title: title, Phone: phone,
+	}, now); cerr != nil {
+		problem := "建笔记失败：" + cerr.Error() + " ⇒ 没删（这一趟没在笔记里留下东西" +
+			"，除非上游其实建成功了却没说）"
+		e.run.progress(core.LevelError, fmt.Sprintf("云笔记失败 %s %d：%s", name, id, cerr.Error()))
+		return true, []string{problem}
+	}
+	e.run.progress(core.LevelInfo, fmt.Sprintf("云笔记已建 %s %d", name, id))
+	if werr := e.wait(ctx, noteRecycleWait); werr != nil {
+		// 等不住 ⇒ **照发**删除那一枪：跳过等待的代价是"上游可能还没落库、删不掉"，
+		// 而不发那一枪的代价是"一定留一条笔记在用户账号里"。前者可重试，后者不可见。
+		e.run.progress(core.LevelWarn, fmt.Sprintf(
+			"云笔记没等够 2 秒（%s）⇒ 直接发删除，不等了", werr.Error()))
+	}
+	if derr := e.src.up.AppNoteMoveToRecycleBin(ctx, authorization, appAuth, noteID); derr != nil {
+		problem := "移进回收站失败：" + derr.Error() +
+			" ⇒ 那条笔记**留在用户的云笔记里**（标题是随机串，需手动去找并删除）"
+		e.run.progress(core.LevelError, fmt.Sprintf("云笔记删除失败 %s %d：%s", name, id, derr.Error()))
+		return true, []string{problem}
+	}
+	// 与外链那一族同一条纪律：这一族是"建了又删"，少了这一行，日志里只有
+	// "云笔记已建" ⇒ 读的人会以为账号里留着一条笔记。⚠ 也别读成"清干净了"：
+	// 它只在**回收站**里（R32），所以这里念的是"已移进回收站"。
+	e.run.progress(core.LevelInfo, fmt.Sprintf("云笔记已移进回收站 %s %d", name, id))
 	return true, nil
 }
 

@@ -264,11 +264,18 @@ type taskRunnerSpec struct {
 	// 当天能上传的那几条 id 都比 434 大）⇒ 两口仍零真打。要不要给它造一次可分享的
 	// 文件是设计决定，未拍板 ⇒ `docs/pending-decisions.md` **Q41**。
 	Shares bool
+	// Notes 为真 ⇒ 这条 runner 的**本体**是"在云笔记里建一条随机笔记、再把它移进回收站"
+	// （**两次写**，形状与 [Shares] 同：建了又删）。
+	//
+	// 它是这一族**唯一**的清理手段：本仓没有"物删回收站笔记"那一口（零实现、零实拍）
+	// ⇒ 产物会留在用户的笔记回收站里，**进不了** [TaskMatrixRunResult.CloudFileIDs]
+	// 那条网盘清理链。这一格是已知残留，登记在 `docs/pending-decisions.md` **R32**。
+	Notes bool
 }
 
 // taskMatrixRunners 是**本仓已经接上**的专属玩法表。
 //
-// ⚠ 表里五条，而旧实现有十四条 —— 其余九条在 [taskMatrixToolGaps]。
+// ⚠ 表里六条，而旧实现有十四条 —— 其余八条在 [taskMatrixToolGaps]。
 // 前两条（409 / 1005）是"整条链今天真的能跑完"的：入口上报（**零实拍**，见
 // `app_task_click.go` 文件头）+ 一发打卡（本族那一发只有**两发**实拍，都在
 // `m.mcloud.139.com`；另两发同名端点在 `:7071`，属 notice 与分享码那两族 ——
@@ -282,6 +289,11 @@ type taskRunnerSpec struct {
 // 最后一条（434）是 2026-09-25 随外链那一族接上的，形状与上面几条都不同：它**不生产**
 // 文件、只消费这一趟前面那些上传任务产出的文件（见 [taskRunnerSpec.Shares]）。
 // 它的两口同样**零 REST 实拍**（成文见 `internal/upstream/app_cloud_outlink.go` 文件头）。
+//
+// 107（云笔记）与 434 同族（建了又删），但它是这一张表里**唯一一条"旧实现从没跑到过"**
+// 的玩法：旧 TS 那个判据恒不成立 ⇒ 后两枪一枪都没发过（`docs/business-feature-inventory.md:383`
+// 那句"实测 bug"）。所以它的形状取自**在跑的** Go 参考实现，而不是旧 TS ——
+// 三口逐字与两处取舍写在 `internal/upstream/app_note.go` 文件头，⚠ 也是**零 REST 实拍**。
 //
 // ⚠ 旧实现在跑 runner **之前**还有一发通用打卡（`handleTaskClick` 里那句
 // `clickTaskWithStep`，key 恒 `task`、受 `currstep == 0` 门约束）。
@@ -317,6 +329,20 @@ var taskMatrixRunners = map[int64]taskRunnerSpec{
 	// 前置那一发仍由 [PlanTaskStep] 按门决定，而 434 恰好是那道门**唯一有例外**的一条
 	// （`currstep == 22` 也打，见 [taskClickGate]）⇒ 它是那张例外表今天唯一能走到的入口。
 	434: {Name: "分享一个文件并立刻取消", Shares: true},
+	// 旧实现 `runners.ts:47-66` + `apis/note.ts`：换笔记凭据 → 建一条随机笔记 →
+	// 等 2s → 把它移进回收站。形状与 434 同族（建了又删），差别在**删不到底**：
+	// 这一族只进回收站，本仓没有物删那一口（R32）。
+	//
+	// ⚠ 这条**不是**"照旧实现落好了"那么简单：旧 TS 那一条 runner **从来没有真的发过
+	// 后两枪** —— 它读 `http.post` 返回值的 `.headers`，而 ofetch 直接返回解析后的响应体
+	// ⇒ 那个判据恒不成立，每次都走"跳过云笔记任务"那一支（盘点里的"实测 bug"就是这句，
+	// `docs/business-feature-inventory.md:383`）。所以这一条的**判据源是在跑的 Go 参考实现**
+	// （caiyun `caiyun_note.go` + `handleNoteTask`），不是旧 TS；逐处差异写在
+	// `internal/upstream/app_note.go` 文件头。
+	//
+	// ⚠ 它同样**没有** `FinalKey`（旧 TS 那一条 runner 自己不再打一发；它在恒跳过的
+	// 那段代码之后，从未执行过 ⇒ 那一发到底存不存在**没有证据**，故不发）。
+	107: {Name: "创建并删除一个云笔记", Notes: true},
 }
 
 // taskMatrixToolGaps 是"旧实现有专属玩法、本仓还接不上"的那批，**逐条写明缺哪一族**。
@@ -335,7 +361,11 @@ var taskMatrixToolGaps = map[int64]string{
 	// 顶它（换掉的是另一个服务），**待拍板 Q32**。
 	113: "PC 客户端上传：三枪与 PC 档已落码，缺的是旧实现那一发前置 `authTokenRefresh.do`" +
 		"（本仓刻意不实现那一个服务，见 `internal/upstream/auth_refresh.go` 文件头）⇒ 用哪一口顶它待拍板 Q32",
-	107: "创建云笔记要笔记服务那一族（note 鉴权 + 建 + 删），本仓未实现",
+	// 107（云笔记）在 [taskMatrixRunners]：三口已于 2026-09-25 落码
+	// （`internal/upstream/app_note.go`）。⚠ 但"接上"只到**形状**那一层：这一族三口
+	// **零 REST 实拍**，而旧 TS 那一条 runner 从未跑到过后两枪 ⇒ 它连"照抄"都算不上。
+	// 别再把它放回本表（同上面 113 与下面 434 那两格的写法）。
+	//
 	// 434（分享文件）在 [taskMatrixRunners]：外链那一族两口已于 2026-09-25 落码
 	// （`internal/upstream/app_cloud_outlink.go`）。它今天仍**没有一次真打**，
 	// 但"本仓缺端点"这一档已经不成立了 —— 别再把它放回本表。

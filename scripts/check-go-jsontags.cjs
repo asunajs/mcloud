@@ -675,6 +675,9 @@ const UNTAGGED_ALLOWED = {
     '`getOutLink` 的**请求侧入参集**（`Account` + `FileIDs` + `DedicatedName`）。⚠ `Account` 是**完整手机号** —— 与 `CloudUploader.Auth` 同一条"只进不出"：这一旦可序列化，离把号码写进日志/响应体只差一次"顺手 marshal 一下入参"。body 由 `CloudGetOutLinkRequest` 现拼那**十一键** map（与旧 TS 逐字对齐，含 `subLinkType:0`、`encrypt:1` 这些**不能缺**的档位）⇒ 补 tag 会造出第二条旁路，而"这一口认不认多出来的键"零实拍',
   'internal/upstream/app_cloud_outlink.go:CloudOutLink':
     '`getOutLink` 的解析结果（只有 `LinkID` 那一格）。它是编排层**"能不能删"的唯一判据**：`nil` 与"给了空串"都要被上层播成失败（拿不到 id ⇒ 那条公开外链留在用户网盘里，见 `runShare` 函数头那三处刻意不同）。本口**零实拍** ⇒ 字段名与"会不会回 `getOutLinkResSet`"都还没被上游确认过，补 tag 等于把一份未证实的形状写成对外契约',
+  // ── 云笔记那一族（#66，2026-09-25 随玩法 107 落地）──
+  'internal/upstream/app_note.go:NoteCreateInput':
+    '`createNote.do` 的**请求侧入参集**（`NoteID` / `Title` / `Phone`）。⚠ `Phone` 是**完整手机号** —— 与上面 `CloudOutLinkInput.Account`、`CloudUploader.Auth` 同一条"只进不出"：这一旦可序列化，离把号码写进日志只差一次"顺手 marshal 一下入参"。而 body 由 `NoteCreateRequest` 现拼那**二十六键** map（与在跑的 caiyun 逐字对齐，`tags: []`、`contents[]` 那一格是嵌套形状）⇒ 补 tag 等于造第二条会多发键的旁路请求，而"这一口认不认多出来的键"零实拍（本族三口今日仍无一条真实反馈，见 `docs/pending-decisions.md` R32）',
 }
 
 function walk(dir, out = []) {
