@@ -14,7 +14,18 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+# 真实下界是 1.88，不是原先写的 1.82。
+#
+# 1.82 这个值从一开始就是错的，而且没人发现：日常开发用 stable（1.91），
+# 声明的版本纯粹是个装饰。实测（rustup run <ver> cargo check --locked）：
+#
+#   1.82 / 1.85 / 1.86  → 失败
+#   1.88                → 通过
+#
+# 卡住的是间接依赖：cookie_store@0.22.1 与 icu_*@2.3.0 都要求 rustc 1.88
+# （cookie_store 经 reqwest 的 cookie 支持进入构建）。在降级这些依赖或
+# 去掉 cookie_store 之前，不要把这里改低。
+rust-version = "1.88"
 license = "Apache-2.0"
 authors = ["catlair"]
 

@@ -1,0 +1,86 @@
+name: CI
+
+# 门禁与 docs/conventions.md §9.2 一一对应：
+#   fmt --check / clippy -D warnings / test，外加前端 typecheck。
+# 这里的四条命令都在本地实测通过，CI 不是「上线后才发现是红的」。
+#
+# 为什么用 --locked：Cargo.lock 已入库，锁死依赖版本才能让 CI 结果可复现；
+# 否则 CI 可能因为上游发新版而突然变红，与本次改动无关。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # 警告一旦出现就直接失败，避免「警告堆积」——约定 §3 的前提是零告警。
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: Rust（fmt / clippy / test）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # 编译缓存：首次较慢，之后显著加速
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 格式检查
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: 测试
+        run: cargo test --workspace --locked
+
+  msrv:
+    name: MSRV 1.88（Cargo.toml 声明的最低版本）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 与 Cargo.toml 的 rust-version 保持一致。
+      # 这个值不是拍脑袋定的：1.82/1.85/1.86 实测均编译失败，
+      # 卡点是 cookie_store 与 icu_*（经 reqwest 的 cookie 支持进入构建），
+      # 它们要求 rustc 1.88。改动依赖后要重新实测再调整。
+      - name: 安装 1.88
+        uses: dtolnay/rust-toolchain@1.88
+
+      - uses: Swatinem/rust-cache@v2
+
+      # 只 check 不 test：MSRV 关心的是「能否编译」，不是运行时行为
+      - name: 用 1.88 编译
+        run: cargo check --workspace --all-targets --locked
+
+  web:
+    name: Web（typecheck）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # web/.npmrc 设了 legacy-peer-deps=true：vue-jsx-vapor 的 peer 是
+      # vue@^3，而 Vapor 需要 vue 3.6 预发布版，npm 默认不接受 prerelease。
+      # 不写 --force，靠 .npmrc 让任何人（含 CI）都得到同一棵依赖树。
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck

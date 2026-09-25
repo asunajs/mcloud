@@ -22,7 +22,7 @@
 | 项 | 值 |
 |---|---|
 | crate 数 | 8（`core` / `crypto` / `upstream` / `engine` / `tasks` / `store` / `app` / `server`） |
-| 工具链 | stable `1.91.1`，`rust-version = 1.82`，`edition 2021` |
+| 工具链 | stable `1.91.1`，`rust-version = 1.88`，`edition 2021` |
 | 测试 | 全绿（58 条通过、0 失败，含 `mcloud-crypto` 黄金向量对拍） |
 | `cargo fmt --check` | ✅ 干净（0 漂移） |
 | `cargo clippy --all-targets` | ✅ 干净（0 告警，含测试代码） |
@@ -445,7 +445,8 @@ cargo test --workspace              # 必须 0 failed
 三条全绿才能提交。**本次提交新引入的告警/失败由本次提交负责**——
 当前 §3.3 记录的欠账为零，所以「本来就有」这个借口不存在。
 
-CI 尚未配置（见 §11），目前靠人工执行；配置后这三条即为合并门禁。
+CI 已配置（`.github/workflows/ci.yml`），上面三条即为合并门禁，
+另加 MSRV 编译与前端 `typecheck`。
 
 ### 9.3 任务新增清单
 
@@ -522,13 +523,18 @@ data/         运行时数据（不入库）
 | 3 | `Runner` 无测试（核心并发逻辑裸奔） | `mcloud-engine/src/runner.rs` | 测试 |
 | 4 | `json_store` 在 async 中用阻塞 `std::fs` | `mcloud-store` | 并发 |
 | 5 | `FixedClock` 是 `#[cfg(test)]` 私有项，其他 crate 用不到 | `mcloud-store/src/clock.rs` | 可测性 |
-| 6 | 无 CI 配置，§9.2 的三条命令靠人工执行 | 根目录 | 工程 |
+| 6 | MSRV 从 1.82 修正为 1.88（原值实测编译不过）；如要降低需先换掉 cookie_store | `Cargo.toml` | 工程 |
 | 7 | `mcloud-server` 路由 0 测试；`upstream` 无 fixture 回放 | 见 §8.4 | 测试 |
 | 8 | SSE 只按 `run_id` 过滤，且同步 `create` 不产生可订阅事件 | `mcloud-server/src/routes/runs.rs` | 设计 |
 | 9 | 凭证目录权限 `0600` 未实现（无 `set_permissions`） | `mcloud-store` | 安全 |
 
-> 已完成：`git init` + 首次提交、`clippy` 归零、`fmt` 归零（见 §3.3、§10.1）。
-> 本文档**只记录，不擅自修改代码**——清账请在专门的提交里做，并同步删掉对应行。
+> 已完成：`git init` + 首次提交、`clippy` 归零、`fmt` 归零、CI 配置、
+> MSRV 修正（见 §3.3、§10.1、§9.2）。
+>
+> 处理原则：清单项**默认只记录**。但若某项会让已落地的门禁必然失败
+> （例如声明 `rust-version = "1.82"` 而 CI 要用它编译），那属于门禁本身的
+> bug，必须当场修掉并在此留痕——留着一条永远红着的 CI 比没有 CI 更糟。
+> 其余项请在专门提交里清账，并同步删掉对应行。
 
 ---
 
