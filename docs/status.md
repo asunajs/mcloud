@@ -4673,7 +4673,8 @@ P1 剩下的第①件、R27 那句边界）。这一趟是**补完再跑**。
 2. **编排层**（#73）：[`internal/app/task_matrix_mail.go`](../internal/app/task_matrix_mail.go) 加
    `runMailBackup`（1020：①② → ⑧）与 `runMailPDF`（1014：①② → 传一份 PDF 素材 → ⑥，
    素材 id 进清理账本）；[`task_matrix_dispatch.go`](../internal/app/task_matrix_dispatch.go) 把
-   这两条从缺口表移进 runner 表 ⇒ 玩法表现在**十二条**，缺口表剩 113 / 1004 / 1028 / 585。
+   这两条从缺口表移进 runner 表 ⇒ 玩法表现在**十条**（旧实现十四条：另四条仍在缺口表），
+   缺口表剩 113 / 1004 / 1028 / 585。
    ⚠ `MailPDF` 与 `MailBackup` 是两个开关，用例钉"`spec.MailPDF == spec.MailBackup` 就红"
    ⇒ 一条玩法只能是一种资产侧形状，防止将来给同一条挂两档。
 3. **编排层用例**（#73）：`task_matrix_mail_run_test.go` 新增 **8 条**（该文件 14 条，880 行）：
