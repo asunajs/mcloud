@@ -269,6 +269,14 @@ func (r TaskMatrixRun) RunAccount(
 	if line := matrix.MarketSummaryLine(); line != "" {
 		r.progress(core.LevelInfo, line)
 	}
+	// 组级读数（`taskFinishState` 与 `process`）逐组念一遍，**复查后**还会念第二遍。
+	//
+	// 为什么值得占两行日志：这两格今天既进结构体又**一个字都不念**，于是 R15 那两问
+	// （"它是不是组内完成度""`process` 是不是进度"）跑十趟也答不出 —— 而答出它只需要
+	// 把两次读数并排看一眼。
+	for _, line := range matrix.GroupReadingLines("拉表前") {
+		r.progress(core.LevelInfo, line)
+	}
 	if result.ReadFailures > 0 {
 		// 这一句要紧贴在条数后面：`24 个`读起来像"全表就这些"，而它可能只是 13/16 组。
 		// 小结里也有同一格（[TaskMatrixRunResult.SummaryLine]），但那是三十行之后才出现，
@@ -432,6 +440,14 @@ func (r TaskMatrixRun) verify(
 		return
 	}
 	result.VerifiedAgain = second.Fetches
+	// **第二次**组级读数（与入口那几行同格式，只换行头标签）。
+	//
+	// 这一行为什么值一次拉取（32 个请求）：R15 的第一问是"`taskFinishState` 随不随
+	// 任务完成而动"，而它只能靠**同一趟的前后两次**并排回答 —— 隔一天再跑就混进了
+	// "上游自己按日重置"这一档，分辨不了。两行都在，日志里一眼可见"有没有哪一组动过"。
+	for _, line := range second.GroupReadingLines("复查后") {
+		r.progress(core.LevelInfo, line)
+	}
 	for _, item := range second.Items {
 		id, ok := taskIDOf(item)
 		if !ok {

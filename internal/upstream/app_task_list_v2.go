@@ -99,8 +99,11 @@ func TaskListV2Request(jwt, referer, marketname, group string) (core.HTTPRequest
 // 后面这四个是**这一口才读**的：旧 TS 的分发器要用 `enable !== 1` 与 `state === "FINISH"`
 // 当"要不要做"的门，用 `currstep` 决定点击上报带哪一步，用 `marketname` 区分云盘/邮箱两侧。
 //
-// ⚠ `process` 在实拍三条里**恒为 0**，而同三条的 `state` 已经是 `FINISH`、`currstep` 是 4/6/8
+// ⚠ 夹具那三条的 `process` **恒为 0**，而同三条的 `state` 已经是 `FINISH`、`currstep` 是 4/6/8
 // ⇒ "进度到底读哪个字段"这一格**未验证**（与 `app_task_list.go` 里 [TaskItem] 那条注释同一个洞）。
+// ⚠ "恒为 0" 只是**那一份夹具**的形状，不是这一格的性质：2026-09-25 两个真账号现场读到过
+// `0 / 9 / 59 / 64 / 100`，且**同一趟**两遍拉表之间有一条从 `59` 涨到 `64`（见 `docs/status.md`
+// 「同日第五趟真跑」）⇒ 它确实会动，但"是几比几"仍没答案（面值对不上任何"共几步"）。
 // 2026-09-24 起它有**一个**消费者：app 层 522（循环上传）照旧实现那句
 // `task.process >= 100` 读它当停表 ⇒ 不再是"纯交出不判"。⚠ 但那是**照抄旧实现的读法**，
 // 不等于这一格的语义验过（仍登记在 `docs/pending-decisions.md` R15）。
@@ -110,10 +113,12 @@ type TaskV2Item struct {
 	Enable *int64
 	// CurrStep 是 `currstep` —— 旧实现把它带进 `task/click` 的 `step` 参数。
 	CurrStep *int64
-	// Process 是 `process` —— 见上面那条"恒为 0"的说明：今天只有 522 那一档停表读它，
-	// 语义未验证（R15）。
+	// Process 是 `process` —— 见上面那段：夹具里恒 0，但真账号现场读到过 `0/9/59/64/100`，
+	// 同一趟内还会涨（59→64）⇒ "会动"已确认，"是几分之几"未验证（R15）。
 	Process *int64
-	// MarketName 是 `marketname` —— 实拍 `sign_in_3`（邮箱那一支应是另一个值，本仓无样本）。
+	// MarketName 是 `marketname` —— 实拍 `sign_in_3`。
+	// ⚠ 2026-09-25 真跑答出这一格（R13 / R14）：邮箱那一支（`newsign_139mail`）**回数据、且同形**，
+	// 但它回来的条目里 `marketname` **混着**给 `newsign_139mail` 与 `sign_in_3` ⇒ 两边不是干净的两批表。
 	MarketName *string
 }
 
@@ -129,10 +134,18 @@ type TaskListV2 struct {
 	Items []TaskV2Item
 	// GroupFinishStates 是顶层 `groupState.<group>.taskFinishState`，按 group 存。
 	//
-	// ⚠ **只存不判**：实拍一次是 `{}`（group `new`），一次是
-	// `{"beiyong1":{"taskFinishState":2}}`（同一份响应里三条**全是** `FINISH`）⇒
-	// 这个 `2` 与 V3 那个 `1` 都不是"完成/未完成"那种二值口径，语义**未验证**。
-	// 拿它当"这一组做完了没"的判据 ⇒ 会把已经做完的一组再送去执行。
+	// ⚠ **只存不判**（这一条没变）：夹具里一次是 `{}`（group `new`）、一次是
+	// `{"beiyong1":{"taskFinishState":2}}`（同一份响应里三条**全是** `FINISH`）
+	// ⇒ 它不是"完成/未完成"那种二值口径。
+	//
+	// 2026-09-25 两个真账号各一趟、每趟拉表两遍，把这一格**逐组念出来**之后读到的是三档
+	// （`0` 只配"该组一条都没完成"、`1` 只配"部分完成"、`2` 只配"全部完成"，
+	// 18 次读数 / 14 种组合零例外）⇒ 它**读起来像"组内完成度"**。
+	// ⚠ 那是**同日两号的相关性观察、不是因果**：没有把某一组从 0 推到 2 再看它跟不跟的补样，
+	// 所以判据面照旧不读它（`docs/pending-decisions.md` R15、`docs/status.md`「同日第五趟真跑」）。
+	//
+	// ⚠ 键名：那十六次里每次响应只给**一枚键、且与请求的组名相同** ⇒ "键名会不会不一致"
+	// 今天**没有反例、也没验过**（不写"不会"）。调用方因此**不按键名筛选**（见 [TaskListV2.Group]）。
 	GroupFinishStates map[string]*int64
 }
 

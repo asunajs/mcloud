@@ -171,15 +171,19 @@ const UNTAGGED_ALLOWED = {
   'internal/upstream/app_task_list.go:TaskList':
     '`taskListV3` 的整份解析结果（条目 + 顶层 `taskFinishState`）。后者语义**未验证**（只存不判），更不能对外承诺它的形状',
   'internal/upstream/app_task_list_v2.go:TaskV2Item':
-    '`taskListV2` 的一条任务（嵌 `app_task_list.go:TaskItem` 那六个共用字段 + 这一口才读的 `enable`/`currstep`/`process`/`marketname`）。⚠ 嵌进来的那份 tag 归外层结构体管，所以它必须与 `TaskItem` 同进同退；且 `process` 在实拍三条里恒 0 而 `state` 已是 `FINISH` ⇒ "进度"这一格口径未验证，不能承诺给前端',
+    '`taskListV2` 的一条任务（嵌 `app_task_list.go:TaskItem` 那六个共用字段 + 这一口才读的 `enable`/`currstep`/`process`/`marketname`）。⚠ 嵌进来的那份 tag 归外层结构体管，所以它必须与 `TaskItem` 同进同退；且 `process` 在夹具三条里恒 0 而 `state` 已是 `FINISH`（2026-09-25 真号读到过 `0/9/59/64/100`、同一趟内会涨）⇒ "进度是几分之几"这一格口径未验证，不能承诺给前端',
   'internal/upstream/app_task_list_v2.go:TaskListV2':
-    '`taskListV2` **一个 group** 的解析结果。`GroupFinishStates` 是"只存不判"那格（实拍一次 `{}`、一次给 `2`，而同批条目全 `FINISH` ⇒ 不是完成度）；`Group` 是请求时回填的键名，不属于响应字段',
+    '`taskListV2` **一个 group** 的解析结果。`GroupFinishStates` 是"只存不判"那格（夹具一次 `{}`、一次给 `2` 而同批条目全 `FINISH`；真号读到 `0`/`1`/`2` 三档、与"组内是否全 `FINISH`"零例外同向 ⇒ 那是相关性、不是因果，仍不判）；`Group` 是请求时回填的键名，不属于响应字段',
   'internal/app/task_matrix.go:TaskMatrixFailure':
     '一次拉取的失败记录，`Err` 是 `*core.Error`（其对外文案走白名单、原文只进日志）⇒ 整块 marshal 等于把上游原文当结构化字段承诺给前端',
   'internal/app/task_matrix.go:TaskMatrix':
     '十六次拉取聚合出的内存结论。它的消费者是 app 层的执行链（`task_matrix_run.go` 两趟读表：待做集合与复查），聚合结果本身不出接口 ⇒ 对外形状由 `TaskMatrixRunResult` 那一格负责；`Items` 的语义是"按 name 去重、保留 id 小的那条"，去重取向是刻意不同③，补 tag 会把它变成对外契约',
   'internal/app/task_matrix.go:TaskMatrixMarketCount':
     '上面那条 [TaskMatrix] 的**一半**读数（按市场名分开的"读到几次 / 拿到几条"），随之外层一起不进 JSON。`FieldValues` 装的是**上游响应里 `marketname` 出现过什么取值**（照抄上游字面量，用于 R13 的排障），把它钉成对外字段等于让前端依赖一份未穷举的上游枚举',
+  'internal/app/task_matrix.go:TaskMatrixGroupCount':
+    '同外层的第二半读数：**逐次拉取**的组级面值（`taskFinishState` 与条目 `process`），只为把 R15 那一问念成一行而存在。⚠ 2026-09-25 真跑读出的仍是**相关性**（`0`/`1`/`2` 与"组内是否全 `FINISH`"同日 18 次读数零例外同向；`process` 会涨但没有"共几步"可对照）⇒ 语义未验证、也不参与判定，钉成 JSON 就是替一份未穷举的上游枚举建契约；对外形状仍由 `TaskMatrixRunResult` 那一格负责',
+  'internal/app/task_matrix.go:TaskMatrixStateEntry':
+    '[TaskMatrixGroupCount] 里的那一枚键值对（组名 + 面值），跟着外层一起不进 JSON。键名是**上游给的**（2026-09-25 十六次读数里每次都恰好等于请求组名，但"只给一枚同名键"是观察、不是契约，反例有没有仍无样本），补 tag 会把这份来源不可控的键集合变成前端可依赖的形状',
   'internal/app/task_matrix_report.go:TaskReportLine':
     '一行**播报**（级别 + 已渲染好的人话）。它是纯内存形状：落库的是渲染后的 `run_events.message` 文本与 `level`，事件 JSON 形状已冻结（`kind=log` 那一份由 `core` 侧构造），所以这一格一旦补 tag 就等于新造一条"半结构化"的对外契约，而前端读的仍是那一句文本',
   'internal/upstream/app_notice.go:NoticeTaskSlot':

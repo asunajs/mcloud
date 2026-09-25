@@ -4034,3 +4034,92 @@ R13 / R14 两问今天**本可以更早答**，但旧播报只念一句"获取�
 （`internal/upstream/app_msg_push*.go`、`internal/app/msg_push_*`、`docs/capture/app-msg-push-on-samples.txt`、
 `scripts/reqable-detail-masked.py`、`web/src/**` 等）。提交**只点名本轮自己的文件**
 （五份 Go + 两份 .cjs/文档中属于本行的 hunk），别人的改动留在工作树。
+
+## 补记（2026-09-25 同日第五趟真跑，R15 收口：组级读数补一行播报，再拿两个号跑一遍）
+
+上一趟补的是**按市场名**那一半读数（`拉取明细 …`），这一趟补**按组**那一半：
+`groupState.<组>.taskFinishState` 与条目 `process` 这两格从前**只存不判、也没人念**，
+于是 R15 那两问（"它是不是组内完成度""`process` 是不是进度"）跑十趟也答不出 ——
+而答出它只需要把**拉表前**与**复查后**两次读数并排看一眼（AGENTS.md §1.13）。
+
+### 一、加了什么（只加读数面，一格判据都没动）
+
+- [`internal/app/task_matrix.go`](../internal/app/task_matrix.go)：`TaskMatrix.Groups`
+  （`TaskMatrixGroupCount` = 市场名 / 组名 / 回来几条 / 其中 `FINISH` 几条 / 条目 `process`
+  出现过哪些面值 / **响应里 `groupState` 的全键面值**）+ `GroupReadingLines(label)`。
+  ⚠ 键名与面值**照抄**、不解释；`parseGroupState` 只收整数档 ⇒ "给了但不是整数"那一档
+  今天**念不出来**（这一格在 `TaskMatrixStateEntry.Value` 的头注里写明"未被断言"，
+  因为解析器根本不会产生 `nil`）。
+- 执行层在读表那一半播两行（`组读数（拉表前） …`，每个市场名一行），
+  `verify()` 复查之后**再播第二遍**（`组读数（复查后） …`）⇒ 同一趟内自己对比。
+- 三条新用例：`TestAppTaskMatrixRecordsGroupReadings`（含"非整数键被丢掉"那一格）、
+  `TestTaskMatrixGroupReadingLines`（逐字行文本、空标签不拼空括号、无读数回 `nil`）、
+  `TestTaskMatrixRunBroadcastsGroupReadingsTwice`（两行都在、排在"拉取明细"**之后**、
+  `info` 档、复查后念的是**第二份**）。
+
+### 二、程序自己念出来的（逐字；两个测试号，号码不进成文）
+
+```
+拉取明细 sign_in_3：读到 8/8 次、18 条、响应里的 marketname：sign_in_3；newsign_139mail：读到 8/8 次、14 条、响应里的 marketname：newsign_139mail、sign_in_3
+组读数（拉表前） sign_in_3：new：taskFinishState 没给、回 0 条；beiyong1：taskFinishState{beiyong1=2}、1 条（FINISH 1）、process{0}；beiyong2：taskFinishState 没给、回 0 条；cloudEmail：taskFinishState{cloudEmail=2}、1 条（FINISH 1）、process{0}；time：taskFinishState{time=1}、9 条（FINISH 2）、process{0、59}；day：taskFinishState{day=2}、1 条（FINISH 1）、process{0}；month：taskFinishState{month=1}、5 条（FINISH 4）、process{0}；hidden：taskFinishState{hidden=2}、1 条（FINISH 1）、process{0}
+组读数（拉表前） newsign_139mail：… time：taskFinishState{time=0}、6 条（FINISH 0）、process{0、59}；… month：taskFinishState{month=1}、7 条（FINISH 5）、process{0} …
+组读数（复查后） sign_in_3：… time：taskFinishState{time=1}、9 条（FINISH 2）、process{0、64}；…
+```
+
+另一号（同一趟两遍）：`beiyong1：taskFinishState{beiyong1=0}、1 条（FINISH 0）、process{9}`、
+`time：taskFinishState{time=1}、9 条（FINISH 3）、process{0、100}`。
+两趟终态各是"任务表 24 条（待做 11 条）… 复查：认下 0、没认 7…"与"27 条（待做 13 条）… 认下 0、没认 10"。
+
+### 三、跑出来的三格
+
+- **R15 之一（`taskFinishState` 像"组内完成度"三档）**：把两号两遍里**给了 state 的那 18 次读数**
+  按（state，完成条数/总条数）排开 ⇒ **14 种组合、零例外**：`0` 只出现在 `FINISH 0`（如 0/1、0/6），
+  `1` 只出现在**部分**完成（2/9、3/9、4/5、5/7、6/8），`2` 只出现在**全部**完成（1/1）。
+  ⚠ **这是同日两号的相关性观察，不是因果**：没有任何一次把某一组从"一条没完成"推到"全部完成"
+  再看 state 跟不跟 ⇒ **今天仍不参与判定、没有消费者**，也不得据此改 `Pending()` 那一类门。
+  要收口：拿一个 `time` 组没做完的号跑到全 `FINISH`，回读那一格是否变 `2`（有副作用的一趟）。
+- **R15 之二（`process` 会动，不是恒 0）**：现场面值 `0 / 9 / 59 / 64 / 100`，
+  且**同一趟内**某条从 `59 → 64` 而它所在组的 `taskFinishState` 纹丝不动
+  ⇒ 成文里"`process` 实拍恒 `0`""它不是完成度"那几句就地改掉了（坑表口径见下）。
+  ⚠ 这一格只有**组内面值集合**，指不出涨的是哪一条 ⇒ 要指名得把逐条 `process` 也播出来（未做）。
+  另一格顺带看见：`59` 那一条在**两个市场名那半边同时**变成 `64` ⇒ 与 R13 的"两边不是干净的两批"
+  对得上（同一条条目被两批各给了一次）。
+- **R15 之三（`groupState` 的键名）**：十六次里每次响应只给**一枚键、且与请求的组名相同**
+  ⇒ "键名与请求不一致"这一格今天**没有反例、也没验过**（不写"不会不一致"）。
+  空组那一档念成"`taskFinishState` 没给、回 0 条"，与"给了但值为空"仍**分辨不了**。
+
+顺带复现了上一趟的两条旧口径：`拉取明细` 仍是"云盘 18 条 / 邮箱 14 与 17 条、
+邮箱半边混着给 `sign_in_3`"⇒ R13 / R14 的结论没被这一趟改坏。
+
+### 四、这一趟**没有**答出的（登记，不写成已验证）
+
+- `taskFinishState` 的**因果**那一半（见上）。
+- `process` 是不是"百分比"：面值有 `9 / 59 / 64 / 100` 也有 `0`，看着像，
+  但**没有一条**能对上"该条共几步"⇒ 只到"它会涨"，不到"它是几比几"。
+- R24 那一格照旧：两趟都是"认下 0"⇒ 打卡滞后翻 `FINISH` 那档仍要**隔天回读**才收。
+- R11（撞 `90001` 刷票认不认）：这一趟两号十六次拉表 + 复查，**一次都没撞** ⇒ 仍零样本。
+
+### 五、门禁（照抄当轮 stdout）
+
+- Go **十项全绿**，总耗时 1m03s（build 1.9s，vet 0.7s，fmt 0.1s，**test 56.2s**，deps 3.0s，
+  filenames 0.2s，idents 0.3s，golden 0.1s，jsontags 0.1s，md-tables 0.1s）。
+  本轮 `test` 那一档是**实打**（不是上一轮那种缓存命中）。golden 仍为**断言 167 条全绿**
+  （本轮没加黄金向量，新用例都是进程内替身）。
+  jsontags：`95 个结构体字段齐全，225 个按白名单不进 JSON`（本轮新登记两个：
+  `TaskMatrixGroupCount`、`TaskMatrixStateEntry`，理由都是"未穷举的上游面值、且无消费者"）。
+  md-tables：`39 个文件、没有一行比表头多格`。
+- web **两条全绿**，总耗时 3.8s（typecheck 2.9s，build 0.9s）。本轮没动 web。
+
+⚠ 按 §2.7 披露：以上是**整棵工作树**的绿灯，里面有别人的在飞改动
+（`internal/app/msg_push_*`、`internal/upstream/app_msg_push*`、`docs/capture/app-msg-push-on-samples.txt`、
+`internal/cli/msg_push_fixture_replay_test.go`、`web/src/**` 等）。本轮只点名自己的文件提交。
+
+### 六、待拍板与遗留（本轮增量）
+
+- §3.9 那条老话照旧成立：`internal/app/task_matrix_run.go` 现在 **1119 行**（本轮又 +2 处播报），
+  `task_matrix_run_test.go` 1469 行、`docs/status.md` 4100+ 行 ⇒ 拆分方案仍是**待批**，本轮没动。
+- R15 的**因果**那一半没补（要一次"把某组推到全 `FINISH`、回读 state 跟不跟"的有副作用跑），
+  已写成"要收口还缺什么"登记在本文 R15，不当成已验证。
+- 真跑现场：一次性实例（副本库 + `:8794`）跑完即关、`target/verify-r15/` 整目录删掉，
+  主库未动（md5 复核）。事件流里那句 `删除文件 <一串 fileId>` 是**真实 fileId** ⇒ **不进成文**，
+  上面所有引用都只写"链尾一次 `batchTrash`"。

@@ -115,6 +115,56 @@ type TaskMatrix struct {
 	// ⚠ 这一格只**记录**、不参与任何判定 ⇒ 它不会改哪一条任务做不做。
 	// 加它不改判据，只让"跑一趟"能把 R13 / R14 那两问答出来（AGENTS.md §1.13）。
 	Markets []TaskMatrixMarketCount
+	// Groups 是**逐次拉取**的组级读数，顺序与请求顺序一致（2 × 8 = 16 段，
+	// 中途整体失败时可能少几段）。
+	//
+	// 为什么单独有一格：`groupState.<组>.taskFinishState` 与条目 `process` 这两格**此前**
+	// 只存进结构体、一个字都不念（`process` 另有一个读者：522 停表），
+	// 而 R15 要的就是"它随不随任务完成而动、它跟组内是否全 `FINISH` 对不对得上"。
+	// 这两问光看代码答不出，而跑一趟如果没人念出来，跑十趟也答不出 ⇒ 与 [TaskMatrix.Markets]
+	// 同一条理由（AGENTS.md §1.13：缺口的默认处置是去跑，先得看得见）。
+	// 念出来之后今天已经答出两格：`taskFinishState` 与"组内是否全 `FINISH`"同日 18 次读数
+	// 零例外同向（`0`/`1`/`2` 三档），`process` **不是恒 0**、同一趟内会涨。
+	// ⚠ 两者都是**相关性观察** ⇒ 仍不改判据（结论与还缺哪一格见 R15）。
+	//
+	// ⚠ 只**记录**、不参与任何判定：这两格该不该升格成判据是 R15 的**结论**，不是前提。
+	Groups []TaskMatrixGroupCount
+}
+
+// TaskMatrixGroupCount 是**一次**拉取（一个市场名 × 一个请求组名）的组级读数。
+//
+// 三段各对应 R15 的一种读法：条数与 `Finished` 是"组内是否全完成"，
+// `States` 是上游给的"完成度"那一格的原样取值，`ProcessValues` 是条目 `process`
+// 在这一组里出现过的面值。把三者**并排**念出来，才有分辨"是不是同一件事"的样本。
+type TaskMatrixGroupCount struct {
+	// MarketName 与 [TaskMatrixMarketCount.MarketName] 同义（我们发出去的那个）。
+	MarketName string
+	// Group 是**请求**带的那一个组名 —— 不取响应键名，理由见 `TaskListV2.Group` 那条注释。
+	Group string
+	// Items 是这一次回来的条目数（**去重之前**，只看这一组）。
+	Items int
+	// Finished 是其中 `state == "FINISH"` 的条数（逐字比对，口径同 [taskFinished]）。
+	Finished int
+	// ProcessValues 是这一组条目里 `process` 出现过的面值（去重、升序；缺失的不算一档）。
+	ProcessValues []int64
+	// States 是响应顶层 `groupState` 里的**全部**键值（按组名升序）。
+	//
+	// ⚠ 不按"请求那一个组"筛选：实拍里 `groupState` 只带本次那一个键，但那是**一次观测**
+	// 不是契约（条目那一侧同理是全摊平）。它给了别的键名，恰恰是 R15 要看见的事实。
+	States []TaskMatrixStateEntry
+}
+
+// TaskMatrixStateEntry 是 `groupState` 里的一个键。
+type TaskMatrixStateEntry struct {
+	// Group 是那一枚键名。
+	Group string
+	// Value 是 `taskFinishState` 的原样取值。
+	//
+	// ⚠ `nil` 只表示"键在、值不是整数或缺失"，而**今天这一档走不到**：上游层那份
+	// [parseGroupState] 只收整数档，非整数的键**整个被丢掉** ⇒ 界面上"没给"与"给了但
+	// 不是整数"是同一档（`TestAppTaskMatrixRecordsGroupReadings` 把这一格钉成了断言）。
+	// 保留 nil 分支是防"将来解析器放宽"时静默读成 0 —— ⚠ 它今天**未被断言**。
+	Value *int64
 }
 
 // TaskMatrixMarketCount 是**一个市场名**那一半边这一次拉到了什么。
@@ -169,12 +219,37 @@ func AppTaskMatrix(ctx context.Context, src *SignInSessionSource) (TaskMatrix, *
 				continue
 			}
 			market.Raw += len(list.Items)
+			// ⚠ 变量名用 `reading`，不复用 `group`：外层循环变量 `group` 是**请求那枚组名**，
+			// 而这一格是它的读数（同名会让 `Group: group` 那一句读起来像自引用）。
+			reading := TaskMatrixGroupCount{
+				MarketName: marketName, Group: group,
+				Items:         len(list.Items),
+				ProcessValues: []int64{}, States: []TaskMatrixStateEntry{},
+			}
+			seenProcess := map[int64]bool{}
 			for _, item := range list.Items {
 				if item.MarketName != nil && !seen[*item.MarketName] {
 					seen[*item.MarketName] = true
 					market.FieldValues = append(market.FieldValues, *item.MarketName)
 				}
+				if taskFinished(item) {
+					reading.Finished++
+				}
+				if item.Process != nil && !seenProcess[*item.Process] {
+					seenProcess[*item.Process] = true
+					reading.ProcessValues = append(reading.ProcessValues, *item.Process)
+				}
 			}
+			sort.Slice(reading.ProcessValues, func(i, j int) bool {
+				return reading.ProcessValues[i] < reading.ProcessValues[j]
+			})
+			for name, value := range list.GroupFinishStates {
+				reading.States = append(reading.States, TaskMatrixStateEntry{Group: name, Value: value})
+			}
+			sort.Slice(reading.States, func(i, j int) bool {
+				return reading.States[i].Group < reading.States[j].Group
+			})
+			matrix.Groups = append(matrix.Groups, reading)
 			matrix.Items = append(matrix.Items, list.Items...)
 		}
 		sort.Strings(market.FieldValues)
@@ -214,6 +289,72 @@ func (m TaskMatrix) MarketSummaryLine() string {
 		parts = append(parts, text)
 	}
 	return "拉取明细 " + strings.Join(parts, "；")
+}
+
+// GroupReadingLines 把 [TaskMatrix.Groups] 念成**每个市场名一行**读数。
+//
+// `label` 只出现在行头（"拉表前" / "复查后"），用来把**同一条链上的两次读数**对上：
+// R15 问的两件事里，"它随不随任务完成而动"只有把两次并排放进同一份事件流才看得见。
+//
+// 口径与 [TaskMatrix.MarketSummaryLine] 同一条：**照抄面值、不加解释**。
+// 这一句不判"taskFinishState=2 是不是这一组做完了"，也不判"process=0 是不是没进度"
+// —— 那正是 R15 还没有答案的地方（AGENTS.md §1.7）。
+//
+// 没有读数时回 nil ⇒ 调用方不给行（与 [MarketSummaryLine] 空表回空串同一取舍）。
+func (m TaskMatrix) GroupReadingLines(label string) []string {
+	if len(m.Groups) == 0 {
+		return nil
+	}
+	head := "组读数"
+	if label != "" {
+		head = fmt.Sprintf("组读数（%s）", label)
+	}
+	lines := make([]string, 0, len(TaskMatrixMarketNames))
+	for _, marketName := range TaskMatrixMarketNames {
+		parts := make([]string, 0, len(upstream.TaskListV2Groups))
+		for _, reading := range m.Groups {
+			if reading.MarketName == marketName {
+				parts = append(parts, reading.line())
+			}
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s %s：%s", head, marketName, strings.Join(parts, "；")))
+	}
+	return lines
+}
+
+// line 是**一组**那一段读数。
+//
+// ⚠ 三截的顺序按"R15 的两问怎么排"来：先看上游给的 `taskFinishState`，
+// 再看组内条目的 `state` 是不是全 `FINISH`，最后看 `process` 的面值 —— 前两截并排
+// 才看得出"完成度那一格跟实际完成状态对不对得上"。
+func (g TaskMatrixGroupCount) line() string {
+	states := "taskFinishState 没给"
+	if len(g.States) > 0 {
+		pairs := make([]string, 0, len(g.States))
+		for _, entry := range g.States {
+			if entry.Value == nil {
+				pairs = append(pairs, entry.Group+"=值不是整数")
+				continue
+			}
+			pairs = append(pairs, fmt.Sprintf("%s=%d", entry.Group, *entry.Value))
+		}
+		states = "taskFinishState{" + strings.Join(pairs, "、") + "}"
+	}
+	if g.Items == 0 {
+		return fmt.Sprintf("%s：%s、回 0 条", g.Group, states)
+	}
+	process := "process 全没给"
+	if len(g.ProcessValues) > 0 {
+		values := make([]string, 0, len(g.ProcessValues))
+		for _, value := range g.ProcessValues {
+			values = append(values, fmt.Sprintf("%d", value))
+		}
+		process = "process{" + strings.Join(values, "、") + "}"
+	}
+	return fmt.Sprintf("%s：%s、%d 条（FINISH %d）、%s", g.Group, states, g.Items, g.Finished, process)
 }
 
 // normalizeTaskMatrix 做那三步：去 HTML ⇒ 按 id 升序 ⇒ 按 name 去重保留先来。
