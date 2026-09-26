@@ -32,7 +32,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::*;
 use crate::live_msync::{
-    encode_message_body, CMD_NOTICE, CMD_PROVISION, CMD_SYNC, MessageBody, MessageContent,
+    encode_message_body, MessageBody, MessageContent, CMD_NOTICE, CMD_PROVISION, CMD_SYNC,
 };
 use crate::live_ws::{inbound_danmaku_frame, SOCKJS_HEARTBEAT, SOCKJS_OPEN};
 
@@ -253,9 +253,11 @@ async fn open_then_provision_ack_then_unread_in_order() {
         &FixedClock(NOW_MS),
     )
     .await
- .expect("听写失败");
+    .expect("听写失败");
 
-    let received = within_budget("服务端脚本", serve).await.expect("服务端任务 panic");
+    let received = within_budget("服务端脚本", serve)
+        .await
+        .expect("服务端任务 panic");
 
     // ── 断言 ①：收到 `o` 之后的**第一个**回帧必须是 PROVISION ──────────
     assert!(
@@ -326,8 +328,10 @@ async fn listener_records_provision_and_unread_sent() {
         &FixedClock(NOW_MS),
     )
     .await
- .expect("听写失败");
-    within_budget("服务端脚本", serve).await.expect("服务端任务 panic");
+    .expect("听写失败");
+    within_budget("服务端脚本", serve)
+        .await
+        .expect("服务端任务 panic");
 
     assert!(listener.provision_sent(), "PROVISION 应当发过");
     assert!(
@@ -364,10 +368,15 @@ async fn no_unread_without_provision_ack() {
         &FixedClock(NOW_MS),
     )
     .await
- .expect("听写失败");
-    let received = within_budget("服务端脚本", serve).await.expect("服务端任务 panic");
+    .expect("听写失败");
+    let received = within_budget("服务端脚本", serve)
+        .await
+        .expect("服务端任务 panic");
 
-    assert!(listener.provision_sent(), "PROVISION 应当发过（由 `o` 触发）");
+    assert!(
+        listener.provision_sent(),
+        "PROVISION 应当发过（由 `o` 触发）"
+    );
     assert!(
         !listener.unread_sent(),
         "没有收到 PROVISION 响应却发了 UNREAD —— UNREAD 的触发条件错了"
@@ -394,8 +403,10 @@ async fn heartbeat_is_echoed_verbatim() {
         &FixedClock(NOW_MS),
     )
     .await
- .expect("听写失败");
-    let received = within_budget("服务端脚本", serve).await.expect("服务端任务 panic");
+    .expect("听写失败");
+    let received = within_budget("服务端脚本", serve)
+        .await
+        .expect("服务端任务 panic");
 
     assert_eq!(
         received,
@@ -424,8 +435,10 @@ async fn danmaku_codes_collected_from_sync_and_notice() {
         &FixedClock(NOW_MS),
     )
     .await
- .expect("听写失败");
-    within_budget("服务端脚本", serve).await.expect("服务端任务 panic");
+    .expect("听写失败");
+    within_budget("服务端脚本", serve)
+        .await
+        .expect("服务端任务 panic");
 
     assert_eq!(
         report.codes,
@@ -487,31 +500,33 @@ async fn listen_deadline_disconnects_even_when_server_is_silent() {
     assert!(report.end.is_normal());
     assert!(report.codes.is_empty(), "服务端没推任何弹幕，不该有口令");
 
-    within_budget("服务端脚本", serve).await.expect("服务端任务 panic");
+    within_budget("服务端脚本", serve)
+        .await
+        .expect("服务端任务 panic");
 }
 
-    /// 连不上（服务端在握手后立刻关闭）：要**区分**于"听满"。
-    ///
-    /// 这一支对应"根本没进过房间" —— 也就是**看起来像"直播结束了"**的那种。
-    #[tokio::test]
-    async fn peer_gone_without_ever_entering_room() {
-        let (client, server) = duplex_pair().await;
+/// 连不上（服务端在握手后立刻关闭）：要**区分**于"听满"。
+///
+/// 这一支对应"根本没进过房间" —— 也就是**看起来像"直播结束了"**的那种。
+#[tokio::test]
+async fn peer_gone_without_ever_entering_room() {
+    let (client, server) = duplex_pair().await;
 
-        // 服务端立刻关连接，连 `o` 都不发。
-        tokio::spawn(async move {
-            let mut server = server;
-            let _ = server.close(None).await;
-        });
+    // 服务端立刻关连接，连 `o` 都不发。
+    tokio::spawn(async move {
+        let mut server = server;
+        let _ = server.close(None).await;
+    });
 
-        let mut listener = listener();
-        let report = listen_on_stream(
-            client,
-            &mut listener,
-            Duration::from_secs(5),
-            &FixedClock(NOW_MS),
-        )
-        .await
-        .expect("听写失败");
+    let mut listener = listener();
+    let report = listen_on_stream(
+        client,
+        &mut listener,
+        Duration::from_secs(5),
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("听写失败");
 
     assert!(
         report.end.is_broken(),
@@ -554,8 +569,10 @@ async fn disconnected_after_entering_room() {
         &FixedClock(NOW_MS),
     )
     .await
- .expect("听写失败");
-    within_budget("服务端脚本", serve).await.expect("服务端任务 panic");
+    .expect("听写失败");
+    within_budget("服务端脚本", serve)
+        .await
+        .expect("服务端任务 panic");
 
     assert!(report.entered_room(), "这条连接应当被判为进过房间");
     assert_eq!(
@@ -599,7 +616,9 @@ async fn server_close_frame_yields_server_closed() {
     )
     .await
     .expect("听写失败");
-    within_budget("服务端脚本", serve).await.expect("服务端任务 panic");
+    within_budget("服务端脚本", serve)
+        .await
+        .expect("服务端任务 panic");
 
     assert!(report.entered_room(), "这条连接应当进过房间");
     assert!(report.heard_close_frame, "应当记下收到过 SockJS 关闭帧");
@@ -638,7 +657,9 @@ async fn close_frame_without_entering_room_is_peer_gone() {
     )
     .await
     .expect("听写失败");
-    within_budget("服务端脚本", serve).await.expect("服务端任务 panic");
+    within_budget("服务端脚本", serve)
+        .await
+        .expect("服务端任务 panic");
 
     assert!(
         !report.entered_room(),
@@ -655,7 +676,6 @@ async fn close_frame_without_entering_room_is_peer_gone() {
          ——顺序反了会让「直播结束了」这一档永远不出现"
     );
 }
-
 
 /// 反复断坏帧时，状态机会要求收工，连接层要**照办**（不能一直空转到超时）。
 #[tokio::test]
@@ -677,8 +697,10 @@ async fn aborts_after_too_many_malformed_frames() {
         &FixedClock(NOW_MS),
     )
     .await
- .expect("听写失败");
-    within_budget("服务端脚本", serve).await.expect("服务端任务 panic");
+    .expect("听写失败");
+    within_budget("服务端脚本", serve)
+        .await
+        .expect("服务端任务 panic");
 
     assert!(
         report.malformed >= 3,
@@ -707,7 +729,10 @@ async fn aborts_after_too_many_malformed_frames() {
 /// 供调用方断言 `User-Agent` / `Origin` 确实发出去了。
 async fn spawn_fake_sockjs(
     script: Vec<String>,
-) -> (String, tokio::task::JoinHandle<(Vec<(String, String)>, Vec<String>)>) {
+) -> (
+    String,
+    tokio::task::JoinHandle<(Vec<(String, String)>, Vec<String>)>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("绑定本地端口失败");
@@ -789,9 +814,11 @@ async fn real_tcp_upgrade_and_core_sequence() {
         &FixedClock(NOW_MS),
     )
     .await
- .expect("听写失败");
+    .expect("听写失败");
 
-    let (headers, received) = within_budget("假服务端", handle).await.expect("服务端任务 panic");
+    let (headers, received) = within_budget("假服务端", handle)
+        .await
+        .expect("服务端任务 panic");
 
     // ── 升级请求真的带上了那两个头吗 ────────────────────────────────────
     //
@@ -843,12 +870,9 @@ async fn connect_refused_maps_to_network_error() {
     };
     let url = live_ws_url(&endpoint.base, 1, "abcdefghijklm");
 
-    let result = tokio::time::timeout(
-        Duration::from_secs(10),
-        connect_live_ws(&url, &endpoint),
-    )
-    .await
-    .expect("连接一个无人监听的端口竟然挂住了");
+    let result = tokio::time::timeout(Duration::from_secs(10), connect_live_ws(&url, &endpoint))
+        .await
+        .expect("连接一个无人监听的端口竟然挂住了");
 
     match result {
         Err(Error::Network(msg)) => {
@@ -891,7 +915,8 @@ fn session_id_is_13_lowercase_base36_and_reproducible() {
     assert_eq!(a, b, "同一随机序列必须得到同一个 sessionId（可复现）");
     assert_eq!(a.len(), 13, "sessionId 必须是 13 位");
     assert!(
-        a.chars().all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
+        a.chars()
+            .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
         "sessionId 只能是 0-9a-z，实际 {a}"
     );
 
