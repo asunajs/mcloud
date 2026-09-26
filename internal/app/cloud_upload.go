@@ -20,12 +20,20 @@ package app
 // ⇒ `file/create`（文件型）、`PUT`、`file/complete`、`batchTrash` 端到端走通过一次。
 // 仍**没答出**的三件，都不挡这条路：
 //
-//   - 三态里"已存在（`exist:true`）/ 秒传（`rapidUpload:true`）"两档**仍零样本** ——
+//   - **文件型**这一族的"已存在（`exist:true`）/ 秒传（`rapidUpload:true`）"两档**仍零样本** ——
 //     这一格 2026-09-25 已经**能读了**（成功播报的括号里念"三枪都发了"还是"只发了 create"，
 //     见 `task_matrix_run.go` 的 `uploadBranchWords`），读到的是：第六趟五发**全部**走完整上传。
 //     ⚠ 这不是"再跑几趟就有"：这条玩法每次传随机文件名 + 随机内容 ⇒ `exist` 要撞同名、
-//     `rapidUpload` 要撞内容哈希。要样本只有一条路：故意传两次同名同内容（为补样造行为，
-//     本仓未做）。口径边界与出处见 `docs/pending-decisions.md` **R27** / P1 第①件。
+//     `rapidUpload` 要撞内容哈希。要样本只有一条路：**故意撞一次**（为补样造行为）。
+//     ⚠ 2026-09-26 这一格因此**分成两半**，别再写成一句：
+//       - **目录型**的 `exist` 那一半已经撞出来了（同一个名连发两发 `file/create` ⇒ 第二发回
+//         `exist:true` + **同一枚** `fileId`、回执仍是 `code:"0000"`，短标 `[refuse=回已有那枚]`，
+//         见 `docs/capture/app-cloud-folder-trash-samples.txt` **§8**）。但那走的是
+//         `fileRenameMode:"refuse"`，**不是**本函数的文件型路径（它发 `auto_rename`）⇒
+//         那一档**不能**搬来给 [CloudUploadExists] 作证。
+//       - **文件型**的两档（撞同名 / 撞内容哈希）今天仍**零样本** ⇒ [CloudUploadExists]
+//         与 [CloudUploadRapid] 这两支今天只有旧实现的形状兜着，没有本仓的读数。
+//     口径边界与出处见 `docs/pending-decisions.md` **R27** / P1 第①件、**R7** 的 §8 那一格。
 //   - 非空目录那一档**已于 2026-09-26 真跑闭合**（**R7**：一次 `batchTrash(目录)` 就把它
 //     连同内容一起收走，内容不退回根目录）⇒ 清理链将来接目录不需要"连子文件一起记"。
 //     但今天**名单里仍然只放文件 id**（生产没有造目录的路径），出处见

@@ -1,7 +1,8 @@
-# 网盘「非空目录删不删得掉」（R7）+ 建目录 / 传进子目录两口第一次真跑 · 活体探针实测
+# 网盘「非空目录删不删得掉」（R7）+ 建目录 / 传进子目录 / refuse 撞同名 第一次真跑 · 活体探针实测
 
-> 本文是**摘要**：读数只在这些趟的 stdout 里，命令与边界见 §1。
-> 探针：`internal/app/live_probe_folder_trash_test.go`（`TestLiveProbeFolderTrash`）。
+> 本文是**摘要**：读数只在这些趟的 stdout 里，命令与边界见 §1（§8 那一趟另在 §8）。
+> 探针：`internal/app/live_probe_folder_trash_test.go`（`TestLiveProbeFolderTrash`）、
+> `internal/app/live_probe_refuse_name_collision_test.go`（`TestLiveProbeRefuseNameCollision`，§8）。
 > 接口层：`internal/upstream/app_cloud_upload.go` 的 [CloudFolderCreateRequest] /
 > [upstream.AppCloudFolderCreate]（本仓**第一次**真打这一口，之前只有两条 folder 型实拍）。
 >
@@ -93,9 +94,12 @@ A 趟那一次"删后根目录仍列着目录（32 项）"怎么落：它与 B/C
 
 ## 5. 这一趟没答的（别把上面的读数读成它们）
 
-  - **`fileRenameMode:"refuse"` 撞同名目录**：四趟 `exist` 都是 `false`（名字含 8 位随机 hex，
-    撞不上）。⇒ "同名已存在"那一档仍零样本，且探针里那一支的处置是**当场收手不删**
-    （那一枚 fileId 属于用户本来有的目录，不该拿清理链去动）。
+  - ~~**`fileRenameMode:"refuse"` 撞同名目录**~~：**已于同日第卅二趟答出**（本文 **§8**）——
+    前四趟 `exist` 都是 `false` 只是因为随机 hex 撞不上名，§8 把那一档**主动造出来**：
+    同名第二发回 `exist=true` + **同一枚** `fileId`、回执与第一发**逐字同**（不算失败）、
+    网盘侧仍 1 枚 ⇒ `[refuse=回已有那枚]`，三趟一致。
+    ⚠ 探针那条「遇 `exist:true` 当场收手不删」的处置**不变**（§8 只是把它从没被触发过的那一格
+    读出现场值）：那一枚 fileId 属于**谁**由 ⓪ 的对照决定，随机名撞上一趟残留时仍然只能收手。
   - **回收站那一页**长什么样：**已于同日第廿七趟读到**（`app-cloud-recyclebin-samples.txt` §3）。
     能不能"彻底删除"：本仓仍**无口**（同族三口零落码）⇒ 未测试，
     而"回收站条目那枚 `fileId` 能不能拿去打那两口"也是零读数。
@@ -128,3 +132,95 @@ A 趟那一次"删后根目录仍列着目录（32 项）"怎么落：它与 B/C
 `create` 两发 = 建目录 + 传文件那一枚的占位枪；`batchTrash` 两发 = 删目录 + 收尾那一枪；
 `file/list` 六发 = 建前 / 删前列目录 / 删后根 / 删后列目录 / 等 8s 后 / 收尾后（本探针的口径，
 比生产的走查窄，因为它只盯两枚具名文件）。
+
+## 8. 第卅二趟：`fileRenameMode:"refuse"` **撞上同名目录**（§5 第一条那一格，同日填上）
+
+探针：`internal/app/live_probe_refuse_name_collision_test.go`（`TestLiveProbeRefuseNameCollision`）。
+这一趟只答一问：**同一个目录名再建一次，上游怎么处置**（`exist` 那一格 + 回的是哪枚 `fileId` +
+网盘侧因此有几枚，三格都是同一问的三个面）。
+
+### 复跑命令（账号 0；一趟约 2s，无 sleep）
+
+```
+mkdir -p target/s32probe && cp data/mcloud.db target/s32probe/probe.db
+: > target/s32probe/device.txt
+MCLOUD_LIVE_PROBE_DB="$PWD/target/s32probe/probe.db" \
+MCLOUD_LIVE_PROBE_ACCOUNT_INDEX=0 \
+MCLOUD_LIVE_PROBE_DEVICE_FILE="$PWD/target/s32probe/device.txt" \
+MCLOUD_LIVE_PROBE_CONFIRM='确认写真实上游' \
+go test ./internal/app/ -run 'TestLiveProbeRefuseNameCollision$' -v -count=1 -timeout 600s \
+  > target/s32probe/run1.txt 2>&1          # 写探针：⓪ 网盘侧对照 → ① 占名 → ② 同名再发 → ③ 复查 → ⑤ 收场
+```
+
+⚠ `> … 2>&1` 那一段照旧**不是可选的**（坑表 #198）。副本库跑完即删（`command rm -f
+target/s32probe/probe.db* target/s32probe/device.txt`），那几份 `.txt` 是唯一留档。
+
+### 三趟读数（同日 18:09，同一号）
+
+| 趟 | ⓪ 建前那一页 / 整名命中 | ① 第一发（占名） | ② 第二发（同名，本问） | ③ 两发之后 | ④ 短标 | ⑤ 收场 |
+| --- | --- | --- | --- | --- | --- | --- |
+| run1 | 31 项 / `asign-refusedir-bb241aef` **0 枚** | `code:"0000"` `success:true` `msg` **缺键** ⇒ `exist=false`、fileId 长度 33 | 回执**逐字同** ⇒ `exist=true`、fileId 长度 33 | 32 项 / **命中 1 枚**、同一枚=true | `[refuse=回已有那枚]` | 名单 1 枚 ⇒ `batchTrash` 上游认了 |
+| run2 | 31 项 / `asign-refusedir-97ebe343` 0 枚 | 同上 | 同上 | 32 项 / 1 枚、同一枚=true | `[refuse=回已有那枚]` | 同上 |
+| run3 | 31 项 / `asign-refusedir-d7d95134` 0 枚 | 同上 | 同上 | 32 项 / 1 枚、同一枚=true | `[refuse=回已有那枚]` | 同上 |
+
+两页读数都标了「穷尽（没有下一页游标）」——这一口今天不翻页（`AppCloudFileList` 固定一页），
+所以 ③ 那个"1 枚"是**穷尽**读数而不是下界。
+
+### ⭐ 这一格闭合：实拍那句在本仓真打上成立
+
+  - **上游不把撞名当失败**：第二发的信封三格与第一发**逐字相同**（`code:"0000"` /
+    `success:true` / `msg` 缺键）⇒ [upstream.ParseCloudFileCreate] 走的是**成功**那一条，
+    `exist=true` 读得到 ⇒ 编排层那一支 `created.Exist`（[CloudUploadExists] 那一档）
+    **不是死分支**。此前这一句只是"照旧 TS 抄来"，今天它有本仓的现场值。
+  - **交回的是已有那枚**：两发 fileId 在内存里**相等**（长度都是 33；真实值不进成文），
+    而网盘侧整名仍 **1 枚**、那一页只涨 1 条（31 → 32）⇒ `fileRenameMode:"refuse"` 确实
+    "不另起一个"，[upstream.CloudRenameModeRefuse] 头注那句**由实拍升成实测**（同一条注释里
+    "别搬去传文件"那半句仍无读数，见下面边界）。
+  - 三趟同一档、且都是**第一次**在这口上读到 `exist:true` ⇒ 前面五趟（第廿六／廿八／廿九／卅／
+    卅一趟）那句"每一发都 `exist:false`"不是上游的口径，只是随机名撞不上。
+
+### 方法格：零样本那一档要**主动造**，但造之前要先钉"撞的是谁"
+
+这一族五趟都靠随机 hex **躲开** `exist:true`（躲开的是"删掉用户原有目录"这一后果），代价就是
+那一档一直零样本。第卅二趟的做法是**把撞名变成设计**，同时用 ⓪ 那一遍网盘侧对照把
+"这一枚属不属于本趟"钉在前面：⓪ 命中 > 0 ⇒ 判据不成立、当场收手且**不删**（那是上一趟的残留，
+归 R37ⓒ 那批处置），⑤ 的收场名单因此可以按 id 直接列（都是本趟造的）。
+⇒ "要读一条危险分支的现场值"与"不动用户内容"这两件不冲突，缺的只是**先读一遍对照**。
+
+### 这一趟没答的（四条，都不许顺手放宽）
+
+  - **同名的是文件而不是目录**：`refuse` 只在 `type:"folder"` 上真打过；
+    [upstream.CloudRenameModeRefuse] 头注那句"同名**文件**用 refuse 会怎样零样本"**仍然零样本**
+    （文件的真实链走 `auto_rename`，本仓没有发 refuse 的文件型）。
+  - **在非根目录里撞名**：两发都发在 `/`。`parentFileId` 换成一枚子目录时同样问句**未测**
+    （第廿六趟证明过"非根 parentFileId 上游认"，但那一趟没测同名）。
+  - **对方那一枚是用户本来就有的**：⓪ 命中 > 0 那一档探针只念"收手不删"⇒ 上游在那一档回什么
+    **没有读数**（这一档**补不了**：要它就得拿用户真实目录名去发写请求，越界）。
+  - **已进回收站的那枚同名目录**：会不会让 `file/create` 回 `exist:true`（"回收站里占不占名"）
+    **未测** ⇒ 执行口现成：拿 §9／§14 那几枚残留的**整名**再发一发建目录（都是我们自己造的名）。
+    ⚠ 那是**下一趟**的一问，本趟不混着答（一趟只答一问）。
+
+### 账本与残留
+
+每趟 **5 枪 / 3 类**（`file/create` ×2 + `file/list` ×2 + `batchTrash` ×1；三趟逐字相同）：
+
+```
+一共 5 枪 / 3 类
+  POST personal-kd-njs.yun.139.com/hcy/file/create ×2
+  POST personal-kd-njs.yun.139.com/hcy/file/list ×2
+  POST personal-kd-njs.yun.139.com/hcy/recyclebin/batchTrash ×1
+```
+
+网盘侧**不留东西**（每趟"两发之后 32 项"、下一趟"建前"又回到 31 项 ⇒ 收场那一发真的生效了）。
+回收站侧净增 **3 枚**：同日只读复跑（`TestLiveProbeSameFileRetrashReread`，一枪写的不发）
+念到第一页 `40 条 / 我方前缀 40 条` —— 与第卅一趟那次的 **37** 相差正好是本趟这三枚；
+八枚 `retrash*` 整名仍各出现 **1 次**（`trashedAt` 全是各自那趟的时刻 ⇒ §13 那句"跨趟也不重复入账"
+又多一遍读数）。⚠ 那一支按 `retrash` 系四个中段数条，`refusedir-` 不在其内 ⇒
+本趟那三枚只落在 `40` 这个总数里，没被逐枚念出来。**并入 R37ⓒ 的合计因此是 20 枚**（原 17 枚）。
+
+### 待办（这一格补得了的）
+
+  1. 隔天用同一支只读复跑看 `40` 那一格会不会自己变小（上游有没有延后清理）；
+  2. 「回收站里那枚同名目录占不占名」那一问（上面边界第四条）——它要新开一趟，形状与本趟同档；
+  3. `file/list` 那一口**翻页**（今天固定一页）：命中数在有下一页游标时只是下界，R36 的全树走查
+     也卡在同一格上（见 `pending-decisions.md` Q11 那一族）。

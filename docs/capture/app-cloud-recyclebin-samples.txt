@@ -5,7 +5,10 @@
 > ＋同日更晚第廿八趟（账号 0 写探针三趟 + 只读复跑一趟，见 §11）
 > ＋同日更晚第廿九趟（账号 0 写探针三趟 + 只读复跑一趟，见 §12）
 > ＋同日更晚第卅趟（账号 0 写探针三趟 + 只读复跑一趟，见 §13）
-> ＋同日更晚第卅一趟（账号 0 写探针两趟 + 只读复跑一趟，见 §14）。
+> ＋同日更晚第卅一趟（账号 0 写探针两趟 + 只读复跑一趟，见 §14）
+> ＋同日更晚第卅二趟（账号 0 **写探针三趟** + 只读复跑一趟；它的主档在
+>   [`app-cloud-folder-trash-samples.txt`](app-cloud-folder-trash-samples.txt) **§8**（`refuse` 撞同名目录），
+>   本档只接它的**回收站残留账**与那一遍只读复跑读数（`37 → 40`，见 §9 末）。
 > 原始 stdout：`target/s27probe/{run0,run1,run2,reread0,reread1}.txt`、
 > `target/s28probe/{run1,run2,run3,reread0}.txt`、`target/s29probe/{run1,run2,run3,reread0}.txt`
 > `target/s30probe/{run1,run2,run3,reread0}.txt` 与 `target/s31probe/{run1,run2,reread0}.txt`
@@ -19,7 +22,9 @@
 > ＋ `internal/app/live_probe_retrash_same_file_test.go`（第卅趟：`TestLiveProbeSameFileRetrash` 写、
 > `...Reread` 只读）
 > ＋ `internal/app/live_probe_retrash_nested_dir_test.go`（第卅一趟：`TestLiveProbeNestedDirRetrash` 写；
-> 只读那一支复用上面第卅趟的 `...SameFileRetrashReread`，它现在按**四个**中段数这一族）。
+> 只读那一支复用上面第卅趟的 `...SameFileRetrashReread`，它现在按**四个**中段数这一族）
+> ＋ `internal/app/live_probe_refuse_name_collision_test.go`（第卅二趟，主档在另一份文件 §8：
+> 它往回收站里留下的那几枚 `asign-refusedir-*` 记在本文 §9）。
 > 接口层：`internal/upstream/app_cloud_recyclebin.go` —— 请求构造与**响应解析器都在这份**，
 > 解析器按本文 §3 的形状落，只读判据用得上的那几格。
 >
@@ -330,6 +335,15 @@ run2 那行逐字读数把两格分开念得很清楚：
 **1 条/枚** ⇒ 见 §14。只读那一趟（17:48）念到 `第一页 37 条 / 我方前缀 37 条`，逐枚整名里
 `retrashdir-` 3 条、`retrashfile-` 3 条、`retrashnest-` 2 条、`retrashnestkid-` **0 条**，
 且八个整名**各出现 1 次**（含那两枚各被打过两发的非空目录）⇒ 从残留侧二次钉住 §13/§14 的主问。
+
+第卅二趟再新增 **3 枚目录条目**（`asign-refusedir-bb241aef` / `-97ebe343` / `-d7d95134`），
+本族合计 **20 枚**。⚠ 那一趟的主档在**另一份**文件（[`app-cloud-folder-trash-samples.txt`](app-cloud-folder-trash-samples.txt)
+**§8**：`fileRenameMode:"refuse"` 撞同名目录），本档只接它的**残留账**——它每趟打 **1 发**
+`batchTrash`（收场那一发），三趟 3 枚、账上每条 **1 次**。只读复跑（18:12，与上面 37 那条同一支探针）
+念到 `第一页 40 条 / 我方前缀 40 条` ⇒ `37 → 40` 的差额**正好**是本趟这三枚；那八个 `retrash*` 整名
+仍各出现 1 次、`trashedAt` 仍是各自那趟的时刻。⚠ 那一支按 `retrash` 系四个中段数条，
+`refusedir-` 不在其内 ⇒ 这三枚只落在 `40` 这个总数里，没被逐枚念出来（要逐枚念得改那一支的中段名单，
+登记成本档 §14 末的待办，本趟没动它）。
 
 ⚠ 除这些之外，账号 0 的**条数本身**在当天就会因趟外动作变化：§4 表里那趟只读复跑念到 **32 条**，
 而 §11 的只读复跑（15:56）同一号第一页只有 **23 条**，可那三枚 `asign-binlistdir-*` 到 15:57
@@ -671,3 +685,6 @@ run2 / run3 两趟干净的读数。修法两处：补 `time.Sleep(liveProbeBinW
   （后者出现即"延后单列"⇒ 直接推翻本节第 2 格，也动摇 R7）。
 - **三层子树 / 多枚子文件的非空目录**被点两次名：仍零读数（本节边界第一条）。形状 §12 已有，
   只是那一族每趟只打**一枪** ⇒ 要补的是"同一枚点名两次"那一步。
+- 只读那一支的中段名单**目前不含** `refusedir-`（第卅二趟那三枚只落在 `40` 这个总数里，逐枚念不到）。
+  ⚠ 这是**有意**的：那一支答的是"retrash 这一族隔天会不会变"，把另一族的对象混进同一格会让两问
+  共用一个数（#196 同族）。要逐枚盯 `refusedir-*` 的隔天读数 ⇒ 另开一支只读探针，别改这一支的口径。

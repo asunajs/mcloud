@@ -116,10 +116,19 @@ const (
 	// 实拍两条是 `"refuse"`（建目录用 refuse）⇒ 两档各有出处，不是猜的。
 	CloudRenameModeAuto = "auto_rename"
 	// CloudRenameModeRefuse 是**建目录**那一型的重名策略：同名目录已存在时上游不另起一个，
-	// 而是在响应里给 `data.exist:true` + **已有那枚** `fileId`（实拍两条逐字如此）。
+	// 而是在响应里给 `data.exist:true` + **已有那枚** `fileId`。
 	//
-	// ⚠ "同名**文件**也用 refuse 会怎样"**零样本**：本族的文件型走 [CloudRenameModeAuto]，
-	// 而 refuse 只在实拍那两条目录型里出现过 —— 别把这一枚搬去传文件。
+	// ⭐ 这一句 2026-09-26 起**有本仓自己的读数**（此前只有实拍那两条）：同一个目录名连发两发
+	// `file/create` ⇒ 第二发回 `code:"0000" + success:true`（**与第一发逐字同**，不算失败）、
+	// `exist:true`、`fileId` 与第一发**同一枚**，而 `file/list` 那一页里这个整名仍只 **1 枚**
+	// —— 三趟一致，短标 `[refuse=回已有那枚]`。
+	// 出处：`docs/capture/app-cloud-folder-trash-samples.txt` §8、
+	// `internal/app/live_probe_refuse_name_collision_test.go`。
+	//
+	// ⚠ 上面那档读的是**目录型**。"同名**文件**也用 refuse 会怎样"**仍零样本**：本族的文件型走
+	// [CloudRenameModeAuto]，refuse 只在目录型上出现过（实拍与真跑都是）—— 别把这一枚搬去传文件。
+	// ⚠ 同样**没测**的还有两格：在非根目录里撞同名、以及"同名那一枚已在回收站里"占不占名
+	// （§8 边界四条）。
 	CloudRenameModeRefuse = "refuse"
 	// CloudHashAlgorithm 是 `contentHashAlgorithm`：`SHA256`（大写，两处都用它）。
 	CloudHashAlgorithm = "SHA256"
@@ -356,8 +365,10 @@ func CloudFileCreateRequest(
 // # 四格各自"缺"意味着什么（旧实现的分叉就在这里）
 //
 //   - [Exist] ⇒ 旧实现**直接返回 false 且不上传**（`utils/file.ts:52-55`）。
-//     实拍两条 `folder` 型都是 `exist:true` —— 那是"目录已经建过了"，与"文件已存在"
-//     是不是同一格语义**未测试**。
+//     **目录型**这一格 2026-09-26 真跑读到过（同名第二发回 `exist:true` + 已有那枚 `fileId`，
+//     回执仍是成功码，见 [CloudRenameModeRefuse] 那段与 capture §8）；
+//     而"与**文件**已存在是不是同一格语义"**仍未测试** —— 文件型走 [CloudRenameModeAuto]，
+//     本仓在文件型上读到 `exist:true` 的样本数是**零**（要它得故意传两次同名同内容）。
 //   - [RapidUpload] ⇒ 旧实现**跳过 PUT 与 complete**、只把 fileId 记账（`utils/file.ts:57-61`）。
 //     也就是"秒传"这一支**不发后三枪**，所以清理那一族拿到的 id 仍然要删得掉。
 //   - [UploadURL] 与 [FileID] 任一为空 ⇒ 旧实现判失败（`utils/file.ts:64-67`）。
