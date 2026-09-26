@@ -10,9 +10,11 @@
 import { onUnmounted, onMounted, ref } from 'vue'
 import {
   cancelRun,
+  listAccounts,
   listCapabilities,
   startRun,
   subscribeRun,
+  type AccountSummary,
   type RunEvent,
   type TaskMeta,
 } from '../api'
@@ -20,6 +22,23 @@ import { EmptyState } from '../ui/empty-state'
 import { LogPanel, type LogLine } from '../ui/log-panel'
 
 type LoadState = 'loading' | 'error' | 'ready'
+
+/**
+ * 签到族（P1）那八条。
+ *
+ * 它们共用**同一条 H5 会话**（签到页 `newsignin`），一起验收最省事：
+ * 跑通 `sign` 之后其余几条基本只是换请求。
+ */
+const SIGNIN_FAMILY = [
+  'sign',
+  'receive',
+  'multiple',
+  'backup-gift',
+  'revival',
+  'prizes',
+  'cloud-snapshot',
+  'task-list',
+]
 
 export const TasksPage = () => {
   const state = ref<LoadState>('loading')
@@ -29,6 +48,8 @@ export const TasksPage = () => {
   const submitError = ref('')
 
   const tasks = ref<TaskMeta[]>([])
+  /** 已登录的云盘账号。跑任务要选一个，而不是手打手机号。 */
+  const accounts = ref<AccountSummary[]>([])
   const account = ref('')
   const running = ref(false)
   const lines = ref<LogLine[]>([])
@@ -36,6 +57,10 @@ export const TasksPage = () => {
   const elapsedMs = ref(0)
   /** 当前运行的 run id，用于请求中止。 */
   const currentRunId = ref<number | null>(null)
+  /** 正在跑哪个任务（用于把卡片上的按钮变成"执行中"）。 */
+  const runningTask = ref<string | null>(null)
+  /** 本次运行的终局结论（跑完后显示在日志上方）。 */
+  const outcome = ref<{ ok: boolean; text: string } | null>(null)
   /** 已发出中止请求，等待任务在安全点退出。 */
   const cancelling = ref(false)
 
@@ -47,8 +72,14 @@ export const TasksPage = () => {
     state.value = 'loading'
     errorMessage.value = ''
     try {
-      const r = await listCapabilities()
-      tasks.value = r.tasks.filter((t) => !t.hidden)
+      const [caps, accts] = await Promise.all([listCapabilities(), listAccounts()])
+      tasks.value = caps.tasks.filter((t) => !t.hidden)
+      accounts.value = accts
+      // 只有一个账号时**预选**它：少一次点击，而且"就是那个号"没有歧义。
+      // 多个账号时不猜 —— 猜错就是拿另一个号跑了一遍真任务。
+      if (accts.length === 1 && !account.value) {
+        account.value = accts[0].id
+      }
       state.value = 'ready'
     } catch (e) {
       errorMessage.value = e instanceof Error ? e.message : '无法连接后端'
@@ -71,6 +102,7 @@ export const TasksPage = () => {
     running.value = false
     cancelling.value = false
     currentRunId.value = null
+    runningTask.value = null
     stopTicker()
     // EventSource 断线会自动重连，必须显式关掉
     stopStream?.()
@@ -117,15 +149,20 @@ export const TasksPage = () => {
       case 'progress':
         push('info', `[${ev.step}/${ev.total}] ${ev.label}`)
         break
-      case 'finished':
+      case 'finished': {
+        // 三种结局分别显示：失败要说清原因，跳过要说清**为什么跳过**
+        // （跳过不是失败，不该染红）。
+        const o = ev.outcome
+        const text =
+          o.status === 'success' ? o.summary : o.status === 'skipped' ? o.reason : o.reason
+        outcome.value = { ok: o.status === 'success', text }
         push(
-          ev.outcome.status === 'failed' ? 'error' : 'info',
-          `结束（${ev.duration_ms}ms）：${
-            ev.outcome.status === 'success' ? ev.outcome.summary : ev.outcome.reason
-          }`,
+          o.status === 'failed' ? 'error' : 'info',
+          `结束（${ev.duration_ms}ms）：${o.status === 'skipped' ? `跳过 —— ${text}` : text}`,
         )
         finish()
         break
+      }
       default:
         // 后端新增事件类型时，旧前端不该整页报错 —— 忽略即可
         break
@@ -136,11 +173,13 @@ export const TasksPage = () => {
     submitError.value = ''
     lines.value = []
     if (!account.value.trim()) {
-      submitError.value = '请先填写账号（手机号）'
+      submitError.value = '请先选择一个账号'
       return
     }
 
     running.value = true
+    runningTask.value = task
+    outcome.value = null
     startedAt = Date.now()
     elapsedMs.value = 0
     ticker = window.setInterval(() => {
@@ -189,16 +228,34 @@ export const TasksPage = () => {
       <div class="card-body">
         <h2 class="card-title text-base">运行参数</h2>
         <fieldset class="fieldset">
-          <legend class="fieldset-legend">账号（手机号）</legend>
-          <input
-            class="input w-full"
-            placeholder="例如 13800000000"
-            value={account.value}
-            // 用 onInput 而不是 onChange：Vue 的 onChange 是原生 change，只在失焦时触发
-            onInput={(e) => {
-              account.value = (e.target as HTMLInputElement).value
-            }}
-          />
+          <legend class="fieldset-legend">账号</legend>
+          {accounts.value.length === 0 ? (
+            // 没账号时**给出下一步**，而不是一个会失败的输入框：
+            // 手打手机号也没用 —— 任务要的是本地已登录的那份凭据。
+            <div class="alert alert-soft alert-warning text-sm" role="alert">
+              <span>
+                还没有已登录的账号。请先到「账号」页登录一个云盘账号，再回来跑任务。
+              </span>
+            </div>
+          ) : (
+            <select
+              class="select w-full"
+              value={account.value}
+              onChange={(e) => {
+                account.value = (e.target as HTMLSelectElement).value
+              }}
+            >
+              <option value="" disabled>
+                选择一个账号
+              </option>
+              {accounts.value.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.nickname || a.id}
+                  {a.pc_platform ? `（${a.pc_platform}）` : ''}
+                </option>
+              ))}
+            </select>
+          )}
         </fieldset>
         {submitError.value ? (
           <div class="alert alert-soft alert-error text-sm" role="alert">
@@ -244,9 +301,21 @@ export const TasksPage = () => {
         {tasks.value.map((t) => (
           <div key={t.name} class="card bg-base-100 shadow-sm">
             <div class="card-body">
-              <h3 class="card-title text-base">{t.title}</h3>
+              <h3 class="card-title text-base">
+                {t.title}
+                {/* 签到族标一个徽标：它们共用同一条会话，验收时按组看更省事 */}
+                {SIGNIN_FAMILY.includes(t.name) ? (
+                  <span class="badge badge-soft badge-primary badge-sm">云朵中心</span>
+                ) : null}
+                {t.params.length > 0 ? (
+                  <span class="badge badge-soft badge-sm">有参数</span>
+                ) : null}
+              </h3>
               <p class="break-words text-sm opacity-70">{t.description}</p>
-              <p class="text-xs opacity-50">标识：{t.name}</p>
+              <p class="font-mono text-xs opacity-50">{t.name}</p>
+              {t.params.length > 0 ? (
+                <p class="text-xs opacity-50">参数：{t.params.join('、')}</p>
+              ) : null}
               <div class="card-actions justify-end">
                 <button
                   type="button"
@@ -254,7 +323,7 @@ export const TasksPage = () => {
                   disabled={running.value}
                   onClick={() => void run(t.name)}
                 >
-                  {running.value ? '执行中…' : '运行'}
+                  {runningTask.value === t.name ? '执行中…' : '运行'}
                 </button>
               </div>
             </div>
@@ -285,6 +354,19 @@ export const TasksPage = () => {
       {state.value === 'ready' ? (
         <>
           {form()}
+          {outcome.value ? (
+            <div
+              class={`alert alert-soft text-sm ${
+                outcome.value.ok ? 'alert-success' : 'alert-warning'
+              }`}
+              role="status"
+            >
+              <span class="break-words">
+                {outcome.value.ok ? '✅ ' : '⚠ '}
+                {outcome.value.text}
+              </span>
+            </div>
+          ) : null}
           {taskCards()}
           {lines.value.length > 0 ? <LogPanel lines={lines.value} /> : null}
         </>

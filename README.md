@@ -46,9 +46,11 @@ cargo test --workspace
 # 跑服务（默认 127.0.0.1:3000）
 MCLOUD_ADDR=127.0.0.1:38123 MCLOUD_DATA_DIR=./data cargo run -p mcloud-server
 
-# CLI
+# CLI（收敛后：tasks / run / cron / pipeline / auth / login）
 cargo run -p mcloud-server --bin mcloud-cli -- tasks
-cargo run -p mcloud-server --bin mcloud-cli -- run sign 13800000000
+cargo run -p mcloud-server --bin mcloud-cli -- run sign <account-id>   # 账号 id 见 WebUI「账号」页
+cargo run -p mcloud-server --bin mcloud-cli -- cron <schedule-id>     # 供外部触发，CLI 自身不常驻
+cargo run -p mcloud-server --bin mcloud-cli -- auth refresh --all
 
 # 前端
 cd web && npm install && npm run dev     # 开发（代理到 38123）
@@ -111,9 +113,10 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 
 ## 测试
 
-- `cargo test --workspace` —— **567 个测试**
+- `cargo test --workspace` —— **660 个测试**
 - `cargo clippy --workspace --all-targets -- -D warnings` —— 0 告警
 - 黄金向量对拍：`test/golden/crypto-vectors.json`（签名、MD5、SHA256、两种 AES 语义）
+  + `test/golden/app-signin-vectors.json`（签到族实拍信封与常量）
 - 对拍是**字节级**的；不一致就是 bug，不允许改期望值来变绿。
 
 ## 路线图
@@ -129,7 +132,8 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 | P6 | **H5 会话层（JWT）+ 签到端点校正** | ✅ |
 | P7 | **WebUI 登录闸 + 认证闸/登出 + CLI 收敛（6 命令）** | ✅ |
 | P8 | **账号登录（扫码/短信）+ 账号页 + 定时/编排 CRUD 页** | ✅ |
-| P9 | `receive` / `after` 等签到族 + 推送渠道 + 其余任务增量接入 | 待做 |
+| P9a | **签到族 8 条**（`sign` / `receive` / `multiple` / `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`） | ✅ |
+| P9b | 其余任务增量接入（`notice` / `app-task` / 活动类 等）+ 推送渠道 | 待做 |
 
 > **端点必须来自抓包，不能凭印象写。** 本项目的签到端点最初是
 > `/ycloud/api/sign/query`（凭印象），实测回 **405**；换成实拍的

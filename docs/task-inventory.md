@@ -3,7 +3,11 @@
 > 来源：`mcloud`（Go，19 条能力已全部实现）+ `mcloud-sign`（旧 TS，权威清单 `TASKS.md`）
 > + `mcloud/docs/business-feature-inventory.md`（逐条实现规格，含 `path:line` 证据）。
 >
-> 本项目现状：**只有 1 个任务**（`sign`），且端点是**占位**的（实测 HTTP 405）。
+> 本项目现状（2026-09-26）：**已实现 8 个任务** —— P1 签到族全部落地
+> （`sign` / `receive` / `multiple` / `backup-gift` / `revival` / `prizes` /
+> `cloud-snapshot` / `task-list`），端点全部换成**实拍**的
+> `/ycloud/signin/page/*`（不再是 405 的占位）。
+> `/api/capabilities` 实测返回这 8 条。
 
 ---
 
@@ -142,9 +146,8 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 | 项 | 内容 | 判据 |
 |---|---|---|
 | P0-1 | ~~**会话层**：`SessionRecipe` + 会话池 + `90001` 刷新重放~~ | ✅ **已完成**（`mcloud-upstream::session` / `session_source` / `h5_client`）|
-| P0-3 | ~~端点校正~~ | ✅ **已完成**（`sign` 改用实拍 `/ycloud/signin/page/*`）|
-| P0-2 | **`auth-refresh`**：`authTokenRefresh.do`（XML 体、正则取 `<token>`）+ 三档判据 | `expire<0` ⇒ `ManualRequired`，不重试 |
-| P0-3 | **端点校正**：按真实抓包逐条核对 `/market/` vs `/ycloud/` | §5.1 那三组差异有结论 |
+| P0-2 | **`auth-refresh`**：`authTokenRefresh.do`（XML 体、正则取 `<token>`）+ 三档判据 | ✅ **已完成**，但**换了端点**：实拍走 `user/auth/refreshToken` JSON 体；`authTokenRefresh.do` 是零抓包的旧 TS，**刻意不实现**。`expire<0` ⇒ `ManualOnly`，不重试 |
+| P0-3 | ~~**端点校正**：按真实抓包逐条核对 `/market/` vs `/ycloud/`~~ | ✅ **已完成**（P1 八条的端点全部换成实拍 `/ycloud/signin/page/*`）|
 | P0-4 | **产物账本**：run 名下文件清单 + 失败也清理 | ✅ **账本层已完成**（`mcloud-engine::artifacts`，34 条用例）。**仍缺**：`batchTrash` 协议与"真去删"那一枪 —— 要等第一条写网盘的链（P3）落地时才接得上，见下 |
 
 > **P0-4 的现状要说准**（2026-09-26）：
@@ -170,7 +173,7 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 > **你需要提供的**：真实抓包（HAR 或样本）。没有它，P0-3 只能猜，而猜错的代价是
 > "签到请求打到已下线的端点"——返回非零码，与"我写错了"完全无法区分。
 
-### 🅿️ P1 — 签到族（共用一条会话，一次打通 8 条）
+### 🅿️ P1 — 签到族（共用一条会话，一次打通 8 条）✅ **已完成（2026-09-26）**
 
 `sign` → `receive` → `multiple` → `backup-gift` → `revival` → `prizes` → `cloud-snapshot` → `task-list`
 
@@ -180,9 +183,34 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 **共同坑（mcloud 明确记录）**：旧实现**全链吞错** —— 失败只打日志、从不抛错，
 于是对 runner 永远"成功"。新实现必须把失败变成 `Run` 的失败。
 
+> **落地位置**（分层同其余任务）：
+>
+> | 层 | 文件 | 职责 |
+> |---|---|---|
+> | 协议 | `crates/mcloud-upstream/src/app_signin.rs` | 请求构造与响应解析，**纯函数、零 IO** |
+> | 编排 | `crates/mcloud-tasks/src/signin.rs` | 串步骤、判分支、把结论说成一句人话 |
+> | 消费 | `test/golden/app-signin-vectors.json` | 实拍信封与常量，**权威** |
+>
+> **两处实测纠正**（都有抓包支撑，不是推断）：
+>
+> 1. **路径是 `/ycloud/signin/page/*`，不是 `/market/signin/page/*`**。
+> 2. **判据是回查 `infoV3`，不是 `startSignIn` 的响应**。实测 `startSignIn`
+>    响应里的 `cal` / `todaySignIn` 会骗人 —— 它说没签，而紧接着 `infoV3`
+>    已经是 `s:true`。只信提交响应会把一次**成功**报成失败，用户看到失败
+>    再点一次就是重复请求。
+
 **其中 `revival` 有特殊风险**：判活接口**从未抓到**，旧实现是"盲打 + 中文文案匹配
 `本月已领取` + 本地硬编码 2 次"。mcloud 明确说：**抓到判活接口前不要按 1 收紧**，
 那是用一个没验证的假设换掉一条实测过的保险。
+→ 本仓**没有收紧**：仍按文案判活，但把匹配面**收窄**成双条件
+（先有"已领取/已领过"，再有"复活卡/回馈卡/奖励"三种主体词之一）。
+裸一句"本月已领取"**刻意不认** —— 漏认一档只是报失败、人来判，
+误认一片却会把真故障洗白。命中时判 `skipped`（跳过，不是失败也不是成功），
+因为"本月没得领"下个月之前都不会自己好，天天标红只会训练人忽略告警。
+
+**仍未做**：`signin_session_pool` 那层**会话池**（按 `(账号, 配方, 凭据指纹)`
+跨轮复用）。当前每条任务各自建票，功能正确但比参考实现多打几枪。
+
 
 ### 🅿️ P2 — 只读查询（低风险，可先做）
 
