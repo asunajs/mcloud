@@ -25,8 +25,10 @@ package upstream
 //     的 `getVirDirInfo`，那里它就叫"回收站相关接口"）：`POST /hcy/recyclebin/list`，
 //     体只有一枚键 `pageInfo:{pageCursor,pageSize}`，`pageSize` 在那个包里**写死 100**
 //     （原文还留着 `//item.pageSize`，说明页长本来可调，App 选了固定值）。
-//   - **响应形状**：**已有一份实测**（2026-09-26 第廿七趟，两个号各真打过，逐字读数见
-//     [`docs/capture/app-cloud-recyclebin-samples.txt`](../../docs/capture/app-cloud-recyclebin-samples.txt)）。
+//   - **响应形状**：**已有两份实测**（2026-09-26 第廿七趟两个号各真打过；同日更晚第廿八趟
+//     在账号 0 上又跑三趟，专门读 folder 型那三格。逐字读数见
+//     [`docs/capture/app-cloud-recyclebin-samples.txt`](../../docs/capture/app-cloud-recyclebin-samples.txt)
+//     §3／§4／§11）。
 //     形状是 `data:{items:[…], nextPageCursor:…}`，条目里 folder 型与 file 型**不同形**
 //     （`trashedDirStatistics` 与 `thumbnailUrls` 各自可能为 `null`）⇒ 解析器只读
 //     **两型都有且实拍稳定**的那几格，其余一律不解释（见 [CloudRecycleBinEntry] 那条字段级说明）。
@@ -126,11 +128,24 @@ type CloudRecycleBinEntry struct {
 
 // CloudRecycleBinDirStats 是 folder 型条目上的 `trashedDirStatistics` 那三格。
 //
-// ⚠ **它不是"这个目录里现在有什么"的读数**：第廿七趟实拍，一枚**刚放进 1 个文件**、
-// 随即整棵被 `batchTrash` 收走的目录，在回收站里这一格是 `subDirCount:0 subFileCount:0
-// totalSize:0` ⇒ 三种可能（删除时点前就已归零 / 这一格另有语义 / 回收站里的目录不参与统计），
-// 本仓**没有判据分开它们**（要分：拿一枚**没删**的、里面有文件的目录去读同一格，
-// 而那一档需要先有"列某个目录"的对照 —— 网盘侧 [CloudFileListRequest] 有口，可做未做）。
+// ⚠ **它不是"这个目录里现在有什么"的读数，也不是一个"由形状唯一决定"的数**：
+// 第廿八趟拿**同一棵两层子树**（子树 = 1 枚子目录 + 2 枚文件，直接子级 = 1 枚子目录 + 1 枚文件）
+// 连打三趟，`batchTrash(最外层)` 之后在回收站里读到的是**两档**：
+//
+//   - `1/0/0`（两趟，且那两枚在十几分钟后的另一趟里回读**仍是** `1/0/0`）；
+//   - `1/1/64`（一趟，数值恰好等于**直接子级**：1 枚目录 + 1 枚文件 + 64 字节；整棵子树应是 `1/2/128`）。
+//
+// 而第廿七趟那档"子树只有一枚文件"的目录读到的是 `0/0/0` ⇒ 三条读法各自的分界写在这里：
+// 目录那一格会跟着子树里的目录动（`0/0/0` vs `1/x/x`），文件那两格**填不填不确定**；
+// "晚填"这一解释对上面那两枚已被隔了十几分钟的回头读否掉，但**不排除**更长（小时 / 天）才补，
+// 也仍未解释第三枚为什么当趟就填上了。逐字读数见
+// [`docs/capture/app-cloud-recyclebin-samples.txt`](../../docs/capture/app-cloud-recyclebin-samples.txt) §11。
+//
+// ⇒ 落码取向：三格**只交回数字**（指针：键缺席 / 不是数字都是 `nil`，与"读到 0"分开，#197 同族），
+// 不做任何"用 `totalSize` 当目录大小 / 用 `subFileCount` 数内容"的判断。⚠ 同一趟里条目自身的
+// `size` 与 `totalSize` 逐枚相等（0/0、0/0、64/64）—— 那**只是三次读数一致**，不是上游保证，
+// 所以也不拿 `size` 去兜这一格。要真分口径，得另造"直接 1 枚目录 / 子树 2 枚目录"的三层形状
+// （今天这两档在 `subDirCount` 上同值，分不开）。
 type CloudRecycleBinDirStats struct {
 	SubDirCount  *int64
 	SubFileCount *int64
