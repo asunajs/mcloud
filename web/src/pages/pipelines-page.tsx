@@ -28,6 +28,7 @@ import { onMounted, ref } from 'vue'
 import { listCapabilities, request, type TaskMeta } from '../api'
 import { EmptyState } from '../ui/empty-state'
 import { closeDialog, ConfirmDialog, openDialog } from '../ui/dialog'
+import { showError } from '../ui/error-dialog'
 import { pushToast } from '../ui/toast'
 import { fmtEpochMs } from '../ui/time'
 
@@ -140,9 +141,13 @@ const parseAccounts = (raw: string): string[] =>
 
 export const PipelinesPage = () => {
   const state = ref<LoadState>('loading')
-  /** 加载失败（整页替换）。 */
+  /** 加载失败（整页替换）。**留在页内** —— 它要配「重试」。 */
   const errorMessage = ref('')
-  /** 保存/校验失败（表单内联）。与上面分开，否则保存失败会整页什么都不显示。 */
+  /**
+   * 保存/校验失败（表单内联）。**保持内联**：错误要贴着待改的步骤，
+   * 且它出现在草稿表单里，用户正在往下改。页面里独立动作
+   * （运行、删除）的失败走 `showError`。
+   */
   const submitError = ref('')
 
   const pipelines = ref<Pipeline[]>([])
@@ -334,7 +339,7 @@ export const PipelinesPage = () => {
       await runPipeline(p.id)
       pushToast('success', '已在后台开始，可在运行历史查看进度')
     } catch (e) {
-      pushToast('error', e instanceof Error ? e.message : '运行请求失败')
+      showError(`无法运行「${p.name}」`, e instanceof Error ? e.message : '运行请求失败')
     } finally {
       runningId.value = ''
     }
@@ -355,9 +360,13 @@ export const PipelinesPage = () => {
       pushToast('success', `已删除编排「${p.name}」`)
       await load()
     } catch (e) {
-      // 被定时引用时后端拒绝删除，并列出引用它的定时任务名 —— 原样抛出
+      // 被定时引用时后端拒绝删除，并列出引用它的定时任务名 —— 原样抛出。
+      // 走弹窗：那份"被谁引用"的名单正是用户接下来要去改的东西，必须读到。
       closeDialog(DELETE_DIALOG_ID)
-      pushToast('error', e instanceof Error ? e.message : '删除失败')
+      showError(
+        `无法删除编排「${p.name}」`,
+        e instanceof Error ? e.message : '删除失败',
+      )
     } finally {
       deleting.value = false
     }

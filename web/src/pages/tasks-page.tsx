@@ -19,6 +19,7 @@ import {
   type TaskMeta,
 } from '../api'
 import { EmptyState } from '../ui/empty-state'
+import { showError } from '../ui/error-dialog'
 import { LogPanel, type LogLine } from '../ui/log-panel'
 
 type LoadState = 'loading' | 'error' | 'ready'
@@ -42,10 +43,8 @@ const SIGNIN_FAMILY = [
 
 export const TasksPage = () => {
   const state = ref<LoadState>('loading')
-  /** 加载失败（整页替换）。 */
+  /** 加载失败（整页替换）。**留在页内** —— 它要配「重试」，弹窗会挡住入口。 */
   const errorMessage = ref('')
-  /** 动作失败（表单旁内联）。与上面分开，否则动作失败时整页什么都不显示。 */
-  const submitError = ref('')
 
   const tasks = ref<TaskMeta[]>([])
   /** 已登录的云盘账号。跑任务要选一个，而不是手打手机号。 */
@@ -130,7 +129,7 @@ export const TasksPage = () => {
       }
       push('warn', '已请求中止，等待任务在安全点退出…')
     } catch (e) {
-      submitError.value = e instanceof Error ? e.message : '中止请求失败'
+      showError('中止失败', e instanceof Error ? e.message : '中止请求失败')
       cancelling.value = false
     }
   }
@@ -170,10 +169,11 @@ export const TasksPage = () => {
   }
 
   const run = async (task: string) => {
-    submitError.value = ''
     lines.value = []
     if (!account.value.trim()) {
-      submitError.value = '请先选择一个账号'
+      // 没选账号就点运行 —— 这是**当前动作的直接答案**，弹窗告知。
+      // 页内那行提示在表单上方，卡片列表拉长后用户根本看不到。
+      showError('请先选择一个账号', '任务需要一个已登录的账号才能跑。请在上方「账号」里选一个，再点运行。')
       return
     }
 
@@ -196,7 +196,7 @@ export const TasksPage = () => {
       stopStream = subscribeRun(resp.run_id, { onEvent })
       push('info', `已提交，运行号 ${resp.run_id}`)
     } catch (e) {
-      submitError.value = e instanceof Error ? e.message : '请求失败'
+      showError(`无法启动「${task}」`, e instanceof Error ? e.message : '请求失败')
       finish()
     }
   }
@@ -257,11 +257,6 @@ export const TasksPage = () => {
             </select>
           )}
         </fieldset>
-        {submitError.value ? (
-          <div class="alert alert-soft alert-error text-sm" role="alert">
-            <span class="break-words">{submitError.value}</span>
-          </div>
-        ) : null}
         {running.value ? (
           <div class="flex flex-wrap items-center justify-between gap-2">
             <span class="text-xs opacity-70">

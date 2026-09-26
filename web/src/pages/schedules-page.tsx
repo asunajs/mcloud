@@ -30,6 +30,7 @@ import {
 } from '../api'
 import { ConfirmDialog, Dialog, closeDialog, openDialog } from '../ui/dialog'
 import { EmptyState } from '../ui/empty-state'
+import { showError } from '../ui/error-dialog'
 import { IconAlert } from '../ui/icons'
 import { fmtEpochMs } from '../ui/time'
 import { pushToast } from '../ui/toast'
@@ -84,9 +85,16 @@ const statusBadge = (s: Schedule['lastStatus']): { cls: string; text: string } =
 
 export const SchedulesPage = () => {
   const state = ref<LoadState>('loading')
-  /** 加载失败（整页替换）。 */
+  /** 加载失败（整页替换）。**留在页内** —— 它要配「重试」。 */
   const errorMessage = ref('')
-  /** 动作/表单失败（内联在表单旁）。与上面分开 —— 否则动作失败时整页什么都不显示。 */
+  /**
+   * 表单失败（内联在表单旁）。
+   *
+   * 这一条**保持内联**：`save()` 发生在「新建/编辑定时任务」那个 `<dialog>` 里，
+   * 弹出错误弹窗就是 `<dialog>` 套 `<dialog>` —— 无效结构，ESC 与遮罩会打架；
+   * 而且「请填写名称」这类错误必须贴着要改的字段，弹窗把它推远了。
+   * 页面里**独立动作**（启停开关）的失败走 `showError`。
+   */
   const submitError = ref('')
 
   const items = ref<Schedule[]>([])
@@ -208,7 +216,6 @@ export const SchedulesPage = () => {
   }
 
   const toggleEnabled = async (s: Schedule) => {
-    submitError.value = ''
     try {
       await saveSchedule(s.id, {
         name: s.name,
@@ -221,9 +228,12 @@ export const SchedulesPage = () => {
       pushToast('success', s.enabled ? '已停用' : '已启用')
       await refresh()
     } catch (e) {
-      // 失败必须回滚界面：乐观改了却不回滚，用户会以为改成功了
-      submitError.value = e instanceof Error ? e.message : '操作失败'
-      pushToast('error', e instanceof Error ? e.message : '操作失败')
+      // 失败必须回滚界面：乐观改了却不回滚，用户会以为改成功了。
+      // 报错走弹窗 —— 启停是列表上的独立动作，没有表单在场，
+      // 往 `submitError` 里写等于把错误丢进一个此刻不存在的地方（旧代码正是如此，
+      // 而且还是重复报了两遍：内联一份 + 角落 toast 一份）。
+      const reason = e instanceof Error ? e.message : '操作失败'
+      showError(s.enabled ? '无法停用定时任务' : '无法启用定时任务', reason)
       await refresh()
     }
   }
@@ -244,10 +254,12 @@ export const SchedulesPage = () => {
       pushToast('success', '已删除')
       await refresh()
     } catch (e) {
-      // 例如被编排引用时的拒绝 —— 原样透出
-      pushToast('error', e instanceof Error ? e.message : '删除失败')
+      // 例如被编排引用时的拒绝 —— 原样透出。
+      // 走弹窗：删除是独立动作，而这里的原因（"被 X 引用"）是用户**必须读到**
+      // 才知道下一步该改哪，丢进 3 秒后仍在角落的 toast 里等于没说。
       closeDialog(confirmId)
       pendingDelete.value = null
+      showError('删除定时任务失败', e instanceof Error ? e.message : '删除失败')
     } finally {
       deleting.value = false
     }
