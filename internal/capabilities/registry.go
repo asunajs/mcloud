@@ -112,6 +112,23 @@ const (
 	// rabactive 那六口**整族零实拍**，特有取法无从得知。
 	// 要切特有取法时改的是 `internal/app/ai_avatar_run.go` 取票那一句。
 	CodeAiAvatar = "ai-avatar"
+
+	// CodeTaskExpansion 是「任务拓展」（旧实现 `taskExpansion`）这一族的名字。
+	//
+	// 取值沿用 `docs/business-feature-inventory.md` §2.4 那张表里旧项目的小写名。
+	//
+	// ⚠ 这一条会**往用户网盘写文件**，而且是本仓**唯一**一条"为了改变上游状态而写"的链：
+	// 读到 `curMonthBackup=false` 时它不是提示用户去开备份，而是传一个文件去**凑**
+	// （`internal/app/task_expansion_run.go` 文件头写清了这一支的证据面：夹具那条实拍
+	// 读到的正是 `true`，所以**凑备份那一支到今天零实拍**）。
+	// ⇒ `RunInBatch: false` + `MissPolicyOnMiss: MissSkip`：
+	// 挂上调度等于每天往网盘攒一个**没人删**的文件（这条链不删，理由与"删了会不会把
+	// 这次备份记回滚"的零样本一起，记在同一个文件头）。
+	//
+	// ⚠ 这一页的 `jwttoken` 今天用的是**签到页那张**（AGENTS §1.12 的临时态，
+	// 夹具两条的票值脱敏、换票链路没抓到）⇒ 要切特有取法时改的是
+	// `internal/app/task_expansion_run.go` 取票那一句，不是这里的声明。
+	CodeTaskExpansion = "task-expansion"
 )
 
 // Capability 是能力声明。
@@ -397,6 +414,24 @@ func aiAvatarOutput() []core.FieldSpec {
 	}
 }
 
+// taskExpansionOutput 对应 `TaskExpansionResult`（见 `internal/app/task_expansion_run.go`）。
+//
+// # `uploadedFile` 为什么念名字而不是 id
+//
+// 这一格要传达的是"你的网盘里因为这一趟多了哪个文件、而且**它不会被删**"，
+// 名字在网盘里认得出，一串对象 id 认不出（与 [aiAvatarOutput] 那格"个数而不是 id"同一条）。
+//
+// ⚠ `cloudCount` 空**不等于**领到 0 个：领取那一口本仓零实拍，
+// "上游认了但没报数"是可能的一档（`cloudCount` 为 nil 时小结念的是"上游没报朵数"）。
+func taskExpansionOutput() []core.FieldSpec {
+	return []core.FieldSpec{
+		core.NewFieldSpecText("cloudCount", "本次领到的朵数（上游没报数时为空）"),
+		core.NewFieldSpecText("backupReadings", "当月备份与记录数读数（缺的键念成「缺」）"),
+		core.NewFieldSpecText("nextMonthCount", "下月可领（只在大于 0 时念）"),
+		core.NewFieldSpecText("uploadedFile", "为凑备份传上去的文件名（这条链不删）"),
+	}
+}
+
 // liveRoomParams 是「直播口令 → 小红花」的参数。
 //
 // # 为什么口令做成可填的
@@ -472,7 +507,7 @@ func authRefreshOutput() []core.FieldSpec {
 //
 // 用显式列表而不是"注册函数 + init()" —— 可 grep、可 diff，新增能力只改这一处。
 //
-// ⚠ 上面那句"这里先登记 3 项"是**迁移当时**的原文，现在共 **17** 项，分五组：
+// ⚠ 上面那句"这里先登记 3 项"是**迁移当时**的原文，现在共 **19** 项，分五组：
 //
 //   - **迁移对位**（与冻结基准的 code 集合 `diff` 为空）：`sign` / `exchange` /
 //     `cloud-snapshot`；
@@ -482,14 +517,17 @@ func authRefreshOutput() []core.FieldSpec {
 //     `backup-gift` / `revival` / `prizes` —— 这一组**不新增上游接口**，
 //     只是把早就存在的领域层实现挂上可寻址的名字。
 //   - **新接口批**（2026-09-23 起）：`task-list` / `notice` / `msg-push` / `fun-ai` /
-//     `cloud-phone-redpack` / `play-ai-special` / `ai-avatar` —— 这一组**各自都带来了新的上游接口**，
+//     `cloud-phone-redpack` / `play-ai-special` / `ai-avatar` / `app-task` /
+//     `task-expansion` —— 这一组**各自都带来了新的上游接口**，
 //     逐条的证据与"哪些仍是待验证"写在它们各自那一段注释与
 //     `internal/upstream/app_*.go` 的文件头（`cloud-phone-redpack` 与 `play-ai-special`
 //     **都只有只读那一半**，为什么各自没接上写请求分别看 `cloud_phone_run.go` 与
 //     `play_ai_run.go` 文件头；`ai-avatar` 相反 —— 它接的**是**写请求，而且产物会留在
-//     用户网盘上今天没人清，所以它 `RunInBatch: false`，理由见 [CodeAiAvatar]）。
+//     用户网盘上今天没人清，所以它 `RunInBatch: false`，理由见 [CodeAiAvatar]；
+//     `task-expansion` 与它同一条代价，而且它是本仓**唯一**一条"为了改变上游状态而写
+//     网盘"的链，见 [CodeTaskExpansion]）。
 //
-// 别把 17 当成"基准里多出来了什么"。
+// 别把 19 当成"基准里多出来了什么"。
 //
 //   - `live-room`：直播口令 → 小红花。
 //   - `auth-refresh`：把"到期换凭据"登记成能力，**唯一用途**是让定时任务能指向它
@@ -862,6 +900,37 @@ var registry = []Capability{
 		MissPolicyOnMiss: missPolicyPtr(core.MissSkip),
 		Params:           accountSelector,
 		Output:           aiAvatarOutput,
+	},
+	// ── 任务拓展（2026-09-26）：本仓**唯一**一条"为了改变上游状态而写网盘"的链 ──
+	//
+	// 它读 `page/taskExpansion`（读口**有实拍**，请求与响应都在 `3d.json`），
+	// 读到 `curMonthBackup=false` 时**传一个文件去凑**，等一会儿重读，
+	// 再按 `curMonthTaskRecordCount>0` 领掉（领取口**零实拍**）。
+	//
+	// ⚠ 三个档位里只有"跳过凑备份"与"不去领"那两支有实拍支撑（夹具那条读到的正是
+	// `backup=true` + `count=0`）⇒ "凑备份那一支到底有没有把读数刷成 true"
+	// 与"20 秒够不够"**今天都没有样本**，判它的唯一路径是真跑一次
+	// （`internal/app/task_expansion_run.go` 文件头把证据面逐条列了）。
+	//
+	// ⇒ `RunInBatch: false`：这条链**不删**自己传上去的文件（旧实现也不删，且
+	// "删了会不会把这次备份记回滚"零样本），挂上调度等于每天往用户网盘攒一个孤儿。
+	// 手工点一次既是它的使用方式，也是拿到这一族第一个响应样本的路径。
+	{
+		Code:        CodeTaskExpansion,
+		Title:       "任务拓展（凑备份 + 领月度记录）",
+		Group:       core.GroupActivity,
+		Kind:        core.KindAction,
+		Description: "读任务拓展状态；当月备份没开就传一个文件去凑（会写进你的网盘，这条链不删），攒下记录就领掉",
+		RunInBatch:  false,
+		// Medium：会写一次网盘（不可回滚但可手删）+ 发一次进账请求；
+		// 判据读不到时**一枪都不发**（两格判据全 nil ⇒ 判不了那一档）。
+		Risk:               core.RiskMedium,
+		DefaultAccountMode: core.ModeSequential,
+		// 日型，但**不补跑**：补跑是"替人授权一次额外执行"，而这一条的额外执行
+		// 恰好是往网盘里多写一个文件（与 [CodeAiAvatar] 那一条同一条理由）。
+		MissPolicyOnMiss: missPolicyPtr(core.MissSkip),
+		Params:           accountSelector,
+		Output:           taskExpansionOutput,
 	},
 }
 

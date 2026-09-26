@@ -300,6 +300,38 @@ func buildAiAvatarRun(
 	}, nil
 }
 
+// buildTaskExpansionRun 接「任务拓展」：读一次 →（该凑才）传一个文件凑备份 →
+// 等一会儿 → 重读 →（该领才）领掉。
+//
+// 它与 [buildAiAvatarRun] 同样**不走** [buildSignInChain] 共用外壳，因为要多塞一份
+// [app.Waiter]：那条链在凑完备份之后要等 20 秒才重读（旧实现那句
+// `sleep((backupWaitTime||20)*1000)`）。用共用外壳的话，接线用例里凑备份那一支就得
+// 真睡 20 秒 —— 而这一层要断言的不是"睡了"，是"等了几次、等了多久、什么情况下不等"
+// （判据在 `internal/app/task_expansion_run_test.go`，那一支的"不等"是刻意差别之一）。
+//
+// ⚠ 这一条**会往用户网盘写一个文件且不删**（注册表里 `RunInBatch: false`，
+// 代价与"为什么这条链不清理"写在 `internal/app/task_expansion_run.go` 文件头）。
+func buildTaskExpansionRun(
+	ctx context.Context, s *Server, scope core.Scope,
+	capability capabilities.Capability, raw map[string]json.RawMessage,
+) (runSpec, *core.Error) {
+	world, targets, perr := s.signInWorld(ctx, scope, capability, raw)
+	if perr != nil {
+		return runSpec{}, perr
+	}
+	return runSpec{
+		scope: scope,
+		plan: app.RunPlan{
+			Capability: capability.Code, Accounts: targets, ParamsDigest: "",
+		},
+		task: signInTaskFor(world, func(
+			ctx context.Context, w app.SignInWorld, account core.AccountID,
+		) (app.TaskExpansionResult, *core.Error) {
+			return app.TaskExpansionRun{SignInWorld: w, Wait: s.runs.waiter}.RunAccount(ctx, account)
+		}),
+	}, nil
+}
+
 // buildAppTaskRun 接「App 任务矩阵」的**写侧**：读整张表 → 逐条判定 → 打卡 / 跑玩法 → 复查。
 //
 // 它与 [buildAiAvatarRun] 同样**不走** [buildSignInChain] 共用外壳，因为要多塞一份

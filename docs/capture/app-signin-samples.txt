@@ -503,6 +503,8 @@ function h(e){
 老路径的"立即领取"是**无参**的 `GET …/market/signin/page/receiveV2?client=app`；
 新 H5 换成了带 body 的 `receiveV3`。**新 H5 已经没有 `taskExpansion` 这个查询接口**
 （`acceptDate` 改由 `infoV3.receiveList[]` 直接带下来）。
+⚠ 这句的**主语是页面、不是上游** —— 2026-09-26 那个 URL 在新主机上仍然返回 `code:0` 与五格读数，
+现场见 **§3.9.6**。
 
 #### 3.6.4 实测：领掉"当前可领取"那一条（账号 159 / 2026-09-19）
 
@@ -762,8 +764,15 @@ if (curMonthBackup === false) {
 ```
 
 `backFile` 走的是**网盘上传**（`uploadRandomFile(ctx, {opType: "backup", parentFileId: "/"})`）。
-我们**没有网盘上传能力**，所以这一半只**如实报告**"本月未开启备份"，
-**不假装做过**。要补的是"上传"那条线，不是门槛判定。
+
+⚠ **这一节上面那句"我们**没有**网盘上传能力，所以这一半只如实报告"已经过期，2026-09-26 就地改准**：
+本仓 2026-09-25 起有那条四枪链（`internal/upstream/app_cloud_upload.go` + `internal/app/cloud_upload.go`），
+2026-09-26 把它按 `opType:"backup"` + `parentFileId:"/"` 接进了
+[`internal/app/task_expansion_run.go`](../../internal/app/task_expansion_run.go)
+（能力键 `task-expansion`，`RunInBatch:false` ⇒ 只有界面上点那一下才真写）。
+现场读数与"这一档上传能不能真打穿"见下面 **§3.9.6 / §3.9.7**。
+它**不**是"重试一次"那一份：旧实现那句 `return _taskExpansion(ctx, timer-1)` 是**整条链重入**，
+本仓落成"传完 → 等 → 重读一次 → 用重读那一份判定"，凑备份的次数上限同样是 1（绝不传第二个文件）。
 
 #### 3.9.4 `/ycloud/signin/page/receiveTask` 是**死代码**
 
@@ -793,6 +802,57 @@ $ mcloud --account 2 --multiple
 **补（同日）**：响应里还有一个 `result.multiple` —— **倍数**，与 `cloudCount`（合计）
 不是一个量。旧项目那句话逐字是 `"成功获得", multiple, "倍云朵，共计", cloudCount`，
 只报 `cloudCount` 会把"翻了几倍"丢掉。两个字段都解析、都可能缺、都**不判失败**。
+
+#### 3.9.6 ⭐ 活体（2026-09-26）：**老路径那个查询口在新主机上还活着**，且键集合第一次有了正面样本
+
+⚠ 先更正上面 **§3.6.3** 那一句：「**新 H5 已经没有 `taskExpansion` 这个查询接口**」说的是
+**页面不再调它**（`acceptDate` 改由 `infoV3.receiveList[]` 带下来），**不是**"这个 URL 失效了"。
+两个测试号各打一发，回的都正常：
+
+```text
+GET https://m.mcloud.139.com/ycloud/signin/page/taskExpansion   （无查询串，头 7 枚）
+HTTP 200
+{code="0" msg="success" result={
+    curMonthBackup=true  curMonthBackupTaskAccept=true  preMonthBackup=true
+    curMonthTaskRecordCount=0  nextMonthTaskRecordCount=252｜246 }}
+```
+
+- **键集合只有这五格**，两号同型（形状由探针 `liveProbeShape` 打，值级只出布尔与整数）；
+- ⚠ **没有 `acceptDate`** —— 与 §3.6.6 那句"两号的 `receiveList[]` 里都没有 `acceptDate`"同向，
+  但那是**另一口**。这一口今天同样没给 ⇒ **领取那一发的入参在这一族里仍是零真实样本**
+  （本仓的解析把它做成 `*string`，缺了不判失败；发出去的是**裸 GET**，口径同 §3.6.6）；
+- `curMonthBackupTaskAccept` / `preMonthBackup` 这两格本仓**不消费**（旧 TS 也不读），实拍两号都给 `true`；
+- 同一趟里补了一发**只读对照枪**：`infoV3.curMonthBackup` 也是 `true`（两号）⇒ 与这一口**同值**，
+  但"是不是同一件事"**仍没有正面样本**（两条同值不构成证明，见 pending-decisions **R39**）。
+
+⇒ 判据面：两号都读到 `curMonthTaskRecordCount=0` ⇒ 领取那一发**不该发**，程序自己念的是
+「任务拓展没领：本月记录数读到 0，不是 >0（读数：…）；下月可领 252 朵」，四态 `success`。
+"`>0` 那一天长什么样"仍**没有样本** —— 它不是等抓包，是**等月份**（本月的记录数要挣出来）。
+
+#### 3.9.7 活体（2026-09-26）：`backup` 档那一发第一次真打，以及"打完移进回收站"那一次的读数
+
+上面 §3.9.3 那半（`curMonthBackup === false` ⇒ 传一个文件）在本仓**此前一次样本都没有**：
+此前所有真跑上传走的都是 `upload` 档（`x-yun-op-type: 1` / `sub-op-type: 100`），
+而这一族要的是 `2` / `200`（`internal/upstream/app_cloud_upload.go` 的 `opTypeIsBackup`）。
+探针因此在 ③（生产路径）之外单开了一档**直接调生产那一层**（`TaskExpansionRun.uploadBackup`）：
+
+```text
+④ 上传档位=Done（念出来："传了一个文件，没删"）
+④ 产物："asign-<8hex>.png" 落在**根目录**，fileId 长度 33
+④ 生产默认档等 20s 后重读：curMonthBackup=true curMonthTaskRecordCount=0 nextMonthTaskRecordCount=252（与上传前逐字同）
+⑤ 把自己刚传的那一枚移进回收站（batchTrash）：发过=true、结果=上游认了
+⑤ 清理后重读：与 ④ 那一份**一格没变**
+```
+
+三条各自**能说什么、不能说什么**（这条链是唯一会写用户网盘的常规能力，措辞必须卡死）：
+
+- **能说**：`backup` 档那两枚头被上游认 —— 四枪走通、拿到 `fileId`，
+  于是"这一族唯一那条写网盘的链一枪都发不出去"那种失败今天**排除了**。
+- **不能说**：`curMonthBackup` 没变**不**说明"传文件刷不动备份" —— 这个号**上传前**就读成 `true`，
+  它对"false → true"那一问一个比特都没给。要答那一问需要一个**当月未开自动备份**的号（R39）。
+- 清理那一句**只有一条样本**：不够说"删除不会让当月备份读数回滚"，
+  只够把"这条链要不要接自动清理"从**纯猜**变成"**有一条读数可看**"——
+  拍板仍未做（`task_expansion_run.go` 文件头那一节写的是"不删"，本轮**没有**改这条链的行为）。
 
 ---
 

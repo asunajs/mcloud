@@ -47,7 +47,9 @@
 > - **已有实现且 CLI 可达**：#1 待领取奖品（`app.PendingPrizes` + `mcloud signin --prizes`）、
 >   #2 云朵快照（`app.RecordCloud` / `core.NextCloudStats`）、#3 签到（`app.CloudSignIn`）、
 >   #4 领取（`app.ReceiveCloud` / `ReceiveAll`，`--receive`）、#5 复活卡（`app.ReceiveRevivalReward`，`--revive`）、
->   #8 任务拓展（`app.ReceiveTaskExpansion` 一族，**只有 CLI 那一条路**）、#13 备份礼（`app.ClaimBackupGift`，`--backup-gift`）；
+>   #8 任务拓展（`app.ReceiveTaskExpansion` 一族：CLI 那一条路只在 `--receive` 里**领**那一句，
+>   2026-09-26 起它是一条**独立能力** `task-expansion` —— 读口 + 凑备份 + 领，见 §2.3 那一节）、
+>   #13 备份礼（`app.ClaimBackupGift`，`--backup-gift`）；
 >   另有**连签倍数**（`app.ClaimMultiple`，`--multiple`），它不在旧项目那 19 项的编号里。
 > - **已接进服务端执行面**（`runBuilders` 里有键 ⇒ 界面"开始"与定时任务的 `target.code` 指得到）：
 >   **#6 凭证刷新**（`app.NewAuthRefresher` / `app.RefreshRun` + 能力 `CodeAuthRefresh`，
@@ -59,13 +61,17 @@
 >   **任务清单查询**（从 #9 里拆出来的**只查不做**那一半：`app.TaskList` + `CodeTaskList`，`RunInBatch=false`）、
 >   **#11 消息推送**（`app.ClaimMsgPush` + `CodeMsgPush`，`RunInBatch=false` —— ⚠ 这一族**零抓包样本**）、
 >   **#12 公告任务**（`app.ClaimNotice` + `CodeNotice`）、
+>   **#8 任务拓展**（2026-09-26：`upstream.AppTaskExpansion` / `AppReceiveTaskExpansion`
+>   + `app.TaskExpansionRun` + 能力 `CodeTaskExpansion` + `run_dispatch_signin.go` 的
+>   `buildTaskExpansionRun`。⚠ `RunInBatch:false` —— 它是本档**唯一会为了改变上游状态而写用户网盘**的常规能力，
+>   所以调度与"一键全跑"都不替它跑，只有界面上点那一下会真传文件）、
 >   **#17 玩 AI 抽奖**（`app.FunaiDraw` + `CodeFunAI`，每日 1 次由 `app.FunaiDailyDrawLimit` 钉住）、
 >   **#20 抢兑**（2026-09-24：`upstream.AppExchangeList` / `AppGetSlide` / `AppExchangeV3`
 >   + `app.PlanExchange` / `app.LocateExchangePrize` / `app.Exchange` + `run_dispatch_exchange.go`
 >   + 能力 `CodeExchange`。⚠ **三层都在夹具/实拍样本上跑绿；2026-09-24 只读那一半已由本仓真打成功
 >   （55 件 / 9 组，见 `docs/status.md` 同一天的那一节），但**下单**那一半仍一条没由本仓发过** ——
 >   这一族会真扣豆，第一次真跑要按 `docs/capture/app-exchange-samples.txt` §5.4 那三条判据人工对账）。
-> - **只有声明**：**没有了** —— 注册表**十八条**在 `runBuilders` 里十八条（自检用例
+> - **只有声明**：**没有了** —— 注册表**十九条**在 `runBuilders` 里十九条（自检用例
 >   `TestEveryRegisteredCapabilityIsWired` 要求差集为空 ⇒ 将来登记新能力却不接执行会直接红）。
 >   ⚠ "只有声明"与"没有实现"不是一回事，前者缺的是一行接线；接线判据里那条"501"现在
 >   **只能靠临时摘掉一份 builder 来验**（`TestRegisteredButUnwiredCapabilityIsNotImplemented`、
@@ -370,6 +376,21 @@
 > 所以 §2.2 第 3 条与上面这三枪的状态是
 > "账本 ready、上传族 ready 且真跑通、**中间那条线还没接**"，不是"已落地"。缺格清单与解冻条件见
 > [`status.md`](status.md)「网盘上传族四枪落码」那一轮与 Q33 那一格。
+
+- **Go 侧现状（2026-09-26，第十九趟真跑之后）**：**整条链落地并真跑过**，是能力注册表里的
+  第 **19** 条（码 `task-expansion`，`RiskMedium`、`ModeSequential`、`MissSkip`、
+  ⚠ `RunInBatch:false` ⇒ 调度与"一键全跑"都不替它写网盘，只有界面上点那一下会真传文件）。
+  上面那五步逐条对上：① 读口 + ④ 领取口在
+  `internal/upstream/app_signin_task_expansion.go`（**新主机** `m.mcloud.139.com/ycloud/…` 那一对，
+  不是旧项目的 `mrp…/market/…`；2026-09-26 真跑确认这一口**仍返回 `code:0`**，
+  见 [`capture/app-signin-samples.txt`](./capture/app-signin-samples.txt) §3.9.6）；
+  ②③ 与"重读一次"在 `internal/app/task_expansion_run.go`（`opType:"backup"` + `parentFileId:"/"`，
+  两枚头 `2`/`200` **第一次真打就被上游认**，§3.9.7）；⑤ **与旧实现不同**：Go 侧**没有**把
+  留下的 `fileId` 交给 `after` 删 —— 这一条链**不删**自己写的文件，只把**文件名念进事件流与小结**，
+  理由三条与"删掉之后当月读数会不会回滚只有一条样本"一起登记在 **Q48**。
+  三处与旧实现的**刻意差别**（一枪没发就不空等 / 发了且被认就一定念"已领" / 重读挂了仍把"传过了"交回）
+  逐条写在 `task_expansion_run.go` 文件头，各自带一条用例。
+  仍缺的三格（"能不能把 `false` 刷成 `true`"、"20 秒够不够"、`receiveTaskExpansion` 的响应形状）⇒ **R39**。
 
 #### `app` App 任务矩阵（`packages/core/src/tasks/app/`）—— 体量最大的一项
 

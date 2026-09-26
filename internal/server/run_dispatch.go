@@ -191,6 +191,9 @@ var runBuilders = map[string]runBuilder{
 	// App 任务矩阵的**写侧**（每做一条任务一发 `task/click`）。同 AI 头像那一条：
 	// 它也要那份 `Waiter` 注入点，所以不走共用外壳（见 `buildAppTaskRun` 的注释）。
 	capabilities.CodeAppTask: buildAppTaskRun,
+	// 任务拓展：凑备份那一支要等 20 秒，所以它也要那份 `Waiter` 注入点
+	// （见 `buildTaskExpansionRun` 的注释）。
+	capabilities.CodeTaskExpansion: buildTaskExpansionRun,
 }
 
 // builderFor 查这一条能力接上了执行没有。

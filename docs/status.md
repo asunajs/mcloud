@@ -4979,3 +4979,71 @@ golden 0.1s，jsontags 0.1s，md-tables 0.1s；总耗时 27.0s。
    看门那一格会不会随真实 `result` 出现而改变形状。
 6. ⚠ 本族**不写网盘**但**写 AI 会话**：探针三趟在 AI 工作台那边留下三条会话记录，本仓零实现
    "删会话"那一口 ⇒ 这一族**不是零产物**，将来要不要在界面上标"这一条会留一次对话"是产品决定。
+
+## 补记（2026-09-26，第十九趟真跑 + `task-expansion`「任务拓展」一族落地，#81：一条成文被真跑更正，而"这一档上传通不通"与"能不能刷开备份"是**两个问题**）
+
+> 旧项目那条**唯一会为了改变上游状态而写用户网盘**的常规任务（`tasks/task-expansion.ts`）
+> 迁完的整轮：上游读口 → 编排（读 → 凑备份 → 等 → 重读 → 领）→ 能力登记 + server 分派 →
+> 三层测试 → 活体探针 → 成文。判据落点在
+> [`capture/app-signin-samples.txt`](./capture/app-signin-samples.txt) §3.9.6 §3.9.7、
+> 缺口在 [`pending-decisions.md`](./pending-decisions.md) **R39**（要实测）与 **Q48**（要不要接自动清理），
+> 方法层教训在坑表 **#177 ~ #179**。
+
+### 一、改了什么（三层，每层带反向判据）
+
+1. **上游层**（`internal/upstream/app_signin_task_expansion.go`，8 条测试）：
+   `GET /ycloud/signin/page/taskExpansion`（**无查询串**，`deviceid` 是**可选头**而不是参数）与
+   `GET /ycloud/signin/page/receiveTaskExpansion`（`acceptDate` 缺 ⇒ **裸 GET**，口径同 §3.6.6）。
+   解析侧两格判据都做成**指针**：`curMonthBackup` 与 `curMonthTaskRecordCount` **没读到 ≠ false / 0** ——
+   反向改法"把缺当成 false"会让本工具**往用户网盘多写一个文件**（`TestTaskExpansionPredicatesKeepAbsentApart` 红）。
+   ⚠ `TaskExpansion` 那五个键整体无 tag，按 §1.5 登记进 `scripts/check-go-jsontags.cjs` 白名单并**写理由**。
+2. **编排层**（`internal/app/task_expansion_run.go` + `task_expansion_run_test.go`，18 条用例）：
+   档位轴**分两条**（`Status` 是这一趟的结论、`Upload` 是凑备份那一发的结局），三处**与旧实现的刻意差别**各带一条用例：
+   ① **一枪没发就不等**（旧实现把 `backFile` 的返回值丢掉 ⇒ 上传失败也照睡 20 秒再重读；
+   少等只省 20 秒，多等一次只花 20 秒，不对称处在"等错了没人知道"）；
+   ② **发了、上游认了，就一定念"已领"**（旧实现那句 truthy 判据让"`code:0` 但 `result` 空"那一趟**一句都不念**）；
+   ③ **重读挂了仍把"已经传上去了"交回**（旧实现只 `logger.error` 就 return ⇒ 用户网盘多一个文件而日志上没事发生）。
+   另有一格判断（**领到了就不降级成"需人工"**，哪怕重读仍 `false`）标成 **agent 侧默认（非用户要求）**。
+3. **接线**：能力 `task-expansion` 进注册表（`RunInBatch:false` ⇒ **不进一键全跑**，只有界面上点那一下才真写网盘；
+   `RiskMedium`、`ModeSequential`、`MissSkip`），server 分派表加一条 `buildTaskExpansionRun`
+   （**不走** `buildSignInChain`：这一条要注入 `Waiter`，而链上那一套不接等待）。
+
+### 二、真跑读出来的（四趟活体探针：库副本 + 真设备档案 + 一句人话确认；号码、票、fileId 不进成文）
+
+| 枪 | 程序自己念的 | 收到哪一格 |
+| --- | --- | --- |
+| ① 读口（号一、号二各一发） | `HTTP 200`，体只有五格：`curMonthBackup=true` `curMonthBackupTaskAccept=true` `preMonthBackup=true` `curMonthTaskRecordCount=0` `nextMonthTaskRecordCount=252｜246`，**没有 `acceptDate`** | 键集合第一次有正面样本（两号同型）；⚠ 顺带**推翻一条成文**：§3.6.3 那句"新 H5 已经没有 `taskExpansion` 这个查询接口"说的是**页面不再调它**，不是上游下线（坑表 **#177**） |
+| ② 只读对照枪（`infoV3`） | `infoV3.curMonthBackup=true`（两号） | 与 ① **同值**，但"是不是同一件事"**仍无样本** ⇒ 两边不一致时不许拿 ① 当备份开关用（R39 附带格） |
+| ③ **生产路径**整条链（两号） | 档位=`Nothing` 上传=NotNeeded 读了 1 遍 等了 0s；小结「任务拓展没领：本月记录数读到 0，不是 >0（读数：…）；下月可领 252 朵」；四态 `success` 待办 0 条 | "该不发的时候一枪都不发"在真号上成立；⚠ 这一档**永远碰不到**上传那一支（进不进由账号状态决定，坑表 **#179**） |
+| ④ 强制走生产那一层（`uploadBackup`，独立开关） | 档位=`Done`（念出来"传了一个文件，没删"），产物 `asign-<8hex>.png` 落在**根目录**（`fileId` 长度 33）；按生产默认档等 **20s** 后重读，五个键**与上传前逐字同** | ⭐ **`backup` 档那两枚头（`x-yun-op-type: 2` / `sub-op-type: 200`）第一次真打、上游认** —— 此前本仓所有真跑上传走的都是 `upload` 档（`1`/`100`）⇒ "这一族唯一那条写网盘的链一枪都发不出去"那种失败**排除**了。<br>⚠ **不收**那一问："传文件能不能把 `false` 刷成 `true`" —— 这个号上传前就是 `true`，读数不动一个比特都没给（R39①） |
+| ⑤ 清理那一发（同趟内） | `batchTrash` 发过=true、上游认了；清理后重读五个键**一格没变** | "删掉之后当月备份读数会不会回滚"的**第一条**样本（也只有一条，且落在"本来就开着备份"的号上 ⇒ 成文写成"只对照，不下结论"，见 **Q48**） |
+
+**没有**改成的东西（本轮刻意不动）：这条链**仍不删**自己写的文件（`Q48` 待拍板），
+`taskExpansionRetries` 那一格上限仍是"只凑一次"，`BackupWait` 仍是注入点而非配置项。
+
+### 三、门禁（照抄当轮 stdout）
+
+**第十九轮 · `task-expansion`（`gates-go.js`，2026-09-26）**：**十项门禁全绿**（N=10）。
+逐条：build 1.0s，vet 0.4s，fmt 0.1s，test 1m00s（`GOFLAGS=-count=1` 重跑，不吃缓存），deps 3.0s，
+filenames 0.2s，idents 0.3s，golden 0.1s（断言 167 条全绿），jsontags 0.1s，md-tables 0.1s；总耗时 1m06s。
+⚠ 本轮**没有**跑 `gates-web.js`（改动面全在 Go 与文档，web 侧一行未动）。
+
+首跑红一项，是本轮自己引进的、就地修不是绕：**jsontags** 报
+`internal/app/task_expansion_run.go:TaskExpansionRun` 与 `:TaskExpansionResult`
+两个结构体**整个**没有 `json` tag 且不在白名单 ⇒ 按 §1.5 显式登记进
+`scripts/check-go-jsontags.cjs` 的 `UNTAGGED_ALLOWED`（各带理由：前者是注入点兼句柄包，
+内嵌的 `SignInWorld` 里装着 HTTP 客户端、全账号票池与库句柄，对外形状另有 `RunReport` /
+`SummaryLine` 那条出口；后者是内存结论，`CloudCount` 的 `nil` ≠ `0`、`UploadFileID` 是用户网盘里的
+真实 fileId —— 那两格一旦可序列化就把"只进不出"变成一次"顺手 marshal"）。
+
+### 四、现场与边界
+
+- 一次性材料：`target/live-probe-te.db`（主库副本）**跑完即删**；主库 `data/mcloud.db` md5
+  四趟前后一致：`3761b6411af549f859ed4fbcb2e6baf6` ⇒ 未被覆写。
+- ⚠ **真产物两枚**：④ 那一档在测试号一（号码不进成文）的网盘**根目录**传过两个
+  `asign-<8hex>.png` —— 第二枚由 ⑤ 当场移进回收站，**第一枚留着**（那趟还没写清理档）。
+  这一条链**不删**自己写的东西（`Q48`），处置方式是在 App 里按名字找 `asign-` 前缀那一个。
+- 探针的三枚开关分层：四个 env 全给才动（默认 `t.Skipf`）；④ 另要 `MCLOUD_LIVE_PROBE_TE_UPLOAD=1`、
+  ⑤ 另要 `MCLOUD_LIVE_PROBE_TE_CLEANUP=1` ⇒ 不带开关时这一族**一个字都不写**。
+- 凭据边界：`jwttoken`、`authorization`、真实 `fileId`、手机号一律只出**长度**；
+  `acceptDate` 只念"有 / 缺"不念值；探针的响应侧只出**形状**（键名 + 类型 + 长度）。

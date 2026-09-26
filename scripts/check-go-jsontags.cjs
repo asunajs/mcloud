@@ -560,6 +560,8 @@ const UNTAGGED_ALLOWED = {
     'receiveTaskExpansion 的解析结果（月度任务奖励），同上',
   'internal/upstream/app_signin_receive.go:MultipleResult':
     'multiple 的解析结果（本次额外领到的豆），同上',
+  'internal/upstream/app_signin_task_expansion.go:TaskExpansion':
+    'taskExpansion **读口**的解析结果（六格全指针）。出网的是 app 层那句小结，不是这份形状；⚠ 钉 tag 会把"上游没给这一格"和"这一格是 `false` / `0`"混成同一个读数，而编排层正是拿这个区别决定**要不要往用户网盘写一个文件**去凑备份（不可回滚）。实拍只有一条、且**不含** `acceptDate` ⇒ 更没有可承诺的形状',
   'internal/upstream/app_signin_records.go:CloudRecords':
     'cloudRecordV2 的解析结果（一页流水 + 分页总数），手工构造，不做反序列化',
   'internal/upstream/app_signin_records.go:PrizeRecordItem': '奖品流水里的一条，同上',
@@ -705,6 +707,11 @@ const UNTAGGED_ALLOWED = {
   // ── 139 邮箱会话那一族（#67，2026-09-25 随玩法 472/473 落地）──
   'internal/upstream/app_mail139.go:MailSession':
     '两张字段（`SID` / `RMKey`）**都是会话凭据**，类型是 `core.SecretValue`：它的 `String()` 只挡打印，**不挡 `encoding/json`** ⇒ 一旦补上 tag，"顺手 marshal 一下这张会话"就会把 sid/rmkey 原文写进日志、错误文本或 fixture（三者都是本仓明令禁止的落点，见 `docs/sanitize-guide.md`）。这一族的③那一发更是把两枚直接拼进 URL、而传输层错误原样嵌 URL（`internal/io/client.go` 的 `mapTransportError`）⇒ 不给 tag 是"只进不出"这条边界在类型上的那一份，不是漏写。响应形状零实拍（② 那条只拍到请求面）⇒ 也没有任何外部契约要钉',
+  // ── 任务拓展那一族（#81，2026-09-26 随 `task-expansion` 落地）──
+  'internal/app/task_expansion_run.go:TaskExpansionRun':
+    '一条链的**注入点**，不是数据：内嵌的 `SignInWorld` 里装着 `*upstream.Upstream`（HTTP 客户端）、`*SessionPool`（进程内**所有账号**的票池）与 `core.StateStore`（库句柄），marshal 到它们要么直接报错、要么把别账号的凭据带出进程；`Wait`/`BackupWait` 两格的正误只服务于测试压小等待，没有任何外部读者。对外形状另有出口：`RunReport` 与 `SummaryLine`（`internal/exec`）⇒ 补 tag 只会造出第二条**没人读**的形状',
+  'internal/app/task_expansion_run.go:TaskExpansionResult':
+    '一个账号这一趟的**内存结论**。三处区别只有类型能保住、tag 会抹掉：① `CloudCount *int64` 的 `nil` 与 `0` 是两档（上游没报 ≠ 报了 0 朵，同 §3.6.7 的口径），补 tag 出去前端只能看到其中一档；② `UploadFileID` / `UploadName` 是**用户网盘里的真实 fileId**，本仓纪律是"真跑日志里的真实 fileId 不进任何成文" ⇒ 这一旦可序列化，离把它写进响应体/日志只差一次"顺手 marshal"；③ `BackupStillOff` 与 `Status` 是**独立两位**（可以同时成立），档位取舍由 `RunReport` 现拼，字段平铺出去会被读成互斥。今天没有任何前端或协议读它 ⇒ 没有契约要钉',
 }
 
 function walk(dir, out = []) {
