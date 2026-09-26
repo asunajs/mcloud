@@ -6,10 +6,12 @@
 //! 权威性由 `tests/golden.rs` 的向量对拍保证。
 
 pub mod aes;
+pub mod des;
 pub mod hash;
 pub mod sign;
 
 pub use aes::{aes_cbc_decrypt, aes_cbc_encrypt, decrypt_with_dynamic_iv, encrypt_with_dynamic_iv};
+pub use des::{des_decrypt_b64, des_encrypt_b64};
 pub use hash::{md5_hex, sha256_hex, sha256_hex_upper};
 pub use sign::{generate_signature, sign_headers, sign_headers_with, SignHeaders, SALT_MAP};
 

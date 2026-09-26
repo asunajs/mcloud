@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use mcloud_crypto::{aes, generate_signature, hash, SALT_MAP};
+use mcloud_crypto::{aes, des, generate_signature, hash, SALT_MAP};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -21,6 +21,29 @@ struct Vectors {
     sign_header: Vec<SignCase>,
     #[serde(rename = "aesDynamicIv")]
     aes_dynamic_iv: Vec<AesDynamicCase>,
+    /// 设备指纹上报：DES-ECB/NoPadding，base64 输出。
+    #[serde(rename = "desEcbNoPaddingB64")]
+    des_no_padding: Vec<DesEncryptCase>,
+    /// 旧接口响应：DES-ECB/PKCS7，base64 进、utf8 出。
+    #[serde(rename = "desEcbPkcs7Decrypt")]
+    des_pkcs7_decrypt: Vec<DesDecryptCase>,
+}
+
+#[derive(Deserialize)]
+struct DesEncryptCase {
+    name: String,
+    key: String,
+    message: String,
+    expect: String,
+}
+
+#[derive(Deserialize)]
+struct DesDecryptCase {
+    name: String,
+    key: String,
+    #[serde(rename = "cipherB64")]
+    cipher_b64: String,
+    expect: String,
 }
 
 #[derive(Deserialize)]
@@ -229,4 +252,32 @@ fn dynamic_iv_roundtrip_with_golden_key() {
         aes::decrypt_with_dynamic_iv(key, &enc).unwrap(),
         "向量往返测试"
     );
+}
+
+/// DES-ECB/NoPadding 加密（设备指纹上报路径）。
+///
+/// 18 条向量覆盖三种密钥写法（正好 8 字节 / 短了补零 / 长了截断）
+/// × 六种消息长度（1、7、8、9、16、0），边界是刻意排的：
+/// 8 与 16 是「已对齐」，必须**不补**整块。
+#[test]
+fn des_ecb_no_padding_matches_all_vectors() {
+    let v = load();
+    assert!(!v.des_no_padding.is_empty(), "向量不应为空");
+    for c in &v.des_no_padding {
+        let got = des::des_encrypt_b64(&c.message, &c.key)
+            .unwrap_or_else(|e| panic!("加密失败（用例 {}）：{e}", c.name));
+        assert_eq!(got, c.expect, "DES 无填充用例 {}", c.name);
+    }
+}
+
+/// DES-ECB/PKCS7 解密（旧接口响应路径）。
+#[test]
+fn des_ecb_pkcs7_decrypt_matches_all_vectors() {
+    let v = load();
+    assert!(!v.des_pkcs7_decrypt.is_empty(), "向量不应为空");
+    for c in &v.des_pkcs7_decrypt {
+        let got = des::des_decrypt_b64(&c.cipher_b64, &c.key)
+            .unwrap_or_else(|e| panic!("解密失败（用例 {}）：{e}", c.name));
+        assert_eq!(got, c.expect, "DES PKCS7 解密用例 {}", c.name);
+    }
 }
