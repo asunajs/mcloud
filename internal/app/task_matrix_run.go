@@ -411,8 +411,13 @@ func (r TaskMatrixRun) RunAccount(
 //   - **失败不重跑**：旧实现失败只打一句 error。这里也一枪不打第二遍 —— 但要把
 //     结局记进结果并写进小结，因为"没删掉"意味着**用户网盘里留着东西**。
 //
-// ⚠ `batchTrash` 自身零实拍（R27 那一族第四枪）⇒ 本函数只保证"发的是旧实现那一份
-// 请求、判的是它那一句 `success`"。要核它：测试号跑一次上传再删，抓那一枪的请求体与响应。
+// ⚠ 本函数原来那句"`batchTrash` 自身零实拍"已被 2026-09-26 的活体探针**推翻并就地改掉**：
+// 这一口今天打过十几枪（第廿六~卅趟），请求侧被上游认、回执三格也有逐字读数
+// （`code:"0000"` / `success:true` / 没有 `msg` 键，见
+// [`docs/capture/app-cloud-recyclebin-samples.txt`](../../docs/capture/app-cloud-recyclebin-samples.txt) §13），
+// 而"删一枚非空目录只留一条""重复点名不新增条目"两格也都有了判据。
+// 仍**没有**读数的两格：上游把 `batchTrash` 的**失败**回成什么形状（今天只见过成功那一档），
+// 以及"整份名单里有一枚 id 是别人家的 / 已经不在了"时那一发怎么判 —— 本函数不替它们做保证。
 func (r TaskMatrixRun) cleanupCloudFiles(
 	ctx context.Context, exec *taskExecutor, result *TaskMatrixRunResult,
 ) {

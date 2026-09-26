@@ -555,6 +555,20 @@ func ParseCloudFileComplete(envelope *Envelope) *core.Error {
 //
 // `apis/file.ts:114` 写死 `channelSrc: "10000034"`，**与前面三枪用的档位无关** ——
 // 也就是说旧实现里"用 PC 档上传、用 web 档删除"是常态。照抄，不"顺手统一"。
+//
+// # 同一枚 `fileId` 点名两次：今天没有"多记一条"的读数（2026-09-26 第卅趟真跑）
+//
+// 清理链会重复点名同一枚对象（任务重复触发、两条链上传了同一枚产物、用户连点两次清理），
+// 所以"重试安不安全"是这一口必须有的口径。第卅趟造两枚（空目录 + 文件）、每枚**各打两发**、
+// 三遍回读（两遍之间各等 20s）⇒ 两趟都是"第二发之后条数与第一发之后**同数**、**整页总条数也不变**、
+// 那一枚的 `trashedAt` **逐毫秒仍是第一发那一条**"（第二发在其后约 20.9s）
+// ⇒ 第二发**既没新增条目、也没改写已有条目**，上游两发回的是同一句"成功"
+// （逐字读数见 [`docs/capture/app-cloud-recyclebin-samples.txt`](../../docs/capture/app-cloud-recyclebin-samples.txt) §13）。
+//
+// ⚠ **边界**：那一趟只测了"入站后一分钟内再点名"、只测了 `batchTrash` 一口、对象只有**空目录**与
+// **单个文件**两型（**非空目录**被点两次名仍未测）、且只测了**当天**。所以这一格能支持的说法是
+// "重复点名不产生第二条回收站条目、也不回失败"，**不能**扩成"这一口幂等"这种一般性保证，
+// 更不能反过来用它去**省掉**清理链的记账（那是"少发一枪"的优化，另一回事）。
 func CloudBatchTrashRequest(
 	authorization, deviceID string, fileIds []string,
 ) (core.HTTPRequest, *core.Error) {
@@ -576,6 +590,15 @@ func CloudBatchTrashRequest(
 // 也就是说它读的是顶层 `success`，而且**读不到就当失败**（`undefined` 是假值）。
 // 这里同一口径：`EnsureOK` 先拦掉 `success:false` 与非 0 码，再要求
 // 顶层确实有一个 `success:true`；那一格缺席 ⇒ 回错误，不念成"没失败就是成功了"。
+//
+// # 真实回执的逐字形状（本仓第一份，2026-09-26 第卅趟）
+//
+// 这一口的回执以前**从没进过日志**（第廿六~廿九趟都只走编排层，回执被折成 `*core.Error` 了），
+// 第卅趟的探针为了读"第二发回什么"直接打 [Upstream.Call] 才第一次念出三格：
+// `code="0000"`（**字符串**那一型，不是数字 0）、`success=true`（**布尔**）、`msg` **缺键**
+// （不是空串 —— 这一档差别对本函数有直接意义：读 `msg` 的代码必须能在**没有这一格**时活下来）。
+// 成功那一发只有这三格 ⇒ 上面那句"读不到 `success` 就当失败"在真实成功回执上不会被踩到，
+// 而"上游把失败也回成 `code:"0000"`"这一档今天仍零样本（不推断，见 capture §13 那张表）。
 func ParseCloudFileBatchTrash(envelope *Envelope) *core.Error {
 	if _, perr := envelope.EnsureOK(); perr != nil {
 		return perr
