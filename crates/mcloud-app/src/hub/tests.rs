@@ -126,6 +126,44 @@ impl mcloud_core::PipelineStore for MemStore {
     }
 }
 
+/// 登录闸在事件中枢测试里用不到 —— 全部给"空/无"的实现。
+#[async_trait]
+impl mcloud_core::UserStore for MemStore {
+    async fn user_count(&self) -> mcloud_core::Result<usize> {
+        Ok(0)
+    }
+    async fn users(&self) -> mcloud_core::Result<Vec<mcloud_core::User>> {
+        Ok(Vec::new())
+    }
+    async fn user_by_name(&self, _n: &str) -> mcloud_core::Result<Option<mcloud_core::User>> {
+        Ok(None)
+    }
+    async fn user(
+        &self,
+        _i: &mcloud_core::UserId,
+    ) -> mcloud_core::Result<Option<mcloud_core::User>> {
+        Ok(None)
+    }
+    async fn save_user(&self, _u: &mcloud_core::User) -> mcloud_core::Result<()> {
+        Ok(())
+    }
+    async fn save_session(&self, _s: &mcloud_core::Session) -> mcloud_core::Result<()> {
+        Ok(())
+    }
+    async fn session(&self, _h: &str) -> mcloud_core::Result<Option<mcloud_core::Session>> {
+        Ok(None)
+    }
+    async fn remove_session(&self, _h: &str) -> mcloud_core::Result<()> {
+        Ok(())
+    }
+    async fn remove_user_sessions(&self, _i: &mcloud_core::UserId) -> mcloud_core::Result<usize> {
+        Ok(0)
+    }
+    async fn purge_expired_sessions(&self, _n: i64) -> mcloud_core::Result<usize> {
+        Ok(0)
+    }
+}
+
 fn hub() -> EventHub {
     EventHub::new(
         Arc::new(MemStore::default()) as Arc<dyn Store>,

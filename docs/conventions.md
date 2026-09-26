@@ -361,8 +361,14 @@ pub enum RunEvent { Started{..}, Log{..}, Progress{..}, Finished{..} }
 
 ### 7.2 时间
 
-- **秒级**用于凭证过期（`AuthInfo::expire`、`days_until_expiry`）。
 - **毫秒级**用于事件与运行记录（字段名带 `_ms` 后缀）。
+- **毫秒级**也用于凭证过期：`AuthInfo::expire` 是 epoch **毫秒**，
+  取差值的口径是 `86_400_000`（`days_until_expiry`）。
+  ⚠ 这一条原先写成"秒级"，**是错的**：上游 token 第 4 段是 13 位毫秒
+  （黄金向量 `1893456000000`、真实 `asign.json` 都是），
+  按秒解释会把"已过期"算成公元 61968 年 —— 不报错，只是永远不刷新，
+  直到上游回 90001 才发现。所以**访问器一律把单位写进名字**：
+  新加的时间参数叫 `now_ms`，不叫 `now`。
 - 时间一律取 `Clock` trait，**不许直接 `SystemTime::now()`**——
   测试要靠 `FixedClock` 才能稳定。
 

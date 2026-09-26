@@ -28,6 +28,8 @@ fn account(phone: &str) -> Account {
             expire: 0,
         },
         device_id: DeviceId("dev".into()),
+        pc_platform: None,
+        user_domain_id: None,
         settings: AccountSettings::default(),
     }
 }
@@ -186,6 +188,48 @@ impl mcloud_core::PipelineStore for MemStore {
     }
     async fn mark_pipeline_ran(&self, _i: &PipelineId, _ms: i64) -> mcloud_core::Result<()> {
         Ok(())
+    }
+}
+
+/// 登录闸在编排测试里用不到 —— 全部给"空/无"的实现。
+///
+/// 这组方法存在的意义只是让 `MemStore` 满足 `Store`。
+/// 给空实现而不是 `unimplemented!()`：将来某个测试顺路调到它时，
+/// 得到的是"没有用户"这个**语义正确**的结果，而不是一次 panic。
+#[async_trait]
+impl mcloud_core::UserStore for MemStore {
+    async fn user_count(&self) -> mcloud_core::Result<usize> {
+        Ok(0)
+    }
+    async fn users(&self) -> mcloud_core::Result<Vec<mcloud_core::User>> {
+        Ok(Vec::new())
+    }
+    async fn user_by_name(&self, _n: &str) -> mcloud_core::Result<Option<mcloud_core::User>> {
+        Ok(None)
+    }
+    async fn user(
+        &self,
+        _id: &mcloud_core::UserId,
+    ) -> mcloud_core::Result<Option<mcloud_core::User>> {
+        Ok(None)
+    }
+    async fn save_user(&self, _u: &mcloud_core::User) -> mcloud_core::Result<()> {
+        Ok(())
+    }
+    async fn save_session(&self, _s: &mcloud_core::Session) -> mcloud_core::Result<()> {
+        Ok(())
+    }
+    async fn session(&self, _h: &str) -> mcloud_core::Result<Option<mcloud_core::Session>> {
+        Ok(None)
+    }
+    async fn remove_session(&self, _h: &str) -> mcloud_core::Result<()> {
+        Ok(())
+    }
+    async fn remove_user_sessions(&self, _id: &mcloud_core::UserId) -> mcloud_core::Result<usize> {
+        Ok(0)
+    }
+    async fn purge_expired_sessions(&self, _now: i64) -> mcloud_core::Result<usize> {
+        Ok(0)
     }
 }
 

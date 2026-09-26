@@ -8,6 +8,11 @@
  * 刻意不用 CORS，避免"开发能用、打包上去就不行"。
  */
 
+import { classifyAuthFailure, noteAuthOk, noteAuthRequired } from './ui/auth-signal'
+// 转出给页面用：页面只 import `api` 就够了，不必知道状态存在哪个模块里
+export type { AuthState } from './ui/auth-signal'
+export { currentUser } from './ui/auth-signal'
+
 export interface TaskMeta {
   name: string
   title: string
@@ -22,6 +27,16 @@ export type TaskOutcome =
   | { status: 'skipped'; reason: string }
   | { status: 'failed'; reason: string }
 
+/** 一条留在用户网盘上、还没清理的产物。 */
+export interface LeftoverArtifact {
+  /** 产物类型。今天是 `cloud-file`，刻意开放（将来会有外链、笔记等）。 */
+  kind: string
+  /** 账号（掩码标识，**不是**凭据）。 */
+  account: string
+  /** 上游侧的 `fileId` —— 手工清理时要用它。 */
+  id: string
+}
+
 export interface RunRecord {
   run_id: number
   task: string
@@ -29,6 +44,16 @@ export interface RunRecord {
   started_at_ms: number
   duration_ms: number
   outcome: TaskOutcome
+  /**
+   * 结构化明细。
+   *
+   * 今天只有一格：`artifacts` —— 这次运行**留在用户网盘上、还没清理**的文件。
+   * 非空时后端还会发一条 warn 日志。
+   *
+   * ⚠ 它是"跑完那一刻还没清"的快照，不是"最终没清"：
+   * 链尾清理干净的任务这里就是 `null`。
+   */
+  details?: { artifacts?: LeftoverArtifact[] } | null
 }
 
 export interface RunResponse {
@@ -55,6 +80,14 @@ export type RunEvent =
 /** 后端返回的错误体。 */
 export interface ApiErrorBody {
   error: string
+  /**
+   * 可判别的机器码，例如 `setup_required`。
+   *
+   * ⚠ 与 `error` 分工明确：`error` 是**给人看的**（可以随时改字），
+   * 这个字段是给**代码判断**的。让代码去匹配 `error` 的文案，
+   * 后端改一个字就会让判断静默失效。
+   */
+  code?: string
 }
 
 /**
@@ -65,10 +98,13 @@ export interface ApiErrorBody {
  */
 export class ApiError extends Error {
   readonly status: number
-  constructor(status: number, message: string) {
+  /** 后端的机器码（如 `setup_required`），没有则 `undefined`。 */
+  readonly code: string | undefined
+  constructor(status: number, message: string, code?: string) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.code = code
   }
 }
 
@@ -77,6 +113,29 @@ export class ApiError extends Error {
  *
  * 导出是为了让页面复用同一份语义 —— 复制一份到页面里迟早会分叉。
  */
+/**
+ * 这次失败是不是"认证动作**自己**的正常失败"（而非"整个应用该跳登录页"）。
+ *
+ * ⚠ 必须**按方法区分**，不能只看路径：
+ *
+ * | 请求 | 401 的含义 | 该不该跳登录页 |
+ * |---|---|---|
+ * | `POST /api/session`（登录） | 用户名或口令错 | **否** —— 用户就在登录页上 |
+ * | `POST /api/setup`（建管理员） | 已初始化/校验失败 | **否** —— 同理 |
+ * | `GET /api/session`（查会话） | 没登录 | **是** —— 这正是启动时的判据 |
+ *
+ * 只看路径的话，启动时那句 `GET /api/session` 的 401 会被吞掉，
+ * 于是应用永远停在"正在检查"上。
+ *
+ * 不排除 POST 的话，口令输错一次就会让登录页自己重渲染、把表单清掉。
+ */
+function isAuthActionFailure(method: string, path: string): boolean {
+  const m = method.toUpperCase()
+  if (path === '/api/session') return m === 'POST' || m === 'DELETE'
+  if (path === '/api/setup') return m === 'POST'
+  return false
+}
+
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     credentials: 'same-origin',
@@ -100,16 +159,83 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!response.ok) {
-    const message =
-      data && typeof data === 'object' && 'error' in data
-        ? String((data as ApiErrorBody).error)
-        : `HTTP ${response.status}`
-    throw new ApiError(response.status, message)
+    const body = data && typeof data === 'object' ? (data as ApiErrorBody) : null
+    const message = body && 'error' in body ? String(body.error) : `HTTP ${response.status}`
+    const code = body && typeof body.code === 'string' ? body.code : undefined
+
+    // ⭐ 认证失败要在**这一层**统一识别。
+    //
+    // 放在这里而不是各页面：每个页面都要处理的话，漏一个就是那一个页面
+    // 永远卡在错误态；而"漏了"没有任何测试会红。
+    //
+    // ⚠ 登录接口自己**排除在外**：它返回 401 表示"用户名或口令错误"，
+    // 那是这个动作的正常失败，不是"整个应用要跳登录页"——
+    // 而用户此刻**就在**登录页上。
+    const method = (init?.method ?? 'GET').toUpperCase()
+    if (!isAuthActionFailure(method, path)) {
+      const authFailure = classifyAuthFailure(response.status, code)
+      if (authFailure) noteAuthRequired(authFailure)
+    }
+
+    throw new ApiError(response.status, message, code)
   }
 
   if (response.status === 204) return undefined as T
   return data as T
 }
+
+// ── 认证（WebUI 登录闸）──────────────────────────────────────────────
+//
+// ⚠ 这一层与下面的 `/api/login/*`（云盘账号登录）是**两件事**：
+// 这里管"谁能进这个 WebUI"，那边管"往账号列表里加一个云盘账号"。
+
+export interface SetupStatus {
+  initialized: boolean
+  /**
+   * 口令长度下限。**后端给**，前端不硬编 ——
+   * 硬编一份必然与后端漂移，而漂移的表现是"前端说可以、后端拒绝"。
+   */
+  minPasswordLen: number
+}
+
+export interface AuthSession {
+  userId: string
+  name: string
+  kind: 'web' | 'cli'
+}
+
+export const getSetupStatus = () => request<SetupStatus>('/api/setup')
+
+/**
+ * 首次建管理员。成功后后端会**直接下发会话 cookie**，无需再登录一次。
+ *
+ * 这里显式置 `ready` —— 而不是在 `request` 里"任何成功都置 ready"。
+ * 理由是公开接口（`/api/version`、`/api/health`）**未初始化时也返回 200**，
+ * 那样会让应用从"要建管理员"错误地翻成"放行"，然后每个页面各自
+ * 撞一鼻子 503。放行只能由**明确的认证动作**宣布。
+ */
+export const createAdmin = async (username: string, password: string) => {
+  const s = await request<AuthSession>('/api/setup', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  })
+  noteAuthOk(s.name)
+  return s
+}
+
+export const loginSession = async (username: string, password: string) => {
+  const s = await request<AuthSession>('/api/session', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  })
+  noteAuthOk(s.name)
+  return s
+}
+
+export const logoutSession = () => request<void>('/api/session', { method: 'DELETE' })
+
+/** 查当前会话。401 会经 `request` 让应用转到登录页 —— 这是启动时的判据。 */
+export const getCurrentSession = () => request<AuthSession>('/api/session')
 
 // ── 具体接口 ────────────────────────────────────────────────────────────
 
@@ -353,3 +479,117 @@ export const cancelRun = (runId: number) =>
   request<{ cancelled: boolean; running: boolean }>(`/api/runs/${runId}/cancel`, {
     method: 'POST',
   })
+
+// ── 云盘账号登录 ────────────────────────────────────────────────────────
+//
+// 注意与 `/api/session` 的区别：那个登的是**本实例管理员**，
+// 这里登的是**要跑任务的云盘账号**。两者的凭据存在不同的文件里。
+
+/** 平台形态。mac 与 win 在请求头、UA 与落盘数据上都不一样。 */
+export type PcPlatform = 'windows' | 'macos'
+
+export interface StartQrResponse {
+  session_id: string
+  /** 二维码载荷（原始链接）。排障与自渲染用。 */
+  payload: string
+  /** 二维码图片（SVG 的 data URL），直接塞进 `<img src=...>`。 */
+  image_svg: string
+  platform: PcPlatform
+  platform_label: string
+  poll_interval_ms: number
+  ttl_seconds: number
+  device_id: string
+}
+
+export interface LoginOutcome {
+  phase: 'not_scanned' | 'scanned' | 'logged_in' | 'failed'
+  terminal: boolean
+  reason?: string
+  retry_after_ms?: number
+  /** 成功时的**掩码**账号名（完整手机号不出现在响应里）。 */
+  account?: string
+  platform?: PcPlatform
+}
+
+/** 出码。**不发上游请求**：二维码是服务端本地拼的。 */
+export const startQrLogin = (platform: PcPlatform) =>
+  request<StartQrResponse>('/api/login/qr', {
+    method: 'POST',
+    body: JSON.stringify({ platform }),
+  })
+
+/** 问一次"扫了没"。用 POST：它会推进服务端会话状态。 */
+export const pollQrLogin = (sessionId: string) =>
+  request<LoginOutcome>('/api/login/qr/poll', {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sessionId }),
+  })
+
+/** 放弃一次扫码（离开页面时调用，让服务端把会话丢掉）。 */
+export const cancelQrLogin = (sessionId: string) =>
+  request<{ cancelled: boolean }>(`/api/login/qr/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+  })
+
+export interface SliderPayload {
+  background: string
+  puzzle: string
+  width: number | null
+  /** 已解出的答案。上游把答案加密在题面里，不需要图像识别。 */
+  answer?: string
+}
+
+export interface SmsStartResponse {
+  phase: 'sent' | 'need_slider' | 'slider_exhausted'
+  remain_get_times?: number
+  slider?: SliderPayload
+}
+
+export const startSmsLogin = (phone: string, platform: PcPlatform) =>
+  request<SmsStartResponse>('/api/login/sms/start', {
+    method: 'POST',
+    body: JSON.stringify({ phone, platform }),
+  })
+
+export const submitSmsLogin = (input: {
+  phone: string
+  platform: PcPlatform
+  code: string
+  sliderAnswer?: string
+}) =>
+  request<LoginOutcome>('/api/login/sms', {
+    method: 'POST',
+    body: JSON.stringify({
+      phone: input.phone,
+      platform: input.platform,
+      code: input.code,
+      slider_answer: input.sliderAnswer,
+    }),
+  })
+
+export const loginWithPassword = (username: string, password: string, platform: PcPlatform) =>
+  request<LoginOutcome>('/api/login/password', {
+    method: 'POST',
+    body: JSON.stringify({ username, password, platform }),
+  })
+
+export const getPcDevice = () => request<{ device_id: string }>('/api/login/device')
+
+export const rotatePcDevice = () =>
+  request<{ device_id: string }>('/api/login/device/rotate', { method: 'POST' })
+
+/** 列出已登录的云盘账号。 */
+export interface AccountSummary {
+  id: string
+  nickname: string | null
+  /** `windows` / `macos`；`null` = 非 PC 端登录的账号。 */
+  pc_platform: PcPlatform | null
+  device_id: string
+  /** 凭据到期的 epoch 毫秒；`0` = 解析不出。 */
+  expire: number
+}
+
+export const listAccounts = () => request<AccountSummary[]>('/api/accounts')
+
+export const deleteAccount = (id: string) =>
+  request<void>(`/api/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' })

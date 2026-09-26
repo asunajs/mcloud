@@ -452,7 +452,7 @@ export const SchedulesPage = () => {
       <fieldset class="fieldset">
         <legend class="fieldset-legend">名称</legend>
         <input
-          class="input input-bordered w-full"
+          class="input w-full"
           placeholder="例如 每天签到"
           value={fName.value}
           onInput={(e) => {
@@ -464,7 +464,7 @@ export const SchedulesPage = () => {
       <fieldset class="fieldset">
         <legend class="fieldset-legend">执行的任务</legend>
         <select
-          class="select select-bordered w-full"
+          class="select w-full"
           value={fTask.value}
           onChange={(e) => {
             fTask.value = (e.target as HTMLSelectElement).value
@@ -481,7 +481,7 @@ export const SchedulesPage = () => {
       <fieldset class="fieldset">
         <legend class="fieldset-legend">账号（手机号，逗号分隔；留空 = 全部已启用账号）</legend>
         <input
-          class="input input-bordered w-full"
+          class="input w-full"
           placeholder="留空表示对所有已启用账号执行"
           value={fAccounts.value}
           onInput={(e) => {
@@ -493,7 +493,7 @@ export const SchedulesPage = () => {
       <fieldset class="fieldset">
         <legend class="fieldset-legend">cron 表达式</legend>
         <input
-          class="input input-bordered w-full font-mono"
+          class="input w-full font-mono"
           placeholder="0 8 * * *"
           value={fExpr.value}
           onInput={(e) => {
@@ -522,7 +522,7 @@ export const SchedulesPage = () => {
       <fieldset class="fieldset">
         <legend class="fieldset-legend">时区</legend>
         <select
-          class="select select-bordered w-full"
+          class="select w-full"
           value={fTimezone.value}
           onChange={(e) => {
             fTimezone.value = (e.target as HTMLSelectElement).value

@@ -1,0 +1,759 @@
+{
+  "$source": "2026-09-19 Reqable 抓包（iOS App mCloud 12.6.0 的签到页 H5）+ 账号 B 纯协议复现",
+  "$note": "Rust 侧 ../mcloud-rust/crates/mcloud-upstream/src/app_signin.rs 消费本文件；Node 侧 scripts/check-golden-vectors.cjs 独立复算 h5Signature。",
+  "$evidence": {
+    "har": "har/signin-2026-09-19-full.har（已 gitignore）",
+    "doc": "docs/capture/app-signin-samples.txt",
+    "h5Bundle": "har/h5-signin/139newsignin~National_zero2025~newsignin~promotion~test.59d6fdcb.js"
+  },
+  "constants": {
+    "MARKET_NAME": "sign_in_3",
+    "SOURCE_ID": "1002",
+    "TO_SOURCE_ID": "001005",
+    "H5_APP_ID": "cy62d5a5e8373a272aeca467accad61722c51cfd48",
+    "H5_SIGN_SALT_KEY": 2,
+    "H5_SIGN_SALT": "sekaMdYYLIZfbCfm",
+    "H5_APP_VERSION": "12.6.0.0",
+    "TASK_CLIENT_VERSION": "12.6.0",
+    "SM_ORGANIZATION": "FXlyfmWg2AzwbrxDKSv5",
+    "SM_APP_ID": "default",
+    "SM_API_HOST": "https://slw.h5cmpassport.com:9090",
+    "SM_API_PATH": "/deviceprofile/v4",
+    "SM_PUBLIC_KEY": "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC8KHAcHbkCn5rxGgGJE+07tY+pt86D/oZ7sA51FaEBv2jgno2TI9zHJVYKJynmiKpixgwUcv93EfWIrU/p/UCs5Vu+odS3I4UBp3R7IZ1A0W01FkumAHYW2PQpMm8ueQKPLUq/idkpG/9b2JDv/qU+Ks36nbUPwlW4CjdfrV+V9QIDAQAB"
+  },
+  "h5Signature": [
+    {
+      "name": "tyrzLogin-real-capture",
+      "requestId": "4b2d0b57-5479-468c-a336-651a4923edb9",
+      "timestamp": "1789800128813",
+      "nonce": "129eb90a-daae-4173-b3fa-4b1633b1a2f8",
+      "saltKey": 2,
+      "other": "",
+      "expectMd5": "90ee90a9e443059873eca9d599a7e858",
+      "note": "实拍值（不是算出来的）。该次 tyrzLogin 因 SSO token 过期回 200050409 —— 签名校验失败会回 401『请求签名校验失败』，所以 200050409 反证签名已通过。"
+    }
+  ],
+  "envelopes": [
+    {
+      "name": "infoV3-not-logged-in",
+      "raw": {
+        "code": 90001,
+        "msg": "未登录"
+      },
+      "code": 90001
+    },
+    {
+      "name": "tyrzLogin-sso-expired",
+      "raw": {
+        "code": 200050409,
+        "msg": "token 已失效"
+      },
+      "code": 200050409
+    },
+    {
+      "name": "tyrzLogin-signature-rejected",
+      "raw": {
+        "code": 401,
+        "msg": "请求签名校验失败"
+      },
+      "code": 401
+    },
+    {
+      "name": "isMaintain-not-enabled",
+      "raw": {
+        "code": 500,
+        "msg": "未开启活动公告栏"
+      },
+      "code": 500
+    },
+    {
+      "name": "querySpecTokenV2-success",
+      "raw": {
+        "success": true,
+        "code": "0000",
+        "message": "请求成功",
+        "data": {
+          "token": "YZsidssolgSYNTH000000000000000000000000000",
+          "resultCode": "104000"
+        }
+      },
+      "code": 0,
+      "expectToken": "YZsidssolgSYNTH000000000000000000000000000",
+      "note": "token 形状：`YZsidssolg` + 32 位小写 hex = 42 字符；此处用含 SYNTH 的合成值（长度与前缀保持）。"
+    },
+    {
+      "name": "h5-timestamp-success",
+      "raw": {
+        "code": 0,
+        "msg": "success",
+        "result": 1789800128813
+      },
+      "code": 0
+    }
+  ],
+  "infoV3": {
+    "name": "infoV3-real-capture",
+    "raw": {
+      "code": 0,
+      "msg": "success",
+      "result": {
+        "curMonthBackup": true,
+        "cardInfo": 0,
+        "beforeTotal": 8027,
+        "signInPoints": 3,
+        "signCount": 1,
+        "provinceCode": "23",
+        "monthDays": 7,
+        "curMonthBackupSignAccept": true,
+        "maxType": "",
+        "cal": [
+          {
+            "d": 31,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 0
+          },
+          {
+            "d": 1,
+            "s": true,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 2,
+            "s": true,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 3,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 4,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 5,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 6,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 7,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 8,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 9,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 10,
+            "s": true,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 11,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 12,
+            "s": true,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 13,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 14,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 15,
+            "s": true,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 16,
+            "s": true,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 17,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 18,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 19,
+            "s": true,
+            "n": 3,
+            "p": 0,
+            "t": true,
+            "currentMonth": 1
+          },
+          {
+            "d": 20,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 21,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 22,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 23,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 24,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 25,
+            "s": false,
+            "n": 3,
+            "p": 7,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 26,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 27,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 28,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 29,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 30,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 1,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 0
+          },
+          {
+            "d": 2,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 0
+          },
+          {
+            "d": 3,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 0
+          },
+          {
+            "d": 4,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 0
+          }
+        ],
+        "remind": 1,
+        "total": 10496,
+        "canExchangeText": [
+          {
+            "prizeName": "移动云盘黄金会员年卡",
+            "imgUrl": "https://img.mcloud.139.com//uop_prod/20260730/7e971f30677e4a0da7fb290f75e16a81.png",
+            "pOrder": "12000",
+            "jumpTarget": "https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&sourceid=1101&tab=2&enableShare=1&token=#ssoToken#"
+          }
+        ],
+        "showHistory": 1,
+        "showTaskExpansion": 1,
+        "toReceive": 0,
+        "isGuide": 11,
+        "time": 1789799930833,
+        "isCloudEnough": 0,
+        "lackCloudNum": 1504,
+        "receiveList": [
+          {
+            "cloudType": 2,
+            "cloudNum": 234
+          }
+        ]
+      }
+    }
+  },
+  "receiveRevivalReward": {
+    "name": "receiveRevivalReward-real-capture-revival-card",
+    "raw": {
+      "code": 0,
+      "msg": "success",
+      "result": {
+        "cardType": 1,
+        "littleFirstTime": 0,
+        "rewardClouds": 114,
+        "totalClouds": 571
+      }
+    },
+    "note": "来源与上面几段**不同**：这不是 2026-09-19 的 iOS 抓包，而是老项目夹具 test/fixtures/http/复活.json 里那条 POST /ycloud/signin/page/receiveRevivalReward（Android WebView UA）。该夹具是「本机测试数据、不入库」，所以这里只把**响应体**摘出来固化 —— 它是无标识的纯计数，可以入库。请求形状不在这段里：body 是空对象 `{}`，见 receive_revival_reward_request 的文档。⚠ 老抓包带了 deviceid 头、而 H5 定义里没有 isDeviceId，两者不一致，未验证。"
+  },
+  "startSignIn": {
+    "name": "startSignIn-real-capture-already-signed",
+    "raw": {
+      "code": 0,
+      "msg": "success",
+      "result": {
+        "todaySignIn": true,
+        "signInPoints": 3,
+        "signCount": 1,
+        "time": 1789799929696,
+        "cal": [
+          {
+            "d": 31,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 0
+          },
+          {
+            "d": 1,
+            "s": true,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 2,
+            "s": true,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 3,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 4,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 5,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 6,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 7,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 8,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 9,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 10,
+            "s": true,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 11,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 12,
+            "s": true,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 13,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 14,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 15,
+            "s": true,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 16,
+            "s": true,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 17,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 18,
+            "s": false,
+            "n": 0,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 19,
+            "s": true,
+            "n": 3,
+            "p": 0,
+            "t": true,
+            "currentMonth": 1
+          },
+          {
+            "d": 20,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 21,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 22,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 23,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 24,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 25,
+            "s": false,
+            "n": 3,
+            "p": 7,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 26,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 27,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 28,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 29,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 30,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 1
+          },
+          {
+            "d": 1,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 0
+          },
+          {
+            "d": 2,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 0
+          },
+          {
+            "d": 3,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 0
+          },
+          {
+            "d": 4,
+            "s": false,
+            "n": 3,
+            "p": 0,
+            "t": false,
+            "currentMonth": 0
+          }
+        ]
+      }
+    }
+  },
+  "prizeRecords": {
+    "name": "record-real-capture-pending-prize",
+    "raw": {
+      "code": 0,
+      "msg": "success",
+      "result": {
+        "records": [
+          {
+            "belonger": 0,
+            "device": 0,
+            "expireTime": "2026-09-30T15:59:59.000+00:00",
+            "flag": 1,
+            "groupId": 0,
+            "insertTime": "2026-09-16T11:12:54.000+00:00",
+            "linkUrl": "{\"saleType\":103,\"days\":\"0\",\"serviceId\":\"ai_1000token_1month20260615\"}",
+            "market": "sign_in_3_ex",
+            "marketName": "sign_in_3_ex",
+            "oid": 1270932714,
+            "orderType": 0,
+            "prizeId": 260630014,
+            "prizeName": "移动云盘1000万tokens叠加包",
+            "prizeSectionStatus": 1,
+            "reasons": "260630014",
+            "source": 0,
+            "type": 1057,
+            "uorder": 400,
+            "updateTime": "2026-09-16T11:12:54.000+00:00"
+          }
+        ]
+      }
+    },
+    "note": "2026-09-19 账号 159 的 GET /ycloud/signin/public/record?marketname=sign_in_3_ex&type=1&pageNumber=1&pageSize=10 实拍（「待领取」页签）。⚠ 原条目里**有 `userDomainId`**（那个 19 位值），已按脱敏口径**整字段删除** —— 所以本段字段清单比线上响应少一个，别拿它当「响应就这些字段」的依据。`oid` 实拍是**数字**（1270932714），而 H5 把它拼进 URL 查询串，故实现侧统一成字符串。`expireTime` 虽然不在 H5 列表项模板里渲染，但**响应里确实有**（中奖后 14 天）—— 「模板没渲染」不等于「响应没有」。"
+  }
+}

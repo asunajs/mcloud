@@ -6,7 +6,10 @@
 
 use std::path::PathBuf;
 
-use mcloud_crypto::{aes, des, generate_signature, hash, SALT_MAP};
+use mcloud_crypto::{
+    aes, b64_decode, des, generate_signature, gzip, hash, rsa, tn, SeqRandom, SALT_MAP,
+    SKLAND_PUBLIC_KEY_B64,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -27,6 +30,60 @@ struct Vectors {
     /// 旧接口响应：DES-ECB/PKCS7，base64 进、utf8 出。
     #[serde(rename = "desEcbPkcs7Decrypt")]
     des_pkcs7_decrypt: Vec<DesDecryptCase>,
+    /// smid 特征体的 `tn` 摘要输入（拼接串本身，不是 md5）。
+    #[serde(rename = "getTn")]
+    get_tn: Vec<TnCase>,
+    /// gzip：不做字节级对拍，只要求能解回原文且 OS 字节 == 19。
+    gzip: Vec<GzipCase>,
+    /// RSA 公钥加密：随机填充，不做字节级对拍。
+    #[serde(rename = "rsaPkcs1v15B64")]
+    rsa_pkcs1v15: Vec<RsaStructureCase>,
+    /// 自持测试密钥对：用来把 RSA 密文**解回明文**（唯一的硬证据）。
+    #[serde(rename = "rsaSelfKeyPair")]
+    rsa_self_key_pair: RsaSelfKeyPair,
+}
+
+#[derive(Deserialize)]
+struct TnCase {
+    name: String,
+    input: Value,
+    expect: String,
+}
+
+#[derive(Deserialize)]
+struct GzipCase {
+    name: String,
+    json: String,
+    #[serde(rename = "osByteAfter")]
+    os_byte_after: u8,
+    #[serde(rename = "byteExact")]
+    byte_exact: bool,
+}
+
+#[derive(Deserialize)]
+struct RsaStructureCase {
+    name: String,
+    #[serde(rename = "publicKeyB64")]
+    public_key_b64: String,
+    #[serde(rename = "modulusBytes")]
+    modulus_bytes: usize,
+    #[serde(rename = "byteExact")]
+    byte_exact: bool,
+}
+
+#[derive(Deserialize)]
+struct RsaSelfKeyPair {
+    #[serde(rename = "publicKeyB64")]
+    public_key_b64: String,
+    #[serde(rename = "privateKeyPkcs8B64")]
+    private_key_pkcs8_b64: String,
+    cases: Vec<RsaSelfCase>,
+}
+
+#[derive(Deserialize)]
+struct RsaSelfCase {
+    name: String,
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -280,4 +337,134 @@ fn des_ecb_pkcs7_decrypt_matches_all_vectors() {
             .unwrap_or_else(|e| panic!("解密失败（用例 {}）：{e}", c.name));
         assert_eq!(got, c.expect, "DES PKCS7 解密用例 {}", c.name);
     }
+}
+
+// ── 设备指纹（smid）相关：getTn / gzip / RSA ──────────────────────────────
+
+/// `getTn` 的拼接串。向量的 `expect` **不是** md5，就是拼出来的那一串。
+#[test]
+fn get_tn_matches_all_vectors() {
+    let v = load();
+    assert!(!v.get_tn.is_empty(), "getTn 段不能为空");
+    for c in &v.get_tn {
+        assert_eq!(tn::get_tn(&c.input), c.expect, "getTn 用例 {}", c.name);
+    }
+}
+
+/// gzip：**不做字节级对拍**（deflate 输出因实现而异），只钉两件事。
+///
+/// 向量里 `byteExact: false` 就是这个意思 —— 别把它当"可以随便"，
+/// 它排除的是压缩流字节，留下的是"能解回原文"与"OS 字节 == 19"。
+#[test]
+fn gzip_roundtrips_and_normalises_the_os_byte() {
+    let v = load();
+    assert!(!v.gzip.is_empty(), "gzip 段不能为空");
+    for c in &v.gzip {
+        assert!(
+            !c.byte_exact,
+            "用例 {}：deflate 不该被要求字节级对拍",
+            c.name
+        );
+        let raw = c.json.as_bytes();
+        let gz = gzip::gzip_with_os19(raw)
+            .unwrap_or_else(|e| panic!("压缩失败（用例 {}）：{e}", c.name));
+        assert_eq!(gz[9], c.os_byte_after, "OS 字节（用例 {}）", c.name);
+        assert_eq!(gz[9], 19, "OS 字节必须归一为 19（用例 {}）", c.name);
+        let back = gzip::gunzip(&gz).unwrap_or_else(|e| panic!("解压失败（用例 {}）：{e}", c.name));
+        assert_eq!(
+            String::from_utf8(back).unwrap(),
+            c.json,
+            "解压回原文（用例 {}）",
+            c.name
+        );
+    }
+}
+
+/// RSA 公钥的结构性约束：定长 128 字节（1024 位），且**两次加密不同**。
+#[test]
+fn rsa_ciphertext_has_the_expected_structure() {
+    let v = load();
+    assert!(!v.rsa_pkcs1v15.is_empty(), "rsaPkcs1v15B64 段不能为空");
+    for c in &v.rsa_pkcs1v15 {
+        assert!(
+            !c.byte_exact,
+            "用例 {}：PKCS#1 v1.5 不该被要求字节级对拍",
+            c.name
+        );
+        let mut rng = SeqRandom::new(1);
+        let ct =
+            rsa::rsa_pkcs1v15_encrypt_base64_with_b64_key(&c.public_key_b64, b"some-uid", &mut rng)
+                .unwrap_or_else(|e| panic!("加密失败（用例 {}）：{e}", c.name));
+        let raw = b64_decode(&ct).unwrap();
+        assert_eq!(raw.len(), c.modulus_bytes, "密文长度（用例 {}）", c.name);
+
+        // 同一明文换个随机源必须得到不同的密文 —— 这正是"不可对拍"的原因
+        let again =
+            rsa::rsa_pkcs1v15_encrypt_base64_with_b64_key(&c.public_key_b64, b"some-uid", &mut rng)
+                .unwrap();
+        assert_ne!(ct, again, "PKCS#1 v1.5 填充含随机字节（用例 {}）", c.name);
+    }
+}
+
+/// RSA 的**硬证据**：用自持私钥把密文解回明文。
+///
+/// 这是 RSA 那一段唯一能证明"真的算对了"的断言 ——
+/// 长度与随机性都只能排除一部分错误实现。
+#[test]
+fn rsa_ciphertext_decrypts_back_with_the_matching_private_key() {
+    let v = load();
+    let kp = &v.rsa_self_key_pair;
+    let private_der = b64_decode(&kp.private_key_pkcs8_b64).unwrap();
+    assert!(!kp.cases.is_empty(), "rsaSelfKeyPair.cases 不能为空");
+
+    for c in &kp.cases {
+        let ct = rsa::rsa_pkcs1v15_encrypt_base64_with_b64_key(
+            &kp.public_key_b64,
+            c.message.as_bytes(),
+            &mut SeqRandom::new(3),
+        )
+        .unwrap_or_else(|e| panic!("加密失败（用例 {}）：{e}", c.name));
+        let pt = rsa::rsa_pkcs1v15_decrypt(&private_der, &ct)
+            .unwrap_or_else(|e| panic!("解密失败（用例 {}）：{e}", c.name));
+        assert_eq!(
+            String::from_utf8(pt).unwrap(),
+            c.message,
+            "解回明文（用例 {}）",
+            c.name
+        );
+    }
+}
+
+/// smid 用到的公钥必须与签到页向量里的那一把**逐字相同**。
+///
+/// 这条是"签到链路的 deviceId 不需要浏览器"这个结论的地基：
+/// 签到页加载的风控 SDK 与本模块打的是同一个 `deviceprofile/v4`，
+/// 换回来的 `"B"+detail.deviceId` 也就是同一个东西。
+/// 常量哪天被改，这里先炸，而不是线上忽然回一个"像没带 deviceId"的码。
+#[test]
+fn smid_public_key_matches_the_signin_vectors() {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.pop();
+    p.pop();
+    p.push("test/golden/app-signin-vectors.json");
+    let raw = std::fs::read_to_string(&p)
+        .unwrap_or_else(|e| panic!("读取签到页向量失败 {}：{e}", p.display()));
+    let v: Value = serde_json::from_str(&raw).expect("签到页向量格式不符");
+    let c = &v["constants"];
+
+    assert_eq!(
+        c["SM_PUBLIC_KEY"].as_str().unwrap(),
+        SKLAND_PUBLIC_KEY_B64,
+        "smid 公钥必须与签到页那份 SDK 配置一致"
+    );
+    assert_eq!(
+        c["SM_ORGANIZATION"].as_str().unwrap(),
+        "FXlyfmWg2AzwbrxDKSv5"
+    );
+    assert_eq!(c["SM_APP_ID"].as_str().unwrap(), "default");
+    assert_eq!(
+        c["SM_API_HOST"].as_str().unwrap(),
+        "https://slw.h5cmpassport.com:9090"
+    );
+    assert_eq!(c["SM_API_PATH"].as_str().unwrap(), "/deviceprofile/v4");
 }

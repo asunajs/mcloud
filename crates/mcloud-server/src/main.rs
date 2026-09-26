@@ -25,28 +25,25 @@ async fn main() -> anyhow::Result<()> {
     let tasks = app.registry().len();
     tracing::info!(data_dir, tasks, "mcloud-gost 启动");
 
-    let state = mcloud_server::ServerState::new(Arc::new(mcloud_app::AppHandle {
-        runner: Arc::clone(app.runner()),
-        registry: Arc::clone(app.registry()),
-        store: Arc::clone(&app.handle.store),
-        clock: Arc::clone(&app.handle.clock),
-        hub: Arc::clone(app.hub()),
-        scheduler: Arc::clone(app.scheduler()),
-        pipelines: Arc::clone(&app.handle.pipelines),
-        cancel: Arc::clone(&app.handle.cancel),
-    }));
+    // 先取走后面还要用的两个句柄，再把 `AppHandle` **整体**交出去。
+    //
+    // 这里刻意**不**逐字段重建 `AppHandle`：那样每加一个字段都要回来补一行，
+    // 而漏补的表现是"编译不过"（还算好）或"新功能静默不生效"（更糟）。
+    // 直接用 `App` 已经组装好的那一个，字段增减对它零影响。
+    let scheduler = Arc::clone(app.scheduler());
+    let hub = Arc::clone(app.hub());
+    let stop = scheduler.stop_handle();
+
+    let state = mcloud_server::ServerState::new(Arc::new(app.handle));
 
     // 启动调度器。
     //
     // 它自己会**立刻跑第一个 tick**，不等一个间隔 —— 定时器的第一次触发
     // 是在一个间隔之后，那样每次重启都要白等 30 秒，而重启恰恰是
     // "错过今天那一趟"最常见的原因。
-    let scheduler = Arc::clone(app.scheduler());
-    let stop = scheduler.stop_handle();
     tokio::spawn(async move { scheduler.run_loop(stop).await });
 
     // 日志攒批落盘：与调度同频，保证崩溃时最多丢掉几秒的日志。
-    let hub = Arc::clone(app.hub());
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
         loop {

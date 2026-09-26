@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 mcloud-core.workspace = true
+mcloud-crypto.workspace = true
 mcloud-engine.workspace = true
 mcloud-tasks.workspace = true
 mcloud-store.workspace = true

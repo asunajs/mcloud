@@ -5,6 +5,13 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 /// API 错误包装。
+///
+/// 派生 `Debug` 是为了让调用方能 `unwrap()`/`expect()` ——
+/// 没有它，`Result<T, ApiError>` 在测试里连 `unwrap` 都用不了，
+/// 而那是测试里最常见的写法。派生出来的 Debug 打印的是**内层错误**，
+/// 与 `Display` 走同一份 `redact` 逻辑无关：内层 `mcloud_core::Error`
+/// 自己的 Debug 不脱敏，所以**不要**拿它去打日志。
+#[derive(Debug)]
 pub struct ApiError(pub mcloud_core::Error);
 
 impl From<mcloud_core::Error> for ApiError {

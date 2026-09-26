@@ -191,7 +191,7 @@ export const TasksPage = () => {
         <fieldset class="fieldset">
           <legend class="fieldset-legend">账号（手机号）</legend>
           <input
-            class="input input-bordered w-full"
+            class="input w-full"
             placeholder="例如 13800000000"
             value={account.value}
             // 用 onInput 而不是 onChange：Vue 的 onChange 是原生 change，只在失焦时触发

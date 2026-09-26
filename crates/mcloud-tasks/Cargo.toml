@@ -9,6 +9,10 @@ license.workspace = true
 [dependencies]
 mcloud-core.workspace = true
 mcloud-engine.workspace = true
+# 任务要用会话层的错误语义（90001 的判据与措辞），不自己再实现一份。
+mcloud-upstream.workspace = true
+# 登录要生成 sID / 短信 random（`Random` trait 与 `SeqRandom` 替身都在这里）。
+mcloud-crypto.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -16,3 +20,11 @@ thiserror.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# 登录测试要手工构造 AES-ECB 密文（模拟上游成功响应）与顺序随机源。
+mcloud-core = { workspace = true, features = ["testkit"] }
+# 异步测试（`#[tokio::test]`）。
+tokio = { workspace = true, features = ["macros", "rt"] }
+aes.workspace = true
+hex.workspace = true

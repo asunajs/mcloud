@@ -111,7 +111,7 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 
 ## 测试
 
-- `cargo test --workspace` —— **181 个测试**
+- `cargo test --workspace` —— **567 个测试**
 - `cargo clippy --workspace --all-targets -- -D warnings` —— 0 告警
 - 黄金向量对拍：`test/golden/crypto-vectors.json`（签名、MD5、SHA256、两种 AES 语义）
 - 对拍是**字节级**的；不一致就是 bug，不允许改期望值来变绿。
@@ -126,13 +126,15 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 | P3 | Vue Vapor WebUI（主题 + 门禁） | ✅ |
 | P4 | `rust-embed` 单二进制 / 同源托管 | ✅ |
 | P5 | **通用存储 + 定时调度 + 任务编排 + 日志收集 + 任务中止** | ✅ |
-| P6 | 上游认证链路（真实登录、token 刷新） | 待做 |
-| P7 | `sign` / `receive` / `after` 端到端 + 账号管理页 + 推送渠道 | 待做 |
-| P8 | 其余任务增量接入 | 待做 |
+| P6 | **H5 会话层（JWT）+ 签到端点校正** | ✅ |
+| P7 | **WebUI 登录闸 + 认证闸/登出 + CLI 收敛（6 命令）** | ✅ |
+| P8 | **账号登录（扫码/短信）+ 账号页 + 定时/编排 CRUD 页** | ✅ |
+| P9 | `receive` / `after` 等签到族 + 推送渠道 + 其余任务增量接入 | 待做 |
 
-> P6 是当前的关键路径：`mcloud-tasks/src/sign.rs` 里的端点是**占位**的
-> （实测返回 HTTP 405），必须按真实抓包校正。密码学已被黄金向量锁死，
-> **接口存活与签名服务端一致性**才是本项目最大的风险点。
+> **端点必须来自抓包，不能凭印象写。** 本项目的签到端点最初是
+> `/ycloud/api/sign/query`（凭印象），实测回 **405**；换成实拍的
+> `/ycloud/signin/page/infoV3` 后回 **200**。这类错误的产物是
+> "能编译、能过测试、但打到一个不存在的地址"，比不写更糟。
 
 ## 注意
 

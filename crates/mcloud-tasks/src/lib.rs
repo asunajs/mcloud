@@ -3,10 +3,17 @@
 //! 任务只依赖 `mcloud-core` 的 trait 与 `mcloud-engine` 的上下文，
 //! 不直接碰网络或磁盘。
 
+pub mod login;
 pub mod sign;
 
 use mcloud_engine::{Registry, Task};
 use std::sync::Arc;
+
+pub use login::{
+    account_from_login, account_from_user_info_with_prefix, auth_from_user_info, logout,
+    persist_login, production_decryptor, PasswordLogin, QrFailure, QrLogin, QrProgress, SmsLogin,
+    QR_POLL_INTERVAL_MS, QR_TTL_SECONDS,
+};
 
 /// 注册全部任务。
 ///

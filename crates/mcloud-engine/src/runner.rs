@@ -31,6 +31,11 @@ pub struct Runner {
     inflight: Mutex<HashMap<String, RunId>>,
     /// 运行中任务的取消登记表。
     cancel: Arc<crate::cancel_registry::CancelRegistry>,
+    /// run 内产物账本：往用户网盘写了什么、还欠着清理哪些。
+    ///
+    /// 一个进程一份：清理路径（界面上"待清理"那一栏、将来的收尾任务）
+    /// 要能看到跑任务的那条路径记下的东西。
+    artifacts: crate::SharedLedger,
 }
 
 impl Runner {
@@ -50,12 +55,18 @@ impl Runner {
             next_id: AtomicU64::new(1),
             inflight: Mutex::new(HashMap::new()),
             cancel: Arc::new(crate::cancel_registry::CancelRegistry::new()),
+            artifacts: Arc::new(crate::ArtifactLedger::new()),
         }
     }
 
     /// 取消登记表。服务器据此响应"中止这次运行"。
     pub fn cancel_registry(&self) -> Arc<crate::cancel_registry::CancelRegistry> {
         Arc::clone(&self.cancel)
+    }
+
+    /// 产物账本（清理路径与界面读它）。
+    pub fn artifacts(&self) -> crate::SharedLedger {
+        Arc::clone(&self.artifacts)
     }
 
     /// 后台启动一次运行，**立刻**返回 run id。
@@ -207,6 +218,11 @@ impl Runner {
             run_id,
             cancel: cancel_token.clone(),
             chain_cancel,
+            artifacts: crate::ArtifactRecorder::new(
+                Arc::clone(&self.artifacts),
+                run_id,
+                account.id.clone(),
+            ),
         };
 
         let outcome = match task.run(&ctx, body).await {
@@ -217,6 +233,50 @@ impl Runner {
         let duration_ms = (self.clock.now_ms() - started).max(0) as u64;
         // 中止与业务结论分开记：中止不是失败，不该计入错误率
         let was_cancelled = cancel_token.is_cancelled();
+
+        // ⭐ 收尾：把**还没清掉的产物**取出来，落进运行记录。
+        //
+        // # 为什么必须取出来而不是留在账本里
+        //
+        // 账本留在内存里有两个后果，都属于"漏记"那一类：
+        //
+        // ① **看不见**。旧项目只在小结里念"网盘里留了 N 个待清理文件"，
+        //    却不说是**哪 N 个** —— 将来手工清理时无从下手。
+        //    这里把清单连同 ID 一起写进 `details.artifacts`，
+        //    于是"留了什么"在历史记录里查得到。
+        // ② **不释放**。一次运行结束了账本还替它留着条目，
+        //    进程跑得越久占得越多 —— 而这些东西要么已被清理（该销账），
+        //    要么已经交给记录（该遗忘）。
+        //
+        // `forget` 的返回值**刻意**是"还没清的那些"：
+        // 账本消失不代表用户网盘上的文件消失。非空本身就是一条要说出去的事实。
+        let leftovers = self.artifacts.forget(run_id);
+
+        // ⚠ 顺序要紧：这条警告必须在 `Finished` **之前**发。
+        //
+        // 前端收到 `finished` 就 `close()` 那条 SSE（`web/src/api.ts`
+        // 的 `subscribeRun` 有一条"终局即关闭"的说明）。发在后面的话，
+        // 警告会落在**已经关掉的流**上 —— 直连看日志的人还能看到，
+        // 但正在看页面的那个人一个字都收不到。
+        //
+        // 静默是这一层最该防的失效：用户不会知道自己网盘里多了文件。
+        if !leftovers.is_empty() {
+            self.sink.emit(RunEvent::Log {
+                run_id,
+                level: mcloud_core::LogLevel::Warn,
+                message: format!(
+                    "本次运行在网盘里留下 {} 个未清理的文件（清单见运行记录）：{}",
+                    leftovers.len(),
+                    leftovers
+                        .iter()
+                        .map(|a| a.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                at_ms: self.clock.now_ms(),
+            });
+        }
+
         self.sink.emit(RunEvent::Finished {
             run_id,
             outcome: outcome.clone(),
@@ -227,6 +287,11 @@ impl Runner {
         self.cancel.release(run_id);
 
         let mut record = self.record(run_id, task_name, account, duration_ms, outcome);
+        // 只有在真有东西留下时才写 `details`：空清单写 `{}` 会让
+        // "没留东西"与"老数据没有这个字段"在历史里长得一样。
+        if !leftovers.is_empty() {
+            record.details = serde_json::json!({ "artifacts": leftovers });
+        }
         if was_cancelled {
             record.status = RunStatus::Cancelled;
         }
@@ -450,6 +515,44 @@ mod tests {
         }
     }
 
+    /// 登录闸在 runner 测试里用不到 —— 全部给"空/无"的实现。
+    ///
+    /// 给空实现而不是 `unimplemented!()`：将来某个测试顺路调到它时，
+    /// 得到的是"没有用户"这个**语义正确**的结果，而不是一次 panic。
+    #[async_trait]
+    impl mcloud_core::UserStore for FakeStore {
+        async fn user_count(&self) -> Result<usize> {
+            Ok(0)
+        }
+        async fn users(&self) -> Result<Vec<mcloud_core::User>> {
+            Ok(Vec::new())
+        }
+        async fn user_by_name(&self, _n: &str) -> Result<Option<mcloud_core::User>> {
+            Ok(None)
+        }
+        async fn user(&self, _id: &mcloud_core::UserId) -> Result<Option<mcloud_core::User>> {
+            Ok(None)
+        }
+        async fn save_user(&self, _u: &mcloud_core::User) -> Result<()> {
+            Ok(())
+        }
+        async fn save_session(&self, _s: &mcloud_core::Session) -> Result<()> {
+            Ok(())
+        }
+        async fn session(&self, _h: &str) -> Result<Option<mcloud_core::Session>> {
+            Ok(None)
+        }
+        async fn remove_session(&self, _h: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_user_sessions(&self, _id: &mcloud_core::UserId) -> Result<usize> {
+            Ok(0)
+        }
+        async fn purge_expired_sessions(&self, _now: i64) -> Result<usize> {
+            Ok(0)
+        }
+    }
+
     #[derive(Default)]
     struct FakeSink {
         events: Mutex<Vec<RunEvent>>,
@@ -624,6 +727,8 @@ mod tests {
                 expire: 0,
             },
             device_id: DeviceId("dev".into()),
+            pc_platform: None,
+            user_domain_id: None,
             settings: AccountSettings::default(),
         }
     }
@@ -1067,5 +1172,233 @@ mod tests {
             "固定时钟不前进，时长应为 0——若这里不是 0，说明混入了真实时钟"
         );
         assert_eq!(record.started_at_ms, NOW_MS);
+    }
+    // ── 产物账本与收尾 ──────────────────────────────────────────────────
+
+    /// 写文件但**不清理**的任务：收尾必须把清单交出来。
+    struct LeaveArtifactsTask;
+
+    #[async_trait]
+    impl Task for LeaveArtifactsTask {
+        fn name(&self) -> &'static str {
+            "leaves"
+        }
+        fn title(&self) -> &'static str {
+            "留产物"
+        }
+        fn description(&self) -> &'static str {
+            "往网盘写两个文件且不清理"
+        }
+        async fn run(&self, ctx: &TaskContext, _b: &serde_json::Value) -> TaskResult {
+            ctx.register_cloud_file("F1", false)?;
+            ctx.register_cloud_file("F2", false)?;
+            Ok(TaskOutcome::success("传了两个"))
+        }
+    }
+
+    /// 写文件**并在链尾清掉**的任务（参考实现的形状）。
+    struct CleanUpTask;
+
+    #[async_trait]
+    impl Task for CleanUpTask {
+        fn name(&self) -> &'static str {
+            "cleans"
+        }
+        fn title(&self) -> &'static str {
+            "传了又删"
+        }
+        fn description(&self) -> &'static str {
+            "往网盘写一个文件然后在链尾销账"
+        }
+        async fn run(&self, ctx: &TaskContext, _b: &serde_json::Value) -> TaskResult {
+            ctx.register_cloud_file("F1", false)?;
+            // 链尾"发完 batchTrash"之后销账
+            assert!(ctx.artifacts.mark_cloud_file_removed("F1"));
+            Ok(TaskOutcome::success("传了又删了"))
+        }
+    }
+
+    /// ⭐ 留下的产物必须写进运行记录 —— 否则"留了什么"永远查不出来。
+    ///
+    /// 旧项目只念"网盘里留了 N 个"，却不说是哪 N 个，将来手工清理无从下手。
+    #[tokio::test]
+    async fn leftover_artifacts_land_in_the_run_record() {
+        let (runner, _store, _sink) = build(vec![Arc::new(LeaveArtifactsTask)]);
+        let record = runner
+            .run("leaves", &account("13800000000"), &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let list = record.details["artifacts"]
+            .as_array()
+            .expect("details.artifacts 应当是数组");
+        assert_eq!(list.len(), 2, "两个文件都要记下来：{list:?}");
+        let ids: Vec<&str> = list.iter().filter_map(|a| a["id"].as_str()).collect();
+        assert!(ids.contains(&"F1") && ids.contains(&"F2"), "实得：{ids:?}");
+        // 账号也要在（清理要用它的凭据）
+        assert_eq!(list[0]["account"], "13800000000");
+        assert_eq!(list[0]["kind"], "cloud-file");
+    }
+
+    /// ⭐ 留下产物时必须**发一条警告** —— 静默是这一层最该防的失效。
+    #[tokio::test]
+    async fn leftover_artifacts_emit_a_warning() {
+        let (runner, _store, sink) = build(vec![Arc::new(LeaveArtifactsTask)]);
+        runner
+            .run("leaves", &account("13800000000"), &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let events = sink.events.lock().unwrap();
+        let warned = events.iter().any(|e| match e {
+            RunEvent::Log { level, message, .. } => {
+                *level == mcloud_core::LogLevel::Warn
+                    && message.contains("未清理")
+                    && message.contains("F1")
+            }
+            _ => false,
+        });
+        assert!(warned, "留下产物必须告警并点名是哪几个：{events:?}");
+    }
+
+    /// ⭐ 遗留警告必须发在 `finished` **之前**。
+    ///
+    /// # 为什么这条值得单测
+    ///
+    /// 前端收到 `finished` 就 `close()` 那条 SSE（见 `web/src/api.ts` 的
+    /// `subscribeRun`）。警告发在后面的话，它会落在**已经关掉的流**上 ——
+    /// 直连看日志的人还能看到，但正在看页面的那个人**一个字都收不到**。
+    ///
+    /// 而"收不到"这件事本身不报错，所以只能靠顺序断言钉住。
+    #[tokio::test]
+    async fn leftover_warning_is_emitted_before_finished() {
+        let (runner, _store, sink) = build(vec![Arc::new(LeaveArtifactsTask)]);
+        runner
+            .run("leaves", &account("13800000000"), &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let names = sink.names();
+        let warn_at = names
+            .iter()
+            .position(|n| *n == "log")
+            .expect("应当有 log 事件");
+        let finished_at = names
+            .iter()
+            .position(|n| *n == "finished")
+            .expect("应当有 finished 事件");
+
+        assert!(
+            warn_at < finished_at,
+            "遗留警告必须在 finished 之前（否则前端已关闭流，收不到）：{names:?}"
+        );
+    }
+
+    /// 链尾清理干净的任务**不该**误报。
+    ///
+    /// 这条防的是反向失效：每次正常运行都报"留了东西"，
+    /// 用户很快就会学会忽略那条警告 —— 那比不报更糟。
+    #[tokio::test]
+    async fn fully_cleaned_run_reports_nothing() {
+        let (runner, _store, sink) = build(vec![Arc::new(CleanUpTask)]);
+        let record = runner
+            .run("cleans", &account("13800000000"), &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert!(
+            record.details.is_null(),
+            "清干净了就不该写 details：{:?}",
+            record.details
+        );
+        let events = sink.events.lock().unwrap();
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                RunEvent::Log { message, .. } if message.contains("未清理")
+            )),
+            "清干净了不该告警：{events:?}"
+        );
+    }
+
+    /// 收尾必须**释放**账本（否则进程跑得越久占得越多）。
+    #[tokio::test]
+    async fn ledger_is_released_after_each_run() {
+        let (runner, _store, _sink) = build(vec![Arc::new(LeaveArtifactsTask)]);
+        runner
+            .run("leaves", &account("13800000000"), &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let ledger = runner.artifacts();
+        assert_eq!(ledger.total_pending(), 0, "运行结束后不该还占着条目");
+        assert!(ledger.runs().is_empty(), "也不该还跟踪着这个 run");
+    }
+
+    /// 失败的任务留下的产物**同样**要收尾。
+    ///
+    /// 这条是"失败也清理"的一半：任务在中途报错时，
+    /// 它之前写进网盘的东西**不能**因为异常路径就被忘掉。
+    #[tokio::test]
+    async fn artifacts_survive_a_failing_task() {
+        struct WriteThenFail;
+
+        #[async_trait]
+        impl Task for WriteThenFail {
+            fn name(&self) -> &'static str {
+                "write-fail"
+            }
+            fn title(&self) -> &'static str {
+                "写一半失败"
+            }
+            fn description(&self) -> &'static str {
+                "写一个文件然后报错"
+            }
+            async fn run(&self, ctx: &TaskContext, _b: &serde_json::Value) -> TaskResult {
+                ctx.register_cloud_file("HALF", false)?;
+                Err(mcloud_core::Error::Task {
+                    task: "write-fail".into(),
+                    reason: "中途断了".into(),
+                })
+            }
+        }
+
+        let (runner, _store, _sink) = build(vec![Arc::new(WriteThenFail)]);
+        let record = runner
+            .run(
+                "write-fail",
+                &account("13800000000"),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+
+        assert!(record.outcome.is_failure(), "这次运行应当是失败的");
+        let list = record.details["artifacts"]
+            .as_array()
+            .expect("失败路径也必须把留下的产物记下来");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["id"], "HALF", "那个半途写进去的文件必须可查");
+    }
+
+    /// 任务**不能**销别的账号的账（跨账号销账 = 静默漏记）。
+    #[tokio::test]
+    async fn task_cannot_settle_another_accounts_artifact() {
+        let ledger = std::sync::Arc::new(crate::ArtifactLedger::new());
+        // 另一个账号在同一次运行里留下的东西
+        ledger
+            .register(
+                RunId(1),
+                crate::Artifact::cloud_file(AccountId::new("other"), "OTHER-F"),
+            )
+            .unwrap();
+
+        let rec = crate::ArtifactRecorder::new(
+            std::sync::Arc::clone(&ledger),
+            RunId(1),
+            AccountId::new("13800000000"),
+        );
+        assert!(!rec.mark_cloud_file_removed("OTHER-F"));
+        assert_eq!(ledger.count(RunId(1)), 1, "别人的账必须还在");
     }
 }

@@ -8,12 +8,23 @@ license.workspace = true
 
 [dependencies]
 mcloud-core.workspace = true
+mcloud-crypto.workspace = true
+uuid.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 tokio.workspace = true
+# 十六进制编解码：登录链路的设备指纹（`login.rs`）在生产代码里就要用，
+# 只放 dev-dependencies 编译不过。
+hex.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# 登录测试要手工构造 AES-ECB 密文，验证解密器（生产代码不需要直接用它）。
+aes.workspace = true
+hex.workspace = true

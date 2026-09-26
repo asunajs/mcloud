@@ -18,6 +18,40 @@ export interface HistoryPageProps {
 
 type LoadState = 'loading' | 'error' | 'ready'
 
+/**
+ * 一行"这次运行在用户网盘里留下了什么"。
+ *
+ * # 为什么值得单独占一列
+ *
+ * 旧项目只在小结里念一句"网盘里留了 N 个待清理文件"，却**不说是哪 N 个** ——
+ * 用户想去手工清理时无从下手。所以这里把 `fileId` 直接给出来：
+ * 它是清理那一枪唯一认的标识。
+ *
+ * # 为什么空的时候什么都不显示
+ *
+ * 绝大多数运行是干净的（链尾自己收尾）。给每一行都挂一个"无"字
+ * 只会把真正有遗留的那几行淹掉 —— 而这一列的全部价值就是让人**一眼看见**
+ * 那几行。
+ */
+const LeftoverCell = (props: { record: RunRecord }) => {
+  const items = props.record.details?.artifacts ?? []
+  if (items.length === 0) return null
+
+  return (
+    <div class="flex flex-col gap-1">
+      <span class="badge badge-warning badge-sm">遗留 {items.length} 个文件</span>
+      <ul class="flex flex-col gap-0.5">
+        {items.map((a) => (
+          // 给出账号与 ID：清理要用该账号的凭据按 ID 删
+          <li key={`${a.account}/${a.id}`} class="font-mono text-xs opacity-70">
+            {a.account} · {a.id}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 export const HistoryPage = (props: HistoryPageProps) => {
   const state = ref<LoadState>('loading')
   const errorMessage = ref('')
@@ -83,6 +117,7 @@ export const HistoryPage = (props: HistoryPageProps) => {
                 <th>结果</th>
                 <th>耗时</th>
                 <th>时间</th>
+                <th>网盘遗留</th>
               </tr>
             </thead>
             <tbody>
@@ -98,6 +133,9 @@ export const HistoryPage = (props: HistoryPageProps) => {
                   </td>
                   <td>{fmtDuration(r.duration_ms)}</td>
                   <td>{fmtEpochMs(r.started_at_ms)}</td>
+                  <td>
+                    <LeftoverCell record={r} />
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -121,6 +159,7 @@ export const HistoryPage = (props: HistoryPageProps) => {
                   运行号 {r.run_id} · 耗时 {fmtDuration(r.duration_ms)}
                 </p>
                 <p class="text-xs opacity-60">时间 {fmtEpochMs(r.started_at_ms)}</p>
+                <LeftoverCell record={r} />
               </div>
             </div>
           ))}

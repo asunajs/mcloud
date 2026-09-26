@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 md-5.workspace = true
+sha1.workspace = true
 sha2.workspace = true
 aes.workspace = true
 cbc.workspace = true
@@ -16,8 +17,18 @@ cipher.workspace = true
 base64.workspace = true
 hex.workspace = true
 serde.workspace = true
+# `get_tn` 直接吃 `serde_json::Value`：特征体本来就是 JSON，
+# 先转成别的中间形态再算摘要只会多一层可错的地方。
+serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+argon2.workspace = true
+password-hash.workspace = true
+# 设备指纹（smid）：RSA 包 uid、gzip 压特征体。
+rsa.workspace = true
+flate2.workspace = true
+# 生产随机源走 OS 熵源，不靠 rsa 的传递依赖。
+getrandom.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

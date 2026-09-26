@@ -18,9 +18,17 @@ import {
   IconPipeline,
   IconSettings,
   IconTask,
+  IconUser,
 } from './icons'
 
-export type PageId = 'dashboard' | 'tasks' | 'schedules' | 'pipelines' | 'history' | 'settings'
+export type PageId =
+  | 'dashboard'
+  | 'accounts'
+  | 'tasks'
+  | 'schedules'
+  | 'pipelines'
+  | 'history'
+  | 'settings'
 
 interface NavItem {
   id: PageId
@@ -54,6 +62,14 @@ export const NAV_ITEMS: readonly NavItem[] = [
     blurb: '账号状态、云朵统计与最近运行一览。',
     href: '#/',
     icon: IconDashboard,
+  },
+  {
+    id: 'accounts',
+    label: '账号',
+    title: '账号',
+    blurb: '登录移动云盘账号（扫码 / 短信 / 账号密码），查看已登录的账号。',
+    href: '#/accounts',
+    icon: IconUser,
   },
   {
     id: 'tasks',

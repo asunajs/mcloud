@@ -16,6 +16,7 @@ use crate::log::{AppendOutcome, LogLine, Seq};
 use crate::pipeline::{Pipeline, PipelineId};
 use crate::run::{RunId, RunRecord};
 use crate::schedule::{Schedule, ScheduleId};
+use crate::user::{Session, User, UserId};
 
 // ── HTTP ────────────────────────────────────────────────────────────────
 
@@ -194,18 +195,45 @@ pub trait PipelineStore: Send + Sync {
     async fn mark_pipeline_ran(&self, id: &PipelineId, run_ms: i64) -> Result<()>;
 }
 
+/// 系统用户与会话（WebUI 登录闸）。
+///
+/// 与 `AccountStore` 分开是刻意的：那是"要操作的对象"，这是"谁能操作"。
+/// 合成一个 trait 会让"只想给任务写个内存假实现"的人被迫实现用户管理，
+/// 而假实现正是保证函数级可测的手段。
+#[async_trait]
+pub trait UserStore: Send + Sync {
+    /// 用户数。**首次部署判定用它**：0 个用户 ⇒ 需要走 `/api/setup`。
+    async fn user_count(&self) -> Result<usize>;
+    async fn users(&self) -> Result<Vec<User>>;
+    async fn user_by_name(&self, name: &str) -> Result<Option<User>>;
+    async fn user(&self, id: &UserId) -> Result<Option<User>>;
+    async fn save_user(&self, user: &User) -> Result<()>;
+
+    /// 建会话（存的是 `sha256(token)`，不是原文）。
+    async fn save_session(&self, session: &Session) -> Result<()>;
+    /// 按令牌哈希查会话。
+    async fn session(&self, token_hash: &str) -> Result<Option<Session>>;
+    async fn remove_session(&self, token_hash: &str) -> Result<()>;
+    /// 清掉某用户的所有会话（改口令时用 —— 旧会话必须失效）。
+    ///
+    /// 返回被清掉的条数：调用方可以据此提示"已登出 N 个设备"。
+    async fn remove_user_sessions(&self, user_id: &UserId) -> Result<usize>;
+    /// 清掉已过期的会话。顺手回收，避免表无限增长。
+    async fn purge_expired_sessions(&self, now_ms: i64) -> Result<usize>;
+}
+
 /// 全部持久化能力的组合。
 ///
 /// 用 trait 继承而不是把方法摊平：这样 `Arc<dyn Store>` 仍然是
 /// **一个**对象，注入时不用带五个 `Arc`。
 pub trait Store:
-    AccountStore + RunStore + LogStore + ScheduleStore + PipelineStore + Send + Sync
+    AccountStore + RunStore + LogStore + ScheduleStore + PipelineStore + UserStore + Send + Sync
 {
 }
 
 /// 任何同时实现了全部子 trait 的类型自动成为 `Store`。
 impl<T> Store for T where
-    T: AccountStore + RunStore + LogStore + ScheduleStore + PipelineStore + Send + Sync
+    T: AccountStore + RunStore + LogStore + ScheduleStore + PipelineStore + UserStore + Send + Sync
 {
 }
 
@@ -218,6 +246,41 @@ pub trait Clock: Send + Sync {
 
     fn now_secs(&self) -> i64 {
         self.now_ms() / 1000
+    }
+}
+
+/// 东八区固定偏移 —— `timezone: -480` 就是 UTC+8 的分钟数取负。
+///
+/// # 为什么写死在代码里，不用系统本地时区
+///
+/// smid 特征体里 `timezone: -480` 是**写死的**东八区，而 `smid` 字段里的
+/// `yyyyMMddHHmmss` 必须与它同源。如果时间按运行机器的本地时区算，
+/// 一台设在 UTC 的服务器就会自报"我在东八区，但我的时间戳是 UTC"——
+/// 这是风控侧一眼可见的不一致。
+///
+/// 所以"东八区"这个事实在本项目里**只有这一处定义**，需要它的地方都引用这里。
+pub fn beijing_offset() -> chrono::FixedOffset {
+    // UTC+8 是合法偏移，构造不会失败；真失败说明常量被改错了，那属于代码缺陷。
+    chrono::FixedOffset::east_opt(8 * 3600).unwrap_or_else(|| {
+        debug_assert!(false, "东八区偏移必须合法");
+        // 退化到 UTC：时间偏 8 小时总好过崩溃，而 debug 断言会先把问题暴露出来。
+        chrono::FixedOffset::east_opt(0).expect("UTC 偏移必然合法")
+    })
+}
+
+/// 东八区墙钟的 14 位 `yyyyMMddHHmmss`。
+///
+/// 见 [`beijing_offset`] 说明为什么固定用东八区。
+/// 时间**只能**来自注入的 [`Clock`]，不许直接 `SystemTime::now()`——
+/// 否则测试无法钉住上报内容（见 docs/conventions.md §7.2）。
+pub fn beijing_time_digits(clock: &dyn Clock) -> String {
+    use chrono::TimeZone as _;
+    let offset = beijing_offset();
+    match offset.timestamp_millis_opt(clock.now_ms()) {
+        chrono::LocalResult::Single(t) => t.format("%Y%m%d%H%M%S").to_string(),
+        // 东八区**没有夏令时**，所以这两个分支对本偏移不可达。
+        // 真出现说明偏移常量被改成了有 DST 的地方。
+        _ => String::new(),
     }
 }
 

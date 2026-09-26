@@ -620,7 +620,7 @@ export const PipelinesPage = () => {
         <fieldset class="fieldset">
           <legend class="fieldset-legend">名称</legend>
           <input
-            class="input input-bordered w-full"
+            class="input w-full"
             placeholder="例如 早班：签到 → 领云朵"
             value={d.name}
             // onInput 而不是 onChange：Vue 的 onChange 是原生 change，只在失焦时触发
@@ -633,7 +633,7 @@ export const PipelinesPage = () => {
         <fieldset class="fieldset">
           <legend class="fieldset-legend">账号</legend>
           <input
-            class="input input-bordered w-full"
+            class="input w-full"
             placeholder="留空 = 全部账号"
             value={d.accountsText}
             onInput={(e) => {

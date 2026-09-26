@@ -32,6 +32,8 @@ fn account(phone: &str) -> Account {
             expire: 0,
         },
         device_id: DeviceId("dev".into()),
+        pc_platform: None,
+        user_domain_id: None,
         settings: AccountSettings::default(),
     }
 }
@@ -721,5 +723,467 @@ fn worst_case_log_write_stays_bounded() {
         per_ms < 200.0,
         "单次写盘 {per_ms:.1}ms，已超出 §6 例外所依赖的量级"
     );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ── 设备指纹（smid）窄写 ────────────────────────────────────────────────
+
+const FP_V1: &str = r#"{"ua":"v1","canvas":"11111111"}"#;
+const FP_V2: &str = r#"{"ua":"v2","canvas":"22222222"}"#;
+const DEVICE_ID_1: &str = "B1990000000000000000000000000000000000000000000001";
+
+#[tokio::test]
+async fn smid_state_is_absent_before_the_first_bind() {
+    let d = tmpdir("smid-absent");
+    let s = JsonStore::open(&d).unwrap();
+    let id = AccountId::new("13800000000");
+    // 「从没绑过」必须是 None，不能伪造成一个空状态 ——
+    // 两者的后续动作不同（一个要生成、一个不该重生成）
+    assert!(
+        mcloud_core::SmidStore::get_smid_state(&s, &id)
+            .await
+            .unwrap()
+            .is_none(),
+        "未绑定不该伪造一个空 SmidState"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[tokio::test]
+async fn smid_state_round_trips_across_reopen() {
+    let d = tmpdir("smid-roundtrip");
+    let id = AccountId::new("13800000000");
+    {
+        let s = JsonStore::open(&d).unwrap();
+        mcloud_core::SmidStore::set_smid_fingerprint(&s, &id, FP_V1)
+            .await
+            .unwrap();
+        mcloud_core::SmidStore::set_smid_device_id(&s, &id, DEVICE_ID_1)
+            .await
+            .unwrap();
+    }
+    // 重开一次：绑定必须活过进程重启，否则每次启动都换一台"设备"
+    let s = JsonStore::open(&d).unwrap();
+    let got = mcloud_core::SmidStore::get_smid_state(&s, &id)
+        .await
+        .unwrap()
+        .expect("重开后应还在");
+    assert_eq!(got.fingerprint_json.as_deref(), Some(FP_V1));
+    assert_eq!(got.device_id.as_deref(), Some(DEVICE_ID_1));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 换指纹必须**连带清掉**旧 deviceId —— 旧 id 是**旧长相**在风控那边换来的。
+#[tokio::test]
+async fn rotating_the_fingerprint_clears_the_stale_device_id() {
+    let d = tmpdir("smid-rotate");
+    let s = JsonStore::open(&d).unwrap();
+    let id = AccountId::new("13800000000");
+    mcloud_core::SmidStore::set_smid_fingerprint(&s, &id, FP_V1)
+        .await
+        .unwrap();
+    mcloud_core::SmidStore::set_smid_device_id(&s, &id, DEVICE_ID_1)
+        .await
+        .unwrap();
+
+    mcloud_core::SmidStore::set_smid_fingerprint(&s, &id, FP_V2)
+        .await
+        .unwrap();
+    let got = mcloud_core::SmidStore::get_smid_state(&s, &id)
+        .await
+        .unwrap()
+        .expect("有状态");
+    assert_eq!(got.fingerprint_json.as_deref(), Some(FP_V2));
+    assert_eq!(
+        got.device_id, None,
+        "新长相配旧 id 会被风控认成同一台设备，比没有 id 更糟"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 窄写的另一面：写 deviceId **不能**碰掉指纹。
+#[tokio::test]
+async fn writing_the_device_id_leaves_the_fingerprint_alone() {
+    let d = tmpdir("smid-narrow");
+    let s = JsonStore::open(&d).unwrap();
+    let id = AccountId::new("13800000000");
+    mcloud_core::SmidStore::set_smid_fingerprint(&s, &id, FP_V1)
+        .await
+        .unwrap();
+    mcloud_core::SmidStore::set_smid_device_id(&s, &id, DEVICE_ID_1)
+        .await
+        .unwrap();
+    let got = mcloud_core::SmidStore::get_smid_state(&s, &id)
+        .await
+        .unwrap()
+        .expect("有状态");
+    assert_eq!(
+        got.fingerprint_json.as_deref(),
+        Some(FP_V1),
+        "指纹不该被 deviceId 写入碰掉"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 登录态那条整块覆盖的写**不得**影响指纹。
+///
+/// 这是把两张表分开存的原因：`save_account_state` 直接替换整个 `Value`，
+/// 若指纹也放在里面，登录路径会顺手把它抹掉。
+#[tokio::test]
+async fn saving_account_state_does_not_touch_the_fingerprint() {
+    let d = tmpdir("smid-isolation");
+    let s = JsonStore::open(&d).unwrap();
+    let id = AccountId::new("13800000000");
+    mcloud_core::SmidStore::set_smid_fingerprint(&s, &id, FP_V1)
+        .await
+        .unwrap();
+    mcloud_core::SmidStore::set_smid_device_id(&s, &id, DEVICE_ID_1)
+        .await
+        .unwrap();
+
+    // 登录路径：整块覆盖登录态
+    s.save_account_state(&id, &serde_json::json!({"jwtToken":"JWT-1"}))
+        .await
+        .unwrap();
+
+    let got = mcloud_core::SmidStore::get_smid_state(&s, &id)
+        .await
+        .unwrap()
+        .expect("有状态");
+    assert_eq!(
+        got.fingerprint_json.as_deref(),
+        Some(FP_V1),
+        "换凭据不该换设备长相"
+    );
+    assert_eq!(got.device_id.as_deref(), Some(DEVICE_ID_1));
+    // 而登录态自己确实写进去了
+    assert_eq!(s.account_state(&id).await.unwrap()["jwtToken"], "JWT-1");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 删账号要连带删指纹，否则同号再次添加会继承旧设备长相。
+#[tokio::test]
+async fn removing_an_account_drops_its_fingerprint() {
+    let d = tmpdir("smid-remove");
+    let s = JsonStore::open(&d).unwrap();
+    let id = AccountId::new("13800000000");
+    s.save_account(&account("13800000000")).await.unwrap();
+    mcloud_core::SmidStore::set_smid_fingerprint(&s, &id, FP_V1)
+        .await
+        .unwrap();
+
+    s.remove_account(&id).await.unwrap();
+    assert!(
+        mcloud_core::SmidStore::get_smid_state(&s, &id)
+            .await
+            .unwrap()
+            .is_none(),
+        "账号没了，它的设备指纹也该跟着走"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ── 系统用户与会话 ──────────────────────────────────────────────────────
+
+use mcloud_core::{Session, SessionKind, UserId, UserStore, WEB_SESSION_TTL_MS};
+
+fn user(id: &str, name: &str) -> mcloud_core::User {
+    mcloud_core::User {
+        id: UserId::new(id),
+        name: name.into(),
+        password_hash: mcloud_core::PasswordHash("$argon2id$v=19$m=19456,t=2,p=1$s$h".into()),
+        created_at_ms: 1_700_000_000_000,
+    }
+}
+
+fn session(token_hash: &str, user_id: &str, expires_at_ms: i64) -> Session {
+    Session {
+        token_hash: token_hash.into(),
+        user_id: UserId::new(user_id),
+        kind: SessionKind::Web,
+        created_at_ms: 1_700_000_000_000,
+        expires_at_ms,
+    }
+}
+
+/// 首次部署判定：0 个用户 ⇒ 需要走 `/api/setup`。
+#[tokio::test]
+async fn user_count_starts_at_zero() {
+    let d = tmpdir("users-empty");
+    let s = JsonStore::open(&d).unwrap();
+    assert_eq!(s.user_count().await.unwrap(), 0, "新库没有用户");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[tokio::test]
+async fn user_crud_and_lookup_by_name() {
+    let d = tmpdir("users-crud");
+    let s = JsonStore::open(&d).unwrap();
+
+    s.save_user(&user("u1", "admin")).await.unwrap();
+    assert_eq!(s.user_count().await.unwrap(), 1);
+    assert_eq!(
+        s.user_by_name("admin").await.unwrap().unwrap().id,
+        UserId::new("u1")
+    );
+    assert_eq!(
+        s.user(&UserId::new("u1")).await.unwrap().unwrap().name,
+        "admin"
+    );
+    assert!(s.user_by_name("nobody").await.unwrap().is_none());
+    assert!(s.user(&UserId::new("nope")).await.unwrap().is_none());
+
+    // 同 id 再存是更新
+    let mut u = user("u1", "admin2");
+    u.password_hash = mcloud_core::PasswordHash("$argon2id$NEW".into());
+    s.save_user(&u).await.unwrap();
+    assert_eq!(s.user_count().await.unwrap(), 1, "同 id 应是更新");
+    assert_eq!(
+        s.user(&UserId::new("u1")).await.unwrap().unwrap().name,
+        "admin2"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 用户与会话必须**落盘**（重启后还在）。
+#[tokio::test]
+async fn users_and_sessions_survive_reopen() {
+    let d = tmpdir("users-reopen");
+    {
+        let s = JsonStore::open(&d).unwrap();
+        s.save_user(&user("u1", "admin")).await.unwrap();
+        s.save_session(&session("hash-1", "u1", 9_999_999_999_999))
+            .await
+            .unwrap();
+    }
+    let s2 = JsonStore::open(&d).unwrap();
+    assert_eq!(s2.user_count().await.unwrap(), 1);
+    assert!(s2.session("hash-1").await.unwrap().is_some(), "会话要落盘");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[tokio::test]
+async fn session_lookup_by_token_hash() {
+    let d = tmpdir("sess-lookup");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_session(&session("h1", "u1", 1000)).await.unwrap();
+    s.save_session(&session("h2", "u1", 2000)).await.unwrap();
+
+    assert!(s.session("h1").await.unwrap().is_some());
+    assert!(s.session("h2").await.unwrap().is_some());
+    assert!(
+        s.session("nope").await.unwrap().is_none(),
+        "不存在的令牌给 None"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[tokio::test]
+async fn remove_session_logs_out() {
+    let d = tmpdir("sess-logout");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_session(&session("h1", "u1", 1000)).await.unwrap();
+    s.remove_session("h1").await.unwrap();
+    assert!(
+        s.session("h1").await.unwrap().is_none(),
+        "登出后令牌立即失效"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// ⭐ 改口令必须清掉该用户的**所有**会话。
+///
+/// 不清的话"改了口令、旧会话还能用" —— 而用户改口令的动机通常正是
+/// "怀疑别人知道我的口令"。这时旧会话还在，等于改了也没用。
+#[tokio::test]
+async fn changing_password_revokes_all_sessions_of_that_user() {
+    let d = tmpdir("sess-revoke");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_session(&session("a", "u1", 1000)).await.unwrap();
+    s.save_session(&session("b", "u1", 1000)).await.unwrap();
+    s.save_session(&session("c", "u2", 1000)).await.unwrap();
+
+    let removed = s.remove_user_sessions(&UserId::new("u1")).await.unwrap();
+    assert_eq!(removed, 2, "u1 有两条会话，都要清掉");
+    assert!(s.session("a").await.unwrap().is_none());
+    assert!(s.session("b").await.unwrap().is_none());
+    assert!(
+        s.session("c").await.unwrap().is_some(),
+        "别把别的用户的会话也清了"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ── 过期回收 ────────────────────────────────────────────────────────────
+
+/// ⭐ 过期会话要被清掉；**CLI 会话（不过期）不能被误清**。
+#[tokio::test]
+async fn purge_removes_expired_but_keeps_permanent() {
+    let d = tmpdir("sess-purge");
+    let s = JsonStore::open(&d).unwrap();
+
+    s.save_session(&session("expired", "u1", 500))
+        .await
+        .unwrap();
+    s.save_session(&session("future", "u1", 5000))
+        .await
+        .unwrap();
+    // CLI 会话：expires_at_ms = 0 ⇒ 永不过期
+    let mut cli = session("cli", "u1", 0);
+    cli.kind = SessionKind::Cli;
+    s.save_session(&cli).await.unwrap();
+
+    let removed = s.purge_expired_sessions(1000).await.unwrap();
+    assert_eq!(removed, 1, "只该清掉那一条过期的");
+    assert!(s.session("expired").await.unwrap().is_none());
+    assert!(s.session("future").await.unwrap().is_some());
+    assert!(
+        s.session("cli").await.unwrap().is_some(),
+        "不过期的会话不能被清掉 —— expires_at_ms=0 是'永不过期'，不是'早已过期'"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[tokio::test]
+async fn purge_with_nothing_expired_is_a_noop() {
+    let d = tmpdir("sess-purge-none");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_session(&session("a", "u1", 10_000)).await.unwrap();
+    assert_eq!(s.purge_expired_sessions(1000).await.unwrap(), 0);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 会话落盘的**是哈希**，不是令牌原文。
+#[tokio::test]
+async fn session_file_stores_the_hash_not_the_token() {
+    let d = tmpdir("sess-hash");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_session(&session("sha256-of-token", "u1", 1000))
+        .await
+        .unwrap();
+
+    let raw = std::fs::read_to_string(d.join(files::SESSIONS)).unwrap();
+    assert!(raw.contains("token_hash"), "{raw}");
+    assert!(raw.contains("sha256-of-token"));
+    // 这个字段名本身就是提醒：库里存的是哈希。真正的令牌从不出现在磁盘上。
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 并发建会话不能丢 —— 多标签页同时登录是常态。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_session_creation_loses_nothing() {
+    let d = tmpdir("sess-conc");
+    let s = std::sync::Arc::new(JsonStore::open(&d).unwrap());
+    let mut handles = Vec::new();
+    for i in 0..32 {
+        let s = std::sync::Arc::clone(&s);
+        handles.push(tokio::spawn(async move {
+            s.save_session(&session(&format!("h{i}"), "u1", 9_999_999_999_999))
+                .await
+                .unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+    let mut found = 0;
+    for i in 0..32 {
+        if s.session(&format!("h{i}")).await.unwrap().is_some() {
+            found += 1;
+        }
+    }
+    assert_eq!(found, 32, "并发建会话一条都不能丢");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn web_session_ttl_is_a_week() {
+    assert_eq!(WEB_SESSION_TTL_MS, 604_800_000);
+}
+
+// ── 机器级 PC 设备指纹 ──────────────────────────────────────────────────
+
+/// 落盘 / 读回，且**跨实例稳定**（重启不换设备 —— 这是它存在的全部意义）。
+#[tokio::test]
+async fn pc_device_id_round_trips_and_survives_reopen() {
+    use mcloud_core::PcDeviceStore as _;
+    let d = tmpdir("pcdev-round");
+    let id = "62AA2BDA29F99744536E142A83CA5B03-ENDIN";
+
+    {
+        let s = JsonStore::open(&d).unwrap();
+        assert_eq!(s.pc_device_id().await.unwrap(), None, "一开始应当没有");
+        s.set_pc_device_id(id).await.unwrap();
+        assert_eq!(s.pc_device_id().await.unwrap().as_deref(), Some(id));
+    }
+
+    // 重新打开：必须是**同一个** id
+    let s = JsonStore::open(&d).unwrap();
+    assert_eq!(
+        s.pc_device_id().await.unwrap().as_deref(),
+        Some(id),
+        "重开之后设备号漂移了 —— 服务端会永远定位不到扫码会话"
+    );
+
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 形状非法的值必须被**拒绝写入**，而不是写进去再读不出来。
+#[tokio::test]
+async fn pc_device_id_rejects_malformed_values() {
+    use mcloud_core::PcDeviceStore as _;
+    let d = tmpdir("pcdev-bad");
+    let s = JsonStore::open(&d).unwrap();
+
+    for bad in [
+        "",                                       // 空
+        "ABC-ENDIN",                              // 太短
+        "62aa2bda29f99744536e142a83ca5b03-ENDIN", // 小写
+        "62AA2BDA29F99744536E142A83CA5B03",       // 缺后缀
+        "62AA2BDA29F99744536E142A83CA5B0Z-ENDIN", // 非 hex
+    ] {
+        assert!(
+            s.set_pc_device_id(bad).await.is_err(),
+            "非法值 {bad:?} 不该被接受"
+        );
+    }
+    assert_eq!(s.pc_device_id().await.unwrap(), None, "非法写不该留下东西");
+
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 文件被截断/清空 ⇒ 视作"没有"，而不是当成一个半截设备号。
+#[tokio::test]
+async fn truncated_pc_device_file_reads_as_absent() {
+    use mcloud_core::PcDeviceStore as _;
+    let d = tmpdir("pcdev-trunc");
+    let s = JsonStore::open(&d).unwrap();
+    s.set_pc_device_id("62AA2BDA29F99744536E142A83CA5B03-ENDIN")
+        .await
+        .unwrap();
+
+    // 模拟写到一半被中断留下的半截文件
+    std::fs::write(d.join(files::PC_DEVICE), "62AA2BDA29F997").unwrap();
+    assert_eq!(
+        s.pc_device_id().await.unwrap(),
+        None,
+        "半截 id 必须被当成没有（否则每轮都换一个新设备）"
+    );
+
+    std::fs::write(d.join(files::PC_DEVICE), "   \n").unwrap();
+    assert_eq!(s.pc_device_id().await.unwrap(), None);
+
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 末尾换行要能容忍（我们写盘时带一个）。
+#[tokio::test]
+async fn trailing_newline_is_tolerated() {
+    use mcloud_core::PcDeviceStore as _;
+    let d = tmpdir("pcdev-nl");
+    let s = JsonStore::open(&d).unwrap();
+    let id = "62AA2BDA29F99744536E142A83CA5B03-ENDIN";
+    std::fs::write(d.join(files::PC_DEVICE), format!("{id}\n")).unwrap();
+    assert_eq!(s.pc_device_id().await.unwrap().as_deref(), Some(id));
     let _ = std::fs::remove_dir_all(&d);
 }

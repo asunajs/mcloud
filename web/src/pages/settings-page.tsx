@@ -68,12 +68,12 @@ export const SettingsPage = () => {
               <h2 class="card-title text-base">实例信息</h2>
               <fieldset class="fieldset">
                 <legend class="fieldset-legend">产品</legend>
-                <input class="input input-bordered w-full" value={version.value?.name ?? ''} readonly />
+                <input class="input w-full" value={version.value?.name ?? ''} readonly />
               </fieldset>
               <fieldset class="fieldset">
                 <legend class="fieldset-legend">版本</legend>
                 <input
-                  class="input input-bordered w-full"
+                  class="input w-full"
                   value={version.value?.version ?? ''}
                   readonly
                 />
@@ -81,7 +81,7 @@ export const SettingsPage = () => {
               <fieldset class="fieldset">
                 <legend class="fieldset-legend">已注册任务</legend>
                 <input
-                  class="input input-bordered w-full"
+                  class="input w-full"
                   value={String(status.value?.taskCount ?? 0)}
                   readonly
                 />

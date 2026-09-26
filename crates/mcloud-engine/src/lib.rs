@@ -2,12 +2,14 @@
 //!
 //! **铁律：本 crate 不做 IO**。所有外部交互经 `mcloud-core` 的 trait。
 
+pub mod artifacts;
 pub mod cancel_registry;
 pub mod pipeline;
 pub mod registry;
 pub mod runner;
 pub mod scheduler;
 
+pub use artifacts::{Artifact, ArtifactKind, ArtifactLedger, ArtifactRecorder, SharedLedger};
 pub use cancel_registry::{CancelRegistry, SharedCancelRegistry};
 pub use pipeline::{PipelineOutcome, PipelineRunner, StepStatus, StepSummary};
 pub use registry::{Registry, Task, TaskMeta};
@@ -33,6 +35,14 @@ pub struct TaskContext {
     /// 编排的中止要停掉整条链。任务必须**两个都看** ——
     /// 只看一个的话，另一种中止方式对它就是无效的。
     pub chain_cancel: Option<mcloud_core::CancelToken>,
+    /// 产物登记句柄：本任务往用户网盘写了东西就**必须**在这里上报。
+    ///
+    /// 它只能登记（`run_id` 与 `account` 已由执行器填好），
+    /// 销账与遗忘只属于清理路径 —— 见 [`crate::ArtifactRecorder`]。
+    ///
+    /// 不上报的后果**不报错**：那文件永久留在用户网盘上，
+    /// 而界面上没有任何一行字说明"这里留了东西"。
+    pub artifacts: crate::ArtifactRecorder,
 }
 
 impl TaskContext {
@@ -76,6 +86,18 @@ impl TaskContext {
             message: msg.into(),
             at_ms: self.clock.now_ms(),
         });
+    }
+
+    /// 上报一条**本 run 造出来的**网盘文件（防漏记的入口）。
+    ///
+    /// 传 `pre_existing` 是**故意**的：那条判断是防误删的唯一防线，
+    /// 不该让每个调用方自己记。详见 [`crate::ArtifactLedger::register_created`]。
+    pub fn register_cloud_file(
+        &self,
+        file_id: impl Into<String>,
+        pre_existing: bool,
+    ) -> mcloud_core::Result<bool> {
+        self.artifacts.register_cloud_file(file_id, pre_existing)
     }
 
     /// 上报进度。

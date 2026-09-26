@@ -56,6 +56,13 @@ export const IconSettings = (p: IconProps): JSX.Element => (
   </svg>
 )
 
+/** 用户：账号页。 */
+export const IconUser = (p: IconProps): JSX.Element => (
+  <svg {...BASE} class={p.class ?? 'size-5'}>
+    <path d="M12 12a5 5 0 1 0 0-10 5 5 0 0 0 0 10Zm0 2c-4.4 0-8 2.2-8 5v1h16v-1c0-2.8-3.6-5-8-5Z" />
+  </svg>
+)
+
 export const IconMenu = (p: IconProps): JSX.Element => (
   <svg {...BASE} class={p.class ?? 'size-5'}>
     <path d="M3 6h18v2H3V6Zm0 5h18v2H3v-2Zm0 5h18v2H3v-2Z" />
@@ -100,6 +107,13 @@ export const IconAlert = (p: IconProps): JSX.Element => (
 export const IconClock = (p: IconProps): JSX.Element => (
   <svg {...BASE} class={p.class ?? 'size-5'}>
     <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2Zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8Zm1-13h-2v6l5 3 1-1.7-4-2.3V7Z" />
+  </svg>
+)
+
+/** 登出：门框 + 向外指的箭头。 */
+export const IconLogout = (p: IconProps): JSX.Element => (
+  <svg {...BASE} class={p.class ?? 'size-5'}>
+    <path d="M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h5v-2H5V5h5V3Zm5.6 3.6L14.2 8l3 3H9v2h8.2l-3 3 1.4 1.4L21 12l-5.4-5.4Z" />
   </svg>
 )
 

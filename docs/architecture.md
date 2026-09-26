@@ -86,7 +86,7 @@ pub struct AuthInfo {
     pub platform: String,  // 如 "android"
     pub phone: String,
     pub token: String,
-    pub expire: i64,       // 秒级时间戳
+    pub expire: i64,       // epoch **毫秒**（不是秒，见 §5.3 的说明）
 }
 
 pub struct Account {
@@ -196,7 +196,7 @@ jwttoken: <jwt>          仅注入 →  caiyun.feixin.10086.cn
                                   mrp.mcloud.139.com
                                   m.mcloud.139.com
 
-deviceid: <smid>         注入所有请求
+deviceid: <smid>         注入所有请求（值由 smid 系统换取，见 §5.6）
 ```
 
 ### 5.2 客户端工厂
@@ -213,6 +213,17 @@ pub fn create_task_http(device_id, jwt_token, referer) -> impl HttpClient;
 //  附加: appversion 12.6.0.0 / activityid sign_in_3
 //        origin https://m.mcloud.139.com
 ```
+
+装饰器栈（组装层实际装配的顺序，`mcloud-app/src/builder.rs`）：
+
+```text
+SmidClient        ← 懒加载补 deviceid 头（第一次请求时才去换）
+  └ H5Client      ← 建会话、带 jwttoken、90001 刷新重放
+      └ ReqwestClient  ← 真正发请求，按域名注入 authorization
+```
+
+`SmidClient` 必须在**最外层**：它补的头要作用于所有出去的请求，
+包括 `H5Client` 建会话那三枪。
 
 ### 5.3 认证生命周期
 
@@ -233,7 +244,78 @@ auth(base64) ──parse──> {platform, phone, token, expire}
 `POST aas.caiyun.feixin.10086.cn/tellin/authTokenRefresh.do`（XML 报文），
 成功后重算 basic auth 并**原子写回**配置文件（保留 `.bak`）。
 
-### 5.4 错误语义
+⚠ `expire` 的单位是 **epoch 毫秒**（13 位），不是秒。上游 token 第 4 段
+就是毫秒（黄金向量 `1893456000000`），而旧实现曾按秒处理 ——
+后果不是报错，而是把"已过期"算成公元 61968 年、永远不刷新，
+直到上游回 90001 才发现。详见 `docs/conventions.md` §7.2。
+
+### 5.4 H5 会话层
+
+签到、领取、任务列表这些动作**全部由 H5 发出**，它们要的不是 `Authorization`
+而是 `jwttoken`。拿票要打三枪：
+
+```
+① POST /user/querySpecTokenV2      （原生 A 族头，带 Authorization）
+      {"toSourceId":"001005"}  →  SSO token
+② GET  /ycloud/api/timestamp       （无鉴权）→ 13 位毫秒
+③ POST /ycloud/auth-service/auth/tyrzLogin  （带 x-signature）
+      → jwttoken（905 字符）
+```
+
+**这三条是一条链，不是三个接口。** 漏掉第 ③ 步的表现是"每个业务接口都报
+`90001 未登录`"—— 看上去像鉴权坏了，实际是会话没建。
+
+#### 票是"每页一套配方"，不是全局一张
+
+mcloud 的实拍结论：**每个页面用自己的参数换自己的票，票与票之间逐字节不等**。
+所以键叫 [`SessionRecipe`]，而不是"页面名"：
+
+| 页面 | `marketName` | `sourceId` |
+|---|---|---|
+| 签到页 | `sign_in_3` | `1002` |
+| 备份有礼页 | `backupgift` | `1134` |
+| 开启通知页 | `msgpushon` | `1062` |
+| 拍拍门户页 | `National_playAI` | `1044` |
+
+目前**只有签到页有完整实拍**，其余页面在拿到自己的实拍前映射到它。
+但代码**一次就按配方建模** —— mcloud 自己吃过亏：它先把换票参数写死在
+`OpenSignInSession` 里，后来发现各页有自己配方，切的时候"动的是**共享会话层**"。
+
+#### 缓存只在内存，不落地
+
+`jwttoken` 2 小时即废，而库里那一列（`account_state`）装的是**登录凭据** ——
+同名不同物。落一张两小时就死的票，换来的是"重启后读到一张过期票"这一整类难查现象。
+进程重启就重取，代价是三条请求。
+
+**SSO token 连内存都不缓存**：实测"14:38:54 换到的 token，14:42:09 重放已被拒"。
+
+#### 不加 TTL，只认 `90001`
+
+抓包只给了"这张票 2 小时即废"，**没给**"该在哪个时刻算它过期"的依据。
+所以失效判据只有上游回的那一句 `90001`，不自造时钟。
+
+代价说清楚：票自然过期后的第一次请求会先撞一次 `90001`，然后刷新并
+**重放那一条**（不是整轮）。用户看到的是"多等一次往返"，不是失败。
+反过来写死 2 小时重建，那是拿客户端猜测替换服务端语义。
+
+> ⚠ **重放的是"那一条"，不是"整轮"。** 重放整轮的表现是"某个写请求跑了两次"，
+> 而它在余额上看不出、日志里不报错 —— 只有把**请求序列**钉住才抓得到。
+
+#### 透明接入
+
+`H5Client` 是 `HttpClient` 的装饰器，只接管 [`JWT_HOSTS`] 那一族：
+
+- 任务代码**不需要知道有"会话"这回事**，只管发业务请求；
+- `90001` 刷新重放**只有一处实现**（20 个任务各写一遍必然分叉，
+  而分叉的表现是"某个任务在票过期时静默失败"）；
+- 原生族（`user-njs.yun.139.com`）**原样透传** —— 对它建会话是白打三枪，
+  而且那三枪的第一条就在这个主机上，会绕回自己。
+
+按**主机**分派而不是"给每个任务传一个 jwt 字符串"：mcloud 踩过的坑是
+"把直播侧 JWT 传进了云盘侧的参数位"，根因是**类型把两套凭据降级成了同一个
+`string`** —— 摆错顺序在编译器和测试眼里都合法。按主机分派让这个位置不存在。
+
+### 5.5 错误语义
 
 ```
 code ∈ {"0","0000","200"} 或 resultCode == 0  → 成功
@@ -241,6 +323,62 @@ code ∈ {"0","0000","200"} 或 resultCode == 0  → 成功
 ```
 
 网络层错误与业务错误分离：前者 `Err`，后者 `Ok(Envelope::Err{..})`。
+
+### 5.6 smid 设备指纹（`deviceid` 从哪来）
+
+`deviceid` **不是本地算出来的串**，是中国移动统一认证（cmpassport）的风控服务
+发下来的：客户端把一份浏览器特征加密上报，服务端回一个 `deviceId`，
+客户端在它前面拼一个字母 `B` 当自己的设备 id 用。
+
+```
+uid = randomUUID()
+  ├─ ep     = RSA(uid)              公钥 SKLAND_PUBLIC_KEY_B64
+  └─ priId  = md5(uid)[0..16]       下面那份特征的 AES 密钥
+特征体（约 30 个字段，含一个当场随机出来的 smid）
+  → tn = md5(getTn(特征体))          ← 先算摘要，再写回 tn 字段
+  → 按 25 条 DES 规则逐字段加密 + 改名（appId→um、ua→pu、…）
+  → JSON → gzip（OS 字节写 19）→ base64
+  → AES-CBC/PKCS7 固定 IV，密钥 priId → hex   = data
+POST https://slw.h5cmpassport.com:9090/deviceprofile/v4
+  → code == 1100 → deviceId = "B" + detail.deviceId
+```
+
+#### ⚠ 绑定账号的是**特征**，不是 smid，也不是 deviceId
+
+这三样生命周期完全不同，混起来就会把该变的东西钉死：
+
+| | 会不会变 | 本项目的处理 |
+|---|---|---|
+| **设备特征**（屏幕、dpr、platform、canvas、cpu 数、ua…） | 真机上**不变** | **绑定到账号**：首次生成一份落库，之后一直复用 |
+| **smid 字段** | **每次都变**（内嵌 `yyyyMMddHHmmss` 与现生成的 uuid） | 每次上报现算，不落库 |
+| **deviceId**（`B…`） | 服务端发的，会变 | 每次上报重新取；库里那个只是"最近拿到的那一个" |
+
+旧实现每跑一次任务就重新随机一份特征，等于同一台机器每次上报都长成另一台机器的
+样子 —— 那正是最容易触发风控核验的姿态。本项目不跟：特征生成一次、按账号存下来
+复用，**只在主动更换指纹时**才重生成。
+
+#### 落点
+
+| 层 | 职责 |
+|---|---|
+| `mcloud-crypto` | 纯原语：DES/AES/gzip(OS=19)/RSA/getTn/`Random` |
+| `mcloud-upstream::smid` | 算法：`SmFingerprint`、`smid_string`、`private_id`、`ep`、`build_sm_data`、DES 规则表、`parse_device_id` |
+| `mcloud-core::SmidStore` | 存储契约（**窄写**：换指纹连带清 deviceId） |
+| `mcloud-store` | `smid.json`，**与 `state.json` 分开**（见下） |
+| `mcloud-app::smid` | 生命周期：ensure / rotate / report / device_id |
+| `mcloud-app::SmidClient` | 请求路径上懒加载补 `deviceid` 头 |
+
+#### 为什么 `smid.json` 与 `state.json` 分开
+
+`save_account_state` 是**整块覆盖**写入。若指纹也放在里面，登录路径（它根本不知道
+指纹的存在）会顺手把它清掉 —— 而"换凭据不该换设备长相"正是这里要保证的。
+分开存之后两边的写互不可见，窄写才有意义。
+
+#### 取 id 失败时不阻断业务请求
+
+`SmidClient` 取 id 要打第三方风控服务，它可能超时。这时**原样发出去、只是不带那个头**，
+而不是让业务请求失败 —— 一个风控服务的抖动不该让签到跑不起来。缺头的后果由上游按
+自己的规则回错，那才是权威判据。
 
 ---
 
@@ -553,10 +691,32 @@ SQLite 后端尚未实现，但 `Store` 的形状已按"能换"设计好，
 ### 9.1 路由契约
 
 ```
+── 登录闸（公开部分）────────────────────────────────────────────
+GET    /api/setup                   是否已初始化 + 口令长度下限
+POST   /api/setup                   首次建管理员（已初始化则拒绝）
+POST   /api/session                 登录
+DELETE /api/session                 登出
+GET    /api/session                 当前会话（**需登录**）
+GET    /api/health
+GET    /api/version
+
+── 以下全部需要登录 ─────────────────────────────────────────────
 GET    /api/version
 GET    /api/status                  后端自述（含调度器运行时实况）
 GET    /api/health
 GET    /api/capabilities            任务清单
+
+── 云盘账号（与登录闸是两件事）────────────────────────────────
+GET    /api/accounts                账号列表（**不含凭据**）
+DELETE /api/accounts/{id}           移除账号及其本地凭据
+POST   /api/login/qr                扫码登录：出码
+POST   /api/login/qr/poll           扫码登录：轮询
+DELETE /api/login/qr/{sid}          取消扫码
+POST   /api/login/sms/start         短信登录：发码
+POST   /api/login/sms               短信登录：校验
+POST   /api/login/password          账密登录
+GET    /api/login/device            查看本机 PC 设备指纹
+POST   /api/login/device/rotate     更换 PC 设备指纹
 
 POST   /api/runs                    启动运行 {task, account, body, background}
 GET    /api/runs                    运行列表
@@ -698,10 +858,52 @@ web/src/
 
 ## 12. 安全与合规
 
+### 12.1 凭证与脱敏
+
 - 凭证仅存本地，配置目录权限 0600，写盘保留 `.bak`。
 - 日志**脱敏**：`auth`/`token`/`jwttoken` 一律掩码，禁止整串落盘。
 - 不内置任何他人账号或批量注册能力。
 - 请求频率保守，遵循上游限流；失败指数退避而非重试轰炸。
+
+### 12.2 登录闸（WebUI）
+
+**两层认证，不要混**：
+
+| | 谁的凭证 | 存哪 | 谁用 |
+|---|---|---|---|
+| 系统用户 | 你设的用户名/口令 | `users.json`（argon2id PHC） | 浏览器 |
+| 云盘账号 | 移动云盘的 auth | `accounts.json` | 任务运行时 |
+
+三态门：
+
+| 状态 | `/api/` 下（除公开路由） |
+|---|---|
+| 未初始化（0 个用户） | **503** `setup_required` |
+| 已初始化、未登录 | **401** |
+| 已登录 | 放行 |
+
+**为什么 503 与 401 必须分开**：401 让前端弹登录框，而这时根本没有账号可登；
+503 让前端跳初始化向导。混成一个码，用户看到的是"登录失败"
+而不是"还没建管理员" —— 而后者才是他该做的事。
+
+几条硬规则：
+
+- **口令**：argon2id（`m=19456, t=2, p=1, out=32`），与 mcloud 同参数 ⇒
+  两边金标向量可对拍。长度按 **Unicode 字符**数（8 位），
+  按字节算会让中文口令的下限变成 3 个字。
+- **会话令牌**：库里存 `sha256(token)`，**明文不落盘**。
+  令牌是 32 字节随机数（不是"用户名+时间戳"的派生 —— 派生值可预测）。
+- **cookie**：`HttpOnly; SameSite=Strict; Path=/; Max-Age=<与库内到期一致>`。
+  **不加 `Secure`** —— 默认跑在 `http://127.0.0.1`，加了浏览器会直接不存，
+  表现是"登录成功但立刻又未登录"；上 HTTPS 时应由反代加。
+- **用户名枚举**：用户不存在与口令错**回同一句话**。区分开来就是一个
+  "这个用户名存不存在"的探测器。
+- **改口令**：必须清掉该用户的**所有**会话 —— 用户改口令的动机通常正是
+  "怀疑别人知道我的口令"，旧会话还在等于改了也没用。
+- **静态资源放行**：否则登录页自己都加载不出来，用户看到的是永远转圈的
+  空白页而不是登录框。这不泄漏任何东西 —— 前端包里没有数据。
+- **读不出用户数时失败关闭**：放行等于"存储坏了就没人需要登录"，
+  那是最糟的失效方向。
 
 ---
 
@@ -715,13 +917,43 @@ web/src/
 | P3 | 引擎（注册表/运行器/并发闸/事件） | ✅ |
 | P4 | HTTP 服务 + 前端（同源单二进制） | ✅ |
 | **P5** | **通用存储、定时调度、任务编排、日志收集、任务中止** | **✅** |
-| P6 | 真实上游认证链（登录、token 刷新） | ⏳ 端点仍是占位 |
-| P7 | 账号管理页面、推送渠道 | ⏳ |
-| P8 | 其余约 19 个任务 | ⏳ |
+| **P6** | **H5 会话层（JWT）+ 签到端点校正** | **✅** |
+| **P7** | **WebUI 登录闸（argon2id + 三态门 + 会话）** | **✅** |
+| **P8** | **认证闸 + 登出 + CLI 收敛为 6 命令 + 账号登录（扫码/短信）** | **✅** |
+| P9 | 推送渠道、其余约 19 个任务 | ⏳ |
+
+### CLI（`mcloud-cli`）—— 只管"无头也能跑"的六件事
+
+```
+tasks                          列出可用任务
+run <任务名> <账号>             跑一次任务
+cron <定时id>                   跑一条已配置的定时（给系统 crontab 调用）
+pipeline run <编排id>           跑一条已配置的编排
+auth refresh <--account|--all>  刷新凭据
+login <方式>                    登录账号（qr / sms / password）
+```
+
+**定时与编排的「创建」不在命令行** —— 改配置文件或用 WebUI。
+少一个入口就少一处会与 WebUI 漂移的语义。
+
+`cron` **不常驻**：时间由系统 crontab 管，它只跑一条然后退出。
+判据、水位推进、并发闸全走 `Scheduler::tick`，不在这里重写 ——
+重写就是"两处语义"，而它们的差异（一个补跑、一个不补）极难发现。
+
+退出码约定：`0` 成功（**含"这次不该跑"**）、`1` 任务失败、`2` 配置错误。
+"不该跑"退 0 是刻意的：crontab 会把非零当"执行出错"，
+而"今天这次不用跑"是正常的 —— 退 1 会让监控天天报假警。
+
+设计取向见 [`cli-webui-design.md`](cli-webui-design.md)：**WebUI 为主，
+CLI 只管"无头也能跑"的那 5 件事**（`login` / `run` / `cron` / `auth refresh` /
+`pipeline`）。编排与定时的**创建**不在 CLI —— 改配置文件或走 WebUI。
 
 ### 当前的关键风险
 
-密码学已被黄金向量锁死，**接口存活与签名服务端一致性才是真正的风险点**：
-`mcloud-tasks/src/sign.rs` 的端点目前是**占位**的（实测返回 HTTP 405），
-必须按真实抓包校正。这是 P6 的全部内容。
+密码学已被黄金向量锁死，**接口存活与签名服务端一致性才是真正的风险点**。
+已经吃过一次这个亏：签到端点最初是凭印象写的 `/ycloud/api/sign/query`，
+**实测回 405**；换成实拍的 `/ycloud/signin/page/infoV3` 后回 **200**。
+这类错误的产物是"能编译、能过测试、但打到一个不存在的地址"。
+
+**规则：端点必须来自抓包，不能凭印象写。**
 

@@ -76,6 +76,7 @@ serde_json = "1"
 
 # ── 密码学（全部纯 Rust，无 FFI）────────────────────────────────────────
 md-5 = "0.10"
+sha1 = "0.10"
 sha2 = "0.10"
 aes = "0.8"
 cbc = "0.1"
@@ -83,7 +84,20 @@ des = "0.8"
 cipher = { version = "0.4", features = ["block-padding"] }
 base64 = "0.22"
 hex = "0.4"
+# 口令哈希：WebUI 登录闸用 argon2id。
+# 参数与 mcloud 一致（m=19456,t=2,p=1,out=32），这样金标向量能对拍。
+argon2 = { version = "0.5", features = ["std"] }
+password-hash = { version = "0.5", features = ["std"] }
 uuid = { version = "1", features = ["v4"] }
+
+# ── 设备指纹（smid）─────────────────────────────────────────────────────
+# RSA 包住 uid（`ep` 字段），gzip 压缩特征体（OS 字节要归一到 19）。
+# 两者都是纯 Rust 实现，符合本 crate 零 FFI 的约束。
+rsa = "0.9"
+flate2 = "1"
+# OS 熵源：生产环境的随机源（`OsRandom`）。rsa 已经间接依赖它，
+# 这里显式声明是因为我们要**直接**调用，不靠传递依赖。
+getrandom = "0.2"
 
 # ── HTTP 客户端 ─────────────────────────────────────────────────────────
 reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "gzip", "rustls-tls"] }
@@ -95,6 +109,9 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 # 前端产物内嵌：单二进制交付，且与后端同源（见 webui-code-guide §7.4）
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 mime_guess = "2"
+# 终端登录出码：把二维码画成字符画。
+# 关掉默认特性：默认会拉 `image`（重），而我们只要"矩阵 + 字符画"。
+qrcode = { version = "0.14", default-features = false }
 
 # ── 可观测 ──────────────────────────────────────────────────────────────
 tracing = "0.1"

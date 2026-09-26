@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 
 use mcloud_core::{
     Account, AccountId, AppendOutcome, Error, LogLine, Pipeline, PipelineId, Result, RunId,
-    RunRecord, RunStatus, Schedule, ScheduleId, Seq, LOG_LIMIT_PER_RUN,
+    RunRecord, RunStatus, Schedule, ScheduleId, Seq, Session, User, UserId, LOG_LIMIT_PER_RUN,
 };
 
 /// 运行历史保留条数。
@@ -67,6 +67,19 @@ struct Db {
     pipelines: Vec<Pipeline>,
     /// 账号运行期状态（deviceId、jwtToken 缓存等），按账号 id 存。
     state: HashMap<String, serde_json::Value>,
+    /// 账号绑定的设备指纹（smid），按账号 id 存。
+    ///
+    /// **刻意与 `state` 分开存、分开落盘**：`state` 那条路是整块覆盖写入
+    /// （`save_account_state` 直接替换整个 `Value`），登录路径一旦顺手走它，
+    /// 就会把设备指纹一起抹掉 —— 而"换凭据不该换设备长相"正是本表要保证的。
+    /// 分开之后两边的写互不可见，`SmidStore` 的三条窄写才有意义。
+    smid: HashMap<String, StoredSmid>,
+    /// 系统用户（WebUI 登录闸）。
+    users: Vec<User>,
+    /// 会话，按 `token_hash` 存。
+    ///
+    /// 用 `HashMap` 而不是 `Vec`：查会话是**每个请求**都走的路径。
+    sessions: HashMap<String, Session>,
 }
 
 /// 建目录，并在 unix 上把权限收成 `0700`。
@@ -98,8 +111,51 @@ mod files {
     pub const SCHEDULES: &str = "schedules.json";
     pub const PIPELINES: &str = "pipelines.json";
     pub const STATE: &str = "state.json";
+    pub const USERS: &str = "users.json";
+    pub const SESSIONS: &str = "sessions.json";
+    /// 设备指纹：**单独一个文件**，不与 `state.json` 混。
+    ///
+    /// 混在一起的话，`save_account_state` 那种整块覆盖写会顺手把指纹清掉；
+    /// 而这条路的写入方（登录/刷新）根本不知道指纹的存在。
+    pub const SMID: &str = "smid.json";
+    /// 机器级 PC 设备指纹（`windowMachine`）。
+    ///
+    /// # 为什么是**纯文本**而不是 JSON
+    ///
+    /// 它只有一个值。JSON 包一层不会让它更可读，反而让"文件被截断"
+    /// 这件事从"值不对"变成"解析失败"——前者至少还能看出是个半截 id。
+    ///
+    /// # 为什么单独一个文件
+    ///
+    /// 它在**登录之前**就要用（二维码的 `dID` 就是它），那一刻还没有账号，
+    /// 所以不能塞进按账号存的 `state.json` / `smid.json`。
+    pub const PC_DEVICE: &str = "pc_device.txt";
     /// 日志目录：每次运行一个文件，避免为了追加一行重写全部日志。
     pub const LOG_DIR: &str = "logs";
+}
+
+/// `smid.json` 里一条记录的落盘形态。
+///
+/// 与 `mcloud_core::SmidState` 分开定义：那个类型刻意不派生 `Serialize`
+/// （少一条"顺手塞进 HTTP 响应"的路），而落盘需要序列化。
+/// 两边的字段含义一一对应，转换是显式的。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct StoredSmid {
+    /// 绑定的设备特征（JSON 文本）。`None` = 还没绑过。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fingerprint_json: Option<String>,
+    /// 最近一次上报换回的 `deviceId`（含 `B` 前缀）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device_id: Option<String>,
+}
+
+impl From<StoredSmid> for mcloud_core::SmidState {
+    fn from(s: StoredSmid) -> Self {
+        Self {
+            fingerprint_json: s.fingerprint_json,
+            device_id: s.device_id,
+        }
+    }
 }
 
 /// 基于目录的 JSON 存储。
@@ -283,6 +339,9 @@ impl JsonStore {
         let schedules: Vec<Schedule> = self.read_json(&self.path(files::SCHEDULES))?;
         let pipelines: Vec<Pipeline> = self.read_json(&self.path(files::PIPELINES))?;
         let state: HashMap<String, serde_json::Value> = self.read_json(&self.path(files::STATE))?;
+        let smid: HashMap<String, StoredSmid> = self.read_json(&self.path(files::SMID))?;
+        let users: Vec<User> = self.read_json(&self.path(files::USERS))?;
+        let sessions: HashMap<String, Session> = self.read_json(&self.path(files::SESSIONS))?;
 
         // 日志按 run 分文件，按需读取（只读还保留着的那些 run）
         let mut logs = HashMap::new();
@@ -301,6 +360,9 @@ impl JsonStore {
         db.schedules = schedules;
         db.pipelines = pipelines;
         db.state = state;
+        db.smid = smid;
+        db.users = users;
+        db.sessions = sessions;
         db.logs = logs;
         Ok(())
     }
@@ -365,12 +427,36 @@ impl JsonStore {
         store.write_json(&store.path(files::PIPELINES), &db.pipelines)
     }
 
+    fn persist_users(db: &Db, store: &Self) -> Result<()> {
+        let _gate = store
+            .write_gate
+            .lock()
+            .map_err(|_| Error::Storage("写锁中毒".into()))?;
+        store.write_json(&store.path(files::USERS), &db.users)
+    }
+
+    fn persist_sessions(db: &Db, store: &Self) -> Result<()> {
+        let _gate = store
+            .write_gate
+            .lock()
+            .map_err(|_| Error::Storage("写锁中毒".into()))?;
+        store.write_json(&store.path(files::SESSIONS), &db.sessions)
+    }
+
     fn persist_state(db: &Db, store: &Self) -> Result<()> {
         let _gate = store
             .write_gate
             .lock()
             .map_err(|_| Error::Storage("写锁中毒".into()))?;
         store.write_json(&store.path(files::STATE), &db.state)
+    }
+
+    fn persist_smid(db: &Db, store: &Self) -> Result<()> {
+        let _gate = store
+            .write_gate
+            .lock()
+            .map_err(|_| Error::Storage("写锁中毒".into()))?;
+        store.write_json(&store.path(files::SMID), &db.smid)
     }
 
     /// 淘汰超出上限的运行记录，并**连同其日志文件一起删除**。
@@ -427,10 +513,13 @@ impl mcloud_core::AccountStore for JsonStore {
     async fn remove_account(&self, id: &AccountId) -> Result<()> {
         let mut db = self.write()?;
         db.accounts.retain(|a| &a.id != id);
-        // 账号没了，它的运行期状态也该跟着走，否则同号再次添加会继承旧 deviceId
+        // 账号没了，它的运行期状态与该设备的指纹都该跟着走，
+        // 否则同号再次添加会继承旧 deviceId（等于新账号套用旧设备长相）
         db.state.remove(id.as_str());
+        db.smid.remove(id.as_str());
         let r = Self::persist_accounts(&db, self);
         Self::persist_state(&db, self)?;
+        Self::persist_smid(&db, self)?;
         r
     }
 
@@ -447,6 +536,89 @@ impl mcloud_core::AccountStore for JsonStore {
         let mut db = self.write()?;
         db.state.insert(id.as_str().to_string(), state.clone());
         Self::persist_state(&db, self)
+    }
+}
+
+// ── 机器级 PC 设备指纹 ──────────────────────────────────────────────────
+
+/// 设备指纹文件的内容校验。
+///
+/// 只做**形状**校验（32 位大写 hex + `-ENDIN`），不校验"是不是这台机器"——
+/// 后者无从校验。形状校验的价值在于：文件被截断/清空时能立刻发现，
+/// 而不是拿一个半截 id 去出码（那张码服务端永远定位不到）。
+fn parse_pc_device_id(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let body = trimmed.strip_suffix(mcloud_core::PC_DEVICE_SUFFIX)?;
+    if body.len() != 32 || !body.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    if body != body.to_uppercase() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+#[async_trait]
+impl mcloud_core::PcDeviceStore for JsonStore {
+    async fn pc_device_id(&self) -> Result<Option<String>> {
+        let path = self.path(files::PC_DEVICE);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = std::fs::read_to_string(&path).map_err(Error::Io)?;
+        // 空白/截断都算"没有"：把它当成已有设备号，等于每次运行都换一台设备。
+        //
+        // 这里**不删文件**：读不出来就返回 None，让上层生成并覆盖。
+        // 顺手删掉会让"文件权限不对导致读失败"这类问题更难查。
+        Ok(parse_pc_device_id(&raw))
+    }
+
+    async fn set_pc_device_id(&self, device_id: &str) -> Result<()> {
+        // 只接受合法形状：写进去一个半截 id，下一次读会被判为"没有"，
+        // 于是每轮都生成一个新的 —— 那正是这个文件要防的事。
+        let checked = parse_pc_device_id(device_id).ok_or_else(|| {
+            Error::Config(format!(
+                "设备指纹形状非法（应形如 <32 位大写 HEX>-ENDIN）：{device_id}"
+            ))
+        })?;
+        // 走既有的原子写：临时文件 → rename，且创建时就是 0600。
+        self.write_atomic(
+            &self.path(files::PC_DEVICE),
+            format!("{checked}\n").as_bytes(),
+        )
+    }
+}
+
+// ── 设备指纹（smid，窄写）────────────────────────────────────────────────
+
+#[async_trait]
+impl mcloud_core::SmidStore for JsonStore {
+    async fn get_smid_state(&self, id: &AccountId) -> Result<Option<mcloud_core::SmidState>> {
+        // `None` 与"空状态"必须可区分：前者要走"生成一份并落库"，
+        // 后者（绑过指纹但 deviceId 丢了）不该重新生成长相。
+        Ok(self.read()?.smid.get(id.as_str()).cloned().map(Into::into))
+    }
+
+    async fn set_smid_fingerprint(&self, id: &AccountId, fingerprint_json: &str) -> Result<()> {
+        let mut db = self.write()?;
+        // 换指纹与清旧 deviceId 是**同一个动作**：中间崩溃会留下
+        // "新长相 + 旧 id"，而那正是风控最想看到的设备漂移信号。
+        db.smid.insert(
+            id.as_str().to_string(),
+            StoredSmid {
+                fingerprint_json: Some(fingerprint_json.to_string()),
+                device_id: None,
+            },
+        );
+        Self::persist_smid(&db, self)
+    }
+
+    async fn set_smid_device_id(&self, id: &AccountId, device_id: &str) -> Result<()> {
+        let mut db = self.write()?;
+        // 窄写：只动 device_id，**不碰**指纹。
+        let entry = db.smid.entry(id.as_str().to_string()).or_default();
+        entry.device_id = Some(device_id.to_string());
+        Self::persist_smid(&db, self)
     }
 }
 
@@ -633,6 +805,76 @@ impl mcloud_core::PipelineStore for JsonStore {
             None => return Ok(()),
         }
         Self::persist_pipelines(&db, self)
+    }
+}
+
+// ── 系统用户与会话 ──────────────────────────────────────────────────────
+
+#[async_trait]
+impl mcloud_core::UserStore for JsonStore {
+    async fn user_count(&self) -> Result<usize> {
+        Ok(self.read()?.users.len())
+    }
+
+    async fn users(&self) -> Result<Vec<User>> {
+        Ok(self.read()?.users.clone())
+    }
+
+    async fn user_by_name(&self, name: &str) -> Result<Option<User>> {
+        Ok(self.read()?.users.iter().find(|u| u.name == name).cloned())
+    }
+
+    async fn user(&self, id: &UserId) -> Result<Option<User>> {
+        Ok(self.read()?.users.iter().find(|u| &u.id == id).cloned())
+    }
+
+    async fn save_user(&self, user: &User) -> Result<()> {
+        let mut db = self.write()?;
+        match db.users.iter_mut().find(|u| u.id == user.id) {
+            Some(slot) => *slot = user.clone(),
+            None => db.users.push(user.clone()),
+        }
+        Self::persist_users(&db, self)
+    }
+
+    async fn save_session(&self, session: &Session) -> Result<()> {
+        let mut db = self.write()?;
+        db.sessions
+            .insert(session.token_hash.clone(), session.clone());
+        Self::persist_sessions(&db, self)
+    }
+
+    async fn session(&self, token_hash: &str) -> Result<Option<Session>> {
+        Ok(self.read()?.sessions.get(token_hash).cloned())
+    }
+
+    async fn remove_session(&self, token_hash: &str) -> Result<()> {
+        let mut db = self.write()?;
+        db.sessions.remove(token_hash);
+        Self::persist_sessions(&db, self)
+    }
+
+    async fn remove_user_sessions(&self, user_id: &UserId) -> Result<usize> {
+        let mut db = self.write()?;
+        // 改口令时必须把旧会话全清掉 —— 否则"改了口令但旧会话还能用"
+        let before = db.sessions.len();
+        db.sessions.retain(|_, s| &s.user_id != user_id);
+        let removed = before - db.sessions.len();
+        if removed > 0 {
+            Self::persist_sessions(&db, self)?;
+        }
+        Ok(removed)
+    }
+
+    async fn purge_expired_sessions(&self, now_ms: i64) -> Result<usize> {
+        let mut db = self.write()?;
+        let before = db.sessions.len();
+        db.sessions.retain(|_, s| s.is_valid_at(now_ms));
+        let removed = before - db.sessions.len();
+        if removed > 0 {
+            Self::persist_sessions(&db, self)?;
+        }
+        Ok(removed)
     }
 }
 
