@@ -342,8 +342,18 @@ func TestCloudFileListHasAuthorizationButNoJwtToken(t *testing.T) {
 		t.Errorf("x-yun-op-type 应是 1，实得 %q", got)
 	}
 	// 走的是 App 原生那套头（x-yun-* 全家），不是 H5 那套。
-	if !hasHeader(request.Headers, "x-yun-client-info") {
-		t.Error("缺 x-yun-client-info ⇒ 没走 WithAppHeaders")
+	// （用 `x-DeviceInfo` 当"没走 WithAppHeaders"的探针：`x-yun-uni` 只在登录后的
+	// profile 上才有，本测试那份 appProfile() 没填它。）
+	if !hasHeader(request.Headers, "x-DeviceInfo") {
+		t.Error("缺 x-DeviceInfo ⇒ 没走 WithAppHeaders")
+	}
+	// ⭐ 这一枚是 R16 的**落点**：装配照旧走 iOS 那套，但 `x-yun-client-info` 的**值**
+	// 被覆盖成网盘侧那一串 —— 见下面那条独立测试，那里写清了为什么值才是承重的一枚。
+	if n := countHeader(request.Headers, "x-yun-client-info"); n != 1 {
+		t.Errorf("x-yun-client-info 必须**恰一枚**（WithHeader 是追加，两根线时上游读哪一根未测试），实得 %d 枚", n)
+	}
+	if got := headerOf(t, request.Headers, "x-yun-client-info"); got != cloudClientInfoWeb {
+		t.Errorf("这一口的 x-yun-client-info 应是网盘侧那一串（设备指纹串被这台主机判 00010003）")
 	}
 	if hasHeader(request.Headers, "activityid") || hasHeader(request.Headers, "showloading") {
 		t.Error("H5 专属头不该出现在网盘侧")
@@ -353,12 +363,56 @@ func TestCloudFileListHasAuthorizationButNoJwtToken(t *testing.T) {
 	}
 }
 
+// TestCloudFileListOverridesClientInfo ⭐⭐ R16 的收口：这一口发的是**哪一串**设备信息。
+//
+// # 来由（2026-09-26 三趟只读活体探针，全程 URL 与体逐字不变）
+//
+// 这一口在本仓连续三档调用点（AI 头像找回、邮箱探针回读、AI 相机根目录计数）上
+// 被上游以 `请求头不合法(00010003)` 挡下。探针把它拆成三问：
+//
+//   - **体有没有问题？** 没有 —— 这一份五键体在写侧那套头下回 `code:"0000"` + 31 条。
+//   - **缺不缺头名？** 不缺 —— 单补 `x-yun-device-id` 或 `deviceid` 都仍红。
+//   - **那一枚承重？** 是 `x-yun-client-info` 的**值**：同一套 iOS 头，只把这一枚
+//     从设备指纹串换成网盘侧那一串 ⇒ **通**；反方向（把设备指纹串塞进那套通的头里）⇒
+//     回的正是原来那句 `(00010003)`。
+//
+// # 反向改坏它的样子（两条，各红一处）
+//
+//   - 把 `setCloudHeader` 换成 `WithHeader`：变成**同名两枚**。这一条本测试的
+//     "恰一枚"会红 —— 而它重要是因为表现不是编译错，是"上线后这一口又全挡了"。
+//   - 直接删掉那一行改写：本测试的第二条断言会红（值回到设备指纹串），
+//     而上游那一侧**不会**有任何反馈 —— 它只会继续对三条链回 00010003。
+func TestCloudFileListOverridesClientInfo(t *testing.T) {
+	profile := appProfile()
+	// 设备档案自己那一串长什么样**不进成文**（它嵌 deviceId 与 deviceShort），
+	// 但这里要的只是"它与那一串**不相等**"这一格，所以直接取来比。
+	deviceValue := profile.Device().ClientInfo()
+	if deviceValue == cloudClientInfoWeb {
+		t.Fatal("两份素材串相等 ⇒ 这条断言失去意义（探针的对照也一起做不了了）")
+	}
+	request, err := CloudFileListRequest(profile, 1893456000000, aiAuthSentinel, "/", 100)
+	if err != nil {
+		t.Fatalf("构造失败: %v", err)
+	}
+	if got := headerOf(t, request.Headers, "x-yun-client-info"); got == deviceValue {
+		t.Error("这一口仍发设备指纹串 ⇒ 上游会回 请求头不合法(00010003)，三条链一起挡死")
+	}
+	// `x-yun-device-id` 是本仓**不带**的那一枚（探针里"补它没用"，故不引入第三个取值）。
+	if hasHeader(request.Headers, "x-yun-device-id") {
+		t.Error("这一口不带 x-yun-device-id：补它那一档实测仍红，没有出处支持加它")
+	}
+}
+
 // TestCloudFileListBodyFollowsLegacyBuilderNotTheCapture 钉"按旧实现发"这一取向（R16）。
 //
 // 实拍那一份（App 真机 okhttp）另有 `fields` / `ownerId` / `parentFilePath` / `type` /
 // `workSpaceType` / `pageInfo.needTotalCount` / `pageInfo.pageCursor`。
-// 这里断言的正是**这些键都不在**：取向按本仓这条链的旧 builder 发（它曾经可用），
+// 这里断言的正是**这些键都不在**：取向按本仓这条链的旧 builder 发，
 // 实拍只用来钉 URL、信封形状与 `items[].fileId/name` 确实存在。
+//
+// ⚠ 这一取向 2026-09-26 起**有实测背书**：探针把体逐字钉住、只换头，这一份五键体
+// 回的是 `code:"0000"` + 31 条 ⇒ 卡在头上的从来不是"键少了哪几个"（见
+// [CloudFileListRequest] 那一节，R16 就地收口）。
 func TestCloudFileListBodyFollowsLegacyBuilderNotTheCapture(t *testing.T) {
 	request, err := CloudFileListRequest(appProfile(), 1893456000000, aiAuthSentinel, "/synbox", 100)
 	if err != nil {

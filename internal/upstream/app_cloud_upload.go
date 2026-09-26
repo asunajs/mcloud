@@ -26,13 +26,18 @@
 // 所以：① 它只作为 [CloudFileCreated.UploadURL] 交回调用方，本包任何函数都
 // 不把它拼进 `core.Error` 的 Message；② 夹具与测试里只出现 `SYNTH-*` 合成值。
 //
-// # 与同一台主机上那一口 `hcy/file/list` 用了**两套画像**（差异登记为 R27）
+// # 与同一台主机上那一口 `hcy/file/list` 用了**两套画像**（R16 / R27，2026-09-26 收口）
 //
-// [CloudFileListRequest] 按实拍选了 iOS 的 [AppProfile]（`WithAppHeaders` 那一整族
-// `x-yun-*`）。这一族零实拍 ⇒ 按**旧 TS** 发：主 http 实例的静态头（[AiAvatarHeaders]）
-// 加 `getFileOpHeader` 那三档。同一账号同一趟里两套并存是**已知不一致**，
-// 不是笔误；谁对未判定（`file/list` 的实拍只证明"那一份是另一个客户端发的"，
-// 见 R16 同一处置）。
+// [CloudFileListRequest] 用 iOS 的 [AppProfile]（[WithAppHeaders] 那一整族 `x-yun-*`），
+// 本族零实拍 ⇒ 按**旧 TS** 发：主 http 实例的静态头（[AiAvatarHeaders]）加
+// [CloudFileOpHeaders] 那三档。同一账号同一趟里两套并存是**已知不一致**，不是笔误。
+//
+// 谁对，探针已经答过（三趟只读、体逐字不变）：**两套今天都通**，
+// 而"通不通"既不取决于装配、也不取决于渠道号的值 ——
+// 唯一承重的是 `x-yun-client-info` 的**值**：设备指纹串被这台主机判
+// `请求头不合法(00010003)`，网盘侧那一串判"请求成功"。
+// 于是 iOS 那一套只在**改掉那一枚值**之后可用（[CloudFileListRequest] 里就是这么落的），
+// 而两套并存这件事本身**不再是待判定的一格**（细节与逐档读数见它的注释与 R16）。
 package upstream
 
 import (

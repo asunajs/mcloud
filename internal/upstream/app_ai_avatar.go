@@ -494,11 +494,35 @@ type CloudFileList struct {
 // 等键。⚠ **本层不照抄那一份全 body**：旧 TS 的 builder（`api.ts:76-80`）只发
 // `parentFileId` / `pageInfo.pageSize` / `imageThumbnailStyleList` / `orderBy` / `orderDirection`
 // 五键，实拍那一份是**另一个客户端**（okhttp + 完整 `x-yun-*`）发的。
-// 取向：按**本仓这条链**的旧实现发（它曾经可用），实拍只用来钉
-// ①URL 与信封形状、②`items[].fileId/name` 确实存在。差异登记成 R16。
+// 取向：按**本仓这条链**的旧实现发。
 //
-// 头集合：走 [WithAppHeaders]（网盘侧要那一整套 `x-yun-*`）+ `Authorization` +
-// 旧 TS 那两枚（`x-yun-module-type: 100`、`x-yun-op-type: 1`）。
+// # R16 已经由三趟活体探针收口：上游收这一份五键体，卡的一直是**一枚头的值**
+//
+// 2026-09-26 那三趟（`internal/app/live_probe_cloud_file_list_test.go`，全程只读）：
+//
+//   - **体不是变量**：把 URL 与体逐字钉住、只换头 ⇒ 本仓这一份五键体**被上游接受**
+//     （回 `code:"0000"` + 31 条）。所以"实拍那份十余键 vs 我们五键"这一格**不是缺陷**，
+//     R16 的"体侧嫌疑"当场撤销。
+//   - **头名也不缺**：本仓 iOS 那套（21 枚）与写侧那套（11 枚）的差异里，
+//     单补 `x-yun-device-id` 或 `deviceid` 都**没用**（两趟都红）。
+//   - 承重的是**五枚**：`Authorization`（摘了回 04000005 认证失败）、
+//     `Content-Type`（04000018 请求体媒体格式不支持）、`x-yun-api-version`
+//     （摘了 **HTTP 404** —— 这一枚是路由，不是装饰）、`x-yun-app-channel`、
+//     `x-yun-client-info`（后两枚摘了回 `请求头不合法`，**不带**子码）。
+//     另六枚（`User-Agent` / `deviceid` / `x-huawei-channelSrc` / `x-yun-device-id` /
+//     `x-yun-module-type` / `x-yun-op-type`）摘了**照样通** ⇒ 不承重。
+//   - ⭐ **真因是一串值**：同一套 iOS 头，只把 `x-yun-client-info` 从**设备指纹串**
+//     换成 [cloudClientInfoWeb] 那一种 ⇒ **通**；反方向（写侧那一套 + 设备指纹串）⇒
+//     回 `请求头不合法(00010003)`，与旧的那句一模一样。
+//     带 `(00010003)` 与不带的差别也顺势分开了：**带了但不认** 才有子码，**压根没带** 没有。
+//
+// ⚠ 所以这里**只改那一枚的值**，不改装配：这条链的其余 20 枚头是 [WithAppHeaders]
+// 给的、与仓库里其它 App 侧请求共用一份画像，换整套等于把这条链的指纹与别的请求劈开。
+// `x-yun-app-channel` 的**值**经测不认档（换成 iOS 渠道号仍通），所以旧 TS 那一枚
+// `10214200`（`api.ts:88`）本仓**不照抄**：抄了只是多一个没人验证过的取值。
+//
+// 头集合：走 [WithAppHeaders] + `Authorization` + 旧 TS 那两枚
+// （`x-yun-module-type: 100`、`x-yun-op-type: 1`）。
 // ⚠ **不带 `jwttoken`** —— 这台主机不在旧 TS 的 `TARGET_HOSTNAMES` 名单里（见文件头）。
 func CloudFileListRequest(
 	profile *AppProfile, timestamp int64, authorization, parentFileID string, pageSize int64,
@@ -518,6 +542,10 @@ func CloudFileListRequest(
 	if authorization != "" {
 		request = request.WithHeader("Authorization", authorization)
 	}
+	// ⭐ 覆盖式改写 `x-yun-client-info`：[core.HTTPRequest.WithHeader] 是**追加**，
+	// 直接追加会变成两根线（探针里那两档"换值"用的是覆盖，见 `fileListProbeWithHeader`），
+	// 而"上游读哪一根"未测试 —— 那正是这一口原本的症状：设备指纹串被判定不合法。
+	request = setCloudHeader(request, "x-yun-client-info", cloudClientInfoWeb)
 	return request.
 		WithHeader("x-yun-module-type", "100").
 		WithHeader("x-yun-op-type", "1"), nil

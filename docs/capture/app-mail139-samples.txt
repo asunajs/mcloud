@@ -241,12 +241,21 @@ userType=str<1> weathercode=str<1>}}
 **这一格仍然没有说什么**：
 
 5. **转换产物落在哪（R36）没答。** 探针在清理之后补了一发**只读**回读
-   （`hcy/file/list` 列根目录一页），它自己挂了：
+   （`hcy/file/list` 列根目录一页），它当时挂了：
    `参数错误: 上游返回 success=false: 请求头不合法(00010003)`。
-   ⇒ 两个结论都别越：既不能说"网盘里干净"，也不能说"留了东西"；这一发的头集合与
-   AI 头像那条链用的是同一个构造器（`CloudFileListRequest`），差别在**装配**
-   （`opening.Profile` 那一份），要收这一格得先拍到"这一口今天到底吃哪几枚头"。
-   登记进 `docs/pending-decisions.md`（探针回读那一档 + R36）。
+   ⇒ 当时两个结论都不能下：既不能说"网盘里干净"，也不能说"留了东西"。
+   ⭐ **那一发今天读得出来了**（2026-09-26 三趟只读探针，见 R16）：卡的是
+   `x-yun-client-info` 的**值**（设备指纹串被这台主机判不合法 ⇒ 带 `(00010003)`；
+   换成网盘侧那一串 ⇒ 回 `code:"0000"` + 条目），与这一口的五键体、与头名清单都无关。
+   于是 R36 剩下的那一格**只剩"没有一趟把转换前后两遍回读放在一起比"**。
+   这一口的**响应形状**（探针只出形状、条目值不打印；下面那枚清单是**第 0 条**的，
+   其余条目未逐条展开 ⇒ "每条都同一组键"这一格探针**没说**）：
+   `data.items[]` 每条读到 26 枚键 —— `addressDetail category contentAuditInfo contentHash`
+   `contentHashAlgorithm createdAt description fileExtension fileId localCreatedAt`
+   `localUpdatedAt mediaMetaInfo metadataAuditInfo name parentFileId punishMode revisionId`
+   `size starred starredAt systemDir thumbnailUrls trashedAt type updatedAt userTags`；
+   另有 `data.nextPageCursor`（两号都读到 `null`）。`fileId` / `name` 两枚本仓在读，
+   `type` / `size` / `trashedAt` 三枚**本层不读**（"在回收站里还算不算存在"这一格未验证）。
 6. **⑧ 的 404 只有状态码。** 这一口刻意**不发**直发档（它是要真做事的那一发，
    同一趟打两遍等于让上游做两件事）⇒ 体的形状今天仍是零样本。要形状就得只打一发直发档，
    而那一走法与"生产代码认不认"分开成两次真跑 —— 是否值得，等 R35 的真机取证一起做。
