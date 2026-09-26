@@ -696,6 +696,16 @@ const UNTAGGED_ALLOWED = {
     '一次上传的**可调参数**，零值 = 旧实现 `uploadRandomFile` 那一档。默认值由 `channelOrDefault` / `extensionOrDefault` / 上游层那两处**依次**补齐，补 tag 会造出第二个"默认值真相"；且 `Op` 只有 android 档读（web/PC 档忽略它），这个"档位决定哪一格生效"的关系不是字段能表达的',
   'internal/app/cloud_upload.go:CloudUploader':
     '一次上传的**注入点**（上游句柄 + 随机源 + `Auth` + `DeviceID`）。⚠ `Auth` 是 `Authorization` 头的**整串**（真凭据），一旦可序列化就顺着日志出去（同 `SmsCredential` / `AppLoginInput` 那两条：里面装凭据的入参打包永不补 tag）；`Up` 里还装着 HTTP 客户端，marshal 到它直接报错',
+  // ── 回收站那一族（2026-09-26 第廿七趟：`recyclebin/list` 落码 + 第一次真打）──
+  // 与同族 `CloudFileCreated` 同规：解析结果是**内存形状**，本层手工从 `map[string]any` 读，
+  // 从不 marshal / unmarshal 这些结构体 ⇒ 补 tag 不会让解析多认一格，只会把
+  // "这些字段名是对外契约"假成文（AGENTS §1.4：JSON 字段名要跟黄金向量比对过才算数）。
+  'internal/upstream/app_cloud_recyclebin.go:CloudRecycleBinEntry':
+    '`recyclebin/list` 一条条目的解析结果（七格全指针）。"上游没给这一格"与"这一格是 0/空"的区别必须留在内存里，而本层是**手工读 map**（`optStrField` / `asInt64`），这些 tag 一行都不会被用到 ⇒ 补上只是把一份零消费者的形状写成对外契约。`TrashedDirStatistics` 那型可能整体为 `null`（file 型），这个"按 `type` 换形状"的关系不是 tag 能表达的',
+  'internal/upstream/app_cloud_recyclebin.go:CloudRecycleBinDirStats':
+    'folder 型条目上 `trashedDirStatistics` 的三格。⚠ 它的**语义今天没判据**（实拍那枚目录删前有 1 个文件、这一格却 0/0/0 ⇒ 三种解释分不开，见 `docs/capture/app-cloud-recyclebin-samples.txt` §10），钉成 JSON 形状就是让前端把"0"念成"这个目录是空的"',
+  'internal/upstream/app_cloud_recyclebin.go:CloudRecycleBinPage':
+    '一页回收站读数。`HasCursorField` 是**本层自己造的第三态格**（区分"键在但为 `null`"与"键缺席"，线路上根本没有这一枚键，#197），给它任何 tag 都是撒谎；`Items` / `NextPageCursor` 由 `ParseCloudRecycleBinPage` 手工填。且这一口**今天没有生产调用点**（消费者只有探针），出网面为零',
   // ── 外链那一族（#53，2026-09-25 随玩法 434 落地）──
   'internal/upstream/app_cloud_outlink.go:CloudOutLinkInput':
     '`getOutLink` 的**请求侧入参集**（`Account` + `FileIDs` + `DedicatedName`）。⚠ `Account` 是**完整手机号** —— 与 `CloudUploader.Auth` 同一条"只进不出"：这一旦可序列化，离把号码写进日志/响应体只差一次"顺手 marshal 一下入参"。body 由 `CloudGetOutLinkRequest` 现拼那**十一键** map（与旧 TS 逐字对齐，含 `subLinkType:0`、`encrypt:1` 这些**不能缺**的档位）⇒ 补 tag 会造出第二条旁路，而"这一口认不认多出来的键"零实拍',

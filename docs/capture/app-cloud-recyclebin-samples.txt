@@ -1,0 +1,230 @@
+# 回收站那一页的第一份读数（`POST /hcy/recyclebin/list`）· 活体探针实测（R7 剩下那一半）
+
+> 采集方式：**D 活体探针**（Go 程序真打上游，读数只取程序自己的 stdout；无 har）。
+> 采集时刻：2026-09-26（同日五趟：账号 0 写探针两趟 + 只读复跑一趟，账号 1 只读复跑两趟）。
+> 原始 stdout：`target/s27probe/{run0,run1,run2,reread0,reread1}.txt`（`target/` 不入库）。
+> 探针：`internal/app/live_probe_recycle_bin_test.go`
+> （`TestLiveProbeRecycleBinListing` 写、`TestLiveProbeRecycleBinReread` **只读可反复跑**）。
+> 接口层：`internal/upstream/app_cloud_recyclebin.go` —— 请求构造与**响应解析器都在这份**，
+> 解析器按本文 §3 的形状落，只读判据用得上的那几格。
+>
+> ⚠ **凭据与隐私边界**（本文逐条遵守，这一族是本仓最严的一处：回收站里**全是用户自己删过的东西**）：
+>   - 真实 `fileId` **只写长度**（今天两型都是 33）；
+>   - **翻页游标的值不进成文**，只念"有没有、长度多少"（那一串可能就是某条用户条目的标识）；
+>   - `thumbnailUrls` 里那枚长度 644 的**读取入口**与预签名 `uploadUrl` 同档 ⇒ 接口层**不读这一格**；
+>   - 逐条读数**只收 `asign-*`**（我们自己造的名 ⇒ 可原样写），**用户自己的文件名一个都不念**，
+>     非我方条目只计数；
+>   - 预签名 `uploadUrl` 整条不进成文（本轮新堵的口子在**错误文本**那一条路，见 §7）；
+>   - 两个测试号的号码不进本文。
+
+## 0. 一句话结论
+
+这一口**打不通的假设被推翻了**：按 App JS 里那份逐字形状（体只有 `pageInfo:{pageCursor,pageSize}`、
+`pageSize` 写死 100）、沿用 `batchTrash` 那一档头画像，上游**直接认**，回的是**真回收站列表**。
+于是 R7 剩下的那一格从推断变成读数：
+
+⭐ **删一枚非空目录 ⇒ 回收站里只多**一条**（那条目录），里面那枚文件不单列**；
+而且**这一口有秒级延迟** —— 同一趟内"删 → 当场读 → 等 20s → 再读"，本趟那枚目录
+**整名**命中 `false → true`、条数 `33 → 34`。
+
+后一句是本趟最要紧的一处**口径**：**「当场回读说没有」不能当「它没进回收站」的判据**（§5）。
+
+## 1. 复跑命令
+
+写探针（**会真写**：造一枚目录、往里传一枚文件、打一枪 `batchTrash`，收尾什么都不删）：
+
+```
+cp data/mcloud.db target/s27probe/probe.db
+: > target/s27probe/device.txt
+MCLOUD_LIVE_PROBE_DB="$PWD/target/s27probe/probe.db" \
+MCLOUD_LIVE_PROBE_ACCOUNT_INDEX=0 \
+MCLOUD_LIVE_PROBE_DEVICE_FILE="$PWD/target/s27probe/device.txt" \
+MCLOUD_LIVE_PROBE_CONFIRM='确认写真实上游' \
+go test ./internal/app/ -run 'TestLiveProbeRecycleBinListing$' -v -count=1 -timeout 600s
+```
+
+只读复跑（**一枪写的不发**，可反复跑，残留不增加）：
+
+```
+MCLOUD_LIVE_PROBE_DB="$PWD/target/s27probe/probe.db" \
+MCLOUD_LIVE_PROBE_ACCOUNT_INDEX=1 \
+MCLOUD_LIVE_PROBE_DEVICE_FILE="$PWD/target/s27probe/device.txt" \
+MCLOUD_LIVE_PROBE_CONFIRM='确认写真实上游' \
+go test ./internal/app/ -run 'TestLiveProbeRecycleBinReread$' -v -count=1 -timeout 600s
+```
+
+两枚路径**必须绝对且已存在**（探针从不自己造 db / device 文件）；换 `..._ACCOUNT_INDEX` 跑另一个号。
+跑完删副本：`command rm -f target/s27probe/probe.db* target/s27probe/device.txt`
+（2026-09-26 这五趟都删过，主库 md5 前后逐字未变）。
+授权口径沿用 2026-09-25 那句"除兑换（真扣豆、已实测）外全部实测，包括上传网盘文件"。
+
+## 2. 请求侧：第一次真打
+
+`POST {BasePersonalKD}/hcy/recyclebin/list`，体只有两枚嵌套键（出处是
+[`apiServer.js`](apiServer.js) 的 `getVirDirInfo`，那里它就叫"回收站相关接口"）：
+
+```json
+{"pageInfo": {"pageCursor": "", "pageSize": 100}}
+```
+
+- **第一页发的是空串**，不是省略这一枚键（App 那句 `item.nextPageCursor || ""`）。
+  ⚠ "省略这一枚键会怎样"零样本，本仓没有拿它试过。
+- `pageSize` 只在 **100** 这一档验证过 ⇒ 换面值**未测试**。
+- 头画像沿用同族 `batchTrash` 那一档（web 渠道 + `op*100`，旧 TS `apis/file.ts:114` 写死的画像）。
+  **本轮实测它认**：两号五趟全部 `code:"0000"`，没有一档被头画像挡下。
+  ⚠ 这一句是"list 认这一档"的读数，**不**覆盖同族另三口。
+
+## 3. 响应侧逐字形状（本仓第一份，此后是这一族的形状基准）
+
+信封与同族 `file/create` 一致：载荷在 **`data`**（不是 `result`），`code` 是字符串 `"0000"`。
+
+```
+data = {
+  items: [ 条目… ],
+  nextPageCursor: null | <长度 104 的串>
+}
+```
+
+| 格 | 读数 |
+| --- | --- |
+| 条目数组挂在哪 | `data.items`（探针按形态扫"哪条路径下挂着对象数组"，五趟都只有这一处） |
+| 总数那一格 | **没有**。五趟都没读到 `total` / `count` 类键 ⇒ "回收站一共多少条"这一问这一口答不了 |
+| 游标 | `data.nextPageCursor`：满页时是长度 104 的串，最后一页是 **`null`**（键**在**、值为 null）⇒ "键缺席"是第三种情况，接口层单独用一格记（`HasCursorField`） |
+| 顺序 | `trashedAt` **倒序**（新的在第 0 项）。账号 0 首末：`15:06:59` → `2025-05-06`；账号 1 首末：`14:27:28` → `2026-09-12`。⚠ "上游保证倒序"没成文，只是复述实拍 ⇒ 排序不要依赖它 |
+
+**条目 14 枚键**（folder 型与 file 型同键集，差在两格的值型）：
+
+```
+category createdAt fileId mediaMetaInfo name remainingTime size
+thumbnailUrls trashedAt trashedDirStatistics trashedReason type updatedAt userTags
+```
+
+| 键 | folder 型 | file 型 |
+| --- | --- | --- |
+| `type` | `"folder"` | `"file"` |
+| `size` | `0` | 真实字节数（见过 `64` / `597` / `5411` / `5412`） |
+| `thumbnailUrls` | `null` | 数组，一项里含 `{style:str<5> url:str<644>}` ⇒ **本层不读** |
+| `trashedDirStatistics` | 对象 `{subDirCount, subFileCount, totalSize}` | `null` |
+| `trashedReason` | 见过 `"userTrashed"` 一档 | 同 |
+| `remainingTime` | 见过 `14` 与 `0` 两档（`0` 在账号 1 第二页那批**更早**的条目上） | 同 |
+| `name` | 长度 23~25 的串（探针只念我方条目的值） | 同 |
+| `userTags` | 数组，5 项 `{key:str<12> value:str<9>}`；第二页也有 1 项 `{key:str<6> value:str<4>}` 的 | 同 |
+| `category` | 长度 5~6 的串 | 同 |
+| `mediaMetaInfo` | `null` | `null`（探针两份形状读数里都是 null） |
+
+⚠ `category` / `userTags` / `mediaMetaInfo` / `createdAt` / `updatedAt` **接口层一律不解释**：
+本仓没有任何成文说它们是什么，落成字段等于把猜测固化成接口层。
+
+## 4. 五趟读数
+
+| 趟 | 号 | 只读? | `list` 枪数 | 第 1 页条数 | 我方前缀 | 翻页 | 结论格 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| run0 | 0 | 否 | 1 | 31 | 31 | 未翻 | 单次回读 目录/文件都 `false`；游标那一行**念错了**（§7 那个 bug） |
+| run1 | 0 | 否 | 2 | 32 → 33 | 32 → 33 | 未翻 | **判定行错**（按中段认命中，见 §6） |
+| run2 | 0 | 否 | 2 | 33 → 34 | 33 → 34 | 未翻 | ⭐ 本趟整名命中 目录 `false → true`；文件两遍都 `false` |
+| reread0 | 0 | 是 | 1 | 32 | 32 | 无（游标 null） | `binlistdir-` 在、`binlistkid-` 不在 |
+| reread1 | 1 | 是 | 2 | 100 | 96（另 4 条用户条目，名字未念） | 翻了 1 次 | 第二页 5 条；`binlistdir-` `false`（写侧只在号 0 打过） |
+
+账号 1 那一趟证明**翻页键能用**：第 1 页满 100 条 + 游标长度 104 ⇒ 续发一次回 5 条 + 游标 `null`，
+两页合计 105 条（其中我方前缀 101 条）。
+
+## 5. ⭐ 延迟那一格怎么测（本文最要紧的一条口径）
+
+探针里两遍回读之间**唯一的动作是等**（`liveProbeBinWait = 20s`，中间一枪都不发），
+账号 0 的 run2 逐字读数：
+
+| 本趟那枚（按**整名**） | 当场那一遍 | 等 20s 之后 |
+| --- | --- | --- |
+| 目录 `asign-binlistdir-d4bcbc1b` | **false** | **true**（第 0 项，`trashedAt=2026-09-26T15:15:56.161+08:00`） |
+| 里面的文件 `asign-binlistkid-76008198.png` | false | false |
+| 第 1 页条数 | 33 | 34（差 1） |
+| 游标 | `null` | `null` |
+| 闸门 | 4 页 / 最多 400 条，**未截断** | 同 |
+
+⇒ 两条结论：
+1. 这一口有**秒级不回**：`batchTrash` 被上游认了之后，`recyclebin/list` 当场那一遍可以不列它。
+   **「当场回读说没有」不是「没进回收站」的判据** ⇒ 判"进没进"只认**等过之后**那一份。
+2. 目录进了（等后 `true`），那枚文件**两遍都不在**，且游标 `null`、闸门未截断 ⇒
+   **整棵子树只记成一条，子文件不单列** ⇒ R7 那句"清理链接目录不需要把子文件也记进名单"
+   现在**有回收站侧的读数**，不再只靠"两处都不再列它"推。
+
+配套的第三格：账号 0 只读复跑（reread0）里 `binlistdir-` 命中 `true`、`binlistkid-` 命中 `false`
+—— 与上表**隔了一趟**仍然一致 ⇒ 这一档不是当场那一遍的巧合。
+
+顺带：这条延迟为第廿六趟 A 趟那格"删后根目录**仍列**那枚目录"提供了一个**同族解释**（回读侧滞后）。
+⚠ 这一句只是**假设**：A 趟那一份是**网盘侧** `file/list` 的读数，与这里的 `recyclebin/list`
+不是同一口，那一趟也没有"等一遍再读"之外的时间戳 ⇒ 成文里仍标 `待验证`，不当结论用。
+
+## 6. 命中怎么认：中段会被同族残留骗过（run1 → run2 的修法）
+
+run1 那一趟打的判读是"两遍一致且**都在** ⇒ 实测"，读起来成立、其实是**错的**：
+探针按名字**中段**（`binlistdir-`）认命中，而同一族复跑两次时，回收站里**同时**有
+上一趟那枚同中段的残留与本趟刚删的那一枚 ⇒ 当场那一遍命中的是**上一趟的残留**。
+
+修法（已落码，带纯单元测试 `TestLiveProbeScanBinEntryMatchesExactNotInfix`）：
+- **判定行**（"本趟那一枚在不在"）按**整名**（`exact`）；
+- **族账行**（"这一族在回收站里留了几条"）仍按**中段**（`mine`）。
+
+run2 那行逐字读数把两格分开念得很清楚：
+`⑥ 命中对照（当场 / 等后，按本趟整名）：目录=false / true；文件=false / false`
+`⑥ 同族残留这一格（按中段，含更早趟那几枚）：目录中段=true / true；文件中段=false / false；条数 当场 33 / 等后 34（差 1）`
+
+## 7. 本轮堵上的一处泄漏口子：错误文本里的预签名 URL
+
+**出处是读代码，不是这一轮跑红过**：`target/s27probe/` 那五份 stdout 逐份 `grep` 过，
+一个 `http(s)://` 都没有（账本里 `PUT` 那一格早就是占位）。但
+`internal/io/client.go` 在传输层出错时会把 `http.Client` 的**原始错误**包进错误串，
+而 `PUT` 那一枪的原始错误形如 `Put "https://<对象存储主机>/<对象键>?X-Amz-Signature=…": dial tcp …`
+⇒ **只要那一枪在传输层失败一次，整条一次性签名入口就能从错误文本里出去**。本轮探针会发 `PUT`，
+所以这条路必须先堵住再跑。
+
+修法：探针侧所有错误都过 `binErr()` —— nil-safe + `sink.mask` + `liveProbeHideWriteEntry`
+（把 `https?://…` 整段换成占位）。反向测试：`TestLiveProbeHideWriteEntryKeepsPresignedURLOutOfOutput`
+（把 helper 改成 `return text` 它就红）。
+
+同族读数的一条修正：探针曾念"没读到名字含 cursor 的键"，而实拍是 `nextPageCursor: null`
+—— 分类代码把**键名**判断放在**类型**分派之后，`null` 那一档被类型分支吃掉了。
+已把键名分类挪到类型分派**之前**，并让游标那一行分别念 `null ⇒ 上游用它说'没有下一页'` / 空串 /
+`值长 N，值不打印`（`TestLiveProbeScanBinEntry…` 一组 + run2 / reread1 两份输出为证）。
+
+## 8. 接口层落码口径（本文 §3 是唯一形状出处）
+
+`internal/upstream/app_cloud_recyclebin.go` 只读**判据用得上**的那几格：
+
+| 落码 | 格 | 为什么 |
+| --- | --- | --- |
+| ✅ | `fileId` / `name` / `type` / `size` / `trashedAt` / `remainingTime` | 认条目、判方向要用；`remainingTime` **只交回数字不解释语义**（见过 14 与 0，"是不是过期了"零判据） |
+| ✅ | `trashedDirStatistics`（指针） | folder 型是对象、file 型是 `null` ⇒ 指针交回，不猜"0 项目录"与"这是文件"同件事 |
+| ✅ | `nextPageCursor` + `HasCursorField` | "键在但为 null"与"键缺席"是两种情况，糊成一格会让上游改版静默变成"回收站只有一页" |
+| ❌ | `thumbnailUrls` | 含带签名读取入口 ⇒ 与 `uploadUrl` 同档，不读 |
+| ❌ | `category` / `userTags` / `mediaMetaInfo` / `createdAt` / `updatedAt` | 无语义成文 ⇒ 落成字段就是把猜测固化成接口 |
+| ❌ | `data.items` 缺席时的行为 | 实拍两号都带这一枚键；本层按空页处理只为"不 panic"，**未被断言为上游行为** |
+
+`data` 缺失 / 不是对象 ⇒ **解析失败**（`core.NewParse`），不兜成"空的一页"：那会把"这一口改版了"
+念成"回收站是空的"，而后者听起来完全正常。反向测试：
+`TestParseCloudRecycleBinPageDoesNotFoldShapeChangeIntoEmptyBin`。
+
+⚠ **今天的消费者只有探针**：本仓生产链一处都不列回收站（清理链的终态就是"进回收站"）。
+这一口的用处是**判读**（R7 收口、R37ⓒ 那批残留），不是功能 ⇒ 别接进链里当"清理的一部分"。
+
+## 9. 残留账（本仓无"彻底删除"口 ⇒ 要清得人去 App 里操作）
+
+2026-09-26 这五趟在**账号 0 的回收站**里新增 **3 枚目录条目**（`asign-binlistdir-6743259c`、
+`-b3177c5b`、`-d4bcbc1b`）+ 它们各自那枚**从未单列**的子文件；写侧每趟都只有**一枪** `batchTrash`。
+只读那两趟（reread0 / reread1）**账本里除 `recyclebin/list` 一枪都没有** ⇒ 残留不增加，可反复跑。
+这一笔并入 **R37ⓒ** 那批待拍板残留。
+
+## 10. 没答的清单（都要么另开一趟、要么等拍板）
+
+- **多层嵌套**（outer→inner→文件，删最外层）：刻意留给单独一趟，与"重复删同一枚"同族
+  —— 混做一案两问都收不到答案（第廿六趟的教训）。
+- **对同一枚 `fileId` 重复打 `batchTrash`**（幂等吗）：同上，未测。
+- `trashedDirStatistics` 的语义：本趟那枚目录**删前有 1 枚文件**，回收站里这一格却是
+  `0 / 0 / 0` ⇒ 三种可能（删除时点前就归零 / 另有语义 / 回收站里的目录不参与统计），
+  本仓**没有判据分开它们**。分开办法现成：拿一枚**没删**的、里面有文件的目录读同一格
+  （网盘侧 `CloudFileListRequest` 有口可做对照）—— 可做，未做。
+- 同族另三口（`batchRestore` 还原、`file/batchDelete` 彻底删除、`recyclebin/clear` 清空）：
+  App JS 里有逐字请求形状，本仓**一口都没落**（都是不可回滚的写且无消费者）。
+  ⚠ 回收站条目那枚 `fileId` **能不能**拿去打这两口，零读数。
+- "回收站一共多少条"：这一口不回总数 ⇒ 只能靠翻页计数，而翻页有闸门。
+- `pageInfo` 里 `pageSize` 换面值、省略 `pageCursor` 键：都零样本。

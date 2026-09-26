@@ -5536,8 +5536,9 @@ jsontags 0.1s（95 个字段齐全 / 235 个按白名单不进 JSON），md-tabl
   那时还没有"等 8 秒"那一遍回读），后三趟 **6** 发（`12 枪 / 5 类`）。
 - **R7 的答案**：`batchTrash` 打在**非空目录**上 ⇒ 上游认，且那一枚子文件**没有退回到根目录**、
   列那个被删的目录回"**读得出来 + 0 项**"（不报错）。⇒ 登记时那两档可能（删不掉 / 连目录带内容
-  清掉但后果不明）里读到的是后者，而"后果"这一半仍要说窄：**回收站那一页本仓无口可回读** ⇒
-  "内容在回收站里"是按"两处都不再列它"推的位置，那一格标 `未验证`（见成文 §3）。
+  清掉但后果不明）里读到的是后者。当时"后果"这一半只到"两处都不再列它"，回收站侧还是一句推断 ——
+  **同日第廿七趟已把它换成读数**（`recyclebin/list` 第一次真打：回收站里只留目录那一条、子文件不单列，
+  且那一口有秒级不回），见下面第廿七趟那一节与 `capture/app-cloud-recyclebin-samples.txt` §5。
 - ⭐ **顺带把"探针自己"修了一处越界**：传输层账本把 `PUT` 那一枪的**对象存储主机 + 对象键**
   逐字打进了 stdout（前两趟的日志里就有）。原纪律写的是**值级**（"查询串键可以、值不行"），
   没管"这一枪的整条 URL 本身就是上一枪交回来的写入入口" ⇒ 现在 `MethodPut` 那一枪整条换占位，
@@ -5583,3 +5584,112 @@ jsontags 0.1s（95 个字段齐全 / 235 个按白名单不进 JSON），md-tabl
   主库 md5 前后逐字一致：`3761b6411af549f859ed4fbcb2e6baf6`。
   ⚠ 两份含对象存储主机 + 对象键的**旧 stdout**（修法前那两趟）随副本一起删掉了，
   `target/` 本就不入库，成文里也没有抄任何一格。
+
+## 补记（2026-09-26，第廿七趟：把 R7 剩下的那一半换成读数 —— 回收站那一页第一次真打，顺带堵上"错误文本"这条泄漏路）
+
+### 一、这一趟要答的两问，和为什么它不必等抓包
+
+第廿六趟把 `batchTrash(非空目录)` 判掉了，但它留下一句**推断**："内容跟着目录一起没了"
+只到"两处回读都不再列它"，而"它**在回收站里**"没有口可证 ⇒ 成文标 `未验证`。
+跑这一趟之前这一族仍**没有 har**、回收站侧也没有口，但按 AGENTS.md §1.13（缺口的默认处置是去跑）与 §1.14
+（判据是 Go 程序自己的运行反馈），这不是停工理由 —— `POST /hcy/recyclebin/list` 的
+**请求形状**在 App JS 里是逐字现成的（`getVirDirInfo`，体只有一枚 `pageInfo`），
+缺的只是**响应形状**，而响应形状只有打一次才有 ⇒ 本仓第一次落这一口、第一次真打。
+
+两问：**① 这一口回什么形状**（条目数组挂在哪、每条目哪些键、游标在哪一格）；
+**② 本趟刚造又刚删的那两枚具名东西在不在里面**（先造一枚目录 + 往里放一枚文件，再打一枪 `batchTrash`）。
+两枚都得**名字归我们**（`asign-*`）才认得出来 —— 回收站里别人删的东西我们不认得，也不能念。
+
+### 二、落码：请求 + 响应解析器 + 两支探针（一写一只读）
+
+- **接口层**（`internal/upstream/app_cloud_recyclebin.go`）：
+  [CloudRecycleBinListRequest]（builder，沿用同族 `batchTrash` 那档头画像）+
+  [ParseCloudRecycleBinPage] + [Upstream.AppCloudRecycleBinList]。
+  解析器只读**判据用得上**的七格，`thumbnailUrls`（含长度 644 的带签名读取入口）与
+  `category` / `userTags` / `mediaMetaInfo` / `createdAt` / `updatedAt`（无语义成文）**一律不落地** ——
+  落成字段就是把猜测固化成接口层。`data` 缺失 / 不是对象 ⇒ **解析失败**，不兜成"空的一页"
+  （那会把"这一口改版了"念成"回收站是空的"，而后者听起来完全正常）。
+  测试八条：三条请求面（逐字两枚键 / 渠道档 / 发送层闭环）+ 四条解析面
+  （实拍形状读得出、`null` 游标与**键缺席**分得开、改版不兜空、串形态数字也认）+ 一条全闭环。
+  反向改坏已验：把 `out.HasCursorField = hasCursor` 写成 `= true` ⇒
+  `TestParseCloudRecycleBinPageSeparatesNullCursorFromAbsentCursor` 红
+  （`键缺席被读成「键在」⇒ 与 null 那一档糊成一格`）。
+- **探针两支**（`internal/app/live_probe_recycle_bin_test.go`）：
+  `TestLiveProbeRecycleBinListing`（**会真写**：造目录 → 传文件 → 一枪 `batchTrash` →
+  当场读一遍 → **等 20s 期间一枪不发** → 再读一遍）与
+  `TestLiveProbeRecycleBinReread`（**只读可反复跑**，账本里除 `recyclebin/list` 以外应当一枪都没有）。
+  真跑五趟：账号 0 写两趟 + 只读一趟，账号 1 只读两趟。逐字读数与复跑命令见
+  [`capture/app-cloud-recyclebin-samples.txt`](capture/app-cloud-recyclebin-samples.txt)。
+
+### 三、读数（三条结论 + 一条口径）
+
+- ⭐ **这一口打得通**，回的是**真回收站列表**：`data:{items:[…], nextPageCursor:…}`，
+  条目 14 枚键，folder 型带 `trashedDirStatistics{subDirCount,subFileCount,totalSize}`、
+  `thumbnailUrls:null`，file 型反之（`thumbnailUrls:[{style,url}]`、统计为 `null`）。
+  游标：满页时长度 104 的串、回完时 **`null`**（账号 1 靠它翻出第二页 5 条，合计 105 条 / 我方 101）。
+  **没有 `total` 那一格** ⇒ "回收站一共多少条"这一问这一口答不了。顺序是 `trashedAt` **倒序**（实拍复述，未成文）。
+- ⭐ **R7 剩下的那一格闭合**：删一枚非空目录 ⇒ 回收站里**只多一条**（那条目录），
+  里面那枚文件**两遍都不在**且游标 `null`、闸门未截断 ⇒ **整棵子树只记一条，子文件不单列**
+  ⇒ 清理链将来接目录**不需要**把子文件也记进名单，这一句现在有两个口的读数撑着。
+- ⭐ **这一口有秒级不回**（本趟最要紧的一格）：run2 里本趟那枚目录按**整名**命中
+  当场 `false` → 等 20s 后 `true`（第 0 项），条数 `33 → 34`。
+  ⇒ **口径**：「当场回读说没有」**不能**当「它没进回收站」的判据，判"进没进"只认**等过之后**那一份。
+  顺带回查第廿六趟 A 趟那格"删后根目录仍列" —— 它有了一个同族解释（回读侧滞后），
+  但那一格是**网盘侧** `file/list` 的读数、与这一口不同口 ⇒ 成文只标假设，不当结论。
+- **鉴权画像那一格从"未测试"换成读数**：沿用 `batchTrash` 那档（web 渠道 + `op*100`），
+  两号五趟全部 `code:"0000"` ⇒ list **认**这一档。⚠ 不覆盖同族另三口，也不覆盖别的渠道档。
+
+### 四、两处自家毛病（都是本轮跑出来 / 读出来的，已修）
+
+- **判读方法**（坑表 **#196**）：run1 那趟念出"两遍一致且**都在**"，听起来是实测，其实**错** ——
+  探针按名字**中段**（`binlistdir-`）认命中，而同族复跑两次时回收站里**同时**有上一趟的残留，
+  当场那一遍命中的是**上一趟那枚**。修法：**判定行按整名**（`exact`）、**族账行按中段**（`mine`），
+  两行分开念；纯单元测试 `TestLiveProbeScanBinEntryMatchesExactNotInfix` 钉这一格。
+- **读数念错**（坑表 **#197**）：run0 念"没读到名字含 cursor 的键"，而**同一份输出**的形状行里
+  明明写着 `nextPageCursor=null` —— 分类代码把**键名**判断放在**类型**分派之后，`null` 那一档被
+  类型分支吃掉了。已把键名分类挪到类型分派**之前**，并让游标行分别念 `null ⇒ 上游用它说'没有下一页'`
+  / 空串 / `值长 N，值不打印`。**「键存在但为 `null`」与「键不存在」是两种情况**，接口层为此单独留了
+  `HasCursorField` 一格。
+- **泄漏面**（坑表 **#195**）：`internal/io/client.go` 传输层出错时把 `http.Client` 的**原始错误**
+  包进错误串，而 `PUT` 那一枪的原始错误形如 `Put "https://<主机>/<对象键>?X-Amz-Signature=…": dial tcp …`
+  ⇒ **整条一次性签名入口可以从错误文本出去**（第廿六趟堵的是**账本**那一格，这是**另一条路**）。
+  本轮探针会发 `PUT`，所以先堵再跑：所有错误经 `binErr()`（nil-safe + `sink.mask` +
+  整段 URL 换占位），反向测试 `TestLiveProbeHideWriteEntryKeepsPresignedURLOutOfOutput`。
+  ⚠ 出处要说准：**这是读代码读出来的**，那五份 stdout 逐份 `grep` 过、一个 `http(s)://` 都没有。
+
+### 五、这一趟没答的（登记，不当已闭合）
+
+**多层嵌套**（outer→inner→文件，删最外层）与**对同一枚 `fileId` 重复打 `batchTrash`**（幂等吗）：
+刻意各留一趟 —— 一次动两格 ⇒ 两问都收不到答案（#194 同族教训）。
+`trashedDirStatistics` 的语义：本趟那枚目录删前有 1 枚文件，回收站里却是 `0/0/0` ⇒
+三种可能没有判据分开（分开办法现成：拿一枚**没删**的、里面有文件的目录读同一格，
+网盘侧 `CloudFileListRequest` 有口可做对照 —— **可做，未做**）。
+同族另三口（`batchRestore` / `file/batchDelete` / `recyclebin/clear`）仍**一口都没落**，
+而"回收站条目那枚 `fileId` 能不能拿去打这两口"零读数。
+`pageSize` 换面值、省略 `pageCursor` 键：零样本。
+
+**残留账**：本轮在账号 0 的用户回收站里新留 **3 枚目录条目**（`asign-binlistdir-{6743259c,b3177c5b,d4bcbc1b}`）
++ 它们各自那枚从未单列的子文件；本仓无"彻底删除"口 ⇒ 只能人工清，已并入 **R37ⓒ ②** 那一问。
+只读那三趟残留不增加。
+
+### 六、门禁与核验
+
+- `node scripts/gates-go.js` 横幅 **`十项门禁全绿`**，逐条照抄当轮 stdout：build 8.1s，vet 2.4s，
+  fmt 0.4s，test 1m05s，deps 5.3s，filenames 0.3s，idents 0.5s，golden 0.2s（断言 167 条全绿），
+  jsontags 0.1s（95 个结构体字段齐全、**239** 个按白名单不进 JSON），
+  md-tables 0.2s（39 个文件、没有一行比表头多格）。
+  ⚠ 按 §2.7 说清范围：这一套跑的是**整棵脏工作树**（含并行会话在飞的改动），不是"只测我改的两个包"。
+- **jsontags 中途红过一次**，红的正是本轮新增面：`CloudRecycleBinPage` 整struct 无 tag 且不在白名单。
+  处置不是"补 tag 让它过"：本层是**手工从 `map[string]any` 读**（`optStrField` / `asInt64`），
+  这三型结构体**从不** marshal / unmarshal ⇒ 补 tag 一行都不会被用到，只会把"这些字段名是对外契约"
+  假成文（AGENTS §1.4：JSON 字段名要跟黄金向量比对过才算数，而本族的出处是探针 stdout）。
+  于是把**先前给 Entry / DirStats 写上的 tag 一并摘掉**（同族先例 `CloudFileCreated` 也无 tag），
+  三型全部登记进 `scripts/check-go-jsontags.cjs` 的 `UNTAGGED_ALLOWED` 并逐条写理由
+  （`HasCursorField` 那枚是**本层自造的第三态格**，线路上没有这一枚键 ⇒ 给它任何 tag 都是撒谎）。
+  ⚠ "加了 tag 却没人用"与"扫了却通过"是同一类假绿，登记面要跟着改。
+- 定向面（改动落地过程中反复跑的）：`go test -count=1 ./internal/upstream/ ./internal/app/` 两包 ok；
+  回收站族 `go test -count=1 -v ./internal/upstream/ -run 'CloudRecycleBin|RecycleBin'` 八条全 PASS。
+- 探针跑在**副本库**上（`target/s27probe/probe.db` + `device.txt`），五趟跑完都删；
+  主库 md5 前后逐字一致：`3761b6411af549f859ed4fbcb2e6baf6`。
+  逐条读数只收 `asign-*` ⇒ **用户自己的文件名一个都没进日志**（账号 1 那 4 条非我方条目只计数）；
+  真实 `fileId` 与游标的值一律只念长度。
