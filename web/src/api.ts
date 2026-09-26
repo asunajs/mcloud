@@ -630,3 +630,394 @@ export const listAccounts = () => request<AccountSummary[]>('/api/accounts')
 
 export const deleteAccount = (id: string) =>
   request<void>(`/api/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' })
+
+// ── 直播口令 → 小红花 ─────────────────────────────────────────────────
+//
+// 这一族**没有专属端点**：它就是一条普通任务，走 `POST /api/runs` 与那条 SSE。
+// 所以这里**刻意只放类型与纯函数**，不包一层 `runLiveRoom()` ——
+// 多了那层包装，页面就分不清"我调的是通用运行"还是"某个私有接口"，
+// 而后端换端点时两处都要改。
+
+/** 直播口令任务的**唯一**能力名（与后端 `Task::name()` / `/api/capabilities` 一致）。 */
+export const LIVE_ROOM_TASK = 'live-room'
+
+/**
+ * 一次直播运行的参数，与后端 `LiveRoomParams` 一一对应。
+ *
+ * ⚠ 键名是后端 `LiveRoomRun::params_from_body` 认的那四个（**驼峰**，
+ * 与 Rust 侧的 `listen_seconds` 不同名）—— 按 Rust 字段名发过去会被静默忽略、
+ * 退回默认值，而界面上显示的数字还是用户填的那个。
+ */
+export interface LiveRoomParams {
+  /**
+   * 手工口令。后端同时接受"一栏自由文本"与字符串数组，
+   * 这里给数组（拆分交给 [`splitKouling`]，它必须与后端 `split_kouling` 同口径）。
+   */
+  codes: string[]
+  /** 自动收集时听弹幕的时长（秒）。**必须 > 0**。 */
+  listenSeconds: number
+  /** 只听不投。 */
+  koulingOnly: boolean
+  /** 只用给定口令（不开弹幕）。为真时 `codes` 必须非空。 */
+  skipKouling: boolean
+}
+
+/**
+ * 口令分隔符 —— 换行 / 回车 / 逗号 / 顿号 / **空白**。
+ *
+ * # ⚠ 与后端 `split_kouling` 的关系：前端是它的**超集**
+ *
+ * 后端按 `['\n','\r',',','，','、']` 拆。而这一页的输入框与需求都写着
+ * "多条用**空格**、换行或逗号分隔"，所以前端**多**拆一个空白。
+ *
+ * 这不是口径漂移，而是**故意的**：把 `"A B"` 当成一条口令发下去，
+ * 后端会原样拿它去投 —— 它必然回 `200108 无效口令`，而用户看到的是
+ * "我明明填了两条，怎么只投了一条、还说无效"。前端先拆开，
+ * 后端拿到的就是两条正常口令。
+ *
+ * 反过来（后端拆得比前端多）才是危险的，而那种情况不存在。
+ * 顿号/空白都用 `\s` 之外的显式列举，避免把全角空格等意外卷进来。
+ */
+export function splitKouling(raw: string): string[] {
+  const out: string[] = []
+  for (const field of raw.split(/[\s,，、]+/)) {
+    const code = field.trim()
+    if (code === '' || out.includes(code)) continue
+    out.push(code)
+  }
+  return out
+}
+
+// ── 结果的结构化明细（后端 `RedFlowerReport`）──────────────────────────
+//
+// ⚠ 这些字段**还不是后端当前的对外形状**：今天 `RunRecord.details` 只有
+// `artifacts` 一格，小红花的报告**只以一句话**（`summary_line()`）出现在
+// outcome 里。下面是"后端把报告整体塞进 `details` 之后"的读法 ——
+// 页面在字段缺失时**逐段降级**，不会因为多一层而整块空掉。
+//
+// 这样写而不是写死一句话，是因为两个判据只能从这里拿：
+//   - 「口令已失效（本场已结束）」与「无效口令」**必须分开说**；
+//   - 「进账多少朵」要用 ⑥−① 的读数，不能把口令的 `flowerNum` 加起来
+//     （那会漏掉③首次参与奖那几朵）。
+
+/**
+ * 上游对一条口令的判定。
+ *
+ * ⚠ `kouling_expired` 与 `invalid` **不是一回事**，界面上必须分开显示：
+ * 前者是"口令认识、但本场直播已经结束了"，后者是"这条口令不认识（多半抄错了）"。
+ * 把它们合并成一句"口令错误"会把排查方向指向**完全错误**的一边。
+ */
+export type LiveRoomDrawKind =
+  | 'succeeded'
+  | 'already_redeemed'
+  | 'kouling_expired'
+  | 'invalid'
+  | 'other'
+
+/** 逐口令的一次投递记录。 */
+export interface LiveRoomDrawRecord {
+  code: string
+  /** 上游的判定类别。见 [`LiveRoomDrawKind`]。 */
+  kind: LiveRoomDrawKind
+  /** 成功时的花朵数。 */
+  flowerNum?: number
+  /** 奖品名（成功时上游会给）。 */
+  prizeName?: string
+}
+
+/** 一份小红花报告。字段名与后端 `RedFlowerReport` 的导出形状对应。 */
+export interface LiveRoomReport {
+  balanceBefore?: number
+  balanceAfter?: number
+  /** 本次进账（⑥−①）。后端给了就用后端的。 */
+  gained?: number
+  draws?: LiveRoomDrawRecord[]
+  invalidCodes?: string[]
+  expiredCodes?: string[]
+  otherCodes?: string[]
+  /** 这一趟实际投出去的口令（保序）。 */
+  codes?: string[]
+}
+
+/** 全部"没投"的原因 —— 不同原因**下一步完全不同**，所以是枚举而不是布尔。 */
+export type LiveRoomIdleReason =
+  /** 只听不投：收完就结束。 */
+  | 'kouling-only'
+  /** 今天没有直播（一间都没在播）。 */
+  | 'no-live'
+  /** 有 N 间在播，但没有一间是「中国移动云盘」。 */
+  | 'other-anchor-live'
+  /** 门开了但没收到口令。 */
+  | 'no-codes'
+  /** 说不清（既没有投递记录，也没有可判别的措辞）。 */
+  | 'unknown'
+
+/**
+ * 读一趟的结果。
+ *
+ * ⚠⚠ **"没投"不是失败**。直播这条链最常见的结局恰恰是"今天没开播"，
+ * 把它染红等于让用户每天看一次假警 —— 与签到里"今天已经签过了"同一档。
+ * 所以这里把 `idle` 单独归一类，颜色由页面查表，不在类型里定。
+ */
+export interface LiveRoomRunView {
+  /**
+   * 结论：
+   * - `idle`     没投（门没开 / 只听不投 / 没收到口令）—— **正常**；
+   * - `success`  投了且全成；
+   * - `partial`  投了、成了一部分；
+   * - `failed`   投了、一个都没成。
+   */
+  kind: 'idle' | 'success' | 'partial' | 'failed'
+  /** 一句人话（后端原文或本地合成）。 */
+  text: string
+  /** `idle` 时"为什么没投"；其余为 `null`。 */
+  idle: LiveRoomIdleReason | null
+  /** 本次进账几朵；读不到时 `null`（**不是 0** —— 0 是一句断言）。 */
+  gained: number | null
+  /** 终值/起始余额，读不到时 `null`。 */
+  balanceAfter: number | null
+  balanceBefore: number | null
+  /** 五类口令结果，分开列。 */
+  succeeded: LiveRoomDrawRecord[]
+  redeemed: LiveRoomDrawRecord[]
+  expired: LiveRoomDrawRecord[]
+  invalid: LiveRoomDrawRecord[]
+  other: LiveRoomDrawRecord[]
+  /** 实际投出去的口令数。 */
+  attempted: number
+}
+
+/**
+ * `TaskOutcome` 的结论文本（与 `ui/history.ts` 同一口径）。
+ *
+ * 返回 `undefined` 时由调用方兜底 —— 后端三个分支各自带 `summary` / `reason`，
+ * 形状对不上时这里会取到 `undefined`。
+ */
+const outcomeTextOf = (o: TaskOutcome): string | undefined =>
+  o.status === 'success' ? o.summary : o.reason
+
+/** 后端小结里"进账 N"那一格 —— 把报告压成一句话时的**唯一**可用来源。 */
+const GAINED_IN_TEXT = /进账\s*(-?\d+)/
+
+/** "成功 1/2" 那一格 —— 只取**分子**（成了几条）。 */
+const SUCCESS_IN_TEXT = /成功\s*(\d+)\s*\/\s*\d+/
+
+/** "成功 1/2" 那一格 —— 只取**分母**（一共投了几条）。 */
+const DRAWN_IN_TEXT = /成功\s*\d+\s*\/\s*(\d+)/
+
+/** 后端 `notes_suffix` 里那三类口令标签 —— **原样**，用于在文本里定位。 */
+const EXPIRED_LABEL = '口令已失效（本场已结束）'
+const INVALID_LABEL = '无效口令'
+const OTHER_LABEL = '未分类口令'
+
+/**
+ * 从一句话里读出某个标签后面跟着的那串口令。
+ *
+ * ⚠⚠ 这里**不能**用"读到 `）` 就停"那种写法：`口令已失效（本场已结束）AAAA`
+ * 这个标签**自己就带一对括号**，一读到 `）` 就停会把它截成
+ * `（本场已结束` —— 于是界面上"口令"那一栏显示的是一个括号片段，
+ * 而真正的口令 `AAAA` 被吞掉。这是我实测踩到的（第一版就是这么写的）。
+ *
+ * 正确做法是拿**已知的标签与分隔符**当边界：
+ * 到下一个 `；`、或者下一个已知标签、或者字符串结尾为止。
+ */
+const codesAfterLabel = (text: string, label: string): string[] => {
+  const at = text.indexOf(label)
+  if (at < 0) return []
+  let tail = text.slice(at + label.length)
+
+  // 到 `；` 为止（`notes_suffix` 用 `；` 连接三段）
+  const semi = tail.indexOf('；')
+  if (semi >= 0) tail = tail.slice(0, semi)
+
+  // 到下一个已知标签为止（它们可能不带 `；`，例如最后一段以 `）` 收尾）
+  for (const other of [EXPIRED_LABEL, INVALID_LABEL, OTHER_LABEL, '首次参与', '复活花']) {
+    if (other === label) continue
+    const next = tail.indexOf(other)
+    if (next >= 0) tail = tail.slice(0, next)
+  }
+
+  // 去掉尾巴上的收尾括号与空白
+  tail = tail.replace(/[）)]+\s*$/, '')
+
+  return tail
+    .split('/')
+    .map((v) => v.trim())
+    .filter((v) => v !== '')
+}
+
+/**
+ * 把一次运行的记录翻成页面要看的视图。
+ *
+ * # 为什么判据**有一部分**落在文本上
+ *
+ * 后端今天只把结论压成一句话（`RedFlowerReport::summary_line()`），
+ * 结构化字段还没进 `details`。要界面上做到"四类口令分开显示、没投不染红"，
+ * 就只能先读那句话 —— 而这**不是猜措辞**：那几句是后端写死的模板
+ * （`无效口令 …` / `口令已失效（本场已结束）…` / `未分类口令 …` / `进账 N`），
+ * 后端的注释里也明确说了它们是**用户可见的**。
+ *
+ * `details.liveRoom` 一旦落地则**结构化字段优先**，文本只作兜底 ——
+ * 所以这里每一步都是"有结构化的用结构化的，没有才读文本"。
+ */
+export function toLiveRoomRunView(
+  record: RunRecord | null,
+  outcome?: TaskOutcome,
+): LiveRoomRunView {
+  const o = outcome ?? record?.outcome
+  // ⚠⚠ `outcomeTextOf` 必须容错。后端的 `failed` / `skipped` 分支带的是 `reason`、
+  // `success` 带的是 `summary`；一旦形状对不上（旧后端、字段改名、
+  // 或者中间有人转发时丢了字段），`o.summary` 就是 `undefined`，
+  // 紧接着 `.match(...)` 抛 TypeError。
+  //
+  // 这里抛错的**代价特别大**：`onEvent` 的 `finished` 分支在 `finish()` 之前
+  // 就断了，于是 `running` 永远为真 —— 页面**永久停在"执行中"**、
+  // 日志里没有任何终局行、按钮也不再恢复。用户唯一的出路是刷新页面。
+  // 所以兜底成空串，让这一趟至少能正常收尾（结论退化成"这一趟没有投出口令"）。
+  const text = o ? (outcomeTextOf(o) ?? '') : ''
+  const details = (record?.details ?? null) as { liveRoom?: LiveRoomReport } | null
+  const report = details?.liveRoom ?? null
+
+  const gainedFromText = (() => {
+    const m = text.match(GAINED_IN_TEXT)
+    return m ? Number(m[1]) : null
+  })()
+  // 余额那一对从"小红花 235 → 245（进账 10…）"里读
+  const pair = text.match(/(\d+)\s*→\s*(\d+)/)
+  const balanceBefore = report?.balanceBefore ?? (pair ? Number(pair[1]) : null)
+  const balanceAfter = report?.balanceAfter ?? (pair ? Number(pair[2]) : null)
+  const gained = report?.gained ?? gainedFromText
+
+  const draws = report?.draws ?? []
+  const bucket = (kind: LiveRoomDrawKind): LiveRoomDrawRecord[] =>
+    draws.filter((d) => d.kind === kind)
+
+  const succeeded = bucket('succeeded')
+  const redeemed = bucket('already_redeemed')
+
+  // ⚠ 这三类是**分开**的，任何一步都不许合并：
+  //   `expired`  = 口令对、但本场已结束  → 排查方向「直播结束了」
+  //   `invalid`  = 口令不认识（多半抄错）→ 排查方向「口令来源对不对」
+  //   `other`    = 上游回了个没分类的码  → 排查方向「上游改了什么」
+  const expired =
+    report?.expiredCodes != null
+      ? report.expiredCodes.map((code) => ({ code, kind: 'kouling_expired' as const }))
+      : bucket('kouling_expired')
+  const invalid =
+    report?.invalidCodes != null
+      ? report.invalidCodes.map((code) => ({ code, kind: 'invalid' as const }))
+      : bucket('invalid')
+  const other =
+    report?.otherCodes != null
+      ? report.otherCodes.map((code) => ({ code, kind: 'other' as const }))
+      : bucket('other')
+
+  // 文本兜底：三类各有自己的固定标签，**按标签分别取**，不混成一个列表。
+  const expiredFinal =
+    expired.length > 0
+      ? expired
+      : codesAfterLabel(text, EXPIRED_LABEL).map((code) => ({
+          code,
+          kind: 'kouling_expired' as const,
+        }))
+  const invalidFinal =
+    invalid.length > 0
+      ? invalid
+      : codesAfterLabel(text, INVALID_LABEL).map((code) => ({ code, kind: 'invalid' as const }))
+  const otherFinal =
+    other.length > 0
+      ? other
+      : codesAfterLabel(text, OTHER_LABEL).map((code) => ({ code, kind: 'other' as const }))
+
+  const attempted = report != null
+    ? draws.length
+    : (() => {
+        const m = text.match(DRAWN_IN_TEXT)
+        return m ? Number(m[1]) : 0
+      })()
+
+  const base = {
+    text,
+    gained,
+    balanceAfter,
+    balanceBefore,
+    succeeded,
+    redeemed,
+    expired: expiredFinal,
+    invalid: invalidFinal,
+    other: otherFinal,
+    attempted,
+  }
+
+  // ── 结论分类 ──
+  //
+  // ⚠ 顺序要紧。**先认"没投"**，再认失败与成功：
+  // 后端在"没投"时回的是 **success**（见 `LiveRoomAccountResult::outcome`），
+  // 所以"成功=绿"这条映射对这条链是**错的**，光看 `outcome.status` 会把
+  // "今天没开播"显示成一个绿色的成功。
+  const idle: LiveRoomIdleReason | null = text.includes('只收不投')
+    ? 'kouling-only'
+    : text.includes('今天没有直播')
+      ? 'no-live'
+      : /有\s*\d+\s*间在播/.test(text)
+        ? 'other-anchor-live'
+        : text.includes('没收到口令')
+          ? 'no-codes'
+          : null
+
+  if (o?.status === 'skipped') {
+    return { kind: 'idle', idle: 'unknown', ...base }
+  }
+  if (idle != null) {
+    return { kind: 'idle', idle, ...base }
+  }
+  if (o?.status === 'failed') {
+    return { kind: 'failed', idle: null, ...base }
+  }
+  if (attempted === 0) {
+    // 既没有"没投"的措辞、也没有投递记录：说不清。归 idle 而**不是** failed ——
+    // 判成失败会制造一条假警，而"没投"才是这条链的常态。
+    return { kind: 'idle', idle: 'unknown', ...base }
+  }
+
+  /**
+   * 成了几条。
+   *
+   * ⚠⚠ 必须**优先读文本里那个"成功 s/t"**，而不是只看结构化的 `succeeded`。
+   *
+   * 后端今天把报告压成一句话，`details.liveRoom` 还没落地 —— 那时
+   * `succeeded` 是**空数组**，而空数组不等于"零条成功"。
+   * 只看它的话，一句 `成功 1/3` 会被判成 `failed`（0 条成功），
+   * 于是界面上写着「失败」、旁边却写着「进账 +15 朵」——
+   * 自相矛盾，而且把一次**部分成功**误报成失败。这是我实测踩到的。
+   */
+  const successFromText = (() => {
+    const m = text.match(SUCCESS_IN_TEXT)
+    return m ? Number(m[1]) : null
+  })()
+  const okCount =
+    successFromText != null
+      ? successFromText
+      : succeeded.length > 0
+        ? succeeded.length
+        : redeemed.length
+
+  // 结构化字段没来时，只能靠后端的固定尾巴判「部分成功 / 一个都没成」。
+  if (report == null) {
+    if (text.includes('一个口令都没成')) return { kind: 'failed', idle: null, ...base }
+    if (text.includes('部分成功')) return { kind: 'partial', idle: null, ...base }
+  }
+  if (okCount === 0 && attempted > 0) return { kind: 'failed', idle: null, ...base }
+  if (okCount < attempted) return { kind: 'partial', idle: null, ...base }
+  return { kind: 'success', idle: null, ...base }
+}
+
+/** "为什么没投"的说法 —— 查表，**不拼字符串**。 */
+export const LIVE_IDLE_REASON: Record<LiveRoomIdleReason, string> = {
+  'kouling-only': '只听不投 —— 口令收完就结束，这一趟一个口令都没投出去',
+  'no-live': '今天没有直播 —— 该主播一间都没在播，没有口令可收（等下一场即可，不是失败）',
+  'other-anchor-live':
+    '有别的房间在播，但没有一间是「中国移动云盘」—— 这一场不会再有口令了，不用等',
+  'no-codes': '门开了，但这一趟没收到口令 —— 弹幕里没人发，或小红书那条还没贴进来',
+  unknown: '这一趟没有投出口令',
+}

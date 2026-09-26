@@ -123,3 +123,10 @@ export const IconPipeline = (p: IconProps): JSX.Element => (
     <path d="M4 3h16v4H4V3Zm0 7h16v4H4v-4Zm0 7h16v4H4v-4Z" />
   </svg>
 )
+
+/** 直播小红花：五瓣花。 */
+export const IconFlower = (p: IconProps): JSX.Element => (
+  <svg {...BASE} class={p.class ?? 'size-5'}>
+    <path d="M12 11a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5Zm0-9a3.5 3.5 0 0 1 3.3 4.7A3.5 3.5 0 0 1 19 12.8a3.5 3.5 0 0 1-3.1 4.4A3.5 3.5 0 0 1 12 21a3.5 3.5 0 0 1-3.9-3.8A3.5 3.5 0 0 1 5 12.8a3.5 3.5 0 0 1 3.7-5.1A3.5 3.5 0 0 1 12 2Z" />
+  </svg>
+)

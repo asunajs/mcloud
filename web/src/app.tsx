@@ -13,10 +13,12 @@ import { IconBrand, IconClose, IconLogout, IconMenu, IconMoon, IconSun } from '.
 import { currentTheme, toggleTheme, type Theme } from './ui/theme'
 import { fmtEpochMs } from './ui/time'
 import { ToastView } from './ui/toast-view'
+import { ErrorDialogHost } from './ui/error-dialog-view'
 import { ConfirmDialog, closeDialog, openDialog } from './ui/dialog'
 import { DashboardPage } from './pages/dashboard-page'
 import { AccountsPage } from './pages/accounts-page'
 import { TasksPage } from './pages/tasks-page'
+import { LiveRoomPage } from './pages/live-room-page'
 import { SchedulesPage } from './pages/schedules-page'
 import { PipelinesPage } from './pages/pipelines-page'
 import { HistoryPage } from './pages/history-page'
@@ -312,6 +314,13 @@ export default defineVaporComponent(() => {
             <AccountsPage />
           ) : page.value === 'tasks' ? (
             <TasksPage />
+          ) : page.value === 'live-room' ? (
+            /*
+              `key` 与下面几页同理：Vapor 没有重渲染，setup 只跑一次。
+              这一页**尤其**需要 —— 它自己的状态里有口令与运行结果，
+              实例被复用会让"切走再切回来"看到上一趟的残留。
+            */
+            <LiveRoomPage key={page.value} />
           ) : page.value === 'schedules' ? (
             <SchedulesPage key={page.value} />
           ) : page.value === 'pipelines' ? (
@@ -390,6 +399,9 @@ export default defineVaporComponent(() => {
       </div>
 
       <ToastView />
+
+      {/* 动作失败弹窗：全局唯一（各页面用 showError(...) 触发） */}
+      <ErrorDialogHost />
 
       <ConfirmDialog
         id="confirm-logout"

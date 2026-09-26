@@ -14,6 +14,7 @@ import type { JSX } from 'vue-jsx-vapor'
 import {
   IconClock,
   IconDashboard,
+  IconFlower,
   IconHistory,
   IconPipeline,
   IconSettings,
@@ -25,6 +26,7 @@ export type PageId =
   | 'dashboard'
   | 'accounts'
   | 'tasks'
+  | 'live-room'
   | 'schedules'
   | 'pipelines'
   | 'history'
@@ -78,6 +80,16 @@ export const NAV_ITEMS: readonly NavItem[] = [
     blurb: '选择账号并触发签到、领取等任务，实时查看执行日志。',
     href: '#/tasks',
     icon: IconTask,
+  },
+  {
+    id: 'live-room',
+    // 2 个字：dock 与侧栏在窄屏都放得下。叫「直播」而不是「直播小红花」——
+    // 侧栏那一列是**入口**，全名在页面标题里。
+    label: '直播',
+    title: '直播小红花',
+    blurb: '收直播弹幕里的口令、再把口令换成小红花。小红书那条口令必须人工粘进来。',
+    href: '#/live-room',
+    icon: IconFlower,
   },
   {
     id: 'schedules',
