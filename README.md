@@ -51,6 +51,7 @@ cargo run -p mcloud-server --bin mcloud-cli -- tasks
 cargo run -p mcloud-server --bin mcloud-cli -- run sign <account-id>   # 账号 id 见 WebUI「账号」页
 cargo run -p mcloud-server --bin mcloud-cli -- cron <schedule-id>     # 供外部触发，CLI 自身不常驻
 cargo run -p mcloud-server --bin mcloud-cli -- auth refresh --all
+cargo run -p mcloud-server --bin mcloud-cli -- login app <手机号>      # App 端验证码登录（另见 login sms）
 
 # 前端
 cd web && npm install && npm run dev     # 开发（代理到 38123）
@@ -113,7 +114,7 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 
 ## 测试
 
-- `cargo test --workspace` —— **660 个测试**
+- `cargo test --workspace` —— **715 个测试**
 - `cargo clippy --workspace --all-targets -- -D warnings` —— 0 告警
 - 黄金向量对拍：`test/golden/crypto-vectors.json`（签名、MD5、SHA256、两种 AES 语义）
   + `test/golden/app-signin-vectors.json`（签到族实拍信封与常量）

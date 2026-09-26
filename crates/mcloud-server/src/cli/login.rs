@@ -12,7 +12,7 @@ use anyhow::{bail, Context};
 use mcloud_core::PcPlatform;
 use mcloud_tasks::login::{QrFailure, QrProgress, SendSmsOutcome};
 
-use mcloud_app::App;
+use mcloud_app::{App, AppSendSmsOutcome};
 
 /// 把二维码载荷画成终端字符画。
 ///
@@ -226,6 +226,99 @@ pub async fn login_sms(app: &App, args: &[String]) -> anyhow::Result<()> {
         "   平台：{}（已随账号落盘）",
         mcloud_app::platform_label(platform)
     );
+    println!("   字段：{}", describe_user_info(&user_info));
+    Ok(())
+}
+
+/// `login app <手机号>`
+///
+/// App 端（手机客户端）短信登录。
+///
+/// # 为什么它不能是 `login sms <手机号> app`
+///
+/// App 与 PC 是**两套协议**（不同的密钥、不同的头、请求体还要加密 + 错位），
+/// 不是同一条链路加个参数。做成一个子命令，能让"我登的是哪一端"这件事
+/// 在命令行上就是显式的 —— 而端一旦搞错，产物（`auth` 前缀）就是错的，
+/// 且后续每个任务请求都会带着错的身份发出去。
+pub async fn login_app(app: &App, args: &[String]) -> anyhow::Result<()> {
+    let phone = args.first().context("用法：login app <手机号>")?;
+
+    println!("登录端：App（手机客户端）；手机号：{phone}");
+    println!("（账号会以 mobile 前缀落盘，后续请求按 App 形态发送）");
+
+    let sms = app
+        .handle
+        .login
+        .start_app_sms(phone)
+        .await
+        .context("准备 App 端登录失败")?;
+
+    // 发码：首次回 200059554 是**常态**，不是错误 —— 接着取题、解坐标、重发。
+    let now = app.handle.login.now_micros();
+    let first = sms.send_code(app.handle.login.http(), now).await?;
+    match first {
+        AppSendSmsOutcome::Sent { remain_get_times } => match remain_get_times {
+            Some(n) => println!("验证码已发送（今日剩余 {n} 次）"),
+            None => println!("验证码已发送"),
+        },
+        AppSendSmsOutcome::NeedCaptcha { .. } | AppSendSmsOutcome::SliderExhausted { .. } => {
+            // 两种情况的动作**不同**，要分开说：
+            // 200059554 是"还没过滑块"（常态），200059553 是"这道题作废了，
+            // 得重取一道新题" —— 这个接口计失败次数，不能拿旧答案硬试。
+            if matches!(first, AppSendSmsOutcome::SliderExhausted { .. }) {
+                println!("⚠ 上一道滑块题已作废（200059553），重新取一道新题…");
+            } else {
+                println!("需要滑块验证，正在取题…");
+            }
+            let answer = sms
+                .slider_puzzle(app.handle.login.http(), now)
+                .await
+                .context("取滑块挑战失败")?
+                .answer()
+                .context("解滑块答案失败")?;
+            println!("滑块答案：{answer}（上游把答案直接给了出来）");
+            match sms
+                .send_code_with_slider(app.handle.login.http(), now, &answer)
+                .await?
+            {
+                AppSendSmsOutcome::Sent { .. } => println!("验证码已发送"),
+                other => bail!("带滑块发码仍失败：{other:?}"),
+            }
+        }
+        other => bail!("发送验证码失败：{other:?}"),
+    }
+
+    print!("请输入收到的验证码：");
+    std::io::stdout().flush().ok();
+    let mut code = String::new();
+    std::io::stdin()
+        .read_line(&mut code)
+        .context("读取验证码失败")?;
+    let code = code.trim();
+    if code.is_empty() {
+        bail!("没有输入验证码");
+    }
+
+    let user_info = sms
+        .login(app.handle.login.http(), now, code)
+        .await
+        .context("App 端登录失败")?;
+
+    let account = app
+        .handle
+        .login
+        .finish_app_sms(&sms, &user_info)
+        .await
+        .context("登录成功但落库失败")?;
+
+    println!("\n✅ 登录成功");
+    println!("   账号：{}", account.id);
+    println!("   端：App（手机客户端，auth 前缀 mobile）");
+    if account.user_domain_id.is_some() {
+        println!("   用户域：已记录（刷新凭据要用）");
+    } else {
+        println!("   ⚠ 用户域：上游未返回 —— 「刷新凭据」会失败，需要重新登录");
+    }
     println!("   字段：{}", describe_user_info(&user_info));
     Ok(())
 }

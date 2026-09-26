@@ -17,7 +17,15 @@ use std::sync::Arc;
 
 use mcloud_core::{Clock, Error, HttpClient, PcDeviceStore, PcPlatform, Result};
 use mcloud_crypto::{OsRandom, Random, SharedRandom};
-use mcloud_tasks::login::{self, LoginResult, PasswordLogin, QrLogin, QrProgress, SmsLogin};
+use mcloud_tasks::login::{
+    self, AppSmsLogin, LoginResult, PasswordLogin, QrLogin, QrProgress, SmsLogin,
+};
+
+/// 重新导出：它是 App 登录 API 的一部分（调用方要 match 它的分支）。
+///
+/// 经本层转出，好让 `mcloud-server` 不必直接依赖 `mcloud-upstream`
+/// —— 服务端只该看到组装层给出的东西。
+pub use mcloud_upstream::app_login::AppSendSmsOutcome;
 use mcloud_upstream::login::{self as proto, LoginDataDecryptor};
 
 /// 登录服务：一个进程一份，服务所有登录请求。
@@ -189,6 +197,50 @@ impl LoginService {
     pub fn new_tid(&self) -> String {
         let mut rng = self.rng.clone();
         rng.uuid_v4()
+    }
+
+    // ── App 端（手机客户端）登录 ──────────────────────────────────────
+
+    /// 开始一次 App 端短信登录。
+    ///
+    /// # 复用同一个设备号
+    ///
+    /// App 与 PC 共用这台机器的 `device_id`：它就是一个 32 位大写 hex 的
+    /// 客户端标识，两种形态都收。**不**为 App 另造一个 ——
+    /// 那样同一个物理设备会在上游留下两个身份，而"为什么任务里的设备号
+    /// 和登录时的不一样"会变成一个很难查的问题。
+    ///
+    /// ⚠ 与 PC 端不同，App 的设备串里 `x-DeviceInfo` 与 `x-yun-client-info`
+    /// **不相等**（见 `mcloud_upstream::app_login`）。
+    pub async fn start_app_sms(&self, phone: &str) -> Result<AppSmsLogin> {
+        let device_id = self.pc_device_id().await?;
+        let mut rng = self.rng.clone();
+        Ok(AppSmsLogin::start(device_id, phone, &mut rng))
+    }
+
+    /// App 端短信登录成功后落库（`auth` 前缀是 **`mobile`**）。
+    pub async fn finish_app_sms(
+        &self,
+        sms: &AppSmsLogin,
+        user_info: &serde_json::Value,
+    ) -> Result<mcloud_core::Account> {
+        let account = login::account_from_app_login(user_info, sms.device_id())?;
+        login::persist_login(
+            &*self.accounts,
+            &LoginResult {
+                account: account.clone(),
+            },
+        )
+        .await?;
+        Ok(account)
+    }
+
+    /// 现在是**微秒**时间戳（App 头 `x-yun-user-timestamp` 要它）。
+    ///
+    /// 与 [`Self::now_ms`] 分开而不是乘 1000：调用点写错单位是本条链路
+    /// 里最容易发生、又最难看出来的一类错（服务端只当它是排序用的数）。
+    pub fn now_micros(&self) -> i64 {
+        self.clock.now_ms().saturating_mul(1000)
     }
 }
 

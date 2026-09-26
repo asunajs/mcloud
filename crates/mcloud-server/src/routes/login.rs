@@ -452,6 +452,197 @@ pub async fn login_sms(
     }))
 }
 
+// ── App 端（手机客户端）短信登录 ────────────────────────────────────────
+
+/// `POST /api/login/app/sms/start` —— App 端发验证码。
+///
+/// # 与 PC 版 `/api/login/sms/start` 的区别
+///
+/// 请求体里**没有 `platform`**：App 端只有一种形态，而 PC 端那个参数
+/// 存在的意义正是"区分 windows / macos"。给 App 也塞一个 platform 参数，
+/// 只会让人以为它能变。
+#[derive(Deserialize)]
+pub struct AppSmsStartRequest {
+    #[serde(default)]
+    pub phone: String,
+}
+
+/// `POST /api/login/app/sms/start` 的响应。
+///
+/// 与 PC 版**刻意不共用**：PC 那支的 `need_slider` 之后是"去取图、本地识别"，
+/// App 这支之后是同一件事，但含义上属于 App 链路 —— 共用一个响应类型会让
+/// 前端以为两端可以互换。
+#[derive(Serialize)]
+pub struct AppSmsStartResponse {
+    /// `sent` / `need_captcha` / `slider_exhausted`。
+    pub phase: String,
+    /// 今日还可发送的次数（仅 `sent` 时可能有）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remain_get_times: Option<u32>,
+    /// 上游给的验证码类型。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captcha_type: Option<i64>,
+    /// 已解出的滑块答案（前端可直接用它重发，**不需要用户去拖**）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slider_answer: Option<String>,
+    /// 滑块背景图（base64）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slider_background: Option<String>,
+    /// 滑块拼图块（base64）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slider_puzzle: Option<String>,
+    /// 滑块题面宽度。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slider_width: Option<i64>,
+}
+
+/// `POST /api/login/app/sms/start` —— App 端发码；需要滑块时顺手把题取回来。
+pub async fn app_start_sms(
+    State(state): State<ServerState>,
+    Json(req): Json<AppSmsStartRequest>,
+) -> ApiResult<AppSmsStartResponse> {
+    let phone = req.phone.trim();
+    if phone.is_empty() {
+        return Err(ApiError(mcloud_core::Error::Config(
+            "手机号不能为空".into(),
+        )));
+    }
+
+    let sms = state
+        .handle
+        .login
+        .start_app_sms(phone)
+        .await
+        .map_err(ApiError::from)?;
+    let now = state.handle.login.now_micros();
+    let outcome = sms.send_code(state.handle.login.http(), now).await?;
+
+    match outcome {
+        mcloud_app::AppSendSmsOutcome::Sent { remain_get_times } => Ok(Json(AppSmsStartResponse {
+            phase: "sent".into(),
+            remain_get_times,
+            captcha_type: None,
+            slider_answer: None,
+            slider_background: None,
+            slider_puzzle: None,
+            slider_width: None,
+        })),
+        // 需要滑块：**顺手把题取回来并解出答案**。
+        //
+        // 取图接口与 PC 端是同一个第一方接口（`/user/verfycode`），
+        // 而 `puzzleLeft` 里带着动态 IV，所以本地就能算出坐标，
+        // 不需要用户去拖、也不需要图像识别。
+        mcloud_app::AppSendSmsOutcome::NeedCaptcha { captcha_type }
+        | mcloud_app::AppSendSmsOutcome::SliderExhausted { captcha_type } => {
+            let exhausted = matches!(
+                outcome,
+                mcloud_app::AppSendSmsOutcome::SliderExhausted { .. }
+            );
+            // 挑战作废（200059553）时**不重试旧答案**，只把状态如实报给前端。
+            let puzzle = sms.slider_puzzle(state.handle.login.http(), now).await.ok();
+            let (answer, background, pz, width) = match &puzzle {
+                Some(p) => (
+                    p.answer().ok(),
+                    Some(p.background_b64.clone()),
+                    Some(p.puzzle_b64.clone()),
+                    p.pic_width,
+                ),
+                None => (None, None, None, None),
+            };
+            Ok(Json(AppSmsStartResponse {
+                phase: if exhausted {
+                    "slider_exhausted".into()
+                } else {
+                    "need_captcha".into()
+                },
+                remain_get_times: None,
+                captcha_type,
+                slider_answer: answer,
+                slider_background: background,
+                slider_puzzle: pz,
+                slider_width: width,
+            }))
+        }
+        other => Err(ApiError(mcloud_core::Error::Upstream {
+            code: String::new(),
+            message: format!("App 端发送验证码失败：{other:?}"),
+        })),
+    }
+}
+
+/// `POST /api/login/app/sms` 的请求体。
+#[derive(Deserialize)]
+pub struct AppSmsLoginRequest {
+    #[serde(default)]
+    pub phone: String,
+    #[serde(default)]
+    pub code: String,
+    /// 需要滑块时带上答案（`start` 返回的 `slider_answer` 直接回填即可）。
+    #[serde(default)]
+    pub slider_answer: Option<String>,
+}
+
+/// `POST /api/login/app/sms` —— 用验证码完成 App 端登录。
+///
+/// 带 `slider_answer` 时先重发一次验证码（与 PC 版同样的理由：
+/// 分成两个端点会让前端必须自己记住"刚才那次发码是不是失败了"，
+/// 而这个状态服务端本来就有）。
+pub async fn app_login_sms(
+    State(state): State<ServerState>,
+    Json(req): Json<AppSmsLoginRequest>,
+) -> ApiResult<PollQrResponse> {
+    let phone = req.phone.trim();
+    if phone.is_empty() {
+        return Err(ApiError(mcloud_core::Error::Config(
+            "手机号不能为空".into(),
+        )));
+    }
+    if req.code.trim().is_empty() {
+        return Err(ApiError(mcloud_core::Error::Config(
+            "验证码不能为空".into(),
+        )));
+    }
+
+    let sms = state
+        .handle
+        .login
+        .start_app_sms(phone)
+        .await
+        .map_err(ApiError::from)?;
+    let now = state.handle.login.now_micros();
+    let http = state.handle.login.http();
+
+    if let Some(answer) = req.slider_answer.as_deref().filter(|a| !a.is_empty()) {
+        match sms.send_code_with_slider(http, now, answer).await? {
+            mcloud_app::AppSendSmsOutcome::Sent { .. } => {}
+            other => {
+                return Err(ApiError(mcloud_core::Error::Upstream {
+                    code: String::new(),
+                    message: format!("带滑块发码失败：{other:?}"),
+                }))
+            }
+        }
+    }
+
+    let user_info = sms.login(http, now, req.code.trim()).await?;
+    let account = state
+        .handle
+        .login
+        .finish_app_sms(&sms, &user_info)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(PollQrResponse {
+        phase: "logged_in".into(),
+        terminal: true,
+        reason: None,
+        retry_after_ms: None,
+        account: Some(account.id.as_str().to_string()),
+        // App 账号没有 PC 平台 —— 前端据此显示"手机端"而不是某个 PC 平台。
+        platform: None,
+    }))
+}
+
 // ── 账密 ────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]

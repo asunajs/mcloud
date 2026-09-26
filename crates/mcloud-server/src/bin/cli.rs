@@ -68,6 +68,8 @@ async fn main() -> anyhow::Result<()> {
             match rest.first().map(String::as_str) {
                 Some("qr") => cli_login::login_qr(&app, &rest[1..]).await?,
                 Some("sms") => cli_login::login_sms(&app, &rest[1..]).await?,
+                // App 端是**另一套协议**，不是 `sms` 加个平台参数
+                Some("app") => cli_login::login_app(&app, &rest[1..]).await?,
                 Some("password") => cli_login::login_password(&app, &rest[1..]).await?,
                 Some("device") => cli_login::login_device(&app, &rest[1..]).await?,
                 Some(other) => {
@@ -136,12 +138,16 @@ async fn main() -> anyhow::Result<()> {
 fn print_login_usage() {
     eprintln!("用法：");
     eprintln!("  login qr [windows|macos]              扫码登录（终端出码）");
-    eprintln!("  login sms <手机号> [windows|macos]    短信验证码登录");
+    eprintln!("  login sms <手机号> [windows|macos]    短信验证码登录（PC 端）");
+    eprintln!("  login app <手机号>                    短信验证码登录（App/手机端）");
     eprintln!("  login password <用户名> [windows|macos] 账号密码登录");
     eprintln!("  login device show|reset               查看/更换本机 PC 设备指纹");
     eprintln!();
     eprintln!("平台默认 windows —— mac 与 win 在请求头、UA 与落盘数据上都不一样，");
     eprintln!("登录后该平台会随账号存下来，后续请求一直沿用它。");
+    eprintln!();
+    eprintln!("`login app` 与 `login sms` **不是同一条链路**：App 走另一套密钥、");
+    eprintln!("另一套设备头，请求体还要加密；落盘的 auth 前缀也不同（mobile vs pc）。");
 }
 
 fn print_usage() {
@@ -153,7 +159,7 @@ fn print_usage() {
     eprintln!("  cron <定时id>                   跑一条已配置的定时（给系统 crontab 调用）");
     eprintln!("  pipeline run <编排id>           跑一条已配置的编排");
     eprintln!("  auth refresh <--account|--all>  刷新凭据");
-    eprintln!("  login <方式>                    登录账号（qr / sms / password）");
+    eprintln!("  login <方式>                    登录账号（qr / sms / app / password）");
     eprintln!();
     eprintln!("定时与编排的**创建**不在命令行：改配置文件，或用 WebUI。");
     eprintln!("完整的 WebUI（含登录闸、账号管理、日志）请直接运行 `mcloud-gost serve`。");

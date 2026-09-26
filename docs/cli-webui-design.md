@@ -27,12 +27,18 @@ mcloud 的 CLI 有 **40+ 个子命令**（`login qr/sms/smid show/reset/refresh`
 ## 1. CLI：5 个命令，不多不少
 
 ```
-mcloud-gost login    [--qr | --sms <手机号>]   登录账号（交互）
+mcloud-gost login    qr | sms <手机号> | app <手机号> | password   登录账号（交互）
 mcloud-gost run      <任务名> <账号>            跑一次任务
 mcloud-gost cron     <定时id>                  跑一条定时（供外部 crontab 调用）
 mcloud-gost auth     refresh <账号|--all>      刷新 auth 凭据
 mcloud-gost pipeline run <编排id>              跑一条编排
 ```
+
+> `login app` 与 `login sms` **并列而不是合并**：App 端走另一套密钥、
+> 另一套设备头，请求体还要 AES 加密 + 末 10 位错位，落盘的 `auth`
+> 前缀也不同（`mobile` vs `pc`）。做成 `sms --app` 会让"我登的是哪一端"
+> 在命令行上不可见，而端一旦搞错，产物是**错的身份** —— 之后每个任务
+> 请求都会带着它发出去。
 
 外加两个无副作用的：
 

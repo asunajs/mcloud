@@ -10,9 +10,10 @@ use mcloud_engine::{Registry, Task};
 use std::sync::Arc;
 
 pub use login::{
-    account_from_login, account_from_user_info_with_prefix, auth_from_user_info, logout,
-    persist_login, production_decryptor, PasswordLogin, QrFailure, QrLogin, QrProgress, SmsLogin,
-    QR_POLL_INTERVAL_MS, QR_TTL_SECONDS,
+    account_from_app_login, account_from_login, account_from_user_info_with_prefix,
+    auth_from_user_info, logout, persist_login, production_app_decryptor, production_decryptor,
+    AppSmsLogin, PasswordLogin, QrFailure, QrLogin, QrProgress, SmsLogin, QR_POLL_INTERVAL_MS,
+    QR_TTL_SECONDS,
 };
 
 /// 注册全部任务。

@@ -17,7 +17,8 @@ pub mod tn;
 
 pub use aes::{
     aes_cbc_decrypt, aes_cbc_encrypt, aes_cbc_fixed_iv_decrypt_hex, aes_ecb_pkcs7_decrypt_hex,
-    aes_encrypt_compat, decrypt_with_dynamic_iv, encrypt_with_dynamic_iv, AES_FIXED_IV,
+    aes_ecb_pkcs7_encrypt_hex, aes_encrypt_compat, decrypt_with_dynamic_iv,
+    encrypt_with_dynamic_iv, shift_head10_to_back, shift_tail10_to_front, AES_FIXED_IV,
     REFRESH_TOKEN_KEY,
 };
 pub use des::{des_decrypt_b64, des_encrypt_b64};

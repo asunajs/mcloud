@@ -13,7 +13,7 @@ pub mod smid;
 pub use auth_refresh::{decide, AuthRefreshService, RefreshDecision, RefreshOutcome};
 pub use builder::{App, AppBuilder};
 pub use hub::{Delivery, EventHub};
-pub use login::{bare_transport, parse_platform, platform_label, LoginService};
+pub use login::{bare_transport, parse_platform, platform_label, AppSendSmsOutcome, LoginService};
 pub use sink::BroadcastSink;
 pub use smid::{
     device_id, ensure_fingerprint, report_device_id, rotate_fingerprint, SmidClient, SmidService,

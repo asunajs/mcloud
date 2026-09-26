@@ -46,6 +46,9 @@ pub fn router() -> Router<ServerState> {
         .route("/api/login/qr/{session_id}", axum::routing::delete(login::cancel_qr))
         .route("/api/login/sms/start", post(login::start_sms))
         .route("/api/login/sms", post(login::login_sms))
+        // App 端（手机客户端）：**不同的协议**，不是 PC 那条加了参数
+        .route("/api/login/app/sms/start", post(login::app_start_sms))
+        .route("/api/login/app/sms", post(login::app_login_sms))
         .route("/api/login/password", post(login::login_password))
         .route("/api/login/device", get(login::get_device))
         .route("/api/login/device/rotate", post(login::rotate_device))

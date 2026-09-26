@@ -27,7 +27,10 @@ use mcloud_core::{
     Result,
 };
 use mcloud_crypto::Random;
-use mcloud_upstream::auth::{account_label, format_auth, parse_auth, PC_AUTH_PREFIX};
+use mcloud_upstream::app_login;
+use mcloud_upstream::auth::{
+    account_label, format_auth, parse_auth, APP_AUTH_PREFIX, PC_AUTH_PREFIX,
+};
 use mcloud_upstream::login::{
     self, LoginDataDecryptor, LoginEnvelope, LoginPayloadDecryptor, PcClient, PollOutcome,
 };
@@ -556,6 +559,174 @@ pub async fn persist_login<S: AccountStore + ?Sized>(
 /// 生产用的登录数据解密器。
 pub fn production_decryptor() -> LoginDataDecryptor {
     LoginDataDecryptor::production()
+}
+
+// ══════════════════════════ App 端（手机）登录 ══════════════════════════
+
+/// App 端短信登录的状态机。
+///
+/// # 与 PC 端 [`SmsLogin`] 的关系：**同名的动作，不同的协议**
+///
+/// 两者的方法名很像（发码、取滑块、登录），但每一枪的
+/// 端点头、请求体形态、加解密都不同（见 [`mcloud_upstream::app_login`]）。
+/// 所以它们是**两个类型**，不共用一个泛型开关 ——
+/// 那样"传错端"会变成一个能静默通过的选项。
+pub struct AppSmsLogin {
+    device_id: String,
+    phone: String,
+    /// `thirdlogin` 用的一次性 `random`（与发码用的 `qwert` 不是一回事）。
+    random: String,
+}
+
+impl AppSmsLogin {
+    /// 开始一次 App 短信登录。
+    pub fn start(
+        device_id: impl Into<String>,
+        phone: impl Into<String>,
+        rng: &mut impl Random,
+    ) -> Self {
+        Self {
+            device_id: device_id.into(),
+            phone: phone.into(),
+            random: app_login::new_login_random(rng),
+        }
+    }
+
+    pub fn phone(&self) -> &str {
+        &self.phone
+    }
+
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    /// 发送验证码（首次不带滑块答案）。
+    pub async fn send_code<H: HttpClient + ?Sized>(
+        &self,
+        http: &H,
+        timestamp: i64,
+    ) -> Result<app_login::AppSendSmsOutcome> {
+        let body = app_login::send_sms_code_body(&self.phone, "");
+        self.send_body(http, timestamp, body).await
+    }
+
+    /// 带滑块答案重发验证码。
+    ///
+    /// 这是 `200059554` 之后的**正常**下一步。答案取 [`Self::slider_puzzle`]
+    /// 解出来的坐标。
+    pub async fn send_code_with_slider<H: HttpClient + ?Sized>(
+        &self,
+        http: &H,
+        timestamp: i64,
+        slider_answer: &str,
+    ) -> Result<app_login::AppSendSmsOutcome> {
+        let body = app_login::send_sms_code_body_with_slider(&self.phone, slider_answer)?;
+        self.send_body(http, timestamp, body).await
+    }
+
+    async fn send_body<H: HttpClient + ?Sized>(
+        &self,
+        http: &H,
+        timestamp: i64,
+        body: serde_json::Value,
+    ) -> Result<app_login::AppSendSmsOutcome> {
+        let req = app_login::send_sms_code_request(&self.device_id, timestamp, &body);
+        let resp = http.request(req).await?;
+        let env = LoginEnvelope::parse(ensure_http_ok(&resp, "App 登录")?)?;
+        Ok(app_login::classify_send_sms(&env))
+    }
+
+    /// 取滑块挑战（第一方接口，与 PC 端是同一个）。
+    pub async fn slider_puzzle<H: HttpClient + ?Sized>(
+        &self,
+        http: &H,
+        timestamp: i64,
+    ) -> Result<login::SliderPuzzle> {
+        let req = app_login::slider_puzzle_request(&self.device_id, timestamp, &self.phone);
+        let resp = http.request(req).await?;
+        let env = LoginEnvelope::parse(ensure_http_ok(&resp, "App 登录")?)?;
+        login::parse_slider_puzzle(&env)
+    }
+
+    /// 用 6 位验证码完成登录，返回解密后的会话载荷。
+    ///
+    /// # 错误信息要把 `9103` / `9441` 的区别说出来
+    ///
+    /// 这两个码的**含义完全不同**：`9441` 是"体解开了、码不对"（用户输错，
+    /// 重输即可），`9103` 是"体没解开"（**我们这边的 bug**：密钥、错位方向
+    /// 或大小写写错了）。混成一句"登录失败"会让一个实现缺陷看起来像用户错误。
+    pub async fn login<H: HttpClient + ?Sized>(
+        &self,
+        http: &H,
+        timestamp: i64,
+        sms_code: &str,
+    ) -> Result<Value> {
+        let body = app_login::sms_thirdlogin_body(&self.phone, sms_code, &self.random);
+        let crypto = app_login::AppLoginCrypto::production();
+        let req = app_login::thirdlogin_request(&self.device_id, timestamp, &crypto, &body)?;
+        let resp = http.request(req).await?;
+        let env = LoginEnvelope::parse(ensure_http_ok(&resp, "App 登录")?)?;
+
+        match app_login::classify_login(&env) {
+            app_login::AppLoginOutcome::Success { encrypted } => {
+                crypto.decrypt_user_info(&encrypted)
+            }
+            // ⚠ 用 `Error::Config` 而不是 `Error::Upstream`：验证码错是
+            // **用户输入问题**，应当映射成 400 让前端就地在表单上显示。
+            // 用 Upstream 会变成 500，前端只能弹一句"服务器错误"，
+            // 而用户真正需要知道的是"这个码不对，重发一个"。
+            app_login::AppLoginOutcome::SmsCodeWrong => {
+                Err(Error::Config("验证码不正确或已过期，请重新获取".into()))
+            }
+            // 这个反过来：**是我们的 bug**，不是用户的错。
+            // 保持 Upstream（500），并在文案里说清责任方。
+            app_login::AppLoginOutcome::Undecryptable => Err(Error::Upstream {
+                code: env.raw_code.clone(),
+                message: "上游无法解开登录体（9103）—— 这是本客户端的加密实现问题，不是验证码问题"
+                    .into(),
+            }),
+            app_login::AppLoginOutcome::LoginFailed => Err(Error::Upstream {
+                code: env.raw_code.clone(),
+                message: format!("App 登录被拒（9999），多半是设备头不完整：{}", env.message),
+            }),
+            // 上游的业务拒绝（手机号格式、风控……）都是**用户可修**的，
+            // 归到 Config（400）而不是 500。
+            //
+            // ⚠ 这里刻意**不打印枚举的 Debug**：那会把
+            // `Other { code: Some(5010047) }` 这种 Rust 语法糊到用户脸上。
+            // 上游的 message 本身已经是人话，直接用。
+            app_login::AppLoginOutcome::Other { code, .. } => {
+                let detail = if env.message.is_empty() {
+                    "上游未给出原因".to_string()
+                } else {
+                    env.message.clone()
+                };
+                match code {
+                    Some(c) => Err(Error::Config(format!("登录失败（上游码 {c}）：{detail}"))),
+                    None => Err(Error::Config(format!("登录失败：{detail}"))),
+                }
+            }
+        }
+    }
+}
+
+/// 从 App 登录结果构造账号（`auth` 前缀是 **`mobile`**）。
+///
+/// # 为什么 `pc_platform` 是 `None`
+///
+/// App 登录的账号**不是 PC 形态**：它用 `mobile:` 前缀、走 App 的设备头与 UA。
+/// 给它随便填一个 PC 平台，会让后续每次请求都用错的 UA 发出去 ——
+/// 而那种错误在服务端表现为业务码，不表现为"平台不对"。
+///
+/// `None` 也正是 [`mcloud_server::routes::accounts::AccountSummary`] 里
+/// "非 PC 端登录（App / 历史数据）"那一档的判据。
+pub fn account_from_app_login(user_info: &Value, device_id: impl Into<String>) -> Result<Account> {
+    account_from_user_info_with_prefix(user_info, APP_AUTH_PREFIX, None, device_id)
+}
+
+/// 生产用的 App 端登录体解密器。
+pub fn production_app_decryptor() -> app_login::AppLoginCrypto {
+    app_login::AppLoginCrypto::production()
 }
 
 #[cfg(test)]

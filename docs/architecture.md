@@ -712,8 +712,10 @@ DELETE /api/accounts/{id}           移除账号及其本地凭据
 POST   /api/login/qr                扫码登录：出码
 POST   /api/login/qr/poll           扫码登录：轮询
 DELETE /api/login/qr/{sid}          取消扫码
-POST   /api/login/sms/start         短信登录：发码
-POST   /api/login/sms               短信登录：校验
+POST   /api/login/sms/start         PC 端短信登录：发码
+POST   /api/login/sms               PC 端短信登录：校验
+POST   /api/login/app/sms/start     App 端短信登录：发码（另一套协议，无 platform）
+POST   /api/login/app/sms           App 端短信登录：校验
 POST   /api/login/password          账密登录
 GET    /api/login/device            查看本机 PC 设备指纹
 POST   /api/login/device/rotate     更换 PC 设备指纹
@@ -865,6 +867,44 @@ web/src/
 - 不内置任何他人账号或批量注册能力。
 - 请求频率保守，遵循上游限流；失败指数退避而非重试轰炸。
 
+### 12.1.1 两层登录：PC 端与 App 端（`auth` 前缀不同）
+
+`Authorization` 的载荷是 `Basic base64("<前缀>:<账号>:<authToken>")`，
+**前缀区分客户端身份**：
+
+| 端 | 前缀 | 登录入口 | 请求特征 |
+|---|---|---|---|
+| PC | `pc` | `login qr` / `login sms` / `login password` | 明文 JSON 体；`pintype` 随方式变（21/5/9）|
+| App | **`mobile`** | `login app` / WebUI「手机端」 | AES-128-ECB 加密体 + 末 10 位错位；`pintype` 恒为 `8` |
+
+两端打的是**同一个接口** `POST /user/thirdlogin`，但**没有一处可以复用**：
+密钥不同（`qPqDw263XgFgL3u8` vs `lYzvvBMUjucw+h^R`）、`clienttype` 不同
+（656/710 vs 412）、`cpid` 不同（277/332 vs 55）、请求体形态不同
+（明文 vs 加密+错位）、头集合不同。
+
+所以代码里是**两个模块、两个类型**，刻意不做平台开关 —— 见
+`mcloud_upstream::app_login` 的模块头。
+
+> **`Account::pc_platform` 为 `None` 即表示 App 端登录。** 这是
+> `AccountSummary` 里"非 PC 端"那一档的判据，WebUI 据此显示「手机端」徽标。
+> 给它随便填一个 PC 平台会让后续每个请求都用错的 UA 发出去，
+> 而那种错误在上游表现为一个含义模糊的业务码。
+
+**实测判据（`9103` / `9441` 二值判别器）**：调这条链路的加密参数时，
+不需要真的登录成功，只看回哪个码：
+
+| 送出的体 | 响应 | 结论 |
+|---|---|---|
+| 加密 + 末 10 位错位 + 生产密钥 | `9441 验证码不正确` | ✅ 服务端**解开了**体 |
+| 同一密文但**不旋转** | `9103 输入参数不合法` | 错位这一步不能省 |
+| 明文 JSON（根本没加密） | `9103 输入参数不合法` | 必须加密 |
+
+本仓三种都实测过（2026-09-26），结果与上表一致。
+
+**滑块是同一个第一方接口**：`POST /user/verfycode {"account":…,"type":2}`，
+取回的 `puzzleLeft` 里带着动态 IV，因此**本地就能算出坐标**，不需要图像识别、
+也不需要用户去拖。App 与 PC 共用这条取题路径（编码方式也相同）。
+
 ### 12.2 登录闸（WebUI）
 
 **两层认证，不要混**：
@@ -930,8 +970,11 @@ run <任务名> <账号>             跑一次任务
 cron <定时id>                   跑一条已配置的定时（给系统 crontab 调用）
 pipeline run <编排id>           跑一条已配置的编排
 auth refresh <--account|--all>  刷新凭据
-login <方式>                    登录账号（qr / sms / password）
+login <方式>                    登录账号（qr / sms / app / password）
 ```
+
+**`login app` 与 `login sms` 是两条链路**，不是"同一条加个参数"：
+前者落盘 `mobile:` 前缀、走 App 的设备头与加密体（见 §12.1.1）。
 
 **定时与编排的「创建」不在命令行** —— 改配置文件或用 WebUI。
 少一个入口就少一处会与 WebUI 漂移的语义。

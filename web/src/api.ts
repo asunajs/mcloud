@@ -573,6 +573,43 @@ export const loginWithPassword = (username: string, password: string, platform: 
     body: JSON.stringify({ username, password, platform }),
   })
 
+// ── App 端（手机客户端）短信登录 ──────────────────────────────────────
+//
+// 与上面那条 PC 短信链路**不是同一个协议**：App 用另一套密钥与设备头，
+// 请求体还要加密。所以端点分开，前端也分开两个函数 —— 合成一个带
+// `platform: 'app'` 的函数会让"我在登哪一端"变得看不出来。
+
+export interface AppSmsStartResponse {
+  phase: 'sent' | 'need_captcha' | 'slider_exhausted'
+  remain_get_times?: number
+  captcha_type?: number
+  /** 已解出的滑块答案（可直接回填重发，不用用户去拖）。 */
+  slider_answer?: string
+  slider_background?: string
+  slider_puzzle?: string
+  slider_width?: number | null
+}
+
+export const startAppSmsLogin = (phone: string) =>
+  request<AppSmsStartResponse>('/api/login/app/sms/start', {
+    method: 'POST',
+    body: JSON.stringify({ phone }),
+  })
+
+export const submitAppSmsLogin = (input: {
+  phone: string
+  code: string
+  sliderAnswer?: string
+}) =>
+  request<LoginOutcome>('/api/login/app/sms', {
+    method: 'POST',
+    body: JSON.stringify({
+      phone: input.phone,
+      code: input.code,
+      slider_answer: input.sliderAnswer,
+    }),
+  })
+
 export const getPcDevice = () => request<{ device_id: string }>('/api/login/device')
 
 export const rotatePcDevice = () =>

@@ -175,6 +175,107 @@ pub fn aes_ecb_pkcs7_decrypt_hex(key: &str, ciphertext_hex: &str) -> Result<Stri
     Ok(String::from_utf8(unpad_pkcs7(&out)?)?)
 }
 
+/// AES-ECB/PKCS7 **加密**，输出是 **小写 hex 字符串**。
+///
+/// 与 [`aes_ecb_pkcs7_decrypt_hex`] 配对，用于 App 端登录体
+/// （见 `mcloud_upstream::app_login`）。
+///
+/// # 为什么 PKCS7 是手写的
+///
+/// `encrypt_padded_mut::<Pkcs7>` 当然也能用，但手写这几行把
+/// **"块间无链接"** 这件事摆在代码里：ECB 的全部语义就是"逐块独立加密"。
+/// 用 `_mut` 变体时读者要去看它的文档才知道有没有做链式处理。
+///
+/// 填充规则与 PKCS7 一致：`pad = 16 - len % 16`，因此
+/// **整块时补满一整块**（16 字节），不是补 0。
+pub fn aes_ecb_pkcs7_encrypt_hex(key: &str, plaintext: &str) -> Result<String> {
+    let data = plaintext.as_bytes();
+    let pad = 16 - (data.len() % 16);
+
+    let mut buf = Vec::with_capacity(data.len() + pad);
+    buf.extend_from_slice(data);
+    buf.extend(std::iter::repeat_n(pad as u8, pad));
+
+    for block in buf.chunks_exact_mut(16) {
+        let mut arr = [0u8; 16];
+        arr.copy_from_slice(block);
+        encrypt_ecb_block(key.as_bytes(), &mut arr)?;
+        block.copy_from_slice(&arr);
+    }
+
+    Ok(hex::encode(&buf))
+}
+
+/// 就地加密单个 ECB 块（无链接，故逐块独立）。
+fn encrypt_ecb_block(key: &[u8], buf: &mut [u8; 16]) -> Result<()> {
+    use aes::cipher::BlockEncrypt;
+
+    match key.len() {
+        16 => aes::Aes128::new_from_slice(key)
+            .map_err(|_| CryptoError::InvalidKeyOrIv)?
+            .encrypt_block(buf.into()),
+        24 => aes::Aes192::new_from_slice(key)
+            .map_err(|_| CryptoError::InvalidKeyOrIv)?
+            .encrypt_block(buf.into()),
+        32 => aes::Aes256::new_from_slice(key)
+            .map_err(|_| CryptoError::InvalidKeyOrIv)?
+            .encrypt_block(buf.into()),
+        _ => return Err(CryptoError::InvalidKeyOrIv),
+    }
+    Ok(())
+}
+
+/// 把**末尾 10 个字符**移到最前面（App 端登录体的第三层封装）。
+///
+/// # 这不是加密，是一次字符串旋转
+///
+/// 反汇编 `-[MCLoginCryptoUtil privateEncrypt:isCurrentEnvironment:]` 得到的
+/// 就是两行 `substringFromIndex:` / `substringToIndex:` 加一次拼接：
+///
+/// ```objc
+/// p    = MAX(len, 10) - 10;
+/// tail = [e substringFromIndex:p];   // 末 10 个
+/// head = [e substringToIndex:p];     // 其余
+/// out  = [NSString stringWithFormat:@"%@%@", tail, head];
+/// ```
+///
+/// 少做这一步，服务端会回 `9103 输入参数不合法` —— 因为它要先反旋转再解密。
+///
+/// # 按**字符**而不是字节
+///
+/// ObjC 的 `substringFromIndex:` 按 UTF-16 码元计数，这里按 Unicode 标量
+/// 计数；两者只在**辅助平面字符**（emoji 等）上不同，而本函数的输入
+/// 永远是 ASCII hex，所以三种口径在实际流量上完全等价。
+///
+/// 长度 ≤ 10 时**原样返回**（不是报错）：此时客户端算出的 `p` 是 0，
+/// 拼接结果就是原串本身。
+pub fn shift_tail10_to_front(s: &str) -> String {
+    let n = s.chars().count();
+    if n <= 10 {
+        return s.to_string();
+    }
+    let cut = n - 10;
+    let byte_at = s.char_indices().nth(cut).map_or(s.len(), |(i, _)| i);
+    let (head, tail) = s.split_at(byte_at);
+    format!("{tail}{head}")
+}
+
+/// [`shift_tail10_to_front`] 的逆操作：把**开头 10 个字符**移到末尾。
+///
+/// 客户端对应的是 `if (len < 11) return @"";`，即长度不足时它返回**空串**；
+/// 这里刻意偏离成"原样返回"，理由是：长度 ≤ 10 的输入本来就不是合法密文，
+/// 后续 AES 解密一定会因为长度或填充非法而报错 ——
+/// 让错误在**解密层**报出来，比在这里安静地变成空串更容易查。
+pub fn shift_head10_to_back(s: &str) -> String {
+    let n = s.chars().count();
+    if n <= 10 {
+        return s.to_string();
+    }
+    let byte_at = s.char_indices().nth(10).map_or(s.len(), |(i, _)| i);
+    let (head, tail) = s.split_at(byte_at);
+    format!("{tail}{head}")
+}
+
 /// 就地解密单个 ECB 块（无链接，故逐块独立）。
 fn decrypt_ecb_block(key: &[u8], buf: &mut [u8; 16]) -> Result<()> {
     use aes::cipher::BlockDecrypt;
@@ -417,5 +518,187 @@ mod tests {
             ecb.as_ref().map(|s| s.as_str()).unwrap_or("") != "hello world!!",
             "ECB 与 CBC 不可互换"
         );
+    }
+}
+
+#[cfg(test)]
+mod app_login_tests {
+    use super::*;
+
+    /// 抓包里那条 `thirdlogin` 明文（186 字节），键序取**抓包原样**。
+    ///
+    /// 这份字面量在 Go（`internal/core/crypto_test.go`）与 Rust
+    /// （`crates/mcloud-core/src/crypto/tests/app.rs`）两个仓库里**逐字节相同**，
+    /// 所以它是这份协议目前最强的证据 —— 优于实现侧自家键序的那一份。
+    const CAPTURED_PLAINTEXT: &str = r#"{"cpid":"55","extInfo":{"ifOpenAccount":"1"},"dycpwd":"429344","pintype":"8","loginMode":"0","verType":"1","version":"12.6.0","msisdn":"19900000000","random":"hOjseB","clienttype":"412"}"#;
+
+    /// 上面那串经 `lYzvvBMUjucw+h^R` 加密 + 末 10 位错位后的线上形态。
+    ///
+    /// 由抓包侧的**独立** AES-ECB 实现算出（不是本仓自产自销），
+    /// 两个参考仓库都钉着同一个值。
+    const GOLDEN_WIRE: &str = "2584e02d73b549d837f9fa6e4bdd4968c816497fba1be0770aeba9d7249a928db623ee6b11f26284588aa8dd943fdca3a5e7d21a36fdc347dbf16e1a2d0d55f23c77b1409ad5afff5600844ded9a613635003471e71be8e07b9b7fb8bbd14639e90ffa9716c22fb01670ee5b4b208efc0d59a0b16c087688ad5fd68561af8860b1e1d93ad7d00150cdb6bac04a3cc792a05347c7813afd2e06ca996da52959d7bc92881e4584c088cf7b01dc35341927e92c11d7e66e76c1625228a8d84c0eb0";
+
+    /// 同一逻辑请求的**实现侧键序**（serde_json 字母序）密文。
+    ///
+    /// 与 [`GOLDEN_WIRE`] **不是一个值** —— 键序进了加密输入，密文必然不同。
+    /// 两条都留着是有意为之：它们一起证明"键序不参与服务端校验"
+    /// （活体探针两种键序都回 `9441`），同时防止有人把两份黄金值串了线。
+    ///
+    /// 只比长度是**查不出**这种串线的：两份明文都是 186 字节。
+    const SORTED_PLAINTEXT: &str = r#"{"clienttype":"412","cpid":"55","dycpwd":"429344","extInfo":{"ifOpenAccount":"1"},"loginMode":"0","msisdn":"19900000000","pintype":"8","random":"hOjseB","verType":"1","version":"12.6.0"}"#;
+
+    const SORTED_WIRE: &str = "17e30bcd98e6e4bdccc6b6e0c034688a3d2db656484a7de56ee67b2580af3dde4075b72cd78a11415da4b19ce641dbf7fad4a096f842da2556008fbbc3521d6ebf0499470b3dcf08532c25cf5ce6ac9052c20db6035c039af766e0206a772f94c3933802caaa302cc5e6d3c7160711a3d966cfc770568650de3a503048bb660f9e57597dc82cf15674c8f622823bc517ef2f7f51483fdff8b8191c6f1e6335d9c48aaba2d076b067ff091c65f3a107a60bd61352d9718a0466512bce9a4397b6";
+
+    const APP_KEY: &str = "lYzvvBMUjucw+h^R";
+
+    #[test]
+    fn both_plaintexts_are_the_measured_186_bytes() {
+        // 长度只是**哨兵**，不是判据：两份键序不同的明文长度相同，
+        // 所以"长度对"根本无法区分它们 —— 真正的判据是下面那条整串比对。
+        assert_eq!(CAPTURED_PLAINTEXT.len(), 186);
+        assert_eq!(SORTED_PLAINTEXT.len(), 186);
+    }
+
+    #[test]
+    fn ecb_encrypt_reproduces_the_captured_golden_wire() {
+        // 这条钉的是"上游层有没有多加/少加/反做一次错位"。
+        // 一旦有人把旋转方向写反、或漏掉旋转，这里立刻炸，
+        // 而不是等一次真实登录收到 9103 才发现。
+        let ecb = aes_ecb_pkcs7_encrypt_hex(APP_KEY, CAPTURED_PLAINTEXT).unwrap();
+        assert_eq!(ecb.len(), 384, "186 字节 → PKCS7 补 6 → 192 字节 → 384 hex");
+        assert_eq!(
+            shift_tail10_to_front(&ecb),
+            GOLDEN_WIRE,
+            "加密 + 末 10 位错位必须逐字节命中抓包侧算出的黄金值"
+        );
+    }
+
+    #[test]
+    fn ecb_encrypt_reproduces_the_sorted_golden_wire() {
+        let wire =
+            shift_tail10_to_front(&aes_ecb_pkcs7_encrypt_hex(APP_KEY, SORTED_PLAINTEXT).unwrap());
+        assert_eq!(wire, SORTED_WIRE);
+        // 两份黄金值必须不同 —— 如果哪天相等了，说明键序没进加密输入，
+        // 那才是真的出错。
+        assert_ne!(GOLDEN_WIRE, SORTED_WIRE);
+    }
+
+    #[test]
+    fn wire_is_lowercase_hex() {
+        let ecb = aes_ecb_pkcs7_encrypt_hex(APP_KEY, CAPTURED_PLAINTEXT).unwrap();
+        let wire = shift_tail10_to_front(&ecb);
+        assert_eq!(wire, wire.to_ascii_lowercase(), "请求体是小写 hex");
+        assert!(wire.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn rotation_moves_exactly_the_tail_ten_to_the_front() {
+        // 逐位验证方向：不是"转了一圈"，而是"末 10 个搬到最前"。
+        let ecb = aes_ecb_pkcs7_encrypt_hex(APP_KEY, CAPTURED_PLAINTEXT).unwrap();
+        let wire = shift_tail10_to_front(&ecb);
+        assert_eq!(&wire[..10], &ecb[ecb.len() - 10..], "前 10 = 原串末 10");
+        assert_eq!(
+            &wire[10..],
+            &ecb[..ecb.len() - 10],
+            "其余 = 去掉末 10 的前缀"
+        );
+    }
+
+    #[test]
+    fn rotation_round_trips() {
+        for s in ["0123456789A", "abcdefghijklmnop", &"x".repeat(384)] {
+            let back = shift_head10_to_back(&shift_tail10_to_front(s));
+            assert_eq!(back, s, "两次旋转必须回到原串：{s}");
+        }
+    }
+
+    #[test]
+    fn short_inputs_are_identity_not_errors() {
+        // 客户端算出的下标是 `MAX(len,10)-10`，长度 ≤ 10 时就是 0，
+        // 拼接结果即原串 —— 所以这里**不该**报错，也不该补字符。
+        for s in ["", "a", "0123456789"] {
+            assert_eq!(shift_tail10_to_front(s), s);
+            assert_eq!(shift_head10_to_back(s), s);
+        }
+    }
+
+    #[test]
+    fn rotation_is_char_based_not_byte_based() {
+        // 10 个汉字 = 10 字符 / 30 字节。按字节实现会切在字符中间而 panic
+        // 或切错位置；按字符实现则"末 10 个字符"正好是全部，结果 = 原串。
+        let s = "零一二三四五六七八九";
+        assert_eq!(shift_tail10_to_front(s), s, "10 字符 → 原样");
+        // 11 个字符时，两者方向相反（这正是"认反"会踩的坑）：
+        //   末 10 个搬到最前 → 首字符落到末尾
+        //   前 10 个搬到末尾 → 末字符落到最前
+        let s11 = "零一二三四五六七八九十";
+        assert_eq!(shift_tail10_to_front(s11), "一二三四五六七八九十零");
+        assert_eq!(shift_head10_to_back(s11), "十零一二三四五六七八九");
+        // 它们互为逆操作
+        assert_eq!(shift_head10_to_back(&shift_tail10_to_front(s11)), s11);
+        assert_eq!(shift_tail10_to_front(&shift_head10_to_back(s11)), s11);
+    }
+
+    #[test]
+    fn wrong_rotation_direction_does_not_decrypt() {
+        // 这是最容易犯的错：把请求方向用到响应上。
+        // 旋转不改变字符集，所以"忘了反旋转"只会解出乱码或填充非法，
+        // 而不会在旋转这一步报错 —— 必须由解密层兜住。
+        let ecb = aes_ecb_pkcs7_encrypt_hex(APP_KEY, CAPTURED_PLAINTEXT).unwrap();
+        let wire = shift_tail10_to_front(&ecb);
+
+        // 正确方向：解得回原文
+        let ok = aes_ecb_pkcs7_decrypt_hex(APP_KEY, &shift_head10_to_back(&wire)).unwrap();
+        assert_eq!(ok, CAPTURED_PLAINTEXT);
+
+        // 未反旋转（方向写错）：必须失败，而不是安静地给出垃圾
+        assert!(
+            aes_ecb_pkcs7_decrypt_hex(APP_KEY, &wire).is_err(),
+            "漏掉反旋转必须报错"
+        );
+    }
+
+    #[test]
+    fn alt_key_does_not_decrypt_production_ciphertext() {
+        // 用错密钥（备用分支）会得到 9103，这里离线复现那条判据：
+        // 备用密钥必须解不开生产密钥的密文。
+        let ecb = aes_ecb_pkcs7_encrypt_hex(APP_KEY, CAPTURED_PLAINTEXT).unwrap();
+        assert!(
+            aes_ecb_pkcs7_decrypt_hex("+09T5lHhO+smS7x@", &ecb).is_err(),
+            "备用密钥不该解开生产密文"
+        );
+    }
+
+    #[test]
+    fn pkcs7_appends_a_full_block_when_already_aligned() {
+        // 16 字节整块时要补满一整块（16），不是补 0 —— 补 0 会让
+        // 服务端解出的明文尾部缺字节，表现为 JSON 解析失败。
+        let aligned = "0123456789abcdef";
+        assert_eq!(aligned.len(), 16);
+        let hexed = aes_ecb_pkcs7_encrypt_hex(APP_KEY, aligned).unwrap();
+        assert_eq!(hexed.len(), 64, "16 字节明文 → 32 字节密文");
+        assert_eq!(aes_ecb_pkcs7_decrypt_hex(APP_KEY, &hexed).unwrap(), aligned);
+    }
+
+    #[test]
+    fn ecb_round_trip_for_unspecified_lengths() {
+        for n in [0usize, 1, 15, 16, 17, 31, 32, 33, 186] {
+            let plain: String = (0..n).map(|i| char::from(b'a' + (i as u8 % 26))).collect();
+            let hexed = aes_ecb_pkcs7_encrypt_hex(APP_KEY, &plain).unwrap();
+            assert_eq!(
+                aes_ecb_pkcs7_decrypt_hex(APP_KEY, &hexed).unwrap(),
+                plain,
+                "长度 {n} 往返失败"
+            );
+        }
+    }
+
+    #[test]
+    fn encrypt_rejects_non_16_byte_keys() {
+        // 密钥按字节长度分派；非法长度必须报错而不是静默截断。
+        // App 登录密钥恰好 16 字节 → AES-128，这一点也要钉住。
+        assert_eq!(APP_KEY.len(), 16, "App 登录密钥是 16 字节 → AES-128");
+        assert!(aes_ecb_pkcs7_encrypt_hex("short", "x").is_err());
+        assert!(aes_ecb_pkcs7_encrypt_hex(&"k".repeat(20), "x").is_err());
     }
 }

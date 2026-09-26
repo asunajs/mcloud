@@ -662,3 +662,224 @@ async fn logout_request_carries_platform_headers() {
     // 登录链路的请求都只用那 5 个头（`x-yun-app-channel` 是登录后的）
     assert!(!req.headers.iter().any(|(k, _)| k == "x-yun-app-channel"));
 }
+
+// ══════════════════════════ App 端登录 ══════════════════════════
+
+/// 用 App 端密钥加密一段 userInfo，模拟 `thirdlogin` 的成功响应。
+///
+/// ⚠ 这里必须走 **App 的** 加解密器（含末 10 位错位），不能借 PC 那套：
+/// 两者密钥不同、且 App 多了旋转那一层。
+fn app_encrypted_user_info(user_info: &str) -> String {
+    app_login::AppLoginCrypto::production()
+        .encrypt_body(user_info)
+        .unwrap()
+}
+
+fn app_success_envelope(user_info: &str) -> String {
+    format!(
+        r#"{{"code":"0000","message":"请求成功","data":"{}"}}"#,
+        app_encrypted_user_info(user_info)
+    )
+}
+
+#[tokio::test]
+async fn app_send_code_surfaces_need_captcha_then_sent() {
+    // 首次发码回 200059554 是**常态**，不是错误。
+    let http = Scripted::new(&[
+        r#"{"success":false,"code":"200059554","message":"请先获取滑块拼图验证码","data":{"captchaType":2}}"#,
+        r#"{"success":true,"code":"0000","data":{"remainGetTimes":8}}"#,
+    ]);
+    let sms = AppSmsLogin::start("DEV1", "19900000001", &mut rng());
+
+    let first = sms.send_code(&http, 1).await.unwrap();
+    assert_eq!(
+        first,
+        app_login::AppSendSmsOutcome::NeedCaptcha {
+            captcha_type: Some(2)
+        }
+    );
+
+    let second = sms.send_code_with_slider(&http, 1, "466").await.unwrap();
+    assert_eq!(
+        second,
+        app_login::AppSendSmsOutcome::Sent {
+            remain_get_times: Some(8)
+        }
+    );
+
+    // 重发那一枪的 puzzleVerfycode 必须是编码后的值，不是明文坐标
+    let reqs = http.requests();
+    let sent = reqs[1].body.clone().unwrap();
+    assert!(sent.contains("puzzleVerfycode"));
+    assert!(!sent.contains("\"466\""), "不能把明文坐标发上去");
+}
+
+#[tokio::test]
+async fn app_send_code_request_carries_app_headers() {
+    let http = Scripted::new(&[r#"{"code":"0000","data":{}}"#]);
+    let sms = AppSmsLogin::start("DEV1", "19900000001", &mut rng());
+    sms.send_code(&http, 1_789_000_000_000).await.unwrap();
+
+    let req = &http.requests()[0];
+    assert_eq!(req.url, mcloud_upstream::endpoints::SEND_SMS_CODE);
+    let h = &req.headers;
+    assert!(h
+        .iter()
+        .any(|(k, v)| k == "x-yun-app-channel" && v == "10000020"));
+    assert!(h.iter().any(|(k, _)| k == "x-DeviceInfo"));
+    // 这个头会让响应变成解不开的密文，必须不发
+    assert!(!h.iter().any(|(k, _)| k == "hcy-cool-flag"));
+    // 恰好一个 content-type
+    assert_eq!(
+        h.iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn app_slider_puzzle_is_solvable_without_image_recognition() {
+    let enc = mcloud_crypto::encrypt_with_dynamic_iv(
+        mcloud_upstream::login::PUZZLE_AES_KEY.as_bytes(),
+        mcloud_upstream::login::PUZZLE_AES_IV,
+        "466",
+    )
+    .unwrap();
+    let reply = format!(
+        r#"{{"code":"0000","data":{{"picture":"BG","puzzle":"PZ","picWidth":"680","puzzleLeft":"{enc}"}}}}"#
+    );
+    let http = Scripted::new(&[&reply]);
+    let sms = AppSmsLogin::start("DEV1", "19900000001", &mut rng());
+    let puzzle = sms.slider_puzzle(&http, 1).await.unwrap();
+    assert_eq!(puzzle.answer().unwrap(), "466", "与 PC 端同一个第一方滑块");
+}
+
+#[tokio::test]
+async fn app_login_success_decrypts_the_session() {
+    let reply = app_success_envelope(r#"{"account":"19900000001","authToken":"tok"}"#);
+    let http = Scripted::new(&[&reply]);
+    let sms = AppSmsLogin::start("DEV1", "19900000001", &mut rng());
+    let v = sms.login(&http, 1, "429344").await.unwrap();
+    assert_eq!(v["account"], "19900000001");
+    assert_eq!(v["authToken"], "tok");
+
+    // 线上体必须是加密 + 旋转过的
+    let sent = http.requests()[0].body.clone().unwrap();
+    assert_eq!(sent.len(), 384);
+    assert!(!sent.contains("429344"));
+}
+
+#[tokio::test]
+async fn app_login_distinguishes_9103_from_9441() {
+    // 两个码的含义完全不同：9441 是用户输错，9103 是我们这边的实现问题。
+    // 混成一句"登录失败"会让实现缺陷看起来像用户错误。
+    let http = Scripted::new(&[r#"{"code":"9441","message":"验证码不正确"}"#]);
+    let sms = AppSmsLogin::start("DEV1", "19900000001", &mut rng());
+    let err = sms.login(&http, 1, "000000").await.unwrap_err();
+    let e = err.to_string();
+    assert!(e.contains("验证码"), "9441 应说验证码不对：{e}");
+    assert!(!e.contains("加密"), "9441 不该怪到加密头上：{e}");
+    // ⭐ 验证码错是**用户输入问题**，要映射成 400 而不是 500 ——
+    // 否则前端只能弹"服务器错误"，而用户需要知道的是"这个码不对"。
+    assert!(
+        matches!(err, mcloud_core::Error::Config(_)),
+        "9441 必须是 Config（→400），实际 {err:?}"
+    );
+
+    let http = Scripted::new(&[r#"{"code":"9103","message":"输入参数不合法"}"#]);
+    let sms = AppSmsLogin::start("DEV1", "19900000001", &mut rng());
+    let err = sms.login(&http, 1, "000000").await.unwrap_err();
+    let e = err.to_string();
+    assert!(e.contains("9103"), "9103 要如实报出来：{e}");
+    assert!(e.contains("实现问题"), "9103 是我们的 bug，要说清：{e}");
+    // 反过来说：这一条**不该**是 400 —— 它不是用户的错。
+    assert!(
+        !matches!(err, mcloud_core::Error::Config(_)),
+        "9103 不该归成用户输入错误"
+    );
+}
+
+#[tokio::test]
+async fn app_login_reports_missing_device_headers_as_9999() {
+    let http = Scripted::new(&[r#"{"code":"9999","message":"登录失败！"}"#]);
+    let sms = AppSmsLogin::start("DEV1", "19900000001", &mut rng());
+    let e = sms.login(&http, 1, "429344").await.unwrap_err().to_string();
+    assert!(e.contains("设备头"), "9999 多半是设备头问题：{e}");
+}
+
+#[test]
+fn app_account_uses_the_mobile_prefix_and_has_no_pc_platform() {
+    // ⭐ 这条钉住本次要补的缺口：App 登录产出的是 `mobile:` 前缀的 auth，
+    // 且**不能**带 pc_platform（带错了后续每个请求都会用错的 UA）。
+    let info = serde_json::json!({
+        "account": "19900000001",
+        "authToken": "tok-abc",
+        "userDomainId": "1990000000000000001",
+    });
+    let acct = account_from_app_login(&info, "DEV1").unwrap();
+
+    let decoded = mcloud_crypto::b64_decode(acct.auth.raw.trim_start_matches("Basic ")).unwrap();
+    let decoded = String::from_utf8(decoded).unwrap();
+    assert!(
+        decoded.starts_with("mobile:19900000001:tok-abc"),
+        "App 账号必须是 mobile 前缀：{decoded}"
+    );
+    assert_eq!(acct.pc_platform, None, "App 账号不是 PC 形态");
+    assert_eq!(acct.device_id.as_str(), "DEV1");
+    assert_eq!(
+        acct.user_domain_id.as_deref(),
+        Some("1990000000000000001"),
+        "刷新凭据要用它，登录时不取以后就没了"
+    );
+}
+
+#[test]
+fn app_and_pc_accounts_have_different_prefixes() {
+    // 同一条 userInfo 走两条路，前缀必须不同 —— 混用会被上游认成另一个客户端。
+    let info = serde_json::json!({ "account": "19900000001", "authToken": "tok" });
+    let app = account_from_app_login(&info, "D").unwrap();
+    let pc = account_from_login(&info, PcPlatform::Windows, "D").unwrap();
+
+    let dec = |a: &Account| {
+        String::from_utf8(
+            mcloud_crypto::b64_decode(a.auth.raw.trim_start_matches("Basic ")).unwrap(),
+        )
+        .unwrap()
+    };
+    assert!(dec(&app).starts_with("mobile:"));
+    assert!(dec(&pc).starts_with("pc:"));
+    assert_ne!(app.auth.raw, pc.auth.raw);
+    assert_eq!(pc.pc_platform, Some(PcPlatform::Windows));
+    assert_eq!(app.pc_platform, None);
+}
+
+#[test]
+fn app_account_rejects_incomplete_user_info() {
+    // 缺 authToken 必须报错，不能造一个空凭据出来。
+    let info = serde_json::json!({ "account": "19900000001" });
+    assert!(account_from_app_login(&info, "D").is_err());
+}
+
+#[tokio::test]
+async fn app_login_upstream_rejection_is_user_facing_not_rust_debug() {
+    // 实测撞到过：手机号格式不对时上游回 `05010047`。
+    // 早期实现把它拼成了 `App 登录未成功：Other { code: Some(5010047), ... }`
+    // —— 把 Rust 枚举语法糊到了用户脸上，且归成 500。
+    let http =
+        Scripted::new(&[r#"{"code":"05010047","message":"国家码和手机号不匹配或手机号格式错误"}"#]);
+    let sms = AppSmsLogin::start("DEV1", "19900001", &mut rng());
+    let err = sms.login(&http, 1, "123456").await.unwrap_err();
+    let e = err.to_string();
+
+    // 上游的人话要带出来
+    assert!(e.contains("手机号格式错误"), "要透传上游原因：{e}");
+    // 不能泄漏 Rust 语法
+    assert!(!e.contains("Other {"), "不能打印枚举 Debug：{e}");
+    assert!(!e.contains("Some("), "不能打印 Option Debug：{e}");
+    // 用户可修的错误 → 400
+    assert!(
+        matches!(err, mcloud_core::Error::Config(_)),
+        "上游业务拒绝应是 Config（→400）：{err:?}"
+    );
+}
