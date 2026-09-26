@@ -215,40 +215,61 @@ func TestMailConvertPDFKeepsOutOfRangeConvertType(t *testing.T) {
 //
 // 单引号那一档对这一族**有出处**（旧 TS 的 `parseLooseJson` 就是为 `RmWeb` / `mw2` 写的），
 // 与 ② 那一发的"外推"不同 —— 那一格的说明在 `app_mail139.go` 的 [parseMailJSONText] 头注。
+//
+// `wantDir` 那一列钉的是 2026-09-26 实拍的形状：成功那一发 `var.directoryId` 非空、
+// `var.fileId` **空串**。反向改坏它：把读 `directoryId` 改成读 `fileId` ⇒ 空串 ⇒ 这一条红。
 func TestAppMailConvertPDFJudgement(t *testing.T) {
 	cases := []struct {
 		name      string
 		body      string
 		wantError bool
 		wantText  string
+		wantDir   string
 	}{
-		{"标准 JSON 的 S_OK", `{"code":"S_OK","var":{"taskId":"1"}}`, false, ""},
-		{"单引号的 S_OK", `{'code':'S_OK'}`, false, ""},
+		{"标准 JSON 的 S_OK", `{"code":"S_OK","var":{"taskId":"1"}}`, false, "", ""},
+		{"单引号的 S_OK", `{'code':'S_OK'}`, false, "", ""},
+		{
+			"实拍两发 S_OK 的三格：目录 id 有、fileId 空",
+			`{'code':'S_OK','summary':'已成功转存至：移动云盘个人云>139邮箱-我的附件-PDF转换',` +
+				`'var':{'directoryId':'DIR-33','fileId':'','html5Url':'https://example'}}`,
+			false, "", "DIR-33",
+		},
 		{
 			"非 S_OK 念上游给的两枚字符串",
 			`{"code":"E_LIMIT","summary":"权益用完了"}`,
-			true, "E_LIMIT",
+			true, "E_LIMIT", "",
 		},
-		{"解不开只说字节数与状态", `not json at all`, true, "解不开"},
-		{"顶层不是对象", `[{"code":"S_OK"}]`, true, "不是对象"},
+		{
+			"实拍：权益用完那一发（code 是十位数字串）",
+			`{"code":"1010010111","summary":"用户权益已经使用完",` +
+				`"var":{"directoryId":"","fileId":"","html5Url":""}}`,
+			true, "用户权益已经使用完", "",
+		},
+		{"解不开只说字节数与状态", `not json at all`, true, "解不开", ""},
+		{"顶层不是对象", `[{"code":"S_OK"}]`, true, "不是对象", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			client := &mailFailingClient{result: core.HTTPResponse{
 				Status: 200, Headers: []core.HeaderPair{{"content-type", "text/javascript"}},
 				Body: core.Body(c.body)}}
-			got := NewUpstream(client).AppMailConvertPDF(context.Background(),
+			receipt, got := NewUpstream(client).AppMailConvertPDF(context.Background(),
 				mailAssetSession(mailSynthSID, mailSynthRMKey),
 				mailAssetCguid, mailAssetRnd, "a.pdf", "fid", 1, 1)
 			if c.wantError {
 				if got == nil {
 					t.Fatal("应回错误")
 				}
+				if receipt.DirectoryID != "" {
+					t.Errorf("没认的那一发不该交回目录 id，实得 %q", receipt.DirectoryID)
+				}
 				if c.wantText != "" && !strings.Contains(got.Error(), c.wantText) {
 					t.Errorf("错误文本应含 %q，实得 %s", c.wantText, got.Error())
 				}
 			} else if got != nil {
 				t.Fatalf("S_OK 应认，实得 %v", got.Message())
+			} else if receipt.DirectoryID != c.wantDir {
+				t.Errorf("目录 id 应为 %q，实得 %q", c.wantDir, receipt.DirectoryID)
 			}
 			if got != nil {
 				if strings.Contains(got.Error(), mailSynthSID) || strings.Contains(got.Error(), mailSynthRMKey) {
@@ -268,11 +289,14 @@ func TestAppMailConvertPDFJudgement(t *testing.T) {
 // 状态码也在"—— 反向改坏：把 `Raw` 换成不看状态的直发 ⇒ 这一条红。
 func TestAppMailConvertPDFFailsOnStatus(t *testing.T) {
 	client := &mailFailingClient{result: core.HTTPResponse{Status: 500, Body: core.Body(`{"code":"E_X"}`)}}
-	got := NewUpstream(client).AppMailConvertPDF(context.Background(),
+	receipt, got := NewUpstream(client).AppMailConvertPDF(context.Background(),
 		mailAssetSession(mailSynthSID, mailSynthRMKey),
 		mailAssetCguid, mailAssetRnd, "a.pdf", "fid", 1, 1)
 	if got == nil {
 		t.Fatal("500 应交回错误")
+	}
+	if receipt.DirectoryID != "" {
+		t.Errorf("非 2xx 那一发不该交回目录 id，实得 %q", receipt.DirectoryID)
 	}
 	if !strings.Contains(got.Error(), "500") {
 		t.Errorf("应带 HTTP 状态，实得 %s", got.Error())

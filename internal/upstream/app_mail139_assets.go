@@ -270,38 +270,60 @@ func MailConvertPDFRequest(
 	return request, nil
 }
 
-// AppMailConvertPDF 发第 ⑥ 枪。**写请求**：转换产物会落进用户网盘。
+// MailConvertReceipt 是 ⑥ **认了**那一发时上游自己交代的东西。
+//
+// 两格的证据等级不一样，分开说：
+//   - `Summary` 在成功那一发写着"已成功转存至：移动云盘个人云>139邮箱-我的附件-PDF转换"
+//     （2026-09-26 一号第二趟实拍）⇒ "产物落在**网盘里**那个目录"这一句是**上游的原话**，
+//     不是我们从目录里数出来的。
+//   - `DirectoryID` 取自 `var.directoryId`：两发 S_OK 实拍里它都是**非空串**，
+//     且探针把它与"从根目录一级级导航到那一枚目录"得到的 fileId 比过**相等**（一发）。
+//     ⚠ 它**不等于**产物自己的 fileId —— `var.fileId` 在两发 S_OK 里**都是空串**，
+//     所以"要删哪一枚"仍然只能靠列这个目录 + 按名字精确对上（见 `internal/app/task_matrix_mail.go`
+//     的 [runMailPDF]），不许在这里推断"fileId 空 = 没产物"（那就是本次实测被推翻的那一版结论）。
+type MailConvertReceipt struct {
+	Summary     string
+	DirectoryID string
+}
+
+// AppMailConvertPDF 发第 ⑥ 枪。**写请求**：转换会往用户网盘**另存一份**
+// （2026-09-26 实拍：产物是 `asign-pdf-<素材毫秒数>.docx`，落在 `var.directoryId` 那个目录，
+// 全树只读走查在两枚测试号里同型看到，见 `docs/capture/app-cloud-residue-samples.txt` §4）。
 //
 // 判据：`code == "S_OK"` ⇒ 认这一发做成了（旧 TS `runners.ts:336-340` 就是这一句，
-// 失败时它打 `code` 与 `summary`）。⚠ 它**没有**读 `var` 里任何东西，所以那一格
-// 形状仍然零样本 —— 别在这里加"从 var 取产物 fileId"的推断。
+// 失败时它打 `code` 与 `summary`）。⚠ 它**不读** `var.fileId` —— 两发 S_OK 实拍里那一格
+// **都是空串**，产物自己的 fileId 只能靠列目录 + 名字对上（[MailConvertReceipt] 里说了为什么
+// 不许反过来推断"没 fileId = 没产物"）。
 //
-// 产物进不进 [CloudFileIDs] 那一类清理账本由**调用方**决定：这一口产出的那个 PDF
-// 是不是就是传进去的那一个 `fileId`（转换 = 原地换内容，还是另存一份），
-// 本仓**未测试**，所以不敢替它登记删除。
+// 产物进不进 [CloudFileIDs] 那一类清理账本由**调用方**决定：本层只把"上游交代的那一格目录 id"
+// 交出去，不替编排层去列目录（列目录用的是网盘那套头，与本层的邮箱会话票**不是一族**）。
 func (u *Upstream) AppMailConvertPDF(
 	ctx context.Context, session MailSession, cguid, rnd, fileName, fileID string,
 	fileRealSize int64, convertType int,
-) *core.Error {
+) (MailConvertReceipt, *core.Error) {
 	request, perr := MailConvertPDFRequest(session, cguid, rnd, fileName, fileID, fileRealSize, convertType)
 	if perr != nil {
-		return perr
+		return MailConvertReceipt{}, perr
 	}
 	response, perr := u.Raw(ctx, request)
 	if perr != nil {
-		return redactError(perr, session.SID, session.RMKey)
+		return MailConvertReceipt{}, redactError(perr, session.SID, session.RMKey)
 	}
 	value, perr := parseMailAssetEnvelope(response, "邮箱 PDF 转换")
 	if perr != nil {
-		return redactError(perr, session.SID, session.RMKey)
+		return MailConvertReceipt{}, redactError(perr, session.SID, session.RMKey)
 	}
 	obj, _ := value.(map[string]any)
 	code, _ := obj["code"].(string)
 	if code == mailAssetOKCode {
-		return nil
+		receipt := MailConvertReceipt{}
+		receipt.Summary, _ = obj["summary"].(string)
+		inner, _ := obj["var"].(map[string]any)
+		receipt.DirectoryID, _ = inner["directoryId"].(string)
+		return receipt, nil
 	}
 	summary, _ := obj["summary"].(string)
-	return core.NewUpstream(response.Status, "邮箱 PDF 转换没认：上游 code="+
+	return MailConvertReceipt{}, core.NewUpstream(response.Status, "邮箱 PDF 转换没认：上游 code="+
 		clipRunes(codeOrUnknown(code), 60)+assetSummaryHint(summary))
 }
 

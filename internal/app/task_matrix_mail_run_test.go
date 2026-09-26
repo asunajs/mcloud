@@ -69,6 +69,13 @@ const (
 	// `mailAssetOKCode` 那一条注释）。
 	mxMailAssetOK = `{"code":"S_OK"}`
 	mxMailAssetNo = `{"code":"S_ERROR","summary":"额度不足"}`
+
+	// mxMailConvertOK 是 ⑥ **认了**那一发的实拍形状（2026-09-26 一号两发 S_OK 同型）：
+	// 除了 `code` 还交代 `summary` 与 `var.directoryId`，而 **`var.fileId` 是空串** ——
+	// 这一格是整个夹具的重点：产物自己的 id 不在响应里，只能列那个目录按名字对上。
+	// 上面那枚 `mxMailAssetOK`（只有 code）留着演"⑥ 没交代目录"那一档。
+	mxMailConvertOK = `{"code":"S_OK","summary":"已成功转存至：移动云盘个人云>139邮箱-我的附件-PDF转换",` +
+		`"var":{"directoryId":"SYNTH-DIR-1","fileId":"","html5Url":"https://synth.invalid/x"}}`
 )
 
 // mailSessionBody 是 ② 的成功响应（`var.sid` + `var.rmkey`）。
@@ -147,6 +154,41 @@ func mailCreateBody(body string) []liveTaskRoute {
 		{mxPutHost, []string{""}},
 		{mxCompleteEndpoint, []string{`{"code":"0000","success":true}`}},
 	}
+}
+
+// ── 产物那一枚（⑥ 认了之后落在 `var.directoryId` 那个目录里的 `.docx`）──
+//
+// 列目录那一口与 AI 头像那条链**是同一个端点、同一份信封** ⇒ 夹具直接复用那边的
+// [aiAvatarFileListEndpoint] 与 [aiAvatarFileListOK]，不在这里再抄一份形状（抄了就会漂移）。
+// 那边的 `fileId` 按顺序是 `F-0`、`F-1`… ⇒ 这一族只给一枚名字，产物 id 恒为 `F-0`。
+
+// mailPDFSourceName 是**这一份夹具**里那一趟真正发出去的素材名。
+//
+// 它由同一个固定时钟算出来（`mailPDFAsset(nowMillis())`），不是抄来的字面量：
+// 名字变了（前缀、扩展名、进制）这一族就跟着变，用例断的仍是"产物按素材干名对上"。
+func mailPDFSourceName() string {
+	name, _ := mailPDFAsset(testClock().Now().UnixMilli())
+	return name
+}
+
+// mailProductRoute 给"列产物那个目录"那一枪编一页，页里就摆 `name` 那一枚。
+// `name` 空串 ⇒ 摆一个**对不上**的名字（演"轮询到最后一档也没读到"）。
+func mailProductRoute(name string) liveTaskRoute {
+	if name == "" {
+		name = "别人的文件.png"
+	}
+	return liveTaskRoute{aiAvatarFileListEndpoint, []string{aiAvatarFileListOK(name)}}
+}
+
+// mailFileListBodies 按发出顺序取出全部列目录请求的体。
+func mailFileListBodies(script *liveTaskScript) []string {
+	var bodies []string
+	for _, request := range script.snapshot() {
+		if strings.Contains(request.URL, aiAvatarFileListEndpoint) {
+			bodies = append(bodies, string(request.Body))
+		}
+	}
+	return bodies
 }
 
 // queryValue 取出 URL 查询里那一枚参数的值（按 `&` 截断）。
@@ -669,18 +711,26 @@ func TestTaskMatrixRunMailBackupFailureKeepsCredentialsOut(t *testing.T) {
 	}
 }
 
-// TestTaskMatrixRunMailPDFUploadsThenConverts ⭐ 1014：会话 → 传一份 PDF（三枪）→ ⑥。
+// TestTaskMatrixRunMailPDFUploadsThenConverts ⭐ 1014：会话 → 传一份 PDF（三枪）→ ⑥ → 找回产物。
 //
-// 三格判据各挡一种错：
+// 四格判据各挡一种错：
 //   - **先换会话再传**：反过来会出现"会话都没换到，已经在用户网盘里写了一个文件"。
 //   - **⑥ 的 fileId 来自这一次上传的响应**：旧实现读 `ctx.state.files` 的末位，那是
 //     共享可变状态（同一趟里别的任务也往里塞）⇒ 用固定夹具时看不出来，一旦前一格
 //     传了 3 个文件就转错了对象。这里把 create 回的那一枚钉进 ⑥ 的体。
-//   - **链尾清掉传上去那一份**（转换产物不在这一条链上，R36）。
+//   - ⭐ **产物也进清理账**（2026-09-26 实拍：⑥ 认了之后在 `var.directoryId` 那个目录里
+//     另存一份 `<素材干名>.docx`，而响应里**没有**它的 fileId）⇒ 这一条把它找回来、
+//     与素材同一发 `batchTrash` 删掉。少了这一步就是"每次跑 1014 都在用户网盘里留一枚"
+//     —— 现场那两个测试号里的 13 枚 `asign-pdf-*.docx` 就是这么攒出来的。
+//   - **链尾清掉传上去那一份**（素材）。
 func TestTaskMatrixRunMailPDFUploadsThenConverts(t *testing.T) {
 	waiting := mxItems(mxItem(1014, "day", "PDF 转换", "WAIT", "", 0))
+	sourceName := mailPDFSourceName()
+	productID := "F-0"
 	script := mxScript([]string{"JWT-1"}, waiting, nil, append(
-		append(append(mailAssetRoutes(mxMailAssetOK, mxMailAssetOK), mailSessionOnly()...),
+		append(append(append(
+			mailAssetRoutes(mxMailAssetOK, mxMailConvertOK), mailSessionOnly()...),
+			mailProductRoute(strings.TrimSuffix(sourceName, ".pdf")+".docx")),
 			mxUploadRoutes(1)...), mxHappy()...)...)
 	log := &mxLog{}
 	res, perr := mxResult(t, mailRun(t, script, log.handle()))
@@ -732,21 +782,50 @@ func TestTaskMatrixRunMailPDFUploadsThenConverts(t *testing.T) {
 	if !strings.Contains(body, `<string name="fileName">asign-pdf-`) {
 		t.Errorf("⑥ 的 fileName 要跟上到网盘的那一个名字（同一枚时间戳），实得 %q", body)
 	}
-	// 网盘那一格进了清理账本，链尾删的是**同一枚** id。
-	if len(res.CloudFileIDs) != 1 || res.CloudFileIDs[0] != "SYNTH-FID-1" {
-		t.Errorf("传上去的 fileId 要进清理链，实得 %v", res.CloudFileIDs)
+	// ⭐ 清理账本上有**两枚**：素材与产物。旧实现只记素材那一枚，产物那一枚从来没人管
+	// ⇒ 反向改坏：把 `e.cloudFileIDs = append(e.cloudFileIDs, products...)` 删掉，
+	// 这一格红（`F-0` 不见了），而下面那句「产物已对上」还会照念 —— 所以两条都要断。
+	if len(res.CloudFileIDs) != 2 || res.CloudFileIDs[0] != "SYNTH-FID-1" ||
+		res.CloudFileIDs[1] != productID {
+		t.Errorf("素材与产物都该进清理链（顺序：先素材后产物），实得 %v", res.CloudFileIDs)
 	}
-	if n := mxTrashCount(script); n != 1 || !strings.Contains(mxTrashBodies(script)[0], "SYNTH-FID-1") {
-		t.Errorf("链尾该把这一份移进回收站，实得 %d 次 / %v", n, mxTrashBodies(script))
+	// 列目录那一枪：恰好一发（第一次轮询就撞上 ⇒ 不该白等第二档），
+	// 且**列的是 ⑥ 交代的那个目录**（拿 directoryId 当 parentFileId，不是根、也不是按名字猜）。
+	if n := script.count(aiAvatarFileListEndpoint); n != 1 {
+		t.Errorf("产物第一枪就撞上 ⇒ 列目录该一发，实得 %d", n)
+	}
+	bodies := mailFileListBodies(script)
+	if len(bodies) != 1 {
+		t.Fatalf("没看到列目录那一枪的请求体，实得 %d 条", len(bodies))
+	}
+	if !strings.Contains(bodies[0], `"parentFileId":"SYNTH-DIR-1"`) {
+		t.Errorf("列目录要用 ⑥ 交代的 var.directoryId 当 parentFileId，实得 %q", bodies[0])
+	}
+	// 链尾**一发** batchTrash 删两枚（"一次删多个"是这一族省请求的办法，别退化成两枪）。
+	trash := mxTrashBodies(script)
+	if len(trash) != 1 || !strings.Contains(trash[0], "SYNTH-FID-1") ||
+		!strings.Contains(trash[0], productID) {
+		t.Errorf("链尾该把素材与产物一并移进回收站，实得 %v", trash)
+	}
+	if n := mxTrashCount(script); n != 1 {
+		t.Errorf("清理该恰好一枪，实得 %d", n)
 	}
 	if res.Steps[0].Uploads != 1 || res.Counts.Uploaded != 1 {
-		t.Errorf("这一条要按'写了一个文件'记账，实得 %+v / %+v", res.Steps[0], res.Counts)
+		t.Errorf("这一条要按'写了一个文件'记账（产物不是上传那一半，不计进 Uploads），实得 %+v / %+v",
+			res.Steps[0], res.Counts)
 	}
 	if !strings.Contains(log.joined(), "PDF 转换已提交") {
 		t.Errorf("成功那一档要念「已提交」（不念「已完成」：成败由复查说），实得：\n%s", log.joined())
 	}
 	if !strings.Contains(log.joined(), "PDF 素材已上传") {
 		t.Errorf("上传那一行要单独念（它说了走了哪一档），实得：\n%s", log.joined())
+	}
+	if !log.has("PDF 转换产物已对上（链尾一并移进回收站） PDF 转换 1014") {
+		t.Errorf("对上那一枚要念出来（它是'这一趟没在网盘里留东西'的唯一凭据），实得：\n%s",
+			log.joined())
+	}
+	if strings.Contains(log.joined(), "PDF 转换产物没对上") {
+		t.Errorf("撞上了就不许念「没对上」（那会让人以为留了残留）：\n%s", log.joined())
 	}
 	if strings.Contains(log.joined(), "PDF 转换失败") {
 		t.Errorf("全成功的一趟不许念失败：\n%s", log.joined())
@@ -799,11 +878,16 @@ func TestTaskMatrixRunMailPDFSkipsConvertWithoutFileID(t *testing.T) {
 	}
 }
 
-// TestTaskMatrixRunMailPDFFailureStillTrashesUploadedFile ⭐ ⑥ 被拒 ⇒ 传上去那一份仍要删。
+// TestTaskMatrixRunMailPDFFailureStillTrashesUploadedFile ⭐ ⑥ 被拒 ⇒ 只清素材，且**不**去找产物。
 //
 // 这一格钉的是**副作用收尾**：写已经发生了，玩法成没成不改变"要把它清掉"。
 // 反过来的写法（只在成功时记账）会留下一个用户网盘里没人认领的文件，
 // 而那正是本仓给这一族加清理链的全部理由。
+//
+// ⭐ 另一半是 2026-09-26 新接的那一步**不该在这条路上跑**：⑥ 没认 ⇒ 它一个字都没交代
+// （实拍那一发回的是 `code:"1010010111"` + `summary:"用户权益已经使用完"`，`var.*` 全空），
+// 而"上游没认的转换不产文件"是实测读数（那一发之后只读走查里没有多出这一趟的那一枚）
+// ⇒ 去列目录就是白敲一发，还可能把**上一趟**留下的那一枚当成这一趟的产物删掉。
 func TestTaskMatrixRunMailPDFFailureStillTrashesUploadedFile(t *testing.T) {
 	waiting := mxItems(mxItem(1014, "day", "PDF 转换", "WAIT", "", 0))
 	script := mxScript([]string{"JWT-1"}, waiting, nil, append(append(append(
@@ -817,6 +901,9 @@ func TestTaskMatrixRunMailPDFFailureStillTrashesUploadedFile(t *testing.T) {
 	if n := script.count(mxMailDiskEndpoint); n != 1 {
 		t.Errorf("⑥ 该发出去过，实得 %d", n)
 	}
+	if n := script.count(aiAvatarFileListEndpoint); n != 0 {
+		t.Errorf("⑥ 没认就不该去列产物目录（白打一枪，还可能删掉上一趟的残留），实得 %d", n)
+	}
 	text := res.Steps[0].Err
 	if !strings.Contains(text, "PDF 转换（⑥）失败") {
 		t.Errorf("要说清挂的是 ⑥（不是会话、也不是上传），实得 %q", text)
@@ -824,11 +911,17 @@ func TestTaskMatrixRunMailPDFFailureStillTrashesUploadedFile(t *testing.T) {
 	if !strings.Contains(text, "S_ERROR") {
 		t.Errorf("上游那句 code 要带进来，实得 %q", text)
 	}
-	if !strings.Contains(text, "转换产物") {
-		t.Errorf("要写明产物那一格未知（R36），别让人以为'跑完什么都没留下'，实得 %q", text)
+	if !strings.Contains(text, "不产文件") {
+		t.Errorf("要写明这一档不产文件（R36 的实测），别让人以为'跑完什么都没留下'是运气，实得 %q", text)
+	}
+	if !strings.Contains(text, "移进回收站") {
+		t.Errorf("要说清素材仍会被清走，实得 %q", text)
 	}
 	if n := mxTrashCount(script); n != 1 || !strings.Contains(mxTrashBodies(script)[0], "SYNTH-FID-1") {
 		t.Errorf("失败也要清理那一份素材，实得 %d 次 / %v", n, mxTrashBodies(script))
+	}
+	if len(res.CloudFileIDs) != 1 {
+		t.Errorf("账上只该有素材那一枚，实得 %v", res.CloudFileIDs)
 	}
 	if !log.hasAt(core.LevelError, "PDF 转换失败 PDF 转换 1014") {
 		t.Errorf("⑥ 被拒是 error，实得：\n%s", log.joined())
@@ -838,6 +931,82 @@ func TestTaskMatrixRunMailPDFFailureStillTrashesUploadedFile(t *testing.T) {
 	}
 	if res.Counts.Failed != 1 {
 		t.Errorf("应落失败 1 条，实得 %+v", res.Counts)
+	}
+}
+
+// TestTaskMatrixRunMailPDFProductNotFoundWarnsWithoutFailing ⭐ 产物找不回：念出来，但不判红。
+//
+// 这一条钉三格，每一格都是"改了会静默变坏"的那种：
+//   - ⭐ **不并进 problems**（反向改坏：把 `return true, problems` 前加一句
+//     `problems = append(problems, why)` ⇒ 这一条红在 `Failed`）。理由成文在
+//     `task_matrix_mail.go`：转换已经做成，判红等于催用户重跑，而重跑会**再耗一次权益**
+//     （一号两发 S_OK 之后上游就回"用户权益已经使用完"）再多留一枚残留。
+//   - **轮询到窗口尽头**才认输（4 档 ⇒ 4 枪、3 次等待）：反向改坏"只列一枪就走"，
+//     红在实得 1 —— 而实拍两发都在**第二次**轮询才读到，一枪就走等于这一族永远找不到产物。
+//   - **不误删别人的文件**：这一页里只有"对不上名字"的那一枚 ⇒ 账上仍只有素材一枚，
+//     `F-0` 不许进清理链（与 [TestTaskMatrixRunMailPDFSkipsConvertWithoutFileID] 里
+//     "不是我们造的坑不许删"同一条纪律）。
+func TestTaskMatrixRunMailPDFProductNotFoundWarnsWithoutFailing(t *testing.T) {
+	waiting := mxItems(mxItem(1014, "day", "PDF 转换", "WAIT", "", 0))
+	script := mxScript([]string{"JWT-1"}, waiting, nil, append(
+		append(append(append(
+			mailAssetRoutes(mxMailAssetOK, mxMailConvertOK), mailSessionOnly()...),
+			mailProductRoute("")), mxUploadRoutes(1)...), mxHappy()...)...)
+	log := &mxLog{}
+	res, perr := mxResult(t, mailRun(t, script, log.handle()))
+	if perr != nil {
+		t.Fatalf("产物找不回不该让整趟报错: %v", perr)
+	}
+	if n := script.count(aiAvatarFileListEndpoint); n != mailPDFProductPolls {
+		t.Errorf("该轮询到窗口尽头（%d 枪）才认输，实得 %d", mailPDFProductPolls, n)
+	}
+	if !log.hasAt(core.LevelWarn, "PDF 转换产物没对上") {
+		t.Errorf("没对上要念 warn（不静默），实得：\n%s", log.joined())
+	}
+	if !strings.Contains(log.joined(), "它仍会留在网盘里") {
+		t.Errorf("要说清代价是'留一枚在网盘里'，别只念一句失败，实得：\n%s", log.joined())
+	}
+	if strings.Contains(log.joined(), "F-0") {
+		t.Errorf("对不上名字的那一枚不许进事件流（它是别人的文件）：\n%s", log.joined())
+	}
+	if len(res.CloudFileIDs) != 1 || res.CloudFileIDs[0] != "SYNTH-FID-1" {
+		t.Errorf("账上只该有素材那一枚（产物没对上就不删它），实得 %v", res.CloudFileIDs)
+	}
+	if tr := mxTrashBodies(script); len(tr) != 1 || strings.Contains(tr[0], "F-0") {
+		t.Errorf("链尾那一发只许删素材，实得 %v", tr)
+	}
+	if res.Counts.Ran != 1 || res.Counts.Failed != 0 {
+		t.Errorf("转换做成了就不该落失败（判红会诱导重跑，见函数头），实得 %+v", res.Counts)
+	}
+}
+
+// TestTaskMatrixRunMailPDFProductWithoutDirectoryID ⭐ ⑥ 认了但没交代目录 ⇒ 一枪都不去列。
+//
+// 反向改坏：把 `directoryID == ""` 那一支删掉 ⇒ 拿着空 `parentFileId` 去敲网盘，
+// 而"空 parentFileId 是根目录还是全树"未测试 —— 真按根目录那一页去找，
+// 表现是每次都白敲一枪且永远对不上（产物在第 3 层那个目录里，不在根目录）。
+// 这一条也不许去**按名字猜目录**（那三枚名是上游的系统目录名，改名就失效）。
+func TestTaskMatrixRunMailPDFProductWithoutDirectoryID(t *testing.T) {
+	waiting := mxItems(mxItem(1014, "day", "PDF 转换", "WAIT", "", 0))
+	script := mxScript([]string{"JWT-1"}, waiting, nil, append(
+		append(append(mailAssetRoutes(mxMailAssetOK, mxMailAssetOK), mailSessionOnly()...),
+			mxUploadRoutes(1)...), mxHappy()...)...)
+	log := &mxLog{}
+	res, perr := mxResult(t, mailRun(t, script, log.handle()))
+	if perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	if n := script.count(aiAvatarFileListEndpoint); n != 0 {
+		t.Errorf("⑥ 没交代目录就不该列任何东西（拿空 parentFileId 去猜是白敲），实得 %d", n)
+	}
+	if !log.hasAt(core.LevelWarn, "PDF 转换产物没对上") {
+		t.Errorf("仍要念一句没对上（不假装清干净了），实得：\n%s", log.joined())
+	}
+	if !strings.Contains(log.joined(), "没交代产物在哪个目录") {
+		t.Errorf("要说清原因在 ⑥ 那一侧（不是'网盘里没有'），实得：\n%s", log.joined())
+	}
+	if len(res.CloudFileIDs) != 1 || res.Counts.Failed != 0 || res.Counts.Ran != 1 {
+		t.Errorf("仍只清素材、仍算做成，实得 %v / %+v", res.CloudFileIDs, res.Counts)
 	}
 }
 

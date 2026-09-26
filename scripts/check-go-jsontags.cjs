@@ -707,6 +707,9 @@ const UNTAGGED_ALLOWED = {
   // ── 139 邮箱会话那一族（#67，2026-09-25 随玩法 472/473 落地）──
   'internal/upstream/app_mail139.go:MailSession':
     '两张字段（`SID` / `RMKey`）**都是会话凭据**，类型是 `core.SecretValue`：它的 `String()` 只挡打印，**不挡 `encoding/json`** ⇒ 一旦补上 tag，"顺手 marshal 一下这张会话"就会把 sid/rmkey 原文写进日志、错误文本或 fixture（三者都是本仓明令禁止的落点，见 `docs/sanitize-guide.md`）。这一族的③那一发更是把两枚直接拼进 URL、而传输层错误原样嵌 URL（`internal/io/client.go` 的 `mapTransportError`）⇒ 不给 tag 是"只进不出"这条边界在类型上的那一份，不是漏写。响应形状零实拍（② 那条只拍到请求面）⇒ 也没有任何外部契约要钉',
+  // ── 139 邮箱资产侧那一族（#71 落地，本轮 2026-09-26 加 ⑥ 的回执）──
+  'internal/upstream/app_mail139_assets.go:MailConvertReceipt':
+    '⑥ 认下那一发时上游交代的**两格**（`summary` 原话 + `var.directoryId`），是手解 `map[string]any` 之后摊出来的**内存解析结果**：对外只有编排层拼的那一句人话（`runMailPDF` 的失败串与 warn 行），没有任何读者要这一族的 JSON 形状 ⇒ 没有契约要钉。⚠ 反向同样不许为了过门禁补 tag：`DirectoryID` 是**用户网盘里那一枚目录的真实 fileId**（本仓纪律："真跑读数里的真实 fileId 不进任何成文"），而 `Summary` 里那句"已成功转存至：…"带用户可见的路径 —— 一旦可 marshal，"顺手把回执整个打出去"就会把两者写进日志或响应体',
   // ── 任务拓展那一族（#81，2026-09-26 随 `task-expansion` 落地）──
   'internal/app/task_expansion_run.go:TaskExpansionRun':
     '一条链的**注入点**，不是数据：内嵌的 `SignInWorld` 里装着 `*upstream.Upstream`（HTTP 客户端）、`*SessionPool`（进程内**所有账号**的票池）与 `core.StateStore`（库句柄），marshal 到它们要么直接报错、要么把别账号的凭据带出进程；`Wait`/`BackupWait` 两格的正误只服务于测试压小等待，没有任何外部读者。对外形状另有出口：`RunReport` 与 `SummaryLine`（`internal/exec`）⇒ 补 tag 只会造出第二条**没人读**的形状',

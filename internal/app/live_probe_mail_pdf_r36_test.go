@@ -209,8 +209,8 @@ const (
 	// ⚠ 它**不进**生产解析器：本仓今天没有任何一处按 `type` 分流（要加分流先按 §1.5 登记）。
 	liveProbeFolderTypeWord = "folder"
 
-	liveProbeWalkMaxDepth = 2
-	liveProbeWalkMaxDirs  = 60
+	liveProbeWalkMaxDepth = 3
+	liveProbeWalkMaxDirs  = 200
 )
 
 // liveProbeRawItem 是 `data.items[]` 里**本层不读的那几枚**：`type` 与 `createdAt`。

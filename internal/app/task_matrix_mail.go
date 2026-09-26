@@ -37,6 +37,8 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/catlair/mcloud/internal/core"
 	"github.com/catlair/mcloud/internal/upstream"
@@ -240,10 +242,13 @@ func (e *taskExecutor) runMailBackup(
 //     收据取，表现是"转换的一定是这一条刚传上去的那一份"。⚠ 这是一处**与旧实现不同**
 //     的取舍，理由与 434 那一格的教训同源（[taskRunnerSpec.Shares] 那一条脆弱点）。
 //   - **传上去的那一份进清理链**（[taskExecutor.cloudFileIDs]）⇒ 链尾一次 `batchTrash`。
-//     ⚠ 但**转换产物**（⑥ 在网盘/邮箱那一侧生成的 PDF）**不在**这一条链上：
-//     ⑥ 的响应今天只有"上游说 `code`"这一格依据（零实拍），它给不给新 fileId、
-//     落在哪个目录**都不知道** ⇒ 这一格登记成残留问句（`docs/pending-decisions.md` R36），
-//     不假装"跑完什么都没留下"。
+//     ⚠ **转换产物**（⑥ 在网盘里另存的那一份 `.docx`）**也**进这一条链，但走的是
+//     [collectMailPDFProduct]：⑥ 的响应里**没有**产物的 fileId（`var.fileId` 两发实拍都是空串），
+//     只有它交代的那个目录（`var.directoryId`）⇒ 得先列那个目录、按素材干名精确对上。
+//     对不上时**念出来**（"产物没对上 ⇒ 它仍会留在网盘里"），不静默、也不假装清干净了。
+//     2026-09-26 实拍：一号两发 S_OK 都在等过一档之后读到，且那次 `batchTrash` 之后
+//     约两分钟的只读走查里它已不再被列出（当场那次回读**还在** ⇒ 列目录有延迟，见
+//     `docs/capture/app-cloud-residue-samples.txt` §4）。
 func (e *taskExecutor) runMailPDF(
 	ctx context.Context, item upstream.TaskV2Item, record *TaskStepRecord,
 ) (bool, []string) {
@@ -290,15 +295,109 @@ func (e *taskExecutor) runMailPDF(
 	e.run.progress(core.LevelInfo, fmt.Sprintf(
 		"PDF 素材已上传（%s） %s %d", uploadBranchWords(receipt.Outcome), name, id))
 	cguid, rnd := mailDiskRandoms(e.run.Random)
-	if cerr := e.src.up.AppMailConvertPDF(
+	convert, cerr := e.src.up.AppMailConvertPDF(
 		ctx, session, cguid, rnd, receipt.Name, receipt.FileID, int64(len(content)),
 		upstream.MailPDFConvertType,
-	); cerr != nil {
+	)
+	if cerr != nil {
 		problem := "PDF 转换（⑥）失败：" + cerr.Error() +
-			" ⇒ 刚传上去那一份仍会在链尾被移进回收站，但转换产物在不在、落在哪**未知**（R36）"
+			" ⇒ 刚传上去那一份仍会在链尾被移进回收站；上游没认的转换不产文件" +
+			"（2026-09-26 一号被拒那一发之后，只读走查里没多出这一趟的那一枚）"
 		e.run.progress(core.LevelError, fmt.Sprintf("PDF 转换失败 %s %d：%s", name, id, cerr.Error()))
 		return true, append(problems, problem)
 	}
 	e.run.progress(core.LevelInfo, fmt.Sprintf("PDF 转换已提交 %s %d", name, id))
+	// ⑥ 认了 ⇒ 上游在**它自己交代的那个目录**里另存一份产物（`var.directoryId` +
+	// `<素材干名>.docx`，两发 S_OK 实拍同型）。它不在任何一份现成账上，所以这里把它找回来
+	// 挂进同一条清理链；找不回时**念出来**，不假装"跑完什么都没留下"。
+	products, why := e.collectMailPDFProduct(ctx, convert.DirectoryID, receipt.Name)
+	e.cloudFileIDs = append(e.cloudFileIDs, products...)
+	if len(products) > 0 {
+		e.run.progress(core.LevelInfo, fmt.Sprintf(
+			"PDF 转换产物已对上（链尾一并移进回收站） %s %d", name, id))
+		return true, problems
+	}
+	// ⚠ 找不回产物**不**并进 problems（与 `ai_avatar_run.go` 的 [collectTempFiles] 同一口径）：
+	// 转换本身已经做成了，把这一条判红等于告诉用户"这一条没成"，而他据此重跑会**再转一次**
+	// —— 多一枚残留，还多耗一次权益（权益是有数的：一号两发 S_OK 之后就回
+	// `用户权益已经使用完`，成文 `docs/capture/app-cloud-residue-samples.txt` §7）。
+	// 代价是这条只活在事件流那一行 warn 里 ⇒ 界面上这一条显示成功，网盘里多一枚没人管的文件。
+	e.run.progress(core.LevelWarn, fmt.Sprintf(
+		"PDF 转换产物没对上：%s ⇒ 它仍会留在网盘里 %s %d", why, name, id))
 	return true, problems
+}
+
+// 产物那一枚的等待窗口。两个数都来自实拍，不是拍的：
+// 一号两发 S_OK 都在**第二次轮询**（即等过一档之后）读到产物，而第一次轮询（紧挨着 ⑥）
+// 还没有 ⇒ "转换要一点时间才落盘"这一档是真的；窗口取 4 档 × 10 秒 ≈ 半分钟，
+// 是"比已见的最慢一档宽出数倍、又不至于把一条玩法拖成一分钟"的折中。
+// ⚠ 它**不是**判据：等不到时上面那句"没对上"照样念，不改成"再多等一会"。
+const (
+	mailPDFProductPolls     = 4
+	mailPDFProductPollDelay = 10 * time.Second
+	// mailPDFProductPageSize 与生产同档：一个目录只看一页，超页时下面那段"没对上"的原因里
+	// 已经写明"可能被一页 100 个截掉"。
+	mailPDFProductPageSize = 100
+)
+
+// mailPDFProductNames 由素材名推出**候选产物名**。
+//
+// 实拍两发都是"干名一模一样、扩展名换成 `.docx`"。`.pdf` 那一档留着是**排除项**：
+// 万一上游哪天改成"同名同扩展另存"，这一条也认得出来，而它不引入新的误删面
+// —— 名字干名是我们自己造的那一串毫秒数（`asign-pdf-<ms>`），撞不上用户自己的文件。
+func mailPDFProductNames(sourceName string) []string {
+	stem := strings.TrimSuffix(sourceName, ".pdf")
+	return []string{stem + ".docx", stem + ".pdf"}
+}
+
+// collectMailPDFProduct 在 ⑥ 交代的那个目录里把这一趟的产物找回来，交回 fileId 与一句人话。
+//
+// 形状照 `ai_avatar_run.go` 的 [collectTempFiles]：**回不了错误** —— 找不到产物只是
+// "网盘里多一枚没人管"，而转换本身已经做成了，把整条玩法判红会让人以为"这一条没成"，
+// 而他据此重跑会**再转一次**（多一枚残留，还多耗一次权益）。所以这里只交回 id 与原因。
+//
+// 三处刻意的"不猜"：
+//   - `directoryID` 空 ⇒ **不**去按目录名导航（那三枚名是上游的系统目录，改名就失效，
+//     而且本仓没有任何"按路径找 fileId"的生产口），只念"⑥ 没交代目录"；
+//   - 只按**精确名字**对上（候选来自素材名），不按前缀扫一片 ⇒ 与"不许按名字猜着删"
+//     那条纪律同源（`docs/pending-decisions.md` R36）；
+//   - 列目录失败 / 一枪都没撞中 ⇒ 念"没对上"并列**分不开的那几档**，不念"没有产物"。
+func (e *taskExecutor) collectMailPDFProduct(
+	ctx context.Context, directoryID, sourceName string,
+) ([]string, string) {
+	if directoryID == "" {
+		return nil, "⑥ 没交代产物在哪个目录（`var.directoryId` 是空串）⇒ 没去找"
+	}
+	if e.run.Clock == nil {
+		return nil, "时钟没接：列目录那一枪的时间戳头造不出来 ⇒ 没去找产物"
+	}
+	wait := e.run.Wait
+	if wait == nil {
+		wait = RealWaiter{}
+	}
+	names := mailPDFProductNames(sourceName)
+	for attempt := 0; attempt < mailPDFProductPolls; attempt++ {
+		if attempt > 0 {
+			if werr := wait.Wait(ctx, mailPDFProductPollDelay); werr != nil {
+				return nil, "等产物落盘那一等被打断：" + werr.Error()
+			}
+		}
+		page, lerr := e.src.up.AppCloudFileList(ctx, e.opening.Profile,
+			UserTimestamp(e.run.Clock), e.opening.Credential.Authorization(),
+			directoryID, mailPDFProductPageSize)
+		if lerr != nil {
+			return nil, "列产物那个目录失败：" + lerr.Error()
+		}
+		for _, file := range page.Items {
+			for _, candidate := range names {
+				if file.Name == candidate && file.FileID != "" {
+					return []string{file.FileID}, ""
+				}
+			}
+		}
+	}
+	return nil, fmt.Sprintf(
+		"在那个目录里轮询到第 %d 次都没读到这一趟那一枚（落得比等待窗口晚、名字变了、"+
+			"或被一页 %d 个截掉 —— 这三档分不开）",
+		mailPDFProductPolls, mailPDFProductPageSize)
 }
