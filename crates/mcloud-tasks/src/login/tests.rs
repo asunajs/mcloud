@@ -66,9 +66,11 @@ fn encrypted_user_info(user_info: &str) -> String {
     buf.resize(buf.len() + pad, pad as u8);
     let cipher = aes::Aes128::new_from_slice(key).unwrap();
     let mut ct = Vec::new();
-    for block in buf.chunks_exact(16) {
-        let mut b = [0u8; 16];
-        b.copy_from_slice(block);
+    // 上面刚补齐到 16 的整数倍，所以余数为空（`as_chunks` 比 `chunks_exact`
+    // 少一次 `copy_from_slice`，块长也由类型写死）
+    let (blocks, _) = buf.as_chunks::<16>();
+    for block in blocks {
+        let mut b = *block;
         cipher.encrypt_block((&mut b).into());
         ct.extend_from_slice(&b);
     }

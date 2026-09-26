@@ -165,9 +165,17 @@ pub fn aes_ecb_pkcs7_decrypt_hex(key: &str, ciphertext_hex: &str) -> Result<Stri
     }
 
     let mut out = Vec::with_capacity(ct.len());
-    for block in ct.chunks_exact(16) {
-        let mut buf = [0u8; 16];
-        buf.copy_from_slice(block);
+    // `as_chunks::<16>()` 而不是 `chunks_exact(16)`：后者给的是 `&[u8]`，
+    // 要再 `copy_from_slice` 进 `[u8; 16]` 才能调 `decrypt_ecb_block`；
+    // 前者直接给 `&[[u8; 16]]`，**少一次拷贝**，且"块长必须是 16"
+    // 由类型写死而不是由调用点的字面量约定。
+    //
+    // 余数在上面已由 `ct.len() % 16 != 0` 拦掉，这里必然是空的；
+    // 用 `let (blocks, _) =` 而不是断言，是因为前提就在上方 7 行之内，
+    // 再加一句 panic 只会让人以为它可能真的非空。
+    let (blocks, _) = ct.as_chunks::<16>();
+    for block in blocks {
+        let mut buf = *block;
         decrypt_ecb_block(key.as_bytes(), &mut buf)?;
         out.extend_from_slice(&buf);
     }
@@ -196,11 +204,12 @@ pub fn aes_ecb_pkcs7_encrypt_hex(key: &str, plaintext: &str) -> Result<String> {
     buf.extend_from_slice(data);
     buf.extend(std::iter::repeat_n(pad as u8, pad));
 
-    for block in buf.chunks_exact_mut(16) {
-        let mut arr = [0u8; 16];
-        arr.copy_from_slice(block);
-        encrypt_ecb_block(key.as_bytes(), &mut arr)?;
-        block.copy_from_slice(&arr);
+    // 同解密路径：`as_chunks_mut` 直接给 `&mut [[u8; 16]]`，
+    // 就地加密后写回，不必先复制到临时数组再拷回来。
+    // 上面刚补过 PKCS7 填充，块数必然是整数，余数为空。
+    let (blocks, _) = buf.as_chunks_mut::<16>();
+    for block in blocks {
+        encrypt_ecb_block(key.as_bytes(), block)?;
     }
 
     Ok(hex::encode(&buf))
@@ -464,9 +473,10 @@ mod tests {
         use aes::cipher::BlockEncrypt;
         let cipher = aes::Aes128::new_from_slice(key).unwrap();
         let mut ct = Vec::with_capacity(buf.len());
-        for block in buf.chunks_exact(16) {
-            let mut b = [0u8; 16];
-            b.copy_from_slice(block);
+        // 刚补过填充，块数整数（同实现里的写法）
+        let (blocks, _) = buf.as_chunks::<16>();
+        for block in blocks {
+            let mut b = *block;
             cipher.encrypt_block((&mut b).into());
             ct.extend_from_slice(&b);
         }
