@@ -68,6 +68,15 @@ impl CancelRegistry {
         self.lock().get(&run_id).is_some_and(|t| t.is_cancelled())
     }
 
+    /// 该运行**当前是否仍在运行**（登记着且未结束）。
+    ///
+    /// 与 [`Self::is_cancelled`] 是两件事：一个已请求中止的运行
+    /// 在任务退出前**仍在运行**。界面据此区分
+    /// "已请求中止、还在收尾" 与 "已经停了"。
+    pub fn is_running(&self, run_id: RunId) -> bool {
+        self.lock().contains_key(&run_id)
+    }
+
     pub fn running_count(&self) -> usize {
         self.lock().len()
     }
@@ -111,6 +120,29 @@ mod tests {
     fn cancelling_an_unknown_run_is_false_not_an_error() {
         let reg = CancelRegistry::new();
         assert!(!reg.cancel(RunId::new(99)));
+    }
+
+    /// "仍在运行"与"已请求中止"是两件事。
+    ///
+    /// 一个已请求中止的运行，在任务退到安全点之前**仍在运行** ——
+    /// 混为一谈会让界面在任务还在跑时就显示"已停止"。
+    #[test]
+    fn is_running_is_distinct_from_is_cancelled() {
+        let reg = CancelRegistry::new();
+        let _ = reg.register(RunId::new(1));
+
+        assert!(reg.is_running(RunId::new(1)));
+        assert!(!reg.is_cancelled(RunId::new(1)));
+
+        reg.cancel(RunId::new(1));
+        assert!(reg.is_cancelled(RunId::new(1)));
+        assert!(
+            reg.is_running(RunId::new(1)),
+            "已请求中止但还没退出 ⇒ 仍在运行"
+        );
+
+        reg.release(RunId::new(1));
+        assert!(!reg.is_running(RunId::new(1)));
     }
 
     #[test]

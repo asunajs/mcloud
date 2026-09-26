@@ -31,5 +31,13 @@ anyhow.workspace = true
 rust-embed.workspace = true
 mime_guess.workspace = true
 
+[dev-dependencies]
+# 路由级测试：`oneshot` 直接打 Router，不真的起监听端口。
+# 这样测试不依赖端口分配，也不会与正在跑的服务抢 8080。
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+mcloud-store.workspace = true
+mcloud-core = { workspace = true, features = ["testkit"] }
+
 [lints]
 workspace = true

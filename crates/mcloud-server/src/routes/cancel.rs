@@ -21,8 +21,13 @@ use crate::ServerState;
 #[serde(rename_all = "camelCase")]
 pub struct CancelResponse {
     /// 是否成功置上了中止标志。
+    ///
+    /// `false` 通常意味着任务刚好跑完 —— 正常竞态，不是错误。
     pub cancelled: bool,
-    /// 该运行当前是否仍在运行中。
+    /// 该运行**此刻是否仍在运行**。
+    ///
+    /// 与 `cancelled` 是两件事：已请求中止的运行在任务退到安全点之前
+    /// **仍在运行**。前端据此区分"已请求中止、还在收尾"与"已经停了"。
     pub running: bool,
 }
 
@@ -31,9 +36,12 @@ pub async fn cancel_run(
     Path(id): Path<u64>,
 ) -> ApiResult<CancelResponse> {
     let run_id = RunId::new(id);
+    // 先取"是否在运行"，再请求中止：顺序反过来的话，一个恰好在此期间
+    // 结束的运行会被报成"仍在运行"
+    let was_running = state.handle.cancel.is_running(run_id);
     let cancelled = state.handle.cancel.cancel(run_id);
     Ok(Json(CancelResponse {
         cancelled,
-        running: state.handle.cancel.is_cancelled(run_id) || cancelled,
+        running: was_running,
     }))
 }

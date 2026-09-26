@@ -155,6 +155,28 @@ pub trait ScheduleStore: Send + Sync {
     async fn schedule(&self, id: &ScheduleId) -> Result<Option<Schedule>>;
     async fn save_schedule(&self, schedule: &Schedule) -> Result<()>;
     async fn remove_schedule(&self, id: &ScheduleId) -> Result<()>;
+
+    /// **窄写**：只推进水位线。
+    ///
+    /// 为什么不能复用 `save_schedule`：调度器在触发那一刻只持有
+    /// "几秒前读到的行"，整行覆盖会把用户在这期间通过 WebUI 改过的
+    /// 名字/参数一起抹掉。而水位线必须在打上游**之前**落盘，
+    /// 所以这个写既紧急又必须最小。
+    async fn mark_schedule_fired(&self, id: &ScheduleId, fire_ms: i64) -> Result<()>;
+
+    /// **窄写**：只记录本次执行结果。
+    ///
+    /// `run_ms` 为 `None` ⇒ **不动**这一列（错过的触发点被弃掉时不产生运行，
+    /// 抹掉真实的上次运行时间会显示成"从未执行"）。
+    /// `error` 为 `None` ⇒ **写入空**（清掉旧错误本身就是结论，
+    /// 否则"成功"旁边挂着一条旧错误，正是查不出原因的形态）。
+    async fn record_schedule_run(
+        &self,
+        id: &ScheduleId,
+        run_ms: Option<i64>,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<()>;
 }
 
 /// 任务编排。
@@ -164,6 +186,12 @@ pub trait PipelineStore: Send + Sync {
     async fn pipeline(&self, id: &PipelineId) -> Result<Option<Pipeline>>;
     async fn save_pipeline(&self, pipeline: &Pipeline) -> Result<()>;
     async fn remove_pipeline(&self, id: &PipelineId) -> Result<()>;
+
+    /// **窄写**：只记上次执行时间。
+    ///
+    /// 一次编排要跑几分钟；用整行 `save_pipeline` 会把这段时间里
+    /// 用户改过的名字与步骤一起抹掉。
+    async fn mark_pipeline_ran(&self, id: &PipelineId, run_ms: i64) -> Result<()>;
 }
 
 /// 全部持久化能力的组合。

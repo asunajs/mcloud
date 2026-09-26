@@ -111,7 +111,8 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 
 ## 测试
 
-- `cargo test --workspace` —— 58 个测试
+- `cargo test --workspace` —— **181 个测试**
+- `cargo clippy --workspace --all-targets -- -D warnings` —— 0 告警
 - 黄金向量对拍：`test/golden/crypto-vectors.json`（签名、MD5、SHA256、两种 AES 语义）
 - 对拍是**字节级**的；不一致就是 bug，不允许改期望值来变绿。
 
@@ -122,15 +123,16 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 | P0 | 设计定稿 + 分层脚手架 | ✅ |
 | P1 | 密码学 + 黄金向量对拍 | ✅ |
 | P2 | axum 路由 + SSE 事件流 | ✅ |
-| P3 | Vue Vapor WebUI（4 页 + 主题 + 门禁） | ✅ |
+| P3 | Vue Vapor WebUI（主题 + 门禁） | ✅ |
 | P4 | `rust-embed` 单二进制 / 同源托管 | ✅ |
-| P5 | 上游认证链路（真实登录、token 刷新） | 待做 |
-| P6 | `sign` / `receive` / `after` 端到端 | 待做 |
-| P7 | 账号管理与调度 + 推送渠道 | 待做 |
+| P5 | **通用存储 + 定时调度 + 任务编排 + 日志收集 + 任务中止** | ✅ |
+| P6 | 上游认证链路（真实登录、token 刷新） | 待做 |
+| P7 | `sign` / `receive` / `after` 端到端 + 账号管理页 + 推送渠道 | 待做 |
 | P8 | 其余任务增量接入 | 待做 |
 
-> P5 是当前的关键路径：`mcloud-tasks/src/sign.rs` 里的端点是**占位**的，
-> 必须按真实抓包校正。上游接口的验证才是本项目最大的风险点，不是密码学。
+> P6 是当前的关键路径：`mcloud-tasks/src/sign.rs` 里的端点是**占位**的
+> （实测返回 HTTP 405），必须按真实抓包校正。密码学已被黄金向量锁死，
+> **接口存活与签名服务端一致性**才是本项目最大的风险点。
 
 ## 注意
 

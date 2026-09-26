@@ -18,7 +18,11 @@
 //!
 //! 2. **锁内做阻塞文件 IO。** 这些文件都在 KB 量级（账号、定时、编排），
 //!    一次写盘是微秒级。为它引入 `spawn_blocking` 会把简单问题复杂化，
-//!    收益还不如它带来的调度开销。**日志是例外**，见 [`JsonStore::append_logs`]。
+//!    收益还不如它带来的调度开销。**日志是例外**，见 [`JsonStore::append_logs`] ——
+//!    单 run 上限 2000 条（约 311KB），实测一次写盘 0.19ms；
+//!    即使取编译期断言允许的极限 10000 条（约 1.5MB）也只有 0.66ms。
+//!    调用点是 2 秒一次的攒批（`main.rs`），不是每条日志一次。
+//!    这个例外成立的前提已写进 `docs/conventions.md` §6。
 //!
 //! 3. **写盘是"写临时文件 + rename"**（[`JsonStore::write_atomic`]）。
 //!    rename 在同一文件系统内是原子的，所以进程被杀也不会留下半截 JSON。
@@ -65,6 +69,28 @@ struct Db {
     state: HashMap<String, serde_json::Value>,
 }
 
+/// 建目录，并在 unix 上把权限收成 `0700`。
+///
+/// 目录用 `0700` 而不是 `0600`：目录必须可**进入**（execute 位）才能读到
+/// 里面的文件，抹掉 x 位会让它自己也读不了。
+fn create_dir_private(dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(Error::Io)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir).map_err(Error::Io)?;
+        Ok(())
+    }
+}
+
 /// 磁盘上的文件清单。集中在一处，改名时不会漏。
 mod files {
     pub const ACCOUNTS: &str = "accounts.json";
@@ -98,18 +124,59 @@ impl JsonStore {
     /// 启动时做两件事，都在 [`Self::recover_orphans`] 里说明。
     pub fn open(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref().to_path_buf();
-        std::fs::create_dir_all(&dir).map_err(Error::Io)?;
-        std::fs::create_dir_all(dir.join(files::LOG_DIR)).map_err(Error::Io)?;
+        create_dir_private(&dir)?;
+        create_dir_private(&dir.join(files::LOG_DIR))?;
 
         let store = Self {
             db: RwLock::new(Db::default()),
             write_gate: Mutex::new(()),
             dir,
         };
+        store.harden_existing_permissions();
         store.load_all()?;
         store.recover_orphans()?;
         Ok(store)
     }
+
+    /// 收紧**已存在**文件的权限（老版本装出来的数据目录是默认权限）。
+    ///
+    /// 新写的文件在 [`Self::write_atomic`] 里就已经是 `0600`，这里只处理
+    /// 历史遗留。只收紧、不放松，所以重复执行无副作用。
+    ///
+    /// 失败**不**让启动失败：可能是文件系统不支持 mode（如某些网络盘、
+    /// Windows 挂载），为此拒绝启动会让工具彻底不可用。但也不静默 ——
+    /// 权限没收紧这件事必须留下痕迹。
+    #[cfg(unix)]
+    fn harden_existing_permissions(&self) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let names = [
+            files::ACCOUNTS,
+            files::RUNS,
+            files::SCHEDULES,
+            files::PIPELINES,
+            files::STATE,
+        ];
+        for name in names {
+            let p = self.path(name);
+            if !p.exists() {
+                continue;
+            }
+            // 只处理"组或其他用户可读"的情况，避免无谓的 chmod
+            match std::fs::metadata(&p) {
+                Ok(m) if m.permissions().mode() & 0o077 != 0 => {
+                    if let Err(e) =
+                        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))
+                    {
+                        eprintln!("警告：无法收紧 {} 的权限：{e}", p.display());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn harden_existing_permissions(&self) {}
 
     // ── 加锁 ────────────────────────────────────────────────────────────
 
@@ -144,12 +211,41 @@ impl JsonStore {
     /// rename 在同一文件系统内原子 ⇒ 进程被杀不会留下半截 JSON。
     /// 临时文件名带 pid，避免同目录下两个实例互踩（虽然本工具单实例，
     /// 但代价只是一点点，能免掉一整类诡异现象）。
+    ///
+    /// # 权限
+    ///
+    /// `accounts.json` 里有凭证原文（`AuthInfo.raw`），所以文件落盘时就是
+    /// `0600`。**必须在创建时就限制**，不能先按默认权限（通常 0644）写、
+    /// 再 `chmod` 收紧 —— 那中间有一小段窗口，同机器上的其他用户
+    /// 正好能读到凭证。所以这里用 `OpenOptions::mode` 而不是事后
+    /// `set_permissions`。
+    ///
+    /// 只在 unix 上做这件事：Windows 没有等价的 mode 位，其 ACL 模型
+    /// 由用户目录继承，硬套 `0600` 反而会写出奇怪的东西。
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<()> {
         if path.exists() {
             let _ = std::fs::copy(path, path.with_extension("bak"));
         }
         let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-        std::fs::write(&tmp, bytes).map_err(Error::Io)?;
+
+        #[cfg(unix)]
+        {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)
+                .map_err(Error::Io)?;
+            f.write_all(bytes).map_err(Error::Io)?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&tmp, bytes).map_err(Error::Io)?;
+        }
+
         std::fs::rename(&tmp, path).map_err(Error::Io)?;
         Ok(())
     }
@@ -466,6 +562,40 @@ impl mcloud_core::ScheduleStore for JsonStore {
         db.schedules.retain(|s| &s.id != id);
         Self::persist_schedules(&db, self)
     }
+
+    async fn mark_schedule_fired(&self, id: &ScheduleId, fire_ms: i64) -> Result<()> {
+        let mut db = self.write()?;
+        let found = db.schedules.iter_mut().find(|s| &s.id == id);
+        match found {
+            Some(sl) => {
+                sl.last_fire_ms = Some(fire_ms);
+                sl.run_count = sl.run_count.saturating_add(1);
+            }
+            // 定时在这期间被删了：不是错误，只是没得写
+            None => return Ok(()),
+        }
+        Self::persist_schedules(&db, self)
+    }
+
+    async fn record_schedule_run(
+        &self,
+        id: &ScheduleId,
+        run_ms: Option<i64>,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let mut db = self.write()?;
+        if let Some(sl) = db.schedules.iter_mut().find(|s| &s.id == id) {
+            // None ⇒ 不动这一列；Some ⇒ 更新
+            if let Some(ms) = run_ms {
+                sl.last_run_ms = Some(ms);
+            }
+            sl.last_status = Some(status.to_string());
+            // None ⇒ 显式清空（不是"不动"）
+            sl.last_error = error.map(str::to_string);
+        }
+        Self::persist_schedules(&db, self)
+    }
 }
 
 // ── 编排 ────────────────────────────────────────────────────────────────
@@ -492,6 +622,16 @@ impl mcloud_core::PipelineStore for JsonStore {
     async fn remove_pipeline(&self, id: &PipelineId) -> Result<()> {
         let mut db = self.write()?;
         db.pipelines.retain(|p| &p.id != id);
+        Self::persist_pipelines(&db, self)
+    }
+
+    async fn mark_pipeline_ran(&self, id: &PipelineId, run_ms: i64) -> Result<()> {
+        let mut db = self.write()?;
+        match db.pipelines.iter_mut().find(|p| &p.id == id) {
+            Some(sl) => sl.last_run_ms = Some(run_ms),
+            // 编排在这期间被删了：不是错误，只是没得写
+            None => return Ok(()),
+        }
         Self::persist_pipelines(&db, self)
     }
 }

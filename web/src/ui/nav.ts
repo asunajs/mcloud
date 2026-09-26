@@ -11,9 +11,16 @@
  */
 
 import type { JSX } from 'vue-jsx-vapor'
-import { IconDashboard, IconHistory, IconSettings, IconTask } from './icons'
+import {
+  IconClock,
+  IconDashboard,
+  IconHistory,
+  IconPipeline,
+  IconSettings,
+  IconTask,
+} from './icons'
 
-export type PageId = 'dashboard' | 'tasks' | 'history' | 'settings'
+export type PageId = 'dashboard' | 'tasks' | 'schedules' | 'pipelines' | 'history' | 'settings'
 
 interface NavItem {
   id: PageId
@@ -34,7 +41,7 @@ interface NavItem {
 }
 
 /**
- * 4 个页面。顺序即侧栏顺序（按使用频率排：总览与任务最常用）。
+ * 页面清单。顺序即侧栏顺序（按使用频率排：总览与任务最常用）。
  *
  * 远未用满 9 条 —— 这是好事：规范里"9 条封顶"是上限不是目标。
  * 后续加页面时若超过 9 条，要么并进已有页，要么先改规范，不要静默开第 10 条。
@@ -57,6 +64,22 @@ export const NAV_ITEMS: readonly NavItem[] = [
     icon: IconTask,
   },
   {
+    id: 'schedules',
+    label: '定时',
+    title: '定时任务',
+    blurb: '按 cron 表达式自动执行任务，可指定时区与账号范围。',
+    href: '#/schedules',
+    icon: IconClock,
+  },
+  {
+    id: 'pipelines',
+    label: '编排',
+    title: '任务编排',
+    blurb: '把多个任务串成一条链，按顺序执行；可配置失败时继续还是中止。',
+    href: '#/pipelines',
+    icon: IconPipeline,
+  },
+  {
     id: 'history',
     label: '历史',
     title: '历史与日志',
@@ -77,13 +100,16 @@ export const NAV_ITEMS: readonly NavItem[] = [
 /**
  * 底部 dock 里直接点得到的项，**全是页面**。
  *
- * 当前 4 个页面全部放进去（少于规范允许的 5 格，不凑数）。
+ * 放 5 格（规范上限）：总览、任务、定时、历史、设置 —— 都是手机上常看的。
+ * **编排不进 dock**：它是"配置一次、之后自动跑"的东西，日常打开频率低，
+ * 从侧栏进完全够用。dock 每一格都要对得起它占的位置。
  * 刻意**不放"更多"**：它点开的是侧栏抽屉，而抽屉在 navbar 左上角的汉堡包
  * 那里已经有入口 —— 重复一格不换来任何新的可达性。
  */
 export const DOCK_IDS: readonly PageId[] = [
   'dashboard',
   'tasks',
+  'schedules',
   'history',
   'settings',
 ] as const

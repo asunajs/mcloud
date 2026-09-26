@@ -94,6 +94,18 @@ impl mcloud_core::ScheduleStore for MemStore {
     async fn remove_schedule(&self, _i: &ScheduleId) -> mcloud_core::Result<()> {
         Ok(())
     }
+    async fn mark_schedule_fired(&self, _i: &ScheduleId, _ms: i64) -> mcloud_core::Result<()> {
+        Ok(())
+    }
+    async fn record_schedule_run(
+        &self,
+        _i: &ScheduleId,
+        _run_ms: Option<i64>,
+        _status: &str,
+        _error: Option<&str>,
+    ) -> mcloud_core::Result<()> {
+        Ok(())
+    }
 }
 #[async_trait]
 impl mcloud_core::PipelineStore for MemStore {
@@ -107,6 +119,9 @@ impl mcloud_core::PipelineStore for MemStore {
         Ok(())
     }
     async fn remove_pipeline(&self, _i: &PipelineId) -> mcloud_core::Result<()> {
+        Ok(())
+    }
+    async fn mark_pipeline_ran(&self, _i: &PipelineId, _ms: i64) -> mcloud_core::Result<()> {
         Ok(())
     }
 }

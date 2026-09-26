@@ -76,11 +76,21 @@ impl Runner {
         body: serde_json::Value,
     ) -> RunId {
         let run_id = RunId::new(self.next_id.fetch_add(1, Ordering::SeqCst));
+        // ⚠ **同步**登记取消令牌，再 spawn。
+        //
+        // 闭环一个真实的竞态窗口：`start` 返回 id 后客户端立刻来订阅事件流，
+        // 而此时 spawn 出去的任务可能还没发出 `started` 事件 ——
+        // 那一瞬间内存中枢里没有这个 run、存储层也没有（记录在结束时才落盘），
+        // 于是订阅会被判 404，而 `EventSource` 遇到 404 **不会重连**，
+        // 界面就永远停在"执行中"。
+        //
+        // 登记在这里之后，"这个 run 存在"在 id 返回时就已经成立。
+        let token = self.cancel.register(run_id);
         let this = Arc::clone(self);
         let task_for_spawn = task_name.to_string();
         tokio::spawn(async move {
             if let Err(e) = this
-                .run_impl(&task_for_spawn, &account, &body, run_id, None)
+                .run_impl(&task_for_spawn, &account, &body, run_id, None, Some(token))
                 .await
             {
                 tracing::error!(task = %task_for_spawn, run = %run_id, error = %e, "后台运行失败");
@@ -138,7 +148,8 @@ impl Runner {
         chain_cancel: Option<mcloud_core::CancelToken>,
     ) -> Result<RunRecord> {
         let run_id = RunId::new(self.next_id.fetch_add(1, Ordering::SeqCst));
-        self.run_impl(task_name, account, body, run_id, chain_cancel).await
+        self.run_impl(task_name, account, body, run_id, chain_cancel, None)
+            .await
     }
 
     /// 实际执行。`run_id` 由调用方预分配 —— 这样"立刻返回 id 再后台跑"
@@ -150,6 +161,8 @@ impl Runner {
         body: &serde_json::Value,
         run_id: RunId,
         chain_cancel: Option<mcloud_core::CancelToken>,
+        // 已由 `start` 预登记的令牌。`None` 表示现登记。
+        pre_registered: Option<mcloud_core::CancelToken>,
     ) -> Result<RunRecord> {
         let task = self
             .registry
@@ -183,7 +196,7 @@ impl Runner {
         // 登记取消令牌：任务在安全点检查它。
         // 登记放在 Started 事件**之前**，这样"刚发出 Started 就点中止"
         // 也能被接住，不会出现一个永远无法中止的窗口。
-        let cancel_token = self.cancel.register(run_id);
+        let cancel_token = pre_registered.unwrap_or_else(|| self.cancel.register(run_id));
 
         let ctx = TaskContext {
             account: account.clone(),
@@ -250,6 +263,7 @@ impl Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::tests::NoHttp;
     use crate::{Task, TaskResult};
     use async_trait::async_trait;
     use mcloud_core::testkit::FixedClock;
@@ -400,6 +414,18 @@ mod tests {
         async fn remove_schedule(&self, _id: &mcloud_core::ScheduleId) -> Result<()> {
             Ok(())
         }
+        async fn mark_schedule_fired(&self, _id: &mcloud_core::ScheduleId, _ms: i64) -> Result<()> {
+            Ok(())
+        }
+        async fn record_schedule_run(
+            &self,
+            _id: &mcloud_core::ScheduleId,
+            _run_ms: Option<i64>,
+            _status: &str,
+            _error: Option<&str>,
+        ) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -417,6 +443,9 @@ mod tests {
             Ok(())
         }
         async fn remove_pipeline(&self, _id: &mcloud_core::PipelineId) -> Result<()> {
+            Ok(())
+        }
+        async fn mark_pipeline_ran(&self, _id: &mcloud_core::PipelineId, _ms: i64) -> Result<()> {
             Ok(())
         }
     }
@@ -751,6 +780,71 @@ mod tests {
         let record = first.await.unwrap().unwrap();
         assert!(record.outcome.is_success());
         assert!(!runner.is_running("gated", &me.id), "结束后必须释放闸");
+    }
+
+    /// ⭐ `start` 返回时该 run **必须已经可被认定为"存在"**。
+    ///
+    /// 这是修过的一个真 bug：`start` 返回 id 后客户端立刻订阅事件流，
+    /// 而 spawn 出去的任务此刻可能还没发出 `started` 事件 ——
+    /// 那一瞬间内存中枢里没有它、存储层也没有（运行记录在**结束时**才落盘），
+    /// 于是订阅被判 404。而 `EventSource` 遇到 404 **不会重连**，
+    /// 界面就永远停在"执行中"（实测卡了 60 秒以上）。
+    ///
+    /// 所以 `start` 必须**同步**登记取消令牌 —— "这个 run 存在"在
+    /// id 返回的那一刻就成立。
+    #[tokio::test]
+    async fn start_registers_the_run_before_returning_the_id() {
+        // 一个跑很久的任务，确保 start 返回时它还没结束
+        struct HangingTask;
+        #[async_trait]
+        impl Task for HangingTask {
+            fn name(&self) -> &'static str {
+                "hang"
+            }
+            fn title(&self) -> &'static str {
+                "挂着"
+            }
+            fn description(&self) -> &'static str {
+                "一直跑"
+            }
+            async fn run(&self, ctx: &TaskContext, _b: &serde_json::Value) -> TaskResult {
+                for _ in 0..200 {
+                    ctx.check_cancelled()?;
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Ok(TaskOutcome::success("done"))
+            }
+        }
+
+        let mut reg = Registry::new();
+        reg.register(Arc::new(HangingTask)).unwrap();
+        let http: HttpClientFactory =
+            Arc::new(|_a: &Account| Arc::new(NoHttp) as Arc<dyn HttpClient>);
+        let runner = Arc::new(Runner::new(
+            Arc::new(reg),
+            Arc::new(FakeStore::default()) as Arc<dyn Store>,
+            Arc::new(FixedClock(NOW_MS)),
+            Arc::new(FakeSink::default()) as Arc<dyn EventSink>,
+            http,
+        ));
+
+        let run_id = runner.start("hang", account("13800000000"), serde_json::Value::Null);
+
+        // **不给任何等待时间**：id 一返回，"存在"就该成立。
+        // 服务端的 SSE 存在性判定正是靠这个。
+        assert!(
+            runner.cancel_registry().is_running(run_id),
+            "start 返回时必须已登记，否则订阅事件流会被判 404，而 EventSource 不重连"
+        );
+
+        runner.cancel_registry().cancel(run_id);
+        // 让它退干净，避免影响其他测试
+        for _ in 0..100 {
+            if runner.cancel_registry().running_count() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        }
     }
 
     /// ⭐ 后台启动**立刻**返回真实的 run id，且该 id 可用来中止。

@@ -91,9 +91,11 @@ pub async fn upsert(
         return Err(ApiError(mcloud_core::Error::Config("名称不能为空".into())));
     }
     // 任务必须在注册表里 —— 存下一个跑不起来的定时，
-    // 表现就是"任务天天绿灯空转"
+    // 表现就是"任务天天绿灯空转"。
+    // 用 `Config`（→ 400）：错的是请求体里的字段，不是 URL 资源
+    // （与 `runs::create` 及 engine 的 `unknown_task_is_config_error` 保持一致）。
     if !state.handle.registry.contains(&input.task) {
-        return Err(ApiError(mcloud_core::Error::NotFound(format!(
+        return Err(ApiError(mcloud_core::Error::Config(format!(
             "未知任务：{}",
             input.task
         ))));

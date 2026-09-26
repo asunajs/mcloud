@@ -34,7 +34,7 @@ use std::time::Duration;
 use chrono::{DateTime, TimeZone, Utc};
 use tokio::sync::watch;
 
-use mcloud_core::{AccountId, Clock, Error, Result, RunStatus, Schedule, ScheduleId, Store};
+use mcloud_core::{AccountId, Clock, Error, Result, Schedule, ScheduleId, Store};
 
 use crate::runner::Runner;
 
@@ -257,6 +257,9 @@ impl Scheduler {
                 Decision::Missed { point_ms } => {
                     // 先推水位（推到 now），再记账。顺序反了会在中途崩溃时重复弃
                     self.advance_watermark(&sch, now).await?;
+                    // 这一趟没有运行 ⇒ `run_ms` 传 None（不动上次运行时间）
+                    self.record(&sch, None, "skipped", Some("错过的触发点已整体弃掉"))
+                        .await;
                     tracing::warn!(
                         schedule = %sch.id,
                         point_ms,
@@ -268,7 +271,7 @@ impl Scheduler {
                 Decision::Due { point_ms } => {
                     // ★ 先推水位，再打上游 —— 这是本文件最重要的一行顺序
                     self.advance_watermark(&sch, point_ms).await?;
-                    let outcome = self.fire(&sch, point_ms).await;
+                    let (outcome, _blocked) = self.fire(&sch, point_ms).await;
                     results.push((sch.id.clone(), outcome));
                 }
             }
@@ -279,45 +282,103 @@ impl Scheduler {
     /// 推水位。
     ///
     /// 用**只改水位**的窄写，而不是整行覆盖：整行覆盖会把用户在这期间
-    /// 通过 WebUI 改过的名字/参数一起抹掉。
+    /// 通过 WebUI 改过的名字/参数一起抹掉（调度器手里那行是几秒前读的）。
     async fn advance_watermark(&self, sch: &Schedule, point_ms: i64) -> Result<()> {
-        let mut updated = sch.clone();
-        updated.last_fire_ms = Some(point_ms);
-        updated.run_count = sch.run_count.saturating_add(1);
-        self.store.save_schedule(&updated).await
+        self.store.mark_schedule_fired(&sch.id, point_ms).await
+    }
+
+    /// 记账：本次执行的结果。
+    ///
+    /// 独立于水位线：水位线在触发**前**就推进了，而结果要等任务跑完才有。
+    /// 两者用不同的窄写，因为它们改的是不同的列、发生在不同的时刻。
+    async fn record(
+        &self,
+        sch: &Schedule,
+        ran_at_ms: Option<i64>,
+        status: &str,
+        error: Option<&str>,
+    ) {
+        if let Err(e) = self
+            .store
+            .record_schedule_run(&sch.id, ran_at_ms, status, error)
+            .await
+        {
+            // 记账失败不该影响已经跑完的任务
+            tracing::warn!(schedule = %sch.id, error = %e, "定时执行结果记账失败");
+        }
     }
 
     /// 真正触发：对定时指向的每个账号起一次运行。
-    async fn fire(&self, sch: &Schedule, point_ms: i64) -> FireOutcome {
+    ///
+    /// 返回 `(结果, 是否全被并发闸挡住)`：后者用于区分
+    /// "跑了但失败" 与 "一个账号都没跑成" —— 两者在界面上的含义不同。
+    async fn fire(&self, sch: &Schedule, point_ms: i64) -> (FireOutcome, bool) {
         // 账号清单为空 = 所有已启用账号
         let accounts = match self.target_accounts(sch).await {
             Ok(a) => a,
-            Err(e) => return FireOutcome::UnknownTask(e.to_string()),
+            Err(e) => return (FireOutcome::UnknownTask(e.to_string()), false),
         };
         if accounts.is_empty() {
-            return FireOutcome::SkippedBusy;
+            return (FireOutcome::SkippedBusy, true);
         }
 
         let mut fired = None;
+        let mut attempted = 0usize;
+        let mut failures: Vec<String> = Vec::new();
+
         for acc in accounts {
             // 同一 task+account 正在跑 ⇒ 跳过不排队（在 runner 里判定）
             match self.runner.run(&sch.task, &acc, &sch.body).await {
                 Ok(rec) => {
-                    if rec.status != RunStatus::Running && rec.run_id.get() > 0 {
+                    if rec.run_id.get() == 0 {
+                        // 被并发闸挡住，不算"跑过"
+                        continue;
+                    }
+                    attempted += 1;
+                    if fired.is_none() {
                         fired = Some(rec.run_id.get());
                     }
+                    if rec.outcome.is_failure() {
+                        failures.push(format!("{}：{}", acc.id, rec.outcome.summary()));
+                    }
                 }
-                Err(Error::Config(msg)) => return FireOutcome::UnknownTask(msg),
+                Err(Error::Config(msg)) => return (FireOutcome::UnknownTask(msg), false),
                 Err(e) => {
+                    attempted += 1;
+                    failures.push(format!("{}：{e}", acc.id));
                     tracing::warn!(schedule = %sch.id, error = %e, "定时触发失败");
                 }
             }
         }
-        let _ = point_ms; // 触发时刻已写进水位
-        match fired {
-            Some(id) => FireOutcome::Fired { run_id: id },
-            None => FireOutcome::SkippedBusy,
-        }
+
+        // 记账：**部分失败记 error，不记 ok**。
+        // 定时任务没人当场看着，把"一半没成"记成 ok 等于把它藏起来 ——
+        // 而"ok 配一句旧错误"正是查不出原因的形态。
+        let blocked_all = attempted == 0;
+        let status = if blocked_all {
+            "skipped"
+        } else if failures.is_empty() {
+            "ok"
+        } else {
+            "error"
+        };
+        let err_text = if failures.is_empty() {
+            None
+        } else {
+            Some(failures.join("；"))
+        };
+        // 全被挡住时**不动**上次运行时间：这一趟什么都没跑，
+        // 抹掉真实的上次运行时间会显示成"从未执行"
+        let ran_at = if blocked_all { None } else { Some(point_ms) };
+        self.record(sch, ran_at, status, err_text.as_deref()).await;
+
+        (
+            match fired {
+                Some(id) => FireOutcome::Fired { run_id: id },
+                None => FireOutcome::SkippedBusy,
+            },
+            blocked_all,
+        )
     }
 
     async fn target_accounts(&self, sch: &Schedule) -> Result<Vec<mcloud_core::Account>> {

@@ -8,7 +8,14 @@
  */
 
 import { onUnmounted, onMounted, ref } from 'vue'
-import { listCapabilities, startRun, subscribeRun, type RunEvent, type TaskMeta } from '../api'
+import {
+  cancelRun,
+  listCapabilities,
+  startRun,
+  subscribeRun,
+  type RunEvent,
+  type TaskMeta,
+} from '../api'
 import { EmptyState } from '../ui/empty-state'
 import { LogPanel, type LogLine } from '../ui/log-panel'
 
@@ -27,6 +34,10 @@ export const TasksPage = () => {
   const lines = ref<LogLine[]>([])
   /** 已用时长，1 秒一跳；用户要能看到"还在动"。 */
   const elapsedMs = ref(0)
+  /** 当前运行的 run id，用于请求中止。 */
+  const currentRunId = ref<number | null>(null)
+  /** 已发出中止请求，等待任务在安全点退出。 */
+  const cancelling = ref(false)
 
   let stopStream: (() => void) | null = null
   let ticker: number | null = null
@@ -58,10 +69,38 @@ export const TasksPage = () => {
 
   const finish = () => {
     running.value = false
+    cancelling.value = false
+    currentRunId.value = null
     stopTicker()
     // EventSource 断线会自动重连，必须显式关掉
     stopStream?.()
     stopStream = null
+  }
+
+  /**
+   * 请求中止当前运行。
+   *
+   * 中止是**协作式**的：后端只置标志，任务在安全点自己退出。
+   * 所以这里不立刻把界面改成"已停止"，而是显示"正在中止"，
+   * 等真正的 finished 事件到达才收尾 —— 否则界面说停了、任务还在跑。
+   */
+  const cancel = async () => {
+    const id = currentRunId.value
+    if (id == null) return
+    cancelling.value = true
+    try {
+      const resp = await cancelRun(id)
+      if (!resp.cancelled) {
+        // 任务刚好跑完 —— 正常竞态，不是错误
+        push('warn', '任务已经结束，无需中止')
+        cancelling.value = false
+        return
+      }
+      push('warn', '已请求中止，等待任务在安全点退出…')
+    } catch (e) {
+      submitError.value = e instanceof Error ? e.message : '中止请求失败'
+      cancelling.value = false
+    }
   }
 
   const onEvent = (ev: RunEvent) => {
@@ -87,6 +126,9 @@ export const TasksPage = () => {
         )
         finish()
         break
+      default:
+        // 后端新增事件类型时，旧前端不该整页报错 —— 忽略即可
+        break
     }
   }
 
@@ -106,9 +148,12 @@ export const TasksPage = () => {
     }, 1000)
 
     try {
-      const resp = await startRun(task, account.value.trim())
-      // 同步运行：结果已经拿到，但仍订阅一下事件流以接收日志，
-      // 拿到终态后立即收尾。
+      // 后台执行：**立刻**拿到 run id，这样才能订阅事件并请求中止。
+      // 同步执行的话请求还没返回，用户根本没有可中止的时机。
+      const resp = await startRun(task, account.value.trim(), {}, true)
+      currentRunId.value = resp.run_id
+      // 先订阅再提示：订阅会把已发布的事件补进队列，
+      // 因此"启动到订阅"之间的事件不会丢
       stopStream = subscribeRun(resp.run_id, { onEvent })
       push('info', `已提交，运行号 ${resp.run_id}`)
     } catch (e) {
@@ -161,8 +206,18 @@ export const TasksPage = () => {
           </div>
         ) : null}
         {running.value ? (
-          <div class="text-xs opacity-70">
-            执行中，已用 {elapsedText()} · 可关闭页面，任务在后端继续
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <span class="text-xs opacity-70">
+              执行中，已用 {elapsedText()} · 可关闭页面，任务在后端继续
+            </span>
+            <button
+              type="button"
+              class="btn btn-error btn-sm min-h-11 md:min-h-0"
+              disabled={cancelling.value}
+              onClick={() => void cancel()}
+            >
+              {cancelling.value ? '正在中止…' : '中止'}
+            </button>
           </div>
         ) : null}
       </div>

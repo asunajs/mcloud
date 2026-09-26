@@ -141,6 +141,7 @@ pub async fn run(
     // 它的上下文就被取消了，只脱离"记账"那一步的话，
     // 表现是"用户点了运行、拿到 202，然后每一步都记成'没等完'"。
     let handle = state.handle.clone();
+    let started_ms = state.handle.clock.now_ms();
     tokio::spawn(async move {
         let cancel = mcloud_core::CancelToken::new();
         let outcome = handle
@@ -150,6 +151,17 @@ pub async fn run(
         match outcome {
             Ok(o) => tracing::info!(pipeline = %pipeline.id, "编排结束：{}", o.summary_line()),
             Err(e) => tracing::error!(pipeline = %pipeline.id, error = %e, "编排失败"),
+        }
+        // 记账用**窄写**：一次编排要跑几分钟，整行覆盖会把用户在这期间
+        // 改过的名字与步骤一起抹掉。
+        // 记的是**开始时刻**而不是结束时刻 —— 界面回答的问题是
+        // "我配的那条链什么时候跑的"。
+        if let Err(e) = handle
+            .store
+            .mark_pipeline_ran(&pipeline.id, started_ms)
+            .await
+        {
+            tracing::warn!(pipeline = %pipeline.id, error = %e, "编排执行时间记账失败");
         }
     });
 

@@ -437,3 +437,289 @@ async fn empty_file_is_treated_as_empty_not_corrupt() {
     assert!(s.accounts().await.unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// ── 窄写：只改该改的列 ──────────────────────────────────────────────────
+
+/// 水位线窄写**不能**碰用户改过的字段。
+///
+/// 调度器手里那行是几秒前读的；整行覆盖会把用户在这期间通过 WebUI
+/// 改过的名字/参数一起抹掉。
+#[tokio::test]
+async fn mark_schedule_fired_only_touches_watermark_and_count() {
+    let d = tmpdir("narrow-fire");
+    let s = JsonStore::open(&d).unwrap();
+    let mut sch = Schedule {
+        id: ScheduleId::new("s1"),
+        name: "原名".into(),
+        task: "sign".into(),
+        accounts: vec![],
+        expr: "0 8 * * *".into(),
+        timezone: "Asia/Shanghai".into(),
+        body: serde_json::Value::Null,
+        enabled: true,
+        last_fire_ms: None,
+        last_run_ms: None,
+        last_status: None,
+        last_error: None,
+        run_count: 0,
+    };
+    s.save_schedule(&sch).await.unwrap();
+
+    // 模拟：调度器读到这行之后，用户改了个名字
+    sch.name = "用户改的新名字".into();
+    s.save_schedule(&sch).await.unwrap();
+
+    // 调度器拿着**旧快照**（名字是"原名"）推水位
+    let mut stale = sch.clone();
+    stale.name = "原名".into();
+    s.mark_schedule_fired(&stale.id, 1_700_000_000_000)
+        .await
+        .unwrap();
+
+    let after = s.schedule(&ScheduleId::new("s1")).await.unwrap().unwrap();
+    assert_eq!(after.name, "用户改的新名字", "窄写不能把名字改回去");
+    assert_eq!(after.last_fire_ms, Some(1_700_000_000_000));
+    assert_eq!(after.run_count, 1);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// `record_schedule_run` 的两个 `None` 语义**不对称**，这是刻意的。
+#[tokio::test]
+async fn record_schedule_run_has_asymmetric_none_semantics() {
+    let d = tmpdir("narrow-record");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_schedule(&Schedule {
+        id: ScheduleId::new("s1"),
+        name: "x".into(),
+        task: "sign".into(),
+        accounts: vec![],
+        expr: "0 8 * * *".into(),
+        timezone: "Asia/Shanghai".into(),
+        body: serde_json::Value::Null,
+        enabled: true,
+        last_fire_ms: Some(1),
+        last_run_ms: None,
+        last_status: None,
+        last_error: None,
+        run_count: 1,
+    })
+    .await
+    .unwrap();
+
+    // 一次真跑：记时间 + ok，并清掉可能的旧错误
+    s.record_schedule_run(&ScheduleId::new("s1"), Some(999), "ok", None)
+        .await
+        .unwrap();
+    let a = s.schedule(&ScheduleId::new("s1")).await.unwrap().unwrap();
+    assert_eq!(a.last_run_ms, Some(999));
+    assert_eq!(a.last_status.as_deref(), Some("ok"));
+    assert_eq!(a.last_error, None);
+
+    // 一次被弃掉的错过：`run_ms = None` ⇒ **不动**上次运行时间
+    s.record_schedule_run(&ScheduleId::new("s1"), None, "skipped", Some("错过了"))
+        .await
+        .unwrap();
+    let b = s.schedule(&ScheduleId::new("s1")).await.unwrap().unwrap();
+    assert_eq!(
+        b.last_run_ms,
+        Some(999),
+        "这一趟没跑，不该把上次真实运行时间抹掉"
+    );
+    assert_eq!(b.last_status.as_deref(), Some("skipped"));
+
+    // 成功时 `error = None` ⇒ **显式清空**（不是"不动"）
+    s.record_schedule_run(&ScheduleId::new("s1"), Some(1000), "ok", None)
+        .await
+        .unwrap();
+    let c = s.schedule(&ScheduleId::new("s1")).await.unwrap().unwrap();
+    assert_eq!(
+        c.last_error, None,
+        "成功必须清掉旧错误，否则界面上 ok 旁边挂着一条旧错误"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[tokio::test]
+async fn narrow_writes_on_missing_row_are_noops_not_errors() {
+    let d = tmpdir("narrow-missing");
+    let s = JsonStore::open(&d).unwrap();
+    // 定时在这期间被删了：不是错误，只是没得写
+    s.mark_schedule_fired(&ScheduleId::new("gone"), 1)
+        .await
+        .unwrap();
+    s.record_schedule_run(&ScheduleId::new("gone"), Some(1), "ok", None)
+        .await
+        .unwrap();
+    s.mark_pipeline_ran(&PipelineId::new("gone"), 1)
+        .await
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[tokio::test]
+async fn mark_pipeline_ran_only_touches_run_time() {
+    let d = tmpdir("narrow-pipe");
+    let s = JsonStore::open(&d).unwrap();
+    use mcloud_core::{AccountMode, PipelineStep};
+    let p = Pipeline {
+        id: PipelineId::new("p1"),
+        name: "原编排".into(),
+        accounts: vec![],
+        account_mode: AccountMode::Sequential,
+        stop_on_error: true,
+        steps: vec![PipelineStep {
+            task: "sign".into(),
+            body: serde_json::Value::Null,
+            continue_on_error: false,
+        }],
+        enabled: true,
+        last_run_ms: None,
+    };
+    s.save_pipeline(&p).await.unwrap();
+
+    // 编排跑了（可能几分钟），期间用户改了名字
+    let mut edited = p.clone();
+    edited.name = "用户改过的".into();
+    s.save_pipeline(&edited).await.unwrap();
+
+    s.mark_pipeline_ran(&PipelineId::new("p1"), 555)
+        .await
+        .unwrap();
+    let after = s.pipeline(&PipelineId::new("p1")).await.unwrap().unwrap();
+    assert_eq!(after.name, "用户改过的", "窄写不能抹掉用户的编辑");
+    assert_eq!(after.last_run_ms, Some(555));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ── 权限 ────────────────────────────────────────────────────────────────
+//
+// `accounts.json` 里是凭证原文，落盘必须是 0600。这类测试在 CI（Linux）
+// 上才有意义，所以整组用 cfg(unix) 门控。
+
+/// 新写入的凭证文件权限必须是 0600。
+#[cfg(unix)]
+#[tokio::test]
+async fn accounts_file_is_created_with_0600() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let d = tmpdir("perm-new");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_account(&account("13800000000")).await.unwrap();
+
+    let p = d.join("accounts.json");
+    let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "凭证文件权限应为 0600，实际 {:o} —— 组或其他用户能读到凭证",
+        mode
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 数据目录本身不应对外开放。
+#[cfg(unix)]
+#[tokio::test]
+async fn data_dir_is_created_with_0700() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let d = tmpdir("perm-dir");
+    let _s = JsonStore::open(&d).unwrap();
+
+    let mode = std::fs::metadata(&d).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700, "数据目录权限应为 0700，实际 {:o}", mode);
+
+    let logs = d.join("logs");
+    let lmode = std::fs::metadata(&logs).unwrap().permissions().mode() & 0o777;
+    assert_eq!(lmode, 0o700, "日志目录权限应为 0700，实际 {:o}", lmode);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 老数据目录里的宽松权限要在启动时被收紧。
+///
+/// 这是升级路径：老版本用默认权限（0644）写出的 `accounts.json`，
+/// 新版本打开时必须收紧，否则「修好了」只是对新用户成立。
+#[cfg(unix)]
+#[tokio::test]
+async fn existing_loose_permissions_are_tightened_on_open() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let d = tmpdir("perm-legacy");
+    std::fs::create_dir_all(&d).unwrap();
+    let p = d.join("accounts.json");
+    std::fs::write(&p, "[]").unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    // 前置条件：确实是宽松的，否则这个测试什么也没验证
+    assert_eq!(
+        std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+
+    let _s = JsonStore::open(&d).unwrap();
+
+    let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "启动时应把历史遗留的 0644 收紧为 0600");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 收紧是幂等的：已经是 0600 的文件再打开一次不能变坏。
+#[cfg(unix)]
+#[tokio::test]
+async fn tightening_is_idempotent() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let d = tmpdir("perm-idem");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_account(&account("13800000001")).await.unwrap();
+    drop(s);
+
+    let p = d.join("accounts.json");
+    let _s2 = JsonStore::open(&d).unwrap();
+    let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "重复打开不应放松权限");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 阻塞写盘的**上界**必须留在"可接受"的量级内。
+///
+/// §6 给 `mcloud-store` 开了唯一的阻塞 IO 例外，理由是「一次写盘亚毫秒级」。
+/// 那是个会被悄悄推翻的前提：有人把 `LOG_LIMIT_PER_RUN` 调大一个数量级、
+/// 或者往每行日志里塞进大段 JSON，例外就不成立了 —— 而**不会有任何测试变红**。
+/// 这里把上界钉住：单 run 满额日志的体积与一次写盘耗时。
+///
+/// 阈值取得很宽（体积 8MB、耗时 200ms），因为这不是性能基准，
+/// 而是防"量级失控"。真到需要收紧时，说明该换 `spawn_blocking` 了。
+#[test]
+fn worst_case_log_write_stays_bounded() {
+    use mcloud_core::LOG_LIMIT_PER_RUN;
+
+    // 单条日志取一个偏大的真实形态：80 字符消息 + 序号/时间戳
+    let one = LogLine::new(
+        1,
+        LogLevel::Info,
+        "x".repeat(80),
+        1_700_000_000_000,
+        Seq(LOG_LIMIT_PER_RUN as u64),
+    );
+    let bytes = serde_json::to_vec(&vec![one; LOG_LIMIT_PER_RUN]).unwrap();
+    let mb = bytes.len() as f64 / (1024.0 * 1024.0);
+    assert!(
+        mb < 8.0,
+        "单 run 满额日志已达 {mb:.1}MB，§6 的阻塞 IO 例外需要重新评估"
+    );
+
+    // 量一下真实写盘耗时（同目录、同临时文件路径）
+    let d = tmpdir("worstcase");
+    let s = JsonStore::open(&d).unwrap();
+    let p = d.join("bench.json");
+    let t = std::time::Instant::now();
+    for _ in 0..20 {
+        s.write_atomic(&p, &bytes).unwrap();
+    }
+    let per_ms = t.elapsed().as_secs_f64() * 1000.0 / 20.0;
+    assert!(
+        per_ms < 200.0,
+        "单次写盘 {per_ms:.1}ms，已超出 §6 例外所依赖的量级"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}

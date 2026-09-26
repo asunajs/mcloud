@@ -82,9 +82,14 @@ pub async fn create(
     State(state): State<ServerState>,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    // 先校验任务名：否则未知任务会被误报成「账号不存在」，误导排查
+    // 先校验任务名：否则未知任务会被误报成「账号不存在」，误导排查。
+    //
+    // 用 `Config`（→ 400）而不是 `NotFound`（→ 404）：错的是**请求体里的
+    // 一个字段**，不是 URL 指向的资源。返回 404 会让客户端以为
+    // `/api/runs` 这个端点不存在。engine 对同一情况也用 `Config`
+    // （`runner.rs` 的 `unknown_task_is_config_error` 锁着），两边必须一致。
     if !state.handle.registry.contains(&req.task) {
-        return Err(ApiError(mcloud_core::Error::NotFound(format!(
+        return Err(ApiError(mcloud_core::Error::Config(format!(
             "未知任务：{}",
             req.task
         ))));
@@ -156,23 +161,29 @@ pub async fn events(
     // 断线续传的起点：`Last-Event-ID` 优先（浏览器自动带），其次 `?after=`
     let since = parse_resume_point(&headers, q.after);
 
-    // ⚠ 顺序：先订阅，再读库。
-    // 订阅会把 since 之后的内存历史补进队列，因此两步之间那个窗口里的
-    // 事件一定在队列里；反过来则两头都漏。
-    let subscriber = state.handle.hub.subscribe(run_id, since);
-
-    // 运行记录必须存在 —— 否则"不存在的 run"会挂成一条永不结束的空流。
-    // 注意 404 与"存在但还没事件"必须区分开。
-    if state.handle.store.run(run_id).await?.is_none() {
-        state.handle.hub.unsubscribe(run_id, subscriber);
+    // ⚠ 判定"这个 run 存不存在"要**同时看三处**，而且必须在 subscribe **之前**判 ——
+    // `subscribe` 会给中枢建一个空条目，之后再问就永远是"存在"了。
+    //
+    // 三处缺一不可：
+    // - 存储层：已结束的运行（记录在结束时才落盘）
+    // - 取消登记表：**正在跑**的运行。只查存储层的话，正在跑的运行在库里
+    //   根本还不存在，会被判 404 —— 而 `EventSource` 遇到 404 **不会重连**，
+    //   界面就永远停在"执行中"
+    // - 内存中枢：刚结束、记录还没落盘完的运行
+    let known = state.handle.cancel.is_running(run_id)
+        || state.handle.hub.is_tracked(run_id)
+        || state.handle.store.run(run_id).await?.is_some();
+    if !known {
         return Err(ApiError(mcloud_core::Error::NotFound(format!(
             "运行记录不存在：{id}"
         ))));
     }
 
     let hub = std::sync::Arc::clone(&state.handle.hub);
-    // 在**订阅之后**建通知接收端：这样"订阅到建接收端"之间发布的事件
-    // 已经在队列里（drain 会取到），而之后发布的会唤醒我们。
+    // 订阅会把 `since` 之后的内存历史补进队列，因此"判存在"到"订阅"之间
+    // 发布的事件不会漏。通知接收端要在订阅**之后**建：这样订阅到建接收端
+    // 之间发布的事件已经在队列里（drain 会取到），之后发布的会唤醒我们。
+    let subscriber = hub.subscribe(run_id, since);
     let waiter = hub.waiter();
 
     let stream = futures::stream::unfold(

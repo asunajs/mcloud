@@ -95,3 +95,17 @@ export const IconAlert = (p: IconProps): JSX.Element => (
     <path d="M12 2 1 21h22L12 2Zm1 15h-2v-2h2v2Zm0-4h-2V8h2v5Z" />
   </svg>
 )
+
+/** 时钟：定时任务。 */
+export const IconClock = (p: IconProps): JSX.Element => (
+  <svg {...BASE} class={p.class ?? 'size-5'}>
+    <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2Zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8Zm1-13h-2v6l5 3 1-1.7-4-2.3V7Z" />
+  </svg>
+)
+
+/** 任务编排：自上而下依次执行的步骤链。 */
+export const IconPipeline = (p: IconProps): JSX.Element => (
+  <svg {...BASE} class={p.class ?? 'size-5'}>
+    <path d="M4 3h16v4H4V3Zm0 7h16v4H4v-4Zm0 7h16v4H4v-4Z" />
+  </svg>
+)

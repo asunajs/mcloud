@@ -72,7 +72,12 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+/**
+ * 底层请求：统一处理 JSON 解析、错误原文透出与 204。
+ *
+ * 导出是为了让页面复用同一份语义 —— 复制一份到页面里迟早会分叉。
+ */
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     credentials: 'same-origin',
     headers: init?.body ? { 'Content-Type': 'application/json' } : undefined,
@@ -135,10 +140,22 @@ export const listRuns = () => request<RunRecord[]>('/api/runs')
 
 export const getRun = (id: number) => request<RunRecord>(`/api/runs/${id}`)
 
-export const startRun = (task: string, account: string, body: Record<string, unknown> = {}) =>
+/**
+ * 启动一次运行。
+ *
+ * `background = true` 时**立刻**返回真实的 run id，任务在后台跑。
+ * 这是"界面上能点中止"的前提：同步执行的话请求还没返回，
+ * 用户根本没有可中止的时机。
+ */
+export const startRun = (
+  task: string,
+  account: string,
+  body: Record<string, unknown> = {},
+  background = false,
+) =>
   request<RunResponse>('/api/runs', {
     method: 'POST',
-    body: JSON.stringify({ task, account, body }),
+    body: JSON.stringify({ task, account, body, background }),
   })
 
 /** SSE 事件流地址。交给 `EventSource` —— 它自己带同源 cookie。 */

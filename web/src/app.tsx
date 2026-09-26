@@ -14,6 +14,8 @@ import { fmtEpochMs } from './ui/time'
 import { ToastView } from './ui/toast-view'
 import { DashboardPage } from './pages/dashboard-page'
 import { TasksPage } from './pages/tasks-page'
+import { SchedulesPage } from './pages/schedules-page'
+import { PipelinesPage } from './pages/pipelines-page'
 import { HistoryPage } from './pages/history-page'
 import { SettingsPage } from './pages/settings-page'
 
@@ -159,6 +161,10 @@ export default defineVaporComponent(() => {
             <DashboardPage onGo={go} />
           ) : page.value === 'tasks' ? (
             <TasksPage />
+          ) : page.value === 'schedules' ? (
+            <SchedulesPage key={page.value} />
+          ) : page.value === 'pipelines' ? (
+            <PipelinesPage key={page.value} />
           ) : page.value === 'history' ? (
             <HistoryPage onGo={go} />
           ) : (

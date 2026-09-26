@@ -298,8 +298,19 @@ if !matches!(code, "0" | "0000" | "200") {
 ## 6. 异步与并发【硬约束】
 
 - 异步 trait 一律用 `#[async_trait]`（`mcloud-core` 的 `HttpClient` / `Store` 是范例）。
-- **禁止在异步上下文里做阻塞 IO**。`std::fs`、`std::thread::sleep` 会卡住整个 runtime。
-  需要时用 `tokio::fs` 或 `tokio::task::spawn_blocking`。
+- **默认禁止在异步上下文里做阻塞 IO**。`std::fs`、`std::thread::sleep` 会占住
+  一个 runtime worker。需要时用 `tokio::fs` 或 `tokio::task::spawn_blocking`。
+- **唯一的例外是 `mcloud-store` 的短写盘**，它是有意为之，不是欠账：
+  数据都在 KB 量级，实测一次写盘 **0.19ms**（311KB，单 run 日志上限 2000 条）；
+  即使取编译期断言允许的极限 10000 条（1.5MB）也只有 **0.66ms**。
+  落盘节拍是 2 秒一次（`main.rs`），runtime 是多线程的。
+  为 0.19ms 引入 `spawn_blocking` 的调度开销比它省下的还多。
+  **例外成立的前提**（任一条不成立就必须改回 `spawn_blocking`）：
+  1. 写的是本地文件系统，不是网络盘；
+  2. 单次写入量有上界（`LOG_LIMIT_PER_RUN` 已有编译期断言兜底，见 §3）；
+  3. 不在紧循环里调用 —— 调用点是 2 秒一次的攒批，不是每条日志一次。
+  代码侧的对应约束：`mcloud-store` 全程**不跨 `.await` 持锁**，
+  这一点由「用 `std::sync::RwLock` 而非 `tokio::sync::RwLock`」编译期保证。
 - **锁**：用 `std::sync::Mutex` 保护**不跨 `.await`** 的临界区（如 `runner.rs` 的
   `inflight`）。一旦需要跨 `.await` 持锁，必须换 `tokio::sync::Mutex`。
 - **锁中毒**：沿用 `expect("...锁中毒")`，因为毒锁意味着已有 panic，继续运行无意义。
@@ -316,7 +327,22 @@ if !matches!(code, "0" | "0000" | "200") {
 
 ### 7.1 序列化形态
 
-- **JSON 字段一律 `snake_case`**（Rust 默认），**不要**加 `rename_all = "camelCase"`。
+- **命名有两种形态，取决于类型属于哪一批**（这不是笔误，是既成事实）：
+
+  | 批次 | 形态 | 类型 |
+  |---|---|---|
+  | 早期领域类型 | **`snake_case`**（Rust 默认，不加注解） | `RunRecord`、`RunEvent`、`TaskOutcome`、`AuthInfo` |
+  | 后期新增类型 | **`camelCase`**（`#[serde(rename_all = "camelCase")]`） | `LogLine`、`Schedule`、`Pipeline`、`PipelineStep`、`PipelineSchedule`、`ServiceStatus`、`CancelResponse`、`ScheduleInput`、`PipelineInput` |
+
+  **新增类型一律用 `camelCase`**（与前端习惯一致，也是后期批次的方向）。
+  但**不要**为了"统一"去改早期类型的命名：它们已经落盘（`history.json`、
+  `accounts.json`）且被前端读取，改名是破坏性变更。
+  改任何 wire 字段前，先在前端 `web/src/api.ts` 里搜一遍它有没有被依赖。
+
+  > 本节此前写的是「JSON 字段**一律** snake_case，**不要**加 camelCase」——
+  > 与代码不符：生产代码里有 11 个类型在用 camelCase。
+  > 照那句话去改会把前端打挂。
+
 - 枚举用 `#[serde(tag = "...")]` 做内部标签，**标签名是 wire 契约**：
 
 ```rust
@@ -332,10 +358,6 @@ pub enum RunEvent { Started{..}, Log{..}, Progress{..}, Finished{..} }
 ```
 
 改动这些 tag 或字段名**必须同步改前端**，并视为破坏性变更。
-
-> ⚠️ **已知文档分歧**：`architecture.md` §9.2 的 SSE 示例写的是 camelCase
-> （`"durationMs"`），而**代码实际输出 snake_case**（`duration_ms`，已实测）。
-> **以代码为准**，`architecture.md` 该处待修正。
 
 ### 7.2 时间
 
@@ -356,9 +378,12 @@ pub enum RunEvent { Started{..}, Log{..}, Progress{..}, Finished{..} }
 - 写盘保留 `.bak`（`JsonStore::write_atomic` 已实现，注意实际文件名是
   `accounts.bak` 而非 `accounts.json.bak`——`with_extension` 会替换扩展名）。
 
-> **尚未实现、但必须遵守**：配置目录权限 `0600`。当前代码没有任何
-> `set_permissions` 调用，`data/` 目录按默认 umask 创建。这是安全欠账，
-> 见 §11。在它落地前，不要把含真实凭证的 `data/` 放在共享目录。
+> **权限已落地**：数据目录 `0700`、凭证文件 `0600`。
+> 关键在于**创建时**就限制，不是写完再 `chmod` —— 先按默认权限写、
+> 再收紧，中间有一小段窗口同机其他用户能读到凭证。所以用的是
+> `OpenOptions::mode` / `DirBuilder::mode`。
+> 老数据目录（默认 umask 装出来的）在 `open` 时会被收紧，覆盖升级路径。
+> 目录是 `0700` 而非 `0600`：目录必须可进入（x 位）才能读到里面的文件。
 
 ### 7.4 持久化
 
@@ -377,7 +402,7 @@ pub enum RunEvent { Started{..}, Log{..}, Progress{..}, Finished{..} }
 | `mcloud-crypto` | **黄金向量对拍**（`test/golden/*.json`） | ✅ 已有 `tests/golden.rs` |
 | `mcloud-upstream` | fixture 回放（录制真实响应，离线断言） | ⬜ 待补 |
 | `mcloud-engine` | 假 Task + 假 Store，断言事件序列与并发闸 | ✅ `runner.rs` 已覆盖（见 §8.5） |
-| `mcloud-server` | `tower::ServiceExt::oneshot` 路由级测试 | ⬜ 待补 |
+| `mcloud-server` | `tower::ServiceExt::oneshot` 路由级测试 | ✅ `tests/routes.rs` 已覆盖（见 §8.6） |
 | web | `tsc --noEmit` + 关键组件测试 | ⬜ 待建 |
 
 ### 8.2 黄金向量铁律
@@ -417,6 +442,16 @@ pub enum RunEvent { Started{..}, Log{..}, Progress{..}, Finished{..} }
   （`tokio::time::timeout`）。闸逻辑一坏，无超时的等待会让整条测试挂到 CI 超时，
   那是比失败更难排查的形态。`runner.rs` 的 `wait_started` 是范例。
 
+### 8.4 补测优先级
+
+当前空白按风险排序，建议依次补：
+
+1. **`mcloud-upstream` 的凭证注入边界**——域名匹配已有测试，但
+   `ReqwestClient` 的注入行为没有；这是安全边界，漏了会把凭证发错域名。
+2. **`mcloud-upstream` 的 fixture 回放**——录制真实响应离线断言，
+   让上游改字段时能在 CI 上发现，而不是等用户报错。
+3. **web 层**——`tsc --noEmit` 已有 CI 门禁；组件测试待建。
+
 ### 8.5 已固化的行为契约（`runner.rs`）
 
 `Runner` 的并发闸是「同 `task:account` 不并发」的核心，改动它前先读这些测试
@@ -434,15 +469,31 @@ pub enum RunEvent { Started{..}, Log{..}, Progress{..}, Finished{..} }
 | 重启后从历史最大值 +1 续号 | `seed_run_id_continues_after_restart` |
 | 时间一律来自注入的 `Clock` | `record_time_comes_from_injected_clock` |
 
-### 8.4 补测优先级
 
-当前空白按风险排序，建议依次补：
+### 8.6 已固化的行为契约（`mcloud-server/tests/routes.rs`）
 
-1. **`mcloud-engine` 的 `Runner`**（`runner.rs` 目前 0 测试）——
-   并发闸、事件序列、`task:account` 去重是核心逻辑，最该有测试。
-2. **`mcloud-upstream` 的凭证注入边界**——域名匹配已有测试，但
-   `ReqwestClient` 的注入行为没有；这是安全边界。
-3. **`mcloud-server` 路由**——用 `oneshot` 断言状态码与 JSON 形态。
+路由测试用 `tower::ServiceExt::oneshot` 直接打 `Router`，**不起监听端口** ——
+端口会冲突、要处理时序，CI 上还可能与正在跑的服务抢 8080。
+
+| 契约 | 测试 |
+|---|---|
+| 未知**任务名** → 400（`Config`），不是 404/500 | `unknown_task_is_400_not_500` |
+| 账号不存在 → 400，且信息里带账号名 | `missing_account_is_400` |
+| 运行记录不存在 → 404 | `missing_run_is_404` |
+| 不存在运行的日志 → **404**（不是 200+`[]`） | `logs_of_missing_run_is_404_not_empty_list` |
+| 存在但无日志 → **200 + `[]`**（不是 404） | `logs_of_existing_run_without_lines_is_empty_200` |
+| 取消没在跑的运行 → 200 且 `cancelled=false`（不是错误） | `cancelling_idle_run_is_ok_not_error` |
+| `taskCount` 是数字不是 `null`（`null` 会让前端白屏） | `status_task_count_is_a_number` |
+| 运行列表最新在前 | `runs_list_only_returns_own_records` |
+
+> **踩过的坑**：`unknown_task` 原先返回 404，而 engine 对同一情况返回
+> `Config`(400) 并有测试锁着 —— 同一个"未知任务"在两层是两个错误类型。
+> 而且 404 语义也不对：错的是**请求体里的字段**，不是 URL 指向的资源，
+> 客户端会以为 `/api/runs` 这个端点不存在。已统一为 400。
+
+### 8.7 测试替身的共享
+
+见 §8.3 的 `mcloud_core::testkit`。**不要**在各自 crate 里复制假实现。
 
 ---
 
@@ -501,13 +552,22 @@ CI 已配置（`.github/workflows/ci.yml`），上面三条即为合并门禁，
 `.gitignore` 必须持续覆盖：
 
 ```gitignore
-/target
-/.cargo-home
+# 不锚定根目录（见下方说明）
+target/
+.cargo-home/
+
 /web/node_modules
 /web/dist
 /data
 *.log
 ```
+
+> **`target/` 与 `.cargo-home/` 不要写成 `/target`、`/.cargo-home`。**
+> 带前导 `/` 只匹配仓库根目录下的那一层。本项目实际出现过
+> `crates/mcloud-server/src/routes/.cargo-home/` —— 某次在子目录里跑了
+> cargo，生成了 **134MB** 的 registry 副本；根锚定的规则挡不住它，
+> 会被直接提交进去。凡是被 cargo/构建工具在任意深度生成的目录，
+> 一律用不锚定的写法。
 
 > **不要提交 `data/`**：那是运行期账号与凭证数据。
 > 提交前用 `git status` 确认没有 `data/` 下的文件混入。
@@ -546,16 +606,39 @@ data/         运行时数据（不入库）
 
 | # | 项 | 位置 | 类型 |
 |---|---|---|---|
-| 1 | `des` 依赖已声明但 `des.rs` 未实现 | `mcloud-crypto` | 死依赖 |
-| 2 | `architecture.md` §9.2 SSE 示例用 camelCase，与代码不符 | `docs/architecture.md` | 文档 |
-| 3 | `json_store` 在 async 中用阻塞 `std::fs` | `mcloud-store` | 并发 |
-| 4 | `mcloud-server` 路由 0 测试；`upstream` 无 fixture 回放 | 见 §8.4 | 测试 |
-| 5 | SSE 只按 `run_id` 过滤，且同步 `create` 不产生可订阅事件 | `mcloud-server/src/routes/runs.rs` | 设计 |
-| 6 | 凭证目录权限 `0600` 未实现（无 `set_permissions`） | `mcloud-store` | 安全 |
+| 1 | `EventHub::forget` **零生产调用** ⇒ 内存里的 run 状态无上限增长 | `mcloud-app/src/hub.rs` | 内存 |
+| 2 | `mcloud-upstream` 无 fixture 回放；`ReqwestClient` 注入行为无测试 | 见 §8.4 | 测试 |
+
+> **第 1 项的证据**（`forget` 存在且文档写明用途，但没人调用）：
+> `publish` 用 `runs.entry(run_id).or_default()` 建状态，唯一的移除路径是
+> `forget`，而它在生产代码里**一次都没被调用**（只有 `hub/tests.rs` 调）。
+> 于是每跑一次就多留一份 `RunState`（含最多 `HISTORY_PER_RUN` 条事件），
+> 而磁盘侧的 `HISTORY_LIMIT = 200` 只管落盘。
+> **不能**简单地在结束时清掉：SSE 与 `/logs` 都以内存历史优先，
+> 清早了会让"运行刚结束、用户来看日志"变成空列表。必须等日志确实落盘。
+> 这是设计问题，不是顺手能改的一行。
 
 > 已完成：`git init` + 首次提交、`clippy` 归零、`fmt` 归零、CI 配置、
 > MSRV 修正为 1.88、`Runner` 测试补齐（14 条，见 §8.5）、
-> `FixedClock` 迁到 `core::testkit`（见 §8.3）。
+> `FixedClock` 迁到 `core::testkit`（见 §8.3）、
+> DES-ECB 实现并消费 21 条黄金向量（原记为"死依赖"，实为未实现的功能）、
+> 凭证目录/文件权限（`0700`/`0600`，见 §7.3）、
+> 阻塞写盘改判为**有意的例外**并给出实测依据（见 §6）、
+> `mcloud-server` 路由测试 12 条（见 §8.6）。
+>
+> **记录本身也会失实**，几条值得留意的教训：
+> - 「`des` 是死依赖」是错的：依赖声明没错，缺的是实现，
+>   而黄金向量里早有 21 条用例在等消费者。差点把功能连同向量一起删掉。
+> - 「async 里用阻塞 `std::fs`」被记为缺陷，但实测单次写盘 0.19ms、
+>   调用节拍 2 秒一次，`spawn_blocking` 的调度开销比它省下的还多。
+>   它是有意为之的取舍，真正的问题在于 §6 把规则写成了绝对禁止。
+> - 「SSE 因同步 `create` 收不到事件」已过时：前端早已用
+>   `background: true` 拿真实 run id 再订阅，后端也返回真实 id。
+> - §7.1 原先写「字段**一律** snake_case，**不要**用 camelCase」，
+>   而生产代码里有 11 个类型在用 camelCase。照那句话改会把前端打挂。
+> - `architecture.md` §9.2 的 camelCase 分歧也已被修掉，注记随之删除。
+>
+> **清单项在下手前要重新核实，不要照着描述直接改。**
 >
 > 处理原则：清单项**默认只记录**。但若某项会让已落地的门禁必然失败
 > （例如声明 `rust-version = "1.82"` 而 CI 要用它编译），那属于门禁本身的
