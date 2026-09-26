@@ -5,20 +5,28 @@
 // 旧实现是 `packages/core/src/apis/file.ts`（四口）+ `utils/file.ts`（编排），
 // 调用点在 `runners.ts:43/95/115/318` 与 `after.ts:135`（清理）。
 //
-// # ⚠ 证据分两半，而且这一族比 rabactive 那一族更薄
+// # 证据分两半（2026-09-25 之后：这一族已经从"零真打"变成"端到端跑通过"）
 //
 //   - **四枪里只有 `file/create` 有实拍，而且实拍的是"建目录"那一型**
 //     （`test/fixtures/http/3d.json` 两条：`type:"folder"`，响应 `data.uploadId` 与
 //     `data.partInfos` 都是 `null`、`exist:true`）。⇒ 它只钉得住三件事：
 //     ①URL 与**信封形状**（`{code:"0000"(字符串), message, success, data}`，载荷在 `data`）；
 //     ②`data.fileId` 这一格确实存在；③这台主机收这个客户端发的请求。
-//   - **"上传文件"那一型、`PUT`、`complete`、`batchTrash` 零实拍**：
-//     `test/fixtures/http/*.json` 里 grep 不到任何一条。⇒ 这四口的请求面
-//     **只对齐到"与旧 TS 字面量一致"**，一个真打都没有过。
+//   - **"上传文件"那一型、`PUT`、`complete`、`batchTrash` 至今无 har 实拍**，但
+//     **不是"一个真打都没有过"**：2026-09-25 起 `app-task` 的 106 / 522 / beiyong1 那几条玩法
+//     用本文件这四个函数**端到端跑通**（传进去 + 链尾 `batchTrash` 收走，见 R27 与
+//     `docs/capture/`），所以"上游认不认这一套请求"在**完整上传**这一条路径上已有读数。
+//     ⚠ 仍**零样本**的是 `exist:true` 与 `rapidUpload:true` 那两支（每次都传随机名 + 随机内容 ⇒
+//     撞同名与撞内容哈希碰不上）。
+//     ⭐ `batchTrash` 打在**非空目录**上的行为（**R7**）**已于 2026-09-26 真跑闭合**：
+//     四趟（账号 0 三趟 + 账号 1 一趟）都是"上游认了 + 内容跟着消失 + 没有退回到根目录"，
+//     且"建目录"与"把文件传进子目录"这两口第一次真打成功 ⇒ 本文件那四口在**带父目录**这一档
+//     也不再是"只对齐到旧 TS 字面量"。逐字读数与边界见
+//     [`../capture/app-cloud-folder-trash-samples.txt`](../capture/app-cloud-folder-trash-samples.txt)。
 //
 // 按 v4 口径（接口层按旧实现落码、业务层照它推进）：本文件把四口都落下来，
-// 但测试**只钉"发得出 + 形状对"，不钉语义** —— 哪些格子是推断的逐条写在各自注释里。
-// 真要判"上游认不认这一套"，唯一的办法是拿一个测试号真跑一次四枪（P1 第三档，需用户点头）。
+// 测试钉"发得出 + 形状对"，语义按各条注释里的证据等级写 —— 有真跑的写真跑，只有实拍的写实拍，
+// 两者都没有的标"零样本"。
 //
 // # 预签名 `uploadUrl` 与凭据同类：**绝不进日志、夹具、错误文本**
 //
@@ -29,8 +37,8 @@
 // # 与同一台主机上那一口 `hcy/file/list` 用了**两套画像**（R16 / R27，2026-09-26 收口）
 //
 // [CloudFileListRequest] 用 iOS 的 [AppProfile]（[WithAppHeaders] 那一整族 `x-yun-*`），
-// 本族零实拍 ⇒ 按**旧 TS** 发：主 http 实例的静态头（[AiAvatarHeaders]）加
-// [CloudFileOpHeaders] 那三档。同一账号同一趟里两套并存是**已知不一致**，不是笔误。
+// 本族**没有 har 实拍**（只有 2026-09-25 起的真跑）⇒ 按**旧 TS** 发：主 http 实例的静态头
+// （[AiAvatarHeaders]）加 [CloudFileOpHeaders] 那三档。同一账号同一趟里两套并存是**已知不一致**，不是笔误。
 //
 // 谁对，探针已经答过（三趟只读、体逐字不变）：**两套今天都通**，
 // 而"通不通"既不取决于装配、也不取决于渠道号的值 ——
@@ -96,10 +104,23 @@ const (
 const (
 	// CloudFileTypeFile 是 `create` 的 `type`：这一族只传文件。
 	// ⚠ 实拍那两条是 `"folder"`（建目录），"这一口认不认 `file`"由那两条**证不了**。
+	// ⇒ 它由 2026-09-25 起的真跑证实（106 / 522 / beiyong1 那几条玩法每次都发这一型，
+	// 且链尾删得掉，见 R27）。
 	CloudFileTypeFile = "file"
+	// CloudFileTypeFolder 是 `create` 的**建目录**那一型。⚠ 它的出处是**实拍**
+	// （`3d.json` 两条），不是真跑：本仓的生产链到今天**一处都不建目录** ——
+	// 唯一消费者是问 R7 那一格（`batchTrash` 删不删得动**非空目录**）的活体探针。
+	// 登记这句是为了"加了它不等于有生产路径依赖它"。
+	CloudFileTypeFolder = "folder"
 	// CloudRenameModeAuto 是**上传**那一型的重名策略（`apis/file.ts:65`）。
 	// 实拍两条是 `"refuse"`（建目录用 refuse）⇒ 两档各有出处，不是猜的。
 	CloudRenameModeAuto = "auto_rename"
+	// CloudRenameModeRefuse 是**建目录**那一型的重名策略：同名目录已存在时上游不另起一个，
+	// 而是在响应里给 `data.exist:true` + **已有那枚** `fileId`（实拍两条逐字如此）。
+	//
+	// ⚠ "同名**文件**也用 refuse 会怎样"**零样本**：本族的文件型走 [CloudRenameModeAuto]，
+	// 而 refuse 只在实拍那两条目录型里出现过 —— 别把这一枚搬去传文件。
+	CloudRenameModeRefuse = "refuse"
 	// CloudHashAlgorithm 是 `contentHashAlgorithm`：`SHA256`（大写，两处都用它）。
 	CloudHashAlgorithm = "SHA256"
 	// CloudCreateContentType 是**请求体里那个 `contentType` 键**的值：
@@ -265,10 +286,16 @@ type CloudFileCreateInput struct {
 
 // parentFileIDOrDefault 补旧实现那个 `|| "/"`。
 func (in CloudFileCreateInput) parentFileIDOrDefault() string {
-	if in.ParentFileID == "" {
+	return orRoot(in.ParentFileID)
+}
+
+// orRoot 是旧 TS `parentFileId || "/"` 那一格（`apis/file.ts:57`）：空 ⇒ 根目录。
+// 两型 `file/create`（文件、目录）共用同一个退路，所以只写一处。
+func orRoot(parentFileID string) string {
+	if parentFileID == "" {
 		return "/"
 	}
-	return in.ParentFileID
+	return parentFileID
 }
 
 // channelOrDefault 补旧实现的两处默认（参数默认值 + `channelSrc || CHANNEL_SRC.web`）。
@@ -386,6 +413,49 @@ func ParseCloudFileCreate(envelope *Envelope) (CloudFileCreated, *core.Error) {
 func cloudFlag(obj map[string]any, key string) bool {
 	flag, _ := obj[key].(bool)
 	return flag
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 第一枪的**另一型**：建目录（`type:"folder"`，四键）
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CloudFolderCreateRequest 构造 `POST /hcy/file/create` 的**建目录**那一型（**写**）。
+//
+// # 为什么不复用 [CloudFileCreateRequest] 加一个 `Type` 字段
+//
+// 两型的**请求体不是同一份**：实拍那两条（`test/fixtures/http/3d.json`）只有四枚键
+// —— `{"fileRenameMode":"refuse","name":…,"parentFileId":…,"type":"folder"}`，
+// 而文件型带 `size` / `contentHash` / `partInfos` 等六枚，且重名策略是 `auto_rename`。
+// 做成"一个 builder + 类型开关"会让"这一型该发哪几枚键"变成运行时才知道的事，
+// 而那是这一口最容易出错的一格（少一枚 `size` 之类的判断会散进调用方）。
+//
+// # 今天的消费者只有一支探针
+//
+// 本仓生产链**一处都不建目录**（清理那一族只删自己传上去的文件）。这一口的存在是为了
+// 问 R7 那一格：`batchTrash` 打在**非空目录**上到底算什么 —— 那需要先造出一个非空目录，
+// 而这一步就是"造"。⚠ 别把它当成"链上缺一环"补进编排。
+//
+// 响应与文件型同一份信封、同一个解析器（[ParseCloudFileCreated]）：实拍两条都回
+// `data.exist:true` + 已有那枚 `fileId` ⇒ `exist` 在目录型上读作"这个名已经有了"。
+// ⚠ "文件型的 `exist:true` 是不是同一格语义"**未测试**（[CloudFileCreated] 那条注释里
+// 同句登记着，两边都不许从对方推）。
+func CloudFolderCreateRequest(
+	authorization, deviceID, parentFileID, name string, channel CloudChannel, op CloudOpType,
+) (core.HTTPRequest, *core.Error) {
+	if name == "" {
+		return core.HTTPRequest{}, core.NewInternal("file/create（folder）缺 name：实拍两条总有一个目录名，空名这一格未测试")
+	}
+	body := map[string]any{
+		"fileRenameMode": CloudRenameModeRefuse,
+		"name":           name,
+		"parentFileId":   orRoot(parentFileID),
+		"type":           CloudFileTypeFolder,
+	}
+	request, err := core.NewRequestPost(BasePersonalKD + "/hcy/file/create").WithJSONBody(body)
+	if err != nil {
+		return request, asCoreError(err, "序列化请求体失败")
+	}
+	return CloudFileOpHeaders(request, authorization, deviceID, channel, op), nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -526,6 +596,25 @@ func (u *Upstream) AppCloudFileCreate(
 	ctx context.Context, authorization, deviceID string, in CloudFileCreateInput,
 ) (CloudFileCreated, *core.Error) {
 	request, perr := CloudFileCreateRequest(authorization, deviceID, in)
+	if perr != nil {
+		return CloudFileCreated{}, perr
+	}
+	envelope, perr := u.Call(ctx, request)
+	if perr != nil {
+		return CloudFileCreated{}, perr
+	}
+	return ParseCloudFileCreate(envelope)
+}
+
+// AppCloudFolderCreate 建一个目录（**写**：在用户网盘里造一个目录，直到被 batchTrash）。
+//
+// 与 [Upstream.AppCloudFileCreate] 共用解析器（同一个信封、同一格 `data`）。
+// ⚠ 今天没有生产路径调用它 —— 见 [CloudFolderCreateRequest] 那句"消费者只有一支探针"。
+func (u *Upstream) AppCloudFolderCreate(
+	ctx context.Context, authorization, deviceID, parentFileID, name string,
+) (CloudFileCreated, *core.Error) {
+	request, perr := CloudFolderCreateRequest(
+		authorization, deviceID, parentFileID, name, CloudChannelAndroid, CloudOpUpload)
 	if perr != nil {
 		return CloudFileCreated{}, perr
 	}

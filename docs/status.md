@@ -5500,3 +5500,86 @@ jsontags 0.1s（95 个字段齐全 / 235 个按白名单不进 JSON），md-tabl
 - 副本库 `target/s25probe/probe.db` + 设备档案跑完即删；主库 md5 前后一致
   （`3761b6411af549f859ed4fbcb2e6baf6`）。这一趟**全链零写**（见第二节那份账），
   所以"要不要担心写坏了什么"这一问在这一趟不成立。
+
+## 补记（2026-09-26，第廿六趟：把 R7 那一格跑掉 —— 建目录 / 传进子目录 / 删非空目录三口第一次真打，顺带补上"等一遍不补枪"的回读）
+
+### 一、为什么选这一格，以及它今天为什么跑得了
+
+`docs/pending-decisions.md` §三 里还开着的格子，绝大多数卡在**人做不了的动作**上：
+要么缺一次人工抓包（R17 那一族，还堵住 R18/R19/R20），要么要等表里出现某条玩法
+（#87 要 1014 回到待办），要么是不可回滚的写且属**待拍板**（R37ⓒ 那 67 枚残留的清理），
+要么就是"隔天再看一眼"（#90）。按 AGENTS.md §1.13（缺口的默认处置是**去跑**）与
+§1.14（判据是 Go 程序自己的运行反馈），**R7 是那一档里唯一"配方已经在手上、今天就能跑完"的一格**：
+它登记的三步（建目录 → 往里放一个 → 删它）只需要两个此前**没落码**的接口面。
+
+所以这一趟的实际工作量在前半：把"建目录"与"传进子目录"这两口落下来，
+让它们**能被真打**（而不是继续停在"旧 TS 这么发过"）。授权口径沿用 2026-09-25 那句
+"除兑换（真扣豆、已实测）外全部实测，包括上传网盘文件"。
+
+### 二、落码：两口 + 四趟读数 + 一处自家越界的修法
+
+- **接口层**（`internal/upstream/app_cloud_upload.go`）：新增 [CloudFileTypeFolder] /
+  [CloudRenameModeRefuse] 两枚常量、[CloudFolderCreateRequest]（builder）与
+  [Upstream.AppCloudFolderCreate]（发送层，走 android + `op*100` 那一档）。
+  ⚠ **不复用文件型 builder**：folder 型的请求体是**四键**（`fileRenameMode` / `name` /
+  `parentFileId` / `type`），文件型是**六键**（多 `contentHash` / `size` 那一族）⇒ 混用会发出
+  一个"带 hash 的目录"。响应侧复用 [ParseCloudFileCreate]（实拍里两型都回 `data.fileId`、
+  `uploadId` 为 `null`）。测试两条：`TestCloudFolderCreateBodyIsLegacyFourKeys`
+  （反向改坏：把四键写成六键 ⇒ 红；`type` 写成 `file` ⇒ 红）与
+  `TestAppCloudFolderCreateRoundTripsThroughSendLayer`（合成实拍体走发送层，
+  钉 `exist` / `uploadId` 缺 / 只发一枪 / `authorization` 恰好一枚）。
+- **探针**（`internal/app/live_probe_folder_trash_test.go`，`TestLiveProbeFolderTrash`）：
+  四趟真跑（账号 0 三趟 + 账号 1 一趟），逐字读数与判读见
+  [`capture/app-cloud-folder-trash-samples.txt`](capture/app-cloud-folder-trash-samples.txt)。
+  每一趟的账本：`create ×2`（建目录 + 文件占位）、`PUT ×1`、`complete ×1`、
+  `batchTrash ×2`（删目录 + 收尾）、`file/list` —— 第一趟 **5** 发（`11 枪 / 5 类`，
+  那时还没有"等 8 秒"那一遍回读），后三趟 **6** 发（`12 枪 / 5 类`）。
+- **R7 的答案**：`batchTrash` 打在**非空目录**上 ⇒ 上游认，且那一枚子文件**没有退回到根目录**、
+  列那个被删的目录回"**读得出来 + 0 项**"（不报错）。⇒ 登记时那两档可能（删不掉 / 连目录带内容
+  清掉但后果不明）里读到的是后者，而"后果"这一半仍要说窄：**回收站那一页本仓无口可回读** ⇒
+  "内容在回收站里"是按"两处都不再列它"推的位置，那一格标 `未验证`（见成文 §3）。
+- ⭐ **顺带把"探针自己"修了一处越界**：传输层账本把 `PUT` 那一枪的**对象存储主机 + 对象键**
+  逐字打进了 stdout（前两趟的日志里就有）。原纪律写的是**值级**（"查询串键可以、值不行"），
+  没管"这一枪的整条 URL 本身就是上一枪交回来的写入入口" ⇒ 现在 `MethodPut` 那一枪整条换占位，
+  只保留"发了几发"，并加反向测试 `TestLiveProbeRecorderKeepsPresignedURLOutOfOutput`
+  （把占位换回真实 `host+path` 它就红）。坑表 **#193**。成文里一律不抄那两格。
+- ⭐ **第二处是方法上的**（坑表 **#194**）：号一第一趟"删后回读仍列着目录"，同号再跑两趟与号二
+  那一趟都**当场不列**。探针原来的动作序列是"删 → 立刻回读 → 还列着就补一枪删子文件"，
+  于是**"回读滞后"与"必须补第二枪"这两种解释共用同一副样子**，那一趟对两条都不答。
+  修法是把"**等 8 秒、期间不补任何枪**"的回读插在删除枪与补枪之间（`④′` 那一段），
+  并把"要不要补这一枪"的判定放到那一遍之后。⚠ 这不推翻第一趟的读数，只是说明
+  它**只能**支撑"必须补第二枪这一档不成立"（B/C/D 各只对那枚目录打过一枪，没有补第二枪），
+  不能支撑"第一趟那一次一定只是滞后"。
+
+### 三、这一趟没答的（登记，不当已闭合）
+
+`fileRenameMode:"refuse"` **撞同名目录**那一档：四趟 `exist` 全是 `false`（名字带 8 位随机 hex）
+⇒ 仍零样本，而探针遇到 `exist:true` 时的处置是**当场收手不删**（那一枚 fileId 属于用户本来就有的
+目录，不该拿清理链去动）。**多层嵌套目录**（目录里还有目录）只测了一层 ⇒ 未测试。
+`web` / `pc` 档的 `file/create` 没打过（四趟都是生产同档 android）⇒ 未测试。
+"彻底删除"（清空回收站）本仓**没有那一口** ⇒ 这一族留在用户网盘里的东西只到回收站为止。
+
+### 四、门禁与核验
+
+- `gofmt -l` 干净；`go vet ./internal/app/ ./internal/upstream/` 无输出。
+- `node scripts/gates-go.js` 横幅写明 **`十项门禁全绿`**，逐条照抄最后一次 stdout：
+  build 1.2s，vet 0.4s，fmt 0.1s，test（首跑未缓存时 1m10s，复跑走缓存时 0.9s），deps 3.5s，
+  filenames 0.2s（207 个文件均 kebab-case），idents 0.3s，golden 0.2s（断言 167 条全绿），
+  jsontags 0.1s（95 个结构体字段齐全、236 个按白名单不进 JSON），
+  md-tables 0.1s（39 个文件、没有一行比表头多格）。
+  ⚠ 上一遍 md-tables 是**红的**，且红的正是本轮：把 R7 那一行的"判反了会怎样"与"怎么跑出来"
+  分开时多写了一枚竖线 ⇒ `docs/pending-decisions.md:113 表头 5 格 / 本行 6 格`。
+  这一条门禁管"多于表头"（少不管），所以**改表格行必须跑它**，不能靠数渲染结果。
+  ⚠ 按 §2.7 说清范围：这套门禁跑的是**整棵脏工作树**（含并行会话在飞的改动），
+  不是"只测我改的两个包"。本轮新增面另跑过
+  `go test -count=1 ./internal/upstream/ -run "TestCloudFolder|TestAppCloudFolder|TestCloudFileCreate"`
+  与 `go test -count=1 ./internal/app/ -run TestLiveProbeRecorderKeepsPresignedURLOutOfOutput`（都 ok）。
+- ⚠ 上面那套门禁跑的是**整棵脏工作树**（含并行会话在飞的改动），所以"提交出去的那棵树到底绿不绿"
+  另核验一次：把**只含本轮改动**的暂存树（HEAD + 我的 hunk）`git archive` 到 `target/staged-check/`，
+  在那份目录里 `go build ./...`、`go vet ./...`、`go test -count=1 ./...` **全部无输出通过**
+  （`internal/app` 2.2s、`internal/upstream` 0.4s）。为什么不在那份目录里跑整套门禁：
+  `idents` 与 `md-tables` 两条按 `git ls-files` 取扫描面，非 git 目录里会**假红**（坑表 #166）。
+- 探针跑在**副本库**上，跑完删掉（`target/s26probe/probe.{db}` 与 `device.txt`）；
+  主库 md5 前后逐字一致：`3761b6411af549f859ed4fbcb2e6baf6`。
+  ⚠ 两份含对象存储主机 + 对象键的**旧 stdout**（修法前那两趟）随副本一起删掉了，
+  `target/` 本就不入库，成文里也没有抄任何一格。

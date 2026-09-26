@@ -34,6 +34,8 @@ package app
 // 记录器只打：方法 + 主机 + 路径 + **查询串的键与各值的长度** + 响应状态码 + 响应**形状**。
 // 值只按 [liveProbeValueKeys] 那一份白名单念（`code` / `msg` / `message` / `success` / `result`），
 // 其余一律"类型 + 长度"。预签名 `uploadUrl` 的查询串里就是一次性 token ⇒ **键可以、值不行**。
+// ⚠ 而 `PUT` 那一枪**整条 URL 都不打**（换成一句占位，只保留"发了几发"）：它的主机与对象键
+// 本身就是上一枪响应交回来的写入入口，"键可以、值不行"这一档在它身上不够用。
 // 响应体解不成 JSON 时**不打内容**（别处那一份 `dump` 会打前 40 字节，这一层看不到请求是谁发的，
 // 万一是回 HTML 的鉴权页就等于把票念出来），只给字节数。
 
@@ -102,6 +104,14 @@ func (r *liveProbeRecorder) record(
 ) {
 	host, path, queryWord := liveProbeSplitURL(request.URL)
 	key := request.Method.String() + " " + host + path
+	// ⚠ **预签名写入入口**（`PUT <uploadUrl>`，主机与对象键都来自上一枪的响应）不进账本：
+	// 本仓对它的纪律是"绝不进日志、夹具、错误文本"（见 `internal/upstream/app_cloud_upload.go`
+	// 文件头那一节）。2026-09-26 第廿六趟真跑时这份账把那一枪的**主机 + 对象键**打了出去
+	// （查询串本来就只有长度，所以只有那两格越界）⇒ 现在整条 URL 换成占位，
+	// 只有"发了几发 PUT"这一格读数保留（那一格才是探针要的）。
+	if request.Method == core.MethodPut {
+		key = "PUT <预签名写入入口：主机与路径不打印>"
+	}
 
 	r.mu.Lock()
 	r.shots++
@@ -182,6 +192,41 @@ func liveProbeSplitURL(raw string) (host, path, queryWord string) {
 		parts = append(parts, name+"(值长 "+strconv.Itoa(width)+")")
 	}
 	return parsed.Host, parsed.Path, strings.Join(parts, " ")
+}
+
+// TestLiveProbeRecorderKeepsPresignedURLOutOfOutput ⭐ 反向钉：账本里不得出现预签名写入入口的
+// 主机、对象键或查询串值。
+//
+// 反向改坏它的样子：把 [liveProbeRecorder.record] 里那句 `MethodPut` 的占位换回真实
+// `host + path` ⇒ 这个测试红（第一条断言），而真跑的日志里会重新长出对象存储的主机与对象键。
+//
+// 为什么值得单独一个测试而不靠人工审：这一枪的 URL **来自上一枪的响应**，
+// 所以它不像凭据头那样有固定名字可抓 —— 记录器是整趟里唯一会把它打印出来的地方。
+// 夹具全部是 `SYNTH-*` 合成值（与网盘那一族的夹具同一口径）。
+func TestLiveProbeRecorderKeepsPresignedURLOutOfOutput(t *testing.T) {
+	sink := newLiveProbeSink(t)
+	recorder := newLiveProbeRecorder(sink)
+	request := core.HTTPRequest{
+		Method: core.MethodPut,
+		URL: "https://synth-bucket.example.com/SYNTH-object-key-0123456789" +
+			"?X-Amz-Signature=SYNTH-secret-signature-value",
+	}
+	recorder.record(request, core.HTTPResponse{Status: 200}, nil)
+	recorder.sayTally()
+
+	joined := strings.Join(sink.lines, "\n")
+	for _, must := range []string{"synth-bucket.example.com", "SYNTH-object-key-0123456789",
+		"SYNTH-secret-signature-value"} {
+		if strings.Contains(joined, must) {
+			t.Errorf("账本里出现了预签名入口的那一格 %q ⇒ 输出：\n%s", must, joined)
+		}
+	}
+	if !strings.Contains(joined, "PUT") {
+		t.Error("占位把「发过几发 PUT」这一格读数也一起抹掉了：账本里连 PUT 都没有 ⇒ 探针失去用途")
+	}
+	if recorder.countFor("SYNTH-object-key-0123456789") != 0 {
+		t.Error("countFor 不该按对象键命中：那一格已经不进账本的键了")
+	}
 }
 
 // liveProbeResponseBodyWord 只给**形状**，且比别处那一份 `dump` 更窄：

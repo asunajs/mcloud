@@ -1,0 +1,121 @@
+# 网盘「非空目录删不删得掉」（R7）+ 建目录 / 传进子目录两口第一次真跑 · 活体探针实测
+
+> 本文是**摘要**：读数只在这些趟的 stdout 里，命令与边界见 §1。
+> 探针：`internal/app/live_probe_folder_trash_test.go`（`TestLiveProbeFolderTrash`）。
+> 接口层：`internal/upstream/app_cloud_upload.go` 的 [CloudFolderCreateRequest] /
+> [upstream.AppCloudFolderCreate]（本仓**第一次**真打这一口，之前只有两条 folder 型实拍）。
+>
+> ⚠ **凭据与隐私边界**（本文逐条遵守）：
+>   - 真实 `fileId` **只写长度**（今天三档都是 33）；
+>   - 预签名 `uploadUrl`（对象存储主机 + 对象键 + 一次性签名）**整条不进成文**，
+>     账本里那一格现已换成占位（见 §6）；
+>   - `asign-*` 那两枚名字是**我们自己造**的 ⇒ 可原样写；用户自己的文件名不进本文；
+>   - 两个测试号的号码不进成文。
+
+## 0. 一句话结论
+
+`batchTrash` 打在**非空目录**上：上游认，且**内容跟着一起没了、没有退回到根目录** ⇒ R7 那一格闭合。
+顺带两口第一次真跑成立：**建目录**（`file/create` + `type:"folder"`）与**把文件传进子目录**
+（`file/create` 带非根 `parentFileId`）——后者今天**零生产调用点**，此前只是"旧 TS 这么发过"。
+
+## 1. 复跑命令
+
+```
+cp data/mcloud.db target/s26probe/probe.db        # 副本：探针只读账号，仍不给主库口子
+: > target/s26probe/device.txt                    # 设备档案：路径必须已存在
+MCLOUD_LIVE_PROBE_DB="$PWD/target/s26probe/probe.db" \
+MCLOUD_LIVE_PROBE_ACCOUNT_INDEX=0 \
+MCLOUD_LIVE_PROBE_DEVICE_FILE="$PWD/target/s26probe/device.txt" \
+MCLOUD_LIVE_PROBE_CONFIRM='确认写真实上游' \
+go test ./internal/app/ -run 'TestLiveProbeFolderTrash$' -v -count=1 -timeout 600s
+```
+
+换 `MCLOUD_LIVE_PROBE_ACCOUNT_INDEX=1` 跑另一个号。两枚路径**必须绝对**
+（出处见 [`app-mail139-samples.txt`](app-mail139-samples.txt) 抬头那条）。
+跑完删副本：`command rm -f target/s26probe/probe.db target/s26probe/device.txt`
+（2026-09-26 这一轮删过，主库 md5 前后逐字未变）。
+
+这一趟**会真写**：建一枚目录、往它里面传一枚文件、把目录移进回收站、收尾再对那枚文件补一枪。
+授权口径沿用 2026-09-25 那句"除兑换（真扣豆、已实测）外全部实测，包括上传网盘文件"。
+
+## 2. 四趟读数（同日，账号 0 三趟 + 账号 1 一趟）
+
+每趟的骨架逐字相同：`建目录前的根目录 → ① 建 → ② 传进目录 → 列那个目录 → ③ 删目录 →
+删后根目录 → 删后列那个目录 → ④/⑤ 判定 → 等 8s 只回读 → 收尾删文件 → 收尾回读 → 账本`。
+下表是**变化着的那几格**（`项` = 根目录那一页的条目数，`游标` 四趟全部为"缺"）：
+
+| 趟 | 号 | 建前根目录 | ① 建目录 | ② 传进目录 | 删前列那个目录 | ③ batchTrash(目录) | 删后根目录 | 删后列那个目录 | 那枚文件在根目录 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A | 0 | 31 项 | `asign-trashdir-28f153ae`，exist=false，uploadId 缺 | 已上传 `asign-trashkid-76e08c5a.png` | **1 项** | 上游认了 | **32 项**、目录名**还在**、文件不在 | 0 项（读得出来） | 否 |
+| B | 0 | 31 项 | `asign-trashdir-6fa5fcb8`，同上 | 已上传 `asign-trashkid-1a9c9f8c.png` | **1 项** | 上游认了 | 31 项、目录名**不在** | 0 项（读得出来） | 否 |
+| C | 0 | 31 项 | `asign-trashdir-96ecf9ac`，同上 | 已上传 `asign-trashkid-3c053b7a.png` | **1 项** | 上游认了 | 31 项、目录名**不在** | 0 项（读得出来） | 否 |
+| D | 1 | 60 项 | `asign-trashdir-e36fa9a9`，同上 | 已上传 `asign-trashkid-b73e1524.png` | **1 项** | 上游认了 | 60 项、目录名**不在** | 0 项（读得出来） | 否 |
+
+等 8 秒那一遍（B / C / D 有；A 那趟的代码还没这一遍）：**期间没有补任何删除枪**，
+三趟读数与"删后"那一遍逐字相同（目录名 `false`、文件名 `false`）。
+
+收尾那一枪（对**已经跟着目录消失**的那枚文件再打一次 `batchTrash`）：四趟都"上游认了"，
+收尾后根目录回到本趟的"建前"计数（A 趟 31、B/C 31、D 60）。
+
+## 3. 逐格判读（对上 `docs/pending-decisions.md` **R7**）
+
+R7 登记时给的是两档可能 + 一句"怎么测"。四趟里读到的是**第三档**：
+
+  - **不是"删不掉"**：③ 那一枪四趟全被上游认，且 B/C/D 里根目录那一页当场不再列它；
+  - **也不是"删掉目录、内容退回根"**：那枚 `asign-trashkid-*` 在四趟里**都没出现**在根目录
+    那一页 ⇒ 清理链若将来接目录，不需要"把子文件也记进名单"这一半；
+  - 读到的是：**目录连同内容一起进回收站**（列那个被删的目录 ⇒ 读得出来、**0 项**）。
+    ⚠ "内容在回收站里"这一句是按"根目录与那个目录里都不再列它"推的位置，
+    **回收站自己那一页今天零口可回读**（本仓没有回收站列表接口）⇒ 那一格仍是 `未验证`。
+
+A 趟那一次"删后根目录仍列着目录（32 项）"怎么落：它与 B/C/D 差在**回读时机**，
+因为同一号同一链跑三趟有两趟当场就不列了。⚠ 这只说明"**必须补第二枪**"那一档**不成立**
+（B/C/D 各只打了一枪），**不构成**"A 那一次一定只是滞后"的 proof ——
+要判它得在删后连读多遍并带时间戳（今天的 `④′` 已经是这一半的做法，A 趟没跑上）。
+
+## 4. 顺带读到的三格（都是"接口层今天算不算通"）
+
+  - **建目录口通**：`file/create` + `type:"folder"` 真打成功，响应里 `exist=false`、
+    `uploadId` 与 `uploadUrl` 都为缺 ⇒ 与 folder 型那两条实拍同型（实拍里 `data.uploadId`
+    与 `data.partInfos` 就是 `null`）。**新增事实**：它回 `data.fileId`，且那一枚可以直接
+    当 `parentFileId` 用（下一条）。
+  - **传文件进子目录通**：`file/create` 带**非根** `parentFileId` ⇒ 四枪全链走完
+    （账本里 `create`/`PUT`/`complete` 各 1 发），列那个目录当场读出**那 1 项**。
+    这一档此前只有旧 TS 的字面量，本仓**从未真打过**（生产的三条玩法全传根目录）。
+  - **列一个已进回收站的目录**不报错：读得出来且 `items` 为空 ⇒ R36 那一族的全树走查
+    以后遇到"0 项目录"时，**不能**据此判"这一支没走过"（它可能是个已删目录）。
+
+## 5. 这一趟没答的（别把上面的读数读成它们）
+
+  - **`fileRenameMode:"refuse"` 撞同名目录**：四趟 `exist` 都是 `false`（名字含 8 位随机 hex，
+    撞不上）。⇒ "同名已存在"那一档仍零样本，且探针里那一支的处置是**当场收手不删**
+    （那一枚 fileId 属于用户本来有的目录，不该拿清理链去动）。
+  - **回收站那一页**长什么样、能不能"彻底删除"：本仓无口 ⇒ 未测试。
+  - **多层嵌套**（目录里还有目录）：只测了一层 ⇒ 未测试。
+  - **别的端**（web / PC 档的 `file/create`）：四趟都走 android 档（生产同档）⇒ 未测试。
+
+## 6. 探针侧修的一处越界（不是上游的账，是我们自己的）
+
+第一趟（A）与账号 1 那趟（D）的**传输层账本**把 `PUT` 那一枪的**对象存储主机 + 对象键**
+逐字打进了 stdout（当时那一份查询串只有长度，所以没漏签名，但写入入口的主机与键漏了）。
+`target/` 不入库 ⇒ 没进成文，但那正是"预签名 `uploadUrl` 绝不进日志"这条纪律的破口。
+
+修法：记录器对 `MethodPut` 那一枪**整条 URL 换成占位**（`PUT <预签名写入入口：主机与路径不打印>`），
+只保留"发了几发"那一格读数；并加反向测试
+`TestLiveProbeRecorderKeepsPresignedURLOutOfOutput`（把占位换回真实 `host+path` 它就红）。
+B / C 两趟的账本已是修法后的输出。细节进坑表（本轮编号见 `docs/migration-pitfalls.md` 抬头）。
+
+## 7. 传输层账本（修法后那一趟，账号 0 · C）
+
+```
+一共 12 枪 / 5 类
+  POST personal-kd-njs.yun.139.com/hcy/file/complete ×1
+  POST personal-kd-njs.yun.139.com/hcy/file/create ×2
+  POST personal-kd-njs.yun.139.com/hcy/file/list ×6
+  POST personal-kd-njs.yun.139.com/hcy/recyclebin/batchTrash ×2
+  PUT <预签名写入入口：主机与路径不打印> ×1
+```
+
+`create` 两发 = 建目录 + 传文件那一枚的占位枪；`batchTrash` 两发 = 删目录 + 收尾那一枪；
+`file/list` 六发 = 建前 / 删前列目录 / 删后根 / 删后列目录 / 等 8s 后 / 收尾后（本探针的口径，
+比生产的走查窄，因为它只盯两枚具名文件）。

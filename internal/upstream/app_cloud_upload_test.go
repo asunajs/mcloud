@@ -8,7 +8,11 @@ package upstream
 // （`type:"folder"`，`uploadId` / `partInfos` 都是 `null`）⇒ 它们能钉的只有
 // ①URL、②信封形状（`code` 是字符串 `"0000"`、载荷在 `data`）。
 // 所以这里**没有**任何一条断言在钉"上游真正接受哪些键、`exist` 到底指什么"：
-// 那些格子只有"旧 TS 这么发过"这一个证据源。
+// 那些格子从前只有"旧 TS 这么发过"这一个证据源。
+// ⚠ 这一句今天只成立**一半**：文件型 / PUT / complete / batchTrash 自 2026-09-25 起有
+// **真跑**（R27），但仍**无 har 实拍**；建目录那一型从前只有实拍、没有真打，
+// 2026-09-26 由 R7 那一发探针补上（四趟：`TestLiveProbeFolderTrash`，成文见
+// `docs/capture/app-cloud-folder-trash-samples.txt`）⇒ 它现在**两样都有**。
 //
 // 全部用例钉的是三类**可控**的事：
 //
@@ -158,6 +162,98 @@ func TestCloudFileCreateRefusesEmptyNameOrHash(t *testing.T) {
 	hashless.ContentHash = ""
 	if _, perr := CloudFileCreateRequest(uploadAuthSentinel, uploadDeviceSentinel, hashless); perr == nil {
 		t.Error("空 contentHash 应当拒发")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 第一枪的**另一型**：建目录（四键，refuse）
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestCloudFolderCreateBodyIsLegacyFourKeys ⭐ 钉"这一型只有四枚键"。
+//
+// 这一条**不是** [TestCloudFileCreateBodyIsLegacyTenKeys] 的复制品：它的价值正好在
+// "少那六枚"。反向改坏它的样子：① 把两型的 builder 合成一个、按 `Type` 开关 ⇒
+// `size` / `contentHash` / `partInfos` 会从文件型漏进目录型（键集合红），而那是
+// "运行时才知道该发哪几枚键"的回归；② 把 `fileRenameMode` 顺手统一成 `auto_rename`
+// （那是**文件**那一型的值）⇒ 红；③ 空 name 不挡 ⇒ 红。
+func TestCloudFolderCreateBodyIsLegacyFourKeys(t *testing.T) {
+	request, perr := CloudFolderCreateRequest(
+		uploadAuthSentinel, uploadDeviceSentinel, "", "asign-synth-dir", CloudChannelAndroid, CloudOpUpload)
+	if perr != nil {
+		t.Fatalf("构造 folder 型失败: %v", perr.Message())
+	}
+	if request.URL != BasePersonalKD+"/hcy/file/create" {
+		t.Errorf("URL 实得 %q（两型同一口）", request.URL)
+	}
+	obj := bodyKeys(t, request.Body)
+	wantKeys := []string{"fileRenameMode", "name", "parentFileId", "type"}
+	if got := strings.Join(sortedKeys(obj), ","); got != strings.Join(wantKeys, ",") {
+		t.Errorf("键集合实得 %s（这一型只有四枚，那六枚是文件型的）", got)
+	}
+	if obj["type"] != CloudFileTypeFolder {
+		t.Errorf("type 实得 %v", obj["type"])
+	}
+	if obj["fileRenameMode"] != CloudRenameModeRefuse {
+		t.Errorf("fileRenameMode 实得 %v（建目录用 refuse，auto_rename 是文件那一型）", obj["fileRenameMode"])
+	}
+	if obj["fileRenameMode"] == CloudRenameModeAuto {
+		t.Error("两型的重名策略不许'顺手统一'：一合就会静默改掉一次接口")
+	}
+	if obj["parentFileId"] != "/" {
+		t.Errorf("空 parentFileId 应补根目录，实得 %v", obj["parentFileId"])
+	}
+	// 文件型那六枚**一枚都不该在**。
+	for _, key := range []string{"size", "contentHash", "contentHashAlgorithm", "contentType", "parallelUpload", "partInfos"} {
+		if _, present := obj[key]; present {
+			t.Errorf("folder 型不应带 %s（那是文件型的键）", key)
+		}
+	}
+	// 显式给目录 ⇒ 不补根。
+	withParent, perr := CloudFolderCreateRequest(
+		uploadAuthSentinel, uploadDeviceSentinel, "SYNTH-PARENT", "asign-synth-dir", CloudChannelWeb, CloudOpUpload)
+	if perr != nil {
+		t.Fatalf("构造失败: %v", perr.Message())
+	}
+	parentObj := bodyKeys(t, withParent.Body)
+	if parentObj["parentFileId"] != "SYNTH-PARENT" {
+		t.Errorf("parentFileId 被改写，实得 %v", parentObj["parentFileId"])
+	}
+	// 空名 ⇒ 拒发（发出去只会在用户网盘里留一个无名目录，而清理那一族靠 id 认它）。
+	if _, perr := CloudFolderCreateRequest(
+		uploadAuthSentinel, uploadDeviceSentinel, "/", "", CloudChannelAndroid, CloudOpUpload); perr == nil {
+		t.Error("空 name 应当拒发")
+	}
+}
+
+// TestAppCloudFolderCreateRoundTripsThroughSendLayer 钉"这一型共用同一个解析器"。
+//
+// 响应体是**实拍那两条的形状**（字段集合照抄，值全 SYNTH-*）：`exist:true`、
+// `uploadId:null`、`partInfos:null`。它证明的是"构造 → 发送 → 解析"这一串接线通，
+// **不**证明上游接受（这一型本仓从没真打过，见 [CloudFolderCreateRequest]）。
+func TestAppCloudFolderCreateRoundTripsThroughSendLayer(t *testing.T) {
+	client := &scriptedClient{response: core.HTTPResponse{
+		Status: 200,
+		Body: core.Body([]byte(
+			`{"code":"0000","success":true,"message":"请求成功","data":{"exist":true,` +
+				`"fileId":"SYNTH-DIR","fileName":"asign-synth-dir","parentFileId":"/",` +
+				`"partInfos":null,"rapidUpload":false,"type":"folder","uploadId":null}}`)),
+	}}
+	created, perr := NewUpstream(client).AppCloudFolderCreate(
+		context.Background(), uploadAuthSentinel, uploadDeviceSentinel, "/", "asign-synth-dir")
+	if perr != nil {
+		t.Fatalf("闭环失败: %v", perr.Message())
+	}
+	if created.FileID == nil || *created.FileID != "SYNTH-DIR" {
+		t.Fatalf("fileId 没交回来: %+v", created)
+	}
+	if !created.Exist || created.UploadID != nil || created.UploadURL != nil {
+		t.Errorf("folder 那三格实得 %+v", created)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("应恰好一发，实得 %d", len(client.requests))
+	}
+	if got := countHeader(client.requests[0].Headers, "authorization"); got != 1 {
+		t.Errorf("这一型也走 [CloudFileOpHeaders]，authorization 应恰好一枚，实得 %d", got)
 	}
 }
 
@@ -622,8 +718,10 @@ func TestChannelOrDefaultAndBackupFolding(t *testing.T) {
 // TestCloudFileCreateRoundTripsThroughSendLayer 是这一族的**最小闭环**：
 // 假客户端按实拍形状回 `data`，发送层把四格交回来。
 //
-// 它不证明上游接受这一套（四枪零真打），只证明"从构造到解析这一串接线是通的"——
+// 它不证明上游接受这一套，只证明"从构造到解析这一串接线是通的"——
 // 也就是"能编译的实现"与"第一次真跑就会散架的实现"之间的那道区别。
+// ⚠ "四枪零真打"这句已经过期：2026-09-25 起这四口在两个测试号上端到端跑通过
+// （106 / 522 / beiyong1 那几条玩法，链尾 `batchTrash` 收走，见 R27）—— 本条钉的仍是接线。
 func TestCloudFileCreateRoundTripsThroughSendLayer(t *testing.T) {
 	client := &scriptedClient{response: core.HTTPResponse{
 		Status: 200,
