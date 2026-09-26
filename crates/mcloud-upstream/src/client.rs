@@ -311,7 +311,12 @@ mod tests {
     /// 而 HTTP 头名**大小写不敏感** —— 按字节比会漏掉前者。
     #[test]
     fn declared_content_type_is_never_overridden() {
-        for name in ["content-type", "Content-Type", "CONTENT-TYPE", "cOnTeNt-TyPe"] {
+        for name in [
+            "content-type",
+            "Content-Type",
+            "CONTENT-TYPE",
+            "cOnTeNt-TyPe",
+        ] {
             let req = HttpRequest::post("https://example.com/x")
                 .header(name, "application/x-www-form-urlencoded;charset=UTF-8")
                 .text_body("module=uservisit");
