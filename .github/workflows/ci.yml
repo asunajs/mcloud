@@ -6,6 +6,24 @@ name: CI
 #
 # 为什么用 --locked：Cargo.lock 已入库，锁死依赖版本才能让 CI 结果可复现；
 # 否则 CI 可能因为上游发新版而突然变红，与本次改动无关。
+#
+# ── 为什么 Rust 的 job 要先构建前端 ──────────────────────────────────────
+#
+# `crates/mcloud-server/src/static_files.rs` 用 `#[derive(RustEmbed)]` 在
+# **编译期**把 `web/dist` 读进二进制（单二进制交付）。而 `web/dist` 在
+# `.gitignore` 里 —— CI 刚 checkout 出来的树里**没有这个目录**，
+# 于是 `cargo check/clippy/test` 全部失败：
+#
+#     error: #[derive(RustEmbed)] folder '.../web/dist' does not exist
+#     error[E0599]: no function or associated item named `get` found for struct `WebAssets`
+#
+# 这不是"本地能过 CI 过不了"的玄学：本地跑过 `npm run build` 所以目录在，
+# CI 没有。所以 `web` job 必须先跑，产物用 artifact 传给下游 ——
+# **前端只构建一次**，rust / msrv 两个 job 各自取用，不必各建一遍。
+#
+# ⚠ 改动本文件时注意：任何新增的、会编译 mcloud-server 的 job
+# （即 `cargo check/clippy/test/build --workspace`）都必须 `needs: web`
+# 并取回 `web-dist` artifact，否则会重新踩这个坑。
 
 on:
   push:
@@ -19,50 +37,16 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  rust:
-    name: Rust（fmt / clippy / test）
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 安装工具链
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      # 编译缓存：首次较慢，之后显著加速
-      - uses: Swatinem/rust-cache@v2
-
-      - name: 格式检查
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: 测试
-        run: cargo test --workspace --locked
-
-  msrv:
-    name: MSRV 1.88（Cargo.toml 声明的最低版本）
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # 与 Cargo.toml 的 rust-version 保持一致。
-      # 这个值不是拍脑袋定的：1.82/1.85/1.86 实测均编译失败，
-      # 卡点是 cookie_store 与 icu_*（经 reqwest 的 cookie 支持进入构建），
-      # 它们要求 rustc 1.88。改动依赖后要重新实测再调整。
-      - name: 安装 1.88
-        uses: dtolnay/rust-toolchain@1.88
-
-      - uses: Swatinem/rust-cache@v2
-
-      # 只 check 不 test：MSRV 关心的是「能否编译」，不是运行时行为
-      - name: 用 1.88 编译
-        run: cargo check --workspace --all-targets --locked
-
+  # ── 前端：typecheck + 构建 ────────────────────────────────────────────────
+  #
+  # 这个 job 有两个产出，缺一不可：
+  #   1. typecheck 门禁本身（前端也要过类型检查）；
+  #   2. `web/dist` —— Rust 侧的 `rust-embed` 靠它在编译期嵌入静态资源。
+  #
+  # 所以它必须**先于**所有 Rust job 完成，并且把 dist 作为 artifact 传下去。
+  # 上游 job 失败时下游直接跳过，不会拿一份残缺的 dist 去编译。
   web:
-    name: Web（typecheck）
+    name: Web（typecheck + build）
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -84,3 +68,90 @@ jobs:
 
       - name: 类型检查
         run: npm run typecheck
+
+      # 先 typecheck 再 build：两者都会失败时，优先报类型错误 ——
+      # 那一条更接近「改错了什么」，而 build 失败往往是它的下游现象。
+      - name: 构建（产出 web/dist，供 Rust job 嵌入）
+        run: npm run build
+
+      - name: 上传 web/dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          # ⚠ 必须写绝对路径。本 job 的 `defaults.run.working-directory: web`
+          # **只作用于 `run` 步骤**，对 `uses` 步骤无效 —— 写相对路径
+          # `web/dist` 时它以仓库根为基准（恰好是对的），但这个"恰好"很脆：
+          # 一旦有人在 job 上加 `defaults.run.working-directory` 就变了。
+          # 钉死到 workspace 根，语义不再依赖那条隐含规则。
+          path: ${{ github.workspace }}/web/dist
+          # dist 只用于编译期嵌入，不需要留档；保留 1 天足够同一次运行的下游取用，
+          # 也避免仓库 artifact 配额被历史产物占满。
+          retention-days: 1
+          # 构建没产出就该在这里断掉，而不是让下游拿着空 dist 编译出
+          # 一个"能过但页面 404"的二进制（rust-embed 对空目录不报错）
+          if-no-files-found: error
+
+  rust:
+    name: Rust（fmt / clippy / test）
+    runs-on: ubuntu-latest
+    # 必须有 dist：rust-embed 在编译期读 web/dist（见文件头说明）
+    needs: web
+    steps:
+      - uses: actions/checkout@v4
+
+      # 取回 web/dist 再编译。**这一步必须在 cargo 之前** ——
+      # 顺序反了就是回到"目录不存在"的老问题。
+      #
+      # artifact 里存的是 dist 的**内容**（index.html + assets/），
+      # 解到 web/dist 下正好还原成 `folder = "../../web/dist"` 要的形状。
+      # 用绝对路径，避免依赖"相对路径以根为基准"这条隐含规则。
+      - name: 取回 web/dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: ${{ github.workspace }}/web/dist
+
+      - name: 安装工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # 编译缓存：首次较慢，之后显著加速
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 格式检查
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: 测试
+        run: cargo test --workspace --locked
+
+  msrv:
+    name: MSRV 1.88（Cargo.toml 声明的最低版本）
+    runs-on: ubuntu-latest
+    # 同 rust：`cargo check --workspace` 会编译 mcloud-server
+    needs: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取回 web/dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          # 同上：绝对路径，不依赖隐含的 CWD 规则
+          path: ${{ github.workspace }}/web/dist
+
+      # 与 Cargo.toml 的 rust-version 保持一致。
+      # 这个值不是拍脑袋定的：1.82/1.85/1.86 实测均编译失败，
+      # 卡点是 cookie_store 与 icu_*（经 reqwest 的 cookie 支持进入构建），
+      # 它们要求 rustc 1.88。改动依赖后要重新实测再调整。
+      - name: 安装 1.88
+        uses: dtolnay/rust-toolchain@1.88
+
+      - uses: Swatinem/rust-cache@v2
+
+      # 只 check 不 test：MSRV 关心的是「能否编译」，不是运行时行为
+      - name: 用 1.88 编译
+        run: cargo check --workspace --all-targets --locked
