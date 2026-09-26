@@ -3,11 +3,20 @@
 > 来源：`mcloud`（Go，19 条能力已全部实现）+ `mcloud-sign`（旧 TS，权威清单 `TASKS.md`）
 > + `mcloud/docs/business-feature-inventory.md`（逐条实现规格，含 `path:line` 证据）。
 >
-> 本项目现状（2026-09-26）：**已实现 8 个任务** —— P1 签到族全部落地
+> 本项目现状（2026-09-26）：**已实现 10 个任务** —— P1 签到族全部落地
 > （`sign` / `receive` / `multiple` / `backup-gift` / `revival` / `prizes` /
 > `cloud-snapshot` / `task-list`），端点全部换成**实拍**的
-> `/ycloud/signin/page/*`（不再是 405 的占位）。
-> `/api/capabilities` 实测返回这 8 条。
+> `/ycloud/signin/page/*`（不再是 405 的占位）；
+> **P4 直播小红花两条**（`live-room` / `red-flower`）已在同一天落地，
+> 协议层按黄金向量**字节级**对拍（见 `test/golden/live-room-vectors.json`、
+> `live-redflower-vectors.json`）。
+> `/api/capabilities` 实测返回这 10 条。
+>
+> ⚠ **直播那两条的边界**（详见 `README.md`「状态」）：真实开播窗口没抓到，
+> 所以真实 WS / 真实门 / 真实六步链**一次都没跑过**；帧顺序与 `command`
+> 取值等四条证据等级是**「原项目实现，零实拍」**；门的第一步（换直播侧 JWT）
+> **未接** ⇒ `live-room` 目前只有配 `codes` 才可用。**不要把"测试全绿"
+> 读成"直播那条链已验证"。**
 
 ---
 
@@ -208,8 +217,14 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 误认一片却会把真故障洗白。命中时判 `skipped`（跳过，不是失败也不是成功），
 因为"本月没得领"下个月之前都不会自己好，天天标红只会训练人忽略告警。
 
-**仍未做**：`signin_session_pool` 那层**会话池**（按 `(账号, 配方, 凭据指纹)`
-跨轮复用）。当前每条任务各自建票，功能正确但比参考实现多打几枪。
+**会话池已经有了**（此前这一格写的是"仍未做"，是错的）：
+`mcloud_upstream::SessionCache` 按 `(账号, 配方, 凭据指纹)` 缓存 `H5Session`，
+在 `mcloud-app` 的组装根里**一个进程一份**（`builder.rs` 的 `sessions`），
+由 `H5Client` 在每条需要票的请求上取用、在 `90001` 时失效重取。
+只有内存、**不落地**：票 2 小时即废，而库里那一列装的是登录凭据（同名不同物），
+落一张两小时就死的票换来的是"重启后读到一张过期票"。
+
+⇒ 八条任务**共用同一条票**，不是各建各的。
 
 
 ### 🅿️ P2 — 只读查询（低风险，可先做）
@@ -230,6 +245,29 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 
 前提：活动站会话抽象（旧项目每个活动各建一个"setAuth 是 no-op"的实例，这块要收敛）；
 `live-room` 还要先做 protobuf 对拍 → WS → 口令解析三层。
+
+> ✅ **`live-room` / `red-flower` 已完成（2026-09-26）**，三层都做了：
+> protobuf 手写编解码（字节级对拍）、WS 连接层（离线假服务端）、口令抽取（41 条向量）。
+> 落地位置：
+>
+> | 层 | 文件 |
+> |---|---|
+> | 常量（三套响应约定的单一来源） | `mcloud-upstream::live_consts` |
+> | 口令提取（弹幕 + 小红书） | `live_kouling` |
+> | MSync 手写 proto3 编解码 | `live_msync` |
+> | `/cmlive` + 房间发现 + `member/apply` 签名 | `live_room` |
+> | SockJS 帧状态机（纯层） | `live_ws` |
+> | 真实 WS 连接（tokio-tungstenite + rustls） | `live_ws_client` |
+> | 六步链（纯函数） | `live_flower` |
+> | 编排 + registry 注册 | `mcloud-tasks::live_room` |
+>
+> ⚠ **仍未接**：门的第一步（换**直播侧** JWT，需 SSO → `cmpassLoginByCmToken` 那条链）。
+> 后果：`live-room` 目前**只有配 `codes`（手工口令）才可用**；
+> 纯"听弹幕自动收口令"那条路要等这一步接上。
+> 代码里对此的处理是**不判门**（而不是报"今天没有直播"）——
+> 因为"我们没实现那一步"与"今天没开播"是两件事，后者会是个**假结论**。
+>
+> `play-ai-special` / `cloud-phone-redpack` 仍未做。
 
 > ⚠️ `hc1t`（云朵大作战）**已过期**，不实现，只作形态参考。
 
