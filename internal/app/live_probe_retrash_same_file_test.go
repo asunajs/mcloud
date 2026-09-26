@@ -440,7 +440,8 @@ func liveProbeRetrashReplyWord(first, second liveProbeRetrashReply) string {
 //
 // 为什么要有它（沿用第廿八/廿九趟那一族的做法）：写探针每复跑一次都**新增残留**（打四枪、
 // 造两枚），而"隔一段时间再看同一格"这一问不需要任何写：
-// 我方那几枚的名字中段是固定的（`retrashdir-` / `retrashfile-`），按中段认就能回答
+// 我方那几枚的名字中段是固定的（`retrashdir-` / `retrashfile-`，以及第卅一趟那两枚
+// `retrashnest-` / `retrashnestkid-`），按中段认就能回答
 // "这一族在回收站里现在有几条 / 有没有自己消失过"。
 //
 // ⚠ 按**中段**只可能数出"这一族"，不可能数出"本趟那一枚"（#196）⇒ 所以这一支
@@ -469,7 +470,7 @@ func TestLiveProbeSameFileRetrashReread(t *testing.T) {
 		recorder.sayTally()
 		return
 	}
-	var dirHits, fileHits, ours int
+	var dirHits, fileHits, nestDirHits, nestKidHits, ours int
 	byName := map[string]int{}
 	times := map[string]string{}
 	for _, entry := range page.Items {
@@ -481,6 +482,16 @@ func TestLiveProbeSameFileRetrashReread(t *testing.T) {
 		}
 		ours++
 		switch {
+		case strings.Contains(*entry.Name, liveProbeRetrashNestDirInfix):
+			// ⚠ 这两个 case 必须排在上面那两条**之前**：`retrashnest-` 里含着
+			// `retrash` 的字面，但**不含** `retrashdir-` / `retrashfile-` 整串，所以顺序今天
+			// 不影响结果 —— 影响的是将来：谁把中段名改成前缀式（例 `retrash`），错序就会把
+			// 非空目录那一型统计进"空目录"那一格，而两型读数是**不同档结论**（第卅趟边界四条）。
+			nestDirHits++
+			byName[*entry.Name]++
+		case strings.Contains(*entry.Name, liveProbeRetrashNestKidInfix):
+			nestKidHits++
+			byName[*entry.Name]++
 		case strings.Contains(*entry.Name, liveProbeRetrashDirInfix):
 			dirHits++
 			byName[*entry.Name]++
@@ -497,12 +508,15 @@ func TestLiveProbeSameFileRetrashReread(t *testing.T) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	sink.say("⓪ 只读复跑：第一页 %d 条 / 我方前缀 %d 条；这一族（中段 %q / %q）命中 目录系 %d 条、文件系 %d 条",
-		len(page.Items), ours, liveProbeRetrashDirInfix, liveProbeRetrashFileInfix, dirHits, fileHits)
+	sink.say("⓪ 只读复跑：第一页 %d 条 / 我方前缀 %d 条；这一族（中段 %q / %q / %q / %q）"+
+		"命中 空目录系 %d 条、文件系 %d 条、非空目录系 %d 条、其子文件 %d 条",
+		len(page.Items), ours, liveProbeRetrashDirInfix, liveProbeRetrashFileInfix,
+		liveProbeRetrashNestDirInfix, liveProbeRetrashNestKidInfix,
+		dirHits, fileHits, nestDirHits, nestKidHits)
 	for _, name := range names {
 		sink.say("   整名 %q 出现 %d 次  trashedAt=%s", name, byName[name], times[name])
 	}
-	if dirHits == 0 && fileHits == 0 {
+	if dirHits == 0 && fileHits == 0 && nestDirHits == 0 && nestKidHits == 0 {
 		sink.say("⓪ ⇒ 这一族今天**不在**回收站里（第一页；游标到底=%v）⇒ 两种读法分不开："+
 			"写探针那几趟没打过 / 打了但已被还原或彻底删除（本仓无这两口）⇒ 这一趟不判任何事",
 			page.NextPageCursor == "")
