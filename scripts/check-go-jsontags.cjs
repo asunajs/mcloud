@@ -681,7 +681,7 @@ const UNTAGGED_ALLOWED = {
   'internal/app/task_matrix_run.go:TaskRunCounts':
     '一次运行的计数（读 / 待做 / 打卡 / 玩法 / 失败 / 缺口 / 规则跳过 / 需人工 + 复查四格）。它是 `SummaryLine()` 那一句人话的**原料**，界面上今天没有任何一格按 key 读它（`capability.output` 在 `web/src` 里零命中）⇒ 补 tag 只会造出一份没人兑现、也没人测试的"字段契约"',
   'internal/app/task_matrix_run.go:TaskMatrixRunResult':
-    '一个账号这一趟的产出（`Steps` / `Verified` / `Counts` / `Notes` / `CloudFileIDs`）。对外只经 `RunReport()` 的 `Summary`；`Steps[].Err` 与 `Notes[]` 里是上游原文与人话，marshal 会把"给人看的那一句"拆成一份没人对齐的结构。⚠ `CloudFileIDs` 里**只有**网盘对象 id，刻意不带预签名 `uploadUrl`（那条纪律在 `internal/upstream/app_cloud_upload.go` 文件头），且它今天只是一张"该清理"的清单——清理那一半还没接（#37）',
+    '一个账号这一趟的产出（`Steps` / `Verified` / `Counts` / `Notes` / `CloudFileIDs` / `CloudProductFiles`）。对外只经 `RunReport()` 的 `Summary`；`Steps[].Err` 与 `Notes[]` 里是上游原文与人话，marshal 会把"给人看的那一句"拆成一份没人对齐的结构。⚠ `CloudFileIDs` 里**只有**网盘对象 id，刻意不带预签名 `uploadUrl`（那条纪律在 `internal/upstream/app_cloud_upload.go` 文件头）；它就是链尾那一发 `batchTrash` 的输入（#37 已接，结局进 `Cleanup`）。`CloudProductFiles` 是这份名单里"上游另存的产物"那一半的**枚数**，只给小结那句话用、不参与判定，补 tag 等于把一份播报口径升成对外字段',
 
   // ── 网盘上传族（#35，2026-09-24 登记：`file/create` + `PUT` + `complete` + `batchTrash`）──
   // 这一族有本仓**最硬**的一条不补 tag 理由：`CloudFileCreated.UploadURL` 是**预签名上传地址**

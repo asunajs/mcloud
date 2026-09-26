@@ -5259,3 +5259,96 @@ jsontags 0.1s（95 个字段齐全 / 235 个按白名单不进 JSON），md-tabl
 - 与并行会话撞车：`docs/pending-decisions.md`、`docs/status.md`、`docs/README.md`、
   `scripts/check-go-jsontags.cjs` 本轮都被别人同时在改（消息推送 / 趣玩AI 那两族）。
   提交按 §2.2 只点名本任务的文件，混合文件走"HEAD + 只我这处"的暂存配方（坑表 #166）。
+
+## 补记（2026-09-26，第廿三趟：让 1014 的新清理链走一遍**生产那两处** —— 链走通了，念错的是小结那一句）
+
+> 入口是上一趟留在边界里那一格："`collectMailPDFProduct` 只有单测与夹具背书，没走过生产入口"。
+> 判据全过程在 [`capture/app-cloud-residue-samples.txt`](capture/app-cloud-residue-samples.txt) **§10**
+> （含三次带写/只读发的逐字读数），坑表加 **#187**（生产的减法句把产物读成占位）与 **#188**
+> （探针手搓结果没抄生产末尾那两处填充，念出一句比生产更错的读数）；
+> **R36** 收到"生产路径已通"这一级，**R37** 新增"产物那一半的新小结仍缺真实读数"那一格。
+> 这一节写"怎么走到生产入口的、念出什么、改了什么、剩下什么"。
+
+### 一、"走生产入口"这一格为什么不能直接跑整趟
+
+- 先花一发**只读**探针问"今天这一条在不在待做集合"（[`live_probe_app_task_table_test.go`](../internal/app/live_probe_app_task_table_test.go)）：
+  两枚测试号里 1014 **都在表中**、`enable=1`、但 `state` 读成 `FINISH`、`currstep=3`
+  （0 号 `16 枪 / 去重前 35 条 / 去重后 27 条 / 待做 10 条`，1 号 `… 32 / 24 / 9`）
+  ⇒ [RunAccount] 只把**待做**那档交给 `apply` ⇒ 今天跑整趟 `app-task` 一枪都不会碰 1014，
+  跑了只是一串空读数。同一发顺带念出**逐条 runner 的在表状态**：
+  472 / 473 / 1028 / 107 **不在表里**，1014 / 106 / 522 / 585 / 409 在表里但**非待做**。
+- 所以这一趟走的是"**除拉表与复查以外**的整条生产链"：真表里那一枚 1014 → **只**把 `state`
+  改成 `WAIT`（名字、组、`currstep`、`enable`、`marketname` 全部沿用上游真回的，输出里念前后两值）
+  → [PlanTaskStep]（纯函数）→ [taskExecutor.apply] → [TaskMatrixRun.cleanupCloudFiles]
+  → [TaskMatrixRunResult.SummaryLine]。播报接的是生产同一入口 [SignInWorld.Progress]
+  ⇒ 这里念出的每一行与界面上事件流里的是**同一句文本**。
+- ⚠ `currstep=3` 让分派**不发前置那一发打卡**（旧实现那道门）⇒ 这一趟没有把一条已完成任务
+  再打一次卡（那是不可回滚的写），只发"传素材 + ⑥ + 链尾清理"这三件本来要验的事。
+
+### 二、真跑读数（号码、票、真实 `fileId` 不进成文；逐字见 capture §10）
+
+| 发 | 程序自述（逐字片段） | 收到哪一格 |
+| --- | --- | --- |
+| 中午，账号 1，⑥ **认了** | `PDF 素材已上传（完整上传：create → PUT → complete 三枪都发了）` → `PDF 转换已提交` → ⭐`PDF 转换产物已对上（链尾一并移进回收站）` → 记账 `2` → `删除文件 <两枚 id，各长度 33>` → `删除文件成功`；等过延迟那一档后独立回读：根目录 `净差 多 0 / 少 0`（60 项，其中我方前缀 51 枚）、产物目录 `净差 多 0 / 少 0`（5 项，5 枚）；耗时 1m44s | ⭐ **生产那两处走通**：产物在第一次轮询就对上（比上午"第二次才读到"更快一档）、与素材**同一发** `batchTrash` 删掉、且**独立回读两遍都空** ⇒ "这一趟在用户网盘里没留下东西"第一次有生产路径背书。同一发的小结念 `另有 2 个占位未传完` ⇒ 两处错（**#187** 生产的减法、**#188** 探针没抄装配） |
+| 深夜，同账号，⑥ **被拒** | ⑤ 先读 `benefitSurplusCount="0" benefitStatus="1"`；`上游 code=1010010111，summary=用户权益已经使用完`；一枪 `file/list` 都不发；记账 `1，其中上游另存的产物 0 枚，上传计数 1`；`删除文件成功`；⭐`小结：…；1 条上报失败；网盘新增 1 个文件（已移进回收站）；未复查`；两份净差仍 0/0；耗时 1m33s | ⭐ **修好装配之后，素材那一半的小结在生产代码上是准的**（不再有多余的"占位"句）。顺带：**账号 1 也见到"耗尽"那一档**（与 0 号同一码同一句），而它被拒**之前**⑤ 读的是 `0`、中午在同一个 `0` 上做成了两发 ⇒ §7 那句"⑤ 不是 ⑥ 的门"再加一发 |
+| 只读预检（两号各一发，新增 [`live_probe_mail_surplus_readonly_test.go`](../internal/app/live_probe_mail_surplus_readonly_test.go)） | `⑤ 转换权益：benefitSurplusCount="0" benefitStatus="1"` —— 两号同值 | ⚠ 它**不能**当"今天还发不发得出 ⑥"的门（上一条已给反例）；本仓生产层今天**没人调**它 ⇒ 这一族只有探针读数 |
+
+### 三、改了什么（每格带反向判据）
+
+- **结果层**（[`internal/app/task_matrix_run.go`](../internal/app/task_matrix_run.go)）：`TaskMatrixRunResult` 加
+  `CloudProductFiles int`（名单里**不是我们上传的**那一半的枚数，今天唯一来源是 ⑥ 的产物），
+  `RunAccount` 在把 `exec.cloudFileIDs` 交进结果那一行旁边把它也带出来；
+  `SummaryLine` 那句减法**拆成两句** —— "另有 N 个是上游另存的转换产物"与"另有 N 个占位未传完"，
+  后者按 `len(CloudFileIDs) - Uploaded - CloudProductFiles` 算。清理**不读**这一格（只读那份名单）。
+- **编排层**（[`internal/app/task_matrix_mail.go`](../internal/app/task_matrix_mail.go)）：`runMailPDF` 找回产物时
+  `e.cloudProductFiles += len(products)`。⚠ 只在**对上**时加，不在"⑥ 认了"时加 ——
+  没对上的那一枚**不在**名单里，小结不许承诺它"也在同一份清理名单里"。
+- **单测两档**（[`task_matrix_mail_run_test.go`](../internal/app/task_matrix_mail_run_test.go)）：
+  成功档断 `CloudProductFiles==1` + 小结含新句 + **不含**"占位未传完"；产物没对上档断 `==0` + 小结**不含**新句。
+  ⭐ **mutation 已实跑**：把编排层那一行注释掉 ⇒ 三条断言全红，而红出来的句子是
+  `网盘新增 1 个文件（已移进回收站）；另有 1 个占位未传完` —— 与中午真跑那句**同源同形**
+  （那一趟是 2/0/0 的输入，这里是 2/1/0）⇒ 这一格的生产路径在夹具上钉住了。
+- **探针两份**：新增只读 peek（表里逐条在表状态 + 待做集合 + 备份门）与带写生产链
+  （[`live_probe_mail_pdf_production_test.go`](../internal/app/live_probe_mail_pdf_production_test.go)）；
+  后者抬头现在明写"必须照抄 `RunAccount` 末尾那两处填充"（**#188** 的防线）。
+- **门禁登记**：`TaskMatrixRunResult` 已在 `scripts/check-go-jsontags.cjs` 的 `UNTAGGED_ALLOWED`
+  里（按 struct 登记 ⇒ 同 struct 加字段不需要新条目），本轮**不**补 tag：它的对外面仍只有
+  `RunReport()` 的 `Summary` 那一句，而这一格的存在理由就是把"哪一句"写准。
+  ⚠ 顺带把那条白名单说明里"清理那一半还没接（#37）"一句**就地改掉**（那是 #37 之前的状态，
+  现在链尾自己删），不留叠层（§2.6）。
+
+### 四、门禁（照抄当轮 stdout）
+
+- 本轮第一次整套十条：`node scripts/gates-go.js` ⇒ `门禁未通过: fmt`（**9 绿 + 1 红**），
+  红的是新建的那份只读探针文件没格式化 ⇒ `gofmt -w` 修，不改判据。
+- 修完复跑（**最后一次改 Go 侧之后**的那次；此后只动文档，再跑仍是十条全绿，但 `test` 那一格变成缓存命中）：
+  `node scripts/gates-go.js` ⇒ **十项门禁全绿**，总耗时 27.6s（逐条：build 1.0s，vet 0.6s，fmt 0.1s，test 21.9s，
+  deps 3.1s，filenames 0.2s，idents 0.4s，golden 0.2s，jsontags 0.1s，md-tables 0.1s）。
+  这一轮的 `test 21.9s` 是**真跑**（不是上一条那种缓存命中）：本轮 Go 侧改动在
+  `internal/app/`（结果层 + 编排层 + 两份探针 + 两档单测）与 `scripts/check-go-jsontags.cjs`。
+  横幅读数照抄：`golden`"断言 167 条全绿"、`jsontags`"95 个结构体字段齐全，236 个按白名单不进 JSON"、
+  `md-tables`"39 个文件、没有一行比表头多格（16 行按 #124 豁免）"。
+- 单独复跑本包（§2.7 的口径：只说测了哪些包）：`go test -count=1 ./internal/app/` ⇒ `ok 2.612s`。
+- 部分暂存后把**暂存树单独抽出来**跑一遍（坑表 #166 那套）：
+  `git archive $(git write-tree) | tar -x -C target/staged-check` ⇒ `go build ./...`、`go vet ./internal/app/`、
+  `gofmt -l`、`go test -count=1 ./internal/app/`（**无编译缓存**，1m02s）**全过**。
+  ⚠ 在那棵抽取树里再跑整套会看到 `门禁未通过: idents md-tables`，红的是"豁免名单过期"那一句 ——
+  这是**抽取目录不是 git 仓库**（`scripts/check-md-tables.cjs` 与 idents 的扫描面取自 `git ls-files`，
+  那里返回零个文件 ⇒ 每条豁免都"没被命中"），**不是**暂存树有缺陷。判据以上面工作树那次十条全绿为准。
+
+### 五、现场与边界
+
+- 副本库 `target/s23probe/probe.db` + 设备档案跑完即删；主库 md5 前后一致
+  （`3761b6411af549f859ed4fbcb2e6baf6`）。三发带写都在**库副本**上，主库没动过。
+- ⚠ **新那句还没有真实读数**：`另有 1 个是上游另存的转换产物`只在夹具路径上被念出来过
+  —— 当晚 ⑥ 已被"权益已经使用完"拒掉，而产物那一半只在 ⑥ **认了**的那一发里存在。
+  补法成文在 R37：等权益恢复（恢复周期**未测试**，只有"同一天中午认、深夜拒"这一对读数）
+  再走一次同一发探针。**在那之前别把这一格写成"真实事件流已验证"**。
+- ⚠ 生产入口 `RunAccount` 本身这一趟**没跑**（它今天不会把 1014 放进待做集合）⇒
+  这一趟验证的是 `apply` + `cleanupCloudFiles` + `SummaryLine` 那三处生产代码，
+  "整趟 `app-task` 里也念得出这一句"仍待 1014 自己回到待做那天（那是**跨日**的表，不是本仓能改的）。
+- 现场残留：账号 1 根目录仍有 **51 枚**我方前缀的历史文件、产物目录 **5 枚**（capture §8）
+  ⇒ 一次性清理仍是**待拍板**（不可回滚的写，不做成"顺手带上"）。
+- 与并行会话撞车：`docs/status.md`、`docs/pending-decisions.md`、`docs/migration-pitfalls.md`、
+  `docs/README.md`、`scripts/check-go-jsontags.cjs` 本轮同时被别人在改（消息推送 / 趣玩AI / WebUI 那几族）。
+  提交按 §2.2 只点名本任务的文件，混合文件走"HEAD + 只我这处"的暂存配方（坑表 #166）。

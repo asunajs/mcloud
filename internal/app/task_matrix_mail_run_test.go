@@ -833,6 +833,24 @@ func TestTaskMatrixRunMailPDFUploadsThenConverts(t *testing.T) {
 	if res.Counts.Ran != 1 || res.Counts.Failed != 0 {
 		t.Errorf("应记 1 条玩法、0 条失败，实得 %+v", res.Counts)
 	}
+	// ⭐ 小结那句减法要**认得**产物这一半（2026-09-26 第廿三趟真跑念出来的错就在这一格：
+	// 一次 1014 跑成之后小结是 `网盘新增 1 个文件（已移进回收站）；另有 1 个占位未传完`，
+	// 那"另有 1 个"其实是 ⑥ 另存的产物 —— 它传完了、也删了，被 `len(CloudFileIDs) - Uploaded`
+	// 读成了"传了一半的坑"）。
+	// 反向改坏两种：把 [taskExecutor.cloudProductFiles] 那一行漏掉 ⇒ 前两条一起红
+	// （第二句会退回成中午真跑那句"另有 1 个占位未传完"）；把产物那一枚**并进**
+	// `Counts.Uploaded`（那是"我们传的文件"那一格）⇒ 红的是上面那条既有断言
+	// （`res.Counts.Uploaded != 1`），而这三条会**全绿** —— 所以这一档的哨兵在那儿，不在这儿。
+	if res.CloudProductFiles != 1 {
+		t.Errorf("产物那一枚要单独记一格枚数（清理仍按 CloudFileIDs），实得 %d / %v",
+			res.CloudProductFiles, res.CloudFileIDs)
+	}
+	if got := res.SummaryLine(); !strings.Contains(got, "另有 1 个是上游另存的转换产物") {
+		t.Errorf("小结要说清那一枚是上游另存的产物，实得 %q", got)
+	}
+	if got := res.SummaryLine(); strings.Contains(got, "占位未传完") {
+		t.Errorf("这一趟没有传了一半的坑 ⇒ 不许念「占位未传完」（那是真占位那一档的话），实得 %q", got)
+	}
 }
 
 // TestTaskMatrixRunMailPDFSkipsConvertWithoutFileID ⭐ 上游说"同名已存在" ⇒ ⑥ 不发、也不删。
@@ -977,6 +995,17 @@ func TestTaskMatrixRunMailPDFProductNotFoundWarnsWithoutFailing(t *testing.T) {
 	}
 	if res.Counts.Ran != 1 || res.Counts.Failed != 0 {
 		t.Errorf("转换做成了就不该落失败（判红会诱导重跑，见函数头），实得 %+v", res.Counts)
+	}
+	// ⭐ 没对上的那一枚**不在**清理账上，所以小结里也不许出现"产物"那一句 ——
+	// 它与上一格（成功那一档）合起来才是 `cloudProductFiles` 的**两档**判据：
+	// 反向改坏"在 ⑥ 一认成功就先 +1（不管找没找回来）"，红在这里（小结会承诺一份
+	// "其实没被删掉的东西也在清理名单里"，而那句是假的）。
+	if res.CloudProductFiles != 0 {
+		t.Errorf("产物没对上时枚数该是 0（它不在名单里），实得 %d / %v",
+			res.CloudProductFiles, res.CloudFileIDs)
+	}
+	if got := res.SummaryLine(); strings.Contains(got, "上游另存的转换产物") {
+		t.Errorf("没找回来的那一枚不许被说成「也在清理名单里」，实得 %q", got)
 	}
 }
 

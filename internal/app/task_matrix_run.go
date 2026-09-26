@@ -217,6 +217,19 @@ type TaskMatrixRunResult struct {
 	// ⚠ 这里**只放 id**：文件名删除那一口用不上；而 `create` 回的预签名地址里
 	// 就是一次性 token ⇒ 绝不外带（凭据边界，见各 `docs/capture/` 样本的抬头）。
 	CloudFileIDs []string
+	// CloudProductFiles 是上面那份名单里**不是我们上传的**那一半的枚数（今天唯一
+	// 来源：玩法 1014 的 ⑥ 在网盘里另存的转换产物，见 [collectMailPDFProduct]）。
+	//
+	// 为什么结果里要专门有一格：清理只看 id，两族一样删，[CloudFileIDs] 已经够了；
+	// 而**小结**那句是按 `len(CloudFileIDs) - Counts.Uploaded` 做减法解释"网盘里为什么
+	// 多了 N 个"，产物那一半被减法读成了"占位没传完的坑"。2026-09-26 第廿三趟真跑
+	// 念出来的就是这一版：跑成一次 1014 之后小结是
+	// `网盘新增 1 个文件（已移进回收站）；另有 1 个占位未传完` —— 那"另有 1 个"其实是
+	// 传完了、也删掉了的产物。它不另开一份名单（那会让清理链要拼两段，多一处漏），
+	// 只是一个**播报用的枚数** ⇒ 与 [CloudFileIDs] 的一致性由写入点（`runMailPDF`）保证。
+	//
+	// ⚠ 它**不参与**任何判定：删不删、删几个都只看 [CloudFileIDs]。
+	CloudProductFiles int
 	// Cleanup 是清理那一节的结局（三档 + 一句原因）。零值 [TaskCleanupNotRun]
 	// 的含义就是字面"这趟没有要清理的东西"，所以它**不是**"没跑成"。
 	Cleanup TaskCleanupOutcome
@@ -336,6 +349,7 @@ func (r TaskMatrixRun) RunAccount(
 		}
 	}
 	result.CloudFileIDs = append(result.CloudFileIDs, exec.cloudFileIDs...)
+	result.CloudProductFiles = exec.cloudProductFiles
 
 	// 一枪都没发时跳过复查是**无损**的；发过枪就不给跳（见 SkipVerify 那条注释）。
 	if r.SkipVerify && len(exec.done) == 0 {
@@ -544,6 +558,17 @@ type taskExecutor struct {
 
 	// cloudFileIDs 是这一趟在网盘里造出来的文件 id（进结果，等清理那一族消费）。
 	cloudFileIDs []string
+
+	// cloudProductFiles 是这些 id 里**不是我们上传的那一半** —— 上游自己另存出来的
+	// （今天只有一个来源：玩法 1014 的 ⑥ 转换产物，见 [collectMailPDFProduct]）。
+	//
+	// 为什么单独有一格而不是并进 [cloudFileIDs] 就完事：清理只看 id，两族一样删；
+	// 而**小结**要说清"网盘里为什么多了 N 个"，那一格用的是减法
+	// （`len(CloudFileIDs) - Counts.Uploaded`，见下面那句"占位未传完"）。
+	// 2026-09-26 第廿三趟真跑念出来的就是**算错的那一版**：跑成一次 1014 之后小结是
+	// `网盘新增 1 个文件（已移进回收站）；另有 1 个占位未传完` —— 那"另有 1 个"其实是
+	// ⑥ 另存的产物，它传完了、也删了，被减法读成了"传了一半的坑"。
+	cloudProductFiles int
 
 	// shareBefore 是跑之前从 434 的名字里读到的天数。
 	shareBefore *int
@@ -1251,7 +1276,15 @@ func (res TaskMatrixRunResult) SummaryLine() string {
 		// （那时删除那一枪确实没有调用点），现在按 [TaskMatrixRunResult.Cleanup] 分流。
 		parts = append(parts, fmt.Sprintf("网盘新增 %d 个文件%s", c.Uploaded, res.cleanupPhrase()))
 	}
-	if n := len(res.CloudFileIDs) - c.Uploaded; n > 0 {
+	if n := res.CloudProductFiles; n > 0 {
+		// ⭐ 上游**另存**出来的那一半要单独说（2026-09-26 第廿三趟真跑跑出来的错）：
+		// 它既不是"我们传上去的几个"（所以不在 `c.Uploaded` 里），也不是"传了一半的坑"，
+		// 而是玩法 1014 的 ⑥ 在网盘里另存的一份产物。混进下面那句减法就会念成
+		// "另有 1 个占位未传完"—— 而它传完了、也被删了，用户据此去查"哪个坑没填"是白查。
+		parts = append(parts, fmt.Sprintf(
+			"另有 %d 个是上游另存的转换产物，也在同一份清理名单里", n))
+	}
+	if n := len(res.CloudFileIDs) - c.Uploaded - res.CloudProductFiles; n > 0 {
 		// 传失败但**已经占下坑**的那些（编排层刻意多交 id，见 `cloud_upload.go` 文件头）。
 		// 不与上一句合并：那一格说"传成了几个"，这一格说"还有几个没传完也要删"。
 		parts = append(parts, fmt.Sprintf("另有 %d 个占位未传完，也在同一份清理名单里", n))

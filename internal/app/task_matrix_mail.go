@@ -312,6 +312,9 @@ func (e *taskExecutor) runMailPDF(
 	// 挂进同一条清理链；找不回时**念出来**，不假装"跑完什么都没留下"。
 	products, why := e.collectMailPDFProduct(ctx, convert.DirectoryID, receipt.Name)
 	e.cloudFileIDs = append(e.cloudFileIDs, products...)
+	// 产物那一半**不计进 Uploads**（它不是我们传的），但要单独记一格：小结那句减法
+	// 靠它把"上游另存的"与"占位没传完的"分开（2026-09-26 真跑就是把它念成了后者）。
+	e.cloudProductFiles += len(products)
 	if len(products) > 0 {
 		e.run.progress(core.LevelInfo, fmt.Sprintf(
 			"PDF 转换产物已对上（链尾一并移进回收站） %s %d", name, id))
