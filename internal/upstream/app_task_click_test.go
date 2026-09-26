@@ -13,10 +13,17 @@ package upstream
 //  3. **mrp 那一发的 `deviceId` 必须过 [PercentEncode]**：它是 base64，
 //     `+` 不编码到查询串里表示**空格** —— 服务端解出另一个值且不报错。
 //
-// ⚠ 本文件**不**判"上游收不收这个 key / 这个 id"—— 一次真打都没有。
-// 钉的全是"我们发出去的是不是那一条"。
+// ⚠ 本文件判的是"我们发出去的是不是那一条"，以及"响应怎么读"。
+// 2026-09-26 第廿四趟起，这一族**有过真打**（走生产入口 `RunAccount`，两个测试号各一趟：
+// 打卡各若干发 + 入口上报各一发，全部 HTTP 200 且 `code` 位读成 0），逐字读数见
+// `docs/capture/app-task-run-account-samples.txt`。那趟还单独量了 `code` 的**类型**：
+// 入口上报那一发是**数字** `0`（打卡那一族同趟打出的是修复前的两可形态 ⇒ 类型仍未定，
+// 但 [asInt64] 两条分支都认，所以不影响判定）。
+// 但"回了 0"**不等于**"上游认了这条任务"—— 当天回读任务表显示一条都没翻（R24），
+// 所以这里仍不判任何 id/key 的语义。
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -155,5 +162,64 @@ func TestMrpDoTaskRequestEncodesTheDeviceID(t *testing.T) {
 func TestMrpDoTaskRequestRefusesEmptyDeviceID(t *testing.T) {
 	if _, perr := MrpDoTaskRequest("JWT-1", taskClickReferer, ""); perr == nil {
 		t.Fatal("空 deviceId 应被拒绝")
+	}
+}
+
+// mrpDoTask 响应判定的三档。夹具里那一份 `{"code":0,"msg":"success"}` **逐字**取自
+// 2026-09-26 第廿四趟真账号整趟真跑（两个号各一趟，回的就是这一串）——
+// 这一族从前零样本、只判 `success`，那份实拍就是"要回来补判定"的那一句的兑现。
+func TestMrpDoTaskAcceptsTheCapturedBody(t *testing.T) {
+	client := &scriptedClient{response: core.NewResponse(200, []byte(`{"code":0,"msg":"success"}`))}
+	if perr := NewUpstream(client).AppMrpDoTask(
+		context.Background(), "JWT-1", taskClickReferer, "BSYNTH-DEVICE",
+	); perr != nil {
+		t.Fatalf("实拍那一档应判成功，实得 %v", perr)
+	}
+}
+
+// TestMrpDoTaskFailsOnNonZeroCode 钉"补上的那一半判定"。
+//
+// ⚠ 这一档的**码值本身零样本**（今天只有 `0` 一份实拍）：这里要的是"非 0 会被交回去"，
+// 不是"1 就是系统繁忙"。反向改坏：把 `EnsureOKWithHint` 换回从前那句只判 `success`
+// ⇒ 这一条红。
+func TestMrpDoTaskFailsOnNonZeroCode(t *testing.T) {
+	client := &scriptedClient{response: core.NewResponse(200,
+		[]byte(`{"code":1,"msg":"合成失败"}`))}
+	perr := NewUpstream(client).AppMrpDoTask(
+		context.Background(), "JWT-1", taskClickReferer, "BSYNTH-DEVICE")
+	if perr == nil {
+		t.Fatal("非 0 必须判失败（旧实现连错误都吞）")
+	}
+	if !strings.Contains(perr.Error(), "合成失败") {
+		t.Errorf("上游原话要留在错误里，实得 %v", perr)
+	}
+}
+
+// TestMrpDoTaskWithoutCodeIsNotAFailure ⭐ 缺 `code` 那一格**不**判失败。
+//
+// 为什么单独钉：这一口只有一次实拍（带回 `code`），没有"上游必然带这一格"的证据，
+// 而旧实现压根不读它的响应。把缺字段判成失败，等于用一份样本否掉一条今天能跑通的枪
+// —— 它挂在 409 / 1005 两条 runner 上，误报会把整条玩法带红。
+// 判据落在 [Envelope.EnsureOK] 的 `!hasCode || code == 0`：走的是同一份实现，
+// 但这条用例保证将来没人"顺手收紧"。
+//
+// ⚠ "上游会不会回不带 `code` 的体"本身**未测试**（零样本）。
+func TestMrpDoTaskWithoutCodeIsNotAFailure(t *testing.T) {
+	client := &scriptedClient{response: core.NewResponse(200, []byte(`{"msg":"success"}`))}
+	if perr := NewUpstream(client).AppMrpDoTask(
+		context.Background(), "JWT-1", taskClickReferer, "BSYNTH-DEVICE",
+	); perr != nil {
+		t.Errorf("缺 code 应沿『没有信封判定』放行，实得 %v", perr)
+	}
+}
+
+// TestMrpDoTaskRejectsSuccessFalse：`success:false` 优先于 code（与信封那一族同一条纪律）。
+func TestMrpDoTaskRejectsSuccessFalse(t *testing.T) {
+	client := &scriptedClient{response: core.NewResponse(200,
+		[]byte(`{"code":0,"success":false,"msg":"合成拒绝"}`))}
+	if perr := NewUpstream(client).AppMrpDoTask(
+		context.Background(), "JWT-1", taskClickReferer, "BSYNTH-DEVICE",
+	); perr == nil {
+		t.Fatal("success=false 必须判失败，且优先于 code=0")
 	}
 }

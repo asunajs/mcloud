@@ -829,8 +829,14 @@ func TestTaskMatrixRunVerifyReClicksRandomCloudTasks(t *testing.T) {
 
 // TestTaskMatrixRunEntryReportFailureIsRecordedNotFatal：入口上报挂了 ⇒ 记一条、继续跑。
 //
-// 这一族今天零实拍，所以"上游回了失败"正是最需要看得到的一档：静默吞掉的话，
-// 界面上只剩"玩法跑了 1 条"。
+// 上游回了失败而界面只剩"玩法跑了 1 条"是这一条要挡的；但**光有"失败了"三个字不够** ——
+// 2026-09-26 第廿四趟真跑跑出来的第二格：这一支的失败文本原本把 `err` 整个丢掉
+// （只写"入口上报失败"），而同一条链上打卡、玩法、邮箱那几支都带原文。
+// 所以这里也钉原文（`活动已结束`）。
+//
+// ⚠ 这份夹具走的是 `success:false` 那一档 —— 它在"补判 `code`"**之前**就已经会挂。
+// 只回 `code` 非 0、不带 `success` 那一档见
+// [TestTaskMatrixRunEntryReportJudgesNonZeroCode]。
 func TestTaskMatrixRunEntryReportFailureIsRecordedNotFatal(t *testing.T) {
 	first := mxItems(mxItem(409, "day", "进入云朵中心", "WAIT", "", 0))
 	second := mxItems(mxItem(409, "day", "进入云朵中心", "WAIT", "", 0))
@@ -845,6 +851,9 @@ func TestTaskMatrixRunEntryReportFailureIsRecordedNotFatal(t *testing.T) {
 	if len(res.Steps) != 1 || !strings.Contains(res.Steps[0].Err, "入口上报失败") {
 		t.Fatalf("要写明挂的是入口上报那一发，实得 %+v", res.Steps)
 	}
+	if !strings.Contains(res.Steps[0].Err, "活动已结束") {
+		t.Errorf("上游原话要一路带到记录里，否则用户只看到一句『失败了』，实得 %q", res.Steps[0].Err)
+	}
 	if res.Counts.Failed != 1 {
 		t.Errorf("应记 1 条失败（而不是仍算成功的一条玩法），实得 %+v", res.Counts)
 	}
@@ -853,6 +862,41 @@ func TestTaskMatrixRunEntryReportFailureIsRecordedNotFatal(t *testing.T) {
 	}
 	if res.Counts.NotAcknowledged != 1 {
 		t.Errorf("做了没认这一格该涨，实得 %+v", res.Counts)
+	}
+}
+
+// TestTaskMatrixRunEntryReportJudgesNonZeroCode ⭐ 入口上报**只回 `code` 非 0** 那一档也要判失败。
+//
+// 这是 2026-09-26 第廿四趟接上的那一半判定：这一族从前"零实拍 ⇒ 不判 `code`"，
+// 那趟拿到了第一份实拍（`{"code":0,"msg":"success"}`，`code` 是数字），
+// 于是 [AppMrpDoTask] 改走与打卡同一套 `EnsureOKWithHint`。
+//
+// ⚠ 夹具里那枚码是**合成**的 —— 这一族仍只有 `0` 一份真实读数（不编任何码的语义）；
+// 这条用例钉的是"非 0 会被交回"，不是"500 表示什么"。
+// 反向改坏它：把 `AppMrpDoTask` 换回从前那句只判 `success` ⇒ 这一条红。
+func TestTaskMatrixRunEntryReportJudgesNonZeroCode(t *testing.T) {
+	first := mxItems(mxItem(1005, "day", "进入云朵中心", "WAIT", "", 0))
+	script := mxScript([]string{"JWT-1"}, first, first, append(
+		[]liveTaskRoute{
+			{mxEntryEndpoint, []string{`{"code":500,"msg":"合成：活动已结束"}`}},
+		}, mxHappy()...)...)
+	res, perr := mxResult(t, mxDefaultRun(t, script))
+	if perr != nil {
+		t.Fatalf("入口上报失败不该让整趟报错: %v", perr)
+	}
+	if len(res.Steps) != 1 {
+		t.Fatalf("只该有一条记录，实得 %+v", res.Steps)
+	}
+	if !strings.Contains(res.Steps[0].Err, "入口上报失败") ||
+		!strings.Contains(res.Steps[0].Err, "合成：活动已结束") {
+		t.Errorf("只回 code 非 0 也必须判失败、并带上原文，实得 %q", res.Steps[0].Err)
+	}
+	if !res.Steps[0].Fired {
+		t.Errorf("这一枪是**发出去被打回**的 ⇒ Fired 应为 true（与 434 那种缺前置分开），实得 %+v",
+			res.Steps[0])
+	}
+	if res.Counts.FailedNoShot != 0 {
+		t.Errorf("发过枪的失败不该进『一枪没发』那一格，实得 %+v", res.Counts)
 	}
 }
 

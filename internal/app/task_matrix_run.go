@@ -136,6 +136,19 @@ type TaskStepRecord struct {
 	// UploadNote 是上传那一半里**不算失败**的补充：按 `process` 提前停了、
 	// 上游说"已存在"所以没传。真失败的原文进 [TaskStepRecord.Err]。
 	UploadNote string
+	// Fired 是这一条**有没有真的往上游发过枪**（与 [TaskStepRecord.Err] 是一对：
+	// 两条合起来才说得清"失败"是哪一种）。
+	//
+	// 为什么要有这一格（2026-09-26 第廿四趟整趟真跑跑出来的）：小结那句原本无条件写
+	// "N 条上报失败"，而当天两号各念了一句 —— 号一那句底下**一条都没有上报**：
+	// 434 的"没有可分享的文件"是**缺前置**（本仓刻意不发），1020 才是真发了一发 ⑧ 被打回
+	// `HTTP 404`。两种在用户面前长得一样，而**下一步动作完全不同**（前者要么等前面有上传、
+	// 要么拍 Q41；后者要去查这一族的入口）。口径与 [TaskRunCounts.FailedNoShot]、
+	// [TaskMatrixRunResult.SummaryLine] 那三档同源。
+	//
+	// ⚠ 它的含义是"出过网"，**不是**"上游认了"：打卡挂了也算出过网（与复查那四格里
+	// "做了但上游未认"用同一个 `fired` 口径，见 [apply] 的第二个返回值）。
+	Fired bool
 }
 
 // TaskVerifyRecord 是复查那一趟对一条任务的读数。
@@ -167,6 +180,14 @@ type TaskRunCounts struct {
 	Ran int
 	// Failed 是有枪发失败的条数。
 	Failed int
+	// FailedNoShot 是 [TaskRunCounts.Failed] 里**一枪都没发**的那几条（缺前置）。
+	//
+	// 为什么要单开：2026-09-26 整趟真跑，号二的小结念"2 条上报失败"，而这两条**根本不是一回事** ——
+	// 434 那条一枪都没出网（这一趟前面没有上传任务 ⇒ 没有可分享的文件），
+	// 1020 那条是真发了一发 ⑧、被打回 `HTTP 404`。
+	// 用户在两种"失败"面前的下一步动作完全不同，而原来那一句分不出来。
+	// 判据是 [TaskStepRecord.Fired]，出处见那一格的注释。
+	FailedNoShot int
 	// ToolGap 是"本仓没接玩法"的条数。
 	ToolGap int
 	// RuleSkipped 是"按规则本来就不发"的条数（SKIP 表 / currstep 门 / 无 id）。
@@ -657,6 +678,7 @@ func (e *taskExecutor) apply(
 	if text := joinProblems(problems); text != "" {
 		record.Err = text
 	}
+	record.Fired = fired
 	if record.Reason == "" && plan.ToolGap != "" {
 		record.Reason = plan.ToolGap
 	}
@@ -710,7 +732,10 @@ func (e *taskExecutor) runRunner(
 			problems = append(problems, "入口上报没做成（取不到 deviceId）："+derr.Error())
 		default:
 			if err := e.entryReport(ctx, deviceID); err != nil {
-				problems = append(problems, "入口上报失败")
+				// 原文必须带上（2026-09-26 第廿四趟真跑跑出来的错）：从前这一句只写
+				// "入口上报失败"，于是界面上是一条**没有任何原因**的失败 —— 而同一趟
+				// 其他岔路（打卡、玩法、邮箱）都带原文。
+				problems = append(problems, "入口上报失败："+err.Error())
 			}
 			fired = true
 		}
@@ -809,7 +834,8 @@ func (e *taskExecutor) accountDeviceID(ctx context.Context) (string, *core.Error
 	return deviceID, perr
 }
 
-// entryReport 打"云朵中心入口"那一发（**零实拍**，见 `app_task_click.go` 文件头）。
+// entryReport 打"云朵中心入口"那一发。响应判定（`code` 非 0 ⇒ 失败）已于
+// 2026-09-26 第廿四趟接上，出处见 `app_task_click.go` 文件头那一节。
 func (e *taskExecutor) entryReport(ctx context.Context, deviceID string) *core.Error {
 	_, perr := do(ctx, e.src, func(s SignInSession) (struct{}, *core.Error) {
 		return struct{}{}, e.src.up.AppMrpDoTask(ctx, s.jwt, s.referer, deviceID)
@@ -1213,16 +1239,25 @@ func (e *taskExecutor) runNote(
 func (c *TaskRunCounts) absorb(record TaskStepRecord) {
 	c.Uploaded += record.Uploads
 	failed := record.Err != ""
+	// 一条失败如果是"没出网"那种，两格都要动：`Failed` 是"这一条没做成"的总数，
+	// `FailedNoShot` 是它里面"根本没发出去"的那一半（小结按这两格分档措辞）。
+	failedNoShot := failed && !record.Fired
 	switch record.Kind {
 	case StepClick:
 		if failed {
 			c.Failed++
+			if failedNoShot {
+				c.FailedNoShot++
+			}
 			return
 		}
 		c.Clicked++
 	case StepRunner:
 		if failed {
 			c.Failed++
+			if failedNoShot {
+				c.FailedNoShot++
+			}
 			return
 		}
 		c.Ran++
@@ -1234,6 +1269,9 @@ func (c *TaskRunCounts) absorb(record TaskStepRecord) {
 		// `Clicked` 也不进 `Ran`，只体现在 `Uploaded` 那一句里 —— 别把它念成"什么都没做"。
 		if failed {
 			c.Failed++
+			if failedNoShot {
+				c.FailedNoShot++
+			}
 		}
 	case StepNeedsHuman:
 		c.NeedsHuman++
@@ -1268,7 +1306,7 @@ func (res TaskMatrixRunResult) SummaryLine() string {
 			c.Clicked+c.Ran, c.Clicked, c.Ran))
 	}
 	if c.Failed > 0 {
-		parts = append(parts, fmt.Sprintf("%d 条上报失败", c.Failed))
+		parts = append(parts, res.failurePhrase())
 	}
 	if c.Uploaded > 0 {
 		// 这一句必须带**结局**：这一族会在用户网盘里写文件，而"写了之后删没删"是
@@ -1310,6 +1348,29 @@ func (res TaskMatrixRunResult) SummaryLine() string {
 		line += "。" + strings.Join(res.Notes, "。")
 	}
 	return line
+}
+
+// failurePhrase 是小结里那句"有几条没做成"，按**有没有出过网**分三档。
+//
+// 为什么要分（2026-09-26 整趟真跑跑出来的错）：原来这一句无条件写"N 条上报失败"，
+// 而当天号二那句底下两条里**只有一条真上报过** ——
+// 434 那条是"这一趟前面没有任务往网盘传过东西 ⇒ 一枪没发"，1020 那条才是
+// "发了 ⑧、上游回 404"。两种在界面上长得一样，用户下一步要做的完全不同
+// （前者是 Q41 那一问，后者是去查这一族的入口）。
+//
+// 反向改坏它：把三档合回一句 ⇒ `TestSummaryLineSeparatesUnsentFromFailedReports` 红
+// （它同时钉"全没出网时不许出现『上报』"与"真发过枪那一半仍要写『上报失败』"）。
+func (res TaskMatrixRunResult) failurePhrase() string {
+	c := res.Counts
+	switch {
+	case c.FailedNoShot == 0:
+		return fmt.Sprintf("%d 条上报失败", c.Failed)
+	case c.FailedNoShot == c.Failed:
+		return fmt.Sprintf("%d 条没做成（一枪都没发：缺前置）", c.Failed)
+	default:
+		return fmt.Sprintf("%d 条没做成（%d 条发出去了、%d 条一枪没发：缺前置）",
+			c.Failed, c.Failed-c.FailedNoShot, c.FailedNoShot)
+	}
 }
 
 // cleanupPhrase 是小结里"网盘新增 N 个文件"后面那个括号。

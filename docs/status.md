@@ -5352,3 +5352,79 @@ jsontags 0.1s（95 个字段齐全 / 235 个按白名单不进 JSON），md-tabl
 - 与并行会话撞车：`docs/status.md`、`docs/pending-decisions.md`、`docs/migration-pitfalls.md`、
   `docs/README.md`、`scripts/check-go-jsontags.cjs` 本轮同时被别人在改（消息推送 / 趣玩AI / WebUI 那几族）。
   提交按 §2.2 只点名本任务的文件，混合文件走"HEAD + 只我这处"的暂存配方（坑表 #166）。
+
+## 补记（2026-09-26，第廿四趟：第一次跑**整趟生产入口** `RunAccount` —— 两格至今零证据的一起收口，跑出来两处措辞缺陷一起修）
+
+> 这一趟走的是**真·生产入口**（`TaskMatrixRun.RunAccount`，与 WebUI `POST /api/runs` 同一条），
+> 两个测试号各一趟（号码不进成文）。判据全过程在
+> [`capture/app-task-run-account-samples.txt`](capture/app-task-run-account-samples.txt)
+> （逐枪账本、`doTask` 逐字、三遍差集、界面上的原文），坑表加 **#189**（"失败"那一句把
+> 两种下一步混成一句）、**#190**（入口上报的失败文本把上游原文整个丢掉）、**#191**
+> （"零实拍"不等于"零证据源"—— 本仓自己会发的枪，本机跑一次就收得上）。
+> 这一节写"收掉哪两格、改了什么、剩下什么"。
+
+### 一、收口的两格
+
+- **R26（`mrp …/page/doTask` 至今零一手证据）** ⇒ 第一次真打：
+  `GET mrp.mcloud.139.com/market/signin/page/doTask?client(值长 3)&deviceId(值长 89)`
+  ⇒ `HTTP 200`、体形状 `{code=0(数字) msg="success"}`，**两号逐字同形**。
+  为这一格专门修了探针的打印器（从前 `code=0` 与 `code="0"` 打印得一模一样，
+  而 R26 那一问的落点**恰恰就是这个类型**）⇒ 现在念成 `0(数字)` / `"0"`。
+  于是 `AppMrpDoTask` 从"零实拍 ⇒ 不判 `code`"改成与打卡同一套 `EnsureOKWithHint`
+  （**缺 `code` 那一格仍不判失败** —— 见下面第三节的理由）。
+- **R24 剩下的那一格（"没认"是滞后还是永不翻）** ⇒ 同一趟里读**三遍**全表
+  （动手前 / `RunAccount` 内部的复查 / 跑后回读），两号各 `变了 0 条`、
+  "本趟没动它却变了"也是 `0 条` ⇒ **分钟级滞后这一档排除**。
+  剩下的"隔天翻不翻"只有**跨日**能答（与任务清单里"念出『上游另存的转换产物』"那一趟合并做，
+  两件事都要 1014 回到待做那天 —— 见本节第五格）。
+
+### 二、界面上的原文（这一族第一份"用户看到什么"的样本）
+
+- 号一：`任务表 27 条（待做 10 条）；本次上报 7 条（打卡 6、玩法 1）；1 条上报失败；复查：认下 0、没认 7、此前已完成 16、仍待办 2`
+- 号二：`任务表 24 条（待做 9 条）；本次上报 5 条（打卡 4、玩法 1）；2 条上报失败；复查：认下 0、没认 6、此前已完成 14、仍待办 2`
+- ⚠ 上面那两句里的"上报失败"**就是这一趟跑出来的缺陷本体**：号一那 1 条是 434，
+  而逐枪账本里它名下**一枪都没发**（`currstep` 门挡住前置 + 前面没有上传 ⇒ 缺前置）；
+  号二那 2 条里只有 1020 真发过（⑧ 回 `HTTP 404`）。两种"失败"用户的下一步完全不同
+  （前者是 Q41 那一问，后者是 R35 那一次真机取证），原句分不出来。
+- 另外两处顺带看见的：`播报[2] 失败 开启备份领好礼 548` 这一档的含义是"打过、复查未认"
+  （打卡那一枪回的是 `HTTP 200 / code=0`），**念成"失败"是否合适**登记成 **Q49**，本轮不改；
+  ⑧ 那一发是它**第一次走生产入口**，读数与 R35 那七次单跑一致（`不存在: HTTP 404`）。
+
+### 三、改了什么（每格带反向判据）
+
+- **计数那一半**（[`internal/app/task_matrix_run.go`](../internal/app/task_matrix_run.go)）：`TaskStepRecord` 加
+  `Fired bool`（口径 = "**出过网**"，**不是**"上游认了"，与复查那四格同一个 `fired`），
+  `TaskRunCounts` 加 `FailedNoShot`（`Failed` 里一枪没发的那子集），`absorb` 三处失败分支各带一格。
+- **措辞那一半**：`SummaryLine` 那句改走新的 `failurePhrase()` 三档 ——
+  `1 条上报失败` / `1 条没做成（一枪都没发：缺前置）` /
+  `2 条没做成（1 条发出去了、1 条一枪没发：缺前置）`。
+  用例：[`task_matrix_summary_line_test.go`](../internal/app/task_matrix_summary_line_test.go)（三档 + `absorb` 各一条）
+  与 [`task_matrix_share_run_test.go`](../internal/app/task_matrix_share_run_test.go) 新增的
+  `TestTaskMatrixRunShareSaysNothingWasSentWhenTheGateBlocksIt`（夹具里那个 `currstep=7` ⇒ 门挡住 ⇒ 真·零发）。
+  ⭐ **mutation 已实跑三次**：合回一句 ⇒ 三档单测红；删掉 `absorb` 里那三处计数 ⇒ `absorb` 那条 + 整趟夹具红；
+  删掉 `record.Fired = fired` ⇒ "打了卡那一档"红（它要求 `Fired==true` 且小结**不含**"一枪都没发"）。
+- **上游层**：`AppMrpDoTask` 改判 `code`（`EnsureOKWithHint`）。⚠ 为什么不是"非 0 或**缺字段**都算失败"：
+  这一口只有一次实拍（带回 `code`），而它挂在 409 / 1005 两条 runner 上 ——
+  把缺字段判成失败等于用一份样本否掉一条今天能跑通的枪。判据落在
+  [`app_task_click_test.go`](../internal/upstream/app_task_click_test.go) 新增的四档
+  （实拍那份判成功 / 非 0 判失败并带原文 / **缺 `code` 不判失败** / `success:false` 优先）。
+- **编排层**：入口上报那一发的失败文本从前把 `err` **整个丢掉**（只写"入口上报失败"，
+  而同一条链上打卡、玩法、邮箱都带原文）⇒ 改为带上。反向判据：
+  `TestTaskMatrixRunEntryReportFailureIsRecordedNotFatal` 加断"上游原话在记录里"，
+  mutation（把 `+ err.Error()` 删掉）⇒ 它与新那条一起红。
+- **探针**：新增 [`live_probe_run_account_test.go`](../internal/app/live_probe_run_account_test.go)
+  （整趟生产入口 + 传输层逐枪账本 + 三遍差集）；`liveProbeWorldWith` 那层包裹接缝
+  （把客户端包起来**不必重新装配整个世界**，理由写在函数头：重新装配 = 多一处可能忘了挂掩码表）。
+
+### 四、门禁与现场
+
+- `gofmt -l internal/` 干净；`go vet ./internal/app/ ./internal/upstream/` 过；
+  `go test -count=1 ./internal/app/ ./internal/upstream/` ⇒ 两包 `ok`。
+  ⚠ 以上是**本轮改过的两个包**的读数（§2.7），不等于全仓 —— 整套门禁在提交前那次跑，读数照抄当轮 stdout。
+- 副本库 `target/s24probe/probe.db` + 设备档案跑完即删；主库 md5 前后一致
+  （`3761b6411af549f859ed4fbcb2e6baf6`）。这一趟**没有**触发网盘上传（两号当天待做集合里没有可传的条目
+  ⇒ 清理那一节念的是"没有要清理的 / 枚数 0"），带写的只有打卡、入口上报与 ⑧（404，什么都没写成）。
+- ⚠ **今天仍补不了的那一格**：任务清单里"整趟 `app-task` 念出『另有 N 个是上游另存的转换产物』"
+  —— 它要 1014 在待做集合里，而当天两号都是 `state=FINISH currstep=3`。
+  这一趟把它的**现场条件**念清楚了（逐条 runner 的在表状态，capture §6），
+  但**没有**、也不能靠改表把它跑成 —— 那是上一趟的探针手法，不是生产入口。

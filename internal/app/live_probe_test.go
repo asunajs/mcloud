@@ -27,6 +27,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -156,8 +157,31 @@ func liveProbeShapeValue(key string, value any) string {
 		}
 		return fmt.Sprintf("%s=str<%d>", key, len(typed))
 	default:
-		return fmt.Sprintf("%s=%s", key, strconv.Quote(fmt.Sprint(typed)))
+		// ⚠ **必须带类型**（2026-09-26 第廿四趟为这一格专门补的）：JSON 里的数字 `0`
+		// 与字符串 `"0"` 在这一族里**长得一模一样**（旧实现与上游两头都见过两种写法），
+		// 而"要不要按 `code != 0` 判失败"取决于解析器读到的那一格是哪种 ——
+		// 不带类型时那份读数只能回答"有这一格"，答不了"这一格怎么解"（R26 补判定的前提）。
+		return fmt.Sprintf("%s=%s", key, liveProbeJSONTypedWord(typed))
 	}
+}
+
+// liveProbeJSONTypedWord 给标量那一格配上它**在 JSON 里**的写法（数字带 `(数字)`，字符串带引号）。
+//
+// 与 [liveProbeScalarWord] 分家：那一格是给 `items[]` 明细**看值**用的（不区分形态），
+// 这一格要回答的是"这一枚到底是 `0` 还是 `"0"`" —— 本仓的 JSON 解析走 `UseNumber`，
+// 所以数字到这里是 `json.Number`，与真字符串是两个 case，不分开打就会两种长得一样。
+func liveProbeJSONTypedWord(value any) string {
+	switch typed := value.(type) {
+	case json.Number:
+		return typed.String() + "(数字)"
+	case string:
+		return strconv.Quote(typed)
+	case bool:
+		return strconv.FormatBool(typed) + "(布尔)"
+	case nil:
+		return "null"
+	}
+	return strconv.Quote(fmt.Sprint(value)) + "(未知类型)"
 }
 
 func liveProbeClip(text string, n int) string {
@@ -173,6 +197,23 @@ func liveProbeClip(text string, n int) string {
 // 设备档案刻意**复用**同一趟真跑那份 `--app-device-file`：探针与真跑用的是同一台
 // "机器"，否则读到的一句"设备不合法"会被当成上游对这一族的态度。
 func liveProbeWorld(t *testing.T) (TaskMatrixRun, core.AccountID, *liveProbeSink, core.HTTPClient) {
+	return liveProbeWorldWith(t, nil)
+}
+
+// liveProbeWorldWith 与 [liveProbeWorld] 同一份世界，多给一个**客户端加工点**。
+//
+// 为什么开这个口子而不是各处自己重装配一遍：这份世界里有六格容易装配错的面
+// （四个 env 的校验、"两个路径必须绝对且已存在"、副本库 + 同一台设备档案、
+// `Progress` 接探针的掩码表）。任何一处自己重装配，就会出现"探针 A 走了掩码、
+// 探针 B 忘了"那种泄漏面 —— 而它只在日志里，门禁抓不到。
+//
+// `wrap` 拿到的 `client` 是**还没被上游包起来**的那一份真实客户端，返回值替它进
+// [upstream.NewUpstream] ⇒ 这一趟**所有**请求都经过它（不是只经过某一条链）。
+// 刻意在 `sink` 之后调用：加工点多半是一层"记录器"，它要往同一份掩码表里登记见过的串。
+// 传 nil 与 [liveProbeWorld] 逐字等价。
+func liveProbeWorldWith(
+	t *testing.T, wrap func(client core.HTTPClient, sink *liveProbeSink) core.HTTPClient,
+) (TaskMatrixRun, core.AccountID, *liveProbeSink, core.HTTPClient) {
 	t.Helper()
 	dbPath := os.Getenv(liveProbeDBEnv)
 	accountIndex := os.Getenv(liveProbeIndexEnv)
@@ -229,10 +270,16 @@ func liveProbeWorld(t *testing.T) (TaskMatrixRun, core.AccountID, *liveProbeSink
 	sink := newLiveProbeSink(t)
 	sink.say("探针现场：库里 %d 个账号，用第 %d 个（id 长度 %d，值不打印）",
 		len(accounts), index, len(account.String()))
+	var probed core.HTTPClient = client
+	if wrap != nil {
+		// 加工点换的是**整趟**那一份客户端 ⇒ 用一个新变量，不把 `mcloudio.Client`
+		// 那份具体类型冲掉（下面返回给调用方的就是被包起来的那一份）。
+		probed = wrap(client, sink)
+	}
 	run := TaskMatrixRun{SignInWorld: SignInWorld{
 		Store:    store,
 		Scope:    core.ScopeLocal(),
-		Upstream: upstream.NewUpstream(client),
+		Upstream: upstream.NewUpstream(probed),
 		Device: upstream.NewIPadAppDevice(
 			deviceID, NewAppDeviceShort(mcloudio.SystemRandom{})),
 		Clock:    mcloudio.SystemClock{},
@@ -240,7 +287,7 @@ func liveProbeWorld(t *testing.T) (TaskMatrixRun, core.AccountID, *liveProbeSink
 		Sessions: NewSessionPool(),
 		Progress: sink.progress,
 	}}
-	return run, account, sink, client
+	return run, account, sink, probed
 }
 
 // TestLiveProbeMail139Family 让 139 邮箱那一族的四枪各出一次真实读数，

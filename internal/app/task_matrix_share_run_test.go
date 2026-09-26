@@ -226,6 +226,69 @@ func TestTaskMatrixRunShareSendsNothingWithoutUploadedFiles(t *testing.T) {
 	if !log.hasAt(core.LevelWarn, "分享文件跳过") {
 		t.Errorf("跳过那一行应是 warn，实得：\n%s", log.joined())
 	}
+	// ⭐ 这一档**不是**"一枪没发"：`currstep == 0` 放行 ⇒ 前置那一发打卡出了网。
+	// 它和下面那条 `TestTaskMatrixRunShareSaysNothingWasSentWhenTheGateBlocksIt`
+	// 的差别只在 `Fired` 那一格 —— 而小结那句"上报失败 / 一枪都没发"只看它。
+	// 放在这里而不是只写单测：手搓计数抓不到"接线断了"（见 `task_matrix_summary_line_test.go`）。
+	if !res.Steps[0].Fired {
+		t.Errorf("这一档前置打卡发出去了 ⇒ Fired 应为 true，实得 %+v", res.Steps[0])
+	}
+	if res.Counts.FailedNoShot != 0 {
+		t.Errorf("发过枪的失败不该进『一枪没发』那一格，实得 %+v", res.Counts)
+	}
+	if strings.Contains(res.SummaryLine(), "一枪都没发") {
+		t.Errorf("小结把打过卡的任务念成『一枪都没发』= 误导，实得 %q", res.SummaryLine())
+	}
+}
+
+// TestTaskMatrixRunShareSaysNothingWasSentWhenTheGateBlocksIt ⭐ 门挡住前置那一发
+// ⇒ 这一条**一枪都没发**，而小结必须这么说。
+//
+// 2026-09-26 第廿四趟整趟真跑：号一那句"1 条上报失败"底下就是这一条（434），
+// 它和号二那条真发了 ⑧、被打回 `HTTP 404` 的 1020 在界面上长得一模一样，
+// 而用户的下一步动作完全不同 ⇒ 分档（`failurePhrase` 三档，见 `task_matrix_summary_line_test.go`）。
+//
+// 与上一条的唯一差别是夹具里那个 `currstep`：`7` ⇒ [taskClickGate] 不放行
+// （它只放 `0` 与 434 在 `22` 那一格），于是 `plan.ClickKey` 为空、打卡一发不发，
+// 而 runner 照样跑 —— 跑到"没有可分享的文件"那一档。
+//
+// 反向改坏它：把 `apply` 里 `StepRunner` 那一支的 `fired` 无条件置 true
+// ⇒ 这一条红（`Fired` 与 `FailedNoShot` 都回不去）。
+func TestTaskMatrixRunShareSaysNothingWasSentWhenTheGateBlocksIt(t *testing.T) {
+	first := mxItems(mxItem(434, "day", mxShareTaskName, "WAIT", "", 7))
+	script := mxScript([]string{"JWT-1"}, first, first, mxHappy()...)
+	log := &mxLog{}
+	run := mxDefaultRun(t, script)
+	run.Progress = log.handle()
+	res, perr := mxResult(t, run)
+	if perr != nil {
+		t.Fatalf("跑一趟失败: %v", perr)
+	}
+	if n := script.count(mxClickEndpoint); n != 0 {
+		t.Errorf("currstep 为 7 ⇒ 门不放行，那一发前置打卡也不该发，实得 %d 次", n)
+	}
+	if n := script.count(mxGetOutLinkEndpoint); n != 0 {
+		t.Errorf("没有文件却发了 getOutLink，实得 %d 次", n)
+	}
+	if len(res.Steps) != 1 {
+		t.Fatalf("只该有一条记录，实得 %+v", res.Steps)
+	}
+	if res.Steps[0].Fired {
+		t.Errorf("一枪都没发 ⇒ Fired 必须为 false（它就是小结分档的判据），实得 %+v", res.Steps[0])
+	}
+	if res.Counts.Failed != 1 || res.Counts.FailedNoShot != 1 {
+		t.Errorf("要记一条失败、且落在『没出网』那一格，实得 %+v", res.Counts)
+	}
+	line := res.SummaryLine()
+	if !strings.Contains(line, "1 条没做成（一枪都没发：缺前置）") {
+		t.Errorf("小结要念出『一枪都没发』，否则用户会去查上游为什么打回，实得 %q", line)
+	}
+	if strings.Contains(line, "上报失败") {
+		t.Errorf("一枪没发却写『上报失败』= 谎报动过网络，实得 %q", line)
+	}
+	if !log.hasAt(core.LevelWarn, "分享文件跳过") {
+		t.Errorf("跳过那一行仍该有（门挡住的是打卡，不是整条处置），实得：\n%s", log.joined())
+	}
 }
 
 // TestTaskMatrixRunShareSaysItOnce ⭐ 跳过那句话**只念一遍**。

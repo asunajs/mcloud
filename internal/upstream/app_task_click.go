@@ -43,14 +43,26 @@
 // ⚠ **哪些 id 该配哪个 key 没有判据表**：实拍只告诉我们这两个值上游都收过，
 // 没告诉我们"id 597 用 task 才对"。所以 key 由调用方（分派表）逐条带，出处写在那边。
 //
-// # `mrp …/page/doTask` —— **零实拍**
+// # `mrp …/page/doTask` —— 形状今天有**一份**读数（2026-09-26 第廿四趟真跑）
 //
-// `BaseMrpMcloud` 这个域在本仓夹具里只出现过 `pointsNotClaimed` 与 `appConfig` 两条，
-// `market/signin/page/doTask` 这一条**一次样本都没有**。它的形状来自旧 TS
+// `BaseMrpMcloud` 这个域在旧抓包夹具里只出现过 `pointsNotClaimed` 与 `appConfig` 两条，
+// `market/signin/page/doTask` 一次样本都没有；它的形状来自旧 TS
 // `runners.ts:101-130`（409 / 1005 两个 runner 的第一枪，`client=app&deviceId=<urlencoded>`，
-// 且**忽略响应**）。⚠ 因此：① 这一枪**未被断言能被上游接受**；
-// ② 它的响应形状未知 ⇒ 这里**不判 `code`**，只把传输层与 JSON 解析失败交回去，
-// 拿到第一个实拍样本后要回来补判定（旧实现连错误都吞，我们不能）。
+// 且**忽略响应**）。
+//
+// 第一份读数是**本仓程序自己跑出来的**（活体探针走生产入口 `RunAccount`，两个测试号各一趟）：
+//
+//	GET mrp.mcloud.139.com/market/signin/page/doTask
+//	    ?client=<值长 3>&deviceId=<值长 89>   ⇒ HTTP 200
+//	    {"code":0,"msg":"success"}            // code 是**数字**
+//
+// ⇒ 与上面那四条 `task/click` 实拍**同一形状、同一解析器**（信封三键、`code` 数字位），
+// 所以 [AppMrpDoTask] 已按同一套判定接上（原先那句"零实拍 ⇒ 不判 code"就此收口）。
+// ⚠ 它仍只证明"**上游收过我们这一枪并回了 code=0**"：
+// ① 失败码零样本 ⇒ 不给任何非 0 码编语义；
+// ② "回了 code=0 算不算把这条任务记成做了"这一问它**一个字都没说** ——
+// 那一格要靠回读任务表判，而当天两号回读都显示"没翻"（见 `docs/pending-decisions.md` R24
+// 与 `docs/capture/app-task-runner-samples.txt` 里那一节的逐枪账本）。
 package upstream
 
 import (
@@ -189,12 +201,21 @@ func (u *Upstream) AppTaskClick(
 	return ParseTaskClick(envelope)
 }
 
-// AppMrpDoTask 打"云朵中心入口"那一发前置上报。**写请求，且零实拍**。
+// AppMrpDoTask 打"云朵中心入口"那一发前置上报。**写请求**。
 //
-// 返回的错误只覆盖"传输层 / 不是 JSON / 信封里 `success=false`"这三类；
-// **不判 `code`** —— 因为我们不知道这一口的失败码长什么样（文件头第二条）。
-// 调用方（409 / 1005 那两条 runner）因此**不能**把它当"这一步成功了"的证据，
-// 只能当"这一枪发出去了、没人拒绝"。
+// 判定与 [ParseTaskClick] 同一套（`EnsureOKWithHint`：`success=false` 优先、再看 `code`），
+// 依据是 2026-09-26 第廿四趟真账号整趟真跑拿到的第一份实拍：
+// `{"code":0,"msg":"success"}`（两个号各一趟，逐字同形；`code` 是**数字**不是字符串）。
+// 它是本仓这一口**唯一**的一份样本 ⇒ 只有"成功那一档"成立，失败码仍零样本。
+//
+// ⚠ 因此这里刻意用 `EnsureOKWithHint` 而不是自己写 `code != 0`：
+// [Envelope.EnsureOK] 在**没有 `code` 那一格**时判成功（`!hasCode || code == 0`）。
+// 这一口没有"上游必然回 code"的证据（旧实现连响应都不读），把缺字段判成失败
+// 等于用一份样本去否掉一条能跑通的枪 —— 多报一次失败是噪声，
+// 而这一枪挂在 409 / 1005 两条 runner 的链路上，噪声会把整条玩法带红。
+//
+// ⚠ 反向的"非 0 到底怎么处置"仍无判据：本层只按 `code != 0` 交回失败，
+// **不**给任何码编语义（[Diagnose] 没有这一族的档位）。
 func (u *Upstream) AppMrpDoTask(
 	ctx context.Context, jwt, referer, deviceID string,
 ) *core.Error {
@@ -206,11 +227,8 @@ func (u *Upstream) AppMrpDoTask(
 	if perr != nil {
 		return perr
 	}
-	if success, ok := envelope.Success(); ok && !success {
-		_, perr = envelope.EnsureOK()
-		return perr
-	}
-	return nil
+	_, perr = EnsureOKWithHint(envelope)
+	return perr
 }
 
 // rawEnvelopeMap 取信封顶层（拿 `msg` 用）。不是对象时交回 nil，
