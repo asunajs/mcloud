@@ -1141,6 +1141,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "async-trait",
+ "futures",
  "hex",
  "mcloud-core",
  "mcloud-crypto",

@@ -14,6 +14,10 @@ mcloud-upstream.workspace = true
 # 登录要生成 sID / 短信 random（`Random` trait 与 `SeqRandom` 替身都在这里）。
 mcloud-crypto.workspace = true
 async-trait.workspace = true
+# 口令收集要**并发**跑两个来源（WS 弹幕听满一段 + 小红书一次 GET）：
+# 串行的话总耗时是 `60s + 1s`，而其中 60 秒里网络是空闲的。
+# 只用 `join!`，不需要 runtime（那是 `mcloud-server` 的事）。
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
