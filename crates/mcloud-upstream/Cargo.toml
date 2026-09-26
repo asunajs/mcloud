@@ -13,13 +13,31 @@ uuid.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# 直播口令提取要**逐字**复刻原 TS 的一批正则（`live_kouling.rs`）。
+# ⚠ 选 `regex`（RE2 风格、线性时间）而不是回溯型引擎：原 TS 里那条前瞻正则
+# 在这里改成了显式扫描，所以**不需要**回溯能力 —— 不需要就不引入。
+regex.workspace = true
 reqwest.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+# 直播弹幕的 WebSocket 客户端（`live_ws_client.rs`）：只用 `connect_async` + `Message`，
+# TLS 走 rustls（与 reqwest 同源，不引入 openssl）。
+tokio-tungstenite.workspace = true
+# `tokio-tungstenite` 的流实现 `Stream`/`Sink`，取 `next()` / `send()`
+# 要 `futures` 的扩展 trait。
+# ⚠ 复用**已有的** workspace 依赖（`mcloud-server` 早就在用），
+# 所以这一行**不新增任何 crate**（`futures` 及 `futures-util` 已在 lock 里）。
+# 不手写 poll 垫片的理由：那要反复摆弄 `Pin`/`Context`，正是 `unsafe` 最爱的角落，
+# 而本仓 `unsafe_code = "forbid"` —— 能用成熟实现就不自己造。
+futures.workspace = true
 # 十六进制编解码：登录链路的设备指纹（`login.rs`）在生产代码里就要用，
 # 只放 dev-dependencies 编译不过。
 hex.workspace = true
+# MD5：`member/apply` 的两个签名头要对**任意字节**求摘要（设备串解码后的
+# 48 字节里有 `0x83` 这种非 UTF-8 序列），而 `mcloud_crypto::md5_hex` 只收 `&str`
+# —— 走它要先经过一次 UTF-8 转换，而那对这批字节是**有损**的。
+md-5.workspace = true
 
 [lints]
 workspace = true
@@ -28,3 +46,6 @@ workspace = true
 # 登录测试要手工构造 AES-ECB 密文，验证解密器（生产代码不需要直接用它）。
 aes.workspace = true
 hex.workspace = true
+# 固定时钟：`live_ws_client` 的听写测试要钉住时间戳（状态机用 `now_millis`
+# 派生三处字段，用真实时钟就没法断言）。
+mcloud-core = { workspace = true, features = ["testkit"] }

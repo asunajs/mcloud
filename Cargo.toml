@@ -74,6 +74,14 @@ futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# ── 文本解析 ────────────────────────────────────────────────────────────
+# 直播口令提取要**逐字**复刻原 TS 的一批正则。
+# ⚠ 选 `regex`（RE2 风格、线性时间）而不是 `fancy-regex`：原 TS 的那一条
+#    前瞻正则改成了显式扫描（见 `live_kouling.rs` 模块头），
+#    所以这里**不需要**回溯能力 —— 而不需要，就不该引入它。
+#    手写扫描器无法覆盖的地方（字符类、多分支）才是它的用武之地。
+regex = "1"
+
 # ── 密码学（全部纯 Rust，无 FFI）────────────────────────────────────────
 md-5 = "0.10"
 sha1 = "0.10"
@@ -101,6 +109,17 @@ getrandom = "0.2"
 
 # ── HTTP 客户端 ─────────────────────────────────────────────────────────
 reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "gzip", "rustls-tls"] }
+
+# ── WebSocket 客户端 ────────────────────────────────────────────────────
+# 直播弹幕长连（`live_ws_client`）用，本仓第一个 WS 依赖。
+#
+# TLS 必须与上面的 reqwest **同源**：`rustls-tls-webpki-roots` 走的是同一套
+# `rustls` + `webpki-roots`，而 `native-tls` 会拉 openssl（FFI）。
+# 本仓的现状是「纯 Rust、零 FFI」，多一套 TLS 栈不只是体积问题：
+# 两套实现对同一张证书可能给出不同结论，而"HTTP 能过、WS 过不了"这种不一致
+# 排查起来极难。`default-features = false` 关掉 native-tls 默认项，
+# 只留 `connect`（`connect_async` 需要）。
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 
 # ── Web 服务 ────────────────────────────────────────────────────────────
 axum = { version = "0.8", features = ["macros"] }

@@ -62,6 +62,38 @@ impl ClientProfile {
 pub const DEFAULT_UA: &str = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 \
 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36";
 
+/// 带体请求在调用方**未**声明 `content-type` 时补的默认值。
+pub const CONTENT_TYPE_JSON: &str = "application/json;charset=UTF-8";
+
+/// 请求是否带体。
+///
+/// 注意 `body == Some("")` 也算带体（空串是**显式**的空体，与 `None`
+/// 语义不同 —— 直播那两条 `give` / `draw` 靠 `None` 表达"无体"）。
+fn has_body(req: &HttpRequest) -> bool {
+    req.body.is_some()
+}
+
+/// 该给这个请求补什么 `content-type`（`None` = 不补）。
+///
+/// 抽成独立纯函数是为了**可测**：原来的写法埋在 `builder` 链里，
+/// "会不会补出第二个头"这件事只能靠真发一个请求才看得见。
+fn default_content_type(req: &HttpRequest) -> Option<&'static str> {
+    if !has_body(req) {
+        return None;
+    }
+    // ⚠ 大小写不敏感：`auth_refresh` 写 `Content-Type`、
+    // `live_flower` 写 `content-type`，而 HTTP 头名不分大小写。
+    let declared = req
+        .headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+    if declared {
+        None
+    } else {
+        Some(CONTENT_TYPE_JSON)
+    }
+}
+
 /// 基于 reqwest 的客户端。
 pub struct ReqwestClient {
     inner: reqwest::Client,
@@ -141,10 +173,31 @@ impl mcloud_core::HttpClient for ReqwestClient {
             builder = builder.header(k, v);
         }
 
+        // ⚠⚠ 只在调用方**没有**声明 `content-type` 时才补默认值。
+        //
+        // 这里原先是无条件补 `application/json;charset=UTF-8`，于是**任何**
+        // 自带 content-type 的非 JSON 请求上线都会带**两个** `content-type`
+        // （调用方那个在前、这里补的在后）。实测（本地端口抓原始报文）：
+        //
+        //     content-type: application/x-www-form-urlencoded;charset=UTF-8
+        //     content-type: application/json;charset=UTF-8      ← 多出来的
+        //     content-length: 107
+        //
+        // 这属于本仓最忌讳的那类错：**不发错、不报错，只是行为不对**。
+        // 受害的是 `live_flower` 的 `visitlog/journaling`（form-urlencoded）
+        // 与 `auth_refresh`（自带 `Content-Type`）—— 它们声明得都对，
+        // 却消不掉第二个头。
+        //
+        // 判据用 `req.headers`（调用方显式给的那一份），**不是** `builder`：
+        // reqwest 的 `RequestBuilder` 不暴露已设置的头，读不到就只能靠来源判断。
+        // ⚠ 先算判据、再移动 `body`：`default_content_type` 借的是
+        // `req`（要看 headers 是否已声明），而 `req.body` 是按值取走的
+        // —— 顺序反了就是 `borrow of partially moved value`。
+        if let Some(ct) = default_content_type(&req) {
+            builder = builder.header("content-type", ct);
+        }
         if let Some(body) = req.body {
-            builder = builder
-                .header("content-type", "application/json;charset=UTF-8")
-                .body(body);
+            builder = builder.body(body);
         }
 
         let resp = builder
@@ -231,5 +284,71 @@ mod tests {
         let profile = ClientProfile::default();
         assert!(profile.pc.is_none());
         assert_eq!(profile.effective_user_agent(), DEFAULT_UA);
+    }
+
+    // ── content-type 去重（回归测试）──────────────────────────────────────
+
+    /// 调用方**没**声明 content-type 时，才补默认的 JSON。
+    ///
+    /// 这是这条规则的**主路径**：绝大多数请求（签到、小红花那五条 JSON）
+    /// 都靠它拿头，所以"去重"不能把默认值也一起去掉。
+    #[test]
+    fn json_content_type_is_added_when_absent() {
+        // ⚠ `HttpRequest::post` 建出来的 `body` 是 `None`（见 core::traits），
+        // 所以这里必须显式挂一个体 —— 否则测的是"无体请求"，走的是另一条分支。
+        let req = HttpRequest::post("https://example.com/x").text_body("{}");
+        assert_eq!(default_content_type(&req), Some(CONTENT_TYPE_JSON));
+    }
+
+    /// ⚠ 调用方**已**声明 content-type 时，**不再补** —— 否则上线两个头。
+    ///
+    /// 这是实测过的缺陷（本地端口抓原始报文，`journaling` 收到两个
+    /// `content-type`）。受害的正是**非 JSON** 的那些请求：
+    /// `visitlog/journaling`（form-urlencoded）与 `auth_refresh`（自带 JSON 头）。
+    ///
+    /// ⚠ 大小写两种写法都要认：本仓两处调用方分别写的是
+    /// `Content-Type`（`auth_refresh`）与 `content-type`（`live_flower`），
+    /// 而 HTTP 头名**大小写不敏感** —— 按字节比会漏掉前者。
+    #[test]
+    fn declared_content_type_is_never_overridden() {
+        for name in ["content-type", "Content-Type", "CONTENT-TYPE", "cOnTeNt-TyPe"] {
+            let req = HttpRequest::post("https://example.com/x")
+                .header(name, "application/x-www-form-urlencoded;charset=UTF-8")
+                .text_body("module=uservisit");
+            assert_eq!(
+                default_content_type(&req),
+                None,
+                "调用方已用 {name} 声明，不该再补一个 —— 那会上线两个 content-type"
+            );
+        }
+    }
+
+    /// 不带 body 的请求（GET）**不加** content-type。
+    ///
+    /// `queryRevivalFlowers` 是 GET；给它补一个 content-type 声明了一个
+    /// 并不存在的体，是另一种形式的失真。
+    #[test]
+    fn bodyless_requests_get_no_content_type() {
+        let get = HttpRequest::get("https://example.com/x");
+        assert!(!has_body(&get));
+        assert_eq!(default_content_type(&get), None);
+    }
+
+    /// 去重判据只看 `content-type`，**不能**被别的头误伤。
+    ///
+    /// 例如 `Accept: */*`、`activityid: sign_in_3` 都在这一族里出现过：
+    /// 把它们误认成 content-type 会让默认头时而加、时而不加。
+    #[test]
+    fn other_headers_do_not_suppress_the_default() {
+        let req = HttpRequest::post("https://example.com/x")
+            .header("Accept", "*/*")
+            .header("activityid", "sign_in_3")
+            .header("x-content-type-options", "nosniff")
+            .text_body("{}");
+        assert_eq!(
+            default_content_type(&req),
+            Some(CONTENT_TYPE_JSON),
+            "只有真正的 content-type 才算已声明"
+        );
     }
 }

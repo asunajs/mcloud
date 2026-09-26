@@ -1,0 +1,501 @@
+{
+  "$source": "2026-09-22 生成：MSync 字节与两个签名头由**原项目实现**（protobufjs + node:crypto，scripts/gen-live-room-vectors.cjs）算出；口令 / 小红书用例的输入取自 2026-09-17 实拍夹具 test/fixtures/http/直播wss.json 与原项目 __tests__/kouling.test.ts。",
+  "$note": "Go 侧 internal/upstream 消费本文件。**全部**期望值都出自原实现：MSync 字节 / 两个签名头走 protobufjs + node:crypto，口令 / 小红书走原项目 packages/core/**src** 的 TS 源码（用原项目的 tsx 直接跑，sha256 见 $evidence.originalSrc）。⚠ 这两段曾一度是**手写**的期望值（34 条里 3 条与真实现不符），随后又一度改成读 packages/core/dist —— 而那份产物已过期（缺 isQuestion 过滤），两种做法都会把**正确的**实现判成红。手写的期望值/过期的产物都是假基准。",
+  "$evidence": {
+    "fixture": "test/fixtures/http/直播wss.json（13 片 imChatRoomHistoryMessage，814 条弹幕）",
+    "fixture2": "test/fixtures/http/直播723.json、直播716.json（member/apply 的实拍头集合）",
+    "doc": "docs/capture/app-live-redflower-samples.txt",
+    "originalTs": "mcloud-sign: packages/core/src/live-room/{proto,kouling,xiaohongshu}.ts",
+    "originalSrc": {
+      "live-room/kouling.ts": {
+        "path": "/Users/catlair/Documents/workspace/mcloud-sign/packages/core/src/live-room/kouling.ts",
+        "sha256": "f9f01c759cc540ef989e5abd30ff16932aa72f903dec2f7811c42ed059bb9552"
+      },
+      "live-room/xiaohongshu.ts": {
+        "path": "/Users/catlair/Documents/workspace/mcloud-sign/packages/core/src/live-room/xiaohongshu.ts",
+        "sha256": "d7b9483ebb5eed9c98fcfd957fd757ed9c0cc731fc8a771c92b0dd4cbe1af513"
+      }
+    },
+    "protobufjs": "8.7.1",
+    "tsx": "原项目 node_modules/.bin/tsx（直接跑 TS 源码，不经编译产物）"
+  },
+  "constants": {
+    "APP_KEY": "cmos_js_sdk",
+    "LIVE_APP_KEY": "cmos#ngvlcs",
+    "DOMAIN": "cmosim.com",
+    "DEVICE_INFO_HEX": "830652084dda69b6b957e2c3a7bd9b18db65922e29051b1b342ccf15bebc0fdbcc96f61dadab12f3cab1e66cb28ec05b",
+    "USER_AGENT": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15",
+    "ACCESS_TOKEN": "A03CBHoAAAAA19900000000SYNTHETICTOKENFORVECTORS000000000000000000",
+    "PHONE": "19900000000",
+    "ROOM_ID": "2026072314302675201220000000000",
+    "protoTypesUsed": [
+      "cmos.pb.MSync",
+      "cmos.pb.JID",
+      "cmos.pb.Provision",
+      "cmos.pb.MessageBody",
+      "cmos.pb.CommSyncUL",
+      "cmos.pb.NoticePayload",
+      "cmos.pb.Meta"
+    ]
+  },
+  "msyncFrames": [
+    {
+      "name": "provision",
+      "command": 3,
+      "timestampMillis": 1784790184674,
+      "identificationHex": "000102030405060708090a0b0c0d0e0f",
+      "resource": "js_1784790184674",
+      "deviceUuid": "1784790184674",
+      "deviceInfoHex": "830652084dda69b6b957e2c3a7bd9b18db65922e29051b1b342ccf15bebc0fdbcc96f61dadab12f3cab1e66cb28ec05b",
+      "base64": "EkEKC2Ntb3Mjbmd2bGNzEhRjbWxpdmVfY18xOTkwMDAwMDAwMBoKY21vc2ltLmNvbSIQanNfMTc4NDc5MDE4NDY3NBpEJHQkQTAzQ0JIb0FBQUFBMTk5MDAwMDAwMDBTWU5USEVUSUNUT0tFTkZPUlZFQ1RPUlMwMDAwMDAwMDAwMDAwMDAwMDAyQk1vemlsbGEvNS4wIChpUGFkOyBDUFUgT1MgMThfNSBsaWtlIE1hYyBPUyBYKSBBcHBsZVdlYktpdC82MDUuMS4xNTgAQANKlAEIBxIGMjMuMC4yGAEiEmNtbGl2ZV9jbW9zX2pzX3NkayoBADIBAEoNMTc4NDc5MDE4NDY3NGIFd2ViaW1qEGpzXzE3ODQ3OTAxODQ2NzRyRCR0JEEwM0NCSG9BQUFBQTE5OTAwMDAwMDAwU1lOVEhFVElDVE9LRU5GT1JWRUNUT1JTMDAwMDAwMDAwMDAwMDAwMDAwWgEAajCDBlIITdpptrlX4sOnvZsY22WSLikFGxs0LM8VvrwP28yW9h2tqxLzyrHmbLKOwFtyCAAAAZ+NyPLiehdjbW9zX2ltAAECAwQFBgcICQoLDA0ODw==",
+      "hex": "12410a0b636d6f73236e67766c63731214636d6c6976655f635f31393930303030303030301a0a636d6f73696d2e636f6d22106a735f313738343739303138343637341a442474244130334342486f4141414141313939303030303030303053594e544845544943544f4b454e464f52564543544f525330303030303030303030303030303030303032424d6f7a696c6c612f352e302028695061643b20435055204f532031385f35206c696b65204d6163204f53205829204170706c655765624b69742f3630352e312e3135380040034a94010807120632332e302e3218012212636d6c6976655f636d6f735f6a735f73646b2a01003201004a0d313738343739303138343637346205776562696d6a106a735f3137383437393031383436373472442474244130334342486f4141414141313939303030303030303053594e544845544943544f4b454e464f52564543544f52533030303030303030303030303030303030305a01006a30830652084dda69b6b957e2c3a7bd9b18db65922e29051b1b342ccf15bebc0fdbcc96f61dadab12f3cab1e66cb28ec05b72080000019f8dc8f2e27a17636d6f735f696d000102030405060708090a0b0c0d0e0f",
+      "payloadHex": "0807120632332e302e3218012212636d6c6976655f636d6f735f6a735f73646b2a01003201004a0d313738343739303138343637346205776562696d6a106a735f3137383437393031383436373472442474244130334342486f4141414141313939303030303030303053594e544845544943544f4b454e464f52564543544f5253303030303030303030303030303030303030",
+      "expect": {
+        "version": 0,
+        "guid": {
+          "appKey": "cmos#ngvlcs",
+          "name": "cmlive_c_19900000000",
+          "domain": "cmosim.com",
+          "clientResource": "js_1784790184674"
+        },
+        "auth": "$t$A03CBHoAAAAA19900000000SYNTHETICTOKENFORVECTORS000000000000000000",
+        "crypto": 0,
+        "userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15",
+        "command": 3,
+        "deviceId": 0,
+        "encryptType": [
+          0
+        ],
+        "deviceInfoHex": "830652084dda69b6b957e2c3a7bd9b18db65922e29051b1b342ccf15bebc0fdbcc96f61dadab12f3cab1e66cb28ec05b",
+        "identificationHex": "636d6f735f696d000102030405060708090a0b0c0d0e0f"
+      },
+      "expectProvision": {
+        "osType": 7,
+        "version": "23.0.2",
+        "networkType": 1,
+        "appSign": "cmlive_cmos_js_sdk",
+        "compressType": [
+          0
+        ],
+        "encryptType": [
+          0
+        ],
+        "deviceUuid": "1784790184674",
+        "deviceName": "webim",
+        "resource": "js_1784790184674",
+        "auth": "$t$A03CBHoAAAAA19900000000SYNTHETICTOKENFORVECTORS000000000000000000",
+        "provinceCode": ""
+      }
+    },
+    {
+      "name": "unread",
+      "command": 1,
+      "timestampMillis": 1784790185000,
+      "identificationHex": "101112131415161718191a1b1c1d1e1f",
+      "resource": "js_1784790185000",
+      "deviceInfoHex": "830652084dda69b6b957e2c3a7bd9b18db65922e29051b1b342ccf15bebc0fdbcc96f61dadab12f3cab1e66cb28ec05b",
+      "base64": "EkEKC2Ntb3Mjbmd2bGNzEhRjbWxpdmVfY18xOTkwMDAwMDAwMBoKY21vc2ltLmNvbSIQanNfMTc4NDc5MDE4NTAwMBpEJHQkQTAzQ0JIb0FBQUFBMTk5MDAwMDAwMDBTWU5USEVUSUNUT0tFTkZPUlZFQ1RPUlMwMDAwMDAwMDAwMDAwMDAwMDAyQk1vemlsbGEvNS4wIChpUGFkOyBDUFUgT1MgMThfNSBsaWtlIE1hYyBPUyBYKSBBcHBsZVdlYktpdC82MDUuMS4xNTgAQAFaAQBqMIMGUghN2mm2uVfiw6e9mxjbZZIuKQUbGzQszxW+vA/bzJb2Ha2rEvPKseZsso7AW3IIAAABn43I9Ch6F2Ntb3NfaW0QERITFBUWFxgZGhscHR4f",
+      "hex": "12410a0b636d6f73236e67766c63731214636d6c6976655f635f31393930303030303030301a0a636d6f73696d2e636f6d22106a735f313738343739303138353030301a442474244130334342486f4141414141313939303030303030303053594e544845544943544f4b454e464f52564543544f525330303030303030303030303030303030303032424d6f7a696c6c612f352e302028695061643b20435055204f532031385f35206c696b65204d6163204f53205829204170706c655765624b69742f3630352e312e3135380040015a01006a30830652084dda69b6b957e2c3a7bd9b18db65922e29051b1b342ccf15bebc0fdbcc96f61dadab12f3cab1e66cb28ec05b72080000019f8dc8f4287a17636d6f735f696d101112131415161718191a1b1c1d1e1f",
+      "payloadHex": "",
+      "expect": {
+        "version": 0,
+        "guid": {
+          "appKey": "cmos#ngvlcs",
+          "name": "cmlive_c_19900000000",
+          "domain": "cmosim.com",
+          "clientResource": "js_1784790185000"
+        },
+        "auth": "$t$A03CBHoAAAAA19900000000SYNTHETICTOKENFORVECTORS000000000000000000",
+        "crypto": 0,
+        "userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15",
+        "command": 1,
+        "deviceId": 0,
+        "encryptType": [
+          0
+        ],
+        "deviceInfoHex": "830652084dda69b6b957e2c3a7bd9b18db65922e29051b1b342ccf15bebc0fdbcc96f61dadab12f3cab1e66cb28ec05b",
+        "identificationHex": "636d6f735f696d101112131415161718191a1b1c1d1e1f"
+      }
+    },
+    {
+      "name": "sync-no-phone",
+      "command": 0,
+      "timestampMillis": 1784790186000,
+      "identificationHex": "202122232425262728292a2b2c2d2e2f",
+      "resource": "js_1784790186000",
+      "deviceInfoHex": "830652084dda69b6b957e2c3a7bd9b18db65922e29051b1b342ccf15bebc0fdbcc96f61dadab12f3cab1e66cb28ec05b",
+      "base64": "ElMKC2Ntb3NfanNfc2RrEiZjbWxpdmVfMjAyNjA3MjMxNDMwMjY3NTIwMTIyMDAwMDAwMDAwMBoKY21vc2ltLmNvbSIQanNfMTc4NDc5MDE4NjAwMBpEJHQkQTAzQ0JIb0FBQUFBMTk5MDAwMDAwMDBTWU5USEVUSUNUT0tFTkZPUlZFQ1RPUlMwMDAwMDAwMDAwMDAwMDAwMDAyQk1vemlsbGEvNS4wIChpUGFkOyBDUFUgT1MgMThfNSBsaWtlIE1hYyBPUyBYKSBBcHBsZVdlYktpdC82MDUuMS4xNTgAWgEAajCDBlIITdpptrlX4sOnvZsY22WSLikFGxs0LM8VvrwP28yW9h2tqxLzyrHmbLKOwFtyCAAAAZ+NyPgQehdjbW9zX2ltICEiIyQlJicoKSorLC0uLw==",
+      "hex": "12530a0b636d6f735f6a735f73646b1226636d6c6976655f323032363037323331343330323637353230313232303030303030303030301a0a636d6f73696d2e636f6d22106a735f313738343739303138363030301a442474244130334342486f4141414141313939303030303030303053594e544845544943544f4b454e464f52564543544f525330303030303030303030303030303030303032424d6f7a696c6c612f352e302028695061643b20435055204f532031385f35206c696b65204d6163204f53205829204170706c655765624b69742f3630352e312e313538005a01006a30830652084dda69b6b957e2c3a7bd9b18db65922e29051b1b342ccf15bebc0fdbcc96f61dadab12f3cab1e66cb28ec05b72080000019f8dc8f8107a17636d6f735f696d202122232425262728292a2b2c2d2e2f",
+      "payloadHex": "",
+      "expect": {
+        "version": 0,
+        "guid": {
+          "appKey": "cmos_js_sdk",
+          "name": "cmlive_2026072314302675201220000000000",
+          "domain": "cmosim.com",
+          "clientResource": "js_1784790186000"
+        },
+        "auth": "$t$A03CBHoAAAAA19900000000SYNTHETICTOKENFORVECTORS000000000000000000",
+        "crypto": 0,
+        "userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15",
+        "command": 0,
+        "deviceId": 0,
+        "encryptType": [
+          0
+        ],
+        "deviceInfoHex": "830652084dda69b6b957e2c3a7bd9b18db65922e29051b1b342ccf15bebc0fdbcc96f61dadab12f3cab1e66cb28ec05b",
+        "identificationHex": "636d6f735f696d202122232425262728292a2b2c2d2e2f"
+      }
+    }
+  ],
+  "msyncInbound": [
+    {
+      "name": "sync-comm-sync-ul",
+      "kind": "sync",
+      "text": "小红花口令：毕业之旅MClaw相伴",
+      "payloadBase64": "CsgBCAASQQoLY21vcyNuZ3ZsY3MSFGNtbGl2ZV9jXzE5OTAwMDAwMDAwGgpjbW9zaW0uY29tIhBqc18xNzg0NzkwMTg0Njc0GkwKC2Ntb3Mjbmd2bGNzEh8yMDI2MDcyMzE0MzAyNjc1MjAxMjIwMDAwMDAwMDAwGgpjbW9zaW0uY29tIhBqc18xNzg0NzkwMTg0Njc0IAAoATIvCAIiKxIp5bCP57qi6Iqx5Y+j5Luk77ya5q+V5Lia5LmL5peFTUNsYXfnm7jkvLQQAA==",
+      "payloadHex": "0ac801080012410a0b636d6f73236e67766c63731214636d6c6976655f635f31393930303030303030301a0a636d6f73696d2e636f6d22106a735f313738343739303138343637341a4c0a0b636d6f73236e67766c6373121f323032363037323331343330323637353230313232303030303030303030301a0a636d6f73696d2e636f6d22106a735f3137383437393031383436373420002801322f0802222b1229e5b08fe7baa2e88ab1e58fa3e4bba4efbc9ae6af95e4b89ae4b98be697854d436c6177e79bb8e4bcb41000"
+    },
+    {
+      "name": "notice-payload",
+      "kind": "notice",
+      "text": "口令1:MClaw全能小助手 口令2:毕业之旅MClaw相伴",
+      "payloadBase64": "CkwKC2Ntb3Mjbmd2bGNzEh8yMDI2MDcyMzE0MzAyNjc1MjAxMjIwMDAwMDAwMDAwGgpjbW9zaW0uY29tIhBqc18xNzg0NzkwMTg0Njc0EtsBCAASQQoLY21vcyNuZ3ZsY3MSFGNtbGl2ZV9jXzE5OTAwMDAwMDAwGgpjbW9zaW0uY29tIhBqc18xNzg0NzkwMTg0Njc0GkwKC2Ntb3Mjbmd2bGNzEh8yMDI2MDcyMzE0MzAyNjc1MjAxMjIwMDAwMDAwMDAwGgpjbW9zaW0uY29tIhBqc18xNzg0NzkwMTg0Njc0IAAoATJCCAIiPhI85Y+j5LukMTpNQ2xhd+WFqOiDveWwj+WKqeaJiyDlj6Pku6QyOuavleS4muS5i+aXhU1DbGF355u45Ly0",
+      "payloadHex": "0a4c0a0b636d6f73236e67766c6373121f323032363037323331343330323637353230313232303030303030303030301a0a636d6f73696d2e636f6d22106a735f3137383437393031383436373412db01080012410a0b636d6f73236e67766c63731214636d6c6976655f635f31393930303030303030301a0a636d6f73696d2e636f6d22106a735f313738343739303138343637341a4c0a0b636d6f73236e67766c6373121f323032363037323331343330323637353230313232303030303030303030301a0a636d6f73696d2e636f6d22106a735f313738343739303138343637342000280132420802223e123ce58fa3e4bba4313a4d436c6177e585a8e883bde5b08fe58aa9e6898b20e58fa3e4bba4323ae6af95e4b89ae4b98be697854d436c6177e79bb8e4bcb4"
+    },
+    {
+      "name": "bare-message-body",
+      "kind": "bare",
+      "text": "小红花口令：毕业之旅MClaw相伴",
+      "payloadBase64": "CAIiKxIp5bCP57qi6Iqx5Y+j5Luk77ya5q+V5Lia5LmL5peFTUNsYXfnm7jkvLQ=",
+      "payloadHex": "0802222b1229e5b08fe7baa2e88ab1e58fa3e4bba4efbc9ae6af95e4b89ae4b98be697854d436c6177e79bb8e4bcb4"
+    }
+  ],
+  "memberApplySignatures": [
+    {
+      "name": "plain",
+      "timestamp": "1784790184674",
+      "accessToken": "A03CBHoAAAAA19900000000SYNTHETICTOKENFORVECTORS000000000000000000",
+      "deviceInfoHex": "830652084dda69b6b957e2c3a7bd9b18db65922e29051b1b342ccf15bebc0fdbcc96f61dadab12f3cab1e66cb28ec05b",
+      "timestampSuffix10": "4790184674",
+      "systemMd5": "239a9ce8558dce4e93cb863eda6d9654",
+      "tokenMd5": "f4d8d0e16feadfee18eea9f29889e9c7"
+    },
+    {
+      "name": "leading-zero-in-last10",
+      "timestamp": "1784700000001",
+      "accessToken": "A03CBHoAAAAA19900000000SYNTHETICTOKENFORVECTORS000000000000000000",
+      "deviceInfoHex": "830652084dda69b6b957e2c3a7bd9b18db65922e29051b1b342ccf15bebc0fdbcc96f61dadab12f3cab1e66cb28ec05b",
+      "timestampSuffix10": "4700000001",
+      "systemMd5": "b7e219ae131b9b8ed349ca0dc1c002b7",
+      "tokenMd5": "8539d81a547877bff8c7f81e9456c045"
+    },
+    {
+      "name": "short-token",
+      "timestamp": "1784790184674",
+      "accessToken": "A03SHORT",
+      "deviceInfoHex": "830652084dda69b6b957e2c3a7bd9b18db65922e29051b1b342ccf15bebc0fdbcc96f61dadab12f3cab1e66cb28ec05b",
+      "timestampSuffix10": "4790184674",
+      "systemMd5": "239a9ce8558dce4e93cb863eda6d9654",
+      "tokenMd5": "b7e4b0916c081cfa76c393ae3d68d09c"
+    }
+  ],
+  "koulingExtract": [
+    {
+      "name": "ts-basic",
+      "text": "小红花口令：云盘AI高效复盘",
+      "why": "格式 1 的基本形态",
+      "expect": [
+        "云盘AI高效复盘"
+      ]
+    },
+    {
+      "name": "ts-multiline",
+      "text": "复制口令1：\n短漫上新免费看\n复制口令2：\n云盘AI高效复盘\n无随机口令",
+      "why": "格式 2：整行是头 ⇒ 取下一行。⚠ 这条曾因 Go 侧漏了\"取下一行\"这一支而解出空",
+      "expect": [
+        "短漫上新免费看",
+        "云盘AI高效复盘"
+      ]
+    },
+    {
+      "name": "ts-multiline-sameline",
+      "text": "复制口令1：短漫上新免费看\n复制口令2：云盘AI高效复盘\n无随机口令",
+      "why": "格式 2 的同名行形态（头与内容在同一行）",
+      "expect": [
+        "短漫上新免费看",
+        "云盘AI高效复盘"
+      ]
+    },
+    {
+      "name": "ts-single-multiline",
+      "text": "复制口令：\n云盘AI高效复盘",
+      "why": "⚠ 单个口令头 + 下一行：与 ts-multiline 同一支，但没有编号",
+      "expect": [
+        "云盘AI高效复盘"
+      ]
+    },
+    {
+      "name": "ts-shi",
+      "text": "口令是云盘AI高效复盘",
+      "why": "格式 3",
+      "expect": [
+        "云盘AI高效复盘"
+      ]
+    },
+    {
+      "name": "ts-question-1",
+      "text": "口令是什么？",
+      "why": "疑问句：问号",
+      "expect": []
+    },
+    {
+      "name": "ts-question-2",
+      "text": "口令是什么",
+      "why": "疑问句：整条等于疑问词",
+      "expect": []
+    },
+    {
+      "name": "ts-question-3",
+      "text": "口令是多少啊",
+      "why": "疑问句：去语气词后等于疑问词",
+      "expect": []
+    },
+    {
+      "name": "ts-question-4",
+      "text": "口令是啥呢",
+      "why": "疑问句：同上，另一个词",
+      "expect": []
+    },
+    {
+      "name": "ts-question-keeps-real",
+      "text": "口令是带着云盘去上学",
+      "why": "⚠ 疑问句过滤的**反向**边界：真口令不能误伤",
+      "expect": [
+        "带着云盘去上学"
+      ]
+    },
+    {
+      "name": "ts-digit-format",
+      "text": "1:短漫上新免费看 2:云盘AI高效复盘 无随机",
+      "why": "格式 4 兜底（只在 ①②③ 全空时生效）",
+      "expect": [
+        "短漫上新免费看",
+        "云盘AI高效复盘"
+      ]
+    },
+    {
+      "name": "ts-empty",
+      "text": "",
+      "why": "空串",
+      "expect": []
+    },
+    {
+      "name": "ts-dedupe",
+      "text": "小红花口令：AAA\n小红花口令：AAA",
+      "why": "保序去重",
+      "expect": [
+        "AAA"
+      ]
+    },
+    {
+      "name": "ts-english-colon",
+      "text": "小红花口令:云盘AI高效复盘",
+      "why": "半角冒号",
+      "expect": [
+        "云盘AI高效复盘"
+      ]
+    },
+    {
+      "name": "live-real-1",
+      "text": "小红花口令：毕业之旅MClaw相伴",
+      "why": "实拍：真实主播格式",
+      "expect": [
+        "毕业之旅MClaw相伴"
+      ]
+    },
+    {
+      "name": "live-real-2",
+      "text": "口令1:MClaw全能小助手 口令2:毕业之旅MClaw相伴",
+      "why": "实拍：同一行两个口令（头之间以空格分隔）",
+      "expect": [
+        "MClaw全能小助手",
+        "毕业之旅MClaw相伴"
+      ]
+    },
+    {
+      "name": "live-real-3",
+      "text": "口令2：毕业之旅MClaw相伴",
+      "why": "实拍：单个编号口令",
+      "expect": [
+        "毕业之旅MClaw相伴"
+      ]
+    },
+    {
+      "name": "live-real-4",
+      "text": "口令1：MClaw全能小助手",
+      "why": "实拍：同上，另一个编号",
+      "expect": [
+        "MClaw全能小助手"
+      ]
+    },
+    {
+      "name": "live-false-positive",
+      "text": "口令是相伴什么",
+      "why": "⚠ 已知假阳性，钉成行为契约",
+      "expect": [
+        "相伴什么"
+      ]
+    },
+    {
+      "name": "live-question-1",
+      "text": "口令在哪里",
+      "why": "疑问句（\"哪里\"不在疑问词表里，靠整条不等判掉）",
+      "expect": []
+    },
+    {
+      "name": "live-question-2",
+      "text": "口令是什么",
+      "why": "疑问句",
+      "expect": []
+    },
+    {
+      "name": "live-question-3",
+      "text": "口令是啥",
+      "why": "疑问句",
+      "expect": []
+    },
+    {
+      "name": "live-question-4",
+      "text": "口令啥啊",
+      "why": "疑问句",
+      "expect": []
+    },
+    {
+      "name": "live-question-5",
+      "text": "口令二是什么",
+      "why": "疑问句（带汉字编号）",
+      "expect": []
+    },
+    {
+      "name": "live-question-6",
+      "text": "口令是什么啊",
+      "why": "疑问句",
+      "expect": []
+    },
+    {
+      "name": "live-question-7",
+      "text": "第2个口令是什么？",
+      "why": "疑问句（问号）",
+      "expect": []
+    },
+    {
+      "name": "live-question-8",
+      "text": "场控随机口令是多少",
+      "why": "疑问句（去语气词后等于\"多少\"）",
+      "expect": []
+    },
+    {
+      "name": "live-question-9",
+      "text": "怎么复制口令",
+      "why": "无口令头、无\"口令是\"",
+      "expect": []
+    },
+    {
+      "name": "live-question-10",
+      "text": "口令兑换不了",
+      "why": "同上",
+      "expect": []
+    },
+    {
+      "name": "live-bare",
+      "text": "口令",
+      "why": "裸关键词",
+      "expect": []
+    },
+    {
+      "name": "live-no-random",
+      "text": "没有随机口令",
+      "why": "含\"口令\"但解不出（也不含\"口令是\"）",
+      "expect": []
+    },
+    {
+      "name": "live-only-this-one",
+      "text": "只有这一个口令",
+      "why": "同上",
+      "expect": []
+    },
+    {
+      "name": "live-no-random-with-head",
+      "text": "小红花口令：AAA 无随机",
+      "why": "⚠ 格式 1 与同一行切分**同时**命中（两个结果）",
+      "expect": [
+        "AAA 无随机",
+        "AAA"
+      ]
+    },
+    {
+      "name": "live-ideographic-space",
+      "text": "口令1：AAA　口令2：BBB",
+      "why": "⚠ 全角空格：JS `\\s` 含 U+3000，Go 的不含",
+      "expect": [
+        "AAA",
+        "BBB"
+      ]
+    },
+    {
+      "name": "live-head-then-head",
+      "text": "复制口令1：\n复制口令2：\nAAA",
+      "why": "⚠ 下一行自己也是口令头 ⇒ 必须排除（否则把 `复制口令2：` 当口令）",
+      "expect": [
+        "AAA"
+      ]
+    },
+    {
+      "name": "live-head-then-no-random",
+      "text": "复制口令1：\n无随机口令",
+      "why": "⚠ 下一行含 `无随机` ⇒ 必须排除（它是收尾标记，不是口令）",
+      "expect": []
+    }
+  ],
+  "xiaohongshuExtract": [
+    {
+      "name": "inline-json-first-hit-wins",
+      "html": "<html><head><script>window.__INITIAL_STATE__={\"noteList\":[{\"displayTitle\":\"小红花口令：最新一期口令在此\"},{\"displayTitle\":\"小红花口令：上一期的旧口令\"}]}</script></head><body></body></html>",
+      "why": "内嵌 JSON 优先；主页倒序 ⇒ 第一条命中即最新（不能再往下取历史口令）",
+      "expect": [
+        "最新一期口令在此"
+      ]
+    },
+    {
+      "name": "server-rendered-element",
+      "html": "<html><body><div class=\"note\">口令是云盘AI高效复盘</div></body></html>",
+      "why": "没有内嵌 JSON 时退到服务端渲染的卡片",
+      "expect": [
+        "云盘AI高效复盘"
+      ]
+    },
+    {
+      "name": "meta-content",
+      "html": "<html><head><meta name=\"description\" content=\"小红花口令：元数据里的口令\" /></head></html>",
+      "why": "再退到 `<meta content>`",
+      "expect": [
+        "元数据里的口令"
+      ]
+    },
+    {
+      "name": "no-kouling-at-all",
+      "html": "<html><body><div>今天天气不错</div></body></html>",
+      "why": "空结果的形状（返回 `[]` 而不是 nil）",
+      "expect": []
+    },
+    {
+      "name": "html-entities-and-json-escape",
+      "html": "<html><body><div>小红花口令：&#35270;&#39057;&#20307;&#39564;</div><script>{\"desc\":\"口令是A\\nB\"}</script></body></html>",
+      "why": "⚠ 内嵌 JSON **优先于**文档顺序 ⇒ 解出的是 `A B`（换行折成空格），不是 div 里的「视频体验」。手写期望值的第一版脚本记成了「视频体验」，与真实现不符，已改为真跑",
+      "expect": [
+        "A B"
+      ]
+    }
+  ]
+}

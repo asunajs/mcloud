@@ -9,6 +9,8 @@
 | `app-signin-vectors.json` | `mcloud/test/golden/app-signin-vectors.json` |
 | `auth-vectors.json` | `mcloud/test/golden/auth-vectors.json` |
 | `password-hash-vectors.json` | `mcloud/test/golden/password-hash-vectors.json` |
+| `live-room-vectors.json` | `mcloud/test/golden/live-room-vectors.json` |
+| `live-redflower-vectors.json` | `mcloud/test/golden/live-redflower-vectors.json` |
 
 ## 为什么同步副本而不是直接引用
 
