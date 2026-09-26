@@ -1884,3 +1884,74 @@ impl mcloud_core::UserStore for NoStore {
         Err(refuse())
     }
 }
+
+// ══════════════════════════ 口令拆分的分隔符 ══════════════════════════
+
+/// 空白（含**全角空格**）必须算分隔符 —— 这是**修过的一个真缺陷**。
+///
+/// 早先只拆 `\n \r , ， 、`，于是 `"口令甲 口令乙"` 被当成**一条**口令发上去，
+/// 服务端必然回 `200108 口令无效`；用户看到的是"我填了两条，怎么只投一条还说口令错"。
+///
+/// 漏掉它是因为 WebUI 在 `api.ts` 里自己先按空格拆了一遍（界面上看着是对的），
+/// 而 CLI 与 HTTP API 两条路直接走本函数、没有那层补偿 ——
+/// 所以这条测试的价值在于：**它钉的是所有入口共用的那一处**。
+#[test]
+fn whitespace_is_a_separator_including_ideographic_space() {
+    assert_eq!(split_kouling("口令甲 口令乙"), vec!["口令甲", "口令乙"]);
+    // 手机输入法默认全角空格，而口令是从手机里复制粘贴出来的 ⇒ 常见输入
+    assert_eq!(
+        split_kouling("口令甲\u{3000}口令乙"),
+        vec!["口令甲", "口令乙"]
+    );
+    assert_eq!(split_kouling("甲\t乙"), vec!["甲", "乙"]);
+    assert_eq!(split_kouling("甲\u{a0}乙"), vec!["甲", "乙"]);
+    // 混用多种分隔符 + 连续空白（连续空白不该产出空口令）
+    assert_eq!(
+        split_kouling("甲,乙、丙 丁\n\n戊"),
+        vec!["甲", "乙", "丙", "丁", "戊"]
+    );
+    assert_eq!(split_kouling("  甲   乙  "), vec!["甲", "乙"]);
+}
+
+/// 拆分**不拆口令内部**的字符：只有分隔符才拆。
+///
+/// 防的是"顺手按长度或按标点乱拆" —— 口令本身可能含数字、字母与标点，
+/// 拆错了会投出一条不存在的口令（`200108`）。
+#[test]
+fn splitting_does_not_touch_characters_inside_a_code() {
+    assert_eq!(split_kouling("一键9图出圈"), vec!["一键9图出圈"]);
+    assert_eq!(split_kouling("中秋美好存云盘"), vec!["中秋美好存云盘"]);
+    // 口令里的连字符/半角括号不是分隔符
+    assert_eq!(split_kouling("A-B(C)1"), vec!["A-B(C)1"]);
+}
+
+/// 空输入与纯分隔符 ⇒ 空列表（不是"一个空口令"）。
+#[test]
+fn empty_or_separator_only_input_yields_no_codes() {
+    assert!(split_kouling("").is_empty());
+    assert!(split_kouling("   ").is_empty());
+    assert!(split_kouling(" , 、\n").is_empty());
+}
+
+/// 拆分要**去重且保序**（与弹幕来源合并时的口径一致）。
+#[test]
+fn splitting_dedupes_and_keeps_order() {
+    assert_eq!(split_kouling("甲 乙 甲 丙 乙"), vec!["甲", "乙", "丙"]);
+}
+
+/// `codes` 用**字符串数组**给时也走同一条拆分路径（两个入口不能漂移）。
+///
+/// `params_from_body` 同时收字符串与数组两种形态；这条钉的是
+/// **数组里的每一项也按同一套分隔符处理** —— 否则"数组给一条含空格的口令"
+/// 与"字符串给同样的内容"会得到不同结果。
+#[test]
+fn params_accept_codes_as_string_or_array_with_the_same_semantics() {
+    let from_string = LiveRoomRun::params_from_body(&serde_json::json!({
+        "codes": "甲 乙", "listenSeconds": 45
+    }));
+    let from_array = LiveRoomRun::params_from_body(&serde_json::json!({
+        "codes": ["甲 乙"], "listenSeconds": 45
+    }));
+    assert_eq!(from_string.codes, vec!["甲", "乙"]);
+    assert_eq!(from_array.codes, from_string.codes);
+}

@@ -108,8 +108,12 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Some("run") => {
-            let task = args.get(1).context("用法：cli run <任务名> <账号>")?;
-            let account = args.get(2).context("用法：cli run <任务名> <账号>")?;
+            let task = args
+                .get(1)
+                .context("用法：cli run <任务名> <账号> [--body <JSON>]")?;
+            let account = args
+                .get(2)
+                .context("用法：cli run <任务名> <账号> [--body <JSON>]")?;
             let id = mcloud_core::AccountId::new(account);
             let acct = app
                 .handle
@@ -117,10 +121,22 @@ async fn main() -> anyhow::Result<()> {
                 .account(&id)
                 .await?
                 .with_context(|| format!("账号不存在：{account}"))?;
-            let record = app
-                .runner()
-                .run(task, &acct, &serde_json::json!({}))
-                .await?;
+            // 任务参数：默认空对象；`--body <JSON>` 显式给。
+            //
+            // ⚠ 这里原先**写死** `{}`，于是所有"要参数才有意义"的任务在 CLI 上
+            // 根本没法用 —— 最典型的是 `live-room`：它的 `codes`（手工口令）
+            // 是**唯一**的入口（小红书那条口令没法自动获取），传不进参数
+            // 就等于这个任务在 CLI 上不存在。WebUI 那条路一直能传（它发 JSON 体），
+            // 所以这个缺口在单测里看不出来 —— 只有"真的从 CLI 跑一次"才会暴露。
+            let body = match args.iter().position(|a| a == "--body") {
+                Some(i) => {
+                    let raw = args.get(i + 1).context("--body 后面要给一段 JSON")?;
+                    serde_json::from_str(raw)
+                        .with_context(|| format!("--body 不是合法 JSON：{raw}"))?
+                }
+                None => serde_json::json!({}),
+            };
+            let record = app.runner().run(task, &acct, &body).await?;
             println!("[{}] {}", record.outcome.summary(), record.task);
             if record.outcome.is_failure() {
                 std::process::exit(1);
@@ -154,7 +170,9 @@ fn print_usage() {
     eprintln!("用法：mcloud-gost <命令> [参数]");
     eprintln!();
     eprintln!("  tasks                          列出可用任务");
-    eprintln!("  run <任务名> <账号>             跑一次任务");
+    eprintln!("  run <任务名> <账号> [--body <JSON>]  跑一次任务");
+    eprintln!("                                 要参数的任务必须用 --body，例如：");
+    eprintln!("                                 run live-room <账号> --body '{{\"codes\":\"口令甲 口令乙\",\"listenSeconds\":45}}'");
     eprintln!("  pending                         查看本进程里还没清理的网盘产物");
     eprintln!("  cron <定时id>                   跑一条已配置的定时（给系统 crontab 调用）");
     eprintln!("  pipeline run <编排id>           跑一条已配置的编排");
