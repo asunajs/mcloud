@@ -563,6 +563,17 @@ func CloudFileListRequest(
 // 但 `code` 不是 `"0000"` 时也照样交回载荷？—— 不：`EnsureOK` 已经把
 // `success:false` 与**非 0 数字码**都拦掉了，这里只补一件事：
 // `data.items` 不是数组 ⇒ 解析失败（旧实现兜成 `[]`，那会把"形状变了"念成"目录是空的"）。
+//
+// # 那 26 枚键里本层只读两枚（2026-09-26 又实测了一次）
+//
+// 一发**只读**的全树走查（808 项）把"本层不读"的那几枚里的两枚念出了形状：
+// `type` 只有**两档、且是小写字符串** `file` / `folder`（**不是**数字），
+// `createdAt` 是 **RFC 3339 带时区的串**（现场值 `2015-02-07T21:24:32.000+08:00`），也不是毫秒数。
+// ⇒ 两点留给下一个读者：① 这一族别按数字形状写判据（坑表 **#176** 同族，它常回串）；
+// ② 要按"是不是目录"分流，今天**有** `type` 可用（那一发里被当目录列的 57 枚全是 `folder`），
+// 但本层**仍不读**它 —— 全仓没有一处按 `type` 分流，而"回收站里算不算存在"（`trashedAt`）
+// 零样本 ⇒ 加字段之前得先说清"读了它判什么"。现场：
+// [`docs/capture/app-cloud-residue-samples.txt`](../../docs/capture/app-cloud-residue-samples.txt) §3。
 func ParseCloudFileList(envelope *Envelope) (CloudFileList, *core.Error) {
 	payload, perr := envelope.EnsureOK()
 	if perr != nil {
