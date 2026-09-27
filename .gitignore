@@ -9,6 +9,17 @@ target/
 /data
 *.log
 
+# 滑块题面的对拍底本（`picture.png` / `puzzle.png`）。
+#
+# ⚠ **有意不入库**：它们是**真机抓包的原始响应体**，含那个账号的真实题面图。
+# 上游 `mcloud` 把同一份放在 `/target/` 下（见其
+# `target/slide-evidence/README.md` 的"为什么不入库"）。
+#
+# 影响：`crates/mcloud-crypto/tests/slide_parity.rs` 在缺图时**跳过**
+# （会把原因打出来）。**跳过 ≠ 通过** —— 要确认它真跑了，看输出里那条说明。
+# 复跑：从抓包缓存把两张图捞回本目录。
+/test/fixtures/slide-evidence/
+
 # 会话工具目录（技能/临时配置），不是项目源码。
 # 上游 `mcloud` 同样不跟踪它 —— 提交进去会让每个 clone 都带上一份
 # 与本地环境相关的副本。

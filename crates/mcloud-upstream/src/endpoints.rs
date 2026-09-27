@@ -56,6 +56,29 @@ pub const SLIDER_PUZZLE: &str = "https://user-njs.yun.139.com/user/verfycode";
 /// `01000001 用户token不能为空` —— 那不是失败，是正常顺序的结果。
 pub const LOGOUT: &str = "https://user-njs.yun.139.com/user/logout";
 
+// ── H5 签到页那一族（`crates/mcloud-upstream/src/app_signin.rs`）──────────
+
+/// H5 那一族的主机。
+///
+/// `origin` 请求头要用它（兑换下单实拍里带了 `origin`），
+/// 所以单列一个常量而不是让各处以 `"https://m.mcloud.139.com"` 字面量散步。
+pub const MCLOUD_HOST: &str = "https://m.mcloud.139.com";
+
+/// 签到页的主机 + 路径前缀。
+pub const SIGNIN_PAGE_BASE: &str = "https://m.mcloud.139.com/ycloud/signin/page";
+
+/// 兑换清单（**只读**）。查询串只有 `client` 与 `clientVersion`。
+pub const EXCHANGE_LIST: &str = "https://m.mcloud.139.com/ycloud/signin/page/exchangeList";
+
+/// 下单（**花真豆**）。
+pub const EXCHANGE_V3: &str = "https://m.mcloud.139.com/ycloud/signin/page/exchangeV3";
+
+/// 取滑块题面（**只读**）。
+///
+/// ⚠ 主机路径族是 `/ycloud/auth-service/slide/`，与上面两条的
+/// `/ycloud/signin/page/` **不同** —— 别顺手复用那一族的请求构造。
+pub const GET_SLIDE: &str = "https://m.mcloud.139.com/ycloud/auth-service/slide/getSlide";
+
 /// 判断主机是否应注入 basic authorization。
 pub fn accepts_basic(host: &str) -> bool {
     AUTH_DOMAINS

@@ -13,6 +13,7 @@ pub mod password;
 pub mod rand;
 pub mod rsa;
 pub mod sign;
+pub mod slide;
 pub mod tn;
 
 pub use aes::{
@@ -33,6 +34,10 @@ pub use rsa::{
     rsa_pkcs1v15_decrypt, rsa_pkcs1v15_encrypt_base64, rsa_pkcs1v15_encrypt_base64_with_b64_key,
 };
 pub use sign::{generate_signature, sign_headers, sign_headers_with, SignHeaders, SALT_MAP};
+pub use slide::{
+    block_box, decode_slide_image, sobel_magnitude, solve_contour, solve_from_images, solve_slide,
+    SlideBox, SlideCandidate, SlideImage, SlideSolution, SLIDE_MAX_DEVIATION, SLIDE_TOP_N,
+};
 pub use tn::{get_tn, get_tn_md5};
 
 /// 设备指纹（smid）上报里用来包住 uid 的公钥：SPKI DER 的 base64，1024 位。
