@@ -247,8 +247,13 @@ pub async fn events(
                 }
                 // 队列空：等新事件。用通知唤醒，不忙轮询。
                 if st.waiter.recv().await.is_err() {
-                    // 发送端没了（进程在收尾）⇒ 结束这条流
-                    st.done = true;
+                    // 发送端没了（进程在收尾）⇒ 结束这条流。
+                    //
+                    // 这里**不置 `st.done`**：下面的 `return None` 把 `st` 一起丢掉了，
+                    // `done` 再也不会被读到（第 199 行那次读取在本轮之前）。
+                    // 置了它只会得到 `unused_assignments` 告警 —— 而 `RUSTFLAGS=-D warnings`
+                    // 会把它变成 CI 失败。与上面那条终局分支不同：那条要把 `st` 交回去，
+                    // 所以 `st.done = true` 是真有意义的。
                     return None;
                 }
             }
