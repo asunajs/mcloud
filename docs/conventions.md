@@ -97,6 +97,31 @@ nightly-only 选项会被静默忽略（只在首次调用时打一行 warning�
 > 已踩过的坑：`format_code_in_doc_comments = true` 属于 nightly-only。
 > 需要它时先做「升级到 nightly 工具链」的决策，不要在 stable 下加。
 
+### 2.1.1 CI 钉住具体工具链版本【硬约束】
+
+`.github/workflows/ci.yml` 的 rust job 用 `dtolnay/rust-toolchain@1.91.1`，
+**不用 `@stable`**。数字与上表 §1 的「工具链」一致。
+
+原因是一次实测的教训：`@stable` 曾解析到 rust-1.98.0，而本机是 1.91.1，
+中间新增的 lint 逐个变成 `-D warnings` 下的硬失败：
+
+| 新增 lint | 位置 | 处置 |
+|---|---|---|
+| `clippy::chunks_exact_to_as_chunks` | `mcloud-crypto/src/aes.rs` | 改用 `as_chunks`（1.88 起稳定，不抬高 MSRV） |
+| `unused_assignments` | `mcloud-server/src/routes/runs.rs` | 删掉真·死赋值 |
+| `clippy::result_large_err` | `mcloud-upstream/src/live_ws_client/tests.rs` | **误报**：闭包签名由 tokio-tungstenite 强制，改不了 |
+
+最麻烦的不是这三条，而是**本地复现不了**——本机 1.91.1 一条都不报，
+只能"推上去看 CI 吐什么"，修一个冒一个。钉住版本后两边是同一个编译器。
+
+> 这与 §3.2 拒绝启用 `clippy::nursery` 的理由（"不稳定、跨版本易变"）
+> 是同一条取向：**门禁要可复现**，不该随上游浮动。
+>
+> 升级方式是**显式改这个数字**并同步本表，而不是让它自己漂。
+> 注意它与 `rust-version = 1.88` 是两回事：后者是 MSRV 下限，
+> 由 msrv job（`@1.88`）把关，**不要**把 msrv job 也钉到 1.91.1 ——
+> 那样就没人验证"最低版本还能不能编译"了。
+
 ### 2.2 风格要点【软约定】
 
 - **缩进**：Rust 4 空格；`toml`/`json`/`ts`/`tsx` 2 空格（`.editorconfig` 已设）。

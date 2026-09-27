@@ -111,8 +111,29 @@ jobs:
           name: web-dist
           path: ${{ github.workspace }}/web/dist
 
+      # ⚠ 用**具体版本**，不用 `@stable`。
+      #
+      # 踩过的坑（三次，逐个爆出来）：`@stable` 今天解析到 rust-1.98.0，
+      # 而本机与 docs/conventions.md §1 记录的工具链是 **1.91.1**。
+      # 中间 7 个版本新增的 lint 一个个变成 `-D warnings` 下的硬失败：
+      #
+      #   1. clippy::chunks_exact_to_as_chunks  （aes.rs）
+      #   2. unused_assignments                 （runs.rs，死赋值）
+      #   3. clippy::result_large_err           （live_ws_client 测试里
+      #      由 tokio-tungstenite 强制签名的闭包 —— 改不了，是误报）
+      #
+      # 最要命的是**本地复现不了**：本机 1.91.1 一个都不报，
+      # 于是每次只能"推上去看 CI 吐什么"——修一个、冒出下一个。
+      #
+      # 钉住版本后本地与 CI 是同一个编译器，clippy 结果可复现，
+      # 不再出现"本地绿、CI 红"。这也与 §3.2 拒绝启用 `clippy::nursery`
+      # 的取向一致：那条的理由正是"不稳定、跨版本易变"。
+      #
+      # 升级方式是**改这个数字**（并同步 docs/conventions.md §1），
+      # 而不是让它随上游浮动。数字要与 rust-version = 1.88 区分：
+      # 后者是 MSRV 下限（由 msrv job 把关），这个是开发/CI 用的版本。
       - name: 安装工具链
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.91.1
         with:
           components: rustfmt, clippy
 
