@@ -4,6 +4,7 @@
 
 pub mod artifacts;
 pub mod cancel_registry;
+pub mod details_ledger;
 pub mod pipeline;
 pub mod registry;
 pub mod runner;
@@ -11,6 +12,7 @@ pub mod scheduler;
 
 pub use artifacts::{Artifact, ArtifactKind, ArtifactLedger, ArtifactRecorder, SharedLedger};
 pub use cancel_registry::{CancelRegistry, SharedCancelRegistry};
+pub use details_ledger::{DetailsLedger, DetailsRecorder, SharedDetails};
 pub use pipeline::{PipelineOutcome, PipelineRunner, StepStatus, StepSummary};
 pub use registry::{Registry, Task, TaskMeta};
 pub use runner::{HttpClientFactory, Runner};
@@ -43,6 +45,16 @@ pub struct TaskContext {
     /// 不上报的后果**不报错**：那文件永久留在用户网盘上，
     /// 而界面上没有任何一行字说明"这里留了东西"。
     pub artifacts: crate::ArtifactRecorder,
+    /// 结构化明细句柄：本任务要把**形状**交回（而不只是一句话）就写这里。
+    ///
+    /// 写进去的东西会并进 `RunRecord.details` —— 运行历史里唯一
+    /// "前端可直接渲染"的一格。`TaskOutcome` 那三档加一句 `summary`
+    /// 装不下的东西（兑换的 `status / plan / code / offset / order`）
+    /// 就是走这条。
+    ///
+    /// 与日志的分工：`ctx.info()` 是**给人读**的一句话，
+    /// `ctx.details()` 是**给程序读**的形状。
+    pub details: crate::DetailsRecorder,
 }
 
 impl TaskContext {
@@ -108,6 +120,27 @@ impl TaskContext {
             step,
             total,
             label: label.into(),
+        });
+    }
+
+    /// 自报一条**结构化**明细（给程序读，不是给人读）。
+    ///
+    /// 落点：运行结束时并进 `RunRecord.details`，前端从那里按字段渲染。
+    ///
+    /// # 两件事一起做，缺一不可
+    ///
+    /// ① 往账本里记 —— 这是**落历史**的那一份，`Runner` 收尾时取走；
+    /// ② 往事件流里发 —— 这样订阅了这次运行的界面**当场**就能收到，
+    ///    不必等运行结束再回头查历史。
+    ///
+    /// ⚠ 只做 ① 会让"跑的时候看不见、跑完才出现"；只做 ② 会让
+    /// 没订阅（或用轮询）的调用方**永远拿不到**，因为事件流是不重放的。
+    pub fn details(&self, payload: serde_json::Value) {
+        self.details.record(payload.clone());
+        self.sink.emit(mcloud_core::RunEvent::Details {
+            run_id: self.run_id,
+            payload,
+            at_ms: self.clock.now_ms(),
         });
     }
 }

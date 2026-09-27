@@ -196,6 +196,10 @@ impl Ctx {
                 mcloud_core::RunId(1),
                 mcloud_core::AccountId::new("19****01"),
             ),
+            details: mcloud_engine::DetailsRecorder::new(
+                mcloud_engine::DetailsLedger::new(),
+                mcloud_core::RunId(1),
+            ),
         }
     }
 }

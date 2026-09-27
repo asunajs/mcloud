@@ -69,7 +69,11 @@ struct Subscriber {
 }
 
 /// 一次拉取的结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// ⚠ `PartialEq` 而**不是** `Eq`：它裹着 [`Sequenced`]，后者带
+/// [`RunEvent::Details`]（`serde_json::Value` 只实现 `PartialEq`）。
+/// 理由与代价见 `RunEvent` 的说明。
+#[derive(Debug, Clone, PartialEq)]
 pub struct Delivery {
     pub events: Vec<Sequenced>,
     /// 本次（以及此前累计）丢了多少条。
@@ -328,6 +332,10 @@ impl EventSink for EventHub {
             } => {
                 tracing::debug!("进度 {step}/{total} {label}");
             }
+            // 结构化明细**不逐条打日志**：它可能很大（整份兑换结论），
+            // 而日志那一格是给人扫的。它真正的去处是 `RunRecord.details`
+            // —— 由 runner 累积后落历史，前端从那里读。
+            RunEvent::Details { .. } => {}
         }
         self.publish(event);
     }

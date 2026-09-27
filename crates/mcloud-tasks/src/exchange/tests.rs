@@ -2438,6 +2438,12 @@ fn task_ctx(http: Arc<dyn HttpClient>, clock: Arc<dyn Clock>) -> TaskContext {
             mcloud_core::RunId(1),
             AccountId::new("19****01"),
         ),
+        // 这一格测的是兑换**任务体**（它自报明细），所以必须给真的记录器 ——
+        // 给个假的就等于把"明细真的会落进记录"这件事测成一句空话。
+        details: mcloud_engine::DetailsRecorder::new(
+            mcloud_engine::DetailsLedger::new(),
+            mcloud_core::RunId(1),
+        ),
     }
 }
 

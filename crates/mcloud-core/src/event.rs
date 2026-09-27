@@ -33,7 +33,18 @@ impl LogLevel {
 }
 
 /// 运行事件。`tag` 决定 SSE 的 `event:` 名称。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # ⚠ 为什么这里**没有** `Eq`（而只有 `PartialEq`）
+///
+/// [`RunEvent::Details`] 带的是 `serde_json::Value`，而 `Value` 只实现
+/// `PartialEq`（浮点与数字比较不是等价关系）。原来这一族用的是 `Eq`，
+/// 加 `Details` 之后只能退到 `PartialEq` —— 传播到的
+/// [`Sequenced`] 与 `mcloud_app::Delivery` 一并退。
+///
+/// 退这一档的实际代价是零：本仓没有任何地方**依赖** `Eq`
+/// （没有把它塞进 `HashMap` 的键、没有 `dedup`、没有 `assert_eq` 的 `Eq` 约束），
+/// 而 `PartialEq` 足够撑住"事件相等"这件事的全部现有用法。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RunEvent {
     Started {
@@ -59,14 +70,46 @@ pub enum RunEvent {
         outcome: TaskOutcome,
         duration_ms: u64,
     },
+    /// 任务自报的一条**结构化**明细。
+    ///
+    /// # 与 [`RunEvent::Log`] 的分工
+    ///
+    /// `Log` 是**给人读**的一句话（进日志、进 `runs.message`）；
+    /// 本变体是**给程序读**的形状，由 `runner` 累积并在运行结束时
+    /// 并进 `RunRecord.details` —— 那是运行历史里唯一"前端可直接渲染"
+    /// 的一格（见 `RunRecord::details` 的说明）。
+    ///
+    /// # 为什么要走事件，而不是让任务直接写 `details`
+    ///
+    /// `details` 是**运行结束后**由 runner 组装的（它还要并进 `artifacts`
+    /// 那一格，见 `runner.rs` 的收尾段）。任务在跑的过程中拿不到那份记录，
+    /// 让它自己去写等于开一条绕过 runner 的旁路。走 `EventSink` 就不一样：
+    /// runner 全程通过 sink 观察任务，这条明细与日志、进度**同一条路**进来。
+    ///
+    /// # `payload` 的形状由**任务自己**定
+    ///
+    /// 这里刻意不定义结构：`details` 本来就是"每个任务说自己那一格"的地方
+    /// （`artifacts` 是云盘产物的那一格，兑换是 `exchange` 那一格）。
+    /// 收口在任务的公开类型上（例如 `ExchangeOutcome`），不在这里。
+    Details {
+        run_id: RunId,
+        payload: serde_json::Value,
+        at_ms: i64,
+    },
 }
 
 impl RunEvent {
     /// SSE `event:` 名称。
+    ///
+    /// ⚠ [`RunEvent::Details`] **刻意与日志共用 `log`**：它是一条结构化明细，
+    /// 不是给用户看的一次状态变化，为它单开一个 SSE `event:` 名会让
+    /// 「哪些事件要订阅」这件事多一档 —— 而前端不订阅它就会**静默漏掉**
+    /// （`EventSource` 只派发注册过的名字）。它随 `log` 一起到达，
+    /// 由 `runs.rs` 的日志路径忽略（`details` 走运行记录，不走日志）。
     pub fn event_name(&self) -> &'static str {
         match self {
             RunEvent::Started { .. } => "started",
-            RunEvent::Log { .. } => "log",
+            RunEvent::Log { .. } | RunEvent::Details { .. } => "log",
             RunEvent::Progress { .. } => "progress",
             RunEvent::Finished { .. } => "finished",
         }
@@ -76,6 +119,7 @@ impl RunEvent {
         match self {
             RunEvent::Started { run_id, .. }
             | RunEvent::Log { run_id, .. }
+            | RunEvent::Details { run_id, .. }
             | RunEvent::Progress { run_id, .. }
             | RunEvent::Finished { run_id, .. } => *run_id,
         }
@@ -97,7 +141,11 @@ impl RunEvent {
 /// 序号与事件**必须是同一个批次里定下来的**：序号由发布方分配。
 /// 若在写库时才重新计算，崩溃重放会给同一批事件算出新序号，
 /// 客户端就会看到重复的进度。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// ⚠ 这里是 `PartialEq` 而**不是** `Eq`：它裹着 [`RunEvent`]，而后者带
+/// [`RunEvent::Details`]（`serde_json::Value`，只实现 `PartialEq`）。
+/// 理由与代价见 `RunEvent` 的说明。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sequenced {
     pub seq: Seq,
     pub event: RunEvent,

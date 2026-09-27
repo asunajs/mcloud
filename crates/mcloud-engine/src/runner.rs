@@ -36,6 +36,11 @@ pub struct Runner {
     /// 一个进程一份：清理路径（界面上"待清理"那一栏、将来的收尾任务）
     /// 要能看到跑任务的那条路径记下的东西。
     artifacts: crate::SharedLedger,
+    /// run 内**结构化明细**账本：任务自报的、给程序读的形状。
+    ///
+    /// 与 `artifacts` 同一个套路（运行期间攒、收尾时取走），但语义不同：
+    /// 产物是**欠账**，明细只是**信息**。所以这里没有"防漏记"的防线。
+    details: crate::SharedDetails,
 }
 
 impl Runner {
@@ -56,6 +61,7 @@ impl Runner {
             inflight: Mutex::new(HashMap::new()),
             cancel: Arc::new(crate::cancel_registry::CancelRegistry::new()),
             artifacts: Arc::new(crate::ArtifactLedger::new()),
+            details: crate::DetailsLedger::new(),
         }
     }
 
@@ -223,6 +229,7 @@ impl Runner {
                 run_id,
                 account.id.clone(),
             ),
+            details: crate::DetailsRecorder::new(Arc::clone(&self.details), run_id),
         };
 
         let outcome = match task.run(&ctx, body).await {
@@ -287,10 +294,42 @@ impl Runner {
         self.cancel.release(run_id);
 
         let mut record = self.record(run_id, task_name, account, duration_ms, outcome);
-        // 只有在真有东西留下时才写 `details`：空清单写 `{}` 会让
-        // "没留东西"与"老数据没有这个字段"在历史里长得一样。
-        if !leftovers.is_empty() {
-            record.details = serde_json::json!({ "artifacts": leftovers });
+
+        // ── 并把两样收尾的东西落进 `details` ──────────────────────────────
+        //
+        // `details` 是"前端可直接渲染"的那一格，这里有两个来源：
+        //   - `artifacts`：**欠账**（还没清掉的网盘文件），非空才写；
+        //   - `details`：任务**自报**的结构化明细，按到达顺序累积。
+        //
+        // ⚠ 合并（而不是互相覆盖）：两者可以同时存在 —— 一个任务既留了
+        // 待清理文件、又交回一份形状，这是正常情形。
+        //
+        // ⚠ `artifacts` 那一格的**名字与形状不要动**：既有测试
+        // （`runner.rs` 里读 `details["artifacts"]` 的那两条）与前端都按它读。
+        //
+        // 自报明细统一落在 `details["reported"]`：
+        //   - 只有一条时**不裹数组**（`{"reported": {...}}`），多了一条才是数组；
+        //   - 任务**不选**这个键名 —— 让任务自己定键名，等于让"运行历史
+        //     长什么样"分散到 N 个任务里，读的人还得先知道是哪条任务。
+        //     固定一个键名，消费方按"我这次跑的什么任务"去解里面的形状。
+        let reported = self.details.take(run_id);
+        if !leftovers.is_empty() || !reported.is_empty() {
+            let mut details = serde_json::Map::new();
+            if !leftovers.is_empty() {
+                details.insert("artifacts".into(), serde_json::json!(leftovers));
+            }
+            if !reported.is_empty() {
+                // 单条时**不裹数组**：`{"reported": {...}}` 比
+                // `{"reported": [{...}]}` 好用得多，而"只自报一条"是绝大多数
+                // 任务的样子。多条时才是数组 —— 消费方两种都要能读。
+                let value = if reported.len() == 1 {
+                    reported.into_iter().next().expect("长度已判为 1")
+                } else {
+                    serde_json::Value::Array(reported)
+                };
+                details.insert("reported".into(), value);
+            }
+            record.details = serde_json::Value::Object(details);
         }
         if was_cancelled {
             record.status = RunStatus::Cancelled;
@@ -1196,6 +1235,70 @@ mod tests {
         }
     }
 
+    /// 自报一条结构化明细的任务。
+    struct ReportDetailsTask;
+
+    #[async_trait]
+    impl Task for ReportDetailsTask {
+        fn name(&self) -> &'static str {
+            "reports"
+        }
+        fn title(&self) -> &'static str {
+            "自报明细"
+        }
+        fn description(&self) -> &'static str {
+            "把一份形状交回 details"
+        }
+        async fn run(&self, ctx: &TaskContext, _b: &serde_json::Value) -> TaskResult {
+            ctx.details(serde_json::json!({
+                "status": "ordered",
+                "plan": "go",
+                "code": 0,
+            }));
+            Ok(TaskOutcome::success("兑到了"))
+        }
+    }
+
+    /// 自报**两条**明细的任务（多条要落成数组）。
+    struct ReportTwoDetailsTask;
+
+    #[async_trait]
+    impl Task for ReportTwoDetailsTask {
+        fn name(&self) -> &'static str {
+            "reports-two"
+        }
+        fn title(&self) -> &'static str {
+            "自报两条明细"
+        }
+        fn description(&self) -> &'static str {
+            "两条明细要落成数组"
+        }
+        async fn run(&self, ctx: &TaskContext, _b: &serde_json::Value) -> TaskResult {
+            ctx.details(serde_json::json!({ "n": 1 }));
+            ctx.details(serde_json::json!({ "n": 2 }));
+            Ok(TaskOutcome::success("两条"))
+        }
+    }
+
+    /// 既不报明细也不留产物的任务（收尾必须**不写** details）。
+    struct ReportNothingTask;
+
+    #[async_trait]
+    impl Task for ReportNothingTask {
+        fn name(&self) -> &'static str {
+            "reports-nothing"
+        }
+        fn title(&self) -> &'static str {
+            "什么都不报"
+        }
+        fn description(&self) -> &'static str {
+            "details 应保持 null"
+        }
+        async fn run(&self, _ctx: &TaskContext, _b: &serde_json::Value) -> TaskResult {
+            Ok(TaskOutcome::success("没留东西"))
+        }
+    }
+
     /// 写文件**并在链尾清掉**的任务（参考实现的形状）。
     struct CleanUpTask;
 
@@ -1400,5 +1503,91 @@ mod tests {
         );
         assert!(!rec.mark_cloud_file_removed("OTHER-F"));
         assert_eq!(ledger.count(RunId(1)), 1, "别人的账必须还在");
+    }
+
+    // ── 结构化明细（`RunEvent::Details` → `details.reported`）─────────────
+
+    /// 任务自报的明细必须落到 `RunRecord.details["reported"]`。
+    ///
+    /// 这条盯的是 route A 的**整条链**：`ctx.details()` → 账本 →
+    /// runner 收尾并进记录。断链的任一环都会让 `details` 里没有那一格，
+    /// 而路由正是从那里读兑换结论的。
+    #[tokio::test]
+    async fn reported_details_land_in_the_run_record() {
+        let (runner, _store, _sink) = build(vec![Arc::new(ReportDetailsTask)]);
+        let record = runner
+            .run("reports", &account("13800000000"), &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            record.details["reported"]["status"], "ordered",
+            "明细应落进 details.reported：{:?}",
+            record.details
+        );
+        assert_eq!(record.details["reported"]["code"], 0);
+        // 没留产物 ⇒ 不该凭空多出 `artifacts` 那一格
+        assert!(
+            record.details.get("artifacts").is_none(),
+            "没留产物就不该有 artifacts：{:?}",
+            record.details
+        );
+    }
+
+    /// 两条明细落成**数组**（一条时不裹数组，两条时是数组）。
+    #[tokio::test]
+    async fn two_details_become_an_array() {
+        let (runner, _store, _sink) = build(vec![Arc::new(ReportTwoDetailsTask)]);
+        let record = runner
+            .run(
+                "reports-two",
+                &account("13800000000"),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+
+        let arr = record.details["reported"]
+            .as_array()
+            .unwrap_or_else(|| panic!("两条应是数组：{:?}", record.details));
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["n"], 1, "按到达顺序");
+        assert_eq!(arr[1]["n"], 2);
+    }
+
+    /// 既不自报也不留产物 ⇒ `details` 必须仍是 `null`。
+    ///
+    /// 防的是反向失效：每次正常运行都写一个空 `{}`，
+    /// "没留东西"与"老数据没有这个字段"在历史里就长得一样了。
+    #[tokio::test]
+    async fn nothing_reported_keeps_details_null() {
+        let (runner, _store, _sink) = build(vec![Arc::new(ReportNothingTask)]);
+        let record = runner
+            .run(
+                "reports-nothing",
+                &account("13800000000"),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            record.details.is_null(),
+            "什么都没报就不该写 details：{:?}",
+            record.details
+        );
+    }
+
+    /// 明细账本收尾必须**释放**（与产物账本同一口径）。
+    #[tokio::test]
+    async fn details_ledger_is_released_after_each_run() {
+        let (runner, _store, _sink) = build(vec![Arc::new(ReportDetailsTask)]);
+        runner
+            .run("reports", &account("13800000000"), &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(
+            runner.details.take(RunId(1)).is_empty(),
+            "收尾已取走过，账本里不该还留着"
+        );
     }
 }

@@ -49,6 +49,10 @@ impl EventSink for BroadcastSink {
             } => {
                 tracing::debug!("进度 {step}/{total} {label}");
             }
+            // 结构化明细**不逐条打日志**：它可能很大（整份兑换结论），
+            // 而日志那一格是给人扫的。它真正的去处是 `RunRecord.details`
+            // —— 由 runner 累积后落历史，前端从那里读。
+            RunEvent::Details { .. } => {}
         }
 
         // 无订阅者时 send 返回 Err，属正常情况，忽略
