@@ -608,3 +608,121 @@ fn bare_numeric_result_passes_the_envelope() {
     // 而真正需要对象的解析函数会自己拒绝它
     assert!(parse_status(&env).is_err(), "infoV3 要对象，数字得报错");
 }
+
+// ══════════════════════════ backup-gift（独立主机）══════════════════════════
+
+/// ⚠ 它走的是**另一个主机**，不是 `m.mcloud.139.com`。
+#[test]
+fn backup_gift_endpoints_live_on_caiyun() {
+    for url in [BACKUP_GIFT_INFO, BACKUP_GIFT_RECEIVE] {
+        assert!(
+            url.starts_with("https://caiyun.feixin.10086.cn/market/backupgift/"),
+            "备份好礼不在 ycloud 那一族里：{url}"
+        );
+    }
+    // 与这一族其余端点**必须**不同主机
+    assert!(INFO_V3.starts_with("https://m.mcloud.139.com/ycloud/"));
+    assert_ne!(
+        BACKUP_GIFT_INFO.split('/').nth(2),
+        INFO_V3.split('/').nth(2),
+        "两者主机不同是刻意的，别顺手统一掉"
+    );
+}
+
+#[test]
+fn backup_gift_requests_shape() {
+    let info = backup_gift_info_request();
+    assert_eq!(info.url, BACKUP_GIFT_INFO);
+    assert!(info.body.is_none(), "状态查询是裸 GET");
+    // 与这一族一样带 activityid / appversion
+    assert!(info
+        .headers
+        .iter()
+        .any(|(k, v)| k == "activityid" && v == MARKET_NAME));
+
+    let recv = backup_gift_receive_request();
+    assert_eq!(recv.url, BACKUP_GIFT_RECEIVE);
+    // ⚠ GET 但是写 —— 这条断言防的是"哪天有人把它改成 POST"
+    assert_eq!(recv.method, "GET", "上游就是 GET（却会记账）");
+}
+
+/// 三态常量与旧项目 `switch (state)` 逐字一致。
+#[test]
+fn backup_gift_states_match_the_reference() {
+    assert_eq!(backup_gift_state::OFF, -1);
+    assert_eq!(backup_gift_state::CLAIMABLE, 0);
+    assert_eq!(backup_gift_state::CLAIMED, 1);
+}
+
+#[test]
+fn parses_backup_gift_info() {
+    let body = r#"{"code":0,"msg":"success","result":{"state":0,"curMonth":true}}"#;
+    let g = parse_backup_gift(&SignInEnvelope::parse(body).unwrap()).unwrap();
+    assert_eq!(g.state, 0);
+    assert!(g.cur_month);
+    assert!(g.claimable());
+    assert!(!g.no_gift_this_month());
+}
+
+/// `curMonth == false` 比 `state` **更靠前**：它一票否决。
+#[test]
+fn backup_gift_cur_month_vetoes_claimability() {
+    let body = r#"{"code":0,"msg":"success","result":{"state":0,"curMonth":false}}"#;
+    let g = parse_backup_gift(&SignInEnvelope::parse(body).unwrap()).unwrap();
+    assert!(g.no_gift_this_month());
+    assert!(!g.claimable(), "本月没有这份礼时不该可领");
+}
+
+/// 三态各自的可领性。
+#[test]
+fn backup_gift_claimability_by_state() {
+    let mk = |state: i64| {
+        let body =
+            format!(r#"{{"code":0,"msg":"success","result":{{"state":{state},"curMonth":true}}}}"#);
+        parse_backup_gift(&SignInEnvelope::parse(&body).unwrap()).unwrap()
+    };
+    assert!(mk(backup_gift_state::CLAIMABLE).claimable(), "0 = 可领");
+    assert!(!mk(backup_gift_state::OFF).claimable(), "-1 = 未开备份");
+    assert!(
+        !mk(backup_gift_state::CLAIMED).claimable(),
+        "1 = 本月已领过"
+    );
+}
+
+/// `state` 是**必填**（主判据），缺了要报错。
+#[test]
+fn backup_gift_requires_state() {
+    let body = r#"{"code":0,"msg":"success","result":{"curMonth":true}}"#;
+    let err = parse_backup_gift(&SignInEnvelope::parse(body).unwrap()).unwrap_err();
+    assert!(err.to_string().contains("state"), "实得：{err}");
+}
+
+/// `receive` 的 `result` 是**裸数字**，缺了也给 `None`（不判失败）。
+#[test]
+fn parses_backup_gift_receive_forms() {
+    // 裸数字
+    let a = parse_backup_gift_receive(
+        &SignInEnvelope::parse(r#"{"code":0,"msg":"success","result":1}"#).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(a.received, Some(1));
+
+    // 数字字符串
+    let b = parse_backup_gift_receive(
+        &SignInEnvelope::parse(r#"{"code":0,"msg":"success","result":"2"}"#).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(b.received, Some(2));
+
+    // 整个 result 缺失 ⇒ 不是失败（领取这个动作本身已经成功了）
+    let c =
+        parse_backup_gift_receive(&SignInEnvelope::parse(r#"{"code":0,"msg":"success"}"#).unwrap())
+            .unwrap();
+    assert_eq!(c.received, None);
+
+    // 非 0 码仍然是失败
+    assert!(parse_backup_gift_receive(
+        &SignInEnvelope::parse(r#"{"code":500,"msg":"系统繁忙"}"#).unwrap()
+    )
+    .is_err());
+}

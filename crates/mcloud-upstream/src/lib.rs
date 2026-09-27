@@ -14,6 +14,7 @@ pub mod auth;
 pub mod auth_refresh;
 pub mod client;
 pub mod endpoints;
+pub mod exchange;
 pub mod h5_client;
 pub mod live_consts;
 pub mod live_flower;

@@ -86,6 +86,27 @@ pub const PRIZE_RECORD: &str = "https://m.mcloud.139.com/ycloud/signin/public/re
 /// 豆的收支流水（审计线）。
 pub const CLOUD_RECORD_V2: &str = "https://m.mcloud.139.com/ycloud/signin/public/cloudRecordV2";
 
+/// 备份好礼的**状态**。
+///
+/// # ⚠ 主机与这一族其余接口**不同**
+///
+/// 它不在新 H5 的签到页里 —— 新 H5 里 `backupGift` 只出现一次，
+/// 是一个指向**独立活动页**的 `popLink`，所以它没有"新接口"可换，
+/// 沿用旧项目那条。
+///
+/// 换主机有实测依据：裸请求 `https://caiyun.feixin.10086.cn/market/backupgift/info`
+/// 回 `{"code":90001,"msg":"未登录"}` —— 与 `m.mcloud.139.com` 上的
+/// `record` / `liveRoomFeedback` **回同一个信封**，说明两者在同一道鉴权网关后面。
+///
+/// ⚠ 若哪天它回 `404` 而不是 `90001`，那是**换了主机**，别以为接口下线了。
+pub const BACKUP_GIFT_INFO: &str = "https://caiyun.feixin.10086.cn/market/backupgift/info";
+
+/// 领备份好礼。
+///
+/// 门槛**不在这里判**：先读 [`BACKUP_GIFT_INFO`] 的 `state`，
+/// 只有 `state == 0`（可领）才发这一条。
+pub const BACKUP_GIFT_RECEIVE: &str = "https://caiyun.feixin.10086.cn/market/backupgift/receive";
+
 // ══════════════════════════ 请求构造 ══════════════════════════
 
 /// 查询串值的百分号编码。
@@ -267,6 +288,92 @@ pub fn prize_record_request(
     h5(false, HttpRequest::get(url), "true")
 }
 
+/// `backupgift/info` 请求 —— 备份好礼的**状态**（只读）。
+///
+/// ⚠ 它走的是**另一个主机**（`caiyun.feixin.10086.cn`），
+/// 不在 `m.mcloud.139.com` 那一族里 —— 别照 [`info_v3_request`] 抄。
+pub fn backup_gift_info_request() -> HttpRequest {
+    h5(false, HttpRequest::get(BACKUP_GIFT_INFO), "true")
+}
+
+/// `backupgift/receive` 请求 —— **领**备份好礼。
+///
+/// 门槛在调用方判（先看 `state`）。见 [`BackupGift::claimable`]。
+pub fn backup_gift_receive_request() -> HttpRequest {
+    h5(false, HttpRequest::get(BACKUP_GIFT_RECEIVE), "true")
+}
+
+/// `backupgift/info` 的 `state` —— **三态**。
+///
+/// 逐字来自旧项目的 `switch (state)`：三个值都可能出现，
+/// 而"没开备份"与"本月已领过"要用**不同的话**说给用户听
+/// （一个要他动手去开，一个什么都不用做）。
+pub mod backup_gift_state {
+    /// **未开启备份** ⇒ 不领，提示去 App 开。
+    pub const OFF: i64 = -1;
+    /// 本月**已领过** ⇒ 不领。
+    pub const CLAIMED: i64 = 1;
+    /// **可领** ⇒ 发 `receive`。
+    pub const CLAIMABLE: i64 = 0;
+}
+
+/// `backupgift/info` 的解析结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupGift {
+    /// 主判据。**必填** —— 缺了它就无法回答"该不该领"。
+    pub state: i64,
+    /// 本月**有没有**备份好礼。
+    ///
+    /// 旧项目先判它：`if (!curMonth) { "无备份礼物可领"; return; }` ——
+    /// 即它比 `state` **更靠前**，`false` 时连 `state` 都不用看。
+    pub cur_month: bool,
+}
+
+impl BackupGift {
+    /// 本月没有备份礼 ⇒ 无论如何都不用往下走。
+    pub fn no_gift_this_month(&self) -> bool {
+        !self.cur_month
+    }
+
+    /// 可以领吗。
+    pub fn claimable(&self) -> bool {
+        self.cur_month && self.state == backup_gift_state::CLAIMABLE
+    }
+}
+
+/// 解析 `backupgift/info`。
+pub fn parse_backup_gift(env: &SignInEnvelope) -> Result<BackupGift> {
+    let r = env.ok_result("查询备份好礼状态")?;
+    let state = int_at(r, "state")
+        .ok_or_else(|| Error::Parse("backupgift/info 响应缺少 result.state（主判据）".into()))?;
+    Ok(BackupGift {
+        state,
+        cur_month: bool_at(r, "curMonth"),
+    })
+}
+
+/// `backupgift/receive` 的结果 —— 领到了多少。
+///
+/// ⚠ `result` 是**裸数字**（份数），不是对象；且可能整个缺失。
+/// 所以它是可选的：缺了**不判失败**（领取这个动作本身已经成功了）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BackupGiftReceive {
+    pub received: Option<i64>,
+}
+
+/// 解析 `backupgift/receive`。
+pub fn parse_backup_gift_receive(env: &SignInEnvelope) -> Result<BackupGiftReceive> {
+    env.ensure_ok("领取备份好礼")?;
+    Ok(BackupGiftReceive {
+        // 裸数字与对象两种形态都收（H5 只读一个数）。
+        received: env.result.as_ref().and_then(|r| match r {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => s.parse().ok(),
+            _ => int_at(r, "receive").or_else(|| int_at(r, "cloudCount")),
+        }),
+    })
+}
+
 /// `cloudRecordV2` 请求 —— **豆的收支流水**（审计线）。
 ///
 /// # `infoV3.total` 与它的关系
@@ -309,7 +416,13 @@ pub fn cloud_record_v2_request(
 /// `is_device_id` 为真时补 `isdeviceid: true` —— **只有标了它的接口才补**。
 /// 这一族里两条证据在 `receiveRevivalReward` 上打架，所以它是逐接口的入参，
 /// 不是一刀切。
-fn h5(is_device_id: bool, req: HttpRequest, show_loading: &str) -> HttpRequest {
+///
+/// # 为什么提升到 `pub(crate)`
+///
+/// 兑换那一族（`crate::exchange`）用的是**同一套 H5 头**（同一个 `activityid`、
+/// 同一个 `appversion`）。各写一遍的后果是两边各自漂移，而漂移的表现是
+/// "签到能用、兑换回 90001"这种最难查的组合。
+pub(crate) fn h5(is_device_id: bool, req: HttpRequest, show_loading: &str) -> HttpRequest {
     let req = req
         .header("Accept", "*/*")
         .header("activityid", MARKET_NAME)
