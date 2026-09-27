@@ -1,7 +1,7 @@
 //! 直播口令 → 小红花：**编排层**（`live-room` 任务）。
 //!
-//! 这一条链把两件事串起来：**收口令**（听弹幕 + 人工喂）与**投口令**
-//! （小红花六步链）。请求构造与响应判定全在 [`mcloud_upstream`] 的纯函数层
+//! 这一条链把两件事串起来：**获取口令**（听弹幕 + 人工喂）与**领取小红花**
+//! （六步链）。请求构造与响应判定全在 [`mcloud_upstream`] 的纯函数层
 //! （`live_flower` / `live_room` / `live_kouling` / `live_ws`），本模块只做
 //! **编排**：串步骤、判分支、把结论说成一句人话。
 //!
@@ -13,17 +13,15 @@
 //! [`LiveRoomParams::check`]（参数）。判定只有一份，两个产物（CLI / 服务端）
 //! 各自只负责"把用户的选择翻成参数、把结果翻成人话"。
 //!
-//! # 五条产品事实（不是提示文案，是判据）
+//! # 四条产品事实（不是提示文案，是判据）
 //!
 //! 1. **`codes` 不是可选项**：小红书那条口令没法自动化（那边无法鉴权），
 //!    必须由人工喂进来 —— 这就是为什么"听弹幕"永远拿不全两条。
 //! 2. **任何"历史口令"都是废值**：口令只在**本次直播**有效，上一场的不能用。
 //!    ⇒ 不保存口令、不跨场复用、**不拿已结束场次的弹幕当口令来源**。
-//! 3. **口令是全场通用**的：所有观众共用同一批，**不存在"消耗口令"这件事**。
-//!    ⇒ 本文件里不出现"消耗"这个概念（重试时要排除已投过的，理由见 [`RetryPlan`]）。
-//! 4. 每场 **2~3 条**是正常形状：别把"只收到 1 条"当成已收全，
+//! 3. 每场 **2~3 条**是正常形状：别把"只收到 1 条"当成已收全，
 //!    也别把"收到 3 条"当脏数据。
-//! 5. 弹幕里的口令**署名是谁都能用**：**不要**按"发信人是不是我"过滤。
+//! 4. 弹幕里的口令**署名是谁都能用**：**不要**按"发信人是不是我"过滤。
 //!
 //! # ⚠ 本仓铁律：禁止全链吞错
 //!
@@ -37,7 +35,7 @@
 //!
 //! | 部分 | 依据 |
 //! |---|---|
-//! | 四态结论、三种"没投"、进账 = ⑥−① | **照抄参考实现**（有实拍值支撑，见下） |
+//! | 四态结论、三种"没领"、进账 = ⑥−① | **照抄参考实现**（有实拍值支撑，见下） |
 //! | `200108` / `200112` / `200118` / `200110` 四分类 | 协议层已钉（**实拍/向量**） |
 //! | 埋点发 5 条 | 照抄参考实现，**实拍只证实其中 1 条**（见 [`JOURNALING_EVENTS`]） |
 //! | 只听第一间房间 | **刻意的取舍**，代价见 [`LiveRoomRun::run_account`] |
@@ -107,9 +105,7 @@ pub struct LiveRoomParams {
     pub codes: Vec<String>,
     /// 自动收集时听弹幕的时长（秒）。
     pub listen_seconds: u64,
-    /// "只听不投"：收完就结束，**一个口令都不投给上游**。
-    ///
-    /// ⚠ 措辞是"不投"，**不是"不消耗"** —— 口令全场通用，不存在消耗（事实 3）。
+    /// **获取口令但不领取**：收完就结束，一个口令都不拿去领。
     pub kouling_only: bool,
     /// "只用给定口令"：不开弹幕。它为真时 `codes` 必须非空。
     pub skip_kouling: bool,
@@ -121,11 +117,11 @@ pub struct LiveRoomParams {
 ///
 /// 三条规则本身只有一个答案，两个产物各写一遍必然漂移（一处放行、一处拒绝，
 /// 而"哪一处才是对的"没人能从那两份代码里读出来）。措辞则**必须**各写一遍：
-/// CLI 要说 `--kouling-only` 并退 2，服务端要说"只听不投"并回 400 ——
+/// CLI 要说 `--kouling-only` 并退 2，服务端要说"获取口令但不领取"并回 400 ——
 /// 把 flag 名塞进领域层会让界面上输出一句没有 flag 的话。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveRoomFault {
-    /// 「只听不投」与「只用给定口令」同时为真。
+    /// 「获取口令但不领取」与「只用给定口令」同时为真。
     ExclusiveSwitches,
     /// 关掉了唯一的口令来源，又没给手工口令。
     SkipWithoutCodes,
@@ -137,7 +133,7 @@ impl LiveRoomFault {
     /// 判据的中性描述（**不含 flag 名**，措辞由调用方自己写）。
     pub fn describe(self) -> &'static str {
         match self {
-            Self::ExclusiveSwitches => "「只听不投」与「只用给定口令」互斥",
+            Self::ExclusiveSwitches => "「获取口令但不领取」与「只用给定口令」互斥",
             Self::SkipWithoutCodes => "关掉了弹幕来源，却没有给手工口令",
             Self::ListenNotPositive => "听弹幕的时长必须是正数",
         }
@@ -154,7 +150,7 @@ impl LiveRoomParams {
     /// ```
     ///
     /// ⚠ 第三条**不看 `skip_kouling`**：时长非正在**任何**情况下都不是合法输入。
-    /// 把它写在 `skip_kouling` 后面会让"只听不投 + 0 秒"悄悄放行，
+    /// 把它写在 `skip_kouling` 后面会让"获取口令但不领取 + 0 秒"悄悄放行，
     /// 而那时 0 秒会被传下去、让那次 WS 与并行的 GET **一起**立刻超时，
     /// 表现成一句方向错的通知（"两个口令来源都失败了"）。
     pub fn check(&self) -> std::result::Result<(), LiveRoomFault> {
@@ -259,7 +255,7 @@ pub fn merge_kouling<S: AsRef<str>>(sources: &[S]) -> Vec<String> {
 ///
 /// 早先这里只拆 `\n \r , ， 、`，于是 `"口令甲 口令乙"` 会被当成**一条**口令
 /// 发上去 —— 服务端必然回 `200108 口令无效`，而用户看到的是
-/// "我明明填了两条，怎么只投了一条还说口令错"。
+/// "我明明填了两条，怎么只领了一条还说口令错"。
 ///
 /// 为什么会漏：WebUI 那边自己在 `api.ts` 里先按空格拆了一遍（作为"超集"），
 /// 于是**界面上看着是对的**；而 CLI 与 HTTP API 两条路都直接走本函数，
@@ -282,7 +278,7 @@ pub fn split_kouling(raw: &str) -> Vec<String> {
 ///
 /// - **没有无效口令就 `retry == false`**：一次完全正常的运行不该多听 60 秒；
 /// - **`exclude` 必须含第一轮"已经试过的"**（含**第一次就成功的**）——
-///   不排除已成功的话，第二轮会把同一批口令再投一遍，而**同一账号**对同一条
+///   不排除已成功的话，第二轮会把同一批口令再领一遍，而**同一账号**对同一条
 ///   **正确**口令的第二次请求会回 `200112`（已兑换）：它不是新结果，
 ///   却会污染 [`RedFlowerReport::draws`] / `invalid_codes` 的归因，
 ///   看起来像"口令坏了"。
@@ -298,10 +294,10 @@ pub fn retry_plan(first_batch: &[String], invalid_codes: &[String]) -> (bool, Ve
     (true, merge_kouling(&all))
 }
 
-/// 从重听结果里挑出**这次真正要投**的口令（纯函数）。
+/// 从重听结果里挑出**这次真正要领取**的口令（纯函数）。
 ///
 /// 判据是"既不在第一批里、也不在无效表里" —— 与 [`retry_plan`] 的排除表同一份
-/// 依据，但用途不同：那个决定"听的时候排除谁"，这个决定"投的时候投谁"。
+/// 依据，但用途不同：那个决定"听的时候排除谁"，这个决定"领的时候领谁"。
 pub fn pick_new_codes(
     retried: &[String],
     already_tried: &[String],
@@ -365,7 +361,7 @@ impl RedFlowerStep {
 /// 一个口令的抽取结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrawRecord {
-    /// 投出去的那条口令。
+    /// 拿去领取的那条口令。
     pub code: String,
     /// 上游的判定。
     pub outcome: RedFlowerDrawOutcome,
@@ -427,12 +423,12 @@ impl RedFlowerReport {
             .count()
     }
 
-    /// 投了几个口令。
+    /// 领了几个口令。
     pub fn attempted(&self) -> usize {
         self.draws.len()
     }
 
-    /// 这次到底投没投（`false` = 一个口令都没发出去）。
+    /// 这次到底领没领（`false` = 一个口令都没发出去）。
     pub fn attempted_any(&self) -> bool {
         !self.draws.is_empty()
     }
@@ -493,7 +489,7 @@ impl RedFlowerReport {
 
 /// 把第二轮的结果并进第一轮。
 ///
-/// ⚠ 余额取**第二轮**的终值（时间上更晚，也更接近"投完之后到底有多少"），
+/// ⚠ 余额取**第二轮**的终值（时间上更晚，也更接近"领完之后到底有多少"），
 /// 而起始余额保留第一轮的 —— **两次读数之差**才是"这两轮加起来进账多少"。
 pub fn merge_reports(first: &RedFlowerReport, second: &RedFlowerReport) -> RedFlowerReport {
     let mut merged = first.clone();
@@ -513,7 +509,7 @@ pub fn merge_reports(first: &RedFlowerReport, second: &RedFlowerReport) -> RedFl
         .extend(second.other_codes.iter().cloned());
     // ⚠ 过期口令**直接追加**即可，不需要去重：[`pick_new_codes`] 只挑"既不
     // 在第一批、也不在无效表"的口令，而过期口令**在第一批里** ⇒ 第二轮
-    // 根本不会重投它。
+    // 根本不会重领它。
     merged
         .expired_codes
         .extend(second.expired_codes.iter().cloned());
@@ -534,7 +530,7 @@ pub fn merge_reports(first: &RedFlowerReport, second: &RedFlowerReport) -> RedFl
 ///
 /// - **[`Self::next`] 不推进**：它返回"当前这一步该发什么"，推进只发生在
 ///   [`Self::feed`]。这样"请求构造失败"与"发出去失败了"不会各自偷偷推进一次
-///   —— 少投一个口令是**静默**的（余额会告诉你有问题，但不会告诉你是哪个）。
+///   —— 少领一个口令是**静默**的（余额会告诉你有问题，但不会告诉你是哪个）。
 ///   也正因为不推进，票过期时可以**原样再取一次这一步**。
 /// - **本层不 sleep、不取时钟**：重听一次的等待由调用方负责，
 ///   "要不要重听"由 [`retry_plan`] 回答（纯函数）。
@@ -550,8 +546,8 @@ pub struct RedFlowerSession {
 impl RedFlowerSession {
     /// 构造一次六步链。
     ///
-    /// `codes` 的顺序**有意义**（决定先投哪个口令）：**同一账号**对同一条
-    /// **正确**口令的第二次请求会回 `200112`（已兑换），所以"先投最新的那个"
+    /// `codes` 的顺序**有意义**（决定先领哪个口令）：**同一账号**对同一条
+    /// **正确**口令的第二次请求会回 `200112`（已兑换），所以"先领最新的那个"
     /// 能让日志里第一条就是最有信息量的。
     pub fn new(codes: Vec<String>) -> Self {
         Self {
@@ -573,7 +569,7 @@ impl RedFlowerSession {
         self.step
     }
 
-    /// 这次要投的口令（已去重）。
+    /// 这次要领取的口令（已去重）。
     pub fn codes(&self) -> &[String] {
         &self.codes
     }
@@ -735,7 +731,7 @@ pub struct SourceOutcome {
 ///
 /// 这条链一年里只有主播开播的那几小时才能真跑一次。把"听弹幕"直接写进任务里，
 /// 唯一能验证它的方式就是**等开播**；抽成接缝之后，整条编排链
-/// （门 → 收集 → 投 → 重听 → 结论）都能在单测里用一个假收集器走完。
+/// （门 → 获取 → 领取 → 重听 → 结论）都能在单测里用一个假收集器走完。
 ///
 /// ⚠ 它与 [`mcloud_upstream::live_ws_client`] 的关系：真实实现
 /// [`LiveKoulingCollector`] 就调那一层。本层**不碰网络**。
@@ -768,7 +764,7 @@ pub trait KoulingCollector: Send + Sync {
 ///
 /// # 合并顺序**固定**
 ///
-/// WS 在前、小红书在后。并发完成顺序是不确定的，而口令顺序决定先投哪一个。
+/// WS 在前、小红书在后。并发完成顺序是不确定的，而口令顺序决定先领哪一个。
 /// 顺序不定会让日志每次都不一样，也会让"同一个输入跑两遍结果不同"变成常态。
 #[derive(Default)]
 pub struct LiveKoulingCollector {
@@ -972,9 +968,9 @@ pub struct LiveRoomAccountResult {
     ///
     /// ⚠ 只存"有没有"，**不存那一串**：它是凭据，不该顺着进度与结果流进日志。
     pub has_jwt: bool,
-    /// 这次实际拿到并投出去的口令（`kouling_only` 时是收到的）。
+    /// 这次实际拿到并拿去领取的口令（`kouling_only` 时是收到的）。
     pub codes: Vec<String>,
-    /// 六步链的结论；`None` 表示**没投**（只听不投 / 门没开 / 一个口令都没收到）。
+    /// 六步链的结论；`None` 表示**没领**（获取口令但不领取 / 门没开 / 一个口令都没收到）。
     pub report: Option<RedFlowerReport>,
     /// 有没有触发过"重听一次"。
     pub retried: bool,
@@ -985,13 +981,13 @@ pub struct LiveRoomAccountResult {
 /// 四个结论状态 —— [`RedFlowerReport`] 的领域层映射。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunVerdict {
-    /// 没投（只听不投 / 门没开 / 一个口令都没收到）。
+    /// 没领（获取口令但不领取 / 门没开 / 一个口令都没收到）。
     Idle,
-    /// 投了、全部成功。
+    /// 领了、全部成功。
     AllSucceeded,
-    /// 投了、成了**一部分**。
+    /// 领了、成了**一部分**。
     PartialSuccess,
-    /// 投了、**一个都没成**。
+    /// 领了、**一个都没成**。
     NoneSucceeded,
 }
 
@@ -1000,12 +996,12 @@ impl LiveRoomAccountResult {
     ///
     /// | 情形 | 结论 |
     /// |---|---|
-    /// | **没投**（只听不投 / 门没开 / 一个口令都没收到） | **成功** |
-    /// | 投了、**一个都没成** | **失败** |
-    /// | 投了、成了**一部分** | **部分成功** |
-    /// | 投了、全成 | 成功 |
+    /// | **没领**（获取口令但不领取 / 门没开 / 一个口令都没收到） | **成功** |
+    /// | 领了、**一个都没成** | **失败** |
+    /// | 领了、成了**一部分** | **部分成功** |
+    /// | 领了、全成 | 成功 |
     ///
-    /// ⚠ 「没投 ⇒ 成功」的理由：「今天没开播」是**正常结果**（与签到里
+    /// ⚠ 「没领 ⇒ 成功」的理由：「今天没开播」是**正常结果**（与签到里
     /// "今天已经签过了"同一档），不是失败。但**失败**那一档不是"没跑到"，
     /// 是"目标没达成"，所以小结里必须带原因（无效 / 已失效 / 未分类），
     /// 不能只剩一个光秃秃的"失败"。
@@ -1030,36 +1026,36 @@ impl LiveRoomAccountResult {
         match self.verdict() {
             RunVerdict::Idle => TaskOutcome::success(self.idle_summary()),
             RunVerdict::NoneSucceeded => {
-                let report = self.report.as_ref().expect("没投就不会走到这一档");
+                let report = self.report.as_ref().expect("没领就不会走到这一档");
                 TaskOutcome::failed(format!("{}（一个口令都没成）", report.summary_line()))
             }
             RunVerdict::PartialSuccess => {
-                let report = self.report.as_ref().expect("没投就不会走到这一档");
+                let report = self.report.as_ref().expect("没领就不会走到这一档");
                 TaskOutcome::success(format!("{}（部分成功）", report.summary_line()))
             }
             RunVerdict::AllSucceeded => {
-                let report = self.report.as_ref().expect("没投就不会走到这一档");
+                let report = self.report.as_ref().expect("没领就不会走到这一档");
                 TaskOutcome::success(report.summary_line())
             }
         }
     }
 
-    /// 说清"为什么这一趟什么都没投"。
+    /// 说清"为什么这一趟什么都没领"。
     ///
-    /// # ⚠⚠ 三种"没投"必须**分开说**
+    /// # ⚠⚠ 三种"没领"必须**分开说**
     ///
     /// ```text
-    /// 只听不投              → "收到 N 个口令，本次只收不投"
+    /// 获取口令但不领取      → "收到 N 个口令，本次只获取不领取"
     /// 门没开 & live_count==0 → "今天没有直播，没有口令可收"     （下一步：等）
     /// 门没开 & live_count>0  → "有 N 间在播，但没有一间是「…」"  （下一步：别等了）
     /// 开了门但没收到        → "开了门但没收到口令"
     /// ```
     ///
-    /// ⚠ 混成一句"没有可投的口令"会让人去查**收集**那一步，
+    /// ⚠ 混成一句"没有可领的口令"会让人去查**收集**那一步，
     /// 而那一步根本没被走到过 —— 它们的下一步**完全不同**。
     pub fn idle_summary(&self) -> String {
         if self.params.kouling_only {
-            return format!("收到 {} 个口令，本次只收不投", self.codes.len());
+            return format!("收到 {} 个口令，本次只获取不领取", self.codes.len());
         }
         if !self.gate.active {
             if self.gate.live_count == 0 {
@@ -1132,7 +1128,7 @@ impl<'a> LiveRoomRun<'a> {
         }
     }
 
-    /// 跑**一个账号**：开门 → 收口令 → 投 → （必要时）重听再投。
+    /// 跑**一个账号**：开门 → 获取口令 → 领取 → （必要时）重听再领。
     ///
     /// # 返回的错误里带"崩在第几步"
     ///
@@ -1148,11 +1144,11 @@ impl<'a> LiveRoomRun<'a> {
     /// 1. **省两个请求**：`querySpecTokenV2` + `cmpassLoginByCmToken` 是纯开销
     ///    —— 手工 codes 已经够跑完六步链，门换来的 JWT 只用于房间发现与 WS，
     ///    而这两件事在"已有 codes"这一支**根本不会发生**。
-    /// 2. **避免门失败拖累投递**（这条才是关键的）：若先开门再看 codes，
-    ///    那么门那两枪偶发 5xx 会把一趟**本来能跑完**的投递整体拖黄。
+    /// 2. **避免门失败拖累领取**（这条才是关键的）：若先开门再看 codes，
+    ///    那么门那两枪偶发 5xx 会把一趟**本来能跑完**的领取整体拖黄。
     ///    用户给的口令是对的、六步链是好的，却因为"换个票失败了"一朵花没拿到
     ///    —— 归因方向全错（他会去查口令）。
-    /// 3. **与 [`RedFlowerTask`] 口径一致**：那一支就是"已经有口令、直接投"，
+    /// 3. **与 [`RedFlowerTask`] 口径一致**：那一支就是"已经有口令、直接领"，
     ///    它从来不开门。两者是同一条链的两个入口，不该在"要不要门"上分叉。
     ///
     /// ⚠ **代价必须说出来**：有 codes 时**收不到弹幕里的口令**（因为没开门）。
@@ -1198,7 +1194,7 @@ impl<'a> LiveRoomRun<'a> {
         // ── 有手工口令 ⇒ **跳过开门**（刻意的取舍，理由见函数头"要不要开门"）──
         //
         // 顺序很关键：这一段必须**在**开门之前。若先开门再看 codes，
-        // 那么"门那两枪偶发失败"会把一趟**本来能跑完**的投递整体拖黄 ——
+        // 那么"门那两枪偶发失败"会把一趟**本来能跑完**的领取整体拖黄 ——
         // 而手工 codes 根本不需要门（它们已经够跑完六步链了）。
         let manual = merge_kouling(&params.codes);
         if !manual.is_empty() {
@@ -1262,13 +1258,13 @@ impl<'a> LiveRoomRun<'a> {
             out.codes = collected.codes;
         }
 
-        // 没得投就结束（"没投"是**正常结果**，见 [`Self::verdict`]）。
+        // 没得领就结束（"没领"是**正常结果**，见 [`Self::verdict`]）。
         if params.kouling_only || out.codes.is_empty() {
             return Ok(out);
         }
 
-        ctx.progress(1, 3, "投口令");
-        ctx.info(format!("投 {} 个口令…", out.codes.len()));
+        ctx.progress(1, 3, "领取小红花");
+        ctx.info(format!("用 {} 个口令领取小红花…", out.codes.len()));
         let session = RedFlowerSession::new(out.codes.clone());
         let report = self.run_chain(ctx, session).await?;
 
@@ -1313,8 +1309,8 @@ impl<'a> LiveRoomRun<'a> {
                     let to_draw = pick_new_codes(&fresh, &out.codes, &report.invalid_codes);
                     out.report = Some(report.clone());
                     if !to_draw.is_empty() {
-                        ctx.info(format!("又收到 {} 个新口令，再投一轮…", to_draw.len()));
-                        ctx.progress(3, 3, "投新口令");
+                        ctx.info(format!("又收到 {} 个新口令，再领一轮…", to_draw.len()));
+                        ctx.progress(3, 3, "用新口令领取");
                         // 第二轮**沿用同一个会话**（口径："一轮任务一条 jwttoken"）。
                         let second = self
                             .run_chain(ctx, RedFlowerSession::new(to_draw.clone()))
@@ -1484,9 +1480,9 @@ impl<'a> LiveRoomRun<'a> {
 ///
 /// # ⚠ 它与 `red-flower` 的分工
 ///
-/// 两者是**同一条链**的两个入口：`live-room` 走完整的"开门 → 收口令 → 投"
-/// （含听弹幕），`red-flower` 是"我手上已经有口令、直接投"那一支。
-/// 分开登记的理由与签到族一样：日常要跑的是前者，而后者在调试/补投时更方便。
+/// 两者是**同一条链**的两个入口：`live-room` 走完整的"开门 → 获取口令 → 领取"
+/// （含听弹幕），`red-flower` 是"我手上已经有口令、直接领"那一支。
+/// 分开登记的理由与签到族一样：日常要跑的是前者，而后者在调试/补领时更方便。
 pub struct LiveRoomTask {
     /// 收集器（生产 = [`LiveKoulingCollector`]）。
     pub collector: Arc<dyn KoulingCollector>,
@@ -1518,7 +1514,7 @@ impl Task for LiveRoomTask {
     }
 
     fn description(&self) -> &'static str {
-        "听直播弹幕收集口令并在小红花活动里逐个投递（小红书那条口令需人工用 codes 传入）"
+        "听直播弹幕获取口令，并逐个领取小红花（小红书那条口令需人工用 codes 传入）"
     }
 
     fn params(&self) -> Vec<String> {
@@ -1541,7 +1537,7 @@ impl Task for LiveRoomTask {
         if let Err(fault) = params.check() {
             let wording = match fault {
                 LiveRoomFault::ExclusiveSwitches => {
-                    "koulingOnly 与 skipKouling 互斥：只听不投就不该再关掉弹幕来源"
+                    "koulingOnly 与 skipKouling 互斥：获取口令但不领取，就不该再关掉弹幕来源"
                 }
                 LiveRoomFault::SkipWithoutCodes => {
                     "skipKouling 关掉了唯一的口令来源，必须同时给 codes"
@@ -1587,7 +1583,7 @@ impl Task for LiveRoomTask {
     }
 }
 
-/// `red-flower`：**直接投**口令（不收集）。
+/// `red-flower`：**直接领取**（不获取口令）。
 ///
 /// # 它与 `live-room` 的关系
 ///
@@ -1624,11 +1620,11 @@ impl Task for RedFlowerTask {
     }
 
     fn title(&self) -> &'static str {
-        "投小红花口令"
+        "领取小红花"
     }
 
     fn description(&self) -> &'static str {
-        "把给定的口令逐个投进小红花活动（不收集弹幕；给的第一个口令决定先投哪条）"
+        "用给定的口令逐个领取小红花（不听弹幕；给的第一个口令决定先领哪条）"
     }
 
     fn params(&self) -> Vec<String> {
@@ -1659,7 +1655,7 @@ impl Task for RedFlowerTask {
         let dry_run = body.get("dryRun").and_then(Value::as_bool).unwrap_or(false);
         if dry_run {
             return Ok(TaskOutcome::success(format!(
-                "演练完成：将投 {} 个口令（{}）",
+                "演练完成：将用 {} 个口令领取小红花（{}）",
                 codes.len(),
                 codes.join("、")
             )));
@@ -1667,7 +1663,7 @@ impl Task for RedFlowerTask {
 
         // ⚠ 这一支**不需要门**（不收集）：`skip_kouling = true` 且 codes 非空
         // ⇒ `run_account` 里"需要收口令"那个条件不成立 ⇒ **一个门请求都不发**。
-        // 这正是 [`RedFlowerTask`] 的固有形状：口令已经有了，直接投。
+        // 这正是 [`RedFlowerTask`] 的固有形状：口令已经有了，直接领。
         let params = LiveRoomParams {
             codes,
             // 它不收集，时长只需是个正数即可过校验。

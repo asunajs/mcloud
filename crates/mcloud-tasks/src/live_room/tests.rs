@@ -56,7 +56,7 @@ impl Scripted {
             .count()
     }
 
-    /// 投出去的口令（从 `draw` 的 query 里取，已解码）。
+    /// 拿去领取的口令（从 `draw` 的 query 里取，已解码）。
     fn drawn_codes(&self) -> Vec<String> {
         self.requests()
             .iter()
@@ -66,7 +66,7 @@ impl Scripted {
     }
 }
 
-/// 极简的 `%XX` 解码（只为断言"投的是哪条口令"）。
+/// 极简的 `%XX` 解码（只为断言"领的是哪条口令"）。
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -566,7 +566,7 @@ fn open_gate_chain(rooms: serde_json::Value) -> Vec<String> {
     ]
 }
 
-/// 关掉重听那一支的参数（专测"投了之后"的结论）。
+/// 关掉重听那一支的参数（专测"领了之后"的结论）。
 fn no_retry_params(codes: &[&str]) -> LiveRoomParams {
     LiveRoomParams {
         codes: codes.iter().map(|s| s.to_string()).collect(),
@@ -688,7 +688,7 @@ fn retry_plan_has_no_retry_without_invalid_codes() {
 /// ⭐ 重听时的排除表 = 第一批 ∪ 无效表。
 ///
 /// ⚠ 关键：**第一次就成功的口令也必须进排除表** —— 不排除的话第二轮会把
-/// 同一批再投一遍，而同一账号对同一条**正确**口令的第二次请求回 `200112`，
+/// 同一批再领一遍，而同一账号对同一条**正确**口令的第二次请求回 `200112`，
 /// 会污染归因、看起来像"口令坏了"。
 ///
 /// ⚠⚠ 这个理由**不是**"口令会被消耗"（口令全场通用）。本测试的注释里也刻意
@@ -703,7 +703,7 @@ fn retry_plan_excludes_both_the_successful_and_the_invalid() {
     assert!(exclude.contains(&"无效乙".to_string()), "无效的要排除");
     assert!(
         exclude.contains(&"成功甲".to_string()),
-        "⭐ **第一次就成功的**也必须排除 —— 否则第二轮会重投它对，回 200112"
+        "⭐ **第一次就成功的**也必须排除 —— 否则第二轮会重领它对，回 200112"
     );
 }
 
@@ -715,13 +715,13 @@ fn pick_new_codes_filters_out_everything_already_tried() {
     let invalid: Vec<String> = vec!["无效乙".into()];
 
     let to_draw = pick_new_codes(&retried, &first, &invalid);
-    assert_eq!(to_draw, vec!["新丙".to_string()], "只该投真正的新口令");
+    assert_eq!(to_draw, vec!["新丙".to_string()], "只该领真正的新口令");
 }
 
-/// ⭐⭐ 重试路径端到端：无效口令进排除表、**成功的不进**、不重复投递。
+/// ⭐⭐ 重试路径端到端：无效口令进排除表、**成功的不进**、不重复领取。
 ///
-/// 第一轮投「甲（成功）+ 乙（200108）」；重听又听到「乙 + 丙」，
-/// 而排除表必须把乙挡住 ⇒ 第二轮**只投丙**。
+/// 第一轮领「甲（成功）+ 乙（200108）」；重听又听到「乙 + 丙」，
+/// 而排除表必须把乙挡住 ⇒ 第二轮**只领丙**。
 ///
 /// # ⚠ 这一趟必须**不用手工 codes**（改了）
 ///
@@ -741,11 +741,11 @@ async fn invalid_code_triggers_one_retry_and_never_redraws_tried_codes() {
     chain.push(code_body(200108, "口令无效")); // 乙无效
     chain.push(revival_body(0));
     chain.push(balance_body(15)); // 第一轮终值
-                                  // 第二轮（只投丙）
+                                  // 第二轮（只领丙）
     chain.extend(happy_chain(15, 18, Some(give_already()), &[draw_ok(3)], 0));
     let (c, http) = ctx_with(&chain);
 
-    // 第 1 次收集给「甲、乙」（首轮投这两个）；第 2 次（重听）给「乙、丙」。
+    // 第 1 次收集给「甲、乙」（首轮领这两个）；第 2 次（重听）给「乙、丙」。
     let collector = FakeCollector::new(&[&["甲", "乙"], &["乙", "丙"]]);
     // ⚠ 不给手工 codes：那一支会跳过开门，于是没有房间 ⇒ 重听根本不会发生。
     let params = LiveRoomParams {
@@ -773,17 +773,17 @@ async fn invalid_code_triggers_one_retry_and_never_redraws_tried_codes() {
         "无效的要排除：{exclude:?}"
     );
 
-    // ⭐ 投递序列：甲 → 乙 → 丙，**乙只投一次**（第二轮被排除表挡住）
+    // ⭐ 领取序列：甲 → 乙 → 丙，**乙只领一次**（第二轮被排除表挡住）
     let drawn = http.drawn_codes();
     assert_eq!(
         drawn,
         vec!["甲".to_string(), "乙".to_string(), "丙".to_string()],
-        "不重复投递已试过的"
+        "不重复领取已试过的"
     );
     assert_eq!(
         drawn.iter().filter(|c| *c == "乙").count(),
         1,
-        "无效口令只投一次"
+        "无效口令只领一次"
     );
 
     // 两轮合并：进账 = 第一轮起始 10 → 第二轮终值 18
@@ -923,7 +923,7 @@ fn draw_kinds_land_in_their_own_buckets() {
     );
 }
 
-/// ⭐ 投了、**一个都没成** ⇒ 结论必须是**失败**（不是"跳过"，也不是"成功"）。
+/// ⭐ 领了、**一个都没成** ⇒ 结论必须是**失败**（不是"跳过"，也不是"成功"）。
 #[tokio::test]
 async fn all_draws_failed_is_a_failed_outcome() {
     let (c, _http) = ctx_with(&happy_chain(
@@ -942,7 +942,7 @@ async fn all_draws_failed_is_a_failed_outcome() {
         .unwrap();
     assert_eq!(res.verdict(), RunVerdict::NoneSucceeded);
     let out = res.outcome();
-    assert!(out.is_failure(), "投了全败必须报失败：{out:?}");
+    assert!(out.is_failure(), "领了全败必须报失败：{out:?}");
     // 失败小结里必须带**原因**，不能只剩光秃秃的"失败"
     assert!(
         out.summary().contains("无效口令"),
@@ -951,7 +951,7 @@ async fn all_draws_failed_is_a_failed_outcome() {
     );
 }
 
-/// ⭐ 投了、**成了部分** ⇒ 部分成功（不是失败）。
+/// ⭐ 领了、**成了部分** ⇒ 部分成功（不是失败）。
 #[tokio::test]
 async fn partial_success_is_reported_as_partial() {
     let (c, _http) = ctx_with(&happy_chain(
@@ -1118,7 +1118,7 @@ async fn only_the_exact_anchor_nickname_opens_the_gate() {
     }
 }
 
-/// ⭐ 只听不投：收到了口令但**一个都不投**，且说明与另两种"没投"不同。
+/// ⭐ 获取口令但不领取：收到了口令但**一个都不拿去领**，且说明与另两种"没领"不同。
 #[tokio::test]
 async fn kouling_only_collects_but_never_draws() {
     let (c, http) = ctx_with(&open_gate_chain(serde_json::json!([room_entry(
@@ -1140,11 +1140,15 @@ async fn kouling_only_collects_but_never_draws() {
         .unwrap();
 
     assert_eq!(res.codes, vec!["口令甲".to_string(), "口令乙".to_string()]);
-    assert!(res.report.is_none(), "只听不投 ⇒ 没有报告");
-    assert_eq!(http.count_of("/liveRoomFeedback"), 0, "一个口令都不能投");
+    assert!(res.report.is_none(), "获取口令但不领取 ⇒ 没有报告");
+    assert_eq!(
+        http.count_of("/liveRoomFeedback"),
+        0,
+        "一个口令都不能拿去领"
+    );
     assert!(res.outcome().is_success());
     assert!(
-        res.outcome().summary().contains("本次只收不投"),
+        res.outcome().summary().contains("本次只获取不领取"),
         "实得：{}",
         res.outcome().summary()
     );
@@ -1156,7 +1160,7 @@ async fn kouling_only_collects_but_never_draws() {
     );
 }
 
-/// ⭐ 门开了但没收到口令 ⇒ **第三种**说法（不是"没直播"，也不是"只听不投"）。
+/// ⭐ 门开了但没收到口令 ⇒ **第三种**说法（不是"没直播"，也不是"获取口令但不领取"）。
 #[tokio::test]
 async fn opened_gate_with_no_codes_says_so() {
     let (c, http) = ctx_with(&open_gate_chain(serde_json::json!([room_entry(
@@ -1182,7 +1186,7 @@ async fn opened_gate_with_no_codes_says_so() {
     assert_eq!(
         res.idle_summary(),
         "开了门但没收到口令",
-        "这是第三种「没投」，措辞不能与另两种混"
+        "这是第三种「没领」，措辞不能与另两种混"
     );
 }
 
@@ -1193,7 +1197,7 @@ async fn multiple_live_rooms_produce_a_warning() {
         room_entry(147606, 1, "中国移动云盘"),
         room_entry(147608, 1, "中国移动云盘"),
     ]);
-    // 开门三枪 + 一轮完整的六步链（收集到的口令会被真的投出去）
+    // 开门三枪 + 一轮完整的六步链（收集到的口令会被真的拿去领）
     let mut chain = open_gate_chain(rooms);
     chain.extend(happy_chain(235, 245, Some(give_ok(0)), &[draw_ok(10)], 0));
     let (c, _http) = ctx_with(&chain);
@@ -1388,7 +1392,7 @@ fn params_check_covers_all_four_states() {
     let ok = no_retry_params(&["甲"]);
     assert_eq!(ok.check(), Ok(()));
 
-    // ② 互斥：只听不投 + 只用给定口令
+    // ② 互斥：获取口令但不领取 + 只用给定口令
     let excl = LiveRoomParams {
         codes: vec!["甲".into()],
         listen_seconds: 60,
@@ -1415,7 +1419,7 @@ fn params_check_covers_all_four_states() {
     };
     assert_eq!(zero.check(), Err(LiveRoomFault::ListenNotPositive));
 
-    // ⚠ 0 秒 + 只听不投 = **仍然非法**（第三条不看 skip_kouling / kouling_only）
+    // ⚠ 0 秒 + 获取口令但不领取 = **仍然非法**（第三条不看 skip_kouling / kouling_only）
     let zero_only = LiveRoomParams {
         codes: vec![],
         listen_seconds: 0,
@@ -1444,7 +1448,7 @@ async fn task_surfaces_invalid_params_as_an_error() {
     let (c, http) = Ctx::new(&[]);
     let task = LiveRoomTask::production();
 
-    // codes 非空但跳过了弹幕来源 + 只听不投 ⇒ 互斥
+    // codes 非空但跳过了弹幕来源 + 获取口令但不领取 ⇒ 互斥
     let body = serde_json::json!({
         "codes": "甲", "listenSeconds": 60,
         "koulingOnly": true, "skipKouling": true
@@ -1504,7 +1508,7 @@ async fn dry_run_sends_nothing() {
 
 // ══════════════════════════ 判据 7：六步链状态机 ══════════════════════════
 
-/// ⭐ `next` **不推进**状态 —— 同一份账重放不会漏投或重投。
+/// ⭐ `next` **不推进**状态 —— 同一份账重放不会漏领或重领。
 #[test]
 fn next_does_not_advance_the_state() {
     let s = RedFlowerSession::new(vec!["甲".into()]);
@@ -1587,7 +1591,7 @@ fn journaling_response_is_never_parsed() {
     );
 }
 
-/// ⭐ 口令为**空**时 ③ 之后直接跳 ⑤（不投任何口令，也不卡在 Draw）。
+/// ⭐ 口令为**空**时 ③ 之后直接跳 ⑤（不领任何口令，也不卡在 Draw）。
 #[test]
 fn empty_codes_skip_the_draw_step() {
     let mut s = RedFlowerSession::new(vec![]);
@@ -1747,7 +1751,7 @@ async fn red_flower_without_codes_is_a_config_error() {
     assert_eq!(http.count(), 0);
 }
 
-/// ⭐ `red-flower` 直接投：不发门那几枪，直接跑六步链。
+/// ⭐ `red-flower` 直接领取：不发门那几枪，直接跑六步链。
 #[tokio::test]
 async fn red_flower_draws_directly_without_the_gate() {
     let (c, http) = ctx_with(&happy_chain(235, 245, Some(give_ok(0)), &[draw_ok(10)], 0));
@@ -1829,9 +1833,9 @@ async fn retry_collection_failure_keeps_the_first_round() {
 
     assert!(res.retried, "触发过重听");
     let report = res.report.as_ref().expect("第一轮的结果必须保留");
-    assert_eq!(report.attempted(), 1, "第一轮投过 1 条");
+    assert_eq!(report.attempted(), 1, "第一轮领过 1 条");
     assert_eq!(report.invalid_codes, vec!["无效甲".to_string()]);
-    // 重听失败 ⇒ 但结论仍是"投了全败"（不是 Err）
+    // 重听失败 ⇒ 但结论仍是"领了全败"（不是 Err）
     assert_eq!(res.verdict(), RunVerdict::NoneSucceeded);
     let warns = c.sink.warns();
     assert!(
@@ -1847,7 +1851,7 @@ async fn retry_collection_failure_keeps_the_first_round() {
 /// # 这条测试存在的理由
 ///
 /// 顺序错了就看不出来：若实现写成"**先开门再看 codes**"，那么
-/// 门那两枪的偶发失败会把一趟**本来能跑完**的投递整体拖黄 ——
+/// 门那两枪的偶发失败会把一趟**本来能跑完**的领取整体拖黄 ——
 /// 而用户给的口令是对的、六步链是好的，他却一朵花没拿到，
 /// 归因方向会指向"口令错了"（**完全错**）。
 ///
@@ -1874,7 +1878,7 @@ async fn manual_codes_skip_the_gate_entirely() {
     assert_eq!(
         http.count_of("/querySpecTokenV2"),
         0,
-        "有 codes 时不该换 SSO（省两个请求 + 不让门失败拖累投递）"
+        "有 codes 时不该换 SSO（省两个请求 + 不让门失败拖累领取）"
     );
     assert_eq!(
         http.count_of("/cmpassLoginByCmToken"),
@@ -1896,7 +1900,7 @@ async fn manual_codes_skip_the_gate_entirely() {
     assert_eq!(collector.call_count(), 0, "手工 codes ⇒ 首轮不收集");
 }
 
-/// ⭐ 手工 codes 且**门那一族拿到的响应是坏的**时，投递照常成功。
+/// ⭐ 手工 codes 且**门那一族拿到的响应是坏的**时，领取照常成功。
 ///
 /// 上一条的**强化版**：让门若真被打出去，拿到的会是明确的失败响应
 /// （六步链的尾巴 `balance_body` ⇒ 解析必然失败），
@@ -1935,7 +1939,7 @@ fn succeeded(flower_num: i64) -> RedFlowerDrawOutcome {
 
 // ══════════════════════════ 判据 13：🌸 开门那条链（G2 的核心）══════════════════════════
 
-/// ⭐⭐⭐ **完整链：开门 → 自动收到口令 → 投出去 → 进账。**
+/// ⭐⭐⭐ **完整链：开门 → 自动收到口令 → 领取 → 进账。**
 ///
 /// 这是任务的原话要求「**小红花自动获取口令，并使用口令领取小红花**」，
 /// 也是 G2 存在的理由。用户**不填任何 codes**，整条链必须自己跑通：
@@ -1950,7 +1954,7 @@ fn succeeded(flower_num: i64) -> RedFlowerDrawOutcome {
 ///
 /// ⚠ WS 那一环用 `FakeCollector`（`KoulingCollector` trait 就是为此留的接缝）——
 /// 真 WS **结构性抓不到**（见模块头证据等级），所以这里只验**编排**：
-/// "门开了之后，收集到的口令会被真的投出去"。
+/// "门开了之后，收集到的口令会被真的拿去领"。
 #[tokio::test]
 async fn auto_chain_opens_gate_collects_kouling_then_earns_flowers() {
     // 门的前四枪 + 六步链
@@ -1979,7 +1983,7 @@ async fn auto_chain_opens_gate_collects_kouling_then_earns_flowers() {
     assert_eq!(collector.call_count(), 1, "开成门之后去收集了一次");
     assert_eq!(res.codes, vec!["自动收集到的口令".to_string()]);
 
-    // ── ③ 收来的口令**真的投出去了**，且进了账 ──────────────────────────
+    // ── ③ 收来的口令**真的拿去领了**，且进了账 ──────────────────────────
     let report = res.report.as_ref().expect("应当有报告");
     assert_eq!(report.balance_before.flower_cnt, 235);
     assert_eq!(report.balance_after.flower_cnt, 245);
@@ -2151,7 +2155,7 @@ async fn gate_failure_does_not_fall_back_to_running_the_chain() {
         0,
         "更不该打小红花六步链"
     );
-    assert_eq!(http.count_of("/redFlower/draw"), 0, "一个口令都不该投");
+    assert_eq!(http.count_of("/redFlower/draw"), 0, "一个口令都不该拿去领");
 }
 
 /// ⭐⭐ **两套凭据绝不能混用**：直播侧 JWT 只在 `/cmlive`，云盘侧票只在 `/ycloud`。
@@ -2316,7 +2320,7 @@ async fn the_gate_jwt_is_handed_to_the_collector_for_real() {
     assert!(!seen[0].is_empty(), "绝不能是空串（那会变成一句'连不上'）");
 }
 
-/// ⭐ 只开门**不收集**（`kouling_only`）时，门照样开、口令照样收，但一枪不投。
+/// ⭐ 只开门**不领取**（`kouling_only`）时，门照样开、口令照样收，但一枪不领。
 #[tokio::test]
 async fn auto_chain_kouling_only_opens_the_gate_and_stops() {
     let rooms = serde_json::json!([room_entry(147606, 1, "中国移动云盘")]);
@@ -2336,8 +2340,8 @@ async fn auto_chain_kouling_only_opens_the_gate_and_stops() {
 
     assert!(res.has_jwt, "门开成了");
     assert_eq!(res.codes, vec!["口令甲".to_string(), "口令乙".to_string()]);
-    assert!(res.report.is_none(), "只听不投");
-    assert_eq!(http.count_of("/liveRoomFeedback"), 0, "一个口令都不投");
+    assert!(res.report.is_none(), "获取口令但不领取");
+    assert_eq!(http.count_of("/liveRoomFeedback"), 0, "一个口令都不领");
     assert_eq!(http.count_of("/querySpecTokenV2"), 1, "门只开一次");
 }
 
@@ -2579,7 +2583,7 @@ impl mcloud_core::UserStore for NoStore {
 /// 空白（含**全角空格**）必须算分隔符 —— 这是**修过的一个真缺陷**。
 ///
 /// 早先只拆 `\n \r , ， 、`，于是 `"口令甲 口令乙"` 被当成**一条**口令发上去，
-/// 服务端必然回 `200108 口令无效`；用户看到的是"我填了两条，怎么只投一条还说口令错"。
+/// 服务端必然回 `200108 口令无效`；用户看到的是"我填了两条，怎么只领一条还说口令错"。
 ///
 /// 漏掉它是因为 WebUI 在 `api.ts` 里自己先按空格拆了一遍（界面上看着是对的），
 /// 而 CLI 与 HTTP API 两条路直接走本函数、没有那层补偿 ——
@@ -2605,7 +2609,7 @@ fn whitespace_is_a_separator_including_ideographic_space() {
 /// 拆分**不拆口令内部**的字符：只有分隔符才拆。
 ///
 /// 防的是"顺手按长度或按标点乱拆" —— 口令本身可能含数字、字母与标点，
-/// 拆错了会投出一条不存在的口令（`200108`）。
+/// 拆错了会拿去领一条不存在的口令（`200108`）。
 #[test]
 fn splitting_does_not_touch_characters_inside_a_code() {
     assert_eq!(split_kouling("一键9图出圈"), vec!["一键9图出圈"]);

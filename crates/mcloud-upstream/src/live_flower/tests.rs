@@ -450,7 +450,7 @@ fn already_drawn_is_neither_a_failure_nor_an_invalid_kouling() {
 /// 重听只会再拿一次 `200118`。所以 `rejected_kouling()` 必须是 **false**。
 ///
 /// ⚠ 它与 `200108` 的差别是**实拍钉住**的：同账号、同样"直播已关"，
-/// 投**真但已过期**的口令 ⇒ `200118`；投**乱码 / 不存在的口令** ⇒ `200108`
+/// 用**真但已过期**的口令去领 ⇒ `200118`；用**乱码 / 不存在的口令** ⇒ `200108`
 /// ⇒ 它是**口令级**的码（"我认识它、它失效了"），不是场次级。
 #[test]
 fn expired_kouling_is_distinct_from_invalid_kouling() {

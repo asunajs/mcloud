@@ -10,10 +10,10 @@
  *    所以"手工口令"这一栏是**必需入口**，不是"可选补充"。页面把这句话写在
  *    输入框正下方，而不是塞进折叠说明里 —— 它是用户理解"为什么我还要手打"
  *    的唯一来源。
- * 2. **"没投"不是失败。** 这条链最常见的结局就是"今天没开播"，
+ * 2. **"没领"不是失败。** 这条链最常见的结局就是"今天没开播"，
  *    与签到里"今天已经签过了"同一档。所以结果区分**四态**，
- *    其中 `idle` 用中性色，**不染红**；且三种"没投"的原因**分开写**
- *    （今天没有直播 / 有 N 间在播但没有一间是那个主播 / 只听不投），
+ *    其中 `idle` 用中性色，**不染红**；且三种"没领"的原因**分开写**
+ *    （今天没有直播 / 有 N 间在播但没有一间是那个主播 / 获取口令但不领取），
  *    因为它们的下一步完全不同。
  * 3. **「口令已失效（本场已结束）」与「无效口令」排查方向完全不同。**
  *    前者是"口令对、但直播结束了"，后者是"口令不认识（多半抄错了）"。
@@ -22,7 +22,7 @@
  * # 与 `tasks-page` 一致的交互契约
  *
  * 提交期间**只禁用提交按钮**，页面其余部分照常可操作；并且明确告诉用户
- * 可以关掉页面 —— 任务在后端继续跑完（口令投出去的那些不会撤回）。
+ * 可以关掉页面 —— 任务在后端继续跑完（已经领到的不会撤回）。
  */
 
 import { onMounted, onUnmounted, ref } from 'vue'
@@ -108,7 +108,7 @@ export const LiveRoomPage = () => {
       task.value = caps.tasks.find((t) => t.name === LIVE_ROOM_TASK) ?? null
       accounts.value = accts
       // 只有一个账号时**预选**它：少一次点击，而且"就是那个号"没有歧义。
-      // 多个账号时不猜 —— 猜错就是拿另一个号跑了一遍真任务（会真的投口令）。
+      // 多个账号时不猜 —— 猜错就是拿另一个号跑了一遍真任务（会真的去领）。
       if (accts.length === 1 && !account.value) {
         account.value = accts[0].id
       }
@@ -139,8 +139,8 @@ export const LiveRoomPage = () => {
     if (koulingOnly.value && skipKouling.value) {
       return {
         field: 'switches',
-        // 后端原文：`koulingOnly 与 skipKouling 互斥：只听不投就不该再关掉弹幕来源`
-        message: '「只听不投」与「只用给定口令」互斥，两者不能同时打开。',
+        // 后端原文：`koulingOnly 与 skipKouling 互斥：获取口令但不领取，就不该再关掉弹幕来源`
+        message: '「获取口令但不领取」与「只用给定口令」互斥，两者不能同时打开。',
       }
     }
     if (skipKouling.value && codeList().length === 0) {
@@ -200,7 +200,7 @@ export const LiveRoomPage = () => {
    *
    * 中止是**协作式**的：后端只置标志，任务在安全点自己退出。
    * 所以这里不立刻改成"已停止"，而是显示"正在中止"，等真正的 finished 到达
-   * 才收尾 —— 否则界面说停了、而任务还在投口令。
+   * 才收尾 —— 否则界面说停了、而任务还在领。
    */
   const cancel = async () => {
     const id = currentRunId.value
@@ -248,7 +248,7 @@ export const LiveRoomPage = () => {
           push(
             view.kind === 'failed' ? 'error' : 'info',
             `结束（${ev.duration_ms}ms）：${
-              view.kind === 'idle' ? `没投 —— ${view.text}` : view.text
+              view.kind === 'idle' ? `没领 —— ${view.text}` : view.text
             }`,
           )
         } catch (e) {
@@ -367,8 +367,7 @@ export const LiveRoomPage = () => {
   const intro = () => (
     <p class="text-sm leading-6 opacity-70">
       进直播间收口令、再把口令换成小红花。这条链只在
-      <b class="font-medium">主播开播的那一段时间</b>里有用；投口令是
-      <b class="font-medium">写操作</b>（口令全场通用，投过也不影响别人）。
+      <b class="font-medium">主播开播的那一段时间</b>里有用。
     </p>
   )
 
@@ -488,7 +487,7 @@ export const LiveRoomPage = () => {
    */
   const switchesField = () => (
     <fieldset class="fieldset">
-      <legend class="fieldset-legend">投不投</legend>
+      <legend class="fieldset-legend">领不领</legend>
       <div class="flex flex-col gap-2">
         <label class="flex min-h-11 cursor-pointer items-center gap-2">
           <input
@@ -502,7 +501,7 @@ export const LiveRoomPage = () => {
               revalidate()
             }}
           />
-          <span class="text-sm">只听不投（只收口令并打印，一个口令都不投给上游）</span>
+          <span class="text-sm">获取口令但不领取（只获取口令并打印，不拿去领小红花）</span>
         </label>
         <label class="flex min-h-11 cursor-pointer items-center gap-2">
           <input
@@ -519,8 +518,8 @@ export const LiveRoomPage = () => {
         </label>
       </div>
       <p class="text-xs leading-5 opacity-60">
-        两者<b class="font-medium">互斥</b>：只听不投就不该再关掉弹幕来源。
-        一个都不开 = 默认行为（用弹幕自动收集，并把手里的口令一起投）。
+        两者<b class="font-medium">互斥</b>：都不领了，就不该再关掉弹幕来源。
+        一个都不开 = 默认行为（用弹幕自动获取口令，并连同手里的口令一起去领）。
       </p>
       {validation.value?.field === 'switches' ? (
         <p class="text-xs leading-5 text-error">{validation.value.message}</p>
@@ -549,8 +548,7 @@ export const LiveRoomPage = () => {
             </span>
           ) : (
             <span class="text-xs opacity-70">
-              点下去会真的投口令：口令全场通用，只有<b class="font-medium">同一个号</b>
-              重复投同一条才会回「已兑换」。
+              点下去会真的去领小红花。
             </span>
           )}
           <span class="flex items-center gap-2">
@@ -592,7 +590,7 @@ export const LiveRoomPage = () => {
    */
   const RESULT_TONE: Record<LiveRoomRunView['kind'], { card: string; badge: string; label: string }> =
     {
-      idle: { card: 'alert-soft', badge: 'badge-soft', label: '没投' },
+      idle: { card: 'alert-soft', badge: 'badge-soft', label: '没领' },
       success: { card: 'alert-soft alert-success', badge: 'badge-soft badge-success', label: '成功' },
       partial: { card: 'alert-soft alert-warning', badge: 'badge-soft badge-warning', label: '部分成功' },
       failed: { card: 'alert-soft alert-error', badge: 'badge-soft badge-error', label: '失败' },
@@ -621,7 +619,7 @@ export const LiveRoomPage = () => {
         </div>
       </div>
       <div class="stat">
-        <div class="stat-title">投出去的口令</div>
+        <div class="stat-title">拿去领取的口令</div>
         <div class="stat-value text-2xl">{view.attempted}</div>
         <div class="stat-desc">
           成功 {view.succeeded.length} · 已兑换 {view.redeemed.length} · 已失效{' '}
@@ -695,8 +693,7 @@ export const LiveRoomPage = () => {
         {view.redeemed.length > 0 ? group(
           '已兑换',
           <span>
-            同一个号把同一条口令又投了一次。这是它自己已经用过了，不是出错 ——
-            口令是全场通用的，不同账号各投一次都会成功。
+            这个号已经用这条口令领过了，不是出错。
           </span>,
           'badge-soft',
           view.redeemed,
@@ -740,7 +737,7 @@ export const LiveRoomPage = () => {
         view.invalid.length === 0 &&
         view.other.length === 0 ? (
           <p class="text-sm opacity-70">
-            这一趟没有投任何口令 —— 所以下面是空的。原因见上面那条结论。
+            这一趟没有拿去领取的口令 —— 所以下面是空的。原因见上面那条结论。
           </p>
         ) : null}
       </div>
@@ -748,10 +745,10 @@ export const LiveRoomPage = () => {
   )
 
   /**
-   * "没投"的那三条路。
+   * "没领"的那三条路。
    *
-   * ⚠ 措辞**逐条不同**，来自后端 `idle_summary()`：三种"没投"的下一步
-   * 完全不一样（等 / 别等 / 本来就没打算投）。混成一句"没有可投的口令"
+   * ⚠ 措辞**逐条不同**，来自后端 `idle_summary()`：三种"没领"的下一步
+   * 完全不一样（等 / 别等 / 本来就没打算领）。混成一句"没有可领的口令"
    * 会让人去查**收集**那一步，而那一步根本没被走到过。
    */
   const idleNote = (reason: LiveRoomIdleReason) => (

@@ -656,7 +656,7 @@ export interface LiveRoomParams {
   codes: string[]
   /** 自动收集时听弹幕的时长（秒）。**必须 > 0**。 */
   listenSeconds: number
-  /** 只听不投。 */
+  /** 获取口令但不领取。 */
   koulingOnly: boolean
   /** 只用给定口令（不开弹幕）。为真时 `codes` 必须非空。 */
   skipKouling: boolean
@@ -671,8 +671,8 @@ export interface LiveRoomParams {
  * "多条用**空格**、换行或逗号分隔"，所以前端**多**拆一个空白。
  *
  * 这不是口径漂移，而是**故意的**：把 `"A B"` 当成一条口令发下去，
- * 后端会原样拿它去投 —— 它必然回 `200108 无效口令`，而用户看到的是
- * "我明明填了两条，怎么只投了一条、还说无效"。前端先拆开，
+ * 后端会原样拿它去领 —— 它必然回 `200108 无效口令`，而用户看到的是
+ * "我明明填了两条，怎么只领了一条、还说无效"。前端先拆开，
  * 后端拿到的就是两条正常口令。
  *
  * 反过来（后端拆得比前端多）才是危险的，而那种情况不存在。
@@ -714,7 +714,7 @@ export type LiveRoomDrawKind =
   | 'invalid'
   | 'other'
 
-/** 逐口令的一次投递记录。 */
+/** 逐口令的一次领取记录。 */
 export interface LiveRoomDrawRecord {
   code: string
   /** 上游的判定类别。见 [`LiveRoomDrawKind`]。 */
@@ -735,13 +735,13 @@ export interface LiveRoomReport {
   invalidCodes?: string[]
   expiredCodes?: string[]
   otherCodes?: string[]
-  /** 这一趟实际投出去的口令（保序）。 */
+  /** 这一趟实际拿去领取的口令（保序）。 */
   codes?: string[]
 }
 
-/** 全部"没投"的原因 —— 不同原因**下一步完全不同**，所以是枚举而不是布尔。 */
+/** 全部"没领"的原因 —— 不同原因**下一步完全不同**，所以是枚举而不是布尔。 */
 export type LiveRoomIdleReason =
-  /** 只听不投：收完就结束。 */
+  /** 获取口令但不领取：收完就结束。 */
   | 'kouling-only'
   /** 今天没有直播（一间都没在播）。 */
   | 'no-live'
@@ -749,28 +749,28 @@ export type LiveRoomIdleReason =
   | 'other-anchor-live'
   /** 门开了但没收到口令。 */
   | 'no-codes'
-  /** 说不清（既没有投递记录，也没有可判别的措辞）。 */
+  /** 说不清（既没有领取记录，也没有可判别的措辞）。 */
   | 'unknown'
 
 /**
  * 读一趟的结果。
  *
- * ⚠⚠ **"没投"不是失败**。直播这条链最常见的结局恰恰是"今天没开播"，
+ * ⚠⚠ **"没领"不是失败**。直播这条链最常见的结局恰恰是"今天没开播"，
  * 把它染红等于让用户每天看一次假警 —— 与签到里"今天已经签过了"同一档。
  * 所以这里把 `idle` 单独归一类，颜色由页面查表，不在类型里定。
  */
 export interface LiveRoomRunView {
   /**
    * 结论：
-   * - `idle`     没投（门没开 / 只听不投 / 没收到口令）—— **正常**；
-   * - `success`  投了且全成；
-   * - `partial`  投了、成了一部分；
-   * - `failed`   投了、一个都没成。
+   * - `idle`     没领（门没开 / 获取口令但不领取 / 没收到口令）—— **正常**；
+   * - `success`  领了且全成；
+   * - `partial`  领了、成了一部分；
+   * - `failed`   领了、一个都没成。
    */
   kind: 'idle' | 'success' | 'partial' | 'failed'
   /** 一句人话（后端原文或本地合成）。 */
   text: string
-  /** `idle` 时"为什么没投"；其余为 `null`。 */
+  /** `idle` 时"为什么没领"；其余为 `null`。 */
   idle: LiveRoomIdleReason | null
   /** 本次进账几朵；读不到时 `null`（**不是 0** —— 0 是一句断言）。 */
   gained: number | null
@@ -783,7 +783,7 @@ export interface LiveRoomRunView {
   expired: LiveRoomDrawRecord[]
   invalid: LiveRoomDrawRecord[]
   other: LiveRoomDrawRecord[]
-  /** 实际投出去的口令数。 */
+  /** 实际拿去领取的口令数。 */
   attempted: number
 }
 
@@ -802,7 +802,7 @@ const GAINED_IN_TEXT = /进账\s*(-?\d+)/
 /** "成功 1/2" 那一格 —— 只取**分子**（成了几条）。 */
 const SUCCESS_IN_TEXT = /成功\s*(\d+)\s*\/\s*\d+/
 
-/** "成功 1/2" 那一格 —— 只取**分母**（一共投了几条）。 */
+/** "成功 1/2" 那一格 —— 只取**分母**（一共领了几条）。 */
 const DRAWN_IN_TEXT = /成功\s*\d+\s*\/\s*(\d+)/
 
 /** 后端 `notes_suffix` 里那三类口令标签 —— **原样**，用于在文本里定位。 */
@@ -852,7 +852,7 @@ const codesAfterLabel = (text: string, label: string): string[] => {
  * # 为什么判据**有一部分**落在文本上
  *
  * 后端今天只把结论压成一句话（`RedFlowerReport::summary_line()`），
- * 结构化字段还没进 `details`。要界面上做到"四类口令分开显示、没投不染红"，
+ * 结构化字段还没进 `details`。要界面上做到"四类口令分开显示、没领不染红"，
  * 就只能先读那句话 —— 而这**不是猜措辞**：那几句是后端写死的模板
  * （`无效口令 …` / `口令已失效（本场已结束）…` / `未分类口令 …` / `进账 N`），
  * 后端的注释里也明确说了它们是**用户可见的**。
@@ -873,7 +873,7 @@ export function toLiveRoomRunView(
   // 这里抛错的**代价特别大**：`onEvent` 的 `finished` 分支在 `finish()` 之前
   // 就断了，于是 `running` 永远为真 —— 页面**永久停在"执行中"**、
   // 日志里没有任何终局行、按钮也不再恢复。用户唯一的出路是刷新页面。
-  // 所以兜底成空串，让这一趟至少能正常收尾（结论退化成"这一趟没有投出口令"）。
+  // 所以兜底成空串，让这一趟至少能正常收尾（结论退化成"这一趟没有拿去领取的口令"）。
   const text = o ? (outcomeTextOf(o) ?? '') : ''
   const details = (record?.details ?? null) as { liveRoom?: LiveRoomReport } | null
   const report = details?.liveRoom ?? null
@@ -951,11 +951,11 @@ export function toLiveRoomRunView(
 
   // ── 结论分类 ──
   //
-  // ⚠ 顺序要紧。**先认"没投"**，再认失败与成功：
-  // 后端在"没投"时回的是 **success**（见 `LiveRoomAccountResult::outcome`），
+  // ⚠ 顺序要紧。**先认"没领"**，再认失败与成功：
+  // 后端在"没领"时回的是 **success**（见 `LiveRoomAccountResult::outcome`），
   // 所以"成功=绿"这条映射对这条链是**错的**，光看 `outcome.status` 会把
   // "今天没开播"显示成一个绿色的成功。
-  const idle: LiveRoomIdleReason | null = text.includes('只收不投')
+  const idle: LiveRoomIdleReason | null = text.includes('只获取不领取')
     ? 'kouling-only'
     : text.includes('今天没有直播')
       ? 'no-live'
@@ -975,8 +975,8 @@ export function toLiveRoomRunView(
     return { kind: 'failed', idle: null, ...base }
   }
   if (attempted === 0) {
-    // 既没有"没投"的措辞、也没有投递记录：说不清。归 idle 而**不是** failed ——
-    // 判成失败会制造一条假警，而"没投"才是这条链的常态。
+    // 既没有"没领"的措辞、也没有领取记录：说不清。归 idle 而**不是** failed ——
+    // 判成失败会制造一条假警，而"没领"才是这条链的常态。
     return { kind: 'idle', idle: 'unknown', ...base }
   }
 
@@ -1012,12 +1012,12 @@ export function toLiveRoomRunView(
   return { kind: 'success', idle: null, ...base }
 }
 
-/** "为什么没投"的说法 —— 查表，**不拼字符串**。 */
+/** "为什么没领"的说法 —— 查表，**不拼字符串**。 */
 export const LIVE_IDLE_REASON: Record<LiveRoomIdleReason, string> = {
-  'kouling-only': '只听不投 —— 口令收完就结束，这一趟一个口令都没投出去',
+  'kouling-only': '获取口令但不领取 —— 口令收完就结束，这一趟一个口令都没拿去领',
   'no-live': '今天没有直播 —— 该主播一间都没在播，没有口令可收（等下一场即可，不是失败）',
   'other-anchor-live':
     '有别的房间在播，但没有一间是「中国移动云盘」—— 这一场不会再有口令了，不用等',
   'no-codes': '门开了，但这一趟没收到口令 —— 弹幕里没人发，或小红书那条还没贴进来',
-  unknown: '这一趟没有投出口令',
+  unknown: '这一趟没有拿去领取的口令',
 }

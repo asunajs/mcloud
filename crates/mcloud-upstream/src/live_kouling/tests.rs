@@ -175,7 +175,7 @@ fn js_space_class_and_predicate_agree() {
 /// JS 的 `g` 是**非重叠**扫描，下一次匹配从**上一次匹配的末位**开始。
 /// Go 参考实现写的是 `pos = headEnd`，于是会把内容里的 `口令2:` 再当成一个头，
 /// 多解出一条 `B`。**原 TS 是权威**（它真跑过），所以这里按 TS 断。
-/// 用户看得见的差别：Go 那版会白投一枪（必然回 `200108`）。
+/// 用户看得见的差别：Go 那版会白跑一枪（必然回 `200108`）。
 #[test]
 fn adjacent_heads_without_space_match_the_ts_global_scan() {
     assert_eq!(
@@ -339,7 +339,7 @@ fn filter_preserves_order_and_filters_questions() {
 
 /// ⭐ 保序去重：同一个口令只留**第一次**出现的位置。
 ///
-/// 顺序有实际影响：调用方按顺序逐个投口令，重复项会让同一条口令被投两次
+/// 顺序有实际影响：调用方按顺序逐个领取，重复项会让同一条口令被领两次
 /// （第二次回 `200112`，是白跑一趟）。
 #[test]
 fn dedupe_keeps_first_occurrence_order() {
