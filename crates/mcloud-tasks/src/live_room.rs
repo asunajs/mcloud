@@ -33,14 +33,49 @@
 //!
 //! # 分层证据等级（实话实说）
 //!
+//! ⚠ **门那一段与 WS 那一段的证据等级不同，别一刀切**：
+//!
 //! | 部分 | 依据 |
 //! |---|---|
 //! | 四态结论、三种"没投"、进账 = ⑥−① | **照抄参考实现**（有实拍值支撑，见下） |
 //! | `200108` / `200112` / `200118` / `200110` 四分类 | 协议层已钉（**实拍/向量**） |
 //! | 埋点发 5 条 | 照抄参考实现，**实拍只证实其中 1 条**（见 [`JOURNALING_EVENTS`]） |
 //! | 只听第一间房间 | **刻意的取舍**，代价见 [`LiveRoomRun::run_account`] |
+//! | 有 codes ⇒ 跳过开门 | **刻意的取舍**，理由见 [`LiveRoomRun::run_account`] |
 //! | 票用云盘侧配方 | **实拍**（拿直播侧 JWT 回 `90001`，见下） |
-//! | WS 收集那一支 | 接在 [`mcloud_upstream::live_ws_client`] 上；**真机未跑过** |
+//! | 🌸 **门的三步**（[`LiveRoomRun::open_gate`]） | **✅ 实证** —— 见下 |
+//! | ⏸ **WS / 弹幕 / 口令**（[`LiveKoulingCollector`]） | **结构性抓不到** —— 见下 |
+//!
+//! ## ✅ 门的三步：**实证**
+//!
+//! 出处 `../mcloud/docs/capture/app-live-redflower-samples.txt`
+//! 第 345–365 行（§5.3）与第 466–475 行的证据等级表：
+//!
+//! ```text
+//! ① POST user-njs.yun.139.com/user/querySpecTokenV2  {"toSourceId":"017027"}
+//!                                                       ⇒ SSO token 42 字符
+//! ② POST v.cmcc-cs.cn/cmlive/api/user/auth/cmpassLoginByCmToken
+//!        body {"cmpassToken":"<SSO>"}  ⇒ {"rtnMsg":null,"rtnCode":"0","object":"<JWT 180 字符>"}
+//! ③ GET  …/api/channel/channel/tabContentList?tabId=<id>&contentType=0&pageNo=1&channelId=134
+//! ```
+//!
+//! 那一轮用**临时只读探针主动走了一遍** —— 因为门第③步是 **GET、不需要开播**，
+//! §5.2 那个"结构性抓不到"只解释了 WS 那半段，抓包没抓到**不等于**它不能打。
+//!
+//! 两处实证细节：`querySpecTokenV2(017027)` **能**换到 SSO
+//! ⇒ 库里那份 `authorization` 在直播族上也认；
+//! `cmpassLoginByCmToken` 的 `object` **就是 JWT 本身**（180 字符），不是包着它的对象。
+//! 全程 `rtnCode` 都是**字符串 `"0"`** ✅ 再证第三套响应约定。
+//!
+//! ## ⏸ WS / 弹幕 / 口令：**结构性抓不到**
+//!
+//! 未开播（`chatRoomId: null`），所以
+//! `userToken` / `member/apply` / SockJS 帧**一个样本都没有**。
+//! ⇒ 这是**结构性的**，不是"没抓到、下次努力"。
+//! [`LiveKoulingCollector::listen_danmaku_with`] 那一支是"接线完成、真机未验证"。
+//!
+//! ⚠ **两者分开标**：门那条路是实证的，WS 那条不是。混成一句
+//! "直播这条链没实拍"会让人以为门也不能用（而它刚刚被走通）。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -1041,14 +1076,25 @@ impl LiveRoomAccountResult {
 }
 
 /// 一趟运行的**世界**（依赖注入点）。
+///
+/// # ⚠ 这里**没有** `live_jwt` 字段（曾经有一个，已删）
+///
+/// 早先它是 `Option<String>`，由调用方从外面填 —— 而两处调用方都填 `None`，
+/// 于是"开门"那一段**永远进不去**：没配 `codes` 时一个口令都收不到，
+/// 表现成"今天没有直播"。那是**假结论**，且没有任何测试会红。
+///
+/// 现在直播侧 JWT 由 [`LiveRoomRun::open_gate`] 在**需要时**自己换
+/// （即"有 codes ⇒ 跳过开门"这一支之外），票活在这一个函数里、不外流。
+///
+/// # 为什么票不该从外面注入
+///
+/// 它是**直播侧**的一张票，与六步链的云盘侧 `jwttoken` 是两回事
+/// （见 [`LiveRoomRun::open_gate`] 里那张对照表）。让调用方塞进来的话，
+/// "塞错一张票"就变成了一个**编译得过**的错误 —— 而它的表现是
+/// `90001 未登录`，排查方向指向"账号没登录"，完全错。
 pub struct LiveRoomRun<'a> {
     /// 口令收集器（真实实现 = [`LiveKoulingCollector`]）。
     pub collector: &'a dyn KoulingCollector,
-    /// 门那三步的**直播侧凭据来源**。
-    ///
-    /// ⚠ 它与六步链的票**不是同一个东西**：门用直播侧 JWT（`/cmlive`），
-    /// 六步链用**云盘侧** `jwttoken`。见 [`LiveRoomRun::run_account`] 里那段说明。
-    pub live_jwt: Option<String>,
 }
 
 impl<'a> LiveRoomRun<'a> {
@@ -1093,6 +1139,31 @@ impl<'a> LiveRoomRun<'a> {
     /// 返回的 [`LiveRoomAccountResult`] 在出错时也尽量带已经拿到的部分
     /// （门、口令），调用方据此能说出"崩在第几步"，而不是一句错误串。
     ///
+    /// # ⚠⚠ 取舍：**有 `codes` 就跳过开门**（我做的决定，理由在此）
+    ///
+    /// 判据是 `out.codes.is_empty() && !skip_kouling` —— 两个条件都成立才开门。
+    ///
+    /// **采纳"跳过"的三条理由：**
+    ///
+    /// 1. **省两个请求**：`querySpecTokenV2` + `cmpassLoginByCmToken` 是纯开销
+    ///    —— 手工 codes 已经够跑完六步链，门换来的 JWT 只用于房间发现与 WS，
+    ///    而这两件事在"已有 codes"这一支**根本不会发生**。
+    /// 2. **避免门失败拖累投递**（这条才是关键的）：若先开门再看 codes，
+    ///    那么门那两枪偶发 5xx 会把一趟**本来能跑完**的投递整体拖黄。
+    ///    用户给的口令是对的、六步链是好的，却因为"换个票失败了"一朵花没拿到
+    ///    —— 归因方向全错（他会去查口令）。
+    /// 3. **与 [`RedFlowerTask`] 口径一致**：那一支就是"已经有口令、直接投"，
+    ///    它从来不开门。两者是同一条链的两个入口，不该在"要不要门"上分叉。
+    ///
+    /// ⚠ **代价必须说出来**：有 codes 时**收不到弹幕里的口令**（因为没开门）。
+    /// 这是**预期**的 —— 模块头事实 1 说清了小红书那条只能人工喂，
+    /// 而"既有 codes 又想听弹幕"这个组合在本任务里**不存在**：
+    /// 给了 codes 就是"我不用你听"的意思。真想把两边都要到手，
+    /// WebUI/CLI 的正确表达是跑两趟（一趟带 codes、一趟不带）。
+    ///
+    /// ⚠ 反过来说：**没有** codes 时开门失败**必须如实上抛**，
+    /// 绝不能退化成"今天没有直播"。见 [`Self::open_gate`]。
+    ///
     /// # ⚠ 票（`jwttoken`）的来源：**云盘侧**，不是直播侧
     ///
     /// 六步链全打在 `m.mcloud.139.com/ycloud`（与签到同域同族，公共头里那个
@@ -1124,18 +1195,31 @@ impl<'a> LiveRoomRun<'a> {
             ..Default::default()
         };
 
-        // 手工口令优先：给了 codes 就不再走收集（`skip_kouling` 只是把它变成硬要求）。
-        if let Some(jwt) = self.live_jwt.as_deref() {
-            out.gate = judge_kouling_gate(&self.gate_rooms(ctx, jwt).await?);
-            out.has_jwt = true;
-        }
-
+        // ── 有手工口令 ⇒ **跳过开门**（刻意的取舍，理由见函数头"要不要开门"）──
+        //
+        // 顺序很关键：这一段必须**在**开门之前。若先开门再看 codes，
+        // 那么"门那两枪偶发失败"会把一趟**本来能跑完**的投递整体拖黄 ——
+        // 而手工 codes 根本不需要门（它们已经够跑完六步链了）。
         let manual = merge_kouling(&params.codes);
         if !manual.is_empty() {
             out.codes = manual;
         }
 
-        if !params.skip_kouling && out.codes.is_empty() {
+        // 门只在"需要收口令"时才开：有 codes 时一个请求都不多发。
+        //
+        // ⚠ `gate_jwt` 是这一趟**唯一**的直播侧票持有者：门第③步与收集器
+        // 都从它借用。这样"重听"那一段也能拿到同一张票，
+        // 而不会出现"第二次去取票"（那会多发两枪，且两张票不是同一张）。
+        let mut gate_jwt: Option<String> = None;
+        if out.codes.is_empty() && !params.skip_kouling {
+            // ⚠ 开门失败**如实上抛** —— 绝不退化成"今天没有直播"（那是撒谎：
+            // "我们凭据坏了"与"今天没开播"是两件事，后者是**假结论**）。
+            let jwt = self.open_gate(ctx).await?;
+            out.has_jwt = true;
+            out.gate = judge_kouling_gate(&self.gate_rooms(ctx, &jwt).await?);
+            gate_jwt = Some(jwt);
+            let jwt = gate_jwt.as_deref().expect("刚放进去");
+
             if !out.gate.active {
                 // ⭐ 门的两种"没有"分开说 —— 它们的下一步完全不同。
                 if out.gate.live_count == 0 {
@@ -1171,10 +1255,9 @@ impl<'a> LiveRoomRun<'a> {
                 "在播房间 {}，听 {} 秒弹幕…",
                 room.id, params.listen_seconds
             ));
-            let jwt = self.live_jwt.clone().unwrap_or_default();
             let collected = self
                 .collector
-                .collect(ctx, &jwt, &room, params.listen_for(), &[])
+                .collect(ctx, jwt, &room, params.listen_for(), &[])
                 .await?;
             out.codes = collected.codes;
         }
@@ -1191,23 +1274,23 @@ impl<'a> LiveRoomRun<'a> {
 
         // ⚠ 重听一次：只在**有口令被判无效**时做（判据是纯函数 [`retry_plan`]）。
         //
-        // ⚠⚠ 重听**需要一间能听的房间**。而这一趟可能没跑过门（比如手工 `codes`
-        // 那一支：门那三步被跳过、`gate.rooms` 是空的）—— 那时**没法重听**。
+        // ⚠⚠ 重听**需要一间能听的房间**，而房间是门那一步的产物。
+        // 这一趟可能**没跑过门**（手工 `codes` 那一支：有 codes ⇒ 跳过开门，
+        // 见函数头的取舍）—— 那时 `gate.rooms` 是空的 ⇒ **没法重听**。
         //
-        // 这里刻意把它做成"如实说一句、不重听"，而**不是**报错：
+        // ⚠ 这里**刻意不去补开门**：补开门意味着"口令抄错一个"要多打两个请求，
+        // 而那两个请求**还要再成功一次**才有房间 —— 它的失败路径是新的，
+        // 而且不产生任何新口令（重听本来只是补救）。取舍与主路径一致：
+        // **手工 codes 这一支不发门的请求**。
+        //
+        // 这里把它做成"如实说一句、不重听"，而**不是**报错：
         // 重听是**补救措施**，没有它第一轮的结果依然成立；而把它变成 `Err`
         // 会让"口令抄错了一个"这种小事把整趟已经拿到的花全部作废
         // （归因方向也错了：真正的问题是那条口令无效，不是"没房间"）。
         let (retry, exclude) = retry_plan(&out.codes, &report.invalid_codes);
         if retry && !params.skip_kouling {
-            match out.gate.rooms.first().cloned() {
-                None => {
-                    ctx.warn(format!(
-                        "有 {} 个口令无效，但这一趟没有可听的房间（未跑门）⇒ 不重听",
-                        report.invalid_codes.len()
-                    ));
-                }
-                Some(room) => {
+            match (gate_jwt.as_deref(), out.gate.rooms.first().cloned()) {
+                (Some(jwt), Some(room)) => {
                     out.retried = true;
                     ctx.progress(2, 3, "重听口令");
                     ctx.warn(format!(
@@ -1215,11 +1298,10 @@ impl<'a> LiveRoomRun<'a> {
                         report.invalid_codes.len(),
                         params.listen_seconds
                     ));
-                    let jwt = self.live_jwt.clone().unwrap_or_default();
                     // 重听失败**不致命**：它是补救措施，自己失败时应当保留第一轮的结果。
                     let fresh = match self
                         .collector
-                        .collect(ctx, &jwt, &room, params.listen_for(), &exclude)
+                        .collect(ctx, jwt, &room, params.listen_for(), &exclude)
                         .await
                     {
                         Ok(o) => o.codes,
@@ -1242,6 +1324,12 @@ impl<'a> LiveRoomRun<'a> {
                         out.codes.extend(to_draw);
                     }
                     return Ok(out);
+                }
+                _ => {
+                    ctx.warn(format!(
+                        "有 {} 个口令无效，但这一趟没有可听的房间（未跑门）⇒ 不重听",
+                        report.invalid_codes.len()
+                    ));
                 }
             }
         }
@@ -1282,6 +1370,85 @@ impl<'a> LiveRoomRun<'a> {
             session.feed(body).map_err(|e| wrap_step_error(step, e))?;
         }
         Ok(session.report().clone())
+    }
+
+    /// 🌸 **开门**：换直播侧 JWT（三步里的前两步）。
+    ///
+    /// ```text
+    /// ① POST user-njs.yun.139.com/user/querySpecTokenV2  {"toSourceId":"017027"}
+    ///                                                       ⇒ SSO token（42 字符）
+    /// ② POST v.cmcc-cs.cn/cmlive/api/user/auth/cmpassLoginByCmToken
+    ///        body {"cmpassToken": <SSO>}  ⇒ {"rtnCode":"0", "object":"<JWT 180 字符>"}
+    /// ```
+    ///
+    /// （第 ③ 步是 [`Self::gate_rooms`]，它要拿 ② 换到的 JWT 才能打。）
+    ///
+    /// # ⚠⚠ 这张票**只**给直播侧用（`/cmlive` 与弹幕 WS）
+    ///
+    /// 它与六步链要的**云盘侧** `jwttoken` **不是同一个东西**，两者绝不能互换：
+    ///
+    /// | | 直播侧 JWT（本函数换的） | 云盘侧 `jwttoken`（[`SessionRecipe::SignInPage`] 换的） |
+    /// |---|---|---|
+    /// | 谁换的 | `querySpecTokenV2(017027)` → `cmpassLoginByCmToken` | `tyrzLogin(sign_in_3)` |
+    /// | 长什么样 | 独立 JWT，payload 含 `userId`（实测 **180 字符**） | `pc:` / `mobile:` 前缀那一串 |
+    /// | 挂在哪个头 | **`Authorization`**（[`live::CmliveEnvelope`] 那一族） | **`jwttoken`**（[`mcloud_upstream::session::h5_headers`]） |
+    /// | 给谁用 | `/cmlive` 房间发现 + 弹幕 WS | `/ycloud` 小红花六步链 |
+    /// | 用错的后果 | —— | 实测回 **`90001 未登录`**（2026-09-22，两个账号都是那一句） |
+    ///
+    /// ⚠ 这两句的具体长相**不是**靠"看着像"区分的，是靠**域**区分的：
+    /// [`live::cmlive_headers`] 只往 `Authorization` 上写，
+    /// 而 H5 那一族只往 `jwttoken` 上写。本函数**只**返回 JWT，
+    /// 绝不去碰六步链那一边 —— 那一边的票由 `H5Client` 透明注入
+    /// （见 [`Self::run_account`] 里那段说明）。
+    ///
+    /// # ⚠ 失败**如实上抛**（带步名前缀），不照抄参考实现那条"失败即放行"
+    ///
+    /// 参考实现早先在 SSO / 登录失败时 `return true` 放行，它自己后来明确否定了：
+    /// 那条让"凭据坏了"表现成"门开着、却一条口令也听不到"，
+    /// 真因被盖住，排查方向会从"今天是不是没开播"开始 —— **完全错**。
+    ///
+    /// ⇒ 这里把失败原样返回。要不要继续由**调用方**决定
+    /// （[`LiveRoomParams::kouling_only`] 那种开关才是"我就是要试试看"的正确表达位置）。
+    ///
+    /// # 证据等级
+    ///
+    /// - **实证**：①②两步 + 第③步（`tabContentList`）—— 出处
+    ///   `../mcloud/docs/capture/app-live-redflower-samples.txt` §5.3（第 345–365 行）
+    ///   与证据等级表（第 466–475 行）。那一轮用临时只读探针主动走了一遍，
+    ///   因为门第③步是 **GET、不需要开播**。
+    /// - **本条实证的两处细节**：`querySpecTokenV2(017027)` 能换到 SSO
+    ///   ⇒ 库里那份 `authorization` 在直播族上也认；
+    ///   `cmpassLoginByCmToken` 的 `object` **就是 JWT 本身**（180 字符），不是包着它的对象。
+    /// - ⏸ **仍结构性抓不到**：WS / 弹幕 / 口令（未开播，`chatRoomId: null`）。
+    ///   那一段在 [`LiveKoulingCollector`] 里，**与本函数分开标**。
+    pub async fn open_gate(&self, ctx: &TaskContext) -> Result<String> {
+        // ① 换 SSO token。用**直播侧**的 `toSourceId`（`017027`）——
+        // 不是签到的 `001005`。混用的表现是"一条房间都筛不出来"，
+        // 而那看起来像"今天没有直播"：一个**假结论**（参考实现坑表 #106）。
+        let authorization = mcloud_upstream::basic_authorization(&ctx.account);
+        let resp = ctx
+            .http
+            .request(mcloud_upstream::session::live_gate_spec_token_request(
+                &authorization,
+            ))
+            .await
+            .map_err(|e| Error::Other(format!("[门·换 SSO token] {e}")))?;
+        let body = mcloud_upstream::session::ensure_http_ok(&resp, "门·换 SSO token")
+            .map_err(|e| Error::Other(format!("[门·换 SSO token] {e}")))?;
+        let sso = mcloud_upstream::session::parse_sso_token(body)
+            .map_err(|e| Error::Other(format!("[门·换 SSO token] {e}")))?;
+
+        // ② 用 SSO 换**直播侧** JWT。
+        let resp = ctx
+            .http
+            .request(live::cmpass_login_request(&sso)?)
+            .await
+            .map_err(|e| Error::Other(format!("[门·换直播侧 JWT] {e}")))?;
+        let body = mcloud_upstream::session::ensure_http_ok(&resp, "门·换直播侧 JWT")
+            .map_err(|e| Error::Other(format!("[门·换直播侧 JWT] {e}")))?;
+        let env = live::CmliveEnvelope::parse(body)
+            .map_err(|e| Error::Other(format!("[门·换直播侧 JWT] {e}")))?;
+        live::parse_cmpass_login(&env).map_err(|e| Error::Other(format!("[门·换直播侧 JWT] {e}")))
     }
 
     /// 拉两个页签的房间（门的第一步）。
@@ -1397,13 +1564,14 @@ impl Task for LiveRoomTask {
             )));
         }
 
-        // ⚠ 门的直播侧凭据这一步**需要**签到页配方之外的签到页 SSO 链，
-        // 本轮未接（见回报）。没有 live_jwt 时门判不出来 —— 那时
-        // **不是**"门没开"，所以不能报"今天没有直播"（那是撒谎）。
-        // 用手工口令时也**不需要**门：codes 已经足够跑完六步链。
+        // 🌸 门在这里接上了：`LiveRoomRun::run_account` 会在**需要收口令**时
+        // 自己调 `open_gate()` 换直播侧 JWT（三步：换 SSO → 换 JWT → 拉两个页签）。
+        //
+        // ⚠ 这里**不再**写死 `live_jwt: None`。那处写死（历史上在 1406 / 1511 行）
+        // 让门那一段**永远进不去** ⇒ 没配 codes 时收不到任何口令，
+        // 而结论显示"今天没有直播" —— 一个**假结论**，且查不出真因。
         let run = LiveRoomRun {
             collector: self.collector.as_ref(),
-            live_jwt: None,
         };
         let result = run.run_account(ctx, &params).await?;
 
@@ -1497,8 +1665,9 @@ impl Task for RedFlowerTask {
             )));
         }
 
-        // ⚠ 这一支**不需要门**（不收集），所以 `gate.active` 留 false 只影响
-        // "没投"那一档的措辞 —— 而这里 codes 非空，永远不会走到那一档。
+        // ⚠ 这一支**不需要门**（不收集）：`skip_kouling = true` 且 codes 非空
+        // ⇒ `run_account` 里"需要收口令"那个条件不成立 ⇒ **一个门请求都不发**。
+        // 这正是 [`RedFlowerTask`] 的固有形状：口令已经有了，直接投。
         let params = LiveRoomParams {
             codes,
             // 它不收集，时长只需是个正数即可过校验。
@@ -1508,7 +1677,6 @@ impl Task for RedFlowerTask {
         };
         let run = LiveRoomRun {
             collector: self.collector.as_ref(),
-            live_jwt: None,
         };
         let result = run.run_account(ctx, &params).await?;
         if let Some(report) = &result.report {

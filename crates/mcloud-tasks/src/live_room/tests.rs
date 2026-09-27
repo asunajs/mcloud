@@ -208,6 +208,88 @@ fn ctx_with(replies: &[String]) -> (Ctx, std::sync::Arc<Scripted>) {
 
 // ── 假收集器（口令来源） ────────────────────────────────────────────────
 
+/// 首轮**成功**、重听**失败**的收集器。
+///
+/// # 为什么不能直接用 [`FakeCollector::failing`]
+///
+/// `failing` 是"每次 collect 都失败"。用它测"重听失败不致命"时，
+/// **首轮收集就已经失败了** ⇒ 一条口令都收不到 ⇒ 六步链走不到
+/// `draw` ⇒ 也就**没有无效口令** ⇒ 根本不会触发重听。
+/// 那条用例会变成"什么都没发生"，却照样通过（因为它只断言最终结论不是 Err）。
+///
+/// ⇒ 这个替身把两轮**分开**：第 1 次成功给出口令，第 2 次才失败。
+#[derive(Default)]
+struct RetryFailCollector {
+    /// 第一次 `collect` 返回的口令。
+    first: Vec<String>,
+    /// 已经调用过几次。
+    calls: Mutex<usize>,
+}
+
+impl RetryFailCollector {
+    fn new(first: &[&str]) -> Self {
+        Self {
+            first: first.iter().map(|s| s.to_string()).collect(),
+            calls: Mutex::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl KoulingCollector for RetryFailCollector {
+    async fn collect(
+        &self,
+        _ctx: &TaskContext,
+        _jwt: &str,
+        _room: &live::LiveRoom,
+        _listen_for: Duration,
+        _exclude: &[String],
+    ) -> Result<SourceOutcome> {
+        let mut n = self.calls.lock().unwrap();
+        *n += 1;
+        if *n == 1 {
+            return Ok(SourceOutcome {
+                codes: self.first.clone(),
+                failure: None,
+            });
+        }
+        Err(Error::Other("假收集器：重听时两个来源都失败了".into()))
+    }
+}
+
+/// 记录"收集器收到的那串 JWT"的替身。
+///
+/// # 为什么需要它
+///
+/// `run_account` 早先用 `unwrap_or_default()` 取票 —— 忘了填就是**静默空串**。
+/// 空串传给收集器之后，表现是"WS 连不上"，而真因是"票根本没传下来"，
+/// 排查方向完全不同。这个替身把"实际传了什么"变成**可断言的事实**。
+#[derive(Default)]
+struct JwtRecordingCollector {
+    jwts: Mutex<Vec<String>>,
+}
+
+impl JwtRecordingCollector {
+    fn jwts(&self) -> Vec<String> {
+        self.jwts.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl KoulingCollector for JwtRecordingCollector {
+    async fn collect(
+        &self,
+        _ctx: &TaskContext,
+        jwt: &str,
+        _room: &live::LiveRoom,
+        _listen_for: Duration,
+        _exclude: &[String],
+    ) -> Result<SourceOutcome> {
+        self.jwts.lock().unwrap().push(jwt.to_string());
+        Ok(SourceOutcome::default())
+    }
+}
+
 /// 按脚本回放口令来源，并记录"要过哪些排除项"。
 #[derive(Default)]
 struct FakeCollector {
@@ -388,20 +470,100 @@ fn room_entry(id: i64, status: i64, nickname: &str) -> serde_json::Value {
     })
 }
 
-/// 造一个 `LiveRoomRun`（门那一支默认关着）。
+/// 造一个 `LiveRoomRun`。
+///
+/// ⚠ 这里**没有** `live_jwt` 参数了（该字段已从 `LiveRoomRun` 删掉）：
+/// 直播侧 JWT 现在由 `LiveRoomRun::open_gate` 在需要时**自己换**。
+/// 于是"从外面塞一张票"变成了一件**编译不过**的事 —— 而它此前正是
+/// "两套票混用"最容易发生的入口。
 fn run_with<'a>(collector: &'a dyn KoulingCollector) -> LiveRoomRun<'a> {
-    LiveRoomRun {
-        collector,
-        live_jwt: None,
-    }
+    LiveRoomRun { collector }
 }
 
-/// 造一个**门开着**的 run（`live_jwt` 非空 ⇒ 会去打两个页签）。
+/// `run_with` 的**同义词**：门相关用例沿用这个名字读起来更顺。
+///
+/// ⚠ 已**没有**"外面塞一张 `live_jwt`"那种假开门了：现在门开着这件事
+/// **只能**通过"假 HTTP 真的把①②两枪回了"来表达 ——
+/// 于是每条门相关测试都**同时**在验证开门的请求序列，覆盖面比过去大。
 fn run_gated<'a>(collector: &'a dyn KoulingCollector) -> LiveRoomRun<'a> {
-    LiveRoomRun {
-        collector,
-        live_jwt: Some("LIVE-JWT".into()),
-    }
+    run_with(collector)
+}
+
+/// 一步到位的 `run_account`：省掉每条用例都写 `.run_account(&c.ctx(), &params)`。
+///
+/// ⚠ 出错时直接 `unwrap` —— 但**只用于"本该成功"的用例**。
+/// 要断言错误的用例请显式写 `run_gated(..).run_account(..).await`，
+/// 那样 `.expect_err(..)` 上的那句话才是断言的一部分。
+async fn run_account_with(
+    c: &Ctx,
+    collector: &dyn KoulingCollector,
+    params: &LiveRoomParams,
+) -> LiveRoomAccountResult {
+    run_gated(collector)
+        .run_account(&c.ctx(), params)
+        .await
+        .expect("这一趟本该成功")
+}
+
+// ── 门的响应构造（开门那两步）────────────────────────────────────────────
+
+/// ① `querySpecTokenV2` 的成功响应。
+///
+/// ⚠ 形状是**双层信封**且 `code` 是**字符串 `"0000"`**（不是数字）——
+/// 协议层 `parse_sso_token` 刻意按字符串解（见那里的说明）。
+/// 实测：`toSourceId=017027` ⇒ SSO token **42 字符**。
+fn sso_body() -> String {
+    serde_json::json!({
+        "success": true,
+        "code": "0000",
+        "message": "成功",
+        "data": {"token": "SSO-TOKEN-42CHARS-0123456789012345678901"}
+    })
+    .to_string()
+}
+
+/// ① 的**失败**响应（`success: false`）。
+fn sso_fail_body() -> String {
+    serde_json::json!({
+        "success": false,
+        "code": "1001",
+        "message": "凭据无效"
+    })
+    .to_string()
+}
+
+/// ② `cmpassLoginByCmToken` 的成功响应。
+///
+/// ⚠ 第三套响应约定：`rtnCode` 是**字符串 `"0"`**，且 `object`
+/// **就是那串 JWT 本身**（不是包着它的对象）—— 实测 180 字符。
+fn cmpass_body(jwt: &str) -> String {
+    serde_json::json!({
+        "rtnMsg": null, "rtnCode": "0", "object": jwt
+    })
+    .to_string()
+}
+
+/// ② 的**失败**响应（`rtnCode != "0"`）。
+fn cmpass_fail_body() -> String {
+    serde_json::json!({
+        "rtnMsg": "登录失败", "rtnCode": "1002", "object": null
+    })
+    .to_string()
+}
+
+/// 测试里用的直播侧 JWT。**刻意取一个不可能与云盘侧票混淆的值**。
+const TEST_LIVE_JWT: &str = "LIVE-SIDE-JWT-not-a-jwttoken";
+
+/// 🔑 **开门**的三枪：① SSO → ② 换 JWT → ③④ 两个页签。
+///
+/// 前两枪固定，后两枪由 `rooms` 决定（第一个页签给房间、第二个给空）。
+fn open_gate_chain(rooms: serde_json::Value) -> Vec<String> {
+    vec![
+        sso_body(),
+        cmpass_body(TEST_LIVE_JWT),
+        tab_body(rooms),
+        tab_body(serde_json::json!([])),
+    ]
 }
 
 /// 关掉重听那一支的参数（专测"投了之后"的结论）。
@@ -560,13 +722,17 @@ fn pick_new_codes_filters_out_everything_already_tried() {
 ///
 /// 第一轮投「甲（成功）+ 乙（200108）」；重听又听到「乙 + 丙」，
 /// 而排除表必须把乙挡住 ⇒ 第二轮**只投丙**。
+///
+/// # ⚠ 这一趟必须**不用手工 codes**（改了）
+///
+/// 「有 codes ⇒ 跳过开门」那个取舍一旦生效，**手工 codes 那一支就没有房间**
+/// ⇒ 永远走不到重听。所以这条用例的口令要**从收集器来**（第 1 次收「甲、乙」），
+/// 这样门是**真的开过**的、`gate.rooms` 非空 ⇒ 重听才有地方听。
+/// 排除表的判据完全一样，覆盖面没少。
 #[tokio::test]
 async fn invalid_code_triggers_one_retry_and_never_redraws_tried_codes() {
-    // 门那两步（两个页签）—— **重听需要一间可听的房间**，门没跑就没有。
-    let mut chain = vec![
-        tab_body(serde_json::json!([room_entry(147606, 1, "中国移动云盘")])),
-        tab_body(serde_json::json!([])),
-    ];
+    // 开门那几枪 —— **重听需要一间可听的房间**，没开成门就没有。
+    let mut chain = open_gate_chain(serde_json::json!([room_entry(147606, 1, "中国移动云盘")]));
     // 第一轮：甲成功、乙无效
     chain.push(balance_body(10));
     push_journaling(&mut chain);
@@ -579,10 +745,11 @@ async fn invalid_code_triggers_one_retry_and_never_redraws_tried_codes() {
     chain.extend(happy_chain(15, 18, Some(give_already()), &[draw_ok(3)], 0));
     let (c, http) = ctx_with(&chain);
 
-    // 这一趟给了手工 codes（所以首轮**不**收集），但门是开的 ⇒ 重听时能听到新口令。
-    let collector = FakeCollector::new(&[&["乙", "丙"]]);
+    // 第 1 次收集给「甲、乙」（首轮投这两个）；第 2 次（重听）给「乙、丙」。
+    let collector = FakeCollector::new(&[&["甲", "乙"], &["乙", "丙"]]);
+    // ⚠ 不给手工 codes：那一支会跳过开门，于是没有房间 ⇒ 重听根本不会发生。
     let params = LiveRoomParams {
-        codes: vec!["甲".into(), "乙".into()],
+        codes: vec![],
         listen_seconds: 60,
         ..Default::default()
     };
@@ -593,10 +760,10 @@ async fn invalid_code_triggers_one_retry_and_never_redraws_tried_codes() {
         .unwrap();
 
     assert!(res.retried, "有无效口令 ⇒ 触发过重听");
-    assert_eq!(collector.call_count(), 1, "只重听一次");
+    assert_eq!(collector.call_count(), 2, "首轮收集 1 次 + 重听 1 次");
 
     // ⭐ 排除表必须含"甲（成功）"与"乙（无效）"两者
-    let exclude = collector.exclude_at(0);
+    let exclude = collector.exclude_at(1);
     assert!(
         exclude.contains(&"甲".to_string()),
         "成功过的也要排除：{exclude:?}"
@@ -824,11 +991,8 @@ async fn partial_success_is_reported_as_partial() {
 /// ⭐ 门没开 ⇒ **不跑链**，且结论可区分（"今天没开播"是成功，不是失败）。
 #[tokio::test]
 async fn closed_gate_does_not_run_the_chain() {
-    // 门那两步：两个页签都回空房间 ⇒ live_count == 0
-    let (c, http) = Ctx::new(&[
-        &tab_body(serde_json::json!([])),
-        &tab_body(serde_json::json!([])),
-    ]);
+    // 开门那两枪（①SSO ②JWT）+ 两个页签都回空房间 ⇒ live_count == 0
+    let (c, http) = ctx_with(&open_gate_chain(serde_json::json!([])));
     let collector = FakeCollector::new(&[&["不该被收集"]]);
     let params = LiveRoomParams {
         codes: vec![],
@@ -878,10 +1042,7 @@ async fn the_two_ways_a_gate_can_be_closed_say_different_things() {
     };
 
     // 情形 A：一个在播房间都没有
-    let (c_a, _) = Ctx::new(&[
-        &tab_body(serde_json::json!([])),
-        &tab_body(serde_json::json!([])),
-    ]);
+    let (c_a, _) = ctx_with(&open_gate_chain(serde_json::json!([])));
     let collector_a = FakeCollector::empty();
     let res_a = run_gated(&collector_a)
         .run_account(&c_a.ctx(), &params)
@@ -890,7 +1051,7 @@ async fn the_two_ways_a_gate_can_be_closed_say_different_things() {
 
     // 情形 B：有房间在播，但主播不是「中国移动云盘」（实拍 147490「福建移动」）
     let live = serde_json::json!([room_entry(147490, 1, "福建移动")]);
-    let (c_b, _) = Ctx::new(&[&tab_body(live), &tab_body(serde_json::json!([]))]);
+    let (c_b, _) = ctx_with(&open_gate_chain(live));
     let collector_b = FakeCollector::empty();
     let res_b = run_gated(&collector_b)
         .run_account(&c_b.ctx(), &params)
@@ -922,7 +1083,7 @@ async fn the_two_ways_a_gate_can_be_closed_say_different_things() {
 async fn only_the_exact_anchor_nickname_opens_the_gate() {
     for nickname in ["福建移动", "移动心选", "移动臻选", "中国移动云盘x"] {
         let rooms = serde_json::json!([room_entry(1, 1, nickname)]);
-        let (c, _) = Ctx::new(&[&tab_body(rooms), &tab_body(serde_json::json!([]))]);
+        let (c, _) = ctx_with(&open_gate_chain(rooms));
         let collector = FakeCollector::empty();
         let params = LiveRoomParams {
             codes: vec![],
@@ -939,7 +1100,7 @@ async fn only_the_exact_anchor_nickname_opens_the_gate() {
     // 预告（status=0）与回放（status=6）也**不算** —— 那时没有聊天室
     for status in [0, 6] {
         let rooms = serde_json::json!([room_entry(1, status, "中国移动云盘")]);
-        let (c, _) = Ctx::new(&[&tab_body(rooms), &tab_body(serde_json::json!([]))]);
+        let (c, _) = ctx_with(&open_gate_chain(rooms));
         let collector = FakeCollector::empty();
         let params = LiveRoomParams {
             codes: vec![],
@@ -960,10 +1121,11 @@ async fn only_the_exact_anchor_nickname_opens_the_gate() {
 /// ⭐ 只听不投：收到了口令但**一个都不投**，且说明与另两种"没投"不同。
 #[tokio::test]
 async fn kouling_only_collects_but_never_draws() {
-    let (c, http) = Ctx::new(&[
-        &tab_body(serde_json::json!([room_entry(147606, 1, "中国移动云盘")])),
-        &tab_body(serde_json::json!([])),
-    ]);
+    let (c, http) = ctx_with(&open_gate_chain(serde_json::json!([room_entry(
+        147606,
+        1,
+        "中国移动云盘"
+    )])));
     let collector = FakeCollector::new(&[&["口令甲", "口令乙"]]);
     let params = LiveRoomParams {
         codes: vec![],
@@ -997,10 +1159,11 @@ async fn kouling_only_collects_but_never_draws() {
 /// ⭐ 门开了但没收到口令 ⇒ **第三种**说法（不是"没直播"，也不是"只听不投"）。
 #[tokio::test]
 async fn opened_gate_with_no_codes_says_so() {
-    let (c, http) = Ctx::new(&[
-        &tab_body(serde_json::json!([room_entry(147606, 1, "中国移动云盘")])),
-        &tab_body(serde_json::json!([])),
-    ]);
+    let (c, http) = ctx_with(&open_gate_chain(serde_json::json!([room_entry(
+        147606,
+        1,
+        "中国移动云盘"
+    )])));
     let collector = FakeCollector::new(&[&[]]); // 听到了 0 条
     let params = LiveRoomParams {
         codes: vec![],
@@ -1030,8 +1193,8 @@ async fn multiple_live_rooms_produce_a_warning() {
         room_entry(147606, 1, "中国移动云盘"),
         room_entry(147608, 1, "中国移动云盘"),
     ]);
-    // 门两个页签 + 一轮完整的六步链（收集到的口令会被真的投出去）
-    let mut chain = vec![tab_body(rooms), tab_body(serde_json::json!([]))];
+    // 开门三枪 + 一轮完整的六步链（收集到的口令会被真的投出去）
+    let mut chain = open_gate_chain(rooms);
     chain.extend(happy_chain(235, 245, Some(give_ok(0)), &[draw_ok(10)], 0));
     let (c, _http) = ctx_with(&chain);
     let collector = FakeCollector::new(&[&["口令甲"]]);
@@ -1059,7 +1222,7 @@ async fn multiple_live_rooms_produce_a_warning() {
 #[tokio::test]
 async fn single_live_room_does_not_warn_about_coverage() {
     let rooms = serde_json::json!([room_entry(147606, 1, "中国移动云盘")]);
-    let mut chain = vec![tab_body(rooms), tab_body(serde_json::json!([]))];
+    let mut chain = open_gate_chain(rooms);
     chain.extend(happy_chain(235, 245, Some(give_ok(0)), &[draw_ok(10)], 0));
     let (c, _http) = ctx_with(&chain);
     let collector = FakeCollector::new(&[&["口令甲"]]);
@@ -1605,10 +1768,11 @@ async fn red_flower_draws_directly_without_the_gate() {
 /// ⭐ 收集**两个来源都失败** ⇒ 整趟失败（不能静默变成"今天没收到口令"）。
 #[tokio::test]
 async fn collector_failure_propagates() {
-    let (c, _) = Ctx::new(&[
-        &tab_body(serde_json::json!([room_entry(147606, 1, "中国移动云盘")])),
-        &tab_body(serde_json::json!([])),
-    ]);
+    let (c, _) = ctx_with(&open_gate_chain(serde_json::json!([room_entry(
+        147606,
+        1,
+        "中国移动云盘"
+    )])));
     let collector = FakeCollector::failing();
     let params = LiveRoomParams {
         codes: vec![],
@@ -1630,13 +1794,17 @@ async fn collector_failure_propagates() {
 }
 
 /// ⭐ 重听失败**不致命**：保留第一轮的结果（重听是补救措施）。
+///
+/// # ⚠ 这一趟得**先开成门**，否则根本走不到重听
+///
+/// 「有 codes ⇒ 跳过开门」那个取舍意味着：**手工 codes 那一支没有房间**，
+/// 于是它连重听的机会都没有（`gate.rooms` 是空的）。
+/// 所以这条用例必须是"**门开着收来的**口令被判无效 ⇒ 重听 ⇒ 重听失败"，
+/// 而不是"手工 codes + 重听失败"—— 后者在新语义下**永远不会发生重听**。
 #[tokio::test]
 async fn retry_collection_failure_keeps_the_first_round() {
     // 门开着（才有房间可听）+ 一轮全败的链
-    let mut chain = vec![
-        tab_body(serde_json::json!([room_entry(147606, 1, "中国移动云盘")])),
-        tab_body(serde_json::json!([])),
-    ];
+    let mut chain = open_gate_chain(serde_json::json!([room_entry(147606, 1, "中国移动云盘")]));
     chain.extend(happy_chain(
         235,
         235,
@@ -1645,10 +1813,11 @@ async fn retry_collection_failure_keeps_the_first_round() {
         0,
     ));
     let (c, _) = ctx_with(&chain);
-    // 手工 codes ⇒ 首轮不收集；重听**会**走收集 —— 而它失败了。
-    let collector = FakeCollector::failing();
+    // 首轮收集**成功**（拿到一条口令），重听**失败** —— 两步必须能区分开，
+    // 否则这条用例测的其实是"首轮收集就失败了"，与它的名字不符。
+    let collector = RetryFailCollector::new(&["无效甲"]);
     let params = LiveRoomParams {
-        codes: vec!["无效甲".into()],
+        codes: vec![],
         listen_seconds: 60,
         ..Default::default()
     };
@@ -1671,6 +1840,86 @@ async fn retry_collection_failure_keeps_the_first_round() {
     );
 }
 
+// ══════════════════════════ 判据 12：⭐ 有 codes 时不开门 ══════════════════════════
+
+/// ⭐⭐ 「有 codes ⇒ 跳过开门」那个取舍的**判据**。
+///
+/// # 这条测试存在的理由
+///
+/// 顺序错了就看不出来：若实现写成"**先开门再看 codes**"，那么
+/// 门那两枪的偶发失败会把一趟**本来能跑完**的投递整体拖黄 ——
+/// 而用户给的口令是对的、六步链是好的，他却一朵花没拿到，
+/// 归因方向会指向"口令错了"（**完全错**）。
+///
+/// ⇒ 断言的是**请求序列里根本没有门的痕迹**。
+#[tokio::test]
+async fn manual_codes_skip_the_gate_entirely() {
+    // ⚠ 只给六步链的响应：**故意不给**门那两枪的响应。
+    // 如果实现真的去开门，它会拿到错位的响应而**必然**解析失败 ——
+    // 于是"跳过开门"这件事被钉在**行为**上，而不只是钉在计数器上。
+    let (c, http) = ctx_with(&happy_chain(235, 245, Some(give_ok(0)), &[draw_ok(10)], 0));
+    let collector = FakeCollector::empty();
+    let params = LiveRoomParams {
+        codes: vec!["手工口令".into()],
+        listen_seconds: 60,
+        ..Default::default()
+    };
+
+    let res = run_gated(&collector)
+        .run_account(&c.ctx(), &params)
+        .await
+        .expect("有 codes 就不该开门，于是也不该因为开门失败而整趟黄掉");
+
+    // ⭐ 门的**两个**请求一个都不能有。
+    assert_eq!(
+        http.count_of("/querySpecTokenV2"),
+        0,
+        "有 codes 时不该换 SSO（省两个请求 + 不让门失败拖累投递）"
+    );
+    assert_eq!(
+        http.count_of("/cmpassLoginByCmToken"),
+        0,
+        "有 codes 时不该换直播侧 JWT"
+    );
+    assert_eq!(
+        http.count_of("/cmlive"),
+        0,
+        "有 codes 时一个 /cmlive 都不该有"
+    );
+    assert!(!res.has_jwt, "没开门 ⇒ 没有直播侧票");
+    assert!(res.gate.rooms.is_empty(), "没开门 ⇒ 没有房间");
+
+    // 但六步链照跑，且真的进账了。
+    assert_eq!(res.report.as_ref().unwrap().gained(), 10);
+    assert_eq!(res.verdict(), RunVerdict::AllSucceeded);
+    assert_eq!(http.count_of("/redFlower/draw"), 1);
+    assert_eq!(collector.call_count(), 0, "手工 codes ⇒ 首轮不收集");
+}
+
+/// ⭐ 手工 codes 且**门那一族拿到的响应是坏的**时，投递照常成功。
+///
+/// 上一条的**强化版**：让门若真被打出去，拿到的会是明确的失败响应
+/// （六步链的尾巴 `balance_body` ⇒ 解析必然失败），
+/// 用来钉住"门不会因为 codes 存在而被打，也就不会被它的坏响应传染"。
+#[tokio::test]
+async fn manual_codes_deliver_even_when_the_gate_would_fail() {
+    let (c, http) = ctx_with(&happy_chain(235, 245, Some(give_ok(0)), &[draw_ok(10)], 0));
+    let collector = FakeCollector::empty();
+    let params = LiveRoomParams {
+        codes: vec!["手工口令".into()],
+        listen_seconds: 60,
+        ..Default::default()
+    };
+
+    let out = run_gated(&collector)
+        .run_account(&c.ctx(), &params)
+        .await
+        .expect("门不会被走到 ⇒ 它的坏响应也不该被消费");
+
+    assert!(out.outcome().is_success(), "{:?}", out.outcome());
+    assert_eq!(http.count_of("/cmlive"), 0);
+}
+
 // ── 小助手：直接造余额表与判定 ──────────────────────────────────────────
 
 fn balance(n: i64) -> RedFlowerBalance {
@@ -1682,6 +1931,446 @@ fn balance(n: i64) -> RedFlowerBalance {
 
 fn succeeded(flower_num: i64) -> RedFlowerDrawOutcome {
     proto::classify_red_flower_draw(&RedFlowerEnvelope::parse(&draw_ok(flower_num)))
+}
+
+// ══════════════════════════ 判据 13：🌸 开门那条链（G2 的核心）══════════════════════════
+
+/// ⭐⭐⭐ **完整链：开门 → 自动收到口令 → 投出去 → 进账。**
+///
+/// 这是任务的原话要求「**小红花自动获取口令，并使用口令领取小红花**」，
+/// 也是 G2 存在的理由。用户**不填任何 codes**，整条链必须自己跑通：
+///
+/// ```text
+/// ① querySpecTokenV2(017027)  → SSO
+/// ② cmpassLoginByCmToken      → 直播侧 JWT
+/// ③④ tabContentList ×2        → 房间（147606 在播，主播「中国移动云盘」）
+/// ⑤ WS 收集（用注入的假收集器）→ 口令
+/// ⑥ 六步链：余额 235 → … → 245
+/// ```
+///
+/// ⚠ WS 那一环用 `FakeCollector`（`KoulingCollector` trait 就是为此留的接缝）——
+/// 真 WS **结构性抓不到**（见模块头证据等级），所以这里只验**编排**：
+/// "门开了之后，收集到的口令会被真的投出去"。
+#[tokio::test]
+async fn auto_chain_opens_gate_collects_kouling_then_earns_flowers() {
+    // 门的前四枪 + 六步链
+    let rooms = serde_json::json!([room_entry(147606, 1, "中国移动云盘")]);
+    let mut chain = open_gate_chain(rooms);
+    chain.extend(happy_chain(235, 245, Some(give_ok(0)), &[draw_ok(10)], 0));
+    let (c, http) = ctx_with(&chain);
+
+    // 用户**没有**填 codes ⇒ 收集器必须被真的用到
+    let collector = FakeCollector::new(&[&["自动收集到的口令"]]);
+    let params = LiveRoomParams {
+        codes: vec![],
+        listen_seconds: 60,
+        ..Default::default()
+    };
+
+    let res = run_account_with(&c, &collector, &params).await;
+
+    // ── ① 门真的被开了 ────────────────────────────────────────────────
+    assert!(res.has_jwt, "⭐ 门开成了 ⇒ 拿到了直播侧凭证");
+    assert!(res.gate.active, "门开着");
+    assert_eq!(res.gate.rooms.len(), 1);
+    assert_eq!(res.gate.live_count, 1);
+
+    // ── ② 口令是**自动收来的**，不是用户给的 ────────────────────────────
+    assert_eq!(collector.call_count(), 1, "开成门之后去收集了一次");
+    assert_eq!(res.codes, vec!["自动收集到的口令".to_string()]);
+
+    // ── ③ 收来的口令**真的投出去了**，且进了账 ──────────────────────────
+    let report = res.report.as_ref().expect("应当有报告");
+    assert_eq!(report.balance_before.flower_cnt, 235);
+    assert_eq!(report.balance_after.flower_cnt, 245);
+    assert_eq!(report.gained(), 10, "⭐ 进账 = ⑥ − ①");
+    assert_eq!(report.succeeded(), 1);
+    assert_eq!(res.verdict(), RunVerdict::AllSucceeded);
+    assert!(res.outcome().is_success(), "{:?}", res.outcome());
+    assert_eq!(http.count_of("/redFlower/draw"), 1);
+
+    // ── ④ 请求序列：门在前、六步链在后 ─────────────────────────────────
+    let urls: Vec<String> = http.requests().iter().map(|r| r.url.clone()).collect();
+    let idx = |needle: &str| urls.iter().position(|u| u.contains(needle)).unwrap();
+    assert!(
+        idx("/querySpecTokenV2") < idx("/cmpassLoginByCmToken"),
+        "① 在 ② 之前"
+    );
+    assert!(
+        idx("/cmpassLoginByCmToken") < idx("/tabContentList"),
+        "② 在 ③ 之前（第③步要拿 ② 换到的 JWT）"
+    );
+    assert!(
+        idx("/tabContentList") < idx("/liveRoomFeedback/user/info"),
+        "门在六步链之前"
+    );
+}
+
+/// ⭐⭐ 开门那一步的 `toSourceId` **必须是 `017027`**（直播侧）。
+///
+/// # 用错的后果是**一条房间都筛不出来**，而那看起来像"今天没有直播"
+///
+/// 两者都叫 `targetSourceId`：签到/小红花侧是 `001005`，直播侧是 `017027`。
+/// 混用**不会报错** —— 只是筛不出东西，于是结论说"今天没有直播"：
+/// 一个**假结论**（参考实现坑表 #106；抓包文档第 494–495 行的原文纠正）。
+///
+/// ⚠ 所以这条断言的是**发出去的请求体**，而不只是常量相等 ——
+/// 常量对但拼装时用错（比如顺手复用了签到页配方）照样会被抓住。
+#[tokio::test]
+async fn gate_opens_with_the_live_source_id_not_the_signin_one() {
+    let rooms = serde_json::json!([room_entry(147606, 1, "中国移动云盘")]);
+    // 开门四枪 + 一条完整的六步链：这条用例让链**跑完**，
+    // 所以响应脚本也得给全（否则失败的是六步链，掩盖了要断言的门）。
+    let mut chain = open_gate_chain(rooms);
+    chain.extend(happy_chain(235, 245, Some(give_ok(0)), &[draw_ok(10)], 0));
+    let (c, http) = ctx_with(&chain);
+    let collector = FakeCollector::new(&[&["口令"]]);
+    let params = LiveRoomParams {
+        codes: vec![],
+        listen_seconds: 60,
+        ..Default::default()
+    };
+
+    run_gated(&collector)
+        .run_account(&c.ctx(), &params)
+        .await
+        .unwrap();
+
+    // 找到第①枪，断言它的 body。
+    let first = http
+        .requests()
+        .into_iter()
+        .find(|r| r.url.contains("/querySpecTokenV2"))
+        .expect("门必须打 querySpecTokenV2");
+    let body: serde_json::Value =
+        serde_json::from_str(first.body.as_deref().expect("第①步是 JSON 体")).unwrap();
+
+    assert_eq!(
+        body["toSourceId"], "017027",
+        "⭐ 门必须用**直播侧**的 toSourceId（不是签到的 001005）"
+    );
+    assert_ne!(
+        body["toSourceId"], "001005",
+        "001005 是小火花/签到侧的值 —— 用它门会一条房间都筛不出来"
+    );
+    // 第①步**只带这一个键**（门不建 H5 会话）
+    assert_eq!(
+        body.as_object().unwrap().len(),
+        1,
+        "门的第①步只有 toSourceId，实得：{body}"
+    );
+}
+
+/// ⭐⭐ **开门失败 ⇒ 如实报错**，绝不能报"今天没有直播"。
+///
+/// # 这条测试拦的是一个**谎言**
+///
+/// 「今天没开播」与「我们的凭据坏了」是**两件完全不同的事**，
+/// 而它们的下一步也不同（一个是"等明天"，一个是"去修票"）。
+/// 参考实现早先在 SSO/登录失败时 `return true` 放行，
+/// 它自己后来明确否定了那条 —— 它让"凭据坏了"表现成
+/// "门开着、却一条口令也听不到"，真因被盖住，排查方向从
+/// "今天是不是没开播"开始，**完全错**。
+///
+/// ⇒ 这里逐个覆盖开门两枪各自的失败，断言的都是 **Err**（不是成功的 idle）。
+#[tokio::test]
+async fn gate_failure_is_reported_honestly_never_as_no_live_today() {
+    let params = LiveRoomParams {
+        codes: vec![],
+        listen_seconds: 60,
+        ..Default::default()
+    };
+
+    // ── 情形 A：第①步（换 SSO）失败 ─────────────────────────────────────
+    let (c, _) = ctx_with(&[sso_fail_body()]);
+    let e = run_gated(&FakeCollector::empty())
+        .run_account(&c.ctx(), &params)
+        .await
+        .expect_err("⭐ 换 SSO 失败必须上抛，绝不能变成一句'今天没有直播'");
+    let text = e.to_string();
+    assert!(
+        text.contains("[门·换 SSO token]"),
+        "错误要带步名前缀，好让人知道崩在哪一步：{text}"
+    );
+    assert!(
+        !text.contains("今天没有直播"),
+        "⭐⭐ '凭据坏了'绝不能报成'今天没开播' —— 那是撒谎：{text}"
+    );
+
+    // ── 情形 B：第②步（换直播侧 JWT）失败 ───────────────────────────────
+    let (c, _) = ctx_with(&[sso_body(), cmpass_fail_body()]);
+    let e = run_gated(&FakeCollector::empty())
+        .run_account(&c.ctx(), &params)
+        .await
+        .expect_err("⭐ 换 JWT 失败必须上抛");
+    let text = e.to_string();
+    assert!(
+        text.contains("[门·换直播侧 JWT]"),
+        "错误要带步名前缀：{text}"
+    );
+    assert!(
+        !text.contains("今天没有直播"),
+        "⭐⭐ 同上，不能撒谎：{text}"
+    );
+
+    // ── 情形 C：第①步的响应不是信封（解析失败）也要如实报 ────────────────
+    let (c, _) = ctx_with(&["<html>网关错误</html>".to_string()]);
+    let e = run_gated(&FakeCollector::empty())
+        .run_account(&c.ctx(), &params)
+        .await
+        .expect_err("⭐ 解析失败必须上抛");
+    assert!(
+        e.to_string().contains("[门·换 SSO token]"),
+        "解析失败也要带步名：{e}"
+    );
+}
+
+/// ⭐ **开门失败时绝不退回"放行"**：收集器一次都不该被调到。
+///
+/// 与上一条配对：上一条钉的是"报了 Err"，这条钉的是"没有偷偷继续跑"。
+/// 参考实现那条被否定的做法（`return true` 放行）的表现正是
+/// "崩了但继续"—— 于是收集器被调用、门却是空的。
+#[tokio::test]
+async fn gate_failure_does_not_fall_back_to_running_the_chain() {
+    let (c, http) = ctx_with(&[sso_fail_body()]);
+    let collector = FakeCollector::new(&[&["不该被收集"]]);
+    let params = LiveRoomParams {
+        codes: vec![],
+        listen_seconds: 60,
+        ..Default::default()
+    };
+
+    let _ = run_gated(&collector)
+        .run_account(&c.ctx(), &params)
+        .await
+        .expect_err("必须 Err");
+
+    assert_eq!(collector.call_count(), 0, "⭐ 门没开成 ⇒ 一次都不该去收集");
+    assert_eq!(
+        http.count_of("/liveRoomFeedback"),
+        0,
+        "更不该打小红花六步链"
+    );
+    assert_eq!(http.count_of("/redFlower/draw"), 0, "一个口令都不该投");
+}
+
+/// ⭐⭐ **两套凭据绝不能混用**：直播侧 JWT 只在 `/cmlive`，云盘侧票只在 `/ycloud`。
+///
+/// # 这条测试拦的是实测过的 `90001 未登录`
+///
+/// 参考实现记录过"把**直播侧** JWT 传进**云盘侧**参数位" ⇒ 实测回
+/// **`90001 未登录`**（2026-09-22，两个账号都是那一句）。
+///
+/// 两套票**不是靠长相区分的**（都是长字符串），而是靠**域**：
+///
+/// | 票 | 挂在哪个头 | 域 |
+/// |---|---|---|
+/// | 直播侧 JWT | **`Authorization`** | `/cmlive` 与弹幕 WS |
+/// | 云盘侧 `jwttoken` | **`jwttoken`** | `/ycloud` 六步链 |
+///
+/// ⇒ 断言两件事：**(a)** 直播侧 JWT 只出现在 `/cmlive` 的请求上且只在
+/// `Authorization` 头里；**(b)** `/ycloud` 的请求上**从不**出现它。
+#[tokio::test]
+async fn the_two_credentials_never_cross_domains() {
+    let rooms = serde_json::json!([room_entry(147606, 1, "中国移动云盘")]);
+    let mut chain = open_gate_chain(rooms);
+    chain.extend(happy_chain(235, 245, Some(give_ok(0)), &[draw_ok(10)], 0));
+    let (c, http) = ctx_with(&chain);
+    let collector = FakeCollector::new(&[&["口令"]]);
+    let params = LiveRoomParams {
+        codes: vec![],
+        listen_seconds: 60,
+        ..Default::default()
+    };
+
+    run_gated(&collector)
+        .run_account(&c.ctx(), &params)
+        .await
+        .unwrap();
+
+    let reqs = http.requests();
+    assert!(!reqs.is_empty());
+
+    let header = |r: &HttpRequest, name: &str| -> Option<String> {
+        r.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
+    };
+
+    let mut cmlive_with_jwt = 0usize;
+    for r in &reqs {
+        let on_cmlive = r.url.contains("/cmlive");
+        let on_ycloud = r.url.contains("/ycloud") || r.url.contains("m.mcloud.139.com");
+        let on_gate_step1 = r.url.contains("/querySpecTokenV2");
+
+        // ── (a) 直播侧 JWT：只在 /cmlive 上，且只走 Authorization 头 ──────
+        if header(r, "Authorization").as_deref() == Some(TEST_LIVE_JWT) {
+            assert!(
+                on_cmlive,
+                "⭐⭐ 直播侧 JWT 出现在了**非 /cmlive** 的请求上：{}",
+                r.url
+            );
+            cmlive_with_jwt += 1;
+        }
+
+        // ── (b) 云盘侧六步链的请求上**绝不能**出现直播侧 JWT ───────────────
+        if on_ycloud {
+            assert!(
+                header(r, "Authorization").as_deref() != Some(TEST_LIVE_JWT),
+                "⭐⭐⭐ 直播侧 JWT 传进了云盘侧请求（实测会回 90001 未登录）：{}",
+                r.url
+            );
+            assert!(
+                header(r, "jwttoken").as_deref() != Some(TEST_LIVE_JWT),
+                "⭐⭐⭐ 直播侧 JWT 被当成了云盘侧 jwttoken：{}",
+                r.url
+            );
+            assert!(
+                !r.url.contains("/cmlive") || on_gate_step1,
+                "云盘侧请求不该借道 /cmlive：{}",
+                r.url
+            );
+        }
+
+        // ── (c) 反过来：/cmlive 的请求不能带云盘侧那套 H5 头 ────────────────
+        if on_cmlive {
+            assert!(
+                header(r, "activityid").is_none(),
+                "⭐⭐ /cmlive 的请求不该带 H5 的 activityid 头（那是云盘侧那一套）：{}",
+                r.url
+            );
+            assert!(
+                header(r, "jwttoken").is_none(),
+                "⭐⭐ /cmlive 的请求不该带 jwttoken 头（那是云盘侧那一套）：{}",
+                r.url
+            );
+        }
+
+        // ── (d) 第①步（换 SSO）不该带任何一张业务票 ───────────────────────
+        if on_gate_step1 {
+            assert!(
+                header(r, "jwttoken").is_none(),
+                "换 SSO 这一步还没有票，不该带 jwttoken：{}",
+                r.url
+            );
+            assert!(
+                header(r, "Authorization").as_deref() != Some(TEST_LIVE_JWT),
+                "换 SSO 用的是库里的 Basic 凭据，不是直播侧 JWT：{}",
+                r.url
+            );
+        }
+    }
+
+    // 直播侧 JWT 必须**真的**被用上（否则上面那些断言全是空转）。
+    //
+    // ⚠ 计数是 **2** 而不是更多：收集器在这条用例里是**替身**（不碰 HTTP），
+    // 所以真正带这张票的只有门第③步的**两个 `tabContentList`**。
+    assert_eq!(
+        cmlive_with_jwt, 2,
+        "直播侧 JWT 应当正好用在门第③步的两个页签上（实得 {cmlive_with_jwt} 处）"
+    );
+    assert_eq!(
+        http.count_of("/tabContentList"),
+        2,
+        "两个页签各一枪（127 福利 + 129 回放）"
+    );
+
+    // 而六步链**确实**打了（否则 (b) 也是空转）。
+    assert!(
+        reqs.iter().any(|r| r.url.contains("/liveRoomFeedback")),
+        "六步链必须真的跑过，否则'两套票不混用'这条断言没有意义"
+    );
+}
+
+/// ⭐ 直播侧 JWT **确实**被传给了收集器（而不是传了个空串）。
+///
+/// # 为什么这条必须单独有
+///
+/// `run_account` 里那个 `jwt` 早先是 `unwrap_or_default()` ——
+/// 忘了填就是**静默传空串**：收集器拿去连 WS 会失败，
+/// 而报错说的是"连不上"，排查方向完全错。
+/// 这里用替身把"收到的那串"记下来，钉住"传的是门换来的那一张"。
+#[tokio::test]
+async fn the_gate_jwt_is_handed_to_the_collector_for_real() {
+    let rooms = serde_json::json!([room_entry(147606, 1, "中国移动云盘")]);
+    let (c, _) = ctx_with(&open_gate_chain(rooms));
+    let collector = JwtRecordingCollector::default();
+    let params = LiveRoomParams {
+        codes: vec![],
+        listen_seconds: 60,
+        ..Default::default()
+    };
+
+    run_gated(&collector)
+        .run_account(&c.ctx(), &params)
+        .await
+        .unwrap();
+
+    let seen = collector.jwts();
+    assert_eq!(seen.len(), 1, "应当收集过一次");
+    assert_eq!(
+        seen[0], TEST_LIVE_JWT,
+        "⭐⭐ 收集器拿到的必须是**门换来的那张直播侧 JWT**，不是空串、不是别的票"
+    );
+    assert!(!seen[0].is_empty(), "绝不能是空串（那会变成一句'连不上'）");
+}
+
+/// ⭐ 只开门**不收集**（`kouling_only`）时，门照样开、口令照样收，但一枪不投。
+#[tokio::test]
+async fn auto_chain_kouling_only_opens_the_gate_and_stops() {
+    let rooms = serde_json::json!([room_entry(147606, 1, "中国移动云盘")]);
+    let (c, http) = ctx_with(&open_gate_chain(rooms));
+    let collector = FakeCollector::new(&[&["口令甲", "口令乙"]]);
+    let params = LiveRoomParams {
+        codes: vec![],
+        listen_seconds: 60,
+        kouling_only: true,
+        skip_kouling: false,
+    };
+
+    let res = run_gated(&collector)
+        .run_account(&c.ctx(), &params)
+        .await
+        .unwrap();
+
+    assert!(res.has_jwt, "门开成了");
+    assert_eq!(res.codes, vec!["口令甲".to_string(), "口令乙".to_string()]);
+    assert!(res.report.is_none(), "只听不投");
+    assert_eq!(http.count_of("/liveRoomFeedback"), 0, "一个口令都不投");
+    assert_eq!(http.count_of("/querySpecTokenV2"), 1, "门只开一次");
+}
+
+/// ⭐ `LiveRoomTask::run` 端到端：**不填 codes** 也能自动收口令并进账。
+///
+/// 前面的用例测的是 `run_account`（编排本体），这条测的是**任务入口** ——
+/// 它才是"用户点一下"真正走到的地方。两者之间的差别正是历史上那处
+/// `live_jwt: None` 写死所在的位置。
+#[tokio::test]
+async fn live_room_task_auto_collects_without_manual_codes() {
+    let rooms = serde_json::json!([room_entry(147606, 1, "中国移动云盘")]);
+    let mut chain = open_gate_chain(rooms);
+    chain.extend(happy_chain(235, 245, Some(give_ok(0)), &[draw_ok(10)], 0));
+    let (c, http) = ctx_with(&chain);
+
+    // 注入假收集器：`LiveRoomTask` 生产上用的是真 WS 收集器。
+    let task = LiveRoomTask {
+        collector: std::sync::Arc::new(FakeCollector::new(&[&["自动口令"]])),
+    };
+
+    let out = task
+        .run(&c.ctx(), &serde_json::json!({}))
+        .await
+        .expect("不填 codes 也要能跑（这正是 G2 要修的那件事）");
+
+    assert!(out.is_success(), "{out:?}");
+    assert!(
+        out.summary().contains("进账 10"),
+        "⭐ 自动收来的口令真的换到了花：{}",
+        out.summary()
+    );
+    assert_eq!(http.count_of("/querySpecTokenV2"), 1);
+    assert_eq!(http.count_of("/redFlower/draw"), 1);
 }
 
 // ══════════════════════════ 判据 11：register_all 接入 ══════════════════════════

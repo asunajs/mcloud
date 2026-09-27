@@ -475,3 +475,90 @@ fn content_type_carries_charset() {
     // `application/json` 少了 `;charset=UTF-8` 是抓包里**没有**的形状
     assert_eq!(H5_CONTENT_TYPE, "application/json;charset=UTF-8");
 }
+
+// ── 直播侧「门」的第①步（自动收口令的前置）────────────────────────────────
+
+/// ⭐ **门的第①步必须用直播侧的 `toSourceId`（`017027`），不是签到的 `001005`。**
+///
+/// 两者都叫 `targetSourceId`，混用的表现是"**一条房间都筛不出来**" ——
+/// 而它看起来像"今天没有直播"，是个**假结论**（参考实现坑表 #106；
+/// `../mcloud/docs/capture/app-live-redflower-samples.txt` 第 494–495 行原文纠正）。
+///
+/// 实测形状（同文档第 351 行）：`{"toSourceId":"017027"}` ⇒ SSO token 42 字符。
+#[test]
+fn live_gate_spec_token_uses_the_live_source_id() {
+    let req = live_gate_spec_token_request("mobile abc");
+
+    assert!(
+        req.url.ends_with("/user/querySpecTokenV2"),
+        "应打 querySpecTokenV2，实得 {}",
+        req.url
+    );
+    let body: serde_json::Value =
+        serde_json::from_str(req.body.as_deref().expect("第①步是 JSON 体")).unwrap();
+
+    // ⭐ 这一条是本文件存在的理由。
+    assert_eq!(
+        body["toSourceId"], "017027",
+        "门的第①步必须用**直播侧**那个 toSourceId"
+    );
+    assert_ne!(
+        body["toSourceId"], "001005",
+        "001005 是签到/小红花侧的值 —— 用它门会一条房间都筛不出来"
+    );
+    assert_eq!(body["toSourceId"], crate::live_consts::LIVE_SOURCE_ID);
+    assert_ne!(
+        crate::live_consts::LIVE_SOURCE_ID,
+        crate::live_consts::TO_SOURCE_ID,
+        "两侧的 sourceId 必须不同（这是两套不同的东西）"
+    );
+}
+
+/// 第①步**只有 `toSourceId` 一个键** —— 没有 `marketName` 之类。
+///
+/// 这条钉的是"门不建 H5 会话"这个事实：建会话那三枪才要 `marketName` /
+/// `sourceId`，而门只换一张 SSO 就去 `/cmlive`。
+/// ⚠ 若将来有人"顺手把配方其余字段拼进这个体"，这条会红 —— 那正是要拦的。
+#[test]
+fn live_gate_spec_token_body_has_exactly_one_key() {
+    let req = live_gate_spec_token_request("mobile abc");
+    let body: serde_json::Value = serde_json::from_str(req.body.as_deref().unwrap()).unwrap();
+    let obj = body.as_object().expect("应当是 JSON 对象");
+    assert_eq!(
+        obj.len(),
+        1,
+        "门的第①步只带 toSourceId（实测形状只有一个键），实得键：{:?}",
+        obj.keys().collect::<Vec<_>>()
+    );
+    assert!(obj.contains_key("toSourceId"));
+}
+
+/// 第①步要带上库里那份 `authorization`（不另建凭据）。
+///
+/// 实测结论：`querySpecTokenV2(017027)` **能换到** SSO token
+/// ⇒ 现有凭据在直播这一族上也认（**不必**为直播单独准备凭据）。
+#[test]
+fn live_gate_spec_token_carries_the_existing_authorization() {
+    let req = live_gate_spec_token_request("mobile abc");
+    assert_eq!(header(&req, "Authorization"), Some("mobile abc"));
+    assert_eq!(header(&req, "Content-Type"), Some(H5_CONTENT_TYPE));
+}
+
+/// 门用的是**直播侧**那一张票，与签到页配方**不是同一条**。
+///
+/// 这条防的是"把两张票混用"：拿直播侧 JWT 去 `/ycloud` 实测回 `90001 未登录`。
+#[test]
+fn gate_token_request_is_not_the_signin_recipe() {
+    let gate = live_gate_spec_token_request("mobile abc");
+    let signin = spec_token_request(signin(), "mobile abc");
+
+    // 同一个端点，但 body 里的 toSourceId 必须不同。
+    let gate_body: serde_json::Value = serde_json::from_str(gate.body.as_deref().unwrap()).unwrap();
+    let signin_body: serde_json::Value =
+        serde_json::from_str(signin.body.as_deref().unwrap()).unwrap();
+    assert_ne!(
+        gate_body["toSourceId"], signin_body["toSourceId"],
+        "门的票与签到页的票是两套不同的参数，不能相同"
+    );
+    assert_eq!(signin_body["toSourceId"], "001005");
+}

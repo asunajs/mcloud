@@ -29,6 +29,8 @@ rsa.workspace = true
 flate2.workspace = true
 # 生产随机源走 OS 熵源，不靠 rsa 的传递依赖。
 getrandom.workspace = true
+# 滑块题面（兑换）要本地解 PNG。
+png.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

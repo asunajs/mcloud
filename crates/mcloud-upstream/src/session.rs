@@ -90,6 +90,44 @@ impl SessionRecipe {
     }
 }
 
+/// 直播侧**门的第①步**：只要 `querySpecTokenV2` 那一枪，不要完整配方。
+///
+/// # 为什么不做成 [`SessionRecipe`] 的一个分支
+///
+/// 门的第①步与"建 H5 会话"是**两件事**：
+///
+/// | | 门的第①步（本函数） | 建 H5 会话（[`SessionRecipe`]） |
+/// |---|---|---|
+/// | 打几枪 | **1**（`querySpecTokenV2`） | 3（+时间戳 +`tyrzLogin`） |
+/// | 要哪些参数 | **只有 `toSourceId`** | `marketName` / `sourceId` / `appID` / `path` |
+/// | 产物 | SSO token → 去 `/cmlive` 换**直播侧** JWT | H5 会话票（`/ycloud` 用） |
+///
+/// ⇒ 把门塞进 `SessionRecipe` 就必须为 `market_name` / `source_id` /
+/// `h5_app_id` / `page_path` **四个用不到的字段填值**，而它们**没有任何依据**
+/// （握手实测：`../mcloud/docs/capture/app-live-redflower-samples.txt` 第 351 行
+/// 那一步只有 `{"toSourceId":"017027"}`，没有后四个）。
+/// 编四个"看起来合理"的常量，正是本仓明确排斥的那类做法 ——
+/// 下一个读代码的人会拿它当依据。
+///
+/// 所以这里只给**一个 `toSourceId`**，与实测形状一一对应。
+///
+/// # ⚠ 必须用直播侧那个值（`017027`）
+///
+/// 同文档第 494–495 行的原文纠正：
+/// > `sourceCode=017027` 当过滤器是错的 —— 它只出现在直播房间页的 **URL 参数**
+/// > `targetSourceId=017027` 里，**不在 `/ycloud` 侧**（小红花那边是 `targetSourceId=001005`）。
+///
+/// 混用的表现是"**一条房间都筛不出来**"，而它看起来像"今天没有直播"——
+/// 一个**假结论**（参考实现坑表 #106）。
+pub fn live_gate_spec_token_request(authorization: &str) -> HttpRequest {
+    HttpRequest::post(format!("{BASE_USER_YUN}/user/querySpecTokenV2"))
+        .header("Content-Type", H5_CONTENT_TYPE)
+        .header("Authorization", authorization)
+        .json_body(&serde_json::json!({
+            "toSourceId": crate::live_consts::LIVE_SOURCE_ID,
+        }))
+}
+
 /// 一个配方的换票参数。
 ///
 /// 收成一个结构体而不是散在函数里：新增配方时只加一个 `match` 分支，

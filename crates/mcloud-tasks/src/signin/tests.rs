@@ -195,6 +195,13 @@ fn ok(result: serde_json::Value) -> String {
     serde_json::json!({"code":0,"msg":"success","result":result}).to_string()
 }
 
+/// 上游回**非零码**（业务失败的正常形状）。
+///
+/// 与 [`ok`] 配对：用来构造"某一笔失败、其余仍要照跑"这类场景。
+fn fail(msg: &str, code: i64) -> String {
+    serde_json::json!({"code":code,"msg":msg}).to_string()
+}
+
 // ══════════════════════════ sign ══════════════════════════
 
 /// 今日已签 ⇒ **一枪都不发**（除了那次查询），并且不报失败。
@@ -622,19 +629,50 @@ async fn revival_reports_feedback_card() {
 
 // ══════════════════════════ backup-gift ══════════════════════════
 
-/// 没开备份 ⇒ 跳过，并说清"要人工去 App 开"。
+/// `backupgift/info` 的响应。
+fn gift_body(state: i64, cur_month: bool) -> String {
+    serde_json::json!({
+        "code": 0, "msg": "success",
+        "result": {"state": state, "curMonth": cur_month}
+    })
+    .to_string()
+}
+
+/// ⭐ 端点必须是**另一个主机**上的 `/market/backupgift/*`。
+///
+/// 这一族里只有它不是 `m.mcloud.139.com/ycloud/`。照抄 `infoV3` 那套
+/// 会打到一个**不存在的路径**上 —— 而返回的非零码会被读成"上游改了接口"。
+#[tokio::test]
+async fn backup_gift_uses_its_own_host_and_path() {
+    let (c, http) = Ctx::new(&[&gift_body(0, true), &ok(serde_json::json!(1))]);
+    BackupGiftTask
+        .run(&c.ctx(), &serde_json::json!({}))
+        .await
+        .unwrap();
+
+    let info = http.url_at(0);
+    assert!(
+        info.starts_with("https://caiyun.feixin.10086.cn/market/backupgift/info"),
+        "状态查询的主机/路径不对：{info}"
+    );
+    let recv = http.url_at(1);
+    assert!(
+        recv.starts_with("https://caiyun.feixin.10086.cn/market/backupgift/receive"),
+        "领取的主机/路径不对：{recv}"
+    );
+}
+
+/// `state == -1`（未开备份）⇒ 跳过 + 给出**人工出口**。
 #[tokio::test]
 async fn backup_gift_skips_when_backup_is_off() {
-    let mut v: serde_json::Value = serde_json::from_str(&info_body(false, 10496)).unwrap();
-    v["result"]["curMonthBackup"] = serde_json::json!(false);
-    let (c, http) = Ctx::new(&[&v.to_string()]);
-
+    let (c, http) = Ctx::new(&[&gift_body(-1, true)]);
     let out = BackupGiftTask
         .run(&c.ctx(), &serde_json::json!({}))
         .await
         .unwrap();
-    assert!(matches!(out, TaskOutcome::Skipped { .. }));
-    assert_eq!(http.count(), 1, "没开备份就不该去领");
+
+    assert!(matches!(out, TaskOutcome::Skipped { .. }), "{out:?}");
+    assert_eq!(http.count(), 1, "不可领就不该发 receive");
     assert!(
         out.summary().contains("App"),
         "要给出人工出口：{}",
@@ -642,10 +680,52 @@ async fn backup_gift_skips_when_backup_is_off() {
     );
 }
 
-/// 开了备份 ⇒ 去领，且**只发一枪**（GET 但是写，不能重试）。
+/// `state == 1`（本月已领过）⇒ 跳过，且措辞与"未开备份"**不同**。
+#[tokio::test]
+async fn backup_gift_skips_when_already_claimed() {
+    let (c, http) = Ctx::new(&[&gift_body(1, true)]);
+    let out = BackupGiftTask
+        .run(&c.ctx(), &serde_json::json!({}))
+        .await
+        .unwrap();
+
+    assert!(matches!(out, TaskOutcome::Skipped { .. }));
+    assert_eq!(http.count(), 1);
+    assert!(
+        out.summary().contains("已经领过"),
+        "实得：{}",
+        out.summary()
+    );
+    assert!(
+        !out.summary().contains("App"),
+        "已领过不需要用户去做任何事，别让他去开备份：{}",
+        out.summary()
+    );
+}
+
+/// `curMonth == false` ⇒ 跳过，且**连 state 都不看**（旧项目的判据顺序）。
+#[tokio::test]
+async fn backup_gift_skips_when_there_is_no_gift_this_month() {
+    // state 是"可领"，但本月没有这份礼 ⇒ 仍然跳过
+    let (c, http) = Ctx::new(&[&gift_body(0, false)]);
+    let out = BackupGiftTask
+        .run(&c.ctx(), &serde_json::json!({}))
+        .await
+        .unwrap();
+
+    assert!(matches!(out, TaskOutcome::Skipped { .. }), "{out:?}");
+    assert_eq!(http.count(), 1);
+    assert!(
+        out.summary().contains("本月没有"),
+        "实得：{}",
+        out.summary()
+    );
+}
+
+/// `state == 0` 且本月有 ⇒ 领，且**只发一枪**（GET 但是写，不能重试）。
 #[tokio::test]
 async fn backup_gift_claims_exactly_once() {
-    let (c, http) = Ctx::new(&[&info_body(false, 10496), &ok(serde_json::json!({}))]);
+    let (c, http) = Ctx::new(&[&gift_body(0, true), &ok(serde_json::json!(1))]);
     let out = BackupGiftTask
         .run(&c.ctx(), &serde_json::json!({}))
         .await
@@ -653,6 +733,56 @@ async fn backup_gift_claims_exactly_once() {
 
     assert!(out.is_success(), "{out:?}");
     assert_eq!(http.count(), 2, "查一次 + 领一次，不重试");
+    assert!(
+        out.summary().contains("获得 1 云朵"),
+        "实得：{}",
+        out.summary()
+    );
+}
+
+/// ⭐ 认不出的 `state` ⇒ **报错，不猜**。
+///
+/// 猜"可领"会白打一枪写请求；猜"不可领"会永久漏领。
+/// 这条防的是"上游加了个新状态"被静默处理成其中一种。
+#[tokio::test]
+async fn backup_gift_refuses_an_unknown_state() {
+    let (c, http) = Ctx::new(&[&gift_body(7, true)]);
+    let err = BackupGiftTask
+        .run(&c.ctx(), &serde_json::json!({}))
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("state=7"), "要点出是哪个值：{err}");
+    assert_eq!(http.count(), 1, "状态不明时绝不发写请求");
+}
+
+/// `receive` 的 `result` 是**裸数字**，缺了也不判失败。
+#[tokio::test]
+async fn backup_gift_tolerates_missing_amount() {
+    let (c, _http) = Ctx::new(&[&gift_body(0, true), r#"{"code":0,"msg":"success"}"#]);
+    let out = BackupGiftTask
+        .run(&c.ctx(), &serde_json::json!({}))
+        .await
+        .unwrap();
+
+    assert!(out.is_success(), "份数缺失不该把一次成功报成失败：{out:?}");
+    assert!(
+        out.summary().contains("份数上游未给"),
+        "实得：{}",
+        out.summary()
+    );
+}
+
+/// `info` 缺 `state` ⇒ 解析失败（它是主判据，缺了没法判该不该领）。
+#[tokio::test]
+async fn backup_gift_requires_the_state_field() {
+    let body = r#"{"code":0,"msg":"success","result":{"curMonth":true}}"#;
+    let (c, _http) = Ctx::new(&[body]);
+    let err = BackupGiftTask
+        .run(&c.ctx(), &serde_json::json!({}))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("state"), "实得：{err}");
 }
 
 // ══════════════════════════ prizes ══════════════════════════
@@ -1060,4 +1190,46 @@ impl mcloud_core::UserStore for NoStore {
     async fn purge_expired_sessions(&self, _now_ms: i64) -> Result<usize> {
         Err(refuse())
     }
+}
+
+/// ⭐ **自动领取的批处理语义**：一条失败**不该**拖垮其余条目。
+///
+/// 参考实现（`mcloud` 的 `ReceiveAll`）对每一条是 `perr != nil ⇒ 记一笔
+/// ReceiveOutcomeFailed、continue`，即**逐条独立**。理由：`receiveList`
+/// 里可能同时有「现在可领」与「已到期延期」两档，而它们是**互不相干**的
+/// 两笔账 —— 第一笔因为某种原因失败（例如它自己那条已被领过、或上游偶发
+/// 5xx），没有理由让第二笔也跟着不发。
+///
+/// ⚠ 本仓此前是 `?` 直接上抛 ⇒ **第一条失败整批中止**。用户看到的是
+/// "领取失败"，而实际上后面那笔**本来能领到** —— 这是"少领了却说失败"
+/// 的那一侧错误，代价是该领的没领、且下轮要等一整天。
+#[tokio::test]
+async fn receive_keeps_going_when_one_item_fails() {
+    let info = info_with_receive(serde_json::json!([
+        {"cloudType":0,"cloudNum":6,"recordId":"R1"},
+        {"cloudType":0,"cloudNum":9,"recordId":"R2"}
+    ]));
+    let (c, http) = Ctx::new(&[
+        &info,
+        // 第一笔失败（非零码），第二笔成功。
+        &fail("领取失败", 500),
+        &ok(serde_json::json!({"receive":9})),
+    ]);
+    let out = ReceiveTask
+        .run(&c.ctx(), &serde_json::json!({}))
+        .await
+        .unwrap();
+
+    // ⭐ 关键断言：**第二笔仍然发出去了**（共 3 枪：1 查 + 2 领）。
+    assert_eq!(
+        http.count(),
+        3,
+        "一条失败不该中止整批 —— 后续条目仍应投递；实得 URL：{:?}",
+        http.requests()
+            .iter()
+            .map(|r| r.url.clone())
+            .collect::<Vec<_>>()
+    );
+    // 领到的 9 朵要被如实计入。
+    assert!(out.summary().contains('9'), "实得：{}", out.summary());
 }

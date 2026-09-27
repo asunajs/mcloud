@@ -195,6 +195,20 @@ impl Task for ReceiveTask {
         // 于是"领到了多少"在数据上是黑盒）。
         let mut step = 0u32;
         let total_steps = st.receive_list.len() as u32;
+        // 失败的条目：**一条失败不拖垮其余**，但要如实收齐、最后报出来。
+        //
+        // # 为什么逐条兜错，而不是 `?` 直接上抛
+        //
+        // `receiveList` 里可能同时有「现在可领」与「已到期延期」两档，
+        // 它们是**互不相干**的两笔账。第一笔因为某种原因失败（自己那条已被领过、
+        // 上游偶发 5xx），没有理由让第二笔也跟着不发 ——
+        // 参考实现（`mcloud` 的 `ReceiveAll`）对每一条就是
+        // `perr != nil ⇒ 记一笔失败、continue`。
+        //
+        // ⚠ 早先这里是 `?` ⇒ **第一条失败整批中止**：用户看到"领取失败"，
+        // 而后面那笔**本来能领到**。这是"少领了却说失败"的那一侧错误 ——
+        // 该领的没领，且下轮要等一整天。
+        let mut failed: Vec<String> = Vec::new();
 
         for item in &st.receive_list {
             ctx.check_cancelled()?;
@@ -213,11 +227,18 @@ impl Task for ReceiveTask {
                 proto::cloud_type::EXPANSION => {
                     ctx.progress(step, total_steps, "领取延期云朵");
                     let req = proto::receive_task_expansion_request(item.accept_date.as_deref());
-                    let env = call(ctx, req, "领取延期云朵").await?;
-                    env.ensure_ok("领取延期云朵")?;
-                    // ⚠ `receiveTaskExpansion` 的 result 是**裸数字**（实拍
-                    // `result: 100`），不是对象 —— 所以这里不解析形状。
-                    claimed_ids.push("延期领取（实拍不返回份数）".to_string());
+                    // ⚠⚠ 这一笔失败**只跳过它自己** —— 见 `failed` 的说明。
+                    match call(ctx, req, "领取延期云朵").await {
+                        Ok(env) => match env.ensure_ok("领取延期云朵") {
+                            Ok(()) => {
+                                // `receiveTaskExpansion` 的 result 是**裸数字**（实拍
+                                // `result: 100`），不是对象 —— 所以这里不解析形状。
+                                claimed_ids.push("延期领取（实拍不返回份数）".to_string());
+                            }
+                            Err(e) => failed.push(format!("延期领取：{e}")),
+                        },
+                        Err(e) => failed.push(format!("延期领取：{e}")),
+                    }
                 }
                 _ => {
                     // `cloudType == 0`（以及任何未知值）：走 `receiveV3`。
@@ -228,10 +249,16 @@ impl Task for ReceiveTask {
                     let cloud_id = item.record_id.clone().unwrap_or_default();
                     let req =
                         proto::receive_v3_request(device_id, &cloud_id, Some(item.cloud_type));
-                    let env = call(ctx, req, "领取云朵").await?;
-                    let got = proto::parse_receive_v3(&env)?;
-                    total_gained += got.receive;
-                    claimed_ids.push(format!("+{} 云朵", got.receive));
+                    match call(ctx, req, "领取云朵").await {
+                        Ok(env) => match proto::parse_receive_v3(&env) {
+                            Ok(got) => {
+                                total_gained += got.receive;
+                                claimed_ids.push(format!("+{} 云朵", got.receive));
+                            }
+                            Err(e) => failed.push(format!("领取云朵（解析失败）：{e}")),
+                        },
+                        Err(e) => failed.push(format!("领取云朵：{e}")),
+                    }
                 }
             }
         }
@@ -250,7 +277,21 @@ impl Task for ReceiveTask {
         if next_month > 0 {
             msg.push_str(&format!("；另有 {next_month} 笔标记为下月可领取"));
         }
+        if !failed.is_empty() {
+            // ⚠ 失败**必须出现在小结里**：否则"领到 9 朵"会把
+            // "另一笔没领到"这件事盖住，而那一笔下轮才会再试。
+            msg.push_str(&format!(
+                "；失败 {} 笔：{}",
+                failed.len(),
+                failed.join("；")
+            ));
+        }
         ctx.info(&msg);
+        // 至少有一笔成功、也有失败 ⇒ 部分成功；全失败 ⇒ 失败（不吞错）。
+        let claimed = claimed_ids.len();
+        if !failed.is_empty() && claimed == 0 && next_month == 0 {
+            return Ok(TaskOutcome::failed(msg));
+        }
         Ok(TaskOutcome::success(msg))
     }
 }
@@ -390,11 +431,21 @@ impl Task for RevivalTask {
 
 /// 备份好礼。
 ///
-/// # ⚠ 这是一个 **GET 却是写** 的接口
+/// # ⚠ 它是一个**独立活动页**，不是签到页里的接口
+///
+/// 端点在 `caiyun.feixin.10086.cn/market/backupgift/*` —— **另一个主机**。
+/// 这一族里只有它是这样（其余七条都在 `m.mcloud.139.com/ycloud/`）。
+///
+/// # ⚠ 而且这是一个 **GET 却是写** 的接口
 ///
 /// 参考实现在能力表里专门标注了"记账（**GET 却是写**）"——
-/// 意味着它**不能**被当成只读接口反复重试。这里的实现因此只发一枪、
-/// 不重试，且把上游的原文带出来。
+/// 意味着 `receive` 那一枪**不能**被当成只读接口反复重试。
+/// 所以这里的实现只发一枪、不重试。
+///
+/// # 门槛在 `info` 里判，不是猜
+///
+/// `state` 三态：`-1` 未开备份 / `1` 本月已领过 / `0` 可领。
+/// 旧项目先判 `curMonth`（本月有没有这份礼），它比 `state` 更靠前。
 pub struct BackupGiftTask;
 
 #[async_trait]
@@ -406,38 +457,53 @@ impl Task for BackupGiftTask {
         "备份好礼"
     }
     fn description(&self) -> &'static str {
-        "开启自动备份后领取备份礼（注意：这是 GET 但会记账）"
+        "领取备份好礼（先查状态再领；注意 receive 是 GET 但会记账）"
     }
 
     async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
-        ctx.progress(1, 2, "查询备份状态");
-        let st = query_status(ctx).await?;
-        ctx.info(format!(
-            "本月自动备份：{}｜{}",
-            match st.cur_month_backup {
-                Some(true) => "已开启",
-                Some(false) => "未开启",
-                None => "上游未给",
-            },
-            describe_status(&st)
-        ));
+        ctx.progress(1, 2, "查询备份好礼状态");
+        let env = call(ctx, proto::backup_gift_info_request(), "查询备份好礼状态").await?;
+        let gift = proto::parse_backup_gift(&env)?;
 
-        if st.cur_month_backup == Some(false) {
-            // 没开备份 ⇒ 领不到。**跳过而不是失败** ——
-            // 但要说清"去 App 里开一下"，这是一条**需人工**的事。
+        // ① 本月没有这份礼 ⇒ 连 state 都不用看（旧项目的判据顺序）
+        if gift.no_gift_this_month() {
+            return Ok(TaskOutcome::skipped("本月没有备份好礼可领"));
+        }
+
+        // ② 未开备份 ⇒ 跳过，并给出**人工出口**（这是"需人工"那一类，
+        //    不是失败：下个月开了就有了）
+        if gift.state == proto::backup_gift_state::OFF {
             return Ok(TaskOutcome::skipped(
-                "本月未开启自动备份，领不到备份礼（需在 App 里开启）",
+                "本月未开启自动备份，领不到备份好礼（需在 App 里开启自动备份）",
             ));
         }
 
+        // ③ 本月已领过 ⇒ 跳过（不是失败）
+        if gift.state == proto::backup_gift_state::CLAIMED {
+            return Ok(TaskOutcome::skipped("本月备份好礼已经领过了"));
+        }
+
+        // ④ 其余值：上游加了新状态而我们不认识 —— **不猜**，如实报出来。
+        //    猜"可领"会白打一枪写请求；猜"不可领"会永久漏领。
+        if !gift.claimable() {
+            return Err(mcloud_core::Error::Other(format!(
+                "备份好礼状态未知（state={}），无法判断该不该领；请核对上游是否新增了状态",
+                gift.state
+            )));
+        }
+
         ctx.check_cancelled()?;
-        ctx.progress(2, 2, "领取备份礼");
-        let env = call(ctx, proto::multiple_request(), "备份礼").await?;
-        env.ensure_ok("备份礼")?;
-        Ok(TaskOutcome::success(format!(
-            "备份礼领取完成（余额 {}）",
-            st.total
-        )))
+        ctx.progress(2, 2, "领取备份好礼");
+        let env = call(ctx, proto::backup_gift_receive_request(), "领取备份好礼").await?;
+        let got = proto::parse_backup_gift_receive(&env)?;
+
+        let msg = match got.received {
+            Some(n) => format!("备份好礼领取成功，获得 {n} 云朵"),
+            // 上游没给份数**不判失败**：领取这个动作本身已经成功了
+            None => "备份好礼领取成功（份数上游未给）".to_string(),
+        };
+        ctx.info(&msg);
+        Ok(TaskOutcome::success(msg))
     }
 }
 
