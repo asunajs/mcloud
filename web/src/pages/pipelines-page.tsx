@@ -444,7 +444,7 @@ export const PipelinesPage = () => {
           <div class="card-body">
             <EmptyState
               title="还没有编排。"
-              hint="新建一条，把「签到 → 领云朵」串起来。"
+              hint="新建一条，把「签到 → 领AI豆」串起来。"
               action={
                 <button
                   type="button"
@@ -630,7 +630,7 @@ export const PipelinesPage = () => {
           <legend class="fieldset-legend">名称</legend>
           <input
             class="input w-full"
-            placeholder="例如 早班：签到 → 领云朵"
+            placeholder="例如 早班：签到 → 领AI豆"
             value={d.name}
             // onInput 而不是 onChange：Vue 的 onChange 是原生 change，只在失焦时触发
             onInput={(e) => {

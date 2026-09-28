@@ -285,7 +285,7 @@ fn prize_json(limit: i64, price: i64, count: i64) -> serde_json::Value {
         "prizeSectionStatus": 1,
         "startTime": serde_json::Value::Null,
         "endTime": serde_json::Value::Null,
-        "marketName": "云朵中心"
+        "marketName": "sign_in_3_ex"
     })
 }
 
@@ -326,7 +326,7 @@ fn order_body(cost: i64) -> String {
             "uorder": cost,
             "insertTime": "2026-09-19 14:30:00",
             "expireTime": "2026-10-19 14:30:00",
-            "marketName": "云朵中心",
+            "marketName": "sign_in_3_ex",
             "linkUrl": "251230053"
         }
     })

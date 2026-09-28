@@ -575,11 +575,11 @@ fn message_falls_back_to_the_other_key() {
 #[test]
 fn non_zero_code_becomes_an_error_naming_the_upstream_text() {
     let env = SignInEnvelope::parse(r#"{"code":615,"msg":"设备号不能为空"}"#).unwrap();
-    let err = env.ensure_ok("领云朵").unwrap_err();
+    let err = env.ensure_ok("领AI豆").unwrap_err();
     let text = err.to_string();
     assert!(text.contains("615"), "要带业务码：{text}");
     assert!(text.contains("设备号不能为空"), "要带上游原文：{text}");
-    assert!(text.contains("领云朵"), "要带是哪一步：{text}");
+    assert!(text.contains("领AI豆"), "要带是哪一步：{text}");
 }
 
 /// 不是 JSON ⇒ 解析错误（不是 panic，也不是当成成功）。

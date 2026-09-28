@@ -300,7 +300,7 @@ export const TasksPage = () => {
                 {t.title}
                 {/* 签到族标一个徽标：它们共用同一条会话，验收时按组看更省事 */}
                 {SIGNIN_FAMILY.includes(t.name) ? (
-                  <span class="badge badge-soft badge-primary badge-sm">云朵中心</span>
+                  <span class="badge badge-soft badge-primary badge-sm">AI豆中心</span>
                 ) : null}
                 {t.params.length > 0 ? (
                   <span class="badge badge-soft badge-sm">有参数</span>

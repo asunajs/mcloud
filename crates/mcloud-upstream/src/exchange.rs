@@ -211,7 +211,7 @@ pub struct ExchangePrize {
     pub name: Option<String>,
     pub group_id: Option<i64>,
     pub kind: Option<i64>,
-    /// 兑换所需云朵数。见 [`parse_price`] 的双键说明。
+    /// 兑换所需AI豆数。见 [`parse_price`] 的双键说明。
     pub price: Option<i64>,
     /// 本账号对**这一件**的可兑状态，见 [`LIMIT_AVAILABLE`] 那五档。
     pub limit: Option<i64>,
@@ -490,7 +490,7 @@ pub struct ExchangeOrder {
     /// ⚠ 参考实现把"`code == 0` 但缺 `prizeName`"**记为失败**。所以它是 `Option`，
     /// **不在这里补空串** —— 补了就把那一档抹平了。
     pub prize_name: Option<String>,
-    /// `uorder` —— 这一笔**上游说**扣掉的云朵数（实拍 `1800`）。
+    /// `uorder` —— 这一笔**上游说**扣掉的AI豆数（实拍 `1800`）。
     ///
     /// ⚠ 只有它**不等于**"余额真的扣了这么多"：判据是两次 `infoV3` 的差。
     pub cost: Option<i64>,

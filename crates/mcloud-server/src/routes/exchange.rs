@@ -5,9 +5,9 @@
 //! | 路由 | 方法 | 碰网络吗 | 花豆吗 |
 //! |---|---|---|---|
 //! | `/api/accounts/{id}/exchange-prizes` | `GET` | 读一次清单（只读） | 否 |
-//! | `/api/accounts/{id}/exchange` | `POST` | 清单 → 余额 → **下单** | ⚠ **真扣云朵** |
+//! | `/api/accounts/{id}/exchange` | `POST` | 清单 → 余额 → **下单** | ⚠ **真扣AI豆** |
 //!
-//! 第二条是**唯一**一条会花掉真云朵的接口，所以它不自动重试、
+//! 第二条是**唯一**一条会花掉真AI豆的接口，所以它不自动重试、
 //! 不做"顺手也兑一下别的"这类扩写，返回值里的档位如实回给前端。
 //!
 //! # 写路由走 `Runner`，不是自己建链
@@ -72,7 +72,7 @@ pub struct PrizeView {
     pub prize_id: i64,
     /// 上游没给名字时为 `null`（**不补空串**：补了就看不出"没名字"还是"名字是空的"）。
     pub name: Option<String>,
-    /// 兑换所需云朵数。`null` = 上游没给。
+    /// 兑换所需AI豆数。`null` = 上游没给。
     pub price: Option<i64>,
     pub group_id: Option<i64>,
     /// 判定档位的**机器可读名**（[`ExchangePlan::slug`]）。
@@ -340,7 +340,7 @@ fn reported_of(details: &Value) -> Option<&Value> {
     }
 }
 
-/// `POST /api/accounts/{id}/exchange` —— **跑一次兑换（真扣云朵）**。
+/// `POST /api/accounts/{id}/exchange` —— **跑一次兑换（真扣AI豆）**。
 ///
 /// # 200 与"成功"不是一回事
 ///

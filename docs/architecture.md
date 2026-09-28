@@ -11,7 +11,7 @@
 
 ### 目标
 - 多账号管理：凭证解析、有效期跟踪、自动刷新、持久化。
-- 任务自动化：签到、领云朵、备份、AI 类活动、直播口令、兑换奖品等。
+- 任务自动化：签到、领AI豆、备份、AI 类活动、直播口令、兑换奖品等。
 - 可观测：每次运行有结构化日志与事件流，前端实时可见（SSE）。
 - 可调度：cron 定时 + 任务组合（pipeline）。
 - 单二进制交付：前端产物内嵌，`mcloud-gost serve` 一条命令跑起来。
@@ -584,8 +584,8 @@ pub struct PipelineStep { task, body, continue_on_error }
 
 | 组 | 任务 | 说明 |
 |---|---|---|
-| 基础 | `sign` | 网盘签到 + 云朵奖励 |
-| | `receive` | 领取待领云朵 |
+| 基础 | `sign` | 网盘签到 + AI豆奖励 |
+| | `receive` | 领取待领AI豆 |
 | | `revival` | 复活奖励（每月 2 次） |
 | | `task-expansion` | 任务扩展（含上传） |
 | | `msg-push` | 消息推送开关 + 奖励 |
@@ -596,7 +596,7 @@ pub struct PipelineStep { task, body, continue_on_error }
 | | `play-ai-special` | 拍拍大作战 |
 | | `play-ai-lottery` | 趣玩 AI 抽奖 |
 | | `cloud-phone-redpack` | 红包派对 |
-| | `hc1t` | 云朵大作战 |
+| | `hc1t` | AI豆大作战 |
 | 直播 | `kouling` | 直播口令（WebSocket + 小红书） |
 | | `red-flower` | 小红花领取 |
 | 奖品 | `prizes` | 待领取奖品列表 |
@@ -722,7 +722,7 @@ POST   /api/login/device/rotate     更换 PC 设备指纹
 
 ── 兑换（抢兑）─────────────────────────────────────────────────
 GET    /api/accounts/{id}/exchange-prizes  奖品清单 + 每件判据档位（**只读**）
-POST   /api/accounts/{id}/exchange         兑一件（**真扣云朵**，走 task:account 并发闸）
+POST   /api/accounts/{id}/exchange         兑一件（**真扣AI豆**，走 task:account 并发闸）
 
 ⚠ 这两条的**判据口径不一样**，别当成同一个：
 只读那条用 `plan_exchange(prize, None, now)` —— **不查余额**（`infoV3` 是账号级
@@ -832,7 +832,7 @@ web/src/
 
 | 页面 | 职责 |
 |---|---|
-| `dashboard` | 账号概览、云朵统计、最近运行 |
+| `dashboard` | 账号概览、AI豆统计、最近运行 |
 | `tasks` | 任务列表 + 参数表单 + 运行 + 实时日志 + **中止** |
 | `schedules` | 定时任务 CRUD、启停、下次执行时间 |
 | `pipelines` | 任务编排：步骤增删改序、两层失败语义 |

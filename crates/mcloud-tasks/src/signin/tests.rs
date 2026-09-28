@@ -240,7 +240,7 @@ async fn sign_submits_then_rechecks() {
     assert!(http.url_at(1).contains("/ycloud/signin/page/startSignIn"));
     assert!(http.url_at(2).contains("/ycloud/signin/page/infoV3"));
     assert!(
-        out.summary().contains("获得 3 云朵"),
+        out.summary().contains("获得 3 AI豆"),
         "实得：{}",
         out.summary()
     );
@@ -411,9 +411,9 @@ async fn receive_claims_now_items_and_reads_the_amount() {
     assert!(out.is_success(), "{out:?}");
     assert_eq!(http.count(), 2);
     assert!(http.url_at(1).contains("/ycloud/signin/page/receiveV3"));
-    assert!(out.summary().contains("6 云朵"), "实得：{}", out.summary());
+    assert!(out.summary().contains("6 AI豆"), "实得：{}", out.summary());
 
-    // ⭐ 领云朵那一枪**必须**带 deviceId 到 body 里（不带会回 615）
+    // ⭐ 领AI豆那一枪**必须**带 deviceId 到 body 里（不带会回 615）
     let body: serde_json::Value =
         serde_json::from_str(http.requests()[1].body.as_deref().unwrap()).unwrap();
     assert_eq!(body["deviceId"], "DEV+1/base=");
@@ -738,7 +738,7 @@ async fn backup_gift_claims_exactly_once() {
     assert!(out.is_success(), "{out:?}");
     assert_eq!(http.count(), 2, "查一次 + 领一次，不重试");
     assert!(
-        out.summary().contains("获得 1 云朵"),
+        out.summary().contains("获得 1 AI豆"),
         "实得：{}",
         out.summary()
     );
@@ -1234,6 +1234,6 @@ async fn receive_keeps_going_when_one_item_fails() {
             .map(|r| r.url.clone())
             .collect::<Vec<_>>()
     );
-    // 领到的 9 朵要被如实计入。
+    // 领到的 9 颗要被如实计入。
     assert!(out.summary().contains('9'), "实得：{}", out.summary());
 }

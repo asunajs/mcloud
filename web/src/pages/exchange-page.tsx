@@ -166,7 +166,7 @@ export const ExchangePage = () => {
         <div class="card-body">
           <h2 class="card-title text-base">兑换</h2>
           <p class="text-sm opacity-70">
-            挑一件兑换。下单会真的扣云朵，所以点下去要再确认一次。
+            挑一件兑换。下单会真的扣AI豆，所以点下去要再确认一次。
           </p>
 
           {accounts.value.length === 0 ? (
@@ -329,7 +329,7 @@ export const ExchangePage = () => {
           <span>
             将用{' '}
             <strong>{pending.value?.name ?? `奖品 ${pending.value?.prizeId ?? ''}`}</strong>
-            {pending.value?.price != null ? <> 兑换这一件，扣 <strong>{pending.value.price} 朵云朵</strong></> : ' 兑这一件'}
+            {pending.value?.price != null ? <> 兑换这一件，扣 <strong>{pending.value.price} 颗 AI豆</strong></> : ' 兑这一件'}
             。扣掉的豆不会退回，同一个月同一件也不能重复兑。
           </span>
         }

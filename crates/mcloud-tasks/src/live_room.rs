@@ -370,7 +370,7 @@ pub struct DrawRecord {
 /// 走完六步之后的结论。
 ///
 /// ⚠ 这里**不带**任何票：六步链用的是云盘侧会话（[`SessionRecipe::SignInPage`]），
-/// 那是能签到、能读云朵的凭据，而它在这个结构里**零消费者** ——
+/// 那是能签到、能读AI豆的凭据，而它在这个结构里**零消费者** ——
 /// 结果会顺着日志与 run 报告走，"顺手把凭据也带上"就是泄漏最常见的路径。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RedFlowerReport {

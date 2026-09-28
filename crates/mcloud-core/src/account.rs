@@ -163,7 +163,7 @@ pub struct AccountSettings {
     /// 红包派对。
     pub redpack_enabled: bool,
 
-    /// 云朵大作战。
+    /// AI豆大作战。
     pub hc1t_enabled: bool,
     pub hc1t_game_secs: u64,
     pub hc1t_target_rank: u32,

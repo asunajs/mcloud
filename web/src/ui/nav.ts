@@ -64,7 +64,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     id: 'dashboard',
     label: '总览',
     title: '总览',
-    blurb: '账号状态、云朵统计与最近运行一览。',
+    blurb: '账号状态、AI豆统计与最近运行一览。',
     href: '#/',
     icon: IconDashboard,
   },
@@ -89,7 +89,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     // 2 个字：dock 与侧栏在窄屏都放得下。
     label: '兑换',
     title: '兑换奖品',
-    blurb: '用云朵兑换奖品（网易云音乐月卡等）。下单会真的扣豆，点之前会再确认一次。',
+    blurb: '用AI豆兑换奖品（网易云音乐月卡等）。下单会真的扣豆，点之前会再确认一次。',
     href: '#/exchange',
     icon: IconExchange,
   },

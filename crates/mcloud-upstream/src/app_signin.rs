@@ -1,4 +1,4 @@
-//! 移动云盘 **App 端签到（云朵中心）** —— H5 链路的上游接口层。
+//! 移动云盘 **App 端签到（AI豆中心）** —— H5 链路的上游接口层。
 //!
 //! 对应 Go 参考的 `internal/upstream/app_signin*.go` 一族。
 //!
@@ -46,7 +46,7 @@ pub const SOURCE_ID: &str = "1002";
 /// ⚠ 与原生 App 的 `12.6.0` **不是一个值**：这里带第 4 段（`12.6.0.0`）。
 pub const H5_APP_VERSION: &str = "12.6.0.0";
 
-/// 云朵中心的基址。
+/// AI豆中心的基址。
 ///
 /// 复用 `session` 那一份 —— 同一个常量两处定义，改一处忘一处就会
 /// 出现"建会话打 A 主机、业务请求打 B 主机"，而那看起来像凭据问题。
@@ -66,7 +66,7 @@ pub const INFO_V3: &str = "https://m.mcloud.139.com/ycloud/signin/page/infoV3";
 /// 执行签到。
 pub const START_SIGN_IN: &str = "https://m.mcloud.139.com/ycloud/signin/page/startSignIn";
 
-/// 领云朵。
+/// 领AI豆。
 pub const RECEIVE_V3: &str = "https://m.mcloud.139.com/ycloud/signin/page/receiveV3";
 
 /// 用复活卡 / 回馈卡。
@@ -168,7 +168,7 @@ pub fn start_sign_in_request(device_id: Option<&str>) -> HttpRequest {
     h5(device_id.is_some(), HttpRequest::get(url), "true")
 }
 
-/// `receiveV3` 请求 —— **领云朵**。
+/// `receiveV3` 请求 —— **领AI豆**。
 ///
 /// # ⚠ `deviceId` 在这里是**必填**
 ///
@@ -567,7 +567,7 @@ pub struct SignInStatus {
     pub month_days: i64,
     pub days: Vec<SignInDay>,
     pub receive_list: Vec<ReceiveItem>,
-    /// 待领取云朵数。
+    /// 待领取AI豆数。
     pub to_receive: Option<i64>,
     /// 本月是否开着自动备份。
     pub cur_month_backup: Option<bool>,
@@ -626,7 +626,7 @@ pub struct ReceiveItem {
     pub accept_date: Option<String>,
 }
 
-/// 云朵账目的三种类型。
+/// AI豆账目的三种类型。
 pub mod cloud_type {
     /// **当前可领取**。
     pub const NOW: i64 = 0;
@@ -702,7 +702,7 @@ pub fn parse_status(env: &SignInEnvelope) -> Result<SignInStatus> {
 /// `receiveV3` 的解析结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceiveResult {
-    /// 本次领到的云朵数（`result.receive`）。
+    /// 本次领到的AI豆数（`result.receive`）。
     ///
     /// ⚠ 与 [`SignInStatus::sign_in_points`] **不是一回事**：
     /// 那个是"签到能拿多少"（还没到手），这个是"这次真进账多少"。
@@ -711,26 +711,26 @@ pub struct ReceiveResult {
 
 /// 解析 `receiveV3`。
 pub fn parse_receive_v3(env: &SignInEnvelope) -> Result<ReceiveResult> {
-    let r = env.ok_result("领取云朵")?;
+    let r = env.ok_result("领取AI豆")?;
     Ok(ReceiveResult {
         receive: int_at(r, "receive")
             .ok_or_else(|| Error::Parse("receiveV3 响应缺少 result.receive".into()))?,
     })
 }
 
-/// `receiveRevivalReward` 的解析结果 —— **用掉一张卡，换回一批云朵**。
+/// `receiveRevivalReward` 的解析结果 —— **用掉一张卡，换回一批AI豆**。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevivalReward {
-    /// `1` = **复活卡**（随机复活上一年失效的云朵），`2` = **回馈卡**。
+    /// `1` = **复活卡**（随机复活上一年失效的AI豆），`2` = **回馈卡**。
     ///
     /// H5 用 `1 == cardType ? "复活卡弹窗" : "回馈卡弹窗"` 分流，
     /// 两张卡连累计数的**文案单位都不同**。所以它是判据不是装饰。
     pub card_type: i64,
-    /// 本次随机复活到的云朵数 —— 这就是"这次进账多少"。
+    /// 本次随机复活到的AI豆数 —— 这就是"这次进账多少"。
     pub reward_clouds: i64,
     /// 累计数（复活卡口径下是"累计复活 AI 豆"）。
     ///
-    /// ⚠ **别把它接进余额记录**：它到底是不是"云朵余额"口径**没有验证**
+    /// ⚠ **别把它接进余额记录**：它到底是不是"AI豆余额"口径**没有验证**
     /// —— H5 文案说的是"复活卡把失效云朵**转换成 AI 豆**"。
     /// 现在接进去只会把两个口径混进同一条曲线。
     pub total_clouds: i64,
@@ -897,7 +897,7 @@ pub struct CloudRecord {
 
 /// 解析 `cloudRecordV2`（豆的收支流水）。
 pub fn parse_cloud_records(env: &SignInEnvelope) -> Result<Vec<CloudRecord>> {
-    let r = env.ok_result("查询云朵流水")?;
+    let r = env.ok_result("查询AI豆流水")?;
     let records = r
         .get("records")
         .and_then(Value::as_array)

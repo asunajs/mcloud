@@ -74,7 +74,7 @@ impl Task for SignTask {
         "每日签到"
     }
     fn description(&self) -> &'static str {
-        "在云朵中心签到，并回查确认"
+        "在AI豆中心签到，并回查确认"
     }
     fn params(&self) -> Vec<String> {
         vec!["dryRun".into()]
@@ -128,7 +128,7 @@ impl Task for SignTask {
 
         let gained = after.total - before.total;
         let msg = if gained > 0 {
-            format!("签到成功，获得 {gained} 云朵，余额 {}", after.total)
+            format!("签到成功，获得 {gained} AI豆，余额 {}", after.total)
         } else {
             // 已签过或服务端延迟入账：状态是真的，但余额没动。
             // **不报失败** —— 状态是权威的；把数字如实说出来。
@@ -144,7 +144,7 @@ impl Task for SignTask {
 
 // ══════════════════════════ receive ══════════════════════════
 
-/// 领取云朵。
+/// 领取AI豆。
 ///
 /// # 判据来自 `infoV3.receiveList` 的 `cloudType`
 ///
@@ -165,10 +165,10 @@ impl Task for ReceiveTask {
         "receive"
     }
     fn title(&self) -> &'static str {
-        "领取云朵"
+        "领取AI豆"
     }
     fn description(&self) -> &'static str {
-        "领取待收的云朵奖励（含到期延期的那一档）"
+        "领取待收的AI豆奖励（含到期延期的那一档）"
     }
 
     async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
@@ -182,7 +182,7 @@ impl Task for ReceiveTask {
 
         if st.receive_list.is_empty() {
             return Ok(TaskOutcome::success(format!(
-                "没有待领取的云朵，余额 {}",
+                "没有待领取的AI豆，余额 {}",
                 st.total
             )));
         }
@@ -219,17 +219,17 @@ impl Task for ReceiveTask {
                     // 下月可领取：H5 只弹一句提示，**不发任何请求**。
                     next_month += 1;
                     ctx.info(format!(
-                        "{} 云朵标记为「下月可领取」，本轮不发请求",
+                        "{} AI豆标记为「下月可领取」，本轮不发请求",
                         item.cloud_num
                     ));
                     continue;
                 }
                 proto::cloud_type::EXPANSION => {
-                    ctx.progress(step, total_steps, "领取延期云朵");
+                    ctx.progress(step, total_steps, "领取延期AI豆");
                     let req = proto::receive_task_expansion_request(item.accept_date.as_deref());
                     // ⚠⚠ 这一笔失败**只跳过它自己** —— 见 `failed` 的说明。
-                    match call(ctx, req, "领取延期云朵").await {
-                        Ok(env) => match env.ensure_ok("领取延期云朵") {
+                    match call(ctx, req, "领取延期AI豆").await {
+                        Ok(env) => match env.ensure_ok("领取延期AI豆") {
                             Ok(()) => {
                                 // `receiveTaskExpansion` 的 result 是**裸数字**（实拍
                                 // `result: 100`），不是对象 —— 所以这里不解析形状。
@@ -245,19 +245,19 @@ impl Task for ReceiveTask {
                     //
                     // ⚠ `deviceId` 在这一条上是**必填**（H5 标了 `isDeviceId`），
                     // 不带会回 `615` —— 而签到那两条不带没事，别外推。
-                    ctx.progress(step, total_steps, "领取云朵");
+                    ctx.progress(step, total_steps, "领取AI豆");
                     let cloud_id = item.record_id.clone().unwrap_or_default();
                     let req =
                         proto::receive_v3_request(device_id, &cloud_id, Some(item.cloud_type));
-                    match call(ctx, req, "领取云朵").await {
+                    match call(ctx, req, "领取AI豆").await {
                         Ok(env) => match proto::parse_receive_v3(&env) {
                             Ok(got) => {
                                 total_gained += got.receive;
-                                claimed_ids.push(format!("+{} 云朵", got.receive));
+                                claimed_ids.push(format!("+{} AI豆", got.receive));
                             }
-                            Err(e) => failed.push(format!("领取云朵（解析失败）：{e}")),
+                            Err(e) => failed.push(format!("领取AI豆（解析失败）：{e}")),
                         },
-                        Err(e) => failed.push(format!("领取云朵：{e}")),
+                        Err(e) => failed.push(format!("领取AI豆：{e}")),
                     }
                 }
             }
@@ -265,7 +265,7 @@ impl Task for ReceiveTask {
 
         let mut msg = if total_gained > 0 {
             format!(
-                "共领取 {total_gained} 云朵，余额 {}",
+                "共领取 {total_gained} AI豆，余额 {}",
                 st.total + total_gained
             )
         } else {
@@ -278,7 +278,7 @@ impl Task for ReceiveTask {
             msg.push_str(&format!("；另有 {next_month} 笔标记为下月可领取"));
         }
         if !failed.is_empty() {
-            // ⚠ 失败**必须出现在小结里**：否则"领到 9 朵"会把
+            // ⚠ 失败**必须出现在小结里**：否则"领到 9 颗"会把
             // "另一笔没领到"这件事盖住，而那一笔下轮才会再试。
             msg.push_str(&format!(
                 "；失败 {} 笔：{}",
@@ -341,8 +341,8 @@ impl Task for MultipleTask {
         // `multiple` 是倍数、`cloudCount` 是合计 —— 两个都报，
         // 只报一个会丢掉"翻了几倍"这个信息。
         let msg = match (r.multiple, r.cloud_count) {
-            (Some(m), Some(c)) => format!("翻倍成功：{m} 倍，共 {c} 云朵"),
-            (None, Some(c)) => format!("翻倍成功：额外获得 {c} 云朵"),
+            (Some(m), Some(c)) => format!("翻倍成功：{m} 倍，共 {c} AI豆"),
+            (None, Some(c)) => format!("翻倍成功：额外获得 {c} AI豆"),
             (Some(m), None) => format!("翻倍成功：{m} 倍（本次份数上游未给）"),
             (None, None) => "翻倍成功（份数上游未给）".to_string(),
         };
@@ -386,7 +386,7 @@ impl Task for RevivalTask {
         "复活奖励"
     }
     fn description(&self) -> &'static str {
-        "用复活卡 / 回馈卡换回失效的云朵（每月一次）"
+        "用复活卡 / 回馈卡换回失效的AI豆（每月一次）"
     }
 
     async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
@@ -416,10 +416,10 @@ impl Task for RevivalTask {
             "回馈卡"
         };
         // ⚠ 只报本次进账与卡型，**不把 totalClouds 当余额**：
-        // 它到底是不是"云朵余额"口径没有验证（H5 文案说的是
+        // 它到底是不是"AI豆余额"口径没有验证（H5 文案说的是
         // "把失效云朵转换成 AI 豆"）。接进余额记录只会混两个口径。
         let msg = format!(
-            "用掉一张{card}，复活 {} 云朵（累计 {}）",
+            "用掉一张{card}，复活 {} AI豆（累计 {}）",
             r.reward_clouds, r.total_clouds
         );
         ctx.info(&msg);
@@ -498,7 +498,7 @@ impl Task for BackupGiftTask {
         let got = proto::parse_backup_gift_receive(&env)?;
 
         let msg = match got.received {
-            Some(n) => format!("备份好礼领取成功，获得 {n} 云朵"),
+            Some(n) => format!("备份好礼领取成功，获得 {n} AI豆"),
             // 上游没给份数**不判失败**：领取这个动作本身已经成功了
             None => "备份好礼领取成功（份数上游未给）".to_string(),
         };
@@ -565,12 +565,12 @@ impl Task for PrizesTask {
 
 // ══════════════════════════ cloud-snapshot ══════════════════════════
 
-/// 云朵余额快照（**只读**）。
+/// AI豆余额快照（**只读**）。
 ///
 /// # 这是旧项目缺的那一格
 ///
 /// 旧项目 `sign` 里那句 `ctx.state.totalCloud = total` 被**注释掉了**，
-/// 于是余额只进日志、不进状态 ⇒ 无法回答"这账号现在还有多少云朵、
+/// 于是余额只进日志、不进状态 ⇒ 无法回答"这账号现在还有多少AI豆、
 /// 今天涨了多少"。
 ///
 /// 本任务把余额**结构化**地报出来（进 run 记录的 `details`），
@@ -579,7 +579,7 @@ impl Task for PrizesTask {
 /// # ⚠ `total` 与 `beforeTotal` 不是一回事
 ///
 /// 实拍里两个数**不相等**（`total=10496`、`beforeTotal=8027`）。
-/// `beforeTotal` 是"云朵改名成 AI 豆那一刻的结转额"，是**冻结的历史快照**，
+/// `beforeTotal` 是"**云朵**改名成 AI 豆那一刻的结转额"，是**冻结的历史快照**，
 /// 永远不变 —— 曾把它当余额记进趋势图，结果是一条直线。
 /// 所以这里只取 `total`。
 pub struct CloudSnapshotTask;
@@ -590,18 +590,18 @@ impl Task for CloudSnapshotTask {
         "cloud-snapshot"
     }
     fn title(&self) -> &'static str {
-        "云朵快照"
+        "AI豆快照"
     }
     fn description(&self) -> &'static str {
-        "记录当前云朵余额与本月签到进度（只读）"
+        "记录当前AI豆余额与本月签到进度（只读）"
     }
 
     async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
-        ctx.progress(1, 1, "读取云朵余额");
+        ctx.progress(1, 1, "读取AI豆余额");
         let st = query_status(ctx).await?;
 
         ctx.info(format!(
-            "云朵余额 {}｜本月已签 {} 天｜连续 {} 天｜今日{}",
+            "AI豆余额 {}｜本月已签 {} 天｜连续 {} 天｜今日{}",
             st.total,
             st.month_days,
             st.sign_count,
@@ -612,7 +612,7 @@ impl Task for CloudSnapshotTask {
             }
         ));
         Ok(TaskOutcome::success(format!(
-            "云朵余额 {}（本月 {} 天，连续 {} 天）",
+            "AI豆余额 {}（本月 {} 天，连续 {} 天）",
             st.total, st.month_days, st.sign_count
         )))
     }
@@ -622,12 +622,12 @@ impl Task for CloudSnapshotTask {
 
 /// 任务清单（**只读**）。
 ///
-/// 把云朵中心当下"有什么可做"列出来：待领取、翻倍机会、到期的延期领取。
+/// 把AI豆中心当下"有什么可做"列出来：待领取、翻倍机会、到期的延期领取。
 ///
 /// # 与 `prizes` 的分工
 ///
 /// `prizes` 读的是**奖品记录**（奖品最终落点，要人去 App 领）；
-/// 本任务读的是**云朵账目**（云朵中心自己那本账，能自动领的）。
+/// 本任务读的是**AI豆账目**（AI豆中心自己那本账，能自动领的）。
 /// 两者不是同一批东西，混起来会让人以为"清单里有就是奖品"。
 pub struct TaskListTask;
 
@@ -640,7 +640,7 @@ impl Task for TaskListTask {
         "任务清单"
     }
     fn description(&self) -> &'static str {
-        "列出云朵中心当下可做的事：待领取、翻倍机会、延期领取（只读）"
+        "列出AI豆中心当下可做的事：待领取、翻倍机会、延期领取（只读）"
     }
 
     async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
@@ -655,7 +655,7 @@ impl Task for TaskListTask {
                 proto::cloud_type::NEXT_MONTH => "下月可领",
                 _ => "未知类型",
             };
-            items.push(format!("{label} {} 云朵", item.cloud_num));
+            items.push(format!("{label} {} AI豆", item.cloud_num));
         }
         if st.should_claim_multiple() {
             items.push("签到翻倍机会可用（本月尚未使用）".to_string());

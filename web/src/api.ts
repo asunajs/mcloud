@@ -1031,7 +1031,7 @@ export const LIVE_IDLE_REASON: Record<LiveRoomIdleReason, string> = {
 export interface ExchangePrizeView {
   prizeId: number
   name: string | null
-  /** 兑换所需云朵数。`null` = 上游没给这一格（不是 0）。 */
+  /** 兑换所需AI豆数。`null` = 上游没给这一格（不是 0）。 */
   price: number | null
   groupId: number | null
   /**

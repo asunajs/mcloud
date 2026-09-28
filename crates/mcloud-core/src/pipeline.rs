@@ -49,7 +49,7 @@ pub struct PipelineStep {
     pub body: serde_json::Value,
     /// 该步骤失败时是否继续后续步骤。
     ///
-    /// 默认 `false`：**多数步骤是有依赖的**（先签到才能领云朵），
+    /// 默认 `false`：**多数步骤是有依赖的**（先签到才能领AI豆），
     /// 默认继续会让后面的步骤在错误状态下空跑，产出误导性的"成功"。
     #[serde(default)]
     pub continue_on_error: bool,

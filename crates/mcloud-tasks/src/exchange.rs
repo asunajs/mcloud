@@ -8,7 +8,7 @@
 //!
 //! 下单是**不可逆消耗**：这一族没有任何幂等键，`oid` 由服务端生成
 //! （见 [`ExchangeOrder::order_id`]），发出去就不收回来。代价因此
-//! **完全不对称** —— 该不发时发了 = 花掉真云朵；该发时不发 = 少一次机会，
+//! **完全不对称** —— 该不发时发了 = 花掉真AI豆；该发时不发 = 少一次机会，
 //! 重跑还有。于是每一条"发"都必须指得出是**哪一档判据**放行的，
 //! 而逐档的可观察后果只有纯函数才测得准（反向改坏哪一档，哪一条用例红）。
 //!
@@ -132,7 +132,7 @@ pub const TIME_LAYOUT: &str = "%Y-%m-%d %H-%M-%S";
 /// | [`MinRemainderZero`](Self::MinRemainderZero) | H5 这一档显示「奖品被抢光啦」；字段本身有实拍 |
 /// | [`SoldOut`](Self::SoldOut) / [`DailyStockEmpty`](Self::DailyStockEmpty) | 字段有实拍；⚠ 是**时刻量** |
 /// | [`PriceMissing`](Self::PriceMissing) | **零样本**（实拍每件都有价格） |
-/// | [`InsufficientCloud`](Self::InsufficientCloud) | 有 H5 那句 `x < t.pOrder ⇒ "AI豆不够啦"` |
+/// | [`InsufficientCloud`](Self::InsufficientCloud) | 有 H5 那句 `x < t.pOrder ⇒ "云朵不够啦"` |
 /// | [`NotStarted`](Self::NotStarted) / [`Ended`](Self::Ended) | ⚠ **只有一档实拍形状**，且"越界时上游回什么码"**无样本** |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ExchangePlan {
@@ -179,7 +179,7 @@ pub enum ExchangePlan {
     ///
     /// ⚠ 当成"不要豆"会白发一笔；当成"不够"会漏兑。缺判据只有停下来这一种处置。
     PriceMissing,
-    /// 余额快照低于价格（H5 那句 `x < t.pOrder ⇒ "AI豆不够啦"`）。
+    /// 余额快照低于价格（H5 那句 `x < t.pOrder ⇒ "云朵不够啦"`）。
     InsufficientCloud,
     /// `startTime` 解得出、且还没到。
     NotStarted,
@@ -1423,7 +1423,7 @@ impl ExchangeRun<'_> {
 
 // ══════════════════════════════ 任务壳 ══════════════════════════════
 
-/// `exchange`：兑换页抢兑（**真扣云朵**）。
+/// `exchange`：兑换页抢兑（**真扣AI豆**）。
 ///
 /// # 参数
 ///
@@ -1465,7 +1465,7 @@ impl Task for ExchangeTask {
     }
 
     fn description(&self) -> &'static str {
-        "在兑换页兑换指定奖品（真扣云朵；下单前逐档判据放行，成交后回查余额）"
+        "在兑换页兑换指定奖品（真扣AI豆；下单前逐档判据放行，成交后回查余额）"
     }
 
     fn params(&self) -> Vec<String> {

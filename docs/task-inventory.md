@@ -123,13 +123,13 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 | # | code | 标题 | 类型 | 批量 | 隐藏 | 错过 | 副作用 | 依赖 |
 |---|---|---|---|---|---|---|---|---|
 | 1 | `sign` | 每日签到 | Action | ✅ | | catch-up | 记账 | jwt |
-| 2 | `receive` | 领取云朵 | Action | ✅ | | catch-up | 记账 | jwt |
+| 2 | `receive` | 领取AI豆 | Action | ✅ | | catch-up | 记账 | jwt |
 | 3 | `multiple` | 签到翻倍 | Action | ✅ | | catch-up | 记账 | jwt |
 | 4 | `backup-gift` | 备份好礼 | Action | ✅ | | catch-up | 记账（**GET 却是写**） | jwt |
 | 5 | `revival` | 用复活卡/回馈卡 | Action | ❌ | | skip | **不可逆** | jwt |
 | 6 | `prizes` | 待领取奖品 | Query | ❌ | | catch-up | 无 | jwt |
 | 7 | `task-list` | 任务清单 | Query | ❌ | | catch-up | 无 | jwt |
-| 8 | `notice` | 开启通知领云朵 | Action | ✅ | | catch-up | 记账 | jwt |
+| 8 | `notice` | 开启通知领AI豆 | Action | ✅ | | catch-up | 记账 | jwt |
 | 9 | `app-task` | App 任务（做任务） | Action | ❌ | | skip | **上传/建删外链/发邮件** | jwt |
 | 10 | `fun-ai` | 趣玩AI抽奖 | Action | ✅ | | catch-up | 记账 | jwt |
 | 11 | `msg-push` | 消息推送任务 | Action | ❌ | | skip | 记账 | jwt |
@@ -138,8 +138,8 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 | 14 | `ai-avatar` | AI 头像生成与抽奖 | Action | ❌ | | skip | **往网盘写文件** | jwt |
 | 15 | `task-expansion` | 任务拓展 | Action | ❌ | | skip | **往网盘写文件** | jwt |
 | 16 | `live-room` | 直播口令 → 小红花 | Action | ❌ | | skip | 入群足迹 + **WS 长连** | jwt + WebSocket |
-| 17 | `exchange` | 兑换奖品 | Action | ❌ | ✅ | skip | **真扣云朵、不可回滚** | jwt + 滑块 |
-| 18 | `cloud-snapshot` | 云朵余额快照 | Query | ❌ | | catch-up | 无 | jwt |
+| 17 | `exchange` | 兑换奖品 | Action | ❌ | ✅ | skip | **真扣AI豆、不可回滚** | jwt + 滑块 |
+| 18 | `cloud-snapshot` | AI豆余额快照 | Query | ❌ | | catch-up | 无 | jwt |
 | 19 | `auth-refresh` | 刷新 auth 凭据 | Action | ❌ | ✅ | catch-up | 换 token | basic（**唯一不需要 jwt 的写操作**） |
 
 > **隐藏的只有两条**：`exchange`（有自己的奖品页与抢兑规则）与 `auth-refresh`（只给调度指向）。
@@ -280,11 +280,11 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 >
 > `play-ai-special` / `cloud-phone-redpack` 仍未做。
 
-> ⚠️ `hc1t`（云朵大作战）**已过期**，不实现，只作形态参考。
+> ⚠️ `hc1t`（AI豆大作战）**已过期**，不实现，只作形态参考。
 
 ### 🅿️ P5 — 高风险收尾
 
-`exchange`：**真扣云朵、不可回滚**，需要幂等与抢兑窗口设计评审 + 滑块。
+`exchange`：**真扣AI豆、不可回滚**，需要幂等与抢兑窗口设计评审 + 滑块。
 
 ---
 
