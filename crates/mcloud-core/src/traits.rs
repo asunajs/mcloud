@@ -284,6 +284,39 @@ pub fn beijing_time_digits(clock: &dyn Clock) -> String {
     }
 }
 
+/// 把一个**不带时区**的本地时刻串按**东八区**解成 epoch 毫秒。
+///
+/// 解不出来回 `None`（`None` ≠ "没有边界"，调用方自己按三态处置）。
+///
+/// # 为什么在这里，而不是各任务层各写一份
+///
+/// 上游那些活动页给的是 `"2025-05-28T00:00:00"` 这种**本地墙钟**串，
+/// 判"活动在不在期"必须按东八区解释 —— 按 UTC 解会把边界**整体推后 8 小时**
+/// （快到 `endTime` 时多发一次写请求，快到 `startTime` 时少发一次）。
+///
+/// [`beijing_offset`] 已经是"东八区"在本项目的**唯一**定义，而 `chrono`
+/// 只有本 crate 引得到（`mcloud-tasks` / `mcloud-upstream` 的依赖里都没有它）
+/// ⇒ 日期算术与偏移一起放这里，别处就不会再出现第二份"自己拆年月日"的实现。
+///
+/// ⚠ `mcloud-tasks::exchange` 里那份**手写**的解析器（`parse_exchange_time`）
+/// 早于本函数，形态也不同（它那边时分秒之间是 `-`）。它**仍然有效**，
+/// 且已用一个"与 [`beijing_offset`] 对拍"的用例钉住偏移来源一致 ——
+/// 不要因为本函数的出现就顺手去改它（改了是白担一次回归风险）。
+///
+/// # `fmt` 用 chrono 的格式串
+///
+/// 例：`"%Y-%m-%dT%H:%M:%S"`。上游形态变了就把 `fmt` 改对，
+/// **不要**在这里"兼容多种形态" —— 那会让"上游换了格式"这件事静默消失。
+pub fn parse_beijing_time(raw: &str, fmt: &str) -> Option<i64> {
+    use chrono::TimeZone as _;
+    let naive = chrono::NaiveDateTime::parse_from_str(raw.trim(), fmt).ok()?;
+    // 固定偏移下不存在歧义，`single()` 就够了（`ambiguous` 只会出现在有 DST 的时区）。
+    beijing_offset()
+        .from_local_datetime(&naive)
+        .single()
+        .map(|dt| dt.timestamp_millis())
+}
+
 // ── 事件 ────────────────────────────────────────────────────────────────
 
 /// 事件接收端。

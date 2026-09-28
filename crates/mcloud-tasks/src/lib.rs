@@ -4,9 +4,11 @@
 //! 不直接碰网络或磁盘。
 
 pub mod exchange;
+pub mod fun_ai;
 pub mod live_room;
 pub mod login;
 pub mod msg_push;
+pub mod notice;
 pub mod signin;
 
 use mcloud_engine::{Registry, Task};
@@ -68,6 +70,8 @@ pub fn register_all(registry: &mut Registry) -> Result<(), String> {
         Arc::new(live_room::RedFlowerTask::production()),
         Arc::new(exchange::ExchangeTask),
         Arc::new(msg_push::MsgPushTask),
+        Arc::new(fun_ai::FunaiTask),
+        Arc::new(notice::NoticeTask),
     ];
     for t in tasks {
         registry.register(t)?;

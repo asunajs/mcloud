@@ -6,10 +6,22 @@
 
 ## 状态
 
-**已落地 12 个任务**：P1 签到族八条（`sign` / `receive` / `multiple` /
+**已落地 14 个任务**：P1 签到族八条（`sign` / `receive` / `multiple` /
 `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`）
 + 直播小红花两条（`live-room` / `red-flower`）
-+ 兑换（`exchange`）+ 消息推送（`msg-push`）。
++ 兑换（`exchange`）+ 消息推送（`msg-push`）
++ 趣玩AI抽奖（`fun-ai`）+ 公告任务（`notice`）。
+
+**`fun-ai` / `notice`（2026-09-28 落地）的证据边界**：
+
+| 任务 | 实拍的 | 零样本 / 未验证的 |
+|---|---|---|
+| `fun-ai` | 两条请求（`page/getmodule` 裸 GET + `page/lottery` body 只有 `moduleId`）、三个计数与活动期形态、**中奖与没中奖两档**响应 | ⚠ 三个计数**跨天清不清零**；⚠ 转盘与刮刮乐（`timed/lottery`）**互不改写账本**但只验过转盘这一口 |
+| `notice` | 四条请求（`getTaskInfo` ×2 → `reward`，另一场是 `receiveTask?taskId=1021`） | ⚠⚠ **判据映射是猜的**：`cloudStatus` 哪个值是"未领"**没有正面样本**；`noticeNeedsManual` **恒 false**（那一档今天**不可达**）；实拍里**没有** `taskListV2` |
+
+> ⚠ `fun-ai` 的"每天抽一次"是**本工具**的取向（`FUNAI_DAILY_DRAW_LIMIT = 1`），
+> **不是**上游规则 —— 上游那条"每日最多 5 次"说的是**做任务能挣到几次**，不是能抽几次。
+> 这是刻意比上游可能允许的更少：不拿写请求去试探额度。
 
 **`msg-push`（2026-09-28 落地）的证据分两半 —— 别混着读**：
 
@@ -177,8 +189,8 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 | P7 | **WebUI 登录闸 + 认证闸/登出 + CLI 收敛（6 命令）** | ✅ |
 | P8 | **账号登录（扫码/短信）+ 账号页 + 定时/编排 CRUD 页** | ✅ |
 | P9a | **签到族 8 条**（`sign` / `receive` / `multiple` / `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`） | ✅ |
-| P9b | **`exchange` + `msg-push`**（P2 只读查询那一档里证据最全的一条） | 已落 2 条 |
-| P9c | 其余任务增量接入（`notice` / `fun-ai` / `app-task` / 活动类 等）+ 推送渠道 | 待做 |
+| P9b | **P2 只读查询那一档全部落完**：`exchange` + `msg-push` + `fun-ai` + `notice` | 已落 4 条 |
+| P9c | 其余任务增量接入（`app-task` / `cloud-phone-redpack` / `play-ai-special` / `ai-avatar` / `task-expansion`）+ 推送渠道 | 待做 |
 
 > **端点必须来自抓包，不能凭印象写。** 本项目的签到端点最初是
 > `/ycloud/api/sign/query`（凭印象），实测回 **405**；换成实拍的
