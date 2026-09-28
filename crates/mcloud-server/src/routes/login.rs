@@ -281,6 +281,15 @@ pub struct SmsStartRequest {
     pub phone: String,
     #[serde(default)]
     pub platform: String,
+    /// 滑块答案（`start` 第一次返回 `need_slider` 时，把 `slider.answer` 原样回填）。
+    ///
+    /// ⚠ **必须有这一格，否则发码那一枪永远过不去**：上游在需要滑块时**不发**短信，
+    /// 而"带答案重发"这件事在此之前只在**提交**那一枪上（那时验证码还没发出来，
+    /// 是鸡生蛋）⇒ 前端拿到题面后没有任何一枪可以把它推进到 `sent`。
+    ///
+    /// 这个能力任务层早就有（`SmsSession::send_code_with_slider`），缺的只是这个入口。
+    #[serde(default)]
+    pub slider_answer: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -327,10 +336,17 @@ pub async fn start_sms(
         .await
         .map_err(ApiError::from)?;
     let tid = state.handle.login.new_tid();
-    let outcome = sms
-        .send_code(state.handle.login.http(), &tid)
-        .await
-        .map_err(ApiError::from)?;
+    // ⚠ 带了答案就走「带滑块发码」那一枪，而不是再发一次裸的：
+    // 裸的那一枪在需要滑块时**上游根本不发短信**，再发一次只会拿回同一道题
+    // （表现是"点自动完成没反应"，短信永远发不出来）。
+    let outcome = match req.slider_answer.as_deref().filter(|a| !a.is_empty()) {
+        Some(answer) => {
+            sms.send_code_with_slider(state.handle.login.http(), &tid, answer)
+                .await
+        }
+        None => sms.send_code(state.handle.login.http(), &tid).await,
+    }
+    .map_err(ApiError::from)?;
 
     match outcome {
         SendSmsOutcome::Sent { remain_get_times } => Ok(Json(SmsStartResponse {
@@ -465,6 +481,10 @@ pub async fn login_sms(
 pub struct AppSmsStartRequest {
     #[serde(default)]
     pub phone: String,
+    /// 滑块答案 —— 与 PC 那支同一个理由：上游需要滑块时**不发**短信，
+    /// 只有带上答案的那一次才会真的发出去。
+    #[serde(default)]
+    pub slider_answer: Option<String>,
 }
 
 /// `POST /api/login/app/sms/start` 的响应。
@@ -515,7 +535,14 @@ pub async fn app_start_sms(
         .await
         .map_err(ApiError::from)?;
     let now = state.handle.login.now_micros();
-    let outcome = sms.send_code(state.handle.login.http(), now).await?;
+    // ⚠ 带了答案就走「带滑块发码」那一枪（同 PC 那支的理由）。
+    let outcome = match req.slider_answer.as_deref().filter(|a| !a.is_empty()) {
+        Some(answer) => {
+            sms.send_code_with_slider(state.handle.login.http(), now, answer)
+                .await?
+        }
+        None => sms.send_code(state.handle.login.http(), now).await?,
+    };
 
     match outcome {
         mcloud_app::AppSendSmsOutcome::Sent { remain_get_times } => Ok(Json(AppSmsStartResponse {

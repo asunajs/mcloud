@@ -226,7 +226,13 @@ export const AccountsPage = () => {
 
   // ── 短信 ─────────────────────────────────────────────────────────────
 
-  const sendSms = async () => {
+  /**
+   * 发验证码。
+   *
+   * ⚠ `sliderAnswer` 只在**点「自动完成」那一下**传：上游需要滑块时不会发短信，
+   * 带上答案才会真的发。不带就再点一次只会拿回同一道题（"没反应"就是这么来的）。
+   */
+  const sendSms = async (sliderAnswer?: string) => {
     formError.value = ''
     if (!phone.value.trim()) {
       formError.value = '请填写手机号'
@@ -234,7 +240,7 @@ export const AccountsPage = () => {
     }
     busy.value = true
     try {
-      const r = await startSmsLogin(phone.value.trim(), platform.value)
+      const r = await startSmsLogin(phone.value.trim(), platform.value, sliderAnswer)
       if (r.phase === 'sent') {
         smsSent.value = true
         smsRemain.value = r.remain_get_times ?? null
@@ -264,11 +270,13 @@ export const AccountsPage = () => {
     }
     busy.value = true
     try {
+      // ⚠ **不**把滑块答案带进这一枪：后端"带了就先重发一次验证码"，
+      // 而验证码在上一步（点了「自动完成」之后）**已经发出来了** ⇒
+      // 带上去会让用户白发一条短信、并让刚收到的那条失效。
       const r = await submitSmsLogin({
         phone: phone.value.trim(),
         platform: platform.value,
         code: smsCode.value.trim(),
-        sliderAnswer: slider.value?.answer,
       })
       pushToast('success', `已添加账号 ${r.account ?? ''}（平台：${r.platform ? PLATFORM_LABEL[r.platform] : '未知'}）`,
       )
@@ -285,7 +293,8 @@ export const AccountsPage = () => {
 
   // ── App 端（手机客户端）短信 ─────────────────────────────────────────
 
-  const sendAppSms = async () => {
+  /** 发验证码（App 链路）。`sliderAnswer` 只在点「自动完成」那一下传。 */
+  const sendAppSms = async (sliderAnswer?: string) => {
     formError.value = ''
     if (!appPhone.value.trim()) {
       formError.value = '请填写手机号'
@@ -293,7 +302,7 @@ export const AccountsPage = () => {
     }
     busy.value = true
     try {
-      const r = await startAppSmsLogin(appPhone.value.trim())
+      const r = await startAppSmsLogin(appPhone.value.trim(), sliderAnswer)
       if (r.phase === 'sent') {
         appSent.value = true
         appRemain.value = r.remain_get_times ?? null
@@ -330,7 +339,6 @@ export const AccountsPage = () => {
       const r = await submitAppSmsLogin({
         phone: appPhone.value.trim(),
         code: appCode.value.trim(),
-        sliderAnswer: appSlider.value?.answer,
       })
       // App 账号没有 PC 平台，所以提示语里说"手机端"而不是某个平台名 ——
       // 说成 Windows 会让人以为它按 PC 的 UA 发请求。
@@ -645,7 +653,7 @@ export const AccountsPage = () => {
                       type="button"
                       class="btn btn-soft btn-sm self-start"
                       disabled={busy.value}
-                      onClick={() => void sendSms()}
+                      onClick={() => void sendSms(slider.value?.answer)}
                     >
                       自动完成验证并重发
                     </button>
@@ -731,7 +739,7 @@ export const AccountsPage = () => {
                       type="button"
                       class="btn btn-soft btn-sm self-start"
                       disabled={busy.value}
-                      onClick={() => void sendAppSms()}
+                      onClick={() => void sendAppSms(appSlider.value?.answer)}
                     >
                       自动完成验证并重发
                     </button>

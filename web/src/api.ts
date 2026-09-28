@@ -545,10 +545,17 @@ export interface SmsStartResponse {
   slider?: SliderPayload
 }
 
-export const startSmsLogin = (phone: string, platform: PcPlatform) =>
+/**
+ * 发验证码。
+ *
+ * ⚠ `sliderAnswer` 必须在**需要滑块时回填**（用上一次响应里 `slider.answer`）：
+ * 上游在需要滑块时**不发**短信，只有带上答案的那一次才会真的把短信发出去。
+ * 不带它就再点一次，拿回来的是同一道题 —— 表现是"自动完成没反应"。
+ */
+export const startSmsLogin = (phone: string, platform: PcPlatform, sliderAnswer?: string) =>
   request<SmsStartResponse>('/api/login/sms/start', {
     method: 'POST',
-    body: JSON.stringify({ phone, platform }),
+    body: JSON.stringify({ phone, platform, slider_answer: sliderAnswer }),
   })
 
 export const submitSmsLogin = (input: {
@@ -590,10 +597,11 @@ export interface AppSmsStartResponse {
   slider_width?: number | null
 }
 
-export const startAppSmsLogin = (phone: string) =>
+/** 发验证码（App 链路）。`sliderAnswer` 与 PC 那支同一个理由，必须回填。 */
+export const startAppSmsLogin = (phone: string, sliderAnswer?: string) =>
   request<AppSmsStartResponse>('/api/login/app/sms/start', {
     method: 'POST',
-    body: JSON.stringify({ phone }),
+    body: JSON.stringify({ phone, slider_answer: sliderAnswer }),
   })
 
 export const submitAppSmsLogin = (input: {
