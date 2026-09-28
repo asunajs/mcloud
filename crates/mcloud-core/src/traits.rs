@@ -26,9 +26,19 @@ pub struct HttpRequest {
     pub url: String,
     #[serde(default)]
     pub headers: Vec<(String, String)>,
-    /// 请求体。JSON 或 XML 文本。
+    /// 请求体的**原始字节**。
+    ///
+    /// # ⚠ 为什么是字节而不是 `String`
+    ///
+    /// 网盘上传那一枪（`PUT <uploadUrl>`）发的是**图片的原始字节** ——
+    /// 用 `String` 装不下（那不是 UTF-8 文本，`from_utf8` 会失败或损坏内容）。
+    /// 而"损坏内容"在那个位置**不会报错**：上游只会回一个校验失败，
+    /// 排查方向会整个跑偏。所以类型上就让它装得下。
+    ///
+    /// 文本请求照旧用 [`HttpRequest::json_body`] / [`HttpRequest::text_body`]，
+    /// 它们只是把文本转成字节；读回文本用 [`HttpRequest::body_str`]。
     #[serde(default)]
-    pub body: Option<String>,
+    pub body: Option<Vec<u8>>,
 }
 
 impl HttpRequest {
@@ -50,19 +60,57 @@ impl HttpRequest {
         }
     }
 
+    /// `PUT` —— 上传那一枪用的方法。
+    pub fn put(url: impl Into<String>) -> Self {
+        Self {
+            method: "PUT".into(),
+            url: url.into(),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
     pub fn header(mut self, k: impl Into<String>, v: impl Into<String>) -> Self {
         self.headers.push((k.into(), v.into()));
         self
     }
 
     pub fn json_body(mut self, v: &serde_json::Value) -> Self {
-        self.body = Some(v.to_string());
+        self.body = Some(v.to_string().into_bytes());
         self
     }
 
     pub fn text_body(mut self, s: impl Into<String>) -> Self {
-        self.body = Some(s.into());
+        self.body = Some(s.into().into_bytes());
         self
+    }
+
+    /// 二进制体（上传图片用）。
+    pub fn bytes_body(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+        self.body = Some(bytes.into());
+        self
+    }
+
+    /// 把体读成文本（测试与少数要读回原文的调用点用）。
+    ///
+    /// ⚠ 体不是合法 UTF-8 时回 `None` —— 那说明这一枪带的是二进制，
+    /// **不是**"没有体"（要判有没有体用 `body.is_some()`）。
+    pub fn body_str(&self) -> Option<&str> {
+        match self.body.as_ref() {
+            Some(bytes) => std::str::from_utf8(bytes).ok(),
+            None => None,
+        }
+    }
+
+    /// 请求是否**带体**。
+    ///
+    /// ⚠ **空体也算带体**：`Some(vec![])` 与 `None` 语义不同 ——
+    /// 直播那两条 `give` / `draw` 靠 `None` 表达"无体"，
+    /// 而"显式给了个空体"是要发出一个 `content-length: 0` 的。
+    /// ⇒ 判"有没有体"只看 `is_some()`，**不要**顺手加 `!is_empty()`：
+    /// 那会把显式空体变成无体，表现是少一个头、少一段长度声明。
+    pub fn has_body(&self) -> bool {
+        self.body.is_some()
     }
 }
 

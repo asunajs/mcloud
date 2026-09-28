@@ -482,7 +482,7 @@ async fn draw_sends_the_lottery_with_the_module_id_from_the_first_shot() {
         second.url
     );
     assert_eq!(second.method, "POST");
-    assert_eq!(second.body.as_deref(), Some(r#"{"moduleId":"1-250730"}"#));
+    assert_eq!(second.body_str(), Some(r#"{"moduleId":"1-250730"}"#));
     assert!(summary.contains("30云朵"), "实得：{summary}");
 }
 

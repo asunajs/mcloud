@@ -398,7 +398,7 @@ pub fn thirdlogin_request(
     let wire = crypto.encrypt_body(&plaintext)?;
 
     let mut request = with_app_headers(HttpRequest::post(THIRD_LOGIN), device_id, timestamp);
-    request.body = Some(wire);
+    request.body = Some(wire.into_bytes());
     Ok(request)
 }
 

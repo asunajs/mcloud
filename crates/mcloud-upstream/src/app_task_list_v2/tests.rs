@@ -47,7 +47,7 @@ fn the_body_is_exactly_the_captured_one() {
         req.url,
         "https://m.mcloud.139.com/ycloud/signin/task/taskListV2"
     );
-    let body = req.body.as_deref().expect("这一口要带 body");
+    let body = req.body_str().expect("这一口要带 body");
     assert_eq!(
         body, r#"{"clientVersion":"12.6.0","group":"new","marketname":"sign_in_3"}"#,
         "键序也要与实拍一致"
@@ -134,7 +134,7 @@ fn the_eight_groups_are_pinned_in_order() {
 #[test]
 fn the_group_flows_into_the_body() {
     let req = task_list_v2_request("sign_in_3", "beiyong2");
-    let v: Value = serde_json::from_str(req.body.as_deref().unwrap()).unwrap();
+    let v: Value = serde_json::from_str(req.body_str().unwrap()).unwrap();
     assert_eq!(v["group"], "beiyong2");
     assert_eq!(v["marketname"], "sign_in_3");
 }

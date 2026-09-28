@@ -1534,7 +1534,7 @@ fn journaling_sends_exactly_five_events_ending_with_flower_btn() {
     for _ in 0..proto::JOURNALING_EVENTS.len() {
         let (step, req) = s.next().unwrap();
         assert_eq!(step, RedFlowerStep::Journaling);
-        bodies.push(req.body.clone().unwrap_or_default());
+        bodies.push(req.body_str().unwrap_or_default().to_string());
         s.feed(&journaling_ok()).unwrap();
     }
     assert_eq!(bodies.len(), 5, "埋点固定 5 条");
@@ -1570,8 +1570,7 @@ fn journaling_sends_exactly_five_events_ending_with_flower_btn() {
         req.headers
     );
     assert!(
-        req.body
-            .as_deref()
+        req.body_str()
             .unwrap_or_default()
             .starts_with("module=uservisit&"),
         "form 体的形状照抄原项目：{:?}",
@@ -2051,7 +2050,7 @@ async fn gate_opens_with_the_live_source_id_not_the_signin_one() {
         .find(|r| r.url.contains("/querySpecTokenV2"))
         .expect("门必须打 querySpecTokenV2");
     let body: serde_json::Value =
-        serde_json::from_str(first.body.as_deref().expect("第①步是 JSON 体")).unwrap();
+        serde_json::from_str(first.body_str().expect("第①步是 JSON 体")).unwrap();
 
     assert_eq!(
         body["toSourceId"], "017027",

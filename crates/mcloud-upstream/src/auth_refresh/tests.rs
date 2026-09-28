@@ -47,7 +47,7 @@ fn request_uses_the_captured_endpoint_and_shape() {
         Some("application/json;charset=UTF-8")
     );
     assert!(header(&req, "Authorization").is_some(), "要带当前凭据");
-    let body = req.body.as_deref().unwrap();
+    let body = req.body_str().unwrap();
     assert!(
         body.contains(r#""userDomainId":"1990000000000000001""#),
         "{body}"
@@ -70,7 +70,7 @@ fn client_type_follows_the_credential_not_a_parameter() {
 #[test]
 fn body_key_order_matches_the_capture() {
     let req = refresh_request(&account("mobile", Some("1990000000000000001"))).unwrap();
-    let body = req.body.as_deref().unwrap();
+    let body = req.body_str().unwrap();
     let a = body.find("userDomainId").unwrap();
     let b = body.find("clientType").unwrap();
     assert!(a < b, "userDomainId 应在前：{body}");

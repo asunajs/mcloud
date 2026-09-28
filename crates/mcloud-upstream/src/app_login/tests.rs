@@ -217,7 +217,7 @@ fn new_login_random_is_not_the_send_sms_constant() {
 // ══════════════════════════ 请求构造 ══════════════════════════
 
 fn body_of(req: &HttpRequest) -> String {
-    req.body.clone().unwrap_or_default()
+    req.body_str().unwrap_or_default().to_string()
 }
 
 fn header<'a>(req: &'a HttpRequest, name: &str) -> Option<&'a str> {

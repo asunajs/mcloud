@@ -116,7 +116,7 @@ async fn qr_poll_sends_platform_specific_request() {
 
     let reqs = http.requests();
     assert_eq!(reqs.len(), 1);
-    let body = reqs[0].body.as_deref().unwrap();
+    let body = reqs[0].body_str().unwrap();
     // mac 的三个业务参数
     assert!(body.contains(r#""clientType":"710""#), "实得：{body}");
     assert!(body.contains(r#""cpid":"332""#), "实得：{body}");
@@ -382,7 +382,7 @@ async fn sms_send_code_reports_quota_and_slider() {
         }
     );
     // 请求体带手机号与平台
-    let body = http.requests()[0].body.clone().unwrap();
+    let body = http.requests()[0].body_str().unwrap().to_string();
     assert!(body.contains("19900000001"));
     assert!(body.contains(r#""clientType":"656""#));
 
@@ -397,8 +397,7 @@ async fn sms_send_code_reports_quota_and_slider() {
     );
     // mac 的 clientType 也要跟着变
     assert!(http.requests()[0]
-        .body
-        .as_deref()
+        .body_str()
         .unwrap()
         .contains(r#""clientType":"710""#));
 }
@@ -410,7 +409,7 @@ async fn sms_send_code_with_slider_embeds_the_answer() {
     let sms = SmsLogin::start(PcPlatform::Windows, "D", "19900000001", &mut rng());
     sms.send_code_with_slider(&http, "T", "461").await.unwrap();
 
-    let body = http.requests()[0].body.clone().unwrap();
+    let body = http.requests()[0].body_str().unwrap().to_string();
     assert!(body.contains("puzzleVerfycode"), "实得：{body}");
     // 字段名必须带上游那个拼写（verfy 不是 verify）
     assert!(!body.contains("puzzleVerifycode"), "字段名拼错了：{body}");
@@ -482,7 +481,7 @@ async fn password_login_never_sends_the_plain_password() {
     .await
     .unwrap();
 
-    let body = http.requests()[0].body.clone().unwrap();
+    let body = http.requests()[0].body_str().unwrap().to_string();
     assert!(!body.contains("hunter2"), "明文口令泄漏进请求体：{body}");
     assert!(body.contains(&mcloud_upstream::login::password_hash("hunter2")));
     assert!(body.contains(r#""pintype":"9""#));
@@ -645,7 +644,7 @@ async fn logout_swallows_upstream_failure() {
     // 必须返回 Ok —— 本地凭据已经清了，这不算失败
     assert!(logout(&http, &client, "T", "19900000001").await.is_ok());
 
-    let body = http.requests()[0].body.clone().unwrap();
+    let body = http.requests()[0].body_str().unwrap().to_string();
     assert!(body.contains("19900000001"));
 }
 
@@ -711,7 +710,7 @@ async fn app_send_code_surfaces_need_captcha_then_sent() {
 
     // 重发那一枪的 puzzleVerfycode 必须是编码后的值，不是明文坐标
     let reqs = http.requests();
-    let sent = reqs[1].body.clone().unwrap();
+    let sent = reqs[1].body_str().unwrap();
     assert!(sent.contains("puzzleVerfycode"));
     assert!(!sent.contains("\"466\""), "不能把明文坐标发上去");
 }
@@ -767,7 +766,7 @@ async fn app_login_success_decrypts_the_session() {
     assert_eq!(v["authToken"], "tok");
 
     // 线上体必须是加密 + 旋转过的
-    let sent = http.requests()[0].body.clone().unwrap();
+    let sent = http.requests()[0].body_str().unwrap().to_string();
     assert_eq!(sent.len(), 384);
     assert!(!sent.contains("429344"));
 }

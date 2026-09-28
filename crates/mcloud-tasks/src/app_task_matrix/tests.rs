@@ -295,7 +295,7 @@ async fn both_markets_are_queried_in_order() {
         .requests()
         .iter()
         .filter_map(|r| {
-            let v: Value = serde_json::from_str(r.body.as_deref()?).ok()?;
+            let v: Value = serde_json::from_str(r.body_str()?).ok()?;
             Some(v["marketname"].as_str()?.to_string())
         })
         .collect();

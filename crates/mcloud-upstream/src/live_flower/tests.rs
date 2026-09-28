@@ -62,7 +62,7 @@ fn give_and_draw_have_no_body_and_no_content_type() {
             "{name} 的 body 必须是 None（实拍 content-length: 0）"
         );
         assert_eq!(
-            req.body.as_deref(),
+            req.body_str(),
             None,
             "{name} 不该发出任何 body —— 尤其不该是 `{{}}`"
         );
@@ -123,11 +123,11 @@ fn journaling_content_type_is_declared_explicitly() {
 fn user_info_and_journaling_keep_their_own_body_shapes() {
     // ① user/info：JSON 空对象 `{}`（实拍 content-length: 2）
     let info = user_info_request();
-    assert_eq!(info.body.as_deref(), Some("{}"), "body 必须是空对象");
+    assert_eq!(info.body_str(), Some("{}"), "body 必须是空对象");
 
     // ② journaling：form-urlencoded、**不是** JSON
     let j = journaling_request("National_LiveRoomFeedback_pv");
-    let body = j.body.as_deref().expect("埋点有 body");
+    let body = j.body_str().expect("埋点有 body");
     assert!(
         !body.starts_with('{'),
         "form 体不是 JSON，别用 json_body：{body}"
@@ -159,7 +159,7 @@ fn journaling_events_are_the_five_from_the_reference() {
     for ev in JOURNALING_EVENTS {
         let req = journaling_request(ev);
         assert!(req.url.ends_with(JOURNALING_PATH), "实得：{}", req.url);
-        assert!(req.body.as_deref().unwrap().contains(ev));
+        assert!(req.body_str().unwrap().contains(ev));
     }
 }
 
@@ -341,7 +341,7 @@ fn percent_encoding_covers_query_breaking_characters() {
 #[test]
 fn form_encoding_uses_plus_for_space_unlike_query_encoding() {
     let req = journaling_request("a b&c=d");
-    let body = req.body.as_deref().unwrap();
+    let body = req.body_str().unwrap();
     assert!(
         body.contains("optkeyword=a+b%26c%3Dd"),
         "form 体的空格该是 `+`：{body}"

@@ -59,7 +59,7 @@ fn spec_token_request_shape() {
     );
     assert_eq!(header(&req, "Authorization"), Some("Basic abc"));
     assert_eq!(header(&req, "Content-Type"), Some(H5_CONTENT_TYPE));
-    assert_eq!(req.body.as_deref(), Some(r#"{"toSourceId":"001005"}"#));
+    assert_eq!(req.body_str(), Some(r#"{"toSourceId":"001005"}"#));
 }
 
 // ── 第 ② 段：timestamp ──────────────────────────────────────────────────
@@ -112,7 +112,7 @@ fn tyrz_login_request_shape() {
 fn tyrz_login_body_keys_are_in_capture_order() {
     let sign = H5Signature::with_ids("r", "1", "n");
     let req = tyrz_login_request(signin(), "TOK", &sign, "https://x/");
-    let body = req.body.as_deref().unwrap();
+    let body = req.body_str().unwrap();
 
     let i_market = body.find("marketName").unwrap();
     let i_open = body.find("openAccount").unwrap();
@@ -495,7 +495,7 @@ fn live_gate_spec_token_uses_the_live_source_id() {
         req.url
     );
     let body: serde_json::Value =
-        serde_json::from_str(req.body.as_deref().expect("第①步是 JSON 体")).unwrap();
+        serde_json::from_str(req.body_str().expect("第①步是 JSON 体")).unwrap();
 
     // ⭐ 这一条是本文件存在的理由。
     assert_eq!(
@@ -522,7 +522,7 @@ fn live_gate_spec_token_uses_the_live_source_id() {
 #[test]
 fn live_gate_spec_token_body_has_exactly_one_key() {
     let req = live_gate_spec_token_request("mobile abc");
-    let body: serde_json::Value = serde_json::from_str(req.body.as_deref().unwrap()).unwrap();
+    let body: serde_json::Value = serde_json::from_str(req.body_str().unwrap()).unwrap();
     let obj = body.as_object().expect("应当是 JSON 对象");
     assert_eq!(
         obj.len(),
@@ -553,9 +553,9 @@ fn gate_token_request_is_not_the_signin_recipe() {
     let signin = spec_token_request(signin(), "mobile abc");
 
     // 同一个端点，但 body 里的 toSourceId 必须不同。
-    let gate_body: serde_json::Value = serde_json::from_str(gate.body.as_deref().unwrap()).unwrap();
+    let gate_body: serde_json::Value = serde_json::from_str(gate.body_str().unwrap()).unwrap();
     let signin_body: serde_json::Value =
-        serde_json::from_str(signin.body.as_deref().unwrap()).unwrap();
+        serde_json::from_str(signin.body_str().unwrap()).unwrap();
     assert_ne!(
         gate_body["toSourceId"], signin_body["toSourceId"],
         "门的票与签到页的票是两套不同的参数，不能相同"

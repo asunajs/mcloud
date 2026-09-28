@@ -100,7 +100,7 @@ fn get_slide_body_is_exactly_two_bytes() {
         req.url,
         "https://m.mcloud.139.com/ycloud/auth-service/slide/getSlide"
     );
-    assert_eq!(req.body.as_deref(), Some("{}"), "实拍 Content-Length: 2");
+    assert_eq!(req.body_str(), Some("{}"), "实拍 Content-Length: 2");
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn exchange_v3_body_matches_the_capture_byte_for_byte() {
     );
     // ⭐ 键序是契约：prizeId → client → clientVersion → puzzleOffset → smsCode → deviceId
     assert_eq!(
-        req.body.as_deref(),
+        req.body_str(),
         Some(
             r#"{"prizeId":251230053,"client":"app","clientVersion":"12.6.0","puzzleOffset":144,"smsCode":"","deviceId":"BDEVICE"}"#
         )
@@ -159,8 +159,7 @@ fn exchange_v3_body_length_matches_the_capture() {
 fn exchange_v3_null_offset_renders_json_null() {
     let req = exchange_v3_request("D", 1, None);
     assert!(
-        req.body
-            .as_deref()
+        req.body_str()
             .unwrap()
             .contains(r#""puzzleOffset":null"#),
         "None 要写成 JSON null（空串与 null 在上游那里逐字相同，都回 501）"

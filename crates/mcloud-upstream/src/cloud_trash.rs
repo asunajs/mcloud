@@ -232,7 +232,7 @@ mod tests {
         assert_eq!(req.method, "POST");
         assert_eq!(req.url, RECYCLEBIN_BATCH_TRASH);
         let body: Value =
-            serde_json::from_str(req.body.as_deref().expect("应有体")).expect("体应是 JSON");
+            serde_json::from_str(req.body_str().expect("应有体")).expect("体应是 JSON");
         assert_eq!(body, serde_json::json!({ "fileIds": ["id-0", "id-1"] }));
         // ⚠ 体里只有这一枚键。多塞一枚"看着有用"的字段等于凭空发明协议。
         assert_eq!(body.as_object().unwrap().len(), 1, "体里只该有 fileIds");

@@ -133,7 +133,7 @@ fn device_id_is_only_appended_when_present() {
 #[test]
 fn receive_v3_requires_device_id_and_sends_it_in_the_body() {
     let req = receive_v3_request("DEV+1", "CID", Some(0));
-    let body: Value = serde_json::from_str(req.body.as_deref().unwrap()).unwrap();
+    let body: Value = serde_json::from_str(req.body_str().unwrap()).unwrap();
 
     assert_eq!(body["deviceId"], "DEV+1");
     assert_eq!(body["cloudId"], "CID");
@@ -153,7 +153,7 @@ fn receive_v3_requires_device_id_and_sends_it_in_the_body() {
 #[test]
 fn receive_v3_defaults_cloud_type_to_empty_string_not_zero() {
     let req = receive_v3_request("D", "CID", None);
-    let body: Value = serde_json::from_str(req.body.as_deref().unwrap()).unwrap();
+    let body: Value = serde_json::from_str(req.body_str().unwrap()).unwrap();
     assert_eq!(body["cloudType"], "", "缺省必须是空串");
     assert_ne!(body["cloudType"], 0, "0 是合法取值，不能拿来当缺省");
 }
@@ -163,7 +163,7 @@ fn receive_v3_defaults_cloud_type_to_empty_string_not_zero() {
 #[test]
 fn revival_request_shape_matches_the_capture() {
     let req = receive_revival_reward_request(None);
-    assert_eq!(req.body.as_deref(), Some("{}"), "body 必须是空对象");
+    assert_eq!(req.body_str(), Some("{}"), "body 必须是空对象");
     assert!(req
         .headers
         .iter()

@@ -566,7 +566,7 @@ fn cmlive_requests_do_not_fake_browser_only_headers() {
 fn cmpass_login_request_carries_no_authorization() {
     let req = cmpass_login_request("SSO-TOKEN").unwrap();
     assert_eq!(header(&req, "Authorization"), None);
-    let body: Value = serde_json::from_str(req.body.as_deref().unwrap()).unwrap();
+    let body: Value = serde_json::from_str(req.body_str().unwrap()).unwrap();
     assert_eq!(body["cmpassToken"], "SSO-TOKEN");
 }
 
@@ -591,7 +591,7 @@ fn tab_list_query_matches_the_capture() {
 #[test]
 fn room_beat_body_matches_the_capture() {
     let req = room_beat_request("147606", "J").unwrap();
-    let body: Value = serde_json::from_str(req.body.as_deref().unwrap()).unwrap();
+    let body: Value = serde_json::from_str(req.body_str().unwrap()).unwrap();
     assert_eq!(body["roomId"], "147606", "roomId 必须是字符串");
     assert!(body["roomId"].is_string(), "写成数字会丢精度");
     assert_eq!(body["channelId"], "134", "channelId 也必须是字符串");
@@ -1046,7 +1046,7 @@ fn apply_request_body_matches_the_capture() {
         "1784790184674",
     )
     .unwrap();
-    let body: Value = serde_json::from_str(req.body.as_deref().unwrap()).unwrap();
+    let body: Value = serde_json::from_str(req.body_str().unwrap()).unwrap();
     assert_eq!(body["roomId"], "2026072314302675201220000000000");
     assert_eq!(body["userName"], "19900000000");
     assert_eq!(body["invoker"], "cmlive");

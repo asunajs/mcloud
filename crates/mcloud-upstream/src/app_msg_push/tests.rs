@@ -90,7 +90,7 @@ fn list_request_sends_the_literal_null_body() {
         req.url,
         "https://m.mcloud.139.com/ycloud/msgPushOn/task/list"
     );
-    let body = req.body.as_deref().expect("这一枪要带 body");
+    let body = req.body_str().expect("这一枪要带 body");
     assert_eq!(body, "null");
     assert_eq!(body.len(), 4, "实拍 content-length 是 4");
 }
@@ -128,7 +128,7 @@ fn obtain_request_carries_type_two() {
         },
         "方法只由 MSG_PUSH_OBTAIN_IS_POST 决定"
     );
-    let body = req.body.as_deref().expect("这一枪要带 body");
+    let body = req.body_str().expect("这一枪要带 body");
     let v: Value = serde_json::from_str(body).expect("body 应是 JSON");
     assert_eq!(v, json!({ "type": 2 }));
 }

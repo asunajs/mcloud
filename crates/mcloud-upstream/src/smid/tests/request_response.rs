@@ -45,7 +45,7 @@ fn request_targets_cmpassport_and_carries_no_cloud_credentials() {
 fn the_request_carries_the_payload_as_its_body() {
     let payload = build_sm_data(&fp(), &upload(), &mut seq_rng(1)).unwrap();
     let request = device_profile_request(&payload, &fp()).unwrap();
-    let body: Value = serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
+    let body: Value = serde_json::from_str(request.body_str().unwrap()).unwrap();
     assert_eq!(body, payload);
 }
 

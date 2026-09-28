@@ -2026,7 +2026,7 @@ async fn the_order_body_carries_the_offset_and_device_id() {
         .requests()
         .into_iter()
         .find(|r| r.url.contains("exchangeV3"))
-        .and_then(|r| r.body)
+        .and_then(|r| r.body_str().map(str::to_string))
         .unwrap();
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(json["prizeId"], 251230053);

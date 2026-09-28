@@ -415,7 +415,7 @@ async fn receive_claims_now_items_and_reads_the_amount() {
 
     // ⭐ 领AI豆那一枪**必须**带 deviceId 到 body 里（不带会回 615）
     let body: serde_json::Value =
-        serde_json::from_str(http.requests()[1].body.as_deref().unwrap()).unwrap();
+        serde_json::from_str(http.requests()[1].body_str().unwrap()).unwrap();
     assert_eq!(body["deviceId"], "DEV+1/base=");
     assert!(http.requests()[1]
         .headers

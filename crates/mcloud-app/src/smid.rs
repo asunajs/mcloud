@@ -598,7 +598,7 @@ mod tests {
         let seen = http.seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
         let body: serde_json::Value =
-            serde_json::from_str(seen[1].body.as_deref().unwrap()).unwrap();
+            serde_json::from_str(seen[1].body_str().unwrap()).unwrap();
         // 上报体是加密的，box 只能通过解密看 —— 这里断言"带了值"而不是空串。
         //
         // ⚠ 原来这里是两句（`len() > 0` 与 `!is_empty()`）—— 后者蕴含前者，

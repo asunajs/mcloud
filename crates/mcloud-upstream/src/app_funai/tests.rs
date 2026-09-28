@@ -85,7 +85,7 @@ fn lottery_body_is_exactly_the_captured_one() {
         req.url,
         "https://m.mcloud.139.com/ycloud/funai/api/page/lottery"
     );
-    let body = req.body.as_deref().expect("这一枪要带 body");
+    let body = req.body_str().expect("这一枪要带 body");
     assert_eq!(body, r#"{"moduleId":"1-250730"}"#);
     assert_eq!(body.len(), 23, "实拍 content-length 是 23");
     let v: Value = serde_json::from_str(body).unwrap();
@@ -101,7 +101,7 @@ fn lottery_body_is_exactly_the_captured_one() {
 #[test]
 fn the_module_id_flows_through_into_the_body() {
     let req = funai_lottery_request("2-260324-1", None);
-    assert_eq!(req.body.as_deref(), Some(r#"{"moduleId":"2-260324-1"}"#));
+    assert_eq!(req.body_str(), Some(r#"{"moduleId":"2-260324-1"}"#));
 }
 
 /// 两条请求共用那四片 H5 头（`jwttoken` / `referer` 由会话层注入，不在这里）。

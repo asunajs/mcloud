@@ -65,12 +65,12 @@ pub const DEFAULT_UA: &str = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36
 /// 带体请求在调用方**未**声明 `content-type` 时补的默认值。
 pub const CONTENT_TYPE_JSON: &str = "application/json;charset=UTF-8";
 
-/// 请求是否带体。
+/// 请求是否带体 —— 转发到 [`HttpRequest::has_body`]，判据只有那一处。
 ///
-/// 注意 `body == Some("")` 也算带体（空串是**显式**的空体，与 `None`
-/// 语义不同 —— 直播那两条 `give` / `draw` 靠 `None` 表达"无体"）。
+/// ⚠ 别在这里重写一遍 `req.body.is_some()`：两处各写一份，
+/// 早晚会有一份被"顺手补上 `!is_empty()`"而另一份没有。
 fn has_body(req: &HttpRequest) -> bool {
-    req.body.is_some()
+    req.has_body()
 }
 
 /// 该给这个请求补什么 `content-type`（`None` = 不补）。

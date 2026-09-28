@@ -319,7 +319,7 @@ async fn obtain_code_zero_is_a_success() {
     assert_eq!(http.count(), 2);
     let second = &http.requests()[1];
     assert!(second.url.ends_with("/task/obtain"), "实得：{}", second.url);
-    assert_eq!(second.body.as_deref(), Some(r#"{"type":2}"#));
+    assert_eq!(second.body_str(), Some(r#"{"type":2}"#));
 }
 
 /// ⚠⚠ **缺 `obtainCode` 算失败，不算成功**。
