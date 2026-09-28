@@ -143,6 +143,8 @@ export const AccountsPage = () => {
     qrImage.value = ''
     qrPhase.value = 'idle'
     qrNote.value = ''
+    // 重新出码 = 一次新的尝试 ⇒ 上一条成功回执已经过时（与其它三条路径同口径）。
+    formOk.value = ''
     if (sid) void cancelQrLogin(sid).catch(() => undefined)
   }
 
@@ -197,9 +199,17 @@ export const AccountsPage = () => {
       if (r.phase === 'logged_in') {
         stopPolling()
         qrSessionId.value = ''
+        // ⚠ 这三格必须一起清。只清 `qrSessionId` 会留下"二维码还在、
+        // 那句『已扫码，请在手机上确认』也还在"的界面 —— 而账号其实已经加好了，
+        // 用户看到的是一个**已经完成**的流程仍停在半路。（实测踩过。）
+        qrImage.value = ''
+        qrNote.value = ''
         qrPhase.value = 'idle'
-        pushToast('success', `已添加账号 ${r.account ?? ''}（平台：${r.platform ? PLATFORM_LABEL[r.platform] : '未知'}）`,
-        )
+        const ok = `已添加账号 ${r.account ?? ''}（平台：${r.platform ? PLATFORM_LABEL[r.platform] : '未知'}）`
+        // ⚠ 与其它三条登录路径一致：3 秒的 toast 之外再留一条页面回执。
+        // 扫码这条尤其需要 —— 人的注意力那时在手机上，toast 很容易整条错过。
+        formOk.value = ok
+        pushToast('success', ok)
         await load()
         return
       }
