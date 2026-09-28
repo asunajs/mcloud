@@ -126,6 +126,24 @@ impl Runner {
         self.registry.contains(name)
     }
 
+    /// 给某个账号构造 HTTP 客户端（与任务体拿到的**同一条**装饰链）。
+    ///
+    /// # 为什么要有这个出口，而不是让调用方自己建一条
+    ///
+    /// 有几个交互式入口（WebUI 的按钮、CLI 的只读查询）要发**一次**
+    /// 业务请求，而它们走的必须是同一条链 —— 会话、`deviceid` 头、
+    /// 按域名注入的 `Authorization` 全在这条链上。
+    ///
+    /// 各调用方自己 `ReqwestClient::new(...)` 一份的表现是
+    /// "任务跑得通、这个按钮永远 401"：新那条链上没有会话，
+    /// 而它会**静默**少一个头，不报错。
+    ///
+    /// ⚠ 它**不**登记 run、**不**过并发闸、**不**发事件。
+    /// 所以只给**只读**查询用；写操作必须走 [`Runner::run`]。
+    pub fn http_for(&self, account: &Account) -> Arc<dyn HttpClient> {
+        (self.http_for)(account)
+    }
+
     /// 该 `task:account` 是否正在运行。
     pub fn is_running(&self, task: &str, account: &AccountId) -> bool {
         let key = Self::key(task, account);

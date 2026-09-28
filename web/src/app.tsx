@@ -18,6 +18,7 @@ import { ConfirmDialog, closeDialog, openDialog } from './ui/dialog'
 import { DashboardPage } from './pages/dashboard-page'
 import { AccountsPage } from './pages/accounts-page'
 import { TasksPage } from './pages/tasks-page'
+import { ExchangePage } from './pages/exchange-page'
 import { LiveRoomPage } from './pages/live-room-page'
 import { SchedulesPage } from './pages/schedules-page'
 import { PipelinesPage } from './pages/pipelines-page'
@@ -314,6 +315,13 @@ export default defineVaporComponent(() => {
             <AccountsPage />
           ) : page.value === 'tasks' ? (
             <TasksPage />
+          ) : page.value === 'exchange' ? (
+            /*
+              `key` 与下面几页同理：Vapor 没有重渲染，setup 只跑一次。
+              这一页的状态里有**上一次兑换的结论**与选中的账号 ——
+              实例被复用会让"切走再切回来"看到上一个账号下的旧结论。
+            */
+            <ExchangePage key={page.value} />
           ) : page.value === 'live-room' ? (
             /*
               `key` 与下面几页同理：Vapor 没有重渲染，setup 只跑一次。

@@ -46,12 +46,34 @@ use mcloud_core::{Clock, Error, HttpClient, Result, TaskOutcome};
 use mcloud_engine::{Task, TaskContext, TaskResult};
 use mcloud_upstream::app_signin::{self, SignInEnvelope, SignInStatus};
 use mcloud_upstream::exchange::{
-    self, ExchangeList, ExchangeOrder, ExchangePrize, ExchangeResult as V3Result, SlidePuzzle,
-    CODE_DUPLICATED, CODE_NOT_TARGET_USER, CODE_OK, CODE_SLIDER_FAILED, LIMIT_AVAILABLE,
-    LIMIT_EXCHANGED, LIMIT_GROUP_EXCHANGED, LIMIT_TOMORROW, LIMIT_UNKNOWN3,
+    self, ExchangeList, ExchangeResult as V3Result, SlidePuzzle, CODE_DUPLICATED,
+    CODE_NOT_TARGET_USER, CODE_OK, CODE_SLIDER_FAILED, LIMIT_AVAILABLE, LIMIT_EXCHANGED,
+    LIMIT_GROUP_EXCHANGED, LIMIT_TOMORROW, LIMIT_UNKNOWN3,
 };
+// `ExchangePrize` / `ExchangeOrder` 由下面那两条 `pub use` 转出（它们都出现在
+// 本模块的**公开**签名里），所以这里**不再**从分组导入里引一次 —— 会撞名（E0252）。
 
 // ══════════════════════════════ 常量 ══════════════════════════════
+
+/// 清单里那一件的类型，**转出**给只看清单的调用方用。
+///
+/// ⚠ 转出是必要的而不是图省事：`ExchangePrize` 出现在本模块的**公开**
+/// 签名里（[`JudgedPrize`] 的字段、[`ExchangeOutcome::prize`]），
+/// 而一个公开结构体上的私有类型会让下游**用不了**那个字段
+/// （拿不到类型名就没法声明变量、没法 `use`）。
+///
+/// 转出的只是**类型**，不是新的行为：上游换形状时这里跟着换，
+/// 下游仍按同一份字段读。
+pub use mcloud_upstream::exchange::ExchangePrize;
+
+/// 成交那一笔的类型，**转出**理由同 [`ExchangePrize`]：
+/// 它出现在 [`ExchangeOutcome::order`] 上。
+///
+/// ⚠ 一并转出还有一层现实原因：`mcloud-server` **不依赖** `mcloud-upstream`
+/// （它只依赖 `mcloud-app` 与 `mcloud-tasks`）。路由要构造/断言订单，
+/// 若不从这里转出，就得为了两个类型加一条 crate 依赖 —— 那会把
+/// "server 不直接碰上游协议层"这条边界拆掉。
+pub use mcloud_upstream::exchange::ExchangeOrder;
 
 /// 取题 → 解算 → 下单，最多跑几轮 = 2。
 ///
@@ -841,11 +863,56 @@ async fn judge_exchange(env: &ExchangeEnv<'_>, query: &str, now_ms: i64) -> Resu
 }
 
 /// 读兑换清单（**只读**）。
-async fn read_exchange_list(env: &ExchangeEnv<'_>) -> Result<ExchangeList> {
+///
+/// 公开是为了让只读的 HTTP 路由（选品器那一类）复用**同一次**读取 ——
+/// 那边没有 `mcloud-upstream` 依赖，而把这段抄一份过去，两份的差别
+/// 会是"任务看得见的清单"与"页面上看得见的清单"不是同一份。
+pub async fn read_exchange_list(env: &ExchangeEnv<'_>) -> Result<ExchangeList> {
     let resp = env.http.request(exchange::exchange_list_request()).await?;
     let body = mcloud_upstream::session::ensure_http_ok(&resp, "读取兑换清单")?;
     let parsed = SignInEnvelope::parse(body)?;
     exchange::parse_exchange_list(&parsed)
+}
+
+/// 清单里的一件 + 它当下的判定档位。
+///
+/// 只读选品器（HTTP 那一条）要的正是这一对，所以类型在这里定：
+/// 档位与商品必须是**同一次读取**的产物，分成两个 `Vec` 返回的话，
+/// 两边的顺序一旦不同，界面上"这件可兑"就会配到**另一件**的价格上。
+#[derive(Debug, Clone)]
+pub struct JudgedPrize {
+    pub prize: ExchangePrize,
+    pub plan: ExchangePlan,
+}
+
+/// **只读**：读一次清单，并逐件判"现在能不能兑"。**不碰余额、不碰滑块、不下单。**
+///
+/// # `balance = None` 这一档是刻意的（代价写在下面）
+///
+/// 与参考实现给选品器的那一档一致：**没有余额读数** ⇒ 判不出
+/// [`ExchangePlan::InsufficientCloud`]。所以这里标成"可兑"的商品，
+/// 用户点了仍可能被链挡下 —— 那一次挡下**有错误码**（`Skipped` + `plan`），
+/// 不会静默不发。
+///
+/// 为什么不顺手查一次余额：`infoV3` 是**账号级**请求，多打一枪就多一分
+/// 风控噪声，而"看一眼清单"的收益不足以付它。
+///
+/// # 时间窗用**调用方给的** `now_ms`
+///
+/// 由 `env.clock` 取也一样，但显式传参让"这一份档位是哪个时刻判的"
+/// 可以被回给前端 —— `NotStarted` / `Ended` 是相对时刻的结论，
+/// 页面显示"还没开售"却不说是什么时候判的，用户没法判断该不该刷新。
+pub async fn read_judged_prizes(env: &ExchangeEnv<'_>, now_ms: i64) -> Result<Vec<JudgedPrize>> {
+    let list = read_exchange_list(env).await?;
+    // 顺序由解析层保证（按 groupId **数值**升序）—— 这里不再排一遍。
+    Ok(list
+        .all()
+        .into_iter()
+        .map(|prize| JudgedPrize {
+            plan: plan_exchange(prize, None, now_ms),
+            prize: prize.clone(),
+        })
+        .collect())
 }
 
 /// 读账号状态（余额的**唯一**来源）。
@@ -1426,16 +1493,109 @@ impl Task for ExchangeTask {
             device_id: None,
         };
         ctx.check_cancelled()?;
-        let result = ExchangeRun {
+        // ⚠ 这里**不用 `?`**：`Ok` 与 `Err` 两种都要自报结构化明细。
+        //
+        // 原先这里是 `...run_account(...).await?`，那样"没走到能报结论的那一步"
+        // （取票失败、清单读不出来、余额查询挂了）会**直接上抛**，于是
+        // HTTP 侧与运行历史里都只剩下一句话 —— 而"是哪一枪断的"这件事
+        // 在 `ExchangeOutcome.error` 里本来就有。花真豆的那条链，
+        // 事后必须答得出"走到哪一步、发没发单、花没花"。
+        let ran = ExchangeRun {
             prize: &prize,
             skip_wait,
             device_id: None,
             wait: None,
         }
         .run_account(&env, ctx.clock.now_ms())
-        .await?;
-        ctx.info(result.summary_line());
-        Ok(result.run_report())
+        .await;
+
+        match ran {
+            Ok(result) => {
+                ctx.info(result.summary_line());
+                ctx.details(detail_payload(&result.outcome));
+                Ok(result.run_report())
+            }
+            Err(e) => {
+                // 一枪未发就断在前面：如实报出来，**不**编一份 outcome ——
+                // 编一份空的正好是这一族最危险的误报：`ExchangePlan` 的零值是
+                // `Go`（"可以下单"）、`ExchangeStatus` 的零值是 `NotAttempted`，
+                // 一份漏填 outcome 读起来就是"这一件可以下单"。
+                // 见 `ExchangePlan::Go` 那段与 `status_zero_value_is_not_attempted`。
+                ctx.warn(format!("兑换没跑起来：{e}"));
+                ctx.details(serde_json::json!({
+                    "kind": "exchange",
+                    "reached": false,
+                    "error": e.to_string(),
+                }));
+                Err(e)
+            }
+        }
+    }
+}
+
+/// 把一次兑换的读数折成**给程序读**的形状（进 `RunRecord.details["reported"]`）。
+///
+/// # 为什么在这里序列化，而不是让路由自己拼
+///
+/// HTTP 路由、运行历史、将来的推送都要看同一批字段。三处各拼一份的话，
+/// 加一个字段就得改三处，而**漏改一处不报错** —— 表现是"某个页面少显示一栏"。
+///
+/// # 键名与 `mcloud-server` 路由的响应体**对齐**
+///
+/// 路由那条 `ExchangeRunResponse` 是从这一份里读回来的，所以两边是同一套
+/// `snake_case` 键名。改这里必须同时改那边。
+pub fn detail_payload(outcome: &ExchangeOutcome) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "exchange",
+        "reached": true,
+        "status": status_slug(outcome.status),
+        "plan": outcome.plan.slug(),
+        "plan_reason": outcome.plan.reason(),
+        "code": outcome.code,
+        "message": outcome.message,
+        "rounds": outcome.rounds,
+        "attempts": outcome.attempts,
+        "offset": outcome.offset,
+        "balance": outcome.balance,
+        "after_balance": outcome.after_balance,
+        // `skipWait=false` 那条路上，"等到了什么时候"是用户要看的。
+        "waited_until_ms": outcome.waited_until_ms,
+        "device_id_failed": outcome.device_id_failed,
+        "error": outcome.error,
+        "prize": {
+            "prize_id": outcome.prize.prize_id,
+            "name": outcome.prize.name,
+            "price": outcome.prize.price,
+        },
+        "order": outcome.order.as_ref().map(|o| serde_json::json!({
+            "order_id": o.order_id,
+            "prize_id": o.prize_id,
+            "prize_name": o.prize_name,
+            "cost": o.cost,
+            "insert_time": o.insert_time,
+            "expire_time": o.expire_time,
+        })),
+    })
+}
+
+/// 结局档位的机器可读名。
+///
+/// ⚠ 逐档点名而不是 `{:?}` 或序号：前者把 Rust 变体名变成对外契约、
+/// 后者把**声明顺序**变成对外契约（加一档就让界面那张颜色表静默错配）。
+/// `match` 是穷尽的 —— 上游加档时这里**编译不过**，那正是我们要的响法。
+///
+/// ⚠ 它只此一份：`mcloud-server` 的兑换路由**引用**这里，不另抄一份。
+/// 两处各写一份的表现是"历史里说 ordered、页面上说 failed"。
+pub fn status_slug(status: ExchangeStatus) -> &'static str {
+    match status {
+        ExchangeStatus::NotAttempted => "not_attempted",
+        ExchangeStatus::Ordered => "ordered",
+        ExchangeStatus::Skipped => "skipped",
+        ExchangeStatus::AlreadyExchanged => "already_exchanged",
+        ExchangeStatus::SliderUnresolved => "slider_unresolved",
+        ExchangeStatus::NotTargetUser => "not_target_user",
+        ExchangeStatus::Unknown => "unknown",
+        ExchangeStatus::Failed => "failed",
     }
 }
 

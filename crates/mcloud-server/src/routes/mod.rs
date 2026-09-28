@@ -4,6 +4,7 @@ pub mod accounts;
 pub mod auth;
 pub mod cancel;
 pub mod capabilities;
+pub mod exchange;
 pub mod health;
 pub mod login;
 pub mod logs;
@@ -40,6 +41,11 @@ pub fn router() -> Router<ServerState> {
         // ── 云盘账号（列表 / 移除）──────────────────────────────────
         .route("/api/accounts", get(accounts::list))
         .route("/api/accounts/{id}", axum::routing::delete(accounts::remove))
+        // ── 兑换（抢兑）────────────────────────────────────────────
+        // ⚠ 上面那条 `/api/accounts/{id}` 与下面两条是**不同**的路由：
+        // 一条删账号、一条读奖品清单、一条**真花云朵**。别把后两条也
+        // 合并进 `{id}` 那条 —— 写操作必须看得出它是写操作。
+        .merge(exchange::routes())
         // ── 云盘账号登录（与上面的「管理员登录闸」是两件事）──────────
         .route("/api/login/qr", post(login::start_qr))
         .route("/api/login/qr/poll", post(login::poll_qr))

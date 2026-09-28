@@ -14,6 +14,7 @@ import type { JSX } from 'vue-jsx-vapor'
 import {
   IconClock,
   IconDashboard,
+  IconExchange,
   IconFlower,
   IconHistory,
   IconPipeline,
@@ -26,6 +27,7 @@ export type PageId =
   | 'dashboard'
   | 'accounts'
   | 'tasks'
+  | 'exchange'
   | 'live-room'
   | 'schedules'
   | 'pipelines'
@@ -53,8 +55,9 @@ interface NavItem {
 /**
  * 页面清单。顺序即侧栏顺序（按使用频率排：总览与任务最常用）。
  *
- * 远未用满 9 条 —— 这是好事：规范里"9 条封顶"是上限不是目标。
- * 后续加页面时若超过 9 条，要么并进已有页，要么先改规范，不要静默开第 10 条。
+ * ⚠ **已经用满 9 条**（规范里"9 条封顶"是硬上限）。
+ * 再加页面**不能**直接在这里开第 10 条 —— 要么并进已有页，
+ * 要么先改规范。这正是那条上限存在的意义：逼一次"它真的该是独立一页吗"。
  */
 export const NAV_ITEMS: readonly NavItem[] = [
   {
@@ -80,6 +83,15 @@ export const NAV_ITEMS: readonly NavItem[] = [
     blurb: '选择账号并触发签到、领取等任务，实时查看执行日志。',
     href: '#/tasks',
     icon: IconTask,
+  },
+  {
+    id: 'exchange',
+    // 2 个字：dock 与侧栏在窄屏都放得下。
+    label: '兑换',
+    title: '兑换奖品',
+    blurb: '用云朵兑换奖品（网易云音乐月卡等）。下单会真的扣豆，点之前会再确认一次。',
+    href: '#/exchange',
+    icon: IconExchange,
   },
   {
     id: 'live-room',

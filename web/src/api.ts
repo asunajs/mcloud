@@ -1021,3 +1021,114 @@ export const LIVE_IDLE_REASON: Record<LiveRoomIdleReason, string> = {
   'no-codes': '门开了，但这一趟没收到口令 —— 弹幕里没人发，或小红书那条还没贴进来',
   unknown: '这一趟没有拿去领取的口令',
 }
+
+// ── 兑换（抢兑）──────────────────────────────────────────────────────
+//
+// ⚠ 这一族与上面的直播/签到**不是**同一条链：清单与取题是只读的，
+// 而**兑换是真花豆的写操作** —— 界面必须二次确认，且不可兑的档位要挡住。
+
+/** 清单里的一件奖品（后端按判据算好档位再发过来）。 */
+export interface ExchangePrizeView {
+  prizeId: number
+  name: string | null
+  /** 兑换所需云朵数。`null` = 上游没给这一格（不是 0）。 */
+  price: number | null
+  groupId: number | null
+  /**
+   * 判据档位（`plan_exchange` 的 slug）。
+   *
+   * ⚠ 只读那条路由用的是**无余额**那一档（`balanceAware: false`），
+   * 所以它判不出「余额不足」—— 见 `ExchangePrizesResponse.balanceNote`。
+   */
+  plan: string
+  /** 为什么不能兑（判据本身的中文复述）。`blocks` 为真时才有意义。 */
+  planReason: string
+  /** 判据没过 ⇒ 界面上的按钮要 disabled。 */
+  blocks: boolean
+  limit: number | null
+  count: number | null
+  dailyRemainderCount: number | null
+  minRemainderCount: number | null
+  onLine: number | null
+  startTime: string | null
+  endTime: string | null
+}
+
+export interface ExchangePrizesResponse {
+  prizes: ExchangePrizeView[]
+  /**
+   * 这一份判据是否把**余额**算进去了。
+   *
+   * 今天恒为 `false`：清单那条路由**不查** `infoV3`（账号级请求，
+   * 多打一枪多一分风控噪声），所以档位里没有「余额不足」这一档。
+   */
+  balanceAware: boolean
+  /** 上面那件事的人话说明，界面上直接显示，别自己编。 */
+  balanceNote: string
+  /** 后端判据用的时刻（界面要显示"这份清单是什么时候的"）。 */
+  nowMs: number
+}
+
+/** 读奖品清单 + 每件的判据档位。**只读，不花豆。** */
+export function listExchangePrizes(account: string): Promise<ExchangePrizesResponse> {
+  return request<ExchangePrizesResponse>(
+    `/api/accounts/${encodeURIComponent(account)}/exchange-prizes`,
+  )
+}
+
+/** 一次兑换的读数（后端从运行记录里读回来的那一份）。 */
+export interface ExchangeRunOutcome {
+  runId: number
+  /** `ordered` / `already-exchanged` / `skipped` / `unknown` / … */
+  status: string
+  plan: string
+  planReason: string
+  /** 给人读的一句话小结（后端定的，界面直接用）。 */
+  summary: string
+  /** 业务码。`0` = 成交。 */
+  code: number
+  /** 上游那句 `msg`（可能是空串）。 */
+  message: string
+  rounds: number
+  /** 真正发出去了几枪**下单**请求。`0` = 一枪未发。 */
+  attempts: number
+  /**
+   * 本地解出的 `puzzleOffset`。
+   *
+   * `null` = 没解出来（那时 `attempts` 必为 0：算不出就不发）。
+   */
+  offset: number | null
+  balance: number
+  afterBalance: number | null
+  order: Record<string, unknown> | null
+  deviceIdFailed: string
+  error: string
+}
+
+export interface ExchangeRequestInput {
+  /** `prizeId` 的数字串，或奖品名（后端按精确相等匹配）。 */
+  prizeIdOrName: string
+  /**
+   * 跳过"等到下一个整点再重判"。
+   *
+   * 界面默认 `true`：用户点了按钮就期望**现在**有结果，
+   * 让 HTTP 请求挂在那儿等一小时是不可接受的。
+   */
+  skipWait?: boolean
+}
+
+/**
+ * 兑一件奖品。**真花豆。**
+ *
+ * 后端会走并发闸（同一 `task:account` 不会并发），所以连点两下
+ * 第二下会拿到「同一任务正在运行中」而不是扣两次豆。
+ */
+export function runExchange(account: string, input: ExchangeRequestInput): Promise<ExchangeRunOutcome> {
+  return request<ExchangeRunOutcome>(`/api/accounts/${encodeURIComponent(account)}/exchange`, {
+    method: 'POST',
+    body: JSON.stringify({
+      prizeIdOrName: input.prizeIdOrName,
+      skipWait: input.skipWait ?? true,
+    }),
+  })
+}

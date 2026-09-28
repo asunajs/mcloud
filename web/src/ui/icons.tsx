@@ -38,6 +38,18 @@ export const IconDashboard = (p: IconProps): JSX.Element => (
   </svg>
 )
 
+/**
+ * 兑换：礼物盒。
+ *
+ * 用礼物盒而不是"两支箭头对着转"（那个更像"同步/刷新"）——
+ * 这一页的动作是"把豆换成实物奖品"，用户扫一眼就该认出来。
+ */
+export const IconExchange = (p: IconProps): JSX.Element => (
+  <svg {...BASE} class={p.class ?? 'size-5'}>
+    <path d="M20 7h-2.2a3 3 0 0 0-4.3-4.1L12 4.4l-1.5-1.5A3 3 0 0 0 6.2 7H4a1 1 0 0 0-1 1v3a1 1 0 0 0 1 1h1v8a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-8h1a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1Zm-4.5-3a1 1 0 0 1 0 2H13V5.5l.3-.3a1 1 0 0 1 2.2.8ZM8.5 4a1 1 0 0 1 1.7.7l.3.3V6H8.5a1 1 0 0 1 0-2ZM11 19H6v-7h5v7Zm7 0h-5v-7h5v7Zm1-9H5V9h14v1Z" />
+  </svg>
+)
+
 export const IconTask = (p: IconProps): JSX.Element => (
   <svg {...BASE} class={p.class ?? 'size-5'}>
     <path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2Z" />
