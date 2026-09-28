@@ -6,12 +6,32 @@
 
 ## 状态
 
-**已落地 15 个任务**：P1 签到族八条（`sign` / `receive` / `multiple` /
+**已落地 16 个任务**：P1 签到族八条（`sign` / `receive` / `multiple` /
 `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`）
 + 直播小红花两条（`live-room` / `red-flower`）
 + 兑换（`exchange`）+ 消息推送（`msg-push`）
 + 趣玩AI抽奖（`fun-ai`）+ 公告任务（`notice`）
-+ 拍拍盘点（`play-ai-special`，**只读**）。
++ 拍拍盘点（`play-ai-special`，**只读**）
++ App 任务矩阵（`app-task-matrix`，**只读**）。
+
+**`app-task-matrix`（2026-09-28 落地）—— 只拉表，不打卡、不上传**：
+
+16 次只读请求 = 2 个市场名（`sign_in_3` / `newsign_139mail`）× 8 个 group
+（`new` / `beiyong1` / `beiyong2` / `cloudEmail` / `time` / `day` / `month` / `hidden`），
+然后按「按 `id` 升序 → 按 `name` 去重保留先来的 → 没名字的各自保留」聚合。
+
+> ⚠⚠ **它的名字不叫 `app-task`，是故意的**。参考实现里 `app-task` 的含义是
+> **「做任务」**（逐条 `task/click`，会写用户的账且不可撤销），而且它自己写着
+> **「今天一次真打都没有」**、`RunInBatch: false`，并指明"手工点一次是拿到第一个
+> 实拍的最快路径"。拿同一个 code 实现成只读，会让那个名字在两边指不同的东西
+> ⇒ 这里另起一个名，**把写的那一半原样留给 `app-task`**。
+>
+> ⚠ 上游那一族另有两口是**写**、且**都零实拍**：`task/click`（写账）与上传三枪
+> （`file/create` → `PUT` → `file/complete`，真往用户网盘写 `asign-*.png`），
+> 收尾那一枪 `batchTrash` 同样零实拍 ⇒ 本仓一个都不发。
+>
+> **失败策略**：某组挂了只**登记**、继续拉（照旧实现）；⚠ 但**十六次全挂 ⇒ 报错** ——
+> 旧 TS 那种"全失败仍回一张空表"会让"全没读到"看起来像"这个号没任务"。
 
 **`play-ai-special`（2026-09-28 落地）—— 只做只读那一半，另三口各自卡在不同地方**：
 
@@ -208,7 +228,7 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 | P8 | **账号登录（扫码/短信）+ 账号页 + 定时/编排 CRUD 页** | ✅ |
 | P9a | **签到族 8 条**（`sign` / `receive` / `multiple` / `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`） | ✅ |
 | P9b | **P2 只读查询那一档全部落完**：`exchange` + `msg-push` + `fun-ai` + `notice` | 已落 4 条 |
-| P9c | 其余任务增量接入（`app-task` / `cloud-phone-redpack` / `ai-avatar` / `task-expansion`）+ 推送渠道 | 待做（`play-ai-special` 只读那一半已落）|
+| P9c | 其余任务增量接入（`app-task` **写的那一半** / `cloud-phone-redpack` / `ai-avatar` / `task-expansion`）+ 推送渠道 | 待做（只读那一半已落：`play-ai-special` 与 `app-task-matrix`）|
 
 > **端点必须来自抓包，不能凭印象写。** 本项目的签到端点最初是
 > `/ycloud/api/sign/query`（凭印象），实测回 **405**；换成实拍的

@@ -3,6 +3,7 @@
 //! 任务只依赖 `mcloud-core` 的 trait 与 `mcloud-engine` 的上下文，
 //! 不直接碰网络或磁盘。
 
+pub mod app_task_matrix;
 pub mod exchange;
 pub mod fun_ai;
 pub mod live_room;
@@ -74,6 +75,7 @@ pub fn register_all(registry: &mut Registry) -> Result<(), String> {
         Arc::new(fun_ai::FunaiTask),
         Arc::new(notice::NoticeTask),
         Arc::new(play_ai::PlayAiTask),
+        Arc::new(app_task_matrix::AppTaskMatrixTask),
     ];
     for t in tasks {
         registry.register(t)?;

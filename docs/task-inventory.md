@@ -12,12 +12,19 @@
 > `live-redflower-vectors.json`）。
 > `/api/capabilities` 实测返回这 10 条。
 >
-> **增补（2026-09-28）：已实现 15 个任务** —— 上面 10 条 +
+> **增补（2026-09-28）：已实现 16 个任务** —— 上面 10 条 +
 > `exchange`（兑换）+ `msg-push`（消息推送）+ `fun-ai`（趣玩AI抽奖）+ `notice`（公告任务）
-> + `play-ai-special`（拍拍盘点，**只读那一半**）。
+> + `play-ai-special`（拍拍盘点，**只读那一半**）
+> + `app-task-matrix`（App 任务矩阵，**只读那一半**）。
 > ⇒ 下面 §2 的 **P2「只读查询」那一档已经全部落完**（那四条的实拍材料都拿到了）。
 > 下面那张 19 条清单是**参考实现的规格表**，不是本项目的进度表；
-> 本项目的进度以 `/api/capabilities`（今天 15 条）与 `README.md` 为准。
+> 本项目的进度以 `/api/capabilities`（今天 16 条）与 `README.md` 为准。
+>
+> ⚠ **`app-task-matrix` 与表里的 `app-task` 不是同一条**：后者在参考实现里是
+> 「**做任务**」（逐条 `task/click`，会写用户的账且不可撤销），
+> 而它自己写着「今天一次真打都没有」、`RunInBatch: false`。
+> 本仓只落了**只读那一半**并另起一个 code ⇒ **`app-task` 这个名字今天不存在**，
+> 写的那一半仍未实现。详见 `crates/mcloud-tasks/src/app_task_matrix.rs` 文件头。
 >
 > ⚠ **`play-ai-special` 只落了只读那两枪**（`user/info` + `task/list`），
 > 上游那一族的另外三口（上报一步 / 抽奖 / 写网盘）**故意不接**：
