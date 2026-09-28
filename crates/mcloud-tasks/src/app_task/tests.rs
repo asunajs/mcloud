@@ -20,7 +20,7 @@ fn item(id: Option<i64>, group: Option<&str>, name: Option<&str>) -> TaskV2Item 
 #[test]
 fn task_106_uploads_exactly_one() {
     let s = upload_shape_for(&item(Some(106), Some("new"), Some("上传一个随机文件"))).unwrap();
-    assert_eq!(s, upload_one());
+    assert_eq!(s, UPLOAD_ONE);
     assert_eq!(s.rounds, 1);
     // ⚠ 106 的 runner 体里**没有**那句 sleep ⇒ 不踱步
     assert!(!s.pace_each_round, "106 不该每轮等一拍");
@@ -105,7 +105,7 @@ fn an_unknown_task_uploads_nothing() {
 #[test]
 fn id_and_name_gates_agree_when_both_hit() {
     let both = upload_shape_for(&item(Some(106), Some("beiyong1"), Some("上传图片"))).unwrap();
-    assert_eq!(both, upload_one());
+    assert_eq!(both, UPLOAD_ONE);
 }
 
 // ── 每轮还要不要再传 ─────────────────────────────────────────────────
@@ -154,7 +154,7 @@ fn a_missing_process_reads_as_zero() {
 /// 106 那一档没有 `process` 门槛 ⇒ 那一格读什么都不影响它。
 #[test]
 fn the_one_shot_shape_ignores_process() {
-    let s = upload_one();
+    let s = UPLOAD_ONE;
     assert_eq!(s.stop_at_process, 0);
     assert!(
         should_upload_another(s, 0, Some(999)),

@@ -9,22 +9,22 @@
 //!
 //! # 为什么和 `app-task-matrix` **不是同一个 code**
 //!
-//! 参考实现里 `app-task` 是「做任务」（写），而本仓 `app-task-matrix`
-//! 是「只看」的只读那一半。拿同一个 code 做只读会让这个名字在两边指不同的东西
-//! ⇒ 只读那一半叫 `app-task-matrix`，写的那一半原样留给 `app-task`（就是本模块）。
+//! 本仓 `app-task-matrix` 是「只看」的只读那一半。写的那一半用**另一个 code**
+//! （就是本模块）——拿一个 code 做两件事会让它在两处指不同的东西
+//! ⇒ 只读那一半叫 `app-task-matrix`，写的那一半叫 `app-task`。
 //!
-//! # 判据做成**数据**，不做成闭包
+//! # 判据做成**纯函数**
 //!
-//! 「这一条要不要传、传几个」的判据全部落在 [`upload_shape_for`] 这个纯函数里，
+//! 「这一条要不要传、传几个」全部落在 [`upload_shape_for`] 这个纯函数里，
 //! 于是它能**在没有网络的情况下被钉住**。真发的枪在后面的执行层。
 //!
-//! 依据：旧 TS `packages/core/src/tasks/app/runners.ts` / `tasks.ts`。
-//! 参考实现（Go）把同一件事做成 `taskUploadShape` + `taskRunnerSpec` 两张数据表，
-//! 本模块沿用那个形状。
+//! 依据是 **`mcloud-sign`**（那份 TS 是**能跑**的，行为以它为准）：
+//! `packages/core/src/tasks/app/runners.ts` 的 `106` / `522` 两个 runner，
+//! 以及 `tasks.ts:68-77` 那个 `switch (task.groupid)` 的 `beiyong1` 分支。
 
 use mcloud_upstream::app_task_list_v2::TaskV2Item;
 
-/// 「这一条的第二半是往网盘传文件」的参数集。
+/// 「这一条要往网盘传文件」的参数集。
 ///
 /// ⚠ **零值不成一档** ⇒ "要不要传"由 `Option` 表达，结构体内部不设 `None` 那样的变体。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,15 +47,13 @@ pub struct UploadShape {
 
 /// 「就传一个」那一档（玩法 106 与 beiyong1 的名字门共用）。
 ///
-/// 单独一个函数是为了让"106 与 beiyong1 走的是**同一档**形状"这件事可断言 ——
-/// 旧实现两处都是裸的 `uploadRandomFile(ctx)`，没有任何参数差别。
-pub const fn upload_one() -> UploadShape {
-    UploadShape {
-        rounds: 1,
-        stop_at_process: 0,
-        pace_each_round: false,
-    }
-}
+/// 单独一个常量是为了让"106 与 beiyong1 走的是**同一档**形状"这件事可断言 ——
+/// 旧 TS 两处都是裸的 `uploadRandomFile(ctx)`，没有任何参数差别。
+pub const UPLOAD_ONE: UploadShape = UploadShape {
+    rounds: 1,
+    stop_at_process: 0,
+    pace_each_round: false,
+};
 
 /// 522 那一趟最多传几个（旧实现的 `每月上传任务单日数量 ?? 5` 里那个默认值）。
 ///
@@ -94,7 +92,7 @@ pub fn beiyong1_name_gate(name: &str) -> bool {
 /// 所以先判哪一条都不改结果。这一点由测试钉住，免得将来有人"顺手"给 beiyong1 换一档。
 pub fn upload_shape_for(item: &TaskV2Item) -> Option<UploadShape> {
     match item.task_id {
-        Some(106) => return Some(upload_one()),
+        Some(106) => return Some(UPLOAD_ONE),
         Some(522) => {
             return Some(UploadShape {
                 rounds: ROUNDS_PER_RUN,
@@ -107,7 +105,7 @@ pub fn upload_shape_for(item: &TaskV2Item) -> Option<UploadShape> {
     if item.group_id.as_deref() == Some("beiyong1") {
         if let Some(name) = item.name.as_deref() {
             if beiyong1_name_gate(name) {
-                return Some(upload_one());
+                return Some(UPLOAD_ONE);
             }
         }
     }
