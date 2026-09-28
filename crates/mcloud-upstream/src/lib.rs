@@ -8,6 +8,7 @@
 //!
 //! 业务层只看到 `mcloud_core::HttpClient`。
 
+pub mod app_cloud_upload;
 pub mod app_funai;
 pub mod app_login;
 pub mod app_msg_push;

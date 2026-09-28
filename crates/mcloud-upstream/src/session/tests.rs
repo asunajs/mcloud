@@ -554,8 +554,7 @@ fn gate_token_request_is_not_the_signin_recipe() {
 
     // 同一个端点，但 body 里的 toSourceId 必须不同。
     let gate_body: serde_json::Value = serde_json::from_str(gate.body_str().unwrap()).unwrap();
-    let signin_body: serde_json::Value =
-        serde_json::from_str(signin.body_str().unwrap()).unwrap();
+    let signin_body: serde_json::Value = serde_json::from_str(signin.body_str().unwrap()).unwrap();
     assert_ne!(
         gate_body["toSourceId"], signin_body["toSourceId"],
         "门的票与签到页的票是两套不同的参数，不能相同"

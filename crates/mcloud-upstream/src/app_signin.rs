@@ -68,6 +68,8 @@ pub const START_SIGN_IN: &str = "https://m.mcloud.139.com/ycloud/signin/page/sta
 
 /// 领AI豆。
 pub const RECEIVE_V3: &str = "https://m.mcloud.139.com/ycloud/signin/page/receiveV3";
+/// 任务拓展的**读口**（只读）。⚠ 裸 URL，**没有查询串**。
+pub const TASK_EXPANSION: &str = "https://m.mcloud.139.com/ycloud/signin/page/taskExpansion";
 
 /// 用复活卡 / 回馈卡。
 pub const RECEIVE_REVIVAL_REWARD: &str =
@@ -924,6 +926,111 @@ pub fn parse_cloud_records(env: &SignInEnvelope) -> Result<Vec<CloudRecord>> {
                 .map(String::from),
         })
         .collect())
+}
+
+// ══════════════════════════ 任务拓展（`taskExpansion`）══════════════════════════
+//
+// ⚠ 这一族的**领取**那一口（`receiveTaskExpansion`）**不在这里** —— 它早就随签到族落码了
+// （见本文件里那份 `receive_task_expansion_request`）。把只读的那一口与写的那一口分开放，
+// 是为了让"哪些口会改用户账上的东西"那份清单**一眼可判**，而不用逐条读函数名。
+
+/// `GET /ycloud/signin/page/taskExpansion` —— 只读。
+///
+/// # 裸 URL，**没有查询串**
+///
+/// 实拍那两条的 URL **逐字不带** `?client=`（与同族的 `infoV3?client=app` 不同）。
+/// ⚠ 别"顺手对齐同族"补一个 `client=app`：那是**另一个请求**，而实拍里没有它。
+pub fn task_expansion_request(device_id: Option<&str>) -> HttpRequest {
+    let req = h5(false, HttpRequest::get(TASK_EXPANSION), "true");
+    match device_id {
+        Some(id) => req.header("deviceid", id),
+        None => req,
+    }
+}
+
+/// `taskExpansion` 的解析结果（**六格全部可选**）。
+///
+/// # 这一族在做什么
+///
+/// * `cur_month_backup == Some(false)` ⇒ 先往网盘**传一个 backup 档的文件**去"凑备份"，
+///   等一会儿之后**再读一次**；重试**只有一次**，第二次还是 false 就只念一句
+///   "本月未开启备份，将无法获取翻倍奖励"。
+/// * `cur_month_task_record_count > 0` ⇒ 拿**同一条响应里的** `accept_date` 去领。
+/// * `next_month_task_record_count` **只打印**，不发任何请求。
+///
+/// # 为什么六格全是指针
+///
+/// 实拍那两条是**同一份读数**：`curMonthBackup:true`、`curMonthBackupTaskAccept:false`、
+/// `curMonthTaskRecordCount:0`、`nextMonthTaskRecordCount:358`、`preMonthBackup:false` ——
+/// 给了**五格**、**没给 `accept_date`** ⇒ 六格里至少有一格是"上游可能就是不给"。
+/// 而这一口是**只读**的：把"缺字段"判成解析失败，表现是换一种上游措辞就整条能力报红。
+///
+/// ⚠ `None` 与"读到 `false` / `0`"在两处判据上**不等价**：编排层必须能分清
+/// "上游说这个号没开备份"（⇒ 要凑）与"上游没说"（⇒ **不凑、也不领**）。
+/// 把"没读到"当"没开"的实际后果是**往用户网盘写一个文件**。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TaskExpansion {
+    /// `curMonthBackup` —— 本月**是否已开启自动备份**。旧实现唯一的用法就是它。
+    ///
+    /// ⚠ **只认 JSON 真正的 `true` / `false`**。万一上游改成 `1` / `0`，
+    /// 这里得到的是 `None` ⇒ 调用方判"未知"而**不发那一发写**。
+    /// 这与本文件里那两个"要不要动用户东西"的门槛字段**同一档**，不是巧合。
+    ///
+    /// ⚠ 实拍那两条读到的都是 `true` ⇒ **"未开备份的号回什么形状"仍是待验证的**。
+    pub cur_month_backup: Option<bool>,
+    /// `preMonthBackup` —— 上月是否开着备份。
+    ///
+    /// ⚠ 旧实现**一个字都不读**它 ⇒ 带出来只为排障时能看见上游说了什么，
+    /// 不参与任何判定，也不进对外文案。
+    pub pre_month_backup: Option<bool>,
+    /// `curMonthBackupTaskAccept` —— 本月的备份任务**是否已经领过**。
+    ///
+    /// 实拍给过这一格（`false`），但旧实现**一个字都不读**它 ⇒
+    /// 带出来不等于本层据此分支。
+    pub cur_month_backup_task_accept: Option<bool>,
+    /// `curMonthTaskRecordCount` —— 本月攒下的任务记录数（旧实现判 `> 0` 才去领）。
+    pub cur_month_task_record_count: Option<i64>,
+    /// `nextMonthTaskRecordCount` —— 下月可领的朵数（旧实现只打印，不发请求）。
+    pub next_month_task_record_count: Option<i64>,
+    /// `acceptDate` —— 领取那一口要回带的日期串（来自**同一条**响应）。
+    ///
+    /// ⚠ 实拍那两条**都没有这一格** ⇒ 读到 `None` 是**缺省路径**，不是异常。
+    /// `None` 时领取那一口发**裸 GET**，与真实客户端一致。
+    ///
+    /// 空串在这里一律收成 `None`：`?acceptDate=` 与不带参数是**两个不同的请求**，
+    /// 而"上游给了一个空串"更接近"没给"。
+    pub accept_date: Option<String>,
+}
+
+/// 解析 `taskExpansion` 的响应。
+///
+/// ⚠ **没有 `result` 不算失败**（理由见 [`TaskExpansion`] 那段"为什么六格全是指针"）。
+/// 失败只有一种：信封不 OK（`90001` 那条"票的问题"在 [`SignInEnvelope`] 里已翻成人话）。
+///
+/// # 布尔与数字只认**自己的类型**
+///
+/// 布尔走 `Value::as_bool()`（`1` / `0` 得到 `None`）、数字走 `Value::as_i64()`。
+/// 一律**不**"顺手兼容"字符串或数字形态 —— 这一格的门后面是一次**写用户网盘**。
+pub fn parse_task_expansion(body: &str) -> Result<TaskExpansion> {
+    let env = SignInEnvelope::parse(body)?;
+    env.ensure_ok("读取任务拓展")?;
+    let Some(Value::Object(obj)) = env.result.as_ref() else {
+        // 没有 result（或它不是对象）⇒ 交回一份"什么都没读到"，**不报错**。
+        return Ok(TaskExpansion::default());
+    };
+    Ok(TaskExpansion {
+        cur_month_backup: obj.get("curMonthBackup").and_then(Value::as_bool),
+        pre_month_backup: obj.get("preMonthBackup").and_then(Value::as_bool),
+        cur_month_backup_task_accept: obj.get("curMonthBackupTaskAccept").and_then(Value::as_bool),
+        cur_month_task_record_count: obj.get("curMonthTaskRecordCount").and_then(Value::as_i64),
+        next_month_task_record_count: obj.get("nextMonthTaskRecordCount").and_then(Value::as_i64),
+        // 空串收成 None：`?acceptDate=` 与不带参数是两个不同的请求
+        accept_date: obj
+            .get("acceptDate")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+    })
 }
 
 #[cfg(test)]

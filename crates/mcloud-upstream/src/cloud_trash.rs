@@ -111,16 +111,22 @@ pub const CLOUD_CONTENT_TYPE: &str = "application/json;charset=UTF-8";
 ///   参考实现给这一族写死 `CaiyunAndroidWebUA`，本仓用的是 profile 的 UA。
 ///   要复现参考行为，应在**组装层**把 profile 的 UA 设成那一串。
 ///   上游今天不校验这一格；哪天开始校验，错的一方是**静默失效**，不会报错。
+///
+/// # 本函数只是**转发**（这一族的头画像只有一处实现）
+///
+/// 那一族是「渠道 × 操作类型」两维的：`create` / `complete` 可能走 android 或 PC 档，
+/// 而删除固定 web 档 —— 三档两份实现的写法迟早分叉，所以参数化的那一份落在
+/// [`crate::app_cloud_upload::cloud_file_op_headers`]，本函数是它在
+/// `(web, upload)` 这一档上的转发。
+///
+/// ⚠ 改这一族的头**只改那一个函数**：在这里补一枚头会变成「只有删除那一枪有」，
+/// 而旧实现里这几口共用同一个 `getFileOpHeader`。
 pub fn cloud_file_op_headers_web(req: HttpRequest) -> HttpRequest {
-    req.header("x-yun-api-version", "v1")
-        .header("x-yun-app-channel", CLOUD_CHANNEL_WEB)
-        .header("x-yun-op-type", "1")
-        .header("x-huawei-channelSrc", CLOUD_CHANNEL_WEB)
-        .header("x-yun-client-info", CLOUD_CLIENT_INFO_WEB)
-        // ⚠ 这一枚在旧 TS 里被赋成**设备信息串**（`apis/file.ts:41`），
-        // 看着像笔误，但上游收到过的就是这一串 ⇒ 照抄。
-        .header("x-yun-device-id", CLOUD_CLIENT_INFO_WEB)
-        .header("Content-Type", CLOUD_CONTENT_TYPE)
+    crate::app_cloud_upload::cloud_file_op_headers(
+        req,
+        crate::app_cloud_upload::CloudChannel::Web,
+        crate::app_cloud_upload::CloudOpType::Upload,
+    )
 }
 
 /// 构造「批量移进回收站」这一枪（**写**）。

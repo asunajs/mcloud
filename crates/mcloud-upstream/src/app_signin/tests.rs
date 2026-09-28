@@ -726,3 +726,131 @@ fn parses_backup_gift_receive_forms() {
     )
     .is_err());
 }
+
+// ══════════════════════════ 任务拓展的读口 ══════════════════════════
+
+/// 夹具那两条实拍（`3d.json` 第 55 / 96 条）**是同一份读数**，逐字。
+const CAPTURED_TASK_EXPANSION: &str = r#"{"code":0,"msg":"success","result":{
+    "curMonthBackup":true,"curMonthBackupTaskAccept":false,
+    "curMonthTaskRecordCount":0,"nextMonthTaskRecordCount":358,
+    "preMonthBackup":false}}"#;
+
+fn renamed_header<'a>(req: &'a HttpRequest, key: &str) -> Option<&'a str> {
+    req.headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+        .map(|(_, v)| v.as_str())
+}
+
+/// 读口是**裸 GET**：URL 逐字、没有查询串、没有体。
+///
+/// ⚠ 别"顺手对齐同族"补一个 `client=app` —— 那是**另一个请求**，实拍里没有它。
+#[test]
+fn task_expansion_request_is_a_bare_get() {
+    let req = task_expansion_request(None);
+    assert_eq!(req.method, "GET");
+    assert_eq!(
+        req.url,
+        "https://m.mcloud.139.com/ycloud/signin/page/taskExpansion"
+    );
+    assert!(
+        !req.url.contains('?'),
+        "实拍裸 URL，没有查询串：{}",
+        req.url
+    );
+    assert!(!req.url.contains("client="), "别补 client=app：{}", req.url);
+    assert!(req.body.is_none());
+}
+
+/// 头画像取同族那一套，`deviceid` 可选。
+#[test]
+fn task_expansion_headers_and_optional_device_id() {
+    let req = task_expansion_request(None);
+    assert_eq!(renamed_header(&req, "Accept"), Some("*/*"));
+    assert_eq!(renamed_header(&req, "activityid"), Some(MARKET_NAME));
+    assert_eq!(renamed_header(&req, "appversion"), Some(H5_APP_VERSION));
+    assert_eq!(renamed_header(&req, "showloading"), Some("true"));
+    assert!(renamed_header(&req, "deviceid").is_none(), "缺省不发");
+
+    let req = task_expansion_request(Some("B-abc"));
+    assert_eq!(renamed_header(&req, "deviceid"), Some("B-abc"));
+}
+
+/// 实拍五格逐字解出来，且 `accept_date` 是 `None`（实拍**没有**这一格）。
+#[test]
+fn parses_the_captured_task_expansion() {
+    let t = parse_task_expansion(CAPTURED_TASK_EXPANSION).unwrap();
+    assert_eq!(t.cur_month_backup, Some(true));
+    assert_eq!(t.cur_month_backup_task_accept, Some(false));
+    assert_eq!(t.cur_month_task_record_count, Some(0));
+    assert_eq!(t.next_month_task_record_count, Some(358));
+    assert_eq!(t.pre_month_backup, Some(false));
+    assert_eq!(
+        t.accept_date, None,
+        "实拍两条都没有这一格 ⇒ None 是缺省路径，不是异常"
+    );
+}
+
+/// ⚠⚠ `curMonthBackup` **只认 JSON 真布尔**。
+///
+/// 上游哪天改成 `1` / `0`，这里必须得到 `None`（⇒ 调用方判"未知"、**不发那一发写**）
+/// 而不是"当成 false ⇒ 去凑备份、往用户网盘写文件"。
+#[test]
+fn cur_month_backup_only_accepts_a_real_boolean() {
+    for body in [
+        r#"{"code":0,"msg":"ok","result":{"curMonthBackup":1}}"#,
+        r#"{"code":0,"msg":"ok","result":{"curMonthBackup":0}}"#,
+        r#"{"code":0,"msg":"ok","result":{"curMonthBackup":"true"}}"#,
+    ] {
+        let t = parse_task_expansion(body).unwrap();
+        assert_eq!(
+            t.cur_month_backup, None,
+            "数字/字符串形态一律不认 —— 这一格后面是一次写用户网盘：{body}"
+        );
+        assert_ne!(
+            t.cur_month_backup,
+            Some(false),
+            "尤其不许落成 false —— 那会去「凑备份」"
+        );
+    }
+    // 真布尔两条都要认
+    let t =
+        parse_task_expansion(r#"{"code":0,"msg":"ok","result":{"curMonthBackup":false}}"#).unwrap();
+    assert_eq!(t.cur_month_backup, Some(false));
+}
+
+/// `acceptDate` 是**空串** ⇒ 收成 `None`（`?acceptDate=` 与不带参数是两个请求）。
+#[test]
+fn an_empty_accept_date_is_treated_as_missing() {
+    let t = parse_task_expansion(r#"{"code":0,"msg":"ok","result":{"acceptDate":""}}"#).unwrap();
+    assert_eq!(t.accept_date, None, "空串更接近「没给」");
+    let t = parse_task_expansion(r#"{"code":0,"msg":"ok","result":{"acceptDate":"20260801"}}"#)
+        .unwrap();
+    assert_eq!(t.accept_date.as_deref(), Some("20260801"));
+}
+
+/// 没有 `result`（或它不是对象）⇒ 六格全 `None`，**不报错**。
+///
+/// 把"缺字段"判成解析失败，表现是换一种上游措辞就整条能力报红。
+#[test]
+fn a_missing_result_is_not_an_error() {
+    for body in [
+        r#"{"code":0,"msg":"success"}"#,
+        r#"{"code":0,"msg":"success","result":[]}"#,
+    ] {
+        let t = parse_task_expansion(body).expect("缺 result 不该报错");
+        assert_eq!(t, TaskExpansion::default());
+    }
+}
+
+/// 非 0 业务码 ⇒ 报错；`90001` 落成"票的问题"那句人话。
+#[test]
+fn task_expansion_failures_are_errors() {
+    assert!(parse_task_expansion(r#"{"code":500,"msg":"系统繁忙"}"#).is_err());
+    let err = parse_task_expansion(r#"{"code":90001,"msg":"未登录"}"#).expect_err("90001 是失败");
+    let text = err.to_string();
+    assert!(
+        !text.contains("code=90001") || text.contains("会话") || text.contains("登录"),
+        "90001 该被解释成人话：{text}"
+    );
+}

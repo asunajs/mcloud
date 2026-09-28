@@ -159,9 +159,7 @@ fn exchange_v3_body_length_matches_the_capture() {
 fn exchange_v3_null_offset_renders_json_null() {
     let req = exchange_v3_request("D", 1, None);
     assert!(
-        req.body_str()
-            .unwrap()
-            .contains(r#""puzzleOffset":null"#),
+        req.body_str().unwrap().contains(r#""puzzleOffset":null"#),
         "None 要写成 JSON null（空串与 null 在上游那里逐字相同，都回 501）"
     );
 }
