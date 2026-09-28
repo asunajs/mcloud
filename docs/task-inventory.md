@@ -12,11 +12,19 @@
 > `live-redflower-vectors.json`）。
 > `/api/capabilities` 实测返回这 10 条。
 >
-> **增补（2026-09-28）：已实现 14 个任务** —— 上面 10 条 +
-> `exchange`（兑换）+ `msg-push`（消息推送）+ `fun-ai`（趣玩AI抽奖）+ `notice`（公告任务）。
+> **增补（2026-09-28）：已实现 15 个任务** —— 上面 10 条 +
+> `exchange`（兑换）+ `msg-push`（消息推送）+ `fun-ai`（趣玩AI抽奖）+ `notice`（公告任务）
+> + `play-ai-special`（拍拍盘点，**只读那一半**）。
 > ⇒ 下面 §2 的 **P2「只读查询」那一档已经全部落完**（那四条的实拍材料都拿到了）。
 > 下面那张 19 条清单是**参考实现的规格表**，不是本项目的进度表；
-> 本项目的进度以 `/api/capabilities`（今天 14 条）与 `README.md` 为准。
+> 本项目的进度以 `/api/capabilities`（今天 15 条）与 `README.md` 为准。
+>
+> ⚠ **`play-ai-special` 只落了只读那两枪**（`user/info` + `task/list`），
+> 上游那一族的另外三口（上报一步 / 抽奖 / 写网盘）**故意不接**：
+> ③ 卡在"埋点零实拍"、④ 卡在"判据语义未验证且不可回滚"、⑤ 卡在"真写用户网盘 + 清理链冻结"。
+> 另外这一族的**请求头比仓库其余 H5 接口少两个**（没有 `appversion` / `activityid` /
+> `deviceid` —— 同归档里门户那四条都带，所以是这一族真的没发）⇒ 它**不复用** `h5()`。
+> 详见 `crates/mcloud-upstream/src/app_play_ai.rs` 文件头。
 >
 > ⚠ **`notice` 的判据是猜的，别当结论读**：`cloudStatus` 哪个值读作"未领"
 > **没有正面样本**（实拍两槽读数方向分不清），`noticeNeedsManual` **恒 false**

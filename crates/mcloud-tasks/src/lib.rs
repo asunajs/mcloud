@@ -9,6 +9,7 @@ pub mod live_room;
 pub mod login;
 pub mod msg_push;
 pub mod notice;
+pub mod play_ai;
 pub mod signin;
 
 use mcloud_engine::{Registry, Task};
@@ -72,6 +73,7 @@ pub fn register_all(registry: &mut Registry) -> Result<(), String> {
         Arc::new(msg_push::MsgPushTask),
         Arc::new(fun_ai::FunaiTask),
         Arc::new(notice::NoticeTask),
+        Arc::new(play_ai::PlayAiTask),
     ];
     for t in tasks {
         registry.register(t)?;

@@ -12,6 +12,7 @@ pub mod app_funai;
 pub mod app_login;
 pub mod app_msg_push;
 pub mod app_notice;
+pub mod app_play_ai;
 pub mod app_signin;
 pub mod auth;
 pub mod auth_refresh;

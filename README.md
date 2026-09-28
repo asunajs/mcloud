@@ -6,11 +6,29 @@
 
 ## 状态
 
-**已落地 14 个任务**：P1 签到族八条（`sign` / `receive` / `multiple` /
+**已落地 15 个任务**：P1 签到族八条（`sign` / `receive` / `multiple` /
 `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`）
 + 直播小红花两条（`live-room` / `red-flower`）
 + 兑换（`exchange`）+ 消息推送（`msg-push`）
-+ 趣玩AI抽奖（`fun-ai`）+ 公告任务（`notice`）。
++ 趣玩AI抽奖（`fun-ai`）+ 公告任务（`notice`）
++ 拍拍盘点（`play-ai-special`，**只读**）。
+
+**`play-ai-special`（2026-09-28 落地）—— 只做只读那一半，另三口各自卡在不同地方**：
+
+| 口 | 状态 |
+|---|---|
+| ① `GET newyear/user/info`（次数读数） | ✅ 实拍逐字，`0 → 1` 两档都有 |
+| ② `GET newyear/task/list`（任务表） | ✅ 实拍逐字，两次同一 URL（差别只在 `id:1` 那条的响应） |
+| ③ `POST task/step/click`（**写**） | ⛔ 旧实现把 `visitlog/journaling` 埋点当**门槛**，而那两条埋点**零实拍** |
+| ④ `POST blindbox/lottery`（**写**） | ⛔ 判据 `totalLotteryCount` **语义未验证**（那句 `1` 出现在**抽奖之前**），且不可回滚 |
+| ⑤ `POST aiRecognize`（**写网盘**） | ⛔ `uploadToCloud` 实拍恒 `true` ⇒ 真往用户网盘写图，清理链今天冻结 |
+
+> ⚠ 这一族的请求头**比仓库其余 H5 接口少两个**（**没有** `appversion`、`activityid`、
+> `deviceid`）—— 同归档里活动门户那四条**都带**这三个头 ⇒ 是这一族真的没发。
+> 所以它**不复用** `h5()`。顺手复用会发出一条**夹具里不存在的请求**，而上游对多余头的反应**没有样本**。
+>
+> ⚠ 这一页的票走**公共来源**（特有换票链有出处但**零实拍**）；**Referer 不借**，
+> 用活动落地页那一串（B 档）。
 
 **`fun-ai` / `notice`（2026-09-28 落地）的证据边界**：
 
@@ -190,7 +208,7 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 | P8 | **账号登录（扫码/短信）+ 账号页 + 定时/编排 CRUD 页** | ✅ |
 | P9a | **签到族 8 条**（`sign` / `receive` / `multiple` / `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`） | ✅ |
 | P9b | **P2 只读查询那一档全部落完**：`exchange` + `msg-push` + `fun-ai` + `notice` | 已落 4 条 |
-| P9c | 其余任务增量接入（`app-task` / `cloud-phone-redpack` / `play-ai-special` / `ai-avatar` / `task-expansion`）+ 推送渠道 | 待做 |
+| P9c | 其余任务增量接入（`app-task` / `cloud-phone-redpack` / `ai-avatar` / `task-expansion`）+ 推送渠道 | 待做（`play-ai-special` 只读那一半已落）|
 
 > **端点必须来自抓包，不能凭印象写。** 本项目的签到端点最初是
 > `/ycloud/api/sign/query`（凭印象），实测回 **405**；换成实拍的
