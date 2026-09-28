@@ -15,6 +15,7 @@ pub mod app_msg_push;
 pub mod app_notice;
 pub mod app_play_ai;
 pub mod app_signin;
+pub mod app_task_click;
 pub mod app_task_list_v2;
 pub mod auth;
 pub mod auth_refresh;
