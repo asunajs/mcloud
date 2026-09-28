@@ -796,6 +796,46 @@ data: {"type":"finished","run_id":1,"outcome":{...},"duration_ms":156}
   否则前端 `JSON.parse` 会报一个与真实原因无关的错。
 - 资产缺失时（例如只跑 `cargo test`）不 panic，只是没有页面可发。
 
+#### 传输层：gzip 与缓存
+
+前端产物是大段重复文本，压缩比极高。实测（gzip -9）：
+
+| 文件 | 原始 | gzip | 省 |
+|---|---|---|---|
+| `index-*.css` | 132969 | 19304 | 85% |
+| `index-*.js` | 154433 | 48474 | 69% |
+| `index.html` | 1444 | 940 | 35% |
+| **合计** | **288846** | **68718** | **76%** |
+
+不做压缩时首屏多传 **220 KB** —— 这不是"优化项"而是缺陷，
+`Content-Encoding` 是服务端的责任，浏览器不会替你压。
+
+两条实现要点：
+
+1. **`CompressionLayer`**（`lib.rs`）按响应头里的 `Content-Type` 判断可压性，
+   所以 `static_files.rs` 必须发准确的类型，否则退化成
+   `application/octet-stream` 会被静默跳过。
+   它挂在 `TraceLayer` **之内**，日志记的才是客户端实际收到的字节数。
+   SSE 不受影响：`tower-http` 的 `DefaultPredicate` **明确排除**
+   `text/event-stream`、gRPC、图片与 <32 字节的响应。
+2. **缓存策略按路径一分为二，且必须相反**：
+
+   | 路径 | 策略 | 理由 |
+   |---|---|---|
+   | `assets/*` | `max-age=31536000, immutable` | Vite 文件名带内容哈希 ⇒ 同 URL 字节永不变 |
+   | `index.html`（含 SPA 回落） | `no-cache` | 它是"指向当前哈希"的那张表 |
+
+   `index.html` **绝不能**跟着长缓存：否则浏览器会拿旧 HTML 去要
+   **已被删除**的旧哈希 JS ⇒ 发版后白屏、硬刷新才好。
+   SPA 回落路径也必须 `no-cache`，否则就是"首页不缓存、深层路由缓存"，
+   问题只会藏得更深。
+
+回归测试锁在 `crates/mcloud-server/tests/routes.rs` 与
+`src/static_files.rs` 的 `mod tests`（4 条：压缩生效、缓存分流、
+`Content-Type` 准确、入口 HTML 永不 `immutable`）。
+这些测试**不写死哈希**，且在前端未构建时**跳过而非失败** ——
+保持"`cargo test` 不依赖 npm"这条既有约定。
+
 ---
 
 ## 10. 前端（web/）
@@ -853,6 +893,108 @@ web/src/
 
 **错误文本一律原样透出**，不翻译、不改写：后端把"哪一步的任务不存在"
 "哪些定时任务在引用它"写进错误里了，前端改写等于把这些信息丢掉。
+
+### 10.5 ⛔ 代码分割（`defineVaporAsyncComponent`）——**暂不可用，别试**
+
+**结论：在 Vue 3.6.0-rc.9 上，Vapor 的异步组件跑不通，本仓前端因此不做按路由拆包。**
+等 Vue 官方修好再启用。以下是把三条坑逐个踩过之后的记录，用来避免重复投入。
+
+#### 现象
+
+把 `app.tsx` 里的页面改成动态 `import()` 后：
+chunk **确实**按预期拆开了、也**确实**按需下载了（Network 面板 200），
+**但页面一片空白** —— 不报错、不抛异常、`typecheck` 过、`build` 成功。
+
+#### 三个独立的坑，缺一不可
+
+**① `suspensible` 默认是 `true`，而 Vapor 没有 Suspense**
+
+`@vue/runtime-vapor` 源码：
+
+```js
+const { ..., suspensible = true } = createAsyncComponentContext(source)
+...
+if (suspensible && instance.suspense) {      // ← 这条分支
+  return load().then(...)                    //    只调 load()，**不建立** renderEffect
+}
+```
+
+没有 Suspense 宿主时走这条分支 ⇒ `load()` 照跑、chunk 照下，
+但那个负责把 loading 换成真组件的 `renderEffect` **从未创建**。
+必须显式 `suspensible: false` 才会走下面那条能工作的分支。
+
+**② 命名导出会被 `comp.default` 解包成 `undefined`**
+
+`@vue/runtime-core` 的 `createAsyncComponentContext`：
+
+```js
+if (comp && (comp.__esModule || comp[Symbol.toStringTag] === 'Module'))
+  comp = comp.default
+```
+
+动态 `import()` 返回的**必然是** Module 命名空间对象（`toStringTag === 'Module'`），
+所以它一定会去取 `.default`。而本仓 9 个页面**全是命名导出**
+（`export const AccountsPage = ...`），模块里没有 `default` ⇒ 解出 `undefined`。
+
+实测：`import('/assets/accounts-page-*.js')` 返回
+`MODULE KEYS: AccountsPage`、`has default: false`。
+
+**③ 页面是裸箭头函数，没有 `defineVaporComponent` 的 block**
+
+这一条**无法在调用点绕开**，也是最终放弃的原因。
+
+Vapor 组件必须返回一个 **block**。`defineVaporComponent(fn)` 做的事是
+`extend({ name, setup: fn, __vapor: true })` —— 也就是给函数打上 `__vapor`。
+本仓页面写的是裸箭头函数（`export const AccountsPage = () => { ... }`），
+**没有 `__vapor` 标记**。
+
+静态导入时能跑，是因为 `app.tsx` 编译后是 `createComponent(AccountsPage)`，
+而 `createComponent` 接受裸函数并把其返回值当 block。
+但经 `createInnerComp` 进 async wrapper 后，Vue 给出明确警告：
+
+```
+[Vue warn]: Vapor component setup() returned non-block value, and has no render function.
+  at <Anonymous>
+  at <VaporAsyncComponentWrapper>
+  at <App>
+```
+
+→ 界面什么都不渲染。
+
+#### 隔离复现（最小用例，与本项目无关）
+
+用 `vue.runtime-with-vapor.esm-browser.js` 直接跑一个最小页面，
+两个变体并排渲染（A 默认 `suspensible`、B 显式 `false`）：
+
+```
+t+10ms   #a=""  #b=""
+t+200ms  #a=""  #b=""
+t+1000ms #a=""  #b=""
+[Vue warn]: Vapor component setup() returned non-block value, and has no render function.
+  at <Anonymous> at <VaporAsyncComponentWrapper> at <App>
+```
+
+**两个变体都渲染不出来** —— 说明问题不在 `suspensible` 这个开关上，
+而在 Vapor 的 async wrapper 与"裸函数组件"之间根本不兼容。
+
+顺带确认：`defineVaporAsyncComponent` **确实存在**且从 `vue` 公开导出
+（`@vue/runtime-vapor` 里有这个 API），所以这**不是**"API 不存在"，
+而是"API 存在但在这套用法下不工作"—— 更容易误判，所以记下来。
+
+#### 因此：要真正做代码分割，需要先满足的前提
+
+1. **Vue 官方修好 Vapor 的 async 组件**（首要，否则后面都是白做）；
+2. 若官方不修而仍要做，则必须把**所有页面**改成 `defineVaporComponent(...)`
+   —— 那是 9 个业务文件一起改写法，且要逐页回归，代价远大于收益；
+3. 收益本身也有限：曾实测拆包后首屏 JS `46,676 → 32,184 B`（gzip 少 31%），
+   而首屏真正的瓶颈是 46 KB(gzip) 的 JS 与 `#app` 空壳，
+   15 KB 的改善换不回"改 9 个文件 + 等上游修复"的成本。
+
+#### 结论
+
+**当前不做前端代码分割。** 首屏成本已由服务端解决（见 §9.3 的 gzip + 缓存，
+传输量 281 KB → 67 KB，那部分是实测有效的）。
+本条在 Vue 官方支持 Vapor async 组件之前**保持关闭**。
 
 ---
 

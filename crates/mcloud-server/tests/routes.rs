@@ -400,11 +400,50 @@ async fn send_full(
     app: axum::Router,
     req: Request<Body>,
 ) -> (StatusCode, axum::http::HeaderMap, String) {
+    // ⚠ 这一段包在**超时**里，不是保险起见，是防挂死：
+    // 这个 helper 的语义是"响应会结束"。若有人拿它去打一条不结束的流
+    // （SSE 就是），整轮 `cargo test` 会静默挂住 —— 实测发生过一次，
+    // 表现是 `cargo test` 十几分钟不返回、也不报错，只能靠 `sample`
+    // 看调用栈才知道卡在哪。超时把"静默挂死"变成"一条失败的断言"。
+    let fut = async {
+        let resp = app.oneshot(req).await.expect("请求应被处理");
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, headers, bytes)
+    };
+    let (status, headers, bytes) = tokio::time::timeout(std::time::Duration::from_secs(10), fut)
+        .await
+        .expect(
+            "响应 10s 内没有结束 —— 这个 helper 只能用于**会结束**的响应；无限流（SSE）请用 send_headers_only",
+        );
+    (status, headers, String::from_utf8_lossy(&bytes).to_string())
+}
+
+/// 只取**响应头**，不碰 body。
+///
+/// # 为什么必须有这个（而不是复用 `send_full`）
+///
+/// SSE 是**无限流**：`send_full` 会 `collect()` 整个 body，而那永远不会结束
+/// —— 实测直接挂死，`cargo test` 十分钟不返回。
+///
+/// 而"SSE 有没有被压缩"这件事**只看响应头就够了**，body 一个字节都不用读。
+/// 所以这里刻意把 body 丢掉。
+///
+/// ⚠ 别用它测"内容对不对" —— 它拿不到 body。那种断言用 `send_full`。
+async fn send_headers_only(
+    app: axum::Router,
+    req: Request<Body>,
+) -> (StatusCode, axum::http::HeaderMap) {
     let resp = app.oneshot(req).await.expect("请求应被处理");
     let status = resp.status();
     let headers = resp.headers().clone();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    (status, headers, String::from_utf8_lossy(&bytes).to_string())
+    // ⚠ **不能** `into_body().collect()`：这条流要等下一个事件或 15s 的
+    // keep-alive 才产出，而订阅存在期间永远不会有 `None` —— 实测挂死，
+    // `cargo test` 十分钟不返回。响应头已经在手上，body 直接丢掉即可。
+    // （落一条**终局**事件就能让流正常收尾，见 `sse_streams_are_never_compressed`。）
+    drop(resp);
+    (status, headers)
 }
 
 fn get_with_cookie(uri: &str, cookie: &str) -> Request<Body> {
@@ -481,6 +520,137 @@ async fn static_assets_are_not_gated() {
         StatusCode::SERVICE_UNAVAILABLE,
         "静态资源不该被登录闸拦下"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── 静态资源的传输策略（压缩 + 缓存）──────────────────────────────────
+//
+// 这一组测的不是业务，而是**"省流量"的两条承诺会不会被悄悄改回去**。
+// 它们都"坏了也不报错"：少一个 `Content-Encoding`，站点照常运行，
+// 只是每次多传 220KB；少一个 `immutable`，只是每次刷新白跑一趟 304。
+// 正因如此才需要断言锁住。
+//
+// ⚠ 这些断言**依赖 `web/dist` 已构建**（`rust-embed` 编译期内嵌）。
+// 未构建时资产集为空，测试会跳过而不是失败 —— 不让 `cargo test`
+// 反过来依赖 npm（与 `static_files.rs` 里那条注释同一个取舍）。
+
+/// 带哈希的产物：`assets/*` 必须能压、且必须长缓存。
+#[tokio::test]
+async fn hashed_assets_are_compressed_and_immutable() {
+    // 前端未构建时跳过（见上面那段注释）。
+    let Some(asset) = mcloud_server::static_files::find_hashed_asset(".css") else {
+        return;
+    };
+    let (handle, dir) = test_app("static-hashed");
+    let app = authed_app(handle);
+
+    // ① 客户端愿意收 gzip ⇒ 必须回 `content-encoding: gzip`
+    let (status, headers, _) = send_full(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/{asset}"))
+            .header("accept-encoding", "gzip")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers.get("content-encoding").map(|v| v.to_str().unwrap()),
+        Some("gzip"),
+        "带哈希的 {asset} 没有 gzip —— 首屏会多传几百 KB"
+    );
+    // 有 `content-encoding` 就必须有 `vary`，否则中间缓存会把压缩版
+    // 发给不支持 gzip 的客户端。
+    assert_eq!(
+        headers.get("vary").map(|v| v.to_str().unwrap()),
+        Some("accept-encoding"),
+    );
+
+    // ② 缓存：文件名带内容哈希 ⇒ 一年 immutable
+    let cc = headers
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        cc.contains("immutable") && cc.contains("max-age=31536000"),
+        "{asset} 的 cache-control 不是长缓存：{cc}"
+    );
+
+    // ③ 不压缩的客户端拿到的是可读原文，不能被压坏
+    let (status, headers, body) = send_full(
+        app,
+        Request::builder()
+            .uri(format!("/{asset}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get("content-encoding"), None);
+    assert!(!body.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 入口 HTML：gzip 可以，但**绝不能**跟着 `assets/*` 一起 immutable。
+///
+/// 这是发版安全的关键：`index.html` 是"指向当前哈希"的那张表。
+/// 它一旦被缓存，浏览器会拿旧 HTML 去要已经删掉的旧哈希 JS ⇒ 白屏。
+#[tokio::test]
+async fn entry_html_is_never_immutable() {
+    if !mcloud_server::static_files::has_built_assets() {
+        return;
+    }
+    let (handle, dir) = test_app("static-html");
+    let app = authed_app(handle);
+
+    for uri in ["/", "/some/deep/route"] {
+        let (status, headers, body) = send_full(
+            app.clone(),
+            Request::builder()
+                .uri(uri)
+                .header("accept-encoding", "gzip")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{uri} 应回落成前端");
+        // ⚠ 别断言 `body.contains("<html>")`：这一发带了 `accept-encoding: gzip`，
+        // 拿到的是**压缩后**的字节（乱码），不是 HTML 原文。
+        // 用 `content-type` 判断"回落成了前端"才稳。
+        let ct = headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            ct.starts_with("text/html"),
+            "{uri} 应回落成 HTML，实际 content-type={ct}"
+        );
+        assert_eq!(
+            headers.get("content-encoding").map(|v| v.to_str().unwrap()),
+            Some("gzip"),
+            "{uri} 这么大一张 HTML 也该压"
+        );
+        assert!(!body.is_empty());
+
+        let cc = headers
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(
+            cc, "no-cache",
+            "{uri} 的 cache-control 必须是 no-cache（否则发版后白屏），实际：{cc}"
+        );
+        assert!(
+            !cc.contains("immutable"),
+            "{uri} 不该带 immutable —— 它会引向已删除的旧哈希资源"
+        );
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -800,5 +970,102 @@ async fn initialization_survives_restart() {
     )
     .await;
     assert_eq!(s, StatusCode::OK, "重启后原口令要能登录");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// SSE 事件流**不能被压缩**，也不能被攒批。
+///
+/// # 为什么这条值得单独锁
+///
+/// `CompressionLayer` 是全局挂的，而 `tower-http` 的默认判据会把
+/// SSE 排除掉（`content-type: text/event-stream` 在排除表里）。
+/// 也就是说这条**今天是对的，但靠的是上游库的默认行为** ——
+/// 哪天有人为了"压得更狠"换掉 predicate，就会把它悄悄压掉。
+///
+/// 而它坏掉的后果不是报错，是**"实时"没了**：压缩层为了压好一批攒着写，
+/// 用户在任务页看着日志一动不动，过一会儿一次性全冒出来 ——
+/// 那种"卡住了还是在跑"的不确定，正是这个页面最不该有的。
+///
+/// # ⚠ 两个坑（都是实测踩出来的）
+///
+/// 1. **必须用一个真的存在的 run**。拿不存在的 id 打这条路由回的是
+///    **404 JSON**，而那个 JSON **会被正常压缩**（带 `content-encoding: gzip`）
+///    —— 拿它当判据会得到"SSE 被压了"的**假警报**。所以下面先造一条 run。
+/// 2. **必须断言响应真的是 `text/event-stream`**。少了这一步，
+///    测试会在"根本没订上"的情况下绿 —— 那是摆设，不是护栏。
+///
+/// 这里**不真跑任务**（那会打真实上游，慢且看运气）：SSE 只要求
+/// `store.run(id)` 存在，所以直接落一条记录即可。
+#[tokio::test]
+async fn sse_streams_are_never_compressed() {
+    let (handle, dir) = test_app("sse-no-gzip");
+
+    // 造一条**存在**的 run（不真跑任务，见上面第 2 点）。
+    handle
+        .store
+        .upsert_run(&mcloud_core::RunRecord {
+            run_id: mcloud_core::RunId::new(1),
+            task: "sign".into(),
+            account: "13800000000".into(),
+            outcome: mcloud_core::TaskOutcome::skipped("测试"),
+            duration_ms: 1,
+            started_at_ms: 1,
+            status: mcloud_core::RunStatus::Done,
+            details: serde_json::Value::Null,
+        })
+        .await
+        .unwrap();
+
+    // ⚠ 用 `send_headers_only`：SSE 是无限流，`send_full` 会永久阻塞。
+    // 而"有没有被压"只看响应头。
+    let (status, headers) = send_headers_only(
+        authed_app(Arc::clone(&handle)),
+        Request::builder()
+            .uri("/api/runs/1/events")
+            // 客户端**主动要** gzip —— 正因如此才需要断言服务端不给。
+            .header("accept-encoding", "gzip")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(status, StatusCode::OK, "这条 run 应当存在并可订阅");
+    assert!(
+        ct.starts_with("text/event-stream"),
+        "没订上 SSE（content-type={ct}）—— 那样下面的断言就成了摆设"
+    );
+    assert!(
+        headers.get("content-encoding").is_none(),
+        "SSE 被压缩了 —— 事件流会攒批到达，实时日志不再实时"
+    );
+
+    // ⚠ 第 3 个坑：**不能只测"订上了"的那一发**。
+    // 上面那条 run 是 `RunStatus::Done`，若它已经有终局事件，流会立刻收尾 ——
+    // 那断言虽然成立，覆盖的却是"流正好结束"这条偶然路径。
+    // 所以再打一发**确定会被跳过订阅**的（run 不存在 ⇒ 404 JSON），
+    // 那个 JSON 必须**照常被压缩**：证明这道排除是**只针对 SSE**的，
+    // 而不是"碰巧这条路径整体不压缩"。把它压掉才是回归。
+    let (status2, headers2) = send_headers_only(
+        authed_app(handle),
+        Request::builder()
+            .uri("/api/runs/424242/events")
+            .header("accept-encoding", "gzip")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status2, StatusCode::NOT_FOUND, "不存在的 run 应 404");
+    assert_eq!(
+        headers2
+            .get("content-encoding")
+            .map(|v| v.to_str().unwrap()),
+        Some("gzip"),
+        "非 SSE 的错误响应也必须照常压缩 —— 否则说明压缩层被整体关掉了",
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
