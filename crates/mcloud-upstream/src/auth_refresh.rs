@@ -123,10 +123,17 @@ pub fn refresh_request(account: &Account) -> Result<HttpRequest> {
         HttpRequest::post(format!("{BASE_USER_YUN}{REFRESH_TOKEN_PATH}"))
         // ⚠ content-type 带 `;charset=UTF-8`（实拍如此）
         .header("Content-Type", "application/json;charset=UTF-8")
-        // ⚠ `auth.raw` 是**裸 base64**（`AuthInfo::raw` 的契约：写回配置时
-        // 保持原形态，不含 `Basic ` 前缀）。这里补前缀；补两次就是
-        // `Basic Basic xxx` —— 上游只会回一个含义模糊的鉴权错。
-        .header("Authorization", format!("Basic {}", account.auth.raw))
+        // ⚠⚠ **`auth.raw` 就是完整的 `Authorization` 头值，逐字用，不许再补前缀。**
+        //
+        // 这行原先是 `format!("Basic {}", account.auth.raw)` —— 补了第二次，
+        // 发出去是 `Basic Basic bW9iaW…`，上游回 `05050009 非法的token！`。
+        // 而它上一行的注释把这个契约**说反了**（"裸 base64…不含前缀"），
+        // 于是注释准确预言了下一行的错误、却把人引向反面。
+        //
+        // 契约的唯一出处是 `auth.rs` 的 `raw: format!("Basic {clean}")`，
+        // 以及实拍：`accounts.json` 里 `raw` 以 `Basic ` 开头、整串 302 字符，
+        // 与 `docs/capture/app-api-families.txt:86` 抓到的头值逐字同形。
+        .header("Authorization", account.auth.raw.clone())
         .text_body(body),
     )
 }
@@ -224,10 +231,22 @@ pub fn rebuild_authorization(account: &Account, new_token: &str) -> Result<Strin
             "账号缺手机号，拼不出 Authorization（它要 `端别:手机号:token`）".into(),
         ));
     }
-    // ⚠ 返回的是**裸 base64**，与 `AuthInfo::raw` 同形（不带 `Basic ` 前缀）。
-    // 带前缀的话，`basic_authorization()` 会再补一次，变成 `Basic Basic …`。
+    // ⚠⚠ 返回的是**完整的 `Authorization` 头值**：`Basic ` + 裸 base64。
+    //
+    // 这一行曾经返回裸 base64，理由是"与 `AuthInfo::raw` 同形（不带前缀）"
+    // —— 那个前提是**错的**：解析处（`auth.rs`）写的是
+    // `raw: format!("Basic {clean}")`，实拍落盘的 `accounts.json` 也带前缀，
+    // 而抓包里 `Authorization` 是 `Basic base64("mobile:…")` 整串 302 字符。
+    //
+    // 后果是"**刷新过凭据的账号**"与"刚登录的账号"落盘形状不一致：
+    // 前者裸、后者带前缀。于是无论 `basic_authorization()` 加不加前缀，
+    // 总有一半账号发出错的头 —— 而错的那一半只会回
+    // `05050009 非法的token！`，一个指向"凭据过期"的**假线索**。
     let plain = format!("{}:{phone}:{new_token}", account.auth.platform);
-    Ok(mcloud_crypto::b64_encode(plain.as_bytes()))
+    Ok(format!(
+        "Basic {}",
+        mcloud_crypto::b64_encode(plain.as_bytes())
+    ))
 }
 
 /// JSON 字符串转义（只做最小的必要集）。

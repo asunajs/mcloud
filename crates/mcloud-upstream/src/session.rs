@@ -561,7 +561,21 @@ pub fn auth_fingerprint(auth_raw: &str) -> String {
 /// 形状：`Basic base64("mobile:<手机号>:<authToken>")`。
 /// 与 App 登录链路同一个形状，所以直接复用账号里存的原始串。
 pub fn basic_authorization(account: &Account) -> String {
-    format!("Basic {}", account.auth.raw)
+    // ⚠⚠ **`auth.raw` 本身就带 `Basic ` 前缀，这里一个字都不能再加。**
+    //
+    // 契约在解析处写着：`auth.rs` 拼 `AuthInfo` 时是
+    // `raw: format!("Basic {clean}")`；实拍的 `Authorization` 头值也是
+    // `Basic base64("mobile:<手机号>:<authToken>")`，整串 302 字符
+    // （`docs/capture/app-api-families.txt:86`）。
+    //
+    // 再加一次得到的是 **`Basic Basic bW9iaW…`**，上游的回话是
+    // `{"code":"05050009","message":"非法的token！"}` —— 这句话**听起来像
+    // "凭据过期了"**，于是会去查 token 有效期（那儿一切正常，还剩 29.8 天），
+    // 而真相是**头值拼错了**。一次排查就这么被带到隔壁。
+    //
+    // 反证：发送层（`builder.rs` 的 `basic_token: Some(account.auth.raw)`）
+    // 是**逐字**注入的 —— 那一处才是对的形状。
+    account.auth.raw.clone()
 }
 
 /// 把一次响应的状态与体交给调用方判定。

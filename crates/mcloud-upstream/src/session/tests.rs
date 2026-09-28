@@ -425,13 +425,15 @@ fn fingerprint_is_stable_short_and_not_reversible() {
 // ── Authorization ───────────────────────────────────────────────────────
 
 #[test]
-fn basic_authorization_wraps_the_raw_auth() {
+fn basic_authorization_is_the_raw_auth_verbatim() {
     use mcloud_core::{AccountId, AccountSettings, AuthInfo, DeviceId};
     let acc = Account {
         id: AccountId::new("19900000000"),
         nickname: None,
         auth: AuthInfo {
-            raw: "bW9iaWxlOjE5OTAwMDAwMDAwOlNZTlRIMDAx".into(),
+            // ⚠ 真实形状：`AuthInfo::raw` **整串就是 `Authorization` 头值**
+            // （见 `auth.rs` 的 `raw: format!("Basic {clean}")` 与实拍 accounts.json）
+            raw: "Basic bW9iaWxlOjE5OTAwMDAwMDAwOlNZTlRIMDAx".into(),
             platform: "ios".into(),
             phone: "19900000000".into(),
             token: "t".into(),

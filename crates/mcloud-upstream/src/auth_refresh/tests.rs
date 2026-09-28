@@ -133,6 +133,16 @@ fn non_json_is_an_error_not_a_panic() {
 
 // ── 拼回整串 ────────────────────────────────────────────────────────────
 
+/// 从重建出来的 `Authorization` 头值上剥掉 `Basic `，拿到裸 base64 去解码。
+///
+/// ⚠ 有它是因为**契约是"整串就是头值"**（带前缀）—— 见
+/// [`super::rebuild_authorization`] 那段说明。拿掉前缀才轮到 base64 解码。
+fn bare(header: &str) -> &str {
+    header
+        .strip_prefix("Basic ")
+        .unwrap_or_else(|| panic!("重建值应当以 `Basic ` 开头：{header}"))
+}
+
 /// ⭐ 新 token 是 `Authorization` 的**第三段**，不是整串。
 ///
 /// 直接把整串替换成新 token 的写法，落库后是一个**用不了的串**。
@@ -140,7 +150,7 @@ fn non_json_is_an_error_not_a_panic() {
 fn rebuilds_the_full_authorization_not_just_the_token() {
     let acc = account("mobile", Some("1990000000000000001"));
     let rebuilt = rebuild_authorization(&acc, "NEWTOKEN").unwrap();
-    let decoded = mcloud_crypto::b64_decode(&rebuilt).unwrap();
+    let decoded = mcloud_crypto::b64_decode(bare(&rebuilt)).unwrap();
     let plain = String::from_utf8(decoded).unwrap();
     assert_eq!(
         plain, "mobile:19900000000:NEWTOKEN",
@@ -148,19 +158,29 @@ fn rebuilds_the_full_authorization_not_just_the_token() {
     );
 }
 
-/// ⭐ 返回的是**裸 base64**，不带 `Basic ` 前缀。
+/// ⭐ 返回的**就是完整的 `Authorization` 头值**：`Basic ` + 裸 base64。
 ///
-/// 带了的话 `basic_authorization()` 会再补一次，变成 `Basic Basic …`。
+/// ⚠ 这条断言原先写的是反面（"裸 base64、不带前缀"），依据是"`AuthInfo::raw`
+/// 不带前缀"—— 那个前提是**错的**：解析处（`auth.rs`）拼的是
+/// `raw: format!("Basic {clean}")`，实拍落盘的 `accounts.json` 也带前缀，
+/// 而抓包里头值是 `Basic base64("mobile:…")` 整串 302 字符。
+///
+/// 错前提的后果不是"多一个前缀"，而是**两种账号落盘形状不一致**：
+/// 刚登录的带前缀、刷新过的裸 —— 于是无论请求头那边加不加前缀，
+/// 总有一半必错，而错的回话只有 `05050009 非法的token！`（**一个指向
+/// "凭据过期"的假线索**）。
 #[test]
-fn rebuilt_value_is_bare_base64_without_the_basic_prefix() {
+fn rebuilt_value_is_the_whole_authorization_header() {
     let acc = account("mobile", None);
     let rebuilt = rebuild_authorization(&acc, "T").unwrap();
-    assert!(!rebuilt.starts_with("Basic "), "不该带前缀：{rebuilt}");
-    assert!(!rebuilt.contains(' '), "裸 base64 不含空格：{rebuilt}");
-    // 补前缀之后才是请求头要的形态（`basic_authorization` 的契约）
+    assert!(rebuilt.starts_with("Basic "), "应当带前缀：{rebuilt}");
+    assert_eq!(rebuilt.matches(' ').count(), 1, "只该有一处空格：{rebuilt}");
+    // 剥掉前缀就是合法 base64（裸串里出现空格就解不动）
+    assert!(!bare(&rebuilt).contains(' '));
+    // 请求头那边**逐字**用它，不再补第二次
     let mut with_new = acc.clone();
-    with_new.auth.raw = rebuilt;
-    assert!(crate::basic_authorization(&with_new).starts_with("Basic "));
+    with_new.auth.raw = rebuilt.clone();
+    assert_eq!(crate::basic_authorization(&with_new), rebuilt);
 }
 
 /// 端别从凭据里取，不重新猜。
@@ -169,7 +189,7 @@ fn rebuild_keeps_the_platform_from_the_credential() {
     for p in ["mobile", "pc"] {
         let acc = account(p, None);
         let rebuilt = rebuild_authorization(&acc, "T").unwrap();
-        let plain = String::from_utf8(mcloud_crypto::b64_decode(&rebuilt).unwrap()).unwrap();
+        let plain = String::from_utf8(mcloud_crypto::b64_decode(bare(&rebuilt)).unwrap()).unwrap();
         assert!(plain.starts_with(&format!("{p}:")), "{plain}");
     }
 }
@@ -196,7 +216,7 @@ fn apply_refresh_returns_both_the_result_and_the_new_auth() {
     };
     let (r, auth) = apply_refresh(&acc, &resp).unwrap();
     assert_eq!(r.token, "NEW");
-    let plain = String::from_utf8(mcloud_crypto::b64_decode(&auth).unwrap()).unwrap();
+    let plain = String::from_utf8(mcloud_crypto::b64_decode(bare(&auth)).unwrap()).unwrap();
     assert!(plain.ends_with(":NEW"), "{plain}");
 }
 
