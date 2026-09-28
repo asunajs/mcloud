@@ -640,9 +640,13 @@ impl Task for TaskExpansionTask {
     async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
         ctx.progress(1, 1, "读取任务拓展状态");
         // ⚠ `deviceId` 这一族**每枪都要**：取不到就不发（不赌"少一个头上游理不理"）。
-        // 本仓的 `TaskContext` 没有 device 档案字段 ⇒ 这里只能给 `None`，
-        // 于是"凑备份"那一支会被**如实挡下**（`Blocked`），而不是静默少发一个头。
-        let device_id: Option<&str> = None;
+        //
+        // ⚠ **显式传，不指望发送层注入**：`ReqwestClient` 会按 profile 注入一枚
+        // `deviceid`，但任务那个 profile 的 `device_id` 是 `None`（见 `builder.rs`
+        // 那条"由 SmidClient 懒加载"的注释）⇒ 不在这里传，这一族就是**少一个头**。
+        // 同族既有写法见 `signin.rs` 那句 `ctx.account.device_id.as_str()`。
+        let account_device = ctx.account.device_id.as_str();
+        let device_id: Option<&str> = (!account_device.is_empty()).then_some(account_device);
         let plan = random_plan(&mut mcloud_crypto::OsRandom, self.backup_wait_ms);
 
         let result = run_expansion(ctx, device_id, &plan).await?;
