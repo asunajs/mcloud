@@ -83,13 +83,55 @@ impl LoginService {
         Ok(fresh)
     }
 
+    /// 给**这个账号**取一枚 PC 设备指纹。
+    ///
+    /// # 一枚指纹只属于一个账号
+    ///
+    /// 在此之前四条登录路径都取那个**全局**文件（`data/pc_device.txt`），
+    /// 于是这台机器上所有账号**共用一枚** —— 上游看到的是
+    /// "一台设备登了多个账号"，那正是多账号最容易被关联的地方。
+    ///
+    /// * 该账号已有一枚、且**没有别的账号在共用它** ⇒ 沿用（设备身份要稳定，
+    ///   频繁换设备本身也是风控信号）
+    /// * 否则 ⇒ 单独生成一枚。两种情况下会走到这里：**新账号**；
+    ///   以及**这一枚还被别人共着** —— 那正是历史遗留的那枚全局值，
+    ///   于是老账号下次重新登录时**自然获得**一枚自己的，从此不再共用
+    ///
+    /// ⚠ 判据刻意用"**是否与别的账号重复**"，而不是"是否等于全局文件里那枚"：
+    /// 后者在用户手动换过设备（`login device reset`）之后就失效了，
+    /// 而"重复"这件事永远是当前事实。
+    async fn device_for_account(&self, id: &mcloud_core::AccountId) -> Result<String> {
+        let all = self.accounts.accounts().await?;
+        if let Some(mine) = all.iter().find(|a| &a.id == id) {
+            let own = mine.device_id.as_str();
+            if !own.is_empty()
+                && !all
+                    .iter()
+                    .any(|o| &o.id != id && o.device_id.as_str() == own)
+            {
+                return Ok(own.to_string());
+            }
+        }
+        let mut rng = self.rng.clone();
+        Ok(proto::new_pc_device_id(&mut rng))
+    }
+
+    /// 出码那一刻**还不知道是哪个账号** ⇒ 每次出码单独给一枚。
+    ///
+    /// 扫码的身份就是这台"设备"，而一张码只服务一次登录；共用全局那枚
+    /// 会让第二个扫码的账号和第一个撞上同一台"设备"。
+    async fn fresh_device(&self) -> Result<String> {
+        let mut rng = self.rng.clone();
+        Ok(proto::new_pc_device_id(&mut rng))
+    }
+
     pub fn now_ms(&self) -> i64 {
         self.clock.now_ms()
     }
 
     /// 出码。**零网络请求**（二维码是本地拼的）。
     pub async fn start_qr(&self, platform: PcPlatform) -> Result<QrLogin> {
-        let device_id = self.pc_device_id().await?;
+        let device_id = self.fresh_device().await?;
         let mut rng = self.rng.clone();
         Ok(QrLogin::start(
             platform,
@@ -130,7 +172,8 @@ impl LoginService {
 
     /// 开始短信登录。
     pub async fn start_sms(&self, platform: PcPlatform, phone: &str) -> Result<SmsLogin> {
-        let device_id = self.pc_device_id().await?;
+        let id = mcloud_core::AccountId::new(mcloud_upstream::mask_phone(phone));
+        let device_id = self.device_for_account(&id).await?;
         let mut rng = self.rng.clone();
         Ok(SmsLogin::start(platform, device_id, phone, &mut rng))
     }
@@ -164,7 +207,8 @@ impl LoginService {
         password: &str,
         tid: &str,
     ) -> Result<mcloud_core::Account> {
-        let device_id = self.pc_device_id().await?;
+        let id = mcloud_core::AccountId::new(mcloud_upstream::mask_phone(username));
+        let device_id = self.device_for_account(&id).await?;
         let pw = PasswordLogin::new(platform, device_id);
         let user_info = pw
             .login(
@@ -213,7 +257,8 @@ impl LoginService {
     /// ⚠ 与 PC 端不同，App 的设备串里 `x-DeviceInfo` 与 `x-yun-client-info`
     /// **不相等**（见 `mcloud_upstream::app_login`）。
     pub async fn start_app_sms(&self, phone: &str) -> Result<AppSmsLogin> {
-        let device_id = self.pc_device_id().await?;
+        let id = mcloud_core::AccountId::new(mcloud_upstream::mask_phone(phone));
+        let device_id = self.device_for_account(&id).await?;
         let mut rng = self.rng.clone();
         Ok(AppSmsLogin::start(device_id, phone, &mut rng))
     }
