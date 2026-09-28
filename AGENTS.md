@@ -54,6 +54,51 @@ TCC 按**代码要求**记授权，而未签名的二进制其要求就是**内�
 这解释了"第一天用没问题"：那天没反复重编译，授权一直匹配。
 正常开发（不改代码、不重启服务）**不会弹**；只有改了代码重新编译才会。
 
+### ⚠ 而且「重新编译」不只是换个哈希 —— 它会 **SIGKILL 正在跑的那个进程**
+
+上面那句只说了一半。2026-09-28 用崩溃报告查实了另一半：
+
+`cargo build` **原地覆写** `target/debug/mcloud-server`，而 launchd 正在跑那个文件。
+覆写瞬间内核把进程判为**代码签名失效**：
+
+```
+~/Library/Logs/DiagnosticReports/mcloud-server-2026-09-28-153826.ips
+  termination: { namespace: "CODESIGNING", indicator: "Launch Constraint Violation" }
+  exception:   { type: "EXC_CRASH", signal: "SIGKILL (Code Signature Invalid)" }
+```
+
+⇒ **光"不 kill、不另起实例"是不够的**：一次 `cargo build` 就足以触发
+「SIGKILL → `KeepAlive` 重拉 → 旧进程还没放开 3000 ⇒ `Address already in use`
+→ 再拉」这个循环。今天的崩溃报告落在 07:29 / 13:33 / 13:48 / 13:55×2 /
+14:04 / 14:06 / 14:07 / 14:12 / 14:50 / 15:00 / 15:38×2 —— **全部落在重编译时刻**，
+不是"agent 手贱 kill"那一条路径。
+
+### ✅ 开发期自检用它，代价 0 次重启：`cargo check`
+
+上面那条有一个**反直觉的例外**，实测有效：
+
+```bash
+cargo check --workspace --all-targets     # 全工作区类型检查，不链接
+```
+
+`cargo check` **只产出 `.rmeta`**，从不写 `target/debug/mcloud-server`
+—— 而 SIGKILL 的触发点正是**链接**把那个文件覆写掉。
+
+2026-09-28 实测（本仓），跑之前与跑之后：
+
+```
+inode=2364362 mtime=1790581118 size=38401616    ← 两次完全一致
+服务 PID = 42558                                 ← 没被换掉
+/api/health → {"status":"ok"}
+```
+
+⇒ **改完代码先用它自检**，能回答"整个工作区还编不编得过"，而代价是
+0 次重启、0 次弹框。同理 `cargo test -p <某个 crate>`（只要不牵到
+`mcloud-server` 的链接）也不碰那个二进制。
+
+⚠ 但它**替代不了** `cargo test --workspace` —— 那是运行期的门。
+真要跑全量就得接受一次重启；"要不要为此改服务怎么跑"仍然要用户点头。
+
 若要去掉这最后一种弹窗，两条路（都需要用户点头，别自作主张）：
 1. 把服务改成从**内置盘**跑（二进制 + cwd + `data/` 都在内置盘，实测 0 次外置盘访问）
 2. 用**固定身份的证书签名**二进制，让授权在重编译后依然匹配
