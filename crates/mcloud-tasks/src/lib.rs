@@ -12,6 +12,7 @@ pub mod msg_push;
 pub mod notice;
 pub mod play_ai;
 pub mod signin;
+pub mod task_expansion;
 
 use mcloud_engine::{Registry, Task};
 use std::sync::Arc;
@@ -76,6 +77,7 @@ pub fn register_all(registry: &mut Registry) -> Result<(), String> {
         Arc::new(notice::NoticeTask),
         Arc::new(play_ai::PlayAiTask),
         Arc::new(app_task_matrix::AppTaskMatrixTask),
+        Arc::new(task_expansion::TaskExpansionTask::new()),
     ];
     for t in tasks {
         registry.register(t)?;

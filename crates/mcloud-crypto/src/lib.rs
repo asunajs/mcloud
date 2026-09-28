@@ -24,7 +24,7 @@ pub use aes::{
 };
 pub use des::{des_decrypt_b64, des_encrypt_b64};
 pub use gzip::{gunzip, gzip_with_os19, gzip_with_os19_base64};
-pub use hash::{md5_hex, sha1_hex_upper, sha256_hex, sha256_hex_upper};
+pub use hash::{md5_hex, sha1_hex_upper, sha256_hex, sha256_hex_bytes, sha256_hex_upper};
 pub use password::{
     hash_password, hash_password_with_salt, hash_session_token, new_session_token, verify_password,
     PasswordError, MIN_PASSWORD_LEN,

@@ -29,6 +29,17 @@ pub fn sha256_hex(input: &str) -> String {
     hex::encode(h.finalize())
 }
 
+/// SHA-256，小写 hex，**吃原始字节**。
+///
+/// ⚠ 与 [`sha256_hex`] 分开是因为上传那一族要哈希的是**文件的原始字节** ——
+/// 那不是 UTF-8 文本，先 `from_utf8` 再哈希会失败或改变内容，
+/// 而"哈希与 PUT 上去的字节对不上"在上游那里表现是一次校验失败（方向容易跑偏）。
+pub fn sha256_hex_bytes(input: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(input);
+    hex::encode(h.finalize())
+}
+
 /// SHA-256，大写 hex。密码哈希路径使用。
 pub fn sha256_hex_upper(input: &str) -> String {
     sha256_hex(input).to_uppercase()

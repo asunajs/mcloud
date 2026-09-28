@@ -12,13 +12,18 @@
 > `live-redflower-vectors.json`）。
 > `/api/capabilities` 实测返回这 10 条。
 >
-> **增补（2026-09-28）：已实现 16 个任务** —— 上面 10 条 +
+> **增补（2026-09-28）：已实现 17 个任务** —— 上面 10 条 +
 > `exchange`（兑换）+ `msg-push`（消息推送）+ `fun-ai`（趣玩AI抽奖）+ `notice`（公告任务）
 > + `play-ai-special`（拍拍盘点，**只读那一半**）
-> + `app-task-matrix`（App 任务矩阵，**只读那一半**）。
+> + `app-task-matrix`（App 任务矩阵，**只读那一半**）
+> + `task-expansion`（任务拓展，**全链**：读 → 凑备份 → 等 → 重读 → 领 → **删自己传的那个文件**）。
 > ⇒ 下面 §2 的 **P2「只读查询」那一档已经全部落完**（那四条的实拍材料都拿到了）。
 > 下面那张 19 条清单是**参考实现的规格表**，不是本项目的进度表；
-> 本项目的进度以 `/api/capabilities`（今天 16 条）与 `README.md` 为准。
+> 本项目的进度以 `/api/capabilities`（今天 17 条）与 `README.md` 为准。
+>
+> ⚠ **`task-expansion` 与参考实现有一处刻意不同：本仓会删掉自己传的那个文件**
+> （参考实现留在它的 P1 缺口里不删）。⚠ 但"撞同名"那一档**绝不删** ——
+> 那是用户本来就有的文件。详见 `crates/mcloud-tasks/src/task_expansion.rs` 文件头。
 >
 > ⚠ **`app-task-matrix` 与表里的 `app-task` 不是同一条**：后者在参考实现里是
 > 「**做任务**」（逐条 `task/click`，会写用户的账且不可撤销），

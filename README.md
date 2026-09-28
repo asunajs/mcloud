@@ -12,7 +12,27 @@
 + 兑换（`exchange`）+ 消息推送（`msg-push`）
 + 趣玩AI抽奖（`fun-ai`）+ 公告任务（`notice`）
 + 拍拍盘点（`play-ai-special`，**只读**）
-+ App 任务矩阵（`app-task-matrix`，**只读**）。
++ App 任务矩阵（`app-task-matrix`，**只读**）
++ 任务拓展（`task-expansion`）。
+
+**`task-expansion`（2026-09-28 落地）—— 第一条"写网盘并自己收尾"的任务**：
+
+它是旧项目里**唯一**"为了改变上游状态而写用户网盘"的任务：本月没开备份时，
+不是提示你去开，而是**自己传一个文件**把 `curMonthBackup` 刷成 true。
+
+> ⚠⚠ **与参考实现的一处刻意不同：本仓跑完会删掉自己传的那个文件。**
+> 参考实现这一条链**不删**（留在它的 P1 缺口里），跑一次你的网盘里就多一个没人清理的文件。
+> 本仓有 `batchTrash`（2026-09-26 起有真跑读数）⇒ 链尾自己收尾。
+>
+> ⚠⚠ **但"撞同名"那一档绝不删**：`exist:true` 时上游按 `refuse` 语义把**你本来就有的
+> 那个文件**的 `fileId` 交回来 —— 把它放进清理名单就是**删你的东西**。
+> 所以那一档**连 id 都不交**（有测试钉住"撞同名时一条 `batchTrash` 都不发"）。
+>
+> ⚠ 删除是**移进回收站**、不是彻底删；真删错了还能捞回来。
+>
+> 另外两处"刻意"：**一枪没发出去时不空等**那 20 秒（等的是"服务端把这次备份记进当月"，
+> 没有上传就没有东西要记），以及**领取成功但上游没报数时仍然报"已领"**
+> （旧实现那个 truthy 判据会让那一趟一句都不念，看起来像什么都没发生）。
 
 **`app-task-matrix`（2026-09-28 落地）—— 只拉表，不打卡、不上传**：
 
@@ -228,7 +248,7 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 | P8 | **账号登录（扫码/短信）+ 账号页 + 定时/编排 CRUD 页** | ✅ |
 | P9a | **签到族 8 条**（`sign` / `receive` / `multiple` / `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`） | ✅ |
 | P9b | **P2 只读查询那一档全部落完**：`exchange` + `msg-push` + `fun-ai` + `notice` | 已落 4 条 |
-| P9c | 其余任务增量接入（`app-task` **写的那一半** / `cloud-phone-redpack` / `ai-avatar` / `task-expansion`）+ 推送渠道 | 待做（只读那一半已落：`play-ai-special` 与 `app-task-matrix`）|
+| P9c | 其余任务增量接入（`app-task` **写的那一半** / `cloud-phone-redpack` / `ai-avatar`）+ 推送渠道 | 待做（已落：`play-ai-special`、`app-task-matrix` 的只读那一半，以及 `task-expansion` 全链）|
 
 > **端点必须来自抓包，不能凭印象写。** 本项目的签到端点最初是
 > `/ycloud/api/sign/query`（凭印象），实测回 **405**；换成实拍的

@@ -21,6 +21,9 @@ futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# ⚠ 只有这一条任务要"等一会儿"（任务拓展凑完备份要等服务端记账，20 秒是判据的一部分）。
+# 等待写成字段、测试里设 0 ⇒ 真 sleep 只出现在生产路径。
+tokio = { workspace = true }
 
 [lints]
 workspace = true
