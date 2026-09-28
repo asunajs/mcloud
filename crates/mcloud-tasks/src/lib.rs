@@ -6,6 +6,7 @@
 pub mod exchange;
 pub mod live_room;
 pub mod login;
+pub mod msg_push;
 pub mod signin;
 
 use mcloud_engine::{Registry, Task};
@@ -66,6 +67,7 @@ pub fn register_all(registry: &mut Registry) -> Result<(), String> {
         Arc::new(live_room::LiveRoomTask::production()),
         Arc::new(live_room::RedFlowerTask::production()),
         Arc::new(exchange::ExchangeTask),
+        Arc::new(msg_push::MsgPushTask),
     ];
     for t in tasks {
         registry.register(t)?;

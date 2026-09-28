@@ -12,6 +12,19 @@
 > `live-redflower-vectors.json`）。
 > `/api/capabilities` 实测返回这 10 条。
 >
+> **增补（2026-09-28）：已实现 12 个任务** —— 上面 10 条 +
+> `exchange`（兑换，见 `README.md`「状态」）+ `msg-push`（消息推送）。
+> 下面那张 19 条清单是**参考实现的规格表**，不是本项目的进度表；
+> 本项目的进度以 `/api/capabilities`（今天 12 条）与 `README.md` 为准。
+>
+> ⚠ **`msg-push` 的证据分两半**：`task/status` 是实拍逐字的
+> （裸 GET、零查询参数、六个字段名都见过），而 **`task/obtain` 那一枪整条零样本**
+> —— 实拍那天 `secondTaskStatus=1`（进度 16/31 天），页面上根本没有领取入口。
+> 所以它的**方法都还没定**（常量在
+> `mcloud_upstream::app_msg_push::MSG_PUSH_OBTAIN_IS_POST`），
+> 且"什么值该做什么"那层判据**仍是旧项目口径、一条都没被上游证实过**。
+> 详见 `crates/mcloud-upstream/src/app_msg_push.rs` 文件头。
+>
 > ⚠ **直播那两条的边界**（详见 `README.md`「状态」）：
 > **开播门已接**（2026-09-26，换 SSO → 换直播侧 JWT → 房间列表），
 > 所以"不填 `codes` 就自动开门听弹幕收口令"这条链**在代码上通了、有端到端单测**；

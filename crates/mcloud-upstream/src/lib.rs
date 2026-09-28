@@ -9,6 +9,7 @@
 //! 业务层只看到 `mcloud_core::HttpClient`。
 
 pub mod app_login;
+pub mod app_msg_push;
 pub mod app_signin;
 pub mod auth;
 pub mod auth_refresh;

@@ -6,9 +6,24 @@
 
 ## 状态
 
-**已落地 10 个任务**：P1 签到族八条（`sign` / `receive` / `multiple` /
+**已落地 12 个任务**：P1 签到族八条（`sign` / `receive` / `multiple` /
 `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`）
-+ 直播小红花两条（`live-room` / `red-flower`）。
++ 直播小红花两条（`live-room` / `red-flower`）
++ 兑换（`exchange`）+ 消息推送（`msg-push`）。
+
+**`msg-push`（2026-09-28 落地）的证据分两半 —— 别混着读**：
+
+| 那一半 | 状态 |
+|---|---|
+| `task/status`（URL / 方法 / 六个字段名） | ✅ 实拍逐字（2026-09-25 进页抓包） |
+| `task/list`（形状） | ✅ 实拍逐字，但**没接进任务链**（`obtain` 之后列表变不变零样本） |
+| 这一页**自己的建会话参数** | ✅ 实拍到了（`msgpushon` / `1062`），但**没有实现** ⇒ 仍走公共来源 |
+| **`task/obtain`（那一枪写请求）** | ⚠ **整条零样本**：实拍那天 `secondTaskStatus=1`，页面上没有领取入口 |
+| **"什么值该做什么"那层判据** | ⚠ **仍是旧项目口径**，实拍一条都没命中过 ⇒ 判据未被上游证实 |
+
+> 所以：`msg-push` 的**读**是实证的，**写**是"原项目实现、零实拍"。
+> 别把"测试全绿"读成"这一枪真机跑通过" —— 它的方法（GET/POST）都还没定，
+> 常量在 `mcloud_upstream::app_msg_push::MSG_PUSH_OBTAIN_IS_POST`，A/B 只改那一处。
 
 **直播小红花（2026-09-26 落地）**的诚实边界 —— 读代码前先读这段：
 
@@ -162,7 +177,8 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 | P7 | **WebUI 登录闸 + 认证闸/登出 + CLI 收敛（6 命令）** | ✅ |
 | P8 | **账号登录（扫码/短信）+ 账号页 + 定时/编排 CRUD 页** | ✅ |
 | P9a | **签到族 8 条**（`sign` / `receive` / `multiple` / `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`） | ✅ |
-| P9b | 其余任务增量接入（`notice` / `app-task` / 活动类 等）+ 推送渠道 | 待做 |
+| P9b | **`exchange` + `msg-push`**（P2 只读查询那一档里证据最全的一条） | 已落 2 条 |
+| P9c | 其余任务增量接入（`notice` / `fun-ai` / `app-task` / 活动类 等）+ 推送渠道 | 待做 |
 
 > **端点必须来自抓包，不能凭印象写。** 本项目的签到端点最初是
 > `/ycloud/api/sign/query`（凭印象），实测回 **405**；换成实拍的
