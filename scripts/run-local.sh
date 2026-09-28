@@ -53,6 +53,39 @@ fi
 
 mkdir -p "$RUN_DIR"
 
+# ⓪ 守卫：**绝不**与 launchd 托管的实例抢 3000 端口。
+#
+# 这是血泪教训：本脚本早先没有这道守卫，于是在 launchd 代理
+# （`~/Library/LaunchAgents/com.catlair.mcloud-webui.plist`，`KeepAlive: true`）
+# 占着 3000 时又起了一个实例。结果是**崩溃重启循环**：
+# launchd 那份绑不上端口就退出，KeepAlive 立刻重拉，如此往复 ——
+# 每 20 秒（launchd 的重启节流）就会新起一个进程，
+# 而每个新进程访问外置卷都会触发一次 macOS 的
+# 「想访问可移除宗卷上的文件」弹窗，一天刷出 1000+ 条记录。
+#
+# 所以：有托管实例在跑就直接退出，把选择权交回用户。
+# 要用本脚本（内置盘、不弹框）跑，先手动 `launchctl bootout` 那个代理。
+if launchctl list 2>/dev/null | grep -q "com.catlair.mcloud-webui"; then
+  cat >&2 <<'EOF'
+✗ 检测到 launchd 代理 com.catlair.mcloud-webui 已加载。
+
+  它在跑 <仓库>/target/debug/mcloud-server（外置盘），并带 KeepAlive。
+  本脚本若同时启动，两份会**抢 3000 端口**，失败的那份被 KeepAlive
+  反复重拉，每次重拉都触发一次 macOS「可移除宗卷」授权弹窗。
+
+  二选一：
+
+  A. 就用托管那份（推荐 —— 正常开发不弹窗）：
+       什么都不用做，WebUI 已在 http://127.0.0.1:3000
+
+  B. 改用本脚本（内置盘，连重编译后的弹窗也免掉）：
+       launchctl bootout gui/$(id -u)/com.catlair.mcloud-webui
+       # 想恢复托管：launchctl bootstrap gui/$(id -u) \
+       #   ~/Library/LaunchAgents/com.catlair.mcloud-webui.plist
+EOF
+  exit 1
+fi
+
 # ① 二进制：从仓库的构建产物拷到内置盘。
 #    ⚠ 每次重新编译后都要再拷一次 —— 这正是弹窗的触发点。
 SRC="$REPO/target/debug/mcloud-server"
@@ -82,3 +115,4 @@ echo "  数据：$DATA（内置盘 —— 进程不碰外置卷，所以不再�
 # ③ 工作目录也设成内置盘：`process.cwd()` 参与 TCC 判定。
 cd "$RUN_DIR"
 exec env MCLOUD_ADDR="$ADDR" MCLOUD_DATA_DIR="$DATA" "$BIN"
+
