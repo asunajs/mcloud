@@ -24,11 +24,16 @@
 //!
 //! # 票来自**另一页**
 //!
-//! 这一页有自己换票的参数（`marketName=msgpushon` / `sourceId=1062`，实拍到了），
-//! 但 [`SessionRecipe`](mcloud_upstream::session::SessionRecipe) 今天只有签到页那一个
-//! 取值 ⇒ 本模块经 `H5Client` 拿的是**签到页那张票**。
-//! ⚠ "借签到页的票打这一页的接口行不行"**未测试** —— 实拍抓到的流量用的就是
-//! 这一页自己的票。真跑结论都要带着这个前提读。
+//! 这一页**有自己换票的参数**且**已经用上了**：
+//! [`SessionRecipe::MsgPushOn`](mcloud_upstream::session::SessionRecipe::MsgPushOn)
+//! （`marketName=msgpushon` / `sourceId=1062`、入口 `portal/hcyview/…?path=openNoticeGift`）。
+//!
+//! 依据是 `docs/capture/app-msg-push-on-samples.txt` §2 的**三张票核对表**：
+//! 那一趟三张 `jwttoken` 互不相等，这一页那张被用在 **24 个接口**上（含本模块打的
+//! `msgPushOn/task/status`、`msgPushOn/task/list`），而签到页那张用在另外 16 个上。
+//!
+//! 路由方式见 `H5Client::recipe_for`：本模块**整条链**都在 `/ycloud/msgPushOn/` 下
+//! ⇒ 一个配方到底，不会一条链里混两张票。
 
 use async_trait::async_trait;
 use serde_json::Value;

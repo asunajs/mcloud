@@ -563,3 +563,67 @@ fn gate_token_request_is_not_the_signin_recipe() {
     );
     assert_eq!(signin_body["toSourceId"], "001005");
 }
+
+// ══════════════ 逐页配方：「开启通知有礼」那一页 ══════════════
+//
+// 依据是 `docs/capture/app-msg-push-on-samples.txt` §2 的**三张票核对表**：
+// 那一趟三张 `jwttoken` 互不相等，`faa8d052` 由 `msgpushon` / `1062` 换出、
+// 用在 24 个接口上（含 `msgPushOn/task/*`），而签到页那张用在另外 16 个上。
+
+/// `tyrzLogin` 那三个参数照实拍逐字。
+#[test]
+fn msg_push_on_params_are_the_captured_ones() {
+    let p = SessionRecipe::MsgPushOn.params();
+    assert_eq!(p.market_name, "msgpushon");
+    assert_eq!(p.source_id, "1062");
+    assert_eq!(p.page_path, "openNoticeGift");
+    // ⚠ 与签到页**不同参数**（这正是要分页的理由）
+    let s = SessionRecipe::SignInPage.params();
+    assert_ne!(p.market_name, s.market_name);
+    assert_ne!(p.source_id, s.source_id);
+    assert_ne!(p.page_path, s.page_path);
+}
+
+/// 这一页的入口 URL 是**另一种形状**：`hcyview`、**没有** `appID`、**没有**
+/// `targetSourceId`，且 `enableShare=1` 排在 `token` **之后**。
+///
+/// 四处都是照抄实拍。⚠ 别顺手"补齐"那两枚 —— 补一枚上游不认的参数与漏一枚
+/// 上游必需的参数是两种错，而这一页是哪一种**没有样本**。
+#[test]
+fn the_notice_page_entry_url_is_the_captured_shape() {
+    let url = SessionRecipe::MsgPushOn.params().page_url("YZsidssolgabc");
+    assert!(
+        url.contains("/portal/hcyview/index.html"),
+        "路径段应逐页不同：{url}"
+    );
+    assert!(url.contains("path=openNoticeGift"));
+    assert!(url.contains("sourceid=1062"));
+    assert!(url.contains("token=YZsidssolgabc"));
+    assert!(!url.contains("appID="), "实拍这一页没有 appID：{url}");
+    assert!(
+        !url.contains("targetSourceId="),
+        "实拍这一页没有 targetSourceId：{url}"
+    );
+    assert!(
+        !url.contains("mobilecloud"),
+        "不该是签到页那个路径段：{url}"
+    );
+    let token_at = url.find("token=").unwrap();
+    let share_at = url.find("enableShare=").unwrap();
+    assert!(share_at > token_at, "enableShare 应排在 token 之后：{url}");
+    assert!(url.ends_with("enableShare=1"), "应在末尾：{url}");
+}
+
+/// 签到页那条回归：加了逐页分支之后，它自己一个字符都不该变。
+#[test]
+fn the_signin_page_entry_url_is_unchanged() {
+    let url = SessionRecipe::SignInPage.params().page_url("SSO123");
+    assert_eq!(
+        url,
+        format!(
+            "{BASE_MCLOUD}/portal/mobilecloud/index.html?path=newsignin&sourceid=1002\
+&enableShare=1&appID=cy62d5a5e8373a272aeca467accad61722c51cfd48&token=SSO123\
+&targetSourceId=001005"
+        )
+    );
+}

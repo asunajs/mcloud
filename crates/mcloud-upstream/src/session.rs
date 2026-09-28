@@ -73,18 +73,55 @@ pub enum SessionRecipe {
     ///
     /// 这是**唯一有完整实拍**的配方，其余页面在拿到自己的实拍前映射到它。
     SignInPage,
+    /// 「开启通知有礼」那一页：`tyrzLogin(marketName=msgpushon / sourceId=1062)`。
+    ///
+    /// # 证据
+    ///
+    /// `docs/capture/app-msg-push-on-samples.txt` §2 的**三张票核对表**：那一趟抓到
+    /// 三张互不相等的 `jwttoken`，其中 `faa8d052` 由 `msgpushon` / `1062` 换出，
+    /// 被用在 **24 个接口**上（含 `msgPushOn/task/status`、`msgPushOn/task/list`）；
+    /// 而签到页那张 `f9048ce0`（`sign_in_3` / `1002`）被用在另外 16 个上。
+    ///
+    /// ⚠ **反向未验证**：实拍里**没有**出现"拿签到页那张打 `msgPushOn/*`"的流量
+    /// ⇒ "借公共票行不行"这一问没有样本（Go 侧 `app_msg_push.go` 的"这一页的票"
+    /// 一节把同一件事记成未测试）。所以这一刀切下去是**照实拍**，不是照推断。
+    MsgPushOn,
 }
 
 impl SessionRecipe {
-    /// 这个配方换票用的三个参数。
+    /// 这个配方换票用的那几个参数。
     pub fn params(self) -> RecipeParams {
         match self {
             SessionRecipe::SignInPage => RecipeParams {
                 to_source_id: "001005",
                 market_name: "sign_in_3",
                 source_id: "1002",
-                h5_app_id: "cy62d5a5e8373a272aeca467accad61722c51cfd48",
+                h5_app_id: Some("cy62d5a5e8373a272aeca467accad61722c51cfd48"),
                 page_path: "newsignin",
+                // 签到页的入口在 `portal/mobilecloud/` 下。
+                portal_page: "mobilecloud",
+                // ⚠ 签到页的入口 URL **必须**带 `&targetSourceId=`，且排在 `token` 之后
+                // —— 参考实现为漏掉它踩过一次坑（见 `page_url` 的说明）。
+                target_source_id: Some("001005"),
+            },
+            SessionRecipe::MsgPushOn => RecipeParams {
+                // ⚠ 这一页的**第一步没有实拍**（三张票那张核对表只拍到 `tyrzLogin`
+                // 的参数）。这里沿用 `001005` 的依据是**旁证**：Go 侧 P5 记的
+                // 拍拍页两步流程里，第一步打的也是 `targetSourceId=001005`
+                // ⇒ "第一步与页面无关"有一格支持，但**不是**这一页的直接实拍。
+                to_source_id: "001005",
+                market_name: "msgpushon",
+                source_id: "1062",
+                // ⚠ 实拍这一页的入口 URL **没有** `appID`（见下 `page_url`）
+                // ⇒ 这里是 `None`，不是"忘了填"。
+                h5_app_id: None,
+                page_path: "openNoticeGift",
+                // 入口在 `portal/hcyview/` 下 —— 与签到页**不是同一个路径段**。
+                portal_page: "hcyview",
+                // ⚠ 实拍这一页的入口 URL **没有** `targetSourceId`。照抄，别顺手补齐：
+                // "补一枚上游不认的参数"与"漏一枚上游必需的参数"是两种错，
+                // 而哪一种是这里的真相**没有样本**。
+                target_source_id: None,
             },
         }
     }
@@ -144,27 +181,72 @@ pub struct RecipeParams {
     pub market_name: &'static str,
     /// `tyrzLogin` body 的 `sourceId`。
     pub source_id: &'static str,
-    /// 页面 URL 的 `appID`。
-    pub h5_app_id: &'static str,
+    /// 页面 URL 的 `appID`。`None` = **实拍里这一页的入口没有这个参数**。
+    ///
+    /// ⚠ 做成 `Option` 而不是给个空串：空串会拼出 `&appID=`，那是**多一枚空参数**，
+    /// 与"没有这一枚"是两件事 —— 而上游认哪种没有样本。
+    pub h5_app_id: Option<&'static str>,
     /// 页面 URL 的 `path`（同时决定 referer 长什么样）。
     pub page_path: &'static str,
+    /// 入口 URL 里 `portal/<这一段>/index.html` 的那一段。
+    ///
+    /// ⚠ **逐页不同**：签到页是 `mobilecloud`，开启通知有礼那一页是 `hcyview`。
+    /// 原先这里写死了 `mobilecloud` ⇒ 另一页的 referer 会指到一个**不存在的页面**，
+    /// 而 referer 指错的表现是上游回一个业务码，不像"我们拼错了"。
+    pub portal_page: &'static str,
+    /// 入口 URL 要不要 `&targetSourceId=<to_source_id>`。
+    ///
+    /// ⚠ 两页**不同**（都是实拍）：签到页**有**（且有一条"漏了它"的坑），
+    /// 开启通知有礼那一页**没有** ⇒ 按各页实拍照抄，不统一。
+    pub target_source_id: Option<&'static str>,
 }
 
 impl RecipeParams {
-    /// 签到页的 H5 落地页地址。
+    /// 这一页的 H5 落地页地址（纯协议实现里只用来当 `referer`）。
     ///
     /// 真实客户端把 SSO token 直接拼在查询串里交给 WebView，H5 自己拿它去
-    /// `tyrzLogin` 建会话。纯协议实现里这个 URL 只用来当 `referer`。
+    /// `tyrzLogin` 建会话。
     ///
-    /// ⚠ `referer` 必须带 `&targetSourceId=…`，且它排在 `token` **之后**。
-    /// mcloud 在这里踩过一次坑：初版漏了它，因为当时是**照着实现**写的这一行，
-    /// 而不是照着抓包 —— 于是实现漏了、文档也跟着漏。
+    /// # 为什么是"逐页"拼而不是一套模板套参数
+    ///
+    /// 两页的入口 URL **形状不同**，不是同一套模板换几个值：
+    ///
+    /// ```text
+    /// 签到页  /portal/mobilecloud/index.html?path=newsignin&sourceid=1002
+    ///         &enableShare=1&appID=<40 字符>&token=<SSO>&targetSourceId=001005
+    /// 通知页  /portal/hcyview/index.html?path=openNoticeGift&sourceid=1062
+    ///         &token=<42 字符>&enableShare=1
+    /// ```
+    ///
+    /// 差别有三处：**路径段**（`mobilecloud` / `hcyview`）、通知页**没有** `appID`、
+    /// 通知页**没有** `targetSourceId`，而且参数次序也不同。
+    ///
+    /// ⚠ 签到页那条 `&targetSourceId=…` 必须带、且排在 `token` **之后** ——
+    /// 参考实现踩过一次坑：初版漏了它，因为当时是**照着实现**写的这一行，
+    /// 而不是照着抓包，于是实现与文档一起漏。
+    ///
+    /// ⚠ 通知页那三处"没有"是**照抄实拍**，不是"还没补"。别顺手给它补齐：
+    /// "补一枚上游不认的参数"与"漏一枚上游必需的参数"是两种错，
+    /// 而这一页究竟是哪种**没有样本**。
     pub fn page_url(&self, sso_token: &str) -> String {
-        format!(
-            "{BASE_MCLOUD}/portal/mobilecloud/index.html?path={}&sourceid={}\
-&enableShare=1&appID={}&token={}&targetSourceId={}",
-            self.page_path, self.source_id, self.h5_app_id, sso_token, self.to_source_id
-        )
+        let mut url = format!(
+            "{BASE_MCLOUD}/portal/{}/index.html?path={}&sourceid={}",
+            self.portal_page, self.page_path, self.source_id
+        );
+        if let Some(app_id) = self.h5_app_id {
+            url.push_str(&format!("&enableShare=1&appID={app_id}"));
+        }
+        url.push_str(&format!("&token={sso_token}"));
+        if let Some(target) = self.target_source_id {
+            url.push_str(&format!("&targetSourceId={target}"));
+        }
+        // ⚠ 有 `appID` 的那一页（签到）实拍里 `enableShare=1` 在 `appID` **之前**，
+        // 而没有 `appID` 的那一页它在 `token` **之后**。两处次序都是照抄，
+        // 所以它跟着 `appID` 一起分支 —— 不在这里"统一一下顺序"。
+        if self.h5_app_id.is_none() {
+            url.push_str("&enableShare=1");
+        }
+        url
     }
 }
 

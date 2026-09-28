@@ -39,6 +39,7 @@ pub struct SessionTrace {
 ///
 /// 「一次建会话、后续复用」的语义就在这一层：同一个 `SessionSource` 上
 /// 连续调 [`Self::with_session`] 只会建一次票。
+#[derive(Clone)]
 pub struct SessionSource {
     http: Arc<dyn HttpClient>,
     account: Account,
@@ -61,6 +62,15 @@ impl SessionSource {
             recipe,
             cache,
         }
+    }
+
+    /// 这个源按哪一页的配方换票。
+    ///
+    /// ⚠ 调用方要拿它与"这一发该用哪页"比 —— 一致才复用它（见
+    /// `H5Client::source_for`）。少了它会变成"每发都现建一个"，虽然不会错，
+    /// 但会让"复用"这件事无从表达。
+    pub fn recipe(&self) -> SessionRecipe {
+        self.recipe
     }
 
     /// 凭据指纹。凭据轮换后键会变，于是旧票不会被误用。

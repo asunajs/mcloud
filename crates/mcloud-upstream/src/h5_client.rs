@@ -42,12 +42,59 @@ fn host_of(url: &str) -> Option<&str> {
     Some(host.split(':').next().unwrap_or(host))
 }
 
+/// 这一发要**哪一页**的票。
+///
+/// # 为什么按 URL 判、而不是让"链"自报
+///
+/// 票是按页面签的（同一趟抓包里三张 `jwttoken` 互不相等，各打各的接口 ——
+/// 见 `docs/capture/app-msg-push-on-samples.txt` §2 的核对表），而页面在这条链上
+/// 唯一的显式痕迹就是**请求路径**。`TaskContext` 里只有一个 `HttpClient`、
+/// 不给任务自报配方的地方，所以判据落在这一层。
+///
+/// ⚠ 拿不到判据时**落签到页**（`SignInPage`）—— 那是今天绝大多数链的真实情况
+/// （Go 侧 `RecipeSignInPage` 同样是全仓默认）。这不是"猜"，是**默认档**：
+/// 新加一页只在下面加一条前缀，别处一行不用动。
+///
+/// ⚠ 反过来**不许**仅凭"页面名不同"就在这里加分支：两页若共用一套换票参数，
+/// 拆开会变成每趟**多打三枪**、而两张票一模一样 —— 那是空转不是"特有优先"。
+/// 加分支的唯一依据是**实拍里那一页自己换过票**。
+fn recipe_for(url: &str) -> Option<SessionRecipe> {
+    if !needs_session(url) {
+        return None;
+    }
+    let path = url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/'))
+        .map(|(_, path)| path)
+        .unwrap_or("");
+    // 「开启通知有礼」那一页：`msgPushOn/*` 在实拍里带的是它自己换的那张票
+    // （三张票核对表里 `faa8d052` 用在这 24 个接口上）。
+    if path.starts_with("ycloud/msgPushOn/") {
+        return Some(SessionRecipe::MsgPushOn);
+    }
+    // ⚠ **未验证**：`notice` 那条链打的 `openemailsms-service/*` 与签到页那几条
+    // （`signin/page`、`signin/task/click`）**是不是同一页**，参考实现里没有明说
+    // （Go 侧 Q42 把「开启通知有礼」整族留在公共票，而那一片真跑**没回过鉴权类码**
+    // ⇒ "用签到页那张"至少是**已知能用**的）。
+    // 所以这一格走默认档、并把它标出来，而不是照着页面名顺手也切成 `MsgPushOn`：
+    // 切错的代价是那条链从此带一张**没人验证过**的票，而它的失败长相是业务码。
+    Some(SessionRecipe::SignInPage)
+}
+
 /// 带会话的 H5 客户端。
 pub struct H5Client {
     /// 底层传输（不注入任何凭证）。
     transport: Arc<dyn HttpClient>,
     /// 会话源：负责建票、缓存、刷新重放。
+    ///
+    /// ⚠ 它按**默认配方**（签到页）建。请求的路径指向别的页时，
+    /// [`H5Client::source_for`] 会现建一个——`SessionSource` 只是几个引用，
+    /// 真正花钱的那三枪在[`SessionCache`](crate::session::SessionCache) 里缓存，
+    /// 所以"每发都现建"不等于"每发都换票"。
     session: SessionSource,
+    /// 账号与池：现建别的配方的 source 要用。
+    account: Account,
+    cache: Arc<crate::session::SessionCache>,
 }
 
 impl H5Client {
@@ -59,13 +106,37 @@ impl H5Client {
         cache: Arc<crate::session::SessionCache>,
     ) -> Self {
         Self {
-            session: SessionSource::new(Arc::clone(&transport), account, recipe, cache),
+            session: SessionSource::new(
+                Arc::clone(&transport),
+                account.clone(),
+                recipe,
+                cache.clone(),
+            ),
             transport,
+            account,
+            cache,
         }
     }
 
     pub fn session_source(&self) -> &SessionSource {
         &self.session
+    }
+
+    /// 取**这一发该用**的会话源。
+    ///
+    /// 与默认配方一致时直接复用现有的那个（绝大多数请求走这条）；
+    /// 不一致才现建 —— 见 [`recipe_for`] 与 `H5Client::session` 的说明。
+    fn source_for(&self, url: &str) -> SessionSource {
+        match recipe_for(url) {
+            Some(r) if r != self.session.recipe() => SessionSource::new(
+                Arc::clone(&self.transport),
+                self.account.clone(),
+                r,
+                Arc::clone(&self.cache),
+            ),
+            // 判不出（原生族）或就是默认页 ⇒ 用现成那个
+            _ => self.session.clone(),
+        }
     }
 
     /// 原样发送（不建会话）。给原生 A 族请求用。
@@ -84,7 +155,11 @@ impl HttpClient for H5Client {
             return self.passthrough(req).await;
         }
 
-        let params = SessionRecipe::SignInPage.params();
+        // ⚠ 会话与签名头**必须同源**：`params` 决定 `activityid` 等头，
+        // 而票是按配方签的。两处各写一个 `SignInPage` 会让"票是这一页的、
+        // 头是那一页的"—— 那是拼不出会话的，且表现只是一个业务码。
+        let source = self.source_for(&req.url);
+        let params = source.recipe().params();
         // 调用方若自己指定了 referer，优先用它；否则用会话的。
         // 会话的 referer 里带着本次的 SSO token，是"这条会话属于哪个页面"的凭据。
         let own_referer = req
@@ -93,7 +168,7 @@ impl HttpClient for H5Client {
             .find(|(k, _)| k.eq_ignore_ascii_case("referer"))
             .map(|(_, v)| v.clone());
 
-        self.session
+        source
             .with_session(|sess| {
                 // `referer` 与票是同一条会话的两半，必须一起带 ——
                 // 只带票的话，表现是"凭据都在、却回 90001"。
@@ -365,5 +440,56 @@ mod integration_tests {
         let seen = http.seen.lock().unwrap();
         let logins = seen.iter().filter(|r| r.url.contains("tyrzLogin")).count();
         assert_eq!(logins, 1, "三条业务请求只该建一次票");
+    }
+
+    /// ⭐ 票是**按页面**签的，而页面在这条链上唯一的显式痕迹是请求路径。
+    ///
+    /// 依据见 `docs/capture/app-msg-push-on-samples.txt` §2：那一趟三张票互不相等，
+    /// `msgPushOn/*` 带的是这一页自己换的那张。
+    #[test]
+    fn the_notice_page_is_picked_by_path() {
+        assert_eq!(
+            recipe_for("https://m.mcloud.139.com/ycloud/msgPushOn/task/status"),
+            Some(SessionRecipe::MsgPushOn)
+        );
+        assert_eq!(
+            recipe_for("https://m.mcloud.139.com/ycloud/msgPushOn/task/list"),
+            Some(SessionRecipe::MsgPushOn)
+        );
+    }
+
+    /// 别的路径**落签到页这个默认档**（绝大多数链的真实情况）。
+    ///
+    /// ⚠ 这一条也是"**不许仅凭页面名加分支**"的守门：`/ycloud/signin/...`
+    /// 与 `/ycloud/signin/task/taskListV2` 今天都该是签到页，因为**没有实拍**
+    /// 证明它们各换各的票。给它们加分支就是每趟多打三枪、而两张票一模一样。
+    #[test]
+    fn everything_else_falls_back_to_the_signin_page() {
+        for url in [
+            "https://m.mcloud.139.com/ycloud/signin/page/infoV3",
+            "https://m.mcloud.139.com/ycloud/signin/task/taskListV2",
+            "https://m.mcloud.139.com/ycloud/signin/page/taskExpansion",
+            // 路径里带 `msgpush` 但不是那一页的目录 —— 前缀判据要够窄
+            "https://m.mcloud.139.com/ycloud/signin/msgPushOnElsewhere",
+        ] {
+            assert_eq!(
+                recipe_for(url),
+                Some(SessionRecipe::SignInPage),
+                "应落默认档：{url}"
+            );
+        }
+    }
+
+    /// 原生族（不需要票的）判成 `None` ⇒ 直通，不为它建会话。
+    #[test]
+    fn native_hosts_need_no_recipe() {
+        assert_eq!(
+            recipe_for("https://user-njs.yun.139.com/user/querySpecTokenV2"),
+            None
+        );
+        assert_eq!(
+            recipe_for("https://personal-kd-njs.yun.139.com/hcy/file/list"),
+            None
+        );
     }
 }
