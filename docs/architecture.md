@@ -720,6 +720,18 @@ POST   /api/login/password          账密登录
 GET    /api/login/device            查看本机 PC 设备指纹
 POST   /api/login/device/rotate     更换 PC 设备指纹
 
+── 兑换（抢兑）─────────────────────────────────────────────────
+GET    /api/accounts/{id}/exchange-prizes  奖品清单 + 每件判据档位（**只读**）
+POST   /api/accounts/{id}/exchange         兑一件（**真扣云朵**，走 task:account 并发闸）
+
+⚠ 这两条的**判据口径不一样**，别当成同一个：
+只读那条用 `plan_exchange(prize, None, now)` —— **不查余额**（`infoV3` 是账号级
+请求，多打一枪多一分风控噪声），所以它判不出「余额不足」这一档，
+界面上的"可兑"比下单前的真判据**宽**。响应里用 `balanceAware: false` +
+`balanceNote` 把这件事当面说清；用户点了仍可能被挡，但那次挡下**有**错误码。
+写那条走 `runner.run(...)`：并发闸以 `task:account` 为键，是"连点两下"与
+"同一件扣两次豆"之间唯一的防线（这条链**零幂等键**）。
+
 POST   /api/runs                    启动运行 {task, account, body, background}
 GET    /api/runs                    运行列表
 GET    /api/runs/{id}
