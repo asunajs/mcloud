@@ -69,6 +69,15 @@ export const AccountsPage = () => {
    * 列表上的独立动作（删除、换设备指纹）走 `showError`。
    */
   const formError = ref('')
+  /**
+   * 成功回执。
+   *
+   * ⚠ 与右上角的 toast **并存**，不是重复：toast 3 秒就没了（§5.11），
+   * 而加完账号那一刻人的注意力在"账号列表有没有多一条"上 —— 实测就是
+   * 「明明加成功了却像什么都没发生」。这一条**留在页面上**，
+   * 直到下一次尝试登录（那时它已经过时了）才清掉。
+   */
+  const formOk = ref('')
   const busy = ref(false)
 
   // 扫码
@@ -229,8 +238,12 @@ export const AccountsPage = () => {
   /**
    * 发验证码。
    *
-   * ⚠ `sliderAnswer` 只在**点「自动完成」那一下**传：上游需要滑块时不会发短信，
-   * 带上答案才会真的发。不带就再点一次只会拿回同一道题（"没反应"就是这么来的）。
+   * `sliderAnswer` 由本函数**自己**回填：上游把答案直接给了出来（`puzzleLeft`
+   * 解出来就是坐标），所以这件事实质上是**全自动**的 —— 拿到 `need_slider`
+   * 就带答案重发一次，用户只需要等那条短信。
+   *
+   * ⚠ 只在**第一次**（`sliderAnswer` 为空）自动重试**一次**：答案本身错了、
+   * 或上游连着要两次，再自动打下去就成了对着上游刷请求。
    */
   const sendSms = async (sliderAnswer?: string) => {
     formError.value = ''
@@ -247,13 +260,22 @@ export const AccountsPage = () => {
         slider.value = null
         pushToast('success', '验证码已发送')
       } else {
-        // 需要滑块：上游把答案直接给了出来，不需要用户去拖
+        const answer = r.slider?.answer
+        if (r.phase === 'need_slider' && answer && !sliderAnswer) {
+          // 自动过关：不显示图、不要人点。
+          pushToast('info', '已自动通过滑块验证，正在发送验证码')
+          await sendSms(answer)
+          return
+        }
+        // 只剩两种可能：题面解不出来，或自动重试后上游还要滑块。
+        // 图留着只作**诊断**（人一眼看出卡在滑块上），但话必须说清
+        // 是工具侧的问题 —— 不能让用户以为该自己去量像素。
         slider.value = r.slider ?? null
         smsSent.value = false
         formError.value =
           r.phase === 'slider_exhausted'
             ? '今日滑块验证次数已用完，请明天再试'
-            : '需要滑块验证，请点下面的按钮自动完成'
+            : '滑块题自动解不开（上游没给答案），本次没发出短信'
       }
     } catch (e) {
       formError.value = e instanceof Error ? e.message : '发送验证码失败'
@@ -264,6 +286,7 @@ export const AccountsPage = () => {
 
   const submitSms = async () => {
     formError.value = ''
+    formOk.value = ''
     if (!smsCode.value.trim()) {
       formError.value = '请填写验证码'
       return
@@ -280,6 +303,7 @@ export const AccountsPage = () => {
       })
       pushToast('success', `已添加账号 ${r.account ?? ''}（平台：${r.platform ? PLATFORM_LABEL[r.platform] : '未知'}）`,
       )
+      formOk.value = `已添加账号 ${r.account ?? ''}（平台：${r.platform ? PLATFORM_LABEL[r.platform] : '未知'}）`
       smsSent.value = false
       smsCode.value = ''
       slider.value = null
@@ -293,7 +317,7 @@ export const AccountsPage = () => {
 
   // ── App 端（手机客户端）短信 ─────────────────────────────────────────
 
-  /** 发验证码（App 链路）。`sliderAnswer` 只在点「自动完成」那一下传。 */
+  /** 发验证码（App 链路）。与 PC 那支同一个道理：滑块由本函数自动过。 */
   const sendAppSms = async (sliderAnswer?: string) => {
     formError.value = ''
     if (!appPhone.value.trim()) {
@@ -309,7 +333,15 @@ export const AccountsPage = () => {
         appSlider.value = null
         pushToast('success', '验证码已发送')
       } else {
-        // 需要滑块：上游把答案直接给了出来，不需要用户去拖。
+        const answer = r.slider_answer
+        // ⚠ App 这一族的档位名是 `need_captcha`，**不是** PC 那个 `need_slider`
+        // —— 两条链路的名字不一样，别顺手抄。
+        if (r.phase === 'need_captcha' && answer && !sliderAnswer) {
+          // 自动过关：不显示图、不要人点。
+          pushToast('info', '已自动通过滑块验证，正在发送验证码')
+          await sendAppSms(answer)
+          return
+        }
         appSlider.value = {
           answer: r.slider_answer,
           background: r.slider_background,
@@ -318,8 +350,8 @@ export const AccountsPage = () => {
         appSent.value = false
         formError.value =
           r.phase === 'slider_exhausted'
-            ? '这道滑块题已作废，请点下面的按钮重新取一道'
-            : '需要滑块验证，请点下面的按钮自动完成'
+            ? '这道滑块题已作废，请重新发送验证码'
+            : '滑块题自动解不开（上游没给答案），本次没发出短信'
       }
     } catch (e) {
       formError.value = e instanceof Error ? e.message : '发送验证码失败'
@@ -330,6 +362,7 @@ export const AccountsPage = () => {
 
   const submitAppSms = async () => {
     formError.value = ''
+    formOk.value = ''
     if (!appCode.value.trim()) {
       formError.value = '请填写验证码'
       return
@@ -343,6 +376,7 @@ export const AccountsPage = () => {
       // App 账号没有 PC 平台，所以提示语里说"手机端"而不是某个平台名 ——
       // 说成 Windows 会让人以为它按 PC 的 UA 发请求。
       pushToast('success', `已添加账号 ${r.account ?? ''}（手机端）`)
+      formOk.value = `已添加账号 ${r.account ?? ''}（手机端）`
       appSent.value = false
       appCode.value = ''
       appSlider.value = null
@@ -358,6 +392,7 @@ export const AccountsPage = () => {
 
   const submitPassword = async () => {
     formError.value = ''
+    formOk.value = ''
     if (!username.value.trim() || !password.value) {
       formError.value = '请填写用户名与口令'
       return
@@ -367,6 +402,7 @@ export const AccountsPage = () => {
       const r = await loginWithPassword(username.value.trim(), password.value, platform.value)
       pushToast('success', `已添加账号 ${r.account ?? ''}（平台：${r.platform ? PLATFORM_LABEL[r.platform] : '未知'}）`,
       )
+      formOk.value = `已添加账号 ${r.account ?? ''}（平台：${r.platform ? PLATFORM_LABEL[r.platform] : '未知'}）`
       password.value = ''
       await load()
     } catch (e) {
@@ -560,6 +596,12 @@ export const AccountsPage = () => {
             ))}
           </div>
 
+          {formOk.value ? (
+            <div class="alert alert-soft alert-success text-sm" role="status">
+              <span class="break-words">{formOk.value}</span>
+            </div>
+          ) : null}
+
           {formError.value ? (
             <div class="alert alert-soft alert-error text-sm" role="alert">
               <span class="break-words">{formError.value}</span>
@@ -638,28 +680,20 @@ export const AccountsPage = () => {
                 ) : null}
               </div>
 
-              {slider.value ? (
-                <div class="flex flex-col gap-2 rounded-box bg-base-200 p-3">
-                  <span class="text-xs opacity-70">需要滑块验证（点一下自动完成）</span>
-                  {slider.value.background ? (
-                    <img
-                      src={`data:image/png;base64,${slider.value.background}`}
-                      alt="滑块背景"
-                      class="w-full rounded"
-                    />
-                  ) : null}
-                  {slider.value.answer ? (
-                    <button
-                      type="button"
-                      class="btn btn-soft btn-sm self-start"
-                      disabled={busy.value}
-                      onClick={() => void sendSms(slider.value?.answer)}
-                    >
-                      自动完成验证并重发
-                    </button>
-                  ) : (
-                    <span class="text-xs text-error">这张滑块题解不出来，请稍后重试</span>
-                  )}
+              {/*
+                ⚠ 这里**刻意不显示题面图、也不给按钮**。
+                滑块答案不是"识别"出来的 —— 上游把它加密在 `puzzleLeft` 里，
+                解出来就是坐标（见 `SliderPuzzle::answer`）。所以能自动过的时候
+                这张图纯属干扰：它会让人以为"得自己去量像素"。
+                走到这一格只剩"上游这次没给答案"，那是工具侧解不开，
+                要说清楚并让人重发，而不是把图甩出来让人自己想办法。
+              */}
+              {slider.value && !slider.value.answer ? (
+                <div class="alert alert-soft alert-warning text-xs" role="status">
+                  <span>
+                    上游这次没把滑块答案给出来，工具侧解不开。这不是让你去核对图片 ——
+                    答案本来就在题面里加密着。请稍后再发一次验证码。
+                  </span>
                 </div>
               ) : null}
 
@@ -722,30 +756,12 @@ export const AccountsPage = () => {
                 ) : null}
               </div>
 
-              {appSlider.value ? (
-                <div class="flex flex-col gap-2 rounded-box bg-base-200 p-3">
-                  <span class="text-xs opacity-70">
-                    需要滑块验证（点一下自动完成，不用手拖）
+              {/* 同 PC 那一格：不显示题面图、不给按钮 —— 滑块由发码函数自动过。 */}
+              {appSlider.value && !appSlider.value.answer ? (
+                <div class="alert alert-soft alert-warning text-xs" role="status">
+                  <span>
+                    上游这次没把滑块答案给出来，工具侧解不开。请稍后再发一次验证码。
                   </span>
-                  {appSlider.value.background ? (
-                    <img
-                      src={`data:image/png;base64,${appSlider.value.background}`}
-                      alt="滑块背景"
-                      class="w-full rounded"
-                    />
-                  ) : null}
-                  {appSlider.value.answer ? (
-                    <button
-                      type="button"
-                      class="btn btn-soft btn-sm self-start"
-                      disabled={busy.value}
-                      onClick={() => void sendAppSms(appSlider.value?.answer)}
-                    >
-                      自动完成验证并重发
-                    </button>
-                  ) : (
-                    <span class="text-xs text-error">这张滑块题解不出来，请稍后重试</span>
-                  )}
                 </div>
               ) : null}
 
