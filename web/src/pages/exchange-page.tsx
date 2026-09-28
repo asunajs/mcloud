@@ -232,7 +232,7 @@ export const ExchangePage = () => {
       {/* ── 清单 ────────────────────────────────────────────────────── */}
       {state.value === 'loading' ? (
         <div class="flex justify-center py-10">
-          <span class="loading loading-spinner loading-lg" />
+          <span class="loading loading-lg" />
         </div>
       ) : state.value === 'error' ? (
         <div class="card bg-base-100 shadow-sm">

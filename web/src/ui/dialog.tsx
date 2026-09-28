@@ -52,9 +52,11 @@ export interface DialogProps {
 /**
  * 弹窗本体。
  *
- * 宽度只由 `SIZE_CLASS` 那一档给，**不再**写 `w-full max-w-[calc(100vw-2rem)]`：
- * 那一句会把 daisyUI `.modal-box` 自带的 `width:91.6667%; max-width:32rem`
- * 整个顶掉，于是宽屏下弹窗撑满屏幕。窄屏不贴边这件事 daisyUI 已经管着。
+ * 宽度只由 `SIZE_CLASS` 那一档给，**不再**自己写 `w-full` 加一个按视口宽度
+ * 算出来的 max-w 任意值：那一句会把 daisyUI `.modal-box` 自带的
+ * `width:91.6667%; max-width:32rem` 整个顶掉，于是宽屏下弹窗撑满屏幕。
+ * 窄屏不贴边这件事 daisyUI 已经管着。
+ * （顺带：任意值写在注释里也会被 Tailwind 当成候选类名，凭空生成一条死 CSS。）
  *
  * ⚠ 内容走**默认插槽**而不是 `props.children`。Vapor 下 JSX 的子节点编译成
  * `_createComponent(Comp, props, () => …)` 的**第三个实参**（插槽），

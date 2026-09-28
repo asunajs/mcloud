@@ -3,11 +3,41 @@
 /* daisyUI 5 通过 Tailwind 4 的 CSS-first 插件机制注册。
    Tailwind 4 已弃用 tailwind.config.js —— 不要再创建它。 */
 @plugin "daisyui" {
-  /* 刻意**不用** dark 的 --prefersdark：那是"系统偏好深色时自动切"，
+  /* themes: false —— **不**让插件再吐一份内置 light/dark。
+     下面两个 `@plugin "daisyui/theme"` 块会用同名主题覆盖它们，而
+     `daisyui/theme` 是**先合并内置主题令牌、再叠加这里写的覆盖值**，
+     所以生效结果完全一样，只是少了一份被覆盖掉的重复声明（实测 7.5KB）。
+     ⚠ 删掉这两个 theme 块就必须把 themes 改回 `light --default, dark`。
+
+     ⚠⚠ 也别改成 dark 的 --prefersdark：那是"系统偏好深色时自动切"，
      而本项目有自己的手动开关（见 index.html 的内联脚本 + src/ui/theme.ts）。
      两者同时存在会互相抢状态 —— 用户手动选了浅色，系统主题一变就被顶回去，
      按钮显示与实际样式不一致。所以「跟随系统」只作为**初始值**在 JS 里算。 */
-  themes: light --default, dark;
+  themes: false;
+  /* exclude 里的组件分三类：
+
+     ① 名字撞上英文单词被误拉进来的（Tailwind 4 扫的是源码**原文**，
+        注释、标识符、字符串都算候选）：steps / list / progress / diff /
+        aura / textrotate / skeleton / rating。
+     ② **已经换成本文件自己的实现**的：loading / status / checkbox / radio /
+        toggle / textarea / table / menu / dock / modal / stat / join / select /
+        input / drawer / badge / card / alert / label / fieldset
+        （tab 则是换成了 join+btn）。实现见下面「自建控件」一节。
+
+     ⚠ 页面真要用到某个组件时，必须把名字从这一行删掉 —— 否则样式静默消失。
+
+     ⚠⚠ 只有 `btn` **故意没换**：9.6KB / 159 处、变体极多，自写的性价比最差。
+     其余每个都是**逐个量过**才换的（省下的 = daisyUI 那份 − 自写那份）：
+        drawer +2.3KB / card +1.5KB / label+fieldset +1.0KB / alert +0.6KB /
+        badge +0.2KB / toast +0.1KB / navbar +0.02KB
+     —— 后两个几乎持平，但既然更小就一并换掉，省得留两套心智模型。
+     换句话说：**这一行只排除"划算的"**，不是"能换的全换"。 */
+      exclude: aura, diff, textrotate, skeleton, rating, steps, list, progress, tab, drawer,
+    menu, dock, navbar, toast, badge, card, alert, label, fieldset, modal, stat, join,
+    select, input, loading, status, checkbox, radio, toggle, textarea, table, button;
+
+
+
 }
 
 /* ---------------------------------------------------------------------------
@@ -150,7 +180,6 @@ main,
 .stats,
 .modal-box,
 .navbar,
-.dropdown-content,
 .drawer-side > div,
 .dock,
 .rounded-box.bg-base-100 {
@@ -202,69 +231,1208 @@ main,
   box-shadow: 0 0 0 3px var(--primary-glow);
 }
 
-/* tabs 激活项：跟随主色。 */
-.tab.tab-active {
-  color: var(--color-primary);
-}
-
 /* 徽章一律不换行：daisyUI v5 的 .badge 没设 white-space ⇒ 表格里长文本列
    把状态列压到 min-content（1 字宽）时徽章逐字竖排。 */
 .badge {
   white-space: nowrap;
 }
 
-/* 分段控件（横向方块）：答案简短、项数少且能放一行的固定选择。
-   容器 padding 3px / radius 同 selector 档，激活项主色渐变 + 白字 + 光晕。
-   语义仍是原生 radio（sr-only 藏起来），分组靠 name、焦点态看 :focus-visible。 */
-.seg {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 3px;
-  padding: 3px;
-  border-radius: var(--radius-selector);
-  background-color: var(--color-base-200);
-}
-.seg-item {
-  flex: 1 1 0;
-  min-width: max-content;
-  min-height: 44px; /* 触控目标（组件指南 §6.1）；桌面回到紧凑密度 */
-  padding: 6px 10px;
-  border-radius: calc(var(--radius-selector) - 3px);
-  font-size: 0.875rem;
-  line-height: 1.25rem;
-  text-align: center;
-  white-space: nowrap;
-  cursor: pointer;
-  color: color-mix(in oklab, var(--color-base-content) 72%, transparent);
-  transition:
-    background-color 0.22s cubic-bezier(0.4, 0, 0.2, 1),
-    color 0.22s cubic-bezier(0.4, 0, 0.2, 1),
-    box-shadow 0.22s cubic-bezier(0.4, 0, 0.2, 1);
-}
-@media (min-width: 48rem) {
-  .seg-item {
-    min-height: 0;
+/* ---------------------------------------------------------------------------
+   自建控件：下面这些组件**已从 daisyUI 换成本仓库自己的实现**
+   （转圈 / 状态点 / 复选框 / 单选 / 开关 / 多行输入 / 表格 / 侧栏导航 /
+    移动端底栏 / 弹窗 / 指标卡 / 成组按钮 / 下拉 / 输入框）。
+   组件清单见文件顶部 `@plugin "daisyui"` 的 `exclude`。
+
+   为什么不用 daisyUI 的：它按"整块组件"发 CSS —— 含我们用不到的尺寸档、
+   语义色变体和状态层（这两批合计约 58KB），而全站只有几十处用法、且都是
+   `<input>` / `<select>` / `<div>` 上的几个类名 ⇒ 自写一遍约 9KB。
+
+   ⚠⚠ **这些规则住在 `@layer components` 里，位置是精心选的**：
+   Tailwind 的层级顺序是 theme < base < components < utilities，
+   所以页面上的工具类（`w-full`、`max-w-sm`、`gap-2`、`z-30`、`md:hidden`、
+   `p-2`、`a-2`…）**永远能就地覆盖我们的默认值** —— 这正是 daisyUI 的效果
+   （它的组件住在 utilities 层的子层里）。
+   把这一节挪到分层之外就会反过来压掉那些工具类：dock 的 `z-30` 会失效、
+   弹窗的 `max-w-sm` 会被默认宽度顶掉。**别挪。**
+   （本文件里**未分层**的那几条品牌补丁 —— `.btn-primary`、玻璃面清单、
+   `.menu-active`、`.dock-active` —— 依旧稳压一切；两套东西分工不同，别混。）
+
+   ⚠ 另外：这一节里**不写**页面负责的属性（`width` 交 `w-full`、`max-width`
+   交 `max-w-*`、`color` 交 `text-*`），这也是上面那条层级的自然结果。
+   --------------------------------------------------------------------------- */
+@layer components {
+  /* ── 转圈 ─────────────────────────────────────────────────────────────────
+     daisyUI 那份是 SVG mask + SMIL（弧长会伸缩），这里退化成固定 1/4 弧旋转：
+     观感是同一个转圈，代价从 6KB 降到 300B 量级。 */
+  .loading {
+    display: inline-block;
+    flex-shrink: 0;
+    vertical-align: middle;
+    width: 1.5rem;
+    height: 1.5rem;
+    border: 3px solid color-mix(in oklab, currentColor 25%, transparent);
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: mcloud-spin 0.8s linear infinite;
   }
-}
-.seg-item:hover:not(:has(:disabled)) {
-  background-color: color-mix(in oklab, var(--color-base-100) 70%, transparent);
-}
-.seg-item:has(:checked) {
-  background-color: transparent;
-  background-image: var(--primary-gradient);
-  color: var(--color-primary-content);
-  font-weight: 500;
-  box-shadow: 0 4px 14px var(--primary-glow);
-}
-.seg-item:has(:focus-visible) {
-  outline: 2px solid var(--color-primary);
-  outline-offset: 1px;
-}
-.seg:has(:disabled) {
-  opacity: 0.6;
-}
-.seg:has(:disabled) .seg-item {
-  cursor: not-allowed;
+  .loading-sm {
+    width: 1.25rem;
+    height: 1.25rem;
+    border-width: 2.5px;
+  }
+  .loading-lg {
+    width: 1.75rem;
+    height: 1.75rem;
+    border-width: 3.5px;
+  }
+  @keyframes mcloud-spin {
+    to {
+      rotate: 360deg;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    /* 直接停住会剩一个缺口的圈（看着像坏掉），改成慢速转 */
+    .loading {
+      animation-duration: 2.4s;
+    }
+  }
+
+  /* ── 状态点（侧栏底部"后端连接"）──────────────────────────────────────────
+     daisyUI 那颗带 --depth 高光与投影，而本项目 `--depth: 0` 本来就把两者关掉了
+     ⇒ 这里不写，视觉一致。呼吸效果来自页面上的 `animate-pulse` 工具类。 */
+  .status {
+    display: inline-block;
+    flex-shrink: 0;
+    vertical-align: middle;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background-color: color-mix(in oklab, var(--color-base-content) 20%, transparent);
+  }
+  .status-success {
+    background-color: var(--color-success);
+  }
+  .status-error {
+    background-color: var(--color-error);
+  }
+  .status-neutral {
+    background-color: var(--color-neutral);
+  }
+
+  /* ── 复选框 ───────────────────────────────────────────────────────────────
+     勾沿用 daisyUI 的手法：`::before` 画一块整色、用 clip-path 剪成勾形、
+     再 rotate 45°（整色走 currentColor ⇒ 深色主题自动反色）。
+     选中态**不染主色**，与 daisyUI 默认一致（页面没写 checkbox-primary）。
+     ⚠ 底色刻意留透明：daisyUI 那份也是透明的（透出所在表面）。 */
+  .checkbox {
+    appearance: none;
+    display: inline-block;
+    position: relative;
+    flex-shrink: 0;
+    cursor: pointer;
+    vertical-align: middle;
+    width: 1.5rem;
+    height: 1.5rem;
+    padding: 0.25rem;
+    border: 1px solid color-mix(in oklab, var(--color-base-content) 20%, transparent);
+    border-radius: var(--radius-selector);
+    color: var(--color-base-content);
+  }
+  .checkbox::before {
+    content: "";
+    display: block;
+    width: 100%;
+    height: 100%;
+    rotate: 45deg;
+    opacity: 0;
+    background-color: currentColor;
+    clip-path: polygon(20% 100%, 20% 80%, 50% 80%, 50% 0, 70% 0, 70% 100%);
+    transition: opacity 0.1s;
+  }
+  .checkbox:checked::before {
+    opacity: 1;
+    /* 与 daisyUI 同一个微调：把旋转后的勾摆正 */
+    translate: 3.5% -7%;
+  }
+  .checkbox:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  .checkbox:disabled {
+    cursor: not-allowed;
+    opacity: 0.4;
+  }
+
+  /* ── 单选 ─────────────────────────────────────────────────────────────────
+     选中 = 内块填满（留白由 padding 决定），颜色走 currentColor
+     ⇒ 与 daisyUI 默认的"深色实心点"一致。
+     ⚠ 底色只在选中时铺 base-100（daisyUI 也是这么写的）：未选中要透出所在表面。 */
+  .radio {
+    appearance: none;
+    display: inline-block;
+    flex-shrink: 0;
+    cursor: pointer;
+    vertical-align: middle;
+    width: 1.5rem;
+    height: 1.5rem;
+    padding: 0.25rem;
+    border: 1px solid color-mix(in oklab, currentColor 20%, transparent);
+    border-radius: 50%;
+  }
+  .radio::before {
+    content: "";
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    opacity: 0;
+    background-color: currentColor;
+    transition: opacity 0.15s;
+  }
+  .radio:checked {
+    border-color: currentColor;
+    background-color: var(--color-base-100);
+  }
+  .radio:checked::before {
+    opacity: 1;
+  }
+  .radio:focus-visible {
+    outline: 2px solid;
+    outline-offset: 2px;
+  }
+  .radio:disabled {
+    cursor: not-allowed;
+    opacity: 0.4;
+  }
+  .radio-sm {
+    width: 1.25rem;
+    height: 1.25rem;
+    padding: 0.1875rem;
+  }
+
+  /* ── 开关 ─────────────────────────────────────────────────────────────────
+     几何沿用 daisyUI：宽 = 2×高，旋钮 = 高 − 2×(描边+内边距)；
+     颜色也沿用：关 = 50% 灰的旋钮 + 透明轨道；开 = base-100 轨道 + base-content
+     旋钮；`.toggle-primary` 开着时旋钮染主色。 */
+  .toggle {
+    --sz: 1.5rem;
+    --bw: 1px;
+    --gap: calc(var(--sz) * 0.125);
+    appearance: none;
+    display: inline-block;
+    position: relative;
+    flex-shrink: 0;
+    box-sizing: border-box;
+    cursor: pointer;
+    vertical-align: middle;
+    width: calc(var(--sz) * 2 - (var(--bw) + var(--gap)) * 2);
+    height: var(--sz);
+    border: var(--bw) solid currentColor;
+    border-radius: 999px;
+    color: color-mix(in oklab, var(--color-base-content) 50%, transparent);
+    transition:
+      color 0.3s,
+      background-color 0.3s;
+  }
+  .toggle::before {
+    content: "";
+    position: absolute;
+    top: var(--gap);
+    left: var(--gap);
+    width: calc(var(--sz) - (var(--bw) + var(--gap)) * 2);
+    height: calc(var(--sz) - (var(--bw) + var(--gap)) * 2);
+    border-radius: 50%;
+    background-color: currentColor;
+    transition: translate 0.2s;
+  }
+  .toggle:checked {
+    background-color: var(--color-base-100);
+    color: var(--color-base-content);
+  }
+  /* 位移距离 = 旋钮直径（轨道内宽 − 2×gap − 旋钮 = 旋钮） */
+  .toggle:checked::before {
+    translate: calc(var(--sz) - (var(--bw) + var(--gap)) * 2) 0;
+  }
+  .toggle-primary:checked {
+    color: var(--color-primary);
+  }
+  .toggle:focus-visible {
+    outline: 2px solid;
+    outline-offset: 2px;
+  }
+  .toggle:disabled {
+    cursor: not-allowed;
+    opacity: 0.3;
+  }
+  .toggle-sm {
+    --sz: 1.25rem;
+  }
+
+  /* ── 多行输入 ─────────────────────────────────────────────────────────────
+     焦点态的品牌描边 + 3px 光环由本文件 `.textarea:focus` 那条负责。
+     ⚠ 不写 line-height：daisyUI 那份没写，继承的是 preflight 的 1.5（21px），
+     自己写会把多行文字的行距压紧。 */
+  .textarea {
+    appearance: none;
+    min-height: 5rem;
+    padding-block: 0.5rem;
+    padding-inline: 0.75rem;
+    font-size: 0.875rem;
+    vertical-align: middle;
+    color: var(--color-base-content);
+    background-color: var(--color-base-100);
+    border: 1px solid color-mix(in oklab, var(--color-base-content) 20%, transparent);
+    border-radius: var(--radius-field);
+  }
+  .textarea::placeholder {
+    color: color-mix(in oklab, var(--color-base-content) 50%, transparent);
+  }
+  .textarea:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  /* ── 表格 ─────────────────────────────────────────────────────────────────
+     只保留结构（满宽 / 单元格间距 / 弱化表头 / 行分隔线）。
+     daisyUI 的 table-zebra / table-pin-rows / table-pin-cols / row-hover 全站没用。 */
+  .table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    border-radius: var(--radius-box);
+    text-align: left;
+    font-size: 0.875rem;
+  }
+  .table :where(th, td) {
+    vertical-align: middle;
+    padding-block: 0.75rem;
+    padding-inline: 1rem;
+  }
+  .table :where(thead, tfoot) {
+    white-space: nowrap;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: color-mix(in oklab, var(--color-base-content) 60%, transparent);
+  }
+  .table :where(thead tr :is(td, th), tbody tr:not(:last-child) :is(td, th)) {
+    border-bottom: 1px solid color-mix(in oklab, var(--color-base-content) 5%, transparent);
+  }
+  .table-sm :not(thead, tfoot) tr {
+    font-size: 0.75rem;
+  }
+  .table-sm :where(th, td) {
+    padding-block: 0.5rem;
+    padding-inline: 0.75rem;
+  }
+
+  /* ── menu：侧栏导航 ───────────────────────────────────────────────────────
+     结构是 `ul.menu > li > button`（见 app.tsx 的 navLink）。
+     宽度/内边距/间距由页面工具类给（w-full / p-3 pt-0 / gap-1），这里只管
+     条目本身的排版。激活态的主色渐变在下面「品牌化补丁」一节（未分层）。 */
+  /* ⚠ `width: fit-content` + `flex-flow: column wrap` 是 daisyUI 的原行为，别省：
+     没有 w-full 的菜单是**收缩到内容宽**的；矮视口下条目会**横向折列**而不是溢出。
+     页面上的 `w-full` 工具类照旧覆盖宽度（本层低于 utilities）。 */
+  .menu {
+    display: flex;
+    flex-flow: column wrap;
+    width: fit-content;
+    font-size: 0.875rem;
+  }
+  .menu li {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    flex-shrink: 0; /* 条目多时不许被压扁 —— 撑住高度，让外层去滚 */
+    position: relative;
+  }
+  .menu li > button {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(auto, max-content) auto max-content;
+    align-content: flex-start;
+    align-items: center;
+    gap: 0.5rem;
+    padding-block: 0.375rem;
+    padding-inline: 0.75rem;
+    border-radius: var(--radius-field);
+    text-align: start;
+    transition:
+      color 0.2s,
+      background-color 0.2s,
+      box-shadow 0.2s;
+  }
+  /* ⚠ 光标只在悬停时变手型 —— daisyUI 就是这么写的（静止态是默认箭头） */
+  .menu li > button:hover {
+    cursor: pointer;
+    background-color: color-mix(in oklab, var(--color-base-content) 10%, transparent);
+  }
+
+  /* ── dock：移动端底部导航 ─────────────────────────────────────────────────
+     底色/描边/层级交给页面（`bg-base-100 border-t border-base-300 z-30`）
+     和玻璃面清单一节 —— 这里只写布局与激活指示点。 */
+  .dock {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-around;
+    align-items: center;
+    width: 100%;
+    height: calc(4rem + env(safe-area-inset-bottom));
+    padding: 0.5rem;
+    padding-bottom: env(safe-area-inset-bottom);
+    position: fixed;
+    inset-inline: 0;
+    bottom: 0;
+  }
+  .dock-md {
+    height: calc(4rem + env(safe-area-inset-bottom));
+  }
+  .dock > button {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 1px;
+    flex: 0 1 100%;
+    max-width: 8rem;
+    height: 100%;
+    margin-bottom: 0.5rem;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-box);
+    background-color: transparent;
+    color: inherit;
+    cursor: pointer;
+    position: relative;
+  }
+  @media (hover: hover) {
+    .dock > button:hover {
+      opacity: 0.8;
+    }
+  }
+  .dock > button::after {
+    content: "";
+    position: absolute;
+    bottom: 0.2rem;
+    width: 1.5rem;
+    height: 0.25rem;
+    border-radius: 999px;
+    background-color: transparent;
+    transition:
+      background-color 0.1s ease-out,
+      width 0.1s ease-out;
+  }
+  .dock > button.dock-active::after,
+  .dock > button[aria-current]:not([aria-current="false"])::after {
+    background-color: currentColor;
+    width: 2.5rem;
+  }
+  .dock-label {
+    font-size: 0.6875rem;
+  }
+
+  /* ── modal：弹窗 ──────────────────────────────────────────────────────────
+     用原生 `<dialog>`：`showModal()` 负责顶层与 ESC，这里负责外观。
+     ⚠ 不复刻 daisyUI 的 modal-top/bottom/start/end/middle 朝向变体（全站没用）。
+     ⚠ `max-width` 刻意**不写**：宽度档位由 `Dialog` 的 `max-w-sm/md/lg` 工具类给，
+       写在这里会把它顶掉（本层低于 utilities，写了也压不住，索性不写）。 */
+  .modal {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    color: inherit;
+    background-color: transparent;
+    overflow: clip;
+    overscroll-behavior: contain;
+    z-index: 999;
+    visibility: hidden;
+    pointer-events: none;
+    opacity: 0;
+    transition:
+      visibility 0.3s allow-discrete,
+      background-color 0.3s ease-out,
+      opacity 0.1s ease-out;
+  }
+  .modal::backdrop {
+    display: none;
+  }
+  .modal[open] {
+    visibility: visible;
+    pointer-events: auto;
+    opacity: 1;
+    background-color: oklch(0 0 0 / 0.4);
+  }
+  .modal-box {
+    grid-row-start: 1;
+    grid-column-start: 1;
+    width: 91.6667%;
+    max-height: 100vh;
+    padding: 1.5rem;
+    border-radius: var(--radius-box);
+    background-color: var(--color-base-100);
+    opacity: 0;
+    scale: 0.95;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    transition:
+      translate 0.3s ease-out,
+      scale 0.3s ease-out,
+      opacity 0.2s ease-out 50ms;
+  }
+  .modal[open] > .modal-box {
+    opacity: 1;
+    translate: 0;
+    scale: 1;
+  }
+  .modal-backdrop {
+    grid-row-start: 1;
+    grid-column-start: 1;
+    place-self: stretch stretch;
+    display: grid;
+    color: transparent;
+    z-index: -1;
+  }
+  .modal-backdrop button {
+    cursor: pointer;
+  }
+  /* 页面若自带 items-center / justify-between / gap-2，工具类会盖掉这里 */
+  .modal-action {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 1.5rem;
+  }
+  /* ⚠ 弹窗打开时**锁住页面滚动** —— daisyUI 那套是靠同一个变量开关实现的，
+     少了这条：遮罩后面还能滚（手机上很明显），而且 `:root` 的背景绘制
+     会从"锁住"分支掉到另一支（实测差 1 个色阶）。 */
+  :root:has(.modal[open]) {
+    --page-scroll-lock: ;
+  }
+
+  /* ── stats / stat：指标卡 ─────────────────────────────────────────────────
+     `.stats` 的玻璃底由玻璃面清单给；这里只管栅格与分隔线。
+     竖排是基础态，横排是 `md:stats-horizontal`（≥48rem）。 */
+  .stats {
+    position: relative;
+    display: inline-grid;
+    grid-auto-flow: column;
+    border-radius: var(--radius-box);
+    overflow-x: auto;
+  }
+  .stats-vertical {
+    grid-auto-flow: row;
+    overflow-y: auto;
+  }
+  .stat {
+    display: inline-grid;
+    grid-template-columns: repeat(1, 1fr);
+    column-gap: 1rem;
+    width: 100%;
+    padding-block: 1rem;
+    padding-inline: 1.5rem;
+  }
+  .stat:not(:last-child) {
+    border-inline-end: 1px dashed color-mix(in oklab, currentColor 10%, transparent);
+  }
+  .stats-vertical .stat:not(:last-child) {
+    border-inline-end: none;
+    border-block-end: 1px dashed color-mix(in oklab, currentColor 10%, transparent);
+  }
+  @media (min-width: 48rem) {
+    .md\:stats-horizontal {
+      grid-auto-flow: column;
+      overflow-x: auto;
+    }
+    .md\:stats-horizontal .stat:not(:last-child) {
+      border-inline-end: 1px dashed color-mix(in oklab, currentColor 10%, transparent);
+      border-block-end: none;
+    }
+  }
+  .stat-title,
+  .stat-desc {
+    grid-column-start: 1;
+    white-space: nowrap;
+    color: color-mix(in oklab, var(--color-base-content) 60%, transparent);
+    font-size: 0.75rem;
+  }
+  /* 字号会被页面上的 text-2xl 盖掉（本层低于 utilities） */
+  .stat-value {
+    grid-column-start: 1;
+    white-space: nowrap;
+    font-size: 2rem;
+    font-weight: 800;
+  }
+
+  /* ── join：成组按钮 ───────────────────────────────────────────────────────
+     ⚠ `--join-ss/se/es/ee` 是 **daisyUI `.btn` 读的变量名**（它按这四个变量取
+     圆角）。既然 `.btn` 还是 daisyUI 的，这套变量名就得照旧，不能改名。 */
+  .join {
+    --join-ss: 0;
+    --join-se: 0;
+    --join-es: 0;
+    --join-ee: 0;
+    display: inline-flex;
+    align-items: stretch;
+  }
+  .join > :first-child {
+    --join-ss: var(--radius-field);
+    --join-es: var(--radius-field);
+  }
+  .join > :last-child {
+    --join-se: var(--radius-field);
+    --join-ee: var(--radius-field);
+  }
+  /* 聚焦/悬停的那一项要盖住邻项的描边 */
+  .join > :focus-visible {
+    z-index: 2;
+  }
+  @media (hover: hover) {
+    .join > :hover {
+      z-index: 1;
+    }
+  }
+  .join-item {
+    border-style: solid;
+    border-width: var(--border, 1px);
+    border-start-start-radius: var(--join-ss, 0);
+    border-start-end-radius: var(--join-se, 0);
+    border-end-end-radius: var(--join-ee, 0);
+    border-end-start-radius: var(--join-es, 0);
+  }
+  .join-item:not(:first-child) {
+    margin-inline-start: calc(var(--border, 1px) * -1);
+  }
+
+  /* ── select：下拉 ─────────────────────────────────────────────────────────
+     右侧那个小三角是两条 45° 渐变画出来的（daisyUI 的同一个手法）。 */
+  .select {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    position: relative;
+    width: clamp(3rem, 20rem, 100%);
+    height: 2.5rem;
+    padding-inline: 0.75rem 1.75rem;
+    font-size: 0.875rem;
+    color: var(--color-base-content);
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    vertical-align: middle;
+    touch-action: manipulation;
+    overflow: hidden;
+    border: 1px solid color-mix(in oklab, var(--color-base-content) 20%, transparent);
+    border-radius: var(--radius-field);
+    background-color: var(--color-base-100);
+    background-image:
+      linear-gradient(45deg, transparent 50%, currentColor 50%),
+      linear-gradient(135deg, currentColor 50%, transparent 50%);
+    background-position:
+      calc(100% - 20px) calc(1px + 50%),
+      calc(100% - 16.1px) calc(1px + 50%);
+    background-repeat: no-repeat;
+    background-size:
+      4px 4px,
+      4px 4px;
+  }
+  .select-sm {
+    height: 2rem;
+    font-size: 0.75rem;
+  }
+  /* 新版 Chrome 的"可定制 select"。daisyUI 原本就 opt-in 了，这里跟着开 ——
+     不开的话下拉弹层会退回原生渲染，弹层样式与改前不一致。
+     ⚠ 必须同时 `::picker-icon{display:none}`：否则 Chrome 会在右边再画一个
+       原生箭头，和上面那个渐变三角叠成两个（像素比对抓到的就是这个）。 */
+  @supports (appearance: base-select) {
+    .select,
+    .select::picker(select) {
+      appearance: base-select;
+    }
+    .select::picker-icon {
+      display: none;
+    }
+    .select::picker(select) {
+      color: inherit;
+      background-color: inherit;
+      border: 1px solid var(--color-base-200);
+      border-radius: var(--radius-box);
+      max-height: min(24rem, 70dvh);
+      margin-block: 0.5rem;
+      margin-inline: 0.5rem;
+      padding: 0.5rem;
+      translate: -0.5rem;
+      box-shadow:
+        0 20px 25px -5px rgb(0 0 0 / 0.1),
+        0 8px 10px -6px rgb(0 0 0 / 0.1);
+    }
+    .select option:not(:disabled):hover,
+    .select option:not(:disabled):focus-visible {
+      background-color: color-mix(in oklab, var(--color-base-content) 10%, transparent);
+      cursor: pointer;
+    }
+  }
+  .select:disabled,
+  .select[disabled] {
+    cursor: not-allowed;
+    color: color-mix(in oklab, var(--color-base-content) 40%, transparent);
+    border-color: var(--color-base-200);
+    background-color: var(--color-base-200);
+  }
+
+  /* ── input：单行输入框 ────────────────────────────────────────────────────
+     焦点态的品牌描边 + 3px 光环同样由 `.input:focus` 那条未分层规则负责。
+     ⚠ 只做"直接挂在 `<input>` 上"的形态；`<label class="input">` 包裹式全站没用。 */
+  .input {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    position: relative;
+    width: clamp(3rem, 20rem, 100%);
+    height: 2.5rem;
+    padding-inline: 0.75rem;
+    font-size: 0.875rem;
+    color: var(--color-base-content);
+    white-space: nowrap;
+    vertical-align: middle;
+    touch-action: manipulation;
+    cursor: text;
+    overflow: clip;
+    border: 1px solid color-mix(in oklab, var(--color-base-content) 20%, transparent);
+    border-radius: var(--radius-field);
+    background-color: var(--color-base-100);
+  }
+  .input-sm {
+    height: 2rem;
+    font-size: 0.75rem;
+  }
+  .input::placeholder {
+    color: var(--color-base-content);
+    opacity: 0.5;
+  }
+  .input:disabled,
+  .input[disabled] {
+    cursor: not-allowed;
+    color: color-mix(in oklab, var(--color-base-content) 40%, transparent);
+    border-color: var(--color-base-200);
+    background-color: var(--color-base-200);
+  }
+  /* ══ 第三批：drawer / navbar / toast / badge / card / alert / label / fieldset ══
+     到此为止，daisyUI 只剩 `btn` 与那几个 base（rootcolor/svg/scrollbar 等）
+     还是它的实现 —— 见文件顶部 exclude 的注释。 */
+
+  /* ── badge：小徽章 ────────────────────────────────────────────────────────
+     ⚠ 这一批里 badge 是本批**性价比最低**的一个（省 1.8KB，自写要 1.6KB）——
+       所以这里刻意写薄：不设中转变量，就地用 `var(--badge-color/-fg, 兜底)`，
+       语义色变体只写「改哪两个变量」。 */
+  .badge {
+    --size: 1.5rem;
+    display: inline-flex;
+    flex-shrink: 0;
+    justify-content: center;
+    align-items: center;
+    gap: 0.5rem;
+    width: fit-content;
+    height: var(--size);
+    padding-inline: calc(var(--size) / 2 - var(--border, 1px));
+    font-size: 0.875rem;
+    vertical-align: middle;
+    color: var(--badge-fg, var(--color-base-content));
+    background-color: var(--badge-color, var(--color-base-100));
+    border: var(--border, 1px) solid var(--badge-color, var(--color-base-200));
+    border-radius: var(--radius-selector);
+  }
+  .badge-sm {
+    --size: 1.25rem;
+    font-size: 0.75rem;
+  }
+  /* soft：8% 语义色压在不透明 base-100 上（对比度就是在那上面量的，别改成透明底） */
+  .badge-soft {
+    color: var(--badge-color, var(--color-base-content));
+    background-color: color-mix(in oklab, var(--badge-color, var(--color-base-content)) 8%, var(--color-base-100));
+    border-color: color-mix(in oklab, var(--badge-color, var(--color-base-content)) 10%, var(--color-base-100));
+  }
+  .badge-ghost {
+    color: var(--color-base-content);
+    background-color: var(--color-base-200);
+    border-color: var(--color-base-200);
+  }
+  .badge-primary {
+    --badge-color: var(--color-primary);
+    --badge-fg: var(--color-primary-content);
+  }
+  .badge-info {
+    --badge-color: var(--color-info);
+    --badge-fg: var(--color-info-content);
+  }
+  .badge-success {
+    --badge-color: var(--color-success);
+    --badge-fg: var(--color-success-content);
+  }
+  .badge-warning {
+    --badge-color: var(--color-warning);
+    --badge-fg: var(--color-warning-content);
+  }
+  .badge-error {
+    --badge-color: var(--color-error);
+    --badge-fg: var(--color-error-content);
+  }
+
+  /* ── alert：提示条 ────────────────────────────────────────────────────────
+     栅格：一条是「图标 + 文本」，两条及以上是「图标 + 可换行文本」。 */
+  .alert {
+    --alert-border-color: var(--color-base-200);
+    display: grid;
+    grid-template-columns: auto;
+    grid-auto-flow: column;
+    justify-content: start;
+    place-items: center start;
+    gap: 1rem;
+    padding-block: 0.75rem;
+    padding-inline: 1rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    text-align: start;
+    color: var(--color-base-content);
+    background-color: var(--alert-color, var(--color-base-200));
+    border: var(--border, 1px) solid var(--alert-border-color, var(--color-base-200));
+    border-radius: var(--radius-box);
+  }
+  .alert:has(> :nth-child(2)) {
+    grid-template-columns: auto minmax(auto, 1fr);
+  }
+  .alert-info {
+    color: var(--color-info-content);
+    --alert-border-color: var(--color-info);
+    --alert-color: var(--color-info);
+  }
+  .alert-success {
+    color: var(--color-success-content);
+    --alert-border-color: var(--color-success);
+    --alert-color: var(--color-success);
+  }
+  .alert-warning {
+    color: var(--color-warning-content);
+    --alert-border-color: var(--color-warning);
+    --alert-color: var(--color-warning);
+  }
+  .alert-error {
+    color: var(--color-error-content);
+    --alert-border-color: var(--color-error);
+    --alert-color: var(--color-error);
+  }
+  .alert-soft {
+    color: var(--alert-color, var(--color-base-content));
+    background: color-mix(in oklab, var(--alert-color, var(--color-base-content)) 8%, var(--color-base-100));
+    --alert-border-color: color-mix(in oklab, var(--alert-color, var(--color-base-content)) 10%, var(--color-base-100));
+  }
+
+  /* ── card：卡片 ───────────────────────────────────────────────────────────
+     只用得上基础 + body/title/actions/border 四件套；daisyUI 的
+     image-full / card-side / xs~xl 尺寸档全站没用，不再生成。
+     ⚠ 卡片里没有 checkbox/radio（查过），所以那套 focus/checked 变体也不写。 */
+  .card {
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    border-radius: var(--radius-box);
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+    transition: outline 0.2s ease-in-out;
+  }
+  .card-body {
+    display: flex;
+    flex-direction: column;
+    flex: auto;
+    gap: 0.5rem;
+    padding: var(--card-p, 1.5rem);
+    font-size: var(--card-fs, 0.875rem);
+  }
+  .card-body p {
+    flex-grow: 1;
+  }
+  .card-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: var(--cardtitle-fs, 1.125rem);
+    font-weight: 600;
+  }
+  .card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+  .card-border {
+    border: var(--border, 1px) solid var(--color-base-200);
+  }
+
+  /* ── navbar：顶栏 ─────────────────────────────────────────────────────────
+     左右两半各占 50%，中间留白靠两边自己撑。 */
+  .navbar {
+    display: flex;
+    align-items: center;
+    position: relative;
+    width: 100%;
+    min-height: 4rem;
+    padding: 0.5rem;
+  }
+  .navbar-start {
+    display: inline-flex;
+    justify-content: flex-start;
+    align-items: center;
+    width: 50%;
+  }
+  .navbar-end {
+    display: inline-flex;
+    justify-content: flex-end;
+    align-items: center;
+    width: 50%;
+  }
+
+  /* ── toast：浮层提示容器 ─────────────────────────────────────────────────
+     只做 toast-end（右上/右下）与 toast-top 两个 modifier —— 全站只用这两个。 */
+  .toast {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    width: max-content;
+    max-width: calc(100vw - 2rem);
+    position: fixed;
+    inset-inline: auto 1rem;
+    top: auto;
+    bottom: 1rem;
+    translate: var(--toast-x, 0) var(--toast-y, 0);
+    background-color: transparent;
+  }
+  .toast-end {
+    --toast-x: 0;
+    inset-inline: auto 1rem;
+  }
+  .toast-top {
+    --toast-y: 0;
+    top: 1rem;
+    bottom: auto;
+  }
+
+  /* ── label / fieldset：表单外壳 ───────────────────────────────────────────
+     ⚠ 只做「直接挂 class」的形态；daisyUI 的 `.label:is(.input>*, .select>*)`
+       那套是给 `<label class="input">` 包裹式输入框用的，全站没用。 */
+  .label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    white-space: nowrap;
+    color: color-mix(in oklab, currentcolor 60%, transparent);
+  }
+  .label:has(input) {
+    cursor: pointer;
+  }
+  .fieldset {
+    display: grid;
+    grid-template-columns: 1fr;
+    grid-auto-rows: max-content;
+    gap: 0.375rem;
+    padding-block: 0.25rem;
+    font-size: 0.75rem;
+  }
+  .fieldset-legend {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: -0.25rem;
+    margin-inline-end: auto;
+    padding-block: 0.5rem;
+    font-weight: 600;
+    color: var(--color-base-content);
+  }
+
+  /* ── drawer：抽屉 / 大屏常驻侧栏 ─────────────────────────────────────────
+     三层结构照抄设计规范 §4.3（不要改顺序）：
+       <div class="drawer lg:drawer-open">
+         <input class="drawer-toggle">   ← 显隐全靠这个 checkbox（无 JS）
+         <div class="drawer-content">…</div>
+         <div class="drawer-side"><label class="drawer-overlay">…</label><面板/></div>
+       </div>
+
+     ⚠ `lg:drawer-open` 是「≥64rem 常驻分栏」，**不是**「当前展开」：
+       它把 drawer-side 从 fixed 浮层改成 sticky 常驻列。JS 里那个
+       `drawerOpen` 控制的始终是 checkbox，两者互不干扰。
+
+     ⚠ `:root:has(.drawer-toggle:checked)` 那条是**页面滚动锁**：它把
+       `--page-scroll-lock` 置空，base 里的 `--page-overflow` 于是算出
+       `overflow: hidden`（关着时那串值非法 ⇒ 声明被丢弃 ⇒ 不锁）。 */
+  .drawer {
+    display: grid;
+    grid-auto-columns: max-content auto;
+    width: 100%;
+    position: relative;
+  }
+  .drawer-content {
+    grid-row-start: 1;
+    grid-column-start: 2;
+    min-width: 0;
+  }
+  .drawer-side {
+    display: grid;
+    grid-template-rows: repeat(1, minmax(0, 1fr));
+    grid-template-columns: repeat(1, minmax(0, 1fr));
+    grid-row-start: 1;
+    grid-column-start: 1;
+    place-items: flex-start start;
+    position: fixed;
+    top: 0;
+    inset-inline-start: 0;
+    width: 100%;
+    height: 100dvh;
+    z-index: 10;
+    overflow: hidden;
+    overscroll-behavior: contain;
+    background-color: transparent;
+    pointer-events: none;
+    visibility: hidden;
+    opacity: 0;
+    transition:
+      opacity 0.2s ease-out 0.1s allow-discrete,
+      visibility 0.3s ease-out 0.1s allow-discrete;
+  }
+  .drawer-side > * {
+    grid-row-start: 1;
+    grid-column-start: 1;
+  }
+  .drawer-side > .drawer-overlay {
+    cursor: pointer;
+    /* 与 daisyUI 同一个写法：oklch 与 color-mix(oklab) 在这些不透明度上
+       计算值不同（lab vs oklab），合成时会出现 ±1 的取整差 —— 用它的原式。 */
+    background-color: oklch(0 0 0 / 0.4);
+    place-self: stretch stretch;
+    position: sticky;
+    top: 0;
+  }
+  .drawer-side > :not(.drawer-overlay) {
+    will-change: transform;
+    translate: -100%;
+    transition:
+      translate 0.3s ease-out,
+      width 0.2s ease-out;
+  }
+  .drawer-toggle {
+    appearance: none;
+    opacity: 0;
+    width: 0;
+    height: 0;
+    position: fixed;
+  }
+  .drawer-toggle:checked ~ .drawer-side {
+    pointer-events: auto;
+    visibility: visible;
+    opacity: 1;
+    overflow-y: auto;
+  }
+  /* 面板要滚动，滚动条也跟着上色（`--page-has-backdrop` 由 base 里的
+     rootcolor 规则提供；本主题下它等于 1 ⇒ 用 40% 黑做轨道） */
+  :where(.drawer-toggle:checked ~ .drawer-side) {
+    scrollbar-color: color-mix(in oklch, currentcolor 35%, transparent)
+      oklch(0 0 0 / calc(var(--page-has-backdrop, 0) * 0.4));
+  }
+  .drawer-toggle:checked ~ .drawer-side > :not(.drawer-overlay) {
+    translate: 0%;
+  }
+  :root:has(.drawer-toggle:checked) {
+    --page-scroll-lock: ;
+  }
+  /* 键盘用户：焦点落在 checkbox 时，把抽屉按钮也描一圈（它才是"看得见"的那个） */
+  .drawer-toggle:focus-visible ~ .drawer-content label.drawer-button {
+    outline: 2px solid;
+    outline-offset: 2px;
+  }
+  @media (min-width: 64rem) {
+    .lg\:drawer-open > .drawer-toggle {
+      display: none;
+    }
+    .lg\:drawer-open > .drawer-toggle ~ .drawer-side {
+      pointer-events: auto;
+      visibility: visible;
+      overscroll-behavior: auto;
+      opacity: 1;
+      width: auto;
+      display: block;
+      position: sticky;
+      overflow-y: auto;
+    }
+    .lg\:drawer-open > .drawer-toggle ~ .drawer-side > .drawer-overlay {
+      cursor: default;
+      background-color: transparent;
+    }
+    .lg\:drawer-open > .drawer-toggle ~ .drawer-side > :not(.drawer-overlay) {
+      translate: 0%;
+    }
+    .lg\:drawer-open > .drawer-toggle:checked ~ .drawer-side {
+      pointer-events: auto;
+      visibility: visible;
+    }
+  }
+
+  /* ══ 第四批：btn ══════════════════════════════════════════════════════════
+     全站用得最多的组件（159 处 / 14 个文件），但**只用到 8 个类**：
+       btn / btn-sm / btn-xs / btn-soft / btn-ghost / btn-primary / btn-error / btn-square
+     所以 daisyUI 那份里的 outline / dash / link / neutral / info / success /
+     warning、circle / wide / block、lg / xl 尺寸、checkbox-radio 形态，以及
+     `.btn-disabled`、`.btn-active`、`.btn-link`、`.prose a.btn` 这些入口，全都不再生成。
+
+     ⚠⚠ `--btn-*` 这套变量名**必须照抄**，别改名也别内联掉：
+        本文件里**未分层的品牌补丁**（`.btn-primary` 的渐变 + 光晕）就是压在这些
+        变量算出来的值上面 —— 改名字等于把补丁的生效面给换了。
+
+     ⚠⚠ 这里**没有** daisyUI 的 `--depth` 浮雕机制（`--btn-shadow` 内投影、
+        `--btn-inset` 内高光、`text-shadow` 高光）。理由：本项目主题里
+        `--depth` 被**显式设成 0**（见文件顶部主题块，注释写着"扁平化"），
+        于是那三样算出来全是**全透明**、各状态里也只是把透明值重算一遍 ——
+        实测这一层复制占本组件近一半体积（7647B → 压平后见下）。
+        代价写在明处：**若哪天把 `--depth` 调大于 0，按钮不会长出浮雕**，
+        要恢复就把这五行按 daisyUI 的公式补回来：
+          --btn-border: color-mix(in oklab, var(--btn-color,var(--color-base-200)), #000 calc(var(--depth) * 5%));
+          --btn-shadow: 0 3px 2px -2px color-mix(in oklab, var(--btn-bg) calc(var(--depth) * 30%), transparent),
+                        0 4px 3px -2px color-mix(in oklab, var(--btn-bg) calc(var(--depth) * 30%), transparent);
+          --btn-inset: 0 .5px 0 .5px oklch(100% 0 0 / calc(var(--depth) * 6%));
+          box-shadow: var(--btn-inset) inset, var(--btn-shadow);
+          text-shadow: 0 .5px oklch(100% 0 0 / calc(var(--depth) * .15));
+        （各状态里同样要按 daisyUI 的写法重算一遍。）
+     ⚠ `--btn-border` 之所以留着 `color-mix` 的写法：`color-mix(..., #000 0%)`
+        与直接写底色在**取整上可能差 1 个色阶**，1px 描边会被逐像素比对抓到。 */
+  .btn {
+    --size: calc(var(--size-field, 0.25rem) * 10);
+    --btn-p: 1rem;
+    --btn-fg: var(--color-base-content);
+    --btn-bg: var(--btn-color, var(--color-base-200));
+    --btn-border: color-mix(in oklab, var(--btn-color, var(--color-base-200)), #000 calc(var(--depth) * 5%));
+    display: inline-flex;
+    flex-shrink: 0;
+    flex-wrap: nowrap;
+    justify-content: center;
+    align-items: center;
+    gap: 0.375rem;
+    height: var(--size);
+    padding-inline: var(--btn-p);
+    font-size: var(--fontsize, 0.875rem);
+    font-weight: 600;
+    text-align: center;
+    vertical-align: middle;
+    user-select: none;
+    cursor: pointer;
+    touch-action: manipulation;
+    outline-offset: 2px;
+    outline-color: var(--btn-color, var(--color-base-content));
+    border: var(--border, 1px) solid var(--btn-border);
+    border-start-start-radius: var(--join-ss, var(--radius-field));
+    border-start-end-radius: var(--join-se, var(--radius-field));
+    border-end-end-radius: var(--join-ee, var(--radius-field));
+    border-end-start-radius: var(--join-es, var(--radius-field));
+    background-color: var(--btn-bg);
+    color: var(--btn-fg);
+    /* ⚠ 这两行看着是死代码（本主题 `--noise: 0` ⇒ 噪声层尺寸为 0、永远不可见），
+       但**删不得**：实测删掉后 Chrome 对这个按钮的光栅化会变，深色主题下
+       文字的次像素抗锯齿会差 1 个色阶（逐像素比对：60 像素 vs 1 像素）。
+       换句话说：**0 尺寸的背景层也会影响栅格化**。补回这两行只花 27B。 */
+    background-image: none, var(--fx-noise);
+    background-size: auto, calc(var(--noise, 0) * 100%);
+    transition-property: color, background-color, border-color, box-shadow, transform;
+    transition-duration: 0.2s;
+    transition-timing-function: cubic-bezier(0, 0, 0.2, 1);
+  }
+  /* 尺寸档：只留 xs / sm（默认档 = 上面的基础值） */
+  .btn-xs {
+    --fontsize: 0.6875rem;
+    --btn-p: 0.5rem;
+    --size: calc(var(--size-field, 0.25rem) * 6);
+  }
+  .btn-sm {
+    --fontsize: 0.75rem;
+    --btn-p: 0.75rem;
+    --size: calc(var(--size-field, 0.25rem) * 8);
+  }
+  .btn-square {
+    width: var(--size);
+    height: var(--size);
+    padding-inline: 0;
+  }
+  /* 幽灵：无底无框，文字走语义色（无变体时 = 正文色） */
+  .btn-ghost {
+    --btn-bg: transparent;
+    --btn-border: transparent;
+    color: var(--btn-color, var(--color-base-content));
+  }
+  /* 柔和：8% 语义色底 + 10% 语义色框，都压在不透明 base-100 上 */
+  .btn-soft {
+    --btn-bg: color-mix(in oklab, var(--btn-color, var(--color-base-content)) 8%, var(--color-base-100));
+    --btn-border: color-mix(in oklab, var(--btn-color, var(--color-base-content)) 10%, var(--color-base-100));
+    color: var(--btn-color, var(--color-base-content));
+  }
+  /* 语义色：只声明 --btn-color / --btn-fg，其余由上面几条推导 */
+  .btn-primary {
+    --btn-color: var(--color-primary);
+    --btn-fg: var(--color-primary-content);
+  }
+  .btn-error {
+    --btn-color: var(--color-error);
+    --btn-fg: var(--color-error-content);
+  }
+  /* 悬停：底色压暗 7%（明暗切换时描边跟着底色走，否则会露一圈更亮的边） */
+  @media (hover: hover) {
+    .btn:hover {
+      --btn-bg: color-mix(in oklab, var(--btn-color, var(--color-base-200)), #000 7%);
+      --btn-border: var(--btn-bg);
+      color: var(--btn-fg);
+    }
+  }
+  /* 按下：压暗 5% + 下沉 0.5px（aria-pressed / aria-current 的"选中态"不算按下） */
+  /* ⚠ 只挡 `aria-pressed`：`.btn` 上全站没有 `.btn-active`/`aria-checked`，
+       而 `aria-current` 只出现在 menu / dock 的条目上（它们不走这条规则）。 */
+  .btn:active:not([aria-pressed='true']) {
+    --btn-bg: color-mix(in oklab, var(--btn-color, var(--color-base-200)), #000 5%);
+    --btn-border: var(--btn-bg);
+    color: var(--btn-fg, var(--color-base-content));
+    translate: 0 0.5px;
+  }
+  /* 选中态（aria-pressed / aria-checked / aria-current）：与按下同色，但不位移 */
+  .btn[aria-pressed='true'] {
+    --btn-bg: color-mix(in oklab, var(--btn-color, var(--color-base-200)), #000 5%);
+    --btn-border: var(--btn-bg);
+    color: var(--btn-fg, var(--color-base-content));
+    isolation: isolate;
+  }
+  /* 键盘焦点：2px 实线描边；同时把底色拉回基础档（键盘 + 悬停叠加时不再加深） */
+  /* 键盘焦点：2px 实线描边 + 底色拉回基础档（键盘与悬停叠加时不再加深）。
+     ⚠ 没有再排除 `[type=radio]`/`[type=checkbox]`：全站没有那种形态的按钮。 */
+  .btn:focus-visible,
+  .btn:has(:focus-visible) {
+    --btn-bg: var(--btn-color, var(--color-base-200));
+    --btn-border: color-mix(in oklab, var(--btn-bg), #000 calc(var(--depth) * 5%));
+    color: var(--btn-fg, var(--color-base-content));
+    isolation: isolate;
+    outline-width: 2px;
+    outline-style: solid;
+  }
+  /* 禁用：文字 20% 灰、底色 10% 灰（幽灵按钮不铺底） */
+  .btn:is(:disabled, [disabled], [aria-disabled='true']) {
+    pointer-events: none;
+    color: color-mix(in oklch, var(--color-base-content) 20%, transparent);
+    --btn-bg: transparent;
+    --btn-border: transparent;
+  }
+  .btn:is(:disabled, [disabled], [aria-disabled='true']):not(.btn-ghost) {
+    background-color: color-mix(in oklab, var(--color-base-content) 10%, transparent);
+  }
+
 }
 
 /* 移动端细则（组件指南 §7.3）：底部安全区 + 抽屉独立滚动。 */

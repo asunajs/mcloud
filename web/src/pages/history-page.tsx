@@ -174,7 +174,7 @@ export const HistoryPage = (props: HistoryPageProps) => {
 
       {state.value === 'loading' ? (
         <div class="flex justify-center py-16">
-          <span class="loading loading-spinner loading-lg text-primary" />
+          <span class="loading loading-lg text-primary" />
         </div>
       ) : null}
 

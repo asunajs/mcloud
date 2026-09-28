@@ -491,7 +491,7 @@ export const AccountsPage = () => {
       {/* ── 已登录账号 ─────────────────────────────────────────────── */}
       {state.value === 'loading' ? (
         <div class="flex justify-center py-10">
-          <span class="loading loading-spinner loading-lg text-primary" />
+          <span class="loading loading-lg text-primary" />
         </div>
       ) : null}
 
@@ -585,8 +585,13 @@ export const AccountsPage = () => {
             </div>
           )}
 
-          {/* 登录方式 */}
-          <div role="tablist" class="tabs tabs-box">
+          {/* 登录方式。
+              ⚠ 用 `join` + `btn` 而**不是** daisyUI 的 `tabs` / `tabs-box`：
+              后者会把整个 tab 组件（含四套朝向变体与带框那套，实测 14.5KB）
+              拖进产物，而全项目只有这一处是"选一个"的语义。
+              写法与上面「客户端形态」保持一致 —— 同一页里两个同级选择器，
+              不该一个用 tabs、一个用 join。 */}
+          <div class="join">
             {(
               [
                 ['qr', '扫码'],
@@ -597,8 +602,8 @@ export const AccountsPage = () => {
             ).map(([id, label]) => (
               <button
                 type="button"
-                role="tab"
-                class={`tab min-h-11 md:min-h-0 ${method.value === id ? 'tab-active' : ''}`}
+                aria-pressed={method.value === id}
+                class={`btn join-item btn-sm min-h-11 md:min-h-0 ${method.value === id ? 'btn-primary' : 'btn-soft'}`}
                 onClick={() => onMethodChange(id)}
               >
                 {label}

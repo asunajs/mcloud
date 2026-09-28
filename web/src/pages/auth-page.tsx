@@ -210,7 +210,7 @@ export const AuthPage = (props: AuthPageProps) => {
               onClick={() => void submit()}
             >
               {busy.value ? (
-                <span class="loading loading-spinner loading-sm" />
+                <span class="loading loading-sm" />
               ) : null}
               {isSetup ? '创建并进入' : '登录'}
             </button>

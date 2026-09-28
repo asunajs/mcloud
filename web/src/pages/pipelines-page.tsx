@@ -657,10 +657,10 @@ export const PipelinesPage = () => {
         <fieldset class="fieldset">
           <legend class="fieldset-legend">账号执行方式</legend>
           {/*
-            刻意**不用** `.seg` 分段控件：`app.css` 里的 `.seg:has(:disabled)`
-            会把**整个**控件降到 0.6 透明度、并给每一项都加 `cursor: not-allowed`。
-            这里只有一个选项该是禁用的，整组变灰会让人误以为"串行也不能选"。
-            所以用逐项独立的 radio：禁用只作用在「并行」那一项上。
+            用**逐项独立**的原生 radio，而不是把整组包成一个分段控件：
+            这里只有「并行」那一项该是禁用的，若整组共用一个禁用态，
+            会连带把「串行」也染灰，让人误以为串行也不能选。
+            所以禁用只作用在「并行」那一项上。
           */}
           <div class="flex flex-col gap-2">
             <label class="flex items-center gap-3">
@@ -787,7 +787,7 @@ export const PipelinesPage = () => {
 
       {state.value === 'loading' ? (
         <div class="flex justify-center py-16">
-          <span class="loading loading-spinner loading-lg text-primary" />
+          <span class="loading loading-lg text-primary" />
         </div>
       ) : null}
 

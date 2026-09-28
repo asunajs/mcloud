@@ -575,7 +575,7 @@ export const SchedulesPage = () => {
 
       {state.value === 'loading' ? (
         <div class="flex justify-center py-10">
-          <span class="loading loading-spinner" />
+          <span class="loading" />
         </div>
       ) : null}
 
