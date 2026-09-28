@@ -13,6 +13,7 @@ pub mod app_signin;
 pub mod auth;
 pub mod auth_refresh;
 pub mod client;
+pub mod cloud_trash;
 pub mod endpoints;
 pub mod exchange;
 pub mod h5_client;

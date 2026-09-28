@@ -79,6 +79,30 @@ pub const EXCHANGE_V3: &str = "https://m.mcloud.139.com/ycloud/signin/page/excha
 /// `/ycloud/signin/page/` **不同** —— 别顺手复用那一族的请求构造。
 pub const GET_SLIDE: &str = "https://m.mcloud.139.com/ycloud/auth-service/slide/getSlide";
 
+// ── 个人网盘那一族（crates/mcloud-upstream/src/cloud_trash.rs）──────────
+//
+// ⚠ 与上面 H5 那一族**不是同一个主机**：H5 走 `m.mcloud.139.com`（还要
+// `activityid` / `jwttoken` 那一套签名头），网盘走 `personal-kd-njs.yun.139.com`
+// （用 basic `authorization`，无签名）。两族的头**不能互换** ——
+// 换错的表现是「登录是好的、网盘回 90001」，最难查的那类。
+
+/// 个人网盘（文件 / 回收站那一族）的基础域。
+///
+/// 它落在 `AUTH_DOMAINS` 的 `yun.139.com` 后缀之内 ⇒ 客户端会**自动**注入
+/// basic `authorization`。所以请求构造里**不该**再自己设一遍：
+/// reqwest 的 `.header()` 是**追加**，设两次就是发出去两根 `authorization`
+/// 线，而上游读哪一根**未测试**。
+pub const PERSONAL_KD: &str = "https://personal-kd-njs.yun.139.com";
+
+/// 批量移进回收站（**写**，且不可回滚 —— 只是进回收站，不是彻底删除）。
+///
+/// 路径出处：旧 TS `apis/file.ts:114`；2026-09-26 由活体探针真打闭合。
+pub const RECYCLEBIN_BATCH_TRASH: &str =
+    "https://personal-kd-njs.yun.139.com/hcy/recyclebin/batchTrash";
+
+/// 读回收站列表（**只读**，可反复跑）。
+pub const RECYCLEBIN_LIST: &str = "https://personal-kd-njs.yun.139.com/hcy/recyclebin/list";
+
 /// 判断主机是否应注入 basic authorization。
 pub fn accepts_basic(host: &str) -> bool {
     AUTH_DOMAINS

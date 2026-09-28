@@ -159,7 +159,7 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 | P0-1 | ~~**会话层**：`SessionRecipe` + 会话池 + `90001` 刷新重放~~ | ✅ **已完成**（`mcloud-upstream::session` / `session_source` / `h5_client`）|
 | P0-2 | **`auth-refresh`**：`authTokenRefresh.do`（XML 体、正则取 `<token>`）+ 三档判据 | ✅ **已完成**，但**换了端点**：实拍走 `user/auth/refreshToken` JSON 体；`authTokenRefresh.do` 是零抓包的旧 TS，**刻意不实现**。`expire<0` ⇒ `ManualOnly`，不重试 |
 | P0-3 | ~~**端点校正**：按真实抓包逐条核对 `/market/` vs `/ycloud/`~~ | ✅ **已完成**（P1 八条的端点全部换成实拍 `/ycloud/signin/page/*`）|
-| P0-4 | **产物账本**：run 名下文件清单 + 失败也清理 | ✅ **账本层已完成**（`mcloud-engine::artifacts`，34 条用例）。**仍缺**：`batchTrash` 协议与"真去删"那一枪 —— 要等第一条写网盘的链（P3）落地时才接得上，见下 |
+| P0-4 | **产物账本**：run 名下文件清单 + 失败也清理 | ✅ **账本层已完成**（`mcloud-engine::artifacts`，34 条用例）。✅ **`batchTrash` 协议层已完成**（`mcloud-upstream::cloud_trash`，10 条用例，2026-09-28）。**仍缺**：真正**调用**它那一枪 —— 要等第一条写网盘的链（P3）落地才接得上，见下 |
 
 > **P0-4 的现状要说准**（2026-09-26）：
 >
@@ -170,8 +170,17 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 >
 > **仍缺两件**，都不是这一层能单独补的：
 >
-> 1. **真去删那一枪**（`hcy/recyclebin/batchTrash`）不在本仓 —— 本层是零 IO 层，
->    而协议层今天**一条写网盘的链都没有**。等 P3 落地时一起接。
+> 1. **真去删那一枪**（`hcy/recyclebin/batchTrash`）：
+>    **协议层已落在本仓**（`mcloud-upstream::cloud_trash`，2026-09-28）——
+>    请求构造（空列表**不发**）、web 档头画像、回执解析都在，逐条对着
+>    `mcloud/docs/capture/app-cloud-recyclebin-samples.txt` 与参考实现落码。
+>    **仍缺的是"谁在链尾调它"**：本层是零 IO 层，而今天**一条写网盘的链都没有**，
+>    所以它还没有调用点。等 P3 第一条链落地时接上。
+>    ⚠ 协议层带来的两条口径要先说清（都写进了模块头）：
+>    ① `success` **缺席算失败**，不是"没失败就是成功" —— 反着写会把
+>    "上游换了回执形状"洗白成删除成功，产物还在网盘里而账本已销账；
+>    ② 重复点名同一枚 `fileId` 今天**没有**"多记一条"的读数，但那**不是幂等保证**
+>    （只测过三型对象、只测过当天），**不能**拿它省掉记账。
 > 2. **编排链内的跨步骤累积接不上**：账本以 `RunId` 为键，而一次 pipeline
 >    产出 N 条独立 run。刻意**不自造**"编排执行 id"——选错键的代价是
 >    **分组分错 ⇒ 看起来像没删掉**，而那种错误不会报错。
