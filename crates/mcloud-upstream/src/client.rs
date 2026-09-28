@@ -124,6 +124,31 @@ impl ReqwestClient {
     }
 }
 
+/// 发送层要不要**补**这一枚凭证头。
+///
+/// # 为什么已经有一枚时**必须**不补
+///
+/// 补第二根不会"覆盖"，发出去就是**两根同名线**，而上游的反应是**直接拒**：
+///
+/// ```text
+/// $ curl -H "Authorization: …" -H "authorization: …" … /user/querySpecTokenV2
+/// HTTP 400  <html>…openresty…400 Bad Request</html>     ← APISIX 在业务层之前就拒了
+/// ```
+///
+/// ⚠ 这个 400 **看起来像"网关/网络问题"**，与只带一根时的真实结论
+/// （`HTTP 200 {"code":"05050009","message":"非法的token！"}`，即凭据过期）
+/// 完全不是一回事 —— 排查方向会被整个带偏。这一条是实测钉出来的。
+///
+/// `host_allows` 是那条域名安全边界（[`accepts_basic`] / [`accepts_jwt`]）；
+/// 它与"已经有一枚"是**两个独立**理由，任一不成立就不补。
+pub fn should_inject_credential(
+    existing: &[(String, String)],
+    name: &str,
+    host_allows: bool,
+) -> bool {
+    host_allows && !existing.iter().any(|(k, _)| k.eq_ignore_ascii_case(name))
+}
+
 #[async_trait]
 impl mcloud_core::HttpClient for ReqwestClient {
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse> {
@@ -136,19 +161,39 @@ impl mcloud_core::HttpClient for ReqwestClient {
 
         let mut builder = self.inner.request(method, url);
 
-        // 凭证按域名注入：这是安全边界，不能放宽
+        // ⚠⚠ **调用方已经明确带了那一枚，就不再注入第二枚。**
+        //
+        // 这根线是**实测**钉出来的，不是洁癖：`querySpecTokenV2` 自己设了一枚
+        // `authorization`（它要用账号凭据换 SSO，而那一刻客户端 profile 里
+        // 还没有令牌），发送层又按域名注入一枚 ⇒ 发出去**两根同名头**。
+        //
+        // 后果**不是"取第一根/最后一根"，而是上游直接拒**：
+        //
+        //   $ curl -H "Authorization: …" -H "authorization: …" … /user/querySpecTokenV2
+        //   HTTP 400  <html>…openresty…400 Bad Request</html>     ← APISIX 在业务层之前就拒了
+        //
+        // 而只带一根时同一发是 `HTTP 200 {"code":"05050009","message":"非法的token！"}`
+        // —— 也就是说这个 400 **看起来像"网络/网关问题"**，与真正的结论
+        // （凭据过期）完全不是一回事，排查方向会被整个带偏。
+        //
+        // 同理适用于 `jwttoken` 与 `deviceid`：三者的规则都是
+        // "发送层补**缺**，不覆盖调用方显式给的那一枚"。
+        // 凭证按域名注入：这是安全边界，不能放宽。
+        // ⚠ 已经有一枚同名的就**不补** —— 理由见 [`should_inject_credential`]。
         if let Some(tok) = &self.profile.basic_token {
-            if accepts_basic(&host) {
+            if should_inject_credential(&req.headers, "authorization", accepts_basic(&host)) {
                 builder = builder.header("authorization", tok);
             }
         }
         if let Some(jwt) = &self.profile.jwt_token {
-            if accepts_jwt(&host) {
+            if should_inject_credential(&req.headers, "jwttoken", accepts_jwt(&host)) {
                 builder = builder.header("jwttoken", jwt);
             }
         }
         if let Some(dev) = &self.profile.device_id {
-            builder = builder.header("deviceid", dev);
+            if should_inject_credential(&req.headers, "deviceid", true) {
+                builder = builder.header("deviceid", dev);
+            }
         }
 
         // PC 形态的设备头：账号是 PC 端登录的就必须带上。
@@ -355,5 +400,29 @@ mod tests {
             Some(CONTENT_TYPE_JSON),
             "只有真正的 content-type 才算已声明"
         );
+    }
+
+    /// 调用方显式给过的凭证头，发送层**一格都不许再补**。
+    ///
+    /// ⭐ 这条是实测 400 的根因：`querySpecTokenV2` 自己带了一枚 `authorization`
+    /// （那一刻 profile 里还没有令牌），发送层又按域名补一枚 ⇒ 两根同名线
+    /// ⇒ APISIX 回 400，**看起来像网关故障**，而真相是另一回事。
+    #[test]
+    fn an_explicit_credential_header_is_never_doubled() {
+        let given = vec![("Authorization".to_string(), "Basic abc".to_string())];
+        // 大小写不敏感（HTTP 头就是不分大小写）
+        assert!(!should_inject_credential(&given, "authorization", true));
+        assert!(!should_inject_credential(&given, "AUTHORIZATION", true));
+
+        // 没有同名 ⇒ 该补
+        assert!(should_inject_credential(&[], "authorization", true));
+        assert!(should_inject_credential(&[], "jwttoken", true));
+
+        // 域名边界不成立 ⇒ 不补（与"已经有一枚"是两个独立理由）
+        assert!(!should_inject_credential(&[], "authorization", false));
+
+        // 三者互不干扰：带了 authorization 不该挡住 jwttoken
+        assert!(should_inject_credential(&given, "jwttoken", true));
+        assert!(should_inject_credential(&given, "deviceid", true));
     }
 }
