@@ -37,7 +37,8 @@ pub mod session_source;
 pub mod smid;
 
 pub use auth::{
-    account_label, format_auth, mask_phone, parse_auth, APP_AUTH_PREFIX, PC_AUTH_PREFIX,
+    account_id_for, account_label, format_auth, mask_phone, parse_auth, APP_AUTH_PREFIX,
+    PC_AUTH_PREFIX,
 };
 pub use auth_refresh::{
     apply_refresh, client_type_for, parse_refresh, rebuild_authorization, refresh_request,

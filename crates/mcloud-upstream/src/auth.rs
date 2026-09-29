@@ -203,7 +203,18 @@ pub fn mask_phone(phone: &str) -> String {
     format!("{head}****{tail}")
 }
 
-/// 账号显示名 / 主键：有手机号就用掩码，否则回落到昵称，再否则用占位符。
+/// 账号显示名：有手机号就用掩码，否则回落到昵称，再否则用占位符。
+///
+/// ⚠⚠ **这个值只能拿去显示，不能当主键。**
+///
+/// 它从前同时被当成主键用，那是错的两层：
+///
+/// 1. **会撞** —— [`mask_phone`] 只留前 2 后 2 位，11 位里活下来 4 位
+///    ⇒ `19??????16` 这种形状的两个号是**同一个值**，数据会串号。
+/// 2. **脱敏没换来东西** —— 账号里 `auth.phone` 就是完整手机号，
+///    `auth.raw` 更是 `base64("mobile:<完整号>:…")` ⇒ id 上那两下星号只挡住了自己。
+///
+/// 主键请用 [`account_id_for`]。
 pub fn account_label(nickname: Option<&str>, phone: &str) -> String {
     if !phone.is_empty() {
         return mask_phone(phone);
@@ -212,6 +223,27 @@ pub fn account_label(nickname: Option<&str>, phone: &str) -> String {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => "account".to_string(),
     }
+}
+
+/// 账号**主键**：手机号的 SHA-256 前 16 位十六进制。
+///
+/// # 为什么是哈希、不是手机号本身、也不是掩码
+///
+/// * **不是掩码** —— 见 [`account_label`]：11 位留 4 位必然撞，而它同时是
+///   `accounts.json` / `sessions.json` / `smid.json` / `history.json` 的主键。
+/// * **不是手机号本身** —— 这个值是主键，会进日志、运行记录与 UI；
+///   手机号没必要跟着到处跑。
+/// * **是它的哈希** —— 稳定（同一个号永远同一个 id，重新登录自然落回同一账号）、
+///   唯一（11 位全参与）、不透明（日志里读不出手机号）。
+///
+/// ⚠ 取前 16 位十六进制 = 64 bit。对"一个人手里几个号"这个量级，
+/// 碰撞概率可以忽略；这里**不是**拿它做安全边界，只是拿它做**身份**。
+///
+/// ⚠ 空手机号**不该走到这里** —— 空串的哈希是常量，两个"没有手机号"的账号会撞。
+/// 上游没给手机号时调用方应换别的来源，而不是拿这个函数兜底。
+pub fn account_id_for(phone: &str) -> String {
+    let hex = mcloud_crypto::sha256_hex_bytes(phone.as_bytes());
+    hex.chars().take(16).collect()
 }
 
 /// base64 补齐到 4 的倍数（对齐 JS 的 `padBase64`）。
@@ -228,3 +260,45 @@ fn pad_base64(s: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod account_id_tests {
+    use super::*;
+
+    /// 稳定：同一个号永远同一个主键（重新登录自然落回同一账号）。
+    #[test]
+    fn the_id_is_stable() {
+        assert_eq!(account_id_for("19900000001"), account_id_for("19900000001"));
+    }
+
+    /// ⭐ 唯一：**掩码会撞、它不会**。
+    ///
+    /// 这两个号前 2 后 2 位完全相同（掩码都是 `19****01`），
+    /// 拿掩码当主键就是数据串号。
+    #[test]
+    fn the_id_does_not_collide_where_the_mask_does() {
+        let a = "19900000001";
+        let b = "19111111101";
+        assert_eq!(mask_phone(a), mask_phone(b), "前提：这两个号的掩码确实一样");
+        assert_ne!(account_id_for(a), account_id_for(b), "主键必须分得开");
+    }
+
+    /// 形状：16 位十六进制（64 bit），且**不含手机号本身**。
+    #[test]
+    fn the_id_is_opaque_hex() {
+        let id = account_id_for("19900000001");
+        assert_eq!(id.len(), 16);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "实得：{id}");
+        assert!(!id.contains("1990"), "不该把号带出来：{id}");
+    }
+
+    /// 显示名那一路**没变**（掩码照旧只给界面看）。
+    #[test]
+    fn the_label_is_still_the_mask() {
+        assert_eq!(account_label(None, "19900000001"), "19****01");
+        assert_ne!(
+            account_label(None, "19900000001"),
+            account_id_for("19900000001")
+        );
+    }
+}

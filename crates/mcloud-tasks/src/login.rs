@@ -500,7 +500,7 @@ fn account_from_auth(
     let parsed = parse_auth(auth)
         .ok_or_else(|| Error::Parse("拼出来的 auth 解析失败（格式与 parse_auth 不一致）".into()))?;
 
-    let account_id = AccountId::new(account_label(None, &parsed.phone));
+    let account_id = AccountId::new(mcloud_upstream::account_id_for(&parsed.phone));
 
     Ok(Account {
         id: account_id,

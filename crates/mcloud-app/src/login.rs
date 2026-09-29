@@ -172,7 +172,7 @@ impl LoginService {
 
     /// 开始短信登录。
     pub async fn start_sms(&self, platform: PcPlatform, phone: &str) -> Result<SmsLogin> {
-        let id = mcloud_core::AccountId::new(mcloud_upstream::mask_phone(phone));
+        let id = mcloud_core::AccountId::new(mcloud_upstream::account_id_for(phone));
         let device_id = self.device_for_account(&id).await?;
         let mut rng = self.rng.clone();
         Ok(SmsLogin::start(platform, device_id, phone, &mut rng))
@@ -207,7 +207,7 @@ impl LoginService {
         password: &str,
         tid: &str,
     ) -> Result<mcloud_core::Account> {
-        let id = mcloud_core::AccountId::new(mcloud_upstream::mask_phone(username));
+        let id = mcloud_core::AccountId::new(mcloud_upstream::account_id_for(username));
         let device_id = self.device_for_account(&id).await?;
         let pw = PasswordLogin::new(platform, device_id);
         let user_info = pw
@@ -257,7 +257,7 @@ impl LoginService {
     /// ⚠ 与 PC 端不同，App 的设备串里 `x-DeviceInfo` 与 `x-yun-client-info`
     /// **不相等**（见 `mcloud_upstream::app_login`）。
     pub async fn start_app_sms(&self, phone: &str) -> Result<AppSmsLogin> {
-        let id = mcloud_core::AccountId::new(mcloud_upstream::mask_phone(phone));
+        let id = mcloud_core::AccountId::new(mcloud_upstream::account_id_for(phone));
         let device_id = self.device_for_account(&id).await?;
         let mut rng = self.rng.clone();
         Ok(AppSmsLogin::start(device_id, phone, &mut rng))

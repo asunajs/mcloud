@@ -513,7 +513,14 @@ fn account_from_login_fields_are_correct() {
     let info = serde_json::json!({"account":"19900000001","authToken":"tok-abc"});
     let acc = account_from_login(&info, PcPlatform::Windows, "DEV-9").unwrap();
 
-    assert_eq!(acc.id.as_str(), "19****01", "主键是掩码");
+    // ⚠ 主键是**手机号的哈希**，不是掩码。掩码只留前 2 后 2 位 ⇒
+    // `19??????01` 形状的两个号会撞成同一个主键，那是数据串号。
+    assert_eq!(
+        acc.id.as_str(),
+        mcloud_upstream::account_id_for("19900000001")
+    );
+    assert_ne!(acc.id.as_str(), "19****01", "不许再拿掩码当主键");
+    assert_eq!(acc.id.as_str().len(), 16, "哈希取前 16 位十六进制");
     assert_eq!(acc.auth.phone, "19900000001", "凭据里是完整号码");
     assert_eq!(acc.auth.platform, "pc", "PC 前缀（mac/win 都是它）");
     assert_eq!(acc.auth.token, "tok-abc", "token 是 authToken");
@@ -629,7 +636,7 @@ async fn persist_login_writes_account_and_state() {
     assert_eq!(store.saved.lock().unwrap().len(), 1);
     let states = store.states.lock().unwrap();
     assert_eq!(states.len(), 1);
-    assert_eq!(states[0].0, "19****01");
+    assert_eq!(states[0].0, mcloud_upstream::account_id_for("19900000001"));
     assert_eq!(states[0].1["device_id"], "DEV-X");
     assert_eq!(states[0].1["pc_platform"], "macos");
 }
