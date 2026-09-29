@@ -5,6 +5,29 @@
     <!-- viewport-fit=cover 是移动端 dock 的硬依赖：删了 iPhone 刘海里会出白条（组件指南 §4.4）。 -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>mcloud-gost</title>
+    <!--
+      首屏加载动画：**必须内联**。打包出来的 CSS 是渲染阻塞的，等它到就已经白屏了；
+      这里要的正是"JS 还没执行就先画点东西"，所以样式只能自带、不能引用主题变量
+      （daisyUI 的 CSS 变量此刻还没定义），颜色按 data-theme 各写一份。
+      ⚠ 它**不改善真实加载速度** —— 应用仍要等 JS 执行完才有内容；改善的是首屏观感与 FCP。
+    -->
+    <style>
+      #boot { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none; }
+      #boot i {
+        width: 28px; height: 28px; border: 3px solid #d4d4d8; border-top-color: #4f46e5;
+        border-radius: 50%; animation: boot-spin .8s linear infinite;
+      }
+      html[data-theme="dark"] #boot i { border-color: #3f3f46; border-top-color: #a5b4fc; }
+      @keyframes boot-spin { to { transform: rotate(360deg); } }
+      /* 动效敏感的用户不要转圈 */
+      @media (prefers-reduced-motion: reduce) { #boot i { animation-duration: 2.4s; } }
+      /*
+        应用一渲染出内容就撤掉它。用 :has() 是**零 JS** 的判据：
+        `#app` 一有子节点就隐藏，不必等 main.ts 跑到那一行（少一帧转圈压在新界面上）。
+        main.ts 里另有一道 `remove()` 兜底 —— 老浏览器没有 :has() 时也能收掉。
+      */
+      body:has(#app > *) #boot { display: none; }
+    </style>
   </head>
   <body class="bg-base-200">
     <script>
@@ -24,6 +47,8 @@
       }
     </script>
     <div id="app"></div>
+    <!-- 首屏占位：在 #app 之外，所以不影响任何 #app 子树比对/截图 -->
+    <div id="boot" role="status" aria-label="加载中"><i></i></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
