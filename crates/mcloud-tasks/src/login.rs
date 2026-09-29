@@ -28,9 +28,7 @@ use mcloud_core::{
 };
 use mcloud_crypto::Random;
 use mcloud_upstream::app_login;
-use mcloud_upstream::auth::{
-    account_label, format_auth, parse_auth, APP_AUTH_PREFIX, PC_AUTH_PREFIX,
-};
+use mcloud_upstream::auth::{format_auth, parse_auth, APP_AUTH_PREFIX, PC_AUTH_PREFIX};
 use mcloud_upstream::login::{
     self, LoginDataDecryptor, LoginEnvelope, LoginPayloadDecryptor, PcClient, PollOutcome,
 };
