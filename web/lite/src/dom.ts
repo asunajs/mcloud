@@ -88,16 +88,18 @@ function disposeTree(node: Node): void {
  */
 let warnedDetachedAnchor = false
 
-export function insert(parent: Node, nodes: Nodes, anchor: Node | null = null): void {
+export function insert(parent: Node, nodes: Nodes, anchor: Node | null = null, where = '?'): void {
   let at = anchor
   if (at && at.parentNode !== parent) {
     if (!warnedDetachedAnchor) {
       warnedDetachedAnchor = true
       // 只警告一次：真出问题时控制台不至于被刷爆
       console.warn('[lite] 锚点已不在父节点内，本次退化为追加到末尾', {
-        anchor: at.nodeType === 8 ? '<!--占位注释-->' : at.nodeName,
+        where, // 谁调用的：setNodes（模板槽）/ createFor（列表 cursor）—— 别再靠猜
+        anchor: at.nodeType === 8 ? '<!--占位注释-->' : at.nodeType === 3 ? `#text(${JSON.stringify(at.nodeValue?.slice(0, 12))})` : at.nodeName,
         anchorParent: at.parentNode?.nodeName ?? null,
         parent,
+        stack: new Error('锚点脱开').stack?.split('\n').slice(1, 6).join('\n'),
       })
     }
     at = null
@@ -267,7 +269,7 @@ export function setNodes(parent: Node, fn: () => unknown, anchor: Node | null = 
     }
     remove(cur)
     cur = createNodes(v)
-    insert(parent, cur, anchor)
+    insert(parent, cur, anchor, 'setNodes')
   })
   // 归属登记：`parent` 被移除时这个 effect 一起销毁（否则它会带着死锚点继续重跑）
   own(parent, eff)
