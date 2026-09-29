@@ -1,0 +1,200 @@
+name: Release
+
+# 出**可分发产物**：Windows / Linux / macOS 三平台各编一份，压成压缩包挂到 Release。
+# 与 ci.yml 的分工：ci.yml 负责"改错了没有"（fmt/clippy/test/MSRV），
+# 本文件负责"能不能拿去用"（release 二进制 + 压缩包）。
+#
+# ── 三条来自 ci.yml 的既有约定，这里照做 ────────────────────────────────
+#
+# 1. **Rust job 必须先拿到 `web/dist`**。`static_files.rs` 用 `#[derive(RustEmbed)]`
+#    在**编译期**把前端产物读进二进制，而 `web/dist` 不入库 —— 干净 checkout 里没有它，
+#    编译会直接失败（`folder '.../web/dist' does not exist`）。
+#    所以 `web` job 先跑、把 dist 当 artifact 传下来，三个平台各自取用，
+#    前端**只构建一次**（不必每平台重跑一遍 npm）。
+#
+# 2. **工具链钉具体版本**（1.91.1），不用 `@stable`：见 ci.yml 里那段长注释 ——
+#    `-D warnings` 下跨 rustc 版本会突然冒出新的 lint，漂版本等于"本地绿、CI 红"。
+#
+# 3. **`--locked`**：Cargo.lock 入库，锁死依赖版本，产物可复现。
+#
+# ── 为什么三平台都能编（TLS 的选择直接决定了这件事）─────────────────────
+#
+# 本仓**只用 `native-tls`**（兼容性优先：rustls 不实现 CBC 套件，连不上只给
+# 老套件的主机）。副作用是各平台都走**系统 TLS**，于是不需要随包带 OpenSSL：
+#   * Windows  → SChannel（系统自带，零额外依赖）
+#   * macOS    → Security.framework（系统自带）
+#   * Linux    → OpenSSL（**需要 libssl-dev + pkg-config**，故下面有 apt 那一步）
+# 若哪天改回 `rustls-tls`，这一步可以删，但会重新引入"老主机连不上"。
+#
+# ── 压缩选型 ────────────────────────────────────────────────────────────
+#
+# 两个二进制之间有大段重复代码，**xz 的大窗口正好吃得下**：同一份产物
+# gzip 3.51 MiB / xz 1.89 MiB（实测，见仓库 docs）。所以 unix 侧两种都给；
+# Windows 的 runner 上没有 xz，只出 zip。
+
+on:
+  # 打 tag 就发版（产物挂到 GitHub Release）
+  push:
+    tags: ['v*']
+  # 手动跑：只出 artifact，不发 Release
+  workflow_dispatch:
+
+permissions:
+  contents: write # 发 Release 需要写权限
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # ── 前端：构建一次，dist 传给三个平台 ────────────────────────────────────
+  web:
+    name: 前端（产出 web/dist）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # 依赖树靠 web/.npmrc 的 legacy-peer-deps=true 统一，不写 --force
+      - name: 安装依赖
+        run: npm ci
+
+      # 发布产物也要过类型检查：release 不该是"唯一没验过的那条路"
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 构建
+        run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: ${{ github.workspace }}/web/dist
+          retention-days: 1
+          if-no-files-found: error
+
+  # ── 三平台 release 构建 + 打包 ──────────────────────────────────────────
+  build:
+    name: ${{ matrix.name }}
+    needs: web
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一个平台挂了也要看到另外两个的结果 —— 跨平台问题常常只挂在某一个平台上
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: Linux x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: Windows x86_64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            name: macOS arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取回 web/dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: ${{ github.workspace }}/web/dist
+
+      - name: 安装工具链
+        uses: dtolnay/rust-toolchain@1.91.1
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Linux 上 native-tls 走 OpenSSL，需要头文件与 pkg-config。
+      # 若哪天改用 rustls，这一步可以删。
+      - name: 安装系统依赖（仅 Linux）
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: 编译（release，两个二进制）
+        run: cargo build --release --locked --bins --target ${{ matrix.target }}
+
+      # 版本号：打 tag 时用 tag（去掉 v），手动跑时读 workspace 版本
+      - name: 计算版本与包名
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "PKG=mcloud-gost-v${VERSION}-${{ matrix.target }}" >> "$GITHUB_ENV"
+
+      - name: 打包（unix：tar.gz + tar.xz）
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          BIN_DIR="target/${{ matrix.target }}/release"
+          mkdir -p "target/dist/${PKG}"
+          cp "$BIN_DIR/mcloud-server" "$BIN_DIR/mcloud-cli" "target/dist/${PKG}/"
+          cd target/dist
+          tar -czf "${PKG}.tar.gz" "${PKG}"
+          echo "gzip: $(ls -l "${PKG}.tar.gz" | awk '{print $5}') B"
+          if command -v xz >/dev/null; then
+            tar -cJf "${PKG}.tar.xz" "${PKG}"
+            echo "xz:   $(ls -l "${PKG}.tar.xz" | awk '{print $5}') B"
+          fi
+          shasum -a 256 *.tar.* > "${PKG}.sha256" || sha256sum *.tar.* > "${PKG}.sha256"
+          cat "${PKG}.sha256"
+
+      - name: 打包（Windows：zip）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = "target/${{ matrix.target }}/release"
+          New-Item -ItemType Directory -Force -Path "target/dist/$env:PKG" | Out-Null
+          Copy-Item "$bin/mcloud-server.exe", "$bin/mcloud-cli.exe" "target/dist/$env:PKG/"
+          Compress-Archive -Path "target/dist/$env:PKG" -DestinationPath "target/dist/$env:PKG.zip"
+          Get-FileHash "target/dist/$env:PKG.zip" -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $env:PKG.zip" } | Out-File "target/dist/$env:PKG.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ github.workspace }}/target/dist/*
+          if-no-files-found: error
+
+  # ── 打 tag 时把三个平台的包挂到 Release ────────────────────────────────
+  release:
+    name: 发布
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 列出待发布文件
+        run: ls -l dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            三平台 release 产物（`mcloud-server` + `mcloud-cli`），每包附 `.sha256`。
+
+            | 平台 | 包 |
+            |---|---|
+            | Linux x86_64 | `*-x86_64-unknown-linux-gnu.tar.gz` / `.tar.xz` |
+            | Windows x86_64 | `*-x86_64-pc-windows-msvc.zip` |
+            | macOS arm64 | `*-aarch64-apple-darwin.tar.gz` / `.tar.xz` |
+
+            ⚠ Linux 版由 release 构建链接系统 OpenSSL（`native-tls`）：目标机需要 `libssl`。
+            Windows/macOS 走系统 TLS，无额外依赖。
