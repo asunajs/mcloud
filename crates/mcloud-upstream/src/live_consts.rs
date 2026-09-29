@@ -23,6 +23,37 @@
 pub const BASE_LIVE_ROOM_FEEDBACK: &str = "https://m.mcloud.139.com/ycloud";
 
 /// 直播侧 `/cmlive/api/...` 与直播 H5 页的入口。
+///
+/// # ⚠⚠ 这台主机**今天在本仓打不通**，原因是 TLS，不是协议
+///
+/// 2026-09-29 真机实测（curl 打同一发是通的，回 HTTP 400
+/// `{"rtnMsg":"token入参不可为空"}` —— **连接没问题**）：
+///
+/// ```text
+/// 本仓（rustls）  连不上 → client error (Connect) → received fatal alert: HandshakeFailure
+/// curl（OpenSSL） TLSv1.2 / ECDHE-RSA-AES128-SHA        ← CBC + SHA-1
+/// 对照 m.mcloud   TLSv1.2 / ECDHE-RSA-CHACHA20-POLY1305  ← 现代套件，本仓通
+/// ```
+///
+/// ⇒ 这台主机只给**老套件** `TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA`（`0xC013`），
+/// 而 **rustls 出于安全考虑不实现任何 CBC 套件** ⇒ **双方零交集**，
+/// 表现在 TLS 层就是一句 `HandshakeFailure`（alert 40）。
+///
+/// ⚠ 三件已经排除的事，别再重查：
+///
+/// 1. **不是 TLS 版本** —— 强制 `max_protocol_version = TLS1.2` 后**一模一样**。
+/// 2. **不是证书** —— 那是 `UnknownCA` 那一类，这里是握手协商失败。
+/// 3. **不是代理/假 IP** —— 两台都解析到 `198.18.x.x`（本机走代理），
+///    而 `m.mcloud.139.com` 同一套机制**是通的**。
+///
+/// # 补法（今天做不了，缺一个依赖）
+///
+/// 需要一个**支持 CBC 的 TLS 后端**：`reqwest` 换 `native-tls` / `openssl` 特性。
+/// ⚠ 2026-09-29 当天 **crates.io 不可达**（`HTTP 000`），而 `Cargo.lock` 里
+/// 只有 `rustls` + `ring` ⇒ 加不进来。
+///
+/// ⚠ 加进来时**别全局换**：`m.mcloud.139.com` 用 rustls 是好的，
+/// 全局翻掉等于拿一条链去赌其余全部上游。按主机分客户端（这个常量就是判据）。
 pub const BASE_CMLIVE: &str = "https://v.cmcc-cs.cn/cmlive";
 
 /// IM 的 HTTPS 入口（`member/apply` / `member/quit`）。
