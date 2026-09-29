@@ -170,3 +170,12 @@ anyhow = "1"
 lto = "thin"
 codegen-units = 1
 strip = true
+# ── 体积（交付形态是"拷一个二进制就能跑"，所以体积算硬指标）─────────────
+# 上面三条已在；下面两条进一步压：
+#   opt-level="s"  按体积优化（比默认 3 小一截，服务端性能损失可接受；
+#                  想更快可改回 3，想更小可试 "z"）
+#   panic="abort"  去掉 unwind 那套（landing pad / 异常表）。
+# ⚠ 语义变化：panic 直接终止进程，不再 unwinding。本服务由 launchd KeepAlive
+#   托管（挂了就重拉），可以接受；但别在 catch_unwind / 锁 poisoning 语义上依赖它。
+opt-level = "s"
+panic = "abort"
