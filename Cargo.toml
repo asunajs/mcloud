@@ -148,7 +148,18 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "coo
 # 两套实现对同一张证书可能给出不同结论，而"HTTP 能过、WS 过不了"这种不一致
 # 排查起来极难。`default-features = false` 关掉 native-tls 默认项，
 # 只留 `connect`（`connect_async` 需要）。
-tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+# ⚠ **与 reqwest 一样只走 native-tls**（2026-09-29 改）。
+#
+# 原来这里是 `rustls-tls-webpki-roots`，理由写的是"TLS 必须与 reqwest 同源"——
+# 那条理由在 reqwest 改成 native-tls 之后**恰好指向相反的方向**：不同源了。
+# 而不只是"同源"问题：直播弹幕连的是**同一台只给 CBC 老套件的主机**
+# （`v.cmcc-cs.cn`，`TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA`），
+# rustls 不实现任何 CBC 套件 ⇒ 那条长连一样是 `HandshakeFailure`。
+# 换成 native-tls 后：连得上老主机，且 rustls/tokio-rustls/webpki-roots/ring
+# 整条线退出依赖图（release 体积与 HTTP 侧一起降）。
+#
+# 代码侧不用改：WS 只用 `connect_async` + `MaybeTlsStream`，后端由特性决定。
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "native-tls"] }
 
 # ── Web 服务 ────────────────────────────────────────────────────────────
 axum = { version = "0.8", features = ["macros"] }

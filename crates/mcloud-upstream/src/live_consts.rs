@@ -52,7 +52,8 @@ pub const BASE_LIVE_ROOM_FEEDBACK: &str = "https://m.mcloud.139.com/ycloud";
 /// ⚠ 2026-09-29 当天 **crates.io 不可达**（`HTTP 000`），而 `Cargo.lock` 里
 /// 只有 `rustls` + `ring` ⇒ 加不进来。
 ///
-/// ⚠ 加进来时**别全局换**：`m.mcloud.139.com` 用 rustls 是好的，
+/// ⚠ 2026-09-29 起**全局都是 native-tls**（原"别全局换"的说法已失效）：
+///
 /// 全局翻掉等于拿一条链去赌其余全部上游。按主机分客户端（这个常量就是判据）。
 pub const BASE_CMLIVE: &str = "https://v.cmcc-cs.cn/cmlive";
 

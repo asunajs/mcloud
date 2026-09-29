@@ -96,7 +96,7 @@ fn default_content_type(req: &HttpRequest) -> Option<&'static str> {
 
 /// 基于 reqwest 的客户端。
 pub struct ReqwestClient {
-    /// 默认后端（rustls）。
+    /// 默认后端（现已统一为 native-tls，见 Cargo.toml 的 reqwest 注释）。
     inner: reqwest::Client,
     /// 老式后端（`native-tls`）：只给 [`LEGACY_TLS_HOSTS`] 里的主机用。
     ///
