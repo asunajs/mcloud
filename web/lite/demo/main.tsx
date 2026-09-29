@@ -320,6 +320,60 @@ ok(
   thirdErr.slice(0, 70) || `anchor=${!!anchorNode} text=${thirdEl.textContent}`,
 )
 
+/**
+ * 用例 A：**碎片槽（`<>…</>`）的内容必须与占位绑定**。
+ *
+ * 真机症状（任务中心点刷新）：每刷一次多一整套内容。根因：`lazySlot` 只把占位文本节点交给
+ * 调用方，碎片内容由槽自己那条 effect 插在占位**后面**；父槽重跑时 `remove(cur)` 只摘掉占位，
+ * 碎片内容原地留下 ⇒ 新的一轮再插一份。
+ * ⚠ 触发条件（从 `app.tsx` 的编译产物看出来的）：**返回多成员片段的组件**才会生成 lazySlot
+ * （`[lazySlot(() => A), lazySlot(() => B)]`）。单成员片段、片段套在 div 里都不会触发 ——
+ * 我前两版用例就是这么写成假绿的。
+ */
+const slN = ref(0)
+const SlItem = () => <i class="sl-item">y</i>
+// ⚠ 片段的**动态成员**才生成 lazySlot（静态成员被折进模板）—— 照 app.tsx 的形状写两个
+const SlBranch = () => (
+  <>
+    {slN.value >= 0 ? <SlItem /> : null}
+    {slN.value >= 0 ? <span class="sl-text">t</span> : null}
+  </>
+)
+// 条件依赖 slN：它变一次就重跑一次 ⇒ 重新创建 SlBranch（旧片段被 remove、新片段再插一份）
+const SlHost = () => <div id="sl-host">{slN.value >= 0 ? <SlBranch /> : null}</div>
+mount(SlHost, '#sl')
+const slEl = document.getElementById('sl-host')!
+const slCounts = [slEl.querySelectorAll('.sl-item').length]
+slN.value = 1
+slCounts.push(slEl.querySelectorAll('.sl-item').length)
+slN.value = 2
+slCounts.push(slEl.querySelectorAll('.sl-item').length)
+ok(
+  '碎片槽重渲染不重复插入（占位与内容绑定）',
+  slCounts.every((n) => n === 1),
+  `三次计数=${slCounts.join('/')}（>1 就是又插了一份）`,
+)
+
+/**
+ * 用例 B：**陈旧 effect 自毁**。内容被外部整块替换后（`cur` 全脱开、`remove(cur)` 成空操作），
+ * 它不该再把新的一份插进去。先真插一次（保证 `cur` 非空），再清空容器，最后触发重跑。
+ * 同样必须是**组件**子节点。把 `setNodes` 里那段自毁判据摘掉，这条必须变红。
+ */
+const stN = ref(1)
+const StChild = () => <i class="st-item">z</i>
+const StHost = () => <div id="st-host">{stN.value > 0 ? <StChild /> : null}</div>
+mount(StHost, '#st')
+const stEl = document.getElementById('st-host')!
+const stBefore = stEl.querySelectorAll('.st-item').length
+for (const c of [...stEl.childNodes]) c.remove() // 外部把这块内容整块拔掉
+stN.value = 2 // 触发重跑：此刻 cur 已全部脱离文档 ⇒ 应自毁，什么都不插
+const stAfter = stEl.querySelectorAll('.st-item').length
+ok(
+  '内容被外部整块替换后，陈旧 effect 自毁（不重复插入）',
+  stBefore === 1 && stAfter === 0,
+  `before=${stBefore} after=${stAfter}（after>0 就是又插了一份）`,
+)
+
 mount(Keyless, '#keyless')
 ok(
   '无 key 的 .map()：锚点没被当成 key（顺序正确）',
