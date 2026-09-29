@@ -43,6 +43,16 @@ export function createFor<T>(
   const seen = new Set<unknown>()
 
   const eff = effect(() => {
+    // ⚠⚠ 同上：列表整体被外部替换掉之后，每行都脱开了 ⇒ 这条 time effect 该退休，
+    // 否则它会把整张表**再插一遍**（真机症状：越刷新内容越多）。
+    if (rows.size) {
+      let alive = false
+      for (const row of rows.values()) for (const n of row.nodes) if (n.parentNode) { alive = true; break }
+      if (!alive) {
+        eff?.dispose()
+        return
+      }
+    }
     const items = list()
     seen.clear()
     let cursor: Node | null = anchor

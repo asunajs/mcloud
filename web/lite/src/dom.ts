@@ -233,6 +233,19 @@ export function remove(nodes: Nodes): void {
 export function setNodes(parent: Node, fn: () => unknown, anchor: Node | null = null): void {
   let cur: Nodes = []
   const eff = effect(() => {
+    /**
+     * ⚠⚠ **陈旧 effect 自毁**。真机症状：任务中心"越刷新内容越多，一直重复插入"。
+     * 成因：那块内容被别处整块替换掉了（切页 / 刷新重建），于是 `cur` 已经全部脱离文档、
+     * `remove(cur)` 变成空操作；而这条 effect 还活着，每次数据变化就把**新的一份**追加进去
+     * ⇒ 无限增长。父节点还活着，所以"按父节点记账"的销毁机制管不到它。
+     *
+     * 判据：上次插进去的节点**全都**不在文档里 ⇒ 这块内容已经不属于我们了，退休。
+     * 必须放在做任何事之前（尤其不能先 remove/insert）。
+     */
+    if (cur.length && cur.every((n) => !n.parentNode)) {
+      eff?.dispose()
+      return
+    }
     const v = fn()
     /**
      * 文本快路径（Solid 的 `insertExpression` 同款）：值还是字符串、且位置上就是
