@@ -78,6 +78,7 @@ pub fn register_all(registry: &mut Registry) -> Result<(), String> {
         Arc::new(notice::NoticeTask),
         Arc::new(play_ai::PlayAiTask),
         Arc::new(app_task_matrix::AppTaskMatrixTask),
+        Arc::new(app_task::AppTaskTask::new()),
         Arc::new(task_expansion::TaskExpansionTask::new()),
     ];
     for t in tasks {

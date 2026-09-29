@@ -228,7 +228,7 @@ impl AppTaskMatrixResult {
 
 // ══════════════════════════ 拉取 ══════════════════════════
 
-async fn fetch_one(ctx: &TaskContext, market: &str, group: &str) -> Result<TaskListV2> {
+pub(crate) async fn fetch_one(ctx: &TaskContext, market: &str, group: &str) -> Result<TaskListV2> {
     let req: HttpRequest = proto::task_list_v2_request(market, group);
     let resp = ctx.http.request(req).await?;
     let body = mcloud_upstream::session::ensure_http_ok(&resp, "读取 App 任务矩阵")?;

@@ -162,3 +162,77 @@ fn the_one_shot_shape_ignores_process() {
     );
     assert!(!should_upload_another(s, 1, Some(999)), "但上限仍然管用");
 }
+
+// ══════════════ 结论（判据层之外，执行层产出怎么念） ══════════════
+
+/// 表里没有要传的 ⇒ `Skipped`，且话说清是"没有"，不是"做完了"。
+#[test]
+fn nothing_planned_is_skipped_not_success() {
+    let r = AppTaskResult::default();
+    assert_eq!(r.planned, 0);
+    assert!(matches!(r.task_outcome(), TaskOutcome::Skipped { .. }));
+    assert!(
+        r.summary_line().contains("没有需要上传的条目"),
+        "{}",
+        r.summary_line()
+    );
+}
+
+/// ⭐ **判出该做却一条都没做成** ⇒ 报**失败**，不许报成"没事发生"。
+///
+/// 这条是零值纪律的那一侧：`acted == 0` 而 `planned > 0` 说明**该做的没做**，
+/// 把它念成成功会让一条天天失败的能力在界面上看起来一切正常。
+#[test]
+fn planned_but_nothing_acted_is_a_failure() {
+    let r = AppTaskResult {
+        planned: 3,
+        acted: 0,
+        ..Default::default()
+    };
+    assert!(
+        matches!(r.task_outcome(), TaskOutcome::Failed { .. }),
+        "实得：{:?}",
+        r.task_outcome()
+    );
+}
+
+/// 清理那一半的账要念全：清干净与没清干净是两句不同的话。
+#[test]
+fn the_cleanup_tail_reports_what_was_actually_reclaimed() {
+    let clean = AppTaskResult {
+        planned: 1,
+        acted: 1,
+        file_ids: vec!["F1".into(), "F2".into()],
+        cleaned_up: 2,
+        ..Default::default()
+    };
+    assert!(
+        clean.summary_line().contains("新增 2 个文件，已移进回收站"),
+        "{}",
+        clean.summary_line()
+    );
+
+    let partial = AppTaskResult {
+        planned: 1,
+        acted: 1,
+        file_ids: vec!["F1".into(), "F2".into()],
+        cleaned_up: 1,
+        cleanup_error: "网络断了".into(),
+        ..Default::default()
+    };
+    let line = partial.summary_line();
+    assert!(line.contains("只收回 1 个"), "{line}");
+    assert!(line.contains("网络断了"), "失败原文要带出来：{line}");
+}
+
+/// 没传任何文件时**不念**清理那一段（避免"新增 0 个文件"这种噪音）。
+#[test]
+fn an_empty_cleanup_tail_is_omitted() {
+    let r = AppTaskResult {
+        planned: 1,
+        acted: 1,
+        file_ids: vec![],
+        ..Default::default()
+    };
+    assert!(!r.summary_line().contains("回收站"), "{}", r.summary_line());
+}

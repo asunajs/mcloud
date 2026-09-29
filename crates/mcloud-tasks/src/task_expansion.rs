@@ -608,7 +608,10 @@ impl TaskExpansionTask {
 ///
 /// ⚠ 名字与内容都随机：撞同名走 `Exists`（不删）、撞内容哈希走秒传，
 /// 两者都会让链路少发几枪 —— 而这条链要验的正是"三枪都发出去"。
-fn random_plan(rng: &mut impl mcloud_crypto::Random, backup_wait_ms: i64) -> ExpansionPlan {
+pub(crate) fn random_plan(
+    rng: &mut impl mcloud_crypto::Random,
+    backup_wait_ms: i64,
+) -> ExpansionPlan {
     let mut suffix = [0u8; 8];
     rng.fill_bytes(&mut suffix);
     let mut hex = String::with_capacity(16);

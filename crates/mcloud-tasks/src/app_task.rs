@@ -22,7 +22,18 @@
 //! `packages/core/src/tasks/app/runners.ts` 的 `106` / `522` 两个 runner，
 //! 以及 `tasks.ts:68-77` 那个 `switch (task.groupid)` 的 `beiyong1` 分支。
 
+use async_trait::async_trait;
+use serde_json::Value;
+
+use mcloud_core::{HttpRequest, Result, TaskOutcome};
+use mcloud_engine::{Task, TaskContext, TaskResult};
+use mcloud_upstream::app_cloud_upload as upload;
+use mcloud_upstream::app_cloud_upload::{CloudChannel, CloudFileCreateInput, CloudOpType};
+use mcloud_upstream::app_task_click;
 use mcloud_upstream::app_task_list_v2::TaskV2Item;
+use mcloud_upstream::cloud_trash;
+
+use crate::app_task_matrix::{self, APP_TASK_MARKETS};
 
 /// 「这一条要往网盘传文件」的参数集。
 ///
@@ -129,6 +140,299 @@ pub fn should_upload_another(shape: UploadShape, done: u32, process: Option<i64>
         return false;
     }
     true
+}
+
+// ══════════════════════════ 执行层 ══════════════════════════
+
+/// 每一轮上传之间等多久（旧 TS 522 循环体末尾那句 `sleep(500)`）。
+pub const PACE_MS: i64 = 500;
+
+/// 一条待做任务的结论。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TaskStep {
+    pub task_id: Option<i64>,
+    pub name: String,
+    /// 真传上去的个数。
+    pub uploaded: u32,
+    /// 打卡那一枪的结局；`None` = 没打（形状是"不传"的那种，或上传全挂）。
+    pub clicked: bool,
+    /// 逐条的原因。
+    pub problems: Vec<String>,
+}
+
+/// 这一趟的结论。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AppTaskResult {
+    /// **真的发过写请求**（传过文件或打过卡）的条目数。
+    pub acted: usize,
+    /// 判出来"要传"的条目数。
+    pub planned: usize,
+    pub steps: Vec<TaskStep>,
+    /// 我们造的文件 id（**`exist` 那一档不进来** —— 那是用户自己的文件）。
+    pub file_ids: Vec<String>,
+    pub cleaned_up: usize,
+    pub cleanup_error: String,
+    pub failures: Vec<String>,
+}
+
+impl AppTaskResult {
+    pub fn summary_line(&self) -> String {
+        const HEAD: &str = "App 任务";
+        if self.planned == 0 {
+            return format!("{HEAD}没做：这张表里没有需要上传的条目");
+        }
+        let tail = match (self.file_ids.is_empty(), self.cleaned_up) {
+            (true, _) => String::new(),
+            (false, n) if n == self.file_ids.len() => {
+                format!("（网盘新增 {} 个文件，已移进回收站）", self.file_ids.len())
+            }
+            (false, n) => format!("（网盘新增 {} 个文件，只收回 {n} 个）", self.file_ids.len()),
+        };
+        let mut s = format!(
+            "{HEAD}做了 {} 条（判出 {} 条）{tail}",
+            self.acted, self.planned
+        );
+        if !self.cleanup_error.is_empty() {
+            s.push_str(&format!("；清理失败：{}", self.cleanup_error));
+        }
+        if !self.failures.is_empty() {
+            s.push_str(&format!("；{} 条有失败", self.failures.len()));
+        }
+        s
+    }
+
+    pub fn task_outcome(&self) -> TaskOutcome {
+        let summary = self.summary_line();
+        // ⚠ 一条都没做成、又确实判出该做 ⇒ 报失败，别报成"没事发生"。
+        if self.planned > 0 && self.acted == 0 {
+            return TaskOutcome::failed(summary);
+        }
+        if self.planned == 0 {
+            return TaskOutcome::skipped(summary);
+        }
+        TaskOutcome::success(summary)
+    }
+}
+
+/// 跑一次 `app-task`：**写**。
+///
+/// 顺序照旧 TS：**先传文件、再打卡**（`tasks.ts` 那个 `beiyong1` 分支就是
+/// `handleTaskClick` 之后 `uploadRandomFile`，而 `runners.ts` 的 106 只有上传那一半）。
+/// 本模块对两者都发 —— 传完再打一发"我做完了"。
+pub async fn run_app_task(ctx: &TaskContext, pace_ms: i64) -> Result<AppTaskResult> {
+    let mut result = AppTaskResult::default();
+
+    // ① 读整张表（十六组，逐次容错）。
+    let mut pages: Vec<mcloud_upstream::app_task_list_v2::TaskListV2> = Vec::new();
+    for market in APP_TASK_MARKETS {
+        for group in mcloud_upstream::app_task_list_v2::TASK_LIST_V2_GROUPS {
+            ctx.check_cancelled()?;
+            match app_task_matrix::fetch_one(ctx, market, group).await {
+                Ok(p) => pages.push(p),
+                // 一次失败不算失败 —— 登记它、继续拉下一组（与只读那一半同口径）。
+                Err(e) => result.failures.push(format!("读取 {market}/{group}：{e}")),
+            }
+        }
+    }
+    let (items, _raw) = app_task_matrix::merge_pages(&pages);
+
+    // ② 逐条判形状。判不出来的一律**不动**。
+    let planned: Vec<(TaskV2Item, UploadShape)> = items
+        .iter()
+        .filter_map(|i| upload_shape_for(i).map(|s| (i.clone(), s)))
+        .collect();
+    result.planned = planned.len();
+
+    // ③ 逐条做。
+    for (item, shape) in &planned {
+        ctx.check_cancelled()?;
+        let name = item.name.clone().unwrap_or_default();
+        let mut step = TaskStep {
+            task_id: item.task_id,
+            name: name.clone(),
+            ..Default::default()
+        };
+        ctx.progress(
+            result.steps.len() as u32 + 1,
+            planned.len() as u32,
+            format!("做任务 {name}"),
+        );
+
+        // ③-a 按档传。
+        let mut done: u32 = 0;
+        while should_upload_another(*shape, done, item.process) {
+            ctx.check_cancelled()?;
+            match upload_one_file(ctx).await {
+                Ok(Some(id)) => {
+                    result.file_ids.push(id);
+                    step.uploaded += 1;
+                }
+                // `exist` 那一档：**不是我们造的** ⇒ 不记账（记了就是删用户的文件）。
+                Ok(None) => step
+                    .problems
+                    .push("上游说同名文件已存在 ⇒ 不算我们造的，也不去删".into()),
+                Err(e) => step.problems.push(format!("上传失败：{e}")),
+            }
+            done += 1;
+            if shape.pace_each_round && pace_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(pace_ms as u64)).await;
+            }
+        }
+
+        // ③-b 打卡（"这条我做完了"）。⚠ 写请求、不可回滚 ⇒ 只有真判出这一条才打。
+        match click(ctx, item).await {
+            Ok(notice) => {
+                step.clicked = true;
+                if let Some(n) = notice {
+                    step.problems.push(format!("上游附言：{n}"));
+                }
+            }
+            Err(e) => step.problems.push(format!("打卡失败：{e}")),
+        }
+
+        if step.uploaded > 0 || step.clicked {
+            result.acted += 1;
+        }
+        result.steps.push(step);
+    }
+
+    // ④ 清理：**只删我们自己造的**。
+    cleanup(ctx, &mut result).await;
+    Ok(result)
+}
+
+/// 传一个随机文件，交回**我们造的**那个 id（`exist` 档交 `None`）。
+async fn upload_one_file(ctx: &TaskContext) -> Result<Option<String>> {
+    let mut rng = mcloud_crypto::OsRandom;
+    let plan = crate::task_expansion::random_plan(&mut rng, 0);
+    let hash = mcloud_crypto::sha256_hex_bytes(&plan.content);
+    let created = {
+        let req = upload::file_create_request(CloudFileCreateInput {
+            parent_file_id: "/".into(),
+            name: plan.name.clone(),
+            size: plan.content.len() as i64,
+            content_hash: hash.clone(),
+            channel: CloudChannel::Android,
+            op: CloudOpType::Upload,
+        })?;
+        let resp = ctx.http.request(req).await?;
+        upload::parse_file_create(&resp.body)?
+    };
+    // ⚠ 撞同名 ⇒ 那个文件**不是我们造的**，交回 `None`。
+    if created.exist {
+        return Ok(None);
+    }
+    let Some(file_id) = created.file_id.clone() else {
+        return Err(mcloud_core::Error::Parse("create 没给 fileId".into()));
+    };
+    if !created.rapid_upload {
+        let Some(url) = created.upload_url.clone() else {
+            return Err(mcloud_core::Error::Parse("create 没给 uploadUrl".into()));
+        };
+        let resp = ctx
+            .http
+            .request(upload::upload_put_request(&url, &plan.content))
+            .await?;
+        upload::ensure_put_ok(&resp)?;
+        let req = upload::file_complete_request(
+            &file_id,
+            created.upload_id.as_deref().unwrap_or(""),
+            &hash,
+            CloudChannel::Android,
+            CloudOpType::Upload,
+        )?;
+        let resp = ctx.http.request(req).await?;
+        upload::parse_file_complete(&resp.body)?;
+    }
+    Ok(Some(file_id))
+}
+
+/// 打一发「这条我做完了」。
+async fn click(ctx: &TaskContext, item: &TaskV2Item) -> Result<Option<String>> {
+    let Some(id) = item.task_id else {
+        return Err(mcloud_core::Error::Config("这一条没有 id，不打卡".into()));
+    };
+    let key = item.group_id.as_deref().unwrap_or("");
+    let req: HttpRequest = app_task_click::task_click_request(key, id)?;
+    let resp = ctx.http.request(req).await?;
+    let body = mcloud_upstream::session::ensure_http_ok(&resp, "打卡（task/click）")?;
+    let env = mcloud_upstream::app_signin::SignInEnvelope::parse(body)?;
+    Ok(app_task_click::parse_task_click(&env)?.notice)
+}
+
+/// 把我们自己传上去的那些移进回收站。
+async fn cleanup(ctx: &TaskContext, result: &mut AppTaskResult) {
+    if result.file_ids.is_empty() {
+        return;
+    }
+    let req = match cloud_trash::batch_trash_request(&result.file_ids) {
+        Ok(r) => r,
+        Err(e) => {
+            result.cleanup_error = e.to_string();
+            return;
+        }
+    };
+    match ctx.http.request(req).await {
+        Ok(resp) => match cloud_trash::parse_batch_trash(&resp.body) {
+            Ok(()) => result.cleaned_up = result.file_ids.len(),
+            Err(e) => result.cleanup_error = e.to_string(),
+        },
+        Err(e) => result.cleanup_error = e.to_string(),
+    }
+}
+
+/// 跑一次 `app-task`（**会写**：往用户网盘传文件并打卡）。
+pub struct AppTaskTask {
+    /// 每轮之间的等待。做成字段是为了让测试设 0。
+    pub pace_ms: i64,
+}
+
+impl Default for AppTaskTask {
+    fn default() -> Self {
+        Self { pace_ms: PACE_MS }
+    }
+}
+
+impl AppTaskTask {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl Task for AppTaskTask {
+    fn name(&self) -> &'static str {
+        "app-task"
+    }
+    fn title(&self) -> &'static str {
+        "App 任务（做任务）"
+    }
+    fn description(&self) -> &'static str {
+        "把 App 任务矩阵里能做的做掉：按玩法传文件、逐条打卡（传上去的文件跑完自己删）"
+    }
+
+    async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
+        ctx.check_cancelled()?;
+        let result = run_app_task(ctx, self.pace_ms).await?;
+        ctx.details(serde_json::json!({
+            "kind": "app-task",
+            "planned": result.planned,
+            "acted": result.acted,
+            "uploadedFiles": result.file_ids.len(),
+            "cleanedUp": result.cleaned_up,
+            "cleanupError": result.cleanup_error,
+            "failures": result.failures,
+            "steps": result.steps.iter().map(|s| serde_json::json!({
+                "taskId": s.task_id,
+                "name": s.name,
+                "uploaded": s.uploaded,
+                "clicked": s.clicked,
+                "problems": s.problems,
+            })).collect::<Vec<_>>(),
+        }));
+        ctx.info(result.summary_line());
+        Ok(result.task_outcome())
+    }
 }
 
 #[cfg(test)]

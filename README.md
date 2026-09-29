@@ -13,7 +13,8 @@
 + 趣玩AI抽奖（`fun-ai`）+ 公告任务（`notice`）
 + 拍拍盘点（`play-ai-special`，**只读**）
 + App 任务矩阵（`app-task-matrix`，**只读**）
-+ 任务拓展（`task-expansion`）。
++ 任务拓展（`task-expansion`）
++ App 任务（`app-task`，**做任务**——写侧）。
 
 **`task-expansion`（2026-09-28 落地）—— 第一条"写网盘并自己收尾"的任务**：
 
@@ -248,7 +249,7 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 | P8 | **账号登录（扫码/短信）+ 账号页 + 定时/编排 CRUD 页** | ✅ |
 | P9a | **签到族 8 条**（`sign` / `receive` / `multiple` / `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`） | ✅ |
 | P9b | **P2 只读查询那一档全部落完**：`exchange` + `msg-push` + `fun-ai` + `notice` | 已落 4 条 |
-| P9c | 其余任务增量接入（`app-task` **写的那一半** / `cloud-phone-redpack` / `ai-avatar`）+ 推送渠道 | 待做（已落：`play-ai-special`、`app-task-matrix` 的只读那一半，以及 `task-expansion` 全链）|
+| P9c | 其余任务增量接入（`cloud-phone-redpack` / `ai-avatar`）+ 推送渠道 | 待做（`app-task` 的写侧已落 106 / 522 / beiyong1 名字门三档玩法）|
 
 > **端点必须来自抓包，不能凭印象写。** 本项目的签到端点最初是
 > `/ycloud/api/sign/query`（凭印象），实测回 **405**；换成实拍的

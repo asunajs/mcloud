@@ -379,8 +379,8 @@ async fn the_items_and_group_readings_are_reported_as_details() {
 
 /// ⭐ `app-task-matrix` 真的注册进了 registry。
 ///
-/// ⚠ 它与参考实现的 `app-task` **不是同一个 code**：那个是"做任务"（写），
-/// 这一条是"只看"。两边共用名字会让这个名字指两个东西。
+/// ⚠ 它与 `app-task`（"做任务"，写）**是两个 code，不是一回事**：
+/// 这一条"只看"，而两条**必须同时存在**且各自独立。
 #[test]
 fn app_task_matrix_is_registered_with_the_right_meta() {
     let mut registry = mcloud_engine::Registry::new();
@@ -394,10 +394,15 @@ fn app_task_matrix_is_registered_with_the_right_meta() {
     assert_eq!(meta.title, "App 任务矩阵（只看）");
     assert!(meta.params.is_empty());
     assert!(!meta.hidden);
-    assert!(
-        !metas.iter().any(|m| m.name == "app-task"),
-        "写的那一半**没**被实现，所以 `app-task` 这个 code 不该出现"
-    );
+    // ⚠ 这条断言**以前是反的**（那时写的那一半没实现，所以断言 `app-task`
+    // 不该出现）。写侧落地之后它必须**存在**，而且与只读这条**分开**：
+    // 拿一个 code 做两件事会让它在两处指不同的东西。
+    let write = metas
+        .iter()
+        .find(|m| m.name == "app-task")
+        .expect("写的那一半（app-task）必须注册");
+    assert_ne!(write.title, meta.title, "两条的标题必须分得开");
+    assert_eq!(write.title, "App 任务（做任务）");
 }
 
 /// 一枪的答复：给个 body，或者**打挂**（网络层错误）。
