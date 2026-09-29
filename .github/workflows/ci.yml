@@ -25,11 +25,23 @@ name: CI
 # （即 `cargo check/clippy/test/build --workspace`）都必须 `needs: web`
 # 并取回 `web-dist` artifact，否则会重新踩这个坑。
 
+# ⚠ **不再对每次 push 跑**（2026-09-29 用户口径：Actions 分钟数要花钱，
+# 没那么多预算）。保留两条：PR 上跑（合并前把关）、手动触发（需要时跑）。
+#
+# 代价要清楚：直接 push 到 main 现在**没有** CI 兜底了。所以本地交付前
+# 必须自己跑齐（见 docs/conventions.md §9.2）：
+#     cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings
+#     cargo test --workspace --locked
+#     node scripts/gates-web.mjs
+# 打 tag 出包时 release.yml 仍会独立跑三平台构建（那是发版必需的一次）。
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
+
+# 同一 PR 连推几次时只保留最后一次 —— Actions 按分钟计费，被取消的不白花
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -56,7 +68,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # 用最新 LTS（`lts/*`）：写死小版本号会过期，而 Actions 分钟数要花钱，
+          # 不该把额度花在"Node 太旧导致的环境问题"上。
+          node-version: lts/*
           cache: npm
           cache-dependency-path: web/package-lock.json
 

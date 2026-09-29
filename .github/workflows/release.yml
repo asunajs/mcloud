@@ -42,6 +42,11 @@ on:
 permissions:
   contents: write # 发 Release 需要写权限
 
+# 同一 tag 重复触发时只保留最后一次（Actions 按分钟计费）
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -59,7 +64,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: lts/*
           cache: npm
           cache-dependency-path: web/package-lock.json
 
