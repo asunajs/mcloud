@@ -272,3 +272,57 @@ node lite/bench/build.mjs   # → /tmp/lite-bench.html，与 Vue Vapor 同页对
 3. 逐页迁移，每页一道像素回归；`api.ts` 与 `ui/*` 不动；
 4. 视情况补：事件委托、列表逆序快路径；
 5. ⚠ 全程不改 CSS；产物体积每步用 `node lite/size.mjs` + 主产物构建复量。
+
+## 11. 迁移演练（2026-09-29）：整包接上 lite
+
+**手法**：`web/vite.config.lite.ts` 用 `resolve.alias` 把 `vue` / `vue-jsx-vapor` 指到 lite 运行时
+—— `src/**` **一个字节都没改**；`web/lite/regress/compare.mjs` 给 lite 包与 Vue 包喂
+**同一套 API fixture**（`/api/setup` `/api/session` `/api/version` `/api/status` + 几个列表），
+再用无头 Chrome 取 `#app` 子树逐字符比对。
+
+**编译与体积（已达成）**：
+
+| | Vue 包 | lite 包 |
+|---|---|---|
+| JS raw | 154,441 B | **110,952 B**（−28.2%） |
+| JS gzip | 48,718 B | **30,026 B**（−38.4%） |
+
+18/18 真实源文件编译通过、产物零残留 JSX（用 TypeScript 重新解析产物来查，不信正则）；
+整包 `vite build` 通过、无控制台报错。
+
+**渲染回归（未达成，这是当前的拦路石）**：
+
+* Vue 包在 fixture 下渲染出完整外壳（`#app` 9,801 B：drawer / navbar / dock / stats…）；
+* lite 包**卡在 loading 态**（`#app` 150 B）。
+
+根因已定位：**片段（fragment）里的动态成员只在挂载时求值一次**。`app.tsx` 的根返回是片段：
+
+```tsx
+return (
+  <>
+    {authGate()}
+    {authState.value !== 'ready' ? null : <div class="drawer lg:drawer-open">…</div>}
+  </>
+)
+```
+
+片段成员没有"父节点"（消费方插入之前不存在），所以 `setNodes(parent, fn, anchor)` 建不起来 ——
+这段表达式被当成普通值复制，`authState` 变了没人重跑。Solid 的解法是把这类成员包成
+`memo(...)`，由它的数组处理逻辑当响应式槽（实测其输出：`[_$createComponent(Header, {}),
+_$memo(() => … ? null : _tmpl$()), …]`）。
+
+**试过并回退的方案**：给片段成员加"占位文本节点 + 插入后由 `insert()` 触发接管"的惰性槽
+（`lazySlot`）。它确实解掉了"永远卡住"，但**引入了重复插入**：同一页里 loading 视图被追加 1,580 次
+（`#app` 涨到 102 KB），Chrome 的虚拟时间因此永远走不完 —— 回归脚本没有超时护栏，
+`execFileSync` 直接挂住 7 分钟，只能人工中断。**该方案未落地，已 `git checkout` 回退**，
+当前 `lite/` 仍是"demo 20/20 + 18/18 编译通过"的已验证状态。
+
+⚠ 这次暴露的真正问题是**测试覆盖**：demo 的 20 条断言里**没有一个用例的组件返回片段**，
+而真实应用的根组件恰恰返回片段 —— 缺口在这里，不在断言数量。
+
+**下一步（按顺序）**：
+
+1. 给 `lite/demo` 补"组件返回片段"的用例：片段成员是 `cond ? null : <div>`、是 `.map()` 列表，
+   反复切换后断言 ① 内容正确、② **没有重复节点**（比对 `childNodes.length` 与节点身份）；
+2. 在那个用例上把修复做对（首选：把片段成员编译成 Solid 那样的 memo 槽；次选：连接时接管）；
+3. 重跑本节的回归脚本；通过后再谈切换默认构建配置与逐像素比对。
