@@ -74,13 +74,6 @@ jobs:
       - name: 构建
         run: npm run build
 
-      # ⚠ 上传前把**未打包的原始二进制目录**删掉：`path: target/dist/*` 会把
-      # 它和压缩包一起收进去，Linux/macOS 各白搭 ~7MB 下载量（实测 artifact
-      # 8.6MB 而压缩包只有 2.9MB）。只留压缩包与校验和。
-      - name: 只保留压缩包与校验和
-        shell: bash
-        run: rm -rf "target/dist/${PKG}"
-
       - uses: actions/upload-artifact@v4
         with:
           name: web-dist
@@ -213,6 +206,16 @@ jobs:
           Copy-Item "$bin/mcloud-server.exe", "$bin/mcloud-cli.exe" "target/dist/$env:PKG/"
           Compress-Archive -Path "target/dist/$env:PKG" -DestinationPath "target/dist/$env:PKG.zip"
           Get-FileHash "target/dist/$env:PKG.zip" -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $env:PKG.zip" } | Out-File "target/dist/$env:PKG.sha256"
+
+      # ⚠ 上传前把**未打包的原始二进制目录**删掉：`path: target/dist/*` 会把它
+      # 和压缩包一起收进去，Linux/macOS 各白搭约 7MB 下载量（实测 artifact 8.6MB
+      # 而压缩包只有 2.9MB）。
+      # 踩过的坑：这步一开始被插到 **web job** 里（那个 upload-artifact 缩进相同、
+      # 是文件里第一个），于是 PKG 未定义、等于空跑，artifact 体积一点没变 ——
+      # 所以这里锚点必须带 `name: ${{ matrix.target }}` 才落到 build job。
+      - name: 只保留压缩包与校验和
+        shell: bash
+        run: rm -rf "target/dist/${PKG}"
 
       - uses: actions/upload-artifact@v4
         with:
