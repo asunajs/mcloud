@@ -146,10 +146,17 @@ export const serve = (root, port, variant) =>
      * 后者用来表达"同一个端点按请求内容给不同结果"（登录成功/口令错）。
      * 匹配顺序：**方法+路径** 优先于 仅路径。
      */
-    const send = (req, res, entry) => {
+    /**
+     * ⚠⚠ **两种形状**：`VARIANTS`/带方法的覆盖是 `{status, body}`，
+     * 而 `FIXTURES` 里的值**直接就是 body**。把后者当 `{status, body}` 用，
+     * 会发出"200 + 空体"—— 应用那边 `JSON.parse('')` 拿不到东西、
+     * `/api/session` 于是判成未登录，**整个 ready 变体都在渲染登录页**，
+     * 而两侧一起渲染登录页 ⇒ 逐字符比对照样"通过"。测试脚本自己的 bug 最会骗人。
+     */
+    const send = (req, res, entry, plain) => {
       const respond = (r) => {
-        res.writeHead(r.status ?? 200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify(r.body))
+        res.writeHead(plain ? 200 : (r.status ?? 200), { 'content-type': 'application/json' })
+        res.end(JSON.stringify(plain ? r : r.body))
       }
       if (!entry.handler) {
         respond(entry)
@@ -174,12 +181,12 @@ export const serve = (root, port, variant) =>
       const key = `${req.method} ${url}`
       const override = overrides[key] ?? overrides[url]
       if (override) {
-        send(req, res, override)
+        send(req, res, override, false)
         return
       }
       const fixture = FIXTURES[key] ?? FIXTURES[url]
       if (fixture !== undefined) {
-        send(req, res, fixture)
+        send(req, res, fixture, true)
         return
       }
       if (url.startsWith('/api/')) {

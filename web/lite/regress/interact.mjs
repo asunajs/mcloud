@@ -65,13 +65,10 @@ const STEPS = {
     ['点 dock：任务', clickText('.dock button', '任务')],
     ['展开抽屉', clickSel('label[for="nav-drawer"]')],
     ['收起抽屉', clickSel('label[for="nav-drawer"]')],
-    ['切深色主题', clickSel('[aria-label="切换到深色主题"]')],
-    ['切回浅色主题', clickSel('[aria-label="切换到浅色主题"]')],
+    ['切换主题', clickSel('[aria-label^="切换到"]')],
+    ['再切回主题', clickSel('[aria-label^="切换到"]')],
     ['打开登出确认框', clickSel('[aria-label="退出登录"]')],
     ['取消（关掉确认框）', clickText('#confirm-logout .modal-action button', '取消')],
-    ['再开一次确认框', clickSel('[aria-label="退出登录"]')],
-    ['确认登出（后端 404 ⇒ 错误弹窗）', clickText('#confirm-logout .modal-action button', '退出')],
-    ['关掉错误弹窗', clickText('#error-dialog button', '关闭')],
 
     // 账号页：四种登录方式之间来回切（条件分支 + 4 项列表），并在出现的输入框里打字。
     // 注意"短信/账号密码"那两个框**只有切到该方式才存在** —— 这正是在测条件分支换内容。
@@ -80,14 +77,14 @@ const STEPS = {
     ['账号页：输入手机号', typeIn('input[type="tel"]', '19900000001')],
     ['账号页：改手机号', typeIn('input[type="tel"]', '19900000002')],
     ['账号页：点「账号密码」方式', clickText('button', '账号密码')],
-    ['账号页：输入用户名', typeIn('input[autocomplete="username"]', 'someone')],
+    ['账号页：输入用户名', typeIn('input[type="text"].input', 'someone')],
     ['账号页：输入口令', typeIn('input[type="password"]', 'pw-123456')],
     ['账号页：点回「扫码」方式', clickText('button', '扫码')],
     ['账号页：点某行的「移除」', clickText('button', '移除')],
     ['账号页：取消移除（有数据的确认弹窗）', clickText('#confirm-delete-account .modal-action button', '取消')],
     // 确认删除 ⇒ DELETE 打到 fixture 的 404 ⇒ 走 `showError` 那条反馈路径（弹窗内容也要一致）
     ['账号页：确认移除（后端 404 ⇒ 错误弹窗）', clickText('#confirm-delete-account .modal-action button', '移除')],
-    ['账号页：关掉错误弹窗', clickText('#error-dialog button', '关闭')],
+    ['账号页：关掉错误弹窗（有就关）', `(() => { const b = [...document.querySelectorAll('dialog[open] button')].find((x) => x.textContent.trim() === '关闭'); if (b) b.click(); return !!b })()`],
 
     // 计划页：新建表单填一遍（文本、下拉、勾选框都覆盖到）
     ['切到计划页', go('#/schedules')],
@@ -105,6 +102,16 @@ const STEPS = {
     // 任务页：下拉框的选项是**由数据 createFor 出来的**，选它等于测"列表项 + select 回写"
     ['切到任务页', go('#/tasks')],
     ['任务页：选账号', pickOption('select.select', '13800000000')],
+
+    /**
+     * ⚠ 登出确认放在**最后**：它是破坏性的（确认后应用回到登录页），
+     * 放在中间会让后面每一步都找不到元素。第一版就踩了：18 步"两侧一致"，
+     * 其实是**两侧都没执行** —— 现在 THREW 一律算失败，才把这件事翻出来。
+     */
+    ['回到设置页', go('#/settings')],
+    ['再开一次登出确认框', clickSel('[aria-label="退出登录"]')],
+    ['确认登出（后端 404 ⇒ 错误弹窗）', clickText('#confirm-logout .modal-action button', '退出')],
+    ['关掉错误弹窗（有就关）', `(() => { const b = [...document.querySelectorAll('dialog[open] button')].find((x) => x.textContent.trim() === '关闭'); if (b) b.click(); return !!b })()`],
   ],
   /**
    * 未初始化：建管理员向导。**先填一个短口令撞本地校验**，再填合法口令提交成功 ——
@@ -122,7 +129,9 @@ const STEPS = {
     ['确认口令跟上', typeIn('input[autocomplete="new-password"]', 'secret-1234')],
     ['提交成功 ⇒ 闸门放行（外壳出现）', clickText('button', '创建并进入')],
     ['放行后：切到历史页', go('#/history')],
-    ['放行后：切主题', clickSel('[aria-label="切换到深色主题"]')],
+    // ⚠ 这里用"有就点"的写法：放行后外壳是**异步**长起来的，主题按钮可能还没出现。
+    // 关键是**两侧一致**（都点到 / 都没点到），所以记录有没有点到，而不是硬要求存在。
+    ['放行后：切主题（有就点）', `(() => { const b = document.querySelector('[aria-label^="切换到"]'); if (b) b.click(); return !!b })()`],
   ],
   /**
    * 已初始化未登录：口令错走错误分支，口令对则**闸门从登录页翻到外壳**
@@ -196,6 +205,8 @@ const shoot = async (session, file) => {
 }
 
 const runSide = async (side, dir, port, debugPort) => {
+  // ⚠ 先清 profile：上一轮留下的 localStorage（主题）会改变选择器与首屏，结果就不可复现
+  fs.rmSync(`/tmp/lite-interact-${side}`, { recursive: true, force: true })
   const server = await serve(dir, port, variant)
   const session = await openSession({ port, route, debugPort, profile: `/tmp/lite-interact-${side}` })
   const shots = []
@@ -238,19 +249,24 @@ console.log(`交互回归（variant=${variant}，${lite.shots.length} 步）`)
 for (let i = 0; i < lite.shots.length; i++) {
   const [name, a] = lite.shots[i]
   const b = vue.shots[i]?.[1]
+  /**
+   * ⚠⚠ **两侧同时抛错 ≠ 一致**。这一条顺序错过一次：`THREW` 判定排在 `a === b` 后面，
+   * 于是"选择器写错、两侧都没找到元素"被印成 ✅ —— 44 步全绿，而实际上**一步都没执行**
+   * （当时 fixture 也坏了，应用停在登录页）。测试脚本的假绿比产品 bug 更难发现。
+   */
+  if (a.startsWith('THREW:') || b?.startsWith('THREW:')) {
+    bad++
+    console.log(`  ✗ ${name}（这步没真正执行）`)
+    console.log(`     lite ${a.startsWith('THREW:') ? a : '（正常）'}`)
+    console.log(`     vue  ${b?.startsWith('THREW:') ? b : '（正常）'}`)
+    continue
+  }
   if (a === b) {
     console.log(`  ✅ ${name}`)
     continue
   }
   if (EXPECTED_DIVERGENT[name]) {
     console.log(`  ⚠ ${name} —— 已知差异（有意）：${EXPECTED_DIVERGENT[name]}`)
-    continue
-  }
-  if (a.startsWith('THREW:') || b?.startsWith('THREW:')) {
-    bad++
-    console.log(`  ✗ ${name}`)
-    console.log(`     lite ${a.startsWith('THREW:') ? a : '（正常）'}`)
-    console.log(`     vue  ${b?.startsWith('THREW:') ? b : '（正常）'}`)
     continue
   }
   bad++
