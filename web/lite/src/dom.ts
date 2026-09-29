@@ -59,6 +59,8 @@ function own(parent: Node, eff: Effect): void {
 
 /** 销毁一棵（已被移除的）子树里登记过的所有 effect。 */
 function disposeTree(node: Node): void {
+  // 子树里嵌着的碎片槽也要收（切页 / 条件分支整块移除时）
+  if (slots.has(node)) removeSlot(node)
   const list = owners.get(node)
   if (list) {
     owners.delete(node)
@@ -160,11 +162,32 @@ function flushMounted(): void {
  * Solid 的解法是把这种成员包成 `memo(...)`，由它的数组处理逻辑当响应式槽看待。
  * 这里换成"占位 + 插入后接管"：不需要观察者，也不需要调度器，**同步**建绑定。
  */
-let pending: { node: Node; fn: () => unknown }[] = []
+/**
+ * 碎片槽（`<>…</>`）的记账。
+ *
+ * ⚠⚠ **占位节点与实际内容必须绑在一起** —— 真机"越刷新内容越多"的根因：
+ * `lazySlot` 只把**占位文本节点**交给调用方，碎片内容由槽自己那条 effect 插在占位**后面**。
+ * 父槽 re-run 时 `remove(cur)` 只摘掉占位，**碎片内容原地留下**；新一轮再 push 新占位 +
+ * 新 effect、又插一份 ⇒ 每刷一次多一整套（实测任务中心 19 → 38 → 57 → 76 张卡片）。
+ * 所以按占位记账 {fn, nodes, eff}，`remove()` 遇到占位就把 effect 与它插的**所有**节点一起收掉。
+ */
+type Slot = { fn: () => unknown; nodes: Nodes; eff?: Effect }
+const slots = new Map<Node, Slot>()
+let pending: Node[] = []
+
+/** 收掉一个碎片槽：停 effect + 移除它插进去的内容（递归，碎片里可能还嵌槽）。 */
+function removeSlot(ph: Node): void {
+  const s = slots.get(ph)
+  if (!s) return
+  slots.delete(ph)
+  s.eff?.dispose()
+  remove(s.nodes)
+}
 
 export function lazySlot(fn: () => unknown): Node {
   const ph = document.createTextNode('')
-  pending.push({ node: ph, fn })
+  slots.set(ph, { fn, nodes: [] })
+  pending.push(ph)
   return ph
 }
 
@@ -180,10 +203,12 @@ function flushSlots(): void {
   for (let pass = 0; pass < 8 && pending.length; pass++) {
     const list = pending
     pending = []
-    for (const p of list) {
-      const parent = p.node.parentNode
-      if (parent) setNodes(parent, p.fn, p.node)
-      else pending.push(p)
+    for (const ph of list) {
+      const slot = slots.get(ph)
+      if (!slot) continue // 槽已被收掉（父槽重渲染过），别再插一份
+      const parent = ph.parentNode
+      if (parent) setNodes(parent, slot.fn, ph, slot)
+      else pending.push(ph)
     }
   }
 }
@@ -213,6 +238,8 @@ export function onRemove(nodes: Nodes, cb: () => void): void {
  * （`onUnmounted` 里多半是 `removeEventListener`，漏跑就是内存泄漏）。
  */
 export function remove(nodes: Nodes): void {
+  // ⚠ 先收碎片槽：否则碎片内容成孤儿留下（真机症状：越刷新内容越多）
+  for (const n of nodes) removeSlot(n)
   // 先销毁这棵子树里的 effect，再摘节点：销毁只解绑订阅，不动 DOM
   for (const n of nodes) disposeTree(n)
   const key = nodes[0]
@@ -232,7 +259,7 @@ export function remove(nodes: Nodes): void {
  * 每次重跑先撤掉上一次铺进去的节点，再铺新的 —— 这段内容替换的语义下
  * 这就是最省字节的写法（不需要在节点间做 diff，因为这不是"列表"）。
  */
-export function setNodes(parent: Node, fn: () => unknown, anchor: Node | null = null): void {
+export function setNodes(parent: Node, fn: () => unknown, anchor: Node | null = null, track?: Slot): void {
   let cur: Nodes = []
   const eff = effect(() => {
     /**
@@ -270,8 +297,10 @@ export function setNodes(parent: Node, fn: () => unknown, anchor: Node | null = 
     remove(cur)
     cur = createNodes(v)
     insert(parent, cur, anchor, 'setNodes')
+    if (track) track.nodes = cur
   })
   // 归属登记：`parent` 被移除时这个 effect 一起销毁（否则它会带着死锚点继续重跑）
+  if (track) track.eff = eff
   own(parent, eff)
 }
 
