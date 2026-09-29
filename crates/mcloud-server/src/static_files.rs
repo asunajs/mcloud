@@ -6,9 +6,20 @@
 //!    也不会出现"开发能用、打包上去就不行"（webui-code-guide §7.4）。
 //! 2. 单二进制交付：拷一个可执行文件就能跑，不必同时带 `web/dist`。
 //!
-//! **构建顺序有依赖**：`rust-embed` 在**编译期**把 `web/dist` 读进来。
-//! 所以改前端后必须先 `npm run build` 再 `cargo build`，否则二进制里还是旧产物。
-//! 目录不存在时（例如只跑 `cargo test`）会得到一个空资产集，
+//! **构建顺序有依赖（release 构建）**：`rust-embed` 在**编译期**把 `web/dist` 读进来。
+//! 所以**交付构建**必须先 `npm run build` 再 `cargo build`，否则二进制里还是旧产物。
+//!
+//! ⚠ 但 **debug 构建是运行时读盘** —— 这条反直觉，2026-09-28 核实过：
+//! rust-embed 8 的实现在 `#[cfg(all(debug_assertions, not(feature = "debug-embed")))]`
+//! 下**每次 `get()` 都去 `web/dist` 读文件**，而本仓只开了 `interpolate-folder-path`。
+//! 于是开发期改前端**只需 `npm run build`**：正在跑的服务下一次请求就是新产物，
+//! 不必重新编译 —— 也就不必触发
+//! 「覆写 `target/debug/mcloud-server` ⇒ SIGKILL ⇒ launchd 重拉 ⇒ TCC 弹框」那条链。
+//!
+//! 实测：服务进程 18:36:37 启动后**没有再重启**，把**次日 08:06** 新构建出的 JS 与
+//! 服务端返回的字节逐字节 `cmp` —— 一致（CSS、`index.html` 同）。
+//!
+//! 目录不存在时（例如没跑过 `npm run build`）会得到一个空资产集，
 //! 此时所有静态路径都落到 SPA fallback —— 不 panic，只是没有页面可发。
 //!
 //! ## 传输层：gzip 与缓存（首屏从 ~2.5s 降到目标区间的那一半）

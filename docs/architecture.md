@@ -996,6 +996,87 @@ t+1000ms #a=""  #b=""
 传输量 281 KB → 67 KB，那部分是实测有效的）。
 本条在 Vue 官方支持 Vapor async 组件之前**保持关闭**。
 
+### 10.6 JS 体积：研究结论（2026-09-28）
+
+产物现状：**单 chunk 154,441 B raw / 48,718 B gzip**。要压它，先得知道字节在哪。
+
+#### 构成（Rolldown 模块图，压缩前渲染长度）
+
+| 模块 | 渲染长度 | 占比 |
+|---|---|---|
+| `@vue/runtime-vapor` | 95,823 | 28.8% |
+| **我们的页面**（§10.3 那张表停在 6 个，实际已 10 个） | ~133,000 | 40.0% |
+| `@vue/reactivity` | 35,493 | 10.7% |
+| `@vue/runtime-core` | 22,448 | 6.7% |
+| `src/api.ts` | 10,095 | 3.0% |
+| `@vue/shared` | 6,769 | 2.0% |
+| `@vue/runtime-dom` | 4,560 | 1.4% |
+| `ui/*`（含图标） | ~14,000 | 4.2% |
+| `vite/modulepreload-polyfill` | 1,205 | 0.4% |
+
+渲染长度合计 332,970 B，最终 chunk 144,894 B ⇒ 压缩比约 43%。
+
+#### 地板：空应用也要 43,656 B（16,344 B gzip）
+
+用**同一套工具链**构建一个"只有一个 `ref` 和一个 div"的 Vapor 应用实测，
+得到上面这个地板 ⇒ 反过来，**我们自己的代码是 110.8 kB raw / 32.4 kB gzip（占 71%）**。
+
+顺带钉两条，别再查第二遍：
+
+* 那 4,560 B 的 `@vue/runtime-dom` 在**空应用里也在** ⇒ 是 `vue` 入口自带的，
+  **不是我们引错了入口**；`vue/vapor` 这个子路径在 3.6.0-rc.9 的 `exports` 里**不存在**。
+* `runtime-vapor` 全程占三到五成，且**没有** VDOM 运行时混进来
+  （`createVNode` / `createElementBlock` 等一个都没有）—— Vapor 这条是真的走通了。
+
+#### 试过、无效或更差的（别重复投入）
+
+| 实验 | 结果 |
+|---|---|
+| `build.target: 'esnext'` | 与 `es2022` **字节级完全相同** |
+| oxc `compress.passes: 2` | 产物哈希不变（该选项在这条路径下不起作用） |
+| `minify: 'terser'`（临时 `--no-save` 装完即卸） | **更差**：171.71 kB / 54.78 kB gzip（默认 oxc：154.44 / 49.40） |
+| 别名到 `vue/vapor` 入口 | 该子路径不存在 ⇒ 构建失败 |
+| 去掉 `console.*` / `debugger` | `src/` 里 **0 个**，无处可省 |
+| 逐页拆包 | 见 §10.5，上游未修，保持关闭 |
+
+#### 唯一落地的一项
+
+`build.modulePreload: { polyfill: false }` ⇒ **−0.67 kB raw / −0.32 kB gzip**（154,441 → 153,771）。
+判据：产物 HTML 里 `<link rel="modulepreload">` 数量是 **0**（单 chunk），
+那条 polyfill 没有任何东西可垫。
+
+⚠ **哪天真的做按需拆包，这条要回来复核** —— 那时候 modulepreload 就有活干了。
+
+#### 复测更新：§10.5 的收益数字
+
+§10.5 里记的"拆包后首屏 46,676 → 32,184 B"是**当时的体量**。
+按现状复量：把 10 个页面全替成空壳后初始包 **154.44 → 68.36 kB**
+（gzip 49.40 → 26.35，首屏 JS **−56%**）—— 比当初记的更划算，因为项目又长了。
+
+**结论不变**：门槛仍是"9 个业务文件得先全改成 `defineVaporComponent`"，
+再加上要等上游修 `suspensible` 与命名导出那两条 ⇒ 收益换不回成本。
+
+#### 怎么复现这些数字
+
+* **模块级构成**：临时给 `vite build` 加一个插件，在 `generateBundle` 里打印
+  `chunk.modules[].renderedLength` 并按大小排序；产物写 `dist-analyze`，**别碰 `dist`**。
+* **地板**：同一个配置把 `build.rollupOptions.input` 指到一个最小 HTML + 一个最小 TSX。
+* **拆包收益**：用 `resolve.alias` 把 `/pages/*-page` 指到一个"导出同名空组件"的文件再构建，
+  与正常构建的差值就是初始包能减掉的部分。
+* 用完删掉：临时配置、`tmp-min/`、`dist-analyze/`（`dist` 只由 `npm run build` 写）。
+
+#### 附：验前端**不用**重编译（debug 构建运行时读盘）
+
+2026-09-28 核实：`rust-embed` 8 在 `debug_assertions` 且未开 `debug-embed`
+（本仓只开了 `interpolate-folder-path`）时，`get()` **每次都去 `web/dist` 读文件**。
+
+实测证据：服务进程 18:36:37 启动后**再没重启**，而**次日 08:06** 新构建出的 JS
+与服务端返回的字节 `cmp` **逐字节一致**（CSS、`index.html` 同）。
+
+⇒ **开发期改完前端只需 `npm run build`**，正在跑的服务下一次请求就是新产物；
+别为它跑 `cargo build` —— 那条链会覆写二进制 ⇒ SIGKILL ⇒ launchd 重拉 ⇒ 可能弹 TCC。
+（⚠ **交付构建**仍必须「先 `npm run build` 再 `cargo build`」：release 下才是编译期内嵌。）
+
 ---
 
 ## 11. 测试策略

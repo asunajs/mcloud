@@ -32,5 +32,12 @@ export default defineConfig({
     outDir: 'dist',
     target: 'es2022',
     sourcemap: false,
+    // 关掉 modulepreload 的**垫片**（不是 preload 本身）。
+    //
+    // 它是给「不支持 `rel=modulepreload` 的浏览器」用的 polyfill，而本产物是
+    // **单 chunk**（HTML 里 `<link rel="modulepreload">` 数量为 0，见
+    // `docs/architecture.md` §10.6）⇒ 那条垫片**没有任何东西可垫**，
+    // 纯粹白带 0.7KB。真要做按需拆包时记得回来复核这一条。
+    modulePreload: { polyfill: false },
   },
 })
