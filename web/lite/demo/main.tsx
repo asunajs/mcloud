@@ -9,7 +9,7 @@
 import { batch, createVaporApp, mount, onMounted, onUnmounted, ref, useSlots, watch } from '../src/index'
 
 /** 自测用的计数器。 */
-const demo = { mounted: 0, unmounted: 0, mountedInDoc: false, watches: [] as string[] }
+const demo = { mounted: 0, unmounted: 0, mountedInDoc: false, late: 0, watches: [] as string[] }
 
 // 原样：一个普通函数组件，两个动态绑定 + 两个生命周期钩子
 const Row = (props: { label: string; n: number }) => {
@@ -100,6 +100,26 @@ const fragItems = ref([
   { id: 2, label: 'q' },
 ])
 
+const LateMounted = () => {
+  onMounted(() => {
+    demo.late++
+  })
+  return <p id="late-body">late</p>
+}
+
+/**
+ * **没有 `key` 的 `.map()`**，而且它后面还有一个静态兄弟 ⇒ 那个兄弟就是它的锚点。
+ * 这一格专门守着"锚点被当成 `createFor` 的 key 传进去"那个 bug（`r is not a function`）。
+ */
+const Keyless = () => (
+  <div id="kbox">
+    {['x', 'y'].map((s) => (
+      <b id={`k-${s}`}>{s}</b>
+    ))}
+    <i id="k-after">end</i>
+  </div>
+)
+
 const Split = () => (
   <>
     <h4 id="frag-head">片段头</h4>
@@ -169,6 +189,7 @@ const GateBox = () => (
   <>
     {gate()}
     {stage.value !== 'ready' ? null : <p id="stage-ready">R</p>}
+    {stage.value !== 'ready' ? null : <LateMounted />}
   </>
 )
 
@@ -179,6 +200,8 @@ createVaporApp(GateBox).mount('#frag3')
 stage.value = 'ready'
 ok('门形状：第一个槽被清空', !document.getElementById('stage-loading'))
 ok('门形状：第二个槽补上了内容', !!document.getElementById('stage-ready'))
+// ⚠ 这个组件是**挂载之后**才建的：它自己的 `onMounted` 必须跑（否则页面永远停在初始态）
+ok('动态建出来的组件：onMounted 也跑了', demo.late === 1, `late=${demo.late}`)
 
 const frag = () => document.getElementById('frag') as HTMLElement
 const fragRows = () => [...document.querySelectorAll('#frag-list > li')].map((n) => n.textContent)
@@ -206,6 +229,78 @@ fragItems.value = [...fragItems.value, { id: 3, label: 'r' }]
 ok('片段：列表追加一行', fragRows().join('|') === 'p|q|r', fragRows().join('|'))
 ok('片段：列表复用了已有节点', !!fragFirst?.isConnected && fragFirst === document.querySelector('#frag-list > li'))
 ok('片段：追加后也没重复节点', fragCount() === baseCount, `childNodes ${fragCount()} vs ${baseCount}`)
+
+/**
+ * 三个**在真实应用上踩到的**形状（都让设置页整体白屏，而且都不报错 —— 错误被应用侧的
+ * `try/catch` 吞了，`window.onerror` 一声不响）：
+ *
+ * 1. `<label … />` 这种**非空元素的自闭合写法**：生成 HTML 时若不写闭合标签，解析器会把
+ *    后面的兄弟节点**吞成它的子节点**，编译期算好的 `childNodes[i]` 全部错位一格；
+ * 2. SVG 上的 `class` 绑定：`SVGElement.className` 是**只读的** `SVGAnimatedString`，
+ *    无条件写它直接抛 `TypeError`（本项目图标全是 `<svg>`）；
+ * 3. `将结束{' '}<b>{x}</b>` 这种**文本里夹元素**的写法：相邻文本在解析后合成一个节点，
+ *    按"每段文本各占一位"数下标，就会拿到一个**文本节点当父节点**去 `insertBefore`。
+ */
+const miscText = ref('当前')
+const Misc = () => (
+  <div id="misc-box">
+    <label class="misc-label" />
+    <b id="misc-after-label">B</b>
+    <svg id="misc-svg" class={miscText.value} aria-hidden={true} viewBox="0 0 4 4">
+      <path d="M0 0" />
+    </svg>
+    <span id="misc-mixed">
+      将结束{' '}
+      <b id="misc-bold">{miscText.value}</b>{' '}
+      在本浏览器
+    </span>
+    <span id="misc-hazard">前{miscText.value}后</span>
+    <button id="misc-current" type="button" aria-current={miscText.value === '当前' ? 'page' : undefined}>
+      C
+    </button>
+    {/* 空白语义：与 `vue-jsx-vapor` 的产物逐字符对齐（见 compiler.ts 的 jsxText 规则表） */}
+    <span id="ws-a">耗时 {miscText.value}秒</span>
+    <span id="ws-b">
+      第一行
+      第二行
+    </span>
+    <span id="ws-c">  a  b  </span>
+  </div>
+)
+
+mount(Keyless, '#keyless')
+ok(
+  '无 key 的 .map()：锚点没被当成 key（顺序正确）',
+  [...document.querySelectorAll('#kbox > *')].map((n) => n.id).join('|') === 'k-x|k-y|k-after',
+  [...document.querySelectorAll('#kbox > *')].map((n) => n.id).join('|'),
+)
+
+mount(Misc, '#misc')
+const miscBox = () => document.getElementById('misc-box') as HTMLElement
+ok('自闭合非空元素：后面的兄弟还是兄弟', miscBox().children.length === 9, `children=${miscBox().children.length}`)
+ok('自闭合非空元素：没把兄弟吞成子节点', document.querySelector('label.misc-label')?.children.length === 0)
+ok('自闭合非空元素：兄弟顺序对', (miscBox().children[1] as HTMLElement)?.id === 'misc-after-label')
+ok('SVG 上的 class 绑定生效（不抛只读错误）', document.getElementById('misc-svg')?.getAttribute('class') === '当前')
+// 布尔 true 在 ARIA 上必须序列化成 "true"（`""` 不是合法 ARIA 值；本项目图标用 `{...BASE}` 展开它）
+ok('aria-hidden={true} 序列化成 "true"', document.getElementById('misc-svg')?.getAttribute('aria-hidden') === 'true', JSON.stringify(document.getElementById('misc-svg')?.getAttribute('aria-hidden')))
+ok('文本里夹元素：结构正确', document.getElementById('misc-mixed')?.textContent === '将结束 当前 在本浏览器', JSON.stringify(document.getElementById('misc-mixed')?.textContent))
+ok('文本里夹元素：<b> 是 span 的直接子节点', (document.getElementById('misc-bold')?.parentNode as HTMLElement)?.id === 'misc-mixed')
+ok('两侧都是文本的动态成员：顺序正确', document.getElementById('misc-hazard')?.textContent === '前当前后', JSON.stringify(document.getElementById('misc-hazard')?.textContent))
+
+ok('空白：单行文本尾随空格保留', document.getElementById('ws-a')?.textContent === '耗时 当前秒', JSON.stringify(document.getElementById('ws-a')?.textContent))
+ok('空白：跨行文本保留换行与缩进', (() => { const t = document.getElementById('ws-b')?.textContent ?? ''; return t.startsWith('第一行\n') && t.endsWith('第二行') })(), JSON.stringify(document.getElementById('ws-b')?.textContent))
+ok('空白：单行内部空格原样保留', document.getElementById('ws-c')?.textContent === '  a  b  ', JSON.stringify(document.getElementById('ws-c')?.textContent))
+ok('动态属性带上了属性名', document.getElementById('misc-current')?.getAttribute('aria-current') === 'page', JSON.stringify(document.getElementById('misc-current')?.outerHTML))
+miscText.value = 'x2'
+ok('动态属性的 undefined 会移除属性', document.getElementById('misc-current')?.getAttribute('aria-current') === null)
+ok('SVG 上的 class 会更新', document.getElementById('misc-svg')?.getAttribute('class') === 'x2')
+ok('文本里夹元素：内部的 `<b>` 跟着更新', document.getElementById('misc-bold')?.textContent === 'x2')
+ok('两侧都是文本的动态成员：更新后顺序仍然对', document.getElementById('misc-hazard')?.textContent === '前x2后', JSON.stringify(document.getElementById('misc-hazard')?.textContent))
+ok(
+  '两侧都是文本的动态成员：两段静态文本没被并掉（占位注释把它们分开了）',
+  (document.getElementById('misc-hazard')?.childNodes[0] as Text)?.data === '前' && (document.getElementById('misc-hazard')?.lastChild as Text)?.data === '后',
+  `childNodes=${document.getElementById('misc-hazard')?.childNodes.length}`,
+)
 
 const fails = out.filter((l) => l.startsWith('FAIL')).length
 const pre = document.createElement('pre')

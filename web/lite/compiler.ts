@@ -46,26 +46,60 @@ export interface CompileResult {
   helpers: Set<string>
 }
 
-/** 这些属性改 property 比改标签更对（布尔/值类）。 */
-const PROPS = new Set(['value', 'checked', 'selected', 'disabled', 'open', 'multiple', 'readonly', 'required', 'muted'])
+/**
+ * 这些属性改 property 比改标签更对（布尔类）。
+ *
+ * ⚠ `value` **不在**这里：它走 `setValue`，因为 Vapor 的 `setValue` 是
+ * **property 与 attribute 都写**（见 `dom.ts` 里那段注释），只写 property 的话
+ * 只读展示框（`<input value={x} readonly>`）在 DOM 里看不到值。
+ */
+const PROPS = new Set(['checked', 'selected', 'disabled', 'open', 'multiple', 'readonly', 'required', 'muted'])
 
 const VOID = new Set(['img', 'br', 'hr', 'input', 'meta', 'link', 'source', 'area', 'base', 'col', 'embed', 'track', 'wbr', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'use', 'stop', 'ellipse'])
 
 const escText = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 const escAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
 
-/** JSX 文本的空白语义：纯空白且跨行的丢，行内空白折叠成一个空格。 */
+/** 属性值可以**折进模板串**的字面量：字符串 / 数字（`false`/`null` 不行，见 `html()` 里的注释）。 */
+function foldLiteral(e: ts.Expression): string | undefined {
+  if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) return e.text
+  if (ts.isNumericLiteral(e)) return e.text
+  return undefined
+}
+
+/**
+ * JSX 文本的空白语义 —— **与 `vue-jsx-vapor` 的实际产物逐字符对齐**（不是照 Babel）。
+ *
+ * 这两条是从**真实插件的输出**反推出来的，不是猜的：把各种形状的 JSX 过一遍
+ * `vue-jsx-vapor/vite`，看它生成的 `template("…")` 字符串：
+ *
+ * | 源码文本 | Vue 生成 |
+ * |---|---|
+ * | `\n    第一行\n    第二行\n  ` | `第一行\n    第二行`（**行间换行与缩进原样保留**） |
+ * | `\n    正文\n  ` | `正文` |
+ * | `，\n    它们…\n  ` | `，\n    它们…` |
+ * | `a  <b>c</b>  d`（单行） | `a  <b>c</b>  d`（**单行原样，不折叠**） |
+ * | `  `（单行纯空白） | ` `（折叠成一个空格） |
+ * | `\n    <b>x</b>\n    <i>y</i>\n  ` | `<b>x</b><i>y</i>`（纯空白跨行**整段丢掉**） |
+ *
+ * ⇒ 规则：
+ * 1. **整段纯空白**：不含换行 ⇒ 一个空格（Vue 把 `  ` 折成 ` `）；含换行 ⇒ 整段丢掉；
+ * 2. 否则**只裁"含换行的"首尾空白段**：不含换行的那点空格是**行内空格**，Vue 原样保留
+ *    （`\n  耗时 {x}` 里的 `耗时 ` 后面那个空格就属于这种 —— 一开始按 Babel 的算法
+ *    把它 trim 掉了，才在这里露馅）。
+ *
+ * ⚠ 第一版按 Babel 的 `cleanJSXElementLiteralChild` 写（行间补空格、整体 trim），
+ * 与 Vue 差一两个空格、甚至丢掉换行 —— 逐字符比对（`lite/regress/compare.mjs`）抓出来的。
+ */
 function jsxText(raw: string): string {
-  if (!raw.includes('\n')) return raw.replace(/[ \t]+/g, ' ')
-  const lines = raw.split('\n')
-  const out = lines.map((l, i) => {
-    let s = l.replace(/[ \t]+/g, ' ')
-    if (i > 0) s = s.replace(/^ /, '')
-    if (i < lines.length - 1) s = s.replace(/ $/, '')
-    return s
-  })
-  const joined = out.join('')
-  return joined.trim() === '' ? '' : joined.replace(/^\s+|\s+$/g, '')
+  // 纯空白（含跨行）：跨行的整段丢掉，单行的折成一个空格
+  if (!/[^ \t\r\n]/.test(raw)) return raw.includes('\n') ? '' : ' '
+  let s = raw
+  const head = /^[ \t\r\n]+/.exec(s)?.[0] ?? ''
+  if (head.includes('\n')) s = s.slice(head.length)
+  const tail = /[ \t\r\n]+$/.exec(s)?.[0] ?? ''
+  if (tail.includes('\n')) s = s.slice(0, s.length - tail.length)
+  return s
 }
 
 /** 到某个节点的索引路径（相对本次编译的根）。 */
@@ -254,6 +288,9 @@ class Compiler {
         continue
       }
       const name = this.srcOf(attr.name)
+      // `key` 是框架的东西，**不能落到 DOM 上**：它由外层 `createFor` 取走（`.map()` 那条路）
+      // 或者被忽略（其它位置）。放进属性里会渲染成 `key="已注册任务"` 这种真实属性。
+      if (name === 'key') continue
       const init = attr.initializer
       if (!init) {
         attrs.push(name)
@@ -264,6 +301,19 @@ class Compiler {
         continue
       }
       if (ts.isJsxExpression(init) && init.expression) {
+        /**
+         * 字符串/数字字面量**直接折进模板串**（Vapor 也这么做）：既少一次运行期写入，
+         * 又让属性顺序与 Vue 一致 —— 静态属性在模板里按源码顺序排，动态属性由 setter
+         * 在之后追加，`rows={3}` 折不折决定它排第 2 还是排最后（回归脚本能逐字符看出来）。
+         *
+         * ⚠ `false`/`null` 不折：布尔属性写进 HTML 是"存在即为真"，
+         * `disabled={false}` 折成 `disabled="false"` 会把它**打开**（语义反了）。
+         */
+        const folded = foldLiteral(init.expression)
+        if (folded !== undefined) {
+          attrs.push(`${name}="${escAttr(folded)}"`)
+          continue
+        }
         const expr = this.exprWithJsx(init.expression)
         if (name.length > 2 && name.startsWith('on') && /^[A-Z]/.test(name[2])) {
           own.push({ kind: 'event', at: [], name: name.slice(2).toLowerCase(), expr })
@@ -278,28 +328,55 @@ class Compiler {
     const children = ts.isJsxElement(node) ? node.children : []
     const parts: string[] = []
     const childBindings: Binding[] = []
+    /** 本元素里的动态子节点（占位注释 + 铺节点），登记完统一追加到 `childBindings`。 */
+    const dyns: Extract<Binding, { kind: 'nodes' | 'for' }>[] = []
     /**
-     * ⚠ 这里必须用**两个**计数器，不能用同一个：
+     * `dom` 是**真正产出节点的下标** —— 路径 `childNodes[dom]` 用的是它。
      *
-     * * `seq` 是"子节点序列位置"（动态槽也占一位）—— 只用来判断"点后面那个静态兄弟是谁"；
-     * * `dom` 是**真正产出节点的下标** —— 路径 `childNodes[dom]` 用的是它。
-     *
-     * 第一版只有一个计数器，于是 `<li>{label}:{n}</li>` 里那个静态的 ":" 被标成
-     * `childNodes[1]`（DOM 里它其实是 `childNodes[0]`）⇒ 锚点错位，渲染出 `:a1`。
+     * ⚠ 第一版把"动态槽"也当成一个序列位置去数，于是 `<li>{label}:{n}</li>` 里静态的 ":"
+     * 被标成 `childNodes[1]`（DOM 里它其实是 `childNodes[0]`）⇒ 锚点错位，渲染出 `:a1`。
      */
-    const statics: { seq: number; path: Path }[] = []
-    const dyns: { seq: number; binding: Binding }[] = []
-    let seq = 0
     let dom = 0
+    /**
+     * 上一个进模板的节点**是不是文本**。
+     *
+     * 相邻两段文本在 HTML 解析后**合成一个节点**，所以 `childNodes` 下标要按合并后的数：
+     * `<span>将结束{' '}<b>…</b></span>` 里两段文本只有一个文本节点，`<b>` 是
+     * `childNodes[1]`。按"每段文本各占一位"数就会算成 `[2]` —— 运行期拿一个文本节点
+     * 当父节点去 `insertBefore`，抛 `HierarchyRequestError: This node type does not
+     * support this method`（设置页的 `confirm-logout` 弹窗就是这么炸的）。
+     */
+    let textTail = false
+
+    /**
+     * 登记一个动态子节点：**它自己带一个 `<!---->` 占位注释**，这个注释就是它的锚点。
+     *
+     * ⚠⚠ 占位是**必须**的，不能靠"后面那个静态兄弟"当锚点（第一版就是那么做的）：
+     * 动态兄弟**后面还有动态兄弟**时，后者没有静态兄弟可指，两者的锚点都是 `null`
+     * （= 追加到末尾），于是最终顺序取决于**谁的 effect 后重跑**，而不是文档顺序 ——
+     * 抽屉页脚那两行（"最近执行 —" 与 "以 catlair 的身份"）就是这么对调的：
+     * 一个先渲染、另一个晚一步（`backend` 是异步来的）后追加，跑到前面去了。
+     * 占位注释把这个槽的位置**钉死**，重跑多少次都插在同一个地方。
+     *
+     * 顺带解决文本合并：`<span>a{dyn}b</span>` 的两段文本被注释分开，不再是同一个节点。
+     * `regress/compare.mjs` 抓 DOM 时本来就去注释，所以不影响逐字符比对。
+     */
+    const dynChild = (binding: Extract<Binding, { kind: 'nodes' | 'for' }>): void => {
+      parts.push('<!---->')
+      binding.anchor = [...base, dom]
+      dom++
+      dyns.push(binding)
+      textTail = false
+    }
 
     for (const child of children) {
       if (ts.isJsxText(child)) {
         const t = jsxText(child.text)
         if (!t) continue
         parts.push(escText(t))
-        statics.push({ seq, path: [...base, dom] })
-        seq++
-        dom++
+        // 与上一段文本合并 ⇒ 不再占一个下标
+        if (!textTail) dom++
+        textTail = true
         continue
       }
       if (ts.isJsxExpression(child)) {
@@ -308,52 +385,54 @@ class Compiler {
         if (lit !== undefined) {
           if (lit) {
             parts.push(lit)
-            statics.push({ seq, path: [...base, dom] })
+            if (!textTail) dom++
+            textTail = true
           }
-          seq++
-          if (lit) dom++
           continue
         }
-        dyns.push({ seq, binding: this.dynamic(child, stmts, [...base, dom]) })
-        seq++
+        dynChild(this.dynamic(child, stmts, [...base, dom]))
         continue
       }
       // 组件 / 片段：不是静态结构 ⇒ 走"动态插入"（Solid 也是 insert(parent, createComponent(…), anchor)）。
       // 这是本项目最常见的写法之一：`<Panel>…</Panel>` 直接放在元素里。
       if (ts.isJsxFragment(child) || /^[A-Z]/.test(this.tagOf(child)) || this.tagOf(child).includes('.')) {
-        dyns.push({
-          seq,
-          binding: { kind: 'nodes', parent: [...base], anchor: null, expr: `() => ${this.valueIsolated(child)}` },
-        })
-        seq++
+        dynChild({ kind: 'nodes', parent: [...base], anchor: null, expr: `() => ${this.valueIsolated(child)}` })
         continue
       }
       // 静态元素：递归（它的绑定路径以本元素的 DOM 下标为前缀）
       const sub = this.html(child, stmts, [...base, dom])
       parts.push(sub.html)
-      statics.push({ seq, path: [...base, dom] })
       childBindings.push(...sub.bindings)
-      seq++
       dom++
+      textTail = false
     }
 
-    // 动态位置的锚点 = 它后面第一个静态兄弟（没有 ⇒ null，追加到末尾）
-    for (const { seq: at, binding } of dyns) {
-      const anchor = statics.find((st) => st.seq > at)?.path ?? null
-      if (binding.kind === 'nodes' || binding.kind === 'for') binding.anchor = anchor
-      childBindings.push(binding)
-    }
+    childBindings.push(...dyns)
 
     const inner = parts.join('')
-    const selfClose = VOID.has(tag) || children.length === 0
-    const html = selfClose ? `<${tag}${attrs.length ? ' ' + attrs.join(' ') : ''}>` : `<${tag}${attrs.length ? ' ' + attrs.join(' ') : ''}>${inner}</${tag}>`
+    const open = `<${tag}${attrs.length ? ' ' + attrs.join(' ') : ''}>`
+    /**
+     * ⚠⚠ **HTML 里没有"自闭合"这回事**（除了空元素）。
+     *
+     * JSX 允许把任意元素写成 `<label ... />`，但 `<label>` 不是空元素 —— 生成
+     * `<label ...>` 交给 HTML 解析器，它会把**后面的兄弟节点吞成 label 的子节点**。
+     * 后果不是"报错看得见"：编译期算好的 `childNodes[i]` 路径全部错位一格，
+     * 运行期在 effect 里抛 `Cannot read properties of undefined (reading 'firstChild')`，
+     * 而应用那边（`authState` 的写入）正好在 `try/catch` 里 ⇒ 错误被吞掉、
+     * 页面整个空白、`window.onerror` 一声不响。（`drawer-side` 里的
+     * `<label ... />` 就是这么把整个应用打黑的。）
+     */
+    if (VOID.has(tag) && children.length) {
+      throw new Error(`lite 编译器不支持的写法：空元素 <${tag}> 不能带子节点（生成 HTML 无法表达）`)
+    }
+    const html = VOID.has(tag) ? open : `${open}${inner}</${tag}>`
     // 自身绑定：路径为 base（相对整棵树的根，由调用方补前缀）
     const ownShifted = own.map((b) => ({ ...b, at: [...base] }) as Binding)
     return { html, bindings: [...ownShifted, ...childBindings] }
   }
 
-  /** 一个动态子节点的绑定。 */
-  private dynamic(child: ts.JsxExpression, stmts: string[], at: Path): Binding {
+  /** 一个动态子节点的绑定。返回值只可能是 `nodes` / `for`（两者都是"往父节点里铺一批节点"）。 */
+  private dynamic(child: ts.JsxExpression, stmts: string[], at: Path): Extract<Binding, { kind: 'nodes' | 'for' }> {
     const e = child.expression as ts.Expression
     const parent = at.slice(0, -1)
     // {cond ? <A/> : null} ⇒ setNodes(parent, () => cond ? A() : null, anchor)（Solid 同款，不需要 createIf）
@@ -459,8 +538,14 @@ class Compiler {
     for (const b of bindings) {
       switch (b.kind) {
         case 'attr': {
-          const fn = this.h(b.name === 'class' ? 'setClass' : PROPS.has(b.name) ? 'setProp' : 'setAttr')
-          const call = `${fn}(${v(b.at)}, ${b.expr})`
+          // `class` / `value` 是 `(node, v)` 两参数，其余是 `(node, name, v)`
+          const two = b.name === 'class' || b.name === 'value'
+          const fn = this.h(b.name === 'class' ? 'setClass' : b.name === 'value' ? 'setValue' : PROPS.has(b.name) ? 'setProp' : 'setAttr')
+          // ⚠ `(node, name, v)` 那三个参数里，**名字不能漏**。漏了不会报错：
+          // `setAttr(el, true)` 里的 `true` 被当成**属性名**，而值成了 undefined
+          // ⇒ 走 removeAttribute 分支，静默什么都不做（`aria-current`、`aria-expanded`
+          // 这类全在这里，页面上"看着对、就是没这个属性"）。
+          const call = two ? `${fn}(${v(b.at)}, ${b.expr})` : `${fn}(${v(b.at)}, ${JSON.stringify(b.name)}, ${b.expr})`
           // 字面量属性直接写一次；其余包 effect（值变了才写 DOM）
           out.push(b.hoist ? call : `${this.h('effect')}(() => ${call})`)
           break
@@ -477,8 +562,11 @@ class Compiler {
           break
         case 'for': {
           const [a, i] = b.params
-          const key = b.key ? `, (${a}, ${i}) => ${b.key}` : ''
-          out.push(`${this.h('createFor')}(${v(b.parent)}, () => ${b.list}, (${a}, ${i}) => ${b.item}${key}, ${b.anchor ? v(b.anchor) : 'null'})`)
+          // ⚠ key 的位置**必须占住**（没有 key 就显式写 `null`）：少了它，锚点会落到
+          // createFor 的 key 形参上 —— `r ? r(i, t) : t` 于是去调一个**节点**，
+          // 抛 `TypeError: r is not a function`（账号页那几个无 key 的 `.map()` 就这么炸的）。
+          const key = b.key ? `(${a}, ${i}) => ${b.key}` : 'null'
+          out.push(`${this.h('createFor')}(${v(b.parent)}, () => ${b.list}, (${a}, ${i}) => ${b.item}, ${key}, ${b.anchor ? v(b.anchor) : 'null'})`)
           break
         }
       }

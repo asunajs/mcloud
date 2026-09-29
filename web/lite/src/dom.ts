@@ -44,6 +44,45 @@ export function template(html: string): () => Node {
 export function insert(parent: Node, nodes: Nodes, anchor: Node | null = null): void {
   for (const n of nodes) parent.insertBefore(n, anchor)
   flushSlots()
+  flushMounted()
+}
+
+/**
+ * 挂载钩子排队：**节点进了文档**才跑（`onMounted` 语义与 Vue 对齐）。
+ *
+ * ⚠⚠ 不能只在"应用挂载那一刻"flush 一次。组件不只在首屏被创建 —— **条件分支翻转、
+ * 列表插入、切页**都会在之后建出新组件（`SettingsPage` 就是 `authState` 变成 `ready`
+ * 之后才在抽屉里建的）。只 flush 一次的话，这些组件的 `onMounted` **永远不跑**：
+ * 页面停在"加载中"、按钮一直是 disabled，而且**一声不响**（没有异常）。
+ *
+ * 所以每次 `insert` 之后都试着 flush；还没进文档的（父节点自己还没被插入）留到下一轮。
+ */
+const mounts: { node: Node | undefined; cb: () => void }[] = []
+
+export function queueMount(nodes: Nodes, cb: () => void): void {
+  const node = nodes[0]
+  // 组件渲染成空（`null`）时没有"进文档"可言，直接跑，别让它永远排在队里
+  if (!node) cb()
+  else mounts.push({ node, cb })
+}
+
+let flushing = false
+
+/** 跑掉"已经进文档"的挂载钩子。有界多轮：钩子里还会建组件（子先父后）。 */
+function flushMounted(): void {
+  if (flushing) return
+  flushing = true
+  try {
+    for (let pass = 0; pass < 8 && mounts.length; pass++) {
+      const list = mounts.splice(0)
+      for (const m of list) {
+        if (m.node?.isConnected) m.cb()
+        else mounts.push(m)
+      }
+    }
+  } finally {
+    flushing = false
+  }
 }
 
 /**
@@ -162,27 +201,65 @@ export function setText(node: Node, v: unknown): void {
 }
 
 /**
- * 普通属性。`null`/`false` 移除、`true` 置空值 —— 与 JSX 里布尔属性的直觉一致。
- * `class` 走 `className`（比 `setAttribute` 少一次字符串解析）。
+ * `setAttr` 里"`false` ⇒ 移除属性"的属性名白名单 —— 与 Vue 的 `isSpecialBooleanAttr` 同一份
+ * （`checked`/`disabled`/`required` 这些**短路在 `setProp` 上**，根本不走这里）。
  */
-/** 类名单独一个函数（Vapor 也是 `setClass`）：走 `className` 比 `setAttribute` 少一次解析。 */
+const BOOL_ATTR = new Set(['allowfullscreen', 'formnovalidate', 'ismap', 'itemscope', 'nomodule', 'novalidate', 'readonly'])
+
+/** 类名（Vapor 也叫 `setClass`）：HTML 元素走 `className`，比 `setAttribute` 少一次解析。 */
 export function setClass(node: Node, v: unknown): void {
   const el = node as Element
-  const s = v == null || v === false ? '' : String(v)
-  if (el.className !== s) el.className = s
+  const s = v == null || v === false ? '' : String(v).trim()
+  /**
+   * ⚠⚠ 不能无条件写 `el.className`：**SVG 元素的 `className` 是只读的**
+   * `SVGAnimatedString`，赋值直接抛 `TypeError`（本项目图标全是 `<svg>`，
+   * 而 `class` 绑定是每个图标头上的第一个 effect ⇒ 一抛就是整个组件树建不出来）。
+   * HTML 元素上 `className` 比 `setAttribute` 省一次解析，所以两路分开走。
+   */
+  if (typeof el.className === 'string') {
+    if (el.className !== s) el.className = s
+  } else if (el.getAttribute('class') !== s) {
+    el.setAttribute('class', s)
+  }
 }
 
+/**
+ * 普通属性。`null` 移除；`false` 只有布尔属性才移除，其余一律 `String(v)`。
+ *
+ * ⚠ 原来把 `true` 写成 `""`（"布尔属性只需要存在"的直觉）。**不对**：这条路径收到 `true`
+ * 的场景根本不是布尔属性 —— 布尔属性（`disabled`/`checked`/…）在编译器里走 `setProp`。
+ * 走这里的是 `{...BASE}` 展开和 `aria-*`，而 `aria-hidden={true}` 必须序列化成
+ * `aria-hidden="true"`（`""` 既不是合法 ARIA 值，也和 Vue 的产物对不上）。
+ */
 export function setAttr(node: Node, name: string, v: unknown): void {
   const el = node as Element
-  if (v == null || v === false) el.removeAttribute(name)
-  else if (v === true) el.setAttribute(name, '')
-  else el.setAttribute(name, String(v))
+  // `false` 只在**布尔属性**上表示"移除"；其余要序列化成 `"false"`
+  // （`spellcheck={false}`、`aria-hidden={false}` 都是这个语义）
+  if (v == null || (v === false && BOOL_ATTR.has(name))) el.removeAttribute(name)
+  else el.setAttribute(name, v === false ? 'false' : String(v))
 }
 
-/** DOM 属性（`value` / `checked` / `disabled` 这类"改属性比改标签更对"的）。 */
+/** DOM 属性（`checked` / `disabled` 这类"改属性比改标签更对"的）。 */
 export function setProp(node: Node, name: string, v: unknown): void {
   // biome-ignore lint/suspicious/noExplicitAny: 属性名与节点类型都由编译器静态决定
   ;(node as any)[name] = v == null ? '' : v
+}
+
+/**
+ * `value`（输入框 / 下拉框）。**property 与 attribute 都写** —— 与 Vapor 的 `setValue` 一致。
+ *
+ * ⚠ 只写 property 是不够的：`--dump-dom`、`outerHTML`、`getAttribute('value')`、以及
+ * 一切"读标签"的代码都看不到值，而 `<input value={x} readonly>` 这种**只读展示框**
+ * 恰恰是只靠它显示的（首屏回归里就是这条把它比出来的）。
+ */
+export function setValue(node: Node, v: unknown): void {
+  const el = node as HTMLInputElement
+  const s = v == null ? '' : String(v)
+  // `<option>` 的 `value` 是**属性**语义（没有 property 回退），Vapor 也是单独判它
+  const old = el.tagName === 'OPTION' ? el.getAttribute('value') : el.value
+  if (old !== s) el.value = s
+  if (v == null) el.removeAttribute('value')
+  else el.setAttribute('value', s)
 }
 
 /** 事件。事件名由编译器从 `onClick` 折成 `click`。 */

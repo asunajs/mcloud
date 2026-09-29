@@ -21,7 +21,13 @@ const arg = (name, fallback) => {
   return i > 0 ? process.argv[i + 1] : fallback
 }
 const rawRoute = arg('--route', 'settings')
-const route = rawRoute.startsWith('#') ? rawRoute : '#' + rawRoute
+/**
+ * 路由规范化：应用的 `parseHash` 比的是 `#/settings` 这种**带斜杠**的 href
+ * （`NAV_ITEMS` 里就是 `#/history`），而命令行里写 `--route settings` 更顺手。
+ * ⚠ 少了这一步，`#settings` 匹配不上任何一项 ⇒ 应用回落到 dashboard，
+ * 于是"每个页面都通过"其实测的是同一个页面（踩过：8 个路由的字节数一模一样才发现）。
+ */
+const route = `#/${rawRoute.replace(/^#\/?/, '')}`
 const liteDir = arg('--lite', '/tmp/lite-app')
 const vueDir = arg('--vue', 'dist')
 
@@ -104,7 +110,7 @@ const dump = (port, name) =>
     })
   })
 
-/** 取 `#app` 子树（按 div 标签配平），去注释锚点、折叠标签间空白。 */
+/** 取 `#app` 子树（按 div 标签配平），去注释锚点、折叠标签间空白、抹掉框架专有的挂载标记。 */
 function appSubtree(html) {
   const i = html.indexOf('<div id="app"')
   if (i < 0) return ''
@@ -120,16 +126,31 @@ function appSubtree(html) {
   return html
     .slice(i, end)
     .replace(/<!--.*?-->/gs, '')
+    .replace(/\s+data-v-app(="")?/g, '')
+    // Vue 的 scoped 属性（`data-v-1a2b3c`）与 `data-v-app` 都是框架挂的标记，不属于渲染结果
+    .replace(/\s+data-v-[0-9a-f]+(="")?/g, '')
     .replace(/>\s+</g, '><')
     .trim()
 }
 
 fs.mkdirSync('/tmp/shots', { recursive: true })
-const a = await serve(liteDir, 48151)
-const b = await serve(vueDir, 48152)
-const raw = { lite: await dump(48151, 'lite'), vue: await dump(48152, 'vue') }
-a.close()
-b.close()
+/**
+ * `--from-raw`：直接用上一次落盘的原始抓取（`/tmp/lite-raw.*.html`）。
+ * 调**比对规则**（归一化、差异报告）时不必再跑一遍 chrome —— 抓一次几秒钟，调试期很划算。
+ */
+const fromRaw = process.argv.includes('--from-raw')
+let raw
+if (fromRaw) {
+  raw = { lite: fs.readFileSync('/tmp/lite-raw.lite.html', 'utf8'), vue: fs.readFileSync('/tmp/lite-raw.vue.html', 'utf8') }
+} else {
+  const a = await serve(liteDir, 48151)
+  const b = await serve(vueDir, 48152)
+  raw = { lite: await dump(48151, 'lite'), vue: await dump(48152, 'vue') }
+  // 原始抓取一律落盘：失败时想细看（例如 side 里塞了诊断节点）不必再跑一遍
+  for (const [name, html] of Object.entries(raw)) fs.writeFileSync(`/tmp/lite-raw.${name}.html`, html)
+  a.close()
+  b.close()
+}
 
 const lite = appSubtree(raw.lite)
 const vue = appSubtree(raw.vue)

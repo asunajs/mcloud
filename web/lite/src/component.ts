@@ -15,7 +15,7 @@
  * 生命周期钩子只有两个（普查：`onMounted` 11 处、`onUnmounted` 5 处，没有别的）。
  */
 
-import { type Nodes, insert, onRemove, createNodes, remove } from './dom'
+import { type Nodes, insert, onRemove, createNodes, remove, queueMount } from './dom'
 
 export interface Slots {
   default?: () => unknown
@@ -32,9 +32,6 @@ interface Instance {
 
 /** 当前正在渲染的组件实例。同步渲染 ⇒ 一个模块级变量就够，不需要上下文栈。 */
 let current: Instance | null = null
-
-/** 挂载钩子排队：**整棵树插进文档之后**才跑，语义与 Vue 的 `onMounted` 对齐。 */
-const queue: (() => void)[] = []
 
 /**
  * 造一个组件实例，返回它的节点。
@@ -53,10 +50,18 @@ export function createComponent<P>(Comp: Component<P>, props: P, slots: Slots = 
   } finally {
     current = prev
   }
-  // 子组件的挂载钩子并到父实例里 ⇒ 最终一起等到根节点入文档后才跑（子先父后）
+  /**
+   * 挂载钩子按**实例自己**的节点登记，不并进父实例。
+   *
+   * ⚠ 并进父实例是错的：动态建的组件（切页、条件分支、列表里的）在它被创建时
+   * 父实例的钩子**早就跑完了**，于是这些钩子再也不会被执行 —— 症状是子页面永远停在
+   * 初始状态（`SettingsPage` 的 `onMounted(() => load())` 不跑 ⇒ 一直"加载中"）。
+   * 登记到自己的节点上，则由 `insert` 在**它的节点进文档**时逐个放行。
+   */
   if (inst.mounts.length) {
-    if (current) current.mounts.push(...inst.mounts)
-    else queue.push(...inst.mounts)
+    queueMount(nodes, () => {
+      for (const m of inst.mounts) m()
+    })
   }
   if (inst.unmounts.length) onRemove(nodes, () => {
     for (const u of inst.unmounts) u()
@@ -67,7 +72,8 @@ export function createComponent<P>(Comp: Component<P>, props: P, slots: Slots = 
 /** 挂载后执行（此时节点已在文档里，能查到 `document`）。 */
 export function onMounted(cb: () => void): void {
   if (current) current.mounts.push(cb)
-  else queue.push(cb)
+  // 不在组件里调用（不该出现）：没有节点可等，立刻跑，别让它永远排队
+  else queueMount([], cb)
 }
 
 /** 卸载时执行。`onUnmounted` 里那些 `removeEventListener` 靠它收尾。 */
@@ -88,9 +94,8 @@ export function mount(App: Component, target: Element | string): () => void {
   const el = typeof target === 'string' ? document.querySelector(target) : target
   if (!el) return () => {}
   const nodes = createComponent(App, {}, {})
+  // `insert` 自己会在插完之后跑挂载钩子（含之后动态建出来的组件的）
   insert(el, nodes)
-  const q = queue.splice(0)
-  for (const m of q) m()
   // 返回卸载器：`remove` 会顺带跑 onUnmounted 的钩子
   return () => remove(nodes)
 }
