@@ -92,6 +92,22 @@ pub async fn serve(uri: Uri) -> Response {
         return asset_response(path, content.data.into_owned());
     }
 
+    // ⚠⚠ **`assets/` 下的未命中必须是 404，不能回落 SPA**（2026-09-29 实测的缺陷）。
+    //
+    // 那是 Vite 的**带内容哈希**产物目录：文件名一变，旧 URL 就不存在了 —— 而
+    // 拿到旧 `index.html` 的浏览器**正是要**去要那个旧 URL，它必须收到 404 才会
+    // 回头重新取 HTML。回落会让它拿到一张 `200 text/html` 并当 JS 解析 ⇒
+    // 「发版后白屏 + 一个与真实原因无关的 MIME 报错」，排查成本远高于 404。
+    //
+    // 顺手也把"看起来是文件"的路径（末段带点，如 `/favicon.ico`）一起 404：
+    // 同样是把 HTML 当别的类型发出去，收益为零、只有误导。
+    // 注意本应用是 **hash 路由**（`#/tasks`），真实路径只有 `/`，
+    // 所以这条收紧不会伤到任何正常入口。
+    let last = path.rsplit('/').next().unwrap_or(path);
+    if path.starts_with("assets/") || last.contains('.') {
+        return (StatusCode::NOT_FOUND, "静态资源不存在").into_response();
+    }
+
     // SPA 回落：认不出的一律给 index.html，让前端按 hash 自己路由。
     // 但**不能**把 API 路径也吞掉 —— 那会让打错字的接口返回一张 HTML，
     // 前端 `JSON.parse` 报一个与真实原因无关的错。
@@ -303,5 +319,48 @@ mod tests {
             .unwrap_or_default()
             .to_string();
         assert_eq!(ct, "text/html; charset=utf-8");
+    }
+}
+
+#[cfg(test)]
+mod assets_404_tests {
+    use super::*;
+
+    /// 未命中的哈希产物必须 404（而不是被 SPA 回落成 200 HTML）。
+    /// 这条不需要前端构建过 —— 判据在"路径形状"上，与资产集无关。
+    #[tokio::test]
+    async fn hashed_asset_miss_is_404() {
+        for uri in [
+            "/assets/index-DOESNOTEXIST.js",
+            "/assets/index-DOESNOTEXIST.css",
+        ] {
+            let res = serve(Uri::from_static(uri)).await;
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{uri} 应当 404");
+        }
+    }
+
+    /// 看起来是文件的路径（末段带点）同样 404：把 HTML 当图标/脚本发出去属于误导。
+    #[tokio::test]
+    async fn file_like_miss_is_404() {
+        let res = serve(Uri::from_static("/favicon.ico")).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// 反过来：普通路径仍要回落 SPA（直接输 `/whatever` 也能进应用）。
+    /// 没构建过前端时跳过 —— 测试不该反过来依赖 `npm run build`。
+    #[tokio::test]
+    async fn plain_path_still_falls_back_to_spa() {
+        if !has_built_assets() {
+            eprintln!("跳过：web/dist 未构建");
+            return;
+        }
+        let res = serve(Uri::from_static("/some/deep/route")).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
     }
 }
