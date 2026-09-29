@@ -22,7 +22,8 @@ export type Nodes = Node[]
 
 export function createNodes(v: unknown): Nodes {
   if (v == null || v === true || v === false) return []
-  if (Array.isArray(v)) return v.flat(9) as Nodes
+  // 数组里可能夹着 null/false（片段成员的 `cond ? x : null`），先滤掉再铺
+  if (Array.isArray(v)) return v.flat(9).filter(Boolean) as Nodes
   return [v instanceof Node ? v : document.createTextNode(String(v))]
 }
 

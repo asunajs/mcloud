@@ -76,7 +76,7 @@ type Binding =
   | { kind: 'event'; at: Path; name: string; expr: string }
   | { kind: 'spread'; at: Path; expr: string }
   | { kind: 'nodes'; parent: Path; anchor: Path | null; expr: string }
-  | { kind: 'for'; parent: Path; anchor: Path | null; list: string; param: string; item: string; key?: string }
+  | { kind: 'for'; parent: Path; anchor: Path | null; list: string; params: [string, string]; item: string; key?: string }
 
 interface Built {
   html: string
@@ -168,8 +168,9 @@ class Compiler {
         continue
       }
       if (ts.isJsxExpression(init) && init.expression) {
-        // 动态 prop = getter（同 Solid）
-        props.push(`get ${JSON.stringify(name)}() { return ${this.srcOf(init.expression)} }`)
+        // 动态 prop = getter（同 Solid）。⚠ 值里可能直接是 JSX
+        // （`<EmptyState action={<button …/>} />` 在本项目里就有），必须递归编译掉
+        props.push(`get ${JSON.stringify(name)}() { return ${this.exprWithJsx(init.expression)} }`)
         continue
       }
       throw new Error(`不支持的组件属性：${name}`)
@@ -182,6 +183,32 @@ class Compiler {
     return `${this.h('createComponent')}(${this.tagOf(node)}, { ${props.join(', ')} }${slots.length ? `, { ${slots.join(', ')} }` : ''})`
   }
 
+  /**
+   * 复制一段表达式的源码，但把它内部的 JSX 全部递归编译掉。
+   *
+   * ⚠ 少了这一步会**静默漏掉 JSX**：`<>…{cond ? null : <div>…</div>}…</>` 这种
+   * 片段成员、或数组字面量里的三元分支，走到"普通表达式"路径时若原样复制，
+   * 产物里就留着 JSX ⇒ 下游解析器直接报 `Unexpected JSX expression`
+   * （实测 app.tsx 的根返回就是这个形状）。
+   */
+  private exprWithJsx(node: ts.Expression): string {
+    const base = node.getStart(this.sf)
+    const edits: { start: number; end: number; text: string }[] = []
+    const walk = (n: ts.Node, inJsx: boolean) => {
+      const isJsx = ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n) || ts.isJsxFragment(n)
+      if (isJsx && !inJsx) {
+        edits.push({ start: n.getStart(this.sf) - base, end: n.getEnd() - base, text: this.valueIsolated(n) })
+        return
+      }
+      ts.forEachChild(n, (c) => walk(c, inJsx || isJsx))
+    }
+    walk(node, false)
+    if (!edits.length) return this.srcOf(node)
+    let out = this.srcOf(node)
+    for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + e.text + out.slice(e.end)
+    return out
+  }
+
   /** 组件子节点 / 片段成员：拿一个"值"（文本要自己造节点）。 */
   private childValue(child: ts.JsxChild): string | undefined {
     if (ts.isJsxText(child)) {
@@ -191,7 +218,7 @@ class Compiler {
     if (ts.isJsxExpression(child)) {
       if (!child.expression) return undefined
       if (isNullish(child.expression)) return undefined
-      return this.srcOf(child.expression)
+      return this.exprWithJsx(child.expression)
     }
     return this.valueIsolated(child)
   }
@@ -232,7 +259,7 @@ class Compiler {
         continue
       }
       if (ts.isJsxExpression(init) && init.expression) {
-        const expr = this.srcOf(init.expression)
+        const expr = this.exprWithJsx(init.expression)
         if (name.length > 2 && name.startsWith('on') && /^[A-Z]/.test(name[2])) {
           own.push({ kind: 'event', at: [], name: name.slice(2).toLowerCase(), expr })
         } else {
@@ -325,7 +352,10 @@ class Compiler {
     const e = child.expression as ts.Expression
     const parent = at.slice(0, -1)
     // {cond ? <A/> : null} ⇒ setNodes(parent, () => cond ? A() : null, anchor)（Solid 同款，不需要 createIf）
-    if (ts.isConditionalExpression(e) && hasJsx(e)) {
+    // ⚠ 只有**两个分支都是 JSX 或 null** 时才走这条精确路径；否则落到下面的通用路径
+    // （分支是普通表达式的三元，项目里也有 —— 那里靠 exprWithJsx 递归处理 JSX）
+    const branchOk = (x: ts.Expression) => isNullish(x) || ts.isJsxElement(x) || ts.isJsxSelfClosingElement(x) || ts.isJsxFragment(x)
+    if (ts.isConditionalExpression(e) && hasJsx(e) && branchOk(e.whenTrue) && branchOk(e.whenFalse)) {
       const cond = this.srcOf(e.condition)
       const a = isNullish(e.whenTrue) ? 'null' : this.branch(e.whenTrue)
       const b = isNullish(e.whenFalse) ? 'null' : this.branch(e.whenFalse)
@@ -334,31 +364,35 @@ class Compiler {
     // {list.map((x) => <Row/>)} ⇒ createFor
     if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && e.expression.name.text === 'map' && e.arguments.length === 1) {
       const fn = e.arguments[0]
-      if (!ts.isArrowFunction(fn) || fn.parameters.length !== 1) throw new Error('.map 回调必须是单参箭头函数')
-      const param = this.srcOf(fn.parameters[0].name)
-      const body = ts.isParenthesizedExpression(fn.body) ? fn.body.expression : fn.body
-      if (!ts.isJsxElement(body) && !ts.isJsxSelfClosingElement(body) && !ts.isJsxFragment(body)) throw new Error('.map 回调必须直接返回 JSX')
-      let key: string | undefined
-      if (!ts.isJsxFragment(body)) {
-        const opening = ts.isJsxElement(body) ? body.openingElement : body
-        for (const attr of opening.attributes.properties) {
-          if (ts.isJsxAttribute(attr) && this.srcOf(attr.name) === 'key' && attr.initializer && ts.isJsxExpression(attr.initializer) && attr.initializer.expression) {
-            key = this.srcOf(attr.initializer.expression)
+      const body = ts.isArrowFunction(fn) ? (ts.isParenthesizedExpression(fn.body) ? fn.body.expression : fn.body) : undefined
+      const isListOfJsx = !!body && (ts.isJsxElement(body) || ts.isJsxSelfClosingElement(body) || ts.isJsxFragment(body))
+      // 回调不返回 JSX 的 `.map`（例如 `{xs.map(f).join(',')}`）不是列表，交给普通表达式路径
+      if (isListOfJsx && ts.isArrowFunction(fn) && fn.parameters.length >= 1 && fn.parameters.length <= 2) {
+        // 两个参数名：用户只写了一个就补一个 `_i`（createFor 会给 index，key/render 都能用）
+        const a = this.srcOf(fn.parameters[0].name)
+        const b = fn.parameters[1] ? this.srcOf(fn.parameters[1].name) : '_i'
+        let key: string | undefined
+        if (!ts.isJsxFragment(body)) {
+          const opening = ts.isJsxElement(body) ? body.openingElement : body
+          for (const attr of opening.attributes.properties) {
+            if (ts.isJsxAttribute(attr) && this.srcOf(attr.name) === 'key' && attr.initializer && ts.isJsxExpression(attr.initializer) && attr.initializer.expression) {
+              key = this.srcOf(attr.initializer.expression)
+            }
           }
         }
-      }
-      return {
-        kind: 'for',
-        parent,
-        anchor: null,
-        list: this.srcOf((e.expression as ts.PropertyAccessExpression).expression),
-        param,
-        item: this.root(body),
-        key,
+        return {
+          kind: 'for',
+          parent,
+          anchor: null,
+          list: this.srcOf((e.expression as ts.PropertyAccessExpression).expression),
+          params: [a, b],
+          item: this.root(body),
+          key,
+        }
       }
     }
     void stmts
-    return { kind: 'nodes', parent, anchor: null, expr: `() => ${this.srcOf(e)}` }
+    return { kind: 'nodes', parent, anchor: null, expr: `() => ${this.exprWithJsx(e)}` }
   }
 
   private branch(e: ts.Expression): string {
@@ -437,8 +471,9 @@ class Compiler {
           out.push(`${this.h('setNodes')}(${v(b.parent)}, ${b.expr}, ${b.anchor ? v(b.anchor) : 'null'})`)
           break
         case 'for': {
-          const key = b.key ? `, (${b.param}) => ${b.key}` : ''
-          out.push(`${this.h('createFor')}(${v(b.parent)}, () => ${b.list}, (${b.param}) => ${b.item}${key}, ${b.anchor ? v(b.anchor) : 'null'})`)
+          const [a, i] = b.params
+          const key = b.key ? `, (${a}, ${i}) => ${b.key}` : ''
+          out.push(`${this.h('createFor')}(${v(b.parent)}, () => ${b.list}, (${a}, ${i}) => ${b.item}${key}, ${b.anchor ? v(b.anchor) : 'null'})`)
           break
         }
       }

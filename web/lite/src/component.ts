@@ -96,3 +96,15 @@ export function mount(App: Component, target: Element | string): () => void {
 }
 
 export const defineVaporComponent = <T>(fn: T): T => fn
+
+/**
+ * 迁移兼容层：`src/main.ts` 现在写的是 `createVaporApp(App).mount('#app')`。
+ * 保留这个名字，业务入口就一行都不用改（与 `defineVaporComponent` 同理）。
+ */
+export function createVaporApp(App: Component) {
+  return {
+    mount(target: Element | string) {
+      mount(App, target)
+    },
+  }
+}
