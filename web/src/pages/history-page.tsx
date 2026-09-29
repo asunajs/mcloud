@@ -7,6 +7,7 @@
 
 import { onMounted, ref } from 'vue'
 import { listRuns, type RunRecord } from '../api'
+import { accountName, refreshAccountNames } from '../account-names'
 import { EmptyState } from '../ui/empty-state'
 import { fmtDuration, fmtEpochMs } from '../ui/time'
 import { outcomeText, statusBadge, statusLabel } from '../ui/history'
@@ -42,9 +43,11 @@ const LeftoverCell = (props: { record: RunRecord }) => {
       <span class="badge badge-warning badge-sm">遗留 {items.length} 个文件</span>
       <ul class="flex flex-col gap-0.5">
         {items.map((a) => (
-          // 给出账号与 ID：清理要用该账号的凭据按 ID 删
+          // 给出账号与 ID：清理要用该账号的凭据按 ID 删。
+          // ⚠ 账号那一格走 accountName：主键是哈希，摆出来认不出是哪个号；
+          // 产物 ID 保持原样，它本来就是拿来操作的东西。
           <li key={`${a.account}/${a.id}`} class="font-mono text-xs opacity-70">
-            {a.account} · {a.id}
+            {accountName(a.account)} · {a.id}
           </li>
         ))}
       </ul>
@@ -69,7 +72,11 @@ export const HistoryPage = (props: HistoryPageProps) => {
     }
   }
 
-  onMounted(() => void load())
+  onMounted(() => {
+    // 先把"id → 名字"填上，否则运行记录里显示的是一串哈希
+    void refreshAccountNames()
+    void load()
+  })
 
   const header = () => (
     <div class="flex flex-wrap items-center justify-between gap-2">
@@ -125,7 +132,7 @@ export const HistoryPage = (props: HistoryPageProps) => {
                 <tr key={r.run_id}>
                   <td>{r.run_id}</td>
                   <td>{r.task}</td>
-                  <td class="break-words">{r.account}</td>
+                  <td class="break-words">{accountName(r.account)}</td>
                   <td>
                     <span class={`badge ${statusBadge(r.outcome.status)}`}>
                       {outcomeText(r.outcome)}
@@ -153,7 +160,7 @@ export const HistoryPage = (props: HistoryPageProps) => {
                     {statusLabel(r.outcome.status)}
                   </span>
                 </div>
-                <p class="break-words text-xs opacity-70">账号 {r.account}</p>
+                <p class="break-words text-xs opacity-70">账号 {accountName(r.account)}</p>
                 <p class="break-words text-xs opacity-70">{outcomeText(r.outcome)}</p>
                 <p class="text-xs opacity-60">
                   运行号 {r.run_id} · 耗时 {fmtDuration(r.duration_ms)}

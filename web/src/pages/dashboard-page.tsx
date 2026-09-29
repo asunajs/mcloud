@@ -6,6 +6,7 @@
 
 import { onMounted, ref } from 'vue'
 import { getStatus, listRuns, type RunRecord, type ServiceStatus } from '../api'
+import { accountName, refreshAccountNames } from '../account-names'
 import { StatRow, type StatItem } from '../ui/stat-row'
 import { EmptyState } from '../ui/empty-state'
 import { fmtDuration, fmtEpochMs } from '../ui/time'
@@ -40,7 +41,11 @@ export const DashboardPage = (props: DashboardPageProps) => {
     }
   }
 
-  onMounted(() => void load())
+  onMounted(() => {
+    // 先把"id → 名字"填上，否则运行记录里显示的是一串哈希
+    void refreshAccountNames()
+    void load()
+  })
 
   const stats = (): StatItem[] => {
     if (!status.value) return []
@@ -116,7 +121,7 @@ export const DashboardPage = (props: DashboardPageProps) => {
                 {runs.value.map((r) => (
                   <tr key={r.run_id}>
                     <td>{r.task}</td>
-                    <td class="break-words">{r.account}</td>
+                    <td class="break-words">{accountName(r.account)}</td>
                     <td>
                       <span class={`badge ${statusBadge(r.outcome.status)}`}>
                         {outcomeText(r.outcome)}
@@ -140,7 +145,7 @@ export const DashboardPage = (props: DashboardPageProps) => {
                     {statusLabel(r.outcome.status)}
                   </span>
                 </div>
-                <p class="mt-1 break-words text-xs opacity-70">账号 {r.account}</p>
+                <p class="mt-1 break-words text-xs opacity-70">账号 {accountName(r.account)}</p>
                 <p class="break-words text-xs opacity-70">{outcomeText(r.outcome)}</p>
                 <p class="mt-1 text-xs opacity-60">
                   耗时 {fmtDuration(r.duration_ms)} · {fmtEpochMs(r.started_at_ms)}

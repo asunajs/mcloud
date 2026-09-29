@@ -1,3 +1,4 @@
+import { accountName, refreshAccountNames } from '../account-names'
 /**
  * 任务中心：选账号 → 运行任务 → 实时看日志。
  *
@@ -137,7 +138,7 @@ export const TasksPage = () => {
   const onEvent = (ev: RunEvent) => {
     switch (ev.type) {
       case 'started':
-        push('info', `任务开始：${ev.task} / ${ev.account}`)
+        push('info', `任务开始：${ev.task} / ${accountName(ev.account)}`)
         break
       case 'log':
         push(
@@ -201,7 +202,11 @@ export const TasksPage = () => {
     }
   }
 
-  onMounted(() => void load())
+  onMounted(() => {
+    // 先把"id → 名字"填上，否则运行记录里显示的是一串哈希
+    void refreshAccountNames()
+    void load()
+  })
   onUnmounted(() => {
     stopTicker()
     stopStream?.()
@@ -250,7 +255,7 @@ export const TasksPage = () => {
               </option>
               {accounts.value.map((a) => (
                 <option key={a.id} value={a.id}>
-                  {a.nickname || a.id}
+                  {a.nickname || a.label || a.id}
                   {a.pc_platform ? `（${a.pc_platform}）` : ''}
                 </option>
               ))}

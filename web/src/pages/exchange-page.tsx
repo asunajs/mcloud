@@ -188,7 +188,7 @@ export const ExchangePage = () => {
                 }}
               >
                 {accounts.value.map((a) => (
-                  <option value={a.id}>{a.nickname ?? a.id}</option>
+                  <option value={a.id}>{a.nickname || a.label || a.id}</option>
                 ))}
               </select>
             </fieldset>

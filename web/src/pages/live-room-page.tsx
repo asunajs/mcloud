@@ -1,3 +1,4 @@
+import { accountName, refreshAccountNames } from '../account-names'
 /**
  * 直播口令 → 小红花。选账号 → 填口令 → 跑 → 实时看日志与结果。
  *
@@ -224,7 +225,7 @@ export const LiveRoomPage = () => {
   const onEvent = (ev: RunEvent) => {
     switch (ev.type) {
       case 'started':
-        push('info', `任务开始：${ev.task} / ${ev.account}`)
+        push('info', `任务开始：${ev.task} / ${accountName(ev.account)}`)
         break
       case 'log':
         push(ev.level === 'error' ? 'error' : ev.level === 'warn' ? 'warn' : 'info', ev.message)
@@ -331,7 +332,11 @@ export const LiveRoomPage = () => {
     }
   }
 
-  onMounted(() => void load())
+  onMounted(() => {
+    // 先把"id → 名字"填上，否则运行记录里显示的是一串哈希
+    void refreshAccountNames()
+    void load()
+  })
   onUnmounted(() => {
     stopTicker()
     stopStream?.()
@@ -393,7 +398,7 @@ export const LiveRoomPage = () => {
           </option>
           {accounts.value.map((a) => (
             <option key={a.id} value={a.id}>
-              {a.nickname || a.id}
+              {a.nickname || a.label || a.id}
               {a.pc_platform ? `（${a.pc_platform}）` : ''}
             </option>
           ))}
