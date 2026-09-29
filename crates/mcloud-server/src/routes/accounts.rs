@@ -30,9 +30,20 @@ use crate::ServerState;
 /// | `phone`（完整） | 页面只需要掩码；完整号码没有展示场景 |
 #[derive(Serialize)]
 pub struct AccountSummary {
-    /// 账号主键（**掩码**手机号，例如 `19****01`）。
+    /// 账号主键：手机号的 SHA-256 前 16 位。
+    ///
+    /// ⚠⚠ **它只当键用，不该拿去显示** —— 那是一串不透明十六进制
+    /// （`0f6050105ab111f4`），用户认不出是哪个号。要显示请用 [`Self::label`]。
+    ///
+    /// 它从前是**掩码手机号**，那是错的：掩码只留前 2 后 2 位
+    /// ⇒ `19??????16` 形状的两个号会撞成同一个主键、数据串号。
     pub id: String,
     pub nickname: Option<String>,
+    /// **给界面看的名字**：有手机号就是掩码（`19****01`），否则回落昵称。
+    ///
+    /// ⚠ 这一格**必须**给：主键改成哈希之后，前端拿 `id` 当兜底会显示成
+    /// `0f6050105ab111f4` —— 那是"能跑但用户认不出账号"的典型长相。
+    pub label: String,
     /// 登录时冒充的 PC 客户端形态（`windows` / `macos`）。
     ///
     /// `null` = 非 PC 端登录的账号（App / 历史数据）。
@@ -47,6 +58,7 @@ impl From<mcloud_core::Account> for AccountSummary {
     fn from(a: mcloud_core::Account) -> Self {
         Self {
             id: a.id.as_str().to_string(),
+            label: mcloud_upstream::account_label(a.nickname.as_deref(), &a.auth.phone),
             nickname: a.nickname,
             pc_platform: a.pc_platform,
             device_id: a.device_id.as_str().to_string(),
@@ -97,7 +109,7 @@ mod tests {
 
     fn sample() -> Account {
         Account {
-            id: AccountId::new("19****01"),
+            id: AccountId::new("0f6050105ab111f4"),
             nickname: Some("小明".into()),
             auth: AuthInfo {
                 raw: "Basic U0VDUkVULUNSRURFTlRJQUw=".into(),
@@ -138,7 +150,9 @@ mod tests {
     #[test]
     fn summary_carries_the_fields_the_page_needs() {
         let v = serde_json::to_value(AccountSummary::from(sample())).unwrap();
-        assert_eq!(v["id"], "19****01");
+        assert_eq!(v["id"], "0f6050105ab111f4");
+        // ⭐ 显示用 `label`（掩码），不是 `id`（哈希）—— 见下面那条测试
+        assert_eq!(v["label"], "19****01");
         assert_eq!(v["nickname"], "小明");
         // ⭐ 平台必须给出：前端要显示"这个账号按 macOS 发请求"
         assert_eq!(v["pc_platform"], "macos");
@@ -153,5 +167,19 @@ mod tests {
         a.pc_platform = None;
         let v = serde_json::to_value(AccountSummary::from(a)).unwrap();
         assert!(v["pc_platform"].is_null(), "实得：{v}");
+    }
+
+    /// ⭐ `label` **必须**给，而且**不是**主键。
+    ///
+    /// 主键改成哈希之后，前端拿 `id` 当兜底会显示成 `0f6050105ab111f4`
+    /// —— 用户认不出是哪个号。那是一类"能跑但没法用"的长相。
+    #[test]
+    fn the_label_is_the_mask_and_never_the_primary_key() {
+        let sum = AccountSummary::from(sample());
+        assert_eq!(sum.label, "19****01", "界面看的是掩码");
+        assert_eq!(sum.id, "0f6050105ab111f4", "主键是哈希");
+        assert_ne!(sum.label, sum.id, "两者不许再混成一个");
+        // 昵称在时也仍然给掩码（前端自己决定优先用哪个）
+        assert_eq!(sum.nickname.as_deref(), Some("小明"));
     }
 }

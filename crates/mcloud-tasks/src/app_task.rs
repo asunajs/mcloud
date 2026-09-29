@@ -27,6 +27,7 @@ use serde_json::Value;
 
 use mcloud_core::{HttpRequest, Result, TaskOutcome};
 use mcloud_engine::{Task, TaskContext, TaskResult};
+use mcloud_upstream::app_cloud_outlink as outlink;
 use mcloud_upstream::app_cloud_upload as upload;
 use mcloud_upstream::app_cloud_upload::{CloudChannel, CloudFileCreateInput, CloudOpType};
 use mcloud_upstream::app_task_click;
@@ -123,6 +124,34 @@ pub fn upload_shape_for(item: &TaskV2Item) -> Option<UploadShape> {
     None
 }
 
+/// 玩法 434 的 id（分享文件）。
+pub const SHARE_TASK_ID: i64 = 434;
+
+/// 这一条要做的**那一件事**。
+///
+/// ⚠ 做成枚举而不是两个 `Option`：这两件事**互斥**（434 不传文件、106/522 不分享），
+/// 而两个独立 `Option` 允许"两个都填"那种表达不出来的状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// 往网盘传文件（106 / 522 / beiyong1 名字门）。
+    Upload(UploadShape),
+    /// 把这趟传上去的**第一个**文件分享出去、再立刻删掉外链（434）。
+    Share,
+}
+
+/// 这一条该做哪件事。判不出来 ⇒ `None`（**什么都不做**）。
+///
+/// 两处出处都是旧 TS：
+///
+/// * 上传那三档见 [`upload_shape_for`]（`runners.ts` 的 106 / 522、`tasks.ts` 的 beiyong1）
+/// * 434 见 `runners.ts:68-88`
+pub fn step_for(item: &TaskV2Item) -> Option<Step> {
+    if item.task_id == Some(SHARE_TASK_ID) {
+        return Some(Step::Share);
+    }
+    upload_shape_for(item).map(Step::Upload)
+}
+
 /// 这一条**要不要动**。
 ///
 /// # 旧 TS `index.ts:34` 逐字
@@ -216,8 +245,10 @@ pub struct TaskStep {
     pub name: String,
     /// 真传上去的个数。
     pub uploaded: u32,
-    /// 打卡那一枪的结局；`None` = 没打（形状是"不传"的那种，或上传全挂）。
+    /// 打卡那一枪的结局。
     pub clicked: bool,
+    /// 434 那一档：外链**建了又删**了。`false` = 没做（含"没有可分享的文件"）。
+    pub shared: bool,
     /// 逐条的原因。
     pub problems: Vec<String>,
 }
@@ -316,15 +347,15 @@ pub async fn run_app_task(ctx: &TaskContext, pace_ms: i64) -> Result<AppTaskResu
     // ⚠ **先过状态门、再判形状**（旧 TS 就是先 `continue` 再分派）。
     // 顺序反了不改结果，但会把"已完成"的条目也算进 `planned`，
     // 于是摘要里那句"判出 N 条"是假的。
-    let planned: Vec<(TaskV2Item, UploadShape)> = items
+    let planned: Vec<(TaskV2Item, Step)> = items
         .iter()
         .filter(|i| should_act(i))
-        .filter_map(|i| upload_shape_for(i).map(|s| (i.clone(), s)))
+        .filter_map(|i| step_for(i).map(|s| (i.clone(), s)))
         .collect();
     result.planned = planned.len();
 
     // ③ 逐条做。
-    for (item, shape) in &planned {
+    for (item, step_kind) in &planned {
         ctx.check_cancelled()?;
         let name = item.name.clone().unwrap_or_default();
         let mut step = TaskStep {
@@ -364,7 +395,22 @@ pub async fn run_app_task(ctx: &TaskContext, pace_ms: i64) -> Result<AppTaskResu
             ));
         }
 
-        // ③-b 门过了 ⇒ 按档传。
+        // ③-b 门过了 ⇒ 做那一件事。
+        // ⚠ 434 与上传**互斥**（见 `Step`）：它消费的是别人生产的文件。
+        let Step::Upload(shape) = step_kind else {
+            // 434：先打卡（门），成了再分享。
+            match share_first_uploaded(ctx, &result.file_ids).await {
+                Ok(()) => {
+                    step.shared = true;
+                    result.acted += 1;
+                }
+                // ⚠ "没有可分享的文件"也走这一支 —— 它不是失败，是**跳过**，
+                // 所以不进 `acted`（旧实现那句就是 `info` 级别的一句跳过）。
+                Err(e) => step.problems.push(e.to_string()),
+            }
+            result.steps.push(step);
+            continue;
+        };
         let mut done: u32 = 0;
         while should_upload_another(*shape, done, item.process) {
             ctx.check_cancelled()?;
@@ -394,6 +440,57 @@ pub async fn run_app_task(ctx: &TaskContext, pace_ms: i64) -> Result<AppTaskResu
     // ④ 清理：**只删我们自己造的**。
     cleanup(ctx, &mut result).await;
     Ok(result)
+}
+
+/// 玩法 434 的本体：把这趟传上去的**第一个**文件分享出去、再**立刻**删掉外链。
+///
+/// # 逐字照旧 TS `runners.ts:68-88`
+///
+/// ```ts
+/// const files = ctx.state.files;
+/// if (!files || files.length === 0) { log("没有可分享的文件，跳过分享任务"); return; }
+/// const fileId = files[0];
+/// const [err, data] = await tryRequest(getOutLink, ctx.http, phone, [fileId], "");
+/// if (!err && data?.code === "0") {
+///   const linkId = data?.data?.getOutLinkRes?.getOutLinkResSet?.[0]?.linkID;
+///   if (linkId) await tryRequest(delOutLink, ctx.http, phone, [linkId]);
+/// } else { log("分享文件失败"); }
+/// ```
+///
+/// 四处照抄、每一处都有"改了不报错"的后果：
+///
+/// 1. **只取第一个文件** —— `files[0]`。全分享出去会留下**多条**外链，
+///    而旧实现只删回第一条（见 ③）。
+/// 2. **`dedicatedName` 是空串** —— 调用处第五个参数就是 `""`。
+/// 3. **只删第一个 linkID** —— `?.[0]`。⚠ 上游给了多条而我们只删一条，
+///    剩下的就留在用户的分享记录里；这是旧实现的行为，**照抄并标出来**，
+///    不"顺手改好" —— 改好是另一种行为，而我们没有样本说哪种对。
+/// 4. **没有可分享的文件 ⇒ 报一句"跳过"就走**，不建空外链
+///    （与协议层那道"空表不发"的守门同一取向）。
+///
+/// ⚠ **它依赖同一趟前面的上传真的传上来过东西** —— 这是旧实现自带的脆弱点。
+/// 待做表按 id 升序，若当天能上传的那几条 id 都比 434 大，它就永远没有可分享的文件。
+/// 我们这边的处置是**如实报"跳过"**，而不是为它造一个文件（那是为补样造行为）。
+async fn share_first_uploaded(ctx: &TaskContext, uploaded: &[String]) -> Result<()> {
+    let Some(file_id) = uploaded.first() else {
+        // 照旧 TS 那句：跳过去，不建空外链
+        return Err(mcloud_core::Error::Other(
+            "没有可分享的文件，跳过分享任务".to_string(),
+        ));
+    };
+    let account = ctx.account.auth.phone.clone();
+    let req = outlink::get_out_link_request(&account, std::slice::from_ref(file_id), "")?;
+    let resp = ctx.http.request(req).await?;
+    let body = mcloud_upstream::session::ensure_http_ok(&resp, "建外链（getOutLink）")?;
+    let link = outlink::parse_get_out_link(&outlink::OutLinkEnvelope::parse(body)?)?;
+    // ⚠ 建了却拿不到 linkID ⇒ 必须报出来（那是一条删不掉的外链）
+    link.ensure_found()?;
+    let first = &link.link_ids[0];
+    let req = outlink::del_out_link_request(&account, std::slice::from_ref(first))?;
+    let resp = ctx.http.request(req).await?;
+    let body = mcloud_upstream::session::ensure_http_ok(&resp, "删外链（delOutLink）")?;
+    outlink::parse_del_out_link(&outlink::OutLinkEnvelope::parse(body)?)?;
+    Ok(())
 }
 
 /// 传一个随机文件，交回**我们造的**那个 id（`exist` 档交 `None`）。
@@ -522,6 +619,7 @@ impl Task for AppTaskTask {
                 "name": s.name,
                 "uploaded": s.uploaded,
                 "clicked": s.clicked,
+                "shared": s.shared,
                 "problems": s.problems,
             })).collect::<Vec<_>>(),
         }));

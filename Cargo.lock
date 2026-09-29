@@ -1176,6 +1176,7 @@ dependencies = [
  "mcloud-engine",
  "mcloud-store",
  "mcloud-tasks",
+ "mcloud-upstream",
  "mime_guess",
  "qrcode",
  "rust-embed",

@@ -333,3 +333,57 @@ fn a_pending_enabled_task_is_acted_on() {
     assert!(should_act(&stateful(None, Some(1))));
     assert!(should_act(&stateful(Some("DOING"), Some(1))));
 }
+
+// ══════════════ 玩法 434：分享（`Step::Share`） ══════════════
+//
+// 旧 TS `runners.ts:68-88`。⚠ 它与上传**互斥** —— 它消费别人生产的文件。
+
+/// 434 判成 `Share`，**不是**上传。
+#[test]
+fn task_434_is_the_share_step() {
+    let it = item(Some(434), Some("day"), Some("分享文件"));
+    assert_eq!(step_for(&it), Some(Step::Share));
+    // ⚠ 它**没有**上传形状 —— 两个 `Option` 的写法会让这里表达成"两个都填"
+    assert_eq!(upload_shape_for(&it), None);
+}
+
+/// 上传那几档仍然判成 `Upload`（接线没把它们挤掉）。
+#[test]
+fn the_upload_tasks_still_map_to_upload_steps() {
+    assert_eq!(
+        step_for(&item(Some(106), None, None)),
+        Some(Step::Upload(UPLOAD_ONE))
+    );
+    assert!(matches!(
+        step_for(&item(Some(522), None, None)),
+        Some(Step::Upload(_))
+    ));
+    assert!(matches!(
+        step_for(&item(None, Some("beiyong1"), Some("上传图片"))),
+        Some(Step::Upload(_))
+    ));
+}
+
+/// 判不出来仍然 ⇒ 什么都不做。
+#[test]
+fn an_unknown_task_gets_no_step() {
+    assert_eq!(
+        step_for(&item(Some(999), Some("day"), Some("看视频"))),
+        None
+    );
+    assert_eq!(step_for(&item(None, None, None)), None);
+}
+
+/// ⚠ 状态门对 434 一样管用（两道 `continue` 是并列的，不是只管上传）。
+#[test]
+fn the_state_gate_also_covers_the_share_task() {
+    let mut done = item(Some(434), Some("day"), Some("分享文件"));
+    done.state = Some("FINISH".into());
+    done.enable = Some(1);
+    assert!(!should_act(&done), "已完成的 434 不该再去建外链");
+
+    let mut off = item(Some(434), Some("day"), Some("分享文件"));
+    off.state = Some("WAIT".into());
+    off.enable = Some(0);
+    assert!(!should_act(&off), "关掉的 434 不该再去建外链");
+}

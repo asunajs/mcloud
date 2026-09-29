@@ -22,6 +22,7 @@ uuid.workspace = true
 chrono.workspace = true
 mcloud-engine.workspace = true
 mcloud-tasks.workspace = true
+mcloud-upstream.workspace = true
 axum.workspace = true
 tower-http.workspace = true
 tokio.workspace = true

@@ -436,11 +436,11 @@ export const AccountsPage = () => {
     try {
       await deleteAccount(a.id)
       closeDialog('confirm-delete-account')
-      pushToast('success', `已移除 ${a.id}`)
+      pushToast('success', `已移除 ${a.nickname || a.label || a.id}`)
       await load()
     } catch (e) {
       showError(
-        `无法移除账号 ${a.nickname || a.id}`,
+        `无法移除账号 ${a.nickname || a.label || a.id}`,
         e instanceof Error ? e.message : '移除失败',
       )
     } finally {
@@ -517,7 +517,7 @@ export const AccountsPage = () => {
             <li class="card card-border bg-base-100">
               <div class="card-body flex-row flex-wrap items-center gap-3 p-3">
                 <div class="flex min-w-0 flex-1 flex-col">
-                  <span class="truncate font-medium">{a.nickname || a.id}</span>
+                  <span class="truncate font-medium">{a.nickname || a.label || a.id}</span>
                   <span class="text-xs opacity-70">
                     设备 {a.device_id} · 凭据 {expireText(a.expire)}
                   </span>
@@ -869,7 +869,7 @@ export const AccountsPage = () => {
         title="移除账号"
         impact={
           <span>
-            将从本实例移除 <b>{pendingDelete.value?.nickname || pendingDelete.value?.id}</b>{' '}
+            将从本实例移除 <b>{pendingDelete.value?.nickname || pendingDelete.value?.label || pendingDelete.value?.id}</b>{' '}
             及其本地凭据。云端的数据不受影响，重新登录即可恢复。
           </span>
         }

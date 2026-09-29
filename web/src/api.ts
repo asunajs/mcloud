@@ -625,7 +625,10 @@ export const rotatePcDevice = () =>
 
 /** 列出已登录的云盘账号。 */
 export interface AccountSummary {
+  /** 账号主键：手机号的 SHA-256 前 16 位。⚠ **只当键用，别拿去显示**（认不出是哪个号）。 */
   id: string
+  /** 给界面看的名字（掩码手机号，如 `19****01`；没有手机号时回落昵称）。 */
+  label: string
   nickname: string | null
   /** `windows` / `macos`；`null` = 非 PC 端登录的账号。 */
   pc_platform: PcPlatform | null
