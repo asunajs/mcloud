@@ -6,7 +6,7 @@
  * 写法刻意与项目现状一致（`ref` / `.value` / `onMounted` / `watch` / `useSlots` / TSX）。
  */
 
-import { batch, mount, onMounted, onUnmounted, ref, useSlots, watch } from '../src/index'
+import { batch, createVaporApp, mount, onMounted, onUnmounted, ref, useSlots, watch } from '../src/index'
 
 /** 自测用的计数器。 */
 const demo = { mounted: 0, unmounted: 0, mountedInDoc: false, watches: [] as string[] }
@@ -104,6 +104,7 @@ const Split = () => (
   <>
     <h4 id="frag-head">片段头</h4>
     {showFrag.value ? <p id="frag-branch">A</p> : null}
+    {showFrag.value ? <p id="frag-b2">B</p> : null}
     <ul id="frag-list">
       {fragItems.value.map((it) => (
         <li key={it.id}>{it.label}</li>
@@ -157,8 +158,27 @@ ok('条件切回来', !!document.getElementById('branch'))
 
 ok('列表标题随数据更新', ($('section.panel > h3') as HTMLElement)?.textContent === `共 ${rows().length} 条`, ($('section.panel > h3') as HTMLElement)?.textContent)
 
+/**
+ * 与应用**同形状**的用例：第一个片段成员是一个**本地函数返回的 JSX**（`gate()`，
+ * 对非目标状态返回 null），第二个成员是同一信号驱动的条件 —— app.tsx 的
+ * `{authGate()}` + `{authState.value !== 'ready' ? null : <div class="drawer">}` 就是这样。
+ */
+const stage = ref<'checking' | 'ready'>('checking')
+const gate = () => (stage.value === 'checking' ? <div id="stage-loading">L</div> : null)
+const GateBox = () => (
+  <>
+    {gate()}
+    {stage.value !== 'ready' ? null : <p id="stage-ready">R</p>}
+  </>
+)
+
 // ── 片段用例的断言 ───────────────────────────────────────────────────────────
 mount(Split, '#frag')
+
+createVaporApp(GateBox).mount('#frag3')
+stage.value = 'ready'
+ok('门形状：第一个槽被清空', !document.getElementById('stage-loading'))
+ok('门形状：第二个槽补上了内容', !!document.getElementById('stage-ready'))
 
 const frag = () => document.getElementById('frag') as HTMLElement
 const fragRows = () => [...document.querySelectorAll('#frag-list > li')].map((n) => n.textContent)
@@ -171,6 +191,8 @@ ok('片段：列表渲染了', fragRows().join('|') === 'p|q', fragRows().join('
 
 showFrag.value = false
 ok('片段：条件切换后分支消失', document.querySelectorAll('#frag-branch').length === 0)
+ok('片段：紧邻的第二个槽也跟着消失', document.querySelectorAll('#frag-b2').length === 0)
+ok('片段：紧邻的第二个槽切回来', (() => { showFrag.value = true; const n = document.querySelectorAll('#frag-b2').length; return n === 1 })())
 showFrag.value = true
 ok('片段：条件切回来只有一个', document.querySelectorAll('#frag-branch').length === 1)
 
