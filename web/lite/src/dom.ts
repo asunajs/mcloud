@@ -291,7 +291,11 @@ export function setNodes(parent: Node, fn: () => unknown, anchor: Node | null = 
       const t = document.createTextNode(String(v))
       remove(cur)
       cur = [t]
-      parent.insertBefore(t, anchor)
+      // ⚠⚠ 必须走 `insert()`：这里以前是裸的 `parent.insertBefore(t, anchor)`，
+      // **绕过了锚点护栏** —— 锚点脱开时同样抛 `… is not a child of this node`
+      // （文本槽是最容易脱开的一类：占位就是文本节点本身）。统一走 insert，
+      // 顺带把 flushSlots/flushMounted 也带上。
+      insert(parent, cur, anchor, 'setNodes:text')
       return
     }
     remove(cur)
