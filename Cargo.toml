@@ -167,7 +167,7 @@ thiserror = "2"
 anyhow = "1"
 
 [profile.release]
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 strip = true
 # ── 体积（交付形态是"拷一个二进制就能跑"，所以体积算硬指标）─────────────
@@ -177,5 +177,5 @@ strip = true
 #   panic="abort"  去掉 unwind 那套（landing pad / 异常表）。
 # ⚠ 语义变化：panic 直接终止进程，不再 unwinding。本服务由 launchd KeepAlive
 #   托管（挂了就重拉），可以接受；但别在 catch_unwind / 锁 poisoning 语义上依赖它。
-opt-level = "s"
+opt-level = "z"
 panic = "abort"
