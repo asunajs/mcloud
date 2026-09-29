@@ -108,10 +108,26 @@ export const FIXTURES = {
  */
 export const VARIANTS = {
   ready: {},
-  login: { '/api/session': { status: 401, body: { error: '未登录', code: 'unauthorized' } } },
+  login: {
+    '/api/session': { status: 401, body: { error: '未登录', code: 'unauthorized' } },
+    /**
+     * ⚠ key 带方法：`GET /api/session` 是"我登录了吗"（401），`POST /api/session` 是**登录动作**。
+     * 同一个 URL 两种语义，只按 URL 匹配的话登录永远失败 —— 那样"登录成功后闸门放行"
+     * 这条最要紧的路径就测不到（而它正是当初整包挂掉的地方）。
+     */
+    'POST /api/session': {
+      handler: (body) =>
+        body?.password === 'right-pass'
+          ? { status: 200, body: { userId: 'u-1', name: 'catlair', kind: 'web' } }
+          : { status: 401, body: { error: '用户名或口令不正确', code: 'invalid_credentials' } },
+    },
+  },
   setup: {
     '/api/setup': { status: 200, body: { initialized: false, minPasswordLen: 8 } },
     '/api/session': { status: 503, body: { error: '实例尚未初始化，请先创建管理员', code: 'setup_required' } },
+    'POST /api/setup': {
+      handler: () => ({ status: 200, body: { userId: 'u-1', name: 'catlair', kind: 'web' } }),
+    },
   },
 }
 
@@ -125,17 +141,45 @@ export const readVariant = () => {
 export const serve = (root, port, variant) =>
   new Promise((resolve) => {
     const overrides = VARIANTS[variant]
-    const server = http.createServer((req, res) => {
-      const url = (req.url ?? '/').split('?')[0]
-      const override = overrides[url]
-      if (override) {
-        res.writeHead(override.status, { 'content-type': 'application/json' })
-        res.end(JSON.stringify(override.body))
+    /**
+     * 一条 fixture 可以是 `{status, body}`，也可以是 `{handler(body) → {status, body}}` ——
+     * 后者用来表达"同一个端点按请求内容给不同结果"（登录成功/口令错）。
+     * 匹配顺序：**方法+路径** 优先于 仅路径。
+     */
+    const send = (req, res, entry) => {
+      const respond = (r) => {
+        res.writeHead(r.status ?? 200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(r.body))
+      }
+      if (!entry.handler) {
+        respond(entry)
         return
       }
-      if (FIXTURES[url] !== undefined) {
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify(FIXTURES[url]))
+      let raw = ''
+      req.on('data', (d) => {
+        raw += d
+      })
+      req.on('end', () => {
+        let parsed = null
+        try {
+          parsed = raw ? JSON.parse(raw) : null
+        } catch {
+          // 非 JSON 体：handler 自己处理 null
+        }
+        respond(entry.handler(parsed))
+      })
+    }
+    const server = http.createServer((req, res) => {
+      const url = (req.url ?? '/').split('?')[0]
+      const key = `${req.method} ${url}`
+      const override = overrides[key] ?? overrides[url]
+      if (override) {
+        send(req, res, override)
+        return
+      }
+      const fixture = FIXTURES[key] ?? FIXTURES[url]
+      if (fixture !== undefined) {
+        send(req, res, fixture)
         return
       }
       if (url.startsWith('/api/')) {

@@ -69,6 +69,9 @@ const STEPS = {
     ['切回浅色主题', clickSel('[aria-label="切换到浅色主题"]')],
     ['打开登出确认框', clickSel('[aria-label="退出登录"]')],
     ['取消（关掉确认框）', clickText('#confirm-logout .modal-action button', '取消')],
+    ['再开一次确认框', clickSel('[aria-label="退出登录"]')],
+    ['确认登出（后端 404 ⇒ 错误弹窗）', clickText('#confirm-logout .modal-action button', '退出')],
+    ['关掉错误弹窗', clickText('#error-dialog button', '关闭')],
 
     // 账号页：四种登录方式之间来回切（条件分支 + 4 项列表），并在出现的输入框里打字。
     // 注意"短信/账号密码"那两个框**只有切到该方式才存在** —— 这正是在测条件分支换内容。
@@ -82,6 +85,9 @@ const STEPS = {
     ['账号页：点回「扫码」方式', clickText('button', '扫码')],
     ['账号页：点某行的「移除」', clickText('button', '移除')],
     ['账号页：取消移除（有数据的确认弹窗）', clickText('#confirm-delete-account .modal-action button', '取消')],
+    // 确认删除 ⇒ DELETE 打到 fixture 的 404 ⇒ 走 `showError` 那条反馈路径（弹窗内容也要一致）
+    ['账号页：确认移除（后端 404 ⇒ 错误弹窗）', clickText('#confirm-delete-account .modal-action button', '移除')],
+    ['账号页：关掉错误弹窗', clickText('#error-dialog button', '关闭')],
 
     // 计划页：新建表单填一遍（文本、下拉、勾选框都覆盖到）
     ['切到计划页', go('#/schedules')],
@@ -100,21 +106,37 @@ const STEPS = {
     ['切到任务页', go('#/tasks')],
     ['任务页：选账号', pickOption('select.select', '13800000000')],
   ],
-  /** 未初始化：建管理员向导。填三个字段再提交（fixture 没有 POST 接口 ⇒ 走错误分支，也要一致）。 */
+  /**
+   * 未初始化：建管理员向导。**先填一个短口令撞本地校验**，再填合法口令提交成功 ——
+   * 后者会让 `authState` 翻成 `ready`，也就是**闸门放行**：`{authGate()}` 那个片段槽
+   * 从"向导"换成"完整外壳"（几十个组件 + 各自的 onMounted + 取数）。
+   * 这条正是当初整包挂掉的路径，必须正面测一遍，而不是只测"提交失败"。
+   */
   setup: [
     ['首屏（未初始化）', null],
     ['填用户名', typeIn('input[autocomplete="username"]', 'admin')],
-    ['填口令', typeIn('input[type="password"]', 'secret-1234')],
-    ['填确认口令', typeIn('input[autocomplete="new-password"]', 'secret-1234')],
-    ['提交（后端没有该接口 ⇒ 错误分支）', clickText('button', '创建并进入')],
-    ['再填一次用户名', typeIn('input[autocomplete="username"]', 'admin2')],
+    ['填短口令（撞本地校验）', typeIn('input[type="password"]', 'abc')],
+    ['填确认口令', typeIn('input[autocomplete="new-password"]', 'abc')],
+    ['提交（本地校验拦下）', clickText('button', '创建并进入')],
+    ['改成长口令', typeIn('input[type="password"]', 'secret-1234')],
+    ['确认口令跟上', typeIn('input[autocomplete="new-password"]', 'secret-1234')],
+    ['提交成功 ⇒ 闸门放行（外壳出现）', clickText('button', '创建并进入')],
+    ['放行后：切到历史页', go('#/history')],
+    ['放行后：切主题', clickSel('[aria-label="切换到深色主题"]')],
   ],
-  /** 已初始化未登录：登录页同上。 */
+  /**
+   * 已初始化未登录：口令错走错误分支，口令对则**闸门从登录页翻到外壳**
+   * （`AuthPage` 卸载、drawer 建起来）。
+   */
   login: [
     ['首屏（未登录）', null],
     ['填用户名', typeIn('input[autocomplete="username"]', 'admin')],
-    ['填口令', typeIn('input[type="password"]', 'wrong-pass')],
-    ['提交（后端没有该接口 ⇒ 错误分支）', clickText('button', '登录')],
+    ['填错口令', typeIn('input[type="password"]', 'wrong-pass')],
+    ['提交（口令错 ⇒ 错误分支）', clickText('button', '登录')],
+    ['填对口令', typeIn('input[type="password"]', 'right-pass')],
+    ['提交成功 ⇒ 闸门放行（外壳出现）', clickText('button', '登录')],
+    ['放行后：切到账号页', go('#/accounts')],
+    ['放行后：展开抽屉', clickSel('label[for="nav-drawer"]')],
   ],
 }
 
