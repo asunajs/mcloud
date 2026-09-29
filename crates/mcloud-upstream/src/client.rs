@@ -96,7 +96,13 @@ fn default_content_type(req: &HttpRequest) -> Option<&'static str> {
 
 /// 基于 reqwest 的客户端。
 pub struct ReqwestClient {
+    /// 默认后端（rustls）。
     inner: reqwest::Client,
+    /// 老式后端（`native-tls`）：只给 [`LEGACY_TLS_HOSTS`] 里的主机用。
+    ///
+    /// ⚠ 与 `inner` **共用同一套超时/cookie/gzip 设置**，差别只有 TLS 后端 ——
+    /// 两个 builder 的配置必须同步改，否则"同一发请求换个主机就换了行为"。
+    legacy: reqwest::Client,
     profile: Arc<ClientProfile>,
 }
 
@@ -153,6 +159,41 @@ pub(crate) fn explain_send(e: &reqwest::Error) -> String {
     out
 }
 
+/// 只给**老式 TLS 套件**的上游主机（走 `native-tls` 而不是 rustls）。
+///
+/// # 为什么需要这一张表
+///
+/// 2026-09-29 实测：直播侧 `v.cmcc-cs.cn` **只给 CBC 套件**
+/// `TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA`（`0xC013`，CBC + SHA-1），
+/// 而 **rustls 出于安全考虑不实现任何 CBC 套件** ⇒ 双方零交集，
+/// 表现在 TLS 层是一句 `HandshakeFailure`（alert 40）。
+///
+/// 三件已排除的（都实测过，别再重查）：
+///
+/// 1. **不是 TLS 版本** —— 强制 `max_protocol_version = TLS1.2` 后一模一样。
+/// 2. **不是证书** —— 那会是 `UnknownCA` 那一类。
+/// 3. **不是代理/假 IP** —— 绕过代理直连两个真实 IP（`117.159.206.181` /
+///    `221.181.128.76`）复验：现代套件全 `HTTP 000`、CBC 那条 `HTTP 200`
+///    ⇒ 是**源站**的事。
+///
+/// ⚠ 这张表要**尽量短**：多一台就多一处拿安全换连通的地方。
+/// 加之前先确认"全站真的没有现代套件"，而不是"这一发没打通"。
+pub const LEGACY_TLS_HOSTS: [&str; 1] = ["v.cmcc-cs.cn"];
+
+/// 这台主机该不该走老式 TLS 后端。
+pub fn needs_legacy_tls(host: &str) -> bool {
+    LEGACY_TLS_HOSTS
+        .iter()
+        .any(|h| host.eq_ignore_ascii_case(h))
+}
+
+/// 从 URL 取主机（不含 scheme 与端口）。
+fn host_of(url: &str) -> Option<&str> {
+    let rest = url.split_once("://")?.1;
+    let host = rest.split(['/', '?', '#']).next()?;
+    Some(host.split(':').next().unwrap_or(host))
+}
+
 impl ReqwestClient {
     pub fn new(profile: ClientProfile) -> Result<Self> {
         let timeout = if profile.timeout_secs == 0 {
@@ -160,14 +201,21 @@ impl ReqwestClient {
         } else {
             profile.timeout_secs
         };
-        let inner = reqwest::Client::builder()
-            .timeout(Duration::from_secs(timeout))
-            .cookie_store(true)
-            .gzip(true)
+        let base = || {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(timeout))
+                .cookie_store(true)
+                .gzip(true)
+        };
+        let inner = base().build().map_err(|e| Error::Network(e.to_string()))?;
+        // 同一套配置，只把 TLS 后端换成 native-tls（见 LEGACY_TLS_HOSTS）
+        let legacy = base()
+            .use_native_tls()
             .build()
             .map_err(|e| Error::Network(e.to_string()))?;
         Ok(Self {
             inner,
+            legacy,
             profile: Arc::new(profile),
         })
     }
@@ -212,7 +260,14 @@ impl mcloud_core::HttpClient for ReqwestClient {
         let method = reqwest::Method::from_bytes(req.method.as_bytes())
             .map_err(|e| Error::Network(format!("方法非法 {}：{e}", req.method)))?;
 
-        let mut builder = self.inner.request(method, url);
+        // ⚠ 按**主机**选 TLS 后端：只有老式主机走 `legacy`（见 `LEGACY_TLS_HOSTS`）。
+        // 判据是 URL 里那一段，不是"调用方是谁" —— 同一条链上可能混着两类主机
+        // （直播链就是：小红花族走 m.mcloud、换 JWT 走 v.cmcc-cs.cn）。
+        let client = match host_of(&req.url) {
+            Some(h) if needs_legacy_tls(h) => &self.legacy,
+            _ => &self.inner,
+        };
+        let mut builder = client.request(method, url);
 
         // ⚠⚠ **调用方已经明确带了那一枚，就不再注入第二枚。**
         //

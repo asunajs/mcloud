@@ -120,7 +120,14 @@ getrandom = "0.2"
 png = "0.17"
 
 # ── HTTP 客户端 ─────────────────────────────────────────────────────────
-reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "gzip", "rustls-tls"] }
+# ⚠ `native-tls` 是**给老式主机**加的第二套后端，不是替代 rustls。
+#
+# 2026-09-29 实测：直播侧 `v.cmcc-cs.cn` **只给 CBC 套件**
+# （`TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA`，`0xC013`），而 rustls 出于安全考虑
+# **不实现任何 CBC 套件** ⇒ 双方零交集 ⇒ TLS 层一句 `HandshakeFailure`。
+# 绕过代理直连两个真实 IP 复验过：现代套件全 000、CBC 那条 200 ⇒ 是**源站**的事。
+# macOS 上 `native-tls` 走 Security.framework（不是 OpenSSL），它支持 CBC。
+reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "gzip", "rustls-tls", "native-tls"] }
 
 # ── WebSocket 客户端 ────────────────────────────────────────────────────
 # 直播弹幕长连（`live_ws_client`）用，本仓第一个 WS 依赖。
