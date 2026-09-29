@@ -123,6 +123,41 @@ pub fn upload_shape_for(item: &TaskV2Item) -> Option<UploadShape> {
     None
 }
 
+/// 这一条**要不要打那一发 `task/click`**。
+///
+/// # 门是 `currstep`（旧 TS `tasks.ts:19-28` 逐字）
+///
+/// ```ts
+/// const specialMap: Record<number, number> = { 434: 22 };
+/// if (specialMap[id] && currstep === specialMap[id]) return clickTask(ctx, id);
+/// if (currstep === 0) return clickTask(ctx, id);
+/// return true;                       // ← 不打，但门**通过**
+/// ```
+///
+/// ⇒ 两种"不打"要分开读：
+///
+/// * `currstep == 0`（不传这一格时 JS 的默认值就是 0）⇒ **打**。
+/// * `currstep != 0`（这一条已经走起来了）⇒ **不打**，而门**照样通过**
+///   —— `return true` 意味着 runner 还是会跑。
+/// * 434 是唯一一个例外：它只在**走到第 22 步**时打。
+///
+/// ⚠ 这一版最初是**无条件打卡**，于是对"已经走起来的"条目多发了一发写请求
+/// （`task/click` 不可回滚）。真机第一趟那条
+/// `522 "当月上传文件满100个" uploaded 0 clicked true` 就是它 ——
+/// 上游本没打算让这一趟再记一笔，是我们自己补的。
+pub fn should_click(item: &TaskV2Item) -> bool {
+    let step = item.curr_step.unwrap_or(0);
+    if item.task_id == Some(SPECIAL_CLICK_TASK) {
+        return step == SPECIAL_CLICK_STEP;
+    }
+    step == 0
+}
+
+/// `specialMap` 里那唯一一条：玩法 434 的外链分享。
+pub const SPECIAL_CLICK_TASK: i64 = 434;
+/// 玩法 434 打那一发打卡的步号。
+pub const SPECIAL_CLICK_STEP: i64 = 22;
+
 /// 这一趟还要不要再传一个（每轮开始前问一次）。
 ///
 /// 两条停止条件：
@@ -273,19 +308,29 @@ pub async fn run_app_task(ctx: &TaskContext, pace_ms: i64) -> Result<AppTaskResu
         );
 
         // ③-a **先打卡**：它是一道门，成了才去做那件事。
-        match click(ctx, item).await {
-            Ok(notice) => {
-                step.clicked = true;
-                if let Some(n) = notice {
-                    step.problems.push(format!("上游附言：{n}"));
+        //
+        // ⚠ 但"打不打"本身还有一道门（[`should_click`]）：已经走起来的条目
+        // **不该再打**，而门**照样通过**（旧实现那句 `return true`）。
+        if should_click(item) {
+            match click(ctx, item).await {
+                Ok(notice) => {
+                    step.clicked = true;
+                    if let Some(n) = notice {
+                        step.problems.push(format!("上游附言：{n}"));
+                    }
+                }
+                Err(e) => {
+                    // 门没过 ⇒ **不传**（旧 `if (await clickTaskWithStep(...))` 那个形状）。
+                    step.problems.push(format!("打卡失败，这一条不传：{e}"));
+                    result.steps.push(step);
+                    continue;
                 }
             }
-            Err(e) => {
-                // 门没过 ⇒ **不传**（旧 `if (await clickTaskWithStep(...))` 那个形状）。
-                step.problems.push(format!("打卡失败，这一条不传：{e}"));
-                result.steps.push(step);
-                continue;
-            }
+        } else {
+            step.problems.push(format!(
+                "已走到第 {} 步 ⇒ 按旧实现不打卡（门仍通过，照常往下做）",
+                item.curr_step.unwrap_or(0)
+            ));
         }
 
         // ③-b 门过了 ⇒ 按档传。

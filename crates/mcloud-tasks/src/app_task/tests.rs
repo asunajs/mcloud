@@ -236,3 +236,61 @@ fn an_empty_cleanup_tail_is_omitted() {
     };
     assert!(!r.summary_line().contains("回收站"), "{}", r.summary_line());
 }
+
+// ══════════════ 打卡的门（currstep） ══════════════
+//
+// 旧 TS `tasks.ts:19-28` 的 `clickTaskWithStep`：`currstep == 0` 才打，
+// 已经走起来的不打（但门**通过**）；434 是唯一例外，只在第 22 步打。
+
+fn with_step(id: i64, step: Option<i64>) -> TaskV2Item {
+    TaskV2Item {
+        task_id: Some(id),
+        curr_step: step,
+        ..Default::default()
+    }
+}
+
+/// 第 0 步 ⇒ 打。**`currstep` 缺席也算第 0 步**（JS 的默认参数就是 0）。
+#[test]
+fn step_zero_clicks() {
+    assert!(should_click(&with_step(106, Some(0))));
+    assert!(
+        should_click(&with_step(522, None)),
+        "缺席按 JS 的默认值 0 算"
+    );
+}
+
+/// ⭐ 已经走起来的 ⇒ **不打**。这一条是那个真 bug 的守门。
+///
+/// 无条件打卡会让"上游本没打算再记一笔"的条目多一发写请求，
+/// 而 `task/click` **不可回滚**。真机第一趟的
+/// `522 uploaded 0 clicked true` 就是这么来的。
+#[test]
+fn a_started_task_is_not_clicked() {
+    for step in [1, 2, 5, 21, 23, 99] {
+        assert!(
+            !should_click(&with_step(522, Some(step))),
+            "第 {step} 步不该打"
+        );
+    }
+}
+
+/// 434 是唯一例外：只在**恰好第 22 步**打。
+#[test]
+fn the_share_task_clicks_only_at_its_special_step() {
+    assert!(should_click(&with_step(434, Some(22))));
+    assert!(
+        !should_click(&with_step(434, Some(0))),
+        "434 在第 0 步**不**打"
+    );
+    assert!(!should_click(&with_step(434, Some(21))));
+    assert!(!should_click(&with_step(434, Some(23))));
+    assert!(!should_click(&with_step(434, None)));
+}
+
+/// 例外**只对 434 生效**：别的任务在第 22 步一样不打。
+#[test]
+fn the_special_step_does_not_leak_to_other_tasks() {
+    assert!(!should_click(&with_step(522, Some(22))));
+    assert!(!should_click(&with_step(106, Some(22))));
+}
