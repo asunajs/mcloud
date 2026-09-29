@@ -1,12 +1,15 @@
 /**
  * lite 的**验收样例**：这份文件是**真实 TSX**，由 `lite/vite.ts` 编译，
- * 跑的还是那 22 条行为断言 —— 也就是说，断言验证的是**编译器的产物**，
+ * 跑的是**行为断言** —— 也就是说，断言验证的是**编译器的产物**，
  * 不是手写的目标形态。
+ *
+ * ⚠ 断言条数**不要**写死在注释里（以前写 22/53/55，源码涨到几十条时注释一直在说谎）；
+ * 要看实时数字就跑 `node lite/demo/run.mjs`，最后一行打印"✓ 全过（N 条）"。
  *
  * 写法刻意与项目现状一致（`ref` / `.value` / `onMounted` / `watch` / `useSlots` / TSX）。
  */
 
-import { batch, createVaporApp, mount, onMounted, onUnmounted, ref, useSlots, watch } from '../src/index'
+import { batch, mount, onMounted, onUnmounted, ref, useSlots, watch } from '../src/index'
 
 /** 自测用的计数器。 */
 const demo = { mounted: 0, unmounted: 0, mountedInDoc: false, late: 0, watches: [] as string[] }
@@ -196,7 +199,7 @@ const GateBox = () => (
 // ── 片段用例的断言 ───────────────────────────────────────────────────────────
 mount(Split, '#frag')
 
-createVaporApp(GateBox).mount('#frag3')
+mount(GateBox, '#frag3')
 stage.value = 'ready'
 ok('门形状：第一个槽被清空', !document.getElementById('stage-loading'))
 ok('门形状：第二个槽补上了内容', !!document.getElementById('stage-ready'))
@@ -381,6 +384,35 @@ ok(
   [...document.querySelectorAll('#kbox > *')].map((n) => n.id).join('|'),
 )
 
+/**
+ * 用例：**JSX 子节点位置上放一个会返回 `null` 的 helper 调用**。
+ *
+ * 这是直播页"一类口令一栏"的形状：判空做成 helper 的返回值，再内联进子节点位置
+ * （`{group(...)}`，而 `group` 在空时返回 `null`）。
+ * lite 这边 `setNodes` 走 `createNodes` ⇒ `null` / `false` 归一成"零个节点"，
+ * 静态兄弟照常渲染，条件之后变真还能补在正确的锚点前。
+ *
+ * ⚠ 历史：这条位置在 **Vue Vapor** 下会读 `null.parentNode` 直接抛 `TypeError`，
+ * 老注释因此警告过"整块渲染不出来"。兼容层拆掉后不适用 —— 这条断言钉住的是**新事实**，
+ * 别照旧警告改代码。
+ */
+const ncOn = ref(false)
+const ncGroup = () => (ncOn.value ? <b class="nc-item">有</b> : null)
+const NcHost = () => (
+  <div id="nc-host">
+    <span id="nc-head">头</span>
+    {ncGroup()}
+    <span id="nc-tail">尾</span>
+  </div>
+)
+mount(NcHost, '#nullchild')
+const ncOrder = () => [...document.getElementById('nc-host')!.children].map((n) => (n as HTMLElement).id || n.className).join('|')
+ok('子节点位置的 null：兄弟照常渲染（没抛、没吞）', ncOrder() === 'nc-head|nc-tail', ncOrder())
+ncOn.value = true
+ok('子节点位置的 null 之后变真：补在两个静态兄弟之间', ncOrder() === 'nc-head|nc-item|nc-tail', ncOrder())
+ncOn.value = false
+ok('再变回 null：只摘掉自己那一份，兄弟数量不变', ncOrder() === 'nc-head|nc-tail', ncOrder())
+
 mount(Misc, '#misc')
 const miscBox = () => document.getElementById('misc-box') as HTMLElement
 ok('自闭合非空元素：后面的兄弟还是兄弟', miscBox().children.length === 9, `children=${miscBox().children.length}`)
@@ -407,6 +439,34 @@ ok(
   (document.getElementById('misc-hazard')?.childNodes[0] as Text)?.data === '前' && (document.getElementById('misc-hazard')?.lastChild as Text)?.data === '后',
   `childNodes=${document.getElementById('misc-hazard')?.childNodes.length}`,
 )
+
+/**
+ * ⚠ **回归用例：位置敏感的列表行**（编译器算出来传进来的 `positional`）。
+ *
+ * 渲染体读了索引（`第 {i + 1} 步`）⇒ **位置是内容的一部分**：重排时那一行必须重建，
+ * 否则步号跟着节点走，界面就成了"第 3 步排在第 1 步前面" —— 流水线编辑器的
+ * 「上移/下移」正是这个形状。
+ *
+ * 反面是上面那个 `#list`：不读索引的行重排时**搬动**（保住输入框光标、焦点、滚动位置
+ * 与 CSS 过渡）。两种行为由 `createFor` 的 `positional` 形参决定。
+ * ⚠ 这条不是摆设：把 `第 {i + 1} 步：{s}` 改成 `{s}`（不再读索引），第二条断言就该翻红。
+ */
+const stepNames = ref(['甲', '乙', '丙'])
+const StepList = () => (
+  <ol id="steps-list">
+    {stepNames.value.map((s, i) => (
+      <li key={s} class="step-item">
+        第 {i + 1} 步：{s}
+      </li>
+    ))}
+  </ol>
+)
+mount(StepList, '#steps')
+const stepRows = () => [...document.querySelectorAll('#steps-list > li')].map((n) => n.textContent)
+const stepFirst = document.querySelector('#steps-list > li')
+stepNames.value = [...stepNames.value].reverse()
+ok('位置敏感的行：重排后步号仍按位置（第 1 步在最前）', stepRows()[0] === '第 1 步：丙', stepRows().join('|'))
+ok('位置敏感的行：重排是重建（旧节点已脱开）', !stepFirst?.isConnected, `isConnected=${!!stepFirst?.isConnected}`)
 
 const fails = out.filter((l) => l.startsWith('FAIL')).length
 const pre = document.createElement('pre')

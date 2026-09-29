@@ -15,7 +15,7 @@
  * ② 选完在按钮下方把"会影响什么"写出来。
  */
 
-import { onMounted, onUnmounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'lite'
 import {
   cancelQrLogin,
   deleteAccount,

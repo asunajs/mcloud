@@ -20,7 +20,7 @@
  * 这里**直接显示**，不自己编 —— 编出来的说明会在后端改口径时变成谎话。
  */
 
-import { onMounted, ref } from 'vue'
+import { onMounted, ref } from 'lite'
 import {
   listAccounts,
   listExchangePrizes,

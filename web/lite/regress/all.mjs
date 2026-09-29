@@ -1,14 +1,22 @@
 /**
- * 迁移回归的**总入口**：一条命令跑完"两侧都构建 + 全部比对"。
+ * lite 的**验收总入口**：一条命令跑完"构建 + 编译期负例 + 真 DOM 断言 + 三个认证态的交互"。
  *
- * 为什么要有它：迁移验收现在是好几支脚本（逐字符 / 交互 / 像素 / demo），
- * 各自记参数、各自构建 —— 切默认构建配置那种决定，必须能**一次跑完再拍**。
+ * 2026-09-30 起不再有"两侧对拍"（Vue 那一侧已随兼容层一起拆掉）。所以这里的判据是
+ * 三条**绝对**的：编译期该抛的抛了（`compiler.mjs`）、真 DOM 上的行为对（`demo/run.mjs`）、
+ * 点完之后界面确实变了且没抛异常（`interact.mjs`）。
+ *
+ * ⚠ "两侧一致"这种判据有个洞：**两侧都坏掉时它也绿**。上一版 `setup` 变体就是这样 ——
+ * 确认口令填进了口令框（两个框的 `autocomplete` 在 setup 态撞车），闸门从没放行过，
+ * 而逐字符比对照样全绿。换成绝对断言之后的第一次运行就把它抓了出来。
  *
  * 用法：
- *   node lite/regress/all.mjs            # 全量：9 路由 × ready + login/setup + 3 组交互
- *   node lite/regress/all.mjs --quick    # 冒烟：1 个路由 + 1 组交互（改脚本时用）
+ *   node lite/regress/all.mjs            # 全量：构建 + 负例 + demo + bench + 3 个认证态交互
+ *   node lite/regress/all.mjs --quick    # 冒烟：只跑 ready 一个认证态（改脚本时用）
+ *   node lite/regress/all.mjs --skip-build # 不重新构建（`scripts/gates-web.mjs` 已建过 dist）
+ *   node lite/regress/all.mjs --size     # 顺带打印运行时体积（不参与判定）
  *
- * 退出码非 0 = 有任何一项没过。⚠ 它**只读**仓库（产物落 /tmp），不动 `web/dist` 之外的任何东西。
+ * 退出码非 0 = 有任何一项没过。⚠ 它**只读**仓库（临时产物落 /tmp 与 `lite/regress/.check-tmp`、
+ * `lite/.size-tmp`），不动 `web/dist` 之外的任何东西，也**不碰** 3000 端口上那个 launchd 服务。
  */
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
@@ -17,20 +25,20 @@ const dir = path.dirname(new URL(import.meta.url).pathname)
 const web = path.join(dir, '../..')
 const quick = process.argv.includes('--quick')
 
-const ROUTES = quick ? ['settings'] : ['dashboard', 'accounts', 'tasks', 'exchange', 'live-room', 'schedules', 'pipelines', 'history', 'settings']
-const VARIANTS = quick ? ['ready'] : ['ready', 'login', 'setup']
-
+/** 跑一支脚本：它的退出码 + 输出里有没有 `✗` 都算失败（脚本自己打印的失败行）。 */
 const run = (args, label) => {
   process.stdout.write(`── ${label} … `)
   try {
     const out = execFileSync('node', args, { cwd: web, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-    const bad = /(^|\n)\s*(✗|THREW)/.test(out)
+    // 三个失败标记来自各脚本自己的口径：`✗`（demo/compiler）、`THREW`（本该抛却没抛）、
+    // `FAIL`（bench）。少认一个就等于那条闸门永远绿。
+    const bad = /(^|\n)\s*(✗|THREW|FAIL)/.test(out)
     console.log(bad ? '✗' : '✓')
-    if (bad) console.log(out.trim().split('\n').filter((l) => /✗|THREW|差异/.test(l)).slice(0, 12).join('\n'))
+    if (bad) console.log(out.trim().split('\n').filter((l) => /✗|THREW|FAIL/.test(l)).slice(0, 14).join('\n'))
     return !bad
   } catch (e) {
     console.log('✗ 抛错')
-    console.log(String(e.stdout ?? e.message).trim().split('\n').slice(-12).join('\n'))
+    console.log(String(e.stdout ?? e.message).trim().split('\n').slice(-14).join('\n'))
     return false
   }
 }
@@ -48,24 +56,49 @@ const bash = (cmd, label) => {
   }
 }
 
+/**
+ * 清掉测量/负例脚本的临时目录（`.size-tmp` / `.check-tmp`）。
+ *
+ * 它们**各自**在结束时删自己那份，但失败路径会留下残骸（`size.mjs` 上次抛在半路，
+ * 于是 `lite/.size-tmp/` 在 `git status` 里挂了一整天）。脚本自己清不干净，
+ * 所以总入口再兜一次 —— 顺手也让"跑过一次全绿"等于"工作区没脏"。
+ */
+const cleanTmp = () => {
+  for (const f of ['../.size-tmp', '.check-tmp']) {
+    try {
+      execFileSync('rm', ['-rf', path.join(dir, f)], { stdio: 'ignore' })
+    } catch {
+      // 清不掉不是验收失败
+    }
+  }
+}
+
 let ok = true
-// 两侧产物都从当前源码重新构建：拿旧产物比对等于在测上一版
-ok = bash('npx vite build --config vite.config.lite.ts', 'lite 包构建') && ok
-// ⚠⚠ 默认配置已切成 lite ⇒ Vue 那一侧**必须显式指配置**，否则两步构建的是同一份产物，
-  // 比对就变成"lite 跟 lite 比"，必然全绿 —— 测试自己骗人比产品 bug 难发现。
-  ok = bash('npx vite build --config vite.config.vue.ts --outDir /tmp/vue-app >/dev/null 2>&1', 'Vue 包构建（→ /tmp/vue-app）') && ok
+// 先构建：交互验收跑的就是 `dist` 里那份产物，拿旧 dist 测等于在测上一版。
+// `--skip-build` 只给"上游刚刚构建过"的门禁省这一下（见 `scripts/gates-web.mjs`）。
+if (process.argv.includes('--skip-build')) {
+  console.log('── 构建 … 跳过（--skip-build：由调用方保证 dist 是新的）')
+} else {
+  ok = bash('npx vite build', '构建（默认配置 → dist）') && ok
+}
+ok = run([path.join(dir, 'compiler.mjs')], '编译期负例') && ok
+// ⚠ 不要在这里写死 demo 的断言条数：断言会涨，写死了就会像上次那样显示 53 而实际已是 59
+ok = run([path.join(dir, '../demo/run.mjs')], 'demo 真 DOM 断言') && ok
+// bench 那一侧是**编译产物**的行为断言（开发者写法：条件/循环/事件/多信号一次改）
+// + 一组很松的耗时护栏（挂载 > 500ms 判负 ⇒ 列表从"搬"退化成"重建"时能响）。
+ok = run([path.join(dir, '../bench/run.mjs')], '编译产物行为 + 耗时护栏') && ok
+for (const variant of quick ? ['ready'] : ['ready', 'login', 'setup']) {
+  ok = run([path.join(dir, 'interact.mjs'), '--variant', variant], `交互验收 ${variant}`) && ok
+}
+if (process.argv.includes('--size')) {
+  // 体积是**读数**不是闸门：它只打印，不参与 ok（超过阈值该怎么判要先跟用户定）
+  try {
+    console.log('\n' + execFileSync('node', [path.join(web, 'lite/size.mjs')], { cwd: web, encoding: 'utf8' }).trim())
+  } catch (e) {
+    console.log('体积测量失败：' + String(e.message ?? e))
+  }
+}
 
-for (const route of ROUTES) {
-  ok = run([path.join(dir, 'compare.mjs'), '--vue', '/tmp/vue-app', '--route', route, '--variant', 'ready'], `逐字符 ${route}`) && ok
-}
-for (const variant of VARIANTS.filter((v) => v !== 'ready')) {
-  ok = run([path.join(dir, 'compare.mjs'), '--vue', '/tmp/vue-app', '--route', 'settings', '--variant', variant], `逐字符 认证态 ${variant}`) && ok
-}
-for (const variant of VARIANTS) {
-  ok = run([path.join(dir, 'interact.mjs'), '--vue', '/tmp/vue-app', '--variant', variant], `交互 + 像素 ${variant}`) && ok
-}
-if (!quick) // ⚠ 不要在这里写死条数：断言会涨，写死了就会像上次那样显示 53 而实际已是 57
-ok = bash('node lite/demo/run.mjs', 'demo 断言') && ok
-
-console.log(ok ? `\n全绿：迁移验收通过${quick ? '（--quick 只跑了冒烟子集）' : ''}` : '\n✗ 有项目未通过（见上）')
+cleanTmp()
+console.log(ok ? `\n全绿：lite 验收通过${quick ? '（--quick 只跑了冒烟子集）' : ''}` : '\n✗ 有项目未通过（见上）')
 process.exitCode = ok ? 0 : 1

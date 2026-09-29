@@ -16,7 +16,8 @@
  * # 移动端形态（规范 §7.2）
  *
  * 列表桌面走表格、窄屏切卡片流（同历史页）；编辑器单列，步骤块纵向排列。
- * 步骤的增删改序是**结构性**改动，每次都让整块重建（见 `stepsRev`）。
+ * 步骤的增删改序是**结构性**改动：`steps` 单独是一个 ref，每次换成**新数组**
+ * （浅响应的 `ref` 只认引用换没换，原地 push/splice 不会让任何人重跑）。
  *
  * # 网络层
  *
@@ -24,7 +25,7 @@
  * 复刻的代价是两处语义迟早分叉（尤其是"后端错误原文透出"这条）。
  */
 
-import { onMounted, ref } from 'vue'
+import { onMounted, ref } from 'lite'
 import { listCapabilities, request, type TaskMeta } from '../api'
 import { EmptyState } from '../ui/empty-state'
 import { closeDialog, ConfirmDialog, openDialog } from '../ui/dialog'
@@ -63,7 +64,7 @@ interface PipelineInput {
   enabled: boolean
 }
 
-/** 编辑期的一份草稿。`uid` 只在前端用，给 Vapor 的 keyed fragment 当稳定 key。 */
+/** 编辑期的一份草稿。`uid` 只在前端用，给步骤列表当稳定的 key。 */
 interface StepDraft {
   uid: number
   task: string
@@ -72,6 +73,13 @@ interface StepDraft {
   continueOnError: boolean
 }
 
+/**
+ * 草稿的**非列表**部分。
+ *
+ * ⚠ 步骤数组**不在这里**（见下面 `steps` 那条 ref）：本框架的 `ref` 是浅响应，
+ * 把数组塞进草稿对象里再 `draft.value.steps.push(…)`，谁都不会醒 ——
+ * 那正是"点了添加步骤、界面不动"的成因。数组要响应，就得让它**自己**是那个 `.value`。
+ */
 interface Draft {
   id: string
   isNew: boolean
@@ -80,7 +88,6 @@ interface Draft {
   accountsText: string
   accountMode: 'sequential' | 'parallel'
   stopOnError: boolean
-  steps: StepDraft[]
   enabled: boolean
 }
 
@@ -162,12 +169,17 @@ export const PipelinesPage = () => {
   const runningId = ref('')
 
   /**
-   * 步骤列表的结构版本号。
+   * 草稿的步骤数组。
    *
-   * 增/删/改序都是结构变化，这里直接让整块步骤列表重建，而不是依赖
-   * keyed fragment 的移动语义 —— 重建的代价是几次点击，换来的是"顺序一定对"。
+   * 它**单独成一个 ref**，而不是挂在 `draft.value.steps` 上 —— 浅响应的 `ref`
+   * 只在"换掉 `.value` 那一个引用"时通知，所以增/删/改序一律写成整数组替换
+   * （见 `addStep` / `removeStep` / `moveStep`）。
+   *
+   * 原来这里是一个 `stepsRev` 计数器 + 原地 `push`/`splice`：计数器**没有**被渲染读过，
+   * 于是点「添加步骤」界面不动（整块步骤列表的 `createFor` 只订阅了数组本身）。
+   * 换成数组 ref 之后不需要计数器，步数、空态提示、每行的禁用态也都跟着活了。
    */
-  const stepsRev = ref(0)
+  const steps = ref<StepDraft[]>([])
 
   let uidSeq = 1
   let idSeq = 1
@@ -200,6 +212,7 @@ export const PipelinesPage = () => {
 
   const startNew = () => {
     submitError.value = ''
+    steps.value = [emptyStep()]
     draft.value = {
       id: `p-${Date.now().toString(36)}-${idSeq++}`,
       isNew: true,
@@ -208,14 +221,19 @@ export const PipelinesPage = () => {
       // 后端当前只接受 sequential；parallel 在下拉里显式禁用并说明原因
       accountMode: 'sequential',
       stopOnError: true,
-      steps: [emptyStep()],
       enabled: true,
     }
-    stepsRev.value++
   }
 
   const startEdit = (p: Pipeline) => {
     submitError.value = ''
+    // 参数（body）原样带回，本页不编辑它但绝不能丢
+    steps.value = p.steps.map((s) => ({
+      uid: uidSeq++,
+      task: s.task,
+      body: s.body,
+      continueOnError: s.continueOnError,
+    }))
     draft.value = {
       id: p.id,
       isNew: false,
@@ -223,45 +241,37 @@ export const PipelinesPage = () => {
       accountsText: p.accounts.join('、'),
       accountMode: p.accountMode,
       stopOnError: p.stopOnError,
-      // 参数（body）原样带回，本页不编辑它但绝不能丢
-      steps: p.steps.map((s) => ({
-        uid: uidSeq++,
-        task: s.task,
-        body: s.body,
-        continueOnError: s.continueOnError,
-      })),
       enabled: p.enabled,
     }
-    stepsRev.value++
   }
 
   const cancelEdit = () => {
     draft.value = null
+    steps.value = []
     submitError.value = ''
   }
 
+  // ⚠⚠ 下面三个都是**整数组替换**，不是 push/splice：浅响应的 ref 只认引用换了没有，
+  // 原地改数组不触发任何人 —— 那会让步骤列表停在旧内容上（本文件以前就是这样，见 `steps` 的注释）。
+
   const addStep = () => {
-    const d = draft.value
-    if (!d) return
-    d.steps.push(emptyStep())
-    stepsRev.value++
+    if (!draft.value) return
+    steps.value = [...steps.value, emptyStep()]
   }
 
   const removeStep = (index: number) => {
-    const d = draft.value
-    if (!d) return
-    d.steps.splice(index, 1)
-    stepsRev.value++
+    if (!draft.value) return
+    steps.value = steps.value.filter((_, i) => i !== index)
   }
 
   const moveStep = (index: number, delta: number) => {
-    const d = draft.value
-    if (!d) return
+    if (!draft.value) return
     const target = index + delta
-    if (target < 0 || target >= d.steps.length) return
-    const [moved] = d.steps.splice(index, 1)
-    d.steps.splice(target, 0, moved)
-    stepsRev.value++
+    if (target < 0 || target >= steps.value.length) return
+    const next = [...steps.value]
+    const [moved] = next.splice(index, 1)
+    next.splice(target, 0, moved)
+    steps.value = next
   }
 
   /** 下拉选项：能力表 + （若当前值已不在表里）把原值兜底显示出来，不静默改数据。 */
@@ -280,9 +290,9 @@ export const PipelinesPage = () => {
    */
   const validate = (d: Draft): string => {
     if (!d.name.trim()) return '请填写编排名称'
-    if (d.steps.length === 0) return '至少要有一个步骤'
-    for (let i = 0; i < d.steps.length; i++) {
-      if (!d.steps[i].task) return `第 ${i + 1} 步还没有选择任务`
+    if (steps.value.length === 0) return '至少要有一个步骤'
+    for (let i = 0; i < steps.value.length; i++) {
+      if (!steps.value[i].task) return `第 ${i + 1} 步还没有选择任务`
     }
     return ''
   }
@@ -292,7 +302,7 @@ export const PipelinesPage = () => {
     accounts: parseAccounts(d.accountsText),
     accountMode: d.accountMode,
     stopOnError: d.stopOnError,
-    steps: d.steps.map((s) => ({
+    steps: steps.value.map((s) => ({
       task: s.task,
       body: s.body ?? {},
       continueOnError: s.continueOnError,
@@ -530,24 +540,27 @@ export const PipelinesPage = () => {
     )
   }
 
-  const stepEditor = (d: Draft) => (
+  /**
+   * 步骤列表本体。
+   *
+   * 读的是 `steps.value`（组件级 ref），不是草稿对象上的数组 —— 这样"增/删/改序"
+   * 换掉引用时，这一块才会重跑。行内的 `第 N 步` 与两个移动按钮的 `disabled`
+   * 都是位置的函数，编译器因此把这一列判成"位置敏感"（`createFor` 的 `positional`）：
+   * 重排时那几行重建，顺序与步号一定对得上。
+   */
+  const stepEditor = () => (
     <div class="flex flex-col gap-3">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <h3 class="text-sm font-medium">步骤（按这个顺序执行）</h3>
-        <span class="text-xs opacity-60">共 {d.steps.length} 步</span>
+        <span class="text-xs opacity-60">共 {steps.value.length} 步</span>
       </div>
 
-      {d.steps.length === 0 ? (
+      {steps.value.length === 0 ? (
         <p class="text-xs opacity-60">还没有步骤。点下面的「添加步骤」加第 1 步。</p>
       ) : null}
 
-      {/*
-        `key={stepsRev.value}`：结构性改动（增/删/改序）让整块重建。
-        Vapor 里 `key` 会编译成 keyed fragment，key 一变整棵子树重建 ——
-        这样步号与顺序一定跟数组一致，不依赖 diff 的移动语义。
-      */}
-      <div class="flex flex-col gap-3" key={stepsRev.value}>
-        {d.steps.map((s, i) => (
+      <div class="flex flex-col gap-3">
+        {steps.value.map((s, i) => (
           <div key={s.uid} class="rounded-box bg-base-200 p-3">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <span class="badge badge-soft">第 {i + 1} 步</span>
@@ -563,7 +576,7 @@ export const PipelinesPage = () => {
                 <button
                   type="button"
                   class="btn btn-ghost btn-sm min-h-11 md:min-h-0"
-                  disabled={i === d.steps.length - 1}
+                  disabled={i === steps.value.length - 1}
                   onClick={() => moveStep(i, 1)}
                 >
                   下移
@@ -751,7 +764,7 @@ export const PipelinesPage = () => {
           </p>
         </div>
 
-        {stepEditor(d)}
+        {stepEditor()}
 
         {submitError.value ? (
           <div class="alert alert-soft alert-error text-sm" role="alert">
@@ -819,9 +832,10 @@ export const PipelinesPage = () => {
       ) : null}
 
       {/*
-        删除确认：内容按 `deleteTarget` 反应式更新，所以弹窗本体只挂一次，
-        不需要（也不能）在 setup 之后重建组件实例 —— Vapor 的 props 是
-        创建时快照，靠 keyed fragment 才能换实例。
+        删除确认：内容按 `deleteTarget` 反应式更新，所以弹窗本体只挂一次。
+        lite 的 props 是**编译期 getter**（`<X label={t.value}/>` 编成
+        `get "label"() { return … }`）⇒ 父级那个 ref 一变，子组件再读 `props.label`
+        拿到的就是新值，**不需要**（也没有"重建组件实例"这条路可走）。
       */}
       <ConfirmDialog
         id={DELETE_DIALOG_ID}

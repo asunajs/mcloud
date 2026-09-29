@@ -22,7 +22,14 @@
  *
  * 从 Solid 那里学到的四条（都是实打实省字节/省 DOM 操作的）：
  *
- * 1. **锚点 = 后面那个静态兄弟节点**（末尾则 `null`）。不需要占位节点、不需要注释锚点。
+ * 1. **模板里折进静态 HTML**（`template()` + 克隆）—— 这部分照 Solid。
+ *    ⚠ **锚点不是 Solid 那一套**：Solid 拿"后面那个静态兄弟"当锚点、末尾则 `null`；
+ *    这里给**每个动态子节点各配一个 `<!---->` 占位注释**并拿它当锚点（见上面的产物）。
+ *    理由是实测出来的坑（docs/lite-postmortem.md §11.2 第 6 条）：两个相邻的动态子节点
+ *    若都没有静态兄弟可当锚点，就都退化成"追加到末尾"，**顺序取决于谁的 effect 后跑** ——
+ *    而其中一个的数据是异步来的 ⇒ 界面顺序随机。占位注释把位置钉死，重跑多少次都在同一处。
+ *    ⚠ 也正因为锚点是**我们自己的节点引用**，它会被别处摘走 ⇒ `insert()` 里有护栏，
+ *    见 docs/lite-postmortem.md §12.3 / §12.5。
  * 2. **每个 JSX 表达式编译成一个立即执行的箭头函数** ⇒ 语句都待在自己的块里，
  *    编译器不必往宿主函数里插语句。
  * 3. **动态 prop 用 getter**（Solid 与 Vapor 在这里不同：Solid 用 getter、Vapor 用函数）。
@@ -32,11 +39,29 @@
  *
  * 与 Solid 的**两处有意不同**：
  * * `.map()` 编译成键控的 `createFor`（Solid 的 `.map` 是朴素数组 diff，键控要写 `<For>`）；
- *   本项目的源码写的是 `.map` + `key=`，我不想为了框架去改 41 处业务代码。
+ *   本项目的源码写的是 `.map` + `key=`。这里**不要求回调返回 JSX 字面量**：
+ *   `(item) => navLink(item.id)`、带 `return` 的块体一样进 `createFor`（拿不到 `key`
+ *   就退回索引键）。少了这一步，导航那一列每次切页都会整块重建，而它本来只需改 9 个 class。
  * * 事件不委托（Solid 用 `$$click` + `delegateEvents`）：见 docs §8，那是下一步的候选。
  *
- * ⚠ 只支持 `docs/lite-framework.md` §2 普查到的语法子集；子集外的写法（`v-*` 指令、
- * `class` 数组/对象、`style={}`、模板引用、组件上的 spread）**直接抛错**，不静默编错。
+ * ⚠ 只支持 `docs/lite-framework.md` §2 普查到的语法子集。**拦不拦分两类，别看错**（都是实测）：
+ *
+ * * **直接抛错**：指令式属性（`v-if` / `vIf` 这种形状）、`.map` 之外的 `key`、
+ *   组件上的 spread、空元素带子节点、块体 map 拿不到返回值那类写法 —— 见
+ *   `lite/regress/compiler.mjs` 的 12 条负例；
+ * * **静默编错**（不抛，产物是错的）：`class` 数组 / `class` 对象 / `style` 对象 /
+ *   `ref=` / 小写 `onclick=`。例如 `class={[a,b]}` 原样进 `setClass` ⇒ `String(数组)`，
+ *   而 `ref={el}` 变成 `setAttr(el, "ref", fn)`。
+ *   ⚠ **这五条不检测**：全仓 0 处使用，加拦截等于为"不存在的需求"付字节，
+ *   还会误伤同名的普通属性（`ref` 在 HTML 里本来就是合法属性名）。
+ *   别指望类型检查兜住 —— jsx 属性是 `any`（`lite/jsx.d.ts`）。
+ *
+ * ⚠⚠ **`key` 写在 `.map` 之外的位置也直接抛错。** 它是从 React/Vue 带来的肌肉记忆，
+ * 而这里没有"按 key 决定复不复用"的那一次 diff —— `key` 只有一个消费者：`.map` 那一列的
+ * `createFor`。写在别处（条件分支、普通元素）会被**静默丢掉**，于是攒出三层错位：
+ * 代码里写着 `key`、注释解释"key 不能省"、界面上它其实什么都没做。
+ * 编排页的步骤列表曾因此"点了不刷新"（docs/review-qwen3.8f-260929.md §1.2）。
+ * 宁可编译不过，也别让人带着一个假的安全走动。
  */
 
 import ts from 'typescript'
@@ -89,7 +114,8 @@ function foldLiteral(e: ts.Expression): string | undefined {
  *    把它 trim 掉了，才在这里露馅）。
  *
  * ⚠ 第一版按 Babel 的 `cleanJSXElementLiteralChild` 写（行间补空格、整体 trim），
- * 与 Vue 差一两个空格、甚至丢掉换行 —— 逐字符比对（`lite/regress/compare.mjs`）抓出来的。
+ * 与 Vue 差一两个空格、甚至丢掉换行 —— 逐字符比对（当时用 `lite/regress/compare.mjs`，
+ * 该脚本已随拆桥删除）抓出来的。
  */
 function jsxText(raw: string): string {
   // 纯空白（含跨行）：跨行的整段丢掉，单行的折成一个空格
@@ -110,7 +136,17 @@ type Binding =
   | { kind: 'event'; at: Path; name: string; expr: string }
   | { kind: 'spread'; at: Path; expr: string }
   | { kind: 'nodes'; parent: Path; anchor: Path | null; expr: string }
-  | { kind: 'for'; parent: Path; anchor: Path | null; list: string; params: [string, string]; item: string; key?: string }
+  | {
+      kind: 'for'
+      parent: Path
+      anchor: Path | null
+      list: string
+      params: [string, string]
+      item: string
+      key?: string
+      /** 渲染体读到了索引参数 ⇒ 位置是内容的一部分，重排时必须重建那一行（见 `createFor`）。 */
+      positional: boolean
+    }
 
 interface Built {
   html: string
@@ -120,12 +156,53 @@ interface Built {
 class Compiler {
   readonly helpers = new Set<string>()
   private templates: string[] = []
+  /**
+   * 被 `.map()` 认领的 `key` 属性节点。
+   *
+   * 只有在这里登记过的才算数：登记发生在 `.map` 那条分支，消费发生在 `html()`/`component()`
+   * 走到那个元素时。没登记过的 `key` 一律抛错（见文件头 ⚠⚠ 那段）。
+   */
+  private readonly mapKeys = new Set<ts.JsxAttribute>()
 
   constructor(
     private readonly sf: ts.SourceFile,
     private readonly src: string,
     private readonly runtime: string,
   ) {}
+
+  /** 带位置的抛错。没有位置的编译错误等于让人回去 grep 一遍文件。 */
+  private fail(msg: string, node?: ts.Node): never {
+    // ⚠ 取"文件名"只能用字符串切：`ts.pathBasename` 是 tsc 的**内部** API，
+    // 编译器包里 import 得到的是 undefined —— 于是这里会抛一个
+    // "pathBasename is not a function"，把**真正要报的那句话**顶掉。
+    const at = node
+      ? `${this.sf.fileName.replace(/^.*[\\/]/, '')}:${ts.getLineAndCharacterOfPosition(this.sf, node.getStart(this.sf)).line + 1} `
+      : ''
+    throw new Error(`[lite] ${at}${msg}`)
+  }
+
+  /**
+   * Vue 的模板指令在 JSX 里**不会报错，只会变成一个没人理的属性**：
+   * `v-if="ok"` 走静态属性那条路 ⇒ 条件根本没生效，而类型检查与构建全绿。
+   * 所以在认属性名的两个入口（组件 / 元素）各拦一次。
+   *
+   * ⚠ 只管 `vIf`（驼峰）与 `v-if`（连字符）——`@click` 那种带 `@` 的属性名 **TSX 本身就解析不过**，
+   * 由 `parseError` 拦。也**不带** `:xxx`：`xmlns:xlink` 那类带冒号的命名空间属性是真 SVG 属性，
+   * 而 `data-*` / `aria-*` 更不该管。
+   */
+  private checkDirective(attr: ts.JsxAttribute, name: string): void {
+    if (/^v[A-Z]/.test(name) || /^v-/.test(name)) {
+      this.fail(`不支持指令式属性：${name} —— 本框架没有模板指令。条件渲染写 \`cond ? <…/> : null\`，列表写 \`list.value.map(…)\`，事件写 \`onClick={…}\``, attr)
+    }
+  }
+
+  /** 处理 `key`：被 `.map` 认领过就放过（它不进 DOM），否则抛错。 */
+  private claimKey(attr: ts.JsxAttribute, name: string): void {
+    if (name !== 'key') return
+    if (!this.mapKeys.delete(attr)) {
+      this.fail('这里的 `key` 什么都不做：它只对 `.map()` 返回的那个元素有意义（交给 createFor 当复用键）。条件分支/普通元素上请直接删掉 —— 本框架没有"按 key 决定复不复用"的那一次 diff，不会因为它换实例', attr)
+    }
+  }
 
   /**
    * 记下一个 helper，返回**生成代码里用的名字**（带 `_$` 前缀）。
@@ -192,7 +269,9 @@ class Compiler {
     for (const attr of opening.attributes.properties) {
       if (ts.isJsxSpreadAttribute(attr)) throw new Error('组件上的 {...spread} 未支持（项目里没有这种写法）')
       const name = this.srcOf(attr.name)
-      if (name === 'key') continue // key 由外层的 createFor 取，不进 props
+      this.checkDirective(attr, name)
+      this.claimKey(attr, name) // `.map` 认领过的 key 由 createFor 取走；没认领过的直接抛错
+      if (name === 'key') continue
       const init = attr.initializer
       if (!init) {
         props.push(`${name}: true`)
@@ -226,7 +305,7 @@ class Compiler {
    * 产物里就留着 JSX ⇒ 下游解析器直接报 `Unexpected JSX expression`
    * （实测 app.tsx 的根返回就是这个形状）。
    */
-  private exprWithJsx(node: ts.Expression): string {
+  private exprWithJsx(node: ts.Node): string {
     const base = node.getStart(this.sf)
     const edits: { start: number; end: number; text: string }[] = []
     const walk = (n: ts.Node, inJsx: boolean) => {
@@ -288,8 +367,10 @@ class Compiler {
         continue
       }
       const name = this.srcOf(attr.name)
-      // `key` 是框架的东西，**不能落到 DOM 上**：它由外层 `createFor` 取走（`.map()` 那条路）
-      // 或者被忽略（其它位置）。放进属性里会渲染成 `key="已注册任务"` 这种真实属性。
+      this.checkDirective(attr, name)
+      // `key` 是框架的东西，**不能落到 DOM 上**：它由外层 `createFor` 取走（`.map()` 那条路）。
+      // 写在别的位置会被静默丢掉 ⇒ 直接抛错，理由见文件头 ⚠⚠。
+      this.claimKey(attr, name)
       if (name === 'key') continue
       const init = attr.initializer
       if (!init) {
@@ -359,7 +440,7 @@ class Compiler {
      * 占位注释把这个槽的位置**钉死**，重跑多少次都插在同一个地方。
      *
      * 顺带解决文本合并：`<span>a{dyn}b</span>` 的两段文本被注释分开，不再是同一个节点。
-     * `regress/compare.mjs` 抓 DOM 时本来就去注释，所以不影响逐字符比对。
+     * 抓 DOM 时本来就去注释（当时由 `regress/compare.mjs` 做，已删），所以不影响逐字符比对。
      */
     const dynChild = (binding: Extract<Binding, { kind: 'nodes' | 'for' }>): void => {
       parts.push('<!---->')
@@ -446,6 +527,31 @@ class Compiler {
     return { html, bindings: [...early, ...childBindings, ...late] }
   }
 
+  /**
+   * 拆开 `.map()` 的回调：参数名 + **返回的那一行**。
+   *
+   * 只认**表达式体** `(x) => <Row …/>`。
+   *
+   * ⚠⚠ 块体（`xs.map((x) => { const a = …; return <Row/> })`）**故意不认**，走通用路径。
+   * 理由是响应式的边界，不是"懒得做"：列表行只在建那一行的时候跑一次回调，
+   * 而块体里 `return` 之前那几句（典型：`const active = page.value === id`）是在
+   * **任何 effect 之外**读信号的 —— 信号变了不会重跑它。列表源又是常量
+   * （`DOCK_IDS` 这种）时，那一行就**永久停在建出来那一刻的值**上。
+   * 表达式体没这个问题：它的每个动态值都编译成绑定 effect，信号是**在 effect 里**读的。
+   *
+   * 其余形状（`xs.map(f).join(',')` 这种不返回 JSX 的、解构参数、参数多于两个）同样返回
+   * `undefined` ⇒ 走通用路径（整表重建，语义仍然对）。
+   */
+  private mapCallback(fn: ts.Expression): { fn: ts.ArrowFunction | ts.FunctionExpression; expr: ts.Expression } | undefined {
+    if (!(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) return undefined
+    const ps = fn.parameters
+    if (ps.length < 1 || ps.length > 2 || ps.some((p) => !ts.isIdentifier(p.name))) return undefined
+    // 块体一律不认（见上面那段）
+    if (ts.isBlock(fn.body)) return undefined
+    const e = ts.isParenthesizedExpression(fn.body) ? fn.body.expression : fn.body
+    return { fn, expr: e }
+  }
+
   /** 一个动态子节点的绑定。返回值只可能是 `nodes` / `for`（两者都是"往父节点里铺一批节点"）。 */
   private dynamic(child: ts.JsxExpression, stmts: string[], at: Path): Extract<Binding, { kind: 'nodes' | 'for' }> {
     const e = child.expression as ts.Expression
@@ -462,31 +568,36 @@ class Compiler {
     }
     // {list.map((x) => <Row/>)} ⇒ createFor
     if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && e.expression.name.text === 'map' && e.arguments.length === 1) {
-      const fn = e.arguments[0]
-      const body = ts.isArrowFunction(fn) ? (ts.isParenthesizedExpression(fn.body) ? fn.body.expression : fn.body) : undefined
-      const isListOfJsx = !!body && (ts.isJsxElement(body) || ts.isJsxSelfClosingElement(body) || ts.isJsxFragment(body))
+      const cb = this.mapCallback(e.arguments[0])
       // 回调不返回 JSX 的 `.map`（例如 `{xs.map(f).join(',')}`）不是列表，交给普通表达式路径
-      if (isListOfJsx && ts.isArrowFunction(fn) && fn.parameters.length >= 1 && fn.parameters.length <= 2) {
+      if (cb && isJsxNode(cb.expr)) {
         // 两个参数名：用户只写了一个就补一个 `_i`（createFor 会给 index，key/render 都能用）
-        const a = this.srcOf(fn.parameters[0].name)
-        const b = fn.parameters[1] ? this.srcOf(fn.parameters[1].name) : '_i'
+        const a = this.srcOf(cb.fn.parameters[0].name)
+        const b = cb.fn.parameters.length > 1 ? this.srcOf(cb.fn.parameters[1].name) : '_i'
         let key: string | undefined
-        if (!ts.isJsxFragment(body)) {
-          const opening = ts.isJsxElement(body) ? body.openingElement : body
+        if (!ts.isJsxFragment(cb.expr)) {
+          const opening = ts.isJsxElement(cb.expr) ? cb.expr.openingElement : cb.expr
           for (const attr of opening.attributes.properties) {
             if (ts.isJsxAttribute(attr) && this.srcOf(attr.name) === 'key' && attr.initializer && ts.isJsxExpression(attr.initializer) && attr.initializer.expression) {
               key = this.srcOf(attr.initializer.expression)
+              // ⚠ 登记它：随后编译这一行时 `html()`/`component()` 会来认领这个 `key`，
+              // 认领不到就抛错（见 `claimKey`）。没登记 = 这根本不是 `.map` 直接返回的那个元素。
+              this.mapKeys.add(attr)
             }
           }
         }
+        // 只编一次：`item` 与 `positional` 的判断共用同一棵返回的 JSX
+        const item = this.root(cb.expr)
         return {
           kind: 'for',
           parent,
           anchor: null,
           list: this.srcOf((e.expression as ts.PropertyAccessExpression).expression),
           params: [a, b],
-          item: this.root(body),
+          item,
           key,
+          // 渲染体（连 `onClick={() => move(i)}` 这种嵌套箭头）读了索引 ⇒ 那一行按位置重建
+          positional: readsIdent(cb.expr, b),
         }
       }
     }
@@ -581,7 +692,7 @@ class Compiler {
           // createFor 的 key 形参上 —— `r ? r(i, t) : t` 于是去调一个**节点**，
           // 抛 `TypeError: r is not a function`（账号页那几个无 key 的 `.map()` 就这么炸的）。
           const key = b.key ? `(${a}, ${i}) => ${b.key}` : 'null'
-          out.push(`${this.h('createFor')}(${v(b.parent)}, () => ${b.list}, (${a}, ${i}) => ${b.item}, ${key}, ${b.anchor ? v(b.anchor) : 'null'})`)
+          out.push(`${this.h('createFor')}(${v(b.parent)}, () => ${b.list}, (${a}, ${i}) => ${b.item}, ${key}, ${b.anchor ? v(b.anchor) : 'null'}, ${b.positional})`)
           break
         }
       }
@@ -611,6 +722,30 @@ function hasJsx(e: ts.Expression): boolean {
   return ts.isJsxElement(e) || ts.isJsxSelfClosingElement(e) || ts.isJsxFragment(e) || (ts.isConditionalExpression(e) && (hasJsx(e.whenTrue) || hasJsx(e.whenFalse)))
 }
 
+const isJsxNode = (n: ts.Node) => ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n) || ts.isJsxFragment(n)
+
+/**
+ * 这一段代码里**读了**某个变量名吗（用来决定列表行是否"位置敏感"）。
+ *
+ * ⚠ 判定要**按结构走**，不能"整段源码里搜一下这个名字"：`a.i` 的那截 `i` 是成员名、
+ * `<div i={…}>` 的 `i` 是属性名、`{ i: 1 }` 的 `i` 是键 —— 都不是读那个变量。
+ *
+ * 反过来漏判的代价不对称：多判一次只是重排时重建一行（丢一次 CSS 过渡），
+ * 漏判则会把「第 3 步」这种步号留在旧位置上。所以除了上面那三处**明确不算**，
+ * 其余一律算读了（包括嵌套箭头里 `() => move(i)`）。
+ */
+function readsIdent(node: ts.Node, name: string): boolean {
+  if (ts.isIdentifier(node)) return node.text === name
+  if (ts.isPropertyAccessExpression(node)) return readsIdent(node.expression, name)
+  if (ts.isJsxAttribute(node)) return !!node.initializer && readsIdent(node.initializer, name)
+  if (ts.isPropertyAssignment(node)) return readsIdent(node.initializer, name)
+  let found = false
+  ts.forEachChild(node, (c) => {
+    if (!found && readsIdent(c, name)) found = true
+  })
+  return found
+}
+
 function literalHtml(e: ts.Expression): string | undefined {
   if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) return escText(e.text)
   if (ts.isNumericLiteral(e)) return escText(e.text)
@@ -618,10 +753,30 @@ function literalHtml(e: ts.Expression): string | undefined {
   return undefined
 }
 
+/**
+ * 只在**源码本来就有语法错误**时才会命中的分支：`createSourceFile` 不抛，它把诊断
+ * 攒在 `parseDiagnostics` 里，节点树则是"就着残文能认多少认多少"。
+ *
+ * 为什么要单独判一句：不判的话 `compile` 会照常产出一段**残缺的**代码 —— 实测
+ * `<div @click={f}>x</div>`（Vue 的事件简写，TSX 里非法）编出来是
+ * `const A = () => (() => { … })() @click={f}>x</div>`，也就是把元素吃掉、把余下的
+ * 原文当尾巴留下。下游 esbuild 确实会报错，但那句 `Unexpected token` 与本文件
+ * 隔着好几层，看着像编译器的 bug。先在这里拦，报的是"你这一行写错了"。
+ */
+const parseError = (sf: ts.SourceFile): string | undefined => {
+  const list = (sf as unknown as { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics
+  const d = list?.[0]
+  if (!d) return undefined
+  const line = d.file ? ts.getLineAndCharacterOfPosition(d.file, d.start ?? 0).line + 1 : 0
+  return `[lite] ${sf.fileName.replace(/^.*[\\/]/, '')}:${line} 源码解析失败：${ts.flattenDiagnosticMessageText(d.messageText, ' ')}（TSX 里没有 Vue 的 @click / v-if：事件写 onClick，条件用三元）`
+}
+
 /** 编译一个 TSX 源文件。 */
 export function compile(source: string, options: { runtime?: string; filename?: string } = {}): CompileResult {
   const runtime = options.runtime ?? '../src/index'
   const sf = ts.createSourceFile(options.filename ?? 'x.tsx', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TSX)
+  const bad = parseError(sf)
+  if (bad) throw new Error(bad)
   const c = new Compiler(sf, source, runtime)
   const edits: { start: number; end: number; text: string }[] = []
 
@@ -631,7 +786,9 @@ export function compile(source: string, options: { runtime?: string; filename?: 
       edits.push({ start: node.getStart(sf), end: node.getEnd(), text: c.root(node) })
       return
     }
-    if (ts.isJsxAttribute(node) && /^v[A-Z]/.test(node.name.getText(sf))) throw new Error(`不支持指令式属性：${node.name.getText(sf)}`)
+    // ⚠ 属性上的检查不放在这里：命中**根** JSX 节点就 `return` 了，子节点根本走不到这一层，
+    // 放在这儿的那句 `v-if` 拦截从来没生效过（`regress/compiler.mjs` 的负例把它抓出来了）。
+    // 指令式属性由 `Compiler.checkDirective` 在认属性名的两个入口（组件 / 元素）拦。
     ts.forEachChild(node, (child) => visit(child, inJsx || isJsx))
   }
   visit(sf, false)

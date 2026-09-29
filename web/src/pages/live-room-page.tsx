@@ -26,8 +26,7 @@ import { accountName, refreshAccountNames } from '../account-names'
  * 可以关掉页面 —— 任务在后端继续跑完（已经领到的不会撤回）。
  */
 
-import { onMounted, onUnmounted, ref } from 'vue'
-import type { JSX } from 'vue-jsx-vapor'
+import { onMounted, onUnmounted, ref } from 'lite'
 import {
   LIVE_IDLE_REASON,
   LIVE_ROOM_TASK,
@@ -642,16 +641,13 @@ export const LiveRoomPage = () => {
    * （抄错了口令 vs 直播已经结束了）。空的那几类**不显示** ——
    * 每类都挂一个"无"会把真正有内容的那一栏淹掉。
    *
-   * ⚠⚠ 判空写成**三元**，而不是 `if (...) return null` 之后再把结果内联到
-   * JSX 的子节点位置上 —— 后者会让 Vapor 崩：
+   * ⚠⚠ 判空用**三元**（`codes.length === 0 ? null : …`），返回 `null` 就行 ——
+   * lite 的 `setNodes` 走 `createNodes`，`null` / `false` 都归一成"零个节点"，
+   * 在 JSX 子节点位置上放一个返回 `null` 的调用是安全的。
    *
-   * 在子节点位置写 `{helper(...)}`、而 helper 返回 `null` 时，Vapor 的
-   * `setNodes` 会去读 `null.parentNode` ⇒
-   * `TypeError: Cannot read properties of null (reading 'parentNode')`，
-   * 于是**整块结果区渲染不出来**（控制台只有一条 pageerror，页面看着"没反应"）。
-   *
-   * 症状是实测出来的：`typecheck` 与 `build` **都不会报**这个错 ——
-   * 它是运行期的渲染行为，只有真开浏览器跑一次才看得见。
+   * （历史备注：以前这里警告过"子节点位置返回 `null` 会让渲染整块崩掉"，
+   * 那是 **Vue Vapor** 的 `setNodes` 读 `null.parentNode` 的毛病，2026-09-30 拆掉
+   * 兼容层之后不适用了。别照那条旧警告改代码。）
    */
   const group = (label: string, hint: JSX.Element, badge: string, codes: { code: string }[]) =>
     codes.length === 0 ? null : (

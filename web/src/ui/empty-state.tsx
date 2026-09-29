@@ -5,7 +5,6 @@
  * 所以这里 `hint` 是必填的，且调用方应当尽量给一个可点的动作。
  */
 
-import type { JSX } from 'vue-jsx-vapor'
 
 export const EmptyState = (props: {
   title: string

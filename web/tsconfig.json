@@ -6,8 +6,15 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["vite/client"],
 
+    // JSX 的**类型**来自 `lite/jsx.d.ts` 里那个全局 `JSX` 命名空间（不是某个包的）。
+    // ⚠ 一旦写 `jsxImportSource`，tsc 就改去读那个包的模块声明，这份全局声明**整个失效**
+    // —— 症状是每个标签都报 TS7026，看着像"lite 不支持 JSX"。
+    // 运行时由 `lite/vite.ts` 编译（`jsx: preserve` 正好表示"tsc 别动 JSX"）。
     "jsx": "preserve",
-    "jsxImportSource": "vue-jsx-vapor",
+
+    // 源码与编译器产物都写裸名 `from 'lite'`（与 `vite.config.ts` 的 alias 同一条口径）。
+    // ⚠ 两边必须同时改：只改这里会在构建时炸，只改那里会在 `npm run typecheck` 炸。
+    "paths": { "lite": ["./lite/src/index.ts"] },
 
     "strict": true,
     "noUnusedLocals": true,
@@ -21,5 +28,5 @@
     // 显式写 .ts 扩展名：Vite 的原生配置加载器将来会要求；TS 需要这个开关才不报错
     "allowImportingTsExtensions": true
   },
-  "include": ["src", "lite/src", "lite/demo", "lite/bench", "vite.config.ts"]
+  "include": ["src", "lite/src", "lite/jsx.d.ts", "lite/demo", "lite/bench", "vite.config.ts"]
 }

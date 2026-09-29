@@ -4,7 +4,7 @@
  * 移动端形态（规范 §7.2）：**单列卡片流**（`grid gap-3`），指标卡竖排。
  */
 
-import { onMounted, ref } from 'vue'
+import { onMounted, ref } from 'lite'
 import { getStatus, listRuns, type RunRecord, type ServiceStatus } from '../api'
 import { accountName, refreshAccountNames } from '../account-names'
 import { StatRow, type StatItem } from '../ui/stat-row'

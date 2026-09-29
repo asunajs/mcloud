@@ -48,11 +48,10 @@ your-project/
 ├─ lite/
 │  ├─ src/
 │  │  ├─ index.ts       ← 对外 API 的唯一入口，业务代码只 import 这里
-│  │  ├─ signal.ts      ← 响应式核心：ref / effect / batch / watch / computed / field
+│  │  ├─ signal.ts      ← 响应式核心：ref / effect / batch / watch + 组件作用域归属 + 循环护栏
 │  │  ├─ dom.ts         ← DOM 层：template / insert / setNodes / setClass …（编译产物调它）
 │  │  ├─ control.ts     ← createFor：`.map()` 列表的键控复用
-│  │  ├─ component.ts   ← 组件、插槽、onMounted / onUnmounted、mount / createVaporApp
-│  │  └─ store.ts       ← createStore（可选模块，用不上可以整份删）
+│  │  └─ component.ts   ← 组件、插槽、onMounted / onUnmounted、mount
 │  ├─ compiler.ts       ← TSX → 运行时调用（唯一需要 typescript 的文件）
 │  ├─ vite.ts           ← Vite 插件（import 上面的 compiler.ts）
 │  └─ jsx.d.ts          ← JSX 类型声明（只有类型，零运行时代码）★ 见 §4
@@ -62,11 +61,15 @@ your-project/
 └─ tsconfig.json
 ```
 
+⚠ 2026-09-30 之前这里还多两个文件：`src/store.ts`（`createStore` / `field`）与
+`computed` —— 它们**只为兼容 Vue 的词汇表而留**，普查里 0 处使用，随兼容层一起删了。
+现在运行时是**四份文件、四个响应式原语**，别再按老清单去凑 `computed`。
+
 **必须一起拷的**：
 
 | 文件 | 少了会怎样 |
 |---|---|
-| `lite/src/` 六个文件 | 它们互相 import，只拷 `index.ts` 起不来 |
+| `lite/src/` 四个文件 | 它们互相 import，只拷 `index.ts` 起不来 |
 | `lite/compiler.ts` | `vite.ts` 直接 import 它，构建期就报模块找不到 |
 | `lite/vite.ts` | 没插件 ⇒ JSX 没人折，esbuild 会按 React 语义去转（§3） |
 | `lite/jsx.d.ts` | `tsc --noEmit` 对每个标签报 `TS7026`（§4） |
@@ -89,11 +92,14 @@ npm i -D vite typescript@^5
 
 | 分类 | API |
 |---|---|
-| 状态 | `ref` `computed` `watch` `batch` `effect` `field` `createStore` |
-| 组件 | 普通函数组件 + `useSlots` `onMounted` `onUnmounted` `mount` `createVaporApp` `defineVaporComponent` |
-| 编译器生成的 helper | `template` `setNodes` `setText` `setClass` `setAttr` `setProp` `setValue` `on` `spread` `createFor` `createComponent` `createNodes` `lazySlot` `insert` `remove` `onRemove` `renderEffect` |
+| 状态 | `ref` `effect` `batch` `watch`（就这四个；`computed` / `reactive` / `nextTick` **没有**） |
+| 组件 | 普通函数组件 + `mount` `useSlots` `onMounted` `onUnmounted`，类型 `Component` / `Slots` / `Ref` |
+| 编译产物用的 helper | `template` `setNodes` `setClass` `setAttr` `setProp` `setValue` `on` `spread` `createFor` `createComponent` `lazySlot` `remove` |
+| 运行时内部件 | `createNodes` `insert` `onRemove` `setText` —— 只有框架自己和 demo/bench 该碰 |
 
-第三类**只有编译产物在用**，业务代码不要手写。
+第三类**只有编译产物在用**，业务代码不要手写；第四类连编译产物都不直接用，是前三类的实现细节。
+`renderEffect` 这个名字已经没了（它是"与 Vapor 词汇表对齐"的别名，2026-09-30 随兼容层删除）——
+现在就叫 `effect`。
 
 ---
 
@@ -271,11 +277,16 @@ negative/negative.tsx(15,25): error TS2322: Type 'unknown' is not assignable to 
 
 ### 路径 ②：沿用 `vue-jsx-vapor` 的类型（存量 Vue 项目过渡用）
 
+⚠ **本节是 2026-09-29 的一次性实测，本仓已不再维护这条路**（`vue` / `vue-jsx-vapor`
+已从 `web/package.json` 里删掉，`node_modules` 里也搜不到这两个包 ⇒ 下面那些命令**在本仓重跑不了**）。
+留着的理由只有一个：**已经有一整套 Vue 类型的外部项目**照它切换时不用改类型。
+新项目请直接走路径 ①；本仓的闸门也只验证路径 ①。
+
 做法：`"jsxImportSource": "vue-jsx-vapor"`，**不要** include `lite/jsx.d.ts`。
 这条路是给"已经有一整套 Vue + vue-jsx-vapor 类型、暂时不想动"的项目准备的 ——
 新项目走它等于**为了类型背上 Vue**，这正是路径 ① 存在的理由。
 
-**跑过的命令与结果**（`/tmp` 里另建一个同源工程，`jsxImportSource` 指向 `vue-jsx-vapor`，
+**当时跑过的命令与结果**（`/tmp` 里另建一个同源工程，`jsxImportSource` 指向 `vue-jsx-vapor`，
 `node_modules` 软链到已有的 vue 3.6.0-rc.9 + vue-jsx-vapor 3.2.25，**没有新装 Vue**）：
 
 ```
@@ -312,7 +323,7 @@ src/main.tsx(21,5): error TS7026: JSX element implicitly has type 'any' because 
 |---|---|---|
 | 依赖 | 只多一个 `lite/jsx.d.ts` | 多 `vue` + `vue-jsx-vapor` |
 | 适合 | **新项目**、非 Vue 项目 | 已有 Vue 类型体系、只把 TSX 换成 lite |
-| 实测 | `tsc` 0 错、build 通过、浏览器渲染正确 | `tsc` 0 错、build 通过 |
+| 实测 | `tsc` 0 错、build 通过、浏览器渲染正确 | 2026-09-29 那次 `tsc` 0 错、build 通过；**本仓已卸掉 Vue，之后不再验证** |
 
 两种声明同时存在也不会报错（实测退出码 0），但没必要，二选一更清楚。
 
@@ -322,7 +333,7 @@ src/main.tsx(21,5): error TS7026: JSX element implicitly has type 'any' because 
 
 ```tsx
 // src/main.tsx
-import { createVaporApp, ref } from 'lite'
+import { mount, ref } from 'lite'
 
 const Counter = () => {
   const n = ref(0)
@@ -334,15 +345,44 @@ const Counter = () => {
   )
 }
 
-createVaporApp(Counter).mount('#app')
-// 等价写法：mount(Counter, '#app')
+mount(Counter, '#app')
 ```
 
-没有组件注册、没有依赖声明、没有 `setup()`。点一下按钮时发生的事：
+⚠ 以前这里写的是 `createVaporApp(Counter).mount('#app')` —— 那是**从 Vue 迁过来时**
+为了"入口一行都不用改"留的壳，2026-09-30 壳删了。`mount(组件, 目标)` 就是唯一写法，
+它**返回卸载器**（本项目没人接：整棵树只挂一次，切页靠信号）。
 
-* `onClick` 编译成一次 `addEventListener('click', …)`；
-* `{n.value}` 编译成一个只写这个文本节点的绑定：`_$setNodes(_n0, () => n.value, _n1)`；
-* 写 `n.value` 是同步的，那个文本节点立刻就变了。
+没有组件注册、没有依赖声明、没有 `setup()`。这段**编译出来的样子**（下面整段是
+`lite/compiler.ts` 的真产物，不是示意 —— 想看自己那份，跑 `node lite/demo/run.mjs`
+之后看 `/tmp/lite-demo.compiled.js`）：
+
+```js
+import { mount, ref } from 'lite'
+import { batch as _$batch, on as _$on, setNodes as _$setNodes, template as _$template } from 'lite'
+const _t0 = _$template('<div><span><!----></span><button>+1</button></div>')
+const Counter = () => {
+  const n = ref(0)
+  return (() => {
+    const _n0 = _t0(), _n1 = _n0.firstChild, _n2 = _n0.childNodes[1], _n3 = _n1.firstChild
+    _$setNodes(_n1, () => n.value, _n3) // 动态文本：锚点是它后面那个占位注释
+    _$on(_n2, 'click', (e) => _$batch(() => (() => n.value++)(e))) // 事件自动包 batch
+    return _n0
+  })()
+}
+mount(Counter, '#app')
+```
+
+（缩进按可读性重排过，其余逐字未改。）
+
+点一下按钮时发生的事：
+
+* `onClick` 编译成一次 `addEventListener('click', …)`，并被自动包进 `batch()`（§7）；
+* `{n.value}` 是一条**只写这一个文本节点**的绑定（`setNodes` 内部自带那条 effect）；
+* 写 `n.value` 是同步的，那个文本节点立刻就变了 —— 没有 diff、没有重跑组件体。
+
+注意生成的 helper 都带 `_$` 前缀（`_$setNodes` / `_$on` / `_$template` …）：
+它们与你在源文件里自己 import 的那批名字**不会撞车**，所以业务代码里
+不用避讳任何标识符。
 
 ---
 
@@ -364,7 +404,8 @@ return <span>{label}</span>
 return <span>{loading.value ? '正在加载…' : '完成'}</span>
 ```
 
-`defineVaporComponent(fn)` 是**恒等函数**，存在只为兼容迁移期的旧写法 —— 新代码直接写箭头函数就行。
+⚠ 以前这里还要包一层 `defineVaporComponent(fn)`（恒等函数，只为迁移期不用改写法）。
+那个壳 2026-09-30 已删 —— **直接写箭头函数就是组件**，没有任何注册表。
 
 ### 6.2 props
 
@@ -411,13 +452,23 @@ const Panel = (props: { title: string }) => {
 
 ### 6.5 key
 
-`key` 只对 `.map()` 有意义（§8.2）。写在其它位置的组件或元素上会被**静默丢掉**。
+`key` **只对 `.map()` 返回的那个元素有意义**（§8.2）—— 它是交给 `createFor` 的复用键。
+
+⚠ 写在别处（普通元素、组件、条件分支的分支里、片段里）现在**直接编译失败**，
+报"这里的 `key` 什么都不做…"并带 `文件名:行号`。以前它是**静默丢掉**的，
+于是"以为列表有 key、其实 key 挂在别的层"这种错永远发现不了 ——
+而 lite 没有"按 key 决定复不复用"的那一次 diff，删掉它不会改变行为。
+（负例用例四条守着这四种位置，见框架文档 §7。）
 
 ---
 
 ## 7. 状态
 
-`lite/src/index.ts` 导出的状态 API 就这些：`ref` `computed` `watch` `batch` `effect` `field` `createStore`。
+`lite/src/index.ts` 导出的状态 API **就四个**：`ref` `effect` `batch` `watch`。
+
+⚠ 老文档这里还列着 `computed` / `createStore` / `field` —— 它们**已经不存在了**
+（2026-09-30 随 Vue 兼容层删除：普查 0 处使用，只为"词汇表和 Vue 一样"而留）。
+派生值就写进 JSX（§6.1）或用一个模块级 `ref` + 在写的那一处同步更新。
 
 ### ref
 
@@ -428,23 +479,38 @@ n.value++
 
 * 读写只能走 `.value`（它是访问器属性，不是普通方法）。
 * 同值写入被 `Object.is` 挡掉，不会白刷 DOM。
-* **没有 `reactive`、没有 Proxy。** 共享状态的做法就是**模块级 ref**：建一个只导出 ref 的模块，
-  谁 import 谁用 —— 不需要 store 这个概念。要"对象的字段本身响应式"用 `createStore`（见下）。
+* **没有 `reactive`、没有 Proxy、没有 store 这一层。** 共享状态的做法就是**模块级 ref**：
+  建一个只导出 ref 的模块，谁 import 谁用。
   ⚠ 模块级 ref 是全应用唯一的：同页多实例会共享（§0.5）。要按实例隔离就在组件体内建 ref。
+* 对象的字段**不会**自己响应式：改了对象内部要换引用（`items.value = [...items.value, x]`），
+  或者为那个字段单开一个 ref。
 
 ### effect
 
 ```ts
 const e = effect(() => { /* 立刻跑一次，之后依赖变了再跑 */ })
-e.dispose()
+e.dispose()   // 停用它（解绑所有依赖，之后不再跑）
 ```
 
 组件里那些"改状态 ⇒ 改 DOM"的绑定全都是 effect，但**那是编译器生成的，业务代码基本不用手写**。
 
-⚠ 编译器生成的 effect 挂在它插入的节点上，节点被移除时**连它一起销毁**；
-**你自己手写的 effect 没有这个待遇** —— 要在 `onUnmounted` 里 `dispose()`。
+销毁有**两条路**，别混：
 
-`renderEffect` 只是 `effect` 的别名（编译产物用的名字）。
+* **编译器生成的绑定**按**节点**记账 —— 节点被 `remove()` 摘走时连带销毁。列表删一行，
+  停的就是那一行那几条绑定，不用等整页卸载。
+* **你在组件体内手写的 `effect()` / `watch()`**按**组件实例**记账 —— 组件卸载即停，
+  不需要你自己记得 `dispose()`。（2026-09-30 起才有这条：在此之前手写的 effect
+  在组件卸载后还活着，回调读到的是旧实例的状态。）
+  只有在**组件外面**（模块级）建的才真需要自己拿句柄停。
+
+⚠ 两个互写的信号（`A` 的 effect 写 `B`、`B` 的 effect 写 `A`）现在会**抛错**：
+"[lite] 循环更新 …"，超过 100 层/轮就中断。
+以前是把调用栈打爆（`RangeError: Maximum call stack size exceeded`），
+而爆栈现场早被中途的 DOM 写入冲掉了。
+⚠ 这条错误**不指名**是哪个 effect（给每条 effect 存标签是白付的字节），
+它只把范围收窄到"是互写，不是数据太多"。
+
+`renderEffect` 这个名字已经没了（它是"与 Vapor 词汇表对齐"时留的别名），现在只有 `effect`。
 
 ### watch
 
@@ -454,6 +520,7 @@ watch(authState, (value, oldValue) => { … })
 
 **初始不触发**（先读一次当前值再比较）、同值不触发。只能盯一个 ref：
 没有 `watchEffect`，没有 `deep` / `immediate` 选项。
+返回 effect 句柄（`e.dispose()` 可停）—— 在组件里建的话它会随组件自动销毁，不用你接。
 
 ### batch
 
@@ -465,33 +532,30 @@ batch(() => { a.value = 1; b.value = 2 })
 ```
 
 连写三个信号：不 batch 刷 3 次，包起来刷 1 次。
+`batch` 是**可重入**的：排空队列那一轮仍然算批量，所以"batch 里再改 batch"
+不会当场同步刷，一轮里同一条 effect 最多跑一次。
 
-### computed
+### 派生值没有原语，怎么办
 
-```ts
-const double = computed(() => base.value * 2)
+`computed` 删了（§7 开头）。两种写法够用：
+
+```tsx
+// ① 只在渲染里用 ⇒ 直接写进 JSX，那条绑定自己会重算
+<span>{list.value.filter((x) => x.on).length} 项</span>
+
+// ② 多处用 / 要在事件里读 ⇒ 在"写的那个地方"顺手更新一个 ref
+const active = ref(0)
+const toggle = (i: number) => {
+  batch(() => {
+    items.value = items.value.map((x, j) => (j === i ? { ...x, on: !x.on } : x))
+    active.value = items.value.filter((x) => x.on).length
+  })
+}
 ```
 
-边界：
-
-* **急切**：创建时就求值，不是"读到才算"。
-* 每次依赖变更会算**两遍**（它内部的 effect 会订阅自己的输出）。
-* **没有 dispose 句柄**，卸载不了 ⇒ 别在组件里按实例建，放模块级。
-
-### createStore
-
-```ts
-const s = createStore({ count: 0 })
-s.count++      // 响应式
-```
-
-它把**初始化时已存在的键**原地换成 getter/setter，不用 Proxy。
-边界：**之后新挂上去的键不响应**（`s.count = 1` 会更新，`s.later = 'x'` 不会）。
-
-### field
-
-`field(v)` 返回 `{ get, set }`，是不带 `.value` 的字段读写器 —— `createStore` 内部用它，
-自己写状态一般用不上。
+②是"多算 JS、少碰 DOM"的那条老规矩：算在写入侧，渲染侧只读一个格子。
+真需要"读到才算 + 缓存"再说 —— 那段实现是**独立的一块**
+（一条订阅 `fn` 的 effect + 一个 `RefImpl` 输出），加上来运行时其余部分一行不用改。
 
 ---
 
@@ -528,6 +592,12 @@ s.count++      // 响应式
 * 删行会跑那一行组件的 `onUnmounted`。
 * 新建的行是**正序**插入的。这不是审美问题：`<select>` 的默认选中项由"第一个被插进来的选项"
   决定，所以插入顺序会被用户看到。
+* ⭐ **渲染体读了第二个参数（下标）⇒ 重排时改为"重建那一行"**（编译器结构判断，
+  生成 `createFor(…, positional=true)`）。因为那种行的内容真的依赖位置：
+  搬过去不重算就会显示错的"第 N 步"。没读下标的行则是**搬动** ——
+  保住行内焦点与输入框光标。**这一条与 Vue 有意不同**：Vue 的 keyed diff 不区分，
+  只会一律重建（`docs/lite-postmortem.md` §11.7 记的是同一类分歧）。
+  想知道自己那处编成了哪种：看产物里 `createFor` 的最后一个布尔参数。
 
 ⚠ **只有一种形状会编成 `createFor`**：箭头函数，且**函数体直接是一个 JSX 表达式**。
 其它形状会**退化成一次性的 `setNodes`**（key 被忽略、依赖一变整块删掉重建）：
@@ -586,24 +656,36 @@ s.count++      // 响应式
 
 ## 10. 语法子集：哪些写法会出错
 
-编译器**只保证报两种错**：
+编译器现在**会拦**这些（带 `文件名:行号`，2026-09-30 起一条条加起来的）：
 
-* 组件上的 `{...spread}`；
-* 空元素带子节点（`<img>…</img>`）。
+| 写法 | 报的那一句含 |
+|---|---|
+| `key` 写在非 `.map()` 返回的元素上（普通元素 / 组件 / 条件分支 / 片段） | 这里的 `key` 什么都不做 |
+| `v-if="x"` / `v-model="x"` / `vShow={…}` / `vIf={…}` | 不支持指令式属性 |
+| `@click={fn}` 这类 Vue 事件简写 | 源码解析失败（TSX 本身就解析不过，报在 lite 这层） |
+| 组件上的 `{...spread}` | 组件上的 {...spread} 未支持 |
+| 空元素带子节点（`<img>…</img>` / `<br>x</br>`） | 空元素 `<img>` 不能带子节点（生成 HTML 无法表达） |
+| 条件分支既不是 JSX 也不是 `null` | 条件分支只支持 JSX 或 null |
+| 组件写在静态位置（不是动态子节点） | 组件只能出现在动态子节点位置 |
 
-其余"子集外"的写法**不一定报错**，会静默编成一个错的值。写之前扫一眼这张表：
+有 12 条负例用例守着这一张表（`node lite/regress/compiler.mjs`，纯 Node 秒级）。
+所以**这张表左列的写法不会"编过了但其实没生效"** —— 它一定红。
+
+但**下面这些仍然静默编错**（项目里 0 处使用 ⇒ 没做检测），别用：
 
 | 写法 | 结果 |
 |---|---|
 | `class={['a','b']}` | 不报错 → `class="a,b"`（对象同理 → `class="[object Object]"`） |
 | `style={{ color: 'red' }}` | 不报错 → `style="[object Object]"`（字符串可以，等价于直接写 `style="…"`） |
-| `ref={el}` | 不报错 → 元素上多一个字符串属性 |
-| `v-if="x"` / `v-model="x"` / `vShow={…}` | 不报错 → 原样变成元素属性，行为为零 |
+| `ref={el}`（模板引用） | 不报错 → 元素上多一个字符串属性 |
 | `onclick={fn}`（小写） | 不报错 → 属性值是函数源码 |
-| `<label class="x" />`（非空元素自闭合） | 正常，生成 `<label class="x"></label>` |
-| `{cond && <b>x</b>}` | 能用（`false` 时渲染为空），但建议统一写三元 |
-| 异步组件 / 代码分割 / SSR / 水合 / Teleport / Transition / Suspense / KeepAlive / 指令 | 不支持 |
-| `provide` / `inject` / `reactive` / `nextTick` / `effectScope` / `toRef` | 没有导出：`import` 它们直接报 `TS2305: Module '"lite"' has no exported member 'provide'`；若你是把 `from 'vue'` alias 过去的老代码，类型可能过得去、`vite build` 才报 `[MISSING_EXPORT]` |
+| `{xs.value.map((x) => { …; return <Row key={x.id}/> })}`（块体回调） | 不报错 → 退化成整块重建（§8.2） |
+| `provide` / `inject` / `reactive` / `nextTick` / `computed` / `createStore` | **没有导出**：`import` 它们直接报 `TS2305: Module '"lite"' has no exported member 'computed'` |
+| 异步组件 / 代码分割 / SSR / 水合 / Teleport / Transition / Suspense / KeepAlive | 不支持 |
+
+`<label class="x" />` 这种**非空元素写自闭合**是安全的：编译器补出
+`<label class="x"></label>`。真正报错的是**空元素带子节点**（`<img>…</img>`、`<br>x</br>`）。
+`{cond && <b>x</b>}` 能用（`false` 渲染为空），但建议统一写三元。
 
 ---
 
@@ -612,12 +694,14 @@ s.count++      // 响应式
 1. **组件体只跑一次**：顶层别算响应式的值，写进 JSX（§6.1）。
 2. **别解构 props**（§6.2）。
 3. **别用顶层 `if (…) return <X/>`** 做分支（§8.1）。
-4. **`key` 只在 `.map()` 里有意义**，而且回调必须是"表达式体直接返回 JSX"（§8.2）。
+4. **`key` 只在 `.map()` 返回的那个元素上有意义**，而且回调必须是"表达式体直接返回 JSX"（§8.2）；
+   写在别处现在会**直接编译失败**，不再是静默丢掉。
 5. **`class` / `style` 只接字符串**（§10）。
 6. **事件名第二个词首字母要大写**：`onClick` 是事件，`onclick` 是字符串属性（§9）。
 7. **没有模板引用**，用 DOM 查找（§9）。
-8. **手写的 `effect` 不会自动销毁**，`onUnmounted` 里自己 `dispose()`（§7）。
-9. **`computed` 别按组件实例建**：没有 dispose 句柄，而且每次依赖变更算两遍（§7）。
+8. **组件内外手写的 `effect` / `watch` 归谁管，不一样**：组件体内建的随组件销毁；
+   **组件外**（模块级）建的没人管，要自己拿句柄 `dispose()`（§7）。
+9. **别指望 `computed`**：它已经不在了。派生值写进 JSX，或在写入侧顺手算一个 ref（§7）。
 10. **别手动增删 / 搬动框架生成的节点**：动态位置靠 `<!---->` 占位注释定位，模板子树是克隆出来的。
     把它们挪走会让后续更新插错位置。
 
@@ -631,14 +715,18 @@ s.count++      // 响应式
 | 组件体顶层的派生值 | 会跟着更新 | **不会**，必须写进 JSX |
 | 更新时机 | 微任务批量刷 | **同步**刷；没有 `nextTick` |
 | 属性绑定粒度 | Vapor 改一个属性会顺带重写同一模板里的其它动态属性 | 细粒度：改 A 不动 B |
-| 卸载 | 组件实例卸载 | 节点被移除 ⇒ 该子树里的绑定销毁 + `onUnmounted` 跑；**手写 effect 除外** |
-| provide/inject、指令、Teleport、Transition、Suspense、异步组件 | 有 | 没有 |
+| 卸载 | 组件实例卸载 | 节点被移除 ⇒ 该子树里的绑定销毁 + `onUnmounted` 跑；**组件体内手写的 `effect`/`watch` 也随组件销毁**（模块级建的要自己 dispose，§7） |
+| 列表重排 | keyed diff 一律"能搬就搬" | **区分两种**：渲染体读了下标 ⇒ 重建那一行；没读 ⇒ 搬动（保住行内焦点/光标，§8.2） |
+| 循环写入 | 调度器 + 警告 | **抛错**（100 层/轮上限，§7） |
+| provide/inject、指令、Teleport、Transition、Suspense、异步组件、`computed`、`nextTick` | 有 | 没有 |
 | 模板引用 | `ref=` | 没有，用 DOM 查找 |
 | 事件对象 | 元素事件是原生；组件事件走 `emit` | 原生 `Event`；组件上的 `onXxx` 只是普通 prop（§6.4） |
 
-> 如果你是从一个 Vue（含 Vapor）项目迁过来的：把 `import { … } from 'vue'` 改成 `from 'lite'`
-> 基本就够；`ref` / `.value` / `onMounted` / `watch` / `.map()+key` 这套写法是刻意对齐的。
-> 迁移期如果用 alias 把 `'vue'` 指到 lite，那只是过渡手段，**新代码直接 import lite**。
+> 从 Vue 项目迁过来时**要注意的**：`ref` / `.value` / `onMounted` / `watch` / `.map()+key`
+> 这套写法是刻意对齐的，改 import 那一行基本就够 —— 但 **`computed` 与 `createStore` 没有**，
+> alias `'vue'` → lite 这条过渡路也**已经拆掉了**（2026-09-30）。
+> 也就是说：漏改的 `import { computed } from 'vue'` 现在会**直接报错**，不会静默跑错。
+> 迁移动作本身只剩两件事：把 `from 'vue'` 改成 `from 'lite'`、把构建插件换成 `lite/vite.ts`（§2）。
 
 ---
 
@@ -655,8 +743,8 @@ s.count++      // 响应式
 | `jsx` 必须 `preserve` | 改成 `react-jsx` 后 | `tsc` 报 `TS2875`；`vite build` **照样成功**（所以只能靠 tsc 拦） |
 | 缺 `jsx.d.ts` 就报错 | `include` 不覆盖它 | 每个标签 `TS7026` |
 | `types` 字段不影响它 | `"types": []` | `tsc` 0 错 |
-| 路径 ② 可用 | 同源工程 + `jsxImportSource: "vue-jsx-vapor"`（软链到 vue 3.6.0-rc.9 / vue-jsx-vapor 3.2.25） | `tsc` 0 错、`--listFiles` 确认用到其 JSX 命名空间、build ✓ |
-| 路径 ② 不是碰巧 | 去掉 `jsxImportSource` 且不含 lite 声明 | 立刻 `TS7026` |
+| 路径 ② 可用 | 同源工程 + `jsxImportSource: "vue-jsx-vapor"`（软链到 vue 3.6.0-rc.9 / vue-jsx-vapor 3.2.25） | `tsc` 0 错、`--listFiles` 确认用到其 JSX 命名空间、build ✓。**⚠ 2026-09-29 的一次性读数**：Vue 依赖已删，本仓不再重跑 |
+| 路径 ② 不是碰巧 | 去掉 `jsxImportSource` 且不含 lite 声明 | 立刻 `TS7026`（同上，一次性读数） |
 | 裸名要配 alias/paths | 分别删掉 `resolve.alias` / tsconfig `paths` | `Rolldown failed to resolve import "lite"` / `TS2307` |
 | Vite 8 自己读 `paths` | 只留 tsconfig `paths`、删掉 `resolve.alias` | build ✓（旧版 Vite 没测，仍建议两处都配） |
 | TS 7 不能用 | 装 `typescript@7.0.2` | `vite build`：`TypeError: Cannot read properties of undefined (reading 'ESNext')`；`tsc`：110 条错 |

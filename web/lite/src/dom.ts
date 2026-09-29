@@ -15,7 +15,7 @@
  * `<!--$-->` 注释锚点，我们连那个都省了）。
  */
 
-import { type Effect, effect } from './signal'
+import { type Effect, newEffect } from './signal'
 
 /** 渲染结果统一成节点数组：**不引入任何包装元素**，所以 CSS 选择器与布局与原来逐像素一致。 */
 export type Nodes = Node[]
@@ -90,6 +90,18 @@ function disposeTree(node: Node): void {
  */
 let warnedDetachedAnchor = false
 
+/**
+ * `insert` 的嵌套深度 —— **收尾工作只在最外层做一次**。
+ *
+ * 为什么：`flushSlots()` 与 `flushMounted()` 都是"扫一遍待办队列"，而它们原先挂在
+ * **每一次** `insert` 后面。列表就是重灾区：`createFor` 每挪一行调一次 `insert`，
+ * 于是 2,000 行的反转要扫 2,000 轮队列（bench 实测：反转 2000 行 ×10 = 9.9ms、
+ * 追加 100 行 ×10 = 5.5ms，是 lite 全场最慢的两项）。
+ * 合批之后同一串插入只收尾一次，队列状态仍然一致（这两步只是"把已进文档的东西放行"，
+ * 晚一点跑不影响结果，只影响中间态，而中间态没人能观察到 —— 全程同步）。
+ */
+let inserting = 0
+
 export function insert(parent: Node, nodes: Nodes, anchor: Node | null = null, where = '?'): void {
   let at = anchor
   if (at && at.parentNode !== parent) {
@@ -106,9 +118,16 @@ export function insert(parent: Node, nodes: Nodes, anchor: Node | null = null, w
     }
     at = null
   }
-  for (const n of nodes) parent.insertBefore(n, at)
-  flushSlots()
-  flushMounted()
+  inserting++
+  try {
+    for (const n of nodes) parent.insertBefore(n, at)
+  } finally {
+    inserting--
+  }
+  if (!inserting) {
+    if (pending.length) flushSlots()
+    if (mounts.length) flushMounted()
+  }
 }
 
 /**
@@ -261,7 +280,7 @@ export function remove(nodes: Nodes): void {
  */
 export function setNodes(parent: Node, fn: () => unknown, anchor: Node | null = null, track?: Slot): void {
   let cur: Nodes = []
-  const eff = effect(() => {
+  const eff = newEffect(() => {
     /**
      * ⚠⚠ **陈旧 effect 自毁**。真机症状：任务中心"越刷新内容越多，一直重复插入"。
      * 成因：那块内容被别处整块替换掉了（切页 / 刷新重建），于是 `cur` 已经全部脱离文档、

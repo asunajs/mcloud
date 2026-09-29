@@ -1,14 +1,13 @@
-import { createVaporApp } from 'vue'
+import { mount } from 'lite'
 import App from './app'
 import './app.css'
 
-// 不挂 vaporInteropPlugin：daisyUI 是纯 CSS 类，整棵树都在 Vapor 里，
-// 没有需要建立边界的 VDOM 组件。
+// 挂根。以前这里写的是 `createVaporApp(App).mount('#app')` —— 那是**从 Vue 迁过来时**
+// 为了"入口一行都不用改"留的壳，壳下面就是这一句。2026-09-30 壳删了，入口跟着直写。
 //
-// ⚠ `createVaporApp` 在 Vite 里能从 `vue` 解析到，是因为 Vite 走 `import`
-// 条件导出（→ `vue.runtime-with-vapor`）。在 Node 里 `require('vue')` 拿到的是
-// runtime-only 那份、没有这个导出 —— 那是包的条件导出差异，不是配置错误。
-createVaporApp(App).mount('#app')
+// ⚠ `mount` 返回的是卸载器，本项目**没人接**：整棵树只挂一次，
+// 切页/切登录态都靠信号，没有"换个根再挂一次"的场景。
+mount(App, '#app')
 
 /*
  * 收掉 index.html 里的首屏加载动画。

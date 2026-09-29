@@ -1,21 +1,17 @@
 /**
- * 回归脚本的**共同底座**：fixture 服务、Chrome 路径、DOM 归一化、两种抓取方式。
+ * 验收脚本的**共同底座**：fixture 服务、Chrome 路径、DOM 归一化、CDP 会话。
  *
- * 两个脚本各走一条抓取路线，都是踩过坑才定下来的：
+ * * `serve` —— 一份 fixture 后端 + 静态产物，端口随脚本给；
+ * * `openSession` —— 起 chrome 并接上 **CDP**（DevTools 协议，零依赖：Node 自带
+ *   `WebSocket`），能点、能输入、能等 DOM 稳定，用于回答"点完这一下，界面对不对"。
  *
- * * `dumpDom`（`compare.mjs` 用）—— `--dump-dom` **一次**抓完初始渲染。最省事、最不容易错，
- *   缺点是抓不到"交互之后"的状态；
- * * `openSession`（`interact.mjs` 用）—— 走 **CDP**（DevTools 协议，零依赖：Node 自带
- *   `WebSocket`），能点、能输入、能等 DOM 稳定，用于回答"点完这一下，两侧还一致吗"。
- *
- * ⚠ `appSubtree` 必须两个脚本**同一份**：它定义了"什么算渲染结果"（去注释锚点、
- * 去框架标记、折叠标签间空白）。各写一份迟早会漂移，而漂移的表现是"都过了但测的不是一回事"。
+ * ⚠ `appSubtree` 是"什么算渲染结果"的唯一定义（去注释锚点、折叠标签间空白）：
+ * 每步快照都过它，于是"界面变了没有"有一个稳定口径，而不是各处自己剪一段 outerHTML。
  */
 import { execFileSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
-import zlib from 'node:zlib'
 
 export const arg = (name, fallback) => {
   const i = process.argv.indexOf(name)
@@ -27,7 +23,7 @@ export const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 /**
  * fixture 数据。⚠ **形状照 `web/src/api.ts` 的类型写**，不是随手编的：
  * 上一版把 `RunRecord` 写成了 `{startedAt, finishedAt}`（真实字段是 `started_at_ms` /
- * `duration_ms`），于是仪表盘上显示 `耗时NaN分NaN秒` —— 两侧当然"一致"，
+ * `duration_ms`），于是仪表盘上显示 `耗时NaN分NaN秒` —— 界面照样"跑通了"，
  * 但那是在**测一个空壳**。列表为空时各页只渲染空态，`createFor` 的增删重排、
  * 带数据的弹窗、带选项的下拉框一个都走不到。
  */
@@ -72,7 +68,15 @@ const PIPELINE = {
   lastRunMs: 1790582000000,
 }
 
-/** 启动链路要的 4 个接口 + 首屏几个列表；两侧**完全一样**。 */
+/**
+ * 启动链路要的 4 个接口 + 首屏几个列表；三个 variant 共用同一份。
+ *
+ * ⚠ **每页要的接口都得在这儿**，少一个的表现不是"那一块空着"而是**整页错误态**：
+ * `accounts-page.tsx` 的 `load()` 是 `Promise.all([listAccounts(), getPcDevice()])`，
+ * 于是 `/api/login/device` 缺失时账号列表一行都不渲染（先前就是这样 —— 点「移除」
+ * 命中的其实是弹窗里那颗按钮，四条断言一起红）。
+ * 加页面时先把它 `load()` 里并发取的端点全列进这张表。
+ */
 export const FIXTURES = {
   '/api/setup': { initialized: true, minPasswordLen: 8 },
   '/api/session': { userId: 'u-1', name: 'catlair', kind: 'web' },
@@ -89,6 +93,12 @@ export const FIXTURES = {
   '/api/schedules': [SCHEDULE],
   '/api/pipelines': [PIPELINE],
   '/api/accounts': [ACCOUNT, ACCOUNT2],
+  /**
+   * 本机设备指纹（`getPcDevice`）与换一台（`rotatePcDevice`）。
+   * 缺前者 ⇒ 账号页 `Promise.all` 整体失败 ⇒ 列表一行都不渲染（见上面那段 ⚠）。
+   */
+  '/api/login/device': { device_id: 'dev-abc123' },
+  'POST /api/login/device/rotate': { device_id: 'dev-rotated-9f2c' },
 }
 
 /**
@@ -151,7 +161,7 @@ export const serve = (root, port, variant) =>
      * 而 `FIXTURES` 里的值**直接就是 body**。把后者当 `{status, body}` 用，
      * 会发出"200 + 空体"—— 应用那边 `JSON.parse('')` 拿不到东西、
      * `/api/session` 于是判成未登录，**整个 ready 变体都在渲染登录页**，
-     * 而两侧一起渲染登录页 ⇒ 逐字符比对照样"通过"。测试脚本自己的 bug 最会骗人。
+     * 而应用停在登录页 ⇒ 每一步都"没报错"，其实是**什么都没测到**。测试脚本自己的 bug 最会骗人。
      */
     const send = (req, res, entry, plain) => {
       const respond = (r) => {
@@ -190,8 +200,13 @@ export const serve = (root, port, variant) =>
         return
       }
       if (url.startsWith('/api/')) {
+        /**
+         * ⚠ 形状与上面 `VARIANTS` 那条同一条规矩：**`error` 是字符串、`code` 在顶层**
+         * （`api.ts` 读的是 `String(body.error)`）。写成 `{error:{code,message}}` 的话
+         * 界面上会出现 `[object Object]` —— 看着像应用的 bug，其实是 fixture 自己造的。
+         */
         res.writeHead(404, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ error: { code: 'not_found', message: 'fixture 未提供: ' + url } }))
+        res.end(JSON.stringify({ error: `fixture 未提供：${url}`, code: 'not_found' }))
         return
       }
       let f = path.join(root, url)
@@ -210,10 +225,9 @@ export const hashRoute = (route) => `#/${String(route).replace(/^#\/?/, '')}`
 export const chromePath = execFileSync('bash', ['-c', 'ls -d ~/.cache/puppeteer/chrome-headless-shell/*/chrome-headless-shell-*/chrome-headless-shell | head -1'], { encoding: 'utf8' }).trim()
 
 /**
- * 取 `#app` 子树（按 div 标签配平），去注释锚点、折叠标签间空白、抹掉框架专有的挂载标记。
+ * 取 `#app` 子树（按 div 标签配平），去注释锚点、折叠标签间空白。
  *
- * ⚠ 注释要**去掉**：lite 用 `<!---->` 当动态槽占位（§11.2 #6），Vapor 也会打自己的标记，
- * 它们不属于渲染结果。
+ * ⚠ 注释要**去掉**：lite 用 `<!---->` 当动态槽占位（§11.2 #6），它不属于渲染结果。
  */
 export function appSubtree(html) {
   const i = html.indexOf('<div id="app"')
@@ -230,57 +244,15 @@ export function appSubtree(html) {
   return html
     .slice(i, end)
     .replace(/<!--.*?-->/gs, '')
-    .replace(/\s+data-v-app(="")?/g, '')
-    // Vue 的 scoped 属性（`data-v-1a2b3c`）与 `data-v-app` 都是框架挂的标记，不属于渲染结果
-    .replace(/\s+data-v-[0-9a-f]+(="")?/g, '')
     .replace(/>\s+</g, '><')
     .trim()
 }
 
 /**
- * 抓 DOM（`--dump-dom` 一次性）。必须：`spawn` + **读 stdout 流** + 等 **`exit`**（而不是等管道关闭）。
- *
- * 三条都踩过：
- * 1. stdout 指向 `fs.openSync` 的 fd ⇒ Node 的句柄带 **CLOEXEC**，chrome 继承不到，
- *    表现是**退出码 0、输出 0 字节**（bash 里重定向到文件却正常，极易误判成"页面没渲染"）；
- * 2. `execFileSync`/`execFile` 的管道 ⇒ chrome 的 renderer/gpu 子进程继承了管道，
- *    主进程退出后也不关，回调永不触发 ⇒ ETIMEDOUT；
- * 3. `execFileSync` 阻塞事件循环，而 fixture 服务就在本进程里 ⇒ 两者互相锁死。
- */
-export const dumpDom = ({ port, route, name, budget = '8000', timeout = '90000', profile = '/tmp/lite-chrome-profile' }) =>
-  new Promise((resolve) => {
-    const child = spawn(
-      chromePath,
-      [
-        `--user-data-dir=${profile}`,
-        '--headless', '--disable-gpu', '--hide-scrollbars', '--window-size=1280,900',
-        `--virtual-time-budget=${budget}`,
-        `--screenshot=/tmp/shots/${name}.png`,
-        '--dump-dom',
-        `http://127.0.0.1:${port}/${route}`,
-      ],
-      { stdio: ['ignore', 'pipe', 'ignore'] },
-    )
-    let out = ''
-    child.stdout.on('data', (d) => {
-      out += d
-    })
-    // 护栏：被测应用若有渲染死循环，chrome 永远不退出 —— 到点就杀，并把这件事标进结果
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      resolve(out + '\n<!-- chrome 超时被杀：应用可能在渲染死循环 -->')
-    }, Number(timeout))
-    child.on('exit', (code) => {
-      clearTimeout(timer)
-      resolve(code ? out + `\n<!-- chrome exit ${code} -->` : out)
-    })
-  })
-
-/**
  * 起一个可交互的页面（CDP）。零依赖：Node 自带 `WebSocket`。
  *
  * 为什么要它：`--dump-dom` 只能看**首屏**。事件处理器、`batch`、列表增删、
- * 切页时新建/卸载组件这些路径，全在"点一下之后" —— 那才是这套框架与 Vue 差别最大的地方。
+ * 切页时新建/卸载组件这些路径，全在"点一下之后" —— 那正是这套框架最容易出错的地方。
  */
 export const launchChrome = ({ url, debugPort, profile }) =>
   spawn(
@@ -388,89 +360,4 @@ export async function openSession({ port, route, debugPort, profile, width = 128
     if (p.type === 'error') errors.push('console.error: ' + p.args.map((a) => a.value ?? a.description ?? '').join(' '))
   })
   return { child, cdp, errors, width }
-}
-
-/**
- * 逐像素比对两张 PNG 截图。**零依赖**：自己解 8 位 PNG（Chrome 截图就是 8 位、非隔行、RGB(A)）。
- *
- * 为什么需要它：DOM 逐字符一致 + CSS 同名同哈希，理论上像素必然一致 ——
- * 但"理论上"不是判据，而且这条能兜住"DOM 一样、渲染不一样"的类型（例如内联样式、
- * `:hover`/`:focus` 状态、动画停在半路）。
- *
- * ⚠⚠ **必须给足 `--virtual-time-budget`**（建议 ≥20 s）：8 s 时按钮的
- * `transition: background-color` 还没走完，两侧截到的是过渡中的不同帧 ——
- * 实测都是"按钮面上差几个色阶"，把预算加到 20 s 后 **0 个不同像素**。
- * 那是截图时机问题，不是渲染差异；别把它当成真差异去追。
- */
-export function pngDiff(fileA, fileB) {
-  const load = (buf) => {
-    let pos = 8
-    let w = 0
-    let h = 0
-    let ch = 3
-    const idat = []
-    while (pos < buf.length) {
-      const len = buf.readUInt32BE(pos)
-      const typ = buf.toString('ascii', pos + 4, pos + 8)
-      pos += 8
-      const body = buf.subarray(pos, pos + len)
-      pos += len + 4
-      if (typ === 'IHDR') {
-        w = body.readUInt32BE(0)
-        h = body.readUInt32BE(4)
-        const ct = body[9]
-        ch = ct === 6 ? 4 : ct === 2 ? 3 : ct === 0 ? 1 : ct === 4 ? 2 : 0
-        if (!ch || body[8] !== 8 || body[12] !== 0) throw new Error('只支持 8 位非隔行 PNG')
-      } else if (typ === 'IDAT') idat.push(body)
-    }
-    const raw = zlib.inflateSync(Buffer.concat(idat))
-    const stride = w * ch
-    const out = Buffer.alloc(h * stride)
-    let prev = Buffer.alloc(stride)
-    let p = 0
-    for (let y = 0; y < h; y++) {
-      const f = raw[p++]
-      const line = Buffer.from(raw.subarray(p, p + stride))
-      p += stride
-      for (let i = 0; i < stride; i++) {
-        const a = i >= ch ? line[i - ch] : 0
-        const b = prev[i]
-        const c = i >= ch ? prev[i - ch] : 0
-        if (f === 1) line[i] = (line[i] + a) & 255
-        else if (f === 2) line[i] = (line[i] + b) & 255
-        else if (f === 3) line[i] = (line[i] + ((a + b) >> 1)) & 255
-        else if (f === 4) {
-          const pa = Math.abs(b - c)
-          const pb = Math.abs(a - c)
-          const pc = Math.abs(a + b - 2 * c)
-          line[i] = (line[i] + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c)) & 255
-        }
-      }
-      line.copy(out, y * stride)
-      prev = line
-    }
-    return { w, h, ch, px: out }
-  }
-  const a = load(fs.readFileSync(fileA))
-  const b = load(fs.readFileSync(fileB))
-  if (a.w !== b.w || a.h !== b.h || a.ch !== b.ch) return { diff: -1, reason: '尺寸/通道不同（布局差异）' }
-  let diff = 0
-  let maxDelta = 0
-  let box = null
-  for (let y = 0; y < a.h; y++) {
-    for (let x = 0; x < a.w; x++) {
-      const i = (y * a.w + x) * a.ch
-      let same = true
-      for (let k = 0; k < a.ch; k++) {
-        if (a.px[i + k] !== b.px[i + k]) {
-          same = false
-          maxDelta = Math.max(maxDelta, Math.abs(a.px[i + k] - b.px[i + k]))
-        }
-      }
-      if (same) continue
-      diff++
-      box = box ? [Math.min(box[0], x), Math.min(box[1], y), Math.max(box[2], x), Math.max(box[3], y)] : [x, y, x, y]
-    }
-  }
-  return { diff, total: a.w * a.h, maxDelta, box, w: a.w, h: a.h }
 }

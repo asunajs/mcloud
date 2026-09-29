@@ -12,7 +12,7 @@ execFileSync('npx', ['vite', 'build', '--config', path.join(dir, 'vite.config.ts
 const js = fs.readFileSync('/tmp/lite-demo/demo.mjs', 'utf8')
 fs.writeFileSync('/tmp/lite-demo.compiled.js', js)
 const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>lite demo</title></head>
-<body><div id="app"></div><div id="frag"></div><div id="frag3"></div><div id="misc"></div><div id="keyless"></div><div id="stale"></div><div id="third"></div><div id="dup"></div><div id="sl"></div><div id="st"></div>
+<body><div id="app"></div><div id="frag"></div><div id="frag3"></div><div id="misc"></div><div id="keyless"></div><div id="stale"></div><div id="third"></div><div id="dup"></div><div id="sl"></div><div id="st"></div><div id="steps"></div><div id="nullchild"></div>
 <script>window.addEventListener('error',function(e){var p=document.createElement('pre');p.id='err';p.textContent=['ERR: '+(e.message||e.error),(e.error&&e.error.stack||'')].join(String.fromCharCode(10));document.body.appendChild(p)});</script>
 <script type="module">${js}</script></body></html>`
 fs.writeFileSync('/tmp/lite-demo.html', html)

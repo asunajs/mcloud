@@ -3,17 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "mcloud-gost WebUI —— Vue Vapor（无虚拟 DOM）+ TSX + daisyUI",
+  "description": "mcloud-gost WebUI —— 自研 lite 框架（无虚拟 DOM + 编译期优化）+ TSX + daisyUI",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsmc --noEmit"
   },
-  "dependencies": {
-    "vue": "3.6.0-rc.9",
-    "vue-jsx-vapor": "^3.2.24"
-  },
+  "//": "没有 dependencies：运行时是仓库里的 lite/（编译器 + 运行时），CSS 侧是构建期插件。",
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@ts-macro/tsc": "^0.3.7",

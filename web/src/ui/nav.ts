@@ -10,7 +10,6 @@
  *  - 只用一个断点（`md`，768px）→ §7.1
  */
 
-import type { JSX } from 'vue-jsx-vapor'
 import {
   IconClock,
   IconDashboard,

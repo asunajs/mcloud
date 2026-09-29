@@ -68,7 +68,8 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      # 依赖树靠 web/.npmrc 的 legacy-peer-deps=true 统一，不写 --force
+      # `web/.npmrc` 已随 Vue 依赖删除：lite 的 devDependencies 之间没有 peer 冲突，
+      # `npm ci` 按 lock 直接可复现，不需要 legacy-peer-deps 这类绕行开关
       - name: 安装依赖
         run: npm ci
 

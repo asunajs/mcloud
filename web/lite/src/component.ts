@@ -87,8 +87,9 @@ export const useSlots = (): Slots => current?.slots ?? {}
 /**
  * 挂到容器上。先建树、再插入、最后统一跑挂载钩子。
  *
- * 保留 `defineVaporComponent` 这个名字做**恒等函数**：`app.tsx` 里那处包装
- * 迁移时不用改（本框架里所有函数组件地位相同，没有"需要打标记才是组件"这回事）。
+ * 返回卸载器，但**项目里没人用它**：整棵树就一次 `mount(App, '#app')`，
+ * 页面切换靠信号，没有"换个根再挂一次"的场景。留着是因为它只要一行，
+ * 而真要做主题/热替换时没它就得改运行时。
  */
 export function mount(App: Component, target: Element | string): () => void {
   const el = typeof target === 'string' ? document.querySelector(target) : target
@@ -98,18 +99,4 @@ export function mount(App: Component, target: Element | string): () => void {
   insert(el, nodes)
   // 返回卸载器：`remove` 会顺带跑 onUnmounted 的钩子
   return () => remove(nodes)
-}
-
-export const defineVaporComponent = <T>(fn: T): T => fn
-
-/**
- * 迁移兼容层：`src/main.ts` 现在写的是 `createVaporApp(App).mount('#app')`。
- * 保留这个名字，业务入口就一行都不用改（与 `defineVaporComponent` 同理）。
- */
-export function createVaporApp(App: Component) {
-  return {
-    mount(target: Element | string) {
-      mount(App, target)
-    },
-  }
 }

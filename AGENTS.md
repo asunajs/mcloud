@@ -154,8 +154,11 @@ Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过�
   cargo test --workspace
   cargo clippy --workspace --all-targets -- -D warnings
   cargo fmt --all -- --check
-  node scripts/gates-web.mjs
+  node scripts/gates-web.mjs --full
   ```
+  （`--full` = 三个认证态的交互验收全跑，≈ 77 s；不带它的默认只跑 `ready`，
+  是**改脚本时的快回路**，不能替代提交前那次。四条里最后一条要无头 Chrome，
+  没有的机器上会明说"跳过 ≠ 通过"。）
 
 ## ⚠ 构建顺序（踩过坑）
 

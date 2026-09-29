@@ -5,7 +5,7 @@
  * 桌面用表格，窄屏**必须**切卡片 —— 列多的表在窄屏不可用。
  */
 
-import { onMounted, ref } from 'vue'
+import { onMounted, ref } from 'lite'
 import { listRuns, type RunRecord } from '../api'
 import { accountName, refreshAccountNames } from '../account-names'
 import { EmptyState } from '../ui/empty-state'

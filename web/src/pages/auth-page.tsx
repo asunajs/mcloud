@@ -23,7 +23,7 @@
  * 并让后端最终说了算。
  */
 
-import { onMounted, ref } from 'vue'
+import { onMounted, ref } from 'lite'
 import {
   createAdmin,
   getSetupStatus,
@@ -91,12 +91,16 @@ export const AuthPage = (props: AuthPageProps) => {
    * 提交。
    *
    * ⚠ 用 `onClick` 而不是 `<form onSubmit>`：本项目其它页面全是这个写法，
-   * 而 Vapor 里 `<form>` 的提交事件类型是 `FormEvent<HTMLFormElement>`，
-   * 与原生 `Event` 不兼容（`cancelBubble`/`returnValue` 等一票属性缺失），
-   * 要多一层类型断言。为一个"回车提交"引入一套与全站不同的写法不值得 ——
+   * 为一个"回车提交"引入一套与全站不同的写法不值得 ——
    * 而 `<form>` 里没写 `onSubmit` 时回车会**刷新整页**，那比没有更糟。
    *
    * 回车提交由两个输入框各自的 `onKeyDown` 接住（见下）。
+   *
+   * （历史备注：这里以前还写着"Vapor 的提交事件类型 `FormEvent<HTMLFormElement>`
+   * 与原生 `Event` 不兼容，要多一层断言"。lite 的 JSX 声明里事件属性走
+   * `on${string}` 那条索引签名 ⇒ 参数就是 `any`（见 `lite/jsx.d.ts`），
+   * 要精确类型就自己标注 `onSubmit={(e: SubmitEvent) => …}` —— 那个包袱
+   * 2026-09-30 随 Vue 兼容层一起没了。）
    */
   const submit = async () => {
     error.value = ''

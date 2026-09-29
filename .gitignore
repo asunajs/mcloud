@@ -9,6 +9,13 @@ target/
 /data
 *.log
 
+# lite 自检脚本的临时构建目录：`regress/.check-tmp`（把编译器编成 ESM 才能跑负例）、
+# `lite/.size-tmp`（体积测量用的临时入口）。两者脚本结尾都会 `rm -rf` 自己那份，
+# 但**抛错在半路就留残骸**（上次 `size.mjs` 挂了，`lite/.size-tmp/` 在
+# `git status` 里挂了一整天）。忽略掉，别让一次失败的测量污染"待提交"列表。
+/web/lite/regress/.check-tmp/
+/web/lite/.size-tmp/
+
 # 滑块题面的对拍底本（`picture.png` / `puzzle.png`）。
 #
 # ⚠ **有意不入库**：它们是**真机抓包的原始响应体**，含那个账号的真实题面图。

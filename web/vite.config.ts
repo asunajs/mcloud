@@ -1,17 +1,18 @@
 /**
- * **默认前端构建配置 = lite**（2026-09-29 切换）。
- *
- * 原来那份（Vue 3 + vue-jsx-vapor）原样留在 `vite.config.vue.ts`，
- * 一条命令就能切回去：
- *
- *   npx vite build --config vite.config.vue.ts     # 退回 Vue 产物
+ * **默认前端构建配置 = lite**。
  *
  * ⚠⚠ 改完**必须** `npm run build` 再 `cargo build`：`rust-embed` 在**编译期**
  * 把 `web/dist` 嵌进二进制，而 `cargo build` **不跟踪** `web/dist` 的变化。
  * 顺序反了会内嵌旧资源（白屏 / chunk 404），而 `cargo build` 还会说 "Finished"。
  *
- * 切换依据（都可复现）：`node lite/regress/all.mjs` —— 9 条路由 + 3 个认证态
- * 逐字符一致、三组交互 45/8/10 步全一致、整页逐像素一致、53 条断言全过。
+ * 两条 import 口径（都得留着，少一条就构建失败）：
+ * * `resolve.alias` 的 `lite`：业务源码 `import { ref } from 'lite'` 与
+ *   编译器生成的 `import { … } from 'lite'` 都走它。
+ *   ⚠ 不能改用相对路径：每个源文件深度不同，`./lite/src/index` 会解析到不同地方。
+ * * `plugins` 里的 `lite({ runtime: 'lite' })`：把 TSX 折成模板 + 逐槽 effect。
+ *
+ * 曾经这里还有 `vue` / `vue-jsx-vapor` 两条 alias —— 那是"业务源码一行不改就切到
+ * 自研运行时"的迁移桥。2026-09-30 源码已经全部直接写 `from 'lite'`，桥拆了。
  */
 import { defineConfig } from 'vite'
 import tailwindcss from '@tailwindcss/vite'
@@ -24,11 +25,7 @@ import lite from './lite/vite.ts'
 export default defineConfig({
   plugins: [tailwindcss(), lite({ runtime: 'lite' })],
   resolve: {
-    alias: [
-      { find: /^lite$/, replacement: new URL('./lite/src/index.ts', import.meta.url).pathname },
-      { find: /^vue$/, replacement: new URL('./lite/src/index.ts', import.meta.url).pathname },
-      { find: /^vue-jsx-vapor$/, replacement: new URL('./lite/src/index.ts', import.meta.url).pathname },
-    ],
+    alias: [{ find: /^lite$/, replacement: new URL('./lite/src/index.ts', import.meta.url).pathname }],
   },
   server: {
     // 开发时后端在 mcloud-server（默认 38123）。

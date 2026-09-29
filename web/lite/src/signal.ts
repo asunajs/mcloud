@@ -6,21 +6,66 @@
  * 1. **同步 + 批量**，不做微任务调度队列。本项目的依赖链只有"信号 → DOM 写入"这一层，
  *    没有 computed 套 computed 的深链，同步执行省掉整套调度器（约 300B）。
  *    需要一次改多个信号再统一刷 DOM 时用 `batch()`。
- * 2. **不用 Proxy**。信号是类实例；`store` 的字段用 `defineProperty` 变成 getter/setter。
- *    Proxy 每次读写都要过陷阱，既慢又占字节，而本项目根本没有"运行时才知道的键"。
+ * 2. **不用 Proxy**。信号是类实例，读写走访问器。Proxy 每次读写都要过陷阱，
+ *    既慢又占字节，而本项目根本没有"运行时才知道的键"。
  * 3. **依赖记账用双向 Set**：effect 记着自己的依赖（重跑前要清），信号记着自己的订阅者
  *    （变更时要通知）。两边都留一份，才能在重跑时精确解绑。
  *
  * 这里刻意**只有 4 个 API**（ref / effect / batch / watch）—— 普查显示全项目就用了这些：
  * `ref` 66 处、`watch` 1 处、`computed` **0 处**、`reactive` 0 处、`nextTick` 0 处。
+ * ⇒ `computed` 与 `field`/`createStore` 那一族（0 处使用）在 2026-09-30 随"不必兼容 Vue"
+ * 一起删了，省下多少字节由 `node lite/size.mjs` 量（它保留着"全量 vs 裁剪后"两档口径）。
+ * 要加回来的话它是**独立的一段**（派生值 = 一条订阅 fn 的 effect + 一个 RefImpl 输出），
+ * 运行时其余部分一行都不用改。
+ *
+ * 名字也不背 Vue 的包袱：`ref` / `.value` 是这里唯一留下的旧名，因为它读起来就是
+ * "一个可写的格子"，而换掉的收益远小于代价（21 个文件改 import）。
+ * 只为"从 Vue 迁过来不用动代码"而留的壳（`createVaporApp` / `defineVaporComponent` /
+ * `renderEffect`）已经删了 —— 入口直接写 `mount(App, '#app')`。
  */
 
 /** 当前正在运行的 effect。用模块级单值而不是给每个函数传参：少一层参数、少一堆字节。 */
 let active: Effect | null = null
 
-/** batch 深度。>0 时变更只入队，归零时统一跑一遍（同一个 effect 只会跑一次）。 */
+/**
+ * 当前的**组件作用域**：这段时间内新建的 effect 交给它（组件卸载时统一销毁）。
+ *
+ * 为什么需要：`watch` / `computed` 建的 effect 不属于任何 DOM 节点，走不到 `dom.ts`
+ * 那套"按节点记账、节点被摘走时销毁"的路子。少了这一层，组件里写的 `watch` 在它卸载后
+ * 还活着 —— 回调读到的是旧实例的状态，而没人再负责停它。
+ *
+ * ⚠ DOM 绑定（`setNodes` / `createFor`）**不走这里**：它们已按节点记账，那一份粒度更细
+ * （列表删一行就该停那一行的 effect，而不是等整页卸载）。所以运行时内部用 `newEffect()`，
+ * 公开的 `effect()` 才挂作用域。
+ */
+let scope: ((e: Effect) => void) | null = null
+
+/** 在 `fn` 执行期间把新建的 effect 登记给 `add`（嵌套安全：进时存、出时恢复）。 */
+export function ownedEffects<T>(add: (e: Effect) => void, fn: () => T): T {
+  const prev = scope
+  scope = add
+  try {
+    return fn()
+  } finally {
+    scope = prev
+  }
+}
+
+/** batch 深度。>0 时变更只入队，归零时统一排空（同一个 effect 一轮只跑一次）。 */
 let depth = 0
 const pending = new Set<Effect>()
+
+/**
+ * effect 重入的上限：`A → B → A` 这种互写在这里变成一条可读的抛错，而不是把栈打爆。
+ *
+ * 为什么阈值是 100：正常嵌套只有一两层（effect 里写信号 ⇒ 订阅者立刻跑）。
+ *
+ * ⚠ 它**不指名**是哪个 effect（要指名得给每个 effect 存标签，那是白付的字节）。
+ * 它比 `RangeError: Maximum call stack size exceeded` 有用的地方是**有边界、能停下**：
+ * 爆栈时中途的 DOM 写入已经把现场冲掉了，而这条错误至少告诉你"是互写，不是数据太多"。
+ */
+let nesting = 0
+const MAX_NESTING = 100
 
 export class Effect {
   /** 我依赖了哪些信号 —— 重跑前要逐个解绑，否则依赖会越滚越大。 */
@@ -55,14 +100,20 @@ export class Effect {
 
   run(): void {
     if (this.disposed) return
+    if (nesting >= MAX_NESTING) {
+      // 抛出去之前先把状态还原：`active`/`nesting` 由 finally 管，但这条 fn 不该再跑
+      throw new Error('[lite] 循环更新：effect 在自己引发的更新链里被反复触发（超过 ' + MAX_NESTING + ' 层），已中断。检查这两个信号是不是互相写对方。')
+    }
     for (const d of this.deps) d.subs.delete(this)
     this.deps.clear()
 
     const prev = active
     active = this
+    nesting++
     try {
       this.fn()
     } finally {
+      nesting--
       active = prev
     }
   }
@@ -72,6 +123,17 @@ export class Effect {
     if (depth) pending.add(this)
     else this.run()
   }
+}
+
+/**
+ * 建一个 effect。**内部用**（`dom.ts` 的绑定、`control.ts` 的列表走这里）。
+ *
+ * 与公开的 `effect()` 差在哪：不挂组件作用域。那些 effect 已经有更细的归属了
+ * （`dom.ts` 的 `owners`：按**节点**记账，节点被摘走时销毁），再往组件实例的数组里
+ * 塞一份纯属重复记账。
+ */
+export function newEffect(fn: () => void): Effect {
+  return new Effect(fn)
 }
 
 class RefImpl<T> {
@@ -97,7 +159,16 @@ class RefImpl<T> {
     // Object.is：NaN 与 +0/-0 的边界与 Vue 一致，顺带避免"同值重设"触发无谓的 DOM 写
     if (Object.is(n, this.v)) return
     this.v = n
-    // 复制一份再遍历：订阅者可能在回调里退订（例如条件分支把某个子树删了）
+    // ⚠ 订阅者可能在回调里退订（例如条件分支把某个子树删了），所以不能原地遍历。
+    // 但 0 个与 1 个是绝大多数情形（本项目每个信号平均不到 1.5 个订阅者），
+    // 为它们各分配一个数组是白付的 GC 压力 —— 只有两个以上才复制。
+    const n0 = this.subs.size
+    if (!n0) return
+    if (n0 === 1) {
+      const only = this.subs.values().next().value as Effect
+      if (!only.disposed) only.notify()
+      return
+    }
     for (const e of [...this.subs]) e.notify()
   }
 }
@@ -112,17 +183,15 @@ export function ref<T>(value: T): Ref<T> {
 }
 
 /**
- * 不带 `.value` 的字段读写器。`store`（见 store.ts）用它把普通对象的字段
- * 换成 getter/setter —— 于是 `s.count++` 也是响应式的，而**不需要 Proxy**。
+ * 注册一个副作用：立刻跑一次，之后依赖变了自动重跑。返回句柄以便**销毁**（见 `Effect.dispose`）。
+ *
+ * 在组件里调用时它会自动挂到该组件的销毁清单上（见 `ownedEffects`）——
+ * 组件卸载即停，不需要调用方自己记得 dispose。运行时内部的绑定不走这条路。
  */
-export function field<T>(v: T) {
-  const r = new RefImpl(v)
-  return { get: () => r.value, set: (n: T) => (r.value = n) }
-}
-
-/** 注册一个副作用：立刻跑一次，之后依赖变了自动重跑。返回句柄以便**销毁**（见 `Effect.dispose`）。 */
 export function effect(fn: () => void): Effect {
-  return new Effect(fn)
+  const e = new Effect(fn)
+  scope?.(e)
+  return e
 }
 
 /** 把一批变更合成一次刷新。 */
@@ -131,10 +200,34 @@ export function batch<T>(fn: () => T): T {
   try {
     return fn()
   } finally {
-    if (!--depth) {
-      const q = [...pending]
+    if (!--depth) drain()
+  }
+}
+
+/**
+ * 排空 batch 队列。
+ *
+ * 两条要点：
+ * 1. **排空期间仍然算批量**（`depth++` 包住这一轮）：跑一个 effect 时写信号，
+ *    变更会进队列而不是立刻同步跑 ⇒ 一轮里同一个 effect 最多跑一次。
+ *    旧写法在 `depth` 已经归零之后才跑队列，"batch 里再改 batch"会当场同步刷，
+ *    一次事件把 DOM 写好几遍。
+ * 2. **循环有界**：队列一直不空就是有人互写，抛错而不是转到浏览器卡死。
+ */
+function drain(): void {
+  let round = 0
+  while (pending.size) {
+    if (++round > MAX_NESTING) {
       pending.clear()
-      for (const e of q) e.run()
+      throw new Error('[lite] 循环更新：batch 队列排不空（超过 ' + MAX_NESTING + ' 轮），检查信号之间是不是互相写对方')
+    }
+    const q = [...pending]
+    pending.clear()
+    depth++
+    try {
+      for (const e of q) if (!e.disposed) e.run()
+    } finally {
+      depth--
     }
   }
 }
@@ -145,10 +238,13 @@ export function batch<T>(fn: () => T): T {
  *
  * 实现上先读一次当前值（此时没有 active effect，所以不建依赖），
  * 再把它放进一个 effect 里比较。
+ *
+ * 返回 effect 句柄：在组件里创建时它会随组件销毁（见 `ownedEffects`），
+ * 在组件外面创建（例如模块级）就用这个句柄自己停。
  */
-export function watch<T>(source: Ref<T>, cb: (value: T, oldValue: T) => void): void {
+export function watch<T>(source: Ref<T>, cb: (value: T, oldValue: T) => void): Effect {
   let old = source.value
-  new Effect(() => {
+  const e = new Effect(() => {
     const v = source.value
     if (!Object.is(v, old)) {
       const prev = old
@@ -156,18 +252,6 @@ export function watch<T>(source: Ref<T>, cb: (value: T, oldValue: T) => void): v
       cb(v, prev)
     }
   })
-}
-
-/**
- * 派生值。**普查显示项目一处都没用** —— 列在这里是为了说明"按需裁剪"的边界：
- * 这段大约 100B（gzip），不想要就整段删掉，运行时其余部分一行都不用改。
- */
-export function computed<T>(fn: () => T): Ref<T> {
-  const out = new RefImpl(undefined as T)
-  // 不追踪 out.value 的写入：写它不该反过来建立依赖
-  new Effect(() => {
-    const v = fn()
-    if (!Object.is(v, out.value)) out.value = v
-  })
-  return out as unknown as Ref<T>
+  scope?.(e)
+  return e
 }

@@ -577,13 +577,21 @@ Conventional Commits，**中文正文**：
 cargo fmt --all -- --check          # 必须无输出
 cargo clippy --workspace --all-targets
 cargo test --workspace              # 必须 0 failed
+node scripts/gates-web.mjs --full   # 前端四条闸门，≈ 77 s
 ```
 
-三条全绿才能提交。**本次提交新引入的告警/失败由本次提交负责**——
+四条全绿才能提交。**本次提交新引入的告警/失败由本次提交负责**——
 当前 §3.3 记录的欠账为零，所以「本来就有」这个借口不存在。
 
-CI 已配置（`.github/workflows/ci.yml`），上面三条即为合并门禁，
-另加 MSRV 编译与前端 `typecheck`。
+`gates-web.mjs` 那四条是：`typecheck` / `build` / **lite 编译期负例** /
+**lite 真 DOM 验收**（demo 断言 + 编译产物行为与耗时护栏 + 三个认证态的交互，
+`--full` 才跑满三个认证态；不带 `--full` 的默认只跑 `ready`，≈ 33 s，是改脚本时的快回路，
+**不能替代**提交前那次）。
+
+⚠ 没装无头 Chrome 的机器上最后一条会印 `⊘ 跳过（本机没有无头 Chrome，这条不算通过）` ——
+**跳过 ≠ 通过**，那部分前端行为没有被验证过，要么换台有浏览器的机器跑，要么显式说明。
+
+CI 已配置（`.github/workflows/ci.yml`），上面四条即为合并门禁，另加 MSRV 编译。
 
 ### 9.3 任务新增清单
 

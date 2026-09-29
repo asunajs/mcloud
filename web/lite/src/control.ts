@@ -9,7 +9,7 @@
  */
 
 import { createNodes, insert, own, remove, type Nodes } from './dom'
-import { effect } from './signal'
+import { newEffect } from './signal'
 
 /**
  * 列表渲染。编译期把 `list.map((x) => <Row/>)` 折成这里（Solid 是交给 `<For>` 组件，
@@ -37,12 +37,19 @@ export function createFor<T>(
   render: (item: T, index: number) => unknown,
   key?: (item: T, index: number) => unknown,
   anchor: Node | null = null,
+  /**
+   * 这一行的内容**读到了索引参数** ⇒ 位置就是内容的一部分（`第 {i+1} 步`、
+   * `disabled={i === 0}`）。由编译器判定并传进来，不用人写。
+   *
+   * 见下面 `row.i !== i` 那段的取舍。
+   */
+  positional = false,
 ): void {
   /** key → 行。跨轮复用同一个 Map/Set，别每轮重建（那是 O(n) 的分配）。 */
-  const rows = new Map<unknown, { item: T; nodes: Nodes }>()
+  const rows = new Map<unknown, { item: T; i: number; nodes: Nodes }>()
   const seen = new Set<unknown>()
 
-  const eff = effect(() => {
+  const eff = newEffect(() => {
     // ⚠⚠ 同上：列表整体被外部替换掉之后，每行都脱开了 ⇒ 这条 time effect 该退休，
     // 否则它会把整张表**再插一遍**（真机症状：越刷新内容越多）。
     if (rows.size) {
@@ -68,8 +75,24 @@ export function createFor<T>(
       const item = items[i]
       const k = key ? key(item, i) : i
       let row = rows.get(k)
-      if (row && row.item !== item) {
-        // 同一个 key 但内容对象换了 ⇒ 重建这一行
+      /**
+       * ⚠ **位置变了要不要重建，取决于这一行的内容读没读索引**（`positional`）。
+       *
+       * - 读了（`第 {i+1} 步`、`disabled={i === 0}`）：`render` 拿到的 `i` 是个**普通数字**，
+       *   被烧进这一行的绑定闭包里。复用的话 DOM 顺序对了、**步号与禁用态却留在旧位置**
+       *   —— 编排页的步骤块就是这么露馅的 ⇒ 必须重建。
+       * - 没读：位置不进内容 ⇒ 复用。这一条**有断言钉着**
+       *   （`demo/main.tsx`："重排是搬动而不是重建（旧节点仍在文档里）"），
+       *   因为搬动保住的不是字节数，是**行内的真实状态**：输入框的光标与焦点、
+       *   滚动位置、跑到一半的 CSS 过渡。全重建会把这些悄悄抹掉。
+       *
+       * 为什么不做成"响应式的 index"（Solid 的 `index()`）：那要把每个 `.map` 的第二个
+       * 参数换成函数，21 个业务文件全得改，而本项目只有一处真的按位置出内容。
+       * 判据在编译期就能算准（渲染体里扫一眼有没有读那个标识符），所以这里用标志位换
+       * 0 行 API 变更；真有"复用 + 实时位置"的需求再上 accessor。
+       */
+      if (row && (row.item !== item || (positional && row.i !== i))) {
+        // 同一个 key 但内容/位置换了 ⇒ 重建这一行
         remove(row.nodes)
         row = undefined
       }
@@ -79,7 +102,7 @@ export function createFor<T>(
       // 就抛 `NotFoundError: … is not a child of this node`（实测踩过）。
       let fresh = false
       if (!row) {
-        row = { item, nodes: createNodes(render(item, i)) }
+        row = { item, i, nodes: createNodes(render(item, i)) }
         rows.set(k, row)
         fresh = true
       }

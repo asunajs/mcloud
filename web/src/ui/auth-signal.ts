@@ -23,7 +23,7 @@
  * 前端这里合并就等于把后端那份区分丢了。
  */
 
-import { ref } from 'vue'
+import { ref } from 'lite'
 
 export type AuthState = 'checking' | 'setup' | 'login' | 'ready'
 

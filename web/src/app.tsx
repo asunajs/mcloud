@@ -5,7 +5,7 @@
  * 这里只负责：导航状态、主题开关、后端自述、把页面塞进 `main` —— 不长内容。
  */
 
-import { defineVaporComponent, onMounted, onUnmounted, ref, watch } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'lite'
 import { getCurrentSession, getStatus, logoutSession, type ServiceStatus } from './api'
 import { authState, currentUser, noteAuthOk, noteAuthRequired } from './ui/auth-signal'
 import { DOCK_IDS, NAV_ITEMS, navItem, parseHash, type PageId } from './ui/nav'
@@ -26,7 +26,7 @@ import { HistoryPage } from './pages/history-page'
 import { SettingsPage } from './pages/settings-page'
 import { AuthPage } from './pages/auth-page'
 
-export default defineVaporComponent(() => {
+export default () => {
   const page = ref<PageId>(parseHash(location.hash))
   const theme = ref<Theme>(currentTheme())
   const drawerOpen = ref(false)
@@ -129,7 +129,7 @@ export default defineVaporComponent(() => {
    *
    * ⚠⚠ 这三件必须是**函数**，不能是 `const x = ...` 算好的值。
    *
-   * Vapor 没有重渲染：setup 只跑一次，所以 `const` 只被求值一次 ——
+   * lite 没有重渲染：**组件体只跑一次**，所以 `const` 只被求值一次 ——
    * 那一刻 `backend` 还是 `null`（请求刚发出去），于是侧栏**永远**
    * 停在"正在问后端…"。而它不报错、网络面板里 `/api/status` 明明回了 200。
    *
@@ -220,9 +220,9 @@ export default defineVaporComponent(() => {
 
   // ── 认证闸 ────────────────────────────────────────────────────────────
   //
-  // ⚠⚠ 这里**绝不能**写成 setup 顶层的 `if (...) return <X/>`。
+  // ⚠⚠ 这里**绝不能**写成组件体顶层的 `if (...) return <X/>`。
   //
-  // Vapor 没有重渲染：**setup 只跑一次**，所以顶层 `return` 只被求值一次，
+  // lite 没有重渲染：**组件体只跑一次**，所以顶层 `return` 只被求值一次，
   // 那一刻 `authState` 还是 `checking` ⇒ 永远返回那个转圈，
   // 登录闸再怎么更新状态都不会换屏。
   //
@@ -231,7 +231,7 @@ export default defineVaporComponent(() => {
   // 因为没有报错、没有异常，只是"渲染决定被冻住了"。
   //
   // 正确写法是把判断放进 JSX 的表达式里（下面的三元），
-  // Vapor 会为它建立响应式绑定。同一文件里切页那段就是这么写的。
+  // lite 会为它建立响应式绑定（`setNodes`）。同一文件里切页那段就是这么写的。
   //
   // 未放行时**整个外壳都不渲染**：侧栏、dock、导航全不出现。
   // 渲染了再遮住的话，用户能点到导航、能触发请求，然后每个请求都 401 ——
@@ -245,13 +245,14 @@ export default defineVaporComponent(() => {
       )
     }
     if (authState.value === 'setup') {
-      // `key` 不能省：`setup` 与 `login` 是同一个组件的两个实例。
-      // 没有 key 时 Vapor 可能复用实例，而 `isSetup` 是在 setup 里
-      // 算好的一次性值，复用会让它停留在旧模式上。
-      return <AuthPage key="setup" mode="setup" />
+      // 这里**不需要** `key`：整个 `{authGate()}` 是一个动态槽，`authState` 一变就重跑，
+      // 重跑就是 `createComponent(AuthPage, …)` **新建一个实例**（旧的连同它的 effect 一起 dispose）。
+      // 本框架没有"虚拟 DOM 比一比再决定复不复用"那一步，所以也就没有"得靠 key 逼它换实例"。
+      // ⚠ 别把 key 加回来：编译器会直接抛错（`lite/compiler.ts` 的 `claimKey`）。
+      return <AuthPage mode="setup" />
     }
     if (authState.value === 'login') {
-      return <AuthPage key="login" mode="login" />
+      return <AuthPage mode="login" />
     }
     return null
   }
@@ -308,6 +309,13 @@ export default defineVaporComponent(() => {
         </div>
 
         {/* pb-24 是为移动端 dock 让位；md 以上没有 dock，用普通内边距 */}
+        {/*
+          ⚠ 这一整串三元**不需要** `key`（也别加，加了编译器抛错）。
+          它是**一个动态槽**：`page.value` 一变，槽的 effect 重跑 ⇒ 走到的分支
+          `createComponent(那一页, …)` **新建实例**，旧实例的节点被移除同时 `disposeTree`
+          （连带它的 effect 与 `onUnmounted`）。所以"切走再切回来一定是干净的一页"
+          由 `setNodes` 保证，不靠 diff 时的那一次 key 比对。
+        */}
         <main class="flex-1 bg-base-200 p-4 pb-24 md:p-6 md:pb-6">
           {page.value === 'dashboard' ? (
             <DashboardPage onGo={go} />
@@ -316,31 +324,17 @@ export default defineVaporComponent(() => {
           ) : page.value === 'tasks' ? (
             <TasksPage />
           ) : page.value === 'exchange' ? (
-            /*
-              `key` 与下面几页同理：Vapor 没有重渲染，setup 只跑一次。
-              这一页的状态里有**上一次兑换的结论**与选中的账号 ——
-              实例被复用会让"切走再切回来"看到上一个账号下的旧结论。
-            */
-            <ExchangePage key={page.value} />
+            <ExchangePage />
           ) : page.value === 'live-room' ? (
-            /*
-              `key` 与下面几页同理：Vapor 没有重渲染，setup 只跑一次。
-              这一页**尤其**需要 —— 它自己的状态里有口令与运行结果，
-              实例被复用会让"切走再切回来"看到上一趟的残留。
-            */
-            <LiveRoomPage key={page.value} />
+            <LiveRoomPage />
           ) : page.value === 'schedules' ? (
-            <SchedulesPage key={page.value} />
+            <SchedulesPage />
           ) : page.value === 'pipelines' ? (
-            <PipelinesPage key={page.value} />
+            <PipelinesPage />
           ) : page.value === 'history' ? (
             <HistoryPage onGo={go} />
           ) : (
-            /**
-             * `key` 不是装饰：Vapor 没有重渲染，setup 只跑一次，
-             * 落在同一个 else 分支里的组件切页时不会重建实例。
-             */
-            <SettingsPage key={page.value} />
+            <SettingsPage />
           )}
         </main>
 
@@ -350,6 +344,13 @@ export default defineVaporComponent(() => {
           左上角的汉堡包那里已经有入口，重复一格不换来任何可达性。
         */}
         <div class="dock dock-md safe-bottom z-30 border-t border-base-300 bg-base-100 md:hidden">
+          {/*
+            这里是**块体** `.map`（要先算 `item` / `Icon` 才能当标签名用），
+            而块体不走 `createFor`：`return` 之前那几句（`const active = page.value === id`）
+            是在 effect **之外**读信号的，列表一旦不重建，`active` 就冻在建行那一刻的值上。
+            所以这一格走"整块重铺"那条路 —— 四颗按钮，代价固定。
+            ⚠ 别在这儿加 `key`：这条路没有复用键，加了只是骗自己（编译器会抛错）。
+          */}
           {DOCK_IDS.map((id) => {
             const item = navItem(id)
             const Icon = item.icon
@@ -357,7 +358,6 @@ export default defineVaporComponent(() => {
             return (
               <button
                 type="button"
-                key={id}
                 aria-current={active ? 'page' : undefined}
                 class={active ? 'dock-active' : ''}
                 onClick={() => go(id)}
@@ -430,4 +430,4 @@ export default defineVaporComponent(() => {
       )}
     </>
   )
-})
+}

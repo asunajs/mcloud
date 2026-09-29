@@ -11,14 +11,12 @@
  * - 返回类型显式标 `JSX.Element`，否则导航表里当值用时会推成 `unknown`（TS2786）。
  * - 尺寸由调用方给（`size-5` / `size-[1.2em]` / `size-4`），图标本身只兜底。
  *
- * ⚠ **刻意不做 `<Svg>{children}</Svg>` 那样的包装组件**：Vapor 下 JSX 的子节点
- * 编译成插槽（`_createComponent` 的第三个实参），包装组件的 `props.children`
+ * ⚠ **刻意不做 `<Svg>{children}</Svg>` 那样的包装组件**：lite 下 JSX 的子节点
+ * 编译成插槽（`_$createComponent` 的第三个实参），包装组件的 `props.children`
  * 恒为 `undefined` —— 不报错、类型也过（除非显式声明 children 字段，那样又会
  * 反过来要求调用方传 props），只是渲染成空。所以这里用**共享属性对象**展开，
  * 每个图标自己写 `<svg>`。
  */
-
-import type { JSX } from 'vue-jsx-vapor'
 
 interface IconProps {
   class?: string

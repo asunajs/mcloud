@@ -18,7 +18,7 @@
  * 后端的错误文本**原样透出**，不翻译、不改写。
  */
 
-import { onMounted, onUnmounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'lite'
 import {
   deleteSchedule,
   listCapabilities,
@@ -597,7 +597,7 @@ export const SchedulesPage = () => {
 
       {state.value === 'ready' ? list() : null}
 
-      {/* 子节点走 Dialog 内部的默认插槽（Vapor 下 props.children 恒为 undefined） */}
+      {/* 子节点走 Dialog 内部的默认插槽（lite 里子节点不进 props：`props.children` 恒为 undefined） */}
       <Dialog
         id={dialogId}
         title={editingId.value ? '编辑定时任务' : '新建定时任务'}

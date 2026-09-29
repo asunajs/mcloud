@@ -5,7 +5,7 @@
  * 空态按规范要求给出**下一步**，不写「暂无数据」。
  */
 
-import { onMounted, ref } from 'vue'
+import { onMounted, ref } from 'lite'
 import { getStatus, getVersion, type ServiceStatus, type VersionInfo } from '../api'
 
 type LoadState = 'loading' | 'error' | 'ready'

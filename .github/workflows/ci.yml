@@ -1,8 +1,9 @@
 name: CI
 
 # 门禁与 docs/conventions.md §9.2 一一对应：
-#   fmt --check / clippy -D warnings / test，外加前端 typecheck。
-# 这里的四条命令都在本地实测通过，CI 不是「上线后才发现是红的」。
+#   fmt --check / clippy -D warnings / test，外加前端三条
+#   （typecheck / build / lite 编译期负例 —— 第四条"真 DOM 验收"要无头 Chrome，runner 上没有）。
+# 这里的命令都在本地实测通过，CI 不是「上线后才发现是红的」。
 #
 # 为什么用 --locked：Cargo.lock 已入库，锁死依赖版本才能让 CI 结果可复现；
 # 否则 CI 可能因为上游发新版而突然变红，与本次改动无关。
@@ -29,10 +30,11 @@ name: CI
 # 没那么多预算）。保留两条：PR 上跑（合并前把关）、手动触发（需要时跑）。
 #
 # 代价要清楚：直接 push 到 main 现在**没有** CI 兜底了。所以本地交付前
-# 必须自己跑齐（见 docs/conventions.md §9.2）：
+# 必须自己跑齐（见 docs/conventions.md §9.2，前端那条要用 `--full`，
+# 不带 `--full` 只跑 ready 一个认证态，覆盖不到登录/初始化态）：
 #     cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings
 #     cargo test --workspace --locked
-#     node scripts/gates-web.mjs
+#     node scripts/gates-web.mjs --full
 # 打 tag 出包时 release.yml 仍会独立跑三平台构建（那是发版必需的一次）。
 on:
   pull_request:
@@ -49,7 +51,7 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  # ── 前端：typecheck + 构建 ────────────────────────────────────────────────
+  # ── 前端：typecheck + 构建 + 编译期负例 ──────────────────────────────────
   #
   # 这个 job 有两个产出，缺一不可：
   #   1. typecheck 门禁本身（前端也要过类型检查）；
@@ -74,9 +76,8 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      # web/.npmrc 设了 legacy-peer-deps=true：vue-jsx-vapor 的 peer 是
-      # vue@^3，而 Vapor 需要 vue 3.6 预发布版，npm 默认不接受 prerelease。
-      # 不写 --force，靠 .npmrc 让任何人（含 CI）都得到同一棵依赖树。
+      # 没有 legacy-peer-deps 之类的绕行开关了（`web/.npmrc` 随 Vue 依赖一起删）：
+      # 前端只剩自研 lite，devDependencies 之间没有 peer 冲突，`npm ci` 直接可复现。
       - name: 安装依赖
         run: npm ci
 
@@ -87,6 +88,16 @@ jobs:
       # 那一条更接近「改错了什么」，而 build 失败往往是它的下游现象。
       - name: 构建（产出 web/dist，供 Rust job 嵌入）
         run: npm run build
+
+      # lite 的**编译期负例**：该抛的写法必须抛（`key` 写在 .map 外面、指令形状的属性…）。
+      # 它只要 Node、不要浏览器 ⇒ CI 跑得动；而"能 build"恰恰掩盖不了它 ——
+      # 门坏了的表现是静默编错，本地一眼看不出来。
+      #
+      # ⚠ 四条前端闸门里 CI 只覆盖这三条（typecheck / build / 负例）：
+      # **真 DOM 验收**要无头 Chrome，ubuntu runner 上没有，`gates-web.mjs` 在那儿会
+      # 印 `⊘ 跳过` 并且**不算通过** ⇒ 那一条是**本地提交前**的门（约定 §9.2）。
+      - name: lite 编译期负例
+        run: node lite/regress/compiler.mjs
 
       - name: 上传 web/dist
         uses: actions/upload-artifact@v4

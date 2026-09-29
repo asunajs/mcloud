@@ -8,7 +8,7 @@ import { accountName, refreshAccountNames } from '../account-names'
  * 并明确告诉用户可以关页面（任务在后端继续跑）。
  */
 
-import { onUnmounted, onMounted, ref } from 'vue'
+import { onUnmounted, onMounted, ref } from 'lite'
 import {
   cancelRun,
   listAccounts,
