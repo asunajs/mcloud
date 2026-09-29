@@ -248,19 +248,28 @@ jobs:
           files: dist/*
           generate_release_notes: true
           body: |
-            三平台 release 产物（`mcloud-server` + `mcloud-cli`），每包附 `.sha256`。
+            三平台产物（Linux x86_64 / Windows x86_64 / macOS arm64），每包附 `.sha256`，
+            包内两个可执行文件：`mcloud-server`（服务本体）+ `mcloud-cli`（命令行）。
+            完整说明见仓库 [`docs/usage.md`](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/usage.md)。
 
-            | 平台 | 包 |
-            |---|---|
-            | Linux x86_64 | `*-x86_64-unknown-linux-gnu.tar.gz` / `.tar.xz` |
-            | Windows x86_64 | `*-x86_64-pc-windows-msvc.zip` |
-            | macOS arm64 | `*-aarch64-apple-darwin.tar.gz` / `.tar.xz` |
+            ## 快速开始
 
-            ⚠ Linux 版由 release 构建链接系统 OpenSSL（`native-tls`）：目标机需要 `libssl`。
-            Windows/macOS 走系统 TLS，无额外依赖。
+            ```bash
+            tar -xJf mcloud-gost-<版本>-<你的平台>.tar.xz     # Windows 用 Expand-Archive 解 .zip
+            ./mcloud-server                                   # 没有子命令，直接跑
+            ```
 
-            **Linux / Windows 的二进制已用 UPX 压缩**（`upx --best --lzma`），
-            压完跑过 `upx -t` 完整性测试与 `--help` 冒烟；macOS 版**未压缩**
-            （UPX 不支持 arm64 Mach-O，且压过的 Mach-O 会破坏代码签名）。
-            ⚠ Windows 上 UPX 压缩过的可执行文件**可能被 Defender/SmartScreen 误报** ——
-            介意的话请自行从源码构建，或用未压缩的 `--target` 产物。
+            然后打开 <http://127.0.0.1:3000> —— **首次运行**进「创建管理员」向导。
+            数据在运行目录下的 `data/`；端口与数据目录用 `MCLOUD_ADDR` / `MCLOUD_DATA_DIR`
+            （⚠ 是 `MCLOUD_DATA_DIR` 不是 `MCLOUD_DATA`；`PORT` 会被忽略）。
+
+            ## 平台注意
+
+            * **Linux**：用系统 TLS，需要 `libssl`（`apt install libssl3` / `dnf install openssl-libs`）；
+            * **macOS**：产物**未压缩**（UPX 会破坏 arm64 代码签名，M 芯片上跑不起来）。
+              二进制未签名，浏览器下载后先 `xattr -dr com.apple.quarantine ./mcloud-server ./mcloud-cli`；
+            * **Windows**：产物**用 UPX 压过**（约原体积 1/3），代价是 Defender/SmartScreen
+              **可能误报** —— 走「更多信息 → 仍要运行」或加白名单；介意就从源码构建。
+
+            ⚠ `mcloud-cli` 与 `mcloud-server` **共用同一个数据目录**（同目录运行，或给同一个
+            `MCLOUD_DATA_DIR`），否则 CLI 看不到服务里配好的账号。
