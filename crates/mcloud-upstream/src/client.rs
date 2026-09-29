@@ -100,6 +100,59 @@ pub struct ReqwestClient {
     profile: Arc<ClientProfile>,
 }
 
+/// 把一次 `send()` 失败**说清楚**：分类 + 整条原因链。
+///
+/// # 为什么单独做这一个
+///
+/// 原先只报 `e.to_string()`，而那对 reqwest 只给出一句
+/// `error sending request for url (…)` —— **恰好把唯一有用的信息丢了**。
+/// 真机第一次跑 `live-room` 时卡在这里：
+///
+/// ```text
+/// [门·换直播侧 JWT] 网络错误：error sending request for url
+///   (https://v.cmcc-cs.cn/cmlive/api/user/auth/cmpassLoginByCmToken)
+/// ```
+///
+/// 同一发用 `curl` 打是通的（HTTP 400 + `{"rtnMsg":"token入参不可为空"}`，
+/// **连接没问题**）⇒ 说明是我们这边的事，而上面那句话答不出是
+/// **连不上、TLS 没过、还是超时**。三者的修法完全不同。
+///
+/// reqwest 把真正的原因放在 `source()` 链里（`hyper` 的 connect 错误、
+/// `rustls` 的握手错误等），`Display` **只印最外层**。这里把整条链串起来。
+pub(crate) fn explain_send(e: &reqwest::Error) -> String {
+    // 分类用 reqwest 自己的判据（比翻字符串可靠）
+    let kind = if e.is_timeout() {
+        "超时"
+    } else if e.is_connect() {
+        "连不上"
+    } else if e.is_request() {
+        "请求本身非法"
+    } else if e.is_body() || e.is_decode() {
+        "响应体读取失败"
+    } else if e.is_redirect() {
+        "重定向太多"
+    } else {
+        "未分类"
+    };
+    let mut out = format!("{kind}：{e}");
+    // ⚠ 原因链要自己走 —— `Display` 只给最外层那一句
+    let mut src = std::error::Error::source(e);
+    let mut depth = 0;
+    while let Some(inner) = src {
+        depth += 1;
+        if depth > 6 {
+            out.push_str(" → …（更深的原因已截断）");
+            break;
+        }
+        out.push_str(&format!(" → {inner}"));
+        src = inner.source();
+    }
+    if depth == 0 {
+        out.push_str(" →（没有更深的原因；URL 已在上文，检查 DNS 与代理）");
+    }
+    out
+}
+
 impl ReqwestClient {
     pub fn new(profile: ClientProfile) -> Result<Self> {
         let timeout = if profile.timeout_secs == 0 {
@@ -248,7 +301,7 @@ impl mcloud_core::HttpClient for ReqwestClient {
         let resp = builder
             .send()
             .await
-            .map_err(|e| Error::Network(e.to_string()))?;
+            .map_err(|e| Error::Network(explain_send(&e)))?;
 
         let status = resp.status().as_u16();
         let headers = resp
