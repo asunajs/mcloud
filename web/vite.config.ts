@@ -1,20 +1,35 @@
+/**
+ * **默认前端构建配置 = lite**（2026-09-29 切换）。
+ *
+ * 原来那份（Vue 3 + vue-jsx-vapor）原样留在 `vite.config.vue.ts`，
+ * 一条命令就能切回去：
+ *
+ *   npx vite build --config vite.config.vue.ts     # 退回 Vue 产物
+ *
+ * ⚠⚠ 改完**必须** `npm run build` 再 `cargo build`：`rust-embed` 在**编译期**
+ * 把 `web/dist` 嵌进二进制，而 `cargo build` **不跟踪** `web/dist` 的变化。
+ * 顺序反了会内嵌旧资源（白屏 / chunk 404），而 `cargo build` 还会说 "Finished"。
+ *
+ * 切换依据（都可复现）：`node lite/regress/all.mjs` —— 9 条路由 + 3 个认证态
+ * 逐字符一致、三组交互 45/8/10 步全一致、整页逐像素一致、53 条断言全过。
+ */
 import { defineConfig } from 'vite'
 import tailwindcss from '@tailwindcss/vite'
-import vueJsxVapor from 'vue-jsx-vapor/vite'
+import lite from './lite/vite.ts'
 
 // 两个踩过的坑：
 // 1. daisyUI 是 Tailwind 插件，不是 Vite 插件 —— 写进 plugins 会报
 //    `handler is not a function`。它在 app.css 里用 `@plugin "daisyui"` 注册。
 // 2. Tailwind 4 是 CSS-first，没有 tailwind.config.js（已废弃）。
 export default defineConfig({
-  plugins: [
-    tailwindcss(),
-    vueJsxVapor({
-      macros: true,
-      // 刻意不开 interop：daisyUI 是纯 CSS 类，不需要 VDOM 组件孤岛。
-      interop: false,
-    }),
-  ],
+  plugins: [tailwindcss(), lite({ runtime: 'lite' })],
+  resolve: {
+    alias: [
+      { find: /^lite$/, replacement: new URL('./lite/src/index.ts', import.meta.url).pathname },
+      { find: /^vue$/, replacement: new URL('./lite/src/index.ts', import.meta.url).pathname },
+      { find: /^vue-jsx-vapor$/, replacement: new URL('./lite/src/index.ts', import.meta.url).pathname },
+    ],
+  },
   server: {
     // 开发时后端在 mcloud-server（默认 38123）。
     //

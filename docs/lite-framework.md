@@ -478,8 +478,15 @@ lite 的属性绑定是细粒度的，改名称不会动下拉框，于是它保
 
 1. ~~逐像素比对~~ ✅ **已做**：`interact.mjs` 每轮结束时比对整页截图，逐像素一致
    （两侧 CSS 实测字节相同）；`compare.mjs` 那句 `--screenshot` 保留当存档，不参与判定；
-2. **切默认构建配置**（把 `vite.config.ts` 换成 lite 的那套 alias）—— 这一步要用户点头：
-   它要 `npm run build` + `cargo build`，而重编译会触发 TCC 弹窗与一次服务重启（见 AGENTS.md）；
+2. ~~切默认构建配置~~ ✅ **已切**（2026-09-29，用户在场时执行）：`vite.config.ts` 换成
+   lite 的插件与 alias，原 Vue 配置**原样留名**为 `vite.config.vue.ts`，
+   一条命令即可退回：`npx vite build --config vite.config.vue.ts` + `cargo build`。
+   切换后 3000 上的真实服务实测已在发 lite 产物（`dist/assets/index-Ch0ks5Ve.js`，
+   DOM 里没有 `data-v-app`），`web/src/**` 仍未改。
+   ⚠ 这份 debug 服务是**从 `web/dist` 读盘**的（实测重编译前后 PID 未变、资源哈希已换），
+   所以"要不要重启服务"与"前端换不换"在这里是两件事 —— AGENTS.md 里那条
+   "重编译会 SIGKILL 服务"的风险这次没有触发；但**别指望每次都这样**；
+3. 迁移期的"不删老配置"原则：`web/src/**` 到现在**一个字节都没改**，随时可以退回 Vue 构建。
 3. ~~事件委托 / LIS~~ —— **量过之后决定不做**，理由如下（不是"没空做"）：
 
    * **LIS（整表反转的快速路径）**：那是 2000 行的合成基准（8.6 ms vs Vue 3.4 ms）。
@@ -494,4 +501,4 @@ lite 的属性绑定是细粒度的，改名称不会动下拉框，于是它保
      所以不委托**不影响与 Vue 的产物一致性**（逐字符/交互/像素三条闸门都证明了这一点），
      委托反而要额外付 ~250 B gzip 并引入"事件目标穿过 shadow/stopPropagation"这类边界。
      挂载性能已经 16× 快于 Vue，这里没有要还的债。
-4. 迁移期的"不删老配置"原则：`web/src/**` 到现在**一个字节都没改**，随时可以退回 Vue 构建。
+
