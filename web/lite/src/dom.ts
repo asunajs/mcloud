@@ -68,8 +68,41 @@ function disposeTree(node: Node): void {
 }
 
 /** 批量插入。`anchor` 为 null 即追加到末尾。 */
+/**
+ * ⚠⚠ 锚点**可能已经不在 `parent` 里了**，不能直接 `insertBefore`。
+ *
+ * 真机上报过（任务中心点"刷新"，2026-09-29）：
+ * ```
+ * Failed to execute 'insertBefore' on 'Node': The node before which the new node
+ * is to be inserted is not a child of this node.
+ * ```
+ * 抛在这一行的后果不止"顺序不对"：**整次更新被打断**，后面的 `flushSlots/flushMounted`
+ * 全都不跑，页面停在半更新状态。
+ *
+ * 锚点为什么会脱开：本运行时持有**构建时抓下来的节点引用**（模板里的占位注释）。任何
+ * 第三方动了那棵 DOM（浏览器扩展：翻译 / 去广告 / 密码管理器；或用户脚本）都可能把它挪走。
+ * 干净 profile 的无头 Chrome 里**一次都复现不出来** —— 这就是我前几轮"实测 0 异常"失真的原因。
+ *
+ * 处置：锚点失效就**退化成追加到末尾**（并警告一次），让更新继续走完。
+ * 顺序可能不完美，但比整页炸掉强得多；警告里带着锚点与父节点的信息，下次能直接认出是谁动的。
+ */
+let warnedDetachedAnchor = false
+
 export function insert(parent: Node, nodes: Nodes, anchor: Node | null = null): void {
-  for (const n of nodes) parent.insertBefore(n, anchor)
+  let at = anchor
+  if (at && at.parentNode !== parent) {
+    if (!warnedDetachedAnchor) {
+      warnedDetachedAnchor = true
+      // 只警告一次：真出问题时控制台不至于被刷爆
+      console.warn('[lite] 锚点已不在父节点内，本次退化为追加到末尾', {
+        anchor: at.nodeType === 8 ? '<!--占位注释-->' : at.nodeName,
+        anchorParent: at.parentNode?.nodeName ?? null,
+        parent,
+      })
+    }
+    at = null
+  }
+  for (const n of nodes) parent.insertBefore(n, at)
   flushSlots()
   flushMounted()
 }

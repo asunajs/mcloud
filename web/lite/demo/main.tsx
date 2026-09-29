@@ -288,6 +288,38 @@ ok(
   `gone=${staleGone} err=${document.getElementById('err')?.textContent?.split('\n')[0] ?? '无'}`,
 )
 
+/**
+ * ⚠⚠ 真机上报过的**同形**复现（任务中心点刷新）：我们持有的锚点**被第三方摘掉**、父节点还在，
+ * 此时 `insertBefore` 抛 `… is not a child of this node` 并**打断整次更新**。
+ * 这条路径以前没有护栏（前几轮"实测 0 异常"全在干净 profile 里跑的，根本没有第三方）。
+ * 注意必须让动态子节点是**组件/元素**（纯文本走的是 setText，碰不到 insert）。
+ * 摘掉运行时那两行防御后，这条必须**变红**，否则它就是摆设。
+ */
+const Flag = ref(true)
+const FlagChild = () => <b id="c-child">C</b>
+const FlagHost = () => (
+  <p id="third-inner">
+    {Flag.value ? <FlagChild /> : null}
+    <span>x</span>
+  </p>
+)
+mount(FlagHost, '#third')
+const thirdEl = document.getElementById('third-inner')!
+const anchorNode = [...thirdEl.childNodes].find((n) => n.nodeType === 8)
+anchorNode?.remove() // 第三方动了 DOM：锚点脱开，父节点还在
+let thirdErr = ''
+try {
+  Flag.value = false // 卸掉
+  Flag.value = true // 再装上 ⇒ 用已脱开的锚点 insert
+} catch (e) {
+  thirdErr = String(e)
+}
+ok(
+  '锚点被摘掉时不抛错（退化为追加到末尾）',
+  !thirdErr && thirdEl.textContent?.includes('C'),
+  thirdErr.slice(0, 70) || `anchor=${!!anchorNode} text=${thirdEl.textContent}`,
+)
+
 mount(Keyless, '#keyless')
 ok(
   '无 key 的 .map()：锚点没被当成 key（顺序正确）',
