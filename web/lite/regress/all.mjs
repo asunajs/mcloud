@@ -64,7 +64,8 @@ for (const variant of VARIANTS.filter((v) => v !== 'ready')) {
 for (const variant of VARIANTS) {
   ok = run([path.join(dir, 'interact.mjs'), '--vue', '/tmp/vue-app', '--variant', variant], `交互 + 像素 ${variant}`) && ok
 }
-if (!quick) ok = bash('node lite/demo/run.mjs', 'demo 断言（53 条）') && ok
+if (!quick) // ⚠ 不要在这里写死条数：断言会涨，写死了就会像上次那样显示 53 而实际已是 57
+ok = bash('node lite/demo/run.mjs', 'demo 断言') && ok
 
 console.log(ok ? `\n全绿：迁移验收通过${quick ? '（--quick 只跑了冒烟子集）' : ''}` : '\n✗ 有项目未通过（见上）')
 process.exitCode = ok ? 0 : 1
