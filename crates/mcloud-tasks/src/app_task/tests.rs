@@ -294,3 +294,42 @@ fn the_special_step_does_not_leak_to_other_tasks() {
     assert!(!should_click(&with_step(522, Some(22))));
     assert!(!should_click(&with_step(106, Some(22))));
 }
+
+// ══════════════ 状态门（`state` / `enable`） ══════════════
+//
+// 旧 TS `index.ts:34` 逐字：`if (task.state === "FINISH" || task.enable !== 1) continue;`
+
+fn stateful(state: Option<&str>, enable: Option<i64>) -> TaskV2Item {
+    TaskV2Item {
+        state: state.map(str::to_string),
+        enable,
+        ..Default::default()
+    }
+}
+
+/// 已完成 ⇒ 不动。**这条对会写的链最要紧** —— 否则会对着做完的条目
+/// 再发一发不可回滚的 `task/click`、再往网盘传一遍文件。
+#[test]
+fn a_finished_task_is_not_touched() {
+    assert!(!should_act(&stateful(Some("FINISH"), Some(1))));
+}
+
+/// `enable != 1` ⇒ 不动；**缺席也算关**（`None != Some(1)`）。
+#[test]
+fn a_disabled_task_is_not_touched_and_missing_enable_counts_as_disabled() {
+    assert!(!should_act(&stateful(Some("WAIT"), Some(0))));
+    assert!(!should_act(&stateful(Some("WAIT"), Some(2))));
+    assert!(
+        !should_act(&stateful(Some("WAIT"), None)),
+        "缺席过不了那道门"
+    );
+}
+
+/// 两道门都过 ⇒ 动。
+#[test]
+fn a_pending_enabled_task_is_acted_on() {
+    assert!(should_act(&stateful(Some("WAIT"), Some(1))));
+    // ⚠ `state` 缺席**不算完成** —— 只有 `"FINISH"` 才是那一档
+    assert!(should_act(&stateful(None, Some(1))));
+    assert!(should_act(&stateful(Some("DOING"), Some(1))));
+}

@@ -114,7 +114,7 @@ impl AppTaskMatrix {
 
 /// ⚠ `state` 的两个字面值。**不**引用拍拍那一族那份常量（那个在
 /// `mcloud_upstream::app_play_ai`）：两族字面相同，但各自的取值集各自只由各自的样本支撑。
-const STATE_DONE: &str = "FINISH";
+pub(crate) const STATE_DONE: &str = "FINISH";
 const STATE_WAITING: &str = "WAIT";
 
 /// 把十六份响应合成一张表。

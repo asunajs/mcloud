@@ -123,6 +123,33 @@ pub fn upload_shape_for(item: &TaskV2Item) -> Option<UploadShape> {
     None
 }
 
+/// 这一条**要不要动**。
+///
+/// # 旧 TS `index.ts:34` 逐字
+///
+/// ```ts
+/// if (task.state === "FINISH" || task.enable !== 1) continue;
+/// ```
+///
+/// 两道门，**都在这一个 `continue` 里**：
+///
+/// * `state == "FINISH"` ⇒ 已经做完了，别再去写一遍。
+/// * `enable != 1` ⇒ 上游把这一条关了。⚠ `enable` **缺席也算关**
+///   （`None != Some(1)`）—— 这一格既不是 1，也就过不了那道门。
+///   与只读那一半 `disabled_count` 的口径一致。
+///
+/// # 为什么这一条对"会写的链"特别要紧
+///
+/// 之前这里只判**形状**（`upload_shape_for`），不看状态 ⇒ 会对着**已完成的**
+/// 条目也发 `task/click`（不可回滚）并往网盘传文件。真机读数是
+/// **未完成 15 / 已完成 13** ⇒ 那 13 条里形状匹配的都会被误伤。
+pub fn should_act(item: &TaskV2Item) -> bool {
+    if item.state.as_deref() == Some(crate::app_task_matrix::STATE_DONE) {
+        return false;
+    }
+    item.enable == Some(1)
+}
+
 /// 这一条**要不要打那一发 `task/click`**。
 ///
 /// # 门是 `currstep`（旧 TS `tasks.ts:19-28` 逐字）
@@ -286,8 +313,12 @@ pub async fn run_app_task(ctx: &TaskContext, pace_ms: i64) -> Result<AppTaskResu
     let (items, _raw) = app_task_matrix::merge_pages(&pages);
 
     // ② 逐条判形状。判不出来的一律**不动**。
+    // ⚠ **先过状态门、再判形状**（旧 TS 就是先 `continue` 再分派）。
+    // 顺序反了不改结果，但会把"已完成"的条目也算进 `planned`，
+    // 于是摘要里那句"判出 N 条"是假的。
     let planned: Vec<(TaskV2Item, UploadShape)> = items
         .iter()
+        .filter(|i| should_act(i))
         .filter_map(|i| upload_shape_for(i).map(|s| (i.clone(), s)))
         .collect();
     result.planned = planned.len();
