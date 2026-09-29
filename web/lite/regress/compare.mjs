@@ -41,6 +41,14 @@ if (fromRaw) {
   b.close()
 }
 
+/**
+ * 逐像素比对**不在这里做**：`--screenshot` 与虚拟时间预算的配合不稳 ——
+ * 按钮的 `transition: background-color` 有时走完、有时截到过渡中的一帧
+ * （实测同一命令两次，一次 0 个不同像素、一次 1,564 个，且色差只有 5 阶）。
+ * 像素比对放在 `interact.mjs`：那里是 CDP + **真实时间**，可以先注入
+ * "禁用所有 transition/animation" 的样式再截图，结果稳定。
+ */
+
 const lite = appSubtree(raw.lite)
 const vue = appSubtree(raw.vue)
 console.log(`页面 ${route}（variant=${variant}；lite ${liteDir} vs Vue ${vueDir}）`)

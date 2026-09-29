@@ -15,6 +15,7 @@ import { execFileSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
+import zlib from 'node:zlib'
 
 export const arg = (name, fallback) => {
   const i = process.argv.indexOf(name)
@@ -336,4 +337,89 @@ export async function openSession({ port, route, debugPort, profile, width = 128
     if (p.type === 'error') errors.push('console.error: ' + p.args.map((a) => a.value ?? a.description ?? '').join(' '))
   })
   return { child, cdp, errors, width }
+}
+
+/**
+ * 逐像素比对两张 PNG 截图。**零依赖**：自己解 8 位 PNG（Chrome 截图就是 8 位、非隔行、RGB(A)）。
+ *
+ * 为什么需要它：DOM 逐字符一致 + CSS 同名同哈希，理论上像素必然一致 ——
+ * 但"理论上"不是判据，而且这条能兜住"DOM 一样、渲染不一样"的类型（例如内联样式、
+ * `:hover`/`:focus` 状态、动画停在半路）。
+ *
+ * ⚠⚠ **必须给足 `--virtual-time-budget`**（建议 ≥20 s）：8 s 时按钮的
+ * `transition: background-color` 还没走完，两侧截到的是过渡中的不同帧 ——
+ * 实测都是"按钮面上差几个色阶"，把预算加到 20 s 后 **0 个不同像素**。
+ * 那是截图时机问题，不是渲染差异；别把它当成真差异去追。
+ */
+export function pngDiff(fileA, fileB) {
+  const load = (buf) => {
+    let pos = 8
+    let w = 0
+    let h = 0
+    let ch = 3
+    const idat = []
+    while (pos < buf.length) {
+      const len = buf.readUInt32BE(pos)
+      const typ = buf.toString('ascii', pos + 4, pos + 8)
+      pos += 8
+      const body = buf.subarray(pos, pos + len)
+      pos += len + 4
+      if (typ === 'IHDR') {
+        w = body.readUInt32BE(0)
+        h = body.readUInt32BE(4)
+        const ct = body[9]
+        ch = ct === 6 ? 4 : ct === 2 ? 3 : ct === 0 ? 1 : ct === 4 ? 2 : 0
+        if (!ch || body[8] !== 8 || body[12] !== 0) throw new Error('只支持 8 位非隔行 PNG')
+      } else if (typ === 'IDAT') idat.push(body)
+    }
+    const raw = zlib.inflateSync(Buffer.concat(idat))
+    const stride = w * ch
+    const out = Buffer.alloc(h * stride)
+    let prev = Buffer.alloc(stride)
+    let p = 0
+    for (let y = 0; y < h; y++) {
+      const f = raw[p++]
+      const line = Buffer.from(raw.subarray(p, p + stride))
+      p += stride
+      for (let i = 0; i < stride; i++) {
+        const a = i >= ch ? line[i - ch] : 0
+        const b = prev[i]
+        const c = i >= ch ? prev[i - ch] : 0
+        if (f === 1) line[i] = (line[i] + a) & 255
+        else if (f === 2) line[i] = (line[i] + b) & 255
+        else if (f === 3) line[i] = (line[i] + ((a + b) >> 1)) & 255
+        else if (f === 4) {
+          const pa = Math.abs(b - c)
+          const pb = Math.abs(a - c)
+          const pc = Math.abs(a + b - 2 * c)
+          line[i] = (line[i] + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c)) & 255
+        }
+      }
+      line.copy(out, y * stride)
+      prev = line
+    }
+    return { w, h, ch, px: out }
+  }
+  const a = load(fs.readFileSync(fileA))
+  const b = load(fs.readFileSync(fileB))
+  if (a.w !== b.w || a.h !== b.h || a.ch !== b.ch) return { diff: -1, reason: '尺寸/通道不同（布局差异）' }
+  let diff = 0
+  let maxDelta = 0
+  let box = null
+  for (let y = 0; y < a.h; y++) {
+    for (let x = 0; x < a.w; x++) {
+      const i = (y * a.w + x) * a.ch
+      let same = true
+      for (let k = 0; k < a.ch; k++) {
+        if (a.px[i + k] !== b.px[i + k]) {
+          same = false
+          maxDelta = Math.max(maxDelta, Math.abs(a.px[i + k] - b.px[i + k]))
+        }
+      }
+      if (same) continue
+      diff++
+      box = box ? [Math.min(box[0], x), Math.min(box[1], y), Math.max(box[2], x), Math.max(box[3], y)] : [x, y, x, y]
+    }
+  }
+  return { diff, total: a.w * a.h, maxDelta, box, w: a.w, h: a.h }
 }

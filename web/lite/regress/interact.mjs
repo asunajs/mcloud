@@ -15,7 +15,7 @@
  * 退出码非 0 = 有步骤两侧不一致（或某一侧抛了页面异常）。
  */
 import fs from 'node:fs'
-import { appSubtree, arg, hashRoute, openSession, readVariant, serve, sleep } from './lib.mjs'
+import { appSubtree, arg, hashRoute, openSession, pngDiff, readVariant, serve, sleep } from './lib.mjs'
 
 const variant = readVariant()
 const only = arg('--only', '')
@@ -158,12 +158,30 @@ const waitStable = async (s, tries = 40) => {
   }
 }
 
+/**
+ * 截图前**先关掉所有 transition / animation**。
+ *
+ * 不关的话像素比对会随机失败：同一个命令跑两次，一次 0 个不同像素、一次 1,500 多个，
+ * 而最大色差只有 5 阶 —— 那是"截到了过渡中的不同帧"，不是渲染差异。
+ * 关掉之后像素是确定的，这条闸门才有意义。
+ */
+const NO_ANIM = `(() => { const s = document.createElement('style'); s.textContent = '*,*::before,*::after{transition:none !important;animation:none !important}'; document.head.appendChild(s); return true })()`
+
+/** 截一张整页图（CDP，真实时间）。 */
+const shoot = async (session, file) => {
+  const r = await session.cdp.send('Page.captureScreenshot', { format: 'png' })
+  fs.writeFileSync(file, Buffer.from(r.data, 'base64'))
+}
+
 const runSide = async (side, dir, port, debugPort) => {
   const server = await serve(dir, port, variant)
   const session = await openSession({ port, route, debugPort, profile: `/tmp/lite-interact-${side}` })
   const shots = []
   try {
     await waitStable(session)
+    await session.cdp.eval(NO_ANIM)
+    await sleep(120)
+    await shoot(session, `/tmp/shots/interact-${side}.png`)
     for (const [name, js] of STEPS[variant]) {
       if (only && !name.includes(only)) continue
       /**
@@ -226,6 +244,18 @@ for (let i = 0; i < lite.shots.length; i++) {
   fs.writeFileSync(`/tmp/interact/${String(i).padStart(2, '0')}-${safe}.lite.json`, a)
   fs.writeFileSync(`/tmp/interact/${String(i).padStart(2, '0')}-${safe}.vue.json`, b ?? '')
 }
+/** 像素闸门：DOM/CSS 都一致时，像素也该一致（它兜的是"DOM 一样、渲染不一样"）。 */
+const px = pngDiff('/tmp/shots/interact-lite.png', '/tmp/shots/interact-vue.png')
+if (px.diff < 0) {
+  console.log(`\n像素：✗ ${px.reason}`)
+  bad++
+} else if (px.diff) {
+  console.log(`\n像素：✗ ${px.diff}/${px.total} 个不同（最大色差 ${px.maxDelta}，范围 ${px.box.join(',')}）`)
+  bad++
+} else {
+  console.log(`\n像素：✅ 逐像素一致（${px.w}×${px.h}，已禁用动画后截图）`)
+}
+
 const pageErrors = (side, r) => r.errors.filter((e) => !e.includes('favicon'))
 console.log(`\n页面异常：lite ${pageErrors('lite', lite).length} 条，Vue ${pageErrors('vue', vue).length} 条`)
 for (const e of pageErrors('lite', lite).slice(0, 5)) console.log(`  lite: ${e.split('\n')[0]}`)

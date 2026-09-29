@@ -409,6 +409,16 @@ Node 自带 `WebSocket`），执行同一串步骤，每步之后比对同一份
   —— "八个路由字节数一模一样"才发现，脚本现在自动补斜杠；
 * 每个侧都要**等 DOM 稳定**（连续 3 次探测一致）再看结果，否则 150 ms 的取数延迟会被当成差异。
 
+**逐像素比对**也挂在它上面：DOM 逐字符一致 + CSS 同名同哈希（实测两侧 CSS **字节相同**，
+`index-C69a_put.css` 同一个哈希）时像素必然一致 —— 但"必然"不是判据，而且这条闸门能兜住
+"DOM 一样、渲染不一样"的类型（内联样式、`:hover`/`:focus` 状态、动画停在半路）。
+
+⚠ 踩过的坑：**不能**用 `compare.mjs` 的 `--screenshot` 做像素比对。按钮的
+`transition: background-color` 与虚拟时间预算配合不稳 —— 同一条命令跑两次，
+一次 0 个不同像素、一次 1,564 个，而最大色差只有 5 阶（截到了过渡中的不同帧）。
+所以像素比对放在 CDP + **真实时间**这一侧，截图前先注入
+`*{transition:none!important;animation:none!important}`。结果：**逐像素一致（1280×900）**。
+
 ### 11.5 回归工具（都留在仓库里）
 
 * `node lite/demo/run.mjs` —— 一条命令：编译 TSX demo → 无头 Chrome → 打印 **53 条**断言
@@ -417,7 +427,8 @@ Node 自带 `WebSocket`），执行同一串步骤，每步之后比对同一份
   `--from-raw` 复用上次抓的 `/tmp/lite-raw.*.html`（只调比对规则时不必再跑 chrome），
   原始抓取**一律落盘**；
 * `node lite/regress/interact.mjs [--variant …] [--only 关键字]` —— 交互回归（见 §11.4），
-  差异时把两侧完整快照落 `/tmp/interact/`；
+  差异时把两侧完整快照落 `/tmp/interact/`；**顺带做逐像素比对**（截图前注入
+  "禁用所有 transition/animation" 的样式，见下）；
 * 两者共用 `lite/regress/lib.mjs`（fixture 服务、`appSubtree` 归一化、两种抓取方式）：
   **归一化规则必须同一份**，各写一份迟早漂移，而漂移的表现是"都过了但测的不是一回事"。
 
@@ -451,8 +462,8 @@ lite 的属性绑定是细粒度的，改名称不会动下拉框，于是它保
 
 ### 11.8 下一步
 
-1. **逐像素比对**：截图已在 `/tmp/shots/`，但还没做图像 diff。逐字符一致 + 交互一致已经覆盖了
-   结构与文本，像素比对主要兜 CSS（这一轮没动 CSS，风险低）；
+1. ~~逐像素比对~~ ✅ **已做**：`interact.mjs` 每轮结束时比对整页截图，逐像素一致
+   （两侧 CSS 实测字节相同）；`compare.mjs` 那句 `--screenshot` 保留当存档，不参与判定；
 2. **切默认构建配置**（把 `vite.config.ts` 换成 lite 的那套 alias）—— 这一步要用户点头：
    它要 `npm run build` + `cargo build`，而重编译会触发 TCC 弹窗与一次服务重启（见 AGENTS.md）；
 3. 事件委托（`$$click` + `delegateEvents`，约 250 B）与倒序列表的 LIS 快速路径
