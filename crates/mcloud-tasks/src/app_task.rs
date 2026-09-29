@@ -216,9 +216,23 @@ impl AppTaskResult {
 
 /// 跑一次 `app-task`：**写**。
 ///
-/// 顺序照旧 TS：**先传文件、再打卡**（`tasks.ts` 那个 `beiyong1` 分支就是
-/// `handleTaskClick` 之后 `uploadRandomFile`，而 `runners.ts` 的 106 只有上传那一半）。
-/// 本模块对两者都发 —— 传完再打一发"我做完了"。
+/// # ⚠ 顺序是**先打卡、再上传**（不是我原先以为的反过来）
+///
+/// 旧 TS `tasks.ts:33-44` 的 `handleTaskClick` 逐字：
+///
+/// ```ts
+/// if (await clickTaskWithStep(ctx, task.id, task.currstep)) {   // ← 先打卡
+///   await taskRunner[task.id]?.(ctx, task);                     // ← 成功之后才跑玩法
+/// }
+/// ```
+///
+/// ⇒ **打卡是一道门**：先问上游"这一条记上了没有"，成了才去真的做那件事。
+/// 参考实现（Go）写的是同一句："beiyong1 的'上传图/照'那一条旧实现是
+/// **先打卡、再上传**"。
+///
+/// ⚠ 这一版最初把顺序写反了（先传再打卡），理由是我自己推的
+/// "打卡是'我做完了'的声明，声明在动作之前就是撒谎" —— **两边参考都不支持那句**。
+/// 从第一原理推出来的行为，只要与参考相反，就是错的。
 pub async fn run_app_task(ctx: &TaskContext, pace_ms: i64) -> Result<AppTaskResult> {
     let mut result = AppTaskResult::default();
 
@@ -258,7 +272,23 @@ pub async fn run_app_task(ctx: &TaskContext, pace_ms: i64) -> Result<AppTaskResu
             format!("做任务 {name}"),
         );
 
-        // ③-a 按档传。
+        // ③-a **先打卡**：它是一道门，成了才去做那件事。
+        match click(ctx, item).await {
+            Ok(notice) => {
+                step.clicked = true;
+                if let Some(n) = notice {
+                    step.problems.push(format!("上游附言：{n}"));
+                }
+            }
+            Err(e) => {
+                // 门没过 ⇒ **不传**（旧 `if (await clickTaskWithStep(...))` 那个形状）。
+                step.problems.push(format!("打卡失败，这一条不传：{e}"));
+                result.steps.push(step);
+                continue;
+            }
+        }
+
+        // ③-b 门过了 ⇒ 按档传。
         let mut done: u32 = 0;
         while should_upload_another(*shape, done, item.process) {
             ctx.check_cancelled()?;
@@ -277,17 +307,6 @@ pub async fn run_app_task(ctx: &TaskContext, pace_ms: i64) -> Result<AppTaskResu
             if shape.pace_each_round && pace_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(pace_ms as u64)).await;
             }
-        }
-
-        // ③-b 打卡（"这条我做完了"）。⚠ 写请求、不可回滚 ⇒ 只有真判出这一条才打。
-        match click(ctx, item).await {
-            Ok(notice) => {
-                step.clicked = true;
-                if let Some(n) = notice {
-                    step.problems.push(format!("上游附言：{n}"));
-                }
-            }
-            Err(e) => step.problems.push(format!("打卡失败：{e}")),
         }
 
         if step.uploaded > 0 || step.clicked {
