@@ -135,6 +135,37 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "PKG=mcloud-gost-v${VERSION}-${{ matrix.target }}" >> "$GITHUB_ENV"
 
+      # ── 压缩二进制：**只有 Linux 与 Windows** ────────────────────────────
+      #
+      # 用户口径（2026-09-29）：linux/windows 可以压二进制，macos 不用压。
+      # macOS **不压不是漏了**：UPX 不支持 arm64 Mach-O，而且压缩后的 Mach-O
+      # 会破坏代码签名，本机执行直接弹"无法验证开发者" —— 白赚体积、丢掉可运行性。
+      #
+      # 两条都要的验证：`upx -t` 是 UPX 自带的完整性测试；再跑一次 `--help`
+      # 确认压完**还能执行**（UPX 压坏二进制的表现就是加载即崩）。
+      - name: 压缩二进制（仅 Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y upx-ucl
+          BIN="target/${{ matrix.target }}/release"
+          upx --best --lzma "$BIN/mcloud-server" "$BIN/mcloud-cli"
+          upx -t "$BIN/mcloud-server" "$BIN/mcloud-cli"
+          "$BIN/mcloud-cli" --help 2>&1 | grep -q "用法" && echo "冒烟：CLI 压完仍可执行"
+          ls -l "$BIN/mcloud-server" "$BIN/mcloud-cli"
+
+      - name: 压缩二进制（仅 Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install upx -y --no-progress
+          $bin = "target/${{ matrix.target }}/release"
+          upx --best --lzma "$bin/mcloud-server.exe" "$bin/mcloud-cli.exe"
+          upx -t "$bin/mcloud-server.exe" "$bin/mcloud-cli.exe"
+          $out = & "$bin/mcloud-cli.exe" --help 2>&1 | Out-String
+          if ($out -notmatch "用法") { throw "冒烟失败：CLI 压完跑不起来：$out" }
+          Write-Host "冒烟：CLI 压完仍可执行"
+          Get-ChildItem "$bin/*.exe" | Select-Object Name, Length
+
       - name: 打包（unix：tar.gz + tar.xz）
         if: runner.os != 'Windows'
         shell: bash
@@ -198,3 +229,9 @@ jobs:
 
             ⚠ Linux 版由 release 构建链接系统 OpenSSL（`native-tls`）：目标机需要 `libssl`。
             Windows/macOS 走系统 TLS，无额外依赖。
+
+            **Linux / Windows 的二进制已用 UPX 压缩**（`upx --best --lzma`），
+            压完跑过 `upx -t` 完整性测试与 `--help` 冒烟；macOS 版**未压缩**
+            （UPX 不支持 arm64 Mach-O，且压过的 Mach-O 会破坏代码签名）。
+            ⚠ Windows 上 UPX 压缩过的可执行文件**可能被 Defender/SmartScreen 误报** ——
+            介意的话请自行从源码构建，或用未压缩的 `--target` 产物。
