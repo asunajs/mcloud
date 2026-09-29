@@ -43,6 +43,46 @@ export function template(html: string): () => Node {
 /** 批量插入。`anchor` 为 null 即追加到末尾。 */
 export function insert(parent: Node, nodes: Nodes, anchor: Node | null = null): void {
   for (const n of nodes) parent.insertBefore(n, anchor)
+  flushSlots()
+}
+
+/**
+ * 片段（fragment）里的动态成员：**先出一个占位文本节点，等它进了文档再接管**。
+ *
+ * 为什么必须延后：`setNodes` 要知道父节点（内容插在占位节点之前），而片段在被消费方
+ * 插入之前**没有父节点**。踩到的坑正是这个 —— `app.tsx` 的根返回是片段，
+ * `{authState !== 'ready' ? null : <div class="drawer">…</div>}` 只在挂载时求值一次，
+ * 之后 `authState` 变了没人重跑，应用**永远停在 loading**。
+ *
+ * Solid 的解法是把这种成员包成 `memo(...)`，由它的数组处理逻辑当响应式槽看待。
+ * 这里换成"占位 + 插入后接管"：不需要观察者，也不需要调度器，**同步**建绑定。
+ */
+let pending: { node: Node; fn: () => unknown }[] = []
+
+export function lazySlot(fn: () => unknown): Node {
+  const ph = document.createTextNode('')
+  pending.push({ node: ph, fn })
+  return ph
+}
+
+/**
+ * 接管"已经进文档"的槽；还没进文档的（父片段也还没被插入）留给下一轮。
+ *
+ * ⚠ 必须**有界多轮**而不是递归调用自己：槽的内容里可能还有槽（片段套片段），
+ * 但嵌深有限；而递归版（在 `insert` 里直接再 flush）在真实应用上出现了
+ * **重复插入** —— 同一页 loading 视图被追加 1,580 次、`#app` 涨到 102 KB，
+ * Chrome 虚拟时间因此走不完（回归脚本卡了 7 分钟）。
+ */
+function flushSlots(): void {
+  for (let pass = 0; pass < 8 && pending.length; pass++) {
+    const list = pending
+    pending = []
+    for (const p of list) {
+      const parent = p.node.parentNode
+      if (parent) setNodes(parent, p.fn, p.node)
+      else pending.push(p)
+    }
+  }
 }
 
 /**

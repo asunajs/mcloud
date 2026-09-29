@@ -19,7 +19,7 @@
 export { batch, computed, effect, field, type Ref, ref, watch } from './signal'
 // Vapor 的编译产物里，副作用写作 `renderEffect`；本实现它就是 effect，导出个别名免得两套词
 export { effect as renderEffect } from './signal'
-export { createNodes, insert, on, onRemove, remove, setAttr, setClass, setNodes, setProp, setText, spread, template } from './dom'
+export { createNodes, lazySlot, insert, on, onRemove, remove, setAttr, setClass, setNodes, setProp, setText, spread, template } from './dom'
 export { createFor } from './control'
 export { type Component, createComponent, createVaporApp, defineVaporComponent, mount, onMounted, onUnmounted, type Slots, useSlots } from './component'
 export { createStore } from './store'

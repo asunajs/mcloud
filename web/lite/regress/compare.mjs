@@ -1,17 +1,15 @@
 /**
  * 迁移回归：**同一套 API fixture 下**，把 lite 包和 Vue 包的同一页面拿来逐节点比对。
  *
- * 为什么需要它：光标级/体积级的证据都不能回答"两个包渲染出的 DOM 是不是同一个"。
- * 这个脚本先给两边喂**完全一样**的接口响应，再比 `#app` 子树。
+ * 体积和编译通过都不能回答"两个包渲染出的 DOM 是不是同一个" —— 这个脚本就是那个判据。
  *
  * 用法（先各自构建）：
  *   npx vite build --config vite.config.lite.ts     # → /tmp/lite-app
- *   npm run build                                    # → web/dist（Vue 包）
- *   node lite/regress/compare.mjs --route '#settings'
+ *   npm run build                                    # → web/dist
+ *   node lite/regress/compare.mjs --route settings [--budget 8000] [--timeout 90000]
  *
- * ⚠ 现状（2026-09-29）：**两边不一致** —— lite 侧卡在 loading 态，
- * 根因是**片段（fragment）里的动态成员只在挂载时求值一次**（详见
- * docs/lite-framework.md §11）。这个脚本就是那次的现场复现工具。
+ * ⚠ 抓 DOM 这件事本身有三个坑（都踩过，注释在 `dump()` 里）：CLOEXEC 的文件 fd、
+ * 被孙子进程拖住的管道、以及同步 API 阻塞事件循环把本进程的 fixture 服务锁死。
  */
 import { execFileSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
@@ -22,12 +20,13 @@ const arg = (name, fallback) => {
   const i = process.argv.indexOf(name)
   return i > 0 ? process.argv[i + 1] : fallback
 }
-const route = arg('--route', '#settings')
+const rawRoute = arg('--route', 'settings')
+const route = rawRoute.startsWith('#') ? rawRoute : '#' + rawRoute
 const liteDir = arg('--lite', '/tmp/lite-app')
 const vueDir = arg('--vue', 'dist')
 
-// ── fixture：启动链路要的 4 个接口 + 首屏几个列表 ────────────────────────────
 const run = { id: 1, task: 'daily-checkin', startedAt: '2026-09-29T00:00:00Z', finishedAt: '2026-09-29T00:00:09Z', ok: true, outcome: 'ok', summary: '打卡 3 个账号', step: 'done', artifacts: [] }
+/** 启动链路要的 4 个接口 + 首屏几个列表；两侧**完全一样**。 */
 const FIXTURES = {
   '/api/setup': { initialized: true, minPasswordLen: 8 },
   '/api/session': { userId: 'u-1', name: 'catlair', kind: 'web' },
@@ -63,22 +62,49 @@ const serve = (root, port) =>
     server.listen(port, '127.0.0.1', () => resolve(server))
   })
 
-const chrome = execFileSync('bash', ['-lc', 'ls -d ~/.cache/puppeteer/chrome-headless-shell/*/chrome-headless-shell-*/chrome-headless-shell | head -1'], { encoding: 'utf8' }).trim()
+// 同步取路径：此时还没有任何请求在飞，阻塞几毫秒无妨（异步取会让下面拿到空串）
+const chromePath = execFileSync('bash', ['-c', 'ls -d ~/.cache/puppeteer/chrome-headless-shell/*/chrome-headless-shell-*/chrome-headless-shell | head -1'], { encoding: 'utf8' }).trim()
 
 /**
- * ⚠ `timeout` 护栏不能省：**被测应用若有渲染死循环，Chrome 的虚拟时间永远走不完**，
- * 没有这个上限 `execFileSync` 会一直挂着（实测卡了 7 分钟，只能人工中断）。
- * macOS 没有 `timeout` 命令，所以用 Node 自己的超时。
+ * 抓 DOM。必须：`spawn` + **读 stdout 流** + 等 **`exit`**（而不是等管道关闭）。
+ *
+ * 三条都踩过：
+ * 1. stdout 指向 `fs.openSync` 的 fd ⇒ Node 的句柄带 `CLOEXEC`，chrome 继承不到，
+ *    表现是**退出码 0、输出 0 字节**（bash 里重定向到文件却正常，极易误判成"页面没渲染"）；
+ * 2. `execFileSync`/`execFile` 的管道 ⇒ chrome 的 renderer/gpu 子进程继承了管道，
+ *    主进程退出后也不关，回调永不触发 ⇒ ETIMEDOUT；
+ * 3. `execFileSync` 阻塞事件循环，而 fixture 服务就在本进程里 ⇒ 两者互相锁死。
  */
-const dump = (port, name) => {
-  try {
-    return execFileSync(chrome, ['--headless', '--disable-gpu', '--hide-scrollbars', '--window-size=1280,900', '--virtual-time-budget=8000', `--screenshot=/tmp/shots/${name}.png`, '--dump-dom', `http://127.0.0.1:${port}/#${route.replace(/^#/, '')}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 90_000 })
-  } catch (e) {
-    return `<!--超时或被中断：${(e as Error).message}-->`
-  }
-}
+const dump = (port, name) =>
+  new Promise((resolve) => {
+    const child = spawn(
+      chromePath,
+      [
+        '--user-data-dir=/tmp/lite-chrome-profile',
+        '--headless', '--disable-gpu', '--hide-scrollbars', '--window-size=1280,900',
+        `--virtual-time-budget=${arg('--budget', '8000')}`,
+        `--screenshot=/tmp/shots/${name}.png`,
+        '--dump-dom',
+        `http://127.0.0.1:${port}/${route}`,
+      ],
+      { stdio: ['ignore', 'pipe', 'ignore'] },
+    )
+    let out = ''
+    child.stdout.on('data', (d) => {
+      out += d
+    })
+    // 护栏：被测应用若有渲染死循环，chrome 永远不退出 —— 到点就杀，并把这件事标进结果
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      resolve(out + '\n<!-- chrome 超时被杀：应用可能在渲染死循环 -->')
+    }, Number(arg('--timeout', '90000')))
+    child.on('exit', (code) => {
+      clearTimeout(timer)
+      resolve(code ? out + `\n<!-- chrome exit ${code} -->` : out)
+    })
+  })
 
-/** 取 `#app` 子树（按标签配平），去注释锚点、折叠标签间空白。 */
+/** 取 `#app` 子树（按 div 标签配平），去注释锚点、折叠标签间空白。 */
 function appSubtree(html) {
   const i = html.indexOf('<div id="app"')
   if (i < 0) return ''
@@ -86,29 +112,40 @@ function appSubtree(html) {
   let end = i
   for (const m of html.slice(i).matchAll(/<(\/?)div\b[^>]*>/g)) {
     depth += m[1] ? -1 : 1
-    if (depth === 0) { end = i + m.index + m[0].length; break }
+    if (depth === 0) {
+      end = i + m.index + m[0].length
+      break
+    }
   }
-  return html.slice(i, end).replace(/<!--.*?-->/gs, '').replace(/>\s+</g, '><').trim()
+  return html
+    .slice(i, end)
+    .replace(/<!--.*?-->/gs, '')
+    .replace(/>\s+</g, '><')
+    .trim()
 }
 
 fs.mkdirSync('/tmp/shots', { recursive: true })
 const a = await serve(liteDir, 48151)
 const b = await serve(vueDir, 48152)
-const lite = appSubtree(dump(48151, 'lite'))
-const vue = appSubtree(dump(48152, 'vue'))
+const raw = { lite: await dump(48151, 'lite'), vue: await dump(48152, 'vue') }
 a.close()
 b.close()
 
-console.log(`页面 ${route}`)
+const lite = appSubtree(raw.lite)
+const vue = appSubtree(raw.vue)
+console.log(`页面 ${route}（lite ${liteDir} vs Vue ${vueDir}）`)
 console.log(`  lite #app ${lite.length} B    Vue #app ${vue.length} B`)
 if (lite && lite === vue) {
-  console.log('  ✅ 逐字符一致（截图同样在 /tmp/shots/）')
+  console.log('  ✅ 逐字符一致；截图在 /tmp/shots/')
 } else if (!lite || !vue) {
-  console.log('  ✗ 有一侧没渲染出来（看 /tmp/shots/*.png 与控制台）')
+  console.log('  ✗ 有一侧没抓到 #app：')
+  console.log('     lite 原始抓取: ' + JSON.stringify(raw.lite.slice(0, 200)))
+  console.log('     vue  原始抓取: ' + JSON.stringify(raw.vue.slice(0, 200)))
+  process.exitCode = 1
 } else {
-  const firstDiff = [...lite].findIndex((c, i) => c !== vue[i])
-  console.log(`  ✗ 不一致，首个差异在第 ${firstDiff} 个字符`)
-  console.log(`     lite: ${JSON.stringify(lite.slice(Math.max(0, firstDiff - 40), firstDiff + 60))}`)
-  console.log(`     vue : ${JSON.stringify(vue.slice(Math.max(0, firstDiff - 40), firstDiff + 60))}`)
+  const i = [...lite].findIndex((c, k) => c !== vue[k])
+  console.log(`  ✗ 不一致，首个差异在第 ${i} 个字符`)
+  console.log(`     lite: ${JSON.stringify(lite.slice(Math.max(0, i - 50), i + 70))}`)
+  console.log(`     vue : ${JSON.stringify(vue.slice(Math.max(0, i - 50), i + 70))}`)
   process.exitCode = 1
 }

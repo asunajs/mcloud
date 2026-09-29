@@ -87,6 +87,31 @@ const App = () => {
   )
 }
 
+/**
+ * ⚠ **回归用例：组件返回片段**（fragment）。
+ *
+ * 真实应用的根组件就是这个形状（`app.tsx` 的 `return (<>…</>)`），而它一度只在挂载时
+ * 求值一次 —— `authState` 变了没人重跑，应用永远卡在 loading。demo 原来的 20 条断言里
+ * **没有一个组件返回片段**，所以漏了。这里把它钉住：既断言内容，也断言**没有重复节点**。
+ */
+const showFrag = ref(true)
+const fragItems = ref([
+  { id: 1, label: 'p' },
+  { id: 2, label: 'q' },
+])
+
+const Split = () => (
+  <>
+    <h4 id="frag-head">片段头</h4>
+    {showFrag.value ? <p id="frag-branch">A</p> : null}
+    <ul id="frag-list">
+      {fragItems.value.map((it) => (
+        <li key={it.id}>{it.label}</li>
+      ))}
+    </ul>
+  </>
+)
+
 // ── 断言（与手写版逐条一致）───────────────────────────────────────────────────
 const out: string[] = []
 const ok = (name: string, cond: boolean, extra = '') => out.push(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra ? '  ← ' + extra : ''}`)
@@ -131,6 +156,34 @@ $('#tog').click()
 ok('条件切回来', !!document.getElementById('branch'))
 
 ok('列表标题随数据更新', ($('section.panel > h3') as HTMLElement)?.textContent === `共 ${rows().length} 条`, ($('section.panel > h3') as HTMLElement)?.textContent)
+
+// ── 片段用例的断言 ───────────────────────────────────────────────────────────
+mount(Split, '#frag')
+
+const frag = () => document.getElementById('frag') as HTMLElement
+const fragRows = () => [...document.querySelectorAll('#frag-list > li')].map((n) => n.textContent)
+const fragCount = () => frag().childNodes.length
+
+const baseCount = fragCount()
+ok('片段：静态兄弟节点渲染了', document.getElementById('frag-head')?.textContent === '片段头')
+ok('片段：动态成员（条件分支）渲染了', document.querySelectorAll('#frag-branch').length === 1)
+ok('片段：列表渲染了', fragRows().join('|') === 'p|q', fragRows().join('|'))
+
+showFrag.value = false
+ok('片段：条件切换后分支消失', document.querySelectorAll('#frag-branch').length === 0)
+showFrag.value = true
+ok('片段：条件切回来只有一个', document.querySelectorAll('#frag-branch').length === 1)
+
+for (let i = 0; i < 5; i++) showFrag.value = !showFrag.value
+showFrag.value = true
+ok('片段：反复切换后没有重复节点', fragCount() === baseCount, `childNodes ${fragCount()} vs ${baseCount}`)
+ok('片段：反复切换后静态头仍只有一个', document.querySelectorAll('#frag-head').length === 1)
+
+const fragFirst = document.querySelector('#frag-list > li')
+fragItems.value = [...fragItems.value, { id: 3, label: 'r' }]
+ok('片段：列表追加一行', fragRows().join('|') === 'p|q|r', fragRows().join('|'))
+ok('片段：列表复用了已有节点', !!fragFirst?.isConnected && fragFirst === document.querySelector('#frag-list > li'))
+ok('片段：追加后也没重复节点', fragCount() === baseCount, `childNodes ${fragCount()} vs ${baseCount}`)
 
 const fails = out.filter((l) => l.startsWith('FAIL')).length
 const pre = document.createElement('pre')

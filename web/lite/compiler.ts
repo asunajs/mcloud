@@ -139,7 +139,8 @@ class Compiler {
   /** 任意 JSX 节点 → 一个表达式的值（元素 / 组件 / 片段）。 */
   private value(node: ts.JsxElement | ts.JsxSelfClosingElement | ts.JsxFragment, stmts: string[]): string {
     if (ts.isJsxFragment(node)) {
-      const parts = node.children.map((c) => this.childValue(c)).filter((v): v is string => !!v)
+      // ⚠ 片段成员的动态部分必须包成惰性槽：片段没有父节点，绑定只能等插入后再建
+      const parts = node.children.map((c) => this.childValue(c, true)).filter((v): v is string => !!v)
       return parts.length === 0 ? 'null' : parts.length === 1 ? parts[0] : `[${parts.join(', ')}]`
     }
     const tag = this.tagOf(node)
@@ -209,8 +210,11 @@ class Compiler {
     return out
   }
 
-  /** 组件子节点 / 片段成员：拿一个"值"（文本要自己造节点）。 */
-  private childValue(child: ts.JsxChild): string | undefined {
+  /**
+   * 组件子节点 / 片段成员：拿一个"值"（文本要自己造节点）。
+   * `slot = true` 时把动态成员包成惰性槽（只有片段需要，见 runtime 的 `lazySlot`）。
+   */
+  private childValue(child: ts.JsxChild, slot = false): string | undefined {
     if (ts.isJsxText(child)) {
       const t = jsxText(child.text)
       return t ? `document.createTextNode(${JSON.stringify(t)})` : undefined
@@ -218,7 +222,8 @@ class Compiler {
     if (ts.isJsxExpression(child)) {
       if (!child.expression) return undefined
       if (isNullish(child.expression)) return undefined
-      return this.exprWithJsx(child.expression)
+      const e = this.exprWithJsx(child.expression)
+      return slot ? `${this.h('lazySlot')}(() => ${e})` : e
     }
     return this.valueIsolated(child)
   }
