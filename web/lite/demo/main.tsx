@@ -268,6 +268,26 @@ const Misc = () => (
   </div>
 )
 
+/**
+ * ⚠ 真机上报过的一个错：**被移除的子树里 effect 不销毁**，于是它带着已经不存在的
+ * 锚点继续重跑，抛
+ * `Failed to execute 'insertBefore' on 'Node': … is not a child of this node`。
+ * 这里刻意造出那个形状：先卸载子树，再改它读过的**全局**信号。
+ */
+const alive = ref(true)
+const gCount = ref(0)
+const Stale = () => <p id="stale-inner">{gCount.value}</p>
+const StaleHost = () => <div id="stale-host">{alive.value ? <Stale /> : null}</div>
+mount(StaleHost, '#stale')
+alive.value = false
+const staleGone = !document.getElementById('stale-inner')
+gCount.value = 1
+ok(
+  '卸载后的子树不再重跑（没有 insertBefore 死锚点）',
+  staleGone && !document.getElementById('stale-inner') && !document.getElementById('err'),
+  `gone=${staleGone} err=${document.getElementById('err')?.textContent?.split('\n')[0] ?? '无'}`,
+)
+
 mount(Keyless, '#keyless')
 ok(
   '无 key 的 .map()：锚点没被当成 key（顺序正确）',

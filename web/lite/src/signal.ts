@@ -22,15 +22,39 @@ let active: Effect | null = null
 let depth = 0
 const pending = new Set<Effect>()
 
-class Effect {
+export class Effect {
   /** 我依赖了哪些信号 —— 重跑前要逐个解绑，否则依赖会越滚越大。 */
   readonly deps = new Set<RefImpl<unknown>>()
+
+  /** 已经销毁：不再跑，也不再被通知。见 `dispose()`。 */
+  disposed = false
 
   constructor(readonly fn: () => void) {
     this.run()
   }
 
+  /**
+   * 销毁：解绑所有依赖并停用。
+   *
+   * ⚠⚠ 不销毁会**报错**，不只是泄漏：被移除的子树（切页、条件分支、列表删行）里的
+   * effect 还订阅着**全局**信号（`authState` / toast / 后端状态）。信号一变它们就重跑，
+   * 拿着**已经不在文档里的** `parent`/`anchor` 去 `insertBefore`：
+   *
+   * ```
+   * Failed to execute 'insertBefore' on 'Node': The node before which the new node
+   * is to be inserted is not a child of this node.
+   * ```
+   *
+   * 谁负责销毁：节点被移除时由 `dom.ts` 的 `remove()` 统一做（它按"谁拥有这个节点"记账）。
+   */
+  dispose(): void {
+    this.disposed = true
+    for (const d of this.deps) d.subs.delete(this)
+    this.deps.clear()
+  }
+
   run(): void {
+    if (this.disposed) return
     for (const d of this.deps) d.subs.delete(this)
     this.deps.clear()
 
@@ -96,9 +120,9 @@ export function field<T>(v: T) {
   return { get: () => r.value, set: (n: T) => (r.value = n) }
 }
 
-/** 注册一个副作用：立刻跑一次，之后依赖变了自动重跑。 */
-export function effect(fn: () => void): void {
-  new Effect(fn)
+/** 注册一个副作用：立刻跑一次，之后依赖变了自动重跑。返回句柄以便**销毁**（见 `Effect.dispose`）。 */
+export function effect(fn: () => void): Effect {
+  return new Effect(fn)
 }
 
 /** 把一批变更合成一次刷新。 */

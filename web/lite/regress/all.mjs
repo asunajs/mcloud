@@ -51,16 +51,18 @@ const bash = (cmd, label) => {
 let ok = true
 // 两侧产物都从当前源码重新构建：拿旧产物比对等于在测上一版
 ok = bash('npx vite build --config vite.config.lite.ts', 'lite 包构建') && ok
-ok = bash('npm run build >/dev/null 2>&1', 'Vue 包构建（web/dist）') && ok
+// ⚠⚠ 默认配置已切成 lite ⇒ Vue 那一侧**必须显式指配置**，否则两步构建的是同一份产物，
+  // 比对就变成"lite 跟 lite 比"，必然全绿 —— 测试自己骗人比产品 bug 难发现。
+  ok = bash('npx vite build --config vite.config.vue.ts --outDir /tmp/vue-app >/dev/null 2>&1', 'Vue 包构建（→ /tmp/vue-app）') && ok
 
 for (const route of ROUTES) {
-  ok = run([path.join(dir, 'compare.mjs'), '--route', route, '--variant', 'ready'], `逐字符 ${route}`) && ok
+  ok = run([path.join(dir, 'compare.mjs'), '--vue', '/tmp/vue-app', '--route', route, '--variant', 'ready'], `逐字符 ${route}`) && ok
 }
 for (const variant of VARIANTS.filter((v) => v !== 'ready')) {
-  ok = run([path.join(dir, 'compare.mjs'), '--route', 'settings', '--variant', variant], `逐字符 认证态 ${variant}`) && ok
+  ok = run([path.join(dir, 'compare.mjs'), '--vue', '/tmp/vue-app', '--route', 'settings', '--variant', variant], `逐字符 认证态 ${variant}`) && ok
 }
 for (const variant of VARIANTS) {
-  ok = run([path.join(dir, 'interact.mjs'), '--variant', variant], `交互 + 像素 ${variant}`) && ok
+  ok = run([path.join(dir, 'interact.mjs'), '--vue', '/tmp/vue-app', '--variant', variant], `交互 + 像素 ${variant}`) && ok
 }
 if (!quick) ok = bash('node lite/demo/run.mjs', 'demo 断言（53 条）') && ok
 

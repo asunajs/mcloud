@@ -502,3 +502,44 @@ lite 的属性绑定是细粒度的，改名称不会动下拉框，于是它保
      委托反而要额外付 ~250 B gzip 并引入"事件目标穿过 shadow/stopPropagation"这类边界。
      挂载性能已经 16× 快于 Vue，这里没有要还的债。
 
+
+
+## 12. 切换之后（2026-09-29，真机上跑起来）
+
+### 12.1 真机报出的错：被移除子树的 effect 不会销毁
+
+用户切到 3000 上的 lite 版之后，控制台出现：
+
+```
+Failed to execute 'insertBefore' on 'Node': The node before which the new node
+is to be inserted is not a child of this node.
+```
+
+根因是**架构性的漏**，不是某个页面的 bug：`remove()` 只跑了 `onUnmounted` 那类清理，
+**没有销毁 effect**。于是被移除子树（切页、条件分支、列表删行）里的 effect 还订阅着
+**全局**信号（`authState` / toast / 后端状态）；信号一变它们照样重跑，
+拿着已经不在文档里的 `parent`/`anchor` 去 `insertBefore`。
+
+修法：`dom.ts` 按"谁拥有这个节点"给 effect 记账（`owners`），`remove()` 时
+`disposeTree()` 把整棵子树里登记过的 effect **销毁**（`Effect.dispose()` 解绑所有依赖并停用）。
+`setNodes` 与 `createFor` 建 effect 时都登记；`createFor` 因此也随列表父节点一起销毁。
+
+⚠ **三条闸门为什么没照出来**：fixture 数据是静止的（加载一次就不动了），
+而这条要"移除子树 **之后** 全局信号再变"才会触发 —— 真机上 toast / 状态更新
+随时在发生。这是"fixture 换成真机响应"那条 TODO 的直接证据。
+
+⚠ **诚实交代**：demo 里补的那条用例（卸载子树后再改它读过的全局信号）**并不能复现这个错**
+（摘掉修复照样通过）—— 因为"往已脱离文档的元素里插入"是合法的、不报错；
+要报错需要"锚点被移除、父节点还在"那种组合。所以这条修复**尚未被一个能复现原错的用例守住**，
+复现条件还需要用户提供（哪个页面、做了什么操作）。
+
+### 12.2 `all.mjs` 在切换之后会自己骗自己
+
+切换后 `npm run build` 变成了 lite 构建 ⇒ `all.mjs` 里"构建 Vue 侧"那一步其实又构建了一份
+lite，于是比对变成 **lite 跟 lite 比**，必然全绿。已改为显式
+`npx vite build --config vite.config.vue.ts --outDir /tmp/vue-app`，并把 `--vue /tmp/vue-app`
+传给两个比对脚本。
+
+**这是同一天第三次遇到"测试脚本自己的假绿"**（前两次：fixture body 形状写错导致整个变体在渲染登录页、
+`THREW` 判定顺序导致 18 步没执行却被印成 ✅）。教训收敛成一句：
+**每条闸门都要问"它红了会不会真的红"**，光看它是绿的不算验证。

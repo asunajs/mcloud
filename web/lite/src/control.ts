@@ -8,7 +8,7 @@
  * 少一层抽象就少一堆记账代码，而且**不产生任何包装节点**（CSS 选择器不受影响）。
  */
 
-import { createNodes, insert, remove, type Nodes } from './dom'
+import { createNodes, insert, own, remove, type Nodes } from './dom'
 import { effect } from './signal'
 
 /**
@@ -42,7 +42,7 @@ export function createFor<T>(
   const rows = new Map<unknown, { item: T; nodes: Nodes }>()
   const seen = new Set<unknown>()
 
-  effect(() => {
+  const eff = effect(() => {
     const items = list()
     seen.clear()
     let cursor: Node | null = anchor
@@ -94,4 +94,6 @@ export function createFor<T>(
       }
     }
   })
+  // 归属登记：列表的父节点被移除时，这个 effect 与它建的每一行一起销毁
+  own(parent, eff)
 }

@@ -15,7 +15,7 @@
  * `<!--$-->` 注释锚点，我们连那个都省了）。
  */
 
-import { effect } from './signal'
+import { type Effect, effect } from './signal'
 
 /** 渲染结果统一成节点数组：**不引入任何包装元素**，所以 CSS 选择器与布局与原来逐像素一致。 */
 export type Nodes = Node[]
@@ -40,6 +40,33 @@ export function template(html: string): () => Node {
   return () => content.cloneNode(true) as Node
 }
 
+/**
+ * 谁拥有哪个 effect：`parent` 被移除时，它名下的 effect 全部销毁。
+ *
+ * ⚠⚠ 这条记账是**必需**的，不是优化。少了它，被移除子树里的 effect 还订阅着全局信号
+ * （`authState` / toast / 后端状态），信号一变就拿着**已不在文档里**的 parent/anchor
+ * 去 `insertBefore`，直接抛
+ * `Failed to execute 'insertBefore' on 'Node': … is not a child of this node`。
+ * 真机（切页 + 全局状态更新）就会撞到 —— fixture 数据静止，所以三条闸门都没照出来。
+ */
+const owners = new Map<Node, Effect[]>()
+
+function own(parent: Node, eff: Effect): void {
+  const list = owners.get(parent)
+  if (list) list.push(eff)
+  else owners.set(parent, [eff])
+}
+
+/** 销毁一棵（已被移除的）子树里登记过的所有 effect。 */
+function disposeTree(node: Node): void {
+  const list = owners.get(node)
+  if (list) {
+    owners.delete(node)
+    for (const eff of list) eff.dispose()
+  }
+  for (const child of node.childNodes) disposeTree(child)
+}
+
 /** 批量插入。`anchor` 为 null 即追加到末尾。 */
 export function insert(parent: Node, nodes: Nodes, anchor: Node | null = null): void {
   for (const n of nodes) parent.insertBefore(n, anchor)
@@ -58,6 +85,8 @@ export function insert(parent: Node, nodes: Nodes, anchor: Node | null = null): 
  * 所以每次 `insert` 之后都试着 flush；还没进文档的（父节点自己还没被插入）留到下一轮。
  */
 const mounts: { node: Node | undefined; cb: () => void }[] = []
+
+export { own }
 
 export function queueMount(nodes: Nodes, cb: () => void): void {
   const node = nodes[0]
@@ -149,6 +178,8 @@ export function onRemove(nodes: Nodes, cb: () => void): void {
  * （`onUnmounted` 里多半是 `removeEventListener`，漏跑就是内存泄漏）。
  */
 export function remove(nodes: Nodes): void {
+  // 先销毁这棵子树里的 effect，再摘节点：销毁只解绑订阅，不动 DOM
+  for (const n of nodes) disposeTree(n)
   const key = nodes[0]
   if (key) {
     const arr = cleanups.get(key)
@@ -168,7 +199,7 @@ export function remove(nodes: Nodes): void {
  */
 export function setNodes(parent: Node, fn: () => unknown, anchor: Node | null = null): void {
   let cur: Nodes = []
-  effect(() => {
+  const eff = effect(() => {
     const v = fn()
     /**
      * 文本快路径（Solid 的 `insertExpression` 同款）：值还是字符串、且位置上就是
@@ -192,6 +223,8 @@ export function setNodes(parent: Node, fn: () => unknown, anchor: Node | null = 
     cur = createNodes(v)
     insert(parent, cur, anchor)
   })
+  // 归属登记：`parent` 被移除时这个 effect 一起销毁（否则它会带着死锚点继续重跑）
+  own(parent, eff)
 }
 
 /** 写文本。同值不写 —— 避免无谓的布局/样式重算。 */
