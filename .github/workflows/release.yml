@@ -165,6 +165,20 @@ jobs:
           if ($out -notmatch "用法") { throw "冒烟失败：CLI 压完跑不起来：$out" }
           Write-Host "冒烟：CLI 压完仍可执行"
           Get-ChildItem "$bin/*.exe" | Select-Object Name, Length
+          # ⚠⚠ 必须显式清零退出码：`--help` 是**未知子命令**，CLI 打印用法后退出非 0，
+          # 而 runner 的 pwsh 包装会在脚本末尾 `exit $LASTEXITCODE` —— 于是**整步判失败**，
+          # 尽管打包、upx -t、冒烟全都成功了（实测踩过：Linux 那步因为管道取的是 grep
+          # 的状态才侥幸没事，Windows 没有管道所以原样漏出来）。
+          $LASTEXITCODE = 0
+
+      # macOS 侧**不加** UPX（UPX 不支持 arm64 Mach-O，压过会破坏代码签名，
+      # 用户实测"m 芯片上压缩就运行不了"）—— 但"没压"不等于"能跑"，
+      # 所以这里补一条冒烟：确认未压缩的 arm64 二进制确实可执行。
+      - name: 冒烟（仅 macOS：确认未压缩的 arm64 二进制可执行）
+        if: runner.os == 'macOS'
+        run: |
+          BIN="target/${{ matrix.target }}/release"
+          "$BIN/mcloud-cli" --help 2>&1 | grep -q "用法" && echo "冒烟：macOS arm64 二进制可执行（未压缩）"
 
       - name: 打包（unix：tar.gz + tar.xz）
         if: runner.os != 'Windows'
