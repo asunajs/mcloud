@@ -21,6 +21,15 @@ import { effect } from './signal'
  * ⚠ 迭代必须**倒序**，且"已就位"的判据是**组尾的下一个兄弟正好是 cursor**：
  * 正序 + `nodes[0] === cursor` 的写法看着对，实际每次更新把整列表 `insertBefore` 搬一遍
  * （实测"同序重排 2000 行"要 10ms，而那一项本该零次 DOM 操作）。倒序后降到 1.1ms。
+ *
+ * ⚠⚠ 但**新建**的行必须**正序**插进去（倒序走是为了"看到的都已就位"，不是为了"倒着插"）。
+ *
+ * 倒着插不只是顺序难看，它有**可观测**的副作用：`<select>` 没有独立的选中状态，
+ * 选项插进一个"还没有任何选中项"的下拉框时，浏览器会自动选中**第一个**被插入的选项
+ * （Chrome 实测：`append(b); insertBefore(a,b)` ⇒ `value === 'b'`）。于是倒着插 = 默认选到
+ * **最后一项**，而 Vapor 是整批正序插 = 默认选到**第一项** —— 计划页那个"执行的任务"下拉框
+ * 就是这么一侧显示"每日签到"、另一侧显示"直播口令"的（交互回归抓出来的）。
+ * 所以倒序走，但把连续新建的行攒成一段，到边界再用**正序**、以"这一段后面那个节点"为锚整段插入。
  */
 export function createFor<T>(
   parent: Node,
@@ -37,6 +46,14 @@ export function createFor<T>(
     const items = list()
     seen.clear()
     let cursor: Node | null = anchor
+    /** 连续新建的一段（倒序攒着），`runAnchor` 是这一段**后面**那个节点。 */
+    let run: Nodes[] = []
+    let runAnchor: Node | null = null
+    const flush = () => {
+      // 倒序攒的，就倒着取出来 ⇒ 实际插入顺序是**正序**（见上面那段注释）
+      for (let j = run.length - 1; j >= 0; j--) insert(parent, run[j], runAnchor)
+      run = []
+    }
     for (let i = items.length - 1; i >= 0; i--) {
       const item = items[i]
       const k = key ? key(item, i) : i
@@ -57,10 +74,17 @@ export function createFor<T>(
         fresh = true
       }
       seen.add(k)
-      const last = row.nodes[row.nodes.length - 1]
-      if (fresh || !last || last.nextSibling !== cursor) insert(parent, row.nodes, cursor)
+      if (fresh) {
+        if (!run.length) runAnchor = cursor
+        run.push(row.nodes)
+      } else {
+        if (run.length) flush()
+        const last = row.nodes[row.nodes.length - 1]
+        if (!last || last.nextSibling !== cursor) insert(parent, row.nodes, cursor)
+      }
       cursor = row.nodes[0] ?? cursor
     }
+    if (run.length) flush()
     if (rows.size !== seen.size) {
       for (const [k, row] of rows) {
         if (!seen.has(k)) {

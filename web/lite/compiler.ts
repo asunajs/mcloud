@@ -428,7 +428,22 @@ class Compiler {
     const html = VOID.has(tag) ? open : `${open}${inner}</${tag}>`
     // 自身绑定：路径为 base（相对整棵树的根，由调用方补前缀）
     const ownShifted = own.map((b) => ({ ...b, at: [...base] }) as Binding)
-    return { html, bindings: [...ownShifted, ...childBindings] }
+    /**
+     * ⚠⚠ `<select>` 的 `value` 必须**等选项建出来之后再写**。
+     *
+     * `<select>` 没有"哪个选项被选中"的独立状态：`value` 是**在选项集合上算出来的**。
+     * 先写 `value=''`（没有任何选项匹配空串）时属性的值确实是 `''`，但随后插入 `<option>`
+     * 会触发浏览器的**自动选中**：Chrome 实测「反序插两个 option」的结果是**最后一个被选中**
+     * （`append(b); insertBefore(a, b)` ⇒ `value === 'b'`），于是下拉框自己跳到了别处。
+     *
+     * Vapor 也是这么排的 —— 任务页那个下拉框它生成的是
+     * `Z(t, () => r.value.map(…))`（先建选项）然后才 `R(() => H(e, i.value))`（再写值）。
+     * 交互回归（`regress/interact.mjs`）拿"切到任务页之后下拉框的 property"比出来的。
+     */
+    const isValueAttr = (b: Binding) => b.kind === 'attr' && b.name === 'value'
+    const late = tag === 'select' ? ownShifted.filter(isValueAttr) : []
+    const early = ownShifted.filter((b) => !late.includes(b))
+    return { html, bindings: [...early, ...childBindings, ...late] }
   }
 
   /** 一个动态子节点的绑定。返回值只可能是 `nodes` / `for`（两者都是"往父节点里铺一批节点"）。 */
