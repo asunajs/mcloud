@@ -5,7 +5,7 @@
  * 这里只负责：导航状态、主题开关、后端自述、把页面塞进 `main` —— 不长内容。
  */
 
-import { onMounted, onUnmounted, ref, watch } from 'lite'
+import { createComponent, onMounted, onUnmounted, ref, watch } from 'lite'
 import { getCurrentSession, getStatus, logoutSession, type ServiceStatus } from './api'
 import { authState, currentUser, noteAuthOk, noteAuthRequired } from './ui/auth-signal'
 import { DOCK_IDS, NAV_ITEMS, navItem, parseHash, type PageId } from './ui/nav'
@@ -15,16 +15,69 @@ import { fmtEpochMs } from './ui/time'
 import { ToastView } from './ui/toast-view'
 import { ErrorDialogHost } from './ui/error-dialog-view'
 import { ConfirmDialog, closeDialog, openDialog } from './ui/dialog'
-import { DashboardPage } from './pages/dashboard-page'
-import { AccountsPage } from './pages/accounts-page'
-import { TasksPage } from './pages/tasks-page'
-import { ExchangePage } from './pages/exchange-page'
-import { LiveRoomPage } from './pages/live-room-page'
-import { SchedulesPage } from './pages/schedules-page'
-import { PipelinesPage } from './pages/pipelines-page'
-import { HistoryPage } from './pages/history-page'
-import { SettingsPage } from './pages/settings-page'
 import { AuthPage } from './pages/auth-page'
+
+/**
+ * 页面路由表：**每个页面一个动态 `import()`**（Vite 据此切出独立 chunk）。
+ *
+ * ## 为什么要拆
+ *
+ * 改之前 10 个页面全是静态 import，于是那 8 个非首屏页面的代码
+ * （实测渲染长度 **119.6 kB / 模块图 191.0 kB = 62.6%**）全被塞进首屏那**一个**
+ * chunk（130,575 B raw / 34,901 B gzip）。而首屏真正需要的只有"外壳 + 当前这一页"。
+ *
+ * 拆开之后：初始 chunk 只剩外壳 + 当页；切页时才取那一块（本机 ~1 ms，
+ * 因为服务端发的是构建期 `.gz` 边车，见 `web/scripts/gzip-sidecars.mjs`）。
+ *
+ * ## 为什么每项自己包 `createComponent`
+ *
+ * 各页 props 形状不同（只有总览页与历史页要 `onGo`）。写成一张
+ * `Component<Record<string, unknown>>` 表，要么每个调用点多一次 `as`，
+ * 要么把 `onGo` 强塞给不接受的页面。放进各自的闭包里，类型是**自然**对的。
+ *
+ * ⚠ `AuthPage` **刻意不懒加载**：登录/初始化页正是"未登录时的首屏"，
+ * 懒加载等于给用户打开就要看的那一屏多加一次往返。
+ */
+type RouteCtx = { go: (id: PageId) => void }
+
+const ROUTES: Record<PageId, (ctx: RouteCtx) => Promise<() => unknown>> = {
+  dashboard: async (ctx) => {
+    const { DashboardPage } = await import('./pages/dashboard-page')
+    return () => createComponent(DashboardPage, { onGo: ctx.go })
+  },
+  accounts: async () => {
+    const { AccountsPage } = await import('./pages/accounts-page')
+    return () => createComponent(AccountsPage, {})
+  },
+  tasks: async () => {
+    const { TasksPage } = await import('./pages/tasks-page')
+    return () => createComponent(TasksPage, {})
+  },
+  exchange: async () => {
+    const { ExchangePage } = await import('./pages/exchange-page')
+    return () => createComponent(ExchangePage, {})
+  },
+  'live-room': async () => {
+    const { LiveRoomPage } = await import('./pages/live-room-page')
+    return () => createComponent(LiveRoomPage, {})
+  },
+  schedules: async () => {
+    const { SchedulesPage } = await import('./pages/schedules-page')
+    return () => createComponent(SchedulesPage, {})
+  },
+  pipelines: async () => {
+    const { PipelinesPage } = await import('./pages/pipelines-page')
+    return () => createComponent(PipelinesPage, {})
+  },
+  history: async (ctx) => {
+    const { HistoryPage } = await import('./pages/history-page')
+    return () => createComponent(HistoryPage, { onGo: ctx.go })
+  },
+  settings: async () => {
+    const { SettingsPage } = await import('./pages/settings-page')
+    return () => createComponent(SettingsPage, {})
+  },
+}
 
 export default () => {
   const page = ref<PageId>(parseHash(location.hash))
@@ -50,6 +103,76 @@ export default () => {
   const go = (id: PageId) => {
     location.hash = navItem(id).href
   }
+
+  // ── 动态路由的装载状态（见文件头 `ROUTES`）────────────────────────────
+  /**
+   * 当前页面的**渲染闭包**（装载完成后才有值）。
+   *
+   * 存"能建出这一页"的闭包而不是组件本身：`createComponent` 要在槽的 effect 里
+   * 被调用，才会得到正确的实例与 dispose 语义（与改之前那个三元链同一条口径）。
+   */
+  const pageRender = ref<(() => unknown) | null>(null)
+  /** 装载失败（chunk 404 / 网络断）。不静默停在上一个转圈上。 */
+  const pageFailed = ref(false)
+
+  /**
+   * 已装载过的页面：闭包复用，所以**切回来是同步的**（不再有一次往返）。
+   *
+   * 用普通 `Map` 而不是信号：它只是缓存，不参与渲染依赖。做成信号的话，
+   * 每次装载都会多触发一轮无关的更新。
+   */
+  const routeCache = new Map<PageId, () => unknown>()
+
+  const loadPage = async (id: PageId) => {
+    pageFailed.value = false
+
+    const hit = routeCache.get(id)
+    if (hit) {
+      pageRender.value = hit
+      return
+    }
+
+    // 先清空：切页时旧页必须立刻让位给"加载中"，否则会看到上一页的残影。
+    pageRender.value = null
+    try {
+      const render = await ROUTES[id]({ go })
+      routeCache.set(id, render)
+      // ⚠ 竞态：装载期间用户可能已经切走了。迟到的结果不能覆盖新页面 ——
+      // 少了这句的表现是"快速连点两下，最终停在先点的那页"。
+      if (page.value === id) pageRender.value = render
+    } catch (e) {
+      if (page.value === id) pageFailed.value = true
+      console.error('[路由] 页面装载失败', id, e)
+    }
+  }
+
+  /**
+   * 悬停/聚焦时预取。切页在缓存命中时是同步的 —— 预取把"点下去才等"
+   * 变成"手移过去就已经在路上"，而代价只是一次几毫秒的本地请求。
+   */
+  const prefetch = (id: PageId) => {
+    if (routeCache.has(id) || page.value === id) return
+    void ROUTES[id]({ go })
+      .then((render) => routeCache.set(id, render))
+      .catch(() => {
+        // 预取失败无所谓：真点下去时 `loadPage` 会再试一次并把错误显示出来
+      })
+  }
+
+  const pageLoading = () => (
+    <div class="flex h-64 items-center justify-center">
+      <span class="loading loading-lg text-primary" />
+    </div>
+  )
+
+  const pageLoadFailed = () => (
+    <div class="flex h-64 flex-col items-center justify-center gap-3">
+      <p class="text-sm opacity-70">页面加载失败，请检查网络后重试</p>
+      <button type="button" class="btn btn-sm btn-primary" onClick={() => void loadPage(page.value)}>
+        重试
+      </button>
+    </div>
+  )
 
   const loadStatus = async () => {
     backendFailed.value = false
@@ -106,6 +229,8 @@ export default () => {
   onMounted(() => {
     window.addEventListener('hashchange', onHashChange)
     void probeSession()
+    // 已经放行时（例如热重载后重挂）立刻装当前页；否则由下面那个 watch 负责。
+    if (authState.value === 'ready') void loadPage(page.value)
   })
 
   /**
@@ -115,7 +240,23 @@ export default () => {
    * 侧栏底部会一直停在"后端连接中断" —— 而用户明明刚登录成功。
    */
   watch(authState, (s) => {
-    if (s === 'ready') void loadStatus()
+    if (s === 'ready') {
+      void loadStatus()
+      // 放行的同时把当前页装上：未放行时整块外壳都不渲染，
+      // 提前装载只会在登录页上白下一份永远不会显示的 chunk。
+      void loadPage(page.value)
+    }
+  })
+
+  /**
+   * 切页就装载。
+   *
+   * 依赖放在 `page`（由 `onHashChange` 推进）而不是直接在 `go()` 里调 ——
+   * 这样浏览器前进/后退、手改 hash、以及页面里其它地方的 `location.hash = ...`
+   * 都走同一条路。少一处调用点，就少一处"某种方式切页不生效"。
+   */
+  watch(page, (id) => {
+    void loadPage(id)
   })
   onUnmounted(() => {
     window.removeEventListener('hashchange', onHashChange)
@@ -210,6 +351,9 @@ export default () => {
           class={`min-h-11 md:min-h-0 ${active ? 'menu-active' : ''}`}
           aria-current={active ? 'page' : undefined}
           onClick={() => go(id)}
+          // 预取：手移到导航上时那一块 chunk 就已经在下（见 `prefetch`）。
+          onMouseEnter={() => prefetch(id)}
+          onFocus={() => prefetch(id)}
         >
           <Icon class="size-[1.15em]" />
           {item.label}
@@ -311,31 +455,17 @@ export default () => {
         {/* pb-24 是为移动端 dock 让位；md 以上没有 dock，用普通内边距 */}
         {/*
           ⚠ 这一整串三元**不需要** `key`（也别加，加了编译器抛错）。
-          它是**一个动态槽**：`page.value` 一变，槽的 effect 重跑 ⇒ 走到的分支
-          `createComponent(那一页, …)` **新建实例**，旧实例的节点被移除同时 `disposeTree`
-          （连带它的 effect 与 `onUnmounted`）。所以"切走再切回来一定是干净的一页"
+          它是**一个动态槽**：槽读到的信号一变就重跑 ⇒ 走到的分支
+          `pageRender()` 里的 `createComponent(那一页, …)` **新建实例**，旧实例的节点被移除
+          同时 `disposeTree`（连带它的 effect 与 `onUnmounted`）。所以"切走再切回来一定是干净的一页"
           由 `setNodes` 保证，不靠 diff 时的那一次 key 比对。
+
+          槽现在读的是 `pageRender` / `pageFailed`（不再是 `page`）：切页时
+          `loadPage` 会先把它置 `null`（转圈），装载完再放上新的闭包 ——
+          两个信号都在这里被读到，所以"切页 → 转圈 → 换页"整条链都能推动槽重跑。
         */}
         <main class="flex-1 bg-base-200 p-4 pb-24 md:p-6 md:pb-6">
-          {page.value === 'dashboard' ? (
-            <DashboardPage onGo={go} />
-          ) : page.value === 'accounts' ? (
-            <AccountsPage />
-          ) : page.value === 'tasks' ? (
-            <TasksPage />
-          ) : page.value === 'exchange' ? (
-            <ExchangePage />
-          ) : page.value === 'live-room' ? (
-            <LiveRoomPage />
-          ) : page.value === 'schedules' ? (
-            <SchedulesPage />
-          ) : page.value === 'pipelines' ? (
-            <PipelinesPage />
-          ) : page.value === 'history' ? (
-            <HistoryPage onGo={go} />
-          ) : (
-            <SettingsPage />
-          )}
+          {pageRender.value ? pageRender.value() : pageFailed.value ? pageLoadFailed() : pageLoading()}
         </main>
 
         {/*
@@ -378,7 +508,7 @@ export default () => {
               <span class="text-primary">
                 <IconBrand class="size-5" />
               </span>
-              <span class="font-medium">mcloud-gost</span>
+              <span class="font-medium">mcloud</span>
             </span>
             <label
               for="nav-drawer"

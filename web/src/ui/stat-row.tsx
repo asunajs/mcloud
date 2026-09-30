@@ -10,11 +10,25 @@
  *    写出来就会凭空生成一条没人用的 CSS —— 见 `app.css` 的 exclude 注释。）
  */
 
+import { toneClass, type BadgeTone } from './badge'
+
 export interface StatItem {
   title: string
   value: string
   /** 补充说明（今日增量等）。 */
   desc?: string
+  /**
+   * 卡片右上角那枚状态徽章。
+   *
+   * 只给**语义色调**，类名由 `ui/badge.ts` 的查表给出 —— 调用方拼接类名的话
+   * Tailwind 扫不到那条字面量，样式会静默消失（§9.1①）。
+   */
+  badge?: StatBadge
+}
+
+export interface StatBadge {
+  text: string
+  tone: BadgeTone
 }
 
 export const StatRow = (props: { items: StatItem[] }) => {
@@ -24,7 +38,14 @@ export const StatRow = (props: { items: StatItem[] }) => {
     <div class="stats stats-vertical w-full bg-base-100 shadow-sm md:stats-horizontal">
       {props.items.map((item) => (
         <div key={item.title} class="stat">
-          <div class="stat-title">{item.title}</div>
+          {/* 标题与徽章同一行两端对齐：徽章是"这一格现在的处境"，
+              和标题一起在第一眼的高度上（数值在下一行）。 */}
+          <div class="stat-title flex items-center justify-between gap-2">
+            <span>{item.title}</span>
+            {item.badge ? (
+              <span class={`badge badge-sm ${toneClass(item.badge.tone)}`}>{item.badge.text}</span>
+            ) : null}
+          </div>
           <div class="stat-value text-2xl">{item.value}</div>
           {item.desc ? <div class="stat-desc">{item.desc}</div> : null}
         </div>

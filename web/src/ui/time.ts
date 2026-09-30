@@ -13,10 +13,49 @@ const SHORT: Intl.DateTimeFormatOptions = {
   minute: '2-digit',
 }
 
+const CLOCK: Intl.DateTimeFormatOptions = {
+  hour12: false,
+  hour: '2-digit',
+  minute: '2-digit',
+}
+
 /** 格式化毫秒级时间戳。0 / null / undefined ⇒ `—`。 */
 export const fmtEpochMs = (ms: number | null | undefined): string => {
   if (!ms) return '—'
   return new Date(ms).toLocaleString('zh-CN', SHORT)
+}
+
+/**
+ * 只要「时:分」。
+ *
+ * 给"**当下的**那个时间点"用（总览的「更新于 22:31」）—— 那种位置的读者只关心
+ * "几分钟前"，再带上月日反而要多扫一眼。跨天时它确实会含糊（23:59 → 00:01），
+ * 而这两个位置都紧挨着一份会自己变的数据，含糊的代价是零。
+ */
+export const fmtClock = (ms: number | null | undefined): string => {
+  if (!ms) return '—'
+  return new Date(ms).toLocaleTimeString('zh-CN', CLOCK)
+}
+
+/**
+ * 把一段**已经过去**的时长渲染成人能读的串（`2 小时 15 分`）。
+ *
+ * 与 [`fmtDuration`] 分工不同：那个是**单次运行**的耗时（毫秒级、要到秒），
+ * 这个是**进程活了多久**（小时/天级）。拿 `fmtDuration` 显示运行时间会出现
+ * "0分2秒"压在一个本该显示"3 天"的位置上。
+ */
+export const fmtUptime = (ms: number): string => {
+  // 负值 = 时钟回拨，或后端那格是 0/缺字段。**不装作 0 秒**：报 `—` 更诚实。
+  if (!Number.isFinite(ms) || ms < 0) return '—'
+  const mins = Math.floor(ms / 60_000)
+  if (mins < 1) return '不到 1 分钟'
+  if (mins < 60) return `${mins} 分`
+  const hours = Math.floor(mins / 60)
+  const restMins = mins % 60
+  if (hours < 24) return restMins > 0 ? `${hours} 小时 ${restMins} 分` : `${hours} 小时`
+  const days = Math.floor(hours / 24)
+  const restHours = hours % 24
+  return restHours > 0 ? `${days} 天 ${restHours} 小时` : `${days} 天`
 }
 
 /** 把耗时毫秒渲染成人能读的串。 */
