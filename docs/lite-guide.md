@@ -128,6 +128,9 @@ export default defineConfig({
   拿到**还带着 JSX 的**源码，把 JSX 折掉、保留 TS 语法，再交给 esbuild 去类型。
   所以**不需要 Vue、不需要 vue-jsx-vapor、不需要 `@vitejs/plugin-vue`**：
   实测一个零 Vue 工程 build 出单 chunk `index-*.js 8.31 kB`（gzip 3.76 kB，含两个组件 + 列表 + 表单）。
+  ⚠ 这个读数是 **2026-09-30 之前**量的；此后运行时自身又瘦了 **337 B gzip**
+  （诊断代码改成编译期剥离，见 [`lite-framework.md`](lite-framework.md) §5），
+  这个最小工程的数**没有复测** —— 按同样口径它应当落在 gzip ≈ 3.4 kB。
 * 插件默认只处理 `.tsx`，并跳过 `node_modules`；`include` 选项可以改。
 * `runtime` 决定**生成代码 import 谁**。推荐裸名 + alias：编译产物可能落在任意深度的源文件里，
   用相对路径会随文件位置解析到不同的地方。配了裸名，就要 §3 的 `paths` 与这里的 `alias` 都在。

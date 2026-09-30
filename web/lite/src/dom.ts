@@ -15,6 +15,7 @@
  * `<!--$-->` 注释锚点，我们连那个都省了）。
  */
 
+import { DEV } from './dev'
 import { type Effect, newEffect } from './signal'
 
 /** 渲染结果统一成节点数组：**不引入任何包装元素**，所以 CSS 选择器与布局与原来逐像素一致。 */
@@ -102,14 +103,21 @@ let warnedDetachedAnchor = false
  */
 let inserting = 0
 
-export function insert(parent: Node, nodes: Nodes, anchor: Node | null = null, where = '?'): void {
+export function insert(parent: Node, nodes: Nodes, anchor: Node | null = null): void {
   let at = anchor
   if (at && at.parentNode !== parent) {
-    if (!warnedDetachedAnchor) {
+    // ⚠ 告警只在**开发构建**里编译进去（`DEV` 会在 build 时被折成 `false`，
+    // 整块连同那几行长文案与抓栈一起被压缩器删掉，实测 gzip −239 B）。
+    // 退化成追加这件事本身**不**受 DEV 影响 —— 它是行为，不是诊断。
+    //
+    // ⚠ 这里**故意不带**"调用方标签"参数（曾经有个 `where`）：四个调用点各传一个
+    // 字符串（`setNodes:text` / `createFor:batch` …），而它们只在告警里用得到 ——
+    // 生产构建折掉告警后，那几个字符串**照样留在产物里**（压缩器没法证明没人再读）。
+    // 它们想回答的"谁调的"由下面的 `stack` 直接给出，且更精确（文件:行号）。
+    if (DEV && !warnedDetachedAnchor) {
       warnedDetachedAnchor = true
       // 只警告一次：真出问题时控制台不至于被刷爆
       console.warn('[lite] 锚点已不在父节点内，本次退化为追加到末尾', {
-        where, // 谁调用的：setNodes（模板槽）/ createFor（列表 cursor）—— 别再靠猜
         anchor: at.nodeType === 8 ? '<!--占位注释-->' : at.nodeType === 3 ? `#text(${JSON.stringify(at.nodeValue?.slice(0, 12))})` : at.nodeName,
         anchorParent: at.parentNode?.nodeName ?? null,
         parent,
@@ -314,12 +322,12 @@ export function setNodes(parent: Node, fn: () => unknown, anchor: Node | null = 
       // **绕过了锚点护栏** —— 锚点脱开时同样抛 `… is not a child of this node`
       // （文本槽是最容易脱开的一类：占位就是文本节点本身）。统一走 insert，
       // 顺带把 flushSlots/flushMounted 也带上。
-      insert(parent, cur, anchor, 'setNodes:text')
+      insert(parent, cur, anchor)
       return
     }
     remove(cur)
     cur = createNodes(v)
-    insert(parent, cur, anchor, 'setNodes')
+    insert(parent, cur, anchor)
     if (track) track.nodes = cur
   })
   // 归属登记：`parent` 被移除时这个 effect 一起销毁（否则它会带着死锚点继续重跑）

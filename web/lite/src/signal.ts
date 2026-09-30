@@ -102,7 +102,10 @@ export class Effect {
     if (this.disposed) return
     if (nesting >= MAX_NESTING) {
       // 抛出去之前先把状态还原：`active`/`nesting` 由 finally 管，但这条 fn 不该再跑
-      throw new Error('[lite] 循环更新：effect 在自己引发的更新链里被反复触发（超过 ' + MAX_NESTING + ' 层），已中断。检查这两个信号是不是互相写对方。')
+      // ⚠ 文案刻意**短**：这是生产路径上的守卫（不能像诊断那样被 DEV 折掉），
+      // 而长文案是直接进产物的字节。要点保住：是谁出的问题（循环更新）+ 往哪查
+      // （信号互相写）+ 上限值（`MAX_NESTING`，拼进去便于对读数）。
+      throw new Error('[lite] 循环更新：effect 复入超过 ' + MAX_NESTING + ' 层，已中断（检查两个信号是否互相写）')
     }
     for (const d of this.deps) d.subs.delete(this)
     this.deps.clear()
@@ -219,7 +222,7 @@ function drain(): void {
   while (pending.size) {
     if (++round > MAX_NESTING) {
       pending.clear()
-      throw new Error('[lite] 循环更新：batch 队列排不空（超过 ' + MAX_NESTING + ' 轮），检查信号之间是不是互相写对方')
+      throw new Error('[lite] 循环更新：batch 队列排不空（超过 ' + MAX_NESTING + ' 轮，检查信号是否互相写）')
     }
     const q = [...pending]
     pending.clear()

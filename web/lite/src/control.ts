@@ -68,7 +68,7 @@ export function createFor<T>(
     let runAnchor: Node | null = null
     const flush = () => {
       // 倒序攒的，就倒着取出来 ⇒ 实际插入顺序是**正序**（见上面那段注释）
-      for (let j = run.length - 1; j >= 0; j--) insert(parent, run[j], runAnchor, 'createFor:batch')
+      for (let j = run.length - 1; j >= 0; j--) insert(parent, run[j], runAnchor)
       run = []
     }
     for (let i = items.length - 1; i >= 0; i--) {
@@ -113,7 +113,7 @@ export function createFor<T>(
       } else {
         if (run.length) flush()
         const last = row.nodes[row.nodes.length - 1]
-        if (!last || last.nextSibling !== cursor) insert(parent, row.nodes, cursor, 'createFor:row')
+        if (!last || last.nextSibling !== cursor) insert(parent, row.nodes, cursor)
       }
       cursor = row.nodes[0] ?? cursor
     }
