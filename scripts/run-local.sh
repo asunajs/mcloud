@@ -4,7 +4,7 @@
 #
 # # 为什么需要这个脚本
 #
-# 工作区在外置硬盘上（`/Users/catlair/mobile`，USB 挂载的 APFS 卷）。
+# 工作区在**外置盘**上（USB 挂载的 APFS 卷这类可移除宗卷）。
 # macOS 对**可移除宗卷**有隐私保护（TCC，服务名
 # `kTCCServiceSystemPolicyRemovableVolumes`）：任何可执行文件首次访问
 # 该卷上的文件，系统就弹一次「"mcloud-server" 想访问可移除宗卷上的文件」。
@@ -56,7 +56,7 @@ mkdir -p "$RUN_DIR"
 # ⓪ 守卫：**绝不**与 launchd 托管的实例抢 3000 端口。
 #
 # 这是血泪教训：本脚本早先没有这道守卫，于是在 launchd 代理
-# （`~/Library/LaunchAgents/com.catlair.mcloud-webui.plist`，`KeepAlive: true`）
+# （`~/Library/LaunchAgents/<label>.plist`，`KeepAlive: true`）
 # 占着 3000 时又起了一个实例。结果是**崩溃重启循环**：
 # launchd 那份绑不上端口就退出，KeepAlive 立刻重拉，如此往复 ——
 # 每 20 秒（launchd 的重启节流）就会新起一个进程，
@@ -65,9 +65,14 @@ mkdir -p "$RUN_DIR"
 #
 # 所以：有托管实例在跑就直接退出，把选择权交回用户。
 # 要用本脚本（内置盘、不弹框）跑，先手动 `launchctl bootout` 那个代理。
-if launchctl list 2>/dev/null | grep -q "com.catlair.mcloud-webui"; then
-  cat >&2 <<'EOF'
-✗ 检测到 launchd 代理 com.catlair.mcloud-webui 已加载。
+#
+# ⚠ 代理的 label 因机器而异（形如 `com.<用户名>.mcloud-webui`），这里**按关键词
+#   从 launchctl 里发现**它 —— 仓库里不写死任何人的用户名。要覆盖就设
+#   `MCLOUD_LAUNCHD_LABEL`。
+LAUNCHD_LABEL="${MCLOUD_LAUNCHD_LABEL:-$(launchctl list 2>/dev/null | awk '$3 ~ /mcloud-webui/ { print $3; exit }')}"
+if [[ -n "$LAUNCHD_LABEL" ]]; then
+  cat >&2 <<EOF
+✗ 检测到 launchd 代理 $LAUNCHD_LABEL 已加载。
 
   它在跑 <仓库>/target/debug/mcloud-server（外置盘），并带 KeepAlive。
   本脚本若同时启动，两份会**抢 3000 端口**，失败的那份被 KeepAlive
@@ -79,9 +84,9 @@ if launchctl list 2>/dev/null | grep -q "com.catlair.mcloud-webui"; then
        什么都不用做，WebUI 已在 http://127.0.0.1:3000
 
   B. 改用本脚本（内置盘，连重编译后的弹窗也免掉）：
-       launchctl bootout gui/$(id -u)/com.catlair.mcloud-webui
-       # 想恢复托管：launchctl bootstrap gui/$(id -u) \
-       #   ~/Library/LaunchAgents/com.catlair.mcloud-webui.plist
+       launchctl bootout gui/$(id -u)/$LAUNCHD_LABEL
+       # 想恢复托管：launchctl bootstrap gui/$(id -u) \\
+       #   ~/Library/LaunchAgents/$LAUNCHD_LABEL.plist
 EOF
   exit 1
 fi

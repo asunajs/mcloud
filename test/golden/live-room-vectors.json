@@ -8,11 +8,11 @@
     "originalTs": "mcloud-sign: packages/core/src/live-room/{proto,kouling,xiaohongshu}.ts",
     "originalSrc": {
       "live-room/kouling.ts": {
-        "path": "/Users/catlair/Documents/workspace/mcloud-sign/packages/core/src/live-room/kouling.ts",
+        "path": "mcloud-sign/packages/core/src/live-room/kouling.ts",
         "sha256": "f9f01c759cc540ef989e5abd30ff16932aa72f903dec2f7811c42ed059bb9552"
       },
       "live-room/xiaohongshu.ts": {
-        "path": "/Users/catlair/Documents/workspace/mcloud-sign/packages/core/src/live-room/xiaohongshu.ts",
+        "path": "mcloud-sign/packages/core/src/live-room/xiaohongshu.ts",
         "sha256": "d7b9483ebb5eed9c98fcfd957fd757ed9c0cc731fc8a771c92b0dd4cbe1af513"
       }
     },
