@@ -1,15 +1,17 @@
 //! 红包派对任务层的测试。
 //!
-//! 钉四类东西：
+//! 钉六类东西（对应派活时点名的六条）：
 //!
-//! * **会话顺序**：先 GET `querySpecToken`（targetSourceId=001216）→ 再 POST
-//!   `user/tokenValidate` → 之后每条业务请求的 `token` 头都是换回来的那个；
-//!   换票那一枪的 `token` 头是**空串**（签名也按空串算）。
-//! * **只读这件事**：这一趟正好 4 枪，且路径逐条钉死 —— 写入侧那 7 条今天没接，
-//!   测试就把「没接」钉住（接上时这一条必须一起改）。
-//! * **读数怎么念**：未知状态码单独成档、`userStatus` 缺失按未完成、
-//!   空表不念成「没事做」、余额的「没读成」与「上游没给数」分清。
-//! * **凭据不进台账**：`details` 里不许出现 token / SSO 票。
+//! 1. 会话顺序：querySpecToken 必须在 tokenValidate 之前，换票那一枪的 token
+//!    头是空串，之后每条业务请求都带换回来的新 token；
+//! 2. 只读盘点路径：全员已完成 / 暂不可做时，一个写请求都不发；
+//! 3. 写入判定：status=1 不发那一条写；读到没见过的码计入 Unknown 且不发；
+//!    （缺 userStatus 按旧 TS 的 ?? 0 当未完成 —— 单独一条钉住这个选择）
+//! 4. 空 token / 上游 status 非 200 ⇒ 报错，不静默；
+//! 5. summary_line 的成功与失败两态；
+//! 6. 取消：中途取消 ⇒ Error::Cancelled，且之后一枪都不发。
+//!
+//! 另外两条：同一个 taskCode 一次运行最多写一次；账号开关关掉 ⇒ 一枪都不发。
 
 use std::sync::{Arc, Mutex};
 
@@ -22,28 +24,81 @@ use mcloud_core::{
     HttpResponse, RunEvent,
 };
 
-/// 一枪的答复：给个 body，或者**打挂**（网络层错误）。
+// ══════════════════════ 假上游的固定答复 ══════════════════════
+
+const SPEC_BODY: &str = r#"{"code":0,"msg":"成功","result":"SSO-1"}"#;
+const VALIDATE_BODY: &str = r#"{"header":{"status":200},"data":{"token":"CPT"}}"#;
+const BALANCE_BODY: &str =
+    r#"{"header":{"status":200},"data":{"info":{"canAmount":1234,"totalAmount":5600}}}"#;
+const TOAST_BODY: &str = r#"{"header":{"status":200},"data":{"lastUserPrize":{"prizeName":"1元话费","prizeAmount":100}}}"#;
+const WRITE_OK: &str = r#"{"header":{"status":200},"data":{"status":1}}"#;
+const EMPTY_OK: &str = r#"{"header":{"status":200},"data":{}}"#;
+
+/// 全员非「未完成」：签到已完成、三条任务分别落在 1 / 3 / 4 ⇒ 一个写都不该发。
+const TASKS_READ_ONLY: &str = r#"{
+  "header": {"status": 200},
+  "data": {
+    "configTaskSignList": [{"isToday": 1, "status": 1, "signAmount": 30}],
+    "configTaskNoviceList": [{"id": 11, "taskCode": "NOVICE_2", "taskName": "看视频", "userStatus": 1}],
+    "configTaskDailyList": [{"id": 21, "taskCode": "DAILY_1", "taskName": "云机使用", "userStatus": 3}],
+    "configTaskMonthlyList": [{"id": 31, "taskCode": "MONTHLY_4", "taskName": "体验一下", "userStatus": 4}]
+  }
+}"#;
+
+/// 三条正好覆盖三种判定：status=1 不许写、status=99 归未知不许写、status=0 该写。
+const TASKS_GATING: &str = r#"{
+  "header": {"status": 200},
+  "data": {
+    "configTaskSignList": [{"isToday": 1, "status": 1}],
+    "configTaskNoviceList": [{"id": 11, "taskCode": "NOVICE_2", "taskName": "看视频", "userStatus": 1}],
+    "configTaskDailyList": [{"id": 21, "taskCode": "DAILY_9", "taskName": "没见过的码", "userStatus": 99}],
+    "configTaskMonthlyList": [{"id": 31, "taskCode": "MONTHLY_4", "taskName": "直接完成", "userStatus": 0}]
+  }
+}"#;
+
+/// 缺 userStatus 那一格（上游回了 null）—— 旧 TS 的 ?? 0 会当成未完成。
+const TASKS_MISSING_STATUS: &str = r#"{
+  "header": {"status": 200},
+  "data": {
+    "configTaskSignList": [{"isToday": 1, "status": 1}],
+    "configTaskNoviceList": [],
+    "configTaskDailyList": [],
+    "configTaskMonthlyList": [{"id": 31, "taskCode": "MONTHLY_4", "taskName": "缺状态", "userStatus": null}]
+  }
+}"#;
+
+/// 同一个 taskCode 列两遍（都是 status=0）—— 同一趟最多只该写一次。
+const TASKS_DUPLICATE_CODE: &str = r#"{
+  "header": {"status": 200},
+  "data": {
+    "configTaskSignList": [{"isToday": 1, "status": 1}],
+    "configTaskNoviceList": [
+      {"id": 11, "taskCode": "NOVICE_2", "taskName": "看视频", "userStatus": 0},
+      {"id": 12, "taskCode": "NOVICE_2", "taskName": "看视频（重复项）", "userStatus": 0}
+    ],
+    "configTaskDailyList": [],
+    "configTaskMonthlyList": []
+  }
+}"#;
+
+// ══════════════════════ 假 HTTP 客户端（按路径分派） ══════════════════════
+
+/// 一枪的答复。
 #[derive(Clone)]
 enum Reply {
     Body(String),
+    /// 网络层打挂（不是业务码失败）。
     Fail,
 }
 
-/// 按顺序答复的假 HTTP 客户端（用尽后重复最后一个）。
-struct Scripted {
+type Handler = Box<dyn Fn(&HttpRequest) -> Reply + Send + Sync>;
+
+struct Routed {
     seen: Mutex<Vec<HttpRequest>>,
-    replies: Mutex<Vec<Reply>>,
+    handler: Handler,
 }
 
-impl Scripted {
-    fn new(replies: Vec<Reply>) -> Self {
-        Self {
-            seen: Mutex::new(Vec::new()),
-            // 反转，便于从队尾取
-            replies: Mutex::new(replies.into_iter().rev().collect()),
-        }
-    }
-
+impl Routed {
     fn requests(&self) -> Vec<HttpRequest> {
         self.seen.lock().unwrap().clone()
     }
@@ -54,18 +109,10 @@ impl Scripted {
 }
 
 #[async_trait]
-impl HttpClient for Scripted {
+impl HttpClient for Routed {
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse> {
-        self.seen.lock().unwrap().push(req);
-        let reply = {
-            let mut r = self.replies.lock().unwrap();
-            if r.len() > 1 {
-                r.pop().unwrap()
-            } else {
-                r.last().cloned().unwrap_or(Reply::Body("{}".into()))
-            }
-        };
-        match reply {
+        self.seen.lock().unwrap().push(req.clone());
+        match (self.handler)(&req) {
             Reply::Body(body) => Ok(HttpResponse {
                 status: 200,
                 body,
@@ -76,7 +123,37 @@ impl HttpClient for Scripted {
     }
 }
 
+/// 按路径分派：除任务表外都用固定答复。
+///
+/// ⚠ 没列到的路径回一个合法空信封 —— 测试若指望某个端点有读数，
+/// 会在断言处红，而不是在这里被静默吞掉。
+fn route(req: &HttpRequest, tasks_body: &str) -> Reply {
+    let url = &req.url;
+    if url.contains("querySpecToken") {
+        Reply::Body(SPEC_BODY.to_string())
+    } else if url.ends_with("/user/tokenValidate") {
+        Reply::Body(VALIDATE_BODY.to_string())
+    } else if url.ends_with("/redpacket/configTaskLoginList") {
+        Reply::Body(tasks_body.to_string())
+    } else if url.ends_with("/redpacket/userAccountInfo") {
+        Reply::Body(BALANCE_BODY.to_string())
+    } else if url.ends_with("/redpacket/userToastInfo") {
+        Reply::Body(TOAST_BODY.to_string())
+    } else if url.ends_with("/redpacket/userCompleteTask") || url.ends_with("/redpacket/userSign") {
+        Reply::Body(WRITE_OK.to_string())
+    } else {
+        Reply::Body(EMPTY_OK.to_string())
+    }
+}
+
+fn handler_for(tasks_body: &'static str) -> Handler {
+    Box::new(move |req| route(req, tasks_body))
+}
+
+// ══════════════════════ 假 ctx ══════════════════════
+
 struct FixedClock(i64);
+
 impl Clock for FixedClock {
     fn now_ms(&self) -> i64 {
         self.0
@@ -89,13 +166,12 @@ struct CollectSink {
 }
 
 impl CollectSink {
-    /// 取回所有 `Details` 事件的 payload。
-    fn details(&self) -> Vec<serde_json::Value> {
+    fn details(&self) -> Vec<Value> {
         self.events
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|e| match e {
+            .filter_map(|event| match event {
                 RunEvent::Details { payload, .. } => Some(payload.clone()),
                 _ => None,
             })
@@ -109,7 +185,7 @@ impl EventSink for CollectSink {
     }
 }
 
-fn account() -> Account {
+fn account_with(settings: AccountSettings) -> Account {
     Account {
         id: mcloud_core::AccountId::new("19****01"),
         nickname: None,
@@ -123,23 +199,29 @@ fn account() -> Account {
         device_id: DeviceId("DEV+1/base=".into()),
         pc_platform: None,
         user_domain_id: None,
-        settings: AccountSettings::default(),
+        settings,
     }
 }
 
-/// 一个只带 `http` 的 ctx，外加能回读的 sink。**时钟是入参** ——
-/// 活动期是判据的一部分，测试必须能把它挪到任意时刻。
-fn ctx_with_at(replies: Vec<Reply>, now_ms: i64) -> (TaskContext, Arc<Scripted>, Arc<CollectSink>) {
-    let http = Arc::new(Scripted::new(replies));
+fn ctx_with_at(
+    handler: Handler,
+    settings: AccountSettings,
+    now_ms: i64,
+    cancel: CancelToken,
+) -> (TaskContext, Arc<Routed>, Arc<CollectSink>) {
+    let http = Arc::new(Routed {
+        seen: Mutex::new(Vec::new()),
+        handler,
+    });
     let sink = Arc::new(CollectSink::default());
     let ctx = TaskContext {
-        account: account(),
+        account: account_with(settings),
         http: http.clone(),
         store: Arc::new(NoStore),
         clock: Arc::new(FixedClock(now_ms)),
         sink: sink.clone(),
         run_id: mcloud_core::RunId(1),
-        cancel: CancelToken::new(),
+        cancel,
         chain_cancel: None,
         artifacts: mcloud_engine::ArtifactRecorder::new(
             Arc::new(mcloud_engine::ArtifactLedger::new()),
@@ -153,11 +235,445 @@ fn ctx_with_at(replies: Vec<Reply>, now_ms: i64) -> (TaskContext, Arc<Scripted>,
     };
     (ctx, http, sink)
 }
-/// 这一条链**不该碰 store** —— 一碰就报错的替身。
+
+/// 零等待的任务：三处 sleep 全关，测试不会真等 15 秒。
+fn fast_task() -> CloudPhoneRedpackTask {
+    CloudPhoneRedpackTask {
+        plan: RedpackPlan {
+            browse_wait_ms: 0,
+            topic_attempts: 3,
+            topic_interval_ms: 0,
+            install_poll_attempts: 3,
+            install_poll_interval_ms: 0,
+        },
+    }
+}
+
+fn header(req: &HttpRequest, name: &str) -> Option<String> {
+    req.headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.clone())
+}
+
+fn body_of(req: &HttpRequest) -> Value {
+    serde_json::from_slice(req.body.as_deref().expect("这一族每条都带体")).unwrap()
+}
+
+fn count_path(reqs: &[HttpRequest], suffix: &str) -> usize {
+    reqs.iter().filter(|req| req.url.ends_with(suffix)).count()
+}
+
+// ══════════════════════ 1. 会话顺序 ══════════════════════
+
+#[tokio::test]
+async fn session_orders_the_login_and_reuses_the_new_token() {
+    let (ctx, http, _) = ctx_with_at(
+        handler_for(TASKS_READ_ONLY),
+        AccountSettings::default(),
+        1_700_000_000_000,
+        CancelToken::new(),
+    );
+    let out = fast_task()
+        .run(&ctx, &json!({}))
+        .await
+        .expect("只读盘点不该 Err");
+    assert!(matches!(out, TaskOutcome::Success { .. }), "实得：{out:?}");
+
+    let reqs = http.requests();
+    assert!(reqs.len() >= 4, "至少换票两枪 + 任务表 + 余额");
+    assert!(
+        reqs[0]
+            .url
+            .contains("/ycloud/api/cloud/userdomain/v2/querySpecToken"),
+        "① 是 querySpecToken：{}",
+        reqs[0].url
+    );
+    assert!(reqs[0].url.contains("targetSourceId=001216"));
+    assert!(
+        reqs[1].url.ends_with("/user/tokenValidate"),
+        "② 是 tokenValidate"
+    );
+
+    // 换票那一枪：token 头是空串，SSO 票在 body 里。
+    assert_eq!(header(&reqs[1], "token").as_deref(), Some(""));
+    let body = body_of(&reqs[1]);
+    assert_eq!(body["token"], json!("SSO-1"));
+    assert_eq!(body["deviceId"], json!("DEV+1/base="));
+
+    // ③ 之后每条业务请求都带换回来的新 token。
+    for req in &reqs[2..] {
+        assert_eq!(
+            header(req, "token").as_deref(),
+            Some("CPT"),
+            "{} 没带新 token",
+            req.url
+        );
+    }
+}
+
+// ══════════════════════ 2. 只读盘点路径 ══════════════════════
+
+#[tokio::test]
+async fn the_inventory_path_sends_no_write_request() {
+    let (ctx, http, sink) = ctx_with_at(
+        handler_for(TASKS_READ_ONLY),
+        AccountSettings::default(),
+        0,
+        CancelToken::new(),
+    );
+    let out = fast_task().run(&ctx, &json!({})).await.expect("不该 Err");
+    assert!(matches!(out, TaskOutcome::Success { .. }));
+
+    for req in http.requests() {
+        for forbidden in [
+            "userSign",
+            "userCompleteTask",
+            "userBrowse",
+            "userTopicAnswer",
+            "apkInstall",
+            "userInstallApp",
+            "getRcsToken",
+        ] {
+            assert!(
+                !req.url.contains(forbidden),
+                "只读盘点不该出现写路径 {forbidden}：{}",
+                req.url
+            );
+        }
+    }
+
+    let details = sink.details();
+    assert_eq!(details.len(), 1, "只自报一次");
+    let d = &details[0];
+    assert_eq!(d["kind"], "cloud-phone-redpack");
+    assert_eq!(d["verdict"], "done");
+    assert_eq!(d["counts"]["total"], 3);
+    assert_eq!(d["counts"]["done"], 1);
+    assert_eq!(d["counts"]["blocked"], 2);
+    assert_eq!(d["counts"]["todo"], 0);
+    assert_eq!(d["counts"]["unknown"], 0);
+    assert_eq!(d["writes"].as_array().unwrap().len(), 0);
+    assert_eq!(d["balanceBefore"]["canAmount"], 1234);
+}
+
+// ══════════════════════ 3. 写入判定 ══════════════════════
+
+#[tokio::test]
+async fn status_one_and_unknown_codes_are_never_written() {
+    let (ctx, http, sink) = ctx_with_at(
+        handler_for(TASKS_GATING),
+        AccountSettings::default(),
+        0,
+        CancelToken::new(),
+    );
+    let out = fast_task().run(&ctx, &json!({})).await.expect("不该 Err");
+    assert!(matches!(out, TaskOutcome::Success { .. }), "实得：{out:?}");
+
+    let reqs = http.requests();
+    assert_eq!(
+        count_path(&reqs, "/redpacket/userCompleteTask"),
+        1,
+        "只有 status=0 的那条该写"
+    );
+    let completes: Vec<&HttpRequest> = reqs
+        .iter()
+        .filter(|req| req.url.ends_with("/redpacket/userCompleteTask"))
+        .collect();
+    assert_eq!(body_of(completes[0])["taskId"], json!(31));
+    assert_eq!(
+        count_path(&reqs, "/redpacket/userBrowse"),
+        0,
+        "status=1 的浏览任务不该被写"
+    );
+
+    let details = sink.details();
+    let d = &details[0];
+    assert_eq!(d["counts"]["todo"], 1);
+    assert_eq!(d["counts"]["done"], 1, "status=1 那一条算已完成");
+    assert_eq!(d["counts"]["unknown"], 1, "没见过的码单独一档");
+    assert_eq!(d["failures"].as_array().unwrap().len(), 0);
+
+    let tasks = d["tasks"].as_array().unwrap();
+    let unknown = tasks
+        .iter()
+        .find(|task| task["taskCode"] == "DAILY_9")
+        .expect("DAILY_9 必须在明细里");
+    assert_eq!(unknown["state"], "unknown");
+    assert_eq!(unknown["handled"], false);
+    let done = tasks
+        .iter()
+        .find(|task| task["taskCode"] == "NOVICE_2")
+        .expect("NOVICE_2 必须在明细里");
+    assert_eq!(done["state"], "done");
+    assert_eq!(done["handled"], false);
+}
+
+/// ⚠ 这条钉的是一个**刻意选择**：缺 userStatus 按旧 TS 的 Number(userStatus ?? 0)
+/// 当未完成（会去写），与"读到没见过的码 ⇒ 不写"不是一回事。
+#[tokio::test]
+async fn a_missing_user_status_is_treated_as_todo_like_the_old_ts() {
+    let (ctx, http, sink) = ctx_with_at(
+        handler_for(TASKS_MISSING_STATUS),
+        AccountSettings::default(),
+        0,
+        CancelToken::new(),
+    );
+    let _ = fast_task().run(&ctx, &json!({})).await.expect("不该 Err");
+
+    assert_eq!(
+        count_path(&http.requests(), "/redpacket/userCompleteTask"),
+        1,
+        "缺格 ⇒ 旧 TS 的 ?? 0 ⇒ 未完成 ⇒ 去写"
+    );
+    let d = &sink.details()[0];
+    assert_eq!(d["counts"]["todo"], 1);
+    assert_eq!(d["counts"]["unknown"], 0);
+    assert_eq!(d["tasks"][0]["state"], "todo");
+    assert_eq!(d["tasks"][0]["userStatus"], Value::Null);
+}
+
+/// 同一个 taskCode 列两遍 ⇒ 一趟最多写一次（同一趟的第二条只记一句"跳过"）。
+#[tokio::test]
+async fn the_same_task_code_is_written_at_most_once_per_run() {
+    let (ctx, http, sink) = ctx_with_at(
+        handler_for(TASKS_DUPLICATE_CODE),
+        AccountSettings::default(),
+        0,
+        CancelToken::new(),
+    );
+    let _ = fast_task().run(&ctx, &json!({})).await.expect("不该 Err");
+
+    let reqs = http.requests();
+    assert_eq!(
+        count_path(&reqs, "/redpacket/userCompleteTask"),
+        1,
+        "两遍同码只写一次"
+    );
+    assert_eq!(count_path(&reqs, "/redpacket/userBrowse"), 1);
+    let d = &sink.details()[0];
+    let tasks = d["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 2);
+    assert!(
+        tasks[1]["note"].as_str().unwrap().contains("跳过"),
+        "{tasks:?}"
+    );
+}
+
+// ══════════════════════ 4. 报错不静默 ══════════════════════
+
+#[tokio::test]
+async fn an_empty_token_fails_loudly_and_stops() {
+    let handler: Handler = Box::new(|req| {
+        if req.url.ends_with("/user/tokenValidate") {
+            Reply::Body(r#"{"header":{"status":200},"data":{"token":""}}"#.to_string())
+        } else {
+            route(req, TASKS_READ_ONLY)
+        }
+    });
+    let (ctx, http, sink) = ctx_with_at(handler, AccountSettings::default(), 0, CancelToken::new());
+    let err = fast_task()
+        .run(&ctx, &json!({}))
+        .await
+        .expect_err("空 token 必须报错，不能静默");
+    assert!(err.to_string().contains("token"), "实得：{err}");
+    assert_eq!(http.count(), 2, "换票失败 ⇒ 业务请求一条都不发");
+    assert_eq!(sink.details()[0]["verdict"], "failed");
+}
+
+#[tokio::test]
+async fn a_non_200_login_status_fails_loudly() {
+    let handler: Handler = Box::new(|req| {
+        if req.url.ends_with("/user/tokenValidate") {
+            Reply::Body(r#"{"header":{"status":401,"errMsg":"票过期"}}"#.to_string())
+        } else {
+            route(req, TASKS_READ_ONLY)
+        }
+    });
+    let (ctx, http, _) = ctx_with_at(handler, AccountSettings::default(), 0, CancelToken::new());
+    let err = fast_task()
+        .run(&ctx, &json!({}))
+        .await
+        .expect_err("非 200 必须报错");
+    let text = err.to_string();
+    assert!(text.contains("401"), "实得：{text}");
+    assert!(text.contains("票过期"), "实得：{text}");
+    assert_eq!(http.count(), 2);
+}
+
+#[tokio::test]
+async fn a_non_200_task_list_is_fatal() {
+    let handler: Handler = Box::new(|req| {
+        if req.url.ends_with("/redpacket/configTaskLoginList") {
+            Reply::Body(r#"{"header":{"status":500,"errMsg":"系统繁忙"}}"#.to_string())
+        } else {
+            route(req, TASKS_READ_ONLY)
+        }
+    });
+    let (ctx, http, sink) = ctx_with_at(handler, AccountSettings::default(), 0, CancelToken::new());
+    let err = fast_task()
+        .run(&ctx, &json!({}))
+        .await
+        .expect_err("任务表是致命读");
+    let text = err.to_string();
+    assert!(text.contains("500"), "实得：{text}");
+    assert!(text.contains("系统繁忙"), "实得：{text}");
+    assert_eq!(http.count(), 3, "任务表挂了就不该再往后走");
+    assert_eq!(sink.details()[0]["verdict"], "failed");
+}
+
+#[tokio::test]
+async fn a_network_error_on_the_task_list_is_fatal() {
+    let handler: Handler = Box::new(|req| {
+        if req.url.ends_with("/redpacket/configTaskLoginList") {
+            Reply::Fail
+        } else {
+            route(req, TASKS_READ_ONLY)
+        }
+    });
+    let (ctx, _, _) = ctx_with_at(handler, AccountSettings::default(), 0, CancelToken::new());
+    let err = fast_task()
+        .run(&ctx, &json!({}))
+        .await
+        .expect_err("网络挂也算失败");
+    assert!(err.to_string().contains("网络断了"), "实得：{err}");
+}
+
+// ══════════════════════ 5. summary_line ══════════════════════
+
+fn entry(code: &str, state: RedpackTaskState) -> RedpackTaskEntry {
+    RedpackTaskEntry {
+        task_code: code.to_string(),
+        state,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn summary_line_spells_out_the_three_counts() {
+    let board = RedpackBoard {
+        tasks: vec![
+            entry("A", RedpackTaskState::Todo),
+            entry("B", RedpackTaskState::Done),
+            entry("C", RedpackTaskState::Unknown),
+        ],
+        ..Default::default()
+    };
+    let result = RedpackResult {
+        verdict: RedpackVerdict::Done,
+        board,
+        error: String::new(),
+    };
+    let line = result.summary_line();
+    assert!(line.contains("未完成 1"), "实得：{line}");
+    assert!(line.contains("已完成 1"), "实得：{line}");
+    assert!(line.contains("未知 1"), "实得：{line}");
+    assert!(matches!(result.task_outcome(), TaskOutcome::Success { .. }));
+}
+
+#[test]
+fn summary_line_of_a_failure_says_which_step_failed() {
+    let result = RedpackResult {
+        verdict: RedpackVerdict::Failed,
+        board: RedpackBoard::default(),
+        error: "MONTHLY_4：userCompleteTask 没成功（上游错误 [500]：系统繁忙）".to_string(),
+    };
+    let line = result.summary_line();
+    assert!(line.contains("失败"), "实得：{line}");
+    assert!(line.contains("MONTHLY_4"), "实得：{line}");
+    assert!(line.contains("未完成 0"), "失败也要带上计数：{line}");
+    assert!(matches!(result.task_outcome(), TaskOutcome::Failed { .. }));
+}
+
+#[test]
+fn the_zero_verdict_is_failed_not_done() {
+    // 零值结果绝不能被念成"一切正常"。
+    assert_eq!(RedpackVerdict::default(), RedpackVerdict::Failed);
+    let zero = RedpackResult::default().summary_line();
+    assert!(zero.contains("失败"), "实得：{zero}");
+    assert!(matches!(
+        RedpackResult::default().task_outcome(),
+        TaskOutcome::Failed { .. }
+    ));
+}
+
+// ══════════════════════ 6. 取消 ══════════════════════
+
+#[tokio::test]
+async fn cancelling_mid_run_stops_before_the_next_request() {
+    let cancel = CancelToken::new();
+    let trip = cancel.clone();
+    // 第 ① 枪就把令牌打掉 ⇒ 换票两枪会走完，任务表那条不该发。
+    let handler: Handler = Box::new(move |req| {
+        if req.url.contains("querySpecToken") {
+            trip.cancel();
+        }
+        route(req, TASKS_READ_ONLY)
+    });
+    let (ctx, http, _) = ctx_with_at(handler, AccountSettings::default(), 0, cancel);
+    let err = fast_task()
+        .run(&ctx, &json!({}))
+        .await
+        .expect_err("中途取消必须 Err(Cancelled)");
+    assert!(err.is_cancelled(), "实得：{err:?}");
+    assert_eq!(http.count(), 2, "取消后一枪都不该再发");
+    for req in http.requests() {
+        assert!(
+            !req.url.contains("configTaskLoginList"),
+            "取消点之后不许有业务请求：{}",
+            req.url
+        );
+    }
+}
+
+// ══════════════════════ 开关 ══════════════════════
+
+#[tokio::test]
+async fn the_redpack_switch_off_skips_without_a_single_request() {
+    let settings = AccountSettings {
+        redpack_enabled: false,
+        ..Default::default()
+    };
+    let (ctx, http, sink) = ctx_with_at(
+        handler_for(TASKS_READ_ONLY),
+        settings,
+        0,
+        CancelToken::new(),
+    );
+    let out = fast_task()
+        .run(&ctx, &json!({}))
+        .await
+        .expect("跳过不是 Err");
+    assert!(matches!(out, TaskOutcome::Skipped { .. }), "实得：{out:?}");
+    assert_eq!(http.count(), 0, "关掉就一枪都不发");
+    assert_eq!(sink.details()[0]["verdict"], "skipped");
+}
+
+// ══════════════════════ 注册表接入 ══════════════════════
+
+#[test]
+fn redpack_is_registered_with_the_right_meta() {
+    let mut registry = mcloud_engine::Registry::new();
+    crate::register_all(&mut registry).expect("注册不该重名");
+
+    let metas = registry.list();
+    let meta = metas
+        .iter()
+        .find(|meta| meta.name == "cloud-phone-redpack")
+        .expect("cloud-phone-redpack 必须注册（CLI/capabilities 都按 registry 走）");
+    assert_eq!(meta.title, "红包派对");
+    assert!(meta.params.is_empty(), "这一条没有参数");
+    assert!(!meta.hidden);
+    assert_eq!(metas.len(), 19, "原 18 条 + 红包派对 = 19 条");
+}
+
+// ══════════════════════ 这条链不碰 store ══════════════════════
+
+/// 一碰 store 就报错的替身。
 struct NoStore;
 
 fn refuse() -> mcloud_core::Error {
-    mcloud_core::Error::Other("拍拍这条链不该碰 store".into())
+    mcloud_core::Error::Other("红包派对这条链不该碰 store".into())
 }
 
 #[async_trait]
@@ -174,14 +690,10 @@ impl mcloud_core::AccountStore for NoStore {
     async fn remove_account(&self, _id: &mcloud_core::AccountId) -> Result<()> {
         Err(refuse())
     }
-    async fn account_state(&self, _id: &mcloud_core::AccountId) -> Result<serde_json::Value> {
+    async fn account_state(&self, _id: &mcloud_core::AccountId) -> Result<Value> {
         Err(refuse())
     }
-    async fn save_account_state(
-        &self,
-        _id: &mcloud_core::AccountId,
-        _s: &serde_json::Value,
-    ) -> Result<()> {
+    async fn save_account_state(&self, _id: &mcloud_core::AccountId, _s: &Value) -> Result<()> {
         Err(refuse())
     }
 }
@@ -308,304 +820,4 @@ impl mcloud_core::UserStore for NoStore {
     async fn purge_expired_sessions(&self, _now_ms: i64) -> Result<usize> {
         Err(refuse())
     }
-}
-
-// ══════════════════════════ 夹具 ══════════════════════════
-
-const SSO_BODY: &str = r#"{"code":0,"msg":"成功","result":"SSO-TICKET"}"#;
-const TOKEN_BODY: &str = r#"{"header":{"status":"200"},"data":{"token":"CPT-TOKEN"}}"#;
-/// 三组各一条：新手（未完成）/ 每日（已完成）/ 每月（**没见过的码 2**）。
-const TASKS_BODY: &str = r#"{"header":{"status":"200"},"data":{
- "configTaskSignList":[{"isToday":1,"status":0,"signAmount":10}],
- "configTaskNoviceList":[{"id":1,"taskCode":"NOVICE_1","taskName":"新手签到","userStatus":0,"prizeAmount":100}],
- "configTaskDailyList":[{"id":2,"taskCode":"DAILY_1","taskName":"每日一次","userStatus":1,"taskAmount":20}],
- "configTaskMonthlyList":[{"id":3,"taskCode":"MONTHLY_1","taskName":"每月一次","userStatus":2}]}}"#;
-/// 有一项**没有** `userStatus`（旧 TS 读 `Number(userStatus ?? 0)` ⇒ 未完成）。
-const MISSING_STATUS_BODY: &str = r#"{"header":{"status":"200"},"data":{
- "configTaskNoviceList":[{"id":1,"taskCode":"NOVICE_1","taskName":"新手签到"}]}}"#;
-const BALANCE_BODY: &str =
-    r#"{"header":{"status":"200"},"data":{"info":{"canAmount":1234,"totalAmount":56789}}}"#;
-const EMPTY_TASKS_BODY: &str = r#"{"header":{"status":"200"},"data":{}}"#;
-
-fn task() -> CloudPhoneRedpackTask {
-    // 顺序随机源 ⇒ requestId / x-DeviceInfo 里那截随机串可复现
-    CloudPhoneRedpackTask::with_rng(Box::new(mcloud_crypto::SeqRandom::new(1)))
-}
-
-fn all_ok() -> Vec<Reply> {
-    vec![
-        Reply::Body(SSO_BODY.into()),
-        Reply::Body(TOKEN_BODY.into()),
-        Reply::Body(TASKS_BODY.into()),
-        Reply::Body(BALANCE_BODY.into()),
-    ]
-}
-
-async fn run_with(replies: Vec<Reply>) -> (TaskOutcome, Arc<Scripted>, Arc<CollectSink>) {
-    let (ctx, http, sink) = ctx_with_at(replies, 1_700_000_000_000);
-    let out = task().run(&ctx, &json!({})).await.expect("不该是 Err");
-    (out, http, sink)
-}
-
-fn summary_of(out: &TaskOutcome) -> String {
-    match out {
-        TaskOutcome::Success { summary } => summary.clone(),
-        TaskOutcome::Failed { reason } | TaskOutcome::Skipped { reason } => reason.clone(),
-    }
-}
-
-fn h(req: &HttpRequest, name: &str) -> Option<String> {
-    req.headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(name))
-        .map(|(_, v)| v.clone())
-}
-
-fn body_of(req: &HttpRequest) -> Value {
-    serde_json::from_slice(req.body.as_deref().expect("该带体")).unwrap()
-}
-
-/// 去掉 scheme/host 与查询串的路径。
-fn path_of(req: &HttpRequest) -> String {
-    let after_host = req.url.split_once("://").map_or(&*req.url, |(_, r)| r);
-    match after_host.split_once('/') {
-        Some((_, rest)) => {
-            let path = rest.split('?').next().unwrap_or(rest);
-            format!("/{path}")
-        }
-        None => after_host.to_string(),
-    }
-}
-
-/// 四枪的路径**逐条钉死**。多一枪（比如接上写入侧）这条就会红 —— 那是故意的。
-const READ_PATHS: [&str; 4] = [
-    "/ycloud/api/cloud/userdomain/v2/querySpecToken",
-    "/cloudphone-market/user/tokenValidate",
-    "/cloudphone-market/redpacket/configTaskLoginList",
-    "/cloudphone-market/redpacket/userAccountInfo",
-];
-
-// ══════════════════════════ 会话 ══════════════════════════
-
-#[tokio::test]
-async fn session_switches_the_sso_ticket_for_the_activity_token() {
-    let (out, http, _) = run_with(all_ok()).await;
-    let reqs = http.requests();
-    assert_eq!(reqs.len(), 4);
-
-    // ① 换 SSO 票：GET，带 targetSourceId，且**没有体**
-    assert_eq!(reqs[0].method, "GET");
-    assert!(
-        reqs[0].url.contains("targetSourceId=001216"),
-        "{}",
-        reqs[0].url
-    );
-    assert!(reqs[0].body.is_none());
-
-    // ② 换活动 token：这一枪的 token 头是**空串**，SSO 票在请求体里
-    assert_eq!(reqs[1].method, "POST");
-    assert_eq!(h(&reqs[1], "token").as_deref(), Some(""));
-    assert_eq!(body_of(&reqs[1])["token"], json!("SSO-TICKET"));
-    assert_eq!(body_of(&reqs[1])["deviceId"], json!("DEV+1/base="));
-
-    // ③④ 业务请求带的是换回来的那个 token
-    for r in &reqs[2..] {
-        assert_eq!(h(r, "token").as_deref(), Some("CPT-TOKEN"), "{}", r.url);
-    }
-
-    assert!(matches!(out, TaskOutcome::Success { .. }), "{out:?}");
-    let s = summary_of(&out);
-    assert!(s.contains("红包派对任务 3 件"), "{s}");
-    assert!(s.contains("余额 12.34 元（累计 567.89 元）"), "{s}");
-    assert!(s.contains("本工具只读"), "{s}");
-}
-
-#[tokio::test]
-async fn the_inventory_only_reads_the_four_known_read_paths() {
-    let (_, http, _) = run_with(all_ok()).await;
-    let got: Vec<String> = http.requests().iter().map(path_of).collect();
-    assert_eq!(got, READ_PATHS.to_vec(), "多一枪都得在这里看见");
-}
-
-// ══════════════════════════ 判读 ══════════════════════════
-
-#[tokio::test]
-async fn an_unreadable_user_status_is_its_own_bucket() {
-    let (out, _, sink) = run_with(all_ok()).await;
-    let d = sink.details();
-    assert_eq!(d.len(), 1, "只该有一次 details");
-    let c = &d[0]["counts"];
-    assert_eq!(c["total"], json!(3));
-    assert_eq!(c["waiting"], json!(1));
-    assert_eq!(c["done"], json!(1));
-    assert_eq!(c["unknown"], json!(1), "码 2 没见过 ⇒ 单独成档");
-    assert_eq!(
-        d[0]["tasks"][2]["statusText"],
-        Value::Null,
-        "未知码不许编文案"
-    );
-    assert!(
-        summary_of(&out).contains("状态读不出 1"),
-        "{:?}",
-        summary_of(&out)
-    );
-}
-
-#[tokio::test]
-async fn a_missing_user_status_counts_as_waiting() {
-    let replies = vec![
-        Reply::Body(SSO_BODY.into()),
-        Reply::Body(TOKEN_BODY.into()),
-        Reply::Body(MISSING_STATUS_BODY.into()),
-        Reply::Body(BALANCE_BODY.into()),
-    ];
-    let (out, _, sink) = run_with(replies).await;
-    let d = sink.details();
-    assert_eq!(d[0]["counts"]["waiting"], json!(1), "旧 TS 的 ?? 0 照做");
-    assert_eq!(d[0]["counts"]["unknown"], json!(0));
-    assert!(
-        summary_of(&out).contains("未完成 1"),
-        "{:?}",
-        summary_of(&out)
-    );
-}
-
-#[tokio::test]
-async fn an_empty_task_table_is_all_zeros_and_not_a_conclusion() {
-    let replies = vec![
-        Reply::Body(SSO_BODY.into()),
-        Reply::Body(TOKEN_BODY.into()),
-        Reply::Body(EMPTY_TASKS_BODY.into()),
-        Reply::Body(BALANCE_BODY.into()),
-    ];
-    let (out, _, sink) = run_with(replies).await;
-    let c = &sink.details()[0]["counts"];
-    for k in ["total", "waiting", "done", "soldOut", "tomorrow", "unknown"] {
-        assert_eq!(c[k], json!(0), "{k}");
-    }
-    let s = summary_of(&out);
-    assert!(s.contains("任务 0 件"), "{s}");
-    assert!(
-        !s.contains("没事做") && !s.contains("没有可做"),
-        "空数组不等于「没任务」：{s}"
-    );
-}
-
-// ══════════════════════════ 致命读与半份结论 ══════════════════════════
-
-#[tokio::test]
-async fn a_broken_session_stops_at_the_first_shot() {
-    let (out, http, sink) = run_with(vec![Reply::Body("not json".into())]).await;
-    assert_eq!(http.count(), 1, "第一枪就废了 ⇒ 后面一枪都不许发");
-    let s = summary_of(&out);
-    assert!(s.contains("没读成"), "{s}");
-    assert!(matches!(out, TaskOutcome::Failed { .. }), "{out:?}");
-    assert_eq!(sink.details()[0]["verdict"], json!("failed"));
-}
-
-#[tokio::test]
-async fn a_broken_balance_does_not_take_the_inventory_down() {
-    let replies = vec![
-        Reply::Body(SSO_BODY.into()),
-        Reply::Body(TOKEN_BODY.into()),
-        Reply::Body(TASKS_BODY.into()),
-        Reply::Body(r#"{"header":{"status":500,"errMsg":"系统繁忙"}}"#.into()),
-    ];
-    let (out, _, sink) = run_with(replies).await;
-    assert!(matches!(out, TaskOutcome::Success { .. }), "{out:?}");
-    assert_eq!(sink.details()[0]["counts"]["total"], json!(3), "任务表照报");
-    assert_eq!(sink.details()[0]["account"], Value::Null);
-    assert!(
-        summary_of(&out).contains("余额没读成"),
-        "{:?}",
-        summary_of(&out)
-    );
-}
-
-#[tokio::test]
-async fn cancellation_stops_before_the_first_shot() {
-    let (ctx, http, _) = ctx_with_at(all_ok(), 0);
-    ctx.cancel.cancel();
-    let err = task()
-        .run(&ctx, &json!({}))
-        .await
-        .expect_err("取消该是 Err");
-    assert!(err.is_cancelled(), "{err:?}");
-    assert_eq!(http.count(), 0, "取消后一枪都不发");
-}
-
-// ══════════════════════════ 凭据与明细 ══════════════════════════
-
-#[tokio::test]
-async fn details_never_carry_the_tokens() {
-    let (_, _, sink) = run_with(all_ok()).await;
-    let text = serde_json::to_string(&sink.details()).unwrap();
-    assert!(!text.contains("CPT-TOKEN"), "token 是凭据，不许进台账");
-    assert!(!text.contains("SSO-TICKET"), "SSO 票是凭据，不许进台账");
-}
-
-#[tokio::test]
-async fn details_report_the_sign_grid_separately_from_tasks() {
-    let (_, _, sink) = run_with(all_ok()).await;
-    let d = sink.details();
-    assert_eq!(d[0]["signDays"][0]["isToday"], json!(1));
-    assert_eq!(d[0]["signDays"][0]["signAmount"], json!(10));
-    assert_eq!(d[0]["counts"]["total"], json!(3), "签到格不进任务计数");
-}
-
-// ══════════════════════════ 接入与纯函数 ══════════════════════════
-
-#[test]
-fn the_registry_knows_this_task() {
-    let mut registry = mcloud_engine::Registry::new();
-    crate::register_all(&mut registry).expect("注册不该重名");
-    let t = registry.get("cloud-phone-redpack").expect("应当注册了");
-    assert_eq!(t.title(), "红包派对盘点");
-}
-
-#[test]
-fn yuan_is_integer_arithmetic() {
-    assert_eq!(yuan(1234), "12.34 元");
-    assert_eq!(yuan(0), "0.00 元");
-    assert_eq!(yuan(5), "0.05 元");
-    assert_eq!(yuan(-5), "-0.05 元");
-}
-
-#[test]
-fn request_id_and_device_nonce_have_the_old_ts_shape() {
-    let mut rng = mcloud_crypto::SeqRandom::new(7);
-    let clock = FixedClock(1_700_000_000_000);
-    let id = request_id(&mut rng, &clock, 1_700_000_000_000);
-    // yyyyMMddHHmmss(14) + epoch 毫秒(13) + base36(8)
-    assert_eq!(id.len(), 35, "{id}");
-    assert!(
-        id.starts_with(&mcloud_core::beijing_time_digits(&clock)),
-        "{id}"
-    );
-    assert!(
-        id.chars()
-            .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
-        "{id}"
-    );
-    let nonce = base36(&mut rng, 16);
-    assert_eq!(nonce.len(), 16);
-    assert!(
-        nonce
-            .chars()
-            .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
-        "{nonce}"
-    );
-}
-
-#[tokio::test]
-async fn a_network_error_at_the_first_shot_is_also_fatal() {
-    // 换票那一枪连不上 ⇒ 一样是「没读成」，不许折成半份结论。
-    let (out, http, _) = run_with(vec![Reply::Fail]).await;
-    assert_eq!(http.count(), 1);
-    assert!(matches!(out, TaskOutcome::Failed { .. }), "{out:?}");
-    assert!(
-        summary_of(&out).contains("网络断了"),
-        "{:?}",
-        summary_of(&out)
-    );
 }
