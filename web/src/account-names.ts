@@ -1,4 +1,4 @@
-import { listAccounts } from './api'
+import { listAccounts, type AccountSummary } from './api'
 import { ref } from 'lite'
 
 /**
@@ -27,15 +27,27 @@ function pick(a: { nickname: string | null; label: string; id: string }): string
   return a.nickname || a.label || a.id
 }
 
+/**
+ * 把**已经拿到**的一份账号列表填进缓存。
+ *
+ * 给"同一份列表还有别的用途"的页面用（总览要拿它算凭据到期那几张指标卡）——
+ * 否则它得为同一个 `/api/accounts` 再发一次请求，而两次结果之间还可能不一致
+ * （一次成一次败 ⇒ 指标卡说 3 个账号、列表里的名字却是哈希）。
+ *
+ * 解析口径与 [`refreshAccountNames`] **共用** `pick`，不是第二份实现。
+ */
+export function rememberAccountNames(list: AccountSummary[]): void {
+  // ⚠ 整张新 Map 赋值（而不是 `names.value.set(...)`）：Map 是内建对象，
+  // 原地 `set` 不会让信号发现变化 —— 那就是上面说的"名字不出现"的根因。
+  const next = new Map(names.value)
+  for (const a of list) next.set(a.id, pick(a))
+  names.value = next
+}
+
 /** 拉一次账号列表填缓存。拉不动就保持原样（界面退化成显示主键，而不是空白）。 */
 export async function refreshAccountNames(): Promise<void> {
   try {
-    const list = await listAccounts()
-    // ⚠ 整张新 Map 赋值（而不是 `names.value.set(...)`）：Map 是内建对象，
-    // 原地 `set` 不会让信号发现变化 —— 那就是上面说的"名字不出现"的根因。
-    const next = new Map(names.value)
-    for (const a of list) next.set(a.id, pick(a))
-    names.value = next
+    rememberAccountNames(await listAccounts())
   } catch {
     // 静默：这只是个显示名字，失败不该让页面报错
   }

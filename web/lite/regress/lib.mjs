@@ -79,9 +79,11 @@ const PIPELINE = {
  */
 export const FIXTURES = {
   '/api/setup': { initialized: true, minPasswordLen: 8 },
-  '/api/session': { userId: 'u-1', name: 'catlair', kind: 'web' },
-  '/api/version': { name: 'mcloud-gost', version: '0.1.0' },
-  '/api/status': { name: 'mcloud-gost', version: '0.1.0', taskCount: 18, lastRun: RUN, schedulerRunning: true, runningCount: 0, scheduleCount: 1, pipelineCount: 1 },
+  '/api/session': { userId: 'u-1', name: 'admin', kind: 'web' },
+  '/api/version': { name: 'mcloud', version: '0.1.0' },
+  // `startedAtMs` 是「运行时间」的来源（总览那条引擎条）：给一个**固定**的两天前，
+  // 界面就会稳定显示「2 天」—— 用 `Date.now()` 的话每次跑门禁的渲染结果都不一样。
+  '/api/status': { name: 'mcloud', version: '0.1.0', startedAtMs: 1790581000000, taskCount: 18, lastRun: RUN, schedulerRunning: true, runningCount: 0, scheduleCount: 1, pipelineCount: 1 },
   '/api/capabilities': {
     tasks: [
       { name: 'daily-checkin', title: '每日签到', description: '签到并领取当日奖励', hidden: false, params: [] },
@@ -93,6 +95,26 @@ export const FIXTURES = {
   '/api/schedules': [SCHEDULE],
   '/api/pipelines': [PIPELINE],
   '/api/accounts': [ACCOUNT, ACCOUNT2],
+  /**
+   * 今日AI豆（云朵记录汇总）。形状照 `web/src/api.ts` 的 `BeanToday`。
+   *
+   * ⚠ **一个账号一份**：豆按账号记账，不合计（合计出来哪个账号都用不了）。
+   * 这里给两笔，正好覆盖净增的**正负两种**长相。
+   *
+   * ⚠⚠ **后端还没有这个端点**（2026-09-30，见 `web/src/api.ts` 的 `BeanToday`
+   * 与 `docs/task-inventory.md` §5）。这里放 fixture 是**故意的**：总览那张卡
+   * "有读数"的长相（每个账号一行、读不到的单独一行染黄）只有喂了数据才走得到，
+   * 否则门禁里它一直停在"待接入"态 —— 那条渲染路径等于没验。
+   * 端点落地后把这段注释删掉即可，**不用**删这条 fixture。
+   */
+  '/api/beans/today': {
+    nowMs: 1790581000000,
+    accounts: [
+      { account: ACCOUNT.id, net: 30, gained: 120, spent: 90, count: 7 },
+      { account: ACCOUNT2.id, net: -200, gained: 0, spent: 200, count: 1 },
+    ],
+    failed: [],
+  },
   /**
    * 本机设备指纹（`getPcDevice`）与换一台（`rotatePcDevice`）。
    * 缺前者 ⇒ 账号页 `Promise.all` 整体失败 ⇒ 列表一行都不渲染（见上面那段 ⚠）。
@@ -128,7 +150,7 @@ export const VARIANTS = {
     'POST /api/session': {
       handler: (body) =>
         body?.password === 'right-pass'
-          ? { status: 200, body: { userId: 'u-1', name: 'catlair', kind: 'web' } }
+          ? { status: 200, body: { userId: 'u-1', name: 'admin', kind: 'web' } }
           : { status: 401, body: { error: '用户名或口令不正确', code: 'invalid_credentials' } },
     },
   },
@@ -136,7 +158,7 @@ export const VARIANTS = {
     '/api/setup': { status: 200, body: { initialized: false, minPasswordLen: 8 } },
     '/api/session': { status: 503, body: { error: '实例尚未初始化，请先创建管理员', code: 'setup_required' } },
     'POST /api/setup': {
-      handler: () => ({ status: 200, body: { userId: 'u-1', name: 'catlair', kind: 'web' } }),
+      handler: () => ({ status: 200, body: { userId: 'u-1', name: 'admin', kind: 'web' } }),
     },
   },
 }

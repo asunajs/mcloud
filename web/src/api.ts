@@ -276,6 +276,13 @@ export interface VersionInfo {
 export interface ServiceStatus {
   name: string
   version: string
+  /**
+   * 服务进程**开始服务**的时刻（epoch 毫秒）—— 「运行时间」= 现在 − 它。
+   *
+   * ⚠ 后端给的是**时刻**而不是"已经跑了多少秒"：页面不轮询，一个标量读完就开始变假，
+   * 而时刻可以让界面自己往前算（总览每 30 秒重算一次，不用再问后端）。
+   */
+  startedAtMs: number
   taskCount: number
   lastRun: RunRecord | null
   /** 调度循环是否**真的**在跑。运行时实况，不是配置项。 */
@@ -292,6 +299,56 @@ export const getStatus = () => request<ServiceStatus>('/api/status')
 export const listCapabilities = () => request<{ tasks: TaskMeta[] }>('/api/capabilities')
 
 export const listRuns = () => request<RunRecord[]>('/api/runs')
+
+/**
+ * 一个账号**今天**的AI豆进出。
+ *
+ * ⚠ 账是**按账号**记的：不能把几个账号加总成一个"总AI豆" ——
+ * 加出来的数**哪个账号都用不了**（豆不能跨账号花）。所以这一层没有"合计"字段，
+ * 界面也一个一个账号地摆（第一版按"总额"设计，是错的）。
+ */
+export interface BeanTodayAccount {
+  /** 账号主键（哈希）。显示要走 `accountName(id)`，别把哈希摆到界面上。 */
+  account: string
+  /** 今日净增（进 − 出）。**可负** —— 兑换扣豆也在这条流水里。 */
+  net: number
+  /** 今日收入合计（正数）。 */
+  gained: number
+  /** 今日支出合计（取正数）。 */
+  spent: number
+  /** 今日读到几笔流水。 */
+  count: number
+}
+
+/**
+ * 今日AI豆 —— 由**云朵记录**（上游 `cloudRecordV2` 的收支流水）按账号汇总而来。
+ *
+ * ⚠⚠ **后端还没有这个端点**（2026-09-30）。前端先把契约接上：
+ * 端点一旦落地，总览那张卡**一行都不用改**。缺的三块与口径见
+ * `docs/task-inventory.md` §5。
+ *
+ * # 口径
+ *
+ * - **一个账号一份**（见 [`BeanTodayAccount`]）。这一层刻意**没有** `net`/`gained`
+ *   这样的总额字段：豆是按账号记的，合计出来没有使用场景。
+ * - "今天"按**服务端**时区算（与 `Schedule.timezone` 同一套），并把那个时刻用
+ *   `nowMs` 回给前端。⚠ 前端**不要**拿本地时钟自己算日界：那会在跨时区/漂移时
+ *   把"今天"算到别的日子上，而界面上看不出来（组件指南 §5.9 同一条理由）。
+ * - `failed` 非空 ⇒ **这份读数是不完整的**。界面必须**逐个账号**说出是谁没读到，
+ *   **不能**把它当成 0 混进那一行（"没读到"与"今天没进出"是两件事）。
+ *   账号主键照 [`AccountSummary.id`] 那一套（哈希，只当键用）。
+ */
+export interface BeanToday {
+  /** 服务端算"今天"用的时刻（epoch 毫秒）。 */
+  nowMs: number
+  /** 每个账号一份。空数组 = 一个账号都没配。 */
+  accounts: BeanTodayAccount[]
+  /** 没读到流水的账号，以及**后端原话**的原因（原样透出）。 */
+  failed: { account: string; error: string }[]
+}
+
+/** `GET /api/beans/today` —— ⚠ 后端未实现，见 [`BeanToday`]。 */
+export const getBeanToday = () => request<BeanToday>('/api/beans/today')
 
 export const getRun = (id: number) => request<RunRecord>(`/api/runs/${id}`)
 
