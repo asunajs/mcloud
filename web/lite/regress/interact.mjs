@@ -18,14 +18,37 @@
  * 退出码非 0 = 有步骤没执行 / 断言不符 / 页面抛过异常。
  */
 import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { appSubtree, arg, hashRoute, openSession, readVariant, serve, sleep } from './lib.mjs'
 
 const variant = readVariant()
 const only = arg('--only', '')
 const dir = arg('--dir', 'dist')
-const PORT = Number(arg('--port', '48251'))
-const DEBUG = PORT + 1300
-const PROFILE = '/tmp/lite-interact'
+/**
+ * fixture 服务的端口。**默认 0 = 由内核分配一个空闲端口**。
+ *
+ * 写死 48251 的坑：只要那个端口上还有东西（上一份验收的进程没死透，或者同一个工作区里
+ * 另一个人/另一个 agent 正在跑同一支脚本），`serve()` 的 `listen` 就是 EADDRINUSE，
+ * 而它**死在任何 stdout 之前** ⇒ 三个变体全是一声闷响的「✗ 抛错」。
+ * 真实端口从 `server.address().port` 读，别再假设就是这里写的那个数。
+ */
+const PORT = Number(arg('--port', '0'))
+/**
+ * CDP 调试端口。0 = 内核分配，起完从 profile 的 `DevToolsActivePort` 读回来。
+ * （旧版写死 `PORT + 1300`：端口一旦动态化这个式子就没意义了，而且写死本身也会撞。）
+ */
+const DEBUG = Number(arg('--debug-port', '0'))
+/**
+ * chrome 的 profile，**每次跑都必须独立**。
+ *
+ * 写死 `/tmp/lite-interact` 的坑：后起的 chrome 发现 profile 被占，会把 URL 转交给
+ * 前一个实例然后自己退出，于是调试端口永远等不到 —— 又是一声闷响。
+ * 默认在 tmp 下开一个一次性目录（跑完删掉）；`--profile` 传进来的**不删**（那是调用方的）。
+ */
+const PROFILE = arg('--profile', '') || fs.mkdtempSync(path.join(os.tmpdir(), 'lite-interact-'))
+/** 只有我们自己建的临时 profile 才由我们删。 */
+const ownedProfile = !arg('--profile', '')
 const route = hashRoute('settings')
 
 /**
@@ -260,8 +283,59 @@ const shoot = async (session, file) => {
 
 const firstLine = (e) => String(e?.message ?? e).split('\n')[0]
 
+/** SIGKILL 之后**等它真的退出**再往下走 —— 理由见下面 `removeProfile`。 */
+const killAndWait = (child, ms = 2000) =>
+  new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode) {
+      resolve()
+      return
+    }
+    const timer = setTimeout(resolve, ms)
+    child.once('exit', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+    try {
+      child.kill('SIGKILL')
+    } catch {
+      // 已经死了
+    }
+  })
+
+/**
+ * 删掉本次运行的一次性 chrome profile。
+ *
+ * ⚠ 三条讲究，全是 2026-10-01 踩出来的：
+ * 1. `SIGKILL` 之后 chrome 还可能再写一两个文件，裸 `rmSync` 会 `ENOTEMPTY`
+ *    （readdir 与 rmdir 之间又冒出一个文件）⇒ 交给 Node 自己重试，
+ *    `maxRetries`/`retryDelay` 正是为 ENOTEMPTY/EBUSY/EPERM 这类比赛准备的。
+ * 2. 删不掉**不算验收失败**：判据是页面行为，而它只是个 tmp 目录。
+ * 3. 但**也不许静默**：留一行 ⚠，别让 tmp 里的垃圾变成无人认领的谜。
+ */
+const removeProfile = () => {
+  if (!ownedProfile) return
+  try {
+    fs.rmSync(PROFILE, { recursive: true, force: true, maxRetries: 8, retryDelay: 60 })
+  } catch (e) {
+    console.log(`⚠ 临时 profile 没能删掉（不影响判据）：${PROFILE} —— ${firstLine(e)}`)
+  }
+}
+
 const server = await serve(dir, PORT, variant)
-const session = await openSession({ port: PORT, route, debugPort: DEBUG, profile: PROFILE })
+// ⚠ 端口由内核给（PORT=0 时），必须从这里读回来交给 chrome 加载
+const port = server.address().port
+/**
+ * 起不来也要**收尸**：fixture 服务与一次性 profile 都别留给下一次运行。
+ * （旧版这两行不在 try 里，`openSession` 一抛，服务与 profile 就留在那儿了。）
+ */
+let session
+try {
+  session = await openSession({ port, route, debugPort: DEBUG, profile: PROFILE })
+} catch (e) {
+  server.close()
+  removeProfile()
+  throw e
+}
 let bad = 0
 let checks = 0
 try {
@@ -316,8 +390,10 @@ try {
   await shoot(session, `/tmp/shots/interact-${variant}-end.png`)
 } finally {
   session.cdp.close()
-  session.child.kill('SIGKILL')
   server.close()
+  // ⚠ **先等 chrome 真的退出**再删 profile：不等就是上面 `removeProfile` 注释里那个 ENOTEMPTY
+  await killAndWait(session.child)
+  removeProfile()
 }
 
 /**

@@ -169,9 +169,13 @@ export const readVariant = () => {
   return v
 }
 
-/** fixture 服务：已知路径按 variant 覆盖，其余 `/api/*` 回 404，非 API 路径当静态文件发。 */
+/**
+ * fixture 服务：已知路径按 variant 覆盖，其余 `/api/*` 回 404，非 API 路径当静态文件发。
+ *
+ * `port = 0` ⇒ 由内核分配一个空闲端口（门禁走这条）；真实端口从 `server.address().port` 读。
+ */
 export const serve = (root, port, variant) =>
-  new Promise((resolve) => {
+  new Promise((resolve, reject) => {
     const overrides = VARIANTS[variant]
     /**
      * 一条 fixture 可以是 `{status, body}`，也可以是 `{handler(body) → {status, body}}` ——
@@ -237,6 +241,18 @@ export const serve = (root, port, variant) =>
       res.writeHead(200, { 'content-type': type })
       fs.createReadStream(f).pipe(res)
     })
+    /**
+     * ⚠ **必须**接 `'error'`。不接时 `listen` 失败（最典型：端口被别的进程占着）
+     * 会成为**未处理的 'error' 事件**，Node 当场把进程打死 —— 而且死在**任何 stdout 之前**，
+     * 上层只能看到一句光秃秃的「✗ 抛错」加一个空行（2026-10-01 三个认证态全这样，
+     * 真因是 `EADDRINUSE: address already in use 127.0.0.1:48251`）。
+     * 接上之后，这类失败至少会带着原话报出来。
+     */
+    server.on('error', reject)
+    /**
+     * `port = 0` ⇒ 内核分配空闲端口。门禁默认走这条：同一个工作区里多人/多 agent
+     * **并发**跑验收时不会互撞。调用方拿到 server 后用 `server.address().port` 取真实端口。
+     */
     server.listen(port, '127.0.0.1', () => resolve(server))
   })
 
@@ -268,6 +284,34 @@ export function appSubtree(html) {
     .replace(/<!--.*?-->/gs, '')
     .replace(/>\s+</g, '><')
     .trim()
+}
+
+/**
+ * 读 chrome 写进 profile 的 `DevToolsActivePort`（首行就是它实际监听的端口）。
+ *
+ * ⚠ 为什么读文件、而不是自己 `listen(0)` 探一个空闲端口再用：
+ * `--remote-debugging-port=0` 时端口由**内核**分配，分配结果只有这里知道；
+ * 自己试探再关掉去用，中间那段就是竞态（并发跑两份验收时正好会撞）。
+ * 文件还没写出来时返回 0。
+ */
+const readDevToolsPort = (profile) => {
+  try {
+    const n = Number(fs.readFileSync(path.join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0].trim())
+    return Number.isInteger(n) && n > 0 ? n : 0
+  } catch {
+    return 0 // chrome 还没起来 / 还没写出来
+  }
+}
+
+/** 等 `DevToolsActivePort` 出现；chrome 起不来时它会一直不出现 —— 超时即判启动失败。 */
+const waitForDevToolsPort = async (profile, timeout = 20000) => {
+  const deadline = Date.now() + timeout
+  while (Date.now() < deadline) {
+    const p = readDevToolsPort(profile)
+    if (p) return p
+    await sleep(60)
+  }
+  throw new Error(`chrome 没写出 DevToolsActivePort（profile=${profile}）—— 它很可能启动失败了`)
 }
 
 /**
@@ -367,11 +411,31 @@ class Cdp {
   }
 }
 
-/** 打开一个可交互页面：起 chrome → 等 CDP → 连接 → 收异常事件。 */
-export async function openSession({ port, route, debugPort, profile, width = 1280 }) {
+/**
+ * 打开一个可交互页面：起 chrome → 等 CDP → 连接 → 收异常事件。
+ *
+ * `debugPort = 0` ⇒ 内核分配，起完从 profile 的 `DevToolsActivePort` 里读回来。
+ */
+export async function openSession({ port, route, debugPort = 0, profile, width = 1280 }) {
   const url = `http://127.0.0.1:${port}/${route}`
   const child = launchChrome({ url, debugPort, profile })
-  const target = await waitForTarget(debugPort)
+  /**
+   * ⚠ 握手阶段抛错**必须收尸**。旧版这里直接 `await waitForTarget`，它一超时就
+   * 留下一个没人管的 chrome：那个孤儿会一直占着 profile 与调试端口，
+   * 于是**下一次**运行又以"CDP 端点没起来"挂掉，再留一个孤儿 —— 一次失败锁死后面每一次。
+   */
+  let target
+  try {
+    const dp = debugPort || (await waitForDevToolsPort(profile))
+    target = await waitForTarget(dp)
+  } catch (e) {
+    try {
+      child.kill('SIGKILL')
+    } catch {
+      // 已经死了
+    }
+    throw e
+  }
   const cdp = await Cdp.connect(target.webSocketDebuggerUrl)
   await cdp.send('Page.enable')
   await cdp.send('Runtime.enable')

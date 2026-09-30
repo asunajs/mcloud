@@ -37,8 +37,23 @@ const run = (args, label) => {
     if (bad) console.log(out.trim().split('\n').filter((l) => /✗|THREW|FAIL/.test(l)).slice(0, 14).join('\n'))
     return !bad
   } catch (e) {
+    // ⚠ 这里**不能**只打 `e.stdout ?? e.message`：execFileSync 抛错时 `e.stdout` 通常是
+    // 空字符串 ''，而空串**不是** nullish ⇒ `??` 不会回落到 message，于是真实原因被吞掉，
+    // 只剩一行光秃秃的「✗ 抛错」（2026-10-01 就是这样把三条交互验收的报错弄丢的）。
+    // 现在四处来源全打：栈 + message、子进程 stdout 尾部、子进程 stderr 尾部。
     console.log('✗ 抛错')
-    console.log(String(e.stdout ?? e.message).trim().split('\n').slice(-14).join('\n'))
+    const tail = (s, n) => String(s ?? '').trim().split('\n').filter(Boolean).slice(-n)
+    const lines = []
+    if (e && e.stack) {
+      lines.push('--- 异常（' + (e.name ?? 'Error') + '）---', ...String(e.stack).split('\n'))
+    } else {
+      lines.push('--- 异常 ---', String((e && e.message) ?? e))
+    }
+    const outTail = tail(e && e.stdout, 14)
+    if (outTail.length) lines.push('--- 子进程 stdout（尾部）---', ...outTail)
+    const errTail = tail(e && e.stderr, 14)
+    if (errTail.length) lines.push('--- 子进程 stderr（尾部）---', ...errTail)
+    console.log(lines.join('\n'))
     return false
   }
 }
@@ -79,7 +94,10 @@ let ok = true
 if (process.argv.includes('--skip-build')) {
   console.log('── 构建 … 跳过（--skip-build：由调用方保证 dist 是新的）')
 } else {
-  ok = bash('npx vite build', '构建（默认配置 → dist）') && ok
+  // ⚠ 用 `npm run build` 而不是裸 `npx vite build`：构建的**口径**只有一个
+  // （2026-09-30 起 `npm run build` = vite build + gzip 边车）。裸 vite build 会让 dist
+  // "是新的、但没有边车" —— 服务端会退回每请求现压，跑一次验收顺手把首屏优化弄丢。
+  ok = bash('npm run build', '构建（npm run build → dist + gzip 边车）') && ok
 }
 ok = run([path.join(dir, 'compiler.mjs')], '编译期负例') && ok
 // ⚠ 不要在这里写死 demo 的断言条数：断言会涨，写死了就会像上次那样显示 53 而实际已是 59
