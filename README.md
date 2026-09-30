@@ -18,7 +18,9 @@
 + 红包派对（`cloud-phone-redpack`，**做任务**——签到 / 登记 / 浏览 / 云机票 / 答题 / 装机）。
   ⚠ 两处**刻意**与旧 TS 不同：读到没见过的状态码**不发写**（防重复领）、会话 token 不落盘。
 + AI 新头像（`ai-avatar`，**做任务**——默认**关**，收尾只删本趟产物）。
-  ⚠ 结构性缺口：本仓 HTTP 抽象只有 `String`（有损），「下载合成图 → upload」这一步**不可达** ⇒ 今天不会往网盘写图；要接得先给 HTTP 抽象加「保留原始字节」的路径。
+  ✅ 「下载合成图 → upload」已接通：`mcloud_core::HttpClient::request_raw` 给原始字节（不经有损 UTF-8 解码），
+  两层装饰器（`SmidClient` / `H5Client`）都转发，字节一路到 leaf；任务层做形状校验 + base64。
+  唯一保留的缺口：**需要会话的主机**走 `request_raw` 会**明确报错**（不静默退到有损路径）。
 
 **`task-expansion`（2026-09-28 落地）—— 第一条"写网盘并自己收尾"的任务**：
 
@@ -259,7 +261,7 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 | P8 | **账号登录（扫码/短信）+ 账号页 + 定时/编排 CRUD 页** | ✅ |
 | P9a | **签到族 8 条**（`sign` / `receive` / `multiple` / `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`） | ✅ |
 | P9b | **P2 只读查询那一档全部落完**：`exchange` + `msg-push` + `fun-ai` + `notice` | 已落 4 条 |
-| P9c | 其余任务增量接入（`cloud-phone-redpack` / `ai-avatar`）+ 推送渠道 | ✅ **整条落完**：`cloud-phone-redpack`（协议 47 + 任务 15）、`ai-avatar`（协议 31 + 任务 21，默认**关**；⚠ 一处结构性缺口：`upload` 因 HTTP 抽象只有 `String` 而不可达，见 `docs/ai-avatar-spec.md`）、推送渠道（`MCLOUD_NOTIFY_WEBHOOK`，不配置即零行为）（`app-task` 的写侧已落 106 / 522 / beiyong1 名字门三档玩法）|
+| P9c | 其余任务增量接入（`cloud-phone-redpack` / `ai-avatar`）+ 推送渠道 | ✅ **整条落完**：`cloud-phone-redpack`（协议 47 + 任务 15）、`ai-avatar`（协议 31 + 任务 21，默认**关**；`upload` 已由 `request_raw` 接通，仅会话主机的 raw 通路按设计报错）、推送渠道（`MCLOUD_NOTIFY_WEBHOOK`，不配置即零行为）（`app-task` 的写侧已落 106 / 522 / beiyong1 名字门三档玩法）|
 
 > **端点必须来自抓包，不能凭印象写。** 本项目的签到端点最初是
 > `/ycloud/api/sign/query`（凭印象），实测回 **405**；换成实拍的
