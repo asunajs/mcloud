@@ -8,6 +8,9 @@ pub mod builder;
 pub mod hub;
 pub mod login;
 pub mod notify;
+// 多渠道运行推送（照 mcloud-sign 的 push 模块移植）。
+// ⚠ 本版**只做模块、不接线**：没有生产代码调用它，见 push.rs 模块头。
+pub mod push;
 pub mod sink;
 pub mod smid;
 
@@ -15,6 +18,12 @@ pub use auth_refresh::{decide, AuthRefreshService, RefreshDecision, RefreshOutco
 pub use builder::{App, AppBuilder};
 pub use hub::{Delivery, EventHub};
 pub use login::{bare_transport, parse_platform, platform_label, AppSendSmsOutcome, LoginService};
+pub use push::{
+    format_logs_for_push, send_notify, send_request, BarkConfig, Channel, ChannelOutcome,
+    CustomPost, DingTalkConfig, EmailConfig, PushApiData, PushConfig, PushContext,
+    PushLogCollector, PushLogEntry, PushLogLevel, PushRequest, PushResponse, PushTransport,
+    TgBotConfig, TokenConfig, TwoImConfig, WorkWeixinBotConfig, WorkWeixinConfig,
+};
 pub use sink::BroadcastSink;
 pub use smid::{
     device_id, ensure_fingerprint, report_device_id, rotate_fingerprint, SmidClient, SmidService,

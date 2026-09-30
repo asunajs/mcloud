@@ -13,8 +13,6 @@ use crate::AppHandle;
 pub struct AppBuilder {
     data_dir: PathBuf,
     timeout_secs: u64,
-    /// 推送渠道的 webhook。`None`（默认）表示不启用。
-    notify_webhook: Option<String>,
 }
 
 impl Default for AppBuilder {
@@ -22,7 +20,6 @@ impl Default for AppBuilder {
         Self {
             data_dir: PathBuf::from("data"),
             timeout_secs: 30,
-            notify_webhook: None,
         }
     }
 }
@@ -39,15 +36,6 @@ impl AppBuilder {
 
     pub fn timeout_secs(mut self, secs: u64) -> Self {
         self.timeout_secs = secs;
-        self
-    }
-
-    /// 推送渠道的 webhook 地址。
-    ///
-    /// `None`（默认）或空串 ⇒ **不启用**：运行结果一个包都不会发出去
-    /// （见 [`crate::notify`] 模块头）。
-    pub fn notify_webhook(mut self, url: Option<String>) -> Self {
-        self.notify_webhook = url;
         self
     }
 
@@ -207,35 +195,34 @@ impl AppBuilder {
             Arc::clone(&http_for),
         ));
 
-        // ── 推送渠道（**旁路**）────────────────────────────────────────────
+        // ── 推送渠道（**旁路**，地址按账号解析）────────────────────────────
         //
         // 挂点选在 sink（而不是订阅 hub）：runner 的每个事件都从这**同一个**
         // 出口过，在它外面套一层即可，engine 零改动（理由详见 crate::notify
         // 模块头）。
         //
-        // 没配 webhook ⇒ notify::decorate 原样返回 hub，连 Notifier 都不建，
-        // 也不会有任何投递。
+        // ⚠ **总是**装饰一层（不按"启动时是否有配置"决定）：渠道是**每账号**的，
+        // 配置在投递那一刻才从该账号的 settings 读，运行期间还能改。跳过装饰
+        // 等于"账号级配置永远不会生效"。
+        // "未配置就零行为"由解析兜住：账号没配 ⇒ 回 None ⇒ 一个包都不发
+        // （见 notify::Notifier::config_for）。**没有**进程级兜底。
         let cancel_slot = notify::cancel_slot();
-        let sink: Arc<dyn EventSink> = if notify::configured(self.notify_webhook.as_deref()) {
-            // 推送打的是**用户自己配的外部地址**，云盘凭据一个都不能给：
-            // 与 smid 的裸传输同一条理由（见上面 smid_http 的说明）。
-            let notify_http: Arc<dyn HttpClient> = Arc::new(
-                mcloud_upstream::ReqwestClient::new(mcloud_upstream::ClientProfile {
-                    timeout_secs: self.timeout_secs,
-                    ..Default::default()
-                })
-                .map_err(|e| mcloud_core::Error::Network(format!("构建推送客户端失败：{e}")))?,
-            );
-            notify::decorate(
-                Arc::clone(&hub) as Arc<dyn EventSink>,
-                self.notify_webhook.clone(),
-                notify_http,
-                Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>,
-                Arc::clone(&cancel_slot),
-            )
-        } else {
-            Arc::clone(&hub) as Arc<dyn EventSink>
-        };
+        // 推送打的是**用户自己配的外部地址**，云盘凭据一个都不能给：
+        // 与 smid 的裸传输同一条理由（见上面 smid_http 的说明）。
+        let notify_http: Arc<dyn HttpClient> = Arc::new(
+            mcloud_upstream::ReqwestClient::new(mcloud_upstream::ClientProfile {
+                timeout_secs: self.timeout_secs,
+                ..Default::default()
+            })
+            .map_err(|e| mcloud_core::Error::Network(format!("构建推送客户端失败：{e}")))?,
+        );
+        let sink: Arc<dyn EventSink> = notify::decorate(
+            Arc::clone(&hub) as Arc<dyn EventSink>,
+            Arc::clone(&store) as Arc<dyn mcloud_core::AccountStore>,
+            notify_http,
+            Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>,
+            Arc::clone(&cancel_slot),
+        );
 
         let runner = Arc::new(mcloud_engine::Runner::new(
             Arc::clone(&registry),

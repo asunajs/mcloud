@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::push::PushConfig;
+
 /// 账号标识，通常是手机号。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AccountId(pub String);
@@ -173,6 +175,32 @@ pub struct AccountSettings {
 
     /// 直播口令。
     pub kouling_enabled: bool,
+
+    /// 推送渠道：这个账号的运行结果推到**哪些**渠道（每账号一份）。
+    ///
+    /// # 为什么是**每账号**而不是进程级
+    ///
+    /// 「结果发给谁」是账号自己的属性：同一台机器上可以既有归本人的账号、
+    /// 也有代跑的账号，它们不该被迫共用一个收件地址；同一进程里 A、B 两个
+    /// 账号也必须能各配各的渠道。而进程级 env 只能有一份 —— 那是**串号**：
+    /// A 的渠道会被套到 B 的运行上（见 `mcloud-core::push` 模块头）。
+    ///
+    /// ⇒ **本仓刻意不做进程级兜底**：那种「一份 env 管全进程」的配置已整个删除。
+    /// `None`（默认）⇒ 这个账号没配渠道 ⇒ **一个包都不发**（无 fallback）。
+    ///
+    /// ⚠ 与 TS 的差异：`mcloud-sign`（单用户）有一份全局配置，那是为了 DRY；
+    /// 本仓多用户 ⇒ 收件地址只能落在**账号维度**。TS 那种「一份配置套多个
+    /// 账号」的正确形态是**用户级模板**，本版**没做**（见 `mcloud-core::push`
+    /// 的未做项），绝不把它偷偷实现成 fallback。
+    ///
+    /// ⚠ `skip_serializing_if` 是刻意的：`None` 不该落盘成一个显式的
+    /// `null`，否则"没配"与"配成空"在老数据里分不开。
+    ///
+    /// ⚠ 半成品字段 `notify_webhook`（单个 webhook 串）不再被读取：serde 默认
+    /// 忽略未知键，旧值会被**静默丢弃** —— 那是刻意的，那份模型语义错误
+    /// （进程级兜底 = 串号），不做兼容迁移。要配就按 `PushConfig` 重配。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<PushConfig>,
 }
 
 impl Default for AccountSettings {
@@ -189,6 +217,8 @@ impl Default for AccountSettings {
             hc1t_target_rank: 500,
             play_ai_enabled: true,
             kouling_enabled: false,
+            // 默认不配推送渠道：与"未配置就零行为"同一条 —— 装完不该有包发出去。
+            notify: None,
         }
     }
 }
@@ -307,6 +337,41 @@ mod tests {
         assert!(!s.hc1t_enabled);
         assert!(!s.kouling_enabled);
         assert_eq!(s.refresh_token_days, 10);
+        assert_eq!(s.notify, None, "默认不该给任何账号配推送渠道");
+    }
+
+    /// 推送渠道落盘：配了就留得住，没配就不占格子。
+    ///
+    /// 这条是"每账号"的回归 —— 若把它做成进程级 env，这一列就不存在，
+    /// 两个账号的 JSON 也分不出来谁该收到通知。
+    #[test]
+    fn notify_config_is_per_account_and_absent_when_unset() {
+        let mut s = AccountSettings::default();
+        let without = serde_json::to_string(&s).unwrap();
+        assert!(
+            !without.contains("notify"),
+            "没配时不该写进 JSON：{without}"
+        );
+
+        s.notify = Some(serde_json::from_str(r#"{"serverChan":{"token":"tk"}}"#).unwrap());
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(
+            json.contains(r#""notify":"#) && json.contains(r#""serverChan":{"token":"tk"}"#),
+            "实得：{json}"
+        );
+        let back: AccountSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.notify, s.notify);
+    }
+
+    /// 旧半成品字段 `notify_webhook` 不再被读取（未知键忽略）。
+    ///
+    /// 这是"没有兜底、也不迁移错误模型"的回归：那个字段代表的是
+    /// 「进程级兜底」，正是串号的来源，绝不让它复活成任何推送配置。
+    #[test]
+    fn legacy_notify_webhook_is_ignored() {
+        let s: AccountSettings =
+            serde_json::from_str(r#"{"notify_webhook":"https://old.test/hook"}"#).unwrap();
+        assert_eq!(s.notify, None, "旧字段不许复活成推送配置");
     }
 
     // ── 平台形态 ────────────────────────────────────────────────────────
