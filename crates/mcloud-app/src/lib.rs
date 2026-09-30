@@ -7,6 +7,7 @@ pub mod auth_refresh;
 pub mod builder;
 pub mod hub;
 pub mod login;
+pub mod notify;
 pub mod sink;
 pub mod smid;
 

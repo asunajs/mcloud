@@ -16,9 +16,13 @@ async fn main() -> anyhow::Result<()> {
 
     let data_dir = std::env::var("MCLOUD_DATA_DIR").unwrap_or_else(|_| "data".to_string());
     let addr = std::env::var("MCLOUD_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+    // 推送渠道的 webhook。**没配就完全没有任何行为** —— 空串 / 纯空白也算没配
+    // （判据在 mcloud_app::notify，见其模块头）。这是这个功能的可撤性。
+    let notify_webhook = std::env::var("MCLOUD_NOTIFY_WEBHOOK").ok();
 
     let app = mcloud_app::AppBuilder::new()
         .data_dir(&data_dir)
+        .notify_webhook(notify_webhook)
         .build()
         .context("组装应用失败")?;
 
