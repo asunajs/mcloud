@@ -87,7 +87,52 @@
 
 ## 2. Rust 部分
 
-（见 §2.x —— 独立复核中，未完成前不写结论）
+### 2.0 先校准可信度
+
+我对 Rust 侧做了**一次便宜但独立的抽查**（全部 grep/read 级），挑的都是 review 标 ★ 的：
+
+| 抽查项 | review 的主张 | 我看到的 | 结论 |
+|---|---|---|---|
+| `Error::AuthExpired` | "全仓零构造点" | 只出现在 `core/error.rs:17`（定义）、`:70`（`is_auth_failure` 的 match 臂）、`server/error.rs:27`（另一个 match 臂）—— **没有任何构造** | **成立** |
+| `is_auth_failure()` | "零调用者" | 全仓只有 `core/error.rs:68` 的定义 | **成立** |
+| `EventHub` 的 `forget`/`unsubscribe` | "生产路径零调用点" | 唯一的 `.forget(` 是 `engine/runner.rs:278` 的 `self.artifacts.forget(...)` —— **不同对象**，不是 EventHub | **成立** |
+| `deny_unknown_fields` | "全仓 0 处" | `grep -rc` 无任何非零命中 | **成立** |
+| `remove_account` | "只级联 state + smid，不动 schedules/pipelines" | `json_store.rs:513-524`：只有 `state.remove` / `smid.remove` + 各自 persist | **成立** |
+
+⇒ **五条全中**。这不能证明它全对，但足以说明它的 ★ 不是随手标的，Rust 侧的其余条目
+应当按"待复核"而不是"待怀疑"来对待。以下按我能给出的把握分级。
+
+### 2.1 我认可、且认为应当**优先修**的三条（后果不可逆或长期累积）
+
+| 结论 | 为什么排前面 |
+|---|---|
+| §3.1 ★ `auth_refresh.rs:173-180` 刷新成功后 `expire` 永不推进 | 若成立，`decide()` 下次仍判"该刷" ⇒ **反复真轮换凭据**。这是全篇唯一"每跑一轮就多一次不可逆动作"的条目。它给的解释很具体（把明文 `platform:phone:token` 喂给契约要求 base64 整串的 `parse_auth`，而 `node_like_b64_decode` 会**丢掉 `:`**），且指出既有测试覆盖三档判据却**没覆盖 `rotate()` 的 expire 再推导** —— 这种"测试正好差一格"的说法值得优先验 |
+| §3.2 session_source.rs `90001` 刷新后重放非幂等写 | 唯一能让"下单/领奖"类写请求**双发**的路径，而重放安全的前提（"回 90001 ⇒ 上游没执行过"）本仓自己的 `describe()` 就说是"被挡下"而非"未执行" ⇒ **未证实且后果最重**。它自己列进了 §6 未证实格，处理得当 |
+| §3.2 exchange/app-task/app-task-matrix 无服务端门 | "不可逆动作只有 UI 确认、没有服务端确认"，且 CLI 完全绕过登录闸 ⇒ 绕过专用页即可触发。这条即使细节有偏差，方向也值得当硬伤看 |
+
+### 2.2 我认可、属于"工程债"的（按它的 §5 顺序即可）
+
+`remove_account` 不级联 schedules/pipelines（2.0 已验）；`scheduler.rs:273` 那行顺序无回归保护
+（我核到 `advance_watermark` 只在 `:259/:273` 被调、`:286` 定义，**没有测试引用 `tick()`/`fire()`**）；
+`hub.rs` 内存单调增长（2.0 已验）；`write_atomic` 无 `fsync`；`json_store` 无 schema 版本；
+`builder.rs:177` 的 `.expect()` 与 `panic="abort"` 组合；WS 握手无超时；`hub`/`sso` 取票无 single-flight；
+`verify_password` 同步跑 argon2 且无节流；`users.json`/`sessions.json` 不在权限收紧清单。
+
+### 2.3 我**拒绝**或降级的
+
+| 原结论 | 裁决 | 理由 |
+|---|---|---|
+| §3.5#5 "TLS 装置空转（两套 client 同一后端，只剩两个 cookie jar）" | **成立，但我已在 `4611590` 处理了一半** | HTTP 侧与 WS 侧都已只编 `native-tls`（`cargo tree -i rustls` 直接报"没有这个包"）；`LEGACY_TLS_HOSTS` 现在确实是空转，**我没删**：删它要动请求路径的选择逻辑，属独立一笔。四处 rustls 旧注释里我改了两处（`client.rs` / `live_consts.rs`），`live_ws_client.rs` 与 `mcloud-upstream/Cargo.toml` 那两处**待改** |
+| §3.5#6 "`release.yml`（275 行，从未跑过）" | **已过期** | 该工作流此后已跑 **4 次**全部三平台成功（`36576841340` 起）。它列的三个具体问题我分别处理了：tag 校验（已加早失败）、权限收窄（已只给 release job）、Linux 可移植性（已在 `usage.md` 说明 glibc/libssl 下限） |
+| §3.5#8 `panic="abort"` + `strip=true` 的代价 | **成立，我接受这个批评** | 这是我用体积换来的（release 从 8.1 MiB 降到约 3.6 MiB，−50%）。**不打算回退**，但 `strip = true` 可以考虑放宽成 `strip = "debuginfo"`（保符号、崩溃报告可读、体积涨一点）—— **待用户定** |
+| §3.5#12 "`usage.md:41` 实际输出 `data_dir=data`（无引号）" | **不成立** | 实跑 release 二进制的输出是 `data_dir="/tmp/logprobe"`；`tracing` 对 `&str` 走 `Debug`，**一定带引号** |
+
+### 2.4 独立复核状态（如实交代）
+
+我另派了一路**独立的 Rust 复核**（逐条对 §3.1–§3.5 取证），到本文写完时**尚未返回**，
+所以 §2 里除 2.0 那五条外，**没有一条是我亲手验的** —— 都是"按它给的 file:line 读下来
+判断可信"。这不是采信，是分级。Rust 侧要真正落刀前，先按 2.1 的三条各做一次
+"先复现再改"（尤其 `auth_refresh` 的 expire 与 `90001` 重放）。
 
 ---
 
