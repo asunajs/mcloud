@@ -1,12 +1,12 @@
 {
-  "name": "mcloud-gost-web",
+  "name": "mcloud-web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "mcloud-gost WebUI —— 自研 lite 框架（无虚拟 DOM + 编译期优化）+ TSX + daisyUI",
+  "description": "mcloud WebUI —— 自研 lite 框架（无虚拟 DOM + 编译期优化）+ TSX + daisyUI",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/gzip-sidecars.mjs",
     "preview": "vite preview",
     "typecheck": "tsmc --noEmit"
   },
