@@ -139,7 +139,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
             # ⚠ git tag 允许斜杠（`v1/2` 之类），而 VERSION 会被拼进文件名与目录名
-            # （`mcloud-gost-v<VERSION>-<target>/`）⇒ 斜杠会让后面每一步的路径都错位。
+            # （`mcloud-v<VERSION>-<target>/`）⇒ 斜杠会让后面每一步的路径都错位。
             # 在这里**早失败**，而不是等打包时报一堆看不懂的路径错误。
             if [[ "$VERSION" == */* || "$VERSION" == *" "* ]]; then
               echo "::error::tag 名不能含 '/' 或空格（当前 '${GITHUB_REF_NAME}'）——它会拼进产物文件名"
@@ -149,7 +149,7 @@ jobs:
             VERSION="$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "PKG=mcloud-gost-v${VERSION}-${{ matrix.target }}" >> "$GITHUB_ENV"
+          echo "PKG=mcloud-v${VERSION}-${{ matrix.target }}" >> "$GITHUB_ENV"
 
       # ── 压缩二进制：**只有 Linux 与 Windows** ────────────────────────────
       #
@@ -269,7 +269,7 @@ jobs:
             ## 快速开始
 
             ```bash
-            tar -xJf mcloud-gost-<版本>-<你的平台>.tar.xz     # Windows 用 Expand-Archive 解 .zip
+            tar -xJf mcloud-<版本>-<你的平台>.tar.xz          # Windows 用 Expand-Archive 解 .zip
             ./mcloud-server                                   # 没有子命令，直接跑
             ```
 

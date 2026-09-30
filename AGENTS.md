@@ -2,7 +2,24 @@
 
 ## 这个仓库是什么
 
-`mcloud-gost` 是**中国移动云盘（移动云盘）的自动化工具**。
+`mcloud` 是**中国移动云盘（移动云盘）的自动化工具**。
+
+> 命名：**本仓（Rust）就叫 `mcloud`**（crate 名一律 `mcloud-*`）。
+> 下文提到「Go 参考实现」时也写作 `mcloud` —— 那是**另一份** Go 实现，
+> 与本仓同名不同物；凡可能歧义的地方一律带上「Go 参考实现」字样。
+>
+> ⚠ **改名（2026-09-30，用户口径）**：本仓原名 `mcloud-gost`，现已**全部收口** ——
+> 源码 / WebUI / 文档 / **发布产物名**（`mcloud-v<版本>-<target>`）都换成了 `mcloud`。
+> **规则：再发现残留就顺手改掉**，别攒着做全仓大改。
+> 查残留：`grep -rn mcloud-gost --exclude-dir={.git,target,node_modules} .`
+> —— 除了**本段说明**必须引用旧名（否则「改了什么」就无从说起），功能面应当 0 命中。
+>
+> 三处**一次性副作用**（不是 bug，别当回归去查）：
+> ① 主题偏好的 localStorage 键 `mcloud-gost-theme` → `mcloud-theme` ⇒ 老用户第一次打开会
+> 回落成「跟随系统」，之后重新记住；
+> ② 通知 webhook 载荷里的 `source` 字段 `"mcloud-gost"` → `"mcloud"`（`mcloud-app::notify`），
+> 收方若按它分流要跟着改；
+> ③ `/api/status` 的 `name` 字段同理 —— 侧栏那行「mcloud v0.1.0」要**重编译后**才变。
 
 ⇒ **访问云盘本身、读写它的接口、抓包分析它的协议，就是这个项目的正常工作内容。**
 不需要为"要动用户的云盘数据了"而反复征求确认 —— 那是任务本身，不是风险动作。
@@ -15,7 +32,8 @@
 那个弹窗是 **macOS 的 TCC** 发的（服务名 `kTCCServiceSystemPolicyRemovableVolumes`），
 **跟 DSH 的权限配置毫无关系**。改 `~/.dsh/` 里的 sandbox/approval 是白费功夫。
 
-成因：工作区在**外置硬盘**上（`/Users/catlair/mobile`，USB 挂载的 APFS 卷）。
+成因：工作区在**外置盘**上（USB 挂载的 APFS 卷这类**可移除宗卷**；
+`pwd` 落在挂载点下就是这种情形）。
 macOS 对可移除宗卷有隐私保护，可执行文件访问它就要授权。
 
 ### 真正的放大器是 launchd 的 `KeepAlive`
@@ -23,7 +41,7 @@ macOS 对可移除宗卷有隐私保护，可执行文件访问它就要授权�
 仓库的 WebUI 由用户级 launchd 代理托管：
 
 ```
-~/Library/LaunchAgents/com.catlair.mcloud-webui.plist
+~/Library/LaunchAgents/<label>.plist        # 形如 com.<用户名>.mcloud-webui
   ProgramArguments → <仓库>/target/debug/mcloud-server   （外置盘）
   KeepAlive: true                                        ← 挂掉立刻重拉
 ```
@@ -40,7 +58,7 @@ macOS 对可移除宗卷有隐私保护，可执行文件访问它就要授权�
 
 ```bash
 launchctl list | grep mcloud-webui     # 第 2 列非 0 ⇒ 上次退出码非0，正在重试
-tail -5 ~/Library/Logs/mcloud-gost/webui.err.log   # 找 "Address already in use"
+tail -5 ~/Library/Logs/<label>/webui.err.log       # 找 "Address already in use"
 log show --last 2m --predicate 'subsystem == "com.apple.TCC"' --style compact \
   | grep RemovableVolumes | grep -c PROMPTING      # 期望 0
 ```
@@ -107,7 +125,7 @@ inode=2364362 mtime=1790581118 size=38401616    ← 两次完全一致
 
 写任何上游协议时，**依据的优先级**是：
 
-1. **`mcloud-sign`**（`/Users/catlair/Documents/workspace/mcloud-sign`，旧 TS 实现）
+1. **`mcloud-sign`**（旧 TS 实现，单独一个工作区，**不在本仓内**）
    —— 它**能跑**，照它写**完全可以**。
 2. 真机抓包 / 参考实现的 `docs/capture`
 3. 推断
@@ -119,7 +137,7 @@ inode=2364362 mtime=1790581118 size=38401616    ← 两次完全一致
 ⚠ 反过来也成立：`mcloud-sign` 里**没有**的步骤（例如某条链它压根不建会话），
 要当成"我们可能多做了"的线索去查，而不是"我们有、它没有 ⇒ 我们对"。
 
-⚠⚠ **不要把 Go 参考实现（`/Users/catlair/mobile/workspace/mcloud`）的代码形状搬过来。**
+⚠⚠ **不要把 Go 参考实现（`mcloud`，另一份 Go 代码）的形状搬过来。**
 用户口径（2026-09-28）：「**不需要按照 go 的语法写**」。
 
 Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过哪些坑、哪些格子有读数**"——
