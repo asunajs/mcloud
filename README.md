@@ -1,4 +1,4 @@
-# mcloud-gost
+# mcloud
 
 移动云盘（中国移动云盘 / 139）自动化平台。后端 **Rust**，前端 **Vue Vapor + TSX**。
 
