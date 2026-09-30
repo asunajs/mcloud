@@ -42,6 +42,28 @@
 //! 那层的判定依据是响应头里的 `Content-Type`，所以 `Content-Type` 必须准确，
 //! 否则会被当成不可压类型（如 `application/octet-stream`）跳过。
 //!
+//! ## 2026-09-30：改成**优先发构建期的 `.gz` 边车**
+//!
+//! `CompressionLayer` 是**每请求现压**，而这一步在 debug 构建下贵得离谱。
+//! 实测同一个 130,575 B 的 JS 产物（本机）：
+//!
+//! | 路径 | 耗时 |
+//! |---|---|
+//! | 不压（identity） | 4.8 ms |
+//! | 每请求现压 gzip（串行） | 45.9–60.6 ms |
+//! | 每请求现压 gzip（并发 10） | **86 ms p50 / 114 RPS** |
+//! | 离线压一次（同机 zlib） | 3.4–4.9 ms，**只花一次** |
+//!
+//! 所以现在：`npm run build` 会顺带产出 `<产物>.gz`（`web/scripts/gzip-sidecars.mjs`），
+//! 这里在客户端声明 `accept-encoding: gzip` 时**直接发那份边车** —— 一次压缩都不做。
+//!
+//! ⚠ 两条路都要留着：边车缺一份（旧的 `dist`、或将来某类产物没被脚本覆盖）时
+//! 仍然退回 `CompressionLayer` 现压。否则"没边车 = 不压缩"，等于把缺陷还回去。
+//!
+//! ⚠ 边车必须与产物**同批**生成（所以挂在 `npm run build` 后面而不是一个独立命令）：
+//! debug 构建下服务端是运行时读盘的，`dist` 里"新 JS + 旧边车"会立刻发出过期字节 ——
+//! 而 `assets/*` 带内容哈希，这种不一致不会报错，只会让人看到旧页面。
+//!
 //! ## 缓存：`assets/` 与 `index.html` 必须**相反**地对待
 //!
 //! Vite 给产物文件名带**内容哈希**，于是同一 URL 的字节永不改变 ——
@@ -55,7 +77,7 @@
 //! 判据是**路径前缀**而不是文件名：`assets/` 是 Vite 的产物目录约定，
 //! `index.html` 在根。这个区分写死在这里，比"猜哪些文件带哈希"可靠。
 
-use axum::http::{header, HeaderValue, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 
@@ -84,12 +106,21 @@ const NO_CACHE: &str = "no-cache";
 /// SPA 路由用的是 hash（`#/tasks`），真实路径永远只有 `/`，
 /// 因此**不需要**为任意路径回落 `index.html`；这里只在
 /// 资产不存在且请求的不是 `/api/*` 时回落，保证刷新页面不 404。
-pub async fn serve(uri: Uri) -> Response {
+///
+/// `headers` 只用来判一件事：客户端要不要 gzip（要就发 `.gz` 边车）。
+pub async fn serve(uri: Uri, headers: HeaderMap) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
 
     if let Some(content) = WebAssets::get(path) {
-        return asset_response(path, content.data.into_owned());
+        // 有边车就发边车：一次压缩都不做（见模块头那张实测表）。
+        // 没有就发原文，交给 `CompressionLayer` 现压 —— 行为与改造前一致。
+        if accepts_gzip(&headers) {
+            if let Some(gz) = WebAssets::get(&format!("{path}.gz")) {
+                return asset_response(path, gz.data.into_owned(), Some("gzip"));
+            }
+        }
+        return asset_response(path, content.data.into_owned(), None);
     }
 
     // ⚠⚠ **`assets/` 下的未命中必须是 404，不能回落 SPA**（2026-09-29 实测的缺陷）。
@@ -118,7 +149,16 @@ pub async fn serve(uri: Uri) -> Response {
     match WebAssets::get("index.html") {
         // ⚠ 回落也必须发 `no-cache`：`/#/tasks` 刷新走的就是这条路径，
         // 漏掉它等于"首页不缓存、深层路由缓存"，问题只会藏得更深。
-        Some(content) => asset_response("index.html", content.data.into_owned()),
+        // 入口 HTML 同样吃边车：它每次都要回源校验，而这 4 KB 的压缩
+        // 在现压路径上也要 1.8 ms（identity 只要 0.56 ms）。
+        Some(content) => {
+            if accepts_gzip(&headers) {
+                if let Some(gz) = WebAssets::get("index.html.gz") {
+                    return asset_response("index.html", gz.data.into_owned(), Some("gzip"));
+                }
+            }
+            asset_response("index.html", content.data.into_owned(), None)
+        }
         // 前端还没构建：明确说出来，别给一个空白 404 让人以为是后端坏了
         None => (
             StatusCode::NOT_FOUND,
@@ -128,12 +168,50 @@ pub async fn serve(uri: Uri) -> Response {
     }
 }
 
+/// 客户端是否接受 `gzip`（也认 `x-gzip`，历史上有的客户端只发这个别名）。
+///
+/// 判据是 RFC 9110 的那套：`Accept-Encoding: gzip;q=0` 表示**明确不要** ——
+/// 只看"出现没出现 gzip"会把它当成要，于是给一个不能解压的客户端发了压缩体。
+/// 这里只解析到 q 值，不实现通配符 `*` 的完整协商：本服务只提供 gzip 与 identity
+/// 两种，而 `*` 在浏览器里从不是"只接受 gzip"的表达方式。
+fn accepts_gzip(headers: &HeaderMap) -> bool {
+    for value in headers.get_all(header::ACCEPT_ENCODING) {
+        let Ok(value) = value.to_str() else { continue };
+        for part in value.split(',') {
+            let mut segments = part.split(';');
+            let name = segments.next().unwrap_or("").trim();
+            if !name.eq_ignore_ascii_case("gzip") && !name.eq_ignore_ascii_case("x-gzip") {
+                continue;
+            }
+            let refused = segments.any(|param| {
+                let param = param.trim();
+                match param.split_once('=') {
+                    // ⚠ 必须按**数值**判 q，不能看首字符是不是 '0'：
+                    // `q=0.5` 是"能接受、次优先"，按首字符判会把它当成拒绝。
+                    // （这条是写测试时才发现的：`br;q=1, gzip;q=0.5` 一开始被判成 no。）
+                    Some((key, q)) => {
+                        key.trim().eq_ignore_ascii_case("q")
+                            && q.trim().parse::<f32>().map(|v| v <= 0.0).unwrap_or(false)
+                    }
+                    None => false,
+                }
+            });
+            return !refused;
+        }
+    }
+    false
+}
+
 /// 组装一个静态资产的响应：准确的 `Content-Type` + 对应的缓存策略。
 ///
 /// `Content-Type` 除了给浏览器，还是**压缩层的开关**
 /// （`CompressionLayer` 按类型判断可压性）—— 这里刻意走 `mime_guess`，
 /// 不硬编码，免得新增产物类型时被静默跳过压缩。
-fn asset_response(path: &str, body: Vec<u8>) -> Response {
+///
+/// `encoding` 是我们要发的那份边车的编码（`Some("gzip")`）。⚠ 传进来的是**原始
+/// 路径**（`assets/x.js`）而不是边车路径，所以 `Content-Type` 仍是 `text/javascript`：
+/// 若按 `x.js.gz` 去猜类型会得到 `application/gzip`，浏览器会拒绝执行它。
+fn asset_response(path: &str, body: Vec<u8>, encoding: Option<&'static str>) -> Response {
     let mime = mime_guess::from_path(path).first_or_octet_stream();
 
     // 用 `essence_str` 比较：`mime_guess` 对 `.html` 给的是不带参数的
@@ -150,7 +228,7 @@ fn asset_response(path: &str, body: Vec<u8>) -> Response {
         NO_CACHE
     };
 
-    (
+    let mut response = (
         StatusCode::OK,
         [
             (
@@ -159,10 +237,20 @@ fn asset_response(path: &str, body: Vec<u8>) -> Response {
                     .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
             ),
             (header::CACHE_CONTROL, HeaderValue::from_static(cache)),
+            // 同一个 URL 会因 `accept-encoding` 而不同 ⇒ 必须声明 vary，
+            // 否则中间缓存（或浏览器自己的缓存）可能把压缩体发给不支持它的客户端。
+            (header::VARY, HeaderValue::from_static("accept-encoding")),
         ],
         body,
     )
-        .into_response()
+        .into_response();
+
+    if let Some(encoding) = encoding {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_ENCODING, HeaderValue::from_static(encoding));
+    }
+    response
 }
 
 /// 内嵌资产集是否非空（即前端是否已构建）。
@@ -188,6 +276,15 @@ pub fn find_hashed_asset(ext: &str) -> Option<String> {
     WebAssets::iter()
         .find(|p| p.starts_with("assets/") && p.ends_with(ext.as_str()))
         .map(|p| p.to_string())
+}
+
+/// 测试用的简写：**不声明 `accept-encoding`**（即走"原文"那条路）。
+///
+/// 绝大多数老测试关心的是缓存头 / 状态码 / Content-Type，与压缩无关；
+/// 让它们继续一眼能读懂，比每处都手写一个空 `HeaderMap` 好。
+#[cfg(test)]
+async fn serve_plain(uri: Uri) -> Response {
+    serve(uri, HeaderMap::new()).await
 }
 
 #[cfg(test)]
@@ -270,7 +367,7 @@ mod tests {
         // assets/ 下取一个真实文件
         if let Some(asset) = find_hashed_asset(".css").or_else(|| find_hashed_asset(".js")) {
             let resp =
-                serve(axum::http::Uri::from_maybe_shared(format!("/{asset}")).unwrap()).await;
+                serve_plain(axum::http::Uri::from_maybe_shared(format!("/{asset}")).unwrap()).await;
             let cc = resp
                 .headers()
                 .get(header::CACHE_CONTROL)
@@ -283,7 +380,7 @@ mod tests {
             );
         }
         for uri in ["/", "/deep/route"] {
-            let resp = serve(axum::http::Uri::from_maybe_shared(uri).unwrap()).await;
+            let resp = serve_plain(axum::http::Uri::from_maybe_shared(uri).unwrap()).await;
             let cc = resp
                 .headers()
                 .get(header::CACHE_CONTROL)
@@ -302,7 +399,8 @@ mod tests {
             return;
         }
         if let Some(js) = find_hashed_asset(".js") {
-            let resp = serve(axum::http::Uri::from_maybe_shared(format!("/{js}")).unwrap()).await;
+            let resp =
+                serve_plain(axum::http::Uri::from_maybe_shared(format!("/{js}")).unwrap()).await;
             let ct = resp
                 .headers()
                 .get(header::CONTENT_TYPE)
@@ -311,7 +409,7 @@ mod tests {
                 .to_string();
             assert_eq!(ct, "text/javascript", "JS 的 Content-Type 不对：{ct}");
         }
-        let resp = serve(axum::http::Uri::from_maybe_shared("/").unwrap()).await;
+        let resp = serve_plain(axum::http::Uri::from_maybe_shared("/").unwrap()).await;
         let ct = resp
             .headers()
             .get(header::CONTENT_TYPE)
@@ -319,6 +417,119 @@ mod tests {
             .unwrap_or_default()
             .to_string();
         assert_eq!(ct, "text/html; charset=utf-8");
+    }
+
+    /// ⭐ 有边车时必须**直接发边车**，一次压缩都不做。
+    ///
+    /// 这条测试**没有挂 `CompressionLayer`** —— 所以能拿到 `content-encoding: gzip`，
+    /// 只可能是"边车被发出来了"。顺带钉住三件容易写错的事：
+    /// 类型仍是 `text/javascript`（按 `x.js.gz` 去猜会得到 `application/gzip`，
+    /// 浏览器会拒绝执行）、缓存头不变、`vary` 在位。
+    #[tokio::test]
+    async fn precompressed_sidecar_is_served_as_is() {
+        use http_body_util::BodyExt as _;
+
+        if !has_built_assets() {
+            return;
+        }
+        let Some(js) = find_hashed_asset(".js") else {
+            return;
+        };
+        let Some(gz) = WebAssets::get(&format!("{js}.gz")) else {
+            eprintln!("跳过：{js}.gz 不存在（这份 dist 不是 `npm run build` 产出的）");
+            return;
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("gzip, deflate, br, zstd"),
+        );
+        let resp = serve(Uri::from_maybe_shared(format!("/{js}")).unwrap(), headers).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_ENCODING)
+                .map(|v| v.as_bytes()),
+            Some(b"gzip".as_slice()),
+            "有边车就该发边车"
+        );
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/javascript"),
+            "Content-Type 必须按原始路径判断，不能变成 application/gzip"
+        );
+        assert!(
+            resp.headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .contains("immutable"),
+            "缓存策略不该被这次改造影响"
+        );
+        assert_eq!(
+            resp.headers()
+                .get(header::VARY)
+                .and_then(|v| v.to_str().ok()),
+            Some("accept-encoding")
+        );
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            &body[..2],
+            &[0x1f, 0x8b],
+            "边车应当是 gzip 流（magic 1f 8b）"
+        );
+        assert_eq!(
+            body.len(),
+            gz.data.len(),
+            "发的应当是边车本身的字节，而不是现压的结果"
+        );
+    }
+
+    /// 不声明 gzip 的客户端拿到**原文**：不能把边车塞给不会解压的客户端。
+    #[tokio::test]
+    async fn client_without_gzip_gets_the_plain_bytes() {
+        use http_body_util::BodyExt as _;
+
+        if !has_built_assets() {
+            return;
+        }
+        let Some(js) = find_hashed_asset(".js") else {
+            return;
+        };
+
+        let resp = serve_plain(Uri::from_maybe_shared(format!("/{js}")).unwrap()).await;
+        assert!(resp.headers().get(header::CONTENT_ENCODING).is_none());
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let raw = WebAssets::get(&js).expect("刚找到的资产").data;
+        assert_eq!(body.as_ref(), raw.as_ref(), "应当是逐字节的原文");
+    }
+
+    /// `accept-encoding` 的判定：要 / 不要 / **明确拒绝（q=0）**。
+    ///
+    /// `q=0` 这条是真会咬人的：只看"出现没出现 gzip"，就会把压缩体发给一个
+    /// 明确说不要的客户端，而它解不开 —— 表现为"页面白屏，控制台语法错误"。
+    #[test]
+    fn accept_encoding_parsing_handles_the_q_zero_trap() {
+        let hv = |s: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::ACCEPT_ENCODING, HeaderValue::from_str(s).unwrap());
+            h
+        };
+        assert!(
+            accepts_gzip(&hv("gzip, deflate, br, zstd")),
+            "浏览器默认就长这样"
+        );
+        assert!(accepts_gzip(&hv("x-gzip")), "老客户端只发这个别名");
+        assert!(accepts_gzip(&hv("br;q=1, gzip;q=0.5")));
+        assert!(!accepts_gzip(&hv("gzip;q=0")), "q=0 是明确不要");
+        assert!(!accepts_gzip(&hv("gzip; q=0.0")));
+        assert!(!accepts_gzip(&hv("deflate, br")), "没声明 gzip 就不发边车");
+        assert!(!accepts_gzip(&HeaderMap::new()), "连头都没有");
     }
 }
 
@@ -334,7 +545,7 @@ mod assets_404_tests {
             "/assets/index-DOESNOTEXIST.js",
             "/assets/index-DOESNOTEXIST.css",
         ] {
-            let res = serve(Uri::from_static(uri)).await;
+            let res = serve_plain(Uri::from_static(uri)).await;
             assert_eq!(res.status(), StatusCode::NOT_FOUND, "{uri} 应当 404");
         }
     }
@@ -342,7 +553,7 @@ mod assets_404_tests {
     /// 看起来是文件的路径（末段带点）同样 404：把 HTML 当图标/脚本发出去属于误导。
     #[tokio::test]
     async fn file_like_miss_is_404() {
-        let res = serve(Uri::from_static("/favicon.ico")).await;
+        let res = serve_plain(Uri::from_static("/favicon.ico")).await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
@@ -354,7 +565,7 @@ mod assets_404_tests {
             eprintln!("跳过：web/dist 未构建");
             return;
         }
-        let res = serve(Uri::from_static("/some/deep/route")).await;
+        let res = serve_plain(Uri::from_static("/some/deep/route")).await;
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(
             res.headers()

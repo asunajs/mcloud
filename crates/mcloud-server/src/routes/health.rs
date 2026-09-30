@@ -40,6 +40,11 @@ pub struct ServiceStatus {
     pub task_count: usize,
     /// 最近一次运行；没有则为 `null` —— 前端按 falsy 处理，不会去调方法。
     pub last_run: Option<mcloud_core::RunRecord>,
+    /// 本进程**开始服务**的时刻（epoch 毫秒）—— 界面据此算「运行时间」。
+    ///
+    /// 给的是**时刻**而不是"已经跑了多少秒"：一份读数能自己往前长，
+    /// 而一个标量在下一次取数之前只会越来越假（页面不轮询）。
+    pub started_at_ms: i64,
     /// 调度循环是否真的在跑。
     ///
     /// 这是**运行时实况**，不是配置项：配置写着 enabled 而循环其实没跑，
@@ -85,6 +90,7 @@ pub async fn status(State(state): State<ServerState>) -> Json<ServiceStatus> {
         version: env!("CARGO_PKG_VERSION"),
         task_count: state.handle.registry.len(),
         last_run,
+        started_at_ms: state.started_at_ms,
         scheduler_running: state.handle.scheduler.state() == mcloud_engine::SchedulerState::Running,
         running_count: state.handle.cancel.running_count(),
         schedule_count,

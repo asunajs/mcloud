@@ -260,6 +260,92 @@ async fn state_broadcast_works_without_external_subscribers() {
     handle.abort();
 }
 
+// ── 优雅停止 ────────────────────────────────────────────────────────────
+
+/// 一个只关心"跑没跑、停没停"的调度器：存储、网络、事件出口都是空壳。
+///
+/// 抽出来是因为下面两条测试要重复"起循环 → 等 Running → 停"这套动作，
+/// 而它们关心的是**停止通道通不通**，不是调度逻辑本身。
+fn bare_scheduler() -> Arc<Scheduler> {
+    use crate::registry::Registry;
+    use crate::runner::{HttpClientFactory, Runner};
+    use mcloud_core::testkit::FixedClock;
+    use mcloud_core::{Account, EventSink, HttpClient, RunEvent, Store};
+    use std::sync::Arc;
+
+    struct NullSink;
+    impl EventSink for NullSink {
+        fn emit(&self, _e: RunEvent) {}
+    }
+
+    let store: Arc<dyn Store> = Arc::new(crate::pipeline::tests::MemStore::default());
+    let clock: Arc<dyn Clock> = Arc::new(FixedClock(T0));
+    let http: HttpClientFactory =
+        Arc::new(|_a: &Account| Arc::new(crate::pipeline::tests::NoHttp) as Arc<dyn HttpClient>);
+    let runner = Arc::new(Runner::new(
+        Arc::new(Registry::new()),
+        Arc::clone(&store),
+        Arc::clone(&clock),
+        Arc::new(NullSink) as Arc<dyn EventSink>,
+        http,
+    ));
+    Arc::new(Scheduler::new(store, runner, clock))
+}
+
+/// ⭐ `Scheduler::stop()` 必须真的让 `run_loop` **退出**，而且不能等到下一个 tick。
+///
+/// `TICK` 是 30 秒，而这里只给 2 秒 —— 能退出就只可能走的是停止分支。
+///
+/// 这条盯的是 2026-09-30 那个缺陷：发送端在 `new()` 里被当场丢掉，
+/// 于是 `stop.changed()` 每次都立刻返回 `Err`（就绪值），`*stop.borrow()`
+/// 又始终是 `false` ⇒ 不 break，只是**空转**。表现不是"报错"，而是
+/// 空载一核跑满（实测单线程累计 187 分钟用户态 CPU）。
+#[tokio::test]
+async fn stop_wakes_run_loop_long_before_the_next_tick() {
+    let sched = bare_scheduler();
+    let stop = sched.stop_handle();
+    let s2 = Arc::clone(&sched);
+    let handle = tokio::spawn(async move { s2.run_loop(stop).await });
+
+    for _ in 0..100 {
+        if sched.state() == SchedulerState::Running {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(sched.state(), SchedulerState::Running, "循环应当已经起来");
+
+    sched.stop();
+    tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("stop() 之后 run_loop 应在 2 秒内退出（TICK 是 30 秒 ⇒ 只可能是停止分支生效）")
+        .expect("run_loop 不该 panic");
+    assert_eq!(
+        sched.state(),
+        SchedulerState::Stopped,
+        "退出后状态应回到 Stopped"
+    );
+}
+
+/// ⭐ 停止信号在**句柄**上就能看见 —— 这等价于"发送端是活的"。
+///
+/// 旧写法（`let (_stop_tx, stop_rx) = watch::channel(false)`）在这里会拿到
+/// `Err(RecvError)`：`changed()` 在发送端消失后立刻返回 `Err`，而那正是上面
+/// 那个忙等的根。所以这条断言的是**通道不能断**，不只是"值变了"。
+#[tokio::test]
+async fn stop_handle_observes_the_signal() {
+    let sched = bare_scheduler();
+    let mut rx = sched.stop_handle();
+    assert!(!*rx.borrow(), "初始应是未停止");
+
+    sched.stop();
+    tokio::time::timeout(std::time::Duration::from_secs(1), rx.changed())
+        .await
+        .expect("stop() 之后应立即收到信号")
+        .expect("停止通道不该断开（发送端必须活着，否则 run_loop 会空转）");
+    assert!(*rx.borrow(), "收到的值应是 true");
+}
+
 // ── 下次触发时间（供前端展示）──────────────────────────────────────────
 
 #[test]

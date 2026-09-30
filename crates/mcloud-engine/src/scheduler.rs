@@ -201,6 +201,8 @@ pub struct Scheduler {
     state_tx: watch::Sender<SchedulerState>,
     /// 自己持有一份接收端，保证 `state_tx.send` 不会因为"无人订阅"而失败。
     _state_rx: watch::Receiver<SchedulerState>,
+    /// ⚠ **发送端必须活着**，否则 `run_loop` 会空转烧满一核 —— 见 `new()` 与 `stop()`。
+    stop_tx: watch::Sender<bool>,
     /// 让 `run_loop` 能被告知停止。
     stop_rx: watch::Receiver<bool>,
 }
@@ -211,13 +213,23 @@ impl Scheduler {
         // 而被忽略的 Err 会让状态永远停在 Stopped —— 界面上就是
         // "调度器明明在跑，却显示已停止"。
         let (state_tx, state_rx) = watch::channel(SchedulerState::Stopped);
-        let (_stop_tx, stop_rx) = watch::channel(false);
+        // ⚠ 停止通道的**发送端必须跟着结构体一起活**。
+        //
+        // `watch::Receiver::changed()` 在发送端被 drop 之后会**立刻**返回
+        // `Err(RecvError)`，而 `Err` 也是个"就绪"值 ⇒ `run_loop` 的 `select!`
+        // 每次都选中停止分支、`*stop.borrow()` 又是 `false`，于是空转烧满一核。
+        // 2026-09-30 实测：:3000 的 debug 服务空载一核跑满、单线程累计 187 分钟
+        // 用户态 CPU，`sample` 的热点栈正是
+        // `Scheduler::run_loop` → `poll_fn` → `watch::Receiver::changed`。
+        // 原来这里写成 `let (_stop_tx, stop_rx) = ...`，发送端当场就没了。
+        let (stop_tx, stop_rx) = watch::channel(false);
         Self {
             store,
             runner,
             clock,
             state_tx,
             _state_rx: state_rx,
+            stop_tx,
             stop_rx,
         }
     }
@@ -410,8 +422,13 @@ impl Scheduler {
         loop {
             tokio::select! {
                 _ = interval.tick() => self.tick_and_log().await,
-                _ = stop.changed() => {
-                    if *stop.borrow() {
+                // ⚠ 这里必须接住 `Err`，不能图省事写 `_ = stop.changed()`：
+                // 发送端一旦没了，`changed()` **立刻**返回 `Err(RecvError)` —— 那是个
+                // 就绪值，被 `_` 吃掉之后这个分支每次都就绪，而 `*stop.borrow()` 还是
+                // `false`（不会 break）⇒ select 退化成忙等，30 秒的 TICK 形同虚设，
+                // 空转烧满一核。发送端留在结构体里是正解，这里是第二道保险。
+                res = stop.changed() => {
+                    if res.is_err() || *stop.borrow() {
                         break;
                     }
                 }
@@ -434,7 +451,19 @@ impl Scheduler {
         }
     }
 
-    /// 请求停止（供优雅关闭用）。
+    /// 请求 `run_loop` 退出（优雅停止）。
+    ///
+    /// ⚠ 这个方法的**存在本身**是忙等那个 bug 的另一半：发送端原先在
+    /// `new()` 里被当场丢掉，于是 receiver 侧的 `changed()` 永远立刻返回
+    /// `Err`，循环空转（见 `new()` 上的实测记录）。留住发送端只是"别再空转"，
+    /// 真正**能让它停下来**的是这里 —— 两者缺一，停止通道都是个摆设。
+    ///
+    /// 用 `send_replace` 而不是 `send`：不依赖"此刻有没有接收者"。
+    pub fn stop(&self) {
+        self.stop_tx.send_replace(true);
+    }
+
+    /// 停止信号的订阅端（`run_loop` 拿它等停止）。
     pub fn stop_handle(&self) -> watch::Receiver<bool> {
         self.stop_rx.clone()
     }

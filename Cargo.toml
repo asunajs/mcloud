@@ -27,7 +27,6 @@ edition = "2021"
 # 去掉 cookie_store 之前，不要把这里改低。
 rust-version = "1.88"
 license = "Apache-2.0"
-authors = ["catlair"]
 
 # ── Lint 基线 ───────────────────────────────────────────────────────────
 #
