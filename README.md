@@ -164,6 +164,12 @@ cargo test --workspace
 # 跑服务（默认 127.0.0.1:3000）
 MCLOUD_ADDR=127.0.0.1:38123 MCLOUD_DATA_DIR=./data cargo run -p mcloud-server
 
+# 可选：把每趟**运行结果**POST 到你的通知渠道（webhook）。
+# ⚠ 不设这一位 = 完全不启用（连 Notifier 都不构造，运行路径上一个包都不发）⇒ 撤销就是删掉它。
+# 语义：Success⇒ok / Failed⇒failed / Skipped⇒skipped / 用户主动中止⇒cancelled；
+# 后两者**不报红**（依据 docs/architecture.md「用户自己点的中止…推送里也不该报红」）。
+MCLOUD_NOTIFY_WEBHOOK=https://example.com/hook cargo run -p mcloud-server
+
 # CLI（收敛后：tasks / run / cron / pipeline / auth / login）
 cargo run -p mcloud-server --bin mcloud-cli -- tasks
 cargo run -p mcloud-server --bin mcloud-cli -- run sign <account-id>   # 账号 id 见 WebUI「账号」页
@@ -253,7 +259,7 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 | P8 | **账号登录（扫码/短信）+ 账号页 + 定时/编排 CRUD 页** | ✅ |
 | P9a | **签到族 8 条**（`sign` / `receive` / `multiple` / `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`） | ✅ |
 | P9b | **P2 只读查询那一档全部落完**：`exchange` + `msg-push` + `fun-ai` + `notice` | 已落 4 条 |
-| P9c | 其余任务增量接入（`cloud-phone-redpack` / `ai-avatar`）+ 推送渠道 | 进行中：`cloud-phone-redpack` **整条已落**（会话两段 + 签到/登记/浏览/云机票/答题/装机；47 协议测试 + 15 任务测试）；`ai-avatar` / 推送渠道待做（`app-task` 的写侧已落 106 / 522 / beiyong1 名字门三档玩法）|
+| P9c | 其余任务增量接入（`cloud-phone-redpack` / `ai-avatar`）+ 推送渠道 | ✅ **整条落完**：`cloud-phone-redpack`（协议 47 + 任务 15）、`ai-avatar`（协议 31 + 任务 21，默认**关**；⚠ 一处结构性缺口：`upload` 因 HTTP 抽象只有 `String` 而不可达，见 `docs/ai-avatar-spec.md`）、推送渠道（`MCLOUD_NOTIFY_WEBHOOK`，不配置即零行为）（`app-task` 的写侧已落 106 / 522 / beiyong1 名字门三档玩法）|
 
 > **端点必须来自抓包，不能凭印象写。** 本项目的签到端点最初是
 > `/ycloud/api/sign/query`（凭印象），实测回 **405**；换成实拍的
