@@ -11,7 +11,7 @@
 
 > 依据优先级：**mcloud-sign TS 为准** > 真机抓包 > 推断。本仓 `docs/capture/` 目录**不存在**，
 > 仓内也无任何 ai-avatar 实现（全仓 grep 只有 `account.rs` 与 `task_expansion.rs:7` 的注释）。
-> Go 参考（/Users/catlair/mobile/workspace/mcloud）**只作线索**，凡引用处均标「线索」。
+> Go 参考（同级的 `mcloud`，另一份 Go 实现）**只作线索**，凡引用处均标「线索」。
 > 未标 [推断] 的结论都逐条给了 TS 的 文件:行号。
 
 ## 1. 端点清单

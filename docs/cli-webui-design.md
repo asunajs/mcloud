@@ -27,11 +27,11 @@ mcloud 的 CLI 有 **40+ 个子命令**（`login qr/sms/smid show/reset/refresh`
 ## 1. CLI：5 个命令，不多不少
 
 ```
-mcloud-gost login    qr | sms <手机号> | app <手机号> | password   登录账号（交互）
-mcloud-gost run      <任务名> <账号>            跑一次任务
-mcloud-gost cron     <定时id>                  跑一条定时（供外部 crontab 调用）
-mcloud-gost auth     refresh <账号|--all>      刷新 auth 凭据
-mcloud-gost pipeline run <编排id>              跑一条编排
+mcloud login    qr | sms <手机号> | app <手机号> | password   登录账号（交互）
+mcloud run      <任务名> <账号>            跑一次任务
+mcloud cron     <定时id>                  跑一条定时（供外部 crontab 调用）
+mcloud auth     refresh <账号|--all>      刷新 auth 凭据
+mcloud pipeline run <编排id>              跑一条编排
 ```
 
 > `login app` 与 `login sms` **并列而不是合并**：App 端走另一套密钥、
@@ -43,8 +43,8 @@ mcloud-gost pipeline run <编排id>              跑一条编排
 外加两个无副作用的：
 
 ```
-mcloud-gost tasks                              列出可用任务
-mcloud-gost --version / --help
+mcloud tasks                              列出可用任务
+mcloud --version / --help
 ```
 
 ### 为什么是这五个
@@ -61,7 +61,7 @@ mcloud-gost --version / --help
 
 ```
 # crontab
-0 8 * * *  /usr/local/bin/mcloud-gost cron daily-sign >> /var/log/mcloud.log 2>&1
+0 8 * * *  /usr/local/bin/mcloud cron daily-sign >> /var/log/mcloud.log 2>&1
 ```
 
 - CLI **不**跑调度循环、**不**长驻。时间由系统 crontab 管。
@@ -122,7 +122,7 @@ mcloud-gost --version / --help
 |---|---|---|
 | **登录/初始化** | 首次建管理员、登录、登出 | P0 |
 | **账号** | 账号列表、**扫码/短信登录**、启用停用、刷新凭据、删除 | P0 |
-| **总览** | 各账号AI豆余额、最近运行、调度器状态 | P0 |
+| **总览** | 调度器状态、今日运行 / 账号凭据 / 定时与编排 / 网盘遗留、最近运行（见 §2.2.1） | P0 |
 | **任务** | 任务列表 → 选账号 → 运行 → 实时日志 → 中止 | P1 |
 | **定时** | 定时 CRUD、启停、下次执行时间 | P1 |
 | **历史** | 运行历史 + 日志回看 | P1 |
@@ -144,6 +144,41 @@ mcloud-gost --version / --help
 编排的创建要填步骤、选账号、设 `continue_on_error` —— 那需要看着，
 所以它属于 WebUI。而 CLI 是无头场景，给它一堆 flag 才是重复入口。
 
+### 2.2.1 总览页的形态（2026-09-30 重新设计）
+
+一屏四段，从上到下回答四个问题：
+
+| 段 | 回答什么 |
+|---|---|
+| **引擎条** | 定时调度在不在跑、当下有没有任务在跑、下一次自动运行是**哪一条**定时 |
+| **四张指标卡** | 今日运行（成功 / 失败 / 跳过）、账号凭据（到期）、定时与编排、网盘遗留 |
+| **最近的定时任务 + 今日AI豆**（并排 2:1） | 左边：接下来几条各**还有多久**跑、上次跑成什么样；右边：**每个账号**今天AI豆进出多少 |
+| **最近运行** | 最近 **5 条** + 一个「查看全部」入口 |
+
+**命名口径**：界面上写「AI豆」（现行叫法），不写「云朵」—— 后者只出现在
+**引用上游接口名**的地方（`cloudRecordV2` 那条流水）。见 `docs/conventions.md` §5.5。
+
+**记账口径（2026-09-30，需求方点出）**：AI豆**按账号各记一本账**，
+**不做跨账号合计** —— 加出来的"总AI豆"哪个账号都用不了（豆不能跨账号花）。
+所以那张卡是一个账号一行；哪天想"优化"成一个总数，先回来看这一句。
+
+两条口径写在这里，免得下次又被"顺手加一格"：
+
+- **指标卡那四格只用现有接口能拿到的数**（`/api/status`、`/api/runs`、
+  `/api/schedules`、`/api/accounts`）—— 没有为它新增任何后端字段。
+  派生规则（"今日"取本地 0 点、7 天内到期算"将到期"、谁的 `nextFireAt` 最小）
+  全部在 `web/src/pages/dashboard-page.tsx` 里以纯函数形式给出，一眼可复核。
+- **收敛到 5 条**：原先总览把 `/api/runs` 的全部记录（后端上限 100 条）铺成一张表，
+  于是它成了第二个历史页，第一屏被表格顶下去 —— 而"一眼看清现状"正是这一页的
+  全部意义。看全量细节是历史与日志页的事。
+
+⚠ **「今日AI豆」那一格是唯一的例外**：它**要一个后端还没有的端点**
+（`GET /api/beans/today`，由云朵记录汇总）。前端已按契约定稿，端点未落地时
+它显示「待接入」；缺什么、口径怎么定，见 `docs/task-inventory.md` §5。
+
+⚠ 另记一条**没做**的：数据**年龄**由页头的「更新于 22:31」承担，
+这一页**不轮询** —— 自刷会让人以为那个时间戳在动，其实只是又采了一次样。
+
 ---
 
 ## 3. 参数从哪来：**配置文件，不是 flag**
@@ -154,7 +189,7 @@ mcloud 的 CLI 有 `--receive` / `--revive` / `--backup-gift` / `--multiple` /
 > **CLI 只给"跑哪一个"，参数在配置里。**
 
 ```
-mcloud-gost run sign 19900000000
+mcloud run sign 19900000000
         └─ 任务名         └─ 账号
 ```
 
