@@ -408,10 +408,49 @@ pub async fn run_expansion(
 
     // ④ 清理：**只有我们自己造的文件才删**。
     cleanup_uploaded(ctx, &mut result).await;
+    // ⑤ 把"本账号本月有没有备份"落盘 —— 供 `app-task` 的月份门读取
+    //    （旧 TS `task-expansion.ts:50` 的 `ctx.state.curMonthBackup = false`）。
+    persist_month_backup(ctx, &result).await;
     // 明细在这一层报（不是 `Task::run`）：`run_expansion` 才是链本身，
     // 直接调它的调用方（活体探针、单测）也该拿到同一份结构化读数。
     report_details(ctx, &result);
     Ok(result)
+}
+
+/// 把本账号**当月**的备份读数落进 `account_state`（旧 TS `task-expansion.ts:50`）。
+///
+/// # 它写什么
+///
+/// 写**结论那次**读到的 `curMonthBackup`（`Some(true)` / `Some(false)` 都写，
+/// `None` 不写）。旧 TS 只在"凑过一次仍未开"那一支里赋 `false`
+/// （`task-expansion.ts:48-51`），从不赋 `true` —— 那是因为 `ctx.state` 是
+/// **一次运行内的内存态**，跨运行即丢。本仓的落盘态**跨运行还在**：
+/// 只写 `false` 会让"5 号没开备份、6 号用户开了"之后 `app-task` 仍拿着旧的
+/// `false` 一直跳到 20 号 ⇒ **必须把 `true` 也写回**，才等价于旧 TS 那种
+/// "每趟重新读"。
+///
+/// # 为什么是"尽力而为"
+///
+/// 它只影响**下一趟** `app-task` 的月份门：写失败时那道门按"不知道"（不跳）
+/// 处理，比让整条 task-expansion 链因一次落盘失败而报错要好。失败打一句 warn。
+///
+/// # 账号维度
+///
+/// 落在 `ctx.store.account_state(&ctx.account.id)` 上 —— **按账号 id** 存的一份
+/// 状态（`mcloud-core::traits::AccountStore`），键里再带**月份**；绝不做成
+/// 进程级全局，那会让 A 账号的"没备份"把 B 账号的 month 任务一起跳掉。
+async fn persist_month_backup(ctx: &TaskContext, result: &ExpansionResult) {
+    let Some(backup) = result.conclusion().cur_month_backup else {
+        return;
+    };
+    let Some((month, _)) = crate::app_task::beijing_month_day(&*ctx.clock) else {
+        return;
+    };
+    if let Err(e) = crate::app_task::save_month_backup(ctx, &month, backup).await {
+        ctx.warn(format!(
+            "本月备份读数没能落盘（app-task 的月份门将按'不知道'处理）：{e}"
+        ));
+    }
 }
 
 /// 走上传那三枪（`file/create` → `PUT` → `file/complete`）。

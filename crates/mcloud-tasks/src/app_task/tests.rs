@@ -387,3 +387,585 @@ fn the_state_gate_also_covers_the_share_task() {
     off.enable = Some(0);
     assert!(!should_act(&off), "关掉的 434 不该再去建外链");
 }
+
+// ══════════════════════════ 执行层：三道门的接线 ══════════════════════════
+//
+// 判据层的纯函数在上面已经钉住；这一节钉的是**接线** —— 三道门真的挡在
+// `task/click` 前面吗？用假 HTTP 数枪、用假 store 喂账号状态。
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+
+use mcloud_core::{
+    Account, AccountId, AccountSettings, AuthInfo, CancelToken, Clock, DeviceId, EventSink,
+    HttpClient, HttpResponse, RunEvent,
+};
+use mcloud_engine::TaskContext;
+
+/// 固定账号 id（与 `AccountId::new` 一致即可，测试里只用来对账）。
+const TEST_ACCOUNT: &str = "19****01";
+
+/// 假 HTTP：按顺序答复，用尽后重复最后一个。请求全部留底，供数枪。
+struct Scripted {
+    seen: Mutex<Vec<mcloud_core::HttpRequest>>,
+    replies: Mutex<Vec<String>>,
+}
+
+impl Scripted {
+    fn new(replies: Vec<String>) -> Self {
+        Self {
+            seen: Mutex::new(Vec::new()),
+            // 反转，便于从队尾取
+            replies: Mutex::new(replies.into_iter().rev().collect()),
+        }
+    }
+
+    fn requests(&self) -> Vec<mcloud_core::HttpRequest> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    /// 打到 `task/click` 的请求 URL（**不可回滚的那一发**）。
+    fn clicks(&self) -> Vec<String> {
+        self.requests()
+            .into_iter()
+            .filter(|r| {
+                r.url
+                    .contains(mcloud_upstream::app_task_click::TASK_CLICK_PATH)
+            })
+            .map(|r| r.url)
+            .collect()
+    }
+}
+
+#[async_trait]
+impl HttpClient for Scripted {
+    async fn request(&self, req: mcloud_core::HttpRequest) -> Result<HttpResponse> {
+        self.seen.lock().unwrap().push(req);
+        let body = {
+            let mut r = self.replies.lock().unwrap();
+            if r.len() > 1 {
+                r.pop().unwrap()
+            } else {
+                r.last().cloned().unwrap_or_else(|| "{}".to_string())
+            }
+        };
+        Ok(HttpResponse {
+            status: 200,
+            body,
+            headers: Vec::new(),
+        })
+    }
+}
+
+/// 一份**按账号**存 `account_state` 的替身；别的 store 方法一律拒绝
+/// （这条链只该碰 `account_state` / `save_account_state`）。
+struct FakeStore {
+    states: Mutex<HashMap<String, serde_json::Value>>,
+}
+
+impl FakeStore {
+    fn new() -> Self {
+        Self {
+            states: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn seed(&self, id: &str, state: serde_json::Value) {
+        self.states.lock().unwrap().insert(id.to_string(), state);
+    }
+
+    fn state_of(&self, id: &str) -> serde_json::Value {
+        self.states
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    }
+}
+
+/// 这条链不该碰的 store 方法统一回这个错。
+fn refuse() -> mcloud_core::Error {
+    mcloud_core::Error::Other("这条链不该碰 store 的别的部分".into())
+}
+
+#[async_trait]
+impl mcloud_core::AccountStore for FakeStore {
+    async fn accounts(&self) -> Result<Vec<Account>> {
+        Err(refuse())
+    }
+    async fn account(&self, _id: &AccountId) -> Result<Option<Account>> {
+        Err(refuse())
+    }
+    async fn save_account(&self, _a: &Account) -> Result<()> {
+        Err(refuse())
+    }
+    async fn remove_account(&self, _id: &AccountId) -> Result<()> {
+        Err(refuse())
+    }
+    async fn account_state(&self, id: &AccountId) -> Result<serde_json::Value> {
+        Ok(self.state_of(id.as_str()))
+    }
+    async fn save_account_state(&self, id: &AccountId, state: &serde_json::Value) -> Result<()> {
+        self.seed(id.as_str(), state.clone());
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl mcloud_core::RunStore for FakeStore {
+    async fn upsert_run(&self, _r: &mcloud_core::RunRecord) -> Result<()> {
+        Err(refuse())
+    }
+    async fn runs(&self, _limit: usize) -> Result<Vec<mcloud_core::RunRecord>> {
+        Err(refuse())
+    }
+    async fn run(&self, _id: mcloud_core::RunId) -> Result<Option<mcloud_core::RunRecord>> {
+        Err(refuse())
+    }
+    async fn running_runs(&self) -> Result<Vec<mcloud_core::RunRecord>> {
+        Err(refuse())
+    }
+}
+
+#[async_trait]
+impl mcloud_core::LogStore for FakeStore {
+    async fn append_logs(
+        &self,
+        _id: mcloud_core::RunId,
+        _lines: &[mcloud_core::LogLine],
+    ) -> Result<mcloud_core::AppendOutcome> {
+        Err(refuse())
+    }
+    async fn logs(
+        &self,
+        _id: mcloud_core::RunId,
+        _after: Option<mcloud_core::Seq>,
+    ) -> Result<Vec<mcloud_core::LogLine>> {
+        Err(refuse())
+    }
+    async fn clear_logs(&self, _id: mcloud_core::RunId) -> Result<()> {
+        Err(refuse())
+    }
+}
+
+#[async_trait]
+impl mcloud_core::ScheduleStore for FakeStore {
+    async fn schedules(&self) -> Result<Vec<mcloud_core::Schedule>> {
+        Err(refuse())
+    }
+    async fn schedule(
+        &self,
+        _id: &mcloud_core::ScheduleId,
+    ) -> Result<Option<mcloud_core::Schedule>> {
+        Err(refuse())
+    }
+    async fn save_schedule(&self, _s: &mcloud_core::Schedule) -> Result<()> {
+        Err(refuse())
+    }
+    async fn remove_schedule(&self, _id: &mcloud_core::ScheduleId) -> Result<()> {
+        Err(refuse())
+    }
+    async fn mark_schedule_fired(&self, _id: &mcloud_core::ScheduleId, _ms: i64) -> Result<()> {
+        Err(refuse())
+    }
+    async fn record_schedule_run(
+        &self,
+        _id: &mcloud_core::ScheduleId,
+        _ms: Option<i64>,
+        _status: &str,
+        _err: Option<&str>,
+    ) -> Result<()> {
+        Err(refuse())
+    }
+}
+
+#[async_trait]
+impl mcloud_core::PipelineStore for FakeStore {
+    async fn pipelines(&self) -> Result<Vec<mcloud_core::Pipeline>> {
+        Err(refuse())
+    }
+    async fn pipeline(
+        &self,
+        _id: &mcloud_core::PipelineId,
+    ) -> Result<Option<mcloud_core::Pipeline>> {
+        Err(refuse())
+    }
+    async fn save_pipeline(&self, _p: &mcloud_core::Pipeline) -> Result<()> {
+        Err(refuse())
+    }
+    async fn remove_pipeline(&self, _id: &mcloud_core::PipelineId) -> Result<()> {
+        Err(refuse())
+    }
+    async fn mark_pipeline_ran(&self, _id: &mcloud_core::PipelineId, _ms: i64) -> Result<()> {
+        Err(refuse())
+    }
+}
+
+#[async_trait]
+impl mcloud_core::UserStore for FakeStore {
+    async fn user_count(&self) -> Result<usize> {
+        Err(refuse())
+    }
+    async fn users(&self) -> Result<Vec<mcloud_core::User>> {
+        Err(refuse())
+    }
+    async fn user_by_name(&self, _name: &str) -> Result<Option<mcloud_core::User>> {
+        Err(refuse())
+    }
+    async fn user(&self, _id: &mcloud_core::UserId) -> Result<Option<mcloud_core::User>> {
+        Err(refuse())
+    }
+    async fn save_user(&self, _u: &mcloud_core::User) -> Result<()> {
+        Err(refuse())
+    }
+    async fn session(&self, _h: &str) -> Result<Option<mcloud_core::Session>> {
+        Err(refuse())
+    }
+    async fn save_session(&self, _s: &mcloud_core::Session) -> Result<()> {
+        Err(refuse())
+    }
+    async fn remove_session(&self, _h: &str) -> Result<()> {
+        Err(refuse())
+    }
+    async fn remove_user_sessions(&self, _id: &mcloud_core::UserId) -> Result<usize> {
+        Err(refuse())
+    }
+    async fn purge_expired_sessions(&self, _now_ms: i64) -> Result<usize> {
+        Err(refuse())
+    }
+}
+
+/// 固定时钟（月份门要能把它挪到任意一天）。
+struct FixedClock(i64);
+impl Clock for FixedClock {
+    fn now_ms(&self) -> i64 {
+        self.0
+    }
+}
+
+/// 什么都不留的 sink —— 这一节不读事件，只要 `TaskContext` 构造得出来。
+struct NullSink;
+impl EventSink for NullSink {
+    fn emit(&self, _event: RunEvent) {}
+}
+
+fn account(id: &str) -> Account {
+    Account {
+        id: AccountId::new(id),
+        nickname: None,
+        auth: AuthInfo {
+            raw: "Basic eA==".into(),
+            platform: "pc".into(),
+            phone: "19900000001".into(),
+            token: "t".into(),
+            expire: 0,
+        },
+        device_id: DeviceId("DEV+1/base=".into()),
+        pc_platform: None,
+        user_domain_id: None,
+        settings: AccountSettings::default(),
+    }
+}
+
+fn ctx_with(
+    id: &str,
+    replies: Vec<String>,
+    now_ms: i64,
+    settings: AccountSettings,
+    store: Arc<FakeStore>,
+) -> (TaskContext, Arc<Scripted>) {
+    let http = Arc::new(Scripted::new(replies));
+    let mut acc = account(id);
+    acc.settings = settings;
+    let ctx = TaskContext {
+        account: acc,
+        http: http.clone(),
+        store,
+        clock: Arc::new(FixedClock(now_ms)),
+        sink: Arc::new(NullSink),
+        run_id: mcloud_core::RunId(1),
+        cancel: CancelToken::new(),
+        chain_cancel: None,
+        artifacts: mcloud_engine::ArtifactRecorder::new(
+            Arc::new(mcloud_engine::ArtifactLedger::new()),
+            mcloud_core::RunId(1),
+            AccountId::new(id),
+        ),
+        details: mcloud_engine::DetailsRecorder::new(
+            mcloud_engine::DetailsLedger::new(),
+            mcloud_core::RunId(1),
+        ),
+    };
+    (ctx, http)
+}
+
+/// 东八区 2026-10-<day> 12:00 的 epoch 毫秒。
+///
+/// ⚠ 不引 `chrono`（`mcloud-tasks` 的依赖里没有它）—— 用 core 的
+/// `parse_beijing_time` 把墙钟串解成毫秒，顺带与它同源。
+fn beijing_noon(day: i64) -> i64 {
+    let s = format!("2026-10-{day:02}T12:00:00");
+    mcloud_core::parse_beijing_time(&s, "%Y-%m-%dT%H:%M:%S").expect("固定日期必须解得出来")
+}
+
+/// 一条任务的 JSON（进 `result.<group>` 数组）。
+fn task_json(id: i64, group: &str, name: &str, market: &str) -> String {
+    format!(
+        r#"{{"id":{id},"name":"{name}","groupid":"{group}","state":"WAIT","limitType":"DAY","enable":1,"currstep":0,"process":0,"marketname":"{market}"}}"#
+    )
+}
+
+/// 十六次拉取都回同一份"这一组就这些条目"的响应（去重后留下的就是它们）。
+fn page_body(items: &[String]) -> String {
+    format!(
+        r#"{{"code":0,"msg":"success","groupState":{{}},"result":{{"g":[{}]}}}}"#,
+        items.join(",")
+    )
+}
+
+/// 十六份相同页面 + 后续的打卡 / 上传答复（页数用生产同一个函数算）。
+fn replies_for(items: &[String], tail: Vec<String>) -> Vec<String> {
+    let n = crate::app_task_matrix::app_task_matrix_fetches();
+    let mut v = vec![page_body(items); n];
+    v.extend(tail);
+    v
+}
+
+/// `task/click` 成功。
+fn click_ok() -> String {
+    r#"{"code":0,"msg":"success"}"#.to_string()
+}
+
+/// `file/create` 回"撞同名" ⇒ 编排层不再发 PUT / complete，也不清理。
+fn create_exists() -> String {
+    r#"{"success":true,"code":"0000","message":"success","data":{"fileId":"F-EXIST","uploadId":null,"exist":true,"rapidUpload":false,"partInfos":null}}"#.to_string()
+}
+
+// ── a) 黑名单：命中就一枪不发 ────────────────────────────────────────
+
+/// 黑名单**逐字**照抄 TS `tasks.ts:111`（不增删；TS 原文是 11 个）。
+#[test]
+fn the_skip_list_is_copied_verbatim_from_ts() {
+    assert_eq!(
+        SKIP_TASK_LIST,
+        [117, 437, 991, 406, 385, 480, 1022, 1018, 603, 1021, 120]
+    );
+    for id in SKIP_TASK_LIST {
+        assert!(is_skipped_task(Some(id)), "{id} 该命中");
+        assert!(!should_click(&with_step(id, Some(0))), "{id} 不该打卡");
+        assert!(!should_act(&with_step(id, Some(0))), "{id} 不该进 planned");
+    }
+    assert!(!is_skipped_task(None));
+    assert!(!is_skipped_task(Some(118)));
+}
+
+/// ⭐ a) 黑名单 id 的条目**一发 `task/click` 都不发**；未列入的照发。
+///
+/// 117（黑名单）与 118（不在名单）都是 beiyong1 里的"上传图片" ⇒ 两道都过
+/// 名字门、都有上传形状。没有黑名单这道门时排序后先打 117、再打 118（**两发**）；
+/// 补上之后只剩 118 那一发。
+#[tokio::test]
+async fn a_blacklisted_id_never_gets_clicked() {
+    let items = vec![
+        task_json(117, "beiyong1", "上传图片甲", "sign_in_3"),
+        task_json(118, "beiyong1", "上传图片乙", "sign_in_3"),
+    ];
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies_for(&items, vec![click_ok(), create_exists()]),
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    let result = run_app_task(&ctx, 0).await.expect("不该是 Err");
+
+    let clicks = http.clicks();
+    assert_eq!(clicks.len(), 1, "只有 118 该被打卡，实得 {clicks:?}");
+    assert!(clicks[0].contains("id=118"), "打卡的是 {}", clicks[0]);
+    assert!(!clicks[0].contains("id=117"));
+    assert_eq!(result.planned, 1, "黑名单条目不该进 planned");
+}
+
+// ── b) skip_tasks：本账号名单 ───────────────────────────────────────
+
+/// ⭐ b) `skip_tasks` 含某 id ⇒ 该条目跳过；不含 ⇒ 处理。
+#[tokio::test]
+async fn b_configured_skip_tasks_are_skipped() {
+    let items = vec![task_json(106, "new", "上传一个随机文件", "sign_in_3")];
+
+    // 含 106 ⇒ 计划为空、一枪不发。
+    let skip = AccountSettings {
+        skip_tasks: vec![106],
+        ..Default::default()
+    };
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies_for(&items, vec![]),
+        beijing_noon(5),
+        skip,
+        Arc::new(FakeStore::new()),
+    );
+    let r = run_app_task(&ctx, 0).await.expect("不该是 Err");
+    assert_eq!(r.planned, 0, "名单命中的条目不该进 planned");
+    assert!(http.clicks().is_empty(), "名单命中的条目不该打卡");
+
+    // 不含 106 ⇒ 照常处理（一发打卡 + 一次 create）。
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies_for(&items, vec![click_ok(), create_exists()]),
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    let r = run_app_task(&ctx, 0).await.expect("不该是 Err");
+    assert_eq!(r.planned, 1);
+    assert_eq!(http.clicks().len(), 1);
+}
+
+// ── c) 月份门：本账号当月有没有备份 ──────────────────────────────────
+
+/// 月份门是逐字的合取（旧 TS `tasks.ts:86-95`），三态 + 20 号边界。
+#[test]
+fn the_month_gate_is_the_legacy_conjunction() {
+    let signin_month = |market: &str| {
+        let mut i = item(Some(106), Some("month"), Some("每月任务"));
+        i.market_name = Some(market.to_string());
+        i
+    };
+    let it = signin_month("sign_in_3");
+    assert!(
+        month_gate_skips(&it, Some(false), Some(5)),
+        "未备份 + 5 号 ⇒ 跳"
+    );
+    assert!(
+        !month_gate_skips(&it, Some(false), Some(20)),
+        "20 号是边界，不跳"
+    );
+    assert!(!month_gate_skips(&it, Some(false), Some(21)));
+    assert!(!month_gate_skips(&it, Some(true), Some(5)), "已备份不跳");
+    assert!(!month_gate_skips(&it, None, Some(5)), "不知道就不跳");
+    assert!(!month_gate_skips(&it, Some(false), None), "时钟读不出不跳");
+    // 别的市场 / 别的组不适用。
+    assert!(!month_gate_skips(
+        &signin_month("newsign_139mail"),
+        Some(false),
+        Some(5)
+    ));
+    let mut other = item(Some(106), Some("new"), Some("每月任务"));
+    other.market_name = Some("sign_in_3".to_string());
+    assert!(!month_gate_skips(&other, Some(false), Some(5)));
+}
+
+/// 月份与日只从注入的时钟来（东八区）。
+#[test]
+fn the_month_and_day_come_from_the_injected_clock() {
+    let (month, day) = beijing_month_day(&FixedClock(beijing_noon(5))).expect("该解得出来");
+    assert_eq!(month, "202610");
+    assert_eq!(day, 5);
+}
+
+/// ⭐ c) 接线：`cur_month_backup=false` 且日期 < 20 ⇒ 跳过；`=true` 或日期 ≥ 20 ⇒ 处理。
+#[tokio::test]
+async fn c_month_gate_reads_this_accounts_backup_state() {
+    let items = vec![task_json(106, "month", "每月任务", "sign_in_3")];
+    let seed = |backup: bool| {
+        let store = Arc::new(FakeStore::new());
+        store.seed(
+            TEST_ACCOUNT,
+            serde_json::json!({"cur_month_backup": {"month": "202610", "backup": backup}}),
+        );
+        store
+    };
+
+    // false + 5 号 ⇒ 跳过。
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies_for(&items, vec![]),
+        beijing_noon(5),
+        AccountSettings::default(),
+        seed(false),
+    );
+    let r = run_app_task(&ctx, 0).await.expect("不该是 Err");
+    assert_eq!(r.month_backup, Some(false));
+    assert_eq!(r.planned, 0, "未备份且 5 号 ⇒ 该跳");
+    assert!(http.clicks().is_empty(), "跳过就不该打卡");
+
+    // true + 5 号 ⇒ 处理。
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies_for(&items, vec![click_ok(), create_exists()]),
+        beijing_noon(5),
+        AccountSettings::default(),
+        seed(true),
+    );
+    let r = run_app_task(&ctx, 0).await.expect("不该是 Err");
+    assert_eq!(r.month_backup, Some(true));
+    assert_eq!(r.planned, 1, "已备份就不跳");
+    assert_eq!(http.clicks().len(), 1);
+
+    // false + 25 号 ⇒ 处理（过了 20 号那道限）。
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies_for(&items, vec![click_ok(), create_exists()]),
+        beijing_noon(25),
+        AccountSettings::default(),
+        seed(false),
+    );
+    let r = run_app_task(&ctx, 0).await.expect("不该是 Err");
+    assert_eq!(r.planned, 1, "20 号之后不再跳");
+    assert_eq!(http.clicks().len(), 1);
+
+    // 没有记录 ⇒ 不跳（不知道 ≠ 没开）。
+    let (ctx, _) = ctx_with(
+        TEST_ACCOUNT,
+        replies_for(&items, vec![click_ok(), create_exists()]),
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    let r = run_app_task(&ctx, 0).await.expect("不该是 Err");
+    assert_eq!(r.month_backup, None);
+    assert_eq!(r.planned, 1, "没记录时不该跳");
+}
+
+/// ⭐ c) **隔离**：A 账号的"本月没备份"**不影响** B 账号。
+#[tokio::test]
+async fn month_state_is_isolated_per_account() {
+    let store = Arc::new(FakeStore::new());
+    store.seed(
+        "A",
+        serde_json::json!({"cur_month_backup": {"month": "202610", "backup": false}}),
+    );
+
+    let (ctx_a, _) = ctx_with("A", vec![], 0, AccountSettings::default(), store.clone());
+    let (ctx_b, _) = ctx_with("B", vec![], 0, AccountSettings::default(), store.clone());
+
+    assert_eq!(read_month_backup(&ctx_a, "202610").await, Some(false));
+    assert_eq!(
+        read_month_backup(&ctx_b, "202610").await,
+        None,
+        "B 没记录，绝不该被 A 的状态影响"
+    );
+    // 月份对不上同样当"没记录"：上个月的 false 不许套到本月。
+    assert_eq!(read_month_backup(&ctx_a, "202611").await, None);
+}
+
+/// 落盘是**读-改-写**：只动自己那一枚键，别把 `device_id` 这类别人的键抹掉。
+#[tokio::test]
+async fn saving_the_month_reading_keeps_other_account_state() {
+    let store = Arc::new(FakeStore::new());
+    store.seed("A", serde_json::json!({"device_id": "DEV-1"}));
+    let (ctx, _) = ctx_with("A", vec![], 0, AccountSettings::default(), store.clone());
+
+    save_month_backup(&ctx, "202610", false)
+        .await
+        .expect("写不该失败");
+
+    let state = store.state_of("A");
+    assert_eq!(state["device_id"], "DEV-1", "别人的键必须原样留着");
+    assert_eq!(state["cur_month_backup"]["month"], "202610");
+    assert_eq!(state["cur_month_backup"]["backup"], false);
+}

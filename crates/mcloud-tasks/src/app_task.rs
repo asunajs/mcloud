@@ -127,6 +127,61 @@ pub fn upload_shape_for(item: &TaskV2Item) -> Option<UploadShape> {
 /// 玩法 434 的 id（分享文件）。
 pub const SHARE_TASK_ID: i64 = 434;
 
+// ══════════════════════ 三道门（第一道：刻意跳过的 id） ══════════════════════
+
+/// 旧实现刻意**跳过**的任务 id 名单（**逐字照抄，不增删**）。
+///
+/// # 依据
+///
+/// `mcloud-sign` 的 `packages/core/src/tasks/app/tasks.ts:111`：
+///
+/// ```ts
+/// export const SKIP_TASK_LIST = [117, 437, 991, 406, 385, 480, 1022, 1018, 603, 1021, 120];
+/// ```
+///
+/// 用法在**同文件** `tasks.ts:101-103`（`default:` 分支）：
+///
+/// ```ts
+/// if (!SKIP_TASK_LIST.includes(task.id)) {
+///   await clickTask(ctx, task.id);
+/// }
+/// ```
+///
+/// # 为什么这些 id 要跳过
+///
+/// TS 给这一串只写了「需要跳过的任务」一句注释（`tasks.ts:108-110`），
+/// **没有逐条列理由** ⇒ 本仓也不替它编。可以确定的是：这些 id 的
+/// `task/click` **有副作用或没有意义**（那一发**不可回滚**），所以 TS
+/// 刻意不对它们打卡 —— 我们照抄，不去"帮它补上"。
+///
+/// ⚠ 任务书写的是「12 个 id」，而 TS 原文只有 **11 个**（逐字数过，见测试）。
+/// 这里以**文件原文**为准：照抄，不拿任务书里的数目去增删。
+pub const SKIP_TASK_LIST: [i64; 11] = [117, 437, 991, 406, 385, 480, 1022, 1018, 603, 1021, 120];
+
+/// 这一条是否在那串刻意跳过的 id 里。
+///
+/// ⚠ `task_id` 缺席（`None`）**不算**命中：旧 TS 那句读的是 `task.id`，
+/// 而 `undefined.includes(...)` 在它那边是 `false` —— 与这里同向。
+pub fn is_skipped_task(task_id: Option<i64>) -> bool {
+    matches!(task_id, Some(id) if SKIP_TASK_LIST.contains(&id))
+}
+
+// ══════════════════════ 第二道门：本账号配置的跳过名单 ══════════════════════
+
+/// 这一条是否在**本账号**配置的跳过名单里。
+///
+/// # 依据（旧 TS `index.ts:33` 逐字）
+///
+/// ```ts
+/// if (ctx.config.tasks?.skipTasks?.includes(task.id)) continue;
+/// ```
+///
+/// 名单是**每账号**的（`ctx.config` 属于当前账号）—— 本仓落在
+/// `AccountSettings::skip_tasks`（`Vec<i64>`，与 TS 的 `number[]` 同形）。
+pub fn is_configured_skip(item: &TaskV2Item, skip_tasks: &[i64]) -> bool {
+    matches!(item.task_id, Some(id) if skip_tasks.contains(&id))
+}
+
 /// 这一条要做的**那一件事**。
 ///
 /// ⚠ 做成枚举而不是两个 `Option`：这两件事**互斥**（434 不传文件、106/522 不分享），
@@ -172,7 +227,14 @@ pub fn step_for(item: &TaskV2Item) -> Option<Step> {
 /// 之前这里只判**形状**（`upload_shape_for`），不看状态 ⇒ 会对着**已完成的**
 /// 条目也发 `task/click`（不可回滚）并往网盘传文件。真机读数是
 /// **未完成 15 / 已完成 13** ⇒ 那 13 条里形状匹配的都会被误伤。
+/// ⚠ 另有一道**同一层**的门（旧 TS 与 `state` 那句挨着）：
+/// 命中 [`SKIP_TASK_LIST`] 的 id **一律不动** —— 它们点了有副作用/没意义
+/// （见该常量的依据）。放在这里而不是只放在 [`should_click`] 里：黑名单
+/// 条目**连形状都不该判进 `planned`**，否则摘要那句"判出 N 条"会把它算进去。
 pub fn should_act(item: &TaskV2Item) -> bool {
+    if is_skipped_task(item.task_id) {
+        return false;
+    }
     if item.state.as_deref() == Some(crate::app_task_matrix::STATE_DONE) {
         return false;
     }
@@ -201,7 +263,13 @@ pub fn should_act(item: &TaskV2Item) -> bool {
 /// （`task/click` 不可回滚）。真机第一趟那条
 /// `522 "当月上传文件满100个" uploaded 0 clicked true` 就是它 ——
 /// 上游本没打算让这一趟再记一笔，是我们自己补的。
+/// ⚠ 打卡前**再过一次**黑名单：这一道与 [`should_act`] 里那道不是冗余 ——
+/// 434 在第 22 步也要打卡，而"哪些 id 不能打"是**独立于步号**的一条，
+/// 写在两处才挡得住"将来有人从别的入口直接调 `click`"。
 pub fn should_click(item: &TaskV2Item) -> bool {
+    if is_skipped_task(item.task_id) {
+        return false;
+    }
     let step = item.curr_step.unwrap_or(0);
     if item.task_id == Some(SPECIAL_CLICK_TASK) {
         return step == SPECIAL_CLICK_STEP;
@@ -231,6 +299,109 @@ pub fn should_upload_another(shape: UploadShape, done: u32, process: Option<i64>
         return false;
     }
     true
+}
+
+// ══════════════════════ 第三道门：本账号当月有没有备份 ══════════════════════
+
+/// 月份门里的市场名（旧 TS `tasks.ts:88` 的 `task.marketname === "sign_in_3"`）。
+pub const MONTH_GATE_MARKET: &str = "sign_in_3";
+/// 月份门只对 `month` 组生效（旧 TS `tasks.ts:86` 的 `case "month"`）。
+pub const MONTH_GATE_GROUP: &str = "month";
+/// 当月第几天**之前**跳过（旧 TS `tasks.ts:90` 的 `< 20`）。
+pub const MONTH_GATE_DAY_LIMIT: i64 = 20;
+
+/// `account_state` 里存"本账号本月备份读数"的键。
+///
+/// ⚠ **账号维度由 store 保证**：`account_state` 本身就是按账号 id 存的一张表
+/// （[`mcloud_core::AccountStore::account_state`]），同一进程里 A、B 各读各的那一份
+/// ⇒ 不可能串号。**月份**写进值的 `month` 字段：不写月份，上个月判出的
+/// `false` 会被套到本月头上，把整组 `month` 任务白白跳过。
+pub const MONTH_BACKUP_STATE_KEY: &str = "cur_month_backup";
+
+/// 东八区墙钟的 `(yyyyMM, 日)`；时钟读不出 ⇒ `None`。
+///
+/// ⚠ 时间只能来自注入的 [`mcloud_core::Clock`]（`beijing_time_digits`），
+/// 不许 `SystemTime::now()` —— 否则测试钉不住月份门。
+/// 旧 TS 那句 `new Date().getDate()` 读的是**本机本地**日期；本仓按全仓惯例
+/// 固定东八区（`mcloud_core::beijing_offset` 是"东八区"在本项目的唯一出处）。
+pub(crate) fn beijing_month_day(clock: &dyn mcloud_core::Clock) -> Option<(String, i64)> {
+    let digits = mcloud_core::beijing_time_digits(clock);
+    if digits.len() < 8 {
+        return None;
+    }
+    let month = digits.get(0..6)?.to_string();
+    let day = digits.get(6..8)?.parse::<i64>().ok()?;
+    Some((month, day))
+}
+
+/// 这一条**该不该因为"本月没开备份"而跳过**（旧 TS `tasks.ts:86-95` 逐字）：
+///
+/// ```ts
+/// case "month": {
+///   if (
+///     task.marketname === "sign_in_3" &&
+///     ctx.state.curMonthBackup === false &&
+///     new Date().getDate() < 20
+///   ) {
+///     ctx.logger.info(`跳过任务（未开启备份）: ${task.name}`);
+///     return;
+///   }
+/// }
+/// ```
+///
+/// 三态读 `month_backup`：
+/// * `Some(false)` ⇒ 确认本月没开备份 ⇒ **跳过**（日期 < 20 时）；
+/// * `Some(true)` ⇒ 已开 ⇒ 不跳；
+/// * `None` ⇒ 本月没记录 / 读失败 ⇒ **不跳**（把"不知道"当成"没开"就是
+///   拿一次跳过补一个空洞，与 `task_expansion` 对 `cur_month_backup` 的三态口径同向）。
+pub fn month_gate_skips(item: &TaskV2Item, month_backup: Option<bool>, day: Option<i64>) -> bool {
+    let Some(day) = day else {
+        // 时钟读不出 ⇒ 判不了"今天是不是 20 号前" ⇒ 不跳（保守）。
+        return false;
+    };
+    item.group_id.as_deref() == Some(MONTH_GATE_GROUP)
+        && item.market_name.as_deref() == Some(MONTH_GATE_MARKET)
+        && month_backup == Some(false)
+        && day < MONTH_GATE_DAY_LIMIT
+}
+
+/// 读本账号**当月**的备份读数。`None` = 没有本月的记录。
+///
+/// ⚠ 读失败（store 挂了 / 状态不是对象 / 月份对不上 / 缺 `backup` 这一格）
+/// 一律回 `None`（"不知道"），**不回 `Some(false)`** —— 见 [`month_gate_skips`]。
+pub async fn read_month_backup(ctx: &TaskContext, month: &str) -> Option<bool> {
+    let state = ctx.store.account_state(&ctx.account.id).await.ok()?;
+    let slot = state.get(MONTH_BACKUP_STATE_KEY)?;
+    if slot.get("month")?.as_str()? != month {
+        return None;
+    }
+    slot.get("backup")?.as_bool()
+}
+
+/// 把本账号**当月**的备份读数写进 `account_state`。
+///
+/// # 为什么是读-改-写
+///
+/// `save_account_state` 是**整块替换**（`crates/mcloud-store/src/json_store.rs:73`
+/// 明写），而这张表里还躺着 `device_id` / `pc_platform`
+/// （`crates/mcloud-tasks/src/login.rs:549-553`）这些**别的任务**的键。
+/// 直接写一份只有我们这枚键的 Value 就会把它们抹掉。
+/// ⇒ 先整份读回、只改自己那一枚键、再整份写回。
+///
+/// ⚠ 读不到（`Null`）或读出来不是对象 ⇒ 从空对象起一份新的：那是"这个账号
+/// 还没有任何状态"，不是"要覆盖别人的"。
+pub async fn save_month_backup(ctx: &TaskContext, month: &str, backup: bool) -> Result<()> {
+    let mut state = ctx.store.account_state(&ctx.account.id).await?;
+    if !state.is_object() {
+        state = serde_json::json!({});
+    }
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert(
+            MONTH_BACKUP_STATE_KEY.to_string(),
+            serde_json::json!({ "month": month, "backup": backup }),
+        );
+    }
+    ctx.store.save_account_state(&ctx.account.id, &state).await
 }
 
 // ══════════════════════════ 执行层 ══════════════════════════
@@ -266,6 +437,12 @@ pub struct AppTaskResult {
     pub cleaned_up: usize,
     pub cleanup_error: String,
     pub failures: Vec<String>,
+    /// 这一趟判定用的东八区月份 / 日；`None` = 时钟读不出（那时月份门一律"不知道"）。
+    pub month: Option<String>,
+    pub day: Option<i64>,
+    /// 本账号当月备份读数（`None` = 没记录 / 读失败）。**按账号**取，见
+    /// [`read_month_backup`]。
+    pub month_backup: Option<bool>,
 }
 
 impl AppTaskResult {
@@ -343,13 +520,31 @@ pub async fn run_app_task(ctx: &TaskContext, pace_ms: i64) -> Result<AppTaskResu
     }
     let (items, _raw) = app_task_matrix::merge_pages(&pages);
 
-    // ② 逐条判形状。判不出来的一律**不动**。
-    // ⚠ **先过状态门、再判形状**（旧 TS 就是先 `continue` 再分派）。
-    // 顺序反了不改结果，但会把"已完成"的条目也算进 `planned`，
-    // 于是摘要里那句"判出 N 条"是假的。
+    // ② 取**本账号当月**的备份读数（月份门的输入），再逐条判。判不出来的一律**不动**。
+    //
+    // ⚠ **先过三道门、再判形状**（旧 TS 就是先 `continue` 再分派）。
+    // 顺序反了不改结果，但会把"已完成/该跳过"的条目也算进 `planned`，
+    // 于是摘要里那句"判出 N 条"是假的。三道门的分工：
+    //
+    // * `should_act` —— `state == "FINISH" || enable != 1`（`index.ts:34`）
+    //   **加上** [`SKIP_TASK_LIST`] 黑名单（`tasks.ts:101-103`）；
+    // * `is_configured_skip` —— 本账号的 `skipTasks`（`index.ts:33`）；
+    // * `month_gate_skips` —— `sign_in_3` 的 `month` 组（`tasks.ts:86-95`）。
+    let (month, day) = match beijing_month_day(&*ctx.clock) {
+        Some((m, d)) => (Some(m), Some(d)),
+        None => (None, None),
+    };
+    result.month = month.clone();
+    result.day = day;
+    result.month_backup = match &month {
+        Some(m) => read_month_backup(ctx, m).await,
+        None => None,
+    };
     let planned: Vec<(TaskV2Item, Step)> = items
         .iter()
         .filter(|i| should_act(i))
+        .filter(|i| !is_configured_skip(i, &ctx.account.settings.skip_tasks))
+        .filter(|i| !month_gate_skips(i, result.month_backup, day))
         .filter_map(|i| step_for(i).map(|s| (i.clone(), s)))
         .collect();
     result.planned = planned.len();
@@ -614,6 +809,9 @@ impl Task for AppTaskTask {
             "cleanedUp": result.cleaned_up,
             "cleanupError": result.cleanup_error,
             "failures": result.failures,
+            "month": result.month,
+            "day": result.day,
+            "monthBackup": result.month_backup,
             "steps": result.steps.iter().map(|s| serde_json::json!({
                 "taskId": s.task_id,
                 "name": s.name,

@@ -155,8 +155,27 @@ pub struct AccountSettings {
     pub backup_wait_secs: u64,
     /// 剩余多少天时刷新凭证。
     pub refresh_token_days: i64,
-    /// 跳过的任务名。
-    pub skip_tasks: Vec<String>,
+    /// 跳过的任务 **id**（数字）。旧 TS 的 `ctx.config.tasks.skipTasks` 就是 `number[]`，
+    /// 判据是 `skipTasks?.includes(task.id)`（`mcloud-sign` 的
+    /// `packages/core/src/tasks/app/index.ts:33`）。
+    ///
+    /// # ⚠ 形状变更与旧落盘值
+    ///
+    /// 本字段**落过盘**：旧形状是 `Vec<String>`（字段注释原文「跳过的任务名」），
+    /// 所以 `accounts.json` 里可能还留着 `["签到", "看视频"]` 这种**任务名**数组。
+    /// 任务名与任务 id 之间**没有可推导的对应关系**，无法迁移 ⇒ 走
+    /// [`de_skip_task_ids`] **宽松读**：
+    ///
+    /// * 数字 ⇒ 收；
+    /// * 数字字符串（`"117"`）⇒ 解析成数字收；
+    /// * 别的一切（任务名、对象、`null`）⇒ **丢弃这一项**；
+    /// * 整个字段不是数组 ⇒ 当**空表**（不报错、不 panic）。
+    ///
+    /// ⚠ 丢弃是**有意的**：把旧任务名原样留着，只会让「跳过名单」看起来配了东西
+    /// 却一条都不生效（`includes` 恒 false）。代价是旧值不再出现在界面上 ——
+    /// 由测试 `skip_tasks_accepts_the_old_shape` 钉住这一行为。
+    #[serde(default, deserialize_with = "de_skip_task_ids")]
+    pub skip_tasks: Vec<i64>,
 
     /// AI 新头像。
     pub ai_avatar_enabled: bool,
@@ -201,6 +220,39 @@ pub struct AccountSettings {
     /// （进程级兜底 = 串号），不做兼容迁移。要配就按 `PushConfig` 重配。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify: Option<PushConfig>,
+}
+
+/// [`AccountSettings::skip_tasks`] 的宽松反序列化。
+///
+/// # 为什么不直接 `Vec<i64>`
+///
+/// 这个字段**落过盘**，旧形状是 `Vec<String>`（任务名）。直接换成 `Vec<i64>`
+/// 会让带旧值的 `accounts.json` **整份读不出来** —— 一个历史字段不该有那种破坏力。
+///
+/// 读法（每一项独立判，坏的丢掉、不报错）：
+/// * 数字 ⇒ 收；
+/// * 字符串 ⇒ 能解析成 `i64` 就收（例如 `"117"`），否则丢；
+/// * 其余（对象 / 数组 / `null` / 布尔）⇒ 丢。
+///
+/// 整个字段不是数组（或整份读不成 JSON）⇒ 回**空表**：`skip_tasks` 是"用户
+/// 明确点名要跳的"，读不出来时"一条都不跳"比"随便跳几条"安全。
+fn de_skip_task_ids<'de, D>(de: D) -> std::result::Result<Vec<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: serde_json::Value =
+        serde::Deserialize::deserialize(de).unwrap_or(serde_json::Value::Null);
+    let serde_json::Value::Array(items) = raw else {
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .into_iter()
+        .filter_map(|item| match item {
+            serde_json::Value::Number(n) => n.as_i64(),
+            serde_json::Value::String(s) => s.trim().parse::<i64>().ok(),
+            _ => None,
+        })
+        .collect())
 }
 
 impl Default for AccountSettings {
@@ -372,6 +424,39 @@ mod tests {
         let s: AccountSettings =
             serde_json::from_str(r#"{"notify_webhook":"https://old.test/hook"}"#).unwrap();
         assert_eq!(s.notify, None, "旧字段不许复活成推送配置");
+    }
+
+    /// ⚠ `skip_tasks` 形状变更的兼容回归：旧落盘值是**任务名**数组。
+    ///
+    /// 旧字段的语义是「跳过的任务名」（`Vec<String>`），新语义是任务 id
+    /// （与旧 TS 的 `skipTasks: number[]` 对齐）。两者无对应关系 ⇒ 旧任务名
+    /// 会被**丢弃**（不是崩、也不是让整份 `accounts.json` 读不出来）。
+    /// 这条测试把「丢什么、留什么」写死，免得将来有人改成"读不出来就 panic"。
+    #[test]
+    fn skip_tasks_accepts_the_old_shape() {
+        // 旧形状：任务名数组 —— 一个都不该留下，也不该让解析失败。
+        let s: AccountSettings =
+            serde_json::from_str(r#"{"skip_tasks":["签到","看视频"]}"#).unwrap();
+        assert!(s.skip_tasks.is_empty(), "旧任务名按 id 用不出来，只能丢");
+
+        // 新形状：数字数组原样收。
+        let s: AccountSettings = serde_json::from_str(r#"{"skip_tasks":[117,437]}"#).unwrap();
+        assert_eq!(s.skip_tasks, vec![117, 437]);
+
+        // 混着来：数字字符串收下，杂项丢掉。
+        let s: AccountSettings =
+            serde_json::from_str(r#"{"skip_tasks":[117,"991",null,{"a":1},"不是数字"]}"#).unwrap();
+        assert_eq!(s.skip_tasks, vec![117, 991]);
+
+        // 整个字段形状不对 ⇒ 空表，不报错。
+        let s: AccountSettings = serde_json::from_str(r#"{"skip_tasks":"117"}"#).unwrap();
+        assert!(s.skip_tasks.is_empty());
+        let s: AccountSettings = serde_json::from_str(r#"{"skip_tasks":{"id":117}}"#).unwrap();
+        assert!(s.skip_tasks.is_empty());
+
+        // 字段整个缺席 ⇒ 默认空表。
+        let s: AccountSettings = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(s.skip_tasks.is_empty());
     }
 
     // ── 平台形态 ────────────────────────────────────────────────────────
