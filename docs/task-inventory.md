@@ -178,7 +178,7 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 | 9 | `app-task` | App 任务（做任务） | Action | ❌ | | skip | **上传/建删外链/发邮件** | jwt |
 | 10 | `fun-ai` | 趣玩AI抽奖 | Action | ✅ | | catch-up | 记账 | jwt |
 | 11 | `msg-push` | 消息推送任务 | Action | ❌ | | skip | 记账 | jwt |
-| 12 | `cloud-phone-redpack` | 红包派对盘点 | Query | ❌ | | catch-up | 无（**只读那一半**；写入侧 7 条待接） | 活动站票（`querySpecToken` → `tokenValidate`，**与 jwt 无关**） |
+| 12 | `cloud-phone-redpack` | 红包派对 | Action | ❌ | | catch-up | **记账 + 装机**（另有有副作用的 `getRcsToken`）；⚠ 读到没见过的状态码**刻意不发写**（旧 TS 会发） | 活动站票（`querySpecToken` → `tokenValidate`，**与 jwt 无关**） |
 | 13 | `play-ai-special` | 拍拍盘点 | Query | ❌ | | catch-up | 无（**只读那两口**） | jwt + 活动会话 |
 | 14 | `ai-avatar` | AI 头像生成与抽奖 | Action | ❌ | | skip | **往网盘写文件** | jwt |
 | 15 | `task-expansion` | 任务拓展 | Action | ❌ | | skip | **往网盘写文件** | jwt |
@@ -332,7 +332,7 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 > 是两件事，后者是假结论）。有 `codes` 时跳过开门（省两个请求，且避免门偶发失败
 > 把一趟本来能跑完的领取拖黄）。
 >
-> `play-ai-special` 仍未做；`cloud-phone-redpack` 的**只读那一半**（会话两段 + 任务表 + 余额）已落，写入侧 7 条待接。
+> `play-ai-special` 仍未做；`cloud-phone-redpack` 已**整条落地**（会话两段 + 签到 / 登记 / 浏览 / 云机票 / 答题 / 装机）。
 
 > ⚠️ `hc1t`（AI豆大作战）**已过期**，不实现，只作形态参考。
 
