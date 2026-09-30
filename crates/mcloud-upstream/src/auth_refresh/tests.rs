@@ -21,6 +21,7 @@ fn account(platform: &str, domain: Option<&str>) -> Account {
         device_id: DeviceId("DEV".into()),
         pc_platform: None,
         user_domain_id: domain.map(str::to_string),
+        owner: None,
         settings: AccountSettings::default(),
     }
 }

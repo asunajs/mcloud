@@ -19,6 +19,7 @@ fn schedule(expr: &str, last_fire_ms: Option<i64>) -> Schedule {
         timezone: "UTC".into(),
         body: serde_json::Value::Null,
         enabled: true,
+        owner: None,
         last_fire_ms,
         last_run_ms: None,
         last_status: None,

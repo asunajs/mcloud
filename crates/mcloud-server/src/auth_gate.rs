@@ -25,8 +25,23 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
+use mcloud_core::UserId;
+
 use crate::routes::auth::{is_initialized, require_session};
 use crate::ServerState;
+
+/// **当前请求的登录用户**，由 [`gate`] 在放行前放进 request extensions。
+///
+/// # 为什么不自己再解一遍 cookie
+///
+/// `require_session` 已经验过会话并拿到了 `user_id`（它还要查过期、
+/// 顺手清过期会话）。业务路由只该**取用**那份结论，另造一套解析必然与它
+/// 漂移 —— 而漂移的表现是「登录闸放行的人」与「归属判定认的人」不是同一个。
+///
+/// 归属过滤一律以它为准：不是自己的数据返回 **404**，不泄露存在性
+/// （`docs/architecture.md`：归属错误一律 404）。
+#[derive(Debug, Clone)]
+pub struct CurrentUser(pub UserId);
 
 /// 不需要登录就能访问的 `/api/` 路由。
 ///
@@ -57,7 +72,7 @@ fn is_public(method: &str, path: &str) -> bool {
 }
 
 /// 登录闸。
-pub async fn gate(State(state): State<ServerState>, req: Request, next: Next) -> Response {
+pub async fn gate(State(state): State<ServerState>, mut req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     let method = req.method().to_string();
 
@@ -98,7 +113,12 @@ pub async fn gate(State(state): State<ServerState>, req: Request, next: Next) ->
 
     // 已初始化 ⇒ 必须登录
     match require_session(&state, req.headers()).await {
-        Ok(_session) => next.run(req).await,
+        Ok(session) => {
+            // 归属判定需要「当前用户是谁」。会话里已经有 `user_id`，
+            // 放进 extensions 交给处理器取 —— 不再解析一遍 cookie。
+            req.extensions_mut().insert(CurrentUser(session.user_id));
+            next.run(req).await
+        }
         Err(e) => e.into_response(),
     }
 }

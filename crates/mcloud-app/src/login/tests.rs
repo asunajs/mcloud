@@ -245,6 +245,7 @@ fn account_with_device(id: &str, device: &str) -> mcloud_core::Account {
         device_id: mcloud_core::DeviceId(device.into()),
         pc_platform: None,
         user_domain_id: None,
+        owner: None,
         settings: mcloud_core::AccountSettings::default(),
     }
 }

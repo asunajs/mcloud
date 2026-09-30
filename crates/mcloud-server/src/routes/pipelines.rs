@@ -2,13 +2,14 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use mcloud_core::{Account, AccountId, Pipeline, PipelineId, PipelineStep};
+use mcloud_core::{Account, AccountId, Pipeline, PipelineId, PipelineStep, UserId};
 
+use crate::auth_gate::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::ServerState;
 
@@ -38,12 +39,17 @@ fn default_true() -> bool {
     true
 }
 
-pub async fn list(State(state): State<ServerState>) -> ApiResult<Vec<Pipeline>> {
-    Ok(Json(state.handle.store.pipelines().await?))
+pub async fn list(
+    State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
+) -> ApiResult<Vec<Pipeline>> {
+    // 只列自己的编排。
+    Ok(Json(state.handle.store.pipelines_for(&cur.0).await?))
 }
 
 pub async fn upsert(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Path(id): Path<String>,
     Json(input): Json<PipelineInput>,
 ) -> ApiResult<Pipeline> {
@@ -51,7 +57,17 @@ pub async fn upsert(
         return Err(ApiError(mcloud_core::Error::Config("名称不能为空".into())));
     }
     let id = PipelineId::new(id);
-    let existing = state.handle.store.pipeline(&id).await?;
+    // 归属：只认「自己的」那一行；别人的 id 与不存在一样回 404。
+    let existing = state.handle.store.pipeline_for(&cur.0, &id).await?;
+    if existing.is_none() && state.handle.store.pipeline(&id).await?.is_some() {
+        return Err(ApiError(mcloud_core::Error::NotFound(format!(
+            "编排不存在：{id}"
+        ))));
+    }
+    let owner = existing
+        .as_ref()
+        .and_then(|p| p.owner.clone())
+        .or_else(|| Some(cur.0.clone()));
     let pipeline = Pipeline {
         id,
         name: input.name,
@@ -60,6 +76,7 @@ pub async fn upsert(
         stop_on_error: input.stop_on_error,
         steps: input.steps,
         enabled: input.enabled,
+        owner,
         last_run_ms: existing.and_then(|p| p.last_run_ms),
     };
 
@@ -77,15 +94,33 @@ pub async fn upsert(
 
 pub async fn remove(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> ApiResult<serde_json::Value> {
     let id = PipelineId::new(id);
+    // 先过归属：别人的编排既不能删、也不该从「被定时引用」这句报错里
+    // 泄露它的存在。真不存在 ⇒ 幂等 200。
+    if state
+        .handle
+        .store
+        .pipeline_for(&cur.0, &id)
+        .await?
+        .is_none()
+    {
+        if state.handle.store.pipeline(&id).await?.is_some() {
+            return Err(ApiError(mcloud_core::Error::NotFound(format!(
+                "编排不存在：{id}"
+            ))));
+        }
+        return Ok(Json(serde_json::json!({"ok": true})));
+    }
     // 被定时引用时**拒绝**并列出引用者，而不是级联删除：
     // 级联会静默把用户另一处配好的"每天 08:10 跑它"一起带走
+    //（只看自己的定时：别人的定时不构成引用）。
     let refs: Vec<String> = state
         .handle
         .store
-        .schedules()
+        .schedules_for(&cur.0)
         .await?
         .into_iter()
         .filter(|s| s.task == format!("pipeline:{}", id.as_str()))
@@ -116,13 +151,14 @@ pub struct RunAccepted {
 /// 一条链可能要跑几分钟，不能占着这个请求不放。
 pub async fn run(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> ApiResult<RunAccepted> {
     let id = PipelineId::new(id);
     let pipeline = state
         .handle
         .store
-        .pipeline(&id)
+        .pipeline_for(&cur.0, &id)
         .await?
         .ok_or_else(|| ApiError(mcloud_core::Error::NotFound(format!("编排不存在：{id}"))))?;
 
@@ -130,7 +166,7 @@ pub async fn run(
     // 后者在界面上的表现与"还在跑"一模一样
     state.handle.pipelines.preflight(&pipeline)?;
 
-    let accounts = target_accounts(&state, &pipeline.accounts).await?;
+    let accounts = target_accounts(&state, &cur.0, &pipeline.accounts).await?;
     if accounts.is_empty() {
         return Err(ApiError(mcloud_core::Error::Config(
             "没有可执行的账号".into(),
@@ -175,8 +211,14 @@ pub async fn run(
 ///
 /// 返回的是内部用的 `Result`，不是 `ApiResult` —— 它不直接当响应体，
 /// 用 `ApiResult` 会让返回值被多包一层 `Json`。
-async fn target_accounts(state: &ServerState, wanted: &[String]) -> Result<Vec<Account>, ApiError> {
-    let all = state.handle.store.accounts().await?;
+async fn target_accounts(
+    state: &ServerState,
+    viewer: &UserId,
+    wanted: &[String],
+) -> Result<Vec<Account>, ApiError> {
+    // 空清单 = 「全部」对**当前用户**的全部 —— 不能是库里的全部，
+    // 否则一条 `accounts: []` 的编排会把别人的账号也跑一遍。
+    let all = state.handle.store.accounts_for(viewer).await?;
     if wanted.is_empty() {
         return Ok(all);
     }

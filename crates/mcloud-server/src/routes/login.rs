@@ -25,12 +25,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::Json;
 use mcloud_core::PcPlatform;
 use mcloud_tasks::login::{QrLogin, QrProgress, SendSmsOutcome};
 use serde::{Deserialize, Serialize};
 
+use crate::auth_gate::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::ServerState;
 
@@ -191,6 +192,7 @@ pub struct PollQrResponse {
 /// GET 在语义上必须可重复且无副作用，而"轮询一次"不满足。
 pub async fn poll_qr(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Json(req): Json<PollQrRequest>,
 ) -> ApiResult<PollQrResponse> {
     // 取出会话（不持锁发请求）—— 锁跨 await 是这类表最容易犯的错。
@@ -214,6 +216,7 @@ pub async fn poll_qr(
                 .finish_qr(&qr, &user_info)
                 .await
                 .map_err(ApiError::from)?;
+            let account = claim_account(&state, &cur.0, account).await?;
             Ok(Json(PollQrResponse {
                 phase: "logged_in".into(),
                 terminal: true,
@@ -404,6 +407,7 @@ pub struct SmsLoginRequest {
 /// 而这个状态服务端本来就有。
 pub async fn login_sms(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Json(req): Json<SmsLoginRequest>,
 ) -> ApiResult<PollQrResponse> {
     let platform = parse_platform(&req.platform)?;
@@ -457,6 +461,7 @@ pub async fn login_sms(
         .finish_sms(&sms, &user_info)
         .await
         .map_err(ApiError::from)?;
+    let account = claim_account(&state, &cur.0, account).await?;
 
     Ok(Json(PollQrResponse {
         phase: "logged_in".into(),
@@ -616,6 +621,7 @@ pub struct AppSmsLoginRequest {
 /// 而这个状态服务端本来就有）。
 pub async fn app_login_sms(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Json(req): Json<AppSmsLoginRequest>,
 ) -> ApiResult<PollQrResponse> {
     let phone = req.phone.trim();
@@ -658,6 +664,7 @@ pub async fn app_login_sms(
         .finish_app_sms(&sms, &user_info)
         .await
         .map_err(ApiError::from)?;
+    let account = claim_account(&state, &cur.0, account).await?;
 
     Ok(Json(PollQrResponse {
         phase: "logged_in".into(),
@@ -691,6 +698,7 @@ pub struct PasswordLoginRequest {
 /// （`tracing` 层的 `TraceLayer` 只记方法与路径，不记 body —— 见 `lib.rs`。）
 pub async fn login_password(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Json(req): Json<PasswordLoginRequest>,
 ) -> ApiResult<PollQrResponse> {
     let platform = parse_platform(&req.platform)?;
@@ -707,6 +715,7 @@ pub async fn login_password(
         .login_with_password(platform, req.username.trim(), &req.password, &tid)
         .await
         .map_err(ApiError::from)?;
+    let account = claim_account(&state, &cur.0, account).await?;
 
     Ok(Json(PollQrResponse {
         phase: "logged_in".into(),
@@ -748,6 +757,24 @@ pub async fn rotate_device(State(state): State<ServerState>) -> ApiResult<Device
 }
 
 // ── 辅助 ────────────────────────────────────────────────────────────────
+
+/// 把刚登录建出来的云盘账号归到**当前系统用户**名下。
+///
+/// # 为什么在这里补写
+///
+/// 账号是 `mcloud_app::LoginService::finish_*` 落库的，而那一层不知道
+/// 「当前 WebUI 会话是谁」（认证在 server 层）。不补的话，多用户实例里
+/// 新登录的账号就是「无主数据」—— 谁都看不到（失败关闭）。
+/// 补写是**覆盖式**的：同一条账号再 save 一次只是把 owner 钉成当前用户。
+async fn claim_account(
+    state: &ServerState,
+    owner: &mcloud_core::UserId,
+    mut account: mcloud_core::Account,
+) -> Result<mcloud_core::Account, ApiError> {
+    account.owner = Some(owner.clone());
+    state.handle.store.save_account(&account).await?;
+    Ok(account)
+}
 
 fn parse_platform(text: &str) -> Result<PcPlatform, ApiError> {
     mcloud_app::parse_platform(text).map_err(ApiError::from)

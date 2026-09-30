@@ -35,14 +35,15 @@
 //!
 //! ⚠ **绝不能**为了拿档位而在路由里再跑一遍链：那是第二次下单。
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use mcloud_core::{Account, AccountId, Error};
+use mcloud_core::{Account, AccountId, Error, UserId};
 use mcloud_tasks::exchange::{read_judged_prizes, ExchangeEnv, ExchangePlan, ExchangePrize};
 
+use crate::auth_gate::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::ServerState;
 
@@ -133,9 +134,10 @@ pub struct ExchangePrizesResponse {
 /// 刷新多少次都不花豆，也不给滑块接口计失败次数。
 pub async fn list_prizes(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> ApiResult<ExchangePrizesResponse> {
-    let account = load_account(&state, &id).await?;
+    let account = load_account(&state, &cur.0, &id).await?;
     // 与任务链**同一条**装饰链：会话由 `H5Client` 按主机透明注入。
     //
     // ⚠ `http_for` **不**过并发闸、不登记 run —— 所以它只给这一条**只读**路用。
@@ -361,6 +363,7 @@ fn reported_of(details: &Value) -> Option<&Value> {
 /// 才回错误，由 [`ApiError`] 映射成 4xx/5xx。
 pub async fn run_exchange(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Path(id): Path<String>,
     body: Option<Json<ExchangeRequest>>,
 ) -> ApiResult<ExchangeRunResponse> {
@@ -381,7 +384,7 @@ pub async fn run_exchange(
         ))));
     }
 
-    let account = load_account(&state, &id).await?;
+    let account = load_account(&state, &cur.0, &id).await?;
 
     // `prizeIdOrName` 交给任务自己解析：纯数字 vs 名字那条规则
     // （**精确相等**，不是包含）只在 `locate_exchange_prize` 里有一份实现。
@@ -406,13 +409,16 @@ pub async fn run_exchange(
     )))
 }
 
-/// 把账号从存储里取出来；不存在时给一句能照着排查的话。
-async fn load_account(state: &ServerState, id: &str) -> Result<Account, ApiError> {
+/// 取**当前用户自己的**账号；不存在或不是自己的，都是 404。
+///
+/// ⚠ 后一条是审计 P1-6 的重点：兑换会**真扣 AI豆**，绝不能让 B 用 A 的账号兑。
+/// 「不是自己的」与「不存在」回同一句 404，不泄露存在性。
+async fn load_account(state: &ServerState, viewer: &UserId, id: &str) -> Result<Account, ApiError> {
     let account_id = AccountId::new(id);
     state
         .handle
         .store
-        .account(&account_id)
+        .account_for(viewer, &account_id)
         .await?
         .ok_or_else(|| ApiError(Error::NotFound(format!("账号不存在：{id}"))))
 }

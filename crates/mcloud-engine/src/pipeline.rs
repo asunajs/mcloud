@@ -313,6 +313,7 @@ pub fn single_step_pipeline(id: impl Into<String>, step: PipelineStep) -> Pipeli
         stop_on_error: true,
         steps: vec![step],
         enabled: true,
+        owner: None,
         last_run_ms: None,
     }
 }

@@ -171,6 +171,7 @@ fn account_fixture() -> Account {
         device_id: mcloud_core::DeviceId("DEV+1/base=".into()),
         pc_platform: None,
         user_domain_id: None,
+        owner: None,
         settings: mcloud_core::AccountSettings::default(),
     }
 }

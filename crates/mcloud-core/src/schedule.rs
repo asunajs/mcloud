@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::user::UserId;
+
 /// 定时任务标识。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ScheduleId(pub String);
@@ -47,6 +49,17 @@ pub struct Schedule {
     pub body: serde_json::Value,
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// **归属**：这条定时属于哪个系统用户。
+    ///
+    /// # 为什么是 Option
+    ///
+    /// 与 `Account::owner` 同一条理由：这一列后加，老 `schedules.json` 里没有。
+    /// 读不到 ⇒ `None`，加载时回填给唯一的管理员（`owner::legacy_owner`），
+    /// 新建时由路由写成当前登录用户。`skip_serializing_if` 保证未归属时
+    /// 不落一个显式 `null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<UserId>,
 
     /// **水位线**：已经处理过的那个触发时刻（毫秒）。
     ///

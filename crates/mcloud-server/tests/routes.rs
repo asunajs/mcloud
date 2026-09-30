@@ -144,6 +144,7 @@ fn account(phone: &str) -> Account {
         device_id: DeviceId("dev".into()),
         pc_platform: None,
         user_domain_id: None,
+        owner: None,
         settings: AccountSettings::default(),
     }
 }

@@ -20,14 +20,15 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::Json;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
-use mcloud_core::{Account, AccountId, RunEvent, RunId, RunRecord, Seq};
+use mcloud_core::{visible_to, Account, AccountId, RunEvent, RunId, RunRecord, Seq, UserId};
 
+use crate::auth_gate::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::ServerState;
 
@@ -56,18 +57,24 @@ pub struct RunResponse {
     pub duration_ms: u64,
 }
 
-/// 列出最近运行记录。
-pub async fn list(State(state): State<ServerState>) -> ApiResult<Vec<RunRecord>> {
-    let runs = state.handle.store.runs(100).await?;
+/// 列出**当前用户**的最近运行记录。
+pub async fn list(
+    State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
+) -> ApiResult<Vec<RunRecord>> {
+    let runs = state.handle.store.runs_for(&cur.0, 100).await?;
     Ok(Json(runs))
 }
 
 /// 查询单次运行。
+///
+/// 不是自己的记录与不存在的记录**回同一个 404** —— 不泄露存在性。
 pub async fn get_one(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Path(id): Path<u64>,
 ) -> Result<Json<RunRecord>, ApiError> {
-    match state.handle.store.run(RunId::new(id)).await? {
+    match state.handle.store.run_for(&cur.0, RunId::new(id)).await? {
         Some(r) => Ok(Json(r)),
         None => Err(ApiError(mcloud_core::Error::NotFound(format!(
             "运行记录不存在：{id}"
@@ -75,11 +82,95 @@ pub async fn get_one(
     }
 }
 
+/// 一次运行对某个用户的可见性。
+///
+/// `Unknown`（库里没有）与 `Denied`（有但不是自己的）**必须回同一个 404**，
+/// 否则「存在性」就从响应码里漏出去了。
+pub(crate) enum RunAccess {
+    /// 库里 / 登记表 / 内存事件里都没有这个 run。
+    Unknown,
+    /// 存在，但不属于这个用户。
+    Denied,
+    /// 是这个用户的。
+    Allowed,
+}
+
+/// 判定一次运行能不能被 `viewer` 看见 / 操作。
+///
+/// # 为什么不能只看存储层
+///
+/// 运行记录**结束时**才落盘，而客户端拿到 run id 后会立刻订阅 SSE / 请求中止。
+/// 那一刻记录还不存在，只查存储层会把**正在跑的**运行判成「不存在」——
+/// 而 `EventSource` 遇到 404 **不会重连**，界面就永远停在「执行中」。
+/// 所以按三条来源依次判：
+///
+/// 1. 本服务发起时登记的归属（`ServerState::run_owners`，最稳、无时序问题）；
+/// 2. 已落盘的记录（归属由它引用的账号决定，见 `JsonStore::run_visible`）；
+/// 3. 内存中枢里的 `started` 事件（服务重启后仍在跑、或调度器发起的运行）。
+pub(crate) async fn run_access(
+    state: &ServerState,
+    viewer: &UserId,
+    run_id: RunId,
+) -> Result<RunAccess, ApiError> {
+    // ① 本服务发起的运行：归属在发起那一刻就登记了，不依赖事件先到。
+    if let Ok(map) = state.run_owners.lock() {
+        if let Some(owner) = map.get(&run_id) {
+            return Ok(if owner == viewer {
+                RunAccess::Allowed
+            } else {
+                RunAccess::Denied
+            });
+        }
+    }
+
+    // ② 已落盘的记录。
+    if state.handle.store.run(run_id).await?.is_some() {
+        return Ok(match state.handle.store.run_for(viewer, run_id).await? {
+            Some(_) => RunAccess::Allowed,
+            None => RunAccess::Denied,
+        });
+    }
+
+    // ③ 还在跑、记录尚未落盘：从内存事件里取它的账号，再按账号归属判。
+    let account = state
+        .handle
+        .hub
+        .replay(run_id, Seq::ZERO)
+        .into_iter()
+        .find_map(|s| match s.event {
+            RunEvent::Started { account, .. } => Some(account),
+            _ => None,
+        });
+    if let Some(account) = account {
+        let id = AccountId::new(account);
+        if state.handle.store.account_for(viewer, &id).await?.is_some() {
+            return Ok(RunAccess::Allowed);
+        }
+        if state.handle.store.account(&id).await?.is_some() {
+            return Ok(RunAccess::Denied);
+        }
+        // 账号已被删：按「未归属」处理 —— 只有实例**唯一**的那个用户能看
+        //（与存储层 `visible_to` 同一条规则：无主数据不对多用户摊开）。
+        let sole = match state.handle.store.users().await?.as_slice() {
+            [u] => Some(u.id.clone()),
+            _ => None,
+        };
+        return Ok(if visible_to(viewer, None, sole.as_ref()) {
+            RunAccess::Allowed
+        } else {
+            RunAccess::Denied
+        });
+    }
+
+    Ok(RunAccess::Unknown)
+}
+
 /// 启动一次运行。
 ///
 /// 默认同步执行并返回最终结果；`background: true` 时立即返回并后台执行。
 pub async fn create(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<RunResponse>, ApiError> {
     // 先校验任务名：否则未知任务会被误报成「账号不存在」，误导排查。
@@ -96,15 +187,26 @@ pub async fn create(
     }
 
     let id = AccountId::new(&req.account);
-    let account: Account = state.handle.store.account(&id).await?.ok_or_else(|| {
-        ApiError(mcloud_core::Error::Config(format!(
-            "账号不存在：{}",
-            req.account
-        )))
-    })?;
+    // 归属：只认自己的账号。**别人的账号回 404**，不泄露存在性；
+    // 真不存在仍是 400（错的是请求体里的一个字段，与既有契约一致）。
+    let account: Account = match state.handle.store.account_for(&cur.0, &id).await? {
+        Some(a) => a,
+        None if state.handle.store.account(&id).await?.is_some() => {
+            return Err(ApiError(mcloud_core::Error::NotFound(format!(
+                "账号不存在：{}",
+                req.account
+            ))));
+        }
+        None => {
+            return Err(ApiError(mcloud_core::Error::Config(format!(
+                "账号不存在：{}",
+                req.account
+            ))));
+        }
+    };
 
     if req.background {
-        return start_background(state, req.task, account, req.body).await;
+        return start_background(state, cur, req.task, account, req.body).await;
     }
 
     let record = state
@@ -128,6 +230,7 @@ pub async fn create(
 /// 所必需的前提。
 async fn start_background(
     state: ServerState,
+    cur: CurrentUser,
     task: String,
     account: Account,
     body: serde_json::Value,
@@ -136,6 +239,9 @@ async fn start_background(
     // ⚠ spawn 出去的 future 不持有请求上下文 —— 请求一返回它的上下文就被取消了，
     // 而这一趟任务要跑几十秒。
     let run_id = state.handle.runner.start(&task, account.clone(), body);
+    // 记录这次运行的归属：记录要到**结束时**才落盘，而客户端拿到 id 后
+    // 会立刻订阅 SSE / 请求中止 —— 那时只能靠这张登记表判归属。
+    state.note_run_owner(run_id, &cur.0);
     Ok(Json(RunResponse {
         run_id,
         task,
@@ -152,32 +258,30 @@ async fn start_background(
 /// 正是最常见的场景。
 pub async fn events(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Path(id): Path<u64>,
     headers: axum::http::HeaderMap,
     axum::extract::Query(q): axum::extract::Query<EventsQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let run_id = RunId::new(id);
 
+    // ⚠ 归属判定必须在 `subscribe` **之前**：`subscribe` 会给中枢建一个空条目，
+    // 之后再问就永远是「存在」了。
+    //
+    // 这里同时替代了原来那段「这个 run 存不存在」的三处判定：
+    // `run_access` 内部就把存储层 / 取消登记 / 内存中枢三处都看了，
+    // 并且**别人的运行与不存在回同一个 404**（不泄露存在性）。
+    match run_access(&state, &cur.0, run_id).await? {
+        RunAccess::Allowed => {}
+        RunAccess::Denied | RunAccess::Unknown => {
+            return Err(ApiError(mcloud_core::Error::NotFound(format!(
+                "运行记录不存在：{id}"
+            ))));
+        }
+    }
+
     // 断线续传的起点：`Last-Event-ID` 优先（浏览器自动带），其次 `?after=`
     let since = parse_resume_point(&headers, q.after);
-
-    // ⚠ 判定"这个 run 存不存在"要**同时看三处**，而且必须在 subscribe **之前**判 ——
-    // `subscribe` 会给中枢建一个空条目，之后再问就永远是"存在"了。
-    //
-    // 三处缺一不可：
-    // - 存储层：已结束的运行（记录在结束时才落盘）
-    // - 取消登记表：**正在跑**的运行。只查存储层的话，正在跑的运行在库里
-    //   根本还不存在，会被判 404 —— 而 `EventSource` 遇到 404 **不会重连**，
-    //   界面就永远停在"执行中"
-    // - 内存中枢：刚结束、记录还没落盘完的运行
-    let known = state.handle.cancel.is_running(run_id)
-        || state.handle.hub.is_tracked(run_id)
-        || state.handle.store.run(run_id).await?.is_some();
-    if !known {
-        return Err(ApiError(mcloud_core::Error::NotFound(format!(
-            "运行记录不存在：{id}"
-        ))));
-    }
 
     let hub = std::sync::Arc::clone(&state.handle.hub);
     // 订阅会把 `since` 之后的内存历史补进队列，因此"判存在"到"订阅"之间

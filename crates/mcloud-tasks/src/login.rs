@@ -508,6 +508,9 @@ fn account_from_auth(
         device_id: DeviceId(device_id.into()),
         pc_platform: platform,
         user_domain_id,
+        // 归属由 server 层在拿到当前会话后补写（见 routes/login.rs 的 claim_account），
+        // 这里不知道是谁在登录。
+        owner: None,
         settings: AccountSettings::default(),
     })
 }

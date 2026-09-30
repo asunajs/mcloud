@@ -1,9 +1,10 @@
 //! 健康检查、版本与后端自述。
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::Json;
 use serde::Serialize;
 
+use crate::auth_gate::CurrentUser;
 use crate::ServerState;
 
 #[derive(Serialize)]
@@ -58,29 +59,42 @@ pub struct ServiceStatus {
     pub pipeline_count: usize,
 }
 
-pub async fn status(State(state): State<ServerState>) -> Json<ServiceStatus> {
-    // 历史倒序，取第一条即最近一次；读失败按"没有记录"处理，
+pub async fn status(
+    State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
+) -> Json<ServiceStatus> {
+    // 历史倒序，取第一条即**自己**最近一次；读失败按"没有记录"处理，
     // 不该因为历史文件损坏就让整个自述接口 500。
-    let last_run = state.handle.store.runs(1).await.ok().and_then(|mut r| {
-        if r.is_empty() {
-            None
-        } else {
-            Some(r.remove(0))
-        }
-    });
+    //
+    // ⚠ 必须按归属过滤：这个值是「最近一次运行」的完整记录，
+    // 把别人的摆到侧栏上等于把任务名、账号与明细一起漏出去。
+    let last_run = state
+        .handle
+        .store
+        .runs_for(&cur.0, 1)
+        .await
+        .ok()
+        .and_then(|mut r| {
+            if r.is_empty() {
+                None
+            } else {
+                Some(r.remove(0))
+            }
+        });
 
-    // 计数读失败一律按 0 处理：自述接口不该因为某个文件损坏就 500
+    // 计数读失败一律按 0 处理：自述接口不该因为某个文件损坏就 500。
+    // 计数也只看自己的 —— 总数会暴露「这个实例上还有别人配了什么」。
     let schedule_count = state
         .handle
         .store
-        .schedules()
+        .schedules_for(&cur.0)
         .await
         .map(|v| v.len())
         .unwrap_or(0);
     let pipeline_count = state
         .handle
         .store
-        .pipelines()
+        .pipelines_for(&cur.0)
         .await
         .map(|v| v.len())
         .unwrap_or(0);

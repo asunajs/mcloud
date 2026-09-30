@@ -12,11 +12,12 @@
 //! 新增字段时必须**主动**加进 DTO —— 这正是我们要的默认：
 //! 漏掉一个字段的代价是功能少一点，而反射式序列化的代价是漏凭据。
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::Json;
 use mcloud_core::AccountId;
 use serde::Serialize;
 
+use crate::auth_gate::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::ServerState;
 
@@ -67,12 +68,18 @@ impl From<mcloud_core::Account> for AccountSummary {
     }
 }
 
-/// `GET /api/accounts` —— 列出已登录的云盘账号。
-pub async fn list(State(state): State<ServerState>) -> ApiResult<Vec<AccountSummary>> {
+/// `GET /api/accounts` —— 列出**当前用户**已登录的云盘账号。
+///
+/// ⚠ 用 `accounts_for` 而不是 `accounts()`：后者是「库里所有账号」，
+/// 在多用户实例里会把别人的账号列出来（审计 P1-6 要修的就是这个）。
+pub async fn list(
+    State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
+) -> ApiResult<Vec<AccountSummary>> {
     let accounts = state
         .handle
         .store
-        .accounts()
+        .accounts_for(&cur.0)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(accounts.into_iter().map(Into::into).collect()))
@@ -88,17 +95,45 @@ pub async fn list(State(state): State<ServerState>) -> ApiResult<Vec<AccountSumm
 ///
 /// 与 `/api/runs/{id}` 那边刻意不同：那里查的是一个**要读的资源**，
 /// "不存在"必须让调用方知道；这里是**收敛到一个目标状态**。
+///
+/// # 但"别人的账号"不是"不存在"
+///
+/// 归属判定插在幂等前面：账号**在、但不是自己的** ⇒ **404**
+///（`docs/architecture.md`：归属错误一律 404，不泄露存在性）。
+/// 只有"真的不存在"才走上面那条幂等 200 —— 否则 B 删 A 的账号会得到 200，
+/// 看起来像删成功了，实际什么都没发生。
 pub async fn remove(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> ApiResult<serde_json::Value> {
     let account_id = AccountId::new(id);
-    state
+
+    // 自己的账号：删。
+    if state
         .handle
         .store
-        .remove_account(&account_id)
-        .await
-        .map_err(ApiError::from)?;
+        .account_for(&cur.0, &account_id)
+        .await?
+        .is_some()
+    {
+        state
+            .handle
+            .store
+            .remove_account(&account_id)
+            .await
+            .map_err(ApiError::from)?;
+        return Ok(Json(serde_json::json!({ "removed": true })));
+    }
+
+    // 账号在、但不是自己的 ⇒ **404**（不泄露存在性）；
+    // 真不存在 ⇒ 仍然是上面那条幂等语义（200）—— 删除是「收敛到目标状态」，
+    // 而「本来就没有」已经达成，不该让前端弹一个红色失败框。
+    if state.handle.store.account(&account_id).await?.is_some() {
+        return Err(ApiError(mcloud_core::Error::NotFound(format!(
+            "账号不存在：{account_id}"
+        ))));
+    }
     Ok(Json(serde_json::json!({ "removed": true })))
 }
 
@@ -121,6 +156,7 @@ mod tests {
             device_id: DeviceId("DEV-1".into()),
             pc_platform: Some(PcPlatform::MacOs),
             user_domain_id: Some("1990000000000000001".into()),
+            owner: None,
             settings: AccountSettings::default(),
         }
     }

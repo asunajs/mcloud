@@ -442,6 +442,7 @@ fn basic_authorization_is_the_raw_auth_verbatim() {
         device_id: DeviceId("d".into()),
         pc_platform: None,
         user_domain_id: None,
+        owner: None,
         settings: AccountSettings::default(),
     };
     assert_eq!(

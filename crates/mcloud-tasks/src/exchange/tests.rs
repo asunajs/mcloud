@@ -2424,6 +2424,7 @@ fn task_ctx(http: Arc<dyn HttpClient>, clock: Arc<dyn Clock>) -> TaskContext {
             device_id: DeviceId("DEV+1/base=".into()),
             pc_platform: None,
             user_domain_id: None,
+            owner: None,
             settings: AccountSettings::default(),
         },
         http,

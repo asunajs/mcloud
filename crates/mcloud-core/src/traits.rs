@@ -202,6 +202,25 @@ pub trait HttpClient: Send + Sync {
 pub trait AccountStore: Send + Sync {
     async fn accounts(&self) -> Result<Vec<Account>>;
     async fn account(&self, id: &AccountId) -> Result<Option<Account>>;
+
+    /// 列出**归 owner 所有**的账号（列表页唯一该用的那条）。
+    ///
+    /// # 为什么默认实现是「空表」而不是「调用 accounts()」
+    ///
+    /// 归属过滤是安全边界，默认必须**失败关闭**：真后端忘了实现它，
+    /// 表现是「看不到任何账号」（会立刻被发现），而不是「看到别人的账号」
+    /// （静默、不可发现）。本仓唯一的落盘后端 `JsonStore` 覆写它；
+    /// 测试替身不需要归属，默认空表不会影响它们。
+    async fn accounts_for(&self, _owner: &UserId) -> Result<Vec<Account>> {
+        Ok(Vec::new())
+    }
+
+    /// 取**归 owner 所有**的那个账号。不是自己的、或不存在，一律 `None`
+    /// —— 调用方据此回 **404**，不泄露「它存在但不属于你」这个事实
+    /// （`docs/architecture.md` 的「归属错误一律 404」）。
+    async fn account_for(&self, _owner: &UserId, _id: &AccountId) -> Result<Option<Account>> {
+        Ok(None)
+    }
     /// 保存账号。实现方必须**原子写**并保留备份。
     async fn save_account(&self, account: &Account) -> Result<()>;
     async fn remove_account(&self, id: &AccountId) -> Result<()>;
@@ -218,6 +237,22 @@ pub trait RunStore: Send + Sync {
     /// `running`，结束时回填结果）。
     async fn upsert_run(&self, record: &RunRecord) -> Result<()>;
     async fn runs(&self, limit: usize) -> Result<Vec<RunRecord>>;
+
+    /// 列出**归 owner 所有**的运行记录（最近在前）。
+    ///
+    /// 运行记录自己没有 owner 列 —— 它的归属由 `RunRecord.account` 指向的那个
+    /// 账号决定（账号已不存在时按未归属处理）。默认失败关闭（空表）。
+    async fn runs_for(&self, _owner: &UserId, _limit: usize) -> Result<Vec<RunRecord>> {
+        Ok(Vec::new())
+    }
+
+    /// 取**归 owner 所有**的那条运行记录；不是自己的、或不存在，都是 `None`。
+    ///
+    /// 日志 / SSE / 中止这三条入口都先过它 —— 拿不到运行记录就回 404，
+    /// 于是「看不到别人的日志」与「看不到别人的运行记录」是同一条判据。
+    async fn run_for(&self, _owner: &UserId, _id: RunId) -> Result<Option<RunRecord>> {
+        Ok(None)
+    }
     async fn run(&self, id: RunId) -> Result<Option<RunRecord>>;
     /// 列出仍在运行中的记录 —— 进程重启后据此把孤儿标记为已中止。
     async fn running_runs(&self) -> Result<Vec<RunRecord>>;
@@ -239,6 +274,17 @@ pub trait LogStore: Send + Sync {
 pub trait ScheduleStore: Send + Sync {
     async fn schedules(&self) -> Result<Vec<Schedule>>;
     async fn schedule(&self, id: &ScheduleId) -> Result<Option<Schedule>>;
+
+    /// 列出**归 owner 所有**的定时。默认失败关闭（空表），理由同
+    /// [`AccountStore::accounts_for`]。
+    async fn schedules_for(&self, _owner: &UserId) -> Result<Vec<Schedule>> {
+        Ok(Vec::new())
+    }
+
+    /// 取**归 owner 所有**的那条定时；不是自己的、或不存在，都是 `None`。
+    async fn schedule_for(&self, _owner: &UserId, _id: &ScheduleId) -> Result<Option<Schedule>> {
+        Ok(None)
+    }
     async fn save_schedule(&self, schedule: &Schedule) -> Result<()>;
     async fn remove_schedule(&self, id: &ScheduleId) -> Result<()>;
 
@@ -270,6 +316,17 @@ pub trait ScheduleStore: Send + Sync {
 pub trait PipelineStore: Send + Sync {
     async fn pipelines(&self) -> Result<Vec<Pipeline>>;
     async fn pipeline(&self, id: &PipelineId) -> Result<Option<Pipeline>>;
+
+    /// 列出**归 owner 所有**的编排。默认失败关闭（空表），理由同
+    /// [`AccountStore::accounts_for`]。
+    async fn pipelines_for(&self, _owner: &UserId) -> Result<Vec<Pipeline>> {
+        Ok(Vec::new())
+    }
+
+    /// 取**归 owner 所有**的那条编排；不是自己的、或不存在，都是 `None`。
+    async fn pipeline_for(&self, _owner: &UserId, _id: &PipelineId) -> Result<Option<Pipeline>> {
+        Ok(None)
+    }
     async fn save_pipeline(&self, pipeline: &Pipeline) -> Result<()>;
     async fn remove_pipeline(&self, id: &PipelineId) -> Result<()>;
 

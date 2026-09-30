@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::push::PushConfig;
+use crate::user::UserId;
 
 /// 账号标识，通常是手机号。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -318,6 +319,24 @@ pub struct Account {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_domain_id: Option<String>,
 
+    /// **归属**：这个账号属于哪个系统用户（WebUI 登录闸里的那个）。
+    ///
+    /// # 为什么是 Option
+    ///
+    /// 这一列是**后加的**：老 `accounts.json` 里没有它。直接写 `UserId`
+    /// 会让老库整份读不出来 —— 而老数据必须照常可用。所以：
+    ///
+    /// * 读不到 ⇒ `None`（未归属）；
+    /// * 加载时由存储层**回填**给那个唯一的管理员（解析见
+    ///   `mcloud_core::owner::legacy_owner`）；
+    /// * 新建的账号由路由层写成当前登录用户。
+    ///
+    /// `skip_serializing_if` 是刻意的：归属一旦确定就落盘，未归属时不写
+    /// 一个显式的 `null` —— 否则「从没归属过」与「归属性被清空」在 JSON 里
+    /// 长得一样，回填逻辑就没法判了。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<UserId>,
+
     #[serde(default)]
     pub settings: AccountSettings,
 }
@@ -484,6 +503,7 @@ mod tests {
             device_id: DeviceId("D-ENDIN".into()),
             pc_platform: Some(p),
             user_domain_id: None,
+            owner: None,
             settings: AccountSettings::default(),
         };
         let win = serde_json::to_string(&mk(PcPlatform::Windows)).unwrap();
@@ -503,6 +523,7 @@ mod tests {
             device_id: DeviceId("d".into()),
             pc_platform: None,
             user_domain_id: None,
+            owner: None,
             settings: AccountSettings::default(),
         };
         let json = serde_json::to_string(&acc).unwrap();

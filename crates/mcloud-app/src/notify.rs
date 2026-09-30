@@ -568,6 +568,7 @@ mod tests {
             device_id: DeviceId("d".into()),
             pc_platform: None,
             user_domain_id: None,
+            owner: None,
             settings: AccountSettings {
                 notify,
                 ..Default::default()

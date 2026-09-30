@@ -34,6 +34,7 @@ fn account(phone: &str) -> Account {
         device_id: DeviceId("dev".into()),
         pc_platform: None,
         user_domain_id: None,
+        owner: None,
         settings: AccountSettings::default(),
     }
 }
@@ -371,6 +372,7 @@ async fn schedules_crud() {
         timezone: "Asia/Shanghai".into(),
         body: serde_json::Value::Null,
         enabled: true,
+        owner: None,
         last_fire_ms: None,
         last_run_ms: None,
         last_status: None,
@@ -403,6 +405,7 @@ async fn pipelines_crud() {
             continue_on_error: false,
         }],
         enabled: true,
+        owner: None,
         last_run_ms: None,
     };
     s.save_pipeline(&p).await.unwrap();
@@ -459,6 +462,7 @@ async fn mark_schedule_fired_only_touches_watermark_and_count() {
         timezone: "Asia/Shanghai".into(),
         body: serde_json::Value::Null,
         enabled: true,
+        owner: None,
         last_fire_ms: None,
         last_run_ms: None,
         last_status: None,
@@ -499,6 +503,7 @@ async fn record_schedule_run_has_asymmetric_none_semantics() {
         timezone: "Asia/Shanghai".into(),
         body: serde_json::Value::Null,
         enabled: true,
+        owner: None,
         last_fire_ms: Some(1),
         last_run_ms: None,
         last_status: None,
@@ -575,6 +580,7 @@ async fn mark_pipeline_ran_only_touches_run_time() {
             continue_on_error: false,
         }],
         enabled: true,
+        owner: None,
         last_run_ms: None,
     };
     s.save_pipeline(&p).await.unwrap();
@@ -1185,5 +1191,324 @@ async fn trailing_newline_is_tolerated() {
     let id = "62AA2BDA29F99744536E142A83CA5B03-ENDIN";
     std::fs::write(d.join(files::PC_DEVICE), format!("{id}\n")).unwrap();
     assert_eq!(s.pc_device_id().await.unwrap().as_deref(), Some(id));
+    let _ = std::fs::remove_dir_all(&d);
+}
+// ══════════════════════════ 多用户归属 ══════════════════════════
+//
+// 审计 P1-6：B 能看到 / 删除 A 的账号、读到 A 的全部运行日志、用 A 的账号
+// 真花 AI豆。归属判定只有 `mcloud_core::owner::visible_to` 一份实现，
+// 路由层直接调这些 `*_for` 方法 —— 所以**在 store 层测**就等于测了路由的
+// 判据（`mcloud-server` 的测试在本仓不能跑：链接会 SIGKILL launchd 托管的
+// 服务，见 AGENTS.md）。
+
+/// 带归属的账号。
+fn owned_account(phone: &str, owner: Option<&str>) -> Account {
+    let mut a = account(phone);
+    a.owner = owner.map(UserId::new);
+    a
+}
+
+fn owned_schedule(id: &str, owner: Option<&str>) -> Schedule {
+    Schedule {
+        id: ScheduleId::new(id),
+        name: format!("sch-{id}"),
+        task: "sign".into(),
+        accounts: vec![],
+        expr: "0 8 * * *".into(),
+        timezone: "Asia/Shanghai".into(),
+        body: serde_json::Value::Null,
+        enabled: true,
+        owner: owner.map(UserId::new),
+        last_fire_ms: None,
+        last_run_ms: None,
+        last_status: None,
+        last_error: None,
+        run_count: 0,
+    }
+}
+
+fn owned_pipeline(id: &str, owner: Option<&str>) -> Pipeline {
+    use mcloud_core::{AccountMode, PipelineStep};
+    Pipeline {
+        id: PipelineId::new(id),
+        name: format!("pipe-{id}"),
+        accounts: vec![],
+        account_mode: AccountMode::Sequential,
+        stop_on_error: true,
+        steps: vec![PipelineStep {
+            task: "sign".into(),
+            body: serde_json::Value::Null,
+            continue_on_error: false,
+        }],
+        enabled: true,
+        owner: owner.map(UserId::new),
+        last_run_ms: None,
+    }
+}
+
+fn owned_run(id: u64, account_id: &str) -> RunRecord {
+    let mut r = run_record(id, RunStatus::Done);
+    r.account = account_id.into();
+    r
+}
+
+/// (a) 账号：列表只含自己的；直取别人的拿不到（路由据此 404）。
+#[tokio::test]
+async fn accounts_are_listed_and_fetched_only_by_their_owner() {
+    let d = tmpdir("owner-acct");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_user(&user("alice", "alice")).await.unwrap();
+    s.save_user(&user("bob", "bob")).await.unwrap();
+    s.save_account(&owned_account("13800000001", Some("alice")))
+        .await
+        .unwrap();
+    s.save_account(&owned_account("13800000002", Some("bob")))
+        .await
+        .unwrap();
+
+    let alice = UserId::new("alice");
+    let bob = UserId::new("bob");
+    let list_a = s.accounts_for(&alice).await.unwrap();
+    assert_eq!(list_a.len(), 1, "A 的列表只该有 A 的账号");
+    assert_eq!(list_a[0].id.as_str(), "13800000001");
+    assert!(
+        s.accounts_for(&bob)
+            .await
+            .unwrap()
+            .iter()
+            .all(|x| x.id.as_str() != "13800000001"),
+        "B 的列表里不该出现 A 的账号"
+    );
+
+    // 直取：别人的一律拿不到（调用方回 404，不泄露「存在但不属于你」）
+    assert!(s
+        .account_for(&alice, &AccountId::new("13800000002"))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(s
+        .account_for(&bob, &AccountId::new("13800000001"))
+        .await
+        .unwrap()
+        .is_none());
+    // 自己的照常拿得到（不是把功能一并关死）
+    assert!(s
+        .account_for(&alice, &AccountId::new("13800000001"))
+        .await
+        .unwrap()
+        .is_some());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// (b) 定时：列表隔离 + 直取 404。
+#[tokio::test]
+async fn schedules_are_isolated_by_owner() {
+    let d = tmpdir("owner-sched");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_user(&user("alice", "alice")).await.unwrap();
+    s.save_user(&user("bob", "bob")).await.unwrap();
+    s.save_schedule(&owned_schedule("s-a", Some("alice")))
+        .await
+        .unwrap();
+    s.save_schedule(&owned_schedule("s-b", Some("bob")))
+        .await
+        .unwrap();
+
+    let alice = UserId::new("alice");
+    let bob = UserId::new("bob");
+    let list = s.schedules_for(&alice).await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id.as_str(), "s-a", "A 只该看到自己的定时");
+    assert!(
+        s.schedule_for(&alice, &ScheduleId::new("s-b"))
+            .await
+            .unwrap()
+            .is_none(),
+        "直取 B 的定时必须是 None ⇒ 路由 404"
+    );
+    assert!(s
+        .schedule_for(&bob, &ScheduleId::new("s-a"))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(s
+        .schedule_for(&alice, &ScheduleId::new("s-a"))
+        .await
+        .unwrap()
+        .is_some());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// (b) 编排：列表隔离 + 直取 404。
+#[tokio::test]
+async fn pipelines_are_isolated_by_owner() {
+    let d = tmpdir("owner-pipe");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_user(&user("alice", "alice")).await.unwrap();
+    s.save_user(&user("bob", "bob")).await.unwrap();
+    s.save_pipeline(&owned_pipeline("p-a", Some("alice")))
+        .await
+        .unwrap();
+    s.save_pipeline(&owned_pipeline("p-b", Some("bob")))
+        .await
+        .unwrap();
+
+    let alice = UserId::new("alice");
+    let bob = UserId::new("bob");
+    let list = s.pipelines_for(&alice).await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id.as_str(), "p-a");
+    assert!(
+        s.pipeline_for(&alice, &PipelineId::new("p-b"))
+            .await
+            .unwrap()
+            .is_none(),
+        "直取 B 的编排必须是 None ⇒ 路由 404"
+    );
+    assert!(s
+        .pipeline_for(&bob, &PipelineId::new("p-a"))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(s
+        .pipeline_for(&alice, &PipelineId::new("p-a"))
+        .await
+        .unwrap()
+        .is_some());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// (c) 运行记录 / 日志：A 看不到 B 的。
+///
+/// 日志入口（`GET /api/runs/{id}/logs`）与 SSE、中止三条都先过 `run_for`；
+/// 所以「拿不到运行记录」就是「拿不到它的日志」。
+#[tokio::test]
+async fn runs_and_logs_are_isolated_by_owner() {
+    let d = tmpdir("owner-run");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_user(&user("alice", "alice")).await.unwrap();
+    s.save_user(&user("bob", "bob")).await.unwrap();
+    s.save_account(&owned_account("13800000001", Some("alice")))
+        .await
+        .unwrap();
+    s.save_account(&owned_account("13800000002", Some("bob")))
+        .await
+        .unwrap();
+    s.upsert_run(&owned_run(1, "13800000001")).await.unwrap();
+    s.upsert_run(&owned_run(2, "13800000002")).await.unwrap();
+    s.append_logs(
+        RunId::new(1),
+        &[LogLine::new(1, LogLevel::Info, "A 的日志", 0, Seq(1))],
+    )
+    .await
+    .unwrap();
+
+    let alice = UserId::new("alice");
+    let bob = UserId::new("bob");
+    let list = s.runs_for(&alice, 100).await.unwrap();
+    assert_eq!(list.len(), 1, "A 的运行历史只该有 A 的");
+    assert_eq!(list[0].run_id, RunId::new(1));
+    assert!(
+        s.run_for(&bob, RunId::new(1)).await.unwrap().is_none(),
+        "B 不该能看到 A 的运行记录（日志入口据此 404）"
+    );
+    assert!(s.run_for(&alice, RunId::new(2)).await.unwrap().is_none());
+    assert!(s.run_for(&alice, RunId::new(1)).await.unwrap().is_some());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// (d) 迁移：只有一个管理员、老数据没有 owner ⇒ 加载后回填、照常可用。
+#[tokio::test]
+async fn legacy_records_without_owner_are_backfilled_to_the_admin() {
+    let d = tmpdir("owner-migrate");
+    std::fs::create_dir_all(&d).unwrap();
+    let admin = user("admin-id", "admin");
+    std::fs::write(
+        d.join(files::USERS),
+        serde_json::to_vec(&vec![admin]).unwrap(),
+    )
+    .unwrap();
+    // 三条**老格式**数据：序列化时 owner=None 会被 skip_serializing_if 跳过
+    std::fs::write(
+        d.join(files::ACCOUNTS),
+        serde_json::to_vec(&vec![account("13800000009")]).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        d.join(files::SCHEDULES),
+        serde_json::to_vec(&vec![owned_schedule("s-legacy", None)]).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        d.join(files::PIPELINES),
+        serde_json::to_vec(&vec![owned_pipeline("p-legacy", None)]).unwrap(),
+    )
+    .unwrap();
+
+    // 前置：盘上确实**没有** owner 这一列，否则这条测试什么也没验
+    let raw = std::fs::read_to_string(d.join(files::ACCOUNTS)).unwrap();
+    assert!(!raw.contains("owner"), "前置：老数据不该有 owner：{raw}");
+
+    let s = JsonStore::open(&d).unwrap();
+    let admin_id = UserId::new("admin-id");
+    let list = s.accounts_for(&admin_id).await.unwrap();
+    assert_eq!(list.len(), 1, "回填后管理员必须能看到老账号");
+    assert_eq!(
+        list[0].owner.as_ref(),
+        Some(&admin_id),
+        "老数据的归属要补给那个唯一的管理员"
+    );
+    assert_eq!(s.schedules_for(&admin_id).await.unwrap().len(), 1);
+    assert_eq!(s.pipelines_for(&admin_id).await.unwrap().len(), 1);
+    // 老库照常可用（不是「回填成功但读不出来」）
+    assert!(s
+        .account_for(&admin_id, &AccountId::new("13800000009"))
+        .await
+        .unwrap()
+        .is_some());
+
+    // 回填结果**落盘**：重启后不再依赖「再回填一次」
+    let raw = std::fs::read_to_string(d.join(files::ACCOUNTS)).unwrap();
+    assert!(raw.contains("owner"), "回填要写回磁盘：{raw}");
+    let reopened = JsonStore::open(&d).unwrap();
+    assert_eq!(
+        reopened.accounts_for(&admin_id).await.unwrap()[0]
+            .owner
+            .as_ref(),
+        Some(&admin_id)
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// (e) 单用户回归：无主数据对唯一用户照常可见（不许「升级后账号全不见了」）。
+#[tokio::test]
+async fn single_user_instance_still_sees_ownerless_records() {
+    let d = tmpdir("owner-solo");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_user(&user("solo", "admin")).await.unwrap();
+    // 进程内直接造、没写 owner 的数据（测试里常见；也让「某条路忘了写 owner」
+    // 不至于把数据变成谁都看不见）
+    s.save_account(&account("13800000000")).await.unwrap();
+    let solo = UserId::new("solo");
+    assert_eq!(s.accounts_for(&solo).await.unwrap().len(), 1);
+    assert!(s
+        .account_for(&solo, &AccountId::new("13800000000"))
+        .await
+        .unwrap()
+        .is_some());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 多用户实例里的无主数据**谁都看不见**（失败关闭），不摊给所有人。
+#[tokio::test]
+async fn ownerless_records_are_invisible_in_a_multi_user_instance() {
+    let d = tmpdir("owner-multi");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_user(&user("u1", "a")).await.unwrap();
+    s.save_user(&user("u2", "b")).await.unwrap();
+    // ⚠ 注意：这是**运行期**存进去的无主数据，不走加载回填
+    s.save_account(&account("13800000000")).await.unwrap();
+    assert!(s.accounts_for(&UserId::new("u1")).await.unwrap().is_empty());
+    assert!(s.accounts_for(&UserId::new("u2")).await.unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&d);
 }

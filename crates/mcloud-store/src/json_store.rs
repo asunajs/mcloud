@@ -42,8 +42,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use mcloud_core::{
-    Account, AccountId, AppendOutcome, Error, LogLine, Pipeline, PipelineId, Result, RunId,
-    RunRecord, RunStatus, Schedule, ScheduleId, Seq, Session, User, UserId, LOG_LIMIT_PER_RUN,
+    legacy_owner, visible_to, Account, AccountId, AppendOutcome, Error, LogLine, Pipeline,
+    PipelineId, Result, RunId, RunRecord, RunStatus, Schedule, ScheduleId, Seq, Session, User,
+    UserId, LOG_LIMIT_PER_RUN,
 };
 
 /// 运行历史保留条数。
@@ -190,6 +191,10 @@ impl JsonStore {
         };
         store.harden_existing_permissions();
         store.load_all()?;
+        // 归属回填：老数据（没有 owner 列）必须在这里补上，否则升级后
+        // 会表现成「账号全不见了」。放在 `recover_orphans` 之前只是让
+        // 「数据先完整、再收尾」这条阅读顺序成立 —— 两者改的是不同的表。
+        store.backfill_owners()?;
         store.recover_orphans()?;
         Ok(store)
     }
@@ -329,6 +334,116 @@ impl JsonStore {
                 s.chars().take(200).collect::<String>()
             ))
         })
+    }
+
+    // ── 归属 ────────────────────────────────────────────────────────────
+
+    /// 实例**唯一**的用户（只有一个用户时才有值）。
+    ///
+    /// 用于「未归属数据」的可见性判定，规则见 `mcloud_core::owner::visible_to`：
+    /// 单用户时无主数据对该用户可见（不存在「别人的东西」），多用户时谁都看不见
+    /// （失败关闭）。
+    fn sole_user(db: &Db) -> Option<&UserId> {
+        if db.users.len() == 1 {
+            db.users.first().map(|u| &u.id)
+        } else {
+            None
+        }
+    }
+
+    /// 某个账号 id 的归属。
+    ///
+    /// 返回 `None` = **库里没有这个账号**；`Some(None)` = 「账号在、但未归属」。
+    /// 这两者必须分得开：前者用于「账号被删了」的运行记录归属兜底，
+    /// 后者用于单用户可见规则。
+    fn account_owner(db: &Db, account_id: &str) -> Option<Option<UserId>> {
+        db.accounts
+            .iter()
+            .find(|a| a.id.as_str() == account_id)
+            .map(|a| a.owner.clone())
+    }
+
+    /// 一条运行记录对 viewer 是否可见。
+    ///
+    /// 运行记录**自己没有 owner 列**：它的归属由 `RunRecord.account` 指向的
+    /// 那个账号决定。账号已不在库里（被删）时按「未归属」处理 —— 多用户实例里
+    /// 它就谁都看不见了，这是刻意的失败方向（宁可看不到，也不误给）。
+    fn run_visible(db: &Db, viewer: &UserId, run: &RunRecord) -> bool {
+        let sole = Self::sole_user(db);
+        match Self::account_owner(db, &run.account) {
+            Some(owner) => visible_to(viewer, owner.as_ref(), sole),
+            None => visible_to(viewer, None, sole),
+        }
+    }
+
+    /// 把**老数据的归属**回填给最初的管理员。
+    ///
+    /// # 为什么必须在加载时做
+    ///
+    /// 老数据（本功能之前建的）的 JSON 里没有 owner 列。不回填的话，按
+    /// `visible_to` 的规则它们只对「实例唯一的用户」可见 —— 而**老库升级**
+    /// 正是最常见的场景，绝不能表现成「升级后账号全不见了」。
+    /// 选谁当 owner 见 `mcloud_core::owner::legacy_owner`（创建最早的那个，
+    /// 也就是最初的管理员）。
+    ///
+    /// # 为什么要把回填结果写回磁盘
+    ///
+    /// 只改内存的话，归属会随 `users.json` 的变化而漂移（例如又加了一个用户，
+    /// 或用户被删）。「归属漂移」是这类功能最难查的形态，所以一次性钉死。
+    /// 这里在启动阶段调用，还没有并发写者，因此直接用 `write_json`（与
+    /// `recover_orphans` 同样的取舍）。
+    fn backfill_owners(&self) -> Result<()> {
+        let (accounts, schedules, pipelines, touched_a, touched_s, touched_p) = {
+            let mut db = self.write()?;
+            let Some(legacy) = legacy_owner(&db.users) else {
+                // 没有用户 ⇒ 没有可归属的对象；数据保持未归属，
+                // 由 `visible_to` 的单用户规则处置。
+                return Ok(());
+            };
+            let mut touched_a = false;
+            let mut touched_s = false;
+            let mut touched_p = false;
+            for a in db.accounts.iter_mut() {
+                if a.owner.is_none() {
+                    a.owner = Some(legacy.clone());
+                    touched_a = true;
+                }
+            }
+            for s in db.schedules.iter_mut() {
+                if s.owner.is_none() {
+                    s.owner = Some(legacy.clone());
+                    touched_s = true;
+                }
+            }
+            for p in db.pipelines.iter_mut() {
+                if p.owner.is_none() {
+                    p.owner = Some(legacy.clone());
+                    touched_p = true;
+                }
+            }
+            if !touched_a && !touched_s && !touched_p {
+                return Ok(());
+            }
+            (
+                db.accounts.clone(),
+                db.schedules.clone(),
+                db.pipelines.clone(),
+                touched_a,
+                touched_s,
+                touched_p,
+            )
+        };
+        // 只在**真的动过**的表上写盘：无谓的写会给每个文件都留一份 .bak
+        if touched_a {
+            self.write_json(&self.path(files::ACCOUNTS), &accounts)?;
+        }
+        if touched_s {
+            self.write_json(&self.path(files::SCHEDULES), &schedules)?;
+        }
+        if touched_p {
+            self.write_json(&self.path(files::PIPELINES), &pipelines)?;
+        }
+        Ok(())
     }
 
     // ── 启动装载与恢复 ──────────────────────────────────────────────────
@@ -501,6 +616,27 @@ impl mcloud_core::AccountStore for JsonStore {
         Ok(self.read()?.accounts.iter().find(|a| &a.id == id).cloned())
     }
 
+    async fn accounts_for(&self, owner: &UserId) -> Result<Vec<Account>> {
+        let db = self.read()?;
+        let sole = Self::sole_user(&db);
+        Ok(db
+            .accounts
+            .iter()
+            .filter(|a| visible_to(owner, a.owner.as_ref(), sole))
+            .cloned()
+            .collect())
+    }
+
+    async fn account_for(&self, owner: &UserId, id: &AccountId) -> Result<Option<Account>> {
+        let db = self.read()?;
+        let sole = Self::sole_user(&db);
+        Ok(db
+            .accounts
+            .iter()
+            .find(|a| &a.id == id && visible_to(owner, a.owner.as_ref(), sole))
+            .cloned())
+    }
+
     async fn save_account(&self, account: &Account) -> Result<()> {
         let mut db = self.write()?;
         match db.accounts.iter_mut().find(|a| a.id == account.id) {
@@ -644,6 +780,26 @@ impl mcloud_core::RunStore for JsonStore {
         Ok(self.read()?.runs.iter().find(|r| r.run_id == id).cloned())
     }
 
+    async fn runs_for(&self, owner: &UserId, limit: usize) -> Result<Vec<RunRecord>> {
+        let db = self.read()?;
+        Ok(db
+            .runs
+            .iter()
+            .filter(|r| Self::run_visible(&db, owner, r))
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    async fn run_for(&self, owner: &UserId, id: RunId) -> Result<Option<RunRecord>> {
+        let db = self.read()?;
+        Ok(db
+            .runs
+            .iter()
+            .find(|r| r.run_id == id && Self::run_visible(&db, owner, r))
+            .cloned())
+    }
+
     async fn running_runs(&self) -> Result<Vec<RunRecord>> {
         Ok(self
             .read()?
@@ -720,6 +876,27 @@ impl mcloud_core::ScheduleStore for JsonStore {
         Ok(self.read()?.schedules.iter().find(|s| &s.id == id).cloned())
     }
 
+    async fn schedules_for(&self, owner: &UserId) -> Result<Vec<Schedule>> {
+        let db = self.read()?;
+        let sole = Self::sole_user(&db);
+        Ok(db
+            .schedules
+            .iter()
+            .filter(|s| visible_to(owner, s.owner.as_ref(), sole))
+            .cloned()
+            .collect())
+    }
+
+    async fn schedule_for(&self, owner: &UserId, id: &ScheduleId) -> Result<Option<Schedule>> {
+        let db = self.read()?;
+        let sole = Self::sole_user(&db);
+        Ok(db
+            .schedules
+            .iter()
+            .find(|s| &s.id == id && visible_to(owner, s.owner.as_ref(), sole))
+            .cloned())
+    }
+
     async fn save_schedule(&self, schedule: &Schedule) -> Result<()> {
         let mut db = self.write()?;
         match db.schedules.iter_mut().find(|s| s.id == schedule.id) {
@@ -780,6 +957,27 @@ impl mcloud_core::PipelineStore for JsonStore {
 
     async fn pipeline(&self, id: &PipelineId) -> Result<Option<Pipeline>> {
         Ok(self.read()?.pipelines.iter().find(|p| &p.id == id).cloned())
+    }
+
+    async fn pipelines_for(&self, owner: &UserId) -> Result<Vec<Pipeline>> {
+        let db = self.read()?;
+        let sole = Self::sole_user(&db);
+        Ok(db
+            .pipelines
+            .iter()
+            .filter(|p| visible_to(owner, p.owner.as_ref(), sole))
+            .cloned()
+            .collect())
+    }
+
+    async fn pipeline_for(&self, owner: &UserId, id: &PipelineId) -> Result<Option<Pipeline>> {
+        let db = self.read()?;
+        let sole = Self::sole_user(&db);
+        Ok(db
+            .pipelines
+            .iter()
+            .find(|p| &p.id == id && visible_to(owner, p.owner.as_ref(), sole))
+            .cloned())
     }
 
     async fn save_pipeline(&self, pipeline: &Pipeline) -> Result<()> {

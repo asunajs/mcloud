@@ -30,6 +30,7 @@ fn account(phone: &str) -> Account {
         device_id: DeviceId("dev".into()),
         pc_platform: None,
         user_domain_id: None,
+        owner: None,
         settings: AccountSettings::default(),
     }
 }
@@ -51,6 +52,7 @@ fn pipeline(steps: Vec<PipelineStep>, stop_on_error: bool) -> Pipeline {
         stop_on_error,
         steps,
         enabled: true,
+        owner: None,
         last_run_ms: None,
     }
 }

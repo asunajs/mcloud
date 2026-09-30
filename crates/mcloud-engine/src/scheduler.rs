@@ -393,13 +393,32 @@ impl Scheduler {
         )
     }
 
+    /// 这条定时该跑**哪些账号**。
+    ///
+    /// ⚠ 归属是硬边界：`accounts: []` 的语义是「我名下的全部账号」，
+    /// **不是**「库里全部账号」—— 后者会让 B 建一条不带账号的定时去跑
+    /// A 的账号（真花 A 的 AI豆、动 A 的网盘文件）。
     async fn target_accounts(&self, sch: &Schedule) -> Result<Vec<mcloud_core::Account>> {
-        let all = self.store.accounts().await?;
+        let owned = match sch.owner.as_ref() {
+            // 已归属：只取主人的账号（`accounts_for` 里含「单用户无主可见」规则）。
+            Some(owner) => self.store.accounts_for(owner).await?,
+            // 未归属：只有「老库且用户表为空」才该出现（有用户时加载会回填）。
+            // 单用户 ⇒ 就是它的账号；没有用户 ⇒ 全库（此时不存在多用户）；
+            // 多用户 + 无主 ⇒ **空表**（失败关闭：宁可这次不跑，也不越权）。
+            None => match self.store.users().await?.as_slice() {
+                [sole] => self.store.accounts_for(&sole.id).await?,
+                [] => self.store.accounts().await?,
+                _ => Vec::new(),
+            },
+        };
         if sch.accounts.is_empty() {
-            return Ok(all);
+            return Ok(owned);
         }
         let wanted: Vec<AccountId> = sch.accounts.iter().map(AccountId::new).collect();
-        Ok(all.into_iter().filter(|a| wanted.contains(&a.id)).collect())
+        Ok(owned
+            .into_iter()
+            .filter(|a| wanted.contains(&a.id))
+            .collect())
     }
 
     /// 起循环。

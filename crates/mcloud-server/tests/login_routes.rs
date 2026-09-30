@@ -372,6 +372,7 @@ async fn accounts_list_never_leaks_credentials() {
         device_id: DeviceId("DEV-1".into()),
         pc_platform: Some(PcPlatform::MacOs),
         user_domain_id: None,
+        owner: None,
         settings: AccountSettings::default(),
     };
     handle.store.save_account(&acct).await.unwrap();
@@ -415,6 +416,7 @@ async fn accounts_can_be_removed_idempotently() {
         device_id: DeviceId("DEV-1".into()),
         pc_platform: None,
         user_domain_id: None,
+        owner: None,
         settings: AccountSettings::default(),
     };
     handle.store.save_account(&acct).await.unwrap();

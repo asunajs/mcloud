@@ -1,12 +1,13 @@
 //! 定时任务路由。
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::routing::{get, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use mcloud_core::{Schedule, ScheduleId};
+use mcloud_core::{AccountId, Schedule, ScheduleId};
 
+use crate::auth_gate::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::ServerState;
 
@@ -45,9 +46,13 @@ impl SchedulePayload {
     }
 }
 
-pub async fn list(State(state): State<ServerState>) -> ApiResult<Vec<SchedulePayload>> {
+pub async fn list(
+    State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
+) -> ApiResult<Vec<SchedulePayload>> {
     let now = state.handle.clock.now_ms();
-    let all = state.handle.store.schedules().await?;
+    // 只看自己的：别人的定时既不显示、也不能改。
+    let all = state.handle.store.schedules_for(&cur.0).await?;
     // 一条坏数据不能让整个页面打不开：算不出下次时间的，nextFireAt 给 null
     Ok(Json(
         all.into_iter()
@@ -84,6 +89,7 @@ fn default_true() -> bool {
 
 pub async fn upsert(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Path(id): Path<String>,
     Json(input): Json<ScheduleInput>,
 ) -> ApiResult<SchedulePayload> {
@@ -104,13 +110,42 @@ pub async fn upsert(
     // 才知道自己写错了，而错误信息还淹没在无人看的日志里
     Schedule::validate_expr(&input.expr).map_err(mcloud_core::Error::Config)?;
 
+    // 目标账号必须都是自己的。写进别人的 id 其实不会越权执行（调度器
+    // 只按定时的主人过滤账号），但会让用户以为配上了 —— 明确拒绝
+    // 比静默丢更不容易误判。
+    for account in &input.accounts {
+        if state
+            .handle
+            .store
+            .account_for(&cur.0, &AccountId::new(account.clone()))
+            .await?
+            .is_none()
+        {
+            return Err(ApiError(mcloud_core::Error::Config(format!(
+                "账号不存在或不属于你：{account}"
+            ))));
+        }
+    }
+
     let id = ScheduleId::new(id);
     let timezone = input.timezone.unwrap_or_else(|| "Asia/Shanghai".into());
     mcloud_engine::scheduler::parse_timezone(&timezone).map_err(mcloud_core::Error::Config)?;
 
     // 保留水位线与记账字段：全量覆盖会把"上次跑成没成"抹掉，
     // 而且会把已经处理过的触发点重放一遍（签到不是幂等的）
-    let existing = state.handle.store.schedule(&id).await?;
+    // 归属：取「自己的」那一行（别人的 id 与不存在一样，回 404 不泄露存在性）。
+    let existing = state.handle.store.schedule_for(&cur.0, &id).await?;
+    if existing.is_none() && state.handle.store.schedule(&id).await?.is_some() {
+        return Err(ApiError(mcloud_core::Error::NotFound(format!(
+            "定时任务不存在：{id}"
+        ))));
+    }
+    // 老行沿用它的 owner（本来就等于当前用户；单用户下可能是刚回填的 None，
+    // 这时补成当前用户，顺手把归属钉死）；全新的一行归当前用户。
+    let owner = existing
+        .as_ref()
+        .and_then(|s| s.owner.clone())
+        .or_else(|| Some(cur.0.clone()));
     let schedule = Schedule {
         id,
         name: input.name,
@@ -120,6 +155,7 @@ pub async fn upsert(
         timezone,
         body: input.body,
         enabled: input.enabled,
+        owner,
         last_fire_ms: existing.as_ref().and_then(|s| s.last_fire_ms),
         last_run_ms: existing.as_ref().and_then(|s| s.last_run_ms),
         last_status: existing.and_then(|s| s.last_status),
@@ -133,12 +169,25 @@ pub async fn upsert(
 
 pub async fn remove(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> ApiResult<serde_json::Value> {
-    state
+    let id = ScheduleId::new(id);
+    if state
         .handle
         .store
-        .remove_schedule(&ScheduleId::new(id))
-        .await?;
+        .schedule_for(&cur.0, &id)
+        .await?
+        .is_some()
+    {
+        state.handle.store.remove_schedule(&id).await?;
+        return Ok(Json(serde_json::json!({"ok": true})));
+    }
+    // 存在但不是自己的 ⇒ 404；本来就不存在 ⇒ 幂等 200。
+    if state.handle.store.schedule(&id).await?.is_some() {
+        return Err(ApiError(mcloud_core::Error::NotFound(format!(
+            "定时任务不存在：{id}"
+        ))));
+    }
     Ok(Json(serde_json::json!({"ok": true})))
 }

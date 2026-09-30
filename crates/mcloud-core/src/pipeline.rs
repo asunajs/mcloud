@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::schedule::ScheduleId;
+use crate::user::UserId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PipelineId(pub String);
@@ -77,6 +78,17 @@ pub struct Pipeline {
     pub steps: Vec<PipelineStep>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// **归属**：这条编排属于哪个系统用户。
+    ///
+    /// # 为什么是 Option
+    ///
+    /// 与 `Account::owner` 同一条理由：这一列后加，老 `pipelines.json` 里没有。
+    /// 读不到 ⇒ `None`，加载时回填给唯一的管理员（`owner::legacy_owner`），
+    /// 新建时由路由写成当前登录用户。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<UserId>,
+
     /// 上次执行时间（毫秒）。
     #[serde(default)]
     pub last_run_ms: Option<i64>,
@@ -150,6 +162,7 @@ mod tests {
             stop_on_error,
             steps,
             enabled: true,
+            owner: None,
             last_run_ms: None,
         }
     }
