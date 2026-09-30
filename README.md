@@ -6,7 +6,7 @@
 
 ## 状态
 
-**已落地 19 个任务**：P1 签到族八条（`sign` / `receive` / `multiple` /
+**已落地 20 个任务**：P1 签到族八条（`sign` / `receive` / `multiple` /
 `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`）
 + 直播小红花两条（`live-room` / `red-flower`）
 + 兑换（`exchange`）+ 消息推送（`msg-push`）
@@ -17,6 +17,8 @@
 + App 任务（`app-task`，**做任务**——写侧）
 + 红包派对（`cloud-phone-redpack`，**做任务**——签到 / 登记 / 浏览 / 云机票 / 答题 / 装机）。
   ⚠ 两处**刻意**与旧 TS 不同：读到没见过的状态码**不发写**（防重复领）、会话 token 不落盘。
++ AI 新头像（`ai-avatar`，**做任务**——默认**关**，收尾只删本趟产物）。
+  ⚠ 结构性缺口：本仓 HTTP 抽象只有 `String`（有损），「下载合成图 → upload」这一步**不可达** ⇒ 今天不会往网盘写图；要接得先给 HTTP 抽象加「保留原始字节」的路径。
 
 **`task-expansion`（2026-09-28 落地）—— 第一条"写网盘并自己收尾"的任务**：
 

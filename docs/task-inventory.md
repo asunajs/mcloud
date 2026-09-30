@@ -180,7 +180,7 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 | 11 | `msg-push` | 消息推送任务 | Action | ❌ | | skip | 记账 | jwt |
 | 12 | `cloud-phone-redpack` | 红包派对 | Action | ❌ | | catch-up | **记账 + 装机**（另有有副作用的 `getRcsToken`）；⚠ 读到没见过的状态码**刻意不发写**（旧 TS 会发） | 活动站票（`querySpecToken` → `tokenValidate`，**与 jwt 无关**） |
 | 13 | `play-ai-special` | 拍拍盘点 | Query | ❌ | | catch-up | 无（**只读那两口**） | jwt + 活动会话 |
-| 14 | `ai-avatar` | AI 头像生成与抽奖 | Action | ❌ | | skip | **往网盘写文件** | jwt |
+| 14 | `ai-avatar` | AI 头像生成与抽奖 | Action | ❌ | | skip | **往网盘写图**（⚠ 今天**不可达**，见 `docs/ai-avatar-spec.md`）；默认**关** | Basic + jwttoken |
 | 15 | `task-expansion` | 任务拓展 | Action | ❌ | | skip | **往网盘写文件** | jwt |
 | 16 | `live-room` | 直播口令 → 小红花 | Action | ❌ | | skip | 入群足迹 + **WS 长连** | jwt + WebSocket |
 | 17 | `exchange` | 兑换奖品 | Action | ❌ | ✅ | skip | **真扣AI豆、不可回滚** | jwt + 滑块 |
