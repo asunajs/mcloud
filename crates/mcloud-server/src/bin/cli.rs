@@ -1,4 +1,4 @@
-//! mcloud-gost 命令行入口。
+//! mcloud 命令行入口。
 
 use mcloud_server::cli::{
     auth as cli_auth, cron as cli_cron, login as cli_login, pipeline as cli_pipeline,
@@ -167,7 +167,7 @@ fn print_login_usage() {
 }
 
 fn print_usage() {
-    eprintln!("用法：mcloud-gost <命令> [参数]");
+    eprintln!("用法：mcloud <命令> [参数]");
     eprintln!();
     eprintln!("  tasks                          列出可用任务");
     eprintln!("  run <任务名> <账号> [--body <JSON>]  跑一次任务");
@@ -180,5 +180,5 @@ fn print_usage() {
     eprintln!("  login <方式>                    登录账号（qr / sms / app / password）");
     eprintln!();
     eprintln!("定时与编排的**创建**不在命令行：改配置文件，或用 WebUI。");
-    eprintln!("完整的 WebUI（含登录闸、账号管理、日志）请直接运行 `mcloud-gost serve`。");
+    eprintln!("完整的 WebUI（含登录闸、账号管理、日志）请直接运行 `mcloud serve`。");
 }

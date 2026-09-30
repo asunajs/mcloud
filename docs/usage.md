@@ -7,7 +7,7 @@
 | `mcloud-server` | 服务本体：WebUI + 定时/编排调度。**日常只需要它** |
 | `mcloud-cli` | 命令行：登录账号、跑任务、看产物、刷新凭据（可选） |
 
-产物按平台命名，形如 `mcloud-gost-v0.1.0-x86_64-unknown-linux-gnu.tar.xz`。
+产物按平台命名，形如 `mcloud-v0.1.0-x86_64-unknown-linux-gnu.tar.xz`。
 
 ---
 
@@ -15,18 +15,18 @@
 
 ```bash
 # Linux / macOS（.tar.xz 最小；也可以取 .tar.gz）
-tar -xJf mcloud-gost-v0.1.0-x86_64-unknown-linux-gnu.tar.xz
-cd mcloud-gost-v0.1.0-x86_64-unknown-linux-gnu
+tar -xJf mcloud-v0.1.0-x86_64-unknown-linux-gnu.tar.xz
+cd mcloud-v0.1.0-x86_64-unknown-linux-gnu
 
 # 校验（包内附 .sha256）
-shasum -a 256 -c ../mcloud-gost-v0.1.0-x86_64-unknown-linux-gnu.sha256
+shasum -a 256 -c ../mcloud-v0.1.0-x86_64-unknown-linux-gnu.sha256
 ```
 
 ```powershell
 # Windows
-Expand-Archive mcloud-gost-v0.1.0-x86_64-pc-windows-msvc.zip -DestinationPath .
-cd .\mcloud-gost-v0.1.0-x86_64-pc-windows-msvc
-Get-FileHash ..\mcloud-gost-v0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Expand-Archive mcloud-v0.1.0-x86_64-pc-windows-msvc.zip -DestinationPath .
+cd .\mcloud-v0.1.0-x86_64-pc-windows-msvc
+Get-FileHash ..\mcloud-v0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 ```
 
 ⚠ **Linux 产物是动态链接的**：构建于 Ubuntu 24.04（glibc 2.39）+ 系统 OpenSSL。
@@ -44,7 +44,7 @@ Fedora 40+ 一类）。更老的发行版（CentOS 7、Debian 11 等）请自行
 **没有子命令**，直接跑就是起服务。看到这两行就成了：
 
 ```
-INFO mcloud_server: mcloud-gost 启动 data_dir="data" tasks=18
+INFO mcloud_server: mcloud 启动 data_dir="data" tasks=18
 INFO mcloud_server: 监听 http://127.0.0.1:3000
 ```
 
@@ -117,7 +117,7 @@ Defender / SmartScreen **可能误报**：弹窗里走「更多信息 → 仍要
 ./mcloud-cli pipeline run <编排id>
 ```
 
-⚠ **帮助文本里的名字是旧的**：它写的是 `mcloud-gost <命令>` 与 `mcloud-gost serve`。
+⚠ **帮助文本里的名字是旧的**：它写的是 `mcloud <命令>` 与 `mcloud serve`。
 实际二进制叫 `mcloud-server` / `mcloud-cli`，而且**服务没有 `serve` 子命令**（直接运行）。
 
 定时与编排的**创建**不在命令行 —— 在 WebUI 里配，或用上面 `cron` / `pipeline run` 让系统计划任务去触发。
@@ -127,9 +127,9 @@ Defender / SmartScreen **可能误报**：弹窗里走「更多信息 → 仍要
 **Linux（systemd）**
 
 ```ini
-# /etc/systemd/system/mcloud-gost.service
+# /etc/systemd/system/mcloud.service
 [Unit]
-Description=mcloud-gost
+Description=mcloud
 After=network.target
 
 [Service]

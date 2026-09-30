@@ -139,7 +139,7 @@ export const AuthPage = (props: AuthPageProps) => {
           <span class="text-primary">
             <IconBrand class="size-10" />
           </span>
-          <h1 class="text-lg font-medium">mcloud-gost</h1>
+          <h1 class="text-lg font-medium">mcloud</h1>
           <p class="text-center text-sm opacity-70">
             {isSetup ? '首次使用，请创建管理员账号' : '请登录以继续'}
           </p>

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <!-- viewport-fit=cover 是移动端 dock 的硬依赖：删了 iPhone 刘海里会出白条（组件指南 §4.4）。 -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>mcloud-gost</title>
+    <title>mcloud</title>
     <!--
       首屏加载动画：**必须内联**。打包出来的 CSS 是渲染阻塞的，等它到就已经白屏了；
       这里要的正是"JS 还没执行就先画点东西"，所以样式只能自带、不能引用主题变量
@@ -47,7 +47,7 @@
       // ⚠ 逻辑与 src/ui/theme.ts 保持一致（改一处要同步另一处）：
       //   localStorage 优先，其次跟随系统偏好。
       try {
-        var saved = localStorage.getItem('mcloud-gost-theme')
+        var saved = localStorage.getItem('mcloud-theme')
         var theme = saved === 'light' || saved === 'dark'
           ? saved
           : (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')

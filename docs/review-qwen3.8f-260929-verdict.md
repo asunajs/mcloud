@@ -199,7 +199,7 @@ test result: ok. 14 passed; 0 failed
 | 原结论 | 裁决 | 证据与我做的事 |
 |---|---|---|
 | §3.5#6 `release.yml` 顶层 `permissions: contents: write` 让 web/build job 白拿写权限 | **成立** | 顶层改 `contents: read`，写权限**只给 `release` job** |
-| §3.5#6 tag 无校验（带 `/` 的 tag 会毁掉包名） | **成立** | `计算版本与包名` 里加早失败：`/` 或空格直接 `::error` 退出（否则斜杠会拼进 `mcloud-gost-v<VERSION>-<target>/` 的路径里） |
+| §3.5#6 tag 无校验（带 `/` 的 tag 会毁掉包名） | **成立** | `计算版本与包名` 里加早失败：`/` 或空格直接 `::error` 退出（否则斜杠会拼进 `mcloud-v<VERSION>-<target>/` 的路径里） |
 | §3.5#6 Linux 产物动态链 OpenSSL + glibc 下限未说明，与"拷一个二进制就能跑"冲突 | **成立** | `usage.md` 补一段：产物构建于 Ubuntu 24.04（glibc 2.39）+ 系统 OpenSSL ⇒ 需 glibc ≥ 2.39 与 `libssl3`，更老的发行版请自行构建；顺带修了 Windows 快速开始漏掉的那层 `cd` |
 | §3.5#12 `usage.md` 漏 `login device` | **成立** | 已补（`cli.rs:74` 确有 `Some("device")` 分支） |
 | §3.5#12 dev 代理写死 38123 而文档教 3000 | **成立** | `vite.config.ts:38` 目标确为 38123。已在 `usage.md` 增「如果你是来改前端的」一节：给出 `MCLOUD_ADDR=127.0.0.1:38123` 这条对齐命令 |

@@ -5,7 +5,7 @@
 //! 这个子命令是给**系统 crontab** 调的：
 //!
 //! ```text
-//! 0 8 * * *  /usr/local/bin/mcloud-gost cron daily-sign >> /var/log/mcloud.log 2>&1
+//! 0 8 * * *  /usr/local/bin/mcloud cron daily-sign >> /var/log/mcloud.log 2>&1
 //! ```
 //!
 //! 时间由 crontab 管，CLI 只负责"把这一条跑了"。
@@ -49,7 +49,7 @@ pub async fn run_schedule(app: &App, args: &[String]) -> anyhow::Result<()> {
             eprintln!("用法：cron <定时id>");
             eprintln!();
             eprintln!("跑一条已配置的定时任务，跑完就退出。给系统 crontab 调用：");
-            eprintln!("  0 8 * * *  mcloud-gost cron daily-sign");
+            eprintln!("  0 8 * * *  mcloud cron daily-sign");
             eprintln!();
             print_schedules(app).await;
             std::process::exit(EXIT_CONFIG);

@@ -20,7 +20,7 @@
 export type Theme = 'light' | 'dark'
 
 /** 持久化用的键名。`index.html` 的内联脚本也用它，改名要同步。 */
-const STORAGE_KEY = 'mcloud-gost-theme'
+const STORAGE_KEY = 'mcloud-theme'
 
 /** 切换的下一个主题。**纯函数**，独立出来便于直接测。 */
 export const nextTheme = (current: Theme): Theme => (current === 'dark' ? 'light' : 'dark')

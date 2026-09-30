@@ -1,4 +1,4 @@
-# mcloud-gost 编写约定
+# mcloud 编写约定
 
 > 本文件是**编码与协作的强制约定**，与 [`architecture.md`](./architecture.md) 分工如下：
 >
