@@ -3,6 +3,7 @@
 //! 任务只依赖 `mcloud-core` 的 trait 与 `mcloud-engine` 的上下文，
 //! 不直接碰网络或磁盘。
 
+pub mod ai_avatar;
 pub mod app_task;
 pub mod app_task_matrix;
 pub mod cloud_phone_redpack;
@@ -75,6 +76,24 @@ pub use login::{
 /// 编排层是**另一个**可验证单元（每条写都要先按 `userStatus` 判定该不该发、
 /// 同一 `taskCode` 一次运行最多发一次）—— 所以 title 与 `summary_line`
 /// 都明写「盘点 / 只读」：不做的事不假装做。
+///
+/// # AI 头像 `ai-avatar`（**默认关**，而且生成链今天断在下载那一枪）
+///
+/// 它是一条**会写**的链（合成、抽奖、往网盘写图），所以默认 `false`
+/// （`account.rs:184`）；开关关掉时一枪都不发。
+///
+/// ⚠ 登记它时要说清两件事，免得被读成「已经能无人值守地跑」：
+///
+/// 1. **生成链断在「下载合成图」那一枪**：本仓的 HTTP 抽象只承载文本
+///    （`HttpResponse.body` 是 `String`），而那一枪回的是图片字节 ——
+///    有损解码后再 base64 会把图弄坏且**不报错**。协议层主动判失败，
+///    所以 `upload` 今天是**不可达**的（请求构造与形状都有测试钉住）。
+///    接上它需要给 HTTP 抽象加一条保留原始字节的路径。
+/// 2. **收尾刻意不照抄旧实现**：`mcloud_tasks::ai_avatar` 先取一份目录基线，
+///    只清「本趟造的」`fileId`；旧 TS 按文件名匹配会把**同名旧文件**一起删。
+///
+/// 另：参考实现 2026-09-25 实测这一族回 404/405（可能活动已下线，见协议层
+/// `mcloud_upstream::ai_avatar` 模块头）—— 运行期非 200 一律如实上抛。
 pub fn register_all(registry: &mut Registry) -> Result<(), String> {
     let tasks: Vec<Arc<dyn Task>> = vec![
         Arc::new(signin::SignTask),
@@ -92,6 +111,7 @@ pub fn register_all(registry: &mut Registry) -> Result<(), String> {
         Arc::new(fun_ai::FunaiTask),
         Arc::new(notice::NoticeTask),
         Arc::new(play_ai::PlayAiTask),
+        Arc::new(ai_avatar::AiAvatarTask::production()),
         Arc::new(cloud_phone_redpack::CloudPhoneRedpackTask::production()),
         Arc::new(app_task_matrix::AppTaskMatrixTask),
         Arc::new(app_task::AppTaskTask::new()),

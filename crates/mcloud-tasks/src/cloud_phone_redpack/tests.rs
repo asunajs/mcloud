@@ -664,7 +664,9 @@ fn redpack_is_registered_with_the_right_meta() {
     assert_eq!(meta.title, "红包派对");
     assert!(meta.params.is_empty(), "这一条没有参数");
     assert!(!meta.hidden);
-    assert_eq!(metas.len(), 19, "原 18 条 + 红包派对 = 19 条");
+    // 这一格是**全局哨兵**：加任务时它会红，提醒你"注册表条数变了"。
+    // 别把它删掉换成"包含某条就行" —— 那正是它要防的（少一条没人发现）。
+    assert_eq!(metas.len(), 20, "原 18 条 + 红包派对 + ai-avatar = 20 条");
 }
 
 // ══════════════════════ 这条链不碰 store ══════════════════════
