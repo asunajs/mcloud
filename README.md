@@ -6,7 +6,7 @@
 
 ## 状态
 
-**已落地 16 个任务**：P1 签到族八条（`sign` / `receive` / `multiple` /
+**已落地 19 个任务**：P1 签到族八条（`sign` / `receive` / `multiple` /
 `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`）
 + 直播小红花两条（`live-room` / `red-flower`）
 + 兑换（`exchange`）+ 消息推送（`msg-push`）
@@ -14,7 +14,9 @@
 + 拍拍盘点（`play-ai-special`，**只读**）
 + App 任务矩阵（`app-task-matrix`，**只读**）
 + 任务拓展（`task-expansion`）
-+ App 任务（`app-task`，**做任务**——写侧）。
++ App 任务（`app-task`，**做任务**——写侧）
++ 红包派对（`cloud-phone-redpack`，**做任务**——签到 / 登记 / 浏览 / 云机票 / 答题 / 装机）。
+  ⚠ 两处**刻意**与旧 TS 不同：读到没见过的状态码**不发写**（防重复领）、会话 token 不落盘。
 
 **`task-expansion`（2026-09-28 落地）—— 第一条"写网盘并自己收尾"的任务**：
 
