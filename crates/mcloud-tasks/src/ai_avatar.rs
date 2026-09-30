@@ -57,19 +57,30 @@
 //! ⚠ 这不是洁癖：`crates/mcloud-engine/src/artifacts.rs` 把「错记」列为比
 //! 「漏记」严重得多的一类失效 —— 漏记是文件留下来，错记是**删用户的东西**。
 //!
-//! # ⚠ 生成链在「下载合成图」那一枪**停下**（本仓的能力缺口）
+//! # ⚠ 生成链的「下载合成图」那一腿：已接上 `request_raw`
 //!
 //! 旧 TS 的 `generateOnce` 是 `merge → 轮询 getStatus → 裸 fetch 下载生成图`
 //! `→ upload(原图, 合成图)`（`task.ts:48-76`）。第四条腿要求把**图片字节**
 //! 读回来做 base64，而本仓的 [`mcloud_core::HttpResponse::body`] 是 `String`、
-//! 发送层走 `reqwest::Response::text()`（**有损** UTF-8）⇒ 图片内容会被破坏，
-//! 且**不会报错**。协议层的 [`mcloud_upstream::ai_avatar::parse_image_download`]
-//! 主动把这种响应判失败，所以本模块的生成轮**到那一步就如实报失败**，
-//! **不伪造**一张图去 `upload`。
+//! 发送层原先走 `reqwest::Response::text()`（**有损** UTF-8）⇒ 图片内容会被
+//! 破坏且**不报错**。现在下载那一枪改走
+//! [`mcloud_core::HttpClient::request_raw`]（真字节）：**有损解码那条坑已经绕开**，
+//! base64 之后交给 `upload`。
 //!
-//! ⇒ 结论要说清：**`upload` 这一步在本仓今天不可达**（协议层的请求构造是对的、
-//! 有测试钉住形状），所以「往网盘写图」这件事今天不会发生，收尾自然也收不到东西。
-//! 接上它需要给 HTTP 抽象加一条保留原始字节的路径。
+//! 判据随之**重新表述**（旧判据作废，别再照抄）：不再看 `content-type`（上游
+//! 随手给，不说明内容对不对）、也不找 `U+FFFD`（那只是"字节已被毁"的痕迹），
+//! 只做**形状校验** —— 非空 + 头部是 JPEG(`FF D8`) 或 PNG(`89 50`)
+//! （见 [`image_download_base64`]）。形状对不上就如实判失败，**绝不**把来路不明的
+//! 字节 base64 上去：那会写成一张打不开的图，而上游仍可能回 `code:0`。
+//!
+//! ⚠⚠ **真机路径上还差一跳（不是本模块能补的）**：业务客户端是
+//! `SmidClient → H5Client → ReqwestClient` —— 两层装饰器套一个 leaf，而
+//! **包着另一个 `HttpClient` 的装饰器必须把 `request_raw` 转发给它的 transport**，
+//! 否则默认实现会落到内层的 `request()`（有损文本）上。这两个装饰器今天**都还
+//! 没有**转发（在本次改动的允许范围之外）。⇒ 真机上这一腿会由形状校验**判失败**
+//! （不会静默写坏图，这是本仓要防的方向）；本模块这一侧的形状是对的，替身
+//! `request_raw` 的测试能验通「任务层这一腿」。补齐见
+//! [`mcloud_core::HttpClient::request_raw`] 的说明。
 //!
 //! # 等待做成字段
 //!
@@ -427,14 +438,48 @@ async fn call_env<T>(
     parse(&env)
 }
 
+/// 下载回来的合成图字节 → `upload` 要的 base64（**形状校验在这里**）。
+///
+/// # 判据为什么只剩「非空 + 魔数」这两条
+///
+/// 旧判据（`content-type: image/*` 或体里出现 `U+FFFD`）是**只能拿到 `String`**
+/// 时的替身：它的前提是"字节已经被有损解码毁了"，所以只能找被毁的痕迹。
+/// 现在 [`mcloud_core::HttpClient::request_raw`] 交回的是**线上原样字节**
+/// —— **有损解码那条坑已经绕开**，痕迹判据随之作废：
+///
+/// * `content-type` 是上游随手给的，与内容对不对无关（真图配错头、非图配
+///   `image/*` 都发生过）；拿它当判据是拿"上游的声明"当"内容的证据"。
+/// * `U+FFFD` 在真字节里出现只是巧合，不再说明任何事。
+///
+/// ⇒ 只做**形状校验**：非空 + 头部魔数对得上（JPEG `FF D8` / PNG `89 50`）。
+/// 判不过就如实报错 —— 把来路不明的字节 base64 上去，上游仍可能回 `code:0`，
+/// 结果是网盘里多一张打不开的图，而**没有任何一步会报错**。
+fn image_download_base64(bytes: &[u8]) -> Result<String> {
+    if bytes.is_empty() {
+        return Err(Error::Other(
+            "合成图那一枪回了空体：没有可上传的字节".into(),
+        ));
+    }
+    let is_jpeg = bytes.starts_with(&[0xFF, 0xD8]);
+    let is_png = bytes.starts_with(&[0x89, 0x50]);
+    if !is_jpeg && !is_png {
+        return Err(Error::Other(format!(
+            "合成图那一枪回了 {} 字节，但头部既不是 JPEG(FF D8) 也不是 PNG(89 50) —— 形状对不上，不当成图上传",
+            bytes.len()
+        )));
+    }
+    Ok(mcloud_crypto::b64_encode(bytes))
+}
+
 /// 跑一轮生成：`merge → 轮询 getStatus →（下载）→ upload`。
 ///
 /// 返回 `Ok(Some(id))` = 这一轮成了；`Ok(None)` = **业务上**判为失败
 /// （没给 `taskId` / `status == 4` / 轮询用尽）；`Err(e)` = 这一枪本身有问题，
 /// 由上层的 [`is_transport`] 决定「上抛」还是「换下一次」。
 ///
-/// ⚠ 「下载生成图」那一步在本仓**一定失败**（见模块头「能力缺口」）——
-/// 这不是 todo，是那条腿今天物理上走不通（HTTP 抽象只承载文本）。
+/// ⚠ 「下载生成图」那一枪走 [`mcloud_core::HttpClient::request_raw`]（真字节），
+/// **不是** `request()`：后者经 `HttpResponse.body`（`String` / 有损 UTF-8）
+/// 会把图片内容改掉且不报错。判据只有形状校验（见 [`image_download_base64`]）。
 async fn generate_once(
     ctx: &TaskContext,
     plan: &AiAvatarPlan,
@@ -473,11 +518,13 @@ async fn generate_once(
                     return Ok(None);
                 };
                 // ⚠ 裸 GET（旧 TS `task.ts:42-46` 用的是不带鉴权的 `fetch`）。
-                let resp = ctx
+                // ⚠⚠ 必须 `request_raw`：这一枪回的是图片字节，`request()` 会把
+                // 它经 `HttpResponse.body`（String / 有损 UTF-8）改掉且不报错。
+                let merged_bytes = ctx
                     .http
-                    .request(proto::image_download_request(&image_url))
+                    .request_raw(proto::image_download_request(&image_url))
                     .await?;
-                let merged_image = proto::parse_image_download(&resp)?;
+                let merged_image = image_download_base64(&merged_bytes)?;
                 let id = call_env(
                     ctx,
                     proto::upload_request(&origin, &merged_image),
@@ -728,7 +775,7 @@ async fn cleanup_ledger(ctx: &TaskContext, result: &mut AiAvatarResult) {
 
 // ══════════════════════════ 任务 ══════════════════════════
 
-/// AI 头像（**会写**：合成并入账抽奖；`upload` 那一口在本仓今天不可达）。
+/// AI 头像（**会写**：合成并入账抽奖，并且只收走本趟写进网盘的活动文件）。
 pub struct AiAvatarTask {
     /// 三处等待与三条上限，测试把它设成 0 / 1。
     pub plan: AiAvatarPlan,

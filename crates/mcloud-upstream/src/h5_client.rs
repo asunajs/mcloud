@@ -22,7 +22,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mcloud_core::{Account, HttpClient, HttpRequest, HttpResponse, Result};
+use mcloud_core::{Account, Error, HttpClient, HttpRequest, HttpResponse, Result};
 
 use crate::session::SessionRecipe;
 use crate::session_source::SessionSource;
@@ -184,6 +184,34 @@ impl HttpClient for H5Client {
             })
             .await
     }
+
+    /// 转发 `request_raw` —— **两条分支，没有第三条**。
+    ///
+    /// # 分支一：不需要会话的主机 ⇒ 直通
+    ///
+    /// 原生 A 族（`user-njs.yun.139.com` 等）本来就不带票，判据与 `request()`
+    /// 的短路同一个（[`needs_session`]）。直接 `transport.request_raw` 转发，
+    /// 字节不经这一层任何加工。
+    ///
+    /// # 分支二：需要会话的主机 ⇒ **明确报错**（本版不做）
+    ///
+    /// 会话路径整个是**围绕文本 `HttpResponse` 建的**：
+    /// `SessionSource::with_session` 收的闭包交回 `HttpResponse`，
+    /// 而 `90001` 刷新重放也只在那个文本体上判。要给它加一条"返回原始字节"的入口，
+    /// 得让换票/重放那套机制整个泛化到字节 —— 那是**另一个增量**，不是转发一行能做到的。
+    ///
+    /// ⚠ **绝不允许**在这里静默落到默认实现（即内层 `request()`）：那会把
+    /// 二进制响应体在有损 UTF-8 解码里毁掉，而且**不报错** —— 正是本仓最忌讳的
+    /// 「不发错、不报错，只是东西不对」。宁可**现在**带一句能读的中文原因回来。
+    async fn request_raw(&self, req: HttpRequest) -> Result<Vec<u8>> {
+        if !needs_session(&req.url) {
+            return self.transport.request_raw(req).await;
+        }
+        Err(Error::Other(format!(
+            "H5 会话主机 {} 暂无 request_raw 通路：现有会话路径围绕文本 HttpResponse 建，             给它加一条返回原始字节的入口是另一个增量，故本版明确报错，             而不是静默退到有损的 request()",
+            req.url
+        )))
+    }
 }
 
 /// 去掉调用方给的 `referer`（改用会话里那条）。
@@ -303,6 +331,9 @@ mod integration_tests {
         }
     }
 
+    /// 非 UTF-8 的"线上原始字节"：`String` 装不下，用来证明转发没被有损路径掉包。
+    const RAW_BYTES: &[u8] = &[0x89, b'P', b'N', b'G', 0xFF, 0x00, 0x80];
+
     #[derive(Default)]
     struct Rec {
         seen: Mutex<Vec<HttpRequest>>,
@@ -337,6 +368,11 @@ mod integration_tests {
                 body: body.into(),
                 headers: vec![],
             })
+        }
+
+        async fn request_raw(&self, req: HttpRequest) -> Result<Vec<u8>> {
+            self.seen.lock().unwrap().push(req);
+            Ok(RAW_BYTES.to_vec())
         }
     }
 
@@ -490,6 +526,48 @@ mod integration_tests {
         assert_eq!(
             recipe_for("https://personal-kd-njs.yun.139.com/hcy/file/list"),
             None
+        );
+    }
+
+    /// 原生族主机：`request_raw` **直通**，字节不被改写，且不建会话。
+    #[tokio::test]
+    async fn native_host_request_raw_passes_through_untouched() {
+        let http = Arc::new(Rec::default());
+        let c = client(Arc::clone(&http));
+
+        let got = c
+            .request_raw(HttpRequest::get(
+                "https://user-njs.yun.139.com/user/querySpecTokenV2",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(got, RAW_BYTES, "字节必须原样交回");
+        let seen = http.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "只该透传一条");
+        assert!(
+            !seen.iter().any(|r| r.url.contains("tyrzLogin")),
+            "不需要票的主机不该建会话"
+        );
+    }
+
+    /// 需要会话的主机：**明确报错**，而且**一条请求都不发**。
+    ///
+    /// 静默落到默认实现会走内层 `request()`（有损文本）—— 那正是要防的。
+    #[tokio::test]
+    async fn session_host_request_raw_is_refused_without_sending_anything() {
+        let http = Arc::new(Rec::default());
+        let c = client(Arc::clone(&http));
+
+        let err = c
+            .request_raw(HttpRequest::get("https://m.mcloud.139.com/business"))
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("request_raw"), "实得：{err}");
+        assert!(
+            http.seen.lock().unwrap().is_empty(),
+            "报错前不能发任何请求（含建会话那三枪）"
         );
     }
 }

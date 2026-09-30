@@ -7,6 +7,15 @@
 //! 全部字面量来自旧 TS `packages/core/src/tasks/ai-avatar/api.ts`（那份**能跑**，
 //! 见 AGENTS.md「依据的优先级」），逐条对过行号。
 //!
+//! # 下载合成图那一枪：取字节与形状校验都在任务层
+//!
+//! 这一枪回的是图片**字节**，不是 JSON。本层只造请求（[`image_download_request`]）；
+//! 真正取字节走任务层的 [`mcloud_core::HttpClient::request_raw`]（线上原样字节，
+//! 不经 UTF-8 解码），PNG 签名等形状校验与 base64 都在 `mcloud-tasks::ai_avatar`。
+//!
+//! ⚠ 本文档早先写过「生成链走不到 upload」—— 那是 `request_raw` 落地之前的
+//! **过期结论**，现在不成立：这条腿已经通了。
+//!
 //! # ⚠ 这条链今天**可能整条打不通** —— 这是一条线索，不是结论
 //!
 //! 参考实现 2026-09-25 真账号跑过一趟，逐字读数是：
@@ -66,7 +75,7 @@
 
 use serde_json::Value;
 
-use mcloud_core::{Error, HttpRequest, HttpResponse, Result};
+use mcloud_core::{Error, HttpRequest, Result};
 
 use crate::app_signin::SignInEnvelope;
 use crate::endpoints::{MCLOUD_HOST, PERSONAL_KD};
@@ -263,13 +272,16 @@ pub fn file_list_request(parent_file_id: &str) -> HttpRequest {
 /// 所以这里只给一个裸 GET，**一枚头都不补**（连 `content-type` 也不补）——
 /// 交给发送层按 host 决定要不要注入凭据。
 ///
-/// # ⚠⚠ 本仓**解析不了这一枪的响应体**
+/// # ⚠⚠ 这一枪的响应体是**图片字节**，本层不解析
 ///
-/// [`mcloud_core::HttpResponse::body`] 是 `String`，而这一枪回的是**图片字节**。
-/// 有损解码后的字符串再 base64，发出去的是一份**内容已被破坏**的图，
-/// 而这条链**不会因此报错**（上传照样可能回 `code:0`）。
-/// ⇒ [`parse_image_download`] 会**主动判失败**，不做那种「看起来成功」的事。
-/// 真要接上这一枪，需要给 HTTP 抽象加一条**保留原始字节**的路径。
+/// [`mcloud_core::HttpResponse::body`] 是 `String`，装不下 PNG / JPEG 的字节：
+/// 有损解码后的字符串再 base64，发出去的是一份**内容已被破坏**的图 ——
+/// 而且这条链**不会因此报错**（上传照样可能回 `code:0`）。
+///
+/// ⇒ 取这一枪的响应必须走 [`mcloud_core::HttpClient::request_raw`]（线上原样字节），
+/// 而**取字节与判形状都在任务层** `mcloud-tasks::ai_avatar`：它拿到字节后先做
+/// 形状校验（PNG 签名等），再 base64 交给 upload。本层**只造请求**，
+/// 不提供任何基于文本体的解析入口 —— 那正是会把字节毁掉的那条路。
 pub fn image_download_request(image_url: &str) -> HttpRequest {
     HttpRequest::get(image_url)
 }
@@ -534,55 +546,6 @@ pub fn parse_file_list(body: &str) -> Result<CloudFileList> {
         items: out,
         next_page_cursor: data.and_then(|d| opt_string_at(d, "nextPageCursor")),
     })
-}
-
-// ══════════════════════════ 解析（下载那一枪） ══════════════════════════
-
-/// 把下载回来的合成图转成 base64 —— **本仓今天做不到，所以它一定报错**。
-///
-/// # 为什么必须报错而不是「尽力而为」
-///
-/// [`mcloud_core::HttpResponse::body`] 是 `String`，而这一枪回的是图片字节。
-/// 发送层用的是 `reqwest` 的 `text()`（**有损** UTF-8 解码）：把那份字符串再
-/// base64 发出去，内容是**已经被破坏**的，而 `upload` 仍可能回 `code:0` ⇒
-/// 界面上是一句「上传成功」，网盘里是一张打不开的图。这正是本仓最忌讳的
-/// 「不发错、不报错，只是东西不对」。
-///
-/// 所以这里**主动判失败**，两种可判别的信号：
-///
-/// 1. `content-type` 是 `image/*`；
-/// 2. 体里出现替换字符 `U+FFFD`（PNG 签名的首字节 `0x89` 不是合法 UTF-8，
-///    必然被解成它 ⇒ 这一条对真 PNG 一定命中）。
-///
-/// 两条都不命中时（上游真回了文本）才交回 base64 —— 那种情形下
-/// 对文本字节做 base64 与旧 TS 对 `arrayBuffer` 做的事**逐字相同**。
-///
-/// # 缺口登记
-///
-/// 接上这一枪需要给 HTTP 抽象加一条「保留原始字节」的路径
-/// （`HttpResponse` 目前只有 `String`）。在那之前，生成链**走不到 `upload`**，
-/// 本层不伪造它。
-pub fn parse_image_download(resp: &HttpResponse) -> Result<String> {
-    let body = crate::session::ensure_http_ok(resp, "下载 AI 头像合成图")?;
-    let content_type = resp
-        .headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-        .map(|(_, v)| v.to_ascii_lowercase());
-    if content_type
-        .as_deref()
-        .is_some_and(|ct| ct.starts_with("image/"))
-    {
-        return Err(Error::Other(
-            "合成图那一枪回的是二进制图片，而本仓的 HTTP 抽象只承载文本（HttpResponse.body 是 String）—— 有损解码后再 base64 发出去的是被破坏的内容，故不当作成功".into(),
-        ));
-    }
-    if body.contains('\u{FFFD}') {
-        return Err(Error::Other(
-            "合成图响应体里出现替换字符 U+FFFD：原始字节不是合法 UTF-8、已被有损解码，不能拿它去 upload".into(),
-        ));
-    }
-    Ok(mcloud_crypto::b64_encode(body.as_bytes()))
 }
 
 // ══════════════════════════ 小工具 ══════════════════════════
@@ -1163,60 +1126,5 @@ mod tests {
         );
         assert_eq!(extract_image_file_name("https://x/p/"), None);
         assert_eq!(extract_image_file_name(""), None);
-    }
-
-    // ── 下载那一枪：本仓解析不了，必须**判失败** ─────────────────────
-
-    #[test]
-    fn a_binary_image_response_is_refused_not_silently_encoded() {
-        // PNG 签名的首字节不是合法 UTF-8 ⇒ 有损解码后一定出现 U+FFFD。
-        let resp = HttpResponse {
-            status: 200,
-            body: "\u{FFFD}PNG\r\n\u{1A}\n".into(),
-            headers: vec![("content-type".into(), "image/png".into())],
-        };
-        let err = parse_image_download(&resp).unwrap_err();
-        assert!(
-            err.to_string().contains("二进制") || err.to_string().contains("U+FFFD"),
-            "实得：{err}"
-        );
-    }
-
-    /// 只有替换字符、但 `content-type` 不是 `image/*` 时也必须拒。
-    #[test]
-    fn a_lossy_body_is_refused_even_without_the_image_content_type() {
-        let resp = HttpResponse {
-            status: 200,
-            body: "\u{FFFD}junk".into(),
-            headers: Vec::new(),
-        };
-        assert!(parse_image_download(&resp).is_err());
-    }
-
-    /// 非 200 一律如实上抛（HTTP 码 + 体）。
-    #[test]
-    fn a_non_200_download_is_reported_with_its_status() {
-        let resp = HttpResponse {
-            status: 404,
-            body: "not found".into(),
-            headers: Vec::new(),
-        };
-        let err = parse_image_download(&resp).unwrap_err();
-        assert!(err.to_string().contains("404"), "实得：{err}");
-        assert!(err.to_string().contains("not found"), "实得：{err}");
-    }
-
-    /// 上游真回文本时，交回的 base64 与「对文本字节做 base64」逐字相同。
-    #[test]
-    fn a_textual_body_is_encoded_as_its_own_bytes() {
-        let resp = HttpResponse {
-            status: 200,
-            body: "hello".into(),
-            headers: vec![("content-type".into(), "text/plain".into())],
-        };
-        assert_eq!(
-            parse_image_download(&resp).unwrap(),
-            mcloud_crypto::b64_encode(b"hello")
-        );
     }
 }

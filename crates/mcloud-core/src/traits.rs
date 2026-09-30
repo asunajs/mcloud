@@ -144,6 +144,43 @@ impl HttpResponse {
 pub trait HttpClient: Send + Sync {
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse>;
 
+    /// 取**原始响应字节** —— 不走任何文本解码。
+    ///
+    /// # 为什么需要第二条通路
+    ///
+    /// [`HttpResponse::body`] 是 `String`，发送层填它时走的是
+    /// `reqwest::Response::text()`（**有损** UTF-8）。图片（JPEG / PNG）不是
+    /// UTF-8 文本：走那条路回来的是被替换字符破坏过的内容，而且**不会报错**；
+    /// 再 base64 交给 upload，上游仍可能回 `code:0` ⇒ 网盘里多一张打不开的图。
+    /// 这正是本仓最忌讳的「不发错、不报错，只是东西不对」。
+    /// ⇒ 二进制响应体（AI 头像那条链下载合成图）必须走这一条。
+    ///
+    /// # 默认实现为什么是这个形状，以及**谁**可以不覆写
+    ///
+    /// 默认实现调 `self.request()` 再取字节 —— 这是**故意**的：按 host 注入凭据
+    /// （`authorization` / `jwttoken` / `deviceid`）发生在 `request()` 里，
+    /// 所以默认实现**不是**绕过注入的旁路，走到它时凭证照旧。
+    ///
+    /// 由此两条：
+    ///
+    /// 1. **不包别的 `HttpClient` 的实现（leaf）** 覆写它 —— 只有 leaf 手里
+    ///    才有线上字节。本仓的 leaf 是 `ReqwestClient`（credential 注入也正好
+    ///    在它里面，两件事是**同一个**类型）—— 只有它覆写：用 `.bytes()`。
+    ///    测试替身想给非 UTF-8 字节时也必须覆写（`String` 装不下）。
+    /// 2. ⚠⚠ **包着另一个 `HttpClient` 的装饰器必须转发**
+    ///    （`self.transport.request_raw(req).await`），**不能只吃默认实现**。
+    ///    原因不是洁癖：默认实现调的是 `self.request()`，对装饰器而言它会落到
+    ///    **内层**的 `request()`，而最内层（leaf）回的是**有损文本**
+    ///    ⇒ 字节在这一跳就毁了（`into_bytes()` 只是把被毁的内容再编码一次）。
+    ///    ⚠ 本仓的链是 `SmidClient → H5Client → ReqwestClient`：这两个装饰器
+    ///    今天都**还没有**转发，所以经过它们时这条通路会退化成「有损文本再转字节」。
+    ///    忘了转发**不报错**，只会让下游的形状校验判失败（那正是要防的方向，
+    ///    只是这次被校验挡住了）。
+    async fn request_raw(&self, req: HttpRequest) -> Result<Vec<u8>> {
+        let resp = self.request(req).await?;
+        Ok(resp.body.into_bytes())
+    }
+
     /// 便捷方法。
     async fn post_json(&self, url: &str, body: &serde_json::Value) -> Result<HttpResponse> {
         self.request(HttpRequest::post(url).json_body(body)).await
@@ -372,4 +409,38 @@ pub fn parse_beijing_time(raw: &str, fmt: &str) -> Option<i64> {
 /// 实现方负责扇出：写日志、推 SSE、按级别过滤后推送通知。
 pub trait EventSink: Send + Sync {
     fn emit(&self, event: RunEvent);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 只实现 `request` 的假客户端：证明 [`HttpClient::request_raw`] 的默认实现
+    /// 就是「走 `request()` 再取字节」。
+    struct TextOnly;
+
+    #[async_trait]
+    impl HttpClient for TextOnly {
+        async fn request(&self, _req: HttpRequest) -> Result<HttpResponse> {
+            Ok(HttpResponse {
+                status: 200,
+                body: "文本体".into(),
+                headers: Vec::new(),
+            })
+        }
+    }
+
+    /// 默认实现 = `request()` 交回的体的字节（纯文本请求走它没问题）。
+    ///
+    /// ⚠ 二进制**不能**指望默认实现：这条路上的 `HttpResponse.body` 已经过
+    /// 有损 UTF-8，`into_bytes()` 只是把被毁的内容再编码一次。真发请求的实现
+    /// （`ReqwestClient`）必须覆写它去拿 `.bytes()`。
+    #[tokio::test]
+    async fn the_default_request_raw_is_the_request_body_bytes() {
+        let got = TextOnly
+            .request_raw(HttpRequest::get("https://example.com/x"))
+            .await
+            .unwrap();
+        assert_eq!(got, "文本体".as_bytes());
+    }
 }

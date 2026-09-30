@@ -326,11 +326,18 @@ impl SmidClient {
             account_id,
         }
     }
-}
 
-#[async_trait::async_trait]
-impl HttpClient for SmidClient {
-    async fn request(&self, req: HttpRequest) -> Result<HttpResponse> {
+    /// 取 id 并补 `deviceid` 头 —— `request` 与 `request_raw` **共用的那一步**。
+    ///
+    /// # 为什么两个入口都必须过这里
+    ///
+    /// `deviceid` 不在构造层写死，而是**懒取**（库里有就直接用，没有才上报换一次，
+    /// 见本模块开头的生命周期图）。`request_raw` 若不经过这一步就直接转发，
+    /// 真机上那条下载/上传腿会**缺 deviceid** —— 上游按自己的规则回错，
+    /// 而这里的日志一条都不会有。所以注入只有这一处实现，两个入口都调它。
+    ///
+    /// 取 id 失败时**不抛错**：见 [`SmidClient`] 的类型文档，只记一行、请求照发。
+    async fn with_deviceid(&self, req: HttpRequest) -> HttpRequest {
         // 取 id：库里有就直接返回，没有才上报换一次。
         let device_id = match self.smid.device_id(&self.account_id).await {
             Ok(id) => Some(id),
@@ -356,7 +363,32 @@ impl HttpClient for SmidClient {
                 req.headers.push(("deviceid".into(), id));
             }
         }
-        self.transport.request(req).await
+        req
+    }
+}
+
+#[async_trait::async_trait]
+impl HttpClient for SmidClient {
+    async fn request(&self, req: HttpRequest) -> Result<HttpResponse> {
+        // 先补 deviceid，再转发 —— 补头那一步与 request_raw 共用（见 with_deviceid）。
+        self.transport.request(self.with_deviceid(req).await).await
+    }
+
+    /// 转发 `request_raw`，**同样先补 deviceid**。
+    ///
+    /// # 为什么不能只吃默认实现
+    ///
+    /// [`HttpClient::request_raw`] 的默认实现调 `self.request()`，对装饰器而言
+    /// 会落到**内层**的 `request()`，而最内层（leaf）回的是**有损文本**
+    /// ⇒ 图片字节在这一跳就被毁了，而且不报错。所以这里必须显式转发到
+    /// `transport.request_raw`（见 `mcloud_core::HttpClient::request_raw` 的说明）。
+    ///
+    /// 先补头再转发：`deviceid` 是按账号懒取的，不经过 [`SmidClient::with_deviceid`]
+    /// 就转发等于让这条腿**缺 deviceid**。
+    async fn request_raw(&self, req: HttpRequest) -> Result<Vec<u8>> {
+        self.transport
+            .request_raw(self.with_deviceid(req).await)
+            .await
     }
 }
 
@@ -756,5 +788,67 @@ mod tests {
         let first = svc.device_id(&id).await.unwrap();
         let second = svc.rotate(&id).await.unwrap();
         assert_ne!(first, second, "换设备必须换回另一个 id");
+    }
+
+    /// `request_raw` 的假 transport：交回**非 UTF-8** 字节，并记下收到的请求。
+    ///
+    /// `request()` 故意 `unreachable!()`：这一条测的就是"**不许**落到有损那条路"，
+    /// 一旦哪次改动把它接回默认实现，测试会在这里炸掉而不是安静地毁字节。
+    struct RawRecorder {
+        seen: Mutex<Vec<HttpRequest>>,
+        raw: Vec<u8>,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpClient for RawRecorder {
+        async fn request(&self, _req: HttpRequest) -> Result<HttpResponse> {
+            unreachable!("request_raw 的转发测试不该碰到 request()（那是有损那条）")
+        }
+
+        async fn request_raw(&self, req: HttpRequest) -> Result<Vec<u8>> {
+            self.seen.lock().unwrap().push(req);
+            Ok(self.raw.clone())
+        }
+    }
+
+    /// `SmidClient::request_raw` 三个断言：补 deviceid 头、请求原样到达、字节逐字不变。
+    #[tokio::test]
+    async fn smid_client_forwards_request_raw_and_only_adds_the_header() {
+        // 含 0x89 / 0xFF / 0x80 —— `String` 装不下，走 request() 必被改写。
+        let raw: Vec<u8> = vec![
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0xFF, 0x00, 0x80,
+        ];
+        let recorder = std::sync::Arc::new(RawRecorder {
+            seen: Mutex::new(Vec::new()),
+            raw: raw.clone(),
+        });
+        let store = std::sync::Arc::new(MemSmid::default());
+        let smid = std::sync::Arc::new(SmidService::new(
+            std::sync::Arc::new(Scripted::new(&[RAW_ID_1])),
+            store,
+            std::sync::Arc::new(clock()),
+            Box::new(SeqRandom::new(1)),
+        ));
+        let client = SmidClient::new(recorder.clone(), smid, account_id());
+
+        let got = client
+            .request_raw(HttpRequest::get("https://cdn.example/a.png").header("x-probe", "1"))
+            .await
+            .unwrap();
+
+        assert_eq!(got, raw, "字节必须一字不差地穿过装饰器");
+        let seen = recorder.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "只该转发一次");
+        assert_eq!(
+            header_of(&seen[0], "deviceid").as_deref(),
+            Some(format!("B{RAW_ID_1}").as_str()),
+            "转发前必须补上 deviceid（两个入口共用那一处注入）"
+        );
+        assert_eq!(seen[0].url, "https://cdn.example/a.png", "URL 原样");
+        assert_eq!(
+            header_of(&seen[0], "x-probe").as_deref(),
+            Some("1"),
+            "调用方自己的头也原样到达"
+        );
     }
 }

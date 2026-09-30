@@ -250,9 +250,18 @@ pub fn should_inject_credential(
     host_allows && !existing.iter().any(|(k, _)| k.eq_ignore_ascii_case(name))
 }
 
-#[async_trait]
-impl mcloud_core::HttpClient for ReqwestClient {
-    async fn request(&self, req: HttpRequest) -> Result<HttpResponse> {
+impl ReqwestClient {
+    /// 把一枪**准备好并发送**，返回 reqwest 的响应；**读响应体由调用方决定**
+    /// （`text()` 还是 `bytes()`）。
+    ///
+    /// # 为什么拆出这一段
+    ///
+    /// 发送层现在有两条读体的路：[`mcloud_core::HttpClient::request`]（文本）与
+    /// [`mcloud_core::HttpClient::request_raw`]（原样字节）。两条路的**前半段
+    /// （按主机选 TLS 后端 / 注入凭据 / 补 content-type / 挂体）必须逐字相同**
+    /// —— 各写一份，早晚有一份被改到，而表现是「同一个请求换个入口就少一枚头」，
+    /// 排查方向会被整个带偏。所以准备与发送只做一次，只有读体分叉。
+    async fn send(&self, req: HttpRequest) -> Result<reqwest::Response> {
         let url = reqwest::Url::parse(&req.url)
             .map_err(|e| Error::Network(format!("URL 非法 {}：{e}", req.url)))?;
         let host = url.host_str().unwrap_or("").to_string();
@@ -353,10 +362,17 @@ impl mcloud_core::HttpClient for ReqwestClient {
             builder = builder.body(body);
         }
 
-        let resp = builder
+        builder
             .send()
             .await
-            .map_err(|e| Error::Network(explain_send(&e)))?;
+            .map_err(|e| Error::Network(explain_send(&e)))
+    }
+}
+
+#[async_trait]
+impl mcloud_core::HttpClient for ReqwestClient {
+    async fn request(&self, req: HttpRequest) -> Result<HttpResponse> {
+        let resp = self.send(req).await?;
 
         let status = resp.status().as_u16();
         let headers = resp
@@ -374,6 +390,24 @@ impl mcloud_core::HttpClient for ReqwestClient {
             body,
             headers,
         })
+    }
+
+    /// ⚠⚠ 这一条**必须**由 leaf 覆写：默认实现走 `self.request()`，而那条路已经
+    /// 过了 `reqwest::Response::text()`（**有损** UTF-8）⇒ 拿不到线上字节。
+    ///
+    /// 用的是 `resp.bytes()`（**原样字节**），**不是** `text()`。AI 头像那条链
+    /// 把下载到的合成图 base64 之后 upload，走错这一步的后果是：内容被替换字符
+    /// 破坏、上游却仍可能回 `code:0` ⇒ 网盘里是一张打不开的图，**且不报错**。
+    ///
+    /// ⚠ 这一条只负责「线上是什么字节就回什么字节」；它**不判**这些字节是不是
+    /// 一张合法的图 —— 形状校验在下游（见 `mcloud_tasks::ai_avatar`）。
+    async fn request_raw(&self, req: HttpRequest) -> Result<Vec<u8>> {
+        let resp = self.send(req).await?;
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| Error::Network(e.to_string()))?;
+        Ok(bytes.to_vec())
     }
 }
 

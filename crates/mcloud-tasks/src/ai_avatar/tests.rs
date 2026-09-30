@@ -1,16 +1,18 @@
 //! AI 头像任务层的测试。
 //!
 //! 夹具直接抄 `play_ai/tests.rs` 那一套（`Scripted` / `FixedClock` /
-//! `CollectSink` / `NoStore`），只多两样能力：**能回非 200** 与**能在第 N 枪之后
-//! 取消**。这两样正是本文件要钉的东西。
+//! `CollectSink` / `NoStore`），多三样能力：**能回非 200**、**能在第 N 枪之后
+//! 取消**、**能把非 UTF-8 的原始响应字节交回**（`Reply::Raw` + 覆写
+//! `request_raw`）。这三样正是本文件要钉的东西。
 //!
-//! 钉五类：
+//! 钉六类：
 //!
 //! * 开关关掉 ⇒ **0 个请求**（用一个「谁来都打挂」的客户端证明它一枪都没发）。
 //! * 只读路径（余量 / 抽奖）与写路径（合成 / 上传）分开验证。
+//! * 下载回来的**原始字节**一路走到 upload，且 base64 **解出来等于**原字节。
+//! * 下载回来但形状不是图 ⇒ 如实失败，**不 upload**。
 //! * 收尾**只删本趟造的 fileId**：预置一张同名的旧文件，断言它还在。
-//! * 上游非 200（404/405）如实失败，**不静默**。
-//! * 取消在安全点生效，且不再发请求。
+//! * 上游非 200（404/405）如实失败，**不静默**；取消在安全点生效且不再发请求。
 
 use std::sync::{Arc, Mutex};
 
@@ -71,7 +73,8 @@ const EMPTY_DIR_BODY: &str =
 
 // ══════════════════════════ 夹具 ══════════════════════════
 
-/// 一枪的答复：给个 200 的体、给一个**任意状态码**的响应，或者**打挂**（网络层错误）。
+/// 一枪的答复：给个 200 的体、给一个**任意状态码**的响应、交回一串
+/// **原始字节**（`request_raw` 专用），或者**打挂**（网络层错误）。
 #[derive(Clone)]
 enum Reply {
     Body(String),
@@ -80,13 +83,16 @@ enum Reply {
         body: String,
         headers: Vec<(String, String)>,
     },
+    /// `request_raw` 交回的字节 —— 可以是**非 UTF-8**（`Body(String)` 装不下）。
+    Raw(Vec<u8>),
     Fail,
 }
 
 /// 按顺序答复的假 HTTP 客户端（用尽后重复最后一个）。
 ///
-/// 比 `play_ai` 那一份多两样：`Response`（要测非 200）与 `cancel_after`
-/// （要测「取消之后不再发请求」）。
+/// 比 `play_ai` 那一份多三样：`Response`（要测非 200）、`cancel_after`
+/// （要测「取消之后不再发请求」）与 `request_raw`（要测**原始图片字节**
+/// 能一路走到 upload —— `HttpResponse.body` 是 `String`，装不下它）。
 struct Scripted {
     seen: Mutex<Vec<HttpRequest>>,
     replies: Mutex<Vec<Reply>>,
@@ -115,30 +121,40 @@ impl Scripted {
     fn count(&self) -> usize {
         self.requests().len()
     }
+
+    /// 记下这一枪，返回「这是第几枪」（取消判据在答复之后生效）。
+    fn record(&self, req: HttpRequest) -> usize {
+        let mut seen = self.seen.lock().unwrap();
+        seen.push(req);
+        seen.len()
+    }
+
+    /// 第 `nth` 枪答复之后按需取消。
+    fn maybe_cancel(&self, nth: usize) {
+        if let Some((n, token)) = self.cancel_after.lock().unwrap().as_ref() {
+            if nth >= *n {
+                token.cancel();
+            }
+        }
+    }
+
+    /// 取下一枪的答复（反转存过，从队尾取；用尽后重复最后一个）。
+    fn next_reply(&self) -> Reply {
+        let mut r = self.replies.lock().unwrap();
+        if r.len() > 1 {
+            r.pop().unwrap()
+        } else {
+            r.last().cloned().unwrap_or(Reply::Body("{}".into()))
+        }
+    }
 }
 
 #[async_trait]
 impl HttpClient for Scripted {
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse> {
-        let seen = {
-            let mut seen = self.seen.lock().unwrap();
-            seen.push(req);
-            seen.len()
-        };
-        if let Some((nth, token)) = self.cancel_after.lock().unwrap().as_ref() {
-            if seen >= *nth {
-                token.cancel();
-            }
-        }
-        let reply = {
-            let mut r = self.replies.lock().unwrap();
-            if r.len() > 1 {
-                r.pop().unwrap()
-            } else {
-                r.last().cloned().unwrap_or(Reply::Body("{}".into()))
-            }
-        };
-        match reply {
+        let nth = self.record(req);
+        self.maybe_cancel(nth);
+        match self.next_reply() {
             Reply::Body(body) => Ok(HttpResponse {
                 status: 200,
                 body,
@@ -153,6 +169,26 @@ impl HttpClient for Scripted {
                 body,
                 headers,
             }),
+            // `request_raw` 专用的答复被 `request()` 取到：只可能是测试脚本把
+            // 枪序写错了。按有损文本交回（不 panic），让断言去暴露它。
+            Reply::Raw(bytes) => Ok(HttpResponse {
+                status: 200,
+                body: String::from_utf8_lossy(&bytes).into_owned(),
+                headers: Vec::new(),
+            }),
+            Reply::Fail => Err(mcloud_core::Error::Other("网络断了".into())),
+        }
+    }
+
+    /// ⚠ 必须覆写：`HttpResponse.body` 是 `String`，装不下图片那串非 UTF-8 字节。
+    /// 这一条交回的是**线上原样字节**，正是 `ReqwestClient::request_raw` 的替身。
+    async fn request_raw(&self, req: HttpRequest) -> Result<Vec<u8>> {
+        let nth = self.record(req);
+        self.maybe_cancel(nth);
+        match self.next_reply() {
+            Reply::Raw(bytes) => Ok(bytes),
+            // 文本答复被这一条取到（其余用例的下载可能走它）：交回它的字节。
+            Reply::Body(body) | Reply::Response { body, .. } => Ok(body.into_bytes()),
             Reply::Fail => Err(mcloud_core::Error::Other("网络断了".into())),
         }
     }
@@ -310,26 +346,107 @@ async fn the_read_path_sends_only_the_two_get_endpoints() {
 
 // ═══════════════════ (b) 写路径 ═══════════════════
 
-/// ⚠ 这一条同时钉两件事：**`merge` 真的发出去了**，以及
-/// **`upload` 一枪都没发** —— 后者不是「没测到」，是本仓的能力缺口：
-/// 生成图要下载回来（图片字节），而 `HttpResponse.body` 是 `String`。
-/// 协议层的 `parse_image_download` 主动判失败，所以这一轮如实报失败，
-/// **不伪造** 一张图去 upload。
+/// 一张含**非 UTF-8 字节**的真图片数据：JPEG 魔数 `FF D8 FF` 后跟 `0x00 0x80`。
+///
+/// ⚠ 这几枚字节**故意**不是合法 UTF-8：只要有哪一步偷偷走了 `String`
+/// （有损 UTF-8），它们就会被换成 `U+FFFD`，下面「逐字节相等」的断言立刻红。
+fn jpeg_bytes() -> Vec<u8> {
+    vec![0xFF, 0xD8, 0xFF, 0x00, 0x80, 0x11, 0xC0, 0xFE]
+}
+
+/// ⭐ 这一条钉两件事：链路**走到了 upload**，且 upload 体里的 `mergeImage`
+/// **base64 解出来逐字节等于**下载到的那张图。
+///
+/// 有损那条路的失效点正在这里：[`mcloud_core::HttpResponse::body`] 是 `String`，
+/// 走 `reqwest::Response::text()` 时 `FF D8 FF 00 80 …` 会被替换成 `U+FFFD`，
+/// 上传的是一张坏图；只有真的 `request_raw`（`.bytes()`）才对得上。
 #[tokio::test]
-async fn the_write_path_sends_merge_but_never_upload() {
+async fn the_downloaded_image_bytes_reach_upload_byte_for_byte() {
+    let image = jpeg_bytes();
     let (ctx, http, sink) = ctx_with(
         vec![
             Reply::Body(CATALOG_BODY.into()),
             Reply::Body(EMPTY_DIR_BODY.into()),
             Reply::Body(r#"{"code":0,"result":{"taskId":"T1"}}"#.into()),
             Reply::Body(
-                r#"{"code":0,"result":{"status":3,"imageUrl":"https://cdn.example/a.png"}}"#.into(),
+                r#"{"code":0,"result":{"status":3,"imageUrl":"https://cdn.example/a.jpg"}}"#.into(),
             ),
-            Reply::Response {
-                status: 200,
-                body: "\u{FFFD}PNG".into(),
-                headers: vec![("content-type".into(), "image/png".into())],
-            },
+            // 下载那一枪：真字节，不是文本。
+            Reply::Raw(image.clone()),
+            // upload 回执：给了 id ⇒ 链路确实走完了上传。
+            Reply::Body(r#"{"code":0,"result":"U-1"}"#.into()),
+            // 余量 0 ⇒ 不抽奖。
+            Reply::Body(r#"{"code":0,"result":0}"#.into()),
+            // 收尾：作品表 → 列目录 → 回收站。
+            Reply::Body(
+                r#"{"code":0,"result":[{"id":"U-1","imgUrl":"https://x/p/AAA.jpg"}]}"#.into(),
+            ),
+            Reply::Body(
+                r#"{"code":0,"success":true,"data":{"items":[{"fileId":"NEW","name":"AAA.jpg"}]}}"#
+                    .into(),
+            ),
+            Reply::Body(r#"{"code":"0000","success":true}"#.into()),
+        ],
+        account_with(true, 1),
+    );
+    let out = task_with(plan_fast(2))
+        .run(&ctx, &serde_json::json!({}))
+        .await
+        .expect("这一趟不该是 Err");
+    assert!(
+        matches!(out, TaskOutcome::Success { .. }),
+        "生成 1 轮并上传成功 ⇒ success：{out:?}"
+    );
+
+    let reqs = http.requests();
+    assert_eq!(
+        http.count(),
+        10,
+        "目录 + 基线 + merge + getStatus + 下载 + upload + 余量 + 作品表 + 列目录 + 回收站，实得：{:?}",
+        reqs.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        reqs[4].url, "https://cdn.example/a.jpg",
+        "第五枪是裸 GET 下载"
+    );
+
+    let upload = reqs
+        .iter()
+        .find(|r| r.url.ends_with("/market/rabactive/image/upload"))
+        .expect("链路必须走到 upload");
+    let body: serde_json::Value =
+        serde_json::from_str(upload.body_str().expect("upload 该带文本体")).expect("该是 JSON");
+    let sent = body["mergeImage"].as_str().expect("mergeImage 是字符串");
+    assert_eq!(
+        mcloud_crypto::b64_decode(sent).expect("上传的 base64 该能解"),
+        image,
+        "⚠ 上传体里的 base64 必须逐字节等于下载到的图（有损解码会在这里被钉出来）"
+    );
+    // originImage 仍是本趟那张噪点原图，形状不变。
+    let origin = body["originImage"].as_str().expect("originImage 是字符串");
+    assert!(mcloud_crypto::b64_decode(origin).is_ok());
+
+    let d = &sink.details()[0];
+    assert_eq!(d["generated"], 1);
+    assert_eq!(d["generateFailures"], 0);
+}
+
+/// 下载回来但**形状不是图**（或空体）⇒ 本轮如实失败、**一枪 upload 都不发**。
+///
+/// 这是形状校验的下游：`request_raw` 本身不挑内容，判据在这里。
+/// ⚠ 之所以不「尽力而为」：把来路不明的字节 base64 上去，上游仍可能回 `code:0`，
+/// 结果是网盘里多一张打不开的图 —— 本仓最忌讳的那类失效。
+#[tokio::test]
+async fn a_downloaded_blob_that_is_not_an_image_never_reaches_upload() {
+    let (ctx, http, sink) = ctx_with(
+        vec![
+            Reply::Body(CATALOG_BODY.into()),
+            Reply::Body(EMPTY_DIR_BODY.into()),
+            Reply::Body(r#"{"code":0,"result":{"taskId":"T1"}}"#.into()),
+            Reply::Body(
+                r#"{"code":0,"result":{"status":3,"imageUrl":"https://cdn.example/a"}}"#.into(),
+            ),
+            Reply::Raw(b"<html>not an image</html>".to_vec()),
             Reply::Body(r#"{"code":0,"result":0}"#.into()),
         ],
         account_with(true, 1),
@@ -337,49 +454,45 @@ async fn the_write_path_sends_merge_but_never_upload() {
     let out = task_with(plan_fast(2))
         .run(&ctx, &serde_json::json!({}))
         .await
-        .expect("这一趟的失败是业务层面的，不该是 Err");
+        .expect("业务层面的失败，不该是 Err");
     assert!(
         matches!(out, TaskOutcome::Failed { .. }),
-        "生成 0/1、抽奖 0 次 ⇒ 必须如实报失败，不能念成「跑完了」：{out:?}"
-    );
-    assert_eq!(
-        http.count(),
-        6,
-        "目录 + 基线 + merge + getStatus + 下载 + 余量"
-    );
-
-    let reqs = http.requests();
-    assert_eq!(
-        reqs[2].url,
-        "https://m.mcloud.139.com/market/rabactive/ai/image/merge"
-    );
-    assert_eq!(reqs[2].method, "POST");
-    assert!(
-        reqs[2].body_str().expect("有体").contains("imageBase64"),
-        "merge 体带原图 base64"
-    );
-    assert_eq!(
-        reqs[3].url,
-        "https://m.mcloud.139.com/market/rabactive/ai/image/getStatus"
-    );
-    assert_eq!(
-        reqs[4].url, "https://cdn.example/a.png",
-        "下载那一枪是裸 GET"
+        "生成 0/1 ⇒ 必须如实报失败：{out:?}"
     );
     assert!(
-        reqs.iter().all(|r| !r.url.contains("/image/upload")),
-        "下载不了字节 ⇒ upload 一枪都不该发"
+        http.requests()
+            .iter()
+            .all(|r| !r.url.ends_with("/image/upload")),
+        "形状不对 ⇒ upload 一枪都不该发"
     );
-
     let d = &sink.details()[0];
     assert_eq!(d["generated"], 0);
     assert_eq!(d["generateFailures"], 1);
     assert!(
-        d["failures"][0].as_str().unwrap_or("").contains("有损"),
-        "失败原因要说清是本仓读不了二进制：{}",
+        d["failures"][0].as_str().unwrap_or("").contains("形状"),
+        "失败原因要说清是形状校验：{}",
         d["failures"][0]
     );
-    assert!(summary_of(&out).contains("生成 0/1 轮"));
+}
+
+/// 形状校验本身：JPEG / PNG 收，空体与别的内容拒。
+#[test]
+fn the_image_shape_check_accepts_jpeg_and_png_and_rejects_everything_else() {
+    let jpeg = jpeg_bytes();
+    assert_eq!(
+        image_download_base64(&jpeg).unwrap(),
+        mcloud_crypto::b64_encode(&jpeg)
+    );
+    let png = vec![0x89, b'P', 0x4E, 0x47, 0x0D, 0x0A];
+    assert_eq!(
+        image_download_base64(&png).unwrap(),
+        mcloud_crypto::b64_encode(&png)
+    );
+    assert!(image_download_base64(&[]).is_err(), "空体没有可上传的东西");
+    assert!(
+        image_download_base64(b"hello").is_err(),
+        "不是图的字节不许 base64 上去"
+    );
 }
 
 /// 业务码非 0（`code:500`）⇒ **本轮失败**，不是致命：会试第二次、然后继续抽奖。
