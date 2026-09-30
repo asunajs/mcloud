@@ -228,7 +228,7 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 
 ## 测试
 
-- `cargo test --workspace` —— **715 个测试**
+- `cargo test --workspace` —— 全量门。⚠ 本机**不能**跑它：它会重链接 `target/debug/mcloud-server`，把 launchd 正在跑的那个进程判成代码签名失效而 SIGKILL（见 AGENTS.md）。本机交付时改跑「分 crate 的 `cargo test -p …` + `cargo clippy --workspace --all-targets -- -D warnings`」，并在交付说明里写明哪条没跑。
 - `cargo clippy --workspace --all-targets -- -D warnings` —— 0 告警
 - 黄金向量对拍：`test/golden/crypto-vectors.json`（签名、MD5、SHA256、两种 AES 语义）
   + `test/golden/app-signin-vectors.json`（签到族实拍信封与常量）
@@ -249,7 +249,7 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 | P8 | **账号登录（扫码/短信）+ 账号页 + 定时/编排 CRUD 页** | ✅ |
 | P9a | **签到族 8 条**（`sign` / `receive` / `multiple` / `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`） | ✅ |
 | P9b | **P2 只读查询那一档全部落完**：`exchange` + `msg-push` + `fun-ai` + `notice` | 已落 4 条 |
-| P9c | 其余任务增量接入（`cloud-phone-redpack` / `ai-avatar`）+ 推送渠道 | 待做（`app-task` 的写侧已落 106 / 522 / beiyong1 名字门三档玩法）|
+| P9c | 其余任务增量接入（`cloud-phone-redpack` / `ai-avatar`）+ 推送渠道 | 进行中：`cloud-phone-redpack` 的**会话两段 + 只读盘点**已落（47 协议测试 + 14 任务测试），写入侧 7 条待接；`ai-avatar` / 推送渠道待做（`app-task` 的写侧已落 106 / 522 / beiyong1 名字门三档玩法）|
 
 > **端点必须来自抓包，不能凭印象写。** 本项目的签到端点最初是
 > `/ycloud/api/sign/query`（凭印象），实测回 **405**；换成实拍的
