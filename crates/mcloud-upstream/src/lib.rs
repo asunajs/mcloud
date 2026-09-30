@@ -21,6 +21,7 @@ pub mod app_task_list_v2;
 pub mod auth;
 pub mod auth_refresh;
 pub mod client;
+pub mod cloud_phone_redpack;
 pub mod cloud_trash;
 pub mod endpoints;
 pub mod exchange;
