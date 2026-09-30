@@ -95,7 +95,7 @@ npm i -D vite typescript@^5
 | 状态 | `ref` `effect` `batch` `watch`（就这四个；`computed` / `reactive` / `nextTick` **没有**） |
 | 组件 | 普通函数组件 + `mount` `useSlots` `onMounted` `onUnmounted`，类型 `Component` / `Slots` / `Ref` |
 | 编译产物用的 helper | `template` `setNodes` `setClass` `setAttr` `setProp` `setValue` `on` `spread` `createFor` `createComponent` `lazySlot` `remove` |
-| 运行时内部件 | `createNodes` `insert` `onRemove` `setText` —— 只有框架自己和 demo/bench 该碰 |
+| 运行时内部件 | `createNodes` `insert` `onRemove` —— 只有框架自己和 demo/bench 该碰 |
 
 第三类**只有编译产物在用**，业务代码不要手写；第四类连编译产物都不直接用，是前三类的实现细节。
 `renderEffect` 这个名字已经没了（它是"与 Vapor 词汇表对齐"的别名，2026-09-30 随兼容层删除）——

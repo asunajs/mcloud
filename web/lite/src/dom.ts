@@ -335,12 +335,6 @@ export function setNodes(parent: Node, fn: () => unknown, anchor: Node | null = 
   own(parent, eff)
 }
 
-/** 写文本。同值不写 —— 避免无谓的布局/样式重算。 */
-export function setText(node: Node, v: unknown): void {
-  const s = v == null || v === false || v === true ? '' : String(v)
-  if (node.textContent !== s) node.textContent = s
-}
-
 /**
  * `setAttr` 里"`false` ⇒ 移除属性"的属性名白名单 —— 与 Vue 的 `isSpecialBooleanAttr` 同一份
  * （`checked`/`disabled`/`required` 这些**短路在 `setProp` 上**，根本不走这里）。

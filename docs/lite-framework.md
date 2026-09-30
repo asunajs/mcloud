@@ -9,7 +9,7 @@
 
 | 指标 | 现在 | 怎么量 |
 |---|---|---|
-| 运行时 gzip（全量导出） | **2,471 B**（raw 5,640） | `node web/lite/size.mjs` |
+| 运行时 gzip（全量导出） | **2,435 B**（raw 5,531） | `node web/lite/size.mjs` |
 | 运行时 gzip（不含只有 demo/bench 用的内部件） | **2,421 B**（raw 5,488） | 同上 |
 | 主产物 JS（单 chunk：业务 + 运行时 + 编译胶水） | **120.65 kB** / gzip **32.92 kB** | `cd web && npm run build` |
 | └ 其中运行时占 | gzip **2.42 kB** ≈ 全量的 **7.4%** | 上面两行相除 |
@@ -80,7 +80,7 @@ lite/src/component.ts   createComponent / mount / onMounted / onUnmounted / useS
 |---|---|---|
 | 编译器 import 的 | `batch` `effect` `ref` `watch` `createComponent` `createFor` `lazySlot` `on` `remove` `setAttr` `setClass` `setNodes` `setProp` `setValue` `spread` `template` | 改名字 = 编译产物断（`compiler.ts` 里那些 `this.h('…')`） |
 | 业务代码手写的 | `mount` `onMounted` `onUnmounted` `useSlots`，类型 `Component` / `Slots` / `Ref` | 页面与 UI 单元 |
-| 运行时内部件 | `createNodes` `insert` `onRemove` `setText` | 只有 demo / bench / 排障该碰 |
+| 运行时内部件 | `createNodes` `insert` `onRemove` | 只有 demo / bench / 排障该碰（曾经还有个 `setText`：编译器不发、运行时不用、demo 也没调 ⇒ 2026-09-30 删了死码） |
 
 ### 3.1 响应式模型：同步刷新 + `batch`，没有调度器
 
@@ -221,10 +221,10 @@ Vite 8 / Rolldown / es2022 / 默认压缩器生产构建后 gzip：
 
 | 裁剪 | raw | gzip |
 |---|---|---|
-| 全量（= `src/index.ts` 导出的全部） | 5,640 | **2,471** |
+| 全量（= `src/index.ts` 导出的全部） | 5,531 | **2,435** |
 | 再去掉只有 demo/bench 用的内部件 | 5,488 | **2,421** |
 
-参照：Solid 核心 ≈7 KB gzip，Vue Vapor 的地板 16,344 B gzip ⇒ 现在是它们的 1/2.8 与 1/6.8。
+参照：Solid 核心 ≈7 KB gzip，Vue Vapor 的地板 16,344 B gzip ⇒ 现在是它们的 1/2.9 与 1/6.7。
 
 ⚠ **和上一版文档的差值要交代清楚**：设计稿引过 1,892 / 1,514 B，那是**还带着
 `computed` / `store` / Vue 兼容壳**时的读数。那一轮把那三样删了，
@@ -233,7 +233,7 @@ Vite 8 / Rolldown / es2022 / 默认压缩器生产构建后 gzip：
 "`insertBefore` 崩溃"与"越刷新内容越多"不会再出现。
 **基线是同一台机器、同一工具链、上一个 commit 的 git worktree 量的**，不是估的。
 
-⚠ **再往后（2026-09-30）又瘦了一轮：2,808 → 2,471（−337 B，−12%）**，没删任何功能：
+⚠ **再往后（2026-09-30）又瘦了一轮：2,808 → 2,435（−373 B，−13%）**，只删了死码、没删任何功能：
 
 1. **诊断代码改成编译期剥离**（`src/dev.ts` 的 `DEV = import.meta.env.DEV`）。
    `insert()` 里那段"锚点脱开"告警（长文案 + `new Error().stack` 抓栈）挂到
@@ -245,6 +245,10 @@ Vite 8 / Rolldown / es2022 / 默认压缩器生产构建后 gzip：
    （压缩器没法证明没人再读）。它们想回答的"谁调的"由告警里的 `stack` 直接给出，
    且更精确。
 3. 两条 `循环更新` 守卫的文案缩短（它们是**生产路径**上的守卫，不能剥离，只能少写字）。
+4. **删死码 `setText`**（−36 B）：编译器不发、运行时内部不调、demo/bench 也没在用，
+   只有 `index.ts` 一句"留给 demo 压"的注释在撑门面。⚠ 这条**不影响用户下载量** ——
+   它本来就被 DCE 掉了，删完主产物**逐字节不变**（同 hash、120,659 B / gzip 32,267 B）。
+   删它是为了别让"注释说得像在用"的代码留着（同类教训见 `authEpoch`）。
 
 ⚠ 怎么**复现**这组读数：`node web/lite/size.mjs` 走的是 Vite build ⇒ `DEV=false`，
 量到的就是"生产档"；开发档把传给 Vite 的 `define` 改成
@@ -272,7 +276,7 @@ Vite 8 / Rolldown / es2022 / 默认压缩器生产构建后 gzip：
 | 9 | `974466a` | 碎片槽内容与占位绑定（`lazySlot` 记账 `{fn,nodes,eff}`） | 2,620 | 5,980 |
 | 10 | `258a7f6` | 堵上"文本快路径绕过锚点护栏"那个洞 | 2,620 | 5,985 |
 | 11 | `5c564c9` 09-30 | **删**兼容壳（`computed`/`field`/`createStore`/`renderEffect`/`defineVaporComponent`）＋**加**组件作用域 `ownedEffects`、`batch` 再入排空、循环护栏 | 2,808 | 6,147 |
-| 12 | 本次 | 诊断代码改成**编译期剥离**（`src/dev.ts` 的 `DEV = import.meta.env.DEV`）＋去掉只给告警用的 `where` 参数＋缩短两条守卫文案 | **2,471** | 5,640 |
+| 12 | 本次 | 诊断代码改成**编译期剥离**（`src/dev.ts` 的 `DEV = import.meta.env.DEV`）＋去掉只给告警用的 `where` 参数＋缩短两条守卫文案＋删死码 `setText` | **2,435** | 5,531 |
 
 ⇒ 那 **+1,146 B gzip 不是"框架长大了"**：除了第 1~3 档是把语法子集吃全，
 第 5~10 档每一档都对应一个**真机上崩过的现场**（详见

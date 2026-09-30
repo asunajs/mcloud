@@ -31,6 +31,10 @@ export { lazySlot, on, remove, setAttr, setClass, setNodes, setProp, setValue, s
 export { type Component, mount, onMounted, onUnmounted, type Slots, useSlots } from './component'
 
 // ── 运行时自己的内部件（demo / bench / 排障会直接调，业务代码不该用）────────
-// `insert` / `createNodes` 是 `createFor` 与 `setNodes` 的实现细节；
-// `setText` 是 `setNodes` 的"纯文本就只写文本"快路。留在这里是为了 demo 能直接压它们。
-export { createNodes, insert, onRemove, setText } from './dom'
+// `insert` / `createNodes` 是 `createFor` 与 `setNodes` 的实现细节。
+//
+// ⚠ 这里曾经还导出 `setText`，注释写着"是 `setNodes` 的纯文本快路，留给 demo 压"。
+// 2026-09-30 复核发现：**编译器不发它、运行时内部不调它、demo/bench 也没在用**
+// （demo 里那句只是注释提到）—— 是一段"注释说得像在用"的死码，已删。
+// 纯文本快路确实存在，但它在 `setNodes` 内部，不是这个导出。
+export { createNodes, insert, onRemove } from './dom'
