@@ -144,3 +144,62 @@ fn lenient_by_design() {
         "合法 base64 一律算可用 —— 与 Node 的宽容解码对齐"
     );
 }
+
+// ── 刷新回来后，过期时刻有没有真的推进 ─────────────────────────────────
+//
+// ⚠ 这一格以前**没有测试**：三档判据（`decide()`）覆盖得很齐，但"刷新成功后
+// `expire` 有没有真的前移"没人验。于是下面这个 bug 活了很久：
+//
+//   `rotate()` 拿 `format!("{}:{}:{}", platform, phone, token)` **明文**去解析，
+//   而 `parse_auth` 的契约是"`Basic ` + base64 整串"。它不报错 —— 只是拿不到
+//   expire ⇒ 库里 `expire` 停在旧值 ⇒ `decide()` 下一轮仍判"该刷"
+//   ⇒ **每轮都真轮换凭据**（对上游是不可逆动作）。
+//
+// 2026-09-30 复核 qwen review 时查实并修掉；这两条测试是它的护栏。
+
+fn account_fixture() -> Account {
+    Account {
+        id: mcloud_core::AccountId::new("19****01"),
+        nickname: None,
+        auth: mcloud_core::AuthInfo {
+            raw: "Basic eA==".into(),
+            platform: "mobile".into(),
+            phone: "19900000001".into(),
+            token: "t".into(),
+            expire: 0,
+        },
+        device_id: mcloud_core::DeviceId("DEV+1/base=".into()),
+        pc_platform: None,
+        user_domain_id: None,
+        settings: mcloud_core::AccountSettings::default(),
+    }
+}
+
+/// 正面：整串（`Basic ` + base64）能拿到 expire —— `rotate()` 现在喂的就是它。
+#[test]
+fn expire_comes_from_the_whole_auth_string() {
+    let acct = account_fixture();
+    let token = "SYNTH001|1|RCS|1792391642025|payload";
+    let auth = auth_refresh::rebuild_authorization(&acct, token).expect("拼串应成功");
+    assert_eq!(
+        expire_from_new_auth(&auth),
+        Some(1_792_391_642_025),
+        "整串 base64 解出来的 token 第 4 段就是过期时刻"
+    );
+}
+
+/// 反面：`platform:phone:token` 明文拼法**拿不到** expire —— 那正是曾经的写法。
+///
+/// 留着它是为了让"为什么不能那么拼"有据可查：`parse_auth` 走的是复刻 Node 的
+/// 宽容解码，字母表以外的字符（`:` 就在其中）会被**直接丢掉**，解出来是垃圾。
+#[test]
+fn plaintext_join_never_yields_an_expire() {
+    let acct = account_fixture();
+    let token = "SYNTH001|1|RCS|1792391642025|payload";
+    let plain = format!("{}:{}:{}", acct.auth.platform, acct.auth.phone, token);
+    assert_eq!(
+        expire_from_new_auth(&plain),
+        None,
+        "明文形式必须拿不到 expire（否则 rotate 当初的写法就不算 bug 了）"
+    );
+}

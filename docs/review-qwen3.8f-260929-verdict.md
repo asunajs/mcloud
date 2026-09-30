@@ -102,13 +102,71 @@
 ⇒ **五条全中**。这不能证明它全对，但足以说明它的 ★ 不是随手标的，Rust 侧的其余条目
 应当按"待复核"而不是"待怀疑"来对待。以下按我能给出的把握分级。
 
-### 2.1 我认可、且认为应当**优先修**的三条（后果不可逆或长期累积）
+### 2.1 我认可、且应当**优先修**的三条
 
-| 结论 | 为什么排前面 |
-|---|---|
-| §3.1 ★ `auth_refresh.rs:173-180` 刷新成功后 `expire` 永不推进 | 若成立，`decide()` 下次仍判"该刷" ⇒ **反复真轮换凭据**。这是全篇唯一"每跑一轮就多一次不可逆动作"的条目。它给的解释很具体（把明文 `platform:phone:token` 喂给契约要求 base64 整串的 `parse_auth`，而 `node_like_b64_decode` 会**丢掉 `:`**），且指出既有测试覆盖三档判据却**没覆盖 `rotate()` 的 expire 再推导** —— 这种"测试正好差一格"的说法值得优先验 |
-| §3.2 session_source.rs `90001` 刷新后重放非幂等写 | 唯一能让"下单/领奖"类写请求**双发**的路径，而重放安全的前提（"回 90001 ⇒ 上游没执行过"）本仓自己的 `describe()` 就说是"被挡下"而非"未执行" ⇒ **未证实且后果最重**。它自己列进了 §6 未证实格，处理得当 |
-| §3.2 exchange/app-task/app-task-matrix 无服务端门 | "不可逆动作只有 UI 确认、没有服务端确认"，且 CLI 完全绕过登录闸 ⇒ 绕过专用页即可触发。这条即使细节有偏差，方向也值得当硬伤看 |
+#### ① ★ `auth_refresh.rs` 刷新成功后 `expire` 永不推进 —— **已复现、已修、已加护栏**
+
+**这条是真的，而且我用测试把它钉住了。** 原来的写法是把 `platform:phone:token`
+**明文拼接**后喂给 `parse_auth`：
+
+```rust
+if let Some(parsed) = mcloud_upstream::parse_auth(&format!(
+    "{}:{}:{}", account.auth.platform, account.auth.phone, updated.auth.token
+))
+```
+
+而 `parse_auth`（`mcloud-upstream/src/auth.rs:45`）的契约是"`Basic ` + **base64 整串**"，
+它走的是复刻 Node 的宽容解码 `node_like_b64_decode`：**丢掉字母表以外的字符**，
+`:` 正在其中。于是明文进去解出垃圾、`expire > 0` 恒不成立 ⇒
+`updated.auth.expire` 停在旧值 ⇒ `decide()` 下一轮仍判"该刷"⇒ **每轮都真轮换凭据**。
+
+复现方式（新增的两条测试，`cargo test -p mcloud-app auth_refresh`）：
+
+```
+test auth_refresh::tests::expire_comes_from_the_whole_auth_string ... ok
+test auth_refresh::tests::plaintext_join_never_yields_an_expire ... ok
+test result: ok. 14 passed; 0 failed
+```
+
+**修法**：`rotate()` 手里本来就有正确形态的串 —— `apply_refresh` 的第二个返回值
+`new_raw` 就是 `rebuild_authorization` 拼好的 `Basic <base64>`（`login.rs` 的
+`account_from_auth` 一直传的就是这种整串）。改成解析 `new_raw`，并把"该喂哪一串"
+这件事抽成 `expire_from_new_auth()` 让测试钉住；**顺带补上 review 指出的那格测试**
+（既有 12 条全在 `decide()` 的门槛上，没有一条碰 `rotate()`）。
+
+⚠ 留下的缺口（如实说）：这两条是**契约级**护栏，不是端到端的 `rotate()` 测试 ——
+`AuthRefreshService::new` 要 `Arc<dyn Store>`，而 `Store` 是六个子 trait 的组合
+（约 25 个方法），造一个完整假 Store 的成本明显高于这次的收益。要端到端那格的话，
+建议把假件放进 `mcloud-core` 的 `testkit`（现在只有 `FixedClock`）一次，全仓复用。
+
+#### ② `90001` 重放非幂等写 —— **代码层已证实，安全性前提在仓内无法验证**
+
+`session_source.rs` 的 `with_session()`：收到 90001 ⇒ 刷新会话 ⇒ **原样重发那一条**，
+**不区分 HTTP 方法、不区分幂等性**；唯一的生产调用点是
+`h5_client.rs:172` 的 `H5Client::request`，它是通用通路（写请求同样经过）。
+
+而"重放安全"的前提是"回 90001 ⇒ 上游没执行过" —— **本仓自己的文档否掉了它**：
+同文件的 `describe()` 写着 90001 是「会话被拒（**被挡下了**：可能是票不对、可能是票
+过期、也可能是别的）」。⇒ 这条**不是**"代码 bug"，而是"前提未证实 + 后果不可逆"。
+
+**改法（需决策，我没擅自改）**：给 `with_session` 加一个显式的
+`replay_on_session_expiry` 开关（默认保持现状），由**不可逆任务**（消耗抽奖次数的
+`red-flower`、`exchange`、`app-task` 的 click）显式关掉；或在真机抓包里拿到
+"90001 时上游确实未执行"的证据再决定。**不要**直接按方法收紧（只重放 GET）——
+有些 POST 现在正是靠这条路径刷活，未经实拍就收紧会静默弄坏能用的流程。
+
+#### ③ 不可逆动作没有服务端门 —— **代码层已证实，属产品决策**
+
+* `POST /api/runs` 只做 `registry.contains(&req.task)`（`routes/runs.rs:91`），
+  既不要求确认、也不看 `hidden`；
+* `fn hidden` 全仓只有 `registry.rs:34` 的 trait 默认实现与 `:143` 的测试夹具 ——
+  **没有任何任务覆写它**（而 `task-inventory.md` 已把 exchange 标为 Hidden）；
+* `routes/exchange.rs` 里 `confirm` 零命中；
+* `bin/cli.rs` 直接进程内跑，**不经过** HTTP 的 `auth_gate`。
+
+⇒ "UI 有二次确认、服务端没有"这个判断成立。要注意的是：定时器/编排内部也要
+`run` 任务，所以硬门不能一刀切 —— 建议做成"交互调用方需带确认令牌"或
+"每账号每日上限"，而不是"`POST /api/runs` 一律要确认"。
 
 ### 2.2 我认可、属于"工程债"的（按它的 §5 顺序即可）
 
@@ -129,10 +187,10 @@
 
 ### 2.4 独立复核状态（如实交代）
 
-我另派了一路**独立的 Rust 复核**（逐条对 §3.1–§3.5 取证），到本文写完时**尚未返回**，
-所以 §2 里除 2.0 那五条外，**没有一条是我亲手验的** —— 都是"按它给的 file:line 读下来
-判断可信"。这不是采信，是分级。Rust 侧要真正落刀前，先按 2.1 的三条各做一次
-"先复现再改"（尤其 `auth_refresh` 的 expire 与 `90001` 重放）。
+我另派的一路独立 Rust 复核**到收口时还没返回**，所以 §2 里的验证是我自己做的：
+2.0 的五条 grep 抽查 + 2.1 的三条（① 用新增测试**复现并修掉**；② ③ 代码层证实、
+把"需实拍/需决策"的部分如实留下）。**§2.2 那一串工程债仍然只有分级、没有逐条取证** ——
+要落刀前按老规矩"先复现再改"。
 
 ---
 

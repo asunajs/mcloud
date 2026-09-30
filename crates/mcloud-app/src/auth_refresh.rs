@@ -94,6 +94,24 @@ pub enum RefreshOutcome {
     ManualOnly { expire_ms: i64 },
 }
 
+/// 从**刷新回来的整串凭据**里取过期时刻；取不到或非正数一律 `None`。
+///
+/// ⚠ 这个函数单独存在，是为了让"该喂哪一串"这件事**能被测试钉住**：
+///
+/// * 入参必须是 `rebuild_authorization`（`mcloud-upstream`）拼好的**整串** ——
+///   `Basic ` + base64("端别:手机号:token")，也就是 `apply_refresh` 的第二个返回值；
+/// * **不能**喂 `format!("{platform}:{phone}:{token}")` 这种明文。`parse_auth` 里
+///   走的是 `node_like_b64_decode`（复刻 Node 的宽容解码），它会把字母表以外的
+///   字符**直接丢掉** —— `:` 正是其中之一。明文进去 ⇒ 解出垃圾 ⇒ 拿不到 expire。
+///
+/// 代价不对等：拿不到 expire 不会报错，只会让 `updated.auth.expire` 停在旧值，
+/// 于是 `decide()` 每轮都判"该刷"，**反复真轮换凭据**（对上游是不可逆动作）。
+fn expire_from_new_auth(new_raw: &str) -> Option<i64> {
+    mcloud_upstream::parse_auth(new_raw)
+        .map(|parsed| parsed.expire)
+        .filter(|expire| *expire > 0)
+}
+
 /// 凭据续期服务。
 pub struct AuthRefreshService {
     store: Arc<dyn Store>,
@@ -163,21 +181,24 @@ impl AuthRefreshService {
         // 上游失败时库里**一点不动** —— `apply_refresh` 已经先返回了 Err，
         // 走到这里的都是拿到了新串。
         let mut updated = account.clone();
-        updated.auth.raw = new_raw;
-        updated.auth.token = result.token;
 
-        // 过期时刻从**新 token 自己**里取（与登录路径同一个来源）。
+        // 过期时刻从**新凭据自己**里取（与登录路径同一个来源）。
         //
         // 用响应里的 `expireTime` 去算的话（秒、且是相对时长），
         // 两个来源迟早分叉 —— 那时"界面显示已过期、刷的时候却判 not-yet"。
-        if let Some(parsed) = mcloud_upstream::parse_auth(&format!(
-            "{}:{}:{}",
-            account.auth.platform, account.auth.phone, updated.auth.token
-        )) {
-            if parsed.expire > 0 {
-                updated.auth.expire = parsed.expire;
-            }
+        //
+        // ⚠⚠ **必须喂 `new_raw`（整串），不能自己拼 `platform:phone:token` 明文。**
+        // `parse_auth` 的契约是"`Basic ` + base64 整串"：它要**宽容解码**
+        // （`:` 属于字母表以外的字符、会被直接丢掉）。喂明文 ⇒ 解出来是垃圾 ⇒
+        // `expire > 0` **恒不成立** ⇒ `updated.auth.expire` 停在旧值 ⇒
+        // 下次 `decide()` 仍判"该刷" ⇒ **每轮都真轮换凭据**（对上游是不可逆动作）。
+        // 这是 2026-09-30 复核 qwen review 时查实的真 bug，靠 `expire_from_new_auth` 钉住。
+        if let Some(expire) = expire_from_new_auth(&new_raw) {
+            updated.auth.expire = expire;
         }
+
+        updated.auth.raw = new_raw;
+        updated.auth.token = result.token;
 
         self.store.save_account(&updated).await?;
 
