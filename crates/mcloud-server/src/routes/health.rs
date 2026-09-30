@@ -14,7 +14,7 @@ pub struct VersionInfo {
 
 pub async fn version() -> Json<VersionInfo> {
     Json(VersionInfo {
-        name: "mcloud-gost",
+        name: "mcloud",
         version: env!("CARGO_PKG_VERSION"),
     })
 }
@@ -81,7 +81,7 @@ pub async fn status(State(state): State<ServerState>) -> Json<ServiceStatus> {
         .unwrap_or(0);
 
     Json(ServiceStatus {
-        name: "mcloud-gost",
+        name: "mcloud",
         version: env!("CARGO_PKG_VERSION"),
         task_count: state.handle.registry.len(),
         last_run,
