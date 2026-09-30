@@ -30,14 +30,11 @@ export type AuthState = 'checking' | 'setup' | 'login' | 'ready'
 /** 当前认证状态。 */
 export const authState = ref<AuthState>('checking')
 
-/**
- * 认证"代次"。每次从"被拒"变成"放行"就 +1。
- *
- * 页面用它当 `key`（或 watch 它）来在登录成功后重新拉数据 ——
- * 否则登录前失败的那些请求把页面留在了错误态，
- * 而用户明明已经登录了。
- */
-export const authEpoch = ref(0)
+// 这里曾经有过一个 `authEpoch`（自增的"认证代次"），注释说"页面用它当 key/watch
+// 来在登录成功后重拉数据"。2026-09-30 复核发现：全仓只有它的声明与自增两处命中，
+// **没有任何读取方** —— 死状态配着一条像模像样的注释，比没有更危险（下一个人会照着
+// 它去"用"一个根本不生效的机制）。页面重拉数据实际靠的是 `authState` 变化。
+// 真要重新引入，请连同读取方一起提交。
 
 /**
  * 后端要求认证。
@@ -67,7 +64,6 @@ export const noteAuthOk = (user?: string): void => {
   if (user !== undefined) currentUser.value = user
   if (authState.value === 'ready') return
   authState.value = 'ready'
-  authEpoch.value += 1
 }
 
 /**

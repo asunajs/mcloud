@@ -39,8 +39,11 @@ on:
   # 手动跑：只出 artifact，不发 Release
   workflow_dispatch:
 
+# 默认**最小权限**：只有发 Release 的那个 job 才需要写。
+# 之前把 `contents: write` 写在顶层，等于让 `web` / `build` 两个 job（要跑 npm ci、
+# 下载依赖、执行编译）也都白拿写权限 —— 权限应该贴着真正需要它的那一步放。
 permissions:
-  contents: write # 发 Release 需要写权限
+  contents: read
 
 # 同一 tag 重复触发时只保留最后一次（Actions 按分钟计费）
 concurrency:
@@ -135,6 +138,13 @@ jobs:
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
+            # ⚠ git tag 允许斜杠（`v1/2` 之类），而 VERSION 会被拼进文件名与目录名
+            # （`mcloud-gost-v<VERSION>-<target>/`）⇒ 斜杠会让后面每一步的路径都错位。
+            # 在这里**早失败**，而不是等打包时报一堆看不懂的路径错误。
+            if [[ "$VERSION" == */* || "$VERSION" == *" "* ]]; then
+              echo "::error::tag 名不能含 '/' 或空格（当前 '${GITHUB_REF_NAME}'）——它会拼进产物文件名"
+              exit 1
+            fi
           else
             VERSION="$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
           fi
@@ -235,6 +245,9 @@ jobs:
     needs: build
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
+    # 写权限**只给这一步**（顶层是 contents: read）——发 Release 才需要它
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:

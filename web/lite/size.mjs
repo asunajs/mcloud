@@ -57,7 +57,13 @@ for (const [name, code] of Object.entries(variants)) {
       rollupOptions: { output: { minify: true } },
     },
   })
-  const file = path.join(out, fs.readdirSync(out).find((f) => f.endsWith('.js')))
+  // ⚠ 匹配 `.js` **和** `.mjs`：产物扩展名由构建器决定，Vite 8/Rolldown 现在吐
+  // `lite.mjs`。只写 `.endsWith('.js')` 时 `find` 返回 `undefined`，下一行
+  // `path.join(undefined)` 直接 `ERR_INVALID_ARG_TYPE` —— 症状是"量体积的脚本崩了"，
+  // 看着像体积出了问题，其实只是没找到文件（2026-09-30 实测踩到）。
+  const built = fs.readdirSync(out).find((f) => f.endsWith('.js') || f.endsWith('.mjs'))
+  if (!built) throw new Error(`构建没有产出 js/mjs：${out} 里只有 ${fs.readdirSync(out).join(', ')}`)
+  const file = path.join(out, built)
   const buf = fs.readFileSync(file)
   rows.push([name, buf.length, gzipSync(buf, { level: 6 }).length])
 }

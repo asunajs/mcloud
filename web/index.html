@@ -27,6 +27,17 @@
         main.ts 里另有一道 `remove()` 兜底 —— 老浏览器没有 :has() 时也能收掉。
       */
       body:has(#app > *) #boot { display: none; }
+
+      /*
+        挂不上时的兜底（见下面那段脚本）：把转圈换成一句能读懂的话。
+        转圈本身没错，错的是**故障时还在转** —— chunk 404 / 断网 / 顶层抛错时，
+        用户只看到"卡住了"，控制台里那条真正的原因被完全挡住。
+      */
+      #boot .boot-fail { display: none; max-width: 20rem; text-align: center; line-height: 1.9; }
+      #boot .boot-fail b { font-size: 15px; }
+      #boot .boot-fail span { font-size: 13px; opacity: .75; }
+      body[data-boot-failed] #boot i { display: none; }
+      body[data-boot-failed] #boot .boot-fail { display: block; }
     </style>
   </head>
   <body class="bg-base-200">
@@ -49,6 +60,30 @@
     <div id="app"></div>
     <!-- 首屏占位：在 #app 之外，所以不影响任何 #app 子树比对/截图 -->
     <div id="boot" role="status" aria-label="加载中"><i></i></div>
+    <script>
+      /*
+       * 首屏兜底：应用没挂上时**别让它永远转圈**。
+       *
+       * 判据是 `#app` 有没有子节点 —— 一旦挂上，这些回调就什么都不做，
+       * 所以它不会误伤正常流程（`main.ts` 挂载后会把 #boot 整个 remove）。
+       * 三段触发源：脚本加载失败（chunk 404 / 断网，error 要 capture 阶段才收得到
+       * 资源错误）、运行时抛错、以及 12 秒超时（应用很小，正常远快于此）。
+       */
+      (function () {
+        function fail(why) {
+          if (document.querySelector('#app > *')) return
+          var boot = document.getElementById('boot')
+          if (!boot || boot.getAttribute('data-failed')) return
+          boot.setAttribute('data-failed', '1')
+          boot.setAttribute('aria-label', '加载失败')
+          document.body.setAttribute('data-boot-failed', '')
+          boot.innerHTML = '<div class="boot-fail"><b>页面没能加载</b><br><span>（' + why + '）<br>请刷新重试；若一直如此，看控制台里第一条报错</span></div>'
+        }
+        window.addEventListener('error', function () { fail('脚本加载失败') }, true)
+        window.addEventListener('unhandledrejection', function () { fail('脚本执行出错') })
+        setTimeout(function () { fail('加载超时') }, 12000)
+      })()
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

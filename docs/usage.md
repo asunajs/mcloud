@@ -25,8 +25,14 @@ shasum -a 256 -c ../mcloud-gost-v0.1.0-x86_64-unknown-linux-gnu.sha256
 ```powershell
 # Windows
 Expand-Archive mcloud-gost-v0.1.0-x86_64-pc-windows-msvc.zip -DestinationPath .
-Get-FileHash .\mcloud-gost-v0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+cd .\mcloud-gost-v0.1.0-x86_64-pc-windows-msvc
+Get-FileHash ..\mcloud-gost-v0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 ```
+
+⚠ **Linux 产物是动态链接的**：构建于 Ubuntu 24.04（glibc 2.39）+ 系统 OpenSSL。
+所以它要在 **glibc ≥ 2.39** 且装了 `libssl3` 的发行版上跑（Ubuntu 24.04+、Debian 13+、
+Fedora 40+ 一类）。更老的发行版（CentOS 7、Debian 11 等）请自行从源码构建 ——
+本仓不提供静态链接产物。
 
 ## 2. 起服务
 
@@ -62,6 +68,17 @@ MCLOUD_ADDR=0.0.0.0:3000 MCLOUD_DATA_DIR=/srv/mcloud ./mcloud-server
 
 ⚠ 用的是 `MCLOUD_DATA_DIR`，**不是** `MCLOUD_DATA`；`PORT` 环境变量会被忽略。
 
+### 如果你是来改前端的
+
+下载用户看到这里就够了。改前端要注意一处**默认值不一致**：
+`web/vite.config.ts` 的 dev 代理写死目标是 **38123**，而服务默认监听 **3000**
+⇒ 照着上面启动服务、再 `cd web && npm run dev`，页面能开但所有接口都会连不上（静默）。
+两者对齐即可：
+
+```bash
+MCLOUD_ADDR=127.0.0.1:38123 ./mcloud-server   # 让后端去迁就 dev 代理
+```
+
 ## 3. 平台注意事项（这三条都是踩过的）
 
 **Linux** —— 服务用系统 TLS（`native-tls` → OpenSSL），需要目标机有 `libssl`：
@@ -92,7 +109,7 @@ Defender / SmartScreen **可能误报**：弹窗里走「更多信息 → 仍要
 ```bash
 ./mcloud-cli                                   # 无参数就是打印用法
 ./mcloud-cli tasks                             # 列出可用任务
-./mcloud-cli login qr                          # 登录账号（qr / sms / app / password）
+./mcloud-cli login qr                          # 登录账号（qr / sms / app / password / device）
 ./mcloud-cli run live-room <账号> --body '{"codes":"口令甲 口令乙","listenSeconds":45}'
 ./mcloud-cli auth refresh --all                # 刷新凭据
 ./mcloud-cli pending                           # 查看还没清理的网盘产物

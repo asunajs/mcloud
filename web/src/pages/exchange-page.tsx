@@ -188,7 +188,7 @@ export const ExchangePage = () => {
                 }}
               >
                 {accounts.value.map((a) => (
-                  <option value={a.id}>{a.nickname || a.label || a.id}</option>
+                  <option key={a.id} value={a.id}>{a.nickname || a.label || a.id}</option>
                 ))}
               </select>
             </fieldset>
@@ -279,7 +279,7 @@ export const ExchangePage = () => {
       ) : (
         <div class="flex flex-col gap-3">
           {list.value.prizes.map((prize) => (
-            <div class="card bg-base-100 shadow-sm">
+            <div key={prize.prizeId} class="card bg-base-100 shadow-sm">
               <div class="card-body">
                 <div class="flex flex-wrap items-start justify-between gap-2">
                   <div class="flex min-w-0 flex-col gap-1">

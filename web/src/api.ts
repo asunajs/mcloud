@@ -136,12 +136,41 @@ function isAuthActionFailure(method: string, path: string): boolean {
   return false
 }
 
+/**
+ * 请求超时（毫秒）。
+ *
+ * ⚠ **为什么必须有。** 页面的 `busy` / `submitting` / `saving` 都是在
+ * `try/finally` 里复位的，而 `fetch` **默认没有超时**：请求悬挂时 `finally`
+ * 永远不跑 ⇒ 按钮永远是禁用态、界面看着"卡死"，用户只能刷页。
+ *
+ * 取 30 秒：上游偶尔确实慢（网盘列表、直播），要留够；但也不能无限等。
+ * SSE 不走这里 —— 它有自己的长连接与重连。
+ */
+const REQUEST_TIMEOUT_MS = 30_000
+
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    credentials: 'same-origin',
-    headers: init?.body ? { 'Content-Type': 'application/json' } : undefined,
-    ...init,
-  })
+  let response: Response
+  try {
+    response = await fetch(path, {
+      credentials: 'same-origin',
+      headers: init?.body ? { 'Content-Type': 'application/json' } : undefined,
+      ...init,
+      // 调用方自己传了 signal 就尊重它（那种情况由调用方负责超时）。
+      signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+  } catch (e) {
+    // fetch 超时只抛一个 DOMException（message 是英文的 "The operation was aborted"），
+    // 直接冒到界面等于没说清发生了什么，这里换成能读懂的一句。
+    if (e instanceof DOMException && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
+      throw new ApiError(
+        0,
+        e.name === 'TimeoutError'
+          ? `请求超时（${REQUEST_TIMEOUT_MS / 1000} 秒没有响应），请重试`
+          : '请求已取消',
+      )
+    }
+    throw e
+  }
 
   const text = await response.text()
   let data: unknown = null

@@ -19,6 +19,7 @@
  */
 
 import { onMounted, onUnmounted, ref } from 'lite'
+import { accountName } from '../account-names'
 import {
   deleteSchedule,
   listCapabilities,
@@ -325,7 +326,7 @@ export const SchedulesPage = () => {
         任务 <code class="break-all">{s.task}</code> · 表达式 <code>{s.expr}</code> · {s.timezone}
       </div>
       <div class="text-xs opacity-70">
-        账号：{s.accounts.length === 0 ? '全部已启用账号' : s.accounts.join('、')}
+        账号：{s.accounts.length === 0 ? '全部已启用账号' : s.accounts.map(accountName).join('、')}
       </div>
       <div class="text-xs">
         <span class="opacity-60">下次执行：</span>
@@ -491,7 +492,7 @@ export const SchedulesPage = () => {
       </fieldset>
 
       <fieldset class="fieldset">
-        <legend class="fieldset-legend">账号（手机号，逗号分隔；留空 = 全部已启用账号）</legend>
+        <legend class="fieldset-legend">账号（账号 id，逗号分隔；留空 = 全部已启用账号）</legend>
         <input
           class="input w-full"
           placeholder="留空表示对所有已启用账号执行"
@@ -500,6 +501,14 @@ export const SchedulesPage = () => {
             fAccounts.value = (e.target as HTMLInputElement).value
           }}
         />
+        {/*
+          ⚠ 这里**必须**写"账号 id"，不能写"手机号"（2026-09-30 修正）。
+          后端拿这串**原样**当 `AccountId` 比对，而 AccountId 是手机号的 SHA-256 前 16 位
+          （`0f6050105ab111f4`）。原文案写着"手机号"，于是照着填的人得到的是
+          **匹配 0 个账号 ⇒ 定时任务静默不跑**（不报错、不提示，最难查的一类）。
+          列表里显示的名字也会误导（那是 `accountName()` 渲染的昵称/掩码，不是可填的值），
+          所以两处一起改。
+        */}
       </fieldset>
 
       <fieldset class="fieldset">
