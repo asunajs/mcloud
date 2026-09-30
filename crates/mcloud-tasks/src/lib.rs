@@ -5,6 +5,7 @@
 
 pub mod app_task;
 pub mod app_task_matrix;
+pub mod cloud_phone_redpack;
 pub mod exchange;
 pub mod fun_ai;
 pub mod live_room;
@@ -60,6 +61,20 @@ pub use login::{
 /// 由它把"上报设备指纹换 id"那一套做成 `DeviceIdFn` 注进来。
 /// 在那之前，本任务的定位是"判定层与编排层已经能跑、能测"，
 /// 不是"能无人值守地花豆"。
+///
+/// # 红包派对 `cloud-phone-redpack`（**今天只读**）
+///
+/// 它与上面几条**性质不同**：签到族 / 小红花族共用 `H5Client` 的网盘侧凭证，
+/// 而这一条要**自己换一套票** —— `GET .../cloud/userdomain/v2/querySpecToken`
+/// （`targetSourceId=001216`）拿 SSO 票，再用它换活动站的 `token`。
+/// 网盘 `authorization` / H5 `jwttoken` / 活动站 `token` 是三套东西，
+/// **不能互相顶替**（协议层 `cloud_phone_redpack` 模块开头有对照表）。
+///
+/// ⚠ 这一趟**四枪全是只读**：换票两枪 + 任务表 + 余额。写入侧那 7 条
+/// （`userSign` / `userCompleteTask` / …）的判据在协议层已落定，但接进
+/// 编排层是**另一个**可验证单元（每条写都要先按 `userStatus` 判定该不该发、
+/// 同一 `taskCode` 一次运行最多发一次）—— 所以 title 与 `summary_line`
+/// 都明写「盘点 / 只读」：不做的事不假装做。
 pub fn register_all(registry: &mut Registry) -> Result<(), String> {
     let tasks: Vec<Arc<dyn Task>> = vec![
         Arc::new(signin::SignTask),
@@ -77,6 +92,7 @@ pub fn register_all(registry: &mut Registry) -> Result<(), String> {
         Arc::new(fun_ai::FunaiTask),
         Arc::new(notice::NoticeTask),
         Arc::new(play_ai::PlayAiTask),
+        Arc::new(cloud_phone_redpack::CloudPhoneRedpackTask::production()),
         Arc::new(app_task_matrix::AppTaskMatrixTask),
         Arc::new(app_task::AppTaskTask::new()),
         Arc::new(task_expansion::TaskExpansionTask::new()),
