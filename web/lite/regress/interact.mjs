@@ -117,6 +117,13 @@ const HELPERS = `(() => {
   };
   window.__stepOrder = () => window.__stepRows().map((d) => d.querySelector('select').value).join(',');
   window.__stepBadges = () => window.__stepRows().map((d) => d.querySelector('.badge').textContent.replace(/\\s+/g, '')).join(',');
+  /**
+   * 某个弹窗里"客户端形态"那几个按钮有几个。
+   * ⚠ 弹窗里还有一排 join（方式 tab），所以按**文字**过滤，
+   * 不能只数 .join button。
+   */
+  window.__platformBtns = (id) => [...document.querySelectorAll('#' + id + ' .join button')]
+    .filter((b) => ['Windows', 'macOS'].includes(b.textContent.trim())).length;
   window.__stepDisabled = (n, text) => {
     const rows = window.__stepRows();
     const b = [...rows[n].querySelectorAll('button')].find((x) => x.textContent.trim() === text);
@@ -151,16 +158,31 @@ const STEPS = {
     { name: '打开登出确认框', do: clickSel('[aria-label="退出登录"]'), check: eq('[...document.querySelectorAll("dialog[open]")].map((d) => d.id).join(",")', 'confirm-logout'), changed: true },
     { name: '取消（关掉确认框）', do: clickText('#confirm-logout .modal-action button', '取消'), check: eq('document.querySelectorAll("dialog[open]").length', 0), changed: true },
 
-    // 账号页：四种登录方式之间来回切（条件分支 + 4 项列表），并在出现的输入框里打字。
-    // ⚠ "短信/账号密码"那两个框**只有切到该方式才存在** —— 这正是在测条件分支换内容。
+    // 账号页：**添加账号收在弹窗里**（2026-10-01 重构）—— 先开弹窗，再在弹窗内
+    // 切方式、打字。这几条同时盯住"弹窗能开、能关"这条路，以及新的「凭据」方式
+    // （pc 前缀要选客户端形态、mobile 前缀不要）。
+    // ⚠ 上面那句不是形式：重构前这几步是在**页面常驻表单**里点的，改成弹窗后
+    // 若还按老选择器点，就会点在 `dialog:not([open])` 里的不可见元素上 —— 用例照样
+    // "过"，但它验的东西已经不是用户能做的事了。
     { name: '切到账号页', do: go('#/accounts'), check: eq('location.hash', '#/accounts') },
-    { name: '账号页：点「短信」方式', do: clickText('button', '短信'), check: eq('!!document.querySelector("input[type=tel]")', true), changed: true },
-    { name: '账号页：输入手机号', do: typeIn('input[type="tel"]', '19900000001'), check: eq('document.querySelector("input[type=tel]").value', '19900000001') },
-    { name: '账号页：改手机号', do: typeIn('input[type="tel"]', '19900000002'), check: eq('document.querySelector("input[type=tel]").value', '19900000002') },
-    { name: '账号页：点「账号密码」方式', do: clickText('button', '账号密码'), check: eq('!!document.querySelector("input[type=password]")', true), changed: true },
-    { name: '账号页：输入用户名', do: typeIn('input[type="text"].input', 'someone'), check: eq('document.querySelector("input[type=text].input").value', 'someone') },
-    { name: '账号页：输入口令', do: typeIn('input[type="password"]', 'pw-123456'), check: eq('document.querySelector("input[type=password]").value', 'pw-123456') },
-    { name: '账号页：点回「扫码」方式', do: clickText('button', '扫码'), changed: true },
+    { name: '账号页：开「添加账号」弹窗', do: clickText('#app button', '添加账号'), check: eq('[...document.querySelectorAll("dialog[open]")].map((d) => d.id).join(",")', 'add-account'), changed: true },
+    { name: '账号页：弹窗里点「短信」方式', do: clickText('#add-account button', '短信'), check: eq('!!document.querySelector("#add-account input[type=tel]")', true), changed: true },
+    { name: '账号页：输入手机号', do: typeIn('#add-account input[type="tel"]', '19900000001'), check: eq('document.querySelector("#add-account input[type=tel]").value', '19900000001') },
+    { name: '账号页：改手机号', do: typeIn('#add-account input[type="tel"]', '19900000002'), check: eq('document.querySelector("#add-account input[type=tel]").value', '19900000002') },
+    { name: '账号页：点「账号密码」方式', do: clickText('#add-account button', '账号密码'), check: eq('!!document.querySelector("#add-account input[type=password]")', true), changed: true },
+    { name: '账号页：输入用户名', do: typeIn('#add-account input[type="text"].input', 'someone'), check: eq('document.querySelector("#add-account input[type=text].input").value', 'someone') },
+    { name: '账号页：输入口令', do: typeIn('#add-account input[type="password"]', 'pw-123456'), check: eq('document.querySelector("#add-account input[type=password]").value', 'pw-123456') },
+    { name: '账号页：切到「凭据」方式', do: clickText('#add-account button', '凭据'), check: eq('!!document.querySelector("#add-account textarea")', true), changed: true },
+    { name: '账号页：pc 凭据 ⇒ 有形态选择', do: typeIn('#add-account textarea', 'Basic cGM6MTk5MDAwMDAwMDE6YXxifGN8MTc5MzAwMDAwMDAwMHxl'), check: eq('window.__platformBtns("add-account")', 2), changed: true },
+    { name: '账号页：mobile 凭据 ⇒ 无形态选择', do: typeIn('#add-account textarea', 'Basic bW9iaWxlOjE5OTAwMDAwMDAxOmF8YnxjfDE3OTMwMDAwMDAwMDB8ZQ=='), check: eq('window.__platformBtns("add-account")', 0), changed: true },
+    { name: '账号页：关掉添加弹窗', do: 'document.getElementById("add-account").close()', check: eq('document.querySelectorAll("dialog[open]").length', 0), changed: true },
+
+    // 编辑弹窗：昵称/设备号预填，凭据框**空**（空 = 不改 —— 凭据从不回显）
+    { name: '账号页：点某行的「编辑」', do: clickText('#app ul li.card button', '编辑'), check: eq('[...document.querySelectorAll("dialog[open]")].map((d) => d.id).join(",")', 'edit-account'), changed: true },
+    { name: '账号页：编辑弹窗预填昵称', do: null, check: eq('document.querySelector("#edit-account input[type=text]").value', '主力号') },
+    { name: '账号页：编辑弹窗的凭据框是空的', do: null, check: eq('document.querySelector("#edit-account textarea").value', '') },
+    { name: '账号页：改昵称', do: typeIn('#edit-account input[type="text"]', '改个名'), check: eq('document.querySelector("#edit-account input[type=text]").value', '改个名') },
+    { name: '账号页：关掉编辑弹窗', do: 'document.getElementById("edit-account").close()', check: eq('document.querySelectorAll("dialog[open]").length', 0), changed: true },
     { name: '账号页：点某行的「移除」', do: clickText('button', '移除'), check: eq('[...document.querySelectorAll("dialog[open]")].map((d) => d.id).join(",")', 'confirm-delete-account'), changed: true },
     { name: '账号页：取消移除（有数据的确认弹窗）', do: clickText('#confirm-delete-account .modal-action button', '取消'), check: eq('document.querySelectorAll("dialog[open]").length', 0), changed: true },
     // 确认删除 ⇒ DELETE 打到 fixture 的 404 ⇒ 走 `showError` 那条反馈路径

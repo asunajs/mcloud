@@ -488,7 +488,19 @@ fn user_domain_id_from(user_info: &Value) -> Option<String> {
 }
 
 /// 从已拼好的 auth 串构造账号。
-fn account_from_auth(
+///
+/// # 为什么是 `pub`（2026-10-01）
+///
+/// WebUI 的「粘贴凭据添加账号」要的正是这件事：**手上只有一条 auth**，
+/// 没有登录响应可依。放在这里而不是让 server 层自己拼，是因为
+/// 「auth 串 → `Account`」只该有**一处**知道（`parse_auth` 的分段规则 +
+/// 账号主键的算法），复制一份迟早分叉。
+///
+/// ⚠ `user_domain_id` 只有**登录响应**里才有（`userInfo.userDomainId`），
+/// 从一串 auth 里反推不出来 ⇒ 导入的账号这里是 `None`，于是
+/// **刷新凭据会明确报"缺用户域"**（见 [`user_domain_id_from`]）。
+/// 这是如实的能力边界，不是 bug：要能刷新，就得走一次真正的登录。
+pub fn account_from_auth(
     auth: &str,
     platform: Option<PcPlatform>,
     device_id: impl Into<String>,

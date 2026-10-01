@@ -201,11 +201,16 @@ cd web && npm run build                  # 产物在 web/dist
 GET  /api/version
 GET  /api/health
 GET  /api/capabilities          任务清单
+GET  /api/accounts              云盘账号列表（**不含凭据**）
+POST /api/accounts              用一条凭据建账号（同号已存在则只换凭据）
+PATCH /api/accounts/{id}        改昵称 / 设备号 / 凭据（部分更新）
 GET  /api/runs                  最近运行
 POST /api/runs                  启动运行 {task, account, body}
 GET  /api/runs/{id}             单次运行详情
 GET  /api/runs/{id}/events      ★ SSE 事件流
 ```
+
+> 完整的路由表（含登录、设置、兑换）在 `docs/architecture.md`「HTTP 接口」一节。
 
 SSE 事件示例：
 

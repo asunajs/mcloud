@@ -1,4 +1,4 @@
-//! 云盘账号管理（列表 / 删除 / 每账号设置）。
+//! 云盘账号管理（列表 / 导入凭据 / 编辑 / 删除 / 每账号设置）。
 //!
 //! # ⚠ 绝不能把 `Account` 直接序列化出去
 //!
@@ -15,8 +15,8 @@
 use axum::extract::{Extension, Path, State};
 use axum::Json;
 use mcloud_core::account::AccountSettingsDto;
-use mcloud_core::{Account, AccountId};
-use serde::Serialize;
+use mcloud_core::{Account, AccountId, AuthInfo, DeviceId, PcPlatform};
+use serde::{Deserialize, Serialize};
 
 use crate::auth_gate::CurrentUser;
 use crate::error::{ApiError, ApiResult};
@@ -136,6 +136,278 @@ pub async fn remove(
         ))));
     }
     Ok(Json(serde_json::json!({ "removed": true })))
+}
+
+/// `POST /api/accounts` —— 用**一条凭据**建立或更新账号。
+///
+/// 这是「手上只有 auth」那条路：不走登录（扫码/短信/账密），直接把一条
+/// `base64("<平台>:<手机号>:<token>")` 交进来。账号主键是**手机号的哈希**，
+/// 所以同一条凭据重复导入会落到同一个账号上。
+///
+/// # 为什么"建立**或**更新"，而不是撞了就 409
+///
+/// 用户手上那条凭据是**会过期**的东西：过期后他拿到的还是一条 auth，
+/// 想做的还是"把这个号的凭据换掉"。若 POST 在已存在时回 409，他就得先知道
+/// 账号主键（一串哈希）、再去猜该用哪个端点 —— 而他要表达的意思从头到尾没变。
+/// 于是这里收敛到同一个动作，并在响应里**明确**回 `created`，
+/// 让界面能说清"这是新建"还是"这是换凭据"。
+///
+/// # ⚠ 已存在的账号：只换凭据，**不动**昵称与设置
+///
+/// 昵称、每账号设置（任务开关、推送渠道）是用户**自己配的**，与凭据无关。
+/// 若这里整行覆盖，一次"换凭据"就会顺手抹掉它们（而且悄无声息）——
+/// 那是本仓最忌讳的一类失效。设备号同理保留：它是登录时定的，重新导入
+/// 一条别人的凭据不该把它换掉。
+pub async fn import(
+    State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
+    Json(body): Json<ImportAccountRequest>,
+) -> ApiResult<ImportAccountResponse> {
+    // 先把凭据解析干净：解不出来就不该在库里留下任何半成品。
+    let parsed = parse_credential(&body.auth)?;
+    let platform = platform_for(&parsed.platform, body.platform.as_deref())?;
+    let account_id = AccountId::new(mcloud_upstream::account_id_for(&parsed.phone));
+
+    let existing = state.handle.store.account_for(&cur.0, &account_id).await?;
+    let created = existing.is_none();
+    let mut account = match existing {
+        Some(a) => a,
+        None => {
+            // 新账号的设备号沿用"这台机器的登记值"——与四条登录路径同一个来源，
+            // 不另造一个（否则同一个用户的两个账号会带着两套互不相干的设备身份）。
+            let device_id = state
+                .handle
+                .login
+                .pc_device_id()
+                .await
+                .map_err(ApiError::from)?;
+            let mut fresh =
+                mcloud_tasks::login::account_from_auth(&body.auth, platform, device_id, None)
+                    .map_err(ApiError::from)?;
+            fresh.nickname = normalize_optional_nickname(body.nickname.as_deref())?;
+            fresh
+        }
+    };
+    // 新建那支上面已经解析过一次（`account_from_auth` 内部就是它）；已存在那支
+    // 在这里把凭据换掉 —— **这是本端点对已存在账号唯一会改的字段**。
+    account.auth = parsed;
+    if platform.is_some() {
+        account.pc_platform = platform;
+    }
+    // 归属在 server 层补写（与登录同一条：业务层不知道"当前 WebUI 会话是谁"）。
+    account.owner = Some(cur.0.clone());
+    state.handle.store.save_account(&account).await?;
+    // 只记"谁导入了哪个账号"，**不记凭据**（那是能冒充用户的完整凭据）。
+    tracing::info!(account = %account.id, user = %cur.0, created, "账号凭据已导入");
+    Ok(Json(ImportAccountResponse {
+        account: AccountSummary::from(account),
+        created,
+    }))
+}
+
+/// `PATCH /api/accounts/{id}` —— 改昵称 / 设备号 / 凭据。
+///
+/// # 为什么这里是 **PATCH**（部分更新），而设置那条是"整体替换"
+///
+/// 因为要改的字段里有一个**凭据**，而凭据**从不发给客户端**
+/// （[`AccountSummary`] 刻意没有 `auth`，见文件头）。于是"读出来、改一处、
+/// 写回去"这条路**根本不存在**：客户端拿不到 auth，就回填不了，
+/// 整体替换会逼它在每次改昵称时重新粘贴一遍凭据。
+/// 这是能力边界决定的形状，不是口味问题。
+///
+/// # 各字段的"缺席"语义（都不靠猜）
+///
+/// | 字段 | 缺席 / `null` | 给了 |
+/// |---|---|---|
+/// | `nickname` | 不改 | 空串 ⇒ **清空**（界面回落成掩码手机号）；否则去空白后最多 32 字 |
+/// | `deviceId` | 不改 | 非空、无空白、≤64 字符 |
+/// | `auth` | 不改 | 必须能解析（解不出 ⇒ 400）；`platform` 随它一起更新 |
+///
+/// # ⚠ 先校验完，再落笔
+///
+/// 半套更新（昵称改了、凭据却是坏的）会让"哪部分生效了"变成要读代码才知道的事。
+/// 所以下面先把三个字段**全部**算成"要不要写、写成什么"，最后才动 `account`。
+pub async fn update(
+    State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateAccountRequest>,
+) -> ApiResult<AccountSummary> {
+    let account_id = AccountId::new(id);
+    let mut account = owned_account(&state, &cur, &account_id).await?;
+
+    // ── 校验与归一化（此时一个字节都还没写进 account）────────────────
+    // `nickname` 给了就是"要写"（空串 ⇒ 写 `None` = 清空）；**没给**才是"不改"。
+    // 两者在这一层必须分开记：归一化的结果 `None` 同时意味"清空"。
+    let nickname_given = body.nickname.is_some();
+    let next_nickname = normalize_optional_nickname(body.nickname.as_deref())?;
+    let next_device = body
+        .device_id
+        .as_deref()
+        .map(validate_device_id)
+        .transpose()?
+        .map(DeviceId);
+    let next_auth = match body.auth.as_deref() {
+        None => None,
+        Some(raw) => {
+            let parsed = parse_credential(raw)?;
+            let platform = platform_for(&parsed.platform, body.platform.as_deref())?;
+            Some((parsed, platform))
+        }
+    };
+
+    // ── 落笔 ────────────────────────────────────────────────────────
+    if nickname_given {
+        account.nickname = next_nickname;
+    }
+    if let Some(device) = next_device {
+        account.device_id = device;
+    }
+    if let Some((parsed, platform)) = next_auth {
+        account.auth = parsed;
+        // 形态**跟着凭据走**：`mobile` 凭据 ⇒ `None`。原来可能是 PC 账号，
+        // 换过 App 凭据后还按 windows 发头就是**用错身份**
+        //（前缀与 UA/设备头必须同源，见 `PcClient`）。
+        account.pc_platform = platform;
+    }
+    state.handle.store.save_account(&account).await?;
+    tracing::info!(account = %account.id, user = %cur.0, "账号已更新");
+    Ok(Json(AccountSummary::from(account)))
+}
+
+/// `POST /api/accounts` 的请求体。
+#[derive(Deserialize)]
+pub struct ImportAccountRequest {
+    /// 原始凭据：`Basic base64("<平台>:<手机号>:<token>")`，`Basic ` 前缀可有可无。
+    /// 解析规则见 `mcloud_upstream::auth::parse_auth`（22 条黄金向量钉着）。
+    pub auth: String,
+    /// PC 客户端形态（`windows` / `macos`）。**只在凭据前缀是 `pc` 时用得上**。
+    pub platform: Option<String>,
+    /// 本地别名。不给就留空（界面回落成掩码手机号）。
+    pub nickname: Option<String>,
+}
+
+/// `POST /api/accounts` 的响应。
+#[derive(Serialize)]
+pub struct ImportAccountResponse {
+    pub account: AccountSummary,
+    /// `true` = 新建；`false` = 这个手机号**已有账号**，本次只换了凭据
+    /// （昵称 / 设置 / 设备号都保留）。界面据此说清发生了什么。
+    pub created: bool,
+}
+
+/// `PATCH /api/accounts/{id}` 的请求体。字段语义见 [`update`] 的表格。
+#[derive(Deserialize)]
+pub struct UpdateAccountRequest {
+    pub nickname: Option<String>,
+    #[serde(rename = "deviceId")]
+    pub device_id: Option<String>,
+    pub auth: Option<String>,
+    pub platform: Option<String>,
+}
+
+/// 解析一条原始凭据。解不出来时给**能照着改**的话，不是一句 "invalid input"。
+fn parse_credential(raw: &str) -> Result<AuthInfo, ApiError> {
+    let parsed = mcloud_upstream::auth::parse_auth(raw).ok_or_else(|| {
+        ApiError(mcloud_core::Error::Config(
+            "凭据解不出来：应当是 base64(\"<平台>:<手机号>:<token>\")，`Basic ` 前缀可有可无"
+                .into(),
+        ))
+    })?;
+    // 没有手机号就没有账号主键（主键是手机号的哈希）⇒ 这条凭据无处可落。
+    if parsed.phone.is_empty() {
+        return Err(ApiError(mcloud_core::Error::Config(
+            "凭据里没有手机号，无法定位账号".into(),
+        )));
+    }
+    Ok(parsed)
+}
+
+/// 由凭据前缀定"这条凭据是哪种客户端"，并校验调用方给的形态。
+///
+/// * `pc` ⇒ **必须**给出形态：它决定后续每一次请求的 UA 与设备头，而凭据本身
+///   区分不出来（两种平台的 auth 前缀都是 `pc`）—— 猜错就会一直用错身份发请求。
+/// * `mobile` ⇒ 形态为 `None`（App 端没有"PC 形态"这一说）。
+/// * 别的前缀 ⇒ 400。**不认识的客户端形态不该"先存下来再报错"**：存下来之后
+///   每一次请求都会带着它，而错误要等到上游拒绝才浮现。
+fn platform_for(prefix: &str, requested: Option<&str>) -> Result<Option<PcPlatform>, ApiError> {
+    use mcloud_upstream::auth::{APP_AUTH_PREFIX, PC_AUTH_PREFIX};
+    match prefix {
+        PC_AUTH_PREFIX => {
+            let text = requested.ok_or_else(|| {
+                ApiError(mcloud_core::Error::Config(
+                    "PC 凭据必须指定客户端形态（windows / macos）".into(),
+                ))
+            })?;
+            Ok(Some(
+                mcloud_app::parse_platform(text).map_err(ApiError::from)?,
+            ))
+        }
+        APP_AUTH_PREFIX => Ok(None),
+        other => Err(ApiError(mcloud_core::Error::Config(format!(
+            "不认识的凭据前缀 `{other}`：本仓只支持 `{PC_AUTH_PREFIX}` 与 `{APP_AUTH_PREFIX}`"
+        )))),
+    }
+}
+
+/// [`normalize_nickname`] 的"给了才归一化"版本：`None`（字段缺席）原样回 `None`。
+///
+/// 单独一个函数是为了让"缺席 = 不改"与"给了空串 = 清空"这两件事在调用点上
+/// 各自只出现一次 —— 两个 handler 都要这套判断，抄两遍就会有一边漏。
+fn normalize_optional_nickname(text: Option<&str>) -> Result<Option<String>, ApiError> {
+    match text {
+        Some(t) => normalize_nickname(t),
+        None => Ok(None),
+    }
+}
+
+/// 归一化昵称：去首尾空白；空 ⇒ `None`（回到掩码手机号）。
+///
+/// 上限 32 字是**有意**的：这一格会进侧栏、日志与通知载荷，长起来会把布局顶破。
+/// 与其在界面上截断（"存的和看的不一样"），不如在这里明确拒绝。
+/// 控制字符同样拒绝 —— 换行会把日志按行撕开。
+fn normalize_nickname(text: &str) -> Result<Option<String>, ApiError> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > 32 {
+        return Err(ApiError(mcloud_core::Error::Config(
+            "昵称最长 32 个字".into(),
+        )));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(ApiError(mcloud_core::Error::Config(
+            "昵称里不能有换行/制表符这类控制字符".into(),
+        )));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+/// 设备号的校验：**只挡明显坏掉的**（空、含空白、过长），不校验形态。
+///
+/// 上游的设备号有几种形状（PC 的是 `<32 位十六进制>-ENDIN`，App 端另一套），
+/// 历史数据里也见过别的形态 ⇒ 严格校验会把"能用但形状少见"的设备号挡在门外，
+/// 那是拿功能换整洁。而真正坏掉的（粘贴时带进来的换行/空格）必须挡住：
+/// 它会让**每一次**请求都带上一个畸形头，且不报错。
+fn validate_device_id(text: &str) -> Result<String, ApiError> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError(mcloud_core::Error::Config(
+            "设备号不能为空".into(),
+        )));
+    }
+    if trimmed.chars().count() > 64 {
+        return Err(ApiError(mcloud_core::Error::Config(
+            "设备号过长（最多 64 个字符）".into(),
+        )));
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return Err(ApiError(mcloud_core::Error::Config(
+            "设备号里不能有空白字符（多半是粘贴时带进来的）".into(),
+        )));
+    }
+    Ok(trimmed.to_string())
 }
 
 /// 取**当前用户**的那个账号；拿不到（账号不存在 **或** 不是自己的）⇒ 404。

@@ -1070,3 +1070,339 @@ async fn sse_streams_are_never_compressed() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── 账号导入与编辑 ──────────────────────────────────────────────────────
+//
+// 这两条路是 WebUI「粘贴凭据添加账号」与「编辑账号」的全部后端：
+// `POST /api/accounts`（建账号 / 换凭据）与 `PATCH /api/accounts/{id}`
+// （改昵称 / 设备号 / 凭据）。重点钉三件容易悄悄错的事：
+//
+// 1. **已存在的账号只换凭据** —— 昵称、每账号设置、设备号不能被顺手抹掉；
+// 2. **先校验完再落笔** —— 半套更新（昵称改了、凭据却是坏的）不该存在；
+// 3. **凭据从不回显** —— 响应里出现 auth/token 就是泄了一次凭据。
+
+/// 拼一条**真能解析**的凭据：用上游自己的拼装函数，不手搓 base64
+/// （手搓的"看起来对"的串，恰恰测不出 `parse_auth` 的真实行为）。
+fn auth_string(prefix: &str, phone: &str, expire_ms: i64) -> String {
+    mcloud_upstream::auth::format_auth(prefix, phone, &format!("a|b|c|{expire_ms}|e"))
+        .expect("拼 auth 串")
+}
+
+fn patch_json(uri: &str, body: &serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("PATCH")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(body).unwrap()))
+        .expect("请求应可构造")
+}
+
+fn json_body(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("响应不是 JSON：{e}；原文：{text}"))
+}
+
+/// 造一条**主键与路由算法一致**的账号（手机号哈希）。
+///
+/// ⚠ 不能用上面那个 `account()`：它的 id 是老式「id = 手机号」，
+/// 而 `POST/PATCH` 算出来的是手机号哈希 —— 两者在库里是**两个不同的账号**，
+/// 预置成前者会让用例去改一个不存在的 id（这一版就这么错过一次）。
+fn seed_for(phone: &str) -> Account {
+    let mut a = account(phone);
+    a.id = mcloud_core::AccountId::new(mcloud_upstream::account_id_for(phone));
+    a
+}
+
+/// 把一条账号直接塞进库（带归属），给"已存在"那几条用例当前置条件。
+fn seed_account(handle: &Arc<AppHandle>, mut account: Account) {
+    account.owner = Some(mcloud_core::UserId::new("test-user"));
+    let store = Arc::clone(&handle.store);
+    futures::executor::block_on(store.save_account(&account)).expect("落库");
+}
+
+#[tokio::test]
+async fn import_credential_creates_an_account() {
+    let (handle, dir) = test_app("acct-import-create");
+    let expire = 1_893_456_000_000i64;
+    let phone = "19900000001";
+    let body = serde_json::json!({
+        "auth": auth_string("pc", phone, expire),
+        "platform": "macos",
+        // 前后空白应当被归一化掉，而不是原样存进侧栏
+        "nickname": "  主力号  ",
+    });
+
+    let (status, text) = send(
+        authed_app(Arc::clone(&handle)),
+        post_json("/api/accounts", &body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "实际：{text}");
+    let v = json_body(&text);
+    assert_eq!(v["created"], true, "第一次导入应当是新建");
+    assert_eq!(v["account"]["nickname"], "主力号");
+    assert_eq!(v["account"]["pc_platform"], "macos");
+    assert_eq!(v["account"]["expire"], expire);
+    assert_eq!(
+        v["account"]["id"],
+        mcloud_upstream::account_id_for(phone),
+        "主键是手机号哈希"
+    );
+    assert_eq!(v["account"]["label"], "19****01", "界面用 label，不是哈希");
+    assert!(
+        !text.contains("Basic ") && !text.contains("a|b|c|"),
+        "响应里不能出现凭据：{text}"
+    );
+
+    let store = Arc::clone(&handle.store);
+    let id = mcloud_core::AccountId::new(mcloud_upstream::account_id_for(phone));
+    let saved = futures::executor::block_on(store.account(&id))
+        .expect("读库")
+        .expect("账号应已落库");
+    assert_eq!(saved.auth.expire, expire);
+    assert_eq!(
+        saved.owner.as_ref().map(|o| o.to_string()),
+        Some("test-user".to_string()),
+        "归属要补写成当前会话用户（否则多用户实例里谁都看不到）"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn import_credential_on_existing_account_keeps_everything_but_the_credential() {
+    let (handle, dir) = test_app("acct-import-existing");
+    let phone = "19900000002";
+    let id_text = mcloud_upstream::account_id_for(phone);
+
+    // 前置：这个号已在库里，且用户配过昵称 / 设置 / 设备号
+    let mut existing = seed_for(phone);
+    existing.nickname = Some("老号".into());
+    existing.device_id = DeviceId("keep-me-ENDIN".into());
+    existing.settings.backup_wait_secs = 42;
+    seed_account(&handle, existing);
+
+    let new_expire = 1_900_000_000_000i64;
+    let body = serde_json::json!({
+        "auth": auth_string("pc", phone, new_expire),
+        "platform": "windows",
+        // ⚠ 昵称**不该**被这次导入改掉：这是"换凭据"，不是"改账号"
+        "nickname": "不该生效",
+    });
+    let (status, text) = send(
+        authed_app(Arc::clone(&handle)),
+        post_json("/api/accounts", &body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "实际：{text}");
+    let v = json_body(&text);
+    assert_eq!(v["created"], false, "同一手机号第二次导入是「换凭据」");
+
+    let store = Arc::clone(&handle.store);
+    let saved = futures::executor::block_on(store.account(&mcloud_core::AccountId::new(id_text)))
+        .expect("读库")
+        .expect("账号还在");
+    assert_eq!(saved.auth.expire, new_expire, "凭据要换掉");
+    assert_eq!(
+        saved.nickname.as_deref(),
+        Some("老号"),
+        "昵称不能被导入抹掉"
+    );
+    assert_eq!(
+        saved.settings.backup_wait_secs, 42,
+        "每账号设置不能被导入抹掉"
+    );
+    assert_eq!(
+        saved.device_id.as_str(),
+        "keep-me-ENDIN",
+        "设备号是登录时定的，换凭据不该动它"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn import_credential_rejects_unusable_input() {
+    let (handle, dir) = test_app("acct-import-bad");
+
+    // 解不出来的串 ⇒ 400，且**什么都别落库**
+    let (status, text) = send(
+        authed_app(Arc::clone(&handle)),
+        post_json(
+            "/api/accounts",
+            &serde_json::json!({ "auth": "这不是 base64" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "实际：{text}");
+
+    // PC 凭据不给客户端形态 ⇒ 400（形态决定后续每一次请求的 UA，猜不得）
+    let phone = "19900000003";
+    let (status, text) = send(
+        authed_app(Arc::clone(&handle)),
+        post_json(
+            "/api/accounts",
+            &serde_json::json!({ "auth": auth_string("pc", phone, 1_900_000_000_000i64) }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "实际：{text}");
+
+    // App 凭据不需要形态 ⇒ 通过，且 `pc_platform` 必须是 null
+    let (status, text) = send(
+        authed_app(Arc::clone(&handle)),
+        post_json(
+            "/api/accounts",
+            &serde_json::json!({ "auth": auth_string("mobile", phone, 1_900_000_000_000i64) }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "实际：{text}");
+    assert!(json_body(&text)["account"]["pc_platform"].is_null());
+
+    let store = Arc::clone(&handle.store);
+    let all = futures::executor::block_on(store.accounts()).expect("读库");
+    assert_eq!(all.len(), 1, "两次失败的导入不该留下账号：{all:#?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn update_account_changes_nickname_and_device() {
+    let (handle, dir) = test_app("acct-update");
+    let phone = "19900000004";
+    let id_text = mcloud_upstream::account_id_for(phone);
+    seed_account(&handle, seed_for(phone));
+
+    let uri = format!("/api/accounts/{id_text}");
+    let (status, text) = send(
+        authed_app(Arc::clone(&handle)),
+        patch_json(
+            &uri,
+            &serde_json::json!({ "nickname": "副号", "deviceId": "  new-dev-ENDIN  " }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "实际：{text}");
+    assert_eq!(json_body(&text)["nickname"], "副号");
+
+    let store = Arc::clone(&handle.store);
+    let saved = futures::executor::block_on(store.account(&mcloud_core::AccountId::new(&id_text)))
+        .expect("读库")
+        .expect("账号还在");
+    assert_eq!(saved.nickname.as_deref(), Some("副号"));
+    assert_eq!(saved.device_id.as_str(), "new-dev-ENDIN", "设备号要去空白");
+
+    // 空串 = 清空昵称（回到掩码手机号），而不是"存一个空名字"
+    let (status, _) = send(
+        authed_app(Arc::clone(&handle)),
+        patch_json(&uri, &serde_json::json!({ "nickname": "" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let saved = futures::executor::block_on(store.account(&mcloud_core::AccountId::new(&id_text)))
+        .expect("读库")
+        .expect("账号还在");
+    assert_eq!(saved.nickname, None, "空串应当清成 None");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn update_account_validates_before_writing_anything() {
+    let (handle, dir) = test_app("acct-update-atomic");
+    let phone = "19900000005";
+    let id_text = mcloud_upstream::account_id_for(phone);
+    let mut seeded = seed_for(phone);
+    seeded.nickname = Some("原名".into());
+    let old_expire = seeded.auth.expire;
+    seed_account(&handle, seeded);
+
+    // 昵称合法、凭据非法 ⇒ 400，且**昵称也不能变**（半套更新不该存在）
+    let uri = format!("/api/accounts/{id_text}");
+    let (status, text) = send(
+        authed_app(Arc::clone(&handle)),
+        patch_json(
+            &uri,
+            &serde_json::json!({ "nickname": "改过了", "auth": "坏的凭据", "platform": "windows" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "实际：{text}");
+
+    let store = Arc::clone(&handle.store);
+    let saved = futures::executor::block_on(store.account(&mcloud_core::AccountId::new(&id_text)))
+        .expect("读库")
+        .expect("账号还在");
+    assert_eq!(
+        saved.nickname.as_deref(),
+        Some("原名"),
+        "校验没过就不该落笔"
+    );
+    assert_eq!(saved.auth.expire, old_expire);
+
+    // 设备号里带空白 ⇒ 400（那种值会让每一次请求都带一个畸形头）
+    let (status, text) = send(
+        authed_app(Arc::clone(&handle)),
+        patch_json(&uri, &serde_json::json!({ "deviceId": "has space" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "实际：{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn update_account_swaps_credential_and_follows_its_platform() {
+    let (handle, dir) = test_app("acct-update-auth");
+    let phone = "19900000006";
+    let id_text = mcloud_upstream::account_id_for(phone);
+    // 前置：一个 PC 账号（macos）
+    let mut seeded = seed_for(phone);
+    seeded.pc_platform = Some(mcloud_core::PcPlatform::MacOs);
+    seed_account(&handle, seeded);
+
+    // 换成一条 **App** 凭据 ⇒ 形态必须跟着变成 null：
+    // 留着一个 windows/macos 会让后续请求按 PC 的身份发头，而凭据是 App 的。
+    let new_expire = 1_950_000_000_000i64;
+    let uri = format!("/api/accounts/{id_text}");
+    let (status, text) = send(
+        authed_app(Arc::clone(&handle)),
+        patch_json(
+            &uri,
+            &serde_json::json!({ "auth": auth_string("mobile", phone, new_expire) }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "实际：{text}");
+    assert!(
+        !text.contains("Basic ") && !text.contains("a|b|c|"),
+        "响应里不能出现凭据：{text}"
+    );
+
+    let store = Arc::clone(&handle.store);
+    let saved = futures::executor::block_on(store.account(&mcloud_core::AccountId::new(&id_text)))
+        .expect("读库")
+        .expect("账号还在");
+    assert_eq!(saved.auth.expire, new_expire, "凭据要换掉");
+    assert_eq!(saved.auth.platform, "mobile");
+    assert_eq!(saved.pc_platform, None, "换成 App 凭据后形态必须归 None");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn account_mutations_are_scoped_to_the_owner() {
+    let (handle, dir) = test_app("acct-owner");
+    // 账号存在，但**不属于**测试用户 ⇒ 改它必须 404（"别人的"与"不存在"同一个回包）
+    let mut foreign = seed_for("19900000007");
+    foreign.owner = Some(mcloud_core::UserId::new("someone-else"));
+    let store = Arc::clone(&handle.store);
+    futures::executor::block_on(store.save_account(&foreign)).expect("落库");
+
+    let uri = format!("/api/accounts/{}", foreign.id.as_str());
+    let (status, text) = send(
+        authed_app(Arc::clone(&handle)),
+        patch_json(&uri, &serde_json::json!({ "nickname": "抢过来" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "实际：{text}");
+    let saved = futures::executor::block_on(store.account(&foreign.id))
+        .expect("读库")
+        .expect("账号还在");
+    assert_eq!(saved.nickname, None, "别人的账号一个字段都不该被改");
+    let _ = std::fs::remove_dir_all(&dir);
+}
