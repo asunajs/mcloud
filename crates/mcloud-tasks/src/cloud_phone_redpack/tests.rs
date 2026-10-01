@@ -667,7 +667,14 @@ fn redpack_is_registered_with_the_right_meta() {
     assert!(!meta.hidden);
     // 这一格是**全局哨兵**：加任务时它会红，提醒你"注册表条数变了"。
     // 别把它删掉换成"包含某条就行" —— 那正是它要防的（少一条没人发现）。
-    assert_eq!(metas.len(), 20, "原 18 条 + 红包派对 + ai-avatar = 20 条");
+    //
+    // 20 - 1：`exchange` 已从 `register_all` 摘掉
+    //（缺 deviceId 来源 / visitlog 预热 / 等待档对齐，见 `lib.rs` 那段说明）。
+    assert_eq!(
+        metas.len(),
+        19,
+        "原 18 条 + 红包派对 + ai-avatar = 20 条，摘掉 exchange 后 19 条"
+    );
 }
 
 // ══════════════════════ 这条链不碰 store ══════════════════════

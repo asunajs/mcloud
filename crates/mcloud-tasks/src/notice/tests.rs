@@ -772,15 +772,16 @@ fn notice_is_registered_with_the_right_meta() {
     );
     assert!(
         !meta.hidden,
-        "它该出现在通用任务列表里 —— 隐藏的只有 exchange 与 auth-refresh"
+        "它该出现在通用任务列表里 —— 注册表里没有任何任务覆写 hidden()；\
+         exchange 是**未注册**（P1-5），不是隐藏"
     );
     assert!(
         !meta.description.is_empty(),
         "描述是界面上唯一解释这一条做什么的地方"
     );
 
-    // 旧的几条没被这次改动碰掉。
-    for name in ["sign", "exchange", "msg-push"] {
+    // 旧的几条没被这次改动碰掉。⚠ exchange 已按 P1-5 摘掉注册，故不在此列。
+    for name in ["sign", "msg-push"] {
         assert!(
             metas.iter().any(|m| m.name == name),
             "{name} 仍应在：{:?}",

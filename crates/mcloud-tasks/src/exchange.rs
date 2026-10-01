@@ -27,7 +27,7 @@
 //! 判定层（纯函数，不碰网络）    plan_exchange / locate_exchange_prize / plan_exchange_wait
 //! 编排层（链）                  exchange —— 读清单 → 判 → 取 deviceId
 //!                                          → 最多 SLIDER_ROUNDS 轮 {取题 → 解算 → 下单}
-//! 任务壳                        ExchangeTask（注册进 Registry 的那一层）
+//! 任务壳                        ExchangeTask（**当前未**注册进 Registry，见文末）
 //! ```
 //!
 //! # 一个必须说清的边界：`deviceId` 是**请求体里的值**
@@ -1448,10 +1448,28 @@ impl ExchangeRun<'_> {
 /// 接线方式（留给组装层）：把 `DeviceIdFn` 从 `mcloud_app` 那层注入进来
 /// （`mcloud_app` 已经依赖 `mcloud-tasks`，方向是对的）。
 ///
-/// # 当前**不**注册进 `register_all`
+/// # 当前**不**注册进 `register_all`（⇒ `/api/capabilities` 里也没有它）
 ///
-/// 理由同上：注不进 `deviceId` 就永远走 `Skipped`。要上线它，
-/// 得先有那一层注入。`register_all` 的注释里登记了这件事。
+/// 未注册：缺 `device_id` 来源 + 缺 `visitlog` 预热 + 等待档与 TS 不一致，
+/// 补齐后才应放出来。三条缺口分别是：
+///
+/// 1. **缺 `device_id` 来源**（上面那段）：注不进它就永远走 `Skipped`，
+///    用户点了什么都不会发生。接线要等 `mcloud_app` 那层把
+///    "上报设备指纹换 id"做成 `DeviceIdFn` 注进来。
+/// 2. **缺 `reportVisitLog` 预热两枪**：参考实现
+///    （`exchange/task.ts:84-100`、`utils.ts:7`）在下单前先上报访问日志；
+///    本仓没接。那两枪的判据在手头样本里不足 —— 不猜（`AGENTS.md` 的
+///    依据优先级：真写不了的分支留空并注明原因）。
+/// 3. **等待档与 TS 不一致**：参考实现默认 `skipWait=false` 且等到
+///    `hh:59:40`；本仓默认 `skipWait=true` 只等到整点
+///    （见 `plan_exchange_wait` 与 `ExchangeTask::run` 里那句
+///    `unwrap_or(true)`）。
+///
+/// 在这三条补齐之前，本任务**可以被直接调用**（判定层与编排层能跑、能测，
+/// 缺 `deviceId` 时如实回 `device_id_failed`），但**不**应对外宣称可用：
+/// 一个"点了永远什么都不会发生"的入口比没有入口更坏。
+/// `lib.rs` 的 `register_all` 里登记了这件事，
+/// 哨兵是 `tests::register_all_does_not_expose_exchange`。
 pub struct ExchangeTask;
 
 #[async_trait]

@@ -46,22 +46,25 @@ pub use login::{
 /// 拿后者去读实测回 `90001 未登录`。票由 `H5Client` 按主机透明注入，
 /// 任务代码一行都不用碰。
 ///
-/// # 兑换 `exchange`（**真扣AI豆**）
+/// # 兑换 `exchange`（**真扣AI豆**，当前**未**注册）
 ///
-/// 它与上面十条**性质不同**：签到族与小红花族都是"领"，
-/// 失败了只是少领一次；这一条是"花"，下单那一枪**不可逆**
-/// （`mcloud_tasks::exchange` 开头那段解释过：这一族没有幂等键，
-/// `oid` 由服务端生成，发出去就不收回来）。
+/// ⚠ 它**不在**下面 `tasks` 里，也不出现在 `/api/capabilities`：
+/// **未注册：缺 `device_id` 来源 + 缺 `visitlog` 预热 + 等待档与 TS 不一致，
+/// 补齐后才应放出来。** 三条缺口逐条记在 `mcloud_tasks::exchange` 的
+/// `ExchangeTask` 文档里。
 ///
-/// ⚠ 所以 `ExchangeTask::run` 里 `device_id` 是**刻意的 `None`** ——
-/// 那条链在没有 `deviceId` 时**一枪都不发**，如实回一句 `device_id_failed`。
-/// 这不是缺陷，是"缺依据就停下来"：随手编一个 `deviceId` 会被上游不认、
-/// 白扣一次机会，而**静默**才是真正的坏结果。
+/// 为什么宁可不给入口：这一族与上面十条**性质不同** —— 签到族与小红花族
+/// 都是"领"，失败了只是少领一次；这一条是"花"，下单那一枪**不可逆**
+/// （没有幂等键，`oid` 由服务端生成，发出去就不收回来）。而
+/// `ExchangeTask::run` 里 `device_id` 是**刻意的 `None`**：那条链在没有
+/// `deviceId` 时**一枪都不发**，如实回一句 `device_id_failed`。
+/// 注册进注册表就等于对用户宣称"这条可用"，而用户点了**永远什么都不会发生** ——
+/// **静默**才是真正的坏结果。
 ///
-/// 真正的注入点在组装层（`mcloud_app` 已经依赖本 crate，方向是对的）：
-/// 由它把"上报设备指纹换 id"那一套做成 `DeviceIdFn` 注进来。
-/// 在那之前，本任务的定位是"判定层与编排层已经能跑、能测"，
-/// 不是"能无人值守地花豆"。
+/// 任务类型本身仍可被**直接调用**（判定层与编排层能跑、能测）；
+/// 用户看得见的两条路（`/api/runs` 与 `/api/capabilities`）都按注册表走，
+/// 摘掉注册就摘掉了"对外宣称"这件事。哨兵见文末
+/// `tests::register_all_does_not_expose_exchange`。
 ///
 /// # 红包派对 `cloud-phone-redpack`（**今天只读**）
 ///
@@ -106,7 +109,9 @@ pub fn register_all(registry: &mut Registry) -> Result<(), String> {
         Arc::new(signin::TaskListTask),
         Arc::new(live_room::LiveRoomTask::production()),
         Arc::new(live_room::RedFlowerTask::production()),
-        Arc::new(exchange::ExchangeTask),
+        // ⚠ `exchange` **刻意不在这里**：缺 deviceId 来源 / visitlog 预热 /
+        // 等待档对齐（见上面那段说明），注册了就是"对外宣称可用"。
+        // 哨兵：`tests::register_all_does_not_expose_exchange`。
         Arc::new(msg_push::MsgPushTask),
         Arc::new(fun_ai::FunaiTask),
         Arc::new(notice::NoticeTask),
@@ -121,4 +126,43 @@ pub fn register_all(registry: &mut Registry) -> Result<(), String> {
         registry.register(t)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! 注册表哨兵：钉住"哪些任务对外宣称可用"。
+
+    use super::*;
+
+    /// ⭐ `exchange` **不得**出现在 `register_all` 里。
+    ///
+    /// `/api/capabilities` 与 `/api/runs` 都按注册表说话 ⇒
+    /// "注册了"就等于"对用户宣称这条能用"。而 exchange 缺 `deviceId` 来源 /
+    /// `visitlog` 预热 / 等待档对齐（见上面 `register_all` 的说明），
+    /// 用户点了**永远什么都不会发生**。
+    ///
+    /// 哪天三条缺口补齐、要放它出来，这条会红 —— 提醒同时改掉
+    /// `exchange.rs` 里 `ExchangeTask` 那段"当前不注册"的说明。
+    #[test]
+    fn register_all_does_not_expose_exchange() {
+        let mut registry = Registry::new();
+        register_all(&mut registry).expect("注册不该重名");
+        let metas = registry.list();
+        let names: Vec<&str> = metas.iter().map(|m| m.name.as_str()).collect();
+
+        assert!(
+            !names.contains(&"exchange"),
+            "exchange 缺 deviceId 来源/visitlog 预热/等待档对齐，不得对外宣称可用：{names:?}"
+        );
+        // 反面：摘它不该误伤邻居（少一条要有人发现）。
+        for name in [
+            "sign",
+            "live-room",
+            "msg-push",
+            "notice",
+            "cloud-phone-redpack",
+        ] {
+            assert!(names.contains(&name), "{name} 不该被摘掉：{names:?}");
+        }
+    }
 }
