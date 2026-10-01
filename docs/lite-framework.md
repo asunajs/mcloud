@@ -116,8 +116,73 @@ lite/src/component.ts   createComponent / mount / onMounted / onUnmounted / useS
 
 ## 4. 编译插件
 
-`lite/compiler.ts`（用仓库已有的 `typescript` 解析 TSX，**没有新依赖**）
-+ `lite/vite.ts`（Vite 插件，`enforce: 'pre'` —— 必须先于 esbuild 拿到带 JSX 的源码）。
+`lite/ast.ts` + `lite/compiler.ts`（用 **`oxc-parser`** 解析 TSX：`ast.ts` 负责把 ESTree 适配成
+编译器要的那几个接口，`compiler.ts` 只写代码生成；2026-10-01 之前解析用的是 `typescript` 包，见 §4.6）
++ `lite/vite.ts`（Vite 插件，`enforce: 'pre'` —— 必须先于下游转换器拿到带 JSX 的源码）。
+
+> ### 4.6 解析器从 `typescript` 换到 `oxc-parser`（2026-10-01）
+>
+> 起因是用户一句"ts 就是为了编译，去掉"。前半句**是对的**：全仓只有 `compiler.ts`
+> 一处 import `typescript`。但上一版把工作量说成了"要把 780 行重写" —— **估错了**，实测尺寸是：
+>
+> | 事实 | 数 |
+> |---|---|
+> | `compiler.ts` 总行数 | 799 |
+> | 其中碰 `ts.` 的行 | **95**（12%） |
+> | 用到 TS 的 printer（`createPrinter`/`printNode`/`getText`） | **0** —— 代码生成本来就是自写字符串拼接 |
+> | 新增的适配层 `lite/ast.ts` | ~300 行（含注释） |
+>
+> ⇒ 换解析器换的是**一条接缝**：`ts.` → `ast.` 一次机械改名，剩下的差异由 `lite/ast.ts`
+> 一次 **normalize 遍历**抹平（详见该文件头部）。
+>
+> **三类真实差异**（都是实测踩出来的，不是推演）：
+>
+> 1. **字段名**：`Literal.value` vs TS 的 `.text`、`CallExpression.callee` vs `.expression`、
+>    `JSXOpeningElement.name` vs `.tagName`、`Property.key/value` vs `.name/.initializer`…
+> 2. **包了一层**：TS 的 `openingElement.attributes` 是个 **JsxAttributes 节点**（数组在
+>    `.properties` 上），TS 的参数是 **ParameterDeclaration**（模式在 `.name` 上）——
+>    ⇒ 适配层**造**同形状节点补上，否则那三处 `opening.attributes.properties` 直接读到 undefined。
+> 3. **语义口径**：`{/* 注释 */}` / `{}` / `{ }` 三种空表达式容器，TS 一律给
+>    `expression === undefined`（编译器靠它跳过），oxc 给 `JSXEmptyExpression` 节点
+>    ⇒ 不镜像就会**多吐一个 `<!---->` 锚点**（黄金样本抓出来的）。
+>
+> ⚠ 另外记一条**与解析器无关、纯 JS 的坑**：适配层收集节点时写了
+> `if (Array.isArray(v)) for (…) if (…) push(c)` 后面跟 `else if (…) push(v)` ——
+> `else` 绑到了**内层** if 上，于是"数组子节点进得来、对象子节点永远进不来"
+> （192 个节点只进来 7 个），表现是产物**静默退回原文件**。凡 `if` 里套 `for` 里再套 `if`，一律加花括号。
+>
+> **怎么证明换对了**（三件，缺一不可）：
+>
+> 1. **18 个 tsx 的产物与换之前逐字节一致**（换之前先把 TS 版产物存成黄金样本）—— 18/18。
+> 2. `lite/regress/compiler.mjs` 的 **12 条编译期负例**行为不变（该抛的都抛）。
+> 3. `node scripts/gates-web.mjs --full` 五条全绿，且 **`web/dist` 的 chunk hash 一字未变**
+>    （`index-BZHZ-pGw.js`）—— 端到端等价的最强证据。
+>
+> **类型检查那条路**与编译器无关，但同样需要一个 TypeScript 实现：本仓改用
+> `tsgo --noEmit`（`@typescript/native-preview`，原生实现，0.5 s），`typescript` 包已从
+> `package.json`/lock 删除。换之前核对过 `tsc` 与 `tsmc`（那个 fork）的 `--listFiles`
+> 逐行相同 —— 顺带把 `@ts-macro/tsc` 一起删了（§9.2）。
+>
+> **"tsgo 到底查不查"**（2026-10-01 被问过，实测对拍，不是嘴上保证）：
+>
+> * 往 `src/` 塞一个故意写错的探针文件（类型不符、strict null、`noUnusedLocals`、
+>   找不到的名字、JSX 多余属性、跨行赋值），**tsgo 与 `typescript@5.9.3` 各报 7 条，
+>   错误码、行列、文案逐条相同**（TS2322 / TS6133 / TS2552 / TS2322-JSX）。
+> * 有错时 `npm run typecheck` **exit=1** ⇒ `gates-web` 那条门会红，不是"永远绿"的空门。
+> * 覆盖面：两边 `--listFiles` 都是 **161** 条，差异只有标准库 `.d.ts` 的**安装路径**
+>   （tsc@5 在 /tmp 的临时副本 vs tsgo 在 node_modules），**项目文件清单完全一致**。
+>
+* 覆盖面：两边 `--listFiles` 都是 **161** 条，项目文件清单逐行相同（102 个）。
+>
+> ⚠ 已知边界：tsgo 目前是 **7.0.0-dev 预览版**，上面对拍覆盖的是"本仓这批文件 + 7 类代表性错误"，
+> 不等于穷举了原生实现与 `tsc` 的每一处差异（`--build` 增量、编辑器级 API 等未验证）。
+>
+> ⚠⚠ **用户口径（2026-10-01）：只要 tsgo。** 不把 `typescript`/`tsc` 加回来做"两条实现互校"——
+> 宁可接受上面那条边界，也不要那个依赖。**别自作主张加兜底**；真要加，先问。
+>
+> ⚠ 不变的：`lite/vite.ts` 的 `enforce: 'pre'` 仍是"谁先谁后"的唯一判据；
+> 编译期负例仍是这个框架最重要的门 —— 换解析器时正是它们与黄金样本兜住的。
+
 结构照 Solid 的 `babel-plugin-jsx-dom-expressions`，两处有意不同：`.map()` 直接编成键控
 `createFor`（Solid 的 `.map` 是朴素数组 diff，键控要写 `<For>`），以及不做事件委托（§8）。
 
@@ -194,7 +259,7 @@ _$setNodes(_n0, () => _$createComponent(Panel, { 'title': 't' }, { default: () =
 |---|---|
 | `key` 写在非 `.map()` 返回的元素上（普通元素 / 组件 / 条件分支 / 片段） | 这里的 `key` 什么都不做… |
 | `v-if` / `vIf` 这类指令式属性 | 不支持指令式属性（TSX 里没有 Vue 的指令） |
-| `@click` 这类 Vue 事件简写 | 源码解析失败（TSX 本身就解析不过；报在 lite 这层，而不是让下游 esbuild 吐一句 `Unexpected token` 的残码） |
+| `@click` 这类 Vue 事件简写 | 源码解析失败（TSX 本身就解析不过；报在 lite 这层，而不是让下游吐一句 `Unexpected token` 的残码） |
 | 组件上的 `{...spread}` | 组件上的 {...spread} 未支持 |
 | 空元素带子节点（`<img>…</img>` / `<br>x</br>`） | 空元素 `<img>` 不能带子节点（生成 HTML 无法表达） |
 | 条件分支的分支不是 JSX 也不是 `null` | 条件分支只支持 JSX 或 null |
@@ -329,18 +394,33 @@ best of 3、headless Chrome、1000/2000 行的合成规模：
 
 ## 7. 验收与门禁
 
-`node scripts/gates-web.mjs`（默认 ≈33 s；`--full` ≈77 s）四条：
+`node scripts/gates-web.mjs`（默认 ≈56 s；`--full` ≈100 s）五条：
 
 | 门 | 命令 | 证明什么 |
 |---|---|---|
-| typecheck | `npm run typecheck`（ts-macro 的 tsc） | 类型与 JSX 命名空间对得上 |
+| typecheck | `npm run typecheck`（**`tsgo --noEmit`**，原生 TS） | 类型与 JSX 命名空间对得上 |
 | build | `npm run build` | 全量 TSX 编得过、产物能出 |
 | lite 编译期负例 | `node lite/regress/compiler.mjs` | **该抛的都抛了**（§4.5 那 12 条：四种 `key` 位置、两种指令写法、`@click`、块体 map、positional 真假、带冒号的命名空间属性不该被拦） |
+| 窄屏布局验收 | `node lite/regress/narrow.mjs` | **真 375 宽视口**下没有横向溢出、账号行没被挤扁、弹窗的 ✕ 够得着、方式 tab 每格 ≥44px（§4.6） |
 | lite 真 DOM 验收 | `node lite/regress/all.mjs --skip-build [--quick]` | 真浏览器上的行为对 |
 
-⚠ 没装无头 Chrome 的机器上第四条会印 `⊘ 跳过（本机没有无头 Chrome，这条**不算通过**）`
+⚠ 没装无头 Chrome 的机器上**后两条**会印 `⊘ 跳过（本机没有无头 Chrome，这条**不算通过**）`
 并在摘要里**明说这条没被验证过**，不会冒充绿。CI 的 ubuntu runner 上因此只覆盖前三条
-（typecheck / build / 编译期负例都是纯 Node）⇒ **第四条是本地提交前的门**（约定 §9.2）。
+（typecheck / build / 编译期负例都是纯 Node）⇒ **后两条是本地提交前的门**（约定 §9.2）。
+
+> **typecheck 用原生 `tsc` 而不是 `@ts-macro/tsc`（2026-10-01）**
+>
+> 那个 fork 是迁移期（`ce17969`）留下的，全仓**没有任何 ts-macro 宏用法**，
+> 而它是整条工具链里**对 TS 大版本最敏感**的一环：实测把 typescript 换成 7.0.2，
+> `tsmc` 第一个崩（`ERR_PACKAGE_PATH_NOT_EXPORTED`，TS 连包导出路径都变了）。
+>
+> 换之前做过等价性核对，不是"都过了"就算：
+> `tsc --noEmit` 与 `tsmc --noEmit` **退出码都是 0，且 `--listFiles` 逐行相同（各 158 个文件）**。
+> 换完 5 条门禁全绿，产物 hash 不变（typecheck 不参与产物）。
+>
+> ⚠ 这**不等于** TS 的耦合解除了：`lite/compiler.ts` 仍然 `import ts from 'typescript'`，
+> 而它在 Vite 配置的加载路径上 ⇒ `npm run build` 也依赖这个包（实测把包挪走，三条全崩）。
+> 想去掉 TS 5.x 的绑定，要动的是"编译器建在哪棵 AST 上"，与这条无关。
 
 `all.mjs` 包了四样：
 

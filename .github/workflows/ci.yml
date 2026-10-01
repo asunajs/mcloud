@@ -2,7 +2,8 @@ name: CI
 
 # 门禁与 docs/conventions.md §9.2 一一对应：
 #   fmt --check / clippy -D warnings / test，外加前端三条
-#   （typecheck / build / lite 编译期负例 —— 第四条"真 DOM 验收"要无头 Chrome，runner 上没有）。
+#   （typecheck / build / lite 编译期负例 —— 另两条"窄屏布局验收"与"真 DOM 验收"
+#    要无头 Chrome，ubuntu runner 上没有，本地跑；见 gates-web.mjs 的 ⊘ 跳过）。
 # 这里的命令都在本地实测通过，CI 不是「上线后才发现是红的」。
 #
 # 为什么用 --locked：Cargo.lock 已入库，锁死依赖版本才能让 CI 结果可复现；
@@ -93,9 +94,10 @@ jobs:
       # 它只要 Node、不要浏览器 ⇒ CI 跑得动；而"能 build"恰恰掩盖不了它 ——
       # 门坏了的表现是静默编错，本地一眼看不出来。
       #
-      # ⚠ 四条前端闸门里 CI 只覆盖这三条（typecheck / build / 负例）：
-      # **真 DOM 验收**要无头 Chrome，ubuntu runner 上没有，`gates-web.mjs` 在那儿会
-      # 印 `⊘ 跳过` 并且**不算通过** ⇒ 那一条是**本地提交前**的门（约定 §9.2）。
+      # ⚠ 五条前端闸门里 CI 只覆盖这三条（typecheck / build / 负例）：
+      # **窄屏布局验收**与**真 DOM 验收**都要无头 Chrome，ubuntu runner 上没有，
+      # `gates-web.mjs` 在那儿会印 `⊘ 跳过` 并且**不算通过**
+      # ⇒ 那两条是**本地提交前**的门（约定 §9.2）。
       - name: lite 编译期负例
         run: node lite/regress/compiler.mjs
 

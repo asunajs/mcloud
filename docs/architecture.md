@@ -1108,7 +1108,7 @@ t+1000ms #a=""  #b=""
 | `mcloud-upstream` | fixture 回放：录制真实响应，离线断言解析 |
 | `mcloud-engine` | 假 Task + 假 Store，断言事件序列与并发闸 |
 | `mcloud-server` | `tower::ServiceExt::oneshot` 路由级测试 |
-| web | 类型检查 `tsmc --noEmit` + 关键组件测试 |
+| web | 类型检查 `npm run typecheck`（`tsgo --noEmit`）+ 关键组件测试 |
 
 **随机性路径**（动态 IV、RSA 填充）不做字节级对拍，改为往返/自持密钥验证。
 

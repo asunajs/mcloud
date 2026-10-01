@@ -6,8 +6,9 @@
  * （`--experimental-transform-types`）在 Node 22 上还没有 —— 闸门不能靠开关活着。
  * 走 vite 就与主产物同一套工具链，多出来的成本是一次约 0.3 s 的小构建。
  *
- * ⚠ `typescript` 必须是 external：把它打进临时产物等于每次跑闸门都压一遍 5MB，
- * 与本闸门要证明的东西毫无关系。
+ * ⚠ `oxc-parser` 必须是 external：它是**原生**包（napi 二进制），既打不进 bundle，
+ * 打进去也没有意义 —— 与闸门要证明的东西毫无关系。
+ * （2026-10-01 之前这里 external 的是 `typescript`，编译器换解析器时一起换了。）
  *
  * ⚠ 路径一律绝对：本文件与临时目录都在 `lite/regress/` 下（`.check-tmp`），而
  * Vite 把相对 `outDir` 当成相对 **root**（= `web/`），不写绝对就会落错地方 ——
@@ -29,6 +30,6 @@ export default defineConfig({
     // ⚠ 扩展名要写全：Vite 8 的 lib 模式**不会**给 `fileName()` 的返回值补 `.js`
     //（给 'compiler' 就产出裸文件 `compiler`，Node 那边 import 不到）
     lib: { entry: path.join(tmp, 'entry.ts'), formats: ['es'], fileName: () => 'compiler.js' },
-    rollupOptions: { external: ['typescript'] },
+    rollupOptions: { external: ['oxc-parser'] },
   },
 })

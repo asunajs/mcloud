@@ -82,7 +82,7 @@ const CASES = [
     // ⚠ 这一条命中的**不是** `checkDirective`：带 `@` 的属性名 TSX 本身就解析不过，
     // 由 `compile` 开头的 `parseError` 拦（没有那道门时，产物是"元素被吃掉、尾巴留原文"
     // 的残码，下游只报一句 `Unexpected token`，看着像编译器的 bug）。
-    name: '`@click` 事件简写 ⇒ 抛错（TSX 解析不过，报在这一层而不是 esbuild）',
+    name: '`@click` 事件简写 ⇒ 抛错（TSX 解析不过，报在这一层而不是下游）',
     src: `const A = () => <div @click={f}>x</div>`,
     throws: '源码解析失败',
   },
@@ -95,7 +95,7 @@ const CASES = [
 
 // 把 `compiler.ts` 打成一个 Node 能直接 import 的 ESM。
 // ⚠ 不用 Node 自带的类型剥离：`--experimental-transform-types` 在 Node 22 上还没有，
-// 而 `typescript` 那包**必须留成 external** —— 打进临时产物等于每次跑闸门都压一遍 5MB，
+// 而 `oxc-parser`（原生 napi 包）**必须留成 external** —— 二进制打不进 bundle，
 // 与本闸门要证明的东西毫无关系。
 fs.rmSync(tmp, { recursive: true, force: true })
 fs.mkdirSync(tmp, { recursive: true })

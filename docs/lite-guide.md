@@ -6,8 +6,15 @@ TSX 由一个小插件在编译期折成运行时调用，之后只有"读过某
 
 框架本身的**设计取舍与踩坑史**不在本文，见 [`docs/lite-framework.md`](lite-framework.md)（那篇是给要改框架的人看的）。
 
-**先说结论：** 把 `lite/` 目录拷进项目 → 装 `vite` + `typescript@^5` → 接插件、配 tsconfig →
-用自带的 `lite/jsx.d.ts` 拿到 JSX 类型。**全程不需要 Vue**（本文第 4 节里每个结论都有跑过的命令）。
+**先说结论：** 把 `lite/` 目录拷进项目 → 装 `vite` + `oxc-parser`（编译器用它解析 TSX）→ 接插件、
+配 tsconfig → 用自带的 `lite/jsx.d.ts` 拿到 JSX 类型。**全程不需要 Vue**
+（本文第 4 节里每个结论都有跑过的命令）。
+
+> ⚠ **2026-10-01 工具链变更**：编译器不再用 `typescript` 包解析 TSX，改用 **`oxc-parser`**
+> （见框架文档 §4.6）。类型检查是**另一条路**，跟编译器无关：`tsc --noEmit`（`typescript@5`）
+> 或原生的 `tsgo --noEmit`（`@typescript/native-preview`）都行 —— 本仓现在用 tsgo，
+> 两者对本仓源码结论一致（实测：同样的 158 个文件、都 exit 0）。
+> 下文凡是写"装 `typescript@^5`才能编译""`tsc --noEmit`"的地方，按这条读。
 
 ---
 
@@ -28,10 +35,13 @@ TSX 由一个小插件在编译期折成运行时调用，之后只有"读过某
 5. **状态惯例是模块级 `ref`。** "建一个只导出 ref 的模块，谁 import 谁用"就是这个框架的状态管理；
    模块级 ref 是**全应用唯一**的 —— 同一页面挂两个 App 实例会共享同一份状态。
    要按实例隔离，就在组件体内 `ref()`（组件体只跑一次，正好一个实例一份）。
-6. **类型检查需要 `typescript@^5`。** 编译器用的是 TypeScript 5 的 JS API（`ts.createSourceFile` 等）。
-   实测装成 `typescript@7` 时：`vite build` 报
-   `TypeError: Cannot read properties of undefined (reading 'ESNext')`，`tsc --noEmit` 报 110 条错。
-   按 §1 的命令装（`typescript@^5`）就不会踩到。
+6. **编译器需要 `oxc-parser`；类型检查要另配一个 TypeScript 实现。** 两件事互不相干：
+   * **构建**：`compiler.ts` 用 `oxc-parser`（原生 napi 包）解析 TSX，**与 `typescript` 包无关**。
+     ⚠ 它是原生模块 ⇒ 打包器里要标 external（本仓见 `lite/regress/check.vite.config.ts`）。
+   * **类型检查**：TSX 的类型检查必须有 TypeScript 实现 —— `typescript@5` 的 `tsc --noEmit`，
+     或原生的 `tsgo --noEmit`（`@typescript/native-preview`）。本仓用 tsgo（快，0.5s）。
+     ⚠ 2026-10-01 之前这里写的是"编译器用的是 TypeScript 5 的 JS API，装 7 会炸" ——
+     那条**只对当时的编译器**成立，现在编译器跟 TS 包已经没关系了。
 7. **没有这些东西**：SSR、水合、Teleport / Transition / Suspense / 异步组件 / 指令、`provide` / `inject`、
    `reactive`、`nextTick`、事件委托、模板引用（`ref=`）。全表见 §10、§12。
 8. **构建工具**：官方只提供 Vite 插件。想接别的（rollup / esbuild / webpack），
@@ -52,7 +62,8 @@ your-project/
 │  │  ├─ dom.ts         ← DOM 层：template / insert / setNodes / setClass …（编译产物调它）
 │  │  ├─ control.ts     ← createFor：`.map()` 列表的键控复用
 │  │  └─ component.ts   ← 组件、插槽、onMounted / onUnmounted、mount
-│  ├─ compiler.ts       ← TSX → 运行时调用（唯一需要 typescript 的文件）
+│  ├─ compiler.ts       ← TSX → 运行时调用（唯一需要 oxc-parser 的文件）
+│  ├─ ast.ts            ← AST 适配层：oxc-parser 的 ESTree → 编译器要的那几个接口
 │  ├─ vite.ts           ← Vite 插件（import 上面的 compiler.ts）
 │  └─ jsx.d.ts          ← JSX 类型声明（只有类型，零运行时代码）★ 见 §4
 ├─ src/…                ← 你自己的代码
@@ -70,8 +81,8 @@ your-project/
 | 文件 | 少了会怎样 |
 |---|---|
 | `lite/src/` 四个文件 | 它们互相 import，只拷 `index.ts` 起不来 |
-| `lite/compiler.ts` | `vite.ts` 直接 import 它，构建期就报模块找不到 |
-| `lite/vite.ts` | 没插件 ⇒ JSX 没人折，esbuild 会按 React 语义去转（§3） |
+| `lite/compiler.ts` + `lite/ast.ts` | `vite.ts` 直接 import `compiler.ts`，它再 import `ast.ts`；少任一个，构建期就报模块找不到 |
+| `lite/vite.ts` | 没插件 ⇒ JSX 没人折，下游转换器会按 React 语义去转（§3） |
 | `lite/jsx.d.ts` | `tsc --noEmit` 对每个标签报 `TS7026`（§4） |
 
 **可以不用拷的**：`demo/`、`bench/`、`regress/`、`size.mjs` —— 那是框架自己的验收样例与体积统计，
@@ -79,13 +90,16 @@ your-project/
 （直接跑它需要无头 Chrome，属于可选）。
 
 **运行时零依赖**：`lite/src/**` 不 import 任何外部包，只用 DOM 与 ES2022。
-**构建期唯一依赖是 `typescript`**（`compiler.ts` 用它解析 TSX），版本必须 `^5`（§0.6）：
+**构建期依赖两个**：`vite` 与 `oxc-parser`（`compiler.ts` → `ast.ts` 用它解析 TSX）；
+类型检查再另加一个 TypeScript 实现（本仓用 `@typescript/native-preview`）：
 
 ```bash
-npm i -D vite typescript@^5
+npm i -D vite oxc-parser
+npm i -D @typescript/native-preview   # 只为 `tsgo --noEmit`；用 typescript@5 的 tsc 也行
 ```
 
-> 验证环境：**Node 24.16.0 + npm 11.13.0 + vite 8.3.1 + typescript 5.9.3**。
+> 验证环境：**Node 24.16.0 + npm 11.13.0 + vite 8.3.1 + oxc-parser 0.152.0
+> + tsgo 7.0.0-dev**（2026-10-01 起；在那之前是 vite 8.3.1 + typescript 5.9.3）。
 > 更老的 Vite 也能用（插件 API 很基础），但 §3.2 里那条 alias 差异要注意。
 
 业务代码用到的 API 就是下面这些（`lite/src/index.ts` 的全部导出）：
@@ -124,8 +138,10 @@ export default defineConfig({
 
 要点：
 
-* **TSX 是插件编译的，不是 esbuild 编译的。** 插件 `enforce: 'pre'`，先于 Vite 自己的 esbuild
-  拿到**还带着 JSX 的**源码，把 JSX 折掉、保留 TS 语法，再交给 esbuild 去类型。
+* **TSX 是插件编译的，不是下游转换器编译的。** 插件 `enforce: 'pre'`，先于下游
+  拿到**还带着 JSX 的**源码，把 JSX 折掉、保留 TS 语法，再交给下游去类型。
+  ⚠ 下游是**谁**会变：Vite 7 是 esbuild，**Vite 8.3 是 rolldown/oxc**（实测 Vite 8 的
+  依赖里没有 esbuild 这个包）⇒ 文档与注释只说"下游"，别写死工具名（2026-10-01 改）。
   所以**不需要 Vue、不需要 vue-jsx-vapor、不需要 `@vitejs/plugin-vue`**：
   实测一个零 Vue 工程 build 出单 chunk `index-*.js 8.31 kB`（gzip 3.76 kB，含两个组件 + 列表 + 表单）。
   ⚠ 这个读数是 **2026-09-30 之前**量的；此后运行时自身又瘦了 **337 B gzip**
@@ -174,9 +190,9 @@ export default defineConfig({
    src/main.tsx(59,5): error TS2875: This JSX tag requires the module path 'react/jsx-runtime' to exist,
    but none could be found. Make sure you have types for the appropriate package installed.
    ```
-2. **构建侧**：Vite 的 esbuild 也会读 tsconfig 的 `jsx` 设置。正常情况下插件已经把 JSX 折掉了，
-   轮不到 esbuild；可一旦插件没覆盖到（文件不是 `.tsx`、被 `include` 排除、插件顺序被改），
-   JSX 就会落到 esbuild 手里被按 React 语义转成 `_jsx(...)`，**运行期才炸**。
+2. **构建侧**：下游转换器也会读 tsconfig 的 `jsx` 设置。正常情况下插件已经把 JSX 折掉了，
+   轮不到它；可一旦插件没覆盖到（文件不是 `.tsx`、被 `include` 排除、插件顺序被改），
+   JSX 就会落到它手里被按 **React 语义**编译，**运行期才炸**。
    ⚠ 实测把 `jsx` 写成 `react-jsx` 时 `npx vite build` **照样成功、产物 hash 都一样** ——
    所以"我 build 过了"不能当类型对的证据，**这个错只在 `tsc --noEmit` 里暴露**。
 

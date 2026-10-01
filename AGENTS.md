@@ -118,6 +118,15 @@ TCC 按**代码要求**记授权，而未签名的二进制其要求就是**内�
 >    `lsof -p <PID> | awk '$4=="txt"'` 的 inode 与 `stat target/release/mcloud-server` 对比。
 > 4. ⚠ release 重编会把**工作区里所有未提交的改动**一起编进线上（本仓同时有多条写入线时
 >    尤其危险）—— 重启上线前先 `git status` 看一眼。
+> 5. ⚠ **别用 `grep -a` / `strings` 判断"某段代码在不在二进制里"**：2026-10-01 实测两者
+>    在这份二进制上**一律漏报**（连 `mcloud 启动` 这种确定执行了的串都搜成 0）。要查就按
+>    字节数：
+>    `python3 -c "import sys;print(open(sys.argv[1],'rb').read().count(sys.argv[2].encode()))" <二进制> <中文串>`
+>    —— 实测新路由的三个串各命中 1 次，而 grep 全 0。
+> 6. ⚠ 重编后**第一次启动会弹一次授权框**（TCC 按内容哈希认程序），进程会**卡在启动阶段**
+>    等你点「允许」：表现是 launchctl 有 PID、`lsof` 里进程持有新 inode，但 **3000 没在监听、
+>    日志一片空白**。别把它当启动慢或崩了 —— 也别 kill 它（点了允许同一个进程会自己接着跑，
+>    PID 不变；实测放开后约 20 秒起来）。
 
 ### ✅ 开发期自检用它，代价 0 次重启：`cargo check`
 
@@ -202,9 +211,9 @@ Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过�
   cargo fmt --all -- --check
   node scripts/gates-web.mjs --full
   ```
-  （`--full` = 三个认证态的交互验收全跑，≈ 77 s；不带它的默认只跑 `ready`，
-  是**改脚本时的快回路**，不能替代提交前那次。四条里最后一条要无头 Chrome，
-  没有的机器上会明说"跳过 ≠ 通过"。）
+  （`--full` = 三个认证态的交互验收全跑，≈ 100 s；不带它的默认只跑 `ready`，≈ 56 s，
+  是**改脚本时的快回路**，不能替代提交前那次。**五条**里后两条（窄屏布局验收 / 真 DOM 验收）
+  要无头 Chrome，没有的机器上会明说"跳过 ≠ 通过"。）
 
 ## ⚠ 构建顺序（踩过坑）
 
@@ -223,3 +232,14 @@ Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过�
 - 服务端口用环境变量 `MCLOUD_ADDR`（默认 `127.0.0.1:3000`），数据目录 `MCLOUD_DATA_DIR`
   （⚠ 不是 `MCLOUD_DATA`）；`PORT` 环境变量**被忽略**
 - macOS 没有 `timeout` 命令；SSH 用 `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=20"`
+- **前端工具链（2026-10-01 起，两条都换过）**：
+  * 编译：TSX 由 **`oxc-parser`** 解析（`web/lite/ast.ts` 是适配层，`typescript` 包
+    **已不在依赖里**）。⚠ 它是**原生**包 ⇒ 凡把它打进 Node 侧产物的构建都要标 `external`
+    （见 `web/lite/regress/check.vite.config.ts`）。
+  * 类型检查：`npm run typecheck` = **`tsgo --noEmit`**（`@typescript/native-preview`，原生实现）。
+    原来那个 `@ts-macro/tsc` fork 已删（全仓没有 ts-macro 宏用法，且它对 TS 大版本最敏感）。
+    ⚠ **用户口径（2026-10-01）：只要 tsgo** —— 不要把 `typescript`/`tsc` 加回来做"互校兜底"。
+    已验证它真在检查：故意写错时与 `typescript@5.9.3` 各报 7 条、错误码/行列/文案逐条相同，
+    有错时退出码 1（门禁会红）；两边 `--listFiles` 项目文件清单逐行相同。
+  * 换解析器的验收方式（以后动这一层照做）：**先存黄金样本**（18 个 tsx 的旧产物），
+    换完逐字节对比 + 12 条编译期负例 + `dist` 的 chunk hash 不变。见 `docs/lite-framework.md` §4.6。

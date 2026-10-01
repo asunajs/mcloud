@@ -8,15 +8,15 @@
     "dev": "vite",
     "build": "vite build && node scripts/gzip-sidecars.mjs",
     "preview": "vite preview",
-    "typecheck": "tsmc --noEmit"
+    "typecheck": "tsgo --noEmit"
   },
   "//": "没有 dependencies：运行时是仓库里的 lite/（编译器 + 运行时），CSS 侧是构建期插件。",
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
-    "@ts-macro/tsc": "^0.3.7",
+    "@typescript/native-preview": "^7.0.0-dev.20260707.2",
     "daisyui": "^5.7.38",
+    "oxc-parser": "^0.152.0",
     "tailwindcss": "^4.3.3",
-    "typescript": "^5.6.0",
     "vite": "^8.3.0"
   }
 }

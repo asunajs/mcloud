@@ -461,7 +461,7 @@ pub enum RunEvent { Started{..}, Log{..}, Progress{..}, Finished{..} }
 | `mcloud-upstream` | fixture 回放（录制真实响应，离线断言） | ⬜ 待补 |
 | `mcloud-engine` | 假 Task + 假 Store，断言事件序列与并发闸 | ✅ `runner.rs` 已覆盖（见 §8.5） |
 | `mcloud-server` | `tower::ServiceExt::oneshot` 路由级测试 | ✅ `tests/routes.rs` 已覆盖（见 §8.6） |
-| web | `tsc --noEmit` + 关键组件测试 | ⬜ 待建 |
+| web | `npm run typecheck`（`tsgo --noEmit`）+ 关键组件测试 | ⬜ 待建 |
 
 ### 8.2 黄金向量铁律
 
@@ -508,7 +508,7 @@ pub enum RunEvent { Started{..}, Log{..}, Progress{..}, Finished{..} }
    `ReqwestClient` 的注入行为没有；这是安全边界，漏了会把凭证发错域名。
 2. **`mcloud-upstream` 的 fixture 回放**——录制真实响应离线断言，
    让上游改字段时能在 CI 上发现，而不是等用户报错。
-3. **web 层**——`tsc --noEmit` 已有 CI 门禁；组件测试待建。
+3. **web 层**——`npm run typecheck`（`tsgo --noEmit`）已有 CI 门禁；组件测试待建。
 
 ### 8.5 已固化的行为契约（`runner.rs`）
 
@@ -577,15 +577,16 @@ Conventional Commits，**中文正文**：
 cargo fmt --all -- --check          # 必须无输出
 cargo clippy --workspace --all-targets
 cargo test --workspace              # 必须 0 failed
-node scripts/gates-web.mjs --full   # 前端四条闸门，≈ 77 s
+node scripts/gates-web.mjs --full   # 前端五条闸门，≈ 100 s
 ```
 
 四条全绿才能提交。**本次提交新引入的告警/失败由本次提交负责**——
 当前 §3.3 记录的欠账为零，所以「本来就有」这个借口不存在。
 
-`gates-web.mjs` 那四条是：`typecheck` / `build` / **lite 编译期负例** /
-**lite 真 DOM 验收**（demo 断言 + 编译产物行为与耗时护栏 + 三个认证态的交互，
-`--full` 才跑满三个认证态；不带 `--full` 的默认只跑 `ready`，≈ 33 s，是改脚本时的快回路，
+`gates-web.mjs` 那五条是：`typecheck` / `build` / **lite 编译期负例** /
+**窄屏布局验收**（真 375 宽视口：横向溢出、账号行、弹窗出口、tab 尺寸）/ **lite 真 DOM 验收**
+（demo 断言 + 编译产物行为与耗时护栏 + 三个认证态的交互，
+`--full` 才跑满三个认证态；不带 `--full` 的默认只跑 `ready`，≈ 56 s，是改脚本时的快回路，
 **不能替代**提交前那次）。
 
 ⚠ 没装无头 Chrome 的机器上最后一条会印 `⊘ 跳过（本机没有无头 Chrome，这条不算通过）` ——

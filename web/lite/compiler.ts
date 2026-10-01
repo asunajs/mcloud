@@ -64,7 +64,7 @@
  * 宁可编译不过，也别让人带着一个假的安全走动。
  */
 
-import ts from 'typescript'
+import * as ast from './ast.ts'
 
 export interface CompileResult {
   code: string
@@ -86,9 +86,9 @@ const escText = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').re
 const escAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
 
 /** 属性值可以**折进模板串**的字面量：字符串 / 数字（`false`/`null` 不行，见 `html()` 里的注释）。 */
-function foldLiteral(e: ts.Expression): string | undefined {
-  if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) return e.text
-  if (ts.isNumericLiteral(e)) return e.text
+function foldLiteral(e: ast.Expression): string | undefined {
+  if (ast.isStringLiteral(e) || ast.isNoSubstitutionTemplateLiteral(e)) return e.text
+  if (ast.isNumericLiteral(e)) return e.text
   return undefined
 }
 
@@ -162,21 +162,21 @@ class Compiler {
    * 只有在这里登记过的才算数：登记发生在 `.map` 那条分支，消费发生在 `html()`/`component()`
    * 走到那个元素时。没登记过的 `key` 一律抛错（见文件头 ⚠⚠ 那段）。
    */
-  private readonly mapKeys = new Set<ts.JsxAttribute>()
+  private readonly mapKeys = new Set<ast.JsxAttribute>()
 
   constructor(
-    private readonly sf: ts.SourceFile,
+    private readonly sf: ast.SourceFile,
     private readonly src: string,
     private readonly runtime: string,
   ) {}
 
   /** 带位置的抛错。没有位置的编译错误等于让人回去 grep 一遍文件。 */
-  private fail(msg: string, node?: ts.Node): never {
-    // ⚠ 取"文件名"只能用字符串切：`ts.pathBasename` 是 tsc 的**内部** API，
-    // 编译器包里 import 得到的是 undefined —— 于是这里会抛一个
-    // "pathBasename is not a function"，把**真正要报的那句话**顶掉。
+  private fail(msg: string, node?: ast.Node): never {
+    // ⚠ 取"文件名"只能用字符串切：原来是 `ts.pathBasename`（tsc 的**内部** API，
+    // 编译器包里 import 到的是 undefined，会抛 "pathBasename is not a function"，
+    // 把真正要报的那句话顶掉）；换到 oxc 之后同样没有现成的 basename 可用 ⇒ 切法原样留着。
     const at = node
-      ? `${this.sf.fileName.replace(/^.*[\\/]/, '')}:${ts.getLineAndCharacterOfPosition(this.sf, node.getStart(this.sf)).line + 1} `
+      ? `${this.sf.fileName.replace(/^.*[\\/]/, '')}:${ast.lineOf(this.sf, ast.getStart(node)) + 1} `
       : ''
     throw new Error(`[lite] ${at}${msg}`)
   }
@@ -190,14 +190,14 @@ class Compiler {
    * 由 `parseError` 拦。也**不带** `:xxx`：`xmlns:xlink` 那类带冒号的命名空间属性是真 SVG 属性，
    * 而 `data-*` / `aria-*` 更不该管。
    */
-  private checkDirective(attr: ts.JsxAttribute, name: string): void {
+  private checkDirective(attr: ast.JsxAttribute, name: string): void {
     if (/^v[A-Z]/.test(name) || /^v-/.test(name)) {
       this.fail(`不支持指令式属性：${name} —— 本框架没有模板指令。条件渲染写 \`cond ? <…/> : null\`，列表写 \`list.value.map(…)\`，事件写 \`onClick={…}\``, attr)
     }
   }
 
   /** 处理 `key`：被 `.map` 认领过就放过（它不进 DOM），否则抛错。 */
-  private claimKey(attr: ts.JsxAttribute, name: string): void {
+  private claimKey(attr: ast.JsxAttribute, name: string): void {
     if (name !== 'key') return
     if (!this.mapKeys.delete(attr)) {
       this.fail('这里的 `key` 什么都不做：它只对 `.map()` 返回的那个元素有意义（交给 createFor 当复用键）。条件分支/普通元素上请直接删掉 —— 本框架没有"按 key 决定复不复用"的那一次 diff，不会因为它换实例', attr)
@@ -216,8 +216,8 @@ class Compiler {
     return `_$${name}`
   }
 
-  private srcOf(node: ts.Node): string {
-    return this.src.slice(node.getStart(this.sf), node.getEnd())
+  private srcOf(node: ast.Node): string {
+    return this.src.slice(ast.getStart(node), ast.getEnd(node))
   }
 
   private tpl(html: string): string {
@@ -228,7 +228,7 @@ class Compiler {
 
   // ── 根 ───────────────────────────────────────────────────────────────────
   /** 编译一个 JSX 表达式：语句封在自己的块里，返回它的值。 */
-  root(node: ts.JsxElement | ts.JsxSelfClosingElement | ts.JsxFragment): string {
+  root(node: ast.JsxElement | ast.JsxSelfClosingElement | ast.JsxFragment): string {
     const stmts: string[] = []
     const value = this.value(node, stmts)
     return `(() => {\n${stmts.map((s) => '  ' + s).join('\n')}\n  return ${value}\n})()`
@@ -240,7 +240,7 @@ class Compiler {
    * 嵌套 JSX（组件插槽里的元素、列表项、条件分支）必须走这个入口：否则内层元素
    * 生成的 `const _n0 = …` 会和外层撞名（实测报 `Identifier '_n0' has already been declared`）。
    */
-  private valueIsolated(node: ts.JsxElement | ts.JsxSelfClosingElement | ts.JsxFragment): string {
+  private valueIsolated(node: ast.JsxElement | ast.JsxSelfClosingElement | ast.JsxFragment): string {
     const local: string[] = []
     const v = this.value(node, local)
     if (!local.length) return v
@@ -248,8 +248,8 @@ class Compiler {
   }
 
   /** 任意 JSX 节点 → 一个表达式的值（元素 / 组件 / 片段）。 */
-  private value(node: ts.JsxElement | ts.JsxSelfClosingElement | ts.JsxFragment, stmts: string[]): string {
-    if (ts.isJsxFragment(node)) {
+  private value(node: ast.JsxElement | ast.JsxSelfClosingElement | ast.JsxFragment, stmts: string[]): string {
+    if (ast.isJsxFragment(node)) {
       // ⚠ 片段成员的动态部分必须包成惰性槽：片段没有父节点，绑定只能等插入后再建
       const parts = node.children.map((c) => this.childValue(c, true)).filter((v): v is string => !!v)
       return parts.length === 0 ? 'null' : parts.length === 1 ? parts[0] : `[${parts.join(', ')}]`
@@ -258,16 +258,16 @@ class Compiler {
     return /^[A-Z]/.test(tag) || tag.includes('.') ? this.component(node) : this.element(node, stmts)
   }
 
-  private tagOf(node: ts.JsxElement | ts.JsxSelfClosingElement): string {
-    return this.srcOf(ts.isJsxElement(node) ? node.openingElement.tagName : node.tagName)
+  private tagOf(node: ast.JsxElement | ast.JsxSelfClosingElement): string {
+    return this.srcOf(ast.isJsxElement(node) ? node.openingElement.tagName : node.tagName)
   }
 
   // ── 组件 ─────────────────────────────────────────────────────────────────
-  private component(node: ts.JsxElement | ts.JsxSelfClosingElement): string {
-    const opening = ts.isJsxElement(node) ? node.openingElement : node
+  private component(node: ast.JsxElement | ast.JsxSelfClosingElement): string {
+    const opening = ast.isJsxElement(node) ? node.openingElement : node
     const props: string[] = []
     for (const attr of opening.attributes.properties) {
-      if (ts.isJsxSpreadAttribute(attr)) throw new Error('组件上的 {...spread} 未支持（项目里没有这种写法）')
+      if (ast.isJsxSpreadAttribute(attr)) throw new Error('组件上的 {...spread} 未支持（项目里没有这种写法）')
       const name = this.srcOf(attr.name)
       this.checkDirective(attr, name)
       this.claimKey(attr, name) // `.map` 认领过的 key 由 createFor 取走；没认领过的直接抛错
@@ -277,11 +277,11 @@ class Compiler {
         props.push(`${name}: true`)
         continue
       }
-      if (ts.isStringLiteral(init)) {
+      if (ast.isStringLiteral(init)) {
         props.push(`${JSON.stringify(name)}: ${JSON.stringify(init.text)}`)
         continue
       }
-      if (ts.isJsxExpression(init) && init.expression) {
+      if (ast.isJsxExpression(init) && init.expression) {
         // 动态 prop = getter（同 Solid）。⚠ 值里可能直接是 JSX
         // （`<EmptyState action={<button …/>} />` 在本项目里就有），必须递归编译掉
         props.push(`get ${JSON.stringify(name)}() { return ${this.exprWithJsx(init.expression)} }`)
@@ -290,7 +290,7 @@ class Compiler {
       throw new Error(`不支持的组件属性：${name}`)
     }
     const slots: string[] = []
-    if (ts.isJsxElement(node) && node.children.length) {
+    if (ast.isJsxElement(node) && node.children.length) {
       const parts = node.children.map((c) => this.childValue(c)).filter((v): v is string => !!v)
       slots.push(`default: () => ${parts.length === 0 ? 'null' : parts.length === 1 ? parts[0] : `[${parts.join(', ')}]`}`)
     }
@@ -305,16 +305,16 @@ class Compiler {
    * 产物里就留着 JSX ⇒ 下游解析器直接报 `Unexpected JSX expression`
    * （实测 app.tsx 的根返回就是这个形状）。
    */
-  private exprWithJsx(node: ts.Node): string {
-    const base = node.getStart(this.sf)
+  private exprWithJsx(node: ast.Node): string {
+    const base = ast.getStart(node)
     const edits: { start: number; end: number; text: string }[] = []
-    const walk = (n: ts.Node, inJsx: boolean) => {
-      const isJsx = ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n) || ts.isJsxFragment(n)
+    const walk = (n: ast.Node, inJsx: boolean) => {
+      const isJsx = ast.isJsxElement(n) || ast.isJsxSelfClosingElement(n) || ast.isJsxFragment(n)
       if (isJsx && !inJsx) {
-        edits.push({ start: n.getStart(this.sf) - base, end: n.getEnd() - base, text: this.valueIsolated(n) })
+        edits.push({ start: ast.getStart(n) - base, end: ast.getEnd(n) - base, text: this.valueIsolated(n) })
         return
       }
-      ts.forEachChild(n, (c) => walk(c, inJsx || isJsx))
+      ast.forEachChild(n, (c) => walk(c, inJsx || isJsx))
     }
     walk(node, false)
     if (!edits.length) return this.srcOf(node)
@@ -327,12 +327,12 @@ class Compiler {
    * 组件子节点 / 片段成员：拿一个"值"（文本要自己造节点）。
    * `slot = true` 时把动态成员包成惰性槽（只有片段需要，见 runtime 的 `lazySlot`）。
    */
-  private childValue(child: ts.JsxChild, slot = false): string | undefined {
-    if (ts.isJsxText(child)) {
+  private childValue(child: ast.JsxChild, slot = false): string | undefined {
+    if (ast.isJsxText(child)) {
       const t = jsxText(child.text)
       return t ? `document.createTextNode(${JSON.stringify(t)})` : undefined
     }
-    if (ts.isJsxExpression(child)) {
+    if (ast.isJsxExpression(child)) {
       if (!child.expression) return undefined
       if (isNullish(child.expression)) return undefined
       const e = this.exprWithJsx(child.expression)
@@ -342,7 +342,7 @@ class Compiler {
   }
 
   // ── 内置元素（静态 HTML + 绑定表）─────────────────────────────────────────
-  private element(node: ts.JsxElement | ts.JsxSelfClosingElement, stmts: string[]): string {
+  private element(node: ast.JsxElement | ast.JsxSelfClosingElement, stmts: string[]): string {
     const built = this.html(node, stmts, [])
     const tpl = this.tpl(built.html)
     const rootVar = `_n0`
@@ -355,14 +355,14 @@ class Compiler {
    * 生成静态 HTML 与绑定表。动态位置**不产出任何节点** —— 插入时以"后面那个静态兄弟"
    * 为锚点（Solid 的做法），所以 HTML 里不会多出占位节点。
    */
-  private html(node: ts.JsxElement | ts.JsxSelfClosingElement, stmts: string[], base: Path): Built {
-    const opening = ts.isJsxElement(node) ? node.openingElement : node
+  private html(node: ast.JsxElement | ast.JsxSelfClosingElement, stmts: string[], base: Path): Built {
+    const opening = ast.isJsxElement(node) ? node.openingElement : node
     const tag = this.tagOf(node)
     if (/^[A-Z]/.test(tag) || tag.includes('.')) throw new Error('组件只能出现在动态子节点位置')
     const attrs: string[] = []
     const own: Binding[] = []
     for (const attr of opening.attributes.properties) {
-      if (ts.isJsxSpreadAttribute(attr)) {
+      if (ast.isJsxSpreadAttribute(attr)) {
         own.push({ kind: 'spread', at: [], expr: this.srcOf(attr.expression) })
         continue
       }
@@ -377,11 +377,11 @@ class Compiler {
         attrs.push(name)
         continue
       }
-      if (ts.isStringLiteral(init)) {
+      if (ast.isStringLiteral(init)) {
         attrs.push(`${name}="${escAttr(init.text)}"`)
         continue
       }
-      if (ts.isJsxExpression(init) && init.expression) {
+      if (ast.isJsxExpression(init) && init.expression) {
         /**
          * 字符串/数字字面量**直接折进模板串**（Vapor 也这么做）：既少一次运行期写入，
          * 又让属性顺序与 Vue 一致 —— 静态属性在模板里按源码顺序排，动态属性由 setter
@@ -406,7 +406,7 @@ class Compiler {
       throw new Error(`不支持的属性：${name}`)
     }
 
-    const children = ts.isJsxElement(node) ? node.children : []
+    const children = ast.isJsxElement(node) ? node.children : []
     const parts: string[] = []
     const childBindings: Binding[] = []
     /** 本元素里的动态子节点（占位注释 + 铺节点），登记完统一追加到 `childBindings`。 */
@@ -451,7 +451,7 @@ class Compiler {
     }
 
     for (const child of children) {
-      if (ts.isJsxText(child)) {
+      if (ast.isJsxText(child)) {
         const t = jsxText(child.text)
         if (!t) continue
         parts.push(escText(t))
@@ -460,7 +460,7 @@ class Compiler {
         textTail = true
         continue
       }
-      if (ts.isJsxExpression(child)) {
+      if (ast.isJsxExpression(child)) {
         if (!child.expression) continue
         const lit = literalHtml(child.expression)
         if (lit !== undefined) {
@@ -476,7 +476,7 @@ class Compiler {
       }
       // 组件 / 片段：不是静态结构 ⇒ 走"动态插入"（Solid 也是 insert(parent, createComponent(…), anchor)）。
       // 这是本项目最常见的写法之一：`<Panel>…</Panel>` 直接放在元素里。
-      if (ts.isJsxFragment(child) || /^[A-Z]/.test(this.tagOf(child)) || this.tagOf(child).includes('.')) {
+      if (ast.isJsxFragment(child) || /^[A-Z]/.test(this.tagOf(child)) || this.tagOf(child).includes('.')) {
         dynChild({ kind: 'nodes', parent: [...base], anchor: null, expr: `() => ${this.valueIsolated(child)}` })
         continue
       }
@@ -542,32 +542,32 @@ class Compiler {
    * 其余形状（`xs.map(f).join(',')` 这种不返回 JSX 的、解构参数、参数多于两个）同样返回
    * `undefined` ⇒ 走通用路径（整表重建，语义仍然对）。
    */
-  private mapCallback(fn: ts.Expression): { fn: ts.ArrowFunction | ts.FunctionExpression; expr: ts.Expression } | undefined {
-    if (!(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) return undefined
+  private mapCallback(fn: ast.Expression): { fn: ast.ArrowFunction | ast.FunctionExpression; expr: ast.Expression } | undefined {
+    if (!(ast.isArrowFunction(fn) || ast.isFunctionExpression(fn))) return undefined
     const ps = fn.parameters
-    if (ps.length < 1 || ps.length > 2 || ps.some((p) => !ts.isIdentifier(p.name))) return undefined
+    if (ps.length < 1 || ps.length > 2 || ps.some((p) => !ast.isIdentifier(p.name))) return undefined
     // 块体一律不认（见上面那段）
-    if (ts.isBlock(fn.body)) return undefined
-    const e = ts.isParenthesizedExpression(fn.body) ? fn.body.expression : fn.body
+    if (ast.isBlock(fn.body)) return undefined
+    const e = ast.isParenthesizedExpression(fn.body) ? fn.body.expression : fn.body
     return { fn, expr: e }
   }
 
   /** 一个动态子节点的绑定。返回值只可能是 `nodes` / `for`（两者都是"往父节点里铺一批节点"）。 */
-  private dynamic(child: ts.JsxExpression, stmts: string[], at: Path): Extract<Binding, { kind: 'nodes' | 'for' }> {
-    const e = child.expression as ts.Expression
+  private dynamic(child: ast.JsxExpression, stmts: string[], at: Path): Extract<Binding, { kind: 'nodes' | 'for' }> {
+    const e = child.expression as ast.Expression
     const parent = at.slice(0, -1)
     // {cond ? <A/> : null} ⇒ setNodes(parent, () => cond ? A() : null, anchor)（Solid 同款，不需要 createIf）
     // ⚠ 只有**两个分支都是 JSX 或 null** 时才走这条精确路径；否则落到下面的通用路径
     // （分支是普通表达式的三元，项目里也有 —— 那里靠 exprWithJsx 递归处理 JSX）
-    const branchOk = (x: ts.Expression) => isNullish(x) || ts.isJsxElement(x) || ts.isJsxSelfClosingElement(x) || ts.isJsxFragment(x)
-    if (ts.isConditionalExpression(e) && hasJsx(e) && branchOk(e.whenTrue) && branchOk(e.whenFalse)) {
+    const branchOk = (x: ast.Expression) => isNullish(x) || ast.isJsxElement(x) || ast.isJsxSelfClosingElement(x) || ast.isJsxFragment(x)
+    if (ast.isConditionalExpression(e) && hasJsx(e) && branchOk(e.whenTrue) && branchOk(e.whenFalse)) {
       const cond = this.srcOf(e.condition)
       const a = isNullish(e.whenTrue) ? 'null' : this.branch(e.whenTrue)
       const b = isNullish(e.whenFalse) ? 'null' : this.branch(e.whenFalse)
       return { kind: 'nodes', parent, anchor: null, expr: `() => ${cond} ? ${a} : ${b}` }
     }
     // {list.map((x) => <Row/>)} ⇒ createFor
-    if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && e.expression.name.text === 'map' && e.arguments.length === 1) {
+    if (ast.isCallExpression(e) && ast.isPropertyAccessExpression(e.expression) && e.expression.name.text === 'map' && e.arguments.length === 1) {
       const cb = this.mapCallback(e.arguments[0])
       // 回调不返回 JSX 的 `.map`（例如 `{xs.map(f).join(',')}`）不是列表，交给普通表达式路径
       if (cb && isJsxNode(cb.expr)) {
@@ -575,10 +575,10 @@ class Compiler {
         const a = this.srcOf(cb.fn.parameters[0].name)
         const b = cb.fn.parameters.length > 1 ? this.srcOf(cb.fn.parameters[1].name) : '_i'
         let key: string | undefined
-        if (!ts.isJsxFragment(cb.expr)) {
-          const opening = ts.isJsxElement(cb.expr) ? cb.expr.openingElement : cb.expr
+        if (!ast.isJsxFragment(cb.expr)) {
+          const opening = ast.isJsxElement(cb.expr) ? cb.expr.openingElement : cb.expr
           for (const attr of opening.attributes.properties) {
-            if (ts.isJsxAttribute(attr) && this.srcOf(attr.name) === 'key' && attr.initializer && ts.isJsxExpression(attr.initializer) && attr.initializer.expression) {
+            if (ast.isJsxAttribute(attr) && this.srcOf(attr.name) === 'key' && attr.initializer && ast.isJsxExpression(attr.initializer) && attr.initializer.expression) {
               key = this.srcOf(attr.initializer.expression)
               // ⚠ 登记它：随后编译这一行时 `html()`/`component()` 会来认领这个 `key`，
               // 认领不到就抛错（见 `claimKey`）。没登记 = 这根本不是 `.map` 直接返回的那个元素。
@@ -592,7 +592,7 @@ class Compiler {
           kind: 'for',
           parent,
           anchor: null,
-          list: this.srcOf((e.expression as ts.PropertyAccessExpression).expression),
+          list: this.srcOf((e.expression as ast.PropertyAccessExpression).expression),
           params: [a, b],
           item,
           key,
@@ -605,8 +605,8 @@ class Compiler {
     return { kind: 'nodes', parent, anchor: null, expr: `() => ${this.exprWithJsx(e)}` }
   }
 
-  private branch(e: ts.Expression): string {
-    if (ts.isJsxElement(e) || ts.isJsxSelfClosingElement(e) || ts.isJsxFragment(e)) return this.root(e)
+  private branch(e: ast.Expression): string {
+    if (ast.isJsxElement(e) || ast.isJsxSelfClosingElement(e) || ast.isJsxFragment(e)) return this.root(e)
     throw new Error('条件分支只支持 JSX 或 null')
   }
 
@@ -714,15 +714,15 @@ class Compiler {
 }
 
 // ── 小工具 ────────────────────────────────────────────────────────────────
-const isNullish = (e: ts.Expression) => e.kind === ts.SyntaxKind.NullKeyword || e.kind === ts.SyntaxKind.FalseKeyword || (ts.isIdentifier(e) && e.text === 'undefined')
+const isNullish = (e: ast.Expression) => e.kind === ast.SyntaxKind.NullKeyword || e.kind === ast.SyntaxKind.FalseKeyword || (ast.isIdentifier(e) && e.text === 'undefined')
 
-const isLiteral = (e: ts.Expression) => ts.isStringLiteral(e) || ts.isNumericLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e) || e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword || isNullish(e)
+const isLiteral = (e: ast.Expression) => ast.isStringLiteral(e) || ast.isNumericLiteral(e) || ast.isNoSubstitutionTemplateLiteral(e) || e.kind === ast.SyntaxKind.TrueKeyword || e.kind === ast.SyntaxKind.FalseKeyword || isNullish(e)
 
-function hasJsx(e: ts.Expression): boolean {
-  return ts.isJsxElement(e) || ts.isJsxSelfClosingElement(e) || ts.isJsxFragment(e) || (ts.isConditionalExpression(e) && (hasJsx(e.whenTrue) || hasJsx(e.whenFalse)))
+function hasJsx(e: ast.Expression): boolean {
+  return ast.isJsxElement(e) || ast.isJsxSelfClosingElement(e) || ast.isJsxFragment(e) || (ast.isConditionalExpression(e) && (hasJsx(e.whenTrue) || hasJsx(e.whenFalse)))
 }
 
-const isJsxNode = (n: ts.Node) => ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n) || ts.isJsxFragment(n)
+const isJsxNode = (n: ast.Node) => ast.isJsxElement(n) || ast.isJsxSelfClosingElement(n) || ast.isJsxFragment(n)
 
 /**
  * 这一段代码里**读了**某个变量名吗（用来决定列表行是否"位置敏感"）。
@@ -734,22 +734,22 @@ const isJsxNode = (n: ts.Node) => ts.isJsxElement(n) || ts.isJsxSelfClosingEleme
  * 漏判则会把「第 3 步」这种步号留在旧位置上。所以除了上面那三处**明确不算**，
  * 其余一律算读了（包括嵌套箭头里 `() => move(i)`）。
  */
-function readsIdent(node: ts.Node, name: string): boolean {
-  if (ts.isIdentifier(node)) return node.text === name
-  if (ts.isPropertyAccessExpression(node)) return readsIdent(node.expression, name)
-  if (ts.isJsxAttribute(node)) return !!node.initializer && readsIdent(node.initializer, name)
-  if (ts.isPropertyAssignment(node)) return readsIdent(node.initializer, name)
+function readsIdent(node: ast.Node, name: string): boolean {
+  if (ast.isIdentifier(node)) return node.text === name
+  if (ast.isPropertyAccessExpression(node)) return readsIdent(node.expression, name)
+  if (ast.isJsxAttribute(node)) return !!node.initializer && readsIdent(node.initializer, name)
+  if (ast.isPropertyAssignment(node)) return readsIdent(node.initializer, name)
   let found = false
-  ts.forEachChild(node, (c) => {
+  ast.forEachChild(node, (c) => {
     if (!found && readsIdent(c, name)) found = true
   })
   return found
 }
 
-function literalHtml(e: ts.Expression): string | undefined {
-  if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) return escText(e.text)
-  if (ts.isNumericLiteral(e)) return escText(e.text)
-  if (isNullish(e) || e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword) return ''
+function literalHtml(e: ast.Expression): string | undefined {
+  if (ast.isStringLiteral(e) || ast.isNoSubstitutionTemplateLiteral(e)) return escText(e.text)
+  if (ast.isNumericLiteral(e)) return escText(e.text)
+  if (isNullish(e) || e.kind === ast.SyntaxKind.TrueKeyword || e.kind === ast.SyntaxKind.FalseKeyword) return ''
   return undefined
 }
 
@@ -760,38 +760,39 @@ function literalHtml(e: ts.Expression): string | undefined {
  * 为什么要单独判一句：不判的话 `compile` 会照常产出一段**残缺的**代码 —— 实测
  * `<div @click={f}>x</div>`（Vue 的事件简写，TSX 里非法）编出来是
  * `const A = () => (() => { … })() @click={f}>x</div>`，也就是把元素吃掉、把余下的
- * 原文当尾巴留下。下游 esbuild 确实会报错，但那句 `Unexpected token` 与本文件
+ * 原文当尾巴留下。下游转换器确实会报错，但那句 `Unexpected token` 与本文件
  * 隔着好几层，看着像编译器的 bug。先在这里拦，报的是"你这一行写错了"。
  */
-const parseError = (sf: ts.SourceFile): string | undefined => {
-  const list = (sf as unknown as { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics
-  const d = list?.[0]
+const parseError = (sf: ast.SourceFile): string | undefined => {
+  // oxc 的 errors 是语法错误列表（`@click` 那类"TSX 本身就解析不过"的写法在这里）：
+  // 每条带 message 与出错区间（labels），行号自己从偏移量数出来。
+  const d = sf.errors[0]
   if (!d) return undefined
-  const line = d.file ? ts.getLineAndCharacterOfPosition(d.file, d.start ?? 0).line + 1 : 0
-  return `[lite] ${sf.fileName.replace(/^.*[\\/]/, '')}:${line} 源码解析失败：${ts.flattenDiagnosticMessageText(d.messageText, ' ')}（TSX 里没有 Vue 的 @click / v-if：事件写 onClick，条件用三元）`
+  const line = ast.lineOf(sf, d.labels?.[0]?.start ?? 0) + 1
+  return `[lite] ${sf.fileName.replace(/^.*[\\/]/, '')}:${line} 源码解析失败：${d.message}（TSX 里没有 Vue 的 @click / v-if：事件写 onClick，条件用三元）`
 }
 
 /** 编译一个 TSX 源文件。 */
 export function compile(source: string, options: { runtime?: string; filename?: string } = {}): CompileResult {
   const runtime = options.runtime ?? '../src/index'
-  const sf = ts.createSourceFile(options.filename ?? 'x.tsx', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TSX)
+  const sf = ast.parse(source, options.filename ?? 'x.tsx')
   const bad = parseError(sf)
   if (bad) throw new Error(bad)
   const c = new Compiler(sf, source, runtime)
   const edits: { start: number; end: number; text: string }[] = []
 
-  const visit = (node: ts.Node, inJsx: boolean): void => {
-    const isJsx = ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node) || ts.isJsxFragment(node)
+  const visit = (node: ast.Node, inJsx: boolean): void => {
+    const isJsx = ast.isJsxElement(node) || ast.isJsxSelfClosingElement(node) || ast.isJsxFragment(node)
     if (isJsx && !inJsx) {
-      edits.push({ start: node.getStart(sf), end: node.getEnd(), text: c.root(node) })
+      edits.push({ start: ast.getStart(node), end: ast.getEnd(node), text: c.root(node) })
       return
     }
     // ⚠ 属性上的检查不放在这里：命中**根** JSX 节点就 `return` 了，子节点根本走不到这一层，
     // 放在这儿的那句 `v-if` 拦截从来没生效过（`regress/compiler.mjs` 的负例把它抓出来了）。
     // 指令式属性由 `Compiler.checkDirective` 在认属性名的两个入口（组件 / 元素）拦。
-    ts.forEachChild(node, (child) => visit(child, inJsx || isJsx))
+    ast.forEachChild(node, (child) => visit(child, inJsx || isJsx))
   }
-  visit(sf, false)
+  visit(sf.program, false)
 
   let out = source
   for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + e.text + out.slice(e.end)
