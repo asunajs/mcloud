@@ -83,6 +83,20 @@ export default () => {
   const page = ref<PageId>(parseHash(location.hash))
   const theme = ref<Theme>(currentTheme())
   const drawerOpen = ref(false)
+  /**
+   * PC 上是否把侧边栏折成"图标轨道"（用户口径 2026-10-02：「pc端可以折叠侧边栏，点击logo展开」）。
+   *
+   * ⚠ 只管 PC：折叠那几段样式整段套在 `@media (min-width: 64rem)` 里
+   * （见 app.css「PC 侧边栏折叠」一节）。移动端是抽屉，由上面那条 checkbox 控制，
+   * 两者互不干扰 —— 所以移动端点 logo 不会有反应，那是**对的**。
+   *
+   * ⚠ 偏好存 localStorage：折叠是"我就这么用"的习惯，刷新一次就弹回来会让人反复折。
+   */
+  const sidebarRail = ref(localStorage.getItem('mcloud-sidebar') === 'rail')
+  const toggleSidebar = () => {
+    sidebarRail.value = !sidebarRail.value
+    localStorage.setItem('mcloud-sidebar', sidebarRail.value ? 'rail' : 'full')
+  }
 
   /** 后端自述。三态：还没问 / 问到了 / 问不到。 */
   const backend = ref<ServiceStatus | null>(null)
@@ -356,7 +370,8 @@ export default () => {
           onFocus={() => prefetch(id)}
         >
           <Icon class="size-[1.15em]" />
-          {item.label}
+          {/* 折成图标轨道时这行藏起来（只留图标）。类名是字面量，不拼接。 */}
+          <span class="rail-hide">{item.label}</span>
         </button>
       </li>
     )
@@ -406,7 +421,7 @@ export default () => {
       {authGate()}
 
       {authState.value !== 'ready' ? null : (
-    <div class="drawer lg:drawer-open">
+    <div class={`drawer lg:drawer-open ${sidebarRail.value ? 'rail' : ''}`}>
       {/*
         drawer-toggle 是 checkbox，靠 <label for> 驱动 —— 不用 JS 控制显隐。
         ⚠ `drawer-open` 是"大屏常驻分栏"的 modifier，**不是**"当前展开"；
@@ -504,12 +519,24 @@ export default () => {
         <label for="nav-drawer" class="drawer-overlay" aria-label="关闭导航菜单" />
         <div class="flex min-h-full w-64 flex-col bg-base-100">
           <div class="flex items-center justify-between gap-2 p-3">
-            <span class="flex items-center gap-2 px-1">
+            {/*
+              点 logo 折叠 / 展开侧边栏（用户口径 2026-10-02）。
+              ⚠ 它在移动端点了没反应，是对的设计：折叠那几段样式只在 lg 以上生效，
+              移动端这里是抽屉，收起靠遮罩或右边那个 ✕。
+            */}
+            <button
+              type="button"
+              class="rail-logo flex items-center gap-2 rounded-field px-1"
+              title={sidebarRail.value ? '展开侧边栏' : '折叠侧边栏'}
+              aria-label={sidebarRail.value ? '展开侧边栏' : '折叠侧边栏'}
+              aria-expanded={!sidebarRail.value}
+              onClick={() => toggleSidebar()}
+            >
               <span class="text-primary">
                 <IconBrand class="size-5" />
               </span>
-              <span class="font-medium">mcloud</span>
-            </span>
+              <span class="rail-hide font-medium">mcloud</span>
+            </button>
             <label
               for="nav-drawer"
               class="btn btn-square btn-ghost btn-sm drawer-button lg:hidden"
@@ -526,11 +553,11 @@ export default () => {
           <div class="border-t border-base-300 p-3 text-xs leading-5">
             <div class="flex items-center gap-2 px-1">
               <span class={backendDot()} aria-hidden="true" />
-              <span class="font-medium">{backendHead()}</span>
+              <span class="rail-hide font-medium">{backendHead()}</span>
             </div>
-            {backendLine2() ? <div class="px-1 opacity-70">{backendLine2()}</div> : null}
+            {backendLine2() ? <div class="rail-hide px-1 opacity-70">{backendLine2()}</div> : null}
             {currentUser.value ? (
-              <div class="px-1 opacity-70">以 {currentUser.value} 的身份</div>
+              <div class="rail-hide px-1 opacity-70">以 {currentUser.value} 的身份</div>
             ) : null}
           </div>
         </div>

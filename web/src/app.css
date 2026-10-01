@@ -1442,3 +1442,60 @@ main,
 .drawer-side {
   overscroll-behavior: contain;
 }
+
+/* ── 小屏（抽屉）：导航条目**垂直居中** ─────────────────────────────────────
+   用户口径（2026-10-02）：「移动端侧边栏没有垂直居中」。
+   实测 375 宽下菜单块 669px、9 条只占 432px ⇒ 条目全挤在顶部、下面空 230px。
+
+   ⚠ `safe center` 里的 `safe` 不能省：条目放得下时居中，**放不下时退回顶部**
+     （只用 `center` 的话，条目高于可用高度时顶部会被裁掉而且滚不到 —— CSS 老坑）。
+   ⚠ 只管小屏：PC 上侧栏可以折成图标轨道，居中反而怪。 */
+@media (max-width: 63.999rem) {
+  .drawer-side ul.menu {
+    justify-content: safe center;
+  }
+  /* 条目**内容**也居中（用户口径 2026-10-02，附图指着"总览"那一行说「这个居中」）：
+     窄屏抽屉本来只有那 9 个入口，左对齐会让图标+文字挤在左边、右边空一大片。
+     ⚠ `.menu li > button` 是 grid（3 列自动列），要先把列压成一列再居中，
+       否则 `justify-content` 会按那几列去分配、看着还是偏左。 */
+  .drawer-side .menu li > button {
+    grid-auto-columns: auto;
+    justify-content: center;
+  }
+}
+
+/* ── PC 侧边栏折叠成"图标轨道" ─────────────────────────────────────────────
+   用户口径（2026-10-02）：「pc端可以折叠侧边栏，点击logo展开」。
+   点侧栏顶部的 logo 切换（见 app.tsx 的 `toggleSidebar`），状态存 localStorage。
+
+   ⚠ 整段只在 lg 以上生效 ⇒ 移动端抽屉完全不受影响。
+   ⚠ 这一节**不放进 `@layer`**（和第 1171 行那批 drawer 规则不同）：
+     要盖掉面板上的 `w-64` 工具类，未分层的规则才压得住 Tailwind 4 的 utilities 层。 */
+@media (min-width: 64rem) {
+  .drawer.rail .drawer-side > div {
+    width: 4.5rem; /* 72px：放得下 24px 图标 + 两侧留白 */
+  }
+  /* 收起时只留图标：品牌名、导航标签、底部状态文字一律藏掉 */
+  .drawer.rail .drawer-side .rail-hide {
+    display: none;
+  }
+  /* 导航条目居中（`.menu li > button` 是 grid，得把它那几列压成一列） */
+  .drawer.rail .drawer-side .menu li > button {
+    grid-auto-columns: auto;
+    justify-content: center;
+    padding-inline: 0;
+  }
+  /* 品牌区 / 底部状态区也居中 */
+  .drawer.rail .drawer-side > div > div:first-child,
+  .drawer.rail .drawer-side > div > div:last-child {
+    justify-content: center;
+    padding-inline: 0;
+  }
+  .drawer.rail .rail-logo {
+    justify-content: center;
+  }
+  /* 折叠时别让"点我展开"全靠猜：hover 给一点反馈 */
+  .drawer.rail .rail-logo:hover {
+    background-color: color-mix(in oklab, var(--color-base-content) 10%, transparent);
+  }
+}
