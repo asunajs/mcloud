@@ -321,27 +321,20 @@ const groupViews = (prizes: ExchangePrizeView[]): PrizeGroupView[] =>
 /**
  * tab 栏的一项。
  *
- * 计数写成 **`可兑/共`**（`3/7`）：一眼看出"这个组里有没有我现在能兑的"，
- * 而"全部"那一项给的是整份清单的同一个比值。
+ * ⚠ **刻意不带计数徽章**。第一版每个 tab 后面挂了 `可兑/共`（`13/17`），
+ * 用户口径（2026-10-01，附截图）：「用户其实并不理解后面的数字，甚至也不关心他是啥」。
+ * 那些数字只是噪声 —— "哪一组里有我能兑的"这件事**折叠状态本来就说了**：
+ * 有可兑件的组默认展开、整组不可兑的默认收起，扫一眼就知道。
  */
 interface GroupTab {
   key: string
   label: string
-  count: string
 }
 
-const groupTabs = (prizes: ExchangePrizeView[]): GroupTab[] => {
-  const groups = groupViews(prizes)
-  const openAll = groups.reduce((n, g) => n + g.open.length, 0)
-  return [
-    { key: 'all', label: '全部', count: `${openAll}/${prizes.length}` },
-    ...groups.map((g) => ({
-      key: g.key,
-      label: groupTitle(g),
-      count: `${g.open.length}/${g.items.length}`,
-    })),
-  ]
-}
+const groupTabs = (prizes: ExchangePrizeView[]): GroupTab[] => [
+  { key: 'all', label: '全部' },
+  ...groupViews(prizes).map((g) => ({ key: g.key, label: groupTitle(g) })),
+]
 
 /**
  * 一个分区的标题栏：组名（**上游给的**）+ 该组限兑规则（上游原话）+ 件数
@@ -765,26 +758,27 @@ export const ExchangePage = () => {
         // 直接把 `.map(...)` 当分支放，`key` 就不会被认领（报"这个 key 什么都不做"）。
         <div class="flex flex-col gap-4">
           {/*
-            分组 tab：一次只看一组（另有「全部」）。计数是 `可兑/共` —— 一眼看出哪组有戏。
-            窄屏下横向滚动、**单行**：`flex-nowrap!` 那个 `!` 是必须的 —— daisyUI 的
-            `.tabs` 在组件层写了 `flex-wrap: wrap`（而且它藏在 `@layer` 里，普通工具类盖不掉
-            —— 技能规则 3 的场景）；`flex` 也是显式给的，不靠 `.tabs` 自己那层 display。
+            分组 tab：一次只看一组（另有「全部」）。**只有一个组名，没有数字**
+            —— 用户口径（2026-10-01，附截图）：「用户其实并不理解后面的数字，甚至也不关心他是啥」。
+
+            ⚠⚠ 为什么不用 daisyUI 的 `tabs` / `tab` 类：本项目的 `app.css` 把 `tab` 放进了
+            `@plugin "daisyui"` 的 **exclude 清单**（它已经换成本仓自建实现）。
+            排除掉的组件**样式会静默消失** —— 实测 `.tab` 的 padding / 边框 / `::after`
+            全是 0 / none，界面退化成"一串连在一起的纯文字"，正是用户说的"比较丑"。
+            项目自己那套等价物是 **`join` + `btn join-item`**（见 `tasks-page.tsx` 的任务分组 tab），
+            这里照用同一套词汇，全站一致、也不多花一个字节的 CSS。
           */}
-          <div role="tablist" class="tabs tabs-box tabs-sm flex w-full flex-nowrap! overflow-x-auto">
+          <div role="tablist" class="join w-full overflow-x-auto" aria-label="奖品分组">
             {groupTabs(list.value.prizes).map((t) => (
               <button
                 key={t.key}
                 type="button"
                 role="tab"
-                class={
-                  t.key === activeGroup.value
-                    ? 'tab tab-active whitespace-nowrap'
-                    : 'tab whitespace-nowrap'
-                }
+                aria-selected={t.key === activeGroup.value}
+                class={`btn join-item btn-sm min-h-11 whitespace-nowrap md:min-h-0 ${t.key === activeGroup.value ? 'btn-primary' : 'btn-soft'}`}
                 onClick={() => (activeGroup.value = t.key)}
               >
                 {t.label}
-                <span class="badge badge-xs ml-1">{t.count}</span>
               </button>
             ))}
           </div>
