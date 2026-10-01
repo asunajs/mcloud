@@ -6,10 +6,11 @@
 
 ## 状态
 
-**已落地 20 个任务**：P1 签到族八条（`sign` / `receive` / `multiple` /
+**已落地 20 个任务，其中 19 条在注册表里**（`/api/capabilities` 返回的就是这 19 条）：
+P1 签到族八条（`sign` / `receive` / `multiple` /
 `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`）
 + 直播小红花两条（`live-room` / `red-flower`）
-+ 兑换（`exchange`）+ 消息推送（`msg-push`）
++ 消息推送（`msg-push`）
 + 趣玩AI抽奖（`fun-ai`）+ 公告任务（`notice`）
 + 拍拍盘点（`play-ai-special`，**只读**）
 + App 任务矩阵（`app-task-matrix`，**只读**）
@@ -21,6 +22,13 @@
   ✅ 「下载合成图 → upload」已接通：`mcloud_core::HttpClient::request_raw` 给原始字节（不经有损 UTF-8 解码），
   两层装饰器（`SmidClient` / `H5Client`）都转发，字节一路到 leaf；任务层做形状校验 + base64。
   唯一保留的缺口：**需要会话的主机**走 `request_raw` 会**明确报错**（不静默退到有损路径）。
+
+> ⚠ **`exchange`（兑换）的实现还在，但已从 `register_all` 摘掉，不算「对外可用」**：
+> 它**不在** `/api/capabilities`、也**不能**经 `POST /api/runs` 跑；专用入口
+> `POST /api/accounts/{id}/exchange` 会如实回一句「任务池里没有 exchange」。
+> 摘它的原因（缺 `deviceId` 来源 / `visitlog` 预热 / 等待档对齐）记在
+> `crates/mcloud-tasks/src/lib.rs` 的 `register_all` 说明里。
+> ⇒ 兑换页今天**读得到奖品清单、点不下单**（下单那条链会明确报错，不是静默什么都不发生）。
 
 **`task-expansion`（2026-09-28 落地）—— 第一条"写网盘并自己收尾"的任务**：
 

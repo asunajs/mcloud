@@ -66,7 +66,7 @@ pub use login::{
 /// 摘掉注册就摘掉了"对外宣称"这件事。哨兵见文末
 /// `tests::register_all_does_not_expose_exchange`。
 ///
-/// # 红包派对 `cloud-phone-redpack`（**今天只读**）
+/// # 红包派对 `cloud-phone-redpack`（**全链会写**）
 ///
 /// 它与上面几条**性质不同**：签到族 / 小红花族共用 `H5Client` 的网盘侧凭证，
 /// 而这一条要**自己换一套票** —— `GET .../cloud/userdomain/v2/querySpecToken`
@@ -74,24 +74,33 @@ pub use login::{
 /// 网盘 `authorization` / H5 `jwttoken` / 活动站 `token` 是三套东西，
 /// **不能互相顶替**（协议层 `cloud_phone_redpack` 模块开头有对照表）。
 ///
-/// ⚠ 这一趟**四枪全是只读**：换票两枪 + 任务表 + 余额。写入侧那 7 条
-/// （`userSign` / `userCompleteTask` / …）的判据在协议层已落定，但接进
-/// 编排层是**另一个**可验证单元（每条写都要先按 `userStatus` 判定该不该发、
-/// 同一 `taskCode` 一次运行最多发一次）—— 所以 title 与 `summary_line`
-/// 都明写「盘点 / 只读」：不做的事不假装做。
+/// ⚠ **它是会写的，别按「只读」读它**：换票两枪 + 任务表 + 余额是只读，
+/// 但编排层已经接上写入侧那 7 条（`userSign` / `userCompleteTask` /
+/// `userBrowse` / `userTopicAnswer` / `apkInstall` / `userInstallApp`，
+/// 外加有副作用的 `getRcsToken`）。两条硬要求：每条写先按 `userStatus`
+/// 判定该不该发（读到没见过的状态码归 Unknown、**不发**，旧 TS 会发）；
+/// 同一 `taskCode` 一次运行最多发一次。`summary_line` 会如实报
+/// 「本趟写请求 N 条」—— 不假装没做、也不假装做过。
 ///
-/// # AI 头像 `ai-avatar`（**默认关**，而且生成链今天断在下载那一枪）
+/// 历史形态（**今天不成立**）：编排层只接了那几枪读请求时，title 与
+/// `summary_line` 曾明写「盘点 / 只读」。
+///
+/// # AI 头像 `ai-avatar`（**默认关**，生成链已接通）
 ///
 /// 它是一条**会写**的链（合成、抽奖、往网盘写图），所以默认 `false`
 /// （`account.rs:184`）；开关关掉时一枪都不发。
 ///
 /// ⚠ 登记它时要说清两件事，免得被读成「已经能无人值守地跑」：
 ///
-/// 1. **生成链断在「下载合成图」那一枪**：本仓的 HTTP 抽象只承载文本
-///    （`HttpResponse.body` 是 `String`），而那一枪回的是图片字节 ——
-///    有损解码后再 base64 会把图弄坏且**不报错**。协议层主动判失败，
-///    所以 `upload` 今天是**不可达**的（请求构造与形状都有测试钉住）。
-///    接上它需要给 HTTP 抽象加一条保留原始字节的路径。
+/// 1. **「下载合成图」那一枪已经接上**：它走
+///    `mcloud_core::HttpClient::request_raw` 取**原始字节**（不经有损 UTF-8
+///    解码），两层装饰器（`SmidClient` / `H5Client`）都会把 `request_raw`
+///    转发给 leaf；任务层只做**形状校验**（非空 + JPEG `FF D8` / PNG `89 50`）
+///    再 base64 交给 `upload`。
+///    ⚠ 唯一保留的缺口：**需要会话的主机**走 `request_raw` 会**明确报错**
+///    （不静默退到有损路径）—— 下载 URL 由上游 `imageUrl` 给，落在哪台
+///    主机上由上游决定。旧形态（**今天不成立**）：HTTP 抽象只承载文本
+///    （`HttpResponse.body` 是 `String`），那一枪被有损解码弄坏且不报错。
 /// 2. **收尾刻意不照抄旧实现**：`mcloud_tasks::ai_avatar` 先取一份目录基线，
 ///    只清「本趟造的」`fileId`；旧 TS 按文件名匹配会把**同名旧文件**一起删。
 ///

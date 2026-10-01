@@ -20,7 +20,14 @@
 > + `app-task`（App 任务**做任务**，写侧：106 / 522 / beiyong1 名字门三档玩法 → 逐条打卡 → 清理）。
 > ⇒ 下面 §2 的 **P2「只读查询」那一档已经全部落完**（那四条的实拍材料都拿到了）。
 > 下面那张 19 条清单是**参考实现的规格表**，不是本项目的进度表；
-> 本项目的进度以 `/api/capabilities`（今天 18 条）与 `README.md` 为准。
+> 本项目的进度以 `/api/capabilities` 与 `README.md` 为准（条数以实际返回为准 —— 见下面的改口）。
+>
+> ⚠ **改口（当前事实）**：`exchange` 已从 `register_all` 摘掉（commit 4c82b5d），
+> **不再出现在 `/api/capabilities`**，也不能经 `POST /api/runs` 触发；专用入口
+> `POST /api/accounts/{id}/exchange` 会回「任务池里没有 exchange」。
+> 所以上面那句「已实现」只指**实现还在**（`mcloud_tasks::exchange` 可直接调用、有测试），
+> **不指「对外可用」**。原因（缺 `deviceId` 来源 / `visitlog` 预热 / 等待档对齐）见
+> `crates/mcloud-tasks/src/lib.rs` 的 `register_all` 说明。今天的注册表是 **19 条**。
 >
 > ⚠ **`task-expansion` 与参考实现有一处刻意不同：本仓会删掉自己传的那个文件**
 > （参考实现留在它的 P1 缺口里不删）。⚠ 但"撞同名"那一档**绝不删** ——
@@ -180,7 +187,7 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 | 11 | `msg-push` | 消息推送任务 | Action | ❌ | | skip | 记账 | jwt |
 | 12 | `cloud-phone-redpack` | 红包派对 | Action | ❌ | | catch-up | **记账 + 装机**（另有有副作用的 `getRcsToken`）；⚠ 读到没见过的状态码**刻意不发写**（旧 TS 会发） | 活动站票（`querySpecToken` → `tokenValidate`，**与 jwt 无关**） |
 | 13 | `play-ai-special` | 拍拍盘点 | Query | ❌ | | catch-up | 无（**只读那两口**） | jwt + 活动会话 |
-| 14 | `ai-avatar` | AI 头像生成与抽奖 | Action | ❌ | | skip | **往网盘写图**（⚠ 今天**不可达**，见 `docs/ai-avatar-spec.md`）；默认**关** | Basic + jwttoken |
+| 14 | `ai-avatar` | AI 头像生成与抽奖 | Action | ❌ | | skip | **往网盘写图**（下载腿已接 `request_raw`，**不再断在那一枪**；唯一缺口是需要会话的主机走 `request_raw` 会明确报错。见 `crates/mcloud-tasks/src/lib.rs` 与 `docs/ai-avatar-spec.md`）；默认**关** | Basic + jwttoken |
 | 15 | `task-expansion` | 任务拓展 | Action | ❌ | | skip | **往网盘写文件** | jwt |
 | 16 | `live-room` | 直播口令 → 小红花 | Action | ❌ | | skip | 入群足迹 + **WS 长连** | jwt + WebSocket |
 | 17 | `exchange` | 兑换奖品 | Action | ❌ | ✅ | skip | **真扣AI豆、不可回滚** | jwt + 滑块 |

@@ -68,14 +68,20 @@ impl LoginService {
 
     /// 这台机器的 PC 设备指纹（没有就生成并落盘）。
     ///
-    /// ⚠ 必须在**出码之前**取到：二维码的 `dID` 就是它，
-    /// 每次重新生成会让服务端定位不到扫码会话。
+    /// ⚠ **别拿它去出码或登录**：出码走 `Self::fresh_device`（每张码现生成
+    /// 一枚），四条登录路径走 `Self::device_for_account`（按账号）。
+    /// 这里读到的机器级那一枚只服务"查看 / 更换"两个入口
+    /// （`GET /api/login/device`、`POST /api/login/device/rotate`）。
     pub async fn pc_device_id(&self) -> Result<String> {
         let mut rng = self.rng.clone();
         proto::load_or_create_pc_device(&*self.store, &mut rng).await
     }
 
-    /// 换一台设备（旧的扫码会话会立即失效）。
+    /// 换掉机器级的那一枚。
+    ///
+    /// ⚠ **不作废任何扫码会话**：出码用的是每码现生成的那枚，与这里无关；
+    /// 也不影响任何账号 —— 登录按账号取设备。它改变的是随后
+    /// `GET /api/login/device` 读到的值。
     pub async fn rotate_pc_device_id(&self) -> Result<String> {
         let mut rng = self.rng.clone();
         let fresh = proto::new_pc_device_id(&mut rng);

@@ -117,7 +117,10 @@ pub struct StartQrResponse {
     pub poll_interval_ms: u64,
     /// 有效期（秒）。
     pub ttl_seconds: i64,
-    /// 本机设备指纹（排障用；换它会作废所有扫码会话）。
+    /// **本次扫码会话自己**那枚设备号（排障用）。
+    ///
+    /// 每张码现生成一枚，与机器级登记值（`GET /api/login/device` 读到的那个）
+    /// 是两个值；换后者**不影响**这一枚，也不作废任何扫码会话。
     pub device_id: String,
 }
 
@@ -734,7 +737,7 @@ pub struct DeviceResponse {
     pub device_id: String,
 }
 
-/// `GET /api/login/device` —— 查看本机 PC 设备指纹。
+/// `GET /api/login/device` —— 查看本机 PC 设备指纹（机器级登记值，排障用）。
 pub async fn get_device(State(state): State<ServerState>) -> ApiResult<DeviceResponse> {
     let id = state
         .handle
@@ -745,7 +748,11 @@ pub async fn get_device(State(state): State<ServerState>) -> ApiResult<DeviceRes
     Ok(Json(DeviceResponse { device_id: id }))
 }
 
-/// `POST /api/login/device/rotate` —— 换一台设备（旧的扫码会话立即失效）。
+/// `POST /api/login/device/rotate` —— 换掉机器级登记值。
+///
+/// ⚠ 它**不会**作废任何扫码会话、也不影响任何账号的登录：出码用的是每张码
+/// 现生成的那一枚，四条登录路径按账号取设备。这里换的只是随后
+/// `GET /api/login/device` 读到的值。
 pub async fn rotate_device(State(state): State<ServerState>) -> ApiResult<DeviceResponse> {
     let id = state
         .handle

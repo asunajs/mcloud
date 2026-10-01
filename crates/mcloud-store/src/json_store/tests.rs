@@ -688,6 +688,87 @@ async fn tightening_is_idempotent() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// 装**凭据与会话**的四个文件也必须在启动时被收紧。
+///
+/// 回归护栏：`harden_existing_permissions` 的清单曾经只有五个"运行数据"文件，
+/// 于是老数据目录里的 `users.json`（口令哈希）/ `sessions.json`（会话）/
+/// `smid.json`（账号设备指纹）/ `pc_device.txt`（机器指纹）仍对同机其他
+/// 用户可读 —— 拿到会话哈希对应的令牌等于直接冒充登录。
+#[cfg(unix)]
+#[tokio::test]
+async fn legacy_loose_credentials_and_sessions_are_tightened_on_open() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let d = tmpdir("perm-legacy-secrets");
+    std::fs::create_dir_all(&d).unwrap();
+    // 内容必须**能解析**，否则 `JsonStore::open` 会在 load_all 那一步先报错。
+    let secrets: [(&str, &str); 4] = [
+        (files::USERS, "[]"),
+        (files::SESSIONS, "{}"),
+        (files::SMID, "{}"),
+        (files::PC_DEVICE, "62AA2BDA29F99744536E142A83CA5B03-ENDIN\n"),
+    ];
+    for (name, body) in secrets {
+        let p = d.join(name);
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // 前置：确实是宽松的，否则这条测试什么也没验证
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "{name} 的前置权限没设成 0644"
+        );
+    }
+
+    let _s = JsonStore::open(&d).unwrap();
+
+    for (name, _) in secrets {
+        let mode = std::fs::metadata(d.join(name))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "{name} 装的是凭据/会话，启动时必须收紧为 0600，实际 {mode:o}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 这四个文件**新写**时也必须是 0600（`write_atomic` 创建即限权）。
+///
+/// 与上一条互补：那条管历史遗留，这条管"从现在起写的"。
+#[cfg(unix)]
+#[tokio::test]
+async fn credentials_and_sessions_are_created_with_0600() {
+    use mcloud_core::{PcDeviceStore, SmidStore};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let d = tmpdir("perm-new-secrets");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_user(&user("u1", "u1")).await.unwrap();
+    s.save_session(&session("h1", "u1", 9_999_999_999_999))
+        .await
+        .unwrap();
+    s.set_smid_fingerprint(&AccountId::new("13800000000"), "{}")
+        .await
+        .unwrap();
+    s.set_pc_device_id("62AA2BDA29F99744536E142A83CA5B03-ENDIN")
+        .await
+        .unwrap();
+
+    for name in [files::USERS, files::SESSIONS, files::SMID, files::PC_DEVICE] {
+        let mode = std::fs::metadata(d.join(name))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "{name} 创建时就必须是 0600，实际 {mode:o}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// 阻塞写盘的**上界**必须留在"可接受"的量级内。
 ///
 /// §6 给 `mcloud-store` 开了唯一的阻塞 IO 例外，理由是「一次写盘亚毫秒级」。

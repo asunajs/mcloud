@@ -128,8 +128,10 @@ mod files {
     ///
     /// # 为什么单独一个文件
     ///
-    /// 它在**登录之前**就要用（二维码的 `dID` 就是它），那一刻还没有账号，
-    /// 所以不能塞进按账号存的 `state.json` / `smid.json`。
+    /// 它是**机器级**登记值，与按账号存的 `state.json` / `smid.json`
+    /// 不是一回事。⚠ 它今天也**不再**参与出码或登录：二维码的 `dID` 由出码时
+    /// 现生成的那一枚担任，四条登录路径按账号取/生成；这个文件只有
+    /// `GET /api/login/device` 与 rotate 读写（见 `mcloud_core::pc_device` 模块头）。
     pub const PC_DEVICE: &str = "pc_device.txt";
     /// 日志目录：每次运行一个文件，避免为了追加一行重写全部日志。
     pub const LOG_DIR: &str = "logs";
@@ -204,6 +206,12 @@ impl JsonStore {
     /// 新写的文件在 [`Self::write_atomic`] 里就已经是 `0600`，这里只处理
     /// 历史遗留。只收紧、不放松，所以重复执行无副作用。
     ///
+    /// 清单覆盖**所有会落盘的表**，尤其是装凭据与会话的那几个：
+    /// `accounts.json`（`AuthInfo.raw` 凭据原文）/ `users.json`（口令哈希）/
+    /// `sessions.json`（WebUI 会话，拿到就能冒充登录）/ `smid.json`（账号设备指纹）/
+    /// `pc_device.txt`（机器指纹），再加上运行数据（历史 / 定时 / 编排 / 状态）。
+    /// 漏掉其中一个 = 老目录升级后那个文件仍对同机其他用户可读。
+    ///
     /// 失败**不**让启动失败：可能是文件系统不支持 mode（如某些网络盘、
     /// Windows 挂载），为此拒绝启动会让工具彻底不可用。但也不静默 ——
     /// 权限没收紧这件事必须留下痕迹。
@@ -216,6 +224,11 @@ impl JsonStore {
             files::SCHEDULES,
             files::PIPELINES,
             files::STATE,
+            // ⚠ 下面四个装的正是凭据与会话，曾经漏在清单外；不要再删。
+            files::USERS,
+            files::SESSIONS,
+            files::SMID,
+            files::PC_DEVICE,
         ];
         for name in names {
             let p = self.path(name);
