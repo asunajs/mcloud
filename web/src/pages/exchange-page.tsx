@@ -40,8 +40,12 @@
  * 之后在「定时」页里管理 —— **不在这页另造一套定时的 UI**。
  *
  * ⚠ 两个当面的限制（弹窗里也写）：调度器 30 秒一跳，直接按分钟触发最多晚 30 秒，
- * 所以目标是**整点**时改成"提前两分钟触发 + 任务自己等到整点"；
+ * 所以目标是**能等到的那一刻**（默认给的下一个 0 点）时改成"提前两分钟触发 + 任务自己等到它"；
  * 而调度器是"宁可漏跑不可重跑"，**服务那一刻不在，就不会补跑**。
+ *
+ * ⚠ 默认时刻是**猜的**：按这件露出的口径（有今日份额 ⇒ 下一个 0 点；只有每月名额 ⇒ 下月 1 日）。
+ * 实测到的一款按自然日 0 点复位（抓包样本 §7），但**复位时刻因活动而异**（用户口径 2026-10-02：
+ * 「也不一定是 0 点，有些也不是」）⇒ 界面不写"0 点开抢"，只说清猜法与依据。
  */
 
 import { onMounted, ref } from 'lite'
@@ -168,11 +172,36 @@ const fmtLocal = (d: Date): string =>
 const toLocalInput = (d: Date): string =>
   `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`
 
-/** 下一个整点（本地）—— 只作**默认值**，不宣称那是"放量时刻"（见文件头）。 */
-const nextHour = (): Date => {
+/**
+ * 定时弹窗的**占位默认时刻**（不是"正确时刻"）。
+ *
+ * ⚠⚠ 别把它读成"份额一定在 0 点复位"。用户口径（2026-10-02）：
+ * 「也不一定是 0 点，有些也不是」—— 复位时刻**因活动而异**。
+ * 我们实测到的那一款（`251230032`）是自然日 0 点（抓包样本 §7），
+ * 但有的按活动自己的投放时刻（例如活动窗口写 `08:00` 那种）。
+ *
+ * 所以这里只按**这件自己露出来的口径**给一个猜测，并且在弹窗里当面说清：
+ *
+ * * 有「今日份额」（`dailyCount`）⇒ 猜每日口径 ⇒ 下一个 0 点；
+ * * 看不出每日、但有「本组每月名额」（`monthQuantity`）⇒ 猜每月口径 ⇒ 下月 1 日 0 点；
+ * * 都看不出来 ⇒ 下一个 0 点（纯占位）。
+ */
+const guessResetAt = (prize: ExchangePrizeView | null): Date => {
   const d = new Date()
-  d.setMinutes(0, 0, 0)
-  d.setHours(d.getHours() + 1)
+  const monthlyOnly = prize?.dailyCount == null && (prize?.monthQuantity ?? 0) > 0
+  if (monthlyOnly) {
+    d.setHours(0, 0, 0, 0)
+    d.setMonth(d.getMonth() + 1, 1) // 下个月 1 日 00:00
+    return d
+  }
+  d.setHours(24, 0, 0, 0) // 下一个自然日 00:00（跨月/跨年由 Date 自己进位）
+  return d
+}
+
+/** **下一个 0 点**（本地）—— 只作初始占位，理由见 [`guessResetAt`]。 */
+const nextMidnight = (): Date => {
+  const d = new Date()
+  d.setHours(24, 0, 0, 0)
   return d
 }
 
@@ -260,9 +289,13 @@ interface PlanComputed {
  *
  * # 两个刻意的取舍
  *
- * 1. **目标是整点 ⇒ 让任务自己等**：调度器 30 秒一跳，直接按分钟触发最多晚 30 秒，
+ * 1. **目标正好落在整点 ⇒ 让任务自己等**：调度器 30 秒一跳，直接按分钟触发最多晚 30 秒，
  *    而"抢"里 30 秒等于输。所以提前量 ≥60 秒且目标是整点时，发 `skipWait=false`，
- *    由任务内部等到整点再发枪（`plan_exchange_wait` 的取向）。
+ *    由任务内部等到那一刻再发枪（`plan_exchange_wait` 的取向）。
+ *
+ *    ⚠ 这个"等"**只有目标本身是那个时刻时才有意义** —— 实测份额按自然日复位
+ *    （0 点，抓包样本 §7），而 21:00 / 22:00 这类整点**不刷新**（§5/§6）。
+ *    所以默认值给的是下一个 0 点，别的整点填了也只是"等到那个整点"，不是放量时刻。
  * 2. **重试用"分钟列表"表达**：cron 没法说"从这一刻起每分钟试 3 次"，
  *    但可以写成 `58,59,0 21 1 10 *`。跨小时的部分**排不进去**（小时列表×分钟列表
  *    会变成笛卡尔积，反而多触发），所以只用同一小时内的分钟，并在界面上说明。
@@ -443,7 +476,7 @@ export const ExchangePage = () => {
   /** 正在给哪一件排定时。 */
   const planning = ref<ExchangePrizeView | null>(null)
   const planAccount = ref('')
-  const planAt = ref(toLocalInput(nextHour()))
+  const planAt = ref(toLocalInput(nextMidnight()))
   const planLead = ref(120)
   const planTries = ref(3)
   const planError = ref('')
@@ -581,7 +614,9 @@ export const ExchangePage = () => {
   const askSchedule = (prize: ExchangePrizeView) => {
     planning.value = prize
     planAccount.value = account.value
-    planAt.value = toLocalInput(nextHour())
+    // 按**这件自己露出的口径**猜一个占位时刻（每日 ⇒ 0 点、只有每月名额 ⇒ 下月 1 日），
+    // 弹窗里会写明"是猜的、复位时刻因活动而异"。见 `guessResetAt` 的注释。
+    planAt.value = toLocalInput(guessResetAt(prize))
     planLead.value = 120
     planTries.value = 3
     planError.value = ''
@@ -663,9 +698,19 @@ export const ExchangePage = () => {
           <div class="flex flex-col gap-2 text-xs opacity-60">
             {list.value ? (
               <span>
-                清单读取于 {fmtEpochMs(list.value.nowMs)}。判据档位不含余额 ——
-                {list.value.balanceNote}
+                清单读取于 {fmtEpochMs(list.value.nowMs)}
+                {list.value.balance != null
+                  ? ` · 余额 ${fmtNum(list.value.balance)} 颗 AI豆（判据含余额）`
+                  : ''}
               </span>
+            ) : null}
+            {/*
+              ⚠ 只有**真没读到**余额时才解释。常态是读到了 ⇒ 不说话。
+              用户口径（2026-10-02）：「这是为啥这么说，无余额你就后端请求啊」——
+              所以后端现在默认读余额（多一枪只读 `infoV3`），这句只在读失败时出现。
+            */}
+            {list.value?.balanceNote ? (
+              <span class="text-warning">{list.value.balanceNote}</span>
             ) : null}
             {/* 组名那一枪没成时照实说：清单是好的，只是分区标题退回"第 N 组"。 */}
             {list.value?.groupsNote ? (
@@ -889,8 +934,11 @@ export const ExchangePage = () => {
             onInput={(e) => (planAt.value = (e.target as HTMLInputElement).value)}
           />
           <p class="text-xs opacity-60">
-            默认给了下一个整点，但那不是"放量时刻" —— 我们实测过 21:00 那个整点，
-            抢光的件一件都没恢复（见抓包样本 §5：份额刷新与整点无关）。按你了解的时刻填。
+            默认值是<b class="font-medium">按这件露出的口径猜的</b>：有「今日份额」⇒ 下一个 0 点，
+            只有「本组每月名额」⇒ 下月 1 日 0 点。⚠ 它<b class="font-medium">不保证对</b> ——
+            份额复位的时刻<b class="font-medium">因活动而异</b>：我们实测到的那款是自然日 0 点
+            （抓包样本 §7），但有活动是照自己的投放时刻（比如 <span class="font-mono">08:00</span>）。
+            按你了解的时刻改。
           </p>
         </fieldset>
 

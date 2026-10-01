@@ -44,7 +44,8 @@ use serde_json::Value;
 
 use mcloud_core::{Account, AccountId, Error, UserId};
 use mcloud_tasks::exchange::{
-    read_judged_prizes, read_prize_groups, ExchangeEnv, ExchangePlan, ExchangePrize, JudgedPrize,
+    read_judged_prizes_with_balance, read_prize_groups, ExchangeEnv, ExchangePlan, ExchangePrize,
+    JudgedPrize,
 };
 
 use crate::auth_gate::CurrentUser;
@@ -57,9 +58,14 @@ use crate::ServerState;
 /// 会得到一条"未知任务：exchange"的 400 —— 那时前端只看到兑换按钮失灵。
 const EXCHANGE_TASK: &str = "exchange";
 
-/// 没有余额读数时那句说明。写在服务端，让前后端**同一句话**。
+/// 余额读不到时那句说明。写在服务端，让前后端**同一句话**。
+///
+/// ⚠ 只在**真读不到余额**时才会发给前端（正常情况 `balanceNote` 是 `null`）。
+/// 2026-10-02 之前这句话是无条件发的：那时这份清单刻意不读余额，
+/// 于是界面每条都要挂一句"这里的「可兑」偏宽"。用户口径是
+/// 「这是为啥这么说，无余额你就后端请求啊」—— 对的，一次只读请求换准确判据很值。
 const BALANCE_NOTE: &str =
-    "这一份按「无余额读数」判定：余额不足这一档判不出来，所以这里的「可兑」比下单前的真判据宽 —— 点了仍可能被挡下，那次挡下会带回具体档位与上游错误码。";
+    "这一份没读到余额（上游那次查询失败了）：余额不足这一档判不出来，所以这里的「可兑」比下单前的真判据宽 —— 点了仍可能被挡下，那次挡下会带回具体档位与上游错误码。点「刷新清单」可以再试一次。";
 
 pub fn routes() -> axum::Router<ServerState> {
     use axum::routing::{get, post};
@@ -138,21 +144,27 @@ pub struct ExchangePrizesResponse {
     /// 必须回给前端：`not_started` / `ended` 是**相对时刻**的结论，
     /// 页面显示"还没开售"却不说是什么时候判的，用户没法判断该不该刷新。
     pub now_ms: i64,
-    /// ⚠⚠ **这一份"可兑"比真判据宽，必须让用户知道。**
+    /// **这一份判据里有没有余额读数。**
     ///
-    /// 本路由用 [`plan_exchange`] 的 `balance = None` 那一档（与参考实现给
-    /// 选品器的那一档一致）：**没有余额读数**，所以判不出
-    /// [`ExchangePlan::InsufficientCloud`] —— 余额不够的商品在这里显示为"可兑"。
+    /// `true` = 读了（`infoV3`），于是 [`ExchangePlan::InsufficientCloud`]
+    /// 这一档能判出来 —— 这是常态。
+    /// `false` = 那次余额查询**失败**了，退回"无余额读数"口径：余额不够的会显示成"可兑"，
+    /// 点了仍可能被挡下（那一次挡下带错误码）。此时 `balanceNote` 会给一句说明。
     ///
-    /// 代价当面说清：用户点了仍可能被链挡下，而**那一次挡下是有错误码的**
-    /// （`status` + `plan` + `code` 一起回来），不会静默不发。
-    ///
-    /// 之所以不在这里顺手查一次余额：`infoV3` 是**账号级**请求，
-    /// 多打一枪就多一分风控噪声，而"看一眼清单"这件事的收益不足以付它。
-    /// 余额那一栏页面上本来就有别的路。
+    /// ⚠ 2026-10-02 之前这里恒为 `false`：那时**刻意不读**余额（"省一枪"）。
+    /// 用户口径：「这是为啥这么说，无余额你就后端请求啊」⇒ 改成**默认读**，
+    /// 只有读失败才退回旧口径。代价是这条只读路多一枪 `infoV3`。
     pub balance_aware: bool,
-    /// 上面那件事的人话说明（前端直接显示，不在前端另写一份）。
-    pub balance_note: &'static str,
+    /// 这一份读到的余额（AI豆）。`null` = 没读到（原因见 `balanceNote`）。
+    ///
+    /// 显示它有用：判据里"余额不足"那一档就是拿它比出来的，
+    /// 用户看到数字才能自己决定要不要先去做任务攒豆。
+    pub balance: Option<i64>,
+    /// 读不到余额时的人话说明（前端直接显示，不在前端另写一份）。
+    ///
+    /// ⚠ 常态是 `null`：**没问题就不说话**。原先这句话是无条件发的，
+    /// 于是每条清单头顶都挂着一段"这里的可兑偏宽"，用户直接反问为什么不去请求余额。
+    pub balance_note: Option<String>,
     /// 组名（`prizeGroup.json`）这一份**拿到了没有**；`None` = 拿到了。
     ///
     /// `Some(原因)` 时清单照常渲染，只是分区标题退回"第 N 组" —— 组名是**文案**，
@@ -164,8 +176,11 @@ pub struct ExchangePrizesResponse {
 ///
 /// # 它是只读的，所以可以随意刷新
 ///
-/// 只发一枪 `exchangeList`，不取滑块题、不碰 `infoV3`、更不发 `exchangeV3`。
-/// 刷新多少次都不花豆，也不给滑块接口计失败次数。
+/// 发**两枪只读**：`exchangeList`（清单）+ `infoV3`（余额，用来判"余额不足"那一档）；
+/// 不取滑块题、更不发 `exchangeV3`。刷新多少次都不花豆，也不给滑块接口计失败次数。
+///
+/// ⚠ `infoV3` 那一枪是 2026-10-02 按用户口径加的（「无余额你就后端请求啊」）：
+/// 拿一次只读请求换判据准确，值。
 pub async fn list_prizes(
     State(state): State<ServerState>,
     Extension(cur): Extension<CurrentUser>,
@@ -189,7 +204,9 @@ pub async fn list_prizes(
         // 只读路径**不碰** `deviceId`（那只在下单前才取，见 `ExchangeEnv`）。
         device_id: None,
     };
-    let judged = read_judged_prizes(&env, now_ms).await?;
+    // 清单 + **余额**：这样"余额不足"那一档才判得出来（余额读失败不影响清单，
+    // 退回无余额口径，由 `balance_note` 说明 —— 见 `read_judged_prizes_with_balance`）。
+    let (judged, balance) = read_judged_prizes_with_balance(&env, now_ms).await?;
 
     // 组名与"每月多选一限兑"那条规则在**另一条静态接口**里（`prizeGroup.json`）。
     // 单独一枪、只读；拿不到就降级 —— 清单才是判据，组名只是文案。
@@ -210,8 +227,10 @@ pub async fn list_prizes(
     Ok(Json(ExchangePrizesResponse {
         prizes,
         now_ms,
-        balance_aware: false,
-        balance_note: BALANCE_NOTE,
+        balance_aware: balance.is_some(),
+        balance,
+        // 读到了就**不说话**（常态）；只有读失败才挂那句说明。
+        balance_note: balance.is_none().then(|| BALANCE_NOTE.to_string()),
         groups_note,
     }))
 }

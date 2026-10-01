@@ -947,6 +947,49 @@ pub async fn read_judged_prizes(env: &ExchangeEnv<'_>, now_ms: i64) -> Result<Ve
         .collect())
 }
 
+/// **只读**：读清单 **+ 读一次余额**，逐件判"现在能不能兑"。
+///
+/// 与 [`read_judged_prizes`] 的唯一区别是多读一次余额（`infoV3`），
+/// 于是 [`ExchangePlan::InsufficientCloud`]（余额不足）这一档能判出来。
+///
+/// # 为什么要为它多打一枪（用户口径 2026-10-02）
+///
+/// 原文：「这是为啥这么说，无余额你就后端请求啊」。
+///
+/// 原先那条"省一枪"的取舍是拿**判据准确性**换的：界面把余额不够的商品标成"可兑"，
+/// 用户点下去才被挡 —— 挡下那一次确实有错误码，但那已经是**白点一次**了，
+/// 而代价只是**一次只读请求**（这条路本来就不碰滑块、不下单）。
+/// 准确性更值钱。
+///
+/// # 余额读不到时**不**让整份清单失败
+///
+/// 返回 `Option<i64>`：`None` = 这一份没有余额读数。此时退回
+/// [`read_judged_prizes`] 的口径（`balance = None`），
+/// 并由调用方把"这一份不含余额读数"显示出来 —— 判据宽一点，但清单照常能看。
+pub async fn read_judged_prizes_with_balance(
+    env: &ExchangeEnv<'_>,
+    now_ms: i64,
+) -> Result<(Vec<JudgedPrize>, Option<i64>)> {
+    let list = read_exchange_list(env).await?;
+    // ⚠ 余额读失败**不**是错误：见上面那节。只清点这次没读数，别的照常。
+    let balance = match read_status(env).await {
+        Ok(status) => Some(status.total),
+        Err(e) => {
+            tracing::warn!(error = %e, "读余额失败：这一份清单按「无余额读数」判定");
+            None
+        }
+    };
+    let judged = list
+        .all()
+        .into_iter()
+        .map(|prize| JudgedPrize {
+            plan: plan_exchange(prize, balance, now_ms),
+            prize: prize.clone(),
+        })
+        .collect();
+    Ok((judged, balance))
+}
+
 /// 读账号状态（余额的**唯一**来源）。
 async fn read_status(env: &ExchangeEnv<'_>) -> Result<SignInStatus> {
     let resp = env.http.request(app_signin::info_v3_request(None)).await?;

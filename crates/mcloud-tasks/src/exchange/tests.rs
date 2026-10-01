@@ -2668,3 +2668,62 @@ struct NoSink;
 impl mcloud_core::EventSink for NoSink {
     fn emit(&self, _event: mcloud_core::RunEvent) {}
 }
+
+// ── 只读清单为什么要多打一枪余额（2026-10-02 用户口径）─────────────────────
+
+/// 余额读数**参与**只读清单的判据 ⇒「余额不足」这一档判得出来。
+///
+/// 用户口径（2026-10-02）：「这是为啥这么说，无余额你就后端请求啊」。
+///
+/// 原先这条路刻意不读余额（"省一枪"、与参考实现给选品器的那一档一致），
+/// 代价是**判据准确性**：余额不够的商品在界面上显示成"可兑"，
+/// 用户点下去才被挡 —— 挡下那次确实有错误码，但已经是**白点一次**了。
+/// 而代价只是一次**只读**请求（这条路本来就不碰滑块、不下单）。
+///
+/// 这条用例是那个改动的看门人：**两枪都发、且余额真的进了判定**。
+#[tokio::test]
+async fn listed_prizes_are_judged_with_balance_when_it_is_readable() {
+    // ⚠ 清单条目要和 `baseline()` 同形：价格 1800、`limit = LIMIT_AVAILABLE`。
+    // 前面那些档（未开始/已结束/今日份额空了/明天再来…）都得先过掉，
+    // 才轮得到余额这一档 —— 随便造一件会先撞上别的档，测出来的就不是余额。
+    let list = list_body(prize_json(LIMIT_AVAILABLE, 1800, 839));
+    let fx = Fixture::new(&[&list, &info_body(50)], BASE_NOW_MS, None);
+
+    let (judged, balance) = read_judged_prizes_with_balance(&fx.env(), BASE_NOW_MS)
+        .await
+        .expect("清单与余额都应该读到");
+
+    assert_eq!(balance, Some(50), "余额要回给前端（界面上要能显示它）");
+    assert_eq!(judged.len(), 1);
+    assert_eq!(
+        judged[0].plan,
+        ExchangePlan::InsufficientCloud,
+        "余额 50 < 价格 1800 ⇒ 必须判成余额不足（这条路以前判不出来）"
+    );
+    assert!(judged[0].plan.blocks(), "这一档要挡住按钮");
+    assert_eq!(fx.http().count(), 2, "清单 + 余额：正好两枪");
+}
+
+/// 余额那一枪**失败**时：清单照常给出，退回"无余额读数"口径。
+///
+/// ⚠ 这是**刻意**的降级，不是将就：余额读不到不该把整份清单也带塌
+/// （那样用户连"有哪些东西"都看不到），但要如实回 `None`，
+/// 由调用方把"这一份不含余额读数"显示出来 —— 判据宽一点，但界面不撒谎。
+#[tokio::test]
+async fn listed_prizes_degrade_to_no_balance_when_status_fails() {
+    let list = list_body(prize_json(LIMIT_AVAILABLE, 1800, 839));
+    // 第 2 枪（`infoV3`，也就是余额那一枪）在传输层失败。
+    let fx = Fixture::new(&[&list, &info_body(50)], BASE_NOW_MS, None).failing_at(2);
+
+    let (judged, balance) = read_judged_prizes_with_balance(&fx.env(), BASE_NOW_MS)
+        .await
+        .expect("余额读失败不该把清单一起带塌");
+
+    assert_eq!(balance, None, "没读到就是 None（前端据此显示说明）");
+    assert_eq!(judged.len(), 1, "清单照常给");
+    assert_ne!(
+        judged[0].plan,
+        ExchangePlan::InsufficientCloud,
+        "没有余额读数时判不出这一档 —— 这正是要如实告诉用户的那件事"
+    );
+}

@@ -1593,8 +1593,9 @@ export interface ExchangePrizeView {
   /**
    * 判据档位（`plan_exchange` 的 slug）。
    *
-   * ⚠ 只读那条路由用的是**无余额**那一档（`balanceAware: false`），
-   * 所以它判不出「余额不足」—— 见 `ExchangePrizesResponse.balanceNote`。
+   * ⚠ 只读那条路由**默认带余额读数**（`balanceAware: true`），所以
+   * 「余额不足」这一档判得出来。只有**那次余额查询失败**时才退回无余额口径
+   * （`balanceAware: false` + 一句 `balanceNote`）。
    */
   plan: string
   /** 为什么不能兑（判据本身的中文复述）。`blocks` 为真时才有意义。 */
@@ -1646,9 +1647,17 @@ export interface ExchangePrizesResponse {
    * 今天恒为 `false`：清单那条路由**不查** `infoV3`（账号级请求，
    * 多打一枪多一分风控噪声），所以档位里没有「余额不足」这一档。
    */
+  /**
+   * 这一份判据里**有没有**余额读数。
+   *
+   * `true` = 读了（常态，后端多打一枪只读 `infoV3`）⇒「余额不足」判得出来。
+   * `false` = 那次余额查询**失败**了，退回无余额口径 ⇒ 界面该把 `balanceNote` 显示出来。
+   */
   balanceAware: boolean
-  /** 上面那件事的人话说明，界面上直接显示，别自己编。 */
-  balanceNote: string
+  /** 读到的余额（AI豆）；`null` = 这次没读到。 */
+  balance: number | null
+  /** 没读到余额时的人话说明；**读到了就是 `null`**（没问题就不说话）。 */
+  balanceNote: string | null
   /**
    * 组名那一枪（`prizeGroup.json`）**拿到了没有**；`null` = 拿到了。
    *
