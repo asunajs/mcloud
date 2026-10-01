@@ -226,10 +226,114 @@ const STEPS = {
     { name: '直播页：输入口令', do: typeIn('textarea', '口令一 口令二'), check: eq('document.querySelector("textarea").value', '口令一 口令二') },
     { name: '直播页：改时长', do: typeIn('input[type="number"]', '45'), check: eq('document.querySelector("input[type=number]").value', '45') },
     { name: '直播页：切开关', do: clickSel('input[type="checkbox"].toggle'), check: eq('document.querySelector("input[type=checkbox].toggle").checked', true), changed: true },
+    // ── 共享口令池卡片（2026-10-01：口令从"页面参数"变成"全实例共享资源"）──
+    {
+      name: '直播页：池卡片显示有效条数',
+      do: null,
+      check: eq(
+        `(() => { const t = document.getElementById('app').textContent; return t.includes('共享口令池') + '/' + t.includes('2 条有效') })()`,
+        'true/true',
+      ),
+    },
+    {
+      // 装置里放了两条有效 ⇒ 界面必须明说"不必再抓"（这是用户口径的核心一句）
+      name: '直播页：够 2 条有效 ⇒ 明说不需要再抓',
+      do: null,
+      check: has(APP_TEXT, '全场都不需要再抓口令'),
+    },
+    {
+      // 过期的那条必须**看得出来**是无效、且原因在（"过期视同无效，但原因留着"）
+      name: '直播页：过期口令显示为无效并带上原因',
+      do: null,
+      check: eq(
+        `(() => { const t = document.getElementById('app').textContent; return t.includes('过期的老口令') + '/' + t.includes('口令已过期') })()`,
+        'true/true',
+      ),
+    },
 
-    // 任务页：下拉框的选项是**由数据 createFor 出来的**，选它等于测"列表项 + select 回写"
+    // 任务页：账号选择器（2026-10-01 起从单选 `<select>` 换成「多选 + 全部账号」）。
+    // 选项同样是**由数据 createFor 出来的**，点它等于测"列表项 + checkbox 回写"。
+    //
+    // 选择器结构：`details.collapse > .collapse-content` 里，
+    // **第 0 个** checkbox 是「全部账号」，第 1 个起才是逐个账号。
     { name: '切到任务页', do: go('#/tasks'), check: eq('location.hash', '#/tasks') },
-    { name: '任务页：选账号', do: pickOption('select.select', '13800000000'), check: eq('document.querySelector("select.select").value', '13800000000') },
+    {
+      name: '任务页：选账号',
+      do: `(() => {
+        const box = document.querySelector('#app details.collapse')
+        box.open = true
+        const items = [...box.querySelectorAll('input[type="checkbox"]')]
+        items[1].click()
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+          const box = document.querySelector('#app details.collapse')
+          const items = [...box.querySelectorAll('input[type="checkbox"]')]
+          return items[1].checked && !items[0].checked
+        })()`,
+        true,
+      ),
+    },
+    {
+      // 「全部账号」是**独立开关**（后端口径 `accounts: []` = 我名下全部），
+      // 勾上时逐个账号的勾选框会禁用 —— 这里锁住这个语义。
+      name: '任务页：勾「全部账号」⇒ 摘要变成全部账号，逐个勾选被禁用',
+      do: `(() => {
+        const box = document.querySelector('#app details.collapse')
+        const items = [...box.querySelectorAll('input[type="checkbox"]')]
+        items[0].click()
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+          const box = document.querySelector('#app details.collapse')
+          const items = [...box.querySelectorAll('input[type="checkbox"]')]
+          const summary = box.querySelector('summary').textContent
+          return items[0].checked && items[1].disabled && summary.includes('全部账号')
+        })()`,
+        true,
+      ),
+      changed: true,
+    },
+    {
+      // ⚠ 分两步，且第二步**不要再点**。
+      //
+      // ① 取消「全部账号」那一刻，逐个账号的勾选框**还是 disabled** 的
+      //    （框架的属性写回与这次点击在同一个 tick），紧接着点它等于点了个禁用控件；
+      // ② 更要紧的是：`picked`（逐个勾选那份状态）**没被"全部"清掉** ——
+      //    前面已经勾过第一个号了，所以取消「全部」之后它**本来就是选中的**。
+      //    这时再点一次等于取消勾选，后面的运行用例就会变成"没选账号"。
+      //    ⇒ 这一步只**断言**状态，不做动作。
+      name: '任务页：取消「全部账号」',
+      do: `(() => {
+        const box = document.querySelector('#app details.collapse')
+        const items = [...box.querySelectorAll('input[type="checkbox"]')]
+        items[0].click()
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+          const box = document.querySelector('#app details.collapse')
+          const items = [...box.querySelectorAll('input[type="checkbox"]')]
+          return !items[0].checked && !items[1].disabled
+        })()`,
+        true,
+      ),
+    },
+    {
+      name: '任务页：取消「全部账号」后，逐个勾选的那份状态还在（第一个号仍选中）',
+      do: null,
+      check: eq(
+        `(() => {
+          const box = document.querySelector('#app details.collapse')
+          const items = [...box.querySelectorAll('input[type="checkbox"]')]
+          const summary = box.querySelector('summary').textContent
+          return !items[0].checked && items[1].checked && !summary.includes('全部账号')
+        })()`,
+        true,
+      ),
+    },
 
     // 设置页：账户安全 / 存储信息 / 重启 —— 这三块 2026-10-01 一起补了后端。
     { name: '切到设置页', do: go('#/settings'), check: eq('location.hash', '#/settings'), changed: true },
@@ -449,10 +553,12 @@ const STEPS = {
       name: '任务页：选账号 → 运行直播任务（带参数才放行）',
       do: `(() => {
         const card = [...document.querySelectorAll('#app .card')].find((c) => c.textContent.includes('直播口令'))
-        const sel = document.querySelector('#app select')
-        const first = [...sel.options].map((o) => o.value).filter((v) => v.length > 0)[0]
-        sel.value = first
-        sel.dispatchEvent(new Event('change', { bubbles: true }))
+        // 账号在共用选择器里（0 号是「全部账号」，1 号起是逐个账号）。
+        // 已经勾好的话不要再点 —— 再点一次会取消勾选。
+        const box = document.querySelector('#app details.collapse')
+        box.open = true
+        const items = [...box.querySelectorAll('input[type="checkbox"]')]
+        if (!items[0].checked && !items[1].checked) items[1].click()
         ;[...card.querySelectorAll('button')].find((b) => b.textContent.trim() === '运行').click()
         return true
       })()`,

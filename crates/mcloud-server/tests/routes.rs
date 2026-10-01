@@ -248,6 +248,87 @@ async fn missing_account_is_400() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ── 多账号 / 全部账号（用户口径 2026-10-01）──────────────────────────────
+//
+// 「任何（包括直播小红花）应该允许配置多账号/全部，点击运行后后端保证串行执行」。
+// 串行本身由 `mcloud-engine` 的 `start_serial_runs_accounts_one_at_a_time_in_order`
+// 锁住（那条测的是"没有重叠 + 顺序一致"）；这里锁**请求口径**。
+
+/// **不猜**：既没给 `account` 也没给 `accounts` ⇒ 400。
+///
+/// 这条是刻意的严格：`accounts: []` 的语义是"我名下**全部**账号"，
+/// 而"没写"如果也当成"全部"，一次手滑就是把名下每个号都真跑一遍。
+#[tokio::test]
+async fn run_without_any_account_is_400() {
+    let (handle, dir) = test_app("run-no-account");
+    let req = post_json("/api/runs", &serde_json::json!({ "task": "sign" }));
+    let (status, body) = send(authed_app(handle), req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "实际体：{body}");
+    assert!(body.contains("缺少账号"), "实际：{body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `accounts: []`（全部）而名下没有账号 ⇒ 400，且**不是**「缺少账号」。
+///
+/// 两条错误必须可区分：一个是"你没给"，一个是"给了但没有可跑的账号"。
+#[tokio::test]
+async fn run_with_empty_account_list_is_400_when_user_has_none() {
+    let (handle, dir) = test_app("run-all-empty");
+    let req = post_json(
+        "/api/runs",
+        &serde_json::json!({ "task": "sign", "accounts": [] }),
+    );
+    let (status, body) = send(authed_app(handle), req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "实际体：{body}");
+    assert!(body.contains("没有可运行的账号"), "实际：{body}");
+    assert!(
+        !body.contains("缺少账号"),
+        "给了空数组是「全部」的意思，不该报成「没给账号」：{body}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `accounts` 数组里的账号不存在 ⇒ 400（与单账号同一套归属规则）。
+#[tokio::test]
+async fn run_with_unknown_account_in_array_is_400() {
+    let (handle, dir) = test_app("run-array-unknown");
+    let req = post_json(
+        "/api/runs",
+        &serde_json::json!({ "task": "sign", "accounts": ["13900000000"] }),
+    );
+    let (status, body) = send(authed_app(handle), req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "实际体：{body}");
+    assert!(body.contains("账号不存在"), "实际：{body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 多账号：**一个账号一条 run**，id 一次给全 —— 界面据此逐条订阅、逐条中止。
+#[tokio::test]
+async fn run_with_multiple_accounts_returns_one_run_id_per_account() {
+    let (handle, dir) = test_app("run-multi");
+    seed_account(&handle, account("13800000000"));
+    seed_account(&handle, account("13800000001"));
+    // `accounts: []` = 我名下全部；后台执行 ⇒ 立刻返回一组 id（不等任务跑完）
+    let req = post_json(
+        "/api/runs",
+        &serde_json::json!({ "task": "sign", "accounts": [], "background": true }),
+    );
+    let (status, body) = send(authed_app(handle), req).await;
+    assert_eq!(status, StatusCode::OK, "实际体：{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("应是合法 JSON");
+    let ids = v["run_ids"].as_array().expect("run_ids 应为数组");
+    assert_eq!(ids.len(), 2, "两个账号应给两个 run id：{body}");
+    assert_eq!(v["run_id"], ids[0], "run_id 是兼容字段，等于第一个：{body}");
+    assert_ne!(ids[0], ids[1], "两个 run id 必须不同：{body}");
+    let accounts = v["accounts"].as_array().expect("accounts 应为数组");
+    assert_eq!(
+        accounts.len(),
+        2,
+        "accounts 应列出本次涉及的全部账号：{body}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 不存在的运行 → 404（`Error::NotFound`）。
 #[tokio::test]
 async fn missing_run_is_404() {

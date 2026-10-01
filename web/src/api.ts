@@ -88,10 +88,17 @@ export interface RunRecord {
 }
 
 export interface RunResponse {
+  /** 兼容字段：多账号时是**第一个**账号那次运行的 id。 */
   run_id: number
+  /** 本次点击涉及的**全部** run id（单账号时就是 `[run_id]`）。 */
+  run_ids: number[]
   task: string
+  /** 兼容字段：多账号时是**第一个**账号。 */
   account: string
+  /** 本次点击涉及的**全部**账号（顺序 = 后端的执行顺序，串行）。 */
+  accounts: string[]
   outcome: TaskOutcome
+  /** 同步执行时是全部账号的合计耗时。 */
   duration_ms: number
 }
 
@@ -529,21 +536,36 @@ export const getBeanToday = () => request<BeanToday>('/api/beans/today')
 export const getRun = (id: number) => request<RunRecord>(`/api/runs/${id}`)
 
 /**
- * 启动一次运行。
+ * 启动一次运行（一个账号，或**多账号/全部**）。
  *
- * `background = true` 时**立刻**返回真实的 run id，任务在后台跑。
+ * `background = true` 时**立刻**返回真实的 run id（多账号时是一组），任务在后台跑。
  * 这是"界面上能点中止"的前提：同步执行的话请求还没返回，
  * 用户根本没有可中止的时机。
+ *
+ * # 多账号（用户口径 2026-10-01）
+ *
+ * 「任何（包括直播小红花）应该允许配置多账号/全部，点击运行后后端保证串行执行」。
+ *
+ * * 传**字符串** ⇒ 单账号，请求体照旧是 `{ account }`（兼容）；
+ * * 传**数组** ⇒ 请求体是 `{ accounts }`；**空数组 = 当前用户名下的全部账号**
+ *   （与 `ScheduleInput.accounts` 同一口径）。
+ *
+ * ⚠ 后端保证**串行**：一个账号跑完再跑下一个（上游限流最怕并发打过去），
+ * 因此这里不要并发调用本函数去"加速"。
  */
 export const startRun = (
   task: string,
-  account: string,
+  accounts: string | string[],
   body: Record<string, unknown> = {},
   background = false,
 ) =>
   request<RunResponse>('/api/runs', {
     method: 'POST',
-    body: JSON.stringify({ task, account, body, background }),
+    body: JSON.stringify(
+      typeof accounts === 'string'
+        ? { task, account: accounts, body, background }
+        : { task, accounts, body, background },
+    ),
   })
 
 /** SSE 事件流地址。交给 `EventSource` —— 它自己带同源 cookie。 */

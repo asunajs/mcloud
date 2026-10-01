@@ -121,6 +121,70 @@ impl Runner {
         self.next_id.fetch_max(id + 1, Ordering::SeqCst);
     }
 
+    /// 后台**串行**启动一组运行（一个账号一个 run id），立刻返回全部 id。
+    ///
+    /// # 为什么需要它（用户口径 2026-10-01）
+    ///
+    /// 「任何（包括直播小红花）应该允许配置多账号/全部，点击运行后后端保证串行执行」。
+    ///
+    /// 与 [`Runner::start`] 的唯一区别是**执行顺序**：`start` 每个 run 各自 spawn、
+    /// 彼此并发；这里只 spawn **一个**驱动任务，逐个 `await` [`Runner::run_impl`]，
+    /// 于是"点一次运行、N 个账号"在后端是**严格串行**的。
+    ///
+    /// ⚠ **不要**改成"在调用方循环 `start`"：那样每个都立刻 spawn ⇒ 并发 ✗，
+    /// 而上游限流（直播小红花这类）最怕的就是并发打过去。
+    ///
+    /// ⚠ 也**不要**指望并发闸来串行：那道闸的语义是**撞上就 Skipped、不排队**
+    /// （见 `run_impl` 里那条注释与 [`Runner::run`] 的文档），它保证不了
+    /// "第 2 个账号等第 1 个跑完"，只会把第 2 个直接跳过。
+    ///
+    /// 取消令牌在**返回之前**逐个登记（与 `start` 同一个理由：客户端拿到 id 会立刻订阅
+    /// 事件流，那一刻"这个 run 存在"必须已经成立）。因此还没轮到的账号也能被订阅与中止 ——
+    /// 中止一个还没轮到它的账号，它会在轮到自己时带着已取消的令牌进任务体，由任务在安全点
+    /// 自己收尾；**其余账号照常继续**（中止只作用于那一条）。
+    pub fn start_serial(
+        self: &Arc<Self>,
+        task_name: &str,
+        accounts: Vec<Account>,
+        body: serde_json::Value,
+    ) -> Vec<RunId> {
+        let ids: Vec<RunId> = accounts
+            .iter()
+            .map(|_| RunId::new(self.next_id.fetch_add(1, Ordering::SeqCst)))
+            .collect();
+        // ⚠ 同步登记取消令牌，再 spawn —— 理由同 `start`（见那里的长注释）。
+        let tokens: Vec<mcloud_core::CancelToken> =
+            ids.iter().map(|id| self.cancel.register(*id)).collect();
+        let this = Arc::clone(self);
+        let task_for_spawn = task_name.to_string();
+        // ⚠ 给协程一份**拷贝**：`ids` 还要在最后返回给调用方
+        // （调用方靠它订阅事件、请求中止）。直接 `move` 进去就是
+        // "use of moved value" —— 修于 2026-10-01，**这一行不是本线的改动**，
+        // 是别人未提交的半成品编译不过，顺手补上以免挡住整条 `mcloud-tasks` 编译。
+        let ids_for_spawn = ids.clone();
+        tokio::spawn(async move {
+            for ((account, id), token) in accounts
+                .into_iter()
+                .zip(ids_for_spawn.iter().copied())
+                .zip(tokens.into_iter())
+            {
+                if let Err(e) = this
+                    .run_impl(&task_for_spawn, &account, &body, id, None, Some(token))
+                    .await
+                {
+                    tracing::error!(
+                        task = %task_for_spawn,
+                        run = %id,
+                        account = %account.id,
+                        error = %e,
+                        "串行批次中的一次运行失败"
+                    );
+                }
+            }
+        });
+        ids
+    }
+
     /// 任务是否已注册。供编排预检用 —— 它必须在发请求**之前**调用。
     pub fn has_task(&self, name: &str) -> bool {
         self.registry.contains(name)
@@ -801,6 +865,92 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
             .await
             .expect("任务未在 5 秒内进入任务体：并发闸的建立逻辑可能已损坏");
+    }
+
+    // ── 多账号串行批次（用户口径 2026-10-01）────────────────────────────
+
+    /// 记账任务：把自己的"进入/离开"按顺序写进共享轨迹。
+    ///
+    /// 用它而不是 `GatedTask`：这里要证的正是**没有重叠**，
+    /// 所以轨迹里每条都带账号，事后一眼看出是不是 `开始A→结束A→开始B→结束B`。
+    struct TraceTask {
+        trace: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Task for TraceTask {
+        fn name(&self) -> &'static str {
+            "trace"
+        }
+        fn title(&self) -> &'static str {
+            "记账任务"
+        }
+        fn description(&self) -> &'static str {
+            "记录进出顺序"
+        }
+        async fn run(&self, ctx: &TaskContext, _body: &serde_json::Value) -> TaskResult {
+            self.trace
+                .lock()
+                .expect("轨迹锁中毒")
+                .push(format!("开始:{}", ctx.account.id));
+            // 让出执行权并睡一下：真并发的话，第二个账号会插到这两行中间。
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            self.trace
+                .lock()
+                .expect("轨迹锁中毒")
+                .push(format!("结束:{}", ctx.account.id));
+            Ok(TaskOutcome::success("跑完"))
+        }
+    }
+
+    #[tokio::test]
+    async fn start_serial_runs_accounts_one_at_a_time_in_order() {
+        let trace: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let (runner, _store, _sink) = build(vec![Arc::new(TraceTask {
+            trace: Arc::clone(&trace),
+        })]);
+        let runner = Arc::new(runner);
+        let a = account("13800000001");
+        let b = account("13800000002");
+        let c = account("13800000003");
+
+        let ids = runner.start_serial(
+            "trace",
+            vec![a.clone(), b.clone(), c.clone()],
+            serde_json::json!({}),
+        );
+        // id 由 runner 预分配并**立刻**返回（界面拿到就要订阅事件流/能中止）
+        assert_eq!(ids.len(), 3, "三个账号应当预分配三个 run id");
+        let uniq: std::collections::HashSet<String> = ids.iter().map(|i| i.to_string()).collect();
+        assert_eq!(uniq.len(), 3, "预分配的 id 必须互不相同：{ids:?}");
+
+        // 等三个都跑完。带超时是刻意的：卡住要直接指向问题，而不是挂成 CI 超时。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if trace.lock().expect("轨迹锁中毒").len() >= 6 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "串行批次没在 5 秒内跑完（可能死等或被并发闸跳过）：{trace:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let got = trace.lock().expect("轨迹锁中毒").clone();
+        assert_eq!(
+            got,
+            vec![
+                format!("开始:{}", a.id),
+                format!("结束:{}", a.id),
+                format!("开始:{}", b.id),
+                format!("结束:{}", b.id),
+                format!("开始:{}", c.id),
+                format!("结束:{}", c.id),
+            ],
+            "三个账号必须**一个跑完再跑下一个**，且顺序与传入顺序一致；实际 {got:?}"
+        );
     }
 
     // ── 基本执行路径 ────────────────────────────────────────────────────

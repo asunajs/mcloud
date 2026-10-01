@@ -23,6 +23,7 @@ import {
   type TaskGroup,
 } from '../api'
 import { TaskConfigPage } from './task-config-page'
+import { AccountPicker } from '../ui/account-picker'
 import { EmptyState } from '../ui/empty-state'
 import { showError } from '../ui/error-dialog'
 import { LogPanel, type LogLine } from '../ui/log-panel'
@@ -72,15 +73,31 @@ export const TasksPage = () => {
   const errorMessage = ref('')
 
   const tasks = ref<TaskMeta[]>([])
-  /** 已登录的云盘账号。跑任务要选一个，而不是手打手机号。 */
+  /** 已登录的云盘账号。跑任务要选一个（或多个），而不是手打手机号。 */
   const accounts = ref<AccountSummary[]>([])
-  const account = ref('')
+  /**
+   * 已勾选的账号 id。
+   *
+   * ⚠ 「全部账号」用**单独的开关** `allAccounts` 表达，而不是"把每一项都勾上"：
+   * 后端的空数组语义是"**我名下的全部账号**"（与定时同一口径），以后加了账号也仍然成立。
+   */
+  const picked = ref<string[]>([])
+  /** `true` = 全部账号 ⇒ 请求发 `accounts: []`。 */
+  const allAccounts = ref(false)
   const running = ref(false)
   const lines = ref<LogLine[]>([])
   /** 已用时长，1 秒一跳；用户要能看到"还在动"。 */
   const elapsedMs = ref(0)
-  /** 当前运行的 run id，用于请求中止。 */
-  const currentRunId = ref<number | null>(null)
+  /**
+   * 本次点击涉及的全部 run id（一个账号一条）。
+   *
+   * 用户口径（2026-10-01）：「任何（包括直播小红花）应该允许配置多账号/全部，
+   * 点击运行后后端保证串行执行」⇒ 后端**串行**跑，但每条 run 是独立记录、独立事件流，
+   * 因此这里是一组 id：订阅要逐条订，中止也要逐条发（只中止第一个的话，其余账号照跑）。
+   */
+  const currentRunIds = ref<number[]>([])
+  /** 已经结束的 run 数：多账号时**全部**结束才算这一批跑完。 */
+  const finishedRuns = ref(0)
   /** 正在跑哪个任务（用于把卡片上的按钮变成"执行中"）。 */
   const runningTask = ref<string | null>(null)
   /** 本次运行的终局结论（跑完后显示在日志上方）。 */
@@ -88,7 +105,7 @@ export const TasksPage = () => {
   /** 已发出中止请求，等待任务在安全点退出。 */
   const cancelling = ref(false)
 
-  let stopStream: (() => void) | null = null
+  let stopStreams: (() => void)[] = []
   let ticker: number | null = null
   let startedAt = 0
 
@@ -101,8 +118,8 @@ export const TasksPage = () => {
       accounts.value = accts
       // 只有一个账号时**预选**它：少一次点击，而且"就是那个号"没有歧义。
       // 多个账号时不猜 —— 猜错就是拿另一个号跑了一遍真任务。
-      if (accts.length === 1 && !account.value) {
-        account.value = accts[0].id
+      if (accts.length === 1 && picked.value.length === 0 && !allAccounts.value) {
+        picked.value = [accts[0].id]
       }
       state.value = 'ready'
     } catch (e) {
@@ -125,53 +142,70 @@ export const TasksPage = () => {
   const finish = () => {
     running.value = false
     cancelling.value = false
-    currentRunId.value = null
+    currentRunIds.value = []
+    finishedRuns.value = 0
     runningTask.value = null
     stopTicker()
-    // EventSource 断线会自动重连，必须显式关掉
-    stopStream?.()
-    stopStream = null
+    // EventSource 断线会自动重连，必须显式关掉（每条 run 一条流）
+    for (const stop of stopStreams) stop()
+    stopStreams = []
   }
 
   /**
-   * 请求中止当前运行。
+   * 请求中止本次点击涉及的全部运行。
    *
    * 中止是**协作式**的：后端只置标志，任务在安全点自己退出。
    * 所以这里不立刻把界面改成"已停止"，而是显示"正在中止"，
    * 等真正的 finished 事件到达才收尾 —— 否则界面说停了、任务还在跑。
+   *
+   * ⚠ 多账号时**逐条**发：只中止第一个的话其余账号照跑。
+   * 还没轮到的账号会带着已取消的令牌轮到自己，在安全点直接收尾（不会白跑一遍）。
    */
   const cancel = async () => {
-    const id = currentRunId.value
-    if (id == null) return
+    const ids = currentRunIds.value
+    if (ids.length === 0) return
     cancelling.value = true
     try {
-      const resp = await cancelRun(id)
-      if (!resp.cancelled) {
+      const results = await Promise.all(ids.map((id) => cancelRun(id)))
+      if (!results.some((r) => r.cancelled)) {
         // 任务刚好跑完 —— 正常竞态，不是错误
         push('warn', '任务已经结束，无需中止')
         cancelling.value = false
         return
       }
-      push('warn', '已请求中止，等待任务在安全点退出…')
+      push(
+        'warn',
+        ids.length > 1
+          ? `已请求中止 ${ids.length} 个账号，等待各自在安全点退出…`
+          : '已请求中止，等待任务在安全点退出…',
+      )
     } catch (e) {
       showError('中止失败', e instanceof Error ? e.message : '中止请求失败')
       cancelling.value = false
     }
   }
 
-  const onEvent = (ev: RunEvent) => {
+  /**
+   * 一条 run 的事件回调。
+   *
+   * ⚠ 多账号时每条流都带**自己的账号前缀**：日志是同一个面板，
+   * 不带前缀两三个账号的进度会交错成一团，看不出谁是谁。
+   */
+  const onEventFor = (accountLabel: string) => (ev: RunEvent) => {
+    const tag = currentRunIds.value.length > 1 ? `[${accountLabel}] ` : ''
+    const say = (kind: LogLine['kind'], text: string) => push(kind, tag + text)
     switch (ev.type) {
       case 'started':
-        push('info', `任务开始：${ev.task} / ${accountName(ev.account)}`)
+        say('info', `任务开始：${ev.task} / ${accountName(ev.account)}`)
         break
       case 'log':
-        push(
+        say(
           ev.level === 'error' ? 'error' : ev.level === 'warn' ? 'warn' : 'info',
           ev.message,
         )
         break
       case 'progress':
-        push('info', `[${ev.step}/${ev.total}] ${ev.label}`)
+        say('info', `[${ev.step}/${ev.total}] ${ev.label}`)
         break
       case 'finished': {
         // 三种结局分别显示：失败要说清原因，跳过要说清**为什么跳过**
@@ -180,11 +214,18 @@ export const TasksPage = () => {
         const text =
           o.status === 'success' ? o.summary : o.status === 'skipped' ? o.reason : o.reason
         outcome.value = { ok: o.status === 'success', text }
-        push(
+        say(
           o.status === 'failed' ? 'error' : 'info',
           `结束（${ev.duration_ms}ms）：${o.status === 'skipped' ? `跳过 —— ${text}` : text}`,
         )
-        finish()
+        finishedRuns.value += 1
+        // 多账号时**全部**结束才算这一批跑完；否则继续等队列里的下一个
+        // （后端是串行的，所以此刻剩下的账号其实是"排队中"）。
+        if (finishedRuns.value >= currentRunIds.value.length) {
+          finish()
+        } else {
+          say('info', `还剩 ${currentRunIds.value.length - finishedRuns.value} 个账号排队中`)
+        }
         break
       }
       default:
@@ -195,10 +236,15 @@ export const TasksPage = () => {
 
   const run = async (task: string) => {
     lines.value = []
-    if (!account.value.trim()) {
+    // 「全部账号」在协议上是 `accounts: []`（与定时同一口径）
+    const ids = allAccounts.value ? [] : picked.value
+    if (!allAccounts.value && ids.length === 0) {
       // 没选账号就点运行 —— 这是**当前动作的直接答案**，弹窗告知。
       // 页内那行提示在表单上方，卡片列表拉长后用户根本看不到。
-      showError('请先选择一个账号', '任务需要一个已登录的账号才能跑。请在上方「账号」里选一个，再点运行。')
+      showError(
+        '请先选择账号',
+        '任务需要一个已登录的账号才能跑。请在上方「账号」里勾选，或勾上「全部账号」。',
+      )
       return
     }
 
@@ -216,14 +262,27 @@ export const TasksPage = () => {
       // 每次运行现拉一次，而不是在内存里存一份 —— 后者会出现"配置页改了、
       // 这次运行还用着旧参数"，而那种不一致没有任何迹象。
       const cfg = await getTaskConfig(task)
-      // 后台执行：**立刻**拿到 run id，这样才能订阅事件并请求中止。
+      // 后台执行：**立刻**拿到 run id（多账号时是一组），这样才能订阅事件并请求中止。
       // 同步执行的话请求还没返回，用户根本没有可中止的时机。
-      const resp = await startRun(task, account.value.trim(), cfg.params, true)
-      currentRunId.value = resp.run_id
+      const resp = await startRun(task, ids, cfg.params, true)
+      // ⚠ 必须容忍**老后端**（只有 `run_id`/`account`，没有这组新字段）：
+      // 门禁的夹具就是老形状，而且升级顺序上"前端先上、后端后上"也真实存在。
+      const runIds = resp.run_ids?.length ? resp.run_ids : [resp.run_id]
+      const labels = resp.accounts?.length ? resp.accounts : [resp.account]
+      currentRunIds.value = runIds
+      finishedRuns.value = 0
       // 先订阅再提示：订阅会把已发布的事件补进队列，
-      // 因此"启动到订阅"之间的事件不会丢
-      stopStream = subscribeRun(resp.run_id, { onEvent })
-      push('info', `已提交，运行号 ${resp.run_id}`)
+      // 因此"启动到订阅"之间的事件不会丢。**每条 run 各订一条**。
+      for (const stop of stopStreams) stop()
+      stopStreams = runIds.map((id, i) =>
+        subscribeRun(id, { onEvent: onEventFor(accountName(labels[i] ?? '')) }),
+      )
+      push(
+        'info',
+        ids.length === 0
+          ? `已提交 ${runIds.length} 个账号：${labels.map(accountName).join('、')} · 后端按顺序一个一个跑`
+          : `已提交，运行号 ${resp.run_id}`,
+      )
     } catch (e) {
       showError(`无法启动「${task}」`, e instanceof Error ? e.message : '请求失败')
       finish()
@@ -239,7 +298,7 @@ export const TasksPage = () => {
   onUnmounted(() => {
     window.removeEventListener('hashchange', onHash)
     stopTicker()
-    stopStream?.()
+    for (const stop of stopStreams) stop()
   })
 
   const elapsedText = () => `${(elapsedMs.value / 1000).toFixed(0)} 秒`
@@ -273,29 +332,38 @@ export const TasksPage = () => {
               </span>
             </div>
           ) : (
-            <select
-              class="select w-full"
-              value={account.value}
-              onChange={(e) => {
-                account.value = (e.target as HTMLSelectElement).value
-              }}
-            >
-              <option value="" disabled>
-                选择一个账号
-              </option>
-              {accounts.value.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.nickname || a.label || a.id}
-                  {a.pc_platform ? `（${a.pc_platform}）` : ''}
-                </option>
-              ))}
-            </select>
+            <div class="flex flex-col gap-2">
+              {/*
+                账号选择器（任务页与直播页共用同一个组件）。
+                用户口径（2026-10-01）：「任何（包括直播小红花）应该允许配置多账号/全部，
+                点击运行后后端保证串行执行」——「全部」在后端是 `accounts: []`。
+              */}
+              <AccountPicker
+                accounts={accounts.value}
+                all={allAccounts.value}
+                picked={picked.value}
+                onToggleAll={() => (allAccounts.value = !allAccounts.value)}
+                onToggle={(id) =>
+                  (picked.value = picked.value.includes(id)
+                    ? picked.value.filter((x) => x !== id)
+                    : [...picked.value, id])
+                }
+              />
+              <p class="text-xs opacity-60">
+                勾多个账号时，后端按顺序一个一个跑（一个跑完再跑下一个）。
+                勾「全部账号」= 你名下的所有账号，以后加了账号也算在内。
+              </p>
+            </div>
           )}
         </fieldset>
         {running.value ? (
           <div class="flex flex-wrap items-center justify-between gap-2">
             <span class="text-xs opacity-70">
-              执行中，已用 {elapsedText()} · 可关闭页面，任务在后端继续
+              执行中，已用 {elapsedText()}
+              {currentRunIds.value.length > 1
+                ? ` · 已完成 ${finishedRuns.value}/${currentRunIds.value.length} 个账号（按顺序串行）`
+                : ''}
+              {' '}· 可关闭页面，任务在后端继续
             </span>
             <button
               type="button"

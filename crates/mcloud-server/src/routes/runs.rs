@@ -36,7 +36,19 @@ use crate::ServerState;
 #[derive(Debug, Deserialize)]
 pub struct RunRequest {
     pub task: String,
-    pub account: String,
+    /// 单个账号（兼容既有调用方与测试）。
+    #[serde(default)]
+    pub account: Option<String>,
+    /// **多账号**。语义与 `Schedule.accounts` 完全一致：
+    ///
+    /// * `Some([...])` ⇒ 就跑这几家；
+    /// * `Some([])` ⇒ **当前用户名下的全部账号**；
+    /// * `None` ⇒ 没给，回落到 `account`。
+    ///
+    /// ⚠ 用 `Option<Vec<String>>` 而不是裸 `Vec<String>`：裸 `Vec` 分不出
+    /// "没给这个字段"与"给了空数组"，而这两者语义**相反**（后者是"全部"）。
+    #[serde(default)]
+    pub accounts: Option<Vec<String>>,
     #[serde(default)]
     pub body: serde_json::Value,
     /// 立即返回、后台执行。
@@ -50,10 +62,19 @@ pub struct RunRequest {
 
 #[derive(Serialize)]
 pub struct RunResponse {
+    /// 兼容字段：多账号时是**第一个**账号那次运行的 id。
     pub run_id: RunId,
+    /// 本次点击涉及的**全部** run id（单账号时就是 `[run_id]`）。
+    /// 界面据此逐条订阅事件流、逐条中止。
+    pub run_ids: Vec<RunId>,
     pub task: String,
+    /// 兼容字段：多账号时是**第一个**账号。
     pub account: String,
+    /// 本次点击涉及的**全部**账号（顺序即执行顺序）。
+    pub accounts: Vec<String>,
+    /// 兼容字段：多账号时是**第一个**账号的结论。
     pub outcome: mcloud_core::TaskOutcome,
+    /// 同步执行时是**全部账号的合计**耗时。
     pub duration_ms: u64,
 }
 
@@ -186,66 +207,130 @@ pub async fn create(
         ))));
     }
 
-    let id = AccountId::new(&req.account);
-    // 归属：只认自己的账号。**别人的账号回 404**，不泄露存在性；
-    // 真不存在仍是 400（错的是请求体里的一个字段，与既有契约一致）。
-    let account: Account = match state.handle.store.account_for(&cur.0, &id).await? {
-        Some(a) => a,
-        None if state.handle.store.account(&id).await?.is_some() => {
-            return Err(ApiError(mcloud_core::Error::NotFound(format!(
-                "账号不存在：{}",
-                req.account
-            ))));
+    // ── 目标账号：多账号 / 全部（用户口径 2026-10-01）─────────────────────
+    //
+    // 四种给法，按"明确程度"排优先级：
+    //   ① `accounts: ["a","b"]`  指定几家；
+    //   ② `accounts: []`         **我名下的全部**（与 `Schedule.accounts` 同一口径）；
+    //   ③ `account: "a"`         单个（兼容既有调用方与测试）；
+    //   ④ 都没给 ⇒ 400：**不猜**。"没写"和"全部"差得太远，猜错就是名下账号全跑一遍。
+    let mut targets: Vec<Account> = Vec::new();
+    match (&req.accounts, &req.account) {
+        (Some(list), _) if list.is_empty() => {
+            targets = state.handle.store.accounts_for(&cur.0).await?;
         }
-        None => {
-            return Err(ApiError(mcloud_core::Error::Config(format!(
-                "账号不存在：{}",
-                req.account
-            ))));
+        (Some(list), _) => {
+            for raw in list {
+                let account = resolve_owned_account(&state, &cur, raw).await?;
+                // 同一次点击里重复给了同一个账号：只跑一次 ——
+                // 否则会白跑一遍，还多半撞上并发闸变成 Skipped。
+                if !targets.iter().any(|a| a.id == account.id) {
+                    targets.push(account);
+                }
+            }
         }
-    };
-
-    if req.background {
-        return start_background(state, cur, req.task, account, req.body).await;
+        (None, Some(single)) => targets.push(resolve_owned_account(&state, &cur, single).await?),
+        (None, None) => {
+            return Err(ApiError(mcloud_core::Error::Config(
+                "缺少账号：给 account（单个）或 accounts（数组；空数组表示全部账号）".into(),
+            )));
+        }
+    }
+    if targets.is_empty() {
+        return Err(ApiError(mcloud_core::Error::Config(
+            "没有可运行的账号：这个用户名下还没有任何账号".into(),
+        )));
     }
 
-    let record = state
-        .handle
-        .runner
-        .run(&req.task, &account, &req.body)
-        .await?;
+    if req.background {
+        return start_background(state, cur, req.task, targets, req.body).await;
+    }
 
+    // 同步：**逐个**跑。串行是这条链的硬要求，理由见 `Runner::start_serial` 的文档
+    // （上游限流最怕并发打过去）。
+    let mut records = Vec::new();
+    let mut total_ms: u64 = 0;
+    for account in &targets {
+        let record = state
+            .handle
+            .runner
+            .run(&req.task, account, &req.body)
+            .await?;
+        total_ms += record.duration_ms;
+        records.push(record);
+    }
+    let accounts: Vec<String> = targets.iter().map(|a| a.id.to_string()).collect();
+    let first = records.first().expect("targets 已判非空");
     Ok(Json(RunResponse {
-        run_id: record.run_id,
-        task: record.task,
-        account: record.account,
-        outcome: record.outcome,
-        duration_ms: record.duration_ms,
+        run_id: first.run_id,
+        run_ids: records.iter().map(|r| r.run_id).collect(),
+        task: req.task,
+        account: first.account.clone(),
+        accounts,
+        outcome: first.outcome.clone(),
+        duration_ms: total_ms,
     }))
 }
 
-/// 后台执行，**立刻**返回真实的 run id。
+/// 把一个账号标识解析成 `Account`，且**只认当前用户自己的账号**。
+///
+/// 归属规则与单账号时代逐字一致（界面在用、也有测试锁着）：
+/// * 自己的账号 ⇒ 正常返回；
+/// * **别人的账号 ⇒ 404**，不泄露存在性；
+/// * 压根不存在 ⇒ 400（错的是请求体里的一个字段，与既有契约一致）。
+async fn resolve_owned_account(
+    state: &ServerState,
+    cur: &CurrentUser,
+    raw: &str,
+) -> Result<Account, ApiError> {
+    let id = AccountId::new(raw);
+    match state.handle.store.account_for(&cur.0, &id).await? {
+        Some(a) => Ok(a),
+        None if state.handle.store.account(&id).await?.is_some() => Err(ApiError(
+            mcloud_core::Error::NotFound(format!("账号不存在：{raw}")),
+        )),
+        None => Err(ApiError(mcloud_core::Error::Config(format!(
+            "账号不存在：{raw}"
+        )))),
+    }
+}
+
+/// 后台执行，**立刻**返回真实的 run id（多账号时是**一组** id）。
 ///
 /// 拿到的 id 可以立即用来订阅事件流和请求中止 —— 这正是"要能点中止"
 /// 所必需的前提。
+///
+/// # 为什么走 `start_serial` 而不是循环 `start`
+///
+/// 用户口径（2026-10-01）：「任何（包括直播小红花）应该允许配置多账号/全部，
+/// 点击运行后后端保证串行执行」。`start` 每个 run 各自 spawn ⇒ 并发；
+/// `start_serial` 只 spawn **一个**驱动任务、逐个 await，
+/// 因此 N 个账号在后端是严格串行的（上游限流最怕并发打过去）。
 async fn start_background(
     state: ServerState,
     cur: CurrentUser,
     task: String,
-    account: Account,
+    accounts: Vec<Account>,
     body: serde_json::Value,
 ) -> Result<Json<RunResponse>, ApiError> {
-    // Runner::start 内部自己分配 id 并 spawn，因此这里返回的 id 是真的。
+    // id 由 runner 分配（id 分配只有一个来源），并且**同步**登记取消令牌 ——
     // ⚠ spawn 出去的 future 不持有请求上下文 —— 请求一返回它的上下文就被取消了，
     // 而这一趟任务要跑几十秒。
-    let run_id = state.handle.runner.start(&task, account.clone(), body);
-    // 记录这次运行的归属：记录要到**结束时**才落盘，而客户端拿到 id 后
+    let names: Vec<String> = accounts.iter().map(|a| a.id.to_string()).collect();
+    let first_account = names.first().cloned().unwrap_or_default();
+    let run_ids = state.handle.runner.start_serial(&task, accounts, body);
+    // 记录归属：记录要到**结束时**才落盘，而客户端拿到 id 后
     // 会立刻订阅 SSE / 请求中止 —— 那时只能靠这张登记表判归属。
-    state.note_run_owner(run_id, &cur.0);
+    // ⚠ **每个 id 都要登记**：只登记第一个的话，第 2 个账号之后的中止会 404。
+    for id in &run_ids {
+        state.note_run_owner(*id, &cur.0);
+    }
     Ok(Json(RunResponse {
-        run_id,
+        run_id: run_ids.first().copied().unwrap_or(RunId::new(0)),
+        run_ids,
         task,
-        account: account.id.to_string(),
+        account: first_account,
+        accounts: names,
         outcome: mcloud_core::TaskOutcome::skipped("已在后台开始"),
         duration_ms: 0,
     }))
