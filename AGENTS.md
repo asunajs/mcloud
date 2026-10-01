@@ -232,6 +232,13 @@ Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过�
 - 服务端口用环境变量 `MCLOUD_ADDR`（默认 `127.0.0.1:3000`），数据目录 `MCLOUD_DATA_DIR`
   （⚠ 不是 `MCLOUD_DATA`）；`PORT` 环境变量**被忽略**
 - macOS 没有 `timeout` 命令；SSH 用 `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=20"`
+- ⚠ **编译/检查为什么慢、怎么跑才快 —— 实测归因见 `docs/build-perf.md`**（2026-10-01）。
+  三条最省事的：① 日常自检用 **`cargo check -p <crate>`**，别动不动 `--workspace --all-targets`
+  （后者要把 94 个含 `#[cfg(test)]` 的文件**再编一份 test 版** + 链接 8 个集成测试目标）；
+  ② **起编译前 `pgrep -fl 'cargo check'`** 看一眼有没有别的写入线在跑 —— cargo 对 `target/`
+  上独占锁，硬抢两边都慢；③ `mcloud-core` / `mcloud-tasks` / `mcloud-engine` 是**全仓下游**，
+  这类改动**攒成一批再编**（每改一行就编 = 全仓重编一次）。
+  ⚠ 已实测**排除**：外置盘吞吐、小文件随机 I/O、内存换页、磁盘空间 —— 别再往那些方向查。
 - **前端工具链（2026-10-01 起，两条都换过）**：
   * 编译：TSX 由 **`oxc-parser`** 解析（`web/lite/ast.ts` 是适配层，`typescript` 包
     **已不在依赖里**）。⚠ 它是**原生**包 ⇒ 凡把它打进 Node 侧产物的构建都要标 `external`
