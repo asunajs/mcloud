@@ -185,11 +185,9 @@ pub struct AccountSettings {
     /// 红包派对。
     pub redpack_enabled: bool,
 
-    /// AI豆大作战。
-    pub hc1t_enabled: bool,
-    pub hc1t_game_secs: u64,
-    pub hc1t_target_rank: u32,
-
+    // 这里**没有** `hc1t_*` 三个旋钮：`hc1t`（AI豆大作战）已被判「已过期、
+    // 不实现」（`docs/task-inventory.md` 的 §P4 与差异表 D3），本仓也没有对应
+    // 任务 —— 留着就是骗人的旋钮。将来真要实现时，随任务一起把字段加回来。
     /// 春日拍拍大作战。
     pub play_ai_enabled: bool,
 
@@ -265,9 +263,6 @@ impl Default for AccountSettings {
             ai_avatar_enabled: false,
             ai_avatar_daily_limit: 10,
             redpack_enabled: true,
-            hc1t_enabled: false,
-            hc1t_game_secs: 300,
-            hc1t_target_rank: 500,
             play_ai_enabled: true,
             kouling_enabled: false,
             // 默认不配推送渠道：与"未配置就零行为"同一条 —— 装完不该有包发出去。
@@ -405,10 +400,23 @@ mod tests {
     fn default_settings_are_conservative() {
         let s = AccountSettings::default();
         assert!(!s.ai_avatar_enabled);
-        assert!(!s.hc1t_enabled);
         assert!(!s.kouling_enabled);
         assert_eq!(s.refresh_token_days, 10);
         assert_eq!(s.notify, None, "默认不该给任何账号配推送渠道");
+    }
+
+    /// 删掉 `hc1t_*` 之后，带旧键的落盘值仍然读得回来。
+    ///
+    /// 这是"删一个**从没接线**的旋钮"为什么安全的判据：serde 忽略未知键，
+    /// 所以老库里残留的 `hc1t_enabled` 不会让整份账号设置读不出来。
+    #[test]
+    fn legacy_hc1t_keys_are_ignored_after_removal() {
+        let s: AccountSettings = serde_json::from_str(
+            r#"{"hc1t_enabled":true,"hc1t_game_secs":600,"hc1t_target_rank":10}"#,
+        )
+        .expect("旧键必须被忽略，不能让整份设置读不出来");
+        assert!(s.skip_tasks.is_empty());
+        assert!(s.play_ai_enabled, "其余字段照常取默认");
     }
 
     /// 推送渠道落盘：配了就留得住，没配就不占格子。

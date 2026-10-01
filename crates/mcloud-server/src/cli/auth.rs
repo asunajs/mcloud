@@ -14,7 +14,7 @@
 //! - `2` —— 用法错（`--lead-days` 给了 0 或负数、账号不存在、参数矛盾）
 
 use anyhow::Context;
-use mcloud_app::auth_refresh::{RefreshOutcome, DEFAULT_LEAD_DAYS};
+use mcloud_app::auth_refresh::RefreshOutcome;
 use mcloud_core::AccountId;
 
 use mcloud_app::App;
@@ -24,7 +24,7 @@ const EXIT_CONFIG: i32 = 2;
 struct Args {
     account: Option<String>,
     all: bool,
-    lead_days: f64,
+    lead_days: Option<f64>,
     force: bool,
 }
 
@@ -32,7 +32,7 @@ fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
     let mut out = Args {
         account: None,
         all: false,
-        lead_days: DEFAULT_LEAD_DAYS,
+        lead_days: None,
         force: false,
     };
     let mut i = 0;
@@ -52,14 +52,14 @@ fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
                     .with_context(|| format!("--lead-days 不是数字：{raw}"))?;
                 // ⚠ 0 或负数 ⇒ **用法错**，不静默当默认值。
                 //
-                // 想「到期当天才刷」的人写 0，静默变 7 天恰好是他想避开的含义。
+                // 想「到期当天才刷」的人写 0，静默变账号配置的天数恰好是他想避开的含义。
                 if v <= 0.0 {
                     eprintln!("--lead-days 必须为正数（给的是 {v}）");
                     eprintln!("想「到期当天才刷」请给一个很小的正数，比如 0.001；");
                     eprintln!("想无条件刷新请用 --force。");
                     std::process::exit(EXIT_CONFIG);
                 }
-                out.lead_days = v;
+                out.lead_days = Some(v);
             }
             other => {
                 eprintln!("未知参数：{other}");
@@ -74,11 +74,13 @@ fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
 
 fn print_usage() {
     eprintln!();
-    eprintln!("用法：auth refresh <--account <id> | --all> [--lead-days 7] [--force]");
+    eprintln!("用法：auth refresh <--account <id> | --all> [--lead-days N] [--force]");
     eprintln!();
     eprintln!("  --account <id>   只刷这一个账号");
     eprintln!("  --all            刷所有账号");
-    eprintln!("  --lead-days N    剩余不足 N 天时刷新（默认 {DEFAULT_LEAD_DAYS}，必须为正）");
+    eprintln!(
+        "  --lead-days N    剩余不足 N 天时刷新（不给就用账号配置「剩余多少天刷新token」，账号默认 10 天；必须为正）"
+    );
     eprintln!("  --force          到不到点都刷（越过 --lead-days，越不过「需人工」那一档）");
     eprintln!();
     eprintln!("（本项目暂无账号级启停，所以 --all 就是全部账号。）");

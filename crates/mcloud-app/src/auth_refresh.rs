@@ -23,11 +23,20 @@ use std::sync::Arc;
 use mcloud_core::{Account, Clock, Error, Result, Store};
 use mcloud_upstream::auth_refresh;
 
-/// 默认提前量：7 天。
+/// 解析"这个账号该用的提前量（天）"。
 ///
-/// 参考实现有两处值（代码兜底 7、给用户配置的默认 10）—— 本仓取 7，
-/// 并把它做成可调参数。
-pub const DEFAULT_LEAD_DAYS: f64 = 7.0;
+/// 优先级：**显式覆盖**（CLI `--lead-days`，传 `Some`）> **账号配置**
+/// [`mcloud_core::AccountSettings::refresh_token_days`]。
+///
+/// ⚠ 账号配置缺席时由 `AccountSettings::default()` 兜底成 **10 天**（serde
+/// `#[serde(default)]`），与旧 TS 的默认值一致（`schema.ts` 的
+/// `剩余多少天刷新token`）。原先写死的 7 是参考实现的**代码兜底**值，不是
+/// 用户看到的默认 —— 那条旋钮此前**声明了却没人读**，等于摆设。
+///
+/// ⚠ 判据语义**没变**：这里只换"提前量从哪来"，比较仍走 [`decide`]。
+pub fn lead_days_for(account: &Account, explicit: Option<f64>) -> f64 {
+    explicit.unwrap_or(account.settings.refresh_token_days as f64)
+}
 
 /// 判据的三种结果。
 ///
@@ -135,16 +144,19 @@ impl AuthRefreshService {
 
     /// 按判据刷一个账号。
     ///
+    /// `lead_days = None` ⇒ 用**账号配置**的 `refresh_token_days`（默认 10）；
+    /// `Some` 是显式覆盖（CLI `--lead-days`）。解析口径见 [`lead_days_for`]。
+    ///
     /// `force = true` 越过 `not-yet`，但**越不过** `ManualOnly` ——
     /// 那一档打了上游也注定失败。
     pub async fn refresh(
         &self,
         account: &Account,
-        lead_days: f64,
+        lead_days: Option<f64>,
         force: bool,
     ) -> Result<RefreshOutcome> {
         let now = self.clock.now_ms();
-        let decision = decide(account.auth.expire, now, lead_days);
+        let decision = decide(account.auth.expire, now, lead_days_for(account, lead_days));
 
         match decision {
             RefreshDecision::ManualOnly => {
@@ -227,7 +239,7 @@ impl AuthRefreshService {
     /// 各写一遍。
     pub async fn refresh_all(
         &self,
-        lead_days: f64,
+        lead_days: Option<f64>,
         force: bool,
     ) -> Result<Vec<(Account, Result<RefreshOutcome>)>> {
         let all = self.store.accounts().await?;

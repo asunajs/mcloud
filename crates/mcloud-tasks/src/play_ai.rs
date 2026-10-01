@@ -213,6 +213,16 @@ impl Task for PlayAiTask {
     }
 
     async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
+        // ⚠ 开关是**最外层**的门（旧 TS 在 `cli/index.ts` 用
+        // `if (config.春日拍拍大作战?.开启)` 把整条调用包起来）：关 ⇒ 一个请求
+        // 都不发，结论是 `Skipped` 而**不是** `Failed` —— "用户没启用"是决定，
+        // 不是故障。
+        if !ctx.account.settings.play_ai_enabled {
+            return Ok(TaskOutcome::skipped(
+                "拍拍盘点未启用（账号配置「春日拍拍大作战·开启」为关）",
+            ));
+        }
+
         ctx.progress(1, 2, "读取拍拍活动状态");
         // ⚠ 这一条**只发读请求**，两枪的 URL 里没有任何写路径。
         let status = call(

@@ -102,9 +102,96 @@ fn tiny_lead_days_is_allowed() {
     assert_eq!(decide(NOW + 60_000, NOW, 0.001), RefreshDecision::Needed);
 }
 
+// ── 提前量的来源：账号配置（不是写死的 7） ──────────────────────────────
+
+/// 只当构造参数用的 store：这几条用例的判定**不碰库**
+/// （not-yet 直接返回；该刷那一支在 `refresh_request` 就因缺用户域而 Err）。
+fn unused_store() -> Arc<dyn Store> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "mcloud-auth-refresh-{}-{nanos}",
+        std::process::id()
+    ));
+    Arc::new(mcloud_store::JsonStore::open(&dir).expect("临时目录必须能建"))
+}
+
+/// 永远打挂的 HTTP 客户端。这几条用例的第一个失败点是缺 `userDomainId`
+/// （`refresh_request`），它压根到不了这里；留着它只是为了"真打了网络也只会失败"。
+struct NeverHttp;
+
+#[async_trait::async_trait]
+impl mcloud_core::HttpClient for NeverHttp {
+    async fn request(
+        &self,
+        _req: mcloud_core::HttpRequest,
+    ) -> mcloud_core::Result<mcloud_core::HttpResponse> {
+        Err(mcloud_core::Error::Other("测试替身：不该真的打网络".into()))
+    }
+}
+
+fn service() -> AuthRefreshService {
+    let http_for: mcloud_engine::HttpClientFactory =
+        Arc::new(|_a: &Account| Arc::new(NeverHttp) as Arc<dyn mcloud_core::HttpClient>);
+    AuthRefreshService::new(
+        unused_store(),
+        Arc::new(mcloud_core::testkit::FixedClock(NOW)),
+        http_for,
+    )
+}
+
+/// 解析口径：显式覆盖 > 账号配置；账号默认是 **10**（不是参考实现的代码兜底 7）。
 #[test]
-fn default_lead_is_seven_days() {
-    assert_eq!(DEFAULT_LEAD_DAYS, 7.0);
+fn lead_days_for_prefers_explicit_then_account_settings() {
+    let mut acct = account_fixture();
+    assert_eq!(lead_days_for(&acct, None), 10.0, "账号默认是 10 天");
+    assert_eq!(lead_days_for(&acct, Some(3.0)), 3.0, "显式覆盖优先");
+
+    acct.settings.refresh_token_days = 7;
+    assert_eq!(lead_days_for(&acct, None), 7.0);
+    assert_eq!(lead_days_for(&acct, Some(3.0)), 3.0);
+}
+
+/// ⭐ d) 提前量来自**账号配置** `refresh_token_days`（默认 10），而不是写死的 7。
+///
+/// 边界：还剩 8 天时，阈值 7 ⇒ 不刷；阈值 10 ⇒ 该刷 —— 这正是 7 与 10
+/// 给出**相反**结论的那条线。
+#[tokio::test]
+async fn refresh_lead_days_comes_from_account_settings() {
+    let mut acct = account_fixture();
+    acct.auth.expire = NOW + 8 * DAY;
+    let svc = service();
+
+    // 账号配置 7 天 ⇒ 8 > 7 ⇒ not-yet，**一个请求都不发**。
+    acct.settings.refresh_token_days = 7;
+    let out = svc.refresh(&acct, None, false).await.expect("不该是 Err");
+    assert!(
+        matches!(out, RefreshOutcome::Skipped { .. }),
+        "实得：{out:?}"
+    );
+
+    // 账号配置 10 天 ⇒ 8 <= 10 ⇒ 该刷 ⇒ 越过 not-yet 走到 rotate。
+    // 这个账号没有 userDomainId ⇒ `refresh_request` 立刻 Err。
+    acct.settings.refresh_token_days = 10;
+    assert!(
+        svc.refresh(&acct, None, false).await.is_err(),
+        "阈值 10 时 8 天余量应判该刷（于是走到缺用户域那一支）"
+    );
+}
+
+/// ⭐ 显式 `--lead-days` 仍然优先于账号配置。
+#[tokio::test]
+async fn explicit_lead_days_overrides_account_settings() {
+    let mut acct = account_fixture();
+    acct.auth.expire = NOW + 8 * DAY;
+    acct.settings.refresh_token_days = 7; // 账号说不用刷
+    let svc = service();
+    assert!(
+        svc.refresh(&acct, Some(10.0), false).await.is_err(),
+        "显式 10 天应覆盖账号配置的 7 天"
+    );
 }
 
 // ── 落库兜底 ────────────────────────────────────────────────────────────

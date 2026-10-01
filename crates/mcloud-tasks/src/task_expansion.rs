@@ -48,8 +48,17 @@ use mcloud_upstream::app_signin as proto;
 use mcloud_upstream::app_signin::{SignInEnvelope, TaskExpansion};
 use mcloud_upstream::cloud_trash;
 
-/// 凑完备份之后等多久再重读（旧实现的默认）。**等的是"服务端把这一次备份事件记进当月"**。
-pub const DEFAULT_BACKUP_WAIT_MS: i64 = 20_000;
+/// 账号配置的 `backup_wait_secs` → 毫秒（旧 TS：`(ctx.config.backupWaitTime || 20) * 1000`）。
+///
+/// ⚠ 本仓**刻意**把 `0` 当「不等待」，而不是像 TS 那句 `|| 20` 回落到 20 秒：
+/// 用户把等待调成 0 的意思就是"别等"（测试与活体探针也靠它不真睡 20 秒）。
+///
+/// 等的是"服务端把刚发出的一次备份事件记进当月"，所以等待只发生在上传
+/// **真的发过枪**之后（见 [`BackupUpload::needs_wait`]）。
+pub fn backup_wait_ms(secs: u64) -> i64 {
+    // `u64 → i64` 用饱和：一个手改坏的值不该在转换时绕回负数。
+    i64::try_from(secs).unwrap_or(i64::MAX).saturating_mul(1000)
+}
 
 /// 最多凑几次备份 = 1。
 ///
@@ -223,6 +232,12 @@ pub struct ExpansionResult {
     pub cloud_count: Option<i64>,
     /// 没领 / 判不了的人话依据。
     pub reason: String,
+    /// 这一趟**计划**等多久（毫秒）—— 直接来自 [`ExpansionPlan::backup_wait_ms`]，
+    /// 也就是账号配置 `backup_wait_secs` 的换算值。
+    ///
+    /// 进明细（`backupWaitMs`）：这是"账号配置到底有没有生效"唯一不必真等
+    /// 20 秒就能读到的读数。
+    pub backup_wait_ms: i64,
     /// 失败原文（`ClaimFailed` 或清理失败）。
     pub error: String,
     /// 第一次读到的（判据用它）。
@@ -334,7 +349,12 @@ pub async fn run_expansion(
     device_id: Option<&str>,
     plan: &ExpansionPlan,
 ) -> Result<ExpansionResult> {
-    let mut result = ExpansionResult::default();
+    // 把"计划等多久"记进结果：它决定下面真睡多久，也是"账号配置有没有生效"
+    // 唯一不必真等就能读到的读数。
+    let mut result = ExpansionResult {
+        backup_wait_ms: plan.backup_wait_ms,
+        ..Default::default()
+    };
 
     // ① 读第一遍。它挂了 ⇒ 整趟没有结论可报。
     let first = read_once(ctx, device_id).await?;
@@ -623,23 +643,23 @@ fn sha256_hex(content: &[u8]) -> String {
 // ══════════════════════════ 任务 ══════════════════════════
 
 /// 跑一次任务拓展（**会写**：往用户网盘传一个文件并刷备份状态）。
-pub struct TaskExpansionTask {
-    /// 凑完之后等多久。**做成字段是为了让测试把它设成 0** ——
-    /// 真睡 20 秒的测试既慢又看不出"等"这件事的语义。
-    pub backup_wait_ms: i64,
-}
+///
+/// # 等待时长**不写死在这里**
+///
+/// 它来自**账号配置** `backup_wait_secs`（默认 20 秒）—— 换算见
+/// [`backup_wait_ms`]。原先那个写死 20 秒的字段已删：配置里那个旋钮此前
+/// 声明了却没人读，等于摆设。
+pub struct TaskExpansionTask;
 
 impl Default for TaskExpansionTask {
     fn default() -> Self {
-        Self {
-            backup_wait_ms: DEFAULT_BACKUP_WAIT_MS,
-        }
+        Self
     }
 }
 
 impl TaskExpansionTask {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 }
 
@@ -689,7 +709,11 @@ impl Task for TaskExpansionTask {
         // 同族既有写法见 `signin.rs` 那句 `ctx.account.device_id.as_str()`。
         let account_device = ctx.account.device_id.as_str();
         let device_id: Option<&str> = (!account_device.is_empty()).then_some(account_device);
-        let plan = random_plan(&mut mcloud_crypto::OsRandom, self.backup_wait_ms);
+        // ⚠ 等待时长随**账号配置**走，不是写死的 20 秒。
+        let plan = random_plan(
+            &mut mcloud_crypto::OsRandom,
+            backup_wait_ms(ctx.account.settings.backup_wait_secs),
+        );
 
         let result = run_expansion(ctx, device_id, &plan).await?;
         match result.verdict {
@@ -724,6 +748,7 @@ fn report_details(ctx: &TaskContext, result: &ExpansionResult) {
     ctx.details(serde_json::json!({
         "kind": "task-expansion",
         "verdict": slug,
+        "backupWaitMs": result.backup_wait_ms,
         "reason": result.reason,
         "error": result.error,
         "cloudCount": result.cloud_count,

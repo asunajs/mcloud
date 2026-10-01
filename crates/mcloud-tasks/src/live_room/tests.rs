@@ -1450,7 +1450,9 @@ fn params_check_covers_all_four_states() {
 /// ⭐ 任务层把参数错误翻成 `Err`，且措辞**点出 flag 名**（措辞在调用方）。
 #[tokio::test]
 async fn task_surfaces_invalid_params_as_an_error() {
-    let (c, http) = Ctx::new(&[]);
+    let (mut c, http) = Ctx::new(&[]);
+    // 先过开关；这一条测的是**启用之后**的参数校验。
+    c.account.settings.kouling_enabled = true;
     let task = LiveRoomTask::production();
 
     // codes 非空但跳过了弹幕来源 + 获取口令但不领取 ⇒ 互斥
@@ -1501,7 +1503,9 @@ fn params_accept_codes_as_an_array() {
 /// ⭐ 演练模式：**一枪都不发**。
 #[tokio::test]
 async fn dry_run_sends_nothing() {
-    let (c, http) = Ctx::new(&[]);
+    let (mut c, http) = Ctx::new(&[]);
+    // 先过开关（默认关 ⇒ 整条会被跳过）；这一条测的是**启用之后**的演练档。
+    c.account.settings.kouling_enabled = true;
     let task = LiveRoomTask::production();
     let body = serde_json::json!({"codes": "甲\n乙", "dryRun": true});
     let out = task.run(&c.ctx(), &body).await.unwrap();
@@ -1509,6 +1513,45 @@ async fn dry_run_sends_nothing() {
     assert_eq!(http.count(), 0, "演练不该发任何请求");
     assert!(out.is_success());
     assert!(out.summary().contains("演练"), "实得：{}", out.summary());
+}
+
+/// ⭐ b) `kouling_enabled = false`（**默认**）⇒ 一个请求都不发、结论 `Skipped`。
+///
+/// 与旧 TS 同口径：`cli/index.ts` 的 `if (config.直播口令?.开启)` 之外不会
+/// 调用这条任务。
+#[tokio::test]
+async fn disabled_kouling_is_skipped_with_zero_requests() {
+    let (c, http) = Ctx::new(&[]);
+    assert!(!c.account.settings.kouling_enabled, "这一格默认就是 false");
+
+    let out = LiveRoomTask::production()
+        .run(&c.ctx(), &serde_json::json!({"codes": "甲"}))
+        .await
+        .expect("关掉不是错误，是跳过");
+    let TaskOutcome::Skipped { reason } = out else {
+        panic!("实得：{out:?}");
+    };
+    assert_eq!(http.count(), 0, "关了就一个请求都不发");
+    assert!(reason.contains("未启用"), "实得：{reason}");
+}
+
+/// ⭐ b-反面：`kouling_enabled = true` ⇒ 照旧跑（这里走演练档，不打请求，
+/// 但结论是"演练完成"而不是"未启用"）。
+#[tokio::test]
+async fn enabled_kouling_runs() {
+    let (mut c, http) = Ctx::new(&[]);
+    c.account.settings.kouling_enabled = true;
+
+    let out = LiveRoomTask::production()
+        .run(
+            &c.ctx(),
+            &serde_json::json!({"codes": "甲\n乙", "dryRun": true}),
+        )
+        .await
+        .expect("不该是 Err");
+    assert!(out.is_success(), "实得：{out:?}");
+    assert!(out.summary().contains("演练"), "实得：{}", out.summary());
+    assert_eq!(http.count(), 0, "演练不发请求");
 }
 
 // ══════════════════════════ 判据 7：六步链状态机 ══════════════════════════
@@ -2359,7 +2402,8 @@ async fn live_room_task_auto_collects_without_manual_codes() {
     let rooms = serde_json::json!([room_entry(147606, 1, "中国移动云盘")]);
     let mut chain = open_gate_chain(rooms);
     chain.extend(happy_chain(235, 245, Some(give_ok(0)), &[draw_ok(10)], 0));
-    let (c, http) = ctx_with(&chain);
+    let (mut c, http) = ctx_with(&chain);
+    c.account.settings.kouling_enabled = true;
 
     // 注入假收集器：`LiveRoomTask` 生产上用的是真 WS 收集器。
     let task = LiveRoomTask {

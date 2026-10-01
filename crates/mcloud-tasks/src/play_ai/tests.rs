@@ -203,6 +203,44 @@ async fn the_run_sends_exactly_two_get_requests() {
     }
 }
 
+/// ⭐ a) `play_ai_enabled = false` ⇒ **一个请求都不发**，结论 `Skipped`
+/// （不是 `Failed`）。
+///
+/// 与旧 TS 同口径：`cli/index.ts` 在那个 `if (config.春日拍拍大作战?.开启)`
+/// 之外根本不会调用这条任务 ⇒ 关掉是用户的决定，不是故障。
+#[tokio::test]
+async fn disabled_play_ai_is_skipped_with_zero_requests() {
+    let (mut ctx, http, _) = ctx_with(vec![]);
+    ctx.account.settings.play_ai_enabled = false;
+
+    let out = PlayAiTask
+        .run(&ctx, &serde_json::json!({}))
+        .await
+        .expect("关掉不是错误，是跳过");
+    let TaskOutcome::Skipped { reason } = out else {
+        panic!("实得：{out:?}");
+    };
+    assert_eq!(http.count(), 0, "关了就一个请求都不发");
+    assert!(reason.contains("未启用"), "实得：{reason}");
+}
+
+/// ⭐ a-反面：`play_ai_enabled = true` ⇒ 照旧发那两枪（与默认值同一条路）。
+#[tokio::test]
+async fn enabled_play_ai_still_runs() {
+    let (mut ctx, http, _) = ctx_with(vec![
+        Reply::Body(STATUS_BODY.to_string()),
+        Reply::Body(TASKS_BODY.to_string()),
+    ]);
+    ctx.account.settings.play_ai_enabled = true;
+
+    let out = PlayAiTask
+        .run(&ctx, &serde_json::json!({}))
+        .await
+        .expect("不该是 Err");
+    assert!(matches!(out, TaskOutcome::Success { .. }), "实得：{out:?}");
+    assert_eq!(http.count(), 2, "开了就照旧跑两枪");
+}
+
 /// 第一枪就挂 ⇒ 交回 `Err`，且**一枪都没往下走**。
 #[tokio::test]
 async fn a_failed_status_query_is_fatal_and_stops() {

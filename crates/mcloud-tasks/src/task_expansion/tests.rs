@@ -163,6 +163,40 @@ async fn backup_already_on_does_nothing() {
     );
 }
 
+/// `backup_wait_secs` → 毫秒的换算（`0` = 不等，**不**回落到 20）。
+#[test]
+fn backup_wait_secs_maps_to_millis() {
+    assert_eq!(backup_wait_ms(20), 20_000);
+    assert_eq!(backup_wait_ms(3), 3_000);
+    assert_eq!(backup_wait_ms(0), 0, "0 是「不等」，不是「用默认 20」");
+}
+
+/// ⭐ c) 等待时长随**账号配置** `backup_wait_secs` 变（秒 × 1000）。
+///
+/// 这里刻意用"备份已开"那一档：它不走上传、**一次都不真等**，但计划里的
+/// 等待值照样进明细 —— 于是不必真睡 20 秒就能钉住"配置有没有生效"。
+#[tokio::test]
+async fn backup_wait_secs_drives_the_planned_wait() {
+    for (secs, expected_ms) in [(20u64, 20_000i64), (7, 7_000), (0, 0)] {
+        let (mut ctx, http, sink) = ctx_with_at(vec![Reply::Body(BACKUP_ON.into())], 0);
+        ctx.account.settings.backup_wait_secs = secs;
+
+        let out = TaskExpansionTask::new()
+            .run(&ctx, &serde_json::json!({}))
+            .await
+            .expect("读得到就该有结论");
+        assert!(matches!(out, TaskOutcome::Skipped { .. }), "实得：{out:?}");
+        assert_eq!(http.count(), 1, "只读一枪");
+
+        let details = sink.details();
+        assert_eq!(details.len(), 1);
+        assert_eq!(
+            details[0]["backupWaitMs"], expected_ms,
+            "backup_wait_secs={secs} 必须换算成 {expected_ms}ms"
+        );
+    }
+}
+
 /// 备份已开、有记录 ⇒ 读一枪 + 领一枪，**不凑**。
 #[tokio::test]
 async fn claims_without_uploading_when_backup_is_on() {

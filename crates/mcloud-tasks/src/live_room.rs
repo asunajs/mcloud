@@ -1528,6 +1528,19 @@ impl Task for LiveRoomTask {
     }
 
     async fn run(&self, ctx: &TaskContext, body: &Value) -> TaskResult {
+        // ⚠ 开关是**最外层**的门（旧 TS 在 `cli/index.ts` 用
+        // `if (config.直播口令?.开启)` 把整条调用包起来）：关 ⇒ 一个请求都不发，
+        // 结论是 `Skipped` 而**不是** `Failed`。默认 `false` ⇒ **默认就是跳过**，
+        // 与旧 TS 的默认一致。
+        //
+        // ⚠ 它刻意放在参数校验**之前**：开关关着就不该对"参数怎么填"发表意见
+        // —— 那正是"任务根本没被调用"的等价物。
+        if !ctx.account.settings.kouling_enabled {
+            return Ok(TaskOutcome::skipped(
+                "直播口令未启用（账号配置「直播口令·开启」为关）",
+            ));
+        }
+
         let params = LiveRoomRun::params_from_body(body);
         let dry_run = body.get("dryRun").and_then(Value::as_bool).unwrap_or(false);
 
