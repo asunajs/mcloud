@@ -880,6 +880,32 @@ pub async fn read_exchange_list(env: &ExchangeEnv<'_>) -> Result<ExchangeList> {
     exchange::parse_exchange_list(&parsed)
 }
 
+/// **只读**：读一次组字典（`prizeGroup.json`：组名 + 该组的限兑规则）。
+///
+/// `market_name` 取清单里的 `marketName`（同一份清单里各组同值，实拍 `sign_in_3_ex`）。
+///
+/// # 为什么返回"可选"，而不是直接报错
+///
+/// 组名是**界面文案**，不是判据 —— 拿不到只是分区标题难看，不该影响清单本身。
+/// 三种结果刻意分成三档，别混：
+///
+/// | 结果 | 含义 |
+/// |---|---|
+/// | `Ok(None)` | 从 `marketName` **推不出**目录名 ⇒ **连请求都没发**（"上游没有"与"我们没问"要分得清）|
+/// | `Ok(Some(_))` | 拿到了 |
+/// | `Err(_)` | 问了但没成（⚠ 实拍有"HTTP 200 + 0 字节"这一档，见 [`exchange::parse_prize_groups`]）|
+pub async fn read_prize_groups(
+    env: &ExchangeEnv<'_>,
+    market_name: &str,
+) -> Result<Option<Vec<exchange::ExchangeGroup>>> {
+    let Some(req) = exchange::prize_group_request(market_name) else {
+        return Ok(None);
+    };
+    let resp = env.http.request(req).await?;
+    let body = mcloud_upstream::session::ensure_http_ok(&resp, "读取奖品组字典")?;
+    Ok(Some(exchange::parse_prize_groups(body)?))
+}
+
 /// 清单里的一件 + 它当下的判定档位。
 ///
 /// 只读选品器（HTTP 那一条）要的正是这一对，所以类型在这里定：

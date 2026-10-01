@@ -3,16 +3,18 @@
 //! 对应参考实现的 `internal/upstream/app_exchange*.go`，消费
 //! `test/golden/app-exchange-vectors.json`（实拍请求/响应）。
 //!
-//! # 三枪，两条链路
+//! # 四枪，三条链路
 //!
 //! | 枪 | 方法 | 路径 | 作用 |
 //! |---|---|---|---|
 //! | `exchangeList` | GET | `/ycloud/signin/page/exchangeList` | 读奖品清单（**只读**）|
+//! | `prizeGroup.json` | GET | `/ycloud/signin/public/text/<活动>/prizeGroup.json` | 读**组字典**：组名与"每月多选一限兑"规则（**静态、只读、免鉴权**）|
 //! | `getSlide` | POST | `/ycloud/auth-service/slide/getSlide` | 取滑块题面（**只读**）|
 //! | `exchangeV3` | POST | `/ycloud/signin/page/exchangeV3` | **下单（花真豆）** |
 //!
 //! 注意 `getSlide` 的路径族是 `/ycloud/auth-service/slide/`，
-//! 与另外两条的 `/ycloud/signin/page/` **不同** —— 别顺手复用那一族的请求构造。
+//! 与 `exchangeList` 的 `/ycloud/signin/page/`、组字典的 `/ycloud/signin/public/text/`
+//! **三条都不同** —— 别顺手复用哪一族的请求构造。
 //!
 //! # `code` 的两种语义，**不能一刀切**
 //!
@@ -25,8 +27,14 @@
 //!
 //! # 证据
 //!
-//! `test/golden/app-exchange-vectors.json` 收的是真机抓包（4 轮兑换、3 错 1 成）
-//! 加只读探针，逐字保留请求头、请求体与响应体。
+//! 逐字实拍样本在**上游参考仓**：`../mcloud/docs/capture/app-exchange-samples.txt`
+//! （`exchangeList` / `exchangeV3` / `getSlide` 的请求与响应逐字，含 4 轮兑换、3 错 1 成）；
+//! 组字典那一枪是本仓 2026-10-01 抓的，落在
+//! `../mcloud-capture/docs/capture/app-exchange-samples.txt`（含响应逐字与四个坑）。
+//!
+//! ⚠ 这里以前写的是 `test/golden/app-exchange-vectors.json`。2026-10-01 核实：
+//! **该文件在四个仓（本仓 / `mcloud` / `mcloud-rust` / `mcloud-sign` / `mcloud-capture`）
+//! 里都不存在**，是一条指不到的引用 —— 已改成上面那两份真实样本。
 
 use serde_json::Value;
 
@@ -575,6 +583,119 @@ pub fn parse_exchange_result(env: &SignInEnvelope) -> Result<ExchangeResult> {
         message: env.message.clone(),
         order,
     })
+}
+
+// ══════════════════════════ 组字典（`prizeGroup.json`）══════════════════════════
+
+/// 组字典里的一组。**只取界面要用的四样**（上游还给 `media` / `list`，本能力一个不读）。
+///
+/// # 为什么值得单独读一枪
+///
+/// `exchangeList` **只有商品**，而"一组商品共享状态"这件事是**组**的属性：
+/// 同组每月共用一个名额（见 [`MonthQuota`] 与 [`LIMIT_GROUP_EXCHANGED`]）、
+/// 同组共享同一个活动时间窗。组名与那条限兑规则都在这里，
+/// 实拍证据见 `../mcloud-capture/docs/capture/app-exchange-samples.txt`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExchangeGroup {
+    /// 组键。⚠ 上游**类型混用**：2026-10-01 实拍同一份里既有 `"groupId":1`（数字）
+    /// 也有 `"groupId":"0"`（字符串）⇒ 这里一律归一成字符串，
+    /// 与清单那边"顶层键在 JSON 里就是串"的口径对齐（两边要能对上）。
+    pub group_id: String,
+    /// 组名（实拍 `"音乐类会员"`）—— 界面分区标题就念它，**别自己编品类名**。
+    pub title: Option<String>,
+    /// 该组的限兑规则，**上游原话**（实拍 `"(月卡每月多选一限兑)"`、`"（每月多选一限兑）"`）。
+    ///
+    /// ⚠ 全角/半角括号混用是上游的写法，别"顺手规范化" —— 那是它给用户看的文案。
+    pub sub_title: Option<String>,
+    pub prize_type: Option<i64>,
+    pub icon: Option<String>,
+}
+
+/// 从 `marketName` 推 `prizeGroup.json` 里的**活动文件夹名**。
+///
+/// # 只有一个观测点，所以这是推导、不是实拍
+///
+/// 2026-10-01 实拍：清单里 `marketName = "sign_in_3_ex"`，而 H5 取组字典的路径是
+/// `/ycloud/signin/public/text/sign_in_3/prizeGroup.json` ⇒ 去掉尾部 `_ex` 正好对上。
+///
+/// ⚠ 活动换代（`sign_in_4`）时这条推导对不对**没人证过**（`sign_in_4` 现在回 404，
+/// 只说明"现在没有"）。所以推不出来就回 `None`，由调用方**降级**（干脆不发这一枪），
+/// 而不是硬编一个文件夹名 —— 那会在换代之后静默给出**另一场活动的组名**。
+pub fn prize_group_folder(market_name: &str) -> Option<String> {
+    let name = market_name.trim();
+    let base = name.strip_suffix("_ex").unwrap_or(name);
+    (!base.is_empty()).then(|| base.to_string())
+}
+
+/// `GET /ycloud/signin/public/text/<活动>/prizeGroup.json` —— 组字典。**静态、只读、免鉴权。**
+///
+/// 回 `None` = 从 `market_name` 推不出文件夹名（见 [`prize_group_folder`]）。
+pub fn prize_group_request(market_name: &str) -> Option<HttpRequest> {
+    let folder = prize_group_folder(market_name)?;
+    let url = format!("{MCLOUD_HOST}/ycloud/signin/public/text/{folder}/prizeGroup.json");
+    // 与 `exchangeList` 同形态（`h5(false, ..)`、`"true"`）：这一条上游是静态文案，
+    // 2026-10-01 实测**不带任何凭据**也回 200 —— 走同一条装饰链只为省一条分支。
+    Some(h5(false, HttpRequest::get(url), "true"))
+}
+
+/// 解析组字典。
+///
+/// # 为什么**空体必须报错**，不能读成"没有组"
+///
+/// 2026-10-01 实拍：同族路径换成 `sign_in_3_ex` 时，上游回 **HTTP 200 但 0 字节**
+/// （`sign_in_4` 回 404）。只看状态码的写法会把"这个路径没内容"读成
+/// "上游说没有组" ⇒ 界面表现为组名全空，而且**一声不响**。宁可让调用方拿到 `Err`，
+/// 由它降级并把原因说出来。
+///
+/// # `title` / `subTitle` 的空串归 `None`
+///
+/// 实拍里好几组的 `subTitle` 是 `""`（给了键、值是空串）。界面上一句空规则没有意义，
+/// 所以在这里归一。⚠ 这一族**不是判据字段**，归一不改变任何"能不能兑"的结论 ——
+/// 判据那一族的"没给 vs 给了 0"仍然严格区分（见 [`parse_month_quota`]）。
+pub fn parse_prize_groups(text: &str) -> Result<Vec<ExchangeGroup>> {
+    if text.trim().is_empty() {
+        return Err(Error::Parse(
+            "prizeGroup.json 是空体（实拍：路径不对时上游回 200 + 0 字节）".into(),
+        ));
+    }
+    let value: Value = serde_json::from_str(text)
+        .map_err(|e| Error::Parse(format!("prizeGroup.json 不是合法 JSON（实拍是数组）：{e}")))?;
+    let items = value
+        .as_array()
+        .ok_or_else(|| Error::Parse("prizeGroup.json 顶层不是数组（实拍是数组）".into()))?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        // 没有组键的一组对界面毫无用处（而且它一定不是实拍形态）⇒ 响，别静默跳过。
+        let group_id = group_id_text(item).ok_or_else(|| {
+            Error::Parse("prizeGroup.json 里有一组没有 groupId（实拍每组都有）".into())
+        })?;
+        out.push(ExchangeGroup {
+            group_id,
+            title: nonempty(opt_str(item, "title")),
+            sub_title: nonempty(opt_str(item, "subTitle")),
+            prize_type: opt_i64(item, "prizeType"),
+            icon: nonempty(opt_str(item, "icon")),
+        });
+    }
+    Ok(out)
+}
+
+/// 取组键：**字符串原样、数字转字符串**（上游类型混用，见 [`ExchangeGroup::group_id`]）。
+fn group_id_text(item: &Value) -> Option<String> {
+    match item.get("groupId") {
+        Some(Value::String(s)) => {
+            let t = s.trim();
+            (!t.is_empty()).then(|| t.to_string())
+        }
+        // ⚠ 走 [`opt_i64`] 而不是自己 `as_i64`：它也吃字符串形态的数字，
+        // 而上面那一支已经把字符串留下来了，所以这里只会拿到数字。
+        _ => opt_i64(item, "groupId").map(|n| n.to_string()),
+    }
+}
+
+/// 空串 / 纯空白归 `None`（见 [`parse_prize_groups`] 的第二段）。
+fn nonempty(s: Option<String>) -> Option<String> {
+    s.map(|x| x.trim().to_string()).filter(|x| !x.is_empty())
 }
 
 #[cfg(test)]

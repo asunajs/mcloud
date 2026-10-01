@@ -38,6 +38,28 @@ export const fmtClock = (ms: number | null | undefined): string => {
 }
 
 /**
+ * 上游那种时间串（`2026-07-01 09-30-00`）→ 界面短格式（`07-01 09:30`）。
+ *
+ * ⚠ 上游的**时间部分也用连字符**（实拍 `09-30-00`），不是 `09:30:00` ——
+ * 整串直接显示又长又容易看错（`07-01 09-30-00` 看着像三段数字）。
+ * 这里先把连字符还原成冒号，再交给 `Date` 解析（**按本地时区**，与上游口径一致）。
+ *
+ * 解析不了就**原样返回**：宁可难看，也不要静默显示成空、或者编一个时间出来。
+ * 只有**跨年**时才补上年份 —— 同年的活动窗口显示 `07-01 09:30` 就够了。
+ */
+export const fmtUpstreamTime = (raw: string | null | undefined): string => {
+  const s = (raw ?? '').trim()
+  if (s === '') return '—'
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2})[-:](\d{2})(?:[-:](\d{2}))?/.exec(s)
+  if (!m) return s
+  const [, y, mo, d, h, mi] = m
+  const at = new Date(`${y}-${mo}-${d}T${h}:${mi}:00`)
+  if (Number.isNaN(at.getTime())) return s
+  const short = at.toLocaleString('zh-CN', SHORT)
+  return at.getFullYear() === new Date().getFullYear() ? short : `${y}-${short}`
+}
+
+/**
  * 把一段**已经过去**的时长渲染成人能读的串（`2 小时 15 分`）。
  *
  * 与 [`fmtDuration`] 分工不同：那个是**单次运行**的耗时（毫秒级、要到秒），

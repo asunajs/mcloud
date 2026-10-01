@@ -497,3 +497,77 @@ fn message_accepts_both_msg_and_message_keys() {
     let b = parse_exchange_result(&env(r#"{"code":514,"message":"来自 message"}"#)).unwrap();
     assert_eq!(b.message, "来自 message");
 }
+
+// ── 组字典（`prizeGroup.json`）──────────────────────────────────────────────
+
+/// 组字典的抓包原文（2026-10-01 20:32，逐字，3,043 B）。
+///
+/// 来源：`../mcloud-capture/docs/capture/app-exchange-samples.txt` —— 那个仓建仓后的
+/// **第一份真样本**。⚠ 这一份里 `groupId` **类型混用**（`"0"`/`"3"` 是字符串、
+/// 其余是数字），是实拍形态，别"顺手"统一。
+const CAPTURED_PRIZE_GROUPS: &str = r#"[{"title":"限时抢兑","subTitle":"","prizeType":1056,"list":[],"icon":"https://uop.mcloud.139.com/uop/gray/advert_media/1/20220829/ccad73a5eeb040e89740937c5fbe0e27.png","groupId":4,"media":true},{"title":"西藏用户专属","subTitle":"(每月多选一限兑)","prizeType":1035,"list":[],"icon":"https://img.mcloud.139.com//uop_prod/20250808/8d54e06589fb424ba735e35f9386d3ca.png","groupId":12,"media":true},{"title":"限时福利","subTitle":"","prizeType":1035,"list":[],"icon":"https://img.mcloud.139.com//uop_prod/20250808/8d54e06589fb424ba735e35f9386d3ca.png","groupId":15,"media":true},{"title":"视频类会员","subTitle":"(月卡每月多选一限兑)","prizeType":1035,"list":[],"icon":"https://img.mcloud.139.com//uop_prod/20260409/05be1db48bdc41b4973cf15f02e448d3.png","groupId":1,"media":true},{"title":"音乐类会员","subTitle":"(月卡每月多选一限兑)","prizeType":1035,"list":[],"icon":"https://img.mcloud.139.com//uop_prod/20260409/1d28d4b2ece643888b13914522a13699.png","groupId":2,"media":true},{"title":"游戏礼包权益","subTitle":"(每月多选一限兑)","prizeType":1035,"list":[],"icon":"https://img.mcloud.139.com//uop_prod/20251014/d32f836c6bae4466b75d85f45b6ee75f.png","groupId":14,"media":true},{"title":"美食饮品权益","subTitle":"(每月多选一限兑)","prizeType":1035,"list":[],"icon":"https://img.mcloud.139.com//uop_prod/20250714/325a283da91c4eea9a2fb0df83852f6d.png","groupId":11,"media":true},{"title":"咖啡饮品权益","subTitle":"(每月多选一限兑)","prizeType":1035,"list":[],"icon":"https://img.mcloud.139.com//uop_prod/20251014/46eecd5b934c4f53a472e760d5f9fcb1.png","groupId":13,"media":true},{"title":"交通出行类","subTitle":"（每月多选一限兑）","prizeType":1035,"list":[],"icon":"https://uop.mcloud.139.com/uop/prod/advert_media/1/20221108/05e2fd21b6c941bcbadabc5929cf0240.png","groupId":6,"media":true},{"title":"外卖美食权益","subTitle":"(每月多选一限兑)","prizeType":1035,"list":[],"icon":"https://img.mcloud.139.com//uop_prod/20250808/2c1f2973f8094ba4b2b02079139b11c7.png","groupId":5,"media":true},{"title":"快递寄件券","subTitle":"（每月多选一限兑）","prizeType":1035,"list":[],"icon":"https://img.mcloud.139.com//uop_prod/20250808/c8955e0a625d4ebba8498f57fe44850f.png","groupId":7,"media":true},{"title":"云盘转存券","subTitle":"","prizeType":1058,"list":[],"icon":"https://img.mcloud.139.com//uop_gray/20240111/3f42cddb4c8a4f669efe05fa8ba2fe77.jpg","groupId":8,"media":true},{"title":"实用工具类","subTitle":"","prizeType":1035,"list":[],"icon":"https://img.mcloud.139.com//uop_prod/20250808/c2e9d52162ed47cdb9228431765dd373.png","groupId":9,"media":true},{"title":"山西专属流量奖品","subTitle":"(每月多选一限兑)","prizeType":1035,"list":[],"icon":"https://om.mrp.139.com/img/signin/plus.png","groupId":"3","media":true},{"title":"其他权益奖品","subTitle":"","list":[],"icon":"https://img.mcloud.139.com//uop_prod/20260409/cd84351237e84638b2b43aa763d5ed3f.png","groupId":"0","media":false}]"#;
+
+#[test]
+fn prize_group_folder_drops_the_ex_suffix() {
+    // 实拍这一对：清单里的 `marketName` → H5 静态目录名。
+    assert_eq!(
+        prize_group_folder("sign_in_3_ex").as_deref(),
+        Some("sign_in_3")
+    );
+    // 没有 `_ex` 后缀时**原样用**（不猜、不硬编）。
+    assert_eq!(
+        prize_group_folder("sign_in_3").as_deref(),
+        Some("sign_in_3")
+    );
+    // 推不出来 ⇒ `None`：调用方据此**不发那一枪**，而不是发一个 404 当"没组名"。
+    assert_eq!(prize_group_folder(""), None);
+    assert_eq!(prize_group_folder("   "), None);
+    assert_eq!(prize_group_folder("_ex"), None);
+    // 连请求也是 `None`，不进网络层。
+    assert!(prize_group_request("").is_none());
+    assert!(prize_group_request("sign_in_3_ex").is_some());
+}
+
+#[test]
+fn parse_prize_groups_reads_the_captured_dictionary() {
+    let groups = parse_prize_groups(CAPTURED_PRIZE_GROUPS).unwrap();
+    assert_eq!(groups.len(), 15);
+    let by_id = |id: &str| groups.iter().find(|g| g.group_id == id).unwrap();
+    // 组名就是上游原话 —— 界面上直接念，别自己编"音乐类"这种名字。
+    assert_eq!(by_id("2").title.as_deref(), Some("音乐类会员"));
+    assert_eq!(
+        by_id("2").sub_title.as_deref(),
+        Some("(月卡每月多选一限兑)")
+    );
+    // ⚠ 括号**全角半角混用**是上游的：组 6/7 是全角 `（…）`、组 2/13 是半角 `(…)`。
+    // 别"顺手规范化" —— 那是它给用户看的文案。
+    assert_eq!(by_id("6").sub_title.as_deref(), Some("（每月多选一限兑）"));
+    assert_eq!(by_id("13").sub_title.as_deref(), Some("(每月多选一限兑)"));
+    // `subTitle: ""` 归 `None`（界面上"没有规则"与"规则是空串"没区别）。
+    assert_eq!(by_id("9").title.as_deref(), Some("实用工具类"));
+    assert_eq!(by_id("9").sub_title, None);
+    // 类型混用归一：源里 `"0"` 是字符串、`1` 是数字，两边都要按同一个键查得到
+    // （清单那边的组键是**字符串**，两边得能对上）。
+    assert!(groups.iter().any(|g| g.group_id == "0"));
+    assert!(groups.iter().any(|g| g.group_id == "1"));
+    // `icon` 取到了（界面可以给分区加图标）；`prizeType` 也留着。
+    assert!(by_id("2").icon.is_some());
+    assert_eq!(by_id("2").prize_type, Some(1035));
+}
+
+#[test]
+fn an_empty_body_is_an_error_not_an_empty_dictionary() {
+    // ⚠ 实拍：同族路径换成 `sign_in_3_ex`，上游回 **200 + 0 字节**。
+    // 把空体读成"上游说没有组"会让界面组名全空**且不报警**，所以这里必须响。
+    for body in ["", "   ", "\n"] {
+        assert!(parse_prize_groups(body).is_err(), "{body:?}");
+    }
+}
+
+#[test]
+fn non_array_and_missing_group_id_are_errors() {
+    // 顶层不是数组（实拍是数组）。
+    assert!(parse_prize_groups("{}").is_err());
+    // 少组键的那一组对界面没用，而且是实拍里没有的形态 ⇒ 响，别静默跳过。
+    assert!(parse_prize_groups(r#"[{"title":"没有组键"}]"#).is_err());
+}

@@ -35,13 +35,17 @@
 //!
 //! ⚠ **绝不能**为了拿档位而在路由里再跑一遍链：那是第二次下单。
 
+use std::collections::HashMap;
+
 use axum::extract::{Extension, Path, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use mcloud_core::{Account, AccountId, Error, UserId};
-use mcloud_tasks::exchange::{read_judged_prizes, ExchangeEnv, ExchangePlan, ExchangePrize};
+use mcloud_tasks::exchange::{
+    read_judged_prizes, read_prize_groups, ExchangeEnv, ExchangePlan, ExchangePrize, JudgedPrize,
+};
 
 use crate::auth_gate::CurrentUser;
 use crate::error::{ApiError, ApiResult};
@@ -91,12 +95,37 @@ pub struct PrizeView {
     ///
     /// ⚠ **时刻量**：会因为**别的用户**在同一分钟里兑掉而变化（实拍 `839 → 837`）。
     /// 只能用来判"现在还有没有"，不能当个人流水。
+    ///
+    /// ⚠⚠ [`Self::count`] 是**这一场活动的总池剩余**，**不是**"今天还能不能抢"：
+    /// 2026-10-01 实拍 `251230032`（白银会员月卡）`count = 43,739` 而
+    /// `minRemainderCount = 0`（H5 判"抢光"）—— 池子里还有货、**今日份额**没了。
+    /// 界面上必须把这两件事分开说，否则"总池 4 万"和"已抢光"看着自相矛盾。
     pub count: Option<i64>,
+    /// 上游 `totalCount`：这一场活动的**总投放量**（配 [`Self::count`] 就是"现量/总量"）。
+    pub total_count: Option<i64>,
+    /// 上游 `dailyCount`：**今日投放量**（配 `dailyRemainderCount` 是"今日还剩几份"）。
+    pub daily_count: Option<i64>,
     pub daily_remainder_count: Option<i64>,
     pub min_remainder_count: Option<i64>,
     pub on_line: Option<i64>,
     pub start_time: Option<String>,
     pub end_time: Option<String>,
+    /// 这一件的**活动/品类组**（取自 `prizeGroup.json`），拿不到时为 `None`。
+    ///
+    /// 组是"共享状态"的单位：同组每月共用一个名额（`limit == 4` ⇒ `exchanged_this_group`）、
+    /// 同组还共享同一个活动时间窗。所以界面按组分区，而**组名是上游给的**、不是我们编的。
+    pub group_title: Option<String>,
+    /// 该组的限兑规则，**上游原话**（实拍 `"(月卡每月多选一限兑)"`）。
+    pub group_sub_title: Option<String>,
+    /// 上游 `quota.monthQuantity`：这个组**每月能兑几件**（实拍音乐类是 `1`）。
+    ///
+    /// ⚠ 它是**展示用**的读数：判据链并不读它（判据读 `limit`）。别拿它算"还剩几个名额"
+    /// —— 上游没给"本组已用几件"，用 `limit == 2` 的件数去凑会数错。
+    pub month_quantity: Option<i64>,
+    /// 上游 `quota.groupPrizeIds`：**与这一件互斥**的其它 prizeId（上游直接给的名单）。
+    ///
+    /// 用它回答"兑了这件，同组哪几件本月就兑不了了"；`None` = 上游没给这个键。
+    pub group_prize_ids: Option<Vec<String>>,
 }
 
 /// 一次清单读取的结果。
@@ -124,6 +153,11 @@ pub struct ExchangePrizesResponse {
     pub balance_aware: bool,
     /// 上面那件事的人话说明（前端直接显示，不在前端另写一份）。
     pub balance_note: &'static str,
+    /// 组名（`prizeGroup.json`）这一份**拿到了没有**；`None` = 拿到了。
+    ///
+    /// `Some(原因)` 时清单照常渲染，只是分区标题退回"第 N 组" —— 组名是**文案**，
+    /// 不该因为它读失败就让整份清单失败。原因原样显示（别在前端另写一句）。
+    pub groups_note: Option<String>,
 }
 
 /// `GET /api/accounts/{id}/exchange-prizes` —— **只读**：读清单并逐件判定档位。
@@ -157,9 +191,20 @@ pub async fn list_prizes(
     };
     let judged = read_judged_prizes(&env, now_ms).await?;
 
+    // 组名与"每月多选一限兑"那条规则在**另一条静态接口**里（`prizeGroup.json`）。
+    // 单独一枪、只读；拿不到就降级 —— 清单才是判据，组名只是文案。
+    let (groups, groups_note) = read_groups(&env, &judged).await;
+
     let prizes = judged
         .into_iter()
-        .map(|j| prize_view(&j.prize, j.plan))
+        .map(|j| {
+            let group = j
+                .prize
+                .group_id
+                .map(|id| id.to_string())
+                .and_then(|id| groups.get(&id).cloned());
+            prize_view(&j.prize, j.plan, group.as_ref())
+        })
         .collect();
 
     Ok(Json(ExchangePrizesResponse {
@@ -167,10 +212,61 @@ pub async fn list_prizes(
         now_ms,
         balance_aware: false,
         balance_note: BALANCE_NOTE,
+        groups_note,
     }))
 }
 
-fn prize_view(prize: &ExchangePrize, plan: ExchangePlan) -> PrizeView {
+/// 组字典里、界面要用的那两样（组名 + 该组的限兑规则）。
+#[derive(Clone)]
+struct GroupInfo {
+    title: Option<String>,
+    sub_title: Option<String>,
+}
+
+/// 读组字典，把三档结果都收成"人话 + 空表"。**永不失败**：这一枪读不到不该拖垮清单。
+///
+/// `marketName` 取清单里第一个给了值的（同一份清单同属一场活动，实拍全是 `sign_in_3_ex`）。
+async fn read_groups(
+    env: &ExchangeEnv<'_>,
+    judged: &[JudgedPrize],
+) -> (HashMap<String, GroupInfo>, Option<String>) {
+    let Some(market_name) = judged.iter().find_map(|j| j.prize.market_name.as_deref()) else {
+        return (
+            HashMap::new(),
+            Some("这份清单没给 marketName，组名取不到（清单本身不受影响）".to_string()),
+        );
+    };
+    match read_prize_groups(env, market_name).await {
+        Ok(Some(list)) => (
+            list.into_iter()
+                .map(|g| {
+                    (
+                        g.group_id,
+                        GroupInfo {
+                            title: g.title,
+                            sub_title: g.sub_title,
+                        },
+                    )
+                })
+                .collect(),
+            None,
+        ),
+        // "推不出目录名"与"问了没成"要分开说：前者是我们没问，后者是上游那一下没成。
+        Ok(None) => (
+            HashMap::new(),
+            Some(format!(
+                "从 marketName「{market_name}」推不出组字典目录，本次没取组名"
+            )),
+        ),
+        Err(e) => (
+            HashMap::new(),
+            Some(format!("组名读取失败（清单不受影响）：{e}")),
+        ),
+    }
+}
+
+fn prize_view(prize: &ExchangePrize, plan: ExchangePlan, group: Option<&GroupInfo>) -> PrizeView {
+    let quota = prize.quota.as_ref();
     PrizeView {
         prize_id: prize.prize_id,
         name: prize.name.clone(),
@@ -181,11 +277,17 @@ fn prize_view(prize: &ExchangePrize, plan: ExchangePlan) -> PrizeView {
         blocks: plan.blocks(),
         limit: prize.limit,
         count: prize.count,
+        total_count: prize.total_count,
+        daily_count: prize.daily_count,
         daily_remainder_count: prize.daily_remainder_count,
         min_remainder_count: prize.min_remainder_count,
         on_line: prize.on_line,
         start_time: prize.start_time.clone(),
         end_time: prize.end_time.clone(),
+        group_title: group.and_then(|g| g.title.clone()),
+        group_sub_title: group.and_then(|g| g.sub_title.clone()),
+        month_quantity: quota.and_then(|q| q.month_quantity),
+        group_prize_ids: quota.and_then(|q| q.group_prize_ids.clone()),
     }
 }
 

@@ -1382,11 +1382,39 @@ export interface ExchangePrizeView {
   blocks: boolean
   limit: number | null
   count: number | null
+  /**
+   * 上游 `totalCount`：这一场活动的**总投放量**。
+   *
+   * ⚠ 与 `count`（当前剩余）配起来才是"现量/总量"。**别**把 `count` 单独叫"现量"
+   * 再和"已抢光"并排显示：2026-10-01 实拍 `251230032` 是 `count = 43,739` 而
+   * `minRemainderCount = 0`（H5 判抢光）—— 池子里还有货、**今日份额**没了。
+   */
+  totalCount: number | null
+  /** 上游 `dailyCount`：**今日投放量**（配 `dailyRemainderCount` = 今日还剩几份）。 */
+  dailyCount: number | null
   dailyRemainderCount: number | null
   minRemainderCount: number | null
   onLine: number | null
   startTime: string | null
   endTime: string | null
+  /**
+   * 这一件所属**活动/品类组**的名字，取自另一条静态接口 `prizeGroup.json`。
+   *
+   * 组是"共享状态"的单位（同组每月共用一个名额 ⇒ `limit == 4`），
+   * 而组名是**上游给的**（实拍"音乐类会员""视频类会员"）—— 界面直接显示，别自己编。
+   * `null` = 上游没给或那一枪没取到（这时分区标题退回"第 N 组"）。
+   */
+  groupTitle: string | null
+  /** 该组的限兑规则，**上游原话**（实拍 `(月卡每月多选一限兑)`）。 */
+  groupSubTitle: string | null
+  /**
+   * 上游 `quota.monthQuantity`：这个组**每月能兑几件**（实拍音乐类是 `1`）。
+   *
+   * ⚠ 只用于显示：判据链不读它，上游也没给"本组已用几件"，别拿它算"还剩几个名额"。
+   */
+  monthQuantity: number | null
+  /** 上游 `quota.groupPrizeIds`：与这一件**互斥**的其它 prizeId。`null` = 上游没给。 */
+  groupPrizeIds: string[] | null
 }
 
 export interface ExchangePrizesResponse {
@@ -1400,6 +1428,13 @@ export interface ExchangePrizesResponse {
   balanceAware: boolean
   /** 上面那件事的人话说明，界面上直接显示，别自己编。 */
   balanceNote: string
+  /**
+   * 组名那一枪（`prizeGroup.json`）**拿到了没有**；`null` = 拿到了。
+   *
+   * `string` 时清单照常显示，只是分区标题退回"第 N 组" —— 组名是文案，
+   * 不该因为它读失败就让整份清单失败。原因原样显示（别在前端另写一句）。
+   */
+  groupsNote: string | null
   /** 后端判据用的时刻（界面要显示"这份清单是什么时候的"）。 */
   nowMs: number
 }
