@@ -103,6 +103,21 @@ TCC 按**代码要求**记授权，而未签名的二进制其要求就是**内�
 > 或看启动日志那句（改名后新代码写 `mcloud 启动`、旧代码写 `mcloud-gost 启动`）。
 > 那次显式重启会按上面那条触发一次授权检查：2026-09-30 实测近 3 分钟 **1 次** PROMPTING、
 > err.log 没有被写 —— 是**一次**弹框，不是循环。
+>
+> ⚠⚠ **2026-10-01 再补一条更要紧的：托管跑的已经是 `target/release/mcloud-server`**
+> （plist 的 `ProgramArguments` 现在指 release；`ps -o command -p <PID>` 一看就知道）。
+> 由此三条：
+> 1. `cargo build`（**debug**）与线上**毫无关系** —— 编完、重启完线上还是旧代码。
+>    要上线得 `cargo build --release -p mcloud-server --bin mcloud-server`。
+> 2. **前端也不再"刷新即生效"**：`rust-embed` 那条"debug 下运行时读盘"只对 debug 成立，
+>    release 是**编译期**把 `web/dist` 嵌进二进制（`static_files.rs` 文件头写着这条）
+>    ⇒ release 部署下前端改动**同样要重编 release**。
+> 3. 判断线上到底是哪一份，最快两条：
+>    `curl -s http://127.0.0.1:3000/ | grep -o 'assets/index-[A-Za-z0-9_-]*\.js'`
+>    与 `web/dist/index.html` 的 chunk 名对比；以及
+>    `lsof -p <PID> | awk '$4=="txt"'` 的 inode 与 `stat target/release/mcloud-server` 对比。
+> 4. ⚠ release 重编会把**工作区里所有未提交的改动**一起编进线上（本仓同时有多条写入线时
+>    尤其危险）—— 重启上线前先 `git status` 看一眼。
 
 ### ✅ 开发期自检用它，代价 0 次重启：`cargo check`
 
