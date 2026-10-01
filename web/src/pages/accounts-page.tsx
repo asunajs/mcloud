@@ -1677,6 +1677,52 @@ export const AccountsPage = () => {
     return true
   }
 
+  /**
+   * 「客户端形态」选择器。
+   *
+   * ⚠ 它渲染在**各个方式自己的面板里**，而不是飘在 tab 栏上面（2026-10-01 用户
+   * 用箭头画出来的正是这层归属）：挂在上面时它看起来像"管所有方式"，
+   * 可它对手机端无意义、对 `mobile` 凭据也无意义 —— 一个会凭空消失的全局控件，
+   * 比一个出现在该出现的地方的控件难理解得多。
+   */
+  const platformPicker = () => (
+    <div class="flex flex-col gap-2">
+      <span class="text-xs font-medium opacity-70">客户端形态</span>
+      <div class="join">
+        {(['windows', 'macos'] as const).map((p) => (
+          <button
+            type="button"
+            class={`btn join-item btn-sm min-h-11 md:min-h-0 ${platform.value === p ? 'btn-primary' : 'btn-soft'}`}
+            onClick={() => (platform.value = p)}
+          >
+            {PLATFORM_LABEL[p]}
+          </button>
+        ))}
+      </div>
+      <p class="text-xs opacity-70">
+        这会随账号存进 <code>accounts.json</code>，之后每次请求的 UA、设备串与渠道号
+        都按它来。选错的话，账号以后一直用错的身份发请求。
+      </p>
+    </div>
+  )
+
+  /** 手机端（App）没有客户端形态这一说：摆一个选不了或选了没用的开关只会让人以为它有意义。 */
+  const appPlatformNote = () => (
+    <div class="alert alert-soft text-sm" role="status">
+      <span>
+        手机端登录用 App 自己的身份（<code>mobile</code> 前缀）与设备头，
+        不存在 Windows / macOS 之分，所以这里不需要选客户端形态。
+      </span>
+    </div>
+  )
+
+  /** 凭据自带 `mobile` 前缀时，形态同样无从可选（也不需要选）。 */
+  const mobileCredentialNote = () => (
+    <p class="text-xs opacity-70">
+      这条凭据是 <code>mobile</code> 前缀（App 端身份），不需要客户端形态。
+    </p>
+  )
+
   return (
     <div class="flex flex-col gap-4">
       <div class="flex flex-wrap items-center justify-between gap-2">
@@ -1732,53 +1778,72 @@ export const AccountsPage = () => {
         <ul class="flex flex-col gap-2">
           {accounts.value.map((a) => (
             <li class="card card-border bg-base-100">
-              <div class="card-body flex-row flex-wrap items-center gap-3 p-3">
-                <div class="flex min-w-0 flex-1 flex-col">
-                  <span class="truncate font-medium">{a.nickname || a.label || a.id}</span>
-                  <span class="text-xs opacity-70">
+              {/*
+                窄屏（<md）**纵向两段**：名字 + 身份徽章 / 设备与到期 / 动作行。
+                ⚠ 这是踩过的坑（2026-10-01 用户截图为证）：原来是
+                `flex-row flex-wrap` + 文字列 `min-w-0 flex-1`，窄屏上四个控件
+                **不肯换行** —— 文字列的 flex-basis 是 0，可以被压到 40px 宽，
+                于是「设备 B58A…-ENDIN · 凭据 27 天后」被挤成**一列竖排单字**，
+                完全没法读。⇒ 窄屏改成列方向；动作那一行等分铺满（44px 触控高度）。
+              */}
+              <div class="card-body gap-3 p-3 md:flex-row md:flex-wrap md:items-center">
+                <div class="flex w-full min-w-0 flex-col md:w-auto md:flex-1">
+                  <div class="flex min-w-0 items-center gap-2">
+                    <span class="min-w-0 truncate font-medium">{a.nickname || a.label || a.id}</span>
+                    {/* 身份必须显示：它决定这个账号以后每次请求用哪套头和 UA。
+                        `pc_platform` 为空 = App 端登录（或更早的历史数据）。
+                        窄屏把它放在名字旁边（动作行留给按钮），宽屏本来也在这一侧。 */}
+                    {a.pc_platform ? (
+                      <span class="badge badge-soft badge-primary badge-sm shrink-0">
+                        {PLATFORM_LABEL[a.pc_platform]}
+                      </span>
+                    ) : (
+                      <span
+                        class="badge badge-soft badge-sm shrink-0"
+                        title="App（手机端）登录的账号：用 mobile 前缀与 App 设备头"
+                      >
+                        手机端
+                      </span>
+                    )}
+                  </div>
+                  {/* 设备号是 32 位十六进制加后缀：`break-all` 不能省，
+                      否则它自己一条就能把窄屏顶出横向滚动条。 */}
+                  <span class="break-all text-xs opacity-70">
                     设备 {a.device_id} · 凭据 {expireText(a.expire)}
                   </span>
                 </div>
-                {/* 身份必须显示：它决定这个账号以后每次请求用哪套头和 UA。
-                    `pc_platform` 为空 = App 端登录（或更早的历史数据）。 */}
-                {a.pc_platform ? (
-                  <span class="badge badge-soft badge-primary badge-sm">
-                    {PLATFORM_LABEL[a.pc_platform]}
-                  </span>
-                ) : (
-                  <span
-                    class="badge badge-soft badge-sm"
-                    title="App（手机端）登录的账号：用 mobile 前缀与 App 设备头"
+                {/*
+                  编辑 / 设置在前、移除在后：三个都是"对这个账号做点事"，
+                  而移除不可逆 —— 让它留在最外侧（远离视线落点）。
+                  ⚠ **不要给这几个按钮加 `flex-1`**（2026-10-01 用户口径：
+                  "这种按钮对于移动端来说太大了"）：拉满整行会变成一条压在卡片上的
+                  按钮带，而本仓其它页面（定时/编排/历史）全是**内容宽度**的
+                  `btn-sm min-h-11 md:min-h-0`。窄屏靠右排一行正合适，
+                  触控高度仍是 44（§6.1 那条不变）。
+                */}
+                <div class="flex w-full items-center justify-end gap-2 md:w-auto">
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-soft min-h-11 md:min-h-0"
+                    onClick={() => askEdit(a)}
                   >
-                    手机端
-                  </span>
-                )}
-                {/* 编辑在前、移除在后：两个都是"对这个账号做点事"，
-                    但编辑是可逆的、移除不是 —— 把不可逆那个放在最外侧
-                    （远离视线落点，也远离"看一眼就想点第一个"的位置）。 */}
-                <button
-                  type="button"
-                  class="btn btn-sm btn-soft min-h-11 md:min-h-0"
-                  onClick={() => askEdit(a)}
-                >
-                  编辑
-                </button>
-                {/* 设置与编辑并列：都是"改这个账号"，且都可逆。
-                    真正不可逆的「移除」仍旧留在最外侧。 */}
-                <button
-                  type="button"
-                  class="btn btn-sm btn-soft min-h-11 md:min-h-0"
-                  onClick={() => openSettings(a)}
-                >
-                  设置
-                </button>
-                <button
-                  type="button"
-                  class="btn btn-sm btn-soft btn-error min-h-11 md:min-h-0"
-                  onClick={() => askDelete(a)}
-                >
-                  移除
-                </button>
+                    编辑
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-soft min-h-11 md:min-h-0"
+                    onClick={() => openSettings(a)}
+                  >
+                    设置
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-soft btn-error min-h-11 md:min-h-0"
+                    onClick={() => askDelete(a)}
+                  >
+                    移除
+                  </button>
+                </div>
               </div>
             </li>
           ))}
@@ -1793,59 +1858,31 @@ export const AccountsPage = () => {
       <Dialog id="add-account" title="添加账号">
         <div class="flex flex-col gap-4">
 
-          {/* 平台：必须选，且必须说清影响。
-              手机端**没有**这个选择 —— App 只有一种形态，摆一个选不了或
-              选了没用的开关只会让人以为它有意义。
-              粘贴凭据那一格同理：凭据自带前缀（`pc` / `mobile`），
-              `mobile` 凭据下这个选择器同样不该出现。 */}
-          {!needPlatform() ? (
-            <div class="alert alert-soft text-sm" role="status">
-              <span>
-                手机端登录用 App 自己的身份（<code>mobile</code> 前缀）与设备头，
-                不存在 Windows / macOS 之分，所以这里不需要选客户端形态。
-              </span>
-            </div>
-          ) : (
-            <div class="flex flex-col gap-2">
-              <span class="text-xs font-medium opacity-70">客户端形态</span>
-              <div class="join">
-                {(['windows', 'macos'] as const).map((p) => (
-                  <button
-                    type="button"
-                    class={`btn join-item btn-sm min-h-11 md:min-h-0 ${platform.value === p ? 'btn-primary' : 'btn-soft'}`}
-                    onClick={() => (platform.value = p)}
-                  >
-                    {PLATFORM_LABEL[p]}
-                  </button>
-                ))}
-              </div>
-              <p class="text-xs opacity-70">
-                这会随账号存进 <code>accounts.json</code>，之后每次请求的
-                UA、设备串与渠道号都按它来。选错的话，账号以后一直用错的身份发请求。
-              </p>
-            </div>
-          )}
-
           {/* 登录方式。
               ⚠ 用 `join` + `btn` 而**不是** daisyUI 的 `tabs` / `tabs-box`：
               后者会把整个 tab 组件（含四套朝向变体与带框那套，实测 14.5KB）
               拖进产物，而全项目只有这一处是"选一个"的语义。
               写法与上面「客户端形态」保持一致 —— 同一页里两个同级选择器，
-              不该一个用 tabs、一个用 join。 */}
-          <div class="join">
+              不该一个用 tabs、一个用 join。
+
+              窄屏（<md）**铺满等分**：375 宽下五个标签挤在一起每格只剩 ~58px，
+              实测「账号密码」那格会顶到边（用户截图里就是这么挤的）；
+              铺满 + 把四字的「账号密码」缩成两字「账密」之后每格宽裕。
+              ⚠ 缩短的是**这格**的文案，面板里该怎么解释还怎么解释。 */}
+          <div class="join w-full md:w-auto">
             {(
               [
                 ['qr', '扫码'],
                 ['sms', '短信'],
                 ['app', '手机端'],
-                ['password', '账号密码'],
+                ['password', '账密'],
                 ['auth', '凭据'],
               ] as const
             ).map(([id, label]) => (
               <button
                 type="button"
                 aria-pressed={method.value === id}
-                class={`btn join-item btn-sm min-h-11 md:min-h-0 ${method.value === id ? 'btn-primary' : 'btn-soft'}`}
+                class={`btn join-item btn-sm min-h-11 flex-1 whitespace-nowrap px-2 md:min-h-0 md:flex-none md:px-4 ${method.value === id ? 'btn-primary' : 'btn-soft'}`}
                 onClick={() => onMethodChange(id)}
               >
                 {label}
@@ -1868,6 +1905,7 @@ export const AccountsPage = () => {
           {/* 扫码 */}
           {method.value === 'qr' ? (
             <div class="flex flex-col items-center gap-3">
+              {needPlatform() ? <div class="w-full">{platformPicker()}</div> : null}
               {qrImage.value ? (
                 // 白底容器：深色主题下二维码必须保持黑码白底（扫码器假设深色是数据）
                 <div class="rounded-box bg-white p-3">
@@ -1909,6 +1947,7 @@ export const AccountsPage = () => {
           {/* 短信 */}
           {method.value === 'sms' ? (
             <div class="flex flex-col gap-3">
+              {needPlatform() ? platformPicker() : null}
               <label class="flex flex-col gap-1">
                 <span class="text-xs opacity-70">手机号</span>
                 <input
@@ -1981,6 +2020,7 @@ export const AccountsPage = () => {
           {/* 手机端（App）短信 */}
           {method.value === 'app' ? (
             <div class="flex flex-col gap-3">
+              {appPlatformNote()}
               <p class="text-xs opacity-70">
                 与上面的「短信」**不是同一条链路**：手机端走 App 自己的密钥与设备头，
                 登录后凭据以 <code>mobile</code> 前缀落盘。
@@ -2049,6 +2089,7 @@ export const AccountsPage = () => {
           {/* 账密 */}
           {method.value === 'password' ? (
             <div class="flex flex-col gap-3">
+              {needPlatform() ? platformPicker() : null}
               <label class="flex flex-col gap-1">
                 <span class="text-xs opacity-70">手机号</span>
                 <input
@@ -2093,6 +2134,7 @@ export const AccountsPage = () => {
           */}
           {method.value === 'auth' ? (
             <div class="flex flex-col gap-3">
+              {needPlatform() ? platformPicker() : mobileCredentialNote()}
               <label class="flex flex-col gap-1">
                 <span class="text-xs opacity-70">凭据</span>
                 <textarea

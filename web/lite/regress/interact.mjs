@@ -124,6 +124,13 @@ const HELPERS = `(() => {
    */
   window.__platformBtns = (id) => [...document.querySelectorAll('#' + id + ' .join button')]
     .filter((b) => ['Windows', 'macOS'].includes(b.textContent.trim())).length;
+  /** 那颗 ✕ 是否**确实**落在视口里（窄屏弹窗"没有出口"就是这么漏掉的）。 */
+  window.__closeBtnInViewport = (id) => {
+    const b = document.querySelector('#' + id + ' button[aria-label="关闭"]');
+    if (!b) return '没有关闭键';
+    const r = b.getBoundingClientRect();
+    return r.top >= 0 && r.bottom <= window.innerHeight && r.width > 0 && r.height > 0;
+  };
   window.__stepDisabled = (n, text) => {
     const rows = window.__stepRows();
     const b = [...rows[n].querySelectorAll('button')].find((x) => x.textContent.trim() === text);
@@ -169,12 +176,15 @@ const STEPS = {
     { name: '账号页：弹窗里点「短信」方式', do: clickText('#add-account button', '短信'), check: eq('!!document.querySelector("#add-account input[type=tel]")', true), changed: true },
     { name: '账号页：输入手机号', do: typeIn('#add-account input[type="tel"]', '19900000001'), check: eq('document.querySelector("#add-account input[type=tel]").value', '19900000001') },
     { name: '账号页：改手机号', do: typeIn('#add-account input[type="tel"]', '19900000002'), check: eq('document.querySelector("#add-account input[type=tel]").value', '19900000002') },
-    { name: '账号页：点「账号密码」方式', do: clickText('#add-account button', '账号密码'), check: eq('!!document.querySelector("#add-account input[type=password]")', true), changed: true },
+    { name: '账号页：点「账密」方式', do: clickText('#add-account button', '账密'), check: eq('!!document.querySelector("#add-account input[type=password]")', true), changed: true },
     { name: '账号页：输入用户名', do: typeIn('#add-account input[type="text"].input', 'someone'), check: eq('document.querySelector("#add-account input[type=text].input").value', 'someone') },
     { name: '账号页：输入口令', do: typeIn('#add-account input[type="password"]', 'pw-123456'), check: eq('document.querySelector("#add-account input[type=password]").value', 'pw-123456') },
     { name: '账号页：切到「凭据」方式', do: clickText('#add-account button', '凭据'), check: eq('!!document.querySelector("#add-account textarea")', true), changed: true },
     { name: '账号页：pc 凭据 ⇒ 有形态选择', do: typeIn('#add-account textarea', 'Basic cGM6MTk5MDAwMDAwMDE6YXxifGN8MTc5MzAwMDAwMDAwMHxl'), check: eq('window.__platformBtns("add-account")', 2), changed: true },
     { name: '账号页：mobile 凭据 ⇒ 无形态选择', do: typeIn('#add-account textarea', 'Basic bW9iaWxlOjE5OTAwMDAwMDAxOmF8YnxjfDE3OTMwMDAwMDAwMDB8ZQ=='), check: eq('window.__platformBtns("add-account")', 0), changed: true },
+    // 弹窗的出口：标题栏那颗 ✕ 必须存在且尺寸非零（**真**窄屏的"够不够得着"
+    // 由 `lite/regress/narrow.mjs` 按 375 宽单独验 —— 这里验不了视口）。
+    { name: '账号页：弹窗有可点的出口（✕）', do: null, check: eq('window.__closeBtnInViewport("add-account")', true) },
     { name: '账号页：关掉添加弹窗', do: 'document.getElementById("add-account").close()', check: eq('document.querySelectorAll("dialog[open]").length', 0), changed: true },
 
     // 编辑弹窗：昵称/设备号预填，凭据框**空**（空 = 不改 —— 凭据从不回显）

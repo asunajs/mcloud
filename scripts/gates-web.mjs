@@ -55,6 +55,10 @@ const GATES = [
   { name: 'build', cmd: 'npm', args: ['run', 'build'] },
   // 编译期负例：纯 Node，CI 也跑得动 —— 该抛的没抛就是编译器的门坏了
   { name: 'lite 编译期负例', cmd: 'node', args: ['lite/regress/compiler.mjs'] },
+  // 窄屏（375，真视口）：宽屏那条抓不到"手机上没法用"这一类（2026-10-01 用户连报两个）
+  // ⚠ 名字里留一段 ASCII：日志文件名按 `[^0-9a-zA-Z]+` 清洗，纯中文名会退化成
+  // `gates-web--.log`（跟别的门禁分不清）。
+  { name: 'narrow-375 窄屏布局验收', cmd: 'node', args: ['lite/regress/narrow.mjs'], browser: true },
   {
     name: 'lite 真 DOM 验收',
     // all.mjs 的默认就是"三个认证态全跑"，所以 --full 只需**不传** --quick

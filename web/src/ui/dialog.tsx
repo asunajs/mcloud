@@ -68,9 +68,38 @@ export const Dialog = (props: DialogProps) => {
   const slots = useSlots()
   return (
     <dialog id={props.id} class="modal" onClose={() => props.onClose?.()}>
-      <div class={`modal-box flex flex-col gap-3 ${SIZE_CLASS[props.size ?? 'lg']}`}>
-        <h3 class="text-base font-medium">{props.title}</h3>
-        {slots.default?.()}
+      {/*
+        # 窄屏上"没有出口"是个真 bug（2026-10-01 用户实测：手机上加账号弹窗点不到取消）
+
+        三个原因叠在一起，缺一条都还会踩：
+        1. daisyUI 给 `.modal-box` 的是 `max-height: 100vh` —— 手机浏览器的 `100vh`
+           **包含地址栏那块**，于是弹窗底部（含按钮）被切到屏幕外；
+        2. 遮罩是取消的唯一入口，而弹窗几乎铺满屏 ⇒ 遮罩只剩顶上一条细缝，点不到；
+        3. 添加账号那个弹窗**本来就没有取消按钮**（只有各方式自己的提交键）。
+
+        ⇒ 这里一次性给所有弹窗补上：**高度用 `dvh`**（真实可见视口）、
+        **标题栏 + ✕ 常驻不滚动**、**只有内容区滚**。
+        ✕ 是唯一一条"任何高度下都够得着"的出口，所以它不能跟着内容滚走。
+
+        ⚠ 内容外面那层 `flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto`：
+        `min-h-0` 不能省（否则 flex 子项不肯收缩，滚动条出不来），
+        `gap-3` 是把原来 modal-box 上的间距**搬进来**（否则消费者那些直接子节点会挤在一起）。
+      */}
+      <div
+        class={`modal-box flex max-h-[calc(100dvh-2rem)] flex-col gap-3 overflow-hidden ${SIZE_CLASS[props.size ?? 'lg']}`}
+      >
+        <div class="flex items-center justify-between gap-2">
+          <h3 class="text-base font-medium">{props.title}</h3>
+          <button
+            type="button"
+            class="btn btn-sm btn-ghost btn-circle -mr-2"
+            aria-label="关闭"
+            onClick={() => closeDialog(props.id)}
+          >
+            ✕
+          </button>
+        </div>
+        <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">{slots.default?.()}</div>
       </div>
       <form method="dialog" class="modal-backdrop">
         <button>关闭</button>
