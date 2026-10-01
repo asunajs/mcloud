@@ -268,6 +268,28 @@ impl Runner {
             .get(task_name)
             .ok_or_else(|| mcloud_core::Error::Config(format!("未知任务：{task_name}")))?;
 
+        // ⚠ 「排队中被取消」要**跳过**，不是照样开跑。
+        //
+        // `start_serial`（多账号）会给**每个**账号预登记取消令牌，于是轮到某个账号时，
+        // 它可能在那之前就被取消了（用户在队列里点了中止 / 点了"全部中止"）。
+        // 不查这一下的话，"取消"就退化成"跑起来之后再停"：界面上会冒出一串
+        // "开始了又立刻中止"的假运行，而且每一趟都可能已经向上游发过请求
+        // —— 副作用已经产生，而用户以为自己取消了。
+        //
+        // ⚠ 必须查在 `Started` **之前**：那个事件的语义是"真的开始干活了"。
+        // ⚠ 令牌是调用方预登记的，走这条提前返回要**自己还回去**（`release`），
+        // 否则取消表里会留一条没人回收的条目（进程越久积得越多）。
+        if pre_registered.as_ref().is_some_and(|t| t.is_cancelled()) {
+            self.cancel.release(run_id);
+            return Ok(self.record(
+                run_id,
+                task_name,
+                account,
+                0,
+                TaskOutcome::skipped("已被中止，这一趟跳过"),
+            ));
+        }
+
         let key = Self::key(task_name, &account.id);
         {
             let mut inflight = self.inflight.lock().expect("inflight 锁中毒");
@@ -950,6 +972,85 @@ mod tests {
                 format!("结束:{}", c.id),
             ],
             "三个账号必须**一个跑完再跑下一个**，且顺序与传入顺序一致；实际 {got:?}"
+        );
+    }
+
+    /// 多账号串行时，**排队中被取消的账号要被跳过** —— 不是"跑起来再停"。
+    ///
+    /// 界面上点「中止」/「全部中止」之后，那些**还没轮到**的账号必须直接跳过：
+    /// 让它们开跑再停，既会冒出一串"开始了又立刻中止"的假运行，
+    /// 也可能已经向上游发过请求（副作用产生了，而用户以为取消了）。
+    /// 这条用例同时钉住两件事：**跳过的那趟连 `Started` 都不发**、**后面的账号照跑**。
+    #[tokio::test]
+    async fn start_serial_skips_an_account_cancelled_while_queued() {
+        let trace: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let (runner, _store, sink) = build(vec![Arc::new(TraceTask {
+            trace: Arc::clone(&trace),
+        })]);
+        let runner = Arc::new(runner);
+        let a = account("13800000001");
+        let b = account("13800000002");
+        let c = account("13800000003");
+
+        let ids = runner.start_serial(
+            "trace",
+            vec![a.clone(), b.clone(), c.clone()],
+            serde_json::json!({}),
+        );
+
+        // 等 1 号真的开跑，再去取消 **2 号**（它此刻还排在队列里）。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while trace.lock().expect("轨迹锁中毒").is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "1 号没在 5 秒内开跑，后面就没法构造「排队中被取消」这个局面"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        assert!(
+            runner.cancel_registry().cancel(ids[1]),
+            "排队中的账号也必须能被取消（界面拿到的 id 就是为这个给的）"
+        );
+
+        // 等整批跑完：2 号被跳过 ⇒ 轨迹只有 4 条（1 号两条 + 3 号两条）。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while trace.lock().expect("轨迹锁中毒").len() < 4 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "批次没在 5 秒内跑完（跳过一个不该把后面的也带走）：{trace:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let got = trace.lock().expect("轨迹锁中毒").clone();
+        assert_eq!(
+            got,
+            vec![
+                format!("开始:{}", a.id),
+                format!("结束:{}", a.id),
+                format!("开始:{}", c.id),
+                format!("结束:{}", c.id),
+            ],
+            "被取消的排队账号必须**整个跳过**，后面的账号照常跑；实际 {got:?}"
+        );
+
+        // 更硬的一条：跳过的那趟**连 `Started` 都没发** ——
+        // 否则界面上仍会闪一次"开始"，用户会以为取消没生效。
+        let started: Vec<RunId> = sink
+            .events
+            .lock()
+            .expect("事件锁中毒")
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Started {
+                    run_id, account, ..
+                } if account == &b.id.to_string() => Some(*run_id),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            started.is_empty(),
+            "2 号被取消后不该有任何 Started 事件，实际：{started:?}"
         );
     }
 
