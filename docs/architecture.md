@@ -753,6 +753,40 @@ POST   /api/accounts/{id}/exchange         兑一件（**真扣AI豆**，走 tas
 写那条走 `runner.run(...)`：并发闸以 `task:account` 为键，是"连点两下"与
 "同一件扣两次豆"之间唯一的防线（这条链**零幂等键**）。
 
+### 只读那条其实是**两枪**（2026-10-01 起）
+
+`exchange-prizes` 除了清单那一枪，还会读一次**组字典** —— 它是同族的另一条
+**静态、只读、免鉴权**接口：
+
+```
+GET /ycloud/signin/public/text/sign_in_3/prizeGroup.json      （上游，跨主机同族）
+→ [{"groupId":1,"title":"视频类会员","subTitle":"(月卡每月多选一限兑)",…}, …]
+```
+
+* **`title` 是组名**（音乐类会员 / 视频类会员 / 外卖美食权益…）—— 界面分组标题直接念它，
+  我们**不编**品类名；`subTitle` 是上游原话的**限兑规则**（"每月多选一限兑"），
+  与商品上的 `limit == 4`（`exchanged_this_group`）是同一件事的两种表达。
+* 路径里的 `sign_in_3` 由清单的 `marketName`（实拍 `sign_in_3_ex`）去 `_ex` 推出来 ——
+  **只有一个观测点，是推导不是实拍** ⇒ 推不出来就**不发这一枪**，
+  并让响应里的 `groupsNote` 把原因说出来（清单照常返回，组名退回"第 N 组"）。
+* ⚠ **HTTP 200 + 0 字节是真实存在的**（实拍把路径换成 `sign_in_3_ex` 就是这样）：
+  只看状态码会把"这个路径没内容"读成"上游说没有组"，所以解析层对空体**报错**。
+* 逐字样本与四个坑：`../mcloud-capture/docs/capture/app-exchange-samples.txt` §1~§3。
+
+视图新增字段：`totalCount`（活动总投放）/ `dailyCount`（今日投放）/
+`groupTitle` / `groupSubTitle` / `monthQuantity`（上游 `quota`，**只用于显示**，
+判据仍读 `limit`）/ `groupPrizeIds`（实拍**含自己**，算"同组另外几件"要减一）。
+响应新增 `groupsNote`（`null` = 组名拿到了）。
+
+⚠ `count` 是**池子剩余**，不是"今天还能不能抢"：实拍 `251230032` 是
+`count = 43,739` 而 `minRemainderCount = 0`（H5 判抢光）⇒ 池子有货、**今日份额没了**。
+界面必须分开写这两件事。
+
+⚠ **份额不是整点刷新的**（2026-10-01 实测：跨 21:00 整点，`min=0` 的 26 件一件没变，
+同期 15 件的 `count` 在变 ⇒ 快照是活的）。所以界面不许写"整点开抢"；
+`mcloud-tasks::exchange::plan_exchange_wait`（`skipWait=false` 时"等到下一个整点"）
+在这个活动上等于空等 —— 见样本 §5，待 00:00 复查。
+
 POST   /api/runs                    启动运行 {task, account, body, background}
 GET    /api/runs                    运行列表
 GET    /api/runs/{id}
