@@ -2425,6 +2425,7 @@ fn task_ctx(http: Arc<dyn HttpClient>, clock: Arc<dyn Clock>) -> TaskContext {
             pc_platform: None,
             user_domain_id: None,
             owner: None,
+            enabled: true,
             settings: AccountSettings::default(),
         },
         http,
@@ -2455,7 +2456,8 @@ fn task_meta_is_stable() {
     assert_eq!(meta.name, "exchange");
     assert_eq!(meta.title, "兑换奖品");
     assert!(!meta.description.is_empty());
-    assert_eq!(meta.params, vec!["prizeIdOrName", "skipWait"]);
+    let names: Vec<&str> = meta.params.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["prizeIdOrName", "skipWait"]);
 }
 
 /// ⚠ 已知缺口：任务壳没有 `deviceId` 注入点 ⇒ **一枪不发**并如实说原因。

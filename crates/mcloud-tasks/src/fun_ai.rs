@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use mcloud_core::{HttpRequest, Result, TaskOutcome};
-use mcloud_engine::{Task, TaskContext, TaskResult};
+use mcloud_engine::{Task, TaskContext, TaskGroup, TaskResult};
 use mcloud_upstream::app_funai as proto;
 use mcloud_upstream::app_funai::FunaiModule;
 use mcloud_upstream::app_signin::SignInEnvelope;
@@ -391,6 +391,10 @@ impl Task for FunaiTask {
     }
     fn title(&self) -> &'static str {
         "趣玩AI抽奖"
+    }
+
+    fn group(&self) -> TaskGroup {
+        TaskGroup::App
     }
     fn description(&self) -> &'static str {
         "全网趣玩AI赢好礼：读判据后每天最多抽一次（转盘那一口，不是刮刮乐）"

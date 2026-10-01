@@ -152,3 +152,94 @@ fn different_tokens_hash_differently() {
         hash_session_token(&new_session_token())
     );
 }
+
+// ── 「前端先哈希一次」那一档（用户口径 2026-10-01）────────────────────────
+
+/// ⭐ **对拍向量**：Web 侧（`web/src/ui/password.ts`）算出来的必须与这里逐字节一致。
+///
+/// 两边不一致的表现是"口令明明对、就是登不上"，而且换台机器、换个浏览器
+/// 才复现 —— 所以这里钉死一条公开的向量（`SHA-256("abc")` 是标准测试向量，
+/// 随便哪本手册都能查到）。
+#[test]
+fn client_digest_matches_the_web_side() {
+    assert_eq!(
+        client_password_digest("abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(client_password_digest("").len(), 64);
+    // 确定性：同明文两次必须一致（否则建管理员与登录算出来的值不同）
+    assert_eq!(
+        client_password_digest("correct-horse"),
+        client_password_digest("correct-horse")
+    );
+}
+
+#[test]
+fn digest_recognition_is_strict() {
+    assert!(is_client_digest(&client_password_digest("x")));
+    assert!(!is_client_digest(""), "空串不是摘要");
+    assert!(!is_client_digest("correct-horse"), "明文不是摘要");
+    assert!(
+        !is_client_digest(&"A".repeat(64)),
+        "大写 hex 不认 —— Web 侧产出的恒为小写"
+    );
+    assert!(
+        !is_client_digest(&"g".repeat(64)),
+        "非 hex 字符不认（否则明文恰好 64 位会被误判）"
+    );
+    assert!(!is_client_digest(&"a".repeat(63)), "位数不足不是摘要");
+}
+
+/// 老记录（没有前缀）必须原样通过 `strip_digest_scheme` ——
+/// 它是"升级前那些实例还能登录"的唯一依据。
+#[test]
+fn scheme_marker_roundtrip_and_legacy_passthrough() {
+    let phc = hash_password("correct-horse").unwrap();
+    assert!(!is_digest_scheme(&phc), "argon2 裸串是**老档**");
+
+    let marked = mark_digest_scheme(&phc);
+    assert!(is_digest_scheme(&marked));
+    assert_eq!(
+        strip_digest_scheme(&marked),
+        phc,
+        "去前缀必须还原成能校验的 PHC 串"
+    );
+    assert_eq!(
+        mark_digest_scheme(&marked),
+        marked,
+        "幂等：别叠成 sha256$sha256$…"
+    );
+
+    // 老档：原样返回，不会被砍掉开头
+    assert_eq!(strip_digest_scheme(&phc), phc);
+    assert!(verify_password("correct-horse", strip_digest_scheme(&marked)).is_ok());
+}
+
+/// 请求里带的凭据换算：摘要原样、明文补一次 —— 两条路算出来的必须**相同**。
+#[test]
+fn to_digest_credential_is_idempotent() {
+    let plain = "correct-horse";
+    let once = to_digest_credential(plain);
+    assert_eq!(once, client_password_digest(plain));
+    assert_eq!(
+        to_digest_credential(&once),
+        once,
+        "对摘要再来一次不该变成 sha256(摘要)"
+    );
+}
+
+/// 新档落库后，**用摘要验得通、用明文（未换算）验不通** ——
+/// 后者正是"库里存的不是明文派生值"的证据。
+#[test]
+fn new_scheme_verifies_the_digest_not_the_plaintext() {
+    let plain = "correct-horse";
+    let phc = hash_password(&client_password_digest(plain)).unwrap();
+    let stored = mark_digest_scheme(&phc);
+
+    assert!(verify_password(&to_digest_credential(plain), strip_digest_scheme(&stored)).is_ok());
+    assert_eq!(
+        verify_password(plain, strip_digest_scheme(&stored)),
+        Err(PasswordError::Mismatch),
+        "明文直接压上去必须不匹配 —— 否则说明库里存的还是明文那档"
+    );
+}

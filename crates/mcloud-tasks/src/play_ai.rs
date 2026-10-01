@@ -39,7 +39,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use mcloud_core::{HttpRequest, Result, TaskOutcome};
-use mcloud_engine::{Task, TaskContext, TaskResult};
+use mcloud_engine::{Task, TaskContext, TaskGroup, TaskResult};
 use mcloud_upstream::app_play_ai as proto;
 use mcloud_upstream::app_play_ai::{PlayAiUserStatus, PlayAiUserTask};
 
@@ -207,6 +207,10 @@ impl Task for PlayAiTask {
     }
     fn title(&self) -> &'static str {
         "拍拍盘点"
+    }
+
+    fn group(&self) -> TaskGroup {
+        TaskGroup::App
     }
     fn description(&self) -> &'static str {
         "看这个号在拍拍活动里的任务表与抽奖次数读数（只盘点不代做：不做任务、不抽奖、不写网盘）"

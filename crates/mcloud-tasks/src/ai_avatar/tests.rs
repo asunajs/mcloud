@@ -59,6 +59,7 @@ fn account_with(enabled: bool, limit: u32) -> Account {
         pc_platform: None,
         user_domain_id: None,
         owner: None,
+        enabled: true,
         settings: AccountSettings {
             ai_avatar_enabled: enabled,
             ai_avatar_daily_limit: limit,

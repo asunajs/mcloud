@@ -24,6 +24,11 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .context("组装应用失败")?;
 
+    // ⚠ **必须在起服务之前**：把 run id 续到历史最大值之后。
+    // 不做的话重启后编号从 1 重来 —— 而运行记录按编号 upsert，
+    // 新记录会把上次启动留下的同编号记录覆盖掉（症状：历史"越重启越少"）。
+    app.handle.seed_run_ids().await?;
+
     let tasks = app.registry().len();
     tracing::info!(data_dir, tasks, "mcloud 启动");
 
@@ -38,6 +43,8 @@ async fn main() -> anyhow::Result<()> {
     // 收尾时要拿它去喊停，所以**在 `scheduler` 被 move 进 spawned 任务之前**另留一份。
     let stop_scheduler = Arc::clone(app.scheduler());
 
+    // 「重启服务」那条路要用的信号：先取出来，再把 handle 交给 state
+    let restart = Arc::clone(&app.handle.shutdown);
     let state = mcloud_server::ServerState::new(Arc::new(app.handle));
 
     // 启动调度器。
@@ -72,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
     // 直接 `std::process::exit` 或让 main 掉出去，正在写的响应会被拦腰截断，
     // 前端看到的是"随机一个请求网络错误"—— 而重启是常事（改完代码就要重启一次）。
     axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(restart))
         .await
         .context("服务异常退出")?;
 
@@ -93,7 +100,13 @@ async fn main() -> anyhow::Result<()> {
 /// 两个都要等：`Ctrl-C` 是手动跑（`scripts/run-local.sh`）时的路径，
 /// 而 launchd / systemd 停服务发的是 **SIGTERM** —— 只接 `ctrl_c()` 的话，
 /// 托管场景下永远是"被 SIGKILL 打死"，优雅收尾那一段等于没写。
-async fn shutdown_signal() {
+async fn shutdown_signal(restart: Arc<tokio::sync::Notify>) {
+    // WebUI 点「重启服务」走这条：与 SIGTERM 同一条优雅收尾路径。
+    // （托管方是 launchd/supervisor 时进程会被重拉；手动前台跑时它就停在这儿。）
+    let requested = async move {
+        restart.notified().await;
+    };
+
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -116,5 +129,6 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => tracing::info!("收到 Ctrl-C"),
         _ = terminate => tracing::info!("收到 SIGTERM"),
+        _ = requested => tracing::info!("WebUI 请求重启"),
     }
 }

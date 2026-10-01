@@ -12,6 +12,9 @@ pub mod logs;
 pub mod pipelines;
 pub mod runs;
 pub mod schedules;
+pub mod security;
+pub mod system;
+pub mod task_config;
 
 use axum::routing::{get, post};
 use axum::Router;
@@ -32,6 +35,25 @@ pub fn router() -> Router<ServerState> {
         .route("/api/status", get(health::status))
         .route("/api/health", get(health::health))
         .route("/api/capabilities", get(capabilities::list))
+        // ── 账户安全（都要登录）──────────────────────────────────────
+        // 口令策略与会话时长是**登录闸自己的设置**，所以和 users/sessions 一样
+        // 必须落在闸后面：没登录就能改下限，等于没有闸。
+        .route(
+            "/api/admin/security",
+            get(security::get_security).put(security::put_security),
+        )
+        // 改口令：只认"当前口令"，不认身份 —— 会话被盗时这一条拦不住，
+        // 但那是会话本身的语义（能改口令的会话本来就有全部权限）。
+        .route("/api/admin/password", axum::routing::put(security::change_password))
+        // ── 系统（存储 / 重启）───────────────────────────────────────
+        // ── 任务的参数配置（任务页「配置」那一页）──────────────────────
+        .route(
+            "/api/tasks/{name}/config",
+            get(task_config::get_one).put(task_config::put_one),
+        )
+        .route("/api/system/about", get(system::about))
+        .route("/api/system/storage", get(system::storage))
+        .route("/api/system/restart", post(system::restart))
         // 今日AI豆（云朵记录汇总）—— **只读**：按账号读流水，绝不合计。
         // 一个账号读不到进响应的 `failed`，不打整张卡（见 beans.rs 模块头）。
         .merge(beans::routes())

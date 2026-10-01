@@ -104,7 +104,7 @@ use serde_json::{json, Value};
 
 use mcloud_core::{Error, HttpRequest, Result, TaskOutcome};
 use mcloud_crypto::{Random, SharedRandom};
-use mcloud_engine::{Task, TaskContext, TaskResult};
+use mcloud_engine::{Task, TaskContext, TaskGroup, TaskResult};
 use mcloud_upstream::ai_avatar as proto;
 use mcloud_upstream::cloud_trash;
 
@@ -827,6 +827,9 @@ impl Task for AiAvatarTask {
     }
     fn title(&self) -> &'static str {
         AI_AVATAR_TASK_TITLE
+    }
+    fn group(&self) -> TaskGroup {
+        TaskGroup::App
     }
     fn description(&self) -> &'static str {
         AI_AVATAR_TASK_DESCRIPTION

@@ -231,6 +231,235 @@ const STEPS = {
     { name: '切到任务页', do: go('#/tasks'), check: eq('location.hash', '#/tasks') },
     { name: '任务页：选账号', do: pickOption('select.select', '13800000000'), check: eq('document.querySelector("select.select").value', '13800000000') },
 
+    // 设置页：账户安全 / 存储信息 / 重启 —— 这三块 2026-10-01 一起补了后端。
+    { name: '切到设置页', do: go('#/settings'), check: eq('location.hash', '#/settings'), changed: true },
+    { name: '设置页：存储信息报到数据目录', do: null, check: has(APP_TEXT, '数据目录') },
+    {
+      // 用户口径 2026-10-01：「你口令更改怎么取消了旧口令」⇒ 当前口令必须留着。
+      // 三个框 = 当前口令 + 新口令 + 确认（1 个 current-password + 2 个 new-password）。
+      name: '设置页：改口令是三个框（当前 + 新 + 确认）',
+      do: null,
+      check: eq(
+        `document.querySelectorAll('#app input[autocomplete="current-password"]').length + '/' +
+         document.querySelectorAll('#app input[autocomplete="new-password"]').length`,
+        '1/2',
+      ),
+    },
+    {
+      name: '设置页：两次新口令不一致 ⇒ 前端先挡（只提示、不发请求）',
+      do: `(() => {
+        const set = (el, v) => { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })) }
+        // ⚠ 当前口令也要填：不填的话先撞上"请填写当前口令"，测不到"两次不一致"这一条
+        set(document.querySelector('#app input[autocomplete="current-password"]'), 'current-pass')
+        const f = document.querySelectorAll('#app input[autocomplete="new-password"]')
+        set(f[0], 'first-pass')
+        set(f[1], 'second-pass')
+        ;[...document.querySelectorAll('#app button')].find((b) => b.textContent.trim() === '更新口令').click()
+        return f.length
+      })()`,
+      check: has(APP_TEXT, '两次输入的新口令不一致'),
+      changed: true,
+    },
+    {
+      // 版权声明：版本号来自 /api/version（fixture 是 0.1.0），年份是当年
+      name: '设置页：关于卡有版权声明（带许可与年份）',
+      do: null,
+      // ⚠ 不能写 `APP_TEXT`：它只是 `has()` 用的**字面量占位**，在 `eq()` 里是个
+      // 未定义标识符 —— 症状是"断言不符"而不是报错，很容易看错方向。这里写全。
+      check: eq(
+        `/Copyright © ${new Date().getFullYear()} catlair · Apache-2\.0/.test(document.getElementById('app').textContent)`,
+        true,
+      ),
+    },
+    {
+      // 更新说明这块：列的是**这次构建带了什么**（装置给了两条）
+      name: '设置页：关于卡列出更新说明（来自构建记录）',
+      do: null,
+      check: eq(
+        `/feat\\(accounts\\): 账号停用/.test(document.getElementById('app').textContent)`,
+        true,
+      ),
+    },
+    {
+      name: '设置页：保存策略 ⇒ 有成功提示',
+      do: clickText('button', '保存策略'),
+      check: has(APP_TEXT, '策略已保存'),
+      changed: true,
+    },
+    {
+      name: '设置页：重启按钮开的是确认框（不是直接重启）',
+      do: clickText('button', '重启服务'),
+      check: eq('[...document.querySelectorAll("dialog[open]")].map((d) => d.id).join(",")', 'confirm-restart'),
+    },
+    {
+      name: '设置页：取消重启 ⇒ 框关掉、服务没动',
+      do: clickText('#confirm-restart .modal-action button', '取消'),
+      check: eq('!!document.querySelector("dialog#confirm-restart[open]")', false),
+    },
+
+    // ── 账号停用（2026-10-01 用户口径："账号需要增加一个停用功能，
+    //    这样在其他功能下拉菜单就不显示"）──
+    { name: '账号页：有停用按钮', do: go('#/accounts'), check: has(APP_TEXT, '停用'), changed: true },
+    {
+      name: '账号页：停用主号 ⇒ 卡片出现「已停用」',
+      do: `(() => {
+        const li = [...document.querySelectorAll('#app li.card')].find((el) => el.textContent.includes('主力号'))
+        if (!li) return '没有主号那张卡'
+        ;[...li.querySelectorAll('button')].find((b) => b.textContent.trim() === '停用').click()
+        return true
+      })()`,
+      // ⚠ 不判文案：成功提示里也写着"已停用 XXX" —— 那会让"启用后"的断言永远为真。
+      // 判**卡片本身**有没有被压暗（`opacity-60`）：唯一无歧义的状态。
+      check: eq(
+        `(() => { const li = [...document.querySelectorAll('#app li.card')].find((el) => el.textContent.includes('主力号')); return li ? li.className.includes('opacity-60') : 'no-card' })()`,
+        true,
+      ),
+      changed: true,
+    },
+    {
+      // ⭐ 用户要的就是这一条：**别的页面的下拉里不再出现它**
+      name: '兑换页：账号下拉里已经没有停用的那个号',
+      do: go('#/exchange'),
+      check: eq(
+        `[...document.querySelectorAll('#app select option')].some((o) => o.textContent.includes('主力号'))`,
+        false,
+      ),
+      changed: true,
+    },
+    {
+      name: '账号页：回到账号页准备启用',
+      do: go('#/accounts'),
+      check: eq(
+        `(() => { const li = [...document.querySelectorAll('#app li.card')].find((el) => el.textContent.includes('主力号')); return li ? li.className.includes('opacity-60') : 'no-card' })()`,
+        true,
+      ),
+      changed: true,
+    },
+    {
+      name: '账号页：再点启用 ⇒ 恢复可选（停用是可逆的）',
+      do: `(() => {
+        const li = [...document.querySelectorAll('#app li.card')].find((el) => el.textContent.includes('主力号'))
+        if (!li) return '没有主号那张卡'
+        ;[...li.querySelectorAll('button')].find((b) => b.textContent.trim() === '启用').click()
+        return true
+      })()`,
+      check: eq(
+        `(() => { const li = [...document.querySelectorAll('#app li.card')].find((el) => el.textContent.includes('主力号')); return li ? li.className.includes('opacity-60') : 'no-card' })()`,
+        false,
+      ),
+      changed: true,
+    },
+
+    // ── 任务页：分组 + 参数挪到单独的配置页（2026-10-01 用户口径）──
+    {
+      name: '任务页：分组是 tab（可见的组各一个）',
+      do: go('#/tasks'),
+      // 装置里有 5 个任务、其中 `internal-probe` 是隐藏的 ⇒ 可见的组是 3 个
+      // （signin / live / device）。隐藏任务那一组**不该**留下一个空 tab。
+      check: eq(`document.querySelectorAll('#app [role="tab"]').length`, 3),
+      changed: true,
+    },
+    {
+      /**
+       * ⚠ 选中的 tab 必须**看得出**是选中的。
+       *
+       * 判"实际背景色不一样"而不是"有没有某个类名"：本项目 `app.css` 里有一份
+       * daisyUI 组件的 `exclude` 清单，用到被排除的组件时**类名照样在 DOM 上、
+       * 样式却静默消失**（2026-10-01 实际踩到：`tab-active` 不在产物 CSS 里，
+       * 三个组名渲染成一行没有任何样式的文字，而任何"类名在不在"的断言都会通过）。
+       */
+      name: '任务页：选中的 tab 与未选中的**看起来不一样**',
+      do: null,
+      check: eq(
+        `(() => {
+          const tabs = [...document.querySelectorAll('#app [role="tab"]')]
+          if (tabs.length < 2) return 'tabs<2'
+          const bg = (el) => getComputedStyle(el).backgroundColor
+          const fg = (el) => getComputedStyle(el).color
+          return bg(tabs[0]) !== bg(tabs[1]) || fg(tabs[0]) !== fg(tabs[1])
+        })()`,
+        true,
+      ),
+    },
+    {
+      // 一次只看一组：默认那组在，"别组"的任务不在（堆叠版本会两组都在）
+      name: '任务页：默认只显示第一组',
+      do: null,
+      check: eq(
+        `(() => { const t = document.getElementById('app').textContent; return t.includes('每日签到') + '/' + t.includes('直播口令') })()`,
+        'true/false',
+      ),
+    },
+    {
+      // 留在"直播小红花"这一组：下面几步要用到那张卡
+      name: '任务页：切 tab ⇒ 换一组内容',
+      do: `(() => {
+        const tab = [...document.querySelectorAll('#app [role="tab"]')].find((t) => t.textContent.includes('直播小红花'))
+        tab.click()
+        return true
+      })()`,
+      check: eq(
+        `(() => { const t = document.getElementById('app').textContent; return t.includes('直播口令') + '/' + t.includes('每日签到') })()`,
+        'true/false',
+      ),
+      changed: true,
+    },
+    {
+      name: '任务页：有参数的任务给「配置」入口',
+      do: null,
+      check: eq(
+        `[...document.querySelectorAll('#app .card')].some((c) => c.textContent.includes('直播口令') && [...c.querySelectorAll('button')].some((b) => b.textContent.trim() === '配置'))`,
+        true,
+      ),
+    },
+    {
+      name: '任务配置页：能从任务卡进到单独那一页',
+      do: `(() => {
+        const card = [...document.querySelectorAll('#app .card')].find((c) => c.textContent.includes('直播口令'))
+        ;[...card.querySelectorAll('button')].find((b) => b.textContent.trim() === '配置').click()
+        return true
+      })()`,
+      check: has(APP_TEXT, '任务配置'),
+      changed: true,
+    },
+    {
+      name: '任务配置页：改「听弹幕时长」为 123 并保存',
+      do: `(() => {
+        const inp = document.querySelector('#app input[type="number"]')
+        inp.value = '123'
+        inp.dispatchEvent(new Event('input', { bubbles: true }))
+        ;[...document.querySelectorAll('#app button')].find((b) => b.textContent.trim() === '保存').click()
+        return true
+      })()`,
+      check: has(APP_TEXT, '已保存'),
+      changed: true,
+    },
+    {
+      // ⭐ 装置只在 listenSeconds === 123 时回 200 ⇒ 这一步真的钉住了
+      //   "配置页存的东西进了运行请求"，而不只是"按钮点了有反应"。
+      name: '任务页：运行 ⇒ 请求真的带上了配置页存的参数',
+      do: `(() => {
+        location.hash = '#/tasks'
+        return true
+      })()`,
+      check: has(APP_TEXT, '直播口令'),
+      changed: true,
+    },
+    {
+      name: '任务页：选账号 → 运行直播任务（带参数才放行）',
+      do: `(() => {
+        const card = [...document.querySelectorAll('#app .card')].find((c) => c.textContent.includes('直播口令'))
+        const sel = document.querySelector('#app select')
+        const first = [...sel.options].map((o) => o.value).filter((v) => v.length > 0)[0]
+        sel.value = first
+        sel.dispatchEvent(new Event('change', { bubbles: true }))
+        ;[...card.querySelectorAll('button')].find((b) => b.textContent.trim() === '运行').click()
+        return true
+      })()`,
+      check: has(APP_TEXT, '已提交'),
+      changed: true,
+    },
+
     /**
      * ⚠ 登出确认放在**最后**：它是破坏性的（确认后应用回到登录页），
      * 放在中间会让后面每一步都找不到元素。第一版就踩了：18 步"两侧一致"，
@@ -263,6 +492,13 @@ const STEPS = {
     // ⚠ 放行后外壳是**异步**长起来的，主题按钮可能还没出现 —— 但本框架的挂载是同步的，
     // 而 `waitStable` 已经等过一轮，所以这里要求它**必须**在（不在就是没放行完全）
     { name: '放行后：切主题', do: clickSel('[aria-label^="切换到"]'), check: eq("!!document.documentElement.getAttribute('data-theme')", true) },
+    // ── 历史页：筛选与搜索（2026-10-01 改版新增）──
+    // fixture 里是 2 条（1 成功 + 1 失败）。⚠ 胶囊的可见文字带计数（「失败 1」），
+    // 所以按 `aria-label` 点它 —— `clickText` 是精确匹配。
+    { name: '历史页：两条记录都在', do: null, check: eq('document.querySelectorAll("#app table tbody tr").length', 2) },
+    { name: '历史页：切「失败」档只剩 1 条', do: clickSel('[aria-label="筛选：失败"]'), check: eq('document.querySelectorAll("#app table tbody tr").length', 1), changed: true },
+    { name: '历史页：搜索无结果 ⇒ 是"没有符合条件"而不是"还没有记录"', do: typeIn('#app input[type=search]', 'zzz'), check: has(APP_TEXT, '没有符合条件的记录'), changed: true },
+    { name: '历史页：清除筛选回到全部', do: clickText('button', '清除筛选'), check: eq('document.querySelectorAll("#app table tbody tr").length', 2), changed: true },
   ],
   /**
    * 已初始化未登录：口令错走错误分支，口令对则**闸门从登录页翻到外壳**

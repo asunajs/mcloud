@@ -259,6 +259,7 @@ fn account_fixture() -> Account {
         pc_platform: None,
         user_domain_id: None,
         owner: None,
+        enabled: true,
         settings: mcloud_core::AccountSettings::default(),
     }
 }

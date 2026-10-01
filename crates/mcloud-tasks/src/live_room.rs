@@ -82,7 +82,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use mcloud_core::{Error, HttpRequest, Result, TaskOutcome};
-use mcloud_engine::{Task, TaskContext, TaskResult};
+use mcloud_engine::{ParamSpec, Task, TaskContext, TaskGroup, TaskResult};
 use mcloud_upstream::live_flower as proto;
 use mcloud_upstream::live_flower::{
     FirstParticipateKind, RedFlowerBalance, RedFlowerDrawKind, RedFlowerDrawOutcome,
@@ -1513,17 +1513,33 @@ impl Task for LiveRoomTask {
         "直播口令小红花"
     }
 
+    fn group(&self) -> TaskGroup {
+        TaskGroup::Live
+    }
+
     fn description(&self) -> &'static str {
         "听直播弹幕获取口令，并逐个领取小红花（小红书那条口令需人工用 codes 传入）"
     }
 
-    fn params(&self) -> Vec<String> {
+    fn params(&self) -> Vec<ParamSpec> {
         vec![
-            "codes".into(),
-            "listenSeconds".into(),
-            "koulingOnly".into(),
-            "skipKouling".into(),
-            "dryRun".into(),
+            ParamSpec::text(
+                "codes",
+                "口令",
+                "小红书那条口令只能人工粘进来；多个用逗号或换行分隔",
+            ),
+            ParamSpec::number(
+                "listenSeconds",
+                "听弹幕时长",
+                60.0,
+                5.0,
+                1800.0,
+                "秒",
+                "听多久弹幕来抓口令（参考实现的默认是 60 秒）",
+            ),
+            ParamSpec::boolean("koulingOnly", "只听不领", false, "只抓口令，不换成小红花"),
+            ParamSpec::boolean("skipKouling", "跳过听弹幕", false, "直接用上面填的口令去领"),
+            ParamSpec::boolean("dryRun", "试运行", false, "只查询、不真的领取"),
         ]
     }
 
@@ -1636,12 +1652,19 @@ impl Task for RedFlowerTask {
         "领取小红花"
     }
 
+    fn group(&self) -> TaskGroup {
+        TaskGroup::Live
+    }
+
     fn description(&self) -> &'static str {
         "用给定的口令逐个领取小红花（不听弹幕；给的第一个口令决定先领哪条）"
     }
 
-    fn params(&self) -> Vec<String> {
-        vec!["codes".into(), "dryRun".into()]
+    fn params(&self) -> Vec<ParamSpec> {
+        vec![
+            ParamSpec::text("codes", "口令", "要领取的口令；多个用逗号或换行分隔"),
+            ParamSpec::boolean("dryRun", "试运行", false, "只查询、不真的领取"),
+        ]
     }
 
     async fn run(&self, ctx: &TaskContext, body: &Value) -> TaskResult {

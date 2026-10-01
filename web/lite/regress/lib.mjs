@@ -9,6 +9,13 @@
  * 每步快照都过它，于是"界面变了没有"有一个稳定口径，而不是各处自己剪一段 outerHTML。
  */
 import { execFileSync, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
+
+/**
+ * 与 Web 侧 `ui/password.ts`、Rust 侧 `client_password_digest` **同一套值**。
+ * 用它来断言"前端那一次哈希真的发生了"（见下面登录/建管理员两条 handler）。
+ */
+const sha256Hex = (v) => createHash('sha256').update(v, 'utf8').digest('hex')
 import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
@@ -27,8 +34,39 @@ export const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
  * 但那是在**测一个空壳**。列表为空时各页只渲染空态，`createFor` 的增删重排、
  * 带数据的弹窗、带选项的下拉框一个都走不到。
  */
-const ACCOUNT = { id: '13800000000', nickname: '主力号', pc_platform: 'windows', device_id: 'dev-abc123', expire: 1790000000000 }
-const ACCOUNT2 = { id: '13900000001', nickname: null, pc_platform: null, device_id: 'dev-def456', expire: 0 }
+const ACCOUNT = { id: '13800000000', nickname: '主力号', pc_platform: 'windows', device_id: 'dev-abc123', expire: 1790000000000, enabled: true }
+const ACCOUNT2 = { id: '13900000001', nickname: null, pc_platform: null, device_id: 'dev-def456', expire: 0, enabled: true }
+
+/**
+ * 账号在 ready 变体里是**有状态**的（停用之后别处就该看不到它）。
+ * `serve()` 每次启动时重置 —— 否则同一次进程里起两个服务会串状态。
+ */
+const acctState = { accounts: [] }
+
+/**
+ * 任务的默认参数（任务配置页存的那份）。
+ *
+ * 有状态是**故意**的：这个功能的价值全在"配置页存了 → 任务页运行时带上"，
+ * 回一份静态值就只证明"按钮点了有反应"。
+ */
+const taskCfg = {}
+const resetTaskCfg = () => {
+  taskCfg['daily-checkin'] = { dryRun: false }
+  taskCfg['live-room'] = { listenSeconds: 60, codes: '' }
+}
+const SPECS = {
+  'daily-checkin': [
+    { name: 'dryRun', title: '试运行', kind: 'bool', default: false, help: '只查询、不真的签到' },
+  ],
+  'live-room': [
+    { name: 'listenSeconds', title: '听弹幕时长', kind: 'number', default: 60, min: 5, max: 1800, unit: '秒', help: '听多久弹幕来抓口令' },
+    { name: 'codes', title: '口令', kind: 'text', default: '', help: '多个用逗号或换行分隔' },
+  ],
+}
+const configView = (name) => ({ name, specs: SPECS[name] ?? [], params: taskCfg[name] ?? {} })
+const resetAcctState = () => {
+  acctState.accounts = [ACCOUNT, ACCOUNT2].map((a) => ({ ...a }))
+}
 const RUN = {
   run_id: 1024,
   task: 'daily-checkin',
@@ -78,17 +116,66 @@ const PIPELINE = {
  * 加页面时先把它 `load()` 里并发取的端点全列进这张表。
  */
 export const FIXTURES = {
-  '/api/setup': { initialized: true, minPasswordLen: 8 },
+  // `passwordScheme` 决定登录页发摘要还是发明文（见 `ui/password.ts`）
+  '/api/setup': { initialized: true, minPasswordLen: 8, passwordScheme: 'sha256' },
   '/api/session': { userId: 'u-1', name: 'admin', kind: 'web' },
+  // 账户安全（改口令 / 策略）与存储信息：设置页那两块要它们
+  '/api/admin/security': { minPasswordLen: 8, sessionTtlHours: 168, passwordScheme: 'sha256' },
+  '/api/system/storage': {
+    dataDir: '/tmp/mcloud-fixture/data',
+    logDir: '/tmp/mcloud-fixture/data/logs',
+    binary: '/tmp/mcloud-fixture/target/release/mcloud-server',
+    dataBytes: 20480,
+    logBytes: 1024,
+    files: [
+      { name: 'accounts.json', bytes: 4096 },
+      { name: 'users.json', bytes: 512 },
+    ],
+  },
   '/api/version': { name: 'mcloud', version: '0.1.0' },
+  // 「关于」卡片（构建期从 git 抓的那几项）
+  '/api/system/about': {
+    name: 'mcloud',
+    version: '0.1.0',
+    commit: 'abc1234',
+    dirty: false,
+    buildTime: '2026-10-01 19:20 CST',
+    profile: 'release',
+    changes: [
+      { hash: 'abc1234', subject: 'feat(accounts): 账号停用' },
+      { hash: 'def5678', subject: 'feat(web): 设置页重做' },
+    ],
+  },
   // `startedAtMs` 是「运行时间」的来源（总览那条引擎条）：给一个**固定**的两天前，
   // 界面就会稳定显示「2 天」—— 用 `Date.now()` 的话每次跑门禁的渲染结果都不一样。
   '/api/status': { name: 'mcloud', version: '0.1.0', startedAtMs: 1790581000000, taskCount: 18, lastRun: RUN, schedulerRunning: true, runningCount: 0, scheduleCount: 1, pipelineCount: 1 },
   '/api/capabilities': {
     tasks: [
-      { name: 'daily-checkin', title: '每日签到', description: '签到并领取当日奖励', hidden: false, params: [] },
-      { name: 'live-room', title: '直播口令', description: '听弹幕领小红花', hidden: false, params: ['listenSeconds'] },
-      { name: 'internal-probe', title: '内部探针', description: '不该出现在界面上', hidden: true, params: [] },
+      {
+        name: 'daily-checkin', title: '每日签到', description: '签到并领取当日奖励',
+        hidden: false, group: 'signin', groupLabel: 'AI豆中心',
+        params: [{ name: 'dryRun', title: '试运行', kind: 'bool', default: false, help: '只查询、不真的签到' }],
+      },
+      {
+        name: 'receive', title: '领取AI豆', description: '领取待领的AI豆',
+        hidden: false, group: 'signin', groupLabel: 'AI豆中心', params: [],
+      },
+      {
+        name: 'live-room', title: '直播口令', description: '听弹幕领小红花',
+        hidden: false, group: 'live', groupLabel: '直播小红花',
+        params: [
+          { name: 'listenSeconds', title: '听弹幕时长', kind: 'number', default: 60, min: 5, max: 1800, unit: '秒', help: '听多久弹幕来抓口令' },
+          { name: 'codes', title: '口令', kind: 'text', default: '', help: '多个用逗号或换行分隔' },
+        ],
+      },
+      {
+        name: 'msg-push', title: '消息推送', description: '把运行结果推到你配的渠道',
+        hidden: false, group: 'device', groupLabel: '消息与设备', params: [],
+      },
+      {
+        name: 'internal-probe', title: '内部探针', description: '不该出现在界面上',
+        hidden: true, group: 'app', groupLabel: '应用与 AI', params: [],
+      },
     ],
   },
   '/api/runs': [RUN, { ...RUN, run_id: 1023, task: 'live-room', duration_ms: 61000, outcome: { status: 'failed', reason: '口令无效' }, details: null }],
@@ -189,6 +276,70 @@ export const VARIANTS = {
    * 界面读回一个没有 `skipTasks` 的对象，报 `Cannot read properties of undefined`。
    */
   ready: {
+    // 任务配置：GET 读、PUT 存（都改那份有状态的值）
+    'GET /api/tasks/daily-checkin/config': { handler: () => ({ status: 200, body: configView('daily-checkin') }) },
+    'GET /api/tasks/live-room/config': { handler: () => ({ status: 200, body: configView('live-room') }) },
+    'PUT /api/tasks/daily-checkin/config': {
+      handler: (body) => ({ status: 200, body: saveCfg('daily-checkin', body) }),
+    },
+    'PUT /api/tasks/live-room/config': {
+      handler: (body) => ({ status: 200, body: saveCfg('live-room', body) }),
+    },
+    /**
+     * 运行：**装置替后端把"参数有没有真带上"这件事判了**。
+     *
+     * `listenSeconds` 必须是配置页里存的 123（见门禁那两步），否则回 400。
+     * 这比"点了按钮有反应"强得多：它钉住的是"配置页存的东西真的进了运行请求"，
+     * 而那正是这个功能存在的全部理由。
+     */
+    'POST /api/runs': {
+      handler: (body) => {
+        if (body?.task === 'live-room' && body?.body?.listenSeconds !== 123) {
+          return {
+            status: 400,
+            body: {
+              error: `运行没带上配置页存的参数（收到 ${JSON.stringify(body?.body)}）`,
+              code: 'config',
+            },
+          }
+        }
+        return { status: 200, body: { run_id: 4242 } }
+      },
+    },
+    /**
+     * 账号列表：**有状态**的一份（区别于 `FIXTURES` 里那份静态的）。
+     *
+     * 停用是"改一处、别处都跟着变"的功能，所以装置必须真的把状态记住：
+     * 账号页点「停用」→ PATCH 改这份状态 → 任务/兑换页再拉列表时它就没了。
+     * 若这里回一份静态名单，门禁只能证明"按钮点了有反应"，证明不了用户要的那件事。
+     */
+    'GET /api/accounts': {
+      handler: (_body, req) => {
+        const url = String(req?.url ?? '')
+        const all = url.includes('includeDisabled=true')
+        return { status: 200, body: acctState.accounts.filter((a) => all || a.enabled) }
+      },
+    },
+    // 停用 / 启用：改上面那份状态，返回改完的那一条（页面据此重画卡片）
+    'PATCH /api/accounts/13800000000': {
+      handler: (body) => setFixtureEnabled('13800000000', body),
+    },
+    'PATCH /api/accounts/13900000001': {
+      handler: (body) => setFixtureEnabled('13900000001', body),
+    },
+    // 策略 PUT 会把 body 原样回显（页面据此更新读数）
+    'PUT /api/admin/security': {
+      handler: (body) => ({ status: 200, body: { ...body, passwordScheme: 'sha256' } }),
+    },
+    // 改口令：默认成功。⚠ 真断言在 `routes.rs`（踢会话/换 cookie 那是后端的事）
+    'PUT /api/admin/password': {
+      handler: () => ({
+        status: 200,
+        body: { userId: 'u-1', name: 'admin', kind: 'web', sessionsEnded: 2 },
+      }),
+    },
+    // 重启：202 受理（测试装置里没有真进程可重启）。真断言同样在 Rust 侧。
+    'POST /api/system/restart': { status: 202, body: { ok: true } },
     'PUT /api/accounts/13800000000/settings': { handler: (body) => ({ status: 200, body }) },
     'PUT /api/accounts/13900000001/settings': { handler: (body) => ({ status: 200, body }) },
   },
@@ -200,19 +351,57 @@ export const VARIANTS = {
      * 这条最要紧的路径就测不到（而它正是当初整包挂掉的地方）。
      */
     'POST /api/session': {
+      /**
+       * ⚠ 后端自述 `passwordScheme: 'sha256'` ⇒ 前端发来的**必须是**
+       * `SHA-256('right-pass')` 的 hex，不能是明文。
+       *
+       * 这就是"前端真的做了那一次哈希"的端到端证据：哪天有人把它退化成发明文，
+       * 登录闸立刻红（而且报错会直接说破这一点，而不是含糊的"口令不正确"）。
+       */
       handler: (body) =>
-        body?.password === 'right-pass'
+        body?.password === sha256Hex('right-pass')
           ? { status: 200, body: { userId: 'u-1', name: 'admin', kind: 'web' } }
-          : { status: 401, body: { error: '用户名或口令不正确', code: 'invalid_credentials' } },
+          : {
+              status: 401,
+              body: {
+                error:
+                  typeof body?.password === 'string' && /^[0-9a-f]{64}$/.test(body.password)
+                    ? '用户名或口令不正确'
+                    : 'HTTP 测试装置：口令不是 SHA-256 摘要（前端那一次哈希没做？）',
+                code: 'invalid_credentials',
+              },
+            },
     },
   },
   setup: {
-    '/api/setup': { status: 200, body: { initialized: false, minPasswordLen: 8 } },
+    '/api/setup': { status: 200, body: { initialized: false, minPasswordLen: 8, passwordScheme: 'sha256' } },
     '/api/session': { status: 503, body: { error: '实例尚未初始化，请先创建管理员', code: 'setup_required' } },
     'POST /api/setup': {
-      handler: () => ({ status: 200, body: { userId: 'u-1', name: 'admin', kind: 'web' } }),
+      // 建管理员这条路上同样必须是摘要（与登录那条同一个理由）
+      handler: (body) =>
+        typeof body?.password === 'string' && /^[0-9a-f]{64}$/.test(body.password)
+          ? { status: 200, body: { userId: 'u-1', name: 'admin', kind: 'web' } }
+          : {
+              status: 400,
+              body: { error: 'HTTP 测试装置：口令不是 SHA-256 摘要', code: 'invalid_credentials' },
+            },
     },
   },
+}
+
+/** 存任务参数（`PUT /api/tasks/{name}/config` 用）。 */
+const saveCfg = (name, body) => {
+  const given = body && typeof body === 'object' && body.params ? body.params : {}
+  taskCfg[name] = { ...(taskCfg[name] ?? {}), ...given }
+  return configView(name)
+}
+
+/** 改装置里某个账号的启停（`PATCH /api/accounts/{id}` 用）。 */
+const setFixtureEnabled = (id, body) => {
+  const a = acctState.accounts.find((x) => x.id === id)
+  if (!a) return { status: 404, body: { error: 'fixture 里没有这个账号', code: 'not_found' } }
+  if (body && typeof body.enabled === 'boolean') a.enabled = body.enabled
+  return { status: 200, body: a }
 }
 
 export const readVariant = () => {
@@ -228,6 +417,8 @@ export const readVariant = () => {
  */
 export const serve = (root, port, variant) =>
   new Promise((resolve, reject) => {
+    resetAcctState()
+    resetTaskCfg()
     const overrides = VARIANTS[variant]
     /**
      * 一条 fixture 可以是 `{status, body}`，也可以是 `{handler(body) → {status, body}}` ——
@@ -261,7 +452,11 @@ export const serve = (root, port, variant) =>
         } catch {
           // 非 JSON 体：handler 自己处理 null
         }
-        respond(entry.handler(parsed))
+        // ⚠ 第二个参数是原始 req：**带查询串的 GET** 需要它才能按查询串分岔
+        // （`GET /api/accounts?includeDisabled=true` 与不带参数是两种结果）。
+        // 原来只传 body，于是"停用后下拉里没有它"这条根本量不出来 —— 装置测不到
+        // 就等于没测（本仓在这上面栽过：门禁全绿而功能是坏的）。
+        respond(entry.handler(parsed, req))
       })
     }
     const server = http.createServer((req, res) => {

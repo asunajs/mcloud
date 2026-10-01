@@ -373,6 +373,7 @@ async fn accounts_list_never_leaks_credentials() {
         pc_platform: Some(PcPlatform::MacOs),
         user_domain_id: None,
         owner: None,
+        enabled: true,
         settings: AccountSettings::default(),
     };
     handle.store.save_account(&acct).await.unwrap();
@@ -417,6 +418,7 @@ async fn accounts_can_be_removed_idempotently() {
         pc_platform: None,
         user_domain_id: None,
         owner: None,
+        enabled: true,
         settings: AccountSettings::default(),
     };
     handle.store.save_account(&acct).await.unwrap();
@@ -439,6 +441,113 @@ async fn accounts_can_be_removed_idempotently() {
     // 列表里没了
     let (_, body) = send(authed_app(handle.clone()), get("/api/accounts")).await;
     assert_eq!(body.trim(), "[]", "删完应当为空：{body}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 停用：默认列表里消失、账号页带 `?includeDisabled=true` 仍看得到、能再启用。
+///
+/// 用户口径（2026-10-01）："账号需要增加一个停用功能，这样在其他功能下拉菜单就不显示"。
+/// 所以判据落在**接口默认不返回** —— 各处下拉都调这一个接口，在这里滤掉才不会有漏网的页面；
+/// 若改成"每个页面自己过滤"，迟早有一处忘了，而那一处的症状正是"停用了还能选"。
+#[tokio::test]
+async fn disabled_account_is_hidden_by_default_and_restorable() {
+    use mcloud_core::{Account as CoreAccount, AccountId, AccountSettings, AuthInfo, DeviceId};
+
+    let (handle, dir) = test_app("accounts-disable");
+    let acct = CoreAccount {
+        id: AccountId::new("19****01"),
+        nickname: None,
+        auth: AuthInfo {
+            raw: "Basic eA==".into(),
+            platform: "pc".into(),
+            phone: "19900000001".into(),
+            token: "t".into(),
+            expire: 0,
+        },
+        device_id: DeviceId("DEV-1".into()),
+        pc_platform: None,
+        user_domain_id: None,
+        owner: None,
+        enabled: true,
+        settings: AccountSettings::default(),
+    };
+    handle.store.save_account(&acct).await.unwrap();
+
+    let patch = |body: &serde_json::Value| {
+        Request::builder()
+            .method("PATCH")
+            .uri("/api/accounts/19%2A%2A%2A%2A01")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap()
+    };
+    let listed = |handle: Arc<AppHandle>, uri: &'static str| async move {
+        let (_, body) = send(authed_app(handle), get(uri)).await;
+        serde_json::from_str::<serde_json::Value>(&body)
+            .unwrap_or_else(|e| panic!("列表不是 JSON：{e}；{body}"))
+            .as_array()
+            .expect("列表是数组")
+            .len()
+    };
+
+    // 停用
+    let (status, body) = send(
+        authed_app(handle.clone()),
+        patch(&serde_json::json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("响应是 JSON");
+    assert_eq!(v["enabled"], false, "响应要能读出停用状态：{body}");
+
+    // 默认列表：没了 —— 这就是"下拉菜单里不显示"
+    assert_eq!(
+        listed(handle.clone(), "/api/accounts").await,
+        0,
+        "停用后默认列表必须为空"
+    );
+    // 账号页那条口子：仍看得到（否则停用之后就再也启用不回来）
+    assert_eq!(
+        listed(handle.clone(), "/api/accounts?includeDisabled=true").await,
+        1,
+        "带 includeDisabled 要看得到全部"
+    );
+
+    // 真的落盘了（不是只把响应改了）
+    let saved = handle
+        .store
+        .account(&AccountId::new("19****01"))
+        .await
+        .unwrap()
+        .expect("账号还在");
+    assert!(!saved.enabled, "停用必须写进存储");
+
+    // 再启用 ⇒ 回到列表
+    let (status, _) = send(
+        authed_app(handle.clone()),
+        patch(&serde_json::json!({ "enabled": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        listed(handle.clone(), "/api/accounts").await,
+        1,
+        "启用后要回到默认列表"
+    );
+
+    // 只改昵称的 PATCH **不能**把它顺手改成停用（部分更新语义：没给就是不改）
+    let (status, _) = send(
+        authed_app(handle.clone()),
+        patch(&serde_json::json!({ "nickname": "改个名" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        listed(handle, "/api/accounts").await,
+        1,
+        "只改昵称不该让它消失"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

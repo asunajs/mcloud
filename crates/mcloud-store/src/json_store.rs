@@ -42,9 +42,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use mcloud_core::{
-    legacy_owner, visible_to, Account, AccountId, AppendOutcome, Error, LogLine, Pipeline,
-    PipelineId, Result, RunId, RunRecord, RunStatus, Schedule, ScheduleId, Seq, Session, User,
-    UserId, LOG_LIMIT_PER_RUN,
+    legacy_owner, visible_to, Account, AccountId, AppSettings, AppendOutcome, Error, LogLine,
+    Pipeline, PipelineId, Result, RunId, RunRecord, RunStatus, Schedule, ScheduleId, Seq, Session,
+    User, UserId, LOG_LIMIT_PER_RUN,
 };
 
 /// 运行历史保留条数。
@@ -77,6 +77,16 @@ struct Db {
     smid: HashMap<String, StoredSmid>,
     /// 系统用户（WebUI 登录闸）。
     users: Vec<User>,
+    /// 应用级设置（口令下限、会话时长）。
+    ///
+    /// `Db: Default` 靠 [`AppSettings`] 自己的 `Default` —— 于是"老实例没有
+    /// settings.json"与"新实例刚建目录"两种情况走的是同一条路（默认值）。
+    settings: AppSettings,
+    /// 每个任务的**默认参数**，按任务名存。
+    ///
+    /// 与 `settings` 分开落盘：设置是"这个实例怎么跑"，而这里每一格属于某一个任务 ——
+    /// 混在一份文件里，写参数就会顺带把设置整体重写一遍。
+    task_config: HashMap<String, serde_json::Value>,
     /// 会话，按 `token_hash` 存。
     ///
     /// 用 `HashMap` 而不是 `Vec`：查会话是**每个请求**都走的路径。
@@ -114,6 +124,10 @@ mod files {
     pub const STATE: &str = "state.json";
     pub const USERS: &str = "users.json";
     pub const SESSIONS: &str = "sessions.json";
+    /// 应用级设置（口令下限、会话时长）。**后来才有的文件** —— 缺了按默认值走。
+    pub const SETTINGS: &str = "settings.json";
+    /// 每个任务的默认参数（任务页「配置」存的那份）。
+    pub const TASK_CONFIG: &str = "task-config.json";
     /// 设备指纹：**单独一个文件**，不与 `state.json` 混。
     ///
     /// 混在一起的话，`save_account_state` 那种整块覆盖写会顺手把指纹清掉；
@@ -469,6 +483,9 @@ impl JsonStore {
         let state: HashMap<String, serde_json::Value> = self.read_json(&self.path(files::STATE))?;
         let smid: HashMap<String, StoredSmid> = self.read_json(&self.path(files::SMID))?;
         let users: Vec<User> = self.read_json(&self.path(files::USERS))?;
+        let settings: AppSettings = self.read_json(&self.path(files::SETTINGS))?;
+        let task_config: HashMap<String, serde_json::Value> =
+            self.read_json(&self.path(files::TASK_CONFIG))?;
         let sessions: HashMap<String, Session> = self.read_json(&self.path(files::SESSIONS))?;
 
         // 日志按 run 分文件，按需读取（只读还保留着的那些 run）
@@ -490,6 +507,8 @@ impl JsonStore {
         db.state = state;
         db.smid = smid;
         db.users = users;
+        db.settings = settings;
+        db.task_config = task_config;
         db.sessions = sessions;
         db.logs = logs;
         Ok(())
@@ -561,6 +580,22 @@ impl JsonStore {
             .lock()
             .map_err(|_| Error::Storage("写锁中毒".into()))?;
         store.write_json(&store.path(files::USERS), &db.users)
+    }
+
+    fn persist_settings(db: &Db, store: &Self) -> Result<()> {
+        let _gate = store
+            .write_gate
+            .lock()
+            .map_err(|_| Error::Storage("写锁中毒".into()))?;
+        store.write_json(&store.path(files::SETTINGS), &db.settings)
+    }
+
+    fn persist_task_config(db: &Db, store: &Self) -> Result<()> {
+        let _gate = store
+            .write_gate
+            .lock()
+            .map_err(|_| Error::Storage("写锁中毒".into()))?;
+        store.write_json(&store.path(files::TASK_CONFIG), &db.task_config)
     }
 
     fn persist_sessions(db: &Db, store: &Self) -> Result<()> {
@@ -778,7 +813,23 @@ impl mcloud_core::RunStore for JsonStore {
     async fn upsert_run(&self, record: &RunRecord) -> Result<()> {
         let mut db = self.write()?;
         match db.runs.iter_mut().find(|r| r.run_id == record.run_id) {
-            Some(slot) => *slot = record.clone(),
+            Some(slot) => {
+                // 同一次运行的**更新**（起 → 完）走这里，是正常路径。
+                // 但"编号相同、却是另一次运行"意味着**编号被复用** —— 那会静默丢掉
+                // 一条历史（2026-10-01 的真实故障：`seed_run_id` 没人调用，
+                // 重启后编号从 1 重来）。这里留一声警告，让这类事再也无法无声发生。
+                if slot.started_at_ms != record.started_at_ms || slot.task != record.task {
+                    tracing::warn!(
+                        run = %record.run_id,
+                        old_task = %slot.task,
+                        new_task = %record.task,
+                        old_started = slot.started_at_ms,
+                        new_started = record.started_at_ms,
+                        "运行编号被复用：这次要覆盖的是**另一次**运行，历史会少一条"
+                    );
+                }
+                *slot = record.clone();
+            }
             None => db.runs.push_front(record.clone()),
         }
         Self::evict_runs(&mut db, self);
@@ -1046,6 +1097,37 @@ impl mcloud_core::UserStore for JsonStore {
             None => db.users.push(user.clone()),
         }
         Self::persist_users(&db, self)
+    }
+
+    async fn settings(&self) -> Result<AppSettings> {
+        Ok(self.read()?.settings)
+    }
+
+    async fn task_params(&self, task: &str) -> Result<serde_json::Value> {
+        Ok(self
+            .read()?
+            .task_config
+            .get(task)
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())))
+    }
+
+    async fn save_task_params(&self, task: &str, params: &serde_json::Value) -> Result<()> {
+        // 形状在这里也守一道：绕过 HTTP 的调用方（CLI / 脚本）同样不该塞进非对象。
+        if !params.is_object() {
+            return Err(Error::Config("任务参数必须是一个 JSON 对象".into()));
+        }
+        let mut db = self.write()?;
+        db.task_config.insert(task.to_string(), params.clone());
+        Self::persist_task_config(&db, self)
+    }
+
+    async fn save_settings(&self, settings: &AppSettings) -> Result<()> {
+        // 领域约束在这里也守一道：绕过 HTTP 的调用方（CLI / 脚本）同样不该写进非法值。
+        settings.validate().map_err(Error::Config)?;
+        let mut db = self.write()?;
+        db.settings = *settings;
+        Self::persist_settings(&db, self)
     }
 
     async fn save_session(&self, session: &Session) -> Result<()> {

@@ -41,7 +41,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use mcloud_core::{HttpRequest, Result, TaskOutcome};
-use mcloud_engine::{Task, TaskContext, TaskResult};
+use mcloud_engine::{Task, TaskContext, TaskGroup, TaskResult};
 use mcloud_upstream::app_cloud_upload as upload;
 use mcloud_upstream::app_cloud_upload::{CloudChannel, CloudFileCreateInput, CloudOpType};
 use mcloud_upstream::app_signin as proto;
@@ -694,6 +694,10 @@ impl Task for TaskExpansionTask {
     }
     fn title(&self) -> &'static str {
         "任务拓展"
+    }
+
+    fn group(&self) -> TaskGroup {
+        TaskGroup::App
     }
     fn description(&self) -> &'static str {
         "读本月备份状态与任务记录；未开备份会往网盘传一个文件凑数，攒够记录就领掉（传的那个文件跑完自己删）"

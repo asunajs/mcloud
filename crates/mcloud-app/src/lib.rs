@@ -34,6 +34,18 @@ use std::sync::Arc;
 
 /// 应用句柄。
 pub struct AppHandle {
+    /// 数据目录（`.json` 表 + 日志都在这儿）。
+    ///
+    /// 放在句柄上而不是 `App` 上：WebUI 的「存储信息」要报绝对路径，
+    /// 而服务器只拿得到句柄（`ServerState::new(Arc::new(app.handle))`）。
+    pub data_dir: std::path::PathBuf,
+    /// 主动关停信号。
+    ///
+    /// WebUI 的「重启服务」用它：`notify_one` ⇒ `main.rs` 的
+    /// `with_graceful_shutdown` 分支醒过来 ⇒ 进程优雅退出 ⇒ 由 launchd/systemd 重拉。
+    /// **不自己 `kill`**：托管场景下信号会走一遍完整收尾（停调度器、日志落盘），
+    /// 而 `process::exit` 会把这些全跳过。
+    pub shutdown: Arc<tokio::sync::Notify>,
     pub runner: Arc<mcloud_engine::Runner>,
     pub registry: Arc<mcloud_engine::Registry>,
     pub store: Arc<dyn mcloud_core::Store>,
@@ -65,6 +77,33 @@ pub struct AppHandle {
 }
 
 impl AppHandle {
+    /// 用既有历史**续上 run id**。起服务之前必须调一次。
+    ///
+    /// # 为什么这件事非做不可（2026-10-01 实际踩到）
+    ///
+    /// `Runner` 的编号从 **1** 开始（`Runner::new`），而运行记录是**按编号 upsert** 的
+    /// （`RunStore::upsert_run`：同编号就覆盖）。两件事撞在一起 = **静默丢数据**：
+    /// 每次重启之后新跑的 1、2、3… 会把**上次启动**留下的同编号记录一条条盖掉，
+    /// 于是一重启历史就"只剩最近这两条"。
+    ///
+    /// 用户看到的是"为啥历史只有两条" —— 而原因是编号被复用了，
+    /// 与历史页、与存储限额都无关。
+    ///
+    /// # 为什么不在 `AppBuilder::build()` 里顺手做掉
+    ///
+    /// `build()` 是**同步**的，而读历史是 `async`（`RunStore::runs`）。
+    /// 在 sync 里 `block_on` 一个库调用，在 tokio 运行时里会直接 panic ——
+    /// 那是比这个 bug 更难查的一类故障。所以它做成必须显式调用的方法，
+    /// 调用点唯一且显眼：`mcloud-server/src/main.rs`。
+    pub async fn seed_run_ids(&self) -> mcloud_core::Result<()> {
+        let runs = self.store.runs(usize::MAX).await?;
+        if let Some(max) = runs.iter().map(|r| r.run_id.0).max() {
+            self.runner.seed_run_id(max);
+            tracing::info!(max_run_id = max, kept = runs.len(), "已从历史续上 run id");
+        }
+        Ok(())
+    }
+
     /// 事件中枢也是 `EventSink`，任务通过它发日志。
     pub fn sink(&self) -> Arc<dyn mcloud_core::EventSink> {
         Arc::clone(&self.hub) as Arc<dyn mcloud_core::EventSink>

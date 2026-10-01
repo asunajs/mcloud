@@ -14,7 +14,7 @@ pub use artifacts::{Artifact, ArtifactKind, ArtifactLedger, ArtifactRecorder, Sh
 pub use cancel_registry::{CancelRegistry, SharedCancelRegistry};
 pub use details_ledger::{DetailsLedger, DetailsRecorder, SharedDetails};
 pub use pipeline::{PipelineOutcome, PipelineRunner, StepStatus, StepSummary};
-pub use registry::{Registry, Task, TaskMeta};
+pub use registry::{ParamKind, ParamSpec, Registry, Task, TaskGroup, TaskMeta};
 pub use runner::{HttpClientFactory, Runner};
 pub use scheduler::{next_fire_at, Decision, FireOutcome, Scheduler, SchedulerState};
 

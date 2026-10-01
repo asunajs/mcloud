@@ -47,7 +47,10 @@ export function rememberAccountNames(list: AccountSummary[]): void {
 /** 拉一次账号列表填缓存。拉不动就保持原样（界面退化成显示主键，而不是空白）。 */
 export async function refreshAccountNames(): Promise<void> {
   try {
-    rememberAccountNames(await listAccounts())
+    // ⚠ 显式要**全部**（含停用）：这份缓存是给"显示名字"用的 —— 历史里那条记录
+    // 不会因为账号被停用就变得认不出来。它**不是**挑账号的下拉数据源，
+    // 所以在这里放全部不会让停用账号漏回下拉（各处下拉各自调 listAccounts()）。
+    rememberAccountNames(await listAccounts({ includeDisabled: true }))
   } catch {
     // 静默：这只是个显示名字，失败不该让页面报错
   }

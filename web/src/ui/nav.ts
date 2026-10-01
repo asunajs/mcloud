@@ -154,9 +154,24 @@ export const DOCK_IDS: readonly PageId[] = [
 ] as const
 
 /** 把 `#/tasks` 这样的 hash 解析成 PageId；无法识别时回落到总览。 */
+/**
+ * 把 hash 切成路径段：`#/tasks/sign/config` → `['tasks','sign','config']`。
+ *
+ * 子路由（`#/tasks/<任务名>/config`，任务配置页）靠它取参数 ——
+ * 那类页面**不是**一条独立导航项：规范里"侧栏 9 条封顶"是硬上限，
+ * 而配置页本来就属于「任务」，多开一条只会多一个不该出现的入口。
+ */
+export const hashPath = (hash: string): string[] =>
+  hash.replace(/^#\/?/, '').split('/').filter((x) => x.length > 0)
+
 export const parseHash = (hash: string): PageId => {
   const found = NAV_ITEMS.find((item) => item.href === hash)
-  return found ? found.id : 'dashboard'
+  if (found) return found.id
+  // 子路由按**第一段**归属：`#/tasks/xxx/config` 仍是「任务」这一页。
+  // 不做这一步的话它会被兜底成"总览"，用户点「配置」会莫名其妙跳到总览页。
+  const [first] = hashPath(hash)
+  const parent = NAV_ITEMS.find((item) => item.href === `#/${first ?? ''}`)
+  return parent ? parent.id : 'dashboard'
 }
 
 /** 由 PageId 取配置。总览是兜底，所以一定找得到。 */

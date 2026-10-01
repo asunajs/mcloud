@@ -29,8 +29,10 @@ import {
   getSetupStatus,
   loginSession,
   type AuthState,
+  type PasswordScheme,
 } from '../api'
 import { IconAlert, IconBrand } from '../ui/icons'
+import { credentialFor } from '../ui/password'
 
 export interface AuthPageProps {
   /** `setup` = 建管理员；`login` = 登录。 */
@@ -51,12 +53,23 @@ export const AuthPage = (props: AuthPageProps) => {
    */
   const minLen = ref(8)
 
+  /**
+   * 这次要发什么凭据（见 `ui/password.ts`）。
+   *
+   * ⚠ 兜底值是 **`plain`**，不是 `sha256` —— 它是唯一对新老两种后端都成立的那条路：
+   * 新后端收到明文会自己补一次 SHA-256，老后端本来就只认明文。
+   * 反过来兜底成 `sha256` 的话，一旦问不到档位（旧后端 / 请求失败），
+   * 就会发一个老库谁也验不过的摘要，把用户锁在登录页。
+   */
+  const scheme = ref<PasswordScheme>('plain')
+
   const isSetup = props.mode === 'setup'
 
   onMounted(async () => {
     try {
       const s = await getSetupStatus()
       minLen.value = s.minPasswordLen
+      scheme.value = s.passwordScheme ?? 'plain'
     } catch {
       // 问不到就用兜底值。这里**不报错** —— 用户此刻要做的是登录，
       // 而"读不到口令下限"不该挡住他。
@@ -113,10 +126,13 @@ export const AuthPage = (props: AuthPageProps) => {
 
     busy.value = true
     try {
+      // 前端这一次哈希（用户口径：前端 hash 一次、后端再 hash 一次落库）。
+      // ⚠ 本地那几道校验用的仍是**明文**（长度、两次一致），换算只发生在发请求前。
+      const credential = await credentialFor(password.value, scheme.value)
       if (isSetup) {
-        await createAdmin(username.value.trim(), password.value)
+        await createAdmin(username.value.trim(), credential)
       } else {
-        await loginSession(username.value.trim(), password.value)
+        await loginSession(username.value.trim(), credential)
       }
       // 成功后不在这里跳转：`authState` 变了，外壳会自己把页面换掉。
       // 手动 `location.hash = ...` 反而会与那一步打架。

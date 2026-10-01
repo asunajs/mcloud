@@ -140,3 +140,10 @@ export const IconFlower = (p: IconProps): JSX.Element => (
     <path d="M12 11a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5Zm0-9a3.5 3.5 0 0 1 3.3 4.7A3.5 3.5 0 0 1 19 12.8a3.5 3.5 0 0 1-3.1 4.4A3.5 3.5 0 0 1 12 21a3.5 3.5 0 0 1-3.9-3.8A3.5 3.5 0 0 1 5 12.8a3.5 3.5 0 0 1 3.7-5.1A3.5 3.5 0 0 1 12 2Z" />
   </svg>
 )
+
+/** 放大镜：历史与日志页的搜索框（框内左侧）。 */
+export const IconSearch = (p: IconProps): JSX.Element => (
+  <svg {...BASE} class={p.class ?? 'size-5'}>
+    <path d="M10 2a8 8 0 1 0 4.9 14.32l5.39 5.39 1.42-1.42-5.39-5.39A8 8 0 0 0 10 2Zm0 2a6 6 0 1 1 0 12 6 6 0 0 1 0-12Z" />
+  </svg>
+)

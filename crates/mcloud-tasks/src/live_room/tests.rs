@@ -120,6 +120,7 @@ fn account() -> Account {
         pc_platform: None,
         user_domain_id: None,
         owner: None,
+        enabled: true,
         settings: AccountSettings::default(),
     }
 }
@@ -1781,7 +1782,8 @@ fn task_metadata_is_complete_and_stable() {
     assert!(
         LiveRoomTask::production()
             .params()
-            .contains(&"codes".to_string()),
+            .iter()
+            .any(|p| p.name == "codes"),
         "codes 必须是一个被声明的参数"
     );
 }

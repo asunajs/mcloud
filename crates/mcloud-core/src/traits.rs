@@ -16,6 +16,7 @@ use crate::log::{AppendOutcome, LogLine, Seq};
 use crate::pipeline::{Pipeline, PipelineId};
 use crate::run::{RunId, RunRecord};
 use crate::schedule::{Schedule, ScheduleId};
+use crate::settings::AppSettings;
 use crate::user::{Session, User, UserId};
 
 // ── HTTP ────────────────────────────────────────────────────────────────
@@ -362,6 +363,55 @@ pub trait UserStore: Send + Sync {
     async fn remove_user_sessions(&self, user_id: &UserId) -> Result<usize>;
     /// 清掉已过期的会话。顺手回收，避免表无限增长。
     async fn purge_expired_sessions(&self, now_ms: i64) -> Result<usize>;
+
+    /// 读某个任务的**默认参数**（任务页「配置」里存的那份）。
+    ///
+    /// 没配过就是**空对象**（不是错误）：前端据此回落到参数自己的默认值。
+    ///
+    /// # 为什么也挂在 `UserStore`
+    ///
+    /// 与 `settings()` 同一个理由（见下面的长注释）：新开 trait 会让 16 处测试替身
+    /// 各补一行空实现。语义上它不属于"用户"，但**归属感不值得为它改 16 个文件**。
+    async fn task_params(&self, task: &str) -> Result<serde_json::Value> {
+        let _ = task;
+        Ok(serde_json::Value::Object(serde_json::Map::new()))
+    }
+
+    /// 写某个任务的默认参数。
+    ///
+    /// 默认实现**报错**（与 `save_settings` 同一口径）：替身存储不支持，
+    /// 就得让它显式失败，而不是默默吞掉——写不进去而界面说"已保存"是最坏的一种。
+    async fn save_task_params(&self, task: &str, params: &serde_json::Value) -> Result<()> {
+        let _ = (task, params);
+        Err(crate::Error::Config(
+            "这个存储不支持下改任务参数（save_task_params 未实现）".into(),
+        ))
+    }
+
+    /// 读应用级设置（口令下限、会话时长）。
+    ///
+    /// # 为什么挂在 `UserStore` 而不是新开一个 trait
+    ///
+    /// 这两项就是**登录闸的策略**，与用户、会话是同一块东西。而新开一个 trait
+    /// 会让每一个测试替身都得再补一行空实现 —— 本仓有 16 处 `impl UserStore for X`。
+    ///
+    /// # 为什么给默认实现
+    ///
+    /// 替身不关心设置，逼它们逐个实现只是噪音。真实存储（`JsonStore`）会覆盖它，
+    /// 去读 `settings.json`。**默认值必须等于那两个老常量**（见 `settings.rs` 模块头）。
+    async fn settings(&self) -> Result<AppSettings> {
+        Ok(AppSettings::default())
+    }
+
+    /// 存应用级设置。
+    ///
+    /// 默认实现**报错**而不是静默成功：一个不持久化的存储若假装存上了，
+    /// 用户会以为改生效了 —— 那比明确失败糟得多。真实存储会覆盖它。
+    async fn save_settings(&self, _settings: &AppSettings) -> Result<()> {
+        Err(crate::Error::Storage(
+            "这个存储不支持下改设置（save_settings 未实现）".into(),
+        ))
+    }
 }
 
 /// 全部持久化能力的组合。

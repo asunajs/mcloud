@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 /**
- * 窄屏（375）布局验收 —— **真按手机宽度开一个视口**，不是把 `#app` 收窄。
+ * 布局验收（320 / 375 / 1440）—— **真按那个宽度开一个视口**，不是把 `#app` 收窄。
+ *
+ * 覆盖三件事：窄屏无横向溢出（全 9 条路由 × 320/375）、账号页那类"元素被挤扁"、
+ * 弹窗够得着；外加桌面一条：**表单页内容要封顶**（别在 1512 宽的屏上拉满）。
  *
  * # 为什么单开这一条
  *
@@ -150,6 +153,115 @@ try {
     `({ overflow: document.documentElement.scrollWidth > window.innerWidth + 1 })`,
   )
   check('总览页窄屏无横向溢出', dash.overflow === false)
+  /**
+   * ④ 全路由 × 两个窄宽度：**都要没有横向溢出**。
+   *
+   * ⚠ 2026-10-01 补这一段的理由：这条门禁原来只测账号页与总览页、且只测 375，
+   * 于是**设置页在 320 宽下溢出**它一声没吭（grid 子项默认 `min-width: auto`
+   * 不肯收缩，`p.label` 又是 flex/nowrap）。用户手机上看到的就是那一条。
+   * 只测"刚好够用"的那一档宽度，等于只测了自己想测的那一档。
+   */
+  const ROUTES = [
+    'dashboard',
+    'accounts',
+    'tasks',
+    'exchange',
+    'live-room',
+    'schedules',
+    'pipelines',
+    'history',
+    'settings',
+  ]
+  for (const w of [320, 375]) {
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: w,
+      height: 812,
+      deviceScaleFactor: 2,
+      mobile: true,
+    })
+    for (const r of ROUTES) {
+      await cdp.eval(`location.hash = '#/${r}'`)
+      await sleep(420)
+      const o = await probe(
+        `({ sw: document.documentElement.scrollWidth, vw: window.innerWidth })`,
+      )
+      check(`${w}px · ${r} 无横向溢出`, o.sw <= o.vw + 1, `scrollWidth ${o.sw} / 视口 ${o.vw}`)
+    }
+  }
+
+  /**
+   * ⑤ 桌面：设置页要**有结构地用宽度**。
+   *
+   * 用户原话："pc端这样太宽了视觉体验差"，并贴了另一套系统的同页做参照 ——
+   * 两张卡并排、路径三列、读数成格。所以我**没有**把它缩成窄栏（那是修错方向），
+   * 而是：`max-w-7xl` 封顶 + 卡内分栏。这条门禁钉住的就是那个"别拉满整屏"的下限：
+   * 既不能无限宽，也不能退化回单列一条线。
+   */
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: 1440,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  })
+  await cdp.eval(`location.hash = '#/settings'`)
+  await sleep(900)
+  const wide = await probe(`(() => {
+    const cards = [...document.querySelectorAll('#app .card')]
+    const ws = cards.map((c) => Math.round(c.getBoundingClientRect().width))
+    const first = cards[0] ? cards[0].getBoundingClientRect() : null
+    // 数据目录那一行所属的栅格实际分了几列（看子项的左边界有几种）
+    // 卡 vs 它所在格：只对"父元素本身处在 grid 里"的卡判（页面上其它卡不在格子里）
+    const unfilled = []
+    for (const c of document.querySelectorAll('#app .card')) {
+      const cell = c.parentElement
+      const box = cell && cell.parentElement
+      if (!box || !getComputedStyle(box).display.includes('grid')) continue
+      const ch = Math.round(c.getBoundingClientRect().height)
+      const gh = Math.round(cell.getBoundingClientRect().height)
+      const title = c.querySelector('.card-title')
+      if (gh - ch > 2) unfilled.push((title ? title.textContent.trim().slice(0, 10) : '?') + ' ' + ch + '/' + gh)
+    }
+    const paths = [...document.querySelectorAll('#app .grid')].find((g) => (g.textContent || '').includes('数据目录'))
+    const cols = paths
+      ? new Set([...paths.children].map((c) => Math.round(c.getBoundingClientRect().left))).size
+      : 0
+    return {
+      unfilled,
+      pathCols: cols,
+      maxW: ws.length ? Math.max(...ws) : 0,
+      left: first ? Math.round(first.left) : 0,
+      right: first ? Math.round(first.right) : 0,
+      vw: window.innerWidth,
+    }
+  })()`)
+  check('1440 宽下设置页内容封顶（≤1280）', wide.maxW > 0 && wide.maxW <= 1280, `最宽卡片 ${wide.maxW}`)
+  // 不断言"相对视口居中"：左侧有常驻侧栏，居中与否是设计取舍、不是约束。
+  // 要钉的是"别贴着右边缘"—— 那才是"太宽了视觉体验差"的形态。
+  check(
+    '设置页内容右侧留了白（没顶到边）',
+    wide.vw - wide.right >= 8,
+    '左 ' + wide.left + ' / 右留白 ' + (wide.vw - wide.right),
+  )
+  // 桌面上必须真的**分了栏**：存储信息与日志表那种"关键信息各占一端"的长线正是被抱怨的形态
+  check(
+    '桌面存储信息的路径是分栏的（不是一条长线）',
+    wide.pathCols >= 2,
+    `路径列数 ${wide.pathCols}`,
+  )
+  /**
+   * 并排的卡**必须填满它所在的那一格** —— 用户口径："不要这种不平的布局"。
+   *
+   * ⚠ 第一版我写的是"同一行内底边极差 ≤ 2px"，**它永远不会红**（实测：把 `h-full`
+   * 摘掉照样通过）—— 因为并排两卡的内容高度本就接近。真正造成"不平"的是另一种：
+   * **矮内容塞进高格子**（当时「服务操作」只有一段话，却和 7 个文件的「存储信息」并排），
+   * 卡自己缩着、格子空一大片。所以判据要比的是**卡高 vs 格子高**。
+   */
+  check(
+    '并排的卡填满所在格（不留悬空的半张卡）',
+    wide.unfilled.length === 0,
+    wide.unfilled.length ? '没填满的卡：' + JSON.stringify(wide.unfilled) : '',
+  )
+
 } catch (e) {
   check('窄屏验收自身跑通', false, String(e && e.stack ? e.stack : e))
 } finally {

@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use mcloud_core::{HttpRequest, Result, TaskOutcome};
-use mcloud_engine::{Task, TaskContext, TaskResult};
+use mcloud_engine::{ParamSpec, Task, TaskContext, TaskGroup, TaskResult};
 use mcloud_upstream::app_signin as proto;
 use mcloud_upstream::app_signin::{SignInEnvelope, SignInStatus};
 
@@ -73,11 +73,20 @@ impl Task for SignTask {
     fn title(&self) -> &'static str {
         "每日签到"
     }
+
+    fn group(&self) -> TaskGroup {
+        TaskGroup::Signin
+    }
     fn description(&self) -> &'static str {
         "在AI豆中心签到，并回查确认"
     }
-    fn params(&self) -> Vec<String> {
-        vec!["dryRun".into()]
+    fn params(&self) -> Vec<ParamSpec> {
+        vec![ParamSpec::boolean(
+            "dryRun",
+            "试运行",
+            false,
+            "只查询签到状态、不真的签到（第一次跑建议先开着它看结果）",
+        )]
     }
 
     async fn run(&self, ctx: &TaskContext, body: &Value) -> TaskResult {
@@ -166,6 +175,10 @@ impl Task for ReceiveTask {
     }
     fn title(&self) -> &'static str {
         "领取AI豆"
+    }
+
+    fn group(&self) -> TaskGroup {
+        TaskGroup::Signin
     }
     fn description(&self) -> &'static str {
         "领取待收的AI豆奖励（含到期延期的那一档）"
@@ -315,6 +328,10 @@ impl Task for MultipleTask {
     fn title(&self) -> &'static str {
         "签到翻倍"
     }
+
+    fn group(&self) -> TaskGroup {
+        TaskGroup::Signin
+    }
     fn description(&self) -> &'static str {
         "用掉本月那一次签到翻倍机会（需先开自动备份）"
     }
@@ -384,6 +401,10 @@ impl Task for RevivalTask {
     }
     fn title(&self) -> &'static str {
         "复活奖励"
+    }
+
+    fn group(&self) -> TaskGroup {
+        TaskGroup::Signin
     }
     fn description(&self) -> &'static str {
         "用复活卡 / 回馈卡换回失效的AI豆（每月一次）"
@@ -455,6 +476,10 @@ impl Task for BackupGiftTask {
     }
     fn title(&self) -> &'static str {
         "备份好礼"
+    }
+
+    fn group(&self) -> TaskGroup {
+        TaskGroup::Signin
     }
     fn description(&self) -> &'static str {
         "领取备份好礼（先查状态再领；注意 receive 是 GET 但会记账）"
@@ -528,6 +553,10 @@ impl Task for PrizesTask {
     fn title(&self) -> &'static str {
         "待领取奖品"
     }
+
+    fn group(&self) -> TaskGroup {
+        TaskGroup::Signin
+    }
     fn description(&self) -> &'static str {
         "列出待领取的奖品记录，供你去 App 领取（只读，只查第一页）"
     }
@@ -592,6 +621,10 @@ impl Task for CloudSnapshotTask {
     fn title(&self) -> &'static str {
         "AI豆快照"
     }
+
+    fn group(&self) -> TaskGroup {
+        TaskGroup::Signin
+    }
     fn description(&self) -> &'static str {
         "记录当前AI豆余额与本月签到进度（只读）"
     }
@@ -638,6 +671,10 @@ impl Task for TaskListTask {
     }
     fn title(&self) -> &'static str {
         "任务清单"
+    }
+
+    fn group(&self) -> TaskGroup {
+        TaskGroup::Signin
     }
     fn description(&self) -> &'static str {
         "列出AI豆中心当下可做的事：待领取、翻倍机会、延期领取（只读）"

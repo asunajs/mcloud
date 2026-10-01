@@ -102,6 +102,7 @@ fn account() -> Account {
         pc_platform: None,
         user_domain_id: None,
         owner: None,
+        enabled: true,
         settings: AccountSettings::default(),
     }
 }

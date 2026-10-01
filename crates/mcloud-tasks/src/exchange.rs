@@ -43,7 +43,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use mcloud_core::{Clock, Error, HttpClient, Result, TaskOutcome};
-use mcloud_engine::{Task, TaskContext, TaskResult};
+use mcloud_engine::{ParamSpec, Task, TaskContext, TaskResult};
 use mcloud_upstream::app_signin::{self, SignInEnvelope, SignInStatus};
 use mcloud_upstream::exchange::{
     self, ExchangeList, ExchangeResult as V3Result, SlidePuzzle, CODE_DUPLICATED,
@@ -1518,8 +1518,11 @@ impl Task for ExchangeTask {
         "在兑换页兑换指定奖品（真扣AI豆；下单前逐档判据放行，成交后回查余额）"
     }
 
-    fn params(&self) -> Vec<String> {
-        vec!["prizeIdOrName".into(), "skipWait".into()]
+    fn params(&self) -> Vec<ParamSpec> {
+        vec![
+            ParamSpec::text("prizeIdOrName", "奖品", "奖品 id 或名字；下单会真扣AI豆"),
+            ParamSpec::boolean("skipWait", "跳过等待", true, "不等冷却/档位窗口，直接下单"),
+        ]
     }
 
     async fn run(&self, ctx: &TaskContext, body: &Value) -> TaskResult {

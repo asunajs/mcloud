@@ -81,7 +81,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use mcloud_core::{HttpRequest, Result, TaskOutcome};
-use mcloud_engine::{Task, TaskContext, TaskResult};
+use mcloud_engine::{Task, TaskContext, TaskGroup, TaskResult};
 use mcloud_upstream::app_notice as proto;
 use mcloud_upstream::app_notice::{NoticeTaskInfo, NoticeTaskSlot};
 use mcloud_upstream::app_signin::SignInEnvelope;
@@ -654,6 +654,9 @@ impl Task for NoticeTask {
         // 认识的那句话），而小结里的头用参考实现那句"公告任务" ——
         // 两处说的是同一件事，不改。
         "开启通知领AI豆"
+    }
+    fn group(&self) -> TaskGroup {
+        TaskGroup::Device
     }
     fn description(&self) -> &'static str {
         "领取公告任务奖励（先查两个槽；cloudStatus=1 且 taskStatus=3 才领，领完复查一次）"

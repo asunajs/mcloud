@@ -39,7 +39,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use mcloud_core::{HttpRequest, Result, TaskOutcome};
-use mcloud_engine::{Task, TaskContext, TaskResult};
+use mcloud_engine::{Task, TaskContext, TaskGroup, TaskResult};
 use mcloud_upstream::app_msg_push as proto;
 use mcloud_upstream::app_msg_push::MsgPushStatus;
 use mcloud_upstream::app_signin::SignInEnvelope;
@@ -333,6 +333,10 @@ impl Task for MsgPushTask {
     }
     fn title(&self) -> &'static str {
         "消息推送"
+    }
+
+    fn group(&self) -> TaskGroup {
+        TaskGroup::Device
     }
     fn description(&self) -> &'static str {
         "开启 App 消息通知后领第二次奖励（先查状态；只有 secondTaskStatus=2 才领）"

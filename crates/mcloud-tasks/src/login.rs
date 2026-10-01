@@ -523,6 +523,9 @@ pub fn account_from_auth(
         // 归属由 server 层在拿到当前会话后补写（见 routes/login.rs 的 claim_account），
         // 这里不知道是谁在登录。
         owner: None,
+        // 新登录的账号一律**启用**：停用是用户事后主动做的选择，
+        // 不该由"刚扫码进来"这种动作触发（否则用户会看到刚加的号选不到）。
+        enabled: true,
         settings: AccountSettings::default(),
     })
 }

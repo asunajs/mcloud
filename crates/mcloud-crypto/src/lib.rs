@@ -26,8 +26,9 @@ pub use des::{des_decrypt_b64, des_encrypt_b64};
 pub use gzip::{gunzip, gzip_with_os19, gzip_with_os19_base64};
 pub use hash::{md5_hex, sha1_hex_upper, sha256_hex, sha256_hex_bytes, sha256_hex_upper};
 pub use password::{
-    hash_password, hash_password_with_salt, hash_session_token, new_session_token, verify_password,
-    PasswordError, MIN_PASSWORD_LEN,
+    client_password_digest, hash_password, hash_password_with_salt, hash_session_token,
+    is_client_digest, is_digest_scheme, mark_digest_scheme, new_session_token, strip_digest_scheme,
+    to_digest_credential, verify_password, PasswordError, DIGEST_SCHEME_PREFIX, MIN_PASSWORD_LEN,
 };
 pub use rand::{OsRandom, Random, SeqRandom, SharedRandom};
 pub use rsa::{

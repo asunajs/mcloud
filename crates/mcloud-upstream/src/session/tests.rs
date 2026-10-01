@@ -443,6 +443,7 @@ fn basic_authorization_is_the_raw_auth_verbatim() {
         pc_platform: None,
         user_domain_id: None,
         owner: None,
+        enabled: true,
         settings: AccountSettings::default(),
     };
     assert_eq!(

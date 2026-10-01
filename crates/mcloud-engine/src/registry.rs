@@ -8,16 +8,147 @@ use std::sync::Arc;
 use crate::{TaskContext, TaskResult};
 
 /// 任务元信息，供 `/api/capabilities` 暴露给前端。
+///
+/// ⚠ `rename_all = "camelCase"` 不能省：`group_label` 落到 JSON 里必须是 `groupLabel`
+/// —— 前端读的是后者。而**测试装置（fixture）里的 JSON 是手写的**：它写对了、
+/// 真机发错了，门禁照样全绿（2026-10-01 实际发生：线上分组名全回落成兜底的"其它"）。
+/// 钉住字段名的是 `crates/mcloud-server/tests/routes.rs` 里那条断言 key 的用例。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskMeta {
     pub name: String,
     pub title: String,
     pub description: String,
     /// 是否在 UI 中隐藏（例如兑换奖品走独立页面）。
     pub hidden: bool,
-    /// 该任务支持的参数名，前端据此生成表单。
+    /// 分组键（`signin` / `live` / `app` / `device`）—— 界面按它分栏。
+    pub group: TaskGroup,
+    /// 分组的**中文名**。
+    ///
+    /// ⚠ 由后端给，**不是**让前端维护一份"键→名字"的映射：
+    /// 本仓已经栽过一次 —— 任务页曾把签到族的 8 个名字硬编码在前端当分组依据，
+    /// 而后端的注册表才是权威。前端每多一份这类表，就多一处迟早漂移的地方。
+    pub group_label: String,
+    /// 该任务支持的参数。
+    ///
+    /// 从前这里只有**参数名**（`Vec<String>`），于是类型/默认值全靠前端猜 ——
+    /// 猜错的表现是"填了没用"。现在把类型、默认值、取值范围一起给出去。
     #[serde(default)]
-    pub params: Vec<String>,
+    pub params: Vec<ParamSpec>,
+}
+
+/// 任务分组。只影响界面怎么分栏，不影响执行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskGroup {
+    /// AI豆中心那一族（签到、领取、快照…）。
+    Signin,
+    /// 直播小红花。
+    Live,
+    /// 应用与 AI（趣玩、拍拍、App 任务…）。
+    ///
+    /// ⚠ 这是**默认值**（`TaskGroup::default()`）—— 没标分组的任务都落在这一栏。
+    /// 原来手写了一个 `impl Default`，clippy 的 `derivable_impls` 要求改成
+    /// `derive` + `#[default]`（两者语义完全一样，只是写法）。
+    #[default]
+    App,
+    /// 消息与设备。
+    Device,
+}
+
+impl TaskGroup {
+    /// 界面上的分组标题。
+    pub fn label(self) -> &'static str {
+        match self {
+            TaskGroup::Signin => "AI豆中心",
+            TaskGroup::Live => "直播小红花",
+            TaskGroup::App => "应用与 AI",
+            TaskGroup::Device => "消息与设备",
+        }
+    }
+}
+
+/// 参数该用什么控件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ParamKind {
+    Bool,
+    Number,
+    Text,
+}
+
+/// 一个参数的说明（前端据此生成表单 + 校验）。
+///
+/// ⚠ 这里是**唯一的权威**：任务的 `run` 怎么解析这个参数，就得在这里说清楚；
+/// 两边不一致时，用户看到的是"填了没用"。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParamSpec {
+    pub name: String,
+    /// 界面上的标签。
+    pub title: String,
+    pub kind: ParamKind,
+    /// 默认值（JSON）。前端用它预填"从没配过"的任务。
+    pub default: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// 一句话说明（"这个参数到底干什么"）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
+}
+
+impl ParamSpec {
+    pub fn boolean(name: &str, title: &str, default: bool, help: &str) -> Self {
+        Self {
+            name: name.into(),
+            title: title.into(),
+            kind: ParamKind::Bool,
+            default: serde_json::Value::Bool(default),
+            min: None,
+            max: None,
+            unit: None,
+            help: Some(help.into()),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn number(
+        name: &str,
+        title: &str,
+        default: f64,
+        min: f64,
+        max: f64,
+        unit: &str,
+        help: &str,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            title: title.into(),
+            kind: ParamKind::Number,
+            default: serde_json::json!(default),
+            min: Some(min),
+            max: Some(max),
+            unit: Some(unit.into()),
+            help: Some(help.into()),
+        }
+    }
+
+    pub fn text(name: &str, title: &str, help: &str) -> Self {
+        Self {
+            name: name.into(),
+            title: title.into(),
+            kind: ParamKind::Text,
+            default: serde_json::Value::String(String::new()),
+            min: None,
+            max: None,
+            unit: None,
+            help: Some(help.into()),
+        }
+    }
 }
 
 /// 一个可执行任务。
@@ -35,7 +166,13 @@ pub trait Task: Send + Sync {
         false
     }
 
-    fn params(&self) -> Vec<String> {
+    /// 该任务属于哪一组（界面分栏用）。
+    fn group(&self) -> TaskGroup {
+        TaskGroup::default()
+    }
+
+    /// 该任务支持的参数。**默认没有** —— 只有真的读参数的实现才该覆写它。
+    fn params(&self) -> Vec<ParamSpec> {
         Vec::new()
     }
 
@@ -48,6 +185,8 @@ pub trait Task: Send + Sync {
             title: self.title().into(),
             description: self.description().into(),
             hidden: self.hidden(),
+            group: self.group(),
+            group_label: self.group().label().into(),
             params: self.params(),
         }
     }

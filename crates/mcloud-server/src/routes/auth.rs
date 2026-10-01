@@ -25,10 +25,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use mcloud_core::{
-    validate_username, PasswordHash, Session, SessionKind, User, UserId, MIN_PASSWORD_LEN,
-    WEB_SESSION_TTL_MS,
-};
+use mcloud_core::{validate_username, PasswordHash, Session, SessionKind, User, UserId};
 // 令牌原语来自 crypto 而不是 core：core 只放**类型与 trait**，
 // 密码学原语归 crypto。这条边界让 core 不必依赖任何密码学实现。
 use mcloud_crypto::{hash_session_token, new_session_token};
@@ -55,7 +52,19 @@ pub struct SetupStatus {
     /// 口令长度下限。**必须发给前端** —— 前端硬编一份必然与它漂移，
     /// 而漂移的表现是"前端说可以、后端拒绝"。
     pub min_password_len: usize,
+    /// 登录时前端该发什么凭据：`"sha256"` = 发 `SHA-256(明文)` 的 hex；
+    /// `"plain"` = 发**明文**（库里还是老档，服务端验过之后会当场升级）。
+    ///
+    /// 让前端**先问再发**，而不是"发错了再重试一次" —— 后者要多一条错误码、
+    /// 一次额外的往返，而两条路的差异只是"这个实例的库是什么时候建的"。
+    pub password_scheme: &'static str,
 }
+
+/// 凭据档位：库里存的是 `argon2(SHA-256(明文))`。
+const SCHEME_DIGEST: &str = "sha256";
+
+/// 凭据档位：库里存的是 `argon2(明文)`（2026-10-01 之前的实例）。
+const SCHEME_PLAIN: &str = "plain";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,10 +85,31 @@ pub async fn is_initialized(state: &ServerState) -> Result<bool, ApiError> {
     Ok(n > 0)
 }
 
+/// 这个实例的**登录凭据档位**（见 [`SetupStatus::password_scheme`]）。
+///
+/// ⚠ 只要**有一个**用户还是老档就报 `plain`：前端一次只能发一种凭据，
+/// 而"存在老记录"意味着只有明文那条路能同时喂饱两边。单个管理员是本项目的主线，
+/// 多管理员只是理论情形 —— 这时候宁可让新记录也再走一次明文（登录成功后会各自升级）。
+pub(crate) async fn login_scheme(state: &ServerState) -> Result<&'static str, ApiError> {
+    let users = state.handle.store.users().await?;
+    Ok(
+        if users
+            .iter()
+            .any(|u| !mcloud_crypto::is_digest_scheme(u.password_hash.as_str()))
+        {
+            SCHEME_PLAIN
+        } else {
+            SCHEME_DIGEST
+        },
+    )
+}
+
 pub async fn setup_status(State(state): State<ServerState>) -> ApiResult<SetupStatus> {
     Ok(Json(SetupStatus {
         initialized: is_initialized(&state).await?,
-        min_password_len: MIN_PASSWORD_LEN,
+        // 下限是**可改的设置**（默认 8 = `MIN_PASSWORD_LEN`）
+        min_password_len: state.handle.store.settings().await?.min_password_len,
+        password_scheme: login_scheme(&state).await?,
     }))
 }
 
@@ -87,6 +117,12 @@ pub async fn setup_status(State(state): State<ServerState>) -> ApiResult<SetupSt
 ///
 /// ⚠ **已经初始化过就拒绝**（409）。不这样的话，任何人都能在你的实例上
 /// 再建一个管理员账号 —— 那等于没有登录闸。
+///
+/// # 口令怎么落库（用户口径 2026-10-01：**前端 hash 一次、后端再 hash 一次**）
+///
+/// 新建的管理员**一律落新档**：`argon2(SHA-256(明文))`，存储串带 `sha256$` 前缀。
+/// 前端没做那一次（缓存里的旧 bundle 还在发明文）时，服务端**现场补上**
+/// —— 兼容口子开在这里，而不是"拒绝明文"，否则老 bundle 的用户一点登录就 400。
 pub async fn setup_create(
     State(state): State<ServerState>,
     Json(body): Json<Credentials>,
@@ -99,20 +135,35 @@ pub async fn setup_create(
 
     validate_username(&body.username).map_err(mcloud_core::Error::Config)?;
 
-    let hash = mcloud_crypto::hash_password(&body.password)
-        .map_err(|e| mcloud_core::Error::Config(format!("{e}（下限 {MIN_PASSWORD_LEN} 位）")))?;
+    // ⚠ 长度下限只在**明文**这条路上判得出来：摘要恒 64 位，拿它比长度没有意义。
+    // 所以"收到明文"时在这里卡一道，报错文案与从前一致（前端已经拿 minPasswordLen 卡过一次，
+    // 这是服务端那道，缺了它 curl 直接 POST 就能设一个 1 位的口令）。
+    let settings = state.handle.store.settings().await?;
+    if !mcloud_crypto::is_client_digest(&body.password)
+        && body.password.chars().count() < settings.min_password_len
+    {
+        return Err(ApiError(mcloud_core::Error::Config(format!(
+            "口令太短：至少 {} 个字符（下限 {} 位）",
+            settings.min_password_len, settings.min_password_len
+        ))));
+    }
+
+    let digest = mcloud_crypto::to_digest_credential(&body.password);
+    let hash = mcloud_crypto::hash_password(&digest).map_err(|e| {
+        mcloud_core::Error::Config(format!("{e}（下限 {} 位）", settings.min_password_len))
+    })?;
 
     let now = state.handle.clock.now_ms();
     let user = User {
         id: UserId::new(uuid::Uuid::new_v4().to_string()),
         name: body.username.clone(),
-        password_hash: PasswordHash(hash),
+        password_hash: PasswordHash(mcloud_crypto::mark_digest_scheme(&hash)),
         created_at_ms: now,
     };
     state.handle.store.save_user(&user).await?;
 
     // 建完管理员**顺手登录** —— 让用户接着填一遍刚设的口令是多余的
-    let (token, session) = make_session(&user, now);
+    let (token, session) = make_session(&user, now, settings.session_ttl_ms());
     state.handle.store.save_session(&session).await?;
 
     tracing::info!(user = %user.name, "已创建管理员");
@@ -151,11 +202,41 @@ pub async fn login(
         // "这个用户名存不存在"的探测器。
         .ok_or_else(|| ApiError(mcloud_core::Error::Auth("用户名或口令错误".into())))?;
 
-    mcloud_crypto::verify_password(&body.password, user.password_hash.as_str())
+    // ── 口令校验：两种档位，按**库里那条记录**决定怎么验 ──────────────────
+    //
+    // 老档（2026-10-01 之前建的实例）：库里是对**明文**做的 argon2 ⇒ 只能用明文验。
+    // 新档：库里是对**前端摘要**做的 argon2 ⇒ 请求里是摘要就直接用；
+    //       是明文（浏览器缓存里的旧 bundle）就现场补一次摘要。
+    // 两条兼容口子都指向同一个目的：**任何一侧还没更新，都不许把人锁在门外**。
+    let stored = user.password_hash.as_str();
+    let legacy = !mcloud_crypto::is_digest_scheme(stored);
+    let digest = mcloud_crypto::to_digest_credential(&body.password);
+    let candidate = if legacy {
+        body.password.as_str()
+    } else {
+        digest.as_str()
+    };
+
+    mcloud_crypto::verify_password(candidate, mcloud_crypto::strip_digest_scheme(stored))
         .map_err(|_| ApiError(mcloud_core::Error::Auth("用户名或口令错误".into())))?;
 
+    // 老档验过 ⇒ **当场升级**。不升级的话这条记录永远只能靠明文登录，
+    // "明文不出浏览器"就永远只是新装实例的事。
+    // ⚠ 升级用的一定是**摘要**（`digest`），不是刚验过的明文 —— 后者等于白做。
+    if legacy {
+        let hash = mcloud_crypto::hash_password(&digest)
+            .map_err(|e| mcloud_core::Error::Config(format!("口令升级失败：{e}")))?;
+        let upgraded = User {
+            password_hash: PasswordHash(mcloud_crypto::mark_digest_scheme(&hash)),
+            ..user.clone()
+        };
+        state.handle.store.save_user(&upgraded).await?;
+        tracing::info!(user = %upgraded.name, "管理员口令已升级为「前端摘要」档");
+    }
+
     let now = state.handle.clock.now_ms();
-    let (token, session) = make_session(&user, now);
+    let ttl_ms = state.handle.store.settings().await?.session_ttl_ms();
+    let (token, session) = make_session(&user, now, ttl_ms);
     state.handle.store.save_session(&session).await?;
 
     tracing::info!(user = %user.name, "登录成功");
@@ -217,20 +298,25 @@ pub async fn current_session(
 
 // ── 会话读写 ────────────────────────────────────────────────────────────
 
-fn make_session(user: &User, now_ms: i64) -> (String, Session) {
+/// 建会话。
+///
+/// `ttl_ms` 由调用方从 `AppSettings` 取（默认值 = 原来的 `WEB_SESSION_TTL_MS`，
+/// 见 `mcloud-core::settings`）—— **改设置只影响之后新建的会话**，
+/// 已经发出去的 cookie 不会被动缩短有效期。
+pub(crate) fn make_session(user: &User, now_ms: i64, ttl_ms: i64) -> (String, Session) {
     let token = new_session_token();
     let session = Session {
         token_hash: hash_session_token(&token),
         user_id: user.id.clone(),
         kind: SessionKind::Web,
         created_at_ms: now_ms,
-        expires_at_ms: now_ms + WEB_SESSION_TTL_MS,
+        expires_at_ms: now_ms + ttl_ms,
     };
     // 令牌原文只在这一次响应里出现（写进 cookie），之后库里只有哈希
     (token, session)
 }
 
-fn session_expires_at(expires_at_ms: i64, now_ms: i64) -> i64 {
+pub(crate) fn session_expires_at(expires_at_ms: i64, now_ms: i64) -> i64 {
     // cookie 的 Max-Age 用秒；会话表用毫秒
     ((expires_at_ms - now_ms) / 1000).max(0)
 }
@@ -288,7 +374,7 @@ pub async fn require_session(
 /// **不加 `Secure`**：本工具默认跑在 `http://127.0.0.1`，加了 `Secure`
 /// 浏览器会直接不存这个 cookie，表现是"登录成功但立刻又未登录"。
 /// 部署在 HTTPS 后面时应当由反代加。
-fn set_cookie_response<T: Serialize>(
+pub(crate) fn set_cookie_response<T: Serialize>(
     status: StatusCode,
     token: &str,
     max_age_secs: i64,
@@ -302,7 +388,9 @@ fn set_cookie_response<T: Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 这两个只在测试里当"默认值"用：生产路径改从 `AppSettings` 读（默认值正是它们）。
     use axum::http::HeaderMap;
+    use mcloud_core::WEB_SESSION_TTL_MS;
 
     fn headers_with_cookie(v: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
@@ -342,7 +430,7 @@ mod tests {
             password_hash: PasswordHash("$argon2id$...".into()),
             created_at_ms: 0,
         };
-        let (token, session) = make_session(&user, 1_000);
+        let (token, session) = make_session(&user, 1_000, WEB_SESSION_TTL_MS);
         assert_ne!(session.token_hash, token, "库里不能是原文");
         assert_eq!(
             session.token_hash,

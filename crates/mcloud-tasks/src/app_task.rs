@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use mcloud_core::{HttpRequest, Result, TaskOutcome};
-use mcloud_engine::{Task, TaskContext, TaskResult};
+use mcloud_engine::{Task, TaskContext, TaskGroup, TaskResult};
 use mcloud_upstream::app_cloud_outlink as outlink;
 use mcloud_upstream::app_cloud_upload as upload;
 use mcloud_upstream::app_cloud_upload::{CloudChannel, CloudFileCreateInput, CloudOpType};
@@ -793,6 +793,10 @@ impl Task for AppTaskTask {
     }
     fn title(&self) -> &'static str {
         "App 任务（做任务）"
+    }
+
+    fn group(&self) -> TaskGroup {
+        TaskGroup::App
     }
     fn description(&self) -> &'static str {
         "把 App 任务矩阵里能做的做掉：按玩法传文件、逐条打卡（传上去的文件跑完自己删）"

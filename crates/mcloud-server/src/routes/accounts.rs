@@ -54,6 +54,8 @@ pub struct AccountSummary {
     pub device_id: String,
     /// 凭据到期时间（**epoch 毫秒**）。`0` = 解析不出。
     pub expire: i64,
+    /// 是否启用。停用的账号不出现在"挑账号"的下拉里（见 [`list`] 的默认口径）。
+    pub enabled: bool,
 }
 
 impl From<mcloud_core::Account> for AccountSummary {
@@ -65,6 +67,7 @@ impl From<mcloud_core::Account> for AccountSummary {
             pc_platform: a.pc_platform,
             device_id: a.device_id.as_str().to_string(),
             expire: a.auth.expire,
+            enabled: a.enabled,
         }
     }
 }
@@ -73,9 +76,24 @@ impl From<mcloud_core::Account> for AccountSummary {
 ///
 /// ⚠ 用 `accounts_for` 而不是 `accounts()`：后者是「库里所有账号」，
 /// 在多用户实例里会把别人的账号列出来（审计 P1-6 要修的就是这个）。
+/// `GET /api/accounts` —— 列表。
+///
+/// # 默认**只给启用的**（2026-10-01）
+///
+/// 这是"停用"唯一的收口点：任务 / 兑换 / 直播 / 总览这些页面的下拉都调这一个接口，
+/// 在这里滤掉，就不会出现"某个页面还能选到停用账号"。
+/// 账号页自己要看全部（不然停用之后就没法启用回来了），所以给它
+/// `?includeDisabled=true` 这个显式口子 —— **默认安全、需要时才放开**。
+#[derive(Deserialize)]
+pub struct ListQuery {
+    #[serde(default, rename = "includeDisabled")]
+    pub include_disabled: bool,
+}
+
 pub async fn list(
     State(state): State<ServerState>,
     Extension(cur): Extension<CurrentUser>,
+    axum::extract::Query(q): axum::extract::Query<ListQuery>,
 ) -> ApiResult<Vec<AccountSummary>> {
     let accounts = state
         .handle
@@ -83,7 +101,13 @@ pub async fn list(
         .accounts_for(&cur.0)
         .await
         .map_err(ApiError::from)?;
-    Ok(Json(accounts.into_iter().map(Into::into).collect()))
+    Ok(Json(
+        accounts
+            .into_iter()
+            .filter(|a| q.include_disabled || a.enabled)
+            .map(Into::into)
+            .collect(),
+    ))
 }
 
 /// `DELETE /api/accounts/{id}` —— 移除一个账号（本地凭据）。
@@ -270,8 +294,16 @@ pub async fn update(
         //（前缀与 UA/设备头必须同源，见 `PcClient`）。
         account.pc_platform = platform;
     }
+    if let Some(enabled) = body.enabled {
+        account.enabled = enabled;
+    }
     state.handle.store.save_account(&account).await?;
-    tracing::info!(account = %account.id, user = %cur.0, "账号已更新");
+    tracing::info!(
+        account = %account.id,
+        user = %cur.0,
+        enabled = account.enabled,
+        "账号已更新"
+    );
     Ok(Json(AccountSummary::from(account)))
 }
 
@@ -304,6 +336,8 @@ pub struct UpdateAccountRequest {
     pub device_id: Option<String>,
     pub auth: Option<String>,
     pub platform: Option<String>,
+    /// 启用 / 停用（不给 = 不改，与其余字段同一套"部分更新"语义）。
+    pub enabled: Option<bool>,
 }
 
 /// 解析一条原始凭据。解不出来时给**能照着改**的话，不是一句 "invalid input"。
@@ -528,6 +562,7 @@ mod tests {
             pc_platform: Some(PcPlatform::MacOs),
             user_domain_id: Some("1990000000000000001".into()),
             owner: None,
+            enabled: true,
             settings: AccountSettings::default(),
         }
     }

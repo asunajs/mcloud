@@ -35,7 +35,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use mcloud_core::{HttpRequest, Result, TaskOutcome};
-use mcloud_engine::{Task, TaskContext, TaskResult};
+use mcloud_engine::{Task, TaskContext, TaskGroup, TaskResult};
 use mcloud_upstream::app_task_list_v2 as proto;
 use mcloud_upstream::app_task_list_v2::{TaskListV2, TaskV2Item};
 
@@ -245,6 +245,10 @@ impl Task for AppTaskMatrixTask {
     }
     fn title(&self) -> &'static str {
         "App 任务矩阵（只看）"
+    }
+
+    fn group(&self) -> TaskGroup {
+        TaskGroup::App
     }
     fn description(&self) -> &'static str {
         "把 App 任务矩阵那张表拉回来看（2 个市场 × 8 个 group；只读，不打卡、不上传网盘）"

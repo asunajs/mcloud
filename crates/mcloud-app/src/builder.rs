@@ -245,6 +245,8 @@ impl AppBuilder {
 
         Ok(App {
             handle: AppHandle {
+                data_dir: self.data_dir,
+                shutdown: Arc::new(tokio::sync::Notify::new()),
                 runner,
                 registry,
                 store,
@@ -257,15 +259,16 @@ impl AppBuilder {
                 login,
                 auth_refresh,
             },
-            data_dir: self.data_dir,
         })
     }
 }
 
 /// 已组装的应用。
+///
+/// ⚠ 数据目录在 [`AppHandle::data_dir`] 上，不在这儿 —— 服务器只有句柄，
+/// 而「存储信息」要报它。
 pub struct App {
     pub handle: AppHandle,
-    pub data_dir: PathBuf,
 }
 
 impl App {

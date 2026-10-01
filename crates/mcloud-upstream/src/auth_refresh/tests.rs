@@ -22,6 +22,7 @@ fn account(platform: &str, domain: Option<&str>) -> Account {
         pc_platform: None,
         user_domain_id: domain.map(str::to_string),
         owner: None,
+        enabled: true,
         settings: AccountSettings::default(),
     }
 }

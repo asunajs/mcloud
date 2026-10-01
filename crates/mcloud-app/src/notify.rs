@@ -569,6 +569,7 @@ mod tests {
             pc_platform: None,
             user_domain_id: None,
             owner: None,
+            enabled: true,
             settings: AccountSettings {
                 notify,
                 ..Default::default()

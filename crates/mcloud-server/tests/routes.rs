@@ -21,7 +21,7 @@ use http_body_util::BodyExt as _;
 use tower::ServiceExt as _;
 
 use mcloud_app::{AppBuilder, AppHandle};
-use mcloud_core::{Account, AccountSettings, AuthInfo, DeviceId};
+use mcloud_core::{Account, AccountSettings, AuthInfo, DeviceId, PasswordHash, User, UserId};
 
 use mcloud_server::ServerState;
 
@@ -145,6 +145,7 @@ fn account(phone: &str) -> Account {
         pc_platform: None,
         user_domain_id: None,
         owner: None,
+        enabled: true,
         settings: AccountSettings::default(),
     }
 }
@@ -1097,6 +1098,17 @@ fn patch_json(uri: &str, body: &serde_json::Value) -> Request<Body> {
         .expect("请求应可构造")
 }
 
+/// `PUT` + JSON + cookie。账户安全那两条都走它。
+fn put_json_with_cookie(uri: &str, cookie: &str, body: &serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("cookie", cookie)
+        .body(Body::from(serde_json::to_vec(body).unwrap()))
+        .expect("请求应可构造")
+}
+
 fn json_body(text: &str) -> serde_json::Value {
     serde_json::from_str(text).unwrap_or_else(|e| panic!("响应不是 JSON：{e}；原文：{text}"))
 }
@@ -1404,5 +1416,610 @@ async fn account_mutations_are_scoped_to_the_owner() {
         .expect("读库")
         .expect("账号还在");
     assert_eq!(saved.nickname, None, "别人的账号一个字段都不该被改");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── 口令：前端 hash 一次 + 后端再 hash 一次（用户口径 2026-10-01）────────
+
+/// ⭐ 建管理员时收到的就是**前端那次 SHA-256** ⇒ 库里是 `sha256$argon2(摘要)`。
+///
+/// 同时钉住兼容口子：**缓存里的旧 bundle（还在发明文）必须仍然登得上** ——
+/// 否则更新服务端的那一刻，所有人都被自己的登录闸关在门外。
+#[tokio::test]
+async fn setup_stores_the_client_digest_scheme() {
+    let (handle, dir) = test_app("gate-digest-setup");
+    let state = ServerState::new(handle.clone());
+    let digest = mcloud_crypto::sha256_hex("correct-horse");
+
+    let (s, _, body) = send_full(
+        mcloud_server::app(state.clone()),
+        post_json("/api/setup", &setup_json("admin", &digest)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+
+    let users = handle.store.users().await.unwrap();
+    let stored = users
+        .first()
+        .expect("建完应该有一个管理员")
+        .password_hash
+        .as_str();
+    assert!(stored.starts_with("sha256$"), "新档必须带前缀：{stored}");
+    assert!(!stored.contains("correct-horse"), "明文不许落库：{stored}");
+    assert!(
+        mcloud_crypto::verify_password(&digest, mcloud_crypto::strip_digest_scheme(stored)).is_ok(),
+        "存下来的必须是对**摘要**做的 argon2"
+    );
+
+    // 前端发摘要 ⇒ 登得上
+    let (s, _, body) = send_full(
+        mcloud_server::app(state.clone()),
+        post_json("/api/session", &setup_json("admin", &digest)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+
+    // 缓存里的旧前端发明文 ⇒ 也得登得上（服务端现场补一次摘要）
+    let (s, _, body) = send_full(
+        mcloud_server::app(state),
+        post_json("/api/session", &setup_json("admin", "correct-horse")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "旧 bundle 发明文不能因此登不上：{body}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 老库（argon2 直接吃明文）在**登录成功那一刻**升级到新档；
+/// 升级后用摘要登录也通 —— 升完不能把人锁在外面。
+#[tokio::test]
+async fn legacy_password_record_is_upgraded_on_login() {
+    let (handle, dir) = test_app("gate-digest-upgrade");
+    let plain = "correct-horse";
+    // 老档的样子：**没有** `sha256$` 前缀的 argon2 串
+    Arc::clone(&handle.store)
+        .save_user(&User {
+            id: UserId::new("u-legacy"),
+            name: "admin".into(),
+            password_hash: PasswordHash(mcloud_crypto::hash_password(plain).unwrap()),
+            created_at_ms: 0,
+        })
+        .await
+        .unwrap();
+
+    let state = ServerState::new(handle.clone());
+
+    // 前端**先问档位**：老库必须自述 `plain`，否则前端发摘要 ⇒ 谁也验不过
+    let (_, body) = send(mcloud_server::app(state.clone()), get("/api/setup")).await;
+    assert!(
+        body.contains("\"passwordScheme\":\"plain\""),
+        "老库要自述明文档，否则前端会发摘要：{body}"
+    );
+
+    // 明文登录 ⇒ 成功 + 当场升级
+    let (s, _, body) = send_full(
+        mcloud_server::app(state.clone()),
+        post_json("/api/session", &setup_json("admin", plain)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+
+    let stored = handle.store.users().await.unwrap()[0]
+        .password_hash
+        .as_str()
+        .to_string();
+    assert!(
+        stored.starts_with("sha256$"),
+        "登录成功那一刻就该升级：{stored}"
+    );
+    assert!(
+        !stored.contains(plain),
+        "升级后库里仍是 argon2 串，不该出现明文：{stored}"
+    );
+
+    // 档位跟着翻成 sha256；摘要登录也通
+    let (_, body) = send(mcloud_server::app(state.clone()), get("/api/setup")).await;
+    assert!(body.contains("\"passwordScheme\":\"sha256\""), "{body}");
+
+    let (s, _, body) = send_full(
+        mcloud_server::app(state),
+        post_json(
+            "/api/session",
+            &setup_json("admin", &mcloud_crypto::sha256_hex(plain)),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "升级后摘要必须能登：{body}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ `/api/capabilities` 的**字段名**必须和前端读的一致。
+///
+/// 这条测试存在的唯一理由：装置（fixture）里的 JSON 是手写的，字段名写对与否
+/// 只取决于写的人 —— 2026-10-01 真实发生：Rust 侧漏了 `rename_all = "camelCase"`，
+/// 发出的是 `group_label`，而装置写的是 `groupLabel` ⇒ **门禁全绿、线上分组名全丢**。
+/// 断言 key 才能挡住这一类。
+#[tokio::test]
+async fn capabilities_expose_group_and_param_specs_with_camel_case_keys() {
+    let (handle, dir) = test_app("gate-caps-fields");
+    let (status, body) = send(authed_app(Arc::clone(&handle)), get("/api/capabilities")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    for key in ["groupLabel", "group_label"] {
+        let present = body.contains(&format!("\"{key}\""));
+        if key == "groupLabel" {
+            assert!(
+                present,
+                "少了下划线转驼峰：前端读 groupLabel，发了 group_label 就会回落成兜底值"
+            );
+        } else {
+            assert!(!present, "不该把 snake_case 的 group_label 发出去：{body}");
+        }
+    }
+    // 参数说明也要在（前端照它画任务配置页的表单）
+    assert!(
+        body.contains("\"specs\"") || body.contains("\"params\""),
+        "{body}"
+    );
+    assert!(
+        body.contains("\"kind\"") || !body.contains("\"name\":\"sign\""),
+        "有参数的任务必须连类型一起给：{body}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── 任务参数配置（2026-10-01：参数从任务页挪到单独的配置页）──────────
+
+fn put_json(uri: &str, body: &serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(body).unwrap()))
+        .expect("请求应可构造")
+}
+
+/// ⭐ 任务参数：默认值补齐、类型/范围/未知键都拒、存了能读回、任务不存在 404、
+/// 没登录读不到。
+#[tokio::test]
+async fn task_config_round_trip_and_validation() {
+    let (handle, dir) = test_app("gate-task-config");
+    let _ = authed_app(Arc::clone(&handle));
+
+    // 没配过 ⇒ 200 + 空对象（**不是** 404：那会让界面显示一个空表单），
+    // 且带上参数说明与默认值 —— 前端不必自己算默认
+    let (s, body) = send(
+        authed_app(Arc::clone(&handle)),
+        get("/api/tasks/sign/config"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let v = json_body(&body);
+    assert_eq!(v["name"], "sign");
+    assert_eq!(v["params"]["dryRun"], false, "缺省键要补成默认值：{body}");
+    assert!(
+        v["specs"]
+            .as_array()
+            .expect("specs 是数组")
+            .iter()
+            .any(|x| x["name"] == "dryRun" && x["kind"] == "bool"),
+        "参数说明要带上类型（前端照它画控件）：{body}"
+    );
+
+    // 存
+    let (s, body) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(
+            "/api/tasks/sign/config",
+            &serde_json::json!({ "params": { "dryRun": true } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(json_body(&body)["params"]["dryRun"], true);
+
+    // 读回（落盘了，不是只回了显）
+    let (_, body) = send(
+        authed_app(Arc::clone(&handle)),
+        get("/api/tasks/sign/config"),
+    )
+    .await;
+    assert_eq!(json_body(&body)["params"]["dryRun"], true, "存了必须读得回");
+
+    // 类型错 / 范围错 / 不认识的键 —— 一律 400，且话要能照着改
+    let cases = [
+        (
+            "/api/tasks/sign/config",
+            serde_json::json!({ "params": { "dryRun": "yes" } }),
+            "true / false",
+        ),
+        (
+            "/api/tasks/live-room/config",
+            serde_json::json!({ "params": { "listenSeconds": 9999 } }),
+            "超出范围",
+        ),
+        (
+            "/api/tasks/sign/config",
+            serde_json::json!({ "params": { "nope": 1 } }),
+            "没有参数",
+        ),
+    ];
+    for (uri, body, want) in cases {
+        let (s, got) = send(authed_app(Arc::clone(&handle)), put_json(uri, &body)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{body} 应被拒：{got}");
+        assert!(got.contains(want), "错误里要出现「{want}」：{got}");
+    }
+
+    // 不存在的任务 ⇒ 404
+    let (s, _) = send(
+        authed_app(Arc::clone(&handle)),
+        get("/api/tasks/nope/config"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // 没登录读不到（构建信息都不给，参数更不给）
+    let (s, _) = send(
+        mcloud_server::app(ServerState::new(Arc::clone(&handle))),
+        get("/api/tasks/sign/config"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── 账户安全：策略 / 改口令（2026-10-01 补的后端）──────────────────────
+
+/// ⭐ 策略可读可写、非法值 400 且**不覆盖**已存的值；没登录读不到。
+#[tokio::test]
+async fn security_policy_round_trip() {
+    let (handle, dir) = test_app("gate-security-policy");
+    let state = ServerState::new(Arc::clone(&handle));
+
+    let (_, headers, _) = send_full(
+        mcloud_server::app(state.clone()),
+        post_json(
+            "/api/setup",
+            &setup_json("admin", &mcloud_crypto::sha256_hex("correct-horse")),
+        ),
+    )
+    .await;
+    let cookie = cookie_of(&headers).expect("初始化后应有 cookie");
+
+    // 已初始化但**没带 cookie** ⇒ 401。这一条是"策略本身也在闸后面"的证明：
+    // 能匿名改口令下限，等于把闸的门槛交给任何路过的人。
+    // （未初始化时是 503 而不是 401 —— 那是仓库既有语义，另有一组测试锁着。）
+    let (s, _) = send(
+        mcloud_server::app(state.clone()),
+        get("/api/admin/security"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    let (s, body) = send(
+        mcloud_server::app(state.clone()),
+        get_with_cookie("/api/admin/security", &cookie),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert!(body.contains("\"minPasswordLen\":8"), "默认下限 8：{body}");
+    assert!(
+        body.contains("\"sessionTtlHours\":168"),
+        "默认会话必须是 7 天 = 168 小时：{body}"
+    );
+    assert!(body.contains("\"passwordScheme\":\"sha256\""), "{body}");
+
+    let (s, body) = send(
+        mcloud_server::app(state.clone()),
+        put_json_with_cookie(
+            "/api/admin/security",
+            &cookie,
+            &serde_json::json!({ "minPasswordLen": 12, "sessionTtlHours": 24 }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert!(body.contains("\"minPasswordLen\":12"), "{body}");
+
+    // 真的落盘了（不是只回显了一下）
+    let saved = futures::executor::block_on(Arc::clone(&handle.store).settings()).expect("读设置");
+    assert_eq!(saved.min_password_len, 12);
+    assert_eq!(saved.session_ttl_hours, 24);
+
+    // 非法值 400，且**已存的值不动** —— 半套写入是最难查的那类状态
+    for bad in [
+        serde_json::json!({ "minPasswordLen": 3, "sessionTtlHours": 24 }),
+        serde_json::json!({ "minPasswordLen": 12, "sessionTtlHours": 24 * 91 }),
+    ] {
+        let (s, body) = send(
+            mcloud_server::app(state.clone()),
+            put_json_with_cookie("/api/admin/security", &cookie, &bad),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad} 应被拒：{body}");
+    }
+    let after = futures::executor::block_on(Arc::clone(&handle.store).settings()).expect("读设置");
+    assert_eq!(after.min_password_len, 12, "非法值不该写进去");
+    assert_eq!(after.session_ttl_hours, 24);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 改口令：换哈希、**旧会话全失效**、当前浏览器拿到新令牌、新旧口令各自能/不能登。
+///
+/// 当前口令**必填**且要照验（用户口径 2026-10-01：「你口令更改怎么取消了旧口令」
+/// —— 曾一度做成可选，被明确指出后改回；缺字段直接 422，不留"省略即跳过"这条路）。
+#[tokio::test]
+async fn change_password_kills_other_sessions_and_keeps_this_one() {
+    let (handle, dir) = test_app("gate-change-pw");
+    let state = ServerState::new(Arc::clone(&handle));
+    let old = "correct-horse";
+    let new = "another-horse";
+    let third = "third-horse";
+
+    // 两个浏览器 = 两次登录
+    let (_, h1, _) = send_full(
+        mcloud_server::app(state.clone()),
+        post_json("/api/setup", &setup_json("admin", old)),
+    )
+    .await;
+    let cookie1 = cookie_of(&h1).expect("cookie1");
+    let (_, h2, _) = send_full(
+        mcloud_server::app(state.clone()),
+        post_json("/api/session", &setup_json("admin", old)),
+    )
+    .await;
+    let cookie2 = cookie_of(&h2).expect("cookie2");
+
+    fn change(cookie: &str, current: &str, next: &str) -> Request<Body> {
+        put_json_with_cookie(
+            "/api/admin/password",
+            cookie,
+            &serde_json::json!({
+                "currentPassword": mcloud_crypto::sha256_hex(current),
+                "newPassword": mcloud_crypto::sha256_hex(next),
+            }),
+        )
+    }
+
+    // 当前口令不对 ⇒ 401
+    let (s, body) = send(
+        mcloud_server::app(state.clone()),
+        change(&cookie1, "nope", new),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{body}");
+
+    // 干脆不传当前口令 ⇒ 422（必填字段缺失）
+    let (s, _) = send(
+        mcloud_server::app(state.clone()),
+        put_json_with_cookie(
+            "/api/admin/password",
+            &cookie1,
+            &serde_json::json!({ "newPassword": mcloud_crypto::sha256_hex(new) }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "缺少当前口令必须拒");
+
+    // 新口令太短（明文这条路量得出长度）⇒ 400
+    let (s, _) = send(
+        mcloud_server::app(state.clone()),
+        put_json_with_cookie(
+            "/api/admin/password",
+            &cookie1,
+            &serde_json::json!({
+                "currentPassword": mcloud_crypto::sha256_hex(old),
+                "newPassword": "short",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "低于下限必须拒");
+
+    // 新 = 旧 ⇒ 400（否则会白踢一堆会话，而口令其实没变）
+    let (s, _) = send(
+        mcloud_server::app(state.clone()),
+        change(&cookie1, old, old),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // 真改
+    let (s, headers, body) = send_full(
+        mcloud_server::app(state.clone()),
+        change(&cookie1, old, new),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert!(
+        body.contains("\"sessionsEnded\":2"),
+        "两个旧会话都要被踢（含发起这次请求的那张）：{body}"
+    );
+    let fresh = cookie_of(&headers).expect("改完必须给当前浏览器发新令牌");
+
+    // 当前浏览器还在（用新令牌）—— 把操作者一起踢出去，用户会以为"改失败了"
+    let (s, _) = send(
+        mcloud_server::app(state.clone()),
+        get_with_cookie("/api/accounts", &fresh),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "操作者不该被自己踢出去");
+
+    // 另一个浏览器的旧令牌必须失效
+    let (s, _) = send(
+        mcloud_server::app(state.clone()),
+        get_with_cookie("/api/accounts", &cookie2),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "改口令后旧会话必须失效");
+
+    // 库里那片是对**新摘要**做的 argon2、且带新档前缀
+    let stored = handle.store.users().await.unwrap()[0]
+        .password_hash
+        .as_str()
+        .to_string();
+    assert!(stored.starts_with("sha256$"), "{stored}");
+
+    // 新口令能登、旧口令不能
+    let (s, _, _) = send_full(
+        mcloud_server::app(state.clone()),
+        post_json(
+            "/api/session",
+            &setup_json("admin", &mcloud_crypto::sha256_hex(new)),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "新口令必须能登");
+    let (s, _, _) = send_full(
+        mcloud_server::app(state.clone()),
+        post_json(
+            "/api/session",
+            &setup_json("admin", &mcloud_crypto::sha256_hex(old)),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "旧口令必须不能登");
+
+    // 再改一次：**带对**当前口令 ⇒ 能过（证明这道检查不是"一律拒绝"）
+    let (_, h3, _) = send_full(
+        mcloud_server::app(state.clone()),
+        post_json(
+            "/api/session",
+            &setup_json("admin", &mcloud_crypto::sha256_hex(new)),
+        ),
+    )
+    .await;
+    let cookie3 = cookie_of(&h3).expect("cookie3");
+    let (s, body) = send(
+        mcloud_server::app(state.clone()),
+        change(&cookie3, new, third),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "带对当前口令必须能改：{body}");
+    let (s, _, _) = send_full(
+        mcloud_server::app(state),
+        post_json(
+            "/api/session",
+            &setup_json("admin", &mcloud_crypto::sha256_hex(third)),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "第三次设的口令必须能登");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 「关于」：版本来自编译期常量、构建信息来自构建机（拿不到就是空串，但字段必须在），
+/// 没登录读不到。
+#[tokio::test]
+async fn about_reports_build_facts() {
+    let (handle, dir) = test_app("gate-about");
+    let _ = authed_app(Arc::clone(&handle));
+
+    let (s, body) = send(authed_app(Arc::clone(&handle)), get("/api/system/about")).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let v = json_body(&body);
+    assert_eq!(v["name"], "mcloud");
+    assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+    assert!(
+        v["buildTime"].is_string(),
+        "构建时间必须是字符串（拿不到就是空串，但不能没有）：{body}"
+    );
+    assert!(v["changes"].is_array(), "更新说明必须是数组：{body}");
+    assert!(
+        v["profile"] == "release" || v["profile"] == "debug",
+        "构建类型只能是这两种：{body}"
+    );
+    // 提交号：测试机上有 git 就是 7 位上下，没有就是空串 —— 两种都接受，但不能是 null
+    assert!(v["commit"].is_string(), "{body}");
+    assert!(v["dirty"].is_boolean(), "{body}");
+
+    let (s, _) = send(
+        mcloud_server::app(ServerState::new(Arc::clone(&handle))),
+        get("/api/system/about"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "构建信息不该匿名可见");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── 系统：存储信息 / 重启 ──────────────────────────────────────────────
+
+/// ⭐ 存储信息报的是**真实路径**（不是猜的、也不是相对路径），并列出数据文件。
+#[tokio::test]
+async fn storage_reports_real_paths() {
+    let (handle, dir) = test_app("gate-storage");
+    let (status, body) = send(authed_app(Arc::clone(&handle)), get("/api/system/storage")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v = json_body(&body);
+
+    // ⚠ 不能直接比字符串：接口报的是 **canonicalize** 之后的路由，
+    // 而 macOS 上临时目录 `/var/folders/…` 会规范化成 `/private/var/folders/…`。
+    // 比"两边规范化之后相等"才是这条断言真正想说的东西。
+    let reported = std::path::PathBuf::from(v["dataDir"].as_str().unwrap());
+    assert!(
+        reported.is_absolute(),
+        "要报绝对路径（相对路径等于没给）：{reported:?}"
+    );
+    assert_eq!(
+        std::fs::canonicalize(&reported).unwrap(),
+        std::fs::canonicalize(&dir).unwrap(),
+        "必须是这个实例真实的数据目录"
+    );
+    assert!(v["logDir"].as_str().unwrap().ends_with("/logs"), "{body}");
+    assert!(
+        !v["binary"].as_str().unwrap().is_empty(),
+        "二进制路径要报出来"
+    );
+    let files = v["files"].as_array().expect("files 是数组");
+    assert!(
+        files.iter().any(|f| f["name"] == "users.json"),
+        "建过管理员就该有 users.json：{body}"
+    );
+    assert!(v["dataBytes"].as_u64().unwrap() > 0, "占用不该恒为 0");
+
+    // 没登录 ⇒ 401（存储路径属于"这台机器怎么部署的"，不该匿名可见）
+    let (s, _) = send(
+        mcloud_server::app(ServerState::new(Arc::clone(&handle))),
+        get("/api/system/storage"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 重启：202 受理，并且**真的**唤醒了关停路径（`main.rs` 等的是同一个信号）。
+#[tokio::test]
+async fn restart_is_accepted_and_signals_shutdown() {
+    let (handle, dir) = test_app("gate-restart");
+
+    // ⚠ 先让 authed_app 把用户建出来：**未初始化**时网关回 503（另一组测试锁着），
+    // 而这里要证的是"已初始化但没登录" ⇒ 401。
+    let _ = authed_app(Arc::clone(&handle));
+    let (s, _) = send(
+        mcloud_server::app(ServerState::new(Arc::clone(&handle))),
+        post_json("/api/system/restart", &serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "重启是特权动作，必须登录");
+
+    let (s, body) = send(
+        authed_app(Arc::clone(&handle)),
+        post_json("/api/system/restart", &serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{body}");
+
+    // 信号是 300ms 后发的（先让响应出去）：等得到才算真发了。
+    let woke = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        handle.shutdown.notified(),
+    )
+    .await;
+    assert!(
+        woke.is_ok(),
+        "重启请求必须真的唤醒关停路径，否则按钮是个摆设"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

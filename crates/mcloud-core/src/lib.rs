@@ -14,6 +14,7 @@ pub mod pipeline;
 pub mod push;
 pub mod run;
 pub mod schedule;
+pub mod settings;
 pub mod smid;
 pub mod traits;
 pub mod user;
@@ -36,6 +37,7 @@ pub use pipeline::{AccountMode, Pipeline, PipelineId, PipelineStep};
 pub use push::PushConfig;
 pub use run::{RunId, RunRecord, RunStatus, TaskOutcome};
 pub use schedule::{Schedule, ScheduleId};
+pub use settings::{AppSettings, DEFAULT_MIN_PASSWORD_LEN, DEFAULT_SESSION_TTL_HOURS};
 pub use smid::{SmidState, SmidStore};
 pub use traits::{
     beijing_offset, beijing_time_digits, parse_beijing_time, AccountStore, Clock, EventSink,

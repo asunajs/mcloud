@@ -652,8 +652,33 @@ pub struct Account {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<UserId>,
 
+    /// **是否启用**（2026-10-01，用户口径："账号需要增加一个停用功能，这样在其他功能
+    /// 下拉菜单就不显示"）。
+    ///
+    /// # 语义：停用 = 不再被**挑中**，不是删除
+    ///
+    /// 账号、凭据、历史记录全部留着；只是从各处"选账号"的下拉里消失。实现口径是
+    /// **一处收口**：`GET /api/accounts` 默认就不返回停用的，账号页显式
+    /// `?includeDisabled=true` 才看得到全部。页面各写一遍过滤，迟早漏一处 ——
+    /// 而漏掉的那处正是"停用了还能选"。
+    ///
+    /// ⚠ **已存在的定时规则照旧跑**。停用改的是"以后选谁"，不是"过去的配置作废"；
+    /// 要让某条规则也停，去定时页改它（那里的账号是手填的 id 列表）。
+    ///
+    /// # 为什么是 `bool` + `serde(default)`
+    ///
+    /// 老 `accounts.json` 里没有这一列，缺省必须读成 `true`：读成 `false` 会让
+    /// 升级后的实例"所有账号突然都不能选"，而那种症状离"我改过什么"非常远。
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+
     #[serde(default)]
     pub settings: AccountSettings,
+}
+
+/// 缺省 = 启用。给老数据用（见 [`Account::enabled`]）。
+fn default_enabled() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -668,6 +693,25 @@ mod tests {
             token: "t".into(),
             expire,
         }
+    }
+
+    /// 老库（没有 `enabled` 这一列）读出来必须是**启用**。
+    ///
+    /// 反了（读成 false）的症状是"升级后所有账号都不能选"，而那时没人会想到
+    /// 是这一列 —— 所以用一条用例把它钉住。
+    #[test]
+    fn missing_enabled_reads_as_enabled() {
+        let json = r#"{
+            "id": "0f6050105ab111f4",
+            "nickname": null,
+            "auth": { "raw": "x", "platform": "android", "phone": "13800000000", "token": "t", "expire": 0 },
+            "device_id": "D"
+        }"#;
+        let a: Account = serde_json::from_str(json).expect("老 JSON 要能读");
+        assert!(a.enabled, "缺这一列必须当启用，不能当停用");
+        // 落盘时写出来（否则下次读还是缺，回填永远不落）
+        let back = serde_json::to_string(&a).unwrap();
+        assert!(back.contains("\"enabled\":true"), "{back}");
     }
 
     #[test]
@@ -832,6 +876,7 @@ mod tests {
             pc_platform: Some(p),
             user_domain_id: None,
             owner: None,
+            enabled: true,
             settings: AccountSettings::default(),
         };
         let win = serde_json::to_string(&mk(PcPlatform::Windows)).unwrap();
@@ -852,6 +897,7 @@ mod tests {
             pc_platform: None,
             user_domain_id: None,
             owner: None,
+            enabled: true,
             settings: AccountSettings::default(),
         };
         let json = serde_json::to_string(&acc).unwrap();
@@ -931,6 +977,7 @@ mod tests {
             pc_platform: None,
             user_domain_id: None,
             owner: None,
+            enabled: true,
             settings: settings.clone(),
         };
         let stored = serde_json::to_string(&acc).expect("落盘");

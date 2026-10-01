@@ -71,7 +71,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use mcloud_core::{Error, HttpRequest, Result, TaskOutcome};
-use mcloud_engine::{Task, TaskContext, TaskResult};
+use mcloud_engine::{Task, TaskContext, TaskGroup, TaskResult};
 use mcloud_upstream::cloud_phone_redpack as proto;
 use mcloud_upstream::cloud_phone_redpack::{
     RedpackAccount, RedpackCall, RedpackEnvelope, RedpackPhoneStatus, RedpackTask, RedpackTaskList,
@@ -428,6 +428,9 @@ impl Task for CloudPhoneRedpackTask {
 
     fn title(&self) -> &'static str {
         REDPACK_TASK_TITLE
+    }
+    fn group(&self) -> TaskGroup {
+        TaskGroup::Device
     }
 
     fn description(&self) -> &'static str {

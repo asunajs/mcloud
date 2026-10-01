@@ -42,6 +42,17 @@ export const currentTheme = (): Theme => {
   return attr === 'dark' ? 'dark' : 'light'
 }
 
+/** 切换并按需持久化。供顶栏那个按钮调用 —— **唯一的主题入口**。
+ *
+ * （2026-10-01 曾有过第二个入口：设置页的「外观」两档。用户判定那是重复入口
+ *  ——"主题没用"—— 于是连同为它引入的共享信号模块一起删了。要再加第二个入口，
+ *  记得先想清楚两个入口怎么不分叉。）*/
+export const toggleTheme = (): Theme => {
+  const next = nextTheme(currentTheme())
+  applyTheme(next)
+  return next
+}
+
 /** 应用主题：写 DOM（立即生效）+ 尽力持久化（失败不影响本次切换）。 */
 export const applyTheme = (theme: Theme): void => {
   document.documentElement.setAttribute('data-theme', theme)
@@ -50,11 +61,4 @@ export const applyTheme = (theme: Theme): void => {
   } catch {
     // 隐私模式：不持久化也比抛错好 —— 切换本身仍然生效
   }
-}
-
-/** 切换并按需持久化。供 navbar 的按钮调用。 */
-export const toggleTheme = (): Theme => {
-  const next = nextTheme(currentTheme())
-  applyTheme(next)
-  return next
 }

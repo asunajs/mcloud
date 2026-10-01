@@ -305,11 +305,19 @@ export const AccountsPage = () => {
     null,
   )
 
+  /** 正在启停的账号 id（按钮期间禁用，避免连点两下发两次相反的请求）。 */
+  const enabling = ref<string | null>(null)
+
   const load = async () => {
     state.value = 'loading'
     loadError.value = ''
     try {
-      const [list, dev] = await Promise.all([listAccounts(), getPcDevice()])
+      // ⚠ 这里要**全部**（含停用）：账号页是唯一能启停的地方，过滤掉就没法启用回来。
+      // 各处下拉用的是不带参数的 `listAccounts()`（默认只给启用的）。
+      const [list, dev] = await Promise.all([
+        listAccounts({ includeDisabled: true }),
+        getPcDevice(),
+      ])
       accounts.value = list
       deviceId.value = dev.device_id
       state.value = 'ready'
@@ -638,6 +646,35 @@ export const AccountsPage = () => {
     } finally {
       deleting.value = false
       pendingDelete.value = null
+    }
+  }
+
+  /**
+   * 启停一个账号。
+   *
+   * # 为什么不用确认框
+   *
+   * **可逆**：点错了一下再点回来即可。本仓的确认框留给不可逆的动作（移除账号、
+   * 重启服务）—— 给可逆动作也套一层，用户学会的是"闭眼点确认"，那道框就白设了。
+   */
+  const toggleEnabled = async (a: AccountSummary) => {
+    const next = !a.enabled
+    const who = a.nickname || a.label || a.id
+    enabling.value = a.id
+    try {
+      await updateAccount(a.id, { enabled: next })
+      pushToast(
+        'success',
+        next ? `已启用 ${who}` : `已停用 ${who} —— 其它页面的下拉里不再出现它`,
+      )
+      await load()
+    } catch (e) {
+      showError(
+        `${next ? '无法启用' : '无法停用'} ${who}`,
+        e instanceof Error ? e.message : '操作失败',
+      )
+    } finally {
+      enabling.value = null
     }
   }
 
@@ -1777,7 +1814,8 @@ export const AccountsPage = () => {
       {accounts.value.length > 0 ? (
         <ul class="flex flex-col gap-2">
           {accounts.value.map((a) => (
-            <li class="card card-border bg-base-100">
+            // 停用的整张压暗：一眼扫过去就知道"这个现在不参与"
+            <li class={`card card-border bg-base-100${a.enabled ? '' : ' opacity-60'}`}>
               {/*
                 窄屏（<md）**纵向两段**：名字 + 身份徽章 / 设备与到期 / 动作行。
                 ⚠ 这是踩过的坑（2026-10-01 用户截图为证）：原来是
@@ -1793,6 +1831,14 @@ export const AccountsPage = () => {
                     {/* 身份必须显示：它决定这个账号以后每次请求用哪套头和 UA。
                         `pc_platform` 为空 = App 端登录（或更早的历史数据）。
                         窄屏把它放在名字旁边（动作行留给按钮），宽屏本来也在这一侧。 */}
+                    {a.enabled ? null : (
+                      <span
+                        class="badge badge-soft badge-warning badge-sm shrink-0"
+                        title="已停用：各处挑账号的下拉里不再出现它（已有定时规则照旧跑）"
+                      >
+                        已停用
+                      </span>
+                    )}
                     {a.pc_platform ? (
                       <span class="badge badge-soft badge-primary badge-sm shrink-0">
                         {PLATFORM_LABEL[a.pc_platform]}
@@ -1813,8 +1859,9 @@ export const AccountsPage = () => {
                   </span>
                 </div>
                 {/*
-                  编辑 / 设置在前、移除在后：三个都是"对这个账号做点事"，
+                  编辑 / 设置 / 停用在前、移除在后：都是"对这个账号做点事"，
                   而移除不可逆 —— 让它留在最外侧（远离视线落点）。
+                  停用**可逆**（同一颗按钮再点回来），所以它不需要确认框。
                   ⚠ **不要给这几个按钮加 `flex-1`**（2026-10-01 用户口径：
                   "这种按钮对于移动端来说太大了"）：拉满整行会变成一条压在卡片上的
                   按钮带，而本仓其它页面（定时/编排/历史）全是**内容宽度**的
@@ -1835,6 +1882,14 @@ export const AccountsPage = () => {
                     onClick={() => openSettings(a)}
                   >
                     设置
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-soft min-h-11 md:min-h-0"
+                    disabled={enabling.value === a.id}
+                    onClick={() => void toggleEnabled(a)}
+                  >
+                    {a.enabled ? '停用' : '启用'}
                   </button>
                   <button
                     type="button"

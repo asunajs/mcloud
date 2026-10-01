@@ -131,5 +131,84 @@ impl From<CryptoError> for PasswordError {
     }
 }
 
+// ── 「前端先哈希一次」那一档 ─────────────────────────────────────────────
+//
+// 用户口径（2026-10-01）：**前端 hash 一次、后端再 hash 一次落库**。
+//
+// # 为什么前端那一次选裸 SHA-256
+//
+// 它必须**确定性**（建管理员与登录要算出同一个值），单靠它挡不住暴力破解 ——
+// 真正抗暴力破解的是后面那次 argon2id。所以选最简单的那个：跨语言一行就能复现
+// （Rust 这边就是 [`crate::sha256_hex`]，Web 那边一行 `crypto.subtle.digest`），
+// 而且**服务端也能算** —— 老前端（缓存里的旧 bundle）发明文时，服务端自己补上这一步。
+//
+// # 它挡什么、不挡什么（别把它当万灵药）
+//
+// - ✅ 明文**不进服务端**：日志、错误上报、内存转储里只有这个摘要。
+// - ✅ 库里那片摘要即使被拖走，也不能直接拿去登录别的服务（很多人复用同一个口令）。
+// - ❌ **挡不住重放**：服务端最终认的就是这个摘要 —— 抓到它等于抓到口令。
+//   真要挡住得走"服务端下发挑战值"那套，那是另一件事（本轮没做）。
+// - ❌ 明文在浏览器里仍然是明文（表单、密码管理器、页面内存），这档只保护"出浏览器之后"。
+
+/// 「库里存的是前端摘要」这一档的存储前缀。
+///
+/// # 为什么用一个前缀而不是加列/加 schema 字段
+///
+/// 存储值是 PHC 串，本来就自带算法与参数（`$argon2id$v=19$m=…$salt$hash`），
+/// 多带一个"这一层是对谁做的"只是再往前加一段。加列要动 store 的 schema 与迁移，
+/// 而前缀**老数据天然没有** —— 于是"有没有前缀"本身就是档位判据，不需要额外的迁移开关。
+pub const DIGEST_SCHEME_PREFIX: &str = "sha256$";
+
+/// 这个存储串是不是「前端摘要」档。
+pub fn is_digest_scheme(stored: &str) -> bool {
+    stored.starts_with(DIGEST_SCHEME_PREFIX)
+}
+
+/// 给 PHC 串打上档位前缀。**幂等**（已经带前缀就原样返回）。
+pub fn mark_digest_scheme(phc: &str) -> String {
+    if is_digest_scheme(phc) {
+        phc.to_string()
+    } else {
+        format!("{DIGEST_SCHEME_PREFIX}{phc}")
+    }
+}
+
+/// 去掉档位前缀，拿到能交给 argon2 校验的那个 PHC 串。
+///
+/// **老记录（没有前缀）原样返回** —— 调用方拿到的永远是"纯 PHC 串"。
+pub fn strip_digest_scheme(stored: &str) -> &str {
+    stored.strip_prefix(DIGEST_SCHEME_PREFIX).unwrap_or(stored)
+}
+
+/// 前端那一次哈希：`SHA-256(明文)` 的小写 hex。
+///
+/// ⚠ Web 侧那份实现必须与它逐字节一致（`web/src/ui/password.ts`）——
+/// 两边不一致的表现是"口令明明对、就是登不上"，所以两边都有对拍向量。
+pub fn client_password_digest(plain: &str) -> String {
+    crate::sha256_hex(plain)
+}
+
+/// 看起来像不像前端摘要：**64 个小写 hex**。
+///
+/// 用来区分"请求里带的是摘要还是明文"。判据故意取严（只认小写）：
+/// Web 侧产出的一定是小写，而"大写 hex"这种既不像我们的摘要、又不像有人会
+/// 真拿它当口令的东西，宁可按明文走（走明文那条路会撞上长度下限，报错更直白）。
+pub fn is_client_digest(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// 把请求里带的凭据换算成**要交给 argon2 的那串**：
+/// 已经是摘要就原样用；是明文就现场补上前端那一次 ——
+/// 这样缓存里的旧 bundle（还在发明文）不会把用户锁在门外。
+pub fn to_digest_credential(credential: &str) -> String {
+    if is_client_digest(credential) {
+        credential.to_string()
+    } else {
+        client_password_digest(credential)
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -266,6 +266,9 @@ fn an_empty_body_deserializes_to_an_empty_request() {
 
 /// 档位串与"能不能兑"必须一致：`blocks == (plan != "go")`。
 #[test]
+/// ⚠ 第三参是"分组信息"（后来加的）：这里传 `None` = 拿不到分组，
+/// 与本用例要钉的"计划与拦截一致"无关。加参数那次没跟过来改这几处，
+/// 整个测试目标因此编不过 —— 2026-10-01 顺手补上。
 fn prize_view_keeps_plan_and_blocks_consistent() {
     let prize = ExchangePrize {
         prize_id: 1,
@@ -274,11 +277,11 @@ fn prize_view_keeps_plan_and_blocks_consistent() {
         ..ExchangePrize::default()
     };
 
-    let go = prize_view(&prize, ExchangePlan::Go);
+    let go = prize_view(&prize, ExchangePlan::Go, None);
     assert_eq!(go.plan, "go");
     assert!(!go.blocks, "go 不该被判成挡住");
 
-    let blocked = prize_view(&prize, ExchangePlan::InsufficientCloud);
+    let blocked = prize_view(&prize, ExchangePlan::InsufficientCloud, None);
     assert_eq!(blocked.plan, "insufficient_cloud");
     assert!(blocked.blocks);
     assert_eq!(
@@ -304,7 +307,7 @@ fn every_plan_is_distinguishable_from_the_list_route() {
     let mut slugs = std::collections::HashSet::new();
     let mut reasons = std::collections::HashSet::new();
     for plan in ExchangePlan::ALL {
-        let view = prize_view(&prize, plan);
+        let view = prize_view(&prize, plan, None);
         assert_eq!(view.plan, plan.slug());
         assert_eq!(view.blocks, plan.blocks());
         assert!(

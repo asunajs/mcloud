@@ -13,12 +13,43 @@ import { classifyAuthFailure, noteAuthOk, noteAuthRequired } from './ui/auth-sig
 export type { AuthState } from './ui/auth-signal'
 export { currentUser } from './ui/auth-signal'
 
+/** 任务分组键（界面分栏用，不影响执行）。 */
+export type TaskGroup = 'signin' | 'live' | 'app' | 'device'
+
+/**
+ * 一个参数的说明 —— 前端据此画"任务配置"表单。
+ *
+ * ⚠ 从前 `/api/capabilities` 只给**参数名**（`string[]`），类型/默认值全靠前端猜；
+ * 猜错的表现是"填了没用"。现在类型、默认值、取值范围都由后端给。
+ */
+export interface TaskParamSpec {
+  name: string
+  /** 界面上的标签。 */
+  title: string
+  kind: 'bool' | 'number' | 'text'
+  /** 默认值（JSON）。用于"从没配过"时的预填。 */
+  default: unknown
+  min?: number
+  max?: number
+  unit?: string
+  help?: string
+}
+
 export interface TaskMeta {
   name: string
   title: string
   description: string
   hidden: boolean
-  params: string[]
+  /** 分组键。 */
+  group: TaskGroup
+  /**
+   * 分组的中文名 —— **后端给**。
+   *
+   * 本仓栽过一次：任务页曾把签到族那 8 个任务名硬编码在前端当分组依据，
+   * 而后端的注册表才是权威。前端每多一份这类"键→名字"的表，就多一处迟早漂移的地方。
+   */
+  groupLabel: string
+  params: TaskParamSpec[]
 }
 
 /** 任务结果。`skipped` 不是失败 —— 活动未开启或条件不满足。 */
@@ -225,7 +256,20 @@ export interface SetupStatus {
    * 硬编一份必然与后端漂移，而漂移的表现是"前端说可以、后端拒绝"。
    */
   minPasswordLen: number
+  /**
+   * 登录时该发什么凭据（后端自述，用户口径 2026-10-01 的"前端先 hash 一次"）：
+   *
+   * - `sha256` —— 发 `SHA-256(明文)` 的 hex（新档，目标形态）
+   * - `plain`  —— 发**明文**（库里还是老档：argon2 直接吃明文；后端验过会当场升级）
+   *
+   * ⚠ 声明成可选：**旧后端不带这个字段**。前端在缺失时按 `plain` 走 ——
+   * 那是对"新老两种后端"都成立的那条路（新后端收到明文会自己补一次摘要）。
+   */
+  passwordScheme?: PasswordScheme
 }
+
+/** 口令凭据档位，与后端 `SetupStatus.password_scheme` 同义。 */
+export type PasswordScheme = 'sha256' | 'plain'
 
 export interface AuthSession {
   userId: string
@@ -242,20 +286,134 @@ export const getSetupStatus = () => request<SetupStatus>('/api/setup')
  * 理由是公开接口（`/api/version`、`/api/health`）**未初始化时也返回 200**，
  * 那样会让应用从"要建管理员"错误地翻成"放行"，然后每个页面各自
  * 撞一鼻子 503。放行只能由**明确的认证动作**宣布。
+ *
+ * ⚠ `credential` 是**口令凭据**，不是明文：调用方先按 `/api/setup` 自述的
+ * `passwordScheme` 过一遍 `ui/password.ts` 的 `credentialFor`（见那里的取舍）。
  */
-export const createAdmin = async (username: string, password: string) => {
+export const createAdmin = async (username: string, credential: string) => {
   const s = await request<AuthSession>('/api/setup', {
     method: 'POST',
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ username, password: credential }),
   })
   noteAuthOk(s.name)
   return s
 }
 
-export const loginSession = async (username: string, password: string) => {
+/** 登录。`credential` 同上：凭据，不是明文。 */
+/**
+ * 账户安全（口令策略 / 改口令）。
+ *
+ * 与 `/api/setup` 的 `passwordScheme` 同一套档位：库里是老档时这两年
+ * 前端要发明文，服务端验过会顺手升级（见 `ui/password.ts`）。
+ */
+export interface SecurityView {
+  /** 口令长度下限（可改）。⚠ 只对**明文**生效：摘要恒 64 位，量不出长度。 */
+  minPasswordLen: number
+  /** 新建会话的有效期（小时）。改它只影响之后新建的会话。 */
+  sessionTtlHours: number
+  passwordScheme?: PasswordScheme
+}
+
+export const getSecurity = () => request<SecurityView>('/api/admin/security')
+
+/**
+ * 改策略。
+ *
+ * ⚠ **两个字段都要给**（后端 PUT = 整体替换）：少给会 422。
+ * 这样"以为改了、其实没改"不可能发生 —— 调用方把当前值一起发回来。
+ */
+export const putSecurity = (patch: { minPasswordLen: number; sessionTtlHours: number }) =>
+  request<SecurityView>('/api/admin/security', {
+    method: 'PUT',
+    body: JSON.stringify(patch),
+  })
+
+/** 改口令的结果：被结束的旧会话数 + 当前用户（后端会顺手换一张新 cookie）。 */
+export interface PasswordChanged {
+  userId: string
+  name: string
+  kind: 'web' | 'cli'
+  /** 这次改口令顺带结束了多少个**旧**会话（不含马上发的那张新令牌）。 */
+  sessionsEnded: number
+}
+
+/**
+ * 改口令。`current` / `next` 都是**凭据**（不是明文）——
+ * 调用方先过 `ui/password.ts` 的 `credentialFor`。
+ *
+ * ⚠ 当前口令**必填**（后端也必填）：用户口径 2026-10-01
+ * ——「你口令更改怎么取消了旧口令」。
+ */
+export const changePassword = async (current: string, next: string) => {
+  const r = await request<PasswordChanged>('/api/admin/password', {
+    method: 'PUT',
+    body: JSON.stringify({ currentPassword: current, newPassword: next }),
+  })
+  // 后端换了一张新 cookie ⇒ 会话仍然有效，本地状态跟着刷新一下
+  noteAuthOk(r.name)
+  return r
+}
+
+/**
+ * 「关于」卡片的数据（`GET /api/system/about`）。
+ *
+ * ⚠ **没有"最新版本"这一项**：上游仓库是私有的（匿名访问 404），浏览器端没有凭据
+ * 去查发布 ⇒ 这里给的是**本次构建实际包含的改动**，那是本机真拿得到的东西。
+ */
+export interface AboutChange {
+  hash: string
+  subject: string
+}
+
+export interface AboutView {
+  name: string
+  version: string
+  /** 短提交号；构建机上没有 git 时是空串。 */
+  commit: string
+  /** 构建时工作区有未提交改动（release 会把它们一起编进线上）。 */
+  dirty: boolean
+  /** 构建时间（本机时区，形如 `2026-10-01 19:20 CST`）。 */
+  buildTime: string
+  profile: 'release' | 'debug' | string
+  /** 本次构建包含的最近若干条改动。 */
+  changes: AboutChange[]
+}
+
+export const getAbout = () => request<AboutView>('/api/system/about')
+
+/** 一个数据文件的大小。 */
+export interface FileSize {
+  name: string
+  bytes: number
+}
+
+/** 存储信息（数据目录 / 日志占用 / 二进制）。 */
+export interface StorageView {
+  dataDir: string
+  logDir: string
+  binary: string
+  /** 数据文件合计（**不含**日志）。 */
+  dataBytes: number
+  /** `data/logs` 递归合计。 */
+  logBytes: number
+  files: FileSize[]
+}
+
+export const getStorage = () => request<StorageView>('/api/system/storage')
+
+/**
+ * 重启服务。
+ *
+ * 后端回 **202** 后 300ms 才优雅退出，交给 launchd / systemd 重拉 ——
+ * 所以这个 Promise 正常返回**不代表服务已经重启完**，调用方要自己轮询 `/api/health`。
+ */
+export const restartService = () =>
+  request<unknown>('/api/system/restart', { method: 'POST', body: '{}' })
+
+export const loginSession = async (username: string, credential: string) => {
   const s = await request<AuthSession>('/api/session', {
     method: 'POST',
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ username, password: credential }),
   })
   noteAuthOk(s.name)
   return s
@@ -297,6 +455,24 @@ export const getVersion = () => request<VersionInfo>('/api/version')
 export const getStatus = () => request<ServiceStatus>('/api/status')
 
 export const listCapabilities = () => request<{ tasks: TaskMeta[] }>('/api/capabilities')
+
+/** 一个任务的参数配置（任务页「配置」那一页）。 */
+export interface TaskConfigView {
+  name: string
+  specs: TaskParamSpec[]
+  /** 已保存的值。缺省键后端已经补成默认值，前端不必自己算。 */
+  params: Record<string, unknown>
+}
+
+export const getTaskConfig = (task: string) =>
+  request<TaskConfigView>(`/api/tasks/${encodeURIComponent(task)}/config`)
+
+/** 保存任务参数。**PUT = 整体替换**：没给的键回落到默认值。 */
+export const putTaskConfig = (task: string, params: Record<string, unknown>) =>
+  request<TaskConfigView>(`/api/tasks/${encodeURIComponent(task)}/config`, {
+    method: 'PUT',
+    body: JSON.stringify({ params }),
+  })
 
 export const listRuns = () => request<RunRecord[]>('/api/runs')
 
@@ -721,9 +897,25 @@ export interface AccountSummary {
   device_id: string
   /** 凭据到期的 epoch 毫秒；`0` = 解析不出。 */
   expire: number
+  /**
+   * 是否启用。**停用的账号不出现在各处"挑账号"的下拉里**。
+   *
+   * 过滤发生在**服务端**（`GET /api/accounts` 默认只给启用的）——
+   * 前端各页面不需要、也不应该各写一遍过滤：漏掉的那一处正是"停用了还能选"。
+   */
+  enabled: boolean
 }
 
-export const listAccounts = () => request<AccountSummary[]>('/api/accounts')
+/**
+ * 列出云盘账号。
+ *
+ * ⚠ **默认只给启用的**（各处下拉要的就是这个）—— 账号页要能看全部（否则停用之后
+ * 就没法启用回来），所以它显式传 `includeDisabled`。
+ */
+export const listAccounts = (opts?: { includeDisabled?: boolean }) =>
+  request<AccountSummary[]>(
+    opts?.includeDisabled ? '/api/accounts?includeDisabled=true' : '/api/accounts',
+  )
 
 export const deleteAccount = (id: string) =>
   request<void>(`/api/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' })
@@ -747,7 +939,7 @@ export const importAccount = (input: { auth: string; platform?: PcPlatform; nick
   })
 
 /**
- * 改一个账号的昵称 / 设备号 / 凭据（`PATCH /api/accounts/{id}`）。
+ * 改一个账号的昵称 / 设备号 / 凭据 / 启停（`PATCH /api/accounts/{id}`）。
  *
  * # 为什么是部分更新
  *
@@ -757,7 +949,14 @@ export const importAccount = (input: { auth: string; platform?: PcPlatform; nick
  */
 export const updateAccount = (
   id: string,
-  patch: { nickname?: string; deviceId?: string; auth?: string; platform?: PcPlatform },
+  patch: {
+    nickname?: string
+    deviceId?: string
+    auth?: string
+    platform?: PcPlatform
+    /** 启用 / 停用（不给 = 不改）。 */
+    enabled?: boolean
+  },
 ) =>
   request<AccountSummary>(`/api/accounts/${encodeURIComponent(id)}`, {
     method: 'PATCH',
