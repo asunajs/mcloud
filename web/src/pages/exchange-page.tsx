@@ -319,6 +319,31 @@ const groupViews = (prizes: ExchangePrizeView[]): PrizeGroupView[] =>
   }))
 
 /**
+ * tab 栏的一项。
+ *
+ * 计数写成 **`可兑/共`**（`3/7`）：一眼看出"这个组里有没有我现在能兑的"，
+ * 而"全部"那一项给的是整份清单的同一个比值。
+ */
+interface GroupTab {
+  key: string
+  label: string
+  count: string
+}
+
+const groupTabs = (prizes: ExchangePrizeView[]): GroupTab[] => {
+  const groups = groupViews(prizes)
+  const openAll = groups.reduce((n, g) => n + g.open.length, 0)
+  return [
+    { key: 'all', label: '全部', count: `${openAll}/${prizes.length}` },
+    ...groups.map((g) => ({
+      key: g.key,
+      label: groupTitle(g),
+      count: `${g.open.length}/${g.items.length}`,
+    })),
+  ]
+}
+
+/**
  * 一个分区的标题栏：组名（**上游给的**）+ 该组限兑规则（上游原话）+ 件数
  * + 组内**共享**的活动窗口 + 本月名额。
  */
@@ -360,7 +385,8 @@ const PrizeRow = (props: {
   <div class="flex items-center justify-between gap-3 py-2">
     <div class="flex min-w-0 flex-col">
       <span class="truncate text-sm">{props.prize.name ?? `奖品 ${props.prize.prizeId}`}</span>
-      <span class="truncate text-xs opacity-60">{stockText(props.prize)}</span>
+      {/* 数字行**不**截断：窄屏宁可换行，也别把"共 400,000"吃掉（名字那行截断即可）。 */}
+      <span class="text-xs opacity-60">{stockText(props.prize)}</span>
     </div>
     <div class="flex shrink-0 items-center gap-1">
       <button
@@ -386,7 +412,7 @@ const BlockedRow = (props: {
   <div class="flex items-center justify-between gap-3 py-1.5">
     <div class="flex min-w-0 flex-col">
       <span class="truncate text-sm opacity-80">{props.prize.name ?? `奖品 ${props.prize.prizeId}`}</span>
-      <span class="truncate text-xs opacity-50">{stockText(props.prize)}</span>
+      <span class="text-xs opacity-50">{stockText(props.prize)}</span>
     </div>
     <div class="flex shrink-0 items-center gap-1">
       <span class={badgeClass(props.prize)} title={props.prize.planReason}>
@@ -430,6 +456,39 @@ export const ExchangePage = () => {
   const planError = ref('')
   const planSaving = ref(false)
 
+  /**
+   * 用户手动折/展过的组（键 = `groupId` 的字符串形态）。
+   *
+   * ⚠ 为什么要单独记一份：`<details>` 的原生开合状态活在 **DOM** 上，而清单
+   * **每读一次就重建这一批节点**（兑完一件就重读）⇒ 不记的话用户折好的组每次都被弹回去。
+   * `open` 属性只负责"第一次看见时的默认值"（有可兑件就展开、整组都不可兑就收起）。
+   */
+  const groupOpen = ref<Record<string, boolean>>({})
+
+  /**
+   * 当前选中的分组 tab（`'all'` = 全部）。
+   *
+   * 分组有两层用法，**两层都留着**（用户口径 2026-10-01：「分组可折叠」+「分组可以通过 tab 切换」）：
+   * tab 决定**看哪一组**（一次只渲染一组 ⇒ 列表天然短），
+   * 而"全部"那一页里每个组仍然可以单独折叠。
+   */
+  const activeGroup = ref<string>('all')
+
+  /** 第一次看见某个组时的默认开合。 */
+  const groupOpenOf = (key: string, hasOpen: boolean): boolean =>
+    groupOpen.value[key] ?? hasOpen
+
+  /**
+   * 记下用户的开合。
+   *
+   * ⚠ 值没变就直接返回：把 `open` 写回 DOM 会**再触发一次 `toggle` 事件**，
+   * 不设这道闸就是"事件 → 改状态 → 改属性 → 事件"的回环。
+   */
+  const onGroupToggle = (key: string, open: boolean) => {
+    if (groupOpen.value[key] === open) return
+    groupOpen.value = { ...groupOpen.value, [key]: open }
+  }
+
   const loadAccounts = async () => {
     accounts.value = await listAccounts()
     if (account.value === '' && accounts.value.length > 0) {
@@ -448,6 +507,16 @@ export const ExchangePage = () => {
     listError.value = ''
     try {
       list.value = await listExchangePrizes(account.value)
+      // 选中的那个组可能已经不在了（活动下线 / 换了账号）⇒ 回落「全部」，
+      // 否则界面会停在一个永远空的 tab 上。
+      if (
+        activeGroup.value !== 'all' &&
+        !list.value.prizes.some(
+          (p) => (p.groupId == null ? 'none' : String(p.groupId)) === activeGroup.value,
+        )
+      ) {
+        activeGroup.value = 'all'
+      }
     } catch (e) {
       list.value = null
       listError.value = e instanceof Error ? e.message : String(e)
@@ -584,6 +653,10 @@ export const ExchangePage = () => {
                   // 换了账号，上一件的结论就不属于这个账号了 —— 清掉，
                   // 否则"刚兑成功"那条提示会挂在一个没兑过的账号下面。
                   result.value = null
+                  // 分组也是按账号投放的：选中的 tab 与折叠状态都属于上一个账号的清单，
+                  // 留着会让新账号直接停在一个它根本没有的组上。
+                  activeGroup.value = 'all'
+                  groupOpen.value = {}
                   void loadPrizes()
                 }}
               >
@@ -691,26 +764,49 @@ export const ExchangePage = () => {
         // 编译器的三元分支只认"JSX / null"（`web/lite/compiler.ts` 的 `branchOk`）——
         // 直接把 `.map(...)` 当分支放，`key` 就不会被认领（报"这个 key 什么都不做"）。
         <div class="flex flex-col gap-4">
-          {groupViews(list.value.prizes).map((g) => (
-            <div key={g.key}>
-            {/* 整组都不可兑 ⇒ 整组折起来（51 件的清单里这类组占大头）。 */}
-            {g.open.length === 0 ? (
-              <details class="collapse collapse-arrow bg-base-100 shadow-sm">
-                <summary class="collapse-title">
-                  <GroupHead group={g} openCount={0} />
-                </summary>
-                <div class="collapse-content flex flex-col divide-y divide-base-200">
-                  {g.blocked.map((p) => (
-                    <div key={p.prizeId}>
-                      <BlockedRow prize={p} onSchedule={askSchedule} />
-                    </div>
-                  ))}
-                </div>
-              </details>
-            ) : (
-              <div class="card bg-base-100 shadow-sm">
-                <div class="card-body gap-2">
-                  <GroupHead group={g} openCount={g.open.length} />
+          {/*
+            分组 tab：一次只看一组（另有「全部」）。计数是 `可兑/共` —— 一眼看出哪组有戏。
+            窄屏下横向滚动、**单行**：`flex-nowrap!` 那个 `!` 是必须的 —— daisyUI 的
+            `.tabs` 在组件层写了 `flex-wrap: wrap`（而且它藏在 `@layer` 里，普通工具类盖不掉
+            —— 技能规则 3 的场景）；`flex` 也是显式给的，不靠 `.tabs` 自己那层 display。
+          */}
+          <div role="tablist" class="tabs tabs-box tabs-sm flex w-full flex-nowrap! overflow-x-auto">
+            {groupTabs(list.value.prizes).map((t) => (
+              <button
+                key={t.key}
+                type="button"
+                role="tab"
+                class={
+                  t.key === activeGroup.value
+                    ? 'tab tab-active whitespace-nowrap'
+                    : 'tab whitespace-nowrap'
+                }
+                onClick={() => (activeGroup.value = t.key)}
+              >
+                {t.label}
+                <span class="badge badge-xs ml-1">{t.count}</span>
+              </button>
+            ))}
+          </div>
+          {groupViews(list.value.prizes)
+            .filter((g) => activeGroup.value === 'all' || g.key === activeGroup.value)
+            .map((g) => (
+              /*
+                每个组**都能折**（用户口径 2026-10-01）。默认：有可兑件的展开、
+                整组都不可兑的收起；**手动选中的那个 tab** 也默认展开（否则点进去只见一条标题）。
+                用户手动折过之后状态记在 `groupOpen` 里，刷新清单不会弹回去。
+              */
+              <details
+                key={g.key}
+                open={groupOpenOf(g.key, g.open.length > 0 || activeGroup.value === g.key)}
+                onToggle={(e) => onGroupToggle(g.key, (e.target as HTMLDetailsElement).open)}
+                class="collapse collapse-arrow bg-base-100 shadow-sm"
+              >
+              <summary class="collapse-title">
+                <GroupHead group={g} openCount={g.open.length} />
+              </summary>
+              <div class="collapse-content flex flex-col gap-2">
+                {g.open.length > 0 ? (
                   <div class="flex flex-col divide-y divide-base-200">
                     {g.open.map((p) => (
                       <div key={p.prizeId}>
@@ -723,24 +819,23 @@ export const ExchangePage = () => {
                       </div>
                     ))}
                   </div>
-                  {g.blocked.length > 0 ? (
-                    <details class="collapse collapse-arrow border-t border-base-200">
-                      <summary class="collapse-title min-h-0 py-2 text-sm opacity-70">
-                        另有 {g.blocked.length} 件不可兑（{reasonsSummary(g.blocked)}）
-                      </summary>
-                      <div class="collapse-content flex flex-col divide-y divide-base-200">
-                        {g.blocked.map((p) => (
-                          <div key={p.prizeId}>
-                            <BlockedRow prize={p} onSchedule={askSchedule} />
-                          </div>
-                        ))}
-                      </div>
-                    </details>
-                  ) : null}
-                </div>
+                ) : null}
+                {g.blocked.length > 0 ? (
+                  <details class="collapse collapse-arrow border-t border-base-200">
+                    <summary class="collapse-title min-h-0 py-2 text-sm opacity-70">
+                      另有 {g.blocked.length} 件不可兑（{reasonsSummary(g.blocked)}）
+                    </summary>
+                    <div class="collapse-content flex flex-col divide-y divide-base-200">
+                      {g.blocked.map((p) => (
+                        <div key={p.prizeId}>
+                          <BlockedRow prize={p} onSchedule={askSchedule} />
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                ) : null}
               </div>
-            )}
-            </div>
+            </details>
           ))}
         </div>
       )}
