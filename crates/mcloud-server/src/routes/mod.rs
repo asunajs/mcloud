@@ -41,6 +41,12 @@ pub fn router() -> Router<ServerState> {
         // ── 云盘账号（列表 / 移除）──────────────────────────────────
         .route("/api/accounts", get(accounts::list))
         .route("/api/accounts/{id}", axum::routing::delete(accounts::remove))
+        // 每账号设置：GET 读、PUT **整体替换**（语义与取舍见 accounts::put_settings）。
+        // 与上面那条 `{id}` 是不同的路由：一条删账号、一条读/写设置。
+        .route(
+            "/api/accounts/{id}/settings",
+            get(accounts::get_settings).put(accounts::put_settings),
+        )
         // ── 兑换（抢兑）────────────────────────────────────────────
         // ⚠ 上面那条 `/api/accounts/{id}` 与下面两条是**不同**的路由：
         // 一条删账号、一条读奖品清单、一条**真花AI豆**。别把后两条也

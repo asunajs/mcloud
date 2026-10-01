@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::{Error, Result};
 use crate::push::PushConfig;
 use crate::user::UserId;
 
@@ -268,6 +269,325 @@ impl Default for AccountSettings {
             // 默认不配推送渠道：与"未配置就零行为"同一条 —— 装完不该有包发出去。
             notify: None,
         }
+    }
+}
+
+// ── 设置的**线格式**（GET/PUT /api/accounts/{id}/settings）──────────────
+
+/// 账号设置在 HTTP 上的形状：`GET` 的响应体，也是 `PUT` 的请求体。
+///
+/// # 为什么不直接复用 [`AccountSettings`] 的 serde
+///
+/// 两者服务的目的**相反**，所以形状必须分开：
+///
+/// | | 落盘（[`AccountSettings`]） | HTTP（本类型） |
+/// |---|---|---|
+/// | 键名 | `snake_case`（`backup_wait_secs`）| `camelCase`（`backupWaitSecs`，与 `/api/schedules`、`/api/runs` 一致）|
+/// | 未知键 | **忽略**（老库里残留的键不该让整份读不出来）| **400**（敲错键要当场知道）|
+/// | 坏元素 | **丢弃**（`skip_tasks` 的旧形状见 [`de_skip_task_ids`]）| **400** |
+///
+/// 落盘那条宽松是**读兼容**的需要，不是"怎么写都行"。写入口照抄它的话，
+/// 表现就是「用户把 `skipTasks` 敲成 `skipTask` ⇒ 一声不响地当没配」——
+/// 而本仓最忌讳的就是"不报错、只是东西不对"。所以写入口另有一套严格形状。
+///
+/// # 为什么每个字段都必填
+///
+/// `PUT` 是**整体替换**：缺席的字段没有"保持不变"的意思。若给缺席字段兜一个
+/// 默认值，表现就是「少传一个键 ⇒ 那项设置被悄悄重置」——那是最难查的一类失效。
+/// 必填 ⇒ 少传就 400 并指名。`notify` 也必须显式给出（`null` = 不配推送）：
+/// JSON 里"缺席"与"null"不是一回事，而"清空推送"在这个接口上必须能表达。
+///
+/// ⚠ 与落盘模型一一对应由**编译器**保证：两个方向的 `From`/`TryFrom` 都逐字段
+/// 列举，[`AccountSettings`] 加字段而这里不加就编不过。键名的对应另有测试
+/// `the_wire_keys_match_the_stored_keys` 钉住。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountSettingsDto {
+    /// 备份任务等待时间（秒）。`0` = 不等（既有语义，见 `backup_wait_ms`）。
+    pub backup_wait_secs: u64,
+    /// 剩余多少天时刷新凭证。
+    pub refresh_token_days: i64,
+    /// 跳过的任务 **id**（数字）。见 [`AccountSettings::skip_tasks`]。
+    pub skip_tasks: Vec<i64>,
+    pub ai_avatar_enabled: bool,
+    pub ai_avatar_daily_limit: u32,
+    pub redpack_enabled: bool,
+    pub play_ai_enabled: bool,
+    pub kouling_enabled: bool,
+    /// 推送渠道。`null` = 不配（与落盘的 `None` 同义）。
+    pub notify: Option<PushConfig>,
+}
+
+impl AccountSettingsDto {
+    /// `backup_wait_secs` 的上限（秒）。
+    ///
+    /// 它等的是"服务端把刚发出的一次备份事件记进当月"，分钟级已经过分；
+    /// 一小时以上一定是笔误，而代价是任务一直挂着不结束。
+    pub const BACKUP_WAIT_SECS_MAX: u64 = 3_600;
+    /// `refresh_token_days` 的上限（天）。
+    ///
+    /// 上限取得很宽（十年）是刻意的：它只用来钉住"显然不是天数"的输入
+    ///（负数、六位数），不去规定用户该多激进地刷新。
+    pub const REFRESH_TOKEN_DAYS_MAX: i64 = 3_650;
+    /// `ai_avatar_daily_limit` 的上限（轮）。每轮都是一次上游调用。
+    pub const AI_AVATAR_DAILY_LIMIT_MAX: u32 = 1_000;
+    /// `skip_tasks` 的条数上限。
+    pub const SKIP_TASKS_MAX: usize = 1_000;
+
+    /// 范围与结构校验（**纯函数**，不碰存储 —— 所以能在 core 层测）。
+    ///
+    /// ⚠ 错误信息只说**字段名与规则**，绝不带字段值：`notify` 里有 token/secret，
+    /// 而这些字符串会进 HTTP 响应，也可能被打进日志。
+    pub fn validate(&self) -> Result<()> {
+        if self.backup_wait_secs > Self::BACKUP_WAIT_SECS_MAX {
+            return Err(Error::Config(format!(
+                "backupWaitSecs 最多 {} 秒（实得 {}）：再长就是任务一直挂着不结束",
+                Self::BACKUP_WAIT_SECS_MAX,
+                self.backup_wait_secs
+            )));
+        }
+        if !(0..=Self::REFRESH_TOKEN_DAYS_MAX).contains(&self.refresh_token_days) {
+            return Err(Error::Config(format!(
+                "refreshTokenDays 必须在 0..={} 之间（实得 {}）：负数会让「剩余天数低于阈值才刷新」永远算错",
+                Self::REFRESH_TOKEN_DAYS_MAX,
+                self.refresh_token_days
+            )));
+        }
+        if self.ai_avatar_daily_limit > Self::AI_AVATAR_DAILY_LIMIT_MAX {
+            return Err(Error::Config(format!(
+                "aiAvatarDailyLimit 最多 {} 轮（实得 {}）：每一轮都是一次上游调用",
+                Self::AI_AVATAR_DAILY_LIMIT_MAX,
+                self.ai_avatar_daily_limit
+            )));
+        }
+        if self.skip_tasks.len() > Self::SKIP_TASKS_MAX {
+            return Err(Error::Config(format!(
+                "skipTasks 最多 {} 条（实得 {}）",
+                Self::SKIP_TASKS_MAX,
+                self.skip_tasks.len()
+            )));
+        }
+        if let Some(notify) = &self.notify {
+            validate_notify(notify)?;
+        }
+        Ok(())
+    }
+
+    /// 从 HTTP 请求体解析并校验，得到可落盘的 [`AccountSettings`]。
+    ///
+    /// 三步，顺序是刻意的：
+    ///
+    /// 1. 最外层必须是 JSON **对象**；
+    /// 2. `notify` 的**顶层键**必须是认识的渠道 —— [`PushConfig`] 自己会静默
+    ///    忽略未知键（`dingTalk` 敲成 `dingtalk` 就被吞掉、一声不响），
+    ///    而一个不生效的渠道比不写更难查，所以这里宁可 400；
+    /// 3. 交给本类型的严格 serde（未知键 / 缺字段 / 类型不对都 400），
+    ///    再过 [`Self::validate`] 的范围与渠道结构校验。
+    ///
+    /// ⚠ `notify` 里**渠道内部**的未知键**不**报错，这是刻意的：`TokenConfig.extra`
+    /// 这类 `#[serde(flatten)]` 是 TS 的既定语义（多余字段原样展开进请求体），
+    /// 不是笔误。那层无法区分"有意的附加字段"与"敲错的键名"，所以不做检查。
+    pub fn from_wire(raw: serde_json::Value) -> Result<AccountSettings> {
+        if !raw.is_object() {
+            return Err(Error::Config("请求体必须是一个 JSON 对象".into()));
+        }
+        if let Some(notify) = raw.get("notify") {
+            if !notify.is_null() {
+                let obj = notify
+                    .as_object()
+                    .ok_or_else(|| Error::Config("notify 必须是对象或 null".into()))?;
+                if let Some(known) = known_notify_keys() {
+                    for key in obj.keys() {
+                        if !known.iter().any(|k| k == key) {
+                            return Err(Error::Config(format!(
+                                "notify 里不认识的渠道「{key}」；认识的是：{}",
+                                known.join("、")
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        // serde 的错误文本可能引用**用户自己刚提交的**那个越界值（例如把字符串
+        // 传给了数字字段）。它只回给提交者本人，且本路由不把请求体写进日志 ——
+        // 与"错误信息不许带出**别的**字段"（见 validate）是两条不同的边界。
+        let dto: AccountSettingsDto =
+            serde_json::from_value(raw).map_err(|e| Error::Config(format!("设置格式不对：{e}")))?;
+        AccountSettings::try_from(dto)
+    }
+}
+
+/// [`PushConfig`] 认识的顶层键（含渠道名与 `title` / `onlyError` / `minLevel`）。
+///
+/// 不手抄一份：直接问 `PushConfig::default()` 的序列化结果，加渠道时它自己会跟上。
+/// 序列化失败时回 `None`，调用方**跳过**这道检查（它是防笔误的，不是安全边界）。
+fn known_notify_keys() -> Option<Vec<String>> {
+    match serde_json::to_value(PushConfig::default()) {
+        Ok(serde_json::Value::Object(map)) => Some(map.keys().cloned().collect()),
+        _ => None,
+    }
+}
+
+/// 推送渠道的**结构**校验。
+///
+/// 逐条对着发送侧真正会用到的字段：缺一个的后果是"配了等于没配"——
+/// `mcloud-app::push` 的 `build_*` 会 `return None` / 整条跳过，
+/// 表现是**一条都不发、也不报错**。
+///
+/// ⚠ 只报**字段名**，不报字段值（这些字段里有 token/secret）。
+fn validate_notify(notify: &PushConfig) -> Result<()> {
+    let mut any = false;
+
+    if let Some(c) = &notify.pushplus {
+        any = true;
+        require_non_empty("notify.pushplus.token", &c.token)?;
+    }
+    if let Some(c) = &notify.server_chan {
+        any = true;
+        require_non_empty("notify.serverChan.token", &c.token)?;
+    }
+    if let Some(c) = &notify.work_weixin {
+        any = true;
+        // 应用消息是两步：先 corpid+corpsecret 换 access_token，再带 agentid 发。
+        // 缺任何一个都到不了"发出去了"那一步。
+        match c.corpid.as_deref() {
+            Some(v) if !v.trim().is_empty() => {}
+            _ => {
+                return Err(Error::Config(
+                    "notify.workWeixin.corpid 缺失：取 access_token 要用它".into(),
+                ))
+            }
+        }
+        match c.corpsecret.as_deref() {
+            Some(v) if !v.trim().is_empty() => {}
+            _ => {
+                return Err(Error::Config(
+                    "notify.workWeixin.corpsecret 缺失：取 access_token 要用它".into(),
+                ))
+            }
+        }
+        if c.agentid.is_none() {
+            return Err(Error::Config(
+                "notify.workWeixin.agentid 缺失：发应用消息要用它".into(),
+            ));
+        }
+    }
+    if let Some(c) = &notify.work_weixin_bot {
+        any = true;
+        require_non_empty("notify.workWeixinBot.url", &c.url)?;
+    }
+    if let Some(c) = &notify.tg_bot {
+        any = true;
+        require_non_empty("notify.tgBot.token", &c.token)?;
+        // 判据照发送侧（`build_tg_bot` 的 JS 真值口径）：`0` / `""` / `null` 都算缺，
+        // 缺了整条跳过 —— 那是"配了不发"的典型长相。
+        match c.chat_id.as_ref() {
+            Some(v) if js_truthy(v) => {}
+            _ => {
+                return Err(Error::Config(
+                    "notify.tgBot.chat_id 缺失或为空：没有它发送侧会整条跳过".into(),
+                ))
+            }
+        }
+    }
+    if let Some(c) = &notify.bark {
+        any = true;
+        require_non_empty("notify.bark.key", &c.key)?;
+    }
+    if let Some(c) = &notify.two_im {
+        any = true;
+        require_non_empty("notify.twoIm.key", &c.key)?;
+        require_non_empty("notify.twoIm.sid", &c.sid)?;
+    }
+    if let Some(c) = &notify.ding_talk {
+        any = true;
+        require_non_empty("notify.dingTalk.token", &c.token)?;
+    }
+    if let Some(c) = &notify.email {
+        any = true;
+        // 本版不发邮件（见 `mcloud-app::push::EMAIL_NOT_IMPLEMENTED`），
+        // 但配了就要配全 —— 一份缺字段的配置只会让人以为它生效了。
+        require_non_empty("notify.email.pass", &c.pass)?;
+        require_non_empty("notify.email.from", &c.from)?;
+        require_non_empty("notify.email.host", &c.host)?;
+    }
+    if let Some(c) = &notify.custom_post {
+        any = true;
+        let items = c.items();
+        if items.is_empty() {
+            return Err(Error::Config(
+                "notify.customPost 一个模板都没有：空数组等于没配".into(),
+            ));
+        }
+        for (idx, item) in items.iter().enumerate() {
+            require_non_empty(&format!("notify.customPost[{idx}].url"), &item.url)?;
+        }
+    }
+
+    if !any {
+        return Err(Error::Config(
+            "notify 里没有任何渠道（全为 null）：这样配一条都发不出去；要关掉推送请把 notify 设为 null"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// 必填字段的非空校验。**只报路径，不报值**。
+fn require_non_empty(path: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(Error::Config(format!(
+            "{path} 不能为空：配了这个渠道却发不出去"
+        )));
+    }
+    Ok(())
+}
+
+/// JS 的真值口径（与 `mcloud-app::push` 的 `js_truthy` 同义）：
+/// `0` / `""` / `null` / `false` 为假，对象与数组恒真。
+fn js_truthy(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        serde_json::Value::String(s) => !s.is_empty(),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => true,
+    }
+}
+
+impl From<AccountSettings> for AccountSettingsDto {
+    fn from(s: AccountSettings) -> Self {
+        Self {
+            backup_wait_secs: s.backup_wait_secs,
+            refresh_token_days: s.refresh_token_days,
+            skip_tasks: s.skip_tasks,
+            ai_avatar_enabled: s.ai_avatar_enabled,
+            ai_avatar_daily_limit: s.ai_avatar_daily_limit,
+            redpack_enabled: s.redpack_enabled,
+            play_ai_enabled: s.play_ai_enabled,
+            kouling_enabled: s.kouling_enabled,
+            notify: s.notify,
+        }
+    }
+}
+
+impl TryFrom<AccountSettingsDto> for AccountSettings {
+    type Error = Error;
+
+    /// 校验通过才落成落盘模型 —— 这是"非法值进不了存储"的**唯一**关口。
+    fn try_from(dto: AccountSettingsDto) -> Result<Self> {
+        dto.validate()?;
+        Ok(Self {
+            backup_wait_secs: dto.backup_wait_secs,
+            refresh_token_days: dto.refresh_token_days,
+            skip_tasks: dto.skip_tasks,
+            ai_avatar_enabled: dto.ai_avatar_enabled,
+            ai_avatar_daily_limit: dto.ai_avatar_daily_limit,
+            redpack_enabled: dto.redpack_enabled,
+            play_ai_enabled: dto.play_ai_enabled,
+            kouling_enabled: dto.kouling_enabled,
+            notify: dto.notify,
+        })
     }
 }
 
@@ -553,5 +873,307 @@ mod tests {
             None,
             "未知平台不能静默落成 Windows"
         );
+    }
+
+    // ── 账号设置的**线格式**与校验（GET/PUT /api/accounts/{id}/settings）──
+
+    /// 一份**合法**的请求体。各条测试在它上面只改一处，免得每回抄一遍。
+    fn valid_settings_body() -> serde_json::Value {
+        serde_json::json!({
+            "backupWaitSecs": 20,
+            "refreshTokenDays": 10,
+            "skipTasks": [117, 437],
+            "aiAvatarEnabled": true,
+            "aiAvatarDailyLimit": 5,
+            "redpackEnabled": false,
+            "playAiEnabled": true,
+            "koulingEnabled": false,
+            "notify": {
+                "title": "我的推送",
+                "onlyError": true,
+                "minLevel": "warn",
+                "serverChan": { "token": "SCT-SECRET-VALUE" }
+            }
+        })
+    }
+
+    /// ⭐ 合法设置能**存能读回**：先过线格式校验，再走一遍**落盘形态**
+    /// （`snake_case` JSON）的序列化 / 反序列化 —— 与 `JsonStore` 的
+    /// `write_json` / `read_json` 是同一条路。
+    ///
+    /// 路由层没有集成测试（`mcloud-server` 的测试在本仓不能跑，见 AGENTS.md），
+    /// 所以"存得进、读得回"在这里用同一条序列化路径替代。
+    #[test]
+    fn a_valid_body_stores_and_reads_back() {
+        let settings =
+            AccountSettingsDto::from_wire(valid_settings_body()).expect("合法请求体必须通过");
+        assert_eq!(settings.backup_wait_secs, 20);
+        assert_eq!(settings.refresh_token_days, 10);
+        assert_eq!(settings.skip_tasks, vec![117, 437]);
+        assert!(settings.ai_avatar_enabled);
+        assert_eq!(settings.ai_avatar_daily_limit, 5);
+        assert!(!settings.redpack_enabled);
+        assert!(settings.play_ai_enabled);
+        assert!(!settings.kouling_enabled);
+        let notify = settings.notify.clone().expect("notify 必须被存下来");
+        assert_eq!(notify.title, "我的推送");
+        assert!(notify.only_error);
+        assert_eq!(
+            notify.server_chan.as_ref().unwrap().token,
+            "SCT-SECRET-VALUE"
+        );
+
+        let acc = Account {
+            id: AccountId::new("13800000001"),
+            nickname: None,
+            auth: auth_with_expiry(0),
+            device_id: DeviceId("D-1".into()),
+            pc_platform: None,
+            user_domain_id: None,
+            owner: None,
+            settings: settings.clone(),
+        };
+        let stored = serde_json::to_string(&acc).expect("落盘");
+        let back: Account = serde_json::from_str(&stored).expect("读回");
+        assert_eq!(back.settings, settings, "合法设置必须能存能读回");
+    }
+
+    /// `GET` 出来的对象必须能原样 `PUT` 回去（往返闭合）。
+    #[test]
+    fn the_wire_format_round_trips() {
+        let settings = AccountSettingsDto::from_wire(valid_settings_body()).unwrap();
+        let dto = AccountSettingsDto::from(settings.clone());
+        let json = serde_json::to_string(&dto).unwrap();
+        let back: AccountSettingsDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, dto, "响应体必须能被当成请求体原样收回：{json}");
+        assert_eq!(
+            AccountSettingsDto::from_wire(serde_json::from_str(&json).unwrap()).unwrap(),
+            settings
+        );
+    }
+
+    /// 既有默认值必须都落在校验范围内 —— 不许"加了校验就把默认值变成非法值"。
+    #[test]
+    fn the_existing_defaults_pass_validation() {
+        let s = AccountSettings::default();
+        let back = AccountSettings::try_from(AccountSettingsDto::from(s.clone())).unwrap();
+        assert_eq!(back, s);
+    }
+
+    /// 落盘键与线格式键必须**一一对应**：给 `AccountSettings` 加字段而忘了
+    /// 加进 DTO，那个字段在 HTTP 上就永远写不进去。
+    #[test]
+    fn the_wire_keys_match_the_stored_keys() {
+        // 让 `notify` 也真的落盘（`None` 时它被 `skip_serializing_if` 跳过）。
+        // ⚠ 用结构体初始化而不是先 default 再赋值：clippy 的 field_reassign_with_default 会拦后者。
+        let settings = AccountSettings {
+            notify: Some(PushConfig::default()),
+            ..Default::default()
+        };
+        let stored = serde_json::to_value(&settings).unwrap();
+        let wire = serde_json::to_value(AccountSettingsDto::from(settings)).unwrap();
+        let mut stored_keys: Vec<String> = stored
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| snake_to_camel(k))
+            .collect();
+        let mut wire_keys: Vec<String> = wire.as_object().unwrap().keys().cloned().collect();
+        stored_keys.sort();
+        wire_keys.sort();
+        assert_eq!(stored_keys, wire_keys, "落盘字段与线格式字段必须一一对应");
+    }
+
+    /// `snake_case` → `camelCase`（测试专用，只处理这几个字段名）。
+    fn snake_to_camel(s: &str) -> String {
+        let mut out = String::new();
+        let mut upper_next = false;
+        for c in s.chars() {
+            if c == '_' {
+                upper_next = true;
+            } else if upper_next {
+                out.extend(c.to_uppercase());
+                upper_next = false;
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// ⭐ 未知键 ⇒ 400 并点名，**绝不**静默落库。
+    #[test]
+    fn unknown_keys_are_rejected_with_the_key_named() {
+        let mut body = valid_settings_body();
+        body["backupWaitSecond"] = serde_json::json!(5); // 敲错一个词
+        let err = AccountSettingsDto::from_wire(body).unwrap_err().to_string();
+        assert!(err.contains("backupWaitSecond"), "错误要点名未知键：{err}");
+    }
+
+    /// 少传字段 ⇒ 400（而不是"悄悄重置成默认值"）。
+    #[test]
+    fn a_missing_field_is_rejected() {
+        let mut body = valid_settings_body();
+        body.as_object_mut().unwrap().remove("koulingEnabled");
+        let err = AccountSettingsDto::from_wire(body).unwrap_err().to_string();
+        assert!(err.contains("koulingEnabled"), "错误要点名缺失字段：{err}");
+    }
+
+    /// `skipTasks` 的类型必须真的是**数字**数组。
+    ///
+    /// 落盘那条路是宽松的（旧形状 `["签到"]` 会被丢掉、不报错），
+    /// 写入口**不许**照抄：用户敲进来的坏类型必须当场 400。
+    #[test]
+    fn skip_tasks_must_be_numbers() {
+        let mut body = valid_settings_body();
+        body["skipTasks"] = serde_json::json!(["117"]);
+        assert!(
+            AccountSettingsDto::from_wire(body).is_err(),
+            "数字字符串不许收（那是读老数据的宽容，不是写接口的）"
+        );
+
+        let mut body = valid_settings_body();
+        body["skipTasks"] = serde_json::json!("117");
+        assert!(
+            AccountSettingsDto::from_wire(body).is_err(),
+            "整体不是数组不许收"
+        );
+
+        let mut body = valid_settings_body();
+        body["skipTasks"] = serde_json::json!([117, null]);
+        assert!(
+            AccountSettingsDto::from_wire(body).is_err(),
+            "数组里有 null 不许收"
+        );
+    }
+
+    /// 数值范围：越界 ⇒ 400 并点名；边界上的 `0` 是**合法**的（既有语义）。
+    #[test]
+    fn out_of_range_numbers_are_rejected() {
+        for (field, value) in [
+            ("backupWaitSecs", serde_json::json!(3_601u64)),
+            ("refreshTokenDays", serde_json::json!(-1)),
+            ("aiAvatarDailyLimit", serde_json::json!(1_001u64)),
+        ] {
+            let mut body = valid_settings_body();
+            body[field] = value;
+            let err = AccountSettingsDto::from_wire(body).unwrap_err().to_string();
+            assert!(err.contains(field), "{field} 越界必须 400 且点名：{err}");
+        }
+
+        // `0` 秒 = 不等；`0` 轮 = 本趟不生成。两者都是**既有语义**，别顺手拒掉。
+        let mut body = valid_settings_body();
+        body["backupWaitSecs"] = serde_json::json!(0);
+        body["refreshTokenDays"] = serde_json::json!(0);
+        body["aiAvatarDailyLimit"] = serde_json::json!(0);
+        assert!(
+            AccountSettingsDto::from_wire(body).is_ok(),
+            "0 是合法值（不等 / 不生成），不是越界"
+        );
+    }
+
+    /// `notify` 的渠道结构：配了却缺必需字段 ⇒ 400。
+    ///
+    /// 缺字段的后果不是报错，而是发送侧**整条跳过**（`配了等于没配`），
+    /// 所以必须在写入口拦下。
+    #[test]
+    fn broken_channel_configs_are_rejected() {
+        let cases: [(&str, serde_json::Value); 7] = [
+            (
+                "serverChan",
+                serde_json::json!({"serverChan": {"token": "   "}}),
+            ),
+            ("chat_id", serde_json::json!({"tgBot": {"token": "tk"}})),
+            (
+                "twoIm",
+                serde_json::json!({"twoIm": {"key": "k", "sid": ""}}),
+            ),
+            (
+                "workWeixin",
+                serde_json::json!({"workWeixin": {"corpid": "c"}}),
+            ),
+            ("customPost", serde_json::json!({"customPost": []})),
+            (
+                "customPost",
+                serde_json::json!({"customPost": [{"url": ""}]}),
+            ),
+            ("token", serde_json::json!({"pushplus": {}})),
+        ];
+        for (needle, notify) in cases {
+            let mut body = valid_settings_body();
+            body["notify"] = notify;
+            let err = AccountSettingsDto::from_wire(body).unwrap_err().to_string();
+            assert!(err.contains(needle), "错误该提到 {needle}：{err}");
+        }
+    }
+
+    /// `notify` 里一个渠道都没有 ⇒ 400（否则用户以为配上了）。
+    #[test]
+    fn notify_without_any_channel_is_rejected() {
+        let mut body = valid_settings_body();
+        body["notify"] = serde_json::json!({"title": "x", "onlyError": true});
+        let err = AccountSettingsDto::from_wire(body).unwrap_err().to_string();
+        assert!(err.contains("没有任何渠道"), "实得：{err}");
+    }
+
+    /// `notify` 顶层的渠道名敲错 ⇒ 400。
+    ///
+    /// `PushConfig` 自己会静默忽略未知键（`pushPlus` 会被整个吞掉），
+    /// 而那是"看起来配好了、其实一条不发"的经典长相。
+    #[test]
+    fn a_misspelled_channel_name_is_rejected() {
+        let mut body = valid_settings_body();
+        body["notify"] = serde_json::json!({"pushPlus": {"token": "tk"}});
+        let err = AccountSettingsDto::from_wire(body).unwrap_err().to_string();
+        assert!(err.contains("pushPlus"), "要点名不认识的渠道：{err}");
+    }
+
+    /// `notify: null` 是"清空推送渠道"的表达方式（缺席则 400，见上）。
+    #[test]
+    fn null_notify_clears_the_channels() {
+        let mut body = valid_settings_body();
+        body["notify"] = serde_json::Value::Null;
+        let s = AccountSettingsDto::from_wire(body).unwrap();
+        assert_eq!(s.notify, None);
+    }
+
+    /// 请求体不是 JSON 对象 ⇒ 400（不是 serde 那句含糊的报错）。
+    #[test]
+    fn a_non_object_body_is_rejected() {
+        let err = AccountSettingsDto::from_wire(serde_json::json!([1, 2]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("JSON 对象"), "实得：{err}");
+    }
+
+    /// ⭐ 校验错误**绝不能**回显敏感值。
+    ///
+    /// 这些错误字符串会进 HTTP 响应、也可能被打进日志，而 `notify` 里全是
+    /// token / secret。判据：错误只许说**字段**，不许说**值**。
+    #[test]
+    fn validation_errors_never_echo_secret_values() {
+        const SECRETS: [&str; 3] = ["SECRET-SC-TOKEN", "SECRET-2IM-KEY", "SECRET-DT-TOKEN"];
+
+        // a) 渠道结构错误：坏的是 twoIm.sid，同一份配置里别的渠道的真值也不许被带出来
+        let mut body = valid_settings_body();
+        body["notify"] = serde_json::json!({
+            "serverChan": {"token": "SECRET-SC-TOKEN"},
+            "twoIm": {"key": "SECRET-2IM-KEY", "sid": "  "},
+            "dingTalk": {"token": "SECRET-DT-TOKEN"}
+        });
+        let err = AccountSettingsDto::from_wire(body).unwrap_err().to_string();
+        assert!(err.contains("twoIm"), "应当点名 twoIm：{err}");
+        for s in SECRETS {
+            assert!(!err.contains(s), "敏感值 {s} 出现在错误信息里：{err}");
+        }
+
+        // b) serde 的类型错误也不许顺手带出**别的**字段的真值
+        let mut body = valid_settings_body();
+        body["skipTasks"] = serde_json::json!("不是数组");
+        body["notify"] = serde_json::json!({"serverChan": {"token": "SECRET-SC-TOKEN"}});
+        let err = AccountSettingsDto::from_wire(body).unwrap_err().to_string();
+        for s in SECRETS {
+            assert!(!err.contains(s), "敏感值 {s} 出现在错误信息里：{err}");
+        }
     }
 }
