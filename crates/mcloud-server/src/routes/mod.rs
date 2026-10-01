@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod auth;
+pub mod beans;
 pub mod cancel;
 pub mod capabilities;
 pub mod exchange;
@@ -31,6 +32,9 @@ pub fn router() -> Router<ServerState> {
         .route("/api/status", get(health::status))
         .route("/api/health", get(health::health))
         .route("/api/capabilities", get(capabilities::list))
+        // 今日AI豆（云朵记录汇总）—— **只读**：按账号读流水，绝不合计。
+        // 一个账号读不到进响应的 `failed`，不打整张卡（见 beans.rs 模块头）。
+        .merge(beans::routes())
         .route("/api/runs", get(runs::list).post(runs::create))
         .route("/api/runs/{id}", get(runs::get_one))
         .route("/api/runs/{id}/events", get(runs::events))
@@ -38,9 +42,14 @@ pub fn router() -> Router<ServerState> {
         .route("/api/runs/{id}/cancel", post(cancel::cancel_run))
         // 运行日志（支持 ?after= 断线续传）
         .route("/api/runs/{id}/logs", get(logs::list))
-        // ── 云盘账号（列表 / 移除）──────────────────────────────────
-        .route("/api/accounts", get(accounts::list))
-        .route("/api/accounts/{id}", axum::routing::delete(accounts::remove))
+        // ── 云盘账号（列表 / 导入凭据 / 编辑 / 移除）────────────────
+        // `POST` = 用一条凭据建账号（手机号已存在则**只换凭据**，见 accounts::import）；
+        // `PATCH` = 改昵称 / 设备号 / 凭据 —— **部分更新**，理由见 accounts::update。
+        .route("/api/accounts", get(accounts::list).post(accounts::import))
+        .route(
+            "/api/accounts/{id}",
+            axum::routing::delete(accounts::remove).patch(accounts::update),
+        )
         // 每账号设置：GET 读、PUT **整体替换**（语义与取舍见 accounts::put_settings）。
         // 与上面那条 `{id}` 是不同的路由：一条删账号、一条读/写设置。
         .route(

@@ -6,6 +6,8 @@
 pub mod ai_avatar;
 pub mod app_task;
 pub mod app_task_matrix;
+/// 今日AI豆（云朵记录汇总）—— 总览页那张卡的**只读**读数来源。
+pub mod beans;
 pub mod cloud_phone_redpack;
 pub mod exchange;
 pub mod fun_ai;

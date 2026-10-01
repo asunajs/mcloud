@@ -587,7 +587,10 @@ const BEIJING_OFFSET_SECS: i64 = 8 * 3_600;
 /// Howard Hinnant 的 `days_from_civil`，逐字实现。选它而不是手写闰年循环，
 /// 是因为闰年与世纪规则在这一段里已经收口成一行算术，
 /// 而"我自己写的闰年判断"正是这类代码最常见的错处。
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+///
+/// ⚠ 提升到 `pub(crate)` 是给 `crate::beans` 的 `insertTime` 归一回用：
+/// 那边要的正是同一套日期算术，抄一份过去就是"闰年规则有两个实现"。
+pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400; // [0, 399]
@@ -598,7 +601,10 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 }
 
 /// 这个月有多少天（含闰年规则）。
-fn days_in_month(year: i64, month: i64) -> i64 {
+///
+/// ⚠ 与 [`days_from_civil`] 同为 `pub(crate)` 的理由：`crate::beans` 的
+/// `insertTime` 归一要用同一套校验。
+pub(crate) fn days_in_month(year: i64, month: i64) -> i64 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
