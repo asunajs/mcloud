@@ -121,6 +121,47 @@ export const FIXTURES = {
    */
   '/api/login/device': { device_id: 'dev-abc123' },
   'POST /api/login/device/rotate': { device_id: 'dev-rotated-9f2c' },
+  /**
+   * 每账号设置的**读**（`GET /api/accounts/{id}/settings`）。形状**照 `web/src/api.ts` 的
+   * `AccountSettings`**（camelCase，与后端 `AccountSettingsDto` 一一对应）—— 随手编形状
+   * 等于让界面"跑通了但测的是空壳"（本文件开头那条 ⚠ 就是这个教训）。
+   *
+   * 两个账号刻意给**相反**的长相，好让两条路都走得到：
+   * - `ACCOUNT`：`notify` 非空、配了两个渠道（其中 `workWeixinBot.url` 是**带密钥的
+   *   webhook**，用来看"打码显示"那条路有没有把它当密文）；`skipTasks` 非空。
+   * - `ACCOUNT2`：`notify: null` + 全默认 ⇒ "+ 加渠道"与"一个渠道都没配"那条路。
+   *
+   * ⚠ **写**（`PUT`）不在这里 —— 见 `VARIANTS.ready`。`FIXTURES` 这一路的值"就是 body"，
+   * 放 `handler` 进去会被序列化成 `{status, body}` 发回客户端（实测踩到）。
+   */
+  '/api/accounts/13800000000/settings': {
+    backupWaitSecs: 20,
+    refreshTokenDays: 10,
+    skipTasks: [117],
+    aiAvatarEnabled: false,
+    aiAvatarDailyLimit: 10,
+    redpackEnabled: true,
+    playAiEnabled: true,
+    koulingEnabled: false,
+    notify: {
+      title: 'mcloud 运行推送',
+      onlyError: false,
+      minLevel: 'info',
+      pushplus: { token: 'fixture-pushplus-token' },
+      workWeixinBot: { url: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=fixture-key' },
+    },
+  },
+  '/api/accounts/13900000001/settings': {
+    backupWaitSecs: 0,
+    refreshTokenDays: 0,
+    skipTasks: [],
+    aiAvatarEnabled: false,
+    aiAvatarDailyLimit: 10,
+    redpackEnabled: true,
+    playAiEnabled: true,
+    koulingEnabled: false,
+    notify: null,
+  },
 }
 
 /**
@@ -139,7 +180,18 @@ export const FIXTURES = {
  * 那样"setup 态通过"其实是登录态通过（两个 variant 字节数一样才发现）。
  */
 export const VARIANTS = {
-  ready: {},
+  /**
+   * `ready` 多一条**保存设置**的 `PUT`：请求体即响应体。
+   *
+   * ⚠ 它必须在 `VARIANTS` 里而**不是** `FIXTURES` 里：`FIXTURES` 那一路是
+   * "值**就是** body"（`plain = true`），`handler` 的返回值会被当成 body 整个
+   * 序列化成 `{status, body}` —— 客户端拿到的就不是那份设置了。实测踩到：
+   * 界面读回一个没有 `skipTasks` 的对象，报 `Cannot read properties of undefined`。
+   */
+  ready: {
+    'PUT /api/accounts/13800000000/settings': { handler: (body) => ({ status: 200, body }) },
+    'PUT /api/accounts/13900000001/settings': { handler: (body) => ({ status: 200, body }) },
+  },
   login: {
     '/api/session': { status: 401, body: { error: '未登录', code: 'unauthorized' } },
     /**

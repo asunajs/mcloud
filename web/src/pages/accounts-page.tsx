@@ -17,35 +17,211 @@
 
 import { onMounted, onUnmounted, ref } from 'lite'
 import {
+  ApiError,
+  NOTIFY_CHANNELS,
   cancelQrLogin,
   deleteAccount,
+  getAccountSettings,
   getPcDevice,
+  importAccount,
   listAccounts,
   loginWithPassword,
   pollQrLogin,
+  putAccountSettings,
   rotatePcDevice,
   startAppSmsLogin,
   startQrLogin,
   startSmsLogin,
   submitAppSmsLogin,
   submitSmsLogin,
+  updateAccount,
+  type AccountSettings,
   type AccountSummary,
+  type NotifyChannelKey,
   type PcPlatform,
+  type PushConfig,
+  type PushLogLevel,
   type SliderPayload,
 } from '../api'
 import { EmptyState } from '../ui/empty-state'
-import { ConfirmDialog, closeDialog, openDialog } from '../ui/dialog'
+import { ConfirmDialog, Dialog, closeDialog, openDialog } from '../ui/dialog'
 import { showError } from '../ui/error-dialog'
 import { pushToast } from '../ui/toast'
 
 type LoadState = 'loading' | 'error' | 'ready'
-type Method = 'qr' | 'sms' | 'app' | 'password'
+type Method = 'qr' | 'sms' | 'app' | 'password' | 'auth'
 type QrPhase = 'idle' | 'waiting' | 'scanned' | 'failed'
+
+/**
+ * 从凭据串里**猜**平台前缀，**只**用来决定"要不要让用户选客户端形态"。
+ *
+ * ⚠ 这不是校验：真正的判定在服务端（`accounts::platform_for`），这里猜错的
+ * 后果只是多显示/少显示一个选择器。猜不出来一律按"要选"处理 —— PC 是常见情况，
+ * 而服务端对 `pc` 凭据**要求**形态，少显示会让提交必然失败。
+ */
+const credentialPrefix = (raw: string): string => {
+  const text = raw.trim().replace(/^Basic\s+/i, '')
+  if (!text) return ''
+  try {
+    return atob(text).split(':', 1)[0] ?? ''
+  } catch {
+    // 不是合法 base64 ⇒ 交给服务端报错（它的错话更准）
+    return ''
+  }
+}
 
 /** 两种平台的人话名字。`Record` 而不是函数：加平台时 TS 会报缺一项。 */
 const PLATFORM_LABEL: Record<PcPlatform, string> = {
   windows: 'Windows',
   macos: 'macOS',
+}
+
+
+// ── 每账号设置的常量（与后端 DTO 一一对应）─────────────────────────────
+
+/** 推送标题的默认值 —— 与后端 `mcloud_core::push::DEFAULT_TITLE` 同字面量。 */
+const DEFAULT_NOTIFY_TITLE = 'mcloud 运行推送'
+
+/** 推送渠道的人话名字。`Record` ⇒ 加渠道时 TS 会报缺一项。 */
+const CHANNEL_LABEL: Record<NotifyChannelKey, string> = {
+  pushplus: 'PushPlus',
+  serverChan: 'Server 酱',
+  workWeixinBot: '企业微信机器人',
+  dingTalk: '钉钉机器人',
+  customPost: '自定义 POST',
+  workWeixin: '企业微信应用',
+  tgBot: 'Telegram Bot',
+  bark: 'Bark',
+  twoIm: '回逍（2Im）',
+  email: '邮箱',
+}
+
+/**
+ * 渠道的**必填**字段 —— 与后端 `validate_notify` 逐条对应。
+ *
+ * 判据只有一条：这些字段**全空** ⇒ 这个渠道算"没配"，PUT 时整条不带
+ * （⚠ **不发空对象**：`{token:""}` 会被后端当成"填了但为空"⇒ 400，而用户只是没填）。
+ * 填了一部分就照发 —— 后端会指名缺哪一格，那比前端自己猜准。
+ */
+const CHANNEL_REQUIRED: Record<NotifyChannelKey, readonly string[]> = {
+  pushplus: ['token'],
+  serverChan: ['token'],
+  workWeixinBot: ['url'],
+  dingTalk: ['token'],
+  customPost: ['url'],
+  workWeixin: ['corpid', 'corpsecret', 'agentid'],
+  tgBot: ['token', 'chat_id'],
+  bark: ['key'],
+  twoIm: ['key', 'sid'],
+  email: ['host', 'from', 'pass'],
+}
+
+/**
+ * 渠道里必须是 **JSON 数字**的字段（后端是 `i64` / `u16`）。
+ *
+ * 界面只能给字符串，提交时转 —— 不转的话后端回的是
+ * `invalid type: string, expected i64`，一句用户看不懂的话。
+ * `chat_id` 也在里面，但它可以是 `@channelname`：不是整数的就原样留着（后端收 `Value`）。
+ */
+const CHANNEL_NUMERIC: Partial<Record<NotifyChannelKey, readonly string[]>> = {
+  workWeixin: ['agentid'],
+  tgBot: ['chat_id'],
+  email: ['port'],
+}
+
+/** 每个渠道一句话说明（配在哪、有什么坑）。 */
+const CHANNEL_HINT: Record<NotifyChannelKey, string> = {
+  pushplus: 'PushPlus（微信推送）：在 pushplus.plus 拿 token，一条 token 就是一个收件人。',
+  serverChan: 'Server 酱：sct.ftqq.com 拿 SendKey（SCT 开头），填进来即可。',
+  workWeixinBot: '企业微信**群机器人**：群设置 → 群机器人 → 添加 → 复制 Webhook 地址。',
+  dingTalk:
+    '钉钉**群机器人**：群设置 → 智能群助手 → 添加机器人 → 自定义 → 拿 Webhook 里的 access_token；安全设置选了「加签」时还要填密钥。',
+  customPost:
+    '自定义 POST：给你自己的接口发一条 HTTP 请求。URL 里可以用 {title} / {text} 占位符。',
+  workWeixin:
+    '企业微信**应用消息**：要企业 ID（corpid）、应用密钥（corpsecret）与应用 ID（agentid）三样；与上面的「机器人」不是一回事。',
+  tgBot:
+    'Telegram Bot：@BotFather 拿 token；chat_id 是收件会话（群 id 是负数，也可以写 @channelname）。',
+  bark: 'Bark（iOS 推送）：App 首页那串 key。',
+  twoIm: '回逍（2Im）：key 与 sid 都要填。',
+  email:
+    '⚠ 本版**不会真的发信**（后端还没实现 SMTP）。配了只会存下来、不会生效 —— 摆在这里是为了让旧配置看得见、改得动。',
+}
+
+/** 推送日志级别选项。级别越小越严重，过滤规则是 `level <= max`。 */
+const MIN_LEVELS: readonly { value: PushLogLevel; label: string }[] = [
+  { value: 'error', label: 'error —— 只推错误（最安静）' },
+  { value: 'warn', label: 'warn —— 错误 + 警告' },
+  { value: 'info', label: 'info —— 默认：再带上信息与成功' },
+  { value: 'debug', label: 'debug —— 全推（最吵）' },
+]
+
+// ── 每账号设置的纯函数（不碰 DOM，可单测）───────────────────────────────
+
+/**
+ * 解析一个"必须是整数"的输入。
+ *
+ * 空串**不当 0**：`backupWaitSecs` 的 0 有明确语义（"不等"），替用户拍板成 0
+ * 等于悄悄改掉一项行为。留空请他显式写 0。
+ *
+ * ⚠ 这里**只**管"是不是整数"，**不管范围** —— 范围以后端为准
+ * （`AccountSettingsDto::BACKUP_WAIT_SECS_MAX` 等），前端再实现一遍必然分叉。
+ */
+const parseIntField = (label: string, raw: string): number => {
+  const t = raw.trim()
+  if (t === '') throw new Error(label + ' 不能留空（要 0 就写 0）')
+  if (!/^-?\d+$/.test(t)) throw new Error(label + ' 必须是整数，当前是「' + t + '」')
+  const n = Number(t)
+  if (!Number.isSafeInteger(n)) throw new Error(label + ' 超出可表示的范围')
+  return n
+}
+
+/** 数字串转 JSON 数字；不是整数就原样保留（例如 chat_id 写 `@channelname`）。 */
+const toJsonScalar = (raw: string): string | number => {
+  const t = raw.trim()
+  return /^-?\d+$/.test(t) && Number.isSafeInteger(Number(t)) ? Number(t) : t
+}
+
+/**
+ * 逗号 / 空白分隔的**任务 id**。
+ *
+ * 非数字当场报错：后端对 `["签到"]` 只会回一句 serde 的类型错误，用户看不懂
+ * "为什么我填了它说格式不对"。旧形状（任务名）是**后端读旧库时丢弃**的，不是这里。
+ */
+const parseSkipTasks = (raw: string): number[] => {
+  const out: number[] = []
+  for (const part of raw.split(/[\s,，、;；]+/)) {
+    const t = part.trim()
+    if (t === '') continue
+    if (!/^-?\d+$/.test(t)) throw new Error('跳过任务只能填任务 id（数字），「' + t + '」不是')
+    out.push(Number(t))
+  }
+  return out
+}
+
+/**
+ * 把设置的读写失败翻成**能分辨**的一句话。
+ *
+ * ⚠ 三种状态**不能**都落到「网络错误」：
+ * - **404** = 账号不存在**或**不属于当前登录用户（后端对两种情形回同一个 404，
+ *   不泄露存在性）—— 用户该做的是刷新列表 / 重新登录，不是"再点一次"；
+ * - **400** = 请求体被后端拒绝（未知键、越界、渠道缺字段），**后端原话必须显出来**，
+ *   否则用户只看到一句无从下手的"保存失败"；
+ * - **401** = 登录态失效（`request` 已经让整个应用转去登录页），这里补一句说明。
+ *
+ * `status === 0` 是 `request` 自己造的"超时/取消"，那时 `message` 已经是人话。
+ */
+const describeSettingsError = (e: unknown, action: string): string => {
+  if (e instanceof ApiError) {
+    if (e.status === 404) {
+      return '这个账号不存在，或者不属于当前登录用户（后端对两种情形回的是同一个 404）。请刷新账号列表后再试。'
+    }
+    if (e.status === 401) return '登录状态已失效，请重新登录后再' + action + '设置。'
+    if (e.status === 400) return '后端拒绝了这份设置：' + e.message
+    if (e.status === 0) return e.message
+    return action + '账号设置失败（HTTP ' + e.status + '）：' + e.message
+  }
+  return e instanceof Error ? e.message : action + '账号设置失败'
 }
 
 export const AccountsPage = () => {
@@ -57,6 +233,22 @@ export const AccountsPage = () => {
   /** 待确认删除的账号（确认弹窗用）。 */
   const pendingDelete = ref<AccountSummary | null>(null)
   const deleting = ref(false)
+
+  // ── 编辑账号（弹窗） ────────────────────────────────────────────────
+  //
+  // 三个字段都是"给了才改"：凭据**从不回显**（服务端也不发它），所以这里
+  // 永远是空的 —— 空 = 不动它。这也正是这一层用 PATCH 而不是"整体替换"的原因。
+  const editing = ref<AccountSummary | null>(null)
+  const editNickname = ref('')
+  const editDevice = ref('')
+  const editAuth = ref('')
+  const editPlatform = ref<PcPlatform>('windows')
+  const editError = ref('')
+  const savingEdit = ref(false)
+
+  // ── 粘贴凭据添加（添加弹窗里的一个 tab） ────────────────────────────
+  const importAuth = ref('')
+  const importBusy = ref(false)
 
   // ── 登录表单 ─────────────────────────────────────────────────────────
   const method = ref<Method>('qr')
@@ -460,6 +652,1004 @@ export const AccountsPage = () => {
     }
   }
 
+  // ── 编辑账号 ────────────────────────────────────────────────────────
+
+  /** 打开编辑弹窗：把三个输入框预填成"当前值 / 空"。 */
+  const askEdit = (a: AccountSummary) => {
+    editing.value = a
+    // 昵称预填是要**看见并改**的；设备号同理。凭据留空 —— 它从不回显，
+    // 空 = 不改（这也是"换凭据"与"改名字"能在同一个弹窗里的原因）。
+    editNickname.value = a.nickname ?? ''
+    editDevice.value = a.device_id
+    editAuth.value = ''
+    editError.value = ''
+    if (a.pc_platform) editPlatform.value = a.pc_platform
+    openDialog('edit-account')
+  }
+
+  const doSaveEdit = async () => {
+    const a = editing.value
+    if (!a) return
+    const patch: {
+      nickname: string
+      deviceId: string
+      auth?: string
+      platform?: PcPlatform
+    } = {
+      // 空串是**有意义**的：服务端把它读作"清空昵称"（回落成掩码手机号）。
+      nickname: editNickname.value,
+      deviceId: editDevice.value,
+    }
+    const pasted = editAuth.value.trim()
+    if (pasted) {
+      patch.auth = pasted
+      patch.platform = editPlatform.value
+    }
+    savingEdit.value = true
+    editError.value = ''
+    try {
+      await updateAccount(a.id, patch)
+      closeDialog('edit-account')
+      pushToast('success', `已保存 ${editNickname.value.trim() || a.label || a.id}`)
+      await load()
+    } catch (e) {
+      // 弹窗**不关**：用户刚打的字还在里面，关掉等于让他重打一遍。
+      editError.value = e instanceof Error ? e.message : '保存失败'
+    } finally {
+      savingEdit.value = false
+    }
+  }
+
+  // ── 粘贴凭据添加 ────────────────────────────────────────────────────
+
+  const doImport = async () => {
+    const raw = importAuth.value.trim()
+    if (!raw) {
+      formError.value = '请先粘贴一条凭据'
+      formOk.value = ''
+      return
+    }
+    importBusy.value = true
+    formError.value = ''
+    formOk.value = ''
+    try {
+      const r = await importAccount({
+        auth: raw,
+        // 形态只在 pc 凭据上才有意义；服务端对 pc **要求**它、对 mobile 忽略它。
+        platform: credentialPrefix(raw) === 'mobile' ? undefined : platform.value,
+      })
+      const name = r.account.nickname || r.account.label || r.account.id
+      // 说清发生了什么：同一个手机号再次导入是"换凭据"，不是"多了一个账号"。
+      pushToast('success', r.created ? `已添加 ${name}` : `已更新 ${name} 的凭据`)
+      const where = r.account.pc_platform ? PLATFORM_LABEL[r.account.pc_platform] : '手机端'
+      formOk.value = r.created
+        ? `已添加 ${name}（${where}）`
+        : `${name} 的凭据已更新（昵称与设备号保留）`
+      importAuth.value = ''
+      closeDialog('add-account')
+      await load()
+    } catch (e) {
+      formError.value = e instanceof Error ? e.message : '导入失败'
+    } finally {
+      importBusy.value = false
+    }
+  }
+
+  // ── 每账号设置（GET/PUT /api/accounts/{id}/settings）─────────────────
+  //
+  // # 为什么"结构"与"值"分成两个 ref
+  //
+  // lite 是编译期的"指哪儿改哪儿"：一个 `{expr}` 只重建**读到过变化信号**的那一小块。
+  // 所以渠道列表的**结构**（有哪些卡片）读 `settingsChannels`，卡片里的**值**读
+  // `settingsNotify`。合成一个对象的话，往输入框敲一个字就会让整块渠道表单重建
+  // ⇒ 每敲一下就丢一次焦点。
+  //
+  // # 为什么渠道配置留着**原始对象**
+  //
+  // PUT 是整体替换。而后端给每个渠道留了 `#[serde(flatten)] extra`（TS 的语义：多余
+  // 字段原样展开进请求体），那些键我们**没有建模**。只挑认识的字段回写，等于把用户
+  // 没碰过的字段静默抹掉 —— 所以界面持有 GET 回来的那个对象本身，只改看得见的键。
+  //
+  // # 打开才拉数据
+  //
+  // 十条渠道 + 一堆字段，页面 `load()` 里顺手全拉一遍只会多一条失败路径（没有后端时
+  // 每个账号各报一次错），而首屏一行都用不到它。所以读发生在**打开弹窗那一刻**。
+  const SETTINGS_DIALOG = 'account-settings'
+  const settingsAccount = ref<AccountSummary | null>(null)
+  const settingsState = ref<'idle' | 'loading' | 'error' | 'ready'>('idle')
+  /** 读 / 存 / 本地校验的失败原话（**后端原文优先**，见 `describeSettingsError`）。 */
+  const settingsError = ref('')
+  /** 保存成功回执。留在弹窗里直到关掉或下一次保存 —— 3 秒的 toast 太容易被错过。 */
+  const settingsOk = ref('')
+  const settingsSaving = ref(false)
+
+  // 全局字段。数字一律以**字符串**存：原样回显用户敲的东西，解析放到提交那一刻。
+  const fBackupWait = ref('')
+  const fRefreshDays = ref('')
+  const fSkipTasks = ref('')
+  const fAiAvatar = ref(false)
+  const fAiAvatarLimit = ref('')
+  const fRedpack = ref(false)
+  const fPlayAi = ref(false)
+  const fKouling = ref(false)
+
+  // 推送
+  const fNotifyOn = ref(false)
+  const fNotifyTitle = ref(DEFAULT_NOTIFY_TITLE)
+  const fOnlyError = ref(false)
+  const fMinLevel = ref<PushLogLevel>('info')
+  /** 渠道 → 原始配置对象（GET 回来的那份，见上面"留着原始对象"）。 */
+  const settingsNotify = ref<Record<string, unknown>>({})
+  /** 当前显示哪几张渠道卡片。结构与值分开存，理由见上面那段。 */
+  const settingsChannels = ref<NotifyChannelKey[]>([])
+  /** `customPost` 每条模板的请求体（JSON 文本），下标与模板一一对应。 */
+  const templateBodies = ref<string[]>([])
+  /** 打码字段的「显示」开关，按字段 id 记。 */
+  const shownSecrets = ref<Record<string, boolean>>({})
+
+  /** 取一个渠道的原始配置对象（`customPost` 是数组，单独处理）。 */
+  const channelCfg = (key: NotifyChannelKey): Record<string, unknown> | null => {
+    const v = settingsNotify.value[key]
+    return v != null && typeof v === 'object' && !Array.isArray(v)
+      ? (v as Record<string, unknown>)
+      : null
+  }
+
+  /** 读渠道配置里的一个字段，按**文本**给输入框（数字也照原样）。 */
+  const cfgText = (key: NotifyChannelKey, field: string): string => {
+    const v = channelCfg(key)?.[field]
+    return v == null ? '' : String(v)
+  }
+
+  /**
+   * 改渠道配置里的一个字段。
+   *
+   * 空串 ⇒ **删掉这一格**：`""` 会被后端当成"填了但为空"（`require_non_empty` ⇒ 400），
+   * 而用户的意思只是"这一格不填"。删掉它，可选字段才是真的缺席。
+   */
+  const setChannelField = (key: NotifyChannelKey, field: string, value: string): void => {
+    const next: Record<string, unknown> = { ...(channelCfg(key) ?? {}) }
+    if (value.trim() === '') delete next[field]
+    else next[field] = value
+    settingsNotify.value = { ...settingsNotify.value, [key]: next }
+  }
+
+  /** 回逍那两格在 `query` 里；没有别的键时把空的 `query` 删掉，别留一个空对象。 */
+  const setTwoImQuery = (field: string, value: string): void => {
+    const cfg: Record<string, unknown> = { ...(channelCfg('twoIm') ?? {}) }
+    const q: Record<string, unknown> = { ...((cfg.query as Record<string, unknown>) ?? {}) }
+    if (value.trim() === '') delete q[field]
+    else q[field] = value
+    if (Object.keys(q).length === 0) delete cfg.query
+    else cfg.query = q
+    settingsNotify.value = { ...settingsNotify.value, twoIm: cfg }
+  }
+
+  const twoImQueryText = (field: string): string => {
+    const q = channelCfg('twoIm')?.query as Record<string, unknown> | undefined
+    const v = q?.[field]
+    return v == null ? '' : String(v)
+  }
+
+  /** `customPost` 允许单个模板或数组；界面统一按数组处理。 */
+  const templateList = (): Record<string, unknown>[] => {
+    const v = settingsNotify.value.customPost
+    if (v == null) return []
+    return Array.isArray(v) ? (v as Record<string, unknown>[]) : [v as Record<string, unknown>]
+  }
+
+  /**
+   * 按**下标**迭代模板。
+   *
+   * ⚠ 列表项刻意是**数字**而不是模板对象：`createFor` 判"要不要重建这一行"用的是
+   * 对象身份。改一个字段就是一次 `{...tpl}`，新对象 ⇒ 整行重建 ⇒ 输入框丢焦点。
+   * 数字按下标比是同一份值，行被复用，只有字段绑定重跑。
+   */
+  const templateIndexes = (): number[] => templateList().map((_tpl, i) => i)
+
+  const templateText = (index: number, field: string): string => {
+    const v = templateList()[index]?.[field]
+    return v == null ? '' : String(v)
+  }
+
+  const setTemplateField = (index: number, field: string, value: string): void => {
+    const items = templateList().map((tpl, i) => {
+      if (i !== index) return tpl
+      const next: Record<string, unknown> = { ...tpl }
+      if (value.trim() === '') delete next[field]
+      else next[field] = value
+      return next
+    })
+    settingsNotify.value = { ...settingsNotify.value, customPost: items }
+  }
+
+  /**
+   * 改一条模板的请求体文本。
+   *
+   * ⚠ 刻意**不**写成 `templateBodies.value.map(...)`：两个数组（模板与请求体）
+   * 一旦长度不一致，`map` 到不了那个下标 ⇒ 赋值出来还是"没有这一格" ⇒ 紧接着
+   * 那条 `value={templateBodies.value[i] ?? ''}` 的绑定把用户刚敲的字**回写成空串**。
+   * 实测踩到过一次（`addChannel` 漏了配对），症状是"打字打不进去"。
+   * 这里先补齐长度，让"数组短了"不可能变成"输入框自己变空"。
+   */
+  const setTemplateBody = (index: number, text: string): void => {
+    const next = [...templateBodies.value]
+    while (next.length <= index) next.push('')
+    next[index] = text
+    templateBodies.value = next
+  }
+
+  /** 模板体在界面上是一段 JSON 文本；`data` 与 `body` 在后端是 `data || body`。 */
+  const bodyTextOf = (tpl: Record<string, unknown>): string => {
+    const v = tpl.data ?? tpl.body
+    return v == null ? '' : JSON.stringify(v, null, 2)
+  }
+
+  const addTemplate = (): void => {
+    const list = templateList()
+    // 请求体数组与模板数组**必须等长**（见 `setTemplateBody` 的 ⚠）：先按模板对齐一份，
+    // 再一起加一条，否则新加的那条从一出生就没有自己的请求体格子。
+    const bodies = list.map((_tpl, i) => templateBodies.value[i] ?? '')
+    settingsNotify.value = { ...settingsNotify.value, customPost: [...list, {}] }
+    templateBodies.value = [...bodies, '']
+  }
+
+  const removeTemplate = (index: number): void => {
+    settingsNotify.value = {
+      ...settingsNotify.value,
+      customPost: templateList().filter((_tpl, i) => i !== index),
+    }
+    templateBodies.value = templateBodies.value.filter((_t, i) => i !== index)
+  }
+
+  const addChannel = (key: NotifyChannelKey): void => {
+    if (!settingsChannels.value.includes(key)) {
+      settingsChannels.value = [...settingsChannels.value, key]
+    }
+    if (settingsNotify.value[key] == null) {
+      settingsNotify.value = { ...settingsNotify.value, [key]: {} }
+    }
+    // `customPost` 的空数组会被后端判成"一个模板都没有"（⇒ 400）。新加的直接给一条
+    // 空模板 —— 用户看到的是"该填 URL 了"，而不是"配了却被拒绝"。
+    //
+    // ⚠ 两个数组（模板 / 请求体文本）**必须同时就位**。上面那两行会把
+    // `customPost` 设成 `{}`，而 `templateList()` 把它当**单模板**包成 `[{}]` ——
+    // 所以"长度是 0 才补请求体"那个写法永远进不去，请求体数组留在空表上，
+    // 结果就是"URL 打得进去、模板体那边一敲字就被回写成空串"。实测踩到过。
+    if (key === 'customPost') {
+      const list = templateList()
+      if (list.length === 0) {
+        settingsNotify.value = { ...settingsNotify.value, customPost: [{}] }
+        templateBodies.value = ['']
+      } else {
+        templateBodies.value = list.map((_tpl, i) => templateBodies.value[i] ?? '')
+      }
+    }
+  }
+
+  const removeChannel = (key: NotifyChannelKey): void => {
+    settingsChannels.value = settingsChannels.value.filter((k) => k !== key)
+    const next = { ...settingsNotify.value }
+    delete next[key]
+    settingsNotify.value = next
+    if (key === 'customPost') templateBodies.value = []
+  }
+
+  const availableChannels = (): NotifyChannelKey[] =>
+    NOTIFY_CHANNELS.filter((k) => !settingsChannels.value.includes(k))
+
+  /** 卡片标题旁那枚徽章：只看**必填字段填没填**（与提交时"算不算配了"同一条判据）。 */
+  const channelState = (key: NotifyChannelKey): string => {
+    if (key === 'customPost') {
+      const n = templateList().filter((t) => String(t.url ?? '').trim() !== '').length
+      return n === 0 ? '未填' : String(n) + ' 条模板'
+    }
+    const cfg = channelCfg(key)
+    if (!cfg) return '未填'
+    const missing = CHANNEL_REQUIRED[key].filter((f) => String(cfg[f] ?? '').trim() === '')
+    return missing.length === 0 ? '已填好' : '缺 ' + missing.join('、')
+  }
+
+  const secretShown = (id: string): boolean => shownSecrets.value[id] === true
+
+  const toggleSecret = (id: string): void => {
+    shownSecrets.value = { ...shownSecrets.value, [id]: !secretShown(id) }
+  }
+
+  /**
+   * 把 GET / PUT 回来的一份设置铺进表单。
+   *
+   * 渠道配置**原样拿住**（里面可能有我们没建模的键），另挑一份"有哪些渠道"给结构性 ref。
+   */
+  const applySettings = (s: AccountSettings): void => {
+    // ⚠ 逐格容错：GET / PUT 回的应当是完整的 DTO，但真出现形状缺口时，
+    // 一条 `Cannot read properties of undefined` 会把"哪一格不对"整个盖掉。
+    // 缺数字 ⇒ 留空（提交时那条"不能留空"才是能读的错误），缺数组 ⇒ 空表。
+    fBackupWait.value = s.backupWaitSecs == null ? '' : String(s.backupWaitSecs)
+    fRefreshDays.value = s.refreshTokenDays == null ? '' : String(s.refreshTokenDays)
+    fSkipTasks.value = (s.skipTasks ?? []).join(', ')
+    fAiAvatar.value = s.aiAvatarEnabled === true
+    fAiAvatarLimit.value = s.aiAvatarDailyLimit == null ? '' : String(s.aiAvatarDailyLimit)
+    fRedpack.value = s.redpackEnabled
+    fPlayAi.value = s.playAiEnabled
+    fKouling.value = s.koulingEnabled
+
+    const n = s.notify
+    fNotifyOn.value = n != null
+    fNotifyTitle.value = n?.title ?? DEFAULT_NOTIFY_TITLE
+    fOnlyError.value = n?.onlyError ?? false
+    fMinLevel.value = n?.minLevel ?? 'info'
+
+    const raw = (n ?? {}) as Record<string, unknown>
+    const next: Record<string, unknown> = {}
+    const keys: NotifyChannelKey[] = []
+    for (const key of NOTIFY_CHANNELS) {
+      const v = raw[key]
+      if (v == null) continue
+      next[key] = v
+      keys.push(key)
+    }
+    settingsNotify.value = next
+    settingsChannels.value = keys
+    templateBodies.value = templateList().map(bodyTextOf)
+    shownSecrets.value = {}
+  }
+
+  const openSettings = (a: AccountSummary): void => {
+    settingsAccount.value = a
+    settingsState.value = 'loading'
+    settingsError.value = ''
+    settingsOk.value = ''
+    // ⚠ 先清空：上一个账号的渠道绝不能在下一次 GET 回来之前留在界面上
+    // —— 那会让人以为"这个账号也配了这些"，照着按保存就把别人的配置套过来了。
+    settingsNotify.value = {}
+    settingsChannels.value = []
+    templateBodies.value = []
+    shownSecrets.value = {}
+    openDialog(SETTINGS_DIALOG)
+    void loadSettings(a)
+  }
+
+  const loadSettings = async (a: AccountSummary): Promise<void> => {
+    settingsState.value = 'loading'
+    settingsError.value = ''
+    try {
+      applySettings(await getAccountSettings(a.id))
+      settingsState.value = 'ready'
+    } catch (e) {
+      settingsError.value = describeSettingsError(e, '读取')
+      settingsState.value = 'error'
+    }
+  }
+
+  const closeSettings = (): void => {
+    // 换一个账号再打开时不该看到上一条回执/错误 —— 关掉就清干净。
+    settingsOk.value = ''
+    settingsError.value = ''
+    settingsState.value = 'idle'
+    settingsAccount.value = null
+  }
+
+  /**
+   * 把一条渠道配置整理成要发出去的形状；返回 `null` = 这个渠道**没配**、整条不发。
+   *
+   * 三条规矩：
+   * - 必填字段**全空** ⇒ `null`（不发空对象）；
+   * - 数字字段转 JSON 数字（见 `CHANNEL_NUMERIC`）；
+   * - `customPost` 的模板体在这里解析 JSON，解不开就**指名是第几条**。
+   */
+  const buildChannel = (key: NotifyChannelKey): unknown => {
+    if (key === 'customPost') {
+      const items = templateList()
+        .map((tpl, i) => {
+          const next: Record<string, unknown> = { ...tpl }
+          const rawBody = (templateBodies.value[i] ?? '').trim()
+          delete next.data
+          delete next.body
+          if (rawBody !== '') {
+            let parsed: unknown
+            try {
+              parsed = JSON.parse(rawBody)
+            } catch {
+              throw new Error('自定义 POST 第 ' + (i + 1) + ' 条的模板体不是合法 JSON')
+            }
+            if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+              throw new Error('自定义 POST 第 ' + (i + 1) + ' 条的模板体必须是一个 JSON 对象')
+            }
+            next.data = parsed as Record<string, unknown>
+          }
+          return next
+        })
+        .filter((t) => String(t.url ?? '').trim() !== '')
+      return items.length > 0 ? items : null
+    }
+
+    const cfg = channelCfg(key)
+    if (!cfg) return null
+    const next: Record<string, unknown> = { ...cfg }
+    for (const field of CHANNEL_NUMERIC[key] ?? []) {
+      const cur = next[field]
+      if (cur == null || String(cur).trim() === '') delete next[field]
+      else next[field] = toJsonScalar(String(cur))
+    }
+    if (CHANNEL_REQUIRED[key].every((f) => String(next[f] ?? '').trim() === '')) return null
+    return next
+  }
+
+  const buildNotifyPayload = (): PushConfig | null => {
+    if (!fNotifyOn.value) return null
+    const out: Record<string, unknown> = {
+      title: fNotifyTitle.value.trim() === '' ? DEFAULT_NOTIFY_TITLE : fNotifyTitle.value.trim(),
+      onlyError: fOnlyError.value,
+      minLevel: fMinLevel.value,
+    }
+    let count = 0
+    for (const key of settingsChannels.value) {
+      const built = buildChannel(key)
+      if (built == null) continue
+      out[key] = built
+      count++
+    }
+    if (count === 0) {
+      // 后端对这份形状的原话是「notify 里没有任何渠道（全为 null）」⇒ 400。
+      // 与其打一枪再回错误，不如在这里说同一件事（判据与后端一致，只是省一次往返）。
+      throw new Error(
+        '推送总开关开着，但一个渠道都没配。要么至少配一个，要么关掉总开关（关掉 = 这个账号不推送）。',
+      )
+    }
+    return out as unknown as PushConfig
+  }
+
+  const buildSettings = (): AccountSettings => ({
+    backupWaitSecs: parseIntField('备份等待秒数', fBackupWait.value),
+    refreshTokenDays: parseIntField('刷新阈值天数', fRefreshDays.value),
+    skipTasks: parseSkipTasks(fSkipTasks.value),
+    aiAvatarEnabled: fAiAvatar.value,
+    aiAvatarDailyLimit: parseIntField('AI 头像每日上限', fAiAvatarLimit.value),
+    redpackEnabled: fRedpack.value,
+    playAiEnabled: fPlayAi.value,
+    koulingEnabled: fKouling.value,
+    notify: buildNotifyPayload(),
+  })
+
+  const saveSettings = async (): Promise<void> => {
+    const target = settingsAccount.value
+    if (!target) return
+    settingsError.value = ''
+    settingsOk.value = ''
+    let payload: AccountSettings
+    try {
+      payload = buildSettings()
+    } catch (e) {
+      // 本地能判的（空、不是整数、JSON 坏了）当场说，**范围**仍然留给后端。
+      settingsError.value = e instanceof Error ? e.message : '设置不完整'
+      return
+    }
+    settingsSaving.value = true
+    try {
+      // 用**后端回读的那一份**回填：整体替换的语义下，"我以为存进去的"不算数。
+      applySettings(await putAccountSettings(target.id, payload))
+      settingsOk.value = (target.nickname || target.label || target.id) + ' 的设置已保存'
+      pushToast('success', '账号设置已保存')
+    } catch (e) {
+      settingsError.value = describeSettingsError(e, '保存')
+    } finally {
+      settingsSaving.value = false
+    }
+  }
+
+  // ── 每账号设置的渲染 ────────────────────────────────────────────────
+  //
+  // 下面几个 `*Field` 都是**普通函数**（不是组件），并且**值一律走 thunk**
+  // （`get: () => string`）。两条都不是风格问题：
+  // - 普通函数被 `{channelFields(key)}` 这样调用时，调用本身发生在一条 effect 里；
+  //   若在这里**当场**读出值（`const v = cfgText(...)`）再当字符串传下去，那条
+  //   effect 就订阅了 `settingsNotify` —— 敲一个字整块表单重建、焦点全丢。
+  //   写成 `value={get()}` 时读发生在**属性自己的 effect** 里，只更新那一个输入框。
+  // - 组件不行：组件的 props 是在组件体里读的，而组件体只跑一次、不在任何 effect 里，
+  //   读到的值不会更新（本框架没有虚拟 DOM 的那层 diff）。
+
+  /** 一行普通输入框。 */
+  const textField = (
+    label: string,
+    get: () => string,
+    set: (v: string) => void,
+    hint: string,
+    type: 'text' | 'number' = 'text',
+  ) => (
+    <fieldset class="fieldset">
+      <legend class="fieldset-legend">{label}</legend>
+      <input
+        type={type}
+        class="input w-full"
+        autocomplete="off"
+        spellcheck={false}
+        value={get()}
+        onInput={(e) => set((e.target as HTMLInputElement).value)}
+      />
+      <p class="text-xs leading-5 opacity-60">{hint}</p>
+    </fieldset>
+  )
+
+  /**
+   * 一行**打码**输入框（token / secret / 带密钥的 webhook URL）。
+   *
+   * 默认 `type=password`，右边那颗「显示」按字段 id 记住是否明文 —— 打码防的是
+   * **站在屏幕边上的人**，不是自己，所以查看必须一键可达。
+   *
+   * ⚠ 这些值**不进 console**：本文件里没有任何 `console.*`，报错也只带字段名
+   * （后端 `validate` 就是这么约束的：错误信息里不许出现字段值）。
+   */
+  const secretField = (
+    id: string,
+    label: string,
+    get: () => string,
+    set: (v: string) => void,
+    hint: string,
+  ) => (
+    <fieldset class="fieldset">
+      <legend class="fieldset-legend">{label}</legend>
+      <div class="join w-full">
+        <input
+          type={secretShown(id) ? 'text' : 'password'}
+          class="input join-item w-full font-mono text-xs"
+          autocomplete="off"
+          spellcheck={false}
+          value={get()}
+          onInput={(e) => set((e.target as HTMLInputElement).value)}
+        />
+        <button
+          type="button"
+          class="btn join-item btn-soft"
+          aria-pressed={secretShown(id)}
+          onClick={() => toggleSecret(id)}
+        >
+          {secretShown(id) ? '隐藏' : '显示'}
+        </button>
+      </div>
+      <p class="text-xs leading-5 opacity-60">{hint}</p>
+    </fieldset>
+  )
+
+  /** 一个开关（daisyUI `toggle`）。 */
+  const switchField = (
+    label: string,
+    get: () => boolean,
+    set: (v: boolean) => void,
+    hint: string,
+  ) => (
+    <label class="flex cursor-pointer flex-col gap-1">
+      <span class="flex min-h-11 items-center gap-3 md:min-h-0">
+        <input
+          type="checkbox"
+          class="toggle toggle-primary"
+          checked={get()}
+          onChange={(e) => set((e.target as HTMLInputElement).checked)}
+        />
+        <span class="text-sm">{label}</span>
+      </span>
+      <span class="text-xs leading-5 opacity-60">{hint}</span>
+    </label>
+  )
+
+  /**
+   * 一个渠道的具体字段。
+   *
+   * ⚠ 分支**只看 `key`**（普通字符串），一个 ref 都不当场读 —— 所以这块结构建一次
+   * 就定了，改字段不会重建它（见上面那段"值一律走 thunk"）。
+   */
+  const channelFields = (key: NotifyChannelKey) => {
+    const get = (field: string) => () => cfgText(key, field)
+    const set = (field: string) => (v: string) => setChannelField(key, field, v)
+
+    if (key === 'pushplus' || key === 'serverChan') {
+      return secretField(
+        key + '.token',
+        'Token',
+        get('token'),
+        set('token'),
+        '在对应服务里生成的推送 token。留空 = 这个渠道不发。',
+      )
+    }
+    if (key === 'workWeixinBot') {
+      return (
+        <>
+          {secretField(
+            'workWeixinBot.url',
+            'Webhook URL',
+            get('url'),
+            set('url'),
+            '群设置 → 群机器人 → 添加 → 复制 Webhook 地址。⚠ 这个 URL 本身就是密钥：拿到它就能往群里发消息。',
+          )}
+          {textField('消息类型 msgtype（可留空）', get('msgtype'), set('msgtype'), '留空 = 后端按 text 发。')}
+        </>
+      )
+    }
+    if (key === 'dingTalk') {
+      return (
+        <>
+          {secretField(
+            'dingTalk.token',
+            'Access Token',
+            get('token'),
+            set('token'),
+            'Webhook 地址里 access_token= 后面那一段。',
+          )}
+          {secretField(
+            'dingTalk.secret',
+            '加签密钥（可留空）',
+            get('secret'),
+            set('secret'),
+            '只有机器人安全设置里选了「加签」才需要。',
+          )}
+        </>
+      )
+    }
+    if (key === 'customPost') {
+      return (
+        <div class="flex flex-col gap-2">
+          {templateIndexes().map((i) => (
+            <div key={i} class="flex flex-col gap-2 rounded-box border border-base-300 p-3">
+              {secretField(
+                'customPost.' + i + '.url',
+                '第 ' + (i + 1) + ' 条 URL',
+                () => templateText(i, 'url'),
+                (v) => setTemplateField(i, 'url', v),
+                '支持 {title} / {text} 占位符。⚠ URL 里带密钥时要按密钥对待。',
+              )}
+              {textField(
+                '第 ' + (i + 1) + ' 条方法（可留空）',
+                () => templateText(i, 'method'),
+                (v) => setTemplateField(i, 'method', v),
+                '留空 = POST；后端会把它转成大写。GET 也允许。',
+              )}
+              <fieldset class="fieldset">
+                <legend class="fieldset-legend">{'第 ' + (i + 1) + ' 条请求体模板（JSON，可留空）'}</legend>
+                <textarea
+                  class="textarea w-full font-mono text-xs"
+                  rows={3}
+                  value={templateBodies.value[i] ?? ''}
+                  onInput={(e) => setTemplateBody(i, (e.target as HTMLTextAreaElement).value)}
+                />
+                <p class="text-xs leading-5 opacity-60">
+                  必须是 JSON **对象**。里面的 {'{title}'} / {'{text}'} 会被替换（不转义）。
+                  留空 = 不发模板体。⚠ headers / timeout 等本版没有列出来的字段会原样保留。
+                </p>
+              </fieldset>
+              <button
+                type="button"
+                class="btn btn-sm btn-soft min-h-11 self-start md:min-h-0"
+                onClick={() => removeTemplate(i)}
+              >
+                删掉这条
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            class="btn btn-sm btn-soft self-start min-h-11 md:min-h-0"
+            onClick={addTemplate}
+          >
+            再加一条模板
+          </button>
+        </div>
+      )
+    }
+    if (key === 'workWeixin') {
+      return (
+        <>
+          {textField(
+            'corpid（企业 ID）',
+            get('corpid'),
+            set('corpid'),
+            '企业微信后台 → 我的企业 → 企业 ID。',
+          )}
+          {secretField(
+            'workWeixin.corpsecret',
+            'corpsecret（应用密钥）',
+            get('corpsecret'),
+            set('corpsecret'),
+            '企业微信后台 → 应用管理 → 你的应用 → Secret。',
+          )}
+          {textField(
+            'agentid（应用 ID）',
+            get('agentid'),
+            set('agentid'),
+            '必须是数字；缺了发送侧会整条跳过。',
+            'number',
+          )}
+          {textField('touser（可留空）', get('touser'), set('touser'), '收件人，留空 = 后端默认 @all。')}
+        </>
+      )
+    }
+    if (key === 'tgBot') {
+      return (
+        <>
+          {secretField('tgBot.token', 'Bot Token', get('token'), set('token'), '@BotFather 给的 token。')}
+          {textField(
+            'chat_id',
+            get('chat_id'),
+            set('chat_id'),
+            '收件会话：私聊是数字，群是负数，也可以写 @channelname。',
+          )}
+          {textField(
+            'apiHost（可留空）',
+            get('apiHost'),
+            set('apiHost'),
+            '自建反代时才填；留空 = 官方 api.telegram.org。',
+          )}
+          {textField('proxy（可留空）', get('proxy'), set('proxy'), '形如 http://127.0.0.1:7890。')}
+        </>
+      )
+    }
+    if (key === 'bark') {
+      return (
+        <>
+          {secretField('bark.key', 'Key', get('key'), set('key'), 'Bark App 首页那串 key。')}
+          {textField(
+            'level（可留空）',
+            get('level'),
+            set('level'),
+            '常见取值 active / timeSensitive / passive / critical；留空 = 后端默认。',
+          )}
+        </>
+      )
+    }
+    if (key === 'twoIm') {
+      return (
+        <>
+          {secretField('twoIm.key', 'Key', get('key'), set('key'), '回逍后台的 key。')}
+          {secretField('twoIm.sid', 'Sid', get('sid'), set('sid'), '回逍后台的 sid。')}
+          {textField('msgtype（可留空）', get('msgtype'), set('msgtype'), '留空 = 后端默认。')}
+          {textField(
+            '分组 group（可留空）',
+            () => twoImQueryText('group'),
+            (v) => setTwoImQuery('group', v),
+            '回逍的群组标识；留空 = 不按分组发。',
+          )}
+        </>
+      )
+    }
+    if (key === 'email') {
+      return (
+        <>
+          {textField('SMTP 主机', get('host'), set('host'), '例如 smtp.qq.com。')}
+          {textField('端口（可留空）', get('port'), set('port'), '必须是数字；留空 = 后端默认。', 'number')}
+          {textField('发件人 from', get('from'), set('from'), '例如 you@qq.com。')}
+          {secretField(
+            'email.pass',
+            'SMTP 口令 / 授权码',
+            get('pass'),
+            set('pass'),
+            '多数邮箱要的是「授权码」，不是登录口令。',
+          )}
+          {textField('收件人 to（可留空）', get('to'), set('to'), '留空 = 发给 from 自己。')}
+        </>
+      )
+    }
+    // 十个渠道都在上面的表里。走到这里说明加渠道时漏了一档 ——
+    // 宁可把话说出来，也别静默渲染成一块空白。
+    return <p class="text-xs text-error">这个渠道还没有表单（代码里漏了一档）。</p>
+  }
+
+  /** 推送那一块（总开关之外的全部内容）。 */
+  const notifyFields = () => (
+    <>
+      {textField(
+        '推送标题',
+        () => fNotifyTitle.value,
+        (v) => (fNotifyTitle.value = v),
+        '留空 = 用默认「mcloud 运行推送」。',
+      )}
+      {switchField(
+        '只在出错时推',
+        () => fOnlyError.value,
+        (v) => (fOnlyError.value = v),
+        '开了之后只有 error 类型的日志会推 —— fail / fatal 不算（后端判的就是类型恰好等于 error）。',
+      )}
+
+      <fieldset class="fieldset">
+        <legend class="fieldset-legend">最低日志级别</legend>
+        <select
+          class="select w-full"
+          value={fMinLevel.value}
+          onChange={(e) => (fMinLevel.value = (e.target as HTMLSelectElement).value as PushLogLevel)}
+        >
+          {MIN_LEVELS.map((lv) => (
+            <option key={lv.value} value={lv.value}>
+              {lv.label}
+            </option>
+          ))}
+        </select>
+        <p class="text-xs leading-5 opacity-60">级别越小越严重：error 只留错误，debug 全留。</p>
+      </fieldset>
+
+      <div class="flex flex-col gap-2">
+        <span class="text-xs font-medium opacity-70">渠道（点开一个才能改它）</span>
+        <div class="flex flex-col gap-2">
+          {settingsChannels.value.map((key) => (
+            <details key={key} class="collapse collapse-arrow bg-base-200">
+              <summary class="collapse-title text-sm font-medium">
+                {CHANNEL_LABEL[key]}
+                <span class="badge badge-soft badge-sm ml-2">{channelState(key)}</span>
+              </summary>
+              <div class="collapse-content flex flex-col gap-2">
+                <p class="text-xs leading-5 opacity-60">{CHANNEL_HINT[key]}</p>
+                {channelFields(key)}
+                <button
+                  type="button"
+                  class="btn btn-sm btn-soft btn-error min-h-11 self-start md:min-h-0"
+                  onClick={() => removeChannel(key)}
+                >
+                  删除这个渠道
+                </button>
+              </div>
+            </details>
+          ))}
+        </div>
+        {availableChannels().length > 0 ? (
+          <div class="flex flex-wrap items-center gap-1">
+            <span class="text-xs opacity-70">+ 加渠道：</span>
+            {availableChannels().map((key) => (
+              <button
+                key={key}
+                type="button"
+                class="btn btn-xs btn-soft min-h-9"
+                onClick={() => addChannel(key)}
+              >
+                {CHANNEL_LABEL[key]}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p class="text-xs opacity-60">十个渠道都已经在列表里了。</p>
+        )}
+      </div>
+    </>
+  )
+
+  const settingsForm = () => (
+    <>
+      {settingsOk.value ? (
+        <div class="alert alert-soft alert-success text-sm" role="status">
+          <span class="break-words">{settingsOk.value}</span>
+        </div>
+      ) : null}
+
+      {settingsError.value ? (
+        <div class="alert alert-soft alert-error text-sm" role="alert">
+          <span class="break-words">{settingsError.value}</span>
+        </div>
+      ) : null}
+
+      <div class="flex flex-col gap-2">
+        <h4 class="text-sm font-medium">任务参数</h4>
+        {textField(
+          '备份任务等待时间（秒）',
+          () => fBackupWait.value,
+          (v) => (fBackupWait.value = v),
+          '范围 0–3600（后端上限）：备份事件发出后等它落库的秒数，0 = 不等。',
+          'number',
+        )}
+        {textField(
+          '刷新凭据的剩余天数阈值',
+          () => fRefreshDays.value,
+          (v) => (fRefreshDays.value = v),
+          '范围 0–3650（后端上限）：凭据剩余天数低于它就刷新。',
+          'number',
+        )}
+        {textField(
+          '跳过的任务 id',
+          () => fSkipTasks.value,
+          (v) => (fSkipTasks.value = v),
+          '填任务 id（数字），用逗号或空格分隔，最多 1000 条；留空 = 一个都不跳。⚠ 旧版本存的是任务名，后端读旧库时会丢弃它们。',
+        )}
+      </div>
+
+      <div class="flex flex-col gap-2">
+        <h4 class="text-sm font-medium">功能开关</h4>
+        {switchField(
+          'AI 新头像',
+          () => fAiAvatar.value,
+          (v) => (fAiAvatar.value = v),
+          '打开后每天给账号换一批 AI 头像。',
+        )}
+        {textField(
+          'AI 头像每日上限（轮）',
+          () => fAiAvatarLimit.value,
+          (v) => (fAiAvatarLimit.value = v),
+          '范围 0–1000（后端上限）：每一轮都是一次上游调用。',
+          'number',
+        )}
+        {switchField(
+          '红包派对',
+          () => fRedpack.value,
+          (v) => (fRedpack.value = v),
+          '参与红包派对活动。',
+        )}
+        {switchField(
+          '春日拍拍大作战',
+          () => fPlayAi.value,
+          (v) => (fPlayAi.value = v),
+          '参与拍拍大作战活动。',
+        )}
+        {switchField(
+          '直播口令',
+          () => fKouling.value,
+          (v) => (fKouling.value = v),
+          '参与直播口令领小红花。',
+        )}
+      </div>
+
+      <div class="flex flex-col gap-2">
+        <h4 class="text-sm font-medium">运行结果推送</h4>
+        {switchField(
+          '启用推送',
+          () => fNotifyOn.value,
+          (v) => (fNotifyOn.value = v),
+          '关掉 = 这个账号一个渠道都不推（保存时 notify 写 null，会清掉下面的渠道配置）。本仓没有进程级兜底，每个账号各配各的。',
+        )}
+        {fNotifyOn.value ? (
+          notifyFields()
+        ) : (
+          <p class="text-xs leading-5 opacity-60">
+            当前不推送任何渠道。打开上面的开关才会出现渠道配置。
+          </p>
+        )}
+      </div>
+
+      <div class="modal-action">
+        <button type="button" class="btn btn-soft" onClick={() => closeDialog(SETTINGS_DIALOG)}>
+          关闭
+        </button>
+        <button
+          type="button"
+          class="btn btn-primary"
+          disabled={settingsSaving.value}
+          onClick={() => void saveSettings()}
+        >
+          {settingsSaving.value ? '保存中…' : '保存设置'}
+        </button>
+      </div>
+    </>
+  )
+
+  /**
+   * 弹窗正文：加载中 / 读失败（带重试）/ 表单。
+   *
+   * ⚠ 读失败的状态里**不关**弹窗：`settingsError` 里那句（404 / 401 / 400 / 网络）
+   * 正是用户要读的东西，关掉它等于把唯一的线索扔掉。
+   */
+  const settingsBody = () => {
+    if (settingsState.value === 'error') {
+      return (
+        <div class="flex flex-col gap-3">
+          <div class="alert alert-soft alert-error text-sm" role="alert">
+            <span class="break-words">{settingsError.value}</span>
+          </div>
+          <button
+            type="button"
+            class="btn btn-soft self-start"
+            onClick={() => {
+              const a = settingsAccount.value
+              if (a) void loadSettings(a)
+            }}
+          >
+            重试
+          </button>
+        </div>
+      )
+    }
+    if (settingsState.value !== 'ready') {
+      return (
+        <div class="flex justify-center py-8">
+          <span class="loading loading-lg text-primary" />
+        </div>
+      )
+    }
+    return settingsForm()
+  }
+
   onMounted(() => void load())
   onUnmounted(() => stopPolling())
 
@@ -474,18 +1664,45 @@ export const AccountsPage = () => {
     return hours >= 1 ? `${hours} 小时后` : '不到 1 小时'
   }
 
+  /**
+   * 添加弹窗里要不要显示「客户端形态」。
+   *
+   * - 手机端（App 登录）没有这个概念；
+   * - 粘贴凭据时看**凭据自带的**前缀：`mobile` 的不需要，`pc`（或看不出前缀）
+   *   的需要 —— 服务端对 `pc` 凭据**要求**它，不显示会让提交必然失败。
+   */
+  const needPlatform = () => {
+    if (method.value === 'app') return false
+    if (method.value === 'auth') return credentialPrefix(importAuth.value) !== 'mobile'
+    return true
+  }
+
   return (
     <div class="flex flex-col gap-4">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <h1 class="text-base font-medium">账号</h1>
-        <button
-          type="button"
-          class="btn btn-sm btn-soft min-h-11 md:min-h-0"
-          disabled={state.value === 'loading'}
-          onClick={() => void load()}
-        >
-          刷新
-        </button>
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            class="btn btn-sm btn-soft min-h-11 md:min-h-0"
+            disabled={state.value === 'loading'}
+            onClick={() => void load()}
+          >
+            刷新
+          </button>
+          {/*
+            添加账号收进弹窗：四条登录路径（扫码/短信/手机端/账密）加表单本身有
+            800 多行，常驻在页面上会把"我现在有哪几个账号"压到第一屏之外 ——
+            而那一句话才是这一页的主语。表单在弹窗里、宽度也够。
+          */}
+          <button
+            type="button"
+            class="btn btn-sm btn-primary min-h-11 md:min-h-0"
+            onClick={() => openDialog('add-account')}
+          >
+            添加账号
+          </button>
+        </div>
       </div>
 
       {/* ── 已登录账号 ─────────────────────────────────────────────── */}
@@ -507,7 +1724,7 @@ export const AccountsPage = () => {
       {state.value === 'ready' && accounts.value.length === 0 ? (
         <EmptyState
           title="还没有账号"
-          hint="用下面的任意一种方式登录一个移动云盘账号，登录后就能对它跑任务。"
+          hint="点右上角「添加账号」，扫码、短信、账密或用一条凭据都行。"
         />
       ) : null}
 
@@ -536,6 +1753,25 @@ export const AccountsPage = () => {
                     手机端
                   </span>
                 )}
+                {/* 编辑在前、移除在后：两个都是"对这个账号做点事"，
+                    但编辑是可逆的、移除不是 —— 把不可逆那个放在最外侧
+                    （远离视线落点，也远离"看一眼就想点第一个"的位置）。 */}
+                <button
+                  type="button"
+                  class="btn btn-sm btn-soft min-h-11 md:min-h-0"
+                  onClick={() => askEdit(a)}
+                >
+                  编辑
+                </button>
+                {/* 设置与编辑并列：都是"改这个账号"，且都可逆。
+                    真正不可逆的「移除」仍旧留在最外侧。 */}
+                <button
+                  type="button"
+                  class="btn btn-sm btn-soft min-h-11 md:min-h-0"
+                  onClick={() => openSettings(a)}
+                >
+                  设置
+                </button>
                 <button
                   type="button"
                   class="btn btn-sm btn-soft btn-error min-h-11 md:min-h-0"
@@ -549,15 +1785,20 @@ export const AccountsPage = () => {
         </ul>
       ) : null}
 
-      {/* ── 添加账号 ───────────────────────────────────────────────── */}
-      <div class="card card-border bg-base-100">
-        <div class="card-body gap-4 p-4">
-          <h2 class="card-title text-sm">添加账号</h2>
+      {/*
+        添加账号（弹窗）。
+        四条登录路径加各自表单有 300 多行，常驻会把"我现在有哪几个账号"压到
+        第一屏之外 —— 而那一句才是这一页的主语。弹窗里宽度也够放表单。
+      */}
+      <Dialog id="add-account" title="添加账号">
+        <div class="flex flex-col gap-4">
 
           {/* 平台：必须选，且必须说清影响。
               手机端**没有**这个选择 —— App 只有一种形态，摆一个选不了或
-              选了没用的开关只会让人以为它有意义。 */}
-          {method.value === 'app' ? (
+              选了没用的开关只会让人以为它有意义。
+              粘贴凭据那一格同理：凭据自带前缀（`pc` / `mobile`），
+              `mobile` 凭据下这个选择器同样不该出现。 */}
+          {!needPlatform() ? (
             <div class="alert alert-soft text-sm" role="status">
               <span>
                 手机端登录用 App 自己的身份（<code>mobile</code> 前缀）与设备头，
@@ -598,6 +1839,7 @@ export const AccountsPage = () => {
                 ['sms', '短信'],
                 ['app', '手机端'],
                 ['password', '账号密码'],
+                ['auth', '凭据'],
               ] as const
             ).map(([id, label]) => (
               <button
@@ -842,8 +2084,44 @@ export const AccountsPage = () => {
               </button>
             </div>
           ) : null}
+
+          {/*
+            粘贴凭据。
+            这条路**不做任何网络登录**：账号主键是手机号的哈希，服务端从凭据里
+            就能算出来 —— 所以"从旧实例 / 插件 / 抓包里拿到的一条 auth"
+            可以直接变成这里的账号。
+          */}
+          {method.value === 'auth' ? (
+            <div class="flex flex-col gap-3">
+              <label class="flex flex-col gap-1">
+                <span class="text-xs opacity-70">凭据</span>
+                <textarea
+                  class="textarea w-full font-mono text-xs"
+                  rows={4}
+                  placeholder="Basic <base64>，或只粘 base64 那段"
+                  value={importAuth.value}
+                  onInput={(e) => {
+                    importAuth.value = (e.target as HTMLTextAreaElement).value
+                  }}
+                />
+              </label>
+              <p class="text-xs opacity-70">
+                同一个手机号已经加过时，这里是换掉它的凭据，不是多一个账号 ——
+                昵称、设备号与任务设置都会保留。凭据只落进本机的
+                <code>accounts.json</code>，不会回显给界面。
+              </p>
+              <button
+                type="button"
+                class="btn btn-primary btn-sm self-start min-h-11 md:min-h-0"
+                disabled={importBusy.value}
+                onClick={() => void doImport()}
+              >
+                {importBusy.value ? '添加中…' : '用这条凭据添加'}
+              </button>
+            </div>
+          ) : null}
         </div>
-      </div>
+      </Dialog>
 
       {/* ── 设备指纹 ───────────────────────────────────────────────── */}
       <div class="card card-border bg-base-100">
@@ -863,6 +2141,130 @@ export const AccountsPage = () => {
           </button>
         </div>
       </div>
+
+      {/*
+        编辑账号（弹窗）。
+        三格：昵称、设备号、换凭据 —— 都是**给了才改**（服务端是 PATCH）。
+        凭据输入框刻意**留空**：它从不回显，空就是"不动它"，
+        所以"改个名字"不需要用户重新粘一遍凭据。
+      */}
+      <Dialog id="edit-account" title="编辑账号">
+        {editing.value ? (
+          <div class="flex flex-col gap-3">
+            <p class="text-xs opacity-70">
+              账号 <b>{editing.value.nickname || editing.value.label || editing.value.id}</b>
+              {' · '}
+              {editing.value.pc_platform ? PLATFORM_LABEL[editing.value.pc_platform] : '手机端'}
+              {' · 凭据 '}
+              {expireText(editing.value.expire)}
+            </p>
+
+            <label class="flex flex-col gap-1">
+              <span class="text-xs opacity-70">昵称（留空就用掩码手机号）</span>
+              <input
+                type="text"
+                class="input w-full"
+                maxlength={32}
+                value={editNickname.value}
+                onInput={(e) => {
+                  editNickname.value = (e.target as HTMLInputElement).value
+                }}
+              />
+            </label>
+
+            <label class="flex flex-col gap-1">
+              <span class="text-xs opacity-70">设备号</span>
+              <input
+                type="text"
+                class="input w-full font-mono text-xs"
+                value={editDevice.value}
+                onInput={(e) => {
+                  editDevice.value = (e.target as HTMLInputElement).value
+                }}
+              />
+              <span class="text-xs opacity-70">
+                上游按它认设备。不确定就别改 —— 换掉可能让这个账号的请求被上游拒绝。
+              </span>
+            </label>
+
+            <label class="flex flex-col gap-1">
+              <span class="text-xs opacity-70">换凭据（留空 = 不改）</span>
+              <textarea
+                class="textarea w-full font-mono text-xs"
+                rows={3}
+                placeholder="Basic <base64>，或只粘 base64 那段"
+                value={editAuth.value}
+                onInput={(e) => {
+                  editAuth.value = (e.target as HTMLTextAreaElement).value
+                }}
+              />
+            </label>
+
+            {/* 换了 pc 凭据就得同时给它形态：服务端要求形态与凭据同源，
+                否则这个账号以后每次请求都按错的平台发头。 */}
+            {editAuth.value.trim() && credentialPrefix(editAuth.value) !== 'mobile' ? (
+              <div class="flex flex-col gap-2">
+                <span class="text-xs font-medium opacity-70">客户端形态</span>
+                <div class="join">
+                  {(['windows', 'macos'] as const).map((p) => (
+                    <button
+                      type="button"
+                      class={`btn join-item btn-sm min-h-11 md:min-h-0 ${editPlatform.value === p ? 'btn-primary' : 'btn-soft'}`}
+                      onClick={() => (editPlatform.value = p)}
+                    >
+                      {PLATFORM_LABEL[p]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {editError.value ? (
+              <div class="alert alert-soft alert-error text-sm" role="alert">
+                <span class="break-words">{editError.value}</span>
+              </div>
+            ) : null}
+
+            <div class="modal-action">
+              <button
+                type="button"
+                class="btn btn-soft"
+                onClick={() => closeDialog('edit-account')}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                class="btn btn-primary"
+                disabled={savingEdit.value}
+                onClick={() => void doSaveEdit()}
+              >
+                {savingEdit.value ? '保存中…' : '保存'}
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </Dialog>
+
+      {/*
+        每账号设置（弹窗）。
+        结构：任务参数 → 功能开关 → 推送。推送里十条渠道**折叠**着，首屏只列
+        已配置的那些，其余走「+ 加渠道」—— 十条渠道的表单全铺开有一屏半，
+        而常用的一直是那几条。
+        ⚠ 打开才 GET：见上面「打开才拉数据」那段。
+      */}
+      <Dialog
+        id={SETTINGS_DIALOG}
+        title={
+          settingsAccount.value
+            ? '账号设置 · ' +
+              (settingsAccount.value.nickname || settingsAccount.value.label || settingsAccount.value.id)
+            : '账号设置'
+        }
+        onClose={closeSettings}
+      >
+        {settingsBody()}
+      </Dialog>
 
       <ConfirmDialog
         id="confirm-delete-account"

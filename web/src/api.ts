@@ -728,6 +728,244 @@ export const listAccounts = () => request<AccountSummary[]>('/api/accounts')
 export const deleteAccount = (id: string) =>
   request<void>(`/api/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' })
 
+/**
+ * 用**一条凭据**建立或更新账号（`POST /api/accounts`）。
+ *
+ * 这是"手上只有 auth"那条路：不走扫码/短信/账密。账号主键是**手机号的哈希**，
+ * 所以同一个号的凭据再次导入会落到同一个账号上 —— 服务端此时**只换凭据**，
+ * 昵称 / 设备号 / 每账号设置都保留，并在响应里用 `created: false` 说明。
+ *
+ * @param input.auth 原始凭据：`Basic base64("<平台>:<手机号>:<token>")`，
+ *   `Basic ` 前缀可有可无（服务端用同一套解析，见 `mcloud-upstream::auth::parse_auth`）。
+ * @param input.platform **仅在凭据前缀是 `pc` 时需要**：它决定后续每一次请求的
+ *   UA 与设备头，而凭据本身区分不出 win/mac（两种都是 `pc`）。
+ */
+export const importAccount = (input: { auth: string; platform?: PcPlatform; nickname?: string }) =>
+  request<{ account: AccountSummary; created: boolean }>('/api/accounts', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+
+/**
+ * 改一个账号的昵称 / 设备号 / 凭据（`PATCH /api/accounts/{id}`）。
+ *
+ * # 为什么是部分更新
+ *
+ * 这里有一个字段是**凭据**，而凭据从不发给客户端（[`AccountSummary`] 里没有它）
+ * ⇒ "读出来、改一处、写回去"这条路不存在，只能"给什么改什么"：
+ * **字段缺席 = 不改**，`nickname: ''` = 清空昵称。
+ */
+export const updateAccount = (
+  id: string,
+  patch: { nickname?: string; deviceId?: string; auth?: string; platform?: PcPlatform },
+) =>
+  request<AccountSummary>(`/api/accounts/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  })
+
+// ── 每账号设置（GET/PUT /api/accounts/{id}/settings）────────────────────
+//
+// 权威定义在 `crates/mcloud-core/src/account.rs` 的 `AccountSettingsDto`。这里的形状
+// 与它**逐字段一一对应**，三条口径照抄：
+//
+// 1. **线格式是 camelCase**（与 /api/schedules、/api/runs 一致）—— 不是落盘那份
+//    `AccountSettings` 的 snake_case。敲错键后端回 400，不会静默忽略。
+// 2. `PUT` 是**整体替换**：每个字段都必须显式给出（`notify: null` = 不配推送）。
+//    缺席没有"保持不变"的意思 ⇒ 客户端必须"先 GET 读全、改一处、再整体写回"。
+// 3. 未知键 ⇒ 400（`deny_unknown_fields`）；范围只在后端校验，前端给的是提示。
+
+/** 推送日志级别。与后端 `PushLogLevel` 一一对应（小写）。 */
+export type PushLogLevel = 'error' | 'warn' | 'info' | 'debug'
+
+/**
+ * 渠道配置里**具名字段之外**的键。
+ *
+ * 后端对应的是各处 `#[serde(flatten)] extra`：TS 的既定语义是"多余字段原样展开进
+ * 请求体"。它不是笔误（所以后端刻意不校验），而**整体替换**意味着客户端回写时
+ * 必须把这些键**原样带上** —— 丢了就是"用户没改过的字段被静默抹掉"。
+ *
+ * ⇒ 下面每个渠道类型都带一条索引签名，界面直接持有 GET 回来的那个对象本身。
+ */
+export interface TokenChannelConfig {
+  token: string
+  [extra: string]: unknown
+}
+
+/** 企业微信**应用**（两步：先换 access_token，再发消息）。 */
+export interface WorkWeixinConfig {
+  msgtype?: string
+  touser?: string
+  agentid?: number
+  corpsecret?: string
+  corpid?: string
+  [extra: string]: unknown
+}
+
+/** 企业微信**机器人**（一个 webhook URL 打到底）。 */
+export interface WorkWeixinBotConfig {
+  url: string
+  msgtype?: string
+  [extra: string]: unknown
+}
+
+/** Telegram Bot。 */
+export interface TgBotConfig {
+  apiHost?: string
+  token: string
+  /**
+   * ⚠ 后端是 `Value`（TS 里 chat_id 也可以是非数字的字符串，例如 `@channel`），
+   * 所以这里**不收窄**成 number。
+   */
+  chat_id?: string | number
+  disable_web_page_preview?: boolean
+  proxy?: string
+  [extra: string]: unknown
+}
+
+/** Bark（iOS）。 */
+export interface BarkConfig {
+  key: string
+  level?: string
+  [extra: string]: unknown
+}
+
+/** 回逍（2Im）的 query。 */
+export interface TwoImQuery {
+  plat?: string
+  group?: string
+  icon?: unknown
+  [extra: string]: unknown
+}
+
+/** 回逍（2Im）。 */
+export interface TwoImConfig {
+  key: string
+  sid: string
+  query?: TwoImQuery
+  msgtype?: string
+  [extra: string]: unknown
+}
+
+/** 钉钉机器人。`secret` 是加签密钥（可选）。 */
+export interface DingTalkConfig {
+  token: string
+  secret?: string
+  [extra: string]: unknown
+}
+
+/**
+ * 邮箱。
+ *
+ * ⚠ **本版不会真的发信**（后端 `mcloud-app::push::EMAIL_NOT_IMPLEMENTED`）。
+ * 界面照 DTO 把字段列全，并在渠道说明里写明这一点 —— 否则用户会以为配了就生效。
+ */
+export interface EmailConfig {
+  pass: string
+  from: string
+  port?: number
+  host: string
+  to?: string
+  [extra: string]: unknown
+}
+
+/** 自定义 POST 的一条模板。`url` 支持 `{title}` / `{text}` 占位符。 */
+export interface PushApiData {
+  url: string
+  method?: string
+  headers?: Record<string, string>
+  timeout?: number
+  data?: Record<string, unknown>
+  /** `data` 的备选（后端 `data || body`）。 */
+  body?: Record<string, unknown>
+  [extra: string]: unknown
+}
+
+/** 后端允许**单个模板或模板数组**（`CustomPost` 那个 untagged 枚举）。 */
+export type CustomPost = PushApiData | PushApiData[]
+
+/**
+ * 推送渠道的顶层键 —— 顺序即界面里的推荐顺序（最常用的排前面）。
+ *
+ * ⚠ 这个名单同时是**未知键校验**的名单：界面只发这里面的键。后端会拒绝别的。
+ */
+export const NOTIFY_CHANNELS = [
+  'pushplus',
+  'serverChan',
+  'workWeixinBot',
+  'dingTalk',
+  'customPost',
+  'workWeixin',
+  'tgBot',
+  'bark',
+  'twoIm',
+  'email',
+] as const
+
+export type NotifyChannelKey = (typeof NOTIFY_CHANNELS)[number]
+
+/** 推送配置（`PushConfig`）。渠道字段缺省 / `null` = 那个渠道不启用。 */
+export interface PushConfig {
+  title: string
+  onlyError: boolean
+  minLevel: PushLogLevel
+  pushplus?: TokenChannelConfig | null
+  serverChan?: TokenChannelConfig | null
+  workWeixin?: WorkWeixinConfig | null
+  workWeixinBot?: WorkWeixinBotConfig | null
+  tgBot?: TgBotConfig | null
+  bark?: BarkConfig | null
+  twoIm?: TwoImConfig | null
+  dingTalk?: DingTalkConfig | null
+  email?: EmailConfig | null
+  customPost?: CustomPost | null
+}
+
+/**
+ * 一个账号的设置 —— `GET` 的响应体，也是 `PUT` 的请求体（**整体替换**）。
+ *
+ * ⚠ `notify` 里有第三方渠道的 token/secret（后端**刻意不打码**读接口，取舍见
+ * `mcloud-server::routes::accounts::put_settings`）。界面必须把它们当密文：
+ * 默认打码、可切换查看、**不进 console**。
+ */
+export interface AccountSettings {
+  /** 备份任务等待时间（秒）。`0` = 不等。后端上限 3600。 */
+  backupWaitSecs: number
+  /** 剩余多少天时刷新凭证。后端范围 0..=3650。 */
+  refreshTokenDays: number
+  /** 跳过的任务 **id**（数字）。旧形状是任务名，后端读旧库时会**丢弃**它们。 */
+  skipTasks: number[]
+  aiAvatarEnabled: boolean
+  /** AI 新头像每日轮数上限。后端上限 1000。 */
+  aiAvatarDailyLimit: number
+  redpackEnabled: boolean
+  playAiEnabled: boolean
+  koulingEnabled: boolean
+  /** `null` = 这个账号**一个渠道都不推**（后端没有进程级兜底）。 */
+  notify: PushConfig | null
+}
+
+/**
+ * 读某账号的设置。
+ *
+ * ⚠ 别人的账号与不存在的账号回**同一个** 404（后端不区分，免得泄露存在性）——
+ * 界面不能把 404 说成"网络错误"。
+ */
+export const getAccountSettings = (id: string) =>
+  request<AccountSettings>(`/api/accounts/${encodeURIComponent(id)}/settings`)
+
+/**
+ * **整体替换**某账号的设置。
+ *
+ * 每个字段都必须给出（`notify: null` = 清空推送）。返回值是落盘后回读的那一份，
+ * 调用方应当拿它**回填界面** —— 后端可能做过归一化。
+ */
+export const putAccountSettings = (id: string, settings: AccountSettings) =>
+  request<AccountSettings>(`/api/accounts/${encodeURIComponent(id)}/settings`, {
+    method: 'PUT',
+    body: JSON.stringify(settings),
+  })
+
 // ── 直播口令 → 小红花 ─────────────────────────────────────────────────
 //
 // 这一族**没有专属端点**：它就是一条普通任务，走 `POST /api/runs` 与那条 SSE。
