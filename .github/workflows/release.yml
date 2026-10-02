@@ -28,18 +28,28 @@ name: Release
 #
 # 3. **`--locked`**：Cargo.lock 入库，锁死依赖版本，产物可复现。
 #
-# ── Linux arm64 为什么走 `cross` ────────────────────────────────────────
+# ── Linux arm64 为什么走 `cross`，以及它为什么要 `vendored` OpenSSL ──────
 #
 # 本仓**只用 `native-tls`**（兼容性优先：rustls 不实现 CBC 套件，连不上只给老套件的主机）
-# ⇒ Linux 侧走系统 OpenSSL ⇒ **交叉编译要拿到 aarch64 的 OpenSSL**，只装
-# `gcc-aarch64-linux-gnu` 是不够的（openssl-sys 会用 pkg-config 去找**目标架构**的库）。
-# `cross` 的镜像里带着目标 sysroot 与这批 -sys 依赖，正是为这种情况做的。
+# ⇒ Linux 侧链接 OpenSSL ⇒ 交叉编 aarch64 时必须拿到**目标架构**的 OpenSSL。
+#
+# ⚠ 光装 `gcc-aarch64-linux-gnu` 不够（openssl-sys 走 pkg-config，找的是目标架构的 .pc）；
+#   而 `cross` 的镜像里那份又**太老**：cross 最后发布的 v0.2.5（2023-02）用的还是
+#   Ubuntu 16.04 ⇒ 只有 OpenSSL 1.0.2g，低于 openssl-sys 要求的 1.1.0。
+#   （Dockerfile 升到 Ubuntu 24.04 是 2026-05-31，**在最后一次发布之后** ⇒ 只有未发布的
+#   `:main`/`:edge` 镜像才是新的；而那个会把 glibc 基线从 2.23 抬到 2.39，产物反而
+#   **更不兼容**旧发行版 ✗。）
+#
+# ⇒ 解法在依赖侧，不在 workflow 侧：给 `aarch64-unknown-linux-gnu` 开 openssl 的
+#   `vendored`（见 `crates/mcloud-upstream/Cargo.toml` 末尾那段），用目标架构的交叉
+#   工具链**从源码编 OpenSSL**。好处是不依赖镜像里那份过期库，也不去追未发布镜像。
+#   代价：arm64 产物**静态链** OpenSSL（运行时不需要装 `libssl`，体积大 2–3 MB）。
 #
 # ⚠ 另一条路是 GitHub 的 arm64 runner（`ubuntu-24.04-arm`），但**本仓是私有仓库** ⇒
 #    那条要额外计费 ⇒ 用 cross。
-# ⚠ cross 那条**本地验不了**（本机没有 Docker）⇒ 它只在 tag 那次真跑时才算验证过。
-#    真失败时第一嫌疑就是 OpenSSL：踩到就在镜像里补装 `libssl-dev:arm64`，
-#    或把这一条改成 rustls（代价见上）。
+# ⚠ cross 那条**本地验不了**（本机没有 Docker）⇒ 它只在 CI 真跑时才算验证过。
+#    验证方式：`gh workflow run release.yml --ref main`（手动触发不发 Release，
+#    只出 artifact —— 见 release job 的 `if: github.ref_type == 'tag'`）。
 #
 # ── 压缩选型（UPX）────────────────────────────────────────────────────
 #
@@ -401,7 +411,10 @@ jobs:
 
             ## 平台注意
 
-            * **Linux**：用系统 TLS，需要 `libssl`（`apt install libssl3` / `dnf install openssl-libs`）；
+            * **Linux x86_64**：用系统 TLS，需要 `libssl`（`apt install libssl3` / `dnf install openssl-libs`）；
+            * **Linux arm64**：OpenSSL **已静态链进二进制**，运行时**不需要**装 `libssl` ✓
+              （它是交叉编的，用不了 runner 镜像里那份系统库，见仓库 `crates/mcloud-upstream/Cargo.toml`
+              末尾那段说明）；
             * **macOS**：产物**未压缩**（UPX 会破坏 arm64 代码签名，M 芯片上跑不起来）。
               二进制未签名，浏览器下载后先 `xattr -dr com.apple.quarantine ./mcloud-server`；
             * **Windows**：产物**用 UPX 压过**（约原体积 1/3），代价是 Defender/SmartScreen

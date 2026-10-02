@@ -49,3 +49,34 @@ hex.workspace = true
 # 固定时钟：`live_ws_client` 的听写测试要钉住时间戳（状态机用 `now_millis`
 # 派生三处字段，用真实时钟就没法断言）。
 mcloud-core = { workspace = true, features = ["testkit"] }
+
+# ── 交叉编 Linux arm64 时的 OpenSSL ──────────────────────────────────────
+#
+# Linux 上 `native-tls` 走**系统 OpenSSL** ⇒ `openssl-sys` 必须找到**目标架构**的
+# 头文件与库。原生构建（x86_64 Linux / macOS / Windows）用系统那份就行 ✓，
+# 但 **cross 交叉编 aarch64 时不行**：cross 最后发布的 v0.2.5（2023-02）用的镜像
+# 还是 Ubuntu 16.04，里面只有 OpenSSL **1.0.2g**，而 `openssl-sys` 0.9.115 要求
+# ≥ 1.1.0 ⇒
+#
+#     version_number=1000207f
+#     This crate is only compatible with OpenSSL (version 1.1.0, 1.1.1, 3.x, or 4.x) …
+#     Process completed with exit code 101.
+#
+# （2026-10-02 发 3.0.0-rc.1 时实测两轮：第一轮是"完全找不到"，按 cross 官方
+#  `docs/recipes.md` 的 pre-build 装了 `libssl-dev:arm64` 之后，变成"找到了但太老"。）
+#
+# 官方文档给的另一条路就是这里用的 `vendored`：**从源码编 OpenSSL**，用目标架构的
+# 交叉工具链（cross 会设好 `CC_aarch64_unknown_linux_gnu` 等）。两条好处：
+#   1. 不依赖镜像里那份过期 OpenSSL ✓；
+#   2. 也**不去追未发布的 `:main` 镜像** —— 那个已升到 Ubuntu 24.04，会把 glibc 基线
+#      从 2.23 抬到 2.39，产物反而**更不兼容**旧发行版 ✗。
+#
+# 代价说清：arm64 这份产物**静态链** OpenSSL（运行时不再需要装 `libssl` ✓，
+# 代价是二进制约大 2–3 MB —— 反正后面还有 UPX ✓）；x86_64 那份照旧动态链系统
+# `libssl` ✓。两边差异在 Release 说明里写明了。
+#
+# ⚠ 只挂 `aarch64-unknown-linux-gnu`：**别**改成 `cfg(target_os = "linux")` ——
+#   那会让本来好好的 x86_64 也去源码编一遍 OpenSSL（每次构建多约 4 分钟 ✗），
+#   换来的只是"少装一个 libssl" ✓。
+[target.aarch64-unknown-linux-gnu.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
