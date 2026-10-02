@@ -157,6 +157,16 @@ const STEPS = {
     // 走的是 page 条件分支 + 新页组件创建 + onMounted + 各页自己的取数）
     ...ROUTES.map((r) => ({ name: `切到 ${r}`, do: go(`#/${r}`), check: eq('location.hash', `#/${r}`), changed: true })),
     { name: '点导航（抽屉）：历史', do: clickText('ul.menu button', '历史'), check: eq('location.hash', '#/history') },
+    {
+      // ⭐ 「历史页复用结构化明细」的直接证据：**过去**那一场直播的逐条口令，
+      // 现在能在历史里看到（从前只有一行小结，明细打不开）。
+      name: '历史页：过去的直播能看到逐条口令明细',
+      do: null,
+      check: eq(
+        `(() => { const t = document.getElementById('app').textContent; return t.includes('历史口令甲') + '/' + t.includes('历史口令乙') })()`,
+        'true/true',
+      ),
+    },
     { name: '点 dock：任务', do: clickText('.dock button', '任务'), check: eq('location.hash', '#/tasks') },
     { name: '展开抽屉', do: clickSel('label[for="nav-drawer"]'), check: eq("document.getElementById('nav-drawer').checked", true), changed: true },
     { name: '收起抽屉', do: clickSel('label[for="nav-drawer"]'), check: eq("document.getElementById('nav-drawer').checked", false), changed: true },
@@ -240,6 +250,22 @@ const STEPS = {
       name: '直播页：够 2 条有效 ⇒ 明说不需要再抓',
       do: null,
       check: has(APP_TEXT, '全场都不需要再抓口令'),
+    },
+    {
+      // 下一场读的是**预告场**的 expectStartTime —— 而判定门只认 status==1，
+      // 所以这个时间能显示出来，就证明"日程没跟着门一起丢"（Go 参考实现的坑）。
+      name: '直播页：显示下一场（预告场的时间，原样）',
+      do: null,
+      check: eq(
+        `(() => { const t = document.getElementById('app').textContent; return t.includes('下一场') + '/' + t.includes('2026-09-23 14:30:00') })()`,
+        'true/true',
+      ),
+    },
+    {
+      // 场次列表：进行中的那条要写"还在播"，结束的那条要有结束时刻。
+      name: '直播页：显示观测到的场次（含"还在播"）',
+      do: null,
+      check: has(APP_TEXT, '还在播'),
     },
     {
       // 过期的那条必须**看得出来**是无效、且原因在（"过期视同无效，但原因留着"）
@@ -599,12 +625,14 @@ const STEPS = {
     // 而 `waitStable` 已经等过一轮，所以这里要求它**必须**在（不在就是没放行完全）
     { name: '放行后：切主题', do: clickSel('[aria-label^="切换到"]'), check: eq("!!document.documentElement.getAttribute('data-theme')", true) },
     // ── 历史页：筛选与搜索（2026-10-01 改版新增）──
-    // fixture 里是 2 条（1 成功 + 1 失败）。⚠ 胶囊的可见文字带计数（「失败 1」），
+    // fixture 里是 **3** 条（2 成功 + 1 失败）——
+    // 第 3 条是 2026-10-02 为「历史页复用结构化明细」加的（带 `details.liveRoom`）。
+    // ⚠ 胶囊的可见文字带计数（「失败 1」），
     // 所以按 `aria-label` 点它 —— `clickText` 是精确匹配。
-    { name: '历史页：两条记录都在', do: null, check: eq('document.querySelectorAll("#app table tbody tr").length', 2) },
+    { name: '历史页：三条记录都在', do: null, check: eq('document.querySelectorAll("#app table tbody tr").length', 3) },
     { name: '历史页：切「失败」档只剩 1 条', do: clickSel('[aria-label="筛选：失败"]'), check: eq('document.querySelectorAll("#app table tbody tr").length', 1), changed: true },
     { name: '历史页：搜索无结果 ⇒ 是"没有符合条件"而不是"还没有记录"', do: typeIn('#app input[type=search]', 'zzz'), check: has(APP_TEXT, '没有符合条件的记录'), changed: true },
-    { name: '历史页：清除筛选回到全部', do: clickText('button', '清除筛选'), check: eq('document.querySelectorAll("#app table tbody tr").length', 2), changed: true },
+    { name: '历史页：清除筛选回到全部', do: clickText('button', '清除筛选'), check: eq('document.querySelectorAll("#app table tbody tr").length', 3), changed: true },
   ],
   /**
    * 已初始化未登录：口令错走错误分支，口令对则**闸门从登录页翻到外壳**

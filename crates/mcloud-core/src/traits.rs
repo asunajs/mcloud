@@ -364,6 +364,31 @@ pub trait UserStore: Send + Sync {
     /// 清掉已过期的会话。顺手回收，避免表无限增长。
     async fn purge_expired_sessions(&self, now_ms: i64) -> Result<usize>;
 
+    /// 读**共享口令池**（实例级：跨 mcloud 用户、跨重启）。
+    ///
+    /// 默认实现回一个空池（不是错误）：测试替身不关心它，而空池的语义就是
+    /// "什么都没抓过" —— 一切都会照常走一遍抓取。
+    ///
+    /// # 为什么也挂在 `UserStore`
+    ///
+    /// 与 `settings()` / `task_params()` 同一个理由：新开 trait 会让 16 处
+    /// 测试替身各补一行空实现。语义上它属于**实例**而不是某个用户 ——
+    /// 而它偏偏必须跨用户共享，所以更不能挂在某个用户下面。
+    async fn kouling_pool(&self) -> Result<Box<crate::kouling::KoulingPool>> {
+        Ok(Box::new(crate::kouling::KoulingPool::default()))
+    }
+
+    /// 写共享口令池。
+    ///
+    /// 默认实现**报错**（与 `save_settings` 同一口径）：写不进去却回成功，
+    /// 会让"够 2 条就停抓"这类判据永远不成立 —— 那是查都没法查的一种坏。
+    async fn save_kouling_pool(&self, pool: &crate::kouling::KoulingPool) -> Result<()> {
+        let _ = pool;
+        Err(crate::Error::Config(
+            "这个存储不支持下改口令池（save_kouling_pool 未实现）".into(),
+        ))
+    }
+
     /// 读某个任务的**默认参数**（任务页「配置」里存的那份）。
     ///
     /// 没配过就是**空对象**（不是错误）：前端据此回落到参数自己的默认值。

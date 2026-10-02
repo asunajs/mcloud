@@ -178,7 +178,53 @@ export const FIXTURES = {
       },
     ],
   },
-  '/api/runs': [RUN, { ...RUN, run_id: 1023, task: 'live-room', duration_ms: 61000, outcome: { status: 'failed', reason: '口令无效' }, details: null }],
+  /**
+   * 共享口令池：装置里放**两条有效**（正是"够了、别再抓"的那条判据），
+   * 外加一条已过期 —— 界面必须同时显示"够 2 条"与"过期视同无效"。
+   */
+  '/api/kouling': {
+    cycleAtMs: 1_790_000_000_000,
+    validCount: 2,
+    stopScraping: true,
+    codes: [
+      { value: '中秋口令甲', state: 'valid', source: 'danmaku', reason: '已验证有效', firstSeenMs: 1_790_000_000_000, validAtMs: 1_790_000_010_000 },
+      { value: '中秋口令乙', state: 'valid', source: 'xiaohongshu', reason: '已验证有效（这个账号已领过）', firstSeenMs: 1_790_000_020_000, validAtMs: 1_790_000_030_000 },
+      { value: '过期的老口令', state: 'invalid', source: 'manual', reason: '口令已过期', firstSeenMs: 1_790_000_040_000, validAtMs: null },
+    ],
+    nextStart: '2026-09-23 14:30:00',
+    scheduleAtMs: 1_790_000_050_000,
+    sessions: [
+      { startedAtMs: 1_790_000_060_000, endedAtMs: null },
+      { startedAtMs: 1_789_960_000_000, endedAtMs: 1_789_963_600_000 },
+    ],
+  },
+  '/api/runs': [
+    RUN,
+    { ...RUN, run_id: 1023, task: 'live-room', duration_ms: 61000, outcome: { status: 'failed', reason: '口令无效' }, details: null },
+    {
+      // ⭐ 直播那一次的**结构化明细**（`details.liveRoom`）：
+      // 历史页必须把它渲染出来。从前这套明细只长在直播页上 ⇒
+      // 过去的每一次直播都只剩一行小结，用户回看时无处可看。
+      ...RUN,
+      run_id: 1024,
+      task: 'live-room',
+      duration_ms: 66000,
+      outcome: { status: 'success', summary: '进账 3 朵小红花' },
+      details: {
+        liveRoom: {
+          balanceBefore: 10,
+          balanceAfter: 13,
+          gained: 3,
+          codes: ['历史口令甲', '历史口令乙'],
+          draws: [
+            { code: '历史口令甲', kind: 'succeeded', flowerNum: 3, prizeName: '小红花' },
+            { code: '历史口令乙', kind: 'kouling_expired' },
+          ],
+          expiredCodes: ['历史口令乙'],
+        },
+      },
+    },
+  ],
   '/api/schedules': [SCHEDULE],
   '/api/pipelines': [PIPELINE],
   '/api/accounts': [ACCOUNT, ACCOUNT2],

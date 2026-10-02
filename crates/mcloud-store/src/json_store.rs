@@ -87,6 +87,8 @@ struct Db {
     /// 与 `settings` 分开落盘：设置是"这个实例怎么跑"，而这里每一格属于某一个任务 ——
     /// 混在一份文件里，写参数就会顺带把设置整体重写一遍。
     task_config: HashMap<String, serde_json::Value>,
+    /// 直播口令池。**实例级**（不是按账号/按用户）—— 口令是全场共享的资源。
+    kouling_pool: mcloud_core::KoulingPool,
     /// 会话，按 `token_hash` 存。
     ///
     /// 用 `HashMap` 而不是 `Vec`：查会话是**每个请求**都走的路径。
@@ -128,6 +130,8 @@ mod files {
     pub const SETTINGS: &str = "settings.json";
     /// 每个任务的默认参数（任务页「配置」存的那份）。
     pub const TASK_CONFIG: &str = "task-config.json";
+    /// 全实例共享的直播口令池。
+    pub const KOULING_POOL: &str = "kouling-pool.json";
     /// 设备指纹：**单独一个文件**，不与 `state.json` 混。
     ///
     /// 混在一起的话，`save_account_state` 那种整块覆盖写会顺手把指纹清掉；
@@ -486,6 +490,8 @@ impl JsonStore {
         let settings: AppSettings = self.read_json(&self.path(files::SETTINGS))?;
         let task_config: HashMap<String, serde_json::Value> =
             self.read_json(&self.path(files::TASK_CONFIG))?;
+        let kouling_pool: mcloud_core::KoulingPool =
+            self.read_json(&self.path(files::KOULING_POOL))?;
         let sessions: HashMap<String, Session> = self.read_json(&self.path(files::SESSIONS))?;
 
         // 日志按 run 分文件，按需读取（只读还保留着的那些 run）
@@ -509,6 +515,7 @@ impl JsonStore {
         db.users = users;
         db.settings = settings;
         db.task_config = task_config;
+        db.kouling_pool = kouling_pool;
         db.sessions = sessions;
         db.logs = logs;
         Ok(())
@@ -588,6 +595,14 @@ impl JsonStore {
             .lock()
             .map_err(|_| Error::Storage("写锁中毒".into()))?;
         store.write_json(&store.path(files::SETTINGS), &db.settings)
+    }
+
+    fn persist_kouling_pool(db: &Db, store: &Self) -> Result<()> {
+        let _gate = store
+            .write_gate
+            .lock()
+            .map_err(|_| Error::Storage("写锁中毒".into()))?;
+        store.write_json(&store.path(files::KOULING_POOL), &db.kouling_pool)
     }
 
     fn persist_task_config(db: &Db, store: &Self) -> Result<()> {
@@ -1101,6 +1116,16 @@ impl mcloud_core::UserStore for JsonStore {
 
     async fn settings(&self) -> Result<AppSettings> {
         Ok(self.read()?.settings)
+    }
+
+    async fn kouling_pool(&self) -> Result<Box<mcloud_core::KoulingPool>> {
+        Ok(Box::new(self.read()?.kouling_pool.clone()))
+    }
+
+    async fn save_kouling_pool(&self, pool: &mcloud_core::KoulingPool) -> Result<()> {
+        let mut db = self.write()?;
+        db.kouling_pool = pool.clone();
+        Self::persist_kouling_pool(&db, self)
     }
 
     async fn task_params(&self, task: &str) -> Result<serde_json::Value> {

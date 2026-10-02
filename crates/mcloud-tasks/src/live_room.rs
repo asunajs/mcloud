@@ -93,6 +93,102 @@ use mcloud_upstream::live_ws_client::{self, ListenRequest, LiveWsEndpoint};
 
 // ══════════════════════════ 参数 ══════════════════════════
 
+/// 把上游给的房间变成池要留的**日程**（含门会筛掉的预告/回放）。
+///
+/// ⚠ 这里是"日程不能跟着丢"的落点：判定门只留"正在直播"，
+/// 而"下一场几点"读的恰恰是 `status == 0` 那张预告场的 `expectStartTime`。
+fn schedule_rooms(rooms: &[mcloud_upstream::live_room::LiveRoom]) -> Vec<mcloud_core::ProbeRoom> {
+    rooms
+        .iter()
+        .map(|r| mcloud_core::ProbeRoom {
+            room_id: r.id,
+            title: r.title.clone(),
+            status: r.status,
+            expect_start_time: r.expect_start_time.clone(),
+        })
+        .collect()
+}
+
+/// 把一份领取报告里"验成有效"的口令并进集合（本地计"够不够两条"用）。
+///
+/// # 为什么判据要**本地算**，而不是回读池
+///
+/// 池写失败是**只警告不失败**的（那是刻意的：不能拿优化否定目的）。若判据靠
+/// "回读池"，写不进盘时就永远读到 0 ⇒ 继续听的循环会一直转到硬上限为止 ✗。
+/// 这个 bug 是被测试逼出来的：测试的替身存储不支持下写池，循环因此停不下来。
+fn note_valid_codes(set: &mut std::collections::HashSet<String>, report: &RedFlowerReport) {
+    for d in &report.draws {
+        if matches!(
+            d.outcome.kind,
+            RedFlowerDrawKind::Succeeded | RedFlowerDrawKind::AlreadyDrawn
+        ) {
+            set.insert(d.code.clone());
+        }
+    }
+}
+
+/// 把这次运行的领取结论**写回共享口令池**。
+///
+/// # 为什么池写不进去**只警告、不失败**
+///
+/// 本任务的价值是"把花领到手"；池是"让别的账号少抓一次"的**优化**。
+/// 因为池写失败就把已经领到的花判成失败，是拿优化去否定目的 ——
+/// 而且那种失败最难查：日志里只有一句存储错误，用户看到的是"任务失败"，
+/// 而他明明领到了。
+///
+/// # ⚠ 已知的并发窗口（刻意留着，不引锁）
+///
+/// 池是"读 → 改 → 存"，两个账号同时跑时，后写的会把先写的那条**备注**盖掉。
+/// 后果是"那条死口令下一次还会被投一次"（再得一次 `200108`），
+/// **不是**文件损坏（存储的写入本身是原子的）。
+/// 引一把进程内锁能消掉它，但代价是把"池"这个概念和进程生命周期绑在一起 ——
+/// 而池的意义恰恰是**跨进程重启**。所以这里选择如实标注，而不是假装没有。
+async fn settle_pool(
+    ctx: &TaskContext,
+    account_id: &str,
+    out: &LiveRoomAccountResult,
+) -> Result<()> {
+    let now = ctx.clock.now_ms();
+    let mut pool = ctx.store.kouling_pool().await?;
+    pool.normalize(now);
+    // 这次实际拿到并投出去的口令先进池（未知态）—— 包括重听那一轮拿到的。
+    pool.note(&out.codes, mcloud_core::KoulingSource::Auto, now);
+    if let Some(report) = &out.report {
+        for d in &report.draws {
+            // ⚠ **状态跃迁的唯一映射点**（用户 2026-10-01 拍的那张表）：
+            //
+            // 成功 / 已兑换 ⇒ 有效；口令错 ⇒ 无效；**过期视同无效**（但原因留着）；
+            // 别的码 ⇒ 不动（本层没分类，不能当有效性判据）。
+            //
+            // ⚠⚠ 注意这里与"要不要重听"是**两个问题**：那边 `rejected_kouling()`
+            // 对过期必须返回 `false`（否则会白听 60 秒）。别把两处合并。
+            let verdict = match d.outcome.kind {
+                RedFlowerDrawKind::Succeeded => mcloud_core::ClaimVerdict::Claimed,
+                RedFlowerDrawKind::AlreadyDrawn => mcloud_core::ClaimVerdict::AlreadyClaimed,
+                RedFlowerDrawKind::InvalidKouling => mcloud_core::ClaimVerdict::Invalid,
+                RedFlowerDrawKind::KoulingExpired => mcloud_core::ClaimVerdict::Expired,
+                _ => mcloud_core::ClaimVerdict::Other,
+            };
+            pool.note_claim(account_id, &d.code, verdict, now);
+        }
+    }
+    if let Err(e) = ctx.store.save_kouling_pool(&pool).await {
+        ctx.warn(format!(
+            "口令池写回失败（不影响这次领取，只是别的账号这次用不上共享结果）：{e}"
+        ));
+    }
+    Ok(())
+}
+
+/// "继续听"最多再听几轮（防死循环）。
+///
+/// # 为什么必须有这个上限
+///
+/// 弹幕是**不可信输入**：任何一行都可能是候选口令（观众发言也算），
+/// 所以"还不足两条有效就继续听"在理论上可以永远听下去。
+/// 上限只兜底，不参与判据 —— 正常情况下第一、二轮就够了。
+pub const MAX_LISTEN_ROUNDS: usize = 5;
+
 /// 一趟运行里**由使用者决定**的那几件事。
 ///
 /// ⚠ 构造出来不等于"这组参数能跑"：组合是否成立由 [`LiveRoomParams::check`] 判
@@ -105,8 +201,6 @@ pub struct LiveRoomParams {
     pub codes: Vec<String>,
     /// 自动收集时听弹幕的时长（秒）。
     pub listen_seconds: u64,
-    /// **获取口令但不领取**：收完就结束，一个口令都不拿去领。
-    pub kouling_only: bool,
     /// "只用给定口令"：不开弹幕。它为真时 `codes` 必须非空。
     pub skip_kouling: bool,
 }
@@ -115,14 +209,12 @@ pub struct LiveRoomParams {
 ///
 /// # 为什么判据在这层、措辞不在
 ///
-/// 三条规则本身只有一个答案，两个产物各写一遍必然漂移（一处放行、一处拒绝，
+/// 判据本身只有一个答案，两个产物各写一遍必然漂移（一处放行、一处拒绝，
 /// 而"哪一处才是对的"没人能从那两份代码里读出来）。措辞则**必须**各写一遍：
-/// CLI 要说 `--kouling-only` 并退 2，服务端要说"获取口令但不领取"并回 400 ——
-/// 把 flag 名塞进领域层会让界面上输出一句没有 flag 的话。
+/// CLI 要说 `--skip-kouling` 并退 2，服务端要说"关掉了唯一的弹幕来源"并回 400
+/// —— 把 flag 名塞进领域层会让界面上输出一句没有 flag 的话。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveRoomFault {
-    /// 「获取口令但不领取」与「只用给定口令」同时为真。
-    ExclusiveSwitches,
     /// 关掉了唯一的口令来源，又没给手工口令。
     SkipWithoutCodes,
     /// 要听弹幕，可时长不是正数。
@@ -133,7 +225,6 @@ impl LiveRoomFault {
     /// 判据的中性描述（**不含 flag 名**，措辞由调用方自己写）。
     pub fn describe(self) -> &'static str {
         match self {
-            Self::ExclusiveSwitches => "「获取口令但不领取」与「只用给定口令」互斥",
             Self::SkipWithoutCodes => "关掉了弹幕来源，却没有给手工口令",
             Self::ListenNotPositive => "听弹幕的时长必须是正数",
         }
@@ -144,19 +235,15 @@ impl LiveRoomParams {
     /// 判这一组参数**是否成立**（纯函数）。
     ///
     /// ```text
-    /// kouling_only && skip_kouling        → ExclusiveSwitches
     /// skip_kouling && codes.is_empty()    → SkipWithoutCodes
     /// listen_seconds == 0                 → ListenNotPositive
     /// ```
     ///
-    /// ⚠ 第三条**不看 `skip_kouling`**：时长非正在**任何**情况下都不是合法输入。
-    /// 把它写在 `skip_kouling` 后面会让"获取口令但不领取 + 0 秒"悄悄放行，
+    /// ⚠ 时长那一条**不看 `skip_kouling`**：非正在**任何**情况下都不是合法输入。
+    /// 把它挂在 `skip_kouling` 后面会让"不用弹幕 + 0 秒"悄悄放行，
     /// 而那时 0 秒会被传下去、让那次 WS 与并行的 GET **一起**立刻超时，
     /// 表现成一句方向错的通知（"两个口令来源都失败了"）。
     pub fn check(&self) -> std::result::Result<(), LiveRoomFault> {
-        if self.kouling_only && self.skip_kouling {
-            return Err(LiveRoomFault::ExclusiveSwitches);
-        }
         if self.skip_kouling && self.codes.is_empty() {
             return Err(LiveRoomFault::SkipWithoutCodes);
         }
@@ -272,11 +359,18 @@ pub fn split_kouling(raw: &str) -> Vec<String> {
     merge_kouling(&fields)
 }
 
-/// 回答"要不要为无效口令重听一次，以及听的时候该排除哪些"（纯函数）。
+/// 回答"要不要**继续听**一次，以及听的时候该排除哪些"（纯函数）。
+///
+/// # ⚠⚠ 判据在 2026-10-01 换掉了（用户口径）
+///
+/// **要的是两条*有效*的口令，不是"收到两条"。** 原来的实现是"有口令被判无效才重听" ✗
+/// —— 于是"一条都没收到""收到两条全是没分类的码""只验出一条有效"这三种情况
+/// 一趟就结束了，而它们恰恰是**最该继续听下去**的情形。
+/// 现在看的是**池里（含这一趟刚验出来的）有效条数够不够 [`VALID_ENOUGH`]**。
 ///
 /// # 两个容易写错的边界
 ///
-/// - **没有无效口令就 `retry == false`**：一次完全正常的运行不该多听 60 秒；
+/// - **够了就不再听**：验出两条有效之后多听 60 秒纯属白喂风控；
 /// - **`exclude` 必须含第一轮"已经试过的"**（含**第一次就成功的**）——
 ///   不排除已成功的话，第二轮会把同一批口令再领一遍，而**同一账号**对同一条
 ///   **正确**口令的第二次请求会回 `200112`（已兑换）：它不是新结果，
@@ -285,10 +379,17 @@ pub fn split_kouling(raw: &str) -> Vec<String> {
 ///
 /// ⚠⚠ 上面那条的理由**不是**"口令会被消耗" —— 口令是**全场通用**的
 /// （事实 3），所有观众共用同一批，不存在"用掉"。**别把"消耗"写回来。**
-pub fn retry_plan(first_batch: &[String], invalid_codes: &[String]) -> (bool, Vec<String>) {
-    if invalid_codes.is_empty() {
+pub fn retry_plan(
+    first_batch: &[String],
+    invalid_codes: &[String],
+    valid_count: usize,
+) -> (bool, Vec<String>) {
+    // 够了（两条有效）：这一趟收工，别再占着弹幕窗口。
+    if valid_count >= mcloud_core::kouling::VALID_ENOUGH {
         return (false, Vec::new());
     }
+    // 还不够：继续听。排除表 = 第一批 + 判无效的（**含第一次就成功的**，
+    // 否则第二轮会把同一批口令再领一遍，而"已兑换"会污染归因）。
     let mut all: Vec<String> = first_batch.to_vec();
     all.extend(invalid_codes.iter().cloned());
     (true, merge_kouling(&all))
@@ -968,9 +1069,9 @@ pub struct LiveRoomAccountResult {
     ///
     /// ⚠ 只存"有没有"，**不存那一串**：它是凭据，不该顺着进度与结果流进日志。
     pub has_jwt: bool,
-    /// 这次实际拿到并拿去领取的口令（`kouling_only` 时是收到的）。
+    /// 这次实际拿到并拿去领取的口令。
     pub codes: Vec<String>,
-    /// 六步链的结论；`None` 表示**没领**（获取口令但不领取 / 门没开 / 一个口令都没收到）。
+    /// 六步链的结论；`None` 表示**没领**（门没开 / 一个口令都没收到）。
     pub report: Option<RedFlowerReport>,
     /// 有没有触发过"重听一次"。
     pub retried: bool,
@@ -981,7 +1082,7 @@ pub struct LiveRoomAccountResult {
 /// 四个结论状态 —— [`RedFlowerReport`] 的领域层映射。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunVerdict {
-    /// 没领（获取口令但不领取 / 门没开 / 一个口令都没收到）。
+    /// 没领（门没开 / 一个口令都没收到）。
     Idle,
     /// 领了、全部成功。
     AllSucceeded,
@@ -996,7 +1097,7 @@ impl LiveRoomAccountResult {
     ///
     /// | 情形 | 结论 |
     /// |---|---|
-    /// | **没领**（获取口令但不领取 / 门没开 / 一个口令都没收到） | **成功** |
+    /// | **没领**（门没开 / 一个口令都没收到） | **成功** |
     /// | 领了、**一个都没成** | **失败** |
     /// | 领了、成了**一部分** | **部分成功** |
     /// | 领了、全成 | 成功 |
@@ -1045,7 +1146,6 @@ impl LiveRoomAccountResult {
     /// # ⚠⚠ 三种"没领"必须**分开说**
     ///
     /// ```text
-    /// 获取口令但不领取      → "收到 N 个口令，本次只获取不领取"
     /// 门没开 & live_count==0 → "今天没有直播，没有口令可收"     （下一步：等）
     /// 门没开 & live_count>0  → "有 N 间在播，但没有一间是「…」"  （下一步：别等了）
     /// 开了门但没收到        → "开了门但没收到口令"
@@ -1054,9 +1154,6 @@ impl LiveRoomAccountResult {
     /// ⚠ 混成一句"没有可领的口令"会让人去查**收集**那一步，
     /// 而那一步根本没被走到过 —— 它们的下一步**完全不同**。
     pub fn idle_summary(&self) -> String {
-        if self.params.kouling_only {
-            return format!("收到 {} 个口令，本次只获取不领取", self.codes.len());
-        }
         if !self.gate.active {
             if self.gate.live_count == 0 {
                 return "今天没有直播，没有口令可收".to_string();
@@ -1117,10 +1214,6 @@ impl<'a> LiveRoomRun<'a> {
                 .and_then(Value::as_u64)
                 // 默认 60 秒：与参考实现一致（听满一段才有意义）。
                 .unwrap_or(60),
-            kouling_only: body
-                .get("koulingOnly")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
             skip_kouling: body
                 .get("skipKouling")
                 .and_then(Value::as_bool)
@@ -1160,6 +1253,18 @@ impl<'a> LiveRoomRun<'a> {
     /// ⚠ 反过来说：**没有** codes 时开门失败**必须如实上抛**，
     /// 绝不能退化成"今天没有直播"。见 [`Self::open_gate`]。
     ///
+    /// # ⚠ 2026-10-01 补第三条：**池里够 2 条有效也不再开门**
+    ///
+    /// 口令现在是**全实例共享**的资源（见 [`settle_pool`]）：池里已经有两张能用的票时，
+    /// 全场都不该再去抓（用户口径）。于是"开门"的完整判据是**三个条件的与**：
+    ///
+    /// ```text
+    /// 手里没有可用口令（含池里挑出来为空的）  且  池里有效 < 2 条  且  没开「只听手工」
+    /// ```
+    ///
+    /// 再叠一道**90 秒去重**（[`mcloud_core::KoulingPool::scrape_ready`]）：
+    /// 别的账号刚开抓就别再扑上去 —— 这就是"一个 mcloud 用户只开一个抓取"那一句。
+    ///
     /// # ⚠ 票（`jwttoken`）的来源：**云盘侧**，不是直播侧
     ///
     /// 六步链全打在 `m.mcloud.139.com/ycloud`（与签到同域同族，公共头里那个
@@ -1191,15 +1296,28 @@ impl<'a> LiveRoomRun<'a> {
             ..Default::default()
         };
 
-        // ── 有手工口令 ⇒ **跳过开门**（刻意的取舍，理由见函数头"要不要开门"）──
+        // ── 口令来源：**共享池** + 手工 ──────────────────────────────────
         //
-        // 顺序很关键：这一段必须**在**开门之前。若先开门再看 codes，
-        // 那么"门那两枪偶发失败"会把一趟**本来能跑完**的领取整体拖黄 ——
-        // 而手工 codes 根本不需要门（它们已经够跑完六步链了）。
-        let manual = merge_kouling(&params.codes);
-        if !manual.is_empty() {
-            out.codes = manual;
+        // 顺序很关键：这一段必须**在**开门之前 —— 门要不要开，
+        // 取决于这里挑出来了几条（见下面那句判据）。
+        //
+        // 用户口径（2026-10-01）：口令是**全实例共享**的资源 ——
+        // 别的账号、别的 mcloud 用户抓到并验过的，这里直接用；
+        // 手工粘的**验证通过后也进共享**（见 [`settle_pool`]）。
+        let now_ms = ctx.clock.now_ms();
+        let mut pool = ctx.store.kouling_pool().await?;
+        pool.normalize(now_ms);
+        let account_id = ctx.account.id.to_string();
+        // 手工给的排前面（"我就要用这几条"），池里挑的是补充。
+        let mut picked = merge_kouling(&params.codes);
+        for code in pool.pick_for(&account_id) {
+            if !picked.contains(&code) {
+                picked.push(code);
+            }
         }
+        out.codes = picked;
+        // 池里已判死的别拿去凑数，也别让重听把它们再听一遍。
+        let known_invalid = pool.invalid_values();
 
         // 门只在"需要收口令"时才开：有 codes 时一个请求都不多发。
         //
@@ -1207,12 +1325,51 @@ impl<'a> LiveRoomRun<'a> {
         // 都从它借用。这样"重听"那一段也能拿到同一张票，
         // 而不会出现"第二次去取票"（那会多发两枪，且两张票不是同一张）。
         let mut gate_jwt: Option<String> = None;
-        if out.codes.is_empty() && !params.skip_kouling {
+        //
+        // ⚠ 判据是**两个条件的与**（2026-10-01 定）：
+        //
+        // ```text
+        // 手里没有可用的口令  且  池里有效不足 2 条  ⇒ 才开门去抓
+        // ```
+        //
+        // 为什么不是"只要池里不够就抓"：手工口令是小红书那条的**唯一入口**
+        // （它没有可鉴权的接口）。那样改会让"门那两枪偶发失败"把一趟
+        // **本来能跑完**的领取整体拖黄 ✗ —— 这是本文件早就记着的取舍，
+        // 而它并不与共享冲突：手工那几条**验证后也会进池**（见 [`settle_pool`]），
+        // 池就是这么被填起来的。
+        //
+        // 反过来说，"这个账号还有池里没领过的"也算**有得用**（`pick_for` 非空）
+        // ⇒ 不必抓。于是抓取天然只在"谁都还没拿到口令"时发生一次，
+        // 而"有效够 2 条"之后全场都不再抓（用户口径）。
+        //
+        // ⚠ 再加一道**去重**：别的账号刚开抓（90 秒内）就别再扑上去 ——
+        // 用户口径"一个 mcloud 用户只需要开一个 ws/小红书抓取"。这道判据是
+        // **持久化**的（不是进程内标志）：重启后仍然有效，而池存在的意义就是跨重启。
+        if out.codes.is_empty()
+            && !params.skip_kouling
+            && !pool.stop_scraping()
+            && pool.scrape_ready(now_ms)
+        {
             // ⚠ 开门失败**如实上抛** —— 绝不退化成"今天没有直播"（那是撒谎：
             // "我们凭据坏了"与"今天没开播"是两件事，后者是**假结论**）。
             let jwt = self.open_gate(ctx).await?;
             out.has_jwt = true;
-            out.gate = judge_kouling_gate(&self.gate_rooms(ctx, &jwt).await?);
+            let all_rooms = self.gate_rooms(ctx, &jwt).await?;
+            out.gate = judge_kouling_gate(&all_rooms);
+            // ⚠ 把**全部**房间交给池（含门必然筛掉的预告与回放）：界面上那行
+            // "下一场几点"读的就是预告场的时间。只留门认可的那几间 ⇒ 日历就丢了。
+            pool.note_probe(&schedule_rooms(&all_rooms), out.gate.active, now_ms);
+            // ⚠ 记"我开抓了"必须在**动手之前**：收集要听满 listenSeconds（默认 60 秒），
+            // 抓完再记 = 整个窗口都敞着，别的账号照样扑上来。
+            //
+            // ⚠⚠ 这里**连"门最后是关的"也会记**（`note_scrape` 在 `if !out.gate.active`
+            // 之前）：效果是 90 秒内不再重复问门。这是**故意**的 —— 判定门的结果
+            // 在一分钟内不会变，而"没开播"是这一整段里最正常的结局，
+            // 每个账号每分钟都去打两枪只是白白喂风控。代价：开播最多晚 90 秒被发现。
+            pool.note_scrape(now_ms);
+            if let Err(e) = ctx.store.save_kouling_pool(&pool).await {
+                ctx.warn(format!("口令池写回失败（不影响本次运行）：{e}"));
+            }
             gate_jwt = Some(jwt);
             let jwt = gate_jwt.as_deref().expect("刚放进去");
 
@@ -1253,13 +1410,16 @@ impl<'a> LiveRoomRun<'a> {
             ));
             let collected = self
                 .collector
-                .collect(ctx, jwt, &room, params.listen_for(), &[])
+                .collect(ctx, jwt, &room, params.listen_for(), &known_invalid)
                 .await?;
+            // ⚠ 收集到的**先进池再领**：这一趟要是中途崩了，
+            // 别人至少还能直接用这几条（口令本身是有时效的，捂在手里最亏）。
+            pool.note(&collected.codes, mcloud_core::KoulingSource::Auto, now_ms);
             out.codes = collected.codes;
         }
 
         // 没得领就结束（"没领"是**正常结果**，见 [`Self::verdict`]）。
-        if params.kouling_only || out.codes.is_empty() {
+        if out.codes.is_empty() {
             return Ok(out);
         }
 
@@ -1283,54 +1443,104 @@ impl<'a> LiveRoomRun<'a> {
         // 重听是**补救措施**，没有它第一轮的结果依然成立；而把它变成 `Err`
         // 会让"口令抄错了一个"这种小事把整趟已经拿到的花全部作废
         // （归因方向也错了：真正的问题是那条口令无效，不是"没房间"）。
-        let (retry, exclude) = retry_plan(&out.codes, &report.invalid_codes);
-        if retry && !params.skip_kouling {
-            match (gate_jwt.as_deref(), out.gate.rooms.first().cloned()) {
-                (Some(jwt), Some(room)) => {
-                    out.retried = true;
-                    ctx.progress(2, 3, "重听口令");
-                    ctx.warn(format!(
-                        "有 {} 个口令无效，重听 {} 秒…",
-                        report.invalid_codes.len(),
-                        params.listen_seconds
-                    ));
-                    // 重听失败**不致命**：它是补救措施，自己失败时应当保留第一轮的结果。
-                    let fresh = match self
-                        .collector
-                        .collect(ctx, jwt, &room, params.listen_for(), &exclude)
-                        .await
-                    {
-                        Ok(o) => o.codes,
-                        Err(e) => {
-                            ctx.warn(format!("重听失败（保留第一轮结果）：{e}"));
-                            Vec::new()
-                        }
-                    };
-                    let to_draw = pick_new_codes(&fresh, &out.codes, &report.invalid_codes);
-                    out.report = Some(report.clone());
-                    if !to_draw.is_empty() {
-                        ctx.info(format!("又收到 {} 个新口令，再领一轮…", to_draw.len()));
-                        ctx.progress(3, 3, "用新口令领取");
-                        // 第二轮**沿用同一个会话**（口径："一轮任务一条 jwttoken"）。
-                        let second = self
-                            .run_chain(ctx, RedFlowerSession::new(to_draw.clone()))
-                            .await?;
-                        // 两轮的结果**合并**：第一次成功的不能因为第二轮而消失。
-                        out.report = Some(merge_reports(&report, &second));
-                        out.codes.extend(to_draw);
-                    }
-                    return Ok(out);
-                }
-                _ => {
-                    ctx.warn(format!(
-                        "有 {} 个口令无效，但这一趟没有可听的房间（未跑门）⇒ 不重听",
-                        report.invalid_codes.len()
-                    ));
-                }
+        // ⚠ 顺序：**先结算、再判"要不要继续听"**。
+        //
+        // 判据要看的是**池里**的有效条数，而这一趟刚验出来的那几条此刻还只在
+        // `report` 里 —— 所以先把它们写进池（`out.report` 也必须先赋值，
+        // [`settle_pool`] 读的就是它），再回读一份新鲜的池。
+        // `settle_pool` 是幂等的（同一份结论重复写没有副作用），收尾还会再走一次。
+        out.report = Some(report.clone());
+        settle_pool(ctx, &account_id, &out).await?;
+        // ── 还不够两条有效 ⇒ **继续听**（循环）────────────────────────────
+        //
+        // ⚠ 这里从前是"最多再听一次"，判据是"有没有口令被判无效"。
+        // 2026-10-01 用户口径把判据换成"**要的是两条有效的**"，
+        // 于是它自然该是个循环：每一轮都 听 → 立刻领取验证 → 回写池 → 再看够不够。
+        //
+        // 三条边界，缺一条就会变成"转圈"或"假收工"：
+        // 1. 每轮必须**真的推进**：`to_draw` 为空（弹幕里没有新口令）就结束，
+        //    否则同一批口令会被反复听、反复试；
+        // 2. `exclude` 逐轮累积（**含第一次就成功的**）—— 否则下一轮会把同一批
+        //    再领一遍，而同一账号对同一条正确口令的第二次请求回 `200112`，
+        //    会污染归因、看起来像"口令坏了"；
+        // 3. 硬上限 [`MAX_LISTEN_ROUNDS`]：弹幕是不可信输入，没有上限就是死循环。
+        let mut merged = report.clone();
+        let mut tried: Vec<String> = out.codes.clone();
+        let mut rounds = 0usize;
+        //
+        // ⚠⚠ 有效条数**本地算**，不去 store 回读 —— 这一条是被测试逼出来的真问题：
+        //
+        // 池写失败是**只警告不失败**的（那是刻意的：不能拿优化否定目的）。若判据
+        // 靠"回读池"，那么写不进盘时就永远读到 0 ⇒ 循环一直听到硬上限为止 ✗。
+        // 所以起点取**进门之前那份池快照**里的有效口令，之后每轮把这一轮新验出来的
+        // 成功/已兑换加进来（用集合去重 ⇒ 同一张嘴不会数两遍）。
+        let mut valid: std::collections::HashSet<String> =
+            pool.valid_values().into_iter().collect();
+        // ⚠ **第一轮的结论也要算** —— 它不在循环里的 `next` 上，
+        // 漏掉它就会把"第一轮已经验出一条有效"当成"一条都没有"⇒ 多听一轮 ✗
+        // （实测就是这么多的听了第三轮）。
+        note_valid_codes(&mut valid, &report);
+        while !params.skip_kouling && rounds < MAX_LISTEN_ROUNDS {
+            let (again, exclude) = retry_plan(&tried, &merged.invalid_codes, valid.len());
+            if !again {
+                break;
             }
+            rounds += 1;
+            // 没有可听的房间（这一趟没跑过门：手工 codes 那一支）⇒ 如实说一句、不再听。
+            let (Some(jwt), Some(room)) = (gate_jwt.as_deref(), out.gate.rooms.first().cloned())
+            else {
+                ctx.warn(format!(
+                    "有效口令还不足 {} 条，但这一趟没有可听的房间（未跑门）⇒ 不再听",
+                    mcloud_core::kouling::VALID_ENOUGH
+                ));
+                break;
+            };
+            out.retried = true;
+            ctx.progress(2, 3, "继续听口令");
+            ctx.info(format!(
+                "有效口令还不足 {} 条（现有 {} 条），再听 {} 秒…",
+                mcloud_core::kouling::VALID_ENOUGH,
+                valid.len(),
+                params.listen_seconds
+            ));
+            // 再听失败**不致命**：它是补救措施，失败时保留已有结果。
+            let fresh = match self
+                .collector
+                .collect(ctx, jwt, &room, params.listen_for(), &exclude)
+                .await
+            {
+                Ok(o) => o.codes,
+                Err(e) => {
+                    ctx.warn(format!("再听失败（保留已有结果）：{e}"));
+                    break;
+                }
+            };
+            let to_draw = pick_new_codes(&fresh, &tried, &merged.invalid_codes);
+            if to_draw.is_empty() {
+                ctx.info("又听了一轮，没有新口令 —— 停在这儿（再听也不会有）");
+                break;
+            }
+            ctx.info(format!("又收到 {} 个新口令，再领一轮…", to_draw.len()));
+            ctx.progress(3, 3, "用新口令领取");
+            // 每一轮**沿用同一个会话**（口径："一轮任务一条 jwttoken"）。
+            let next = self
+                .run_chain(ctx, RedFlowerSession::new(to_draw.clone()))
+                .await?;
+            // 结果**合并**：先成功的不能因为后一轮而消失。
+            merged = merge_reports(&merged, &next);
+            // 把这一轮"验成有效"的口令记进本地计数（判据看的就是它）。
+            note_valid_codes(&mut valid, &next);
+            out.report = Some(merged.clone());
+            out.codes.extend(to_draw.clone());
+            tried.extend(to_draw);
+            // 每轮都回写池：这样"够不够两条"看的是**已验证**的事实。
+            settle_pool(ctx, &account_id, &out).await?;
         }
-
-        out.report = Some(report);
+        // ⚠ 这里**不能**再 `out.report = Some(report)`：循环里已经把各轮结果合并过，
+        // 用第一轮覆盖会把后面几轮的成功记录抹掉（表现是"明明领到了却报没领"）。
+        // 循环没进过时 `out.report` 也已经是第一轮 —— 见上面那句赋值。
+        // 收尾结算：把这次每条口令的结论写回共享池（别的账号就不必再试一遍）。
+        settle_pool(ctx, &account_id, &out).await?;
         Ok(out)
     }
 
@@ -1403,8 +1613,8 @@ impl<'a> LiveRoomRun<'a> {
     /// 那条让"凭据坏了"表现成"门开着、却一条口令也听不到"，
     /// 真因被盖住，排查方向会从"今天是不是没开播"开始 —— **完全错**。
     ///
-    /// ⇒ 这里把失败原样返回。要不要继续由**调用方**决定
-    /// （[`LiveRoomParams::kouling_only`] 那种开关才是"我就是要试试看"的正确表达位置）。
+    /// ⇒ 这里把失败原样返回，要不要继续由**调用方**决定 ——
+    /// 想"不发请求先看看参数怎么拆"用 `dryRun`（它是纯本地的，见 `run`）。
     ///
     /// # 证据等级
     ///
@@ -1537,7 +1747,6 @@ impl Task for LiveRoomTask {
                 "秒",
                 "听多久弹幕来抓口令（参考实现的默认是 60 秒）",
             ),
-            ParamSpec::boolean("koulingOnly", "只听不领", false, "只抓口令，不换成小红花"),
             ParamSpec::boolean("skipKouling", "跳过听弹幕", false, "直接用上面填的口令去领"),
             ParamSpec::boolean("dryRun", "试运行", false, "只查询、不真的领取"),
         ]
@@ -1565,9 +1774,6 @@ impl Task for LiveRoomTask {
         // 直接输出给用户会少掉"哪个 flag 该去掉"这个关键信息。
         if let Err(fault) = params.check() {
             let wording = match fault {
-                LiveRoomFault::ExclusiveSwitches => {
-                    "koulingOnly 与 skipKouling 互斥：获取口令但不领取，就不该再关掉弹幕来源"
-                }
                 LiveRoomFault::SkipWithoutCodes => {
                     "skipKouling 关掉了唯一的口令来源，必须同时给 codes"
                 }
@@ -1704,7 +1910,6 @@ impl Task for RedFlowerTask {
             codes,
             // 它不收集，时长只需是个正数即可过校验。
             listen_seconds: 1,
-            kouling_only: false,
             skip_kouling: true,
         };
         let run = LiveRoomRun {

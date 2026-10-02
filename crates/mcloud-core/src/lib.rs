@@ -7,6 +7,7 @@ pub mod account;
 pub mod cancel;
 pub mod error;
 pub mod event;
+pub mod kouling;
 pub mod log;
 pub mod owner;
 pub mod pc_device;
@@ -30,6 +31,10 @@ pub use account::{Account, AccountId, AccountSettings, AuthInfo, DeviceId, PcPla
 pub use cancel::CancelToken;
 pub use error::{Error, Result};
 pub use event::{LogLevel, RunEvent, SeqAllocator, Sequenced};
+pub use kouling::{
+    ClaimVerdict, KoulingPool, KoulingSource, KoulingState, LiveSession, PoolCode, PoolSummary,
+    ProbeRoom,
+};
 pub use log::{AppendOutcome, LogLine, Seq, LOG_LIMIT_PER_RUN};
 pub use owner::{legacy_owner, visible_to};
 pub use pc_device::{PcDeviceStore, PC_DEVICE_SUFFIX};

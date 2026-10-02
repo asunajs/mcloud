@@ -577,7 +577,6 @@ fn no_retry_params(codes: &[&str]) -> LiveRoomParams {
     LiveRoomParams {
         codes: codes.iter().map(|s| s.to_string()).collect(),
         listen_seconds: 60,
-        kouling_only: false,
         skip_kouling: true,
     }
 }
@@ -683,12 +682,30 @@ async fn gain_includes_the_first_participate_bonus() {
 
 // ══════════════════════════ 判据 2：重试路径 ══════════════════════════
 
-/// ⭐ 没有无效口令 ⇒ **不重听**（排除表都不该被构造出来）。
+/// ⭐ **验出两条有效之后** ⇒ 不再继续听（排除表都不该被构造出来）。
+///
+/// ⚠ 判据 2026-10-01 换过：从前看"有没有口令被判无效"，现在看
+/// **池里（含这一趟刚验出来的）有效够不够两条** —— 用户口径"要的是两条有效的"。
+/// 这条用例钉的是新判据的"够了就收工"那一半。
 #[test]
-fn retry_plan_has_no_retry_without_invalid_codes() {
-    let (retry, exclude) = retry_plan(&["甲".into(), "乙".into()], &[]);
-    assert!(!retry, "没有无效口令就不该重听");
+fn retry_plan_stops_once_two_valid_codes_exist() {
+    let (retry, exclude) = retry_plan(&["甲".into(), "乙".into()], &[], 2);
+    assert!(!retry, "两条有效 ⇒ 收工，别再占着弹幕窗口");
     assert!(exclude.is_empty());
+}
+
+/// ⭐ 反过来：**不够两条有效就要继续听** —— 哪怕一个无效口令都没有。
+///
+/// 这正是老判据漏掉的情形：收到一条没分类的码、或只验出一条有效，
+/// 老实现从"没有无效口令"直接就结束了，而那恰恰是最该继续听下去的时候。
+#[test]
+fn retry_plan_keeps_listening_while_fewer_than_two_are_valid() {
+    let (retry, exclude) = retry_plan(&["说不清的".into()], &[], 0);
+    assert!(retry, "一条有效都没有 ⇒ 继续听");
+    assert_eq!(exclude, vec!["说不清的".to_string()], "试过的要排除");
+
+    let (retry, _) = retry_plan(&["甲".into()], &[], 1);
+    assert!(retry, "只有一条有效 ⇒ 继续听，去凑第二条");
 }
 
 /// ⭐ 重听时的排除表 = 第一批 ∪ 无效表。
@@ -703,9 +720,10 @@ fn retry_plan_has_no_retry_without_invalid_codes() {
 fn retry_plan_excludes_both_the_successful_and_the_invalid() {
     let first: Vec<String> = vec!["成功甲".into(), "无效乙".into()];
     let invalid: Vec<String> = vec!["无效乙".into()];
-    let (retry, exclude) = retry_plan(&first, &invalid);
+    // `0` = 池里还没有有效口令 ⇒ 该继续听（这一条要验的是**排除表**）。
+    let (retry, exclude) = retry_plan(&first, &invalid, 0);
 
-    assert!(retry, "有无效口令就该重听");
+    assert!(retry, "一条有效都还没有 ⇒ 继续听");
     assert!(exclude.contains(&"无效乙".to_string()), "无效的要排除");
     assert!(
         exclude.contains(&"成功甲".to_string()),
@@ -1124,49 +1142,7 @@ async fn only_the_exact_anchor_nickname_opens_the_gate() {
     }
 }
 
-/// ⭐ 获取口令但不领取：收到了口令但**一个都不拿去领**，且说明与另两种"没领"不同。
-#[tokio::test]
-async fn kouling_only_collects_but_never_draws() {
-    let (c, http) = ctx_with(&open_gate_chain(serde_json::json!([room_entry(
-        147606,
-        1,
-        "中国移动云盘"
-    )])));
-    let collector = FakeCollector::new(&[&["口令甲", "口令乙"]]);
-    let params = LiveRoomParams {
-        codes: vec![],
-        listen_seconds: 60,
-        kouling_only: true,
-        skip_kouling: false,
-    };
-
-    let res = run_gated(&collector)
-        .run_account(&c.ctx(), &params)
-        .await
-        .unwrap();
-
-    assert_eq!(res.codes, vec!["口令甲".to_string(), "口令乙".to_string()]);
-    assert!(res.report.is_none(), "获取口令但不领取 ⇒ 没有报告");
-    assert_eq!(
-        http.count_of("/liveRoomFeedback"),
-        0,
-        "一个口令都不能拿去领"
-    );
-    assert!(res.outcome().is_success());
-    assert!(
-        res.outcome().summary().contains("本次只获取不领取"),
-        "实得：{}",
-        res.outcome().summary()
-    );
-    // ⚠ 措辞里**不能**出现"消耗"这个概念（口令全场通用）
-    assert!(
-        !res.outcome().summary().contains("消耗"),
-        "口令全场通用，不存在消耗：{}",
-        res.outcome().summary()
-    );
-}
-
-/// ⭐ 门开了但没收到口令 ⇒ **第三种**说法（不是"没直播"，也不是"获取口令但不领取"）。
+/// ⭐ 门开了但没收到口令 ⇒ **第三种**说法（既不是"没直播"，也不是"有别的间在播"）。
 #[tokio::test]
 async fn opened_gate_with_no_codes_says_so() {
     let (c, http) = ctx_with(&open_gate_chain(serde_json::json!([room_entry(
@@ -1220,7 +1196,14 @@ async fn multiple_live_rooms_produce_a_warning() {
         .unwrap();
 
     assert_eq!(res.gate.rooms.len(), 2);
-    assert_eq!(collector.call_count(), 1, "只听**第一间**（刻意的取舍）");
+    // ⚠ 两次都打在**同一间**（`gate.rooms.first()`）：这条用例钉的是"只听第一间"，
+    // 而重听那一轮用的也是这一间 ⇒ 断言次数是 2 不改变它的意思。
+    // （2 而不是 1 的理由同下一条用例：第一批只收到 1 条 ⇒ 有效不足 2 ⇒ 再听一次。）
+    assert_eq!(
+        collector.call_count(),
+        2,
+        "只听**第一间**（刻意的取舍）；两次都打在那一间"
+    );
     let warns = c.sink.warns();
     assert!(
         warns.iter().any(|w| w.contains("只听第一间")),
@@ -1398,20 +1381,10 @@ fn params_check_covers_all_four_states() {
     let ok = no_retry_params(&["甲"]);
     assert_eq!(ok.check(), Ok(()));
 
-    // ② 互斥：获取口令但不领取 + 只用给定口令
-    let excl = LiveRoomParams {
-        codes: vec!["甲".into()],
-        listen_seconds: 60,
-        kouling_only: true,
-        skip_kouling: true,
-    };
-    assert_eq!(excl.check(), Err(LiveRoomFault::ExclusiveSwitches));
-
     // ③ 关掉唯一来源又没给手工口令
     let no_codes = LiveRoomParams {
         codes: vec![],
         listen_seconds: 60,
-        kouling_only: false,
         skip_kouling: true,
     };
     assert_eq!(no_codes.check(), Err(LiveRoomFault::SkipWithoutCodes));
@@ -1420,16 +1393,14 @@ fn params_check_covers_all_four_states() {
     let zero = LiveRoomParams {
         codes: vec!["甲".into()],
         listen_seconds: 0,
-        kouling_only: false,
         skip_kouling: true,
     };
     assert_eq!(zero.check(), Err(LiveRoomFault::ListenNotPositive));
 
-    // ⚠ 0 秒 + 获取口令但不领取 = **仍然非法**（第三条不看 skip_kouling / kouling_only）
+    // ⚠ 0 秒 + 关掉弹幕来源 = **仍然非法**（时长那一条不看 skip_kouling）
     let zero_only = LiveRoomParams {
         codes: vec![],
         listen_seconds: 0,
-        kouling_only: true,
         skip_kouling: false,
     };
     assert_eq!(
@@ -1440,7 +1411,6 @@ fn params_check_covers_all_four_states() {
 
     // 三条规则的中性描述都非空（措辞由调用方写，但领域层得说得出自己是什么）
     for f in [
-        LiveRoomFault::ExclusiveSwitches,
         LiveRoomFault::SkipWithoutCodes,
         LiveRoomFault::ListenNotPositive,
     ] {
@@ -1456,17 +1426,17 @@ async fn task_surfaces_invalid_params_as_an_error() {
     c.account.settings.kouling_enabled = true;
     let task = LiveRoomTask::production();
 
-    // codes 非空但跳过了弹幕来源 + 获取口令但不领取 ⇒ 互斥
+    // 关掉了唯一的弹幕来源，却没给手工口令
     let body = serde_json::json!({
-        "codes": "甲", "listenSeconds": 60,
-        "koulingOnly": true, "skipKouling": true
+        "codes": "", "listenSeconds": 60,
+        "skipKouling": true
     });
     let e = task.run(&c.ctx(), &body).await.unwrap_err();
     assert_eq!(http.count(), 0, "参数不成立就不该发任何请求");
     let text = e.to_string();
     assert!(
-        text.contains("koulingOnly") && text.contains("skipKouling"),
-        "要给出可操作的措辞（哪个 flag 冲突）：{text}"
+        text.contains("skipKouling") && text.contains("codes"),
+        "要给出可操作的措辞（哪个 flag 该改）：{text}"
     );
 
     // listenSeconds == 0
@@ -1888,8 +1858,10 @@ async fn retry_collection_failure_keeps_the_first_round() {
     assert_eq!(res.verdict(), RunVerdict::NoneSucceeded);
     let warns = c.sink.warns();
     assert!(
-        warns.iter().any(|w| w.contains("重听失败")),
-        "重听失败要留下痕迹：{warns:?}"
+        // ⚠ 措辞随「循环」改过：原来是「重听失败」，现在是「再听失败」。
+        // 断言的是**判据本身**，别只改提示文案 ✗（第一次就是这么漏的）。
+        warns.iter().any(|w| w.contains("再听失败")),
+        "再听失败要留下痕迹（措辞随「循环」改过：原来叫「重听失败」）：{warns:?}"
     );
 }
 
@@ -2029,7 +2001,15 @@ async fn auto_chain_opens_gate_collects_kouling_then_earns_flowers() {
     assert_eq!(res.gate.live_count, 1);
 
     // ── ② 口令是**自动收来的**，不是用户给的 ────────────────────────────
-    assert_eq!(collector.call_count(), 1, "开成门之后去收集了一次");
+    // ⚠ **两次**是对的，不是多收了一次（2026-10-01 换判据之后）：
+    // 第一批只收到 **1 条**口令 ⇒ 验出 1 条有效 < 2 ⇒ 按新判据"要的是两条有效的"
+    // 再听一次去凑第二条。第二次那个假收集器又给同一条口令，而它已在排除表里
+    // ⇒ `pick_new_codes` 过滤掉 ⇒ **不会**重复领取（所以下面的 `res.codes` 仍是一条）。
+    assert_eq!(
+        collector.call_count(),
+        2,
+        "第一批只验出 1 条有效 ⇒ 按新判据再听一次（要凑够两条有效）"
+    );
     assert_eq!(res.codes, vec!["自动收集到的口令".to_string()]);
 
     // ── ③ 收来的口令**真的拿去领了**，且进了账 ──────────────────────────
@@ -2367,31 +2347,6 @@ async fn the_gate_jwt_is_handed_to_the_collector_for_real() {
         "⭐⭐ 收集器拿到的必须是**门换来的那张直播侧 JWT**，不是空串、不是别的票"
     );
     assert!(!seen[0].is_empty(), "绝不能是空串（那会变成一句'连不上'）");
-}
-
-/// ⭐ 只开门**不领取**（`kouling_only`）时，门照样开、口令照样收，但一枪不领。
-#[tokio::test]
-async fn auto_chain_kouling_only_opens_the_gate_and_stops() {
-    let rooms = serde_json::json!([room_entry(147606, 1, "中国移动云盘")]);
-    let (c, http) = ctx_with(&open_gate_chain(rooms));
-    let collector = FakeCollector::new(&[&["口令甲", "口令乙"]]);
-    let params = LiveRoomParams {
-        codes: vec![],
-        listen_seconds: 60,
-        kouling_only: true,
-        skip_kouling: false,
-    };
-
-    let res = run_gated(&collector)
-        .run_account(&c.ctx(), &params)
-        .await
-        .unwrap();
-
-    assert!(res.has_jwt, "门开成了");
-    assert_eq!(res.codes, vec!["口令甲".to_string(), "口令乙".to_string()]);
-    assert!(res.report.is_none(), "获取口令但不领取");
-    assert_eq!(http.count_of("/liveRoomFeedback"), 0, "一个口令都不领");
-    assert_eq!(http.count_of("/querySpecTokenV2"), 1, "门只开一次");
 }
 
 /// ⭐ `LiveRoomTask::run` 端到端：**不填 codes** 也能自动收口令并进账。

@@ -7,6 +7,7 @@ pub mod cancel;
 pub mod capabilities;
 pub mod exchange;
 pub mod health;
+pub mod kouling;
 pub mod login;
 pub mod logs;
 pub mod pipelines;
@@ -46,6 +47,8 @@ pub fn router() -> Router<ServerState> {
         // 但那是会话本身的语义（能改口令的会话本来就有全部权限）。
         .route("/api/admin/password", axum::routing::put(security::change_password))
         // ── 系统（存储 / 重启）───────────────────────────────────────
+        // ── 共享口令池（直播页看它决定"还要不要抓"）──────────────────
+        .route("/api/kouling", get(kouling::get_pool))
         // ── 任务的参数配置（任务页「配置」那一页）──────────────────────
         .route(
             "/api/tasks/{name}/config",

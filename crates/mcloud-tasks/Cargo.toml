@@ -19,6 +19,10 @@ async-trait.workspace = true
 # 只用 `join!`，不需要 runtime（那是 `mcloud-server` 的事）。
 futures.workspace = true
 serde.workspace = true
+# ⚠ 2026-10-02 补：`exchange.rs` 那条线用了 `tracing::warn!` 而本 crate 没有这个依赖，
+# 编译直接红（`use of unresolved module or unlinked crate tracing`）⇒ 挡住的却是
+# 别人那条线的验证。依赖与 `mcloud-engine` 保持一致（同一份 workspace 版本）。
+tracing.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 # ⚠ 只有这一条任务要"等一会儿"（任务拓展凑完备份要等服务端记账，20 秒是判据的一部分）。

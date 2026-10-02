@@ -19,6 +19,9 @@
 
 import { onMounted, ref } from 'lite'
 import { listRuns, type RunRecord, type TaskOutcome } from '../api'
+// 直播的结构化明细：与直播页**共用同一份**渲染（从前只有"当前这次"能看到）。
+import { LiveRoomResult } from '../ui/live-room-result'
+import { toLiveRoomRunView } from '../api'
 import { accountName, refreshAccountNames } from '../account-names'
 import { EmptyState } from '../ui/empty-state'
 import { IconClose, IconSearch } from '../ui/icons'
@@ -67,6 +70,29 @@ const LeftoverCell = (props: { record: RunRecord }) => {
           </li>
         ))}
       </ul>
+    </div>
+  )
+}
+
+/**
+ * 直播那一次的**结构化明细**（领到的花 + 逐条口令的落点）。
+ *
+ * # 这一格是补上的缺口
+ *
+ * 这套明细原来只长在直播页上 ⇒ **只有"当前这次"看得到** ✗：历史里每一次直播
+ * 都只剩一行小结（`outcome.summary`），于是用户想回看"上一场到底领到没有、
+ * 哪条口令过期了、为什么"时，界面上无处可看。
+ *
+ * ⚠ 判据是"**这是直播任务、并且后端给了结构化明细**"：光看 `task` 不够 ——
+ * 老版本的记录只有文本小结（`details.liveRoom` 不在），那时渲染出来是
+ * 一块"领到 0 个"的假明细，比不显示更糟 ✗。
+ */
+const LiveRoomCell = (props: { record: RunRecord }) => {
+  const r = props.record
+  if (r.task !== 'live-room' || r.details?.liveRoom == null) return null
+  return (
+    <div class="min-w-0">
+      <LiveRoomResult view={toLiveRoomRunView(r)} />
     </div>
   )
 }
@@ -263,7 +289,7 @@ export const HistoryPage = (props: HistoryPageProps) => {
                 <th>状态</th>
                 <th class="text-right">耗时</th>
                 <th>时间</th>
-                <th>网盘遗留</th>
+                <th>明细</th>
               </tr>
             </thead>
             <tbody>
@@ -288,7 +314,11 @@ export const HistoryPage = (props: HistoryPageProps) => {
                   </td>
                   <td class="whitespace-nowrap opacity-80">{fmtEpochMs(r.started_at_ms)}</td>
                   <td>
-                    <LeftoverCell record={r} />
+                    <div class="flex flex-col gap-2">
+                      <LeftoverCell record={r} />
+                <LiveRoomCell record={r} />
+                      <LiveRoomCell record={r} />
+                    </div>
                   </td>
                 </tr>
               ))}

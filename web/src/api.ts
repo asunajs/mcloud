@@ -84,7 +84,19 @@ export interface RunRecord {
    * ⚠ 它是"跑完那一刻还没清"的快照，不是"最终没清"：
    * 链尾清理干净的任务这里就是 `null`。
    */
-  details?: { artifacts?: LeftoverArtifact[] } | null
+  details?:
+    | {
+        artifacts?: LeftoverArtifact[]
+        /**
+         * 直播那一次的**结构化明细**（后端落地后才有）。
+         *
+         * ⚠ 它可能在**老记录里不存在** —— 那时 `outcome.summary` 里只有一句话。
+         * 历史页必须能区分这两种情况：没有它就别渲染"领到 0 个"的假明细 ✗
+         * （那比不显示更糟：用户会以为真的一个都没领到）。
+         */
+        liveRoom?: LiveRoomReport
+      }
+    | null
 }
 
 export interface RunResponse {
@@ -462,6 +474,47 @@ export const getVersion = () => request<VersionInfo>('/api/version')
 export const getStatus = () => request<ServiceStatus>('/api/status')
 
 export const listCapabilities = () => request<{ tasks: TaskMeta[] }>('/api/capabilities')
+
+/**
+ * 一条口令在**共享池**里的可复用性。
+ *
+ * ⚠ 只有三种：`unknown`（抓到了还没验过）、`valid`（验过、能用）、
+ * `invalid`（口令错**或已过期** —— 用户口径：过期视同无效，原因留在 `reason` 里）。
+ */
+export type KoulingState = 'unknown' | 'valid' | 'invalid'
+
+/** 口令从哪来。手工粘贴的**验证通过后也进池**（用户口径 2026-10-01）。 */
+export type KoulingSource = 'danmaku' | 'xiaohongshu' | 'manual'
+
+export interface PoolCode {
+  value: string
+  state: KoulingState
+  source: KoulingSource
+  /** 被判无效/有效的原因（人的说法，直接显示）。 */
+  reason?: string | null
+  firstSeenMs: number
+  validAtMs?: number | null
+}
+
+/** 池的当前状态（`GET /api/kouling`）。 */
+export interface KoulingPoolView {
+  /** 本周期开始的时刻（5 小时 TTL / 判定门关了再宽限 10 分钟 ⇒ 翻篇）。 */
+  cycleAtMs: number
+  /** **有效**口令条数 —— 界面与"要不要再抓"的唯一判据。 */
+  validCount: number
+  /** 够 2 条了 ⇒ 全场不需要再抓口令。 */
+  stopScraping: boolean
+  codes: PoolCode[]
+  /** 下一场的开播时间 —— 预告场给的**本地**字符串，界面**原样**显示（它没有时区）。 */
+  nextStart: string | null
+  /** 上面那个日程是什么时候探测到的（`null` = 还没探测过 —— 别渲染成空白 ✗）。 */
+  scheduleAtMs: number | null
+  /** 观测到的场次（**新的在前**）。`endedAtMs: null` = 还在播。 */
+  sessions: { startedAtMs: number; endedAtMs: number | null }[]
+}
+
+/** 读共享口令池。**全实例共享**（跨 mcloud 用户、跨重启）。 */
+export const getKoulingPool = () => request<KoulingPoolView>('/api/kouling')
 
 /** 一个任务的参数配置（任务页「配置」那一页）。 */
 export interface TaskConfigView {
@@ -1212,8 +1265,6 @@ export interface LiveRoomParams {
   codes: string[]
   /** 自动收集时听弹幕的时长（秒）。**必须 > 0**。 */
   listenSeconds: number
-  /** 获取口令但不领取。 */
-  koulingOnly: boolean
   /** 只用给定口令（不开弹幕）。为真时 `codes` 必须非空。 */
   skipKouling: boolean
 }
@@ -1297,8 +1348,6 @@ export interface LiveRoomReport {
 
 /** 全部"没领"的原因 —— 不同原因**下一步完全不同**，所以是枚举而不是布尔。 */
 export type LiveRoomIdleReason =
-  /** 获取口令但不领取：收完就结束。 */
-  | 'kouling-only'
   /** 今天没有直播（一间都没在播）。 */
   | 'no-live'
   /** 有 N 间在播，但没有一间是「中国移动云盘」。 */
@@ -1318,7 +1367,7 @@ export type LiveRoomIdleReason =
 export interface LiveRoomRunView {
   /**
    * 结论：
-   * - `idle`     没领（门没开 / 获取口令但不领取 / 没收到口令）—— **正常**；
+   * - `idle`     没领（门没开 / 没收到口令）—— **正常**；
    * - `success`  领了且全成；
    * - `partial`  领了、成了一部分；
    * - `failed`   领了、一个都没成。
@@ -1511,15 +1560,16 @@ export function toLiveRoomRunView(
   // 后端在"没领"时回的是 **success**（见 `LiveRoomAccountResult::outcome`），
   // 所以"成功=绿"这条映射对这条链是**错的**，光看 `outcome.status` 会把
   // "今天没开播"显示成一个绿色的成功。
-  const idle: LiveRoomIdleReason | null = text.includes('只获取不领取')
-    ? 'kouling-only'
-    : text.includes('今天没有直播')
-      ? 'no-live'
-      : /有\s*\d+\s*间在播/.test(text)
-        ? 'other-anchor-live'
-        : text.includes('没收到口令')
-          ? 'no-codes'
-          : null
+  // ⚠ 这里从前还认一句"只获取不领取"（对应已删的伪需求 `koulingOnly`）——
+  // 它是**从中文文案里 substring 推出来的**，所以文案一删它就自然失效、
+  // 留着只会是一条永远匹配不上的死分支。
+  const idle: LiveRoomIdleReason | null = text.includes('今天没有直播')
+    ? 'no-live'
+    : /有\s*\d+\s*间在播/.test(text)
+      ? 'other-anchor-live'
+      : text.includes('没收到口令')
+        ? 'no-codes'
+        : null
 
   if (o?.status === 'skipped') {
     return { kind: 'idle', idle: 'unknown', ...base }
@@ -1570,7 +1620,6 @@ export function toLiveRoomRunView(
 
 /** "为什么没领"的说法 —— 查表，**不拼字符串**。 */
 export const LIVE_IDLE_REASON: Record<LiveRoomIdleReason, string> = {
-  'kouling-only': '获取口令但不领取 —— 口令收完就结束，这一趟一个口令都没拿去领',
   'no-live': '今天没有直播 —— 该主播一间都没在播，没有口令可收（等下一场即可，不是失败）',
   'other-anchor-live':
     '有别的房间在播，但没有一间是「中国移动云盘」—— 这一场不会再有口令了，不用等',
