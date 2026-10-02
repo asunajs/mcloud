@@ -70,15 +70,23 @@ const exprFieldError = (expr: string): string | null => {
   return `cron 表达式需要 5 段（分 时 日 月 周）或 6 段（秒 分 时 日 月 周），当前 ${n} 段`
 }
 
-/** 上次结果的徽章样式。`null`（从未运行）单独一档，不跟任何结果混。 */
+/**
+ * 上次结果的徽章样式。`null`（从未运行）单独一档，不跟任何结果混。
+ *
+ * ⚠ **平涂（`badge-soft`）**—— 与 `ui/history.ts` / `ui/badge.ts` / `dashboard-page`
+ * 同一套写法；这一页原先用的是**实心** `badge` ✗，是全仓唯一的例外。
+ * 用户口径（2026-10-02 附图）：「黑色模式下太亮了」——
+ * 实心亮绿铺在深底上就是一块发光的牌子 ✗；soft 是 8% 语义色混底色，
+ * 字用语义色本身，深浅两个主题看起来才是一套东西。
+ */
 const statusBadge = (s: Schedule['lastStatus']): { cls: string; text: string } => {
   switch (s) {
     case 'ok':
-      return { cls: 'badge badge-success badge-sm', text: '成功' }
+      return { cls: 'badge badge-soft badge-success badge-sm', text: '成功' }
     case 'error':
-      return { cls: 'badge badge-error badge-sm', text: '失败' }
+      return { cls: 'badge badge-soft badge-error badge-sm', text: '失败' }
     case 'skipped':
-      return { cls: 'badge badge-warning badge-sm', text: '已跳过' }
+      return { cls: 'badge badge-soft badge-warning badge-sm', text: '已跳过' }
     default:
       return { cls: 'badge badge-ghost badge-sm', text: '从未运行' }
   }
