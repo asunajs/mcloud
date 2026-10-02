@@ -1,0 +1,46 @@
+# `cross` 的配置。**只有 Linux arm64 那条构建会读它**（原生构建完全不看这个文件）。
+#
+# ── 为什么需要它 ────────────────────────────────────────────────────────
+#
+# 本仓**只用 `native-tls`**（兼容性优先：rustls 不实现 CBC 套件，连不上只给老套件的主机）
+# ⇒ Linux 侧链接**系统 OpenSSL** ⇒ `openssl-sys` 必须找到**目标架构（aarch64）**的
+# openssl 头文件与库。
+#
+# 而 cross 的镜像里**没有**目标架构的 OpenSSL —— 2026-10-02 第一次发 3.0.0-rc.1
+# 就是这么挂的（Linux arm64 job，exit 101）：
+#
+#     $HOST   = x86_64-unknown-linux-gnu
+#     $TARGET = aarch64-unknown-linux-gnu
+#     cargo:warning=Could not find directory of OpenSSL installation, and this
+#                   `-sys` crate cannot proceed without this knowledge.
+#
+# ⚠ 只装交叉编译器（`gcc-aarch64-linux-gnu`）**不够**：openssl-sys 走 pkg-config，
+#   而 pkg-config 找的是**目标架构**的 `.pc` 文件。
+#
+# ── 这条配方是从哪来的 ──────────────────────────────────────────────────
+#
+# cross 官方文档 `docs/recipes.md` 的「OpenSSL → Pre-build」一节给的**原样配方**
+# （`docs/config_file.md` 的 `build.pre-build` 示例也是同一条）：
+#
+#     [target.x86_64-unknown-linux-gnu]
+#     pre-build = [
+#         "dpkg --add-architecture $CROSS_DEB_ARCH",
+#         "apt-get update && apt-get install --assume-yes libssl-dev:$CROSS_DEB_ARCH"
+#     ]
+#
+# `$CROSS_DEB_ARCH` 由 cross 自己注入（`src/docker/shared.rs`），aarch64 ⇒ `arm64`。
+# 所以这里照抄，只把 target 换成我们要的那一个。
+#
+# ⚠ 另一条路是给 `openssl` 开 `vendored`（官方文档的上一节）—— 那是**从源码编
+#   OpenSSL**，要把目标架构的 C 工具链与 perl 都拉上，构建时间也长得多。
+#   而且它会让 arm64 的产物**静态链 OpenSSL**，与另外三个平台（动态链系统库）
+#   行为不一致 ⇒ 不走这条。
+#
+# ⚠⚠ 本机没有 Docker，这条**本地验不了** ⇒ 只能靠 CI 真跑验证。
+#     验证方式：`gh workflow run release.yml --ref main`（手动触发不会发 Release，
+#     只出 artifact）—— 见下方 workflow 里的 `if: github.ref_type == 'tag'`。
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+  'dpkg --add-architecture $CROSS_DEB_ARCH',
+  'apt-get update && apt-get install --assume-yes libssl-dev:$CROSS_DEB_ARCH',
+]

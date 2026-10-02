@@ -878,6 +878,21 @@ class Cdp {
  * `debugPort = 0` ⇒ 内核分配，起完从 profile 的 `DevToolsActivePort` 里读回来。
  */
 export async function openSession({ port, route, debugPort = 0, profile, width = 1280 }) {
+  /**
+   * ⚠⚠ `profile` **必须**显式传 —— 它没有默认值，漏传就成了
+   * `--user-data-dir=undefined`，而 Chrome 会把 `undefined` 当成**相对当前目录**的
+   * 路径 ⇒ 在跑脚本的那个目录（通常就是 `web/`）下建出一个叫 `undefined` 的
+   * Chrome 用户目录（实测 2 MB，`Default/`、`GPUCache/`、`Session Storage/` 一整套）。
+   *
+   * 2026-10-02 真攒出来过一个：`git status` 里躺着 `?? web/undefined/`，
+   * 而当时正要 `git add -A` 做发布提交 —— 差一点就把 2 MB 垃圾提进仓库。
+   * 静默造垃圾比报错贵得多 ⇒ 这里早失败，并说清为什么。
+   */
+  if (!profile) {
+    throw new Error(
+      'openSession 必须传 profile（漏传时 chrome 会在当前目录下建一个叫 "undefined" 的用户目录）',
+    )
+  }
   const url = `http://127.0.0.1:${port}/${route}`
   const child = launchChrome({ url, debugPort, profile })
   /**
