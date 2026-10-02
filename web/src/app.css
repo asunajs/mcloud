@@ -549,7 +549,16 @@ main,
     display: grid;
     grid-auto-flow: column;
     grid-auto-columns: minmax(auto, max-content) auto max-content;
-    align-content: flex-start;
+    /* ⚠ 这一条才是**垂直**方向：`align-content` 决定"行轨"在容器里的分布。
+     *
+     * 原先是 `flex-start` ⇒ 内容被钉在顶上，容器多出来的高度**全落到下面**：
+     * 窄屏条目有 44px 的触控高度（`min-h-11`），而图标+文字只有 ~20px
+     * ⇒ 上留白 6px、下留白 18px。用户口径（2026-10-02）正是在量这个：
+     * 「你看看红框的高，哪里居中了」（上框 18px、下框 32px）。
+     *
+     * ⚠ 别和 `justify-content` 混：那个是**列方向**（= 水平居中），已经被否过一次
+     *   （见下面"小屏抽屉"那节）。两者一个是纵轴一个是横轴。 */
+    align-content: center;
     align-items: center;
     gap: 0.5rem;
     padding-block: 0.375rem;
@@ -1459,6 +1468,8 @@ main,
    *
    * ⇒ 条目内容保持**左对齐**（默认），谁也别再去动 `justify-content`
    *   （`.menu li > button` 是 grid，动了它就是在做水平居中 —— 已经被否过一次）。
+   *   ⚠ "条目内容在**行内垂直**居中"不在这条里，而是在上面 `.menu li > button`
+   *   的 `align-content: center` —— 那条管纵轴（`justify-content` 管横轴）。
    *   ⚠ 这条在**大屏是另一回事**：PC 折成图标轨道时图标当然居中（见下面 rail 那节），
    *   那是"只剩图标"的排版，不是这里的"文字行水平居中"。 */
   .drawer-side ul.menu {
