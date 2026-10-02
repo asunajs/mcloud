@@ -26,12 +26,23 @@
  */
 
 import { onMounted, ref } from 'lite'
-import { listCapabilities, request, type TaskMeta } from '../api'
+import {
+  listAccounts,
+  listCapabilities,
+  PIPELINE_TASK,
+  request,
+  saveSchedule,
+  type AccountSummary,
+  type TaskMeta,
+} from '../api'
 import { EmptyState } from '../ui/empty-state'
-import { closeDialog, ConfirmDialog, openDialog } from '../ui/dialog'
+// ⚠ 参数控件与**任务配置页**共用一份（`ui/param-field.tsx`）—— 两处各写一份迟早分叉。
+import { ParamField } from '../ui/param-field'
+import { closeDialog, ConfirmDialog, Dialog, openDialog } from '../ui/dialog'
 import { showError } from '../ui/error-dialog'
 import { pushToast } from '../ui/toast'
 import { fmtEpochMs } from '../ui/time'
+import { Select } from '../ui/select'
 
 type LoadState = 'loading' | 'error' | 'ready'
 
@@ -46,8 +57,12 @@ interface PipelineStep {
 interface Pipeline {
   id: string
   name: string
-  accounts: string[]
-  accountMode: 'sequential' | 'parallel'
+  /** ⚠ **已废弃**：账号不属于编排（用户口径 2026-10-02：编排不绑账号，
+   * 账号由**触发方**给 —— 手动运行 / 定时排期各带自己那份）。后端老数据里还有，
+   * 所以类型保留为可选 ✓；界面既不显示也不提交 ✓。 */
+  accounts?: string[]
+  /** ⚠ **已废弃**，同上：执行方式也跟着账号走触发方。 */
+  accountMode?: 'sequential' | 'parallel'
   stopOnError: boolean
   steps: PipelineStep[]
   enabled: boolean
@@ -57,8 +72,12 @@ interface Pipeline {
 /** 提交给 `PUT /api/pipelines/{id}` 的体。刻意不含 `lastRunMs`：那是服务端维护的。 */
 interface PipelineInput {
   name: string
-  accounts: string[]
-  accountMode: 'sequential' | 'parallel'
+  /** ⚠ **已废弃**：账号不属于编排（用户口径 2026-10-02：编排不绑账号，
+   * 账号由**触发方**给 —— 手动运行 / 定时排期各带自己那份）。后端老数据里还有，
+   * 所以类型保留为可选 ✓；界面既不显示也不提交 ✓。 */
+  accounts?: string[]
+  /** ⚠ **已废弃**，同上：执行方式也跟着账号走触发方。 */
+  accountMode?: 'sequential' | 'parallel'
   stopOnError: boolean
   steps: { task: string; body: unknown; continueOnError: boolean }[]
   enabled: boolean
@@ -84,14 +103,15 @@ interface Draft {
   id: string
   isNew: boolean
   name: string
-  /** 账号用文本编辑，逗号/空格/顿号分隔；空 = 全部账号。 */
-  accountsText: string
-  accountMode: 'sequential' | 'parallel'
   stopOnError: boolean
   enabled: boolean
 }
 
 const DELETE_DIALOG_ID = 'delete-pipeline'
+/** 「运行」前先选账号（用户口径 2026-10-02：**账号属于触发方**，编排不绑账号）。 */
+const RUN_DIALOG_ID = 'run-pipeline'
+/** 给这条编排排一条定时（`task: "pipeline"` + `body.pipelineId`）。 */
+const SCHED_DIALOG_ID = 'pipeline-schedule'
 
 // ── 网络 ────────────────────────────────────────────────────────────────
 
@@ -106,18 +126,22 @@ const savePipeline = (id: string, input: PipelineInput) =>
 const removePipeline = (id: string) =>
   request<{ ok: boolean }>(`/api/pipelines/${encodeURIComponent(id)}`, { method: 'DELETE' })
 
-const runPipeline = (id: string) =>
+/**
+ * 跑一条编排。
+ *
+ * ⚠ 账号**不取编排里存的那份**（已废弃字段 ✗）—— 由**触发方**给 ✓：
+ * 手动运行在这里给 ✓，定时运行在排期的 `accounts` 里给 ✓。
+ * 空数组 = 当前用户全部已启用账号 ✓（与后端「留空 = 全部」同义 ✓）。
+ */
+const runPipeline = (id: string, accounts: string[]) =>
   request<{ pipeline: string; started: boolean }>(
     `/api/pipelines/${encodeURIComponent(id)}/run`,
-    { method: 'POST' },
+    // ⚠ 与同页 `savePipeline` 一致：body 要自己序列化（`request` 收的是 `BodyInit`）。
+    { method: 'POST', body: JSON.stringify({ accounts }) },
   )
 
 // ── 查表（类名一律字面量，绝不拼接）────────────────────────────────────────
 
-const ACCOUNT_MODE_LABEL: Record<Pipeline['accountMode'], string> = {
-  sequential: '串行',
-  parallel: '并行',
-}
 
 const ENABLED_LABEL: Record<'on' | 'off', string> = { on: '已启用', off: '已停用' }
 
@@ -126,25 +150,10 @@ const ENABLED_BADGE: Record<'on' | 'off', string> = {
   off: 'badge-soft',
 }
 
-const STOP_LABEL: Record<'stop' | 'continue', string> = {
-  stop: '失败时中止整条链',
-  continue: '失败也继续后续',
-}
 
-const STOP_BADGE: Record<'stop' | 'continue', string> = {
-  stop: 'badge-soft badge-warning',
-  continue: 'badge-soft',
-}
 
 const onOff = (v: boolean): 'on' | 'off' => (v ? 'on' : 'off')
-const stopOrContinue = (v: boolean): 'stop' | 'continue' => (v ? 'stop' : 'continue')
 
-/** 账号文本 → 数组。分隔符接受中英文逗号、顿号与空白。 */
-const parseAccounts = (raw: string): string[] =>
-  raw
-    .split(/[\s,，、]+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
 
 export const PipelinesPage = () => {
   const state = ref<LoadState>('loading')
@@ -207,7 +216,9 @@ export const PipelinesPage = () => {
     uid: uidSeq++,
     task: '',
     body: {},
-    continueOnError: false,
+    // 用户口径 2026-10-02：「默认设置为失败继续」——新加的步骤默认就继续，
+    // 想让某一步"失败即止"再单独关掉它。
+    continueOnError: true,
   })
 
   const startNew = () => {
@@ -217,9 +228,7 @@ export const PipelinesPage = () => {
       id: `p-${Date.now().toString(36)}-${idSeq++}`,
       isNew: true,
       name: '',
-      accountsText: '',
       // 后端当前只接受 sequential；parallel 在下拉里显式禁用并说明原因
-      accountMode: 'sequential',
       stopOnError: true,
       enabled: true,
     }
@@ -238,8 +247,6 @@ export const PipelinesPage = () => {
       id: p.id,
       isNew: false,
       name: p.name,
-      accountsText: p.accounts.join('、'),
-      accountMode: p.accountMode,
       stopOnError: p.stopOnError,
       enabled: p.enabled,
     }
@@ -299,9 +306,9 @@ export const PipelinesPage = () => {
 
   const toInput = (d: Draft): PipelineInput => ({
     name: d.name.trim(),
-    accounts: parseAccounts(d.accountsText),
-    accountMode: d.accountMode,
-    stopOnError: d.stopOnError,
+    // ⚠ 编排级「失败时中止整条链」已按用户口径**砍掉**（2026-10-02）：
+    // 只保留步骤级开关。这里恒为 false，免得老编排的 true 又把"两层"带回来。
+    stopOnError: false,
     steps: steps.value.map((s) => ({
       task: s.task,
       body: s.body ?? {},
@@ -346,12 +353,110 @@ export const PipelinesPage = () => {
   const run = async (p: Pipeline) => {
     runningId.value = p.id
     try {
-      await runPipeline(p.id)
+      await runPipeline(p.id, runAccounts.value)
       pushToast('success', '已在后台开始，可在运行历史查看进度')
     } catch (e) {
       showError(`无法运行「${p.name}」`, e instanceof Error ? e.message : '运行请求失败')
     } finally {
       runningId.value = ''
+    }
+  }
+
+  // ── 「运行」先选账号 ──────────────────────────────────────────────────
+  /** 本次运行要用的账号（弹窗里选的；空 = 全部 ✓）。 */
+  const runAccounts = ref<string[]>([])
+  /** 可选账号清单（打开弹窗时拉一次）。 */
+  const runChoices = ref<AccountSummary[]>([])
+  /** 正在为哪条编排选账号。 */
+  const runTarget = ref<Pipeline | null>(null)
+
+  const openRun = async (p: Pipeline) => {
+    runTarget.value = p
+    runAccounts.value = []
+    if (runChoices.value.length === 0) {
+      try {
+        runChoices.value = await listAccounts()
+      } catch (e) {
+        showError('读不到账号列表', e instanceof Error ? e.message : '加载失败')
+        return
+      }
+    }
+    // ⚠ **默认全选**（用户口径 2026-10-02）✗ 不做"留空 = 全部"这种隐式约定：
+    // 界面上看到的勾选状态就是**会发生什么** ✓，不需要靠一句提示去解释空表 ✓。
+    runAccounts.value = runChoices.value.map((a) => a.id)
+    openDialog(RUN_DIALOG_ID)
+  }
+
+  /** 勾/取消一个账号 —— ⚠ 换**新数组**：`ref` 是浅响应，原地 push/splice 没人会醒 ✗。 */
+  const toggleRunAccount = (id: string) => {
+    runAccounts.value = runAccounts.value.includes(id)
+      ? runAccounts.value.filter((x) => x !== id)
+      : [...runAccounts.value, id]
+  }
+
+  const confirmRun = async () => {
+    const p = runTarget.value
+    if (!p) return
+    closeDialog(RUN_DIALOG_ID)
+    await run(p)
+  }
+
+  // ── 「定时」给这条编排排一条定时 ──────────────────────────────────────
+  const schedTarget = ref<Pipeline | null>(null)
+  const schedAccounts = ref<string[]>([])
+  const schedExpr = ref('0 8 * * *')
+  const schedTz = ref(
+    // 浏览器时区作为缺省 ✓（用户就在这个时区里点按钮）。
+    Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
+  )
+  const schedBusy = ref(false)
+
+  const openSched = async (p: Pipeline) => {
+    schedTarget.value = p
+    schedAccounts.value = []
+    schedBusy.value = false
+    if (runChoices.value.length === 0) {
+      try {
+        runChoices.value = await listAccounts()
+      } catch (e) {
+        showError('读不到账号列表', e instanceof Error ? e.message : '加载失败')
+        return
+      }
+    }
+    // 同运行弹窗：**默认全选** ✓（不靠"空 = 全部"）。
+    schedAccounts.value = runChoices.value.map((a) => a.id)
+    openDialog(SCHED_DIALOG_ID)
+  }
+
+  const toggleSchedAccount = (id: string) => {
+    schedAccounts.value = schedAccounts.value.includes(id)
+      ? schedAccounts.value.filter((x) => x !== id)
+      : [...schedAccounts.value, id]
+  }
+
+  const confirmSched = async () => {
+    const p = schedTarget.value
+    if (!p) return
+    schedBusy.value = true
+    try {
+      await saveSchedule(`sch-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, {
+        name: `编排 ${p.name}`,
+        task: PIPELINE_TASK,
+        accounts: schedAccounts.value,
+        expr: schedExpr.value.trim(),
+        // ⚠ 不能给 `undefined`（类型是 `string` ✓）；空了就回落上海 ✓ —— 发一个空串
+        // 会让后端的时区解析失败 ✗，而"时区没填"根本不该是一次失败。
+        timezone: schedTz.value.trim() || 'Asia/Shanghai',
+        body: { pipelineId: p.id },
+        enabled: true,
+      })
+      closeDialog(SCHED_DIALOG_ID)
+      pushToast('success', '已加定时 —— 到「定时」页能看到下次触发时间')
+    } catch (e) {
+      // 后端的建时校验（cron 写法、pipelineId 是否存在/属于你）在这里原样透出 ✓
+      showError('加定时失败', e instanceof Error ? e.message : '保存失败')
+    } finally {
+      schedBusy.value = false
     }
   }
 
@@ -417,6 +522,25 @@ export const PipelinesPage = () => {
     </div>
   )
 
+  /** 某个任务的参数表（从能力表取；选空/选了个不存在的 ⇒ 空数组 ✗ 不报错）。 */
+  const specsFor = (task: string) => tasks.value.find((t) => t.name === task)?.params ?? []
+
+  /**
+   * 某个任务的**默认参数**（后端给的 `default`，JSON 原样）。
+   *
+   * ⚠ 换任务时用它**整份替换** `body`（而不是留着旧的键 ✗）：不同任务的参数名不同，
+   * 留着上一个任务的键，就会变成"界面上看不见、却会随编排发给后端"的垃圾 ✗。
+   * 同时这也让表单**一进来就显示真正会用的值** ✓ —— 比留空更准确（空 ≠ 用默认值，
+   * 空是"没给"，两者在有些任务上并不等价）。
+   */
+  const specDefaults = (task: string) => {
+    const out: Record<string, unknown> = {}
+    for (const p of specsFor(task)) {
+      if (p.default !== undefined) out[p.name] = p.default
+    }
+    return out
+  }
+
   /** 一条编排的操作区（表格与卡片共用）。 */
   const actions = (p: Pipeline) => (
     <>
@@ -424,9 +548,17 @@ export const PipelinesPage = () => {
         type="button"
         class="btn btn-soft btn-sm min-h-11 md:min-h-0"
         disabled={runningId.value === p.id}
-        onClick={() => void run(p)}
+        onClick={() => void openRun(p)}
       >
         {runningId.value === p.id ? '提交中…' : '运行'}
+      </button>
+      <button
+        type="button"
+        class="btn btn-soft btn-sm min-h-11 md:min-h-0"
+        disabled={draft.value !== null}
+        onClick={() => void openSched(p)}
+      >
+        定时
       </button>
       <button
         type="button"
@@ -480,8 +612,6 @@ export const PipelinesPage = () => {
               <tr>
                 <th>名称</th>
                 <th>步骤</th>
-                <th>账号</th>
-                <th>失败时</th>
                 <th>状态</th>
                 <th>上次执行</th>
                 <th>操作</th>
@@ -491,13 +621,9 @@ export const PipelinesPage = () => {
               {pipelines.value.map((p) => (
                 <tr key={p.id}>
                   <td class="break-words font-medium">{p.name}</td>
-                  <td>{p.steps.length} 步</td>
-                  <td>{ACCOUNT_MODE_LABEL[p.accountMode]}</td>
-                  <td>
-                    <span class={`badge ${STOP_BADGE[stopOrContinue(p.stopOnError)]}`}>
-                      {STOP_LABEL[stopOrContinue(p.stopOnError)]}
-                    </span>
-                  </td>
+                  {/* 只报步数：两层失败语义已按用户口径砍掉（2026-10-02），
+                      失败与否现在只由**每一步**自己的开关决定 ✓。 */}
+                  <td class="whitespace-nowrap">{p.steps.length} 步</td>
                   <td>
                     <span class={`badge ${ENABLED_BADGE[onOff(p.enabled)]}`}>
                       {ENABLED_LABEL[onOff(p.enabled)]}
@@ -524,12 +650,7 @@ export const PipelinesPage = () => {
                     {ENABLED_LABEL[onOff(p.enabled)]}
                   </span>
                 </div>
-                <p class="text-xs opacity-70">
-                  {p.steps.length} 步 · {ACCOUNT_MODE_LABEL[p.accountMode]}
-                </p>
-                <p class="break-words text-xs opacity-70">
-                  失败时 {STOP_LABEL[stopOrContinue(p.stopOnError)]}
-                </p>
+                <p class="break-words text-xs opacity-70">{p.steps.length} 步</p>
                 <p class="text-xs opacity-60">上次执行 {fmtEpochMs(p.lastRunMs)}</p>
                 <div class="card-actions justify-end">{actions(p)}</div>
               </div>
@@ -593,21 +714,50 @@ export const PipelinesPage = () => {
 
             <fieldset class="fieldset">
               <legend class="fieldset-legend">任务</legend>
-              <select
-                class="select select-sm w-full"
+              <Select
+                id={`step-task-${i}`}
+                size="sm"
+                class="w-full"
+                ariaLabel="任务"
+                placeholder="请选择任务"
                 value={s.task}
-                onChange={(e) => {
-                  s.task = (e.target as HTMLSelectElement).value
+                options={[
+                  { value: '', label: '请选择任务' },
+                  ...taskChoices(s.task).map((c) => ({ value: c.value, label: c.label })),
+                ]}
+                onChange={(task) => {
+                  // ⚠ 整份换掉（含 `body`）—— 见 `specDefaults` 上那段说明。
+                  steps.value = steps.value.map((x, k) =>
+                    k === i ? { ...x, task, body: specDefaults(task) } : x,
+                  )
                 }}
-              >
-                <option value="">请选择任务</option>
-                {taskChoices(s.task).map((c) => (
-                  <option key={c.value} value={c.value}>
-                    {c.label}
-                  </option>
-                ))}
-              </select>
+              />
             </fieldset>
+
+            {/*
+              ⚠ 参数**按任务生成**（`TaskMeta.params` ← 后端 `ParamSpec`）；前端不维护
+              任何任务知识 ✓。从前这一块是空的 —— 步骤的 `body` 只"原样带回、不能编辑"✗，
+              于是编排里的步骤永远用**任务自己的默认配置**，想改一个参数只能去任务页 ✗。
+
+              ⚠⚠ 改值必须**整体换掉那个步骤对象**（以及 `body`）：`steps` 是 `ref`，
+              浅响应只认"引用换没换"✓ —— 原地 `s.body[x] = v` 谁都不会醒 ✗
+              （同一页的步骤增删也是靠换新数组 ✓，见文件头）。
+            */}
+            {specsFor(s.task).length > 0 ? (
+              <div class="mt-2 flex flex-col gap-2">
+                {specsFor(s.task).map((spec) => (
+                  <ParamField
+                    key={spec.name}
+                    spec={spec}
+                    value={(s.body as Record<string, unknown> | null | undefined)?.[spec.name]}
+                    onInput={(v) => {
+                      const body = { ...((s.body as Record<string, unknown> | null) ?? {}), [spec.name]: v }
+                      steps.value = steps.value.map((x, k) => (k === i ? { ...x, body } : x))
+                    }}
+                  />
+                ))}
+              </div>
+            ) : null}
 
             <label class="flex items-center gap-3">
               <input
@@ -652,72 +802,6 @@ export const PipelinesPage = () => {
           />
         </fieldset>
 
-        <fieldset class="fieldset">
-          <legend class="fieldset-legend">账号</legend>
-          <input
-            class="input w-full"
-            placeholder="留空 = 全部账号"
-            value={d.accountsText}
-            onInput={(e) => {
-              d.accountsText = (e.target as HTMLInputElement).value
-            }}
-          />
-          <p class="text-xs opacity-60">
-            多个账号用逗号或空格分隔；留空表示对全部账号依次执行。
-          </p>
-        </fieldset>
-
-        <fieldset class="fieldset">
-          <legend class="fieldset-legend">账号执行方式</legend>
-          {/*
-            用**逐项独立**的原生 radio，而不是把整组包成一个分段控件：
-            这里只有「并行」那一项该是禁用的，若整组共用一个禁用态，
-            会连带把「串行」也染灰，让人误以为串行也不能选。
-            所以禁用只作用在「并行」那一项上。
-          */}
-          <div class="flex flex-col gap-2">
-            <label class="flex items-center gap-3">
-              <input
-                type="radio"
-                class="radio radio-sm"
-                name="pipeline-account-mode"
-                value="sequential"
-                checked={d.accountMode === 'sequential'}
-                onChange={() => {
-                  d.accountMode = 'sequential'
-                }}
-              />
-              <span class="text-sm">串行</span>
-            </label>
-            {/*
-              并行**不隐藏**：隐藏会让人以为"没这个功能"或"漏做了"。
-              这里显式禁用 + 把原因写在选项上。真被提交（例如从别处存进来的数据）
-              也会由后端 400 拦下，错误原文照抛。
-            */}
-            <label class="flex items-start gap-3">
-              <input
-                type="radio"
-                class="radio radio-sm mt-0.5"
-                name="pipeline-account-mode"
-                value="parallel"
-                disabled={true}
-                checked={d.accountMode === 'parallel'}
-                onChange={() => {
-                  d.accountMode = 'parallel'
-                }}
-              />
-              <span class="text-sm opacity-60">
-                并行
-                <span class="block text-xs opacity-80">
-                  上游限流，暂不支持并行
-                </span>
-              </span>
-            </label>
-          </div>
-          <p class="text-xs opacity-60">
-            后端当前只接受串行执行；若提交并行，会原样显示后端返回的 400 报错。
-          </p>
-        </fieldset>
 
         <label class="flex items-center gap-3">
           <input
@@ -731,38 +815,6 @@ export const PipelinesPage = () => {
           <span class="text-sm">启用这条编排</span>
         </label>
 
-        {/*
-          两层失败语义单独占一块：这是本页最核心的概念，
-          混进步骤列表就等于埋掉了。
-        */}
-        <div class="rounded-box bg-base-200 p-3">
-          <h3 class="text-sm font-medium">失败语义（两层）</h3>
-          <p class="mt-1 text-xs leading-5 opacity-70">
-            步骤级优先：某一步勾了「这一步失败也继续」，即使编排级开着「失败时中止整条链」，
-            这一步失败也不会中断后续步骤。
-          </p>
-
-          <label class="mt-3 flex items-start gap-3">
-            <input
-              type="checkbox"
-              class="toggle toggle-sm mt-0.5"
-              checked={d.stopOnError}
-              onChange={(e) => {
-                d.stopOnError = (e.target as HTMLInputElement).checked
-              }}
-            />
-            <span>
-              <span class="block text-sm font-medium">失败时中止整条链</span>
-              <span class="block text-xs opacity-60">
-                编排级：任何一步失败后，不再开始后续步骤。
-              </span>
-            </span>
-          </label>
-
-          <p class="mt-2 text-xs opacity-60">
-            每个步骤还有自己的「这一步失败也继续」开关 —— 那一层更具体，压过这里。
-          </p>
-        </div>
 
         {stepEditor()}
 
@@ -837,6 +889,159 @@ export const PipelinesPage = () => {
         `get "label"() { return … }`）⇒ 父级那个 ref 一变，子组件再读 `props.label`
         拿到的就是新值，**不需要**（也没有"重建组件实例"这条路可走）。
       */}
+      <Dialog id={RUN_DIALOG_ID} title="运行编排" size="md">
+        <p class="text-sm">
+          给「<strong>{runTarget.value?.name ?? ''}</strong>」选账号（默认全选）。
+        </p>
+        <div class="flex justify-end gap-2">
+          <button
+            type="button"
+            class="btn btn-soft btn-xs"
+            onClick={() => (runAccounts.value = runChoices.value.map((a) => a.id))}
+          >
+            全选
+          </button>
+          <button
+            type="button"
+            class="btn btn-soft btn-xs"
+            onClick={() => (runAccounts.value = [])}
+          >
+            清空
+          </button>
+        </div>
+        <p class="text-xs opacity-60">已选 {runAccounts.value.length} / {runChoices.value.length}</p>
+        <div class="flex flex-col gap-1">
+          {runChoices.value.map((a) => (
+            <label key={a.id} class="flex min-h-11 cursor-pointer items-center gap-3">
+              <input
+                type="checkbox"
+                class="checkbox checkbox-sm"
+                checked={runAccounts.value.includes(a.id)}
+                onChange={() => toggleRunAccount(a.id)}
+              />
+              {/* ⚠ 显示 `label`（掩码手机号）✗ 不要用 `id` —— 它是哈希，认不出是哪个号。 */}
+              <span class="text-sm">{a.label}</span>
+            </label>
+          ))}
+          {runChoices.value.length === 0 ? (
+            <p class="text-xs opacity-60">没有可用账号。</p>
+          ) : null}
+        </div>
+        <div class="modal-action">
+          <button type="button" class="btn btn-ghost" onClick={() => closeDialog(RUN_DIALOG_ID)}>
+            取消
+          </button>
+          <button
+            type="button"
+            class="btn btn-primary"
+            disabled={runAccounts.value.length === 0}
+            onClick={() => void confirmRun()}
+          >
+            开始运行
+          </button>
+        </div>
+      </Dialog>
+
+      <Dialog id={SCHED_DIALOG_ID} title="给编排加定时" size="md">
+        <p class="text-sm">
+          让「<strong>{schedTarget.value?.name ?? ''}</strong>」按下面的时间**自动跑一遍** ✓ ——
+          用的就是下面选的账号（默认全选）。
+        </p>
+
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">cron 表达式</legend>
+          <input
+            class="input w-full font-mono"
+            value={schedExpr.value}
+            onInput={(e) => (schedExpr.value = (e.target as HTMLInputElement).value)}
+          />
+          <p class="text-xs opacity-60">5 段（分 时 日 月 周）或 6 段（秒 分 时 日 月 周）。</p>
+          <div class="flex flex-wrap gap-2">
+            {/*
+              ⚠ 用**对象数组 + 具名参数**，不要用 `[[…]].map(([a, b]) => …)`：
+              lite 编译器靠"返回值就是那个 JSX 元素"来认 `.map` 的 `key`，
+              解构参数会让它认不出 ✗（实测报错："这里的 key 什么都不做" — 本页 945 行）。
+            */}
+            {[
+              { expr: '0 8 * * *', label: '每天 08:00' },
+              { expr: '0 0 * * *', label: '每天 00:00' },
+              { expr: '30 7 * * 1-5', label: '工作日 07:30' },
+            ].map((preset) => (
+              <button
+                key={preset.expr}
+                type="button"
+                class="btn btn-soft btn-sm"
+                onClick={() => (schedExpr.value = preset.expr)}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+        </fieldset>
+
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">时区</legend>
+          <input
+            class="input w-full"
+            value={schedTz.value}
+            onInput={(e) => (schedTz.value = (e.target as HTMLInputElement).value)}
+          />
+        </fieldset>
+
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">账号</legend>
+          <div class="flex justify-end gap-2">
+            <button
+              type="button"
+              class="btn btn-soft btn-xs"
+              onClick={() => (schedAccounts.value = runChoices.value.map((a) => a.id))}
+            >
+              全选
+            </button>
+            <button
+              type="button"
+              class="btn btn-soft btn-xs"
+              onClick={() => (schedAccounts.value = [])}
+            >
+              清空
+            </button>
+          </div>
+          <p class="text-xs opacity-60">
+            已选 {schedAccounts.value.length} / {runChoices.value.length}
+          </p>
+          <div class="flex flex-col gap-1">
+            {runChoices.value.map((a) => (
+              <label key={a.id} class="flex min-h-11 cursor-pointer items-center gap-3">
+                <input
+                  type="checkbox"
+                  class="checkbox checkbox-sm"
+                  checked={schedAccounts.value.includes(a.id)}
+                  onChange={() => toggleSchedAccount(a.id)}
+                />
+                <span class="text-sm">{a.label}</span>
+              </label>
+            ))}
+            {runChoices.value.length === 0 ? (
+              <p class="text-xs opacity-60">没有可用账号。</p>
+            ) : null}
+          </div>
+        </fieldset>
+
+        <div class="modal-action">
+          <button type="button" class="btn btn-ghost" onClick={() => closeDialog(SCHED_DIALOG_ID)}>
+            取消
+          </button>
+          <button
+            type="button"
+            class="btn btn-primary"
+            disabled={schedBusy.value || schedAccounts.value.length === 0}
+            onClick={() => void confirmSched()}
+          >
+            {schedBusy.value ? '保存中…' : '加定时'}
+          </button>
+        </div>
+      </Dialog>
+
       <ConfirmDialog
         id={DELETE_DIALOG_ID}
         title="删除编排"

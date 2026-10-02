@@ -437,6 +437,41 @@ pub trait UserStore: Send + Sync {
             "这个存储不支持下改设置（save_settings 未实现）".into(),
         ))
     }
+
+    /// 读兑换页的**订阅**（用户钉在顶部的那几件奖品）。
+    ///
+    /// 没订阅过就是**空列表**（不是错误）—— 与 `task_params()` 同一口径 ✓。
+    ///
+    /// # 为什么也挂在 `UserStore`
+    ///
+    /// 与 `settings()` / `task_params()` / `kouling_pool()` 同一个理由：
+    /// 新开一个 trait 会让本仓 16 处测试替身各补一行空实现 ✗。
+    ///
+    /// # 为什么按 `owner` 分表（与 `kouling_pool` 相反）
+    ///
+    /// 口令池是**全场共享的资源**（谁抓到的口令大家都能用 ✓），而订阅是
+    /// **"我想看哪几件"**—— 那是某个人自己的偏好 ✓。本仓用户资源的惯例就是
+    /// 按 owner 分表（`pipelines_for(owner)` 同款）⇒ 换个人登录不该看见别人的订阅 ✗。
+    async fn exchange_subscriptions(
+        &self,
+        _owner: &UserId,
+    ) -> Result<Vec<crate::ExchangeSubscription>> {
+        Ok(Vec::new())
+    }
+
+    /// 写兑换页的订阅（**整份替换** —— 切换由 `exchange::toggled` 先算好）。
+    ///
+    /// 默认实现**报错**（与 `save_settings` 同一口径）：写不进去却回成功，
+    /// 界面会说"已订阅"而下次刷新就没了 ✗ —— 那是查都没法查的一种坏 ✓。
+    async fn save_exchange_subscriptions(
+        &self,
+        _owner: &UserId,
+        _items: &[crate::ExchangeSubscription],
+    ) -> Result<()> {
+        Err(crate::Error::Storage(
+            "这个存储不支持下改兑换订阅（save_exchange_subscriptions 未实现）".into(),
+        ))
+    }
 }
 
 /// 全部持久化能力的组合。

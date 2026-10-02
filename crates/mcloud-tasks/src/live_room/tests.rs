@@ -1471,22 +1471,14 @@ fn params_accept_codes_as_an_array() {
     assert_eq!(p.listen_seconds, 60);
 }
 
-/// ⭐ 演练模式：**一枪都不发**。
-#[tokio::test]
-async fn dry_run_sends_nothing() {
-    let (mut c, http) = Ctx::new(&[]);
-    // 先过开关（默认关 ⇒ 整条会被跳过）；这一条测的是**启用之后**的演练档。
-    c.account.settings.kouling_enabled = true;
-    let task = LiveRoomTask::production();
-    let body = serde_json::json!({"codes": "甲\n乙", "dryRun": true});
-    let out = task.run(&c.ctx(), &body).await.unwrap();
-
-    assert_eq!(http.count(), 0, "演练不该发任何请求");
-    assert!(out.is_success());
-    assert!(out.summary().contains("演练"), "实得：{}", out.summary());
-}
-
 /// ⭐ b) `kouling_enabled = false`（**默认**）⇒ 一个请求都不发、结论 `Skipped`。
+///
+/// ⚠ 这里从前还有一条"反面用例"：`enabled = true` ⇒ 照旧跑。它当时**靠 `dryRun`
+/// 来回避真实请求**（"走演练档"）—— 演练档 2026-10-02 删掉之后，那条用例的写法
+/// 就没了立足点；而它想证明的"开关打开就真跑"**已经被那些开门 + 跑完整条链的用例
+/// 覆盖**（见 `auto_chain_opens_gate_collects_kouling_then_earns_flowers`：
+/// 它同样把开关打开，并且真的发出了门的请求与六步链）。
+/// ⇒ 与其再造一份门+链的装置去复述同一件事，不如把覆盖指向那边。
 ///
 /// 与旧 TS 同口径：`cli/index.ts` 的 `if (config.直播口令?.开启)` 之外不会
 /// 调用这条任务。
@@ -1504,25 +1496,6 @@ async fn disabled_kouling_is_skipped_with_zero_requests() {
     };
     assert_eq!(http.count(), 0, "关了就一个请求都不发");
     assert!(reason.contains("未启用"), "实得：{reason}");
-}
-
-/// ⭐ b-反面：`kouling_enabled = true` ⇒ 照旧跑（这里走演练档，不打请求，
-/// 但结论是"演练完成"而不是"未启用"）。
-#[tokio::test]
-async fn enabled_kouling_runs() {
-    let (mut c, http) = Ctx::new(&[]);
-    c.account.settings.kouling_enabled = true;
-
-    let out = LiveRoomTask::production()
-        .run(
-            &c.ctx(),
-            &serde_json::json!({"codes": "甲\n乙", "dryRun": true}),
-        )
-        .await
-        .expect("不该是 Err");
-    assert!(out.is_success(), "实得：{out:?}");
-    assert!(out.summary().contains("演练"), "实得：{}", out.summary());
-    assert_eq!(http.count(), 0, "演练不发请求");
 }
 
 // ══════════════════════════ 判据 7：六步链状态机 ══════════════════════════
@@ -2652,4 +2625,18 @@ fn params_accept_codes_as_string_or_array_with_the_same_semantics() {
     }));
     assert_eq!(from_string.codes, vec!["甲", "乙"]);
     assert_eq!(from_array.codes, from_string.codes);
+}
+
+/// ⭐ 两份 `KOULING_ANCHOR` 必须**字面相同**（用户口径：有效的主播只有一个）。
+///
+/// `mcloud-core`（挑「下一场」的地方）与 `mcloud-upstream`（判定门的地方）层次上
+/// **互不依赖** ✗ ⇒ 常量各立一处 ⇒ 靠这条用例钉住相等 ✓。
+/// 谁改了一处而忘了另一处 ⇒ 这里当场红 ✓（而不是界面上悄悄换了一个主播 ✗）。
+#[test]
+fn anchors_agree_between_core_and_upstream() {
+    assert_eq!(
+        mcloud_core::kouling::KOULING_ANCHOR,
+        mcloud_upstream::live_consts::KOULING_ANCHOR,
+        "core 与 upstream 的 KOULING_ANCHOR 必须一致 —— 这是「有效的主播」的唯一判据"
+    );
 }

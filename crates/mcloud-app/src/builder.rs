@@ -235,12 +235,15 @@ impl AppBuilder {
         // 内部创建。这里到 build() 返回之前一定填好，且还没开始任何一次运行。
         let _ = cancel_slot.set(runner.cancel_registry());
 
+        // ⚠ 顺序：编排运行器**必须先建**，调度器要拿它（定时跑编排）。
+        // 同一个实例也交给 `AppHandle::pipelines`（路由那条路）—— 共用一份。
+        let pipelines = Arc::new(mcloud_engine::PipelineRunner::new(Arc::clone(&runner)));
         let scheduler = Arc::new(mcloud_engine::Scheduler::new(
             Arc::clone(&store) as Arc<dyn mcloud_core::Store>,
             Arc::clone(&runner),
             Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>,
+            Arc::clone(&pipelines),
         ));
-        let pipelines = Arc::new(mcloud_engine::PipelineRunner::new(Arc::clone(&runner)));
         let cancel = runner.cancel_registry();
 
         Ok(App {

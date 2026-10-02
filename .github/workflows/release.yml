@@ -1,15 +1,26 @@
 name: Release
 
-# 出**可分发产物**：Windows / Linux / macOS 三平台各编一份，压成压缩包挂到 Release。
+# 出**可分发产物**：四个目标各编一份，压成压缩包挂到 Release。
 # 与 ci.yml 的分工：ci.yml 负责"改错了没有"（fmt/clippy/test/MSRV），
-# 本文件负责"能不能拿去用"（release 二进制 + 压缩包）。
+# 本文件负责"能不能拿去用"（release 二进制 + 压缩包），并在**发版前再跑一次门禁**
+# （打 tag 是直接 push，没有 PR 那道把关 ⇒ 这里是最后一道）。
+#
+# ── 用户口径（2026-10-02）────────────────────────────────────────────────
+#
+# 1. **只发 `mcloud-server`**，不发 `mcloud-cli`（CLI 仍留在源码里，只是不进包）。
+# 2. **一个平台只出一种压缩包** —— 不再 unix 侧同时给 tar.gz + tar.xz。
+#    unix 一律 `tar.gz`（通用性最好：GNU tar / BSD tar / Windows 自带的 bsdtar 都能解），
+#    Windows 用 `zip`。每包附一个 `.sha256`。
+#    ⚠ 代价说清：xz 比 gzip 小约 45%（仓库实测 3.51 → 1.89 MiB，那是**两个**二进制的数，
+#    现在只有一个 server，绝对值更小）。要换 xz 就改「打包（unix）」那一步。
+# 3. 四个目标：**Windows x86_64 / Linux x86_64 / Linux arm64 / macOS arm64**。
 #
 # ── 三条来自 ci.yml 的既有约定，这里照做 ────────────────────────────────
 #
 # 1. **Rust job 必须先拿到 `web/dist`**。`static_files.rs` 用 `#[derive(RustEmbed)]`
 #    在**编译期**把前端产物读进二进制，而 `web/dist` 不入库 —— 干净 checkout 里没有它，
 #    编译会直接失败（`folder '.../web/dist' does not exist`）。
-#    所以 `web` job 先跑、把 dist 当 artifact 传下来，三个平台各自取用，
+#    所以 `web` job 先跑、把 dist 当 artifact 传下来，四个目标各自取用，
 #    前端**只构建一次**（不必每平台重跑一遍 npm）。
 #
 # 2. **工具链钉具体版本**（1.91.1），不用 `@stable`：见 ci.yml 里那段长注释 ——
@@ -17,20 +28,32 @@ name: Release
 #
 # 3. **`--locked`**：Cargo.lock 入库，锁死依赖版本，产物可复现。
 #
-# ── 为什么三平台都能编（TLS 的选择直接决定了这件事）─────────────────────
+# ── Linux arm64 为什么走 `cross` ────────────────────────────────────────
 #
-# 本仓**只用 `native-tls`**（兼容性优先：rustls 不实现 CBC 套件，连不上只给
-# 老套件的主机）。副作用是各平台都走**系统 TLS**，于是不需要随包带 OpenSSL：
-#   * Windows  → SChannel（系统自带，零额外依赖）
-#   * macOS    → Security.framework（系统自带）
-#   * Linux    → OpenSSL（**需要 libssl-dev + pkg-config**，故下面有 apt 那一步）
-# 若哪天改回 `rustls-tls`，这一步可以删，但会重新引入"老主机连不上"。
+# 本仓**只用 `native-tls`**（兼容性优先：rustls 不实现 CBC 套件，连不上只给老套件的主机）
+# ⇒ Linux 侧走系统 OpenSSL ⇒ **交叉编译要拿到 aarch64 的 OpenSSL**，只装
+# `gcc-aarch64-linux-gnu` 是不够的（openssl-sys 会用 pkg-config 去找**目标架构**的库）。
+# `cross` 的镜像里带着目标 sysroot 与这批 -sys 依赖，正是为这种情况做的。
 #
-# ── 压缩选型 ────────────────────────────────────────────────────────────
+# ⚠ 另一条路是 GitHub 的 arm64 runner（`ubuntu-24.04-arm`），但**本仓是私有仓库** ⇒
+#    那条要额外计费 ⇒ 用 cross。
+# ⚠ cross 那条**本地验不了**（本机没有 Docker）⇒ 它只在 tag 那次真跑时才算验证过。
+#    真失败时第一嫌疑就是 OpenSSL：踩到就在镜像里补装 `libssl-dev:arm64`，
+#    或把这一条改成 rustls（代价见上）。
 #
-# 两个二进制之间有大段重复代码，**xz 的大窗口正好吃得下**：同一份产物
-# gzip 3.51 MiB / xz 1.89 MiB（实测，见仓库 docs）。所以 unix 侧两种都给；
-# Windows 的 runner 上没有 xz，只出 zip。
+# ── 压缩选型（UPX）────────────────────────────────────────────────────
+#
+# **只有 Linux 与 Windows** 压二进制。macOS **不压不是漏了**：UPX 不支持 arm64 Mach-O，
+# 而且压缩后的 Mach-O 会破坏代码签名，本机执行直接弹"无法验证开发者" —— 白赚体积、
+# 丢掉可运行性。
+#
+# ── 冒烟：真起服务、真打接口 ────────────────────────────────────────────
+#
+# `mcloud-server` **没有子命令**（`--help` 会被忽略并**另起一个服务**，实测踩过）
+# ⇒ 不能拿 `--help` 当冒烟。这里改成：拿一个临时数据目录 + 一个空闲端口把它**真跑起来**，
+# 轮询 `/api/health`（不需要登录），通了才算过，然后杀掉。
+# ⚠ Linux arm64 是交叉编出来的 aarch64 二进制，x86 runner 上**跑不了** ⇒ 那一条跳过冒烟
+#    （"没验"不等于"验过了"，跳过在日志里是看得见的）。
 
 on:
   # 打 tag 就发版（产物挂到 GitHub Release）
@@ -55,7 +78,7 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  # ── 前端：构建一次，dist 传给三个平台 ────────────────────────────────────
+  # ── 前端：构建一次，dist 传给后面每个 job ──────────────────────────────
   web:
     name: 前端（产出 web/dist）
     runs-on: ubuntu-latest
@@ -83,6 +106,12 @@ jobs:
       - name: 构建
         run: npm run build
 
+      # lite 的**编译期负例**：该抛的写法必须抛。只要 Node、不要浏览器 ⇒ CI 跑得动。
+      # ⚠ 另两条前端闸门（窄屏布局 / 真 DOM 验收）要无头 Chrome，ubuntu runner 上没有 ⇒
+      #   那两条是**本地提交前**的门（`node scripts/gates-web.mjs --full`）。
+      - name: lite 编译期负例
+        run: node lite/regress/compiler.mjs
+
       - uses: actions/upload-artifact@v4
         with:
           name: web-dist
@@ -90,25 +119,69 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # ── 三平台 release 构建 + 打包 ──────────────────────────────────────────
+  # ── 门禁：发版前再跑一次 fmt / clippy / test ───────────────────────────
+  #
+  # 为什么 release 里也要跑：打 tag 是**直接 push**，没有 PR 那道把关，而 ci.yml 只在
+  # PR 与手动触发时跑 ⇒ 不加这一道，tag 就成了"唯一没验过的那条路"。
+  # 代价是一次 tag ≈ 8–10 分钟 runner 时间，换"不会发出去一个编得过、跑不过的包"。
+  gates:
+    name: 门禁（fmt / clippy / test）
+    needs: web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取回 web/dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: ${{ github.workspace }}/web/dist
+
+      - name: 安装工具链
+        uses: dtolnay/rust-toolchain@1.91.1
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装系统依赖（native-tls → OpenSSL）
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: 格式检查
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: 测试
+        run: cargo test --workspace --locked
+
+  # ── 四个目标：release 构建 + 冒烟 + 打包 ────────────────────────────────
   build:
     name: ${{ matrix.name }}
-    needs: web
+    needs: [web, gates]
     runs-on: ${{ matrix.os }}
     strategy:
-      # 一个平台挂了也要看到另外两个的结果 —— 跨平台问题常常只挂在某一个平台上
+      # 一个平台挂了也要看到另外三个的结果 —— 跨平台问题常常只挂在某一个平台上
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             name: Linux x86_64
+            cross: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            name: Linux arm64
+            cross: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             name: Windows x86_64
+            cross: false
           - os: macos-14
             target: aarch64-apple-darwin
             name: macOS arm64
+            cross: false
     steps:
       - uses: actions/checkout@v4
 
@@ -121,16 +194,33 @@ jobs:
       - name: 安装工具链
         uses: dtolnay/rust-toolchain@1.91.1
 
-      - uses: Swatinem/rust-cache@v2
+      # cross 只装在需要它的那条矩阵上（装它要几十秒，别的平台白装没意义）
+      - name: 安装 cross（仅 Linux arm64）
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
-      # Linux 上 native-tls 走 OpenSSL，需要头文件与 pkg-config。
-      # 若哪天改用 rustls，这一步可以删。
-      - name: 安装系统依赖（仅 Linux）
-        if: runner.os == 'Linux'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # 交叉那条与原生那条的产物不通用，分开缓存别互相污染
+          key: ${{ matrix.target }}
+
+      # 原生 Linux 上 native-tls 走 OpenSSL，需要头文件与 pkg-config。
+      # ⚠ 交叉那条**不要**装：cross 镜像里自带目标的 sysroot 与 -sys 依赖，
+      #   装了反而可能把 x86 的 pkg-config 结果喂给 aarch64 编译。
+      - name: 安装系统依赖（仅原生 Linux）
+        if: runner.os == 'Linux' && !matrix.cross
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
 
-      - name: 编译（release，两个二进制）
-        run: cargo build --release --locked --bins --target ${{ matrix.target }}
+      # ── 编译：**只编 server**（用户口径 2026-10-02）────────────────────
+      - name: 编译（原生）
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --locked --bin mcloud-server --target ${{ matrix.target }}
+
+      - name: 编译（交叉，Linux arm64）
+        if: matrix.cross
+        run: cross build --release --locked --bin mcloud-server --target ${{ matrix.target }}
 
       # 版本号：打 tag 时用 tag（去掉 v），手动跑时读 workspace 版本
       - name: 计算版本与包名
@@ -150,85 +240,107 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "PKG=mcloud-v${VERSION}-${{ matrix.target }}" >> "$GITHUB_ENV"
+          echo "BIN_DIR=target/${{ matrix.target }}/release" >> "$GITHUB_ENV"
 
       # ── 压缩二进制：**只有 Linux 与 Windows** ────────────────────────────
       #
-      # 用户口径（2026-09-29）：linux/windows 可以压二进制，macos 不用压。
-      # macOS **不压不是漏了**：UPX 不支持 arm64 Mach-O，而且压缩后的 Mach-O
-      # 会破坏代码签名，本机执行直接弹"无法验证开发者" —— 白赚体积、丢掉可运行性。
-      #
-      # 两条都要的验证：`upx -t` 是 UPX 自带的完整性测试；再跑一次 `--help`
-      # 确认压完**还能执行**（UPX 压坏二进制的表现就是加载即崩）。
-      - name: 压缩二进制（仅 Linux）
-        if: runner.os == 'Linux'
+      # 两条都要的验证：`upx -t` 是 UPX 自带的完整性测试；紧随其后那条**真冒烟**
+      # 确认压完**还能跑起来、还能服务**（UPX 压坏二进制的表现就是加载即崩）。
+      - name: 压缩二进制（仅原生 Linux）
+        if: runner.os == 'Linux' && !matrix.cross
         run: |
           sudo apt-get install -y upx-ucl
-          BIN="target/${{ matrix.target }}/release"
-          upx --best --lzma "$BIN/mcloud-server" "$BIN/mcloud-cli"
-          upx -t "$BIN/mcloud-server" "$BIN/mcloud-cli"
-          "$BIN/mcloud-cli" --help 2>&1 | grep -q "用法" && echo "冒烟：CLI 压完仍可执行"
-          ls -l "$BIN/mcloud-server" "$BIN/mcloud-cli"
+          upx --best --lzma "$BIN_DIR/mcloud-server"
+          upx -t "$BIN_DIR/mcloud-server"
+          ls -l "$BIN_DIR/mcloud-server"
 
       - name: 压缩二进制（仅 Windows）
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install upx -y --no-progress
-          $bin = "target/${{ matrix.target }}/release"
-          upx --best --lzma "$bin/mcloud-server.exe" "$bin/mcloud-cli.exe"
-          upx -t "$bin/mcloud-server.exe" "$bin/mcloud-cli.exe"
-          $out = & "$bin/mcloud-cli.exe" --help 2>&1 | Out-String
-          if ($out -notmatch "用法") { throw "冒烟失败：CLI 压完跑不起来：$out" }
-          Write-Host "冒烟：CLI 压完仍可执行"
-          Get-ChildItem "$bin/*.exe" | Select-Object Name, Length
-          # ⚠⚠ 必须显式清零退出码：`--help` 是**未知子命令**，CLI 打印用法后退出非 0，
-          # 而 runner 的 pwsh 包装会在脚本末尾 `exit $LASTEXITCODE` —— 于是**整步判失败**，
-          # 尽管打包、upx -t、冒烟全都成功了（实测踩过：Linux 那步因为管道取的是 grep
-          # 的状态才侥幸没事，Windows 没有管道所以原样漏出来）。
-          $LASTEXITCODE = 0
+          upx --best --lzma "$env:BIN_DIR/mcloud-server.exe"
+          upx -t "$env:BIN_DIR/mcloud-server.exe"
+          Get-ChildItem "$env:BIN_DIR/mcloud-server.exe" | Select-Object Name, Length
 
-      # macOS 侧**不加** UPX（UPX 不支持 arm64 Mach-O，压过会破坏代码签名，
-      # 用户实测"m 芯片上压缩就运行不了"）—— 但"没压"不等于"能跑"，
-      # 所以这里补一条冒烟：确认未压缩的 arm64 二进制确实可执行。
-      - name: 冒烟（仅 macOS：确认未压缩的 arm64 二进制可执行）
-        if: runner.os == 'macOS'
+      # ── 冒烟：真起服务、真打 /api/health ────────────────────────────────
+      #
+      # ⚠ 不能拿 `--help` 冒烟：`mcloud-server` 没有子命令，参数会被忽略并**另起一个服务**
+      #   （实测踩过：以为在打印用法，其实占了端口）。
+      # ⚠ 交叉编出来的 aarch64 二进制在 x86 runner 上跑不了 ⇒ 那一条由 `if` 跳过。
+      - name: 冒烟（unix：起服务 + /api/health）
+        if: runner.os != 'Windows' && !matrix.cross
+        shell: bash
         run: |
-          BIN="target/${{ matrix.target }}/release"
-          "$BIN/mcloud-cli" --help 2>&1 | grep -q "用法" && echo "冒烟：macOS arm64 二进制可执行（未压缩）"
+          export MCLOUD_ADDR=127.0.0.1:39123
+          export MCLOUD_DATA_DIR="$(mktemp -d)"
+          "$BIN_DIR/mcloud-server" &
+          PID=$!
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 2 http://127.0.0.1:39123/api/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+          if [ "$ok" != 1 ]; then
+            echo "::error::冒烟失败：二进制起来了但 /api/health 一直不通"
+            exit 1
+          fi
+          echo "冒烟通过：二进制能起、/api/health 通（压缩后 ✓）"
 
-      - name: 打包（unix：tar.gz + tar.xz）
+      - name: 冒烟（Windows：起服务 + /api/health）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:MCLOUD_ADDR = "127.0.0.1:39123"
+          $env:MCLOUD_DATA_DIR = Join-Path $env:RUNNER_TEMP "mcloud-smoke"
+          New-Item -ItemType Directory -Force -Path $env:MCLOUD_DATA_DIR | Out-Null
+          $p = Start-Process -FilePath "$env:BIN_DIR/mcloud-server.exe" -PassThru -NoNewWindow
+          $ok = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            try {
+              Invoke-WebRequest -Uri "http://127.0.0.1:39123/api/health" -TimeoutSec 2 -UseBasicParsing | Out-Null
+              $ok = $true; break
+            } catch { Start-Sleep -Seconds 1 }
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { throw "冒烟失败：二进制起来了但 /api/health 一直不通" }
+          Write-Host "冒烟通过：二进制能起、/api/health 通（压缩后 ✓）"
+
+      # ── 打包：**一个平台一种格式** ──────────────────────────────────────
+      #
+      # unix → tar.gz；Windows → zip。各附一个 .sha256。
+      # 包内**只有** `mcloud-server`（用户口径：不发 CLI）。
+      - name: 打包（unix：tar.gz）
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          BIN_DIR="target/${{ matrix.target }}/release"
           mkdir -p "target/dist/${PKG}"
-          cp "$BIN_DIR/mcloud-server" "$BIN_DIR/mcloud-cli" "target/dist/${PKG}/"
+          cp "$BIN_DIR/mcloud-server" "target/dist/${PKG}/"
           cd target/dist
           tar -czf "${PKG}.tar.gz" "${PKG}"
-          echo "gzip: $(ls -l "${PKG}.tar.gz" | awk '{print $5}') B"
-          if command -v xz >/dev/null; then
-            tar -cJf "${PKG}.tar.xz" "${PKG}"
-            echo "xz:   $(ls -l "${PKG}.tar.xz" | awk '{print $5}') B"
-          fi
-          shasum -a 256 *.tar.* > "${PKG}.sha256" || sha256sum *.tar.* > "${PKG}.sha256"
+          echo "包大小: $(ls -l "${PKG}.tar.gz" | awk '{print $5}') B"
+          shasum -a 256 "${PKG}.tar.gz" > "${PKG}.sha256" || sha256sum "${PKG}.tar.gz" > "${PKG}.sha256"
           cat "${PKG}.sha256"
 
       - name: 打包（Windows：zip）
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $bin = "target/${{ matrix.target }}/release"
           New-Item -ItemType Directory -Force -Path "target/dist/$env:PKG" | Out-Null
-          Copy-Item "$bin/mcloud-server.exe", "$bin/mcloud-cli.exe" "target/dist/$env:PKG/"
+          Copy-Item "$env:BIN_DIR/mcloud-server.exe" "target/dist/$env:PKG/"
           Compress-Archive -Path "target/dist/$env:PKG" -DestinationPath "target/dist/$env:PKG.zip"
-          Get-FileHash "target/dist/$env:PKG.zip" -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $env:PKG.zip" } | Out-File "target/dist/$env:PKG.sha256"
+          Get-FileHash "target/dist/$env:PKG.zip" -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $env:PKG.zip" } |
+            Out-File -Encoding ascii "target/dist/$env:PKG.sha256"
+          Get-Content "target/dist/$env:PKG.sha256"
 
       # ⚠ 上传前把**未打包的原始二进制目录**删掉：`path: target/dist/*` 会把它
-      # 和压缩包一起收进去，Linux/macOS 各白搭约 7MB 下载量（实测 artifact 8.6MB
-      # 而压缩包只有 2.9MB）。
+      # 和压缩包一起收进去，白搭好几 MB 下载量。
       # 踩过的坑：这步一开始被插到 **web job** 里（那个 upload-artifact 缩进相同、
-      # 是文件里第一个），于是 PKG 未定义、等于空跑，artifact 体积一点没变 ——
-      # 所以这里锚点必须带 `name: ${{ matrix.target }}` 才落到 build job。
+      # 是文件里第一个），于是 PKG 未定义、等于空跑 —— 所以这里锚点必须带
+      # `name: ${{ matrix.target }}` 才落到 build job。
       - name: 只保留压缩包与校验和
         shell: bash
         run: rm -rf "target/dist/${PKG}"
@@ -239,7 +351,7 @@ jobs:
           path: ${{ github.workspace }}/target/dist/*
           if-no-files-found: error
 
-  # ── 打 tag 时把三个平台的包挂到 Release ────────────────────────────────
+  # ── 打 tag 时把四个目标的包挂到 Release ────────────────────────────────
   release:
     name: 发布
     needs: build
@@ -262,15 +374,25 @@ jobs:
           files: dist/*
           generate_release_notes: true
           body: |
-            三平台产物（Linux x86_64 / Windows x86_64 / macOS arm64），每包附 `.sha256`，
-            包内两个可执行文件：`mcloud-server`（服务本体）+ `mcloud-cli`（命令行）。
-            完整说明见仓库 [`docs/usage.md`](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/usage.md)。
+            四个目标的产物，**每个平台一种格式**，包内**只有一个可执行文件 `mcloud-server`**
+            （服务本体；CLI 不随包发布）：
+
+            | 平台 | 目标三元组 | 格式 |
+            |---|---|---|
+            | Linux x86_64 | `x86_64-unknown-linux-gnu` | `.tar.gz` |
+            | Linux arm64 | `aarch64-unknown-linux-gnu` | `.tar.gz` |
+            | Windows x86_64 | `x86_64-pc-windows-msvc` | `.zip` |
+            | macOS arm64 | `aarch64-apple-darwin` | `.tar.gz` |
+
+            每包附一个 `.sha256`（Linux/macOS 用 `shasum -a 256 -c`、Windows 用
+            `Get-FileHash` 核对）。完整说明见仓库
+            [`docs/usage.md`](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/usage.md)。
 
             ## 快速开始
 
             ```bash
-            tar -xJf mcloud-<版本>-<你的平台>.tar.xz          # Windows 用 Expand-Archive 解 .zip
-            ./mcloud-server                                   # 没有子命令，直接跑
+            tar -xzf mcloud-<版本>-<你的平台>.tar.gz    # Windows：Expand-Archive 解 .zip
+            ./mcloud-server                             # 没有子命令，直接跑
             ```
 
             然后打开 <http://127.0.0.1:3000> —— **首次运行**进「创建管理员」向导。
@@ -281,9 +403,6 @@ jobs:
 
             * **Linux**：用系统 TLS，需要 `libssl`（`apt install libssl3` / `dnf install openssl-libs`）；
             * **macOS**：产物**未压缩**（UPX 会破坏 arm64 代码签名，M 芯片上跑不起来）。
-              二进制未签名，浏览器下载后先 `xattr -dr com.apple.quarantine ./mcloud-server ./mcloud-cli`；
+              二进制未签名，浏览器下载后先 `xattr -dr com.apple.quarantine ./mcloud-server`；
             * **Windows**：产物**用 UPX 压过**（约原体积 1/3），代价是 Defender/SmartScreen
               **可能误报** —— 走「更多信息 → 仍要运行」或加白名单；介意就从源码构建。
-
-            ⚠ `mcloud-cli` 与 `mcloud-server` **共用同一个数据目录**（同目录运行，或给同一个
-            `MCLOUD_DATA_DIR`），否则 CLI 看不到服务里配好的账号。

@@ -315,20 +315,6 @@ async fn sign_reports_zero_gain_honestly() {
     );
 }
 
-/// 演练模式：查一次、不提交。
-#[tokio::test]
-async fn sign_dry_run_does_not_submit() {
-    let (c, http) = Ctx::new(&[&info_body(false, 10496)]);
-    let out = SignTask
-        .run(&c.ctx(), &serde_json::json!({"dryRun": true}))
-        .await
-        .unwrap();
-
-    assert!(out.is_success());
-    assert_eq!(http.count(), 1, "演练不该提交");
-    assert!(out.summary().contains("演练"));
-}
-
 /// `deviceId` 是 base64 ⇒ 查询串里必须编码（`+` 不编码表示空格）。
 #[tokio::test]
 async fn sign_percent_encodes_the_device_id() {

@@ -16,7 +16,7 @@ use std::sync::Mutex;
 
 const NOW_MS: i64 = 1_700_000_000_000;
 
-fn account(phone: &str) -> Account {
+pub(crate) fn account(phone: &str) -> Account {
     Account {
         id: AccountId::new(phone),
         nickname: None,
@@ -44,7 +44,7 @@ fn step(task: &str, cont: bool) -> PipelineStep {
     }
 }
 
-fn pipeline(steps: Vec<PipelineStep>, stop_on_error: bool) -> Pipeline {
+pub(crate) fn pipeline(steps: Vec<PipelineStep>, stop_on_error: bool) -> Pipeline {
     Pipeline {
         id: PipelineId::new("p1"),
         name: "测试链".into(),
@@ -75,14 +75,42 @@ impl HttpClient for NoHttp {
 #[derive(Default)]
 pub(crate) struct MemStore {
     runs: Mutex<Vec<RunRecord>>,
+    /// 播种用的账号（默认空 ⇒ 现有用例行为不变 ✓）。
+    ///
+    /// ⚠ 必须**同时**覆写 `accounts_for`：`AccountStore::accounts_for` 的默认实现
+    /// 返回空表 ✗，而"定时跑编排"那条路走的是**按归属**的 `accounts_for`
+    /// ⇒ 只让 `accounts()` 有数据是不够的 ✗（会表现成"没有可执行账号"）。
+    pub(crate) accounts: Vec<Account>,
+    /// 播种用的编排（默认空 ✓）。同理必须覆写 `pipeline_for`。
+    pub(crate) pipelines: Vec<Pipeline>,
 }
+impl MemStore {
+    /// 带播种的桩仓（账号 + 编排）。
+    ///
+    /// ⚠ 用构造器而不是让调用方写结构体字面量：`runs` 是私有的 ✗，
+    /// 字面量会把"哪些字段是内部实现"漏出去（也编不过 —— `E0451`）。
+    pub(crate) fn seeded(accounts: Vec<Account>, pipelines: Vec<Pipeline>) -> Self {
+        Self {
+            accounts,
+            pipelines,
+            ..Default::default()
+        }
+    }
+}
+
 #[async_trait]
 impl mcloud_core::AccountStore for MemStore {
     async fn accounts(&self) -> mcloud_core::Result<Vec<Account>> {
-        Ok(Vec::new())
+        Ok(self.accounts.clone())
     }
-    async fn account(&self, _id: &AccountId) -> mcloud_core::Result<Option<Account>> {
-        Ok(None)
+    async fn account(&self, id: &AccountId) -> mcloud_core::Result<Option<Account>> {
+        Ok(self.accounts.iter().find(|a| &a.id == id).cloned())
+    }
+    async fn accounts_for(
+        &self,
+        _owner: &mcloud_core::UserId,
+    ) -> mcloud_core::Result<Vec<Account>> {
+        Ok(self.accounts.clone())
     }
     async fn save_account(&self, _a: &Account) -> mcloud_core::Result<()> {
         Ok(())
@@ -178,10 +206,17 @@ impl mcloud_core::ScheduleStore for MemStore {
 #[async_trait]
 impl mcloud_core::PipelineStore for MemStore {
     async fn pipelines(&self) -> mcloud_core::Result<Vec<Pipeline>> {
-        Ok(Vec::new())
+        Ok(self.pipelines.clone())
     }
-    async fn pipeline(&self, _i: &PipelineId) -> mcloud_core::Result<Option<Pipeline>> {
-        Ok(None)
+    async fn pipeline(&self, i: &PipelineId) -> mcloud_core::Result<Option<Pipeline>> {
+        Ok(self.pipelines.iter().find(|p| &p.id == i).cloned())
+    }
+    async fn pipeline_for(
+        &self,
+        _owner: &mcloud_core::UserId,
+        i: &PipelineId,
+    ) -> mcloud_core::Result<Option<Pipeline>> {
+        Ok(self.pipelines.iter().find(|p| &p.id == i).cloned())
     }
     async fn save_pipeline(&self, _p: &Pipeline) -> mcloud_core::Result<()> {
         Ok(())

@@ -7,10 +7,13 @@ import { accountName, refreshAccountNames } from '../account-names'
  *
  * # ⚠ 三条产品事实决定了这个页面的样子
  *
- * 1. **小红书那条口令没法自动获取，必须人工粘进来。** 那边没有可鉴权的接口，
- *    所以"手工口令"这一栏是**必需入口**，不是"可选补充"。页面把这句话写在
- *    输入框正下方，而不是塞进折叠说明里 —— 它是用户理解"为什么我还要手打"
- *    的唯一来源。
+ * 1. **口令有两个自动来源：直播间弹幕 与 小红书。** 收集器**并发**跑这两个，
+ *    所以"没收到口令"要看两个来源的结果，不是只看弹幕。
+ *    ⚠ 小红书**没有"它自己那条口令"** —— 是**别人把口令分享到小红书**，
+ *    我们从那儿读回来。写"小红书那条口令没法自动获取"是**双重误导**：
+ *    既暗示小红书有一条专属口令，又暗示它拿不到（其实拿得到，只是低频）。
+ *    手工那一栏是**第三条入口**（自动两条都没到手、或你想指定某条时用），
+ *    所以它写在输入框正下方，而不是塞进折叠说明里。
  * 2. **"没领"不是失败。** 这条链最常见的结局就是"今天没开播"，
  *    与签到里"今天已经签过了"同一档。所以结果区分**四态**，
  *    其中 `idle` 用中性色，**不染红**；且三种"没领"的原因**分开写**
@@ -456,6 +459,52 @@ export const LiveRoomPage = () => {
     </p>
   )
 
+  /**
+   * 下一场直播 —— **放在最上面**（用户口径 2026-10-02：
+   * 「下一场直播时间应该移动到上面，显眼」）。
+   *
+   * ⚠ 它原先埋在「共享口令池」卡片的最底下 ✗。而这一页真正要先看的就是"什么时候开播"：
+   * 口令**只在开播那段时间有效**（见模块头的产品事实 2），所以时间是"现在该不该点运行"
+   * 的唯一依据 —— 正是上面那句"这条链只在主播开播的那一段时间里有用" ✓。
+   * ⇒ 移到顶部并放大；全页**只有这一处**（池卡片里那份已删 ✓，两处早晚不一致 ✗）。
+   */
+  const nextSession = () => {
+    const p = pool.value
+    // 池子还没读到（或读失败）⇒ 不占位：下面那张「共享口令池」卡片会给出错误与重试 ✓
+    if (p == null) return null
+    return (
+      <div class="card bg-base-100 shadow-sm">
+        <div class="card-body gap-1">
+          <p class="text-xs font-semibold opacity-60">下一场直播</p>
+          {p.nextStart ? (
+            <>
+              <p class="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <span class="font-mono text-xl font-semibold">{p.nextStart}</span>
+                {/* ⚠ 主播名字（用户口径 2026-10-02）✗ 光有时间和场次名仍分不出
+                    是不是自己那个直播间 —— 后端给的就是**目标主播**的昵称 ✓，
+                    与时间/标题同一次选择 ✓。 */}
+                {p.nextAnchor ? <span class="text-base font-medium">{p.nextAnchor}</span> : null}
+              </p>
+              {/* ⚠ 标题要跟着时间一起显示（用户口径 2026-10-02）：
+                  只写"10-02 15:00"根本看不出是不是自己要看的那个直播间 ——
+                  后端按**目标主播**筛、取最早一场，标题就是那一场的场次名 ✓。 */}
+              {p.nextTitle ? <p class="break-words text-sm opacity-80">{p.nextTitle}</p> : null}
+              <p class="text-xs opacity-50">
+                目标主播最早那一场；时间是上游给的本地时间，原样显示。
+              </p>
+            </>
+          ) : (
+            <p class="text-sm opacity-60">
+              {p.scheduleAtMs == null
+                ? '还没有探测过场次 —— 跑一次直播任务就会带回来。'
+                : '上游这次没有给下一场的时间。'}
+            </p>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   const accountField = () => (
     <fieldset class="fieldset">
       <legend class="fieldset-legend">账号</legend>
@@ -492,21 +541,22 @@ export const LiveRoomPage = () => {
       <p class="text-xs leading-5 opacity-60">
         可以勾<b class="font-medium">多个账号</b>、也可以勾「全部账号」——
         后端会<b class="font-medium">逐个串行</b>跑（一个领完再领下一个）；
-        每个号的兑换状态是<b class="font-medium">各算各的</b>。
+        每个号的领取状态是<b class="font-medium">各算各的</b>。
       </p>
     </fieldset>
   )
 
   /**
-   * 手工口令 —— 本页最重要的一栏。
+   * 手工口令 —— 第三条入口（可留空）。
    *
-   * ⚠ 那句"小红书那条必须人工粘"是**产品事实**，不是使用提示：
-   * 小红书那边没有可鉴权的接口，自动收集永远拿不全两条口令。
-   * 所以这一栏不是"可选补充"，而是**必需入口**。
+   * ⚠ 别写成"小红书那条口令必须人工粘"：口令的自动来源是**弹幕**与**小红书**
+   * 两个（收集器并发跑，小红书那条链不需要鉴权、只是低频）。
+   * 小红书**没有它自己那条口令** —— 是**别人把口令分享到那儿**。
+   * 那样写会让人以为小红书有一条专属口令、而且自动拿不到，两件都不是事实。
    */
   const codesField = () => (
     <fieldset class="fieldset">
-      <legend class="fieldset-legend">手工口令</legend>
+      <legend class="fieldset-legend">手工口令（可留空）</legend>
       <textarea
         class="textarea w-full"
         rows={3}
@@ -522,9 +572,9 @@ export const LiveRoomPage = () => {
       />
       <div class="alert alert-soft alert-info text-sm" role="alert">
         <span class="break-words">
-          <b class="font-medium">小红书那条口令没法自动获取，必须人工粘进来。</b>
-          直播间弹幕里的口令能自动收，小红书那条不能（那边无法鉴权）——
-          所以这一栏是<b class="font-medium">必需入口</b>，不是可选补充。
+          口令会自动从<b class="font-medium">直播间弹幕</b>和<b class="font-medium">小红书</b>两个来源收
+          （<b class="font-medium">小红书那边不是它自己有口令</b>，是别人把口令分享到那儿，我们读回来）。
+          这一栏是<b class="font-medium">补</b>：自动那两条都没到手、或你想指定某条时用，留空也行。
         </span>
       </div>
       <p class="text-xs leading-5 opacity-60">
@@ -533,7 +583,7 @@ export const LiveRoomPage = () => {
         <b class="font-medium">{codeList().length}</b> 条。
       </p>
       <p class="text-xs leading-5 opacity-60">
-        留空 = 只用弹幕自动收集（这时就<b class="font-medium">拿不到</b>小红书那一条）。
+        留空 = 让弹幕与小红书两个来源自动收集。
         ⚠ 口令只在<b class="font-medium">本次直播</b>有效：上一场的口令是废值，
         抄来的会回「口令无效」。
       </p>
@@ -611,9 +661,9 @@ export const LiveRoomPage = () => {
         {listenField()}
         {switchesField()}
 
-        {/* ⚠ 后果必须写在按钮旁边：点下去是**真的去兑换**（"演练"才不发请求）。 */}
+        {/* ⚠ 后果必须写在按钮旁边：点下去是**真的去领取**（"演练"才不发请求）。 */}
         <p class="text-xs leading-5 opacity-60">
-          运行＝真的去兑换小红花（不发请求的只有「演练」）。多账号会按顺序串行跑，可以关页面，后端会接着跑。
+          运行＝真的去领取小红花（不发请求的只有「演练」）。多账号会按顺序串行跑，可以关页面，后端会接着跑。
         </p>
 
         {/*
@@ -804,27 +854,9 @@ export const LiveRoomPage = () => {
               ))}
             </ul>
           )}
-          <p class="text-xs font-semibold opacity-60">直播场次</p>
-          {p.nextStart ? (
-            <p class="break-words text-sm">
-              下一场：<span class="font-mono">{p.nextStart}</span>
-              {/*
-                ⚠ 标题要跟着时间一起显示（用户口径 2026-10-02）：
-                只写"10-02 15:00"根本看不出是不是自己要看的那个直播间 ——
-                后端现在按**目标主播**筛、取最早一场，标题就是那一场的场次名。
-              */}
-              {p.nextTitle ? <span class="opacity-80">{` ${p.nextTitle}`}</span> : null}
-              <span class="text-xs opacity-50">
-                （目标主播最早那一场；时间是上游给的本地时间，原样显示）
-              </span>
-            </p>
-          ) : (
-            <p class="text-sm opacity-60">
-              {p.scheduleAtMs == null
-                ? '还没有探测过场次 —— 跑一次直播任务就会带回来。'
-                : '上游这次没有给下一场的时间。'}
-            </p>
-          )}
+          {/* ⚠ 「下一场」**不在这里**：已按用户口径（2026-10-02）移到页面最上面 ✓
+              （见 `nextSession()`）—— 这一页真正要先看的就是"什么时候开播"，
+              埋在池卡片最底下 ✗ 等于没有。全页只有那一处 ✓。 */}
           {p.sessions.length === 0 ? null : (
             <ul class="flex flex-col gap-1">
               {p.sessions.map((s) => (
@@ -849,6 +881,9 @@ export const LiveRoomPage = () => {
   return (
     <div class="flex flex-col gap-4">
       {header()}
+      {/* ⚠ 顺序是**刻意的**（用户口径 2026-10-02）：先给"什么时候开播" ✓，
+          再给"这页是干什么的" —— 反过来会让用户先读一段说明才看到时间 ✗。 */}
+      {nextSession()}
       {intro()}
 
       {state.value === 'loading' ? (

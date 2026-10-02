@@ -8,15 +8,19 @@
  * 两处必须是**同一套控件、同一套口径**（「全部」在后端是 `accounts: []`），
  * 否则迟早一处改了、另一处没改。
  *
- * # 为什么不是 `<select multiple>`
+ * # 为什么不是 `<select multiple>`，也不是原来的 `<details>`
  *
- * 移动端原生多选要靠"按住 + 点选"，几乎不可用（本仓窄屏是主要形态之一）。
- * 这里用 `<details>` 收起一个复选框列表：收起时只占一行，展开时逐项可点。
+ * 2026-10-02 起换成 `ui/select.tsx`（TDesign 口径的自建下拉）：
+ *  - 原生多选要靠"按住 + 点选"，移动端几乎不可用（本仓窄屏是主要形态之一）；
+ *  - 原来的 `<details>` 面板**在文档流里**，展开会把卡片撑高、把下面的内容顶下去，
+ *    也没有"点外部关闭"——而用户要的是 TDesign 那种浮层。
  *
  * ⚠ 「全部」是一个**独立开关**，不是"把每一项都勾上" —— 后端空数组的语义是
  * "**我名下的全部账号**"，账号以后增加了也仍然成立（勾每一项就锁死了当时的名单）。
+ * 所以它走 `allRow`，而不是往 `options` 里塞一项。
  */
 import type { AccountSummary } from '../api'
+import { Select } from './select'
 
 export interface AccountPickerProps {
   accounts: AccountSummary[]
@@ -30,51 +34,42 @@ export interface AccountPickerProps {
 
 export function AccountPicker(props: AccountPickerProps) {
   const label = (a: AccountSummary) => a.nickname || a.label || a.id
-  const nameOf = (id: string) => {
-    const hit = props.accounts.find((a) => a.id === id)
-    return hit ? label(hit) : id
-  }
-  const summary = () =>
-    props.all
-      ? `全部账号（${props.accounts.length} 个）`
-      : props.picked.length === 0
-        ? '未选择'
-        : props.picked.map(nameOf).join('、')
 
   return (
-    <details class="collapse collapse-arrow border-base-300 bg-base-100 border">
-      <summary class="collapse-title min-h-0 py-2 text-sm">
-        <span class="opacity-60">已选：</span>
-        <span>{summary()}</span>
-      </summary>
-      <div class="collapse-content flex flex-col gap-1">
-        <label class="label cursor-pointer justify-start gap-2 py-1">
-          <input
-            type="checkbox"
-            class="checkbox checkbox-sm"
-            checked={props.all}
-            onChange={() => props.onToggleAll()}
-          />
-          <span class="label-text">
-            全部账号（{props.accounts.length} 个）— 一个跑完再跑下一个
-          </span>
-        </label>
-        {props.accounts.map((a) => (
-          <label key={a.id} class="label cursor-pointer justify-start gap-2 py-1 pl-6">
-            <input
-              type="checkbox"
-              class="checkbox checkbox-sm"
-              checked={!props.all && props.picked.includes(a.id)}
-              disabled={props.all}
-              onChange={() => props.onToggle(a.id)}
-            />
-            <span class="label-text">
-              {label(a)}
-              {a.pc_platform ? `（${a.pc_platform}）` : ''}
-            </span>
-          </label>
-        ))}
-      </div>
-    </details>
+    <Select
+      id="account-picker"
+      multiple
+      filterable
+      ariaLabel="账号"
+      placeholder="请选择账号"
+      emptyText="还没有已登录的账号"
+      value={props.picked}
+      /*
+        ⚠ 上游接口是 `onToggle(id)`（逐项），而 `Select` 给的是**下一份名单**。
+        面板一次只改一项 ⇒ `added` / `removed` 里必有一个，折回一次 toggle 即可。
+        这样两个调用点（任务页 / 直播页）的 props 不用动，口径也不会分叉。
+      */
+      onChange={(next) => {
+        const added = next.find((v) => !props.picked.includes(v))
+        if (added !== undefined) {
+          props.onToggle(added)
+          return
+        }
+        const removed = props.picked.find((v) => !next.includes(v))
+        if (removed !== undefined) props.onToggle(removed)
+      }}
+      allRow={{
+        label: `全部账号（${props.accounts.length} 个）`,
+        active: props.all,
+        onToggle: props.onToggleAll,
+      }}
+      options={props.accounts.map((a) => ({
+        value: a.id,
+        label: label(a),
+        hint: a.pc_platform ? a.pc_platform : undefined,
+        // 勾了「全部账号」就锁住逐个勾选（后端口径：全部 = `accounts: []`）
+        disabled: props.all,
+      }))}
+    />
   )
 }

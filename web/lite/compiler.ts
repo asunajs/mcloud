@@ -701,7 +701,19 @@ class Compiler {
   }
 
   finish(code: string): CompileResult {
-    if (this.templates.length === 0) return { code, helpers: this.helpers }
+    /**
+     * ⚠ 早退的判据**不能只看 `templates`**。
+     *
+     * `helpers` 里那些 `_$createComponent` / `_$setNodes` 是**代码里真的会调用**的
+     * （第 297 行那个组件分支就会发 `createComponent`），漏注入 import 的后果是
+     * 运行期 `ReferenceError: _$createComponent is not defined`，而**编译期一声不响**。
+     *
+     * 2026-10-02 实测踩中：`ui/account-picker.tsx` 改成"整份就是一个组件、
+     * 没有任何静态元素"之后 `templates.length === 0`，于是 import 被这行早退吞掉，
+     * 任务页整块渲染炸掉。判据补上 `helpers.size === 0` 即可 ——
+     * 两个都空时才是真的没什么要插。
+     */
+    if (this.templates.length === 0 && this.helpers.size === 0) return { code, helpers: this.helpers }
     const lines = code.split('\n')
     let at = 0
     for (let i = 0; i < lines.length; i++) if (/^\s*import\s/.test(lines[i])) at = i + 1

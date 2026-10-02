@@ -37,6 +37,26 @@ export const IconDashboard = (p: IconProps): JSX.Element => (
 )
 
 /**
+ * 订阅（已订）：实心星。
+ *
+ * 用星星而不是"图钉/书签"：这一页的动作是"我盯着这件" ✓，而**空心/实心**
+ * 天然表达"订没订"两态 —— 不必再配一句文案 ✓（窄屏那一行已经挤着
+ * 「兑换」「定时」两颗按钮了，第三颗只能是图标）。
+ */
+export const IconStarFilled = (p: IconProps): JSX.Element => (
+  <svg {...BASE} class={p.class ?? 'size-5'}>
+    <path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27Z" />
+  </svg>
+)
+
+/** 订阅（未订）：空心星。与 `IconStarFilled` 同一形状，只差填充。 */
+export const IconStarOutline = (p: IconProps): JSX.Element => (
+  <svg {...BASE} class={p.class ?? 'size-5'}>
+    <path d="M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24ZM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4Z" />
+  </svg>
+)
+
+/**
  * 兑换：礼物盒。
  *
  * 用礼物盒而不是"两支箭头对着转"（那个更像"同步/刷新"）——
@@ -145,5 +165,19 @@ export const IconFlower = (p: IconProps): JSX.Element => (
 export const IconSearch = (p: IconProps): JSX.Element => (
   <svg {...BASE} class={p.class ?? 'size-5'}>
     <path d="M10 2a8 8 0 1 0 4.9 14.32l5.39 5.39 1.42-1.42-5.39-5.39A8 8 0 0 0 10 2Zm0 2a6 6 0 1 1 0 12 6 6 0 0 1 0-12Z" />
+  </svg>
+)
+
+/** 下拉箭头（TDesign 的 `chevron-down`）。展开时由 CSS 转 180°。 */
+export const IconChevronDown = (p: IconProps): JSX.Element => (
+  <svg {...BASE} class={p.class ?? 'size-5'}>
+    <path d="M12 15.4 5.3 8.7l1.4-1.4L12 12.6l5.3-5.3 1.4 1.4z" />
+  </svg>
+)
+
+/** 勾：单选下拉里标「当前项」（TDesign 放在行尾）。 */
+export const IconCheck = (p: IconProps): JSX.Element => (
+  <svg {...BASE} class={p.class ?? 'size-5'}>
+    <path d="M9.55 17.6 4 12.05l1.4-1.4 4.15 4.15L18.6 5.7l1.4 1.4z" />
   </svg>
 )

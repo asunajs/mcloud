@@ -44,6 +44,27 @@ const ACCOUNT2 = { id: '13900000001', nickname: null, pc_platform: null, device_
 const acctState = { accounts: [] }
 
 /**
+ * 兑换页的**订阅**（有状态）。
+ *
+ * 与 `acctState` 同一个理由：这个功能的价值全在"点星星 → 服务端记住 → 顶部那块出现"
+ * —— 回一份静态值就只能证明"按钮点了有反应" ✗，证明不了用户要的那件事 ✓。
+ *
+ * ⚠ 初值**非空**：顶部那块"有内容"的样子才是要验收的（门禁会点星星加一件、
+ * 再从顶部取消一件，两边的数都要跟着动 ✓）。
+ */
+const subState = {
+  items: [
+    {
+      prizeId: 251230053,
+      name: '移动云盘100万tokens叠加包',
+      groupId: 1,
+      groupTitle: 'AI豆兑换',
+      subscribedAtMs: 1_790_000_000_000,
+    },
+  ],
+}
+
+/**
  * 任务的默认参数（任务配置页存的那份）。
  *
  * 有状态是**故意**的：这个功能的价值全在"配置页存了 → 任务页运行时带上"，
@@ -51,12 +72,14 @@ const acctState = { accounts: [] }
  */
 const taskCfg = {}
 const resetTaskCfg = () => {
-  taskCfg['daily-checkin'] = { dryRun: false }
+  // ⚠ `daily-checkin` **没有参数**了（2026-10-02 删掉 `dryRun`「试运行」）。
+  taskCfg['daily-checkin'] = {}
   taskCfg['live-room'] = { listenSeconds: 60, codes: '' }
 }
 const SPECS = {
   'daily-checkin': [
-    { name: 'dryRun', title: '试运行', kind: 'bool', default: false, help: '只查询、不真的签到' },
+    // 这条任务现在没有任何参数（删掉了 dryRun「试运行」）。
+    // 装置里留空数组是有意的：正好让门禁盯住"没有参数的任务，配置页也要能打开"。
   ],
   'live-room': [
     { name: 'listenSeconds', title: '听弹幕时长', kind: 'number', default: 60, min: 5, max: 1800, unit: '秒', help: '听多久弹幕来抓口令' },
@@ -115,6 +138,62 @@ const PIPELINE = {
  * 命中的其实是弹窗里那颗按钮，四条断言一起红）。
  * 加页面时先把它 `load()` 里并发取的端点全列进这张表。
  */
+/**
+ * 兑换清单。**两个账号共用同一份** —— 上游是按活动投放的，与账号无关 ✓。
+ *
+ * ⚠ 为什么要给**两个**账号都配上：门禁中途会**停用主力号**，兑换页随之切到另一个
+ * 账号 —— 只配一个账号的话，那一页会静默变成「没有奖品」，于是**所有兑换断言都在
+ * 空转** ✗（本仓在「装置测不到 = 没测」上栽过：门禁全绿而功能是坏的）。
+ */
+const EXCHANGE_PRIZES = {
+  prizes: [
+    {
+      prizeId: 251230053,
+      name: '移动云盘100万tokens叠加包',
+      price: 50,
+      groupId: 1,
+      plan: 'go',
+      planReason: '可以下单',
+      blocks: false,
+      limit: 1,
+      count: 399210,
+      totalCount: 400000,
+      dailyCount: 5000,
+      dailyRemainderCount: 5,
+      minRemainderCount: 1,
+      onLine: 1,
+      startTime: null,
+      endTime: null,
+      groupTitle: 'AI豆兑换',
+      groupSubTitle: '(月卡每月多选一限兑)',
+      monthQuantity: 1,
+      groupPrizeIds: null,
+    },
+    {
+      prizeId: 251230054,
+      name: '哔哩哔哩会员月卡',
+      price: 100,
+      groupId: 1,
+      plan: 'min_remainder_zero',
+      planReason: '这件的余量阈值已经是 0（H5 在这一档显示「奖品被抢光啦」）',
+      blocks: true,
+      limit: 1,
+      count: 43739,
+      totalCount: 100000,
+      dailyCount: 100,
+      dailyRemainderCount: 0,
+      minRemainderCount: 0,
+      onLine: 1,
+      startTime: null,
+      endTime: null,
+      groupTitle: 'AI豆兑换',
+      groupSubTitle: '(月卡每月多选一限兑)',
+      monthQuantity: 1,
+      groupPrizeIds: null,
+    },
+  ],
+}
+
 export const FIXTURES = {
   // `passwordScheme` 决定登录页发摘要还是发明文（见 `ui/password.ts`）
   '/api/setup': { initialized: true, minPasswordLen: 8, passwordScheme: 'sha256' },
@@ -154,7 +233,7 @@ export const FIXTURES = {
       {
         name: 'daily-checkin', title: '每日签到', description: '签到并领取当日奖励',
         hidden: false, group: 'signin', groupLabel: 'AI豆中心',
-        params: [{ name: 'dryRun', title: '试运行', kind: 'bool', default: false, help: '只查询、不真的签到' }],
+        params: [],
       },
       {
         name: 'receive', title: '领取AI豆', description: '领取待领的AI豆',
@@ -192,6 +271,10 @@ export const FIXTURES = {
       { value: '过期的老口令', state: 'invalid', source: 'manual', reason: '口令已过期', firstSeenMs: 1_790_000_040_000, validAtMs: null },
     ],
     nextStart: '2026-09-23 14:30:00',
+    // ⚠ 主播名与场次名要跟时间**同一次选择**给（用户口径 2026-10-02）：
+    // 只写"09-23 14:30"分不出是不是自己那个直播间 —— 上游列表里混着别的主播 ✓。
+    nextAnchor: '中国移动云盘',
+    nextTitle: '云盘AI助职场加速！看直播赢好礼！',
     scheduleAtMs: 1_790_000_050_000,
     sessions: [
       { startedAtMs: 1_790_000_060_000, endedAtMs: null },
@@ -201,6 +284,42 @@ export const FIXTURES = {
   '/api/runs': [
     RUN,
     { ...RUN, run_id: 1023, task: 'live-room', duration_ms: 61000, outcome: { status: 'failed', reason: '口令无效' }, details: null },
+    {
+      // ⭐ 兑换那一次的**结构化明细**：后端 `detail_payload` 把字段**铺平**在
+      // `details` 上（不像 liveRoom 那样套一层），用 `kind: "exchange"` 标识自己。
+      // 历史页要把它**全部**渲染出来（用户口径：所有内容都要进记录）。
+      ...RUN,
+      run_id: 1025,
+      task: 'exchange',
+      duration_ms: 12000,
+      outcome: { status: 'success', summary: '兑换成功：小红花（花 1800 AI豆）' },
+      details: {
+        kind: 'exchange',
+        reached: true,
+        status: 'ordered',
+        plan: 'available',
+        plan_reason: '可兑',
+        code: 0,
+        message: 'success',
+        rounds: 1,
+        attempts: 2,
+        offset: 87,
+        balance: 10496,
+        after_balance: 8696,
+        waited_until_ms: 1_789_797_599_990,
+        device_id_failed: '',
+        error: '',
+        prize: { prize_id: 251230053, name: '小红花', price: 1800 },
+        order: {
+          order_id: 'ORD-1025',
+          prize_id: 251230053,
+          prize_name: '小红花',
+          cost: 1800,
+          insert_time: 1_789_797_600_000,
+          expire_time: 1_789_883_999_000,
+        },
+      },
+    },
     {
       // ⭐ 直播那一次的**结构化明细**（`details.liveRoom`）：
       // 历史页必须把它渲染出来。从前这套明细只长在直播页上 ⇒
@@ -215,10 +334,11 @@ export const FIXTURES = {
           balanceBefore: 10,
           balanceAfter: 13,
           gained: 3,
-          codes: ['历史口令甲', '历史口令乙'],
+          codes: ['历史口令甲', '历史口令乙', '历史口令丙'],
           draws: [
             { code: '历史口令甲', kind: 'succeeded', flowerNum: 3, prizeName: '小红花' },
             { code: '历史口令乙', kind: 'kouling_expired' },
+            { code: '历史口令丙', kind: 'already_redeemed' },
           ],
           expiredCodes: ['历史口令乙'],
         },
@@ -267,6 +387,26 @@ export const FIXTURES = {
    * ⚠ **写**（`PUT`）不在这里 —— 见 `VARIANTS.ready`。`FIXTURES` 这一路的值"就是 body"，
    * 放 `handler` 进去会被序列化成 `{status, body}` 发回客户端（实测踩到）。
    */
+  // ⭐ 兑换页的**奖品清单**（2026-10-02 补）：没有它，无头浏览器里的兑换页只会说
+  // 「清单没读到」⇒ 一行「兑换 / 已抢光」都渲染不出来 ⇒ 行内按钮的配色就只能靠
+  // 用户截图 + 我猜 ✗（今天在这上面栽了两回）。两行覆盖两种形态：
+  // 可兑（`plan: go`）与抢光（`plan: min_remainder_zero`，`minRemainderCount: 0`）。
+  /**
+   * 兑换页的订阅（**静态**一份，给不点星星的变体看；`ready` 里那份是有状态的 ✓）。
+   */
+  '/api/exchange/subscriptions': {
+    items: [
+      {
+        prizeId: 251230053,
+        name: '移动云盘100万tokens叠加包',
+        groupId: 1,
+        groupTitle: 'AI豆兑换',
+        subscribedAtMs: 1_790_000_000_000,
+      },
+    ],
+  },
+  '/api/accounts/13800000000/exchange-prizes': EXCHANGE_PRIZES,
+  '/api/accounts/13900000001/exchange-prizes': EXCHANGE_PRIZES,
   '/api/accounts/13800000000/settings': {
     backupWaitSecs: 20,
     refreshTokenDays: 10,
@@ -322,6 +462,34 @@ export const VARIANTS = {
    * 界面读回一个没有 `skipTasks` 的对象，报 `Cannot read properties of undefined`。
    */
   ready: {
+    /**
+     * 兑换订阅：GET 读那份有状态的值、POST **toggle** 改它。
+     *
+     * ⚠ 装置这边也要按**真后端那条规则**实现（已订就取消、没订就追加）——
+     * 否则门禁测的是"装置自己的逻辑"，而不是"服务端判切换"这件事 ✓。
+     */
+    'GET /api/exchange/subscriptions': {
+      handler: () => ({ status: 200, body: { items: subState.items } }),
+    },
+    'POST /api/exchange/subscriptions/toggle': {
+      handler: (body) => {
+        const id = body?.prizeId
+        const has = subState.items.some((s) => s.prizeId === id)
+        subState.items = has
+          ? subState.items.filter((s) => s.prizeId !== id)
+          : [
+              ...subState.items,
+              {
+                prizeId: id,
+                name: body?.name ?? '',
+                groupId: body?.groupId ?? null,
+                groupTitle: body?.groupTitle ?? null,
+                subscribedAtMs: Date.now(),
+              },
+            ]
+        return { status: 200, body: { items: subState.items } }
+      },
+    },
     // 任务配置：GET 读、PUT 存（都改那份有状态的值）
     'GET /api/tasks/daily-checkin/config': { handler: () => ({ status: 200, body: configView('daily-checkin') }) },
     'GET /api/tasks/live-room/config': { handler: () => ({ status: 200, body: configView('live-room') }) },

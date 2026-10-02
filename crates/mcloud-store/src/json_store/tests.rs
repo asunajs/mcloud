@@ -1594,3 +1594,89 @@ async fn ownerless_records_are_invisible_in_a_multi_user_instance() {
     assert!(s.accounts_for(&UserId::new("u2")).await.unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// ── 兑换订阅（用户口径 2026-10-02：按单个奖品订阅 + 存服务端）─────────────
+
+fn sub(prize_id: i64, name: &str, at: i64) -> mcloud_core::ExchangeSubscription {
+    mcloud_core::ExchangeSubscription {
+        prize_id,
+        name: name.into(),
+        group_id: Some(1),
+        group_title: Some("AI豆兑换".into()),
+        subscribed_at_ms: at,
+    }
+}
+
+/// 写进去 → **重开** → 读回来，而且**按 owner 分表**。
+///
+/// ⚠ 为什么这条非有不可：订阅的**文件名与键名**是在这一层定的
+/// （`exchange-subscriptions.json` + owner id）—— 写错一个字母，功能在界面上就是
+/// "点了没反应"，而**编译期一点提示都没有** ✗。这条测试就是那份提示 ✓。
+#[tokio::test]
+async fn exchange_subscriptions_survive_reopen_and_are_per_owner() {
+    let d = tmpdir("exch-sub");
+    let a = UserId::new("user-a");
+    let b = UserId::new("user-b");
+    {
+        let s = JsonStore::open(&d).unwrap();
+        // 没订阅过 ⇒ **空列表**（不是错误），与 `task_params()` 同一口径 ✓
+        assert!(s.exchange_subscriptions(&a).await.unwrap().is_empty());
+        s.save_exchange_subscriptions(
+            &a,
+            &[sub(
+                251230053,
+                "移动云盘100万tokens叠加包",
+                1_790_000_000_000,
+            )],
+        )
+        .await
+        .unwrap();
+    }
+    let s2 = JsonStore::open(&d).unwrap();
+    let got = s2.exchange_subscriptions(&a).await.unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].prize_id, 251230053);
+    assert_eq!(got[0].name, "移动云盘100万tokens叠加包");
+    // **分表**：换个人登录看不见别人的订阅 ✓
+    assert!(
+        s2.exchange_subscriptions(&b).await.unwrap().is_empty(),
+        "订阅是某个人的偏好，不是实例级资源（与口令池相反）"
+    );
+
+    // 全取消 ⇒ 那一格**删掉**（文件里不留空数组），读回来仍是空列表 ✓
+    s2.save_exchange_subscriptions(&a, &[]).await.unwrap();
+    let s3 = JsonStore::open(&d).unwrap();
+    assert!(s3.exchange_subscriptions(&a).await.unwrap().is_empty());
+    let raw = std::fs::read_to_string(d.join("exchange-subscriptions.json")).unwrap();
+    assert!(!raw.contains("user-a"), "全取消后不该留空数组：{raw}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 顺序按**订阅时刻**定死（前端与服务端各算一次也得同序 ✓），
+/// 而**重复的 `prize_id` 直接报错** —— 不是静默去重。
+///
+/// 理由：顶部"已订阅"的判定与"切换"语义都依赖 `prize_id` 唯一 ✓；
+/// 静默去重会让"谁写错了"这件事永远查不出来 ✗（写进去的人以为成功了）。
+#[tokio::test]
+async fn exchange_subscriptions_are_ordered_and_reject_duplicates() {
+    let d = tmpdir("exch-sub-order");
+    let a = UserId::new("user-a");
+    let s = JsonStore::open(&d).unwrap();
+
+    // 故意**乱序**写：读回来必须按订阅时刻排 ✓
+    s.save_exchange_subscriptions(&a, &[sub(2, "乙", 200), sub(1, "甲", 100)])
+        .await
+        .unwrap();
+    let got = s.exchange_subscriptions(&a).await.unwrap();
+    assert_eq!(
+        got.iter().map(|x| x.prize_id).collect::<Vec<_>>(),
+        vec![1, 2],
+        "按 subscribed_at_ms 排，不按写入顺序"
+    );
+
+    let dup = s
+        .save_exchange_subscriptions(&a, &[sub(7, "甲", 1), sub(7, "甲又一件", 2)])
+        .await;
+    assert!(dup.is_err(), "重复的 prize_id 必须报错，不能静默去重");
+    let _ = std::fs::remove_dir_all(&d);
+}

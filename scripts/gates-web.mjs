@@ -66,6 +66,26 @@ const GATES = [
     args: ['lite/regress/all.mjs', '--skip-build', ...(process.argv.includes('--full') ? [] : ['--quick'])],
     browser: true,
   },
+  /**
+   * ⚠ 只在 `--full`（提交前那次）跑：要无头 Chrome 走 8 个页面 × 2 轮。
+   * **实测 126 s**（预热 8 页 + 2 轮 + 浏览器启动）—— 是六条里最慢的一条 ✓，
+   * 所以默认那条快回路（改脚本用）不加它 ✓。
+   *
+   * 为什么非有不可：这一类泄漏**功能上完全看不出来** —— 页面全对、别的门禁全绿，
+   * 只是内存与 DOM 节点一路涨 ✗。2026-10-02 就是这么漏到用户眼前的（用户报「4M → 8M」）：
+   * 当时只有一份要**真会话 cookie** 的脚本 ✗（`/tmp/mcloud-cookie.txt`），别人复现不了 ✗。
+   * 现在走 `--fixture` ✓（夹具后端 + 内核分配端口，不碰 3000、不要 cookie ✓）。
+   */
+  ...(process.argv.includes('--full')
+    ? [
+        {
+          name: '前端泄漏量测',
+          cmd: 'node',
+          args: ['lite/regress/leak.mjs', '--fixture', '--rounds', '2'],
+          browser: true,
+        },
+      ]
+    : []),
 ]
 
 fs.mkdirSync(path.join(ROOT, 'target'), { recursive: true })

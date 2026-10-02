@@ -161,9 +161,14 @@ fn describe_outcome(o: &mcloud_engine::FireOutcome) -> String {
     use mcloud_engine::FireOutcome as F;
     match o {
         F::Fired { run_id } => format!("已触发，运行 #{run_id}"),
+        // 编排没有单次运行的 run_id（它内部要跑 N 步），所以单独一句话说清。
+        F::FiredPipeline => "已触发（编排）".into(),
         F::SkippedBusy => "跳过：同一任务+账号正在跑".into(),
         F::AbandonedMissed => "放弃：错过太久".into(),
-        F::UnknownTask(t) => format!("配置错误：注册表里没有任务 {t}"),
+        // ⚠ 不能写死"注册表里没有任务"：这个变体现在也承载**编排**那边的配置错误
+        // （`body` 缺 `pipelineId`、编排不存在或不属于你），写死会得到
+        // "注册表里没有任务 编排不存在或不属于这个用户：x" 这种骗人的句子。
+        F::UnknownTask(t) => format!("配置错误：{t}"),
     }
 }
 

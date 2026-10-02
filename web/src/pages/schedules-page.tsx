@@ -22,19 +22,24 @@ import { onMounted, onUnmounted, ref } from 'lite'
 import { accountName } from '../account-names'
 import {
   deleteSchedule,
+  listAccounts,
   listCapabilities,
   listSchedules,
+  PIPELINE_TASK,
   saveSchedule,
+  type AccountSummary,
   type Schedule,
   type ScheduleInput,
   type TaskMeta,
 } from '../api'
+import { AccountPicker } from '../ui/account-picker'
 import { ConfirmDialog, Dialog, closeDialog, openDialog } from '../ui/dialog'
 import { EmptyState } from '../ui/empty-state'
 import { showError } from '../ui/error-dialog'
 import { IconAlert } from '../ui/icons'
 import { fmtEpochMs } from '../ui/time'
 import { pushToast } from '../ui/toast'
+import { Select } from '../ui/select'
 
 type LoadState = 'loading' | 'error' | 'ready'
 
@@ -108,6 +113,8 @@ export const SchedulesPage = () => {
 
   const items = ref<Schedule[]>([])
   const tasks = ref<TaskMeta[]>([])
+  /** 账号清单：账号那个**多选框**要用（「全部账号（N 个）」里的 N 也来自它 ✓）。 */
+  const accounts = ref<AccountSummary[]>([])
   /** 计时器：每分钟刷一次列表，让"下次执行"与"上次结果"跟上。 */
   let ticker: number | null = null
 
@@ -117,6 +124,33 @@ export const SchedulesPage = () => {
   const fName = ref('')
   const fTask = ref('')
   const fAccounts = ref('')
+  /**
+   * 账号那一栏在界面上的形态（用户口径 2026-10-02：「这里账号和任务应该用新的多选框」）。
+   *
+   * 存储仍是**逗号分隔的账号 id 串** —— 后端字段就是这个 ✓、存量数据不用迁 ✓，
+   * 只在**渲染与交互**这一层折成多选框要的 `all` / `picked` 两半 ✓。
+   */
+  const accountsAll = (): boolean => fAccounts.value.trim() === ''
+  const accountsPicked = (): string[] =>
+    fAccounts.value
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s !== '')
+  /**
+   * 勾/取消「全部账号」。
+   *
+   * ⚠ 勾上 = **清空名单**（后端口径：空数组 = 我名下全部 ✓，以后加了账号也算 ✓）；
+   * 取消 = **把当前已启用的账号全勾上**，而不是留一个空名单 ✗ ——
+   * 空名单与"全部"在后端**是同一个值**，取消之后名单还是空的，用户会以为没生效 ✗
+   * （用户口径 2026-10-01：「直接无需提示的全选」）。
+   */
+  const toggleAllAccounts = () => {
+    fAccounts.value = accountsAll() ? accounts.value.map((a) => a.id).join(',') : ''
+  }
+  const toggleAccount = (id: string) => {
+    const cur = accountsPicked()
+    fAccounts.value = (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]).join(',')
+  }
   const fExpr = ref('')
   const fTimezone = ref(DEFAULT_TZ)
   const fEnabled = ref(true)
@@ -132,9 +166,15 @@ export const SchedulesPage = () => {
     errorMessage.value = ''
     try {
       // 任务清单用于下拉框：**不硬编码任务名** —— 任务由后端注册表提供
-      const [schedules, caps] = await Promise.all([listSchedules(), listCapabilities()])
+      // 账号清单用于多选框（只取**已启用**的：`listAccounts()` 默认就不含停用的 ✓）
+      const [schedules, caps, accts] = await Promise.all([
+        listSchedules(),
+        listCapabilities(),
+        listAccounts(),
+      ])
       items.value = schedules
       tasks.value = caps.tasks.filter((t) => !t.hidden)
+      accounts.value = accts
       state.value = 'ready'
     } catch (e) {
       errorMessage.value = e instanceof Error ? e.message : '无法连接后端'
@@ -331,7 +371,7 @@ export const SchedulesPage = () => {
         })()}
       </div>
       <div class="text-xs opacity-70">
-        任务 <code class="break-all">{s.task}</code> · 表达式 <code>{s.expr}</code> · {s.timezone}
+        任务 <code class="break-all">{s.task === PIPELINE_TASK ? '编排' : s.task}</code> · 表达式 <code>{s.expr}</code> · {s.timezone}
       </div>
       <div class="text-xs opacity-70">
         账号：{s.accounts.length === 0 ? '全部已启用账号' : s.accounts.map(accountName).join('、')}
@@ -444,7 +484,7 @@ export const SchedulesPage = () => {
                         ) : null}
                       </td>
                       <td class="text-xs">
-                        <code>{s.task}</code>
+                        <code>{s.task === PIPELINE_TASK ? '编排' : s.task}</code>
                         <div class="opacity-60">
                           {s.accounts.length === 0 ? '全部账号' : `${s.accounts.length} 个账号`}
                         </div>
@@ -491,39 +531,41 @@ export const SchedulesPage = () => {
 
       <fieldset class="fieldset">
         <legend class="fieldset-legend">执行的任务</legend>
-        <select
-          class="select w-full"
+        <Select
+          id="sched-task"
+          class="w-full"
+          ariaLabel="执行的任务"
+          placeholder="请选择任务"
           value={fTask.value}
-          onChange={(e) => {
-            fTask.value = (e.target as HTMLSelectElement).value
+          options={tasks.value.map((t) => ({ value: t.name, label: `${t.title}（${t.name}）` }))}
+          onChange={(v) => {
+            fTask.value = v
           }}
-        >
-          {tasks.value.map((t) => (
-            <option key={t.name} value={t.name}>
-              {t.title}（{t.name}）
-            </option>
-          ))}
-        </select>
+        />
       </fieldset>
 
       <fieldset class="fieldset">
-        <legend class="fieldset-legend">账号（账号 id，逗号分隔；留空 = 全部已启用账号）</legend>
-        <input
-          class="input w-full"
-          placeholder="留空表示对所有已启用账号执行"
-          value={fAccounts.value}
-          onInput={(e) => {
-            fAccounts.value = (e.target as HTMLInputElement).value
-          }}
-        />
+        <legend class="fieldset-legend">账号</legend>
         {/*
-          ⚠ 这里**必须**写"账号 id"，不能写"手机号"（2026-09-30 修正）。
-          后端拿这串**原样**当 `AccountId` 比对，而 AccountId 是手机号的 SHA-256 前 16 位
-          （`0f6050105ab111f4`）。原文案写着"手机号"，于是照着填的人得到的是
-          **匹配 0 个账号 ⇒ 定时任务静默不跑**（不报错、不提示，最难查的一类）。
-          列表里显示的名字也会误导（那是 `accountName()` 渲染的昵称/掩码，不是可填的值），
-          所以两处一起改。
+          多选框（用户口径 2026-10-02：「这里账号和任务应该用新的多选框」）。
+
+          ⚠ 换掉的是**裸文本输入**（原来那句是"账号 id，逗号分隔；留空 = 全部已启用账号"✗）。
+          那一栏本身就是最坑的一处：后端拿这串**原样**当 `AccountId` 比对，而 `AccountId`
+          是手机号的 SHA-256 前 16 位（`0f6050105ab111f4`）—— 照文案填手机号 ⇒
+          **匹配 0 个账号 ⇒ 定时任务静默不跑**（不报错、不提示，最难查的一类）✗。
+          改成勾选之后，值只可能来自**真实存在的账号** ✓ ⇒ 这一整类失败模式消失 ✓
+          （不用再靠一句警告文案去防 ✓）。
+
+          ⚠ 与任务页/直播页共用 `ui/account-picker.tsx` ⇒ 「全部」的口径只有一处
+          （后端空数组 = 我名下全部 ✓），不会三处各写一遍。
         */}
+        <AccountPicker
+          accounts={accounts.value}
+          all={accountsAll()}
+          picked={accountsPicked()}
+          onToggleAll={toggleAllAccounts}
+          onToggle={toggleAccount}
+        />
       </fieldset>
 
       <fieldset class="fieldset">
@@ -557,19 +599,17 @@ export const SchedulesPage = () => {
 
       <fieldset class="fieldset">
         <legend class="fieldset-legend">时区</legend>
-        <select
-          class="select w-full"
+        <Select
+          id="sched-timezone"
+          class="w-full"
+          ariaLabel="时区"
+          filterable
           value={fTimezone.value}
-          onChange={(e) => {
-            fTimezone.value = (e.target as HTMLSelectElement).value
+          options={TIMEZONES.map((tz) => ({ value: tz, label: tz }))}
+          onChange={(v) => {
+            fTimezone.value = v
           }}
-        >
-          {TIMEZONES.map((tz) => (
-            <option key={tz} value={tz}>
-              {tz}
-            </option>
-          ))}
-        </select>
+        />
       </fieldset>
 
       <label class="label cursor-pointer justify-start gap-3">

@@ -89,6 +89,14 @@ struct Db {
     task_config: HashMap<String, serde_json::Value>,
     /// 直播口令池。**实例级**（不是按账号/按用户）—— 口令是全场共享的资源。
     kouling_pool: mcloud_core::KoulingPool,
+    /// 兑换页的订阅：用户钉在顶部的那几件奖品。
+    ///
+    /// 与 `settings` / `task_config` 同一类（服务端的一小块用户偏好），
+    /// 但**单独落盘**：改订阅不该顺带重写设置或任务参数 ✓。
+    ///
+    /// ⚠ 键是 **owner id（`UserId` 的字符串形态）** —— 订阅是"我想看哪几件"，
+    /// 属于某个人 ✓，与全场共享的 `kouling_pool` 正好相反 ✓。
+    exchange_subscriptions: HashMap<String, Vec<mcloud_core::ExchangeSubscription>>,
     /// 会话，按 `token_hash` 存。
     ///
     /// 用 `HashMap` 而不是 `Vec`：查会话是**每个请求**都走的路径。
@@ -132,6 +140,10 @@ mod files {
     pub const TASK_CONFIG: &str = "task-config.json";
     /// 全实例共享的直播口令池。
     pub const KOULING_POOL: &str = "kouling-pool.json";
+    /// 兑换页的订阅（用户钉在顶部的那几件奖品）。
+    ///
+    /// **后来才有的文件** —— 缺了就是"还没订阅过"，按空列表走 ✓（与 `settings.json` 同一条路）。
+    pub const EXCHANGE_SUBSCRIPTIONS: &str = "exchange-subscriptions.json";
     /// 设备指纹：**单独一个文件**，不与 `state.json` 混。
     ///
     /// 混在一起的话，`save_account_state` 那种整块覆盖写会顺手把指纹清掉；
@@ -492,6 +504,8 @@ impl JsonStore {
             self.read_json(&self.path(files::TASK_CONFIG))?;
         let kouling_pool: mcloud_core::KoulingPool =
             self.read_json(&self.path(files::KOULING_POOL))?;
+        let exchange_subscriptions: HashMap<String, Vec<mcloud_core::ExchangeSubscription>> =
+            self.read_json(&self.path(files::EXCHANGE_SUBSCRIPTIONS))?;
         let sessions: HashMap<String, Session> = self.read_json(&self.path(files::SESSIONS))?;
 
         // 日志按 run 分文件，按需读取（只读还保留着的那些 run）
@@ -516,6 +530,7 @@ impl JsonStore {
         db.settings = settings;
         db.task_config = task_config;
         db.kouling_pool = kouling_pool;
+        db.exchange_subscriptions = exchange_subscriptions;
         db.sessions = sessions;
         db.logs = logs;
         Ok(())
@@ -603,6 +618,17 @@ impl JsonStore {
             .lock()
             .map_err(|_| Error::Storage("写锁中毒".into()))?;
         store.write_json(&store.path(files::KOULING_POOL), &db.kouling_pool)
+    }
+
+    fn persist_exchange_subscriptions(db: &Db, store: &Self) -> Result<()> {
+        let _gate = store
+            .write_gate
+            .lock()
+            .map_err(|_| Error::Storage("写锁中毒".into()))?;
+        store.write_json(
+            &store.path(files::EXCHANGE_SUBSCRIPTIONS),
+            &db.exchange_subscriptions,
+        )
     }
 
     fn persist_task_config(db: &Db, store: &Self) -> Result<()> {
@@ -1145,6 +1171,52 @@ impl mcloud_core::UserStore for JsonStore {
         let mut db = self.write()?;
         db.task_config.insert(task.to_string(), params.clone());
         Self::persist_task_config(&db, self)
+    }
+
+    async fn exchange_subscriptions(
+        &self,
+        owner: &mcloud_core::UserId,
+    ) -> Result<Vec<mcloud_core::ExchangeSubscription>> {
+        // 没订阅过 ⇒ 空列表（不是错误），与 `task_params()` 同一口径 ✓。
+        Ok(self
+            .read()?
+            .exchange_subscriptions
+            .get(owner.as_str())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn save_exchange_subscriptions(
+        &self,
+        owner: &mcloud_core::UserId,
+        items: &[mcloud_core::ExchangeSubscription],
+    ) -> Result<()> {
+        // 形状在这里也守一道（与 `save_task_params` 同一理由）：绕过 HTTP 的调用方
+        // （CLI / 脚本）同样不该塞进**重复的 `prize_id`** —— 顶部的"已订阅"判定与
+        // 切换语义都依赖它唯一 ✓；重复会让同一件在顶部出现两行 ✗。
+        let mut seen = std::collections::HashSet::new();
+        for s in items {
+            if !seen.insert(s.prize_id) {
+                return Err(Error::Config(format!(
+                    "订阅里有重复的奖品 id：{}",
+                    s.prize_id
+                )));
+            }
+        }
+        // 顺序在这里也定死（按订阅时刻）：前端与服务端各算一次也得同序，
+        // 否则同一次订阅在两个标签页里显示成两种顺序 ✗。见 `mcloud_core::exchange::toggled`。
+        let mut ordered = items.to_vec();
+        ordered.sort_by_key(|s| (s.subscribed_at_ms, s.prize_id));
+        let mut db = self.write()?;
+        if ordered.is_empty() {
+            // 全取消掉就把这一格删掉，而不是留一个空数组：文件里少一行垃圾 ✓
+            // （读回来时缺键 = 空列表，与上面 `unwrap_or_default` 对上 ✓）。
+            db.exchange_subscriptions.remove(owner.as_str());
+        } else {
+            db.exchange_subscriptions
+                .insert(owner.as_str().to_string(), ordered);
+        }
+        Self::persist_exchange_subscriptions(&db, self)
     }
 
     async fn save_settings(&self, settings: &AppSettings) -> Result<()> {

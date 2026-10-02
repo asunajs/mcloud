@@ -80,18 +80,20 @@ impl Task for SignTask {
     fn description(&self) -> &'static str {
         "在AI豆中心签到，并回查确认"
     }
+    /// ⚠ **没有参数**（2026-10-02 用户口径：删掉 `dryRun`「试运行」）。
+    ///
+    /// 理由：签到是**无害且幂等**的动作（重复签到只会回"今日已签到"），
+    /// 所以"预演"挡不住任何真实损失 —— 而它给的**安全感是假的**：
+    /// 「试运行」= 只查状态、不签到 ⇒ 跑完你依然不知道"签到会不会成功"，
+    /// 它验证的"网络通、凭据对、状态读得到"真跑时同样会验证。
+    /// 想验证能不能签上，唯一的办法就是真签。
     fn params(&self) -> Vec<ParamSpec> {
-        vec![ParamSpec::boolean(
-            "dryRun",
-            "试运行",
-            false,
-            "只查询签到状态、不真的签到（第一次跑建议先开着它看结果）",
-        )]
+        Vec::new()
     }
 
-    async fn run(&self, ctx: &TaskContext, body: &Value) -> TaskResult {
-        let dry_run = body.get("dryRun").and_then(Value::as_bool).unwrap_or(false);
-
+    // ⚠ 形参留 `_body`：本任务**没有任何参数**（见上面的 `params`）。
+    // 不写成 `body` 会有一个 unused 警告，而那个警告正是在提醒"这里本可以有参数"。
+    async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
         ctx.progress(1, 3, "查询签到状态");
         let before = query_status(ctx).await?;
         ctx.info(format!("签到前：{}", describe_status(&before)));
@@ -99,14 +101,6 @@ impl Task for SignTask {
         if before.signed_today() {
             return Ok(TaskOutcome::success(format!(
                 "今日已签到，余额 {}",
-                before.total
-            )));
-        }
-
-        if dry_run {
-            ctx.info("演练模式：未提交签到");
-            return Ok(TaskOutcome::success(format!(
-                "演练完成，今日未签到，余额 {}",
                 before.total
             )));
         }

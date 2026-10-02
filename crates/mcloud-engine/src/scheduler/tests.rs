@@ -237,7 +237,8 @@ async fn state_broadcast_works_without_external_subscribers() {
         http,
     ));
 
-    let sched = Arc::new(Scheduler::new(store, runner, clock));
+    let pipelines = Arc::new(crate::pipeline::PipelineRunner::new(Arc::clone(&runner)));
+    let sched = Arc::new(Scheduler::new(store, runner, clock, pipelines));
     assert_eq!(sched.state(), SchedulerState::Stopped, "初始应为已停止");
 
     // 起循环，不给任何外部订阅者
@@ -267,7 +268,15 @@ async fn state_broadcast_works_without_external_subscribers() {
 ///
 /// 抽出来是因为下面两条测试要重复"起循环 → 等 Running → 停"这套动作，
 /// 而它们关心的是**停止通道通不通**，不是调度逻辑本身。
-fn bare_scheduler() -> Arc<Scheduler> {
+/// 能播种账号与编排的桩调度器 —— 给"定时跑编排"的用例用 ✓。
+///
+/// ⚠ 现有 `bare_scheduler()` 里**没有账号** ✗ ⇒ `fire()` 会在
+/// `accounts.is_empty()` 那条早退就返回 `SkippedBusy` ✓，根本走不到编排分支 ✗。
+/// （我第一版两条用例就是栽在这上面 ✓。）
+fn scheduler_with(
+    accounts: Vec<mcloud_core::Account>,
+    pipelines: Vec<mcloud_core::Pipeline>,
+) -> Arc<Scheduler> {
     use crate::registry::Registry;
     use crate::runner::{HttpClientFactory, Runner};
     use mcloud_core::testkit::FixedClock;
@@ -279,7 +288,9 @@ fn bare_scheduler() -> Arc<Scheduler> {
         fn emit(&self, _e: RunEvent) {}
     }
 
-    let store: Arc<dyn Store> = Arc::new(crate::pipeline::tests::MemStore::default());
+    let store: Arc<dyn Store> = Arc::new(crate::pipeline::tests::MemStore::seeded(
+        accounts, pipelines,
+    ));
     let clock: Arc<dyn Clock> = Arc::new(FixedClock(T0));
     let http: HttpClientFactory =
         Arc::new(|_a: &Account| Arc::new(crate::pipeline::tests::NoHttp) as Arc<dyn HttpClient>);
@@ -290,7 +301,13 @@ fn bare_scheduler() -> Arc<Scheduler> {
         Arc::new(NullSink) as Arc<dyn EventSink>,
         http,
     ));
-    Arc::new(Scheduler::new(store, runner, clock))
+    let pipelines = Arc::new(crate::pipeline::PipelineRunner::new(Arc::clone(&runner)));
+    Arc::new(Scheduler::new(store, runner, clock, pipelines))
+}
+
+/// 空仓、空账号的调度器（大多数用例只要这个）。
+fn bare_scheduler() -> Arc<Scheduler> {
+    scheduler_with(Vec::new(), Vec::new())
 }
 
 /// ⭐ `Scheduler::stop()` 必须真的让 `run_loop` **退出**，而且不能等到下一个 tick。
@@ -374,4 +391,101 @@ fn disabled_schedule_still_has_a_next_time_but_caller_must_hide_it() {
     let mut s = schedule("0 0 * * * *", Some(T0));
     s.enabled = false;
     assert!(next_fire_at(&s, T0).is_some());
+}
+
+// ── 定时跑编排（2026-10-02 用户口径：编排只能手动点运行没有意义）────────────
+
+/// **顺序**：`accounts` 为空那条早退在编排分支**之前** ✓ —— 这是对的，得钉住。
+///
+/// 「留空 = 全部已启用账号」✓ ⇒ 一个已启用账号都没有时，编排也一样**没事可做** ✓，
+/// 记 `SkippedBusy`（"到点但没跑成"）比"如实报错"更准 ✓。
+///
+/// ⚠ 我第一版这两条用例就是栽在这儿 ✗：桩仓里没有账号 ⇒ 早退先命中 ⇒
+/// 我以为是"分支走不到"，其实是**用错了预期** ✓。有账号的场景见下面那条。
+#[tokio::test]
+async fn pipeline_schedule_without_accounts_is_skipped_not_errored() {
+    let sched = bare_scheduler();
+    let mut sch = schedule("0 0 * * * *", None);
+    sch.task = PIPELINE_TASK.to_string();
+    sch.body = serde_json::json!({ "pipelineId": "no-such-pipeline" });
+
+    let (outcome, blocked_all) = sched.fire(&sch, 0).await;
+    assert!(
+        matches!(outcome, FireOutcome::SkippedBusy),
+        "无账号时应当 SkippedBusy，实际 {outcome:?}"
+    );
+    assert!(blocked_all, "且要标记成「全被挡住」（不改上次运行时间）");
+}
+
+/// 有账号、但 `body` 里没有 `pipelineId` ⇒ **如实报错** ✓（400 那档在路由侧 ✓）。
+#[tokio::test]
+async fn pipeline_schedule_missing_id_errors_when_accounts_exist() {
+    let sched = scheduler_with(
+        vec![crate::pipeline::tests::account("13800000000")],
+        Vec::new(),
+    );
+    let mut sch = schedule("0 0 * * * *", None);
+    sch.task = PIPELINE_TASK.to_string();
+    sch.body = serde_json::json!({});
+
+    let (outcome, _) = sched.fire(&sch, 0).await;
+    match outcome {
+        FireOutcome::UnknownTask(msg) => assert!(msg.contains("pipelineId"), "实际：{msg}"),
+        other => panic!("期望 UnknownTask，实际 {other:?}"),
+    }
+}
+
+/// 有账号、`pipelineId` 指向不存在的编排 ⇒ **如实报错** ✓（带上是哪个 id ✓）。
+#[tokio::test]
+async fn pipeline_schedule_unknown_pipeline_errors_when_accounts_exist() {
+    let sched = scheduler_with(
+        vec![crate::pipeline::tests::account("13800000000")],
+        Vec::new(),
+    );
+    let mut sch = schedule("0 0 * * * *", None);
+    sch.task = PIPELINE_TASK.to_string();
+    sch.body = serde_json::json!({ "pipelineId": "no-such-one" });
+
+    let (outcome, _) = sched.fire(&sch, 0).await;
+    match outcome {
+        FireOutcome::UnknownTask(msg) => assert!(msg.contains("no-such-one"), "实际：{msg}"),
+        other => panic!("期望 UnknownTask，实际 {other:?}"),
+    }
+}
+
+/// 有账号、编排**存在** ⇒ 真的走进编排运行器 ✓。
+///
+/// 这条编排的步骤名是**不存在的任务** ⇒ `preflight` 会拒 ⇒ 我们据此确认
+/// "确实进去了"（错误消息里是那个步骤名 ✗，不是"编排不存在" ✓）。
+/// ⚠ 用一个坏步骤是**故意**的：这条用例只证明"调用发生" ✓，不去伪造一次成功 ✗
+/// （伪造成功就得搭齐注册表与 HTTP 替身，那是 `pipeline::tests` 的活 ✓）。
+#[tokio::test]
+async fn pipeline_schedule_reaches_the_runner() {
+    let p = crate::pipeline::tests::pipeline(
+        vec![mcloud_core::PipelineStep {
+            task: "no-such-step-task".into(),
+            body: serde_json::json!({}),
+            continue_on_error: true,
+        }],
+        false,
+    );
+    let sched = scheduler_with(
+        vec![crate::pipeline::tests::account("13800000000")],
+        vec![p.clone()],
+    );
+    let mut sch = schedule("0 0 * * * *", None);
+    sch.task = PIPELINE_TASK.to_string();
+    sch.body = serde_json::json!({ "pipelineId": p.id.as_str() });
+
+    let (outcome, _) = sched.fire(&sch, 0).await;
+    match outcome {
+        FireOutcome::UnknownTask(msg) => {
+            assert!(msg.contains("no-such-step-task"), "实际：{msg}");
+            assert!(
+                !msg.contains("不存在或不属于"),
+                "不该是「编排找不到」：{msg}"
+            );
+        }
+        other => panic!("期望 UnknownTask（预检拒），实际 {other:?}"),
+    }
 }

@@ -98,6 +98,54 @@ const LiveRoomCell = (props: { record: RunRecord }) => {
 }
 
 /**
+ * 兑换那一次的明细 —— **后端给什么就显示什么**（用户口径：所有内容都要进记录）。
+ *
+ * ⚠ 判据是"这是兑换任务 **且** 后端给了结构化明细"：只有老记录才两者都不在，
+ * 那时这里什么都不渲染（只有一句文本小结），**不编**假明细 ✗。
+ */
+const ExchangeCell = (props: { record: RunRecord }) => {
+  const r = props.record
+  const d = r.details
+  if (r.task !== 'exchange' || d?.kind !== 'exchange') return null
+  const o = d.order
+  return (
+    <div class="flex min-w-0 flex-col gap-0.5 text-xs">
+      <span class="opacity-80">
+        {d.status ?? '—'} · {d.plan ?? '—'}
+        {d.plan_reason ? `（${d.plan_reason}）` : ''}
+      </span>
+      <span class="opacity-60">
+        上游码 {d.code ?? '—'} · 轮次 {d.rounds ?? 0} · 发单 {d.attempts ?? 0} · offset{' '}
+        {d.offset ?? '—'}
+      </span>
+      <span class="opacity-60">
+        余额 {d.balance ?? '—'} → {d.after_balance ?? '—'}
+      </span>
+      {d.waited_until_ms != null ? (
+        <span class="opacity-60">等到 {fmtEpochMs(d.waited_until_ms)}</span>
+      ) : null}
+      {d.prize ? (
+        <span class="opacity-80">
+          奖品 {d.prize.name ?? `#${d.prize.prize_id}`} · {d.prize.price} 豆
+        </span>
+      ) : null}
+      {o ? (
+        <span class="opacity-80">
+          订单 {o.order_id} · {o.prize_name ?? `#${o.prize_id}`} · 花 {o.cost} 豆
+        </span>
+      ) : (
+        <span class="opacity-60">没有订单</span>
+      )}
+      {d.message ? <span class="opacity-60">上游说：{d.message}</span> : null}
+      {d.device_id_failed ? (
+        <span class="text-error">deviceId 没接上：{d.device_id_failed}</span>
+      ) : null}
+      {d.error ? <span class="text-error">{d.error}</span> : null}
+    </div>
+  )
+}
+
+/**
  * 状态徽章。
  *
  * `w-fit` 不能省：放在纵向 flex 列里时，徽章会被拉满整列宽，
@@ -316,8 +364,8 @@ export const HistoryPage = (props: HistoryPageProps) => {
                   <td>
                     <div class="flex flex-col gap-2">
                       <LeftoverCell record={r} />
-                <LiveRoomCell record={r} />
                       <LiveRoomCell record={r} />
+                      <ExchangeCell record={r} />
                     </div>
                   </td>
                 </tr>
@@ -347,6 +395,12 @@ export const HistoryPage = (props: HistoryPageProps) => {
                   <span>耗时 {fmtDuration(r.duration_ms)}</span>
                 </div>
                 <LeftoverCell record={r} />
+                {/* ⚠ 桌面那列有的，移动端也要有 —— 不然后端辛苦存下来的结构化明细
+                    只在宽屏看得见（用户口径：所有内容都要进记录）。 */}
+                <div class="flex flex-col gap-2">
+                  <LiveRoomCell record={r} />
+                  <ExchangeCell record={r} />
+                </div>
               </div>
             </div>
           ))}

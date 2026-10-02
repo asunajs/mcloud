@@ -95,6 +95,38 @@ export interface RunRecord {
          * （那比不显示更糟：用户会以为真的一个都没领到）。
          */
         liveRoom?: LiveRoomReport
+        /**
+         * 兑换那一次的**结构化明细**（后端落地后才有）。
+         *
+         * ⚠ 它是**扁平**的（不像 `liveRoom` 那样套一层）：后端 `detail_payload`
+         * 直接把这几个键铺在 `details` 上，并用 `kind: "exchange"` 标识自己。
+         * 判据要**同时**看 `task === 'exchange'` 与 `kind === 'exchange'` ——
+         * 老记录里两者都可能不在（那时只有一句文本小结）。
+         */
+        kind?: string
+        status?: string
+        plan?: string
+        plan_reason?: string
+        code?: number | null
+        message?: string
+        rounds?: number
+        attempts?: number
+        offset?: number | null
+        balance?: number | null
+        after_balance?: number | null
+        /** `skipWait=false` 那条路上"等到了什么时候"（unix 毫秒）。 */
+        waited_until_ms?: number | null
+        device_id_failed?: string
+        error?: string
+        prize?: { prize_id: number; name: string | null; price: number }
+        order?: {
+          order_id: string
+          prize_id: number
+          prize_name: string | null
+          cost: number
+          insert_time: number
+          expire_time: number
+        } | null
       }
     | null
 }
@@ -514,6 +546,16 @@ export interface KoulingPoolView {
    * 只写时间根本分不出是不是自己那场 ⇒ 后端把标题一起给（与 `nextStart` 同源同一次选择）。
    */
   nextTitle: string | null
+  /**
+   * 下一场是**哪个主播**（上游给的昵称，原样）。
+   *
+   * 用户口径 2026-10-02：「直播要看主播名字」—— 光有时间与场次名，
+   * 还是分不出"这是不是我那个直播间"（上一个 bug 正是如此 ✗）。
+   * 与 `nextStart` / `nextTitle` **同源同一次选择** ✓。
+   *
+   * ⚠ 可选：老后端还没有这个字段（前端先上 ✓，不写 `undefined` 就不渲染 ✓）。
+   */
+  nextAnchor?: string | null
   /** 上面那个日程是什么时候探测到的（`null` = 还没探测过 —— 别渲染成空白 ✗）。 */
   scheduleAtMs: number | null
   /** 观测到的场次（**新的在前**）。`endedAtMs: null` = 还在播。 */
@@ -731,6 +773,16 @@ export interface ScheduleInput {
   body?: unknown
   enabled: boolean
 }
+
+/**
+ * 排期里表示"这一条跑的是**编排**"的约定任务名 —— 必须与后端
+ * `mcloud_engine::scheduler::PIPELINE_TASK` 一致 ✓。
+ *
+ * ⚠ 编排**不是**注册表里的任务 ✗（它是一条链）⇒ 排期靠"约定名 + `body.pipelineId`"
+ * 表达 ✓。放这里是因为**两页**都要用它（编排页写 ✓、定时页显示 ✓），
+ * 各写一份字符串迟早漂移 ✗。
+ */
+export const PIPELINE_TASK = 'pipeline'
 
 export const listSchedules = () => request<Schedule[]>('/api/schedules')
 
@@ -1630,7 +1682,7 @@ export const LIVE_IDLE_REASON: Record<LiveRoomIdleReason, string> = {
   'no-live': '今天没有直播 —— 该主播一间都没在播，没有口令可收（等下一场即可，不是失败）',
   'other-anchor-live':
     '有别的房间在播，但没有一间是「中国移动云盘」—— 这一场不会再有口令了，不用等',
-  'no-codes': '门开了，但这一趟没收到口令 —— 弹幕里没人发，或小红书那条还没贴进来',
+  'no-codes': '门开了，但这一趟没收到口令 —— 弹幕里没人发，小红书那边暂时也没读到',
   unknown: '这一趟没有拿去领取的口令',
 }
 
@@ -1732,6 +1784,51 @@ export function listExchangePrizes(account: string): Promise<ExchangePrizesRespo
   )
 }
 
+/**
+ * 一条订阅：用户钉在兑换页顶部的一件奖品。
+ *
+ * ⚠ `name` 是**订阅那一刻的快照**（用户口径 2026-10-02：按单个奖品订阅 + 存服务端）——
+ * 上游清单会变（下架、换活动、换云盘账号），那时顶部仍要显示得出人看得懂的一行，
+ * 而不是一串 `prizeId` ✓。清单里还在时，页面用**实时**名字覆盖它 ✓。
+ */
+export interface ExchangeSubscriptionView {
+  prizeId: number
+  name: string
+  groupId: number | null
+  groupTitle: string | null
+  subscribedAtMs: number
+}
+
+export interface ExchangeSubscriptionsResponse {
+  items: ExchangeSubscriptionView[]
+}
+
+/** 我订阅了哪几件（**服务端**存：换浏览器、换设备也还在 ✓）。 */
+export function listExchangeSubscriptions(): Promise<ExchangeSubscriptionsResponse> {
+  return request<ExchangeSubscriptionsResponse>('/api/exchange/subscriptions')
+}
+
+/**
+ * 订阅 / 取消订阅一件（**切换**，不是"加"）。
+ *
+ * ⚠ 判断依据在**服务端**：它手里那份列表才是准的 ⇒ 两个标签页各点一下不会变成
+ * "都加了一遍"或"都删掉了" ✗。所以这里只发"哪一件"，回的是**切换之后的整份列表** ✓。
+ *
+ * 取消时只给 `prizeId` 就够（`name` 可省）：顶部那几行要能一键取消，
+ * 而它手上不一定还留着当初的名字 ✓。
+ */
+export function toggleExchangeSubscription(input: {
+  prizeId: number
+  name?: string
+  groupId?: number | null
+  groupTitle?: string | null
+}): Promise<ExchangeSubscriptionsResponse> {
+  return request<ExchangeSubscriptionsResponse>('/api/exchange/subscriptions/toggle', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
 /** 一次兑换的读数（后端从运行记录里读回来的那一份）。 */
 export interface ExchangeRunOutcome {
   runId: number
@@ -1779,12 +1876,21 @@ export interface ExchangeRequestInput {
  * 后端会走并发闸（同一 `task:account` 不会并发），所以连点两下
  * 第二下会拿到「同一任务正在运行中」而不是扣两次豆。
  */
-export function runExchange(account: string, input: ExchangeRequestInput): Promise<ExchangeRunOutcome> {
+export function runExchange(
+  account: string,
+  // ⚠ `force` 不放进 `ExchangeRequestInput`：那是"这次兑哪件、跳不跳等待"的入参，
+  // 而 `force` 是"**本地判成不能兑也照样真发下单请求**"的开关（用户口径 2026-10-02：
+  // 所有档都放行、点击就是真发请求）。放在这里当附加字段，界面显式传。
+  input: ExchangeRequestInput & { force?: boolean; offset?: number },
+): Promise<ExchangeRunOutcome> {
   return request<ExchangeRunOutcome>(`/api/accounts/${encodeURIComponent(account)}/exchange`, {
     method: 'POST',
     body: JSON.stringify({
       prizeIdOrName: input.prizeIdOrName,
       skipWait: input.skipWait ?? true,
+      force: input.force ?? false,
+      // 传输延迟补偿（毫秒）：本地与云端的传输时间差，默认 10（与参考实现同值）。
+      offset: input.offset ?? 10,
     }),
   })
 }

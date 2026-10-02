@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "3.0.0-rc.1"
 edition = "2021"
 # 真实下界是 1.88，不是原先写的 1.82。
 #

@@ -145,6 +145,20 @@ pub struct RunAccepted {
     pub started: bool,
 }
 
+/// `POST /api/pipelines/{id}/run` 的入参。
+///
+/// # ⚠ 账号属于**触发方**，不属于编排（用户口径 2026-10-02）
+///
+/// 「编排不绑账号 —— 运行时/定时时才指定账户」✓ ⇒ 手动运行在**这里**给账号，
+/// 定时运行在**排期的 `accounts`** 里给 ✓。留空 = 当前用户全部已启用账号 ✓
+/// （与界面上「留空 = 全部账号」同义 ✓）。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunInput {
+    #[serde(default)]
+    pub accounts: Vec<String>,
+}
+
 /// 执行一条编排。
 ///
 /// 返回 **202 语义**：立即返回，链在后台跑完。
@@ -153,6 +167,9 @@ pub async fn run(
     State(state): State<ServerState>,
     Extension(cur): Extension<CurrentUser>,
     Path(id): Path<String>,
+    // ⚠ body **可选**：不带 body 也要能跑（缺省 = 全部账号 ✓），
+    // 所以是 `Option<Json<_>>` 而不是 `Json<_>`。
+    body: Option<Json<RunInput>>,
 ) -> ApiResult<RunAccepted> {
     let id = PipelineId::new(id);
     let pipeline = state
@@ -166,7 +183,9 @@ pub async fn run(
     // 后者在界面上的表现与"还在跑"一模一样
     state.handle.pipelines.preflight(&pipeline)?;
 
-    let accounts = target_accounts(&state, &cur.0, &pipeline.accounts).await?;
+    // ⚠ 账号取**本次请求**给的清单 ✗，不再取编排里存的那份（已废弃字段 ✓）。
+    let wanted = body.map(|Json(b)| b.accounts).unwrap_or_default();
+    let accounts = target_accounts(&state, &cur.0, &wanted).await?;
     if accounts.is_empty() {
         return Err(ApiError(mcloud_core::Error::Config(
             "没有可执行的账号".into(),

@@ -9,11 +9,17 @@
 
 | 指标 | 现在 | 怎么量 |
 |---|---|---|
-| 运行时 gzip（全量导出） | **2533 B**（raw 5792） | `node web/lite/size.mjs` |
-| 运行时 gzip（不含只有 demo/bench 用的内部件） | **2518 B**（raw 5749） | 同上 |
-| 主产物 JS（单 chunk：业务 + 运行时 + 编译胶水） | **120.65 kB** / gzip **32.92 kB** | `cd web && npm run build` |
-| └ 其中运行时占 | gzip **2.5 kB** ≈ 全量的 **7.6%** | 上面两行相除 |
-| 主产物 CSS（Tailwind + daisyUI） | 47.81 kB / gzip **9.91 kB** | 同上 |
+| 运行时 gzip（全量导出） | **2586 B**（raw 5971）—— 2026-10-02 修内存泄漏后复测（修前 2533 / 5792，即本次修复 **+53 B gzip / +179 B raw**，占 2.1%） | `node web/lite/size.mjs` |
+| 运行时 gzip（不含只有 demo/bench 用的内部件） | **2571 B**（raw 5928） | 同上 |
+| 主产物 JS | ⚠ **2026-10-02 19:3x 复测：19 个 chunk**（按页拆），合计 raw **233,090 B** / gzip **80,209 B**；首屏只拉 `index`（gzip 9,583）+ `api`（gzip 5,668）两个 = gzip **15,251 B** | `cd web && npm run build` |
+| └ 其中运行时占 | ⚠ **旧口径（"gzip 2.5 kB ≈ 全量 7.6%"）已失效** —— 那个数是拿"单 chunk"当分母除的；产物拆开后分母不再是一个文件 ⇒ **待重定，别照它判断** | — |
+| 主产物 CSS（Tailwind + daisyUI） | raw **68,600 B** / gzip **12,892 B** ⇒ **首屏三字节的 45.8%**（旧读数 47.81 kB / 9.91 kB、以及本轮早些时候的 64,088 / 12,372 都已过期）| 同上；gzip 口径 = node zlib −9，见 `web/scripts/daisyui-size-probe.mjs`（它跑一次 ≈6 s，且自带**逐字节自检**）|
+
+> ⚠ **CSS 这两行的基准正在动**：`web/src/app.css` 此刻是**别的未提交工作线**的脏文件
+> （`git diff` 240 增 / 66 删），本轮十分钟内实测到它连跳三个读数
+> （raw 68,516 → 68,568 → **68,600**）。⇒ 引这几个数要带"2026-10-02 那份未提交 CSS"这个限定，
+> 别人提交后再复量一次。移除 daisyUI 的取舍与**Δ**（同一轮内可比）见
+> [`daisyui-removal-analysis.md`](daisyui-removal-analysis.md)。
 | 挂载 1000 行（编译产物） | **2.5–5.9 ms**（best of 3） | `node web/lite/bench/run.mjs` |
 | 反转 2000 行 ×10 | **8.6–12 ms** ⚠ 唯一劣化项 | 同上 |
 | 门禁（默认 / `--full`） | **≈33 s / ≈77 s** | `node scripts/gates-web.mjs` |
@@ -286,8 +292,8 @@ Vite 8 / Rolldown / es2022 / 默认压缩器生产构建后 gzip：
 
 | 裁剪 | raw | gzip |
 |---|---|---|
-| 全量（= `src/index.ts` 导出的全部） | 5,598 | **2,456** |
-| 再去掉只有 demo/bench 用的内部件 | 5,555 | **2,442** |
+| 全量（= `src/index.ts` 导出的全部） | 5792 | **2533** |
+| 再去掉只有 demo/bench 用的内部件 | 5749 | **2518** |
 
 参照：Solid 核心 ≈7 KB gzip，Vue Vapor 的地板 16,344 B gzip ⇒ 现在是它们的 1/2.9 与 1/6.7。
 

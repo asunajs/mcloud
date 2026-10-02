@@ -231,6 +231,20 @@ main,
    同时承担「与 btn-error 去撞车」的职责：error 是**平涂**深红 #c0233f，
    主行动是**渐变**靛蓝 —— 两者色相本来就分得开，再靠"渐变 vs 平涂"
    强化区分，将来若品牌色再变也不至于混同。 */
+/* ⚠⚠ 禁用时**必须**在这儿清渐变与阴影 —— 不能只写在 `@layer components` 的
+   `.btn:is(:disabled…)` 里 ✗：两者**不在同一层**，层叠时层序优先于特异性，
+   组件层那条永远输给这里 ✗。
+
+   2026-10-02 用户拿 DevTools 的 Computed 面板把这件事钉死了：
+   元素上 `pointer-events:none` ✓、字色与底色都吃到了新值 ✓，
+   但 `background-image` 仍是 `var(--primary-gradient)` ✗、`box-shadow` 仍在 ✗
+   ⇒ 于是禁用按钮**满紫底 + 灰字**，怎么调字色都还是看不清 ✓
+   （根源是这一条覆盖了组件层里的 `background-image:none`）。
+   放在**同一层内**、并靠 `:is(:disabled…)` 更高的特异性取胜 ✓。 */
+.btn-primary:is(:disabled, [disabled], [aria-disabled='true']) {
+  background-image: none;
+  box-shadow: none;
+}
 .btn-primary {
   background-image: var(--primary-gradient);
   border-color: transparent;
@@ -399,6 +413,13 @@ main,
     cursor: not-allowed;
     opacity: 0.4;
   }
+  /* 装饰性勾选框的开态：下拉选项里那个是 `<span>`（行的语义在
+     `role="option"` + `aria-selected` 上），拿不到 `:checked` ⇒ 显式给一个类。
+     与 `.checkbox:checked::before` 同一套视觉。 */
+  .checkbox-on::before {
+    opacity: 1;
+    translate: 3.5% -7%;
+  }
 
   /* ── 单选 ─────────────────────────────────────────────────────────────────
      选中 = 内块填满（留白由 padding 决定），颜色走 currentColor
@@ -448,9 +469,12 @@ main,
   }
 
   /* ── 开关 ─────────────────────────────────────────────────────────────────
-     几何沿用 daisyUI：宽 = 2×高，旋钮 = 高 − 2×(描边+内边距)；
-     颜色也沿用：关 = 50% 灰的旋钮 + 透明轨道；开 = base-100 轨道 + base-content
-     旋钮；`.toggle-primary` 开着时旋钮染主色。 */
+     几何沿用 daisyUI：宽 = 2×高，旋钮 = 高 − 2×(描边+内边距)。
+     ⚠ **颜色改过一次**（2026-10-02 用户口径：「开关状态颜色差别太小，难以区分」）：
+     原来是 关 = 50% 灰旋钮 + 透明轨道 / 开 = base-100 轨道 + base-content 旋钮 ——
+     在浅色底上两者都是"深浅不一的黑"，**只能靠旋钮位置分辨**，扫一眼分不出来。
+     现在改成"**染色的 / 没染色的**"：开 = 实心主色轨道 + 白色旋钮，
+     关 = 透明轨道 + 灰旋钮。不必比较灰度，颜色本身就是那个信号。 */
   .toggle {
     --sz: 1.5rem;
     --bw: 1px;
@@ -483,15 +507,21 @@ main,
     transition: translate 0.2s;
   }
   .toggle:checked {
-    background-color: var(--color-base-100);
-    color: var(--color-base-content);
+    background-color: var(--color-primary);
+    /* ⚠ 描边必须显式给：它默认吃 `currentColor`，而下面那行把 currentColor
+       改成了白色 ⇒ 不写这句会变成"白描边 + 白旋钮"，整颗开关糊成一团。 */
+    border-color: var(--color-primary);
+    color: var(--color-primary-content);
   }
   /* 位移距离 = 旋钮直径（轨道内宽 − 2×gap − 旋钮 = 旋钮） */
   .toggle:checked::before {
     translate: calc(var(--sz) - (var(--bw) + var(--gap)) * 2) 0;
   }
+  /* 默认已经是主色（见上）⇒ 这个变体现在只是"显式说明"，不是另一种配色。
+     ⚠ 别再让它把 currentColor 染成 primary：白旋钮会变成主色旋钮压在
+     主色轨道上，等于把刚修好的可辨识性又抹掉。 */
   .toggle-primary:checked {
-    color: var(--color-primary);
+    color: var(--color-primary-content);
   }
   .toggle:focus-visible {
     outline: 2px solid;
@@ -856,80 +886,211 @@ main,
     margin-inline-start: calc(var(--border, 1px) * -1);
   }
 
-  /* ── select：下拉 ─────────────────────────────────────────────────────────
-     右侧那个小三角是两条 45° 渐变画出来的（daisyUI 的同一个手法）。 */
+  /* ── select：下拉（**自建组件**，TDesign 口径）─────────────────────────────
+     ⚠ 这一节原来是"给原生 `<select>` 换皮"（含 `::picker(select)` 那段）。
+     2026-10-02 起原生 select 全仓没有了 —— 多选 + 复选框 + 搜索它做不到，
+     换成了 `ui/select.tsx`。所以这里是**组件的样式**，不是元素选择器。
+
+     ⚠ 面板挂在 `document.body` 上（`position: fixed` + 视口坐标，由组件算）：
+     留在原地会被 `.modal-box` 的 `overflow-y:auto` 裁掉，而玻璃卡片的
+     `backdrop-filter` 又会变成 fixed 后代的包含块。原因写在组件文件头。 */
   .select {
-    appearance: none;
     display: inline-flex;
     align-items: center;
-    gap: 0.375rem;
-    position: relative;
+    justify-content: space-between;
+    gap: 0.5rem;
     width: clamp(3rem, 20rem, 100%);
-    height: 2.5rem;
-    padding-inline: 0.75rem 1.75rem;
+    min-height: 2.5rem;
+    padding-inline: 0.75rem;
     font-size: 0.875rem;
+    line-height: 1.25rem;
     color: var(--color-base-content);
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    vertical-align: middle;
+    text-align: start;
+    cursor: pointer;
+    user-select: none;
     touch-action: manipulation;
-    overflow: hidden;
     border: 1px solid color-mix(in oklab, var(--color-base-content) 20%, transparent);
     border-radius: var(--radius-field);
     background-color: var(--color-base-100);
-    background-image:
-      linear-gradient(45deg, transparent 50%, currentColor 50%),
-      linear-gradient(135deg, currentColor 50%, transparent 50%);
-    background-position:
-      calc(100% - 20px) calc(1px + 50%),
-      calc(100% - 16.1px) calc(1px + 50%);
-    background-repeat: no-repeat;
-    background-size:
-      4px 4px,
-      4px 4px;
+    transition:
+      border-color 0.2s ease,
+      background-color 0.2s ease;
   }
   .select-sm {
-    height: 2rem;
+    min-height: 2rem;
+    padding-inline: 0.5rem;
     font-size: 0.75rem;
   }
-  /* 新版 Chrome 的"可定制 select"。daisyUI 原本就 opt-in 了，这里跟着开 ——
-     不开的话下拉弹层会退回原生渲染，弹层样式与改前不一致。
-     ⚠ 必须同时 `::picker-icon{display:none}`：否则 Chrome 会在右边再画一个
-       原生箭头，和上面那个渐变三角叠成两个（像素比对抓到的就是这个）。 */
-  @supports (appearance: base-select) {
-    .select,
-    .select::picker(select) {
-      appearance: base-select;
-    }
-    .select::picker-icon {
-      display: none;
-    }
-    .select::picker(select) {
-      color: inherit;
-      background-color: inherit;
-      border: 1px solid var(--color-base-200);
-      border-radius: var(--radius-box);
-      max-height: min(24rem, 70dvh);
-      margin-block: 0.5rem;
-      margin-inline: 0.5rem;
-      padding: 0.5rem;
-      translate: -0.5rem;
-      box-shadow:
-        0 20px 25px -5px rgb(0 0 0 / 0.1),
-        0 8px 10px -6px rgb(0 0 0 / 0.1);
-    }
-    .select option:not(:disabled):hover,
-    .select option:not(:disabled):focus-visible {
-      background-color: color-mix(in oklab, var(--color-base-content) 10%, transparent);
-      cursor: pointer;
+  /* hover 变品牌色：TDesign 的招牌交互（`@input-border-color-default-hover`）。
+     ⚠ `.input` 目前没跟 —— 要统一的话是另一件事，别在这里顺手改。 */
+  .select:hover:not([aria-disabled='true']) {
+    border-color: var(--color-primary);
+  }
+  .select[aria-disabled='true'] {
+    cursor: not-allowed;
+    color: color-mix(in oklab, var(--color-base-content) 26%, transparent);
+    background-color: var(--color-base-200);
+  }
+  .select-value {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+  }
+  .select-text,
+  .select-placeholder {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .select-placeholder {
+    color: color-mix(in oklab, var(--color-base-content) 40%, transparent);
+  }
+  /* 箭头：展开时转 180°（TDesign 同）。 */
+  .select-arrow {
+    flex-shrink: 0;
+    opacity: 0.55;
+    transition: rotate 0.2s ease;
+  }
+  .select-open .select-arrow {
+    rotate: 180deg;
+  }
+
+  /* 面板的挂载壳（`body` 上，或**弹窗里**——见 `ui/select.tsx` 的 `portalMount`）。
+     面板自己是 `fixed`，所以这里用 `display:contents` 让壳完全不参与布局：
+     挂进 `<dialog>` 时那是 `display:grid`，多一个子元素会多出一行、把弹窗挤歪。 */
+  .select-portal {
+    display: contents;
+  }
+
+  /* 浮层面板。坐标（top/left/width）由 JS 按视口算，这里只负责外观。
+     ⚠ `inset` / `margin` 两行是给 **Popover API** 擦屁股：面板带 `popover="manual"`
+     （为了进 top layer —— 否则会被 `<dialog>` 盖住，实测 `elementFromPoint`
+     命中的是弹窗里的 fieldset），而 UA 对 popover 有 `inset:0; margin:auto` 的默认样式，
+     不清掉面板会被"自动居中"，JS 算的坐标看起来像没生效。 */
+  .select-panel {
+    position: fixed;
+    inset: auto;
+    margin: 0;
+    z-index: 2000;
+    max-height: 300px; /* TDesign `@select-dropdown-max-height` */
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0.375rem; /* TDesign `@pop-padding-m` = 6px */
+    color: var(--color-base-content);
+    background-color: var(--color-base-100);
+    border: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+    border-radius: var(--radius-box);
+    /* 阴影照抄 TDesign `@shadow-2` 的三层 */
+    box-shadow:
+      0 3px 14px 2px rgb(0 0 0 / 0.05),
+      0 8px 10px 1px rgb(0 0 0 / 0.06),
+      0 5px 5px -3px rgb(0 0 0 / 0.1);
+  }
+  .select-option {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 2.75rem; /* 窄屏 44px 触控目标（规范 §6.1 硬要求） */
+    padding-inline: 0.5rem; /* TDesign `@select-option-padding-default` = 0 8px */
+    border-radius: var(--radius-field);
+    font-size: 0.875rem;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+  }
+  @media (min-width: 768px) {
+    .select-option {
+      min-height: 1.75rem; /* TDesign 的 28px —— 桌面用鼠标，不必 44px */
     }
   }
-  .select:disabled,
-  .select[disabled] {
+  /* ⚠ 悬停底色只给"没选中、没禁用"的项（TDesign 的选择器同）：
+     选中项有自己的浅色底，再叠一层 hover 会把它冲掉。 */
+  .select-option:not(.select-option-on):not(.select-option-off):hover {
+    background-color: color-mix(in oklab, var(--color-base-content) 8%, transparent);
+  }
+  .select-option-on {
+    color: var(--color-primary);
+    background-color: color-mix(in oklab, var(--color-primary) 10%, transparent);
+  }
+  .select-option-off {
     cursor: not-allowed;
+    color: color-mix(in oklab, var(--color-base-content) 26%, transparent);
+  }
+  .select-option-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .select-option-hint {
+    flex-shrink: 0;
+    font-size: 0.75rem;
+    opacity: 0.5;
+  }
+  .select-option-check {
+    flex-shrink: 0;
+  }
+  /* 选项里的勾选框比独立的小一号（TDesign 同）。 */
+  .select-option-box {
+    width: 1.125rem;
+    height: 1.125rem;
+  }
+  .select-empty {
+    padding: 0.5rem;
+    text-align: center;
+    font-size: 0.8125rem;
     color: color-mix(in oklab, var(--color-base-content) 40%, transparent);
-    border-color: var(--color-base-200);
+  }
+  .select-search {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin-bottom: 0.25rem;
+    padding: 0.25rem 0.5rem 0.375rem;
+    border-bottom: 1px solid color-mix(in oklab, var(--color-base-content) 10%, transparent);
+  }
+  .select-search-input {
+    flex: 1;
+    min-width: 0;
+    background-color: transparent;
+    outline: none;
+    font-size: 0.8125rem;
+  }
+
+  /* 多选触发器里的标签（TDesign 的 tag 形态）。 */
+  .select-tags {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem;
+    min-width: 0;
+  }
+  .select-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    max-width: 100%;
+    padding: 0.0625rem 0.375rem;
+    border: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+    border-radius: 0.25rem;
     background-color: var(--color-base-200);
+    font-size: 0.75rem;
+    line-height: 1.25rem;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .select-tag-x {
+    display: inline-flex;
+    cursor: pointer;
+    opacity: 0.5;
+  }
+  .select-tag-x:hover {
+    opacity: 1;
+    color: var(--color-error);
+  }
+  .select-tag-more {
+    color: color-mix(in oklab, var(--color-base-content) 60%, transparent);
   }
 
   /* ── input：单行输入框 ────────────────────────────────────────────────────
@@ -1468,15 +1629,28 @@ main,
     outline-width: 2px;
     outline-style: solid;
   }
-  /* 禁用：文字 20% 灰、底色 10% 灰（幽灵按钮不铺底） */
+  /* 禁用：文字 20% 灰、底色 10% 灰（幽灵按钮不铺底）
+     ⚠⚠ `background-image: none` **不能省**（2026-10-02 用户截图："谁特么看得清写的字"）：
+     `.btn-primary` 还铺了一层 `var(--primary-gradient)`，而**背景图永远压在
+     background-color 之上** ⇒ 只把 `--btn-bg` 清成 transparent 没用：禁用态的
+     primary 按钮**依旧是满紫底** ✗，文字却掉成 20% 灰 ✗ ⇒ 深字压紫底、根本看不清。
+     这里把背景图一并清掉，禁用态就统一成"灰底 + 灰字"这个可读的档 ✓。 */
   .btn:is(:disabled, [disabled], [aria-disabled='true']) {
     pointer-events: none;
-    color: color-mix(in oklch, var(--color-base-content) 20%, transparent);
-    --btn-bg: transparent;
-    --btn-border: transparent;
+    /* ⚠ 字色 20% → **60%**（2026-10-02 用户："谁特么看得清写的字"）。
+       旧值 `base-content 20%` 压在 `base-content 10%` 的底上 —— **两者同源**，
+       实测浅色主题只有 **1.52:1** ✗（远低于 3:1）；改 60% 且底换成 `base-200`
+       之后实测 **4.58:1** ✓（过 AA）。深色主题同结构、只会更高 ✓。 */
+    color: color-mix(in oklch, var(--color-base-content) 60%, transparent);
+    /* 底用**真**灰面（base-200），不再用"本身颜色的 10% 透明"—— 后者在半透明叠加下
+       与字色同源 ⇒ 对比度天生不足。 */
+    --btn-bg: var(--color-base-200);
+    --btn-border: var(--color-base-200);
+    background-image: none;
+    box-shadow: none;
   }
   .btn:is(:disabled, [disabled], [aria-disabled='true']):not(.btn-ghost) {
-    background-color: color-mix(in oklab, var(--color-base-content) 10%, transparent);
+    background-color: var(--color-base-200);
   }
 
 }

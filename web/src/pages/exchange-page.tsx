@@ -52,20 +52,86 @@ import { onMounted, ref } from 'lite'
 import {
   listAccounts,
   listExchangePrizes,
+  listExchangeSubscriptions,
   runExchange,
   saveSchedule,
+  toggleExchangeSubscription,
   type AccountSummary,
   type ExchangePrizeView,
   type ExchangePrizesResponse,
   type ExchangeRunOutcome,
+  type ExchangeSubscriptionView,
 } from '../api'
 import { EmptyState } from '../ui/empty-state'
 import { showError } from '../ui/error-dialog'
 import { ConfirmDialog, Dialog, closeDialog, openDialog } from '../ui/dialog'
+import { IconStarFilled, IconStarOutline } from '../ui/icons'
 import { pushToast } from '../ui/toast'
 import { fmtEpochMs, fmtUpstreamTime } from '../ui/time'
+import { Select } from '../ui/select'
 
 type LoadState = 'loading' | 'error' | 'ready'
+
+/**
+ * 「下单前再确认一次」这个偏好的存储键。
+ *
+ * ⚠ 存 localStorage 而**不是**账号设置：它是**这个浏览器**的偏好，不是账号属性 ——
+ * 换台机器、换个浏览器，本来就该重新确认一次（而账号设置会跟着账号走遍所有设备）。
+ * 名字风格跟主题偏好那个 `mcloud-theme` 一致。
+ */
+const CONFIRM_KEY = 'mcloud-exchange-confirm'
+
+/**
+ * 「开启本地判定」这个偏好的存储键。
+ *
+ * # ⚠ 为什么要**正着说**（用户口径 2026-10-02）
+ *
+ * 上一版这个开关叫「本地判不能兑也照样发单」—— 那是**双重否定** ✗，
+ * 和旁边那个陈述句（「下单前再确认一次」✓）摆在一起，一个陈述、一个反问，
+ * 读的人要先在脑子里转一道弯才明白拨过去会发生什么。
+ * 现在改成"**开启本地判定**"✓：**开 = 本地先判、判不过就不发**（＝安全的那一侧 ✓），
+ * **关 = 抢光/未开始/已兑过也**真发下单请求 ✓（可能真扣豆 ✓）。
+ *
+ * ⚠ 用「判定」而不是「验证」：这个仓里「验证」已经被**滑块验证**占了 ✗，
+ * 写"开启本地验证"会让人以为是滑块那件事。
+ *
+ * 默认**开**（＝现在的安全默认：判不过就如实说"一枪未发"、不扣豆 ✓）。
+ */
+const LOCAL_JUDGE_KEY = 'mcloud-exchange-local-judge'
+
+const readLocalJudgePref = () => {
+  try {
+    // 缺省 `true`：与"关掉才是危险动作"这个方向一致（写法同 `readConfirmPref`）。
+    return localStorage.getItem(LOCAL_JUDGE_KEY) !== '0'
+  } catch {
+    return true
+  }
+}
+
+const writeLocalJudgePref = (on: boolean) => {
+  try {
+    localStorage.setItem(LOCAL_JUDGE_KEY, on ? '1' : '0')
+  } catch {
+    /* 存不进去只影响"下次还记不记得"，不影响这次点下去的行为 */
+  }
+}
+
+/** 读偏好，**默认开**。localStorage 在读不到时（隐私模式等）当默认值处理。 */
+const readConfirmPref = (): boolean => {
+  try {
+    return localStorage.getItem(CONFIRM_KEY) !== '0'
+  } catch {
+    return true
+  }
+}
+
+const writeConfirmPref = (on: boolean) => {
+  try {
+    localStorage.setItem(CONFIRM_KEY, on ? '1' : '0')
+  } catch {
+    // 写不进去只意味着"这次的选择下次不记得了"，不该因此报错打断兑换。
+  }
+}
 
 /** 二次确认弹窗的 id。 */
 const CONFIRM_ID = 'confirm-exchange'
@@ -113,20 +179,6 @@ const statusPhrase = (prize: ExchangePrizeView): string => {
   }
 }
 
-/**
- * 档位 → 徽章颜色。
- *
- * 只分四类：可兑、**要等**（时间窗没到）、**已兑过**（本月/本组用掉了）、
- * 其余不可兑。刻意不按 17 档一一配色 —— 用户要区分的是"我该做什么"。
- */
-const badgeClass = (prize: ExchangePrizeView): string => {
-  if (!prize.blocks) return 'badge badge-success'
-  if (prize.plan === 'not_started') return 'badge badge-info'
-  if (prize.plan === 'exchanged_this_prize' || prize.plan === 'exchanged_this_group') {
-    return 'badge badge-warning'
-  }
-  return 'badge badge-ghost'
-}
 
 /**
  * 这一件**值不值得定时去抢**。
@@ -285,22 +337,24 @@ interface PlanComputed {
 }
 
 /**
- * 由"目标时刻 + 提前量 + 重试次数"算出 cron 与人话说明。
+ * 由"目标时刻 + 提前量"算出 cron 与人话说明。
  *
- * # 两个刻意的取舍
+ * # 刻意的取舍
  *
- * 1. **目标正好落在整点 ⇒ 让任务自己等**：调度器 30 秒一跳，直接按分钟触发最多晚 30 秒，
- *    而"抢"里 30 秒等于输。所以提前量 ≥60 秒且目标是整点时，发 `skipWait=false`，
- *    由任务内部等到那一刻再发枪（`plan_exchange_wait` 的取向）。
+ * **目标正好落在整点 ⇒ 让任务自己等**：调度器 30 秒一跳，直接按分钟触发最多晚 30 秒，
+ * 而"抢"里 30 秒等于输。所以提前量 ≥60 秒且目标是整点时，发 `skipWait=false`，
+ * 由任务内部等到那一刻再发枪（`plan_exchange_wait`）。
  *
  *    ⚠ 这个"等"**只有目标本身是那个时刻时才有意义** —— 实测份额按自然日复位
  *    （0 点，抓包样本 §7），而 21:00 / 22:00 这类整点**不刷新**（§5/§6）。
- *    所以默认值给的是下一个 0 点，别的整点填了也只是"等到那个整点"，不是放量时刻。
- * 2. **重试用"分钟列表"表达**：cron 没法说"从这一刻起每分钟试 3 次"，
- *    但可以写成 `58,59,0 21 1 10 *`。跨小时的部分**排不进去**（小时列表×分钟列表
- *    会变成笛卡尔积，反而多触发），所以只用同一小时内的分钟，并在界面上说明。
+ *    默认给的是下一个 0 点，别的整点填了也只是"等到那个整点"，不是放量时刻。
+ *
+ * ⚠ **这里不排"重试"**（用户口径 2026-10-02：「不要重试输入，默认重试一次无间隔」✓）：
+ * 重试是**任务内部**的事 —— `514`（滑块被上游判错）时重取题、**立刻**再发一枪
+ * （`SLIDER_ROUNDS = 2`，与参考实现 `task.ts:29-42` 同款 ✓）。cron 表达不了秒，
+ * 在排期里写"每分钟再试"既不准也没必要 ✗。
  */
-const buildPlan = (atLocal: string, leadSec: number, tries: number): PlanComputed => {
+const buildPlan = (atLocal: string, leadSec: number): PlanComputed => {
   if (atLocal.trim() === '') {
     return { expr: '', human: '', skipWait: true, error: '先选一个抢兑时刻' }
   }
@@ -314,22 +368,13 @@ const buildPlan = (atLocal: string, leadSec: number, tries: number): PlanCompute
   const lead = Math.max(0, Math.floor(leadSec))
   const trigger = new Date(target.getTime() - lead * 1000)
   const hour = trigger.getHours()
-  const minutes: number[] = []
-  for (let i = 0; i < Math.max(1, tries); i++) {
-    const at = new Date(trigger.getTime() + i * 60_000)
-    if (at.getHours() !== hour) break
-    minutes.push(at.getMinutes())
-  }
+  const minutes = [trigger.getMinutes()]
   // 目标正好在整点、且提前量够 ⇒ 交给任务等整点（更准）。
   const skipWait = !(target.getMinutes() === 0 && lead >= 60)
   const expr = `${minutes.join(',')} ${hour} ${trigger.getDate()} ${trigger.getMonth() + 1} *`
   const parts = skipWait
     ? [`${fmtLocal(trigger)} 触发，立刻发一枪（调度器 30 秒一跳，可能晚 ≤30 秒）`]
     : [`${fmtLocal(trigger)} 触发，任务自己等到 ${fmtLocal(target)} 整点再发枪`]
-  parts.push(minutes.length > 1 ? `没成功就每分钟再试，共 ${minutes.length} 次` : '只试一次')
-  if (minutes.length < tries) {
-    parts.push('（跨小时的那几次 cron 表达不了，没排进去）')
-  }
   return { expr, human: parts.join('；'), skipWait, error: null }
 }
 
@@ -402,11 +447,70 @@ const GroupHead = (props: { group: PrizeGroup; openCount: number }) => (
  * 于是里面的 `key` 没人认领 ⇒ 直接报"这个 key 什么都不做"）。
  * 列表行的回调因此只能写成**表达式体**，"先算再渲染"和"两种行"只能靠组件拆开。
  */
+/**
+ * 订阅星星（清单里**两种行**共用：能兑的 [`PrizeRow`] 与被挡住的 [`BlockedRow`]）。
+ *
+ * ⚠⚠ **被挡住的那件也必须能订阅** —— 订阅的用处恰恰是"盯着它什么时候又能兑了" ✓。
+ * 只让可兑的能订阅，等于把最需要盯的那一类排除在外 ✗。
+ * 这一条是被门禁逼出来的：装置里"已抢光"那件没有星星 ⇒ 那条断言直接失败 ✓
+ * （不然它会以"界面上看着挺对"的样子留很久）。
+ *
+ * 为什么是**图标**按钮：这一行已经挤着「兑换/定时/已抢光」，再加一颗文字按钮
+ * 窄屏就换行了 ✗ —— 而"订没订"用**空心/实心**表达就够 ✓。`title` 与 `aria-label`
+ * 都写：鼠标能看、读屏能念 ✓（门禁也是按 `aria-label` 找它的 ✓）。
+ */
+const SubscribeStar = (props: {
+  subscribed: boolean
+  /** **这一件**正在切换订阅 ⇒ 禁用，避免连点。 */
+  busy: boolean
+  /** 两种行的按钮尺寸不同（`PrizeRow`/订阅卡用 `sm`、`BlockedRow` 用 `xs`）✓。 */
+  size: 'sm' | 'xs'
+  /**
+   * ⚠ **不接收 prize**（用户口径 2026-10-02：「不要取消订阅，直接用星星」）：
+   * 订阅卡里那一行的"取消"只有 `prizeId` 可用（那一件可能已经不在当前账号的
+   * 清单里 ⇒ 根本没有 `ExchangePrizeView` ✓）。让调用方自己绑参数，
+   * 这颗星星才能在**三个**地方通用 ✓（清单两处 + 订阅卡一处）。
+   */
+  onToggle: () => void
+}) => (
+  <button
+    type="button"
+    class={`btn ${props.size === 'sm' ? 'btn-sm' : 'btn-xs'} ${
+      props.subscribed ? 'btn-soft text-primary' : 'btn-ghost opacity-60'
+    }`}
+    disabled={props.busy}
+    aria-pressed={props.subscribed}
+    aria-label={props.subscribed ? '取消订阅' : '订阅'}
+    title={
+      props.subscribed
+        ? '已订阅：它会固定在最上面。点一下取消。'
+        : '订阅：把它固定到页面最上面，不用每次翻分组'
+    }
+    onClick={() => props.onToggle()}
+  >
+    {props.subscribed ? <IconStarFilled class="size-4" /> : <IconStarOutline class="size-4" />}
+  </button>
+)
+
 const PrizeRow = (props: {
   prize: ExchangePrizeView
+  /** **这一行**就是正在跑的那件 ⇒ 显示「兑换中…」。 */
   busy: boolean
+  /**
+   * **有任意一次兑换在跑** ⇒ 这一行的按钮 disable（用户口径 2026-10-02 第 3 条：
+   * 「我点击这个已抢光按钮 ⇒ 兑换按钮应该是 disable，已抢光按钮也应该是 disable」）。
+   *
+   * ⚠ 与 `busy` 是**两件事**，上一版把它们合成一个（传"任意一行在跑"）✗ ⇒
+   * 运行时**每一行**都显示「兑换中…」✗（用户截图里四颗一起变，就是这么来的）。
+   */
+  locked: boolean
   onExchange: (prize: ExchangePrizeView) => void
   onSchedule: (prize: ExchangePrizeView) => void
+  /** 这一件订没订（服务端那份列表说了算 ✓）。 */
+  subscribed: boolean
+  /** **这一件**正在切换订阅（`null` 之外的值）⇒ 那颗星星要禁用，避免连点。 */
+  subBusy: boolean
+  onToggleSubscribe: (prize: ExchangePrizeView) => void
 }) => (
   <div class="flex items-center justify-between gap-3 py-2">
     <div class="flex min-w-0 flex-col">
@@ -415,10 +519,21 @@ const PrizeRow = (props: {
       <span class="text-xs opacity-60">{stockText(props.prize)}</span>
     </div>
     <div class="flex shrink-0 items-center gap-1">
+      {/* 订阅入口（共用件，理由见 `SubscribeStar` 的注释） */}
+      <SubscribeStar
+        subscribed={props.subscribed}
+        busy={props.subBusy}
+        size="sm"
+        onToggle={() => props.onToggleSubscribe(props.prize)}
+      />
       <button
         type="button"
-        class="btn btn-sm btn-primary"
-        disabled={props.busy}
+        // ⚠ 忙碌时**必须掉掉 `btn-primary`**：2026-10-02 用户截图反馈「点击兑换后按钮
+        // 颜色不对」—— 当时忙碌态也挂着 primary，于是「兑换中…」看起来是
+        // **一颗禁用的主色按钮**（紫蓝、灰得发脏 ✗），与旁边那些中性禁用按钮不一致。
+        // 现在忙碌 = 中性 `btn` + `disabled`（与「已抢光」禁用态同款 ✓）。
+        class={props.busy ? 'btn btn-sm' : 'btn btn-sm btn-primary'}
+        disabled={props.busy || props.locked}
         onClick={() => props.onExchange(props.prize)}
       >
         {props.busy ? '兑换中…' : '兑换'}
@@ -430,10 +545,129 @@ const PrizeRow = (props: {
   </div>
 )
 
-/** 一条**被挡住**的件：状态一句话，完整原因放 `title`，不再占正文。 */
+/**
+ * 顶部「我订阅的」里的一行。
+ *
+ * ⚠ 与清单里的 [`PrizeRow`] **分开写**，不是懒得复用：那一边只答"这一件现在能不能兑"，
+ * 这一边还得多答一句"**它还在不在这个账号的清单里**" —— 订阅可以比活动活得久 ✓
+ * （下架了、或换了个云盘账号）。这一句正是"订阅"最容易骗人的地方：
+ * 装作它还在，用户点兑换才发现没有 ✗。
+ *
+ * `key` 挂在这一行的 `<li>` 上（lite 的 `.map` 要求 key 落在返回的 JSX 元素上 ✓）。
+ */
+const SubscribedRow = (props: {
+  sub: ExchangeSubscriptionView
+  /** 当前账号清单里的对应项；`null` = 这个账号的清单里没有它。 */
+  live: ExchangePrizeView | null
+  /** 这一行正在切换订阅 ⇒ 两颗按钮都禁用（避免连点）。 */
+  busy: boolean
+  onExchange: (prize: ExchangePrizeView) => void
+  /**
+   * 定时抢兑。
+   *
+   * ⚠ **顶部这一块也必须能定时**（用户口径 2026-10-02：「订阅怎么没有定时选项」）——
+   * 订阅盯的恰恰是"现在还不能兑、到点才放货"的那些 ✓，而定时就是为它们存在的 ✓。
+   * 只给清单里的行配「定时」、订阅这块不配，等于把订阅最该有的动作砍掉了 ✗。
+   */
+  onSchedule: (prize: ExchangePrizeView) => void
+  onUnsubscribe: (sub: ExchangeSubscriptionView) => void
+}) => {
+  // 取成 `const` 再进闭包：TS 对 `const` 的收窄能穿过闭包 ✓，
+  // 于是下面那颗按钮里不必写 `!`（本仓不用非空断言，见 conventions）。
+  const live = props.live
+  return (
+    <li class="flex items-center justify-between gap-3 py-2">
+      <div class="flex min-w-0 flex-col">
+        <span class="truncate text-sm">
+          {/* 清单里还在 ⇒ 用**实时**名字（可能改过名）；不在 ⇒ 用订阅时的快照 ✓ */}
+          {live !== null ? (live.name ?? `奖品 ${live.prizeId}`) : props.sub.name || `奖品 ${props.sub.prizeId}`}
+        </span>
+        <span class="text-xs opacity-60">
+          {live === null
+            ? '这个账号的清单里现在没有这一件（可能已下架）'
+            : `${stockText(live)}${live.blocks ? ` · ${live.planReason}` : ''}`}
+        </span>
+      </div>
+      <div class="flex shrink-0 items-center gap-1">
+        {/*
+          ⚠ 取消订阅**就是这颗星星**（用户口径 2026-10-02：「不要取消订阅，直接用星星」）
+          —— 文字按钮已经删掉 ✗。位置放在**最前**，与清单里那两处**完全一致** ✓：
+          一处学会，三处都能用 ✓；这一行本来就窄，少一颗文字按钮也松快 ✓。
+        */}
+        <SubscribeStar
+          subscribed={true}
+          busy={props.busy}
+          size="sm"
+          onToggle={() => props.onUnsubscribe(props.sub)}
+        />
+        {live === null ? null : (
+          <button
+            type="button"
+            class="btn btn-sm btn-primary"
+            disabled={live.blocks || props.busy}
+            title={live.blocks ? live.planReason : ''}
+            onClick={() => props.onExchange(live)}
+          >
+            兑换
+          </button>
+        )}
+        {/*
+          「定时」的判据与清单里**同一条**（`canSchedule`）：可兑的能定时 ✓，
+          以及那些"会随时间变"的档（未开始 / 抢光 / 今日份额空 / 明日可兑）也能 ✓ ——
+          而"已结束 / 已兑过"这类定时没有意义，就不给 ✗。
+          ⚠ `live === null`（这件不在当前账号的清单里）时**不给**：定时要把
+          "这一件 + 这个账号"落成一条定时任务，手上没有这一件的清单读数就不该假装能排 ✗。
+        */}
+        {live !== null && canSchedule(live) ? (
+          <button
+            type="button"
+            class="btn btn-sm"
+            disabled={props.busy}
+            onClick={() => props.onSchedule(live)}
+          >
+            定时
+          </button>
+        ) : null}
+      </div>
+    </li>
+  )
+}
+
+/**
+ * 一条**被挡住**的件：状态一句话，完整原因放 `title`，不再占正文。
+ *
+ * # ⚠「已抢光」在特定情况下要变成**按钮**（2026-10-02 用户口径）
+ *
+ * 用户原话：「文案显示已抢光，只要用户开启了取消二次确认，就直接显示按钮，
+ * 而不是一个已抢光文本（按钮文本还是已抢光）」。
+ *
+ * 判据刻意**按那句文案**判（`statusPhrase(p) === '已抢光'`），而不是按 `plan` 名 ——
+ * 用户说的就是"显示已抢光的那些"，按文案判不会因为后端多一个状态就漏掉。
+ *
+ * ⚠ 为什么只放**抢光**这一类：抢光是**会随时间变**的（份额放出来就又能兑）⇒
+ * 让人点一下试试是合理的 ✓。而「未开始 / 已结束」不是这种性质（点下去注定被拒 ✗），
+ * 它们仍是一句话，旁边留「定时」就够了。
+ */
 const BlockedRow = (props: {
   prize: ExchangePrizeView
   onSchedule: (prize: ExchangePrizeView) => void
+  onExchange: (prize: ExchangePrizeView) => void
+  /**
+   * 这一行**能不能点**（＝用户关掉了「开启本地判定」）。
+   *
+   * ⚠ 判据挂**本地判定**，不是挂"下单前再确认一次"：前者才是"要不要让本地挡下"，
+   * 后者只管"点下去要不要再问一遍"。2026-10-02 用户截图反馈：
+   * 「我没开启本地判定，但是按钮不可点击」—— 上一版写成**无条件 disabled** ✗，
+   * 于是关掉本地判定也没法强制发单（那个开关就落不到任何一档上了）。
+   */
+  canForce: boolean
+  /** **有任意一次兑换在跑** ⇒ 这枚（本来可点的）按钮也 disable（用户口径第 3 条）。 */
+  locked: boolean
+  /** 这一件订没订（服务端那份列表说了算 ✓）。 */
+  subscribed: boolean
+  /** **这一件**正在切换订阅 ⇒ 那颗星星禁用。 */
+  subBusy: boolean
+  onToggleSubscribe: (prize: ExchangePrizeView) => void
 }) => (
   <div class="flex items-center justify-between gap-3 py-1.5">
     <div class="flex min-w-0 flex-col">
@@ -441,9 +675,53 @@ const BlockedRow = (props: {
       <span class="text-xs opacity-50">{stockText(props.prize)}</span>
     </div>
     <div class="flex shrink-0 items-center gap-1">
-      <span class={badgeClass(props.prize)} title={props.prize.planReason}>
-        {statusPhrase(props.prize)}
-      </span>
+      {/* ⚠ 被挡住的那件**也要能订阅** —— 订阅的用处就是盯着它什么时候又能兑 ✓。
+          这条是门禁逼出来的（装置里那件没有星星 ⇒ 断言直接失败 ✓），
+          详见 `SubscribeStar` 的注释。 */}
+      <SubscribeStar
+        subscribed={props.subscribed}
+        busy={props.subBusy}
+        size="xs"
+        onToggle={() => props.onToggleSubscribe(props.prize)}
+      />
+      {/*
+        判据没过的档位 = **一枚真按钮，但 disabled**（2026-10-02 用户口径第二次修正）。
+
+        ⚠ 之前这里有两种形态：`exchangeDirect`（＝用户关掉了"下单前再确认一次"）时
+        渲染一枚**能点**的 `btn btn-xs`（点了直接下单），否则渲染一个 `<span>` 徽标。
+        用户 2026-10-02 截图反馈两件事：**① 灰色那枚"禁止按钮颜色不对"**（因为它压根不是
+        按钮 ✗，是个徽标 ✗）；**② 白色那几枚"已抢光"还能再点** ✗。
+        ⇒ 两条都归到同一个修法：**所有判据没过的档都渲染 `disabled` 的 `btn`** ✓
+        —— 形态对了（daisyUI 的禁用配色 ✓）、也真的**点不动**了 ✓。
+
+        ⚠ "抢光了还想试一下"这个需求**没有丢**：它现在归给「开启本地判定」那个开关
+        （关掉 = 所有档都真发下单请求）。一页只留**一处**表达"我要强制发单"，
+        比"每一行各自能点"更不容易误解 ✓。
+
+        ⚠ `title` 保留：把"为什么不能兑"当面写出来（本文件设计说明第 ① 条）。
+      */}
+      {/* 本地判定**开** ⇒ 真的 `disabled` 按钮（点不动 ✓、禁用色由 daisyUI 管 ✓）。
+          ⚠ `title` 挂**外层 span**：`disabled` 按钮浏览器**不触发 hover** ✗，
+          挂它身上那句"为什么不能兑"永远看不到（本文件设计说明第 ① 条）。
+          本地判定**关** ⇒ 同款**可点**按钮（点了走 `askExchange` ⇒ 真发单 ✓）
+          —— 这样"强制发单"只有**一处**入口（那个开关），这一行如实反映它 ✓。 */}
+      {props.canForce ? (
+        <button
+          type="button"
+          class="btn btn-xs"
+          disabled={props.locked}
+          title={props.prize.planReason}
+          onClick={() => props.onExchange(props.prize)}
+        >
+          {statusPhrase(props.prize)}
+        </button>
+      ) : (
+        <span title={props.prize.planReason}>
+          <button type="button" class="btn btn-xs" disabled>
+            {statusPhrase(props.prize)}
+          </button>
+        </span>
+      )}
       {canSchedule(props.prize) ? (
         <button type="button" class="btn btn-xs" onClick={() => props.onSchedule(props.prize)}>
           定时
@@ -469,6 +747,16 @@ export const ExchangePage = () => {
   const busyPrizeId = ref<number | null>(null)
   /** 待确认的那一件。 */
   const pending = ref<ExchangePrizeView | null>(null)
+  /**
+   * 下单前是否再确认一次（**默认开**）。
+   *
+   * 兑换是**不可逆**的（真扣 AI豆、扣了不退），所以默认保留确认；
+   * 但"抢兑"抢的是名额，每次多一次点击就是慢一步 ⇒ 给一个**关掉它的开关**
+   * （用户口径 2026-10-02：「兑换这里加个取消二次弹窗按钮」）。
+   */
+  const confirmFirst = ref(readConfirmPref())
+  /** 本地判定：**开** = 判不过就不发（安全 ✓）；**关** = 照样真发（可能真扣豆 ✓）。 */
+  const localJudge = ref(readLocalJudgePref())
   /** 上一次兑换的结论。 */
   const result = ref<ExchangeRunOutcome | null>(null)
 
@@ -478,7 +766,15 @@ export const ExchangePage = () => {
   const planAccount = ref('')
   const planAt = ref(toLocalInput(nextMidnight()))
   const planLead = ref(120)
-  const planTries = ref(3)
+
+  /**
+   * **传输延迟补偿**（毫秒）—— 用户口径 2026-10-02：「10ms 是本地与云端的传输时间差」。
+   *
+   * ⚠ 它**不是**"提前多少开始跑"（那是 `planLead`，秒、给调度器用的），
+   * 而是**任务内部**"整点前多少毫秒发枪"（与参考实现 `standalone.ts:213` 的
+   * `offset = 10` 同值）⇒ 提前这 10ms 发出，让请求**正好在整点抵达**云端 ✓。
+   */
+  const planOffset = ref(10)
   const planError = ref('')
   const planSaving = ref(false)
 
@@ -549,11 +845,90 @@ export const ExchangePage = () => {
     }
   }
 
+  // ─────────────────────────────────────────────────────────────────────
+  // 订阅：钉在顶部的那几件（用户口径 2026-10-02）
+  // ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * 我订阅的那几件。**服务端**存（`GET /api/exchange/subscriptions`）——
+   * 换浏览器、换设备也还在 ✓。
+   *
+   * ⚠ "跟账号走"指的是**登录账号**，不是被操作的云盘账号：同一个人换个云盘账号，
+   * 想看的东西还是那几件 ✓（所以服务端按 owner 分表，见 `UserStore` 那条注释）。
+   */
+  const subscriptions = ref<ExchangeSubscriptionView[]>([])
+  /** 正在切换的那一件（`null` = 没在切）。两颗入口（星星 / 顶部取消）共用它。 */
+  const subBusy = ref<number | null>(null)
+  /**
+   * 订阅这条链**自己的**错误。
+   *
+   * ⚠ 与清单的 `listError` **分开**：两者该分别说清 ✓（清单挂了是"这页没数据"，
+   * 订阅挂了只是"顶上那块没读到"）。
+   */
+  const subError = ref('')
+
+  const loadSubscriptions = async () => {
+    try {
+      subscriptions.value = (await listExchangeSubscriptions()).items
+      subError.value = ''
+    } catch (e) {
+      // ⚠ 铁律：**不许吞错**（见 `mcloud-tasks` 模块头）—— 读不到就如实说一句 ✓。
+      // 但也**不**把整页拖垮：清单才是这一页的主线，订阅只是顶上那块附加信息 ✓。
+      subError.value = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  const toggleSubscribe = async (prize: ExchangePrizeView) => {
+    if (subBusy.value !== null) return
+    subBusy.value = prize.prizeId
+    try {
+      // 名字 / 组名作为**快照**存进服务端：清单里没有这件时（下架、换账号），
+      // 顶上那一行仍要是人看得懂的名字，而不是一串 `prizeId` ✓。
+      subscriptions.value = (
+        await toggleExchangeSubscription({
+          prizeId: prize.prizeId,
+          name: prize.name ?? '',
+          groupId: prize.groupId,
+          groupTitle: prize.groupTitle,
+        })
+      ).items
+      subError.value = ''
+    } catch (e) {
+      subError.value = e instanceof Error ? e.message : String(e)
+    } finally {
+      subBusy.value = null
+    }
+  }
+
+  /** 从顶上那块取消订阅：**只发 id** 就够（当初那个名字不一定还留着 ✓）。 */
+  const unsubscribe = async (s: ExchangeSubscriptionView) => {
+    if (subBusy.value !== null) return
+    subBusy.value = s.prizeId
+    try {
+      subscriptions.value = (await toggleExchangeSubscription({ prizeId: s.prizeId })).items
+      subError.value = ''
+    } catch (e) {
+      subError.value = e instanceof Error ? e.message : String(e)
+    } finally {
+      subBusy.value = null
+    }
+  }
+
+  const isSubscribed = (prizeId: number): boolean =>
+    subscriptions.value.some((s) => s.prizeId === prizeId)
+
+  /** 订阅里那件在**当前账号**清单里的对应项（`null` = 这个账号的清单里没有它）。 */
+  const liveOf = (s: ExchangeSubscriptionView): ExchangePrizeView | null =>
+    list.value === null ? null : (list.value.prizes.find((p) => p.prizeId === s.prizeId) ?? null)
+
   const load = async () => {
     state.value = 'loading'
     try {
       await loadAccounts()
       await loadPrizes()
+      // 订阅与清单是**两条独立的链**：订阅读挂了只在顶上那块说一句 ✓
+      // （`loadSubscriptions` 自己吞下错误并记进 `subError`，不会把这里抛断 ✓）。
+      await loadSubscriptions()
       state.value = 'ready'
     } catch (e) {
       errorMessage.value = e instanceof Error ? e.message : String(e)
@@ -563,9 +938,15 @@ export const ExchangePage = () => {
 
   onMounted(load)
 
-  /** 点"兑换"：先记下这一件，弹确认。 */
+  /** 点"兑换"：先记下这一件；**关了确认就直接下单**。 */
   const askExchange = (prize: ExchangePrizeView) => {
     pending.value = prize
+    if (!confirmFirst.value) {
+      // `doExchange` 自己会收尾（关弹窗、清 pending、刷新清单），
+      // 所以这里不重复那几步 —— 两条路走同一段代码，行为才不会分叉。
+      void doExchange()
+      return
+    }
     openDialog(CONFIRM_ID)
   }
 
@@ -576,6 +957,8 @@ export const ExchangePage = () => {
     try {
       result.value = await runExchange(account.value, {
         prizeIdOrName: String(prize.prizeId),
+        // 开关是"正着说"的 ⇒ 传给后端的是它的**反面**（`force` = 不走本地判定）。
+        force: !localJudge.value,
       })
       closeDialog(CONFIRM_ID)
       pending.value = null
@@ -618,7 +1001,7 @@ export const ExchangePage = () => {
     // 弹窗里会写明"是猜的、复位时刻因活动而异"。见 `guessResetAt` 的注释。
     planAt.value = toLocalInput(guessResetAt(prize))
     planLead.value = 120
-    planTries.value = 3
+    planOffset.value = 10
     planError.value = ''
     openDialog(PLAN_ID)
   }
@@ -626,7 +1009,7 @@ export const ExchangePage = () => {
   const submitSchedule = async () => {
     const prize = planning.value
     if (!prize) return
-    const computed = buildPlan(planAt.value, planLead.value, planTries.value)
+    const computed = buildPlan(planAt.value, planLead.value)
     if (computed.error) {
       planError.value = computed.error
       return
@@ -643,7 +1026,12 @@ export const ExchangePage = () => {
         expr: computed.expr,
         timezone: browserTz(),
         // ⚠ 参数名必须与 `ExchangeTask::params()` 一致（`prizeIdOrName` / `skipWait`）。
-        body: { prizeIdOrName: String(prize.prizeId), skipWait: computed.skipWait },
+        body: {
+          prizeIdOrName: String(prize.prizeId),
+          skipWait: computed.skipWait,
+          // 传输延迟补偿（毫秒）—— 与任务参数 `offset` 同名（ExchangeTask::params()）。
+          offset: planOffset.value,
+        },
         enabled: true,
       })
       closeDialog(PLAN_ID)
@@ -656,15 +1044,116 @@ export const ExchangePage = () => {
     }
   }
 
+  /**
+   * 顶部「我订阅的」—— 用户口径 2026-10-02：
+   * 「把想要的内容订阅到显示在上面方便直接看」。
+   *
+   * ⚠ 必须在**最上面**（他截图里红框那个位置）：订阅的全部意义就是"不用在长清单里翻" ✓，
+   * 埋在清单底下 ✗ 等于没有 —— 这条判据写进了门禁（比较**卡片序号**，不是"页面里有这行字"✗）。
+   */
+  const subscribedCard = () => (
+    <div class="card bg-base-100 shadow-sm">
+      <div class="card-body gap-2">
+        <h2 class="card-title text-base">
+          我订阅的
+          {subscriptions.value.length > 0 ? (
+            <span class="badge badge-sm badge-ghost">{subscriptions.value.length} 件</span>
+          ) : null}
+        </h2>
+
+        {subError.value ? (
+          <p class="flex flex-wrap items-center gap-2 text-sm text-error">
+            订阅没读到：{subError.value}
+            <button type="button" class="btn btn-xs" onClick={() => void loadSubscriptions()}>
+              重试
+            </button>
+          </p>
+        ) : null}
+
+        {subscriptions.value.length === 0 ? (
+          <p class="text-sm opacity-60">
+            还没有订阅。在下面任意一件奖品上点<b class="font-medium">星星</b>，它会固定到这一块
+            —— 以后不用每次翻分组去找它。
+          </p>
+        ) : (
+          <ul class="flex flex-col divide-y divide-base-200">
+            {subscriptions.value.map((s) => (
+              <SubscribedRow
+                key={String(s.prizeId)}
+                sub={s}
+                live={liveOf(s)}
+                busy={subBusy.value === s.prizeId}
+                onExchange={askExchange}
+                onSchedule={askSchedule}
+                onUnsubscribe={unsubscribe}
+              />
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  )
+
   return (
     <div class="flex flex-col gap-4">
+      {/* ⚠ 顺序是刻意的（用户口径 2026-10-02）：**订阅在最上面** ——
+          它就是"我盯着的那几件，一眼看到还能不能兑" ✓。 */}
+      {subscribedCard()}
       {/* ── 账号 + 刷新 ─────────────────────────────────────────────── */}
       <div class="card bg-base-100 shadow-sm">
         <div class="card-body">
           <h2 class="card-title text-base">兑换</h2>
+          {/* ⚠ 这句话必须**跟着开关变**：关掉确认之后还写"点下去要再确认一次"
+              就是骗人 —— 用户点下去会直接扣豆，而界面说会先问他。 */}
           <p class="text-sm opacity-70">
-            挑一件兑换。下单会真的扣AI豆，所以点下去要再确认一次；抢不到的可以加个定时。
+            {confirmFirst.value
+              ? '挑一件兑换。下单会真的扣AI豆，所以点下去要再确认一次；抢不到的可以加个定时。'
+              : '挑一件兑换。下单会真的扣AI豆 —— 你已经关掉二次确认，点下去就直接扣。'}
           </p>
+          {/* ⚠⚠ 这一处曾经被误判成"框架的 checked 绑定坏了"（2026-10-02）：
+              当时门禁的断言用 `parentElement.textContent` 去认那颗复选框，而
+              textContent 一路冒泡 ⇒ `.find` 撞上了**别的**复选框 ⇒ 诊断读到的
+              `checked=false` 根本不是它。改成按"紧邻兄弟的文字"精确匹配之后，
+              `box.checked` 与状态**完全一致** ⇒ **框架没问题，是我的选择器错了**。
+              这个控件因此留下当**回归样本**：门禁里那条断言直接读 `box.checked`。
+              教训：诊断"读到的值不对"时，先确认**读的是不是那个东西**。 */}
+          <label class="flex w-fit cursor-pointer items-center gap-2 text-xs opacity-70">
+            <input
+              type="checkbox"
+              class="toggle toggle-sm"
+              checked={confirmFirst.value}
+              onChange={(e) => {
+                const on = (e.target as HTMLInputElement).checked
+                confirmFirst.value = on
+                writeConfirmPref(on)
+              }}
+            />
+            <span>下单前再确认一次</span>
+          </label>
+
+          {/* ⚠ 第二个开关，紧挨着上一个，而且**与它同向**（都是"开着 = 做那件事"✓）。
+              上一个管"下单前问不问"，这个管"本地要不要先判一道"。
+              它不改变"发不发请求"本身（请求本来就发），改变的是
+              **请求会不会真的落到下单那一枪**。 */}
+          <label
+            class="flex w-fit cursor-pointer items-center gap-2 text-xs opacity-70"
+            title="开着 = 本地先判一道，判不过（抢光/未开始/已兑过）就如实说「一枪未发」、不扣豆；关掉 = 这些档也真发下单请求，可能真扣AI豆"
+          >
+            <input
+              type="checkbox"
+              class="toggle toggle-sm"
+              checked={localJudge.value}
+              onChange={(e) => {
+                const on = (e.target as HTMLInputElement).checked
+                localJudge.value = on
+                writeLocalJudgePref(on)
+              }}
+            />
+            <span>
+              开启本地判定
+              {localJudge.value ? '' : '（已关：抢光也会真发单）'}
+            </span>
+          </label>
 
           {accounts.value.length === 0 ? (
             <div class="alert alert-warning">
@@ -673,11 +1162,18 @@ export const ExchangePage = () => {
           ) : (
             <fieldset class="fieldset">
               <legend class="fieldset-legend">账号</legend>
-              <select
-                class="select w-full md:w-80"
+              <Select
+                id="exchange-account"
+                class="w-full md:w-80"
+                ariaLabel="账号"
+                placeholder="请选择账号"
                 value={account.value}
-                onChange={(e) => {
-                  account.value = (e.target as HTMLSelectElement).value
+                options={accounts.value.map((a) => ({
+                  value: a.id,
+                  label: a.nickname || a.label || a.id,
+                }))}
+                onChange={(v) => {
+                  account.value = v
                   // 换了账号，上一件的结论就不属于这个账号了 —— 清掉，
                   // 否则"刚兑成功"那条提示会挂在一个没兑过的账号下面。
                   result.value = null
@@ -687,11 +1183,7 @@ export const ExchangePage = () => {
                   groupOpen.value = {}
                   void loadPrizes()
                 }}
-              >
-                {accounts.value.map((a) => (
-                  <option key={a.id} value={a.id}>{a.nickname || a.label || a.id}</option>
-                ))}
-              </select>
+              />
             </fieldset>
           )}
 
@@ -739,7 +1231,12 @@ export const ExchangePage = () => {
             </span>
             {result.value.order ? (
               <span class="text-xs opacity-80">
-                订单号 {String(result.value.order.oid ?? '—')}
+                {/* ⚠ 键名是 `order_id`（后端 `detail_payload` 里就叫这个 ✓），
+                    这里原先写的是 `oid` ✗ ⇒ 永远取不到 ⇒ 界面一直显示「订单号 —」。
+                    ⚠ 上游**响应**里那个 10 位订单号确实叫 `oid` ✓（抓包 §6 记录第 4 问 ✓），
+                    但那是**解析层**的事：`mcloud-upstream` 把它读成 `ExchangeOrder.order_id` ✓，
+                    到界面这一层已经是 `order_id` 了 ✓。别把两层的名字搞混 ✓。 */}
+                订单号 {String(result.value.order.order_id ?? '—')}
                 {result.value.order.prizeName ? ` · ${String(result.value.order.prizeName)}` : ''}
               </span>
             ) : null}
@@ -851,9 +1348,13 @@ export const ExchangePage = () => {
                       <div key={p.prizeId}>
                         <PrizeRow
                           prize={p}
-                          busy={busyPrizeId.value !== null}
+                          busy={busyPrizeId.value === p.prizeId}
+                          locked={busyPrizeId.value !== null}
                           onExchange={askExchange}
                           onSchedule={askSchedule}
+                          subscribed={isSubscribed(p.prizeId)}
+                          subBusy={subBusy.value === p.prizeId}
+                          onToggleSubscribe={toggleSubscribe}
                         />
                       </div>
                     ))}
@@ -867,7 +1368,16 @@ export const ExchangePage = () => {
                     <div class="collapse-content flex flex-col divide-y divide-base-200">
                       {g.blocked.map((p) => (
                         <div key={p.prizeId}>
-                          <BlockedRow prize={p} onSchedule={askSchedule} />
+                          <BlockedRow
+                            prize={p}
+                            onSchedule={askSchedule}
+                            onExchange={askExchange}
+                            canForce={!localJudge.value}
+                            locked={busyPrizeId.value !== null}
+                            subscribed={isSubscribed(p.prizeId)}
+                            subBusy={subBusy.value === p.prizeId}
+                            onToggleSubscribe={toggleSubscribe}
+                          />
                         </div>
                       ))}
                     </div>
@@ -914,15 +1424,18 @@ export const ExchangePage = () => {
 
         <fieldset class="fieldset">
           <legend class="fieldset-legend">账号</legend>
-          <select
-            class="select w-full"
+          <Select
+            id="plan-account"
+            class="w-full"
+            ariaLabel="账号"
+            placeholder="请选择账号"
             value={planAccount.value}
-            onChange={(e) => (planAccount.value = (e.target as HTMLSelectElement).value)}
-          >
-            {accounts.value.map((a) => (
-              <option key={a.id} value={a.id}>{a.nickname || a.label || a.id}</option>
-            ))}
-          </select>
+            options={accounts.value.map((a) => ({
+              value: a.id,
+              label: a.nickname || a.label || a.id,
+            }))}
+            onChange={(v) => (planAccount.value = v)}
+          />
         </fieldset>
 
         <fieldset class="fieldset">
@@ -933,13 +1446,12 @@ export const ExchangePage = () => {
             value={planAt.value}
             onInput={(e) => (planAt.value = (e.target as HTMLInputElement).value)}
           />
-          <p class="text-xs opacity-60">
-            默认值是<b class="font-medium">按这件露出的口径猜的</b>：有「今日份额」⇒ 下一个 0 点，
-            只有「本组每月名额」⇒ 下月 1 日 0 点。⚠ 它<b class="font-medium">不保证对</b> ——
-            份额复位的时刻<b class="font-medium">因活动而异</b>：我们实测到的那款是自然日 0 点
-            （抓包样本 §7），但有活动是照自己的投放时刻（比如 <span class="font-mono">08:00</span>）。
-            按你了解的时刻改。
-          </p>
+          {/* ⚠ 这段说明**从界面上删掉了**（用户口径 2026-10-02：「不需要说明」）✗，
+              但知识留着，就放这儿：
+              默认值是**按这件露出的口径猜的** —— 有「今日份额」⇒ 下一个 0 点；
+              只有「本组每月名额」⇒ 下月 1 日 0 点。⚠ **不保证对**：份额复位的时刻
+              **因活动而异** —— 我们实测到的那款是自然日 0 点（抓包样本 §7），
+              但也有活动照自己的投放时刻（比如 08:00）。用户按自己了解的时刻改。 */}
         </fieldset>
 
         <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -955,40 +1467,34 @@ export const ExchangePage = () => {
             />
           </fieldset>
           <fieldset class="fieldset">
-            <legend class="fieldset-legend">没成功怎么办</legend>
-            <select
-              class="select w-full"
-              value={String(planTries.value)}
-              onChange={(e) => (planTries.value = Number((e.target as HTMLSelectElement).value))}
-            >
-              <option value="1">只试一次</option>
-              <option value="3">每分钟再试，共 3 次</option>
-              <option value="5">每分钟再试，共 5 次</option>
-            </select>
-            <p class="text-xs opacity-60">
-              重复触发不会多扣豆：兑到之后这一件的判据会变成"本月已兑"，任务自己会跳过。
-            </p>
+            <legend class="fieldset-legend">传输延迟补偿（毫秒）</legend>
+            <input
+              type="number"
+              class="input w-full"
+              min="0"
+              max="1000"
+              value={String(planOffset.value)}
+              onInput={(e) => (planOffset.value = Number((e.target as HTMLInputElement).value) || 0)}
+            />
           </fieldset>
         </div>
 
-        {buildPlan(planAt.value, planLead.value, planTries.value).error ? (
+        {buildPlan(planAt.value, planLead.value).error ? (
           <div class="alert alert-warning">
-            <span>{buildPlan(planAt.value, planLead.value, planTries.value).error}</span>
+            <span>{buildPlan(planAt.value, planLead.value).error}</span>
           </div>
         ) : (
           <div class="rounded-box flex flex-col gap-1 bg-base-200 p-3 text-xs">
-            <span>{buildPlan(planAt.value, planLead.value, planTries.value).human}</span>
+            <span>{buildPlan(planAt.value, planLead.value).human}</span>
             <span class="opacity-70">
-              cron <code>{buildPlan(planAt.value, planLead.value, planTries.value).expr}</code>
+              cron <code>{buildPlan(planAt.value, planLead.value).expr}</code>
               {' · '}时区 {browserTz()}
             </span>
           </div>
         )}
 
-        <p class="text-xs opacity-70">
-          ⚠ 调度器是「宁可漏跑不可重跑」：服务在那一刻不在，就不会补跑。
-          到「定时」页能看到下次触发时间，也能停掉它。
-        </p>
+        {/* ⚠ 界面上删掉了（同上）。知识：调度器是「**宁可漏跑不可重跑**」——
+            服务在那一刻不在就**不会补跑**；「定时」页能看到下次触发时间、也能停掉它。 */}
 
         {planError.value !== '' ? (
           <div class="alert alert-error">
@@ -1003,7 +1509,7 @@ export const ExchangePage = () => {
           <button
             type="button"
             class="btn btn-primary"
-            disabled={planSaving.value || buildPlan(planAt.value, planLead.value, planTries.value).error !== null}
+            disabled={planSaving.value || buildPlan(planAt.value, planLead.value).error !== null}
             onClick={submitSchedule}
           >
             {planSaving.value ? '保存中…' : '加到定时'}

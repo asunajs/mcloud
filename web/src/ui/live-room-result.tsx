@@ -36,7 +36,8 @@ export const gainedCard = (view: LiveRoomRunView) => (
         <div class="stat-title">拿去领取的口令</div>
         <div class="stat-value text-2xl">{view.attempted}</div>
         <div class="stat-desc">
-          成功 {view.succeeded.length} · 已兑换 {view.redeemed.length} · 已失效{' '}
+          成功 {view.succeeded.length} · <b class="font-medium">本号</b>已领过{' '}
+          {view.redeemed.length} · 已失效{' '}
           {view.expired.length} · 无效 {view.invalid.length} · 未分类 {view.other.length}
         </div>
       </div>
@@ -100,11 +101,12 @@ export const codeBreakdown = (view: LiveRoomRunView) => (
             </ul>
           </div>
         ) : null}
-        {/* 已兑换 —— 不是失败 */}
+        {/* 已领过（200112）—— 不是失败 */}
         {view.redeemed.length > 0 ? group(
-          '已兑换',
+          '本号已领过',
           <span>
-            这个号已经用这条口令领过了，不是出错。
+            这个<b class="font-medium">账号</b>已经用这条口令领过了 —— 口令本身是对的，
+            也不是"口令被别人用掉了"（口令<b class="font-medium">全场通用</b>，谁都能领）。
           </span>,
           'badge-soft',
           view.redeemed,

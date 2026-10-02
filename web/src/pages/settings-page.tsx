@@ -44,6 +44,7 @@ import { StatRow, type StatItem } from '../ui/stat-row'
 import { fmtClock, fmtEpochMs, fmtUptime } from '../ui/time'
 import { statusBadge, statusLabel } from '../ui/history'
 import { IconBrand } from '../ui/icons'
+import { Select } from '../ui/select'
 
 type LoadState = 'loading' | 'error' | 'ready'
 
@@ -442,20 +443,16 @@ export const SettingsPage = () => {
           <h2 class="card-title text-base">会话控制</h2>
           <fieldset class="fieldset min-w-0">
             <legend class="fieldset-legend">会话有效期</legend>
-            <select
-              class="select w-full min-w-0"
+            <Select
+              id="session-ttl"
+              class="w-full min-w-0"
+              ariaLabel="会话有效期"
               value={String(ttlHours.value)}
-              aria-label="会话有效期"
-              onChange={(e) => {
-                ttlHours.value = Number((e.target as HTMLSelectElement).value)
+              options={TTL_CHOICES.map((c) => ({ value: String(c.hours), label: c.label }))}
+              onChange={(v) => {
+                ttlHours.value = Number(v)
               }}
-            >
-              {TTL_CHOICES.map((c) => (
-                <option key={String(c.hours)} value={String(c.hours)}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
+            />
             <p class="text-xs opacity-60">只影响之后新建的会话，已发出的不会被缩短。</p>
           </fieldset>
 

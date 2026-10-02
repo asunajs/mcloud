@@ -96,6 +96,16 @@ pub const SLIDER_ROUNDS: u32 = 2;
 /// （想赶下一场）那条路，默认参数（`skip_wait == true`）完全不碰它。
 pub const WAIT_LEAD_INTO_HOUR_MS: i64 = 20_000;
 
+/// 压着整点**提前多少毫秒**发单。
+///
+/// 依据 `mcloud-sign`（能跑的 TS）：`tasks/exchange/standalone.ts:169` 调的是
+/// `getMsToNextHour(new Date(), offset)`，而 `offset` 的文档写的是
+/// 「**提前多少毫秒发起兑换（默认 10）**」（`standalone.ts:185`）。
+/// ⇒ 目标时刻是 `下一个整点 − offset`，**不是**整点整。
+///
+/// ⚠ 抢兑场景下这 10ms 就是"压着整点先手"的意思，不是可有可无的取整。
+pub const EXCHANGE_LEAD_MS: i64 = 10;
+
 /// 奖品自身时间窗的串形态 —— `"2006-01-02 15-04-05"`。
 ///
 /// ⚠⚠ **时分秒之间也是 `-`**，不是 `:`。实拍两条都是这个形状：
@@ -648,6 +658,18 @@ pub struct ExchangeWait {
 /// 东八区是**整小时**偏移 ⇒ 按 UTC 截断与按东八区截断给出同一个时刻
 /// （半小时偏移的时区才会错开，本仓不涉及）。
 pub fn plan_exchange_wait(now_ms: i64) -> ExchangeWait {
+    plan_exchange_wait_with(now_ms, EXCHANGE_LEAD_MS)
+}
+
+/// 同 [`plan_exchange_wait`]，但**提前量由调用方给**（毫秒）。
+///
+/// # 这个 `offset` 是什么（用户口径 2026-10-02）
+///
+/// 「**10ms 是本地与云端的传输时间差**」—— 它是**传输耗时补偿** ✓，不是抢跑：
+/// 提前 `offset` 毫秒发出，让请求**正好在整点抵达云端** ✓。
+/// 默认 `10` 与参考实现同值（`standalone.ts:185/213`：「提前多少毫秒发起兑换（默认 10）」✓），
+/// 而它现在是**可输入项**（任务参数 `offset`）。
+pub fn plan_exchange_wait_with(now_ms: i64, lead_ms: i64) -> ExchangeWait {
     // `rem_euclid` 而不是 `%`：负数时间戳下 `%` 会给出负的余数，
     // 于是"整点"会被算到未来的一小时上。本仓 `now_ms` 恒为正，
     // 但这里不该让一个对负输入才错的写法留在判定层里。
@@ -658,9 +680,52 @@ pub fn plan_exchange_wait(now_ms: i64) -> ExchangeWait {
             until_ms: 0,
         };
     }
+    // ⚠ 目标 = 下一个整点**减提前量**（TS 的 `offset`，默认 10ms）。
+    let until_ms = hour + 3_600_000 - lead_ms;
+    // ⚠ 离整点只剩不到一个提前量时，上面会算出**过去**的时刻 —— 那时不该"等"，
+    // 直接发。TS 那边靠 `if (hourMs > 0)` 兜住同一件事（`standalone.ts:170`）。
+    if until_ms <= now_ms {
+        return ExchangeWait {
+            needed: false,
+            until_ms: 0,
+        };
+    }
     ExchangeWait {
         needed: true,
-        until_ms: hour + 3_600_000,
+        until_ms,
+    }
+}
+
+/// 兑换窗口开始的**秒**：TS `tasks/exchange/utils.ts:8` 的 `PREHEAT_SECOND = 40`
+/// ⇒ 窗口在 **hh:59:40** 打开。
+pub const EXCHANGE_WINDOW_SECOND: i64 = 40;
+
+/// 整点后**这么久之内**仍算"在窗口里"：TS `utils.ts:60` 的 `endMs = 15 * 1000`。
+pub const EXCHANGE_WINDOW_TAIL_MS: i64 = 15_000;
+
+/// 要等到 **hh:59:40**（兑换窗口打开）还有多少毫秒；**已经在窗口里 ⇒ 0**。
+///
+/// 依据 `mcloud-sign`（能跑的 TS）`tasks/exchange/utils.ts:57-65` 的
+/// `getMsToNextExchangeTime`，逐条照抄它的两个边界：
+///
+/// 1. `nowMs >= 59:40` ⇒ `0`（窗口已经开了，不用等）
+/// 2. `nowMs < 整点后 15 秒` ⇒ `0`（**上一场的尾巴**：整点刚过那一小会儿仍算在窗口里）
+///
+/// ⚠ 与 [`plan_exchange_wait`] 是**两段不同的等待**，TS 里也是两个函数：
+/// 这一段把时间带到"窗口开头"（在那里预热），后面那一段再压着整点发单。
+pub fn plan_exchange_window_wait(now_ms: i64) -> ExchangeWait {
+    // `rem_euclid` 的理由同 [`plan_exchange_wait`]：负数时间戳下 `%` 会给出负余数。
+    let into_hour = now_ms.rem_euclid(3_600_000);
+    let start_ms = 59 * 60_000 + EXCHANGE_WINDOW_SECOND * 1_000;
+    if into_hour >= start_ms || into_hour < EXCHANGE_WINDOW_TAIL_MS {
+        return ExchangeWait {
+            needed: false,
+            until_ms: 0,
+        };
+    }
+    ExchangeWait {
+        needed: true,
+        until_ms: now_ms - into_hour + start_ms,
     }
 }
 
@@ -1006,6 +1071,52 @@ async fn fetch_puzzle(env: &ExchangeEnv<'_>) -> Result<SlidePuzzle> {
     exchange::parse_slide_puzzle(&parsed)
 }
 
+/// 兑换前的"预热埋点"：报一次访问日志，再等 **500ms**。
+///
+/// # 依据（`mcloud-sign`，能跑的 TS）
+///
+/// `tasks/exchange/task.ts:86-87`：
+///
+/// ```text
+/// await reportVisitLog(http, "newsignin_index_to_exchange");
+/// await sleep(PREHEAT_DELAY);            // = 500，定义在 tasks/exchange/utils.ts:7
+/// ```
+///
+/// ⇒ **每趟只发一次**，位置在下单之前（所以调用点挂在 `round == 1` 那个分支里，
+/// 而不是挂在 [`submit_exchange`] 里 —— 挂在后者会让每次重试都多等 500ms）。
+async fn preheat(env: &ExchangeEnv<'_>) -> Result<()> {
+    let resp = env
+        .http
+        .request(exchange::report_visit_log_request(
+            exchange::VISIT_LOG_KEYWORD_EXCHANGE,
+            exchange::VISIT_LOG_MARKET_NAME_DEFAULT,
+        ))
+        .await?;
+    // ⚠ 它只是埋点：**失败不挡路**（下次重试会重判，不该因为一次埋点失败就放弃这趟）。
+    if let Err(e) = mcloud_upstream::session::ensure_http_ok(&resp, "兑换预热埋点") {
+        tracing::warn!(error = %e, "兑换预热埋点失败，继续往下走");
+    }
+    // TODO(todo): 这一步的 500ms 是 TS 的常量；若日后发现服务端并不需要，
+    // 应有实拍依据再改，而不是"看着多余"就删。
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // ⚠ **两枪，中间夹着 500ms** —— 顺序是契约（`task.ts:86-88`）：
+    //   第一枪 `newsignin_index_to_exchange` → sleep(500) → 第二枪 `…_exchange_times`。
+    // 少一枪就不是"同一个客户端"的预热序列了。
+    let resp = env
+        .http
+        .request(exchange::report_visit_log_request(
+            exchange::VISIT_LOG_KEYWORD_EXCHANGE_TIMES,
+            exchange::VISIT_LOG_MARKET_NAME_DEFAULT,
+        ))
+        .await?;
+    if let Err(e) = mcloud_upstream::session::ensure_http_ok(&resp, "兑换预热埋点（第二枪）")
+    {
+        tracing::warn!(error = %e, "兑换预热埋点（第二枪）失败，继续往下走");
+    }
+    Ok(())
+}
+
 /// 发一枪 `exchangeV3`（**真扣豆**）。
 async fn submit_exchange(
     env: &ExchangeEnv<'_>,
@@ -1050,6 +1161,18 @@ pub struct ExchangeOptions<'a> {
     /// ⚠ "整点"是参考实现抢兑那一场的时序取向，**不是**上游的硬条件 ——
     /// 我们自己的成功兑换发生在 `12:16`。默认 `true`。
     pub skip_wait: bool,
+    /// **传输延迟补偿**（毫秒，默认 10）：提前这么久发出，让请求正好在整点抵达云端。
+    ///
+    /// 用户口径 2026-10-02：「10ms 是本地与云端的传输时间差」✓。它现在是可输入项，
+    /// 缺省值就是参考实现的 10（`standalone.ts:185/213`）。⚠ 只影响"提前多少"，
+    /// 不改变"等到整点"这件事本身。
+    pub offset_ms: i64,
+    /// **强制发单**（用户口径 2026-10-02）：本地看着不能兑也照样发下单请求。
+    ///
+    /// 「所有档都放行」——抢光、未开始、已兑过，一律不再由本地挡下，交给上游回码。
+    /// ⚠ 会让"点了没反应"变成"点了真发请求"，代价是**可能真扣豆**；
+    /// 所以它是个**开关**（默认 `false`，与"下单前再确认一次"同款做法），不是默认行为。
+    pub force: bool,
     /// 换 `deviceId` 的注入点；`None` ⇒ **一枪不发**（见 [`ExchangeEnv`]）。
     pub device_id: Option<&'a DeviceIdFn<'a>>,
     /// "等到某个时刻"的注入点；`None` ⇒ `skip_wait == false` 时**如实挡下**。
@@ -1082,14 +1205,14 @@ pub struct ExchangeOptions<'a> {
 /// ```text
 /// 1  GET  exchangeList   清单：limit 与三个余量、价格（只读）
 /// 2  GET  infoV3         余额（判"够不够"，也是成交后的对照基准）
-/// 3  ← 换 deviceId（注入点；这一步会**上报设备指纹**）
-/// 4  POST getSlide       取滑块题面（每次下单前现取）
-/// 5  POST exchangeV3     下单
-/// 6  GET  infoV3         复查余额（判据链第 2 条）
-/// ```
-///
-/// 实拍四条 `exchangeV3` 每一条前面都紧跟一条 `getSlide`，所以 4、5 是
-/// **成对**的：`514` 重来 = 再取一题 + 再下一单，而不是拿旧 offset 重发。
+/// 2.5 ← 换 deviceId（注入点）：**现在由路由从请求体带进来**
+///       （`SmidService::device_id`，见 [`ExchangeTask`] 说明）
+/// 3  POST visitlog ×2    **预热**：`…_to_exchange` → `sleep(500ms)` → `…_exchange_times`
+///        ⚠ 位置：**等到 hh:59:40 → 预热 → 等到整点−offset → 下单**
+///       （与参考实现 `standalone.ts:143-171` 同序；窗口等待是
+///       [`plan_exchange_window_wait`]，带边界测试）。
+///       ⚠ 顺序还有个前提：`deviceId` 在**两段等待之前**就取好并检查 ——
+///       否则拿不到 id 时会先白等（`skipWait=false` 最长一小时）再白打两枪。
 pub async fn exchange(
     env: &ExchangeEnv<'_>,
     now_ms: i64,
@@ -1107,12 +1230,49 @@ pub async fn exchange(
         balance: judge.balance,
         ..ExchangeOutcome::default()
     };
-    if judge.plan.blocks() {
+    if !opts.force && judge.plan.blocks() {
         return Ok(skipped(&judge, outcome));
     }
 
+    // 下单体里那个 `deviceId` 键必须有值：实拍四条每一条都带了非空值。
+    // ⚠ "少了它会回什么码"**没有样本** ⇒ 不猜，直接不发。
+    let Some(device_id_fn) = opts.device_id else {
+        outcome.device_id_failed = "这一趟没接上 deviceId 来源（下单硬需要它，一枪都没发）".into();
+        return Ok(skipped(&judge, outcome));
+    };
+    // ⚠⚠ `deviceId` **在等待之前**就取好（2026-10-02 用户口径：「deviceid 应该提前获取」）。
+    // 原先它在两段等待之后 ⇒ 拿不到 id 时会先白等（`skipWait=false` 最长一小时）
+    // 再白打两枪预热，最后才说"没有 deviceId" —— 那三条都是白费的。
+    // 判定（`plan.blocks()`）仍排在它前面：判据没过就不该碰设备指纹。
+    // ── 第一段等待：**先等到 hh:59:40**（兑换窗口打开）───────────────────────
+    // 依据 TS `standalone.ts:143-149` 的 `getMsToNextExchangeTime`。目标时刻由纯函数
+    // [`plan_exchange_window_wait`] 算；两条"不等"的边界（已在窗口里 / 整点后 15 秒内
+    // 的**上一场尾巴**）都在那个函数里，有边界测试。
     if !opts.skip_wait {
-        let wait = plan_exchange_wait(now_ms);
+        // ⚠ 用**入参**那个 `now_ms`（这一趟的时刻），与下面整点等待同一个口径 ——
+        // 别去读 `env.clock`：那是"现在几点"，在有等待的链上它与入参已经不同了
+        // （实测：读它会把窗口等待算到**下一小时**的 59:40，多等一小时）。
+        let window = plan_exchange_window_wait(now_ms);
+        if window.needed {
+            let Some(sleep) = opts.wait else {
+                return Ok(set_error(
+                    skipped(&judge, outcome),
+                    "skipWait=false 但这一趟没接上等待实现（不静默跳过等待，本次没发请求）".into(),
+                ));
+            };
+            if let Err(e) = sleep(window.until_ms) {
+                return Ok(set_error(skipped(&judge, outcome), e.to_string()));
+            }
+        }
+    }
+
+    // ── 预热：**夹在两段等待之间**，这是 TS 的顺序（`standalone.ts:150-171`）──
+    // 等到窗口开了就报访问日志两枪，再压着整点发单；放在循环里会变成"发单前才预热"，
+    // 那正是窗口那一段等待存在的意义（让服务端看到"这个人已经在兑换页"）。
+    preheat(env).await?;
+
+    if !opts.skip_wait {
+        let wait = plan_exchange_wait_with(now_ms, opts.offset_ms);
         if wait.needed {
             outcome.waited_until_ms = Some(wait.until_ms);
             // ⚠ 没接上等待实现 ⇒ **如实挡下**，绝不"静默不等待"往下走：
@@ -1136,18 +1296,12 @@ pub async fn exchange(
             outcome.plan = judge.plan;
             outcome.prize = judge.prize.clone();
             outcome.balance = judge.balance;
-            if judge.plan.blocks() {
+            if !opts.force && judge.plan.blocks() {
                 return Ok(skipped(&judge, outcome));
             }
         }
     }
 
-    // 下单体里那个 `deviceId` 键必须有值：实拍四条每一条都带了非空值。
-    // ⚠ "少了它会回什么码"**没有样本** ⇒ 不猜，直接不发。
-    let Some(device_id_fn) = opts.device_id else {
-        outcome.device_id_failed = "这一趟没接上 deviceId 来源（下单硬需要它，一枪都没发）".into();
-        return Ok(skipped(&judge, outcome));
-    };
     let device_id = match device_id_fn() {
         Ok(id) => id,
         Err(e) => {
@@ -1403,11 +1557,22 @@ impl ExchangeResult {
                 line.push_str("，需要去 App 核对余额与待领取奖品");
                 line
             }
-            ExchangeStatus::Failed => format!(
-                "兑换失败：上游回 {}「{}」",
-                outcome.code,
-                or_upstream(&outcome.message, "没给原因")
-            ),
+            ExchangeStatus::Failed => {
+                let mut line = format!(
+                    "兑换失败：上游回 {}「{}」",
+                    outcome.code,
+                    or_upstream(&outcome.message, "没给原因")
+                );
+                // ⚠ 用户口径 2026-10-02：撞上这种"活动异常"兜底档时，**让用户手动去兑换页
+                // 打开一次**再回来重试 —— 那一趟会替这个账号把活动页那套会话/预热状态建起来，
+                // 光走接口常常建不起来（实测就是 `610` + `Error Code：GK`）。
+                if outcome.code == mcloud_upstream::exchange::CODE_GENERIC {
+                    line.push_str(
+                        "；⚠ 请先手动打开一次兑换页面（在 App 或 H5 里进一次兑换页）再回来重试",
+                    );
+                }
+                line
+            }
             ExchangeStatus::NotAttempted => format!("兑换没判成{}", tail(&outcome.error)),
         }
     }
@@ -1469,6 +1634,18 @@ pub struct ExchangeRun<'a> {
     pub prize: &'a str,
     /// 与参数面同名：`false` ⇒ 先等到整点再判一次。
     pub skip_wait: bool,
+    /// **传输延迟补偿**（毫秒，默认 10）：提前这么久发出，让请求正好在整点抵达云端。
+    ///
+    /// 用户口径 2026-10-02：「10ms 是本地与云端的传输时间差」✓。它现在是可输入项，
+    /// 缺省值就是参考实现的 10（`standalone.ts:185/213`）。⚠ 只影响"提前多少"，
+    /// 不改变"等到整点"这件事本身。
+    pub offset_ms: i64,
+    /// **强制发单**（用户口径 2026-10-02）：本地看着不能兑也照样发下单请求。
+    ///
+    /// 「所有档都放行」——抢光、未开始、已兑过，一律不再由本地挡下，交给上游回码。
+    /// ⚠ 会让"点了没反应"变成"点了真发请求"，代价是**可能真扣豆**；
+    /// 所以它是个**开关**（默认 `false`，与"下单前再确认一次"同款做法），不是默认行为。
+    pub force: bool,
     /// 换 `deviceId` 的注入点。
     pub device_id: Option<&'a DeviceIdFn<'a>>,
     /// 等待实现。
@@ -1485,6 +1662,8 @@ impl ExchangeRun<'_> {
         let opts = ExchangeOptions {
             prize: self.prize,
             skip_wait: self.skip_wait,
+            force: self.force,
+            offset_ms: self.offset_ms,
             device_id: self.device_id,
             wait: self.wait,
         };
@@ -1505,7 +1684,7 @@ impl ExchangeRun<'_> {
 /// | 参数 | 必填 | 说明 |
 /// |---|---|---|
 /// | `prizeIdOrName` | ✅ | 纯数字按 prizeId，其余按商品名**精确**找 |
-/// | `skipWait` | | `false` ⇒ 先等到下一个整点再判一次（默认 `true`） |
+/// | `skipWait` | | `false` ⇒ 先等到下一个整点再判一次（**默认 `false`**，与 TS 一致；路由那层另有"缺省不等"的 UX 取舍，见 `routes/exchange.rs` 的 `default_skip_wait`）|
 ///
 /// # ⚠ `deviceId` 这条缺口必须说清（本任务目前**不能**单独跑通）
 ///
@@ -1523,28 +1702,38 @@ impl ExchangeRun<'_> {
 /// 接线方式（留给组装层）：把 `DeviceIdFn` 从 `mcloud_app` 那层注入进来
 /// （`mcloud_app` 已经依赖 `mcloud-tasks`，方向是对的）。
 ///
-/// # 当前**不**注册进 `register_all`（⇒ `/api/capabilities` 里也没有它）
+/// # 2026-10-02 起**已注册**进 `register_all`（⇒ `/api/capabilities` 里也有它）
 ///
-/// 未注册：缺 `device_id` 来源 + 缺 `visitlog` 预热 + 等待档与 TS 不一致，
-/// 补齐后才应放出来。三条缺口分别是：
+/// 曾经摘掉注册的三条理由**都已补齐**（下面对每一条都写清"现在接在哪"）：
+/// 留着它们是因为——这一族与"领"那一族性质不同（**花**、且不可逆），
+/// 读的人需要知道"当初为什么宁可不给入口"。
 ///
-/// 1. **缺 `device_id` 来源**（上面那段）：注不进它就永远走 `Skipped`，
-///    用户点了什么都不会发生。接线要等 `mcloud_app` 那层把
-///    "上报设备指纹换 id"做成 `DeviceIdFn` 注进来。
-/// 2. **缺 `reportVisitLog` 预热两枪**：参考实现
-///    （`exchange/task.ts:84-100`、`utils.ts:7`）在下单前先上报访问日志；
-///    本仓没接。那两枪的判据在手头样本里不足 —— 不猜（`AGENTS.md` 的
-///    依据优先级：真写不了的分支留空并注明原因）。
-/// 3. **等待档与 TS 不一致**：参考实现默认 `skipWait=false` 且等到
-///    `hh:59:40`；本仓默认 `skipWait=true` 只等到整点
-///    （见 `plan_exchange_wait` 与 `ExchangeTask::run` 里那句
-///    `unwrap_or(true)`）。
+/// 1. ~~缺 `device_id` 来源~~ **已接**（2026-10-02）：`deviceId` 走**请求体**
+///    （`body.deviceId`）⇒ 链上包成一个常量 `DeviceIdFn`。
+///    ⚠ 取 id 的动作在**路由那层**（它手里才有 app state）：调
+///    `mcloud_app::smid::device_id`（**不是** `report_device_id`）。
+///    两者的分工在 `smid.rs` 的文档里写着：`device_id` = "这个账号**现在能用**的
+///    `deviceid`，库里有就直接返回（不打网络），没有才换一次 ⇒ **业务请求该调的是它**"；
+///    而 `report_device_id` 是"**每次都真的打上游**"的换 id 那条路（刚换过指纹、
+///    或上游判定该 id 作废时才用）。⚠ 别为了"更保险"每单都重报 —— 那是白流量。
+/// 2. ~~缺 `reportVisitLog` 预热两枪~~ **已接**（2026-10-02）：`preheat()` 按
+///    参考实现的**顺序**发两枪 —— `newsignin_index_to_exchange`
+///    → `sleep(500ms)` → `newsignin_index_exchange_times`（`task.ts:85-88`、
+///    `utils.ts:7`），每趟**只发一次**、位置在第一次下单之前。
+///    ⚠ 参考实现那次预热里还夹着"取滑块、算不出就用偏移量 `0` 兜底"，**本仓不跟**：
+///    拿真豆去赌一个未验证的偏移量不是"照 TS 写"能解释的（见 `submit_exchange` 旁那段）。
+/// 3. ~~等待档与 TS 不一致~~ **已对齐**（2026-10-02）：任务层缺省 `skipWait=false`
+///    （`standalone.ts:214` 同款）⇒ 先等到 **hh:59:40** 预热
+///    （[`plan_exchange_window_wait`]，含"上一场尾巴"两条边界），再等到
+///    **整点 − 10ms** 发单（[`plan_exchange_wait`] + [`EXCHANGE_LEAD_MS`]）。
+///    ⚠ **用户点按钮那条路不等**（用户口径：「用户点按钮就不用等」）——
+///    路由的 `default_skip_wait` 是 `true`，前端每次都显式传，两处不冲突。
 ///
 /// 在这三条补齐之前，本任务**可以被直接调用**（判定层与编排层能跑、能测，
 /// 缺 `deviceId` 时如实回 `device_id_failed`），但**不**应对外宣称可用：
 /// 一个"点了永远什么都不会发生"的入口比没有入口更坏。
 /// `lib.rs` 的 `register_all` 里登记了这件事，
-/// 哨兵是 `tests::register_all_does_not_expose_exchange`。
+/// 哨兵是**正向**的 `tests::register_all_exposes_exchange`（谁把注册摘掉它就红）。
 pub struct ExchangeTask;
 
 #[async_trait]
@@ -1564,7 +1753,22 @@ impl Task for ExchangeTask {
     fn params(&self) -> Vec<ParamSpec> {
         vec![
             ParamSpec::text("prizeIdOrName", "奖品", "奖品 id 或名字；下单会真扣AI豆"),
-            ParamSpec::boolean("skipWait", "跳过等待", true, "不等冷却/档位窗口，直接下单"),
+            ParamSpec::boolean("skipWait", "跳过等待", false, "不等冷却/档位窗口，直接下单"),
+            ParamSpec::number(
+                "offset",
+                "传输延迟补偿（毫秒）",
+                10.0,
+                0.0,
+                1000.0,
+                "毫秒",
+                "提前这么久发出，让请求正好在整点抵达云端（本地与云端的传输时间差）",
+            ),
+            ParamSpec::boolean(
+                "force",
+                "强制发单",
+                false,
+                "本地判成不能兑（抢光/未开始/已兑过）也照样发下单请求；可能真扣豆",
+            ),
         ]
     }
 
@@ -1580,13 +1784,49 @@ impl Task for ExchangeTask {
         let skip_wait = body
             .get("skipWait")
             .and_then(Value::as_bool)
-            .unwrap_or(true);
+            // ⚠ 缺省**等**（`false`）—— 与 TS 一致（`standalone.ts:214` 的默认参数）。
+            // 路由那层另有"缺省不等"的 UX 取舍（`routes/exchange.rs::default_skip_wait`），
+            // 它每次都会**显式**传这个字段，所以两处不冲突。
+            .unwrap_or(false);
+
+        // `deviceId` 从**请求体**来（方案 c：不给 `TaskContext` 加字段，见 [`ExchangeTask`]
+        // 说明）。⚠ 只在**下单前**才用它 —— 只读路径（路由里那个 list 接口）压根不经过这里。
+        let device_id = body
+            .get("deviceId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        // 链上要的是"取一个 deviceId"的闭包；这里值已经取好，所以是个**常量闭包** ——
+        // 链上"没有它就一枪不发"那条安全阀（`device_id_failed`）保持原样。
+        // ⚠ 用 `Box<dyn …>` 而不是 `as DeviceIdFn<'_>`：后者是"转成 unsized 类型"，
+        // Rust 不允许（E0620）；闭包要变成 trait 对象，必须经由一个**有所有权的**中间值。
+        let device_fn: Option<Box<DeviceIdFn<'_>>> = device_id.as_ref().map(|id| {
+            let id = id.clone();
+            Box::new(move || Ok(id.clone())) as Box<DeviceIdFn<'_>>
+        });
+
+        // 本地判定是否被"强制发单"开关放行（用户口径：所有档都放行）。
+        let force = body.get("force").and_then(Value::as_bool).unwrap_or(false);
+        // 传输延迟补偿（毫秒）：缺省 = 参考实现那个 10。
+        // ⚠ 数字**和数字字符串**都收：界面 `<input>` 过来的是字符串，
+        // 只认 `as_i64` 会**默默回落到默认值** ✗（今天在别处刚踩过这种"看着有、实际没生效"）。
+        let offset_ms = body
+            .get("offset")
+            .and_then(|v| {
+                v.as_i64().or_else(|| {
+                    v.as_str()
+                        .and_then(|t| t.trim().parse::<f64>().ok())
+                        .map(|f| f.round() as i64)
+                })
+            })
+            .filter(|ms| (0..=60_000).contains(ms))
+            .unwrap_or(EXCHANGE_LEAD_MS);
 
         let env = ExchangeEnv {
             http: ctx.http.as_ref(),
             clock: ctx.clock.as_ref(),
-            // 见 [`ExchangeTask`] 那段缺口说明：这里刻意**不**编一个 deviceId。
-            device_id: None,
+            device_id: device_fn.as_deref(),
         };
         ctx.check_cancelled()?;
         // ⚠ 这里**不用 `?`**：`Ok` 与 `Err` 两种都要自报结构化明细。
@@ -1599,7 +1839,9 @@ impl Task for ExchangeTask {
         let ran = ExchangeRun {
             prize: &prize,
             skip_wait,
-            device_id: None,
+            force,
+            offset_ms,
+            device_id: device_fn.as_deref(),
             wait: None,
         }
         .run_account(&env, ctx.clock.now_ms())

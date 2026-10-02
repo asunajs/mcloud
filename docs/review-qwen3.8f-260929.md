@@ -143,7 +143,7 @@
 
 **调度语义**（核过，符合注释）：只接受 `FixedOffset`、坏时区显式报错；过期窗口整体弃掉不逐点补跑（`GRACE_MS=60s`，"宁可漏跑不可重跑"）；定时器与手动共用 `task:account` 闸、忙则**跳过不排队**；`start()` 在 spawn **之前**同步注册取消 token（`runner.rs:89-117`）+ `routes/runs.rs:173-175` 三源存在性检查 ⇒ SSE 404/重连竞态**已闭环**。
 
-**任务盘点（18 个，`lib.rs:63-88` ★ 与文档"18 条"对得上）**：只读 2（`cloud-snapshot`、`task-list`）；可逆 12（`sign`/`receive`/`multiple`/`backup-gift`/`revival`/`prizes`/`live-room`/`msg-push`/`fun-ai`/`notice`/`play-ai`/`task-expansion`）；**不可逆 4**（`red-flower` 消耗抽奖次数——**只有它有 dryRun**；`exchange`；`app-task`；`app-task-matrix`）。
+**任务盘点（18 个，`lib.rs:63-88` ★ 与文档"18 条"对得上）**：只读 2（`cloud-snapshot`、`task-list`）；可逆 12（`sign`/`receive`/`multiple`/`backup-gift`/`revival`/`prizes`/`live-room`/`msg-push`/`fun-ai`/`notice`/`play-ai`/`task-expansion`）；**不可逆 4**（`red-flower`、`exchange`、`app-task`、`app-task-matrix`）。⚠ 2026-10-02 更正：本行原写"`red-flower` 消耗抽奖次数——**只有它有 dryRun**"，两处都不对 —— ① 代码里的 `red-flower` 是「**领取**小红花（用给定口令逐个领）」，不是抽奖；② `dryRun` 当时**不止它有**（签到也有一条）。`dryRun` 一族已于 2026-10-02 全部删除：它们是"把无害动作当风险动作"的产物，伪需求，且其安全感是假的（只查状态、不真做，跑完仍不知能不能成）。。
 
 ### 3.3 服务端 / CLI / 安全面
 

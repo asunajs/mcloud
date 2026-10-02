@@ -20,7 +20,9 @@
  */
 
 import { onMounted, ref } from 'lite'
-import { getTaskConfig, putTaskConfig, type TaskConfigView, type TaskParamSpec } from '../api'
+import { getTaskConfig, putTaskConfig, type TaskConfigView } from '../api'
+// ⚠ 参数控件与**编排页**共用一份（`ui/param-field.tsx`）—— 两处各写一份迟早分叉。
+import { ParamField } from '../ui/param-field'
 import { pushToast } from '../ui/toast'
 import { IconClose } from '../ui/icons'
 
@@ -56,62 +58,7 @@ export const TaskConfigPage = (props: TaskConfigPageProps) => {
 
   onMounted(() => void load())
 
-  /** 单个参数的控件。三种类型，就三种 —— 后端 `ParamKind` 也只有三种。 */
-  const field = (spec: TaskParamSpec) => {
-    const set = (v: unknown) => {
-      values.value = { ...values.value, [spec.name]: v }
-    }
-    const cur = values.value[spec.name]
-    return (
-      <fieldset class="fieldset min-w-0">
-        <legend class="fieldset-legend">
-          {spec.title}
-          <span class="ml-1 font-mono text-xs opacity-40">{spec.name}</span>
-        </legend>
 
-        {spec.kind === 'bool' ? (
-          <label class="flex min-h-11 cursor-pointer items-center gap-3">
-            <input
-              type="checkbox"
-              class="toggle"
-              checked={cur === true}
-              onChange={(e) => set((e.target as HTMLInputElement).checked)}
-            />
-            <span class="text-sm opacity-70">{cur === true ? '开' : '关'}</span>
-          </label>
-        ) : spec.kind === 'number' ? (
-          <label class="input flex min-w-0 items-center gap-2">
-            <input
-              type="number"
-              class="grow"
-              min={spec.min !== undefined ? String(spec.min) : undefined}
-              max={spec.max !== undefined ? String(spec.max) : undefined}
-              value={cur === undefined || cur === null ? '' : String(cur)}
-              onInput={(e) => {
-                const raw = (e.target as HTMLInputElement).value
-                set(raw === '' ? null : Number(raw))
-              }}
-            />
-            {spec.unit ? <span class="text-xs opacity-50">{spec.unit}</span> : null}
-          </label>
-        ) : (
-          <textarea
-            class="textarea w-full min-w-0"
-            rows={3}
-            value={typeof cur === 'string' ? cur : ''}
-            onInput={(e) => set((e.target as HTMLTextAreaElement).value)}
-          />
-        )}
-
-        {spec.help ? <p class="text-xs opacity-60">{spec.help}</p> : null}
-        {spec.kind === 'number' && (spec.min !== undefined || spec.max !== undefined) ? (
-          <p class="text-xs opacity-40">
-            范围 {spec.min ?? '-'} ~ {spec.max ?? '-'}
-          </p>
-        ) : null}
-      </fieldset>
-    )
-  }
 
   const save = async () => {
     saving.value = true
@@ -191,7 +138,13 @@ export const TaskConfigPage = (props: TaskConfigPageProps) => {
               <div class="grid min-w-0 gap-4 md:grid-cols-2">
                 {(view.value?.specs ?? []).map((s) => (
                   <div key={s.name} class="min-w-0">
-                    {field(s)}
+                    <ParamField
+                      spec={s}
+                      value={values.value[s.name]}
+                      onInput={(v) => {
+                        values.value = { ...values.value, [s.name]: v }
+                      }}
+                    />
                   </div>
                 ))}
               </div>

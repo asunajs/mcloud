@@ -16,7 +16,7 @@
  */
 
 import { DEV } from './dev'
-import { type Effect, newEffect } from './signal'
+import { type Effect, newEffect, ownedEffects } from './signal'
 
 /** 渲染结果统一成节点数组：**不引入任何包装元素**，所以 CSS 选择器与布局与原来逐像素一致。 */
 export type Nodes = Node[]
@@ -113,7 +113,17 @@ function disposeTree(node: Node): void {
     cleanups.delete(node)
     for (const cb of unmounts) cb()
   }
-  for (const child of node.childNodes) disposeTree(child)
+  /**
+   * ⚠⚠ 递归前**先把孩子快照下来**（`Array.from`）。
+   *
+   * `node.childNodes` 是**活的** NodeList，而这一轮里会跑用户的 `onUnmounted` 钩子
+   * （上面那段 ✓）—— 那些钩子**会改 DOM**（除了 `clearInterval`，也常见 `el.remove()`、
+   * 关弹窗、换容器内容）。边遍历边被改的活列表会**跳过**节点 ⇒ 被跳过的那棵子树
+   * 既不销毁 effect、也不跑钩子 ✗（症状是"只有某一页/某一棵子树漏"✗，极难查）。
+   * 快照之后遍历的是固定数组，钩子怎么改都不影响这一轮的覆盖面 ✓。
+   */
+  const kids = Array.from(node.childNodes)
+  for (const child of kids) disposeTree(child)
 }
 
 /** 批量插入。`anchor` 为 null 即追加到末尾。 */
@@ -354,13 +364,30 @@ export function setNodes(parent: Node, fn: () => unknown, anchor: Node | null = 
       eff?.dispose()
       return
     }
-    const v = fn()
+    /**
+     * ⚠⚠ `fn()` 里建的 effect 必须有归属 —— 这是 2026-10-02 内存泄漏的**第二处**
+     * （第一处是 `component.ts` 的组件体，第三处是 `control.ts` 的列表行）。
+     *
+     * `fn()` 里的 JSX 会建**公开 `effect()`**（动态属性全是它，见 `compiler.ts` 的
+     * `case 'attr'` ✓），而这里是 `newEffect()` 的求值上下文（`scope` 为空 ✗）
+     * ⇒ 那些 effect **谁都不管**：`remove(cur)` 只摘 DOM、不销毁它们 ✗。
+     *
+     * 实测症状（就是它把用户那条"切页后内存累计"顶住的）：**导航栏 9 项 + 底部 dock 5 项**
+     * 是用 `setNodes(parent, () => items.map(…))` 铺的 ✓（不是 `createFor` ✗）⇒
+     * 每切一次页就重建一遍、旧的永不销毁 ⇒ 每次 +28 个 effect / +465 个节点，
+     * 而它们读的正是模块级的"当前页"信号（长命 ⇒ 攥着 effect ⇒ effect 攥着脱离文档的 DOM ✗）。
+     */
+    const effs: Effect[] = []
+    const v = ownedEffects((e) => effs.push(e), fn)
     /**
      * 文本快路径（Solid 的 `insertExpression` 同款）：值还是字符串、且位置上就是
      * 我们上次放的那个文本节点时，直接改 `.data`，不删不建。
      * 文本更新是最高频的绑定（改一个计数、刷一条日志），这条省下的是真实的 DOM 操作。
      */
     if (typeof v === 'string' || typeof v === 'number') {
+      // 文本值建不出 effect（`fn()` 返回的就是个字符串 ✓）。真有，也只能销毁 ——
+      // 没有节点可挂，留着就是永久泄漏 ✗。
+      for (const e of effs) e.dispose()
       const only = cur[0]
       if (cur.length === 1 && only && only.nodeType === 3) {
         const t = String(v)
@@ -380,6 +407,14 @@ export function setNodes(parent: Node, fn: () => unknown, anchor: Node | null = 
     remove(cur)
     cur = createNodes(v)
     insert(parent, cur, anchor)
+    /**
+     * 归属：把这一段里建的 effect 挂到**新铺进去的节点**下 ✓ ——
+     * 下次重跑时的 `remove(cur)`（→ `disposeTree`）会把它们一起销毁 ✓。
+     * 渲染成空（`null` / `false`）⇒ 没有可挂的节点 ⇒ 直接销毁（留着就是永久泄漏 ✗）。
+     */
+    const first = cur[0]
+    if (first) for (const e of effs) own(first, e)
+    else for (const e of effs) e.dispose()
     if (track) track.nodes = cur
   })
   // 归属登记：`parent` 被移除时这个 effect 一起销毁（否则它会带着死锚点继续重跑）

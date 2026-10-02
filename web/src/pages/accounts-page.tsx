@@ -47,6 +47,7 @@ import { EmptyState } from '../ui/empty-state'
 import { ConfirmDialog, Dialog, closeDialog, openDialog } from '../ui/dialog'
 import { showError } from '../ui/error-dialog'
 import { pushToast } from '../ui/toast'
+import { Select } from '../ui/select'
 
 type LoadState = 'loading' | 'error' | 'ready'
 type Method = 'qr' | 'sms' | 'app' | 'password' | 'auth'
@@ -128,6 +129,17 @@ const CHANNEL_NUMERIC: Partial<Record<NotifyChannelKey, readonly string[]>> = {
   tgBot: ['chat_id'],
   email: ['port'],
 }
+
+/**
+ * 账号设置弹窗里那两块（**功能开关** / **运行结果推送**）暂时**不显示**。
+ *
+ * 用户口径（2026-10-02）：「这些设置先取消显示，设置后面单独弄」。
+ *
+ * ⚠ 代码**原样留着**：里面是上游字段、取值范围与校验（重做那一版时有依据 ✓），
+ * 只是**不渲染** ⇒ 要让它回来，把这里改成 `true` 就行 ✓。
+ * ⚠ **别删代码** ✗ —— 用户说的是"先取消显示"，不是"不要了"。
+ */
+const SHOW_ACCOUNT_SETTINGS_BLOCKS = false
 
 /** 每个渠道一句话说明（配在哪、有什么坑）。 */
 const CHANNEL_HINT: Record<NotifyChannelKey, string> = {
@@ -1487,17 +1499,14 @@ export const AccountsPage = () => {
 
       <fieldset class="fieldset">
         <legend class="fieldset-legend">最低日志级别</legend>
-        <select
-          class="select w-full"
+        <Select
+          id="push-min-level"
+          class="w-full"
+          ariaLabel="最低日志级别"
           value={fMinLevel.value}
-          onChange={(e) => (fMinLevel.value = (e.target as HTMLSelectElement).value as PushLogLevel)}
-        >
-          {MIN_LEVELS.map((lv) => (
-            <option key={lv.value} value={lv.value}>
-              {lv.label}
-            </option>
-          ))}
-        </select>
+          options={MIN_LEVELS.map((lv) => ({ value: lv.value, label: lv.label }))}
+          onChange={(v) => (fMinLevel.value = v as PushLogLevel)}
+        />
         <p class="text-xs leading-5 opacity-60">级别越小越严重：error 只留错误，debug 全留。</p>
       </fieldset>
 
@@ -1583,57 +1592,65 @@ export const AccountsPage = () => {
         )}
       </div>
 
-      <div class="flex flex-col gap-2">
-        <h4 class="text-sm font-medium">功能开关</h4>
-        {switchField(
-          'AI 新头像',
-          () => fAiAvatar.value,
-          (v) => (fAiAvatar.value = v),
-          '打开后每天给账号换一批 AI 头像。',
-        )}
-        {textField(
-          'AI 头像每日上限（轮）',
-          () => fAiAvatarLimit.value,
-          (v) => (fAiAvatarLimit.value = v),
-          '范围 0–1000（后端上限）：每一轮都是一次上游调用。',
-          'number',
-        )}
-        {switchField(
-          '红包派对',
-          () => fRedpack.value,
-          (v) => (fRedpack.value = v),
-          '参与红包派对活动。',
-        )}
-        {switchField(
-          '春日拍拍大作战',
-          () => fPlayAi.value,
-          (v) => (fPlayAi.value = v),
-          '参与拍拍大作战活动。',
-        )}
-        {switchField(
-          '直播口令',
-          () => fKouling.value,
-          (v) => (fKouling.value = v),
-          '参与直播口令领小红花。',
-        )}
-      </div>
+      {/*
+        ⚠ 这两块**暂时不显示** —— 开关与理由见文件头那个 `SHOW_ACCOUNT_SETTINGS_BLOCKS` ✓。
+        包成 `<>` 是因为三元的分支只认"一个 JSX 元素或 null" ✓（lite 编译器的边界）。
+      */}
+      {SHOW_ACCOUNT_SETTINGS_BLOCKS ? (
+        <>
+        <div class="flex flex-col gap-2">
+          <h4 class="text-sm font-medium">功能开关</h4>
+          {switchField(
+            'AI 新头像',
+            () => fAiAvatar.value,
+            (v) => (fAiAvatar.value = v),
+            '打开后每天给账号换一批 AI 头像。',
+          )}
+          {textField(
+            'AI 头像每日上限（轮）',
+            () => fAiAvatarLimit.value,
+            (v) => (fAiAvatarLimit.value = v),
+            '范围 0–1000（后端上限）：每一轮都是一次上游调用。',
+            'number',
+          )}
+          {switchField(
+            '红包派对',
+            () => fRedpack.value,
+            (v) => (fRedpack.value = v),
+            '参与红包派对活动。',
+          )}
+          {switchField(
+            '春日拍拍大作战',
+            () => fPlayAi.value,
+            (v) => (fPlayAi.value = v),
+            '参与拍拍大作战活动。',
+          )}
+          {switchField(
+            '直播口令',
+            () => fKouling.value,
+            (v) => (fKouling.value = v),
+            '参与直播口令领小红花。',
+          )}
+        </div>
 
-      <div class="flex flex-col gap-2">
-        <h4 class="text-sm font-medium">运行结果推送</h4>
-        {switchField(
-          '启用推送',
-          () => fNotifyOn.value,
-          (v) => (fNotifyOn.value = v),
-          '关掉 = 这个账号一个渠道都不推（保存时 notify 写 null，会清掉下面的渠道配置）。本仓没有进程级兜底，每个账号各配各的。',
-        )}
-        {fNotifyOn.value ? (
-          notifyFields()
-        ) : (
-          <p class="text-xs leading-5 opacity-60">
-            当前不推送任何渠道。打开上面的开关才会出现渠道配置。
-          </p>
-        )}
-      </div>
+        <div class="flex flex-col gap-2">
+          <h4 class="text-sm font-medium">运行结果推送</h4>
+          {switchField(
+            '启用推送',
+            () => fNotifyOn.value,
+            (v) => (fNotifyOn.value = v),
+            '关掉 = 这个账号一个渠道都不推（保存时 notify 写 null，会清掉下面的渠道配置）。本仓没有进程级兜底，每个账号各配各的。',
+          )}
+          {fNotifyOn.value ? (
+            notifyFields()
+          ) : (
+            <p class="text-xs leading-5 opacity-60">
+              当前不推送任何渠道。打开上面的开关才会出现渠道配置。
+            </p>
+          )}
+        </div>
+        </>
+      ) : null}
 
       <div class="modal-action">
         <button type="button" class="btn btn-soft" onClick={() => closeDialog(SETTINGS_DIALOG)}>

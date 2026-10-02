@@ -1672,19 +1672,22 @@ async fn task_config_round_trip_and_validation() {
     // 且带上参数说明与默认值 —— 前端不必自己算默认
     let (s, body) = send(
         authed_app(Arc::clone(&handle)),
-        get("/api/tasks/sign/config"),
+        get("/api/tasks/live-room/config"),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{body}");
     let v = json_body(&body);
-    assert_eq!(v["name"], "sign");
-    assert_eq!(v["params"]["dryRun"], false, "缺省键要补成默认值：{body}");
+    assert_eq!(v["name"], "live-room");
+    assert_eq!(
+        v["params"]["skipKouling"], false,
+        "缺省键要补成默认值：{body}"
+    );
     assert!(
         v["specs"]
             .as_array()
             .expect("specs 是数组")
             .iter()
-            .any(|x| x["name"] == "dryRun" && x["kind"] == "bool"),
+            .any(|x| x["name"] == "skipKouling" && x["kind"] == "bool"),
         "参数说明要带上类型（前端照它画控件）：{body}"
     );
 
@@ -1692,27 +1695,31 @@ async fn task_config_round_trip_and_validation() {
     let (s, body) = send(
         authed_app(Arc::clone(&handle)),
         put_json(
-            "/api/tasks/sign/config",
-            &serde_json::json!({ "params": { "dryRun": true } }),
+            "/api/tasks/live-room/config",
+            &serde_json::json!({ "params": { "skipKouling": true } }),
         ),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{body}");
-    assert_eq!(json_body(&body)["params"]["dryRun"], true);
+    assert_eq!(json_body(&body)["params"]["skipKouling"], true);
 
     // 读回（落盘了，不是只回了显）
     let (_, body) = send(
         authed_app(Arc::clone(&handle)),
-        get("/api/tasks/sign/config"),
+        get("/api/tasks/live-room/config"),
     )
     .await;
-    assert_eq!(json_body(&body)["params"]["dryRun"], true, "存了必须读得回");
+    assert_eq!(
+        json_body(&body)["params"]["skipKouling"],
+        true,
+        "存了必须读得回"
+    );
 
     // 类型错 / 范围错 / 不认识的键 —— 一律 400，且话要能照着改
     let cases = [
         (
-            "/api/tasks/sign/config",
-            serde_json::json!({ "params": { "dryRun": "yes" } }),
+            "/api/tasks/live-room/config",
+            serde_json::json!({ "params": { "skipKouling": "yes" } }),
             "true / false",
         ),
         (
@@ -1721,7 +1728,7 @@ async fn task_config_round_trip_and_validation() {
             "超出范围",
         ),
         (
-            "/api/tasks/sign/config",
+            "/api/tasks/live-room/config",
             serde_json::json!({ "params": { "nope": 1 } }),
             "没有参数",
         ),
@@ -1743,7 +1750,7 @@ async fn task_config_round_trip_and_validation() {
     // 没登录读不到（构建信息都不给，参数更不给）
     let (s, _) = send(
         mcloud_server::app(ServerState::new(Arc::clone(&handle))),
-        get("/api/tasks/sign/config"),
+        get("/api/tasks/live-room/config"),
     )
     .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);

@@ -258,6 +258,8 @@ fn ready_opts(fx: &Fixture) -> ExchangeOptions<'_> {
     ExchangeOptions {
         prize: "251230053",
         skip_wait: true,
+        offset_ms: EXCHANGE_LEAD_MS, // 缺省提前量（传输延迟补偿 10ms）
+        force: false,                // 既有用例一律走"本地判定照旧挡"这条老路
         device_id: fx.env().device_id,
         wait: None,
     }
@@ -300,6 +302,12 @@ fn list_body_many(prizes: Vec<serde_json::Value>) -> String {
 }
 
 /// `infoV3`：余额是 `total`。
+/// `visitlog/journaling` 的响应 —— **只读埋点**，链上只做 `ensure_http_ok`，
+/// 所以结果体是空对象即可（字段没有语义，别在这里编造上游字段）。
+fn visitlog_body() -> String {
+    serde_json::json!({ "code": 0, "msg": "success", "result": {} }).to_string()
+}
+
 fn info_body(total: i64) -> String {
     serde_json::json!({
         "code": 0, "msg": "success",
@@ -351,6 +359,8 @@ fn replies_ordered() -> Vec<String> {
     vec![
         list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
         info_body(10496),
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
         slide_body(),
         order_body(1800),
         info_body(8696),
@@ -1380,18 +1390,78 @@ fn wait_plan_waits_for_the_next_hour() {
     // 13:00:20 ⇒ 恰好达到阈值 ⇒ 等（判据是 `< 20s`）。
     let wait = plan_exchange_wait(beijing_ms(2026, 9, 19, 13, 0, 20));
     assert!(wait.needed);
-    assert_eq!(wait.until_ms, beijing_ms(2026, 9, 19, 14, 0, 0));
+    assert_eq!(
+        wait.until_ms,
+        beijing_ms(2026, 9, 19, 14, 0, 0) - EXCHANGE_LEAD_MS
+    );
 
     // 13:30 ⇒ 等到 14:00。
     let wait = plan_exchange_wait(beijing_ms(2026, 9, 19, 13, 30, 0));
-    assert_eq!(wait.until_ms, beijing_ms(2026, 9, 19, 14, 0, 0));
+    assert_eq!(
+        wait.until_ms,
+        beijing_ms(2026, 9, 19, 14, 0, 0) - EXCHANGE_LEAD_MS
+    );
 
     // 13:59:59 ⇒ 等到 14:00（只差一秒也要等）。
     let wait = plan_exchange_wait(beijing_ms(2026, 9, 19, 13, 59, 59));
-    assert_eq!(wait.until_ms, beijing_ms(2026, 9, 19, 14, 0, 0));
+    assert_eq!(
+        wait.until_ms,
+        beijing_ms(2026, 9, 19, 14, 0, 0) - EXCHANGE_LEAD_MS
+    );
 
-    // 目标是整点**时刻**：东八区是整小时偏移 ⇒ 与截断方式无关。
-    assert_eq!(wait.until_ms % 3_600_000, 0);
+    // ⚠ 目标**不是**整点整，而是"整点 − 提前量"（TS 的 `offset`，默认 10ms）——
+    // 这条断言就是那个差异的钉子：抢兑压着整点先手，不是等到整点才动。
+    assert_eq!(
+        wait.until_ms,
+        beijing_ms(2026, 9, 19, 14, 0, 0) - EXCHANGE_LEAD_MS
+    );
+    assert!(
+        wait.until_ms < beijing_ms(2026, 9, 19, 14, 0, 0),
+        "必须早于整点"
+    );
+}
+/// `offset`（**传输延迟补偿**）是**可输入的** ⇒ 它必须真的改变目标时刻。
+///
+/// 用户口径 2026-10-02：「10ms 是本地与云端的传输时间差」—— 提前 `offset` 发出，
+/// 让请求正好在整点抵达云端。缺省 = 参考实现那个 `10`（`standalone.ts:213`）。
+#[test]
+fn wait_target_follows_the_inputtable_offset() {
+    let now = beijing_ms(2026, 9, 19, 13, 30, 0);
+    let hour = beijing_ms(2026, 9, 19, 14, 0, 0);
+    assert_eq!(plan_exchange_wait_with(now, 10).until_ms, hour - 10);
+    assert_eq!(plan_exchange_wait_with(now, 500).until_ms, hour - 500);
+    // 旧签名 = 缺省补偿，行为必须与参考实现一致（10）。
+    assert_eq!(plan_exchange_wait(now).until_ms, hour - EXCHANGE_LEAD_MS);
+}
+
+/// `plan_exchange_window_wait`：等到 **hh:59:40**；已经在窗口里 ⇒ 不等。
+///
+/// 边界逐条照 TS `utils.py`… 准确说 `utils.ts:57-65` 抄 —— 两条 `0` 的规则
+/// （已过 59:40、整点后 15 秒内）是"上一场尾巴"的处理；写错就会在一场刚结束时
+/// 又去等一个整小时。⚠ 本函数目前**只被测试用到**，接链在下一轮。
+#[test]
+fn window_plan_waits_for_hh_59_40() {
+    // 13:30 ⇒ 等到 13:59:40。
+    let w = plan_exchange_window_wait(beijing_ms(2026, 9, 19, 13, 30, 0));
+    assert!(w.needed);
+    assert_eq!(w.until_ms, beijing_ms(2026, 9, 19, 13, 59, 40));
+
+    // 13:59:39 ⇒ 只差一秒也等（判据是"`>=` 59:40 才不等"）。
+    let w = plan_exchange_window_wait(beijing_ms(2026, 9, 19, 13, 59, 39));
+    assert_eq!(w.until_ms, beijing_ms(2026, 9, 19, 13, 59, 40));
+
+    // 13:59:40 / 13:59:59 ⇒ 窗口已开 ⇒ 不等。
+    assert!(!plan_exchange_window_wait(beijing_ms(2026, 9, 19, 13, 59, 40)).needed);
+    assert!(!plan_exchange_window_wait(beijing_ms(2026, 9, 19, 13, 59, 59)).needed);
+
+    // 14:00:00 / 14:00:14 ⇒ **上一场的尾巴**（整点后 15 秒内）⇒ 不等。
+    assert!(!plan_exchange_window_wait(beijing_ms(2026, 9, 19, 14, 0, 0)).needed);
+    assert!(!plan_exchange_window_wait(beijing_ms(2026, 9, 19, 14, 0, 14)).needed);
+
+    // 14:00:15 ⇒ 尾巴结束 ⇒ 又要等到 14:59:40。
+    let w = plan_exchange_window_wait(beijing_ms(2026, 9, 19, 14, 0, 15));
+    assert!(w.needed);
+    assert_eq!(w.until_ms, beijing_ms(2026, 9, 19, 14, 59, 40));
 }
 
 /// 等待的判据在**负时间戳**上也不该错（`%` 会对负输入给出负余数）。
@@ -1485,6 +1555,8 @@ async fn a_missing_prize_sends_nothing_and_skips_the_balance_read() {
     let opts = ExchangeOptions {
         prize: "不存在的商品",
         skip_wait: true,
+        offset_ms: EXCHANGE_LEAD_MS, // 缺省提前量（传输延迟补偿 10ms）
+        force: false,                // 既有用例一律走"本地判定照旧挡"这条老路
         device_id: None,
         wait: None,
     };
@@ -1524,6 +1596,8 @@ async fn empty_prize_is_a_config_error() {
         let opts = ExchangeOptions {
             prize: bad,
             skip_wait: true,
+            offset_ms: EXCHANGE_LEAD_MS, // 缺省提前量（传输延迟补偿 10ms）
+            force: false,                // 既有用例一律走"本地判定照旧挡"这条老路
             device_id: None,
             wait: None,
         };
@@ -1648,7 +1722,11 @@ async fn ordered_requires_the_balance_delta_to_match_the_price() {
     assert!(outcome.order.is_some(), "成交那份订单要留着");
     assert!(outcome.offset.is_some(), "发出去的那个 offset 要留着");
     assert_eq!(fx.http().attempts(), 1, "成交了只发一枪");
-    assert_eq!(fx.http().count(), 5, "清单 → 余额 → 题面 → 下单 → 复查");
+    assert_eq!(
+        fx.http().count(),
+        7,
+        "清单 → 余额 → **预热两枪** → 题面 → 下单 → 复查（2026-10-02 起链上补了 TS 那个预热序列）"
+    );
     assert_eq!(device.calls(), 1, "deviceId 只换一次（它要上报指纹）");
 
     let result = ExchangeResult {
@@ -1702,6 +1780,8 @@ async fn code_ok_with_a_wrong_delta_is_unknown_not_success() {
         let replies = vec![
             list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
             info_body(10496),
+            visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
+            visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
             slide_body(),
             order_body(1800),
             info_body(after),
@@ -1740,11 +1820,13 @@ async fn ordered_even_if_the_balance_recheck_fails() {
     let replies = vec![
         list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
         info_body(10496),
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
         slide_body(),
         order_body(1800),
     ];
-    // 第 5 个请求（复查）传输层失败。
-    let fx = Fixture::new(&as_refs(&replies), BASE_NOW_MS, Some(Arc::clone(&device))).failing_at(5);
+    // 第 7 个请求（复查）传输层失败 —— 预热两枪都插在题面之前，所以整体后移两位。
+    let fx = Fixture::new(&as_refs(&replies), BASE_NOW_MS, Some(Arc::clone(&device))).failing_at(7);
     let opts = ready_opts(&fx);
     let outcome = exchange(&fx.env(), BASE_NOW_MS, &opts).await.unwrap();
 
@@ -1774,7 +1856,9 @@ async fn slider_failure_retries_with_a_fresh_puzzle() {
     let replies = vec![
         list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
         info_body(10496),
-        slide_body(), // 第 1 轮取题
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
+        slide_body(),    // 第 1 轮取题
         v3_fail(514, "验证失败"),
         slide_body(), // 第 2 轮**重新**取题
         order_body(1800),
@@ -1807,6 +1891,8 @@ async fn both_rounds_rejected_stops_at_two_attempts() {
     let replies = vec![
         list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
         info_body(10496),
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
         slide_body(),
         v3_fail(514, "验证失败"),
         slide_body(),
@@ -1843,6 +1929,8 @@ async fn second_round_puzzle_failure_keeps_the_slider_verdict() {
     let replies = vec![
         list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
         info_body(10496),
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
         slide_body(),
         v3_fail(514, "验证失败"),
         v3_fail(500, "取题服务抖了"), // 第 5 枪是第二轮取题，回非 0 ⇒ 报错
@@ -1869,10 +1957,12 @@ async fn a_transport_error_is_unknown_and_is_never_resent() {
     let replies = vec![
         list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
         info_body(10496),
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
         slide_body(),
     ];
     // 第 4 枪 = 下单。
-    let fx = Fixture::new(&as_refs(&replies), BASE_NOW_MS, Some(Arc::clone(&device))).failing_at(4);
+    let fx = Fixture::new(&as_refs(&replies), BASE_NOW_MS, Some(Arc::clone(&device))).failing_at(6);
     let opts = ready_opts(&fx);
     let outcome = exchange(&fx.env(), BASE_NOW_MS, &opts).await.unwrap();
 
@@ -1905,6 +1995,8 @@ async fn duplicate_prize_code_is_already_exchanged() {
     let replies = vec![
         list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
         info_body(10496),
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
         slide_body(),
         v3_fail(2301, "重复兑奖"),
     ];
@@ -1932,6 +2024,8 @@ async fn not_target_user_code_is_a_failure() {
     let replies = vec![
         list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
         info_body(10496),
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
         slide_body(),
         v3_fail(407, "非移动用户不可领奖"),
     ];
@@ -1965,6 +2059,8 @@ async fn other_business_codes_are_failures_without_retry() {
         let replies = vec![
             list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
             info_body(10496),
+            visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
+            visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
             slide_body(),
             v3_fail(code, msg),
         ];
@@ -1996,6 +2092,8 @@ async fn empty_upstream_message_falls_back() {
     let replies = vec![
         list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
         info_body(10496),
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
+        visitlog_body(), // 预热那一枪（链上在下单前**每趟一次**）
         slide_body(),
         serde_json::json!({"code": 610}).to_string(),
     ];
@@ -2053,6 +2151,12 @@ async fn waiting_rereads_and_rejudges() {
     let replies = vec![
         list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
         info_body(10496),
+        // ⚠ 预热两枪的位置在**整点等待之前**（与 TS 同序：窗口等待 → 预热 → 整点等待）⇒
+        // 它排在"重判那一轮"的清单/余额**之前**。原先这条用例走不到预热（第一轮判完
+        // 就等到整点、重判被挡下），预热挪到等待之间以后就必须给它两枪，否则后面的
+        // 重判会读到错位的响应（症状是 `groupId=beforeTotal 那一组不是数组`）。
+        visitlog_body(),
+        visitlog_body(),
         list_body(prize_json(LIMIT_EXCHANGED, 1800, 839)),
         info_body(10496),
     ];
@@ -2070,6 +2174,8 @@ async fn waiting_rereads_and_rejudges() {
     let opts = ExchangeOptions {
         prize: "251230053",
         skip_wait: false,
+        offset_ms: EXCHANGE_LEAD_MS, // 缺省提前量（传输延迟补偿 10ms）
+        force: false,                // 既有用例一律走"本地判定照旧挡"这条老路
         device_id: fx.env().device_id,
         wait: Some(&wait_fn),
     };
@@ -2077,12 +2183,17 @@ async fn waiting_rereads_and_rejudges() {
 
     assert_eq!(
         waited.lock().unwrap().as_slice(),
-        &[beijing_ms(2026, 9, 19, 14, 0, 0)],
-        "等到下一个整点"
+        &[
+            // 第一段：先等到窗口打开（hh:59:40）—— 预热就发生在这一段之后。
+            beijing_ms(2026, 9, 19, 13, 59, 40),
+            // 第二段：再压着整点发单（整点 − 提前量，TS 的 offset 默认 10ms）。
+            beijing_ms(2026, 9, 19, 14, 0, 0) - EXCHANGE_LEAD_MS,
+        ],
+        "先等到 hh:59:40，再等到「下一个整点 − 提前量」（两段等待，TS 同款）"
     );
     assert_eq!(
         outcome.waited_until_ms,
-        Some(beijing_ms(2026, 9, 19, 14, 0, 0))
+        Some(beijing_ms(2026, 9, 19, 14, 0, 0) - EXCHANGE_LEAD_MS)
     );
     assert_eq!(
         outcome.plan,
@@ -2093,14 +2204,17 @@ async fn waiting_rereads_and_rejudges() {
     assert_eq!(outcome.attempts, 0);
     assert_eq!(
         fx.http().count(),
-        4,
-        "两轮各两次：每轮都是「清单 + 余额」。\
+        6,
+        "两轮各两次（清单 + 余额＝4 枪）**再加预热两枪**＝6。\
+         ⚠ 预热在「窗口等待之后、整点等待之前」（与 TS 同序），\
+         所以它排在这两轮只读请求之间 —— 这不是「多读了一轮」，是那两枪埋点。\
+         早先写 4 的时候预热还在下单循环里，这条用例走不到它。\
          ⚠ 重判那一轮**也要读余额** —— `limit` 不是定位阶段判的，\
          而定位成功之后 `judge_exchange` 一律读余额（参考实现 `judgeExchange` 同形）。\
          写成 3 会把「重判时因 limit 挡住而少读一次余额」当成正确行为，\
          那正是这条测试要排除的偏差。"
     );
-    // 等完之后重判没过 ⇒ 连 deviceId 都不去换。
+    // 到这一步为止只花了只读请求 + 预热那两枪（没发单）。⚠ `deviceId` 现在在两段等待**之前**就取好，所以这里不代表「没碰过设备指纹」。
     assert_eq!(device.calls(), 0);
 }
 
@@ -2120,6 +2234,8 @@ async fn no_wait_just_after_the_hour() {
     let opts = ExchangeOptions {
         prize: "251230053",
         skip_wait: false,
+        offset_ms: EXCHANGE_LEAD_MS, // 缺省提前量（传输延迟补偿 10ms）
+        force: false,                // 既有用例一律走"本地判定照旧挡"这条老路
         device_id: fx.env().device_id,
         wait: Some(&wait_fn),
     };
@@ -2140,6 +2256,8 @@ async fn missing_wait_impl_is_refused_not_silently_skipped() {
     let opts = ExchangeOptions {
         prize: "251230053",
         skip_wait: false,
+        offset_ms: EXCHANGE_LEAD_MS, // 缺省提前量（传输延迟补偿 10ms）
+        force: false,                // 既有用例一律走"本地判定照旧挡"这条老路
         device_id: fx.env().device_id,
         wait: None, // 没注入
     };
@@ -2167,6 +2285,8 @@ async fn cancelled_wait_sends_nothing() {
     let opts = ExchangeOptions {
         prize: "251230053",
         skip_wait: false,
+        offset_ms: EXCHANGE_LEAD_MS, // 缺省提前量（传输延迟补偿 10ms）
+        force: false,                // 既有用例一律走"本地判定照旧挡"这条老路
         device_id: fx.env().device_id,
         wait: Some(&wait_fn),
     };
@@ -2457,20 +2577,32 @@ fn task_meta_is_stable() {
     assert_eq!(meta.title, "兑换奖品");
     assert!(!meta.description.is_empty());
     let names: Vec<&str> = meta.params.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, vec!["prizeIdOrName", "skipWait"]);
+    // ⚠ 这条哨兵红了正是它的用途：提醒"元信息变了，是有意改的吗"。
+    // 2026-10-02 是有意的 —— 加了 `force`（用户口径：「所有档都放行、点击就是真发请求」，
+    // 与"下单前再确认一次"同款，做成开关、默认关）。
+    // ⚠ 2026-10-02 又是有意的：加了 `offset`（用户口径：「10ms 是本地与云端的传输
+    // 时间差」⇒ 它成为**可输入项**），排在 `force` 前面。
+    assert_eq!(names, vec!["prizeIdOrName", "skipWait", "offset", "force"]);
 }
 
-/// ⚠ 已知缺口：任务壳没有 `deviceId` 注入点 ⇒ **一枪不发**并如实说原因。
+/// ⚠ **`body` 里没有 `deviceId`** ⇒ 任务壳**一枪不发**并如实说原因。
 ///
-/// 这条用例把缺口**钉住**：哪天补上了注入点，它会红，提醒改掉模块头那段说明。
+/// 注入点**已经接上**了（`deviceId` 走请求体；路由那层用 `SmidService::device_id`
+/// 取一个可用的 id，见 `routes/exchange.rs`）⇒ 这条用例钉的不再是"没有注入点"，
+/// 而是**缺 id 时那条安全阀**：宁可不发，也不拿空 id 去赌真豆。
+///
+/// 另一面（`body` **带** id ⇒ 真的往下走到下单）由正向用例覆盖 —— 见
+/// `task_shell_orders_when_the_body_carries_a_device_id`（下一轮补）。
 #[tokio::test]
-async fn task_shell_refuses_without_a_device_id_source() {
+async fn task_shell_refuses_when_the_body_has_no_device_id() {
     let list = list_body(prize_json(LIMIT_AVAILABLE, 1800, 839));
     let info = info_body(10496);
     let http = Arc::new(Scripted::new(&[&list, &info])) as Arc<dyn HttpClient>;
     let ctx = task_ctx(http, Arc::new(FixedClock(BASE_NOW_MS)));
 
-    let body = serde_json::json!({"prizeIdOrName": "251230053"});
+    // ⚠ 显式 `skipWait: true`：任务层缺省已改为"等"（与 TS 一致），而这条测的是
+    // **deviceId 缺口**，不显式跳过就会先撞上等待那条路径，测到别的东西。
+    let body = serde_json::json!({"prizeIdOrName": "251230053", "skipWait": true});
     let outcome = ExchangeTask.run(&ctx, &body).await.unwrap();
     assert!(
         !outcome.is_success(),
@@ -2480,6 +2612,78 @@ async fn task_shell_refuses_without_a_device_id_source() {
         outcome.summary().contains("没接上 deviceId 来源"),
         "要如实说清缺口：{}",
         outcome.summary()
+    );
+}
+/// `body` **带** `deviceId` ⇒ 任务壳真的一路走到下单（与上一条正好是一对）。
+///
+/// ⚠ 这条用例是补上的：上一条的注释早就指向了它，但测试**并不存在** ——
+/// 「注释指向一个不存在的东西」正是这次清理一直在挑的那类问题。
+///
+/// 枪序按链上实际顺序排：清单 → 余额 → **预热两枪** → 取题 → 下单 → 复查。
+/// `deviceId` 由 `body` 提供（生产上由路由用 `SmidService::device_id` 取好塞进来），
+/// 所以这里**不需要** fixture 的设备源。
+#[tokio::test]
+async fn task_shell_orders_when_the_body_carries_a_device_id() {
+    let replies = vec![
+        list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
+        info_body(10496),
+        visitlog_body(),
+        visitlog_body(),
+        slide_body(),
+        order_body(1800),
+        info_body(8696),
+    ];
+    let http = Arc::new(Scripted::new(&as_refs(&replies))) as Arc<dyn HttpClient>;
+    let ctx = task_ctx(http, Arc::new(FixedClock(BASE_NOW_MS)));
+
+    let body = serde_json::json!({
+        "prizeIdOrName": "251230053",
+        "skipWait": true,
+        "deviceId": "B-from-body-1",
+    });
+    let outcome = ExchangeTask.run(&ctx, &body).await.unwrap();
+    assert!(
+        outcome.is_success(),
+        "带了 deviceId 就该真的下单成功：{outcome:?}"
+    );
+}
+/// `force: true` ⇒ **本地判成「抢光」也照样真发单**（用户口径 2026-10-02：
+/// 「所有档都放行、点击就是真发请求」）。
+///
+/// 与上一条成对：上一条钉"带 `deviceId` 就下单" ✓，这条钉"**本地挡着也下单**" ✓
+/// —— 后者是那个开关存在的**唯一理由** ✗，没有它，开关就只是个装饰 ✓。
+///
+/// 枪序同上（清单 → 余额 → 预热两枪 → 取题 → 下单 → 复查）；
+/// 差别只在 `minRemainderCount: 0`（本地判据会落 `min_remainder_zero` ✗）
+/// 与 `"force": true` ✓ ⇒ 判定闸被放行 ⇒ 那一枪真发出去 ✓。
+#[tokio::test]
+async fn force_sends_the_order_even_when_the_judge_says_sold_out() {
+    let mut prize = prize_json(LIMIT_AVAILABLE, 1800, 839);
+    // 11/17 `MinRemainderZero`：判据是 `minRemainderCount == 0`。
+    prize["minRemainderCount"] = serde_json::json!(0);
+
+    let replies = vec![
+        list_body(prize),
+        info_body(10496),
+        visitlog_body(),
+        visitlog_body(),
+        slide_body(),
+        order_body(1800),
+        info_body(8696),
+    ];
+    let http = Arc::new(Scripted::new(&as_refs(&replies))) as Arc<dyn HttpClient>;
+    let ctx = task_ctx(http, Arc::new(FixedClock(BASE_NOW_MS)));
+
+    let body = serde_json::json!({
+        "prizeIdOrName": "251230053",
+        "skipWait": true,
+        "force": true,
+        "deviceId": "B-from-body-force",
+    });
+    let outcome = ExchangeTask.run(&ctx, &body).await.unwrap();
+    assert!(
+        outcome.is_success(),
+        "开了 force 就该真发单（哪怕本地判成抢光）：{outcome:?}"
     );
 }
 

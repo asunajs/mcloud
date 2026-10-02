@@ -63,10 +63,23 @@ pub enum SchedulerState {
 }
 
 /// 一次触发尝试的结果。
+/// 排期里表示"这一条跑的是**编排**"的约定任务名。
+///
+/// ⚠ 编排不是注册表里的任务（`Task::name`）✗，所以不能像任务那样按名字派发。
+/// 用约定的任务名 + `body.pipelineId` 表达，**不动数据模型** ✓。
+pub const PIPELINE_TASK: &str = "pipeline";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
+
 pub enum FireOutcome {
     /// 触发成功，已交给运行器。
     Fired { run_id: u64 },
+    /// 触发成功，已交给**编排运行器**。
+    ///
+    /// 与 [`FireOutcome::Fired`] 分开是**刻意的** ✗：编排没有单次运行的 `run_id`
+    /// （它内部要跑 N 步、可能跨 N 个账号），拿 `Fired { run_id: 0 }` 冒充会撞上
+    /// 别处 `run_id == 0` 表示"被并发闸挡住"的语义 ✗ —— 那是两种完全不同的结果。
+    FiredPipeline,
     /// 到点了，但同一 `任务+账号` 正在跑 —— 跳过，不排队。
     SkippedBusy,
     /// 错过的太久，整体弃掉（水位已推到当前）。
@@ -196,6 +209,12 @@ fn parse_offset(s: &str) -> Option<chrono::FixedOffset> {
 pub struct Scheduler {
     store: Arc<dyn Store>,
     runner: Arc<Runner>,
+    /// 编排运行器。**定时要能拉起一条编排**（用户口径 2026-10-02：编排只能手动点
+    /// 运行没有意义 ⇒「定时跑编排」才是它的命）。
+    ///
+    /// ⚠ 与 `/api/pipelines/{id}/run` **共用同一个实例**（`AppHandle::pipelines`）✓ ——
+    /// 编排语义、并发闸、取消登记表都在它里面，各建一份迟早分叉 ✗。
+    pipelines: Arc<crate::pipeline::PipelineRunner>,
     clock: Arc<dyn Clock>,
     /// 广播自己的运行状态，供 `/api/status` 读运行时实况。
     state_tx: watch::Sender<SchedulerState>,
@@ -208,7 +227,12 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn new(store: Arc<dyn Store>, runner: Arc<Runner>, clock: Arc<dyn Clock>) -> Self {
+    pub fn new(
+        store: Arc<dyn Store>,
+        runner: Arc<Runner>,
+        clock: Arc<dyn Clock>,
+        pipelines: Arc<crate::pipeline::PipelineRunner>,
+    ) -> Self {
         // ⚠ 必须留住接收端：`watch::Sender::send` 在**没有接收者**时返回 Err，
         // 而被忽略的 Err 会让状态永远停在 Stopped —— 界面上就是
         // "调度器明明在跑，却显示已停止"。
@@ -226,6 +250,7 @@ impl Scheduler {
         Self {
             store,
             runner,
+            pipelines,
             clock,
             state_tx,
             _state_rx: state_rx,
@@ -322,6 +347,68 @@ impl Scheduler {
 
     /// 真正触发：对定时指向的每个账号起一次运行。
     ///
+    /// 触发一条**编排**（`sch.task == PIPELINE_TASK`）。
+    ///
+    /// # 三点与任务分支**刻意不同**
+    ///
+    /// 1. **整份账号**交给编排器 ✓ —— 不逐个账号跑一遍 ✗：编排自己按 `accountMode`
+    ///    依次/并发走账号（`pipeline.rs` 里那套），外层再套一层会把它跑 N 遍。
+    /// 2. 取编排**按归属**（`pipeline_for`）✓ —— 取不到就**如实报错** ✓，不静默跳过 ✗
+    ///    （老数据没有 owner 才退回不带归属的 `pipeline`）。
+    /// 3. 记账沿用 `record` ✓：编排整体 `Partial` / `Error` **都记 error** ✗ ——
+    ///    定时没人当场看着，"一半没成"记成 ok 就等于把它藏起来 ✓（同 `fire` 那条取向）。
+    async fn fire_pipeline(
+        &self,
+        sch: &Schedule,
+        accounts: &[mcloud_core::Account],
+        point_ms: i64,
+    ) -> (FireOutcome, bool) {
+        let Some(id) = sch.body.get("pipelineId").and_then(|v| v.as_str()) else {
+            return (
+                FireOutcome::UnknownTask("这条排期说要跑编排，但 body 里没有 pipelineId".into()),
+                false,
+            );
+        };
+        let id = mcloud_core::PipelineId::new(id);
+        let found = match sch.owner.as_ref() {
+            Some(owner) => self.store.pipeline_for(owner, &id).await,
+            None => self.store.pipeline(&id).await,
+        };
+        let pipeline = match found {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                return (
+                    FireOutcome::UnknownTask(format!("编排不存在或不属于这个用户：{id}")),
+                    false,
+                )
+            }
+            Err(e) => return (FireOutcome::UnknownTask(e.to_string()), false),
+        };
+
+        match self.pipelines.run(&pipeline, accounts, None).await {
+            Ok(outcome) => {
+                let status = if outcome.status() == crate::pipeline::StepStatus::Ok {
+                    "ok"
+                } else {
+                    "error"
+                };
+                let err = if status == "ok" {
+                    None
+                } else {
+                    Some(outcome.summary_line())
+                };
+                self.record(sch, Some(point_ms), status, err.as_deref())
+                    .await;
+                (FireOutcome::FiredPipeline, false)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                self.record(sch, Some(point_ms), "error", Some(&msg)).await;
+                (FireOutcome::UnknownTask(msg), false)
+            }
+        }
+    }
+
     /// 返回 `(结果, 是否全被并发闸挡住)`：后者用于区分
     /// "跑了但失败" 与 "一个账号都没跑成" —— 两者在界面上的含义不同。
     async fn fire(&self, sch: &Schedule, point_ms: i64) -> (FireOutcome, bool) {
@@ -332,6 +419,11 @@ impl Scheduler {
         };
         if accounts.is_empty() {
             return (FireOutcome::SkippedBusy, true);
+        }
+
+        // ── 编排：**整份账号**交给编排运行器，不逐个账号跑 ✗ ──────────────
+        if sch.task == PIPELINE_TASK {
+            return self.fire_pipeline(sch, &accounts, point_ms).await;
         }
 
         let mut fired = None;

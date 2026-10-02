@@ -100,7 +100,33 @@ pub async fn upsert(
     // 表现就是"任务天天绿灯空转"。
     // 用 `Config`（→ 400）：错的是请求体里的字段，不是 URL 资源
     // （与 `runs::create` 及 engine 的 `unknown_task_is_config_error` 保持一致）。
-    if !state.handle.registry.contains(&input.task) {
+    //
+    // ⚠ **例外**：`task == PIPELINE_TASK`（"跑编排"）✓ —— 编排**不是**注册表里的任务 ✗
+    // （它是一条链，不是 `Task` ✓），调度器对它有**单独的分支**
+    // （`Scheduler::fire_pipeline`）。不放行的话，界面上加的那个「定时」按钮
+    // 一点就会被这里拒掉 ✗。
+    if input.task == mcloud_engine::scheduler::PIPELINE_TASK {
+        // ⚠ 建的时候就校验到"这条编排确实存在、而且属于你" ✓：
+        // 只在触发时才发现的话，用户要等到那个时间点才知道配错了 ✗
+        // （同上面 cron 那条取向：错误要当场说）。
+        let Some(pid) = input.body.get("pipelineId").and_then(|v| v.as_str()) else {
+            return Err(ApiError(mcloud_core::Error::Config(
+                "这条定时要跑编排，但 body 里没有 pipelineId".into(),
+            )));
+        };
+        let pid = mcloud_core::PipelineId::new(pid);
+        if state
+            .handle
+            .store
+            .pipeline_for(&cur.0, &pid)
+            .await?
+            .is_none()
+        {
+            return Err(ApiError(mcloud_core::Error::NotFound(format!(
+                "编排不存在或不属于你：{pid}"
+            ))));
+        }
+    } else if !state.handle.registry.contains(&input.task) {
         return Err(ApiError(mcloud_core::Error::Config(format!(
             "未知任务：{}",
             input.task

@@ -91,6 +91,15 @@ const CASES = [
     src: `const A = () => <svg xlink:href="#g">x</svg>`,
     ok: ['xlink:href'],
   },
+  {
+    // ⚠ 2026-10-02 实测踩到的：`ui/account-picker.tsx` 改成"整份就是一个组件"之后
+    // （没有任何静态元素 ⇒ `templates.length === 0`），`finish()` 那句早退把
+    // helper 的 import 一起吞了 ⇒ 产物跑起来报 `_$createComponent is not defined`，
+    // 而**编译期一声不响**。这条钉住"没有静态模板也要注入 import"。
+    name: '只有组件、没有静态模板 ⇒ 仍要注入 helper import',
+    src: `const A = (p) => <Row a={p.x} />`,
+    ok: ['createComponent as _$createComponent'],
+  },
 ]
 
 // 把 `compiler.ts` 打成一个 Node 能直接 import 的 ESM。

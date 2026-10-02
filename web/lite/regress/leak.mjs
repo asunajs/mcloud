@@ -24,8 +24,12 @@
  * # 用法
  *
  * ```bash
- * cd web && node lite/regress/leak.mjs          # 打印每页与整轮的 Δ
+ * cd web && node lite/regress/leak.mjs --fixture   # 夹具模式：谁都能跑 ✓（推荐）
+ * cd web && node lite/regress/leak.mjs             # 真服务模式：要 /tmp/mcloud-cookie.txt ✗
  * ```
+ *
+ * ⚠ 两种模式的**读数不能直接互比**（接口数据不同 ⇒ 渲染出的行数不同 ✓）；
+ *   要比"修之前 / 修之后"，两次都用**同一种**模式 ✓。
  *
  * ⚠ 调试端口用 9480（**不要用门禁的 9491/9496**：撞端口会让门禁连到这个残留浏览器上，
  *   2026-10-02 就因此误红过一次）。
@@ -34,15 +38,26 @@ import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { openSession, sleep, hashRoute } from './lib.mjs'
+import { openSession, serve, sleep, hashRoute } from './lib.mjs'
 
 const WEB = path.resolve(import.meta.dirname, '..', '..')
 const PORT = 48980
 const DWELL_MS = 2500
 const IDLE_MS = 800
-const ROUNDS = Number(process.env.LEAK_ROUNDS ?? 5)
+/**
+ * `--rounds N` 优先于 `LEAK_ROUNDS`（门禁走 `--rounds 2`：够抓线性泄漏、又别太慢 ✓）。
+ */
+const roundsArg = process.argv.indexOf('--rounds')
+const ROUNDS = Number(roundsArg >= 0 ? process.argv[roundsArg + 1] : (process.env.LEAK_ROUNDS ?? 5))
 /** 每次访问允许的净增长（节点数）。低于它就是噪声（字体/滚动条/门禁自身的探针）。 */
 const NODE_BUDGET = 40
+/**
+ * 夹具模式（`node lite/regress/leak.mjs --fixture`，或 `LEAK_FIXTURE=1`）：
+ * **不连真服务、不要 cookie** ⇒ 谁都能一键复现 ✓（理由见下面 `try` 里那段）。
+ */
+const FIXTURE = process.argv.includes('--fixture') || process.env.LEAK_FIXTURE === '1'
+/** 静态产物与接口的来源端口（夹具模式下由内核分配 ⇒ 不能是 `const` ✓）。 */
+let port = PORT
 
 /** 每页访问 ROUNDS 次，记录 Δ；整轮跑一遍全部路由，记录总 Δ。 */
 const PAGES = ['accounts', 'tasks', 'exchange', 'live-room', 'schedules', 'pipelines', 'history', 'settings']
@@ -87,12 +102,28 @@ const server = http.createServer((req, res) => {
 
 let fail = 0
 let session
+/** 夹具模式：**不需要真服务、也不需要 cookie** ✓（见下面那段注释）。 */
+let fixture = null
 try {
-  await new Promise((r) => server.listen(PORT, '127.0.0.1', r))
+  if (FIXTURE) {
+    /**
+     * ⚠ 为什么非要这条：原来的写法要 `/tmp/mcloud-cookie.txt` 里的**真会话 cookie** ✗，
+     * 于是这组读数**只有本机登录过的人能复现** ✗ —— 而"改完拿什么证明改好了"靠的就是它 ✓。
+     * 2026-10-02 就栽过：诊断用的探针脚本跑完删了 ⇒ 泄漏结论**一度无法一键复现** ✗。
+     *
+     * 夹具走门禁那一套 `serve(dist, 0, 'ready')` ✓（端口由内核分配 ✓、不碰 3000 ✓）。
+     * ⚠ 调试端口避开门禁的 9491/9496 ✓（撞端口会让门禁连到这个残留浏览器上 ✗）。
+     */
+    fixture = await serve(path.join(WEB, 'dist'), 0, 'ready')
+    port = fixture.address().port
+  } else {
+    await new Promise((r) => server.listen(PORT, '127.0.0.1', r))
+    port = PORT
+  }
   session = await openSession({
-    port: PORT,
+    port,
     route: hashRoute('dashboard'),
-    debugPort: 9480,
+    debugPort: FIXTURE ? 9482 : 9480,
     profile: fs.mkdtempSync(path.join(os.tmpdir(), 'mcloud-leak-')),
     width: 1280,
   })
@@ -163,6 +194,7 @@ try {
 } finally {
   try { session?.child.kill('SIGKILL') } catch { /* 已死 */ }
   server.close()
+  try { fixture?.close() } catch { /* 已关 */ }
 }
 
 if (fail) {

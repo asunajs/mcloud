@@ -90,8 +90,24 @@ const typeIn = (sel, value) =>
 const typeNth = (sel, n, value) =>
   `(() => { const el = document.querySelectorAll(${JSON.stringify(sel)})[${n}]; if (!el) throw new Error('第 ${n + 1} 个 ${JSON.stringify(sel)} 不存在'); el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); return el.value })()`
 const nthValue = (sel, n) => `document.querySelectorAll(${JSON.stringify(sel)})[${n}]?.value ?? '(没有第 ${n + 1} 个)'`
+/**
+ * 选一个下拉项。
+ *
+ * ⚠ 2026-10-02 起下拉是**自建组件**（`ui/select.tsx`），没有 `select.value` 可写、
+ * 也没有 `change` 事件可派发 ⇒ 只能"点开触发器 → 点那一项"。
+ * 判据仍读 `data-value`（组件在触发器上留的可读出口）。
+ */
 const pickOption = (sel, value) =>
-  `(() => { const el = document.querySelector(${JSON.stringify(sel)}); if (!el) throw new Error('找不到下拉框: ' + ${JSON.stringify(sel)}); el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('change', { bubbles: true })); return el.value })()`
+  `(() => {
+     const t = document.querySelector(${JSON.stringify(sel)});
+     if (!t) throw new Error('找不到下拉框: ' + ${JSON.stringify(sel)});
+     t.click();
+     const o = [...document.querySelectorAll('.select-panel .select-option')]
+       .find((x) => x.dataset.value === ${JSON.stringify(value)});
+     if (!o) throw new Error('下拉里没有选项: ' + ${JSON.stringify(value)});
+     o.click();
+     return document.querySelector(${JSON.stringify(sel)}).dataset.value;
+   })()`
 const go = (hash) => `(() => { location.hash = ${JSON.stringify(hash)}; return location.hash })()`
 
 /** 向导里那两个口令框（setup 态下 `autocomplete` 撞车，只能按序号取，见 `typeNth`）。 */
@@ -115,7 +131,8 @@ const HELPERS = `(() => {
     if (b.disabled) throw new Error('第 ' + (n + 1) + ' 步的「' + text + '」是禁用的');
     return b;
   };
-  window.__stepOrder = () => window.__stepRows().map((d) => d.querySelector('select').value).join(',');
+  // ⚠ 步骤里的任务下拉也是自建组件（ui/select.tsx）⇒ 读 data-value
+  window.__stepOrder = () => window.__stepRows().map((d) => d.querySelector('.select').dataset.value).join(',');
   window.__stepBadges = () => window.__stepRows().map((d) => d.querySelector('.badge').textContent.replace(/\\s+/g, '')).join(',');
   /**
    * 某个弹窗里"客户端形态"那几个按钮有几个。
@@ -167,6 +184,34 @@ const STEPS = {
         'true/true',
       ),
     },
+    {
+      // ⭐⭐ 「**所有内容都要进记录**」（用户口径 2026-10-02）：兑换那一次的
+      // 结构化明细（后端 `details` 是**铺平**的：kind/status/plan/code/rounds/
+      // attempts/offset/balance/after_balance/waited/device_id_failed/error/
+      // prize/order）必须在历史页**全部**看得见。
+      // 这条把用户回看时真正要问的几项都钉住 —— 少渲染任何一个它就红。
+      name: '历史页：兑换那次的明细全都进记录（码/轮次/发单/offset/余额/订单/奖品）',
+      do: null,
+      check: eq(
+        `(() => {
+           const t = document.getElementById('app').textContent;
+           const need = ['ORD-1025', '上游码 0', '轮次 1', '发单 2', 'offset 87',
+                         '10496', '8696', '小红花', '1800'];
+           const miss = [];
+           for (const k of need) { if (t.indexOf(k) < 0) miss.push(k); }
+           return miss.length === 0 ? 'ok' : '缺这些字段：' + miss.join(' / ');
+         })()`,
+        'ok',
+      ),
+    },
+    {
+      // ⭐ 「本号已领过」必须**带主语**（用户口径 2026-10-02：不要造成歧义）。
+      // 光写"已领过"会被读成"这条口令被用掉了" —— 而口令是全场通用、人人可领的，
+      // 那个误解会把人引向完全错误的方向（以为要去找新口令）。
+      name: '历史页：200112 写成「本号已领过」（带主语，不歧义）',
+      do: null,
+      check: has(APP_TEXT, '本号已领过'),
+    },
     { name: '点 dock：任务', do: clickText('.dock button', '任务'), check: eq('location.hash', '#/tasks') },
     { name: '展开抽屉', do: clickSel('label[for="nav-drawer"]'), check: eq("document.getElementById('nav-drawer').checked", true), changed: true },
     { name: '收起抽屉', do: clickSel('label[for="nav-drawer"]'), check: eq("document.getElementById('nav-drawer').checked", false), changed: true },
@@ -214,13 +259,85 @@ const STEPS = {
     { name: '计划页：填名称', do: typeIn('input[placeholder="例如 每天签到"]', '每周签到'), check: eq('document.querySelector("input[placeholder=\\"例如 每天签到\\"]").value', '每周签到') },
     { name: '计划页：改 cron', do: typeIn('input[placeholder="0 8 * * *"]', '0 9 * * 1'), check: eq('document.querySelector("input[placeholder=\\"0 8 * * *\\"]").value', '0 9 * * 1') },
     // ⚠ 这条同时盯住"选中的值没被别的绑定回写成空串" —— 上一代对拍里 Vue 侧正是回写成了空
-    { name: '计划页：选任务', do: pickOption('select.select', 'live-room'), check: eq('document.querySelector("select.select").value', 'live-room') },
+    { name: '计划页：选任务', do: pickOption('#sched-task', 'live-room'), check: eq('document.querySelector("#sched-task").dataset.value', 'live-room') },
     { name: '计划页：勾选启用', do: clickSel('input[type="checkbox"].checkbox'), check: eq('document.querySelector("input[type=checkbox].checkbox").checked', false), changed: true },
+    {
+      // ⭐ 用户口径（2026-10-02）：「这里账号和任务应该用新的多选框」
+      // ⇒ 定时弹窗里**账号**那一栏不再是裸文本输入 ✗，而是与任务页/直播页**同一套**
+      //   多选框（`ui/account-picker.tsx` ⇒ 建在 `ui/select.tsx` 上）✓。
+      //
+      // ⚠ 判据要能区分"换成了多选框"和"那一栏整个没了" ✗ ⇒ 三条一起判：
+      //   ① 多选框在 ✓ ② 旧的账号文本输入没了 ✓ ③ 旧文案"逗号分隔"也没了 ✓。
+      // ⚠ 顺带钉住"任务那一栏仍是**单选**下拉" ✓（用户 2026-10-02 选的就是这条 ✓）——
+      //   免得以后有人顺手把它也改成多选（那要动后端 `Schedule.task` 那个单值字段 ✗）。
+      name: '定时页：账号换成新的多选框（不再是"逗号分隔"的文本输入）',
+      do: clickText('#app button', '新建定时'),
+      check: eq(
+        `(() => {
+           const d = document.querySelector('dialog#schedule-dialog')
+           if (!d || !d.open) return 'not-open'
+           const picker = d.querySelector('[aria-label="账号"]')
+           const task = d.querySelector('#sched-task')
+           const bad = [...d.querySelectorAll('input.input')].filter((i) => (i.placeholder || '').includes('账号'))
+           return [!!picker, bad.length === 0, d.textContent.includes('逗号分隔'), task.dataset.multiple === 'true'].join('/')
+         })()`,
+        'true/true/false/false',
+      ),
+      changed: true,
+    },
+    {
+      // ⭐ 点开 ⇒ 面板里要有「全部账号」那个**独立开关** ✓
+      // （后端口径：空数组 = 我名下全部 ✓，**不是**"把每一项都勾上"✗ —— 勾每一项会把名单锁死）。
+      name: '定时页：账号多选框展开后有「全部账号」这一行',
+      do: `(() => {
+        const t = document.querySelector('dialog#schedule-dialog [aria-label="账号"]')
+        if (!t) return '没有账号选择器'
+        t.click()
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const p = document.querySelector('.select-portal')
+           if (!p) return 'no-panel'
+           return p.textContent.includes('全部账号')
+         })()`,
+        true,
+      ),
+      changed: true,
+    },
+    {
+      // TDesign 那套浮层的行为之一：**点外部就收起** ✓（面板挂在 `body` 上，不在文档流里 ✓）
+      //
+      // ⚠ 必须发 **`mousedown`**，不能只发 `click` ✗：`ui/select.tsx` 收面板靠的是
+      // `document.addEventListener('mousedown', …, true)` —— 真浏览器里点一下会
+      // 先 mousedown 再 click ✓，而合成事件只有 click ⇒ 面板**不会关** ✗
+      //（实测就是这么红的：是**测试**用错了事件，不是应用坏了 ✓）。
+      name: '定时页：点外面 ⇒ 账号面板收起、弹窗关掉',
+      do: `(() => {
+        document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+        const d = document.getElementById('schedule-dialog')
+        if (d) d.close()
+        return true
+      })()`,
+      check: eq('document.querySelectorAll(".select-portal").length', 0),
+      changed: true,
+    },
 
     // 编排页：步骤列表的**增 / 删 / 改序**（本框架里最容易出错的一块 —— createFor + 位置敏感行）
     { name: '切到编排页', do: go('#/pipelines'), check: eq('location.hash', '#/pipelines') },
     { name: '编排页：点「编辑」（草稿带 2 步）', do: clickText('button', '编辑'), check: has(APP_TEXT, '共 2 步'), changed: true },
     { name: '编排页：初始顺序 = 签到 → 直播', do: null, check: eq('window.__stepOrder()', 'daily-checkin,live-room') },
+    // ⭐⭐ 步骤卡里必须能看到**参数控件**（2026-10-02 重构）。
+    // 从前这一块是空的 ✗：步骤的 `body` 只"原样带回、不能编辑"✗ ⇒ 编排里的步骤
+    // 永远跑任务自己的默认配置，想改一个参数只能跑去任务页。
+    // 实测（重构后）：签到 + 直播两步里共 **4** 个控件（数字框 / 开关）✓。
+    // 判据取 `>= 4`：少一个就说明参数表单没渲染（或某个参数的控件类型掉了）✗。
+    { name: '编排页：步骤卡里能看到参数控件（表单，不再是只读 body）', do: null, check: eq(
+        `(() => { const box = [...document.querySelectorAll('#app div')].find(d => d.className === 'flex flex-col gap-3');
+           if (!box) return 'no-box';
+           const n = box.querySelectorAll('textarea,input[type=number],input[type=checkbox]').length;
+           return n >= 4 ? 'ok' : 'ctl=' + n; })()`,
+        'ok') },
     { name: '编排页：第 1 步的「上移」禁用', do: null, check: eq('window.__stepDisabled(0, "上移")', true) },
     { name: '编排页：添加步骤', do: clickText('button', '添加步骤'), check: has(APP_TEXT, '共 3 步'), changed: true },
     { name: '编排页：新步落在末尾', do: null, check: eq('window.__stepOrder()', 'daily-checkin,live-room,') },
@@ -236,6 +353,28 @@ const STEPS = {
     { name: '直播页：输入口令', do: typeIn('textarea', '口令一 口令二'), check: eq('document.querySelector("textarea").value', '口令一 口令二') },
     { name: '直播页：改时长', do: typeIn('input[type="number"]', '45'), check: eq('document.querySelector("input[type=number]").value', '45') },
     { name: '直播页：切开关', do: clickSel('input[type="checkbox"].toggle'), check: eq('document.querySelector("input[type=checkbox].toggle").checked', true), changed: true },
+    {
+      // ⭐ 开关的**开/关必须一眼分得出来**（2026-10-02 用户口径：颜色差别太小）。
+      // 断言用"同一颗开关开态 vs 关态的**计算后背景色不同**"，不去比对具体色值 ——
+      // 色值会随主题变，而"两者必须不同"这条不变式不该跟着变。
+      // 关态用一个临时克隆量，避免把页面上的开关真拨回去（那会污染后面的步骤）。
+      name: '直播页：开关"开"与"关"的背景色不同（不是只差旋钮位置）',
+      do: null,
+      check: eq(
+        `(() => {
+           const b = document.querySelector('#app input[type=checkbox].toggle');
+           if (!b) return 'no-toggle';
+           const on = getComputedStyle(b).backgroundColor;
+           const c = b.cloneNode(true);
+           c.checked = false;
+           b.parentElement.appendChild(c);
+           const off = getComputedStyle(c).backgroundColor;
+           c.remove();
+           return on !== off && on !== 'rgba(0, 0, 0, 0)';
+         })()`,
+        true,
+      ),
+    },
     // ── 共享口令池卡片（2026-10-01：口令从"页面参数"变成"全实例共享资源"）──
     {
       name: '直播页：池卡片显示有效条数',
@@ -254,11 +393,29 @@ const STEPS = {
     {
       // 下一场读的是**预告场**的 expectStartTime —— 而判定门只认 status==1，
       // 所以这个时间能显示出来，就证明"日程没跟着门一起丢"（Go 参考实现的坑）。
-      name: '直播页：显示下一场（预告场的时间，原样）',
+      //
+      // ⚠⚠ 2026-10-02 用户口径：「下一场直播时间应该移动到上面，显眼」
+      // ⇒ **位置本身成了判据**：它必须在「运行参数」卡片**之前** ✓。
+      // 只断言"页面里有这行字"是不够的 ✗ —— 它原先就埋在池卡片最底下、
+      // 照样能被 `includes` 查到 ✓（这正是那条断言漏掉的形状 ✗）。
+      name: '直播页：下一场在顶部（排在「运行参数」之前）且带主播名与场次名',
       do: null,
       check: eq(
-        `(() => { const t = document.getElementById('app').textContent; return t.includes('下一场') + '/' + t.includes('2026-09-23 14:30:00') })()`,
-        'true/true',
+        `(() => {
+           const cards = Array.from(document.querySelectorAll('.card'));
+           const iNext = cards.findIndex((c) => c.textContent.includes('下一场直播'));
+           const iForm = cards.findIndex((c) => c.textContent.includes('运行参数'));
+           const t = document.getElementById('app').textContent;
+           return [
+             iNext >= 0,
+             iForm >= 0,
+             iNext < iForm,
+             t.includes('2026-09-23 14:30:00'),
+             t.includes('中国移动云盘'),
+             t.includes('云盘AI助职场加速！看直播赢好礼！'),
+           ].join('/');
+         })()`,
+        'true/true/true/true/true/true',
       ),
     },
     {
@@ -277,26 +434,27 @@ const STEPS = {
       ),
     },
 
-    // 任务页：账号选择器（2026-10-01 起从单选 `<select>` 换成「多选 + 全部账号」）。
-    // 选项同样是**由数据 createFor 出来的**，点它等于测"列表项 + checkbox 回写"。
+    // 任务页：账号选择器（2026-10-01 起是「多选 + 全部账号」；2026-10-02 起换成
+    // TDesign 口径的自建下拉 `ui/select.tsx`）。
+    // 选项同样是**由数据 createFor 出来的**，点它等于测"列表项 + 勾选回写"。
     //
-    // 选择器结构：`details.collapse > .collapse-content` 里，
-    // **第 0 个** checkbox 是「全部账号」，第 1 个起才是逐个账号。
+    // 选择器结构：面板里 `.select-option`，**第 0 项**是「全部账号」（独立开关），
+    // 第 1 项起才是逐个账号；面板挂在 `body`（或弹窗里）的 `.select-portal` 上。
     { name: '切到任务页', do: go('#/tasks'), check: eq('location.hash', '#/tasks') },
     {
       name: '任务页：选账号',
       do: `(() => {
-        const box = document.querySelector('#app details.collapse')
-        box.open = true
-        const items = [...box.querySelectorAll('input[type="checkbox"]')]
+        document.querySelector('#account-picker').click()
+        const items = [...document.querySelectorAll('.select-panel .select-option')]
         items[1].click()
         return true
       })()`,
       check: eq(
         `(() => {
-          const box = document.querySelector('#app details.collapse')
-          const items = [...box.querySelectorAll('input[type="checkbox"]')]
-          return items[1].checked && !items[0].checked
+          const items = [...document.querySelectorAll('.select-panel .select-option')]
+          return items[1].getAttribute('aria-selected') === 'true' &&
+                 items[0].getAttribute('aria-selected') === 'false' &&
+                 document.querySelector('#account-picker').dataset.value.length > 0
         })()`,
         true,
       ),
@@ -306,17 +464,16 @@ const STEPS = {
       // 勾上时逐个账号的勾选框会禁用 —— 这里锁住这个语义。
       name: '任务页：勾「全部账号」⇒ 摘要变成全部账号，逐个勾选被禁用',
       do: `(() => {
-        const box = document.querySelector('#app details.collapse')
-        const items = [...box.querySelectorAll('input[type="checkbox"]')]
-        items[0].click()
+        document.querySelectorAll('.select-panel .select-option')[0].click()
         return true
       })()`,
       check: eq(
         `(() => {
-          const box = document.querySelector('#app details.collapse')
-          const items = [...box.querySelectorAll('input[type="checkbox"]')]
-          const summary = box.querySelector('summary').textContent
-          return items[0].checked && items[1].disabled && summary.includes('全部账号')
+          const items = [...document.querySelectorAll('.select-panel .select-option')]
+          const trigger = document.querySelector('#account-picker').textContent
+          return items[0].getAttribute('aria-selected') === 'true' &&
+                 items[1].className.includes('select-option-off') &&
+                 trigger.includes('全部账号')
         })()`,
         true,
       ),
@@ -333,16 +490,14 @@ const STEPS = {
       //    ⇒ 这一步只**断言**状态，不做动作。
       name: '任务页：取消「全部账号」',
       do: `(() => {
-        const box = document.querySelector('#app details.collapse')
-        const items = [...box.querySelectorAll('input[type="checkbox"]')]
-        items[0].click()
+        document.querySelectorAll('.select-panel .select-option')[0].click()
         return true
       })()`,
       check: eq(
         `(() => {
-          const box = document.querySelector('#app details.collapse')
-          const items = [...box.querySelectorAll('input[type="checkbox"]')]
-          return !items[0].checked && !items[1].disabled
+          const items = [...document.querySelectorAll('.select-panel .select-option')]
+          return items[0].getAttribute('aria-selected') === 'false' &&
+                 !items[1].className.includes('select-option-off')
         })()`,
         true,
       ),
@@ -352,10 +507,11 @@ const STEPS = {
       do: null,
       check: eq(
         `(() => {
-          const box = document.querySelector('#app details.collapse')
-          const items = [...box.querySelectorAll('input[type="checkbox"]')]
-          const summary = box.querySelector('summary').textContent
-          return !items[0].checked && items[1].checked && !summary.includes('全部账号')
+          const items = [...document.querySelectorAll('.select-panel .select-option')]
+          const trigger = document.querySelector('#account-picker').textContent
+          return items[0].getAttribute('aria-selected') === 'false' &&
+                 items[1].getAttribute('aria-selected') === 'true' &&
+                 !trigger.includes('全部账号')
         })()`,
         true,
       ),
@@ -450,11 +606,177 @@ const STEPS = {
       // ⭐ 用户要的就是这一条：**别的页面的下拉里不再出现它**
       name: '兑换页：账号下拉里已经没有停用的那个号',
       do: go('#/exchange'),
+      // 自建下拉的选项只在**展开时**存在 ⇒ 这条得自己点开看一眼再收起
       check: eq(
-        `[...document.querySelectorAll('#app select option')].some((o) => o.textContent.includes('主力号'))`,
+        `(() => {
+           const t = document.querySelector('#exchange-account')
+           t.click()
+           const hit = [...document.querySelectorAll('.select-panel .select-option')]
+             .some((o) => o.textContent.includes('主力号'))
+           t.click()
+           return hit
+         })()`,
         false,
       ),
       changed: true,
+    },
+    {
+      // ⭐⭐ 这条口径在 2026-10-02 **改过一次**，断言跟着改（旧版写的是"必须不是按钮"✗）。
+      //
+      // 用户原话（截图反馈两件事）：① 灰色那枚"禁止按钮颜色不对" —— 因为它压根
+      // **不是按钮** ✗，是个徽标 ✗；② 白色那几枚"已抢光"**还能再点** ✗。
+      // ⇒ 现在的口径：**所有判据没过的档都渲染 `disabled` 的 `btn`** ✓
+      //   —— 形态对（禁用配色交给 daisyUI ✓）、而且真的点不动 ✓。
+      //
+      // ⚠⚠ 这条断言**曾经是空转的**：它查"页面里有没有 `已抢光` 按钮"，而当时夹具里
+      // 兑换清单只有一个账号配了、门禁中途又**停用了主力号** ⇒ 清单 404 ⇒ 那一页
+      // 一件奖品都没有 ⇒ "不是按钮"永远成立 ✗。补上第二个账号的清单之后它才真的开始
+      // 判东西 —— 又一次「装置测不到 = 没测」（门禁全绿而功能是坏的）。
+      name: '兑换页：默认（本地判定开）时「已抢光」是**禁用**按钮（形态对、点不动）',
+      do: null,
+      check: eq(
+        `(() => {
+           const b = [...document.querySelectorAll('#app button')].filter((x) => x.textContent.trim() === '已抢光')
+           if (b.length === 0) return 'no-button'
+           return b.every((x) => x.disabled)
+         })()`,
+        true,
+      ),
+    },
+    {
+      // ⭐⭐ 用户口径（2026-10-02）：「把想要的内容订阅到显示在上面方便直接看」
+      // ⇒ **位置本身成了判据**：订阅那块必须排在「兑换」卡片之前 ✓。
+      // 只断言"页面里有订阅这两个字"是不够的 ✗ —— 埋在清单底下照样能被 includes 查到
+      // （直播页那条断言就是这么漏的，见「下一场」那条的注释）。
+      //
+      // ⚠ 这段注释在**模板字符串外面**；里面的表达式**绝不能出现反引号**（踩过）。
+      name: '兑换页：订阅区在顶部（排在「兑换」卡片之前）',
+      do: null,
+      check: eq(
+        `(() => {
+           const cards = Array.from(document.querySelectorAll('#app .card'));
+           const iSub = cards.findIndex((c) => c.textContent.includes('我订阅的'));
+           const iEx = cards.findIndex((c) => c.textContent.includes('下单前再确认一次'));
+           return [iSub >= 0, iEx >= 0, iSub < iEx].join('/');
+         })()`,
+        'true/true/true',
+      ),
+    },
+    {
+      // 顶上那行显示**名字**（这件现在还在清单里 ⇒ 用实时名字，与订阅时同名 ✓）
+      name: '兑换页：顶部列出已订阅的那件',
+      do: null,
+      check: has(APP_TEXT, '移动云盘100万tokens叠加包'),
+    },
+    {
+      // ⭐ 用户口径（2026-10-02）：「订阅怎么没有定时选项」——
+      // 订阅盯的恰恰是"现在还不能兑、到点才放货"的那些 ✓，而**定时就是为它们存在的** ✓。
+      // ⇒ 订阅那一行必须有「定时」，且判据与清单里**同一条**（`canSchedule`）✓。
+      name: '兑换页：订阅那一行也有「定时」（与清单里同一条判据）',
+      do: null,
+      check: eq(
+        `(() => {
+           const card = Array.from(document.querySelectorAll('#app .card')).find((c) => c.textContent.includes('我订阅的'))
+           if (!card) return 'no-card'
+           const has = [...card.querySelectorAll('button')].some((b) => b.textContent.trim() === '定时')
+           return has
+         })()`,
+        true,
+      ),
+    },
+    {
+      // ⚠ 口径钉子（用户原话 2026-10-02：「**不要取消订阅，直接用星星**」）：
+      // 顶部那行**不许**出现文字版「取消订阅」按钮 ✗ —— 免得以后又被"补回来"。
+      // ⚠ 这条必须在**取消那一件之前**跑：卡片空了它就成了空转 ✗（本仓栽过这种）。
+      name: '兑换页：顶部那行没有文字「取消订阅」按钮（只用星星）',
+      do: null,
+      check: eq(
+        `(() => {
+           const card = Array.from(document.querySelectorAll('#app .card')).find((c) => c.textContent.includes('我订阅的'))
+           if (!card) return 'no-card'
+           if (card.querySelectorAll('li').length === 0) return 'empty-card'
+           return [...card.querySelectorAll('button')].some((b) => b.textContent.trim() === '取消订阅')
+         })()`,
+        false,
+      ),
+    },
+    {
+      // ⭐ 点星星 ⇒ 服务端记住 ⇒ 顶部**多一件**。
+      // 这是"订阅"这个功能的全部价值，也是装置**有状态**的理由：
+      // 回一份静态列表就只能证明"按钮点了有反应" ✗。
+      name: '兑换页：点星星订阅另一件 ⇒ 顶部多一件',
+      do: `(() => {
+        const b = document.querySelector('#app button[aria-label="订阅"]')
+        if (!b) return '没有可订阅的星星'
+        b.click()
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const card = Array.from(document.querySelectorAll('#app .card')).find((c) => c.textContent.includes('我订阅的'))
+           if (!card) return 'no-card'
+           return card.querySelectorAll('li').length
+         })()`,
+        2,
+      ),
+      changed: true,
+    },
+    {
+      // ⭐ 从顶上取消 ⇒ 那一件消失（回到 1 件）。
+      //
+      // ⚠ 入口是**星星**（用户口径 2026-10-02：「不要取消订阅，直接用星星」）——
+      // 顶部那行**没有**文字版「取消订阅」了 ✗，与清单里那两处是**同一个入口** ✓。
+      name: '兑换页：顶部那颗星星就是取消订阅（点了 ⇒ 那一件消失）',
+      do: `(() => {
+        const card = Array.from(document.querySelectorAll('#app .card')).find((c) => c.textContent.includes('我订阅的'))
+        if (!card) return 'no-card'
+        const b = card.querySelector('button[aria-label="取消订阅"]')
+        if (!b) return '顶部那行没有星星'
+        b.click()
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const card = Array.from(document.querySelectorAll('#app .card')).find((c) => c.textContent.includes('我订阅的'))
+           if (!card) return 'no-card'
+           return card.querySelectorAll('li').length
+         })()`,
+        1,
+      ),
+      changed: true,
+    },
+    {
+      // ⭐ 兑换页的「下单前再确认一次」开关（2026-10-02 用户口径：加个取消二次弹窗的按钮）。
+      name: '兑换页：有「下单前再确认一次」这个开关',
+      do: null,
+      check: has(APP_TEXT, '下单前再确认一次'),
+    },
+    {
+      // ⭐⭐ 断言的是**开关状态与那句说明的耦合**（2026-10-02 用户口径：不要造成歧义）。
+      // 关掉确认之后还写"点下去要再确认一次"就是骗人（用户点下去直接扣豆）。
+      //
+      // ⚠ 读**真实 DOM 的 checked**，不是读文案 —— 文案是从状态渲染的，
+      //   读文案测不出"状态对、DOM 不对"这一类。
+      // ⚠ 选择器要**精确**：曾经用 parentElement.textContent 去认，而它一路冒泡，
+      //   `.find` 撞上了别的复选框（诊断显示那个 parent 里还有 DIALOG ⇒ 根本不是这个
+      //   label）⇒ 断言测的是别的东西。现在按"紧邻兄弟的文字"认，只认自己那一个。
+      // ⚠⚠ 这段注释在**模板字符串里面**：里面**绝不能出现反引号**（踩过 ——
+      //   一个反引号就把模板提前结束，整个文件 SyntaxError，症状是门禁报错退出）。
+      name: '兑换页：说明与开关状态一致（关了就不说"要再确认一次"）',
+      do: null,
+      check: eq(
+        `(() => {
+           const all = document.querySelectorAll('#app input[type=checkbox]');
+           let box = null;
+           for (const i of all) {
+             const s = i.nextElementSibling;
+             if (s && s.textContent.includes('下单前再确认一次')) box = i;
+           }
+           if (!box) return 'no-switch';
+           return box.checked === document.getElementById('app').textContent.includes('要再确认一次');
+         })()`,
+        true,
+      ),
     },
     {
       name: '账号页：回到账号页准备启用',
@@ -473,10 +795,46 @@ const STEPS = {
         ;[...li.querySelectorAll('button')].find((b) => b.textContent.trim() === '启用').click()
         return true
       })()`,
+      changed: true,
+    },
+    {
+      // ⭐⭐ 用户口径（2026-10-02）：「这些设置先取消显示，设置后面单独弄」
+      // ⇒ 账号设置弹窗里那两块（**功能开关** / **运行结果推送**）**不该再渲染** ✓。
+      //
+      // ⚠⚠ 这条**必须同时证明"弹窗真的开了、数据真的读到了"** ✗ —— 否则"页面上没有
+      // 功能开关"在**弹窗没开**或**读设置失败（错误态）**时**同样成立** ⇒ 又是一条空转 ✗
+      // （今天已经栽过一次：兑换清单 404 ⇒ 那条断言一直是空的）。
+      // 所以判据里带上"任务参数那块在" ✓（同一个弹窗、同一个表单、这次没被藏 ✓）。
+      name: '账号页：设置弹窗里没有「功能开关」（先取消显示，且弹窗确实开着）',
+      do: clickText('#app li.card button', '设置'),
       check: eq(
-        `(() => { const li = [...document.querySelectorAll('#app li.card')].find((el) => el.textContent.includes('主力号')); return li ? li.className.includes('opacity-60') : 'no-card' })()`,
+        `(() => {
+           const d = document.querySelector('dialog#account-settings')
+           if (!d || !d.open) return 'not-open'
+           const t = d.textContent
+           return [t.includes('刷新凭据的剩余天数阈值'), t.includes('功能开关')].join('/')
+         })()`,
+        'true/false',
+      ),
+      changed: true,
+    },
+    {
+      name: '账号页：设置弹窗里也没有「运行结果推送」（先取消显示）',
+      do: null,
+      check: eq(
+        `(() => {
+           const d = document.querySelector('dialog#account-settings')
+           if (!d || !d.open) return 'not-open'
+           return d.textContent.includes('运行结果推送')
+         })()`,
         false,
       ),
+    },
+    {
+      // 收尾：弹窗开着会挡住后面的步骤 ⇒ 关掉（并顺手钉住"关得掉"）
+      name: '账号页：关掉设置弹窗',
+      do: `document.getElementById('account-settings').close()`,
+      check: eq('document.querySelectorAll("dialog[open]").length', 0),
       changed: true,
     },
 
@@ -484,9 +842,13 @@ const STEPS = {
     {
       name: '任务页：分组是 tab（可见的组各一个）',
       do: go('#/tasks'),
-      // 装置里有 5 个任务、其中 `internal-probe` 是隐藏的 ⇒ 可见的组是 3 个
+      // 装置里有 5 个任务、其中 `internal-probe` 是隐藏的 ⇒ 任务组是 3 个
       // （signin / live / device）。隐藏任务那一组**不该**留下一个空 tab。
-      check: eq(`document.querySelectorAll('#app [role="tab"]').length`, 3),
+      //
+      // ⚠ 总数是 **4**：任务页最前面多了一格「编排」✓（2026-10-02）—— 它的数据源
+      // 不是 `/api/capabilities` 而是 `/api/pipelines` ✓，所以它不算"任务组"，
+      // 但**是**一个 tab。这一条钉的是"tab 的数量"，编排那格必须算进来 ✓。
+      check: eq(`document.querySelectorAll('#app [role="tab"]').length`, 4),
       changed: true,
     },
     {
@@ -510,6 +872,50 @@ const STEPS = {
         })()`,
         true,
       ),
+    },
+    {
+      /**
+       * ⭐⭐ 2026-10-02 用户两次报「你的 tabs 呢」，**根因就钉在这一条**。
+       *
+       * tab 排原本写在 `taskCards()` 的最后一个分支里 ⇒ **一切到「编排」整排消失**，
+       * 用户再也切不回去（两张截图都是这个状态：编排卡片在、tab 排没了）。
+       *
+       * ⚠ 为什么原来门禁全绿也没发现：进页面时 `activeGroup` 是**空串** ⇒ 走的是
+       * "有分组"那个分支 ⇒ tab 排当然在 ✓。**这是状态相关的**，夹具只覆盖了初始态 ✗。
+       * ⇒ 这条必须**先点一下「编排」**再断言（只断言"DOM 里有 tab"是抓不到的 ✗）。
+       */
+      name: '任务页：切到「编排」后 tab 排仍在（否则再也切不回去）',
+      do: `(() => {
+        const t = [...document.querySelectorAll('#app [role="tab"]')].find((x) => x.textContent.includes('编排'))
+        if (!t) throw new Error('没有「编排」tab')
+        t.click()
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+          const tabs = [...document.querySelectorAll('#app [role="tab"]')]
+          const on = tabs.filter((t) => t.getAttribute('aria-selected') === 'true')
+          // ⚠ 同时钉住"只能亮一个"：currentGroup() 有兜底（选中的组没出现就落到第一组），
+          // 在「编排」页它会返回第一组 ⇒ 不特殊处理就会**两个 tab 同时亮** ✗
+          return tabs.length + '/' + on.length + '/' + (on[0] ? on[0].textContent.trim().slice(0, 2) : '无')
+        })()`,
+        '4/1/编排',
+      ),
+      changed: true,
+    },
+    {
+      // 再切回去：分组卡片必须回来（钉住"来回都能走"）
+      name: '任务页：从「编排」切回分组',
+      do: `(() => {
+        const t = [...document.querySelectorAll('#app [role="tab"]')].find((x) => !x.textContent.includes('编排'))
+        t.click()
+        return true
+      })()`,
+      check: eq(
+        `document.querySelectorAll('#app [role="tab"]').length + '/' + [...document.querySelectorAll('#app [role="tab"]')].filter((t) => t.getAttribute('aria-selected') === 'true').length`,
+        '4/1',
+      ),
+      changed: true,
     },
     {
       // 一次只看一组：默认那组在，"别组"的任务不在（堆叠版本会两组都在）
@@ -579,12 +985,14 @@ const STEPS = {
       name: '任务页：选账号 → 运行直播任务（带参数才放行）',
       do: `(() => {
         const card = [...document.querySelectorAll('#app .card')].find((c) => c.textContent.includes('直播口令'))
-        // 账号在共用选择器里（0 号是「全部账号」，1 号起是逐个账号）。
+        // 账号在共用选择器里（面板第 0 项是「全部账号」，第 1 项起是逐个账号）。
         // 已经勾好的话不要再点 —— 再点一次会取消勾选。
-        const box = document.querySelector('#app details.collapse')
-        box.open = true
-        const items = [...box.querySelectorAll('input[type="checkbox"]')]
-        if (!items[0].checked && !items[1].checked) items[1].click()
+        const trigger = document.querySelector('#account-picker')
+        trigger.click()
+        const items = [...document.querySelectorAll('.select-panel .select-option')]
+        const picked = items[1].getAttribute('aria-selected') === 'true'
+        if (!picked && items[0].getAttribute('aria-selected') === 'false') items[1].click()
+        trigger.click() // 收起面板，别挡着下面那个「运行」按钮
         ;[...card.querySelectorAll('button')].find((b) => b.textContent.trim() === '运行').click()
         return true
       })()`,
@@ -625,14 +1033,16 @@ const STEPS = {
     // 而 `waitStable` 已经等过一轮，所以这里要求它**必须**在（不在就是没放行完全）
     { name: '放行后：切主题', do: clickSel('[aria-label^="切换到"]'), check: eq("!!document.documentElement.getAttribute('data-theme')", true) },
     // ── 历史页：筛选与搜索（2026-10-01 改版新增）──
-    // fixture 里是 **3** 条（2 成功 + 1 失败）——
-    // 第 3 条是 2026-10-02 为「历史页复用结构化明细」加的（带 `details.liveRoom`）。
+    // fixture 里是 **4** 条（3 成功 + 1 失败）——
+    // 第 3 条是 2026-10-02 为「历史页复用结构化明细」加的（带 `details.liveRoom`）；
+    // 第 4 条是同一天为**兑换**加的（`details` 是**铺平**的那一份，`kind: exchange`）——
+    // 用户口径「所有内容都要进记录」⇒ 加记录时这条计数断言会红，那是设计如此。
     // ⚠ 胶囊的可见文字带计数（「失败 1」），
     // 所以按 `aria-label` 点它 —— `clickText` 是精确匹配。
-    { name: '历史页：三条记录都在', do: null, check: eq('document.querySelectorAll("#app table tbody tr").length', 3) },
+    { name: '历史页：四条记录都在', do: null, check: eq('document.querySelectorAll("#app table tbody tr").length', 4) },
     { name: '历史页：切「失败」档只剩 1 条', do: clickSel('[aria-label="筛选：失败"]'), check: eq('document.querySelectorAll("#app table tbody tr").length', 1), changed: true },
     { name: '历史页：搜索无结果 ⇒ 是"没有符合条件"而不是"还没有记录"', do: typeIn('#app input[type=search]', 'zzz'), check: has(APP_TEXT, '没有符合条件的记录'), changed: true },
-    { name: '历史页：清除筛选回到全部', do: clickText('button', '清除筛选'), check: eq('document.querySelectorAll("#app table tbody tr").length', 3), changed: true },
+    { name: '历史页：清除筛选回到全部', do: clickText('button', '清除筛选'), check: eq('document.querySelectorAll("#app table tbody tr").length', 4), changed: true },
   ],
   /**
    * 已初始化未登录：口令错走错误分支，口令对则**闸门从登录页翻到外壳**

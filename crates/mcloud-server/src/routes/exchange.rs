@@ -72,6 +72,12 @@ pub fn routes() -> axum::Router<ServerState> {
     axum::Router::new()
         .route("/api/accounts/{id}/exchange-prizes", get(list_prizes))
         .route("/api/accounts/{id}/exchange", post(run_exchange))
+        // 订阅：钉在顶部的那几件（用户口径 2026-10-02「按单个奖品订阅」+「存服务端」）
+        .route("/api/exchange/subscriptions", get(list_subscriptions))
+        .route(
+            "/api/exchange/subscriptions/toggle",
+            post(toggle_subscription),
+        )
 }
 
 // ══════════════════════════ 只读：奖品清单 ══════════════════════════
@@ -337,9 +343,30 @@ pub struct ExchangeRequest {
     /// （最长一小时），而请求看起来只是"很慢"。
     #[serde(default = "default_skip_wait")]
     pub skip_wait: bool,
+    /// **强制发单**（用户口径 2026-10-02：所有档都放行、点击就是真发请求）。
+    ///
+    /// `false`（缺省）⇒ 本地判成不能兑就如实说"一枪未发"，不扣豆；
+    /// `true` ⇒ 抢光/未开始/已兑过都不再由本地挡下，**真发下单请求**（可能真扣豆）。
+    /// 界面把它做成开关（`mcloud-exchange-force`），显式传。
+    #[serde(default)]
+    pub force: bool,
+    /// **传输延迟补偿**（毫秒，缺省 ⇒ 任务那边的 10）。
+    ///
+    /// 用户口径 2026-10-02：「10ms 是本地与云端的传输时间差」—— 提前这么久发出，
+    /// 让请求正好在整点抵达云端。界面把它做成可输入项，缺省不带（任务自己用 10）。
+    #[serde(default)]
+    pub offset: Option<i64>,
 }
 
 fn default_skip_wait() -> bool {
+    // ⚠⚠ **有意与 TS 不同** —— 用户口径（2026-10-02）：「**用户点按钮就不用等**」。
+    // 这个路由就是"用户点按钮"那条路，所以缺省**不等**；
+    // TS（长跑脚本）默认 `skipWait=false` ⇒ 一直等到整点，那是另一种调用形态。
+    // 而这里是**一个 HTTP 请求** —— 缺省等下去，最长一小时的静默会让它看起来
+    // 就是"卡死了"（上面那段注释说的就是这个）。所以路由缺省**不等**，
+    // 想等的用户在界面上显式打开那个开关（每次都会传这个字段）。
+    // 任务层的缺省是 `false`（与 TS 一致，见 `mcloud_tasks::exchange`）——
+    // 两处不同不是疏忽，是"脚本"与"请求"两种调用形态的差别。
     true
 }
 
@@ -511,9 +538,24 @@ pub async fn run_exchange(
     // （**精确相等**，不是包含）只在 `locate_exchange_prize` 里有一份实现。
     // 在这里先解析一遍等于把它复制到第二处，而两处的分歧会是
     // "页面选的这件"与"实际下单那件"不是同一件 —— 花真豆的那种分歧。
+    // ⚠ `deviceId` 是**下单体里**那个键（`exchangeV3` 的 body），**不是**请求头 ——
+    // 请求头那份由 `SmidClient` 自动补（见 `AppHandle.smid` 的说明），两者不是一回事：
+    // `SmidClient` 补的是 `deviceid` 头，而这里要的是 body 里的 `deviceId` 键。
+    //
+    // 取的来源是**H5 那条 smid 指纹链**换回来的 id（用户口径："device 是 smid"）：
+    // `SmidService::device_id` 是"库里有就用、没有才上报换一次"那条业务路径
+    // （`report_device_id` 是"每次都真打上游"的换 id 路径，别用错）。
+    //
+    // ⚠ 不是 `account.device_id` —— 那一份是登录时**冒充 PC 客户端**用的，
+    // 与 H5 兑换这条链不是同一件事。
+    let device_id = state.handle.smid.device_id(&account.id).await?;
+
     let task_body = serde_json::json!({
         "prizeIdOrName": prize,
         "skipWait": request.skip_wait,
+        "force": request.force,
+        "offset": request.offset,
+        "deviceId": device_id,
     });
 
     let record = state
@@ -542,6 +584,100 @@ async fn load_account(state: &ServerState, viewer: &UserId, id: &str) -> Result<
         .account_for(viewer, &account_id)
         .await?
         .ok_or_else(|| ApiError(Error::NotFound(format!("账号不存在：{id}"))))
+}
+
+// ══════════════════════ 订阅：钉在顶部的那几件 ══════════════════════
+
+/// 一条订阅的**对外**形态。
+///
+/// ⚠ 字段名与持久化那份（`mcloud_core::ExchangeSubscription`）**不同**：
+/// 存储用蛇形（与 `data/*.json` 其余文件一致 ✓），对外一律驼峰（本仓 HTTP 的惯例，
+/// 见 `PrizeView`）✓ —— 所以这里不直接序列化核心类型，免得以后改存储顺手改了 API ✗。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionView {
+    pub prize_id: i64,
+    pub name: String,
+    pub group_id: Option<i64>,
+    pub group_title: Option<String>,
+    pub subscribed_at_ms: i64,
+}
+
+impl From<&mcloud_core::ExchangeSubscription> for SubscriptionView {
+    fn from(s: &mcloud_core::ExchangeSubscription) -> Self {
+        Self {
+            prize_id: s.prize_id,
+            name: s.name.clone(),
+            group_id: s.group_id,
+            group_title: s.group_title.clone(),
+            subscribed_at_ms: s.subscribed_at_ms,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionsResponse {
+    pub items: Vec<SubscriptionView>,
+}
+
+/// 切换一件的订阅状态。
+///
+/// ⚠ 取消订阅**只发 `prizeId` 就够**（`name` 缺省为空串 ✓）—— 顶部那几行要能
+/// "一键取消"，而它手上不一定还留着当初的名字（换了云盘账号、清单里就没这件了 ✓）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToggleSubscriptionInput {
+    pub prize_id: i64,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub group_id: Option<i64>,
+    #[serde(default)]
+    pub group_title: Option<String>,
+}
+
+/// `GET /api/exchange/subscriptions` —— 我订阅了哪几件。
+pub async fn list_subscriptions(
+    State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
+) -> ApiResult<SubscriptionsResponse> {
+    let items = state.handle.store.exchange_subscriptions(&cur.0).await?;
+    Ok(Json(SubscriptionsResponse {
+        items: items.iter().map(SubscriptionView::from).collect(),
+    }))
+}
+
+/// `POST /api/exchange/subscriptions/toggle` —— 订阅 / 取消订阅一件。
+///
+/// # 为什么是"切换"而不是"加/删"两条路由
+///
+/// 用户那一下点的就是**一个开关**（订阅 ↔ 取消）✓。做成切换之后，
+/// **判断依据在服务端**（它手里那份列表才是准的）⇒ 两个标签页各点一下不会
+/// 变成"都加了一遍"或"都删掉了" ✗。规则本体在 `mcloud_core::exchange::toggled`
+/// （纯函数，四条单测钉着：往返、快照、顺序、老文件可读 ✓）。
+pub async fn toggle_subscription(
+    State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
+    Json(body): Json<ToggleSubscriptionInput>,
+) -> ApiResult<SubscriptionsResponse> {
+    let current = state.handle.store.exchange_subscriptions(&cur.0).await?;
+    let next = mcloud_core::exchange::toggled(
+        &current,
+        body.prize_id,
+        &body.name,
+        body.group_id,
+        body.group_title,
+        state.handle.clock.now_ms(),
+    );
+    state
+        .handle
+        .store
+        .save_exchange_subscriptions(&cur.0, &next)
+        .await?;
+    Ok(Json(SubscriptionsResponse {
+        items: next.iter().map(SubscriptionView::from).collect(),
+    }))
 }
 
 #[cfg(test)]

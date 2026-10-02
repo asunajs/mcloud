@@ -49,6 +49,20 @@ use crate::endpoints::{EXCHANGE_LIST, EXCHANGE_V3, GET_SLIDE, MCLOUD_HOST};
 ///
 /// ⚠ **不等于**请求头 `appversion` 的 `12.6.0.0`（四段）——两个值在**同一个请求里**
 /// 同时出现且不一样（实拍如此），别互抄。
+/// `POST /ycloud/visitlog/journaling` —— 访问日志埋点（兑换前预热用，见
+/// [`report_visit_log_request`]）。取自 `mcloud-sign` 的 `apis/exchange.ts:17`。
+pub const VISIT_LOG_JOURNALING: &str = "https://m.mcloud.139.com/ycloud/visitlog/journaling";
+
+/// 兑换链在 TS 里用的那个 `optkeyword`（`tasks/exchange/task.ts:86`）。
+pub const VISIT_LOG_KEYWORD_EXCHANGE: &str = "newsignin_index_to_exchange";
+
+/// 预热的**第二枪**用的 `optkeyword`（`tasks/exchange/task.ts:88`）：
+/// 两枪之间夹着 `sleep(PREHEAT_DELAY)`，顺序是契约。
+pub const VISIT_LOG_KEYWORD_EXCHANGE_TIMES: &str = "newsignin_index_exchange_times";
+
+/// TS 的 `marketName` 默认值（`apis/exchange.ts:15` 的默认参数）。
+pub const VISIT_LOG_MARKET_NAME_DEFAULT: &str = "sign_in_3";
+
 pub const EXCHANGE_CLIENT_VERSION: &str = "12.6.0";
 
 /// `getSlide` 实拍的 `content-type`。
@@ -100,7 +114,12 @@ pub const CODE_DUPLICATED: i64 = 2301;
 pub const CODE_DAILY_QUOTA: i64 = 420;
 /// `421`：H5 文案「该奖品每月限兑，您本月份额已用完」。**零样本**。
 pub const CODE_MONTHLY_QUOTA: i64 = 421;
-/// `610`：H5 文案「兑换失败，请稍后再试或联系客服~」。**未观测**。
+/// `610`：H5 文案「兑换失败，请稍后再试或联系客服~」。
+///
+/// ⚠ **2026-10-02 已观测**（线上真发单那次）：上游回的是
+/// 「活动异常，请稍后重试！Error Code：GK」—— 与 H5 表里那句**不是同一句**，
+/// 而且 `GK` 在抓包仓与 `mcloud-sign` 里**都查不到样本** ⇒ 不许猜它是什么。
+/// 已知的只有：**它不是 deviceId 那一档**（按抓包，缺 id 回 `615`、内容不对回 `614`）。
 pub const CODE_GENERIC: i64 = 610;
 /// `614` / `615`：H5 给这两档**同一句文案**。
 ///
@@ -140,6 +159,45 @@ pub fn exchange_list_request() -> HttpRequest {
 /// `application/json`，再补上 form 那一个 —— 结果**恰好一个**。
 pub fn get_slide_request() -> HttpRequest {
     let req = HttpRequest::post(GET_SLIDE).text_body("{}");
+    let mut req = h5(false, req, "true");
+    req.headers
+        .retain(|(k, _)| !k.eq_ignore_ascii_case("content-type"));
+    req.header("Content-Type", SLIDE_FORM_CONTENT_TYPE)
+}
+
+/// `POST /ycloud/visitlog/journaling` —— **兑换前的"预热"埋点**。**只读、无副作用**。
+///
+/// # 为什么要有这一枪（证据：`mcloud-sign`，能跑的 TS）
+///
+/// `mcloud-sign/packages/core/src/tasks/exchange/task.ts:86-87`：
+///
+/// ```text
+/// await reportVisitLog(http, "newsignin_index_to_exchange");
+/// await sleep(PREHEAT_DELAY);          // ⚠ 500ms，定义在 tasks/exchange/utils.ts:7
+/// ```
+///
+/// 也就是**先报一次访问日志、再等 500ms、然后才下单** —— 顺序本身是这段链条的一部分，
+/// 不是可有可无的日志。本仓原先**完全没有**这一枪。
+///
+/// # 请求形状逐字照 TS（`packages/core/src/apis/exchange.ts:15-23`）
+///
+/// | 项 | 值 |
+/// |---|---|
+/// | 方法 | `POST` |
+/// | 查询串 | `module=uservisit&optkeyword=<keyword>&sourceid=1002&marketName=<marketName>` |
+/// | body | **空**（TS 传的是 `""`，Content-Length: 0）|
+/// | content-type | `application/x-www-form-urlencoded;charset=UTF-8` ＝ [`SLIDE_FORM_CONTENT_TYPE`] |
+/// | `marketName` 缺省 | `sign_in_3`（TS 的默认参数；兑换链传的是 `newsignin_index_to_exchange` 那个 keyword，marketName 走默认）|
+///
+/// ⚠ 与 [`get_slide_request`] 同样要**先把 `h5()` 可能补上的 `content-type` 删掉**再
+/// 设成 form 那一个 —— 否则会留下两个 `content-type`，那就不是"同一个客户端"了。
+pub fn report_visit_log_request(keyword: &str, market_name: &str) -> HttpRequest {
+    let url = format!(
+        "{VISIT_LOG_JOURNALING}?module=uservisit&optkeyword={}&sourceid=1002&marketName={}",
+        percent_encode(keyword),
+        percent_encode(market_name)
+    );
+    let req = HttpRequest::post(url).text_body("");
     let mut req = h5(false, req, "true");
     req.headers
         .retain(|(k, _)| !k.eq_ignore_ascii_case("content-type"));

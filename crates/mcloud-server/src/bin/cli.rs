@@ -23,6 +23,18 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .context("组装应用失败")?;
 
+    // ⚠⚠ **必须在跑任何任务之前**：把 run id 续到历史最大值之后。
+    //
+    // 2026-10-02 实测踩到：这里原先没有这一句 ✗ ⇒ CLI 的 run id 从 **1** 重来 ✗
+    // ⇒ 一次 `cli run live-room` 就把历史里 `run_id=1` 那条**签到记录覆盖掉了** ✗
+    // （`json_store` 的警告原话：「运行编号被复用：这次要覆盖的是**另一次**运行…
+    //   run=1 old_task=sign new_task=live-room」✓）。而且 CLI 与服务**同时在跑**时，
+    // 两边各持一份内存状态 ⇒ 覆盖方向还取决于谁后写盘 ✓。
+    //
+    // 服务那条路早就有这句（`mcloud-server/src/main.rs`，注释同一条理由：
+    // "不做的话重启后编号从 1 重来…症状：历史越重启越少"）✓ —— CLI 漏了 ✓。
+    app.handle.seed_run_ids().await?;
+
     match args.first().map(String::as_str) {
         // 不给参数时**打印用法**，而不是列任务。
         //

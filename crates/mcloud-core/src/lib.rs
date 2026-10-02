@@ -7,6 +7,7 @@ pub mod account;
 pub mod cancel;
 pub mod error;
 pub mod event;
+pub mod exchange;
 pub mod kouling;
 pub mod log;
 pub mod owner;
@@ -31,6 +32,7 @@ pub use account::{Account, AccountId, AccountSettings, AuthInfo, DeviceId, PcPla
 pub use cancel::CancelToken;
 pub use error::{Error, Result};
 pub use event::{LogLevel, RunEvent, SeqAllocator, Sequenced};
+pub use exchange::ExchangeSubscription;
 pub use kouling::{
     ClaimVerdict, KoulingPool, KoulingSource, KoulingState, LiveSession, PoolCode, PoolSummary,
     ProbeRoom,

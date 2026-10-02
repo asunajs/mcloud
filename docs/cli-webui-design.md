@@ -471,11 +471,11 @@ mcloud run sign 19900000000
         └─ 任务名         └─ 账号
 ```
 
-参数（如 `dryRun`）从 `data/tasks.json` 读：
+参数（如 `skipKouling`）从 `data/tasks.json` 读：
 
 ```json
 {
-  "sign": { "dryRun": false }
+  "live-room": { "skipKouling": false }
 }
 ```
 

@@ -98,7 +98,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     // 侧栏那一列是**入口**，全名在页面标题里。
     label: '直播',
     title: '直播小红花',
-    blurb: '收直播弹幕里的口令、再把口令换成小红花。小红书那条口令必须人工粘进来。',
+    blurb: '收直播弹幕与小红书里的口令、再把口令换成小红花。',
     href: '#/live-room',
     icon: IconFlower,
   },

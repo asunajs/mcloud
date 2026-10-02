@@ -21,6 +21,7 @@ import {
   type RunEvent,
   type TaskMeta,
   type TaskGroup,
+  request,
 } from '../api'
 import { TaskConfigPage } from './task-config-page'
 import { AccountPicker } from '../ui/account-picker'
@@ -290,6 +291,8 @@ export const TasksPage = () => {
   }
 
   onMounted(() => {
+    // 编排那一格的**计数**要一进来就有 ✓（不点它也是 0 会让人以为没有编排）。
+    void loadPipelines()
     window.addEventListener('hashchange', onHash)
     // 先把"id → 名字"填上，否则运行记录里显示的是一串哈希
     void refreshAccountNames()
@@ -387,6 +390,32 @@ export const TasksPage = () => {
    */
   const GROUP_ORDER: TaskGroup[] = ['signin', 'live', 'app', 'device']
 
+  /**
+   * 「编排」这一格**不是**任务组 —— 它来自另一份数据（`/api/pipelines`）✓。
+   *
+   * 用 `__` 前缀的伪键，与后端给的 `TaskMeta.group`（`signin`/`live`/…）不会撞 ✓。
+   * ⚠ 这里只做**总览**：运行/编辑/新建留在编排页 ✓ —— 两页各写一份运行逻辑迟早分叉
+   * （这页已有「运行参数 · 账号」，那边也有账号选择器 ✓，已经记着统一到
+   * `ui/account-picker` ✓）。给一个明确入口就够，不再复制一套 ✓。
+   */
+  const PIPELINES_TAB = '__pipelines'
+  type PipelineRow = {
+    id: string
+    name: string
+    steps: unknown[]
+    enabled: boolean
+    lastRunMs?: number | null
+  }
+  const pipelineRows = ref<PipelineRow[]>([])
+
+  const loadPipelines = async () => {
+    try {
+      pipelineRows.value = await request<PipelineRow[]>('/api/pipelines')
+    } catch (e) {
+      showError('读不到编排列表', e instanceof Error ? e.message : '加载失败')
+    }
+  }
+
   /** 按分组切一刀，顺序按 `GROUP_ORDER`，没列到的组按出现顺序接在后面。 */
   const groups = (): { key: string; label: string; items: TaskMeta[] }[] => {
     const buckets = new Map<string, { label: string; items: TaskMeta[] }>()
@@ -417,8 +446,113 @@ export const TasksPage = () => {
     return all.find((g) => g.key === activeGroup.value) ?? all[0]!
   }
 
+  /**
+   * 分组导航那一排 tab。
+   *
+   * ⚠⚠ **必须留在 `taskCards()` 之外** —— 2026-10-02 用户两次报「你的 tabs 呢」，
+   * 根因就是这一排原本写在 `taskCards()` 的**最后一个分支**里：一旦切到「编排」
+   * （`activeGroup === PIPELINES_TAB`）或任务目录为空，整排**直接不渲染** ⇒
+   * 「点了编排就再也切不回去」，只能刷新。
+   *
+   * 为什么之前没测出来：门禁/夹具进页面时 `activeGroup` 是空串 ⇒ 走的是最后一个分支，
+   * tab 排当然在 ✓。用户是**先点了「编排」**才没了 —— 状态相关，夹具没覆盖到。
+   *
+   * 判据（截图量像素，2026-10-02）：用户那张里这一排的文字暗像素 **0** 个、
+   * 卡片间空档只有 **34px**（两个 `gap-4`）；我这边同一位置 **161** 个暗像素、空档 **65px**。
+   */
+  const groupTabs = () => (
+    <div role="tablist" class="join w-full overflow-x-auto" aria-label="任务分组">
+      {/* ⚠ 「编排」的数据源与任务组**不同**（`/api/pipelines`）✓ */}
+      <button
+        type="button"
+        role="tab"
+        aria-selected={activeGroup.value === PIPELINES_TAB}
+        class={`btn join-item btn-sm min-h-11 whitespace-nowrap md:min-h-0 ${activeGroup.value === PIPELINES_TAB ? 'btn-primary' : 'btn-soft'}`}
+        onClick={() => {
+          activeGroup.value = PIPELINES_TAB
+          void loadPipelines()
+        }}
+      >
+        编排
+        <span class="ml-1 text-xs opacity-70">{pipelineRows.value.length}</span>
+      </button>
+      {groups().map((g) => (
+        <button
+          key={g.key}
+          type="button"
+          role="tab"
+          /*
+            ⚠ 在「编排」页时**不能**用 `currentGroup()?.key` 直接比：那个函数带兜底
+            （选中的组这次没出现就落到第一组），而 `__pipelines` 不在分组里 ⇒
+            它会返回第一组 ⇒ **两个 tab 同时亮**（2026-10-02 探针实测到）。
+          */
+          aria-selected={
+            activeGroup.value === PIPELINES_TAB ? false : currentGroup()?.key === g.key
+          }
+          class={`btn join-item btn-sm min-h-11 whitespace-nowrap md:min-h-0 ${
+            activeGroup.value !== PIPELINES_TAB && currentGroup()?.key === g.key
+              ? 'btn-primary'
+              : 'btn-soft'
+          }`}
+          onClick={() => {
+            activeGroup.value = g.key
+          }}
+        >
+          {g.label}
+          <span class="ml-1 text-xs opacity-70">{g.items.length}</span>
+        </button>
+      ))}
+    </div>
+  )
+
   const taskCards = () =>
-    tasks.value.length === 0 ? (
+    activeGroup.value === PIPELINES_TAB ? (
+      <div class="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+        {pipelineRows.value.map((p) => (
+          <div key={p.id} class="card bg-base-100 shadow-sm">
+            <div class="card-body">
+              <h3 class="card-title text-base">
+                {p.name}
+                <span class="badge badge-soft badge-sm">{p.enabled ? '已启用' : '已停用'}</span>
+              </h3>
+              <p class="text-sm opacity-70">{p.steps.length} 步</p>
+              <div class="card-actions justify-end">
+                <button
+                  type="button"
+                  class="btn btn-soft btn-sm"
+                  onClick={() => {
+                    location.hash = '#/pipelines'
+                  }}
+                >
+                  打开编排页
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
+        {pipelineRows.value.length === 0 ? (
+          <div class="card bg-base-100 shadow-sm">
+            <div class="card-body">
+              <EmptyState
+                title="还没有编排。"
+                hint="编排就是「把多个任务串成一条链」—— 到编排页新建一条。"
+                action={
+                  <button
+                    type="button"
+                    class="btn btn-soft"
+                    onClick={() => {
+                      location.hash = '#/pipelines'
+                    }}
+                  >
+                    去编排页
+                  </button>
+                }
+              />
+            </div>
+          </div>
+        ) : null}
+      </div>
+    ) : tasks.value.length === 0 ? (
       <div class="card bg-base-100 shadow-sm">
         <div class="card-body">
           <EmptyState
@@ -433,43 +567,8 @@ export const TasksPage = () => {
         </div>
       </div>
     ) : (
-      <div class="flex flex-col gap-4">
-        {/*
-          分组**用 tab 切**，不是一栏一栏往下堆（用户口径 2026-10-01）。
-          堆叠的版本在手机上要滚很久，而且"我现在看的是哪一组"全靠眼力；
-          tab 一次只看一组，这一排就是导航。分组名与顺序都来自后端。
-
-          ⚠ 这里**不能**用 daisyUI 的 `tabs`/`tab`/`tab-active`：本项目的
-          `app.css` 把 `tab` 组件 exclude 掉了（"tab 则是换成了 join+btn"），
-          用了它的类样式会**静默消失** —— 页面只剩一排没有任何样式的文字
-          （2026-10-01 实际踩到：截图里三个组名连成一行）。
-          照仓库口径用 `join` + `btn`，选中态用 `btn-primary`（与账号页的平台切换同一套）。
-          窄屏放不下时整排可横滑，不换行也不撑破。
-        */}
-        <div
-          role="tablist"
-          class="join w-full overflow-x-auto"
-          aria-label="任务分组"
-        >
-          {groups().map((g) => (
-            <button
-              key={g.key}
-              type="button"
-              role="tab"
-              aria-selected={currentGroup()?.key === g.key}
-              class={`btn join-item btn-sm min-h-11 whitespace-nowrap md:min-h-0 ${currentGroup()?.key === g.key ? 'btn-primary' : 'btn-soft'}`}
-              onClick={() => {
-                activeGroup.value = g.key
-              }}
-            >
-              {g.label}
-              <span class="ml-1 text-xs opacity-70">{g.items.length}</span>
-            </button>
-          ))}
-        </div>
-
-        <div class="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-          {(currentGroup()?.items ?? []).map((t) => (
+      <div class="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+        {(currentGroup()?.items ?? []).map((t) => (
                 <div key={t.name} class="card bg-base-100 shadow-sm">
                   <div class="card-body">
                     <h3 class="card-title text-base">
@@ -506,7 +605,6 @@ export const TasksPage = () => {
             </div>
           ))}
         </div>
-      </div>
     )
 
   // 配置子路由：整页换成配置视图（用户口径："给任务出个单独的配置页面"）
@@ -557,7 +655,15 @@ export const TasksPage = () => {
               </span>
             </div>
           ) : null}
-          {taskCards()}
+          {/*
+            ⚠ tab 排在 `taskCards()` **外面**：分组导航必须一直在（切到「编排」也要能切回来）。
+            原来的写法把它塞进了 `taskCards()` 的最后一个分支，于是"点了编排就回不去"
+            —— 2026-10-02 用户报的「你的 tabs 呢」就是这个。见 `groupTabs()` 的注释。
+          */}
+          <div class="flex flex-col gap-4">
+            {groupTabs()}
+            {taskCards()}
+          </div>
           {lines.value.length > 0 ? <LogPanel lines={lines.value} /> : null}
         </>
       ) : null}

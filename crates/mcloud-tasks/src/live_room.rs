@@ -1624,7 +1624,6 @@ impl<'a> LiveRoomRun<'a> {
     /// 真因被盖住，排查方向会从"今天是不是没开播"开始 —— **完全错**。
     ///
     /// ⇒ 这里把失败原样返回，要不要继续由**调用方**决定 ——
-    /// 想"不发请求先看看参数怎么拆"用 `dryRun`（它是纯本地的，见 `run`）。
     ///
     /// # 证据等级
     ///
@@ -1696,7 +1695,7 @@ impl<'a> LiveRoomRun<'a> {
 
 /// `live-room`：口令 → 小红花六步链。
 ///
-/// 参数见 [`Task::params`]（`codes` / `listenSeconds` / `dryRun` 等）。
+/// 参数见 [`Task::params`]（`codes` / `listenSeconds` 等）。
 ///
 /// # ⚠ 它与 `red-flower` 的分工
 ///
@@ -1758,7 +1757,6 @@ impl Task for LiveRoomTask {
                 "听多久弹幕来抓口令（参考实现的默认是 60 秒）",
             ),
             ParamSpec::boolean("skipKouling", "跳过听弹幕", false, "直接用上面填的口令去领"),
-            ParamSpec::boolean("dryRun", "试运行", false, "只查询、不真的领取"),
         ]
     }
 
@@ -1777,7 +1775,6 @@ impl Task for LiveRoomTask {
         }
 
         let params = LiveRoomRun::params_from_body(body);
-        let dry_run = body.get("dryRun").and_then(Value::as_bool).unwrap_or(false);
 
         // ⚠ 参数校验：判据在 [`LiveRoomParams::check`]（只有一份），
         // 而**措辞在这里** —— 领域层里那句"互斥"没有 flag 名，
@@ -1790,19 +1787,6 @@ impl Task for LiveRoomTask {
                 LiveRoomFault::ListenNotPositive => "listenSeconds 必须是正数",
             };
             return Err(Error::Config(format!("{wording}（{}）", fault.describe())));
-        }
-
-        if dry_run {
-            ctx.info("演练模式：只校验参数与口令拆分，不发任何请求");
-            return Ok(TaskOutcome::success(format!(
-                "演练完成：识别出 {} 个口令（{}）",
-                params.codes.len(),
-                if params.codes.is_empty() {
-                    "未提供 codes".to_string()
-                } else {
-                    params.codes.join("、")
-                }
-            )));
         }
 
         // 🌸 门在这里接上了：`LiveRoomRun::run_account` 会在**需要收口令**时
@@ -1877,10 +1861,11 @@ impl Task for RedFlowerTask {
     }
 
     fn params(&self) -> Vec<ParamSpec> {
-        vec![
-            ParamSpec::text("codes", "口令", "要领取的口令；多个用逗号或换行分隔"),
-            ParamSpec::boolean("dryRun", "试运行", false, "只查询、不真的领取"),
-        ]
+        vec![ParamSpec::text(
+            "codes",
+            "口令",
+            "要领取的口令；多个用逗号或换行分隔",
+        )]
     }
 
     async fn run(&self, ctx: &TaskContext, body: &Value) -> TaskResult {
@@ -1902,15 +1887,6 @@ impl Task for RedFlowerTask {
             return Err(Error::Config(
                 "red-flower 需要 codes：它不收集弹幕，没有别的口令来源".into(),
             ));
-        }
-
-        let dry_run = body.get("dryRun").and_then(Value::as_bool).unwrap_or(false);
-        if dry_run {
-            return Ok(TaskOutcome::success(format!(
-                "演练完成：将用 {} 个口令领取小红花（{}）",
-                codes.len(),
-                codes.join("、")
-            )));
         }
 
         // ⚠ 这一支**不需要门**（不收集）：`skip_kouling = true` 且 codes 非空

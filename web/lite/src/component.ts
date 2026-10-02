@@ -16,6 +16,7 @@
  */
 
 import { type Nodes, insert, onRemove, createNodes, remove, queueMount } from './dom'
+import { ownedEffects } from './signal'
 
 export interface Slots {
   default?: () => unknown
@@ -46,7 +47,33 @@ export function createComponent<P>(Comp: Component<P>, props: P, slots: Slots = 
   current = inst
   let nodes: Nodes
   try {
-    nodes = createNodes(Comp(props, { slots }))
+    /**
+     * ⚠⚠ 组件体里那些**公开 `effect()`** 建的 effect 必须有归属 —— 这是 2026-10-02
+     * 那轮内存泄漏的**根因** ✓。
+     *
+     * 症状：切页若干轮之后 DOM 节点与监听器一路涨、GC 之后堆不回落；堆快照的回溯链是
+     * `模块级信号 → subs → Effect(fn) → 闭包 → 已脱离文档的 DOM` ✓。
+     *
+     * 为什么：`compiler.ts` 把**动态属性**编成公开的 `effect(() => setClass(…))`
+     * （见它 `case 'attr'` 那条 ✓），而公开 `effect()` 只把自己交给 `signal.ts` 的
+     * `scope`（由 `ownedEffects()` 设 ✓）—— 可 `createComponent` **从来没建过作用域** ✗，
+     * 全仓 `ownedEffects` 只有 `control.ts` 里那一处（那是**列表行**的收口 ✓，粒度更细 ✓）。
+     * ⇒ 组件体里的 effect **谁都不管**，页面卸载时没人 `dispose` ✗。
+     *
+     * ⚠ 只有"读了**长命**信号"的那些才显形（模块级的 `opened` / `activeGroup` 这类）：
+     * 长命信号攥着 effect ⇒ effect 攥着已脱离文档的 DOM ⇒ 谁都回收不了 ✗。
+     * 只读页面内局部信号的 effect 会跟着那棵树一起被 GC ✓ —— 所以不是每一页都在漏 ✓
+     * （实测 accounts / pipelines / history 的 Δ 就是 0 ✓）。
+     *
+     * ⚠ 与 `dom.ts` 那套"按节点记账"**不冲突**：`setNodes` / `createFor` 走内部的
+     * `newEffect()`（**不查** `scope` ✓），列表删一行仍然只停那一行 ✓。
+     *
+     * ⚠ `dispose()` 是幂等的 ✓，所以这里**不做去重**：一条 effect 只可能被登记一次 ✓
+     * （它就是在这一段里建的 ✓）。
+     */
+    nodes = createNodes(
+      ownedEffects((e) => inst.unmounts.push(() => e.dispose()), () => Comp(props, { slots })),
+    )
   } finally {
     current = prev
   }
