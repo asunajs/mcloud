@@ -1,0 +1,160 @@
+/**
+ * 前端内存泄漏量测（真浏览器 + CDP）。
+ *
+ * # 为什么要有这个脚本
+ *
+ * 用户口径（2026-10-02）：「前端 js 内存占用又**从 4M 提升到了 8M**」。
+ * 当场的证据是 Safari 计数器（JS 堆 10.6 MB / DOM nodes 8654）。这个脚本把它
+ * 变成**可复现的读数**：切页若干轮之后，看还能不能回到基线。
+ *
+ * # 判据（两条，缺一不可）
+ *
+ * 1. `Runtime.getHeapUsage`：**必须每步先 `HeapProfiler.collectGarbage`** ——
+ *    不 GC 读到的是"还没回收的垃圾"，会虚高好几 M，看着像泄漏其实不是 ✗。
+ * 2. `Memory.getDOMCounters`：`nodes` 是**包含脱离文档**的节点的 ⇒ 和
+ *    `document.querySelectorAll('*').length` 一比就能判断"是留在文档里"还是
+ *    "脱离文档却还被引用"。后者才是 JS 保留泄漏（实测过一次：CDP 数到 3438，
+ *    文档里只有 318）。
+ *
+ * # ⚠ 停留时间必须够
+ *
+ * 每页停留 `DWELL_MS`（默认 2500）。停太短测的是"请求还在路上"的中间态 ——
+ * 那是另一个现象，会把它误判成泄漏 ✗。
+ *
+ * # 用法
+ *
+ * ```bash
+ * cd web && node lite/regress/leak.mjs          # 打印每页与整轮的 Δ
+ * ```
+ *
+ * ⚠ 调试端口用 9480（**不要用门禁的 9491/9496**：撞端口会让门禁连到这个残留浏览器上，
+ *   2026-10-02 就因此误红过一次）。
+ */
+import fs from 'node:fs'
+import http from 'node:http'
+import os from 'node:os'
+import path from 'node:path'
+import { openSession, sleep, hashRoute } from './lib.mjs'
+
+const WEB = path.resolve(import.meta.dirname, '..', '..')
+const PORT = 48980
+const DWELL_MS = 2500
+const IDLE_MS = 800
+const ROUNDS = Number(process.env.LEAK_ROUNDS ?? 5)
+/** 每次访问允许的净增长（节点数）。低于它就是噪声（字体/滚动条/门禁自身的探针）。 */
+const NODE_BUDGET = 40
+
+/** 每页访问 ROUNDS 次，记录 Δ；整轮跑一遍全部路由，记录总 Δ。 */
+const PAGES = ['accounts', 'tasks', 'exchange', 'live-room', 'schedules', 'pipelines', 'history', 'settings']
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+}
+
+/** 量测要的接口：真实服务 + 已登录的 cookie。 */
+const COOKIE_FILE = process.env.MCLOUD_COOKIE_FILE ?? '/tmp/mcloud-cookie.txt'
+
+function cookie(): string {
+  const raw = fs.readFileSync(COOKIE_FILE, 'utf8')
+  const line = raw.split('\n').find((l) => l.includes('mcloud_session'))
+  if (!line) throw new Error(`${COOKIE_FILE} 里没有 mcloud_session —— 先去登录一次，把 cookie 存进去`)
+  return line.trim().split('\t').pop()
+}
+
+const server = http.createServer((req, res) => {
+  if (req.url.startsWith('/api')) {
+    const up = http.request(
+      { host: '127.0.0.1', port: 3000, path: req.url, method: req.method,
+        headers: { ...req.headers, host: '127.0.0.1:3000', cookie: `mcloud_session=${cookie()}` } },
+      (r) => { res.writeHead(r.statusCode ?? 502, r.headers); r.pipe(res) },
+    )
+    up.on('error', () => res.writeHead(502).end('proxy error'))
+    req.pipe(up)
+    return
+  }
+  const p = new URL(req.url, 'http://x').pathname
+  const f = path.join(WEB, 'dist', p === '/' ? 'index.html' : p)
+  if (fs.existsSync(f) && fs.statSync(f).isFile()) {
+    res.writeHead(200, { 'content-type': MIME[path.extname(f)] ?? 'application/octet-stream' })
+    fs.createReadStream(f).pipe(res)
+    return
+  }
+  res.writeHead(404).end('not found')
+})
+
+let fail = 0
+let session
+try {
+  await new Promise((r) => server.listen(PORT, '127.0.0.1', r))
+  session = await openSession({
+    port: PORT,
+    route: hashRoute('dashboard'),
+    debugPort: 9480,
+    profile: fs.mkdtempSync(path.join(os.tmpdir(), 'mcloud-leak-')),
+    width: 1280,
+  })
+  const { cdp } = session
+  const ev = async (expr) => {
+    const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true })
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.text ?? 'evaluate 挂了')
+    return r.result?.value
+  }
+  const sample = async () => {
+    await cdp.send('HeapProfiler.collectGarbage')
+    await sleep(150)
+    await cdp.send('HeapProfiler.collectGarbage')
+    await sleep(150)
+    const u = await cdp.send('Runtime.getHeapUsage')
+    const d = await cdp.send('Memory.getDOMCounters').catch(() => ({}))
+    const inDoc = await ev(`document.querySelectorAll('*').length`)
+    return { mb: u.usedSize / 1048576, nodes: d.nodes ?? 0, listeners: d.jsEventListeners ?? 0, inDoc }
+  }
+
+  console.log(`每页访问 ${ROUNDS} 次（每次停留 ${DWELL_MS}ms），Δ 为 GC 之后的净增长：\n`)
+  console.log('页面          Δ节点   Δ监听   Δ堆(MB)')
+  for (const page of PAGES) {
+    await ev(`location.hash = '#/dashboard'`)
+    await sleep(IDLE_MS)
+    const a = await sample()
+    for (let i = 0; i < ROUNDS; i++) {
+      await ev(`location.hash = '#/${page}'`)
+      await sleep(DWELL_MS)
+      await ev(`location.hash = '#/dashboard'`)
+      await sleep(IDLE_MS)
+    }
+    await sleep(400)
+    const b = await sample()
+    const per = (b.nodes - a.nodes) / ROUNDS
+    const ok = per <= NODE_BUDGET
+    if (!ok) fail++
+    const sign = (n) => (n >= 0 ? '+' : '') + n
+    console.log(
+      `${page.padEnd(11)} ${sign(b.nodes - a.nodes).padStart(6)}  ${sign(b.listeners - a.listeners).padStart(6)}  ${sign(+(b.mb - a.mb).toFixed(2)).padStart(7)}   ${ok ? '✓' : `✗ 每次访问留下 ${per.toFixed(0)} 个节点`}`,
+    )
+  }
+
+  const before = await sample()
+  for (let r = 0; r < ROUNDS; r++) {
+    for (const p of PAGES) {
+      await ev(`location.hash = '#/${p}'`)
+      await sleep(DWELL_MS * 0.4)
+    }
+  }
+  await sleep(600)
+  const after = await sample()
+  console.log(`\n全路由 ${ROUNDS} 轮：节点 ${before.nodes} → ${after.nodes}，监听 ${before.listeners} → ${after.listeners}，堆 ${before.mb.toFixed(2)} → ${after.mb.toFixed(2)} MB`)
+  console.log(`（文档里实际只有 ${after.inDoc} 个元素 —— 两者差得越多，说明"脱离文档却还活着"的越多）`)
+  if (after.nodes - before.nodes > NODE_BUDGET * ROUNDS * 2) fail++
+} finally {
+  try { session?.child.kill('SIGKILL') } catch { /* 已死 */ }
+  server.close()
+}
+
+if (fail) {
+  console.log(`\n✗ ${fail} 项超预算（每次访问净增 > ${NODE_BUDGET} 节点就算泄漏）`)
+  process.exit(1)
+}
+console.log('\n✅ 都在预算内')
