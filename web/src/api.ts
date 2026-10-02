@@ -507,6 +507,13 @@ export interface KoulingPoolView {
   codes: PoolCode[]
   /** 下一场的开播时间 —— 预告场给的**本地**字符串，界面**原样**显示（它没有时区）。 */
   nextStart: string | null
+  /**
+   * 下一场是**哪一间**（房间标题）。
+   *
+   * 用户口径（2026-10-02）：「你这 10 月 2 号不是目标直播间吧」——
+   * 只写时间根本分不出是不是自己那场 ⇒ 后端把标题一起给（与 `nextStart` 同源同一次选择）。
+   */
+  nextTitle: string | null
   /** 上面那个日程是什么时候探测到的（`null` = 还没探测过 —— 别渲染成空白 ✗）。 */
   scheduleAtMs: number | null
   /** 观测到的场次（**新的在前**）。`endedAtMs: null` = 还在播。 */

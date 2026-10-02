@@ -97,6 +97,12 @@ use mcloud_upstream::live_ws_client::{self, ListenRequest, LiveWsEndpoint};
 ///
 /// ⚠ 这里是"日程不能跟着丢"的落点：判定门只留"正在直播"，
 /// 而"下一场几点"读的恰恰是 `status == 0` 那张预告场的 `expectStartTime`。
+///
+/// ⚠⚠ 主播昵称**必须一起带走**（用户口径 2026-10-02）：
+/// 上游那份列表里**别的主播也在**（判定门注释里的实拍 147490），
+/// 不带上昵称，池子就分不出"哪一场是那个主播的"，界面上那行「下一场」
+/// 会指向**别人的场次** —— 用户看到 10-02 那场直接反问
+/// 「你这 10 月 2 号不是目标直播间吧」。
 fn schedule_rooms(rooms: &[mcloud_upstream::live_room::LiveRoom]) -> Vec<mcloud_core::ProbeRoom> {
     rooms
         .iter()
@@ -105,6 +111,7 @@ fn schedule_rooms(rooms: &[mcloud_upstream::live_room::LiveRoom]) -> Vec<mcloud_
             title: r.title.clone(),
             status: r.status,
             expect_start_time: r.expect_start_time.clone(),
+            anchor_nickname: r.anchor_nickname.clone(),
         })
         .collect()
 }
@@ -1358,6 +1365,9 @@ impl<'a> LiveRoomRun<'a> {
             out.gate = judge_kouling_gate(&all_rooms);
             // ⚠ 把**全部**房间交给池（含门必然筛掉的预告与回放）：界面上那行
             // "下一场几点"读的就是预告场的时间。只留门认可的那几间 ⇒ 日历就丢了。
+            // ⚠⚠ 但"全部"里混着**别的主播** ⇒ 得告诉池"我们只关心哪个主播"，
+            // 否则「下一场」会挑到别人的场次（用户口径 2026-10-02）。
+            pool.note_schedule_anchor(mcloud_upstream::live_consts::KOULING_ANCHOR);
             pool.note_probe(&schedule_rooms(&all_rooms), out.gate.active, now_ms);
             // ⚠ 记"我开抓了"必须在**动手之前**：收集要听满 listenSeconds（默认 60 秒），
             // 抓完再记 = 整个窗口都敞着，别的账号照样扑上来。

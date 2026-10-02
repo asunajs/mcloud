@@ -808,7 +808,15 @@ export const LiveRoomPage = () => {
           {p.nextStart ? (
             <p class="break-words text-sm">
               下一场：<span class="font-mono">{p.nextStart}</span>
-              <span class="text-xs opacity-50">（上游给的本地时间，原样显示）</span>
+              {/*
+                ⚠ 标题要跟着时间一起显示（用户口径 2026-10-02）：
+                只写"10-02 15:00"根本看不出是不是自己要看的那个直播间 ——
+                后端现在按**目标主播**筛、取最早一场，标题就是那一场的场次名。
+              */}
+              {p.nextTitle ? <span class="opacity-80">{` ${p.nextTitle}`}</span> : null}
+              <span class="text-xs opacity-50">
+                （目标主播最早那一场；时间是上游给的本地时间，原样显示）
+              </span>
             </p>
           ) : (
             <p class="text-sm opacity-60">

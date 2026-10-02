@@ -72,6 +72,20 @@ pub struct ProbeRoom {
     /// ⚠ **不要**解析成时间戳：它没有时区，解析只会凭空造出一个错误的时刻。
     /// 界面**原样显示**它。
     pub expect_start_time: String,
+    /// 主播昵称（上游 `anchor.nickname` 的原样，判定门的真正判据）。
+    ///
+    /// # 为什么必须留着它（用户口径 2026-10-02）
+    ///
+    /// 上游那份房间列表里**别的主播也在**（判定门的注释记着实拍 147490：
+    /// 只看 `status == 1` 会误判成"那个主播在播"）。原先这里没留昵称
+    /// ⇒ 池子分不出"哪一场是那个主播的" ⇒ 界面上那行「下一场」取到了
+    /// **别人的场次**，用户看到 10-02 那场直接反问：
+    /// 「你这 10 月 2 号**不是目标直播间**吧」。
+    ///
+    /// ⚠ `serde(default)`：池是**持久化**的（`kouling-pool.json`），
+    /// 加字段必须能读旧文件（旧文件读出来是空串 ⇒ 退回"不筛"的旧行为）。
+    #[serde(default)]
+    pub anchor_nickname: String,
 }
 
 /// 观测到的一场直播：门开 ⇒ 开场；门关到过了宽限 ⇒ 散场。
@@ -207,6 +221,13 @@ pub struct KoulingPool {
     pub schedule: Vec<ProbeRoom>,
     /// 上面那份日程是什么时候看到的。
     pub schedule_at_ms: Option<i64>,
+    /// 这份日程是**哪个主播**的 —— 挑「下一场」时按它筛。
+    ///
+    /// 上游列表混着别的主播 ⇒ 不筛的话那行「下一场」会指向别人的场次 ✗
+    /// （用户口径 2026-10-02：「你这 10 月 2 号不是目标直播间吧」）。
+    /// ⚠ `None` = 还没记过（老池文件）⇒ 退回"不筛"的旧行为，界面照旧有东西显示。
+    #[serde(default)]
+    pub schedule_anchor: Option<String>,
     /// 观测到的场次（新的在后）。**不随周期翻篇清空** —— 它是历史。
     pub sessions: Vec<LiveSession>,
 }
@@ -266,15 +287,59 @@ impl KoulingPool {
         }
     }
 
-    /// 下一场的开播时间（预告场的 `expect_start_time`，**原样**）。
+    /// 下一场的开播时间（**目标主播**的预告场里最早那条的 `expect_start_time`，原样）。
     ///
     /// 判据与判定门**无关**：门只认 `status == 1`，这里要的恰恰是 `status == 0`。
     /// 没有预告场 ⇒ `None`（不是空串 —— 界面要能区分"没有下一场"与"上游没给时间"）。
+    ///
+    /// # ⚠ 为什么要按主播筛、又要按时间排（用户口径 2026-10-02）
+    ///
+    /// 上游列表里**混着别的主播**（判定门注释里的实拍 147490）。原先这里取的是
+    /// "列表里第一条 `status == 0`" ⇒ 界面上「下一场」指向了**别人的场次** ✗。
+    /// 现在：先按 [`Self::schedule_anchor`] 筛，再取**时间最早**的一条。
+    ///
+    /// ⚠ 比字符串就够了：`YYYY-MM-DD HH:MM:SS` 定长且**字典序等于时间序**。
+    ///   不要解析成时间戳 —— 它没有时区，解析只会造出一个错的时刻。
     pub fn next_start(&self) -> Option<&str> {
+        self.next_room().map(|r| r.expect_start_time.as_str())
+    }
+
+    /// 下一场是哪一间（标题要用它）。
+    pub fn next_room(&self) -> Option<&ProbeRoom> {
+        // 先按目标主播挑；挑不到就退回"全部房间"——
+        // 老池文件里 `anchor_nickname` 是空的（`serde(default)`），
+        // 那种情况下"显示一个可能是别人的场次"也比"突然变空白"好。
+        self.earliest_preview(true)
+            .or_else(|| self.earliest_preview(false))
+    }
+
+    /// 下一场的房间标题 —— 预告场的标题常常写的就是场次名，
+    /// 界面带上它，用户一眼就能看出"这是不是我那场"。
+    pub fn next_title(&self) -> Option<&str> {
+        self.next_room()
+            .map(|r| r.title.as_str())
+            .filter(|t| !t.is_empty())
+    }
+
+    /// 最早的一条预告场。`only_target` ⇒ 只算目标主播那些房间。
+    fn earliest_preview(&self, only_target: bool) -> Option<&ProbeRoom> {
+        let target = self.schedule_anchor.as_deref();
         self.schedule
             .iter()
-            .find(|r| r.status == 0 && !r.expect_start_time.is_empty())
-            .map(|r| r.expect_start_time.as_str())
+            .filter(|r| r.status == 0 && !r.expect_start_time.is_empty())
+            .filter(|r| !only_target || target == Some(r.anchor_nickname.as_str()))
+            .min_by(|a, b| a.expect_start_time.cmp(&b.expect_start_time))
+    }
+
+    /// 记下"这份日程属于哪个主播"（挑「下一场」时按它筛，见 [`Self::next_start`]）。
+    ///
+    /// ⚠ 与 [`Self::note_probe`] 分开一个方法：`note_probe` 的调用点很多，
+    /// 而"目标主播是谁"是链上才知道的事（常量在 `mcloud-upstream`），
+    /// 不该让 `mcloud-core` 为了它多一个依赖方向反过来的参数。
+    pub fn note_schedule_anchor(&mut self, anchor: &str) {
+        if !anchor.is_empty() {
+            self.schedule_anchor = Some(anchor.to_string());
+        }
     }
 
     /// 记一次探测看到的东西：**全部房间**（含预告/回放）+ 门开没开。
@@ -517,6 +582,7 @@ impl KoulingPool {
             stop_scraping: self.stop_scraping(),
             codes: self.codes.clone(),
             next_start: self.next_start().map(str::to_string),
+            next_title: self.next_title().map(str::to_string),
             schedule_at_ms: self.schedule_at_ms,
             sessions: {
                 // 界面要"最近几场"，所以**新的在前**（存的时候是新的在后）。
@@ -542,6 +608,12 @@ pub struct PoolSummary {
     /// ⚠ 它来自"最近一次探测"，所以**没跑过任务时是 `None`** ——
     /// 界面必须能说清"还没探测过"，而不是显示一个空白。
     pub next_start: Option<String>,
+    /// 下一场是**哪一间**（房间标题）—— 预告场的标题常常写的就是场次名。
+    ///
+    /// 用户口径（2026-10-02）：界面上只写时间的话，看到"10-02 15:00"根本分不出
+    /// 是不是自己要看的那个直播间 ⇒ 把标题一起带上，一眼可辨。
+    /// ⚠ 与 `next_start` 同源同一次选择：两者要么都有，要么都没有。
+    pub next_title: Option<String>,
     /// 下一场是什么时候探测到的（用来判断上面那个时间还新不新）。
     pub schedule_at_ms: Option<i64>,
     /// 观测到的场次（新的在前，界面上"最近几场"）。
@@ -714,12 +786,14 @@ mod tests {
                 title: "下一场".into(),
                 status: 0,
                 expect_start_time: "2026-09-23 14:30:00".into(),
+                anchor_nickname: "中国移动云盘".into(),
             },
             ProbeRoom {
                 room_id: 147607,
                 title: "上一场回放".into(),
                 status: 2,
                 expect_start_time: "2026-09-22 14:30:00".into(),
+                anchor_nickname: "中国移动云盘".into(),
             },
         ];
         p.note_probe(&rooms, false, T0);
@@ -740,6 +814,100 @@ mod tests {
         );
     }
 
+    /// ⭐ 「下一场」**只认目标主播**，并在它那些场次里取**最早**的一场。
+    ///
+    /// 用户口径（2026-10-02）：「你这 10 月 2 号**不是目标直播间**吧」——
+    /// 上游那份列表混着别的主播（判定门注释里的实拍 147490）。
+    /// 原先 `next_start` 取的是"列表里第一条 `status == 0`" ⇒ 指向别人的场次 ✗。
+    /// 这条用例把"别人的场次排在前面、而且时间更早"这种最容易骗过旧写法的形状钉住。
+    #[test]
+    fn next_start_prefers_the_target_anchor_then_earliest() {
+        let mut p = pool();
+        p.note_schedule_anchor("中国移动云盘");
+        let rooms = vec![
+            ProbeRoom {
+                room_id: 1,
+                title: "别的主播：今天 15:00".into(),
+                status: 0,
+                expect_start_time: "2026-10-02 15:00:00".into(),
+                anchor_nickname: "另一个主播".into(),
+            },
+            ProbeRoom {
+                room_id: 2,
+                title: "云盘AI助职场加速！看直播赢好礼！".into(),
+                status: 0,
+                expect_start_time: "2026-10-09 14:30:00".into(),
+                anchor_nickname: "中国移动云盘".into(),
+            },
+            ProbeRoom {
+                room_id: 3,
+                title: "再晚一场".into(),
+                status: 0,
+                expect_start_time: "2026-10-10 10:00:00".into(),
+                anchor_nickname: "中国移动云盘".into(),
+            },
+        ];
+        p.note_probe(&rooms, false, T0);
+
+        assert_eq!(
+            p.next_start(),
+            Some("2026-10-09 14:30:00"),
+            "要挑**目标主播**里**最早**的一场，而不是列表第一条"
+        );
+        assert_eq!(
+            p.next_title(),
+            Some("云盘AI助职场加速！看直播赢好礼！"),
+            "标题要一起给 —— 界面靠它认出是不是自己那场"
+        );
+        assert_eq!(
+            p.summary().next_title.as_deref(),
+            Some("云盘AI助职场加速！看直播赢好礼！"),
+            "视图里也要带上（前端只拿得到 summary）"
+        );
+    }
+
+    /// ⚠ 老池文件里没有 `anchor_nickname`（`serde(default)` ⇒ 空串）：
+    /// 这种"一间都匹配不上"的情况**退回旧行为**（不筛），
+    /// 而不是让界面突然变空白 —— 宁可显示一个可能是别人的场次。
+    #[test]
+    fn next_start_falls_back_when_no_room_matches_the_anchor() {
+        let mut p = pool();
+        p.note_schedule_anchor("中国移动云盘");
+        p.note_probe(
+            &[ProbeRoom {
+                room_id: 1,
+                title: "旧数据：没存昵称".into(),
+                status: 0,
+                expect_start_time: "2026-10-02 15:00:00".into(),
+                anchor_nickname: String::new(),
+            }],
+            false,
+            T0,
+        );
+        assert_eq!(p.next_start(), Some("2026-10-02 15:00:00"));
+        assert_eq!(p.schedule_anchor.as_deref(), Some("中国移动云盘"));
+    }
+
+    /// ⚠ 池是**持久化**的：加了字段之后，旧 `kouling-pool.json` 必须还能读
+    /// （两个新字段都带 `serde(default)`）。
+    #[test]
+    fn pool_json_from_before_the_anchor_fields_still_loads() {
+        let old = r#"{"cycle_at_ms":0,"codes":[],"claims":{},
+            "last_live_at_ms":null,"gate_closed_at_ms":null,"last_xhs_at_ms":null,
+            "last_scrape_at_ms":null,
+            "schedule":[{"room_id":1,"title":"旧预告","status":0,
+                         "expect_start_time":"2026-10-02 15:00:00"}],
+            "schedule_at_ms":123,"sessions":[]}"#;
+        let p: KoulingPool = serde_json::from_str(old).expect("旧池文件必须还能读");
+        assert_eq!(p.schedule_anchor, None, "旧文件没有这个字段 ⇒ None");
+        assert_eq!(p.schedule[0].anchor_nickname, "", "旧房间也没有 ⇒ 空串");
+        assert_eq!(
+            p.next_start(),
+            Some("2026-10-02 15:00:00"),
+            "读得出来，而且退回不筛的旧行为"
+        );
+    }
+
     /// ⭐ 没有预告场 ⇒ `None`（不是空串：界面要能区分"没有下一场"与"上游没给时间"）。
     #[test]
     fn next_start_is_none_without_a_preview_room() {
@@ -750,6 +918,7 @@ mod tests {
                 title: "正在播".into(),
                 status: 1,
                 expect_start_time: String::new(),
+                anchor_nickname: "中国移动云盘".into(),
             }],
             true,
             T0,
