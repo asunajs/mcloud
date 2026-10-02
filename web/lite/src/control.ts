@@ -9,7 +9,7 @@
  */
 
 import { createNodes, insert, own, remove, type Nodes } from './dom'
-import { newEffect } from './signal'
+import { newEffect, ownedEffects, type Effect } from './signal'
 
 /**
  * 列表渲染。编译期把 `list.map((x) => <Row/>)` 折成这里（Solid 是交给 `<For>` 组件，
@@ -102,7 +102,29 @@ export function createFor<T>(
       // 就抛 `NotFoundError: … is not a child of this node`（实测踩过）。
       let fresh = false
       if (!row) {
-        row = { item, i, nodes: createNodes(render(item, i)) }
+        /**
+         * ⚠⚠ 行内 effect 必须**挂到这一行的节点下**（2026-10-02 内存泄漏修复）。
+         *
+         * 编译器把 `key=` 列表里的动态绑定编成**行内**的 `effect(...)`（实测产物：
+         * `createFor(…, (t) => { effect(() => setProp(btn, "disabled", running.value)); … })`）。
+         * 那些 effect 是在**渲染回调里**建的 —— 既不在组件作用域里（`scope` 为空 ✗），
+         * 也不在 `owners` 里 ⇒ `remove(row.nodes)` 只摘走 DOM、**不销毁它们** ✗
+         * ⇒ 它们继续订阅着模块级信号（`running` / `currentGroup`），而 `fn` 闭包又攥着
+         * 这一行的 DOM ⇒ 用户口径「切换页面后累计」正是这个：
+         * 任务页每次访问留下 16 个已脱离文档的可交互元素（8 张卡的「运行」+ 4 个分组标签
+         * + 3 个账号勾选框 + 1 个按钮），一次都不回收 ✓（堆快照回溯到的链是
+         * `模块作用域信号 → subs → Effect(fn) → closure → 已脱离文档的 DOM`）。
+         *
+         * 挂到 `nodes[0]` 下就落进了**现有的**销毁机制，不新增任何记账：
+         * `remove(row.nodes)` → `disposeTree(nodes[0])` → `owners` 里这批 effect 一起销毁 ✓。
+         */
+        const effs: Effect[] = []
+        const nodes = createNodes(ownedEffects((e) => effs.push(e), () => render(item, i)))
+        const first = nodes[0]
+        if (first) for (const e of effs) own(first, e)
+        // 空行（渲染成 null）：没有可挂的节点，直接销毁 —— 留着就是永久泄漏 ✗
+        else for (const e of effs) e.dispose()
+        row = { item, i, nodes }
         rows.set(k, row)
         fresh = true
       }

@@ -57,7 +57,7 @@ const MIME = {
 /** 量测要的接口：真实服务 + 已登录的 cookie。 */
 const COOKIE_FILE = process.env.MCLOUD_COOKIE_FILE ?? '/tmp/mcloud-cookie.txt'
 
-function cookie(): string {
+function cookie() {
   const raw = fs.readFileSync(COOKIE_FILE, 'utf8')
   const line = raw.split('\n').find((l) => l.includes('mcloud_session'))
   if (!line) throw new Error(`${COOKIE_FILE} 里没有 mcloud_session —— 先去登录一次，把 cookie 存进去`)
@@ -113,7 +113,19 @@ try {
     return { mb: u.usedSize / 1048576, nodes: d.nodes ?? 0, listeners: d.jsEventListeners ?? 0, inDoc }
   }
 
-  console.log(`每页访问 ${ROUNDS} 次（每次停留 ${DWELL_MS}ms），Δ 为 GC 之后的净增长：\n`)
+  /**
+   * ⚠ **必须先预热**：每个页面第一次加载会一次性留下东西（懒加载的 chunk、模块状态、
+   * 缓存 —— 实测 accounts +509 / exchange +387 个节点），那是**一次性成本**，不是泄漏。
+   * 不预热就会把它误报成"每次访问漏 170 个" ✗（实测：5 个来回与 12 个来回的 Δ 完全一样，
+   * 正说明它是一次性的）。预热之后每页的 Δ 才是"每访问一次漏多少" ✓。
+   */
+  for (const p of PAGES) {
+    await ev(`location.hash = '#/${p}'`)
+    await sleep(DWELL_MS)
+  }
+  await ev(`location.hash = '#/dashboard'`)
+  await sleep(IDLE_MS)
+  console.log(`每页访问 ${ROUNDS} 次（每次停留 ${DWELL_MS}ms，已预热），Δ 为 GC 之后的净增长：\n`)
   console.log('页面          Δ节点   Δ监听   Δ堆(MB)')
   for (const page of PAGES) {
     await ev(`location.hash = '#/dashboard'`)
