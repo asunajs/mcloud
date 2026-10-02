@@ -9,10 +9,10 @@
 
 | 指标 | 现在 | 怎么量 |
 |---|---|---|
-| 运行时 gzip（全量导出） | **2,435 B**（raw 5,531） | `node web/lite/size.mjs` |
-| 运行时 gzip（不含只有 demo/bench 用的内部件） | **2,421 B**（raw 5,488） | 同上 |
+| 运行时 gzip（全量导出） | **2,456 B**（raw 5,598） | `node web/lite/size.mjs` |
+| 运行时 gzip（不含只有 demo/bench 用的内部件） | **2,442 B**（raw 5,555） | 同上 |
 | 主产物 JS（单 chunk：业务 + 运行时 + 编译胶水） | **120.65 kB** / gzip **32.92 kB** | `cd web && npm run build` |
-| └ 其中运行时占 | gzip **2.42 kB** ≈ 全量的 **7.4%** | 上面两行相除 |
+| └ 其中运行时占 | gzip **2.44 kB** ≈ 全量的 **7.4%** | 上面两行相除 |
 | 主产物 CSS（Tailwind + daisyUI） | 47.81 kB / gzip **9.91 kB** | 同上 |
 | 挂载 1000 行（编译产物） | **2.5–5.9 ms**（best of 3） | `node web/lite/bench/run.mjs` |
 | 反转 2000 行 ×10 | **8.6–12 ms** ⚠ 唯一劣化项 | 同上 |
@@ -286,8 +286,8 @@ Vite 8 / Rolldown / es2022 / 默认压缩器生产构建后 gzip：
 
 | 裁剪 | raw | gzip |
 |---|---|---|
-| 全量（= `src/index.ts` 导出的全部） | 5,531 | **2,435** |
-| 再去掉只有 demo/bench 用的内部件 | 5,488 | **2,421** |
+| 全量（= `src/index.ts` 导出的全部） | 5,598 | **2,456** |
+| 再去掉只有 demo/bench 用的内部件 | 5,555 | **2,442** |
 
 参照：Solid 核心 ≈7 KB gzip，Vue Vapor 的地板 16,344 B gzip ⇒ 现在是它们的 1/2.9 与 1/6.7。
 
@@ -341,7 +341,8 @@ Vite 8 / Rolldown / es2022 / 默认压缩器生产构建后 gzip：
 | 9 | `974466a` | 碎片槽内容与占位绑定（`lazySlot` 记账 `{fn,nodes,eff}`） | 2,620 | 5,980 |
 | 10 | `258a7f6` | 堵上"文本快路径绕过锚点护栏"那个洞 | 2,620 | 5,985 |
 | 11 | `5c564c9` 09-30 | **删**兼容壳（`computed`/`field`/`createStore`/`renderEffect`/`defineVaporComponent`）＋**加**组件作用域 `ownedEffects`、`batch` 再入排空、循环护栏 | 2,808 | 6,147 |
-| 12 | 本次 | 诊断代码改成**编译期剥离**（`src/dev.ts` 的 `DEV = import.meta.env.DEV`）＋去掉只给告警用的 `where` 参数＋缩短两条守卫文案＋删死码 `setText` | **2,435** | 5,531 |
+| 12 | `c689e9c` | 诊断代码改成**编译期剥离**（`src/dev.ts` 的 `DEV = import.meta.env.DEV`）＋去掉只给告警用的 `where` 参数＋缩短两条守卫文案＋删死码 `setText` | 2,435 | 5,531 |
+| 13 | 本次 10-02 | **修内存泄漏**：三张登记表（`owners`/`slots`/`cleanups`）改 `WeakMap`、`disposeTree` 按**整棵子树**跑卸载钩子、`Effect.dispose()` 松开闭包、`own()` 清掉已销毁的 effect | **2,456** | 5,598 |
 
 ⇒ 那 **+1,146 B gzip 不是"框架长大了"**：除了第 1~3 档是把语法子集吃全，
 第 5~10 档每一档都对应一个**真机上崩过的现场**（详见

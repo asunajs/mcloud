@@ -67,6 +67,9 @@ const pending = new Set<Effect>()
 let nesting = 0
 const MAX_NESTING = 100
 
+/** `dispose()` 之后 `fn` 的落点：一个共享的空函数（不额外造闭包）。 */
+const EMPTY_FN = (): void => {}
+
 export class Effect {
   /** 我依赖了哪些信号 —— 重跑前要逐个解绑，否则依赖会越滚越大。 */
   readonly deps = new Set<RefImpl<unknown>>()
@@ -74,7 +77,15 @@ export class Effect {
   /** 已经销毁：不再跑，也不再被通知。见 `dispose()`。 */
   disposed = false
 
-  constructor(readonly fn: () => void) {
+  /**
+   * 这条副作用要跑的函数。
+   *
+   * ⚠ 不是 `readonly`：`dispose()` 会把它换成空函数，见那里的说明（不松开就是内存泄漏 ✗）。
+   */
+  fn: () => void
+
+  constructor(fn: () => void) {
+    this.fn = fn
     this.run()
   }
 
@@ -96,6 +107,16 @@ export class Effect {
     this.disposed = true
     for (const d of this.deps) d.subs.delete(this)
     this.deps.clear()
+    /**
+     * ⚠⚠ 必须**松开 `fn`**（2026-10-02 内存泄漏修复）。
+     *
+     * `fn` 是渲染闭包，里面攥着它铺进 DOM 的那批节点。只把 `disposed` 置真、
+     * 却继续持有闭包 ⇒ 那棵**已经脱离文档**的子树照样活着 —— 等于没销毁 ✗。
+     * 实测（用户报「前端 js 内存又从 4M 涨到 8M」）：切页 10 个来回后，
+     * 浏览器里的 DOM 计数 +2553，而文档里其实只有 318 个节点。
+     * 换成共享的空函数：不再跑得到（`run()` 有 `disposed` 守卫），也不会多一个闭包。
+     */
+    this.fn = EMPTY_FN
   }
 
   run(): void {

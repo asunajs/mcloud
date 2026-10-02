@@ -50,15 +50,43 @@ export function template(html: string): () => Node {
  * `Failed to execute 'insertBefore' on 'Node': … is not a child of this node`。
  * 真机（切页 + 全局状态更新）就会撞到 —— fixture 数据静止，所以三条闸门都没照出来。
  */
-const owners = new Map<Node, Effect[]>()
+/**
+ * 谁拥有这些 effect（父节点 → 它名下的 effect 列表）。
+ *
+ * ⚠⚠ **`WeakMap` 不是 `Map`**（2026-10-02，用户报「前端 js 内存又从 4M 涨到 8M」）。
+ *
+ * 实测到的泄漏链条：页面异步拿到数据时**用户已经切走了** ⇒ `setNodes` 往一棵
+ * **已脱离文档**的父节点上登记 effect ⇒ 父节点成了这里的**键** ✗ `Map` 强引用它
+ * ⇒ 整棵子树（实测：设置页每次访问留 5 个 `OPTION`+1 个 `SELECT`，10 次就是 50+10）
+ * 连同监听器永远活着 ✗。泄漏页正是"异步加载数据"的那四个（任务/设置/兑换/直播），
+ * 同步渲染的页面一个都不漏 —— 这条对应关系就是它。
+ *
+ * `WeakMap` 的语义正好治这个：**值（effect → 闭包 → 父节点）反过来引用键**时，
+ * 键仍可被回收（ephemeron 规则）⇒ 登记不再构成"活着"的理由 ✓。
+ * 表里只做按键的 get/set/delete/has，不需要遍历，所以换掉是等价的 ✓。
+ */
+const owners = new WeakMap<Node, Effect[]>()
 
 function own(parent: Node, eff: Effect): void {
   const list = owners.get(parent)
-  if (list) list.push(eff)
-  else owners.set(parent, [eff])
+  if (!list) {
+    owners.set(parent, [eff])
+    return
+  }
+  /**
+   * ⚠⚠ 顺手把**已销毁**的 effect 清出去（2026-10-02 内存泄漏修复）。
+   *
+   * 原先这里是 `list.push(eff)` —— 只长不消 ✗。长命的父节点（比如切页时被复用的容器）
+   * 每挂一次新内容就攒一条，攒下来的都是死 effect；而**死 effect 的闭包仍然攥着
+   * 它当年铺进 DOM 的那批节点**（`setNodes` 里的 `cur`）⇒ 即使那棵子树早就脱离了
+   * 文档，也一直被拽着 ✗。实测：任务页/兑换页切 10 个来回，浏览器 DOM 计数还涨 2500+。
+   */
+  const alive = list.filter((e) => !e.disposed)
+  alive.push(eff)
+  owners.set(parent, alive)
 }
 
-/** 销毁一棵（已被移除的）子树里登记过的所有 effect。 */
+/** 销毁一棵（已被移除的）子树里登记过的所有 effect **与卸载钩子**。 */
 function disposeTree(node: Node): void {
   // 子树里嵌着的碎片槽也要收（切页 / 条件分支整块移除时）
   if (slots.has(node)) removeSlot(node)
@@ -66,6 +94,24 @@ function disposeTree(node: Node): void {
   if (list) {
     owners.delete(node)
     for (const eff of list) eff.dispose()
+  }
+  /**
+   * ⚠⚠ 卸载钩子也必须**按整棵子树**收（2026-10-02 内存泄漏修复）。
+   *
+   * 原先只有 `remove(nodes)` 里那一句"取 `nodes[0]` 那把 key"会跑钩子 ⇒
+   * 父级摘整棵子树时，**子组件登记的 `onUnmounted` 永远不跑** ✗：
+   *   * 里面 `clearInterval` / 关 `EventSource` 的收尾全部落空
+   *     （设置页那个 ticker 就是这么活到刷新为止的）；
+   *   * 而且登记表里那条会一直拽着子树不放 —— 一个会话切几十次页，
+   *     正好就是用户看到的「4M → 8M」。
+   *
+   * 递归顺序是**父先子后**：`disposeTree` 本来就是从这个方向往下走的
+   * （effect 的销毁顺序与它一致），钩子跟着走，语义才统一。
+   */
+  const unmounts = cleanups.get(node)
+  if (unmounts) {
+    cleanups.delete(node)
+    for (const cb of unmounts) cb()
   }
   for (const child of node.childNodes) disposeTree(child)
 }
@@ -199,7 +245,12 @@ function flushMounted(): void {
  * 所以按占位记账 {fn, nodes, eff}，`remove()` 遇到占位就把 effect 与它插的**所有**节点一起收掉。
  */
 type Slot = { fn: () => unknown; nodes: Nodes; eff?: Effect }
-const slots = new Map<Node, Slot>()
+/**
+ * 占位节点 → 碎片槽。
+ *
+ * ⚠ 同上：`WeakMap`，理由见 `owners` 那段（占位也可能落在一条已断开的旧子树里 ✗）。
+ */
+const slots = new WeakMap<Node, Slot>()
 let pending: Node[] = []
 
 /** 收掉一个碎片槽：停 effect + 移除它插进去的内容（递归，碎片里可能还嵌槽）。 */
@@ -246,8 +297,14 @@ function flushSlots(): void {
  * 键用**节点数组的第一个节点**：组件卸载时它的节点整体被撤掉，
  * 用首节点就能把 `onUnmounted` 的钩子找回来。用 `Map` 而不是在节点上挂属性 ——
  * 不给 DOM 留任何自定义痕迹。
+ *
+ * ⚠⚠ 类型是 `WeakMap`，**不是 `Map`**（2026-10-02，用户报「前端 js 内存又从 4M 涨到 8M」）。
+ * `Map` 强引用键 ⇒ 只要有一条登记没被 `delete` 掉，那个节点（以及**它整棵子树、
+ * 它上面的所有监听器**）就永远活着。实测症状：切页 10 个来回后
+ * `jsEventListeners` +162、`nodes` +2739（都发生在"带 `onMounted` 的页面"上）。
+ * `WeakMap` 让"登记"本身不构成存活理由：节点该回收就回收，表里那条自然消失。
  */
-const cleanups = new Map<Node, (() => void)[]>()
+const cleanups = new WeakMap<Node, (() => void)[]>()
 
 export function onRemove(nodes: Nodes, cb: () => void): void {
   const key = nodes[0]
@@ -267,16 +324,11 @@ export function onRemove(nodes: Nodes, cb: () => void): void {
 export function remove(nodes: Nodes): void {
   // ⚠ 先收碎片槽：否则碎片内容成孤儿留下（真机症状：越刷新内容越多）
   for (const n of nodes) removeSlot(n)
-  // 先销毁这棵子树里的 effect，再摘节点：销毁只解绑订阅，不动 DOM
+  // 先销毁这棵子树里的 effect **与卸载钩子**，再摘节点：销毁只解绑订阅，不动 DOM。
+  // ⚠ 钩子的收尾现在归 `disposeTree` 管（它按整棵子树走）—— 这里**不要再单独跑一遍**
+  //   `nodes[0]` 那把 key：跑了就是同一条 `onUnmounted` 执行两次（关两次流、
+  //   clearInterval 两次），而且那份重复代码正是当初漏掉子组件的原因 ✗。
   for (const n of nodes) disposeTree(n)
-  const key = nodes[0]
-  if (key) {
-    const arr = cleanups.get(key)
-    if (arr) {
-      cleanups.delete(key)
-      for (const cb of arr) cb()
-    }
-  }
   for (const n of nodes) n.parentNode?.removeChild(n)
 }
 
