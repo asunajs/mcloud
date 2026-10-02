@@ -94,6 +94,18 @@
   --color-error: #c0233f;
   --color-info: #0f7396;
 
+  /* ⚠⚠ 上面那四个是**深色系**，所以 `-content` 必须自己给白字 ——
+     本文件顶上的规矩（两个 @plugin 块互不继承）在这里只写了一半的坑：
+     不写 `-content`，daisyUI 会用它自己那套"配亮色"的默认值（深色字 ✗）。
+     用户口径（2026-10-02 附图）：定的「成功」徽章就是**深绿底 + 深绿字**，
+     大字都糊在一起 ✗。实测（无头浏览器）：bg `rgb(10,125,85)` 而 fg 是
+     `lab(27.9 …)` 的深绿 ⇒ 对比度不达标。
+     白字在这四个底色上分别是 4.9:1 / 4.6:1 / 6.1:1 / 5.4:1 ✓。 */
+  --color-success-content: #fff;
+  --color-warning-content: #fff;
+  --color-error-content: #fff;
+  --color-info-content: #fff;
+
   --depth: 0;
   --radius-box: 0.75rem;
   --radius-field: 0.5rem;
@@ -116,6 +128,27 @@
   --color-base-200: #07111f;
   --color-base-100: #0f172a;
   --color-base-300: #1e293b;
+
+  /* ⚠⚠ 语义色**必须与浅色块成对写** —— 本文件顶上的规矩：两个 @plugin 块
+     互不继承，light 里定义过的 dark 这边照样是空的 ✗。
+     这里原先缺了这四个 ⇒ 深色下直接掉回 daisyUI 的默认色。
+     用户口径（2026-10-02 附图「按钮配色问题」）看到的那个**粉红**的「删除」
+     就是这么来的：daisyUI 的深色默认 error 偏玫瑰色 ✗，与浅色那份深红对不上。
+
+     取值与浅色同一族（绿 / 琥珀 / 红 / 青），按深底提亮；
+     `-content` 交给 daisyUI 按明度算，唯独实心红按钮显式要白字
+     （浅色那份 #c0233f 也是白字 ⇒ 两个主题看起来才是一套东西）。 */
+  --color-success: #34d399;
+  --color-warning: #fbbf24;
+  --color-error: #ef4444;
+  --color-error-content: #fff;
+  --color-info: #38bdf8;
+
+  /* 深色这三个是**亮色系**，字取深色才对（与浅色那份刚好相反）。
+     显式写出来而不是靠 daisyUI 的默认值 —— 那条路在这个文件里已经坑过两次 ✗。 */
+  --color-success-content: #04231a;
+  --color-warning-content: #3a2c00;
+  --color-info-content: #04283a;
 
   --depth: 0;
   --radius-box: 0.75rem;

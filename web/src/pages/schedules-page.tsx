@@ -361,9 +361,16 @@ export const SchedulesPage = () => {
       >
         {s.enabled ? '停用' : '启用'}
       </button>
+      {/*
+        ⚠ **平涂**（`btn-soft`），不是实心 —— 与 `pipelines` / `accounts` 同一条约定：
+        表格里的危险动作保持克制，**真正的确认在弹窗里那一下实心 `btn-error`**
+        （见 `ui/dialog.tsx`）。
+        用户口径（2026-10-02 附图「按钮配色问题」）：这一行原本是全仓唯一的实心红，
+        整行最扎眼的反而变成了「删除」✗。
+      */}
       <button
         type="button"
-        class="btn btn-sm btn-error min-h-11 md:min-h-0"
+        class="btn btn-sm btn-soft btn-error min-h-11 md:min-h-0"
         onClick={() => askDelete(s)}
       >
         删除
