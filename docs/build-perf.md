@@ -135,6 +135,54 @@ fingerprint（跑的是 `clippy-driver`），check 与 test 各是另一套（`.
 Linux/发布链路没量 ✗；② 第二遍已经是"增量复用后只剩链接"的形状，但严格说仍是
 `rustc` 的编译+链接总时长，纯链接的占比没有单独切出来 ✗。
 
+## 3.2 「写代码之外那一圈」怎么压（2026-10-03 实测，用户口径「太慢了」）
+
+先给结论，再说数据：**时间不是花在"编译慢"，而是花在"命令种类一换、整个依赖图重编一遍"** ✗。
+
+### 实测
+
+| 动作 | 耗时 |
+|---|---|
+| `cargo check -p mcloud-core`（改一处叶子 crate 之后，产物是热的） | **8.0 s** ✓ |
+| `cargo check -p mcloud-tasks` —— **那一档产物还是冷的时候** | **663.5 s** ✗ |
+| `cargo check -p mcloud-server` —— 同上 | **227.2 s** ✗ |
+| 同一档命令**再跑一遍**（没有新改动） | **7.6 s** ✓ |
+| `cargo check -p mcloud-tasks --all-targets`（多编一份 test 版） | **31.5 s**（≈ 4 倍 ✗） |
+| `cargo clippy --workspace --all-targets`（冷） | 19m13s ✗ |
+| `cargo test --workspace`（冷） | 27m14s ✗ |
+| └ 其中**真跑测试** | **1.17 s** ✓（717 个用例） |
+
+⇒ 两条读数：
+
+1. **只有第一次是贵的** ✓ —— 同一档命令补齐之后是秒级 ✓；而三档命令
+   （`check` / `clippy` / `test`）**各一套产物、互不复用** ✗ ⇒ 在一个回路里换着跑
+   = 把同一张图按三种口味各编一遍 ✗✗。
+2. **改中游 crate 的代价是它的下游** ✗ —— `mcloud-core` / `mcloud-tasks` /
+   `mcloud-engine` 是**全仓下游**，碰它们之后**任何**一档命令的第一遍都要重来 ✗。
+   ⇒ 一次编辑尽量只落在**一个** crate 里；碰了中游就先想清楚"这一轮要哪一档" ✓。
+
+### 口径：开发循环（照这个来，别改）
+
+```bash
+cargo check -p <刚改的那个 crate>      # 改完立刻自检：热的时候秒级 ✓（别用 --workspace）
+cargo test  -p <那个 crate>            # 要跑测试时：**只挑这一档**，别 check/test 来回换 ✗
+node scripts/gates-web.mjs             # 前端：≈110 s（三条要 Chrome 的已并行 ✓）
+```
+
+* ⚠ **提交前那四条全量**（`test --workspace` / `clippy --workspace --all-targets` /
+  `fmt --check` / `gates-web --full`）照旧要跑 ✓ —— 但**放后台跑** ✓，别在前台等 ✗
+  （前台等的那些分钟，正好拿来写下一处改动 ✓）。
+* ⚠ `cargo check --workspace --all-targets` 与 `cargo clippy --workspace --all-targets`
+  **是同一张图的两次编** ✗ ⇒ 两条里**只留一条**（clippy 覆盖 check 的全部检查 ✓）。
+* 前端那一档与 Rust 那三档**互不相干** ✓ ⇒ 可以同时跑（两边各用各的 CPU ✓）。
+
+### 还试过、**不划算**的
+
+* `ld64.lld`：**慢 15%** ✗（见上一节）⇒ 不采用。
+* `[profile.dev] debug = "line-tables-only"`：留下 ✓（`target/debug/mcloud` 37.2 MB ✓），
+  但**它只影响"编+链"里的链接那一段**，对上面的秒级循环**没有帮助** ✗ ——
+  别指望 profile 设置能救开发循环，**能救它的是"少换命令种类 + 缩小作用域"** ✓。
+
 ## 4. 什么时候该重测
 
 会话（写入线）数变化、crate 数明显增加、`target` 又涨一个量级，
