@@ -1,6 +1,10 @@
 /**
  * 页面清单与导航配置 —— **唯一来源**。
  *
+ * ⚠ `href` 是**干净路径**（`/tasks`），不是 `#/tasks` —— 2026-10-03 用户口径
+ * 「先去掉#号」。跳转一律走 `ui/router.ts` 的 `navigate()`，别自己写
+ * `location.hash = …`（那已经是过去式）。
+ *
  * 侧栏、底部 dock、页面标题都从这里读，避免"加了页面但某处忘了改"。
  * 纯数据 + 纯函数，不依赖 Vue。
  *
@@ -64,7 +68,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     label: '总览',
     title: '总览',
     blurb: '账号状态、AI豆统计与最近运行一览。',
-    href: '#/',
+    href: '/',
     icon: IconDashboard,
   },
   {
@@ -72,7 +76,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     label: '账号',
     title: '账号',
     blurb: '登录移动云盘账号（扫码 / 短信 / 账号密码），查看已登录的账号。',
-    href: '#/accounts',
+    href: '/accounts',
     icon: IconUser,
   },
   {
@@ -80,7 +84,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     label: '任务',
     title: '任务中心',
     blurb: '选择账号并触发签到、领取等任务，实时查看执行日志。',
-    href: '#/tasks',
+    href: '/tasks',
     icon: IconTask,
   },
   {
@@ -89,7 +93,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     label: '兑换',
     title: '兑换奖品',
     blurb: '用AI豆兑换奖品（网易云音乐月卡等）。下单会真的扣豆，点之前会再确认一次。',
-    href: '#/exchange',
+    href: '/exchange',
     icon: IconExchange,
   },
   {
@@ -99,7 +103,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     label: '直播',
     title: '直播小红花',
     blurb: '收直播弹幕与小红书里的口令、再把口令换成小红花。',
-    href: '#/live-room',
+    href: '/live-room',
     icon: IconFlower,
   },
   {
@@ -107,7 +111,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     label: '定时',
     title: '定时任务',
     blurb: '按 cron 表达式自动执行任务，可指定时区与账号范围。',
-    href: '#/schedules',
+    href: '/schedules',
     icon: IconClock,
   },
   {
@@ -115,7 +119,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     label: '编排',
     title: '任务编排',
     blurb: '把多个任务串成一条链，按顺序执行；可配置失败时继续还是中止。',
-    href: '#/pipelines',
+    href: '/pipelines',
     icon: IconPipeline,
   },
   {
@@ -123,7 +127,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     label: '历史',
     title: '历史与日志',
     blurb: '历次执行的结果、耗时与失败原因。',
-    href: '#/history',
+    href: '/history',
     icon: IconHistory,
   },
   {
@@ -131,7 +135,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     label: '设置',
     title: '设置',
     blurb: '账号管理与全局选项。',
-    href: '#/settings',
+    href: '/settings',
     icon: IconSettings,
   },
 ] as const
@@ -157,20 +161,21 @@ export const DOCK_IDS: readonly PageId[] = [
 /**
  * 把 hash 切成路径段：`#/tasks/sign/config` → `['tasks','sign','config']`。
  *
- * 子路由（`#/tasks/<任务名>/config`，任务配置页）靠它取参数 ——
+ * 子路由（`/tasks/<任务名>/config`，任务配置页）靠它取参数 ——
  * 那类页面**不是**一条独立导航项：规范里"侧栏 9 条封顶"是硬上限，
  * 而配置页本来就属于「任务」，多开一条只会多一个不该出现的入口。
  */
-export const hashPath = (hash: string): string[] =>
-  hash.replace(/^#\/?/, '').split('/').filter((x) => x.length > 0)
+/** 把 `location.pathname` 切成路径段（**不**解码，需要时由调用方 `decodeURIComponent`）。 */
+export const pathParts = (pathname: string): string[] =>
+  pathname.split('/').filter((x) => x.length > 0)
 
-export const parseHash = (hash: string): PageId => {
-  const found = NAV_ITEMS.find((item) => item.href === hash)
+export const parsePath = (pathname: string): PageId => {
+  const found = NAV_ITEMS.find((item) => item.href === pathname)
   if (found) return found.id
-  // 子路由按**第一段**归属：`#/tasks/xxx/config` 仍是「任务」这一页。
+  // 子路由按**第一段**归属：`/tasks/xxx/config` 仍是「任务」这一页。
   // 不做这一步的话它会被兜底成"总览"，用户点「配置」会莫名其妙跳到总览页。
-  const [first] = hashPath(hash)
-  const parent = NAV_ITEMS.find((item) => item.href === `#/${first ?? ''}`)
+  const [first] = pathParts(pathname)
+  const parent = NAV_ITEMS.find((item) => item.href === `/${first ?? ''}`)
   return parent ? parent.id : 'dashboard'
 }
 

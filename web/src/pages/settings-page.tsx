@@ -22,6 +22,7 @@
  */
 
 import { onMounted, onUnmounted, ref } from 'lite'
+import { setPageRefresh } from '../ui/page-refresh'
 import {
   changePassword,
   getAbout,
@@ -123,6 +124,7 @@ export const SettingsPage = () => {
   }
 
   onMounted(() => {
+  setPageRefresh({ run: () => void load() })
     void load()
     ticker = setInterval(() => {
       now.value = Date.now()
@@ -152,20 +154,6 @@ export const SettingsPage = () => {
     ]
   }
 
-  const header = () => (
-    <div class="flex flex-wrap items-center justify-between gap-2">
-      <h1 class="text-base font-medium">设置</h1>
-      <button
-        type="button"
-        class="btn btn-sm btn-soft min-h-11 md:min-h-0"
-        disabled={state.value === 'loading' || restarting.value}
-        onClick={() => void load()}
-      >
-        刷新
-      </button>
-    </div>
-  )
-
   /** 一行「标签 —— 值」。值可换行，不挤标签（窄屏也放得下）。 */
   const kv = (label: string, value: JSX.Element | string) => (
     <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-sm">
@@ -178,7 +166,9 @@ export const SettingsPage = () => {
     const s = status.value
     if (!s) return null
     const last = s.lastRun
-    return (
+    onUnmounted(() => setPageRefresh(null))
+
+  return (
       <div class="card bg-base-100 shadow-sm">
         <div class="card-body gap-3">
           <div class="flex flex-wrap items-center justify-between gap-2">
@@ -695,7 +685,6 @@ export const SettingsPage = () => {
      * - 窄屏一切照旧堆叠（`grid` 的默认单列）。
      */
     <div class="mx-auto flex w-full max-w-7xl flex-col gap-4">
-      {header()}
 
       {state.value === 'loading' ? (
         <div class="flex justify-center py-16">

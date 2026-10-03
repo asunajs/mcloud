@@ -1,5 +1,6 @@
 import { accountName, refreshAccountNames } from '../account-names'
-import { hashPath } from '../ui/nav'
+import { pathParts } from '../ui/nav'
+import { navigate } from '../ui/router'
 /**
  * 任务中心：选账号 → 运行任务 → 实时看日志。
  *
@@ -10,6 +11,7 @@ import { hashPath } from '../ui/nav'
  */
 
 import { onUnmounted, onMounted, ref } from 'lite'
+import { setPageRefresh } from '../ui/page-refresh'
 import {
   cancelRun,
   listAccounts,
@@ -48,18 +50,18 @@ const activeGroup = ref<string>('')
 
 export const TasksPage = () => {
   /**
-   * 当前 hash 的路径段。
+   * 当前地址的路径段。
    *
-   * ⚠ **本页自己盯着 hash**，而不是让路由表来管：`parseHash` 把
-   * `#/tasks/x/config` 与 `#/tasks` 都归到「任务」这一页（配置页不是独立导航项），
+   * ⚠ **本页自己盯着地址**，而不是让路由表来管：`parsePath` 把
+   * `/tasks/x/config` 与 `/tasks` 都归到「任务」这一页（配置页不是独立导航项），
    * 于是从列表切到配置时 PageId **没变**，`app.tsx` 那条动态 import 不会再跑一次。
    * 想让它工作只有两条路：把配置页做成第 10 条导航项（规范里 9 条封顶，不行），
-   * 或者本页自己听 hash 换视图（就是这里）。切换时列表**不会**被卸载重建 ——
+   * 或者本页自己听地址变化换视图（就是这里）。切换时列表**不会**被卸载重建 ——
    * 用户从配置页点回来，看到的还是原来那份列表和滚动位置。
    */
-  const path = ref<string[]>(hashPath(location.hash))
-  const onHash = () => {
-    path.value = hashPath(location.hash)
+  const path = ref<string[]>(pathParts(location.pathname))
+  const onNavigate = () => {
+    path.value = pathParts(location.pathname)
   }
 
   /** 配置视图对应哪个任务；不在配置子路由上就是 `null`。 */
@@ -293,34 +295,22 @@ export const TasksPage = () => {
   }
 
   onMounted(() => {
+  setPageRefresh({ run: () => void load() })
     // 编排那一格的**计数**要一进来就有 ✓（不点它也是 0 会让人以为没有编排）。
     void loadPipelines()
-    window.addEventListener('hashchange', onHash)
+    window.addEventListener('popstate', onNavigate)
     // 先把"id → 名字"填上，否则运行记录里显示的是一串哈希
     void refreshAccountNames()
     void load()
   })
   onUnmounted(() => {
-    window.removeEventListener('hashchange', onHash)
+  setPageRefresh(null)
+    window.removeEventListener('popstate', onNavigate)
     stopTicker()
     for (const stop of stopStreams) stop()
   })
 
   const elapsedText = () => `${(elapsedMs.value / 1000).toFixed(0)} 秒`
-
-  const header = () => (
-    <div class="flex flex-wrap items-center justify-between gap-2">
-      <h1 class="text-base font-medium">任务中心</h1>
-      <button
-        type="button"
-        class="btn btn-sm btn-soft min-h-11 md:min-h-0"
-        disabled={state.value === 'loading'}
-        onClick={() => void load()}
-      >
-        刷新
-      </button>
-    </div>
-  )
 
   const form = () => (
     <div class="card bg-base-100 shadow-sm">
@@ -523,7 +513,7 @@ export const TasksPage = () => {
                   type="button"
                   class="btn btn-soft btn-sm"
                   onClick={() => {
-                    location.hash = '#/pipelines'
+                    navigate('/pipelines')
                   }}
                 >
                   打开编排页
@@ -543,7 +533,7 @@ export const TasksPage = () => {
                     type="button"
                     class="btn btn-soft"
                     onClick={() => {
-                      location.hash = '#/pipelines'
+                      navigate('/pipelines')
                     }}
                   >
                     去编排页
@@ -588,7 +578,7 @@ export const TasksPage = () => {
                           type="button"
                           class="btn btn-sm btn-soft min-h-11 md:min-h-0"
                           onClick={() => {
-                            location.hash = `#/tasks/${encodeURIComponent(t.name)}/config`
+                            navigate(`/tasks/${encodeURIComponent(t.name)}/config`)
                           }}
                         >
                           配置
@@ -616,7 +606,7 @@ export const TasksPage = () => {
       <TaskConfigPage
         task={task}
         onBack={() => {
-          location.hash = '#/tasks'
+          navigate('/tasks')
         }}
       />
     )
@@ -624,7 +614,6 @@ export const TasksPage = () => {
 
   return (
     <div class="flex flex-col gap-4">
-      {header()}
 
       {state.value === 'loading' ? (
         <div class="flex justify-center py-16">

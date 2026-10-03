@@ -282,6 +282,22 @@ main,
   box-shadow: 0 0 0 3px var(--primary-glow);
 }
 
+/* 图标在框内的输入（daisyUI 5 的 `<label class="input"><svg/><input class="grow"/></label>`）：
+   焦点落在**内层那个 `<input>`** 上，上面那条 `.input:focus` 匹配不到它 ⇒
+   内层自己画浏览器默认焦点环，于是在圆角外框里再套一个**直角矩形** ✗
+   （2026-10-03 用户指着搜索框说的就是这个）。
+   ⇒ 环画到**外框**上（`:focus-within`），内层一律不画。 */
+.input:focus-within:not(.input-error) {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
+.input > input:focus,
+.input > input:focus-visible {
+  outline: none;
+}
+
 /* 徽章一律不换行：daisyUI v5 的 .badge 没设 white-space ⇒ 表格里长文本列
    把状态列压到 min-content（1 字宽）时徽章逐字竖排。 */
 .badge {

@@ -28,7 +28,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { hashRoute, openSession, serve, sleep } from './lib.mjs'
+import { gotoJs, openSession, routeUrl, serve, sleep } from './lib.mjs'
 
 const WIDTH = 375
 const DIST = new URL('../../dist/', import.meta.url).pathname
@@ -48,7 +48,7 @@ try {
   server = await serve(DIST, PORT, 'ready')
   session = await openSession({
     port: PORT,
-    route: hashRoute('accounts'),
+    route: routeUrl('accounts'),
     debugPort: 9491,
     profile: PROFILE,
     width: WIDTH,
@@ -147,7 +147,7 @@ try {
 
   // ③ 总览页顺带看一眼（那一页元素最多，最容易顶出横向滚动）
   await cdp.eval(`document.getElementById('add-account').close()`)
-  await cdp.eval(`location.hash = '#/dashboard'`)
+  await cdp.eval(gotoJs('dashboard'))
   await sleep(700)
   const dash = await probe(
     `({ overflow: document.documentElement.scrollWidth > window.innerWidth + 1 })`,
@@ -180,7 +180,7 @@ try {
       mobile: true,
     })
     for (const r of ROUTES) {
-      await cdp.eval(`location.hash = '#/${r}'`)
+      await cdp.eval(gotoJs(r))
       await sleep(420)
       const o = await probe(
         `({ sw: document.documentElement.scrollWidth, vw: window.innerWidth })`,
@@ -203,7 +203,7 @@ try {
     deviceScaleFactor: 1,
     mobile: false,
   })
-  await cdp.eval(`location.hash = '#/settings'`)
+  await cdp.eval(gotoJs('settings'))
   await sleep(900)
   const wide = await probe(`(() => {
     const cards = [...document.querySelectorAll('#app .card')]

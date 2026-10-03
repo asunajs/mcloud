@@ -16,6 +16,7 @@
  */
 
 import { onMounted, onUnmounted, ref } from 'lite'
+import { setPageRefresh } from '../ui/page-refresh'
 import {
   ApiError,
   NOTIFY_CHANNELS,
@@ -1704,8 +1705,14 @@ export const AccountsPage = () => {
     return settingsForm()
   }
 
-  onMounted(() => void load())
-  onUnmounted(() => stopPolling())
+  onMounted(() => {
+  setPageRefresh({ run: () => void load() })
+    void load()
+  })
+  onUnmounted(() => {
+    setPageRefresh(null)
+    stopPolling()
+  })
 
   /** 到期时间的说法。`0` = 解析不出，与"已过期"不是一回事。 */
   const expireText = (ms: number) => {
@@ -1779,17 +1786,13 @@ export const AccountsPage = () => {
 
   return (
     <div class="flex flex-col gap-4">
-      <div class="flex flex-wrap items-center justify-between gap-2">
-        <h1 class="text-base font-medium">账号</h1>
+      <div class="flex flex-wrap items-center justify-end gap-2">
+        {/* 标题由外壳那个 sticky navbar 显示（`app.tsx` 读 `navItem(id).title`）——
+            页面里**不要再写一遍**：2026-10-03 之前八页各写了一次，于是每页顶部
+            都是同一句话挨着出现两遍（连 `text-base font-medium` 都一模一样）✗。
+            这里只放动作（添加/新建…）——「刷新」已搬到外壳 navbar 的图标上
+          （见 `ui/page-refresh.ts`）。 */}
         <div class="flex items-center gap-2">
-          <button
-            type="button"
-            class="btn btn-sm btn-soft min-h-11 md:min-h-0"
-            disabled={state.value === 'loading'}
-            onClick={() => void load()}
-          >
-            刷新
-          </button>
           {/*
             添加账号收进弹窗：四条登录路径（扫码/短信/手机端/账密）加表单本身有
             800 多行，常驻在页面上会把"我现在有哪几个账号"压到第一屏之外 ——

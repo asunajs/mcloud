@@ -17,7 +17,8 @@
  * 布局沿用规范 §7.2：桌面表格（列多、要横向比较），窄屏**卡片流**。
  */
 
-import { onMounted, ref } from 'lite'
+import { onMounted, ref, onUnmounted } from 'lite'
+import { setPageRefresh } from '../ui/page-refresh'
 import { listRuns, type RunRecord, type TaskOutcome } from '../api'
 // 直播的结构化明细：与直播页**共用同一份**渲染（从前只有"当前这次"能看到）。
 import { LiveRoomResult } from '../ui/live-room-result'
@@ -177,10 +178,12 @@ export const HistoryPage = (props: HistoryPageProps) => {
   }
 
   onMounted(() => {
+    setPageRefresh({ run: () => void load() })
     // 先把"id → 名字"填上，否则运行记录里显示的是一串哈希
     void refreshAccountNames()
     void load()
   })
+  onUnmounted(() => setPageRefresh(null))
 
   /** 一条记录命中搜索词吗。搜四样东西：任务名、账号、运行号、结果摘要。 */
   const matchesQuery = (r: RunRecord): boolean => {
@@ -206,20 +209,6 @@ export const HistoryPage = (props: HistoryPageProps) => {
     filter.value = 'all'
     query.value = ''
   }
-
-  const header = () => (
-    <div class="flex flex-wrap items-center justify-between gap-2">
-      <h1 class="text-base font-medium">历史与日志</h1>
-      <button
-        type="button"
-        class="btn btn-sm btn-soft min-h-11 md:min-h-0"
-        disabled={state.value === 'loading'}
-        onClick={() => void load()}
-      >
-        刷新
-      </button>
-    </div>
-  )
 
   /**
    * 筛选与搜索。
@@ -411,7 +400,6 @@ export const HistoryPage = (props: HistoryPageProps) => {
 
   return (
     <div class="flex flex-col gap-4">
-      {header()}
 
       {state.value === 'loading' ? (
         <div class="flex justify-center py-16">

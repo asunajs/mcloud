@@ -20,7 +20,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { appSubtree, arg, hashRoute, openSession, readVariant, serve, sleep } from './lib.mjs'
+import { appSubtree, arg, gotoJs, openSession, readVariant, routeUrl, serve, sleep } from './lib.mjs'
 
 const variant = readVariant()
 const only = arg('--only', '')
@@ -49,7 +49,7 @@ const DEBUG = Number(arg('--debug-port', '0'))
 const PROFILE = arg('--profile', '') || fs.mkdtempSync(path.join(os.tmpdir(), 'lite-interact-'))
 /** 只有我们自己建的临时 profile 才由我们删。 */
 const ownedProfile = !arg('--profile', '')
-const route = hashRoute('settings')
+const route = routeUrl('settings')
 
 /**
  * 页面里的快照。`dom` 走 `lib.mjs` 的 `appSubtree` 归一化，所以"变了没有"有一个稳定口径。
@@ -58,7 +58,7 @@ const route = hashRoute('settings')
  * （受控输入框有没有被回写成旧值，全靠这里抓到）。
  */
 const PROBE = `JSON.stringify({
-  hash: location.hash,
+  path: location.pathname,
   theme: document.documentElement.getAttribute('data-theme'),
   openDialogs: [...document.querySelectorAll('dialog[open]')].map((d) => d.id).join(','),
   form: [...document.querySelectorAll('input,select,textarea')].map((e) =>
@@ -68,7 +68,7 @@ const PROBE = `JSON.stringify({
 
 const snapshot = async (s) => {
   const j = JSON.parse(await s.cdp.eval(PROBE))
-  return JSON.stringify({ hash: j.hash, theme: j.theme, openDialogs: j.openDialogs, form: j.form, app: appSubtree(j.app) })
+  return JSON.stringify({ path: j.path, theme: j.theme, openDialogs: j.openDialogs, form: j.form, app: appSubtree(j.app) })
 }
 
 // ── 动作与断言的写法 ─────────────────────────────────────────────────────────
@@ -108,7 +108,7 @@ const pickOption = (sel, value) =>
      o.click();
      return document.querySelector(${JSON.stringify(sel)}).dataset.value;
    })()`
-const go = (hash) => `(() => { location.hash = ${JSON.stringify(hash)}; return location.hash })()`
+const go = (route) => gotoJs(route)
 
 /** 向导里那两个口令框（setup 态下 `autocomplete` 撞车，只能按序号取，见 `typeNth`）。 */
 const PWDS = '#app input[type="password"]'
@@ -172,8 +172,8 @@ const STEPS = {
     { name: '首屏（已登录）', do: null, check: eq('!!document.querySelector("#app .dock")', true) },
     // 切页：每条路由都走一遍（首屏回归是"直接打开该路由"，这里是"**切过去**"，
     // 走的是 page 条件分支 + 新页组件创建 + onMounted + 各页自己的取数）
-    ...ROUTES.map((r) => ({ name: `切到 ${r}`, do: go(`#/${r}`), check: eq('location.hash', `#/${r}`), changed: true })),
-    { name: '点导航（抽屉）：历史', do: clickText('ul.menu button', '历史'), check: eq('location.hash', '#/history') },
+    ...ROUTES.map((r) => ({ name: `切到 ${r}`, do: go(r), check: eq('location.pathname', `/${r}`), changed: true })),
+    { name: '点导航（抽屉）：历史', do: clickText('ul.menu button', '历史'), check: eq('location.pathname', '/history') },
     {
       // ⭐ 「历史页复用结构化明细」的直接证据：**过去**那一场直播的逐条口令，
       // 现在能在历史里看到（从前只有一行小结，明细打不开）。
@@ -212,7 +212,7 @@ const STEPS = {
       do: null,
       check: has(APP_TEXT, '本号已领过'),
     },
-    { name: '点 dock：任务', do: clickText('.dock button', '任务'), check: eq('location.hash', '#/tasks') },
+    { name: '点 dock：任务', do: clickText('.dock button', '任务'), check: eq('location.pathname', '/tasks') },
     { name: '展开抽屉', do: clickSel('label[for="nav-drawer"]'), check: eq("document.getElementById('nav-drawer').checked", true), changed: true },
     { name: '收起抽屉', do: clickSel('label[for="nav-drawer"]'), check: eq("document.getElementById('nav-drawer').checked", false), changed: true },
     { name: '切换主题', do: clickSel('[aria-label^="切换到"]'), check: eq("!!document.documentElement.getAttribute('data-theme')", true) },
@@ -226,7 +226,7 @@ const STEPS = {
     // ⚠ 上面那句不是形式：重构前这几步是在**页面常驻表单**里点的，改成弹窗后
     // 若还按老选择器点，就会点在 `dialog:not([open])` 里的不可见元素上 —— 用例照样
     // "过"，但它验的东西已经不是用户能做的事了。
-    { name: '切到账号页', do: go('#/accounts'), check: eq('location.hash', '#/accounts') },
+    { name: '切到账号页', do: go('accounts'), check: eq('location.pathname', '/accounts') },
     { name: '账号页：开「添加账号」弹窗', do: clickText('#app button', '添加账号'), check: eq('[...document.querySelectorAll("dialog[open]")].map((d) => d.id).join(",")', 'add-account'), changed: true },
     { name: '账号页：弹窗里点「短信」方式', do: clickText('#add-account button', '短信'), check: eq('!!document.querySelector("#add-account input[type=tel]")', true), changed: true },
     { name: '账号页：输入手机号', do: typeIn('#add-account input[type="tel"]', '19900000001'), check: eq('document.querySelector("#add-account input[type=tel]").value', '19900000001') },
@@ -255,7 +255,7 @@ const STEPS = {
     { name: '账号页：关掉错误弹窗', do: clickText('#error-dialog .modal-action button', '知道了'), check: eq('document.querySelectorAll("dialog[open]").length', 0), changed: true },
 
     // 计划页：新建表单填一遍（文本、下拉、勾选框都覆盖到）
-    { name: '切到计划页', do: go('#/schedules'), check: eq('location.hash', '#/schedules') },
+    { name: '切到计划页', do: go('schedules'), check: eq('location.pathname', '/schedules') },
     { name: '计划页：填名称', do: typeIn('input[placeholder="例如 每天签到"]', '每周签到'), check: eq('document.querySelector("input[placeholder=\\"例如 每天签到\\"]").value', '每周签到') },
     { name: '计划页：改 cron', do: typeIn('input[placeholder="0 8 * * *"]', '0 9 * * 1'), check: eq('document.querySelector("input[placeholder=\\"0 8 * * *\\"]").value', '0 9 * * 1') },
     // ⚠ 这条同时盯住"选中的值没被别的绑定回写成空串" —— 上一代对拍里 Vue 侧正是回写成了空
@@ -324,7 +324,7 @@ const STEPS = {
     },
 
     // 编排页：步骤列表的**增 / 删 / 改序**（本框架里最容易出错的一块 —— createFor + 位置敏感行）
-    { name: '切到编排页', do: go('#/pipelines'), check: eq('location.hash', '#/pipelines') },
+    { name: '切到编排页', do: go('pipelines'), check: eq('location.pathname', '/pipelines') },
     { name: '编排页：点「编辑」（草稿带 2 步）', do: clickText('button', '编辑'), check: has(APP_TEXT, '共 2 步'), changed: true },
     { name: '编排页：初始顺序 = 签到 → 直播', do: null, check: eq('window.__stepOrder()', 'daily-checkin,live-room') },
     // ⭐⭐ 步骤卡里必须能看到**参数控件**（2026-10-02 重构）。
@@ -349,7 +349,7 @@ const STEPS = {
     { name: '编排页：取消（回列表，不发请求）', do: clickText('#app .card-actions button', '取消'), check: not(APP_TEXT, '共 2 步'), changed: true },
 
     // 直播页：口令 textarea、时长数字框、开关
-    { name: '切到直播页', do: go('#/live-room'), check: eq('location.hash', '#/live-room') },
+    { name: '切到直播页', do: go('live-room'), check: eq('location.pathname', '/live-room') },
     { name: '直播页：输入口令', do: typeIn('textarea', '口令一 口令二'), check: eq('document.querySelector("textarea").value', '口令一 口令二') },
     { name: '直播页：改时长', do: typeIn('input[type="number"]', '45'), check: eq('document.querySelector("input[type=number]").value', '45') },
     { name: '直播页：切开关', do: clickSel('input[type="checkbox"].toggle'), check: eq('document.querySelector("input[type=checkbox].toggle").checked', true), changed: true },
@@ -440,7 +440,7 @@ const STEPS = {
     //
     // 选择器结构：面板里 `.select-option`，**第 0 项**是「全部账号」（独立开关），
     // 第 1 项起才是逐个账号；面板挂在 `body`（或弹窗里）的 `.select-portal` 上。
-    { name: '切到任务页', do: go('#/tasks'), check: eq('location.hash', '#/tasks') },
+    { name: '切到任务页', do: go('tasks'), check: eq('location.pathname', '/tasks') },
     {
       name: '任务页：选账号',
       do: `(() => {
@@ -518,7 +518,7 @@ const STEPS = {
     },
 
     // 设置页：账户安全 / 存储信息 / 重启 —— 这三块 2026-10-01 一起补了后端。
-    { name: '切到设置页', do: go('#/settings'), check: eq('location.hash', '#/settings'), changed: true },
+    { name: '切到设置页', do: go('settings'), check: eq('location.pathname', '/settings'), changed: true },
     { name: '设置页：存储信息报到数据目录', do: null, check: has(APP_TEXT, '数据目录') },
     {
       // 用户口径 2026-10-01：「你口令更改怎么取消了旧口令」⇒ 当前口令必须留着。
@@ -585,7 +585,7 @@ const STEPS = {
 
     // ── 账号停用（2026-10-01 用户口径："账号需要增加一个停用功能，
     //    这样在其他功能下拉菜单就不显示"）──
-    { name: '账号页：有停用按钮', do: go('#/accounts'), check: has(APP_TEXT, '停用'), changed: true },
+    { name: '账号页：有停用按钮', do: go('accounts'), check: has(APP_TEXT, '停用'), changed: true },
     {
       name: '账号页：停用主号 ⇒ 卡片出现「已停用」',
       do: `(() => {
@@ -605,7 +605,7 @@ const STEPS = {
     {
       // ⭐ 用户要的就是这一条：**别的页面的下拉里不再出现它**
       name: '兑换页：账号下拉里已经没有停用的那个号',
-      do: go('#/exchange'),
+      do: go('exchange'),
       // 自建下拉的选项只在**展开时**存在 ⇒ 这条得自己点开看一眼再收起
       check: eq(
         `(() => {
@@ -780,7 +780,7 @@ const STEPS = {
     },
     {
       name: '账号页：回到账号页准备启用',
-      do: go('#/accounts'),
+      do: go('accounts'),
       check: eq(
         `(() => { const li = [...document.querySelectorAll('#app li.card')].find((el) => el.textContent.includes('主力号')); return li ? li.className.includes('opacity-60') : 'no-card' })()`,
         true,
@@ -841,7 +841,7 @@ const STEPS = {
     // ── 任务页：分组 + 参数挪到单独的配置页（2026-10-01 用户口径）──
     {
       name: '任务页：分组是 tab（可见的组各一个）',
-      do: go('#/tasks'),
+      do: go('tasks'),
       // 装置里有 5 个任务、其中 `internal-probe` 是隐藏的 ⇒ 任务组是 3 个
       // （signin / live / device）。隐藏任务那一组**不该**留下一个空 tab。
       //
@@ -975,7 +975,8 @@ const STEPS = {
       //   "配置页存的东西进了运行请求"，而不只是"按钮点了有反应"。
       name: '任务页：运行 ⇒ 请求真的带上了配置页存的参数',
       do: `(() => {
-        location.hash = '#/tasks'
+        history.pushState({}, '', '/tasks')
+        window.dispatchEvent(new PopStateEvent('popstate'))
         return true
       })()`,
       check: has(APP_TEXT, '直播口令'),
@@ -1005,7 +1006,7 @@ const STEPS = {
      * 放在中间会让后面每一步都找不到元素。第一版就踩了：18 步"两侧一致"，
      * 其实是**两侧都没执行**。
      */
-    { name: '回到设置页', do: go('#/settings'), check: eq('location.hash', '#/settings') },
+    { name: '回到设置页', do: go('settings'), check: eq('location.pathname', '/settings') },
     { name: '再开一次登出确认框', do: clickSel('[aria-label="退出登录"]'), check: eq('[...document.querySelectorAll("dialog[open]")].map((d) => d.id).join(",")', 'confirm-logout') },
     { name: '确认登出 ⇒ 闸门回登录页', do: clickText('#confirm-logout .modal-action button', '退出'), check: eq('!!document.querySelector("input[autocomplete=username]")', true), changed: true },
     // 登出失败（fixture 的 POST /api/session 404）被 `doLogout` 吞掉是**故意的**：
@@ -1028,7 +1029,7 @@ const STEPS = {
     { name: '改成长口令', do: typeNth(PWDS, 0, 'secret-1234'), check: eq(nthValue(PWDS, 0), 'secret-1234') },
     { name: '确认口令跟上', do: typeNth(PWDS, 1, 'secret-1234'), check: eq(nthValue(PWDS, 1), 'secret-1234') },
     { name: '提交成功 ⇒ 闸门放行（外壳出现）', do: clickText('button', '创建并进入'), check: eq('!!document.querySelector("#app .dock")', true), changed: true },
-    { name: '放行后：切到历史页', do: go('#/history'), check: eq('location.hash', '#/history'), changed: true },
+    { name: '放行后：切到历史页', do: go('history'), check: eq('location.pathname', '/history'), changed: true },
     // ⚠ 放行后外壳是**异步**长起来的，主题按钮可能还没出现 —— 但本框架的挂载是同步的，
     // 而 `waitStable` 已经等过一轮，所以这里要求它**必须**在（不在就是没放行完全）
     { name: '放行后：切主题', do: clickSel('[aria-label^="切换到"]'), check: eq("!!document.documentElement.getAttribute('data-theme')", true) },
@@ -1055,7 +1056,7 @@ const STEPS = {
     { name: '提交（口令错 ⇒ 错误分支）', do: clickText('button', '登录'), check: has(APP_TEXT, '用户名或口令不正确') },
     { name: '填对口令', do: typeNth(PWDS, 0, 'right-pass'), check: eq(nthValue(PWDS, 0), 'right-pass') },
     { name: '提交成功 ⇒ 闸门放行（外壳出现）', do: clickText('button', '登录'), check: eq('!!document.querySelector("#app .dock")', true), changed: true },
-    { name: '放行后：切到账号页', do: go('#/accounts'), check: eq('location.hash', '#/accounts'), changed: true },
+    { name: '放行后：切到账号页', do: go('accounts'), check: eq('location.pathname', '/accounts'), changed: true },
     { name: '放行后：展开抽屉', do: clickSel('label[for="nav-drawer"]'), check: eq("document.getElementById('nav-drawer').checked", true), changed: true },
   ],
 }

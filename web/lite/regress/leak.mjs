@@ -38,7 +38,7 @@ import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { openSession, serve, sleep, hashRoute } from './lib.mjs'
+import { gotoJs, openSession, routeUrl, serve, sleep } from './lib.mjs'
 
 const WEB = path.resolve(import.meta.dirname, '..', '..')
 const PORT = 48980
@@ -122,7 +122,7 @@ try {
   }
   session = await openSession({
     port,
-    route: hashRoute('dashboard'),
+    route: routeUrl('dashboard'),
     debugPort: FIXTURE ? 9482 : 9480,
     profile: fs.mkdtempSync(path.join(os.tmpdir(), 'mcloud-leak-')),
     width: 1280,
@@ -151,21 +151,21 @@ try {
    * 正说明它是一次性的）。预热之后每页的 Δ 才是"每访问一次漏多少" ✓。
    */
   for (const p of PAGES) {
-    await ev(`location.hash = '#/${p}'`)
+    await ev(gotoJs(p))
     await sleep(DWELL_MS)
   }
-  await ev(`location.hash = '#/dashboard'`)
+  await ev(gotoJs('dashboard'))
   await sleep(IDLE_MS)
   console.log(`每页访问 ${ROUNDS} 次（每次停留 ${DWELL_MS}ms，已预热），Δ 为 GC 之后的净增长：\n`)
   console.log('页面          Δ节点   Δ监听   Δ堆(MB)')
   for (const page of PAGES) {
-    await ev(`location.hash = '#/dashboard'`)
+    await ev(gotoJs('dashboard'))
     await sleep(IDLE_MS)
     const a = await sample()
     for (let i = 0; i < ROUNDS; i++) {
-      await ev(`location.hash = '#/${page}'`)
+      await ev(gotoJs(page))
       await sleep(DWELL_MS)
-      await ev(`location.hash = '#/dashboard'`)
+      await ev(gotoJs('dashboard'))
       await sleep(IDLE_MS)
     }
     await sleep(400)
@@ -182,7 +182,7 @@ try {
   const before = await sample()
   for (let r = 0; r < ROUNDS; r++) {
     for (const p of PAGES) {
-      await ev(`location.hash = '#/${p}'`)
+      await ev(gotoJs(p))
       await sleep(DWELL_MS * 0.4)
     }
   }

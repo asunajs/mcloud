@@ -19,6 +19,7 @@
  */
 
 import { onMounted, onUnmounted, ref } from 'lite'
+import { setPageRefresh } from '../ui/page-refresh'
 import { accountName } from '../account-names'
 import {
   deleteSchedule,
@@ -315,6 +316,7 @@ export const SchedulesPage = () => {
   }
 
   onMounted(() => {
+  setPageRefresh({ run: () => void load() })
     void load()
     // 一分钟一跳："下次执行时间"与"上次结果"要能自己跟上，
     // 否则用户盯着一个过期的时刻看
@@ -323,6 +325,7 @@ export const SchedulesPage = () => {
 
   // 必须清掉：页面切走后计时器还在跑，就是一条看不见的持续请求
   onUnmounted(() => {
+    setPageRefresh(null)
     if (ticker !== null) {
       clearInterval(ticker)
       ticker = null
@@ -332,17 +335,13 @@ export const SchedulesPage = () => {
   // ── 渲染 ──────────────────────────────────────────────────────────────
 
   const header = () => (
-    <div class="flex flex-wrap items-center justify-between gap-2">
-      <h1 class="text-base font-medium">定时任务</h1>
+    <div class="flex flex-wrap items-center justify-end gap-2">
+      {/* 标题由外壳那个 sticky navbar 显示（`app.tsx` 读 `navItem(id).title`）——
+          页面里**不要再写一遍**：2026-10-03 之前八页各写了一次，于是每页顶部
+          都是同一句话挨着出现两遍（连 `text-base font-medium` 都一模一样）✗。
+          这里只放动作（添加/新建…）——「刷新」已搬到外壳 navbar 的图标上
+          （见 `ui/page-refresh.ts`）。 */}
       <div class="flex items-center gap-2">
-        <button
-          type="button"
-          class="btn btn-sm btn-soft min-h-11 md:min-h-0"
-          disabled={state.value === 'loading'}
-          onClick={() => void load()}
-        >
-          刷新
-        </button>
         <button
           type="button"
           class="btn btn-sm btn-primary min-h-11 md:min-h-0"

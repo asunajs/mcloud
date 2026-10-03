@@ -8,8 +8,10 @@
 import { createComponent, onMounted, onUnmounted, ref, watch } from 'lite'
 import { getCurrentSession, getStatus, logoutSession, type ServiceStatus } from './api'
 import { authState, currentUser, noteAuthOk, noteAuthRequired } from './ui/auth-signal'
-import { DOCK_IDS, NAV_ITEMS, navItem, parseHash, type PageId } from './ui/nav'
-import { IconBrand, IconClose, IconLogout, IconMenu, IconMoon, IconSun } from './ui/icons'
+import { DOCK_IDS, NAV_ITEMS, navItem, parsePath, type PageId } from './ui/nav'
+import { navigate } from './ui/router'
+import { refreshNow } from './ui/page-refresh'
+import { IconBrand, IconClose, IconLogout, IconMenu, IconMoon, IconSun, IconRefresh } from './ui/icons'
 import { currentTheme, toggleTheme, type Theme } from './ui/theme'
 import { fmtEpochMs } from './ui/time'
 import { ToastView } from './ui/toast-view'
@@ -79,8 +81,41 @@ const ROUTES: Record<PageId, (ctx: RouteCtx) => Promise<() => unknown>> = {
   },
 }
 
+/**
+ * navbar 上那个「刷新当前页」按钮（用户口径 2026-10-03：「刷新做成图标放上面」）。
+ *
+ * # 它点的还是**那一页原来的 `load()`**
+ *
+ * 页面自己把 `load()` 登记给 `ui/page-refresh.ts`，这里只是触发器 ⇒ 任务页正在看的
+ * 日志、勾好的账号、编排页填了一半的表单、滚动位置**都不会丢** ✓。
+ * ⚠ 别改成「重新挂载当前页」—— 那等于把这些状态全清掉 ✗。
+ *
+ * # 为什么这里不读信号、也没有转圈/置灰
+ *
+ * 登记的写入发生在**页面挂载的那一刻**，而那正是外壳在渲染这一页的过程中 ⇒
+ * 那一层若用 lite 信号，会**重入外壳的渲染**，把页面槽位的替换逻辑打断：
+ * 切页时旧页面不再被替换、新页面被追加 ✗（实测卡片数 64 → 108 → 153 → …一路累加，
+ * 真 DOM 验收从 6 条全绿掉到 28 条失败）。所以那里用的是**普通变量**，
+ * 点击时现读（`refreshNow()`）—— 动作永远是对的，代价是外观没法跟着加载态变，
+ * 于是干脆不做转圈/置灰：页面自己的 `load()` 是幂等的，重复点不会出问题 ✓。
+ * 完整机理与两条实测见 `ui/page-refresh.ts` 的文件头。
+ *
+ * 每个页面都登记（九个页面 + 任务配置子页），所以这里不必做「没登记就隐藏」。
+ */
+const RefreshButton = (): JSX.Element => (
+  <button
+    type="button"
+    class="btn btn-square btn-ghost btn-sm"
+    aria-label="刷新当前页"
+    title="刷新当前页"
+    onClick={() => refreshNow()}
+  >
+    <IconRefresh class="size-5" />
+  </button>
+)
+
 export default () => {
-  const page = ref<PageId>(parseHash(location.hash))
+  const page = ref<PageId>(parsePath(location.pathname))
   const theme = ref<Theme>(currentTheme())
   const drawerOpen = ref(false)
   /**
@@ -104,8 +139,14 @@ export default () => {
 
   const loggingOut = ref(false)
 
-  const onHashChange = () => {
-    page.value = parseHash(location.hash)
+  /**
+   * 地址变了（浏览器前进/后退、手敲地址、或 `navigate()` 广播）。
+   *
+   * ⚠ 名字从 `onHashChange` 改过来不是修辞：`pushState` 自己**不发**事件，
+   * 所以 `navigate()` 里补发了一次 `popstate` —— 这条监听器就是**唯一**的切页入口。
+   */
+  const onNavigate = () => {
+    page.value = parsePath(location.pathname)
     // 移动端点了导航就把抽屉收起来，否则内容被盖住
     drawerOpen.value = false
   }
@@ -115,7 +156,7 @@ export default () => {
   }
 
   const go = (id: PageId) => {
-    location.hash = navItem(id).href
+    navigate(navItem(id).href)
   }
 
   // ── 动态路由的装载状态（见文件头 `ROUTES`）────────────────────────────
@@ -241,7 +282,7 @@ export default () => {
   }
 
   onMounted(() => {
-    window.addEventListener('hashchange', onHashChange)
+    window.addEventListener('popstate', onNavigate)
     void probeSession()
     // 已经放行时（例如热重载后重挂）立刻装当前页；否则由下面那个 watch 负责。
     if (authState.value === 'ready') void loadPage(page.value)
@@ -265,15 +306,15 @@ export default () => {
   /**
    * 切页就装载。
    *
-   * 依赖放在 `page`（由 `onHashChange` 推进）而不是直接在 `go()` 里调 ——
-   * 这样浏览器前进/后退、手改 hash、以及页面里其它地方的 `location.hash = ...`
+   * 依赖放在 `page`（由 `onNavigate` 推进）而不是直接在 `go()` 里调 ——
+   * 这样浏览器前进/后退、手敲地址、以及页面里其它地方的 `navigate()` 调用
    * 都走同一条路。少一处调用点，就少一处"某种方式切页不生效"。
    */
   watch(page, (id) => {
     void loadPage(id)
   })
   onUnmounted(() => {
-    window.removeEventListener('hashchange', onHashChange)
+    window.removeEventListener('popstate', onNavigate)
   })
 
   /**
@@ -447,9 +488,16 @@ export default () => {
             >
               <IconMenu class="size-5" />
             </label>
+            {/*
+              页面标题**只在这里**显示一次（`navItem(id).title`）。
+              ⚠ 页面里不要再写一遍 `<h1>` —— 2026-10-03 之前八页各写了一次，
+              于是每页顶部同一句话挨着出现两遍 ✗。留在这里的理由：它是 sticky 的
+              （滚动时还在），而窄屏侧栏是抽屉 ⇒ 它是"我在哪一页"的唯一指示 ✓。
+            */}
             <span class="px-1 text-base font-medium">{navItem(page.value).title}</span>
           </div>
           <div class="navbar-end gap-1">
+            <RefreshButton />
             {themeToggle()}
             {/*
               登出放在 navbar 而不是侧栏：侧栏在窄屏是抽屉，

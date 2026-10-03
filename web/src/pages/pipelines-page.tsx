@@ -25,7 +25,8 @@
  * 复刻的代价是两处语义迟早分叉（尤其是"后端错误原文透出"这条）。
  */
 
-import { onMounted, ref } from 'lite'
+import { onMounted, ref, onUnmounted } from 'lite'
+import { setPageRefresh } from '../ui/page-refresh'
 import {
   listAccounts,
   listCapabilities,
@@ -208,7 +209,11 @@ export const PipelinesPage = () => {
     }
   }
 
-  onMounted(() => void load())
+  onMounted(() => {
+    setPageRefresh({ run: () => void load() })
+    void load()
+  })
+  onUnmounted(() => setPageRefresh(null))
 
   // ── 草稿 ──────────────────────────────────────────────────────────────
 
@@ -490,8 +495,12 @@ export const PipelinesPage = () => {
   // ── 渲染 ──────────────────────────────────────────────────────────────
 
   const header = () => (
-    <div class="flex flex-wrap items-center justify-between gap-2">
-      <h1 class="text-base font-medium">任务编排</h1>
+    <div class="flex flex-wrap items-center justify-end gap-2">
+      {/* 标题由外壳那个 sticky navbar 显示（`app.tsx` 读 `navItem(id).title`）——
+          页面里**不要再写一遍**：2026-10-03 之前八页各写了一次，于是每页顶部
+          都是同一句话挨着出现两遍（连 `text-base font-medium` 都一模一样）✗。
+          这里只放动作（添加/新建…）——「刷新」已搬到外壳 navbar 的图标上
+          （见 `ui/page-refresh.ts`）。 */}
       <div class="flex flex-wrap items-center gap-2">
         {/*
           全页**只有一个**实心 btn-primary：
@@ -510,14 +519,6 @@ export const PipelinesPage = () => {
             新建编排
           </button>
         ) : null}
-        <button
-          type="button"
-          class="btn btn-sm btn-soft min-h-11 md:min-h-0"
-          disabled={state.value === 'loading'}
-          onClick={() => void load()}
-        >
-          刷新
-        </button>
       </div>
     </div>
   )

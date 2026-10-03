@@ -686,6 +686,29 @@ export const serve = (root, port, variant) =>
         send(req, res, fixture, true)
         return
       }
+      /**
+       * 运行事件流（SSE）。
+       *
+       * ⚠ 为什么必须**只发注释、不发事件**：
+       * 它要造的只是"任务还在跑 ⇒ 连接开着"这个状态。真发 `log` 事件会让
+       * 日志面板多出几行 ⇒ 门禁里那些 DOM 快照比较跟着变 ✗（而它们要测的是别的事）。
+       * SSE 规范里 `: 注释行` 是心跳，**不会**触发任何事件 ✓ 所以这里正合适。
+       *
+       * ⚠ 加上它的理由：以前夹具没有这条 ⇒ 应用点「运行」后 EventSource 拿到 404、
+       * 流根本没开成 ⇒ **"边跑任务边刷新"这个场景一条都复现不出来** ✗，
+       * 而这正是用户报"刷新后 JS 堆递增"时的真实用法（见 task-log 第 34 行）。
+       */
+      const events = url.match(/^\/api\/runs\/(\d+)\/events$/)
+      if (events) {
+        res.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        })
+        const beat = setInterval(() => res.write(': ping\n\n'), 1000)
+        req.on('close', () => clearInterval(beat))
+        return
+      }
       if (url.startsWith('/api/')) {
         /**
          * ⚠ 形状与上面 `VARIANTS` 那条同一条规矩：**`error` 是字符串、`code` 在顶层**
@@ -717,8 +740,21 @@ export const serve = (root, port, variant) =>
     server.listen(port, '127.0.0.1', () => resolve(server))
   })
 
-/** 应用认得的 hash 路由：`parseHash` 比的是 `#/settings` 这种**带斜杠**的 href。 */
-export const hashRoute = (route) => `#/${String(route).replace(/^#\/?/, '')}`
+/**
+ * 应用认得的路径：`parsePath` 比的是 `/settings` 这种**带斜杠**的路径
+ * （2026-10-03 起去掉了 `#` —— 用户口径「先去掉#号」）。
+ */
+export const routeUrl = (route) => `/${String(route).replace(/^#?\/?/, '')}`
+
+/**
+ * "跳到某个页面"的求值片段 —— **模拟 `ui/router.ts` 的 `navigate()`**。
+ *
+ * ⚠ 必须**两件事一起做**：`pushState` 改地址，再补发一次 `popstate`。
+ * 只改地址的话应用不会切页（`pushState` 自己不发事件），
+ * 而夹具脚本会以为"跳过去了"然后去断言一个还没渲染的页面 ✗。
+ */
+export const gotoJs = (route) =>
+  `(() => { const to = ${JSON.stringify(routeUrl(route))}; history.pushState({}, '', to); window.dispatchEvent(new PopStateEvent('popstate')); return location.pathname })()`
 
 // 同步取路径：此时还没有任何请求在飞，阻塞几毫秒无妨（异步取会让调用方拿到空串）
 export const chromePath = execFileSync('bash', ['-c', 'ls -d ~/.cache/puppeteer/chrome-headless-shell/*/chrome-headless-shell-*/chrome-headless-shell | head -1'], { encoding: 'utf8' }).trim()
@@ -893,7 +929,10 @@ export async function openSession({ port, route, debugPort = 0, profile, width =
       'openSession 必须传 profile（漏传时 chrome 会在当前目录下建一个叫 "undefined" 的用户目录）',
     )
   }
-  const url = `http://127.0.0.1:${port}/${route}`
+  // ⚠ 这里用 `routeUrl` 归一化：调用方传 `tasks` / `/tasks` / `#/tasks` 都行。
+  // 直接拼 `${port}/${route}` 的话，传 `/tasks` 会得到 `//tasks`（双斜杠）——
+  // 静态服务器认不出那个路径，于是发回落页，夹具却看不出来（页面照样能开）。
+  const url = `http://127.0.0.1:${port}${routeUrl(route)}`
   const child = launchChrome({ url, debugPort, profile })
   /**
    * ⚠ 握手阶段抛错**必须收尸**。旧版这里直接 `await waitForTarget`，它一超时就

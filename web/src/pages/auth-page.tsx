@@ -135,7 +135,7 @@ export const AuthPage = (props: AuthPageProps) => {
         await loginSession(username.value.trim(), credential)
       }
       // 成功后不在这里跳转：`authState` 变了，外壳会自己把页面换掉。
-      // 手动 `location.hash = ...` 反而会与那一步打架。
+      // 手动 `navigate(...)` 反而会与那一步打架。
     } catch (err) {
       // 后端原文直接透出（规范：不翻译成"操作失败"）——
       // 它已经说清了是口令短、还是不匹配。

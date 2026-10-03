@@ -19,7 +19,8 @@
  * 每多一份这类表就多一处迟早漂移的地方。
  */
 
-import { onMounted, ref } from 'lite'
+import { onMounted, onUnmounted, ref } from 'lite'
+import { setPageRefresh } from '../ui/page-refresh'
 import { getTaskConfig, putTaskConfig, type TaskConfigView } from '../api'
 // ⚠ 参数控件与**编排页**共用一份（`ui/param-field.tsx`）—— 两处各写一份迟早分叉。
 import { ParamField } from '../ui/param-field'
@@ -37,6 +38,8 @@ type LoadState = 'loading' | 'error' | 'ready'
 
 export const TaskConfigPage = (props: TaskConfigPageProps) => {
   const state = ref<LoadState>('loading')
+  /** 被本页盖住的那份刷新登记（任务页的），卸载时还回去。 */
+  let prevRefresh: ReturnType<typeof setPageRefresh> = null
   const errorMessage = ref('')
   const view = ref<TaskConfigView | null>(null)
   const values = ref<Record<string, unknown>>({})
@@ -56,7 +59,36 @@ export const TaskConfigPage = (props: TaskConfigPageProps) => {
     }
   }
 
-  onMounted(() => void load())
+  /**
+   * 登记「刷新」给外壳 navbar（与各页同一条约定，见 `ui/page-refresh.ts`）。
+   *
+   * # ⚠⚠ 为什么要 `queueMicrotask` 把它推到挂载之后
+   *
+   * 这一页是**子视图**（任务页里切出来的）。lite 里子组件的 `onMounted` **先于**
+   * 父页面（任务页）的 `onMounted` 跑 ⇒ 若在这里直接登记，紧接着父页面那份会把它
+   * **盖掉** ✗ ⇒ 表现是「在配置页点刷新，刷的是任务列表、不是这份配置」
+   * （实测发出的是 `/api/capabilities` + `/api/accounts`，而不是 `/api/tasks/<名>/config` ✗）。
+   * 推到微任务里就落在外层之后 ⇒ 子视图这份生效 ✓。
+   *
+   * ⚠ 这个推迟之所以安全，是因为登记写的是**普通变量、不是信号**
+   * （`ui/page-refresh.ts` 文件头写着为什么不能用信号：挂载期间写信号会重入外壳渲染
+   * ⇒ 切页时旧页面不被替换而被追加 ✗）。**若哪天有人把它改回信号，这段必须一起改** ✗。
+   *
+   * 卸载时把外层那份**还回去**（`prev`）而不是置 `null` —— 置 null 会让回到任务列表后
+   * 那个刷新图标点了没反应 ✗。`alive` 处理"还没轮到这个微任务就被卸载"的竞态：
+   * 那种情况下不能登记，否则图标会指向一个已经没了的页面 ✗。
+   */
+  let alive = true
+  onMounted(() => {
+    queueMicrotask(() => {
+      if (alive) prevRefresh = setPageRefresh({ run: () => void load() })
+    })
+    void load()
+  })
+  onUnmounted(() => {
+    alive = false
+    setPageRefresh(prevRefresh)
+  })
 
 
 
@@ -99,14 +131,6 @@ export const TaskConfigPage = (props: TaskConfigPageProps) => {
             任务配置 · {view.value?.name ?? props.task}
           </h1>
         </div>
-        <button
-          type="button"
-          class="btn btn-sm btn-soft min-h-11 md:min-h-0"
-          disabled={state.value === 'loading' || saving.value}
-          onClick={() => void load()}
-        >
-          刷新
-        </button>
       </div>
 
       {state.value === 'loading' ? (

@@ -99,6 +99,17 @@ export const IconMenu = (p: IconProps): JSX.Element => (
   </svg>
 )
 
+/**
+ * 刷新（navbar 上那个）。用 Material 的 refresh 路径，与其余图标同为 fill 风格。
+ *
+ * ⚠ 它转起来时是 `animate-spin`（由调用方加）—— 图标本身不管动效。
+ */
+export const IconRefresh = (p: IconProps): JSX.Element => (
+  <svg {...BASE} class={p.class ?? 'size-5'}>
+    <path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35Z" />
+  </svg>
+)
+
 export const IconClose = (p: IconProps): JSX.Element => (
   <svg {...BASE} class={p.class ?? 'size-5'}>
     <path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3 1.4 1.4Z" />

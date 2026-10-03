@@ -139,7 +139,12 @@ pub async fn serve(uri: Uri, headers: HeaderMap) -> Response {
         return (StatusCode::NOT_FOUND, "静态资源不存在").into_response();
     }
 
-    // SPA 回落：认不出的一律给 index.html，让前端按 hash 自己路由。
+    // SPA 回落：认不出的一律给 index.html，让前端自己按**路径**路由
+    // （`web/src/ui/router.ts`；2026-10-03 起去掉了 `#`）。
+    //
+    // ⚠ 这条回落与上面那条"末段带点 ⇒ 404"是配套的：干净路径路由下，
+    // 路由段里**不能出现 `.`**（会被当静态资源）。今天全部安全（任务名是 Rust
+    // 标识符、账号 id 是十六进制），新增路由时要过一遍这条。
     // 但**不能**把 API 路径也吞掉 —— 那会让打错字的接口返回一张 HTML，
     // 前端 `JSON.parse` 报一个与真实原因无关的错。
     if uri.path().starts_with("/api/") {

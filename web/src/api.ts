@@ -693,6 +693,33 @@ export const runEventsUrl = (runId: number) => `/api/runs/${encodeURIComponent(S
  * 一次已结束的运行会被无限重连（每次带 `Last-Event-ID`，
  * 服务端补发 0 条再关），每个打开的页面都挂着一条永久连接。
  */
+/**
+ * 活着的 SSE 连接（页面级）。
+ *
+ * # 为什么要登记 + 在 `pagehide` 里显式关掉
+ *
+ * 用户口径（2026-10-03）：「刷新页面，js 堆栈内存会递增」。**Chrome 里复现不出来** ——
+ * 实测：每次刷新前都开一条 SSE（`readyState=1`），6 次刷新的堆 0.79 MB、
+ * 脱离文档的节点 794 个，**一个不动** ✓（口径与 `lite/regress/leak.mjs` 一致）。
+ * 所以这不是"我们代码里有个 JS 泄漏"。
+ *
+ * 但 WebKit 与 Blink 不同：**老文档还挂着未关闭的连接时，它的销毁可能被推迟**
+ * ⇒ 上一页的堆留在进程里 ⇒ 内存面板看起来"每次刷新都涨" ✗。
+ * 这条登记处就是堵这条路：`pagehide`（刷新/关标签/跳走都会发）里把所有流**主动关掉**，
+ * 让老文档**没有任何理由**被留住 ✓。
+ *
+ * ⚠ 这是**加固**，不是"修好了一个已复现的 bug" —— 别把它写成后者。
+ * 它零风险（关掉本来就要死的连接）、且能让"浏览器保留老文档"这条路径彻底不成立。
+ */
+const activeStreams = new Set<() => void>()
+let pagehideHooked = false
+
+/** 页面要走了：把所有流关掉。也导出给测试用（否则这段只能靠真刷新验证）。 */
+export const closeAllStreams = (): void => {
+  for (const stop of activeStreams) stop()
+  activeStreams.clear()
+}
+
 export function subscribeRun(
   runId: number,
   handlers: {
@@ -722,6 +749,15 @@ export function subscribeRun(
     if (closed) return
     closed = true
     source.close()
+    activeStreams.delete(close)
+  }
+  activeStreams.add(close)
+  if (!pagehideHooked) {
+    // 只挂一次：这条监听器是**页面级**的，每条流各挂一遍就变成"监听器随流增长"了 ✗。
+    // ⚠ 用 `pagehide` 而不是 `unload`：`unload` 会破坏 Safari 的往返缓存，
+    // 而 `pagehide` 在刷新/关标签/跳走时都会发 ✓。
+    pagehideHooked = true
+    window.addEventListener('pagehide', closeAllStreams)
   }
 
   const handle = (raw: MessageEvent) => {

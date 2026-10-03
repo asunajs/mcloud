@@ -30,6 +30,7 @@ import { accountName, refreshAccountNames } from '../account-names'
  */
 
 import { onMounted, onUnmounted, ref } from 'lite'
+import { setPageRefresh } from '../ui/page-refresh'
 import {
   LIVE_IDLE_REASON,
   LIVE_ROOM_TASK,
@@ -418,11 +419,13 @@ export const LiveRoomPage = () => {
   }
 
   onMounted(() => {
+  setPageRefresh({ run: () => void load() })
     // 先把"id → 名字"填上，否则运行记录里显示的是一串哈希
     void refreshAccountNames()
     void load()
   })
   onUnmounted(() => {
+  setPageRefresh(null)
     stopTicker()
     for (const stop of stopStreams) stop()
   })
@@ -432,20 +435,6 @@ export const LiveRoomPage = () => {
   // ─────────────────────────────────────────────────────────────────────
   // 渲染：表头与参数卡
   // ─────────────────────────────────────────────────────────────────────
-
-  const header = () => (
-    <div class="flex flex-wrap items-center justify-between gap-2">
-      <h1 class="text-base font-medium">直播小红花</h1>
-      <button
-        type="button"
-        class="btn btn-sm btn-soft min-h-11 md:min-h-0"
-        disabled={state.value === 'loading'}
-        onClick={() => void load()}
-      >
-        刷新
-      </button>
-    </div>
-  )
 
   /**
    * 这一页的来龙去脉。
@@ -882,7 +871,6 @@ export const LiveRoomPage = () => {
 
   return (
     <div class="flex flex-col gap-4">
-      {header()}
       {/* ⚠ 顺序是**刻意的**（用户口径 2026-10-02）：先给"什么时候开播" ✓，
           再给"这页是干什么的" —— 反过来会让用户先读一段说明才看到时间 ✗。 */}
       {nextSession()}

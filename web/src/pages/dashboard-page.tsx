@@ -46,6 +46,7 @@
  */
 
 import { onMounted, onUnmounted, ref } from 'lite'
+import { setPageRefresh } from '../ui/page-refresh'
 import {
   getBeanToday,
   getStatus,
@@ -331,6 +332,7 @@ export const DashboardPage = (props: DashboardPageProps) => {
   }
 
   onMounted(() => {
+  setPageRefresh({ run: () => void load() })
     void load()
     // 「运行时间」得自己往前走：这一格显示的正是"已经过去多久"，
     // 只在取数那一刻算一次的话，页面开着十分钟它还写「2 分」—— 那比不显示更糟。
@@ -339,7 +341,10 @@ export const DashboardPage = (props: DashboardPageProps) => {
       nowTick.value = Date.now()
     }, 30_000)
   })
-  onUnmounted(() => clearInterval(ticker))
+  onUnmounted(() => {
+    setPageRefresh(null)
+    clearInterval(ticker)
+  })
 
   // ── 引擎条 ────────────────────────────────────────────────────────────
 
@@ -756,19 +761,10 @@ export const DashboardPage = (props: DashboardPageProps) => {
 
   const header = () => (
     <div class="flex flex-wrap items-center justify-between gap-2">
-      <div class="flex items-baseline gap-2">
-        <h1 class="text-base font-medium">总览</h1>
-        {/* 数据的**年龄**。不轮询，所以这一行是"上面那些数字是什么时候的"的唯一答案。 */}
-        {loadedAt.value ? <span class="text-xs opacity-60">更新于 {fmtClock(loadedAt.value)}</span> : null}
-      </div>
-      <button
-        type="button"
-        class="btn btn-sm btn-soft min-h-11 md:min-h-0"
-        disabled={state.value === 'loading'}
-        onClick={() => void load()}
-      >
-        刷新
-      </button>
+      {/* 标题由外壳那个 sticky navbar 显示（见 `app.tsx`）—— 这里**不再重复**。
+          这一行只留"数据的年龄"与右侧的刷新：不轮询，所以它是"上面那些数字
+          是什么时候的"的唯一答案。 */}
+      {loadedAt.value ? <span class="text-xs opacity-60">更新于 {fmtClock(loadedAt.value)}</span> : null}
     </div>
   )
 

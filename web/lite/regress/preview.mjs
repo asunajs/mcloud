@@ -14,5 +14,5 @@ const port = Number(process.argv[2] ?? 48700)
 const variant = process.argv[3] ?? 'ready'
 
 await serve('dist', port, variant)
-console.log(`预览（dist，variant=${variant}）：http://127.0.0.1:${port}/#/settings`)
+console.log(`预览（dist，variant=${variant}）：http://127.0.0.1:${port}/settings`)
 console.log('页面：设置 / 账号 / 任务 / 兑换 / 直播 / 定时 / 编排 / 历史 / 总览；登录态由 variant 决定')
