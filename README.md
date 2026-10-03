@@ -156,8 +156,10 @@ docs/                设计文档
 ```
 
 > 本仓库只放**干净的实现代码**。抓包记录、逆向素材、客户端分析
-> 都在上游仓库 [`mcloud`](../mcloud/)（`har/`、`test/golden/`、
+> 都在**同一个仓的 `go-legacy` 分支**（那份 Go 参考实现；`har/`、`test/golden/`、
 > `test/fixtures/`、`scripts/`），本仓库不复制这些内容。
+> 取阅：`git show go-legacy:<路径>`（该分支 HEAD 已删掉抓包素材，原文在 `go-legacy^`）；
+> 本机 `../mcloud/` 目录是它的检出。抓包**规范**另在第三个仓 `../mcloud-capture/`。
 
 依赖只能自上而下：`core ← crypto/upstream/store ← engine ← tasks ← app ← server`。
 `core` / `crypto` / `engine` / `tasks` **禁止**直接做 IO。

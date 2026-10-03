@@ -652,12 +652,15 @@ data/         运行时数据（不入库）
 ```
 
 **本仓库只放实现代码。** 抓包记录、逆向素材、客户端产物、一次性分析脚本
-一律留在上游 [`mcloud`](../../mcloud/) 仓库，不复制进来：
+一律留在**同一个仓的 `go-legacy` 分支**（那份 Go 参考实现），不复制进来：
 
-- `mcloud/har/` —— 抓包归档
-- `mcloud/test/golden/` —— 黄金向量原始出处（本仓库按需同步副本）
-- `mcloud/test/fixtures/` —— 脱敏夹具
-- `mcloud/scripts/` —— asar 解包等分析脚本
+- `go-legacy:har/` —— 抓包归档（`har/` 在 `.gitignore` 里，只在本机 `../mcloud/har/` 存在，**没入库**）
+- `go-legacy:test/golden/` —— 黄金向量原始出处（本仓库按需同步副本）
+- `go-legacy:test/fixtures/` —— 脱敏夹具
+- `go-legacy:scripts/` —— asar 解包等分析脚本
+
+> 2026-10-03 起这不是"另一个上游仓库"而是**同一仓的另一条分支**（`git show go-legacy:<路径>` 直接取，
+> 不必旁边那份检出）；抓包**规范四篇 + 协议五篇**则在第三个仓 `mcloud-capture`。
 
 这样本仓库能保持「可读、可审计、无第三方产物」，也避免两份素材各自漂移。
 

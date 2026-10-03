@@ -14,6 +14,16 @@
 > 查残留：`grep -rn mcloud-gost --exclude-dir={.git,target,node_modules} .`
 > —— 除了**本段说明**必须引用旧名（否则「改了什么」就无从说起），功能面应当 0 命中。
 >
+> ⚠ **仓库身份（2026-10-03，用户口径：「mcloud-gost 正式改名 mcloud」）**：
+> GitHub 上**只有一个** `mcloud`（`asunajs/mcloud`；`catlair/mcloud` 与 `catlair/mcloud-gost`
+> 是它改 org 前后的旧路径，org 改名后 `catlair/…` 仍能解析到 `asunajs/…`，但**不要再当权威名用**）。
+> 本仓 `main` = Rust 实现；**那份 Go 实现现在是同一个仓的 `go-legacy` 分支**，
+> 不是"另一个仓库的上游"。`go-legacy` 已经把抓包素材与通路脚本删掉（`docs/capture/`、
+> `docs/upstream/`、四篇规范、八个脚本，共 39 个文件），素材没消失 —— 在删除前的那一个提交里：
+> `git show go-legacy^:docs/capture/<文件>`。本机 `../mcloud/` 目录仍是 Go 侧的检出，
+> 所以文档里那些 `../mcloud/…` 相对路径照旧可解析。
+> 抓包规范与协议文档的家是**第三个仓** `mcloud-capture`（本机 `../mcloud-capture/`）。
+>
 > 三处**一次性副作用**（不是 bug，别当回归去查）：
 > ① 主题偏好的 localStorage 键 `mcloud-gost-theme` → `mcloud-theme` ⇒ 老用户第一次打开会
 > 回落成「跟随系统」，之后重新记住；
