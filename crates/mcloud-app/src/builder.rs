@@ -153,7 +153,15 @@ impl AppBuilder {
                     pc,
                 }) {
                     Ok(c) => {
-                        let transport = Arc::new(c) as Arc<dyn HttpClient>;
+                        // 最内层再包一层日志（排查第三方问题用 ✓）。放在这里的理由：
+                        // 到这一层时 `deviceid` / `jwttoken` / `authorization` **都已注入**
+                        // ⇒ 记下来的就是真正上网的那一发 ✓，而不是"我们打算发什么" ✗。
+                        // ⚠ 它必须**转发** `request_raw`（头像下载那条二进制链靠它 ✓）——
+                        // 见 `http_log.rs` 里那条钉住此事的用例 ✓。
+                        let transport = Arc::new(mcloud_upstream::LoggingClient::new(
+                            c,
+                            account.id.to_string(),
+                        )) as Arc<dyn HttpClient>;
                         let with_session = Arc::new(mcloud_upstream::H5Client::new(
                             transport,
                             account.clone(),

@@ -27,6 +27,7 @@ pub mod cloud_trash;
 pub mod endpoints;
 pub mod exchange;
 pub mod h5_client;
+pub mod http_log;
 pub mod live_consts;
 pub mod live_flower;
 pub mod live_kouling;
@@ -50,6 +51,7 @@ pub use auth_refresh::{
 pub use client::{ClientProfile, ReqwestClient};
 pub use endpoints::*;
 pub use h5_client::H5Client;
+pub use http_log::LoggingClient;
 pub use login::{
     LoginDataDecryptor, LoginEnvelope, LoginKind, LoginPayloadDecryptor, PcClient, PollOutcome,
     SendSmsOutcome, SliderPuzzle,

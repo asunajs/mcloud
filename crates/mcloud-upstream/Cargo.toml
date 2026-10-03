@@ -54,6 +54,9 @@ hex.workspace = true
 # 固定时钟：`live_ws_client` 的听写测试要钉住时间戳（状态机用 `now_millis`
 # 派生三处字段，用真实时钟就没法断言）。
 mcloud-core = { workspace = true, features = ["testkit"] }
+# 捕获式断言"这层真的会打日志"要一个 subscriber（见 http_log.rs 尾部的用例 ✓）。
+# ⚠ 只进 dev-dependencies：生产侧用 tracing 那套宏，不需要订阅者 ✗。
+tracing-subscriber.workspace = true
 
 # ── 交叉编 Linux arm64 时的 OpenSSL ──────────────────────────────────────
 #
