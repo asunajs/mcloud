@@ -514,6 +514,35 @@ impl mcloud_core::AccountStore for FakeStore {
     }
 }
 
+/// `SmidStore` 替身：默认"这个 store 不管 smid"。
+///
+/// 2026-10-03 起 `Store` 把 `SmidStore` 并成了 supertrait（任务层要能读
+/// 这个账号**已换回来**的那个 `deviceId` —— 它和登录时那份不是同一个东西）。
+/// 这些替身要证明的事与 smid 无关，所以读一律 `None`、写一律拒绝。
+#[async_trait]
+impl mcloud_core::SmidStore for FakeStore {
+    async fn get_smid_state(
+        &self,
+        _id: &mcloud_core::AccountId,
+    ) -> mcloud_core::Result<Option<mcloud_core::SmidState>> {
+        Ok(None)
+    }
+    async fn set_smid_fingerprint(
+        &self,
+        _id: &mcloud_core::AccountId,
+        _fingerprint_json: &str,
+    ) -> mcloud_core::Result<()> {
+        Err(refuse())
+    }
+    async fn set_smid_device_id(
+        &self,
+        _id: &mcloud_core::AccountId,
+        _device_id: &str,
+    ) -> mcloud_core::Result<()> {
+        Err(refuse())
+    }
+}
+
 #[async_trait]
 impl mcloud_core::RunStore for FakeStore {
     async fn upsert_run(&self, _r: &mcloud_core::RunRecord) -> Result<()> {

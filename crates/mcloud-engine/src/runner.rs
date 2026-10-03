@@ -482,7 +482,7 @@ mod tests {
     use mcloud_core::testkit::FixedClock;
     use mcloud_core::{
         AccountSettings, AccountStore, AuthInfo, DeviceId, HttpRequest, HttpResponse, LogStore,
-        PipelineStore, RunStore, ScheduleStore,
+        PipelineStore, RunStore, ScheduleStore, SmidState, SmidStore,
     };
 
     /// 固定时刻，便于断言时长与开始时间。
@@ -546,6 +546,23 @@ mod tests {
             _id: &AccountId,
             _state: &serde_json::Value,
         ) -> Result<()> {
+            Ok(())
+        }
+    }
+    /// `SmidStore` 替身（`Store` 的 supertrait，2026-10-03 起）：这个替身不管 smid。
+    #[async_trait]
+    impl SmidStore for FakeStore {
+        async fn get_smid_state(&self, _id: &AccountId) -> Result<Option<SmidState>> {
+            Ok(None)
+        }
+        async fn set_smid_fingerprint(
+            &self,
+            _id: &AccountId,
+            _fingerprint_json: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn set_smid_device_id(&self, _id: &AccountId, _device_id: &str) -> Result<()> {
             Ok(())
         }
     }

@@ -1060,6 +1060,35 @@ impl mcloud_core::AccountStore for NoStore {
     }
 }
 
+/// `SmidStore` 替身：默认"这个 store 不管 smid"。
+///
+/// 2026-10-03 起 `Store` 把 `SmidStore` 并成了 supertrait（任务层要能读
+/// 这个账号**已换回来**的那个 `deviceId` —— 它和登录时那份不是同一个东西）。
+/// 这些替身要证明的事与 smid 无关，所以读一律 `None`、写一律拒绝。
+#[async_trait]
+impl mcloud_core::SmidStore for NoStore {
+    async fn get_smid_state(
+        &self,
+        _id: &mcloud_core::AccountId,
+    ) -> mcloud_core::Result<Option<mcloud_core::SmidState>> {
+        Ok(None)
+    }
+    async fn set_smid_fingerprint(
+        &self,
+        _id: &mcloud_core::AccountId,
+        _fingerprint_json: &str,
+    ) -> mcloud_core::Result<()> {
+        Err(refuse())
+    }
+    async fn set_smid_device_id(
+        &self,
+        _id: &mcloud_core::AccountId,
+        _device_id: &str,
+    ) -> mcloud_core::Result<()> {
+        Err(refuse())
+    }
+}
+
 #[async_trait]
 impl mcloud_core::RunStore for NoStore {
     async fn upsert_run(&self, _r: &mcloud_core::RunRecord) -> Result<()> {
@@ -1224,4 +1253,49 @@ async fn receive_keeps_going_when_one_item_fails() {
     );
     // 领到的 9 颗要被如实计入。
     assert!(out.summary().contains('9'), "实得：{}", out.summary());
+}
+
+// ── deviceId 的取值顺序（2026-10-03 的 614 回归）────────────────────────
+//
+// 现场：`receiveV3` 领AI豆回 `614`「活动太火爆啦，锁定失败」。
+// 抓包 `app-signin-samples.txt` §4.2 的同一条请求三档实证说清了这一档的含义 ——
+// **不带回 `615`、内容错回 `614`**，而账号里存的 `B58A…-ENDIN`（32 hex + 后缀）
+// 是**登录时冒充 PC 客户端**那一份，与 H5 这条链要的（`B` + 88 字符 base64 ⇒ 64 字节）
+// 不是同一个东西。下面钉住优先级，别让谁把它改回 `ctx.account.device_id`。
+
+/// 抓包里那份真实值的形状：`B` + 88 字符 base64。
+const SMID_DEVICE_ID: &str = "BLV5ibGzzp50/lQ0p8jM3m1oYyq2gq7Xr2L4pQ0Zz1k=";
+/// 登录时冒充 PC 客户端用的那份（现场值，缩略到同形状）。
+const ACCOUNT_DEVICE_ID: &str = "B58A2FA1937BC109DC034A5D380F4057-ENDIN";
+
+#[test]
+fn device_id_prefers_smid_over_the_account_one() {
+    assert_eq!(
+        pick_device_id(None, Some(SMID_DEVICE_ID), ACCOUNT_DEVICE_ID).as_deref(),
+        Some(SMID_DEVICE_ID),
+        "smid 库里那份必须胜过账号里那份 —— 后者会被上游按「内容无效」回 614"
+    );
+}
+
+#[test]
+fn device_id_prefers_the_body_injection() {
+    assert_eq!(
+        pick_device_id(Some("B-from-body"), Some(SMID_DEVICE_ID), ACCOUNT_DEVICE_ID).as_deref(),
+        Some("B-from-body"),
+        "路由层显式注入的那份最优先（兑换走的也是这个口子）"
+    );
+}
+
+#[test]
+fn device_id_falls_back_to_the_account_only_last() {
+    assert_eq!(
+        pick_device_id(None, None, ACCOUNT_DEVICE_ID).as_deref(),
+        Some(ACCOUNT_DEVICE_ID),
+        "都没有时才兜底 —— 兜底了会另发一条警告，不静默"
+    );
+    assert_eq!(
+        pick_device_id(None, Some("   "), ""),
+        None,
+        "空串与纯空白一律当「没有」：上游对空串的判法等同于「不带」（回 615）"
+    );
 }

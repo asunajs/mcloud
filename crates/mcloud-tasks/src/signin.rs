@@ -37,10 +37,82 @@ async fn call(ctx: &TaskContext, req: HttpRequest, what: &str) -> Result<SignInE
     SignInEnvelope::parse(body)
 }
 
+/// 取签到族 H5 请求该带的 `deviceId`。
+///
+/// # 为什么**不能**用 `ctx.account.device_id`
+///
+/// 那一份是**登录时冒充 PC 客户端**用的（`Account::device_id`），
+/// 与 H5 这条 smid 指纹链换回来的 id **不是同一个东西** —— 兑换那边的
+/// 注释已经写死过一句（`routes/exchange.rs`）："⚠ 不是 `account.device_id`"。
+///
+/// 上游**校验的是内容**，不只是"非空"（抓包 `app-signin-samples.txt` §4.2
+/// 的同一条请求三档实证，2026-09-19 账号 B，只换 `deviceId` 一项）：
+///
+/// | `deviceId` | `code` | 上游 msg |
+/// |---|---|---|
+/// | 不带 | `615` | 活动太火爆啦，**兑换失败**，试试其他奖品吧 |
+/// | 长度对、只错一个字符 | `614` | 活动太火爆啦，**锁定失败**，试试其他奖品吧 |
+/// | 真实值（`'B'` + 88 字符 base64 ⇒ 64 字节） | `0` | 正常 |
+///
+/// 2026-10-03 实测复现：账号里那份是 `B58A…-ENDIN`（32 hex + `-ENDIN` 后缀），
+/// 于是 `receiveV3` 领AI豆回 **`614`** ⇒ 界面上一句"活动太火爆啦，锁定失败"，
+/// 看着像限流，**其实是参数**。抓包 §4.2 第 3 条专门提醒过别照这句 msg 归类。
+///
+/// # 取值顺序
+///
+/// 1. **`body.deviceId`**（路由层注入的那一份 —— 兑换走的就是这个口子，
+///    来源是 `SmidService::device_id`，"库里有就不打网络"）；
+/// 2. **本机 smid 库里已换回来的那个**（`SmidState::device_id`，含 `B` 前缀）——
+///    任务的 `ctx.store` 直接读得到，不联网、定时任务那条路径也覆盖得到；
+/// 3. 都没有 ⇒ 退回 `account.device_id`，**并如实警告**（这条已知会被判
+///    "内容无效"，不能让它静默地当成正常值用）。
+async fn h5_device_id(ctx: &TaskContext, body: Option<&Value>) -> Option<String> {
+    let body_id = body.and_then(|b| b.get("deviceId")).and_then(Value::as_str);
+    let smid = match ctx.store.get_smid_state(&ctx.account.id).await {
+        Ok(Some(st)) => st.device_id,
+        Ok(None) => None,
+        Err(e) => {
+            ctx.warn(format!(
+                "读 smid 状态失败（本次可能回落成登录时那份 deviceId，领取类接口会按「内容无效」回 614）：{e}"
+            ));
+            None
+        }
+    };
+    let account = ctx.account.device_id.as_str();
+    let picked = pick_device_id(body_id, smid.as_deref(), account);
+    // 落到最后一档（登录时那份）时**必须说一声**：那一份已知会被判"内容无效"，
+    // 而界面上只会看到"活动太火爆啦" —— 不说清就等于把参数问题伪装成限流。
+    if picked.is_some() && pick_device_id(body_id, smid.as_deref(), "").is_none() {
+        ctx.warn(
+            "这个账号还没换过 smid deviceId（`data/smid.json` 里没有）—— 本次退回用登录时那份；\
+             领取类接口（`receiveV3`）会按「内容无效」回 614，而文案是「活动太火爆啦」",
+        );
+    }
+    picked
+}
+
+/// 按优先级挑一个 `deviceId`（纯逻辑，便于单测 —— 见上面那张三档实证表）。
+///
+/// 顺序是：**`body` 注入的那份** → **smid 库里已换回来的那份** → 登录时那份（兜底，已知会被拒）。
+/// 空串与纯空白一律当"没有"：上游对空串的判法等同于"不带"（回 `615`）。
+fn pick_device_id(body: Option<&str>, smid: Option<&str>, account: &str) -> Option<String> {
+    [body, smid, Some(account)]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// 查签到状态（**权威判据**）。
 pub async fn query_status(ctx: &TaskContext) -> Result<SignInStatus> {
-    let device_id = ctx.account.device_id.as_str();
-    let env = call(ctx, proto::info_v3_request(Some(device_id)), "查询签到状态").await?;
+    let device_id = h5_device_id(ctx, None).await;
+    let env = call(
+        ctx,
+        proto::info_v3_request(device_id.as_deref()),
+        "查询签到状态",
+    )
+    .await?;
     proto::parse_status(&env)
 }
 
@@ -91,9 +163,10 @@ impl Task for SignTask {
         Vec::new()
     }
 
-    // ⚠ 形参留 `_body`：本任务**没有任何参数**（见上面的 `params`）。
-    // 不写成 `body` 会有一个 unused 警告，而那个警告正是在提醒"这里本可以有参数"。
-    async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
+    // ⚠ 原本这条注释写着"形参留 `_body`：本任务**没有任何参数**"—— 现在不成立了：
+    // 2026-10-03 起它要把 `body.deviceId`（路由层注入的那一份，若有）转交给
+    // `h5_device_id`，所以这里真的用得上 body。
+    async fn run(&self, ctx: &TaskContext, body: &Value) -> TaskResult {
         ctx.progress(1, 3, "查询签到状态");
         let before = query_status(ctx).await?;
         ctx.info(format!("签到前：{}", describe_status(&before)));
@@ -108,10 +181,10 @@ impl Task for SignTask {
         ctx.check_cancelled()?;
 
         ctx.progress(2, 3, "提交签到");
-        let device_id = ctx.account.device_id.as_str();
+        let device_id = h5_device_id(ctx, Some(body)).await;
         let env = call(
             ctx,
-            proto::start_sign_in_request(Some(device_id)),
+            proto::start_sign_in_request(device_id.as_deref()),
             "提交签到",
         )
         .await?;
@@ -178,7 +251,7 @@ impl Task for ReceiveTask {
         "领取待收的AI豆奖励（含到期延期的那一档）"
     }
 
-    async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
+    async fn run(&self, ctx: &TaskContext, body: &Value) -> TaskResult {
         ctx.progress(1, 2, "查询待领取账目");
         let st = query_status(ctx).await?;
         ctx.info(format!(
@@ -194,7 +267,10 @@ impl Task for ReceiveTask {
             )));
         }
 
-        let device_id = ctx.account.device_id.as_str();
+        // ⚠ 用 `h5_device_id`，**不是** `ctx.account.device_id`：后者是登录时冒充 PC 客户端
+        // 那份，上游判"内容无效"回 614（2026-10-03 实测：领AI豆整笔领不到，
+        // 报错文案却是"活动太火爆啦"）。详见那个函数的文档。
+        let device_id = h5_device_id(ctx, Some(body)).await;
         let mut claimed_ids: Vec<String> = Vec::new();
         let mut total_gained = 0i64;
         let mut next_month = 0usize;
@@ -216,6 +292,18 @@ impl Task for ReceiveTask {
         // 而后面那笔**本来能领到**。这是"少领了却说失败"的那一侧错误 ——
         // 该领的没领，且下轮要等一整天。
         let mut failed: Vec<String> = Vec::new();
+
+        // 失败**当场**以 `warn` 打一行，而不是只等末行的小结 —— 两个理由：
+        //
+        // 1. ⚠ **级别**：`info` 在日志面板里是默认色 ✓，而"这一笔没领到"是**警告**
+        //    ✗。用户 2026-10-03 实测原话：「日志没附上颜色确认状态」✓ —— 根因就是
+        //    这些失败信息全都走了 `ctx.info` ✓。
+        // 2. 多账号时日志是交错的一条流 ⇒ 只在末行汇总的话，那一行早被别人的
+        //    进度冲走了 ✗。
+        let mut note_failure = |msg: String| {
+            ctx.warn(&msg);
+            failed.push(msg);
+        };
 
         for item in &st.receive_list {
             ctx.check_cancelled()?;
@@ -242,9 +330,9 @@ impl Task for ReceiveTask {
                                 // `result: 100`），不是对象 —— 所以这里不解析形状。
                                 claimed_ids.push("延期领取（实拍不返回份数）".to_string());
                             }
-                            Err(e) => failed.push(format!("延期领取：{e}")),
+                            Err(e) => note_failure(format!("延期领取：{e}")),
                         },
-                        Err(e) => failed.push(format!("延期领取：{e}")),
+                        Err(e) => note_failure(format!("延期领取：{e}")),
                     }
                 }
                 _ => {
@@ -253,6 +341,16 @@ impl Task for ReceiveTask {
                     // ⚠ `deviceId` 在这一条上是**必填**（H5 标了 `isDeviceId`），
                     // 不带会回 `615` —— 而签到那两条不带没事，别外推。
                     ctx.progress(step, total_steps, "领取AI豆");
+                    // `receive_v3_request` 的 `deviceId` 是**必填 `&str`**（漏发在编译期就
+                    // 暴露）。真取不到时**不发**：上游对"没带"回 615、对"内容错"回 614 ——
+                    // 两者都领不到，但如实说清比发一个已知会被拒的值强。
+                    let Some(device_id) = device_id.as_deref() else {
+                        note_failure(
+                            "领取AI豆：这个账号还没有可用的 deviceId（smid 指纹没换过）"
+                                .to_string(),
+                        );
+                        continue;
+                    };
                     let cloud_id = item.record_id.clone().unwrap_or_default();
                     let req =
                         proto::receive_v3_request(device_id, &cloud_id, Some(item.cloud_type));
@@ -262,9 +360,9 @@ impl Task for ReceiveTask {
                                 total_gained += got.receive;
                                 claimed_ids.push(format!("+{} AI豆", got.receive));
                             }
-                            Err(e) => failed.push(format!("领取AI豆（解析失败）：{e}")),
+                            Err(e) => note_failure(format!("领取AI豆（解析失败）：{e}")),
                         },
-                        Err(e) => failed.push(format!("领取AI豆：{e}")),
+                        Err(e) => note_failure(format!("领取AI豆：{e}")),
                     }
                 }
             }
@@ -293,13 +391,26 @@ impl Task for ReceiveTask {
                 failed.join("；")
             ));
         }
-        ctx.info(&msg);
-        // 至少有一笔成功、也有失败 ⇒ 部分成功；全失败 ⇒ 失败（不吞错）。
+        // ⚠ 级别跟着结局走：末行不是"一句普通进展"，扫日志时要能一眼看出黄/红 ✓
+        if failed.is_empty() {
+            ctx.info(&msg);
+        } else {
+            ctx.warn(&msg);
+        }
+
+        // 至少有一笔成功、也有失败 ⇒ **部分成功**；全失败 ⇒ 失败（不吞错）。
+        //
+        // ⚠ 这一档是 2026-10-03 补的：原来"有成的也有没成的"落到 `Success`
+        // ⇒ 界面写「成功」而正文写「失败 1 笔」✗，用户实测原话就是
+        // 「下面的 614 失败还直接说成功」✓。
         let claimed = claimed_ids.len();
-        if !failed.is_empty() && claimed == 0 && next_month == 0 {
+        if failed.is_empty() {
+            return Ok(TaskOutcome::success(msg));
+        }
+        if claimed == 0 && next_month == 0 {
             return Ok(TaskOutcome::failed(msg));
         }
-        Ok(TaskOutcome::success(msg))
+        Ok(TaskOutcome::partial(msg))
     }
 }
 
@@ -684,7 +795,15 @@ impl Task for TaskListTask {
                 proto::cloud_type::NOW => "现在可领",
                 proto::cloud_type::EXPANSION => "已到期可领（延期领取）",
                 proto::cloud_type::NEXT_MONTH => "下月可领",
-                _ => "未知类型",
+                // ⚠ 别只写"未知类型" ✗：用户原话「未知又是啥，不明不白」✓。
+                // 把**上游给的原始码**带出来 ⇒ 看图就能查、也知道该往哪加分支 ✓
+                // （已知的三个是 0=现在可领 / 1=已到期 / 2=下月，见 `proto::cloud_type`）。
+                _ => {
+                    return Ok(TaskOutcome::partial(format!(
+                        "任务清单里出现未识别的类型码 {}（已知 0/1/2），本次只报了能识别的部分",
+                        item.cloud_type
+                    )))
+                }
             };
             items.push(format!("{label} {} AI豆", item.cloud_num));
         }

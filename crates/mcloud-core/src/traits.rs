@@ -17,6 +17,7 @@ use crate::pipeline::{Pipeline, PipelineId};
 use crate::run::{RunId, RunRecord};
 use crate::schedule::{Schedule, ScheduleId};
 use crate::settings::AppSettings;
+use crate::smid::SmidStore;
 use crate::user::{Session, User, UserId};
 
 // ── HTTP ────────────────────────────────────────────────────────────────
@@ -495,14 +496,39 @@ pub trait UserStore: Send + Sync {
 ///
 /// 用 trait 继承而不是把方法摊平：这样 `Arc<dyn Store>` 仍然是
 /// **一个**对象，注入时不用带五个 `Arc`。
+///
+/// # 为什么 2026-10-03 把 [`SmidStore`] 也并了进来
+///
+/// 任务是**拿得到 `ctx.store` 的**（`TaskContext`），所以"读这个账号
+/// 已换回来的 smid `deviceId`"本来不该再拉一条注入线。没并进来之前，
+/// 任务层只能去用 `Account::device_id` —— 而那一份是**登录时冒充 PC
+/// 客户端**用的，与 H5 那条链不是同一个东西：上游**校验内容**，
+/// 内容错就回 `614`（`receiveV3` 领AI豆因此整笔领不到，
+/// 报错文案却是"活动太火爆啦"）。见 `mcloud_tasks::signin::h5_device_id`。
 pub trait Store:
-    AccountStore + RunStore + LogStore + ScheduleStore + PipelineStore + UserStore + Send + Sync
+    AccountStore
+    + RunStore
+    + LogStore
+    + ScheduleStore
+    + PipelineStore
+    + UserStore
+    + SmidStore
+    + Send
+    + Sync
 {
 }
 
 /// 任何同时实现了全部子 trait 的类型自动成为 `Store`。
 impl<T> Store for T where
-    T: AccountStore + RunStore + LogStore + ScheduleStore + PipelineStore + UserStore + Send + Sync
+    T: AccountStore
+        + RunStore
+        + LogStore
+        + ScheduleStore
+        + PipelineStore
+        + UserStore
+        + SmidStore
+        + Send
+        + Sync
 {
 }
 
