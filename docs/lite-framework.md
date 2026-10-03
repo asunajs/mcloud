@@ -9,20 +9,19 @@
 
 | 指标 | 现在 | 怎么量 |
 |---|---|---|
-| 运行时 gzip（全量导出） | **2586 B**（raw 5971）—— 2026-10-02 修内存泄漏后复测（修前 2533 / 5792，即本次修复 **+53 B gzip / +179 B raw**，占 2.1%） | `node web/lite/size.mjs` |
-| 运行时 gzip（不含只有 demo/bench 用的内部件） | **2571 B**（raw 5928） | 同上 |
-| 主产物 JS | ⚠ **2026-10-02 19:3x 复测：19 个 chunk**（按页拆），合计 raw **233,090 B** / gzip **80,209 B**；首屏只拉 `index`（gzip 9,583）+ `api`（gzip 5,668）两个 = gzip **15,251 B** | `cd web && npm run build` |
+| 运行时体积（全量导出，raw + gzip 两档） | **别背数**（每次改运行时都变） | `node web/lite/size.mjs` |
+| 运行时体积（不含只有 demo/bench 用的内部件） | 同上 | 同上 |
+| 主产物 JS（条数与字节） | **别背数**：产物按页拆，条数随页面增减 | `cd web && npm run build && ls web/dist/assets/*.js \| wc -l` |
 | └ 其中运行时占 | ⚠ **旧口径（"gzip 2.5 kB ≈ 全量 7.6%"）已失效** —— 那个数是拿"单 chunk"当分母除的；产物拆开后分母不再是一个文件 ⇒ **待重定，别照它判断** | — |
-| 主产物 CSS（Tailwind + daisyUI） | raw **68,600 B** / gzip **12,892 B** ⇒ **首屏三字节的 45.8%**（旧读数 47.81 kB / 9.91 kB、以及本轮早些时候的 64,088 / 12,372 都已过期）| 同上；gzip 口径 = node zlib −9，见 `web/scripts/daisyui-size-probe.mjs`（它跑一次 ≈6 s，且自带**逐字节自检**）|
-
-> ⚠ **CSS 这两行的基准正在动**：`web/src/app.css` 此刻是**别的未提交工作线**的脏文件
-> （`git diff` 240 增 / 66 删），本轮十分钟内实测到它连跳三个读数
-> （raw 68,516 → 68,568 → **68,600**）。⇒ 引这几个数要带"2026-10-02 那份未提交 CSS"这个限定，
-> 别人提交后再复量一次。移除 daisyUI 的取舍与**Δ**（同一轮内可比）见
-> [`daisyui-removal-analysis.md`](daisyui-removal-analysis.md)。
+| 主产物 CSS（Tailwind + daisyUI） | **别背数** | `node web/scripts/daisyui-size-probe.mjs`（跑一次 ≈6 s，自带逐字节自检） |
 | 挂载 1000 行（编译产物） | **2.5–5.9 ms**（best of 3） | `node web/lite/bench/run.mjs` |
 | 反转 2000 行 ×10 | **8.6–12 ms** ⚠ 唯一劣化项 | 同上 |
-| 门禁（默认 / `--full`） | **≈33 s / ≈77 s** | `node scripts/gates-web.mjs` |
+| 门禁（默认 / `--full`） | 默认只跑 `ready` 一个认证态（改脚本时的快回路）；`--full` 跑满三个认证态 + 一条前端泄漏量测。**耗时随机器变，别写死秒数**，看脚本自己那行 | `node scripts/gates-web.mjs` |
+
+> ⚠ **主产物 CSS 的读数会随 `web/src/app.css` 变**（`@plugin "daisyui"` 的 `exclude`
+> 清单也在动）⇒ **别引历史读数**，跑 `node web/scripts/daisyui-size-probe.mjs` 现算。
+> 移除 daisyUI 的取舍与**Δ**（同一轮内可比）见
+> [`daisyui-removal-analysis.md`](daisyui-removal-analysis.md)。
 
 > 📌 表里的数字是**编译产物**的读数。以前引的"挂载 1.2 ms"是手写目标形态的裸速，
 > 口径偏乐观，已作废（见 §6 与 [`lite-postmortem.md`](lite-postmortem.md)）。
@@ -46,7 +45,8 @@
 * 普查（§2）显示真正用到的 Vue API 只有 **6 个**，其余（Teleport / Transition /
   KeepAlive / Suspense / 异步组件 / 指令 / computed）**一处都没用**。
 
-现在的结果：主产物 JS 153.8 kB → **120.8 kB**（gzip 48.4 → **33.1 kB**，约 −32%），
+现在的结果：主产物已**按页拆 chunk**，体积**别背数**（每轮都在动）—— 现算：
+`node web/lite/size.mjs`（运行时）、`cd web && npm run build && ls web/dist/assets/*.js | wc -l`（业务产物的 chunk 条数）。
 CSS 与类名一字未动。**性能不是自研的理由** —— 2,000 行的列表这个项目根本没有。
 
 ## 2. 语法子集：由普查决定，不是拍脑袋
@@ -292,10 +292,13 @@ Vite 8 / Rolldown / es2022 / 默认压缩器生产构建后 gzip：
 
 | 裁剪 | raw | gzip |
 |---|---|---|
-| 全量（= `src/index.ts` 导出的全部） | 5792 | **2533** |
-| 再去掉只有 demo/bench 用的内部件 | 5749 | **2518** |
+| 全量（= `src/index.ts` 导出的全部） | 现算 | 现算 |
+| 再去掉只有 demo/bench 用的内部件 | 现算 | 现算 |
 
-参照：Solid 核心 ≈7 KB gzip，Vue Vapor 的地板 16,344 B gzip ⇒ 现在是它们的 1/2.9 与 1/6.7。
+> 数字**别背**（每次改运行时都变）：`node web/lite/size.mjs` 会把这两行打出来。
+> 下面的历史差值都标了 commit / 日期，是**当时的读数**，不是"现在"。
+
+参照：Solid 核心 ≈7 KB gzip，Vue Vapor 的地板 16,344 B gzip —— 拿现算的 gzip 去除即可。
 
 ⚠ **和上一版文档的差值要交代清楚**：设计稿引过 1,892 / 1,514 B，那是**还带着
 `computed` / `store` / Vue 兼容壳**时的读数。那一轮把那三样删了，
@@ -394,7 +397,8 @@ best of 3、headless Chrome、1000/2000 行的合成规模：
    `performance.now()` 精度）。要拉开差距得给每处文本挂几十条绑定，
    那已经不是本项目的形状 ⇒ 不追求。
 3. **反转仍是劣化项**：逐行搬，没有"最小移动集"。绝对值 2000 行反转 ≈1 ms/次，
-   而全仓最大的列表是"已注册任务 18 项"那种几十行量级 ⇒ 亚毫秒。
+   而全仓最大的列表是"已注册任务"那种几十行量级（条数现算：
+   `grep -c "Arc::new" crates/mcloud-tasks/src/lib.rs`）⇒ 亚毫秒。
    **什么情况下该回来做**：某一页 routinely 上千行**且**会整段颠倒（追加不在此列）。
 
 挂载为什么比手写版慢：每个列表项多了 `createComponent` + props getter + 一条行内 effect。
@@ -402,7 +406,7 @@ best of 3、headless Chrome、1000/2000 行的合成规模：
 
 ## 7. 验收与门禁
 
-`node scripts/gates-web.mjs`（默认 ≈56 s；`--full` ≈100 s）五条：
+`node scripts/gates-web.mjs` 默认五条（认证态只跑 `ready`）；`--full` 跑满三个认证态并加一条前端泄漏量测：
 
 | 门 | 命令 | 证明什么 |
 |---|---|---|
@@ -411,12 +415,13 @@ best of 3、headless Chrome、1000/2000 行的合成规模：
 | lite 编译期负例 | `node lite/regress/compiler.mjs` | **该抛的都抛了**（§4.5 那 12 条：四种 `key` 位置、两种指令写法、`@click`、块体 map、positional 真假、带冒号的命名空间属性不该被拦） |
 | 窄屏布局验收 | `node lite/regress/narrow.mjs` | **真 375 宽视口**下没有横向溢出、账号行没被挤扁、弹窗的 ✕ 够得着、方式 tab 每格 ≥44px（§4.6） |
 | lite 真 DOM 验收 | `node lite/regress/all.mjs --skip-build [--quick]` | 真浏览器上的行为对 |
+| 前端泄漏量测（**仅 `--full`**） | `node lite/regress/leak.mjs --fixture --rounds 2` | 8 个页面各访问 2 轮后，节点/监听/堆的净增长在预算内（夹具后端，不碰 :3000） |
 
 ⚠ 没装无头 Chrome 的机器上**后两条**会印 `⊘ 跳过（本机没有无头 Chrome，这条**不算通过**）`
 并在摘要里**明说这条没被验证过**，不会冒充绿。CI 的 ubuntu runner 上因此只覆盖前三条
 （typecheck / build / 编译期负例都是纯 Node）⇒ **后两条是本地提交前的门**（约定 §9.2）。
 
-> **typecheck 用原生 `tsc` 而不是 `@ts-macro/tsc`（2026-10-01）**
+> **（历史）typecheck 从 `@ts-macro/tsc` 换成原生实现（2026-10-01）**
 >
 > 那个 fork 是迁移期（`ce17969`）留下的，全仓**没有任何 ts-macro 宏用法**，
 > 而它是整条工具链里**对 TS 大版本最敏感**的一环：实测把 typescript 换成 7.0.2，
@@ -425,10 +430,16 @@ best of 3、headless Chrome、1000/2000 行的合成规模：
 > 换之前做过等价性核对，不是"都过了"就算：
 > `tsc --noEmit` 与 `tsmc --noEmit` **退出码都是 0，且 `--listFiles` 逐行相同（各 158 个文件）**。
 > 换完 5 条门禁全绿，产物 hash 不变（typecheck 不参与产物）。
+> 现在 `npm run typecheck` = **`tsgo --noEmit`**（`@typescript/native-preview`，原生实现）；
+> 用户口径（2026-10-01）：**只要 tsgo** —— 不要把 `typescript` / `tsc` 加回来做"互校兜底"。
 >
-> ⚠ 这**不等于** TS 的耦合解除了：`lite/compiler.ts` 仍然 `import ts from 'typescript'`，
-> 而它在 Vite 配置的加载路径上 ⇒ `npm run build` 也依赖这个包（实测把包挪走，三条全崩）。
-> 想去掉 TS 5.x 的绑定，要动的是"编译器建在哪棵 AST 上"，与这条无关。
+> ⚠ **TS 的耦合已经解除（2026-10-01，与上一条同一批改动）**：`web/lite/compiler.ts`
+> 现在只 `import * as ast from './ast.ts'`，由 `web/lite/ast.ts` 调 **`oxc-parser`** 解析 TSX
+> ⇒ `package.json` 里**没有** `typescript` 这个包，`npm run build` 也不再依赖它。
+> （本节原先写"`compiler.ts` 仍然 `import ts from 'typescript'`、把包挪走三条全崩" ——
+> 那是换 `oxc-parser` **之前**的读数，已过期。）
+> ⚠ `oxc-parser` 是**原生**包 ⇒ 凡把它打进 Node 侧产物的构建都要标 `external`
+> （见 `web/lite/regress/check.vite.config.ts`）。
 
 `all.mjs` 包了四样：
 
@@ -495,7 +506,7 @@ best of 3、headless Chrome、1000/2000 行的合成规模：
 | 项 | 说明 |
 |---|---|
 | 只测过 Chrome | Safari / Firefox 未验；用的都是标准 API，但没有实测 |
-| 异步组件 / 代码分割 | **不做**：单 chunk 是刻意的（`modulePreload` 垫片也因此关掉） |
+| 异步组件 / 代码分割 | **已做**：`web/src/app.tsx` 的每个页面一个动态 `import()`（Vite 据此切独立 chunk，另有 hover/focus 预取），切页时按需取。条数**别背数**，现算：`ls web/dist/assets/*.js \| wc -l`（要先 `cd web && npm run build`）。`modulePreload.polyfill: false` 仍关着 —— 那是给不支持 `rel=modulepreload` 的浏览器用的垫片，与本仓拆不拆包无关（`web/vite.config.ts` 里"本产物是单 chunk"那句注释已过期） |
 | SSR / 水合 | 不做，本项目是纯客户端 |
 | 指令、模板引用、`class` 数组/对象、`style` 对象 | 0 处使用，**不做**，也**不检测**（§4.5 的静默区） |
 | 事件委托 | 不做：逐元素 listener 在本仓是几百个的量级，而委托要额外付 ~250 B 并引入"事件目标穿过 shadow / `stopPropagation`"这类边界 |

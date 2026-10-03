@@ -3,6 +3,8 @@
  *
  * 固定高度 + 可滚动（规范 §7.2 「历史与日志」：SSE 日志区固定高度可滚动）。
  * `overscroll-contain` 防止 iOS 上滚到边界带动整页。
+ *
+ * ⚠ 本组件**只画**：行数与截断由调用方的 [`pushLog`] 管（两页共用同一个上限）。
  */
 
 export interface LogLine {
@@ -23,21 +25,49 @@ const TONE: Record<LogLine['kind'], string> = {
   error: 'text-error',
 }
 
-export const LogPanel = (props: { lines: LogLine[] }) => {
-  if (props.lines.length === 0) return null
+/**
+ * 日志最多留多少行。
+ *
+ * 一次运行里日志是**无上限**追加的（每条 SSE 事件一行），而面板高度固定
+ * ⇒ 超出部分既看不见、又白占内存与每次更新的遍历成本（2026-10-03 review §2.1）。
+ * 500 行远多于那个 `h-64` 能显示的量（约 12 行），够回看一大段。
+ * 同款做法见 `toast.ts` 的 `MAX_TOASTS`、`dashboard-page` 的 `RECENT_LIMIT`。
+ */
+export const MAX_LOG_LINES = 500
 
-  return (
-    <div class="card bg-base-100 shadow-sm">
-      <div class="card-body">
-        <h2 class="card-title text-base">运行日志</h2>
-        <div class="h-64 overflow-y-auto overscroll-contain rounded-box bg-base-200 p-3 font-mono text-xs leading-5">
-          {props.lines.map((l, i) => (
-            <div key={i} class={`break-words ${TONE[l.kind]}`}>
-              {l.text}
-            </div>
-          ))}
+/** 追加一行，并按 [`MAX_LOG_LINES`] 截断（**只截头部**：最新的在最后）。 */
+export function pushLog(lines: LogLine[], kind: LogLine['kind'], text: string): LogLine[] {
+  const next = [...lines, { kind, text, at: Date.now() }]
+  return next.length > MAX_LOG_LINES ? next.slice(next.length - MAX_LOG_LINES) : next
+}
+
+/**
+ * 运行日志面板。
+ *
+ * ⚠⚠ `get` 必须是**函数**（thunk），不能是数组（2026-10-03 review §2.1）：
+ * 传数组时调用方要在槽里当场读（`{lines.value.length > 0 ? <LogPanel lines={lines.value}/> : null}`）
+ * ⇒ 那个槽订阅了日志信号 ⇒ **每来一条日志就把整块面板（含全部已显示的行、
+ * 含那个滚动容器）拆掉重造** ✗。后果有三条：一次运行累计 O(L²)；
+ * 多账号并发时 L 涨得更快；**用户往上翻日志会被弹回底部**（滚动容器换了新节点）。
+ * 传 thunk 时槽里只读到一个函数，真正的读发生在本组件自己的槽里 ⇒
+ * `.map` 那一层重跑、`createFor` 按**行对象身份**复用已有行，只追加新的 ✓
+ * （行对象是 `pushLog` 新建的、旧的那些身份不变）。
+ */
+export const LogPanel = (props: { get: () => LogLine[] }) => (
+  <>
+    {props.get().length === 0 ? null : (
+      <div class="card bg-base-100 shadow-sm">
+        <div class="card-body">
+          <h2 class="card-title text-base">运行日志</h2>
+          <div class="h-64 overflow-y-auto overscroll-contain rounded-box bg-base-200 p-3 font-mono text-xs leading-5">
+            {props.get().map((l, i) => (
+              <div key={i} class={`break-words ${TONE[l.kind]}`}>
+                {l.text}
+              </div>
+            ))}
+          </div>
         </div>
       </div>
-    </div>
-  )
-}
+    )}
+  </>
+)

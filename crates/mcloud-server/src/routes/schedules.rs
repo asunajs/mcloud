@@ -184,9 +184,15 @@ pub async fn upsert(
         owner,
         last_fire_ms: existing.as_ref().and_then(|s| s.last_fire_ms),
         last_run_ms: existing.as_ref().and_then(|s| s.last_run_ms),
-        last_status: existing.and_then(|s| s.last_status),
-        last_error: None,
-        run_count: 0,
+        last_status: existing.as_ref().and_then(|s| s.last_status.clone()),
+        // ⚠ 记账字段**全都**要留（2026-10-03 review §1.4）：`last_error` 与 `run_count`
+        // 原先在这里被重置成 `None` / `0`，与上面那句注释（"保留水位线与记账字段"）
+        // **直接相反** ✗ ⇒ 在界面上改个名字就把「累计触发 N 次」清零
+        // （`web/src/pages/schedules-page.tsx:384` 确实在展示它），而 `last_status`
+        // 还留着 `error`、`last_error` 却是空 ⇒ 写着失败却答不出原因 ——
+        // 正是那段注释自己说要避免的形态。
+        last_error: existing.as_ref().and_then(|s| s.last_error.clone()),
+        run_count: existing.as_ref().map_or(0, |s| s.run_count),
     };
     state.handle.store.save_schedule(&schedule).await?;
     let now = state.handle.clock.now_ms();

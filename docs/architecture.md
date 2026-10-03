@@ -1,7 +1,9 @@
 # mcloud 架构设计
 
 > 移动云盘（中国移动云盘 / 139 / 和彩云）自动化平台。
-> 后端 Rust，前端 Vue Vapor（无虚拟 DOM）+ TSX。
+> 后端 Rust，前端自研 **`lite`**（无虚拟 DOM + 编译期优化）+ TSX。
+> ⚠ 前端这一侧本文件只留**契约与结论**；现状与实测读数以
+> [`lite-framework.md`](lite-framework.md) 为准（原先写的 Vue Vapor 栈已于 2026-09-30 拆掉）。
 >
 > 状态：**设计定稿 + 脚手架**。本文件是唯一设计来源。
 
@@ -199,27 +201,22 @@ jwttoken: <jwt>          仅注入 →  caiyun.feixin.10086.cn
 deviceid: <smid>         注入所有请求（值由 smid 系统换取，见 §5.6）
 ```
 
-### 5.2 客户端工厂
+### 5.2 客户端装配
 
-```rust
-/// 通用客户端
-pub fn create_http(opts: HttpOptions) -> impl HttpClient;
-//  默认 POST、30s 超时、retry 0
-//  UA: Android Chrome 128 移动端串
-//  content-type: application/json;charset=UTF-8
+⚠ **没有 `create_http(HttpOptions)` / `create_task_http(...)` 这类工厂** ——
+全仓零命中（`grep -rn "create_http\|HttpOptions" crates --include="*.rs"`）。
+真实的装配在 `mcloud-app/src/builder.rs`：用 `ClientProfile`
+（`basic_token` / `jwt_token` / `device_id` / `user_agent` / `timeout_secs` / `pc` 形态）
+构造 `mcloud_upstream::ReqwestClient`，再按需要装饰。
+活动类接口的 `appversion` / `activityid` / `origin` 等**不是客户端级配置**，
+而是各请求自己带头（见 `mcloud-upstream::app_signin::h5()` 一族）。
 
-/// 任务客户端（活动类接口）
-pub fn create_task_http(device_id, jwt_token, referer) -> impl HttpClient;
-//  附加: appversion 12.6.0.0 / activityid sign_in_3
-//        origin https://m.mcloud.139.com
-```
-
-装饰器栈（组装层实际装配的顺序，`mcloud-app/src/builder.rs`）：
+装饰器栈（`builder.rs` 实际装配的顺序）：
 
 ```text
 SmidClient        ← 懒加载补 deviceid 头（第一次请求时才去换）
   └ H5Client      ← 建会话、带 jwttoken、90001 刷新重放
-      └ ReqwestClient  ← 真正发请求，按域名注入 authorization
+      └ ReqwestClient  ← 真正发请求（按域名注入 authorization；UA/超时来自 ClientProfile）
 ```
 
 `SmidClient` 必须在**最外层**：它补的头要作用于所有出去的请求，
@@ -306,8 +303,9 @@ mcloud 的实拍结论：**每个页面用自己的参数换自己的票，票�
 `H5Client` 是 `HttpClient` 的装饰器，只接管 [`JWT_HOSTS`] 那一族：
 
 - 任务代码**不需要知道有"会话"这回事**，只管发业务请求；
-- `90001` 刷新重放**只有一处实现**（20 个任务各写一遍必然分叉，
-  而分叉的表现是"某个任务在票过期时静默失败"）；
+- `90001` 刷新重放**只有一处实现**（注册表里每个任务各写一遍必然分叉，
+  而分叉的表现是"某个任务在票过期时静默失败"；任务条数现算：
+  `grep -c "Arc::new" crates/mcloud-tasks/src/lib.rs`）；
 - 原生族（`user-njs.yun.139.com`）**原样透传** —— 对它建会话是白打三枪，
   而且那三枪的第一条就在这个主机上，会绕回自己。
 
@@ -580,29 +578,31 @@ pub struct PipelineStep { task, body, continue_on_error }
 
 ## 7. 任务清单（mcloud-tasks）
 
-19 个任务，按域分组：
+注册表里的任务（**条数别背数**，现算：`grep -c "Arc::new" crates/mcloud-tasks/src/lib.rs`），
+按域分组。**名单以 `crates/mcloud-tasks/src/lib.rs` 的 `register_all` 为唯一权威**：
 
 | 组 | 任务 | 说明 |
 |---|---|---|
-| 基础 | `sign` | 网盘签到 + AI豆奖励 |
+| 签到族 | `sign` | 网盘签到 + AI豆奖励 |
 | | `receive` | 领取待领AI豆 |
-| | `revival` | 复活奖励（每月 2 次） |
-| | `task-expansion` | 任务扩展（含上传） |
-| | `msg-push` | 消息推送开关 + 奖励 |
-| | `notice` | 短信/邮件通知开关 + 奖励 |
+| | `multiple` | 签到翻倍 |
 | | `backup-gift` | 备份好礼 |
-| | `app` | App 内任务 |
-| 活动 | `ai-avatar` | AI 新头像 + 抽奖 |
-| | `play-ai-special` | 拍拍大作战 |
-| | `play-ai-lottery` | 趣玩 AI 抽奖 |
-| | `cloud-phone-redpack` | 红包派对 |
-| | `hc1t` | AI豆大作战 |
-| 直播 | `kouling` | 直播口令（WebSocket + 小红书） |
+| | `revival` | 复活奖励（每月 2 次） |
+| | `prizes` | 待领取奖品列表 |
+| | `cloud-snapshot` | AI豆余额快照 |
+| | `task-list` | 任务清单 |
+| 直播 | `live-room` | 直播口令 → 小红花（WebSocket + 小红书） |
 | | `red-flower` | 小红花领取 |
-| 奖品 | `prizes` | 待领取奖品列表 |
-| | `exchange` | 兑换奖品（UI 隐藏） |
-| 维护 | `auth-refresh` | 凭证刷新 |
-| | `after` | 清理临时文件 |
+| 活动 | `exchange` | 兑换奖品（**真扣AI豆、不可回滚**） |
+| | `msg-push` | 消息推送开关 + 奖励 |
+| | `fun-ai` | 趣玩 AI 抽奖 |
+| | `notice` | 开启通知领AI豆 |
+| | `play-ai-special` | 拍拍盘点（只读那两口） |
+| | `ai-avatar` | AI 新头像 + 抽奖（**默认关**） |
+| | `cloud-phone-redpack` | 红包派对 |
+| App 任务 | `app-task-matrix` | App 任务矩阵（**只读那一半**） |
+| | `app-task` | App 任务做任务（写侧：逐条 `task/click` + 传文件） |
+| 任务拓展 | `task-expansion` | 任务拓展（读 → 凑备份 → 领 → 删自己传的文件） |
 
 活动类任务由账号级开关控制（`AccountSettings`），默认关闭的需显式开启。
 
@@ -881,16 +881,13 @@ data: {"type":"finished","run_id":1,"outcome":{...},"duration_ms":156}
 
 #### 传输层：gzip 与缓存
 
-前端产物是大段重复文本，压缩比极高。实测（gzip -9）：
+前端产物是大段重复文本，压缩比极高。实测口径（gzip -9）：CSS 约省 **85%**、
+JS 约 **69%**、`index.html` 约 **35%**，合计约 **76%**。
+⚠ **绝对字节别背**（产物每轮都在变，且现在已按页拆 chunk）——
+要复现就对自己构建出的 `web/dist` 跑 `gzip -9`；运行时体积的现算命令见
+[`lite-framework.md`](lite-framework.md) §5（`node web/lite/size.mjs`）。
 
-| 文件 | 原始 | gzip | 省 |
-|---|---|---|---|
-| `index-*.css` | 132969 | 19304 | 85% |
-| `index-*.js` | 154433 | 48474 | 69% |
-| `index.html` | 1444 | 940 | 35% |
-| **合计** | **288846** | **68718** | **76%** |
-
-不做压缩时首屏多传 **220 KB** —— 这不是"优化项"而是缺陷，
+不做压缩时首屏要多传几百 KB —— 这不是"优化项"而是缺陷，
 `Content-Encoding` 是服务端的责任，浏览器不会替你压。
 
 两条实现要点：
@@ -925,42 +922,57 @@ data: {"type":"finished","run_id":1,"outcome":{...},"duration_ms":156}
 
 ### 10.1 技术栈
 
-```json
+```jsonc
 {
-  "vue": "3.6.0-rc.9",          // Vapor 运行时
-  "vue-jsx-vapor": "^3.2.24",   // TSX → Vapor 编译
+  // 运行时就是仓库里的 web/lite/（编译器 + 运行时），**不是** npm 包
+  "lite": "web/lite/",
+  "oxc-parser": "^0.152",                  // TSX 解析（web/lite/ast.ts 是适配层）
+  "@typescript/native-preview": "^7.0.0-dev.20260707.2",  // 类型检查：npm run typecheck = tsgo --noEmit
   "tailwindcss": "^4", "daisyui": "^5",
   "vite": "^8"
 }
 ```
 
-Vapor 模式**无虚拟 DOM**：组件编译为直接 DOM 操作，运行时开销更低。
-TSX 写法保留类型安全与组合能力。
+⚠ `web/package.json` 里**没有** `dependencies` —— 运行时是仓库里的 `lite/`，
+CSS 侧是构建期插件，其余全在 `devDependencies`。
+**零 Vue 依赖**（原先那套 `vue` / `vue-jsx-vapor` 已于 2026-09-30 拆掉）。
+
+`lite` 模式**无虚拟 DOM**：TSX 在构建期被折成"模板串 + 每个动态位置一条 effect"，
+运行时只留本项目真用到的那几个原语。写法保留类型安全与组合能力。
+详见 [`lite-framework.md`](lite-framework.md)。
 
 ### 10.2 目录
 
 ```
 web/src/
-  main.ts           入口，createApp
-  app.tsx           壳：侧边栏 + 路由
+  main.ts           入口，mount(App, '#app')
+  app.tsx           壳：侧边栏 + 路由（**每页一个动态 import()**）
   api.ts            REST 封装 + SSE 订阅
-  stores/           响应式状态（Vue reactive）
-  components/       通用组件
+  ui/               通用控件（log-panel / param-field / dialog / toast / theme …）
   pages/            页面
 ```
 
+（**没有** `stores/` 目录：响应式状态用 lite 的 `ref` / `watch`，没有 Vue `reactive`。）
+
 ### 10.3 页面
 
-**6 个页面**（侧栏上限 9 条，远未用满 —— 上限不是目标）：
+**9 个路由页**（侧栏上限 9 条）：
 
 | 页面 | 职责 |
 |---|---|
 | `dashboard` | 账号概览、AI豆统计、最近运行 |
+| `accounts` | 账号列表、添加/编辑/移除、二维码与短信登录 |
 | `tasks` | 任务列表 + 参数表单 + 运行 + 实时日志 + **中止** |
+| `exchange` | 兑换奖品（抢兑窗口、分组清单） |
+| `live-room` | 直播口令 → 小红花 |
 | `schedules` | 定时任务 CRUD、启停、下次执行时间 |
 | `pipelines` | 任务编排：步骤增删改序、两层失败语义 |
 | `history` | 运行历史与日志 |
 | `settings` | 全局配置 |
+
+另有 `auth-page`（登录/初始化闸，**刻意不懒加载** —— 它就是未登录时的首屏）
+与 `task-config-page`（任务参数子视图，不是顶层路由）。
+路由表以 `web/src/app.tsx` 的 `ROUTES` 为准，别背数。
 
 **移动端 dock 放 5 格**（规范上限）：总览、任务、定时、历史、设置。
 **编排不进 dock** —— 它是"配置一次、之后自动跑"的东西，日常打开频率低，
@@ -977,10 +989,24 @@ web/src/
 **错误文本一律原样透出**，不翻译、不改写：后端把"哪一步的任务不存在"
 "哪些定时任务在引用它"写进错误里了，前端改写等于把这些信息丢掉。
 
-### 10.5 ⛔ 代码分割（`defineVaporAsyncComponent`）——**暂不可用，别试**
+### 10.5 代码分割 —— **已做**（按页 `import()`）
 
-**结论：在 Vue 3.6.0-rc.9 上，Vapor 的异步组件跑不通，本仓前端因此不做按路由拆包。**
-等 Vue 官方修好再启用。以下是把三条坑逐个踩过之后的记录，用来避免重复投入。
+**当前事实（2026-10-03 复核）**：`web/src/app.tsx` 的每个路由页一个动态 `import()`
+（另有 hover/focus 预取），Vite 据此切出独立 chunk，切页时才取那一块。
+chunk 条数**别背数**，现算：`cd web && npm run build && ls web/dist/assets/*.js | wc -l`。
+
+> ⚠ **本节下面那三大段是 Vue 时代的记录，已经整段不适用** ——
+> 当时卡在 `defineVaporAsyncComponent`（Vapor 的异步组件）上，而 Vue 栈已于
+> 2026-09-30 全部拆掉、换成自研 `lite`；`lite` 没有 Suspense/异步组件这一层，
+> 页面本身就是"异步工厂 + `createComponent`"的形状，所以那三条坑**一条都不再成立**。
+> 保留原文只为"别再按它规划工作量"；要问现状看上面这句与
+> [`lite-framework.md`](lite-framework.md)。
+
+<details>
+<summary>历史记录（Vue 时代，已不适用）——为什么当时拆不动</summary>
+
+**当时的结论：在 Vue 3.6.0-rc.9 上，Vapor 的异步组件跑不通，因此不做按路由拆包。**
+以下是把三条坑逐个踩过之后的记录。
 
 #### 现象
 
@@ -1073,15 +1099,22 @@ t+1000ms #a=""  #b=""
    而首屏真正的瓶颈是 46 KB(gzip) 的 JS 与 `#app` 空壳，
    15 KB 的改善换不回"改 9 个文件 + 等上游修复"的成本。
 
-#### 结论
+#### 结论（当时）
 
-**当前不做前端代码分割。** 首屏成本已由服务端解决（见 §9.3 的 gzip + 缓存，
-传输量 281 KB → 67 KB，那部分是实测有效的）。
-本条在 Vue 官方支持 Vapor async 组件之前**保持关闭**。
+**当时不做前端代码分割。** 首屏成本已由服务端解决（见 §9.3 的 gzip + 缓存）。
+本条在 Vue 官方支持 Vapor async 组件之前**保持关闭** —— 后来 Vue 栈整个被拆掉，
+这条也就随之作废。
 
-### 10.6 JS 体积：研究结论（2026-09-28）
+</details>
 
-产物现状：**单 chunk 154,441 B raw / 48,718 B gzip**。要压它，先得知道字节在哪。
+### 10.6 JS 体积：研究结论（2026-09-28，**Vue 时代的历史读数**）
+
+> ⚠ **整节是 Vue 时代（迁移到 `lite` 之前）的字节分析，数字与模块名都已过期** ——
+> 现在没有 `@vue/*` 这些模块，产物也**按页拆 chunk**、不再是单 chunk。
+> 现状与现算命令看 [`lite-framework.md`](lite-framework.md) §5（`node web/lite/size.mjs`）。
+> 保留本节只为"当时为什么这么压"的来龙去脉。
+
+当时的产物现状：**单 chunk 154,441 B raw / 48,718 B gzip**。要压它，先得知道字节在哪。
 
 #### 构成（Rolldown 模块图，压缩前渲染长度）
 
@@ -1120,24 +1153,27 @@ t+1000ms #a=""  #b=""
 | `minify: 'terser'`（临时 `--no-save` 装完即卸） | **更差**：171.71 kB / 54.78 kB gzip（默认 oxc：154.44 / 49.40） |
 | 别名到 `vue/vapor` 入口 | 该子路径不存在 ⇒ 构建失败 |
 | 去掉 `console.*` / `debugger` | `src/` 里 **0 个**，无处可省 |
-| 逐页拆包 | 见 §10.5，上游未修，保持关闭 |
+| 逐页拆包 | 见 §10.5，当时上游未修、保持关闭；**现已做**（换 `lite` 后按页 `import()`） |
 
 #### 唯一落地的一项
 
-`build.modulePreload: { polyfill: false }` ⇒ **−0.67 kB raw / −0.32 kB gzip**（154,441 → 153,771）。
-判据：产物 HTML 里 `<link rel="modulepreload">` 数量是 **0**（单 chunk），
+`build.modulePreload: { polyfill: false }` ⇒ **−0.67 kB raw / −0.32 kB gzip**（当时 154,441 → 153,771）。
+当时的判据：产物 HTML 里 `<link rel="modulepreload">` 数量是 **0**（单 chunk），
 那条 polyfill 没有任何东西可垫。
 
-⚠ **哪天真的做按需拆包，这条要回来复核** —— 那时候 modulepreload 就有活干了。
+⚠ **按需拆包已经做了，这条该回来复核** —— 现在产物里有 chunk，
+`web/vite.config.ts` 那句"本产物是单 chunk、数量为 0"的注释已过期
+（polyfill 本身仍关着；要不要开是另一件事）。
 
-#### 复测更新：§10.5 的收益数字
+#### 复测更新：§10.5 的收益数字（当时）
 
 §10.5 里记的"拆包后首屏 46,676 → 32,184 B"是**当时的体量**。
-按现状复量：把 10 个页面全替成空壳后初始包 **154.44 → 68.36 kB**
-（gzip 49.40 → 26.35，首屏 JS **−56%**）—— 比当初记的更划算，因为项目又长了。
+按当时现状复量：把 10 个页面全替成空壳后初始包 **154.44 → 68.36 kB**
+（gzip 49.40 → 26.35，首屏 JS **−56%**）。
 
-**结论不变**：门槛仍是"9 个业务文件得先全改成 `defineVaporComponent`"，
+**当时的结论**：门槛是"9 个业务文件得先全改成 `defineVaporComponent`"，
 再加上要等上游修 `suspensible` 与命名导出那两条 ⇒ 收益换不回成本。
+（这条随 Vue 栈被拆掉而作废：`lite` 侧没有这个门槛。）
 
 #### 怎么复现这些数字
 
@@ -1277,18 +1313,22 @@ t+1000ms #a=""  #b=""
 | **P5** | **通用存储、定时调度、任务编排、日志收集、任务中止** | **✅** |
 | **P6** | **H5 会话层（JWT）+ 签到端点校正** | **✅** |
 | **P7** | **WebUI 登录闸（argon2id + 三态门 + 会话）** | **✅** |
-| **P8** | **认证闸 + 登出 + CLI 收敛为 6 命令 + 账号登录（扫码/短信）** | **✅** |
-| P9 | 推送渠道、其余约 19 个任务 | ⏳ |
+| **P8** | **认证闸 + 登出 + CLI 收敛 + 账号登录（扫码/短信）** | **✅** |
+| P9 | 推送渠道、其余任务 | ⏳ |
 
-### CLI（`mcloud-cli`）—— 只管"无头也能跑"的六件事
+### CLI（`mcloud-cli`）—— 只管"无头也能跑"的那几条
+
+**命令数以 `bin/cli.rs` 的顶层分派为准，别背数** —— 现算（8 空格缩进那层就是顶层）：
+`grep -n '^        Some("' crates/mcloud-server/src/bin/cli.rs`。今天的长相：
 
 ```
 tasks                          列出可用任务
 run <任务名> <账号>             跑一次任务
+pending                        查看本进程里还没清理的网盘产物
 cron <定时id>                   跑一条已配置的定时（给系统 crontab 调用）
 pipeline run <编排id>           跑一条已配置的编排
 auth refresh <--account|--all>  刷新凭据
-login <方式>                    登录账号（qr / sms / app / password）
+login <方式>                    登录账号（qr / sms / app / password / device）
 ```
 
 **`login app` 与 `login sms` 是两条链路**，不是"同一条加个参数"：
@@ -1306,8 +1346,8 @@ login <方式>                    登录账号（qr / sms / app / password）
 而"今天这次不用跑"是正常的 —— 退 1 会让监控天天报假警。
 
 设计取向见 [`cli-webui-design.md`](cli-webui-design.md)：**WebUI 为主，
-CLI 只管"无头也能跑"的那 5 件事**（`login` / `run` / `cron` / `auth refresh` /
-`pipeline`）。编排与定时的**创建**不在 CLI —— 改配置文件或走 WebUI。
+CLI 只管"无头也能跑"的那几条**（`login` / `run` / `pending` / `cron` /
+`auth refresh` / `pipeline`）。编排与定时的**创建**不在 CLI —— 改配置文件或走 WebUI。
 
 ### 当前的关键风险
 

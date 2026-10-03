@@ -1,32 +1,42 @@
 # 拿到二进制怎么用
 
-面向**下载了 Release 压缩包**的人。整包两个可执行文件，没有别的依赖：
+面向**下载了 Release 压缩包**的人。整包里**只有一个可执行文件**，没有别的依赖：
 
 | 文件 | 作用 |
 |---|---|
-| `mcloud-server` | 服务本体：WebUI + 定时/编排调度。**日常只需要它** |
-| `mcloud-cli` | 命令行：登录账号、跑任务、看产物、刷新凭据（可选） |
+| `mcloud-server` | 服务本体：WebUI + 定时/编排调度。**发布包里就它一个** |
 
-产物按平台命名，形如 `mcloud-v0.1.0-x86_64-unknown-linux-gnu.tar.xz`。
+> CLI（`mcloud-cli`）仍留在源码里，但**不进发布包**（用户口径，2026-10-02：
+> 只发 `mcloud-server`）。要用它得自己 `cargo build --release --bin mcloud-cli`，
+> 见 §4。
+
+产物按平台命名：unix 是 `mcloud-v<版本>-<target>.tar.gz`，Windows 是 `...zip`
+（**不再有 `.tar.xz`** —— 一个平台只出一种包）。
+`<版本>` 取自 `Cargo.toml` 的 `[workspace.package] version`（发 tag 时以 tag 名去掉 `v` 为准），
+**别背数**，现算：
+
+```bash
+sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1
+```
 
 ---
 
 ## 1. 解压与校验
 
 ```bash
-# Linux / macOS（.tar.xz 最小；也可以取 .tar.gz）
-tar -xJf mcloud-v0.1.0-x86_64-unknown-linux-gnu.tar.xz
-cd mcloud-v0.1.0-x86_64-unknown-linux-gnu
+# Linux / macOS：unix 一律 tar.gz
+tar -xzf mcloud-v<版本>-x86_64-unknown-linux-gnu.tar.gz
+cd mcloud-v<版本>-x86_64-unknown-linux-gnu
 
 # 校验（包内附 .sha256）
-shasum -a 256 -c ../mcloud-v0.1.0-x86_64-unknown-linux-gnu.sha256
+shasum -a 256 -c ../mcloud-v<版本>-x86_64-unknown-linux-gnu.sha256
 ```
 
 ```powershell
 # Windows
-Expand-Archive mcloud-v0.1.0-x86_64-pc-windows-msvc.zip -DestinationPath .
-cd .\mcloud-v0.1.0-x86_64-pc-windows-msvc
-Get-FileHash ..\mcloud-v0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Expand-Archive mcloud-v<版本>-x86_64-pc-windows-msvc.zip -DestinationPath .
+cd .\mcloud-v<版本>-x86_64-pc-windows-msvc
+Get-FileHash ..\mcloud-v<版本>-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 ```
 
 ⚠ **Linux 产物是动态链接的**：构建于 Ubuntu 24.04（glibc 2.39）+ 系统 OpenSSL。
@@ -44,9 +54,12 @@ Fedora 40+ 一类）。更老的发行版（CentOS 7、Debian 11 等）请自行
 **没有子命令**，直接跑就是起服务。看到这两行就成了：
 
 ```
-INFO mcloud_server: mcloud 启动 data_dir="data" tasks=18
+INFO mcloud_server: mcloud 启动 data_dir="data" tasks=<已注册任务条数>
 INFO mcloud_server: 监听 http://127.0.0.1:3000
 ```
+
+> `tasks=` 后面是**注册表里任务的条数**，随版本变，别背数 —— 现算：
+> `grep -c "Arc::new" crates/mcloud-tasks/src/lib.rs`。
 
 然后用浏览器打开 **<http://127.0.0.1:3000>**。
 
@@ -92,7 +105,7 @@ sudo dnf install -y openssl-libs   # Fedora/RHEL
 但二进制没有签名，从浏览器下载会被 Gatekeeper 拦：
 
 ```bash
-xattr -dr com.apple.quarantine ./mcloud-server ./mcloud-cli
+xattr -dr com.apple.quarantine ./mcloud-server
 ```
 
 （或右键 → 打开 → 「仍要打开」。终端里 `tar` 解出来的通常不带 quarantine。）
@@ -103,22 +116,37 @@ Defender / SmartScreen **可能误报**：弹窗里走「更多信息 → 仍要
 
 ## 4. 命令行怎么用（可选）
 
+⚠ **CLI 不在发布包里**（见开头：只发 `mcloud-server`）。要用它先从源码构建：
+
+```bash
+cargo build --release --bin mcloud-cli     # 产物：target/release/mcloud-cli
+```
+
+顶层命令以 `crates/mcloud-server/src/bin/cli.rs` 的顶层分派为准，**别背数**，现算
+（8 空格缩进那层就是顶层）：
+
+```bash
+grep -n '^        Some("' crates/mcloud-server/src/bin/cli.rs
+```
+
 `mcloud-cli` 与 `mcloud-server` **共用同一个数据目录** —— 想让 CLI 看到服务里配好的账号，
 要么在同一个目录下运行，要么给它同一个 `MCLOUD_DATA_DIR`。
 
 ```bash
-./mcloud-cli                                   # 无参数就是打印用法
-./mcloud-cli tasks                             # 列出可用任务
-./mcloud-cli login qr                          # 登录账号（qr / sms / app / password / device）
-./mcloud-cli run live-room <账号> --body '{"codes":"口令甲 口令乙","listenSeconds":45}'
-./mcloud-cli auth refresh --all                # 刷新凭据
-./mcloud-cli pending                           # 查看还没清理的网盘产物
-./mcloud-cli cron <定时id>                      # 给系统 crontab 调用
-./mcloud-cli pipeline run <编排id>
+mcloud-cli                                   # 无参数就是打印用法
+mcloud-cli tasks                             # 列出可用任务
+mcloud-cli login qr                          # 登录账号（qr / sms / app / password / device）
+mcloud-cli run live-room <账号> --body '{"codes":"口令甲 口令乙","listenSeconds":45}'
+mcloud-cli auth refresh --all                # 刷新凭据
+mcloud-cli pending                           # 查看还没清理的网盘产物
+mcloud-cli cron <定时id>                      # 给系统 crontab 调用
+mcloud-cli pipeline run <编排id>
 ```
 
-⚠ **帮助文本里的名字是旧的**：它写的是 `mcloud <命令>` 与 `mcloud serve`。
-实际二进制叫 `mcloud-server` / `mcloud-cli`，而且**服务没有 `serve` 子命令**（直接运行）。
+⚠ **帮助文本里的名字与清单是旧的**：它写的是 `mcloud <命令>` 与 `mcloud serve`，
+而且 login 那一行**漏了 `device`**。实际二进制叫 `mcloud-server` / `mcloud-cli`，
+服务**没有 `serve` 子命令**（直接运行）；`login device show|reset` 是真命令（见 `cli.rs` 分派）。
+（这些是代码侧注释/文案的欠账，不在这份文档里改。）
 
 定时与编排的**创建**不在命令行 —— 在 WebUI 里配，或用上面 `cron` / `pipeline run` 让系统计划任务去触发。
 

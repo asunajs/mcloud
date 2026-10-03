@@ -632,7 +632,14 @@ export interface BeanToday {
   failed: { account: string; error: string }[]
 }
 
-/** `GET /api/beans/today` —— ⚠ 后端未实现，见 [`BeanToday`]。 */
+/**
+ * `GET /api/beans/today` —— 今日AI豆（云朵记录汇总）。
+ *
+ * ⚠ 2026-10-03 更正：这条注释原先写「后端未实现」，**已经不成立** ——
+ * 端点在 `crates/mcloud-server/src/routes/beans.rs` 实现并已在 `routes/mod.rs` merge
+ * （review §3 D7 / §5 C5）。读不到时的原因看响应（未登录 401、上游读不到 502 那一族），
+ * 不要再按"一定是 404"去查。
+ */
 export const getBeanToday = () => request<BeanToday>('/api/beans/today')
 
 export const getRun = (id: number) => request<RunRecord>(`/api/runs/${id}`)

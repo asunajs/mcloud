@@ -21,8 +21,13 @@ reqwest.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
-# 直播弹幕的 WebSocket 客户端（`live_ws_client.rs`）：只用 `connect_async` + `Message`，
-# TLS 走 rustls（与 reqwest 同源，不引入 openssl）。
+# 直播弹幕的 WebSocket 客户端（`live_ws_client.rs`）：只用 `connect_async` + `Message`。
+# ⚠ 2026-10-03 更正：这条注释原先写「TLS 走 rustls（与 reqwest 同源，不引入 openssl）」，
+# 现在**三处都不成立** —— ① 根 `Cargo.toml:131` 写明原先的 `rustls-tls` 已移除，
+# reqwest 只走 native-tls；② 本行依赖的 features 就是 `native-tls`（见下）；
+# ③ `aarch64-unknown-linux-gnu` 那条交叉产物现在还要**链 vendored OpenSSL**
+# （`Cross.toml` / 发布流程）。⇒ 想看 TLS 后端的现状，看根 `Cargo.toml` 的
+# reqwest / tokio-tungstenite 两段注释，别看这里。
 tokio-tungstenite.workspace = true
 # `tokio-tungstenite` 的流实现 `Stream`/`Sink`，取 `next()` / `send()`
 # 要 `futures` 的扩展 trait。

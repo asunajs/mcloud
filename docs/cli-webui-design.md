@@ -24,10 +24,14 @@ mcloud 的 CLI 有 **40+ 个子命令**（`login qr/sms/smid show/reset/refresh`
 
 ---
 
-## 1. CLI：5 个命令，不多不少
+## 1. CLI：只留"无头也能跑"的几条
+
+**条数以 `crates/mcloud-server/src/bin/cli.rs` 的顶层分派为准，别背数** —— 现算
+（8 空格缩进那层就是顶层）：`grep -n '^        Some("' crates/mcloud-server/src/bin/cli.rs`。
+今天的长相是 5 条核心 + 2 条只读：
 
 ```
-mcloud login    qr | sms <手机号> | app <手机号> | password   登录账号（交互）
+mcloud login    qr | sms <手机号> | app <手机号> | password | device   登录账号（交互）
 mcloud run      <任务名> <账号>            跑一次任务
 mcloud cron     <定时id>                  跑一条定时（供外部 crontab 调用）
 mcloud auth     refresh <账号|--all>      刷新 auth 凭据
@@ -40,14 +44,14 @@ mcloud pipeline run <编排id>              跑一条编排
 > 在命令行上不可见，而端一旦搞错，产物是**错的身份** —— 之后每个任务
 > 请求都会带着它发出去。
 
-外加两个无副作用的：
+外加两条只读的：
 
 ```
 mcloud tasks                              列出可用任务
-mcloud --version / --help
+mcloud pending                            查看本进程里还没清理的网盘产物
 ```
 
-### 为什么是这五个
+### 为什么是这几条
 
 | 命令 | 为什么 CLI 需要它 |
 |---|---|
@@ -56,6 +60,7 @@ mcloud --version / --help
 | `cron` | **外部 crontab 的入口**。见下 |
 | `auth refresh` | 凭据将过期时批量续期，脚本里最常调的一个 |
 | `pipeline` | 一条链手工重跑（WebUI 挂了或想看清退出码） |
+| `tasks` / `pending` | 只读、无副作用：列任务清单、看本进程还没清的网盘产物 |
 
 ### `cron` 的语义：**外部触发，CLI 不常驻**
 
@@ -196,9 +201,10 @@ mcloud --version / --help
   于是它成了第二个历史页，第一屏被表格顶下去 —— 而"一眼看清现状"正是这一页的
   全部意义。看全量细节是历史与日志页的事。
 
-⚠ **「今日AI豆」那一格是唯一的例外**：它**要一个后端还没有的端点**
-（`GET /api/beans/today`，由云朵记录汇总）。前端已按契约定稿，端点未落地时
-它显示「待接入」；缺什么、口径怎么定，见 `docs/task-inventory.md` §5。
+⚠ **「今日AI豆」那一格**：它**要一个专用端点**（`GET /api/beans/today`，由云朵记录汇总）。
+端点**已落地**（`crates/mcloud-server/src/routes/beans.rs`，已由 `routes/mod.rs` merge）
+—— 本节原先写"后端还没有这个端点、它显示「待接入」"，已过期。
+口径与仍缺的收尾见 `docs/task-inventory.md` §5。
 
 ⚠ 另记一条**没做**的：数据**年龄**由页头的「更新于 22:31」承担，
 这一页**不轮询** —— 自刷会让人以为那个时间戳在动，其实只是又采了一次样。
@@ -395,7 +401,7 @@ mcloud --version / --help
    `app` / `device`）。任务页从前把签到族那 8 个任务名硬编码在前端当分组依据 ——
    而注册表才是权威，那份名单迟早漂移。**分组名也由后端给**（前端只决定"先看哪一组"）。
 2. **任务页只做三件事**：分栏列出（标题 + 描述 + 任务名）、标出"可配置"、给一个「运行」。
-   参数不在这一页填 —— 19 个任务里只要有两个要参数，混在一起就没法一眼看完了。
+   参数不在这一页填 —— 注册表里的任务只要有两个要参数，混在一起就没法一眼看完了。
 3. **参数在 `#/tasks/<任务名>/config`**。它不是第 10 条导航项（规范里侧栏 9 条封顶，
    配置页本来就属于「任务」）；`parseHash` 按**第一段**归属，所以它在 URL 上可直接进、
    侧栏仍高亮「任务」。`TasksPage` 自己盯着 `hashchange` 换视图。
@@ -489,7 +495,7 @@ mcloud run sign 19900000000
 
 | 维度 | mcloud | 本项目 | 理由 |
 |---|---|---|---|
-| CLI 命令数 | 40+ | **5** | 多数是开发期工具或 WebUI 的重复入口 |
+| CLI 命令数 | 40+ | **只留无头也能跑的那几条**（条数现算：`grep -n '^        Some("' crates/mcloud-server/src/bin/cli.rs`） | 多数是开发期工具或 WebUI 的重复入口 |
 | 调度 | server 常驻 | server 常驻 + **CLI 单次触发** | 两种部署形态都要能用 |
 | 参数传递 | 大量 flag | **配置文件** | flag 会与 WebUI 表单漂移 |
 | 编排编辑 | WebUI 有完整编辑器 | **只读**（改文件） | 最复杂的一页，日常不改 |
@@ -520,7 +526,9 @@ mcloud run sign 19900000000
 | 登出 ⇒ 204，旧 cookie 立即 401 | ✅ |
 | 落盘的是 `sha256(token)`，**明文令牌不落盘** | ✅ |
 
-测试规模：**605 个**（P1 验收当时是 538 个；其后账号登录、CLI 收敛与产物账本又加了 67 条）
+测试规模：**别背数**（每轮都在涨）—— 现算：
+`grep -rh "#\[test\]\|#\[tokio::test\]" crates | wc -l`，或直接看 `cargo test` 输出。
+（P1 验收当时是 538 条。）
 
 **P2 · 账号登录**（扫码 + 短信）✅ **已完成**（另一 agent 落地）
 
@@ -530,7 +538,7 @@ mcloud run sign 19900000000
 
 **P3 · CLI 收敛** ✅ **已完成**
 
-8. `bin/cli.rs` 收敛为 6 个命令（`tasks` / `run` / `cron` / `pipeline` / `auth refresh` / `login`）✅
+8. `bin/cli.rs` 收敛（`tasks` / `run` / `pending` / `cron` / `pipeline` / `auth refresh` / `login`；条数现算，见 §1）✅
 9. `cron <id>` 走 `Scheduler::tick`，不重写水位/并发/错过策略 ✅
 10. `auth refresh` 走实拍端点 `POST /user/auth/refreshToken`，三档判据 ✅
 11. `pipeline run <id>` 只跑不建 ✅

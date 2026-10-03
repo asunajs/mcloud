@@ -293,7 +293,8 @@ impl Scheduler {
                 Decision::Disabled | Decision::NotYet { .. } | Decision::NeverFires => {}
                 Decision::Missed { point_ms } => {
                     // 先推水位（推到 now），再记账。顺序反了会在中途崩溃时重复弃
-                    self.advance_watermark(&sch, now).await?;
+                    // ⚠ `false`：弃置**不算**跑过一次（否则「累计触发 N 次」虚高）
+                    self.advance_watermark(&sch, now, false).await?;
                     // 这一趟没有运行 ⇒ `run_ms` 传 None（不动上次运行时间）
                     self.record(&sch, None, "skipped", Some("错过的触发点已整体弃掉"))
                         .await;
@@ -307,7 +308,7 @@ impl Scheduler {
                 }
                 Decision::Due { point_ms } => {
                     // ★ 先推水位，再打上游 —— 这是本文件最重要的一行顺序
-                    self.advance_watermark(&sch, point_ms).await?;
+                    self.advance_watermark(&sch, point_ms, true).await?;
                     let (outcome, _blocked) = self.fire(&sch, point_ms).await;
                     results.push((sch.id.clone(), outcome));
                 }
@@ -320,8 +321,18 @@ impl Scheduler {
     ///
     /// 用**只改水位**的窄写，而不是整行覆盖：整行覆盖会把用户在这期间
     /// 通过 WebUI 改过的名字/参数一起抹掉（调度器手里那行是几秒前读的）。
-    async fn advance_watermark(&self, sch: &Schedule, point_ms: i64) -> Result<()> {
-        self.store.mark_schedule_fired(&sch.id, point_ms).await
+    ///
+    /// `counted` = 这一次触发点**算不算跑过一次**（`run_count` 那一列）。
+    /// ⚠ 弃置错过的触发点（`Decision::Missed`）要传 `false`：那一支一次上游都没打，
+    /// 记成"跑过一次"会让界面上的「累计触发 N 次」虚高（2026-10-03 review §1.7）。
+    async fn advance_watermark(&self, sch: &Schedule, point_ms: i64, counted: bool) -> Result<()> {
+        if counted {
+            self.store.mark_schedule_fired(&sch.id, point_ms).await
+        } else {
+            self.store
+                .advance_schedule_watermark(&sch.id, point_ms)
+                .await
+        }
     }
 
     /// 记账：本次执行的结果。

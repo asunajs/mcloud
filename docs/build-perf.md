@@ -59,8 +59,8 @@
 | `cargo check --workspace --all-targets` | 5m53s |
 | `cargo fmt --all -- --check` | < 1 s |
 | `cargo clippy --workspace --all-targets -- -D warnings` | 数分钟（当次先红在 `mcloud-engine` 的 `derivable_impls`，修掉后 exit 0） |
-| `cargo test --workspace` | 26 个测试目标 / 累计 **1740** 条通过（22:30→22:43 那一段） |
-| `node scripts/gates-web.mjs --full` | ≈ 110 s（与 Rust 侧无关，纯前端 + 无头 Chrome） |
+| `cargo test --workspace` | 26 个测试目标；通过条数**别背数**（会随每轮改动涨），当次读到 1740 条。现算：`grep -rh "#\[test\]\|#\[tokio::test\]" crates \| wc -l`（22:30→22:43 那一段） |
+| `node scripts/gates-web.mjs --full` | ≈ 110 s（**当次含争用**；与 Rust 侧无关，纯前端 + 无头 Chrome。耗时随机器变，别当基准） |
 
 ## 4. 什么时候该重测
 

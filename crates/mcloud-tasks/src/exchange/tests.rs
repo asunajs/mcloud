@@ -2165,9 +2165,11 @@ async fn waiting_rereads_and_rejudges() {
 
     let waited = Arc::new(Mutex::new(Vec::<i64>::new()));
     let recorder = Arc::clone(&waited);
-    let wait_fn = move |until: i64| {
+    // ⚠ 等待实现是 **async** 的（返回 `WaitFuture`）：生产要在 tokio 里睡一小时，
+    // 同步签名逼得人只能 `block_in_place` 占线程 ⇒ 见 `exchange.rs` 的 `WaitFn`。
+    let wait_fn = move |until: i64| -> WaitFuture {
         recorder.lock().unwrap().push(until);
-        Ok(())
+        Box::pin(async { Ok(()) })
     };
     // 从 13:30 出发（离整点还远 ⇒ 要等），等完之后时钟往前跳。
     let base = beijing_ms(2026, 9, 19, 13, 30, 0);
@@ -2226,10 +2228,13 @@ async fn no_wait_just_after_the_hour() {
     let at = beijing_ms(2026, 9, 19, 14, 0, 5);
     let fx = Fixture::new(&as_refs(&replies), at, Some(Arc::clone(&device)));
 
-    let called = AtomicUsize::new(0);
-    let wait_fn = |_until: i64| -> Result<()> {
-        called.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+    // ⚠ 计数器要 `Arc` 包一层：`WaitFn` 是 `'static`（等待实现可能在别处被长存），
+    // 闭包借用栈上的计数器编译不过 ✗ —— 同第一个用例的 `waited`。
+    let called = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&called);
+    let wait_fn = move |_until: i64| -> WaitFuture {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
     };
     let opts = ExchangeOptions {
         prize: "251230053",
@@ -2281,7 +2286,7 @@ async fn cancelled_wait_sends_nothing() {
     let replies = replies_ready();
     let at = beijing_ms(2026, 9, 19, 13, 30, 0);
     let fx = Fixture::new(&as_refs(&replies), at, Some(Arc::clone(&device)));
-    let wait_fn = |_until: i64| -> Result<()> { Err(Error::Cancelled) };
+    let wait_fn = |_until: i64| -> WaitFuture { Box::pin(async { Err(Error::Cancelled) }) };
     let opts = ExchangeOptions {
         prize: "251230053",
         skip_wait: false,
@@ -2646,6 +2651,83 @@ async fn task_shell_orders_when_the_body_carries_a_device_id() {
         outcome.is_success(),
         "带了 deviceId 就该真的下单成功：{outcome:?}"
     );
+}
+
+/// ⭐⭐ 生产路径**真的注入了等待实现**（2026-10-03 review §1.1 的钉子）。
+///
+/// 判据时刻刻意选在"整点前 15ms、缺省补偿 10ms" ⇒ 第二段等待 `needed = true`
+/// 而长度只有 **5ms**：既不用真睡，又能把"注入了等待实现"与"没注入"分开 ——
+/// `wait: None` 时 `run_account` 会**如实挡下**（"没接上等待实现…本次没发请求"），
+/// 于是这一条只会到"跳过"；注入了才会一路走到**下单**。
+/// ⇒ 反向改回 `wait: None` 这条必红 ✓（这正是 2026-10-02 藏了一整天的那个缺口）。
+#[tokio::test]
+async fn task_shell_injects_a_real_wait() {
+    // ⚠ 枪序要按**等完之后会重判**排：清单 → 余额 →（窗口等待，本用例不用等）
+    // → 预热两枪 →（整点等待）→ **重判的清单 + 余额** → 取题 → 下单 → 复查。
+    // 少了重判那两枪就会错位（症状是 `groupId=... 那一组不是数组`）。
+    let replies = vec![
+        list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
+        info_body(10496),
+        visitlog_body(),
+        visitlog_body(),
+        list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
+        info_body(10496),
+        slide_body(),
+        order_body(1800),
+        info_body(8696),
+    ];
+    let http = Arc::new(Scripted::new(&as_refs(&replies))) as Arc<dyn HttpClient>;
+    // 13:59:59.985：窗口已经开着（≥ 59:40 ⇒ 第一段不用等），离整点只差 15ms
+    // ⇒ 第二段要等到 `14:00:00 - 10ms`，即 5ms 之后。
+    let at = beijing_ms(2026, 9, 19, 13, 59, 59) + 985;
+    let ctx = task_ctx(http, Arc::new(FixedClock(at)));
+
+    let body = serde_json::json!({
+        "prizeIdOrName": "251230053",
+        "skipWait": false,
+        "deviceId": "B-from-body-wait",
+    });
+    let outcome = ExchangeTask.run(&ctx, &body).await.unwrap();
+    assert!(
+        !outcome.summary().contains("没接上等待实现"),
+        "生产路径必须注入等待实现（否则「定时抢兑」一枪不发）：{}",
+        outcome.summary()
+    );
+    assert!(
+        outcome.is_success(),
+        "等到点之后应当真的下单成功：{outcome:?}"
+    );
+}
+
+/// 等待要**看得见取消**：令牌已经翻掉时，一片都不睡就返回。
+///
+/// 为什么单独测这个函数而不是整条链：抢整点最长要等**一小时**，
+/// 而"点中止之后还要等多久"是用户唯一能感觉到的东西（200ms 一片）。
+#[tokio::test]
+async fn sleep_until_honours_cancellation_before_sleeping() {
+    let clock = FixedClock(BASE_NOW_MS);
+    let cancel = mcloud_core::CancelToken::new();
+    cancel.cancel();
+
+    let t0 = std::time::Instant::now();
+    let err = sleep_until(&clock, &cancel, None, BASE_NOW_MS + 600_000)
+        .await
+        .expect_err("已取消的令牌不该让它睡下去");
+    assert!(err.is_cancelled(), "应当是取消错误：{err}");
+    assert!(
+        t0.elapsed() < std::time::Duration::from_millis(100),
+        "取消要在睡之前就生效，实际等了 {:?}",
+        t0.elapsed()
+    );
+
+    // 链令牌同样要认（编排中止是另一个来源）。
+    let run_token = mcloud_core::CancelToken::new();
+    let chain = mcloud_core::CancelToken::new();
+    chain.cancel();
+    let err = sleep_until(&clock, &run_token, Some(&chain), BASE_NOW_MS + 600_000)
+        .await
+        .expect_err("链令牌翻掉也要停");
+    assert!(err.is_cancelled(), "应当是取消错误：{err}");
 }
 /// `force: true` ⇒ **本地判成「抢光」也照样真发单**（用户口径 2026-10-02：
 /// 「所有档都放行、点击就是真发请求」）。

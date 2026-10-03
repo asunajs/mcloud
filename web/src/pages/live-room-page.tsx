@@ -56,7 +56,7 @@ import { codeBreakdown, gainedCard } from '../ui/live-room-result'
 import { AccountPicker } from '../ui/account-picker'
 import { EmptyState } from '../ui/empty-state'
 import { showError } from '../ui/error-dialog'
-import { LogPanel, type LogLine } from '../ui/log-panel'
+import { LogPanel, pushLog, type LogLine } from '../ui/log-panel'
 
 type LoadState = 'loading' | 'error' | 'ready'
 
@@ -217,7 +217,9 @@ export const LiveRoomPage = () => {
   // ─────────────────────────────────────────────────────────────────────
 
   const push = (kind: LogLine['kind'], text: string) => {
-    lines.value = [...lines.value, { kind, text, at: Date.now() }]
+    // ⚠ 走 `pushLog`：它按 `MAX_LOG_LINES` 截断（日志无上限追加会白占内存 +
+    // 拖慢每次更新 —— 2026-10-03 review §2.1）
+    lines.value = pushLog(lines.value, kind, text)
   }
 
   const stopTicker = () => {
@@ -907,7 +909,8 @@ export const LiveRoomPage = () => {
           {poolCard()}
           {task.value == null ? notRegistered() : null}
           {result.value ? resultSection(result.value) : null}
-          {lines.value.length > 0 ? <LogPanel lines={lines.value} /> : null}
+          {/* ⚠ thunk：传数组会让这个槽订阅日志 ⇒ 每条事件整块面板重建（含滚动位置丢失） */}
+          <LogPanel get={() => lines.value} />
         </>
       ) : null}
     </div>

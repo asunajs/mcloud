@@ -23,7 +23,7 @@
 |---|---|
 | crate 数 | 8（`core` / `crypto` / `upstream` / `engine` / `tasks` / `store` / `app` / `server`） |
 | 工具链 | stable `1.91.1`，`rust-version = 1.88`，`edition 2021` |
-| 测试 | 全绿（58 条通过、0 失败，含 `mcloud-crypto` 黄金向量对拍） |
+| 测试 | 全绿、0 失败（含 `mcloud-crypto` 黄金向量对拍）。**条数别背数**，现算：`grep -rh "#\[test\]\|#\[tokio::test\]" crates \| wc -l`，或看 `cargo test` 输出 |
 | `cargo fmt --check` | ✅ 干净（0 漂移） |
 | `cargo clippy --all-targets` | ✅ 干净（0 告警，含测试代码） |
 | 注释语言 | **中文**，术语（trait / crate / 标识符）保留英文 |
@@ -245,7 +245,7 @@ cargo clippy --workspace --all-targets
 | 对象 | 规则 | 示例 |
 |---|---|---|
 | crate | `mcloud-` 前缀，短横线 | `mcloud-crypto` |
-| 模块/文件 | `snake_case`，一个文件一个主题 | `json_store.rs`、`sign.rs` |
+| 模块/文件 | `snake_case`，一个文件一个主题 | `json_store.rs`、`signin.rs` |
 | 类型/trait | `UpperCamelCase` | `TaskContext`、`EventSink` |
 | 函数/方法 | `snake_case`，动词开头 | `generate_signature`、`accepts_basic` |
 | 常量 | `SCREAMING_SNAKE_CASE` | `AES_FIXED_IV`、`SALT_MAP` |
@@ -305,7 +305,7 @@ Err(mcloud_core::Error::Upstream { code, message })
 
 ### 5.4 上游响应解析
 
-上游 `code` 成功值判定集中在任务层，标准写法（见 `mcloud-tasks/src/sign.rs`）：
+上游 `code` 成功值判定集中在任务层，标准写法（见 `mcloud-tasks/src/signin.rs`）：
 
 ```rust
 let code = v.get("code").and_then(|c| c.as_str()).unwrap_or("");
@@ -577,17 +577,19 @@ Conventional Commits，**中文正文**：
 cargo fmt --all -- --check          # 必须无输出
 cargo clippy --workspace --all-targets
 cargo test --workspace              # 必须 0 failed
-node scripts/gates-web.mjs --full   # 前端五条闸门，≈ 100 s
+node scripts/gates-web.mjs --full   # 前端闸门（默认五条；--full 再加一条泄漏量测）
 ```
 
 四条全绿才能提交。**本次提交新引入的告警/失败由本次提交负责**——
 当前 §3.3 记录的欠账为零，所以「本来就有」这个借口不存在。
+⚠ **耗时随机器变，本文不写秒数** —— 脚本头部自己那行会报当次读数。
 
-`gates-web.mjs` 那五条是：`typecheck` / `build` / **lite 编译期负例** /
+`gates-web.mjs` 默认五条是：`typecheck` / `build` / **lite 编译期负例** /
 **窄屏布局验收**（真 375 宽视口：横向溢出、账号行、弹窗出口、tab 尺寸）/ **lite 真 DOM 验收**
-（demo 断言 + 编译产物行为与耗时护栏 + 三个认证态的交互，
-`--full` 才跑满三个认证态；不带 `--full` 的默认只跑 `ready`，≈ 56 s，是改脚本时的快回路，
-**不能替代**提交前那次）。
+（demo 断言 + 编译产物行为与耗时护栏 + 认证态的交互）。
+**认证态的口径**：不带 `--full` 时只跑 `ready`（改脚本时的快回路，
+**不能替代**提交前那次）；`--full` 跑满三个认证态（`ready` / `login` / `setup`），
+并**额外**跑一条前端泄漏量测。
 
 ⚠ 没装无头 Chrome 的机器上最后一条会印 `⊘ 跳过（本机没有无头 Chrome，这条不算通过）` ——
 **跳过 ≠ 通过**，那部分前端行为没有被验证过，要么换台有浏览器的机器跑，要么显式说明。
@@ -645,7 +647,7 @@ target/
 crates/       Rust 各层
 docs/         设计文档（architecture.md / conventions.md）
 test/golden/  黄金向量（权威数据，勿手改；从 mcloud 同步）
-web/          前端（Vue Vapor + TSX）
+web/          前端（自研 `lite` 运行时 + TSX，见 lite-framework.md）
 data/         运行时数据（不入库）
 ```
 
@@ -691,7 +693,8 @@ data/         运行时数据（不入库）
 > DES-ECB 实现并消费 21 条黄金向量（原记为"死依赖"，实为未实现的功能）、
 > 凭证目录/文件权限（`0700`/`0600`，见 §7.3）、
 > 阻塞写盘改判为**有意的例外**并给出实测依据（见 §6）、
-> `mcloud-server` 路由测试 12 条（见 §8.6）。
+> `mcloud-server` 路由测试（条数**别背数**，现算：
+> `grep -c '#\[tokio::test\]\|#\[test\]' crates/mcloud-server/tests/routes.rs`；见 §8.6）。
 >
 > **记录本身也会失实**，几条值得留意的教训：
 > - 「`des` 是死依赖」是错的：依赖声明没错，缺的是实现，

@@ -9,8 +9,11 @@
 
 # ai-avatar（AI 新头像 / AI头像）上游规格 — 给 Lead
 
-> 依据优先级：**mcloud-sign TS 为准** > 真机抓包 > 推断。本仓 `docs/capture/` 目录**不存在**，
-> 仓内也无任何 ai-avatar 实现（全仓 grep 只有 `account.rs` 与 `task_expansion.rs:7` 的注释）。
+> 依据优先级：**mcloud-sign TS 为准** > 真机抓包 > 推断。本仓 `docs/capture/` 目录**不存在**。
+> ⚠ **本仓已有 ai-avatar 实现**（本节原先写"仓内无任何 ai-avatar 实现"，已过期）：
+> 协议层 `crates/mcloud-upstream/src/ai_avatar.rs`、任务层 `crates/mcloud-tasks/src/ai_avatar.rs`
+> （`AiAvatarTask::production()` 已在 `register_all` 里注册）。下面这份规格是**落地前**的调研，
+> 保留原样；要问"现在到底做到哪一步"，以那两个文件头为准。
 > Go 参考（同级的 `mcloud`，另一份 Go 实现）**只作线索**，凡引用处均标「线索」。
 > 未标 [推断] 的结论都逐条给了 TS 的 文件:行号。
 
@@ -142,8 +145,8 @@ TS 全部落在 `packages/core/src/tasks/ai-avatar/api.ts`（8 口）。
   要按 TS 字面另写（或加一档）。
 - **清理**：`crates/mcloud-upstream/src/cloud_trash.rs`（batchTrash）+ `crates/mcloud-engine/src/artifacts.rs`
   （临时文件登记/清理，:84,:223,:389）—— 这是 TS `ctx.state.files` 在本仓的对应物。
-- **设置位**：`crates/mcloud-core/src/account.rs:160-161`（`ai_avatar_enabled` 默认 false、`ai_avatar_daily_limit` 默认 10）。
-- **状态**：本仓**没有** ai-avatar task 实现；`crates/mcloud-tasks/src/task_expansion.rs:7` 只是在注释里把它列为"写网盘的链"之一。
+- **设置位**：`crates/mcloud-core/src/account.rs:183-184`（`ai_avatar_enabled` / `ai_avatar_daily_limit` 的字段定义）、`:264-265`（默认值 false / 10）。
+- **状态**：本仓**已有** ai-avatar task 实现 —— 协议层 `crates/mcloud-upstream/src/ai_avatar.rs`、任务层 `crates/mcloud-tasks/src/ai_avatar.rs`（`AiAvatarTask::production()` 已在 `register_all` 注册，默认**关**）。本节原先写"本仓没有 ai-avatar task 实现"，已过期。
 
 ## 7. 未定项
 

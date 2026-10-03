@@ -46,10 +46,15 @@ export default defineConfig({
     sourcemap: false,
     // 关掉 modulepreload 的**垫片**（不是 preload 本身）。
     //
-    // 它是给「不支持 `rel=modulepreload` 的浏览器」用的 polyfill，而本产物是
-    // **单 chunk**（HTML 里 `<link rel="modulepreload">` 数量为 0，见
-    // `docs/architecture.md` §10.6）⇒ 那条垫片**没有任何东西可垫**，
-    // 纯粹白带 0.7KB。真要做按需拆包时记得回来复核这一条。
+    // 它是给「不支持 `rel=modulepreload` 的浏览器」用的 polyfill。写这条时产物是
+    // 单 chunk（`<link rel="modulepreload">` 数量为 0）⇒ 垫片没有东西可垫。
+    //
+    // ⚠ 2026-10-03 复核：**前提已经变了** —— `app.tsx` 现在按页动态 `import()`
+    // （见 `docs/lite-framework.md` §8），`web/dist/assets` 有 20 个 chunk、
+    // `index.html` 里有 1 条 `modulepreload`。这条设置**仍然保留**，因为：
+    // 本仓的目标浏览器（macOS 上跑 WebUI 的 Chrome/Safari）全都支持
+    // `rel=modulepreload`，垫片是给老浏览器兜底的，而这条路线里没有老浏览器。
+    // 真要支持老浏览器时**先复核这一条**（这正是当初写下的那句提醒）。
     modulePreload: { polyfill: false },
   },
 })

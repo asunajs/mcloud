@@ -256,8 +256,10 @@ export const DashboardPage = (props: DashboardPageProps) => {
   /**
    * 今日AI豆（云朵记录汇总）。
    *
-   * ⚠ 后端**还没有**这个端点（见 `api.ts` 的 [`BeanToday`]）⇒ 今天它一直是 `null`、
-   * `beansError` 里是 404 的原因。这不是 bug：前端先定稿，端点落地即亮。
+   * ⚠ 2026-10-03 更正：端点**已经落地**（`crates/mcloud-server/src/routes/beans.rs`，
+   * 见 review §3 D7 / §5 C5）—— 原先这段写「后端还没有」，会把下一个排查的人
+   * 引向"有一发白发的请求"。现在读到 `null` 就是**真的读不到**，
+   * 原因在 `beansError` 里（未登录 401 / 上游 502 / 解析失败那一族）。
    */
   const beans = ref<BeanToday | null>(null)
   /** 云朵记录读不到的原因。**单独一格** —— 它不该把整页打成"后端连不上"。 */

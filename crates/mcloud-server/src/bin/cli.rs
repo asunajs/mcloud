@@ -39,8 +39,9 @@ async fn main() -> anyhow::Result<()> {
         // 不给参数时**打印用法**，而不是列任务。
         //
         // 列任务的写法在只有 `tasks`/`run` 两个命令时还算合理；
-        // 现在有 6 个命令，"不带参数"多半是**不知道有什么**，
-        // 这时该给的是命令清单。
+        // 现在有 7 个命令（tasks/pending/login/cron/pipeline/auth/run —— 现算：
+        // `grep -n '^        Some("' crates/mcloud-server/src/bin/cli.rs`），
+        // "不带参数"多半是**不知道有什么**，这时该给的是命令清单。
         None => print_usage(),
         Some("tasks") => {
             println!("可用任务（{} 个）：", app.registry().len());
@@ -189,8 +190,11 @@ fn print_usage() {
     eprintln!("  cron <定时id>                   跑一条已配置的定时（给系统 crontab 调用）");
     eprintln!("  pipeline run <编排id>           跑一条已配置的编排");
     eprintln!("  auth refresh <--account|--all>  刷新凭据");
-    eprintln!("  login <方式>                    登录账号（qr / sms / app / password）");
+    eprintln!("  login <方式>                    登录账号（qr / sms / app / password / device）");
     eprintln!();
     eprintln!("定时与编排的**创建**不在命令行：改配置文件，或用 WebUI。");
-    eprintln!("完整的 WebUI（含登录闸、账号管理、日志）请直接运行 `mcloud serve`。");
+    // ⚠ 这里原先教用户跑 `mcloud serve` —— **没有这个子命令**（全仓零命中），
+    // 照着打就是 `unknown command`（2026-10-03 review §1.15）。
+    // WebUI 是**服务进程自己的路由**，由 launchd 托管的那份跑着，不需要另起。
+    eprintln!("完整的 WebUI（含登录闸、账号管理、日志）在服务进程里：默认 http://127.0.0.1:3000");
 }

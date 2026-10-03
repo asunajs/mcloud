@@ -12,7 +12,7 @@
 > `live-redflower-vectors.json`）。
 > `/api/capabilities` 实测返回这 10 条。
 >
-> **增补（2026-09-28）：已实现 18 个任务** —— 上面 10 条 +
+> **增补（2026-09-28 当时 18 个任务；当前条数现算：`grep -c "Arc::new" crates/mcloud-tasks/src/lib.rs`）** —— 上面 10 条 +
 > `exchange`（兑换）+ `msg-push`（消息推送）+ `fun-ai`（趣玩AI抽奖）+ `notice`（公告任务）
 > + `play-ai-special`（拍拍盘点，**只读那一半**）
 > + `app-task-matrix`（App 任务矩阵，**只读那一半**）
@@ -22,22 +22,25 @@
 > 下面那张 19 条清单是**参考实现的规格表**，不是本项目的进度表；
 > 本项目的进度以 `/api/capabilities` 与 `README.md` 为准（条数以实际返回为准 —— 见下面的改口）。
 >
-> ⚠ **改口（当前事实）**：`exchange` 已从 `register_all` 摘掉（commit 4c82b5d），
-> **不再出现在 `/api/capabilities`**，也不能经 `POST /api/runs` 触发；专用入口
-> `POST /api/accounts/{id}/exchange` 会回「任务池里没有 exchange」。
-> 所以上面那句「已实现」只指**实现还在**（`mcloud_tasks::exchange` 可直接调用、有测试），
-> **不指「对外可用」**。原因（缺 `deviceId` 来源 / `visitlog` 预热 / 等待档对齐）见
-> `crates/mcloud-tasks/src/lib.rs` 的 `register_all` 说明。今天的注册表是 **19 条**。
+> ⚠ **改口（当前事实，2026-10-02）**：`exchange` **已回到 `register_all`**
+> ⇒ 它**在** `/api/capabilities` 里，也能经 `POST /api/runs` 触发。
+> （历史：它曾于 commit 4c82b5d 被摘掉、专用入口回「任务池里没有 exchange」——
+> 那条已过期，别再照它判断。）
+> ⚠ 注册表里那条哨兵注释说三条缺口已补齐（`deviceId` 来源 / `visitlog` 预热 /
+> 等待档与 TS 对齐）—— **具体行为以 `crates/mcloud-tasks/src/exchange.rs` 现状为准**，
+> 别把注释当结论。
+> 注册表条数**别背数**，现算：`grep -c "Arc::new" crates/mcloud-tasks/src/lib.rs`。
 >
 > ⚠ **`task-expansion` 与参考实现有一处刻意不同：本仓会删掉自己传的那个文件**
 > （参考实现留在它的 P1 缺口里不删）。⚠ 但"撞同名"那一档**绝不删** ——
 > 那是用户本来就有的文件。详见 `crates/mcloud-tasks/src/task_expansion.rs` 文件头。
 >
-> ⚠ **`app-task-matrix` 与表里的 `app-task` 不是同一条**：后者在参考实现里是
+> ⚠ **`app-task-matrix` 与 `app-task` 不是同一条**：后者在参考实现里是
 > 「**做任务**」（逐条 `task/click`，会写用户的账且不可撤销），
 > 而它自己写着「今天一次真打都没有」、`RunInBatch: false`。
-> 本仓只落了**只读那一半**并另起一个 code ⇒ **`app-task` 这个名字今天不存在**，
-> 写的那一半仍未实现。详见 `crates/mcloud-tasks/src/app_task_matrix.rs` 文件头。
+> **两条现在都在注册表里**：`app-task-matrix` 是**只读那一半**（另起一个 code），
+> `app-task`（写的那一半）已落地 —— 名字门三档玩法（106 / 522 / beiyong1）→ 逐条打卡 → 清理。
+> 详见 `crates/mcloud-tasks/src/app_task_matrix.rs` 与 `crates/mcloud-tasks/src/app_task.rs` 文件头。
 >
 > ⚠ **`play-ai-special` 只落了只读那两枪**（`user/info` + `task/list`），
 > 上游那一族的另外三口（上报一步 / 抽奖 / 写网盘）**故意不接**：
@@ -148,13 +151,16 @@ mcloud 实测的三张票长度相同（905 字符）但**哈希互不相等**�
 > （`TestRedFlowerChainRefreshesAndReplaysTheFailedStep`），因为"重放整轮"
 > 在余额上看不出、日志里不报错 —— 只有把**请求序列**钉住才抓得到。
 
-### ⛔ 阻塞点二：`sign` 的端点本身是错的
+### ⛔ 阻塞点二：`sign` 的端点本身是错的 —— **已解决**
 
 ```rust
-// crates/mcloud-tasks/src/sign.rs
+// crates/mcloud-tasks/src/signin.rs（当时这里的占位端点，现已换成实拍）
 HttpRequest::post("https://m.mcloud.139.com/ycloud/api/sign/query")   // 405
 HttpRequest::post("https://m.mcloud.139.com/ycloud/api/sign/doSign")  // 405
 ```
+
+> ✅ 这一段已闭环：P1 八条的端点全部换成实拍 `/ycloud/signin/page/*`
+> （见 §2 的 P0-3）。上面两行只作"凭印象写端点会怎样"的记录。
 
 mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 
@@ -365,7 +371,8 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 ## 4. 我建议的下一步（等你确认）
 
 > **进展（2026-09-26）**：P0-1 / P0-2 / P0-3 已完成，P0-4 的账本层已完成，
-> **605 个测试全绿**，clippy 0 告警。
+> 当时测试全绿、clippy 0 告警（**条数会变，别背数** —— 现算：
+> `grep -rh "#\[test\]\|#\[tokio::test\]" crates | wc -l`，或直接看 `cargo test` 输出）。
 > 证据：占位端点 `/ycloud/api/sign/query` 实测 **405**，实拍端点
 > `/ycloud/signin/page/infoV3` 实测 **200**。
 > 仍未做：P0-4 的两条尾巴（`batchTrash` 那一枪、编排链内跨步骤累积）——
@@ -410,21 +417,21 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 
 ---
 
-## 5. WebUI 读数缺口：今日AI豆（云朵记录汇总）
+## 5. 今日AI豆（云朵记录汇总）
 
-**状态：前端已定稿，后端未实现**（2026-09-30）。
+**状态：路由与只读封装已落地；路由级测试仍缺**（2026-10-03 复核）。
 
-总览页那张「今日AI豆」卡已按下面的契约接好（`web/src/api.ts` 的 `BeanToday` /
-`getBeanToday`）。端点落地之前它显示「待接入」+ 后端的 HTTP 码，**不会**把整页
+总览页那张「今日AI豆」卡按下面的契约接好（`web/src/api.ts` 的 `BeanToday` /
+`getBeanToday`）。端点落地前它显示「待接入」+ 后端的 HTTP 码，**不会**把整页
 拖成错误态 —— 一格读数不该被说成"服务挂了"。
 
-### 5.1 缺的三块
+### 5.1 三块的现状
 
 | # | 缺什么 | 现状 |
 |---|---|---|
-| 1 | 只读封装（`mcloud-tasks`） | 上游那两口**都已经在**：`mcloud-upstream::app_signin::cloud_record_v2_request(ai_dou, filter, page_number, page_size)` + `parse_cloud_records`（→ `CloudRecord { num, summary, mark, insert_time }`）。缺的是一个像 `exchange::read_judged_prizes` 那样的公开只读入口（外加一个给 server 用的 env 结构） |
-| 2 | 路由 | `GET /api/beans/today`：**按账号**读流水，一个账号一份 |
-| 3 | 路由级测试 | 照 `crates/mcloud-server/tests/routes.rs` 的 one-shot 风格；上游那一侧用 fixture 回放 |
+| 1 | 只读封装（`mcloud-tasks`） | ✅ 已落地：`crates/mcloud-tasks/src/beans.rs` 的 `read_today(&BeansEnv, &[BeanAccount]) -> Today`（配套 `BeansEnv` / `BeanAccount` / `Today` / `aggregate_today`）；上游仍是 `mcloud-upstream::app_signin::cloud_record_v2_request` + `parse_cloud_records` |
+| 2 | 路由 | ✅ 已落地：`GET /api/beans/today` 在 `crates/mcloud-server/src/routes/beans.rs`，已由 `routes/mod.rs` merge。复核：`curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/api/beans/today`（未登录回 401 就说明路由在） |
+| 3 | 路由级测试 | ❌ **仍缺**：`crates/mcloud-server/tests/routes.rs` 里没有 beans 用例（`grep -n beans crates/mcloud-server/tests/routes.rs` 零命中）。照那里的 one-shot 风格补；上游那一侧用 fixture 回放 |
 
 ### 5.2 口径（已定，别在实现时再发明）
 
@@ -443,7 +450,7 @@ mcloud 的实拍结论（`business-feature-inventory.md` §5.1）明确写着：
 - **拿不到就逐个说**：某个账号读失败 ⇒ 进 `failed[]`（带**后端原话**的原因），
   界面把它单独列一行、染黄；**不能**把它当 0 混进那一行（"没读到"≠"今天没进出"）。
   注意这是**账号级**的失败：一个账号读不到不该把整张卡打成错误态（那是"服务挂了"的语义）。
-- **实现后记得**：同步 `README.md` 的「HTTP 接口」一节。
-  `web/lite/regress/lib.mjs` 的 `FIXTURES` 里**已经先放好**这个端点的 fixture
-  （带"后端未实现"的注记，为的是让门禁走到那张卡"有读数"的长相），
-  落地后把那条注记删掉即可。
+- **仍欠的收尾**：同步 `README.md` 的「HTTP 接口」一节（今天还没有这条）。
+  `web/lite/regress/lib.mjs` 的 `FIXTURES` 里那条 `/api/beans/today` fixture
+  **保留**（它让门禁走到那张卡"有读数"的长相），但它的注释仍写着
+  「后端还没有这个端点」—— 那条注记该删（属 `web/`，不在本轮文档改动范围）。

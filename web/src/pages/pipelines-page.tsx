@@ -749,10 +749,29 @@ export const PipelinesPage = () => {
                   <ParamField
                     key={spec.name}
                     spec={spec}
-                    value={(s.body as Record<string, unknown> | null | undefined)?.[spec.name]}
+                    get={() =>
+                      (s.body as Record<string, unknown> | null | undefined)?.[spec.name]
+                    }
                     onInput={(v) => {
-                      const body = { ...((s.body as Record<string, unknown> | null) ?? {}), [spec.name]: v }
-                      steps.value = steps.value.map((x, k) => (k === i ? { ...x, body } : x))
+                      /*
+                        ⚠⚠ **原地改 `body`，不写 `steps.value`**（2026-10-03 review §2.2）。
+
+                        两件事叠在一起才是"敲一个字整张步骤卡重建、焦点全丢"：
+                        ① 传**值** ⇒ 参数块那一层重建（已由 `get` thunk 修掉）；
+                        ② 写 `steps.value` ⇒ 列表槽重跑 ⇒ `createFor` 按**对象身份**判行
+                           ⇒ 这里每次 `{ ...x, body }` 都是**新对象** ⇒ 整行（含任务下拉、
+                           全部参数控件）拆掉重造 ✗。
+
+                        改完之后不需要重渲染：`<input>` 里的字是用户自己敲进去的，
+                        `body` 改了就行（保存路径读的就是这些**同一个**对象）。
+                        切任务那条路径**照旧**换新对象 —— 那时 specs 真的变了，重建是对的 ✓。
+                      */
+                      const step = steps.value[i]
+                      if (!step) return
+                      step.body = {
+                        ...((step.body as Record<string, unknown> | null) ?? {}),
+                        [spec.name]: v,
+                      }
                     }}
                   />
                 ))}

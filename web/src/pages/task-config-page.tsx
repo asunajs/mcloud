@@ -138,9 +138,12 @@ export const TaskConfigPage = (props: TaskConfigPageProps) => {
               <div class="grid min-w-0 gap-4 md:grid-cols-2">
                 {(view.value?.specs ?? []).map((s) => (
                   <div key={s.name} class="min-w-0">
+                    {/* ⚠ `get` 是 thunk：在槽里写 `value={values.value[s.name]}`
+                        会让这个槽订阅值信号 ⇒ 每敲一个字整块重建、焦点全丢
+                        （2026-10-03 review §2.2；正解见 `accounts-page.tsx:1192-1199`）。 */}
                     <ParamField
                       spec={s}
-                      value={values.value[s.name]}
+                      get={() => values.value[s.name]}
                       onInput={(v) => {
                         values.value = { ...values.value, [s.name]: v }
                       }}

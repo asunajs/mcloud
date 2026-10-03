@@ -1031,6 +1031,19 @@ impl mcloud_core::ScheduleStore for JsonStore {
         Self::persist_schedules(&db, self)
     }
 
+    /// 只推水位、**不**计数（`Decision::Missed` 那条弃置支走这里）。
+    ///
+    /// 与 `mark_schedule_fired` 的差别只有 `run_count` 那一行 ——
+    /// 弃置的触发点一次上游都没打，不该算"跑过一次"（2026-10-03 review §1.7）。
+    async fn advance_schedule_watermark(&self, id: &ScheduleId, fire_ms: i64) -> Result<()> {
+        let mut db = self.write()?;
+        match db.schedules.iter_mut().find(|s| &s.id == id) {
+            Some(sl) => sl.last_fire_ms = Some(fire_ms),
+            None => return Ok(()),
+        }
+        Self::persist_schedules(&db, self)
+    }
+
     async fn record_schedule_run(
         &self,
         id: &ScheduleId,

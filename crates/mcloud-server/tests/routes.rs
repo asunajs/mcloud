@@ -2111,3 +2111,135 @@ async fn restart_is_accepted_and_signals_shutdown() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── SSE 断开必须退订（2026-10-03 review §1.5）────────────────────────────
+
+/// ⭐⭐ 流被丢掉时**必须退订**，否则中枢里一次运行漏一份。
+///
+/// 改之前的实情：`hub.subscribe` 在生产路径上只有一处调用（这条路由），
+/// 而 `hub.unsubscribe` **一个都没有** —— `grep -rn "hub\.unsubscribe" crates`
+/// 只剩测试。浏览器关掉 `EventSource`（前端在终局事件后就是这么做的）时，
+/// axum 丢掉响应体 ⇒ `unfold` 生成器被 drop ⇒ **循环后面那些语句一行都不执行**
+/// ⇒ 订阅者条目永远留着。
+///
+/// ⚠ 这条用例必须**先断言"订上了"**（`subscriber_count == 1`）：只断言"断开后是 0"
+/// 的话，订阅根本没发生也能绿 —— 那是摆设。
+#[tokio::test]
+async fn sse_disconnect_unsubscribes_from_the_hub() {
+    let (handle, dir) = test_app("sse-unsubscribes");
+    let run_id = mcloud_core::RunId::new(7);
+    handle
+        .store
+        .upsert_run(&mcloud_core::RunRecord {
+            run_id,
+            task: "sign".into(),
+            account: "13800000000".into(),
+            outcome: mcloud_core::TaskOutcome::skipped("测试"),
+            duration_ms: 1,
+            started_at_ms: 1,
+            status: mcloud_core::RunStatus::Done,
+            details: serde_json::Value::Null,
+        })
+        .await
+        .unwrap();
+    assert_eq!(handle.hub.subscriber_count(run_id), 0, "前提：还没人订阅");
+
+    // 拿住响应体不 drop —— 此时订阅**必须**是活的
+    let resp = authed_app(Arc::clone(&handle))
+        .oneshot(
+            Request::builder()
+                .uri("/api/runs/7/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("请求应被处理");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        handle.hub.subscriber_count(run_id),
+        1,
+        "响应拿到手时订阅就该是活的（否则下面的断言测的是「从来没订上」）"
+    );
+
+    // 客户端断开 = 丢掉响应体（`EventSource.close()` / 关标签页都走这条路）
+    drop(resp);
+    assert_eq!(
+        handle.hub.subscriber_count(run_id),
+        0,
+        "断开后订阅者条目必须清掉 —— 留着就是一次运行漏一份"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── 定时任务的记账字段（2026-10-03 review §1.4 / §1.7）──────────────────
+
+/// ⭐ 更新定时**不能**把记账字段抹掉。
+///
+/// 2026-10-03 review §1.4：`PUT /api/schedules/{id}` 那个 struct 字面量里，
+/// `last_error` / `run_count` 被重置成 `None` / `0`，而同八行上面的注释写的是
+/// "保留水位线与**记账字段**" ⇒ 改个名字就把界面上「累计触发 N 次」清零
+/// （`web/src/pages/schedules-page.tsx:384` 展示它），
+/// 而 `last_status` 还留着 `error`、`last_error` 却是空 —— 写着失败却答不出原因。
+#[tokio::test]
+async fn schedule_update_keeps_the_accounting_columns() {
+    let (handle, dir) = test_app("sched-put-keeps-accounting");
+
+    let body = serde_json::json!({
+        "name": "签到",
+        "task": "sign",
+        "accounts": [],
+        "expr": "0 8 * * *",
+        "timezone": "Asia/Shanghai",
+        "body": {},
+        "enabled": true,
+    });
+    // ⚠ 建/改都是 **PUT `/api/schedules/{id}`**（`/api/schedules` 只有 GET）——
+    // 这条路径本身是 upsert，第一次调用就是"新建"。
+    let id = "sched-put-keeps-accounting";
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(&format!("/api/schedules/{id}"), &body),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(json_body(&out)["id"], id, "{out}");
+
+    // 直接把"跑过一次、且上次失败了"写进库（不跑调度器：那要等 tick）
+    let sid = mcloud_core::ScheduleId::new(id);
+    handle
+        .store
+        .mark_schedule_fired(&sid, 1_700_000_000_000)
+        .await
+        .unwrap();
+    handle
+        .store
+        .record_schedule_run(&sid, Some(1_700_000_000_500), "error", Some("上游 500"))
+        .await
+        .unwrap();
+
+    // 只改名字
+    let mut renamed = body.clone();
+    renamed["name"] = serde_json::json!("签到（改名）");
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(&format!("/api/schedules/{id}"), &renamed),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let v = json_body(&out);
+
+    assert_eq!(v["name"], "签到（改名）", "{out}");
+    assert_eq!(v["runCount"], 1, "改个名字不该把「累计触发」清零：{out}");
+    assert_eq!(
+        v["lastFireMs"], 1_700_000_000_000i64,
+        "水位线要留（清了会把已处理的触发点重放一遍）：{out}"
+    );
+    assert_eq!(
+        v["lastError"], "上游 500",
+        "上次错误也要留：清了就是「写着失败却答不出原因」：{out}"
+    );
+    assert_eq!(v["lastStatus"], "error", "{out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

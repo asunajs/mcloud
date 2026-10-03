@@ -60,7 +60,8 @@ use crate::live_ws::{FrameKind, KoulingListener, Outbound};
 /// 本模块实际使用的 WS 流类型。
 ///
 /// 用别名而不是到处写全路径：`MaybeTlsStream<TcpStream>` 是 `connect_async`
-/// 真实返回的类型（`wss` 走 rustls、`ws` 走明文）。写死一处，换连接方式时只改这里。
+/// 真实返回的类型（`wss` 走 **native-tls**、`ws` 走明文 —— 见本 crate 的 `Cargo.toml`）。
+/// 写死一处，换连接方式时只改这里。
 pub type LiveWsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// SockJS 路径里的 sessionId 长度。
@@ -286,7 +287,7 @@ fn random_server_id(rng: &mut dyn Random) -> u32 {
 
 /// 建立到直播间的 WebSocket 连接。
 ///
-/// 返回的流已经完成 WS 升级（`wss` 走 rustls，与 `reqwest` 同一套 TLS 栈）。
+/// 返回的流已经完成 WS 升级（`wss` 走 **native-tls**，与 `reqwest` 同一套 TLS 栈）。
 ///
 /// # 错误映射
 ///

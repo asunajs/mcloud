@@ -322,14 +322,26 @@ impl ReqwestClient {
         // `cutoverStatus == 1` 那一套**登录后**的头，而这里是已登录路径。
         // 登录请求本身只能发那 5 个（`login::PcClient::headers`），
         // 两套混起来的话"登录请求多带一个头"这种错误不会报错、只会静默。
+        // ⚠⚠ 这两处**必须先查重**（2026-10-03 review §1.10）：
+        // `reqwest` 的 `RequestBuilder::header` 是 **append**，不是 set ——
+        // 调用方自己在 `req.headers` 里带了同名头时，这里再补一枚就是
+        // **两根同名线**，与凭据那一族（`authorization`/`jwttoken`/`deviceid`，
+        // 见 `should_inject_credential`）**完全同一个坑**。
+        // 实测踩中的两支：`smid::device_profile_request` 自己带 `user-agent`
+        // （`smid.rs:687`），以及 PC 那套 `x-yun-*` 业务头。
+        // 口径同凭据：**调用方声明的赢**。
         if let Some(pc) = &self.profile.pc {
             for (name, value) in pc.business_headers() {
-                builder = builder.header(name, value);
+                if should_inject_credential(&req.headers, name, true) {
+                    builder = builder.header(name, value);
+                }
             }
         }
 
         // UA 优先级：显式覆盖 > 平台 UA > 默认移动端（见 `effective_user_agent`）
-        builder = builder.header("user-agent", self.profile.effective_user_agent());
+        if should_inject_credential(&req.headers, "user-agent", true) {
+            builder = builder.header("user-agent", self.profile.effective_user_agent());
+        }
 
         for (k, v) in &req.headers {
             builder = builder.header(k, v);

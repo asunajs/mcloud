@@ -295,7 +295,24 @@ pub trait ScheduleStore: Send + Sync {
     /// "几秒前读到的行"，整行覆盖会把用户在这期间通过 WebUI 改过的
     /// 名字/参数一起抹掉。而水位线必须在打上游**之前**落盘，
     /// 所以这个写既紧急又必须最小。
+    ///
+    /// ⚠ 它会**累加 `run_count`**（"跑过一次"的记账）。要推进水位但**不**计数的
+    /// 场合（错过的触发点被整体弃掉）用 [`Store::advance_schedule_watermark`]。
     async fn mark_schedule_fired(&self, id: &ScheduleId, fire_ms: i64) -> Result<()>;
+
+    /// **窄写**：推进水位线，但**不**累加运行次数。
+    ///
+    /// 为什么要和 [`Store::mark_schedule_fired`] 分开（2026-10-03 review §1.7）：
+    /// 那个方法里 `run_count += 1` 记的是"真的跑过一次"，而
+    /// `Decision::Missed`（错过的触发点整体弃掉）也调它 ⇒ 一次上游都没打的**弃置**
+    /// 会被记成一次运行，界面上「累计触发 N 次」（`schedules-page.tsx:384`）虚高。
+    ///
+    /// 默认实现退回 `mark_schedule_fired`：生产只有 `JsonStore` 一处要覆盖，
+    /// 而各任务测试里的 `Store` 桩有十来份 —— 给一个**默认方法**，
+    /// 才不用为这一行去改那十来份桩。
+    async fn advance_schedule_watermark(&self, id: &ScheduleId, fire_ms: i64) -> Result<()> {
+        self.mark_schedule_fired(id, fire_ms).await
+    }
 
     /// **窄写**：只记录本次执行结果。
     ///

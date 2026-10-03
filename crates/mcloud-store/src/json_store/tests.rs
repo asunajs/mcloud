@@ -1680,3 +1680,62 @@ async fn exchange_subscriptions_are_ordered_and_reject_duplicates() {
     assert!(dup.is_err(), "重复的 prize_id 必须报错，不能静默去重");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// ── 定时水位线的两种口径（2026-10-03 review §1.7）──────────────────────
+
+fn schedule(id: &str) -> Schedule {
+    Schedule {
+        id: ScheduleId::new(id),
+        name: "签到".into(),
+        task: "sign".into(),
+        accounts: vec![],
+        expr: "0 8 * * *".into(),
+        timezone: "Asia/Shanghai".into(),
+        body: serde_json::Value::Null,
+        enabled: true,
+        owner: None,
+        last_fire_ms: None,
+        last_run_ms: None,
+        last_status: None,
+        last_error: None,
+        run_count: 0,
+    }
+}
+
+/// ⭐ **弃置的触发点不算"跑过一次"**（review §1.7）。
+///
+/// `mark_schedule_fired` 里那句 `run_count += 1` 记的是"真的跑过一次"，
+/// 而 `Decision::Missed`（错过的触发点整体弃掉）也要推水位 —— 它共用那个方法时，
+/// 一次上游都没打的弃置会被记成一次运行，界面上「累计触发 N 次」虚高
+/// （`web/src/pages/schedules-page.tsx:384` 展示它）。
+///
+/// 两条口径都钉住：**弃置**只动水位、**真跑**才 +1。
+#[tokio::test]
+async fn watermark_advance_does_not_count_a_run() {
+    let d = tmpdir("watermark");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_schedule(&schedule("s1")).await.unwrap();
+
+    let id = ScheduleId::new("s1");
+
+    // 弃置：推水位，但不计数
+    s.advance_schedule_watermark(&id, 1_700_000_000_000)
+        .await
+        .unwrap();
+    let row = s.schedule(&id).await.unwrap().expect("应有这一行");
+    assert_eq!(row.last_fire_ms, Some(1_700_000_000_000), "水位要推");
+    assert_eq!(row.run_count, 0, "弃置不该记成跑过一次");
+
+    // 真跑：推水位**并且** +1
+    s.mark_schedule_fired(&id, 1_700_000_060_000).await.unwrap();
+    let row = s.schedule(&id).await.unwrap().unwrap();
+    assert_eq!(row.last_fire_ms, Some(1_700_000_060_000));
+    assert_eq!(row.run_count, 1, "真跑要计数");
+
+    // 对不存在的 id：两种都不报错（定时在这期间被删了）
+    let gone = ScheduleId::new("nope");
+    s.advance_schedule_watermark(&gone, 1).await.unwrap();
+    s.mark_schedule_fired(&gone, 1).await.unwrap();
+
+    let _ = std::fs::remove_dir_all(&d);
+}

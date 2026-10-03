@@ -507,3 +507,89 @@ fn record_carries_status_and_roundtrips() {
     let j = serde_json::to_string(&r).unwrap();
     assert!(j.contains("\"status\":\"cancelled\""), "{j}");
 }
+
+// ── 终态 run 的回收（2026-10-03 review §1.5）────────────────────────────
+
+fn finished(id: RunId) -> RunEvent {
+    RunEvent::Finished {
+        run_id: id,
+        outcome: TaskOutcome::success("ok"),
+        duration_ms: 100,
+    }
+}
+
+/// ⭐⭐ 终态 run 的内存历史**有上限**，而"还在跑 / 还有人在看 / 日志没落盘"
+/// 的一律不动（2026-10-03 review §1.5）。
+///
+/// 改之前 `Inner::runs` 只进不出：一次运行最多 `HISTORY_PER_RUN`（2000）条事件
+/// 永远堆着，而 `forget`/`unsubscribe` 在生产路径上一个调用点都没有。
+#[tokio::test]
+async fn terminal_runs_are_capped_and_live_ones_are_never_reclaimed() {
+    let h = hub();
+
+    // ① 还在跑的：它的历史只在内存里（盘上还没有），一份都不能回收
+    let live = RunId::new(9001);
+    h.emit(RunEvent::info(live, "还在跑", NOW_MS));
+
+    // ② 终态但**有人正在看**：回收会把这条件流当场断在半路
+    let watched = RunId::new(9002);
+    h.emit(RunEvent::info(watched, "快完了", NOW_MS));
+    let sub = h.subscribe(watched, Seq::ZERO);
+    h.emit(finished(watched));
+
+    // ③ 再堆一批终态、没人看的，超出上限
+    for i in 0..(MAX_TERMINAL_RUNS_KEPT as u64 + 3) {
+        let id = RunId::new(1000 + i);
+        h.emit(RunEvent::info(id, "干完了", NOW_MS));
+        h.emit(finished(id));
+    }
+    h.flush().await.unwrap();
+
+    // 只留最近 MAX 份：最老的 3 份被回收
+    assert!(
+        !h.is_tracked(RunId::new(1000)),
+        "最老的终态 run 应当被回收（否则这张表只进不出）"
+    );
+    assert!(
+        h.is_tracked(RunId::new(1000 + MAX_TERMINAL_RUNS_KEPT as u64 + 2)),
+        "最新的终态 run 要留着（页面刷新/断线续传靠它补历史）"
+    );
+    assert!(
+        h.is_tracked(live),
+        "还在跑的 run 绝不能回收 —— 它的事件只有内存里有"
+    );
+    assert!(
+        h.is_tracked(watched),
+        "还有人订阅的终态 run 不能回收 —— 那会把这条流断在半路"
+    );
+    assert_eq!(h.subscriber_count(watched), 1);
+    let _ = sub;
+}
+
+/// ⭐ **日志还没落盘的终态 run 不许回收** —— `forget` 会连待落盘缓冲一起删，
+/// 那一批日志就真的没了（review §1.5 那个"三个条件全满足才回收"里的第三条）。
+#[tokio::test]
+async fn a_terminal_run_with_unflushed_logs_is_not_reclaimed() {
+    let store = Arc::new(MemStore {
+        logs: Mutex::new(Vec::new()),
+        fail: true,
+    });
+    let h = hub_with(Arc::clone(&store));
+
+    // 先堆满上限（这些的日志都写不进去 ⇒ 全都在 pending 里）
+    for i in 0..(MAX_TERMINAL_RUNS_KEPT as u64 + 3) {
+        let id = RunId::new(2000 + i);
+        h.emit(RunEvent::info(id, "写不进去的日志", NOW_MS));
+        h.emit(finished(id));
+    }
+    let n = h.flush().await.unwrap();
+    assert_eq!(n, 0, "store 一直在失败，不该报落盘成功");
+
+    for i in 0..(MAX_TERMINAL_RUNS_KEPT as u64 + 3) {
+        let id = RunId::new(2000 + i);
+        assert!(
+            h.is_tracked(id),
+            "日志还在待落盘缓冲里的 run 不能被回收：run {id} 的那批日志会真的丢"
+        );
+    }
+}

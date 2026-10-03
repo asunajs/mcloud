@@ -474,6 +474,27 @@ struct StreamState {
     last_sent: Seq,
 }
 
+/// ⭐⭐ 流被丢掉时**必须退订**（2026-10-03 review §1.5）。
+///
+/// 为什么不能靠"循环跑完"来退订：`axum` 在客户端断开时**丢掉响应体**，
+/// 而这条流是 `unfold` 生成的 —— 丢掉 = 生成器被 drop，**循环后面那些语句
+/// 一行都不会执行** ✗。浏览器关掉 `EventSource`（前端在终局事件后就是这么做的，
+/// 见 `web/src/api.ts:687`）走的正是这条路。
+///
+/// 后果（改之前）：中枢里那个订阅者条目**永远留着**，一次运行漏一份；
+/// 而 `hub.unsubscribe` 在生产路径上**一个调用点都没有**
+/// （`grep -rn "hub\\.unsubscribe" crates` 当时只剩测试）⇒ `Inner::runs`
+/// 只进不出，服务跑得越久堆得越多。
+///
+/// 用 `Drop` 而不是"在每个 `return` 前手动退订"：这条流有 **5 个**出口
+/// （终局收尾 ×2、通知端关闭、队列空转、以及"被 drop"），少写一处就是又漏一条。
+/// `Drop` 只有一个入口，且覆盖"被 drop"这条手动退订根本够不着的路径。
+impl Drop for StreamState {
+    fn drop(&mut self) {
+        self.hub.unsubscribe(self.run_id, self.subscriber);
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct EventsQuery {
     /// 手动指定起点（curl / 测试用），语义同 `Last-Event-ID`。

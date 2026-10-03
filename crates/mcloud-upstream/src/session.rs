@@ -343,8 +343,14 @@ pub fn tyrz_login_request(
 ) -> HttpRequest {
     // 字段按 JSON 键的字典序（marketName → openAccount → sourceId → token）。
     //
-    // 用 `json!` 而不是手拼字符串：`serde_json` 的 Map 默认按插入序输出，
-    // 而这里按字典序写就是抓包顺序。手拼字符串没法处理 token 里的转义。
+    // 用 `json!` 而不是手拼字符串：手拼没法处理 token 里的转义。
+    //
+    // ⚠ 2026-10-03 更正：这条注释原先写「`serde_json` 的 Map 默认按**插入序**输出」——
+    // **说反了**。本仓的 `serde_json = "1"` 没开 `preserve_order` ⇒ 默认是
+    // **BTreeMap（键的字典序）**，插入序只是"因为这里本来就按字典序写"才碰巧一致
+    // （同仓 `mcloud-upstream/src/auth_refresh.rs:106-112` 写的是对的）。
+    // 结论不变、但理由换掉了：**签名能不能用，取决于键序而不是插入序** ——
+    // 哪天有人给 serde_json 打开 `preserve_order`，这里就该复核一遍。
     let body = serde_json::json!({
         "marketName": params.market_name,
         "openAccount": 0,

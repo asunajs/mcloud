@@ -38,6 +38,7 @@
 //! 所以链上留了一个显式的 [`DeviceIdFn`] 注入点，见 [`ExchangeEnv`] 那段。
 
 use std::fmt;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -819,7 +820,18 @@ pub type DeviceIdFn<'a> = dyn Fn() -> Result<String> + Send + Sync + 'a;
 /// `None` 时 `skip_wait == false` 这一支会**如实挡下**（见 [`exchange`]）——
 /// 绝不"静默不等待"：那会让这个开关看起来生效、实际没等，
 /// 而"什么时候发出去"恰恰是这条链最有副作用的一件事。
-pub type WaitFn<'a> = dyn Fn(i64) -> Result<()> + Send + Sync + 'a;
+///
+/// ⚠⚠ **它是 async 的**（返回 [`WaitFuture`]），这不是风格问题：
+/// 2026-10-03 的 review §1.1 查到 —— 原先签名是 `dyn Fn(i64) -> Result<()>`
+/// （同步），而**生产路径在 tokio 里跑**，同步闭包只能 `block_in_place` 占住一个
+/// worker 线程去睡（抢整点最长要等**一小时**）⇒ 没人敢注入 ⇒
+/// [`ExchangeTask`] 那一侧**恒传 `None`** ⇒ 界面上「定时抢兑」承诺的
+/// "任务自己等到整点再发枪"**从来没生效过**，每次都是"零请求 + 一句错误"结束 ✗。
+/// 换成 async 之后生产注入才写得出（见 [`ExchangeTask::run`] 里的 `wait`）。
+pub type WaitFn = dyn Fn(i64) -> WaitFuture + Send + Sync;
+
+/// [`WaitFn`] 的返回值。
+pub type WaitFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
 
 // ══════════════════════════════ 链 ══════════════════════════════
 
@@ -1176,7 +1188,7 @@ pub struct ExchangeOptions<'a> {
     /// 换 `deviceId` 的注入点；`None` ⇒ **一枪不发**（见 [`ExchangeEnv`]）。
     pub device_id: Option<&'a DeviceIdFn<'a>>,
     /// "等到某个时刻"的注入点；`None` ⇒ `skip_wait == false` 时**如实挡下**。
-    pub wait: Option<&'a WaitFn<'a>>,
+    pub wait: Option<&'a WaitFn>,
 }
 
 /// 跑一次兑换：**最多**下一单（真扣豆）。
@@ -1260,7 +1272,7 @@ pub async fn exchange(
                     "skipWait=false 但这一趟没接上等待实现（不静默跳过等待，本次没发请求）".into(),
                 ));
             };
-            if let Err(e) = sleep(window.until_ms) {
+            if let Err(e) = sleep(window.until_ms).await {
                 return Ok(set_error(skipped(&judge, outcome), e.to_string()));
             }
         }
@@ -1283,7 +1295,7 @@ pub async fn exchange(
                     "skipWait=false 但这一趟没接上等待实现（不静默跳过等待，本次没发请求）".into(),
                 ));
             };
-            if let Err(e) = sleep(wait.until_ms) {
+            if let Err(e) = sleep(wait.until_ms).await {
                 return Ok(set_error(skipped(&judge, outcome), e.to_string()));
             }
             // 等到点之后**重读重判**：清单与余额都是时刻量，等完这一小时里
@@ -1649,7 +1661,7 @@ pub struct ExchangeRun<'a> {
     /// 换 `deviceId` 的注入点。
     pub device_id: Option<&'a DeviceIdFn<'a>>,
     /// 等待实现。
-    pub wait: Option<&'a WaitFn<'a>>,
+    pub wait: Option<&'a WaitFn>,
 }
 
 impl ExchangeRun<'_> {
@@ -1836,13 +1848,31 @@ impl Task for ExchangeTask {
         // HTTP 侧与运行历史里都只剩下一句话 —— 而"是哪一枪断的"这件事
         // 在 `ExchangeOutcome.error` 里本来就有。花真豆的那条链，
         // 事后必须答得出"走到哪一步、发没发单、花没花"。
+        // ⚠⚠ **生产路径必须注入等待实现**（2026-10-03 review §1.1）：
+        // 界面上的「定时抢兑」承诺"任务自己等到整点再发枪"（见 `exchange-page.tsx`
+        // 那段 `skipWait` 注释），而这里原先恒为 `wait: None` ⇒ 凡是需要等待的那一趟
+        // （提前量 ≥60 秒的整点目标，**也就是这个功能的全部用法**）都会在
+        // `run_account` 里被如实挡下 ⇒ 一条上游请求都不发、历史里一句
+        // "没接上等待实现"。功能看着在、实际从没生效过 ✗。
+        //
+        // 用 `ctx` 的两个取消令牌做分段等待：用户在界面上点中止要能立刻生效，
+        // 而不是"睡满一小时再看令牌"。
+        let wait_clock = Arc::clone(&ctx.clock);
+        let wait_cancel = ctx.cancel.clone();
+        let wait_chain = ctx.chain_cancel.clone();
+        let wait = move |until_ms: i64| -> WaitFuture {
+            let clock = Arc::clone(&wait_clock);
+            let cancel = wait_cancel.clone();
+            let chain = wait_chain.clone();
+            Box::pin(async move { sleep_until(&*clock, &cancel, chain.as_ref(), until_ms).await })
+        };
         let ran = ExchangeRun {
             prize: &prize,
             skip_wait,
             force,
             offset_ms,
             device_id: device_fn.as_deref(),
-            wait: None,
+            wait: Some(&wait),
         }
         .run_account(&env, ctx.clock.now_ms())
         .await;
@@ -1937,13 +1967,52 @@ pub fn status_slug(status: ExchangeStatus) -> &'static str {
     }
 }
 
+/// 一片等待的长度（毫秒）。
+///
+/// 取值是"取消要多快生效"与"别把定时器打满"之间的折中：抢整点最长等一小时，
+/// 用 200ms 一片 ⇒ 中止最多迟 0.2 秒生效，而一小时也就 18000 次唤醒（可忽略）。
+const WAIT_SLICE_MS: i64 = 200;
+
+/// 睡到 `until_ms`，**分段**睡并盯着两个取消令牌。
+///
+/// ⚠ 用 `left -= slice` **递推**，而不是每片重读时钟：单测里的 `Clock` 是假的
+/// （时间不会自己走），重读会永远得到同一个 `left` ⇒ 死循环 ✗。
+/// 真实时钟下两者的差别只是"少算上调度抖动"，而那点抖动远小于窗口余量。
+async fn sleep_until(
+    clock: &dyn mcloud_core::Clock,
+    cancel: &mcloud_core::CancelToken,
+    chain: Option<&mcloud_core::CancelToken>,
+    until_ms: i64,
+) -> Result<()> {
+    let mut left = until_ms.saturating_sub(clock.now_ms());
+    while left > 0 {
+        // ⚠ 取消检查放在**睡之前**：令牌在进来之前就已经翻掉时（用户刚点中止、
+        // 或者这一步排在一个已被中止的链上），连一片都不该睡。
+        // 睡完之后再查一次，是为了让"睡到一半才被中止"最多迟一片（`WAIT_SLICE_MS`）生效。
+        cancel.check()?;
+        if let Some(c) = chain {
+            c.check()?;
+        }
+        let slice = left.min(WAIT_SLICE_MS);
+        tokio::time::sleep(std::time::Duration::from_millis(slice as u64)).await;
+        cancel.check()?;
+        if let Some(c) = chain {
+            c.check()?;
+        }
+        left -= slice;
+    }
+    Ok(())
+}
+
 /// 在**立即**返回 `Ok(())` 之前不做任何等待的等待实现。
 ///
-/// 只给测试与"我就是要现在试试"那一支用。生产路径上要等到整点，
-/// 得注入一个真的 sleep（见 [`wait_until`]）——
+/// 只给测试与"我就是要现在试试"那一支用。生产路径要等到整点，
+/// 注入的是 [`ExchangeTask::run`] 里那个 `sleep_until` 版本
+/// （⚠ 2026-10-03 之前这里指向一个**并不存在**的 `wait_until`，而生产恒传 `None`
+/// —— 空头注释 + 空实现凑在一起，把"功能没生效"藏了整整一天）。
 /// ⚠ 链**不会**在 `wait` 为 `None` 时静默跳过等待（见 [`exchange`]）。
-pub fn no_wait() -> impl Fn(i64) -> Result<()> {
-    |_until_ms| Ok(())
+pub fn no_wait() -> impl Fn(i64) -> WaitFuture {
+    |_until_ms| Box::pin(async { Ok(()) })
 }
 
 #[cfg(test)]
