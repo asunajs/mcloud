@@ -254,10 +254,18 @@ jobs:
 
       # ── 压缩二进制：**只有 Linux 与 Windows** ────────────────────────────
       #
-      # 两条都要的验证：`upx -t` 是 UPX 自带的完整性测试；紧随其后那条**真冒烟**
-      # 确认压完**还能跑起来、还能服务**（UPX 压坏二进制的表现就是加载即崩）。
-      - name: 压缩二进制（仅原生 Linux）
-        if: runner.os == 'Linux' && !matrix.cross
+      # ⚠⚠ 这里的条件**不能**带 `!matrix.cross`：UPX 只是压缩、**不执行**目标文件 ⇒
+      #   交叉编出来的 aarch64 一样能压。2026-10-03 第一次发 rc.1 就是这里写错了
+      #   （把"冒烟不能跑交叉产物"和"UPX 不能压交叉产物"混成了一件事）：
+      #   x86_64 二进制 1.9 MB、arm64 却是 **10 MB**，同一个 Release 里差 5 倍。
+      #   判断"压没压过"最快的一条：`file` 的判定 —— 压过的会显示
+      #   `statically linked, no section header`（UPX 存根），没压的是普通 ELF。
+      #
+      # 两条都要的验证：`upx -t` 是 UPX 自带的完整性测试（它是解压后比对，同样不执行
+      # 目标文件 ⇒ 交叉产物也验得了）；随后那条**真冒烟**确认压完**还能跑起来、还能服务**
+      # （UPX 压坏二进制的表现就是加载即崩）—— 冒烟那条**只有原生**跑得了。
+      - name: 压缩二进制（Linux，含交叉编的 arm64）
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get install -y upx-ucl
           upx --best --lzma "$BIN_DIR/mcloud-server"
