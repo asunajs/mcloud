@@ -357,7 +357,12 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          # ⚠ 前缀 `pkg-` 是**必须**的：release job 用 `pattern: 'pkg-*'` 只取平台包，
+          # 而 `web-dist` 这个 artifact（前端产物，给 rust-embed 用的）不能混进去 ——
+          # 2026-10-03 第一次发 rc.1 就是这么漏的：release job 的 download-artifact
+          # 默认把**所有** artifact 都拉下来，于是 Release 里多出 `index.html`
+          # 与 `index.html.gz` 两个不该发布的前端文件。
+          name: pkg-${{ matrix.target }}
           path: ${{ github.workspace }}/target/dist/*
           if-no-files-found: error
 
@@ -373,6 +378,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          # 只取平台包（`pkg-<target>`）—— 不写 pattern 的话，`web-dist` 也会被拉进来，
+          # 于是 `index.html` / `index.html.gz` 混进 Release（2026-10-03 首次发 rc.1 实测）。
+          pattern: pkg-*
           path: dist
           merge-multiple: true
 
@@ -383,6 +391,9 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+          # RC / beta 这类**带连字符**的 tag 自动标成 pre-release，正式版（`v3.0.0`）不标。
+          # 写死 true/false 都不行：那会让"以后那个正式版"或"以后的 RC"其中一边标错。
+          prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
             四个目标的产物，**每个平台一种格式**，包内**只有一个可执行文件 `mcloud-server`**
             （服务本体；CLI 不随包发布）：
@@ -412,9 +423,9 @@ jobs:
             ## 平台注意
 
             * **Linux x86_64**：用系统 TLS，需要 `libssl`（`apt install libssl3` / `dnf install openssl-libs`）；
-            * **Linux arm64**：OpenSSL **已静态链进二进制**，运行时**不需要**装 `libssl` ✓
-              （它是交叉编的，用不了 runner 镜像里那份系统库，见仓库 `crates/mcloud-upstream/Cargo.toml`
-              末尾那段说明）；
+            * **Linux arm64**：OpenSSL **已静态链进二进制**，运行时**不需要**装 `libssl`
+              （它是交叉编的，用不了 runner 镜像里那份系统库；见仓库
+              `crates/mcloud-upstream/Cargo.toml` 末尾那段说明）；
             * **macOS**：产物**未压缩**（UPX 会破坏 arm64 代码签名，M 芯片上跑不起来）。
               二进制未签名，浏览器下载后先 `xattr -dr com.apple.quarantine ./mcloud-server`；
             * **Windows**：产物**用 UPX 压过**（约原体积 1/3），代价是 Defender/SmartScreen
