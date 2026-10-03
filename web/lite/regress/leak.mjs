@@ -145,6 +145,29 @@ try {
   }
 
   /**
+   * ⚠⚠ **导航前必须等应用挂载完**。
+   *
+   * `openSession` 只做到"CDP 连上"，**不等页面 load 完**（见 lib.mjs 里那段）。
+   * 而本门禁是**并行**跑的（`gates-web.mjs` 里三条要 Chrome 的门禁同时起）⇒ 机器忙时
+   * 第一个 `gotoJs()` 会在文档还是 `about:blank` 的时刻执行，`history.pushState`
+   * 于是抛 `SecurityError` —— 表现是整条门禁在**预热第一页**就崩，报一句光秃秃的
+   * `Uncaught`，看不出是哪一页、也看不出原因 ✗（2026-10-03 实测：单独跑全绿、
+   * 并行跑必崩，就是这个）。
+   *
+   * 判据取 `#app` 有第一个子元素：lite 挂载完才会有内容，比 `readyState` 更贴应用。
+   */
+  const waitForApp = async (timeout = 20000) => {
+    const t0 = Date.now()
+    for (;;) {
+      const ok = await ev(`document.readyState === 'complete' && !!document.querySelector('#app')?.firstElementChild`)
+      if (ok) return
+      if (Date.now() - t0 > timeout) throw new Error('等待应用挂载超时（20s）—— 页面没起来')
+      await sleep(200)
+    }
+  }
+  await waitForApp()
+
+  /**
    * ⚠ **必须先预热**：每个页面第一次加载会一次性留下东西（懒加载的 chunk、模块状态、
    * 缓存 —— 实测 accounts +509 / exchange +387 个节点），那是**一次性成本**，不是泄漏。
    * 不预热就会把它误报成"每次访问漏 170 个" ✗（实测：5 个来回与 12 个来回的 Δ 完全一样，

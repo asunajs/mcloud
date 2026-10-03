@@ -1515,12 +1515,12 @@ export const AccountsPage = () => {
         <span class="text-xs font-medium opacity-70">渠道（点开一个才能改它）</span>
         <div class="flex flex-col gap-2">
           {settingsChannels.value.map((key) => (
-            <details key={key} class="collapse collapse-arrow bg-base-200">
-              <summary class="collapse-title text-sm font-medium">
+            <details key={key} class="disclosure disclosure-arrow bg-base-200">
+              <summary class="disclosure-title text-sm font-medium">
                 {CHANNEL_LABEL[key]}
                 <span class="badge badge-soft badge-sm ml-2">{channelState(key)}</span>
               </summary>
-              <div class="collapse-content flex flex-col gap-2">
+              <div class="disclosure-content flex flex-col gap-2">
                 <p class="text-xs leading-5 opacity-60">{CHANNEL_HINT[key]}</p>
                 {channelFields(key)}
                 <button

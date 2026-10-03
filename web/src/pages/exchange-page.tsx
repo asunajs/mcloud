@@ -1336,12 +1336,12 @@ export const ExchangePage = () => {
                 key={g.key}
                 open={groupOpenOf(g.key, g.open.length > 0 || activeGroup.value === g.key)}
                 onToggle={(e) => onGroupToggle(g.key, (e.target as HTMLDetailsElement).open)}
-                class="collapse collapse-arrow bg-base-100 shadow-sm"
+                class="disclosure disclosure-arrow bg-base-100 shadow-sm"
               >
-              <summary class="collapse-title">
+              <summary class="disclosure-title">
                 <GroupHead group={g} openCount={g.open.length} />
               </summary>
-              <div class="collapse-content flex flex-col gap-2">
+              <div class="disclosure-content flex flex-col gap-2">
                 {g.open.length > 0 ? (
                   <div class="flex flex-col divide-y divide-base-200">
                     {g.open.map((p) => (
@@ -1361,11 +1361,11 @@ export const ExchangePage = () => {
                   </div>
                 ) : null}
                 {g.blocked.length > 0 ? (
-                  <details class="collapse collapse-arrow border-t border-base-200">
-                    <summary class="collapse-title min-h-0 py-2 text-sm opacity-70">
+                  <details class="disclosure disclosure-arrow border-t border-base-200">
+                    <summary class="disclosure-title min-h-0 py-2 text-sm opacity-70">
                       另有 {g.blocked.length} 件不可兑（{reasonsSummary(g.blocked)}）
                     </summary>
-                    <div class="collapse-content flex flex-col divide-y divide-base-200">
+                    <div class="disclosure-content flex flex-col divide-y divide-base-200">
                       {g.blocked.map((p) => (
                         <div key={p.prizeId}>
                           <BlockedRow
