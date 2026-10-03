@@ -28,7 +28,7 @@ export default defineConfig({
     alias: [{ find: /^lite$/, replacement: new URL('./lite/src/index.ts', import.meta.url).pathname }],
   },
   server: {
-    // 开发时后端在 mcloud-server（默认 38123）。
+    // 开发时后端就是 `mcloud`（同一份二进制，不带参数即起服务；默认 38123）。
     //
     // 配代理而不是让前端跨域请求：生产形态本来就是同源
     // （后端直接发前端产物），开发期用代理抹平差异，

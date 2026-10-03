@@ -14,7 +14,7 @@
 //! 下**每次 `get()` 都去 `web/dist` 读文件**，而本仓只开了 `interpolate-folder-path`。
 //! 于是开发期改前端**只需 `npm run build`**：正在跑的服务下一次请求就是新产物，
 //! 不必重新编译 —— 也就不必触发
-//! 「覆写 `target/debug/mcloud-server` ⇒ SIGKILL ⇒ launchd 重拉 ⇒ TCC 弹框」那条链。
+//! 「覆写 `target/debug/mcloud` ⇒ SIGKILL ⇒ launchd 重拉 ⇒ TCC 弹框」那条链。
 //!
 //! 实测：服务进程 18:36:37 启动后**没有再重启**，把**次日 08:06** 新构建出的 JS 与
 //! 服务端返回的字节逐字节 `cmp` —— 一致（CSS、`index.html` 同）。

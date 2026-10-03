@@ -26,8 +26,8 @@ mcloud 的 CLI 有 **40+ 个子命令**（`login qr/sms/smid show/reset/refresh`
 
 ## 1. CLI：只留"无头也能跑"的几条
 
-**条数以 `crates/mcloud-server/src/bin/cli.rs` 的顶层分派为准，别背数** —— 现算
-（8 空格缩进那层就是顶层）：`grep -n '^        Some("' crates/mcloud-server/src/bin/cli.rs`。
+**条数以 `crates/mcloud-server/src/cli/run.rs` 的顶层分派为准，别背数** —— 现算
+（8 空格缩进那层就是顶层）：`grep -n '^        Some("' crates/mcloud-server/src/cli/run.rs`。
 今天的长相是 5 条核心 + 2 条只读：
 
 ```

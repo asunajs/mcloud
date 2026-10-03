@@ -12,8 +12,8 @@
  * `skipped(无浏览器)`，摘要里看得见。"跳过 ≠ 通过"是本项目的一贯口径。
  *
  * 用法：
- *   node scripts/gates-web.mjs           # 默认：typecheck + build + lite 冒烟（ready 一个认证态）≈ 33 s
- *   node scripts/gates-web.mjs --full    # 提交前：三个认证态全跑（ready / login / setup）≈ 77 s
+ *   node scripts/gates-web.mjs           # 默认：typecheck + build + lite 冒烟 + 窄屏（后两条并行）≈ 110 s
+ *   node scripts/gates-web.mjs --full    # 提交前：三个认证态全跑 + 泄漏量测（三条并行）≈ 143 s（2026-10-03 实测 2m22.8s）
  *
  * 为什么默认只跑 ready：`interact` 的三个认证态里 ready 占了一半以上时间（27 s / 8 s / 10 s），
  * 而改脚本时的快速回路不该等一分钟。提交前用 `--full`（约定 §9.2 要的那条）。
@@ -22,7 +22,7 @@
  * 不在仓库根跑就会把日志写到别处、并诡异地"找不到 web"）。
  * 日志：<仓库根>/target/gates-web-<name>.log 与 target/gates-web-last.log
  */
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -91,23 +91,87 @@ const GATES = [
 fs.mkdirSync(path.join(ROOT, 'target'), { recursive: true })
 const results = []
 
-for (const gate of GATES) {
-  process.stdout.write(`── ${gate.name} … `)
+/** 把一条门禁的输出落盘（名字里的非字母数字按老口径清洗成 `-`）。 */
+const logPath = (gate) =>
+  path.join(ROOT, 'target', `gates-web-${gate.name.replace(/[^0-9a-zA-Z]+/g, '-')}.log`)
+
+/**
+ * 跑一条门禁。同步版给"必须先于浏览器那几条"的那几条用 ——
+ * `build` 得先出 `web/dist`，浏览器的三条才有东西可服务 ✗ 别并行到一起去。
+ */
+function runSync(gate) {
   const t = Date.now()
-  if (gate.browser && !hasBrowser()) {
-    console.log(`⊘ 跳过（本机没有无头 Chrome，这条**不算通过**）`)
-    results.push({ name: gate.name, ok: true, skipped: true })
-    continue
-  }
+  process.stdout.write(`── ${gate.name} … `)
+  if (browserMissing(gate)) return
   const r = spawnSync(gate.cmd, gate.args, { cwd: WEB, encoding: 'utf8' })
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}`
-  fs.writeFileSync(path.join(ROOT, 'target', `gates-web-${gate.name.replace(/[^0-9a-zA-Z]+/g, '-')}.log`), out)
+  fs.writeFileSync(logPath(gate), out)
   const ok = r.status === 0
   results.push({ name: gate.name, ok })
   console.log(`${ok ? '✓' : '✗'} (${((Date.now() - t) / 1000).toFixed(1)}s)`)
-  if (!ok) {
-    console.log(out.split('\n').slice(-30).join('\n'))
+  if (!ok) console.log(out.split('\n').slice(-30).join('\n'))
+  return ok
+}
+
+/**
+ * 并行版：给三条要无头 Chrome 的门禁用。
+ *
+ * # 为什么可以并行（2026-10-03 实测省下约 2 分钟）
+ *
+ * 它们**互不依赖**：每条自己起夹具后端（`serve(..., 0)`，端口由内核分配、不碰 3000）
+ * 与自己的 Chrome profile ✓，读的只是已经构建好的 `web/dist` ✓。
+ * 串行时是 30.9 + 84.6 + 127.0 = **242 s**，并行后约等于最慢那条（**127 s**）。
+ *
+ * ⚠ 三条都**不是靠计时**断言的（数堆/数节点/量计算样式 + 固定 dwell），
+ * 所以互相抢 CPU 不会让它们变脆 ✓ —— 但真机只 2 核时别并行，那时抢 CPU 反而拖慢。
+ */
+function runParallel(gate) {
+  return new Promise((resolve) => {
+    const t = Date.now()
+    if (browserMissing(gate)) return resolve()
+    const child = spawn(gate.cmd, gate.args, { cwd: WEB, encoding: 'utf8' })
+    let out = ''
+    child.stdout.on('data', (d) => (out += d))
+    child.stderr.on('data', (d) => (out += d))
+    child.on('close', (code) => {
+      fs.writeFileSync(logPath(gate), out)
+      const ok = code === 0
+      results.push({ name: gate.name, ok })
+      console.log(`── ${gate.name} … ${ok ? '✓' : '✗'} (${((Date.now() - t) / 1000).toFixed(1)}s)`)
+      if (!ok) console.log(out.split('\n').slice(-30).join('\n'))
+      resolve()
+    })
+  })
+}
+
+/** 要浏览器的那条在本机没浏览器就"跳过 ≠ 通过"，记一条 skipped 免得摘要里当成功。 */
+function browserMissing(gate) {
+  if (!gate.browser || hasBrowser()) return false
+  console.log('⊘ 跳过（本机没有无头 Chrome，这条**不算通过**）')
+  results.push({ name: gate.name, ok: true, skipped: true })
+  return true
+}
+
+// ① 顺序跑"不依赖浏览器"的那几条：typecheck / build / lite 编译期负例。
+//    `build` 必须在浏览器的三条之前 —— 它们服务的是它产出的 `web/dist` ✗。
+const serial = GATES.filter((g) => !g.browser)
+const parallel = GATES.filter((g) => g.browser)
+let failedEarly = false
+for (const gate of serial) {
+  if (runSync(gate) === false) {
+    failedEarly = true
     break
+  }
+}
+
+// ② 浏览器那几条并行。
+if (!failedEarly) {
+  const cores = os.cpus().length
+  if (parallel.length > 1 && cores >= 4) {
+    console.log(`（下面 ${parallel.length} 条并行跑：互不依赖，各自起夹具与浏览器）`)
+    await Promise.all(parallel.map(runParallel))
+  } else {
+    for (const gate of parallel) runSync(gate)
   }
 }
 

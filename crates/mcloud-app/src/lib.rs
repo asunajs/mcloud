@@ -1,7 +1,7 @@
 //! mcloud-app —— 组装层。
 //!
 //! 把具体 IO 实现（reqwest / JSON 存储 / 系统时钟）注入 engine，
-//! 供 `mcloud-cli` 与 `mcloud-server` 共用。
+//! 供 `mcloud` 那个唯一二进制共用（2026-10-03 起 CLI 与服务合并成一个 bin）。
 
 pub mod auth_refresh;
 pub mod builder;

@@ -234,7 +234,7 @@ cargo clippy --workspace --all-targets
 - **禁止 `panic!` / `todo!` / `unimplemented!` 进入主路径**。
   测试里可以用（`golden.rs` 用它给出可读的失败信息）。
 - **禁止 `dbg!`**。临时调试用 `tracing::debug!`。
-- **禁止在库代码里 `println!`**。用户可见输出只允许出现在 `mcloud-server/src/bin/cli.rs`；
+- **禁止在库代码里 `println!`**。用户可见输出只允许出现在 `mcloud-server/src/cli/run.rs`（合并前的 `src/bin/cli.rs`）；
   日志一律走 `tracing`。
 - **禁止 `unsafe`**（已由 lint 强制）。
 

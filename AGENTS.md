@@ -52,9 +52,21 @@ macOS 对可移除宗卷有隐私保护，可执行文件访问它就要授权�
 
 ```
 ~/Library/LaunchAgents/<label>.plist        # 形如 com.<用户名>.mcloud-webui
-  ProgramArguments → <仓库>/target/debug/mcloud-server   （外置盘）
+  ProgramArguments → <仓库>/target/debug/mcloud         （外置盘）
   KeepAlive: true                                        ← 挂掉立刻重拉
 ```
+
+> ⚠⚠ **2026-10-03 用户口径：「合并为一个，以后就叫 mcloud」。**
+> CLI 与服务合并成**一个**二进制，名字叫 **`mcloud`**（原来两个：`mcloud-server` +
+> `mcloud-cli`，同一个 crate、同一张依赖表）。实测合并只多 **116 KB**，省掉一整个
+> 3.12 MB 的二进制（7.17 MB → 4.16 MB）；分发规则是**不带参数 = 起服务、带子命令 = CLI**。
+> ⇒ 本文件里凡是出现在**带日期的旧口径**里的 `target/debug/mcloud-server` /
+> `target/release/mcloud-server` / `mcloud-cli`，今天一律读作 `target/debug/mcloud` /
+> `target/release/mcloud` / `mcloud` ✓（历史原文不再逐句改写：那时候确实叫那个名字）。
+> ⚠ **那条「重编 ⇒ SIGKILL ⇒ KeepAlive 重拉 ⇒ TCC 弹框」的链一条都没少**：plist 改指
+> `target/debug/mcloud` 之后，`cargo build` 写的**正是托管在跑的那个文件** ⇒ 照旧原地覆写、
+> 照旧可能被判签名失效 ✗。合并改的是"几个二进制"，不是这条机制。
+> （只有在"改了 bin 名但 plist 还没跟上"的那几分钟里，这条链才短暂断开 —— 别把它当收益 ✓。）
 
 **`kill` 它 = 立刻又起来一个新进程 = 又触发一次 TCC 检查 = 又弹一次框。**
 
@@ -86,7 +98,7 @@ TCC 按**代码要求**记授权，而未签名的二进制其要求就是**内�
 
 上面那句只说了一半。2026-09-28 用崩溃报告查实了另一半：
 
-`cargo build` **原地覆写** `target/debug/mcloud-server`，而 launchd 正在跑那个文件。
+`cargo build` **原地覆写** `target/debug/mcloud`，而 launchd 正在跑那个文件。
 覆写瞬间内核把进程判为**代码签名失效**：
 
 ```
@@ -109,12 +121,12 @@ TCC 按**代码要求**记授权，而未签名的二进制其要求就是**内�
 > 「编完就生效」在 debug 下只对**前端**成立（`web/dist` 运行时读盘），
 > Rust 侧要显式重启：`launchctl kickstart -k gui/$(id -u)/<label>`。
 > 判断到底跑的是哪一份，两条都能一眼看出：
-> `lsof -p <PID> | awk '$4=="txt"'` 的 inode 是否等于 `stat target/debug/mcloud-server`；
+> `lsof -p <PID> | awk '$4=="txt"'` 的 inode 是否等于 `stat target/debug/mcloud`；
 > 或看启动日志那句（改名后新代码写 `mcloud 启动`、旧代码写 `mcloud-gost 启动`）。
 > 那次显式重启会按上面那条触发一次授权检查：2026-09-30 实测近 3 分钟 **1 次** PROMPTING、
 > err.log 没有被写 —— 是**一次**弹框，不是循环。
 >
-> ⚠⚠⚠ **2026-10-02 用户口径：开发期让托管跑 `target/debug/mcloud-server`。**
+> ⚠⚠⚠ **2026-10-02 用户口径：开发期让托管跑 `target/debug/mcloud`。**
 > 上面那条"指 release"是 2026-10-01 的状态，**现在已经改回 debug**（plist 的
 > `ProgramArguments`；改之前那份 plist 备份在 `~/.LaunchAgents/…plist.bak-before-debug`）。
 >
@@ -163,7 +175,7 @@ TCC 按**代码要求**记授权，而未签名的二进制其要求就是**内�
 cargo check --workspace --all-targets     # 全工作区类型检查，不链接
 ```
 
-`cargo check` **只产出 `.rmeta`**，从不写 `target/debug/mcloud-server`
+`cargo check` **只产出 `.rmeta`**，从不写 `target/debug/mcloud`
 —— 而 SIGKILL 的触发点正是**链接**把那个文件覆写掉。
 
 2026-09-28 实测（本仓），跑之前与跑之后：
@@ -176,7 +188,7 @@ inode=2364362 mtime=1790581118 size=38401616    ← 两次完全一致
 
 ⇒ **改完代码先用它自检**，能回答"整个工作区还编不编得过"，而代价是
 0 次重启、0 次弹框。同理 `cargo test -p <某个 crate>`（只要不牵到
-`mcloud-server` 的链接）也不碰那个二进制。
+`mcloud` 那个二进制的链接）也不碰那个二进制。
 
 ⚠ 但它**替代不了** `cargo test --workspace` —— 那是运行期的门。
 真要跑全量就得接受一次重启；"要不要为此改服务怎么跑"仍然要用户点头。
@@ -260,7 +272,7 @@ Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过�
   cargo fmt --all -- --check
   node scripts/gates-web.mjs --full
   ```
-  （`--full` = 三个认证态的交互验收全跑，≈ 100 s；不带它的默认只跑 `ready`，≈ 56 s，
+  （`--full` = 三个认证态的交互验收全跑 + 泄漏量测，**2026-10-03 实测 2m22.8s**；不带它的默认只跑 `ready`，≈ 110 s。三条要 Chrome 的已并行 —— 见 `scripts/gates-web.mjs`；
   是**改脚本时的快回路**，不能替代提交前那次。**五条**里后两条（窄屏布局验收 / 真 DOM 验收）
   要无头 Chrome，没有的机器上会明说"跳过 ≠ 通过"。）
 

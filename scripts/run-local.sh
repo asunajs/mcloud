@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 #
-# 从**内置盘**运行 mcloud-server，避开 macOS 的「可移除宗卷」授权弹窗。
+# 从**内置盘**运行 mcloud，避开 macOS 的「可移除宗卷」授权弹窗。
 #
 # # 为什么需要这个脚本
 #
 # 工作区在**外置盘**上（USB 挂载的 APFS 卷这类可移除宗卷）。
 # macOS 对**可移除宗卷**有隐私保护（TCC，服务名
 # `kTCCServiceSystemPolicyRemovableVolumes`）：任何可执行文件首次访问
-# 该卷上的文件，系统就弹一次「"mcloud-server" 想访问可移除宗卷上的文件」。
+# 该卷上的文件，系统就弹一次「"mcloud" 想访问可移除宗卷上的文件」。
 #
 # 而这个弹窗是**反复**弹的，原因有两条叠加：
 #
 # 1. **每次 `cargo build` 都是一个新二进制**。TCC 按「路径 + 代码要求」记授权，
 #    新产物的代码要求匹配不上旧记录 ⇒ 重新弹。系统日志里的原话是
-#    `Failed to match existing code requirement for subject .../target/debug/mcloud-server`。
-# 2. 进程在**外置盘上**（`target/debug/mcloud-server`），且要读外置盘上的 `data/`。
+#    `Failed to match existing code requirement for subject .../target/debug/mcloud`。
+# 2. 进程在**外置盘上**（`target/debug/mcloud`），且要读外置盘上的 `data/`。
 #
 # ⇒ 光把二进制拷到内置盘**不够**（它照样读外置盘的 `data/`）。
 #   必须让**二进制与数据目录都在内置盘**，进程才完全不碰那个卷。
@@ -34,7 +34,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_DIR="${MCLOUD_RUN_DIR:-$HOME/dsh-run}"
-BIN="$RUN_DIR/mcloud-server"
+BIN="$RUN_DIR/mcloud"
 DATA="$RUN_DIR/data"
 ADDR="${MCLOUD_ADDR:-127.0.0.1:3000}"
 
@@ -74,7 +74,7 @@ if [[ -n "$LAUNCHD_LABEL" ]]; then
   cat >&2 <<EOF
 ✗ 检测到 launchd 代理 $LAUNCHD_LABEL 已加载。
 
-  它在跑 <仓库>/target/debug/mcloud-server（外置盘），并带 KeepAlive。
+  它在跑 <仓库>/target/debug/mcloud（外置盘），并带 KeepAlive。
   本脚本若同时启动，两份会**抢 3000 端口**，失败的那份被 KeepAlive
   反复重拉，每次重拉都触发一次 macOS「可移除宗卷」授权弹窗。
 
@@ -93,10 +93,10 @@ fi
 
 # ① 二进制：从仓库的构建产物拷到内置盘。
 #    ⚠ 每次重新编译后都要再拷一次 —— 这正是弹窗的触发点。
-SRC="$REPO/target/debug/mcloud-server"
+SRC="$REPO/target/debug/mcloud"
 if [[ ! -x "$SRC" ]]; then
   echo "构建产物不存在：$SRC" >&2
-  echo "先跑：cargo build -p mcloud-server --bin mcloud-server" >&2
+  echo "先跑：cargo build -p mcloud-server --bin mcloud" >&2
   exit 1
 fi
 if [[ ! -x "$BIN" || "$SRC" -nt "$BIN" ]]; then

@@ -1,18 +1,22 @@
 [package]
 name = "mcloud-server"
-description = "HTTP 服务：axum 路由 + SSE 事件流；同时提供 CLI 入口"
+description = "mcloud 的库与唯一入口：HTTP 服务（axum 路由 + SSE + 内嵌前端）与 CLI 同一个二进制"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+# ⚠ **只有一个 bin**（2026-10-03 用户口径：「合并为一个，以后就叫 mcloud」）。
+#
+# 原先这里是两个：`mcloud-server`（`src/main.rs`）与 `mcloud-cli`（`src/bin/cli.rs`）。
+# 实测（同源码、同 release profile）4.05 MB + 3.12 MB = 7.17 MB，合并后 **4.16 MB**
+# ——只多 116 KB（CLI 独有的代码），省掉一整个二进制，而且交付形态变成
+# "拷一个二进制就能跑" ✓。分发规则见 `src/main.rs`：**无参数 = 起服务、有子命令 = CLI**。
+#
+# ⚠ 名字必须显式写出来：不写 `[[bin]]` 的话名字会取 **package 名**（`mcloud-server`）✗。
 [[bin]]
-name = "mcloud-server"
+name = "mcloud"
 path = "src/main.rs"
-
-[[bin]]
-name = "mcloud-cli"
-path = "src/bin/cli.rs"
 
 [dependencies]
 mcloud-core.workspace = true

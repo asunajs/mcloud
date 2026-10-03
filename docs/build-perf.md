@@ -36,6 +36,10 @@
 
 ## 2. 操作口径（按性价比排序）
 
+0. ⚠⚠ **一个回路里只跑一种 cargo 命令**（2026-10-03 实测，见 §3.1）：
+   `check` / `clippy` / `test` 各用一套编译产物、**互不复用** ✗ ⇒ 三种都跑 = 同一张依赖图
+   编三遍（改一处顶层 crate 就要 ≈7.7 分钟）。平时自检只挑一种 ✓。
+
 1. **日常"能不能编过"用 `cargo check -p <crate>`** —— 省掉 test 版编译与 8 次链接；
    **提交前**才用 `--workspace --all-targets` 与 `cargo test --workspace`（那是运行期的门）。
 2. **起编译前先看一眼有没有别人的在跑**：`pgrep -fl 'cargo check'`。有就等它 ——
@@ -47,7 +51,7 @@
    ⚠ 但**单 crate 紧改循环**反过来该**保留** incremental —— 两种用法别一刀切。
 5. **清一次 `target`**：31 GB / 55 万文件，代价是一次全量重编（≈20 分钟），
    建议在**所有写入线都不忙**的时候做。
-6. **上线只编需要的 bin**：`cargo build --release -p mcloud-server --bin mcloud-server`，
+6. **上线只编需要的 bin**：`cargo build --release -p mcloud-server --bin mcloud`，
    不要 `--workspace`（release 那边还有 `lto="fat"`，成本天生高）。
 7. 可选 **sccache**（跨 target 目录 / 跨分支复用 rustc 产物，正好对治原因 1）；
    建议先按 1~4 压一轮，再评估值不值一个常驻 daemon。
@@ -61,6 +65,57 @@
 | `cargo clippy --workspace --all-targets -- -D warnings` | 数分钟（当次先红在 `mcloud-engine` 的 `derivable_impls`，修掉后 exit 0） |
 | `cargo test --workspace` | 26 个测试目标；通过条数**别背数**（会随每轮改动涨），当次读到 1740 条。现算：`grep -rh "#\[test\]\|#\[tokio::test\]" crates \| wc -l`（22:30→22:43 那一段） |
 | `node scripts/gates-web.mjs --full` | ≈ 110 s（**当次含争用**；与 Rust 侧无关，纯前端 + 无头 Chrome。耗时随机器变，别当基准） |
+
+## 3.1 2026-10-03 复测（用户口径「门禁越来越慢了」）
+
+同一台机器（10 核 / 16 GB），`[profile.dev] debug = "line-tables-only"` 落地**之前**
+冷跑的两次（改 bin 名之后，全量重编）：
+
+| 命令 | 耗时 | 备注 |
+|---|---|---|
+| `cargo fmt --all -- --check` | **1.34 s** | |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **19m13s** | 冷（profile 指纹变了） |
+| `cargo test --workspace` | **27m14s** | 冷 |
+| └ **其中"真跑测试"** | **1.17 s** | **717 个测试全过** ✓ |
+
+⚠⚠ **这条最值得记住：门禁 99.9% 的时间是编译与链接，跑测试本身只要 1 秒** ✓。
+所以"把测试写快一点"没有意义，**能省的只有"少编一遍"** ✓。
+
+### 新发现：`check` / `clippy` / `test` 各一套产物，**互不复用** ✗
+
+改**一处**源码（顶层 crate）之后逐条实测：
+
+| 命令 | 耗时 | 其中"真跑测试" |
+|---|---|---|
+| `cargo check -p mcloud-server` | 122.9 s | — |
+| `cargo clippy -p mcloud-server` | 152.1 s | — |
+| `cargo test -p mcloud-server` | 186.1 s | 34.0 s（52 个测试） |
+
+⇒ 三条**加起来 ≈ 7.7 分钟**，而它们编的是**同一张依赖图** ✗ —— clippy 是另一套
+fingerprint（跑的是 `clippy-driver`），check 与 test 各是另一套（`.rmeta` vs 真实目标文件）✓。
+**同一个回路里把三种都跑一遍 = 把图编三遍** ✗✗。这是"门禁越来越慢"最直接的原因 ✓。
+
+**口径**（照这个来）：
+
+* **平时改完一处自检**：只挑**一种** —— `cargo check -p <改动的 crate>` ✓
+  （**第二次起是秒级**：第一次只是为了把该 crate 的 `.rmeta` 变热 ✓）。
+* **要跑测试**：`cargo test -p <crate>` ✓，别顺手 `--workspace` ✗（那是提交前的事）。
+* **改前端**：`node scripts/gates-web.mjs`（快回路 ≈ 110 s）✓。
+* **提交前**：四条全量（`cargo test --workspace` / `clippy --workspace --all-targets` /
+  `fmt --check` / `gates-web --full`）✓ —— 冷的时候将近 50 分钟，**别在赶时间时顺带跑** ✓。
+
+### 这一轮落地的两条改动
+
+1. **`[profile.dev] debug = "line-tables-only"`**（`Cargo.toml`，test profile 继承它）——
+   `target/debug/mcloud` 实测 **39.5 MB → 37.2 MB** ✓。
+   ⚠ 诚实说明：**链接时间的收益没有单独量到**（两种配置各要一次全量重编，成本比收益高）；
+   保留它的理由是"少生成/少搬运 debuginfo"这条机制本身 ✓，以及需要完整调试信息时
+   可以用 `CARGO_PROFILE_DEV_DEBUG=2` 临时抬回去 ✓。
+2. **三条要无头 Chrome 的 web 门禁改成并行**（`scripts/gates-web.mjs`）——
+   实测 **246 s → 142 s**（`--full` 全程 **4m06s → 2m22.8s** ✓，省 ≈1.7 分钟/次 ✓）。
+   它们互不依赖（各自起夹具后端、端口由内核分配、各用自己的 Chrome profile ✓），
+   而且**都不是靠计时断言的**（数堆/数节点/量计算样式 + 固定 dwell）⇒ 抢 CPU 不会让它们变脆 ✓。
+   ⚠ 真机只 2 核时脚本会自动退回串行 ✓（`cores >= 4` 才并行）。
 
 ## 4. 什么时候该重测
 

@@ -186,6 +186,31 @@ cron = "0.12"
 thiserror = "2"
 anyhow = "1"
 
+# ── 开发/测试 profile：只压 **debuginfo**，不动优化级别 ────────────────────
+#
+# 2026-10-03 用户口径：「优化一下，现在门禁越来越慢了」。会话内实测（同一台机器）：
+#
+#   cargo clippy --workspace --all-targets   ≈ 7m16s
+#   cargo check  --workspace --all-targets   ≈ 2m31s
+#   cargo test   --workspace                 ≈ 17m
+#   node scripts/gates-web.mjs --full        ≈ 4m
+#
+# 归因：慢的不是"编译"，是**每个单位都要生成并链接全量 debuginfo** ——
+# 全工作区有 8 个集成测试目标 + 每个 lib 的 test 版本，每个都要把整张依赖图的
+# debuginfo 走一遍 ✗。而日常根本没人用 `target/debug` 去逐变量调试。
+#
+# `debug = "line-tables-only"`：留下"哪一行"（panic / 回溯里照样看得见 文件:行 ✓），
+# 去掉变量、类型、内联展开那部分真正占体积的东西 ⇒ 链接快一截、`target/debug` 也小一截 ✓。
+#
+# ⚠ `backtrace` 里只有文件:行、没有局部变量 —— 这**正是**本仓日常要的那一档 ✓。
+# ⚠ 真要完整调试信息（lldb/gdb 逐变量）时别改这个文件，用环境变量临时抬：
+#     CARGO_PROFILE_DEV_DEBUG=2 cargo build
+#   —— 代价是那些单位要重编一遍（缓存按 profile 分叉），所以别在赶门禁时用 ✗。
+# ⚠ `cargo test` 用的是 **test profile，它继承 dev** ⇒ 这里写一次就够，不必再写
+#   `[profile.test]`（写了也是同一个值，纯冗余 ✗）。
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

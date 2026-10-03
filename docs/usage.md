@@ -119,7 +119,7 @@ Defender / SmartScreen **可能误报**：弹窗里走「更多信息 → 仍要
 ⚠ **CLI 不在发布包里**（见开头：只发 `mcloud-server`）。要用它先从源码构建：
 
 ```bash
-cargo build --release --bin mcloud-cli     # 产物：target/release/mcloud-cli
+cargo build --release --bin mcloud     # 产物：target/release/mcloud-cli
 ```
 
 顶层命令以 `crates/mcloud-server/src/bin/cli.rs` 的顶层分派为准，**别背数**，现算
@@ -129,18 +129,19 @@ cargo build --release --bin mcloud-cli     # 产物：target/release/mcloud-cli
 grep -n '^        Some("' crates/mcloud-server/src/bin/cli.rs
 ```
 
-`mcloud-cli` 与 `mcloud-server` **共用同一个数据目录** —— 想让 CLI 看到服务里配好的账号，
+**只有一个二进制 `mcloud`**（2026-10-03 起：原来 `mcloud-server` 与 `mcloud-cli` 两个 bin 合并了）—— 不带参数就是起服务，带子命令就是下面这些命令行用法 ✓。CLI 与服务**共用同一个数据目录** —— 想让 CLI 看到服务里配好的账号，
 要么在同一个目录下运行，要么给它同一个 `MCLOUD_DATA_DIR`。
 
 ```bash
-mcloud-cli                                   # 无参数就是打印用法
-mcloud-cli tasks                             # 列出可用任务
-mcloud-cli login qr                          # 登录账号（qr / sms / app / password / device）
-mcloud-cli run live-room <账号> --body '{"codes":"口令甲 口令乙","listenSeconds":45}'
-mcloud-cli auth refresh --all                # 刷新凭据
-mcloud-cli pending                           # 查看还没清理的网盘产物
-mcloud-cli cron <定时id>                      # 给系统 crontab 调用
-mcloud-cli pipeline run <编排id>
+mcloud                                       # 无参数 = 起 WebUI 服务（默认 127.0.0.1:3000）
+mcloud bogus                                 # 给个不认识的子命令 = 打印用法
+mcloud tasks                             # 列出可用任务
+mcloud login qr                          # 登录账号（qr / sms / app / password / device）
+mcloud run live-room <账号> --body '{"codes":"口令甲 口令乙","listenSeconds":45}'
+mcloud auth refresh --all                # 刷新凭据
+mcloud pending                           # 查看还没清理的网盘产物
+mcloud cron <定时id>                      # 给系统 crontab 调用
+mcloud pipeline run <编排id>
 ```
 
 ⚠ **帮助文本里的名字与清单是旧的**：它写的是 `mcloud <命令>` 与 `mcloud serve`，

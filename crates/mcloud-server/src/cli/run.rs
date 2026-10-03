@@ -1,21 +1,31 @@
-//! mcloud 命令行入口。
-
-use mcloud_server::cli::{
-    auth as cli_auth, cron as cli_cron, login as cli_login, pipeline as cli_pipeline,
-};
+//! CLI 子命令的**分发**（`mcloud <命令>` 那条路）。
+//!
+//! # 为什么在这里，而不是 `src/bin/`
+//!
+//! 2026-10-03 用户口径：「**合并为一个，以后就叫 mcloud**」——
+//! 原来 `mcloud-server` 与 `mcloud-cli` 是两个 bin（同一个 crate、同一张依赖表），
+//! 实测合并只多 **116 KB**，却省掉一整个 3.12 MB 的二进制，而且交付形态变成
+//! "拷一个二进制就能跑" ✓。于是入口只剩一个：`src/main.rs` 按 argv 分发，
+//! **不带子命令 = 起服务、带子命令 = 走这里**。
+//!
+//! 分发逻辑放在库里（`src/cli/`）而不是入口里，理由与原来 `src/cli.rs` 文件头写的一样：
+//! 库里才能被 `cargo test` 直接测到，而且 `src/bin/` 下每个 `.rs` 都会变成一个独立二进制。
+//!
+//! ⚠ 日志**不在这里**初始化：默认过滤值两条路不一样（服务要 `mcloud=debug`、
+//! CLI 只要 `info`，否则 debug 日志会把命令输出淹掉）⇒ 由 `src/main.rs` 按模式选。
 
 use anyhow::Context;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+use crate::cli::{
+    auth as cli_auth, cron as cli_cron, login as cli_login, pipeline as cli_pipeline,
+};
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+/// 跑一条 CLI 命令。`args` 是**去掉程序名之后**的参数（`src/main.rs` 负责切）。
+///
+/// 空 `args` 不会走到这里 —— 那是"起服务"，由 `src/main.rs` 分流
+/// （这里仍然保留 `None => print_usage()` 那一支：它防的是"将来有人从别处
+/// 调进来"这种形状，不是给 `mcloud` 无参数用的）。
+pub async fn run(args: &[String]) -> anyhow::Result<()> {
     let data_dir = std::env::var("MCLOUD_DATA_DIR").unwrap_or_else(|_| "data".to_string());
 
     let app = mcloud_app::AppBuilder::new()
@@ -26,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     // ⚠⚠ **必须在跑任何任务之前**：把 run id 续到历史最大值之后。
     //
     // 2026-10-02 实测踩到：这里原先没有这一句 ✗ ⇒ CLI 的 run id 从 **1** 重来 ✗
-    // ⇒ 一次 `cli run live-room` 就把历史里 `run_id=1` 那条**签到记录覆盖掉了** ✗
+    // ⇒ 一次 `mcloud run live-room` 就把历史里 `run_id=1` 那条**签到记录覆盖掉了** ✗
     // （`json_store` 的警告原话：「运行编号被复用：这次要覆盖的是**另一次**运行…
     //   run=1 old_task=sign new_task=live-room」✓）。而且 CLI 与服务**同时在跑**时，
     // 两边各持一份内存状态 ⇒ 覆盖方向还取决于谁后写盘 ✓。
@@ -123,10 +133,10 @@ async fn main() -> anyhow::Result<()> {
         Some("run") => {
             let task = args
                 .get(1)
-                .context("用法：cli run <任务名> <账号> [--body <JSON>]")?;
+                .context("用法：mcloud run <任务名> <账号> [--body <JSON>]")?;
             let account = args
                 .get(2)
-                .context("用法：cli run <任务名> <账号> [--body <JSON>]")?;
+                .context("用法：mcloud run <任务名> <账号> [--body <JSON>]")?;
             let id = mcloud_core::AccountId::new(account);
             let acct = app
                 .handle
@@ -182,6 +192,10 @@ fn print_login_usage() {
 fn print_usage() {
     eprintln!("用法：mcloud <命令> [参数]");
     eprintln!();
+    // 2026-10-03 合并成一个二进制后，**不带参数**就是起服务（原来那条路只有
+    // `mcloud-server` 那个二进制有）。必须写在这里：CLI 的用法文本是唯一会被人看到的说明。
+    eprintln!("  （不带参数 = 起 WebUI 服务，默认 http://127.0.0.1:3000）");
+    eprintln!();
     eprintln!("  tasks                          列出可用任务");
     eprintln!("  run <任务名> <账号> [--body <JSON>]  跑一次任务");
     eprintln!("                                 要参数的任务必须用 --body，例如：");
@@ -193,8 +207,9 @@ fn print_usage() {
     eprintln!("  login <方式>                    登录账号（qr / sms / app / password / device）");
     eprintln!();
     eprintln!("定时与编排的**创建**不在命令行：改配置文件，或用 WebUI。");
-    // ⚠ 这里原先教用户跑 `mcloud serve` —— **没有这个子命令**（全仓零命中），
+    // ⚠ 这里原先教用户跑 `mcloud serve` —— 那时**没有这个子命令**（全仓零命中），
     // 照着打就是 `unknown command`（2026-10-03 review §1.15）。
-    // WebUI 是**服务进程自己的路由**，由 launchd 托管的那份跑着，不需要另起。
+    // 合并成单个二进制后改成"不带参数就是服务"（上面那行）✓ —— 仍然**没有** `serve`
+    // 子命令：多一个别名只会让"托管那条命令行"与"文档"分叉 ✗。
     eprintln!("完整的 WebUI（含登录闸、账号管理、日志）在服务进程里：默认 http://127.0.0.1:3000");
 }

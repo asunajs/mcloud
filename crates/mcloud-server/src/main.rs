@@ -1,4 +1,18 @@
-//! mcloud 服务入口。
+//! mcloud 入口：**一个二进制，两种用法**。
+//!
+//! * **不带参数** ⇒ 起 HTTP 服务（原 `mcloud-server`）
+//! * **带子命令** ⇒ 命令行（原 `mcloud-cli`，逻辑在 `mcloud_server::cli::run`）
+//!
+//! # 为什么合并（2026-10-03 用户口径：「合并为一个，以后就叫 mcloud」）
+//!
+//! 两者本来就在**同一个 crate**、共用同一张依赖表 ⇒ 实测（同源码、同 release profile）
+//! `mcloud-server` 4.05 MB + `mcloud-cli` 3.12 MB = 7.17 MB，合并成一个只有 **4.16 MB**
+//! （只比 server 多 **116 KB**，那就是 CLI 独有的代码）✓。省下的一整个二进制是次要的，
+//! 主要是交付形态变成 `Cargo.toml` 里写的那句"拷一个二进制就能跑" ✓。
+//!
+//! ⚠ 分发规则刻意定成「**无参数 = 起服务**」：托管（launchd）那份就是不带参数跑的，
+//! 而 CLI 的用法文本本来就写着 `mcloud <命令>` ⇒ 两条路都自然 ✓。
+//! 反过来（要求 `mcloud serve`）会让托管方那条命令行也得改，且与既有文档不一致 ✗。
 
 use std::sync::Arc;
 
@@ -7,13 +21,32 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // ⚠ 两条路的**日志默认值保持各自原样**（合并前 server 与 cli 各有一份）：
+    //   服务要 `mcloud=debug`（调度/任务那些才看得见），CLI 只要 `info`
+    //   —— 后者是命令输出，塞 debug 日志进去会把结果淹掉 ✗。
+    // `RUST_LOG` 仍然优先（两条路都是 `try_from_default_env`）。
+    let default_filter = if args.is_empty() {
+        "info,mcloud=debug"
+    } else {
+        "info"
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,mcloud=debug")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
         )
         .init();
 
+    if args.is_empty() {
+        serve().await
+    } else {
+        mcloud_server::cli::run::run(&args).await
+    }
+}
+
+/// 起 HTTP 服务（原 `mcloud-server` 的 main 本体，逐行照搬）。
+async fn serve() -> anyhow::Result<()> {
     let data_dir = std::env::var("MCLOUD_DATA_DIR").unwrap_or_else(|_| "data".to_string());
     let addr = std::env::var("MCLOUD_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
     // 推送渠道是**每账号**的（`AccountSettings::notify`），**没有**进程级兜底：

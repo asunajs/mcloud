@@ -30,10 +30,10 @@
 依赖只能**自上而下**，反向依赖一律视为设计错误。
 
 ```
-                    ┌─────────────┐
-                    │ mcloud-cli  │  mcloud-server
-                    └──────┬──────┘        │
-                           ▼               ▼
+                    ┌──────────────────────────┐
+                    │   mcloud（唯一二进制）    │  ← 不带参数 = 起服务；带子命令 = CLI
+                    └────────────┬─────────────┘
+                                 ▼
                     ┌──────────────────────────┐
                     │        mcloud-app        │  组装层：注入 IO 实现
                     └────────────┬─────────────┘
@@ -68,8 +68,8 @@
 | `mcloud-tasks` | 各任务的业务编排 | ❌（经 trait） |
 | `mcloud-store` | 持久化：账号、运行历史、调度、pipeline | ✅ 磁盘 |
 | `mcloud-app` | 组装：把 IO 实现注入 engine | ✅ |
-| `mcloud-server` | axum 路由 + SSE + 内嵌前端 | ✅ |
-| `mcloud-cli` | 命令行入口 | ✅ |
+| `mcloud-server` | 库（axum 路由 + SSE + 内嵌前端）**＋ 唯一入口**（`src/main.rs` 按 argv 分流） | ✅ |
+| `mcloud`（二进制） | 不带参数 = 服务；带子命令 = CLI（`src/cli/run.rs`）。**2026-10-03 起只有一个 bin** —— 原来 `mcloud-server` 与 `mcloud-cli` 两个，实测合并后只多 116 KB、省掉一整个 3.12 MB 的二进制 | ✅ |
 
 **铁律**：`core` / `crypto` / `engine` / `tasks` 不得直接依赖 `reqwest`、`sqlx`、`tokio::fs`。
 所有 IO 走 trait，便于测试时替换为 fixture 回放。

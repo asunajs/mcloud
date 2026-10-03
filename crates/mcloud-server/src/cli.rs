@@ -7,9 +7,11 @@
 //! 2. 放在库里才能被 `cargo test` 直接测到（二进制里的 `#[cfg(test)]`
 //!    也能跑，但没法从外部复用）。
 //!
-//! `src/bin/cli.rs` 只是入口，实际逻辑在这里。
+//! `src/bin/` 已经没有了（2026-10-03 合并成单个二进制 `mcloud`）：入口是
+//! `src/main.rs`，它按 argv 分发到 [`run`]。
 
 pub mod auth;
 pub mod cron;
 pub mod login;
 pub mod pipeline;
+pub mod run;
