@@ -10,13 +10,20 @@
 | 门禁与分层铁律 | [`docs/dev-gates.md`](docs/dev-gates.md) |
 | 迁移决策与对拍口径（与其它文档冲突时以它为准） | [`docs/go-migration-plan.md`](docs/go-migration-plan.md) |
 | 实测判据登记表（踩过的坑。**条数看文件抬头**，别在这里抄数字） | [`docs/migration-pitfalls.md`](docs/migration-pitfalls.md) |
-| **抓包纪律**（何时抓 / 抓多少 / 停止条件 / 合规红线 / 抓包面选谁） | [`docs/capture-guidelines.md`](docs/capture-guidelines.md) |
-| **抓包工具与通路**（用什么 / 命令 / 前置自检 / 通路怎么选 / 落档抬头怎么写） | [`docs/capture-tools.md`](docs/capture-tools.md) |
+| **抓包纪律 / 工具与通路 / 脱敏 SOP / 凭据边界** | **不在本分支**：这四篇规范与 `docs/upstream/` 五篇协议已迁至独立仓 `mcloud-capture`（本机 `../mcloud-capture/docs/`） |
+| **历史抓包样本**（原 `docs/capture/*-samples.txt` 等 22 份） | **不在本分支**；本分支的删除只有一个提交，取阅：`git show go-legacy^:docs/capture/<文件名>`。新取证一律落 `../mcloud-capture/docs/capture/` |
 | 文档索引与目录约定 | [`docs/README.md`](docs/README.md)、[`docs/repo-layout.md`](docs/repo-layout.md) |
 | WebUI 视觉 / 组件 / 代码约定 | [`docs/webui-design-guide.md`](docs/webui-design-guide.md)、[`docs/webui-code-guide.md`](docs/webui-code-guide.md)、[`docs/webui-components.md`](docs/webui-components.md) |
 | 进度与实况记录 | [`docs/status.md`](docs/status.md) |
 
 同一条事实只写一处，别处放链接。发现两处成文且不一致 ⇒ 报告，不要静默"对齐"。
+
+> **本分支为什么"删了抓包、留着守卫与夹具"**：本分支是 Go 实现的留档分支，删的是**抓包素材与通路脚本**
+> （`docs/capture/`、`docs/upstream/`、四篇规范、八个通路脚本）。**保留** `scripts/check-identifiers.cjs`
+> （`gates-go.js` 的 idents 那一条依赖它，删了本分支就不再全绿）、`test/golden/` 与 `test/fixtures/`
+> （§1.4 的冻结对拍基准）和 `mcloud fixture extract` 命令（CLI 参数面同样冻结）。
+> ⚠ 因此**代码注释里那些 `docs/capture/…` 的出处在本分支已不存在**，它们指向的是本分支删除前的那一个提交
+> （`git show go-legacy^:<路径>`）；不要照这个形状去新建 `docs/capture/`。
 
 ## 1. 质量：什么才算"完成"
 

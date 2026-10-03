@@ -1,9 +1,0 @@
-# 退出登录 + 短信登录 实测请求样本（手机号已脱敏为 199 号段）
-# 来源：Reqable 抓包归档 2026-09-17
-
-{"clientType":"656","cpid":"277","dycpwd":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","extInfo":{"ifOpenAccount":0},"loginMode":"0","msisdn":"","pintype":"21","verType":"2","version":"8.8.6.20260829"}
-{"phoneNumber":"19900000000"}
-{"phoneNumber":"19900000000","random":"0aebc7fd57048e7b92fbd22efe","mode":0,"reqType":3,"clientType":"656"}
-{"phoneNumber":"19900000000","random":"698f6e67034570dc08e5a73661","mode":0,"reqType":3,"clientType":"656","puzzleVerfycode":"RTUyNkUxRjNGOTc2NTQ0NPXSgBfdneawSGgfCa/g/Rg="}
-{"phoneNumber":"19900000000","random":"94328e9cffb9c6c47b678cea52","mode":0,"reqType":3,"clientType":"656","puzzleVerfycode":"RTUyNkUxRjNGOTc2NTQ0NEA6F1MQJO7Ejcwfa1IsHCs="}
-{"clientType":"656","cpid":"277","dycpwd":"119301","extInfo":{"ifOpenAccount":1},"loginMode":"0","msisdn":"19900000000","pintype":"5","verType":"2","version":"8.8.6.20260829"}

@@ -1,5 +1,0 @@
-count,body
-121,"{""success"":false,""code"":""200059541"",""message"":""未找到设备的二维码信息"",""data"":null}"
-39,"{""success"":false,""code"":""200059548"",""message"":""二维码信息未授权"",""data"":null}"
-31,"{""success"":false,""code"":""200059544"",""message"":""二维码信息与登录二维码信息不一致"",""data"":null}"
-1,"{""success"":false,""code"":""200059542"",""message"":""二维码已失效"",""data"":null}"

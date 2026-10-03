@@ -106,11 +106,11 @@ node scripts/gates-go.js filenames idents      # 也可以只跑其中几条（�
 | 跑门禁 / 搞清哪层能依赖哪层 | [`docs/dev-gates.md`](./docs/dev-gates.md) |
 | 加文件、起新目录、查命名规则 | [`docs/repo-layout.md`](./docs/repo-layout.md) —— **文件名与标识符的规则不同，别改错** |
 | 看**现在能跑什么、还差什么** | [`docs/status.md`](./docs/status.md) |
-| 写抓包产物 / 夹具 / 测试字面量 | [`docs/credential-boundary.md`](./docs/credential-boundary.md) + [`docs/sanitize-guide.md`](./docs/sanitize-guide.md) |
+| 写抓包产物 / 夹具 / 测试字面量 | 凭据边界与脱敏 SOP 已迁至独立仓 `mcloud-capture`（本机 `../mcloud-capture/docs/credential-boundary.md`、`../mcloud-capture/docs/sanitize-guide.md`）；本分支的脱敏守卫 `scripts/check-identifiers.cjs` 照旧生效 |
 | 实现某个业务能力（签到、领取、抢兑…） | [`docs/business-feature-inventory.md`](./docs/business-feature-inventory.md) |
 | 接**新的端**（安卓 / 邮箱 / 小程序） | [`docs/client-profiles.md`](./docs/client-profiles.md) |
 | 写任何带"**码**"的请求 | [`docs/device-and-source-codes.md`](./docs/device-and-source-codes.md) |
-| 做**登录**（PC 客户端 / PC Web / App） | [`docs/upstream/login-protocol.md`](./docs/upstream/login-protocol.md) 一族，按端选 |
+| 做**登录**（PC 客户端 / PC Web / App） | 协议五篇已迁至 `mcloud-capture`（本机 `../mcloud-capture/docs/upstream/`，按端选）；本分支不再有 `docs/upstream/` |
 | 写**前端页面 / 组件** | [`docs/webui-design-guide.md`](./docs/webui-design-guide.md)（视觉与交互）→ [`docs/webui-components.md`](./docs/webui-components.md)（组件与移动端）→ [`docs/webui-code-guide.md`](./docs/webui-code-guide.md)（代码组织与验收） |
 | 改 `mcloud signin` 的**编排逻辑**（不只是查参数） | [`docs/signin-cli-spec.md`](./docs/signin-cli-spec.md) |
 | 动手前想知道**这里曾经踩过什么坑** | [`docs/migration-pitfalls.md`](./docs/migration-pitfalls.md)（编号登记表，新条目接在最后） |

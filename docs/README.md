@@ -3,6 +3,12 @@
 > 这一页只做两件事：**把你导向正确的那一篇**，以及**说清两篇重复时谁说了算**。
 > 具体结论一律不在这里复述 —— 复述就会过期。
 
+> ⚠ **本分支（`go-legacy`）上抓包那一族已经不在这里**：下面凡是指向 `capture-guidelines.md`、
+> `capture-tools.md`、`sanitize-guide.md`、`credential-boundary.md`、`upstream/`、`capture/` 的行都是
+> **删档后留下的空指**（这些条目在其它分支/历史里仍然对得上，所以不逐行改了）。
+> 规范四篇与协议五篇的**现在的家**是独立仓 `mcloud-capture`（本机 `../mcloud-capture/docs/`）；
+> 历史样本取阅 `git show go-legacy^:docs/capture/<文件名>`。
+
 ---
 
 ## 该读哪篇
