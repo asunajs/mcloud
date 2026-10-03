@@ -26,7 +26,22 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# ⚠ label 的发现要**两步**：先问 `launchctl list`（正跑着的那个最权威 ✓），
+# 问不到就**退回磁盘上的 plist** ✓。
+#
+# 为什么非要有第二步（2026-10-03 实测踩到，代价是 WebUI 停了约 30 分钟 ✗）：
+# 上一次上线只要停在 `bootout` 之后（脚本被中断、编译报错、机器重启），
+# 服务就**已经不在** `launchctl list` 里了 ✗ —— 而那恰恰是最需要这个脚本
+# 把服务拉回来的时刻 ✓。只有第一步的话它会直接以"找不到 label"退出 ✗，
+# 于是"停掉的那个"再也没人拉起来 ✗。
 LABEL="${MCLOUD_LAUNCHD_LABEL:-$(launchctl list 2>/dev/null | awk '$3 ~ /mcloud-webui/ { print $3; exit }')}"
+if [[ -z "$LABEL" ]]; then
+  # 从 plist 文件名反推 label（排除 `.bak-*` 那几份备份 ✓）
+  PLIST_FILE="$(ls -1 "$HOME/Library/LaunchAgents/" 2>/dev/null \
+    | grep -E 'mcloud.*\.plist$' | grep -v '\.bak' | head -1 || true)"
+  LABEL="${PLIST_FILE%.plist}"
+  [[ -n "$LABEL" ]] && echo "⚠ 托管当前**没在跑**（launchctl 里找不到）⇒ 按磁盘上的 plist 认它：$LABEL"
+fi
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 UID_="$(id -u)"
 
@@ -35,6 +50,22 @@ if [[ -z "$LABEL" || ! -f "$PLIST" ]]; then
   echo "  设 MCLOUD_LAUNCHD_LABEL=<label> 覆盖。" >&2
   exit 1
 fi
+
+# ⚠⚠ 兜底：从下面那句 `bootout` 起，服务就是**停的** ✓ —— 这段窗口里任何一步失败
+# （编译报错、脚本被 Ctrl-C、被上层工具超时掐掉）都会把它**留在停机状态** ✗。
+# 2026-10-03 实测踩到过：两次中断 ⇒ WebUI 停了约 30 分钟 ✓（用户当场看出来 ✗）。
+# ⇒ 无论怎么退出，都把托管拉回来 ✓；先补一次签名，否则未签名的二进制会被 TCC
+# 扣住、起而不监听 ✗（`|| true` 是必要的：异常退出时二进制可能正被写坏）。
+restore_on_exit() {
+  local code=$?
+  if [[ $code -ne 0 ]]; then
+    echo "── ⚠ 中途失败（exit $code）⇒ 兜底把托管拉回来（先补签名）" >&2
+    "$REPO/scripts/sign-local.sh" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/$UID_" "$PLIST" 2>/dev/null || true
+  fi
+  exit "$code"
+}
+trap restore_on_exit EXIT
 
 echo "── ① 停掉托管（$LABEL）"
 # ⚠ `kickstart -k` **不重读 plist** ✗ —— 改过 plist 就必须 bootout+bootstrap（踩过）
