@@ -105,6 +105,8 @@ const startOfTodayMs = (now: number): number => {
 interface TodayRuns {
   total: number
   success: number
+  /** 部分成功：有成有败（`TaskOutcome::Partial`）。⚠ 别并进 `success` ✗ */
+  partial: number
   skipped: number
   failed: number
 }
@@ -112,7 +114,7 @@ interface TodayRuns {
 /** 今天的运行统计。按**开始**时刻归日：跨零点跑的那一次算在开始的那一天。 */
 const todayRuns = (runs: RunRecord[], now: number): TodayRuns => {
   const from = startOfTodayMs(now)
-  const t: TodayRuns = { total: 0, success: 0, skipped: 0, failed: 0 }
+  const t: TodayRuns = { total: 0, success: 0, partial: 0, skipped: 0, failed: 0 }
   for (const r of runs) {
     if (r.started_at_ms < from) continue
     t.total++
@@ -224,6 +226,9 @@ const lastRunBadge = (s: Schedule): StatBadge => {
 const todayBadge = (t: TodayRuns): StatBadge => {
   if (t.total === 0) return { text: '暂无记录', tone: 'plain' }
   if (t.failed > 0) return { text: `${t.failed} 次失败`, tone: 'bad' }
+  // 部分成功**必须单独说**：并进"全部成功"就是把没成的那些盖住 ✗
+  // （2026-10-03 用户实测：「下面的 614 失败还直接说成功」）。
+  if (t.partial > 0) return { text: `${t.partial} 次部分成功`, tone: 'warn' }
   // ⚠ 跳过**不染黄**：活动没开/条件不满足是正常结局，不是待处理项
   // （与 `ui/history.ts` 里 skipped 用中性徽章同一条口径）。
   if (t.skipped > 0) return { text: `${t.skipped} 次跳过`, tone: 'plain' }
@@ -459,7 +464,14 @@ export const DashboardPage = (props: DashboardPageProps) => {
         title: '今日运行',
         value: `${today.total} 次`,
         badge: todayBadge(today),
-        desc: today.total === 0 ? '今天还没跑过任务' : `成功 ${today.success} · 失败 ${today.failed}`,
+        // ⚠ `partial` 有数就要露出来：`value` 用的是 `total`，
+        // 这里只写"成功/失败"的话那些运行在明细里就凭空消失了 ✗
+        desc:
+          today.total === 0
+            ? '今天还没跑过任务'
+            : `成功 ${today.success} · 失败 ${today.failed}${
+                today.partial > 0 ? ` · 部分成功 ${today.partial}` : ''
+              }`,
       },
       {
         title: '账号凭据',

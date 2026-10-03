@@ -264,6 +264,7 @@ fn ctx_with(replies: Vec<Reply>, acct: Account) -> (TaskContext, Arc<Scripted>, 
 fn summary_of(out: &TaskOutcome) -> String {
     match out {
         TaskOutcome::Success { summary } => summary.clone(),
+        TaskOutcome::Partial { summary } => summary.clone(),
         TaskOutcome::Failed { reason } => reason.clone(),
         TaskOutcome::Skipped { reason } => reason.clone(),
     }

@@ -223,6 +223,7 @@ export const HistoryPage = (props: HistoryPageProps) => {
           [
             ['all', '全部'],
             ['success', '成功'],
+            ['partial', '部分成功'],
             ['skipped', '跳过'],
             ['failed', '失败'],
           ] as const

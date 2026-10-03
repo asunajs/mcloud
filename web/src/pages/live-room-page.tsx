@@ -311,7 +311,8 @@ export const LiveRoomPage = () => {
           const view = toLiveRoomRunView(null, ev.outcome)
           result.value = view
           say(
-            view.kind === 'failed' ? 'error' : 'info',
+            // `partial`（有成有败）染黄：既不报红，也不能跟普通成功一个色 ✗
+            view.kind === 'failed' ? 'error' : ev.outcome.status === 'partial' ? 'warn' : 'info',
             `结束（${ev.duration_ms}ms）：${
               view.kind === 'idle' ? `没领 —— ${view.text}` : view.text
             }`,

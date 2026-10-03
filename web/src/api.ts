@@ -56,6 +56,14 @@ export interface TaskMeta {
 export type TaskOutcome =
   | { status: 'success'; summary: string }
   | { status: 'skipped'; reason: string }
+  /**
+   * **部分成功**：有成的、也有没成的（后端的 `TaskOutcome::Partial`）。
+   *
+   * ⚠ 它与 success / failed **都不是一回事**：写"成功"会把失败盖住 ✗
+   * （2026-10-03 用户实测：「下面的 614 失败还直接说成功」），写"失败"又把
+   * "其实领到了几笔"说成全败 ✗。文案走 `summary`（两边都在里面）。
+   */
+  | { status: 'partial'; summary: string }
   | { status: 'failed'; reason: string }
 
 /** 一条留在用户网盘上、还没清理的产物。 */
@@ -1316,7 +1324,6 @@ export interface AccountSettings {
   aiAvatarDailyLimit: number
   redpackEnabled: boolean
   playAiEnabled: boolean
-  koulingEnabled: boolean
   /** `null` = 这个账号**一个渠道都不推**（后端没有进程级兜底）。 */
   notify: PushConfig | null
 }
@@ -1501,7 +1508,7 @@ export interface LiveRoomRunView {
  * 形状对不上时这里会取到 `undefined`。
  */
 const outcomeTextOf = (o: TaskOutcome): string | undefined =>
-  o.status === 'success' ? o.summary : o.reason
+  o.status === 'success' || o.status === 'partial' ? o.summary : o.reason
 
 /** 后端小结里"进账 N"那一格 —— 把报告压成一句话时的**唯一**可用来源。 */
 const GAINED_IN_TEXT = /进账\s*(-?\d+)/

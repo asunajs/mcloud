@@ -214,6 +214,7 @@ pub fn cancel_slot() -> CancelSlot {
 /// |---|---|---|
 /// | Success | success（level 3） | 不报红 |
 /// | Skipped | info（level 3） | **不算错误**（docs/conventions.md:301） |
+/// | Partial | warn（level 1） | 有成有败 ⇒ 不报红、但也别当成普通成功 ✓ |
 /// | Failed | error（level 0） | onlyError 会触发；正文里报红 |
 /// | 用户主动中止 | warn（level 1） | **不许是 error**（docs/architecture.md:452） |
 ///
@@ -227,6 +228,9 @@ fn outcome_line(outcome: &TaskOutcome, cancelled: bool) -> (&'static str, String
     match outcome {
         TaskOutcome::Success { summary } => ("success", summary.clone()),
         TaskOutcome::Skipped { reason } => ("info", format!("跳过：{reason}")),
+        // 部分成功：不报红（没到"整个挂了"），但也明确说"有没成的" ——
+        // 用户 2026-10-03 实测踩到的正是"有失败却显示成功" ✗。
+        TaskOutcome::Partial { summary } => ("warn", format!("部分成功：{summary}")),
         TaskOutcome::Failed { reason } => ("error", format!("失败：{reason}")),
     }
 }

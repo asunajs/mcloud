@@ -61,12 +61,38 @@ impl RunStatus {
 ///
 /// 刻意区分 `Skipped`：活动未开启或条件不满足**不是失败**，
 /// 不应触发告警，也不应计入错误率。
+///
+/// 也刻意区分 `Partial`：一次运行里常常有**几笔子操作**（例如"领取 AI 豆"
+/// 有三笔可领），成功的与失败的可能同时存在 ✓。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum TaskOutcome {
-    Success { summary: String },
-    Skipped { reason: String },
-    Failed { reason: String },
+    Success {
+        summary: String,
+    },
+    Skipped {
+        reason: String,
+    },
+    /// **部分成功**：有成功的、也有失败的。
+    ///
+    /// # 为什么非要单开一档（2026-10-03 用户实测口径）
+    ///
+    /// 原话：「下面的 614 失败还直接说成功」✗ —— `beans` 那条领取本来就把
+    /// 「至少有一笔成功、也有失败」注释成**部分成功** ✓，但枚举里没有这一档，
+    /// 于是它落到 `Success` ⇒ 界面写「成功」、正文写「失败 1 笔」✗，自相矛盾。
+    ///
+    /// 两个偷懒的替代都不行 ✗：
+    /// - 都算 `Success`：把失败盖住（正是用户踩到的那个）；
+    /// - 都算 `Failed`：把"其实领到了几笔"说成全败 ✗，还会让错误率与告警虚高。
+    ///
+    /// ⚠ 语义上它**不是成功**也**不是失败**：`is_success()` 与 `is_failure()`
+    /// 都为 `false` ✓（谁要靠它分流，得显式认 `is_partial()`）。
+    Partial {
+        summary: String,
+    },
+    Failed {
+        reason: String,
+    },
 }
 
 impl TaskOutcome {
@@ -86,6 +112,13 @@ impl TaskOutcome {
         }
     }
 
+    /// 部分成功：有成的、也有没成的（两边的账都要在小结里说清 ✓）。
+    pub fn partial(summary: impl Into<String>) -> Self {
+        TaskOutcome::Partial {
+            summary: summary.into(),
+        }
+    }
+
     pub fn is_success(&self) -> bool {
         matches!(self, TaskOutcome::Success { .. })
     }
@@ -94,9 +127,14 @@ impl TaskOutcome {
         matches!(self, TaskOutcome::Failed { .. })
     }
 
+    /// 部分成功。⚠ 它与上面两个**都为假**的关系是刻意的 ✓（见变体的说明）。
+    pub fn is_partial(&self) -> bool {
+        matches!(self, TaskOutcome::Partial { .. })
+    }
+
     /// 脱敏后的副本。
     ///
-    /// 三个变体的文本都来自**任务自己**（`summary`/`reason`），而失败原因里
+    /// 每个变体的文本都来自**任务自己**（`summary`/`reason`），而失败原因里
     /// 最典型的就是"上游回显 + 原因" —— 上游把请求体或头原样吐回来时，
     /// 那一串里就带着凭证 ✓。它同时进两条路：`RunEvent::Finished`（SSE / 推送）
     /// 与 `RunRecord.outcome`（落盘）⇒ 两处都得过闸 ✓。
@@ -107,6 +145,9 @@ impl TaskOutcome {
             },
             TaskOutcome::Skipped { reason } => TaskOutcome::Skipped {
                 reason: crate::event::redact(reason),
+            },
+            TaskOutcome::Partial { summary } => TaskOutcome::Partial {
+                summary: crate::event::redact(summary),
             },
             TaskOutcome::Failed { reason } => TaskOutcome::Failed {
                 reason: crate::event::redact(reason),
@@ -119,6 +160,7 @@ impl TaskOutcome {
         match self {
             TaskOutcome::Success { summary } => summary,
             TaskOutcome::Skipped { reason } => reason,
+            TaskOutcome::Partial { summary } => summary,
             TaskOutcome::Failed { reason } => reason,
         }
     }

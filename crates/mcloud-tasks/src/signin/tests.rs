@@ -102,6 +102,24 @@ struct CollectSink {
 }
 
 impl CollectSink {
+    /// 带**级别**的日志。`logs()` 只留文本 ⇒ 断言不了"这条该染黄" ✗，
+    /// 而 2026-10-03 用户实测的正是「日志没附上颜色确认状态」✓。
+    fn logs_with_level(&self) -> Vec<(mcloud_core::LogLevel, String)> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                mcloud_core::RunEvent::Log { level, message, .. } => {
+                    // ⚠ `LogLevel` 是 `Copy` ⇒ 解引用就好，别 `clone()`
+                    // （clippy 的 clone_on_copy 会拦下 ✓）。
+                    Some((*level, message.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     fn logs(&self) -> Vec<String> {
         self.events
             .lock()
@@ -382,6 +400,79 @@ async fn receive_does_not_send_for_next_month_items() {
         "实得：{}",
         out.summary()
     );
+}
+
+/// ⚠ 用户 2026-10-03 实测口径：「**下面的 614 失败还直接说成功**」。
+///
+/// 两笔可领、一笔成（+6）、一笔被上游拒（614）⇒ 必须是**部分成功** ✓：
+/// 写"成功"会把失败盖住 ✗，写"失败"又把"其实领到了"说成全败 ✗。
+#[tokio::test]
+async fn receive_with_one_failure_is_partial_not_success() {
+    let info = info_with_receive(serde_json::json!([
+        {"cloudType":0,"cloudNum":6},
+        {"cloudType":0,"cloudNum":9}
+    ]));
+    let (c, _http) = Ctx::new(&[
+        &info,
+        &ok(serde_json::json!({"receive":6})),
+        &fail("活动太火爆啦，锁定失败，试试其他奖品吧", 614),
+    ]);
+    let out = ReceiveTask
+        .run(&c.ctx(), &serde_json::json!({}))
+        .await
+        .unwrap();
+
+    assert!(out.is_partial(), "有成的也有没成的 ⇒ 该是部分成功：{out:?}");
+    assert!(
+        !out.is_success() && !out.is_failure(),
+        "部分成功两个谓词都该为假：{out:?}"
+    );
+    let text = out.summary();
+    assert!(text.contains("失败 1 笔"), "小结要把没成的那笔说清：{text}");
+    assert!(text.contains("6 AI豆"), "也要说清领到了什么：{text}");
+
+    // ⚠ 还有一半是"日志有没有颜色"：那条失败**必须以 warn 级**打出来 ✗→✓。
+    // 原来走 `ctx.info` ⇒ 面板里跟正常行一个色，用户看不出哪笔没成 ✓。
+    // ⚠ 先把返回值绑住：`logs_with_level()` 是个临时 `Vec`，
+    // 直接 `.iter()` 取引用会被 E0716 拦下 ✓（借用比临时值活得久 ✗）。
+    let all = c.sink.logs_with_level();
+    let warned: Vec<&String> = all
+        .iter()
+        .filter(|(lvl, _)| *lvl == mcloud_core::LogLevel::Warn)
+        .map(|(_, msg)| msg)
+        .collect();
+    assert!(
+        warned
+            .iter()
+            .any(|m| m.contains("614") || m.contains("失败")),
+        "失败那一笔该以 warn 打出来：{warned:?}"
+    );
+}
+
+/// ⚠ 用户 2026-10-03 实测口径：「**未知又是啥，不明不白**」。
+///
+/// 上游给出已知三个常量（0/1/2）之外的 `cloudType` 时，旧代码只写「未知类型」
+/// ✗ —— 看图的人没法查、也没法判断该不该加分支。现在要把**原始码**带出来 ✓。
+#[tokio::test]
+async fn task_list_reports_the_raw_type_code_when_unknown() {
+    let info = info_with_receive(serde_json::json!([
+        {"cloudType":0,"cloudNum":5},
+        {"cloudType":9,"cloudNum":200}
+    ]));
+    let (c, _http) = Ctx::new(&[&info]);
+    let out = TaskListTask
+        .run(&c.ctx(), &serde_json::json!({}))
+        .await
+        .unwrap();
+
+    let text = out.summary();
+    assert!(text.contains("9"), "要说清上游给的原始类型码：{text}");
+    assert!(
+        !text.contains("未知类型"),
+        "「未知类型」这个词本身没有信息量：{text}"
+    );
+    // 没识别出来的那一笔 ⇒ 这条运行**不是普通成功**（但也别报成失败：能识别的部分照报了 ✓）
+    assert!(out.is_partial(), "有没识别的类型 ⇒ 部分成功：{out:?}");
 }
 
 /// `cloudType == 0` ⇒ 走 `receiveV3`，并读回 `result.receive`。

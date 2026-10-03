@@ -29,6 +29,7 @@ import { TaskConfigPage } from './task-config-page'
 import { AccountPicker } from '../ui/account-picker'
 import { EmptyState } from '../ui/empty-state'
 import { showError } from '../ui/error-dialog'
+import { outcomeText } from '../ui/history'
 import { LogPanel, pushLog, type LogLine } from '../ui/log-panel'
 
 type LoadState = 'loading' | 'error' | 'ready'
@@ -216,11 +217,13 @@ export const TasksPage = () => {
         // 三种结局分别显示：失败要说清原因，跳过要说清**为什么跳过**
         // （跳过不是失败，不该染红）。
         const o = ev.outcome
-        const text =
-          o.status === 'success' ? o.summary : o.status === 'skipped' ? o.reason : o.reason
+        const text = outcomeText(o)
         outcome.value = { ok: o.status === 'success', text }
+        // ⚠ 级别要跟着结局走 —— 「日志没附上颜色确认状态」（2026-10-03 用户实测）
+        // 说的就是这个：`partial` 原来落到 `info` ⇒ 面板里跟正常行一个色 ✗。
+        const kind = o.status === 'failed' ? 'error' : o.status === 'partial' ? 'warn' : 'info'
         say(
-          o.status === 'failed' ? 'error' : 'info',
+          kind,
           `结束（${ev.duration_ms}ms）：${o.status === 'skipped' ? `跳过 —— ${text}` : text}`,
         )
         finishedRuns.value += 1
