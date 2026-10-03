@@ -647,7 +647,7 @@ target/
 crates/       Rust 各层
 docs/         设计文档（architecture.md / conventions.md）
 test/golden/  黄金向量（权威数据，勿手改；从 mcloud 同步）
-web/          前端（自研 `lite` 运行时 + TSX，见 lite-framework.md）
+web/          前端（自研 `lite` 运行时 + TSX，见 docs/web/lite-framework.md）
 data/         运行时数据（不入库）
 ```
 

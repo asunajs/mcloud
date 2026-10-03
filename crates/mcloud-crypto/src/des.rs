@@ -12,7 +12,7 @@
 //! 加密侧**手工补零**，且对齐时**不补**（`padLen = 8 - len % 8`，等于 8 就跳过）；
 //! 解密侧按 **PKCS7** 去除。这是照搬上游行为，不是为了对称美观 ——
 //! 写成对称的反而会与上游对不上。权威语义见上游
-//! `scripts/gen-crypto-vectors.cjs` 的 `desEncryptB64` / `desDecrypt`。
+//! `../mcloud-rust/scripts/gen-crypto-vectors.cjs` 的 `desEncryptB64` / `desDecrypt`。
 //!
 //! # 密钥处理
 //!

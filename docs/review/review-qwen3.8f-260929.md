@@ -54,7 +54,7 @@
 | 触控目标 ≥44px | 10 处违背既有约定：`schedules-page.tsx:523/608/613`、`exchange-page.tsx:244/258/272`、`history-page.tsx:104/191`、`dashboard-page.tsx:91/174`、`live-room-page.tsx:811/834`、`tasks-page.tsx:292/348`、`settings-page.tsx:58`、`accounts-page.tsx:501` |
 | `signal.ts` 框架债 | 循环更新无防护（`:96-102`，A→B→A 直接爆栈）；`watch`/`computed` 的 effect 永不释放（`:151/:168`）。现在只有 `app.tsx:117` 一处根级 `watch` ⇒ 未发作，但这是框架的债 |
 | `regress/interact.mjs:297-300` | 收了 `Runtime.exceptionThrown`/`console.error` 却**不 increment bad** ⇒ lite 侧吞异常也能全绿 |
-| `docs/lite-framework.md:8` vs `:226-230` | 体积宣称自相矛盾（1,892 / 1,514），本机 `node lite/size.mjs` 实测 **2,462–2,620 gzip** ★，漂移约 +30%；且 `bench/lite-side.ts` 是手写目标形态而非编译产物，"挂载快 10×"口径偏乐观 |
+| `docs/web/lite-framework.md:8` vs `:226-230` | 体积宣称自相矛盾（1,892 / 1,514），本机 `node lite/size.mjs` 实测 **2,462–2,620 gzip** ★，漂移约 +30%；且 `bench/lite-side.ts` 是手写目标形态而非编译产物，"挂载快 10×"口径偏乐观 |
 
 ### 1.4 lite 语义差的全量扫描（我扫的 + 另一路独立扫的，交叉验证过）
 
@@ -93,7 +93,7 @@
 | `auth-signal.ts:40` | "`authEpoch` 供页面当 key/watch" | 无人读 |
 | `docs/conventions.md:288-289` | "判凭证失效必须用 `is_auth_failure()`" | 该函数**零调用者** ★ |
 | `docs/task-inventory.md:32` | "`app-task` 这个名字今天不存在" | `lib.rs:81` 当天已注册 ★ |
-| `docs/lite-framework.md:8/226` | 1,892 / 1,514 gzip | 实测 2,462–2,620 ★ |
+| `docs/web/lite-framework.md:8/226` | 1,892 / 1,514 gzip | 实测 2,462–2,620 ★ |
 | `session.rs:345-349` | "`serde_json` Map 默认按插入序输出" | `preserve_order` 未启用 ⇒ 是字典序（同仓 `auth_refresh.rs:103-112` 的说法才对） |
 
 ---
@@ -215,7 +215,7 @@
 4. **资源与鲁棒性**：`EventHub` 的 `forget`/`unsubscribe` 接上；WS 握手包超时；`verify_password` 走 `spawn_blocking` + 登录节流；前端 `request` 加 `AbortSignal.timeout()`；`write_atomic` 补 `sync_all`。
 5. **发版前**：tag 校验 + `permissions` 收窄 + Linux 产物可移植性；决定 `panic="abort"` 的隔离代价是否接受。
 6. **可延后**：显示链收敛成一处、`app_task_matrix` 的 name/id 去重口径（先确认上游会不会给）、§1.5 的组件拆分、§2 那张"注释与实现对不上"的清单逐条改写。
-7. **文档体量**：`docs/architecture.md` 1237 行、`lite-framework.md` 682 + `lite-guide.md` 667 有重叠。建议按"框架设计 / 上手教程 / 决策记录"三份归位，`architecture.md` 拆出 §10（构建与产物）独立成篇。
+7. **文档体量**：`docs/architecture.md` 1237 行、`docs/web/lite-framework.md` 682 + `docs/web/lite-guide.md` 667 有重叠。建议按"框架设计 / 上手教程 / 决策记录"三份归位，`architecture.md` 拆出 §10（构建与产物）独立成篇。
 
 ## 六、未证实的格子（本轮拿不到读数，别当结论用）
 

@@ -47,7 +47,7 @@ fn host_of(url: &str) -> Option<&str> {
 /// # 为什么按 URL 判、而不是让"链"自报
 ///
 /// 票是按页面签的（同一趟抓包里三张 `jwttoken` 互不相等，各打各的接口 ——
-/// 见 `docs/capture/app-msg-push-on-samples.txt` §2 的核对表），而页面在这条链上
+/// 见 `../mcloud/docs/capture/app-msg-push-on-samples.txt` §2 的核对表），而页面在这条链上
 /// 唯一的显式痕迹就是**请求路径**。`TaskContext` 里只有一个 `HttpClient`、
 /// 不给任务自报配方的地方，所以判据落在这一层。
 ///
@@ -482,7 +482,7 @@ mod integration_tests {
 
     /// ⭐ 票是**按页面**签的，而页面在这条链上唯一的显式痕迹是请求路径。
     ///
-    /// 依据见 `docs/capture/app-msg-push-on-samples.txt` §2：那一趟三张票互不相等，
+    /// 依据见 `../mcloud/docs/capture/app-msg-push-on-samples.txt` §2：那一趟三张票互不相等，
     /// `msgPushOn/*` 带的是这一页自己换的那张。
     #[test]
     fn the_notice_page_is_picked_by_path() {

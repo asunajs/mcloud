@@ -1,5 +1,5 @@
 {
-  "$source": "Reqable 抓包，2026-09-23 16:27–16:40（本机系统代理 127.0.0.1:9000）。取证面 = App（mCloud_iPhone，pid 94901）内 WebView 打开的 H5「直播小红花」界面，抓包里进程名是 com.apple.WebKit.Networking（pid 94913），不是 mCloud。页面 URL = https://m.mcloud.139.com/portal/yunClound/index.html?path=National_LiveRoomFeedback&sourceid=1007&targetSourceId=001005。记录 ID：600（成功）/ 621（重放）/ 511（错误口令）/ 622（余额）。凭据按 docs/sanitize-guide.md 换形，未落本文档。",
+  "$source": "Reqable 抓包，2026-09-23 16:27–16:40（本机系统代理 127.0.0.1:9000）。取证面 = App（mCloud_iPhone，pid 94901）内 WebView 打开的 H5「直播小红花」界面，抓包里进程名是 com.apple.WebKit.Networking（pid 94913），不是 mCloud。页面 URL = https://m.mcloud.139.com/portal/yunClound/index.html?path=National_LiveRoomFeedback&sourceid=1007&targetSourceId=001005。记录 ID：600（成功）/ 621（重放）/ 511（错误口令）/ 622（余额）。凭据按 ../mcloud-capture/docs/sanitize-guide.md 换形，未落本文档。",
   "draw": {
     "code": "中秋美好存云盘",
     "expectQuery": "?code=%E4%B8%AD%E7%A7%8B%E7%BE%8E%E5%A5%BD%E5%AD%98%E4%BA%91%E7%9B%98",

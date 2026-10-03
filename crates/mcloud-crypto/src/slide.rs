@@ -32,7 +32,7 @@
 //! 3. **轮廓点循环从 `x = 1` 起**（[`solve_contour`]）—— 结构上永远看不到
 //!    第 0 列。别改成 `0`：那会改变轮廓点集与得分。
 //!
-//! 证据：`mcloud/docs/capture/app-exchange-samples.txt` §5.3。
+//! 证据：`../mcloud-capture/docs/capture/app-exchange-samples.txt` §5.3。
 
 use crate::{CryptoError, Result};
 

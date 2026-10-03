@@ -7,7 +7,7 @@
 //! ① URL、② 信封形状（`code` 是字符串 `"0000"`、载荷在 `data`）。
 //! ⚠ 文件型 / `PUT` / `complete` / `batchTrash` 自 2026-09-25 起有**真跑**（R27），
 //! 但仍**无 har 实拍**；建目录那一型 2026-09-26 由 R7 那一发探针补上真打
-//! （成文见 `mcloud/docs/capture/app-cloud-folder-trash-samples.txt`）。
+//! （成文见 `../mcloud/docs/capture/app-cloud-folder-trash-samples.txt`）。
 //!
 //! 所以全部用例钉的是三类**可控**的事：
 //!

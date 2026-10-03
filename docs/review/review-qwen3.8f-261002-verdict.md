@@ -253,7 +253,7 @@ PC 那套 `x-yun-*` 业务头同理（无去重）。
 
 复核方式：每条先用报告给的命令自己跑一遍，再改；口径按 §4 的主张 ——
 **权威源是代码，文档只写"怎么现算"**。改动落在 8 个文件（`usage.md` / `task-inventory.md` /
-`architecture.md` / `ai-avatar-spec.md` / `lite-framework.md` / `cli-webui-design.md` /
+`architecture.md` / `ai-avatar-spec.md` / `docs/web/lite-framework.md` / `docs/design/cli-webui-design.md` /
 `conventions.md` / `build-perf.md`），要点：
 
 * **写死的数字全部换成现算命令**：任务条数 → `grep -c "Arc::new" crates/mcloud-tasks/src/lib.rs`；

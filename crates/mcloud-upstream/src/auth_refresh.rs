@@ -45,7 +45,7 @@ pub const BASE_USER_YUN: &str = "https://user-njs.yun.139.com";
 /// App 端的 `clientType`。
 ///
 /// ⚠ **`412` 是 App 的码**，旧 TS 项目里那个 `414` 不是。
-/// 实测出处：`docs/capture/app-rights-token-samples.txt` §4。
+/// 实测出处：`../mcloud/docs/capture/app-rights-token-samples.txt` §4。
 pub const APP_CLIENT_TYPE: &str = "412";
 
 /// PC 端的 `clientType`。
@@ -132,7 +132,7 @@ pub fn refresh_request(account: &Account) -> Result<HttpRequest> {
         //
         // 契约的唯一出处是 `auth.rs` 的 `raw: format!("Basic {clean}")`，
         // 以及实拍：`accounts.json` 里 `raw` 以 `Basic ` 开头、整串 302 字符，
-        // 与 `docs/capture/app-api-families.txt:86` 抓到的头值逐字同形。
+        // 与 `../mcloud/docs/capture/app-api-families.txt:86` 抓到的头值逐字同形。
         .header("Authorization", account.auth.raw.clone())
         .text_body(body),
     )

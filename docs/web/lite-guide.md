@@ -4,7 +4,7 @@
 lite 是一个"无虚拟 DOM + 编译期绑定"的 TSX 框架：运行时零依赖，只需要 Node + Vite，
 TSX 由一个小插件在编译期折成运行时调用，之后只有"读过某个状态的那一处 DOM"会被更新。
 
-框架本身的**设计取舍与踩坑史**不在本文，见 [`docs/lite-framework.md`](lite-framework.md)（那篇是给要改框架的人看的）。
+框架本身的**设计取舍与踩坑史**不在本文，见 [`lite-framework.md`](lite-framework.md)（那篇是给要改框架的人看的）。
 
 **先说结论：** 把 `lite/` 目录拷进项目 → 装 `vite` + `oxc-parser`（编译器用它解析 TSX）→ 接插件、
 配 tsconfig → 用自带的 `lite/jsx.d.ts` 拿到 JSX 类型。**全程不需要 Vue**
@@ -615,7 +615,7 @@ const toggle = (i: number) => {
   生成 `createFor(…, positional=true)`）。因为那种行的内容真的依赖位置：
   搬过去不重算就会显示错的"第 N 步"。没读下标的行则是**搬动** ——
   保住行内焦点与输入框光标。**这一条与 Vue 有意不同**：Vue 的 keyed diff 不区分，
-  只会一律重建（`docs/lite-postmortem.md` §11.7 记的是同一类分歧）。
+  只会一律重建（`lite-postmortem.md` §11.7 记的是同一类分歧）。
   想知道自己那处编成了哪种：看产物里 `createFor` 的最后一个布尔参数。
 
 ⚠ **只有一种形状会编成 `createFor`**：箭头函数，且**函数体直接是一个 JSX 表达式**。

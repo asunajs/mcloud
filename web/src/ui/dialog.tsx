@@ -5,7 +5,7 @@
  *
  * lite **没有模板 ref** 这条路 —— `ref=` 不是编译器支持的属性，写上去会被当成普通属性
  * 静默编错（实测产物：`_$setAttr(el, "ref", fn)`，把函数串写进 DOM；
- * 见 `docs/lite-guide.md` §10），而 `showModal()` 要在**点击那一刻**
+ * 见 `docs/web/lite-guide.md` §10），而 `showModal()` 要在**点击那一刻**
  * 打到真实 DOM 元素上。`<dialog>` 的 id 是唯一的，
  * 由调用方给 —— 于是"开哪个窗"是一句 DOM 查找，不需要实例状态。
  *

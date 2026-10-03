@@ -131,7 +131,7 @@ P1 签到族八条（`sign` / `receive` / `multiple` /
 - `200112`（已兑换）语义仍**零实拍**；`draw` 的重放边界**待验证**
 - TLS 只验到"依赖同源"，未验真实证书链
 
-> 开播门本身**有实证**（`docs/capture/app-live-redflower-samples.txt` §5.3：
+> 开播门本身**有实证**（`../mcloud/docs/capture/app-live-redflower-samples.txt` §5.3：
 > `querySpecTokenV2(017027)` → `cmpassLoginByCmToken` ⇒ JWT，三步都走通过，
 > 因为门第③步是 GET、不需要开播）。**别把"WS 没验过"误读成"门也没验过"。**
 

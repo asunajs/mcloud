@@ -1,6 +1,6 @@
 //! 兑换协议层的测试。
 //!
-//! 请求/响应逐字来自真机抓包（`mcloud/docs/capture/app-exchange-samples.txt` §5.1~5.3）。
+//! 请求/响应逐字来自真机抓包（`../mcloud-capture/docs/capture/app-exchange-samples.txt` §5.1~5.3）。
 //!
 //! 重点在三处**极易写错且不报警**的地方：
 //! 1. 字段类型（数字 vs 字符串）；

@@ -2,7 +2,7 @@
 //!
 //! 对应参考实现 `internal/upstream/app_cloud_upload.go` 的
 //! `CloudBatchTrashRequest` / `ParseCloudFileBatchTrash`；证据是
-//! `mcloud/docs/capture/app-cloud-recyclebin-samples.txt`（活体探针真打，非推断）
+//! `../mcloud/docs/capture/app-cloud-recyclebin-samples.txt`（活体探针真打，非推断）
 //! 与 `app-cloud-folder-trash-samples.txt`。
 //!
 //! # 为什么这一枪值得单独一层

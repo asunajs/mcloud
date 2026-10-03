@@ -1,7 +1,7 @@
 //! 凭据串解析的**黄金向量对拍**。
 //!
 //! 向量来自 `mcloud/test/golden/auth-vectors.json`（原版编译产物的实测对拍，
-//! 由 `scripts/gen-auth-vectors.cjs` 生成），本仓已同步。
+//! 由 `../mcloud-rust/scripts/gen-auth-vectors.cjs` 生成），本仓已同步。
 //!
 //! # 为什么必须对拍而不是自己写几条
 //!

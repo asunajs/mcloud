@@ -77,7 +77,7 @@ pub enum SessionRecipe {
     ///
     /// # 证据
     ///
-    /// `docs/capture/app-msg-push-on-samples.txt` §2 的**三张票核对表**：那一趟抓到
+    /// `../mcloud/docs/capture/app-msg-push-on-samples.txt` §2 的**三张票核对表**：那一趟抓到
     /// 三张互不相等的 `jwttoken`，其中 `faa8d052` 由 `msgpushon` / `1062` 换出，
     /// 被用在 **24 个接口**上（含 `msgPushOn/task/status`、`msgPushOn/task/list`）；
     /// 而签到页那张 `f9048ce0`（`sign_in_3` / `1002`）被用在另外 16 个上。
@@ -654,7 +654,7 @@ pub fn basic_authorization(account: &Account) -> String {
     // 契约在解析处写着：`auth.rs` 拼 `AuthInfo` 时是
     // `raw: format!("Basic {clean}")`；实拍的 `Authorization` 头值也是
     // `Basic base64("mobile:<手机号>:<authToken>")`，整串 302 字符
-    // （`docs/capture/app-api-families.txt:86`）。
+    // （`../mcloud/docs/capture/app-api-families.txt:86`）。
     //
     // 再加一次得到的是 **`Basic Basic bW9iaW…`**，上游的回话是
     // `{"code":"05050009","message":"非法的token！"}` —— 这句话**听起来像

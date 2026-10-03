@@ -129,7 +129,7 @@ impl LiveWsEndpoint {
     ///
     /// ⚠ 与 `/cmlive` 那套 HTTP 头**不是同一组**，只有 `Origin` 是共用的。
     /// UA 用 iPad App 内嵌 WebView 的原样值 —— 2026-09-23 实拍
-    /// （`docs/capture/app-live-ws-samples.txt` §一）证明真实 H5 客户端
+    /// （`../mcloud/docs/capture/app-live-ws-samples.txt` §一）证明真实 H5 客户端
     /// 在 WS 升级请求上发的就是它。
     ///
     /// ⚠ 但**别把实拍当成"服务端校验 UA"的判据**：实拍只能证明客户端

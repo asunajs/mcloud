@@ -50,7 +50,7 @@ export default defineConfig({
     // 单 chunk（`<link rel="modulepreload">` 数量为 0）⇒ 垫片没有东西可垫。
     //
     // ⚠ 2026-10-03 复核：**前提已经变了** —— `app.tsx` 现在按页动态 `import()`
-    // （见 `docs/lite-framework.md` §8），`web/dist/assets` 有 20 个 chunk、
+    // （见 `docs/web/lite-framework.md` §8），`web/dist/assets` 有 20 个 chunk、
     // `index.html` 里有 1 条 `modulepreload`。这条设置**仍然保留**，因为：
     // 本仓的目标浏览器（macOS 上跑 WebUI 的 Chrome/Safari）全都支持
     // `rel=modulepreload`，垫片是给老浏览器兜底的，而这条路线里没有老浏览器。

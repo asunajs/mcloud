@@ -337,7 +337,7 @@ Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过�
     已验证它真在检查：故意写错时与 `typescript@5.9.3` 各报 7 条、错误码/行列/文案逐条相同，
     有错时退出码 1（门禁会红）；两边 `--listFiles` 项目文件清单逐行相同。
   * 换解析器的验收方式（以后动这一层照做）：**先存黄金样本**（18 个 tsx 的旧产物），
-    换完逐字节对比 + 12 条编译期负例 + `dist` 的 chunk hash 不变。见 `docs/lite-framework.md` §4.6。
+    换完逐字节对比 + 12 条编译期负例 + `dist` 的 chunk hash 不变。见 `docs/web/lite-framework.md` §4.6。
 
 - ⚠ **框架不够用时：把"改框架"和"绕开"摆上秤比一比再选**（用户口径 2026-10-01）：
   「有些时候前端框架不够用，这时候可以在优化前端框架和避免这个问题上对比择优」。
@@ -345,8 +345,11 @@ Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过�
   页面侧绕一下只在那一页付；**同一个"绕"在第 3 处出现**才算"该改框架"的证据。
   两个要一并检查的静默坑：① `web/lite/compiler.ts` 的语法边界（如 `.map` 的 `key`
   必须挂在 JSX 元素的子表达式位置、三元分支只认 JSX / null）；
-  ② **`web/src/app.css` 的 `@plugin "daisyui"` 里有一份 `exclude` 组件清单**
-  —— 排除掉的组件**样式会静默消失**（实测 `.tab` 的 padding/边框/`::after` 全为 0/none，
-  界面退化成"一串连在一起的纯文字"）。页面真要用某个组件，得把名字从 exclude 里删掉；
-  但多数时候**更划算的是换成本仓已有的自建控件**（如分组 tab 用 `join` + `btn join-item`，
-  见 `tasks-page.tsx`）。完整判据与两个真例：`docs/lite-framework.md` §8.0。
+  ② **`web/src/app.css` 顶部的 `@theme` 令牌层**（2026-10-03 起取代了 daisyUI 的
+  `@plugin` + `exclude` 清单）—— **没在 `@theme` 里注册的颜色/圆角，对应的 utility 会
+  "静默不生成"**：类名写在页面上、`npm run build` 也不报错，只是那条样式根本不存在 ✗
+  （同一类事故的上一版是"类名在 daisyUI 的 `exclude` 里"，实测 `.tab` 的 padding/边框
+  `/::after` 全为 0/none，界面退化成"一串连在一起的纯文字"）。要加新颜色就先在 `@theme`
+  注册 `--color-*`，**深色那份 `[data-theme="dark"]` 要成对写** ✓。
+  页面多数时候**更划算的是用本仓已有的自建控件**（如分组 tab 用 `join` + `btn join-item`，
+  见 `tasks-page.tsx`）。完整判据与两个真例：`docs/web/lite-framework.md` §8.0。

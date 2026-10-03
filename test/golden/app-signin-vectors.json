@@ -1,9 +1,9 @@
 {
   "$source": "2026-09-19 Reqable 抓包（iOS App mCloud 12.6.0 的签到页 H5）+ 账号 B 纯协议复现",
-  "$note": "Rust 侧 ../mcloud-rust/crates/mcloud-upstream/src/app_signin.rs 消费本文件；Node 侧 scripts/check-golden-vectors.cjs 独立复算 h5Signature。",
+  "$note": "Rust 侧 ../mcloud-rust/crates/mcloud-upstream/src/app_signin.rs 消费本文件；Node 侧 ../mcloud-rust/scripts/check-golden-vectors.cjs 独立复算 h5Signature。",
   "$evidence": {
     "har": "har/signin-2026-09-19-full.har（已 gitignore）",
-    "doc": "docs/capture/app-signin-samples.txt",
+    "doc": "../mcloud/docs/capture/app-signin-samples.txt",
     "h5Bundle": "har/h5-signin/139newsignin~National_zero2025~newsignin~promotion~test.59d6fdcb.js"
   },
   "constants": {
@@ -426,7 +426,7 @@
         "totalClouds": 571
       }
     },
-    "note": "来源与上面几段**不同**：这不是 2026-09-19 的 iOS 抓包，而是老项目夹具 test/fixtures/http/复活.json 里那条 POST /ycloud/signin/page/receiveRevivalReward（Android WebView UA）。该夹具是「本机测试数据、不入库」，所以这里只把**响应体**摘出来固化 —— 它是无标识的纯计数，可以入库。请求形状不在这段里：body 是空对象 `{}`，见 receive_revival_reward_request 的文档。⚠ 老抓包带了 deviceid 头、而 H5 定义里没有 isDeviceId，两者不一致，未验证。"
+    "note": "来源与上面几段**不同**：这不是 2026-09-19 的 iOS 抓包，而是老项目夹具 ../mcloud/test/fixtures/http/复活.json 里那条 POST /ycloud/signin/page/receiveRevivalReward（Android WebView UA）。该夹具是「本机测试数据、不入库」，所以这里只把**响应体**摘出来固化 —— 它是无标识的纯计数，可以入库。请求形状不在这段里：body 是空对象 `{}`，见 receive_revival_reward_request 的文档。⚠ 老抓包带了 deviceid 头、而 H5 定义里没有 isDeviceId，两者不一致，未验证。"
   },
   "startSignIn": {
     "name": "startSignIn-real-capture-already-signed",

@@ -1,10 +1,10 @@
 {
-  "$source": "2026-09-22 生成：MSync 字节与两个签名头由**原项目实现**（protobufjs + node:crypto，scripts/gen-live-room-vectors.cjs）算出；口令 / 小红书用例的输入取自 2026-09-17 实拍夹具 test/fixtures/http/直播wss.json 与原项目 __tests__/kouling.test.ts。",
+  "$source": "2026-09-22 生成：MSync 字节与两个签名头由**原项目实现**（protobufjs + node:crypto，../mcloud/scripts/gen-live-room-vectors.cjs）算出；口令 / 小红书用例的输入取自 2026-09-17 实拍夹具 ../mcloud/test/fixtures/http/直播wss.json 与原项目 __tests__/kouling.test.ts。",
   "$note": "Go 侧 internal/upstream 消费本文件。**全部**期望值都出自原实现：MSync 字节 / 两个签名头走 protobufjs + node:crypto，口令 / 小红书走原项目 packages/core/**src** 的 TS 源码（用原项目的 tsx 直接跑，sha256 见 $evidence.originalSrc）。⚠ 这两段曾一度是**手写**的期望值（34 条里 3 条与真实现不符），随后又一度改成读 packages/core/dist —— 而那份产物已过期（缺 isQuestion 过滤），两种做法都会把**正确的**实现判成红。手写的期望值/过期的产物都是假基准。",
   "$evidence": {
-    "fixture": "test/fixtures/http/直播wss.json（13 片 imChatRoomHistoryMessage，814 条弹幕）",
-    "fixture2": "test/fixtures/http/直播723.json、直播716.json（member/apply 的实拍头集合）",
-    "doc": "docs/capture/app-live-redflower-samples.txt",
+    "fixture": "../mcloud/test/fixtures/http/直播wss.json（13 片 imChatRoomHistoryMessage，814 条弹幕）",
+    "fixture2": "../mcloud/test/fixtures/http/直播723.json、直播716.json（member/apply 的实拍头集合）",
+    "doc": "../mcloud/docs/capture/app-live-redflower-samples.txt",
     "originalTs": "mcloud-sign: packages/core/src/live-room/{proto,kouling,xiaohongshu}.ts",
     "originalSrc": {
       "live-room/kouling.ts": {

@@ -32,7 +32,7 @@
  * ⚠ 本层的类型是**宽松**的（`[key: string]: any`）：它要描述一棵来源不断变化的树，
  * 逐字段强类型只会让 95 行的移植变成 500 行的类型体操。行为不靠类型保证，靠两样东西：
  * `lite/regress/compiler.mjs` 的 12 条负例，以及"18 个 tsx 的产物与 TS 版逐字节一致"
- * （黄金样本在移植时对过，见 `docs/lite-framework.md`）。
+ * （黄金样本在移植时对过，见 `docs/web/lite-framework.md`）。
  */
 import { parseSync } from 'oxc-parser'
 

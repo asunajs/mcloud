@@ -19,7 +19,7 @@
 //!
 //! # ⚠⚠ 四个请求的"请求体形态"**各不相同**，别统一成 JSON
 //!
-//! 2026-09-22 实拍（`docs/capture/app-live-redflower-samples.txt` §5.1）逐条钉住：
+//! 2026-09-22 实拍（`../mcloud/docs/capture/app-live-redflower-samples.txt` §5.1）逐条钉住：
 //!
 //! | 端点 | content-type | body |
 //! |---|---|---|

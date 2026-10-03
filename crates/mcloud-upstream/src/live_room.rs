@@ -14,7 +14,7 @@
 //! 三套都在同一条链路上，**不能共用解析**。最要命的是 `/cmlive` 那一套：
 //! [`crate::app_signin::SignInEnvelope`] 取的是 `result` 键，喂给它 `/cmlive` 的响应
 //! 会**静默取到 `None` 而不报错** —— 表现为「登录成功却取不到 token」
-//! （实拍记录 `docs/capture/app-live-redflower-samples.txt` §5.3 末尾，坑表 #108）。
+//! （实拍记录 `../mcloud/docs/capture/app-live-redflower-samples.txt` §5.3 末尾，坑表 #108）。
 //! 所以这里单独给一个 [`CmliveEnvelope`]。
 //!
 //! # `rtnCode` 刻意**只认字符串**
@@ -38,7 +38,7 @@
 //! | `TimestampSuffix10` / `SystemMD5` / `TokenMD5` 的**算式** | **实拍**（§8.3，两条记录逐字命中） |
 //! | 那两个签名头**服务端不校验** | **实拍**（§8.6：打成全 0 也回 `code: 0`，坑表 #136） |
 //! | [`LIVE_APPLY_VERSION`] 的取值 | **取自原项目**（`v23.0.2`）—— 抓包里那个头被脱敏成 `<REDACTED>` |
-//! | `member/apply` 的**响应**字段（`appKey` 等） | **实拍**（`test/fixtures/http/直播716.json`） |
+//! | `member/apply` 的**响应**字段（`appKey` 等） | **实拍**（`../mcloud/test/fixtures/http/直播716.json`） |
 //!
 //! # 本模块只构造与解析，一个请求都不发
 //!
@@ -651,7 +651,7 @@ pub fn timestamp_suffix_10(timestamp: &str) -> &str {
 ///
 /// # ⚠⚠ 服务端**不校验**这个头（2026-09-23 实证）
 ///
-/// `docs/capture/app-live-ws-samples.txt` §8.6：在**正在播**的房间里发
+/// `../mcloud/docs/capture/app-live-ws-samples.txt` §8.6：在**正在播**的房间里发
 /// `member/apply`，把 `systemMd5` 打成 `0000…0`（32 个 0）**照样回
 /// `{"code":0,"msg":"接口调用成功"}`**；`tokenMd5` 一起打成全 0 也过。
 ///

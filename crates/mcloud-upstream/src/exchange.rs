@@ -27,7 +27,7 @@
 //!
 //! # 证据
 //!
-//! 逐字实拍样本在**上游参考仓**：`../mcloud/docs/capture/app-exchange-samples.txt`
+//! 逐字实拍样本在**上游参考仓**：`../mcloud-capture/docs/capture/app-exchange-samples.txt`
 //! （`exchangeList` / `exchangeV3` / `getSlide` 的请求与响应逐字，含 4 轮兑换、3 错 1 成）；
 //! 组字典那一枪是本仓 2026-10-01 抓的，落在
 //! `../mcloud-capture/docs/capture/app-exchange-samples.txt`（含响应逐字与四个坑）。

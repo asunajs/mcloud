@@ -51,7 +51,7 @@
 | §1.3 体积宣称自相矛盾（1,892 / 1,514） | **已过期** | 表头已改 **2,808 / 2,757**，`:227-231` 专段交代"旧值是还带 Vue 壳时的读数"。我实跑 `size.mjs` 得同值 ✓ |
 | §1.4 非 `.map` 位置 `key=`（7 处） | **已过期** | `grep 'key="' web/src` 零命中；`app.tsx` 相关注释已改对 |
 | §1.4 `ref` 内原地变异喂渲染 | **已过期** | `grep -E '\.value\.(push\|splice\|sort\|reverse\|shift\|unshift)\('` 零命中 |
-| §1.6 "regress 双运行时逐字符 + 逐像素对比" | **部分成立** | 那段机制本身已被删（`lite-postmortem.md:179` 有交代），其余称赞项（SSE 生命周期、`isAuthActionFailure`、颜色查表、原生 `<dialog>`）都还在 |
+| §1.6 "regress 双运行时逐字符 + 逐像素对比" | **部分成立** | 那段机制本身已被删（`docs/web/lite-postmortem.md:179` 有交代），其余称赞项（SSE 生命周期、`isAuthActionFailure`、颜色查表、原生 `<dialog>`）都还在 |
 
 ### 1.2 我认可、**已修**的（本次提交）
 

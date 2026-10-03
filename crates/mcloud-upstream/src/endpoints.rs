@@ -37,7 +37,7 @@ pub const DEFAULT_SOURCE_ID: &str = "001005";
 /// 邮件业务用的 sourceId。
 pub const MAIL_SOURCE_ID: &str = "001003";
 
-// ── PC 客户端登录链路（`docs/upstream/login-protocol.md` 实测）──────────────
+// ── PC 客户端登录链路（`../mcloud-capture/docs/upstream/login-protocol.md` 实测）──────────────
 //
 // 四条都在**同一个**用户域主机 `user-njs.yun.139.com` 上。
 // 注意这个主机**不在** `AUTH_DOMAINS` 里 —— 登录时还没有凭据，

@@ -387,9 +387,9 @@ accounts +0  tasks +0  exchange +0  live-room +0  schedules +0  pipelines +0  hi
 | D2 | `docs/task-inventory.md:25-30`、`:39` | 「exchange 已摘掉、共 19 条」「app-task 这个名字今天不存在」 | `crates/mcloud-tasks/src/lib.rs` 的 `register_all` vec 有 **20** 项，含 `Arc::new(exchange::ExchangeTask)`(`:86`)、`AppTaskTask::new()`(`:94`)、`AiAvatarTask::production()`(`:91`) | `grep -c "Arc::new" crates/mcloud-tasks/src/lib.rs`（现算，别背数） |
 | D3 | `docs/architecture.md:4`、`:930-947`、`:982` | 「前端 **Vue** Vapor」；列 vue 依赖；`stores/` 目录；「代码分割跑不通」 | 自研 `web/lite`，**零 vue 依赖**（`web/package.json` 连 runtime dependencies 都没有）；无 `stores/`；`app.tsx` 已按页 `import()`，`web/dist/assets` 现在 **20 个 chunk** | `grep -rn "vue" web/package.json`（应 0 命中）；`ls web/dist/assets \| wc -l` |
 | D4 | `docs/ai-avatar-spec.md:13-14`、`:146` | 「仓内也无任何 ai-avatar 实现」「本仓**没有** ai-avatar task」 | `crates/mcloud-upstream/src/ai_avatar.rs` 存在且已注册 | `ls crates/mcloud-upstream/src/ai_avatar.rs` |
-| D5 | `docs/lite-framework.md:498`（§8）、`:419-431` | 「代码分割不做、单 chunk 是刻意的」；「`compiler.ts` 仍然 `import ts from 'typescript'`，构建依赖它」 | 与同文件头部/§5 相反（已按页拆）；`compiler.ts` 只 import `./ast.ts`，`package.json` 里**没有** `typescript`（解析器已换 `oxc-parser`） | `grep -n "^import" web/lite/compiler.ts` |
+| D5 | `docs/web/lite-framework.md:498`（§8）、`:419-431` | 「代码分割不做、单 chunk 是刻意的」；「`compiler.ts` 仍然 `import ts from 'typescript'`，构建依赖它」 | 与同文件头部/§5 相反（已按页拆）；`compiler.ts` 只 import `./ast.ts`，`package.json` 里**没有** `typescript`（解析器已换 `oxc-parser`） | `grep -n "^import" web/lite/compiler.ts` |
 | D6 | `docs/architecture.md:583`（§7 任务表）、`:204-215` | 任务表列了不存在的名（`app`/`play-ai-lottery`/`hc1t`/`kouling`/`auth-refresh`），漏 `multiple`/`cloud-snapshot`/`task-list`/`app-task`，写"19 个"；工厂函数 `create_http(HttpOptions)`/`create_task_http` | 名单以 `register_all` 现算为准（20）；那两个函数**全仓零命中**，真实装配在 `mcloud-app/src/builder.rs`（`ClientProfile` + `ReqwestClient` + `H5Client` + `SmidClient`） | `grep -rn "create_http\|HttpOptions" crates --include="*.rs"` |
-| D7 | `docs/cli-webui-design.md:199-201` | 「`GET /api/beans/today` … 端点未落地」 | `crates/mcloud-server/src/routes/beans.rs:40` 已实现、`routes/mod.rs:62` 已 merge | `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/api/beans/today`（未登录会 401，401 就说明路由在） |
+| D7 | `docs/design/cli-webui-design.md:199-201` | 「`GET /api/beans/today` … 端点未落地」 | `crates/mcloud-server/src/routes/beans.rs:40` 已实现、`routes/mod.rs:62` 已 merge | `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/api/beans/today`（未登录会 401，401 就说明路由在） |
 | D8 | `docs/conventions.md:308`/`:248`、`:26`、`:580`/`:589` | 引 `mcloud-tasks/src/sign.rs`（真名 `signin.rs`）；「58 条测试通过」；门禁「≈100 s / ≈56 s」 | 文件不存在；测试属性有 **1780** 行 `#[test]`/`#[tokio::test]`；`scripts/gates-web.mjs:15-16` 自己写的是 **≈33 s / ≈77 s** | `ls crates/mcloud-tasks/src/signin.rs`；`grep -rh "#\[test\]\|#\[tokio::test\]" crates \| wc -l`；`sed -n 10,20p scripts/gates-web.mjs` |
 
 > ⚠ **D8 的时间读数要带条件看**：`gates-web.mjs` 的 mtime 是 2026-10-02 22:55，比 `AGENTS.md`（同日 17:25）和 `docs/conventions.md`（10-01 12:20）都新 ⇒ 现在**以脚本头部自述为准**；但那个数是作者机器上的耗时，换机就变 —— 更稳的做法是文档里**不写秒数**，只写"默认只跑 `ready`，`--full` 跑三个认证态"。
@@ -400,16 +400,16 @@ accounts +0  tasks +0  exchange +0  live-room +0  schedules +0  pipelines +0  hi
 
 | 事实 | 现有出处（互相冲突） | 应当的权威源 |
 |---|---|---|
-| 任务条数 | `architecture.md` §7「19」/P9「19」、`usage.md:47`「18」、`task-inventory.md`「19」、`lite-framework.md:397`「18」 | `grep -c "Arc::new" crates/mcloud-tasks/src/lib.rs`（现算 = 20） |
+| 任务条数 | `architecture.md` §7「19」/P9「19」、`usage.md:47`「18」、`task-inventory.md`「19」、`docs/web/lite-framework.md:397`「18」 | `grep -c "Arc::new" crates/mcloud-tasks/src/lib.rs`（现算 = 20） |
 | 门禁耗时 | `AGENTS.md:253`「≈100 / ≈56」、`conventions.md` §9.2 同、`scripts/gates-web.mjs:15-16`「≈33 / ≈77」 | 脚本头部（或直接删掉秒数，只留口径区别） |
-| lite 体积 | `architecture.md` §9.3「154433 B 单 JS」、`Cargo.toml` 注释「132846 → 19277」、`lite-framework.md` 头 L12 / §5 / §5.1 三个向 | `lite-framework.md` 头部（2586 / 5971） |
-| CLI 命令数 | `cli-webui-design.md`「5 个，不多不少」、`architecture.md:1283`「六件事」/`:1309`「5 件事」、`bin/cli.rs:42`「6 个」 | `bin/cli.rs` 顶层分派 arm 数（现 = 7） |
-| 测试条数 | `conventions.md:26`「58」、`cli-webui-design.md`「605」、`build-perf.md`「1740」 | `grep -rh` 现算（1780）或 `cargo test` 输出 |
+| lite 体积 | `architecture.md` §9.3「154433 B 单 JS」、`Cargo.toml` 注释「132846 → 19277」、`docs/web/lite-framework.md` 头 L12 / §5 / §5.1 三个向 | `docs/web/lite-framework.md` 头部（2586 / 5971） |
+| CLI 命令数 | `docs/design/cli-webui-design.md`「5 个，不多不少」、`architecture.md:1283`「六件事」/`:1309`「5 件事」、`bin/cli.rs:42`「6 个」 | `bin/cli.rs` 顶层分派 arm 数（现 = 7） |
+| 测试条数 | `conventions.md:26`「58」、`docs/design/cli-webui-design.md`「605」、`build-perf.md`「1740」 | `grep -rh` 现算（1780）或 `cargo test` 输出 |
 
 **不要顺手删的"刻意冗余"**：`AGENTS.md` 里的凭据处理、TCC/可移除宗卷那一大段、"什么才需要先问用户"那张表 ——
 它们**故意在每个 agent 的上下文里重复出现**，删了会直接退化成"反复弹确认 / 反复误杀服务"。这类重复是护栏，不是冗余。
 
-**体量与归位建议**（本报告**没有执行**）：`architecture.md` 1320 行里 §9.3/§10 的前端历史已被 `lite-framework.md`/`lite-guide` 覆盖且过期 ⇒ 抽进 lite 归档、`architecture.md` 留后端；`review-*`、`*-verdict`、`lite-postmortem` 这类快照文件在 docs 索引里统一标注「历史快照，不作当前事实」。
+**体量与归位建议**（本报告**没有执行**）：`architecture.md` 1320 行里 §9.3/§10 的前端历史已被 `docs/web/lite-framework.md`/`lite-guide` 覆盖且过期 ⇒ 抽进 lite 归档、`architecture.md` 留后端；`review-*`、`*-verdict`、`lite-postmortem` 这类快照文件在 docs 索引里统一标注「历史快照，不作当前事实」。
 
 ---
 

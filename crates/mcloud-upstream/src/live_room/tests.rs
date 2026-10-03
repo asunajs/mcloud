@@ -6,7 +6,7 @@
 //!
 //! `memberApplySignatures` 三条取自 `test/golden/live-room-vectors.json`
 //! —— 那是**权威**，期望值一个字节都不许改。其余用例的响应文本逐字来自
-//! `docs/capture/app-live-redflower-samples.txt` §5.2 / §5.3（2026-09-22 实拍）。
+//! `../mcloud/docs/capture/app-live-redflower-samples.txt` §5.2 / §5.3（2026-09-22 实拍）。
 
 use super::*;
 use serde_json::Value;

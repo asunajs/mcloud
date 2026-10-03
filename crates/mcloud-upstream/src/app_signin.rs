@@ -17,14 +17,14 @@
 //! # 端点全部按实拍，不按旧 TS
 //!
 //! 旧项目写的是 `/market/signin/page/...`，实测是 `/ycloud/signin/page/...`
-//! （前缀不同）。这一条在参考实现的 `business-feature-inventory.md` §5.1
+//! （前缀不同）。这一条在参考实现的 `../mcloud/docs/business-feature-inventory.md` §5.1
 //! 有专门一节，而"照着旧代码写就错"的代价是任务**每天都失败**却看不出原因。
 //!
 //! # 本模块的证据等级
 //!
 //! | 端点 | 证据 |
 //! |---|---|
-//! | `infoV3` / `startSignIn` / `receiveV3` / `receiveRevivalReward` | **实拍**（`test/fixtures/http/*.json`、`test/golden/app-signin-vectors.json`）|
+//! | `infoV3` / `startSignIn` / `receiveV3` / `receiveRevivalReward` | **实拍**（`../mcloud/test/fixtures/http/*.json`、`test/golden/app-signin-vectors.json`）|
 //! | `multiple` / `receiveTaskExpansion` | 旧 TS + H5 源码逐字，**缺成功样本**（两个测试号本月都已领过）|
 //! | `record`（奖品） | **实拍**（`prizeRecords` 黄金向量）|
 //! | `cloudRecordV2`（流水） | H5 源码逐字，**无实拍** |

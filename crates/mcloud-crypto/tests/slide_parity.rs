@@ -2,7 +2,7 @@
 //!
 //! # 期望值从哪来
 //!
-//! 逐字来自 `mcloud/docs/capture/app-exchange-samples.txt` §5.3：
+//! 逐字来自 `../mcloud-capture/docs/capture/app-exchange-samples.txt` §5.3：
 //!
 //! | 量 | 期望 |
 //! |---|---|

@@ -89,7 +89,7 @@ pub const SLIDER_ROUNDS: u32 = 2;
 ///
 /// 出处是参考实现那条组合判据（有效窗口 `hh:59:40 ~ (hh+1):00:15`，
 /// `getMsToNextHour` 在 `nowMs < 20000` 时不再等待，见
-/// `docs/business-feature-inventory.md` §2.5）。
+/// `../mcloud/docs/business-feature-inventory.md` §2.5）。
 ///
 /// ⚠ **上游是否真的整点开抢，我们没有证据**：我们自己那条成功兑换发生在
 /// `12:16`（抓包 §5.4，CST），根本不在整点窗口里 ⇒ "整点开抢"**不是**上游的

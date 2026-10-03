@@ -20,7 +20,7 @@
 //! # 证据分两半（2026-09-25 之后：这一族已经从「零真打」变成「端到端跑通过」）
 //!
 //! - **四枪里只有 `file/create` 有实拍，而且实拍的是「建目录」那一型**
-//!   （`test/fixtures/http/3d.json` 两条：`type:"folder"`，响应 `data.uploadId` 与
+//!   （`../mcloud/test/fixtures/http/3d.json` 两条：`type:"folder"`，响应 `data.uploadId` 与
 //!   `data.partInfos` 都是 `null`、`exist:true`）。⇒ 它只钉得住三件事：
 //!   ① URL 与**信封形状**（`{code:"0000"(字符串), message, success, data}`，载荷在 `data`）；
 //!   ② `data.fileId` 这一格确实存在；③ 这台主机收这个客户端发的请求。
@@ -31,7 +31,7 @@
 //!   那两支（每次都传随机名 + 随机内容 ⇒ 撞同名与撞内容哈希碰不上）。
 //! - ⭐ `batchTrash` 打在**非空目录**上的行为（**R7**）已于 2026-09-26 真跑闭合：
 //!   四趟都是「上游认了 + 内容跟着消失 + 没有退回到根目录」；逐字读数与边界见
-//!   `mcloud/docs/capture/app-cloud-folder-trash-samples.txt`。
+//!   `../mcloud/docs/capture/app-cloud-folder-trash-samples.txt`。
 //!
 //! 所以本层落码的口径是：**有真跑的写真跑、只有实拍的写实拍、两者都没有的标「零样本」**，
 //! 测试只钉「发得出 + 形状对」。
@@ -435,7 +435,7 @@ pub fn file_create_request(input: CloudFileCreateInput) -> Result<HttpRequest> {
 ///
 /// # 为什么不复用 [`file_create_request`] 加一个 `Type` 字段
 ///
-/// 两型的**请求体不是同一份**：实拍那两条（`test/fixtures/http/3d.json`）只有四枚键
+/// 两型的**请求体不是同一份**：实拍那两条（`../mcloud/test/fixtures/http/3d.json`）只有四枚键
 /// —— `{"fileRenameMode":"refuse","name":…,"parentFileId":…,"type":"folder"}`，
 /// 而文件型带 `size` / `contentHash` / `partInfos` 等六枚，且重名策略是 `auto_rename`。
 /// 做成「一个 builder + 类型开关」会让「这一型该发哪几枚键」变成运行时才知道的事，

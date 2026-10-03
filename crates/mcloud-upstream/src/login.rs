@@ -4,10 +4,10 @@
 //!
 //! 全部依据实测与客户端产物，不含猜测性字段：
 //!
-//! - `mcloud/docs/upstream/login-protocol.md`：PC 客户端扫码（本地拼装二维码 +
+//! - `../mcloud-capture/docs/upstream/login-protocol.md`：PC 客户端扫码（本地拼装二维码 +
 //!   `thirdlogin` 轮询 + 状态机），采集环境 Windows 11 + 客户端 `8.8.6.20260829`；
-//! - `mcloud/docs/upstream/logout-sms-login.md`：短信登录全链路（含滑块降级）；
-//! - `mcloud/docs/capture/apiServer.js`（从 `app.asar` 提取的 renderer 源码）：
+//! - `../mcloud-capture/docs/upstream/logout-sms-login.md`：短信登录全链路（含滑块降级）；
+//! - `../mcloud/docs/capture/apiServer.js`（从 `app.asar` 提取的 renderer 源码）：
 //!   `isMacPc`、`clientType` / `cpid`、设备串兜底模板、三个密码学原语。
 //!
 //! # 三条"反直觉"的实测结论（照直觉写就会错）
@@ -150,7 +150,7 @@ impl PcClient {
     /// 于是 mac 会发出 `x-huawei-channelSrc: 10301000`。
     ///
     /// 证据是客户端源码里那一行**字面量**（`mcloud/docs/client-profiles.md` §4
-    /// 的 pre-login 分支、`docs/capture/apiServer.js`）：
+    /// 的 pre-login 分支、`../mcloud/docs/capture/apiServer.js`）：
     ///
     /// ```js
     /// xhr.setRequestHeader("x-huawei-channelSrc","10200153");
@@ -177,7 +177,7 @@ impl PcClient {
     /// 这里用的是**同平台浏览器外壳的实测串**（都带 `Edg/`，说明 Electron
     /// 外壳就是 Edge）：
     ///
-    /// - Windows：`mcloud/docs/capture/web-qr-login-samples.txt` §1 的实测头；
+    /// - Windows：`../mcloud/docs/capture/web-qr-login-samples.txt` §1 的实测头；
     /// - macOS：`mcloud/test/fixtures/http/登录pc.json` 里 21 条同类请求的实测头。
     ///
     /// 为什么仍然要区分它：客户端**自己**就是靠 UA 里的 `mac` 判断平台的

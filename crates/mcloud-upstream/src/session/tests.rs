@@ -568,7 +568,7 @@ fn gate_token_request_is_not_the_signin_recipe() {
 
 // ══════════════ 逐页配方：「开启通知有礼」那一页 ══════════════
 //
-// 依据是 `docs/capture/app-msg-push-on-samples.txt` §2 的**三张票核对表**：
+// 依据是 `../mcloud/docs/capture/app-msg-push-on-samples.txt` §2 的**三张票核对表**：
 // 那一趟三张 `jwttoken` 互不相等，`faa8d052` 由 `msgpushon` / `1062` 换出、
 // 用在 24 个接口上（含 `msgPushOn/task/*`），而签到页那张用在另外 16 个上。
 

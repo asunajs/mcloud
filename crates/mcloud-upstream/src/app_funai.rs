@@ -11,7 +11,7 @@
 //!
 //! # 只要这两条 —— 其余十口为什么**不**补
 //!
-//! 实拍（`mcloud` 的 `test/fixtures/http/玩-ai-抽支付宝红包.json`，按文件顺序 0…11）
+//! 实拍（`mcloud` 的 `../mcloud/test/fixtures/http/玩-ai-抽支付宝红包.json`，按文件顺序 0…11）
 //! 里出现过六类请求，门户页的接口名单一共有十二口。没实现的那些**不是忘了**：
 //!
 //! * `timed/getmodule`：`result` 是模块数组，每一项的 `drawTimes` / `drawsUsed` /

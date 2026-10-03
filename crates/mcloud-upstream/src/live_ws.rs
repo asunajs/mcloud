@@ -42,7 +42,7 @@
 //! 2. **`command` 的取值**（`1`/`3` 这些数字本身）；
 //! 3. **UNREAD 是否真的必需**（原实现注释说必需，但没有实测证据）。
 //!
-//! `docs/capture/probe-live-room-2026-09-23.md` 的运行记录里，这三条
+//! `../mcloud/docs/capture/probe-live-room-2026-09-23.md` 的运行记录里，这三条
 //! 明明白白列在「🔌 要抓包」那一档。**别把本文件的行为描述成「已实测」。**
 //!
 //! 这正是把「每一帧要回什么」做成**可断言的返回值**的原因：开播后第一次
@@ -52,7 +52,7 @@
 //! # ⚠ 实拍支撑的部分
 //!
 //! - **四种 SockJS 文本帧的存在性**（`o` / `h` / `a[...]` / `c[...]`）：
-//!   实拍夹具 `test/fixtures/http/直播wss.json` 里有 13 片
+//!   实拍夹具 `../mcloud/test/fixtures/http/直播wss.json` 里有 13 片
 //!   `imChatRoomHistoryMessage`（814 条弹幕）；
 //! - **弹幕文本的形状**：`test/golden/live-room-vectors.json` 的
 //!   `msyncInbound` 三条给出了真文本（`小红花口令：…`）。

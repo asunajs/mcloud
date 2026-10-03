@@ -3,7 +3,7 @@
 > 移动云盘（中国移动云盘 / 139 / 和彩云）自动化平台。
 > 后端 Rust，前端自研 **`lite`**（无虚拟 DOM + 编译期优化）+ TSX。
 > ⚠ 前端这一侧本文件只留**契约与结论**；现状与实测读数以
-> [`lite-framework.md`](lite-framework.md) 为准（原先写的 Vue Vapor 栈已于 2026-09-30 拆掉）。
+> [`lite-framework.md`](web/lite-framework.md) 为准（原先写的 Vue Vapor 栈已于 2026-09-30 拆掉）。
 >
 > 状态：**设计定稿 + 脚手架**。本文件是唯一设计来源。
 
@@ -885,7 +885,7 @@ data: {"type":"finished","run_id":1,"outcome":{...},"duration_ms":156}
 JS 约 **69%**、`index.html` 约 **35%**，合计约 **76%**。
 ⚠ **绝对字节别背**（产物每轮都在变，且现在已按页拆 chunk）——
 要复现就对自己构建出的 `web/dist` 跑 `gzip -9`；运行时体积的现算命令见
-[`lite-framework.md`](lite-framework.md) §5（`node web/lite/size.mjs`）。
+[`lite-framework.md`](web/lite-framework.md) §5（`node web/lite/size.mjs`）。
 
 不做压缩时首屏要多传几百 KB —— 这不是"优化项"而是缺陷，
 `Content-Encoding` 是服务端的责任，浏览器不会替你压。
@@ -939,7 +939,7 @@ CSS 侧是构建期插件，其余全在 `devDependencies`。
 
 `lite` 模式**无虚拟 DOM**：TSX 在构建期被折成"模板串 + 每个动态位置一条 effect"，
 运行时只留本项目真用到的那几个原语。写法保留类型安全与组合能力。
-详见 [`lite-framework.md`](lite-framework.md)。
+详见 [`lite-framework.md`](web/lite-framework.md)。
 
 ### 10.2 目录
 
@@ -1000,7 +1000,7 @@ chunk 条数**别背数**，现算：`cd web && npm run build && ls web/dist/ass
 > 2026-09-30 全部拆掉、换成自研 `lite`；`lite` 没有 Suspense/异步组件这一层，
 > 页面本身就是"异步工厂 + `createComponent`"的形状，所以那三条坑**一条都不再成立**。
 > 保留原文只为"别再按它规划工作量"；要问现状看上面这句与
-> [`lite-framework.md`](lite-framework.md)。
+> [`lite-framework.md`](web/lite-framework.md)。
 
 <details>
 <summary>历史记录（Vue 时代，已不适用）——为什么当时拆不动</summary>
@@ -1111,7 +1111,7 @@ t+1000ms #a=""  #b=""
 
 > ⚠ **整节是 Vue 时代（迁移到 `lite` 之前）的字节分析，数字与模块名都已过期** ——
 > 现在没有 `@vue/*` 这些模块，产物也**按页拆 chunk**、不再是单 chunk。
-> 现状与现算命令看 [`lite-framework.md`](lite-framework.md) §5（`node web/lite/size.mjs`）。
+> 现状与现算命令看 [`lite-framework.md`](web/lite-framework.md) §5（`node web/lite/size.mjs`）。
 > 保留本节只为"当时为什么这么压"的来龙去脉。
 
 当时的产物现状：**单 chunk 154,441 B raw / 48,718 B gzip**。要压它，先得知道字节在哪。
@@ -1345,7 +1345,7 @@ login <方式>                    登录账号（qr / sms / app / password / dev
 "不该跑"退 0 是刻意的：crontab 会把非零当"执行出错"，
 而"今天这次不用跑"是正常的 —— 退 1 会让监控天天报假警。
 
-设计取向见 [`cli-webui-design.md`](cli-webui-design.md)：**WebUI 为主，
+设计取向见 [`design/cli-webui-design.md`](design/cli-webui-design.md)：**WebUI 为主，
 CLI 只管"无头也能跑"的那几条**（`login` / `run` / `pending` / `cron` /
 `auth refresh` / `pipeline`）。编排与定时的**创建**不在 CLI —— 改配置文件或走 WebUI。
 

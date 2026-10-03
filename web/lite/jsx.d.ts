@@ -14,7 +14,7 @@
  * `style` 只接字符串、`false`/`null` 在部分属性上有特殊语义……），用类型去假装能校验它
  * 只会造出一堆假错误。
  *
- * 三条使用前提（见 `docs/lite-guide.md` §3）：
+ * 三条使用前提（见 `docs/web/lite-guide.md` §3）：
  * 1. `"jsx": "preserve"` —— 否则 tsc 按该设置去找 JSX 运行时（例如 `react-jsx` 会直接报
  *    `TS2875: This JSX tag requires the module path 'react/jsx-runtime' to exist`）；
  * 2. 这个文件靠 tsconfig 的 `include` / `files` 进类型程序（`types` 字段与它无关，
@@ -66,7 +66,7 @@ declare namespace JSX {
 
   /**
    * 所有标签都接受的通用属性。lite 只有 `key`，而且**只对 `.map()` 有意义**
-   * （写在其它的元素/组件上会被编译器静默丢掉，见 `docs/lite-guide.md` §6）。
+   * （写在其它的元素/组件上会被编译器静默丢掉，见 `docs/web/lite-guide.md` §6）。
    */
   interface IntrinsicAttributes {
     key?: string | number | bigint | null | undefined

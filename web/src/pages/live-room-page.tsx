@@ -3,7 +3,7 @@ import { accountName, refreshAccountNames } from '../account-names'
  * 直播口令 → 小红花。选账号 → 填口令 → 跑 → 实时看日志与结果。
  *
  * 形态照 `tasks-page.tsx`（同一条 `POST /api/runs` + SSE），
- * 移动端优先（`docs/cli-webui-design.md`）：表单全宽、卡片流、44px 触控目标。
+ * 移动端优先（`docs/design/cli-webui-design.md`）：表单全宽、卡片流、44px 触控目标。
  *
  * # ⚠ 三条产品事实决定了这个页面的样子
  *

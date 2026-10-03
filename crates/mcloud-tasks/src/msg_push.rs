@@ -28,7 +28,7 @@
 //! [`SessionRecipe::MsgPushOn`](mcloud_upstream::session::SessionRecipe::MsgPushOn)
 //! （`marketName=msgpushon` / `sourceId=1062`、入口 `portal/hcyview/…?path=openNoticeGift`）。
 //!
-//! 依据是 `docs/capture/app-msg-push-on-samples.txt` §2 的**三张票核对表**：
+//! 依据是 `../mcloud/docs/capture/app-msg-push-on-samples.txt` §2 的**三张票核对表**：
 //! 那一趟三张 `jwttoken` 互不相等，这一页那张被用在 **24 个接口**上（含本模块打的
 //! `msgPushOn/task/status`、`msgPushOn/task/list`），而签到页那张用在另外 16 个上。
 //!
