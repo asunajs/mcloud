@@ -433,7 +433,9 @@ impl Runner {
                 };
                 details.insert("reported".into(), value);
             }
-            record.details = serde_json::Value::Object(details);
+            // 任务自报的形状里键名是任务自己定的 ⇒ 顶层那 20 个键名一个都不认识 ✗，
+            // 所以这里必须**递归**扫每一个字符串（`?token=…` 这种就藏在里面）✓。
+            record.details = mcloud_core::event::redact_value(&serde_json::Value::Object(details));
         }
         if was_cancelled {
             record.status = RunStatus::Cancelled;
@@ -459,7 +461,10 @@ impl Runner {
             account: account.id.to_string(),
             started_at_ms: self.clock.now_ms() - duration_ms as i64,
             duration_ms,
-            outcome,
+            // ⚠ 结论里的 `summary`/`reason` 是**任务自己**写的自由文本，失败原因
+            // 常常就是"上游回显 + 说明" ⇒ 落盘前过一道闸（复核意见 §1.14）✓。
+            // 同一份文本还作为 `RunEvent::Finished` 出去，那条路由 sink 侧负责脱敏 ✓。
+            outcome: outcome.scrubbed(),
             // 生命周期与业务结论分开：这里刚跑完，是 Done；
             // 被中止时由调用方覆盖成 Cancelled。
             status: RunStatus::Done,
@@ -1530,6 +1535,33 @@ mod tests {
         }
     }
 
+    /// 一条"句句带凭证"的任务：结论文本与自报明细里都塞了凭证。
+    ///
+    /// 用来钉住**落盘那一格**（复核意见 §1.14）—— 运行记录会长期躺在
+    /// `history.json` 里 ✗，而 SSE 流看完就没了、进程日志还会轮转 ✓。
+    struct LeakyTask;
+
+    #[async_trait]
+    impl Task for LeakyTask {
+        fn name(&self) -> &'static str {
+            "leaky"
+        }
+        fn title(&self) -> &'static str {
+            "泄漏样例"
+        }
+        fn description(&self) -> &'static str {
+            "结论与明细里都带凭证"
+        }
+        async fn run(&self, ctx: &TaskContext, _b: &serde_json::Value) -> TaskResult {
+            ctx.details(serde_json::json!({
+                "url": "https://host/order?token=deadbeefdeadbeef",
+                "pwd": "s3cr3t3",
+                "note": "一切正常",
+            }));
+            Ok(TaskOutcome::failed("上游回显 password=hunter2，请稍后重试"))
+        }
+    }
+
     /// 自报**两条**明细的任务（多条要落成数组）。
     struct ReportTwoDetailsTask;
 
@@ -1803,6 +1835,28 @@ mod tests {
             "没留产物就不该有 artifacts：{:?}",
             record.details
         );
+    }
+
+    /// ⚠ 落盘那一格的钉子：`RunRecord` 是**唯一会长期留存**的那份 ✗
+    /// （SSE 看完就没了、进程日志会轮转、推送只留个回声）。
+    ///
+    /// 断言的是 `record`（runner **返回并落进 store 的那一份**）✓，
+    /// 所以它同时覆盖了 `outcome` 与 `details` 两处脱敏 ✓。
+    #[tokio::test]
+    async fn run_record_never_carries_credentials() {
+        let (runner, _store, _sink) = build(vec![Arc::new(LeakyTask)]);
+        let record = runner
+            .run("leaky", &account("13800000000"), &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let text = format!("{:?} {}", record.outcome, record.details);
+        assert!(!text.contains("deadbeef"), "落盘的明细里带了 token：{text}");
+        assert!(!text.contains("s3cr3t3"), "落盘的明细里带了口令：{text}");
+        assert!(!text.contains("hunter2"), "落盘的结论里带了口令：{text}");
+        // 脱敏不是"什么都藏起来"：正常文案与形状要留着，否则排障就没法看了 ✗
+        assert!(text.contains("上游回显"), "正常文案被吃掉了：{text}");
+        assert!(text.contains("一切正常"), "正常字段被吃掉了：{text}");
     }
 
     /// 两条明细落成**数组**（一条时不裹数组，两条时是数组）。

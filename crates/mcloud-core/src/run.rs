@@ -94,6 +94,26 @@ impl TaskOutcome {
         matches!(self, TaskOutcome::Failed { .. })
     }
 
+    /// 脱敏后的副本。
+    ///
+    /// 三个变体的文本都来自**任务自己**（`summary`/`reason`），而失败原因里
+    /// 最典型的就是"上游回显 + 原因" —— 上游把请求体或头原样吐回来时，
+    /// 那一串里就带着凭证 ✓。它同时进两条路：`RunEvent::Finished`（SSE / 推送）
+    /// 与 `RunRecord.outcome`（落盘）⇒ 两处都得过闸 ✓。
+    pub fn scrubbed(&self) -> Self {
+        match self {
+            TaskOutcome::Success { summary } => TaskOutcome::Success {
+                summary: crate::event::redact(summary),
+            },
+            TaskOutcome::Skipped { reason } => TaskOutcome::Skipped {
+                reason: crate::event::redact(reason),
+            },
+            TaskOutcome::Failed { reason } => TaskOutcome::Failed {
+                reason: crate::event::redact(reason),
+            },
+        }
+    }
+
     /// 一句话摘要，用于列表展示与推送。
     pub fn summary(&self) -> &str {
         match self {

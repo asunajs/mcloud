@@ -299,7 +299,11 @@ impl NotifySink {
 
 impl EventSink for NotifySink {
     fn emit(&self, event: RunEvent) {
-        // 先做推送侧的动作，再把事件**原样**转给内层。
+        // 出去之前先过一道脱敏（复核意见 §1.14）：
+        // 这一路会把任务的日志/结论原样带出去（进程日志 / SSE / 推送 / 落盘），
+        // 而上游回显里可能就有一枚凭证 ✗。形状由 mcloud-core 给死 ⇒ sink 只要一行 ✓。
+        let event = event.scrubbed();
+        // 先做推送侧的动作，再把事件转给内层（内层自己也会脱敏，幂等 ✓）。
         //
         // 判据（是否主动中止）依赖"runner 还没 release 取消登记表"——那与转发
         // 顺序无关：整段都在同一个同步 emit 调用里完成，而 runner 的 release 在
@@ -716,6 +720,37 @@ mod tests {
             "企业微信正文要带摘要：{wx}"
         );
         assert_eq!(inner.len(), 2, "事件要原样往下走");
+    }
+
+    /// ⚠ **推送是本项目最要紧的一条脱敏边界**：SSE 流与进程日志都还在本机，
+    /// webhook 是**真的离开本机** ✗。而结论里的 `summary`/`reason` 是任务自己写的
+    /// 自由文本 —— 上游把请求头/请求体回显进报错时，凭证就跟着一起出去 ✗。
+    ///
+    /// 这条断言的是**推出去的那份正文**（不是内存里的事件对象）✓。
+    #[tokio::test]
+    async fn webhook_body_never_carries_credentials() {
+        let http = FakeHttp::new();
+        let store = FakeStore::with(vec![account_with(
+            "19900000001",
+            Some(cfg(r#"{"serverChan":{"token":"SC"}}"#)),
+        )])
+        .arc();
+        let (sink, _inner) = sink_for(Arc::clone(&http), store, None);
+
+        sink.emit(started(1, "sign", "19900000001"));
+        sink.emit(finished(
+            1,
+            TaskOutcome::failed(
+                "上游回显 password=hunter2，Authorization: Bearer deadbeefdeadbeef",
+            ),
+            10,
+        ));
+        wait_calls(&http, 1).await;
+
+        let body = http.body_at(0).to_string();
+        assert!(!body.contains("hunter2"), "推送正文里带了口令：{body}");
+        assert!(!body.contains("deadbeef"), "推送正文里带了 token：{body}");
+        assert!(body.contains("上游回显"), "正常文案要留着：{body}");
     }
 
     /// 标题用账号配置里的 title（不是硬编码）。

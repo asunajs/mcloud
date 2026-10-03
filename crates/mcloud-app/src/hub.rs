@@ -391,6 +391,10 @@ impl EventHub {
 
 impl EventSink for EventHub {
     fn emit(&self, event: RunEvent) {
+        // 出去之前先过一道脱敏（复核意见 §1.14）：
+        // 这一路会把任务的日志/结论原样带出去（进程日志 / SSE / 推送 / 落盘），
+        // 而上游回显里可能就有一枚凭证 ✗。形状由 mcloud-core 给死 ⇒ sink 只要一行 ✓。
+        let event = event.scrubbed();
         // 顺手打到 tracing，便于无订阅者时也能从进程日志追溯
         match &event {
             RunEvent::Log { level, message, .. } => match level {
