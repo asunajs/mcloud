@@ -577,21 +577,35 @@ Conventional Commits，**中文正文**：
 cargo fmt --all -- --check          # 必须无输出
 cargo clippy --workspace --all-targets
 cargo test --workspace              # 必须 0 failed
-node scripts/gates-web.mjs --full   # 前端闸门（默认五条；--full 再加一条泄漏量测）
+node scripts/gates-web.mjs --push   # 前端闸门（推送档 = 提交档 + 窄屏 + login/setup + 泄漏量测）
 ```
 
 四条全绿才能提交。**本次提交新引入的告警/失败由本次提交负责**——
 当前 §3.3 记录的欠账为零，所以「本来就有」这个借口不存在。
-⚠ **耗时随机器变，本文不写秒数** —— 脚本头部自己那行会报当次读数。
+⚠ **耗时随机器变，本文不写秒数** —— 脚本自己会打当次读数。
 
-`gates-web.mjs` 默认五条是：`typecheck` / `build` / **lite 编译期负例** /
-**窄屏布局验收**（真 375 宽视口：横向溢出、账号行、弹窗出口、tab 尺寸）/ **lite 真 DOM 验收**
-（demo 断言 + 编译产物行为与耗时护栏 + 认证态的交互）。
-**认证态的口径**：不带 `--full` 时只跑 `ready`（改脚本时的快回路，
-**不能替代**提交前那次）；`--full` 跑满三个认证态（`ready` / `login` / `setup`），
-并**额外**跑一条前端泄漏量测。
+`gates-web.mjs` **分两档**（2026-10-04 用户口径：「一种在 push 时再验证，时间长范围广；
+一种提交就验证必要的测试」）：
 
-⚠ 没装无头 Chrome 的机器上最后一条会印 `⊘ 跳过（本机没有无头 Chrome，这条不算通过）` ——
+* **`--commit`（默认，必要且快）**：`typecheck` / `build` / **lite 编译期负例** /
+  **lite 真 DOM 验收**（demo 断言）/ **编译产物行为与耗时护栏**（bench）/
+  **交互验收 `ready`**（真页面点一遍：9 条路由 + 各页交互）；
+* **`--push`（旧名 `--full` 仍认）**：在上面那档之上**再加**三条"贵"或"不看就发现不了"的 ——
+  320/375 两档窄屏布局验收（真视口：横向溢出、账号行、弹窗出口、tab 尺寸）/ 交互验收
+  `login` 与 `setup`（走的是另一条代码路径：登录闸门 / 建管理员向导）/ **前端泄漏量测**
+  （8 个页面 × 2 轮 —— 它就是"推送档为什么长"的**全部**原因）。
+
+两档是**包含**关系：`--push` 跑的就是 `--commit` 的超集 ✓，不会"跑了推送档反而漏了提交档某条"。
+分界不是"重要不重要"，而是"**贵不贵**"：一档要等两分钟，人就会开始 `--no-verify` ✗。
+
+**要不要手敲，交给钩子也行**：`scripts/install-git-hooks.sh` 装一次，`pre-commit` 自动跑提交档
+（⚠ 只在暂存区里确实有 `web/` 改动时才跑 —— 纯 Rust / 纯文档提交不该为它等）、`pre-push`
+自动跑推送档 ✓（它们**只碰这两个名字**，`.git/hooks/` 里别的钩子一个都不动，也**不设**
+`core.hooksPath` ✗）。卸：`scripts/install-git-hooks.sh --uninstall`；单独跳过某一次：
+`git commit --no-verify` / `git push --no-verify` —— **跳了就是没验证** ✓。
+
+⚠ 没装无头 Chrome 的机器上，要浏览器的那几条会印
+`⊘ 跳过（本机没有无头 Chrome，这条不算通过）` ——
 **跳过 ≠ 通过**，那部分前端行为没有被验证过，要么换台有浏览器的机器跑，要么显式说明。
 
 CI 已配置（`.github/workflows/ci.yml`），上面四条即为合并门禁，另加 MSRV 编译。

@@ -121,8 +121,9 @@ jobs:
         run: npm run build
 
       # lite 的**编译期负例**：该抛的写法必须抛。只要 Node、不要浏览器 ⇒ CI 跑得动。
-      # ⚠ 另两条前端闸门（窄屏布局 / 真 DOM 验收）要无头 Chrome，ubuntu runner 上没有 ⇒
-      #   那两条是**本地提交前**的门（`node scripts/gates-web.mjs --full`）。
+      # ⚠ 要无头 Chrome 的那几条（窄屏布局 / 真 DOM 验收 / 三个认证态 / 泄漏量测）
+      #   ubuntu runner 上没有 ⇒ 它们是**本地**的门：
+      #   提交档 `node scripts/gates-web.mjs`、推送前 `node scripts/gates-web.mjs --push`。
       - name: lite 编译期负例
         run: node lite/regress/compiler.mjs
 

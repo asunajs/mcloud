@@ -1,22 +1,38 @@
 #!/usr/bin/env node
 /**
- * Web 门禁：**编译两条 + lite 编译期负例一条 + lite 真 DOM 验收一条**。
+ * Web 门禁：**两档**（2026-10-04 用户口径：「一种在 push 时再验证，时间长范围广；
+ * 一种提交就验证必要的测试」）。
  *
- * 为什么加后两条：原来只有 `typecheck` + `build`，那两条只证明"能编译"，
- * 不证明页面正确 —— lite 的行为靠 `web/lite/regress/`（真 DOM 交互）与
- * `web/lite/demo/`（编译产物断言）把，而它们此前**只能手敲**，
- * 于是"提交前全绿"里的前端部分实际上是没门的。
+ * * `--commit`（**默认就是它**）：提交档 —— 改完就能自查的最小集合。
+ *   类型 + 构建 + 编译器负例 + 框架真 DOM 断言（demo）+ 编译产物行为护栏（bench）
+ *   + **真页面点一遍**（交互验收 `ready` 一个认证态）。
+ * * `--push`：推送档 —— 上面那档 **再加**三条"范围广/看不出来"的：
+ *   320/375 两档窄屏布局、`login` / `setup` 两个认证态、前端泄漏量测。
+ *   ⚠ 泄漏那条自己就占了绝大部分时间（8 个页面 × 2 轮 + 8 次浏览器启动），
+ *   它就是"推送档为什么长"的**全部**原因 ✓。
  *
- * ⚠ 没浏览器就**明说跳过**，不算通过。`regress` 与 `demo` 要无头 Chrome
- * （本机 puppeteer 缓存里那份），CI 的 ubuntu runner 上没有 —— 那一条会显示
- * `skipped(无浏览器)`，摘要里看得见。"跳过 ≠ 通过"是本项目的一贯口径。
+ * 两档的关系是**包含**：`--push` 跑的就是 `--commit` 的超集（同一条命令 + 三条）✓，
+ * 不存在"跑了推送档反而漏了提交档某条"的情形 ✓。
  *
- * 用法：
- *   node scripts/gates-web.mjs           # 默认：typecheck + build + lite 冒烟 + 窄屏（后两条并行）≈ 110 s
- *   node scripts/gates-web.mjs --full    # 提交前：三个认证态全跑 + 泄漏量测（三条并行）≈ 143 s（2026-10-03 实测 2m22.8s）
+ * # 为什么这么分（而不是"提交时全跑"）
  *
- * 为什么默认只跑 ready：`interact` 的三个认证态里 ready 占了一半以上时间（27 s / 8 s / 10 s），
- * 而改脚本时的快速回路不该等一分钟。提交前用 `--full`（约定 §9.2 要的那条）。
+ * 提交是高频动作：一档要等两分钟，人就会开始 `git commit --no-verify` ✗ ——
+ * 那一档必须短到**愿意等**；而推送/合并是低频、影响面大，值得把"不看就发现不了"
+ * 的那一类（内存与 DOM 泄漏、窄屏溢出、别的认证态）一次跑完 ✓。
+ * ⇒ 分界不是"重要不重要"，而是"**贵不贵**"：便宜且常出错的留在提交档，
+ * 贵的（泄漏量测）挪去推送档 ✓。
+ *
+ * # 用法
+ *
+ *   node scripts/gates-web.mjs            # = --commit（提交档）
+ *   node scripts/gates-web.mjs --push     # 推送档（`--full` 是它的旧名，仍认）
+ *
+ * 装好钩子后这两档是自动的：`scripts/install-git-hooks.sh` 的 `pre-commit` 跑提交档、
+ * `pre-push` 跑推送档 ✓（跳过一律用 `--no-verify`，跳了就是没验证过 ✓）。
+ *
+ * ⚠ 没浏览器就**明说跳过**，不算通过（`skipped(无浏览器)`），摘要里看得见 ——
+ * 这是本项目的一贯口径：跳过 ≠ 通过。CI 的 ubuntu runner 上没有无头 Chrome，
+ * 所以 CI 那条只覆盖不依赖浏览器的三条（见 `.github/workflows/ci.yml`）✓。
  *
  * ⚠ 从**任何目录**调用都行：路径全部相对本文件算（曾经写死相对 `target`，
  * 不在仓库根跑就会把日志写到别处、并诡异地"找不到 web"）。
@@ -29,6 +45,12 @@ import path from 'node:path'
 
 const ROOT = path.resolve(new URL('.', import.meta.url).pathname, '..')
 const WEB = path.join(ROOT, 'web')
+
+/**
+ * 档位。`--full` 是**推送档的旧名**（2026-10-04 之前只有 `--full` 这一个开关，
+ * 文档 / CI 注释 / release.yml 里都还留着它）⇒ 继续认，别再改回去 ✗。
+ */
+const MODE = process.argv.includes('--push') || process.argv.includes('--full') ? 'push' : 'commit'
 
 /** 有没有可用的无头 Chrome（只看本机 puppeteer 缓存，不去联网下载）。 */
 const hasBrowser = () => {
@@ -50,46 +72,55 @@ const hasBrowser = () => {
   return false
 }
 
+/**
+ * 门禁清单。`tier` = 从哪一档开始跑（`commit` 的两档都跑，`push` 只有推送档跑）。
+ *
+ * `browser: true` 的三条性质：① 没有无头 Chrome ⇒ 印 `⊘ 跳过` 且**不算通过**；
+ * ② 它们**并行**跑（彼此不依赖：各自起夹具后端、各自一个 Chrome profile，
+ * 读的都是 `build` 刚产出的 `web/dist`）✓。
+ */
 const GATES = [
-  { name: 'typecheck', cmd: 'npm', args: ['run', 'typecheck'] },
-  { name: 'build', cmd: 'npm', args: ['run', 'build'] },
+  // ── 提交档：不依赖浏览器的三条（**串行**，`build` 必须先出 `web/dist`）──
+  { tier: 'commit', name: 'typecheck', cmd: 'npm', args: ['run', 'typecheck'] },
+  { tier: 'commit', name: 'build', cmd: 'npm', args: ['run', 'build'] },
   // 编译期负例：纯 Node，CI 也跑得动 —— 该抛的没抛就是编译器的门坏了
-  { name: 'lite 编译期负例', cmd: 'node', args: ['lite/regress/compiler.mjs'] },
-  // 窄屏（375，真视口）：宽屏那条抓不到"手机上没法用"这一类（2026-10-01 用户连报两个）
+  { tier: 'commit', name: 'lite 编译期负例', cmd: 'node', args: ['lite/regress/compiler.mjs'] },
+
+  // ── 提交档：要浏览器的三条（**并行**）──
+  // demo：lite 的**真 DOM 断言**（绑定/列表复用/插槽/钩子/条件分支…）—— 框架自己的门
+  { tier: 'commit', name: 'lite 真 DOM 验收', cmd: 'node', args: ['lite/demo/run.mjs'], browser: true },
+  // bench：编译产物的行为断言 + 一组很松的耗时护栏（列表从"搬"退化成"重建"时能响）
+  { tier: 'commit', name: '编译产物行为 + 耗时护栏', cmd: 'node', args: ['lite/bench/run.mjs'], browser: true },
+  // 交互验收 ready：**真页面**点一遍（9 条路由 + 各页的交互与断言）—— 提交档里最值钱的一条
+  { tier: 'commit', name: '交互验收 ready', cmd: 'node', args: ['lite/regress/interact.mjs', '--variant', 'ready'], browser: true },
+
+  // ── 推送档追加：贵／"不看就发现不了"的三类 ──
+  // 窄屏两档（320 / 375 真视口）：宽屏跑不到的"手机上没法用"那一类
   // ⚠ 名字里留一段 ASCII：日志文件名按 `[^0-9a-zA-Z]+` 清洗，纯中文名会退化成
   // `gates-web--.log`（跟别的门禁分不清）。
-  { name: 'narrow-375 窄屏布局验收', cmd: 'node', args: ['lite/regress/narrow.mjs'], browser: true },
-  {
-    name: 'lite 真 DOM 验收',
-    // all.mjs 的默认就是"三个认证态全跑"，所以 --full 只需**不传** --quick
-    cmd: 'node',
-    args: ['lite/regress/all.mjs', '--skip-build', ...(process.argv.includes('--full') ? [] : ['--quick'])],
-    browser: true,
-  },
+  { tier: 'push', name: 'narrow-320-375 窄屏布局验收', cmd: 'node', args: ['lite/regress/narrow.mjs'], browser: true },
+  // 另外两个认证态：走的是**另一条代码路径**（登录闸门 / 建管理员向导），ready 态覆盖不到
+  { tier: 'push', name: '交互验收 login', cmd: 'node', args: ['lite/regress/interact.mjs', '--variant', 'login'], browser: true },
+  { tier: 'push', name: '交互验收 setup', cmd: 'node', args: ['lite/regress/interact.mjs', '--variant', 'setup'], browser: true },
   /**
-   * ⚠ 只在 `--full`（提交前那次）跑：要无头 Chrome 走 8 个页面 × 2 轮。
-   * **实测 126 s**（预热 8 页 + 2 轮 + 浏览器启动）—— 是六条里最慢的一条 ✓，
-   * 所以默认那条快回路（改脚本用）不加它 ✓。
+   * 泄漏量测：**只在推送档**。要无头 Chrome 走 8 个页面 × 2 轮（实测 ≈127 s，
+   * 是全部十条里最慢的一条，比其余九条加起来还长 ✓ 所以它不进提交档 ✗）。
    *
    * 为什么非有不可：这一类泄漏**功能上完全看不出来** —— 页面全对、别的门禁全绿，
    * 只是内存与 DOM 节点一路涨 ✗。2026-10-02 就是这么漏到用户眼前的（用户报「4M → 8M」）：
    * 当时只有一份要**真会话 cookie** 的脚本 ✗（`/tmp/mcloud-cookie.txt`），别人复现不了 ✗。
    * 现在走 `--fixture` ✓（夹具后端 + 内核分配端口，不碰 3000、不要 cookie ✓）。
    */
-  ...(process.argv.includes('--full')
-    ? [
-        {
-          name: '前端泄漏量测',
-          cmd: 'node',
-          args: ['lite/regress/leak.mjs', '--fixture', '--rounds', '2'],
-          browser: true,
-        },
-      ]
-    : []),
+  { tier: 'push', name: '前端泄漏量测', cmd: 'node', args: ['lite/regress/leak.mjs', '--fixture', '--rounds', '2'], browser: true },
 ]
+
+/** 本次要跑的那几条（提交档 + 推送档追加）。 */
+const ACTIVE = GATES.filter((g) => g.tier === 'commit' || MODE === 'push')
 
 fs.mkdirSync(path.join(ROOT, 'target'), { recursive: true })
 const results = []
+
+console.log(`=== 档位：${MODE === 'push' ? '推送档（--push）' : '提交档（--commit，默认）'} · ${ACTIVE.length} 条 ===`)
 
 /** 把一条门禁的输出落盘（名字里的非字母数字按老口径清洗成 `-`）。 */
 const logPath = (gate) =>
@@ -97,7 +128,7 @@ const logPath = (gate) =>
 
 /**
  * 跑一条门禁。同步版给"必须先于浏览器那几条"的那几条用 ——
- * `build` 得先出 `web/dist`，浏览器的三条才有东西可服务 ✗ 别并行到一起去。
+ * `build` 得先出 `web/dist`，浏览器那几条才有东西可服务 ✗ 别并行到一起去。
  */
 function runSync(gate) {
   const t = Date.now()
@@ -114,15 +145,16 @@ function runSync(gate) {
 }
 
 /**
- * 并行版：给三条要无头 Chrome 的门禁用。
+ * 并行版：给要无头 Chrome 的门禁用。
  *
  * # 为什么可以并行（2026-10-03 实测省下约 2 分钟）
  *
  * 它们**互不依赖**：每条自己起夹具后端（`serve(..., 0)`，端口由内核分配、不碰 3000）
  * 与自己的 Chrome profile ✓，读的只是已经构建好的 `web/dist` ✓。
- * 串行时是 30.9 + 84.6 + 127.0 = **242 s**，并行后约等于最慢那条（**127 s**）。
+ * 串行时是 30.9 + 84.6 + 127.0 = **242 s**，并行后约等于最慢那条 ✓
+ * （推送档最慢的是泄漏量测 ⇒ 并行把这档钉在 ≈130 s 而不是 ≈250 s ✓）。
  *
- * ⚠ 三条都**不是靠计时**断言的（数堆/数节点/量计算样式 + 固定 dwell），
+ * ⚠ 它们**不是靠计时**断言的（数堆/数节点/量计算样式 + 固定 dwell），
  * 所以互相抢 CPU 不会让它们变脆 ✓ —— 但真机只 2 核时别并行，那时抢 CPU 反而拖慢。
  */
 function runParallel(gate) {
@@ -153,9 +185,9 @@ function browserMissing(gate) {
 }
 
 // ① 顺序跑"不依赖浏览器"的那几条：typecheck / build / lite 编译期负例。
-//    `build` 必须在浏览器的三条之前 —— 它们服务的是它产出的 `web/dist` ✗。
-const serial = GATES.filter((g) => !g.browser)
-const parallel = GATES.filter((g) => g.browser)
+//    `build` 必须在浏览器的那几条之前 —— 它们服务的是它产出的 `web/dist` ✗。
+const serial = ACTIVE.filter((g) => !g.browser)
+const parallel = ACTIVE.filter((g) => g.browser)
 let failedEarly = false
 for (const gate of serial) {
   if (runSync(gate) === false) {
@@ -179,13 +211,14 @@ const failed = results.filter((r) => !r.ok)
 const summary = results.map((r) => `${r.name}: ${r.skipped ? 'skipped(无浏览器)' : r.ok ? 'pass' : 'FAIL'}`).join(' | ')
 
 if (failed.length > 0) {
-  fs.writeFileSync(path.join(ROOT, 'target', 'gates-web-last.log'), `FAILED — ${summary}\n`)
-  console.error(`\n门禁未通过：${summary}`)
+  fs.writeFileSync(path.join(ROOT, 'target', 'gates-web-last.log'), `FAILED [${MODE}] — ${summary}\n`)
+  console.error(`\n门禁未通过（${MODE} 档）：${summary}`)
   process.exit(1)
 }
 
 // 全绿时清掉 last 日志：别拿它的空不空当"跑没跑"的证据
 fs.rmSync(path.join(ROOT, 'target', 'gates-web-last.log'), { force: true })
 const skipped = results.filter((r) => r.skipped).map((r) => r.name)
-console.log(`\n全绿（${results.length} 条）：${summary}`)
+console.log(`\n全绿（${MODE} 档 ${results.length} 条）：${summary}`)
 if (skipped.length) console.log(`⚠ 其中 ${skipped.join('、')} 被跳过 —— 那部分**没有**被验证过。`)
+if (MODE === 'commit') console.log('⚠ 提交档不含窄屏 / login / setup / 泄漏量测 —— 推送前请跑 `--push` ✓。')

@@ -90,6 +90,29 @@ const configView = (name) => ({ name, specs: SPECS[name] ?? [], params: taskCfg[
 const resetAcctState = () => {
   acctState.accounts = [ACCOUNT, ACCOUNT2].map((a) => ({ ...a }))
 }
+
+/**
+ * 服务端日志（`/api/logs`）—— **会长**的一份。
+ *
+ * 为什么必须会长：日志页每 2s 轮询一次，而「贴底时新行要跟到底部」这条
+ * 只有内容真的变多才量得出来 —— 静态名单下 `scrollHeight` 不变，
+ * "还在底部"这句在坏代码里也可能成立 ⇒ 门禁绿得没有意义 ✗。
+ * 每次请求多两行，正好模拟"进程还在打日志" ✓。
+ *
+ * ⚠ 与 `acctState`/`taskCfg` 同一个理由要有 `reset`：同一次进程里跑两个变体时
+ * 别把上一轮攒的行带过去 ✓。
+ */
+const logsState = { lines: [], seq: 0 }
+const logLine = (i, at) => ({
+  level: i % 7 === 0 ? 'warn' : 'info',
+  target: 'mcloud_engine::scheduler',
+  message: `第 ${i} 行 —— 门禁用（量滚动位置）`,
+  at_ms: at,
+})
+const resetLogsState = () => {
+  logsState.lines = Array.from({ length: 60 }, (_, i) => logLine(i, 1790581000000 + i * 1000))
+  logsState.seq = logsState.lines.length
+}
 const RUN = {
   run_id: 1024,
   task: 'daily-checkin',
@@ -455,6 +478,24 @@ export const VARIANTS = {
    */
   ready: {
     /**
+     * 服务端日志（`/logs` 那一页）：**每次请求多两行** ✓。
+     *
+     * 为什么必须会长：那一页每 2 s 轮询一次，而「贴底时新行要跟到底部」这条
+     * 只有内容真的变多才量得出来（见 `logsState`）✓。
+     * `limit` 照真后端那个口径夹一下（界面固定传 800）✓。
+     */
+    'GET /api/logs': {
+      handler: (_body, req) => {
+        logsState.lines.push(
+          logLine(logsState.seq++, Date.now()),
+          logLine(logsState.seq++, Date.now()),
+        )
+        const q = new URL(String(req?.url ?? ''), 'http://x').searchParams
+        const limit = Number(q.get('limit') ?? '800')
+        return { status: 200, body: logsState.lines.slice(-limit) }
+      },
+    },
+    /**
      * 兑换订阅：GET 读那份有状态的值、POST **toggle** 改它。
      *
      * ⚠ 装置这边也要按**真后端那条规则**实现（已订就取消、没订就追加）——
@@ -625,6 +666,7 @@ export const serve = (root, port, variant) =>
   new Promise((resolve, reject) => {
     resetAcctState()
     resetTaskCfg()
+    resetLogsState()
     const overrides = VARIANTS[variant]
     /**
      * 一条 fixture 可以是 `{status, body}`，也可以是 `{handler(body) → {status, body}}` ——

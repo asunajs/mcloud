@@ -297,11 +297,15 @@ Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过�
   cargo test --workspace
   cargo clippy --workspace --all-targets -- -D warnings
   cargo fmt --all -- --check
-  node scripts/gates-web.mjs --full
+  node scripts/gates-web.mjs --push
   ```
-  （`--full` = 三个认证态的交互验收全跑 + 泄漏量测，**2026-10-03 实测 2m22.8s**；不带它的默认只跑 `ready`，≈ 110 s。三条要 Chrome 的已并行 —— 见 `scripts/gates-web.mjs`；
-  是**改脚本时的快回路**，不能替代提交前那次。**五条**里后两条（窄屏布局验收 / 真 DOM 验收）
-  要无头 Chrome，没有的机器上会明说"跳过 ≠ 通过"。）
+  （前端门禁**分两档**（2026-10-04 用户口径：「一种在 push 时再验证，时间长范围广；
+  一种提交就验证必要的测试」）—— `--commit`（**默认**）是必要且快的那档：类型 + 构建 +
+  编译期负例 + demo/bench + 交互验收 `ready`；`--push`（旧名 `--full` 仍认）在它之上再加
+  320/375 窄屏 + `login`/`setup` 两个认证态 + 泄漏量测，**实测约 130 s**（其中泄漏那条自己
+  就≈127 s）。**提交时**跑哪档可以交给钩子：`scripts/install-git-hooks.sh` 一装，
+  `pre-commit` 自动跑提交档、`pre-push` 自动跑推送档 ✓（跳过一律 `--no-verify`，
+  跳了就是没验证过 ✓）。要 Chrome 的那几条在没有浏览器的机器上会明说"跳过 ≠ 通过"。）
 
 ## ⚠ 构建顺序（踩过坑）
 

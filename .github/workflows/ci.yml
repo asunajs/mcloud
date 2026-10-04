@@ -31,11 +31,11 @@ name: CI
 # 没那么多预算）。保留两条：PR 上跑（合并前把关）、手动触发（需要时跑）。
 #
 # 代价要清楚：直接 push 到 main 现在**没有** CI 兜底了。所以本地交付前
-# 必须自己跑齐（见 docs/conventions.md §9.2，前端那条要用 `--full`，
-# 不带 `--full` 只跑 ready 一个认证态，覆盖不到登录/初始化态）：
+# 必须自己跑齐（见 docs/conventions.md §9.2；前端门禁分两档，
+# **推送前**那条要用 `--push` —— 只跑默认的提交档覆盖不到窄屏 / 登录 / 初始化态 / 泄漏）：
 #     cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings
 #     cargo test --workspace --locked
-#     node scripts/gates-web.mjs --full
+#     node scripts/gates-web.mjs --push
 # 打 tag 出包时 release.yml 仍会独立跑三平台构建（那是发版必需的一次）。
 on:
   pull_request:

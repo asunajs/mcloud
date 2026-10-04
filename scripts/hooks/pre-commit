@@ -1,0 +1,32 @@
+#!/bin/sh
+# 提交档 Web 门禁（`node scripts/gates-web.mjs --commit`，必要且快 ✓）。
+#
+# ⚠ 只在本**暂存区里确实有 web/ 的东西**时才跑：纯 Rust / 纯文档提交不该为它等
+# 那几十秒 ✓（多会话并行时尤其重要 —— 别的写入线在跑 Rust，别被前端门禁堵住 ✗）。
+# 判据是 `git diff --cached`（暂存区），不是工作区 —— 提交的就是暂存区那份 ✓。
+#
+# 跳过：`git commit --no-verify`（git 的标准开关）。跳了就是**没验证**，别当默认 ✓。
+# 卸载：`rm .git/hooks/pre-commit`（或跑 `scripts/install-git-hooks.sh --uninstall`）。
+set -e
+
+root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$root" ] || exit 0
+
+staged="$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)"
+case "$staged" in
+  *web/*|*scripts/gates-web.mjs*|*scripts/hooks/*) ;;
+  *)
+    echo "web 门禁（提交档）：暂存区里没有 web/ 改动，跳过 ✓"
+    exit 0
+    ;;
+esac
+
+if ! command -v node >/dev/null 2>&1; then
+  # ⚠ 这里**不拦提交**（环境缺 node 不是这次改动的错），但要把话说明白：
+  # 本项目口径是"跳过 ≠ 通过"，所以措辞照那个来 ✓。
+  echo "⚠ 找不到 node ⇒ web 门禁（提交档）**没跑**（跳过 ≠ 通过）" >&2
+  exit 0
+fi
+
+echo "web 门禁（提交档，本机实测≈40 s）：node scripts/gates-web.mjs --commit"
+exec node "$root/scripts/gates-web.mjs" --commit

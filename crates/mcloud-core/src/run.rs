@@ -287,13 +287,18 @@ mod tests {
     fn log_lines_round_trip() {
         let line = RunLogLine {
             level: LogLevel::Warn,
+            // 分类与级别**不是一回事**：`level` 管配色档位、`kind` 管徽章语义 ✓
+            //（`ctx.fail()` 就是 kind=Fail + level=Warn ✓）。这一条是普通 warn ⇒ 同值 ✓。
+            kind: crate::event::LogKind::Warn,
             message: "领取AI豆：上游错误 [614]".into(),
             at_ms: 1_700_000_000_123,
         };
         let j = serde_json::to_string(&line).expect("应能序列化");
+        // ⚠ 字段顺序就是**结构体里的声明顺序**（level → kind → message → at_ms ✓）——
+        // 这一条是逐字比对，`kind` 后来才加进结构体 ⇒ 期望串要跟着带上它 ✗。
         assert_eq!(
             j,
-            r#"{"level":"warn","message":"领取AI豆：上游错误 [614]","at_ms":1700000000123}"#
+            r#"{"level":"warn","kind":"warn","message":"领取AI豆：上游错误 [614]","at_ms":1700000000123}"#
         );
         let back: RunLogLine = serde_json::from_str(&j).expect("应能解析");
         assert_eq!(back, line);

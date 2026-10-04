@@ -12,8 +12,13 @@
  * 用法：
  *   node lite/regress/all.mjs            # 全量：构建 + 负例 + demo + bench + 3 个认证态交互
  *   node lite/regress/all.mjs --quick    # 冒烟：只跑 ready 一个认证态（改脚本时用）
- *   node lite/regress/all.mjs --skip-build # 不重新构建（`scripts/gates-web.mjs` 已建过 dist）
+ *   node lite/regress/all.mjs --skip-build # 不重新构建（调用方保证 dist 是新的）
  *   node lite/regress/all.mjs --size     # 顺带打印运行时体积（不参与判定）
+ *
+ * ⚠ 这是 lite 自己的**总入口**（串行跑上面那一串）。`scripts/gates-web.mjs` 现在
+ * **不调它**了（2026-10-04 起门禁分两档，要按档挑子集、还要并行）⇒ 那边直接跑
+ * `demo/run.mjs` / `bench/run.mjs` / `interact.mjs` 三个子脚本 ✓。两边都跑得通，
+ * 别把这里当成"门禁只走这一条路" ✗。
  *
  * 退出码非 0 = 有任何一项没过。⚠ 它**只读**仓库（临时产物落 /tmp 与 `lite/regress/.check-tmp`、
  * `lite/.size-tmp`），不动 `web/dist` 之外的任何东西，也**不碰** 3000 端口上那个 launchd 服务。
@@ -90,7 +95,7 @@ const cleanTmp = () => {
 
 let ok = true
 // 先构建：交互验收跑的就是 `dist` 里那份产物，拿旧 dist 测等于在测上一版。
-// `--skip-build` 只给"上游刚刚构建过"的门禁省这一下（见 `scripts/gates-web.mjs`）。
+// `--skip-build` 只给"上游刚刚构建过"的调用方省这一下（手敲连跑时用得上）。
 if (process.argv.includes('--skip-build')) {
   console.log('── 构建 … 跳过（--skip-build：由调用方保证 dist 是新的）')
 } else {

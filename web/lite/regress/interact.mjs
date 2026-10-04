@@ -1001,6 +1001,65 @@ const STEPS = {
       changed: true,
     },
 
+    // ── 日志页（`/logs`）：**滚动位置**（2026-10-04 用户报「服务端日志页面出日志会强制滚动到顶部」✗）──
+    //
+    // 那一页每 2 s 轮询一次把整份列表换掉，而卡片原先写在条件槽里 ⇒ `setNodes`
+    // 每次换一颗**新容器**（节点一换，`scrollTop` 天然是 0）⇒ 用户被弹回最旧那屏 ✗。
+    // 修法是"卡片常驻 + `load()` 里记/写滚动位置"（`web/src/pages/logs-page.tsx`），
+    // 下面两步就是它的钉子：**各自真等一次轮询**（2.4 s）再断言 ✓。
+    //
+    // ⚠ 夹具那份 `/api/logs` 挂在 **`VARIANTS.ready`** 上（`lib.mjs` 的 `logsState`）——
+    // 所以下面这几步只属于 **ready 档** ✓（别的变体里那条路径是 404）。
+    // 没有这一条"贴底跟随"就量不出来（静态名单下 `scrollHeight` 不变，
+    // 坏代码也可能满足"还在底部"✗）。所以下面 `do` 里**先断言容器真的可滚**：
+    // 夹具一旦没给日志，"通过"就成了一句空话 ⇒ 宁可当场红 ✗。
+    // ⚠ 只量 `scrollTop` 也不够：真坏法是"换了节点"（新节点的 `scrollTop` 天然是 0），
+    // 所以"还是不是同一个容器"（`__probe` 标记）必须一起量 ✓ —— 实测：
+    // 把卡片改回条件渲染（其余不动）后，**中间那条**靠 `__probe` 才红 ✗；
+    // 而"贴底"那条会**照过**（`load()` 的写回把新容器重新钉到了底部）⇒
+    // 两条一起才是完整的钉子，别删任何一条 ✓。
+    {
+      name: '切到日志页（服务端全量日志，夹具每次请求多两行）',
+      do: go('logs'),
+      check: eq('location.pathname + "/" + (document.querySelectorAll("#logs-scroll > div").length > 20)', '/logs/true'),
+      changed: true,
+    },
+    {
+      name: '日志页：滚到中间后跨一次轮询不被弹回顶部',
+      do: `(async () => {
+        const el = document.getElementById('logs-scroll');
+        if (!el) throw new Error('没有滚动容器 #logs-scroll');
+        const max = el.scrollHeight - el.clientHeight;
+        if (max < 200) throw new Error('日志页没有可滚动的内容（夹具没给 /api/logs？）');
+        // ⚠ 位置要取**滚动范围**的一半，不是 scrollHeight 的一半 ——
+        // 后者在"视口本身就占了半屏"时几乎等于底部（实测 632/634）⇒ 会被"贴底跟随"
+        // 那条分支正确地接管，读数就成了"没弹回顶部、但走了 42px"✗。
+        el.__probe = 1;
+        el.scrollTop = Math.round(max / 2);
+        window.__logsTop = el.scrollTop;
+        await new Promise((r) => setTimeout(r, 2400));
+        return el.scrollTop;
+      })()`,
+      check: eq(
+        `(() => { const el = document.getElementById('logs-scroll'); return el.__probe === 1 && el.scrollTop === window.__logsTop })()`,
+        true,
+      ),
+    },
+    {
+      name: '日志页：贴底后跨一次轮询仍贴着底（新行跟着来）',
+      do: `(async () => {
+        const el = document.getElementById('logs-scroll');
+        window.__logsHeight = el.scrollHeight;
+        el.scrollTop = el.scrollHeight;
+        await new Promise((r) => setTimeout(r, 2400));
+        return true;
+      })()`,
+      check: eq(
+        `(() => { const el = document.getElementById('logs-scroll'); return el.scrollHeight > window.__logsHeight && el.scrollHeight - el.scrollTop - el.clientHeight < 4 })()`,
+        true,
+      ),
+    },
+
     /**
      * ⚠ 登出确认放在**最后**：它是破坏性的（确认后应用回到登录页），
      * 放在中间会让后面每一步都找不到元素。第一版就踩了：18 步"两侧一致"，

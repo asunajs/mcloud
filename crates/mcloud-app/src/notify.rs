@@ -634,9 +634,19 @@ mod tests {
     }
 
     fn logged(run_id: u64, level: LogLevel, message: &str) -> RunEvent {
+        // ⚠ 分类与级别是**两件事**（`kind` 管徽章/推送 type ✓、`level` 管筛选 ✓），
+        // 但生产里 `ctx.info/warn/error` 两格本来就同名 ⇒ 这里也按级别给出同名分类 ✓。
+        // `kind` 是后加的字段 ⇒ 这一处构造当时漏了 ✗，`--all-targets` 才抓到 ✓。
+        let kind = match level {
+            LogLevel::Debug => mcloud_core::LogKind::Debug,
+            LogLevel::Info => mcloud_core::LogKind::Info,
+            LogLevel::Warn => mcloud_core::LogKind::Warn,
+            LogLevel::Error => mcloud_core::LogKind::Error,
+        };
         RunEvent::Log {
             run_id: RunId::new(run_id),
             level,
+            kind,
             message: message.into(),
             at_ms: NOW_MS,
         }

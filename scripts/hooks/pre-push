@@ -1,0 +1,23 @@
+#!/bin/sh
+# 推送档 Web 门禁（`node scripts/gates-web.mjs --push`，长且范围广 ✓）。
+#
+# 跑的是**整套**：提交档那六条 + 320/375 窄屏 + `login` / `setup` 两个认证态 +
+# 前端泄漏量测（那一条自己就≈127 s，是这一档为什么长的全部原因 ✓）。
+#
+# ⚠ 与 `pre-commit` 不同，这里**不做"有没有 web 改动"的裁剪**：push 是低频动作，
+# 而"这次推的东西能不能上"值得把"不看就发现不了"的那一类一次跑完 ✓。
+# （真嫌慢就 `git push --no-verify` —— 跳了就是没验证，别当默认 ✓。）
+#
+# 卸载：`rm .git/hooks/pre-push`（或跑 `scripts/install-git-hooks.sh --uninstall`）。
+set -e
+
+root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$root" ] || exit 0
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "⚠ 找不到 node ⇒ web 门禁（推送档）**没跑**（跳过 ≠ 通过）" >&2
+  exit 0
+fi
+
+echo "web 门禁（推送档，本机实测≈2m10s）：node scripts/gates-web.mjs --push"
+exec node "$root/scripts/gates-web.mjs" --push

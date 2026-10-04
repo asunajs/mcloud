@@ -34,7 +34,15 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 服务就**已经不在** `launchctl list` 里了 ✗ —— 而那恰恰是最需要这个脚本
 # 把服务拉回来的时刻 ✓。只有第一步的话它会直接以"找不到 label"退出 ✗，
 # 于是"停掉的那个"再也没人拉起来 ✗。
-LABEL="${MCLOUD_LAUNCHD_LABEL:-$(launchctl list 2>/dev/null | awk '$3 ~ /mcloud-webui/ { print $3; exit }')}"
+# ⚠ `|| true` 不能省：`launchctl list` 在**被沙箱包住的 shell** 里会 exit 1（空输出 ✓，
+# 实测：DSH 的 bash 沙箱下如此，放宽后同一条命令 exit 0 / 527 行 ✓）。而
+# `set -e` 下 **`VAR=$(失败的命令)` 这行赋值本身就会终止脚本** ✗ —— 位置恰好在下面
+# trap **安装之前** ⇒ 表现是「无任何输出、exit 1、服务没被碰但也没人知道为什么」✗
+# （2026-10-04 实测踩到一次 ✓）。所以这里把它兜成"发现不到 label"这条**有出口**的路 ✓。
+LABEL="${MCLOUD_LAUNCHD_LABEL:-}"
+if [[ -z "$LABEL" ]]; then
+  LABEL="$(launchctl list 2>/dev/null | awk '$3 ~ /mcloud-webui/ { print $3; exit }' || true)"
+fi
 if [[ -z "$LABEL" ]]; then
   # 从 plist 文件名反推 label（排除 `.bak-*` 那几份备份 ✓）
   PLIST_FILE="$(ls -1 "$HOME/Library/LaunchAgents/" 2>/dev/null \
@@ -103,7 +111,13 @@ echo "── ③ 签名（固定身份 ⇒ 授权在重编后依然匹配 ✓）
 "$REPO/scripts/sign-local.sh"
 
 echo "── ④ 重新加载并启动"
-launchctl bootstrap "gui/$UID_" "$PLIST"
+# ⚠ 这一步在**被沙箱包住的 shell** 里会失败成 `Bootstrap failed: 5: Input/output error` ✗
+# （2026-10-04 实测：同一个 plist、同一条命令，沙箱内 exit 5，放宽后 exit 0 ✓）
+# ⇒ 报错里要带一句指路，否则会被误当成"plist 坏了"去瞎改 ✗。
+if ! launchctl bootstrap "gui/$UID_" "$PLIST"; then
+  echo "⚠ bootstrap 失败 ⇒ 上面若是 \`5: Input/output error\`，先怀疑 shell 被沙箱包着（不是 plist 的问题 ✗）" >&2
+  exit 1
+fi
 for _ in $(seq 1 24); do
   sleep 2
   if curl -s -o /dev/null --max-time 2 http://127.0.0.1:3000/api/health 2>/dev/null; then
@@ -117,7 +131,7 @@ cat >&2 <<EOF
 
   先看两处：
     launchctl list | awk '\$3=="${LABEL}"'            # 第 2 列非 0 ⇒ 上次退出码非 0
-    tail -5 ~/Library/Logs/mcloud-gost/webui.err.log  # 找 "Address already in use"
+    tail -5 ~/Library/Logs/mcloud/webui.err.log      # 找 "Address already in use"
 
   ⚠ 若日志一片空白、进程存在却不监听：那是**卡在等授权框**（dyld 的 open() 被扣住）。
     别 kill 它 —— 点一下「允许」同一个进程会自己接着跑 ✓。

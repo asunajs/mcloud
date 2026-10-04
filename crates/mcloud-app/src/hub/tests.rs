@@ -533,6 +533,9 @@ fn record_carries_status_and_roundtrips() {
         outcome: TaskOutcome::success("ok"),
         status: RunStatus::Cancelled,
         details: serde_json::Value::Null,
+        // `logs` 是后加的字段（`default` + `skip_serializing_if` ⇒ 空表不写进 JSON ✓）
+        // —— 这一处构造当时漏了 ✗，`--all-targets` 才抓到 ✓。
+        logs: Vec::new(),
     };
     let j = serde_json::to_string(&r).unwrap();
     assert!(j.contains("\"status\":\"cancelled\""), "{j}");

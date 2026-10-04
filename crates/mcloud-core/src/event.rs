@@ -750,6 +750,8 @@ mod tests {
             RunEvent::Log {
                 run_id: RunId::new(1),
                 level: LogLevel::Info,
+                // 分类（`kind` 是后加的字段 ⇒ 这一处构造当时漏了 ✗，`--all-targets` 才抓到 ✓）
+                kind: crate::event::LogKind::Info,
                 message: format!("拿到凭证 {JWT}"),
                 at_ms: 0,
             },
