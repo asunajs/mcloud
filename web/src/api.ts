@@ -68,6 +68,21 @@ export type TaskOutcome =
   | { status: 'failed'; reason: string }
 
 /**
+ * 一次运行的**生命周期**状态（后端 `mcloud_core::RunStatus`，serde 小写）。
+ *
+ * ⚠ 它和 `TaskOutcome` **不是一回事**，别合并（`crates/mcloud-core/src/run.rs`
+ * 的文件头写着这条分工）：
+ * - `status` 说"这次运行结束了没有"（`running` / `done` / `cancelled`）；
+ * - `outcome` 说"业务上成没成"（success / skipped / partial / failed）。
+ *
+ * 混起来会出事的地方正是 `cancelled`：用户自己点的「中止」在业务结论上是 `failed`
+ * （`runner.rs` 把 `Error::Cancelled` 收成 `TaskOutcome::failed`），
+ * 而后端**明确**说它不该报红、不该计入错误率（`RunRecord::needs_attention`
+ * 把 `Cancelled` 排除在外）⇒ 界面必须先看 `status`，别直接拿 `outcome.status` 染红 ✗。
+ */
+export type RunStatus = 'running' | 'done' | 'cancelled'
+
+/**
  * 运行日志的一行（**回看**用，来自 `RunRecord.logs`）。
  *
  * ⚠ 与实时面板的 `LogLine` **不是**同一个类型，别合并：这里 `level` 是后端那四个
@@ -99,6 +114,14 @@ export interface RunRecord {
   started_at_ms: number
   duration_ms: number
   outcome: TaskOutcome
+  /**
+   * 生命周期状态。与 `outcome` 的分工见 [`RunStatus`]。
+   *
+   * ⚠ 写成可选是给**老记录**留的：这一格是后加的，后端读回来时 `#[serde(default)]`
+   * 回填成 `done` ✓；界面侧一律走 `ui/history.ts` 的 `runStatusOf` 判它，
+   * **别**在各页自己写 `r.status === 'cancelled'` 的判空（漏一处就是一处"中止显示成失败"✗）。
+   */
+  status?: RunStatus
   /**
    * 这次运行的日志行（**回看**用；最多 200 行 ✓）。
    *

@@ -127,6 +127,10 @@ pub async fn setup_create(
     State(state): State<ServerState>,
     Json(body): Json<Credentials>,
 ) -> Result<Response, ApiError> {
+    // ⚠ 先过闸（复审 sv-5）：这条路同样在 PUBLIC 里，且要算一次 argon2。
+    if let Some(resp) = auth_rate_limit(&state) {
+        return Ok(resp);
+    }
     if is_initialized(&state).await? {
         return Err(ApiError(mcloud_core::Error::Config(
             "已经初始化过了，不能重复创建管理员".into(),
@@ -185,6 +189,11 @@ pub async fn login(
     State(state): State<ServerState>,
     Json(body): Json<Credentials>,
 ) -> Result<Response, ApiError> {
+    // ⚠ 先过闸（复审 sv-5）——**必须在"是否已初始化"之前**，理由见助手函数的注释。
+    if let Some(resp) = auth_rate_limit(&state) {
+        return Ok(resp);
+    }
+
     // 未初始化时明确告知，而不是"用户名或口令错误" ——
     // 后者会让人反复试一个根本不存在的账号
     if !is_initialized(&state).await? {
@@ -193,14 +202,21 @@ pub async fn login(
         )));
     }
 
-    let user = state
-        .handle
-        .store
-        .user_by_name(&body.username)
-        .await?
-        // ⚠ 用户不存在与口令错**回同一句话**：区分开来就是一个
-        // "这个用户名存不存在"的探测器。
-        .ok_or_else(|| ApiError(mcloud_core::Error::Auth("用户名或口令错误".into())))?;
+    // ⚠⚠ 计时抹平（2026-10-04 复审 `sv-4`）：**用户不存在时也要跑一次 argon2**。
+    //
+    // 直接 `ok_or_else` 早退的话，这条分支**一步 argon2 都不跑**，而 argon2id 是本
+    // 项目里最慢的一步（故意慢）⇒ 两条分支的响应时间差**一个数量级**，等于把
+    // "这个用户名存不存在"写在秒表上 ✗ —— 与下面那句共用的"用户名或口令错误"
+    //（注释里明写"区分开来就是一个探测器"）自相矛盾。
+    let Some(user) = state.handle.store.user_by_name(&body.username).await? else {
+        let _ = mcloud_crypto::verify_password(
+            &mcloud_crypto::to_digest_credential(&body.password),
+            mcloud_crypto::strip_digest_scheme(dummy_password_hash()),
+        );
+        return Err(ApiError(mcloud_core::Error::Auth(
+            "用户名或口令错误".into(),
+        )));
+    };
 
     // ── 口令校验：两种档位，按**库里那条记录**决定怎么验 ──────────────────
     //
@@ -260,7 +276,7 @@ pub async fn login(
 pub async fn logout(
     State(state): State<ServerState>,
     headers: HeaderMap,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Response, ApiError> {
     if let Some(token) = cookie_token(&headers) {
         state
             .handle
@@ -268,9 +284,63 @@ pub async fn logout(
             .remove_session(&hash_session_token(&token))
             .await?;
     }
-    // 即使没有 cookie 也返回 200：登出是幂等的，
-    // "本来就没登录"不该报错
-    Ok(StatusCode::NO_CONTENT)
+    // ⚠⚠ 服务端那条会话删了，**浏览器里那枚 cookie 也得让浏览器扔掉**
+    //（2026-10-04 复审 `sv-6`）：只删库、不 `Set-Cookie` 的话，cookie 会一直留在
+    // 浏览器里 —— 登出后它仍会被每一次请求带上（虽然服务端已经认不出它），
+    // 于是"登出"看起来只是"下次一定 401"，那枚凭据本体还躺在磁盘上 ✗。
+    // 属性与登录时**逐项对齐**（同 Path / HttpOnly / SameSite）＋ `Max-Age=0`，
+    // 否则浏览器会留下另一枚同名的 cookie，表现成"登出了还在"。
+    // ⚠ 即使没有 cookie 也返回 204：登出是**幂等**的，
+    // "本来就没登录"不该报错（照旧清一遍 cookie，对没登录的人也无害 ✓）。
+    Ok(clear_cookie_response(StatusCode::NO_CONTENT))
+}
+
+/// 用户不存在时拿它跑一次 argon2（见 [`login`] 里的计时抹平，复审 `sv-4`）。
+///
+/// 第一次用时算一次（`LazyLock`），之后复用 —— 串的内容**是什么不重要**，
+/// 重要的是"这一步必须和真校验**一样贵**" ✗（图省事换成一个便宜的哈希，
+/// 那个计时差当场就回来了）。
+fn dummy_password_hash() -> &'static str {
+    static DUMMY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        mcloud_crypto::mark_digest_scheme(
+            &mcloud_crypto::hash_password("mcloud-timing-equalizer")
+                .expect("argon2 应当能算出这个固定串"),
+        )
+    });
+    DUMMY.as_str()
+}
+
+/// 认证面的限速闸（2026-10-04 复审 `sv-5`）：超限 ⇒ `Some(429 响应)`。
+///
+/// 为什么这两个路由要单独设闸：它们在 `auth_gate::PUBLIC` 里 ⇒ **不需要凭据**，
+/// 而每一次都跑一遍 argon2id（19 MiB × 2 轮）⇒ 一个 `for` 循环就能占满单核。
+/// 判据与边界写在 [`crate::ratelimit`] 的模块说明上 ✓。
+///
+/// ⚠ 闸放在**所有其他判断之前**（包括"实例是否已初始化"）：否则未初始化的实例上
+/// 那条 400 分支就成了一个不花 argon2 的探针，而闸也拦不住它 ✗。
+fn auth_rate_limit(state: &ServerState) -> Option<Response> {
+    let now_ms = state.handle.clock.now_ms();
+    match state.auth_limiter.check(now_ms) {
+        Ok(()) => None,
+        Err(wait_secs) => Some(
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, wait_secs.to_string())],
+                Json(serde_json::json!({
+                    "error": format!("尝试过于频繁，请 {wait_secs} 秒后再试"),
+                })),
+            )
+                .into_response(),
+        ),
+    }
+}
+
+/// 让浏览器**扔掉**登录 cookie 的那一发（登出用）。
+///
+/// `Max-Age=0` 是标准的失效写法；值留空（不是 `token=;` —— 空值仍是"一枚 cookie"）。
+fn clear_cookie_response(status: StatusCode) -> Response {
+    let cookie = format!("{COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+    (status, [(header::SET_COOKIE, cookie)]).into_response()
 }
 
 /// 当前会话。未登录时 401（由中间件拦，这里只处理已登录的情况）。

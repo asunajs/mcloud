@@ -68,7 +68,7 @@ import { toneClass } from '../ui/badge'
 import { Dialog, openDialog } from '../ui/dialog'
 import { EmptyState } from '../ui/empty-state'
 import { fmtClock, fmtDuration, fmtEpochMs, fmtUptime } from '../ui/time'
-import { outcomeText, statusBadge, statusLabel } from '../ui/history'
+import { outcomeText, runStatusOf, statusBadge, statusLabel } from '../ui/history'
 import type { PageId } from '../ui/nav'
 
 export interface DashboardPageProps {
@@ -138,16 +138,30 @@ interface TodayRuns {
   /** 部分成功：有成有败（`TaskOutcome::Partial`）。⚠ 别并进 `success` ✗ */
   partial: number
   skipped: number
+  /**
+   * 用户自己点的「中止」（生命周期 `RunStatus::Cancelled`）。
+   *
+   * ⚠ 与被中止那次运行的 `outcome`（后端收成 `failed`）**分开数**：计入 `failed`
+   * 就是把"我自己按的停"报成故障，而后端 `RunRecord::needs_attention` 明确把它
+   * 排除在"要人管"之外 ✗。
+   */
+  cancelled: number
   failed: number
 }
 
 /** 今天的运行统计。按**开始**时刻归日：跨零点跑的那一次算在开始的那一天。 */
 const todayRuns = (runs: RunRecord[], now: number): TodayRuns => {
   const from = startOfTodayMs(now)
-  const t: TodayRuns = { total: 0, success: 0, partial: 0, skipped: 0, failed: 0 }
+  const t: TodayRuns = { total: 0, success: 0, partial: 0, skipped: 0, cancelled: 0, failed: 0 }
   for (const r of runs) {
     if (r.started_at_ms < from) continue
     t.total++
+    // ⚠ 先看生命周期再看业务结论：被中止的那次 `outcome` 是 `failed`，
+    // 直接落进 `failed` 就是 sv-3 那条"用户点的中止显示成红色失败"。
+    if (r.status === 'cancelled') {
+      t.cancelled++
+      continue
+    }
     t[r.outcome.status]++
   }
   return t
@@ -259,6 +273,10 @@ const todayBadge = (t: TodayRuns): StatBadge => {
   // 部分成功**必须单独说**：并进"全部成功"就是把没成的那些盖住 ✗
   // （2026-10-03 用户实测：「下面的 614 失败还直接说成功」）。
   if (t.partial > 0) return { text: `${t.partial} 次部分成功`, tone: 'warn' }
+  // 已中止**不染红也不染黄**：是用户自己按的，后端也把它排除在"要人管"之外。
+  // ⚠ 必须单独说一句：不然"今天只跑了 1 次、那次被中止"会落到最后那句「全部成功」✗
+  // （与 `ui/history.ts` 里 cancelled 用中性徽章、skipped 用中性徽章同一条口径）。
+  if (t.cancelled > 0) return { text: `${t.cancelled} 次已中止`, tone: 'plain' }
   // ⚠ 跳过**不染黄**：活动没开/条件不满足是正常结局，不是待处理项
   // （与 `ui/history.ts` 里 skipped 用中性徽章同一条口径）。
   if (t.skipped > 0) return { text: `${t.skipped} 次跳过`, tone: 'plain' }
@@ -511,12 +529,13 @@ export const DashboardPage = (props: DashboardPageProps) => {
         badge: todayBadge(today),
         // ⚠ `partial` 有数就要露出来：`value` 用的是 `total`，
         // 这里只写"成功/失败"的话那些运行在明细里就凭空消失了 ✗
+        // ⚠ `cancelled` 同理（它**不算失败**，所以不写就会既不进失败、也不见踪影）。
         desc:
           today.total === 0
             ? '今天还没跑过任务'
             : `成功 ${today.success} · 失败 ${today.failed}${
                 today.partial > 0 ? ` · 部分成功 ${today.partial}` : ''
-              }`,
+              }${today.cancelled > 0 ? ` · 已中止 ${today.cancelled}` : ''}`,
       },
       {
         title: '账号凭据',
@@ -641,14 +660,29 @@ export const DashboardPage = (props: DashboardPageProps) => {
    *
    * 失败**不退回空列表**：后端读不到上游时给的是 4xx/5xx，这里如实进 `error` 态 ——
    * 显示成"没有流水"是把"我不知道"说成了"没有"（与那张卡的 `failed` 同一条道理）。
+   *
+   * ⚠⚠ **只认最后一次**（请求键 = `账号 + 档位`）。两次请求同时在飞是常态：
+   * 「7 天 → 30 天」连点、或开着明细弹窗换号；单请求超时 30 s（`api.ts`），
+   * 而那两下之间只有几十毫秒 ⇒ 先发的那个后到**完全可能**。
+   * 若不校验，7 天的流水会填进标着「近 30 天」的 Tab、
+   * 上一个账号的流水会落在新账号的标题下面（`openBeanDetail` 那句
+   * "清掉上一个账号的数据"只挡得住**同步**顺序，挡不住在飞的旧请求 ✗）。
    */
   const loadBeanDetail = async () => {
+    // 把这次的请求键**取下来存住**：`await` 回来后拿它跟当前值比 ——
+    // 读 `beanDetailAccount.value` 只在这里读一次，回来时读到的必须还是同一对值。
+    const account = beanDetailAccount.value
+    const days = beanDetailDays.value
     beanDetailState.value = 'loading'
     beanDetailError.value = ''
     try {
-      beanDetail.value = await getBeanRecords(beanDetailAccount.value, beanDetailDays.value)
+      const data = await getBeanRecords(account, days)
+      // 过期响应：当前看的已经不是这个号/这一档了 ⇒ 整份丢弃（**连三态都不许写** ✗）。
+      if (account !== beanDetailAccount.value || days !== beanDetailDays.value) return
+      beanDetail.value = data
       beanDetailState.value = 'ready'
     } catch (e) {
+      if (account !== beanDetailAccount.value || days !== beanDetailDays.value) return
       beanDetailError.value = e instanceof Error ? e.message : '读取失败'
       beanDetailState.value = 'error'
     }
@@ -921,8 +955,8 @@ export const DashboardPage = (props: DashboardPageProps) => {
                     */}
                     <td>
                       <div class="flex flex-col items-start gap-0.5">
-                        <span class={`badge badge-sm ${statusBadge(r.outcome.status)}`}>
-                          {statusLabel(r.outcome.status)}
+                        <span class={`badge badge-sm ${statusBadge(runStatusOf(r))}`}>
+                          {statusLabel(runStatusOf(r))}
                         </span>
                         <span class="break-words text-xs opacity-60">{outcomeText(r.outcome)}</span>
                       </div>
@@ -941,8 +975,8 @@ export const DashboardPage = (props: DashboardPageProps) => {
               <div key={r.run_id} class="rounded-box bg-base-200 p-3">
                 <div class="flex items-center justify-between gap-2">
                   <span class="font-medium">{r.task}</span>
-                  <span class={`badge ${statusBadge(r.outcome.status)}`}>
-                    {statusLabel(r.outcome.status)}
+                  <span class={`badge ${statusBadge(runStatusOf(r))}`}>
+                    {statusLabel(runStatusOf(r))}
                   </span>
                 </div>
                 <p class="mt-1 break-words text-xs opacity-70">账号 {accountName(r.account)}</p>

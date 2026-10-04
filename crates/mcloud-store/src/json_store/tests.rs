@@ -434,15 +434,30 @@ async fn corrupt_file_reports_filename_not_just_parse_error() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// **空文件 = 上一次写坏了**，要响亮地失败（2026-10-04 复审 `co-1` 翻的口径）。
+///
+/// 这条原来钉的是"空文件当没有数据"，理由是"半途崩溃可能留下空文件"。
+/// 复审时翻掉：`write_atomic` 现在在 rename **之前** `fsync`，"改了名、内容没落盘"
+/// 那条路已经堵上 ⇒ 盘上再出现 0 字节文件，只可能是上一次写入**真的坏了**。
+/// 这时静默按空库启动，等于把账号/会话/口令全丢了还一声不响
+/// （`accounts.json` 空 ⇒ 用户看到"账号全不见了"）。⇒ 改成报错 + 给恢复路径。
+/// 真正的"还没有数据"是**文件不存在**（对照组装在下面）。
 #[tokio::test]
-async fn empty_file_is_treated_as_empty_not_corrupt() {
+async fn empty_file_is_a_loud_error_not_an_empty_database() {
     let d = tmpdir("empty");
     std::fs::create_dir_all(&d).unwrap();
-    // 半途崩溃可能留下空文件；把它当"没有数据"而不是"数据损坏"
     std::fs::write(d.join(files::ACCOUNTS), "").unwrap();
-    let s = JsonStore::open(&d).unwrap();
-    assert!(s.accounts().await.unwrap().is_empty());
+
+    let err = JsonStore::open(&d).unwrap_err().to_string();
+    assert!(err.contains("空文件"), "实得：{err}");
+    assert!(err.contains(".bak"), "要给出恢复路径，实得：{err}");
     let _ = std::fs::remove_dir_all(&d);
+
+    // 对照组：文件**不存在**（首次启动）仍然是"没有数据"，不是错误。
+    let d2 = tmpdir("missing");
+    let s = JsonStore::open(&d2).unwrap();
+    assert!(s.accounts().await.unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&d2);
 }
 
 // ── 窄写：只改该改的列 ──────────────────────────────────────────────────
@@ -690,12 +705,16 @@ async fn tightening_is_idempotent() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// 装**凭据与会话**的四个文件也必须在启动时被收紧。
+/// 装**凭据、会话与账号数据**的文件必须在启动时被收紧。
 ///
 /// 回归护栏：`harden_existing_permissions` 的清单曾经只有五个"运行数据"文件，
 /// 于是老数据目录里的 `users.json`（口令哈希）/ `sessions.json`（会话）/
 /// `smid.json`（账号设备指纹）/ `pc_device.txt`（机器指纹）仍对同机其他
 /// 用户可读 —— 拿到会话哈希对应的令牌等于直接冒充登录。
+///
+/// ⚠ 2026-10-04 复审 `co-3` 又补了四个（`settings` / `task-config` /
+/// `kouling-pool` / `exchange-subscriptions`）：上面那句"覆盖**所有会落盘的表**"
+/// 在那之前是不成立的，而 `settings.json` 里正是登录口令哈希。
 #[cfg(unix)]
 #[tokio::test]
 async fn legacy_loose_credentials_and_sessions_are_tightened_on_open() {
@@ -704,11 +723,16 @@ async fn legacy_loose_credentials_and_sessions_are_tightened_on_open() {
     let d = tmpdir("perm-legacy-secrets");
     std::fs::create_dir_all(&d).unwrap();
     // 内容必须**能解析**，否则 `JsonStore::open` 会在 load_all 那一步先报错。
-    let secrets: [(&str, &str); 4] = [
+    let secrets: [(&str, &str); 8] = [
         (files::USERS, "[]"),
         (files::SESSIONS, "{}"),
         (files::SMID, "{}"),
         (files::PC_DEVICE, "62AA2BDA29F99744536E142A83CA5B03-ENDIN\n"),
+        // 这四个都 `#[serde(default)]`（或在 load_all 里当 map 读）⇒ `{}` 合法
+        (files::SETTINGS, "{}"),
+        (files::TASK_CONFIG, "{}"),
+        (files::KOULING_POOL, "{}"),
+        (files::EXCHANGE_SUBSCRIPTIONS, "{}"),
     ];
     for (name, body) in secrets {
         let p = d.join(name);
@@ -1738,5 +1762,52 @@ async fn watermark_advance_does_not_count_a_run() {
     s.advance_schedule_watermark(&gone, 1).await.unwrap();
     s.mark_schedule_fired(&gone, 1).await.unwrap();
 
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ── co-1（2026-10-04 复审）：0 字节文件不能毁掉备份、也不能被当成空库 ──────
+
+/// 上一次写入被截断（0 字节残骸）时，**不能**拿它去覆盖 `.bak`。
+///
+/// 红测：把 `write_atomic` 里的 `if !old.is_empty()` 去掉 ⇒ 最后一条断言
+/// 读到的 `.bak` 是空字符串，红。
+#[test]
+fn a_torn_empty_file_must_not_destroy_the_backup() {
+    let d = tmpdir("torn-bak");
+    let s = JsonStore::open(&d).unwrap();
+    let path = d.join(files::ACCOUNTS);
+    let bak = path.with_extension("bak");
+
+    s.write_atomic(&path, b"v1").unwrap(); // 首次写：还没有 .bak
+    s.write_atomic(&path, b"v2").unwrap(); // 这次才留下 .bak = v1
+    assert_eq!(std::fs::read_to_string(&bak).unwrap(), "v1");
+
+    // 模拟"写了一半被杀"：主文件在，但 0 字节
+    std::fs::write(&path, b"").unwrap();
+    s.write_atomic(&path, b"v3").unwrap();
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "v3");
+    assert_eq!(
+        std::fs::read_to_string(&bak).unwrap(),
+        "v1",
+        "0 字节的旧文件不该把上一份好备份覆盖掉"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 端到端：盘上躺着一个 0 字节的 `accounts.json` 时，`open` 必须**响亮地失败**
+/// （这正是"掉电后静默丢全部账号"那条路的入口）。
+#[test]
+fn opening_a_store_with_a_torn_accounts_file_fails_loudly() {
+    let d = tmpdir("torn-open");
+    {
+        let s = JsonStore::open(&d).unwrap();
+        s.write_json(&d.join(files::ACCOUNTS), &vec![account("19900000001")])
+            .unwrap();
+    }
+    std::fs::write(d.join(files::ACCOUNTS), b"").unwrap();
+
+    let msg = JsonStore::open(&d).unwrap_err().to_string();
+    assert!(msg.contains("空文件"), "实得：{msg}");
     let _ = std::fs::remove_dir_all(&d);
 }

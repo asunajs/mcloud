@@ -81,6 +81,15 @@ struct HttpPushTransport {
 #[async_trait::async_trait]
 impl PushTransport for HttpPushTransport {
     async fn send(&self, req: PushRequest) -> anyhow::Result<PushResponse> {
+        // ⚠⚠ 用户配的地址**先过闸**（2026-10-04 复审 sv-8）：这一枪是**服务进程**发的，
+        // 而地址整条来自账号设置 ⇒ 不设闸就是一条盲 SSRF（打本机路由、云元数据、
+        // 内网段）。闸的判据与边界写在 `push::validate_push_url` 上 ✓。
+        //
+        // ⚠ 放在**这个**位置（唯一的 HTTP 出口）而不是各个渠道的 builder 里：
+        // 渠道会多起来（customPost / 企业微信 / TG / serverchan / …），
+        // 一处一处加早晚漏一处 ✗。这里是所有渠道的必经之路 ✓。
+        crate::push::validate_push_url(&req.url).map_err(|e| anyhow::anyhow!(e))?;
+
         let http_req = HttpRequest {
             method: req.method.clone(),
             url: req.url.clone(),
@@ -1146,5 +1155,76 @@ mod tests {
         assert_eq!(log_type(LogLevel::Info), "info");
         assert_eq!(log_type(LogLevel::Warn), "warn");
         assert_eq!(log_type(LogLevel::Error), "error");
+    }
+}
+
+// ⚠ 上面那个 `mod tests { … }` 的收口在这里补一条：闸必须在**发之前**生效。
+
+#[cfg(test)]
+mod transport_gate_tests {
+    use super::*;
+    use mcloud_core::{HttpClient, HttpRequest, HttpResponse};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 只数"发了几枪"的最小替身。
+    #[derive(Default)]
+    struct CountingHttp {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpClient for CountingHttp {
+        async fn request(&self, _req: HttpRequest) -> mcloud_core::Result<HttpResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(HttpResponse {
+                status: 200,
+                body: "{}".into(),
+                headers: Vec::new(),
+            })
+        }
+    }
+
+    fn req(url: &str) -> PushRequest {
+        PushRequest {
+            method: "POST".into(),
+            url: url.into(),
+            headers: Vec::new(),
+            body: Some(serde_json::json!({ "msgtype": "text" })),
+            timeout_ms: 1_000,
+        }
+    }
+
+    /// ⚠⚠ 复审 `sv-8`：内网地址**一个包都不许发**（闸在 HTTP 出口，所有渠道共用）。
+    ///
+    /// 红测：把 `send` 里那句 `validate_push_url` 删掉 ⇒ `calls()` 会变成 3，红。
+    #[tokio::test]
+    async fn private_targets_never_reach_the_http_layer() {
+        let http = Arc::new(CountingHttp::default());
+        let transport = HttpPushTransport {
+            http: Arc::clone(&http) as Arc<dyn HttpClient>,
+        };
+
+        for url in [
+            "http://127.0.0.1:3000/api/system/restart",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://192.168.1.10/hook",
+        ] {
+            let err = transport
+                .send(req(url))
+                .await
+                .expect_err("内网地址必须被拒，不能发出去");
+            assert!(
+                err.to_string().contains("拒绝发送"),
+                "错因要能看出是「地址被拒」：{err}"
+            );
+        }
+        assert_eq!(http.calls.load(Ordering::SeqCst), 0, "一个包都不该发出去");
+
+        // 公网地址照旧能发（别把闸焊死在"永远拒"上）
+        assert!(transport
+            .send(req("https://push.example.com/hook"))
+            .await
+            .is_ok());
+        assert_eq!(http.calls.load(Ordering::SeqCst), 1);
     }
 }

@@ -83,6 +83,9 @@ impl AppBuilder {
                 // smid 上报打的是**第三方风控**主机，与 PC 形态无关：
                 // 带上 PC 设备头等于把"我是谁"多告诉一个不需要它的服务。
                 pc: None,
+                // 这一条**不拒**重定向：它的行为与改动前**逐字相同**（见
+                // `ClientProfile::no_redirects` 上那段"字段名为什么是反的"）。
+                no_redirects: false,
             })
             .map_err(|e| mcloud_core::Error::Network(format!("构建 smid 客户端失败：{e}")))?,
         );
@@ -151,6 +154,8 @@ impl AppBuilder {
                     user_agent: None,
                     timeout_secs: timeout,
                     pc,
+                    // 同上：云盘 API 客户端保持一直以来的行为（跟随重定向）。
+                    no_redirects: false,
                 }) {
                     Ok(c) => {
                         // 最内层再包一层日志（排查第三方问题用 ✓）。放在这里的理由：
@@ -217,9 +222,13 @@ impl AppBuilder {
         let cancel_slot = notify::cancel_slot();
         // 推送打的是**用户自己配的外部地址**，云盘凭据一个都不能给：
         // 与 smid 的裸传输同一条理由（见上面 smid_http 的说明）。
+        // ⚠ `no_redirects: true`（2026-10-04 复审 sv-8）：serverchan / day.app / 2im
+        // 这类渠道把 token 放在 **URL query** 里 ⇒ 跟随重定向等于把那枚 token 交给
+        // 跳转目标；而用户配的地址也不该由我们替他把跳转跟到底。
         let notify_http: Arc<dyn HttpClient> = Arc::new(
             mcloud_upstream::ReqwestClient::new(mcloud_upstream::ClientProfile {
                 timeout_secs: self.timeout_secs,
+                no_redirects: true,
                 ..Default::default()
             })
             .map_err(|e| mcloud_core::Error::Network(format!("构建推送客户端失败：{e}")))?,

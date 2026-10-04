@@ -332,6 +332,82 @@ fn an_empty_cleanup_tail_is_omitted() {
     assert!(!r.summary_line().contains("回收站"), "{}", r.summary_line());
 }
 
+/// ⚠⚠ 复审 `tk-1`（口径 B，用户 2026-10-04 拍板）：
+/// **"动了"与"上游确认了"是两件事**，摘要必须把"没核对到"的那部分说出来 ——
+/// 但**不许**因此改成败。
+///
+/// 背景是同一份代码里的真机读数：106 `clicked:true` 而上游 `state` 恒 `WAIT`
+/// ⇒ 那种"成功"其实是"**没核对**"。旧摘要只说"做了 N 条"，读起来像"N 条都验过了" ✗。
+///
+/// 红测：① 撤掉 `settle_unconfirmed()`（或让 `run_app_task` 不再调它）⇒ 前几组断言红；
+/// ② 把它改成"未确认就算失败"⇒ 最后那条 `Success` 断言红（那是口径 A，用户否过一次 ✗）。
+#[test]
+fn acted_but_unconfirmed_is_labelled_without_flipping_the_outcome() {
+    let mut r = AppTaskResult {
+        planned: 3,
+        acted: 3,
+        ..Default::default()
+    };
+    // 434：分享次数 0/7 → 1/7 ⇒ **涨了** = 确认 ✓，不该被标
+    r.steps.push(TaskStep {
+        task_id: Some(SHARE_TASK_ID),
+        name: "分享".into(),
+        uploaded: 1,
+        shared: true,
+        share_before: Some("0/7".into()),
+        share_after: Some("1/7".into()),
+        share_counted: true,
+        ..Default::default()
+    });
+    // 106：只"打卡 + 传了文件"，**没有**可比读数 ⇒ 未确认（如实说"没核对"）
+    r.steps.push(TaskStep {
+        task_id: Some(106),
+        name: "上传图片".into(),
+        uploaded: 1,
+        clicked: true,
+        ..Default::default()
+    });
+    // 522：进度 42/100 → 42/100 **没动** ⇒ 未确认（这是"比过了、没动"）
+    r.steps.push(TaskStep {
+        task_id: Some(522),
+        name: "上传".into(),
+        uploaded: 5,
+        progress_total: Some(100),
+        progress_before: Some("42/100".into()),
+        progress_after: Some("42/100".into()),
+        ..Default::default()
+    });
+
+    r.settle_unconfirmed();
+
+    assert_eq!(
+        r.unconfirmed,
+        vec![106, 522],
+        "只有**真涨了**的那条才算确认"
+    );
+    let line = r.summary_line();
+    assert!(line.contains("另有 2 条未获上游确认"), "{line}");
+
+    // 明细里逐条写清**为什么**（"没核对"与"比过了没动"是两句不同的话）
+    let p106 = r.steps[1].problems.join(" ");
+    assert!(p106.contains("没有可核对的读数"), "{p106}");
+    let p522 = r.steps[2].problems.join(" ");
+    assert!(p522.contains("42/100 → 42/100"), "{p522}");
+    assert!(
+        r.steps[0].problems.is_empty(),
+        "确认过的条目不该被念叨：{:?}",
+        r.steps[0].problems
+    );
+
+    // ⚠ 口径 B 的**契约**：加了标注**不改成败** ——
+    // 这条要是变成 Failed/Partial，就等于把被否掉的口径 A 偷偷装回来了 ✗。
+    assert!(
+        matches!(r.task_outcome(), TaskOutcome::Success { .. }),
+        "实得：{:?}",
+        r.task_outcome()
+    );
+}
+
 // ══════════════ 打卡的门（currstep） ══════════════
 //
 // 旧 TS `tasks.ts:19-28` 的 `clickTaskWithStep`：`currstep == 0` 才打，
@@ -1177,6 +1253,20 @@ async fn a_lone_share_task_uploads_its_own_file_and_counts() {
     );
     assert_eq!(result.cleaned_up, 1, "补传那个要收回");
     assert!(http.clicks().iter().any(|c| c.contains("id=434")));
+
+    // ⚠ 这一条里 434 自己是"动的那个"，次数真涨了 ⇒ **不该**被标未确认
+    //（`settle_unconfirmed` 的端到端断言在下面那条 106+434 的场景里 —— 那里才有
+    //  "动了但没有可比读数"的那一档）。
+    assert!(
+        result.unconfirmed.is_empty(),
+        "次数涨了的那条不算未确认：{:?}",
+        result.unconfirmed
+    );
+    assert!(
+        !result.summary_line().contains("未获上游确认"),
+        "{}",
+        result.summary_line()
+    );
 }
 
 /// ⭐ 434 的**真判据**：跑完再拉一次表，**次数涨了**才算这一条成了 ✓。
@@ -1241,6 +1331,46 @@ async fn the_share_task_counts_only_when_the_upstream_number_moves() {
         result.task_outcome()
     );
     assert!(result.summary_line().contains("做了 2 条"));
+
+    // ⚠⚠ 复审 tk-1（口径 B）——**端到端**这一侧：**动过 ≠ 上游确认过**。
+    //
+    // 这一趟里 106 打了卡、也真传了文件，但那一档**没有任何可比读数**
+    // ⇒ 必须被标成"未获上游确认"（旧实现只说"做了 2 条"，读起来像两条都验过了 ✗）；
+    // 434 的次数真涨了 ⇒ **不**算未确认 ✓。
+    //
+    // 挂在这个既有场景（而不是只测 `settle_unconfirmed` 本身）是**故意**的：
+    // 只测方法的话，`run_app_task` 哪天不再调它就没人发现
+    //（sv-2 那条钉子第一版就是这么写成绿的 ✗）。
+    assert_eq!(
+        result.unconfirmed,
+        vec![106],
+        "实得：{:?}",
+        result.unconfirmed
+    );
+    assert!(
+        result.summary_line().contains("另有 1 条未获上游确认"),
+        "{}",
+        result.summary_line()
+    );
+    assert!(
+        result.steps[0]
+            .problems
+            .iter()
+            .any(|p| p.contains("没有可核对的读数")),
+        "{:?}",
+        result.steps[0].problems
+    );
+    assert!(
+        result.steps[1].problems.is_empty(),
+        "确认过的那条不该被念叨：{:?}",
+        result.steps[1].problems
+    );
+    // 口径 B 的契约：加了标注**不改成败**
+    assert!(
+        result.task_outcome().is_success(),
+        "{:?}",
+        result.task_outcome()
+    );
 }
 
 /// ⭐ 反向：外链建成了、但**上游次数没动** ⇒ 这一条**不算**记上 ✓。
@@ -1936,4 +2066,147 @@ fn entry_tasks_get_the_entry_step() {
             "id={id}"
         );
     }
+}
+
+// ── 复审 tk-2 / tk-3（2026-10-04）：上传产物的回收不能因为一次失败或取消就漏 ──
+
+/// 让某一发请求在**传输层**失败（`Scripted` 只会回 200，没有失败档）。
+struct FailOn {
+    inner: Arc<Scripted>,
+    needle: &'static str,
+}
+
+#[async_trait]
+impl HttpClient for FailOn {
+    async fn request(&self, req: mcloud_core::HttpRequest) -> Result<HttpResponse> {
+        if req.url.contains(self.needle) {
+            return Err(mcloud_core::Error::Other("测试夹具：让这一发失败".into()));
+        }
+        self.inner.request(req).await
+    }
+}
+
+/// 打到 `needle` 的那一发**之后**按下取消 —— 模拟"跑到一半用户点了中止"。
+struct CancelOn {
+    inner: Arc<Scripted>,
+    needle: &'static str,
+    cancel: CancelToken,
+}
+
+#[async_trait]
+impl HttpClient for CancelOn {
+    async fn request(&self, req: mcloud_core::HttpRequest) -> Result<HttpResponse> {
+        let hit = req.url.contains(self.needle);
+        let out = self.inner.request(req).await;
+        if hit {
+            self.cancel.cancel();
+        }
+        out
+    }
+}
+
+/// `file/create` 成功、随后的 PUT 挂掉 ⇒ **那个文件仍要进回收站**。
+///
+/// 红测：把 `upload_one_file` 里那句提前落账（`owned.push`）挪回调用方
+/// （只有 `Ok(Some(id))` 才记）⇒ 这一条不再发 `batchTrash`，红。
+#[tokio::test]
+async fn a_file_whose_put_failed_is_still_reclaimed() {
+    let items = vec![task_json(106, "month", "上传图片", "sign_in_3")];
+    let mut replies = replies_for(&items, vec![]);
+    replies.push(click_ok()); // 106 打卡
+    replies.push(create_new()); // create 成了 ⇒ 拿到 SYNTH-FID
+                                // PUT 之后的 complete 不会发（PUT 就挂了）；这一发是收尾的 batchTrash
+    replies.push(r#"{"code":"0000","success":true,"message":"success"}"#.to_string());
+
+    let (mut ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    ctx.http = Arc::new(FailOn {
+        inner: Arc::clone(&http),
+        needle: "synth.example.invalid",
+    });
+
+    let result = run_app_task(&ctx, 0, &[])
+        .await
+        .expect("这一趟本身不该是 Err");
+
+    assert_eq!(
+        result.cleaned_up, 1,
+        "create 已经拿到 fileId ⇒ 即使 PUT 挂了也必须回收（否则文件永久留在用户网盘）"
+    );
+    let reqs = http.requests();
+    let trash = reqs
+        .iter()
+        .find(|r| r.url.contains("batchTrash"))
+        .expect("必须发 batchTrash");
+    assert!(
+        trash.body_str().unwrap_or_default().contains("SYNTH-FID"),
+        "回收的应当是我们造的那个 id"
+    );
+    assert!(
+        result.steps[0]
+            .problems
+            .iter()
+            .any(|p| p.contains("上传失败")),
+        "失败要如实记：{:?}",
+        result.steps[0].problems
+    );
+}
+
+/// **上传途中被取消**，已经传上去的文件仍要被回收。
+///
+/// 这一趟有两条（106 在前、113 在后）：106 传完一个文件后按下取消 ⇒ 轮到 113
+/// 时那道 `check_cancelled` 命中。旧写法是 `.await?` ⇒ 取消直接窜出函数、
+/// **绕过链尾的清理**，106 传上去的文件就永远留在用户网盘里。
+///
+/// 红测：把 `run_app_task` 里两处取消检查换回 `?` ⇒ 这一条不再发 `batchTrash`，红。
+#[tokio::test]
+async fn cancelling_mid_run_still_reclaims_what_was_uploaded() {
+    let items = vec![
+        task_json(106, "month", "上传图片", "sign_in_3"),
+        task_json(113, "month", "使用PC客户端", "sign_in_3"),
+    ];
+    let mut replies = replies_for(&items, vec![]);
+    replies.push(click_ok()); // 106 打卡
+    replies.push(create_new()); // 106 create
+    replies.push("{}".to_string()); // 106 PUT
+    replies.push(r#"{"code":"0000","success":true,"message":"请求成功"}"#.to_string()); // complete ⇒ 在这里取消
+    replies.push(r#"{"code":"0000","success":true,"message":"success"}"#.to_string()); // 收尾 batchTrash
+
+    let (mut ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    let token = ctx.cancel.clone();
+    ctx.http = Arc::new(CancelOn {
+        inner: Arc::clone(&http),
+        needle: "file/complete",
+        cancel: token,
+    });
+
+    let err = run_app_task(&ctx, 0, &[])
+        .await
+        .expect_err("取消要如实报出去，不能假装跑完了");
+    assert!(
+        matches!(err, mcloud_core::Error::Cancelled),
+        "报出来的应当是取消本身，实得：{err:?}"
+    );
+
+    let reqs = http.requests();
+    assert!(
+        reqs.iter().any(|r| r.url.contains("batchTrash")
+            && r.body_str().unwrap_or_default().contains("SYNTH-FID")),
+        "取消**不是**不回收的理由：已经传上去的文件必须被移进回收站"
+    );
+    assert!(
+        !reqs.iter().any(|r| r.url.contains("id=113")),
+        "取消之后 113 一条都不该动手"
+    );
 }

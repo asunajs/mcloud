@@ -401,6 +401,13 @@ impl Runner {
         {
             let mut inflight = self.inflight.lock().expect("inflight 锁中毒");
             if inflight.contains_key(&key) {
+                // ⚠ 与上面那条早退同理：令牌是**调用方预登记**的，走这条提前返回要
+                // **自己还回去**，否则取消表里留一条永远没人回收的条目 ——
+                // 它是 `CancelRegistry::is_running` 的判据，于是
+                // `ServerState::run_owners` 里那条也永远清不掉（那张表按
+                // `is_running` 清理），两张表一起只涨不跌。
+                // 「运行全部」点两下就会撞上这一支（2026-10-04 复审 sv-1）。
+                self.cancel.release(run_id);
                 // 不排队：排队会让定时任务在慢上游面前无限堆积
                 return Ok(self.record(
                     RunId::new(0),
@@ -1614,6 +1621,75 @@ mod tests {
 
         release.notify_one();
         assert!(first.await.unwrap().unwrap().outcome.is_success());
+    }
+
+    /// 回归测试（复审 `sv-1`）：**撞并发闸早退时，预登记的取消令牌要还回去**。
+    ///
+    /// 不还的话取消表里会留一条永远没人回收的条目，而它同时是 `is_running` 的判据
+    /// ⇒ `ServerState::run_owners` 里那条也永远清不掉（那张表按 `is_running` 清理）
+    /// ⇒ 两张表一起只涨不跌，「正在运行 N 个」只增不减。
+    ///
+    /// 红测：去掉 `runner.rs` 里那句 `self.cancel.release(run_id)` ⇒ 下面那条
+    /// `running_count() == 1` 实得 2，红。
+    ///
+    /// ⚠ 必须走 [`Runner::start`]（后台那条路）：令牌是**调用方预登记**的。
+    /// 直调 `run` 那条路是在闸检查**之后**才登记 ⇒ 撞闸时压根没有条目，
+    /// 测不出泄漏（本钉子第一版就写成了那样，撤销修复后仍然是绿的）。
+    #[tokio::test]
+    async fn the_gate_early_return_releases_the_cancel_token() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let task = Arc::new(GatedTask {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        });
+        let (runner, _store, _sink) = build(vec![task]);
+        let runner = Arc::new(runner);
+        let me = account("13800000000");
+
+        // 第一趟：占住闸，卡在任务体里。
+        runner.start("gated", me.clone(), serde_json::json!({}));
+        wait_started(&started).await;
+
+        // 第二趟：同一 task:account ⇒ 撞闸，立刻 Skipped。
+        runner.start("gated", me.clone(), serde_json::json!({}));
+        // ⚠ 撞闸那条**不落记录**（`start` 那条路把 Skipped 的 record 丢掉了）、
+        // 也不发任何事件 ⇒ 没有东西可等。用"读数连续多次不变"判它已经跑到闸口：
+        // 不管修没修，计数都会停在 1（修了）或 2（没修）。
+        let mut last = runner.cancel.running_count();
+        let mut stable = 0;
+        let mut spins = 0;
+        while stable < 5 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let now = runner.cancel.running_count();
+            if now == last {
+                stable += 1;
+            } else {
+                last = now;
+                stable = 0;
+            }
+            spins += 1;
+            assert!(spins < 300, "取消登记表的读数一直不稳");
+        }
+
+        assert_eq!(
+            last, 1,
+            "撞闸早退的那条**不该**在取消表里留条目（实得 2 就是永久泄漏，\
+             而它同时是 `is_running` 的判据 ⇒ `run_owners` 那张表也永远清不掉）"
+        );
+
+        release.notify_one();
+        let mut spins = 0;
+        while runner.is_running("gated", &me.id) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            spins += 1;
+            assert!(spins < 500, "第一趟没有跑完");
+        }
+        assert_eq!(
+            runner.cancel.running_count(),
+            0,
+            "两趟都结束了，登记表必须清空"
+        );
     }
 
     /// 回归测试：任务失败时若忘了释放闸，该任务将永远无法再次运行。

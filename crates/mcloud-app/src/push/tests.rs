@@ -768,3 +768,57 @@ fn email_config_carries_the_ts_fields() {
     assert_eq!(config.port, Some(465));
     assert!(config.to.is_none());
 }
+
+// ══════════════ 推送地址的闸（复审 sv-8）══════════════
+
+/// ⚠⚠ 复审 `sv-8`：**公网 http(s) 放行，本机/内网一律拒**。
+///
+/// 这条闸挡的是"有权改账号设置的人把服务当内网探针"（盲 SSRF）：推送地址整条来自
+/// 用户配置，而发请求的是服务进程。
+///
+/// 红测：把 `validate_push_url` 改回"只判空"⇒ 拒的那一组全红。
+#[test]
+fn push_urls_that_point_inside_are_refused() {
+    // 该放行的：真渠道的地址（企业微信机器人 / TG / serverchan 这些形状）
+    for ok in [
+        "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc",
+        "https://api.telegram.org/bot123:ABC/sendMessage",
+        "https://sctapi.ftqq.com/SCT123.send?title=x",
+        "http://8.8.8.8/hook", // 公网 IP 直连也是合法的
+        "https://push.example.com:8443/x",
+        "http://172.32.0.1/x", // ⚠ 172.16/12 **之外**，别把整段 172 都拒了
+    ] {
+        assert!(
+            validate_push_url(ok).is_ok(),
+            "这条本该放行：{ok} —— {:?}",
+            validate_push_url(ok)
+        );
+    }
+
+    // 该拒的：本机 / 私网 / 链路本地（含云元数据）/ 别的 scheme
+    for bad in [
+        "file:///etc/passwd",
+        "gopher://127.0.0.1:6379/_x",
+        "ftp://example.com/x",
+        "http://127.0.0.1:3000/api/system/restart",
+        "http://127.1.2.3/x",
+        "http://localhost:8080/hook",
+        "http://nas.local/hook",
+        "http://foo.internal/hook",
+        "http://169.254.169.254/latest/meta-data/", // 云元数据
+        "http://10.1.2.3/x",
+        "http://192.168.1.10/hook",
+        "http://172.16.0.1/x",
+        "http://172.31.255.254/x",
+        "http://0.0.0.0/x",
+        "http://100.64.0.1/x", // CGNAT
+        "http://224.0.0.1/x",
+        "http://[::1]/x",
+        "http://[fd00::1]/x",
+        "http://[fe80::1]/x",
+        "//example.com/x", // 没有 scheme
+        "example.com/hook",
+    ] {
+        assert!(validate_push_url(bad).is_err(), "这条本该被拒：{bad}");
+    }
+}

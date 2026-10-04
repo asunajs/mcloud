@@ -80,6 +80,11 @@ pub enum FireOutcome {
     /// （它内部要跑 N 步、可能跨 N 个账号），拿 `Fired { run_id: 0 }` 冒充会撞上
     /// 别处 `run_id == 0` 表示"被并发闸挡住"的语义 ✗ —— 那是两种完全不同的结果。
     FiredPipeline,
+    /// 到点了，但**已经交给后台任务**，结论还没出来。
+    ///
+    /// 与 [`FireOutcome::Fired`] 分开是刻意的：那个是"运行器已经收下并给出
+    /// `run_id`"，这个是"我们还没等到它的结论"（守护循环专用，2026-10-04 复审 `sv-2`）。
+    Spawned,
     /// 到点了，但同一 `任务+账号` 正在跑 —— 跳过，不排队。
     SkippedBusy,
     /// 错过的太久，整体弃掉（水位已推到当前）。
@@ -271,7 +276,31 @@ impl Scheduler {
     /// 跑一个 tick：检查所有定时，该触发的触发。
     ///
     /// 返回本次的触发结果，便于测试与日志。
+    ///
+    /// ⚠ 这是**同步等结论**的那一版（CLI 的 `cron` 与测试要的就是它）。
+    /// 守护循环走 [`Self::tick_inner`] 的 `Some(..)` 分支 —— 见那里的说明。
     pub async fn tick(&self) -> Result<Vec<(ScheduleId, FireOutcome)>> {
+        self.tick_inner(None).await
+    }
+
+    /// `tick()` 的共享实现：`spawner` 为 `Some` 时，到点的那条**丢进后台任务**
+    /// 立刻返回（守护循环用）；为 `None` 时**当场跑完**再返回（CLI / 测试要的是
+    /// 最终结论）。
+    ///
+    /// ⚠⚠ 为什么守护循环不能等（2026-10-04 复审 `sv-2`，[高]）：`fire()` 要把一条
+    /// 定时的**所有账号串行跑完**（上游限流要的），而一条慢任务（上游慢、或等到整点）
+    /// 能让这一拍占住几十秒到几分钟；`run_loop` 却是
+    /// `interval.tick() => tick_and_log().await` ⇒ **下一拍被整体推后**，
+    /// 这期间到点的**其它**定时在下一拍里已经超出宽限窗口 ⇒ 被判
+    /// `Decision::Missed` **弃掉**（水位推到 now），用户看到的是"某天那个定时没跑"。
+    ///
+    /// 拆开后判定所用的 `now` **没变**（仍是拍头那一刻，与旧实现一致 ⇒ 谁该跑
+    /// 还是谁该跑），变的只是"跑"不再占住循环；同一条定时内部的账号**依旧串行** ✓
+    /// （那是上游限流要的，不能改成并发）。
+    async fn tick_inner(
+        &self,
+        spawner: Option<&Arc<Self>>,
+    ) -> Result<Vec<(ScheduleId, FireOutcome)>> {
         let now = self.clock.now_ms();
         let schedules = self.store.schedules().await?;
         let mut results = Vec::new();
@@ -309,8 +338,27 @@ impl Scheduler {
                 Decision::Due { point_ms } => {
                     // ★ 先推水位，再打上游 —— 这是本文件最重要的一行顺序
                     self.advance_watermark(&sch, point_ms, true).await?;
-                    let (outcome, _blocked) = self.fire(&sch, point_ms).await;
-                    results.push((sch.id.clone(), outcome));
+                    match spawner {
+                        // 守护循环：丢进后台，**别占住这一拍**（见上面那段说明）
+                        Some(this) => {
+                            let this = Arc::clone(this);
+                            let sch_for_task = sch.clone();
+                            tokio::spawn(async move {
+                                let (outcome, _blocked) = this.fire(&sch_for_task, point_ms).await;
+                                tracing::info!(
+                                    schedule = %sch_for_task.id,
+                                    ?outcome,
+                                    "定时触发（后台）"
+                                );
+                            });
+                            results.push((sch.id.clone(), FireOutcome::Spawned));
+                        }
+                        // CLI / 测试：当场跑完，把真实结论交回去
+                        None => {
+                            let (outcome, _blocked) = self.fire(&sch, point_ms).await;
+                            results.push((sch.id.clone(), outcome));
+                        }
+                    }
                 }
             }
         }
@@ -561,11 +609,19 @@ impl Scheduler {
         tracing::info!("调度器已停止");
     }
 
-    async fn tick_and_log(&self) {
-        match self.tick().await {
+    async fn tick_and_log(self: &Arc<Self>) {
+        // ⚠ 守护循环走 `Some(self)`：到点的那条丢进后台，这一拍**不占住循环**
+        //（否则慢任务会把下一拍推后 ⇒ 同期其它定时被判"错过太久"弃掉，
+        //  见 `tick_inner` 的说明 / 复审 sv-2）。
+        match self.tick_inner(Some(self)).await {
             Ok(results) if results.is_empty() => {}
             Ok(results) => {
                 for (id, outcome) in results {
+                    // ⚠ `Spawned` 只表示"已经丢出去"，真正的结论由那个后台任务
+                    // 自己打一行（见 `tick_inner`）⇒ 这里不重复。
+                    if matches!(outcome, FireOutcome::Spawned) {
+                        continue;
+                    }
                     tracing::info!(schedule = %id, ?outcome, "定时触发");
                 }
             }

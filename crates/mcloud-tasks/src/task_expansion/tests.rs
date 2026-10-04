@@ -328,6 +328,39 @@ async fn a_name_collision_is_never_trashed() {
     assert!(reason.contains("撞上同名"), "实得：{reason}");
 }
 
+/// ⚠⚠ 复审 `up-1`：`exist` 那一格**读不出来**（缺席 / 非布尔 —— 形状变了）时，
+/// 同样按"**不是我们造的**"处理 ⇒ 一发 `batchTrash` 都不发。
+///
+/// 这一格是"别删用户文件"的唯一依据，旧写法把它兜成 `false` ⇒ 形状一变就会
+/// 把**用户自己的文件**当成我们的产物删掉。
+///
+/// 红测：把 `place_upload` 里 `created.exist` 的 `None` 分支删掉（退回
+/// `if created.exist.unwrap_or(false)` 的语义）⇒ 这一条会发 `batchTrash`，红。
+#[tokio::test]
+async fn an_unreadable_exist_flag_is_never_trashed() {
+    // `exist` 整个缺席（旧写法 ⇒ 兜成 false ⇒ 删掉 F-UNKNOWN）
+    let body = r#"{"code":"0000","success":true,"data":{"fileId":"F-UNKNOWN","uploadId":"U-1","rapidUpload":false,"partInfos":null}}"#;
+    let (out, http, _) = run_with(vec![
+        Reply::Body(NEEDS_BACKUP.into()),
+        Reply::Body(body.into()),
+        Reply::Body(NEEDS_BACKUP.into()), // 重读（`ExistUnknown` 与 Failed 同档：要等）
+    ])
+    .await;
+    let TaskOutcome::Skipped { reason } = &out else {
+        panic!("实得：{out:?}");
+    };
+    assert!(
+        !http.requests().iter().any(|r| r.url.contains("batchTrash")),
+        "exist 读不出来时**不许**发删除：判不了那个文件是不是我们造的"
+    );
+    assert_eq!(http.count(), 3, "读 + create + 重读");
+    assert!(
+        !reason.contains("F-UNKNOWN"),
+        "判不了是谁的 ⇒ 连 id 都不该念：{reason}"
+    );
+    assert!(reason.contains("exist"), "要说清是那一格读不出来：{reason}");
+}
+
 /// 秒传 ⇒ 后两枪不发，但**删那一枪照发**（文件确实是我们造的）。
 #[tokio::test]
 async fn a_rapid_upload_skips_put_and_complete_but_is_still_trashed() {

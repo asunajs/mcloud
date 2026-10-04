@@ -404,6 +404,12 @@ export const AccountsPage = () => {
     }
     try {
       const r = await pollQrLogin(sid)
+      // ⚠⚠ **归属校验**：`sid` 是这一拍开始时捕获的，`await` 期间用户可能已经
+      // 「重新出码」或切了平台（`abandonQr` + `beginQr`）—— 那时 `qrSessionId`
+      // 已经是**另一张码**的了。不校验的话，作废会话的响应会落在新会话的界面上：
+      // `logged_in` 那一支尤其糟（把刚出的新码清掉、还弹一条属于上一会话的回执 ✗）。
+      // `abandonQr` 只 `cancelQrLogin(sid)` 取消服务端会话，**取消不掉**这次在飞的请求。
+      if (sid !== qrSessionId.value) return
       if (r.phase === 'scanned') {
         qrPhase.value = 'scanned'
         qrNote.value = '已扫码，请在手机上确认'
@@ -445,6 +451,8 @@ export const AccountsPage = () => {
     } catch (e) {
       // 网络抖动不该终止会话：记一句、下一拍再问。
       // 只有服务端明确说"会话没了"（404）才停 —— 那时重开一张码才有意义。
+      // ⚠ 同一道归属校验：作废会话的 404 不该把**新**会话的界面打成失败。
+      if (sid !== qrSessionId.value) return
       const status = (e as { status?: number }).status
       if (status === 404) {
         stopPolling()

@@ -25,6 +25,14 @@ pub struct ServerState {
     /// **刻意不落盘**：一次扫码会话只活两分钟，进程重启后重出一张码
     /// 比"从磁盘恢复一个已经过期的会话"更符合直觉，也少一份要清理的状态。
     pub login_sessions: Arc<LoginSessions>,
+    /// 认证面的限速器（登录 / 初始化）。见 [`crate::ratelimit`] 的模块说明。
+    ///
+    /// ⚠ 与 `login_sessions` 一样**刻意不落盘**：限速状态是"这一小会儿"的事，
+    /// 重启后清零正是我们要的（重启本来就该让人重新试）。
+    ///
+    /// ⚠ 部署形态变了（真的绑到 LAN / 多用户）时，这里应当换成**按 IP** 的键 ——
+    /// 那需要在 `serve` 处接 `ConnectInfo`，见 [`crate::ratelimit`] 里的边界说明。
+    pub auth_limiter: Arc<crate::ratelimit::RateLimiter>,
     /// 本进程由**本服务**发起的运行 → 归属。
     ///
     /// # 为什么需要它
@@ -48,6 +56,9 @@ impl ServerState {
             handle,
             started_at_ms,
             login_sessions: Arc::new(LoginSessions::new()),
+            // 60 秒 30 次：正常使用（一个人偶尔登录）碰不到，而"100 个并发"
+            // 会被截到 30 以内 ⇒ argon2 最多跑 30 次而不是无限次 ✓。
+            auth_limiter: Arc::new(crate::ratelimit::RateLimiter::new(60_000, 30)),
             run_owners: Arc::new(Mutex::new(HashMap::new())),
         }
     }

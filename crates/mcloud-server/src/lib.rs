@@ -11,6 +11,7 @@ pub mod cli;
 pub mod error;
 pub mod logbuf;
 pub mod qr;
+pub mod ratelimit;
 pub mod routes;
 pub mod state;
 pub mod static_files;

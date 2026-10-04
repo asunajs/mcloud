@@ -165,6 +165,11 @@ fn describe_outcome(o: &mcloud_engine::FireOutcome) -> String {
         F::FiredPipeline => "已触发（编排）".into(),
         F::SkippedBusy => "跳过：同一任务+账号正在跑".into(),
         F::AbandonedMissed => "放弃：错过太久".into(),
+        // ⚠ 这一档只可能出现在**守护循环**那条路（`tick_inner(Some(..))`）：
+        // 到点的那条被丢进后台，这一拍不等结论。CLI 走的是 `tick()`（当场等完）
+        // ⇒ 这里实际到不了；留着是为了让"新增变体时必须想一遍每一处显示"这件事
+        // 由编译器逼出来（2026-10-04 复审 sv-2 就是这么抓到这个 match 的 ✓）。
+        F::Spawned => "已触发（后台执行，结论稍后见日志）".into(),
         // ⚠ 不能写死"注册表里没有任务"：这个变体现在也承载**编排**那边的配置错误
         // （`body` 缺 `pipelineId`、编排不存在或不属于你），写死会得到
         // "注册表里没有任务 编排不存在或不属于这个用户：x" 这种骗人的句子。

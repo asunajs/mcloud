@@ -74,7 +74,7 @@ fn session_table_take_and_remove() {
     let mut rng = SeqRandom::new(1);
     let qr = QrLogin::start(PcPlatform::Windows, "DEV", &mut rng, 0);
     let sid = qr.session_id().to_string();
-    table.put_back(sid.clone(), qr, "tid-1".into());
+    table.put_back(sid.clone(), qr, "tid-1".into(), 0);
 
     // 取出后表里就没了（避免两个请求同时推进同一个会话）
     let (qr, tid) = table.take(&sid).expect("应当取得到");
@@ -82,14 +82,44 @@ fn session_table_take_and_remove() {
     assert!(table.take(&sid).is_none(), "取出后不该还在");
 
     // 放回去又能取到
-    table.put_back(sid.clone(), qr, "tid-1".into());
+    table.put_back(sid.clone(), qr, "tid-1".into(), 0);
     assert!(table.take(&sid).is_some());
 
     // 显式移除
     let mut rng = SeqRandom::new(2);
     let qr2 = QrLogin::start(PcPlatform::MacOs, "DEV", &mut rng, 0);
     let sid2 = qr2.session_id().to_string();
-    table.put_back(sid2.clone(), qr2, "t".into());
+    table.put_back(sid2.clone(), qr2, "t".into(), 0);
     table.remove(&sid2);
     assert!(table.take(&sid2).is_none());
+}
+
+/// ⚠⚠ 复审 `sv-7`：**插入时要把过期的扫掉**（这张表原先只进不出）。
+///
+/// 没有这一扫的话，"出一张码但没轮询到终态"（点开看一眼就走 / 刷新页面 /
+/// 超时后前端不再轮询）每发生一次就留一条**常驻**条目，长跑实例里单调增长 ✗。
+///
+/// 红测：把 `insert` 里那句 `retain(|_, s| !s.qr.is_expired(now_ms))` 删掉 ⇒ 红。
+#[test]
+fn inserting_sweeps_the_expired_sessions() {
+    use mcloud_crypto::SeqRandom;
+
+    let table = LoginSessions::new();
+    let mut rng = SeqRandom::new(7);
+
+    // 一张**只有 1 秒**有效期的码（`with_ttl` 是"把码发给别人扫"用的那条口子）
+    let stale = QrLogin::start(PcPlatform::Windows, "DEV", &mut rng, 0).with_ttl(1);
+    let stale_id = stale.session_id().to_string();
+    table.put_back(stale_id.clone(), stale, "tid-old".into(), 0);
+    assert_eq!(table.qr.lock().unwrap().len(), 1, "先是插进去了");
+
+    // 5 秒后再插一条新的 ⇒ 旧的早过期了，必须被顺手扫掉
+    let fresh = QrLogin::start(PcPlatform::Windows, "DEV", &mut rng, 5_000);
+    let fresh_id = fresh.session_id().to_string();
+    table.put_back(fresh_id.clone(), fresh, "tid-new".into(), 5_000);
+
+    let qr = table.qr.lock().unwrap();
+    assert_eq!(qr.len(), 1, "过期那条应当被扫掉，实得 {} 条", qr.len());
+    assert!(!qr.contains_key(&stale_id), "过期那条还在表里");
+    assert!(qr.contains_key(&fresh_id), "新那条不该被误扫");
 }

@@ -314,69 +314,117 @@ pub fn redact(input: &str) -> String {
 }
 
 /// 第一层：`键名 = 值` / `键名: 值`（引号可有可无）。
+///
+/// # 为什么是"扫标识符"而不是"拿清单里的字面量去搜"
+///
+/// ⚠ 2026-10-04 复审 `co-4`：旧写法是 `for key in SENSITIVE_KEYS { find(key) }`，
+/// 而清单里写的是**归一化后**的名字（`verifycode` / `apikey`）⇒ 文本里那三种
+/// 真实形状**一个都抓不到** ✗：
+///
+/// ```text
+/// verify_code=123456          ← 清单里没有 "verify_code" 这个字面量
+/// api_key: sk-…               ← 同上
+/// X-Verify-Code: 9999         ← 同上
+/// ```
+///
+/// JSON 那一层（[`is_sensitive_key`]）一直是对的 ✓ —— 两层的尺子不一样，
+/// 就是这处漏的根因。改成"先切出标识符、再归一化比对"之后，两层同一把尺子 ✓。
+///
+/// # 判定用"归一化后**后缀**相等"，不是整串相等
+///
+/// 文本里的键**带前缀**是常态：`x-auth-token` / `x-yun-jwttoken`。旧写法靠
+/// "子串 + 分隔符紧跟在键名之后"隐式实现了**尾匹配**，所以这里必须保留它 ✓ ——
+/// 换成整串相等会把这几种前缀键**从"已脱敏"退回"裸奔"** ✗（那是比原问题更糟的回归）。
 fn redact_keyed(input: &str) -> String {
     let mut out = input.to_string();
-    for key in SENSITIVE_KEYS {
-        let mut search_from = 0usize;
-        // 每轮都可能因替换而改变后续偏移，故重新扫描
-        while let Some(key_start) = find_ascii_ci(&out, key, search_from) {
-            let key_end = key_start + key.len();
+    let mut scan = 0usize;
+    while let Some((key_start, key_end)) = next_identifier(&out, scan) {
+        if !text_key_is_sensitive(&out[key_start..key_end]) {
+            scan = key_end;
+            continue;
+        }
 
-            // key 与分隔符之间只允许空白或引号，避免 "authorization" 被 "auth" 命中
-            let Some(sep_rel) = out[key_end..].find(['=', ':']) else {
-                break;
-            };
-            let between = &out[key_end..key_end + sep_rel];
-            if !between
-                .chars()
-                .all(|c| c.is_whitespace() || c == '"' || c == '\'')
-            {
-                search_from = key_end;
-                if search_from >= out.len() {
-                    break;
-                }
-                continue;
-            }
+        // key 与分隔符之间只允许空白或引号，避免 "authorization" 被 "auth" 命中
+        let Some(sep_rel) = out[key_end..].find(['=', ':']) else {
+            break;
+        };
+        let between = &out[key_end..key_end + sep_rel];
+        if !between
+            .chars()
+            .all(|c| c.is_whitespace() || c == '"' || c == '\'')
+        {
+            scan = key_end;
+            continue;
+        }
 
-            // 跳过分隔符后的空白
-            let mut cursor = key_end + sep_rel + 1;
-            while cursor < out.len() {
-                let c = out[cursor..].chars().next().expect("cursor 在边界内");
-                if c.is_whitespace() {
-                    cursor += c.len_utf8();
-                } else {
-                    break;
-                }
-            }
-
-            // 带引号的值取到配对引号；裸值取到常见分隔符
-            let (val_start, val_end) = if out[cursor..].starts_with('"') {
-                let s = cursor + 1;
-                let e = out[s..].find('"').map(|i| s + i).unwrap_or(out.len());
-                (s, e)
-            } else if out[cursor..].starts_with('\'') {
-                let s = cursor + 1;
-                let e = out[s..].find('\'').map(|i| s + i).unwrap_or(out.len());
-                (s, e)
+        // 跳过分隔符后的空白
+        let mut cursor = key_end + sep_rel + 1;
+        while cursor < out.len() {
+            let c = out[cursor..].chars().next().expect("cursor 在边界内");
+            if c.is_whitespace() {
+                cursor += c.len_utf8();
             } else {
-                let e = out[cursor..]
-                    .find(['&', '"', '\'', ' ', ',', ';', '\n', '}', ']'])
-                    .map(|i| cursor + i)
-                    .unwrap_or(out.len());
-                (cursor, e)
-            };
-
-            if val_end > val_start {
-                out.replace_range(val_start..val_end, "***");
-            }
-
-            search_from = val_start + 3;
-            if search_from >= out.len() {
                 break;
             }
         }
+
+        // 带引号的值取到配对引号；裸值取到常见分隔符
+        let (val_start, val_end) = if out[cursor..].starts_with('"') {
+            let s = cursor + 1;
+            let e = out[s..].find('"').map(|i| s + i).unwrap_or(out.len());
+            (s, e)
+        } else if out[cursor..].starts_with('\'') {
+            let s = cursor + 1;
+            let e = out[s..].find('\'').map(|i| s + i).unwrap_or(out.len());
+            (s, e)
+        } else {
+            let e = out[cursor..]
+                .find(['&', '"', '\'', ' ', ',', ';', '\n', '}', ']'])
+                .map(|i| cursor + i)
+                .unwrap_or(out.len());
+            (cursor, e)
+        };
+
+        if val_end > val_start {
+            out.replace_range(val_start..val_end, "***");
+        }
+
+        scan = val_start + 3;
     }
     out
+}
+
+/// 从 `from` 起找下一个"像键名"的标识符：`[A-Za-z0-9_-]+` 的**极大**段。
+///
+/// 只按 ASCII 字节判界，多字节字符一律跳过 —— 切片点永远落在 ASCII 标识符的
+/// 起止处，不会把某个汉字劈开 ✓。
+fn next_identifier(s: &str, from: usize) -> Option<(usize, usize)> {
+    let b = s.as_bytes();
+    let is_id = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'-';
+    let mut i = from;
+    while i < b.len() {
+        if is_id(b[i]) {
+            let start = i;
+            while i < b.len() && is_id(b[i]) {
+                i += 1;
+            }
+            return Some((start, i));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 文本层的键名判定：归一化之后，**以某个敏感键名结尾**就算。
+///
+/// ⚠ 与 JSON 层的 [`is_sensitive_key`]（整串相等）**刻意不同**：文本里的键名
+/// 带前缀（`x-auth-token`）。两处别合并成一个函数 —— 合并就意味着要么 JSON 层
+/// 开始误伤 `oauth` 这类正常键，要么文本层把前缀键放过去 ✗。
+fn text_key_is_sensitive(identifier: &str) -> bool {
+    let k = normalize_key(identifier);
+    SENSITIVE_KEYS
+        .iter()
+        .any(|s| k.ends_with(&normalize_key(s)))
 }
 
 /// 第二层之一：**JWT**（`eyJ…` + 两个点 + 三段 base64url）。
@@ -614,6 +662,46 @@ mod tests {
             let out = redact(input);
             assert!(!out.contains("abc123"), "未脱敏：{input} -> {out}");
         }
+    }
+
+    /// ⚠⚠ 复审 `co-4`：键名里的分隔符（`_` / `-`）与大小写不该让脱敏漏掉。
+    ///
+    /// 清单里写的是**归一化后**的名字（`verifycode` / `apikey`），而旧实现是拿这些
+    /// **字面量**去文本里搜 ⇒ 下面前三种一个都抓不到 ✗（JSON 那一层却一直是好的
+    /// ⇒ 两层两把尺子，这就是漏的根因）。
+    ///
+    /// 红测：把 `text_key_is_sensitive` 换回字面量搜索、或改成"整串相等"⇒
+    /// `verify_code` / `api_key` / `X-Verify-Code` 三种都不会被脱敏，红。
+    #[test]
+    fn redacts_keys_with_separators_or_case_inside_the_name() {
+        for input in [
+            "verify_code=123456",
+            "verifyCode=123456",
+            "X-Verify-Code: 123456",
+            "api_key: sk-live-abcdef",
+            "apiKey=sk-live-abcdef",
+        ] {
+            let out = redact(input);
+            assert!(
+                !out.contains("123456") && !out.contains("sk-live-abcdef"),
+                "未脱敏：{input} -> {out}"
+            );
+        }
+
+        // ⚠ 前缀键是旧实现靠"子串 + 分隔符紧跟在键名之后"隐式抓到的 ⇒
+        // 换成"整串相等"会把这几种从"已脱敏"退回**裸奔**（比原问题更糟）。
+        for input in [
+            "x-auth-token=SECRETVALUE",
+            "x-yun-jwttoken: SECRETVALUE",
+            "X-Request-Sessionid=SECRETVALUE",
+        ] {
+            let out = redact(input);
+            assert!(!out.contains("SECRETVALUE"), "前缀键漏了：{input} -> {out}");
+        }
+
+        // 正常词不该被误伤：`author` 不以 `auth` **结尾**，`oauth2` 也不是。
+        assert_eq!(redact("author=张三"), "author=张三");
+        assert_eq!(redact("oauth2=public"), "oauth2=public");
     }
 
     #[test]

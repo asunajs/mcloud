@@ -43,7 +43,7 @@ import { pushToast } from '../ui/toast'
 import { credentialFor } from '../ui/password'
 import { StatRow, type StatItem } from '../ui/stat-row'
 import { fmtClock, fmtEpochMs, fmtUptime } from '../ui/time'
-import { statusBadge, statusLabel } from '../ui/history'
+import { runStatusOf, statusBadge, statusLabel } from '../ui/history'
 import { IconBrand } from '../ui/icons'
 import { Select } from '../ui/select'
 
@@ -191,8 +191,8 @@ export const SettingsPage = () => {
                   <span class="opacity-80">
                     {fmtEpochMs(last.started_at_ms)} · {last.task}
                   </span>
-                  <span class={`badge badge-sm ${statusBadge(last.outcome.status)}`}>
-                    {statusLabel(last.outcome.status)}
+                  <span class={`badge badge-sm ${statusBadge(runStatusOf(last))}`}>
+                    {statusLabel(runStatusOf(last))}
                   </span>
                 </span>
               ) : (

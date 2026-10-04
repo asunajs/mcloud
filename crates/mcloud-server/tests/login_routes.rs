@@ -619,3 +619,153 @@ async fn leftover_artifacts_are_readable_through_the_api() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ══════════════ 认证面加固（2026-10-04 复审 sv-4 / sv-6）══════════════
+
+/// ⚠⚠ 复审 `sv-4`：**用户名不存在时也必须跑一次 argon2**。
+///
+/// 早退的话两条分支的响应时间差**一到两个数量级**（未知用户名那条只查一次表就返回），
+/// 等于把"这个用户名存不存在"写在秒表上 —— 与 `login` 里那句刻意共用的
+/// 「用户名或口令错误」（注释明写"区分开来就是一个探测器"）自相矛盾 ✗。
+///
+/// 判据取**比值**（绝对时间在 CI 上没法卡）：真跑了 argon2 时两条分支差不到一倍；
+/// 漏掉修复时差 ≥100 倍。阈值放到 4 倍是给抖动的余量 ✓。
+///
+/// 红测：把 `login` 里那句"未知用户先跑一次 `verify_password`"删掉 ⇒ 红。
+#[tokio::test]
+async fn an_unknown_user_still_pays_for_argon2() {
+    use mcloud_core::{PasswordHash, User, UserId};
+
+    let (handle, dir) = test_app("timing");
+
+    // ⚠ 必须是一个**真算出来的** argon2 串：`authed_app` 里那个 `$argon2id$test-only`
+    // 是**解析就会失败**的假串 ⇒ 拿它做计时，两条分支都"很快"，测不出问题 ✗。
+    let digest = mcloud_crypto::to_digest_credential("correct-horse-battery");
+    let hash = mcloud_crypto::hash_password(&digest).expect("算一个真口令");
+    let now = handle.clock.now_ms();
+    let user = User {
+        id: UserId::new("timing-user"),
+        name: "admin".into(),
+        password_hash: PasswordHash(mcloud_crypto::mark_digest_scheme(&hash)),
+        created_at_ms: now,
+    };
+    handle.store.save_user(&user).await.expect("建测试用户");
+
+    let app = || mcloud_server::app(ServerState::new(Arc::clone(&handle)));
+    let body = |name: &str| serde_json::json!({ "username": name, "password": "definitely-wrong" });
+
+    // ① 存在的用户 + 错口令 ⇒ 跑一次真 argon2
+    let t0 = std::time::Instant::now();
+    let (st_known, _) = send(app(), post_json("/api/session", &body("admin"))).await;
+    let known = t0.elapsed();
+
+    // ② 不存在的用户 ⇒ **也要**跑一次（查表落空本来就在毫秒级，差的是 argon2 那一段）
+    let t0 = std::time::Instant::now();
+    let (st_unknown, _) = send(app(), post_json("/api/session", &body("nobody"))).await;
+    let unknown = t0.elapsed();
+
+    // 状态码本身就是探测器 ⇒ 两条必须一模一样
+    assert_eq!(st_known, st_unknown, "状态码不能泄露用户存不存在");
+    assert!(st_known.is_client_error(), "错口令应当是 4xx：{st_known}");
+
+    assert!(
+        unknown * 4 >= known,
+        "未知用户名那条**快了一个数量级** ⇒ argon2 没跑（计时侧漏）：\
+         known={known:?} unknown={unknown:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⚠⚠ 复审 `sv-6`：登出必须让**浏览器把 cookie 扔掉**（不只是删服务端那条会话）。
+///
+/// 只删库、不发 `Set-Cookie` 的话，那枚凭据会一直留在浏览器里 —— 服务端认不出它，
+/// 但它照样被每一次请求带上，"登出"看起来只是"下次一定 401"，而凭据本体还在 ✗。
+///
+/// 红测：把 `logout` 改回只返回 `StatusCode`（去掉 `clear_cookie_response`）⇒ 红。
+#[tokio::test]
+async fn logging_out_clears_the_cookie_too() {
+    let (handle, dir) = test_app("logout-cookie");
+    // ⚠ 路由**只建一次**：`authed_app` 每调一次都会把那条会话重新写进库里
+    // ⇒ 再建一次就等于把刚登出删掉的会话又救回来（这条断言第一版就是这么写成绿的 ✗）。
+    let app = authed_app(Arc::clone(&handle));
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/session")
+                .body(Body::empty())
+                .expect("请求应可构造"),
+        )
+        .await
+        .expect("登出请求应被处理");
+
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let cookie = resp
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .expect("登出必须带 Set-Cookie，让浏览器扔掉那枚 cookie")
+        .to_str()
+        .expect("Set-Cookie 应当是可见字符")
+        .to_string();
+    for want in [
+        "mcloud_session=;", // 清空（属性与登录时逐项对齐，否则会留下**另一枚**同名的）
+        "Max-Age=0",        // 标准的失效写法
+        "Path=/",
+        "HttpOnly",
+        "SameSite=Strict",
+    ] {
+        assert!(
+            cookie.contains(want),
+            "清 cookie 那句少了 {want:?}：{cookie}"
+        );
+    }
+
+    // 服务端那条会话也真的没了：同一条（已失效的）cookie 再问 ⇒ 401
+    let (st, _) = send(app.clone(), get("/api/session")).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED, "登出后那条会话不该还能用");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⚠⚠ 复审 `sv-5`：认证面（在 `PUBLIC` 里 ⇒ **免凭据**）必须有限速 ——
+/// 否则一条 `for` 循环就能让这台机器一直算 argon2（19 MiB × 2 轮/次）✗。
+///
+/// 这里把配额调成 2 条，省得为了撞上限真算 30 次 argon2。
+/// ⚠ 闸必须在"是否已初始化"**之前**，所以这条用**没建过管理员**的实例也能测：
+/// 前两次 400（尚未初始化）落在配额内，第三次直接 429 —— 顺带钉住"闸在最前"。
+///
+/// 红测：把 `login` / `setup_create` 里那句 `auth_rate_limit(&state)` 删掉
+/// ⇒ 第三次会回到 400，红。
+#[tokio::test]
+async fn the_public_auth_routes_are_rate_limited() {
+    use mcloud_server::ratelimit::RateLimiter;
+
+    let (handle, dir) = test_app("ratelimit");
+    let mut state = ServerState::new(Arc::clone(&handle));
+    state.auth_limiter = Arc::new(RateLimiter::new(60_000, 2));
+    let app = mcloud_server::app(state);
+
+    let credentials = serde_json::json!({ "username": "admin", "password": "irrelevant" });
+
+    for i in 1..=2 {
+        let (st, _) = send(app.clone(), post_json("/api/session", &credentials)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "第 {i} 次还在配额内：{st}");
+    }
+
+    let (st, body) = send(app.clone(), post_json("/api/session", &credentials)).await;
+    assert_eq!(
+        st,
+        StatusCode::TOO_MANY_REQUESTS,
+        "第 3 次必须被限速：{body}"
+    );
+    assert!(body.contains("尝试过于频繁"), "要说清为什么：{body}");
+
+    // `/api/setup` 是同一个闸（两条路都在 PUBLIC 里，都算 argon2）
+    let (st, _) = send(app.clone(), post_json("/api/setup", &credentials)).await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "/api/setup 也该在闸内");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

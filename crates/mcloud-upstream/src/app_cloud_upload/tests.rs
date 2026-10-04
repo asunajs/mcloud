@@ -861,7 +861,7 @@ fn parse_file_create_reads_the_data_payload() {
         Some("https://synth-oss.example.invalid/put"),
         "取的是 partInfos[0].uploadUrl"
     );
-    assert!(!created.exist);
+    assert_eq!(created.exist, Some(false), "exist:false 该读成明确的 false");
     assert!(!created.rapid_upload);
 }
 
@@ -874,7 +874,7 @@ fn parse_file_create_handles_the_captured_folder_shape() {
     let body = r#"{"code":"0000","success":true,"message":"请求成功","data":{"exist":true,"fileId":"SYNTH-DIR","formInfo":null,"parentFileId":"/","partInfos":null,"rapidUpload":false,"type":"folder","uploadId":null}}"#;
     let created = parse_file_create(body).expect("folder 型不该报错");
 
-    assert!(created.exist, "exist:true 该读出来");
+    assert_eq!(created.exist, Some(true), "exist:true 该读出来");
     assert_eq!(created.file_id.as_deref(), Some("SYNTH-DIR"));
     assert_eq!(created.upload_id, None, "null 不该被编造成空串");
     assert_eq!(created.upload_url, None, "partInfos:null ⇒ 没有 URL");
@@ -926,12 +926,16 @@ fn parse_file_create_distinguishes_missing_from_empty() {
         "上游原话要带出来：{err}"
     );
 
-    // `exist` / `rapidUpload` 是数字 ⇒ 读成 false（形状变了要可断言，不当真值）。
+    // `exist` 是数字 ⇒ **None**（形状变了，且这一格决定"能不能删"，不能兜成 false）；
+    // `rapidUpload` 是数字 ⇒ 读成 false（兜成 false 只是多走一遍 PUT，无害）。
     let weird = parse_file_create(
         r#"{"code":"0000","success":true,"data":{"exist":1,"rapidUpload":"true"}}"#,
     )
     .expect("应能解析");
-    assert!(!weird.exist, "exist:1 不该被念成 true");
+    assert_eq!(
+        weird.exist, None,
+        "exist:1 不是布尔 ⇒ 必须如实回 None（兜成 false 会删用户的文件）"
+    );
     assert!(!weird.rapid_upload, "rapidUpload:\"true\" 不该被念成 true");
 }
 

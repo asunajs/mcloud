@@ -40,6 +40,24 @@ const RANK: Record<string, number> = { error: 4, warn: 3, info: 2, debug: 1 }
 const SCROLL_ID = 'logs-scroll'
 
 /**
+ * 取数的代次号（**只认最后一次** ✓）。
+ *
+ * 为什么必须有它：这一页每 2 s 打一次 `/api/logs`，而单请求超时上限是 **30 s**
+ * （`api.ts` 的 `REQUEST_TIMEOUT_MS`）—— 慢后端/抖动网络下一屏还没回来，
+ * 后面几拍已经发出去 ⇒ 同时有好几个 `load()` 在飞。
+ * 各拍的收尾是**无条件**写 `lines.value` / `state.value` 的，于是：
+ * * 先发的**旧**响应后到 ⇒ 把新一屏整份盖回旧内容 ✗；
+ * * 旧的那拍超时失败、新的那拍已经成功 ⇒ `state.value = 'error'`
+ *   把**已经渲染好**的页面重新打成红屏 ✗（用户看到的是"刚才还好好的"）。
+ *
+ * 放在**模块级**而不是组件里：页面来回切时组件会重建，而上一份实例发出去的
+ * 请求还在飞 —— 模块级才不会因为换了一份闭包就认不出它已经过期 ✓。
+ * 只用一个自增整数（不引 `AbortController`）：这里要的是"过期响应别写信号"，
+ * 省下的那次带宽不是重点，多一个取消路径反而多一处要维护的状态 ✗。
+ */
+let loadSeq = 0
+
+/**
  * 「算用户还在看最新那几条」的容差（px）。
  *
  * 一行是 20px（`leading-5`）⇒ 32 约等于"一行半"：手指/滚轮的落点误差装得下 ✓，
@@ -73,6 +91,10 @@ export const LogsPage = () => {
   const scroller = () => document.getElementById(SCROLL_ID)
 
   const load = async () => {
+    // ⚠ 这一拍的编号（见模块顶部 `loadSeq` 的说明）：`await` 回来后先对一下，
+    // 对不上说明后面已经又发过一拍 ⇒ 这一份是**过期**的，整份丢掉 ——
+    // 连下面那段滚动位置也**不许**写（旧数据配旧位置，写回去反而把用户的视口搞乱 ✗）。
+    const mine = ++loadSeq
     /**
      * ⚠⚠ **更新前先记下滚动位置**（2026-10-04 用户报：「服务端日志页面出日志会强制滚动到顶部」✗）。
      *
@@ -98,9 +120,15 @@ export const LogsPage = () => {
       ? before.scrollHeight - before.scrollTop - before.clientHeight <= TAIL_SLACK
       : true
     try {
-      lines.value = await listServerLogs({ limit: 800 })
+      const next = await listServerLogs({ limit: 800 })
+      // 先判代次再写：写在判断前面，旧响应就已经把新数据盖掉了 ✗。
+      if (mine !== loadSeq) return
+      lines.value = next
       state.value = 'ready'
     } catch (e) {
+      // 同一道闸也要拦**失败**这一支：慢后端下"旧那拍超时"很常见，
+      // 它落到 `state.value = 'error'` 就是把已经恢复的页面又打回红屏 ✗。
+      if (mine !== loadSeq) return
       errorMessage.value = e instanceof Error ? e.message : String(e)
       state.value = 'error'
     }

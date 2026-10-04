@@ -83,8 +83,18 @@ pub(crate) struct MemStore {
     pub(crate) accounts: Vec<Account>,
     /// 播种用的编排（默认空 ✓）。同理必须覆写 `pipeline_for`。
     pub(crate) pipelines: Vec<Pipeline>,
+    /// 播种用的定时（默认空 ⇒ 现有用例行为不变 ✓）。
+    ///
+    /// 2026-10-04 加：调度器的用例要先有**到点的定时**才走得到 `fire()`，
+    /// 而原先这个桩的 `schedules()` 恒返回空表 ✗ ⇒ 那些用例根本没法写。
+    pub(crate) schedules: Vec<mcloud_core::Schedule>,
 }
 impl MemStore {
+    /// 挂上种子定时（链式写法，免得改已有的 `seeded` 签名）。
+    pub(crate) fn with_schedules(mut self, schedules: Vec<mcloud_core::Schedule>) -> Self {
+        self.schedules = schedules;
+        self
+    }
     /// 带播种的桩仓（账号 + 编排）。
     ///
     /// ⚠ 用构造器而不是让调用方写结构体字面量：`runs` 是私有的 ✗，
@@ -202,13 +212,13 @@ impl mcloud_core::LogStore for MemStore {
 #[async_trait]
 impl mcloud_core::ScheduleStore for MemStore {
     async fn schedules(&self) -> mcloud_core::Result<Vec<mcloud_core::Schedule>> {
-        Ok(Vec::new())
+        Ok(self.schedules.clone())
     }
     async fn schedule(
         &self,
-        _i: &mcloud_core::ScheduleId,
+        i: &mcloud_core::ScheduleId,
     ) -> mcloud_core::Result<Option<mcloud_core::Schedule>> {
-        Ok(None)
+        Ok(self.schedules.iter().find(|s| &s.id == i).cloned())
     }
     async fn save_schedule(&self, _s: &mcloud_core::Schedule) -> mcloud_core::Result<()> {
         Ok(())

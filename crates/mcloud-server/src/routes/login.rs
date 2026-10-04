@@ -57,8 +57,19 @@ impl LoginSessions {
         Self::default()
     }
 
-    fn insert(&self, id: String, session: QrSession) {
-        self.qr.lock().unwrap().insert(id, session);
+    /// 插入前**顺手扫掉已过期的**（2026-10-04 复审 `sv-7`）。
+    ///
+    /// 这张表原先**只进不出**：出一张码就插一条，只有"轮询到终态"或"显式 DELETE"
+    /// 才摘得掉 ⇒ 用户点开登录框看一眼就走、页面刷新、扫码超时后前端不再轮询
+    ///（前端只在终态 `close`）都会留下**常驻**条目，长跑实例里单调增长 ——
+    /// 这是"跑久了内存慢慢涨"最容易复现的一条 ✗。
+    ///
+    /// ⚠ 判据用 `QrLogin` 自己带着的 `started_at_ms + ttl_seconds`（**上游给的**有效期），
+    /// 不另记一个 `inserted_at` —— 两套时间早晚会漂 ✓。
+    fn insert(&self, id: String, session: QrSession, now_ms: i64) {
+        let mut qr = self.qr.lock().unwrap();
+        qr.retain(|_, s| !s.qr.is_expired(now_ms));
+        qr.insert(id, session);
     }
 
     /// 推进一次。**锁只在这段同步代码里持有**，网络请求在外面。
@@ -66,8 +77,8 @@ impl LoginSessions {
         self.qr.lock().unwrap().remove(id).map(|s| (s.qr, s.tid))
     }
 
-    fn put_back(&self, id: String, qr: QrLogin, tid: String) {
-        self.insert(id, QrSession { qr, tid });
+    fn put_back(&self, id: String, qr: QrLogin, tid: String, now_ms: i64) {
+        self.insert(id, QrSession { qr, tid }, now_ms);
     }
 
     fn remove(&self, id: &str) {
@@ -146,7 +157,10 @@ pub async fn start_qr(
     let device_id = qr.client().device_id().to_string();
     let tid = state.handle.login.new_tid();
 
-    state.login_sessions.put_back(session_id.clone(), qr, tid);
+    // ⚠ 顺手扫一遍过期的（复审 sv-7）：这张表原先只进不出。
+    state
+        .login_sessions
+        .put_back(session_id.clone(), qr, tid, state.handle.clock.now_ms());
 
     Ok(Json(StartQrResponse {
         session_id,
@@ -236,7 +250,9 @@ pub async fn poll_qr(
             .is_terminal();
             // 限流不是终态：会话要放回去，前端退避后接着问。
             if !terminal {
-                state.login_sessions.put_back(req.session_id, qr, tid);
+                state
+                    .login_sessions
+                    .put_back(req.session_id, qr, tid, state.handle.clock.now_ms());
             }
             Ok(Json(PollQrResponse {
                 phase: "failed".into(),
@@ -252,7 +268,9 @@ pub async fn poll_qr(
                 Ok(QrProgress::Scanned) => "scanned",
                 _ => "not_scanned",
             };
-            state.login_sessions.put_back(req.session_id, qr, tid);
+            state
+                .login_sessions
+                .put_back(req.session_id, qr, tid, state.handle.clock.now_ms());
             Ok(Json(PollQrResponse {
                 phase: phase.into(),
                 terminal: false,
@@ -264,7 +282,9 @@ pub async fn poll_qr(
         }
         Err(e) => {
             // 网络抖动不该让用户重出一张码：会话放回去，前端可以再问。
-            state.login_sessions.put_back(req.session_id, qr, tid);
+            state
+                .login_sessions
+                .put_back(req.session_id, qr, tid, state.handle.clock.now_ms());
             Err(ApiError(e))
         }
     }

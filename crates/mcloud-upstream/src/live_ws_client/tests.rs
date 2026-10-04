@@ -976,3 +976,50 @@ fn entered_room_requires_both_open_and_provision_ack() {
     r.heard_open = true;
     assert!(r.entered_room(), "两条都收到才算进过房间");
 }
+
+/// ⚠⚠ 复审 `up-2`：对面**收下 TCP 但永不回握手**时，必须**按超时**报错 ——
+/// 而不是永远挂着（旧写法 `connect_async` 无超时，`listen_for` 的 deadline 又在
+/// 连上之后才起算 ⇒ 任务永远停在"正在听"，只有重启服务才结束）。
+///
+/// 红测：把 `connect_live_ws_within` 里那句 `tokio::time::timeout(handshake, ..)`
+/// 拆掉 ⇒ 这条用例会一直挂到下面那句**兜底** `timeout`，红。
+#[tokio::test]
+async fn a_silent_peer_times_out_instead_of_hanging_forever() {
+    // 只 accept、绝不回 101 的"黑洞"服务端
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("绑定本地端口失败");
+    let addr = listener.local_addr().expect("取本地地址失败");
+    tokio::spawn(async move {
+        let _conn = listener.accept().await;
+        // 收下连接就装死
+        std::future::pending::<()>().await;
+    });
+
+    let endpoint = LiveWsEndpoint {
+        base: format!("ws://{addr}"),
+        ..LiveWsEndpoint::production()
+    };
+    let url = live_ws_url(&endpoint.base, 1, "abcdefghijklm");
+    let started = std::time::Instant::now();
+
+    let err = tokio::time::timeout(
+        Duration::from_secs(10), // 兜底：真挂住时别让整条测试卡死
+        connect_live_ws_within(&url, &endpoint, Duration::from_millis(300)),
+    )
+    .await
+    .expect("黑洞握手必须**按超时**返回，而不是永远挂着")
+    .expect_err("必须报错，不能交回一个连接");
+
+    let msg = err.to_string();
+    assert!(msg.contains("超时"), "要说清是超时：{msg}");
+    assert!(
+        msg.contains("0.3"),
+        "要把实际超时值说出来（注入的 300ms）：{msg}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "不能等满外层兜底：实际 {:?}",
+        started.elapsed()
+    );
+}

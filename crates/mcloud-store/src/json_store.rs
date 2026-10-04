@@ -24,10 +24,12 @@
 //!    调用点是 2 秒一次的攒批（`main.rs`），不是每条日志一次。
 //!    这个例外成立的前提已写进 `docs/conventions.md` §6。
 //!
-//! 3. **写盘是"写临时文件 + rename"**（[`JsonStore::write_atomic`]）。
-//!    rename 在同一文件系统内是原子的，所以进程被杀也不会留下半截 JSON。
-//!    覆盖前留一份 `.bak`，但**不**试图自动恢复 —— 静默回滚到旧数据
-//!    比报错更难排查。
+//! 3. **写盘是"写临时文件 + `fsync` + rename + `fsync` 目录"**（[`JsonStore::write_atomic`]）。
+//!    rename 在同一文件系统内是原子的，所以进程被杀也不会留下半截 JSON；
+//!    两道 `fsync` 保证"**原子**"同时是"**耐久**"（否则掉电会读回一个空文件）。
+//!    覆盖前留一份 `.bak`（只从**非空**的旧文件留），但**不**试图自动恢复 ——
+//!    静默回滚到旧数据比报错更难排查。读到一个**空文件**时**报错**而不是当空库：
+//!    那多半是上一次写坏的残骸，静默按空库启动等于把账号/会话全丢了还一声不响。
 //!
 //! # 只保证**进程内**并发安全
 //!
@@ -259,6 +261,15 @@ impl JsonStore {
             files::SESSIONS,
             files::SMID,
             files::PC_DEVICE,
+            // ⚠ 2026-10-04 复审 co-3 补的四个：上面那句"覆盖**所有会落盘的表**"
+            // 在此之前是不成立的 ✗ —— `settings.json` 里有登录口令哈希与安全设置、
+            // `task-config.json` / `kouling-pool.json` 里是账号相关的口令与参数、
+            // `exchange-subscriptions.json` 是账号的兑换订阅。它们与其余表一样
+            // 是**用户数据**，老目录升级后不该仍对同机其他用户可读。
+            files::SETTINGS,
+            files::TASK_CONFIG,
+            files::KOULING_POOL,
+            files::EXCHANGE_SUBSCRIPTIONS,
         ];
         for name in names {
             let p = self.path(name);
@@ -310,11 +321,18 @@ impl JsonStore {
             .join(format!("{}.json", run_id.get()))
     }
 
-    /// 原子写：临时文件 + rename，覆盖前留 `.bak`。
+    /// 原子**且耐久**写：临时文件（0600）→ `fsync` → rename → `fsync` 目录，
+    /// 覆盖前留 `.bak`。
     ///
     /// rename 在同一文件系统内原子 ⇒ 进程被杀不会留下半截 JSON。
     /// 临时文件名带 pid，避免同目录下两个实例互踩（虽然本工具单实例，
     /// 但代价只是一点点，能免掉一整类诡异现象）。
+    ///
+    /// ⚠ **"原子"不等于"落盘"**：rename 改的是内存里的目录项，掉电时新内容
+    /// 可能还在页缓存里 ⇒ 重新读回来是**空文件**（或旧文件）。所以这里有两道
+    /// `fsync`：① 临时文件在 rename **之前**刷盘（否则 rename 成功而数据没落盘，
+    /// 得到一个"名字对、内容空"的文件）；② 目录项在 rename **之后**刷盘
+    /// （否则"改名"这一步本身可能丢）。见 2026-10-04 复审 `co-1`。
     ///
     /// # 权限
     ///
@@ -327,30 +345,55 @@ impl JsonStore {
     /// 只在 unix 上做这件事：Windows 没有等价的 mode 位，其 ACL 模型
     /// 由用户目录继承，硬套 `0600` 反而会写出奇怪的东西。
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<()> {
-        if path.exists() {
-            let _ = std::fs::copy(path, path.with_extension("bak"));
+        // ⚠ 备份只从**非空**的旧文件来。0 字节只可能是上一次半截写入的残骸
+        // （见 `read_json`），拿它 `copy` 过去等于把唯一一份好 `.bak` 也毁掉
+        // —— 那正是"掉电后连备份一起失效"的原因（2026-10-04 复审 co-1）。
+        if let Ok(old) = std::fs::read(path) {
+            if !old.is_empty() {
+                let _ = std::fs::copy(path, path.with_extension("bak"));
+            }
         }
         let tmp = path.with_extension(format!("tmp{}", std::process::id()));
 
         #[cfg(unix)]
-        {
-            use std::io::Write as _;
+        let mut f = {
             use std::os::unix::fs::OpenOptionsExt as _;
-            let mut f = std::fs::OpenOptions::new()
+            std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
                 .mode(0o600)
                 .open(&tmp)
-                .map_err(Error::Io)?;
-            f.write_all(bytes).map_err(Error::Io)?;
-        }
+                .map_err(Error::Io)?
+        };
         #[cfg(not(unix))]
+        let mut f = std::fs::File::create(&tmp).map_err(Error::Io)?;
+
         {
-            std::fs::write(&tmp, bytes).map_err(Error::Io)?;
+            use std::io::Write as _;
+            f.write_all(bytes).map_err(Error::Io)?;
+            // 必须在 rename 之前：否则 rename 会把一个"还没落盘的空壳"顶上去
+            f.sync_all().map_err(Error::Io)?;
         }
+        drop(f);
 
         std::fs::rename(&tmp, path).map_err(Error::Io)?;
+
+        // 目录项也要落盘，否则 rename 自身可能丢（掉电后回到旧文件/空文件）。
+        // Windows 打不开目录句柄，那里不做（也没有等价的语义）。
+        //
+        // ⚠ 这一道的失败**只警告、不致命**：内容已经 `fsync` 过，最坏情况是崩溃后
+        // 退回**上一个完整版本**（旧文件原样还在）—— 那不是数据丢失；
+        // 而把它做成致命错误，会让"文件系统不支持目录 fsync"的环境（某些网络盘/FUSE）
+        // 连账号都存不下去。上面那道**文件**的 `sync_all` 则相反：它失败意味着
+        // 内容没落盘，正是"空文件"的来源 ⇒ 必须致命。
+        #[cfg(unix)]
+        {
+            let dir = path.parent().unwrap_or_else(|| Path::new("."));
+            if let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all()) {
+                eprintln!("警告：无法 fsync 目录 {}：{e}", dir.display());
+            }
+        }
         Ok(())
     }
 
@@ -359,14 +402,28 @@ impl JsonStore {
         self.write_atomic(path, &bytes)
     }
 
-    /// 读一个 JSON 文件。不存在或为空 ⇒ 默认值（首次启动是正常路径）。
+    /// 读一个 JSON 文件。
+    ///
+    /// * 文件**不存在** ⇒ 默认值（首次启动是正常路径）；
+    /// * 文件存在但**是空的**（0 字节 / 只有空白）⇒ **报错**，不按默认值处理。
+    ///
+    /// ⚠ 后者是 2026-10-04 复审 `co-1` 改的：0 字节只可能来自"上一次写入被截断
+    /// 或掉电"，把它读成"空库"会让账号、会话、口令池**静默消失**
+    /// （表现是"账号全不见了"，而日志里一个字都没有）。报错则会在启动时停下，
+    /// 并给出恢复路径：删掉它（按空库启动）或从同名 `.bak` 取回。
     fn read_json<T: for<'de> Deserialize<'de> + Default>(&self, path: &Path) -> Result<T> {
         if !path.exists() {
             return Ok(T::default());
         }
         let s = std::fs::read_to_string(path).map_err(Error::Io)?;
         if s.trim().is_empty() {
-            return Ok(T::default());
+            return Err(Error::Storage(format!(
+                "{} 是空文件：上一次写入没有完整落盘（掉电/被杀）。\
+                 这里不按空库处理，免得静默丢数据 —— 确认后删掉它，\
+                 或从 {} 恢复",
+                path.display(),
+                path.with_extension("bak").display()
+            )));
         }
         serde_json::from_str(&s).map_err(|e| {
             // 解析失败时带上文件名与片段：只报 "expected value at line 1"

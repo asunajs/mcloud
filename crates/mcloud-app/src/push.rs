@@ -965,5 +965,101 @@ pub async fn send_notify(ctx: &PushContext<'_>, config: &PushConfig, title: &str
     }
 }
 
+// ── 推送地址的闸（2026-10-04 复审 sv-8）──────────────────────────────────
+
+/// 推送地址的**安全检查**。不合规 ⇒ `Err(原因)`，调用方**不许发**。
+///
+/// # 为什么必须有这条闸
+///
+/// 推送地址是**用户配置里的整条 URL**（`customPost.url`、企业微信机器人的
+/// `workWeixinBot.url`、TG 的 `apiHost` …），而发请求的是**服务进程**。不设闸的话，
+/// 有权改某个账号设置的人就能让服务向任意地址发任意方法、带任意头的请求
+///（`http://127.0.0.1:3000/api/...`、云元数据 `169.254.169.254`、内网段扫描），
+/// 而响应体不回给调用方 ⇒ 这是一条**盲** SSRF，状态码还会进推送日志 ✗。
+/// 单用户本机部署下这只是"管理员自伤"，但本仓的归属模型是多用户、`MCLOUD_ADDR`
+/// 还可以绑到 LAN ⇒ 那时第二个用户就能拿它当内网探针 ✗。
+///
+/// # 闸放行什么、挡住什么
+///
+/// * 只允许 `http` / `https`（挡掉 `file:` / `gopher:` 这类 scheme）；
+/// * 拒**字面量**的回环 / 私网 / 链路本地（含云元数据 `169.254.169.254`）/
+///   未指定 / 组播 / 文档段 / CGNAT（`100.64/10`）地址；
+/// * 拒 `localhost` 与 `.localhost` / `.local` / `.internal` 这类**名字**。
+///
+/// # ⚠ 诚实的边界（别把这条闸当成万能的）
+///
+/// **不做 DNS 解析** ⇒ 它挡不住"域名解析到 127.0.0.1"这一类（DNS rebinding、
+/// 或者内网自己那套域名）。要挡那一层得在**连接时**核对实际 IP，那是另一件事；
+/// 这里先把"直接写 IP 打本机/内网"这条最省事的路堵死，也把常见误配挡在前面 ✓。
+pub fn validate_push_url(url: &str) -> Result<(), String> {
+    let (scheme, after) = url
+        .split_once("://")
+        .ok_or_else(|| format!("推送地址缺少协议头（只允许 http/https）：{url}"))?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return Err(format!("推送地址只允许 http/https，实得 {scheme}：{url}"));
+    }
+
+    // authority → 去掉 userinfo（`user:pass@`）→ 主机（去掉端口；IPv6 是 `[::1]`）
+    let authority = after.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    let host = host.to_ascii_lowercase();
+    if host.is_empty() {
+        return Err(format!("推送地址没有主机名：{url}"));
+    }
+
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if !is_public_ip(&ip) {
+            return Err(format!("推送地址指向本机/内网（{ip}），拒绝发送：{url}"));
+        }
+        return Ok(());
+    }
+
+    if host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+    {
+        return Err(format!(
+            "推送地址指向本机/内网名字（{host}），拒绝发送：{url}"
+        ));
+    }
+    Ok(())
+}
+
+/// 这个 IP 能不能当推送目标（能 ⇒ `true`）。
+///
+/// 判据是"**公网**才放行"：私网 / 回环 / 链路本地 / 未指定 / 组播 / 广播 /
+/// 文档段 / CGNAT 一律拒。用白名单式的写法而不是"列几个已知内网段"，
+/// 免得漏掉 `0.0.0.0`、`224.0.0.0/4` 这类不常见但同样不该打的地址 ✓。
+fn is_public_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_multicast()
+                // CGNAT `100.64.0.0/10`（运营商级 NAT —— 不是公网）
+                || (o[0] == 100 && (64..=127).contains(&o[1])))
+        }
+        std::net::IpAddr::V6(v6) => {
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || v6.is_unique_local()          // fc00::/7
+                || v6.is_unicast_link_local()) // fe80::/10
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

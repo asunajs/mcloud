@@ -489,3 +489,151 @@ async fn pipeline_schedule_reaches_the_runner() {
         other => panic!("期望 UnknownTask（预检拒），实际 {other:?}"),
     }
 }
+
+// ── sv-2（2026-10-04 复审）：慢定时不许把同一拍里的别人饿死 ──────────────
+
+/// 一条会**卡住**的任务（等到放行为止）—— 用来占住一拍。
+struct GatedTask {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::Task for GatedTask {
+    fn name(&self) -> &'static str {
+        "slow"
+    }
+    fn title(&self) -> &'static str {
+        "慢任务"
+    }
+    fn description(&self) -> &'static str {
+        "阻塞直到放行"
+    }
+    async fn run(&self, _ctx: &crate::TaskContext, _body: &serde_json::Value) -> crate::TaskResult {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(mcloud_core::TaskOutcome::success("放行"))
+    }
+}
+
+/// 立刻返回，并记下"我跑过"。
+struct QuickTask {
+    ran: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl crate::Task for QuickTask {
+    fn name(&self) -> &'static str {
+        "quick"
+    }
+    fn title(&self) -> &'static str {
+        "快任务"
+    }
+    fn description(&self) -> &'static str {
+        "立刻返回"
+    }
+    async fn run(&self, _ctx: &crate::TaskContext, _body: &serde_json::Value) -> crate::TaskResult {
+        self.ran.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(mcloud_core::TaskOutcome::success("快"))
+    }
+}
+
+/// 一条在 `T0` 到点的定时（表达式与 `first_run_does_not_backfill_history` 同源）。
+fn due_schedule(id: &str, task: &str) -> Schedule {
+    let mut s = schedule("0 0 * * * *", None);
+    s.id = ScheduleId::new(id);
+    s.task = task.to_string();
+    s
+}
+
+/// 注册了两条任务、仓里有一个账号、两条定时都在 `T0` 到点的调度器。
+fn scheduler_with_two_due(gated: Arc<GatedTask>, quick: Arc<QuickTask>) -> Arc<Scheduler> {
+    use crate::registry::Registry;
+    use crate::runner::{HttpClientFactory, Runner};
+    use mcloud_core::testkit::FixedClock;
+    use mcloud_core::{EventSink, HttpClient, RunEvent, Store};
+    use std::sync::Arc;
+
+    struct NullSink;
+    impl EventSink for NullSink {
+        fn emit(&self, _e: RunEvent) {}
+    }
+
+    let mut registry = Registry::new();
+    registry.register(gated as Arc<dyn crate::Task>).unwrap();
+    registry.register(quick as Arc<dyn crate::Task>).unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        crate::pipeline::tests::MemStore::seeded(
+            vec![crate::pipeline::tests::account("13800000000")],
+            Vec::new(),
+        )
+        .with_schedules(vec![
+            due_schedule("slow-one", "slow"),
+            due_schedule("quick-one", "quick"),
+        ]),
+    );
+    let clock: Arc<dyn Clock> = Arc::new(FixedClock(T0));
+    let http: HttpClientFactory = Arc::new(|_a: &mcloud_core::Account| {
+        Arc::new(crate::pipeline::tests::NoHttp) as Arc<dyn HttpClient>
+    });
+    let runner = Arc::new(Runner::new(
+        Arc::new(registry),
+        Arc::clone(&store),
+        Arc::clone(&clock),
+        Arc::new(NullSink) as Arc<dyn EventSink>,
+        http,
+    ));
+    let pipelines = Arc::new(crate::pipeline::PipelineRunner::new(Arc::clone(&runner)));
+    Arc::new(Scheduler::new(store, runner, clock, pipelines))
+}
+
+/// ⭐ 守护循环那一拍（`tick_inner(Some(..))`）**不能**等慢定时跑完。
+///
+/// 旧写法在 tick 里 `fire().await`：整拍被慢任务占住 ⇒ 下一拍被推后，这期间到点的
+/// **其它**定时在下一拍里已超出宽限窗口 ⇒ 被判 `Decision::Missed` 弃掉
+///（用户看到的是"某天那个定时没跑"）—— 2026-10-04 复审 `sv-2`。
+///
+/// 红测：把 `tick_and_log` 里的 `Some(self)` 改成 `None` ⇒ 这一拍会卡在慢任务上，
+/// 下面那句 `timeout` 立刻超时，红。
+#[tokio::test]
+async fn a_daemon_tick_does_not_wait_for_a_slow_schedule() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let sched = scheduler_with_two_due(
+        Arc::new(GatedTask {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        }),
+        Arc::new(QuickTask {
+            ran: Arc::clone(&ran),
+        }),
+    );
+
+    // ⚠ 走**守护循环真正调的那条路**（`run_loop` 里就是 `tick_and_log()`）：
+    // 只测 `tick_inner(Some(..))` 是测不到"循环用没用它"的（钉子第一版就写成那样，
+    // 把接线改回去它仍然是绿的）。
+    tokio::time::timeout(std::time::Duration::from_millis(500), sched.tick_and_log())
+        .await
+        .expect("这一拍必须**立刻**返回：慢定时该丢后台，不能占住循环（旧写法会卡在这里）");
+
+    // 慢任务确实**已经在后台跑起来**（而不是压根没派出去）
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+        .await
+        .expect("慢任务应当在后台跑起来");
+
+    // 同拍的另一条也跑到了 —— 谁也没被谁挡住
+    for _ in 0..200 {
+        if ran.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        ran.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "同拍的另一条也该跑"
+    );
+
+    release.notify_one();
+}

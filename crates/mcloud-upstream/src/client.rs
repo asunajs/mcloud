@@ -22,6 +22,16 @@ pub struct ClientProfile {
     pub user_agent: Option<String>,
     /// 请求超时（秒）。
     pub timeout_secs: u64,
+    /// **不跟随重定向**（`true` ⇒ `redirect::Policy::none()`）。
+    ///
+    /// ⚠ 字段名是**反的**、默认 `false`，这是故意的：`ClientProfile` 派生了 `Default`
+    /// ⇒ `bool` 的默认值必然是 `false`，而"跟随重定向"正是**本仓一直以来的行为**
+    ///（reqwest 默认 ≤10 跳）。若写成 `follow_redirects: bool`，默认值就成了
+    /// **不跟随**，等于给全仓每个客户端都换了一次行为 ✗。
+    ///
+    /// 谁需要它：**推送**那个客户端 —— 地址是用户配的、还常把 token 写在 query 里，
+    /// 跟随重定向等于把那枚 token 交给跳转目标（复审 `sv-8`）。
+    pub no_redirects: bool,
     /// **冒充的 PC 客户端形态**（Windows / macOS）。
     ///
     /// # 为什么凭证配置里要有"形态"
@@ -194,6 +204,27 @@ fn host_of(url: &str) -> Option<&str> {
     Some(host.split(':').next().unwrap_or(host))
 }
 
+/// 预签名 `PUT` 的总 deadline（10 分钟）。
+///
+/// ⚠ 为什么它与 API 那条 30s **不同**（2026-10-04 复审 `up-3`）：客户端建的时候
+/// 那条 `.timeout(...)` 是 **reqwest 的总 deadline**（连接 + 写体 + 读响应**加起来**），
+/// 对 API 调用正合适，但预签名上传那一枪传的是**整个文件的原始字节** ⇒
+/// 文件大一点、或对方链路慢一点，就会在传到一半被掐断（`is_timeout` 那一档），
+/// 表现是"上传失败"，而真正的原因是**我们给自己设的钟**。
+///
+/// 10 分钟是**宽到不像限制**的值：这一枪不该因为我们的钟而失败；
+/// 真挂了有连接层的错误兜底。
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// 这一发要不要用 [`UPLOAD_TIMEOUT`] 而不是客户端那条总 deadline。
+///
+/// 判据是 `PUT` —— 本仓上游层**只有一处**发 `PUT`：`app_cloud_upload::upload_put_request`
+/// （预签名写入入口）。这条对应关系有钉子：`app_cloud_upload/tests.rs` 断言那一枪的
+/// `method == "PUT"`。⇒ 看到 `PUT` 就是"在传文件"，不是"在调 API"，不会误伤。
+fn presigned_upload_timeout(method: &reqwest::Method) -> Option<Duration> {
+    (*method == reqwest::Method::PUT).then_some(UPLOAD_TIMEOUT)
+}
+
 impl ReqwestClient {
     pub fn new(profile: ClientProfile) -> Result<Self> {
         let timeout = if profile.timeout_secs == 0 {
@@ -201,11 +232,19 @@ impl ReqwestClient {
         } else {
             profile.timeout_secs
         };
+        let no_redirects = profile.no_redirects;
         let base = || {
-            reqwest::Client::builder()
+            let b = reqwest::Client::builder()
                 .timeout(Duration::from_secs(timeout))
                 .cookie_store(true)
-                .gzip(true)
+                .gzip(true);
+            // ⚠ 只有**明说要**的客户端才拒跟随（见 `ClientProfile::no_redirects` 上
+            // 那段"字段名为什么是反的"）；缺省与一直以来的行为逐字相同 ✓。
+            if no_redirects {
+                b.redirect(reqwest::redirect::Policy::none())
+            } else {
+                b
+            }
         };
         let inner = base().build().map_err(|e| Error::Network(e.to_string()))?;
         // 同一套配置，只把 TLS 后端换成 native-tls（见 LEGACY_TLS_HOSTS）
@@ -268,6 +307,9 @@ impl ReqwestClient {
 
         let method = reqwest::Method::from_bytes(req.method.as_bytes())
             .map_err(|e| Error::Network(format!("方法非法 {}：{e}", req.method)))?;
+        // ⚠ 先算好：下一行会把 `method` move 走。
+        // 见 `UPLOAD_TIMEOUT` —— 预签名 PUT 不该吃 API 那条 30s 总 deadline（复审 up-3）。
+        let upload_timeout = presigned_upload_timeout(&method);
 
         // ⚠ 按**主机**选 TLS 后端：只有老式主机走 `legacy`（见 `LEGACY_TLS_HOSTS`）。
         // 判据是 URL 里那一段，不是"调用方是谁" —— 同一条链上可能混着两类主机
@@ -277,6 +319,11 @@ impl ReqwestClient {
             _ => &self.inner,
         };
         let mut builder = client.request(method, url);
+        // 预签名 PUT：换成"宽到不像限制"的那条（reqwest 的**按请求** deadline
+        // 会覆盖客户端那条总 deadline ✓ —— 见 `UPLOAD_TIMEOUT`）。
+        if let Some(t) = upload_timeout {
+            builder = builder.timeout(t);
+        }
 
         // ⚠⚠ **调用方已经明确带了那一枚，就不再注入第二枚。**
         //
@@ -578,5 +625,55 @@ mod tests {
         // 三者互不干扰：带了 authorization 不该挡住 jwttoken
         assert!(should_inject_credential(&given, "jwttoken", true));
         assert!(should_inject_credential(&given, "deviceid", true));
+    }
+
+    /// ⚠⚠ 复审 `up-3`：预签名上传那一枪不能被 API 那条 30s 总 deadline 掐断。
+    ///
+    /// 这是**结构性**钉子：真正的"线上有没有被掐断"要拿一个慢/大的文件真传才验得到
+    /// （本仓传的是小文件 ⇒ 从没触发过），所以这里钉**策略**本身 ——
+    /// `PUT`（= 唯一那处预签名上传）⇒ 更宽的 deadline；其余 ⇒ 不覆盖。
+    ///
+    /// 红测：把 `presigned_upload_timeout` 改成恒 `None`（等于撤掉 `send` 里那次
+    /// `.timeout(..)`）⇒ 第一条断言就被 `expect` 打红。
+    #[test]
+    fn the_presigned_upload_gets_a_wider_deadline_than_api_calls() {
+        // 与 `ReqwestClient::new` 的缺省一致（`profile.timeout_secs == 0` ⇒ 30）
+        let api = Duration::from_secs(30);
+
+        let put = presigned_upload_timeout(&reqwest::Method::PUT)
+            .expect("预签名 PUT 必须换成更宽的 deadline");
+        assert_eq!(put, UPLOAD_TIMEOUT);
+        assert!(put > api, "要**宽**于 API 那条：实得 {put:?} vs {api:?}");
+
+        for m in [reqwest::Method::GET, reqwest::Method::POST] {
+            assert!(
+                presigned_upload_timeout(&m).is_none(),
+                "{m} 不该改 deadline：API 调用要的就是那条总 deadline"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod redirect_policy_tests {
+    use super::*;
+
+    /// ⚠⚠ 复审 `sv-8`：`no_redirects` 的**默认必须是 `false`**（= 跟随）。
+    ///
+    /// 这条钉的是一个很容易踩的坑：字段是"反着命名"的 `bool`（见它上面那段说明），
+    /// 谁哪天顺手把它改成 `follow_redirects`，`Default` 一算就变成"全仓默认不跟随"
+    /// ✗ —— 那是给每个客户端都换了一次行为，而且**不会有任何测试变红**（除非有这一条）。
+    #[test]
+    fn following_redirects_stays_the_default() {
+        assert!(
+            !ClientProfile::default().no_redirects,
+            "默认必须仍然是跟随重定向（`no_redirects` 是反名字段，默认 false）"
+        );
+        // 反过来也要能开：推送那条路会显式设 true
+        let p = ClientProfile {
+            no_redirects: true,
+            ..Default::default()
+        };
+        assert!(p.no_redirects);
     }
 }

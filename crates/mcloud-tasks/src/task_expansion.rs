@@ -157,6 +157,12 @@ pub enum BackupUpload {
     ///
     /// ⚠⚠ 那一个**不是我们造的** ⇒ id **绝不**进清理名单（删它就是删用户的东西）。
     Exists,
+    /// `exist` 那一格**读不出来**（缺席 / `null` / 数字 —— 形状变了）。
+    ///
+    /// 处置与 [`Self::Exists`] 同向（**不交 id** ⇒ 绝不删），单独一档只为让
+    /// "上游改了响应形状"这件事在明细里看得见；2026-10-04 复审 `up-1`：
+    /// 旧写法把这一格兜成 `false` ⇒ 形状一变就会删**用户自己的文件**。
+    ExistUnknown,
     /// **一枪都没发**：前置缺（取不到 deviceId，或随机源没接）。
     ///
     /// 单独一档是因为它与"发了但失败"要分开：前者是本工具侧缺接线，
@@ -182,6 +188,7 @@ impl BackupUpload {
             BackupUpload::Done => "传了一个文件，已删",
             BackupUpload::Rapid => "秒传（后两枪没发），已删",
             BackupUpload::Exists => "撞上同名（那个文件不是我们造的，不删）",
+            BackupUpload::ExistUnknown => "exist 读不出来（形状变了）⇒ 按不是我们造的算，不删",
             BackupUpload::Blocked => "一枪没发",
             BackupUpload::Failed => "没传成",
             BackupUpload::NotNeeded => "没凑",
@@ -514,10 +521,23 @@ async fn run_upload(ctx: &TaskContext, plan: &ExpansionPlan, result: &mut Expans
         }
     };
     result.upload_name = plan.name.clone();
-    if created.exist {
+    match created.exist {
         // ⚠⚠ 那个文件**不是我们造的** ⇒ **不交 id**，链尾绝不删它。
-        result.upload = BackupUpload::Exists;
-        return;
+        Some(true) => {
+            result.upload = BackupUpload::Exists;
+            return;
+        }
+        // ⚠ `exist` 读不出来（形状变了）⇒ **同样不交 id**。两个方向都错的时候，
+        // 只有"漏删一个我们自己传的"是可接受的：删了用户的文件就回不来了
+        //（2026-10-04 复审 up-1）。
+        None => {
+            result.upload = BackupUpload::ExistUnknown;
+            result.reason =
+                "file/create 的 exist 不是布尔（响应形状变了）⇒ 判不了那个文件是不是我们造的，按不清理处理"
+                    .into();
+            return;
+        }
+        Some(false) => {}
     }
     // 从这一格起，这个 id 是**我们造的** ⇒ 链尾要删。
     result.upload_file_id = created.file_id.clone();

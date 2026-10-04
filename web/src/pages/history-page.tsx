@@ -9,9 +9,11 @@
  *    成功/失败只能靠徽章**颜色**猜 —— 而 `skipped` 是刻意的中性色（活动没开不是故障），
  *    于是"跳过"跟"成功"在界面上一模一样。⇒ 现在**状态徽章自己占一层**，
  *    摘要降到它下面的小字。
- * 2. **记录一多就只能从头翻。** 没有筛选、没有搜索。⇒ 加状态三档
- *    （**成功 / 跳过 / 失败**；数据模型 `TaskOutcome.status` 里**没有**"运行中"，
- *    不凭截图里那个参考页面去编一档出来）+ 一个搜索框（任务名 / 账号 / 运行号 / 摘要）。
+ * 2. **记录一多就只能从头翻。** 没有筛选、没有搜索。⇒ 加状态档位
+ *    （**成功 / 部分成功 / 跳过 / 已中止 / 失败**；`TaskOutcome.status` 里**没有**"运行中"，
+ *    不凭截图里那个参考页面去编一档出来 —— 「已中止」是例外：它不是编的，
+ *    后端 `RunStatus::Cancelled` 就是这么一档，见 `ui/history.ts` 的 `RunStatusView`）
+ *    + 一个搜索框（任务名 / 账号 / 运行号 / 摘要）。
  *    全部在**前端**过滤：`/api/runs` 一次把记录取全，不新增接口、不改后端。
  *
  * 布局沿用规范 §7.2：桌面表格（列多、要横向比较），窄屏**卡片流**。
@@ -21,7 +23,7 @@ import { onMounted, ref, onUnmounted } from 'lite'
 import { Dialog, openDialog } from '../ui/dialog'
 import { LogPanel, type LogLine } from '../ui/log-panel'
 import { setPageRefresh } from '../ui/page-refresh'
-import { getRun, listRuns, type RunLogLine, type RunRecord, type TaskOutcome } from '../api'
+import { getRun, listRuns, type RunLogLine, type RunRecord } from '../api'
 // 直播的结构化明细：与直播页**共用同一份**渲染（从前只有"当前这次"能看到）。
 import { LiveRoomResult } from '../ui/live-room-result'
 import { toLiveRoomRunView } from '../api'
@@ -29,7 +31,7 @@ import { accountName, refreshAccountNames } from '../account-names'
 import { EmptyState } from '../ui/empty-state'
 import { IconClose, IconSearch } from '../ui/icons'
 import { fmtDuration, fmtEpochMs } from '../ui/time'
-import { outcomeText, statusBadge, statusLabel } from '../ui/history'
+import { outcomeText, runStatusOf, statusBadge, statusLabel, type RunStatusView } from '../ui/history'
 import type { PageId } from '../ui/nav'
 
 export interface HistoryPageProps {
@@ -39,7 +41,7 @@ export interface HistoryPageProps {
 type LoadState = 'loading' | 'error' | 'ready'
 
 /** 状态档位。`all` 不是一种状态，是"不筛"。 */
-type StatusFilter = 'all' | TaskOutcome['status']
+type StatusFilter = 'all' | RunStatusView
 
 /**
  * 一行"这次运行在用户网盘里留下了什么"。
@@ -189,9 +191,9 @@ const ExchangeCell = (props: { record: RunRecord }) => {
  * `w-fit` 不能省：放在纵向 flex 列里时，徽章会被拉满整列宽，
  * 看起来像一条色带而不是一枚标签。
  */
-const StatusChip = (props: { outcome: TaskOutcome }) => (
-  <span class={`badge badge-sm w-fit whitespace-nowrap ${statusBadge(props.outcome.status)}`}>
-    {statusLabel(props.outcome.status)}
+const StatusChip = (props: { record: RunRecord }) => (
+  <span class={`badge badge-sm w-fit whitespace-nowrap ${statusBadge(runStatusOf(props.record))}`}>
+    {statusLabel(runStatusOf(props.record))}
   </span>
 )
 
@@ -234,11 +236,11 @@ export const HistoryPage = (props: HistoryPageProps) => {
 
   /** 当前该显示哪些记录。**在 JSX 里调用**（lite：派生值必须写在绑定里，不能提前算）。 */
   const visible = (): RunRecord[] =>
-    runs.value.filter((r) => (filter.value === 'all' || r.outcome.status === filter.value) && matchesQuery(r))
+    runs.value.filter((r) => (filter.value === 'all' || runStatusOf(r) === filter.value) && matchesQuery(r))
 
   /** 某一档有几条。计数直接摆在档位上 —— 不用点进去就知道哪一档有东西。 */
   const countOf = (id: StatusFilter): number =>
-    id === 'all' ? runs.value.length : runs.value.filter((r) => r.outcome.status === id).length
+    id === 'all' ? runs.value.length : runs.value.filter((r) => runStatusOf(r) === id).length
 
   /**
    * 运行日志（**回看**）。
@@ -291,6 +293,10 @@ export const HistoryPage = (props: HistoryPageProps) => {
             ['success', '成功'],
             ['partial', '部分成功'],
             ['skipped', '跳过'],
+            // ⚠ 「已中止」单开一档（数据来源是 `RunRecord.status`，不是 `outcome`）：
+            // 不单开的话，用户自己中止的那些既会被「失败」算进去 ✗，
+            // 又只能在「全部」里翻到 —— 而这正是 sv-3 要治的误读。
+            ['cancelled', '已中止'],
             ['failed', '失败'],
           ] as const
         ).map(([id, label]) => (
@@ -409,7 +415,7 @@ export const HistoryPage = (props: HistoryPageProps) => {
                   <td class="whitespace-nowrap">{accountName(r.account)}</td>
                   <td>
                     <div class="flex flex-col items-start gap-0.5">
-                      <StatusChip outcome={r.outcome} />
+                      <StatusChip record={r} />
                       <span class="max-w-[24rem] text-xs opacity-60">{outcomeText(r.outcome)}</span>
                     </div>
                   </td>
@@ -442,7 +448,7 @@ export const HistoryPage = (props: HistoryPageProps) => {
                     <span class="font-mono text-xs opacity-50">#{r.run_id}</span>
                   </div>
                   <span class="shrink-0">
-                    <StatusChip outcome={r.outcome} />
+                    <StatusChip record={r} />
                   </span>
                 </div>
                 <p class="break-words text-xs opacity-70">{outcomeText(r.outcome)}</p>

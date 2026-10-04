@@ -671,8 +671,15 @@ pub struct CloudFileCreated {
     pub file_id: Option<String>,
     /// `data.uploadId`。
     pub upload_id: Option<String>,
-    /// `data.exist`。非布尔（含 `null`、数字、缺席）一律 `false`，见 `cloud_flag`。
-    pub exist: bool,
+    /// `data.exist`。**三态**：`Some(true)` 撞同名（那个文件不是我们造的）、
+    /// `Some(false)` 是我们造的、`None` 表示这一格**形状不对**（缺席 / `null` / 数字）。
+    ///
+    /// ⚠ 2026-10-04 复审 `up-1` 从 `bool` 改成 `Option<bool>`：这一格是
+    /// **"别删用户文件"的唯一依据**（`task_expansion` / `app_task` 靠它决定
+    /// `fileId` 要不要进清理名单），而旧写法把"读不出来"兜成 `false` ⇒
+    /// 形状一变就会把**用户自己的文件**当成我们的产物删掉。危险的方向只有那一个，
+    /// 所以"读不出来"必须与 `false` 分得开。`rapidUpload` 没有这个问题，仍是 `bool`。
+    pub exist: Option<bool>,
     /// `data.rapidUpload`。同上。
     pub rapid_upload: bool,
     /// `data.partInfos[0].uploadUrl` —— 预签名写入入口（**绝不进错误文本**）。
@@ -704,7 +711,9 @@ pub fn parse_file_create(body: &str) -> Result<CloudFileCreated> {
     let mut created = CloudFileCreated {
         file_id: opt_str_at(obj, "fileId"),
         upload_id: opt_str_at(obj, "uploadId"),
-        exist: cloud_flag(obj, "exist"),
+        // ⚠ 与 `rapidUpload` 不同：这一格**不做布尔兜底**，读不出来就是 `None`
+        //（它是"别删用户文件"的判据，见字段文档）。
+        exist: obj.get("exist").and_then(Value::as_bool),
         rapid_upload: cloud_flag(obj, "rapidUpload"),
         upload_url: None,
     };
@@ -738,6 +747,11 @@ fn opt_str_at(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String>
 }
 
 /// 读一个布尔格：非布尔（含 `null`、数字、缺席）一律 `false`。
+///
+/// ⚠ **只给"兜成 false 无害"的格子用**（如 `rapidUpload`：兜成 `false` 只是多走
+/// 一遍 PUT，且缺 URL 时会明确失败）。`exist` 不在这里 —— 它的 false 意味着
+/// "这个文件是我们的、可以删"，兜错方向就是删用户的文件，见
+/// [`CloudFileCreated::exist`]。
 ///
 /// ⚠ 刻意**不**「把 `1` 当 true」：旧 TS 用的是 `if (exist)`，那确实会把 `1` 当真值，
 /// 但这一族的响应里这两格在实拍中都是**布尔** ⇒ 出现数字就意味着形状变了，

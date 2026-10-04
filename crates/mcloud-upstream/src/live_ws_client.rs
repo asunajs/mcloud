@@ -285,6 +285,19 @@ fn random_server_id(rng: &mut dyn Random) -> u32 {
 // 连接
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// 握手超时。
+///
+/// ⚠⚠ 为什么必须显式加（2026-10-04 复审 `up-2`，[高]）：`connect_async` **自己
+/// 没有超时**，而 `listen_for` 的 deadline 是在**连上之后**才起算的 ⇒ 对面收下 TCP
+/// 却不回 WS 握手（半开连接 / 黑洞路由 / 中间设备静默丢包）时，这个 await 会
+/// **永远**挂住：任务在界面上就是"一直在听"，只有重启服务才结束。这不是"慢"，
+/// 是**不会结束**。
+///
+/// 取 30s 与 `client.rs` 的 HTTP 总 deadline 同档：握手本身通常 <1s，30s 已是
+/// 一个数量级以上的宽限 —— 而这条链**从未真机连过**（见模块头的诚实边界），
+/// 宁可宽一点，也不要因为超时太紧把真窗口里的连接掐掉。
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// 建立到直播间的 WebSocket 连接。
 ///
 /// 返回的流已经完成 WS 升级（`wss` 走 **native-tls**，与 `reqwest` 同一套 TLS 栈）。
@@ -294,6 +307,19 @@ fn random_server_id(rng: &mut dyn Random) -> u32 {
 /// 所有失败都映射为 [`Error::Network`]，**不把 tungstenite 的类型泄漏出去**：
 /// 上层只看到 `mcloud_core` 的抽象（本仓铁律，与 `client.rs` 同款做法）。
 pub async fn connect_live_ws(url: &str, endpoint: &LiveWsEndpoint) -> Result<LiveWsStream> {
+    connect_live_ws_within(url, endpoint, HANDSHAKE_TIMEOUT).await
+}
+
+/// 同 [`connect_live_ws`]，但**握手超时可注入**。
+///
+/// 生产只有 [`connect_live_ws`] 一个入口（走 [`HANDSHAKE_TIMEOUT`]）；这个函数
+/// 存在的唯一理由是让单测用**毫秒级**超时去钉"黑洞握手不会永远挂着" ——
+/// 否则那条用例自己就要跑 30 秒。
+pub async fn connect_live_ws_within(
+    url: &str,
+    endpoint: &LiveWsEndpoint,
+    handshake: std::time::Duration,
+) -> Result<LiveWsStream> {
     // 用 `into_client_request` + 手工塞头，而不是 `connect_async(url)` 直接连：
     // `User-Agent` 与 `Origin` 是服务端**看得见**的两项，不能靠默认值。
     let mut request = url
@@ -316,8 +342,14 @@ pub async fn connect_live_ws(url: &str, endpoint: &LiveWsEndpoint) -> Result<Liv
             .map_err(|e| Error::Network(format!("Origin 非法：{e}")))?,
     );
 
-    let (stream, _response) = connect_async(request)
+    let (stream, _response) = tokio::time::timeout(handshake, connect_async(request))
         .await
+        .map_err(|_| {
+            Error::Network(format!(
+                "连接直播间 WebSocket 超时（{}s 内没完成握手）：{url}",
+                handshake.as_secs_f32()
+            ))
+        })?
         .map_err(|e| Error::Network(format!("连接直播间 WebSocket 失败：{e}")))?;
     Ok(stream)
 }

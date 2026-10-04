@@ -907,6 +907,15 @@ pub struct AppTaskResult {
     pub cleaned_up: usize,
     pub cleanup_error: String,
     pub failures: Vec<String>,
+    /// 动了、但**没得到上游确认**的条目 id（2026-10-04 复审 `tk-1` 新增的这一格）。
+    ///
+    /// ⚠ **不参与成败判定**（口径 B，用户 2026-10-04 拍板：「只加诚实标注」）——
+    /// [`Self::task_outcome`] 看都不看它。它唯一的用途是把"我们其实**没核对**"
+    /// 这件事从 summary 里说出来，别让"N 条"被读成"N 条都验过了"。
+    ///
+    /// 填它的地方只有 [`Self::settle_unconfirmed`] **一处**（别散进各个 `settle_*`：
+    /// 判定规则只有一份，才敢说它是同一把尺子）。
+    pub unconfirmed: Vec<i64>,
     /// 这一趟判定用的东八区月份 / 日；`None` = 时钟读不出（那时月份门一律"不知道"）。
     pub month: Option<String>,
     pub day: Option<i64>,
@@ -938,7 +947,81 @@ impl AppTaskResult {
         if !self.failures.is_empty() {
             s.push_str(&format!("；{} 条有失败", self.failures.len()));
         }
+        if !self.unconfirmed.is_empty() {
+            s.push_str(&format!(
+                "；另有 {} 条未获上游确认（明细见运行详情）",
+                self.unconfirmed.len()
+            ));
+        }
         s
+    }
+
+    /// 结算"动了、但**没得到上游确认**"的条目（2026-10-04 复审 `tk-1`，口径 B）。
+    ///
+    /// # 它要解决的问题
+    ///
+    /// [`Self::acted`] 是**两套口径**合起来的：434 要"上游次数真涨" ✓，而上传/埋点只要
+    /// "写请求发成功了" ✓ —— 那两档除了这个**没别的可看**（这是诚实的下限，不是偷懒）。
+    /// 问题不在口径，在**表述**：summary 只说"做了 N 条"，读起来就是"N 条都确认成了" ✗。
+    /// 同文件自己记着真机读数：106 `clicked:true` 而上游 `state` 恒 `WAIT`
+    ///（`app_task.rs` 里那处真机记录）⇒ 那次"成功"其实是"**没核对**"。
+    ///
+    /// # 规则（有读数就比读数，没读数就明说"没核对"）
+    ///
+    /// * **434**：`share_counted`（次数涨了）⇒ 算确认 ✓；否则写"上游次数没涨（a → b）"；
+    /// * **522 / 615**：跑前/跑后的进度比大小 ⇒ 涨了算确认 ✓，没动写"上游进度没动（a → b）"；
+    /// * **其余**（106/113 这类压根**没有可比读数**的）：写"本档没有可核对的读数" ——
+    ///   这是**如实**，不是判它失败 ✗。
+    ///
+    /// ⚠ 只写**真动过**的条目（`uploaded > 0 || clicked || shared`）：没动过的归
+    /// [`Self::failures`] 管，别在这里重复念一遍 ✗。
+    ///
+    /// ⚠⚠ 这一格**不参与成败**：口径 A（"只认上游动了才算成功"）2026-10-04 被用户否过一次
+    ///（"最后都是看次数的…"），所以这里只加标注、不动 `task_outcome` ✓。
+    pub fn settle_unconfirmed(&mut self) {
+        self.unconfirmed.clear();
+        for step in &mut self.steps {
+            let acted = step.uploaded > 0 || step.clicked || step.shared;
+            if !acted {
+                continue;
+            }
+            // 两档读数都是"a/b"形状（434 是次数、522 是进度）⇒ 同一个比较器
+            let moved = |before: Option<&str>, after: Option<&str>| -> bool {
+                match (before.and_then(parse_ratio), after.and_then(parse_ratio)) {
+                    (Some(b), Some(a)) => a > b,
+                    // 任一侧读不出 ⇒ **不当成"没动"**……但也不能算确认 ⇒ 落到"未确认" ✓
+                    _ => false,
+                }
+            };
+            let confirmed = step.share_counted
+                || moved(
+                    step.progress_before.as_deref(),
+                    step.progress_after.as_deref(),
+                );
+            if confirmed {
+                continue;
+            }
+
+            let why = if step.share_before.is_some() || step.share_after.is_some() {
+                format!(
+                    "上游次数没涨（{} → {}）",
+                    step.share_before.as_deref().unwrap_or("读不出"),
+                    step.share_after.as_deref().unwrap_or("读不出")
+                )
+            } else if step.progress_total.is_some() {
+                format!(
+                    "上游进度没动（{} → {}）",
+                    step.progress_before.as_deref().unwrap_or("读不出"),
+                    step.progress_after.as_deref().unwrap_or("读不出")
+                )
+            } else {
+                "本档没有可核对的读数（打卡/上传成功 ≠ 任务记上）".to_string()
+            };
+            step.problems.push(format!("未获上游确认：{why}"));
+            if let Some(id) = step.task_id {
+                self.unconfirmed.push(id);
+            }
+        }
     }
 
     pub fn task_outcome(&self) -> TaskOutcome {
@@ -979,6 +1062,10 @@ pub async fn run_app_task(
     only_task_ids: &[i64],
 ) -> Result<AppTaskResult> {
     let mut result = AppTaskResult::default();
+    // ⚠ 取消**不能**用 `?` 直接窜出去（2026-10-04 复审 tk-2）：这条链会往用户网盘里
+    // 传文件，而清理挂在链尾 —— `?` 一窜就绕过了它，这一趟传上去的文件**永远留着**。
+    // 所以取消记在这里，先走完收尾（清理 + 事后读数），最后再把取消原样报出去。
+    let mut cancelled: Option<mcloud_core::Error> = None;
 
     // ① 读整张表（十六组，逐次容错）。
     let mut pages: Vec<mcloud_upstream::app_task_list_v2::TaskListV2> = Vec::new();
@@ -1042,7 +1129,12 @@ pub async fn run_app_task(
 
     // ③ 逐条做。
     for (item, step_kind) in &planned {
-        ctx.check_cancelled()?;
+        // ⚠ 同理：取消也要先收尾（这一趟可能已经传了文件）⇒ 记下来、跳出，
+        // 不是 `?` 出去。见函数开头 `cancelled` 的说明。
+        if let Err(e) = ctx.check_cancelled() {
+            cancelled = Some(e);
+            break;
+        }
         // ⚠ 上游的 name 里会带 HTML（见 `clean_task_name` 的说明）⇒ 进记录前清掉 ✓
         let name = clean_task_name(&item.name.clone().unwrap_or_default());
         let mut step = TaskStep {
@@ -1130,10 +1222,12 @@ pub async fn run_app_task(
             if result.file_ids.is_empty() {
                 // ⚠ 这一发补传**按安卓档**（缺省档 ✓）：旧 TS 的 `shareTime` 自己不上传，
                 // 这一发是本仓补的 ⇒ 没有哪一档渠道要求，用缺省最不容易出错 ✓。
-                match upload_one_file(ctx, CloudChannel::Android, ".bin").await {
-                    // 交回来的 id 进 `file_ids` ⇒ 收尾那一发会把它一起移进回收站 ✓
-                    Ok(Some(id)) => {
-                        result.file_ids.push(id);
+                match upload_one_file(ctx, CloudChannel::Android, ".bin", &mut result.file_ids)
+                    .await
+                {
+                    // ⚠ id **已经在 `upload_one_file` 里落账**（那边一拿到就 push）⇒
+                    // 这里不再 push，否则同一个 id 会被删两次。
+                    Ok(Some(_)) => {
                         step.uploaded += 1;
                     }
                     Ok(None) => step
@@ -1178,12 +1272,18 @@ pub async fn run_app_task(
             *shape
         };
         while should_upload_another(eff, done, item.process) {
-            ctx.check_cancelled()?;
+            // ⚠ 取消：**不能** `?` 出去 —— 那会绕过链尾的清理，把这一趟已经传上去的
+            // 文件永远留在用户网盘里（2026-10-04 复审 tk-2）。记下来、跳出上传循环，
+            // 让链尾照常收尾（清理读的就是 `result.file_ids`，id 早已提前落账 ✓）。
+            if let Err(e) = ctx.check_cancelled() {
+                cancelled = Some(e);
+                break;
+            }
             // ⚠ 渠道按**这一档的形状**走：113 是 PC 档、别的是安卓档 ✓
             //（create 与 complete 两发用同一个 `shape.channel` —— 旧 TS 那两发也同源 ✓）。
-            match upload_one_file(ctx, eff.channel, eff.file_ext).await {
-                Ok(Some(id)) => {
-                    result.file_ids.push(id);
+            match upload_one_file(ctx, eff.channel, eff.file_ext, &mut result.file_ids).await {
+                // ⚠ id **已经在 `upload_one_file` 里落账** ⇒ 这里不再 push。
+                Ok(Some(_)) => {
                     step.uploaded += 1;
                 }
                 // `exist` 那一档：**不是我们造的** ⇒ 不记账（记了就是删用户的文件）。
@@ -1222,6 +1322,15 @@ pub async fn run_app_task(
     //     → `printShareProgress` 比 `state.shareCount` ✓）。
     settle_progress(ctx, &mut result).await;
 
+    // ⑤′ 结算"动了、但**没得到上游确认**"的条目（2026-10-04 复审 tk-1，口径 B）：
+    //     只往明细与 summary 里加诚实标注，**不改成败**（用户 2026-10-04 拍板）。
+    result.settle_unconfirmed();
+
+    // ⑥ 取消是"提前退出"，但**不是**跳过收尾的理由 —— 文件已经传上去了，
+    //    清理与事后读数都已经跑完，现在把取消原样报出去（2026-10-04 复审 tk-2）。
+    if let Some(e) = cancelled {
+        return Err(e);
+    }
     Ok(result)
 }
 
@@ -1278,6 +1387,9 @@ async fn share_first_uploaded(ctx: &TaskContext, uploaded: &[String]) -> Result<
 
 /// 传一个随机文件，交回**我们造的**那个 id（`exist` 档交 `None`）。
 ///
+/// `owned` 是**清理名单**（调用点传 `result.file_ids`）：一拿到 `fileId` 就落账，
+/// 所以后面 PUT / complete 挂掉、甚至整趟被取消，那个文件仍会被链尾回收 ✓。
+///
 /// `channel` 是**必填**的：旧 TS 的 `uploadRandomFile` 缺省按安卓档发
 ///（`getFileOpHeader` 的 `channelSrc` 缺省值 ✓），只有玩法 113 显式改成 PC 档 ✓ ——
 /// 把它做成参数而不是写死，正是为了"哪一档走哪个客户端"这件事**在调用点看得见** ✓。
@@ -1285,6 +1397,7 @@ async fn upload_one_file(
     ctx: &TaskContext,
     channel: CloudChannel,
     ext: &str,
+    owned: &mut Vec<String>,
 ) -> Result<Option<String>> {
     let mut rng = mcloud_crypto::OsRandom;
     let plan = crate::task_expansion::random_plan_with_ext(&mut rng, 0, ext);
@@ -1301,13 +1414,26 @@ async fn upload_one_file(
         let resp = ctx.http.request(req).await?;
         upload::parse_file_create(&resp.body)?
     };
-    // ⚠ 撞同名 ⇒ 那个文件**不是我们造的**，交回 `None`。
-    if created.exist {
-        return Ok(None);
+    // ⚠ `exist` 是**三态**（2026-10-04 复审 up-1）：`Some(true)` = 撞同名（不是我们造的）、
+    // `Some(false)` = 我们造的、`None` = 这一格形状变了。**读不出来按"不是我们造的"处理**：
+    // 兜成 `false` 会把用户自己的文件记进清理名单 ⇒ 链尾删掉它 ✗。
+    match created.exist {
+        Some(false) => {}
+        // 撞同名 ⇒ 那个文件**不是我们造的**，交回 `None`（不落账、不清理）。
+        Some(true) => return Ok(None),
+        None => return Err(mcloud_core::Error::Parse(
+            "file/create 的 exist 读不出来（形状变了）⇒ 判不了那个文件是不是我们造的，按不清理处理"
+                .into(),
+        )),
     }
     let Some(file_id) = created.file_id.clone() else {
         return Err(mcloud_core::Error::Parse("create 没给 fileId".into()));
     };
+    // ⚠⚠ **提前落账**（在 PUT / complete 之前）：从这一格起网盘里那个文件就是我们造的，
+    // 而下面两枪任何一步失败都会让本函数提前返回 —— 返回值里带不走 id，
+    // 不在这里落账的话那个文件就**永远留在用户网盘里**（2026-10-04 复审 tk-3；
+    // `task_expansion.rs` 早就是这么写的）。
+    owned.push(file_id.clone());
     if !created.rapid_upload {
         let Some(url) = created.upload_url.clone() else {
             return Err(mcloud_core::Error::Parse("create 没给 uploadUrl".into()));
@@ -1484,6 +1610,8 @@ impl Task for AppTaskTask {
             "cleanedUp": result.cleaned_up,
             "cleanupError": result.cleanup_error,
             "failures": result.failures,
+            // ⚠ 动了但**没核对到上游**的条目（口径 B 的诚实标注；不参与成败）✓
+            "unconfirmed": result.unconfirmed,
             "month": result.month,
             "day": result.day,
             "monthBackup": result.month_backup,
