@@ -681,6 +681,63 @@ export interface BeanToday {
  */
 export const getBeanToday = () => request<BeanToday>('/api/beans/today')
 
+/**
+ * 明细里的一笔流水（`GET /api/beans/records`）—— **上游原话**，只做了时间归一。
+ *
+ * ⚠ 与 [`BeanTodayAccount`] 是两条链：那个是**汇总**，这个是**逐笔**。
+ * 数据源同一个（上游 `cloudRecordV2` 的流水），**不是**本仓的运行记录 ——
+ * 后者是"我们做过什么"，流水是"上游账上发生了什么"，对不上是常态。
+ */
+export interface BeanRecord {
+  /** `insertTime` 归一成的 epoch 毫秒（**服务端**算的，前端不自己算）。 */
+  atMs: number | null
+  /**
+   * 原样的 `insertTime`。`atMs` 为 `null`（上游换过格式 / 没有这个字段）时显示它 ——
+   * 明细列表里"少了一笔"与"这一笔时间看不懂"必须分得开。
+   */
+  rawTime: string | null
+  /** 正负号就是进出（**可负** = 扣豆）。 */
+  num: number
+  summary: string
+  mark: string
+}
+
+/**
+ * 一个账号的 AI豆流水明细（**不限于今日**）。
+ *
+ * # 窗口
+ *
+ * `days` 是**自然日**：`1` = 今天（东八区日界起）、`7` = 含今天共 7 天、
+ * `0` = 全部。日界由**服务端**算并把 `nowMs` / `sinceMs` 回给前端 ——
+ * 前端不要拿本地时钟自己算（跨时区/漂移时会把窗口挪一天，而界面上看不出来）。
+ */
+export interface BeanRecords {
+  /** 回显：这一份明细是哪个账号的。 */
+  account: string
+  /** 服务端算窗口用的时刻（epoch 毫秒）。 */
+  nowMs: number
+  /** 回显请求的窗口档位（`0` = 全部）。 */
+  days: number
+  /** 窗口下界（epoch 毫秒）；`days = 0` 时为 `null`。 */
+  sinceMs: number | null
+  /** 按时间**倒序**（新的在前）。 */
+  records: BeanRecord[]
+  /** 时间解不出的笔数（**已经在 `records` 里**，不是被丢掉的）。 */
+  undated: number
+  /** 还有没读到的（撞上页数/条数上限）⇒ 这一份可能不全，界面必须说出来。 */
+  hasMore: boolean
+}
+
+/**
+ * `GET /api/beans/records?account=<id>&days=<n>` —— **一个**账号的 AI豆流水明细。
+ *
+ * 与 [`getBeanToday`] 的两条硬区别（见 `crates/mcloud-server/src/routes/beans.rs`）：
+ * 一次只读一个账号；失败**不**吞成空列表 —— 读不到就是 4xx/5xx，
+ * 界面要如实说"没读到"，不能显示成"这个号没有流水"。
+ */
+export const getBeanRecords = (account: string, days: number): Promise<BeanRecords> =>
+  request<BeanRecords>(`/api/beans/records?account=${encodeURIComponent(account)}&days=${days}`)
+
 export const getRun = (id: number) => request<RunRecord>(`/api/runs/${id}`)
 
 /**

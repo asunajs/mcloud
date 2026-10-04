@@ -429,11 +429,11 @@ mcloud 的实拍结论（`../mcloud/docs/business-feature-inventory.md` §5.1）
 
 ## 5. 今日AI豆（云朵记录汇总）
 
-**状态：路由与只读封装已落地；路由级测试仍缺**（2026-10-03 复核）。
+**状态：汇总与明细两条链都已落地**（2026-10-04 复核）。
 
 总览页那张「今日AI豆」卡按下面的契约接好（`web/src/api.ts` 的 `BeanToday` /
-`getBeanToday`）。端点落地前它显示「待接入」+ 后端的 HTTP 码，**不会**把整页
-拖成错误态 —— 一格读数不该被说成"服务挂了"。
+`getBeanToday`）。卡上**每个账号一行**是可点的 ⇒ 点开看这个号的**逐笔流水**
+（`GET /api/beans/records`，**不限于今日**）。
 
 ### 5.1 三块的现状
 
@@ -441,7 +441,8 @@ mcloud 的实拍结论（`../mcloud/docs/business-feature-inventory.md` §5.1）
 |---|---|---|
 | 1 | 只读封装（`mcloud-tasks`） | ✅ 已落地：`crates/mcloud-tasks/src/beans.rs` 的 `read_today(&BeansEnv, &[BeanAccount]) -> Today`（配套 `BeansEnv` / `BeanAccount` / `Today` / `aggregate_today`）；上游仍是 `mcloud-upstream::app_signin::cloud_record_v2_request` + `parse_cloud_records` |
 | 2 | 路由 | ✅ 已落地：`GET /api/beans/today` 在 `crates/mcloud-server/src/routes/beans.rs`，已由 `routes/mod.rs` merge。复核：`curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/api/beans/today`（未登录回 401 就说明路由在） |
-| 3 | 路由级测试 | ❌ **仍缺**：`crates/mcloud-server/tests/routes.rs` 里没有 beans 用例（`grep -n beans crates/mcloud-server/tests/routes.rs` 零命中）。照那里的 one-shot 风格补；上游那一侧用 fixture 回放 |
+| 3 | 路由级测试 | ⚠ **部分**：`crates/mcloud-server/tests/routes.rs` 里已补五条（401 / 缺参 400 / 别人的号 404 / 不存在的号 404 / `days` 越界 400）。**成功那一趟仍缺** —— 它要真发上游，得先有 fixture 回放的注入点 |
+| 4 | 明细（2026-10-04，用户口径「点击查看账号的详细明细，不限于今日」） | ✅ 已落地：`mcloud-tasks::beans::read_records(&dyn HttpClient, since_ms, limit) -> BeanRecords` + `range_since_ms(days, now_ms)`；路由 `GET /api/beans/records?account=<id>&days=<n>`；前端总览页账号行可点，弹窗里四档（今日 / 近 7 天 / 近 30 天 / 全部） |
 
 ### 5.2 口径（已定，别在实现时再发明）
 
@@ -455,12 +456,20 @@ mcloud 的实拍结论（`../mcloud/docs/business-feature-inventory.md` §5.1）
   ⚠ 参照实现在这里也是**只取一页**，并被它自己列为"重写要修"的一条 —— 别照搬那个缺口。
 - **"今天"按服务端时区算**（与 `Schedule.timezone` 同一套），响应回 `nowMs`。
   前端**不自己算日界**：那会在跨时区 / 时钟漂移时把"今天"算到别的日子上，而界面上看不出来。
+  ⚠ 明细那条把窗口**下界**（`sinceMs`）也回给前端 —— 同一件事的另一半。
 - **`insertTime` 是字符串**：`CloudRecord.insert_time` 目前还是原样串，路由必须把它
   归一成 epoch 毫秒再给前端 —— 别让前端去摘一个未定义格式的串。
+  ⚠ 明细里**唯一**的例外：归一不出时**不丢这一笔**，把原串放进 `rawTime` 让界面照原样显示
+  （"少了一笔"与"这一笔时间看不懂"必须分得开），`atMs` 为 `null`、并计进 `undated`。
 - **拿不到就逐个说**：某个账号读失败 ⇒ 进 `failed[]`（带**后端原话**的原因），
   界面把它单独列一行、染黄；**不能**把它当 0 混进那一行（"没读到"≠"今天没进出"）。
   注意这是**账号级**的失败：一个账号读不到不该把整张卡打成错误态（那是"服务挂了"的语义）。
-- **仍欠的收尾**：同步 `README.md` 的「HTTP 接口」一节（今天还没有这条）。
+  ⚠ 明细那条**相反**：用户指名一个账号 ⇒ 读不到就是 4xx/5xx，**不**吞成空列表
+  （200 + `[]` 会被读成"这个号没有流水"）。
+- **明细是上游的账，不是本机的记录**（用户口径 2026-10-04：「注意是上游变化而不是本地记录」）：
+  数据源与汇总同一条上游流水；本仓的 `RunRecord` / 运行明细账本回答的是"我们做过什么"，
+  两者对不上是常态（重试、手动操作、别的端）。界面上的措辞也照这条写。
+- **已收尾**：`README.md` 与 `docs/architecture.md` 的「HTTP 接口」一节已补 `beans` 两条。
   `web/lite/regress/lib.mjs` 的 `FIXTURES` 里那条 `/api/beans/today` fixture
-  **保留**（它让门禁走到那张卡"有读数"的长相），但它的注释仍写着
-  「后端还没有这个端点」—— 那条注记该删（属 `web/`，不在本轮文档改动范围）。
+  **保留**（它让门禁走到那张卡"有读数"的长相）—— 那条「后端还没有这个端点」的注记
+  仍待顺手删掉（属 `web/`，与另一条写入线同文件，本轮未动）。

@@ -210,6 +210,8 @@ GET  /api/runs                  最近运行
 POST /api/runs                  启动运行 {task, account, body}
 GET  /api/runs/{id}             单次运行详情
 GET  /api/runs/{id}/events      ★ SSE 事件流
+GET  /api/beans/today           今日AI豆（**按账号**汇总，不合计）
+GET  /api/beans/records         某个账号的AI豆流水明细（?account=<id>&days=<n>）
 ```
 
 > 完整的路由表（含登录、设置、兑换）在 `docs/architecture.md`「HTTP 接口」一节。

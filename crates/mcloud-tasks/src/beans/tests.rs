@@ -399,6 +399,147 @@ async fn read_day_refuses_to_report_a_truncated_ledger() {
     assert_eq!(http.urls().len(), MAX_PAGES, "每一页都真的去要了");
 }
 
+// ── 5. 明细（不限于今日）───────────────────────────────────────────────
+
+/// ⭐ 窗口的下界：`days` 是**自然日**，不是 `days × 24h`。
+///
+/// `1` ⇒ 今天 00:00（东八区）；`7` ⇒ 含今天共 7 个自然日；`0` / 负数 ⇒ 不限。
+#[test]
+fn range_since_is_beijing_midnight_of_the_first_day_in_the_window() {
+    assert_eq!(range_since_ms(0, NOW_MS), None, "0 = 全部（不限窗口）");
+    assert_eq!(range_since_ms(-3, NOW_MS), None);
+    assert_eq!(
+        range_since_ms(1, NOW_MS),
+        Some(DAY_START_MS),
+        "近 1 天 = 今天"
+    );
+    assert_eq!(
+        range_since_ms(7, NOW_MS),
+        Some(DAY_START_MS - 6 * 86_400_000),
+        "近 7 天要含今天，所以只往回退 6 天"
+    );
+}
+
+/// ⭐ 明细**不限于今日**：窗口之外丢掉，窗口之内全留，按时间倒序。
+///
+/// 时间解不出的那一笔**照样列出来**（排在最后、并计入 `undated`）：
+/// 按窗口把它丢掉就是静默少算，而它恰恰是最该被人看一眼的那种。
+#[tokio::test]
+async fn read_records_filters_the_window_and_sorts_newest_first() {
+    let http = Scripted::new(vec![page(&[
+        // 故意乱序给：明细的排序不能指望上游。
+        rec(1, "2026-09-01T00:00:00.000+00:00"),
+        rec(3, TODAY_AT_01Z),
+        rec_without_time(9),
+        rec(2, "2026-09-29T00:00:00.000+00:00"),
+    ])]);
+
+    let got = read_records(&http, range_since_ms(1, NOW_MS), MAX_DETAIL_RECORDS)
+        .await
+        .unwrap();
+
+    assert!(!got.has_more, "一页就到底了");
+    assert_eq!(got.records.len(), 2, "只留今天那笔 + 时间解不出的那笔");
+    // 新的在前；解不出时间的排最后。
+    assert_eq!(got.records[0].num, 3);
+    assert_eq!(got.records[0].at_ms, Some(NOW_MS - 12 * 3_600_000));
+    assert_eq!(got.records[1].num, 9);
+    assert_eq!(got.records[1].at_ms, None);
+    assert_eq!(
+        got.records[1].raw_time, None,
+        "原串没有就如实是 None（不是空串）"
+    );
+    assert_eq!(got.undated, 1);
+}
+
+/// 不限窗口（`since = None`）时四笔都在，且严格倒序 —— `None` 排在最后。
+#[tokio::test]
+async fn read_records_without_a_window_keeps_everything_newest_first() {
+    let http = Scripted::new(vec![page(&[
+        rec(1, "2026-09-01T00:00:00.000+00:00"),
+        rec_without_time(9),
+        rec(3, TODAY_AT_01Z),
+        rec(2, "2026-09-29T00:00:00.000+00:00"),
+    ])]);
+
+    let got = read_records(&http, None, MAX_DETAIL_RECORDS).await.unwrap();
+    let nums: Vec<i64> = got.records.iter().map(|r| r.num).collect();
+    assert_eq!(nums, vec![3, 2, 1, 9], "按时间倒序，解不出时间的垫底");
+    assert_eq!(got.undated, 1);
+}
+
+/// ⭐ 撞上条数上限 ⇒ **不静默截断**：`has_more` 置真、`undated` 只数**回给前端的**那些。
+#[tokio::test]
+async fn read_records_reports_truncation_instead_of_silently_cutting() {
+    let http = Scripted::new(vec![page(&[
+        rec(1, "2026-09-30T03:00:00.000+00:00"),
+        rec_without_time(9),
+        rec(2, "2026-09-30T04:00:00.000+00:00"),
+    ])]);
+
+    let got = read_records(&http, None, 2).await.unwrap();
+    assert!(got.has_more, "截断了就必须说");
+    assert_eq!(got.records.len(), 2);
+    // 倒序后前两笔是有时间的（3:00 与 4:00），那笔没时间的被截在外面 ⇒ undated = 0。
+    assert_eq!(got.undated, 0, "数的是**留在结果里**的，不是被丢掉的");
+}
+
+/// ⭐ 明细也翻页：第一页装满就再要一页；`has_more` 只表示"还有没读到的"。
+#[tokio::test]
+async fn read_records_walks_pages_until_a_short_page() {
+    let full: Vec<String> = (0..PAGE_SIZE).map(|_| rec(1, TODAY_AT_01Z)).collect();
+    let http = Scripted::new(vec![page(&full), page(&[rec(5, TODAY_AT_01Z)])]);
+
+    let got = read_records(&http, None, MAX_DETAIL_RECORDS).await.unwrap();
+    assert_eq!(got.records.len() as i64, PAGE_SIZE + 1);
+    assert!(!got.has_more);
+    let urls = http.urls();
+    assert_eq!(urls.len(), 2, "第二页必须真的去要了：{urls:?}");
+    assert!(urls[1].contains("pageNumber=2"), "{}", urls[1]);
+}
+
+/// ⭐ 翻满 `MAX_PAGES` 仍是满页 ⇒ 明细**不报错**，而是 `has_more = true`。
+///
+/// 与 [`read_day`] 刻意不同：那边是一个"今日净增"的**数**，少算就错；
+/// 这边是给人看的**列表**，给他已经读到的 500 条 + 一句"还有更多"比一个红框有用。
+#[tokio::test]
+async fn read_records_marks_has_more_when_it_hits_the_page_cap() {
+    let full: Vec<String> = (0..PAGE_SIZE).map(|_| rec(1, TODAY_AT_01Z)).collect();
+    let http = Scripted::new(vec![page(&full); MAX_PAGES]);
+
+    let got = read_records(&http, None, MAX_DETAIL_RECORDS).await.unwrap();
+    assert!(got.has_more, "读不到底必须如实说");
+    assert_eq!(got.records.len(), MAX_DETAIL_RECORDS);
+    assert_eq!(http.urls().len(), MAX_PAGES, "每一页都真的去要了");
+}
+
+/// ⭐ 只读哨兵（明细那一条）：只发 `GET cloudRecordV2`，没有一条写请求。
+#[tokio::test]
+async fn read_records_writes_nothing_upstream() {
+    let http = Scripted::new(vec![page(&[rec(1, TODAY_AT_01Z)])]);
+    let _ = read_records(&http, None, MAX_DETAIL_RECORDS).await.unwrap();
+
+    let requests = http.requests();
+    assert_eq!(requests.len(), 1);
+    for req in &requests {
+        assert_eq!(req.method, "GET", "只读端点不许发别的动词");
+        assert!(req.body.is_none(), "查询流水不带体");
+        assert!(
+            req.url.starts_with(app_signin::CLOUD_RECORD_V2),
+            "只能打流水那一口：{}",
+            req.url
+        );
+    }
+    assert_eq!(
+        requests[0].url,
+        format!(
+            "{}?aiDou={LEDGER_AI_DOU}&type={TYPE_ALL}&pageNumber=1&pageSize={PAGE_SIZE}",
+            app_signin::CLOUD_RECORD_V2
+        ),
+        "账本必须是 aiDou=1、不过滤方向"
+    );
+}
+
 // ── 纯函数夹具（不走 HTTP） ─────────────────────────────────────────────
 
 /// 直接造一笔 `CloudRecord`。

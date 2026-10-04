@@ -822,6 +822,12 @@ GET    /api/runs/{id}/events        ★ SSE 事件流
 GET    /api/runs/{id}/logs          运行日志（?after= 断线续传）
 POST   /api/runs/{id}/cancel        请求中止（202 语义）
 
+GET    /api/beans/today             今日AI豆（**按账号**汇总，绝不合计）
+GET    /api/beans/records           某个账号的AI豆**流水明细**（?account=<id>&days=<n>）
+                                    `days` = 自然日：1 今天 / 7 含今天共 7 天 / 0 全部；
+                                    缺省 7。只读上游 `cloudRecordV2`，一次只读一个账号；
+                                    别人的账号一律 404，上游读不到直接 4xx/5xx（不回空列表）
+
 GET    /api/schedules               定时列表（含服务端算的 nextFireAt）
 PUT    /api/schedules/{id}          创建或更新（幂等）
 DELETE /api/schedules/{id}

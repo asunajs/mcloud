@@ -2247,3 +2247,88 @@ async fn schedule_update_keeps_the_accounting_columns() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── AI豆明细（`GET /api/beans/records`）──────────────────────────────────
+//
+// ⚠ 这里**只覆盖"还没碰上游"的那几条**：认证、参数校验、归属判定。
+// 成功那一趟要真发 `cloudRecordV2`（`http_for` 建的是真 H5 会话），
+// 离线跑不了 —— 流水的解析 / 翻页 / 排序 / 截断都在
+// `crates/mcloud-tasks/src/beans/tests.rs` 用 fixture 回放覆盖。
+// 这样分工的理由：那几条判据（东八区窗口、倒序、`hasMore`）**与 HTTP 层无关**，
+// 摆在路由测试里只会更难写、还更慢。
+
+/// ⭐ 明细**必须**要认证 —— 未登录的正确答案是 401，不是"这个号没流水"的空列表。
+#[tokio::test]
+async fn bean_records_requires_login() {
+    let (handle, dir) = test_app("beans-records-gate");
+    let state = ServerState::new(handle);
+    let (_, _, _) = send_full(
+        mcloud_server::app(state.clone()),
+        post_json("/api/setup", &setup_json("admin", "correct-horse")),
+    )
+    .await;
+
+    let (s, body) = send(
+        mcloud_server::app(state),
+        get("/api/beans/records?account=deadbeef&days=7"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "实际：{body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 缺 `account` ⇒ 400。不能是 500，更不能是"空流水"的 200 ——
+/// 后者会把"你漏传了参数"显示成"这个号没有流水"。
+#[tokio::test]
+async fn bean_records_without_account_is_400() {
+    let (handle, dir) = test_app("beans-records-noacct");
+    let (status, text) = send(authed_app(handle), get("/api/beans/records?days=7")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "实际：{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 别人的账号 ⇒ **404**（归属错误一律 404，不泄露"这个号存在但不是你的"）。
+///
+/// ⚠ 这条同时钉住"归属判定在上游之前"：拿别人的 id 打这个端点，
+/// 绝不能变成"替别人去上游读一次账"。
+#[tokio::test]
+async fn bean_records_of_a_foreign_account_is_404() {
+    let (handle, dir) = test_app("beans-records-foreign");
+    let mut other = seed_for("19900000009");
+    other.owner = Some(mcloud_core::UserId::new("someone-else"));
+    let store = Arc::clone(&handle.store);
+    futures::executor::block_on(store.save_account(&other)).expect("落库");
+
+    let uri = format!("/api/beans/records?account={}&days=7", other.id.as_str());
+    let (status, text) = send(authed_app(handle), get(&uri)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "实际：{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 不存在的账号 ⇒ 404（与"别人的账号"同一个码，两者不可区分）。
+#[tokio::test]
+async fn bean_records_of_an_unknown_account_is_404() {
+    let (handle, dir) = test_app("beans-records-unknown");
+    let (status, text) = send(
+        authed_app(handle),
+        get("/api/beans/records?account=0000000000000000&days=7"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "实际：{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ `days` 越界 ⇒ 400（挡在算窗口之前：`days=999999999` 那种乘法会溢出 panic）。
+#[tokio::test]
+async fn bean_records_with_out_of_range_days_is_400() {
+    let (handle, dir) = test_app("beans-records-days");
+    let mine = seed_for("19900000010");
+    seed_account(&handle, mine.clone());
+
+    for bad in ["-1", "3651", "999999999"] {
+        let uri = format!("/api/beans/records?account={}&days={bad}", mine.id.as_str());
+        let (status, text) = send(authed_app(Arc::clone(&handle)), get(&uri)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "days={bad} 实际：{text}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1,8 +1,16 @@
 //! 今日AI豆（云朵记录汇总）—— **只读**。
 //!
 //! 上游那一口是 [`mcloud_upstream::app_signin::cloud_record_v2_request`]
-//! （`GET cloudRecordV2`，豆的收支流水）。本模块负责把它拉全、按“今天”过滤、
-//! **按账号**汇总，给路由 `GET /api/beans/today` 用。
+//! （`GET cloudRecordV2`，豆的收支流水）。本模块负责把它拉全，再按两种口径给出去：
+//!
+//! * **今日汇总**（[`read_today`]）—— 按"今天"过滤、按账号汇总，给路由
+//!   `GET /api/beans/today`（总览页那张卡）。
+//! * **流水明细**（[`read_records`]）—— 不限于今日，按窗口过滤后逐笔列出，
+//!   给路由 `GET /api/beans/records`（点开某个账号看"这些数是怎么来的"）。
+//!
+//! ⚠ 两条的**数据源是同一个上游接口**，不是本仓的运行记录/明细账本：
+//! 那是"我们做过什么"，流水是"上游账上发生了什么"，两者对不上是常态
+//! （重试、手动操作、别的端），明细要回答的是后者。
 //!
 //! # 三条口径（已定稿，见 docs/task-inventory.md §5）
 //!
@@ -79,6 +87,26 @@ pub fn day_start_ms(now_ms: i64) -> i64 {
 pub fn is_today(ts_ms: i64, now_ms: i64) -> bool {
     let start = day_start_ms(now_ms);
     (start..start + DAY_MS).contains(&ts_ms)
+}
+
+/// 明细窗口的下界（epoch 毫秒）：**含今天在内的最近 `days` 个自然日**。
+///
+/// * `days <= 0` ⇒ `None` = **不限**（"全部"那一档）；
+/// * `days == 1` ⇒ 今天 00:00（东八区）起；
+/// * `days == 7` ⇒ 今天往前数 6 天的 00:00 起（**含今天共 7 天**）。
+///
+/// ⚠ 这里用的是**自然日**而不是"最近 7×24 小时"：界面上那一档写的是「近 7 天」，
+/// 而用户对这句话的理解是"从上周同日 0 点到现在"。按 168 小时算的话，
+/// 今天早上打开时会**看不见** 7 天前上午那几笔 —— 界面上看不出差别，
+/// 只会让人以为上游漏记了。
+///
+/// ⚠ 下界是左闭（`>=`）：与 [`is_today`] 的 `start..start+DAY_MS` 同一条口径。
+pub fn range_since_ms(days: i64, now_ms: i64) -> Option<i64> {
+    if days <= 0 {
+        return None;
+    }
+    // 先落到今天的日界，再往回退 (days-1) 天 —— 于是"近 1 天"就是今天。
+    Some(day_start_ms(now_ms) - (days - 1) * DAY_MS)
 }
 
 // ══════════════════════════ insertTime 归一 ═════════════════════════════
@@ -252,6 +280,126 @@ pub async fn read_day(http: &dyn HttpClient, now_ms: i64) -> Result<BeanDay> {
     Err(Error::Other(format!(
         "AI豆流水翻满 {MAX_PAGES} 页仍然是满页，读不到底 —— 这一次没拿到全部记录，不报一个可能少算的数"
     )))
+}
+
+// ══════════════════════════ 明细（不限于今日）═══════════════════════════
+//
+// 「今日AI豆」那张卡只给一个净增数字。用户点开某个账号要看的是**这些数字由哪些
+// 流水构成**，而且往往不止今天（"上周那笔 200 扣的是什么？"）。
+//
+// ⚠ 口径与数据源跟上面那条**完全同源**：还是上游 `cloudRecordV2` 的流水
+// （`aiDou=1`、`type=0`）。**不是**本仓的运行记录 / 明细账本 —— 那是"我们做过什么"，
+// 流水是"上游账上发生了什么"，两者对不上是常态（重试、手动操作、别的端）。
+// 界面要回答的是后者。
+
+/// 明细一次最多回多少笔。
+///
+/// 界面是一个弹窗、一列流水，再多也翻不完。撞上它时**不静默截断**：
+/// [`BeanRecords::has_more`] 会置真，界面据此写一句"还有更多没列出来"。
+pub const MAX_DETAIL_RECORDS: usize = 500;
+
+/// 明细里的一笔流水（**上游原话**，只做了时间归一）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeanRecord {
+    /// `insertTime` 归一成的 epoch 毫秒。**解不出就是 `None`** —— 不猜时区
+    /// （理由见 [`parse_insert_time_ms`]）。
+    pub at_ms: Option<i64>,
+    /// 原样的 `insertTime`。`at_ms` 为 `None` 时这是**唯一**能显示的东西。
+    pub raw_time: Option<String>,
+    /// 正负号就是进出。
+    pub num: i64,
+    /// 上游给的摘要（"每日签到"这种）。
+    pub summary: String,
+    /// 上游给的备注/批次号。
+    pub mark: String,
+}
+
+/// 一个账号的流水明细（**不限于今日**）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeanRecords {
+    /// 按时间**倒序**（新的在前）。解不出时间的那几笔排在最后。
+    pub records: Vec<BeanRecord>,
+    /// 时间解不出的笔数。⚠ 这些笔**已经在 `records` 里**，这里只是如实数出来 ——
+    /// "不知道它属于哪天"不等于"它不是一笔"。
+    pub undated: i64,
+    /// 还有没读到的（撞上页数上限或 [`MAX_DETAIL_RECORDS`]）⇒ 这一份可能不全。
+    pub has_more: bool,
+}
+
+/// 只读：拉一个账号的**全部** AI豆流水，按窗口过滤、倒序、截到 `limit`。
+///
+/// # 与 [`read_day`] 共用同一套翻页口径
+///
+/// 一样是"翻到短页为止"，一样**不假设流水的排序**（那需要实拍依据，本仓没有），
+/// 一样在撞满 [`MAX_PAGES`] 时**不静默给出一个可能不全的数列** —— 区别只在
+/// 这里把"可能不全"做成一个**如实回传的标志**（[`BeanRecords::has_more`]）而不是
+/// 一个错误：看明细的人点的是"全部"，看到 500 条 + 一句"还有更多"比一个红框有用。
+///
+/// # 窗口与解不出时间的笔
+///
+/// `since_ms` 为 `None` = 不限。**时间解不出的笔照样列出来**（`at_ms = None`）：
+/// 按窗口把它们丢掉就是静默少算，而它们恰恰是最需要人看一眼的那种
+/// （上游换过时间格式时，全都会落到这里）。
+pub async fn read_records(
+    http: &dyn HttpClient,
+    since_ms: Option<i64>,
+    limit: usize,
+) -> Result<BeanRecords> {
+    let mut all: Vec<CloudRecord> = Vec::new();
+    let mut has_more = false;
+    for page in 1..=MAX_PAGES {
+        let resp = http
+            .request(app_signin::cloud_record_v2_request(
+                LEDGER_AI_DOU,
+                TYPE_ALL,
+                page as i64,
+                PAGE_SIZE,
+            ))
+            .await?;
+        let body = mcloud_upstream::session::ensure_http_ok(&resp, "查询AI豆流水")?;
+        let parsed = SignInEnvelope::parse(body)?;
+        let batch = app_signin::parse_cloud_records(&parsed)?;
+        let full = batch.len() as i64 == PAGE_SIZE;
+        all.extend(batch);
+        if !full {
+            break;
+        }
+        // 正好在第 MAX_PAGES 页还是满页 ⇒ 后面还有，如实标出来。
+        if page == MAX_PAGES {
+            has_more = true;
+        }
+    }
+
+    let mut records: Vec<BeanRecord> = all
+        .into_iter()
+        .map(|r| BeanRecord {
+            at_ms: r.insert_time.as_deref().and_then(parse_insert_time_ms),
+            raw_time: r.insert_time,
+            num: r.num,
+            summary: r.summary,
+            mark: r.mark,
+        })
+        .filter(|r| match (r.at_ms, since_ms) {
+            // 窗口之外（时间认得出来、且早于下界）才丢。
+            (Some(at), Some(since)) => at >= since,
+            // 不限窗口，或这笔时间解不出 ⇒ 留着。
+            _ => true,
+        })
+        .collect();
+
+    // 倒序：新的在前。`Option` 的序是 `None < Some` ⇒ 解不出时间的自然落到最后。
+    records.sort_by(|a, b| b.at_ms.cmp(&a.at_ms));
+    if records.len() > limit {
+        records.truncate(limit);
+        has_more = true;
+    }
+    let undated = records.iter().filter(|r| r.at_ms.is_none()).count() as i64;
+
+    Ok(BeanRecords {
+        records,
+        undated,
+        has_more,
+    })
 }
 
 // ══════════════════════════ 多账号：失败隔离 ═══════════════════════════

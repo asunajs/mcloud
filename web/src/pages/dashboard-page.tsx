@@ -48,12 +48,15 @@
 import { onMounted, onUnmounted, ref } from 'lite'
 import { setPageRefresh } from '../ui/page-refresh'
 import {
+  getBeanRecords,
   getBeanToday,
   getStatus,
   listAccounts,
   listRuns,
   listSchedules,
   type AccountSummary,
+  type BeanRecord,
+  type BeanRecords,
   type BeanToday,
   type RunRecord,
   type Schedule,
@@ -62,6 +65,7 @@ import {
 import { accountName, rememberAccountNames } from '../account-names'
 import { StatRow, type StatBadge, type StatItem } from '../ui/stat-row'
 import { toneClass } from '../ui/badge'
+import { Dialog, openDialog } from '../ui/dialog'
 import { EmptyState } from '../ui/empty-state'
 import { fmtClock, fmtDuration, fmtEpochMs, fmtUptime } from '../ui/time'
 import { outcomeText, statusBadge, statusLabel } from '../ui/history'
@@ -89,6 +93,32 @@ const UPCOMING_LIMIT = 3
 const EXPIRY_WARN_DAYS = 7
 
 const DAY_MS = 86_400_000
+
+/** 明细弹窗的 id（`openDialog` 与 `<Dialog>` 两边共用 ✓）。 */
+const BEAN_DETAIL_DIALOG_ID = 'bean-records'
+
+/**
+ * 明细的窗口档位。`days` 与 `GET /api/beans/records?days=` **同一个口径**：
+ * **自然日**，`1` = 今天（东八区日界起），`0` = 全部。
+ *
+ * ⚠ 档位写在这里而不是散在按钮上：`days` 是要发给后端的**值**，
+ * 摆在一起才能一眼看出"界面上这几档"与"后端认哪几档"是同一组。
+ */
+const BEAN_RANGES = [
+  { days: 1, label: '今日' },
+  { days: 7, label: '近 7 天' },
+  { days: 30, label: '近 30 天' },
+  { days: 0, label: '全部' },
+] as const
+
+/**
+ * 点开明细时的默认档位 = 「近 7 天」。
+ *
+ * ⚠ **不是「今日」**：总览那张卡上摆的已经是今天的净增，点开再看一遍等于点了个寂寞；
+ * 「不限于今日」正是这个入口存在的理由（用户口径 2026-10-04）。要看今天，
+ * 弹窗里第一档就是。
+ */
+const BEAN_DEFAULT_DAYS = 7
 
 // ── 纯函数：把接口数据算成卡上的数 ────────────────────────────────────
 //
@@ -286,6 +316,21 @@ export const DashboardPage = (props: DashboardPageProps) => {
   const nowTick = ref(Date.now())
   /** 「运行时间」的定时器句柄。组件卸载即停（下面 `onUnmounted`）。 */
   let ticker: ReturnType<typeof setInterval> | undefined
+
+  // ── AI豆明细弹窗（**不限于今日**）──────────────────────────────────────
+  //
+  // 点开某个账号看"这些数是怎么来的"。⚠ 读的是**上游流水**
+  // （`GET /api/beans/records` → 上游 `cloudRecordV2`），**不是**本仓的运行记录 /
+  // 明细账本 —— 后者是"我们做过什么"，流水是"上游账上发生了什么"，
+  // 两者对不上是常态（重试、手动操作、别的端），这一格要回答的是后者。
+  //
+  // 四个信号各管一件事：账号是谁 / 看哪一档 / 数据 / 三态。
+  // **数据与错误分开**：共用一个 ref 会让"上次的数据 + 这次的错误"混着显示。
+  const beanDetailAccount = ref('')
+  const beanDetailDays = ref<number>(BEAN_DEFAULT_DAYS)
+  const beanDetail = ref<BeanRecords | null>(null)
+  const beanDetailState = ref<LoadState>('loading')
+  const beanDetailError = ref('')
 
   const load = async () => {
     state.value = 'loading'
@@ -575,16 +620,140 @@ export const DashboardPage = (props: DashboardPageProps) => {
   // （豆不能跨账号花）。第一版按"总AI豆"设计是错的 —— 这一格的形状就是为了
   // 让"哪个号今天进了多少"一眼对上号。
   //
-  // ⚠ 后端这个端点**还没实现**（见 `api.ts` 的 `BeanToday` 与
-  // `docs/task-inventory.md` §5）。所以现在它显示「待接入」——
-  // 那是**如实**的状态，不是坏掉的样子：端点落地后它自己就亮，前端一行不用改。
+  // ⚠ 端点**早已落地**（`crates/mcloud-server/src/routes/beans.rs`，见
+  // `docs/task-inventory.md` §5）—— 读到 `null` 就是**真的读不到**，
+  // 原因在 `beansError` 里（未登录 401 / 上游 502 / 解析失败那一族）。
 
   /** 净增带符号：`+30` / `-200`。"今天扣了豆"和"今天没动"必须一眼分得开。 */
   const fmtSigned = (n: number): string => (n > 0 ? `+${n}` : String(n))
 
+  // ── 明细：点开某个账号看**逐笔流水**（不限于今日）────────────────────
+
+  /** 当前档位的人话（`0` = 全部 ⇒ 不写"近 0 天"）。 */
+  const beanRangeLabel = (): string =>
+    BEAN_RANGES.find((r) => r.days === beanDetailDays.value)?.label ?? `${beanDetailDays.value} 天`
+
+  /** 弹窗标题。账号名走 `accountName`（哈希不上界面 ✓）。 */
+  const beanDetailTitle = (): string => `${accountName(beanDetailAccount.value)} · AI豆明细`
+
+  /**
+   * 取这一档的明细。
+   *
+   * 失败**不退回空列表**：后端读不到上游时给的是 4xx/5xx，这里如实进 `error` 态 ——
+   * 显示成"没有流水"是把"我不知道"说成了"没有"（与那张卡的 `failed` 同一条道理）。
+   */
+  const loadBeanDetail = async () => {
+    beanDetailState.value = 'loading'
+    beanDetailError.value = ''
+    try {
+      beanDetail.value = await getBeanRecords(beanDetailAccount.value, beanDetailDays.value)
+      beanDetailState.value = 'ready'
+    } catch (e) {
+      beanDetailError.value = e instanceof Error ? e.message : '读取失败'
+      beanDetailState.value = 'error'
+    }
+  }
+
+  /**
+   * 点某一行账号 ⇒ 开弹窗 + 取数。
+   *
+   * ⚠ **先开弹窗再取数**（与历史页「运行日志」同一条）：那一下是网络请求，
+   * 等它回来再开窗的话，用户点完会有几百毫秒"没反应"。
+   */
+  const openBeanDetail = (account: string) => {
+    beanDetailAccount.value = account
+    beanDetailState.value = 'loading'
+    beanDetailError.value = ''
+    // 清掉上一个账号的数据：换号时"旧号的流水 + 新号的标题"是最坏的一种显示。
+    beanDetail.value = null
+    openDialog(BEAN_DETAIL_DIALOG_ID)
+    void loadBeanDetail()
+  }
+
+  /** 切档位：**弹窗不关**，只把这一档的数据取回来。 */
+  const switchBeanRange = (days: number) => {
+    if (beanDetailDays.value === days) return
+    beanDetailDays.value = days
+    void loadBeanDetail()
+  }
+
+  /** 一笔流水的时间：归一得出就按服务端口径格式化，否则**照原样摆出来**。 */
+  const beanRecordTime = (r: BeanRecord): string => {
+    if (r.atMs) return fmtEpochMs(r.atMs)
+    if (r.rawTime) return `${r.rawTime}（时间未识别）`
+    return '上游没给时间'
+  }
+
+  /**
+   * 明细抬头那句话。
+   *
+   * ⚠ `hasMore` 时**不能**把"收/支"说成这一档的合计 —— 那一份是截断过的；
+   * 所以措辞换成"已列出最近 N 笔（还有更多没读到）"。
+   */
+  const beanDetailSummary = (): string => {
+    const d = beanDetail.value
+    if (!d) return ''
+    const gain = d.records.filter((r) => r.num > 0).reduce((s, r) => s + r.num, 0)
+    const spent = d.records.filter((r) => r.num < 0).reduce((s, r) => s - r.num, 0)
+    const head = d.hasMore
+      ? `已列出最近 ${d.records.length} 笔（还有更多没读到）`
+      : `共 ${d.records.length} 笔`
+    const undated = d.undated > 0 ? ` · ${d.undated} 笔时间读不出，已按原样列出` : ''
+    return `${head} · 收 ${gain} · 支 ${spent}${undated}`
+  }
+
+  /** 一句话说清这一格的口径（数据从哪来、窗口怎么算）。 */
+  const beanDetailHint = (): string =>
+    `窗口按东八区自然日算（${beanRangeLabel()}）· 数据来自上游流水，不是本机的运行记录`
+
+  /** 弹窗正文：三态 + 「这一档没有流水」。 */
+  const beanDetailBody = () => {
+    if (beanDetailState.value === 'loading') {
+      return <p class="text-sm opacity-70">正在读上游流水 …</p>
+    }
+    if (beanDetailState.value === 'error') {
+      return (
+        <div class="flex flex-col items-start gap-2">
+          <p class="break-words text-sm text-error">没读到：{beanDetailError.value}</p>
+          <button type="button" class="btn btn-sm btn-soft" onClick={() => void loadBeanDetail()}>
+            重试
+          </button>
+        </div>
+      )
+    }
+    const d = beanDetail.value
+    if (!d) return <p class="text-sm opacity-70">还没取到明细</p>
+    if (d.records.length === 0) {
+      return <p class="text-sm opacity-70">这一档没有流水。</p>
+    }
+    return (
+      <div class="flex flex-col gap-2">
+        <p class="text-xs opacity-60">{beanDetailSummary()}</p>
+        {d.records.map((r, i) => (
+          <div key={i} class="flex items-start justify-between gap-3 rounded-box bg-base-200 p-3">
+            <div class="flex min-w-0 flex-col">
+              <span class="break-words text-sm font-medium">{r.summary || '（上游没给摘要）'}</span>
+              <span class="break-words text-xs opacity-60">
+                {beanRecordTime(r)}
+                {r.mark ? ` · ${r.mark}` : ''}
+              </span>
+            </div>
+            {/* 进出用**符号 + 颜色**两条线说：只给颜色的话，色觉障碍的用户分不出哪笔是扣豆。 */}
+            <span class={`shrink-0 font-medium ${r.num < 0 ? 'text-error' : 'text-success'}`}>
+              {fmtSigned(r.num)}
+            </span>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
   /** 徽章先说**这份读数可不可信**（有账号没读到 ⇒ 它是不完整的），再说账号数。 */
   const beanBadge = (): StatBadge => {
-    if (beansError.value) return { text: '待接入', tone: 'plain' }
+    // ⚠ 写「没读到」而不是原来的「待接入」：端点**早已落地**（见本段上面的说明），
+    // 所以这一格非空就是**真读不到**（未登录 / 上游 502 / 解析失败那一族）——
+    // 「待接入」会把一次真故障说成"功能还没做"，而它旁边现在就是「查看明细」入口。
+    if (beansError.value) return { text: '没读到', tone: 'warn' }
     const b = beans.value
     if (!b) return { text: '无读数', tone: 'plain' }
     if (b.failed.length > 0) return { text: `${b.failed.length} 个账号没读到`, tone: 'warn' }
@@ -602,12 +771,14 @@ export const DashboardPage = (props: DashboardPageProps) => {
    */
   const beansBody = () => {
     if (beansError.value) {
-      // 错误文本一律原样透出（不改写）：端点没实现时它就是一句 404，一眼认得出
-      // "这不是我配错了"。⚠ 必须显式允许换行 —— `.stat-desc` 自带 `nowrap`，
+      // 错误文本一律原样透出（不改写）：这样一眼认得出是哪一类（401 / 502 / 解析）。
+      // ⚠ 措辞是「读不到」而不是「未接入」：端点早已落地（见本段上面的说明），
+      // 这里非空就**是真读不到** —— 说成"没接上"会把故障读成"功能还没做"。
+      // ⚠ 必须显式允许换行 —— `.stat-desc` 自带 `nowrap`，
       // 长句子会顶破卡片、在窄屏上顶出横向滚动条（1280 档实测过）。
       return (
         <div class="stat-desc whitespace-normal break-words">
-          云朵记录接口未接入（{beansError.value}）
+          云朵记录读不到（{beansError.value}）
         </div>
       )
     }
@@ -619,15 +790,33 @@ export const DashboardPage = (props: DashboardPageProps) => {
     return (
       <div class="flex flex-col gap-2">
         {b.accounts.map((a) => (
-          <div key={a.account} class="rounded-box bg-base-200 p-3">
+          /*
+            ⚠ 整行是一个 **`<button>`**，不是"div + 里面一个小链接"：
+            这一行的全部意义就是"点开看明细"，把可点区域收成一个小链接，
+            在窄屏上会变成 44px 触控目标的反面教材（规范 §6.1）。
+            `text-left` 不能省 —— 按钮默认居中，那会让流水数字与账号名对不齐。
+            ⚠⚠ `cursor-pointer` 也**不能省**：这一行不是 `btn`/`dock>button` 那套
+            组件类，而 Tailwind v4 的 preflight **不再给 `<button>` 加
+            `cursor: pointer`**（v3 有 ✓）⇒ 少了它，鼠标移上去是**箭头**，
+            整行"可点"这件事就说不出来了（产物实测：CSS 里只有 `.btn` /
+            `.dock>button` / `.menu li>button:hover` 这些组件类才给手型 ✓）。
+          */
+          <button
+            key={a.account}
+            type="button"
+            class="cursor-pointer rounded-box w-full bg-base-200 p-3 text-left transition-colors hover:bg-base-300"
+            onClick={() => openBeanDetail(a.account)}
+            aria-label={`查看 ${accountName(a.account)} 的AI豆明细`}
+          >
             <div class="flex flex-wrap items-center justify-between gap-2">
               <span class="min-w-0 break-words text-sm font-medium">{accountName(a.account)}</span>
               <span class="font-medium">{fmtSigned(a.net)}</span>
             </div>
             <p class="mt-0.5 text-xs opacity-60">
               收 {a.gained} · 支 {a.spent} · {a.count} 笔
+              <span class="ml-1 opacity-80">查看明细 ›</span>
             </p>
-          </div>
+          </button>
         ))}
         {b.failed.map((f) => (
           <div key={f.account} class="rounded-box bg-base-200 p-3">
@@ -825,6 +1014,36 @@ export const DashboardPage = (props: DashboardPageProps) => {
           {recentRuns()}
         </>
       ) : null}
+
+      {/*
+        AI豆明细弹窗。⚠ 放在 `ready` 分支**外面**：`openDialog` 是按 id 找真实 DOM 的
+        （`ui/dialog.tsx` 文件头），节点必须一直在 —— 挂在 `ready` 里面时，
+        整页重载（`load()` 把 `state` 置 `loading`）会把开着的弹窗连节点一起拆掉。
+      */}
+      <Dialog id={BEAN_DETAIL_DIALOG_ID} title={beanDetailTitle()}>
+        {/* 档位 + 刷新。切档**不关窗**，只换数据（见 `switchBeanRange`）。 */}
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="join">
+            {BEAN_RANGES.map((it) => (
+              <button
+                key={it.days}
+                type="button"
+                class={`btn join-item btn-sm min-h-11 whitespace-nowrap md:min-h-0 ${
+                  beanDetailDays.value === it.days ? 'btn-primary' : 'btn-soft'
+                }`}
+                onClick={() => switchBeanRange(it.days)}
+              >
+                {it.label}
+              </button>
+            ))}
+          </div>
+          <button type="button" class="btn btn-sm btn-ghost" onClick={() => void loadBeanDetail()}>
+            刷新
+          </button>
+        </div>
+        <p class="text-xs opacity-60">{beanDetailHint()}</p>
+        {beanDetailBody()}
+      </Dialog>
     </div>
   )
 }

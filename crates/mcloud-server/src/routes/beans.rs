@@ -22,22 +22,40 @@
 //! 路由这里**不会**因为它返回 4xx/5xx —— 那会把"这一格没数"说成"服务挂了"
 //! （前端对这一格单独 `.catch`，见 `dashboard-page.tsx` 那段说明）。
 //! 只有"连自己有哪些账号都读不出来"才是一个真错误。
+//!
+//! # `GET /api/beans/records`：明细（**不限于今日**）
+//!
+//! 点开某个账号看"这些数是怎么来的"。与 `/today` 两条硬区别：
+//!
+//! 1. **一次只读一个账号**（`?account=`）。明细是"我要看这一个号的账"，
+//!    把所有账号的流水都拉回来是白花好几条上游请求。
+//! 2. **失败就是失败**：这里不像 `/today` 那样把账号级失败收进 `failed` 字段 ——
+//!    用户指名要这一个账号，读不到必须回一个错误码（上游读不到 ⇒ 502），
+//!    200 + 空列表会被读成"这个号没有流水"。
+//!
+//! 数据源仍是**上游流水**（`cloudRecordV2`），与本仓的运行记录无关：
+//! 后者是"我们做过什么"，前者是"上游账上发生了什么"。
 
 use std::sync::Arc;
 
-use axum::extract::{Extension, State};
+use axum::extract::{Extension, Query, State};
 use axum::Json;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use mcloud_core::HttpClient;
-use mcloud_tasks::beans::{read_today, BeanAccount, BeansEnv, Today};
+use mcloud_core::{Error, HttpClient};
+use mcloud_tasks::beans::{
+    range_since_ms, read_records, read_today, BeanAccount, BeanRecord, BeansEnv, Today,
+    MAX_DETAIL_RECORDS,
+};
 
 use crate::auth_gate::CurrentUser;
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::ServerState;
 
 pub fn routes() -> axum::Router<ServerState> {
-    axum::Router::new().route("/api/beans/today", axum::routing::get(today))
+    axum::Router::new()
+        .route("/api/beans/today", axum::routing::get(today))
+        .route("/api/beans/records", axum::routing::get(records))
 }
 
 // ══════════════════════════ 响应形状 ══════════════════════════
@@ -145,4 +163,129 @@ pub async fn today(
     };
     // ⚠ 逐账号失败在这里被收进 `failed`，整趟不会失败。
     Ok(Json(read_today(&env, &sources).await.into()))
+}
+
+// ══════════════════════════ 明细（不限于今日）══════════════════════════
+
+/// 明细没给 `days` 时的窗口。**7 个自然日**：总览那张卡说的是"今天"，
+/// 点开是想看"最近这几天的账"，只给今天等于点了个寂寞。
+const DEFAULT_DETAIL_DAYS: i64 = 7;
+
+/// `days` 的上限。十年足够覆盖任何真实用法，同时挡住
+/// `days=999999999` 那种把 `since` 算到溢出亿年外的输入（乘法会 `overflow` panic ✗）。
+const MAX_DETAIL_DAYS: i64 = 3_650;
+
+/// `GET /api/beans/records` 的查询串。
+#[derive(Debug, Deserialize)]
+pub struct RecordsQuery {
+    /// 账号主键（哈希）。必须是**当前用户自己的**账号 —— 别人的一律 404。
+    pub account: String,
+    /// 窗口：`0` = 全部；`n` = **含今天在内**的最近 `n` 个自然日（东八区日界）。
+    /// 缺省 [`DEFAULT_DETAIL_DAYS`]。
+    #[serde(default)]
+    pub days: Option<i64>,
+}
+
+/// 一笔流水（`api.ts` 的 `BeanRecord`）。
+///
+/// ⚠ `at_ms` 是 `number | null`：上游的 `insertTime` **可能解不出**
+/// （换了格式、或压根没有）。那条路**不丢这一笔**，而是把原串放进 `rawTime`
+/// 让界面照原样显示 —— 明细列表里"少了一笔"和"这一笔时间看不懂"必须分得开。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BeanRecordView {
+    /// `insertTime` 归一成的 epoch 毫秒（**服务端**时区口径，见 `beans` 模块）。
+    pub at_ms: Option<i64>,
+    /// 原样的 `insertTime`。`atMs` 为 `null` 时界面显示它。
+    pub raw_time: Option<String>,
+    /// 正负号就是进出（**可负**）。
+    pub num: i64,
+    /// 上游给的摘要。
+    pub summary: String,
+    /// 上游给的备注/批次号。
+    pub mark: String,
+}
+
+/// `GET /api/beans/records` 的响应（`api.ts` 的 `BeanRecords`）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BeanRecordsResponse {
+    /// 这一份明细是哪个账号的（原样回显，前端据此确认"弹窗里是哪个号"）。
+    pub account: String,
+    /// 服务端算窗口用的时刻（epoch 毫秒）—— 与 `/today` 同一条口径，前端不自己算日界。
+    pub now_ms: i64,
+    /// 回显请求的窗口档位（`0` = 全部）。
+    pub days: i64,
+    /// 窗口下界（epoch 毫秒）；`days = 0` 时为 `null`。
+    pub since_ms: Option<i64>,
+    /// 按时间**倒序**的流水。
+    pub records: Vec<BeanRecordView>,
+    /// 时间解不出的笔数（**已经在 `records` 里**）。
+    pub undated: i64,
+    /// 还有没读到的（撞上页数/条数上限）⇒ 这一份可能不全，界面要说出来。
+    pub has_more: bool,
+}
+
+impl From<BeanRecord> for BeanRecordView {
+    fn from(r: BeanRecord) -> Self {
+        Self {
+            at_ms: r.at_ms,
+            raw_time: r.raw_time,
+            num: r.num,
+            summary: r.summary,
+            mark: r.mark,
+        }
+    }
+}
+
+/// `GET /api/beans/records?account=<id>&days=<n>` —— 读**一个**账号的 AI豆流水明细。
+///
+/// # 错误码
+///
+/// * 缺 `account` / `days` 越界 ⇒ `400`（`Error::Config`）；
+/// * 账号不在当前用户名下（含"根本没这个号"）⇒ `404` —— 归属错误一律 404，
+///   不泄露"这个号存在但不是你的"（与 `routes/accounts.rs::remove` 同一条口径）；
+/// * 上游读不到（网络 / 非 0 码 / 解析失败）⇒ 由 `Error` 自己映射（多为 `502`）。
+///   **不**做"200 + 空列表"：那会被读成"这个号没有流水"。
+pub async fn records(
+    State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
+    Query(q): Query<RecordsQuery>,
+) -> ApiResult<BeanRecordsResponse> {
+    let account_key = q.account.trim();
+    if account_key.is_empty() {
+        return Err(ApiError(Error::Config("缺少 account 参数".into())));
+    }
+    let days = q.days.unwrap_or(DEFAULT_DETAIL_DAYS);
+    if !(0..=MAX_DETAIL_DAYS).contains(&days) {
+        return Err(ApiError(Error::Config(format!(
+            "days 只认 0（全部）或 1..={MAX_DETAIL_DAYS}（自然日），收到 {days}"
+        ))));
+    }
+
+    // 归属：只认**当前用户自己的**账号（与 `/api/accounts` 同一条判据）。
+    let accounts = state.handle.store.accounts_for(&cur.0).await?;
+    let Some(account) = accounts.iter().find(|a| a.id.as_str() == account_key) else {
+        return Err(ApiError(Error::NotFound(format!(
+            "账号 {account_key} 不在当前用户名下"
+        ))));
+    };
+
+    let now_ms = state.handle.clock.now_ms();
+    let since_ms = range_since_ms(days, now_ms);
+    // 一个账号一条自己的传输（会话/票是按账号建的，不能共用），与 `today` 同一条。
+    let http = state.handle.runner.http_for(account);
+    let got = read_records(http.as_ref(), since_ms, MAX_DETAIL_RECORDS).await?;
+    // ⚠ 先把两个标志位取出来再搬 `records`：顺序反了会撞上"部分移动"。
+    let (undated, has_more) = (got.undated, got.has_more);
+
+    Ok(Json(BeanRecordsResponse {
+        account: account.id.as_str().to_string(),
+        now_ms,
+        days,
+        since_ms,
+        records: got.records.into_iter().map(BeanRecordView::from).collect(),
+        undated,
+        has_more,
+    }))
 }
