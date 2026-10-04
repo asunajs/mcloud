@@ -5,11 +5,108 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mcloud_core::{
-    Account, AccountId, Clock, EventSink, HttpClient, Result, RunEvent, RunId, RunRecord,
-    RunStatus, Store, TaskOutcome,
+    Account, AccountId, Clock, EventSink, HttpClient, LogLevel, Result, RunEvent, RunId, RunRecord,
+    RunLogLine, RunStatus, Store, TaskOutcome, RUN_LOG_LIMIT,
 };
 
 use crate::{Registry, TaskContext};
+
+/// 把一次运行的事件**顺手抄一份**的 sink（回看用 —— 见 `RunRecord::logs` ✓）。
+///
+/// 它包在真 sink **外面**：事件照旧原样播给 SSE / 推送 ✓，这里只多留一份 ✓。
+///
+/// # ⚠ 为什么抄之前要自己过一遍 `scrubbed()`
+///
+/// 真 sink（`hub` / `app::sink` / `notify`）的脱敏在**它自己的 `emit` 里** ✓
+/// —— 也就是说，它脱的是"它发出去的那一份" ✗。我这里比它更早拿到原始事件 ✓，
+/// 图省事直接抄原文的话，带凭证的文本会被写进**落盘的历史库** ✗ ——
+/// 那比日志文件更持久、还会随 `/api/runs` 发回浏览器 ✗。
+/// 所以：**抄脱敏后的，转发原始的** ✓。
+struct LogCollector {
+    inner: Arc<dyn EventSink>,
+    clock: Arc<dyn Clock>,
+    lines: Mutex<Vec<RunLogLine>>,
+}
+
+impl LogCollector {
+    fn new(inner: Arc<dyn EventSink>, clock: Arc<dyn Clock>) -> Self {
+        Self {
+            inner,
+            clock,
+            lines: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// 取走攒下的行。
+    ///
+    /// 超过 [`RUN_LOG_LIMIT`] 时留**最后**那些 + 开头插一行说明 ✓ ——
+    /// 失败通常出现在**尾部**（逐笔处理时最后那几笔才出问题 ✓），
+    /// 只留开头会把最该看的几行丢掉 ✗。与前端实时面板"只截头部"同一条口径 ✓。
+    fn take(&self) -> Vec<RunLogLine> {
+        let mut lines = self.lines.lock().unwrap_or_else(|e| e.into_inner());
+        let total = lines.len();
+        if total <= RUN_LOG_LIMIT {
+            return std::mem::take(&mut *lines);
+        }
+        let dropped = total - RUN_LOG_LIMIT;
+        let tail = lines.split_off(dropped);
+        let at = tail.first().map(|l| l.at_ms).unwrap_or_else(|| self.clock.now_ms());
+        let mut out = Vec::with_capacity(tail.len() + 1);
+        out.push(RunLogLine {
+            level: LogLevel::Info,
+            message: format!("…（这次运行前面还有 {dropped} 行，已省略）"),
+            at_ms: at,
+        });
+        out.extend(tail);
+        out
+    }
+}
+
+impl EventSink for LogCollector {
+    fn emit(&self, event: RunEvent) {
+        // ⚠ 先按**脱敏后**的形状抄一份（见上面那段说明 ✓），再把**原始**事件转发 ✓。
+        let safe = event.scrubbed();
+        // 进度行没有 `at_ms`（它在实时面板里也不带时刻 ✓）⇒ 用注入的时钟补一个 ✓
+        // —— 回看时"这一步是什么时候做的"正是要的东西 ✓。
+        let at = self.clock.now_ms();
+        let line = match &safe {
+            RunEvent::Log {
+                level,
+                message,
+                at_ms,
+                ..
+            } => Some(RunLogLine {
+                level: *level,
+                message: message.clone(),
+                at_ms: *at_ms,
+            }),
+            // 与实时面板同一个格式（`[2/3] 领取AI豆` ✓）：回看时"做到第几步"
+            // 和"结果如何"同等重要 ✓。
+            RunEvent::Progress {
+                step, total, label, ..
+            } => Some(RunLogLine {
+                level: LogLevel::Info,
+                message: format!("[{step}/{total}] {label}"),
+                at_ms: at,
+            }),
+            // `Started` / `Finished` / `Details` 不进日志：前两个是生命周期 ✓，
+            // 最后一个进 `details`（前端直接渲染的那一格 ✓），各归各的 ✓。
+            _ => None,
+        };
+        if let Some(line) = line {
+            let mut lines = self.lines.lock().unwrap_or_else(|e| e.into_inner());
+            lines.push(line);
+            // 内存上限：只留最近的两倍上限 ✓ —— 一次刷屏式运行不该把内存吃满 ✗，
+            // 而 `take()` 只需要"足够取到最后一上限" ✓。
+            let cap = RUN_LOG_LIMIT * 2;
+            if lines.len() > cap {
+                let drop = lines.len() - cap;
+                lines.drain(..drop);
+            }
+        }
+        self.inner.emit(event);
+    }
+}
 
 /// 按账号构造 HTTP 客户端的工厂。
 ///
@@ -307,7 +404,13 @@ impl Runner {
         }
 
         let started = self.clock.now_ms();
-        self.sink.emit(RunEvent::Started {
+        // 抄一份日志（回看用 ✓）：包在真 sink 外面，事件照旧原样播出去 ✓。
+        let collector = Arc::new(LogCollector::new(
+            Arc::clone(&self.sink),
+            Arc::clone(&self.clock),
+        ));
+        let sink: Arc<dyn EventSink> = Arc::clone(&collector) as Arc<dyn EventSink>;
+        sink.emit(RunEvent::Started {
             run_id,
             task: task_name.to_string(),
             account: account.id.to_string(),
@@ -324,7 +427,7 @@ impl Runner {
             http: (self.http_for)(account),
             store: Arc::clone(&self.store),
             clock: Arc::clone(&self.clock),
-            sink: Arc::clone(&self.sink),
+            sink: Arc::clone(&sink),
             run_id,
             cancel: cancel_token.clone(),
             chain_cancel,
@@ -372,7 +475,7 @@ impl Runner {
         //
         // 静默是这一层最该防的失效：用户不会知道自己网盘里多了文件。
         if !leftovers.is_empty() {
-            self.sink.emit(RunEvent::Log {
+            sink.emit(RunEvent::Log {
                 run_id,
                 level: mcloud_core::LogLevel::Warn,
                 message: format!(
@@ -388,7 +491,7 @@ impl Runner {
             });
         }
 
-        self.sink.emit(RunEvent::Finished {
+        sink.emit(RunEvent::Finished {
             run_id,
             outcome: outcome.clone(),
             duration_ms,
@@ -398,6 +501,8 @@ impl Runner {
         self.cancel.release(run_id);
 
         let mut record = self.record(run_id, task_name, account, duration_ms, outcome);
+        // 这次运行的日志行（回看用 ✓）：取走后不再累积 ✓。
+        record.logs = collector.take();
 
         // ── 并把两样收尾的东西落进 `details` ──────────────────────────────
         //
@@ -469,6 +574,9 @@ impl Runner {
             // 被中止时由调用方覆盖成 Cancelled。
             status: RunStatus::Done,
             details: serde_json::Value::Null,
+            // 日志由调用方（`run()`）从收集器里取走再塞进来 ✓ ——
+            // `record()` 只负责形状 ✓，不去碰 sink ✓。
+            logs: Vec::new(),
         }
     }
 }
@@ -826,6 +934,90 @@ mod tests {
             ctx.warn("注意");
             Ok(TaskOutcome::success("完成"))
         }
+    }
+
+    /// ⚠ 用户 2026-10-03 口径：「**运行结束后无法查看详细日志**（任务记录不算），
+    /// 需要补上；参考 mcloud 的日志分类和颜色，一眼看出」✓。
+    ///
+    /// 这条钉住"落盘的记录里真的带着那些行、**级别也带着**" ✓ —— 少了它，
+    /// 整个功能可以静默失效 ✗（实时面板照常在刷、历史里却什么都没有 ✓）。
+    #[tokio::test]
+    async fn run_record_carries_the_run_log_with_levels() {
+        let (runner, _store, _sink) = build(vec![Arc::new(ChattyTask)]);
+        let rec = runner
+            .run("chatty", &account("13800000000"), &serde_json::json!({}))
+            .await
+            .expect("应跑完");
+
+        let got: Vec<(LogLevel, String)> =
+            rec.logs.iter().map(|l| (l.level, l.message.clone())).collect();
+        assert!(
+            got.contains(&(LogLevel::Info, "进行中".to_string())),
+            "info 行没落盘：{got:?}"
+        );
+        assert!(
+            got.contains(&(LogLevel::Warn, "注意".to_string())),
+            "**级别**也要落盘（界面按它着色 ✓）：{got:?}"
+        );
+        // 进度行进日志时带 `[步/总数]` 前缀 —— 与实时面板同一个格式 ✓
+        assert!(
+            got.contains(&(LogLevel::Info, "[1/2] 第一步".to_string())),
+            "进度行没落盘：{got:?}"
+        );
+        // 每行都有时刻 ✓（回看时"这一步什么时候做的"就是要看的东西 ✓）
+        assert!(rec.logs.iter().all(|l| l.at_ms == NOW_MS), "时刻该来自注入的时钟");
+    }
+
+    /// 封面：日志超过 [`RUN_LOG_LIMIT`] 时留**最后**那些，并在开头说明丢了多少 ✓。
+    ///
+    /// ⚠ 留尾部不留头部是刻意的：逐笔处理的任务，失败通常出在**最后几笔** ✗
+    /// —— 只留开头等于把最该看的那几行丢掉 ✓（与实时面板"只截头部"同一条口径 ✓）。
+    #[tokio::test]
+    async fn long_logs_keep_the_tail_and_say_what_was_dropped() {
+        struct Flood;
+        #[async_trait]
+        impl Task for Flood {
+            fn name(&self) -> &'static str {
+                "flood"
+            }
+            fn title(&self) -> &'static str {
+                "话痨任务"
+            }
+            fn description(&self) -> &'static str {
+                "刷屏"
+            }
+            async fn run(&self, ctx: &TaskContext, _body: &serde_json::Value) -> TaskResult {
+                for i in 0..(RUN_LOG_LIMIT + 30) {
+                    ctx.info(format!("第 {i} 行"));
+                }
+                Ok(TaskOutcome::success("完"))
+            }
+        }
+
+        let (runner, _store, _sink) = build(vec![Arc::new(Flood)]);
+        let rec = runner
+            .run("flood", &account("13800000000"), &serde_json::json!({}))
+            .await
+            .expect("应跑完");
+
+        let msgs: Vec<&str> = rec.logs.iter().map(|l| l.message.as_str()).collect();
+        assert!(
+            msgs.first().is_some_and(|m| m.contains("已省略")),
+            "开头该有一行说明丢了多少：{msgs:?}"
+        );
+        assert!(
+            !msgs.contains(&"第 0 行"),
+            "最早那些行该被丢掉：{msgs:?}"
+        );
+        assert!(
+            msgs.contains(&format!("第 {} 行", RUN_LOG_LIMIT + 29).as_str()),
+            "**最后**那几行必须留着（失败通常在尾部 ✓）：{msgs:?}"
+        );
+        assert!(
+            rec.logs.len() <= RUN_LOG_LIMIT + 2,
+            "总行数该被压到上限附近：{}",
+            rec.logs.len()
+        );
     }
 
     /// 进入任务体后阻塞，直到 `release` 被通知；用于测试并发闸。

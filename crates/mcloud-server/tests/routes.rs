@@ -371,6 +371,7 @@ async fn logs_of_existing_run_without_lines_is_empty_200() {
             started_at_ms: 0,
             status: mcloud_core::RunStatus::Done,
             details: serde_json::Value::Null,
+            logs: Vec::new(),
         })
         .await
         .expect("落盘应成功");
@@ -446,6 +447,7 @@ async fn runs_list_only_returns_own_records() {
                 started_at_ms: id as i64,
                 status: mcloud_core::RunStatus::Done,
                 details: serde_json::Value::Null,
+                logs: Vec::new(),
             })
             .await
             .unwrap();
@@ -1095,6 +1097,7 @@ async fn sse_streams_are_never_compressed() {
             started_at_ms: 1,
             status: mcloud_core::RunStatus::Done,
             details: serde_json::Value::Null,
+            logs: Vec::new(),
         })
         .await
         .unwrap();
@@ -2139,6 +2142,7 @@ async fn sse_disconnect_unsubscribes_from_the_hub() {
             started_at_ms: 1,
             status: mcloud_core::RunStatus::Done,
             details: serde_json::Value::Null,
+            logs: Vec::new(),
         })
         .await
         .unwrap();

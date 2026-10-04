@@ -66,6 +66,19 @@ export type TaskOutcome =
   | { status: 'partial'; summary: string }
   | { status: 'failed'; reason: string }
 
+/**
+ * 运行日志的一行（**回看**用，来自 `RunRecord.logs`）。
+ *
+ * ⚠ 与实时面板的 `LogLine` **不是**同一个类型，别合并：这里 `level` 是后端那四个
+ * 取值（`debug/info/warn/error` ✓），而面板只认三档 ✓ ⇒ 渲染时把 `debug` 并进
+ * `info` ✓ —— 回看里"调试行"与"普通行"同色是对的 ✓。
+ */
+export interface RunLogLine {
+  level: 'debug' | 'info' | 'warn' | 'error'
+  message: string
+  at_ms: number
+}
+
 /** 一条留在用户网盘上、还没清理的产物。 */
 export interface LeftoverArtifact {
   /** 产物类型。今天是 `cloud-file`，刻意开放（将来会有外链、笔记等）。 */
@@ -83,6 +96,14 @@ export interface RunRecord {
   started_at_ms: number
   duration_ms: number
   outcome: TaskOutcome
+  /**
+   * 这次运行的日志行（**回看**用；最多 200 行 ✓）。
+   *
+   * ⚠ **列表接口不带它** —— `/api/runs` 会剥掉 ✗（100 条各带 200 行就不是列表
+   * 该有的体量了 ✓，见 `routes/runs.rs::list`）⇒ 这里必须是可选的 ✓；
+   * 要日志就按 id 取详情（`getRun(run_id)` ✓，它原样带 ✓）。
+   */
+  logs?: RunLogLine[]
   /**
    * 结构化明细。
    *

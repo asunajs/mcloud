@@ -83,7 +83,16 @@ pub async fn list(
     State(state): State<ServerState>,
     Extension(cur): Extension<CurrentUser>,
 ) -> ApiResult<Vec<RunRecord>> {
-    let runs = state.handle.store.runs_for(&cur.0, 100).await?;
+    let mut runs = state.handle.store.runs_for(&cur.0, 100).await?;
+    // ⚠ 列表**不带日志** ✗：一次运行最多留 200 行（`RUN_LOG_LIMIT` ✓），
+    // 100 条记录全带上就是几 MB 的响应 ✗ —— 而列表要的是"一眼扫过去" ✓。
+    // 要日志就按 id 取详情（`get_one` ✓，它原样带 ✓）。
+    //
+    // 置空 + `skip_serializing_if` ⇒ 响应里连 `logs` 这个键都不出现 ✓，
+    // 前端也就不必区分"空数组"与"没这个字段" ✓。
+    for r in &mut runs {
+        r.logs = Vec::new();
+    }
     Ok(Json(runs))
 }
 

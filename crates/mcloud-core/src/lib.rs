@@ -42,7 +42,7 @@ pub use owner::{legacy_owner, visible_to};
 pub use pc_device::{PcDeviceStore, PC_DEVICE_SUFFIX};
 pub use pipeline::{AccountMode, Pipeline, PipelineId, PipelineStep};
 pub use push::PushConfig;
-pub use run::{RunId, RunRecord, RunStatus, TaskOutcome};
+pub use run::{RunId, RunLogLine, RunRecord, RunStatus, TaskOutcome, RUN_LOG_LIMIT};
 pub use schedule::{Schedule, ScheduleId};
 pub use settings::{AppSettings, DEFAULT_MIN_PASSWORD_LEN, DEFAULT_SESSION_TTL_HOURS};
 pub use smid::{SmidState, SmidStore};

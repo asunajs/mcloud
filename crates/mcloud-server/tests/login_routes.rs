@@ -590,6 +590,7 @@ async fn leftover_artifacts_are_readable_through_the_api() {
         outcome: mcloud_core::TaskOutcome::success("传了两个"),
         status: mcloud_core::RunStatus::Done,
         details: serde_json::json!({ "artifacts": ledger.pending(mcloud_core::RunId(4242)) }),
+        logs: Vec::new(),
     };
     handle.store.upsert_run(&record).await.unwrap();
     let (status, body) = send(authed_app(handle.clone()), get("/api/runs")).await;

@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+// 日志行的级别来自事件那一层（同一套 `LogLevel` ✓，别在两边各定义一个 ✗）。
+use crate::event::LogLevel;
+
 /// 运行标识。进程内单调递增，重启后从历史最大値 +1 继续。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RunId(pub u64);
@@ -166,6 +169,34 @@ impl TaskOutcome {
     }
 }
 
+/// 运行日志的**一行**（回看用）。
+///
+/// # 为什么要有它（2026-10-03 用户口径）
+///
+/// 任务的 `ctx.info/warn/progress` 以前只作为 SSE 事件**实时播出去** ⇒
+/// 页面一刷新、或者运行一结束，就再也看不到那次运行到底做了什么 ✗。
+/// 用户原话：「运行结束后无法查看详细日志（任务记录不算），需要补上；
+/// 参考 mcloud 的日志分类和颜色，一眼看出」✓ —— 所以把行攒下来、
+/// 跟记录一起落盘 ✓，界面按 `level` 着色 ✓（与实时面板同一套配色 ✓）。
+///
+/// ⚠ 文本在**入队前**已经脱敏（引擎那层的 sink 负责 ✓）。这里不再脱一遍，
+/// 但也**不许**有人绕过 sink 往里塞原始文本 ✗。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunLogLine {
+    pub level: LogLevel,
+    pub message: String,
+    pub at_ms: i64,
+}
+
+/// 每个运行最多留多少行日志。
+///
+/// 落盘是**整库 JSON 重写**（`JsonStore`）⇒ 不封顶的话，一次刷屏式运行就会把
+/// 数据文件撑大 ✗。200 行 ≈ 十几 KB，足够看清一次运行做了什么 ✓。
+///
+/// ⚠ 与前端实时面板的 `MAX_LOG_LINES = 500` **不是同一个数**，也别合并：
+/// 那个只占内存、随页面一起丢 ✓；这个是写盘的、要留很久 ✓。
+pub const RUN_LOG_LIMIT: usize = 200;
+
 /// 一次运行的完整记录，落盘到 `history.json`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
@@ -181,6 +212,17 @@ pub struct RunRecord {
     /// 结构化明细，前端可直接渲染。
     #[serde(default)]
     pub details: serde_json::Value,
+    /// 这次运行的日志行（最多 [`RUN_LOG_LIMIT`] 行 ✓）。
+    ///
+    /// `default` + `skip_serializing_if` 两个属性都是给**老数据**留的：
+    /// 加这一格之前落盘的记录没有它 ⇒ 读回来是空表 ✓，写回去也不会凭空长出
+    /// `"logs": []` ✗。
+    ///
+    /// ⚠ 列表接口（`/api/runs`）会把它**剥掉**再回 ✗ → 见
+    /// `routes/runs.rs::list`：100 条记录各带 200 行，那个响应就不是
+    /// 列表该有的体量了 ✗。要日志就按 id 取详情 ✓。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logs: Vec<RunLogLine>,
 }
 
 fn default_done() -> RunStatus {
@@ -229,6 +271,29 @@ mod tests {
         let j = r#"{"run_id":1,"task":"sign","account":"138","started_at_ms":0,"duration_ms":1,"outcome":{"status":"success","summary":"ok"},"details":null}"#;
         let r: RunRecord = serde_json::from_str(j).expect("缺 status 的老记录应能解析");
         assert_eq!(r.status, RunStatus::Done);
+        // ⚠ 同一份老记录也**没有 `logs`**（那一格是 2026-10-04 才加的 ✓）：
+        // 读回来必须是空表 ✓，而且写回去**不能凭空长出** `"logs":[]`
+        // —— 历史库里存着成百上千条老记录，凭空长字段就是白白膨胀 ✗。
+        assert!(r.logs.is_empty(), "老记录没有 logs ⇒ 空表");
+        let back = serde_json::to_string(&r).expect("应能序列化");
+        assert!(
+            !back.contains("\"logs\""),
+            "空日志不该被写进 JSON：{back}"
+        );
+    }
+
+    /// 日志行的形状：级别 + 文本 + 时刻（界面按级别着色 ✓）。
+    #[test]
+    fn log_lines_round_trip() {
+        let line = RunLogLine {
+            level: LogLevel::Warn,
+            message: "领取AI豆：上游错误 [614]".into(),
+            at_ms: 1_700_000_000_123,
+        };
+        let j = serde_json::to_string(&line).expect("应能序列化");
+        assert_eq!(j, r#"{"level":"warn","message":"领取AI豆：上游错误 [614]","at_ms":1700000000123}"#);
+        let back: RunLogLine = serde_json::from_str(&j).expect("应能解析");
+        assert_eq!(back, line);
     }
 
     #[test]
@@ -242,6 +307,7 @@ mod tests {
             outcome: TaskOutcome::failed("被中止"),
             status: RunStatus::Cancelled,
             details: serde_json::Value::Null,
+            logs: Vec::new(),
         };
         assert!(
             !r.needs_attention(),
@@ -260,6 +326,7 @@ mod tests {
             outcome: TaskOutcome::success("ok"),
             status: RunStatus::Done,
             details: serde_json::Value::Null,
+            logs: Vec::new(),
         };
         assert!(!base.needs_attention());
         let failed = RunRecord {

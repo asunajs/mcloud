@@ -18,8 +18,10 @@
  */
 
 import { onMounted, ref, onUnmounted } from 'lite'
+import { Dialog, openDialog } from '../ui/dialog'
+import { LogPanel, type LogLine } from '../ui/log-panel'
 import { setPageRefresh } from '../ui/page-refresh'
-import { listRuns, type RunRecord, type TaskOutcome } from '../api'
+import { getRun, listRuns, type RunLogLine, type RunRecord, type TaskOutcome } from '../api'
 // 直播的结构化明细：与直播页**共用同一份**渲染（从前只有"当前这次"能看到）。
 import { LiveRoomResult } from '../ui/live-room-result'
 import { toLiveRoomRunView } from '../api'
@@ -54,6 +56,39 @@ type StatusFilter = 'all' | TaskOutcome['status']
  * 只会把真正有遗留的那几行淹掉 —— 而这一列的全部价值就是让人**一眼看见**
  * 那几行。
  */
+/** 运行日志弹窗的 id（`openDialog` / `Dialog` 两边都用它 ✓）。 */
+const RUN_LOG_DIALOG_ID = 'run-log-dialog'
+
+/**
+ * 后端那四个级别 → 面板认的三档。
+ *
+ * ⚠ `debug` 并进 `info` 是刻意的：**回看**时"调试行"与"普通行"同色是对的 ✓
+ * —— 实时面板也是这么归的 ✓。两处别归得不一样 ✗（同一份日志两种颜色最费解 ✓）。
+ */
+const toLogLines = (lines: RunLogLine[]): LogLine[] =>
+  lines.map((l) => ({
+    kind: l.level === 'error' ? 'error' : l.level === 'warn' ? 'warn' : 'info',
+    text: l.message,
+    at: l.at_ms,
+  }))
+
+/**
+ * 「日志」入口。
+ *
+ * ⚠ 桌面表格与移动卡片**两处都要放** ✓ —— 不然后端辛苦存下来的日志只在宽屏
+ * 看得见（窄屏那条验收会看这个 ✓，`history-page` 里别的明细格也是这么办的 ✓）。
+ */
+const LogButton = (props: { record: RunRecord; onOpen: (r: RunRecord) => void }) => (
+  <button
+    type="button"
+    class="btn btn-xs btn-soft w-fit"
+    aria-label={`查看日志：${props.record.task} #${props.record.run_id}`}
+    onClick={() => props.onOpen(props.record)}
+  >
+    日志
+  </button>
+)
+
 const LeftoverCell = (props: { record: RunRecord }) => {
   const items = props.record.details?.artifacts ?? []
   if (items.length === 0) return null
@@ -202,6 +237,35 @@ export const HistoryPage = (props: HistoryPageProps) => {
   /** 某一档有几条。计数直接摆在档位上 —— 不用点进去就知道哪一档有东西。 */
   const countOf = (id: StatusFilter): number =>
     id === 'all' ? runs.value.length : runs.value.filter((r) => r.outcome.status === id).length
+
+  /**
+   * 运行日志（**回看**）。
+   *
+   * ⚠ 列表接口**不带日志**（`/api/runs` 会剥掉 ✓，见 `routes/runs.rs::list`）
+   * ⇒ 点开的这一刻才按 id 取详情 ✓。那一下是网络请求 ⇒ 必须有"正在取 / 取失败"
+   * 两个状态 ✓：点了没反应会让人以为功能坏了 ✗。
+   */
+  const logLines = ref<LogLine[]>([])
+  const logState = ref<'loading' | 'ready' | 'error'>('loading')
+  const logWho = ref('')
+  const logError = ref('')
+
+  const openRunLog = async (r: RunRecord) => {
+    logLines.value = []
+    logState.value = 'loading'
+    logWho.value = `${r.task} #${r.run_id}`
+    logError.value = ''
+    // 先开弹窗再取（网络那一下不该让界面"没反应" ✓）
+    openDialog(RUN_LOG_DIALOG_ID)
+    try {
+      const full = await getRun(r.run_id)
+      logLines.value = toLogLines(full.logs ?? [])
+      logState.value = 'ready'
+    } catch (e) {
+      logError.value = e instanceof Error ? e.message : String(e)
+      logState.value = 'error'
+    }
+  }
 
   const filtering = (): boolean => filter.value !== 'all' || query.value.trim() !== ''
 
@@ -353,6 +417,7 @@ export const HistoryPage = (props: HistoryPageProps) => {
                   <td class="whitespace-nowrap opacity-80">{fmtEpochMs(r.started_at_ms)}</td>
                   <td>
                     <div class="flex flex-col gap-2">
+                      <LogButton record={r} onOpen={(x) => void openRunLog(x)} />
                       <LeftoverCell record={r} />
                       <LiveRoomCell record={r} />
                       <ExchangeCell record={r} />
@@ -388,6 +453,7 @@ export const HistoryPage = (props: HistoryPageProps) => {
                 {/* ⚠ 桌面那列有的，移动端也要有 —— 不然后端辛苦存下来的结构化明细
                     只在宽屏看得见（用户口径：所有内容都要进记录）。 */}
                 <div class="flex flex-col gap-2">
+                  <LogButton record={r} onOpen={(x) => void openRunLog(x)} />
                   <LiveRoomCell record={r} />
                   <ExchangeCell record={r} />
                 </div>
@@ -419,6 +485,20 @@ export const HistoryPage = (props: HistoryPageProps) => {
 
       {state.value === 'ready' && runs.value.length > 0 ? toolbar() : null}
       {state.value === 'ready' ? body() : null}
+
+      {/* ⚠ 内容必须写在**默认插槽**里：Vapor 下 JSX 子节点编译成第三个实参，
+          而 `props.children` 永远是 undefined ✗（`ui/dialog.tsx` 文件头写着这条 ✓）。 */}
+      <Dialog id={RUN_LOG_DIALOG_ID} title="运行日志">
+        <p class="text-xs opacity-60">{logWho.value}</p>
+        {logState.value === 'loading' ? <p class="text-sm opacity-70">正在取日志 …</p> : null}
+        {logState.value === 'error' ? (
+          <p class="break-words text-sm text-error">{logError.value}</p>
+        ) : null}
+        {logState.value === 'ready' && logLines.value.length === 0 ? (
+          <p class="text-sm opacity-70">这次运行没有留下日志。</p>
+        ) : null}
+        <LogPanel get={() => logLines.value} />
+      </Dialog>
     </div>
   )
 }
