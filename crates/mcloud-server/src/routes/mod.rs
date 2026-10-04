@@ -14,6 +14,7 @@ pub mod pipelines;
 pub mod runs;
 pub mod schedules;
 pub mod security;
+pub mod server_logs;
 pub mod system;
 pub mod task_config;
 
@@ -67,6 +68,9 @@ pub fn router() -> Router<ServerState> {
         .route("/api/runs/{id}/cancel", post(cancel::cancel_run))
         // 运行日志（支持 ?after= 断线续传）
         .route("/api/runs/{id}/logs", get(logs::list))
+        // **全量**服务端日志（环形缓冲 ✓，含调度器与上游 http ✓）——
+        // 与上面那条的区别见 server_logs.rs 的模块头 ✓。
+        .route("/api/logs", get(server_logs::list))
         // ── 云盘账号（列表 / 导入凭据 / 编辑 / 移除）────────────────
         // `POST` = 用一条凭据建账号（手机号已存在则**只换凭据**，见 accounts::import）；
         // `PATCH` = 改昵称 / 设备号 / 凭据 —— **部分更新**，理由见 accounts::update。

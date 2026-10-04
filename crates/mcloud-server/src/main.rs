@@ -32,10 +32,18 @@ async fn main() -> anyhow::Result<()> {
     } else {
         "info"
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
-        )
+    // ⚠ 从 `fmt().init()` 换成"registry + 两个 layer"：**stdout 那份输出一个字不变** ✓
+    // （`fmt::layer()` 就是原来的默认格式化 ✓），只是**多挂一层**把事件抄进
+    // 环形缓冲 ✓ —— 给界面上那个「日志」窗口用 ✓（见 `logbuf.rs` 的模块头）。
+    //
+    // 顺序：filter 在前 ✓（被过滤掉的事件**不会**进环 ✓ —— 否则开了 trace 的
+    // 进程会把环冲爆 ✗，而环本来只该装"按当前档位真的会打出来"的东西 ✓）。
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)))
+        .with(tracing_subscriber::fmt::layer())
+        .with(mcloud_server::logbuf::RingLayer)
         .init();
 
     if args.is_empty() {

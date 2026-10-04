@@ -14,20 +14,11 @@
  *  - 只用一个断点（`md`，768px）→ §7.1
  */
 
-import {
-  IconClock,
-  IconDashboard,
-  IconExchange,
-  IconFlower,
-  IconHistory,
-  IconPipeline,
-  IconSettings,
-  IconTask,
-  IconUser,
-} from './icons'
+import { IconAlert, IconClock, IconDashboard, IconExchange, IconFlower, IconHistory, IconPipeline, IconSettings, IconTask, IconUser } from './icons'
 
 export type PageId =
   | 'dashboard'
+  | 'logs'
   | 'accounts'
   | 'tasks'
   | 'exchange'
@@ -129,6 +120,14 @@ export const NAV_ITEMS: readonly NavItem[] = [
     blurb: '历次执行的结果、耗时与失败原因。',
     href: '/history',
     icon: IconHistory,
+  },
+  {
+    id: 'logs',
+    label: '日志',
+    title: '服务端日志',
+    blurb: '整个进程的日志：任务、调度、上游请求，一处看全。',
+    href: '/logs',
+    icon: IconAlert,
   },
   {
     id: 'settings',

@@ -75,6 +75,10 @@ const ROUTES: Record<PageId, (ctx: RouteCtx) => Promise<() => unknown>> = {
     const { HistoryPage } = await import('./pages/history-page')
     return () => createComponent(HistoryPage, { onGo: ctx.go })
   },
+  logs: async () => {
+    const { LogsPage } = await import('./pages/logs-page')
+    return () => createComponent(LogsPage, {})
+  },
   settings: async () => {
     const { SettingsPage } = await import('./pages/settings-page')
     return () => createComponent(SettingsPage, {})

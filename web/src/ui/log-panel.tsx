@@ -33,7 +33,7 @@ export interface LogLine {
  * ⚠ 这些语义色必须在 `app.css` 的 `@theme` 里注册过 ✓，否则类名会
  * **静默不生成**（写了也不报错、就是没颜色 ✗，见 AGENTS.md 那条坑 ✓）。
  */
-const TONE: Record<LogKind, string> = {
+export const TONE: Record<LogKind, string> = {
   info: 'opacity-90',
   success: 'text-success',
   // `fail`（某一笔没成）与 `warn` 同色 ✓：都不是"整个挂了"✗，但也别一片绿 ✓
@@ -51,7 +51,7 @@ const TONE: Record<LogKind, string> = {
  * 而 `SUCCESS`／`FAIL` 这几个字在任何情况下都读得出来 ✓。
  * 等宽字体下按最长那个（`SUCCESS`）对齐 ✓。
  */
-const MARK: Record<LogKind, string> = {
+export const MARK: Record<LogKind, string> = {
   info: 'INFO   ',
   success: 'SUCCESS',
   fail: 'FAIL   ',

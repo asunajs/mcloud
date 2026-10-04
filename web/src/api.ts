@@ -684,6 +684,31 @@ export const getBeanToday = () => request<BeanToday>('/api/beans/today')
 export const getRun = (id: number) => request<RunRecord>(`/api/runs/${id}`)
 
 /**
+ * 一行**服务端**日志（`/api/logs` ✓）—— 与"某次运行的日志"不是一回事：
+ * 这是整个进程的（调度器 ✓、凭据续期 ✓、上游 http ✓）。
+ */
+export interface ServerLogLine {
+  level: string
+  /** 来源模块（`mcloud_engine::scheduler` 这种 ✓）—— 排障时"谁在说话"很关键 ✓ */
+  target: string
+  message: string
+  at_ms: number
+}
+
+/** 取最近的服务端日志（`level` 的语义是"**不低于**它" ✓）。 */
+export const listServerLogs = (params: {
+  limit?: number
+  level?: string
+  q?: string
+}): Promise<ServerLogLine[]> => {
+  const sp = new URLSearchParams()
+  if (params.limit) sp.set('limit', String(params.limit))
+  if (params.level) sp.set('level', params.level)
+  if (params.q) sp.set('q', params.q)
+  return request<ServerLogLine[]>(`/api/logs?${sp.toString()}`)
+}
+
+/**
  * 启动一次运行（一个账号，或**多账号/全部**）。
  *
  * `background = true` 时**立刻**返回真实的 run id（多账号时是一组），任务在后台跑。

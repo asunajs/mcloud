@@ -9,6 +9,7 @@
 pub mod auth_gate;
 pub mod cli;
 pub mod error;
+pub mod logbuf;
 pub mod qr;
 pub mod routes;
 pub mod state;
