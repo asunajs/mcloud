@@ -333,11 +333,23 @@ impl EventSink for NotifySink {
             RunEvent::Log {
                 run_id,
                 level,
+                kind,
                 message,
                 at_ms,
             } => {
                 if let Some(state) = self.lock().get(run_id) {
-                    state.logs.write(log_type(*level), message.clone(), *at_ms);
+                    // ⚠ 优先用**分类**（`kind` ✓）—— 推送那套 type 与它是同一套 ✓
+                    // （`info/success/start/warn/error/debug` ✓）。
+                    // `fail` 在推送侧没有对应档 ⇒ 落到 `warn` ✓：级别一致 ✓，
+                    // **不会**把"某一笔没成"变成报红 ✗（`onlyError` 不该被它触发 ✓）。
+                    let ty = match kind {
+                        mcloud_core::LogKind::Success => "success",
+                        mcloud_core::LogKind::Start => "start",
+                        mcloud_core::LogKind::Fail => "warn",
+                        // 其余沿用按级别的映射（debug/info/warn/error ✓）
+                        _ => log_type(*level),
+                    };
+                    state.logs.write(ty, message.clone(), *at_ms);
                 }
             }
             RunEvent::Finished {
