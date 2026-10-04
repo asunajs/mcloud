@@ -50,6 +50,7 @@ fn run_record(id: u64, status: RunStatus) -> RunRecord {
         outcome: mcloud_core::TaskOutcome::success("ok"),
         status,
         details: serde_json::Value::Null,
+        logs: Vec::new(),
     }
 }
 

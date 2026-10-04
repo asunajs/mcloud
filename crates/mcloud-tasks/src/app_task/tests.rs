@@ -1000,3 +1000,29 @@ async fn saving_the_month_reading_keeps_other_account_state() {
     assert_eq!(state["cur_month_backup"]["month"], "202610");
     assert_eq!(state["cur_month_backup"]["backup"], false);
 }
+
+/// ⚠ 用户 2026-10-04 报「app-task 存在 bug，无法正常使用」——
+/// 现场是从**落盘的运行日志**里看到的（这正是新做的"回看日志"第一次派上用场 ✓）：
+///
+/// ```text
+/// [2/3] 做任务 分享文件领好礼<span id='share_title'>0/7</span>
+/// ```
+///
+/// 上游把 HTML 塞进了任务名 ✗ ⇒ 这一条钉住"进记录之前清干净" ✓。
+#[test]
+fn task_name_from_upstream_has_its_html_stripped() {
+    // 真实样本（原样抄自运行 #81 的日志 ✓）
+    assert_eq!(
+        super::clean_task_name("分享文件领好礼<span id=\'share_title\'>0/7</span>"),
+        "分享文件领好礼0/7"
+    );
+    // 标签里有属性、有嵌套、且标签后面还跟文字
+    assert_eq!(
+        super::clean_task_name("手动上传一个文件 <b>每天</b> 都能做"),
+        "手动上传一个文件 每天 都能做"
+    );
+    // 没有标签时**原样保留**（别把正常名字改坏 ✗）
+    assert_eq!(super::clean_task_name("分享文件领好礼"), "分享文件领好礼");
+    // 未闭合的 `<` 别把后面整段吃掉（宁可留着，也别静默丢内容 ✗）
+    assert_eq!(super::clean_task_name("a < b 上传"), "a < b 上传");
+}

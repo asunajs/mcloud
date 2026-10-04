@@ -84,6 +84,47 @@ pub const STOP_AT_PROCESS: i64 = 100;
 /// 我们的 `TaskV2Item` 里没有 `button` 那一格（解析器没读它），而"10 张"那条玩法
 /// 的产物链（`aiRecognize` / `chat/v2/add` SSE）本仓**零实拍**。
 /// ⇒ 留空并注明，不编一个"看起来合理"的入口。
+/// 上游 `name` 里**真的会带 HTML** ✗。
+///
+/// 实拍（2026-10-04，用户报「app-task 存在 bug，无法正常使用」）：
+///
+/// ```text
+/// 分享文件领好礼<span id='share_title'>0/7</span>
+/// ```
+///
+/// ⚠ 这个 `name` **只用于展示与记录**（发给上游的那几枪用的是 `task_id` ✓，
+/// 见 `TaskStep` 的字段说明），所以就地在**进入记录之前**清干净 ✓。不清的话
+/// 同一串脏东西会脏在三个地方：进度日志 ✓、`details.reported.steps[].name` ✓、
+/// 以及界面上 ✓ —— 而 `format!` 出来的 `<span>` 在界面上是**看不见**的 ✗，
+/// 用户只会觉得"任务名怪怪的"却说不出哪里怪 ✓。
+///
+/// 只做两件事：去掉 `<…>` 段 ✓、把连续空白压成一个空格 ✓。
+///
+/// **刻意不做** HTML 实体解码（`&amp;` → `&` 之类）：上游给的是**标签** ✓，
+/// 实体没实测到 ✓；而无脑解码会把本来正确的文本改坏、且不可逆 ✗ ——
+/// 这属于"没证据的加工"✓。
+fn clean_task_name(raw: &str) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '<' {
+            // ⚠ 只有**真的能找到配对的 `>`** 才当标签去掉 ✓。
+            // 找不到的那种（`a < b 上传` ✓，上游偶尔会这么给）就**原样留着** ——
+            // 宁可显示得丑一点，也**不能静默吞掉后面的正文** ✗
+            // （这是本仓最忌讳的"不发错、不报错，只是东西不对"）。
+            if let Some(close) = chars[i + 1..].iter().position(|c| *c == '>') {
+                i += close + 2;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    // 去标签可能留下多余空白（`名称 <span>…</span>` ⇒ `名称 ` ✓）
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn beiyong1_name_gate(name: &str) -> bool {
     name.contains("上传") && (name.contains("图") || name.contains("照"))
 }
@@ -552,7 +593,8 @@ pub async fn run_app_task(ctx: &TaskContext, pace_ms: i64) -> Result<AppTaskResu
     // ③ 逐条做。
     for (item, step_kind) in &planned {
         ctx.check_cancelled()?;
-        let name = item.name.clone().unwrap_or_default();
+        // ⚠ 上游的 name 里会带 HTML（见 `clean_task_name` 的说明）⇒ 进记录前清掉 ✓
+        let name = clean_task_name(&item.name.clone().unwrap_or_default());
         let mut step = TaskStep {
             task_id: item.task_id,
             name: name.clone(),
