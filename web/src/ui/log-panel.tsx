@@ -8,10 +8,10 @@
  */
 
 // 每行都要带时刻 —— 用户 2026-10-04 口径：「下面的日志没有时间」✗。
-// ⚠ 用 `fmtClock`（`HH:MM:SS`）而不是 `fmtEpochMs`（带月日 ✓）：同一个运行里的
+// ⚠ 用 `fmtClockMs`（`HH:MM:SS.mmm` ✓）而不是 `fmtEpochMs`（带月日 ✓）：同一个运行里的
 // 行都发生在几分钟内，带日期只是噪音 ✗；跨天那两个位置由页面自己决定要不要
 // 带日期 ✓（见 `logs-page.tsx` ✓）。
-import { fmtClock } from './time'
+import { fmtClockMs } from './time'
 
 /**
  * 日志的**分类** —— 照老项目 `mcloud-sign` 的 consola `type` 体系 ✓
@@ -106,7 +106,7 @@ export const LogPanel = (props: { get: () => LogLine[] }) => (
               // ⚠ 标记与正文拼在**一个**表达式里：lite 编译器对"元素旁边的裸文本
               // 节点"支持得最薄 ✓，拼成一整串最稳 ✓。
               <div key={i} class={`break-words ${TONE[l.kind]}`}>
-                {`${fmtClock(l.at)}  ${MARK[l.kind]}  ${l.text}`}
+                {`${fmtClockMs(l.at)}  ${MARK[l.kind]}  ${l.text}`}
               </div>
             ))}
           </div>

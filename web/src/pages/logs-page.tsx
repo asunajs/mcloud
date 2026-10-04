@@ -15,7 +15,7 @@ import { onMounted, onUnmounted, ref } from 'lite'
 import { listServerLogs, type ServerLogLine } from '../api'
 import { IconSearch } from '../ui/icons'
 import { MARK, TONE, type LogKind } from '../ui/log-panel'
-import { fmtEpochMs } from '../ui/time'
+import { fmtStampMs } from '../ui/time'
 
 /** 级别档位。⚠ 语义是"**不低于**它" ✓（与后端 `min_level` 同一口径 ✓）。 */
 const LEVELS: ReadonlyArray<readonly [string, string]> = [
@@ -135,7 +135,7 @@ export const LogsPage = () => {
                 // ⚠ 时间、标记、正文、来源拼成**一个**表达式 ✓（lite 编译器对
                 // "元素旁边的裸文本节点"支持最薄 ✓ —— 这个坑在别的页面踩过 ✓）。
                 <div key={i} class={`break-words ${TONE[kindOf(l.level)]}`}>
-                  {`${fmtEpochMs(l.at_ms)}  ${MARK[kindOf(l.level)]}  ${l.message}  ·  ${l.target}`}
+                  {`${fmtStampMs(l.at_ms)}  ${MARK[kindOf(l.level)]}  ${l.message}  ·  ${l.target}`}
                 </div>
               ))}
             </div>

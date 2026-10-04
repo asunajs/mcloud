@@ -37,6 +37,44 @@ export const fmtClock = (ms: number | null | undefined): string => {
   return new Date(ms).toLocaleTimeString('zh-CN', CLOCK)
 }
 
+const pad = (n: number, width = 2): string => String(n).padStart(width, '0')
+
+/**
+ * `HH:MM:SS.mmm` —— **日志专用**（用户 2026-10-04：「时间没有毫秒？」）。
+ *
+ * # 为什么日志非得有毫秒
+ *
+ * 一次运行里**同一秒**会有好几行 ✓ —— 上游 http 那种 `ms=201` 的请求几毫秒一条 ✓
+ * ⇒ 只到秒的话**先后顺序根本分不出来** ✗，而排障时"先发了哪个请求"恰恰是关键 ✓。
+ * 数据本来就是毫秒级 ✓（后端 `at_ms`、事件里的 `at_ms`、实时面板的 `Date.now()` ✓），
+ * 只是没渲染出来 ✗。
+ *
+ * # 为什么不用 `toLocaleTimeString`（上面几个都走它 ✓）
+ *
+ * 两条都踩过：
+ * ① `zh-CN` + `hour12: false` 在**午夜**会渲染成 `24:00:00` ✗（ICU 的经典口径 ✓）；
+ * ② 毫秒在 `Intl` 里要 `fractionalSecondDigits` ✓，而它给不了**定长** ✗ ——
+ *    日志里 `.5` 与 `.005` 右端对不齐 ✓，读起来像是两种东西 ✗。
+ * 手写这两句反而**确定** ✓。
+ */
+export const fmtClockMs = (ms: number | null | undefined): string => {
+  if (!ms) return '—'
+  const d = new Date(ms)
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`
+}
+
+/**
+ * `MM-DD HH:MM:SS.mmm` —— 给**全局**日志页用 ✓。
+ *
+ * 与 `fmtClockMs` 只差那个月日 ✓：服务端日志是**一个长跑进程**的流 ✓，
+ * 跨天是常态 ✓（凌晨那几枪调度 ✓）⇒ 少了日期，`00:05` 是今天还是昨天就说不清 ✗。
+ */
+export const fmtStampMs = (ms: number | null | undefined): string => {
+  if (!ms) return '—'
+  const d = new Date(ms)
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${fmtClockMs(ms)}`
+}
+
 /**
  * 上游那种时间串（`2026-07-01 09-30-00`）→ 界面短格式（`07-01 09:30`）。
  *
