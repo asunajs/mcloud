@@ -143,6 +143,25 @@ pub struct TaskV2Item {
     /// ⚠ 邮箱那一支（`newsign_139mail`）**回数据、且同形**，但它回来的条目里
     /// `marketname` **混着**给 `newsign_139mail` 与 `sign_in_3` ⇒ 两边不是干净的两批表。
     pub market_name: Option<String>,
+    /// `button.app.link` —— 「传 10 张」那一族**唯一的门**就在这一格 ✓。
+    ///
+    /// # 实拍（抓包仓 `har/2026-09-25-通知有礼.har` 的 `taskListV3` 响应）
+    ///
+    /// ```json
+    /// "button": {"app": {"text": "去完成", "action": "jump", "link": "mcloud://main/uploadView"}}
+    /// ```
+    ///
+    /// 同页命中这一格的条目：`id=614`（`group=beiyong1`、`name=上传中秋团圆照`、
+    /// `description=上传10张可领`、`process=6`、`state=WAIT`）、以及 `id=106` / `id=522`
+    /// —— 后两条**在别处已被 id 认领** ⇒ 这一格真正派上用场的是 beiyong1 那一族 ✓。
+    ///
+    /// 旧 TS `tasks.ts:78-81` 的 `beiyong1` 分支正是：
+    /// `if ((task.button.app as Beiyong1App)?.link?.includes("uploadView")) { await upload10PictureTask(task); }`
+    /// ⇒ 命中就"传 (10 − process) 张"✓（`ai-tasks.ts:190-224`）。
+    ///
+    /// ⚠ 只取这一格、**不**抄整份 `button`：这条链只判"是不是那个按钮" ✓
+    ///（那 25 个键里其余的是七份端形态、素材、排序之类，本层不判 ✓）。
+    pub button_app_link: Option<String>,
 }
 
 /// **一次**（一个 group 的）`taskListV2` 响应的解析结果。
@@ -223,6 +242,13 @@ pub fn parse_task_list_v2(body: &str, group: &str) -> Result<TaskListV2> {
                     curr_step: int_at(get("currstep")),
                     process: int_at(get("process")),
                     market_name: str_at(get("marketname")),
+                    // `button.app.link`（玩法 615 那一族唯一的门 ✓）。缺键 / 少一层 /
+                    // 不是字符串 ⇒ `None`（"读不出" ⇒ 那一族就**不动**，不会误点 ✓）。
+                    button_app_link: get("button")
+                        .and_then(|b| b.get("app"))
+                        .and_then(|a| a.get("link"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                 });
             }
         }

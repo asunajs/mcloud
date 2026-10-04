@@ -23,8 +23,45 @@ fn task_106_uploads_exactly_one() {
     assert_eq!(s, UPLOAD_ONE);
     assert_eq!(s.rounds, 1);
     // ⚠ 106 的 runner 体里**没有**那句 sleep ⇒ 不踱步
-    assert!(!s.pace_each_round, "106 不该每轮等一拍");
+    assert_eq!(s.per_round_ms, 0, "106 不该每轮等");
     assert_eq!(s.stop_at_process, 0);
+    assert_eq!(s.file_ext, ".bin", "不带 ext ⇒ 走缺省后缀");
+}
+
+// ── 玩法 113：使用PC客户端 ──────────────────────────────────────────
+
+/// ⭐ 113 的形状与 106 **完全同档**，差别**只在渠道头** ✓。
+///
+/// 旧 TS `runners.ts:27-31` 里**只有**这一个玩法传了 `channelSrc: "10200153"`
+///（别处 `uploadRandomFile()` 走缺省=安卓档 ✓）—— 因为这条任务奖励的就是
+/// "**用 PC 客户端**"，按安卓档传等于没做 ✓。真机读数（两个账号一致）：
+/// `使用PC客户端` / `group month` / `market sign_in_3` / `limitType MONTH` /
+/// `currStep 0` / `state WAIT` ✓。
+#[test]
+fn task_113_uploads_one_file_on_the_pc_channel() {
+    let pc = upload_shape_for(&item(
+        Some(PC_UPLOAD_TASK_ID),
+        Some("month"),
+        Some("使用PC客户端"),
+    ))
+    .expect("113 必须有一档");
+    assert_eq!(pc, UPLOAD_ONE_PC);
+    assert_eq!(pc.channel, CloudChannel::Pc, "PC 档是这条任务的**本体**");
+    assert_eq!(pc.rounds, 1, "与 106 同档：一趟一个");
+    assert_eq!(pc.stop_at_process, 0);
+    assert_eq!(pc.per_round_ms, 0, "106 那一档没有每轮等待 ✓");
+
+    // 对照：106 是安卓档（缺省档 ✓）⇒ 两档**只差渠道**这一格 ✓
+    let android = upload_shape_for(&item(Some(106), None, None)).expect("106 有一档");
+    assert_eq!(android.channel, CloudChannel::Android);
+    assert_eq!(
+        UploadShape {
+            channel: CloudChannel::Pc,
+            ..android
+        },
+        pc,
+        "除渠道外与 106 一模一样 —— 差一点点都说明形状被改坏了 ✗"
+    );
 }
 
 // ── 玩法 522：循环凑满 ────────────────────────────────────────────────
@@ -37,10 +74,13 @@ fn task_522_is_the_looping_shape() {
     assert_eq!(s.rounds, ROUNDS_PER_RUN);
     assert_eq!(s.rounds, 5, "旧实现的默认值是 5，不是 100");
     assert_eq!(s.stop_at_process, STOP_AT_PROCESS);
-    assert!(s.pace_each_round, "522 每轮都要等一拍");
+    assert_eq!(
+        s.per_round_ms, 500,
+        "522 每轮等 500ms（旧实现那句 sleep(500) ✓）"
+    );
 }
 
-/// ⚠ 522 与 106 的**唯一**形状差别就是那个 `pace_each_round`。
+/// ⚠ 522 与 106 的**唯一**形状差别就是那个每轮等待（500ms vs 0）。
 ///
 /// 混成一个的后果两种都不报错：要么 522 变成连传 5 个零间隔，
 /// 要么 106 白等一拍 —— 只在"哪天被判成脚本"那一类最难查的差异上显形。
@@ -49,7 +89,7 @@ fn the_only_difference_between_106_and_522_is_the_pacing() {
     let one = upload_shape_for(&item(Some(106), None, None)).unwrap();
     let many = upload_shape_for(&item(Some(522), None, None)).unwrap();
     assert_ne!(one.rounds, many.rounds);
-    assert_ne!(one.pace_each_round, many.pace_each_round);
+    assert_ne!(one.per_round_ms, many.per_round_ms);
     assert_ne!(one.stop_at_process, many.stop_at_process);
     assert!(one.rounds < many.rounds);
 }
@@ -66,6 +106,61 @@ fn the_beiyong1_name_gate_is_the_legacy_conjunction() {
     assert!(!beiyong1_name_gate("看图有礼"), "有'图'但没有'上传'");
     assert!(!beiyong1_name_gate("签到"));
     assert!(!beiyong1_name_gate(""));
+}
+
+// ── beiyong1 的按钮门：一次传 10 张（玩法 615 那一族） ─────────────────
+
+/// ⭐⭐ 615「记录国庆节欢乐瞬间」这一类**只有按钮门认得出**：它的名字里既没有"上传"、
+/// 也没有"图/照"（`beiyong1_name_gate` 直接漏掉它 ✗）⇒ 全靠 `button.app.link` ✓。
+///
+/// 实拍（抓包仓 `har/2026-09-25-通知有礼.har` 的 `taskListV3`）：同族条目
+/// `id=614 name=上传中秋团圆照 description=上传10张可领 process=6 state=WAIT group=beiyong1`
+/// 且 `button.app.link = mcloud://main/uploadView` ✓；真机 615 的 `description`
+/// 也是「上传10张可领」、`groupid` 也是 `beiyong1` ✓。
+#[test]
+fn the_beiyong1_button_gate_routes_to_ten_uploads() {
+    let mut it = item(Some(615), Some("beiyong1"), Some("记录国庆节欢乐瞬间"));
+    it.button_app_link = Some("mcloud://main/uploadView".into());
+    let s = upload_shape_for(&it).expect("按钮门该认出它");
+    assert_eq!(s, UPLOAD_TEN);
+    assert_eq!(s.rounds, 10, "一次最多 10 张");
+    assert_eq!(
+        s.stop_at_process, 10,
+        "`process` 到 10 就停（= 旧实现那句 `remaining = 10 - process` ✓）"
+    );
+    assert_eq!(s.per_round_ms, 300, "每张 300ms（旧实现那句 sleep(300) ✓）");
+    assert_eq!(s.file_ext, ".jpg", "这一族刻意传 .jpg ✓");
+    assert!(
+        s.top_up_from_process,
+        "⚠ 这一族是「先算剩余再循环」（`remaining = 10 - process`）⇒ 上限随 process 收 ✓"
+    );
+}
+
+/// ⚠ 名字门**优先**：两条都命中时走"一张"那一档 —— 旧 TS 就是先 `if (名字门) {...return}` ✓。
+#[test]
+fn the_name_gate_wins_over_the_button_gate() {
+    let mut it = item(Some(615), Some("beiyong1"), Some("上传国庆照片"));
+    it.button_app_link = Some("mcloud://main/uploadView".into());
+    assert_eq!(upload_shape_for(&it), Some(UPLOAD_ONE), "名字门在前 ✓");
+}
+
+/// ⚠ beiyong1 里**两条门都没中** ⇒ 不传（只打卡）。
+///
+/// 别把整个分组都当成"要传文件" ✗ —— 那是往用户网盘里写没人要求过的东西。
+#[test]
+fn a_beiyong1_item_with_neither_gate_uploads_nothing() {
+    let mut other_link = item(Some(616), Some("beiyong1"), Some("记录欢乐瞬间"));
+    other_link.button_app_link = Some("mcloud://main/otherLink".into());
+    assert_eq!(upload_shape_for(&other_link), None, "别的按钮 ⇒ 不动");
+    assert_eq!(
+        upload_shape_for(&item(Some(616), Some("beiyong1"), Some("记录欢乐瞬间"))),
+        None,
+        "连 link 都读不出 ⇒ 也不动"
+    );
+    // ⚠ 按钮门**只在 beiyong1 里**生效：别的组哪怕带 uploadView 也不因此传 10 张 ✓
+    let mut outside = item(Some(700), Some("day"), Some("别的组"));
+    outside.button_app_link = Some("mcloud://main/uploadView".into());
+    assert_eq!(upload_shape_for(&outside), None);
 }
 
 /// 过名字门 ⇒ 与 106 **同一档**（旧实现两处都是裸的 `uploadRandomFile(ctx)`）。
@@ -240,7 +335,7 @@ fn an_empty_cleanup_tail_is_omitted() {
 // ══════════════ 打卡的门（currstep） ══════════════
 //
 // 旧 TS `tasks.ts:19-28` 的 `clickTaskWithStep`：`currstep == 0` 才打，
-// 已经走起来的不打（但门**通过**）；434 是唯一例外，只在第 22 步打。
+// 已经走起来的不打（但门**通过**）；434 在第 22 步**额外**打一发（叠加，不是替代）。
 
 fn with_step(id: i64, step: Option<i64>) -> TaskV2Item {
     TaskV2Item {
@@ -275,17 +370,31 @@ fn a_started_task_is_not_clicked() {
     }
 }
 
-/// 434 是唯一例外：只在**恰好第 22 步**打。
+/// 434：`specialMap` 是**叠加**的一条 —— 第 22 步**额外**打一发，
+/// 而"第 0 步 / `currstep` 缺席 ⇒ 打"那一句对它**照样生效** ✓。
+///
+/// ⚠ 这一条曾经把 434 钉成"只在第 22 步打"的**替代**规则 ✗ ⇒ 上游不给
+/// `currstep` 时（2026-10-04 小号 run 96 正是如此）**一发都没打** ✗。
 #[test]
-fn the_share_task_clicks_only_at_its_special_step() {
-    assert!(should_click(&with_step(434, Some(22))));
+fn the_share_task_clicks_at_its_special_step_and_still_at_step_zero() {
     assert!(
-        !should_click(&with_step(434, Some(0))),
-        "434 在第 0 步**不**打"
+        should_click(&with_step(434, Some(22))),
+        "第 22 步是额外那一发"
     );
-    assert!(!should_click(&with_step(434, Some(21))));
+    assert!(
+        should_click(&with_step(434, Some(0))),
+        "第 0 步照旧打：叠加不是替代"
+    );
+    assert!(
+        should_click(&with_step(434, None)),
+        "缺席按 JS 的默认值 0 算 ⇒ 照旧打"
+    );
+    assert!(
+        !should_click(&with_step(434, Some(21))),
+        "走到一半（非 0 非 22）不打"
+    );
     assert!(!should_click(&with_step(434, Some(23))));
-    assert!(!should_click(&with_step(434, None)));
+    assert!(!should_click(&with_step(434, Some(5))));
 }
 
 /// 例外**只对 434 生效**：别的任务在第 22 步一样不打。
@@ -337,6 +446,50 @@ fn a_pending_enabled_task_is_acted_on() {
 // ══════════════ 玩法 434：分享（`Step::Share`） ══════════════
 //
 // 旧 TS `runners.ts:68-88`。⚠ 它与上传**互斥** —— 它消费别人生产的文件。
+//
+// ⚠ 判"这一条成没成"**不看**打卡、也不看外链，只看**次数涨没涨**（见 `share_counted` ✓）。
+
+/// 活体形状（run 93 / run 99 实测）⇒ 解出 `(0, 7)`。
+#[test]
+fn share_progress_comes_from_the_live_name_shape() {
+    assert_eq!(
+        share_progress_from_name("分享文件领好礼<span id='share_title'>0/7</span>"),
+        Some((0, 7))
+    );
+    assert_eq!(
+        share_progress_from_name("分享文件得云朵<span id='share_title'>3/7</span>"),
+        Some((3, 7))
+    );
+}
+
+/// ⚠ **文案变了也要能解** —— 旧 TS 的 `getShareCount` 是 `replace` 死前缀
+///（`"分享文件得云朵<span id='share_title'>"` + `"/7</span>"`）：文案一换就解出
+/// `NaN`，而 `NaN > x` 恒 `false` ⇒ **静默地永远不报成功** ✗。
+#[test]
+fn share_progress_survives_copy_changes() {
+    assert_eq!(
+        share_progress_from_name("分享有礼<span id='share_title'>2/7</span>"),
+        Some((2, 7))
+    );
+    // 连 span 都没有：退到"整串里第一个 a/b"
+    assert_eq!(share_progress_from_name("分享文件领好礼 2/7"), Some((2, 7)));
+}
+
+/// 读不出 ⇒ `None` —— **不是 0** ✓（当成 0 会把"没涨"判成"涨了/没涨"反过来 ✗）。
+#[test]
+fn share_progress_is_none_when_there_is_no_ratio() {
+    assert_eq!(share_progress_from_name("分享文件领好礼"), None);
+    assert_eq!(share_progress_from_name(""), None);
+    assert_eq!(
+        share_progress_from_name("分享文件领好礼<span id='share_title'>进行中</span>"),
+        None
+    );
+    // 只有一半的也不算
+    assert_eq!(share_progress_from_name("分享 0/"), None);
+    assert_eq!(share_progress_from_name("分享 /7"), None);
+    // 全角斜杠之类没实拍过的东西**不猜**（宁可读不出 ✓）
+    assert_eq!(share_progress_from_name("分享 0／7"), None);
+}
 
 /// 434 判成 `Share`，**不是**上传。
 #[test]
@@ -437,6 +590,15 @@ impl Scripted {
             .map(|r| r.url)
             .collect()
     }
+}
+
+/// 取一枚请求头（**大小写不敏感**）—— 钉子要断言"113 真按 PC 档发" ✓
+///（渠道在这条任务里就是**全部**，只看 `uploaded:1` 证明不了它按 PC 档发的 ✗）。
+fn header(req: &mcloud_core::HttpRequest, name: &str) -> Option<String> {
+    req.headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.clone())
 }
 
 #[async_trait]
@@ -681,6 +843,28 @@ impl EventSink for NullSink {
     fn emit(&self, _event: RunEvent) {}
 }
 
+/// **把日志行留下来**的 sink —— 用来钉"用户能不能在日志里看到进度" ✓。
+///
+/// 起因（2026-10-04 用户口径）：「522 应该是成功的，但是当前日志没有输出他的进度，
+/// 毕竟需要 100 个，也不急着一次做完，**进度还是很重要的**」✓。
+#[derive(Default)]
+struct CapturedSink {
+    lines: Mutex<Vec<String>>,
+}
+impl CapturedSink {
+    /// 打出来的所有信息（含 `info` / `success` / `fail`，级别都留着 ✓）。
+    fn lines(&self) -> Vec<String> {
+        self.lines.lock().unwrap().clone()
+    }
+}
+impl EventSink for CapturedSink {
+    fn emit(&self, event: RunEvent) {
+        if let RunEvent::Log { message, .. } = event {
+            self.lines.lock().unwrap().push(message);
+        }
+    }
+}
+
 fn account(id: &str) -> Account {
     Account {
         id: AccountId::new(id),
@@ -708,6 +892,20 @@ fn ctx_with(
     settings: AccountSettings,
     store: Arc<FakeStore>,
 ) -> (TaskContext, Arc<Scripted>) {
+    let (ctx, http, _sink) =
+        ctx_with_sink(id, replies, now_ms, settings, store, Arc::new(NullSink));
+    (ctx, http)
+}
+
+/// 同上，但**把 sink 交出去**（要给"日志里到底打了什么"写断言时用 ✓）。
+fn ctx_with_sink(
+    id: &str,
+    replies: Vec<String>,
+    now_ms: i64,
+    settings: AccountSettings,
+    store: Arc<FakeStore>,
+    sink: Arc<dyn EventSink>,
+) -> (TaskContext, Arc<Scripted>, Arc<dyn EventSink>) {
     let http = Arc::new(Scripted::new(replies));
     let mut acc = account(id);
     acc.settings = settings;
@@ -716,7 +914,7 @@ fn ctx_with(
         http: http.clone(),
         store,
         clock: Arc::new(FixedClock(now_ms)),
-        sink: Arc::new(NullSink),
+        sink: sink.clone(),
         run_id: mcloud_core::RunId(1),
         cancel: CancelToken::new(),
         chain_cancel: None,
@@ -730,7 +928,7 @@ fn ctx_with(
             mcloud_core::RunId(1),
         ),
     };
-    (ctx, http)
+    (ctx, http, sink)
 }
 
 /// 东八区 2026-10-<day> 12:00 的 epoch 毫秒。
@@ -746,6 +944,36 @@ fn beijing_noon(day: i64) -> i64 {
 fn task_json(id: i64, group: &str, name: &str, market: &str) -> String {
     format!(
         r#"{{"id":{id},"name":"{name}","groupid":"{group}","state":"WAIT","limitType":"DAY","enable":1,"currstep":0,"process":0,"marketname":"{market}"}}"#
+    )
+}
+
+/// 与 [`task_json`] 同形，但**带 `button.app.link` 与 `process`** ——
+/// 615 那一族的门就在 `button` 这一格（实拍形状见 `app_task_list_v2.rs` 的注释 ✓）。
+fn task_json_with_button(
+    id: i64,
+    group: &str,
+    name: &str,
+    market: &str,
+    link: &str,
+    process: i64,
+) -> String {
+    format!(
+        r#"{{"id":{id},"name":"{name}","groupid":"{group}","state":"WAIT","limitType":"EVER","enable":1,"currstep":0,"process":{process},"marketname":"{market}","button":{{"app":{{"text":"去完成","action":"jump","link":"{link}"}}}}}}"#
+    )
+}
+
+/// 与 [`task_json`] 同形，但**带 `process`** —— 522 那一档的"进度"就在这一格 ✓。
+fn task_json_with_process(id: i64, group: &str, name: &str, market: &str, process: i64) -> String {
+    format!(
+        r#"{{"id":{id},"name":"{name}","groupid":"{group}","state":"WAIT","limitType":"DAY","enable":1,"currstep":0,"process":{process},"marketname":"{market}"}}"#
+    )
+}
+
+/// 与 [`task_json`] 同形，但**不带 `currstep`** —— 上游确实会这么给
+///（2026-10-04 小号 run 96 就是：面板那句自述打成"第 0 步"，而格子里是缺席 ✓）。
+fn task_json_without_step(id: i64, group: &str, name: &str, market: &str) -> String {
+    format!(
+        r#"{{"id":{id},"name":"{name}","groupid":"{group}","state":"WAIT","limitType":"DAY","enable":1,"process":0,"marketname":"{market}"}}"#
     )
 }
 
@@ -773,6 +1001,22 @@ fn click_ok() -> String {
 /// `file/create` 回"撞同名" ⇒ 编排层不再发 PUT / complete，也不清理。
 fn create_exists() -> String {
     r#"{"success":true,"code":"0000","message":"success","data":{"fileId":"F-EXIST","uploadId":null,"exist":true,"rapidUpload":false,"partInfos":null}}"#.to_string()
+}
+
+/// `file/create` 回一个**新文件**（形状取自 `app_cloud_upload/tests.rs` 那条合成样本 ✓）
+/// ⇒ 后面还会跟 PUT 与 complete 两发。
+fn create_new() -> String {
+    r#"{"code":"0000","message":"请求成功","success":true,"data":{"exist":false,"fileId":"SYNTH-FID","fileName":"synth.png","formInfo":null,"parentFileId":"/","partInfos":[{"uploadUrl":"https://synth.example.invalid/put"}],"rapidUpload":false,"transferToken":null,"type":"file","uploadId":"SYNTH-UID"}}"#.to_string()
+}
+
+/// `getOutLink` 成功（形状取自 `app_cloud_outlink/tests.rs` 那条 ✓）。
+fn outlink_ok() -> String {
+    r#"{"code":"0","data":{"getOutLinkRes":{"getOutLinkResSet":[{"linkID":"L1","linkUrl":"https://caiyun.139.com/w/#/synth"}]}}}"#.to_string()
+}
+
+/// `delOutLink` 成功。
+fn del_outlink_ok() -> String {
+    r#"{"code":"0","data":{}}"#.to_string()
 }
 
 // ── a) 黑名单：命中就一枪不发 ────────────────────────────────────────
@@ -818,6 +1062,628 @@ async fn a_blacklisted_id_never_gets_clicked() {
     assert!(clicks[0].contains("id=118"), "打卡的是 {}", clicks[0]);
     assert!(!clicks[0].contains("id=117"));
     assert_eq!(result.planned, 1, "黑名单条目不该进 planned");
+}
+
+/// ⭐ 434 **没有 `currstep`**（上游就是这么给的）时也要真打那一发 `task/click`。
+///
+/// 参考实现里 `specialMap` 是**叠加**的 ⇒ 那句 `currstep === 0` 对 434 一样命中 ✓；
+/// 写成"替代"的那一版这一趟是 `clicked:false`（2026-10-04 小号 run 96 实测 ✗）。
+/// ⚠ 这条必须落在**运行级**：上一版的错值正是被一条单测钉住的 ✗ ⇒ 只改单测
+/// 证明不了"请求真的发出去了"。
+#[tokio::test]
+async fn the_share_task_clicks_when_upstream_omits_the_step() {
+    let items = vec![task_json_without_step(
+        434,
+        "month",
+        "分享文件领好礼",
+        "sign_in_3",
+    )];
+    // 这一趟只有 434 ⇒ 它手里没有文件 ⇒ **自己补传一个**（用户口径 2026-10-04）✓：
+    // 打卡 → create → PUT → complete → 建外链 → 删外链 → 回收站 → 事后整表。
+    let mut replies = replies_for(&items, vec![]);
+    replies.push(click_ok());
+    replies.push(create_new());
+    replies.push("{}".to_string());
+    replies.push(r#"{"code":"0000","success":true,"message":"请求成功"}"#.to_string());
+    replies.push(outlink_ok());
+    replies.push(del_outlink_ok());
+    replies.push(r#"{"code":"0000","success":true,"message":"success"}"#.to_string());
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    let result = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
+
+    let clicks = http.clicks();
+    assert_eq!(clicks.len(), 1, "434 该真打一发，实得 {clicks:?}");
+    assert!(clicks[0].contains("id=434"), "打卡的是 {}", clicks[0]);
+
+    assert_eq!(result.planned, 1, "434 该进 planned");
+    assert!(result.steps[0].clicked, "明细里 clicked 必须是 true");
+    assert_eq!(result.steps[0].uploaded, 1, "⭐ 空手就自己传一个");
+    assert!(result.steps[0].shared, "有了自己传的文件 ⇒ 外链建得起来");
+    assert_eq!(result.cleaned_up, 1, "自己补传那个也要在收尾被移进回收站");
+    assert!(
+        !result.steps[0]
+            .problems
+            .iter()
+            .any(|p| p.contains("没有可分享的文件")),
+        "⚠ 这条现在**不该**再出现（自己补传了）：{:?}",
+        result.steps[0].problems
+    );
+    // ⭐ 这一档**仍不算推进**：判据是"**上游次数涨没涨**" ✓ —— 它这一趟名字里没有那个
+    // `a/b`（"动手前读不出"）、事后也读不出 ⇒ `acted` 停在 0、结论 failed ✓。
+    // **"发过写请求"本身不构成推进**（2026-10-04 用户口径：官方没有判断完成的接口，
+    // 只能比次数 ✓）；补传那个文件只是**把这一条变得可做**，不是"做成了" ✓。
+    assert_eq!(result.acted, 0, "没比出次数上涨就不算推进");
+    assert!(
+        result.task_outcome().is_failure(),
+        "没推进就是 failed：{:?}",
+        result.task_outcome()
+    );
+    assert!(
+        result.steps[0]
+            .problems
+            .iter()
+            .any(|p| p.contains("读不出次数")),
+        "要如实说清为什么不算：{:?}",
+        result.steps[0].problems
+    );
+}
+
+/// ⭐⭐ **只跑 434** 时也要能成 —— 用户口径 2026-10-04：「**没有共享文件 id 就主动上传**」✓。
+///
+/// 这一趟只有 434 ⇒ 它自己补传一个文件 → 建外链/删外链 → 事后整表 `0/7` 变 `1/7`
+/// ⇒ `share_counted` ✓、`acted = 1` ✓、结论 success ✓、补传那个也进了回收站 ✓。
+/// ⚠ 撤掉"补传"那几行 ⇒ 这条会红在 `shared`（退回"没有可分享的文件"✗）。
+#[tokio::test]
+async fn a_lone_share_task_uploads_its_own_file_and_counts() {
+    let name = |done: &str| format!("分享文件领好礼<span id='share_title'>{done}/7</span>");
+    let before = vec![task_json(434, "month", &name("0"), "sign_in_3")];
+    let after = vec![task_json(434, "month", &name("1"), "sign_in_3")];
+    let mut replies = replies_for(&before, vec![]);
+    replies.push(click_ok());
+    replies.push(create_new()); // ⭐ 自己补的那一个：create → PUT → complete
+    replies.push("{}".to_string());
+    replies.push(r#"{"code":"0000","success":true,"message":"请求成功"}"#.to_string());
+    replies.push(outlink_ok());
+    replies.push(del_outlink_ok());
+    replies.push(r#"{"code":"0000","success":true,"message":"success"}"#.to_string()); // 回收站
+    replies.extend(replies_for(&after, vec![]));
+
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    let result = run_app_task(&ctx, 0, &[434]).await.expect("不该是 Err");
+
+    let share = &result.steps[0];
+    assert_eq!(share.uploaded, 1, "空手 ⇒ 主动传一个");
+    assert!(share.shared, "有了自己传的 ⇒ 外链建得起来");
+    assert_eq!(share.share_before.as_deref(), Some("0/7"));
+    assert_eq!(share.share_after.as_deref(), Some("1/7"));
+    assert!(share.share_counted, "次数涨了 ⇒ 算记上");
+    assert_eq!(result.acted, 1, "这一条算推进了");
+    assert!(
+        result.task_outcome().is_success(),
+        "{:?}",
+        result.task_outcome()
+    );
+    assert_eq!(result.cleaned_up, 1, "补传那个要收回");
+    assert!(http.clicks().iter().any(|c| c.contains("id=434")));
+}
+
+/// ⭐ 434 的**真判据**：跑完再拉一次表，**次数涨了**才算这一条成了 ✓。
+///
+/// 这一条是正向端到端：106 真传一个文件（分享才有得分享）→ 434 打卡 + 建外链删外链
+/// → 事后再拉整表，名字从 `0/7` 变成 `1/7` ⇒ `share_counted = true`、`acted` +1 ✓。
+#[tokio::test]
+async fn the_share_task_counts_only_when_the_upstream_number_moves() {
+    let before = vec![
+        task_json(106, "day", "手动上传一个文件", "sign_in_3"),
+        task_json(
+            434,
+            "month",
+            "分享文件领好礼<span id='share_title'>0/7</span>",
+            "sign_in_3",
+        ),
+    ];
+    let after = vec![
+        task_json(106, "day", "手动上传一个文件", "sign_in_3"),
+        task_json(
+            434,
+            "month",
+            "分享文件领好礼<span id='share_title'>1/7</span>",
+            "sign_in_3",
+        ),
+    ];
+    let mut replies = replies_for(&before, vec![]);
+    // ⚠ 顺序是**每条先打卡、再做那一件事**（`app_task.rs` 的 ③-a/③-b ✓）：
+    // 106 打卡 → create → PUT → complete → 434 打卡 → 建外链 → 删外链 → 回收站 → 事后整表。
+    replies.push(click_ok()); // 106 打卡
+    replies.push(create_new());
+    replies.push("{}".to_string()); // PUT（状态 200 就算成功）
+    replies.push(r#"{"code":"0000","success":true,"message":"请求成功"}"#.to_string());
+    replies.push(click_ok()); // 434 打卡
+    replies.push(outlink_ok());
+    replies.push(del_outlink_ok());
+    replies.push(r#"{"code":"0000","success":true,"message":"success"}"#.to_string()); // 回收站
+    replies.extend(replies_for(&after, vec![]));
+
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    let result = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
+
+    assert_eq!(result.planned, 2, "106 与 434 都该进 planned");
+    let clicks = http.clicks();
+    assert_eq!(clicks.len(), 2, "106 与 434 各打一发：{clicks:?}");
+    assert!(clicks.iter().any(|c| c.contains("id=434")));
+    let share = &result.steps[1];
+    assert!(share.shared, "外链建了又删了 ⇒ 技术动作成了");
+    assert_eq!(share.share_before.as_deref(), Some("0/7"));
+    assert_eq!(share.share_after.as_deref(), Some("1/7"));
+    assert!(share.share_counted, "次数涨了 ⇒ 这一条算记上");
+    assert_eq!(result.acted, 2, "上传 1 条 + 分享记上 1 条");
+    assert!(
+        result.task_outcome().is_success(),
+        "{:?}",
+        result.task_outcome()
+    );
+    assert!(result.summary_line().contains("做了 2 条"));
+}
+
+/// ⭐ 反向：外链建成了、但**上游次数没动** ⇒ 这一条**不算**记上 ✓。
+///
+/// 这正是参考实现那句「分享文件成功（**分享成功不等于任务完成**）」的意思 ——
+/// 没有接口能判完成，只能比次数 ✓。`acted` 只算上传那 1 条，`problems` 里必须
+/// 把"动了多少"写清楚（`0/7 → 0/7`），别让人以为它成了 ✓。
+#[tokio::test]
+async fn a_share_that_does_not_move_the_number_is_not_counted() {
+    let same = vec![
+        task_json(106, "day", "手动上传一个文件", "sign_in_3"),
+        task_json(
+            434,
+            "month",
+            "分享文件领好礼<span id='share_title'>0/7</span>",
+            "sign_in_3",
+        ),
+    ];
+    let mut replies = replies_for(&same, vec![]);
+    replies.push(click_ok()); // 106 打卡
+    replies.push(create_new());
+    replies.push("{}".to_string());
+    replies.push(r#"{"code":"0000","success":true,"message":"请求成功"}"#.to_string());
+    replies.push(click_ok()); // 434 打卡
+    replies.push(outlink_ok());
+    replies.push(del_outlink_ok());
+    replies.push(r#"{"code":"0000","success":true,"message":"success"}"#.to_string());
+    replies.extend(replies_for(&same, vec![])); // 事后那一轮也还是 0/7
+
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    let result = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
+
+    let share = &result.steps[1];
+    assert!(share.shared, "外链这一步确实成了");
+    assert_eq!(share.share_before.as_deref(), Some("0/7"));
+    assert_eq!(share.share_after.as_deref(), Some("0/7"));
+    assert!(!share.share_counted, "次数没动 ⇒ 不算记上");
+    assert_eq!(result.acted, 1, "只算上传那一条");
+    assert!(
+        share
+            .problems
+            .iter()
+            .any(|p| p.contains("次数没动") && p.contains("0/7 → 0/7")),
+        "要写明动了多少：{:?}",
+        share.problems
+    );
+    assert!(
+        http.clicks()
+            .iter()
+            .filter(|c| c.contains("id=434"))
+            .count()
+            == 1
+    );
+}
+
+/// ⭐⭐ 434 **必须排在生产者后面** —— 它消费的是**这一趟**传上去的文件 ✓。
+///
+/// 计划按 id 升序（`merge_pages` 的 `sort_by_key`）⇒ 434(434) 排在 522(522) 前面 ✗，
+/// 而**两个账号的 106 都是 `FINISH`** ⇒ 真机上 434 永远拿不到文件。
+/// 实证（2026-10-04 run 103，测试号，`onlyTaskIds=522,434`）：522 传了 5 个文件，
+/// 434 那一格却是「没有可分享的文件，跳过分享任务」✗。这条就是那个洞的钉子 ——
+/// ⚠ 它**只在运行级**能验（单测夹具里 106 常年是 `WAIT`，正好把这个顺序洞盖住 ✗）。
+#[tokio::test]
+async fn the_share_task_runs_after_the_uploaders() {
+    let name_434 = |done: &str| format!("分享文件领好礼<span id='share_title'>{done}/7</span>");
+    let before = vec![
+        task_json(434, "month", &name_434("0"), "sign_in_3"),
+        task_json(522, "month", "当月上传文件满100个", "sign_in_3"),
+    ];
+    let after = vec![
+        task_json(434, "month", &name_434("1"), "sign_in_3"),
+        task_json(522, "month", "当月上传文件满100个", "sign_in_3"),
+    ];
+    let mut replies = replies_for(&before, vec![]);
+    replies.push(click_ok()); // 522 打卡
+    for _ in 0..5 {
+        // 522 那一档最多传 5 个（`ROUNDS_PER_RUN` ✓）
+        replies.push(create_new());
+        replies.push("{}".to_string());
+        replies.push(r#"{"code":"0000","success":true,"message":"请求成功"}"#.to_string());
+    }
+    replies.push(click_ok()); // 434 打卡
+    replies.push(outlink_ok());
+    replies.push(del_outlink_ok());
+    replies.push(r#"{"code":"0000","success":true,"message":"success"}"#.to_string()); // 回收站
+    replies.extend(replies_for(&after, vec![]));
+
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    // ⚠ 传进去的顺序故意把 434 放前面（模拟 `onlyTaskIds="434,522"`）—— 仍该被挪到末尾 ✓
+    let result = run_app_task(&ctx, 0, &[434, 522])
+        .await
+        .expect("不该是 Err");
+
+    assert_eq!(result.steps[0].task_id, Some(522), "生产者先跑");
+    assert_eq!(result.steps[1].task_id, Some(434), "434 挪到末尾");
+    assert_eq!(result.steps[0].uploaded, 5, "522 传满 5 个");
+    let share = &result.steps[1];
+    assert!(
+        share.shared,
+        "434 该拿得到 522 刚传上去的文件：{:?}",
+        share.problems
+    );
+    assert!(share.share_counted, "次数 0/7 → 1/7 ⇒ 记上");
+    assert_eq!(result.acted, 2, "522 一条 + 434 一条");
+    assert!(http.clicks().iter().any(|c| c.contains("id=434")));
+}
+
+/// ⭐ 522 的**进度**要打出来（明细两格 + 日志一行）—— 用户口径 2026-10-04：
+/// 「522 应该是成功的，但是当前日志没有输出他的进度，毕竟需要 100 个，
+/// 也不急着一次做完，**进度还是很重要的**」✓。
+///
+/// 这一档一趟只传 `ROUNDS_PER_RUN` 个、要攒 `STOP_AT_PROCESS` 个 ⇒ 只看
+/// `uploaded:5` **完全看不出走到哪儿** ✗；所以跑完那一趟"事后整表"要顺带把
+/// `process` 读回来、与动手前那个数**并列写出来** ✓（`42/100 → 47/100` ✓）。
+#[tokio::test]
+async fn the_monthly_upload_reports_its_progress_before_and_after() {
+    let name = "当月上传文件满100个";
+    let before = vec![task_json_with_process(522, "month", name, "sign_in_3", 42)];
+    let after = vec![task_json_with_process(522, "month", name, "sign_in_3", 47)];
+    let mut replies = replies_for(&before, vec![]);
+    replies.push(click_ok());
+    for _ in 0..5 {
+        replies.push(create_new());
+        replies.push("{}".to_string());
+        replies.push(r#"{"code":"0000","success":true,"message":"请求成功"}"#.to_string());
+    }
+    replies.push(r#"{"code":"0000","success":true,"message":"success"}"#.to_string()); // 回收站
+    replies.extend(replies_for(&after, vec![]));
+
+    let sink = Arc::new(CapturedSink::default());
+    let (ctx, _http, _sink) = ctx_with_sink(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+        sink.clone(),
+    );
+    let result = run_app_task(&ctx, 0, &[522]).await.expect("不该是 Err");
+
+    let step = &result.steps[0];
+    assert_eq!(step.uploaded, 5, "这一趟传满 5 个");
+    assert_eq!(step.progress_before.as_deref(), Some("42/100"));
+    assert_eq!(step.progress_after.as_deref(), Some("47/100"));
+    let lines = sink.lines();
+    assert!(
+        lines.iter().any(|l| l.contains("42/100 → 47/100")),
+        "日志里必须有进度：{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("这一趟 +5")),
+        "还要写清这一趟贡献了多少：{lines:?}"
+    );
+    assert_eq!(result.acted, 1, "这一档的成就是「这一趟传了文件」");
+    assert!(
+        result.task_outcome().is_success(),
+        "{:?}",
+        result.task_outcome()
+    );
+}
+
+/// ⭐ 差额也要**说出来**：实测"我们传了 5 个、上游只 +4"（记账慢一步 ✓ —— run 105
+/// `48 → 52`，而 run 106 的动手前读数正好是 **53** ✓）⇒ 日志不能只写 `+4` 就完事，
+/// 否则两个数字看着像打架 ✗。
+#[tokio::test]
+async fn the_monthly_upload_explains_a_short_count() {
+    let name = "当月上传文件满100个";
+    let before = vec![task_json_with_process(522, "month", name, "sign_in_3", 42)];
+    let after = vec![task_json_with_process(522, "month", name, "sign_in_3", 46)];
+    let mut replies = replies_for(&before, vec![]);
+    replies.push(click_ok());
+    for _ in 0..5 {
+        replies.push(create_new());
+        replies.push("{}".to_string());
+        replies.push(r#"{"code":"0000","success":true,"message":"请求成功"}"#.to_string());
+    }
+    replies.push(r#"{"code":"0000","success":true,"message":"success"}"#.to_string());
+    replies.extend(replies_for(&after, vec![]));
+
+    let sink = Arc::new(CapturedSink::default());
+    let (ctx, _http, _sink) = ctx_with_sink(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+        sink.clone(),
+    );
+    let result = run_app_task(&ctx, 0, &[522]).await.expect("不该是 Err");
+    assert_eq!(result.steps[0].uploaded, 5);
+    assert_eq!(result.steps[0].progress_after.as_deref(), Some("46/100"));
+    let lines = sink.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("这一趟 +4；我们实际传了 5 个，差的 1 个上游还没记账")),
+        "差额要说清：{lines:?}"
+    );
+}
+
+/// ⭐⭐ 运行级：113 那一发 `file/create` 必须带 **PC 档的头** ✓。
+///
+/// ⚠ 只断言 `uploaded:1` **证明不了**这条任务做成了：它奖励的是"用 PC 客户端"，
+/// 按安卓档传一样会 `uploaded:1` ✗ ⇒ 必须逐枚头断到底：
+/// PC 档有 `x-yun-app-channel: 10200153` + `market-source`/`module-type`/`svc-type` 三枚，
+/// 而**没有** `x-huawei-channelSrc`、**没有** `x-yun-sub-op-type`（那两枚是安卓档的 ✗）。
+#[tokio::test]
+async fn task_113_sends_the_pc_channel_headers() {
+    let items = vec![task_json(113, "month", "使用PC客户端", "sign_in_3")];
+    let mut replies = replies_for(&items, vec![]);
+    replies.push(click_ok());
+    replies.push(create_new());
+    replies.push("{}".to_string());
+    replies.push(r#"{"code":"0000","success":true,"message":"请求成功"}"#.to_string());
+    replies.push(r#"{"code":"0000","success":true,"message":"success"}"#.to_string()); // 回收站
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    let result = run_app_task(&ctx, 0, &[113]).await.expect("不该是 Err");
+
+    assert_eq!(result.planned, 1, "113 该进 planned");
+    assert_eq!(result.steps[0].uploaded, 1, "一趟一个");
+    assert_eq!(result.acted, 1);
+    assert!(
+        http.clicks().iter().any(|c| c.contains("id=113")),
+        "113 也要打卡（它是 TASK_LIST 里的条目 ✓）"
+    );
+
+    let create = http
+        .requests()
+        .into_iter()
+        .find(|r| r.url.contains("/hcy/file/create"))
+        .expect("该发过 file/create");
+    assert_eq!(
+        header(&create, "x-yun-app-channel").as_deref(),
+        Some(mcloud_upstream::app_cloud_upload::CLOUD_CHANNEL_PC),
+        "PC 档的渠道号"
+    );
+    assert_eq!(
+        header(&create, "x-yun-market-source").as_deref(),
+        Some("001")
+    );
+    assert_eq!(header(&create, "x-yun-module-type").as_deref(), Some("100"));
+    assert_eq!(header(&create, "x-yun-svc-type").as_deref(), Some("1"));
+    // ⚠ 这两枚是**安卓档**专有 ⇒ PC 档一个都不该出现（出现了就是档位没生效 ✗）
+    assert!(
+        header(&create, "x-huawei-channelSrc").is_none(),
+        "PC 档没有这一枚：{:?}",
+        header(&create, "x-huawei-channelSrc")
+    );
+    assert!(
+        header(&create, "x-yun-sub-op-type").is_none(),
+        "PC 档没有这一枚：{:?}",
+        header(&create, "x-yun-sub-op-type")
+    );
+}
+
+/// ⭐⭐ 运行级：615 真传 **10 张 `.jpg`** ✓（用户那条 `onlyTaskIds=615` 的离线复刻）。
+///
+/// 门是 `button.app.link`、形状是「最多 10 张 / process 到 10 停 / 每张 300ms / `.jpg`」✓
+/// —— 四格任一写错，这条就红 ✓。
+#[tokio::test]
+async fn task_615_uploads_ten_jpg_files() {
+    let items = vec![task_json_with_button(
+        615,
+        "beiyong1",
+        "记录国庆节欢乐瞬间",
+        "sign_in_3",
+        "mcloud://main/uploadView",
+        0,
+    )];
+    let mut replies = replies_for(&items, vec![]);
+    replies.push(click_ok());
+    for _ in 0..10 {
+        replies.push(create_new());
+        replies.push("{}".to_string());
+        replies.push(r#"{"code":"0000","success":true,"message":"请求成功"}"#.to_string());
+    }
+    replies.push(r#"{"code":"0000","success":true,"message":"success"}"#.to_string()); // 回收站
+                                                                                       // 事后那一趟整表：这一条 `process` 已经到 10 ✓
+    let after = vec![task_json_with_button(
+        615,
+        "beiyong1",
+        "记录国庆节欢乐瞬间",
+        "sign_in_3",
+        "mcloud://main/uploadView",
+        10,
+    )];
+    replies.extend(replies_for(&after, vec![]));
+
+    let sink = Arc::new(CapturedSink::default());
+    let (ctx, http, _sink) = ctx_with_sink(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+        sink.clone(),
+    );
+    let result = run_app_task(&ctx, 0, &[615]).await.expect("不该是 Err");
+
+    assert_eq!(result.planned, 1);
+    assert_eq!(result.steps[0].uploaded, 10, "一次 10 张");
+    assert_eq!(result.steps[0].task_id, Some(615));
+    assert_eq!(result.acted, 1);
+    assert_eq!(result.cleaned_up, 10, "这 10 张也要全收回");
+    assert!(
+        result.steps[0].problems.is_empty(),
+        "{:?}",
+        result.steps[0].problems
+    );
+    // ⚠⚠ 分母必须是**这一档自己的 10**，不是 522 那个 100 ✗
+    //（2026-10-04 真机 run 110 就把 615 显示成了 `0/100` ✗ ⇒ 这一条就是那个 bug 的钉子 ✓）
+    assert_eq!(result.steps[0].progress_total, Some(10));
+    assert_eq!(result.steps[0].progress_before.as_deref(), Some("0/10"));
+    assert_eq!(result.steps[0].progress_after.as_deref(), Some("10/10"));
+    let lines = sink.lines();
+    assert!(
+        lines.iter().any(|l| l.contains("0/10 → 10/10（这一趟 +10")),
+        "进度行要按这一档的分母：{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("/100")),
+        "615 那一族**不该**出现 522 的分母：{lines:?}"
+    );
+    assert!(
+        http.clicks().iter().any(|c| c.contains("id=615")),
+        "615 也要打卡 ✓"
+    );
+
+    let creates: Vec<_> = http
+        .requests()
+        .into_iter()
+        .filter(|r| r.url.contains("/hcy/file/create"))
+        .collect();
+    assert_eq!(creates.len(), 10, "一共 10 发 create");
+    for c in &creates {
+        let body = String::from_utf8_lossy(c.body.as_deref().unwrap_or_default());
+        assert!(
+            body.contains(".jpg"),
+            "这一族刻意传 .jpg（旧实现 `ext: \".jpg\"` ✓）：{body}"
+        );
+    }
+}
+
+/// ⭐ `process` 已经走了一部分 ⇒ 只补 **10 − process** 张（旧 TS 那句 `remaining` ✓）。
+///
+/// 实拍 614（同族）就是 `process=6` ✓ ⇒ 补 4 张、不是 10 张 —— 写错会白传 6 个文件 ✗。
+#[tokio::test]
+async fn task_615_tops_up_only_the_remaining_pictures() {
+    let items = vec![task_json_with_button(
+        615,
+        "beiyong1",
+        "记录国庆节欢乐瞬间",
+        "sign_in_3",
+        "mcloud://main/uploadView",
+        6,
+    )];
+    let mut replies = replies_for(&items, vec![]);
+    replies.push(click_ok());
+    for _ in 0..4 {
+        replies.push(create_new());
+        replies.push("{}".to_string());
+        replies.push(r#"{"code":"0000","success":true,"message":"请求成功"}"#.to_string());
+    }
+    replies.push(r#"{"code":"0000","success":true,"message":"success"}"#.to_string());
+    let after = vec![task_json_with_button(
+        615,
+        "beiyong1",
+        "记录国庆节欢乐瞬间",
+        "sign_in_3",
+        "mcloud://main/uploadView",
+        10,
+    )];
+    replies.extend(replies_for(&after, vec![]));
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    let result = run_app_task(&ctx, 0, &[615]).await.expect("不该是 Err");
+
+    assert_eq!(result.steps[0].uploaded, 4, "6/10 ⇒ 只补 4 张");
+    assert_eq!(result.steps[0].progress_before.as_deref(), Some("6/10"));
+    assert_eq!(result.steps[0].progress_after.as_deref(), Some("10/10"));
+    assert_eq!(result.acted, 1);
+    assert_eq!(
+        http.requests()
+            .into_iter()
+            .filter(|r| r.url.contains("/hcy/file/create"))
+            .count(),
+        4
+    );
+}
+
+/// ⭐ 反面：**打卡门都没过**（`task/click` 回非 0）⇒ 更谈不上推进、整个 run 判 failed ✓。
+///
+/// 与上一条一起把这一档的三段读清：**外链成没成**（`shared`）、**打卡过没过**（`clicked`）
+/// 都只是过程，`acted` 只认**次数涨没涨**（`share_counted`）✓。
+#[tokio::test]
+async fn the_share_task_that_fails_its_click_is_not_counted() {
+    let items = vec![task_json_without_step(
+        434,
+        "month",
+        "分享文件领好礼",
+        "sign_in_3",
+    )];
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies_for(&items, vec![r#"{"code":1,"msg":"boom"}"#.to_string()]),
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    let result = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
+
+    assert_eq!(http.clicks().len(), 1, "那一发照样发出去了（只是上游没认）");
+    assert_eq!(result.planned, 1);
+    assert!(!result.steps[0].clicked, "打卡门没过");
+    assert_eq!(result.acted, 0, "没动过就不计");
+    assert!(
+        result.task_outcome().is_failure(),
+        "一条没动 ⇒ failed：{:?}",
+        result.task_outcome()
+    );
 }
 
 // ── b) skip_tasks：本账号名单 ───────────────────────────────────────

@@ -187,6 +187,46 @@ fn parses_the_captured_beiyong1_group() {
     assert_eq!(steps, vec![Some(4), Some(6), Some(8)]);
 }
 
+/// ⭐ `button.app.link` 也要读出来 —— 玩法 615 那一族**唯一的门**就在这一格 ✓。
+///
+/// 形状取自抓包仓 `har/2026-09-25-通知有礼.har`（同族条目 `id=614` 的 `button`）：
+/// `{"text":"去完成","action":"jump","link":"mcloud://main/uploadView"}` ✓。
+/// ⚠ 这里把**坏形状**也一起钉住：读成 `Some("")` 之类假值会让那一族误判成"该传 10 张" ✗。
+#[test]
+fn button_app_link_is_read_and_bad_shapes_stay_none() {
+    let body = |b: &str| {
+        format!(
+            r#"{{"code":0,"msg":"success","result":{{"beiyong1":[{{"id":615,"name":"记录国庆节欢乐瞬间","groupid":"beiyong1","state":"WAIT","enable":1,"process":0,"marketname":"sign_in_3","button":{b}}}]}}}}"#
+        )
+    };
+    let ok = parse_task_list_v2(
+        &body(r#"{"app":{"text":"去完成","action":"jump","link":"mcloud://main/uploadView"}}"#),
+        "beiyong1",
+    )
+    .unwrap();
+    assert_eq!(
+        ok.items[0].button_app_link.as_deref(),
+        Some("mcloud://main/uploadView")
+    );
+
+    for bad in [
+        "{}",                       // 没有 app 这一层
+        r#"{"app":{}}"#,            // 有 app、没有 link
+        r#"{"app":{"link":null}}"#, // null
+        r#"{"app":{"link":123}}"#,  // 不是字符串
+    ] {
+        let p = parse_task_list_v2(&body(bad), "beiyong1").unwrap();
+        assert_eq!(p.items[0].button_app_link, None, "坏形状 ⇒ None：{bad}");
+    }
+    // 连 `button` 整格都没有 ⇒ 同样 `None`（不报错 ✓）
+    let none = parse_task_list_v2(
+        r#"{"code":0,"msg":"success","result":{"beiyong1":[{"id":615,"groupid":"beiyong1"}]}}"#,
+        "beiyong1",
+    )
+    .unwrap();
+    assert_eq!(none.items[0].button_app_link, None);
+}
+
 /// ⚠⚠ 这一口的 `groupid` 是**全小写** —— 与拍拍那一族的驼峰 `groupId` **相反**。
 ///
 /// 写成 `groupId` 会**静默读不到**（读到 `None`，而 `None` 是合法的"上游没给"）。

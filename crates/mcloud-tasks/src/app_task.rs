@@ -49,12 +49,40 @@ pub struct UploadShape {
     /// 用它的理由不是"它靠谱"，是"**旧实现读它**"；而真正兜底的是 [`Self::rounds`] ——
     /// 就算 `process` 永远读到 0，这一趟也最多传 5 个，不会变成"连传 100 个"。
     pub stop_at_process: i64,
-    /// **每传完一个**等一拍（旧 522 循环体末尾那句 `sleep(500)`，**包括最后一轮**）。
+    /// **每传完一个**等多少毫秒（`0` = 不踱步）。
     ///
     /// ⚠ 它是 522 与 106 **唯一的形状差别**（旧实现 106 的 runner 体里没有这一句）。
     /// 把两者混成一个的后果是：要么 522 变成"连传 5 个零间隔"，要么 106 白等一拍
     /// —— 两种都**不会报错**，只在"哪天被判成脚本"那一类最难查的差异上显形。
-    pub pace_each_round: bool,
+    ///
+    /// ⚠ 它读的是**每一族自己的数**（522 = `runners.ts:117-125` 的 `sleep(500)`、
+    /// 615 = `ai-tasks.ts:203-210` 的 `sleep(300)` ⇒ **500 ≠ 300** ✗）。
+    /// 原先这一格是 `bool`（"踱/不踱"）、时长借用任务的 `pace_ms` ⇒ 615 会白多等 200ms/张 ✗。
+    /// 做成毫秒数之后，两族的差别**在形状里就写着** ✓。
+    pub per_round_ms: i64,
+    /// `true` ⇒ 把这一趟的上限收成 **`stop_at_process - process`** ✓。
+    ///
+    /// ⚠ 它与 522 **不是一回事**，这一格就是两族的差别：
+    /// * **522**（`runners.ts:117-125`）：`for (i < 5) { if (task.process >= 100) break; ... }`
+    ///   —— 那个 `task.process` 是**动手前的快照**、循环里**不会变** ⇒ 它只当"闸"用，
+    ///   上限仍是 `rounds`（5）✓；
+    /// * **615 那一族**（`ai-tasks.ts:192-203`）：`remaining = Math.max(0, 10 - (task.process || 0))`
+    ///   ⇒ **先算剩余再循环**，上限就是"还差几张" ✓。
+    ///
+    /// 把 615 也照 522 那样跑，`process=6` 时会**白传 6 张**（实拍 614 正是 `process=6` ✗）。
+    pub top_up_from_process: bool,
+    /// 造出来的文件名后缀（旧实现的 `uploadRandomFile({ ext })` ✓）。
+    ///
+    /// ⚠ 「传 10 张」那一族传的是 **`.jpg`**（`ai-tasks.ts:205`）—— 而别处没有 `ext`，
+    /// 走 [`random_plan`] 的缺省 `.bin` ✓。上游到底看不看这个后缀**未验证**，
+    /// 但旧实现刻意分开写 ⇒ 照抄，不替它统一 ✗。
+    pub file_ext: &'static str,
+    /// 这一档按**哪个客户端**发 —— 落到 `x-yun-app-channel` 那一枚头（以及各档专有的几枚）✓。
+    ///
+    /// ⚠ 玩法 113 的**全部意义**就在这一格：它叫「**使用PC客户端**」——
+    /// 按安卓档传等于没做 ✓（旧 TS `runners.ts:27-31` 里只有它一个人传了
+    /// `channelSrc: "10200153"`，别处都是缺省的安卓档 ✓）。
+    pub channel: CloudChannel,
 }
 
 /// 「就传一个」那一档（玩法 106 与 beiyong1 的名字门共用）。
@@ -64,7 +92,10 @@ pub struct UploadShape {
 pub const UPLOAD_ONE: UploadShape = UploadShape {
     rounds: 1,
     stop_at_process: 0,
-    pace_each_round: false,
+    top_up_from_process: false,
+    per_round_ms: 0,
+    file_ext: ".bin",
+    channel: CloudChannel::Android,
 };
 
 /// 522 那一趟最多传几个（旧实现的 `每月上传任务单日数量 ?? 5` 里那个默认值）。
@@ -75,6 +106,91 @@ pub const ROUNDS_PER_RUN: u32 = 5;
 
 /// 玩法 522 的 `process` 门槛（旧实现那个 `>= 100`）。
 pub const STOP_AT_PROCESS: i64 = 100;
+
+/// 玩法 113 的 id —— 「**使用PC客户端**」（旧 TS `runners.ts:27-31`）。
+pub const PC_UPLOAD_TASK_ID: i64 = 113;
+
+/// 「**传 10 张**」那一族（旧 TS `ai-tasks.ts:190-224` 的 `upload10PictureTask`）✓。
+///
+/// ```ts
+/// const targetCount = 10;
+/// const remaining = Math.max(0, targetCount - (task.process || 0));
+/// if (remaining === 0) return true;
+/// for (let i = 0; i < remaining; i++) {
+///   const uploaded = await uploadRandomFile({ ext: ".jpg" });
+///   if (uploaded) success++;
+///   await sleep(300);
+/// }
+/// ```
+///
+/// ⇒ 形状 = **最多 10 张**、`process` 到 10 就停、每张 **300ms**、后缀 **`.jpg`** ✓
+///（`rounds: 10` + `stop_at_process: 10` 合起来正是那句 `remaining = 10 - process` ✓；
+/// 而 `process` 读不出（当 0）时也最多 10 张 ⇒ 不会失控 ✓）。
+///
+/// ⚠ **门不是 id**：这一族是**节日任务**，每期换 id（实拍 `id=614`「上传中秋团圆照」、
+/// 真机 `id=615`「记录国庆节欢乐瞬间」，两者 `description` 都是「上传10张可领」、
+/// `groupid` 都是 `beiyong1` ✓）⇒ 认它靠 [`beiyong1_button_gate`]，不是靠 id ✗。
+pub const UPLOAD_TEN: UploadShape = UploadShape {
+    rounds: 10,
+    stop_at_process: 10,
+    top_up_from_process: true,
+    per_round_ms: 300,
+    file_ext: ".jpg",
+    channel: CloudChannel::Android,
+};
+
+/// `beiyong1` 分组的**按钮门**（旧 TS `tasks.ts:78-81` 逐字）：
+///
+/// ```ts
+/// if ((task.button.app as Beiyong1App)?.link?.includes("uploadView")) {
+///   await upload10PictureTask(task);
+///   return;
+/// }
+/// ```
+///
+/// 实拍的 `link` 是 `mcloud://main/uploadView`（抓包仓
+/// `har/2026-09-25-通知有礼.har` ✓）⇒ 这里照抄那句"**包含** `uploadView`"，
+/// **不**写死整串（文案/路径将来变了才不会静默失效 ✓）。
+///
+/// ⚠ 名字门 [`beiyong1_name_gate`] **排在它前面**（旧 TS 就是先 `if (名字门) {...return}`）⇒
+/// 两条都命中时走**一张**那一档 ✓。
+pub fn beiyong1_button_gate(link: Option<&str>) -> bool {
+    link.is_some_and(|l| l.contains("uploadView"))
+}
+
+/// 玩法 113 那一档：形状与 [`UPLOAD_ONE`] **完全一样**，差别**只在渠道头** ✓。
+///
+/// # 旧 TS `runners.ts:27-31` 逐字
+///
+/// ```ts
+/// 113: async () => {
+///   await refreshToken();
+///   await sleep(1000);
+///   await uploadRandomFile({ channelSrc: "10200153" });
+/// },
+/// ```
+///
+/// ⇒ 按 PC 档传（`channelSrc: "10200153"` = [`mcloud_upstream::app_cloud_upload::CLOUD_CHANNEL_PC`] ✓）
+/// 就是这条任务的本体：它奖励的是"**用 PC 客户端**" ✓。落到头上是
+/// `x-yun-app-channel: 10200153` + `x-yun-market-source` / `x-yun-module-type` /
+/// `x-yun-svc-type` 那三枚，而**没有** `x-huawei-channelSrc`、**没有** `x-yun-sub-op-type`
+/// —— 那两枚是安卓档才有的 ✓（见 `cloud_file_op_headers`）。
+///
+/// # ⚠ 前面那句 `refreshToken()` 本仓**不做**
+///
+/// 它打的是 `aas.caiyun.feixin.10086.cn/tellin/authTokenRefresh.do`（XML 体、`clienttype=656`），
+/// 而本仓 `mcloud-upstream::auth_refresh` 的模块文档已经判定过：**那条零抓包 ⇒ 不实现**，
+/// 只走实拍到的 `/user/auth/refreshToken` ✓。并且：那条刷新与"113 算不算做成"之间
+/// **没有任何可证的因果**，而"拿回来的新 token 又丢掉"（旧 TS 的调用方确实不看返回值）
+/// 还有**把账号的 token 搞坏**的风险 ✗ ⇒ 宁可不做这一句，等有实拍再说 ✓。
+pub const UPLOAD_ONE_PC: UploadShape = UploadShape {
+    rounds: 1,
+    stop_at_process: 0,
+    top_up_from_process: false,
+    per_round_ms: 0,
+    file_ext: ".bin",
+    channel: CloudChannel::Pc,
+};
 
 /// beiyong1 分组的名字门（旧实现逐字）：
 /// `name.includes("上传") && (name.includes("图") || name.includes("照"))`。
@@ -145,21 +261,34 @@ pub fn beiyong1_name_gate(name: &str) -> bool {
 /// 所以先判哪一条都不改结果。这一点由测试钉住，免得将来有人"顺手"给 beiyong1 换一档。
 pub fn upload_shape_for(item: &TaskV2Item) -> Option<UploadShape> {
     match item.task_id {
+        // 113「使用PC客户端」：形状与 106 同档，**差别只在渠道头**（PC 档 ✓）。
+        Some(PC_UPLOAD_TASK_ID) => return Some(UPLOAD_ONE_PC),
         Some(106) => return Some(UPLOAD_ONE),
         Some(522) => {
             return Some(UploadShape {
                 rounds: ROUNDS_PER_RUN,
                 stop_at_process: STOP_AT_PROCESS,
-                pace_each_round: true,
-            })
+                // ⚠ 522 是"闸"不是"剩余量"：那个 `process` 在循环里不会变 ✓
+                top_up_from_process: false,
+                per_round_ms: 500,
+                file_ext: ".bin",
+                channel: CloudChannel::Android,
+            });
         }
         _ => {}
     }
     if item.group_id.as_deref() == Some("beiyong1") {
+        // ① 名字门：`name` 里有"上传"且有"图"/"照" ⇒ **一张**（`tasks.ts:68-77` ✓）。
         if let Some(name) = item.name.as_deref() {
             if beiyong1_name_gate(name) {
                 return Some(UPLOAD_ONE);
             }
+        }
+        // ② 按钮门：名字门没中才看它（旧 TS 的顺序 ✓）⇒ **传 10 张**那一族
+        //（`tasks.ts:78-81` ✓）。⚠ 这一格是刚接上的：615「记录国庆节欢乐瞬间」的
+        // 名字里既没有"上传"也没有"图/照" ⇒ 主跟它没关系，全靠 `button.app.link` ✓。
+        if beiyong1_button_gate(item.button_app_link.as_deref()) {
+            return Some(UPLOAD_TEN);
         }
     }
     None
@@ -167,6 +296,247 @@ pub fn upload_shape_for(item: &TaskV2Item) -> Option<UploadShape> {
 
 /// 玩法 434 的 id（分享文件）。
 pub const SHARE_TASK_ID: i64 = 434;
+
+/// 从条目名字里解出分享进度 `(已分享几次, 共几次)`。
+///
+/// # 活体形状（run 93 / run 99 实测）
+///
+/// ```text
+/// 分享文件领好礼<span id='share_title'>0/7</span>
+/// ```
+///
+/// # 为什么这样解，而不是照抄旧 TS 的 `replace`
+///
+/// 旧 TS 的 `getShareCount`（`services/app/tasks.ts:113-115`）是按**固定前后缀**做
+/// `replace` 的：`"分享文件得云朵<span id='share_title'>"` 与 `"/7</span>"` ⇒ 只要那个
+/// "已做"的数 ✓。那份能跑，但它把**活动文案**（"得云朵"、"/7"）写死在代码里 ✗，
+/// 文案一换就解出 `NaN` ⇒ `NaN > x` 恒为 `false` ⇒ **静默地永远不报成功** ✗。
+///
+/// ⇒ 本仓按**结构**解，容忍文案变化：
+/// ① 先取 `share_title` 那一段的文本，在里面找 `a/b`；
+/// ② 取不到就在整串里找**第一个** `a/b`（上游偶尔不带那个 span ✓）；
+/// ③ 都取不到 ⇒ `None` —— **"读不出"不是 0** ✓（当成 0 会把"没涨"判反 ✗）。
+pub fn share_progress_from_name(name: &str) -> Option<(i64, i64)> {
+    share_title_text(name)
+        .and_then(parse_ratio)
+        .or_else(|| parse_ratio(name))
+}
+
+/// `share_title` 那个标签**里面**的文本（不含标签本身）。
+fn share_title_text(name: &str) -> Option<&str> {
+    let at = name.find("share_title")?;
+    let after = &name[at + "share_title".len()..];
+    let text = &after[after.find('>')? + 1..];
+    let end = text.find('<').unwrap_or(text.len());
+    Some(text[..end].trim())
+}
+
+/// 取**第一个** `数字/数字`（返回 `(前, 后)`）。
+///
+/// 刻意只认 ASCII 数字与 `/`：这是上游自己给的形状（`0/7`）✓，不去猜
+/// "共 7 次"中文写法之类的东西（没实拍 ✗）。
+fn parse_ratio(s: &str) -> Option<(i64, i64)> {
+    let cs: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < cs.len() {
+        if !cs[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < cs.len() && cs[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i < cs.len() && cs[i] == '/' {
+            let mut j = i + 1;
+            while j < cs.len() && cs[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 {
+                let a: String = cs[start..i].iter().collect();
+                let b: String = cs[i + 1..j].iter().collect();
+                if let (Ok(a), Ok(b)) = (a.parse(), b.parse()) {
+                    return Some((a, b));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 收尾的**事后读数**：整张表再拉一遍，把"跑之前记下的数"和"跑之后的数"对上 ✓。
+///
+/// 一次拉表服务**两档**（都靠"数字"说话，都是官方没给"完成没完成"接口的那种）：
+///
+/// * **434** —— 分享次数 `shareBefore → shareAfter`，`after > before` 才算记上 ✓；
+/// * **522** —— 上传**进度** `42/100 → 47/100` ✓ —— 用户口径 2026-10-04：
+///   「毕竟需要 100 个，也不急着一次做完，**进度还是很重要的**」✓。
+///   这一档一趟只传 [`ROUNDS_PER_RUN`] 个，光看 `uploaded:5` 根本看不出走到哪儿了 ✗。
+///
+/// 一次拉表而不是每档各拉一趟：同一份读数、同一个时刻 ✓（也省 16 发 GET ✓）。
+async fn settle_progress(ctx: &TaskContext, result: &mut AppTaskResult) {
+    let share_i = result
+        .steps
+        .iter()
+        .position(|s| s.task_id == Some(SHARE_TASK_ID));
+    // ⚠ 找的是"**报了进度的那些档**"（522 / 615 那一族…），不是写死 522 的 id ✓
+    let upload_i = result.steps.iter().position(|s| s.progress_total.is_some());
+    if share_i.is_none() && upload_i.is_none() {
+        return; // 这两档都没做 ⇒ 那一趟"事后整表"压根不发 ✓
+    }
+    let Some(items) = refetch_items(ctx).await else {
+        for i in [share_i, upload_i].into_iter().flatten() {
+            result.steps[i]
+                .problems
+                .push("跑完拉表读不出数 ⇒ 保守当作没记上".to_string());
+        }
+        return;
+    };
+
+    if let Some(i) = share_i {
+        settle_share(&items, result, i, ctx);
+    }
+    if let Some(i) = upload_i {
+        settle_upload(&items, result, i, ctx);
+    }
+}
+
+/// 434 那一格的落地：比次数、决定要不要把这一条计进 `acted` ✓。
+fn settle_share(items: &[TaskV2Item], result: &mut AppTaskResult, i: usize, ctx: &TaskContext) {
+    let Some(after) = items
+        .iter()
+        .find(|it| it.task_id == Some(SHARE_TASK_ID))
+        .and_then(|it| it.name.as_deref())
+        .and_then(share_progress_from_name)
+    else {
+        result.steps[i]
+            .problems
+            .push("分享后读不出次数（表里没这条 / 名字里没有 a/b）⇒ 保守当作没记上".to_string());
+        return;
+    };
+    result.steps[i].share_after = Some(format!("{}/{}", after.0, after.1));
+    let before = result.steps[i]
+        .share_before
+        .as_deref()
+        .and_then(parse_ratio);
+    let name = result.steps[i].name.clone();
+    match before {
+        Some((was, total)) if after.0 > was => {
+            result.steps[i].share_counted = true;
+            result.acted += 1;
+            // 旧 TS 在这里打的就是 success（`printShareProgress` ✓）—— 且**只在涨了时**打 ✓
+            ctx.success(format!(
+                "{name}：{was}/{total} → {}/{}（记上了）",
+                after.0, after.1
+            ));
+        }
+        Some((was, total)) => {
+            result.steps[i].problems.push(format!(
+                "分享后上游次数没动（{was}/{total} → {}/{}）⇒ 这一条不算记上",
+                after.0, after.1
+            ));
+            ctx.fail(format!(
+                "{name}：{was}/{total} → {}/{}（上游次数没动 ⇒ 不算记上）",
+                after.0, after.1
+            ));
+        }
+        None => {
+            result.steps[i].problems.push(format!(
+                "动手前读不出次数（名字里没有 a/b）⇒ 无从比较，保守当作没记上（分享后 {}/{}）",
+                after.0, after.1
+            ));
+            ctx.fail(format!(
+                "{name}：动手前读不出次数 ⇒ 无从比较（分享后 {}/{}）",
+                after.0, after.1
+            ));
+        }
+    }
+}
+
+/// 522 那一格的落地：把**进度**写进明细、并打一行日志 ✓。
+///
+/// ⚠ 这一档**不**因为进度没动就扣 `acted` —— 它的"成"是**传了文件**（那一支自己计 ✓），
+/// 进度只是给用户看的"走到哪儿了" ✓（用户口径：不急着一次做完 ✓）。
+/// 但**读不出**与**没动**要分开说：前者是"我们没读到"，后者是"上游还没记账" ✗。
+fn settle_upload(items: &[TaskV2Item], result: &mut AppTaskResult, i: usize, ctx: &TaskContext) {
+    let Some(total) = result.steps[i].progress_total else {
+        return;
+    };
+    let Some(id) = result.steps[i].task_id else {
+        return;
+    };
+    let Some(item) = items.iter().find(|it| it.task_id == Some(id)) else {
+        result.steps[i]
+            .problems
+            .push("跑完拉表里没有这一条 ⇒ 读不出进度".to_string());
+        return;
+    };
+    let after = item.process;
+    result.steps[i].progress_after = after.map(|p| format!("{p}/{total}"));
+    let name = result.steps[i].name.clone();
+    let uploaded = result.steps[i].uploaded;
+    let before = result.steps[i]
+        .progress_before
+        .as_deref()
+        .and_then(|s| s.split('/').next())
+        .and_then(|s| s.parse::<i64>().ok());
+    match (before, after) {
+        (Some(b), Some(a)) if a > b => {
+            let moved = a - b;
+            // ⚠ 差额要**说出来**，别让两个数字自己打架 ✗：实测"我们传了 5 个、上游只 +4"
+            // 是**记账慢一步**（真的），下一趟的"动手前"读数正好补上那一个 ——
+            // run 105 `48 → 52`（传 5）⇒ run 106 的动手前读数是 **53** ✓ 再 `53 → 58`（传 5 ✓）。
+            // ⇒ 最多差**最后一个**，不是 106 那种 76 分钟的延迟 ✓。
+            let gap = if moved == i64::from(uploaded) {
+                String::new()
+            } else {
+                format!(
+                    "；我们实际传了 {uploaded} 个，差的 {} 个上游还没记账 ✓",
+                    i64::from(uploaded) - moved
+                )
+            };
+            let tail = if a >= total { "，满了 ✓" } else { "" };
+            ctx.success(format!(
+                "{name}：{b}/{total} → {a}/{total}（这一趟 +{moved}{gap}）{tail}"
+            ));
+        }
+        (Some(b), Some(a)) => ctx.info(format!(
+            "{name}：{b}/{total} → {a}/{total}\
+             （这一趟传了 {uploaded} 个，上游计数还没动 ⇒ 可能还没记账）"
+        )),
+        (_, Some(a)) => ctx.info(format!(
+            "{name}：{a}/{total}（动手前没读到，没法比；这一趟传了 {uploaded} 个）"
+        )),
+        (_, None) => result.steps[i]
+            .problems
+            .push("这一条没有 process 这一格 ⇒ 读不出进度".to_string()),
+    }
+}
+
+/// 把整张表再拉一遍、去重后交回条目；**16 次全失败** ⇒ `None`（"读不出" ✓）。
+///
+/// # 为什么是**整张表**
+///
+/// 旧 TS `app.ts:56` 就是 `await getAllAppTaskList()`（全表）之后再比大小 ✓ ——
+/// 本仓照抄这条口径，而不是去猜它这次落在了哪一组（条目会换组、组名也会换 ✗）。
+/// 代价是 16 发只读 GET（与开跑前那次同量 ✓，实测整表读一次约 1.4 s ✓）。
+async fn refetch_items(ctx: &TaskContext) -> Option<Vec<TaskV2Item>> {
+    let mut pages: Vec<mcloud_upstream::app_task_list_v2::TaskListV2> = Vec::new();
+    for market in app_task_matrix::APP_TASK_MARKETS {
+        for group in mcloud_upstream::app_task_list_v2::TASK_LIST_V2_GROUPS {
+            // 单组失败不炸整件事（与只读矩阵同口径 ✓），只是少一页证据。
+            if let Ok(p) = app_task_matrix::fetch_one(ctx, market, group).await {
+                pages.push(p);
+            }
+        }
+    }
+    if pages.is_empty() {
+        // 16 发**全**没成 ⇒ "读不出"（这与"拉到了、只是表里没这条"是两回事 ✗）
+        return None;
+    }
+    let (items, _) = app_task_matrix::merge_pages(&pages);
+    Some(items)
+}
 
 // ══════════════════════ 三道门（第一道：刻意跳过的 id） ══════════════════════
 
@@ -309,9 +679,15 @@ pub fn should_act(item: &TaskV2Item) -> bool {
 /// * `currstep == 0`（不传这一格时 JS 的默认值就是 0）⇒ **打**。
 /// * `currstep != 0`（这一条已经走起来了）⇒ **不打**，而门**照样通过**
 ///   —— `return true` 意味着 runner 还是会跑。
-/// * 434 是唯一一个例外：它只在**走到第 22 步**时打。
 ///
-/// ⚠ 这一版最初是**无条件打卡**，于是对"已经走起来的"条目多发了一发写请求
+/// ⚠⚠ 434 那条 `specialMap` 是**叠加**在上面两句**之上**的，**不是替代** ✗：
+/// 它在第 22 步要打，而"第 0 步 ⇒ 打"那一句对它**照样生效** ✓
+///（参考实现的下标顺序就是先问 `specialMap`、再问 `currstep === 0`）。
+/// 这一版最初把 434 写成了**替代**规则（`if 434 { return step == 22 }`）✗
+/// ⇒ 上游不给 `currstep` 时（2026-10-04 小号 run 96 正是如此）它**一发都没打**
+/// ✗，而界面那条自述还写着"按旧实现不打卡" —— 旧实现在第 0 步**恰恰会打** ✗。
+///
+/// ⚠ 这一版最初还是**无条件打卡**，于是对"已经走起来的"条目多发了一发写请求
 /// （`task/click` 不可回滚）。真机第一趟那条
 /// `522 "当月上传文件满100个" uploaded 0 clicked true` 就是它 ——
 /// 上游本没打算让这一趟再记一笔，是我们自己补的。
@@ -323,8 +699,10 @@ pub fn should_click(item: &TaskV2Item) -> bool {
         return false;
     }
     let step = item.curr_step.unwrap_or(0);
-    if item.task_id == Some(SPECIAL_CLICK_TASK) {
-        return step == SPECIAL_CLICK_STEP;
+    // 434：第 22 步是**额外**要打的一发（叠加）✓；其余一律落回下面的
+    // "第 0 步 ⇒ 打"，所以 `currstep` 缺席（None）时它也**照打** ✓。
+    if item.task_id == Some(SPECIAL_CLICK_TASK) && step == SPECIAL_CLICK_STEP {
+        return true;
     }
     step == 0
 }
@@ -471,7 +849,39 @@ pub struct TaskStep {
     /// 打卡那一枪的结局。
     pub clicked: bool,
     /// 434 那一档：外链**建了又删**了。`false` = 没做（含"没有可分享的文件"）。
+    ///
+    /// ⚠ 它只说明**技术动作**成了，**不等于**任务记上了 —— 判据看 [`Self::share_counted`] ✓。
     pub shared: bool,
+    /// 434：这一趟**动手前**从条目名字里读到的次数（活体形如 `"0/7"`）。
+    /// `None` = 名字里没有那个 `a/b`（读不出，**不当 0** ✗）。
+    pub share_before: Option<String>,
+    /// 434：**跑完之后整张表再拉一遍**读到的次数（同 `"0/7"` 的写法）。`None` = 读不出。
+    pub share_after: Option<String>,
+    /// 434：**上游真把这一笔记上了** —— 唯一的判据是 `share_after > share_before` ✓。
+    ///
+    /// # 为什么不能看别的
+    ///
+    /// 官方**没有**"这条任务完成了"的接口 ⇒ 只能看次数（旧 TS
+    /// `services/app/tasks.ts:113-125` 的 `getShareCount` + `printShareProgress`、
+    /// 调用点在 `app.ts:30`（动手前记一次）与 `app.ts:56-60`（全跑完再拉整表比大小）✓）。
+    /// 所以它**既不等于**"打卡门过了"（`clicked`），**也不等于**"外链建成了"
+    /// （[`Self::shared`]）—— 外链建成而次数不动时，参考实现的 `collectTaskResult`
+    ///（`results.ts:18-45`）照样把这条记进 `failed` ✓。
+    pub share_counted: bool,
+    /// 这一档要报的**分母**（`stop_at_process`：522 = 100 ✓、615 那一族 = 10 ✓）。
+    ///
+    /// ⚠ 它就是"这一档要不要报进度"的开关（`Some` ⇒ 报 ✓）。**分母必须来自这一档自己的
+    /// 形状**，不能写死 522 那个 100 ✗ —— 2026-10-04 真机 run 110 就是这么错的：
+    /// 615 那一格里冒出了 `progressBefore: "0/100"` ✗（实际是"10 张里 0 张" ✓）。
+    pub progress_total: Option<i64>,
+    /// 这一档**动手前**条目自报的进度（`"42/100"` / `"0/10"`）。`None` = 没读到 process。
+    pub progress_before: Option<String>,
+    /// 522：跑完之后**整张表再拉一遍**读到的进度（`"47/100"`）✓。
+    ///
+    /// ⚠ 这一格**不参与成败判定**（522 的"成"是"这一趟真传了文件"，那一支自己计 `acted` ✓）——
+    /// 它只是给用户看"走到哪儿了" ✓（用户口径 2026-10-04：「毕竟需要 100 个，
+    /// 也不急着一次做完，**进度还是很重要的**」✓）。
+    pub progress_after: Option<String>,
     /// 逐条的原因。
     pub problems: Vec<String>,
 }
@@ -479,7 +889,15 @@ pub struct TaskStep {
 /// 这一趟的结论。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AppTaskResult {
-    /// **真的发过写请求**（传过文件或打过卡）的条目数。
+    /// **这一趟真的推进了的条目数** —— 逐档按各自**能拿到的最硬判据**算：
+    ///
+    /// * `Upload` / `Entry`：传过文件**或**打过卡（那两档除了"发过写请求"没别的可看 ✓）；
+    /// * `434`：**上游次数涨了**（[`TaskStep::share_counted`] ✓）—— 打卡过、外链建成都**不算**。
+    ///
+    /// ⚠ 旧 TS 的 `doingList`（`services/app/tasks.ts:29-36`）记的是"打卡门过了"，
+    /// 但那一份在收尾时会被 `collectTaskResult`（`results.ts:18-45`）**按上游 state 复判**：
+    /// 处理过、state 仍非 `FINISH` ⇒ 记 `failed` ✓ ⇒ 本仓 434 这一档取的是后者那条更硬的
+    /// 判据（"次数涨没涨"），**不是**"门过了" ✗（2026-10-04 用户纠正 ✓）。
     pub acted: usize,
     /// 判出来"要传"的条目数。
     pub planned: usize,
@@ -596,7 +1014,7 @@ pub async fn run_app_task(
         Some(m) => read_month_backup(ctx, m).await,
         None => None,
     };
-    let planned: Vec<(TaskV2Item, Step)> = items
+    let mut planned: Vec<(TaskV2Item, Step)> = items
         .iter()
         .filter(|i| should_act(i))
         .filter(|i| !is_configured_skip(i, &ctx.account.settings.skip_tasks))
@@ -610,6 +1028,16 @@ pub async fn run_app_task(
         })
         .filter_map(|i| step_for(i).map(|s| (i.clone(), s)))
         .collect();
+    // ⚠⚠ **434 必须排在最后**：它消费的是**这一趟自己传上去的文件**
+    //（`share_first_uploaded(ctx, &result.file_ids)` ✓），而计划是按 id 升序的
+    //（`merge_pages` 里那句 `all.sort_by_key(task_id)` ✓）⇒ 434(434) **永远**排在
+    // 522(522) 前面 ✗。2026-10-04 真机实测（run 103，测试号，`onlyTaskIds=522,434`）：
+    // 522 明明传了 5 个文件，434 那一格却是「**没有可分享的文件，跳过分享任务**」✗。
+    // 更糟的是**两个账号的 106 都是 `FINISH`** ⇒ 只要按 id 排，434 就**永远**分享不到东西
+    // ✗✗（这一条是"单独跑一次 434"验出来的，单测夹具里 106 是 WAIT、正好掩盖了它 ✓）。
+    // ⇒ 把它挪到末尾：它**只消费、不生产**，排最后不影响任何别人 ✓（`sort_by_key` 稳定 ⇒
+    // 其余条目照旧 id 升序 ✓）。
+    planned.sort_by_key(|(i, _)| i.task_id == Some(SHARE_TASK_ID));
     result.planned = planned.len();
 
     // ③ 逐条做。
@@ -684,23 +1112,76 @@ pub async fn run_app_task(
             continue;
         }
         let Step::Upload(shape) = step_kind else {
-            // 434：先打卡（门），成了再分享。
-            match share_first_uploaded(ctx, &result.file_ids).await {
-                Ok(()) => {
-                    step.shared = true;
-                    result.acted += 1;
+            // 434：打卡那一发在上面打过了；这里先**记下动手前的次数**再分享。
+            // ⚠ 必须从**原始** `item.name` 解（`step.name` 那份已经被 `clean_task_name`
+            // 把 `<span>` 剥掉了 ✗ ⇒ 那里已经读不出数字）。
+            step.share_before = item
+                .name
+                .as_deref()
+                .and_then(share_progress_from_name)
+                .map(|(a, b)| format!("{a}/{b}"));
+            // ⚠⚠ **没有可分享的文件 ⇒ 自己传一个**（用户口径 2026-10-04）。
+            // 434 消费的是**这一趟**传上去的文件，而计划按 id 升序 ⇒ 只要同趟的
+            // 106 是 `FINISH`、或者这一趟只跑 434（`onlyTaskIds=434`），它手里就是空的，
+            // 旧实现那句「没有可分享的文件，跳过分享任务」会让它**永远做不成** ✗
+            //（真机实证 run 103：522 传了 5 个，434 那一格照样是"空手" ✗）。
+            // ⇒ 两道保险：计划里 434 排**末尾**（让别人先生产 ✓），轮到自己还空着
+            //就**自己造一个** ✓。
+            if result.file_ids.is_empty() {
+                // ⚠ 这一发补传**按安卓档**（缺省档 ✓）：旧 TS 的 `shareTime` 自己不上传，
+                // 这一发是本仓补的 ⇒ 没有哪一档渠道要求，用缺省最不容易出错 ✓。
+                match upload_one_file(ctx, CloudChannel::Android, ".bin").await {
+                    // 交回来的 id 进 `file_ids` ⇒ 收尾那一发会把它一起移进回收站 ✓
+                    Ok(Some(id)) => {
+                        result.file_ids.push(id);
+                        step.uploaded += 1;
+                    }
+                    Ok(None) => step
+                        .problems
+                        .push("撞同名（那不是我们造的）⇒ 这次没有可分享的文件".to_string()),
+                    Err(e) => step.problems.push(format!("为分享补传一个文件失败：{e}")),
                 }
-                // ⚠ "没有可分享的文件"也走这一支 —— 它不是失败，是**跳过**，
-                // 所以不进 `acted`（旧实现那句就是 `info` 级别的一句跳过）。
+            }
+            match share_first_uploaded(ctx, &result.file_ids).await {
+                Ok(()) => step.shared = true,
+                // ⚠ "没有可分享的文件"也走这一支 —— 它不是失败，只是这一档没做成 ✓。
                 Err(e) => step.problems.push(e.to_string()),
             }
+            // ⚠⚠ **不在这里记 `acted`**：这一档唯一的判据是**上游次数涨没涨**
+            //（`share_counted` ✓），而那只可能在**跑完之后再拉一次表**才知道
+            //（参考实现的位置也一样：`app.ts:56-60` 是跑完再拉全表比大小 ✓）。
+            // 打卡过（`clicked`）/ 外链建成（`shared`）**都不算推进** ✗。
             result.steps.push(step);
             continue;
         };
         let mut done: u32 = 0;
-        while should_upload_another(*shape, done, item.process) {
+        // 522：动手前先把**进度**记下来（跑完再拉一次表 → 比出"走到哪儿了" ✓）。
+        // 只在**循环档**（`stop_at_process > 0`，即 522）记：106 那种一趟一个的没有"进度"可言 ✗。
+        if shape.stop_at_process > 0 {
+            // ⚠ 分母取**这一档自己**的 `stop_at_process`（522=100、615 那一族=10 ✓）：
+            // 写死 522 那个常量会让 615 显示成 `0/100` ✗（真机 run 110 就这样错了 ✓）。
+            step.progress_total = Some(shape.stop_at_process);
+            step.progress_before = item
+                .process
+                .map(|p| format!("{p}/{}", shape.stop_at_process));
+        }
+        // ⚠ 615 那一族：上限 = `stop_at_process - process`（旧 TS 先算 `remaining` ✓）。
+        // 522 不用这一支（它的 `process` 只是闸、上限另由 `rounds` 管 ✓）⇒ 见 `top_up_from_process`。
+        let eff = if shape.top_up_from_process && shape.stop_at_process > 0 {
+            UploadShape {
+                rounds: (shape.stop_at_process - item.process.unwrap_or(0)).max(0) as u32,
+                // 上限已经按剩余量收好 ⇒ 静态那道闸不必再看 ✓
+                stop_at_process: 0,
+                ..*shape
+            }
+        } else {
+            *shape
+        };
+        while should_upload_another(eff, done, item.process) {
             ctx.check_cancelled()?;
-            match upload_one_file(ctx).await {
+            // ⚠ 渠道按**这一档的形状**走：113 是 PC 档、别的是安卓档 ✓
+            //（create 与 complete 两发用同一个 `shape.channel` —— 旧 TS 那两发也同源 ✓）。
+            match upload_one_file(ctx, eff.channel, eff.file_ext).await {
                 Ok(Some(id)) => {
                     result.file_ids.push(id);
                     step.uploaded += 1;
@@ -712,8 +1193,10 @@ pub async fn run_app_task(
                 Err(e) => step.problems.push(format!("上传失败：{e}")),
             }
             done += 1;
-            if shape.pace_each_round && pace_ms > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(pace_ms as u64)).await;
+            // ⚠ 等的是**这一档自己的数**（522=500ms ✓、615=300ms ✓、106/113=0 不等 ✓）；
+            // `pace_ms > 0` 只是让测试能把等待整体关掉（测试传 0 ✓），不改线上行为 ✓。
+            if eff.per_round_ms > 0 && pace_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(eff.per_round_ms as u64)).await;
             }
         }
 
@@ -733,6 +1216,12 @@ pub async fn run_app_task(
 
     // ④ 清理：**只删我们自己造的**。
     cleanup(ctx, &mut result).await;
+
+    // ⑤ 事后读数：**整张表再拉一遍、比数字** —— 434 判"记上没记上"、522 报"进度" ✓
+    //    （参考实现的位置一样：`app.ts:56-60`，全部任务跑完 → `getAllAppTaskList()`
+    //     → `printShareProgress` 比 `state.shareCount` ✓）。
+    settle_progress(ctx, &mut result).await;
+
     Ok(result)
 }
 
@@ -788,9 +1277,17 @@ async fn share_first_uploaded(ctx: &TaskContext, uploaded: &[String]) -> Result<
 }
 
 /// 传一个随机文件，交回**我们造的**那个 id（`exist` 档交 `None`）。
-async fn upload_one_file(ctx: &TaskContext) -> Result<Option<String>> {
+///
+/// `channel` 是**必填**的：旧 TS 的 `uploadRandomFile` 缺省按安卓档发
+///（`getFileOpHeader` 的 `channelSrc` 缺省值 ✓），只有玩法 113 显式改成 PC 档 ✓ ——
+/// 把它做成参数而不是写死，正是为了"哪一档走哪个客户端"这件事**在调用点看得见** ✓。
+async fn upload_one_file(
+    ctx: &TaskContext,
+    channel: CloudChannel,
+    ext: &str,
+) -> Result<Option<String>> {
     let mut rng = mcloud_crypto::OsRandom;
-    let plan = crate::task_expansion::random_plan(&mut rng, 0);
+    let plan = crate::task_expansion::random_plan_with_ext(&mut rng, 0, ext);
     let hash = mcloud_crypto::sha256_hex_bytes(&plan.content);
     let created = {
         let req = upload::file_create_request(CloudFileCreateInput {
@@ -798,7 +1295,7 @@ async fn upload_one_file(ctx: &TaskContext) -> Result<Option<String>> {
             name: plan.name.clone(),
             size: plan.content.len() as i64,
             content_hash: hash.clone(),
-            channel: CloudChannel::Android,
+            channel,
             op: CloudOpType::Upload,
         })?;
         let resp = ctx.http.request(req).await?;
@@ -824,7 +1321,7 @@ async fn upload_one_file(ctx: &TaskContext) -> Result<Option<String>> {
             &file_id,
             created.upload_id.as_deref().unwrap_or(""),
             &hash,
-            CloudChannel::Android,
+            channel,
             CloudOpType::Upload,
         )?;
         let resp = ctx.http.request(req).await?;
@@ -887,10 +1384,11 @@ async fn entry_do_task(ctx: &TaskContext) -> Result<()> {
 /// 是 `{uploaded:1, clicked:true, problems:[]}`，可上游的 `state` 始终是 `WAIT` ✗。
 fn click_key(task_id: Option<i64>) -> &'static str {
     match task_id {
-        // `runners.ts:107`：409「从固定入口进入云朵中心」。
-        // ⚠ 本仓目前不对它打卡（`step_for` 里没有 409），写在这里是为了将来接上时不漏。
+        // `runners.ts:107`：409「从固定入口进入云朵中心」—— `Step::Entry` 里
+        // **补的那一发**打卡用的就是它 ✓（`handleTaskClick` 那发另算）。
         Some(409) => "task2",
-        // `index.ts:51,54`：这两条同上，本仓也还没接。
+        // `index.ts:51,54`：478 / 481 走「随机云朵任务」；这两条本仓**还没接**
+        //（`step_for` 里没有它们）⇒ 先留在这里，将来接上时不漏 ✓。
         Some(478) | Some(481) => "randomCloudTask",
         _ => app_task_click::TASK_CLICK_DEFAULT_KEY,
     }
@@ -995,6 +1493,14 @@ impl Task for AppTaskTask {
                 "uploaded": s.uploaded,
                 "clicked": s.clicked,
                 "shared": s.shared,
+                // 434 的"成没成"是**比出来的**：动手前/后的次数 + 涨没涨 ✓
+                "shareBefore": s.share_before,
+                "shareAfter": s.share_after,
+                "shareCounted": s.share_counted,
+                // 522 的**进度**：`42/100 → 47/100` ✓（不参与成败，只报走到哪儿 ✓）
+                "progressTotal": s.progress_total,
+                "progressBefore": s.progress_before,
+                "progressAfter": s.progress_after,
                 "problems": s.problems,
             })).collect::<Vec<_>>(),
         }));

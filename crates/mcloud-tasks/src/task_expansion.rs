@@ -687,6 +687,26 @@ pub(crate) fn random_plan(
     }
 }
 
+/// 同 [`random_plan`]，但**后缀可指定** —— 旧实现的 `uploadRandomFile({ ext })` ✓。
+///
+/// ⚠ 为什么值这一格：615 那一族（`ai-tasks.ts:205` 的 `upload10PictureTask`）
+/// 刻意传 **`.jpg`**，而别处都不带 `ext`（走缺省 `.bin` ✓）。上游到底看不看这个后缀
+/// **未验证**，但旧实现是**分开写的** ⇒ 照抄分开，不替它统一 ✗。
+pub(crate) fn random_plan_with_ext(
+    rng: &mut impl mcloud_crypto::Random,
+    backup_wait_ms: i64,
+    ext: &str,
+) -> ExpansionPlan {
+    let mut plan = random_plan(rng, backup_wait_ms);
+    // 名字形如 `mcloud-task-expansion-<16 hex>.bin`（hex 里没有 `.` ✓）
+    // ⇒ 从**最后一个** `.` 截掉旧后缀、再把新的接上（不是再拼一个 ✗）。
+    if let Some(dot) = plan.name.rfind('.') {
+        plan.name.truncate(dot);
+    }
+    plan.name.push_str(ext);
+    plan
+}
+
 #[async_trait]
 impl Task for TaskExpansionTask {
     fn name(&self) -> &'static str {

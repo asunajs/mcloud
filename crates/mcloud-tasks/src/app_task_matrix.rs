@@ -346,6 +346,10 @@ fn report_details(ctx: &TaskContext, result: &AppTaskMatrixResult) {
                 "currStep": t.curr_step,
                 "process": t.process,
                 "marketName": t.market_name,
+                // ⚠ 只读这一格是为了**判据可复核**：玩法 615 那一族的**门**就在
+                // `button.app.link` 里（`beiyong1_button_gate`）⇒ 不报出来就没法在界面上
+                // 核"它到底该不该传 10 张" ✓（2026-10-04 加，接 615 时 ✓）。
+                "buttonAppLink": t.button_app_link,
             })
         })
         .collect();
