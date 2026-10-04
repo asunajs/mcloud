@@ -15,6 +15,7 @@ import { onMounted, onUnmounted, ref } from 'lite'
 import { listServerLogs, type ServerLogLine } from '../api'
 import { IconSearch } from '../ui/icons'
 import { MARK, TONE, type LogKind } from '../ui/log-panel'
+import { fmtEpochMs } from '../ui/time'
 
 /** 级别档位。⚠ 语义是"**不低于**它" ✓（与后端 `min_level` 同一口径 ✓）。 */
 const LEVELS: ReadonlyArray<readonly [string, string]> = [
@@ -32,6 +33,9 @@ const LEVELS: ReadonlyArray<readonly [string, string]> = [
 const kindOf = (level: string): LogKind =>
   level === 'error' || level === 'warn' || level === 'info' || level === 'debug' ? level : 'debug'
 
+/** 级别的高低（与后端 `logbuf::rank_of` **同一个口径** ✓，别各定一套 ✗）。 */
+const RANK: Record<string, number> = { error: 4, warn: 3, info: 2, debug: 1 }
+
 export const LogsPage = () => {
   const lines = ref<ServerLogLine[]>([])
   const level = ref('')
@@ -40,9 +44,20 @@ export const LogsPage = () => {
   const errorMessage = ref('')
   let timer: ReturnType<typeof setInterval> | undefined
 
+  /**
+   * 取回来的行**先不过滤** ✓ —— 级别与关键词都在**本地**筛 ✓。
+   *
+   * ⚠ 为什么不在请求里带 `level`/`q`（接口支持 ✓，但这一页不用 ✗）：
+   * 一次取全（≤800 行）之后，点按钮/打字是**立刻**出结果 ✓；
+   * 而"每点一下发一次请求"既慢 ✓，又会让刚看到的那屏内容被整体换掉 ✓
+   * —— 排查时最烦的就是"内容在我眼前跳走" ✗。
+   *
+   * ⚠ 800 而不是 2000：这是**浏览器**要渲染的 DOM 行数 ✓（环是 2000 ✓）。
+   * 一屏看 800 行已经远超需要 ✓，多了只会让每 2 秒那次重建变卡 ✗。
+   */
   const load = async () => {
     try {
-      lines.value = await listServerLogs({ limit: 1000, level: level.value, q: q.value })
+      lines.value = await listServerLogs({ limit: 800 })
       state.value = 'ready'
     } catch (e) {
       errorMessage.value = e instanceof Error ? e.message : String(e)
@@ -61,6 +76,19 @@ export const LogsPage = () => {
     if (timer) clearInterval(timer)
   })
 
+  /** 本地过滤后的可见行 ✓（级别"**不低于**" ✓ + 关键词 ✓，与后端同一口径 ✓）。 */
+  const visible = (): ServerLogLine[] => {
+    const floor = RANK[level.value] ?? 0
+    const needle = q.value.trim().toLowerCase()
+    return lines.value.filter(
+      (l) =>
+        (RANK[l.level] ?? 0) >= floor &&
+        (needle === '' ||
+          l.message.toLowerCase().includes(needle) ||
+          l.target.toLowerCase().includes(needle)),
+    )
+  }
+
   return (
     <div class="flex flex-col gap-4">
       <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -71,10 +99,7 @@ export const LogsPage = () => {
               aria-pressed={level.value === id}
               aria-label={`级别：${label}`}
               class={`btn btn-sm min-h-11 md:min-h-0 ${level.value === id ? 'btn-primary' : 'btn-soft'}`}
-              onClick={() => {
-                level.value = id
-                void load()
-              }}
+              onClick={() => (level.value = id)}
             >
               {label}
             </button>
@@ -98,19 +123,19 @@ export const LogsPage = () => {
         </div>
       ) : null}
 
-      {state.value === 'ready' && lines.value.length === 0 ? (
-        <p class="text-sm opacity-70">没有匹配的日志（缓冲只留最近 2000 行 ✓）。</p>
+      {state.value === 'ready' && visible().length === 0 ? (
+        <p class="text-sm opacity-70">没有匹配的日志（缓冲只留最近 2000 行 ✓，这里取的是最近 800 行 ✓）。</p>
       ) : null}
 
-      {lines.value.length > 0 ? (
+      {visible().length > 0 ? (
         <div class="card bg-base-100 shadow-sm">
           <div class="card-body gap-2">
             <div class="max-h-[70vh] overflow-y-auto overscroll-contain rounded-box bg-base-200 p-3 font-mono text-xs leading-5">
-              {lines.value.map((l, i) => (
-                // ⚠ 标记、正文、来源拼成**一个**表达式 ✓（lite 编译器对"元素旁边的
-                // 裸文本节点"支持最薄 ✓ —— 这个坑在别的页面踩过 ✓）。
+              {visible().map((l, i) => (
+                // ⚠ 时间、标记、正文、来源拼成**一个**表达式 ✓（lite 编译器对
+                // "元素旁边的裸文本节点"支持最薄 ✓ —— 这个坑在别的页面踩过 ✓）。
                 <div key={i} class={`break-words ${TONE[kindOf(l.level)]}`}>
-                  {`${MARK[kindOf(l.level)]}  ${l.message}  ·  ${l.target}`}
+                  {`${fmtEpochMs(l.at_ms)}  ${MARK[kindOf(l.level)]}  ${l.message}  ·  ${l.target}`}
                 </div>
               ))}
             </div>
