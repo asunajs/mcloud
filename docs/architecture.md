@@ -1322,10 +1322,10 @@ t+1000ms #a=""  #b=""
 | **P8** | **认证闸 + 登出 + CLI 收敛 + 账号登录（扫码/短信）** | **✅** |
 | P9 | 推送渠道、其余任务 | ⏳ |
 
-### CLI（`mcloud-cli`）—— 只管"无头也能跑"的那几条
+### CLI（与服务的**同一个二进制** `mcloud`）—— 只管"无头也能跑"的那几条
 
 **命令数以 `bin/cli.rs` 的顶层分派为准，别背数** —— 现算（8 空格缩进那层就是顶层）：
-`grep -n '^        Some("' crates/mcloud-server/src/bin/cli.rs`。今天的长相：
+`grep -n '^        Some("' crates/mcloud-server/src/cli/run.rs`。今天的长相：
 
 ```
 tasks                          列出可用任务

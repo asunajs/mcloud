@@ -6,7 +6,7 @@
 > 下面带日期的段落是**当时快照**（今天数任务条数：`grep -c "Arc::new" crates/mcloud-tasks/src/lib.rs`）。
 
 > 来源：`mcloud`（Go，19 条能力已全部实现）+ `mcloud-sign`（旧 TS，权威清单 `TASKS.md`）
-> + `../mcloud/docs/business-feature-inventory.md`（逐条实现规格，含 `path:line` 证据）。
+> + `../mcloud-back/docs/business-feature-inventory.md`（逐条实现规格，含 `path:line` 证据）。
 >
 > 本项目现状（2026-09-26）：**已实现 10 个任务** —— P1 签到族全部落地
 > （`sign` / `receive` / `multiple` / `backup-gift` / `revival` / `prizes` /
@@ -167,7 +167,7 @@ HttpRequest::post("https://m.mcloud.139.com/ycloud/api/sign/doSign")  // 405
 > ✅ 这一段已闭环：P1 八条的端点全部换成实拍 `/ycloud/signin/page/*`
 > （见 §2 的 P0-3）。上面两行只作"凭印象写端点会怎样"的记录。
 
-mcloud 的实拍结论（`../mcloud/docs/business-feature-inventory.md` §5.1）明确写着：
+mcloud 的实拍结论（`../mcloud-back/docs/business-feature-inventory.md` §5.1）明确写着：
 
 > 真实抓包是 `https://m.mcloud.139.com/ycloud/signin/page/startSignIn?client=app&deviceId=…`、
 > `POST …/ycloud/signin/task/taskListV3`、`POST …/ycloud/signin/page/doTaskPost`
@@ -236,7 +236,7 @@ mcloud 的实拍结论（`../mcloud/docs/business-feature-inventory.md` §5.1）
 > 1. **真去删那一枪**（`hcy/recyclebin/batchTrash`）：
 >    **协议层已落在本仓**（`mcloud-upstream::cloud_trash`，2026-09-28）——
 >    请求构造（空列表**不发**）、web 档头画像、回执解析都在，逐条对着
->    `../mcloud/docs/capture/app-cloud-recyclebin-samples.txt` 与参考实现落码。
+>    `../mcloud-back/docs/capture/app-cloud-recyclebin-samples.txt` 与参考实现落码。
 >    **仍缺的是"谁在链尾调它"**：本层是零 IO 层，而今天**一条写网盘的链都没有**，
 >    所以它还没有调用点。等 P3 第一条链落地时接上。
 >    ⚠ 协议层带来的两条口径要先说清（都写进了模块头）：
@@ -346,7 +346,7 @@ mcloud 的实拍结论（`../mcloud/docs/business-feature-inventory.md` §5.1）
 > ⇒ **不填 `codes` 就会自动开门听弹幕收口令**，再用收到的口令领小红花
 > （用户要求的"自动获取口令并使用口令领取"）。
 >
-> ⚠ **门 ≠ WS**：门三步**有实证**（`../mcloud/docs/capture/app-live-redflower-samples.txt` §5.3
+> ⚠ **门 ≠ WS**：门三步**有实证**（`../mcloud-back/docs/capture/app-live-redflower-samples.txt` §5.3
 > 用只读探针走通过，因为第③步是 GET、不需要开播），
 > 而 **WS / 真弹幕仍结构性抓不到**（未开播，`chatRoomId: null`）——
 > 自动收集那条链的最后一环在本仓只用**假收集器**验过编排。两者别混为一谈。
@@ -396,7 +396,7 @@ mcloud 的实拍结论（`../mcloud/docs/business-feature-inventory.md` §5.1）
 2. 但**必须一次就按"配方 + 池"的模型写**，不能先写死签到页那一套。
    理由：mcloud 自己就吃过这个亏 —— 它先是把换票三参数**写死**在
    `OpenSignInSession` 里，后来发现 `msgpushon` / `backupgift` 各有自己的配方，
-   切的时候"动的是**共享会话层**"，于是 `../mcloud/docs/pending-decisions.md` Q42 只能
+   切的时候"动的是**共享会话层**"，于是 `../mcloud-back/docs/pending-decisions.md` Q42 只能
    "先登记、等第二条页面一起改"。
    **我们先按配方建模，就不欠这笔债。**
 3. 做完它，`sign` 才能从 405 变成真能跑。

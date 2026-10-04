@@ -30,6 +30,25 @@ import { fileURLToPath } from 'node:url'
 const WEB = join(dirname(fileURLToPath(import.meta.url)), '..')
 const APP_CSS = join(WEB, 'src', 'app.css')
 
+// ⚠⚠ 这个探针**只在 daisyUI 还在依赖里时能跑**（2026-10-04 加这道闸）。
+//
+// daisyUI 已于 2026-10-02 从 `web/package.json` + lock 里移除（`grep -c daisyui
+// web/package-lock.json` ⇒ 0），而本脚本要读 `node_modules/daisyui/components` 来枚举
+// 组件 ⇒ 今天跑起来只会得到一句 `ENOENT`，看不出"为什么"。所以这里先说明再退出。
+//
+// 这份脚本现在的用途**只剩历史分析**（`docs/daisyui-removal-analysis.md` 记的就是它当年的
+// 读数与取舍，那份文档里也写了"今天跑不动"）。量 CSS 体积请改用
+// `cd web && npm run build` 的末行读数（`web/scripts/gzip-sidecars.mjs` 会打 raw + gzip）。
+if (!existsSync(join(WEB, 'node_modules', 'daisyui', 'components'))) {
+  console.error(
+    '这个探针需要 daisyUI 依赖（它枚举 node_modules/daisyui/components），\n' +
+      '而 daisyUI 已于 2026-10-02 从本仓移除 ⇒ 跑不了。\n' +
+      '量 CSS 体积请用：cd web && npm run build（看末行 raw / gzip 读数）。\n' +
+      '想复现当年的对照，请 checkout 到移除 daisyUI 之前的那次提交再跑。',
+  )
+  process.exit(2)
+}
+
 /**
  * 页面里所有"class 位置可能出现的 token"。
  *

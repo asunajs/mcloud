@@ -1,252 +1,246 @@
 # mcloud
 
-移动云盘（中国移动云盘 / 139）自动化平台。后端 **Rust**，前端 **Vue Vapor + TSX**。
+中国移动云盘（139 云盘）自动化平台：把签到、领 AI豆、直播口令、App 任务、兑换这些动作
+做成一套**可定时、可编排、可回看日志**的自托管服务。
 
-> 设计详见 [`docs/architecture.md`](./docs/architecture.md)。
+- 后端 **Rust**：8 个 crate。签名与加解密是**纯 Rust 实现**（无 FFI）；TLS 走 `native-tls`
+  ⇒ Linux 上链接系统 OpenSSL（交叉编 arm64 时改用 `vendored` 从源码编，产物静态链）。
+- 前端**自研 lite 框架**（无虚拟 DOM + 编译期优化）+ TSX + Tailwind 4（`@theme` 令牌层）。
+- 交付形态是**一个二进制** `mcloud`：
+  - **不带参数** ⇒ 起 WebUI 服务（默认 `http://127.0.0.1:3000`）
+  - **带子命令** ⇒ CLI（`tasks` / `run` / `login` / `cron` / `pipeline` / `auth` / `pending`）
 
-## 状态
+> 当前版本 `3.0.0-rc.2`。现算（别背数）：
+> ```bash
+> sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1
+> ```
+> 仓库是 `asunajs/mcloud`：`main` = 这份 Rust 实现；那份 **Go 参考实现**是同仓的
+> `go-legacy` 分支（抓包素材与协议规范在第三个仓 `mcloud-capture`）。
 
-**已落地 20 个任务，其中 19 条在注册表里**（`/api/capabilities` 返回的就是这 19 条）：
-P1 签到族八条（`sign` / `receive` / `multiple` /
-`backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`）
-+ 直播小红花两条（`live-room` / `red-flower`）
-+ 消息推送（`msg-push`）
-+ 趣玩AI抽奖（`fun-ai`）+ 公告任务（`notice`）
-+ 拍拍盘点（`play-ai-special`，**只读**）
-+ App 任务矩阵（`app-task-matrix`，**只读**）
-+ 任务拓展（`task-expansion`）
-+ App 任务（`app-task`，**做任务**——写侧）
-+ 红包派对（`cloud-phone-redpack`，**做任务**——签到 / 登记 / 浏览 / 云机票 / 答题 / 装机）。
-  ⚠ 两处**刻意**与旧 TS 不同：读到没见过的状态码**不发写**（防重复领）、会话 token 不落盘。
-+ AI 新头像（`ai-avatar`，**做任务**——默认**关**，收尾只删本趟产物）。
-  ✅ 「下载合成图 → upload」已接通：`mcloud_core::HttpClient::request_raw` 给原始字节（不经有损 UTF-8 解码），
-  两层装饰器（`SmidClient` / `H5Client`）都转发，字节一路到 leaf；任务层做形状校验 + base64。
-  唯一保留的缺口：**需要会话的主机**走 `request_raw` 会**明确报错**（不静默退到有损路径）。
-
-> ⚠ **`exchange`（兑换）的实现还在，但已从 `register_all` 摘掉，不算「对外可用」**：
-> 它**不在** `/api/capabilities`、也**不能**经 `POST /api/runs` 跑；专用入口
-> `POST /api/accounts/{id}/exchange` 会如实回一句「任务池里没有 exchange」。
-> 摘它的原因（缺 `deviceId` 来源 / `visitlog` 预热 / 等待档对齐）记在
-> `crates/mcloud-tasks/src/lib.rs` 的 `register_all` 说明里。
-> ⇒ 兑换页今天**读得到奖品清单、点不下单**（下单那条链会明确报错，不是静默什么都不发生）。
-
-**`task-expansion`（2026-09-28 落地）—— 第一条"写网盘并自己收尾"的任务**：
-
-它是旧项目里**唯一**"为了改变上游状态而写用户网盘"的任务：本月没开备份时，
-不是提示你去开，而是**自己传一个文件**把 `curMonthBackup` 刷成 true。
-
-> ⚠⚠ **与参考实现的一处刻意不同：本仓跑完会删掉自己传的那个文件。**
-> 参考实现这一条链**不删**（留在它的 P1 缺口里），跑一次你的网盘里就多一个没人清理的文件。
-> 本仓有 `batchTrash`（2026-09-26 起有真跑读数）⇒ 链尾自己收尾。
->
-> ⚠⚠ **但"撞同名"那一档绝不删**：`exist:true` 时上游按 `refuse` 语义把**你本来就有的
-> 那个文件**的 `fileId` 交回来 —— 把它放进清理名单就是**删你的东西**。
-> 所以那一档**连 id 都不交**（有测试钉住"撞同名时一条 `batchTrash` 都不发"）。
->
-> ⚠ 删除是**移进回收站**、不是彻底删；真删错了还能捞回来。
->
-> 另外两处"刻意"：**一枪没发出去时不空等**那 20 秒（等的是"服务端把这次备份记进当月"，
-> 没有上传就没有东西要记），以及**领取成功但上游没报数时仍然报"已领"**
-> （旧实现那个 truthy 判据会让那一趟一句都不念，看起来像什么都没发生）。
-
-**`app-task-matrix`（2026-09-28 落地）—— 只拉表，不打卡、不上传**：
-
-16 次只读请求 = 2 个市场名（`sign_in_3` / `newsign_139mail`）× 8 个 group
-（`new` / `beiyong1` / `beiyong2` / `cloudEmail` / `time` / `day` / `month` / `hidden`），
-然后按「按 `id` 升序 → 按 `name` 去重保留先来的 → 没名字的各自保留」聚合。
-
-> ⚠⚠ **它的名字不叫 `app-task`，是故意的**。参考实现里 `app-task` 的含义是
-> **「做任务」**（逐条 `task/click`，会写用户的账且不可撤销），而且它自己写着
-> **「今天一次真打都没有」**、`RunInBatch: false`，并指明"手工点一次是拿到第一个
-> 实拍的最快路径"。拿同一个 code 实现成只读，会让那个名字在两边指不同的东西
-> ⇒ 这里另起一个名，**把写的那一半原样留给 `app-task`**。
->
-> ⚠ 上游那一族另有两口是**写**、且**都零实拍**：`task/click`（写账）与上传三枪
-> （`file/create` → `PUT` → `file/complete`，真往用户网盘写 `asign-*.png`），
-> 收尾那一枪 `batchTrash` 同样零实拍 ⇒ 本仓一个都不发。
->
-> **失败策略**：某组挂了只**登记**、继续拉（照旧实现）；⚠ 但**十六次全挂 ⇒ 报错** ——
-> 旧 TS 那种"全失败仍回一张空表"会让"全没读到"看起来像"这个号没任务"。
-
-**`play-ai-special`（2026-09-28 落地）—— 只做只读那一半，另三口各自卡在不同地方**：
-
-| 口 | 状态 |
+| 你想干什么 | 看哪 |
 |---|---|
-| ① `GET newyear/user/info`（次数读数） | ✅ 实拍逐字，`0 → 1` 两档都有 |
-| ② `GET newyear/task/list`（任务表） | ✅ 实拍逐字，两次同一 URL（差别只在 `id:1` 那条的响应） |
-| ③ `POST task/step/click`（**写**） | ⛔ 旧实现把 `visitlog/journaling` 埋点当**门槛**，而那两条埋点**零实拍** |
-| ④ `POST blindbox/lottery`（**写**） | ⛔ 判据 `totalLotteryCount` **语义未验证**（那句 `1` 出现在**抽奖之前**），且不可回滚 |
-| ⑤ `POST aiRecognize`（**写网盘**） | ⛔ `uploadToCloud` 实拍恒 `true` ⇒ 真往用户网盘写图，清理链今天冻结 |
+| 拿到 Release 包，想跑起来 | [`docs/usage.md`](docs/usage.md) |
+| 改代码：分层、约定、门禁 | [`docs/conventions.md`](docs/conventions.md) · [`docs/architecture.md`](docs/architecture.md) |
+| 每条业务做到哪一步、证据等级 | [`docs/business-matrix.md`](docs/business-matrix.md) |
+| 单条任务的接口规格与 `path:line` | [`docs/task-inventory.md`](docs/task-inventory.md) |
+| App 任务（25 条）逐条实现/验收状态 | [`docs/app-task-status.md`](docs/app-task-status.md) |
+| 前端框架怎么用 | [`docs/web/lite-framework.md`](docs/web/lite-framework.md) |
+| 全库审查结论（77 条） | [`docs/review/review-261004.md`](docs/review/review-261004.md) |
+| 用户下达的每件事 → 落点 → 状态 | [`docs/task-log.md`](docs/task-log.md) |
 
-> ⚠ 这一族的请求头**比仓库其余 H5 接口少两个**（**没有** `appversion`、`activityid`、
-> `deviceid`）—— 同归档里活动门户那四条**都带**这三个头 ⇒ 是这一族真的没发。
-> 所以它**不复用** `h5()`。顺手复用会发出一条**夹具里不存在的请求**，而上游对多余头的反应**没有样本**。
->
-> ⚠ 这一页的票走**公共来源**（特有换票链有出处但**零实拍**）；**Referer 不借**，
-> 用活动落地页那一串（B 档）。
+---
 
-**`fun-ai` / `notice`（2026-09-28 落地）的证据边界**：
+## 能力
 
-| 任务 | 实拍的 | 零样本 / 未验证的 |
+### 任务（20 条，现算：`mcloud tasks`）
+
+| 分组 | 任务 |
+|---|---|
+| 签到族（8） | `sign` 每日签到 · `receive` 领取AI豆 · `multiple` 签到翻倍 · `backup-gift` 备份好礼 · `revival` 复活奖励 · `prizes` 待领取奖品 · `cloud-snapshot` AI豆快照 · `task-list` 任务清单 |
+| 直播（2） | `live-room` 直播口令小红花（听弹幕 / 抓小红书口令 → 换小红花）· `red-flower` 领取小红花 |
+| 兑换（1） | `exchange` 兑换奖品 —— **真扣 AI豆**，下单**不可逆**（界面上二次确认） |
+| App 任务（3） | `app-task` 做 App 任务（上传 / 分享 / 固定入口）· `app-task-matrix` 只看矩阵（**纯只读**）· `task-expansion` 任务拓展（自己写一个文件、链尾再删掉） |
+| 其他（6） | `cloud-phone-redpack` 红包派对 · `ai-avatar` AI 头像 · `msg-push` 消息推送 · `fun-ai` 趣玩AI抽奖 · `notice` 开启通知领AI豆 · `play-ai-special` 拍拍盘点（**纯只读**） |
+
+> ⚠ **纯只读**（只拉读数、不改上游账本）：`task-list`、`prizes`、`cloud-snapshot`、
+> `app-task-matrix`、`play-ai-special`。其余任务都会在上游留下动作 —— 注意
+> **方法是不是 GET 不代表有没有副作用**（`receive` 就是 GET，但会记账）。
+> `exchange` 花的是真 AI豆，是全仓唯一"发出去就收不回来"的一枪（上游没有幂等键）。
+> 每条任务的实拍/推断依据见 [`docs/business-matrix.md`](docs/business-matrix.md)。
+
+### WebUI（10 页）
+
+总览 · 账号 · 任务 · 兑换 · 直播 · 定时 · 编排 · 历史 · 日志 · 设置
+（页面清单的唯一来源是 [`web/src/ui/nav.ts`](web/src/ui/nav.ts)；路由是**干净路径** `/{page}`，
+不带 `#` 号 —— 刷新与深链接都由服务端的 SPA 回落兜住。）
+
+- **登录闸**：首次打开走初始化向导（建管理员 + 口令），之后用会话 cookie。
+  三态：**未初始化 ⇒ 503**、**未登录 ⇒ 401**、已登录放行
+  （[`crates/mcloud-server/src/routes/auth.rs`](crates/mcloud-server/src/routes/auth.rs)）。
+- **账号登录**（与上面的管理员登录是两件事）：扫码 / 短信 / App 短信 / 账号密码 / 设备号轮换。
+- **实时日志**：跑任务时走 SSE（`GET /api/runs/{id}/events`）；**跑完还能回看**完整日志
+  （`GET /api/runs/{id}/logs?after=<seq>`）。
+- **日志页**：整个进程的环形缓冲（含调度器与上游 http 那一层），`GET /api/logs` ——
+  与"某次运行的日志"是两条不同的路。
+- **定时**：cron + 时区 + 账号范围，也能直接触发一条编排。
+- **编排**：多个任务串成一条链；**编排本身不绑账号**，账号由触发方（手动 / 定时）给。
+- **通知**：渠道配在**每个云盘账号**上（pushplus / Server酱 / 企业微信 / 企业微信 Bot /
+  Telegram Bot / Bark / 回逍 / 钉钉 / 自定义 POST / email）。email 本版**未实现**（会如实记）；
+  **没配 = 一个包都不发**，不做进程级兜底（多用户下那是串号）。
+
+## 快速开始（从源码）
+
+### 0. 依赖
+
+- Rust ≥ **1.88**（`Cargo.toml` 的 `rust-version`；CI 与本地日常跑 **1.91.1**）
+- Node（只用来构建前端；CI 用 `lts/*`）+ npm（`web/package-lock.json` 已入库）
+
+### 1. 构建 —— ⚠ 顺序有依赖
+
+```bash
+cd web && npm ci && npm run build && cd ..
+cargo build --release --bin mcloud
+```
+
+`crates/mcloud-server/src/static_files.rs` 用 `rust-embed` 在**编译期**把 `web/dist`
+读进二进制，而 `cargo build` **不跟踪** `web/dist` 的变化。顺序反了会内嵌旧产物
+（表现：页面白屏 / chunk 404），而 `cargo build` 照样打 "Finished" 不报错。
+
+### 2. 起服务
+
+```bash
+MCLOUD_ADDR=127.0.0.1:3000 MCLOUD_DATA_DIR=./data ./target/release/mcloud
+```
+
+打开 `http://127.0.0.1:3000` → 初始化管理员 → 「账号」页登录云盘账号 → 「任务」页跑任务。
+
+| 环境变量 | 默认 | 说明 |
 |---|---|---|
-| `fun-ai` | 两条请求（`page/getmodule` 裸 GET + `page/lottery` body 只有 `moduleId`）、三个计数与活动期形态、**中奖与没中奖两档**响应 | ⚠ 三个计数**跨天清不清零**；⚠ 转盘与刮刮乐（`timed/lottery`）**互不改写账本**但只验过转盘这一口 |
-| `notice` | 四条请求（`getTaskInfo` ×2 → `reward`，另一场是 `receiveTask?taskId=1021`） | ⚠⚠ **判据映射是猜的**：`cloudStatus` 哪个值是"未领"**没有正面样本**；`noticeNeedsManual` **恒 false**（那一档今天**不可达**）；实拍里**没有** `taskListV2` |
+| `MCLOUD_ADDR` | `127.0.0.1:3000` | 必须是**完整的 `ip:port`** —— 只写 `3000` 会在解析层直接失败（`invalid socket address`），连监听都不会试 |
+| `MCLOUD_DATA_DIR` | `data`（**相对当前目录**） | 所有落盘数据都在这儿；换目录 = 换一份库 |
+| `RUST_LOG` | 服务 `info,mcloud=debug`；CLI `info` | 标准 `tracing` 过滤；`RUST_LOG=mcloud=trace` 能看上游请求/应答正文（**已脱敏**） |
 
-> ⚠ `fun-ai` 的"每天抽一次"是**本工具**的取向（`FUNAI_DAILY_DRAW_LIMIT = 1`），
-> **不是**上游规则 —— 上游那条"每日最多 5 次"说的是**做任务能挣到几次**，不是能抽几次。
-> 这是刻意比上游可能允许的更少：不拿写请求去试探额度。
+### 3. CLI（同一个二进制）
 
-**`msg-push`（2026-09-28 落地）的证据分两半 —— 别混着读**：
+```bash
+./target/release/mcloud tasks                                # 列出可用任务
+./target/release/mcloud run sign <账号-id>                    # 跑一次；账号 id 见 WebUI「账号」页
+./target/release/mcloud run live-room <账号-id> --body '{"codes":"口令甲 口令乙","listenSeconds":45}'
+./target/release/mcloud pending                              # 本进程里还没清理的网盘产物
+./target/release/mcloud login qr|sms|app|password|device     # 登录云盘账号
+./target/release/mcloud cron <定时-id>                        # 跑一条已配置的定时（给系统 crontab 调用）
+./target/release/mcloud pipeline run <编排-id>
+./target/release/mcloud auth refresh --all
+```
 
-| 那一半 | 状态 |
+⚠ `mcloud` **不带参数是"起服务"，不是"打印用法"**（托管那条命令行就是不带参数的）；
+随手指一个未知子命令会打出用法文本并 `exit 2`。
+定时与编排的**创建**不在命令行：用 WebUI（或改 `data/` 下的配置）。
+
+## 开发
+
+```bash
+# 开发期：后端起在 38123，vite dev 把 /api 代理过去（生产形态本来就是同源托管）
+MCLOUD_ADDR=127.0.0.1:38123 cargo run -p mcloud-server
+cd web && npm ci && npm run dev
+
+cd web && npm run typecheck   # tsgo --noEmit（类型检查只有这一套，不装 tsc）
+cd web && npm run build       # 产物 web/dist（含 .gz 边车）
+```
+
+- **前端技术栈**：`web/lite/` 是自研框架（TSX 在构建期被折成"模板串 + 每个动态位一条
+  effect"，运行时只留用到的原语）；CSS 是 Tailwind 4 的 CSS-first 配置，令牌层在
+  [`web/src/app.css`](web/src/app.css) 的 `@theme`（**没注册的 token ⇒ 对应 utility 静默不生成**）；
+  daisyUI 已移除。设计/踩坑全在 [`docs/web/lite-framework.md`](docs/web/lite-framework.md)。
+- **多写入线**：`target/` 上的锁是串行的 —— 两条线同时编译只会排队。
+  约定每线一个 `CARGO_TARGET_DIR="$PWD/target/lines/<线名>"`（详见 [`AGENTS.md`](AGENTS.md)）。
+- **沙箱里 `~/.cargo` 不可写**时：`export CARGO_HOME="$PWD/.cargo-home"`（仓库已忽略该目录）。
+- **macOS 自托管**（本机就是这条路，踩过的坑都在 [`AGENTS.md`](AGENTS.md)）：
+  - 工作区在外置盘 ⇒ TCC 会弹「想访问可移除宗卷」；`scripts/run-local.sh` 把二进制与数据都放到内置盘跑；
+  - 未签名的二进制按**内容哈希**认身份，每次重编都要重新授权 ⇒
+    `scripts/dev-reload.sh`（先停托管 → 编译 → **固定身份签名** → 起）与 `scripts/sign-local.sh`。
+    ⚠ 别 `kill` 托管进程、也别另起一个占 3000 的实例（会触发 KeepAlive 重启循环）。
+
+## 门禁
+
+```bash
+scripts/gates-rust.sh --full        # fmt --check + clippy -D warnings + test --workspace
+node scripts/gates-web.mjs          # = --commit：类型 + 构建 + 编译期负例 + demo/bench + 真页面交互
+node scripts/gates-web.mjs --push   # 再加 320/375 窄屏、login/setup 两个认证态、前端泄漏量测
+scripts/install-git-hooks.sh        # 装钩子：pre-commit 跑提交档、pre-push 跑推送档
+```
+
+- 两档的分界**不是"重要不重要"，而是"贵不贵"**：提交是高频动作，等两分钟就会有人
+  `--no-verify`；泄漏量测那种"不看就发现不了"的挪到推送档。
+- 跳过一律 `--no-verify`，**跳了就是没验证过**；没有浏览器时门禁会明说
+  `skipped(无浏览器)` —— **跳过 ≠ 通过**。
+- CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）只在 **PR 与手动触发**时跑
+  （Actions 分钟数要花钱）；直接 push 到 `main` 没有兜底，所以本地交付前自己跑齐。
+
+## 发布
+
+打 `v*` tag ⇒ [`.github/workflows/release.yml`](.github/workflows/release.yml) 出四个平台各**一种**压缩包
+（unix `tar.gz` / Windows `zip`，各附 `.sha256`），包内**只有 `mcloud` 一个文件**：
+
+| 目标 | 备注 |
 |---|---|
-| `task/status`（URL / 方法 / 六个字段名） | ✅ 实拍逐字（2026-09-25 进页抓包） |
-| `task/list`（形状） | ✅ 实拍逐字，但**没接进任务链**（`obtain` 之后列表变不变零样本） |
-| 这一页**自己的建会话参数** | ✅ 实拍到了（`msgpushon` / `1062`），但**没有实现** ⇒ 仍走公共来源 |
-| **`task/obtain`（那一枪写请求）** | ⚠ **整条零样本**：实拍那天 `secondTaskStatus=1`，页面上没有领取入口 |
-| **"什么值该做什么"那层判据** | ⚠ **仍是旧项目口径**，实拍一条都没命中过 ⇒ 判据未被上游证实 |
+| `x86_64-unknown-linux-gnu` / `aarch64-unknown-linux-gnu` | arm64 走 `cross` + `vendored` OpenSSL（静态链） |
+| `x86_64-pc-windows-msvc` | |
+| `aarch64-apple-darwin` | macOS 不跑 UPX（会破坏签名） |
 
-> 所以：`msg-push` 的**读**是实证的，**写**是"原项目实现、零实拍"。
-> 别把"测试全绿"读成"这一枪真机跑通过" —— 它的方法（GET/POST）都还没定，
-> 常量在 `mcloud_upstream::app_msg_push::MSG_PUSH_OBTAIN_IS_POST`，A/B 只改那一处。
+冒烟是**真起服务** + 轮询 `/api/health`，不是跑 `--help`。
+`workflow_dispatch` 只出 artifact、不发 Release（方便先验一遍）。
 
-**直播小红花（2026-09-26 落地）**的诚实边界 —— 读代码前先读这段：
+## 数据与安全
 
-| 层 | 状态 |
-|---|---|
-| 口令抽取 / MSync 编解码 / `/cmlive` / 六步链 | ✅ 黄金向量对拍通过（字节级 / 逐字） |
-| 开播门（换 SSO → 换直播侧 JWT → 房间列表） | ✅ **实证**（抓包文档 §5.3 走通过）+ 真机确认会打上游 |
-| **自动获取**：不填 `codes` ⇒ 开门 → 听弹幕获取口令 → 领取小红花 | ✅ 编排端到端单测（假 HTTP + 假收集器） |
-| WebSocket 连接层 | ✅ 离线假服务端测试通过（`duplex` + 真 TCP 各一条） |
-| 注册、CLI、HTTP API、WebUI | ✅ 端到端真机跑通 |
+```
+data/                          ← MCLOUD_DATA_DIR（默认 ./data，不入库）
+  accounts.json                云盘账号与凭据（**只存本地**）
+  smid.json / state.json       设备指纹与会话附带状态
+  users.json / sessions.json   管理员与浏览器会话（口令是 argon2id PHC 串）
+  history.json                 运行历史（含每次运行的日志尾部）
+  schedules.json pipelines.json task-config.json exchange-subscriptions.json
+  kouling-pool.json            直播口令池
+  logs/                        每次运行一份日志 JSON（`<run_id>.json`）
+  *.bak                        覆盖前留的上一份（只从**非空**的旧文件留，不自动恢复）
+```
 
-⚠ **没有真实开播窗口，以下都没跑过**（不是"应该能"，是**没验证**）：
+- 凭证与口令**只落本地磁盘**；日志与通知正文过一遍脱敏
+  （`mcloud_core::event::redact`：键名路标 + JWT/`Bearer` 裸形状兜底）。
+- 会话 cookie 名 `mcloud_session`；管理员口令走 argon2id。
+- 上游应答里带 HTML 之类的脏数据会在进记录前清掉（例如 App 任务名里的 `<span>`）。
 
-- 真实 `wss://videoim.cmcc-cs.cn:20102` **一次都没连过**（未开播时 WS 结构性不存在）
-  ⇒ **「自动收集口令」这条链的最后一环（真弹幕）从未真机跑过**；
-  上游那一段用假收集器替换，验的是**编排**（开门 → 获取 → 领取 → 汇总），不是"对面认不认我们"
-- 帧顺序 / `command` 取值 / UNREAD 是否必需 / `h` 是否要回 `h`
-  —— 这四条证据等级是**「原项目实现，零实拍」**，
-  测试只能证明"我们按那个假设实现了"，**证明不了假设成立**
-- `200112`（已兑换）语义仍**零实拍**；`draw` 的重放边界**待验证**
-- TLS 只验到"依赖同源"，未验真实证书链
-
-> 开播门本身**有实证**（`../mcloud/docs/capture/app-live-redflower-samples.txt` §5.3：
-> `querySpecTokenV2(017027)` → `cmpassLoginByCmToken` ⇒ JWT，三步都走通过，
-> 因为门第③步是 GET、不需要开播）。**别把"WS 没验过"误读成"门也没验过"。**
-
-上游接口大部分尚未接入真实抓包（见「路线图」）。
-
-## 目录
+## 目录结构
 
 ```
 crates/
   mcloud-core        领域类型 + IO trait（零 IO）
   mcloud-crypto      签名与加解密原语（纯 Rust，零 FFI）
   mcloud-upstream    上游接口封装（唯一用 reqwest 的层）
-  mcloud-engine      任务注册表 / 运行器 / 并发闸 / 事件
-  mcloud-tasks       各任务业务编排
+  mcloud-engine      任务注册表 / 运行器 / 调度器 / 编排 / 事件
+  mcloud-tasks       各任务的业务编排（20 条都在这里注册）
   mcloud-store       持久化（JSON + 原子写）
-  mcloud-app         组装层
-  mcloud-server      axum 路由 + SSE + CLI
-web/                 Vue Vapor + TSX + daisyUI
-scripts/             门禁脚本（gates-web.mjs）
-test/golden/         权威黄金向量（对拍用，从 mcloud 同步）
-docs/                设计文档
+  mcloud-app         组装层（把上面几层拼成一个 App）
+  mcloud-server      axum 路由 + SSE + 内嵌前端 + CLI（唯一二进制 `mcloud`）
+web/
+  lite/              自研前端框架（编译器 + 运行时 + 门禁夹具 + bench）
+  src/               页面与组件（pages/ · ui/ · api.ts · app.css）
+scripts/             gates-rust.sh · gates-web.mjs · dev-reload.sh · sign-local.sh · run-local.sh · hooks/
+test/golden/         黄金向量（签名 / 口令哈希 / 认证 / 签到信封 / 直播），对拍是字节级
+docs/                设计、约定、审查、任务状态与台账
 ```
-
-> 本仓库只放**干净的实现代码**。抓包记录、逆向素材、客户端分析
-> 都在**同一个仓的 `go-legacy` 分支**（那份 Go 参考实现；`har/`、`test/golden/`、
-> `test/fixtures/`、`scripts/`），本仓库不复制这些内容。
-> 取阅：`git show go-legacy:<路径>`（该分支 HEAD 已删掉抓包素材，原文在 `go-legacy^`）；
-> 本机 `../mcloud/` 目录是它的检出。抓包**规范**另在第三个仓 `../mcloud-capture/`。
 
 依赖只能自上而下：`core ← crypto/upstream/store ← engine ← tasks ← app ← server`。
-`core` / `crypto` / `engine` / `tasks` **禁止**直接做 IO。
+`core` / `crypto` / `engine` / `tasks` **禁止**直接做 IO（见 [`docs/architecture.md`](docs/architecture.md) §2）。
 
-## 构建与运行
+## 边界与已知缺口（别把"测试全绿"读成"真机验过"）
 
-```bash
-# ⚠ 构建顺序有依赖：前端产物在**编译期**被 rust-embed 内嵌，
-#   所以改过前端必须先 build 前端、再编译后端，否则二进制里还是旧产物。
-cd web && npm install && npm run build && cd ..
-cargo build --release
-cargo test --workspace
+| 事 | 现状 |
+|---|---|
+| **直播弹幕那条链** | 主播开播那一小时才存在 WS。真机 `wss://…` **一次都没连过** ⇒「自动收集口令」最后一环（真弹幕）未验证（`data/history.json` 里的 `live-room` 至今没有一次"自动收集成功"的读数）；帧序 / `command` 取值 / UNREAD 等四条是**零实拍**。开播门本身**有实证** |
+| **`msg-push` 的写** | 读那半实拍逐字；`task/obtain` 整条**零样本**（方法都没定，由 `MSG_PUSH_OBTAIN_IS_POST` 一处 A/B） |
+| **`play-ai-special`** | 只做只读两口；写的那三口各自卡在"零实拍 / 语义未验证 / 会真写网盘" |
+| **`fun-ai` / `notice` 的判据** | 部分计数与档位语义是推断的，实拍没命中过 |
+| **`app-task`** | 上游 25 条里项目口径 **10/25**；判不出形状的条目**一枪都不发**（详见 [`docs/app-task-status.md`](docs/app-task-status.md)） |
+| **`exchange`** | 真扣 AI豆且不可逆：没有 `deviceId` ⇒ 一枪不发；`skipWait=false` 但没接上等待实现 ⇒ 如实挡下，绝不静默往下走 |
+| **文档自己** | 本 README 与 [`docs/usage.md`](docs/usage.md) 已按当前形态重写过一遍；其余文档的欠账见 [`docs/review/findings-261004-docs.md`](docs/review/findings-261004-docs.md)（19 条） |
 
-# 跑服务（默认 127.0.0.1:3000）
-MCLOUD_ADDR=127.0.0.1:38123 MCLOUD_DATA_DIR=./data cargo run -p mcloud-server
+> **端点必须来自抓包，不能凭印象写。** 本项目的签到端点最初凭印象写，实测回 **405**；
+> 换成实拍的路径才 200。这类错误的产物是"能编译、能过测试、但打到一个不存在的地址"。
 
-# 可选：通知渠道**配在每个账号上**（`AccountSettings::notify`），不是进程级开关 ——
-# 本仓是多用户服务，进程级配置会把一个用户的渠道套到别人的运行上（串号）。
-# 一个账号一份，渠道照 mcloud-sign：pushplus / serverChan / workWeixin / workWeixinBot /
-# tgBot / bark / twoIm / dingTalk / customPost（email 要 SMTP 依赖，暂未实现、会如实记「未实现」），
-# 外加 title / onlyError / minLevel 三个旋钮。没配 = 一个包都不发；投递失败只记日志，不影响运行。
-
-# CLI（收敛后：tasks / run / cron / pipeline / auth / login）
-cargo run -p mcloud-server --bin mcloud-cli -- tasks
-cargo run -p mcloud-server --bin mcloud-cli -- run sign <account-id>   # 账号 id 见 WebUI「账号」页
-cargo run -p mcloud-server --bin mcloud-cli -- cron <schedule-id>     # 供外部触发，CLI 自身不常驻
-cargo run -p mcloud-server --bin mcloud-cli -- auth refresh --all
-cargo run -p mcloud-server --bin mcloud-cli -- login app <手机号>      # App 端验证码登录（另见 login sms）
-
-# 前端
-cd web && npm install && npm run dev     # 开发（代理到 38123）
-cd web && npm run build                  # 产物在 web/dist
-```
-
-> `CARGO_HOME` 说明：若 `~/.cargo` 不可写（沙箱环境），设置
-> `export CARGO_HOME="$PWD/.cargo-home"` 即可，仓库已忽略该目录。
-
-## HTTP 接口
-
-```
-GET  /api/version
-GET  /api/health
-GET  /api/capabilities          任务清单
-GET  /api/accounts              云盘账号列表（**不含凭据**）
-POST /api/accounts              用一条凭据建账号（同号已存在则只换凭据）
-PATCH /api/accounts/{id}        改昵称 / 设备号 / 凭据（部分更新）
-GET  /api/runs                  最近运行
-POST /api/runs                  启动运行 {task, account, body}
-GET  /api/runs/{id}             单次运行详情
-GET  /api/runs/{id}/events      ★ SSE 事件流
-GET  /api/beans/today           今日AI豆（**按账号**汇总，不合计）
-GET  /api/beans/records         某个账号的AI豆流水明细（?account=<id>&days=<n>）
-```
-
-> 完整的路由表（含登录、设置、兑换）在 `docs/architecture.md`「HTTP 接口」一节。
-
-SSE 事件示例：
-
-```
-event: started
-data: {"type":"started","run_id":1,"task":"sign","account":"138...","at_ms":...}
-
-event: progress
-data: {"type":"progress","run_id":1,"step":1,"total":2,"label":"查询签到状态"}
-
-event: finished
-data: {"type":"finished","run_id":1,"outcome":{"status":"success","summary":"..."},"duration_ms":159}
-```
-
-## 密码学
+## 密码学（实现者向）
 
 业务签名是 **MD5 + 固定盐**：
 
 ```
 data = salt + id + timestamp + nonce + other + salt
-sign = MD5(data)          // 小写 hex
+sign = MD5(data)                      // 小写 hex
 salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 ```
 
 请求头：`x-request-id` / `x-timestamp` / `x-nonce` / `x-signature`。
 
-全部是标准算法，**纯 Rust 实现，无 FFI、无 native 依赖**。
-算法的来源与推导记录在上游 `mcloud` 仓库，本仓库只承载实现。
-
-### AES 的两套语义（易踩坑）
-
-原本并存两种行为，**不可混用**：
+AES 有两套语义，**不可混用**：
 
 | 场景 | 密钥处理 | 实际算法 |
 |---|---|---|
@@ -254,38 +248,9 @@ salt = { 1: "seedMdYYLIZfbCxg", 2: "sekaMdYYLIZfbCfm" }
 | 刷新令牌（动态 IV） | 用原始密钥 | 24 字节密钥 → **AES-192**，`base64(IV‖CT)` |
 
 对应 API：`aes_encrypt_compat()` 与 `encrypt_with_dynamic_iv()`。
-
-## 测试
-
-- `cargo test --workspace` —— 全量门。⚠ 本机**不能**跑它：它会重链接 `target/debug/mcloud-server`，把 launchd 正在跑的那个进程判成代码签名失效而 SIGKILL（见 AGENTS.md）。本机交付时改跑「分 crate 的 `cargo test -p …` + `cargo clippy --workspace --all-targets -- -D warnings`」，并在交付说明里写明哪条没跑。
-- `cargo clippy --workspace --all-targets -- -D warnings` —— 0 告警
-- 黄金向量对拍：`test/golden/crypto-vectors.json`（签名、MD5、SHA256、两种 AES 语义）
-  + `test/golden/app-signin-vectors.json`（签到族实拍信封与常量）
-- 对拍是**字节级**的；不一致就是 bug，不允许改期望值来变绿。
-
-## 路线图
-
-| 阶段 | 内容 | 状态 |
-|---|---|---|
-| P0 | 设计定稿 + 分层脚手架 | ✅ |
-| P1 | 密码学 + 黄金向量对拍 | ✅ |
-| P2 | axum 路由 + SSE 事件流 | ✅ |
-| P3 | Vue Vapor WebUI（主题 + 门禁） | ✅ |
-| P4 | `rust-embed` 单二进制 / 同源托管 | ✅ |
-| P5 | **通用存储 + 定时调度 + 任务编排 + 日志收集 + 任务中止** | ✅ |
-| P6 | **H5 会话层（JWT）+ 签到端点校正** | ✅ |
-| P7 | **WebUI 登录闸 + 认证闸/登出 + CLI 收敛（6 命令）** | ✅ |
-| P8 | **账号登录（扫码/短信）+ 账号页 + 定时/编排 CRUD 页** | ✅ |
-| P9a | **签到族 8 条**（`sign` / `receive` / `multiple` / `backup-gift` / `revival` / `prizes` / `cloud-snapshot` / `task-list`） | ✅ |
-| P9b | **P2 只读查询那一档全部落完**：`exchange` + `msg-push` + `fun-ai` + `notice` | 已落 4 条 |
-| P9c | 其余任务增量接入（`cloud-phone-redpack` / `ai-avatar`）+ 推送渠道 | ✅ **整条落完**：`cloud-phone-redpack`（协议 47 + 任务 15）、`ai-avatar`（协议 31 + 任务 21，默认**关**；`upload` 已由 `request_raw` 接通，仅会话主机的 raw 通路按设计报错）、推送渠道（**每账号**多渠道路：10 个渠道 + `title`/`onlyError`/`minLevel`，照 `mcloud-sign`；没配即零行为）（`app-task` 的写侧已落 106 / 522 / beiyong1 名字门三档玩法）|
-
-> **端点必须来自抓包，不能凭印象写。** 本项目的签到端点最初是
-> `/ycloud/api/sign/query`（凭印象），实测回 **405**；换成实拍的
-> `/ycloud/signin/page/infoV3` 后回 **200**。这类错误的产物是
-> "能编译、能过测试、但打到一个不存在的地址"，比不写更糟。
+黄金向量在 [`test/golden/`](test/golden/)，对拍不一致就是 bug，**不许改期望值来变绿**。
 
 ## 注意
 
 个人账号自用。不要用于批量注册、刷量或商业分发。
-凭证只存本地，日志已做脱敏（`mcloud_core::event::redact`）。
+凭证只存本地，日志与推送正文已做脱敏。

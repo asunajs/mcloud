@@ -20,8 +20,10 @@
 > 本仓 `main` = Rust 实现；**那份 Go 实现现在是同一个仓的 `go-legacy` 分支**，
 > 不是"另一个仓库的上游"。`go-legacy` 已经把抓包素材与通路脚本删掉（`docs/capture/`、
 > `docs/upstream/`、四篇规范、八个脚本，共 39 个文件），素材没消失 —— 在删除前的那一个提交里：
-> `git show go-legacy^:docs/capture/<文件>`。本机 `../mcloud/` 目录仍是 Go 侧的检出，
-> 所以文档里那些 `../mcloud/…` 相对路径照旧可解析。
+> `git show go-legacy^:docs/capture/<文件>`。⚠ **本机那份 Go 侧检出是 `../mcloud-back/`**
+> （2026-10-04 查实：`../mcloud/` 是**本仓自己**的一份同 HEAD 副本，不是 Go ✗）⇒
+> 全库 `../mcloud-back/…` 那些相对路径才解析得到（`docs/business-feature-inventory.md`、
+> `docs/capture/*.txt`、`docs/pending-decisions.md`、`internal/app/live_room*.go`、`har/` 都在那边 ✓）。
 > 抓包规范与协议文档的家是**第三个仓** `mcloud-capture`（本机 `../mcloud-capture/`）。
 >
 > 三处**一次性副作用**（不是 bug，别当回归去查）：
@@ -326,7 +328,7 @@ Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过�
 - macOS 没有 `timeout` 命令；SSH 用 `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=20"`
 - ⚠ **编译/检查为什么慢、怎么跑才快 —— 实测归因见 `docs/build-perf.md`**（2026-10-01）。
   三条最省事的：① 日常自检用 **`cargo check -p <crate>`**，别动不动 `--workspace --all-targets`
-  （后者要把 94 个含 `#[cfg(test)]` 的文件**再编一份 test 版** + 链接 8 个集成测试目标）；
+  （后者要把含 `#[cfg(test)]` 的文件**再编一份 test 版**（别再背数，现算：`grep -rl '#\[cfg(test)\]' crates | wc -l`）+ 链接 8 个集成测试目标）；
   ② **起编译前 `pgrep -fl 'cargo check'`** 看一眼有没有别的写入线在跑 —— cargo 对 `target/`
   上独占锁，硬抢两边都慢；③ `mcloud-core` / `mcloud-tasks` / `mcloud-engine` 是**全仓下游**，
   这类改动**攒成一批再编**（每改一行就编 = 全仓重编一次）。

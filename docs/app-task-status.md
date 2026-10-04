@@ -22,13 +22,15 @@
 
 先过门、再判形状；顺序反了不改结果，但会把"不该动的"算进计划里 ✗。
 
-| # | 关 | 判据 | 落点（`crates/mcloud-tasks/src/app_task.rs`） | 它决定什么 |
+> ⚠ **落点这一列刻意只给符号名**（2026-10-04 改）：旧版钉的是 `:行号`，而 `app_task.rs` 一直在长 ⇒ 整列系统性指错地方 ✗。要行号就现算，例如 `grep -n 'pub fn step_for' crates/mcloud-tasks/src/app_task.rs`。
+
+| # | 关 | 判据 | 落点（`crates/mcloud-tasks/src/app_task.rs`，**给符号名**） | 它决定什么 |
 |---|---|---|---|---|
-| 1 | 上游已记完成 | `state == "FINISH"` | `:290` | 上游说这条做完了 ⇒ 不再动它 |
-| 2 | 黑名单 | `SKIP_TASK_LIST`（11 个 id，逐字照抄参考实现） | `:200` | 这些 id 的 `task/click` **有副作用或无意义** ⇒ 一律不打 |
-| 3 | 本账号 `skipTasks` | `AccountSettings::skip_tasks` | `:222` | 每账号自己的跳过名单 |
-| 4 | 月门 | `market=sign_in_3` **且** `group=month` **且** 本月备份为 `false` **且** 今天 < 20 号 | `:409` | 没开备份时，20 号前不做 app 的月任务 |
-| 5 | 形状判定 | `step_for` 只认「上传 / 分享 / 固定入口」；**判不出 ⇒ 一枪不发** | `:251` | ⇒ **这条是 17 条未实现的直接原因**（见 §5-1） |
+| 1 | 上游已记完成 | `state == "FINISH"` | `should_click()` | 上游说这条做完了 ⇒ 不再动它 |
+| 2 | 黑名单 | `SKIP_TASK_LIST`（11 个 id，逐字照抄参考实现） | `SKIP_TASK_LIST` | 这些 id 的 `task/click` **有副作用或无意义** ⇒ 一律不打 |
+| 3 | 本账号 `skipTasks` | `AccountSettings::skip_tasks` | `is_configured_skip()` | 每账号自己的跳过名单 |
+| 4 | 月门 | `market=sign_in_3` **且** `group=month` **且** 本月备份为 `false` **且** 今天 < 20 号 | `month_gate_skips()` | 没开备份时，20 号前不做 app 的月任务 |
+| 5 | 形状判定 | `step_for` 只认「上传 / 分享 / 固定入口」；**判不出 ⇒ 一枪不发** | `step_for()` | ⇒ **这条是那 15 条未实现的直接原因**（见 §5-1；⚠ 早先写的 17 把 2 条**刻意不做**也算了进去 ✗） |
 
 ## 2. 主表（25 条，**项目口径**）
 
@@ -37,14 +39,14 @@
 
 | taskId | 名称 | 实现 | 落点（`app_task.rs`） | 自动验证 | 手动验收 |
 |---|---|---|---|---|---|
-| 106 | 手动上传一个文件 | ✅ 已实现：上传·单件 | `:148`（`upload_shape_for` → `UPLOAD_ONE`） | ✅ 单测 26 处；**真机闭环** ✓ —— 17:06:18 小号 `9f611bba8206ca0a` 跑出 `{taskId:106, clicked:true, uploaded:1, problems:[]}`（run 96 ✓），17:07:52 矩阵 `state=FINISH`（run 99 ✓，**这次 1.5 分钟就入账**，不像上次等了 76 分钟） | ☑ **已验收**（2026-10-04 用户实跑 ⇒ 上游认账 ✓） |
-| 113 | 使用PC客户端 | ✅ 已实现：上传·单件，但**按 PC 档发**（`channelSrc=10200153` ✓） | `:157`（`upload_shape_for` → `UPLOAD_ONE_PC`，`channel: CloudChannel::Pc` ✓）；渠道头 `app_cloud_upload::cloud_file_op_headers` `:261-266`（**2026-10-04 加**，见 §5-7） | ✅ 单测 2 处（形状✓）+ 运行级 1 条（**逐枚头断言** PC 档的 4 枚 + 断言安卓档那 2 枚**缺席** ✓，退回安卓档即红 ✓） | ☑ **已验收**（run 108，2026-10-04 20:07，测试号 `onlyTaskIds=113`：`clicked:true` ✓ `uploaded:1` ✓ `problems:[]` ✓ ⇒ run 109 矩阵 **`WAIT` → `FINISH`**、`currStep 0 → 3` ✓，**1 分钟就入账** ✓） |
-| 118 | 调查问卷 | ✅门 判定门（上游已记完成 ⇒ 不动） | `:290` | ⚠ 该 id 仅作"不在黑名单"的反例（`app_task/tests.rs:793`） | ☐ 无需人工动作 |
-| 120 | 30G流量0元领 | ⛔ 刻意不做（**与参考一致** ✓） | `:200` | ⚠ 仅黑名单字面量（`tests.rs:785`） | ☐ 无需人工动作 |
-| 409 | 从固定入口访问云朵中心 | ✅ 已实现：固定入口（埋点 → 停一拍 → 补一发打卡，key `task2`） | `:253` → `entry_do_task` `:866` | ✅ 单测 4 处；真机 `{clicked:true, problems:[]}` ✓ | ☐ 跑一次看两发打卡与埋点 |
+| 106 | 手动上传一个文件 | ✅ 已实现：上传·单件 | `UPLOAD_ONE` · `upload_shape_for()` | ✅ 单测 26 处；**真机闭环** ✓ —— 17:06:18 小号 `9f611bba8206ca0a` 跑出 `{taskId:106, clicked:true, uploaded:1, problems:[]}`（run 96 ✓），17:07:52 矩阵 `state=FINISH`（run 99 ✓，**这次 1.5 分钟就入账**，不像上次等了 76 分钟） | ☑ **已验收**（2026-10-04 用户实跑 ⇒ 上游认账 ✓） |
+| 113 | 使用PC客户端 | ✅ 已实现：上传·单件，但**按 PC 档发**（`channelSrc=10200153` ✓） | `UPLOAD_ONE_PC`（`upload_shape_for()`，`channel: CloudChannel::Pc` ✓）；渠道头 `app_cloud_upload::cloud_file_op_headers()`（**2026-10-04 加**，见 §5-7） | ✅ 单测 2 处（形状✓）+ 运行级 1 条（**逐枚头断言** PC 档的 4 枚 + 断言安卓档那 2 枚**缺席** ✓，退回安卓档即红 ✓） | ☑ **已验收**（run 108，2026-10-04 20:07，测试号 `onlyTaskIds=113`：`clicked:true` ✓ `uploaded:1` ✓ `problems:[]` ✓ ⇒ run 109 矩阵 **`WAIT` → `FINISH`**、`currStep 0 → 3` ✓，**1 分钟就入账** ✓） |
+| 118 | 调查问卷 | ✅门 判定门（上游已记完成 ⇒ 不动） | `should_click()`（判定门） | ⚠ 该 id 仅作"不在黑名单"的反例（`app_task/tests.rs:793`） | ☐ 无需人工动作 |
+| 120 | 30G流量0元领 | ⛔ 刻意不做（**与参考一致** ✓） | `SKIP_TASK_LIST` | ⚠ 仅黑名单字面量（`tests.rs:785`） | ☐ 无需人工动作 |
+| 409 | 从固定入口访问云朵中心 | ✅ 已实现：固定入口（埋点 → 停一拍 → 补一发打卡，key `task2`） | `Step::Entry` → `entry_do_task()` | ✅ 单测 4 处；真机 `{clicked:true, problems:[]}` ✓ | ☐ 跑一次看两发打卡与埋点 |
 | 431 | 去使用移动云手机 | ❌ 未实现（两边都无 runner；**参考会打卡，本仓连打卡都不发**） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
-| 434 | 分享文件领好礼（原始 name 带 HTML） | ✅ 已实现：分享本趟传上去的第一个文件、随即删外链；**手里空着就自己传一个** ✓；**成没成按"次数涨没涨"判**（`shareBefore`/`shareAfter`/`shareCounted`） | `:256` → `share_first_uploaded`；打卡门 `should_click` `:325-331`；判据 `settle_share_progress` + `share_progress_from_name`；**计划里排末尾**（`sort_by_key(task_id == 434)` ✓）（**2026-10-04 修**，见 §5-7） | ✅ 单测 18 处 + 运行级 **5 条**（打卡门正反 ✓ + 次数正反 ✓ + **顺序/补传** ✓；三条红测都验过 ✓） | ☑ **已验收**（run 104，2026-10-04 19:37，测试号 `onlyTaskIds=434`：`uploaded:1` ✓ `shared:true` ✓ `0/7 → 1/7` ✓ `shareCounted:true` ✓ `acted=1`、success、文件已收回 1/1 ✓） |
-| 522 | 当月上传文件满100个 | ✅ 已实现：上传·每趟 5 件、上限 100；**跑完报进度**（`progressBefore`/`progressAfter` + 日志一行 ✓） | `:149`（`ROUNDS_PER_RUN=5` / `STOP_AT_PROCESS=100`）；进度 `settle_upload`（**2026-10-04 加**，见 §5-7） | ✅ 单测 16 处 + 运行级 **2 条**（进度正常 ✓ / 差额说明 ✓，都断言了**日志行** ✓，撤掉即红 ✓） | ☑ **已验收**（run 105/106/107，2026-10-04 19:55-19:58：日志打出 `48/100 → 52/100`、`53/100 → 58/100`、`58/100 → 63/100` ✓；明细两格同步 ✓） |
+| 434 | 分享文件领好礼（原始 name 带 HTML） | ✅ 已实现：分享本趟传上去的第一个文件、随即删外链；**手里空着就自己传一个** ✓；**成没成按"次数涨没涨"判**（`shareBefore`/`shareAfter`/`shareCounted`） | `share_first_uploaded()`；打卡门 `should_click()`；判据 `settle_share_progress` + `share_progress_from_name`；**计划里排末尾**（`sort_by_key(task_id == 434)` ✓）（**2026-10-04 修**，见 §5-7） | ✅ 单测 18 处 + 运行级 **5 条**（打卡门正反 ✓ + 次数正反 ✓ + **顺序/补传** ✓；三条红测都验过 ✓） | ☑ **已验收**（run 104，2026-10-04 19:37，测试号 `onlyTaskIds=434`：`uploaded:1` ✓ `shared:true` ✓ `0/7 → 1/7` ✓ `shareCounted:true` ✓ `acted=1`、success、文件已收回 1/1 ✓） |
+| 522 | 当月上传文件满100个 | ✅ 已实现：上传·每趟 5 件、上限 100；**跑完报进度**（`progressBefore`/`progressAfter` + 日志一行 ✓） | `ROUNDS_PER_RUN` / `STOP_AT_PROCESS`；进度 `settle_upload()`（**2026-10-04 加**，见 §5-7） | ✅ 单测 16 处 + 运行级 **2 条**（进度正常 ✓ / 差额说明 ✓，都断言了**日志行** ✓，撤掉即红 ✓） | ☑ **已验收**（run 105/106/107，2026-10-04 19:55-19:58：日志打出 `48/100 → 52/100`、`53/100 → 58/100`、`58/100 → 63/100` ✓；明细两格同步 ✓） |
 | 547 | 加入一个知识库 | ❌ 未实现（同 431） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 | 548 | 开启备份领好礼 | ❌ 未实现（⚠ 它在 `time` 组，**不是**月门那条） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 | 550 | 开启云盘APP通知领好礼 | ❌ 未实现 | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
@@ -52,15 +54,15 @@
 | 604 | 去云盘图书馆阅读书籍 | ❌ 未实现 | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 | 607 | 下月签到领惊喜福利 | ❌ 未实现 | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 | 609 | 和AI助手对话 | ❌ 未实现（参考亦无 runner） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
-| 615 | 记录国庆节欢乐瞬间 | ✅ 已实现：`beiyong1` 的**按钮门** ⇒ 一次传 **10 张 `.jpg`**（`process` 已走的先扣掉 ✓） | `beiyong1_button_gate` `:157` → `UPLOAD_TEN` `:113`；形状四格 `rounds=10 / stop_at_process=10 / per_round_ms=300 / file_ext=".jpg"`；门读 `button_app_link`（`app_task_list_v2.rs:146`，**2026-10-04 加**，见 §5-7） | ✅ 单测 4 处（门 3 + 解析 1）+ 运行级 **2 条**（10 张 ✓ / 补差额 ✓；都断言了 `.jpg` 与**进度分母** ✓，撤门或撤"剩余量"即红 ✓） | ☑ **已验收**（run 110，2026-10-04 20:30，测试号 `onlyTaskIds=615`：`clicked:true` ✓ `uploaded:10` ✓ `problems:[]` ✓ `收回 10/10` ✓ ⇒ run 111 矩阵 **`WAIT` → `FINISH`**、已完成 3 → 4 ✓；**当场入账** ✓） |
+| 615 | 记录国庆节欢乐瞬间 | ✅ 已实现：`beiyong1` 的**按钮门** ⇒ 一次传 **10 张 `.jpg`**（`process` 已走的先扣掉 ✓） | `beiyong1_button_gate()` / `UPLOAD_TEN`；形状四格 `rounds=10 / stop_at_process=10 / per_round_ms=300 / file_ext=".jpg"`；门读 `button_app_link`（`app_task_list_v2.rs` 的 `button_app_link`，**2026-10-04 加**，见 §5-7） | ✅ 单测 4 处（门 3 + 解析 1）+ 运行级 **2 条**（10 张 ✓ / 补差额 ✓；都断言了 `.jpg` 与**进度分母** ✓，撤门或撤"剩余量"即红 ✓） | ☑ **已验收**（run 110，2026-10-04 20:30，测试号 `onlyTaskIds=615`：`clicked:true` ✓ `uploaded:10` ✓ `problems:[]` ✓ `收回 10/10` ✓ ⇒ run 111 矩阵 **`WAIT` → `FINISH`**、已完成 3 → 4 ✓；**当场入账** ✓） |
 | 617 | 体验智能消除 | ❌ 未实现 | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 | 618 | 体验AI相机 | ❌ 未实现 | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 | 1004 | 给好友发邮件 | ❌ 未实现（参考 `sendMailRunner`；本仓 **mail139 整族未实现**） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
-| 1005 | 从固定入口进入云朵中心 | ✅ 已实现：固定入口（打卡 key 用默认 `task`） | `:253` → `:866` | ✅ 单测 4 处；真机 `{clicked:true}` ✓ | ☐ 跑一次看明细 |
+| 1005 | 从固定入口进入云朵中心 | ✅ 已实现：固定入口（打卡 key 用默认 `task`） | `Step::Entry` → `entry_do_task()` | ✅ 单测 4 处；真机 `{clicked:true}` ✓ | ☐ 跑一次看明细 |
 | 1014 | 体验“PDF转换”功能 | ❌ 未实现（参考 `pdfConvertRunner`，mail139） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 | 1017 | 登录移动云盘云朵中心 | ❌ 未实现 | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 | 1020 | 完成一次邮件转存 | ❌ 未实现（参考 `backupMailRunner`，mail139） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
-| 1021 | 连续31天开启邮箱APP通知 | ⛔ 刻意不做 —— ⚠ **但与参考不一致**（参考里 `TASK_LIST[1021]` **先命中** ⇒ 会跑 `emailNotice`） | `:200` | ⚠ 仅黑名单字面量 | ☐ **要你拍板**：跟参考（实现）还是跟黑名单（不做） |
+| 1021 | 连续31天开启邮箱APP通知 | ⛔ 刻意不做 —— ⚠ **但与参考不一致**（参考里 `TASK_LIST[1021]` **先命中** ⇒ 会跑 `emailNotice`） | `SKIP_TASK_LIST` | ⚠ 仅黑名单字面量 | ☐ **要你拍板**：跟参考（实现）还是跟黑名单（不做） |
 | 1057 | 体验AI工作台 | ❌ 未实现（参考 `aiWorkbenchRunner`，mail139） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 
 ## 3. 自动验证（四层，各自能证明什么）
@@ -82,7 +84,7 @@
 2. 预期摘要「**App 任务做了 4 条（判出 4 条）**」（106 若已被上游记完成，会被第 1 道门挡掉 ⇒ 那个数是 4 不是 5；顺序按 id：409 → 434 → 522 → 1005）；
 3. 看运行明细：409 / 1005 `clicked:true`；522 `uploaded:5`（会真传 5 个文件，随后删掉）；434 `shared:true`。
 
-**B. 17 条未实现的**：本仓**一个请求都不发** ⇒ 跑完它们不会出现在这次运行的记录里 ✓。这是"如实不假装"，**不是 bug**；要它们动起来得先按 §5 逐条补实现。
+**B. 15 条未实现的**（另有 2 条是刻意不做，见 §0）：本仓**一个请求都不发** ⇒ 跑完它们不会出现在这次运行的记录里 ✓。这是"如实不假装"，**不是 bug**；要它们动起来得先按 §5 逐条补实现。
 
 **C. 两条纪律**
 
@@ -95,8 +97,8 @@
 2. **1021 的判定顺序**：参考先看 `TASK_LIST[task.id]`（命中 ⇒ 跑 `emailNotice`），黑名单只在"不是已知 runner"那一支才生效 ⇒ **同一条 id 两边结论相反** ⇒ 需要你拍板（§2 最后一行）。
 3. **mail139 整族未实现**：`grep -rln mail139 crates/` = **0 命中** ⇒ 1004 / 1014 / 1020 / 1021 的 runner 无从落。
 4. **113 差一个入参**：参考是 `refreshToken()` + `uploadRandomFile({channelSrc:"10200153"})`；本仓 upload **没有** `channelSrc` 这个入参（`grep -rn channelSrc crates/` 只命中 login 的头常量）。
-5. **615 的名字门**：`beiyong1_name_gate` 要「上传」+「图/照」（`:128`），活体名字是「记录国庆节欢乐瞬间」⇒ 不过门。
-6. **434 的原始 name 带 HTML**：上游给的是 `分享文件领好礼<span id='share_title'>0/7</span>` ⇒ 进记录前由 `clean_task_name`（`:106`）剥掉 ✓。
+5. **615 的名字门**：`beiyong1_name_gate` 要「上传」+「图/照」（符号 `beiyong1_name_gate()`），活体名字是「记录国庆节欢乐瞬间」⇒ 不过门。
+6. **434 的原始 name 带 HTML**：上游给的是 `分享文件领好礼<span id='share_title'>0/7</span>` ⇒ 进记录前由 `clean_task_name()`剥掉 ✓。
 7. ✅ **434 的"第 0 步"曾经被吞了 —— 已修（2026-10-04）**：`should_click` 原先把"434 只在第 22 步打卡"写成了**替代**规则（`if task_id == 434 { return step == 22 }`），而参考实现里那张 `specialMap` 是**叠加**在步号规则之上的 ——
    `if (specialMap[id] && currstep === specialMap[id]) return click; if (currstep === 0) return click;`
    ⇒ **`currstep` 为 0 / 缺格时：参考会打卡，本仓不会** ✗（同函数的注释自己写的正是"`currstep == 0` ⇒ **打**" ⇒ 代码与自己的注释相反 ✓）。
@@ -107,7 +109,7 @@
    * ⭐ 运行级 `the_share_task_clicks_when_upstream_omits_the_step` —— 断言**真的发出了一发 `task/click`**（`tests.rs` 新增 `task_json_without_step`）
    **红测**：把修复临时撤掉重跑 ⇒ 两条都红 ✓，运行级那句是 `434 该真打一发，实得 []`（旧写法**一枪不发**）✓；还原后 `cargo test -p mcloud-tasks --lib app_task` = **58 passed / 0 failed** ✓。
    ⚠ **代价（你点头过的）**：以后每条 434 会多一发**不可回滚**的 `task/click` —— 参考实现就是这么打的 ✓。
-   ⚠ **同处发现的第二件 —— 也已修（2026-10-04），但中途被我理解反过一次** ✗：434 那一档原先**只在分享成功**时计 `acted`（`:696-704`），另外两档（`Entry` `:688`、`Upload` `:728`）却是"打卡过就算" ⇒ 三处口径不一致。
+   ⚠ **同处发现的第二件 —— 也已修（2026-10-04），但中途被我理解反过一次** ✗：434 那一档原先**只在分享成功**时计 `acted`，另外两档（`Entry`、`Upload`）却是"打卡过就算" ⇒ 三处口径不一致。
    **我第一版的"改法"是错的** ✗：我读旧 TS `tasks.ts:29-36` 的 `handleTaskClick`（`if (await clickTaskWithStep(...)) { await taskRunner[id]?.(task); doingList.push(task.id) }`）得出"**打卡门一过就算**"，于是把 434 改成 `if step.clicked || step.shared { acted += 1 }`。用户当场指出：那句「分享文件成功（**分享成功不等于任务完成**）」的意思**不是**"打卡就算"，而是 **官方根本没有判断完成的接口，只能比次数** ✓。
    **真正的依据（用户指路后才看全）**：`app.ts:30` 在跑之前把 434 名字里的次数记进 `state.shareCount`（`getShareCount`，`tasks.ts:113-115`），`app.ts:56-60` 在**全部任务跑完之后 `getAllAppTaskList()` 整表再拉一遍**，`printShareProgress` 里 `if (count > state.shareCount) logger.success(...)` ⇒ **判据是 `after > before`** ✓；而 `results.ts:18-45` 的 `collectTaskResult` 对"处理过、state 仍非 `FINISH`"一律记 `failed` ⇒ 与"门过了 ≠ 完成"同向 ✓。
    **最终改法**：① 434 动手前把名字里的 `a/b` 解出来存 `share_before` ✓；② 跑完（含清理）后**整张表再拉一遍**（16 发只读 GET，同参考 ✓）解 `share_after` ✓；③ **只有 `after > before`** 才 `share_counted = true` 并 `acted += 1` ✓；没涨/读不出就**如实**写进 `problems`（`0/7 → 0/7 ⇒ 这一条不算记上` ✓）。解析按**结构**（`share_title` 段内找 `a/b`，退到整串第一个 `a/b`）而**不**照抄旧 TS 的固定前后缀 `replace`（文案一换就解出 `NaN` ⇒ 静默永不成功 ✗）。

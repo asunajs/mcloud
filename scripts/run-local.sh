@@ -69,7 +69,13 @@ mkdir -p "$RUN_DIR"
 # ⚠ 代理的 label 因机器而异（形如 `com.<用户名>.mcloud-webui`），这里**按关键词
 #   从 launchctl 里发现**它 —— 仓库里不写死任何人的用户名。要覆盖就设
 #   `MCLOUD_LAUNCHD_LABEL`。
-LAUNCHD_LABEL="${MCLOUD_LAUNCHD_LABEL:-$(launchctl list 2>/dev/null | awk '$3 ~ /mcloud-webui/ { print $3; exit }')}"
+#
+# ⚠ `|| true` 不能省（2026-10-04 review dc-14，与 `dev-reload.sh` 那处同源）：
+# `launchctl list` 在**被沙箱包住的 shell** 里 exit 1（空输出 ✓，DSH 下实测如此）。
+# 而 `set -e` 下 `VAR=$(失败的命令)` 这行赋值**本身**就会终止脚本 ✗ ⇒ 表现是
+# 「无任何输出、exit 1」—— 用户只看到没反应，而且它落在下面那道"绝不与托管
+# 抢 3000"的守卫**之前** ⇒ 守卫也没生效 ✗。
+LAUNCHD_LABEL="${MCLOUD_LAUNCHD_LABEL:-$(launchctl list 2>/dev/null | awk '$3 ~ /mcloud-webui/ { print $3; exit }' || true)}"
 if [[ -n "$LAUNCHD_LABEL" ]]; then
   cat >&2 <<EOF
 ✗ 检测到 launchd 代理 $LAUNCHD_LABEL 已加载。

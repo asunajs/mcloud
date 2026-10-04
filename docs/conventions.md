@@ -206,10 +206,12 @@ perf = "warn"
 ### 3.3 告警欠账：当前为零
 
 ```bash
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-**当前 0 告警**（含测试代码），因此可以直接当硬门禁。
+⚠ `-D warnings` **不能省**：`Cargo.toml` 的 `[workspace.lints.clippy]` 只是 `warn` 级
+（`all` / `style` / `suspicious` / `complexity` / `perf`）⇒ 少了这个 flag 就是"只打印、不失败" ✗。
+**当前 0 告警**（含测试代码），加上 flag 之后它才真的是一道硬门禁。
 
 > 已清理的历史欠账，留档说明「搭车清理」的用法：
 >
@@ -575,7 +577,7 @@ Conventional Commits，**中文正文**：
 
 ```bash
 cargo fmt --all -- --check          # 必须无输出
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace              # 必须 0 failed
 node scripts/gates-web.mjs --push   # 前端闸门（推送档 = 提交档 + 窄屏 + login/setup + 泄漏量测）
 ```
@@ -608,7 +610,10 @@ node scripts/gates-web.mjs --push   # 前端闸门（推送档 = 提交档 + 窄
 `⊘ 跳过（本机没有无头 Chrome，这条不算通过）` ——
 **跳过 ≠ 通过**，那部分前端行为没有被验证过，要么换台有浏览器的机器跑，要么显式说明。
 
-CI 已配置（`.github/workflows/ci.yml`），上面四条即为合并门禁，另加 MSRV 编译。
+CI 已配置（`.github/workflows/ci.yml`）：跑 fmt / clippy / test / MSRV **+ 前端三条**
+（typecheck / build / lite 编译期负例）✓。⚠ 上面第 4 条 `node scripts/gates-web.mjs --push`
+**不在 CI 里**（ubuntu runner 没有无头 Chrome）⇒ 它是**本地**推送前的门 ✓；
+别把"CI 绿"读成"推送档跑过" ✗。
 
 ### 9.3 任务新增清单
 
@@ -668,7 +673,7 @@ data/         运行时数据（不入库）
 **本仓库只放实现代码。** 抓包记录、逆向素材、客户端产物、一次性分析脚本
 一律留在**同一个仓的 `go-legacy` 分支**（那份 Go 参考实现），不复制进来：
 
-- `go-legacy:har/` —— 抓包归档（`har/` 在 `.gitignore` 里，只在本机 `../mcloud/har/` 存在，**没入库**）
+- `go-legacy:har/` —— 抓包归档（`har/` 在 `.gitignore` 里，只在本机 `../mcloud-back/har/` 存在，**没入库**）
 - `go-legacy:test/golden/` —— 黄金向量原始出处（本仓库按需同步副本）
 - `go-legacy:test/fixtures/` —— 脱敏夹具
 - `go-legacy:scripts/` —— asar 解包等分析脚本
@@ -738,9 +743,9 @@ data/         运行时数据（不入库）
 
 ```bash
 cargo fmt --all -- --check                          # 格式
-cargo clippy --workspace --all-targets              # Lint
+cargo clippy --workspace --all-targets -- -D warnings   # Lint（flag 不能省，见 §3.3）
 cargo test --workspace                              # 测试
-cargo run -p mcloud-server --bin mcloud-cli -- tasks  # 列出任务
+cargo run -p mcloud-server -- tasks                 # 列出任务（同一个二进制；无参数 = 起服务）
 ```
 
 改代码前问自己三句：

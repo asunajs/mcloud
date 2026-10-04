@@ -2,8 +2,10 @@ name: CI
 
 # 门禁与 docs/conventions.md §9.2 一一对应：
 #   fmt --check / clippy -D warnings / test，外加前端三条
-#   （typecheck / build / lite 编译期负例 —— 另两条"窄屏布局验收"与"真 DOM 验收"
-#    要无头 Chrome，ubuntu runner 上没有，本地跑；见 gates-web.mjs 的 ⊘ 跳过）。
+#   （typecheck / build / lite 编译期负例）。
+#   ⚠ `gates-web.mjs` 一共 **10 条**（提交档 6 + 推送档 4），上面这三条是其中
+#   **不需要浏览器**的那三条；其余 **7 条**要无头 Chrome，ubuntu runner 上没有 ⇒
+#   只有本地跑得动（CI 里那一步会印 `⊘ 跳过`，**跳过 ≠ 通过**）。见 web job 那段。
 # 这里的命令都在本地实测通过，CI 不是「上线后才发现是红的」。
 #
 # 为什么用 --locked：Cargo.lock 已入库，锁死依赖版本才能让 CI 结果可复现；
@@ -40,6 +42,11 @@ name: CI
 on:
   pull_request:
   workflow_dispatch:
+
+# 最小权限（与 release.yml 同口径）：CI 只读代码 + 上传/下载 artifact，
+# 不需要写权限。默认 token 权限随仓库设置变，所以这里显式钉住。
+permissions:
+  contents: read
 
 # 同一 PR 连推几次时只保留最后一次 —— Actions 按分钟计费，被取消的不白花
 concurrency:
@@ -94,10 +101,12 @@ jobs:
       # 它只要 Node、不要浏览器 ⇒ CI 跑得动；而"能 build"恰恰掩盖不了它 ——
       # 门坏了的表现是静默编错，本地一眼看不出来。
       #
-      # ⚠ 五条前端闸门里 CI 只覆盖这三条（typecheck / build / 负例）：
-      # **窄屏布局验收**与**真 DOM 验收**都要无头 Chrome，ubuntu runner 上没有，
-      # `gates-web.mjs` 在那儿会印 `⊘ 跳过` 并且**不算通过**
-      # ⇒ 那两条是**本地提交前**的门（约定 §9.2）。
+      # ⚠ 这里只跑 `gates-web.mjs` **10 条**里不需要浏览器的那 3 条
+      # （typecheck / build / 编译期负例）。其余 **7 条**都要无头 Chrome，
+      # ubuntu runner 上没有 ⇒ 门禁在那儿会印 `⊘ 跳过` 并且**不算通过**：
+      #   demo（lite 真 DOM 验收）· bench（编译产物行为 + 耗时护栏）· 交互 `ready`
+      #   · narrow-320/375 · 交互 `login` · 交互 `setup` · 前端泄漏量测
+      # ⇒ 这 7 条是**本地**的门：提交前 `--commit`，推送前 `--push`（约定 §9.2）。
       - name: lite 编译期负例
         run: node lite/regress/compiler.mjs
 

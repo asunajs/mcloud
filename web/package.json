@@ -3,7 +3,7 @@
   "version": "3.0.0-rc.2",
   "private": true,
   "type": "module",
-  "description": "mcloud WebUI —— 自研 lite 框架（无虚拟 DOM + 编译期优化）+ TSX + daisyUI",
+  "description": "mcloud WebUI —— 自研 lite 框架（无虚拟 DOM + 编译期优化）+ TSX + Tailwind 4（@theme 令牌层）",
   "scripts": {
     "dev": "vite",
     "build": "vite build && node scripts/gzip-sidecars.mjs",

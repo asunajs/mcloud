@@ -62,11 +62,16 @@ fi
 # ⚠⚠ 兜底：从下面那句 `bootout` 起，服务就是**停的** ✓ —— 这段窗口里任何一步失败
 # （编译报错、脚本被 Ctrl-C、被上层工具超时掐掉）都会把它**留在停机状态** ✗。
 # 2026-10-03 实测踩到过：两次中断 ⇒ WebUI 停了约 30 分钟 ✓（用户当场看出来 ✗）。
-# ⇒ 无论怎么退出，都把托管拉回来 ✓；先补一次签名，否则未签名的二进制会被 TCC
+# ⇒ 只要**真的停过**（见下面 `STOPPED`），无论怎么退出都把它拉回来 ✓；先补一次签名，否则未签名的二进制会被 TCC
 # 扣住、起而不监听 ✗（`|| true` 是必要的：异常退出时二进制可能正被写坏）。
+# ⚠ 只有**真的 bootout 过**才需要把服务拉回来（2026-10-04 review dc-17）：
+# 下面那条"别的 cargo 在跑"的早退路径也会 `exit 1`，但它**没停过服务** ⇒
+# 那时去签名 + `bootstrap` 是白做，而且可能正撞上另一条线在写
+# `target/debug/mcloud` ✗（`codesign` 与 `cargo` 抢同一个文件）。
+STOPPED=0
 restore_on_exit() {
   local code=$?
-  if [[ $code -ne 0 ]]; then
+  if [[ $code -ne 0 && "$STOPPED" == "1" ]]; then
     echo "── ⚠ 中途失败（exit $code）⇒ 兜底把托管拉回来（先补签名）" >&2
     "$REPO/scripts/sign-local.sh" >/dev/null 2>&1 || true
     launchctl bootstrap "gui/$UID_" "$PLIST" 2>/dev/null || true
@@ -96,6 +101,7 @@ fi
 
 # ⚠ `kickstart -k` **不重读 plist** ✗ —— 改过 plist 就必须 bootout+bootstrap（踩过）
 launchctl bootout "gui/$UID_/$LABEL" 2>/dev/null || true
+STOPPED=1   # 从这一行起服务是**停的** ⇒ 之后任何失败都由 trap 拉回来 ✓
 
 if [[ "${1:-}" != "--no-build" ]]; then
   echo "── ② 重建（cargo build -p mcloud-server --bin mcloud）"

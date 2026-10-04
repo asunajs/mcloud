@@ -23,6 +23,11 @@
 
 ```bash
 cd web && node scripts/daisyui-size-probe.mjs        # 实测 6.3 s（6 次全量构建 + 自检）
+
+> ⚠⚠ **这条今天跑不起来了**（2026-10-04 实测）：探针要读 `web/node_modules/daisyui/components`
+> 来枚举组件，而 daisyUI 依赖已随移除一起删掉（`grep -c daisyui web/package-lock.json` ⇒ **0**）
+> ⇒ 立刻 `ENOENT`。**这份文档是历史分析**（记当时怎么量、怎么选），
+> 量 CSS 体积请改用 `cd web && npm run build` 的末行读数 ✓。
 ```
 
 它把 `src/app.css` 读进内存 ⇒ 在内存里派生五个变体 ⇒ 每个变体写到**临时文件**

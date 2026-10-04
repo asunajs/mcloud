@@ -522,7 +522,7 @@ mcloud run sign 19900000000
 
 | 维度 | mcloud | 本项目 | 理由 |
 |---|---|---|---|
-| CLI 命令数 | 40+ | **只留无头也能跑的那几条**（条数现算：`grep -n '^        Some("' crates/mcloud-server/src/bin/cli.rs`） | 多数是开发期工具或 WebUI 的重复入口 |
+| CLI 命令数 | 40+ | **只留无头也能跑的那几条**（条数现算：`grep -n '^        Some("' crates/mcloud-server/src/cli/run.rs`） | 多数是开发期工具或 WebUI 的重复入口 |
 | 调度 | server 常驻 | server 常驻 + **CLI 单次触发** | 两种部署形态都要能用 |
 | 参数传递 | 大量 flag | **配置文件** | flag 会与 WebUI 表单漂移 |
 | 编排编辑 | WebUI 有完整编辑器 | **只读**（改文件） | 最复杂的一页，日常不改 |

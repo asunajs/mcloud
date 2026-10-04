@@ -1,7 +1,7 @@
 # 编译/检查为什么慢 —— 实测归因与操作口径
 
 > 测于 **2026-10-01 22:55~23:10**（Asia/Shanghai），工作区
-> `/Users/catlair/mobile/workspace/mcloud-gost`（外置宗卷 `/dev/disk5s1`，APFS），机器 **10 核 / 16 GB**。
+> `/Users/catlair/mobile/workspace/mcloud`（当天的目录名是 `mcloud-gost`，之后已改名；外置宗卷 `/dev/disk5s1`，APFS），机器 **10 核 / 16 GB**。
 >
 > ⚠ 全部是**点测**，而且当时工作区里还有**另一条写入线**正在跑
 > `cargo check --workspace --all-targets`、并同时在改 `crates/mcloud-core/src/kouling.rs`

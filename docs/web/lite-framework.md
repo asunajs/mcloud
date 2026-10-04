@@ -13,13 +13,13 @@
 | 运行时体积（不含只有 demo/bench 用的内部件） | 同上 | 同上 |
 | 主产物 JS（条数与字节） | **别背数**：产物按页拆，条数随页面增减 | `cd web && npm run build && ls web/dist/assets/*.js \| wc -l` |
 | └ 其中运行时占 | ⚠ **旧口径（"gzip 2.5 kB ≈ 全量 7.6%"）已失效** —— 那个数是拿"单 chunk"当分母除的；产物拆开后分母不再是一个文件 ⇒ **待重定，别照它判断** | — |
-| 主产物 CSS（Tailwind + daisyUI） | **别背数** | `node web/scripts/daisyui-size-probe.mjs`（跑一次 ≈6 s，自带逐字节自检） |
+| 主产物 CSS（Tailwind 4 + `@theme` 令牌层） | **别背数** | `cd web && npm run build` 的末行读数（`web/scripts/gzip-sidecars.mjs` 会打 raw + gzip 两档） |
 | 挂载 1000 行（编译产物） | **2.5–5.9 ms**（best of 3） | `node web/lite/bench/run.mjs` |
 | 反转 2000 行 ×10 | **8.6–12 ms** ⚠ 唯一劣化项 | 同上 |
-| 门禁（默认 / `--full`） | 默认只跑 `ready` 一个认证态（改脚本时的快回路）；`--full` 跑满三个认证态 + 一条前端泄漏量测。**耗时随机器变，别写死秒数**，看脚本自己那行 | `node scripts/gates-web.mjs` |
+| 门禁（两档） | `--commit`（**默认**，6 条：类型 / 构建 / 编译期负例 / demo / bench / 交互 `ready`）；`--push` 10 条（再加 320/375 窄屏、`login`、`setup`、泄漏量测）。**耗时随机器变，别写死秒数**，看脚本自己那行 | `node scripts/gates-web.mjs` |
 
 > ⚠ **主产物 CSS 的读数会随 `web/src/app.css` 变**（`@plugin "daisyui"` 的 `exclude`
-> 清单也在动）⇒ **别引历史读数**，跑 `node web/scripts/daisyui-size-probe.mjs` 现算。
+> 清单也在动）⇒ **别引历史读数**，跑 `cd web && npm run build` 看末行现算 ✓。
 > 移除 daisyUI 的取舍与**Δ**（同一轮内可比）见
 > [`daisyui-removal-analysis.md`](daisyui-removal-analysis.md)。
 
@@ -445,7 +445,7 @@ best of 3、headless Chrome、1000/2000 行的合成规模：
 
 ## 7. 验收与门禁
 
-`node scripts/gates-web.mjs` 默认五条（认证态只跑 `ready`）；`--full` 跑满三个认证态并加一条前端泄漏量测：
+`node scripts/gates-web.mjs` 默认（`--commit`）**6 条**；`--push` **10 条**（再加 320/375 窄屏、`login` / `setup` 两个认证态、泄漏量测）：
 
 | 门 | 命令 | 证明什么 |
 |---|---|---|
