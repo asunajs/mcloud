@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mcloud_core::{
-    Account, AccountId, Clock, EventSink, HttpClient, LogLevel, Result, RunEvent, RunId, RunRecord,
-    RunLogLine, RunStatus, Store, TaskOutcome, RUN_LOG_LIMIT,
+    Account, AccountId, Clock, EventSink, HttpClient, LogLevel, Result, RunEvent, RunId,
+    RunLogLine, RunRecord, RunStatus, Store, TaskOutcome, RUN_LOG_LIMIT,
 };
 
 use crate::{Registry, TaskContext};
@@ -50,7 +50,10 @@ impl LogCollector {
         }
         let dropped = total - RUN_LOG_LIMIT;
         let tail = lines.split_off(dropped);
-        let at = tail.first().map(|l| l.at_ms).unwrap_or_else(|| self.clock.now_ms());
+        let at = tail
+            .first()
+            .map(|l| l.at_ms)
+            .unwrap_or_else(|| self.clock.now_ms());
         let mut out = Vec::with_capacity(tail.len() + 1);
         out.push(RunLogLine {
             level: LogLevel::Info,
@@ -949,8 +952,11 @@ mod tests {
             .await
             .expect("应跑完");
 
-        let got: Vec<(LogLevel, String)> =
-            rec.logs.iter().map(|l| (l.level, l.message.clone())).collect();
+        let got: Vec<(LogLevel, String)> = rec
+            .logs
+            .iter()
+            .map(|l| (l.level, l.message.clone()))
+            .collect();
         assert!(
             got.contains(&(LogLevel::Info, "进行中".to_string())),
             "info 行没落盘：{got:?}"
@@ -965,7 +971,10 @@ mod tests {
             "进度行没落盘：{got:?}"
         );
         // 每行都有时刻 ✓（回看时"这一步什么时候做的"就是要看的东西 ✓）
-        assert!(rec.logs.iter().all(|l| l.at_ms == NOW_MS), "时刻该来自注入的时钟");
+        assert!(
+            rec.logs.iter().all(|l| l.at_ms == NOW_MS),
+            "时刻该来自注入的时钟"
+        );
     }
 
     /// 封面：日志超过 [`RUN_LOG_LIMIT`] 时留**最后**那些，并在开头说明丢了多少 ✓。
@@ -1005,10 +1014,7 @@ mod tests {
             msgs.first().is_some_and(|m| m.contains("已省略")),
             "开头该有一行说明丢了多少：{msgs:?}"
         );
-        assert!(
-            !msgs.contains(&"第 0 行"),
-            "最早那些行该被丢掉：{msgs:?}"
-        );
+        assert!(!msgs.contains(&"第 0 行"), "最早那些行该被丢掉：{msgs:?}");
         assert!(
             msgs.contains(&format!("第 {} 行", RUN_LOG_LIMIT + 29).as_str()),
             "**最后**那几行必须留着（失败通常在尾部 ✓）：{msgs:?}"

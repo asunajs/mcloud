@@ -276,10 +276,7 @@ mod tests {
         // —— 历史库里存着成百上千条老记录，凭空长字段就是白白膨胀 ✗。
         assert!(r.logs.is_empty(), "老记录没有 logs ⇒ 空表");
         let back = serde_json::to_string(&r).expect("应能序列化");
-        assert!(
-            !back.contains("\"logs\""),
-            "空日志不该被写进 JSON：{back}"
-        );
+        assert!(!back.contains("\"logs\""), "空日志不该被写进 JSON：{back}");
     }
 
     /// 日志行的形状：级别 + 文本 + 时刻（界面按级别着色 ✓）。
@@ -291,7 +288,10 @@ mod tests {
             at_ms: 1_700_000_000_123,
         };
         let j = serde_json::to_string(&line).expect("应能序列化");
-        assert_eq!(j, r#"{"level":"warn","message":"领取AI豆：上游错误 [614]","at_ms":1700000000123}"#);
+        assert_eq!(
+            j,
+            r#"{"level":"warn","message":"领取AI豆：上游错误 [614]","at_ms":1700000000123}"#
+        );
         let back: RunLogLine = serde_json::from_str(&j).expect("应能解析");
         assert_eq!(back, line);
     }

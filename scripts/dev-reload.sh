@@ -68,6 +68,24 @@ restore_on_exit() {
 trap restore_on_exit EXIT
 
 echo "── ① 停掉托管（$LABEL）"
+
+# ⚠⚠ 停之前先看有没有**别的写入线**在编译 —— 两个理由：
+#
+# 1. cargo 对 `target/` 上独占锁，硬抢两边都慢（AGENTS.md 那条 ✓）。
+# 2. 更要命的是本脚本**先停服务再编** ✗ ⇒ 一旦在锁上等几分钟，WebUI 就白停几分钟 ✗
+#    （2026-10-03 实测踩到两次：一次约 30 分钟 ✓）。
+#
+# ⇒ 有别人在编就**先不动服务** ✓、明确报出来 ✓（要硬上就设 MCLOUD_SKIP_LOCK_CHECK=1）。
+if [[ "${MCLOUD_SKIP_LOCK_CHECK:-0}" != "1" ]]; then
+  OTHERS="$(pgrep -fl 'cargo (build|test|clippy|check|run)' 2>/dev/null | grep -v "$$" || true)"
+  if [[ -n "$OTHERS" ]]; then
+    echo "⚠ 检测到别的 cargo 在跑 ⇒ **不动服务**（它还在正常提供 WebUI ✓）：" >&2
+    echo "$OTHERS" | sed 's/^/    /' >&2
+    echo "  等它结束再跑一次；坚持要现在上就 MCLOUD_SKIP_LOCK_CHECK=1 $0" >&2
+    exit 1
+  fi
+fi
+
 # ⚠ `kickstart -k` **不重读 plist** ✗ —— 改过 plist 就必须 bootout+bootstrap（踩过）
 launchctl bootout "gui/$UID_/$LABEL" 2>/dev/null || true
 
