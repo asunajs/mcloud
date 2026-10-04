@@ -411,11 +411,7 @@ export const FIXTURES = {
     backupWaitSecs: 20,
     refreshTokenDays: 10,
     skipTasks: [117],
-    aiAvatarEnabled: false,
     aiAvatarDailyLimit: 10,
-    redpackEnabled: true,
-    playAiEnabled: true,
-    koulingEnabled: false,
     notify: {
       title: 'mcloud 运行推送',
       onlyError: false,
@@ -428,11 +424,7 @@ export const FIXTURES = {
     backupWaitSecs: 0,
     refreshTokenDays: 0,
     skipTasks: [],
-    aiAvatarEnabled: false,
     aiAvatarDailyLimit: 10,
-    redpackEnabled: true,
-    playAiEnabled: true,
-    koulingEnabled: false,
     notify: null,
   },
 }

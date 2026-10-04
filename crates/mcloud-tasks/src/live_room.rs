@@ -1384,6 +1384,12 @@ impl<'a> LiveRoomRun<'a> {
             let jwt = gate_jwt.as_deref().expect("刚放进去");
 
             if !out.gate.active {
+                // ⚠⚠ **为什么这里必须早退、而不是"顺手把小红书也抓一次"**（用户口径 2026-10-03）：
+                // **没开播时抓到的口令一定是无效的** ⇒ 先验开播再抓取是判据，不是限制。
+                // 所以下面那个收集器（弹幕 + 小红书**两个源一起**）在这里不跑是对的 ✓
+                // —— 别为了"多抓一点"把它提前 ✗（`collect_inner` 里两源确实同级并发，
+                // 但"要不要抓"这一层由门说了算）。
+                //
                 // ⭐ 门的两种"没有"分开说 —— 它们的下一步完全不同。
                 if out.gate.live_count == 0 {
                     ctx.warn(format!(
@@ -1761,18 +1767,14 @@ impl Task for LiveRoomTask {
     }
 
     async fn run(&self, ctx: &TaskContext, body: &Value) -> TaskResult {
-        // ⚠ 开关是**最外层**的门（旧 TS 在 `cli/index.ts` 用
-        // `if (config.直播口令?.开启)` 把整条调用包起来）：关 ⇒ 一个请求都不发，
-        // 结论是 `Skipped` 而**不是** `Failed`。默认 `false` ⇒ **默认就是跳过**，
-        // 与旧 TS 的默认一致。
+        // ⚠ 这里**曾经**有一道"账号级总闸"（`kouling_enabled`，照 TS 的
+        // `if (config.直播口令?.开启)` 搬来的）：关着 ⇒ 一个请求都不发、回 `Skipped`。
+        // 2026-10-03 用户口径「**账号不应该有这个配置**」⇒ 整个字段已删（见
+        // `mcloud_core::AccountSettings` 里那段说明）。
         //
-        // ⚠ 它刻意放在参数校验**之前**：开关关着就不该对"参数怎么填"发表意见
-        // —— 那正是"任务根本没被调用"的等价物。
-        if !ctx.account.settings.kouling_enabled {
-            return Ok(TaskOutcome::skipped(
-                "直播口令未启用（账号配置「直播口令·开启」为关）",
-            ));
-        }
+        // 理由值得留在这里：任务**是用户显式点起来的**，"跑不跑"这一层已经由那个
+        // 动作表达了；再叠一个藏在账号设置里、界面上还看不到入口 ✗ 的总闸，只会让
+        // 显式发起的运行在 1ms 内回一句「直播口令未启用」，而用户无从打开。
 
         let params = LiveRoomRun::params_from_body(body);
 

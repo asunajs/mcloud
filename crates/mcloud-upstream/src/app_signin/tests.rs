@@ -854,3 +854,31 @@ fn task_expansion_failures_are_errors() {
         "90001 该被解释成人话：{text}"
     );
 }
+
+/// `recordId` 上游给的是数字 ⇒ 必须转成十进制串（否则 cloudId 发空串、静默领不到）。
+#[test]
+fn record_id_accepts_both_number_and_string() {
+    let body = serde_json::json!({
+        "code": 0, "msg": "success",
+        "result": {
+            "total": 8011,
+            "cal": [{ "d": 1, "s": true, "n": 3, "currentMonth": 1, "t": true }],
+            "receiveList": [
+                { "cloudType": 3, "cloudNum": 200, "recordId": 551 },      // 数字（实拍形状）
+                { "cloudType": 3, "cloudNum": 200, "recordId": "552" },    // 字符串（兼容）
+                { "cloudType": 3, "cloudNum": 200 }                        // 没有这个键
+            ]
+        }
+    });
+    let st = parse_status(&SignInEnvelope::parse(&body.to_string()).unwrap()).unwrap();
+    let ids: Vec<Option<&str>> = st
+        .receive_list
+        .iter()
+        .map(|it| it.record_id.as_deref())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![Some("551"), Some("552"), None],
+        "数字必须转成十进制串"
+    );
+}

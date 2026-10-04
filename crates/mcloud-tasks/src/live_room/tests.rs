@@ -1421,9 +1421,9 @@ fn params_check_covers_all_four_states() {
 /// ⭐ 任务层把参数错误翻成 `Err`，且措辞**点出 flag 名**（措辞在调用方）。
 #[tokio::test]
 async fn task_surfaces_invalid_params_as_an_error() {
-    let (mut c, http) = Ctx::new(&[]);
-    // 先过开关；这一条测的是**启用之后**的参数校验。
-    c.account.settings.kouling_enabled = true;
+    let (c, http) = Ctx::new(&[]);
+    // ⚠ 这一条同时是"**没有账号级开关**"的回归证明：`run()` 直接进参数校验
+    //（2026-10-03 之前这里得先 `kouling_enabled = true` 才走得到）。
     let task = LiveRoomTask::production();
 
     // 关掉了唯一的弹幕来源，却没给手工口令
@@ -1471,32 +1471,16 @@ fn params_accept_codes_as_an_array() {
     assert_eq!(p.listen_seconds, 60);
 }
 
-/// ⭐ b) `kouling_enabled = false`（**默认**）⇒ 一个请求都不发、结论 `Skipped`。
-///
-/// ⚠ 这里从前还有一条"反面用例"：`enabled = true` ⇒ 照旧跑。它当时**靠 `dryRun`
-/// 来回避真实请求**（"走演练档"）—— 演练档 2026-10-02 删掉之后，那条用例的写法
-/// 就没了立足点；而它想证明的"开关打开就真跑"**已经被那些开门 + 跑完整条链的用例
-/// 覆盖**（见 `auto_chain_opens_gate_collects_kouling_then_earns_flowers`：
-/// 它同样把开关打开，并且真的发出了门的请求与六步链）。
-/// ⇒ 与其再造一份门+链的装置去复述同一件事，不如把覆盖指向那边。
-///
-/// 与旧 TS 同口径：`cli/index.ts` 的 `if (config.直播口令?.开启)` 之外不会
-/// 调用这条任务。
-#[tokio::test]
-async fn disabled_kouling_is_skipped_with_zero_requests() {
-    let (c, http) = Ctx::new(&[]);
-    assert!(!c.account.settings.kouling_enabled, "这一格默认就是 false");
-
-    let out = LiveRoomTask::production()
-        .run(&c.ctx(), &serde_json::json!({"codes": "甲"}))
-        .await
-        .expect("关掉不是错误，是跳过");
-    let TaskOutcome::Skipped { reason } = out else {
-        panic!("实得：{out:?}");
-    };
-    assert_eq!(http.count(), 0, "关了就一个请求都不发");
-    assert!(reason.contains("未启用"), "实得：{reason}");
-}
+// ⚠ 这里**删掉过**一条 ⭐ 用例：`disabled_kouling_is_skipped_with_zero_requests`
+// （`kouling_enabled = false` ⇒ 一个请求都不发、结论 `Skipped`）。
+//
+// 2026-10-03 用户口径「**账号不应该有这个配置**」⇒ `AccountSettings::kouling_enabled`
+// 整个字段已删，那道门也不在了 ⇒ 这条用例的**被测行为不存在**了，留着就是钉一个幻觉。
+//
+// 它从前还配着一条"反面用例"（`enabled = true` ⇒ 照旧跑），那条早先就因为 `dryRun`
+// 演练档被删而失去了立足点 —— 而它想证明的"打开就真跑"，今天由
+// `auto_chain_opens_gate_collects_kouling_then_earns_flowers`（开门 + 完整六步链）
+// 与 `task_surfaces_invalid_params_as_an_error`（`run()` 直接进参数校验）覆盖着。
 
 // ══════════════════════════ 判据 7：六步链状态机 ══════════════════════════
 
@@ -2332,8 +2316,7 @@ async fn live_room_task_auto_collects_without_manual_codes() {
     let rooms = serde_json::json!([room_entry(147606, 1, "中国移动云盘")]);
     let mut chain = open_gate_chain(rooms);
     chain.extend(happy_chain(235, 245, Some(give_ok(0)), &[draw_ok(10)], 0));
-    let (mut c, http) = ctx_with(&chain);
-    c.account.settings.kouling_enabled = true;
+    let (c, http) = ctx_with(&chain);
 
     // 注入假收集器：`LiveRoomTask` 生产上用的是真 WS 收集器。
     let task = LiveRoomTask {
@@ -2353,6 +2336,69 @@ async fn live_room_task_auto_collects_without_manual_codes() {
     );
     assert_eq!(http.count_of("/querySpecTokenV2"), 1);
     assert_eq!(http.count_of("/redFlower/draw"), 1);
+}
+
+// ══════════════ 源 B（小红书）**单独**可测 —— 不需要开播 ══════════════
+
+/// ⭐ 小红书那一源**自己就能测**：它既不需要开播，也不需要直播间。
+///
+/// # 这条是用户口径直接要的（2026-10-03）
+///
+/// 「小红书验证与开播是否无关…… 你可以自己写不验证开播的测试，只测试小红书抓取」。
+///
+/// 做法是**直接调那一源**（`fetch_xiaohongshu`），绕开 `LiveRoomRun::run_account`
+/// 那道门 —— 门要求"有目标主播的房间在播"，而主页是**公开页面**，与房间无关。
+///
+/// # ⚠ 它顺带把一处行为上的不对称钉在案上
+///
+/// `run_account` 在 `!gate.active` 时是**直接 `return Ok(out)`**（`live_room.rs:1386`）
+/// ⇒ 真跑一次（当天没开播）时，源 B **永远不会被走到** ✓。所以模块头那句
+/// "两个来源（WebSocket 弹幕 / 小红书主页）**地位相同**"只在
+/// [`LiveKoulingCollector::collect_inner`] 里面成立，**在任务层不成立**。
+/// 这一条测的就是"源 B 本身是好的，挡住它的是任务层的门"。
+#[tokio::test]
+async fn xiaohongshu_source_extracts_codes_without_any_live_room() {
+    // 样本**从黄金向量里取**（真机抓的那份），不另造：造一份"我认为对"的 HTML
+    // 只能证明我自己同意自己。
+    let raw = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test/golden/live-room-vectors.json"
+    ))
+    .expect("黄金向量文件必须可读");
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("向量必须是合法 JSON");
+    let case = &v["xiaohongshuExtract"][0];
+    let html = case["html"].as_str().expect("用例应有 html");
+    let expect: Vec<String> = case["expect"]
+        .as_array()
+        .expect("expect 应为数组")
+        .iter()
+        .map(|x| x.as_str().expect("expect 里应是字符串").to_string())
+        .collect();
+    assert!(
+        !expect.is_empty(),
+        "挑中的第一条向量必须有口令，否则这条测试证明不了什么（实得：{expect:?}）"
+    );
+
+    let (c, http) = Ctx::new(&[html]);
+    // ⚠ 没有房间、没有门、没有 poll —— 直接调那一源。
+    let out = LiveKoulingCollector::production()
+        .fetch_xiaohongshu(&c.ctx())
+        .await
+        .expect("取一个公开主页不该失败");
+
+    assert_eq!(out.codes, expect, "提取结果必须与黄金向量逐条一致");
+    assert!(
+        out.failure.is_none(),
+        "取到了就不该带 failure：{:?}",
+        out.failure
+    );
+    assert_eq!(http.count(), 1, "只有那一枪 GET");
+    let urls: Vec<String> = http.requests().iter().map(|r| r.url.clone()).collect();
+    assert!(
+        urls[0].contains("xiaohongshu.com/user/profile"),
+        "打的是那个公开主页：{}",
+        urls[0]
+    );
 }
 
 // ══════════════════════════ 判据 11：register_all 接入 ══════════════════════════

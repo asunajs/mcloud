@@ -46,11 +46,11 @@
 //! 又没有任何一条实拍说明这一族 token 的有效期 —— 所以这里只在本趟内复用，
 //! 不落盘。少省一次换票，不会写坏别人的状态。
 //!
-//! # 开关
+//! # 没有开关
 //!
-//! ctx.account.settings.redpack_enabled（默认 true，见
-//! crates/mcloud-core/src/account.rs:164、186）。关掉 ⇒ 直接
-//! TaskOutcome::skipped，一枪都不发。
+//! ⚠ 这里**没有**账号级开关：`redpack_enabled` 已于 2026-10-03 按用户口径
+//! 「账号不应该有这个配置」删除（它默认 `true`，是本仓自己加的、旧 TS 没有的
+//! 一位）。任务**是用户显式点起来的**，"跑不跑"这一层由那个动作表达。
 //!
 //! # 等待时间做成字段
 //!
@@ -438,16 +438,10 @@ impl Task for CloudPhoneRedpackTask {
     }
 
     async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
-        // 账号级开关。关掉就一枪都不发（旧 TS 没有这一位，是本仓的设置项）。
-        if !ctx.account.settings.redpack_enabled {
-            let reason = "红包派对已在账号设置里关掉（redpack_enabled=false）";
-            ctx.details(json!({
-                "kind": REDPACK_TASK_NAME,
-                "verdict": "skipped",
-                "reason": reason,
-            }));
-            return Ok(TaskOutcome::skipped(reason));
-        }
+        // ⚠ 这里**曾经**有一道账号级总闸（`redpack_enabled`，默认 `true`；
+        // 旧 TS 没有这一位，是本仓自己加的设置项）。2026-10-03 用户口径
+        // 「**账号不应该有这个配置**」⇒ 字段已删。
+        // 任务**是用户显式点起来的**，"跑不跑"这一层由那个动作表达。
 
         // ① 建会话（两段）：querySpecToken ⇒ tokenValidate。
         ctx.progress(1, 4, "建立红包派对会话");

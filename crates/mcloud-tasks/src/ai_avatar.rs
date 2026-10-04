@@ -18,14 +18,14 @@
 //! （[`is_transport`] 那一档直接 `?` 出去，带 HTTP 码与响应体），
 //! **绝不**静默当成成功 —— 否则那三行真读数会被洗成一句「跑完了」。
 //!
-//! # 开关与轮数
+//! # 轮数（**没有**开关）
 //!
-//! `ctx.account.settings.ai_avatar_enabled`（默认 **false**，`account.rs:184`）为假
-//! ⇒ 直接 [`TaskOutcome::skipped`]，**一枪都不发**。
+//! ⚠ 这里**没有**账号级开关：`ai_avatar_enabled` 已于 2026-10-03 按用户口径
+//! 「账号不应该有这个配置」删除（它默认 `false` ⇒ 从前显式点运行也会一枪不发）。
+//!
 //! `ai_avatar_daily_limit`（默认 10）语义 = **本地生成轮数**，**不是**上游余量：
 //! 旧 TS 的生成侧压根不看上游计数（`task.ts:80-83` 那个 `每日生成次数` 只是
-//! 循环次数），上游真实余量只在抽奖侧由 `getHashLeft` 读。这一点与
-//! `account.rs:161` 的默认值 10 一致，别把两者混成一个额度。
+//! 循环次数），上游真实余量只在抽奖侧由 `getHashLeft` 读。别把两者混成一个额度。
 //!
 //! # 不幂等：这是旧实现的事实，必须说实话
 //!
@@ -836,16 +836,10 @@ impl Task for AiAvatarTask {
     }
 
     async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
-        // 账号级开关。关掉就一枪都不发（旧 TS 的 `config.AI新头像?.开启`，`task.ts:165`）。
-        if !ctx.account.settings.ai_avatar_enabled {
-            let reason = "AI 头像已在账号设置里关掉（ai_avatar_enabled=false）";
-            ctx.details(json!({
-                "kind": AI_AVATAR_TASK_NAME,
-                "verdict": "skipped",
-                "reason": reason,
-            }));
-            return Ok(TaskOutcome::skipped(reason));
-        }
+        // ⚠ 这里**曾经**有一道账号级总闸（`ai_avatar_enabled`，默认 `false` ⇒
+        // 什么都不跑、一枪都不发）。2026-10-03 用户口径「**账号不应该有这个配置**」
+        // ⇒ 字段已删（见 `mcloud_core::AccountSettings` 里那段说明）。
+        // 任务**是用户显式点起来的**，"跑不跑"这一层由那个动作表达。
         ctx.check_cancelled()?;
 
         let limit = ctx.account.settings.ai_avatar_daily_limit;

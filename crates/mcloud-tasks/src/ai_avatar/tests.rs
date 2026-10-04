@@ -44,7 +44,7 @@ fn task_with(plan: AiAvatarPlan) -> AiAvatarTask {
     }
 }
 
-fn account_with(enabled: bool, limit: u32) -> Account {
+fn account_with(limit: u32) -> Account {
     Account {
         id: mcloud_core::AccountId::new("19****01"),
         nickname: None,
@@ -61,7 +61,6 @@ fn account_with(enabled: bool, limit: u32) -> Account {
         owner: None,
         enabled: true,
         settings: AccountSettings {
-            ai_avatar_enabled: enabled,
             ai_avatar_daily_limit: limit,
             ..Default::default()
         },
@@ -270,28 +269,18 @@ fn summary_of(out: &TaskOutcome) -> String {
     }
 }
 
-// ═══════════════════ (a) 开关关掉 ⇒ 0 个请求 ═══════════════════
+// ⚠ 这里**删掉过**一条 `the_switch_off_sends_zero_requests`：它钉的是
+// `ai_avatar_enabled = false` ⇒ 一枪都不发、结论 `Skipped`。2026-10-03 用户口径
+// 「**账号不应该有这个配置**」⇒ 字段已删、那道门也不在了 ⇒ 被测行为不存在，
+// 留着就是钉一个幻觉。
 
-#[tokio::test]
-async fn the_switch_off_sends_zero_requests() {
-    // 客户端「谁来都打挂」：只要发过一枪，这条就会红。
-    let (ctx, http, sink) = ctx_with(vec![Reply::Fail], account_with(false, 10));
-    let out = task_with(plan_fast(2))
-        .run(&ctx, &serde_json::json!({}))
-        .await
-        .expect("开关关掉不该是 Err");
-    assert!(matches!(out, TaskOutcome::Skipped { .. }), "实得：{out:?}");
-    assert_eq!(http.count(), 0, "关掉就要一枪都不发");
-    let details = sink.details();
-    assert_eq!(details.len(), 1);
-    assert_eq!(details[0]["verdict"], "skipped");
-}
-
-/// 默认设置就是关的（`account.rs:184`）—— 这条钉住「默认不动用户网盘」。
+/// 默认的**轮数上限**是 10（与旧 TS schema 一致）。
+///
+/// ⚠ 这里从前还断言"默认是关的" —— `ai_avatar_enabled` 已于 2026-10-03 删除，
+/// 那条断言连同比测的字段一起去掉了。
 #[test]
-fn the_default_settings_keep_this_task_off() {
+fn the_default_daily_limit_is_ten() {
     let s = AccountSettings::default();
-    assert!(!s.ai_avatar_enabled);
     assert_eq!(
         s.ai_avatar_daily_limit, 10,
         "默认 10 轮，与旧 TS schema 一致"
@@ -309,7 +298,7 @@ async fn the_read_path_sends_only_the_two_get_endpoints() {
             Reply::Body(r#"{"code":0,"msg":"success"}"#.into()),
         ],
         // 轮数 0 ⇒ 不取基线、不生成：这一趟只有余量与抽奖两枪。
-        account_with(true, 0),
+        account_with(0),
     );
     let out = task_with(plan_fast(2))
         .run(&ctx, &serde_json::json!({}))
@@ -390,7 +379,7 @@ async fn the_downloaded_image_bytes_reach_upload_byte_for_byte() {
             ),
             Reply::Body(r#"{"code":"0000","success":true}"#.into()),
         ],
-        account_with(true, 1),
+        account_with(1),
     );
     let out = task_with(plan_fast(2))
         .run(&ctx, &serde_json::json!({}))
@@ -452,7 +441,7 @@ async fn a_downloaded_blob_that_is_not_an_image_never_reaches_upload() {
             Reply::Raw(b"<html>not an image</html>".to_vec()),
             Reply::Body(r#"{"code":0,"result":0}"#.into()),
         ],
-        account_with(true, 1),
+        account_with(1),
     );
     let out = task_with(plan_fast(2))
         .run(&ctx, &serde_json::json!({}))
@@ -509,7 +498,7 @@ async fn a_business_non_zero_merge_is_a_round_failure_not_fatal() {
             Reply::Body(r#"{"code":500,"msg":"系统繁忙","result":{}}"#.into()),
             Reply::Body(r#"{"code":0,"result":0}"#.into()),
         ],
-        account_with(true, 1),
+        account_with(1),
     );
     let plan = AiAvatarPlan {
         max_attempts: 2,
@@ -543,7 +532,7 @@ async fn a_non_200_on_merge_is_fatal_and_not_swallowed() {
                 headers: Vec::new(),
             },
         ],
-        account_with(true, 1),
+        account_with(1),
     );
     let err = task_with(plan_fast(2))
         .run(&ctx, &serde_json::json!({}))
@@ -566,7 +555,7 @@ async fn a_non_200_on_draw_is_fatal() {
                 headers: Vec::new(),
             },
         ],
-        account_with(true, 0),
+        account_with(0),
     );
     let err = task_with(plan_fast(2))
         .run(&ctx, &serde_json::json!({}))
@@ -586,7 +575,7 @@ async fn a_non_200_on_hash_left_is_fatal_not_a_fallback() {
             body: "not found".into(),
             headers: Vec::new(),
         }],
-        account_with(true, 0),
+        account_with(0),
     );
     let err = task_with(plan_fast(2))
         .run(&ctx, &serde_json::json!({}))
@@ -603,7 +592,7 @@ async fn a_business_failure_on_hash_left_uses_the_fallback_and_says_so() {
     for _ in 0..AI_AVATAR_DRAW_FALLBACK {
         replies.push(Reply::Body(r#"{"code":0,"msg":"success"}"#.into()));
     }
-    let (ctx, http, sink) = ctx_with(replies, account_with(true, 0));
+    let (ctx, http, sink) = ctx_with(replies, account_with(0));
     let out = task_with(plan_fast(2))
         .run(&ctx, &serde_json::json!({}))
         .await
@@ -629,7 +618,7 @@ async fn a_408_stops_the_draw_loop() {
             Reply::Body(r#"{"code":0,"result":3}"#.into()),
             Reply::Body(r#"{"code":408,"msg":"次数已用完"}"#.into()),
         ],
-        account_with(true, 0),
+        account_with(0),
     );
     let out = task_with(plan_fast(2))
         .run(&ctx, &serde_json::json!({}))
@@ -654,7 +643,7 @@ async fn any_other_draw_code_is_logged_and_the_loop_continues() {
             Reply::Body(r#"{"code":400,"msg":"这次没中"}"#.into()),
             Reply::Body(r#"{"code":0,"result":{"prizeName":"AI豆"}}"#.into()),
         ],
-        account_with(true, 0),
+        account_with(0),
     );
     let out = task_with(plan_fast(2))
         .run(&ctx, &serde_json::json!({}))
@@ -680,7 +669,7 @@ async fn a_cancelled_token_stops_before_any_request() {
     token.cancel();
     let (ctx, http, _) = ctx_of(
         Arc::new(Scripted::new(vec![Reply::Fail])),
-        account_with(true, 1),
+        account_with(1),
         token,
     );
     let err = task_with(plan_fast(2))
@@ -699,7 +688,7 @@ async fn a_cancel_between_shots_stops_further_requests() {
         r#"{"code":0,"result":3}"#.into(),
     )]));
     http.cancel_after(1, token.clone());
-    let (ctx, http, _) = ctx_of(http, account_with(true, 0), token);
+    let (ctx, http, _) = ctx_of(http, account_with(0), token);
     let err = task_with(plan_fast(2))
         .run(&ctx, &serde_json::json!({}))
         .await
@@ -748,7 +737,7 @@ async fn cleanup_only_trashes_file_ids_created_by_this_run() {
             // ③ batchTrash 回执
             Reply::Body(r#"{"code":"0000","success":true}"#.into()),
         ],
-        account_with(true, 1),
+        account_with(1),
     );
 
     // 基线：动笔之前，那个目录里只有 OLD。
@@ -788,7 +777,7 @@ async fn cleanup_only_trashes_file_ids_created_by_this_run() {
 /// 基线缺（活动目录没读到）⇒ **整个收尾跳过**，一枪都不发。
 #[tokio::test]
 async fn without_a_baseline_the_cleanup_is_skipped_entirely() {
-    let (ctx, http, _) = ctx_with(vec![Reply::Fail], account_with(true, 1));
+    let (ctx, http, _) = ctx_with(vec![Reply::Fail], account_with(1));
     let mut result = AiAvatarResult::default();
     collect_and_clean(&ctx, &["W1".to_string()], None, Some("/rab"), &mut result).await;
     assert_eq!(http.count(), 0, "拿不到基线就不该去列目录/删东西");
@@ -810,7 +799,7 @@ async fn a_failed_cleanup_read_is_reported_in_the_cleanup_error() {
             body: "boom".into(),
             headers: Vec::new(),
         }],
-        account_with(true, 1),
+        account_with(1),
     );
     let mut baseline = HashSet::new();
     baseline.insert("OLD".to_string());
@@ -840,7 +829,7 @@ async fn a_work_id_that_matches_nothing_skips_the_cleanup() {
         vec![Reply::Body(
             r#"{"code":0,"result":[{"id":"OTHER","imgUrl":"https://x/p/ZZZ.png"}]}"#.into(),
         )],
-        account_with(true, 1),
+        account_with(1),
     );
     let mut baseline = HashSet::new();
     baseline.insert("OLD".to_string());
@@ -868,7 +857,7 @@ async fn a_work_id_that_matches_nothing_skips_the_cleanup() {
 async fn the_details_and_summary_carry_the_non_idempotency_hedge() {
     let (ctx, _http, sink) = ctx_with(
         vec![Reply::Body(r#"{"code":0,"result":0}"#.into())],
-        account_with(true, 0),
+        account_with(0),
     );
     let out = task_with(plan_fast(2))
         .run(&ctx, &serde_json::json!({}))

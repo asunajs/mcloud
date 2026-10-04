@@ -203,35 +203,18 @@ async fn the_run_sends_exactly_two_get_requests() {
     }
 }
 
-/// ⭐ a) `play_ai_enabled = false` ⇒ **一个请求都不发**，结论 `Skipped`
-/// （不是 `Failed`）。
-///
-/// 与旧 TS 同口径：`cli/index.ts` 在那个 `if (config.春日拍拍大作战?.开启)`
-/// 之外根本不会调用这条任务 ⇒ 关掉是用户的决定，不是故障。
-#[tokio::test]
-async fn disabled_play_ai_is_skipped_with_zero_requests() {
-    let (mut ctx, http, _) = ctx_with(vec![]);
-    ctx.account.settings.play_ai_enabled = false;
+// ⚠ 这里**删掉过**一条 `disabled_play_ai_is_skipped_with_zero_requests`：它钉的是
+// `play_ai_enabled = false` ⇒ 一个请求都不发、结论 `Skipped`。2026-10-03 用户口径
+// 「**账号不应该有这个配置**」⇒ 字段已删、那道门也不在了 ⇒ 被测行为不存在。
+// 底下这条（原 `a-反面`）于是成了**唯一**的那条路：任务被点起来就发那两枪。
 
-    let out = PlayAiTask
-        .run(&ctx, &serde_json::json!({}))
-        .await
-        .expect("关掉不是错误，是跳过");
-    let TaskOutcome::Skipped { reason } = out else {
-        panic!("实得：{out:?}");
-    };
-    assert_eq!(http.count(), 0, "关了就一个请求都不发");
-    assert!(reason.contains("未启用"), "实得：{reason}");
-}
-
-/// ⭐ a-反面：`play_ai_enabled = true` ⇒ 照旧发那两枪（与默认值同一条路）。
+/// ⭐ 跑起来就发那两枪（从前是"开关打开"那一面，现在只剩这一面）。
 #[tokio::test]
-async fn enabled_play_ai_still_runs() {
-    let (mut ctx, http, _) = ctx_with(vec![
+async fn play_ai_sends_both_requests() {
+    let (ctx, http, _) = ctx_with(vec![
         Reply::Body(STATUS_BODY.to_string()),
         Reply::Body(TASKS_BODY.to_string()),
     ]);
-    ctx.account.settings.play_ai_enabled = true;
 
     let out = PlayAiTask
         .run(&ctx, &serde_json::json!({}))

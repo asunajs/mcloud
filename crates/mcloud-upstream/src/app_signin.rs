@@ -620,9 +620,8 @@ pub struct ReceiveItem {
     pub cloud_num: i64,
     /// `receiveV3` 的 `cloudId` 来源。
     ///
-    /// ⚠ 实测抓到的条目里**没有这个字段**（只有 `cloudType` / `cloudNum`），
-    /// 于是 H5 的 `e.recordId ?? ""` 实际给的就是空串。
-    /// 这里如实做成可选，**不替上游编一个默认值**。
+    /// 上游给的是**数字**（`"recordId":551`）⇒ 数字与字符串两种都要收：
+    /// 只认字符串会让 `cloudId` 发成空串，`receiveV3` 静默回 `receive: 0`。
     pub record_id: Option<String>,
     /// 只有 `cloud_type == 1` 才用得上。
     pub accept_date: Option<String>,
@@ -676,10 +675,12 @@ pub fn parse_status(env: &SignInEnvelope) -> Result<SignInStatus> {
             receive_list.push(ReceiveItem {
                 cloud_type,
                 cloud_num: int_at(item, "cloudNum").unwrap_or(0),
-                record_id: item
-                    .get("recordId")
-                    .and_then(Value::as_str)
-                    .map(String::from),
+                record_id: item.get("recordId").and_then(|v| match v {
+                    // 上游给数字（`"recordId":551`）；只认字符串会让 `cloudId` 变空串。
+                    Value::String(s) => Some(s.clone()),
+                    Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                }),
                 accept_date: item
                     .get("acceptDate")
                     .and_then(Value::as_str)

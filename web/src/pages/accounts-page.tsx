@@ -817,11 +817,7 @@ export const AccountsPage = () => {
   const fBackupWait = ref('')
   const fRefreshDays = ref('')
   const fSkipTasks = ref('')
-  const fAiAvatar = ref(false)
   const fAiAvatarLimit = ref('')
-  const fRedpack = ref(false)
-  const fPlayAi = ref(false)
-  const fKouling = ref(false)
 
   // 推送
   const fNotifyOn = ref(false)
@@ -1018,11 +1014,7 @@ export const AccountsPage = () => {
     fBackupWait.value = s.backupWaitSecs == null ? '' : String(s.backupWaitSecs)
     fRefreshDays.value = s.refreshTokenDays == null ? '' : String(s.refreshTokenDays)
     fSkipTasks.value = (s.skipTasks ?? []).join(', ')
-    fAiAvatar.value = s.aiAvatarEnabled === true
     fAiAvatarLimit.value = s.aiAvatarDailyLimit == null ? '' : String(s.aiAvatarDailyLimit)
-    fRedpack.value = s.redpackEnabled
-    fPlayAi.value = s.playAiEnabled
-    fKouling.value = s.koulingEnabled
 
     const n = s.notify
     fNotifyOn.value = n != null
@@ -1154,11 +1146,7 @@ export const AccountsPage = () => {
     backupWaitSecs: parseIntField('备份等待秒数', fBackupWait.value),
     refreshTokenDays: parseIntField('刷新阈值天数', fRefreshDays.value),
     skipTasks: parseSkipTasks(fSkipTasks.value),
-    aiAvatarEnabled: fAiAvatar.value,
     aiAvatarDailyLimit: parseIntField('AI 头像每日上限', fAiAvatarLimit.value),
-    redpackEnabled: fRedpack.value,
-    playAiEnabled: fPlayAi.value,
-    koulingEnabled: fKouling.value,
     notify: buildNotifyPayload(),
   })
 
@@ -1601,36 +1589,12 @@ export const AccountsPage = () => {
         <>
         <div class="flex flex-col gap-2">
           <h4 class="text-sm font-medium">功能开关</h4>
-          {switchField(
-            'AI 新头像',
-            () => fAiAvatar.value,
-            (v) => (fAiAvatar.value = v),
-            '打开后每天给账号换一批 AI 头像。',
-          )}
           {textField(
             'AI 头像每日上限（轮）',
             () => fAiAvatarLimit.value,
             (v) => (fAiAvatarLimit.value = v),
             '范围 0–1000（后端上限）：每一轮都是一次上游调用。',
             'number',
-          )}
-          {switchField(
-            '红包派对',
-            () => fRedpack.value,
-            (v) => (fRedpack.value = v),
-            '参与红包派对活动。',
-          )}
-          {switchField(
-            '春日拍拍大作战',
-            () => fPlayAi.value,
-            (v) => (fPlayAi.value = v),
-            '参与拍拍大作战活动。',
-          )}
-          {switchField(
-            '直播口令',
-            () => fKouling.value,
-            (v) => (fKouling.value = v),
-            '参与直播口令领小红花。',
           )}
         </div>
 

@@ -179,22 +179,32 @@ pub struct AccountSettings {
     #[serde(default, deserialize_with = "de_skip_task_ids")]
     pub skip_tasks: Vec<i64>,
 
-    /// AI 新头像。
-    pub ai_avatar_enabled: bool,
+    /// AI 新头像**每天最多几轮**。
+    ///
+    /// ⚠ 这里只留"上限"，**没有** `ai_avatar_enabled` 那个总闸。
     pub ai_avatar_daily_limit: u32,
 
-    /// 红包派对。
-    pub redpack_enabled: bool,
+    // 这里**没有**三个"账号级总闸"：`ai_avatar_enabled` / `redpack_enabled` /
+    // `play_ai_enabled`（以及更早删掉的 `kouling_enabled`）。用户口径（2026-10-03）：
+    // 「**账号不应该有这个配置**」—— 任务**是用户显式点起来的**，"跑不跑"这一层已经
+    // 由那个动作表达了；再叠一个藏在账号设置里的总闸，只会让显式发起的运行立刻回一句
+    // "未启用"，而界面上**根本没有入口**能把它打开（那些开关所在的整块被
+    // `SHOW_ACCOUNT_SETTINGS_BLOCKS` 关着）。留着的字段就是骗人的旋钮。
+    //
+    // ⚠ 留下的 `ai_avatar_daily_limit` **不属于**这一类：它是"每天最多几轮"的**上限**，
+    // 不是"参不参加"的开关 —— 删了会真丢能力。
 
     // 这里**没有** `hc1t_*` 三个旋钮：`hc1t`（AI豆大作战）已被判「已过期、
     // 不实现」（`docs/task-inventory.md` 的 §P4 与差异表 D3），本仓也没有对应
     // 任务 —— 留着就是骗人的旋钮。将来真要实现时，随任务一起把字段加回来。
-    /// 春日拍拍大作战。
-    pub play_ai_enabled: bool,
 
-    /// 直播口令。
-    pub kouling_enabled: bool,
-
+    // 这里**没有** `kouling_enabled`：用户口径（2026-10-03）「**账号不应该有这个配置**」。
+    // 它原本是「直播口令·开启」这个账号级总闸 —— 关着时 `live-room` **一个请求都不发**、
+    // 结论 `Skipped`（照 TS 的 `if (config.直播口令?.开启)` 搬来的）。问题是：任务
+    // **是用户显式点起来的**，"跑不跑"这一层已经由那个动作表达了；再叠一个藏在账号
+    // 设置里（且界面上根本没有入口 ✗）的总闸，只会让显式发起的运行在 1ms 内回一句
+    // 「直播口令未启用」，而用户找不到任何地方把它打开。留着的字段就是骗人的旋钮 ——
+    // 与上面 `hc1t_*` 那三个是同一条道理。
     /// 推送渠道：这个账号的运行结果推到**哪些**渠道（每账号一份）。
     ///
     /// # 为什么是**每账号**而不是进程级
@@ -261,11 +271,7 @@ impl Default for AccountSettings {
             backup_wait_secs: 20,
             refresh_token_days: 10,
             skip_tasks: Vec::new(),
-            ai_avatar_enabled: false,
             ai_avatar_daily_limit: 10,
-            redpack_enabled: true,
-            play_ai_enabled: true,
-            kouling_enabled: false,
             // 默认不配推送渠道：与"未配置就零行为"同一条 —— 装完不该有包发出去。
             notify: None,
         }
@@ -309,11 +315,7 @@ pub struct AccountSettingsDto {
     pub refresh_token_days: i64,
     /// 跳过的任务 **id**（数字）。见 [`AccountSettings::skip_tasks`]。
     pub skip_tasks: Vec<i64>,
-    pub ai_avatar_enabled: bool,
     pub ai_avatar_daily_limit: u32,
-    pub redpack_enabled: bool,
-    pub play_ai_enabled: bool,
-    pub kouling_enabled: bool,
     /// 推送渠道。`null` = 不配（与落盘的 `None` 同义）。
     pub notify: Option<PushConfig>,
 }
@@ -561,11 +563,7 @@ impl From<AccountSettings> for AccountSettingsDto {
             backup_wait_secs: s.backup_wait_secs,
             refresh_token_days: s.refresh_token_days,
             skip_tasks: s.skip_tasks,
-            ai_avatar_enabled: s.ai_avatar_enabled,
             ai_avatar_daily_limit: s.ai_avatar_daily_limit,
-            redpack_enabled: s.redpack_enabled,
-            play_ai_enabled: s.play_ai_enabled,
-            kouling_enabled: s.kouling_enabled,
             notify: s.notify,
         }
     }
@@ -581,11 +579,7 @@ impl TryFrom<AccountSettingsDto> for AccountSettings {
             backup_wait_secs: dto.backup_wait_secs,
             refresh_token_days: dto.refresh_token_days,
             skip_tasks: dto.skip_tasks,
-            ai_avatar_enabled: dto.ai_avatar_enabled,
             ai_avatar_daily_limit: dto.ai_avatar_daily_limit,
-            redpack_enabled: dto.redpack_enabled,
-            play_ai_enabled: dto.play_ai_enabled,
-            kouling_enabled: dto.kouling_enabled,
             notify: dto.notify,
         })
     }
@@ -763,8 +757,6 @@ mod tests {
     #[test]
     fn default_settings_are_conservative() {
         let s = AccountSettings::default();
-        assert!(!s.ai_avatar_enabled);
-        assert!(!s.kouling_enabled);
         assert_eq!(s.refresh_token_days, 10);
         assert_eq!(s.notify, None, "默认不该给任何账号配推送渠道");
     }
@@ -780,7 +772,7 @@ mod tests {
         )
         .expect("旧键必须被忽略，不能让整份设置读不出来");
         assert!(s.skip_tasks.is_empty());
-        assert!(s.play_ai_enabled, "其余字段照常取默认");
+        assert_eq!(s.ai_avatar_daily_limit, 10, "其余字段照常取默认");
     }
 
     /// 推送渠道落盘：配了就留得住，没配就不占格子。
@@ -929,11 +921,7 @@ mod tests {
             "backupWaitSecs": 20,
             "refreshTokenDays": 10,
             "skipTasks": [117, 437],
-            "aiAvatarEnabled": true,
             "aiAvatarDailyLimit": 5,
-            "redpackEnabled": false,
-            "playAiEnabled": true,
-            "koulingEnabled": false,
             "notify": {
                 "title": "我的推送",
                 "onlyError": true,
@@ -956,11 +944,7 @@ mod tests {
         assert_eq!(settings.backup_wait_secs, 20);
         assert_eq!(settings.refresh_token_days, 10);
         assert_eq!(settings.skip_tasks, vec![117, 437]);
-        assert!(settings.ai_avatar_enabled);
         assert_eq!(settings.ai_avatar_daily_limit, 5);
-        assert!(!settings.redpack_enabled);
-        assert!(settings.play_ai_enabled);
-        assert!(!settings.kouling_enabled);
         let notify = settings.notify.clone().expect("notify 必须被存下来");
         assert_eq!(notify.title, "我的推送");
         assert!(notify.only_error);
@@ -1061,9 +1045,12 @@ mod tests {
     #[test]
     fn a_missing_field_is_rejected() {
         let mut body = valid_settings_body();
-        body.as_object_mut().unwrap().remove("koulingEnabled");
+        body.as_object_mut().unwrap().remove("aiAvatarDailyLimit");
         let err = AccountSettingsDto::from_wire(body).unwrap_err().to_string();
-        assert!(err.contains("koulingEnabled"), "错误要点名缺失字段：{err}");
+        assert!(
+            err.contains("aiAvatarDailyLimit"),
+            "错误要点名缺失字段：{err}"
+        );
     }
 
     /// `skipTasks` 的类型必须真的是**数字**数组。

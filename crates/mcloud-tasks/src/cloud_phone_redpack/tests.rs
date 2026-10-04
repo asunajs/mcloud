@@ -628,28 +628,10 @@ async fn cancelling_mid_run_stops_before_the_next_request() {
     }
 }
 
-// ══════════════════════ 开关 ══════════════════════
-
-#[tokio::test]
-async fn the_redpack_switch_off_skips_without_a_single_request() {
-    let settings = AccountSettings {
-        redpack_enabled: false,
-        ..Default::default()
-    };
-    let (ctx, http, sink) = ctx_with_at(
-        handler_for(TASKS_READ_ONLY),
-        settings,
-        0,
-        CancelToken::new(),
-    );
-    let out = fast_task()
-        .run(&ctx, &json!({}))
-        .await
-        .expect("跳过不是 Err");
-    assert!(matches!(out, TaskOutcome::Skipped { .. }), "实得：{out:?}");
-    assert_eq!(http.count(), 0, "关掉就一枪都不发");
-    assert_eq!(sink.details()[0]["verdict"], "skipped");
-}
+// ⚠ 这里**删掉过**一条 `the_redpack_switch_off_skips_without_a_single_request`：
+// 它钉的是 `redpack_enabled = false` ⇒ 一枪都不发、结论 `Skipped`。2026-10-03
+// 用户口径「**账号不应该有这个配置**」⇒ 字段已删、那道门也不在了 ⇒ 被测行为
+// 不存在，留着就是钉一个幻觉。
 
 // ══════════════════════ 注册表接入 ══════════════════════
 

@@ -1319,11 +1319,8 @@ export interface AccountSettings {
   refreshTokenDays: number
   /** 跳过的任务 **id**（数字）。旧形状是任务名，后端读旧库时会**丢弃**它们。 */
   skipTasks: number[]
-  aiAvatarEnabled: boolean
   /** AI 新头像每日轮数上限。后端上限 1000。 */
   aiAvatarDailyLimit: number
-  redpackEnabled: boolean
-  playAiEnabled: boolean
   /** `null` = 这个账号**一个渠道都不推**（后端没有进程级兜底）。 */
   notify: PushConfig | null
 }
