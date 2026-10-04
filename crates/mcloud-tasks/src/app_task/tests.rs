@@ -811,7 +811,7 @@ async fn a_blacklisted_id_never_gets_clicked() {
         AccountSettings::default(),
         Arc::new(FakeStore::new()),
     );
-    let result = run_app_task(&ctx, 0).await.expect("不该是 Err");
+    let result = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
 
     let clicks = http.clicks();
     assert_eq!(clicks.len(), 1, "只有 118 该被打卡，实得 {clicks:?}");
@@ -839,7 +839,7 @@ async fn b_configured_skip_tasks_are_skipped() {
         skip,
         Arc::new(FakeStore::new()),
     );
-    let r = run_app_task(&ctx, 0).await.expect("不该是 Err");
+    let r = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
     assert_eq!(r.planned, 0, "名单命中的条目不该进 planned");
     assert!(http.clicks().is_empty(), "名单命中的条目不该打卡");
 
@@ -851,7 +851,7 @@ async fn b_configured_skip_tasks_are_skipped() {
         AccountSettings::default(),
         Arc::new(FakeStore::new()),
     );
-    let r = run_app_task(&ctx, 0).await.expect("不该是 Err");
+    let r = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
     assert_eq!(r.planned, 1);
     assert_eq!(http.clicks().len(), 1);
 }
@@ -919,7 +919,7 @@ async fn c_month_gate_reads_this_accounts_backup_state() {
         AccountSettings::default(),
         seed(false),
     );
-    let r = run_app_task(&ctx, 0).await.expect("不该是 Err");
+    let r = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
     assert_eq!(r.month_backup, Some(false));
     assert_eq!(r.planned, 0, "未备份且 5 号 ⇒ 该跳");
     assert!(http.clicks().is_empty(), "跳过就不该打卡");
@@ -932,7 +932,7 @@ async fn c_month_gate_reads_this_accounts_backup_state() {
         AccountSettings::default(),
         seed(true),
     );
-    let r = run_app_task(&ctx, 0).await.expect("不该是 Err");
+    let r = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
     assert_eq!(r.month_backup, Some(true));
     assert_eq!(r.planned, 1, "已备份就不跳");
     assert_eq!(http.clicks().len(), 1);
@@ -945,7 +945,7 @@ async fn c_month_gate_reads_this_accounts_backup_state() {
         AccountSettings::default(),
         seed(false),
     );
-    let r = run_app_task(&ctx, 0).await.expect("不该是 Err");
+    let r = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
     assert_eq!(r.planned, 1, "20 号之后不再跳");
     assert_eq!(http.clicks().len(), 1);
 
@@ -957,7 +957,7 @@ async fn c_month_gate_reads_this_accounts_backup_state() {
         AccountSettings::default(),
         Arc::new(FakeStore::new()),
     );
-    let r = run_app_task(&ctx, 0).await.expect("不该是 Err");
+    let r = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
     assert_eq!(r.month_backup, None);
     assert_eq!(r.planned, 1, "没记录时不该跳");
 }
@@ -1051,4 +1051,23 @@ fn click_key_is_task_not_a_group_name() {
         "打卡 URL 必须是 key=task：{}",
         req.url
     );
+}
+
+/// 409 / 1005 走「固定入口」那一档 —— 从前这两条**什么都不做** ✗。
+///
+/// 依据：`runners.ts:98-108`（409）与 `:126-133`（1005），形状相同：
+/// `page/doTask` 埋点 → `sleep(500)` → `clickTask`（409 带 `task2` ✓，1005 用默认 key ✓）。
+#[test]
+fn entry_tasks_get_the_entry_step() {
+    for id in [409_i64, 1005] {
+        assert_eq!(
+            step_for(&item(
+                Some(id),
+                Some("time"),
+                Some("从固定入口访问云朵中心")
+            )),
+            Some(Step::Entry),
+            "id={id}"
+        );
+    }
 }

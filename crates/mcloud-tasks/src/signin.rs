@@ -66,7 +66,7 @@ async fn call(ctx: &TaskContext, req: HttpRequest, what: &str) -> Result<SignInE
 ///    任务的 `ctx.store` 直接读得到，不联网、定时任务那条路径也覆盖得到；
 /// 3. 都没有 ⇒ 退回 `account.device_id`，**并如实警告**（这条已知会被判
 ///    "内容无效"，不能让它静默地当成正常值用）。
-async fn h5_device_id(ctx: &TaskContext, body: Option<&Value>) -> Option<String> {
+pub(crate) async fn h5_device_id(ctx: &TaskContext, body: Option<&Value>) -> Option<String> {
     let body_id = body.and_then(|b| b.get("deviceId")).and_then(Value::as_str);
     let smid = match ctx.store.get_smid_state(&ctx.account.id).await {
         Ok(Some(st)) => st.device_id,
@@ -193,6 +193,10 @@ impl Task for SignTask {
         env.ensure_ok("提交签到")?;
 
         ctx.progress(3, 3, "回查签到结果");
+        // 旧 TS `tasks/sign/task.ts:56`：提交之后、**再次获取签到状态以确认**（那句
+        // `await sleep(1000)` ✓）之前要等一拍 —— 入账不是同步的，立刻回查会读到旧状态，
+        // 表现就是"签上了却报没签上" ✗。
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         let after = query_status(ctx).await?;
 
         if !after.signed_today() {

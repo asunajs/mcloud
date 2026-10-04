@@ -233,6 +233,13 @@ pub enum Step {
     Upload(UploadShape),
     /// 把这趟传上去的**第一个**文件分享出去、再立刻删掉外链（434）。
     Share,
+    /// 「从固定入口进一次」的埋点 + 补一发打卡（409 / 1005）。
+    ///
+    /// ⚠ 与另外两档不同的地方：它**额外再打一次卡** —— TS 在这两个 runner 内部
+    /// 各自 `clickTask` 了一发（`runners.ts:107` / `:133`），而 `handleTaskClick`
+    /// 那发是按步数打的 ⇒ **两发都要** ✓。key 由 [`click_key`] 给
+    ///（409 → `task2` ✓，1005 → 默认 `task` ✓）。
+    Entry,
 }
 
 /// 这一条该做哪件事。判不出来 ⇒ `None`（**什么都不做**）。
@@ -242,6 +249,10 @@ pub enum Step {
 /// * 上传那三档见 [`upload_shape_for`]（`runners.ts` 的 106 / 522、`tasks.ts` 的 beiyong1）
 /// * 434 见 `runners.ts:68-88`
 pub fn step_for(item: &TaskV2Item) -> Option<Step> {
+    // 409 / 1005：两条"从固定入口访问云朵中心"（`runners.ts:98-108` / `:126-133`）。
+    if matches!(item.task_id, Some(409 | 1005)) {
+        return Some(Step::Entry);
+    }
     if item.task_id == Some(SHARE_TASK_ID) {
         return Some(Step::Share);
     }
@@ -544,7 +555,11 @@ impl AppTaskResult {
 /// ⚠ 这一版最初把顺序写反了（先传再打卡），理由是我自己推的
 /// "打卡是'我做完了'的声明，声明在动作之前就是撒谎" —— **两边参考都不支持那句**。
 /// 从第一原理推出来的行为，只要与参考相反，就是错的。
-pub async fn run_app_task(ctx: &TaskContext, pace_ms: i64) -> Result<AppTaskResult> {
+pub async fn run_app_task(
+    ctx: &TaskContext,
+    pace_ms: i64,
+    only_task_ids: &[i64],
+) -> Result<AppTaskResult> {
     let mut result = AppTaskResult::default();
 
     // ① 读整张表（十六组，逐次容错）。
@@ -586,6 +601,13 @@ pub async fn run_app_task(ctx: &TaskContext, pace_ms: i64) -> Result<AppTaskResu
         .filter(|i| should_act(i))
         .filter(|i| !is_configured_skip(i, &ctx.account.settings.skip_tasks))
         .filter(|i| !month_gate_skips(i, result.month_backup, day))
+        // 🧪 调试闸（`onlyTaskIds`）：留空 ⇒ 不筛。有它才敢"只试一条"
+        //（2026-10-04 用户口径：这么多任务，得有个方便调试单条的接口）。
+        .filter(|i| {
+            only_task_ids.is_empty()
+                || i.task_id
+                    .is_some_and(|id| only_task_ids.contains(&id))
+        })
         .filter_map(|i| step_for(i).map(|s| (i.clone(), s)))
         .collect();
     result.planned = planned.len();
@@ -634,6 +656,33 @@ pub async fn run_app_task(ctx: &TaskContext, pace_ms: i64) -> Result<AppTaskResu
 
         // ③-b 门过了 ⇒ 做那一件事。
         // ⚠ 434 与上传**互斥**（见 `Step`）：它消费的是别人生产的文件。
+        if matches!(step_kind, Step::Entry) {
+            match entry_do_task(ctx).await {
+                Ok(()) => {}
+                // 埋点失败**不挡路**（TS 那句 `tryRequest` 也不看结果 ✓）
+                Err(e) => step
+                    .problems
+                    .push(format!("入口埋点没打成（不影响后面的打卡）：{e}")),
+            }
+            // 旧 TS：埋点 → `sleep(500)` → `clickTask`。
+            if pace_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(pace_ms as u64)).await;
+            }
+            match click(ctx, item).await {
+                Ok(notice) => {
+                    step.clicked = true;
+                    if let Some(n) = notice {
+                        step.problems.push(format!("上游附言：{n}"));
+                    }
+                }
+                Err(e) => step.problems.push(format!("入口那一发打卡失败：{e}")),
+            }
+            if step.clicked {
+                result.acted += 1;
+            }
+            result.steps.push(step);
+            continue;
+        }
         let Step::Upload(shape) = step_kind else {
             // 434：先打卡（门），成了再分享。
             match share_first_uploaded(ctx, &result.file_ids).await {
@@ -670,6 +719,14 @@ pub async fn run_app_task(ctx: &TaskContext, pace_ms: i64) -> Result<AppTaskResu
 
         if step.uploaded > 0 || step.clicked {
             result.acted += 1;
+            // 旧 TS `tasks.ts:41-46`（`handleTaskClick`）做完一条之后那句
+            // `await sleep(500)` —— **只对真动过的条目**等：没做的事（`clicked=false`
+            // 且一个文件都没传）在 TS 那边根本不进 `handleTaskClick`，也就不等 ✗。
+            // ⚠ 这与 522 循环体内那一拍是**两处**，TS 两处都有
+            //（`runners.ts:117-125` 的循环 + 这里）⇒ 别把哪一处当重复删掉。
+            if pace_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(pace_ms as u64)).await;
+            }
         }
         result.steps.push(step);
     }
@@ -776,6 +833,44 @@ async fn upload_one_file(ctx: &TaskContext) -> Result<Option<String>> {
     Ok(Some(file_id))
 }
 
+/// 🧪 调试闸：`body.onlyTaskIds`（`"106,522"` 或 `[106,522]`）⇒ 只动这几条。
+///
+/// 留空 ⇒ 不筛（正常跑）。这条存在只为一件事：**单独试一条任务**时不连带动别的
+///（用户口径 2026-10-04：「做个方便调试某个具体任务的接口，比较有这么多任务」）。
+fn parse_only_task_ids(body: &Value) -> Vec<i64> {
+    let raw = body.get("onlyTaskIds");
+    let mut out: Vec<i64> = Vec::new();
+    match raw {
+        Some(Value::Array(items)) => {
+            for v in items {
+                if let Some(n) = v.as_i64() {
+                    out.push(n);
+                }
+            }
+        }
+        Some(Value::String(s)) => {
+            for part in s.split([',', '，', ' ', '\n']) {
+                if let Ok(n) = part.trim().parse::<i64>() {
+                    out.push(n);
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// 「从固定入口进一次」那一发埋点（409 / 1005）。
+///
+/// 旧 TS `runners.ts:98-108` / `:126-133`。`deviceId` 用 smid 换回来的那一个 ✓。
+async fn entry_do_task(ctx: &TaskContext) -> Result<()> {
+    let device_id = crate::signin::h5_device_id(ctx, None).await;
+    let req = mcloud_upstream::app_task_entry::entry_do_task_request(device_id.as_deref())?;
+    let resp = ctx.http.request(req).await?;
+    mcloud_upstream::session::ensure_http_ok(&resp, "入口埋点（page/doTask）")?;
+    Ok(())
+}
+
 /// 打卡用的 `key`。默认 `task`；个别任务按参考实现换成专用值。
 ///
 /// ⚠⚠ **`key` 不是"任务分组"** —— 这里从前发的是 `item.group_id`
@@ -869,9 +964,20 @@ impl Task for AppTaskTask {
         "把 App 任务矩阵里能做的做掉：按玩法传文件、逐条打卡（传上去的文件跑完自己删）"
     }
 
-    async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
+    fn params(&self) -> Vec<mcloud_engine::ParamSpec> {
+        vec![mcloud_engine::ParamSpec::text(
+            "onlyTaskIds",
+            "只做这些 id（调试用）",
+            "留空 = 照常跑全表；填了就**只动这些 id**（逗号分隔，例如 106）。\
+             给「想单独试一条任务」用的 —— 列表有 25 条、每条副作用不同，\
+             不筛就会连带动别的。正常跑别填。",
+        )]
+    }
+
+    async fn run(&self, ctx: &TaskContext, body: &Value) -> TaskResult {
         ctx.check_cancelled()?;
-        let result = run_app_task(ctx, self.pace_ms).await?;
+        let only_task_ids = parse_only_task_ids(body);
+        let result = run_app_task(ctx, self.pace_ms, &only_task_ids).await?;
         ctx.details(serde_json::json!({
             "kind": "app-task",
             "planned": result.planned,
