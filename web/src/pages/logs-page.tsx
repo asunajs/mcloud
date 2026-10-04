@@ -36,6 +36,17 @@ const kindOf = (level: string): LogKind =>
 /** 级别的高低（与后端 `logbuf::rank_of` **同一个口径** ✓，别各定一套 ✗）。 */
 const RANK: Record<string, number> = { error: 4, warn: 3, info: 2, debug: 1 }
 
+/** 滚动容器的 id（`load()` 靠它取/写滚动位置 ✓）。 */
+const SCROLL_ID = 'logs-scroll'
+
+/**
+ * 「算用户还在看最新那几条」的容差（px）。
+ *
+ * 一行是 20px（`leading-5`）⇒ 32 约等于"一行半"：手指/滚轮的落点误差装得下 ✓，
+ * 又不会把"正往上翻"误判成"还贴着底" ✓。
+ */
+const TAIL_SLACK = 32
+
 export const LogsPage = () => {
   const lines = ref<ServerLogLine[]>([])
   const level = ref('')
@@ -55,7 +66,37 @@ export const LogsPage = () => {
    * ⚠ 800 而不是 2000：这是**浏览器**要渲染的 DOM 行数 ✓（环是 2000 ✓）。
    * 一屏看 800 行已经远超需要 ✓，多了只会让每 2 秒那次重建变卡 ✗。
    */
+  /**
+   * 滚动容器。⚠ 卡片是**常驻**的（见下面 JSX 那段注释 ✓）⇒ 这个节点自始至终是同一个 ✓，
+   * 拿它读/写滚动位置才有意义 ✓。
+   */
+  const scroller = () => document.getElementById(SCROLL_ID)
+
   const load = async () => {
+    /**
+     * ⚠⚠ **更新前先记下滚动位置**（2026-10-04 用户报：「服务端日志页面出日志会强制滚动到顶部」✗）。
+     *
+     * 怎么坏的：这一页每 2 秒把整份列表换掉 ✓，而原先那张卡片（连同里面这个滚动容器）
+     * 是写在 `{visible().length > 0 ? … : null}` 里的 ⇒ 条件每次重算都**换一颗新节点**
+     * ⇒ 新节点的 `scrollTop` 天然是 0 ⇒ 用户滚到哪儿都被弹回**最旧的那一屏** ✗。
+     * 实测（夹具 300 行、无头 Chrome）：轮询前 `scrollTop=5434`、轮询后 `scrollTop=0`
+     * 且容器已经不是同一个节点 ✓。JSX 那边把卡片改成常驻就是从根上治它 ✓。
+     *
+     * 这里再显式记/写一次，是因为**行本身**也是整批换的（`createFor` 按 item 身份复用，
+     * 而轮询回来的行都是新对象 ⇒ 每行都重建），中途高度会短暂归零、位置会被钳 ⇒
+     * 写回去才是确定的 ✓。
+     *
+     * 两条分支：
+     * * 更新前就贴着底（或**首次**拿到数据、那时还没有容器 ✓）⇒ 更新后钉回底部 ✓
+     *   —— 这一页是"看现在正在发生什么" ✓，新行一进来就该看得见 ✓；
+     * * 否则把 `prevTop` **原样写回** ✓ —— 用户正往上翻的时候内容一变就把人弹走，
+     *   是排查时最烦的 ✗。
+     */
+    const before = scroller()
+    const prevTop = before?.scrollTop ?? 0
+    const pinned = before
+      ? before.scrollHeight - before.scrollTop - before.clientHeight <= TAIL_SLACK
+      : true
     try {
       lines.value = await listServerLogs({ limit: 800 })
       state.value = 'ready'
@@ -63,6 +104,8 @@ export const LogsPage = () => {
       errorMessage.value = e instanceof Error ? e.message : String(e)
       state.value = 'error'
     }
+    const after = scroller()
+    if (after) after.scrollTop = pinned ? after.scrollHeight : prevTop
   }
 
   onMounted(() => {
@@ -127,21 +170,35 @@ export const LogsPage = () => {
         <p class="text-sm opacity-70">没有匹配的日志（缓冲只留最近 2000 行 ✓，这里取的是最近 800 行 ✓）。</p>
       ) : null}
 
-      {visible().length > 0 ? (
-        <div class="card bg-base-100 shadow-sm">
-          <div class="card-body gap-2">
-            <div class="max-h-[70vh] overflow-y-auto overscroll-contain rounded-box bg-base-200 p-3 font-mono text-xs leading-5">
-              {visible().map((l, i) => (
-                // ⚠ 时间、标记、正文、来源拼成**一个**表达式 ✓（lite 编译器对
-                // "元素旁边的裸文本节点"支持最薄 ✓ —— 这个坑在别的页面踩过 ✓）。
-                <div key={i} class={`break-words ${TONE[kindOf(l.level)]}`}>
-                  {`${fmtStampMs(l.at_ms)}  ${MARK[kindOf(l.level)]}  ${l.message}  ·  ${l.target}`}
-                </div>
-              ))}
-            </div>
+      {/*
+        ⚠⚠ 这张卡片**常驻**，可见性走 `class`（`hidden`）—— 别改回 `{… ? <div> : null}` ✗。
+
+        条件写在外面的后果（2026-10-04 用户报「出日志会强制滚动到顶部」）：
+        `setNodes` 的语义是"先把上次铺的撤掉、再铺新的"（`lite/src/dom.ts`），
+        于是**条件每重算一次就换一颗新节点** —— 连同里面那个滚动容器 ✓。
+        新节点的 `scrollTop` 是 0 ⇒ 每 2 秒轮询一次就把用户弹回最旧的那一屏 ✗。
+        改成常驻之后，容器节点从头到尾是同一个 ✓，滚动位置由 `load()` 显式记/写 ✓。
+
+        ⚠ 这里必须用 `hidden` 而不是"给个空 class"：`.card` 自带 `display:flex`
+        （`app.css` 的 `@layer components`），空 class 只会露出一个空盒子 ✗。
+        而 `hidden` 住在 utilities 层、层序在后 ⇒ 压得住它 ✓（见 `app.css` 顶部那段层序说明）。
+      */}
+      <div class={`card bg-base-100 shadow-sm ${visible().length > 0 ? '' : 'hidden'}`}>
+        <div class="card-body gap-2">
+          <div
+            id={SCROLL_ID}
+            class="max-h-[70vh] overflow-y-auto overscroll-contain rounded-box bg-base-200 p-3 font-mono text-xs leading-5"
+          >
+            {visible().map((l, i) => (
+              // ⚠ 时间、标记、正文、来源拼成**一个**表达式 ✓（lite 编译器对
+              // "元素旁边的裸文本节点"支持最薄 ✓ —— 这个坑在别的页面踩过 ✓）。
+              <div key={i} class={`break-words ${TONE[kindOf(l.level)]}`}>
+                {`${fmtStampMs(l.at_ms)}  ${MARK[kindOf(l.level)]}  ${l.message}  ·  ${l.target}`}
+              </div>
+            ))}
           </div>
         </div>
-      ) : null}
+      </div>
     </div>
   )
 }
