@@ -30,12 +30,15 @@ pub const TASK_CLICK_DEFAULT_KEY: &str = "task";
 
 /// 构造打卡请求。
 ///
-/// `key` 是任务分组（`taskListV2` 里那几组 `new` / `beiyong1` / `day` / `month` …），
 /// `id` 是任务的数字 id。
 ///
-/// ⚠ `key` 走 `percent_encode`：它是查询串里的一格，而分组名将来可能带上非
-/// 字母数字的字符 —— 到那时"少一层编码"的表现是上游回一个**业务码**，
-/// 不像"我们拼错了 URL"。
+/// ⚠ `key` **不是**任务分组（从前这里写成 `day` / `month` / `time` 那几组 ✗，没有依据）。
+/// 参考实现默认是 [`TASK_CLICK_DEFAULT_KEY`]（`helpers.ts:10` 的 `taskStr ?? "task"`），
+/// 只有个别任务用专用值：`409 → task2`（`runners.ts:107`）、`478/481 → randomCloudTask`
+/// （`index.ts:51,54`）；挑选逻辑在 `mcloud_tasks::app_task` 的 `click_key`。
+///
+/// ⚠ `key` 走 `percent_encode`：它是查询串里的一格 —— "少一层编码"的表现是上游回一个
+/// **业务码**，不像"我们拼错了 URL"。
 pub fn task_click_request(key: &str, task_id: i64) -> Result<HttpRequest> {
     if task_id <= 0 {
         return Err(Error::Config(format!(

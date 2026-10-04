@@ -776,12 +776,37 @@ async fn upload_one_file(ctx: &TaskContext) -> Result<Option<String>> {
     Ok(Some(file_id))
 }
 
+/// 打卡用的 `key`。默认 `task`；个别任务按参考实现换成专用值。
+///
+/// ⚠⚠ **`key` 不是"任务分组"** —— 这里从前发的是 `item.group_id`
+/// （`day` / `month` / `time` / `hidden`）✗，参考实现里根本没有这个形状：
+///
+/// | 出处 | 值 |
+/// |---|---|
+/// | `mcloud-sign/…/tasks/app/helpers.ts:10` | 默认 `taskStr ?? "task"` |
+/// | `runners.ts:107` | `409` → `task2`（**按任务**给，不是按分组）|
+/// | `index.ts:51,54` | `478` / `481` → `randomCloudTask` |
+///
+/// 本仓发分组名这件事**没有任何实拍或黄金向量支持**（`test/golden/` 里没有
+/// `task/click` 的向量），而真机读数正好相反：2026-10-04 用户实测 106 —— 那趟记录
+/// 是 `{uploaded:1, clicked:true, problems:[]}`，可上游的 `state` 始终是 `WAIT` ✗。
+fn click_key(task_id: Option<i64>) -> &'static str {
+    match task_id {
+        // `runners.ts:107`：409「从固定入口进入云朵中心」。
+        // ⚠ 本仓目前不对它打卡（`step_for` 里没有 409），写在这里是为了将来接上时不漏。
+        Some(409) => "task2",
+        // `index.ts:51,54`：这两条同上，本仓也还没接。
+        Some(478) | Some(481) => "randomCloudTask",
+        _ => app_task_click::TASK_CLICK_DEFAULT_KEY,
+    }
+}
+
 /// 打一发「这条我做完了」。
 async fn click(ctx: &TaskContext, item: &TaskV2Item) -> Result<Option<String>> {
     let Some(id) = item.task_id else {
         return Err(mcloud_core::Error::Config("这一条没有 id，不打卡".into()));
     };
-    let key = item.group_id.as_deref().unwrap_or("");
+    let key = click_key(item.task_id);
     let req: HttpRequest = app_task_click::task_click_request(key, id)?;
     let resp = ctx.http.request(req).await?;
     let body = mcloud_upstream::session::ensure_http_ok(&resp, "打卡（task/click）")?;

@@ -1026,3 +1026,29 @@ fn task_name_from_upstream_has_its_html_stripped() {
     // 未闭合的 `<` 别把后面整段吃掉（宁可留着，也别静默丢内容 ✗）
     assert_eq!(super::clean_task_name("a < b 上传"), "a < b 上传");
 }
+
+/// ⭐ `task/click` 的 `key` 是 **`task`**，不是任务分组名。
+///
+/// # 为什么这条要紧
+///
+/// 2026-10-04 用户实测 106：那趟记录是 `{uploaded:1, clicked:true, problems:[]}` ✓，
+/// 可上游 `state` **始终是 `WAIT`** ✗ —— 打卡发的是 `key=day`（分组名 ✗），
+/// 而参考实现默认发 `task`（`…/app/helpers.ts:10` 的 `taskStr ?? "task"`）。
+/// 从前**没有任何测试**钉这一格 ⇒ 错了很久没人发现 ✓。
+#[test]
+fn click_key_is_task_not_a_group_name() {
+    assert_eq!(click_key(Some(106)), "task");
+    assert_eq!(click_key(Some(522)), "task");
+    assert_eq!(click_key(Some(434)), "task");
+    assert_eq!(click_key(None), "task", "没 id 也走默认值（不发 key=空）");
+    assert_eq!(click_key(Some(409)), "task2", "409 按参考实现给专用值");
+
+    // 真请求上也带着它
+    let req = mcloud_upstream::app_task_click::task_click_request(click_key(Some(106)), 106)
+        .expect("构造打卡请求");
+    assert!(
+        req.url.contains("key=task&id=106"),
+        "打卡 URL 必须是 key=task：{}",
+        req.url
+    );
+}
