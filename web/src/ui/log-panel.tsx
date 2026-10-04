@@ -7,8 +7,19 @@
  * ⚠ 本组件**只画**：行数与截断由调用方的 [`pushLog`] 管（两页共用同一个上限）。
  */
 
+/**
+ * 日志的**分类** —— 照老项目 `mcloud-sign` 的 consola `type` 体系 ✓
+ * （后端 `LogKind` 一一对应 ✓，别各定一套 ✗）。
+ *
+ * ⚠ 与"严重级别"是两件事：级别管筛选/告警 ✓，分类管**这一行是什么** ✓。
+ * 只有级别时「领到了 6 颗」和「这一笔没领到」都是 info ✗ ——
+ * 用户 2026-10-04 原话：「info warn error **success** 等等标记都没有，
+ * 更别说颜色」✓。
+ */
+export type LogKind = 'info' | 'success' | 'fail' | 'warn' | 'error' | 'start' | 'debug'
+
 export interface LogLine {
-  kind: 'info' | 'warn' | 'error'
+  kind: LogKind
   text: string
   at: number
 }
@@ -18,11 +29,36 @@ export interface LogLine {
  *
  * 这里刻意用语义色 + `opacity`，不用 `gray-*` 之类的具名色阶 ——
  * 那些不随主题变，深色模式下必然出现"浅字压深底"。
+ *
+ * ⚠ 这些语义色必须在 `app.css` 的 `@theme` 里注册过 ✓，否则类名会
+ * **静默不生成**（写了也不报错、就是没颜色 ✗，见 AGENTS.md 那条坑 ✓）。
  */
-const TONE: Record<LogLine['kind'], string> = {
+const TONE: Record<LogKind, string> = {
   info: 'opacity-90',
+  success: 'text-success',
+  // `fail`（某一笔没成）与 `warn` 同色 ✓：都不是"整个挂了"✗，但也别一片绿 ✓
+  fail: 'text-warning',
   warn: 'text-warning',
   error: 'text-error',
+  start: 'text-info',
+  debug: 'opacity-50',
+}
+
+/**
+ * 行首的**文字标记** ✓ —— 与颜色**成对**给，别只给颜色 ✗。
+ *
+ * 理由很实在：截图里、暗色主题下、色觉差异的人眼里，颜色都可能分不出来 ✓，
+ * 而 `SUCCESS`／`FAIL` 这几个字在任何情况下都读得出来 ✓。
+ * 等宽字体下按最长那个（`SUCCESS`）对齐 ✓。
+ */
+const MARK: Record<LogKind, string> = {
+  info: 'INFO   ',
+  success: 'SUCCESS',
+  fail: 'FAIL   ',
+  warn: 'WARN   ',
+  error: 'ERROR  ',
+  start: 'START  ',
+  debug: 'DEBUG  ',
 }
 
 /**
@@ -61,8 +97,10 @@ export const LogPanel = (props: { get: () => LogLine[] }) => (
           <h2 class="card-title text-base">运行日志</h2>
           <div class="h-64 overflow-y-auto overscroll-contain rounded-box bg-base-200 p-3 font-mono text-xs leading-5">
             {props.get().map((l, i) => (
+              // ⚠ 标记与正文拼在**一个**表达式里：lite 编译器对"元素旁边的裸文本
+              // 节点"支持得最薄 ✓，拼成一整串最稳 ✓。
               <div key={i} class={`break-words ${TONE[l.kind]}`}>
-                {l.text}
+                {`${MARK[l.kind]}  ${l.text}`}
               </div>
             ))}
           </div>

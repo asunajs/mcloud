@@ -205,8 +205,10 @@ export const TasksPage = () => {
         say('info', `任务开始：${ev.task} / ${accountName(ev.account)}`)
         break
       case 'log':
+        // 优先用后端给的**分类** ✓（`success`/`fail`/`start` …）：面板靠它上
+        // 徽章与颜色 ✓。老后端没这一格 ⇒ 按级别兜底 ✓（只能三分 ✓）。
         say(
-          ev.level === 'error' ? 'error' : ev.level === 'warn' ? 'warn' : 'info',
+          ev.kind ?? (ev.level === 'error' ? 'error' : ev.level === 'warn' ? 'warn' : 'info'),
           ev.message,
         )
         break

@@ -67,7 +67,9 @@ const RUN_LOG_DIALOG_ID = 'run-log-dialog'
  */
 const toLogLines = (lines: RunLogLine[]): LogLine[] =>
   lines.map((l) => ({
-    kind: l.level === 'error' ? 'error' : l.level === 'warn' ? 'warn' : 'info',
+    // ⚠ 优先用**后端给的分类** ✓（info/success/fail/start…）；只有老记录没有它时
+    // 才按级别兜底 ✓ —— 兜底出来的只能三分，颜色会丢掉"成功/失败"的区别 ✓。
+    kind: l.kind ?? (l.level === 'error' ? 'error' : l.level === 'warn' ? 'warn' : 'info'),
     text: l.message,
     at: l.at_ms,
   }))

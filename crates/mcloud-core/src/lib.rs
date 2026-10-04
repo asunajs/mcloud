@@ -31,7 +31,7 @@ pub mod testkit;
 pub use account::{Account, AccountId, AccountSettings, AuthInfo, DeviceId, PcPlatform};
 pub use cancel::CancelToken;
 pub use error::{Error, Result};
-pub use event::{LogLevel, RunEvent, SeqAllocator, Sequenced};
+pub use event::{LogKind, LogLevel, RunEvent, SeqAllocator, Sequenced};
 pub use exchange::ExchangeSubscription;
 pub use kouling::{
     ClaimVerdict, KoulingPool, KoulingSource, KoulingState, LiveSession, PoolCode, PoolSummary,

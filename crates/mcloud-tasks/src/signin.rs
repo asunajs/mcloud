@@ -301,7 +301,10 @@ impl Task for ReceiveTask {
         // 2. 多账号时日志是交错的一条流 ⇒ 只在末行汇总的话，那一行早被别人的
         //    进度冲走了 ✗。
         let mut note_failure = |msg: String| {
-            ctx.warn(&msg);
+            // ⚠ 用 `fail` 而不是 `warn`：**级别**都是 warn ✓，但**分类**不同 ✓
+            // ⇒ 界面上是 `FAIL` 标记 + 黄字，一眼能挑出"这一笔没成" ✓
+            //（用户 2026-10-04 口径：「info warn error success 等等标记都没有」✓）。
+            ctx.fail(&msg);
             failed.push(msg);
         };
 
@@ -320,6 +323,7 @@ impl Task for ReceiveTask {
                     continue;
                 }
                 proto::cloud_type::EXPANSION => {
+                    ctx.start("领取延期AI豆");
                     ctx.progress(step, total_steps, "领取延期AI豆");
                     let req = proto::receive_task_expansion_request(item.accept_date.as_deref());
                     // ⚠⚠ 这一笔失败**只跳过它自己** —— 见 `failed` 的说明。
@@ -329,6 +333,8 @@ impl Task for ReceiveTask {
                                 // `receiveTaskExpansion` 的 result 是**裸数字**（实拍
                                 // `result: 100`），不是对象 —— 所以这里不解析形状。
                                 claimed_ids.push("延期领取（实拍不返回份数）".to_string());
+                                // 一件件报"成了" ✓ —— 逐笔的绿标记才看得出进展 ✓
+                                ctx.success("延期领取 ✓（实拍不返回份数）");
                             }
                             Err(e) => note_failure(format!("延期领取：{e}")),
                         },
@@ -340,6 +346,8 @@ impl Task for ReceiveTask {
                     //
                     // ⚠ `deviceId` 在这一条上是**必填**（H5 标了 `isDeviceId`），
                     // 不带会回 `615` —— 而签到那两条不带没事，别外推。
+                    // 这一步开始了 ✓（分类 START ⇒ 蓝标记 ✓）
+                    ctx.start(format!("领取AI豆（第 {step}/{total_steps} 笔）"));
                     ctx.progress(step, total_steps, "领取AI豆");
                     // `receive_v3_request` 的 `deviceId` 是**必填 `&str`**（漏发在编译期就
                     // 暴露）。真取不到时**不发**：上游对"没带"回 615、对"内容错"回 614 ——
@@ -359,6 +367,9 @@ impl Task for ReceiveTask {
                             Ok(got) => {
                                 total_gained += got.receive;
                                 claimed_ids.push(format!("+{} AI豆", got.receive));
+                                // ⚠ 逐笔绿的 ✓：这是用户最想看的一行 ——
+                                // "这一笔到底领到了几颗" ✓。
+                                ctx.success(format!("领到 {} AI豆 ✓", got.receive));
                             }
                             Err(e) => note_failure(format!("领取AI豆（解析失败）：{e}")),
                         },

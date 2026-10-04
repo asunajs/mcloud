@@ -18,7 +18,7 @@ pub use registry::{ParamKind, ParamSpec, Registry, Task, TaskGroup, TaskMeta};
 pub use runner::{HttpClientFactory, Runner};
 pub use scheduler::{next_fire_at, Decision, FireOutcome, Scheduler, SchedulerState};
 
-use mcloud_core::{Account, TaskOutcome};
+use mcloud_core::{Account, LogKind, LogLevel, TaskOutcome};
 use std::sync::Arc;
 
 /// 任务执行上下文。
@@ -80,21 +80,39 @@ impl TaskContext {
 impl TaskContext {
     /// 发一条信息级日志。
     pub fn info(&self, msg: impl Into<String>) {
-        use mcloud_core::{LogLevel, RunEvent};
-        self.sink.emit(RunEvent::Log {
-            run_id: self.run_id,
-            level: LogLevel::Info,
-            message: msg.into(),
-            at_ms: self.clock.now_ms(),
-        });
+        self.log(LogKind::Info, LogLevel::Info, msg);
     }
 
     /// 发一条警告。
     pub fn warn(&self, msg: impl Into<String>) {
-        use mcloud_core::{LogLevel, RunEvent};
+        self.log(LogKind::Warn, LogLevel::Warn, msg);
+    }
+
+    /// 「这件事**做成了**」—— 与 `info` 只差**分类** ✓（界面给绿徽章 ✓）。
+    pub fn success(&self, msg: impl Into<String>) {
+        self.log(LogKind::Success, LogLevel::Info, msg);
+    }
+
+    /// 「**这一笔**没做成」—— 分类是 `fail`、级别是 **warn** ✓。
+    ///
+    /// ⚠ 别升到 `error` ✗：`OnlyError` 会把"某一笔没成"当成"整个挂了"推送 ✓，
+    /// 而它**不等于**整次运行失败（那由 `TaskOutcome` 说话 ✓）。
+    pub fn fail(&self, msg: impl Into<String>) {
+        self.log(LogKind::Fail, LogLevel::Warn, msg);
+    }
+
+    /// 「开始做某一步」—— 一屏日志里最该一眼看见的那些行的起手式 ✓。
+    pub fn start(&self, msg: impl Into<String>) {
+        self.log(LogKind::Start, LogLevel::Info, msg);
+    }
+
+    /// 所有日志走的**唯一**出口 ✓（分类 + 级别 + 文本 + 时刻 ✓）。
+    fn log(&self, kind: LogKind, level: LogLevel, msg: impl Into<String>) {
+        use mcloud_core::RunEvent;
         self.sink.emit(RunEvent::Log {
             run_id: self.run_id,
-            level: LogLevel::Warn,
+            level,
+            kind,
             message: msg.into(),
             at_ms: self.clock.now_ms(),
         });

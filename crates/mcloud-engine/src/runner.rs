@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mcloud_core::{
-    Account, AccountId, Clock, EventSink, HttpClient, LogLevel, Result, RunEvent, RunId,
+    Account, AccountId, Clock, EventSink, HttpClient, LogKind, LogLevel, Result, RunEvent, RunId,
     RunLogLine, RunRecord, RunStatus, Store, TaskOutcome, RUN_LOG_LIMIT,
 };
 
@@ -57,6 +57,7 @@ impl LogCollector {
         let mut out = Vec::with_capacity(tail.len() + 1);
         out.push(RunLogLine {
             level: LogLevel::Info,
+            kind: LogKind::Info,
             message: format!("…（这次运行前面还有 {dropped} 行，已省略）"),
             at_ms: at,
         });
@@ -75,11 +76,15 @@ impl EventSink for LogCollector {
         let line = match &safe {
             RunEvent::Log {
                 level,
+                kind,
                 message,
                 at_ms,
                 ..
             } => Some(RunLogLine {
                 level: *level,
+                // ⚠ 分类也要抄下来 ✓：界面按它上徽章与颜色，丢了它就只剩"级别" ✗
+                //（用户口径：「info warn error success 等等标记都没有」✓）。
+                kind: *kind,
                 message: message.clone(),
                 at_ms: *at_ms,
             }),
@@ -89,6 +94,8 @@ impl EventSink for LogCollector {
                 step, total, label, ..
             } => Some(RunLogLine {
                 level: LogLevel::Info,
+                // 进度行的分类用它自己的那档 ✓（界面给个"步骤"样式的标记 ✓）
+                kind: LogKind::Start,
                 message: format!("[{step}/{total}] {label}"),
                 at_ms: at,
             }),
@@ -481,6 +488,8 @@ impl Runner {
             sink.emit(RunEvent::Log {
                 run_id,
                 level: mcloud_core::LogLevel::Warn,
+                // 分类同样是警告（这一条是"网盘里留了没清的文件"✓）
+                kind: mcloud_core::LogKind::Warn,
                 message: format!(
                     "本次运行在网盘里留下 {} 个未清理的文件（清单见运行记录）：{}",
                     leftovers.len(),

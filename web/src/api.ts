@@ -9,6 +9,7 @@
  */
 
 import { classifyAuthFailure, noteAuthOk, noteAuthRequired } from './ui/auth-signal'
+import type { LogKind } from './ui/log-panel'
 // 转出给页面用：页面只 import `api` 就够了，不必知道状态存在哪个模块里
 export type { AuthState } from './ui/auth-signal'
 export { currentUser } from './ui/auth-signal'
@@ -75,6 +76,8 @@ export type TaskOutcome =
  */
 export interface RunLogLine {
   level: 'debug' | 'info' | 'warn' | 'error'
+  /** 分类（界面按它上徽章与颜色 ✓）。老记录没有这一格 ⇒ 当 `info` 看 ✓。 */
+  kind?: LogKind
   message: string
   at_ms: number
 }
@@ -182,6 +185,13 @@ export type RunEvent =
       type: 'log'
       run_id: number
       level: 'debug' | 'info' | 'warn' | 'error'
+      /**
+       * 分类 ✓（`info/success/fail/warn/error/start/debug`）。
+       *
+       * ⚠ 可选：老后端 / 老记录没有这一格 ⇒ 渲染时按 `level` 兜底 ✓
+       * （兜底只能分出三档，会丢掉"成功/失败"的区别 ✓）。
+       */
+      kind?: LogKind
       message: string
       at_ms: number
     }

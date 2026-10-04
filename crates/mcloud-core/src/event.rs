@@ -16,6 +16,40 @@ pub enum LogLevel {
     Error,
 }
 
+/// 日志的**分类** —— 照老项目 `mcloud-sign` 的 consola `type` 体系 ✓
+/// （`info / success / fail / warn / error / start / debug / fatal` ✓）。
+///
+/// # 为什么它与 [`LogLevel`] 是两件事，不能合并
+///
+/// - [`LogLevel`] 是**严重级别**：筛选、`onlyError`、告警都看它 ✓；
+/// - `LogKind` 是**"这条日志是什么"**：界面按它给徽章与颜色 ✓。
+///
+/// 只有级别的话，「领到了 6 颗」和「这一笔没领到」**都是 info** ✗ ——
+/// 用户 2026-10-04 的原话就是「info warn error **success** 等等标记都没有，
+/// 更别说颜色」✓。老项目那套 type 正是干这个的 ✓。
+///
+/// ⚠ `Fail` 与 `Error` 的分工（别混 ✗）：
+/// `Fail` = **某一笔**没做成（级别仍是 warn ✓，不该触发 `onlyError` ✓）；
+/// `Error` = 整次运行/整条链出错 ✓。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogKind {
+    Info,
+    Success,
+    Fail,
+    Warn,
+    Error,
+    Start,
+    Debug,
+}
+
+impl Default for LogKind {
+    /// 缺省的分类：`Info` ✓ —— 老记录没有这一格，回落到它最不刺眼 ✓。
+    fn default() -> Self {
+        LogKind::Info
+    }
+}
+
 impl LogLevel {
     /// 是否达到给定的最低级别。
     pub fn gte(self, min: LogLevel) -> bool {
@@ -56,6 +90,9 @@ pub enum RunEvent {
     Log {
         run_id: RunId,
         level: LogLevel,
+        /// **分类**（界面按它上徽章与颜色 ✓）。老记录/老前端没有这一格 ⇒ 默认 [`LogKind::Info`] ✓。
+        #[serde(default)]
+        kind: LogKind,
         message: String,
         at_ms: i64,
     },
@@ -130,6 +167,7 @@ impl RunEvent {
         RunEvent::Log {
             run_id,
             level: LogLevel::Info,
+            kind: LogKind::Info,
             message: message.into(),
             at_ms,
         }
@@ -155,11 +193,15 @@ impl RunEvent {
             RunEvent::Log {
                 run_id,
                 level,
+                kind,
                 message,
                 at_ms,
             } => RunEvent::Log {
                 run_id: *run_id,
                 level: *level,
+                // ⚠ `kind` 必须**原样带过去** ✗→✓：漏了它，回看时所有分类
+                // 都会退化成 `Info`（颜色全丢 ✓），而且不报错 ✗。
+                kind: *kind,
                 message: redact(message),
                 at_ms: *at_ms,
             },

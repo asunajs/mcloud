@@ -184,6 +184,9 @@ impl TaskOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunLogLine {
     pub level: LogLevel,
+    /// 分类（界面按它上徽章与颜色 ✓）。老记录没有这一格 ⇒ `Info` ✓。
+    #[serde(default)]
+    pub kind: crate::event::LogKind,
     pub message: String,
     pub at_ms: i64,
 }
