@@ -228,18 +228,33 @@ try {
     await sleep(400)
     const backList = await probe(`({ rail: !!document.getElementById('config-rail'), detail: !!document.getElementById('config-detail') })`)
     check(`${w}px · 配置中心能退回列表`, backList.rail === true && backList.detail === false, JSON.stringify(backList))
-    // 「账号私有配置」那一栏的详情 —— 渠道表单 + 任务行为 + 功能开关，本页最宽的一屏
-    await cdp.eval(`[...document.querySelectorAll('#app [role="tab"]')].find((b) => b.textContent.includes('账号私有配置'))?.click()`)
+    // 「推送配置」那一栏的详情 —— 渠道表单 + 账号级设置 + 功能开关，本页最宽的一屏
+    await cdp.eval(`[...document.querySelectorAll('#app [role="tab"]')].find((b) => b.textContent.includes('推送配置'))?.click()`)
     await sleep(400)
     await cdp.eval(`document.querySelector('#config-rail button')?.click()`)
     await sleep(900)
     const push = await probe(`(() => ({
       overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
       sw: document.documentElement.scrollWidth, vw: window.innerWidth,
-      blocks: ['运行结果推送', '任务行为', '功能开关'].filter((t) => (document.getElementById('config-detail')?.textContent ?? '').includes(t)).length,
+      blocks: ['推送渠道', '账号级设置', '功能开关'].filter((t) => (document.getElementById('config-detail')?.textContent ?? '').includes(t)).length,
     }))()`)
-    check(`${w}px · 配置中心私有详情无横向溢出`, push.overflow === false, `scrollWidth ${push.sw} / 视口 ${push.vw}`)
-    check(`${w}px · 私有详情三块都在（作用域口径）`, push.blocks === 3, JSON.stringify(push))
+    check(`${w}px · 配置中心推送详情无横向溢出`, push.overflow === false, `scrollWidth ${push.sw} / 视口 ${push.vw}`)
+    check(`${w}px · 推送详情三块都在`, push.blocks === 3, JSON.stringify(push))
+    // 「任务配置」那一栏的详情：右栏分「公共配置 / 账号私有配置」两半，账号那一行也不能挤破
+    await cdp.eval(`[...document.querySelectorAll('#app [role="tab"]')].find((b) => b.textContent.includes('任务配置'))?.click()`)
+    await sleep(400)
+    // ⚠ 窄屏切 tab 之后落在**列表**那一屏（`drillOpen=false`）⇒ 不点一项就没有 `#config-detail`，
+    // 上面那句 `halves: 0` 就是这么来的（第一次写漏了这一步，红了一条）
+    await cdp.eval(`document.querySelector('#config-rail button')?.click()`)
+    await sleep(900)
+    const taskSide = await probe(`(() => ({
+      overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+      sw: document.documentElement.scrollWidth, vw: window.innerWidth,
+      halves: ['公共配置', '账号私有配置'].filter((t) => (document.getElementById('config-detail')?.textContent ?? '').includes(t)).length,
+      rows: [...document.querySelectorAll('#config-detail button')].filter((b) => b.textContent.trim() === '改它的推送').length,
+    }))()`)
+    check(`${w}px · 任务详情（公共 / 账号私有两半）无横向溢出`, taskSide.overflow === false, `scrollWidth ${taskSide.sw} / 视口 ${taskSide.vw}`)
+    check(`${w}px · 任务详情两半都在、账号各占一行`, taskSide.halves === 2 && taskSide.rows === 2, JSON.stringify(taskSide))
   }
 
   /**

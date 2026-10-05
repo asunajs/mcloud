@@ -6,23 +6,26 @@
  * 「重构任务页面，参考这种风格：上面切换任务配置还是推送配置，下面左边列出所有配置大项，
  * 右边主窗口是具体配置」——参照的是 NCM（网易云音乐任务系统）的「策略配置」页。
  *
- * ⚠⚠ **两块按"作用域"分，不是按"功能"分**（用户口径 2026-10-05 追加：
- * 「配置应该分为公共配置和账号私有配置」）。这条比"任务 / 推送"那种按功能切分要紧，
- * 因为**保存下去的是哪一份**决定它影响几个账号：
+ * ⚠⚠ **「公共 / 账号私有」是**每个任务内部**的分法，不是整页的分法**（用户口径 2026-10-05
+ * 两句话定死的）：
  *
- * | 顶部 tab | 作用域 | 左边的「配置大项」 | 右边 | 落盘在哪 |
- * |---|---|---|---|---|
- * | **公共配置** | **全实例一份** | 有参数的任务（注册表给的） | 那个任务的默认参数（`ParamField`） | `PUT /api/tasks/{name}/config` |
- * | **账号私有配置** | **每账号一份** | 已登录的账号 | 推送渠道 + 任务行为 + 功能开关 | `PUT /api/accounts/{id}/settings` |
+ * > 「我说的是**每个任务的配置**分为公共和账号私有」；
+ * > 「比如每个账号的推送就不一样，每个账号可能的上传路径不一样」。
  *
- * 右边那一栏里"账号私有"的三块就是后端 `AccountSettings` 的五格，各有归属：
- * `notify`（推送，`ui/push-editor.tsx`）、`backupWaitSecs` / `refreshTokenDays` / `skipTasks`
- * （任务行为，`ui/account-fields.tsx`）、`aiAvatarDailyLimit`（功能开关，同一个模块）。
- * ⇒ 后端那份 DTO **整体替换**语义下，这一页到底写回什么，取决于这里画了哪几格 ——
- * 所以"没画的格子原样带回"这条**必须**在提交时逐格守住（见 `savePrivate()`）。
+ * 所以顶部仍然是两栏，右边那一栏内部再分公共与私有：
  *
- * 不在这一页的公共项：**管理员口令 / 会话策略**在「设置」页（那是账号安全，不是任务配置），
- * **账号的凭据与设备号**在「账号」页 —— 两处都在页面上写明了去哪找 ✓。
+ * | 顶部 tab | 左边的「配置大项」 | 右边 |
+ * |---|---|---|
+ * | **任务配置** | 有参数的任务（注册表给的） | ① **公共配置**：这个任务的默认参数，**所有账号共用这一份** ② **账号私有配置**：**每个账号各一份**（今天这一半是"指路 + 现状"：每个账号一行、印它当前配了哪些推送、一键跳去改；**还没有**只对某个账号生效的任务参数 —— 后端也还没有这一格。⚠ 后端的 `skipTasks` 存的是**上游任务 id**（`Vec<i64>`，`app_task.rs:592` 那个 `is_configured_skip`），而界面上只有任务名 ⇒ 在拿到 id 之前，"跳过这个任务"**做不成**按账号的开关，别硬做 ✗） |
+ * | **推送配置** | 已登录的账号 | 这个账号的**推送渠道** + 账号级设置（备份等待 / 凭据阈值）+ 功能开关（AI 头像上限） |
+ *
+ * ⚠ 别把这两栏并成"公共配置 / 账号私有配置"两个 tab —— 那样**推送配置这个入口就没了**
+ * （2026-10-05 用户第一句就是问这个：「你为啥去掉了推送配置」）。推送是**账号级**的
+ * （与具体任务无关），它属于「推送配置」那一栏；而"这个账号跑这个任务时的私有项"
+ * 属于「任务配置」右边那半 ✗ 两者不是一回事。
+ *
+ * 落盘也分两处，别混：公共那半 `PUT /api/tasks/{name}/config`；账号私有那半
+ * `PUT /api/accounts/{id}/settings`（**整体替换** ⇒ 没画的格子必须原样写回）。
  *
  * # 为什么是**一页**而不是两页
  *
@@ -74,7 +77,7 @@ import {
   type TaskParamSpec,
 } from '../api'
 import { ParamField } from '../ui/param-field'
-import { createPushEditor, type PushEditorSnapshot } from '../ui/push-editor'
+import { createPushEditor, notifyChannelLabels, type PushEditorSnapshot } from '../ui/push-editor'
 import { createAccountFields, type AccountFieldsSnapshot } from '../ui/account-fields'
 import { EmptyState } from '../ui/empty-state'
 import { pushToast } from '../ui/toast'
@@ -89,7 +92,7 @@ export interface ConfigCenterPageProps {
 }
 
 type LoadState = 'loading' | 'error' | 'ready'
-type TabId = 'shared' | 'private'
+type TabId = 'task' | 'push'
 
 /** 一份任务参数草稿：表单值与"上次保存/载入的那一份"（未保存修改就是两者不等）。 */
 interface TaskDraft {
@@ -104,7 +107,7 @@ interface TaskDraft {
 // 本仓 `tasks-page.tsx` 的 `activeGroup` 是同一条口径（那个文件里写着为什么）。
 
 /** 当前 tab。用户切走再回来不该被丢回第一个 tab。 */
-const activeTab = ref<TabId>('shared')
+const activeTab = ref<TabId>('task')
 /** 选中的任务名 / 账号 id（空串 = 还没选）。 */
 const pickedTask = ref('')
 const pickedAccount = ref('')
@@ -191,6 +194,18 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
   const fieldsBaseline = ref('')
   let acctSeq = 0
 
+  /**
+   * 每个账号的设置（按 id 缓存）—— 「任务配置」右栏那半「账号私有配置」要它。
+   *
+   * 用户口径（2026-10-05）：「比如每个账号的推送就不一样，每个账号可能的上传路径不一样」
+   * ⇒ 这一半要能一眼看出**每个账号的差别**，今天能拿到的差别就是推送。
+   *
+   * ⚠ 打开一个任务时**并发拉一遍**（账号是个位数，不值得为一份摘要造接口）；
+   * 单个账号读不到只让那一行说"读不到"，不把整页弄红 ✓。
+   */
+  const acctViews = ref<Record<string, AccountSettings | null>>({})
+  const acctViewsState = ref<'idle' | 'loading' | 'ready'>('idle')
+
   // ── 宽屏 / 手机（两种形态只渲染一份，见文件头）────────────────────────
   const WIDE_QUERY = '(min-width: 768px)'
   const wide = ref(matchMedia(WIDE_QUERY).matches)
@@ -218,8 +233,11 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
   /** 刷新 = 列表 + 当前选中的那一份（都是重新从后端拉，草稿被服务端那份覆盖）。 */
   const refresh = () => {
     void load()
-    if (activeTab.value === 'shared' && pickedTask.value) void loadTaskConfig(pickedTask.value)
-    if (activeTab.value === 'private' && pickedAccount.value) void loadAccountSettings(pickedAccount.value)
+    if (activeTab.value === 'task' && pickedTask.value) {
+      void loadTaskConfig(pickedTask.value)
+      void loadAccountViews()
+    }
+    if (activeTab.value === 'push' && pickedAccount.value) void loadAccountSettings(pickedAccount.value)
   }
 
   const load = async () => {
@@ -272,7 +290,7 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
    * 时没有它就等于没法用。（不按 tab 分别设 —— 两个 tab 是同一个控件。）
    */
   const searchable = (): boolean =>
-    (activeTab.value === 'shared' ? configurable().length : accounts.value.length) > 6
+    (activeTab.value === 'task' ? configurable().length : accounts.value.length) > 6
 
   const ensureSelection = () => {
     if (state.value !== 'ready') return
@@ -280,12 +298,15 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
     if (!pickedTask.value || !taskItems().some((t) => t.name === pickedTask.value)) {
       pickedTask.value = configurable()[0]?.name ?? ''
     }
-    if (pickedTask.value && detailState.value === 'idle') void loadTaskConfig(pickedTask.value)
+    if (pickedTask.value && detailState.value === 'idle') {
+      void loadTaskConfig(pickedTask.value)
+      void loadAccountViews()
+    }
     // 账号：同上
     if (!accounts.value.some((a) => a.id === pickedAccount.value)) {
       pickedAccount.value = accounts.value[0]?.id ?? ''
     }
-    if (activeTab.value === 'private' && pickedAccount.value && pushState.value === 'idle') {
+    if (activeTab.value === 'push' && pickedAccount.value && pushState.value === 'idle') {
       void loadAccountSettings(pickedAccount.value)
     }
   }
@@ -312,6 +333,45 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
       detailError.value = e instanceof Error ? e.message : '读不到这个任务的配置'
       detailState.value = 'error'
     }
+  }
+
+  /**
+   * 拉一遍所有账号的设置（只给「账号私有配置」那半做摘要）。
+   *
+   * ⚠ 与任务那份**共用 `taskSeq`**：连着切两个任务时，先发的响应可能后到 ——
+   * 不挡住的话，A 的账号摘要会画到 B 的详情上 ✗。
+   */
+  const loadAccountViews = async () => {
+    const seq = taskSeq
+    if (accounts.value.length === 0) {
+      acctViews.value = {}
+      acctViewsState.value = 'ready'
+      return
+    }
+    acctViewsState.value = 'loading'
+    const pairs = await Promise.all(
+      accounts.value.map(async (a) => {
+        try {
+          return [a.id, await getAccountSettings(a.id)] as const
+        } catch {
+          // ⚠ 一个账号读不到（404 / 网络）不该把整页弄红 —— 那一行自己说"读不到" ✓
+          return [a.id, null] as const
+        }
+      }),
+    )
+    if (seq !== taskSeq) return
+    const next: Record<string, AccountSettings | null> = {}
+    for (const [id, s2] of pairs) next[id] = s2
+    acctViews.value = next
+    acctViewsState.value = 'ready'
+  }
+
+  /** 摘要：这个账号配了哪些推送渠道（读不到就说读不到，别装作"没配"）。 */
+  const pushSummaryOf = (id: string): string => {
+    const s2 = acctViews.value[id]
+    if (!s2) return acctViewsState.value === 'loading' ? '正在读这个账号的设置…' : '推送：读不到这个账号的设置'
+    const names = notifyChannelLabels(s2.notify)
+    return names.length > 0 ? '推送：' + names.join('、') : '推送：未配（这个账号收不到推送）'
   }
 
   /** 逐格比"当前值 / 上次保存的那一份"（比整体 `JSON.stringify` 更抗键序变化）。 */
@@ -356,6 +416,7 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
     // 手机上点了就铺详情；宽屏两边都在，这个标志不被读
     drillOpen.value = true
     void loadTaskConfig(name)
+    void loadAccountViews()
   }
 
   const saveTask = async () => {
@@ -528,7 +589,7 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
       // URL 预选：从任务卡点「配置」进来时，那一项就是选中的，手机上直接铺它的详情
       if (props.task) {
         pickedTask.value = props.task
-        activeTab.value = 'shared'
+        activeTab.value = 'task'
         drillOpen.value = true
       }
       prevRefresh = setPageRefresh({ run: () => refresh() })
@@ -557,15 +618,36 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
   // ── 渲染 ──────────────────────────────────────────────────────────────
 
   const openTab = (id: TabId) => {
+    if (id === activeTab.value) return
+    // ⚠ 切走之前先把没保存的收进草稿 —— 下面两条"切回来重新拉"会把内存里那份覆盖掉，
+    // 不收就变成"切一下 tab，刚敲的没了" ✗（草稿是普通 Map，见文件头那段 ⚠⚠）。
+    if (activeTab.value === 'task') stashTaskDraft()
+    else stashAccountDraft()
     activeTab.value = id
     // ⚠ 搜索词**跟着 tab 清掉**：两个 tab 搜的是不同的东西（任务名 / 账号名），
     // 带着上一栏的词切过去，多半只会看到"没有匹配的账号" —— 那不是用户想问的。
     taskQuery.value = ''
     // 换 tab 等于换了一批"配置大项" ⇒ 手机上先看列表（宽屏这个标志不被读）
     drillOpen.value = false
-    if (id === 'private' && pickedAccount.value && pushState.value === 'idle') {
-      void loadAccountSettings(pickedAccount.value)
+    // ⚠ **切回来时重新拉**：两栏动的是同几个后端对象（推送摘要要读账号设置，而账号设置
+    // 又是在「推送配置」里改的）⇒ 拿旧副本继续改，保存时会把对方刚存的改动盖掉 ✗。
+    if (id === 'push' && pickedAccount.value) void loadAccountSettings(pickedAccount.value)
+    if (id === 'task' && pickedTask.value) {
+      void loadTaskConfig(pickedTask.value)
+      void loadAccountViews()
     }
+  }
+
+  /**
+   * 从「账号私有配置」那一行跳到某个账号的推送那一栏。
+   *
+   * ⚠ 先选中再切栏：`openTab` 里那条"切到推送就重拉"于是拉的是**这个**账号 ✓
+   * （反过来写会先拉上一个账号、再被这里覆盖 ⇒ 白跑一趟）。
+   */
+  const openPushFor = (id: string) => {
+    pickedAccount.value = id
+    openTab('push')
+    drillOpen.value = true
   }
 
   const tabs = () => (
@@ -575,25 +657,25 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
       <button
         type="button"
         role="tab"
-        aria-selected={activeTab.value === 'shared'}
+        aria-selected={activeTab.value === 'task'}
         class={`btn join-item btn-sm min-h-11 flex-1 whitespace-nowrap md:min-h-0 md:flex-none ${
-          activeTab.value === 'shared' ? 'btn-primary' : 'btn-soft'
+          activeTab.value === 'task' ? 'btn-primary' : 'btn-soft'
         }`}
-        onClick={() => openTab('shared')}
+        onClick={() => openTab('task')}
       >
-        公共配置
+        任务配置
         <span class="ml-1 text-xs opacity-70">{configurable().length}</span>
       </button>
       <button
         type="button"
         role="tab"
-        aria-selected={activeTab.value === 'private'}
+        aria-selected={activeTab.value === 'push'}
         class={`btn join-item btn-sm min-h-11 flex-1 whitespace-nowrap md:min-h-0 md:flex-none ${
-          activeTab.value === 'private' ? 'btn-primary' : 'btn-soft'
+          activeTab.value === 'push' ? 'btn-primary' : 'btn-soft'
         }`}
-        onClick={() => openTab('private')}
+        onClick={() => openTab('push')}
       >
-        账号私有配置
+        推送配置
         <span class="ml-1 text-xs opacity-70">{accounts.value.length}</span>
       </button>
     </div>
@@ -611,7 +693,7 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
             type="search"
             class="grow"
             autocomplete="off"
-            placeholder={activeTab.value === 'shared' ? '搜任务名 / 标题…' : '搜账号名…'}
+            placeholder={activeTab.value === 'task' ? '搜任务名 / 标题…' : '搜账号名…'}
             aria-label="搜索配置项"
             value={taskQuery.value}
             onInput={(e) => (taskQuery.value = (e.target as HTMLInputElement).value)}
@@ -621,20 +703,20 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
 
       <div class="flex items-center justify-between px-1">
         <span class="text-xs font-medium opacity-70">
-          {activeTab.value === 'shared' ? '公共配置项' : '账号'}
+          {activeTab.value === 'task' ? '可配置任务' : '账号'}
         </span>
         <span class="badge badge-soft badge-sm">
-          {activeTab.value === 'shared' ? configurable().length : accounts.value.length} 项
+          {activeTab.value === 'task' ? configurable().length : accounts.value.length} 项
         </span>
       </div>
 
-      {/* 作用域**必须写在一眼能看到的地方**（用户口径 2026-10-05：「配置应该分为公共配置和
-          账号私有配置」）：这一页最贵的错误是"以为在改某一个，其实改的是一堆/全部"，
-          而"公共 / 私有"只靠 tab 名传达是不够的 —— 它俩长得太像了。 */}
+      {/* "公共 / 私有"的分界**写在左栏上**（用户口径 2026-10-05：「我说的是每个任务的配置
+          分为公共和账号私有」）：这一页最贵的错误是"以为在改某一个，其实改的是一堆/全部"，
+          而它俩长得太像 —— 所以在挑对象这一步就把话说明白。 */}
       <p class="px-1 text-[11px] leading-4 opacity-60">
-        {activeTab.value === 'shared'
-          ? '全实例共用一份：改完哪个账号跑这个任务都用它。'
-          : '每账号各一份：只影响左边选中的那一个账号。'}
+        {activeTab.value === 'task'
+          ? '每个任务里有公共配置与账号私有配置两半，右边分开画。'
+          : '推送是账号级的：每个账号各配一份，与具体任务无关。'}
       </p>
 
       {/*
@@ -645,7 +727,7 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
         它里面的 map 一样认领不到 key。所以下面用 `<div>` 而不是 `<>` 包。
         判据与其它编译期边界见 `docs/web/lite-guide.md` §8.2 / §10。
       */}
-      {activeTab.value === 'shared' ? (
+      {activeTab.value === 'task' ? (
         <div class="flex flex-col gap-1">
           {taskItems().map((t) => (
             <button
@@ -669,7 +751,7 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
         </div>
       ) : null}
 
-      {activeTab.value === 'private' && accounts.value.length === 0 ? (
+      {activeTab.value === 'push' && accounts.value.length === 0 ? (
         <EmptyState
           title="还没有已登录的账号。"
           hint="推送是按账号配的：先到「账号」页登录一个云盘账号，再回来配推送。"
@@ -681,7 +763,7 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
         />
       ) : null}
 
-      {activeTab.value === 'private' && accounts.value.length > 0 ? (
+      {activeTab.value === 'push' && accounts.value.length > 0 ? (
         <div class="flex flex-col gap-1">
           {accountItems().map((a) => (
             <button
@@ -713,16 +795,16 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
 
       {/* 空态分两种：**这一栏本来就没有东西** 与 **搜索没命中** —— 前者要给出下一步，
           后者只要提醒换个词（混成一句"暂无数据"就两种都没说清） */}
-      {activeTab.value === 'shared' && configurable().length === 0 ? (
+      {activeTab.value === 'task' && configurable().length === 0 ? (
         <EmptyState
           title="没有任何任务需要配置。"
           hint="任务参数由后端注册表给：有参数的任务才会出现在这一栏（签到族那些没有参数）。"
         />
       ) : null}
-      {activeTab.value === 'shared' && configurable().length > 0 && taskItems().length === 0 ? (
+      {activeTab.value === 'task' && configurable().length > 0 && taskItems().length === 0 ? (
         <EmptyState title="没有匹配的配置项。" hint="换个关键词试试（搜的是标题、任务名与说明）。" />
       ) : null}
-      {activeTab.value === 'private' && accounts.value.length > 0 && accountItems().length === 0 ? (
+      {activeTab.value === 'push' && accounts.value.length > 0 && accountItems().length === 0 ? (
         <EmptyState title="没有匹配的账号。" hint="换个关键词试试（搜的是昵称、掩码手机号与账号 id）。" />
       ) : null}
     </div>
@@ -752,7 +834,7 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
   )
 
   /** 任务那一栏的详情：那个任务的默认参数。 */
-  const sharedDetail = () => (
+  const taskDetail = () => (
     <div class="card min-w-0 bg-base-100 shadow-sm">
       <div class="card-body gap-4">
         {detailState.value === 'loading' ? (
@@ -789,57 +871,108 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
               })}
             </div>
 
-            <p class="text-sm opacity-70">
-              <span class="badge badge-soft badge-sm mr-1">公共</span>
-              这里存的是这个任务的默认参数，全实例共用一份：任务页点「运行」时会带上它，
-              哪个账号跑都一样。定时任务与编排步骤各自带自己的参数，不受这一页影响。
-              想改"某个账号自己那份"（推送 / 任务行为）请切到「账号私有配置」；
-              管理员口令与会话策略在「设置」页。
-            </p>
-
-            {specs.value.length === 0 ? (
-              <p class="text-sm opacity-70">这个任务没有可配置的参数。</p>
-            ) : (
-              <div class="grid min-w-0 gap-4 lg:grid-cols-2">
-                {specs.value.map((s) => (
-                  <div key={s.name} class="min-w-0">
-                    {/* ⚠ `get` 是 thunk：在槽里写 `value={values.value[s.name]}`
-                        会让这个槽订阅值信号 ⇒ 每敲一个字整块重建、焦点全丢
-                        （2026-10-03 review §2.2；正解见 `accounts-page.tsx:1192-1199`）。 */}
-                    <ParamField
-                      spec={s}
-                      get={() => values.value[s.name]}
-                      onInput={(v) => {
-                        values.value = { ...values.value, [s.name]: v }
-                      }}
-                    />
-                  </div>
-                ))}
+            {/* ── 公共配置：这个任务的默认参数，所有账号共用这一份 ─────────── */}
+            <div class="flex flex-col gap-3">
+              <div class="flex flex-wrap items-center gap-2">
+                <h3 class="text-sm font-medium">公共配置</h3>
+                <span class="badge badge-soft badge-sm">所有账号共用</span>
               </div>
-            )}
+              <p class="text-sm opacity-70">
+                这个任务的默认参数：任务页点「运行」时会带上它，哪个账号跑都一样。
+                定时任务与编排步骤各自带自己的参数，不受这一页影响。
+              </p>
 
-            <div class="card-actions justify-end">
-              <button
-                type="button"
-                class="btn btn-sm btn-soft min-h-11 md:min-h-0"
-                disabled={saving.value}
-                onClick={() => resetTaskDefaults()}
-              >
-                填回默认值
-              </button>
+              {specs.value.length === 0 ? (
+                <p class="text-sm opacity-70">这个任务没有可配置的参数。</p>
+              ) : (
+                <div class="grid min-w-0 gap-4 lg:grid-cols-2">
+                  {specs.value.map((s) => (
+                    <div key={s.name} class="min-w-0">
+                      {/* ⚠ `get` 是 thunk：在槽里写 `value={values.value[s.name]}`
+                          会让这个槽订阅值信号 ⇒ 每敲一个字整块重建、焦点全丢
+                          （2026-10-03 review §2.2；正解见 `accounts-page.tsx:1192-1199`）。 */}
+                      <ParamField
+                        spec={s}
+                        get={() => values.value[s.name]}
+                        onInput={(v) => {
+                          values.value = { ...values.value, [s.name]: v }
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div class="card-actions justify-end">
+                <button
+                  type="button"
+                  class="btn btn-sm btn-soft min-h-11 md:min-h-0"
+                  disabled={saving.value}
+                  onClick={() => resetTaskDefaults()}
+                >
+                  填回默认值
+                </button>
+              </div>
+            </div>
+
+            {/* ── 账号私有配置：同一个任务，每个账号可以不一样 ─────────────── */}
+            <div class="flex flex-col gap-3 border-t border-base-200 pt-4">
+              <div class="flex flex-wrap items-center gap-2">
+                <h3 class="text-sm font-medium">账号私有配置</h3>
+                <span class="badge badge-soft badge-sm">每个账号各一份</span>
+              </div>
+              <p class="text-sm opacity-70">
+                同一个任务，每个账号可以不一样 —— 推送就是一个例子（下面每一行印的是它当前
+                配了哪些渠道）。上传路径这类"按账号不同"的项要等上游功能实现后再加进这里。
+              </p>
+
+              {accounts.value.length === 0 ? (
+                <p class="text-sm opacity-70">
+                  还没有已登录的账号 —— 登录之后，每个账号会在这里各占一行。
+                </p>
+              ) : (
+                <div class="flex flex-col gap-1">
+                  {accounts.value.map((a) => (
+                    <div
+                      key={a.id}
+                      class="flex flex-wrap items-center gap-2 rounded-field bg-base-200/60 px-3 py-2"
+                    >
+                      <span class="min-w-0 flex-1">
+                        <span class="block truncate text-sm font-medium">
+                          {a.nickname || a.label || a.id}
+                        </span>
+                        <span class="block truncate text-[11px] opacity-60">{pushSummaryOf(a.id)}</span>
+                      </span>
+                      <button
+                        type="button"
+                        class="btn btn-xs btn-soft min-h-8"
+                        onClick={() => openPushFor(a.id)}
+                      >
+                        改它的推送
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <p class="text-xs leading-5 opacity-60">
+                ⚠ 现在还没有「只对某个账号生效」的任务参数（后端也还没有这一格）——
+                这一半今天只做"指路"：真正能按账号配的推送在「推送配置」那一栏。
+                等上游把按账号的项做出来，它们会加在上面这几行里，与「公共配置」分开放。
+              </p>
             </div>
           </>
         ) : null}
 
         {detailState.value === 'idle' ? (
-          <p class="py-10 text-center text-sm opacity-70">左边挑一个任务，这里改它那份公共参数。</p>
+          <p class="py-10 text-center text-sm opacity-70">左边挑一个任务，右边分「公共配置」与「账号私有配置」两半。</p>
         ) : null}
       </div>
     </div>
   )
 
   /** 推送那一栏的详情：这个账号的运行结果推送。 */
-  const privateDetail = () => (
+  const pushDetail = () => (
     <div class="card min-w-0 bg-base-100 shadow-sm">
       <div class="card-body gap-4">
         {pushState.value === 'loading' ? (
@@ -878,25 +1011,28 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
             </div>
 
             <p class="text-sm opacity-70">
-              <span class="badge badge-soft badge-sm mr-1">私有</span>
-              这一栏只对左边这个账号生效（本仓没有进程级兜底）。三块分别是推送渠道、
-              任务行为与功能开关；保存时一次写回这个账号的全部设置 ——
-              别的账号一个字都不受影响。
+              <span class="badge badge-soft badge-sm mr-1">账号级</span>
+              这一栏只对左边这个账号生效（本仓没有进程级兜底）：保存时一次写回这个账号的
+              全部设置，别的账号一个字都不受影响。⚠ 这里是**账号级**的（与具体任务无关）；
+              按任务的项在「任务配置」里，两处各管各的。
             </p>
 
             <div class="flex flex-col gap-2">
-              <h4 class="text-sm font-medium">运行结果推送</h4>
+              <h4 class="text-sm font-medium">推送渠道</h4>
               {/* 十条渠道 + 打码字段的整块表单在 `ui/push-editor.tsx`（账号设置弹窗共用） */}
               {push.fields()}
             </div>
 
             <div class="flex flex-col gap-2">
-              <h4 class="text-sm font-medium">任务行为</h4>
+              <h4 class="text-sm font-medium">账号级设置</h4>
               <p class="text-xs leading-5 opacity-60">
-                范围以后端为准（前端不实现第二遍）。修改会影响到这个账号的取数、备份与刷新时机。
+                与具体任务无关的两格（范围以后端为准，前端不实现第二遍）。
+                ⚠ 「跳过的任务 id」**故意不放在这里**：它是按任务的（后端存的是**上游任务 id**，
+                而界面上只有任务名）⇒ 现在只能到「账号」页的设置弹窗里按 id 填；等后端把 id
+                给出来，它会挪进「任务配置」里做成按账号的开关。
               </p>
-              {/* 三个字段（备份等待 / 凭据阈值 / 跳过任务）在 `ui/account-fields.tsx` */}
-              {acct.taskFields()}
+              {/* 两格（备份等待 / 凭据阈值）在 `ui/account-fields.tsx` */}
+              {acct.accountFields()}
             </div>
 
             <div class="flex flex-col gap-2">
@@ -909,13 +1045,13 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
         ) : null}
 
         {pushState.value === 'idle' ? (
-          <p class="py-10 text-center text-sm opacity-70">左边挑一个账号，这里改它私有的那份设置。</p>
+          <p class="py-10 text-center text-sm opacity-70">左边挑一个账号，这里配它的推送渠道与账号级设置。</p>
         ) : null}
       </div>
     </div>
   )
 
-  const detail = () => (activeTab.value === 'shared' ? sharedDetail() : privateDetail())
+  const detail = () => (activeTab.value === 'task' ? taskDetail() : pushDetail())
 
   /** 宽屏：左右两栏（左栏自己滚，页面整体滚到底也不用回去找）。 */
   const wideBody = () => (
@@ -942,7 +1078,7 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
           class="btn btn-sm btn-soft min-h-11 w-full justify-start"
           onClick={() => (drillOpen.value = false)}
         >
-          ← {activeTab.value === 'shared' ? '全部公共配置' : '全部账号私有配置'}
+          ← {activeTab.value === 'task' ? '全部任务配置' : '全部账号推送'}
         </button>
         <div id="config-detail" class="min-w-0">
           {detail()}

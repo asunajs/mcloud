@@ -99,6 +99,16 @@ export interface AccountFields {
   build(): AccountBehavior
   /** 「任务参数」那一组：备份等待秒数 / 刷新阈值天数 / 跳过任务 id（账号页那个**可见**块用它）。 */
   taskFields(): JSX.Element
+  /**
+   * 「账号级设置」那一组（备份等待 / 刷新阈值）—— **不含"跳过的任务 id"**。
+   *
+   * ⚠ 为什么单列一个方法：`skipTasks` 是**按任务**的东西（"这个账号跳过哪些任务"），
+   * 它的家是「任务配置」里那个**按账号**的开关列表（2026-10-05 用户口径：
+   * 「每个任务的配置分为公共配置和账号私有配置」）；而配置中心的「推送配置」那一栏
+   * 与账号页的设置弹窗都用下面这个**不含 skip** 的版本，免得同一格在两个地方各编一份
+   * （同一页里两个编辑器写同一格 ⇒ 谁后保存谁把对方盖掉 ✗）。
+   */
+  accountFields(): JSX.Element
   /** 「功能开关」那一组：AI 头像每日上限（账号页那块**被 `SHOW_ACCOUNT_SETTINGS_BLOCKS` 隐藏**，配置中心页照常显示）。 */
   featureFields(): JSX.Element
   /** 草稿快照 / 还原（调用方切账号时用）。 */
@@ -175,28 +185,42 @@ export const createAccountFields = (): AccountFields => {
    * ⚠ 外层那个 `<div class="flex flex-col gap-2">` 与 `<h4>任务参数</h4>` 归调用方
    * （标题的层级是页面的排版决定），这里只出三行输入框。
    */
+  const backupField = () =>
+    textField(
+      '备份任务等待时间（秒）',
+      () => fBackupWait.value,
+      (v) => (fBackupWait.value = v),
+      '范围 0–3600（后端上限）：备份事件发出后等它落库的秒数，0 = 不等。',
+      'number',
+    )
+
+  const refreshField = () =>
+    textField(
+      '刷新凭据的剩余天数阈值',
+      () => fRefreshDays.value,
+      (v) => (fRefreshDays.value = v),
+      '范围 0–3650（后端上限）：凭据剩余天数低于它就刷新。',
+      'number',
+    )
+
   const taskFields = (): JSX.Element => (
     <>
-      {textField(
-        '备份任务等待时间（秒）',
-        () => fBackupWait.value,
-        (v) => (fBackupWait.value = v),
-        '范围 0–3600（后端上限）：备份事件发出后等它落库的秒数，0 = 不等。',
-        'number',
-      )}
-      {textField(
-        '刷新凭据的剩余天数阈值',
-        () => fRefreshDays.value,
-        (v) => (fRefreshDays.value = v),
-        '范围 0–3650（后端上限）：凭据剩余天数低于它就刷新。',
-        'number',
-      )}
+      {backupField()}
+      {refreshField()}
       {textField(
         '跳过的任务 id',
         () => fSkipTasks.value,
         (v) => (fSkipTasks.value = v),
         '填任务 id（数字），用逗号或空格分隔，最多 1000 条；留空 = 一个都不跳。⚠ 旧版本存的是任务名，后端读旧库时会丢弃它们。',
       )}
+    </>
+  )
+
+  /** 账号级那两格（不含 skipTasks，见接口上那段 ⚠）。 */
+  const accountFields = (): JSX.Element => (
+    <>
+      {backupField()}
+      {refreshField()}
     </>
   )
 
@@ -238,5 +262,5 @@ export const createAccountFields = (): AccountFields => {
     fAiAvatarLimit.value = s.aiAvatarDailyLimit
   }
 
-  return { load, build, taskFields, featureFields, snapshot, restore }
+  return { load, build, taskFields, accountFields, featureFields, snapshot, restore }
 }

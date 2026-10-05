@@ -137,6 +137,18 @@ const toJsonScalar = (raw: string): string | number => {
 
 // ── 冻结接口 ────────────────────────────────────────────────────────────
 
+/**
+ * 一份 `notify` 里**配了哪些渠道**（中文名）—— 给别处做摘要用。
+ *
+ * 例：配置中心的「任务配置 → 账号私有配置」那半要一眼看出"每个账号的推送不一样"
+ * （2026-10-05 用户口径：「比如每个账号的推送就不一样」），就是靠它。
+ *
+ * ⚠ 渠道清单（`NOTIFY_CHANNELS`）与中文名（`CHANNEL_LABEL`）**只有这一份** ——
+ * 在页面里自己再列一遍"有哪些渠道"就是第二份表，迟早与这里漂 ✗。
+ */
+export const notifyChannelLabels = (n: PushConfig | null | undefined): string[] =>
+  n ? NOTIFY_CHANNELS.filter((k) => n[k] != null).map((k) => CHANNEL_LABEL[k]) : []
+
 export interface PushEditorSnapshot {
   on: boolean
   title: string
