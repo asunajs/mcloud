@@ -204,6 +204,38 @@ export const HistoryPage = (props: HistoryPageProps) => {
   const filter = ref<StatusFilter>('all')
   const query = ref('')
 
+  /**
+   * 宽屏（≥768px）。
+   *
+   * ⚠⚠ **表格与卡片流只渲染一份**（2026-10-05 用户实测截图：DevTools 性能监视器里
+   * DOM nodes **30,124** ✗）。改之前是 CSS 双份渲染（`hidden md:block` + `md:hidden`）
+   * —— 两份**都真的在 DOM 里**，只是各自被 CSS 藏起来 ⇒ 这一页的节点数是**双倍** ✗。
+   * 实测（夹具灌到真实体量、100 次运行、GC 两次后）：历史页 **21,915** 个节点，
+   * 而最重的其它页只有 ~7k ⇒ 光这一条就砍掉近一半 ✓。
+   *
+   * ⚠ 768 这个数必须与 CSS 的 `md` **同一档**（`app.css` 的 `@theme` 断点）——
+   * 对不上的后果是"两份都藏起来"（白屏）或"两份都显示"（双倍）✗ ⇒ 写在下面那个
+   * `WIDE_QUERY` 里，只此一处 ✓。
+   */
+  const WIDE_QUERY = '(min-width: 768px)'
+  const wide = ref(matchMedia(WIDE_QUERY).matches)
+  /** 媒体查询对象（`onMounted` 里建、`onUnmounted` 里解绑 —— 不建在组件体里，避免每次重渲染都新建 ✓）。 */
+  let mq: MediaQueryList | undefined
+  const onWideChange = () => {
+    if (mq) wide.value = mq.matches
+  }
+
+  /**
+   * 一次往 DOM 里铺多少条，以及"显示更多"每次加多少。
+   *
+   * ⚠ 为什么要上限（2026-10-05）：`/api/runs` 是**全量**接口（`listRuns()` 不带参数），
+   * 而运行记录只会越攒越多（本机现在 **113** 条 ✓）。全量铺进 DOM = 节点数与历史长度
+   * **线性增长** ⇒ 用一年之后这一页会到十万级 ✗。50 条已经远超"一屏能看"，
+   * 够不着的那部分按需加载（点一下 `+50` ✓）。
+   */
+  const STEP = 50
+  const cap = ref(STEP)
+
   const load = async () => {
     state.value = 'loading'
     errorMessage.value = ''
@@ -221,8 +253,18 @@ export const HistoryPage = (props: HistoryPageProps) => {
     // 先把"id → 名字"填上，否则运行记录里显示的是一串哈希
     void refreshAccountNames()
     void load()
+    // ⚠ 断点监听建在**挂载时**（不是组件体里）：组件体每次重渲染都会跑，建在那里等于
+    // 每次新建一个 MediaQueryList 且旧的永远解绑不掉 ✗。
+    mq = matchMedia(WIDE_QUERY)
+    mq.addEventListener('change', onWideChange)
+    // 组件体求值时到真正挂载之间窗口尺寸可能已经变了（首屏/旋转）⇒ 再读一次为准 ✓
+    onWideChange()
   })
-  onUnmounted(() => setPageRefresh(null))
+  onUnmounted(() => {
+    setPageRefresh(null)
+    mq?.removeEventListener('change', onWideChange)
+    mq = undefined
+  })
 
   /** 一条记录命中搜索词吗。搜四样东西：任务名、账号、运行号、结果摘要。 */
   const matchesQuery = (r: RunRecord): boolean => {
@@ -237,6 +279,12 @@ export const HistoryPage = (props: HistoryPageProps) => {
   /** 当前该显示哪些记录。**在 JSX 里调用**（lite：派生值必须写在绑定里，不能提前算）。 */
   const visible = (): RunRecord[] =>
     runs.value.filter((r) => (filter.value === 'all' || runStatusOf(r) === filter.value) && matchesQuery(r))
+
+  /** 真正铺进 DOM 的那一段（`visible()` 的前 [`cap`] 条 ✓）。 */
+  const shown = (): RunRecord[] => visible().slice(0, cap.value)
+
+  /** 还没铺出来的条数（`> 0` 才出现「显示更多」✓）。 */
+  const rest = (): number => Math.max(0, visible().length - cap.value)
 
   /** 某一档有几条。计数直接摆在档位上 —— 不用点进去就知道哪一档有东西。 */
   const countOf = (id: StatusFilter): number =>
@@ -389,57 +437,60 @@ export const HistoryPage = (props: HistoryPageProps) => {
           </p>
         ) : null}
 
-        {/* 桌面表格 ≥768px */}
-        <div class="hidden overflow-x-auto rounded-box bg-base-100 p-1 shadow-sm md:block">
-          <table class="table table-sm">
-            <thead>
-              <tr class="text-xs">
-                <th>任务</th>
-                <th>账号</th>
-                <th>状态</th>
-                <th class="text-right">耗时</th>
-                <th>时间</th>
-                <th>明细</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visible().map((r) => (
-                <tr key={r.run_id} class="hover">
-                  <td>
-                    {/* 运行号是标识符，不是用来横向比较的列 —— 降到任务名下面当次级信息 */}
-                    <div class="flex flex-col">
-                      <span class="font-medium">{r.task}</span>
-                      <span class="font-mono text-xs opacity-50">#{r.run_id}</span>
-                    </div>
-                  </td>
-                  <td class="whitespace-nowrap">{accountName(r.account)}</td>
-                  <td>
-                    <div class="flex flex-col items-start gap-0.5">
-                      <StatusChip record={r} />
-                      <span class="max-w-[24rem] text-xs opacity-60">{outcomeText(r.outcome)}</span>
-                    </div>
-                  </td>
-                  <td class="text-right whitespace-nowrap tabular-nums">
-                    {fmtDuration(r.duration_ms)}
-                  </td>
-                  <td class="whitespace-nowrap opacity-80">{fmtEpochMs(r.started_at_ms)}</td>
-                  <td>
-                    <div class="flex flex-col gap-2">
-                      <LogButton record={r} onOpen={(x) => void openRunLog(x)} />
-                      <LeftoverCell record={r} />
-                      <LiveRoomCell record={r} />
-                      <ExchangeCell record={r} />
-                    </div>
-                  </td>
+        {/*
+          ⚠⚠ 表格 / 卡片流**二选一**（`wide`），不是"两份都渲染、各用 CSS 藏一份" ✗ ——
+          后者两份都真的在 DOM 里，这一页的节点数直接翻倍（2026-10-05 实测 30,124 ✗）。
+        */}
+        {wide.value ? (
+          <div class="overflow-x-auto rounded-box bg-base-100 p-1 shadow-sm">
+            <table class="table table-sm">
+              <thead>
+                <tr class="text-xs">
+                  <th>任务</th>
+                  <th>账号</th>
+                  <th>状态</th>
+                  <th class="text-right">耗时</th>
+                  <th>时间</th>
+                  <th>明细</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        {/* 移动卡片流 <768px */}
-        <div class="grid gap-2 md:hidden">
-          {visible().map((r) => (
+              </thead>
+              <tbody>
+                {shown().map((r) => (
+                  <tr key={r.run_id} class="hover">
+                    <td>
+                      {/* 运行号是标识符，不是用来横向比较的列 —— 降到任务名下面当次级信息 */}
+                      <div class="flex flex-col">
+                        <span class="font-medium">{r.task}</span>
+                        <span class="font-mono text-xs opacity-50">#{r.run_id}</span>
+                      </div>
+                    </td>
+                    <td class="whitespace-nowrap">{accountName(r.account)}</td>
+                    <td>
+                      <div class="flex flex-col items-start gap-0.5">
+                        <StatusChip record={r} />
+                        <span class="max-w-[24rem] text-xs opacity-60">{outcomeText(r.outcome)}</span>
+                      </div>
+                    </td>
+                    <td class="text-right whitespace-nowrap tabular-nums">
+                      {fmtDuration(r.duration_ms)}
+                    </td>
+                    <td class="whitespace-nowrap opacity-80">{fmtEpochMs(r.started_at_ms)}</td>
+                    <td>
+                      <div class="flex flex-col gap-2">
+                        <LogButton record={r} onOpen={(x) => void openRunLog(x)} />
+                        <LeftoverCell record={r} />
+                        <LiveRoomCell record={r} />
+                        <ExchangeCell record={r} />
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div class="grid gap-2">
+            {shown().map((r) => (
             <div key={r.run_id} class="card bg-base-100 shadow-sm">
               <div class="card-body gap-2 p-3">
                 <div class="flex items-start justify-between gap-2">
@@ -467,8 +518,18 @@ export const HistoryPage = (props: HistoryPageProps) => {
                 </div>
               </div>
             </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
+
+        {/* 超过一屏的按需铺（见 `STEP`）：点一下再放 50 条 */}
+        {rest() > 0 ? (
+          <div class="flex justify-center">
+            <button type="button" class="btn btn-sm btn-soft" onClick={() => (cap.value += STEP)}>
+              {`显示更多（还有 ${rest()} 条）`}
+            </button>
+          </div>
+        ) : null}
       </div>
     )
   }
