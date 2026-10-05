@@ -9,6 +9,8 @@
  * 用法：`node lite/demo/run.mjs`（退出码非 0 = 有断言失败）
  */
 import { execFileSync, spawn } from 'node:child_process'
+// ⚠ 无头 chrome 的公共参数（含可选的 --no-sandbox）只有一份来源，见该文件头
+import { headlessFlags } from '../chrome-flags.mjs'
 
 // 导入即构建：写 /tmp/lite-demo.html（见 build.mjs）。它内部是同步 execFileSync，
 // 但本进程**没有**在跑的 HTTP 服务，所以不存在迁移期那套（`regress/compare.mjs`，已删）
@@ -23,7 +25,7 @@ const chromePath = execFileSync(
 
 const dump = () =>
   new Promise((resolve) => {
-    const child = spawn(chromePath, ['--user-data-dir=/tmp/lite-demo-profile', '--headless', '--disable-gpu', '--virtual-time-budget=8000', '--dump-dom', 'file:///tmp/lite-demo.html'], { stdio: ['ignore', 'pipe', 'ignore'] })
+    const child = spawn(chromePath, ['--user-data-dir=/tmp/lite-demo-profile', ...headlessFlags(), '--virtual-time-budget=8000', '--dump-dom', 'file:///tmp/lite-demo.html'], { stdio: ['ignore', 'pipe', 'ignore'] })
     let out = ''
     child.stdout.on('data', (d) => {
       out += d

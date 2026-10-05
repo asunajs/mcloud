@@ -9,6 +9,8 @@
  * 每步快照都过它，于是"界面变了没有"有一个稳定口径，而不是各处自己剪一段 outerHTML。
  */
 import { execFileSync, spawn } from 'node:child_process'
+// ⚠ 无头 chrome 的公共参数（含可选的 --no-sandbox）只有一份来源，见该文件头
+import { headlessFlags } from '../chrome-flags.mjs'
 import { createHash } from 'node:crypto'
 
 /**
@@ -857,7 +859,11 @@ export const launchChrome = ({ url, debugPort, profile }) =>
     [
       `--remote-debugging-port=${debugPort}`,
       `--user-data-dir=${profile}`,
-      '--headless', '--disable-gpu', '--hide-scrollbars', '--window-size=1280,900',
+      // ⚠ 公共前缀（`--headless` [+ `--no-sandbox`] `--disable-gpu`）只有一份来源：
+      // `../chrome-flags.mjs`。别再往这里塞机器相关的 flag —— 三处各写一份的结果是
+      // 2026-10-05 三条写入线相互覆盖、相互还原，打了三次架 ✗。
+      ...headlessFlags(),
+      '--hide-scrollbars', '--window-size=1280,900',
       '--no-first-run', '--no-default-browser-check',
       url,
     ],

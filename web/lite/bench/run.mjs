@@ -8,6 +8,8 @@
  * 用法：`node lite/bench/run.mjs`
  */
 import { execFileSync, spawn } from 'node:child_process'
+// ⚠ 无头 chrome 的公共参数（含可选的 --no-sandbox）只有一份来源，见该文件头
+import { headlessFlags } from '../chrome-flags.mjs'
 
 await import('./build.mjs')
 
@@ -19,7 +21,7 @@ const chromePath = execFileSync(
 
 const dump = () =>
   new Promise((resolve) => {
-    const child = spawn(chromePath, ['--user-data-dir=/tmp/lite-bench-profile', '--headless', '--disable-gpu', '--virtual-time-budget=10000', '--dump-dom', 'file:///tmp/lite-bench.html'], { stdio: ['ignore', 'pipe', 'ignore'] })
+    const child = spawn(chromePath, ['--user-data-dir=/tmp/lite-bench-profile', ...headlessFlags(), '--virtual-time-budget=10000', '--dump-dom', 'file:///tmp/lite-bench.html'], { stdio: ['ignore', 'pipe', 'ignore'] })
     let out = ''
     child.stdout.on('data', (d) => {
       out += d

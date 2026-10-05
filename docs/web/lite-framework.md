@@ -460,6 +460,26 @@ best of 3、headless Chrome、1000/2000 行的合成规模：
 并在摘要里**明说这条没被验证过**，不会冒充绿。CI 的 ubuntu runner 上因此只覆盖前三条
 （typecheck / build / 编译期负例都是纯 Node）⇒ **后两条是本地提交前的门**（约定 §9.2）。
 
+> **无头 Chrome 的启动参数只有一份（2026-10-05）：`web/lite/chrome-flags.mjs`**
+>
+> 会 spawn chrome 的有三处（`lite/regress/lib.mjs`、`lite/demo/run.mjs`、`lite/bench/run.mjs`），
+> 以前**各写一份参数表**。2026-10-05 为了在本机沙箱里跑门禁，几条写入线往自己那份里塞
+> `--no-sandbox`、又互相还原 ⇒ **同一个文件被反复覆盖，双方各红了若干条**（打了三次架）。
+> 现在三处都从 `headlessFlags()` 取公共前缀（`--headless` [+ `--no-sandbox`] `--disable-gpu`），
+> 私有参数（`--hide-scrollbars` / `--window-size` / `--virtual-time-budget` / `--dump-dom` / URL）
+> 各留各的 ✓。
+>
+> ⚠ **`--no-sandbox` 默认关**（那是**降级**：渲染进程不再与内核隔离）。某些环境里
+> `chrome-headless-shell` 不带它直接 `Target crashed` / `CDP 调用超时：Page.enable`
+> （本仓的 DSH 沙箱就是），那时**显式**打开：
+>
+> ```bash
+> MCLOUD_CHROME_NO_SANDBOX=1 node scripts/gates-web.mjs --push
+> ```
+>
+> 环境变量**会穿过 git 钩子**（`pre-commit` / `pre-push` 继承当前环境）⇒ 过钩子不用改文件 ✓。
+> `=0` / `=false` / `=no` 都当没开。
+
 > **（历史）typecheck 从 `@ts-macro/tsc` 换成原生实现（2026-10-01）**
 >
 > 那个 fork 是迁移期（`ce17969`）留下的，全仓**没有任何 ts-macro 宏用法**，

@@ -326,6 +326,12 @@ Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过�
 - 服务端口用环境变量 `MCLOUD_ADDR`（默认 `127.0.0.1:3000`），数据目录 `MCLOUD_DATA_DIR`
   （⚠ 不是 `MCLOUD_DATA`）；`PORT` 环境变量**被忽略**
 - macOS 没有 `timeout` 命令；SSH 用 `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=20"`
+- ⚠ **无头 Chrome 在某些环境里必须加 `--no-sandbox`**（本机 DSH 沙箱：不加就是
+  `Target crashed` / `CDP 调用超时：Page.enable`，2026-10-05 实测）。它是**显式开关，默认关**
+  （关沙箱是降级，开发机不需要）：`MCLOUD_CHROME_NO_SANDBOX=1 node scripts/gates-web.mjs --push`。
+  三条 spawn 路径的公共参数**只有一份来源** `web/lite/chrome-flags.mjs`（在那之前是几条写入线
+  各改一份、互相覆盖，双方各红了若干条 ✗）。环境变量**会穿过 git 钩子** ✓ —— 过 `pre-commit` /
+  `pre-push` 不需要改任何文件。
 - ⚠ **编译/检查为什么慢、怎么跑才快 —— 实测归因见 `docs/build-perf.md`**（2026-10-01）。
   三条最省事的：① 日常自检用 **`cargo check -p <crate>`**，别动不动 `--workspace --all-targets`
   （后者要把含 `#[cfg(test)]` 的文件**再编一份 test 版**（别再背数，现算：`grep -rl '#\[cfg(test)\]' crates | wc -l`）+ 链接 8 个集成测试目标）；
