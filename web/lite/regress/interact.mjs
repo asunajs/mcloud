@@ -949,17 +949,25 @@ const STEPS = {
       ),
     },
     {
-      name: '任务配置页：能从任务卡进到单独那一页',
+      name: '配置中心：能从任务卡带着任务名进来（两个作用域页签都在）',
       do: `(() => {
         const card = [...document.querySelectorAll('#app .card')].find((c) => c.textContent.includes('直播口令'))
         ;[...card.querySelectorAll('button')].find((b) => b.textContent.trim() === '配置').click()
         return true
       })()`,
-      check: has(APP_TEXT, '任务配置'),
+      check: eq(
+        // ⚠ 这里**不能**引用 node 侧那颗 `APP_TEXT`（它本身就是一段页面表达式的字符串）——
+        // 写进内联表达式里会被当成页面变量 ⇒ `ReferenceError: APP_TEXT is not defined` ✗。
+        `(() => {
+           const t = document.getElementById('app')?.textContent ?? ''
+           return [t.includes('公共配置'), t.includes('账号私有配置'), t.includes('直播口令')].join('/')
+         })()`,
+        'true/true/true',
+      ),
       changed: true,
     },
     {
-      name: '任务配置页：改「听弹幕时长」为 123 并保存',
+      name: '配置中心（公共栏）：改「听弹幕时长」为 123 并保存',
       do: `(() => {
         const inp = document.querySelector('#app input[type="number"]')
         inp.value = '123'
@@ -1004,21 +1012,28 @@ const STEPS = {
     // ── 配置中心（`/tasks/config`，2026-10-05）────────────────────────────
     //
     // 用户口径：「上面切换任务配置还是推送配置，下面左边列出所有配置大项，右边主窗口是
-    // 具体配置」。上面那两步已经验过"从任务卡带着任务名进配置页"（`/tasks/<名>/config`），
-    // 这里钉的是**配置中心本身**：两个 tab、左栏/右栏的分工、未保存修改与放弃修改。
+    // 具体配置」；追加口径（同日）：「**配置应该分为公共配置和账号私有配置**」。
+    // 上面那两步已经验过"从任务卡带着任务名进配置页"（`/tasks/<名>/config`），
+    // 这里钉的是**配置中心本身**：两个 tab 的**作用域**、左栏/右栏的分工、
+    // 未保存修改与放弃修改，以及**两次保存各自动的是哪一份**。
     //
     // ⚠ 断言都盯着 `#config-rail` / `#config-detail` 两个锚，不能只搜整页文字：
     // 选中项的名字**两边都印**（左边那一行、右边标题），搜全页等于没验"右栏换成了它"。
+    //
+    // ⚠⚠ 「作用域不串」这条**只能量发出去的请求体**：夹具里
+    // `PUT /api/accounts/{id}/settings` 是**回显**（`lib.mjs:590`，不落盘）⇒
+    // "存完再 GET 看看"在夹具里恒等于"没存" ✗。所以下面用 `window.fetch` 拦一次
+    // （`__put`），量的是**真发出去的 URL 与 body** —— 那正是这条口径的判据 ✓。
     {
-      name: '配置中心：从任务页进得去，左栏列配置项、右栏是它的参数',
+      name: '配置中心：从任务页进得去，左栏列配置项、右栏是它的参数（公共那份）',
       do: `[...document.querySelectorAll('#app button')].find((b) => b.textContent.trim() === '配置中心').click()`,
       check: eq(
         `(() => {
            const rail = document.querySelector('#config-rail')?.textContent ?? ''
            const detail = document.querySelector('#config-detail')?.textContent ?? ''
-           return [location.pathname, rail.includes('配置模块'), rail.includes('直播口令'), detail.includes('听弹幕时长')].join('/')
+           return [location.pathname, rail.includes('公共配置项'), rail.includes('全实例共用一份'), rail.includes('直播口令'), detail.includes('听弹幕时长')].join('/')
          })()`,
-        '/tasks/config/true/true/true',
+        '/tasks/config/true/true/true/true',
       ),
       changed: true,
     },
@@ -1050,22 +1065,75 @@ const STEPS = {
       changed: true,
     },
     {
-      name: '配置中心：切到「推送配置」⇒ 左栏列账号、右栏是它的渠道卡片',
-      do: `[...document.querySelectorAll('#app [role="tab"]')].find((b) => b.textContent.includes('推送配置')).click()`,
+      name: '配置中心：切到「账号私有配置」⇒ 左栏列账号、右栏三块（推送 / 任务行为 / 功能开关）都在',
+      do: `[...document.querySelectorAll('#app [role="tab"]')].find((b) => b.textContent.includes('账号私有配置')).click()`,
       check: eq(
         `(() => {
            const rail = document.querySelector('#config-rail')?.textContent ?? ''
            const detail = document.querySelector('#config-detail')?.textContent ?? ''
-           return [rail.includes('推送账号'), rail.includes('主力号'), detail.includes('PushPlus'), detail.includes('企业微信机器人')].join('/')
+           return [rail.includes('每账号各一份'), rail.includes('主力号'),
+                   detail.includes('PushPlus'), detail.includes('企业微信机器人'),
+                   detail.includes('运行结果推送'), detail.includes('任务行为'), detail.includes('功能开关'),
+                   detail.includes('备份任务等待时间'), detail.includes('跳过的任务 id'), detail.includes('AI 头像每日上限')].join('/')
          })()`,
-        'true/true/true/true',
+        'true/true/true/true/true/true/true/true/true/true',
       ),
       changed: true,
     },
     {
-      // 另一个账号（夹具里 `notify: null`）⇒ 右栏该说清"一个渠道都没配"，
-      // 而不是留着上一个账号的渠道（那会让人以为"这个号也配了这些"）。
-      name: '配置中心：换一个账号 ⇒ 右栏换成它自己那份（没配渠道就是没配）',
+      // ⭐⭐ 这一页最贵的那条：私有配置保存时，**没显示在界面上的格子也必须原样写回去**
+      // （`PUT` 是整体替换）。夹具那份 ACCOUNT 是 20/10/[117]/10 + 两个渠道，
+      // 这里只把"备份等待"改成 9，其余三格与 notify 一个字都不许变 ✓。
+      name: '配置中心：私有栏改一格任务行为 ⇒ 亮「有未保存修改」',
+      do: `(() => {
+        const box = [...document.querySelectorAll('#config-detail fieldset')]
+          .find((f) => (f.querySelector('legend')?.textContent ?? '').includes('备份任务等待时间'))
+        const inp = box?.querySelector('input')
+        if (!inp) throw new Error('私有栏没有「备份任务等待时间」那一格')
+        inp.value = '9'
+        inp.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      })()`,
+      check: has(`document.querySelector('#config-detail')?.textContent ?? ''`, '有未保存修改'),
+      changed: true,
+    },
+    {
+      name: '配置中心：私有栏保存 ⇒ 发出去的是这个账号的**五格**（没碰的三格与渠道原样）',
+      do: `(async () => {
+        // 夹具的账号设置 PUT 不回写 ⇒ 只能量**真发出去的那一次请求**（见上面那段 ⚠⚠）
+        const put = []
+        const orig = window.fetch
+        window.fetch = async (input, init) => {
+          const url = typeof input === 'string' ? input : input.url
+          if (((init && init.method) || 'GET').toUpperCase() === 'PUT') put.push({ url, body: init && init.body })
+          return orig(input, init)
+        }
+        try {
+          ;[...document.querySelectorAll('#config-detail button')].find((b) => b.textContent.trim() === '保存').click()
+          for (let i = 0; i < 80 && put.length === 0; i++) await new Promise((r) => setTimeout(r, 100))
+          window.__put = put.map((p) => ({ url: p.url, body: JSON.parse(p.body) }))
+        } finally {
+          window.fetch = orig
+        }
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const p = (window.__put ?? [])[0]
+           if (!p) return '没发出 PUT'
+           const b = p.body
+           const n = b.notify ?? {}
+           return [p.url, b.backupWaitSecs, b.refreshTokenDays, (b.skipTasks ?? []).join(','), b.aiAvatarDailyLimit,
+                   'pushplus' in n, 'workWeixinBot' in n, n.title].join('/')
+         })()`,
+        '/api/accounts/13800000000/settings/9/10/117/10/true/true/mcloud 运行推送',
+      ),
+      changed: true,
+    },
+    {
+      // 另一个账号（夹具里 `notify: null` + 全默认）⇒ 右栏该说清"一个渠道都没配"、
+      // 而且**三块都要跟着换**（别只换推送那一块、任务行为还留着上一个账号的数字 ✗）。
+      name: '配置中心：换一个账号 ⇒ 右栏三块都换成它自己那份（没配渠道就是没配）',
       do: `(() => {
         const btns = [...document.querySelectorAll('#config-rail button')]
         if (btns.length < 2) throw new Error('左栏只有一个账号（夹具应有两个）')
@@ -1074,10 +1142,59 @@ const STEPS = {
       })()`,
       check: eq(
         `(() => {
+           const rail = document.querySelector('#config-rail')?.textContent ?? ''
            const d = document.querySelector('#config-detail')?.textContent ?? ''
-           return d.includes('当前不推送任何渠道') + '/' + d.includes('主力号')
+           // 备份等待那一格：ACCOUNT2 是 0，ACCOUNT 是 20 ⇒ 读值能区分"换没换"
+           const box = [...document.querySelectorAll('#config-detail fieldset')]
+             .find((f) => (f.querySelector('legend')?.textContent ?? '').includes('备份任务等待时间'))
+           const v = box?.querySelector('input')?.value ?? '没有那一格'
+           return [d.includes('当前不推送任何渠道'), d.includes('主力号'), rail.includes('13900000001'), v].join('/')
          })()`,
-        'true/false',
+        'true/false/true/0',
+      ),
+      changed: true,
+    },
+    {
+      // ⭐ 反方向：公共那份保存**只带 params**，不许把 `notify` / `backupWaitSecs` 这类
+      // 账号私有字段混进去（"公共 / 私有"分栏之后，这是最容易串的一条）。
+      // 顺带把 123 还回去（这段之后没有别的断言依赖它，但别给后来的人埋雷）。
+      name: '配置中心：公共栏保存 ⇒ 只发任务参数（不带账号私有字段），并还原 123',
+      do: `(async () => {
+        [...document.querySelectorAll('#app [role="tab"]')].find((b) => b.textContent.includes('公共配置')).click()
+        await new Promise((r) => setTimeout(r, 400))
+        const inp = document.querySelector('#config-detail input[type="number"]')
+        if (!inp) throw new Error('公共栏没有数字参数')
+        const put = []
+        const orig = window.fetch
+        window.fetch = async (input, init) => {
+          const url = typeof input === 'string' ? input : input.url
+          if (((init && init.method) || 'GET').toUpperCase() === 'PUT') put.push({ url, body: init && init.body })
+          return orig(input, init)
+        }
+        try {
+          for (const v of ['456', '123']) {
+            inp.value = v
+            inp.dispatchEvent(new Event('input', { bubbles: true }))
+            await new Promise((r) => setTimeout(r, 200))
+            ;[...document.querySelectorAll('#config-detail button')].find((b) => b.textContent.trim() === '保存').click()
+            await new Promise((r) => setTimeout(r, 700))
+          }
+          window.__put2 = put.map((p) => ({ url: p.url, body: JSON.parse(p.body) }))
+        } finally {
+          window.fetch = orig
+        }
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const ps = window.__put2 ?? []
+           if (ps.length < 2) return 'PUT 次数不对：' + ps.length
+           const keys = Object.keys(ps[0].body).sort().join(',')
+           const leaked = ['notify', 'backupWaitSecs', 'refreshTokenDays', 'skipTasks', 'aiAvatarDailyLimit']
+             .filter((k) => k in ps[0].body).join(',')
+           return [ps[0].url, keys, leaked, ps[1].body.params.listenSeconds].join('/')
+         })()`,
+        '/api/tasks/live-room/config/params//123',
       ),
       changed: true,
     },

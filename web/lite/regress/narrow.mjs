@@ -228,16 +228,18 @@ try {
     await sleep(400)
     const backList = await probe(`({ rail: !!document.getElementById('config-rail'), detail: !!document.getElementById('config-detail') })`)
     check(`${w}px · 配置中心能退回列表`, backList.rail === true && backList.detail === false, JSON.stringify(backList))
-    // 推送那一栏的详情（渠道表单最宽的一屏）
-    await cdp.eval(`[...document.querySelectorAll('#app [role="tab"]')].find((b) => b.textContent.includes('推送配置'))?.click()`)
+    // 「账号私有配置」那一栏的详情 —— 渠道表单 + 任务行为 + 功能开关，本页最宽的一屏
+    await cdp.eval(`[...document.querySelectorAll('#app [role="tab"]')].find((b) => b.textContent.includes('账号私有配置'))?.click()`)
     await sleep(400)
     await cdp.eval(`document.querySelector('#config-rail button')?.click()`)
     await sleep(900)
     const push = await probe(`(() => ({
       overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
       sw: document.documentElement.scrollWidth, vw: window.innerWidth,
+      blocks: ['运行结果推送', '任务行为', '功能开关'].filter((t) => (document.getElementById('config-detail')?.textContent ?? '').includes(t)).length,
     }))()`)
-    check(`${w}px · 配置中心推送详情无横向溢出`, push.overflow === false, `scrollWidth ${push.sw} / 视口 ${push.vw}`)
+    check(`${w}px · 配置中心私有详情无横向溢出`, push.overflow === false, `scrollWidth ${push.sw} / 视口 ${push.vw}`)
+    check(`${w}px · 私有详情三块都在（作用域口径）`, push.blocks === 3, JSON.stringify(push))
   }
 
   /**

@@ -45,6 +45,7 @@ import { ConfirmDialog, Dialog, closeDialog, openDialog } from '../ui/dialog'
 import { showError } from '../ui/error-dialog'
 import { pushToast } from '../ui/toast'
 import { createPushEditor } from '../ui/push-editor'
+import { createAccountFields } from '../ui/account-fields'
 
 type LoadState = 'loading' | 'error' | 'ready'
 type Method = 'qr' | 'sms' | 'app' | 'password' | 'auth'
@@ -86,42 +87,8 @@ const PLATFORM_LABEL: Record<PcPlatform, string> = {
  */
 const SHOW_ACCOUNT_SETTINGS_BLOCKS = false
 
-// ── 每账号设置的纯函数（不碰 DOM，可单测）───────────────────────────────
-
-/**
- * 解析一个"必须是整数"的输入。
- *
- * 空串**不当 0**：`backupWaitSecs` 的 0 有明确语义（"不等"），替用户拍板成 0
- * 等于悄悄改掉一项行为。留空请他显式写 0。
- *
- * ⚠ 这里**只**管"是不是整数"，**不管范围** —— 范围以后端为准
- * （`AccountSettingsDto::BACKUP_WAIT_SECS_MAX` 等），前端再实现一遍必然分叉。
- */
-const parseIntField = (label: string, raw: string): number => {
-  const t = raw.trim()
-  if (t === '') throw new Error(label + ' 不能留空（要 0 就写 0）')
-  if (!/^-?\d+$/.test(t)) throw new Error(label + ' 必须是整数，当前是「' + t + '」')
-  const n = Number(t)
-  if (!Number.isSafeInteger(n)) throw new Error(label + ' 超出可表示的范围')
-  return n
-}
-
-/**
- * 逗号 / 空白分隔的**任务 id**。
- *
- * 非数字当场报错：后端对 `["签到"]` 只会回一句 serde 的类型错误，用户看不懂
- * "为什么我填了它说格式不对"。旧形状（任务名）是**后端读旧库时丢弃**的，不是这里。
- */
-const parseSkipTasks = (raw: string): number[] => {
-  const out: number[] = []
-  for (const part of raw.split(/[\s,，、;；]+/)) {
-    const t = part.trim()
-    if (t === '') continue
-    if (!/^-?\d+$/.test(t)) throw new Error('跳过任务只能填任务 id（数字），「' + t + '」不是')
-    out.push(Number(t))
-  }
-  return out
-}
+// ⚠ 本地校验（`parseIntField` / `parseSkipTasks`）已搬去 `../ui/account-fields`
+// —— 账号页与配置中心复用**同一份**，别在这里再写第二份（两份实现迟早分叉）。
 
 /**
  * 把设置的读写失败翻成**能分辨**的一句话。
@@ -713,6 +680,12 @@ export const AccountsPage = () => {
   // 所以账号页这边只剩一个 `push` 句柄：`load` 铺数据、`build` 攒 notify、
   // `fields()` 画那块表单。分成"结构 / 值"两个 ref 的理由见模块文件头。
   //
+  // # 「任务参数」/「功能开关」那四格同款
+  //
+  // 备份等待 / 刷新阈值 / 跳过任务 / AI 头像上限**连同本地校验**一起搬去了
+  // `../ui/account-fields`（同样是工厂函数），这边只剩一个 `acct` 句柄：
+  // `load` 铺数据、`build` 攒那四格、`taskFields()` / `featureFields()` 画两组表单。
+  //
   // # 打开才拉数据
   //
   // 十条渠道 + 一堆字段，页面 `load()` 里顺手全拉一遍只会多一条失败路径（没有后端时
@@ -726,11 +699,8 @@ export const AccountsPage = () => {
   const settingsOk = ref('')
   const settingsSaving = ref(false)
 
-  // 全局字段。数字一律以**字符串**存：原样回显用户敲的东西，解析放到提交那一刻。
-  const fBackupWait = ref('')
-  const fRefreshDays = ref('')
-  const fSkipTasks = ref('')
-  const fAiAvatarLimit = ref('')
+  // 四格（任务参数 / 功能开关）在共享模块里 —— 账号页与配置中心复用同一份。
+  const acct = createAccountFields()
 
   // 运行结果推送（渠道表单本体在共享模块里，见上面那段）
   const push = createPushEditor()
@@ -738,17 +708,12 @@ export const AccountsPage = () => {
   /**
    * 把 GET / PUT 回来的一份设置铺进表单。
    *
+   * 四格交给共享模块的 `acct.load`（它自己逐格容错，理由见模块文件头）；
    * 渠道配置**原样拿住**（里面可能有我们没建模的键）—— 那是 `push.load` 的事，
    * 理由见 `../ui/push-editor` 文件头。
    */
   const applySettings = (s: AccountSettings): void => {
-    // ⚠ 逐格容错：GET / PUT 回的应当是完整的 DTO，但真出现形状缺口时，
-    // 一条 `Cannot read properties of undefined` 会把"哪一格不对"整个盖掉。
-    // 缺数字 ⇒ 留空（提交时那条"不能留空"才是能读的错误），缺数组 ⇒ 空表。
-    fBackupWait.value = s.backupWaitSecs == null ? '' : String(s.backupWaitSecs)
-    fRefreshDays.value = s.refreshTokenDays == null ? '' : String(s.refreshTokenDays)
-    fSkipTasks.value = (s.skipTasks ?? []).join(', ')
-    fAiAvatarLimit.value = s.aiAvatarDailyLimit == null ? '' : String(s.aiAvatarDailyLimit)
+    acct.load(s)
 
     push.load(s.notify)
   }
@@ -786,13 +751,8 @@ export const AccountsPage = () => {
     settingsAccount.value = null
   }
 
-  const buildSettings = (): AccountSettings => ({
-    backupWaitSecs: parseIntField('备份等待秒数', fBackupWait.value),
-    refreshTokenDays: parseIntField('刷新阈值天数', fRefreshDays.value),
-    skipTasks: parseSkipTasks(fSkipTasks.value),
-    aiAvatarDailyLimit: parseIntField('AI 头像每日上限', fAiAvatarLimit.value),
-    notify: push.build(),
-  })
+  /** 攒成 PUT 的整份 DTO：四格来自共享模块，`notify` 来自推送编辑器。 */
+  const buildSettings = (): AccountSettings => ({ ...acct.build(), notify: push.build() })
 
   const saveSettings = async (): Promise<void> => {
     const target = settingsAccount.value
@@ -822,41 +782,10 @@ export const AccountsPage = () => {
 
   // ── 每账号设置的渲染 ────────────────────────────────────────────────
   //
-  // 底下这个 `textField` 是**普通函数**（不是组件），并且**值走 thunk**
-  // （`get: () => string`）。不是风格问题：
-  // - 普通函数被 `{textField(...)}` 这样调用时，调用本身发生在一条 effect 里；
-  //   若在这里**当场**读出值再当字符串传下去，那条 effect 就订阅了那个 ref ——
-  //   敲一个字整块表单重建、焦点全丢。写成 `value={get()}` 时读发生在**属性自己的
-  //   effect** 里，只更新那一个输入框。
-  // - 组件不行：组件的 props 是在组件体里读的，而组件体只跑一次、不在任何 effect 里，
-  //   读到的值不会更新（本框架没有虚拟 DOM 的那层 diff）。
-  //
-  // ⚠ 推送那块同款的 `textField` / `secretField` / `switchField`，连同渠道表单本体，
-  // 已经整体搬进 `../ui/push-editor`（配置中心页复用同一份）—— 这里只留任务参数
-  // 还在用的 `textField`；`secretField` / `switchField` 搬走后本文件再无引用，
-  // 留着会被 `noUnusedLocals` 判成死代码。
-
-  /** 一行普通输入框。 */
-  const textField = (
-    label: string,
-    get: () => string,
-    set: (v: string) => void,
-    hint: string,
-    type: 'text' | 'number' = 'text',
-  ) => (
-    <fieldset class="fieldset">
-      <legend class="fieldset-legend">{label}</legend>
-      <input
-        type={type}
-        class="input w-full"
-        autocomplete="off"
-        spellcheck={false}
-        value={get()}
-        onInput={(e) => set((e.target as HTMLInputElement).value)}
-      />
-      <p class="text-xs leading-5 opacity-60">{hint}</p>
-    </fieldset>
-  )
+  // ⚠ 本文件**不再有**私有的 `textField`：四格连渲染原语一起搬进了
+  // `../ui/account-fields`（那边带一份私有副本，理由与"值走 thunk"的说明见该文件头）。
+  // 搬运时对比过：`textField` 在本文件已 0 引用，留着会被 `noUnusedLocals`
+  // （`npm run typecheck`）判成死代码。
 
   const settingsForm = () => (
     <>
@@ -874,26 +803,7 @@ export const AccountsPage = () => {
 
       <div class="flex flex-col gap-2">
         <h4 class="text-sm font-medium">任务参数</h4>
-        {textField(
-          '备份任务等待时间（秒）',
-          () => fBackupWait.value,
-          (v) => (fBackupWait.value = v),
-          '范围 0–3600（后端上限）：备份事件发出后等它落库的秒数，0 = 不等。',
-          'number',
-        )}
-        {textField(
-          '刷新凭据的剩余天数阈值',
-          () => fRefreshDays.value,
-          (v) => (fRefreshDays.value = v),
-          '范围 0–3650（后端上限）：凭据剩余天数低于它就刷新。',
-          'number',
-        )}
-        {textField(
-          '跳过的任务 id',
-          () => fSkipTasks.value,
-          (v) => (fSkipTasks.value = v),
-          '填任务 id（数字），用逗号或空格分隔，最多 1000 条；留空 = 一个都不跳。⚠ 旧版本存的是任务名，后端读旧库时会丢弃它们。',
-        )}
+        {acct.taskFields()}
       </div>
 
       {/*
@@ -904,13 +814,7 @@ export const AccountsPage = () => {
         <>
         <div class="flex flex-col gap-2">
           <h4 class="text-sm font-medium">功能开关</h4>
-          {textField(
-            'AI 头像每日上限（轮）',
-            () => fAiAvatarLimit.value,
-            (v) => (fAiAvatarLimit.value = v),
-            '范围 0–1000（后端上限）：每一轮都是一次上游调用。',
-            'number',
-          )}
+          {acct.featureFields()}
         </div>
 
         <div class="flex flex-col gap-2">
