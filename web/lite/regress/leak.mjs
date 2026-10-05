@@ -59,8 +59,15 @@ const FIXTURE = process.argv.includes('--fixture') || process.env.LEAK_FIXTURE =
 /** 静态产物与接口的来源端口（夹具模式下由内核分配 ⇒ 不能是 `const` ✓）。 */
 let port = PORT
 
-/** 每页访问 ROUNDS 次，记录 Δ；整轮跑一遍全部路由，记录总 Δ。 */
-const PAGES = ['accounts', 'tasks', 'exchange', 'live-room', 'schedules', 'pipelines', 'history', 'settings']
+/**
+ * 每页访问 ROUNDS 次，记录 Δ；整轮跑一遍全部路由，记录总 Δ。
+ *
+ * ⚠ `tasks/config` 是任务页的**子视图**（不是独立 PageId），但它在路由上是一条真地址，
+ * 而且它自带一批**模块级**状态（草稿表 / 选中项）与该页最大的那张表单（推送十条渠道），
+ * 正是最容易漏的那一类 ⇒ 2026-10-05 一并纳入量测（这一页第一版就踩过一次：
+ * 卸载期间写信号，每进出一次就多留一份整页 DOM，见 `pages/config-page.tsx` 文件头）。
+ */
+const PAGES = ['accounts', 'tasks', 'tasks/config', 'exchange', 'live-room', 'schedules', 'pipelines', 'history', 'settings']
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',

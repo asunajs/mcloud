@@ -1001,6 +1001,87 @@ const STEPS = {
       changed: true,
     },
 
+    // ── 配置中心（`/tasks/config`，2026-10-05）────────────────────────────
+    //
+    // 用户口径：「上面切换任务配置还是推送配置，下面左边列出所有配置大项，右边主窗口是
+    // 具体配置」。上面那两步已经验过"从任务卡带着任务名进配置页"（`/tasks/<名>/config`），
+    // 这里钉的是**配置中心本身**：两个 tab、左栏/右栏的分工、未保存修改与放弃修改。
+    //
+    // ⚠ 断言都盯着 `#config-rail` / `#config-detail` 两个锚，不能只搜整页文字：
+    // 选中项的名字**两边都印**（左边那一行、右边标题），搜全页等于没验"右栏换成了它"。
+    {
+      name: '配置中心：从任务页进得去，左栏列配置项、右栏是它的参数',
+      do: `[...document.querySelectorAll('#app button')].find((b) => b.textContent.trim() === '配置中心').click()`,
+      check: eq(
+        `(() => {
+           const rail = document.querySelector('#config-rail')?.textContent ?? ''
+           const detail = document.querySelector('#config-detail')?.textContent ?? ''
+           return [location.pathname, rail.includes('配置模块'), rail.includes('直播口令'), detail.includes('听弹幕时长')].join('/')
+         })()`,
+        '/tasks/config/true/true/true',
+      ),
+      changed: true,
+    },
+    {
+      name: '配置中心：改一个参数 ⇒ 亮「有未保存修改」',
+      do: `(() => {
+        const inp = document.querySelector('#config-detail input[type="number"]')
+        if (!inp) throw new Error('右栏没有数字参数')
+        inp.value = '77'
+        inp.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      })()`,
+      check: has(`document.querySelector('#config-detail')?.textContent ?? ''`, '有未保存修改'),
+      changed: true,
+    },
+    {
+      // ⭐ 草稿那条路的钉子：放弃修改 = **回到上次保存的那一份**（前面那步存的是 123），
+      // 而不是"填回参数默认值"（60）—— 两者在界面上很像，但语义完全不同。
+      name: '配置中心：点「放弃修改」⇒ 回到已保存的 123（不是默认值 60）',
+      do: `[...document.querySelectorAll('#config-detail button')].find((b) => b.textContent.trim() === '放弃修改').click()`,
+      check: eq(
+        `(() => {
+           const t = document.querySelector('#config-detail')?.textContent ?? ''
+           const inp = document.querySelector('#config-detail input[type="number"]')
+           return t.includes('有未保存修改') + '/' + (inp ? inp.value : '没有输入框')
+         })()`,
+        'false/123',
+      ),
+      changed: true,
+    },
+    {
+      name: '配置中心：切到「推送配置」⇒ 左栏列账号、右栏是它的渠道卡片',
+      do: `[...document.querySelectorAll('#app [role="tab"]')].find((b) => b.textContent.includes('推送配置')).click()`,
+      check: eq(
+        `(() => {
+           const rail = document.querySelector('#config-rail')?.textContent ?? ''
+           const detail = document.querySelector('#config-detail')?.textContent ?? ''
+           return [rail.includes('推送账号'), rail.includes('主力号'), detail.includes('PushPlus'), detail.includes('企业微信机器人')].join('/')
+         })()`,
+        'true/true/true/true',
+      ),
+      changed: true,
+    },
+    {
+      // 另一个账号（夹具里 `notify: null`）⇒ 右栏该说清"一个渠道都没配"，
+      // 而不是留着上一个账号的渠道（那会让人以为"这个号也配了这些"）。
+      name: '配置中心：换一个账号 ⇒ 右栏换成它自己那份（没配渠道就是没配）',
+      do: `(() => {
+        const btns = [...document.querySelectorAll('#config-rail button')]
+        if (btns.length < 2) throw new Error('左栏只有一个账号（夹具应有两个）')
+        btns[1].click()
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const d = document.querySelector('#config-detail')?.textContent ?? ''
+           return d.includes('当前不推送任何渠道') + '/' + d.includes('主力号')
+         })()`,
+        'true/false',
+      ),
+      changed: true,
+    },
+
     // ── 日志页（`/logs`）：**滚动位置**（2026-10-04 用户报「服务端日志页面出日志会强制滚动到顶部」✗）──
     //
     // 那一页每 2 s 轮询一次把整份列表换掉，而卡片原先写在条件槽里 ⇒ `setNodes`

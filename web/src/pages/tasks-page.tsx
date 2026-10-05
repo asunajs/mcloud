@@ -25,7 +25,7 @@ import {
   type TaskGroup,
   request,
 } from '../api'
-import { TaskConfigPage } from './task-config-page'
+import { ConfigCenterPage } from './config-page'
 import { AccountPicker } from '../ui/account-picker'
 import { EmptyState } from '../ui/empty-state'
 import { showError } from '../ui/error-dialog'
@@ -65,11 +65,24 @@ export const TasksPage = () => {
     path.value = pathParts(location.pathname)
   }
 
-  /** 配置视图对应哪个任务；不在配置子路由上就是 `null`。 */
-  const configTask = (): string | null => {
+  /**
+   * 当前是不是「配置中心」这条子路由；是的话要不要预选某个任务。
+   *
+   * 两种进来方式（2026-10-05 用户口径：左上切「任务配置 / 推送配置」、左边列配置大项、
+   * 右边是具体配置）：
+   * - `/tasks/config` —— 配置中心本身，左栏列全部可配置项；
+   * - `/tasks/<任务名>/config` —— 任务卡上点「配置」，那一项预选好（老 URL，别改）。
+   *
+   * ⚠ `undefined`（不是这条路由）与 `null`（是，但没预选）**必须分开**：把两者都写成
+   * `null` 的话要么配置中心永远进不去，要么任何路径都当自己是配置页。
+   */
+  const configRoute = (): { task: string | null } | undefined => {
     const seg = path.value
-    if (seg[0] !== 'tasks' || seg[2] !== 'config') return null
-    return decodeURIComponent(seg[1] ?? '')
+    if (seg[0] !== 'tasks') return undefined
+    // ⚠ `/tasks/config` 只有两段；任务名恰好叫 `config` 时用 `/tasks/config/config` 仍可达
+    if (seg[1] === 'config') return { task: null }
+    if (seg.length >= 3 && seg[2] === 'config') return { task: decodeURIComponent(seg[1] ?? '') }
+    return undefined
   }
 
   const state = ref<LoadState>('loading')
@@ -320,7 +333,23 @@ export const TasksPage = () => {
   const form = () => (
     <div class="card bg-base-100 shadow-sm">
       <div class="card-body">
-        <h2 class="card-title text-base">运行参数</h2>
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <h2 class="card-title text-base">运行参数</h2>
+          {/*
+            配置中心入口（2026-10-05）：一页列全部可配置的任务参数 + 全部账号的推送。
+            任务卡上那个「配置」是**带着任务**进去的（同一个页面，只是预选好了），
+            这一颗是"我就想看看有哪些配置"的入口 —— 手机上尤其需要（卡片要滑很久）。
+          */}
+          <button
+            type="button"
+            class="btn btn-sm btn-soft min-h-11 whitespace-nowrap md:min-h-0"
+            onClick={() => {
+              navigate('/tasks/config')
+            }}
+          >
+            配置中心
+          </button>
+        </div>
         <fieldset class="fieldset">
           <legend class="fieldset-legend">账号</legend>
           {accounts.value.length === 0 ? (
@@ -604,17 +633,10 @@ export const TasksPage = () => {
         </div>
     )
 
-  // 配置子路由：整页换成配置视图（用户口径："给任务出个单独的配置页面"）
-  const task = configTask()
-  if (task !== null) {
-    return (
-      <TaskConfigPage
-        task={task}
-        onBack={() => {
-          navigate('/tasks')
-        }}
-      />
-    )
+  // 配置子路由：整页换成配置中心（任务参数 + 推送渠道两块共用一套"列表 / 详情"）
+  const cfgRoute = configRoute()
+  if (cfgRoute) {
+    return <ConfigCenterPage task={cfgRoute.task} onExit={() => navigate('/tasks')} />
   }
 
   return (

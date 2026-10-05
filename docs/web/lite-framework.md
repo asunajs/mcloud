@@ -157,7 +157,7 @@ DOM 里。真 DOM 验收从「6 条全绿」直接掉到「28 条失败」✗。
 ⚠ 这条也解释了为什么"子视图登记"要额外小心：lite 里子组件的 `onMounted` **先于**
 父页面的 `onMounted` 跑，直接登记会被父页面盖掉 ⇒ 配置子页用的是
 `queueMicrotask` 推到外层之后（普通变量，推迟是安全的；**若改回信号，这段必须一起改**）。
-用法与完整注释见 `web/src/ui/page-refresh.ts` 与 `task-config-page.tsx`。
+用法与完整注释见 `web/src/ui/page-refresh.ts` 与 `web/src/pages/config-page.tsx`。
 
 
 

@@ -165,6 +165,9 @@ try {
     'dashboard',
     'accounts',
     'tasks',
+    // 配置中心（任务页的子视图）：左栏是列表、右栏是表单 —— 窄屏靠"列表 ↔ 详情"下钻，
+    // 两个形态都在这条门禁的射程里（下钻那一步在 ④ 之后单独量）。
+    'tasks/config',
     'exchange',
     'live-room',
     'schedules',
@@ -190,7 +193,55 @@ try {
   }
 
   /**
-   * ⑤ 桌面：设置页要**有结构地用宽度**。
+   * ⑤ 配置中心的**详情那一屏**（窄屏下钻之后）。
+   *
+   * ⚠ 上面那个全路由循环只看到 `#config-rail`（列表那一屏）—— 详情是 JS 状态换出来的，
+   * 不点进不去。而详情里恰恰是本页最宽的东西（两列表单、渠道的 join 输入框、长 URL），
+   * 所以"只测列表"等于没测。两件事一起量：**没有横向溢出** + **下钻是能回头的**
+   * （详情铺开之后必须有一条返回键，否则手机上退不回列表 ✗）。
+   */
+  for (const w of [320, 375]) {
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: w,
+      height: 812,
+      deviceScaleFactor: 2,
+      mobile: true,
+    })
+    await cdp.eval(gotoJs('tasks/config'))
+    await sleep(500)
+    // 列表 → 详情（点左栏第一项）
+    await cdp.eval(`document.querySelector('#config-rail button')?.click()`)
+    await sleep(500)
+    const detail = await probe(`(() => {
+      const d = document.getElementById('config-detail')
+      const back = [...document.querySelectorAll('#app button')].find((b) => b.textContent.includes('全部'))
+      return {
+        opened: !!d,
+        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+        backIn: back ? back.getBoundingClientRect().top >= 0 : false,
+      }
+    })()`)
+    check(`${w}px · 配置中心详情无横向溢出`, detail.opened === true && detail.overflow === false, JSON.stringify(detail))
+    check(`${w}px · 配置中心详情有返回键且够得着`, detail.backIn === true)
+    // 返回列表（钉住"来回都能走"）
+    await cdp.eval(`[...document.querySelectorAll('#app button')].find((b) => b.textContent.includes('全部'))?.click()`)
+    await sleep(400)
+    const backList = await probe(`({ rail: !!document.getElementById('config-rail'), detail: !!document.getElementById('config-detail') })`)
+    check(`${w}px · 配置中心能退回列表`, backList.rail === true && backList.detail === false, JSON.stringify(backList))
+    // 推送那一栏的详情（渠道表单最宽的一屏）
+    await cdp.eval(`[...document.querySelectorAll('#app [role="tab"]')].find((b) => b.textContent.includes('推送配置'))?.click()`)
+    await sleep(400)
+    await cdp.eval(`document.querySelector('#config-rail button')?.click()`)
+    await sleep(900)
+    const push = await probe(`(() => ({
+      overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+      sw: document.documentElement.scrollWidth, vw: window.innerWidth,
+    }))()`)
+    check(`${w}px · 配置中心推送详情无横向溢出`, push.overflow === false, `scrollWidth ${push.sw} / 视口 ${push.vw}`)
+  }
+
+  /**
+   * ⑥ 桌面：设置页要**有结构地用宽度**。
    *
    * 用户原话："pc端这样太宽了视觉体验差"，并贴了另一套系统的同页做参照 ——
    * 两张卡并排、路径三列、读数成格。所以我**没有**把它缩成窄栏（那是修错方向），
