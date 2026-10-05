@@ -10,10 +10,11 @@
  *   全都"看起来正常" ✗；
  * * 日志页 60 行全铺也才 1200 个节点 ⇒ **窗口化失效**（退回全铺）根本量不出来 ✗。
  *
- * 而真实数据是 **113 条运行记录 / 800 行日志 / 单次运行 600 行日志**（本机实测 ✓）。
+ * 而真实数据是 **113 条运行记录 / 日志环 2000 行 / 单次运行 600 行日志**（本机实测 ✓）。
  * 所以这里就地造一份大体量夹具，只量"**该省的地方有没有省、该稳的地方稳不稳**"：
  *
- * 1. `/logs`：800 行只铺**窗口内那几十行**（节点数与"总行数"脱钩 ✓）；滚动条长度/
+ * 1. `/logs`：2000 行只铺**窗口内那几十行**，且**节点数**（DevTools 性能监视器那个口径）
+ *    与总行数脱钩 ✓；滚动条长度/
  *    位置仍是**真实总高**（垫片撑住了 ✓）；首屏贴底（看最新的 ✓）；**滚到中间跨一次
  *    轮询位置不动、容器还是同一个节点**；贴底时跨轮询仍贴底；
  * 2. `/logs`：**2.5 秒内的 `/api/logs` 请求数必须是个位数** —— 这是"页面反复重挂载"
@@ -34,12 +35,26 @@ const PORT = 48931
 // ⚠ `openSession` 的 `profile` 必须显式传（漏传会在 cwd 下建一个叫 `undefined` 的用户目录）
 const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'mcloud-bulk-'))
 
-/** 体量：照本机真实数据（113 条运行 / 800 行日志 / 单次 600 行）取整 ✓。 */
-const LOG_ROWS = 800
+/**
+ * 体量：照本机真实数据取整 —— **2000 行日志就是服务端的环容量**（`logbuf.rs` 的
+ * `RING_CAPACITY` ✓，日志页 2026-10-05 起也**取满环** ✓），113 条运行取 100，
+ * 单次运行日志取 600 ✓。
+ */
+const LOG_ROWS = 2000
 const RUN_COUNT = 100
 const RUN_LOG_ROWS = 600
-/** 窗口外还铺出来的行数上限：真实实现是"视口 + overscan"（几十行）✓，全铺会到 800 ✗。 */
+/** 窗口外还铺出来的行数上限：真实实现是"视口 + overscan"（几十行）✓，全铺会到 2000 ✗。 */
 const MAX_ROWS = 80
+/**
+ * DOM 节点数上限（**"性能监视器"那个口径**：`Memory.getDOMCounters` 的 `nodes`，
+ * 含脱离文档但仍活着的 ✓）。
+ *
+ * ⚠ 这是用户最初那张截图直接量的东西（2026-10-05：DevTools 性能监视器
+ * **DOM nodes 30,124** ✗），所以窗口化到底成不成，最终要看它 ✓：
+ * 2000 行全铺是**万级** ✗，窗口化之后应当与"总行数"**无关**（几百到一千出头 ✓）。
+ * 留 1500 的余量：整页除了日志行还有外壳、工具栏、垫片 ✓。
+ */
+const MAX_NODES = 1500
 
 /**
  * 大体量夹具（**就地定义**，不塞进 `lib.mjs`：只有这一条门禁要它 ✓）。
@@ -121,7 +136,7 @@ try {
   // ── ① /logs：800 行只铺窗口内那几十行 ──
   const ready = await waitFor(`document.querySelectorAll('#logs-scroll [data-i]').length > 0`, 10000)
   const a = await probe(LOGS)
-  check('日志页大体量下仍有内容（夹具 800 行）', ready && !a.missing && a.rendered > 0, JSON.stringify(a))
+  check(`日志页大体量下仍有内容（夹具 ${LOG_ROWS} 行 = 服务端的环容量）`, ready && !a.missing && a.rendered > 0, JSON.stringify(a))
   check(
     `只铺窗口内那几十行（渲染 ${a.rendered} 行 / 总 ${LOG_ROWS} 行，上限 ${MAX_ROWS}）`,
     a.rendered > 0 && a.rendered <= MAX_ROWS,
@@ -134,6 +149,22 @@ try {
   )
   check('首屏在底部（这一页是"看最新"）', a.height - a.top - a.client <= 4, JSON.stringify(a))
   check('铺出来的最后一行就是最新那行', a.last >= LOG_ROWS - 1 - MAX_ROWS, `last=${a.last}`)
+
+  /**
+   * ⚠⚠ **DOM 节点数**（`Memory.getDOMCounters` 的 `nodes`，含脱离文档但活着的 ✓）——
+   * 这就是用户最初那张截图（DevTools 性能监视器 **30,124** ✗）量的东西，窗口化到底
+   * 成不成最终看它 ✓。先强制 GC 两次（口径与"性能监视器"对齐：它**不**强制 GC，
+   * 所以这里只会更宽松、不会更严 ✗）。
+   */
+  await cdp.send('HeapProfiler.collectGarbage')
+  await cdp.send('HeapProfiler.collectGarbage')
+  const counters = await cdp.send('Memory.getDOMCounters')
+  const inDoc = Number(await cdp.eval(`document.querySelectorAll('*').length`))
+  check(
+    `DOM 节点数与总行数脱钩（${LOG_ROWS} 行只占 ${counters.nodes} 个节点，上限 ${MAX_NODES}）`,
+    counters.nodes > 0 && counters.nodes <= MAX_NODES,
+    `nodes=${counters.nodes} 文档内=${inDoc} 脱离=${counters.nodes - inDoc}`,
+  )
 
   // ── ② 页面不许反复重挂载（那个坑的症状：每挂一次又 load() ⇒ 请求风暴） ──
   const reqs = async () =>
