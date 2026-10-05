@@ -75,7 +75,7 @@ const hasBrowser = () => {
 /**
  * 门禁清单。`tier` = 从哪一档开始跑（`commit` 的两档都跑，`push` 只有推送档跑）。
  *
- * `browser: true` 的三条性质：① 没有无头 Chrome ⇒ 印 `⊘ 跳过` 且**不算通过**；
+ * `browser: true` 的那几条性质：① 没有无头 Chrome ⇒ 印 `⊘ 跳过` 且**不算通过**；
  * ② 它们**并行**跑（彼此不依赖：各自起夹具后端、各自一个 Chrome profile，
  * 读的都是 `build` 刚产出的 `web/dist`）✓。
  */
@@ -86,13 +86,26 @@ const GATES = [
   // 编译期负例：纯 Node，CI 也跑得动 —— 该抛的没抛就是编译器的门坏了
   { tier: 'commit', name: 'lite 编译期负例', cmd: 'node', args: ['lite/regress/compiler.mjs'] },
 
-  // ── 提交档：要浏览器的三条（**并行**）──
+  // ── 提交档：要浏览器的四条（**并行**）──
   // demo：lite 的**真 DOM 断言**（绑定/列表复用/插槽/钩子/条件分支…）—— 框架自己的门
   { tier: 'commit', name: 'lite 真 DOM 验收', cmd: 'node', args: ['lite/demo/run.mjs'], browser: true },
   // bench：编译产物的行为断言 + 一组很松的耗时护栏（列表从"搬"退化成"重建"时能响）
   { tier: 'commit', name: '编译产物行为 + 耗时护栏', cmd: 'node', args: ['lite/bench/run.mjs'], browser: true },
   // 交互验收 ready：**真页面**点一遍（9 条路由 + 各页的交互与断言）—— 提交档里最值钱的一条
   { tier: 'commit', name: '交互验收 ready', cmd: 'node', args: ['lite/regress/interact.mjs', '--variant', 'ready'], browser: true },
+  /**
+   * 大体量验收：**分页与窗口化只有数据量够大时才现形** ✓（2026-10-05 用户口径
+   * 「任务记录分页，详细日志虚拟加载」）。
+   *
+   * 为什么非进**提交档**不可：`ready` 夹具只有 **4 条运行 / 60 行日志** —— 这个量级下
+   * "历史页不翻页也放得下"、"60 行全铺也才 1200 个节点" ⇒ 分页写错、窗口化失效
+   * **全都看不出来** ✗。而真实数据是 113 条运行 / 800 行日志 / 单次 600 行 ✓。
+   * 它顺带把两类"会安静地坏掉"的坑做成钉子：① 页面反复重挂载（实测 2 秒 218 次
+   * `/api/logs` ✗）；② 滚动位置被弹走/被钳歪（滚动锚定、渲染期读尺寸）✓。
+   *
+   * 实测 **≈29 s**，比同档的 `ready`（≈40 s）短 ⇒ 并行跑**不增加**墙钟时间 ✓。
+   */
+  { tier: 'commit', name: '大体量验收（分页 + 窗口化）', cmd: 'node', args: ['lite/regress/bulk.mjs'], browser: true },
 
   // ── 推送档追加：贵／"不看就发现不了"的三类 ──
   // 窄屏两档（320 / 375 真视口）：宽屏跑不到的"手机上没法用"那一类
