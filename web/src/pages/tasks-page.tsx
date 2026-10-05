@@ -147,7 +147,8 @@ export const TasksPage = () => {
 
   const push = (kind: LogLine['kind'], text: string) => {
     // ⚠ 走 `pushLog`：它按 `MAX_LOG_LINES` 截断（日志无上限追加会白占内存 +
-    // 拖慢每次更新 —— 2026-10-03 review §2.1）
+    // 拖慢每次追加的复制 —— 2026-10-03 review §2.1；⚠ 上限本身 2026-10-05 从 500
+    // 提到 2000：面板窗口化之后"看不见"那条理由不成立了，见 `ui/log-panel.tsx` ✓）
     lines.value = pushLog(lines.value, kind, text)
   }
 

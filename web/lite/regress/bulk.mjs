@@ -94,11 +94,40 @@ VARIANTS.__bulk = {
   'GET /api/logs': { handler: () => ({ status: 200, body: logs }) },
 }
 
+/**
+ * ⚠ 先做一次**纯源码的交叉核对**（不碰浏览器 ✓）：前端的 `RING_LINES` 与服务端
+ * `logbuf.rs` 的 `RING_CAPACITY` 必须一样、而且**本门禁的夹具大小就是它** ✓。
+ *
+ * 为什么要有这一条：这两个数**在各自的构建单元里**（前端 TS / Rust ✓，没有共享常量
+ * ⇒ 只能靠对账 ✓）。漂了的后果不是崩溃而是**静默少给**（服务端 `limit.clamp` 会把多要的
+ * 截掉 ⇒ 用户以为"全都在"，其实只拿到环里的一部分 ✗）—— 正是这一类"功能全对、数不对"
+ * 只有门禁能看出来 ✓。
+ *
+ * ⚠ 它跟着浏览器门禁跑（没 chrome 时整条是"⊘ 跳过 不算通过"✓）⇒ 这一小段也一起被跳过 ✗。
+ * 挪进纯 Node 的门禁就得同时改 CI 的 web job 清单，权衡之后先放这里 ✓。
+ */
+const WEB_DIR = new URL('../../', import.meta.url).pathname
+const REPO_DIR = new URL('../../../', import.meta.url).pathname
+const readConst = (file, re) => {
+  const src = fs.readFileSync(file, 'utf8')
+  const m = src.match(re)
+  return m ? Number(m[1]) : Number.NaN
+}
+const rustRing = readConst(path.join(REPO_DIR, 'crates/mcloud-server/src/logbuf.rs'), /RING_CAPACITY\s*:\s*usize\s*=\s*(\d+)/)
+const pageRing = readConst(path.join(WEB_DIR, 'src/pages/logs-page.tsx'), /RING_LINES\s*=\s*(\d+)/)
+
 const cases = []
 const check = (name, ok, detail = '') => {
   cases.push({ name, ok })
   console.log(`  ${ok ? '✅' : '✗'} ${name}${ok || !detail ? '' : `\n     ${detail}`}`)
 }
+
+check(
+  `前端 RING_LINES(${pageRing}) 与服务端 RING_CAPACITY(${rustRing}) 一致`,
+  pageRing === rustRing && Number.isFinite(pageRing),
+  '两个数在各自的构建单元里，只能对账；漂了是"静默少给"而不是崩溃',
+)
+check(`本门禁的夹具大小 LOG_ROWS(${LOG_ROWS}) 就是环容量(${rustRing})`, LOG_ROWS === rustRing, `LOG_ROWS=${LOG_ROWS}`)
 
 let server
 let session
