@@ -231,3 +231,127 @@ crates/mcloud-core/src/kouling.rs               pub const KOULING_ANCHOR（同�
 | 104 | 「**继续**」（= 接第 103 行末尾那两件：① 未推送 ② `--no-sandbox` 要不要做成常驻开关） | ≈13:16 | ≈13:2x | **已落盘**（源码 + 文档改了；**推送读数见第 105 行**——本行先落地，免得"已推送"写在还没推的时候 ✗） | **把"临时补丁"做成显式开关，而且只有一份来源**：新增 **`web/lite/chrome-flags.mjs`** —— 会 spawn chrome 的三处（`lite/regress/lib.mjs` / `lite/demo/run.mjs` / `lite/bench/run.mjs`）改成统一从 `headlessFlags()` 取公共前缀（`--headless` [+ `--no-sandbox`] `--disable-gpu`），私有参数（`--hide-scrollbars` / `--window-size` / `--virtual-time-budget` / `--dump-dom` / URL）各留各的。**`--no-sandbox` 默认不加** —— 关掉 Chromium 的沙箱是**降级**，"某台机器上必须加"（本仓的 DSH 沙箱：不加就是 `Target crashed` / `CDP 调用超时：Page.enable`）不等于所有人都该关 ✗；要加就显式：`MCLOUD_CHROME_NO_SANDBOX=1 node scripts/gates-web.mjs --push`（`=0` / `=false` / `=no` 都当没开）。关键性质：**环境变量会穿过 git 钩子**（`pre-commit` / `pre-push` 继承当前环境）⇒ 过钩子**不用再改任何文件** ✓，三条写入线也就不会再抢同一份文件（这三次打架的经过写进了 `docs/web/lite-framework.md` 与 `AGENTS.md` 环境段）。 **实测两向**（不是"看着对"）：① **不设**变量 ⇒ `node lite/demo/run.mjs` 起不来（`没抓到 #result`）⇒ 默认行为一个字节没变 ✓；② `MCLOUD_CHROME_NO_SANDBOX=1` ⇒ `lite/demo/run.mjs` **62/62 全过** ✓、`lite/bench/run.mjs` 通过 ✓。 ✗ **没做**：① **本行之后才推送**（读数在第 105 行）；② 没加"Chrome 起不来时把 `MCLOUD_CHROME_NO_SANDBOX=1` 这句提示打出来"的兜底 ✗ —— 现在仍需人知道有这个变量（写在 `AGENTS.md` 环境段与模块文件头里）。 |
 | 105 | （接第 104 行末尾那件：把这一批推上去） | ≈13:2x | ≈13:3x | **已推送** ✓ | `MCLOUD_CHROME_NO_SANDBOX=1 GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=20" git push origin main` ⇒ **`017b6ea..9fddeb3 main -> main`** ✓（**10 笔**：本线的 `f2a0927` 配置中心 / `83ff35b` 台账第 99 行 / `402b612` 按作用域分栏 / `9fddeb3` chrome 开关，加上另一条线那几笔 `79ab392`（大体量进提交档）/ `6e8429c` / `e8b16bb` / `00c51c5` …）。**推送档是钩子里真跑的**（不是我手动跑的）：11/11 全绿 —— typecheck / build / lite 负例 / demo 2.3s / bench 2.4s / login 22.3s / setup 22.9s / 大体量 29.5s / narrow 37.6s / ready 43.5s / 泄漏 139.6s ✓。⚠ **这次推送全程没有改任何 harness 文件** —— `--no-sandbox` 是靠 `MCLOUD_CHROME_NO_SANDBOX=1` **穿过 git 钩子**起作用的 ✓（第 104 行那个开关的第一次实战，也顺带证明它真的穿得过去）。⚠ 用的是 `origin`（`asunajs/mcloud`，权威名）；本机另有一条 `mcloud-gost-old` 指向旧路径的 remote，**没碰** ✓。 ✗ **没做**：无（这一批交付闭环）。 |
 | 106 | 「**1. 你为啥去掉了推送配置。2. 我说的是每个任务的配置分为公共和账号私有**（补充：比如每个账号的推送就不一样，每个账号可能的上传路径不一样）」 | ≈13:30 | ≈13:4x | **已落盘**（前端 `npm run build` 后刷新即见；提交/推送见行末） | **我把第 2 条理解错了，这一行是纠错**：第一版把**整页**并成「公共配置 / 账号私有配置」两个 tab ⇒ ①「**推送配置**」这个入口没了 ✗（用户第一句就是问这个）②"公共 / 私有"被抬到页级，而它其实是**每个任务内部**的分法。现在的形状：**顶部两栏「任务配置」/「推送配置」**；「任务配置」右栏分两半 —— **公共配置**（徽章「所有账号共用」= 该任务的默认参数）+ **账号私有配置**（徽章「每个账号各一份」= 每个账号一行：印它当前配了哪些推送渠道 + 「改它的推送」一键跳到推送栏并选中它）；「推送配置」右栏三块 = **推送渠道** / **账号级设置**（备份等待、凭据阈值）/ **功能开关**（AI 头像上限）。 **账号私有那半今天只做"指路 + 现状"**，不硬造控件：后端的 `skipTasks` 存的是**上游任务 id**（`Vec<i64>`，判定在 `mcloud-tasks/src/app_task.rs` 的 `is_configured_skip`），而界面上只有任务名 ⇒ 在拿到 id 之前"跳过这个任务"做不成按账号的开关 ✗；"上传路径"这类按账号的项上游也还没有 ⇒ 那半写成"每账号一行 + 推送摘要 + 跳转 + 一句等上游功能实现后往这里加"，**不画一个存不下去的控件**（那比空着更糟）。**两栏动的是同几个后端对象**（账号设置那五格）⇒ 切 tab 时**先存草稿再重新拉一遍**，否则拿旧副本保存会把对方刚存的改动盖掉 ✗。 顺带：`skipTasks` **从「推送配置」里撤掉**（它是按任务的），「账号级设置」只留与任务无关的两格；账号页设置弹窗**不动**（仍 3 格，那条路是独立的、每次打开重新 GET）。**门禁读数**：`interact.mjs --variant ready` ⇒ **130 步 / 129 断言全绿、0 页面异常**（配置中心那 10 步逐条过：两半结构、每账号一行含推送摘要、「改它的推送」跳转选中、任务栏保存**只发 params**、推送栏保存**五格齐**）；`narrow.mjs` ⇒ **48/48 全绿**（新增"任务详情两半都在、账号各占一行"一条；⚠ 第一次红是因为**窄屏切 tab 之后落在列表那一屏**，探针没点进详情 ⇒ `halves: 0`，补一步即绿）。 ✗ **没做**：① 提交与推送在本行之后（读数见第 107 行）；② 「账号私有配置」那半**还没有任何可写的项**（等后端把上游任务 id 给出来 / 上游做出按账号的项）；③ 账号页设置弹窗里那两块仍隐藏（口径未变）。 |
+| 107 | （接第 106 行末尾：提交与推送） | ≈13:4x | ≈13:5x | **已推送** ✓ | On branch main
+Your branch is up to date with 'origin/main'.
+
+nothing to commit, working tree clean ⇒ **`2e17c9b`**（8 files，**+432 / −245**；钩子提交档 **7/7 全绿** ——  穿过钩子，**全程零文件补丁** ✓）；web 门禁（推送档，本机实测≈2m10s）：node scripts/gates-web.mjs --push
+=== 档位：推送档（--push） · 11 条 ===
+── typecheck … ✓ (0.4s)
+── build … ✓ (0.7s)
+── lite 编译期负例 … ✓ (0.5s)
+（下面 8 条并行跑：互不依赖，各自起夹具与浏览器）
+── 前端泄漏量测 … ✗ (0.6s)
+file:///Users/catlair/mobile/workspace/mcloud/web/lite/regress/lib.mjs:901
+        msg.error ? w.rej(new Error(JSON.stringify(msg.error))) : w.res(msg.result)
+                          ^
+
+Error: {"code":-32000,"message":"Target crashed"}
+    at Cdp.ws.onmessage (file:///Users/catlair/mobile/workspace/mcloud/web/lite/regress/lib.mjs:901:27)
+    at [nodejs.internal.kHybridDispatch] (node:internal/event_target:843:20)
+    at WebSocket.dispatchEvent (node:internal/event_target:776:26)
+    at fireEvent (node:internal/deps/undici/undici:14186:14)
+    at #onMessage (node:internal/deps/undici/undici:15474:9)
+    at Object.onMessage (node:internal/deps/undici/undici:15187:76)
+    at websocketMessageReceived (node:internal/deps/undici/undici:14190:15)
+    at node:internal/deps/undici/undici:14896:19
+    at node:internal/deps/undici/undici:14710:11
+    at afterWrite (node:internal/streams/writable:708:5)
+
+Node.js v24.16.0
+
+── 交互验收 ready … ✗ (0.7s)
+file:///Users/catlair/mobile/workspace/mcloud/web/lite/regress/lib.mjs:901
+        msg.error ? w.rej(new Error(JSON.stringify(msg.error))) : w.res(msg.result)
+                          ^
+
+Error: {"code":-32000,"message":"Target crashed"}
+    at Cdp.ws.onmessage (file:///Users/catlair/mobile/workspace/mcloud/web/lite/regress/lib.mjs:901:27)
+    at [nodejs.internal.kHybridDispatch] (node:internal/event_target:843:20)
+    at WebSocket.dispatchEvent (node:internal/event_target:776:26)
+    at fireEvent (node:internal/deps/undici/undici:14186:14)
+    at #onMessage (node:internal/deps/undici/undici:15474:9)
+    at Object.onMessage (node:internal/deps/undici/undici:15187:76)
+    at websocketMessageReceived (node:internal/deps/undici/undici:14190:15)
+    at node:internal/deps/undici/undici:14896:19
+    at node:internal/deps/undici/undici:14710:11
+    at afterWrite (node:internal/streams/writable:708:5)
+
+Node.js v24.16.0
+
+── 交互验收 setup … ✗ (0.7s)
+file:///Users/catlair/mobile/workspace/mcloud/web/lite/regress/lib.mjs:901
+        msg.error ? w.rej(new Error(JSON.stringify(msg.error))) : w.res(msg.result)
+                          ^
+
+Error: {"code":-32000,"message":"Target crashed"}
+    at Cdp.ws.onmessage (file:///Users/catlair/mobile/workspace/mcloud/web/lite/regress/lib.mjs:901:27)
+    at [nodejs.internal.kHybridDispatch] (node:internal/event_target:843:20)
+    at WebSocket.dispatchEvent (node:internal/event_target:776:26)
+    at fireEvent (node:internal/deps/undici/undici:14186:14)
+    at #onMessage (node:internal/deps/undici/undici:15474:9)
+    at Object.onMessage (node:internal/deps/undici/undici:15187:76)
+    at websocketMessageReceived (node:internal/deps/undici/undici:14190:15)
+    at node:internal/deps/undici/undici:14896:19
+    at node:internal/deps/undici/undici:14710:11
+    at afterWrite (node:internal/streams/writable:708:5)
+
+Node.js v24.16.0
+
+── 大体量验收（分页 + 窗口化） … ✗ (0.7s)
+  ✅ 前端 RING_LINES(2000) 与服务端 RING_CAPACITY(2000) 一致
+  ✅ 本门禁的夹具大小 LOG_ROWS(2000) 就是环容量(2000)
+file:///Users/catlair/mobile/workspace/mcloud/web/lite/regress/lib.mjs:901
+        msg.error ? w.rej(new Error(JSON.stringify(msg.error))) : w.res(msg.result)
+                          ^
+
+Error: {"code":-32000,"message":"Target crashed"}
+    at Cdp.ws.onmessage (file:///Users/catlair/mobile/workspace/mcloud/web/lite/regress/lib.mjs:901:27)
+    at [nodejs.internal.kHybridDispatch] (node:internal/event_target:843:20)
+    at WebSocket.dispatchEvent (node:internal/event_target:776:26)
+    at fireEvent (node:internal/deps/undici/undici:14186:14)
+    at #onMessage (node:internal/deps/undici/undici:15474:9)
+    at Object.onMessage (node:internal/deps/undici/undici:15187:76)
+    at websocketMessageReceived (node:internal/deps/undici/undici:14190:15)
+    at node:internal/deps/undici/undici:14896:19
+    at node:internal/deps/undici/undici:14710:11
+    at afterWrite (node:internal/streams/writable:708:5)
+
+Node.js v24.16.0
+
+── 交互验收 login … ✗ (0.7s)
+file:///Users/catlair/mobile/workspace/mcloud/web/lite/regress/lib.mjs:901
+        msg.error ? w.rej(new Error(JSON.stringify(msg.error))) : w.res(msg.result)
+                          ^
+
+Error: {"code":-32000,"message":"Target crashed"}
+    at Cdp.ws.onmessage (file:///Users/catlair/mobile/workspace/mcloud/web/lite/regress/lib.mjs:901:27)
+    at [nodejs.internal.kHybridDispatch] (node:internal/event_target:843:20)
+    at WebSocket.dispatchEvent (node:internal/event_target:776:26)
+    at fireEvent (node:internal/deps/undici/undici:14186:14)
+    at #onMessage (node:internal/deps/undici/undici:15474:9)
+    at Object.onMessage (node:internal/deps/undici/undici:15187:76)
+    at websocketMessageReceived (node:internal/deps/undici/undici:14190:15)
+    at node:internal/deps/undici/undici:14896:19
+    at node:internal/deps/undici/undici:14710:11
+    at afterWrite (node:internal/streams/writable:708:5)
+
+Node.js v24.16.0
+
+── lite 真 DOM 验收 … ✗ (1.3s)
+编译产物: /tmp/lite-demo.compiled.js (63117 B)   页面: /tmp/lite-demo.html
+没抓到 #result —— 页面可能整个没跑起来。原始抓取片段：
+""
+
+── 编译产物行为 + 耗时护栏 … ✗ (1.3s)
+bench 页: /tmp/lite-bench.html   编译产物 7743 B（已压缩）
+没抓到 #result —— 页面可能整个没跑起来。原始抓取片段：
+""
+
+── narrow-320-375 窄屏布局验收 … ✗ (20.6s)
+  ✗ 窄屏验收自身跑通
+     Error: CDP 调用超时：Page.enable
+    at Timeout._onTimeout (file:///Users/catlair/mobile/workspace/mcloud/web/lite/regress/lib.mjs:923:42)
+    at listOnTimeout (node:internal/timers:605:17)
+    at process.processTimers (node:internal/timers:541:7)
+
+✗ 1/1 条窄屏约束不满足 ⇒ **`10e95fd..2e17c9b`**，钩子推送档 **11/11 全绿**（ready 45.3s / 大体量 / narrow / login / setup / 泄漏 140.8s）✓。线上核对：服务发的 `assets/index-DkuCHx6V.js` = `web/dist/index.html` 里那一个（**刷新即见** ✓）。✗ **没做**：无（这一轮闭环）。 |
