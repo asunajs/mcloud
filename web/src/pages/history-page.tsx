@@ -226,15 +226,17 @@ export const HistoryPage = (props: HistoryPageProps) => {
   }
 
   /**
-   * 一次往 DOM 里铺多少条，以及"显示更多"每次加多少。
+   * 分页：一页多少条、现在第几页。
    *
-   * ⚠ 为什么要上限（2026-10-05）：`/api/runs` 是**全量**接口（`listRuns()` 不带参数），
-   * 而运行记录只会越攒越多（本机现在 **113** 条 ✓）。全量铺进 DOM = 节点数与历史长度
-   * **线性增长** ⇒ 用一年之后这一页会到十万级 ✗。50 条已经远超"一屏能看"，
-   * 够不着的那部分按需加载（点一下 `+50` ✓）。
+   * ⚠ 为什么必须分页（2026-10-05 用户口径「任务记录分页」）：`/api/runs` 是**全量**接口
+   * （`listRuns()` 不带参数 ✓），而运行记录只会越攒越多（本机已经 **113** 条 ✓）
+   * ⇒ 全量铺进 DOM 的话，节点数与历史长度**线性增长**（用一年就是十万级 ✗）。
+   *
+   * ⚠ 20 而不是 50：这一页不是"看一屏就够"的读数页，是要**逐条看**的记录页 ✓；
+   * 20 条（移动端是 20 张卡片）翻页的手感比 50 条一屏的长滚动好，节点也只要 ~1/5 ✓。
    */
-  const STEP = 50
-  const cap = ref(STEP)
+  const PAGE_SIZE = 20
+  const page = ref(1)
 
   const load = async () => {
     state.value = 'loading'
@@ -280,11 +282,29 @@ export const HistoryPage = (props: HistoryPageProps) => {
   const visible = (): RunRecord[] =>
     runs.value.filter((r) => (filter.value === 'all' || runStatusOf(r) === filter.value) && matchesQuery(r))
 
-  /** 真正铺进 DOM 的那一段（`visible()` 的前 [`cap`] 条 ✓）。 */
-  const shown = (): RunRecord[] => visible().slice(0, cap.value)
+  /** 一共几页（**至少 1 页**：0 条时也要让"第 1 / 1 页"读得通 ✓）。 */
+  const pageCount = (): number => Math.max(1, Math.ceil(visible().length / PAGE_SIZE))
 
-  /** 还没铺出来的条数（`> 0` 才出现「显示更多」✓）。 */
-  const rest = (): number => Math.max(0, visible().length - cap.value)
+  /**
+   * 当前页（**夹在 `[1, pageCount]` 里**）。
+   *
+   * ⚠ 为什么不在"筛选变了"时去改 `page.value`：那是**在渲染里写信号** ✗
+   * （lite 的 effect 重入保护会抛"循环更新"）。夹一下更简单也更稳：
+   * 筛到只剩 1 页时，`page.value` 哪怕是 5，`curPage()` 也是 1 ✓。
+   */
+  const curPage = (): number => Math.min(page.value, pageCount())
+
+  /** 真正铺进 DOM 的那 20 条 ✓。 */
+  const shown = (): RunRecord[] => {
+    const start = (curPage() - 1) * PAGE_SIZE
+    return visible().slice(start, start + PAGE_SIZE)
+  }
+
+  /** 翻页（只在边界外才写信号 ✓，免得把 `page` 写成越界值）。 */
+  const goPage = (p: number) => {
+    const next = Math.min(Math.max(1, p), pageCount())
+    if (next !== page.value) page.value = next
+  }
 
   /** 某一档有几条。计数直接摆在档位上 —— 不用点进去就知道哪一档有东西。 */
   const countOf = (id: StatusFilter): number =>
@@ -324,6 +344,7 @@ export const HistoryPage = (props: HistoryPageProps) => {
   const clearFilters = () => {
     filter.value = 'all'
     query.value = ''
+    page.value = 1
   }
 
   /**
@@ -358,7 +379,11 @@ export const HistoryPage = (props: HistoryPageProps) => {
             // `aria-label` 找它（`clickText` 是精确匹配，按"失败"找不到"失败1"）。
             aria-label={`筛选：${label}`}
             class={`btn btn-sm min-h-11 md:min-h-0 ${filter.value === id ? 'btn-primary' : 'btn-soft'}`}
-            onClick={() => (filter.value = id)}
+            onClick={() => {
+              filter.value = id
+              // 换了档位就回第 1 页：不然停在"第 5 页"而新档只有 1 页，看起来像没结果 ✗
+              page.value = 1
+            }}
           >
             {label}
             <span class="text-xs opacity-60">{countOf(id)}</span>
@@ -375,7 +400,10 @@ export const HistoryPage = (props: HistoryPageProps) => {
             class="grow"
             placeholder="搜索任务名 / 账号 / 运行号"
             value={query.value}
-            onInput={(e) => (query.value = (e.target as HTMLInputElement).value)}
+            onInput={(e) => {
+              query.value = (e.target as HTMLInputElement).value
+              page.value = 1
+            }}
           />
         </label>
         {query.value ? (
@@ -522,11 +550,30 @@ export const HistoryPage = (props: HistoryPageProps) => {
           </div>
         )}
 
-        {/* 超过一屏的按需铺（见 `STEP`）：点一下再放 50 条 */}
-        {rest() > 0 ? (
-          <div class="flex justify-center">
-            <button type="button" class="btn btn-sm btn-soft" onClick={() => (cap.value += STEP)}>
-              {`显示更多（还有 ${rest()} 条）`}
+        {/*
+          分页（2026-10-05 用户口径「任务记录分页」）：记录是**逐条看**的东西，
+          而它只会越攒越多 ⇒ 一页 20 条 ✓（见 `PAGE_SIZE`）。只在真的不止一页时出现 ✓。
+        */}
+        {pageCount() > 1 ? (
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <button
+              type="button"
+              class="btn btn-sm btn-soft"
+              disabled={curPage() <= 1}
+              onClick={() => goPage(curPage() - 1)}
+            >
+              上一页
+            </button>
+            <span class="text-xs opacity-70">
+              {`第 ${curPage()} / ${pageCount()} 页 · 共 ${visible().length} 条`}
+            </span>
+            <button
+              type="button"
+              class="btn btn-sm btn-soft"
+              disabled={curPage() >= pageCount()}
+              onClick={() => goPage(curPage() + 1)}
+            >
+              下一页
             </button>
           </div>
         ) : null}

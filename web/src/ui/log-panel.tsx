@@ -11,7 +11,9 @@
 // ⚠ 用 `fmtClockMs`（`HH:MM:SS.mmm` ✓）而不是 `fmtEpochMs`（带月日 ✓）：同一个运行里的
 // 行都发生在几分钟内，带日期只是噪音 ✗；跨天那两个位置由页面自己决定要不要
 // 带日期 ✓（见 `logs-page.tsx` ✓）。
+import { onUnmounted, ref } from 'lite'
 import { fmtClockMs } from './time'
+import { createVirtualRows } from './virtual-rows'
 
 /**
  * 日志的**分类** —— 照老项目 `mcloud-sign` 的 consola `type` 体系 ✓
@@ -95,23 +97,126 @@ export function pushLog(lines: LogLine[], kind: LogLine['kind'], text: string): 
  * `.map` 那一层重跑、`createFor` 按**行对象身份**复用已有行，只追加新的 ✓
  * （行对象是 `pushLog` 新建的、旧的那些身份不变）。
  */
-export const LogPanel = (props: { get: () => LogLine[] }) => (
-  <>
-    {props.get().length === 0 ? null : (
-      <div class="card bg-base-100 shadow-sm">
+/**
+ * 每个面板实例一个自增 id（`document.getElementById` 要它 —— lite 没有 ref ✓）。
+ * ⚠ 用**计数器**而不是写死一个字符串：同页万一挂两份，写死就会撞 id ✗。
+ */
+let panelSeq = 0
+
+/**
+ * 窗口化状态（**模块级单例**）：高度缓存按"渲染出来的那串文本"存 ✓，
+ * 两个面板（不同页面）先后用同一份缓存是好事 ✓（切页回来不用重量）。
+ */
+const vr = createVirtualRows()
+
+export const LogPanel = (props: { get: () => LogLine[] }) => {
+  const panelId = `log-panel-${++panelSeq}`
+  /**
+   * 窗口化的输入（与 `pages/logs-page.tsx` **同一套做法** ✓）：滚动位置 + 量高版本号。
+   */
+  const scrollTop = ref(0)
+  /**
+   * ⚠ 可视高度**在渲染之外量、存信号**（初值 0 = 首帧只铺 overscan ✓，下一帧补齐 ✓）。
+   * 渲染期读 `clientHeight` 会强制布局、正好落在换行中途 ⇒ 浏览器把滚动位置钳歪 ✗
+   * （`pages/logs-page.tsx` 里实测过：634 → 34 ✓）。
+   */
+  const viewport = ref(0)
+  const heightsV = ref(0)
+  const scroller = () => document.getElementById(panelId)
+
+  /** 行渲染出来的那串文本 —— 既是展示内容，也是行高的缓存键 ✓。 */
+  const textOf = (l: LogLine): string => `${fmtClockMs(l.at)}  ${MARK[l.kind]}  ${l.text}`
+
+  let keysCache: { src: LogLine[]; keys: string[] } | undefined
+  const keysOf = (): string[] => {
+    const src = props.get()
+    if (keysCache && keysCache.src === src) return keysCache.keys
+    keysCache = { src, keys: src.map(textOf) }
+    return keysCache.keys
+  }
+
+  const win = () => {
+    heightsV.value // 订阅"高度表变了"（见 `virtual-rows.ts` 的说明）
+    const w = vr.window(scrollTop.value, viewport.value, keysOf())
+    // ⚠ 每次都排一次"渲染后量高"：面板刚开时没有滚动事件，不排的话折行行高
+    // 永远是估计值 ⇒ 总高偏小 ⇒ 最底下那几行滚不到 ✗（rAF 在渲染之后 ✓ 安全）
+    measureSoon()
+    return w
+  }
+
+  /** 这次要铺的行（带**绝对**下标 ⇒ `data-i` 对得上 ✓）。 */
+  const slice = () => {
+    const w = win()
+    return props
+      .get()
+      .slice(w.start, w.end)
+      .map((l, i) => ({ i: w.start + i, l, text: textOf(l) }))
+  }
+
+  let raf = 0
+  const measureSoon = () => {
+    if (raf) return
+    raf = requestAnimationFrame(() => {
+      raf = 0
+      const el = scroller()
+      if (!el) return
+      if (viewport.value !== el.clientHeight) viewport.value = el.clientHeight
+      const keys = keysOf()
+      if (vr.measure(el, (i) => keys[i] ?? '')) heightsV.value++
+    })
+  }
+
+  const syncScroll = () => {
+    const el = scroller()
+    if (!el) return
+    if (viewport.value !== el.clientHeight) viewport.value = el.clientHeight
+    if (scrollTop.value !== el.scrollTop) scrollTop.value = el.scrollTop
+    measureSoon()
+  }
+
+  /**
+   * ⚠⚠ **这里刻意没有 `onMounted`**：挂载路径上写信号会重入父层的渲染 ⇒ 反复重挂载
+   * （`logs-page.tsx` 上实测过：2 秒 218 次请求、容器节点被整个换掉 ✗）。
+   * 面板本就不需要"挂载时同步"：`scrollTop` 初值 0 ✓、可视高度渲染时现读 ✓、
+   * 量高由 `win()` 里的 rAF 兜 ✓。
+   */
+  onUnmounted(() => {
+    if (raf) cancelAnimationFrame(raf)
+    raf = 0
+  })
+
+  return (
+    <>
+      {/*
+        ⚠⚠ 卡片**常驻**、可见性走 `class` —— 与 `pages/logs-page.tsx` 同一条理由 ✓。
+
+        原先这里写的是 `{props.get().length === 0 ? null : <div class="card">…`：
+        那个条件**读了日志信号** ⇒ 每来一条日志就重算 ⇒ `setNodes` 把整块（连同
+        里面那个滚动容器）**换一颗新节点** ⇒ 用户往上翻时会被弹回顶部 ✗
+        （2026-10-03 的 review 记过这个形状，当时只治了"行"没治"壳"✗）。
+        常驻之后容器自始至终是同一个 ✓，滚动位置不再丢 ✓。
+      */}
+      <div class={`card bg-base-100 shadow-sm ${props.get().length === 0 ? 'hidden' : ''}`}>
         <div class="card-body">
           <h2 class="card-title text-base">运行日志</h2>
-          <div class="h-64 overflow-y-auto overscroll-contain rounded-box bg-base-200 p-3 font-mono text-xs leading-5">
-            {props.get().map((l, i) => (
+          <div
+            id={panelId}
+            class="h-64 overflow-y-auto overscroll-contain rounded-box bg-base-200 p-3 font-mono text-xs leading-5 [overflow-anchor:none]"
+            onScroll={syncScroll}
+          >
+            {/* 窗口化：只铺看得见的那几十行，上下垫片撑住真实总高 ✓（见 `ui/virtual-rows.ts`） */}
+            <div style={`height:${win().top}px`} />
+            {slice().map((p) => (
               // ⚠ 标记与正文拼在**一个**表达式里：lite 编译器对"元素旁边的裸文本
               // 节点"支持得最薄 ✓，拼成一整串最稳 ✓。
-              <div key={i} class={`break-words ${TONE[l.kind]}`}>
-                {`${fmtClockMs(l.at)}  ${MARK[l.kind]}  ${l.text}`}
+              <div key={p.l} data-i={p.i} class={`break-words ${TONE[p.l.kind]}`}>
+                {p.text}
               </div>
             ))}
+            <div style={`height:${win().bottom}px`} />
           </div>
         </div>
       </div>
-    )}
-  </>
-)
+    </>
+  )
+}
