@@ -686,6 +686,46 @@ pub struct CloudFileCreated {
     pub upload_url: Option<String>,
 }
 
+impl CloudFileCreated {
+    /// 这一发**是不是我们造的那个文件**（能不能进清理名单）—— 三态。
+    ///
+    /// * `Some(true)`：是我们的 ⇒ 可以记账、链尾可以清 ✓
+    /// * `Some(false)`：**撞上用户已有的同名文件**（上游按 `refuse` 语义把那一枚交回来了）
+    ///   ⇒ **绝不**记账、**绝不**删 ✗
+    /// * `None`：判不了 ⇒ 同样**绝不**删 ✗
+    ///
+    /// # ⚠⚠ 2026-10-05 真机：上游把"没撞同名"从 `false` 改成了 **`null`**
+    ///
+    /// 那天 86 发 `create` **全废** ✗ —— 只看 [`Self::exist`] 那一格的话，`null` 落进
+    /// "判不了"，于是 106 / 113 / 522 / 615 与 434 的补传**一起**被拒 ✗。
+    /// 实拍回执（键序照抄，脱敏后）：
+    ///
+    /// ```json
+    /// {"success":true,"code":"0000","message":"请求成功","data":{
+    ///   "parentFileId":"/","fileId":"FmjnKrVH…","type":"file",
+    ///   "fileName":"mcloud-task-expansion-245a9182ccf640de.bin","rapidUpload":false,
+    ///   "uploadId":"2~Ok3eN2Hay6jBPHxO_UOMup26SS-pmeo","partInfos":[{"uploadUrl":"https://…"}],
+    ///   "exist":null,"formInfo":null,"transferToken":null}}
+    /// ```
+    ///
+    /// ⇒ 判据换成"**这一发有没有开出一个新的上传会话**"：`uploadId` 有、且
+    /// （`uploadUrl` 有 **或** 秒传）⇒ 上游确实为我们新开了一发 ⇒ 那个 `fileId` 是新的 ✓。
+    /// 而撞同名那档（`refuse`）按本模块文档是 `partInfos` 全 `null`、**没有** uploadUrl ✓
+    /// ⇒ 两档分得开 ✓。`exist:true` 仍然直接判"不是我们的"（优先级更高 ✓）。
+    pub fn owned_by_us(&self) -> Option<bool> {
+        match self.exist {
+            Some(true) => Some(false),
+            Some(false) => Some(true),
+            // ⚠ `null` / 缺席：**不能**一律当"我们的" ✗ —— 判据是"有没有新上传会话" ✓。
+            None => {
+                let fresh_session =
+                    self.upload_id.is_some() && (self.upload_url.is_some() || self.rapid_upload);
+                fresh_session.then_some(true)
+            }
+        }
+    }
+}
+
 /// 解析 `create` 的响应。
 ///
 /// 信封与 rabactive 那六口**不同**：载荷在 `data`（不是 `result`），`code` 是字符串

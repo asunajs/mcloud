@@ -521,23 +521,24 @@ async fn run_upload(ctx: &TaskContext, plan: &ExpansionPlan, result: &mut Expans
         }
     };
     result.upload_name = plan.name.clone();
-    match created.exist {
+    match created.owned_by_us() {
         // ⚠⚠ 那个文件**不是我们造的** ⇒ **不交 id**，链尾绝不删它。
-        Some(true) => {
+        Some(false) => {
             result.upload = BackupUpload::Exists;
             return;
         }
-        // ⚠ `exist` 读不出来（形状变了）⇒ **同样不交 id**。两个方向都错的时候，
+        // ⚠ 判不了（形状变了）⇒ **同样不交 id**。两个方向都错的时候，
         // 只有"漏删一个我们自己传的"是可接受的：删了用户的文件就回不来了
-        //（2026-10-04 复审 up-1）。
+        //（2026-10-04 复审 up-1；判据见 `CloudFileCreated::owned_by_us` ——
+        // 2026-10-05 起上游把"没撞同名"回成 `null`，只看 `exist` 会把每一发都拒掉 ✗）。
         None => {
             result.upload = BackupUpload::ExistUnknown;
             result.reason =
-                "file/create 的 exist 不是布尔（响应形状变了）⇒ 判不了那个文件是不是我们造的，按不清理处理"
+                "file/create 的 exist 判不了（响应形状变了）⇒ 判不了那个文件是不是我们造的，按不清理处理"
                     .into();
             return;
         }
-        Some(false) => {}
+        Some(true) => {}
     }
     // 从这一格起，这个 id 是**我们造的** ⇒ 链尾要删。
     result.upload_file_id = created.file_id.clone();

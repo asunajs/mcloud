@@ -1544,6 +1544,135 @@ async fn the_monthly_upload_reports_its_progress_before_and_after() {
     );
 }
 
+/// ⭐⭐ **回归钉子：`exist:null` 那一版回执照样要能传上去** ✓。
+///
+/// 2026-10-05 真机：上游把"没撞同名"从 `exist:false` 改成 **`exist:null`** ✗ ⇒
+/// 106 / 113 / 522 / 615 与 434 的补传**一起**废掉（86 发 create 全被拒 ✗）。
+/// 判据改成"有没有开出新上传会话"之后，这一版形状必须走通 ✓ —— 传上去、且**记进清理名单** ✓
+/// （真机 run 131：`uploaded=1`、`收回 1/1` ✓）。
+#[tokio::test]
+async fn the_null_exist_receipt_still_uploads_and_gets_cleaned_up() {
+    let before = vec![task_json_with_process(
+        522,
+        "month",
+        "当月上传文件满100个",
+        "sign_in_3",
+        42,
+    )];
+    let after = vec![task_json_with_process(
+        522,
+        "month",
+        "当月上传文件满100个",
+        "sign_in_3",
+        47,
+    )];
+    // ⚠ 这一版就是 2026-10-05 实拍的形状：`exist:null` + 有 uploadId/uploadUrl ✓
+    //（522 是**循环 5 轮** ⇒ 五轮都要给齐，少一轮后面全错位 ✗ —— 2026-10-05 自己踩过 ✓）
+    let null_exist_create = |n: usize| {
+        format!(
+            r#"{{"success":true,"code":"0000","message":"请求成功","data":{{"parentFileId":"/","fileId":"F-NULL-{n}","type":"file","fileName":"x{n}.bin","rapidUpload":false,"uploadId":"U-{n}","partInfos":[{{"uploadUrl":"https://oss.invalid/put{n}"}}],"exist":null,"formInfo":null,"transferToken":null}}}}"#
+        )
+    };
+    let mut replies = replies_for(&before, vec![]);
+    replies.push(click_ok());
+    for n in 0..5 {
+        replies.push(null_exist_create(n));
+        replies.push("{}".to_string());
+        replies.push(r#"{"code":"0000","success":true,"message":"请求成功"}"#.to_string());
+    }
+    replies.push(r#"{"code":"0000","success":true,"message":"success"}"#.to_string()); // 回收站
+    replies.extend(replies_for(&after, vec![]));
+
+    let (ctx, _http) = ctx_with(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    let result = run_app_task(&ctx, 0, &[522]).await.expect("不该是 Err");
+
+    assert_eq!(
+        result.steps[0].uploaded, 5,
+        "exist:null 那一版必须能传上去（5 轮全成）"
+    );
+    assert!(
+        result.file_ids.contains(&"F-NULL-0".to_string()),
+        "既然是新开的会话 ⇒ 那个 id 是我们造的 ⇒ 必须进清理名单: {:?}",
+        result.file_ids
+    );
+    assert_eq!(result.cleaned_up, 5, "链尾要把这 5 个都收回");
+    assert!(result.failures.is_empty(), "{:?}", result.failures);
+}
+
+/// ⭐⭐ **上传全废那一趟必须报出来**（2026-10-05 真机：86 发 create 被 `exist:null` 打死，
+/// 而摘要一个字没提、结论还因为别的条目"打卡成功"报了 success ✗✗）。
+///
+/// 钉三件事：① 硬失败进 `failures`（摘要会说"1 条有失败" ✓，按**条数**不是按发数 ✓）；
+/// ② settle 不再说"可能还没记账"这种假安慰 ✗，而是明说"都没传上去" ✓；
+/// ③ 结论是 **`Partial`**（不是 success ✗ —— 与 2026-10-03 用户报的
+/// 「下面的 614 失败还直接说成功」同一口径 ✓）。
+#[tokio::test]
+async fn a_failed_upload_is_reported_not_dressed_up_as_a_delay() {
+    let before = vec![task_json_with_process(
+        522,
+        "month",
+        "当月上传文件满100个",
+        "sign_in_3",
+        42,
+    )];
+    // 事后读数**没动** —— 正是"看着像还没记账"的那种读数 ✗
+    let after = vec![task_json_with_process(
+        522,
+        "month",
+        "当月上传文件满100个",
+        "sign_in_3",
+        42,
+    )];
+    let mut replies = replies_for(&before, vec![]);
+    replies.push(click_ok());
+    for _ in 0..5 {
+        // create 回一个**解不动**的信封 ⇒ 每一发都失败（真机那次是 `exist:null` ✓）
+        replies.push(r#"{"code":"9999","success":false,"message":"上游说不行"}"#.to_string());
+    }
+    replies.extend(replies_for(&after, vec![]));
+
+    let sink = Arc::new(CapturedSink::default());
+    let (ctx, _http, _sink) = ctx_with_sink(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+        sink.clone(),
+    );
+    let result = run_app_task(&ctx, 0, &[522]).await.expect("不该是 Err");
+
+    assert_eq!(result.steps[0].uploaded, 0, "一发都没成");
+    assert_eq!(
+        result.failures.len(),
+        1,
+        "1 条任务失败要记成 1 条（不是 5 发 = 5 条）: {:?}",
+        result.failures
+    );
+    let summary = result.summary_line();
+    assert!(summary.contains("1 条有失败"), "摘要必须说出来：{summary}");
+    let lines = sink.lines();
+    assert!(
+        lines.iter().any(|l| l.contains("都没传上去")),
+        "要说清是传不上去：{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("可能还没记账")),
+        "不许再说那句假安慰：{lines:?}"
+    );
+    assert!(
+        result.task_outcome().is_partial(),
+        "有成功也有硬失败 ⇒ Partial，不是 success：{:?}",
+        result.task_outcome()
+    );
+}
+
 /// ⭐ 差额也要**说出来**：实测"我们传了 5 个、上游只 +4"（记账慢一步 ✓ —— run 105
 /// `48 → 52`，而 run 106 的动手前读数正好是 **53** ✓）⇒ 日志不能只写 `+4` 就完事，
 /// 否则两个数字看着像打架 ✗。

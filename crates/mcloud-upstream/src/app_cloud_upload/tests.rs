@@ -865,6 +865,69 @@ fn parse_file_create_reads_the_data_payload() {
     assert!(!created.rapid_upload);
 }
 
+/// ⭐⭐ `owned_by_us()` —— "这一发是不是我们造的"那三态，**七种情形逐条钉住** ✓。
+///
+/// ⚠⚠ 其中第 ① 条是**回归钉子**：2026-10-05 真机，上游把"没撞同名"从 `exist:false`
+/// 改成了 **`exist:null`** ✗ ⇒ 只看 `exist` 那一格的写法把**每一发** create 都判成
+/// "判不了"（86 发全废 ✗：106 / 113 / 522 / 615 与 434 的补传一起 ✗）。
+/// 判据因此是"**有没有开出新的上传会话**"✓ —— 下面每一条都在钉这个判据的一角 ✓。
+#[test]
+fn owned_by_us_is_a_three_state_with_a_session_based_null() {
+    let mk = |data: &str| {
+        let body =
+            format!(r#"{{"code":"0000","message":"请求成功","success":true,"data":{data}}}"#);
+        parse_file_create(&body).expect("应能解析").owned_by_us()
+    };
+
+    // ① **2026-10-05 的实拍形状**：`exist:null` + 新上传会话 ⇒ **是我们的** ✓（回归钉子）
+    assert_eq!(
+        mk(
+            r#"{"exist":null,"fileId":"F","partInfos":[{"uploadUrl":"https://x.invalid/put"}],"rapidUpload":false,"uploadId":"U"}"#
+        ),
+        Some(true),
+        "⚠ exist:null 但开出了新上传会话 ⇒ 那个 fileId 是我们刚造的（2026-10-05 实拍 ✓）"
+    );
+    // ② 老形状：`exist:false` ⇒ 我们的 ✓
+    assert_eq!(
+        mk(
+            r#"{"exist":false,"fileId":"F","partInfos":[{"uploadUrl":"https://x.invalid/put"}],"uploadId":"U"}"#
+        ),
+        Some(true)
+    );
+    // ③ `exist:true` ⇒ **撞同名，不是我们的**（优先级最高，哪怕带了会话也不认 ✗）
+    assert_eq!(
+        mk(
+            r#"{"exist":true,"fileId":"F","partInfos":[{"uploadUrl":"https://x.invalid/put"}],"uploadId":"U"}"#
+        ),
+        Some(false),
+        "撞同名那一枚是用户自己的文件 ⇒ 绝不进清理名单"
+    );
+    // ④ `exist:null` **且没有 uploadUrl**（`refuse` 语义那一档的形状）⇒ 判不了 ✓
+    assert_eq!(
+        mk(r#"{"exist":null,"fileId":"F","partInfos":null,"rapidUpload":false,"uploadId":"U"}"#),
+        None,
+        "没有上传会话 ⇒ 判不了 ⇒ 绝不删"
+    );
+    // ⑤ `exist:null` **且没有 uploadId** ⇒ 判不了 ✓
+    assert_eq!(
+        mk(
+            r#"{"exist":null,"fileId":"F","partInfos":[{"uploadUrl":"https://x.invalid/put"}],"uploadId":null}"#
+        ),
+        None
+    );
+    // ⑥ `exist` 整格**缺席**、但有会话 ⇒ 我们的 ✓（形状再变一格也不至于全废 ✓）
+    assert_eq!(
+        mk(r#"{"fileId":"F","partInfos":[{"uploadUrl":"https://x.invalid/put"}],"uploadId":"U"}"#),
+        Some(true)
+    );
+    // ⑦ 秒传：`exist:null` + `rapidUpload:true` + uploadId ⇒ 我们的 ✓
+    //（内容是随机字节 ⇒ 秒传命中的也是"这一发造出来的"那个 ✓）
+    assert_eq!(
+        mk(r#"{"exist":null,"fileId":"F","partInfos":null,"rapidUpload":true,"uploadId":"U"}"#),
+        Some(true)
+    );
+}
+
 /// 钉「实拍那两条的形状交回来是什么」：`exist:true`、`uploadId:null`、`partInfos:null`。
 ///
 /// 这一条的价值在于「以后有人拿 `file/create` 复用来建目录」时，本层不会 panic，

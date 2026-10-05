@@ -480,6 +480,15 @@ fn settle_upload(items: &[TaskV2Item], result: &mut AppTaskResult, i: usize, ctx
         .as_deref()
         .and_then(|s| s.split('/').next())
         .and_then(|s| s.parse::<i64>().ok());
+    // ⚠⚠ `uploaded == 0` 有**两种完全不同的来路**，混着说会把人带偏 ✗（2026-10-05 真机：
+    // 86 发 create 全被 `exist:null` 打死，而这里当时说的是"可能还没记账" ✗✗）：
+    //   ① 上游记账慢 / 计数已满 ⇒ 那句是对的 ✓，下一趟再看 ✓；
+    //   ② **每一发都发失败了** ⇒ 必须报失败 ✓（判据是这一档自己的 `problems` 里有没有
+    //      "上传失败" —— 那是硬失败的字面证据 ✓，比任何推测都硬 ✓）。
+    let upload_failed = result.steps[i]
+        .problems
+        .iter()
+        .any(|p| p.starts_with("上传失败"));
     match (before, after) {
         (Some(b), Some(a)) if a > b => {
             let moved = a - b;
@@ -500,6 +509,11 @@ fn settle_upload(items: &[TaskV2Item], result: &mut AppTaskResult, i: usize, ctx
                 "{name}：{b}/{total} → {a}/{total}（这一趟 +{moved}{gap}）{tail}"
             ));
         }
+        // ⚠ 这一支要排在下面那条"可能还没记账"**前面**：上传全废时那句是**假安慰** ✗。
+        (Some(b), Some(a)) if upload_failed => ctx.fail(format!(
+            "{name}：{b}/{total} → {a}/{total}\
+             （这一趟 {uploaded} 个都没传上去 ⇒ 见上面那条「上传失败」的原因）"
+        )),
         (Some(b), Some(a)) => ctx.info(format!(
             "{name}：{b}/{total} → {a}/{total}\
              （这一趟传了 {uploaded} 个，上游计数还没动 ⇒ 可能还没记账）"
@@ -1033,6 +1047,14 @@ impl AppTaskResult {
         if self.planned == 0 {
             return TaskOutcome::skipped(summary);
         }
+        // ⚠⚠ **有硬失败就不许报"成功"**（2026-10-05 真机：86 发 create 全被上游
+        // `exist:null` 打死，而结论因为别的条目"打卡成功"报了 `success` ✗✗）。
+        // 这与 2026-10-03 用户报的「下面的 614 失败还直接说成功」是**同一类**事故 ✗ ——
+        // 那次的解法就是 [`TaskOutcome::Partial`]，这里照同一条口径接上 ✓：
+        // 有成功也有失败 ⇒ 部分成功 ✓（不是成功、也不是全败 ✓）。
+        if !self.failures.is_empty() {
+            return TaskOutcome::partial(summary);
+        }
         TaskOutcome::success(summary)
     }
 }
@@ -1300,6 +1322,13 @@ pub async fn run_app_task(
             }
         }
 
+        // ⚠⚠ **硬失败必须进 `failures`**（2026-10-05 真机踩过 ✗）：`step.problems` 只进明细，
+        // 而摘要（"N 条有失败"）与运行级结论看的都是 `result.failures` ⇒ 上传**全废**那次，
+        // 摘要一个字都没提，结论还因为别的条目"打卡成功"报了 success ✗✗。
+        // ⚠ 每条**只记一次**：`problems` 里是一发一条，按条数记会把"1 条任务失败"说成"10 条" ✗。
+        if let Some(first) = step.problems.iter().find(|p| p.starts_with("上传失败")) {
+            result.failures.push(format!("{}：{first}", step.name));
+        }
         if step.uploaded > 0 || step.clicked {
             result.acted += 1;
             // 旧 TS `tasks.ts:41-46`（`handleTaskClick`）做完一条之后那句
@@ -1402,7 +1431,7 @@ async fn upload_one_file(
     let mut rng = mcloud_crypto::OsRandom;
     let plan = crate::task_expansion::random_plan_with_ext(&mut rng, 0, ext);
     let hash = mcloud_crypto::sha256_hex_bytes(&plan.content);
-    let created = {
+    let (created, raw_body) = {
         let req = upload::file_create_request(CloudFileCreateInput {
             parent_file_id: "/".into(),
             name: plan.name.clone(),
@@ -1412,19 +1441,29 @@ async fn upload_one_file(
             op: CloudOpType::Upload,
         })?;
         let resp = ctx.http.request(req).await?;
-        upload::parse_file_create(&resp.body)?
+        (upload::parse_file_create(&resp.body)?, resp.body)
     };
     // ⚠ `exist` 是**三态**（2026-10-04 复审 up-1）：`Some(true)` = 撞同名（不是我们造的）、
     // `Some(false)` = 我们造的、`None` = 这一格形状变了。**读不出来按"不是我们造的"处理**：
     // 兜成 `false` 会把用户自己的文件记进清理名单 ⇒ 链尾删掉它 ✗。
-    match created.exist {
-        Some(false) => {}
+    match created.owned_by_us() {
+        Some(true) => {}
         // 撞同名 ⇒ 那个文件**不是我们造的**，交回 `None`（不落账、不清理）。
-        Some(true) => return Ok(None),
-        None => return Err(mcloud_core::Error::Parse(
-            "file/create 的 exist 读不出来（形状变了）⇒ 判不了那个文件是不是我们造的，按不清理处理"
-                .into(),
-        )),
+        Some(false) => return Ok(None),
+        None => {
+            // ⚠⚠ 这条错误**必须自带读数**：`exist` 读不出来时，唯一能回答"上游到底给了什么"
+            // 的就是回执本身。2026-10-05 真机踩过：86 发 create 全部走到这里，而日志层
+            // **只记请求、不记响应** ⇒ 排查时手上一个字节都没有，只能靠猜 ✗。
+            // 正文先过 `redact`（authorization / token 之类 ✓）再按**字符**截断 ✓。
+            let preview: String = mcloud_core::event::redact(&raw_body)
+                .chars()
+                .take(400)
+                .collect();
+            return Err(mcloud_core::Error::Parse(format!(
+                "file/create 的 exist 读不出来（形状变了）⇒ 判不了那个文件是不是我们造的，按不清理处理；\
+                 已解出的几格={created:?}；回执前 400 字={preview}"
+            )));
+        }
     }
     let Some(file_id) = created.file_id.clone() else {
         return Err(mcloud_core::Error::Parse("create 没给 fileId".into()));
