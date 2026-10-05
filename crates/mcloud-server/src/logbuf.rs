@@ -280,4 +280,84 @@ mod tests {
         // 结构化字段也要跟着 ✓（`k=v` ✓）—— 排障靠的就是它们 ✓
         assert!(line.message.contains("account"), "{line:?}");
     }
+
+    /// ⚠⚠ 用户口径（2026-10-05）：「页面上看不到是那个账号的日志啊」。
+    ///
+    /// 这一条钉的就是它，而且是**端到端**那一段：sink 往 tracing 打的字段
+    /// （`mcloud_app::trace_event` ✓）→ 环里的文本（`RingLayer` ✓）→
+    /// 页面读到的 `message`（`/api/logs` ✓）。
+    ///
+    /// 为什么放在这个 crate：这里已经有一套"真装 subscriber + 读环"的现成装置 ✓，
+    /// 而这条要证的正是**两层的接缝** —— 只测 `RunLabels` 的增删（`mcloud-app` 里那几条 ✓）
+    /// 抓不到"字段有没有真的落到环的文本里"✗。
+    #[test]
+    fn every_line_of_a_run_carries_its_account() {
+        use mcloud_app::{trace_event, RunLabels};
+        use mcloud_core::{LogLevel, RunEvent, RunId, TaskOutcome};
+        use tracing_subscriber::layer::SubscriberExt;
+        let _guard = serial();
+        reset();
+        let labels = RunLabels::default();
+        let sub = tracing_subscriber::registry().with(RingLayer);
+        let log = |run: u64, msg: &str| RunEvent::Log {
+            run_id: RunId(run),
+            level: LogLevel::Warn,
+            kind: Default::default(),
+            message: msg.into(),
+            at_ms: 0,
+        };
+        tracing::subscriber::with_default(sub, || {
+            trace_event(
+                &labels,
+                &RunEvent::Started {
+                    run_id: RunId(1),
+                    task: "app-task".into(),
+                    account: "0f6050105ab111f4".into(),
+                    at_ms: 0,
+                },
+            );
+            trace_event(&labels, &log(1, "分享文件领好礼1/7：1/7 → 1/7"));
+            // 没 Started 过的 run：宁可**不带**账号，也不能安一个错的主人 ✗
+            trace_event(&labels, &log(2, "来路不明的一行"));
+            trace_event(
+                &labels,
+                &RunEvent::Finished {
+                    run_id: RunId(1),
+                    outcome: TaskOutcome::success("跑完了"),
+                    duration_ms: 5,
+                },
+            );
+        });
+
+        let lines = recent(10, None, None);
+        let find = |needle: &str| {
+            lines
+                .iter()
+                .find(|l| l.message.contains(needle))
+                .unwrap_or_else(|| panic!("环里没有含 {needle:?} 的那一行：{lines:?}"))
+        };
+        // ① 关键那条：运行**中间**的日志行（截图里那类 WARN）也要带账号 ✓
+        let mid = find("分享文件领好礼1/7");
+        assert!(
+            mid.message.contains("account=\"0f6050105ab111f4\""),
+            "运行中间的日志行没带账号：{:?}",
+            mid.message
+        );
+        // ② 结束那条也要（实现里是"先打这一行、再忘掉"，反了就丢 ✗）
+        let end = find("任务结束");
+        assert!(
+            end.message.contains("account=\"0f6050105ab111f4\""),
+            "「任务结束」没带账号：{:?}",
+            end.message
+        );
+        // ③ 没见过的 run 不许被安上别人的账号 ✓
+        let orphan = find("来路不明的一行");
+        assert!(
+            !orphan.message.contains("account"),
+            "来路不明的 run 被安了账号：{:?}",
+            orphan.message
+        );
+        // ④ 运行结束后映射要收干净（长跑进程里只增不减就是慢泄漏 ✗）
+        assert_eq!(labels.len(), 0, "结束后 RunLabels 没清干净");
+    }
 }

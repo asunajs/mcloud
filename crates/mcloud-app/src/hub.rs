@@ -32,10 +32,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use mcloud_core::{
-    AppendOutcome, Clock, EventSink, LogLevel, LogLine, RunEvent, RunId, Seq, SeqAllocator,
-    Sequenced, Store,
+    AppendOutcome, Clock, EventSink, LogLine, RunEvent, RunId, Seq, SeqAllocator, Sequenced, Store,
 };
 use tokio::sync::broadcast;
+
+use crate::run_labels::{trace_event, RunLabels};
 
 /// 每个 run 在内存里保留的事件条数。
 ///
@@ -109,6 +110,8 @@ pub struct EventHub {
     clock: Arc<dyn Clock>,
     /// 用于唤醒正在等待的 SSE 任务，避免忙轮询。
     notify: broadcast::Sender<RunId>,
+    /// `run_id → 账号`：让**每一行**日志都认得出主人（见 [`crate::run_labels`]）。
+    labels: RunLabels,
 }
 
 #[derive(Default)]
@@ -132,6 +135,7 @@ impl EventHub {
             store,
             clock,
             notify,
+            labels: RunLabels::default(),
         }
     }
 
@@ -238,6 +242,10 @@ impl EventHub {
         let mut inner = self.lock();
         inner.runs.remove(&run_id);
         inner.pending.remove(&run_id);
+        // ⚠ 账号那份映射也要一起收（否则长跑进程里"跑过的账号"只增不减 ✗）。
+        // 注意：`Finished` 那条日志**先打、后忘**（见 `run_labels::trace_event` ✓），
+        // 所以这里再忘一次是幂等的兜底 ✓。
+        self.labels.forget(run_id);
     }
 
     /// 订阅者数量（诊断用）。
@@ -395,32 +403,11 @@ impl EventSink for EventHub {
         // 这一路会把任务的日志/结论原样带出去（进程日志 / SSE / 推送 / 落盘），
         // 而上游回显里可能就有一枚凭证 ✗。形状由 mcloud-core 给死 ⇒ sink 只要一行 ✓。
         let event = event.scrubbed();
-        // 顺手打到 tracing，便于无订阅者时也能从进程日志追溯
-        match &event {
-            RunEvent::Log { level, message, .. } => match level {
-                LogLevel::Debug => tracing::debug!("{message}"),
-                LogLevel::Info => tracing::info!("{message}"),
-                LogLevel::Warn => tracing::warn!("{message}"),
-                LogLevel::Error => tracing::error!("{message}"),
-            },
-            RunEvent::Started { task, account, .. } => {
-                tracing::info!(task, account, "任务开始");
-            }
-            RunEvent::Finished {
-                outcome,
-                duration_ms,
-                ..
-            } => tracing::info!(duration_ms, "任务结束：{}", outcome.summary()),
-            RunEvent::Progress {
-                step, total, label, ..
-            } => {
-                tracing::debug!("进度 {step}/{total} {label}");
-            }
-            // 结构化明细**不逐条打日志**：它可能很大（整份兑换结论），
-            // 而日志那一格是给人扫的。它真正的去处是 `RunRecord.details`
-            // —— 由 runner 累积后落历史，前端从那里读。
-            RunEvent::Details { .. } => {}
-        }
+        // 顺手打到 tracing，便于无订阅者时也能从进程日志追溯。
+        // ⚠ 走共用的 [`trace_event`]（另一个 sink 也用它 ✓）：它会顺手把
+        // "这个 run 是哪个账号"盖到**每一行**上 —— 否则服务端日志页上除第一行之外
+        // 全是"没主的行"，几个账号轮流跑时根本认不出谁是谁（2026-10-05 用户报 ✓）。
+        trace_event(&self.labels, &event);
         self.publish(event);
     }
 }

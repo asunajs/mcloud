@@ -11,6 +11,10 @@ pub mod notify;
 // 多渠道运行推送（照 mcloud-sign 的 push 模块移植）。
 // ⚠ 本版**只做模块、不接线**：没有生产代码调用它，见 push.rs 模块头。
 pub mod push;
+// 「这个 run 是哪个账号」—— 让每一行日志都认得出主人。见模块头：
+// 用户报「页面上看不到是那个账号的日志啊」的根因在**事件流**（账号只挂在 Started 上），
+// 不在页面 ⇒ 由 sink 在这一层补齐。
+pub mod run_labels;
 pub mod sink;
 pub mod smid;
 
@@ -24,6 +28,7 @@ pub use push::{
     PushLogCollector, PushLogEntry, PushLogLevel, PushRequest, PushResponse, PushTransport,
     TgBotConfig, TokenConfig, TwoImConfig, WorkWeixinBotConfig, WorkWeixinConfig,
 };
+pub use run_labels::{trace_event, RunLabels};
 pub use sink::BroadcastSink;
 pub use smid::{
     device_id, ensure_fingerprint, report_device_id, rotate_fingerprint, SmidClient, SmidService,

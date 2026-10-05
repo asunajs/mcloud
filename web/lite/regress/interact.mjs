@@ -1264,6 +1264,87 @@ const STEPS = {
     },
 
     /**
+     * ── 日志页：**每一行是哪个账号的**（用户口径 2026-10-05：「页面上看不到是那个账号的
+     * 日志啊」）──
+     *
+     * 夹具那份日志**每一行**都带 `account="…"`（两个夹具账号轮流 ✓，见 `lib.mjs` 的
+     * `logLine` ✓），这是照真后端的形状给的：`mcloud-app` 的 sink 会给一趟运行的每一行
+     * 盖上账号（`crates/mcloud-app/src/run_labels.rs` ✓）。
+     *
+     * 页面上应当看到的是**人名**（夹具里 `13800000000` 的人名是「主力号」✓），
+     * 而且**每一行**都要有 —— 只有第一行有（真后端改之前就是那样 ✗）就白搭 ✓。
+     */
+    {
+      name: '日志页：行首标出账号，且显示的是人名（不是主键）',
+      do: `(async () => { await new Promise((r) => setTimeout(r, 300)); return true })()`,
+      check: eq(
+        `(() => {
+          const rows = [...document.querySelectorAll('#logs-scroll > div[data-i]')];
+          if (rows.length < 5) return 'rows=' + rows.length;
+          const chips = rows.map((r) => r.querySelector('[data-acc]'));
+          return JSON.stringify({
+            mapped: chips.some((c) => c && c.textContent.trim() === '主力号'),
+            everyRow: chips.every((c) => c !== null),
+            leaked: rows.some((r) => r.textContent.includes('account=')),
+          });
+        })()`,
+        JSON.stringify({ mapped: true, everyRow: true, leaked: false }),
+      ),
+    },
+    {
+      name: '日志页：两个账号 ⇒ 出现账号筛选行（只有一个账号时不铺，免得是摆设）',
+      do: 'true',
+      check: eq(
+        `(() => {
+          const all = document.querySelector('[aria-label="账号：全部"]');
+          const a = document.querySelector('[aria-label="账号：主力号"]');
+          const b = document.querySelector('[aria-label="账号：13900000001"]');
+          return JSON.stringify({ all: !!all, a: !!a, b: !!b });
+        })()`,
+        JSON.stringify({ all: true, a: true, b: true }),
+      ),
+    },
+    {
+      name: '日志页：点某账号 ⇒ 只剩它的行',
+      do: `(async () => {
+        const btn = document.querySelector('[aria-label="账号：主力号"]');
+        if (!btn) throw new Error('没找到账号筛选按钮「主力号」');
+        btn.click();
+        await new Promise((r) => setTimeout(r, 300));
+        return true;
+      })()`,
+      check: eq(
+        `(() => {
+          const rows = [...document.querySelectorAll('#logs-scroll > div[data-i]')];
+          if (rows.length === 0) return 'no-rows';
+          const ids = new Set(rows.map((r) => r.querySelector('[data-acc]')?.dataset.acc ?? ''));
+          return JSON.stringify({ only: ids.size === 1 && ids.has('13800000000') });
+        })()`,
+        JSON.stringify({ only: true }),
+      ),
+      changed: true,
+    },
+    {
+      name: '日志页：点「全部」⇒ 两个账号的行都回来',
+      do: `(async () => {
+        const btn = document.querySelector('[aria-label="账号：全部"]');
+        if (!btn) throw new Error('没找到账号筛选按钮「全部」');
+        btn.click();
+        await new Promise((r) => setTimeout(r, 300));
+        return true;
+      })()`,
+      check: eq(
+        `(() => {
+          const rows = [...document.querySelectorAll('#logs-scroll > div[data-i]')];
+          const ids = new Set(rows.map((r) => r.querySelector('[data-acc]')?.dataset.acc ?? ''));
+          return JSON.stringify({ both: ids.has('13800000000') && ids.has('13900000001') });
+        })()`,
+        JSON.stringify({ both: true }),
+      ),
+      changed: true,
+    },
+
+    /**
      * ⚠ 登出确认放在**最后**：它是破坏性的（确认后应用回到登录页），
      * 放在中间会让后面每一步都找不到元素。第一版就踩了：18 步"两侧一致"，
      * 其实是**两侧都没执行**。

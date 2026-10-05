@@ -105,10 +105,22 @@ const resetAcctState = () => {
  * 别把上一轮攒的行带过去 ✓。
  */
 const logsState = { lines: [], seq: 0 }
+/**
+ * 一行服务端日志。
+ *
+ * ⚠ 每一行都带 `account="…"`（两个夹具账号轮流 ✓）—— 这是**照真后端那个形状**给的：
+ * `mcloud-app` 的 sink 会给一趟运行的**每一行**盖上账号（`crates/mcloud-app/src/run_labels.rs` ✓），
+ * 而日志页要把那串主键显示成**人名**、并支持按账号筛 ✓（用户口径 2026-10-05：
+ * 「页面上看不到是那个账号的日志啊」）。
+ * ⇒ 装置里要是没有这一格，"显示成人名"那条断言就成了空话 ✗。
+ *
+ * ⚠ 字段落在**正文末尾**（`message account="…"` ✓）而不是拼在前面：真后端就是这么排的
+ * （`RingLayer` 的 `Fields::finish` 先 message 再 k=v ✓）—— 页面得能处理"账号在尾巴上" ✓。
+ */
 const logLine = (i, at) => ({
   level: i % 7 === 0 ? 'warn' : 'info',
   target: 'mcloud_engine::scheduler',
-  message: `第 ${i} 行 —— 门禁用（量滚动位置）`,
+  message: `第 ${i} 行 —— 门禁用（量滚动位置） account="${i % 2 === 0 ? ACCOUNT.id : ACCOUNT2.id}"`,
   at_ms: at,
 })
 const resetLogsState = () => {
@@ -484,7 +496,7 @@ export const VARIANTS = {
      *
      * 为什么必须会长：那一页每 2 s 轮询一次，而「贴底时新行要跟到底部」这条
      * 只有内容真的变多才量得出来（见 `logsState`）✓。
-     * `limit` 照真后端那个口径夹一下（界面固定传 800）✓。
+     * `limit` 照真后端那个口径夹一下（界面传的是环容量 2000 ✓，见日志页的 `RING_LINES` ✓）✓。
      */
     'GET /api/logs': {
       handler: (_body, req) => {

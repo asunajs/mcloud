@@ -13,6 +13,7 @@
 import { onMounted, onUnmounted, ref } from 'lite'
 
 import { listServerLogs, type ServerLogLine } from '../api'
+import { accountName, accountNames, refreshAccountNames } from '../account-names'
 import { IconSearch } from '../ui/icons'
 import { MARK, TONE, type LogKind } from '../ui/log-panel'
 import { createVirtualRows } from '../ui/virtual-rows'
@@ -36,6 +37,29 @@ const kindOf = (level: string): LogKind =>
 
 /** 级别的高低（与后端 `logbuf::rank_of` **同一个口径** ✓，别各定一套 ✗）。 */
 const RANK: Record<string, number> = { error: 4, warn: 3, info: 2, debug: 1 }
+
+/**
+ * 正文里账号那一格：`account="0f6050105ab111f4"` ✓。
+ *
+ * 它是**服务端**盖上去的（`crates/mcloud-app/src/run_labels.rs` ✓ —— 那一层记着
+ * "这个 run 是哪个账号"，给每一行都补上 ✓），不是页面从上下文猜的 ✓。
+ *
+ * ⚠ 为什么这里靠**正则**从文本里认，而不是让接口给个结构化字段：
+ * 这一页读的是环形缓冲的文本（`logbuf` 只存 level / target / message ✓）。
+ * 要让前端按字段认账号，得同时改事件形状 + 环的结构 + `/api/logs` 的返回 ——
+ * 那是另一笔 ✓；而这一格本来就是为了"让人看出这行是谁的"才盖上去的 ✓，
+ * 从文本里认**不会认错主人**（认不出就当作没有 ✓）。
+ */
+const ACCOUNT_RE = / ?account="?([^"\s]+)"?/
+
+/** 这一行是哪个账号的（认不出就空串 —— **不编造** ✓）。 */
+const accIdOf = (l: ServerLogLine): string => l.message.match(ACCOUNT_RE)?.[1] ?? ''
+
+/** 筛选按钮上的一个账号：`id` 是主键（点它写进 `account` ✓），`name` 是给人看的名字 ✓。 */
+interface AccOption {
+  id: string
+  name: string
+}
 
 /** 滚动容器的 id（`load()` / 窗口化都靠它拿容器 ✓）。 */
 const SCROLL_ID = 'logs-scroll'
@@ -79,6 +103,14 @@ export const LogsPage = () => {
   const lines = ref<ServerLogLine[]>([])
   const level = ref('')
   const q = ref('')
+  /**
+   * 「只看某个账号」（空串 = 全部 ✓）。
+   *
+   * 为什么要有它：一趟事往往是**几个账号轮流跑**（调度器一次跑一批 ✓），
+   * 环里这些行是混在一起的 ✓。用户口径（2026-10-05）：「页面上看不到是那个账号的日志啊」
+   * ⇒ 除了给每行标出账号（见 `partsOf`），还得能**只看那一个** ✓。
+   */
+  const account = ref('')
   const state = ref<'loading' | 'ready' | 'error'>('loading')
   const errorMessage = ref('')
   let timer: ReturnType<typeof setInterval> | undefined
@@ -210,6 +242,15 @@ export const LogsPage = () => {
   onMounted(() => {
     void load()
     /**
+     * ⚠ 账号名要**单独拉一次**（`/api/accounts` ✓）—— 环里给的是主键（手机号哈希 ✓），
+     * 而这一页要把主键显示成人名 ✓（见 `partsOf`）。
+     *
+     * ⚠ 这一句**不违反**下面那条"挂载路径上不许写信号"：`refreshAccountNames` 是
+     * `async` ✓，写 `names` 信号发生在 `await` 回来**之后** ✓，不在渲染路径上 ✓
+     * （`void` 掉 Promise 就够，别 `await` ✗ —— 那会把首屏数据也拖到账号列表之后 ✗）。
+     */
+    void refreshAccountNames()
+    /**
      * ⚠⚠ **挂载路径上不许写任何信号**（这里曾经调了一次 `syncScroll()` ⇒ 事故）。
      *
      * 机理（`ui/page-refresh.ts` 文件头写过同一条，我这次又踩了一遍 ✗）：
@@ -236,28 +277,44 @@ export const LogsPage = () => {
   })
 
   /**
-   * 本地过滤后的可见行 ✓（级别"**不低于**" ✓ + 关键词 ✓，与后端同一口径 ✓）。
+   * 本地过滤后的可见行 ✓（级别"**不低于**" ✓ + 账号 ✓ + 关键词 ✓）。
    *
-   * ⚠ 结果按 (`lines` 身份 / 级别 / 关键词) 缓存一次：窗口化之后这个函数**每帧要被
+   * ⚠ 结果按 (`lines` 身份 / 级别 / 账号 / 关键词) 缓存一次：窗口化之后这个函数**每帧要被
    * 调用好几次**（垫片、切片、行数各一次），而开了搜索时每次过滤都要对整环（2000 行）做
    * `toLowerCase` ✗ ⇒ 不缓存的话光是滚动就在做几千次字符串分配 ✓。
+   * ⚠ 缓存键里**必须**带上账号（漏了就是"切了账号但列表没变"这类幽灵 ✗）。
    */
-  let visCache: { src: ServerLogLine[]; level: string; q: string; out: ServerLogLine[] } | undefined
+  let visCache:
+    | { src: ServerLogLine[]; level: string; q: string; acc: string; out: ServerLogLine[] }
+    | undefined
   const visible = (): ServerLogLine[] => {
     const src = lines.value
     const lv = level.value
     const qq = q.value
-    if (visCache && visCache.src === src && visCache.level === lv && visCache.q === qq) return visCache.out
+    const aa = account.value
+    if (
+      visCache &&
+      visCache.src === src &&
+      visCache.level === lv &&
+      visCache.q === qq &&
+      visCache.acc === aa
+    )
+      return visCache.out
     const floor = RANK[lv] ?? 0
     const needle = qq.trim().toLowerCase()
-    const out = src.filter(
-      (l) =>
-        (RANK[l.level] ?? 0) >= floor &&
-        (needle === '' ||
-          l.message.toLowerCase().includes(needle) ||
-          l.target.toLowerCase().includes(needle)),
-    )
-    visCache = { src, level: lv, q: qq, out }
+    const out = src.filter((l) => {
+      if ((RANK[l.level] ?? 0) < floor) return false
+      const id = accIdOf(l)
+      if (aa !== '' && id !== aa) return false
+      if (needle === '') return true
+      return (
+        l.message.toLowerCase().includes(needle) ||
+        l.target.toLowerCase().includes(needle) ||
+        // ⚠ 账号名也要能搜到：用户在界面上看到的是**人名** ✓，搜不到才奇怪 ✗
+        (id !== '' && accountName(id).toLowerCase().includes(needle))
+      )
+    })
+    visCache = { src, level: lv, q: qq, acc: aa, out }
     return out
   }
 
@@ -267,6 +324,56 @@ export const LogsPage = () => {
    */
   const textOf = (l: ServerLogLine): string =>
     `${fmtStampMs(l.at_ms)}  ${MARK[kindOf(l.level)]}  ${l.message}  ·  ${l.target}`
+
+  /**
+   * 一行真正渲染出来的三段：**前缀**（时间 + 级别）/ **账号**（可能没有）/ **正文 + 来源**。
+   *
+   * ⚠ 为什么把账号从正文里**摘出来**、提到行首：它本来挂在正文末尾
+   * （`…（上游次数没动 ⇒ 不算记上） account="0f6050105ab111f4"` ✓），
+   * 既是**一串用户认不出的哈希** ✗，又在最不显眼的位置 ✗。提到行首、定宽
+   * （`w-20 truncate` ✓）之后，同一个账号的行在视觉上对齐成一条竖线 ⇒
+   * 扫一眼就能按账号分组 ✓ —— 这正是用户报的「页面上看不到是那个账号的日志啊」要的 ✓。
+   *
+   * ⚠ 三段都是**元素**（`<span>` ✓），没有"元素旁边的裸文本" —— 那是 lite 编译器
+   * 支持最薄的写法 ✗（这一页上一版正是靠"拼成一个表达式"绕开的 ✓）。
+   * 行高缓存键仍用 [`textOf`]（原始文本 ✓）：账号那格是**定宽**的，
+   * 换不换人名都不影响折行 ⇒ 不必为"名字后到"重算高度 ✓。
+   */
+  const partsOf = (l: ServerLogLine) => {
+    const m = l.message.match(ACCOUNT_RE)
+    const id = m?.[1] ?? ''
+    // 摘掉正文里那格：它已经被提到行首了，留着就是同一件事写两遍（而且写的是哈希 ✗）
+    const body = m ? l.message.replace(m[0], '') : l.message
+    return {
+      before: `${fmtStampMs(l.at_ms)}  ${MARK[kindOf(l.level)]}  `,
+      accId: id,
+      accName: id ? accountName(id) : '',
+      after: `${body}  ·  ${l.target}`,
+    }
+  }
+
+  /**
+   * 当前数据里**出现过**的账号（去重 ✓、带上人名 ✓）—— 筛选按钮按它铺 ✓。
+   *
+   * ⚠ 缓存键要**两个**：`lines` 的身份 ✓ + **名字缓存的 Map 身份** ✓
+   * （`accountNames` 每次更新都换一张新 Map ✓）。只按 `lines` 缓存的话，
+   * 账号列表**后到**时这份结果不会重算 ⇒ 筛选按钮一直停在哈希上 ✗
+   * （`account-names.ts` 模块头记的就是这一类"名字不出现"✓）。
+   */
+  let accCache: { src: ServerLogLine[]; names: Map<string, string>; out: AccOption[] } | undefined
+  const accOptions = (): AccOption[] => {
+    const src = lines.value
+    const nm = accountNames.value
+    if (accCache && accCache.src === src && accCache.names === nm) return accCache.out
+    const seen = new Map<string, string>()
+    for (const l of src) {
+      const id = accIdOf(l)
+      if (id !== '' && !seen.has(id)) seen.set(id, accountName(id))
+    }
+    const out = [...seen].map(([id, name]) => ({ id, name }))
+    accCache = { src, names: nm, out }
+    return out
+  }
 
   /** 高度缓存键（= 每行渲染出来的文本）—— 同样按"过滤结果身份"缓存一次 ✓（见 `visible`）。 */
   let keysCache: { vis: ServerLogLine[]; keys: string[] } | undefined
@@ -296,7 +403,7 @@ export const LogsPage = () => {
     const w = win()
     return visible()
       .slice(w.start, w.end)
-      .map((l, i) => ({ i: w.start + i, l, text: textOf(l) }))
+      .map((l, i) => ({ i: w.start + i, l, ...partsOf(l) }))
   }
 
   /** 渲染之后量一次行高（`requestAnimationFrame` ⇒ 节点已经在文档里了 ✓）。 */
@@ -343,26 +450,60 @@ export const LogsPage = () => {
 
   return (
     <div class="flex flex-col gap-4">
-      <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div class="flex flex-wrap items-center gap-1.5">
-          {LEVELS.map(([id, label]) => (
-            <button
-              type="button"
-              aria-pressed={level.value === id}
-              aria-label={`级别：${label}`}
-              class={`btn btn-sm min-h-11 md:min-h-0 ${level.value === id ? 'btn-primary' : 'btn-soft'}`}
-              onClick={() => (level.value = id)}
-            >
-              {label}
-            </button>
-          ))}
+      <div class="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+        <div class="flex flex-col gap-1.5">
+          <div class="flex flex-wrap items-center gap-1.5">
+            {LEVELS.map(([id, label]) => (
+              <button
+                type="button"
+                aria-pressed={level.value === id}
+                aria-label={`级别：${label}`}
+                class={`btn btn-sm min-h-11 md:min-h-0 ${level.value === id ? 'btn-primary' : 'btn-soft'}`}
+                onClick={() => (level.value = id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {/*
+            ⚠ 只在**真的出现过两个以上账号**时才铺这一行：只有一个账号时它是个
+            永远只有一种选法的摆设 ✗（而这一页平时就是这么用的 ✓）。
+          */}
+          {accOptions().length > 1 ? (
+            <div class="flex flex-wrap items-center gap-1.5">
+              <span class="text-xs opacity-60">账号</span>
+              <button
+                type="button"
+                aria-pressed={account.value === ''}
+                aria-label="账号：全部"
+                class={`btn btn-xs min-h-9 md:min-h-0 ${account.value === '' ? 'btn-primary' : 'btn-soft'}`}
+                onClick={() => (account.value = '')}
+              >
+                全部
+              </button>
+              {accOptions().map((o) => (
+                <button
+                  key={o.id}
+                  type="button"
+                  aria-pressed={account.value === o.id}
+                  aria-label={`账号：${o.name}`}
+                  // 名字可能重名/被截断 ⇒ 悬停时把**主键**也给人看 ✓（排障时要的就是它 ✓）
+                  title={o.id}
+                  class={`btn btn-xs min-h-9 md:min-h-0 ${account.value === o.id ? 'btn-primary' : 'btn-soft'}`}
+                  onClick={() => (account.value = o.id)}
+                >
+                  {o.name}
+                </button>
+              ))}
+            </div>
+          ) : null}
         </div>
 
         <label class="input flex min-h-11 w-full items-center gap-2 md:min-h-0 md:w-64">
           <IconSearch class="h-4 w-4 opacity-60" />
           <input
             class="grow"
-            placeholder="搜索正文 / 来源模块"
+            placeholder="搜索正文 / 来源 / 账号"
             value={q.value}
             onInput={(e) => (q.value = (e.target as HTMLInputElement).value)}
           />
@@ -376,7 +517,7 @@ export const LogsPage = () => {
       ) : null}
 
       {state.value === 'ready' && visible().length === 0 ? (
-        <p class="text-sm opacity-70">{`没有匹配的日志（内存里只留最近 ${RING_LINES} 行 ✓，这一页取的就是那全部 ${RING_LINES} 行 ✓）。`}</p>
+        <p class="text-sm opacity-70">{`没有匹配的日志（账号 / 级别 / 关键词任一不匹配都会没有 ✓；内存里只留最近 ${RING_LINES} 行 ✓，这一页取的就是那全部 ${RING_LINES} 行 ✓）。`}</p>
       ) : null}
 
       {/*
@@ -419,7 +560,26 @@ export const LogsPage = () => {
               // ⚠ 文本拼成**一个**表达式 ✓（lite 编译器对"元素旁边的裸文本节点"支持最薄 ✓）；
               // `data-i` 是**绝对**下标 —— 量行高时靠它对上号 ✓（别改成可见区间里的相对下标 ✗）。
               <div key={p.l} data-i={p.i} class={`break-words ${TONE[kindOf(p.l.level)]}`}>
-                {p.text}
+                <span>{p.before}</span>
+                {/*
+                  ⚠ 三段都是**元素**（`<span>` ✓）—— 别把 `p.before` / `p.after` 写成裸文本 ✗：
+                  那是 lite 编译器支持最薄的写法（这一页上一版就是靠"拼成一个表达式"绕开的 ✓）。
+
+                  账号那格**定宽 + 截断**（`inline-block w-20 truncate` ✓）：不定宽的话
+                  名字长短不一，每一行的正文都会跟着错位，一屏日志看起来像锯齿 ✗。
+                  点它 = 只看这个账号 ✓（与上面那排筛选按钮同一个信号 ✓）。
+                */}
+                {p.accId !== '' ? (
+                  <span
+                    data-acc={p.accId}
+                    class="mr-1 inline-block w-20 cursor-pointer truncate align-bottom font-medium text-primary"
+                    title={`只看这个账号：${p.accName}（${p.accId}）`}
+                    onClick={() => (account.value = p.accId)}
+                  >
+                    {p.accName}
+                  </span>
+                ) : null}
+                <span>{p.after}</span>
               </div>
             ))}
             {/* 下垫片（后面那些行的总高） */}

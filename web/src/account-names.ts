@@ -60,3 +60,13 @@ export async function refreshAccountNames(): Promise<void> {
 export function accountName(id: string): string {
   return names.value.get(id) || id
 }
+
+/**
+ * 名字缓存的**身份**（每次更新都换一张新 Map ✓，见 [`rememberAccountNames`]）。
+ *
+ * 给"把查出来的名字再算成别的东西、想缓存一层"的页面当缓存键用 ✓：
+ * 读它就是**订阅名字变化** ✓ —— 只按数据身份缓存（比如服务端日志页按 `lines` 缓存）
+ * 的话，账号列表后到时那份缓存不会重算，界面就一直停在哈希上 ✗
+ * （症状与模块头那条"名单里全是 16 位哈希，切个页又好了"是同一个 ✓）。
+ */
+export const accountNames = names

@@ -1,17 +1,24 @@
 //! 事件扇出：一份事件同时进日志与 SSE 广播。
 
-use mcloud_core::{EventSink, LogLevel, RunEvent};
+use mcloud_core::{EventSink, RunEvent};
 use tokio::sync::broadcast;
+
+use crate::run_labels::{trace_event, RunLabels};
 
 /// 广播事件到所有订阅者（SSE 连接）。
 pub struct BroadcastSink {
     tx: broadcast::Sender<RunEvent>,
+    /// `run_id → 账号`：让每一行日志都认得出主人（见 [`crate::run_labels`]）。
+    labels: RunLabels,
 }
 
 impl BroadcastSink {
     pub fn new(capacity: usize) -> Self {
         let (tx, _rx) = broadcast::channel(capacity);
-        Self { tx }
+        Self {
+            tx,
+            labels: RunLabels::default(),
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<RunEvent> {
@@ -30,34 +37,10 @@ impl EventSink for BroadcastSink {
         // 这一路会把任务的日志/结论原样带出去（进程日志 / SSE / 推送 / 落盘），
         // 而上游回显里可能就有一枚凭证 ✗。形状由 mcloud-core 给死 ⇒ sink 只要一行 ✓。
         let event = event.scrubbed();
-        // 先落日志：即使没有订阅者，运行过程也要可追溯
-        match &event {
-            RunEvent::Log { level, message, .. } => match level {
-                LogLevel::Debug => tracing::debug!("{message}"),
-                LogLevel::Info => tracing::info!("{message}"),
-                LogLevel::Warn => tracing::warn!("{message}"),
-                LogLevel::Error => tracing::error!("{message}"),
-            },
-            RunEvent::Started { task, account, .. } => {
-                tracing::info!(task, account, "任务开始");
-            }
-            RunEvent::Finished {
-                outcome,
-                duration_ms,
-                ..
-            } => {
-                tracing::info!(duration_ms, "任务结束：{}", outcome.summary());
-            }
-            RunEvent::Progress {
-                step, total, label, ..
-            } => {
-                tracing::debug!("进度 {step}/{total} {label}");
-            }
-            // 结构化明细**不逐条打日志**：它可能很大（整份兑换结论），
-            // 而日志那一格是给人扫的。它真正的去处是 `RunRecord.details`
-            // —— 由 runner 累积后落历史，前端从那里读。
-            RunEvent::Details { .. } => {}
-        }
+        // 先落日志：即使没有订阅者，运行过程也要可追溯。
+        // ⚠ 走共用的 [`trace_event`]（`EventHub` 也用它 ✓）：两个 sink 各抄一份逐字相同的
+        // `match` 时，"只有一个 sink 盖了账号"这种漏是迟早的事 ✗。
+        trace_event(&self.labels, &event);
 
         // 无订阅者时 send 返回 Err，属正常情况，忽略
         let _ = self.tx.send(event);
