@@ -10,7 +10,7 @@
   - **不带参数** ⇒ 起 WebUI 服务（默认 `http://127.0.0.1:3000`）
   - **带子命令** ⇒ CLI（`tasks` / `run` / `login` / `cron` / `pipeline` / `auth` / `pending`）
 
-> 当前版本 `3.0.0-rc.2`。现算（别背数）：
+> 当前版本 `3.0.0-rc.3`。现算（别背数）：
 > ```bash
 > sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1
 > ```
