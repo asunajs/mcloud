@@ -370,7 +370,7 @@ mcloud 的实拍结论（`../mcloud-back/docs/business-feature-inventory.md` §5
 | # | 差异 | mcloud | mcloud-sign TASKS.md | 需要你定 |
 |---|---|---|---|---|
 | D1 | `after` 收尾 | **不是独立能力**（无 code） | 是一个任务 | 是否登记成能力？ |
-| D2 | `red-flower` | **并入 `live-room`** | 独立的 3 个函数 | 保持合并还是拆开？ |
+| D2 | `red-flower` | **并入 `live-room`** | 独立的 3 个函数 | ✅ **已结（2026-10-05 用户口径）**：「小红花弄两个干嘛，输入口令并领取有单独的页面，做定时任务你口令都没有也不行」⇒ 独立任务**删掉**，只留 `live-room` 的「只用手工口令」（`skipKouling` + `codes`）那一支；注册表从 20 条回到 **19 条**（哨兵见 `cloud_phone_redpack/tests.rs`）|
 | D3 | `hc1t` | code 都没登记 | 标注**已过期** | 确认不实现 |
 | D4 | `cloud-snapshot` | 新能力（旧项目没有） | 无 | 已确认要做 |
 | D5 | 签到页开关 | 拆成 5 条 code（receive/prizes/multiple/backup-gift/revival） | 混在 `sign` 里 | 跟随 mcloud 的拆分 |

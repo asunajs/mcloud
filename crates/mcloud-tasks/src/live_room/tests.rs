@@ -1,4 +1,4 @@
-//! `live-room` / `red-flower` 编排层测试。
+//! `live-room` 编排层测试（含它的「只用手工口令」模式 —— 原独立的 `red-flower` 已删）。
 //!
 //! 全程离线：假 HTTP 按脚本回放**实拍形状**的响应，断言的是
 //! "发了哪几枪、按什么分支走、结论说成什么"。
@@ -1690,17 +1690,19 @@ fn merge_keeps_first_start_second_end_and_the_union_of_invalids() {
     );
 }
 
-// ══════════════════════════ 判据 9：任务元信息与 red-flower ══════════════════════════
+// ══════════════════════════ 判据 9：任务元信息 ══════════════════════════
 
-/// ⭐ 两个任务的名字是 **wire 契约**（编排与定时都按它指），且元信息完整。
+/// ⭐ 名字是 **wire 契约**（编排与定时都按它指），且元信息完整。
+///
+/// ⚠ 2026-10-05 用户口径：「小红花弄两个干嘛，输入口令并领取有单独的页面，做定时任务你口令
+/// 都没有也不行」⇒ 独立的 `red-flower` 任务**删掉**了：它就是本任务「只用手工口令」
+/// （`skipKouling` + `codes`）那一支，而那一支在直播页上本来就有开关 ✓。所以这里只剩
+/// 一个名字 —— 它仍是 wire 契约，**别改名** ✗。
 #[test]
 fn task_metadata_is_complete_and_stable() {
-    let metas = [
-        LiveRoomTask::production().meta(),
-        RedFlowerTask::production().meta(),
-    ];
+    let metas = [LiveRoomTask::production().meta()];
     let names: Vec<String> = metas.iter().map(|m| m.name.clone()).collect();
-    assert_eq!(names, vec!["live-room", "red-flower"], "名字是 wire 契约");
+    assert_eq!(names, vec!["live-room"], "名字是 wire 契约");
     for m in &metas {
         assert!(!m.title.is_empty(), "{} 缺标题", m.name);
         assert!(!m.description.is_empty(), "{} 缺说明", m.name);
@@ -1715,31 +1717,37 @@ fn task_metadata_is_complete_and_stable() {
     );
 }
 
-/// ⭐ `red-flower` 没有 codes 时**报配置错误**（它不收集，没有别的来源）。
+/// ⭐ 「只用手工口令」但一条口令都没给 ⇒ **报配置错误**（关了唯一的口令来源，没有别的来源）。
+///
+/// 这一条原来跑在独立的 `red-flower` 任务上；那个任务删掉之后，覆盖面**原样搬到**
+/// `live-room` 的这个模式上（它俩本来就是同一支）✓。
 #[tokio::test]
-async fn red_flower_without_codes_is_a_config_error() {
+async fn skip_kouling_without_codes_is_a_config_error() {
     let (c, http) = Ctx::new(&[]);
-    let e = RedFlowerTask::production()
-        .run(&c.ctx(), &serde_json::json!({}))
+    let e = LiveRoomTask::production()
+        .run(&c.ctx(), &serde_json::json!({"skipKouling": true}))
         .await
         .unwrap_err();
     assert!(e.to_string().contains("codes"), "要指出缺的是 codes：{e}");
     assert_eq!(http.count(), 0);
 }
 
-/// ⭐ `red-flower` 直接领取：不发门那几枪，直接跑六步链。
+/// ⭐ 「只用手工口令」直接领取：不发门那几枪，直接跑六步链。
 #[tokio::test]
-async fn red_flower_draws_directly_without_the_gate() {
+async fn skip_kouling_draws_directly_without_the_gate() {
     let (c, http) = ctx_with(&happy_chain(235, 245, Some(give_ok(0)), &[draw_ok(10)], 0));
-    let out = RedFlowerTask::production()
-        .run(&c.ctx(), &serde_json::json!({"codes": "中秋口令"}))
+    let out = LiveRoomTask::production()
+        .run(
+            &c.ctx(),
+            &serde_json::json!({"codes": "中秋口令", "skipKouling": true}),
+        )
         .await
         .unwrap();
 
     assert!(out.is_success(), "{out:?}");
     assert!(out.summary().contains("进账 10"), "实得：{}", out.summary());
     // 门那一族（/cmlive）一枪都不该有
-    assert_eq!(http.count_of("/cmlive"), 0, "red-flower 不开门");
+    assert_eq!(http.count_of("/cmlive"), 0, "只用手工口令时不开门");
     assert_eq!(http.count_of("/redFlower/draw"), 1);
 }
 
@@ -2408,7 +2416,7 @@ async fn xiaohongshu_source_extracts_codes_without_any_live_room() {
 /// 这条是"接入"这件事的判据：光有任务类型不注册，用户在 CLI 里
 /// `run live-room` 会拿到"未知任务"，而 `/api/capabilities` 里根本不出现。
 #[test]
-fn both_tasks_are_registered() {
+fn live_room_task_is_registered() {
     let mut registry = mcloud_engine::Registry::new();
     crate::register_all(&mut registry).expect("注册不该重名");
 
@@ -2416,10 +2424,6 @@ fn both_tasks_are_registered() {
     assert!(
         names.contains(&"live-room".to_string()),
         "live-room 必须注册（CLI/capabilities 都按 registry 走）：{names:?}"
-    );
-    assert!(
-        names.contains(&"red-flower".to_string()),
-        "red-flower 必须注册：{names:?}"
     );
     // 旧的签到族没被这次改动碰掉
     assert!(

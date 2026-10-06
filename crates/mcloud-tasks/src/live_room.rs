@@ -1248,7 +1248,7 @@ impl<'a> LiveRoomRun<'a> {
     ///    那么门那两枪偶发 5xx 会把一趟**本来能跑完**的领取整体拖黄。
     ///    用户给的口令是对的、六步链是好的，却因为"换个票失败了"一朵花没拿到
     ///    —— 归因方向全错（他会去查口令）。
-    /// 3. **与 [`RedFlowerTask`] 口径一致**：那一支就是"已经有口令、直接领"，
+    /// 3. **与"手工口令"那个模式口径一致**：`skipKouling` + `codes` 就是"已经有口令、直接领"，
     ///    它从来不开门。两者是同一条链的两个入口，不该在"要不要门"上分叉。
     ///
     /// ⚠ **代价必须说出来**：有 codes 时**收不到弹幕里的口令**（因为没开门）。
@@ -1703,10 +1703,15 @@ impl<'a> LiveRoomRun<'a> {
 ///
 /// 参数见 [`Task::params`]（`codes` / `listenSeconds` 等）。
 ///
-/// # ⚠ 它与 `red-flower` 的分工
+/// # ⚠ 两种用法（同一支链，两个入口）
 ///
-/// 两者是**同一条链**的两个入口：`live-room` 走完整的"开门 → 获取口令 → 领取"
-/// （含听弹幕），`red-flower` 是"我手上已经有口令、直接领"那一支。
+/// 默认（`skipKouling = false`）：开门 → 收口令（弹幕 + 小红书）→ 领取。
+/// 「只用手工口令」（`skipKouling = true` + `codes`）：**不碰门、不收弹幕**，直接领给定的口令
+/// —— 直播页那个开关走的就是这一支。
+///
+/// ⚠ 2026-10-05 之前这一支还单独注册成一个任务（`red-flower`），用户口径
+/// 「小红花弄两个干嘛，输入口令并领取有单独的页面，做定时任务你口令都没有也不行」⇒ 删掉 ✓
+/// （定时任务里没有口令来源，那个任务本来就跑不起来）。
 /// 分开登记的理由与签到族一样：日常要跑的是前者，而后者在调试/补领时更方便。
 pub struct LiveRoomTask {
     /// 收集器（生产 = [`LiveKoulingCollector`]）。
@@ -1807,103 +1812,6 @@ impl Task for LiveRoomTask {
                 ctx.info(format!("口令：{code}"));
             }
         }
-        if let Some(report) = &result.report {
-            ctx.info(report.summary_line());
-        }
-        Ok(result.outcome())
-    }
-}
-
-/// `red-flower`：**直接领取**（不获取口令）。
-///
-/// # 它与 `live-room` 的关系
-///
-/// 同一条六步链，两个入口。这一条不碰门、不开弹幕 —— 它假设调用方
-/// **已经有口令**（`codes` 在这里是事实上的必填）。
-///
-/// ⚠ 产品事实（模块头事实 1）：小红书那条口令**只能**从 `codes` 进来。
-/// 所以"只跑 red-flower"永远拿不到完整的两条 —— 那是这一支的固有形状，
-/// 不是缺陷。
-pub struct RedFlowerTask {
-    /// 收集器（供重听用）。
-    pub collector: Arc<dyn KoulingCollector>,
-}
-
-impl Default for RedFlowerTask {
-    fn default() -> Self {
-        Self {
-            collector: Arc::new(LiveKoulingCollector::production()),
-        }
-    }
-}
-
-impl RedFlowerTask {
-    /// 生产实现。
-    pub fn production() -> Self {
-        Self::default()
-    }
-}
-
-#[async_trait]
-impl Task for RedFlowerTask {
-    fn name(&self) -> &'static str {
-        "red-flower"
-    }
-
-    fn title(&self) -> &'static str {
-        "领取小红花"
-    }
-
-    fn group(&self) -> TaskGroup {
-        TaskGroup::Live
-    }
-
-    fn description(&self) -> &'static str {
-        "用给定的口令逐个领取小红花（不听弹幕；给的第一个口令决定先领哪条）"
-    }
-
-    fn params(&self) -> Vec<ParamSpec> {
-        vec![ParamSpec::text(
-            "codes",
-            "口令",
-            "要领取的口令；多个用逗号或换行分隔",
-        )]
-    }
-
-    async fn run(&self, ctx: &TaskContext, body: &Value) -> TaskResult {
-        let codes = match body.get("codes") {
-            Some(Value::String(raw)) => split_kouling(raw),
-            Some(Value::Array(items)) => {
-                let list: Vec<String> = items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect();
-                split_kouling(&list.join("\n"))
-            }
-            _ => Vec::new(),
-        };
-
-        if codes.is_empty() {
-            // 这一支**没有**口令来源可言（它不收集），所以空 codes 是配置错误。
-            return Err(Error::Config(
-                "red-flower 需要 codes：它不收集弹幕，没有别的口令来源".into(),
-            ));
-        }
-
-        // ⚠ 这一支**不需要门**（不收集）：`skip_kouling = true` 且 codes 非空
-        // ⇒ `run_account` 里"需要收口令"那个条件不成立 ⇒ **一个门请求都不发**。
-        // 这正是 [`RedFlowerTask`] 的固有形状：口令已经有了，直接领。
-        let params = LiveRoomParams {
-            codes,
-            // 它不收集，时长只需是个正数即可过校验。
-            listen_seconds: 1,
-            skip_kouling: true,
-        };
-        let run = LiveRoomRun {
-            collector: self.collector.as_ref(),
-        };
-        let result = run.run_account(ctx, &params).await?;
         if let Some(report) = &result.report {
             ctx.info(report.summary_line());
         }

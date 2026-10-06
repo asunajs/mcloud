@@ -592,7 +592,7 @@ pub struct PipelineStep { task, body, continue_on_error }
 | | `cloud-snapshot` | AI豆余额快照 |
 | | `task-list` | 任务清单 |
 | 直播 | `live-room` | 直播口令 → 小红花（WebSocket + 小红书） |
-| | `red-flower` | 小红花领取 |
+| | ~~`red-flower`~~ | 小红花领取 —— **2026-10-05 已删**（用户口径：它就是 `live-room` 的「只用手工口令」那一支，直播页上有开关，单独一个任务多余）|
 | 活动 | `exchange` | 兑换奖品（**真扣AI豆、不可回滚**） |
 | | `msg-push` | 消息推送开关 + 奖励 |
 | | `fun-ai` | 趣玩 AI 抽奖 |

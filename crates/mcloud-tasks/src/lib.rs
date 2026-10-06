@@ -41,7 +41,7 @@ pub use login::{
 ///
 /// # 直播小红花两条
 ///
-/// `live-room`（开门 → 获取口令 → 领取）与 `red-flower`（**直接领**给定口令）
+/// `live-room`（开门 → 获取口令 → 领取；「只用手工口令」那个模式就是不收弹幕直接领）
 /// 是**同一条六步链**的两个入口，所以一起登记。
 ///
 /// ⚠ 六步链要的票是**云盘侧** `jwttoken`（与签到同族），**不是**直播侧 JWT ——
@@ -79,7 +79,6 @@ pub fn register_all(registry: &mut Registry) -> Result<(), String> {
         Arc::new(signin::CloudSnapshotTask),
         Arc::new(signin::TaskListTask),
         Arc::new(live_room::LiveRoomTask::production()),
-        Arc::new(live_room::RedFlowerTask::production()),
         // ⭐ `exchange` 2026-10-02 起**在这里**：三条缺口已补齐（deviceId 来源
         // 走请求体 / visitlog 预热两枪 / 等待档与 TS 对齐），用户点「兑换」
         // 能真的走完整条链。哨兵：`tests::register_all_exposes_exchange`。
