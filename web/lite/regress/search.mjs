@@ -17,11 +17,12 @@
  * **静默坑**的显形处（用户在真机上只会看到"打着字光标跳走" ✗，而门禁若只比
  * 文本快照是看不出来的 ✗）；⑥ 列表被筛掉（只剩命中的那项 + **当前选中**那项，
  * 后者是 `config-page.tsx:184` 有意保留的 ✓）；⑦ 清空后 8 项都回来；
- * ⑧ 375 窄屏下带搜索框**无横向溢出** ✓；⑨ 页面 0 异常 ✓。
+ * ⑧ 375 窄屏下带搜索框**无横向溢出** ✓；⑨⑩⑪⑫ **账号侧那一栏**（`/accounts/push` 的
+ * `#acct-rail`，7 个账号）同一组判据（搜索框出现 / 列全 7 项 / input 同一节点 /
+ * 焦点与字 / 筛到只剩「账号3」✓）；⑬ 页面 0 异常 ✓。
  *
- * ⚠ **账号侧那一栏没钉**（`#acct-rail`，同样 >6 项才出搜索框）：它正由另一条写入线
- * 拆着（`pages/account-config-page.tsx`，工作区未提交 ✗）⇒ 现在钉它等于给别人的
- * 在途改动上锁 ✗。那边落地后补两条即可 ✓。
+ * ⚠ **账号侧那一栏的 375 窄屏没钉**（只有任务侧钉了 ✓）：那一页正由另一条写入线
+ * 拆着，等它落地再补一条即可 ✓。
  *
  * ⚠ 装置写法照本仓口径：`serve()` + `VARIANTS` 里一个**本脚本私有**的变体
  * （`__search` ✓，不塞进 `lib.mjs` 的公共变体 —— 两条写入线同时改那个文件最容易打架 ✗）。
@@ -182,6 +183,45 @@ try {
     `(() => ({ sw: document.documentElement.scrollWidth, vw: window.innerWidth, hasSearch: !!document.querySelector('#config-rail input[type="search"]') }))()`,
   )
   check('375 下（带搜索框）无横向溢出', narrow.sw <= narrow.vw + 1, JSON.stringify(narrow))
+
+  // ── ⑨⑩⑪ 账号侧那一栏（`/accounts/push`）：同一件事的另一份实现 ✓ ──
+  //
+  // ⚠ 2026-10-06 之前这条**没钉**（那一页正由另一条写入线拆着 ✗）。现在钉上：
+  // 它是**另一份**"大清单 + 搜索框"实现（`account-config-page.tsx` 的 `accountItems()` ✓），
+  // 而两份实现最容易各修各的 ⇒ 同一组判据要在两处都成立 ✓。
+  await ev(`(() => { history.pushState({}, '', '/accounts/push'); window.dispatchEvent(new PopStateEvent('popstate')); return true })()`)
+  await sleep(1200)
+  const acctRail = await ev(`(() => {
+    const r = document.getElementById('acct-rail')
+    return { items: r ? r.querySelectorAll('button').length : 0, hasSearch: !!(r && r.querySelector('input[type="search"]')) }
+  })()`)
+  check('账号侧（7 个账号）搜索框也出现', acctRail.hasSearch === true, JSON.stringify(acctRail))
+  check('账号侧列出全部 7 项', acctRail.items === 7, `实际 ${acctRail.items}`)
+  const acctTyped = await ev(`(async () => {
+    const inp = document.querySelector('#acct-rail input[type="search"]')
+    inp.focus()
+    const set = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+    for (const ch of '账号3') {
+      set.call(inp, inp.value + ch)
+      inp.dispatchEvent(new Event('input', { bubbles: true }))
+      await new Promise((r) => setTimeout(r, 60))
+    }
+    await new Promise((r) => setTimeout(r, 260))
+    const now = document.querySelector('#acct-rail input[type="search"]')
+    const texts = [...document.querySelectorAll('#acct-rail button')].map((b) => b.textContent.replace(/\s+/g, ' ').trim()).join(' | ')
+    return {
+      sameNode: now === inp,
+      focused: document.activeElement === now,
+      value: now.value,
+      items: document.querySelectorAll('#acct-rail button').length,
+      texts,
+    }
+  })()`)
+  check('账号侧：打字后 input 还是同一节点', acctTyped.sameNode === true, JSON.stringify(acctTyped))
+  check('账号侧：焦点还在、字没被回写', acctTyped.focused === true && acctTyped.value === '账号3', JSON.stringify(acctTyped))
+  // ⚠ 账号侧这一栏是**纯过滤**（`accountItems()` 里没有"保留选中项"那条 ✓）⇒ 只剩 1 项 ✓
+  //（任务侧那一栏**有**那条 ⇒ 是 2 项 ✓，两边判据不同，别抄 ✗）
+  check('账号侧：筛到只剩「账号3」', acctTyped.items === 1 && acctTyped.texts.includes('账号3'), JSON.stringify(acctTyped))
 
   check('页面 0 条未捕获异常 / console.error', session.errors.length === 0, session.errors.join(' / '))
 

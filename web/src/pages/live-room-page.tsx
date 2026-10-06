@@ -36,6 +36,7 @@ import {
   LIVE_ROOM_TASK,
   cancelRun,
   getKoulingPool,
+  getTaskConfig,
   listAccounts,
   listCapabilities,
   splitKouling,
@@ -101,6 +102,8 @@ export const LiveRoomPage = () => {
   const codesRaw = ref('')
   const listenSeconds = ref(DEFAULT_LISTEN_SECONDS)
   const skipKouling = ref(false)
+  /** 配置页那份**只灌一次**（见 `load()` 里的注释：刷新不该冲掉用户刚填的东西 ✗）。 */
+  let formSeeded = false
 
   // ── 运行 ──────────────────────────────────────────────────────────
   const running = ref(false)
@@ -153,10 +156,30 @@ export const LiveRoomPage = () => {
     state.value = 'loading'
     errorMessage.value = ''
     try {
-      const [caps, accts] = await Promise.all([listCapabilities(), listAccounts()])
+      const [caps, accts, cfg] = await Promise.all([
+        listCapabilities(),
+        listAccounts(),
+        // ⚠ 配置页存的那份也拉回来（与任务页**同一口径** ✓）：以前这里不拉，
+        // 于是"配置页把听弹幕时长改成 300、从直播页跑仍然发 60" ✗
+        //（任务页每次运行都现拉一次配置，它注释里写着理由：「配置页改了、这次运行还用着
+        // 旧参数」那种不一致没有任何迹象 ✗）。拉不到就退回默认值，**不**让整页失败 ✓。
+        getTaskConfig(LIVE_ROOM_TASK).catch(() => null),
+      ])
       void refreshPool()
       task.value = caps.tasks.find((t) => t.name === LIVE_ROOM_TASK) ?? null
       accounts.value = accts
+      /**
+       * ⚠ **只在首次**灌进表单：`load()` 也是「刷新」按钮的入口，每次刷新都灌一遍
+       * 会把用户刚填的口令/时长冲掉 ✗（那是"看着像刷新、其实丢输入"）。
+       * 之后要拿配置页的新值，重新进这一页即可 ✓。
+       */
+      if (!formSeeded && cfg) {
+        formSeeded = true
+        const p = (cfg.params ?? {}) as Record<string, unknown>
+        if (typeof p.listenSeconds === 'number' && p.listenSeconds > 0) listenSeconds.value = p.listenSeconds
+        if (typeof p.codes === 'string' && p.codes.trim() !== '') codesRaw.value = p.codes
+        if (typeof p.skipKouling === 'boolean') skipKouling.value = p.skipKouling
+      }
       // 只有一个账号时**预选**它：少一次点击，而且"就是那个号"没有歧义。
       // 多个账号时不猜 —— 猜错就是拿另一个号跑了一遍真任务（会真的去领）。
       if (accts.length === 1 && picked.value.length === 0 && !allAccounts.value) {
@@ -525,17 +548,8 @@ export const LiveRoomPage = () => {
                 : [...picked.value, id])
             }
           />
-          <p class="text-xs leading-5 opacity-60">
-            勾多个账号时，后端按顺序一个一个跑（一个跑完再跑下一个）。
-            勾「全部账号」= 你名下的所有账号，以后加了账号也算在内。
-          </p>
         </div>
       )}
-      <p class="text-xs leading-5 opacity-60">
-        可以勾<b class="font-medium">多个账号</b>、也可以勾「全部账号」——
-        后端会<b class="font-medium">逐个串行</b>跑（一个领完再领下一个）；
-        每个号的领取状态是<b class="font-medium">各算各的</b>。
-      </p>
     </fieldset>
   )
 
@@ -654,10 +668,6 @@ export const LiveRoomPage = () => {
         {listenField()}
         {switchesField()}
 
-        {/* ⚠ 后果必须写在按钮旁边：点下去是**真的去领取**（"演练"才不发请求）。 */}
-        <p class="text-xs leading-5 opacity-60">
-          运行＝真的去领取小红花（不发请求的只有「演练」）。多账号会按顺序串行跑，可以关页面，后端会接着跑。
-        </p>
 
         {/*
           提交区。

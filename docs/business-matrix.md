@@ -48,7 +48,7 @@
 | `play-ai-special` `play_ai.rs:205` | 拍拍盘点 | ✅ `playAiSpecialTask`（会做活动里可自动化的那几条；"生成校园海报 33 / 体验AI相机 34"是它**设计内跳过**，见 TS `TASKS.md` §运行观测）| ◐ **本仓这条只盘点不代做**（自陈见 `description`：不做任务、不抽奖、不写网盘）⇒ 与 TS 同名不同物 | 任务页卡片；开关 `play_ai_enabled` 默认 true，同样只在隐藏块里 | ✗ 0 条 |
 | `fun-ai` `fun_ai.rs:389` | 趣玩AI抽奖 | ✅ `playAiLotteryTask`（CLI 调度）| ✅ | 任务页卡片 | ✗ 0 条 |
 | `live-room` `live_room.rs:1727` | 直播口令小红花 | ✅ `liveRoomKoulingTask` + `getLiveKouling` + `hasActiveLiveRoom`（WS 与小红书主页**并行**后合并去重）| ✅ 两个来源**同级并发**（`collect_inner` `live_room.rs:1005-1015`），口令解析层对拍 TS 的 `koulingExtract` 36 条 + `xiaohongshuExtract` 5 条（`live_kouling/tests.rs:68-84`）；开关 `kouling_enabled` **默认 false** | **专属页** `/live-room`（口令池 + 参数 `codes`）+ 任务页；⚠ 同 §6-1 | ◐ ×4：门与"没直播/房间不对"都走通过，**但从没赶上目标房间开播** ⇒ 弹幕抓口令那一格仍无实证（§6-4 那条注释之争也没解）|
-| `red-flower` `live_room.rs:1847` | 领取小红花 | ✅ `drawRedFlower` / `autoDrawRedFlower` / `drawRedFlowerForAccount` | ✅ 独立一条（TS 那边是 3 个函数）| 任务页，参数 `codes` | ◐ ×2 都打到"领取"那一枪，喂的是无效口令 `10086112` ⇒ 链路通、**进账 0 从未变成进账 N** |
+| ~~`red-flower`~~（2026-10-05 已删，并入 `live-room` 的「只用手工口令」）| 领取小红花 | ✅ `drawRedFlower` / `autoDrawRedFlower` / `drawRedFlowerForAccount` | ✅ 独立一条（TS 那边是 3 个函数）| 任务页，参数 `codes` | ◐ ×2 都打到"领取"那一枪，喂的是无效口令 `<值已抹去>` ⇒ 链路通、**进账 0 从未变成进账 N** |
 | `app-task` `app_task.rs:791` | App 任务（做任务）| ✅ `appTask`（14 个专用执行器 + `default:` 打卡）| ◐ **只做 4 档形状**：106 / 522 / `beiyong1` 名字门 / 434（`upload_shape_for` `:105-124`、`step_for` `:203-207`）⇒ 详见 §3 | 任务页卡片 | ✅ ×1，而且那一趟**三档形状各过一次**：106 传 1 个、522 传 5 个、**434 `shared: true`**，收尾 `cleanedUp: 6`（自家传的 6 个文件移进回收站）⇒ 4 档里只有 `beiyong1` 名字门没实证｜UI 待验 |
 | `app-task-matrix` `app_task_matrix.rs:243` | App 任务矩阵（只看）| — TS 无"只看"这一条 | ✅ 只读（2 市场 × 8 组）| 任务页卡片 | ✗ 0 条 |
 
@@ -118,7 +118,7 @@ CLI 默认同一个 `data`，除非另设 `MCLOUD_DATA_DIR`）。⚠ 但记录**
 | 验收分层 | 任务（次数 / 最好的一句结论）|
 |---|---|
 | ✅ **真跑成功过** | `sign`（8 次，含"签到成功 +3 AI豆"多条，最近 10-03 09:11）· `receive`（1，"本轮领取完成，余额 8837"）· `revival`（2，**真用卡**：复活 81 / 114 豆）· `task-list`（2）· `prizes`（1，本页 0 条）· `app-task`（1，"做了 3 条 / 网盘新增 6 个文件，已移进回收站"）· **`exchange`（19 次，其中 1 次真兑成**：100万tokens叠加包 50 豆、余额 9236→9186 差值核对；失败面见过 5 类上游结论：非移动用户 ×7、2303 未备份 ×3、415 单日耗尽 ×3、610 GK ×2、阈值 0 而 skipped ×3）|
-| ◐ **跑过但只到"没做成"那一步** | `ai-avatar`（4 次**全**是"开关关着"⇒ 成功路径 0 次，§6-1 的实证）· `multiple`（5 次全 skipped：本月没开备份 / 机会已用掉）· `live-room`（4 次：2 次"今天没直播"/"在播的那间不是中国移动云盘"、1 次开关关 ⇒ **从没赶上目标直播间开播**）· `red-flower`（2 次都打到领取那一枪，但喂的是无效口令 `10086112` ⇒ 链路通、口令假）|
+| ◐ **跑过但只到"没做成"那一步** | `ai-avatar`（4 次**全**是"开关关着"⇒ 成功路径 0 次，§6-1 的实证）· `multiple`（5 次全 skipped：本月没开备份 / 机会已用掉）· `live-room`（4 次：2 次"今天没直播"/"在播的那间不是中国移动云盘"、1 次开关关 ⇒ **从没赶上目标直播间开播**）· `red-flower`（2 次都打到领取那一枪，但喂的是无效口令 `<值已抹去>` ⇒ 链路通、口令假）|
 | ✗ **本机历史里 0 条** | `backup-gift` · `msg-push` · `notice` · `fun-ai` · `play-ai-special` · `cloud-snapshot` · `cloud-phone-redpack` · `task-expansion` · `app-task-matrix` —— **9 条一次都没跑过**，只有 §5.2 那些单测背书 |
 
 ⚠ 引活体记录要带日期：`sign` 那 8 条里有 2 条写的是「**演练**完成」，而"演练档"在 2026-10-02 已被删掉
