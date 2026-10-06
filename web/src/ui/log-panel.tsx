@@ -156,13 +156,17 @@ export const LogPanel = (props: { get: () => LogLine[] }) => {
     return w
   }
 
-  /** 这次要铺的行（带**绝对**下标 ⇒ `data-i` 对得上 ✓）。 */
-  const slice = () => {
+  /**
+   * 这次要铺的行。
+   *
+   * ⚠ 直接铺**日志行对象本身**（不再包一层 `{i, l, text}`）：`createFor` 的复用条件是
+   * "key 与 item 都没变"（`lite/src/control.ts:94`）⇒ 包一层就等于**每帧现造 item**
+   * ⇒ 一个字都没变的行也会被重建 ✗。行自带 `data-k`（自己的高度缓存键 ✓）之后
+   * 也不需要绝对下标了 ✓（见 `virtual-rows.ts` 文件头那条契约变更）。
+   */
+  const slice = (): LogLine[] => {
     const w = win()
-    return props
-      .get()
-      .slice(w.start, w.end)
-      .map((l, i) => ({ i: w.start + i, l, text: textOf(l) }))
+    return props.get().slice(w.start, w.end)
   }
 
   let raf = 0
@@ -173,8 +177,7 @@ export const LogPanel = (props: { get: () => LogLine[] }) => {
       const el = scroller()
       if (!el) return
       if (viewport.value !== el.clientHeight) viewport.value = el.clientHeight
-      const keys = keysOf()
-      if (vr.measure(el, (i) => keys[i] ?? '')) heightsV.value++
+      if (vr.measure(el)) heightsV.value++
     })
   }
 
@@ -218,11 +221,14 @@ export const LogPanel = (props: { get: () => LogLine[] }) => {
           >
             {/* 窗口化：只铺看得见的那几十行，上下垫片撑住真实总高 ✓（见 `ui/virtual-rows.ts`） */}
             <div style={`height:${win().top}px`} />
-            {slice().map((p) => (
+            {slice().map((l) => (
               // ⚠ 标记与正文拼在**一个**表达式里：lite 编译器对"元素旁边的裸文本
               // 节点"支持得最薄 ✓，拼成一整串最稳 ✓。
-              <div key={p.l} data-i={p.i} class={`break-words ${TONE[p.l.kind]}`}>
-                {p.text}
+              // ⚠ `key` 与 `data-k` 都是**这一行自己**的东西（对象身份 / 高度缓存键 ✓）——
+              // 行因此不依赖下标 ⇒ 新行进来时旧行被**搬动**而不是重建 ✓
+              //（用户往上翻时的选中状态、光标都不会被抹掉 ✓）。
+              <div key={l} data-k={textOf(l)} class={`break-words ${TONE[l.kind]}`}>
+                {textOf(l)}
               </div>
             ))}
             <div style={`height:${win().bottom}px`} />

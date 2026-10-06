@@ -15,6 +15,7 @@ import { onMounted, onUnmounted, ref } from 'lite'
 import { listServerLogs, type ServerLogLine } from '../api'
 import { accountName, accountNames, refreshAccountNames } from '../account-names'
 import { IconSearch } from '../ui/icons'
+import { reuseLogLines } from '../ui/log-identity'
 import { MARK, TONE, type LogKind } from '../ui/log-panel'
 import { createVirtualRows } from '../ui/virtual-rows'
 import { fmtStampMs } from '../ui/time'
@@ -54,6 +55,21 @@ const ACCOUNT_RE = / ?account="?([^"\s]+)"?/
 
 /** 这一行是哪个账号的（认不出就空串 —— **不编造** ✓）。 */
 const accIdOf = (l: ServerLogLine): string => l.message.match(ACCOUNT_RE)?.[1] ?? ''
+
+/**
+ * 渲染一行要用的东西（**纯**的那几格，见 [`rowOf`] 的缓存说明 ✓）。
+ *
+ * ⚠ 没有人名：它是**信号**里来的，必须留在渲染槽里现取 ✓。
+ */
+interface Row {
+  /** 日志行对象本身 —— 既是 `key`，也是"这行是谁"的凭据 ✓。 */
+  l: ServerLogLine
+  /** 高度缓存键（= 渲染出来的那串文本 ✓）。 */
+  k: string
+  before: string
+  accId: string
+  after: string
+}
 
 /** 筛选按钮上的一个账号：`id` 是主键（点它写进 `account` ✓），`name` 是给人看的名字 ✓。 */
 interface AccOption {
@@ -185,9 +201,11 @@ export const LogsPage = () => {
      * 实测（夹具 300 行、无头 Chrome）：轮询前 `scrollTop=5434`、轮询后 `scrollTop=0`
      * 且容器已经不是同一个节点 ✓。JSX 那边把卡片改成常驻就是从根上治它 ✓。
      *
-     * 这里再显式记/写一次，是因为**行本身**也是整批换的（`createFor` 按 item 身份复用，
-     * 而轮询回来的行都是新对象 ⇒ 每行都重建），中途高度会短暂归零、位置会被钳 ⇒
-     * 写回去才是确定的 ✓。
+     * 这里再显式记/写一次，是因为**内容会长**（每拍多几行 ✓）：总高变了、窗口边界也可能动，
+     * 中途高度会短暂按估计值算 ⇒ 位置会被钳 ⇒ 写回去才是确定的 ✓。
+     * ⚠ 原先这里还有半句"行本身也是整批换的（轮询回来的行都是新对象 ⇒ 每行都重建）"——
+     * 那半句**已经不作数**了：现在逐行沿用上一拍的对象身份（`ui/log-identity.ts` ✓），
+     * 没变的行不会被重建 ✓。但**上面这条理由不变**：会长的是数组、不是行 ✓。
      *
      * 两条分支：
      * * 更新前就贴着底（或**首次**拿到数据、那时还没有容器 ✓）⇒ 更新后钉回底部 ✓
@@ -216,7 +234,17 @@ export const LogsPage = () => {
       const before = scroller()
       prevTop = before?.scrollTop ?? 0
       pinned = before ? before.scrollHeight - before.scrollTop - before.clientHeight <= TAIL_SLACK : true
-      lines.value = next
+      /**
+       * ⚠⚠ **逐行沿用上一拍的对象身份**（`ui/log-identity.ts` ✓）—— 别改回 `= next` ✗。
+       *
+       * 每拍回来的都是刚 `JSON.parse` 出来的新对象，而 `createFor` 的 `key` 判的是
+       * item **身份**（`key={p.l}` ✓）⇒ 直接 `= next` 会让**一个字都没变的行**也换身份
+       * ⇒ 视口里那几十行每 2 s 拆掉重建 ✗。后果里最刺眼的是**正在选中的文字被清掉**
+       * （这一页的用途就是"一边跑一边看、顺手复制一行去查" ✗）。
+       * 复用之后：没变的行还是原来那个对象 ⇒ 节点不换、选中不丢 ✓。
+       * ⚠ 返回的是**新数组**（信号要变 ✓），只有元素对象被复用 ✓。
+       */
+      lines.value = reuseLogLines(lines.value, next)
       state.value = 'ready'
       const after = scroller()
       if (after) {
@@ -339,17 +367,45 @@ export const LogsPage = () => {
    * 行高缓存键仍用 [`textOf`]（原始文本 ✓）：账号那格是**定宽**的，
    * 换不换人名都不影响折行 ⇒ 不必为"名字后到"重算高度 ✓。
    */
-  const partsOf = (l: ServerLogLine) => {
+  const partsOf = (l: ServerLogLine): Row => {
     const m = l.message.match(ACCOUNT_RE)
     const id = m?.[1] ?? ''
     // 摘掉正文里那格：它已经被提到行首了，留着就是同一件事写两遍（而且写的是哈希 ✗）
     const body = m ? l.message.replace(m[0], '') : l.message
     return {
+      l,
+      // `k` 就是这一行的高度缓存键（= 渲染出来的那串文本 ✓，与 `keysOf()` 同一份口径 ✓）
+      k: textOf(l),
       before: `${fmtStampMs(l.at_ms)}  ${MARK[kindOf(l.level)]}  `,
       accId: id,
-      accName: id ? accountName(id) : '',
       after: `${body}  ·  ${l.target}`,
     }
+  }
+
+  /**
+   * 每行一个**稳定的行对象** —— 这是"轮询不重建行"的**全部机关**所在。
+   *
+   * `createFor` 的复用条件是"**key 与 item 都没变**"（`lite/src/control.ts:94`）：
+   * key 用 `p.l`（日志行对象 ✓，`ui/log-identity.ts` 让它跨拍稳定 ✓）只满足一半，
+   * item 若还是每帧现造的包装对象 ⇒ 照样整批重建 ✗。所以这里**按日志行对象缓存行对象** ✓
+   * （日志行对象稳定 ⇒ 行对象也稳定 ⇒ 节点被复用 ✓）。
+   *
+   * ⚠ 缓存里**只放纯函数算出来的东西**（时间/级别/正文/来源 ✓）：账号**人名**不进来 ——
+   * 它来自 `/api/accounts`、可能**后到**（`account-names.ts` 记过"名字不出现"那个坑 ✗），
+   * 缓存住就等于把那个 bug 请回来 ✓。所以人名在渲染槽里现取（见下面 JSX 的注释 ✓）。
+   *
+   * ⚠ 上界：环里最多 2000 行，而缓存按**见过的**行累计 ⇒ 给个上限、到顶整体清掉
+   * （与 `virtual-rows.ts` 的 `MAX_CACHE` 同一取向：代价只是重新算一遍看得见的那几十行 ✓）。
+   */
+  const ROW_CACHE_MAX = 4000
+  const rowCache = new Map<ServerLogLine, Row>()
+  const rowOf = (l: ServerLogLine): Row => {
+    const hit = rowCache.get(l)
+    if (hit) return hit
+    if (rowCache.size > ROW_CACHE_MAX) rowCache.clear()
+    const row = partsOf(l)
+    rowCache.set(l, row)
+    return row
   }
 
   /**
@@ -380,7 +436,7 @@ export const LogsPage = () => {
   const keysOf = (): string[] => {
     const vis = visible()
     if (keysCache && keysCache.vis === vis) return keysCache.keys
-    keysCache = { vis, keys: vis.map(textOf) }
+    keysCache = { vis, keys: vis.map((l) => rowOf(l).k) }
     return keysCache.keys
   }
 
@@ -398,12 +454,16 @@ export const LogsPage = () => {
     return w
   }
 
-  /** 这次真正要铺的行（带**绝对**下标 —— `data-i` 要靠它对上号 ✓）。 */
-  const slice = () => {
+  /**
+   * 这次真正要铺的行。
+   *
+   * ⚠ **不带下标**：行自带 `data-k`（自己的高度缓存键 ✓）⇒ 不依赖"第几行" ⇒
+   * 位置一变（轮询每拍都在挪 ✓）也不会被判成"位置敏感"而重建 ✓
+   * （`virtual-rows.ts` 文件头那条契约变更 ✓）。
+   */
+  const slice = (): Row[] => {
     const w = win()
-    return visible()
-      .slice(w.start, w.end)
-      .map((l, i) => ({ i: w.start + i, l, ...partsOf(l) }))
+    return visible().slice(w.start, w.end).map(rowOf)
   }
 
   /** 渲染之后量一次行高（`requestAnimationFrame` ⇒ 节点已经在文档里了 ✓）。 */
@@ -416,8 +476,7 @@ export const LogsPage = () => {
       if (!el) return // 容器不在（页面已卸载）⇒ 什么都不用做 ✓
       // ⚠ 尺寸只在这里（rAF，渲染之后）量 ✓ —— 渲染期量会强制布局、把滚动位置钳歪 ✗（见 `viewport`）
       if (viewport.value !== el.clientHeight) viewport.value = el.clientHeight
-      const keys = keysOf()
-      const changed = vr.measure(el, (i) => keys[i] ?? '')
+      const changed = vr.measure(el)
       // 变了才重渲染（否则量→渲染→量 转不停 ✗）
       if (changed) heightsV.value++
       /**
@@ -558,8 +617,10 @@ export const LogsPage = () => {
             <div style={`height:${win().top}px`} />
             {slice().map((p) => (
               // ⚠ 文本拼成**一个**表达式 ✓（lite 编译器对"元素旁边的裸文本节点"支持最薄 ✓）；
-              // `data-i` 是**绝对**下标 —— 量行高时靠它对上号 ✓（别改成可见区间里的相对下标 ✗）。
-              <div key={p.l} data-i={p.i} class={`break-words ${TONE[kindOf(p.l.level)]}`}>
+              // ⚠ `data-k` 是**这一行自己的**高度缓存键 —— 别改回"绝对下标 `data-i`" ✗：
+              // 读下标会让编译器把这一行判成位置敏感（`positional`），而轮询每拍都在挪位置
+              // ⇒ 一个字都没变的行也会被整批重建 ✗（用户看到的是选中的文字每 2 s 被清掉 ✗）。
+              <div key={p.l} data-k={p.k} class={`break-words ${TONE[kindOf(p.l.level)]}`}>
                 <span>{p.before}</span>
                 {/*
                   ⚠ 三段都是**元素**（`<span>` ✓）—— 别把 `p.before` / `p.after` 写成裸文本 ✗：
@@ -573,10 +634,13 @@ export const LogsPage = () => {
                   <span
                     data-acc={p.accId}
                     class="mr-1 inline-block w-20 cursor-pointer truncate align-bottom font-medium text-primary"
-                    title={`只看这个账号：${p.accName}（${p.accId}）`}
+                    // ⚠ 人名**在这里现取**（不在 `rowOf` 里缓存）：它来自 `/api/accounts`，
+                    // 可能比这一屏日志**后到** ⇒ 缓存住就永远停在哈希上了 ✗
+                    //（`account-names.ts` 文件头记的就是这一类"名字不出现"✓）。
+                    title={`只看这个账号：${accountName(p.accId)}（${p.accId}）`}
                     onClick={() => (account.value = p.accId)}
                   >
-                    {p.accName}
+                    {accountName(p.accId)}
                   </span>
                 ) : null}
                 <span>{p.after}</span>

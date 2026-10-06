@@ -1279,7 +1279,7 @@ const STEPS = {
       do: `(async () => { await new Promise((r) => setTimeout(r, 300)); return true })()`,
       check: eq(
         `(() => {
-          const rows = [...document.querySelectorAll('#logs-scroll > div[data-i]')];
+          const rows = [...document.querySelectorAll('#logs-scroll > div[data-k]')];
           if (rows.length < 5) return 'rows=' + rows.length;
           const chips = rows.map((r) => r.querySelector('[data-acc]'));
           return JSON.stringify({
@@ -1315,7 +1315,7 @@ const STEPS = {
       })()`,
       check: eq(
         `(() => {
-          const rows = [...document.querySelectorAll('#logs-scroll > div[data-i]')];
+          const rows = [...document.querySelectorAll('#logs-scroll > div[data-k]')];
           if (rows.length === 0) return 'no-rows';
           const ids = new Set(rows.map((r) => r.querySelector('[data-acc]')?.dataset.acc ?? ''));
           return JSON.stringify({ only: ids.size === 1 && ids.has('13800000000') });
@@ -1335,7 +1335,7 @@ const STEPS = {
       })()`,
       check: eq(
         `(() => {
-          const rows = [...document.querySelectorAll('#logs-scroll > div[data-i]')];
+          const rows = [...document.querySelectorAll('#logs-scroll > div[data-k]')];
           const ids = new Set(rows.map((r) => r.querySelector('[data-acc]')?.dataset.acc ?? ''));
           return JSON.stringify({ both: ids.has('13800000000') && ids.has('13900000001') });
         })()`,

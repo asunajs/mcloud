@@ -755,6 +755,36 @@ export const serve = (root, port, variant) =>
         })
         const beat = setInterval(() => res.write(': ping\n\n'), 1000)
         req.on('close', () => clearInterval(beat))
+        /**
+         * ⚠ 上面那条「只发注释、不发事件」是**默认**；这里留一个**按变体开关**的口子：
+         * `overrides.__sseLogs`（不是路由，`overrides[key]` 永远查不到它 ✓）打开后才真发
+         * `log` 事件 —— `bulk.mjs` 那条「**流式追加**日志时老行要被搬动而不是重建」的钉子
+         * 需要它 ✓。开关只挂在 `bulk.mjs` 自己的 `__bulk` 变体上 ⇒ `interact.mjs` 的
+         * `ready`/`login`/`setup`（它们逐帧在比**整页快照** ✗）一条都不受影响 ✓。
+         *
+         * 事件形状照 `web/src/api.ts` 的 `RunEvent`（`type:'log'` + `level`/`kind`/`message`/`at_ms` ✓）。
+         */
+        const sse = overrides?.__sseLogs
+        if (sse) {
+          const runId = Number(events[1])
+          const timers = []
+          for (let i = 0; i < (sse.lines ?? 4); i++) {
+            timers.push(
+              setTimeout(() => {
+                const ev = {
+                  type: 'log',
+                  run_id: runId,
+                  level: 'info',
+                  kind: i % 2 === 0 ? 'success' : 'info',
+                  message: `夹具流式第 ${i} 行 —— 追加用（要能看见「新行进来、老行不动」✓）`,
+                  at_ms: 1790581000000 + i * 1000,
+                }
+                res.write(`event: log\ndata: ${JSON.stringify(ev)}\n\n`)
+              }, (sse.gapMs ?? 300) * (i + 1)),
+            )
+          }
+          req.on('close', () => timers.forEach((t) => clearTimeout(t)))
+        }
         return
       }
       if (url.startsWith('/api/')) {

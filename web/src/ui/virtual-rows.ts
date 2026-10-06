@@ -20,7 +20,19 @@
  *   转个不停 ✗（`measure()` 的返回值就是这个信号）。
  *
  * ⚠ 本模块**不碰 DOM 结构**：它只算下标与像素、只读尺寸 ✓，铺节点是调用方的事 ✓。
- * ⚠ 调用方要保证每行带 `data-i`（**绝对**下标）—— 量高时靠它对上号 ✓。
+ * ⚠ 调用方要保证每行带 `data-k` = **这一行自己的高度缓存键**（就是 `window()` 里
+ * 那份 `keys` 的对应元素 ✓）—— 量高时靠它认行 ✓。
+ *
+ * # ⚠⚠ 2026-10-06：契约从"绝对下标 `data-i`"改成了"自带键 `data-k`"
+ *
+ * 起因（台账第 96 行 ②）：日志页每 2 s 轮询一次，而**一个字都没变的行**也每拍换一次
+ * 节点 ✗ —— `createFor` 的复用条件是"**key 与 item 都没变**"（`lite/src/control.ts:94`），
+ * 而那一页的 item 是每帧现造的包装对象、`data-i` 又要求行**读下标参数**
+ * （读了 ⇒ 编译器判 `positional` ⇒ 位置一变就重建 ✗，而轮询每拍都在挪位置 ✗）。
+ *
+ * 改成"行自带自己的键"之后：行**不依赖下标** ⇒ 只要 item 身份稳（调用方按日志行对象
+ * 缓存行对象 ✓），行节点就会被复用 ✓ —— 用户能看见的收益是**正在选中的日志文字不再被
+ * 每 2 s 清掉** ✓（`lite/regress/bulk.mjs` 有断言钉着 ✓）。
  */
 
 /** 没量过时的估计行高（`text-xs leading-5` = 20px ✓，与 `log-panel` / `logs-page` 同一档）。 */
@@ -62,12 +74,15 @@ export interface VirtualRows {
    */
   window(top: number, viewport: number, keys: string[]): WindowRange
   /**
-   * 渲染后量高（量的是 `container` 里带 `data-i` 的那些行 ✓）。
+   * 渲染后量高（量的是 `container` 里带 `data-k` 的那些行 ✓）。
+   *
+   * ⚠ **不需要调用方再给一份键**：行上那个 `data-k` 就是它的高度缓存键 ✓
+   * （见文件头那条契约变更：行不许再依赖绝对下标 ✓）。
    *
    * 返回 `true` = **有行的高度和缓存不一样**（调用方据此把版本号 +1、重算窗口 ✓）；
    * 返回 `false` = 什么都没变（**别**重渲染，否则就是死循环 ✗）。
    */
-  measure(container: HTMLElement | null, keyOf: (index: number) => string): boolean
+  measure(container: HTMLElement | null): boolean
 }
 
 /**
@@ -128,18 +143,17 @@ export const createVirtualRows = (): VirtualRows => {
     return { start, end, top: sums[start], bottom: total - sums[end] }
   }
 
-  const measure = (container: HTMLElement | null, keyOf: (index: number) => string): boolean => {
+  const measure = (container: HTMLElement | null): boolean => {
     if (!container) return false
     if (heights.size > MAX_CACHE) heights.clear()
     let changed = false
-    for (const el of container.querySelectorAll<HTMLElement>('[data-i]')) {
-      const i = Number(el.dataset.i)
-      if (!Number.isInteger(i)) continue
+    for (const el of container.querySelectorAll<HTMLElement>('[data-k]')) {
+      const k = el.dataset.k
+      // 空键 = 这一行没给键（不该发生 ✓）⇒ 跳过，别把一堆行都算成"同一个键" ✗
+      if (!k) continue
       // 取整：亚像素差值（缩放/DPR）会让"变了"永远成立 ⇒ 每帧都重渲染 ✗
       const h = Math.round(el.getBoundingClientRect().height)
       if (h <= 0) continue
-      const k = keyOf(i)
-      if (k === undefined) continue
       if (heights.get(k) !== h) {
         heights.set(k, h)
         changed = true

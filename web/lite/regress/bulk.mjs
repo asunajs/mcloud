@@ -89,6 +89,12 @@ for (let i = 0; i < RUN_COUNT; i++) {
 
 VARIANTS.__bulk = {
   ...VARIANTS.ready,
+  /**
+   * ⚠ 只在**本变体**打开"SSE 真发 `log` 事件"（`lib.mjs` 里那个开关 ✓）——
+   * ⑦ 段那条「流式追加时老行要被搬动」的钉子要它 ✓。
+   * `interact.mjs` 用的是 `ready`/`login`/`setup`（在比整页快照 ✗）⇒ 一条都不受影响 ✓。
+   */
+  __sseLogs: { lines: 4, gapMs: 300 },
   'GET /api/runs': { handler: () => ({ status: 200, body: runs }) },
   'GET /api/runs/9000': { handler: () => ({ status: 200, body: { ...runs[0], logs: runLogs } }) },
   'GET /api/logs': { handler: () => ({ status: 200, body: logs }) },
@@ -147,14 +153,25 @@ try {
     return false
   }
 
+  /**
+   * 日志页那一屏的读数。
+   *
+   * ⚠ 行上带的是 `data-k`（**这一行自己的高度缓存键** ✓）而不是绝对下标 —— 2026-10-06
+   * 改的契约（见 `web/src/ui/virtual-rows.ts` 文件头）：行一旦读下标就会被判成"位置敏感"、
+   * 位置一变就重建，而轮询每拍都在挪位置 ⇒ 一个字都没变的行也整批重建 ✗。
+   * 所以"铺到了哪一段"改用夹具正文里那句唯一的 `第 N 行` 来认 ✓（夹具就是这么造的 ✓）。
+   */
   const LOGS = `(() => {
     const el = document.getElementById('logs-scroll')
     if (!el) return { missing: true }
-    const rows = [...el.querySelectorAll('[data-i]')]
+    const rows = [...el.querySelectorAll('[data-k]')]
+    const nums = rows
+      .map((r) => Number((r.dataset.k.match(/第 (\\d+) 行/) ?? [])[1] ?? NaN))
+      .filter((n) => Number.isFinite(n))
     return {
       rendered: rows.length,
-      first: Number(rows[0]?.dataset.i ?? -1),
-      last: Number(rows[rows.length - 1]?.dataset.i ?? -1),
+      first: nums.length ? Math.min(...nums) : -1,
+      last: nums.length ? Math.max(...nums) : -1,
       top: el.scrollTop,
       height: el.scrollHeight,
       client: el.clientHeight,
@@ -163,7 +180,7 @@ try {
   })()`
 
   // ── ① /logs：800 行只铺窗口内那几十行 ──
-  const ready = await waitFor(`document.querySelectorAll('#logs-scroll [data-i]').length > 0`, 10000)
+  const ready = await waitFor(`document.querySelectorAll('#logs-scroll [data-k]').length > 0`, 10000)
   const a = await probe(LOGS)
   check(`日志页大体量下仍有内容（夹具 ${LOG_ROWS} 行 = 服务端的环容量）`, ready && !a.missing && a.rendered > 0, JSON.stringify(a))
   check(
@@ -211,7 +228,30 @@ try {
     window.__bulkTop = el.scrollTop
     return { top: el.scrollTop, height: el.scrollHeight }
   })()`)
-  await sleep(2600)
+  // ⚠ 先让窗口真的换到中段再打标记：`scrollTop` 是同步写下去的，重渲染要等一帧 ✓
+  await sleep(400)
+  /**
+   * ③′ 给"当前视口中间那一行"打个 **JS 属性**当标记 —— 跨一次轮询后还找得到它、
+   * 且标记还在 ⇒ 那个**行节点被复用**了（不是整批重建 ✓）。
+   *
+   * 为什么钉这个：`createFor` 的 `key` 判 item **对象身份**，而 `/api/logs` 每拍回来的是
+   * 刚解析出来的新对象 ⇒ 不给它们稳定身份的话，**一个字都没变的行**也每 2 s 换一次节点 ✗
+   * ——用户能看见的后果是**正在选中的日志文字被清掉**（这一页的用途就是"顺手复制一行去查"✗）。
+   * 台账第 96 行 ② 那条线索就是这个（`web/src/ui/log-identity.ts` ✓）。
+   *
+   * ⚠ 拿正文里那句 `第 N 行` 当线索、**不用** `data-i`：轮询每拍多两行 ⇒ 绝对下标会整体
+   * 平移 ✗；而夹具每一行的正文都是唯一的 ✓。
+   */
+  const tagged = await probe(`(() => {
+    const rows = [...document.querySelectorAll('#logs-scroll [data-k]')]
+    const el = rows[Math.floor(rows.length / 2)]
+    if (!el) return { ok: false }
+    el.__keep = 1
+    window.__keepMark = (el.dataset.k.match(/第 \\d+ 行/) ?? [null])[0]
+    return { ok: true, mark: window.__keepMark }
+  })()`)
+  // 与上面那 400 ms 合计 ≈2.6 s ⇒ 跨过一次 2 s 轮询 ✓（**不额外加门禁时间** ✓）
+  await sleep(2200)
   const mid = await probe(LOGS)
   check(
     '滚到中间后跨一次轮询不被弹走（位置不动 + 容器同一个节点）',
@@ -219,6 +259,16 @@ try {
     `set=${JSON.stringify(set)} now=${JSON.stringify(mid)}`,
   )
   check('窗口跟着滚（渲染出的下标在中段，不是钉在 0）', mid.first > 50 && mid.last < LOG_ROWS, `i=${mid.first}..${mid.last}`)
+  const kept = await probe(`(() => {
+    if (!window.__keepMark) return { missing: true }
+    const el = [...document.querySelectorAll('#logs-scroll [data-k]')].find((d) => d.dataset.k.includes(window.__keepMark))
+    return { found: !!el, kept: el ? el.__keep === 1 : false }
+  })()`)
+  check(
+    '跨一次轮询：没变的行**复用同一个节点**（不是整批重建 ⇒ 选中的文字不会被每 2 s 清掉）',
+    tagged.ok && kept.found && kept.kept,
+    `tagged=${JSON.stringify(tagged)} kept=${JSON.stringify(kept)}`,
+  )
 
   // ── ④ 贴底跟随 ──
   await cdp.eval(`(() => { const el = document.getElementById('logs-scroll'); el.scrollTop = el.scrollHeight; return true })()`)
@@ -260,18 +310,177 @@ try {
 
   // ── ⑥ 「运行日志」弹窗：600 行只铺窗口内那几十行 ──
   await cdp.eval(`(() => { const b = [...document.querySelectorAll('#app table tbody tr:first-child button')].find((x) => x.textContent.includes('日志')); b.click(); return true })()`)
-  const dialogReady = await waitFor(`document.querySelectorAll('dialog[open] [data-i]').length > 0`, 10000)
+  const dialogReady = await waitFor(`document.querySelectorAll('dialog[open] [data-k]').length > 0`, 10000)
   const panel = await probe(`(() => {
     const box = document.querySelector('dialog[open] .h-64')
     return {
       title: document.querySelector('dialog[open] h2')?.textContent?.trim() ?? '',
-      rendered: document.querySelectorAll('dialog[open] [data-i]').length,
+      rendered: document.querySelectorAll('dialog[open] [data-k]').length,
       height: box?.scrollHeight ?? 0,
     }
   })()`)
   check('运行日志弹窗开起来了', dialogReady && panel.title === '运行日志', JSON.stringify(panel))
   check(`600 行只铺窗口内那几十行（渲染 ${panel.rendered} 行）`, panel.rendered > 0 && panel.rendered <= MAX_ROWS, JSON.stringify(panel))
   check('弹窗滚动条长度是真实总高（600 行 ≈ 12,000px）', panel.height > 6000, `scrollHeight=${panel.height}`)
+
+  /**
+   * ⑥′ 弹窗里**滚一段**：那一行要被**搬动**，不是重建。
+   *
+   * 为什么值得单钉一条：`createFor` 的复用条件是「**key 与 item 都没变**」
+   * （`web/lite/src/control.ts:94` ✓），而面板**每渲染一帧**都会重造 `.map` 的 item
+   * —— 直到 2026-10-06 把行对象改成按日志行缓存（`web/src/ui/log-identity.ts` +
+   * 两个调用点 ✓）。滚动就会让窗口换一段 ⇒ 整块重渲染 ⇒ 旧代码在这里**必然红** ✗
+   * （用户能看见的后果：正在选中的文字被清掉 ✓）。
+   *
+   * 判据：给窗口中间那一行打一个 **JS 属性** ⇒ 滚动之后按它自己的 `data-k` 找回那一行，
+   * 属性还在 = 同一个节点被搬过来了 ✓。⚠ 只滚 120px（≈6 行）—— 保证那一行**仍在窗口里** ✓
+   * （滚太多它就正常地离开窗口了，那时"找不到"是对的 ✓）。
+   */
+  const taggedPanel = await probe(`(() => {
+    const box = document.querySelector('dialog[open] .h-64')
+    const rows = [...box.querySelectorAll('[data-k]')]
+    if (rows.length < 5) return { ok: false, rows: rows.length }
+    const el = rows[Math.floor(rows.length / 2)]
+    el.__keep = 1
+    window.__panelKey = el.dataset.k
+    window.__panelTop = box.scrollTop
+    box.scrollTop = box.scrollTop + 120
+    return { ok: true, key: (el.dataset.k || '').slice(0, 40), top: window.__panelTop }
+  })()`)
+  await sleep(200)
+  const afterPanel = await probe(`(() => {
+    const box = document.querySelector('dialog[open] .h-64')
+    const el = [...box.querySelectorAll('[data-k]')].find((d) => d.dataset.k === window.__panelKey)
+    return {
+      scrolled: box.scrollTop !== window.__panelTop,
+      found: !!el,
+      kept: el ? el.__keep === 1 : false,
+      connected: el ? el.isConnected : false,
+    }
+  })()`)
+  check(
+    '弹窗里滚一段：那一行**被搬动**（节点复用）而不是重建',
+    taggedPanel.ok && afterPanel.scrolled && afterPanel.found && afterPanel.kept && afterPanel.connected,
+    `tagged=${JSON.stringify(taggedPanel)} after=${JSON.stringify(afterPanel)}`,
+  )
+
+  /**
+   * ⑦/⑦′ 共用件：在某个页面**起一次运行**，然后钉「**流式追加**日志时老行要被搬动
+   * 而不是重建」。
+   *
+   * ⚠ 为什么要钉这件事：`web/src/ui/log-panel.tsx` 文件头写着的那条契约是
+   * 「`.map` 那一层重跑、`createFor` 按**行对象身份**复用已有行，只追加新的 ✓
+   * （行对象是 `pushLog` 新建的、旧的那些身份不变）」—— 2026-10-06 之前这半句是
+   * **假的** ✗（每帧现造包装对象 ⇒ 身份每帧都变 ⇒ 整批重建）。用户能看见的后果：
+   * 往上翻日志被弹回底部、正在选中的文字被清掉 ✓。
+   *
+   * ⚠ 为什么两个页面都要钉：它们挂的是**同一个组件**、同一份契约 ✓，但"起运行"的
+   * 入口完全不同（任务页 = 选账号 + 卡片上的「运行」；直播页 = 填口令 + 「开始领取」✓）
+   * —— 而**面板那一半是同一段代码** ⇒ 两处各钉一次才说明"不是某页碰巧对了" ✓。
+   *
+   * ⚠ 这里要的"会发 `log` 事件的 SSE"是**按变体开关**的（`lib.mjs` 的 `__sseLogs` ✓），
+   * 而只有本脚本有自己的私有变体 `__bulk` ⇒ `interact.mjs` 那三个变体
+   * （逐帧在比**整页快照** ✗）一条都不受影响 ✓。
+   */
+  const appendReuseOn = async (label, runExpr) => {
+    const ranIt = await cdp.eval(runExpr)
+    const streamed = await waitFor(`document.querySelectorAll('#app [id^="log-panel-"] [data-k]').length > 0`, 10000)
+    const before = await probe(`(() => {
+      const rows = [...document.querySelectorAll('#app [id^="log-panel-"] [data-k]')]
+      if (rows.length === 0) return { ok: false }
+      const el = rows[rows.length - 1]
+      el.__keep = 1
+      window.__appendKey = el.dataset.k
+      return { ok: true, rows: rows.length, key: (el.dataset.k || '').slice(0, 46) }
+    })()`)
+    await sleep(1200)
+    const after = await probe(`(() => {
+      const rows = [...document.querySelectorAll('#app [id^="log-panel-"] [data-k]')]
+      const el = rows.find((d) => d.dataset.k === window.__appendKey)
+      return { rows: rows.length, found: !!el, kept: el ? el.__keep === 1 : false }
+    })()`)
+    check(
+      `${label}：起了运行、夹具的流事件真把行追加进来了`,
+      ranIt !== '' && streamed && after.rows > before.rows,
+      `跑的是「${ranIt}」· ${JSON.stringify(before)} → ${JSON.stringify(after)}`,
+    )
+    check(
+      `${label}：**追加**日志时老行被搬动（节点复用）而不是重建`,
+      before.ok && after.found && after.kept,
+      JSON.stringify({ before, after }),
+    )
+  }
+
+  /** 选账号（面板第 0 项是「全部账号」、第 1 项起才是逐个账号 ✓ —— 与 interact.mjs 同款）。 */
+  const pickFirstAccount = `(() => {
+    const trigger = document.querySelector('#account-picker')
+    if (!trigger) return false
+    trigger.click()
+    const items = [...document.querySelectorAll('.select-panel .select-option')]
+    if (items[0].getAttribute('aria-selected') === 'false') items[1].click()
+    trigger.click()
+    return true
+  })()`
+
+  // ── ⑦ 任务页：卡片上的「运行」⇒ 应用订阅 `/api/runs/{id}/events` ⇒ 夹具开始发 log ──
+  await cdp.eval(gotoJs('tasks'))
+  await waitFor(`document.querySelector('#account-picker') !== null`, 10000)
+  await cdp.eval(pickFirstAccount)
+  await sleep(200)
+  await appendReuseOn(
+    '任务页',
+    `(() => {
+      const card = [...document.querySelectorAll('#app .card')].find((c) =>
+        [...c.querySelectorAll('button')].some((b) => b.textContent.trim() === '运行') && !c.textContent.includes('直播'))
+      if (!card) return ''
+      ;[...card.querySelectorAll('button')].find((b) => b.textContent.trim() === '运行').click()
+      return card.textContent.trim().slice(0, 24)
+    })()`,
+  )
+
+  // ── ⑦′ 直播页：填口令 + 「开始领取」（同一组件、另一条起运行的入口 ✓）──
+  await cdp.eval(gotoJs('live-room'))
+  await waitFor(`document.querySelector('#account-picker') !== null`, 10000)
+  await cdp.eval(`(() => {
+    const trigger = document.querySelector('#account-picker')
+    if (!trigger) return false
+    trigger.click()
+    const items = [...document.querySelectorAll('.select-panel .select-option')]
+    if (items[0].getAttribute('aria-selected') === 'false') items[1].click()
+    trigger.click()
+    // 口令：空口令会被页面拦下来（「只在点运行时才弹」✓）⇒ 填一条夹具口令 ✓
+    const ta = [...document.querySelectorAll('textarea, input')].find((t) => (t.placeholder || '').includes('口令'))
+    if (ta) {
+      ta.value = 'TESTCODE'
+      ta.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    /**
+     * ⚠ 听弹幕时长要填成 123 —— 夹具那条守卫（lib.mjs 的 POST /api/runs）故意只认
+     * 123：「运行没带上配置页存的参数」就 400 ✓（interact.mjs 是先把配置 PUT 成 123
+     * 再跑的 ✓）。
+     * ⚠ 顺带一个口径不一致（不是本钉子的范围，记着）：直播页有自己的运行参数表单
+     * （listenSeconds 初值就是 60 ✓），不读配置页存的那份 ✗ —— 而任务页每次运行都
+     * 现拉一次配置（它注释里写着理由：「配置页改了、这次运行还用着旧参数」那种不一致
+     * 没有任何迹象 ✗）。两页对同一件事的口径不同 ⇒ 配置页把 live-room 的听弹幕时长
+     * 改成 300，从直播页跑仍然发 60 ✗。
+     */
+    const num = document.querySelector('input[inputmode="numeric"]')
+    if (num) {
+      num.value = '123'
+      num.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    return true
+  })()`)
+  await sleep(200)
+  await appendReuseOn(
+    '直播页',
+    `(() => {
+      const btn = [...document.querySelectorAll('#app button')].find((b) => b.textContent.trim() === '开始领取')
+      if (!btn) return ''
+      btn.click()
+      return '开始领取'
+    })()`,
+  )
 
   /**
    * ⚠ 异常要读 `session.errors` —— 那是 `openSession` 真正在收的两路
