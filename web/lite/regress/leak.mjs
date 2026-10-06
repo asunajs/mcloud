@@ -67,7 +67,7 @@ let port = PORT
  * 正是最容易漏的那一类 ⇒ 2026-10-05 一并纳入量测（这一页第一版就踩过一次：
  * 卸载期间写信号，每进出一次就多留一份整页 DOM，见 `pages/config-page.tsx` 文件头）。
  */
-const PAGES = ['accounts', 'tasks', 'tasks/config', 'exchange', 'live-room', 'schedules', 'pipelines', 'history', 'settings']
+const PAGES = ['accounts', 'accounts/push', 'tasks', 'tasks/config', 'exchange', 'live-room', 'schedules', 'pipelines', 'history', 'settings']
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',

@@ -228,33 +228,47 @@ try {
     await sleep(400)
     const backList = await probe(`({ rail: !!document.getElementById('config-rail'), detail: !!document.getElementById('config-detail') })`)
     check(`${w}px · 配置中心能退回列表`, backList.rail === true && backList.detail === false, JSON.stringify(backList))
-    // 「推送配置」那一栏的详情 —— 渠道表单 + 账号级设置 + 功能开关，本页最宽的一屏
-    await cdp.eval(`[...document.querySelectorAll('#app [role="tab"]')].find((b) => b.textContent.includes('推送配置'))?.click()`)
-    await sleep(400)
-    await cdp.eval(`document.querySelector('#config-rail button')?.click()`)
-    await sleep(900)
+    // 「账号配置」页（`/accounts/push`，2026-10-05 从配置中心拆出来的）—— 渠道表单 +
+    // 账号级设置 + 功能开关，本页最宽的一屏。⚠ 它现在是**独立一页**（账号页的子视图），
+    // 不再是配置中心的页签 ⇒ 这里直接换地址进来（窄屏同样要能"列表 ↔ 详情"下钻）。
+    await cdp.eval(gotoJs('accounts/push'))
+    await sleep(1200)
     const push = await probe(`(() => ({
       overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
       sw: document.documentElement.scrollWidth, vw: window.innerWidth,
-      blocks: ['推送渠道', '账号级设置', '功能开关'].filter((t) => (document.getElementById('config-detail')?.textContent ?? '').includes(t)).length,
+      rail: !!document.getElementById('acct-rail'), detail: !!document.getElementById('acct-detail'),
+      blocks: 0,
     }))()`)
-    check(`${w}px · 配置中心推送详情无横向溢出`, push.overflow === false, `scrollWidth ${push.sw} / 视口 ${push.vw}`)
-    check(`${w}px · 推送详情三块都在`, push.blocks === 3, JSON.stringify(push))
-    // 「任务配置」那一栏的详情：右栏分「公共配置 / 账号私有配置」两半，账号那一行也不能挤破
-    await cdp.eval(`[...document.querySelectorAll('#app [role="tab"]')].find((b) => b.textContent.includes('任务配置'))?.click()`)
-    await sleep(400)
-    // ⚠ 窄屏切 tab 之后落在**列表**那一屏（`drillOpen=false`）⇒ 不点一项就没有 `#config-detail`，
+    check(`${w}px · 账号配置列表屏无横向溢出`, push.overflow === false, `scrollWidth ${push.sw} / 视口 ${push.vw}`)
+    // ⚠ 别断言"一定先落在列表屏"：`drillOpen` 是**模块级**信号（会话内保留），
+    // 320 那一轮点过一项之后，375 这一轮进来就是详情屏 —— 那不是 bug，是"记得你上次看到哪" ✓。
+    // 所以这里只要求"列表与详情至少有一个"，再把详情弄出来量。
+    check(`${w}px · 账号配置两屏至少有一屏（不是白屏）`, push.rail === true || push.detail === true, JSON.stringify(push))
+    await cdp.eval(`document.querySelector('#acct-rail button')?.click()`)
+    await sleep(1200)
+    const pushDetail = await probe(`(() => ({
+      overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+      sw: document.documentElement.scrollWidth, vw: window.innerWidth,
+      blocks: ['推送渠道', '账号级设置', '功能开关'].filter((t) => (document.getElementById('acct-detail')?.textContent ?? '').includes(t)).length,
+    }))()`)
+    check(`${w}px · 账号配置详情无横向溢出`, pushDetail.overflow === false, `scrollWidth ${pushDetail.sw} / 视口 ${pushDetail.vw}`)
+    check(`${w}px · 账号配置详情三块都在`, pushDetail.blocks === 3, JSON.stringify(pushDetail))
+    // 回「任务配置」页：右栏分「公共配置 / 账号私有配置」两半，账号那一行也不能挤破
+    await cdp.eval(gotoJs('tasks/config'))
+    await sleep(1200)
+    // ⚠ 窄屏换页之后落在**列表**那一屏（`drillOpen=false`）⇒ 不点一项就没有 `#config-detail`，
     // 上面那句 `halves: 0` 就是这么来的（第一次写漏了这一步，红了一条）
     await cdp.eval(`document.querySelector('#config-rail button')?.click()`)
     await sleep(900)
     const taskSide = await probe(`(() => ({
       overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
       sw: document.documentElement.scrollWidth, vw: window.innerWidth,
-      halves: ['公共配置', '账号私有配置'].filter((t) => (document.getElementById('config-detail')?.textContent ?? '').includes(t)).length,
-      rows: [...document.querySelectorAll('#config-detail button')].filter((b) => b.textContent.trim() === '改它的推送').length,
+      pub: (document.getElementById('config-detail')?.textContent ?? '').includes('公共配置'),
+      priv: (document.getElementById('config-detail')?.textContent ?? '').includes('账号私有配置'),
     }))()`)
-    check(`${w}px · 任务详情（公共 / 账号私有两半）无横向溢出`, taskSide.overflow === false, `scrollWidth ${taskSide.sw} / 视口 ${taskSide.vw}`)
-    check(`${w}px · 任务详情两半都在、账号各占一行`, taskSide.halves === 2 && taskSide.rows === 2, JSON.stringify(taskSide))
+    check(`${w}px · 任务详情（公共配置）无横向溢出`, taskSide.overflow === false, `scrollWidth ${taskSide.sw} / 视口 ${taskSide.vw}`)
+    // ⚠ 「账号私有配置」那一半 2026-10-05 按用户口径整块删掉了 ⇒ 这里反过来钉住"它不在"
+    check(`${w}px · 任务详情只有公共配置（私有那半已删）`, taskSide.pub === true && taskSide.priv === false, JSON.stringify(taskSide))
   }
 
   /**

@@ -949,7 +949,7 @@ const STEPS = {
       ),
     },
     {
-      name: '配置中心：能从任务卡带着任务名进来（两个页签：任务配置 / 推送配置）',
+      name: '配置中心：能从任务卡带着任务名进来（右栏就是「公共配置」）',
       do: `(() => {
         const card = [...document.querySelectorAll('#app .card')].find((c) => c.textContent.includes('直播口令'))
         ;[...card.querySelectorAll('button')].find((b) => b.textContent.trim() === '配置').click()
@@ -960,11 +960,11 @@ const STEPS = {
         // 写进内联表达式里会被当成页面变量 ⇒ `ReferenceError: APP_TEXT is not defined` ✗。
         `(() => {
            const t = document.getElementById('app')?.textContent ?? ''
-           // ⚠ 两个**页签**必须都在：2026-10-05 我把它们并成"公共/私有"时，
-           // 「推送配置」这个入口就没了 —— 用户第一句就是问这个 ✗。
-           return [t.includes('任务配置'), t.includes('推送配置'), t.includes('直播口令')].join('/')
+           // ⚠ 2026-10-05 最终形状：这一页**没有页签**、也**没有「账号私有配置」那一半**了
+           // （推送拆去 /accounts/push，私有那半按用户口径整块删掉）⇒ 右栏只有公共配置。
+           return [t.includes('公共配置'), t.includes('账号私有配置'), t.includes('直播口令')].join('/')
          })()`,
-        'true/true/true',
+        'true/false/true',
       ),
       changed: true,
     },
@@ -1028,7 +1028,7 @@ const STEPS = {
     // "存完再 GET 看看"在夹具里恒等于"没存" ✗。所以下面用 `window.fetch` 拦一次
     // （`__put`），量的是**真发出去的 URL 与 body** —— 那正是这条口径的判据 ✓。
     {
-      name: '配置中心：从任务页进得去，左栏列任务、右栏分「公共配置 / 账号私有配置」',
+      name: '配置中心：从任务页进得去，左栏列任务、右栏只有「公共配置」',
       do: `[...document.querySelectorAll('#app button')].find((b) => b.textContent.trim() === '配置中心').click()`,
       check: eq(
         `(() => {
@@ -1036,26 +1036,12 @@ const STEPS = {
            const detail = document.querySelector('#config-detail')?.textContent ?? ''
            return [location.pathname, rail.includes('可配置任务'), rail.includes('直播口令'),
                    detail.includes('公共配置'), detail.includes('所有账号共用'),
-                   detail.includes('账号私有配置'), detail.includes('每个账号各一份'),
+                   detail.includes('账号私有配置'),
                    detail.includes('听弹幕时长')].join('/')
          })()`,
-        '/tasks/config/true/true/true/true/true/true/true',
+        '/tasks/config/true/true/true/true/false/true',
       ),
       changed: true,
-    },
-    {
-      // ⭐ 「账号私有配置」那半的钉子：**每个账号一行**（用户口径的"每个账号的推送不一样"），
-      // 且那一行能一键跳到该账号的推送配置。
-      name: '配置中心：账号私有配置那半 ⇒ 每个账号一行（含它自己的推送摘要）',
-      do: null,
-      check: eq(
-        `(() => {
-           const detail = document.querySelector('#config-detail')
-           const rows = [...(detail?.querySelectorAll('button') ?? [])].filter((b) => b.textContent.trim() === '改它的推送')
-           return [rows.length, (detail?.textContent ?? '').includes('推送：'), (detail?.textContent ?? '').includes('PushPlus')].join('/')
-         })()`,
-        '2/true/true',
-      ),
     },
     {
       name: '配置中心：改一个参数 ⇒ 亮「有未保存修改」',
@@ -1126,49 +1112,55 @@ const STEPS = {
       changed: true,
     },
     {
-      // ⭐ 「账号私有配置」那行的一键跳转：切到「推送配置」并**选中那一个账号**。
-      name: '配置中心：账号私有配置那行的「改它的推送」⇒ 跳到推送栏并选中它',
-      do: `(() => {
-        const rows = [...document.querySelectorAll('#config-detail button')].filter((b) => b.textContent.trim() === '改它的推送')
-        if (rows.length < 2) throw new Error('账号私有配置那半没有两行（夹具应有两个账号）')
-        rows[1].click()
+      // ⭐ 账号配置页（`/accounts/push`）的入口：账号页右上那个按钮。
+      // ⚠ 它原来是任务配置页「账号私有配置」那半的「改它的推送」跳过来的 —— 那一半
+      // 2026-10-05 按用户口径**整块删掉**了 ⇒ 现在这条入口是账号页的按钮 ✓。
+      name: '账号配置页：从账号页的「账号配置」按钮进得去',
+      do: `(async () => {
+        ;[...document.querySelectorAll('#app button')].find((b) => b.textContent.trim() === '账号')?.click()
+        await new Promise((r) => setTimeout(r, 900))
+        const b = [...document.querySelectorAll('#app button')].find((x) => x.textContent.trim() === '账号配置')
+        if (!b) throw new Error('账号页没有「账号配置」按钮')
+        b.click()
+        for (let i = 0; i < 60; i++) {
+          if (document.querySelector('#acct-detail') && !document.querySelector('#acct-detail .loading')) break
+          await new Promise((r) => setTimeout(r, 200))
+        }
         return true
       })()`,
       check: eq(
         `(() => {
-           const rail = document.querySelector('#config-rail')?.textContent ?? ''
-           const detail = document.querySelector('#config-detail')?.textContent ?? ''
-           const tab = [...document.querySelectorAll('#app [role="tab"]')].find((b) => b.textContent.includes('推送配置'))
-           return [tab?.getAttribute('aria-selected'), rail.includes('13900000001'), detail.includes('当前不推送任何渠道')].join('/')
+           const rail = document.querySelector('#acct-rail')?.textContent ?? ''
+           const detail = document.querySelector('#acct-detail')?.textContent ?? ''
+           return [location.pathname, rail.includes('主力号'), detail.includes('推送渠道')].join('/')
          })()`,
-        'true/true/true',
+        '/accounts/push/true/true',
       ),
       changed: true,
     },
     {
-      name: '配置中心：推送栏三块（推送渠道 / 账号级设置 / 功能开关）都在',
+      name: '账号配置页：三块（推送渠道 / 账号级设置 / 功能开关）都在，侧栏仍高亮「账号」',
       do: null,
       check: eq(
         `(() => {
-           const rail = document.querySelector('#config-rail')?.textContent ?? ''
-           const detail = document.querySelector('#config-detail')?.textContent ?? ''
-           return [rail.includes('推送是账号级的'), detail.includes('推送渠道'), detail.includes('账号级设置'),
-                   detail.includes('功能开关'), detail.includes('备份任务等待时间'),
-                   detail.includes('AI 头像每日上限')].join('/')
+           const detail = document.querySelector('#acct-detail')?.textContent ?? ''
+           const nav = document.querySelector('#app [aria-current="page"]')?.textContent?.trim() ?? ''
+           return [detail.includes('推送渠道'), detail.includes('账号级设置'), detail.includes('功能开关'),
+                   detail.includes('备份任务等待时间'), detail.includes('AI 头像每日上限'), nav].join('/')
          })()`,
-        'true/true/true/true/true/true',
+        'true/true/true/true/true/账号',
       ),
     },
     {
       // ⭐⭐ 账号那一栏最贵的一条：账号设置保存时，**没显示在界面上的格子也必须原样写回去**
       // （`PUT` 是整体替换）。夹具那份 ACCOUNT 是 20/10/[117]/10 + 两个渠道。
-      name: '配置中心：推送栏保存 ⇒ 发出去的是这个账号的**全部五格**（没碰的原样）',
+      name: '账号配置页：保存 ⇒ 发出去的是这个账号的**全部五格**（没碰的原样）',
       do: `(async () => {
         // 先切回主力号（上一步选中了另一个账号），再改一格
-        const btns = [...document.querySelectorAll('#config-rail button')]
+        const btns = [...document.querySelectorAll('#acct-rail button')]
         btns[0].click()
         await new Promise((r) => setTimeout(r, 900))
-        const box = [...document.querySelectorAll('#config-detail fieldset')]
+        const box = [...document.querySelectorAll('#acct-detail fieldset')]
           .find((f) => (f.querySelector('legend')?.textContent ?? '').includes('备份任务等待时间'))
         const inp = box?.querySelector('input')
         if (!inp) throw new Error('推送栏没有「备份任务等待时间」那一格')
@@ -1183,7 +1175,7 @@ const STEPS = {
           return orig(input, init)
         }
         try {
-          ;[...document.querySelectorAll('#config-detail button')].find((b) => b.textContent.trim() === '保存').click()
+          ;[...document.querySelectorAll('#acct-detail button')].find((b) => b.textContent.trim() === '保存').click()
           for (let i = 0; i < 80 && put.length === 0; i++) await new Promise((r) => setTimeout(r, 100))
           window.__put = put.map((p) => ({ url: p.url, body: JSON.parse(p.body) }))
         } finally {

@@ -379,10 +379,6 @@ export const TasksPage = () => {
                     : [...picked.value, id])
                 }
               />
-              <p class="text-xs opacity-60">
-                勾多个账号时，后端按顺序一个一个跑（一个跑完再跑下一个）。
-                勾「全部账号」= 你名下的所有账号，以后加了账号也算在内。
-              </p>
             </div>
           )}
         </fieldset>

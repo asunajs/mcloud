@@ -46,6 +46,9 @@ import { showError } from '../ui/error-dialog'
 import { pushToast } from '../ui/toast'
 import { createPushEditor } from '../ui/push-editor'
 import { createAccountFields } from '../ui/account-fields'
+import { pathParts } from '../ui/nav'
+import { navigate } from '../ui/router'
+import { AccountConfigPage } from './account-config-page'
 
 type LoadState = 'loading' | 'error' | 'ready'
 type Method = 'qr' | 'sms' | 'app' | 'password' | 'auth'
@@ -116,6 +119,20 @@ const describeSettingsError = (e: unknown, action: string): string => {
 }
 
 export const AccountsPage = () => {
+  /**
+   * 当前地址的路径段。
+   *
+   * ⚠ **本页自己盯着地址**，而不是让路由表来管：`parsePath` 把 `/accounts/push` 与
+   * `/accounts` 都归到「账号」这一页（账号配置不是独立导航项 —— 侧栏 9 条封顶），
+   * 于是从列表切到配置时 PageId **没变**，`app.tsx` 那条动态 import 不会再跑一次。
+   * 想让它工作只有两条路：把账号配置做成第 10 条导航项（规范里 9 条封顶，不行），
+   * 或者本页自己听地址变化换视图（就是这里，与 `tasks-page.tsx` 的配置中心同款）。
+   */
+  const path = ref<string[]>(pathParts(location.pathname))
+  const onNavigate = () => {
+    path.value = pathParts(location.pathname)
+  }
+
   // ── 账号列表 ─────────────────────────────────────────────────────────
   const state = ref<LoadState>('loading')
   const loadError = ref('')
@@ -879,10 +896,12 @@ export const AccountsPage = () => {
 
   onMounted(() => {
   setPageRefresh({ run: () => void load() })
+    window.addEventListener('popstate', onNavigate)
     void load()
   })
   onUnmounted(() => {
     setPageRefresh(null)
+    window.removeEventListener('popstate', onNavigate)
     stopPolling()
   })
 
@@ -956,6 +975,12 @@ export const AccountsPage = () => {
     </p>
   )
 
+  // 子路由：账号配置（推送 + 账号级设置）—— 与任务页的配置中心同一套做法。
+  // ⚠ 地址是 `/accounts/push`（用户 2026-10-05 选的：挂账号页下面，不新开导航项）
+  if (path.value[0] === 'accounts' && path.value[1] === 'push') {
+    return <AccountConfigPage onExit={() => navigate('/accounts')} />
+  }
+
   return (
     <div class="flex flex-col gap-4">
       <div class="flex flex-wrap items-center justify-end gap-2">
@@ -970,6 +995,15 @@ export const AccountsPage = () => {
             800 多行，常驻在页面上会把"我现在有哪几个账号"压到第一屏之外 ——
             而那一句话才是这一页的主语。表单在弹窗里、宽度也够。
           */}
+          {/* 账号配置（推送 + 账号级设置）：推送是"每个账号一份"的东西 ⇒ 挂在这一页下面
+              （`/accounts/push`；侧栏 9 条封顶，不为它新开导航项） */}
+          <button
+            type="button"
+            class="btn btn-sm btn-soft min-h-11 md:min-h-0"
+            onClick={() => navigate('/accounts/push')}
+          >
+            账号配置
+          </button>
           <button
             type="button"
             class="btn btn-sm btn-primary min-h-11 md:min-h-0"
