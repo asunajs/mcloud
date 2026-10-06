@@ -331,6 +331,15 @@ Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过�
 - 服务端口用环境变量 `MCLOUD_ADDR`（默认 `127.0.0.1:3000`），数据目录 `MCLOUD_DATA_DIR`
   （⚠ 不是 `MCLOUD_DATA`）；`PORT` 环境变量**被忽略**
 - macOS 没有 `timeout` 命令；SSH 用 `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=20"`
+- **要测试账号 / 多用户场景**（2026-10-06 加）：
+  `mcloud user list` / `mcloud user add <名字> <口令>` / `mcloud user passwd <名字> <新口令>`。
+  空实例上第一条 `add` 建的就是**管理员**（= 不必再走 WebUI 初始化向导 ✓）；之后加的都是
+  **普通用户** —— 管理员按 `legacy_owner`（= 创建最早的那个）**算出来**，不能用命令指定 ✓。
+  ⚠⚠ 它写 `data/users.json`，而 `JsonStore` 是**启动时全量读进内存**的 ⇒ **跑完必须重启服务**
+  （`scripts/dev-reload.sh --no-build`）：否则用它登录 **401**，而且服务下次写这个文件
+  （改口令、老档口令升级）会拿**陈旧快照整份覆盖**，刚加的用户就没了 ✗。
+  ⚠ 加人**不会**把已有账号藏起来：账号记录里的 `owner` 是显式写死的，`visible_to` 对
+  `Some(owner)` 只认相等 ✓（动手前核过，别被"多用户会丢数据"吓住）。
 - ⚠ **无头 Chrome 在某些环境里必须加 `--no-sandbox`**（本机 DSH 沙箱：不加就是
   `Target crashed` / `CDP 调用超时：Page.enable`，2026-10-05 实测）。它是**显式开关，默认关**
   （关沙箱是降级，开发机不需要）：`MCLOUD_CHROME_NO_SANDBOX=1 node scripts/gates-web.mjs --push`。

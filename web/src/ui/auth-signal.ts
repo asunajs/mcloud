@@ -59,9 +59,25 @@ export const noteAuthRequired = (state: 'setup' | 'login'): void => {
  */
 export const currentUser = ref('')
 
-/** 后端放行。`user` 给定时顺带记住是谁。 */
-export const noteAuthOk = (user?: string): void => {
+/**
+ * 当前登录的人**是不是实例管理员**（= 创建最早的那个用户 ✓）。
+ *
+ * # 为什么前端要知道这件事（2026-10-06）
+ *
+ * 有些东西只对管理员有意义：日志页的「运维」那一档（`/api/logs?category=ops`
+ * 对普通用户回 **403** ✓）、设置页里的实例级动作。不知道这一格的话，
+ * 普通用户点进去只会撞一个 403 报错 ✗。
+ *
+ * ⚠ 它**只是提示**，不是权限：真正的闸在后端（`require_admin` ✓）。
+ * 藏按钮是为了体验，不是为了安全 —— 别把判据搬到前端 ✗。
+ * ⚠ 默认 `false`：探到之前一律按"不是管理员"渲染（失败关闭 ✓）。
+ */
+export const currentIsAdmin = ref(false)
+
+/** 后端放行。`user` 给定时顺带记住是谁；`isAdmin` 给定时记住权限档。 */
+export const noteAuthOk = (user?: string, isAdmin?: boolean): void => {
   if (user !== undefined) currentUser.value = user
+  if (isAdmin !== undefined) currentIsAdmin.value = isAdmin
   if (authState.value === 'ready') return
   authState.value = 'ready'
 }

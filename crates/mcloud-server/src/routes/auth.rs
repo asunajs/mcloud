@@ -73,6 +73,19 @@ pub struct SessionView {
     pub user_id: String,
     pub name: String,
     pub kind: &'static str,
+    /// 是不是**实例管理员**（= 创建最早的那个用户，见 [`crate::auth_gate::is_admin`]）。
+    ///
+    /// # 为什么要给前端这一格（2026-10-06）
+    ///
+    /// 界面上有些东西**只对管理员有意义**：日志页的「运维」那一档
+    /// （`/api/logs?category=ops` 对普通用户回 **403** ✓）、设置页里那些
+    /// 实例级动作。没有这一格的话，普通用户点进去只会撞一个 403 报错 ✗ ——
+    /// 而"这一格按钮不该给他看"这件事，前端只能从后端问 ✓。
+    ///
+    /// ⚠ 它**只是提示**，不是权限本身：真正的闸在后端（`require_admin` ✓）。
+    /// 前端藏按钮是为了体验，不是为了安全 —— 别把判据搬到前端 ✗。
+    #[serde(rename = "isAdmin")]
+    pub is_admin: bool,
 }
 
 // ── 初始化 ──────────────────────────────────────────────────────────────
@@ -199,6 +212,9 @@ pub async fn setup_create(
         session_expires_at(session.expires_at_ms, now),
         state.cookie_secure,
         Json(SessionView {
+            // 刚建出来的**就是第一个用户** ⇒ 按 `legacy_owner` 的口径他必然是管理员 ✓
+            // （这里不查库：`create_first_user` 刚刚在锁内确认过用户表是空的 ✓）
+            is_admin: true,
             user_id: user.id.to_string(),
             name: user.name,
             kind: "web",
@@ -299,12 +315,16 @@ pub async fn login(
     state.handle.store.save_session(&session).await?;
 
     tracing::info!(user = %user.name, peer = %peer_ip, "登录成功");
+    // ⚠ 这里要**真查**（不能照 `setup_create` 那样写死 true）：`mcloud user add`
+    // 可以往库里加普通用户（2026-10-06 ✓）⇒ "登录的人一定是管理员"不再成立 ✓。
+    let is_admin = crate::auth_gate::is_admin(&state, &user.id).await?;
     Ok(set_cookie_response(
         StatusCode::OK,
         &token,
         session_expires_at(session.expires_at_ms, now),
         state.cookie_secure,
         Json(SessionView {
+            is_admin,
             user_id: user.id.to_string(),
             name: user.name,
             kind: "web",
@@ -483,6 +503,7 @@ pub async fn current_session(
         .ok_or_else(|| ApiError(mcloud_core::Error::Auth("会话对应的用户已不存在".into())))?;
 
     Ok(Json(SessionView {
+        is_admin: crate::auth_gate::is_admin(&state, &user.id).await?,
         user_id: user.id.to_string(),
         name: user.name,
         kind: match session.kind {

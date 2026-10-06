@@ -122,6 +122,12 @@ const logLine = (i, at) => ({
   target: 'mcloud_engine::scheduler',
   message: `第 ${i} 行 —— 门禁用（量滚动位置） account="${i % 2 === 0 ? ACCOUNT.id : ACCOUNT2.id}"`,
   at_ms: at,
+  // ⚠ 2026-10-06：`/api/logs` 的每一行多了这两格（后端 `ServerLog` ✓）——
+  // `category`（`task`/`ops`，判据是"谁打的" ✓）与 `account`（正文那格的**结构化**副本 ✓）。
+  // 少了它们，页面就认不出这一行是哪个账号的（身份改读结构化那格了 ✓）⇒
+  // 门禁当场红（"账号筛选行"那三条断言）—— 这正是它该抓的 ✓。
+  category: 'task',
+  account: i % 2 === 0 ? ACCOUNT.id : ACCOUNT2.id,
 })
 const resetLogsState = () => {
   logsState.lines = Array.from({ length: 60 }, (_, i) => logLine(i, 1790581000000 + i * 1000))
@@ -234,7 +240,11 @@ const EXCHANGE_PRIZES = {
 export const FIXTURES = {
   // `passwordScheme` 决定登录页发摘要还是发明文（见 `ui/password.ts`）
   '/api/setup': { initialized: true, minPasswordLen: 8, passwordScheme: 'sha256' },
-  '/api/session': { userId: 'u-1', name: 'admin', kind: 'web' },
+  // ⚠ `isAdmin: true` 是**照实**给的（2026-10-06 加的那一格 ✓）：门禁全程按管理员跑
+  // （设置页那些实例级动作、日志页的「运维」页签都只对管理员铺 ✓）——
+  // 不写这一格的话 `currentIsAdmin` 默认 false ⇒ 界面上少一颗按钮，
+  // 而"少一颗按钮"不会让任何断言变红 ⇒ 又一处**静默空转** ✗。
+  '/api/session': { userId: 'u-1', name: 'admin', kind: 'web', isAdmin: true },
   // 账户安全（改口令 / 策略）与存储信息：设置页那两块要它们
   '/api/admin/security': { minPasswordLen: 8, sessionTtlHours: 168, passwordScheme: 'sha256' },
   '/api/system/storage': {

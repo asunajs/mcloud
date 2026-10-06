@@ -14,6 +14,7 @@ import { onMounted, onUnmounted, ref } from 'lite'
 
 import { listServerLogs, type ServerLogLine } from '../api'
 import { accountName, accountNames, refreshAccountNames } from '../account-names'
+import { currentIsAdmin } from '../ui/auth-signal'
 import { IconSearch } from '../ui/icons'
 import { reuseLogLines } from '../ui/log-identity'
 import { MARK, TONE, type LogKind } from '../ui/log-panel'
@@ -36,6 +37,33 @@ const LEVELS: ReadonlyArray<readonly [string, string]> = [
 const kindOf = (level: string): LogKind =>
   level === 'error' || level === 'warn' || level === 'info' || level === 'debug' ? level : 'debug'
 
+/**
+ * **类别**档位（2026-10-06 用户口径：「这种应该分为运维日志，且只有管理员可见」）。
+ *
+ * * `task` —— 某次运行的日志（后端 `trace_event` 打的，带账号 ✓）；
+ * * `ops`  —— 实例自己的：认证失败、路径被拒、调度器、上游 http。
+ *
+ * ⚠ 「运维」那一档**只有管理员能拿**（`/api/logs?category=ops` 对普通用户回 403 ✓）
+ * ⇒ 下面按 `currentIsAdmin` 决定要不要铺这个按钮 ✓（铺了就是让人点一下撞 403 ✗）。
+ */
+const CATEGORIES: ReadonlyArray<readonly [string, string]> = [
+  ['', '全部'],
+  ['task', '任务'],
+  ['ops', '运维'],
+]
+
+/**
+ * 类别按钮的一项。
+ *
+ * ⚠ 刻意用**对象 + 普通标识符**（而不是让 `.map(([id, label]) => …)` 解构元组）：
+ * lite 编译器认不出解构参数里那个 `key`，会报"这里的 `key` 什么都不做"✗
+ * （2026-10-06 实测：构建直接失败 ✓）—— 同一页里 `accOptions()` 那行就是对象形状 ✓。
+ */
+interface CatOption {
+  id: string
+  label: string
+}
+
 /** 级别的高低（与后端 `logbuf::rank_of` **同一个口径** ✓，别各定一套 ✗）。 */
 const RANK: Record<string, number> = { error: 4, warn: 3, info: 2, debug: 1 }
 
@@ -45,16 +73,18 @@ const RANK: Record<string, number> = { error: 4, warn: 3, info: 2, debug: 1 }
  * 它是**服务端**盖上去的（`crates/mcloud-app/src/run_labels.rs` ✓ —— 那一层记着
  * "这个 run 是哪个账号"，给每一行都补上 ✓），不是页面从上下文猜的 ✓。
  *
- * ⚠ 为什么这里靠**正则**从文本里认，而不是让接口给个结构化字段：
- * 这一页读的是环形缓冲的文本（`logbuf` 只存 level / target / message ✓）。
- * 要让前端按字段认账号，得同时改事件形状 + 环的结构 + `/api/logs` 的返回 ——
- * 那是另一笔 ✓；而这一格本来就是为了"让人看出这行是谁的"才盖上去的 ✓，
- * 从文本里认**不会认错主人**（认不出就当作没有 ✓）。
+ * ⚠ 2026-10-06 起：账号的**身份**读 `/api/logs` 返回的**结构化**那一格
+ * （`ServerLogLine.account` ✓，环里存的时候顺手留了一份 ✓）。
+ * 这个正则只留下来干一件事 —— **把正文里那格摘掉**（见 `partsOf`：它已经被提到
+ * 行首了，留在正文里就是同一件事写两遍，而且写的是哈希 ✗）。
+ *
+ * （在这之前身份也得靠这个正则从文本里认 ✓ —— 那时环里没有结构化字段，
+ *   `logbuf` 只存 level / target / message ✓。）
  */
 const ACCOUNT_RE = / ?account="?([^"\s]+)"?/
 
-/** 这一行是哪个账号的（认不出就空串 —— **不编造** ✓）。 */
-const accIdOf = (l: ServerLogLine): string => l.message.match(ACCOUNT_RE)?.[1] ?? ''
+/** 这一行是哪个账号的（没有就是空串 —— **不编造** ✓）。 */
+const accIdOf = (l: ServerLogLine): string => l.account ?? ''
 
 /**
  * 渲染一行要用的东西（**纯**的那几格，见 [`rowOf`] 的缓存说明 ✓）。
@@ -127,6 +157,13 @@ export const LogsPage = () => {
    * ⇒ 除了给每行标出账号（见 `partsOf`），还得能**只看那一个** ✓。
    */
   const account = ref('')
+  /**
+   * 「只看某一类」（空串 = 两档都要 ✓）。
+   *
+   * ⚠ 与级别/账号一样是**本地**筛：一次取全之后点按钮立刻出结果 ✓
+   * （理由见 `visible()` 上面那段 ✓）。
+   */
+  const category = ref('')
   const state = ref<'loading' | 'ready' | 'error'>('loading')
   const errorMessage = ref('')
   let timer: ReturnType<typeof setInterval> | undefined
@@ -313,25 +350,36 @@ export const LogsPage = () => {
    * ⚠ 缓存键里**必须**带上账号（漏了就是"切了账号但列表没变"这类幽灵 ✗）。
    */
   let visCache:
-    | { src: ServerLogLine[]; level: string; q: string; acc: string; out: ServerLogLine[] }
+    | {
+        src: ServerLogLine[]
+        level: string
+        q: string
+        acc: string
+        cat: string
+        out: ServerLogLine[]
+      }
     | undefined
   const visible = (): ServerLogLine[] => {
     const src = lines.value
     const lv = level.value
     const qq = q.value
     const aa = account.value
+    const cc = category.value
     if (
       visCache &&
       visCache.src === src &&
       visCache.level === lv &&
       visCache.q === qq &&
-      visCache.acc === aa
+      visCache.acc === aa &&
+      visCache.cat === cc
     )
       return visCache.out
     const floor = RANK[lv] ?? 0
     const needle = qq.trim().toLowerCase()
     const out = src.filter((l) => {
       if ((RANK[l.level] ?? 0) < floor) return false
+      // ⚠ 类别那一格**必须**进缓存键（同账号那条理由：漏了就是"切了类别列表没变"这类幽灵 ✗）
+      if (cc !== '' && l.category !== cc) return false
       const id = accIdOf(l)
       if (aa !== '' && id !== aa) return false
       if (needle === '') return true
@@ -342,7 +390,7 @@ export const LogsPage = () => {
         (id !== '' && accountName(id).toLowerCase().includes(needle))
       )
     })
-    visCache = { src, level: lv, q: qq, acc: aa, out }
+    visCache = { src, level: lv, q: qq, acc: aa, cat: cc, out }
     return out
   }
 
@@ -369,7 +417,8 @@ export const LogsPage = () => {
    */
   const partsOf = (l: ServerLogLine): Row => {
     const m = l.message.match(ACCOUNT_RE)
-    const id = m?.[1] ?? ''
+    // 身份读**结构化**那格；正则只负责把正文里那格摘掉 ✓（老后端没那格时兜回正则 ✓）
+    const id = l.account ?? m?.[1] ?? ''
     // 摘掉正文里那格：它已经被提到行首了，留着就是同一件事写两遍（而且写的是哈希 ✗）
     const body = m ? l.message.replace(m[0], '') : l.message
     return {
@@ -498,6 +547,19 @@ export const LogsPage = () => {
     })
   }
 
+  /**
+   * 铺出来的**类别**档位 —— 「运维」那一档只给管理员 ✓（理由见 [`CATEGORIES`]）。
+   *
+   * ⚠ 抽成函数而**不是**在 JSX 里写 `.filter(..).map(..)`：lite 编译器只认
+   * **直接**挂在那里的 `.map()`（链一个 `.filter()` 它会报"这里的 `key` 什么都不做"✗
+   * —— 2026-10-06 实测踩到，构建直接失败 ✓）。
+   */
+  const catOptions = (): CatOption[] =>
+    CATEGORIES.filter(([id]) => id !== 'ops' || currentIsAdmin.value).map(([id, label]) => ({
+      id,
+      label,
+    }))
+
   /** 读一次容器的滚动位置与可视高度（滚动时 / 挂载后 / 每拍数据回来后各一次 ✓）。 */
   const syncScroll = () => {
     const el = scroller()
@@ -521,6 +583,29 @@ export const LogsPage = () => {
                 onClick={() => (level.value = id)}
               >
                 {label}
+              </button>
+            ))}
+          </div>
+          {/*
+            类别：任务（某次运行的）vs 运维（实例自己的）。
+
+            ⚠ 「运维」这一档**只给管理员铺**：普通用户请求它会被后端回 403
+            （`server_logs.rs` 的 `require_admin` ✓）⇒ 铺出来就是让人点一下撞报错 ✗。
+            ⚠ `currentIsAdmin` 默认 `false`（探到之前按非管理员渲染 ✓ 失败关闭）——
+            代价是管理员首帧会看不到这个按钮，下一拍（会话探测回来）就出来了 ✓。
+          */}
+          <div class="flex flex-wrap items-center gap-1.5">
+            <span class="text-xs opacity-60">类别</span>
+            {catOptions().map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                aria-pressed={category.value === c.id}
+                aria-label={`类别：${c.label}`}
+                class={`btn btn-xs min-h-9 md:min-h-0 ${category.value === c.id ? 'btn-primary' : 'btn-soft'}`}
+                onClick={() => (category.value = c.id)}
+              >
+                {c.label}
               </button>
             ))}
           </div>

@@ -165,6 +165,137 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
+        // ── 用户管理（本地命令行，**不经过 HTTP**）──────────────────────────
+        //
+        // # 为什么必须有它（2026-10-06 用户口径：「我需要一个用于测试的账号…该怎么做」）
+        //
+        // 这个仓此前**没有任何用户管理入口**：`POST /api/setup` 只在 0 用户时可用，
+        // 之后既没有"加用户"的路由、CLI 也没有命令 ⇒ 想加第二个用户只能手改
+        // `users.json`，而口令那格是 argon2 的 PHC 串（手算不出来）✗。
+        //
+        // ⚠ 为什么放在**命令行**而不是 HTTP：
+        // 它要写 `data/`（口令哈希、归属）—— 那已经意味着"能碰到这台机器的文件系统"了
+        // ⇒ 命令行不引入任何**新的远程**攻击面 ✓；而放到 HTTP 上就多一条"谁能建用户"
+        // 的鉴权链要设计（"没有这条路"才是今天安全的默认 ✓）。
+        //
+        // ⚠⚠ 管理员是**算出来的**、不是设出来的：`legacy_owner` 取"创建最早的那个"
+        // （`mcloud_core::owner` ✓）⇒ **空实例上建的第一个就是管理员**（等于绕开
+        // WebUI 的初始化向导 ✓），之后再加的**永远是普通用户** ✓。
+        // 要换管理员得改 `created_at_ms` —— 那是另一件事，不在这儿做 ✓。
+        //
+        // ⚠⚠ 加完**必须重启服务**：`JsonStore` 是启动时把 `users.json` 全量读进内存的
+        // （`load_all` + `RwLock<Db>` ✓），服务那份快照里没有这个用户 ⇒
+        // ① 用新用户名登录会 401 ✗；② 更要命的是服务下次写 `users.json`
+        // （改口令、老档口令升级）会**拿它那份陈旧快照整份覆盖** ⇒ 刚加的用户消失 ✗。
+        // 所以下面把这句话打给用户看 ✓。
+        Some("user") => {
+            match args.get(1).map(String::as_str) {
+                Some("list") => {
+                    let users = app.handle.store.users().await?;
+                    let admin = mcloud_core::legacy_owner(&users);
+                    println!("用户（{} 个）：", users.len());
+                    for u in &users {
+                        let tag = if Some(&u.id) == admin.as_ref() {
+                            "管理员"
+                        } else {
+                            "普通"
+                        };
+                        println!("  {:<20} {:<4} id={}", u.name, tag, u.id);
+                    }
+                }
+                Some("add") => {
+                    let (Some(name), Some(password)) = (args.get(2), args.get(3)) else {
+                        print_user_usage();
+                        std::process::exit(2);
+                    };
+                    // 与 `/api/setup` **同一套**校验（用户名形状 + 口令长度下限）：
+                    // 命令行不是"绕过闸"的后门 ✓，两条路建出来的用户必须一样规矩 ✓。
+                    mcloud_core::validate_username(name).map_err(anyhow::Error::msg)?;
+                    let users = app.handle.store.users().await?;
+                    if users.iter().any(|u| &u.name == name) {
+                        anyhow::bail!("用户名已存在：{name}（要改口令用 `mcloud user passwd`）");
+                    }
+                    // ⚠ 长度下限只对**明文**判得了：摘要恒 64 位（与 `/api/setup` 同一条口径 ✓）
+                    if !mcloud_crypto::is_client_digest(password) {
+                        let settings = app.handle.store.settings().await?;
+                        if password.chars().count() < settings.min_password_len {
+                            anyhow::bail!("口令太短：至少 {} 位", settings.min_password_len);
+                        }
+                    }
+                    let user = mcloud_core::User {
+                        id: mcloud_core::UserId::new(uuid::Uuid::new_v4().to_string()),
+                        name: name.clone(),
+                        password_hash: mcloud_core::PasswordHash(
+                            mcloud_crypto::mark_digest_scheme(&hash_credential(password)?),
+                        ),
+                        created_at_ms: app.handle.clock.now_ms(),
+                    };
+                    // ⚠⚠ **空实例上第一个用户也走这条路**（2026-10-06 用户口径：
+                    // 「能不能不使用 api 建首个用户，直接用 cli 建立」）⇒
+                    // 全新机器可以不碰浏览器、不开服务，先把管理员建出来 ✓。
+                    //
+                    // 第一个走 `create_first_user`（**原子**："只在空实例上成功" ✓）：
+                    // 万一服务正跑着、恰好有人同时点了初始化向导，两条路不会都成功 ✓。
+                    let is_first = users.is_empty();
+                    if is_first {
+                        if !app.handle.store.create_first_user(&user).await? {
+                            anyhow::bail!(
+                                "实例已经有用户了（刚被别的进程建掉）—— 跑 `mcloud user list` 看一眼"
+                            );
+                        }
+                    } else {
+                        app.handle.store.save_user(&user).await?;
+                    }
+                    println!("✓ 已建用户 {}（id={}）", user.name, user.id);
+                    if is_first {
+                        println!(
+                            "  这是**第一个**用户 ⇒ 按 `legacy_owner` 的口径他就是**管理员** ✓"
+                        );
+                        println!(
+                            "  ⚠ 也就是说：**不用再走 WebUI 的初始化向导**了 —— 服务起来直接登录 ✓"
+                        );
+                    } else {
+                        println!("  这是**普通用户**（管理员 = 创建最早的那个）⇒ 只能看到归自己的账号与日志。");
+                    }
+                    println!();
+                    println!("⚠⚠ 现在**必须重启服务**它才认这个用户：");
+                    println!("     scripts/dev-reload.sh --no-build");
+                    println!("   不重启的后果有两层：① 用它登录会 401 ✗；");
+                    println!(
+                        "   ② 更要命 —— 服务下次写 users.json（改口令、老档口令升级）会拿它那份"
+                    );
+                    println!("      **陈旧快照整份覆盖**，刚加的这个用户就没了 ✗。");
+                }
+                Some("passwd") => {
+                    let (Some(name), Some(password)) = (args.get(2), args.get(3)) else {
+                        print_user_usage();
+                        std::process::exit(2);
+                    };
+                    if !mcloud_crypto::is_client_digest(password) {
+                        let settings = app.handle.store.settings().await?;
+                        if password.chars().count() < settings.min_password_len {
+                            anyhow::bail!("口令太短：至少 {} 位", settings.min_password_len);
+                        }
+                    }
+                    let mut users = app.handle.store.users().await?;
+                    let Some(user) = users.iter_mut().find(|u| &u.name == name) else {
+                        anyhow::bail!("没有这个用户：{name}（用 `mcloud user list` 看有哪些）");
+                    };
+                    user.password_hash = mcloud_core::PasswordHash(
+                        mcloud_crypto::mark_digest_scheme(&hash_credential(password)?),
+                    );
+                    let user = user.clone();
+                    app.handle.store.save_user(&user).await?;
+                    println!("✓ 已改 {} 的口令（id={}）", user.name, user.id);
+                    println!("⚠ 同样要重启服务才生效（理由见 `mcloud user add` 的输出）");
+                    println!("⚠ 已登录的会话**不会**因此失效 —— 要踢掉就重启服务。");
+                }
+                _ => {
+                    print_user_usage();
+                    std::process::exit(2);
+                }
+            }
+        }
         Some(other) => {
             eprintln!("未知子命令：{other}");
             print_usage();
@@ -172,6 +303,31 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// 算"存进 `users.json` 的那个哈希"：**与 `/api/setup` 逐字节同一条路** ✓。
+///
+/// 先取前端那一次的摘要（`SHA-256(明文)` 的小写 hex ✓），再对**摘要**做 argon2，
+/// 最后打上档位前缀（`sha256$` ✓）—— 三步都不能换顺序、也不能省中间那步，
+/// 否则登录时 `verify_password` 拿到的候选值对不上 ✗。
+fn hash_credential(password: &str) -> anyhow::Result<String> {
+    let digest = mcloud_crypto::to_digest_credential(password);
+    mcloud_crypto::hash_password(&digest).map_err(|e| anyhow::anyhow!("算口令哈希失败：{e}"))
+}
+
+fn print_user_usage() {
+    eprintln!("用法：");
+    eprintln!("  user list                        列出用户（标出谁是管理员）");
+    eprintln!("  user add <名字> <口令>            加一个用户（**空实例上第一个 = 管理员**）");
+    eprintln!("  user passwd <名字> <新口令>       改某个用户的口令");
+    eprintln!();
+    eprintln!("⚠ 管理员是**算出来的**（创建最早的那个），不能用命令指定。");
+    eprintln!("⚠ 空实例上第一条 `user add` 建的就是管理员 ⇒ **不必再走 WebUI 的初始化向导** ✓");
+    eprintln!("  （与 `POST /api/setup` 同一套校验、同一种口令档位 ✓）");
+    eprintln!("⚠ 三条都会写 `data/users.json` ⇒ **跑完必须重启服务**它才认：");
+    eprintln!("     scripts/dev-reload.sh --no-build");
+    eprintln!("  （服务启动时把 users.json 全量读进内存 ⇒ 不重启就看不到新用户，");
+    eprintln!("    而且服务下次写这个文件会把刚改的整份覆盖掉 ✗）");
 }
 
 fn print_login_usage() {
@@ -205,6 +361,7 @@ fn print_usage() {
     eprintln!("  pipeline run <编排id>           跑一条已配置的编排");
     eprintln!("  auth refresh <--account|--all>  刷新凭据");
     eprintln!("  login <方式>                    登录账号（qr / sms / app / password / device）");
+    eprintln!("  user list|add|passwd            用户管理（加测试账号用；见 `mcloud user`）");
     eprintln!();
     eprintln!("定时与编排的**创建**不在命令行：改配置文件，或用 WebUI。");
     // ⚠ 这里原先教用户跑 `mcloud serve` —— 那时**没有这个子命令**（全仓零命中），

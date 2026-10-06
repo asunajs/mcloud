@@ -388,6 +388,8 @@ export interface AuthSession {
   userId: string
   name: string
   kind: 'web' | 'cli'
+  /** 是不是**实例管理员**（= 创建最早的那个用户 ✓）—— 见 `ui/auth-signal.ts`。 */
+  isAdmin: boolean
 }
 
 export const getSetupStatus = () => request<SetupStatus>('/api/setup')
@@ -408,7 +410,7 @@ export const createAdmin = async (username: string, credential: string) => {
     method: 'POST',
     body: JSON.stringify({ username, password: credential }),
   })
-  noteAuthOk(s.name)
+  noteAuthOk(s.name, s.isAdmin)
   return s
 }
 
@@ -463,6 +465,8 @@ export const changePassword = async (current: string, next: string) => {
     body: JSON.stringify({ currentPassword: current, newPassword: next }),
   })
   // 后端换了一张新 cookie ⇒ 会话仍然有效，本地状态跟着刷新一下
+  // ⚠ 这一处**不传** isAdmin：`PasswordChanged` 里没有那一格，而且**改口令不会
+  // 改变"是不是管理员"**（那由创建时间定 ✓）⇒ 保持信号原值才是对的 ✓。
   noteAuthOk(r.name)
   return r
 }
@@ -528,7 +532,7 @@ export const loginSession = async (username: string, credential: string) => {
     method: 'POST',
     body: JSON.stringify({ username, password: credential }),
   })
-  noteAuthOk(s.name)
+  noteAuthOk(s.name, s.isAdmin)
   return s
 }
 
@@ -773,6 +777,20 @@ export interface ServerLogLine {
   target: string
   message: string
   at_ms: number
+  /**
+   * `'task'`（某次运行的日志）/ `'ops'`（实例自己的：认证失败、路径被拒、调度器、上游 http）。
+   *
+   * 判据在**后端**（`logbuf::category_of`：只有 `mcloud_app::run_labels::trace_event`
+   * 打的算任务日志 ✓）。两档**可见性不同**：任务日志按账号归属、运维日志只有管理员 ✓。
+   */
+  category: string
+  /**
+   * 这一行属于哪个账号（`message` 里 `account="…"` 那格的**结构化**副本 ✓）；没有就是 `null`。
+   *
+   * ⚠ 2026-10-06 起不用再从正文里正则抠了（原先 `logs-page.tsx` 就是那么干的 ✓）——
+   * 那是"环里没有结构化字段"时代的将就 ✓。
+   */
+  account: string | null
 }
 
 /** 取最近的服务端日志（`level` 的语义是"**不低于**它" ✓）。 */
@@ -780,11 +798,14 @@ export const listServerLogs = (params: {
   limit?: number
   level?: string
   q?: string
+  /** `'all'`（缺省）/ `'task'` / `'ops'` —— ⚠ `'ops'` 只有管理员能拿（普通用户 403 ✓）。 */
+  category?: string
 }): Promise<ServerLogLine[]> => {
   const sp = new URLSearchParams()
   if (params.limit) sp.set('limit', String(params.limit))
   if (params.level) sp.set('level', params.level)
   if (params.q) sp.set('q', params.q)
+  if (params.category) sp.set('category', params.category)
   return request<ServerLogLine[]>(`/api/logs?${sp.toString()}`)
 }
 

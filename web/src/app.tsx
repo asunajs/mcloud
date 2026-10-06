@@ -276,7 +276,7 @@ export default () => {
       //
       // 漏掉这一句的后果：带着有效 cookie 刷新页面会**永远停在转圈上** ——
       // 而它不报错、不抛异常，网络面板里全是 200，极难查。
-      noteAuthOk(me.name)
+      noteAuthOk(me.name, me.isAdmin)
     } catch {
       // 401/503 已由 `request` 推进状态。其余错误（如后端 500）不该被
       // 当成"去登录" —— 那是后端有问题。但也不能一直停在转圈上，

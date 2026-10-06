@@ -2470,9 +2470,14 @@ async fn instance_level_actions_are_admin_only() {
             "GET /api/system/storage",
             Box::new(|c: &str| get_with_cookie("/api/system/storage", c)),
         ),
+        // ⚠ 2026-10-06 起这一条**不再是**"整个 `/api/logs` 只给管理员"：
+        // 日志按**类别**分了两档（用户口径「这种应该分为运维日志，且只有管理员可见」）——
+        // **运维**那一档仍然是管理员专属（就是这一条 ✓），而**任务**那一档改成
+        // "按账号归属给"（自己的账号的才给，见 `a_plain_user_gets_only_their_own_task_logs_not_an_error` ✓）。
+        // 所以这里要显式带上 `category=ops`；不带参数时普通用户拿到的是 200 + 自己的任务日志 ✓。
         (
-            "GET /api/logs",
-            Box::new(|c: &str| get_with_cookie("/api/logs", c)),
+            "GET /api/logs?category=ops",
+            Box::new(|c: &str| get_with_cookie("/api/logs?category=ops", c)),
         ),
         (
             "GET /api/tasks/live-room/config",
@@ -2986,5 +2991,96 @@ async fn logs_of_a_running_run_are_200_just_like_its_event_stream() {
         body.contains("跑起来了"),
         "该把内存里那条日志带出来：{body}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ══════════════════ 日志分档的可见性（2026-10-06 用户口径）══════════════════
+//
+// 「这种应该分为运维日志，且只有管理员可见吧」
+//
+// ⚠ 这一组测的是**权限那一层**（HTTP 状态码）。"哪些行进哪一档"以及
+// "按账号过滤"的**内容**逻辑在 `crates/mcloud-server/src/logbuf.rs` 的单元测试里
+// —— 那边能直接往环里塞行 ✓；集成测试这边**塞不进去**（环形缓冲是进程级静态量，
+// 而 `RingLayer` 只在 `main()` 里装、测试进程从来没装过 ⇒ 这一组里 `/api/logs`
+// 恒回空数组 ✓）。两半合起来才是完整覆盖 ✓。
+
+/// ⭐⭐ 运维那一档**只有管理员**能拿：普通用户 ⇒ **403**。
+///
+/// 红测：把 `server_logs.rs` 里那句 `require_admin` 删掉 ⇒ 普通用户会拿到
+/// **200**（而环里此刻没有他的任务日志 ⇒ 恰好是空数组，看起来"没泄露"）——
+/// 所以本用例断言的是**状态码**，不是内容 ✓（内容那半靠 logbuf 的单测 ✓）。
+#[tokio::test]
+async fn ops_logs_are_admin_only() {
+    let (handle, dir) = test_app("logs-ops-admin");
+    let (app, admin, other) = two_user_app(handle);
+
+    let (st, body) = send(
+        app.clone(),
+        get_with_cookie("/api/logs?category=ops", &admin),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "管理员该能读运维日志：{st} {body}");
+
+    let (st, body) = send(
+        app.clone(),
+        get_with_cookie("/api/logs?category=ops", &other),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "普通用户不该能读运维日志：{st} {body}"
+    );
+    assert!(
+        body.contains("只有实例管理员"),
+        "文案该与别的实例级动作一致：{body}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 普通用户请求 `all`（或**漏传** category）**不报错**，只是拿不到运维那一档 ✓。
+///
+/// 后端把 `all` 收敛成"任务日志 + 自己的账号"（`server_logs.rs` ✓）——
+/// 所以这里是 **200 + 空数组**，而不是 403、更不是"全部日志" ✓。
+#[tokio::test]
+async fn a_plain_user_gets_only_their_own_task_logs_not_an_error() {
+    let (handle, dir) = test_app("logs-plain-user");
+    let (app, _admin, other) = two_user_app(handle);
+
+    for uri in [
+        "/api/logs",
+        "/api/logs?category=all",
+        "/api/logs?category=task",
+    ] {
+        let (st, body) = send(app.clone(), get_with_cookie(uri, &other)).await;
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "{uri} 该放行（只是内容受限）：{st} {body}"
+        );
+        assert_eq!(
+            body.trim(),
+            "[]",
+            "{uri}：他没有账号 ⇒ 一条任务日志都没有（而运维那一档压根不该给）"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 写错的 `category` **报错**，不静默当成 `all` ✓。
+///
+/// 静默兜底的失效方向是**失败开放**的：把 `ops` 打成 `opss` 的人会拿到
+/// **全部**日志（而不是 400）✗ —— 正是"越权"最爱的形状 ✓。
+#[tokio::test]
+async fn an_unknown_category_is_rejected_instead_of_defaulting_to_all() {
+    let (handle, dir) = test_app("logs-bad-category");
+    let (app, admin, _other) = two_user_app(handle);
+
+    let (st, body) = send(app, get_with_cookie("/api/logs?category=opss", &admin)).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "实际：{st} {body}");
+    assert!(body.contains("只认 all / task / ops"), "{body}");
+
     let _ = std::fs::remove_dir_all(&dir);
 }

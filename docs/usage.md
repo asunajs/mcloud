@@ -31,6 +31,10 @@ cd mcloud-v<版本>-x86_64-unknown-linux-gnu
 shasum -a 256 -c ../mcloud-v<版本>-x86_64-unknown-linux-gnu.sha256
 ```
 
+> ⚠ **x86_64 Linux 有两份，别拿错**（拿错的症状见下一节）：
+> 拿不准就下 **`x86_64-unknown-linux-musl`** 那份 —— 它静态链了 glibc 与 OpenSSL，
+> 任何 Linux x86_64 都能跑 ✓。
+
 ```powershell
 # Windows
 Expand-Archive mcloud-v<版本>-x86_64-pc-windows-msvc.zip -DestinationPath .
@@ -38,14 +42,27 @@ cd .\mcloud-v<版本>-x86_64-pc-windows-msvc
 Get-FileHash ..\mcloud-v<版本>-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 ```
 
-⚠ **两个 Linux 产物不是一回事**：
+⚠ **三个 Linux 产物不是一回事**（选错的那份，症状是
+`./mcloud: /lib/x86_64-linux-gnu/libc.so.6: version GLIBC_2.39 not found` ✗）：
 
-* **x86_64**：动态链接 —— 构建于 Ubuntu 24.04（glibc 2.39）+ **系统** OpenSSL ⇒ 要在
-  **glibc ≥ 2.39** 且装了 `libssl3` 的发行版上跑（Ubuntu 24.04+、Debian 13+、Fedora 40+ 一类）。
-* **arm64**：走 `cross` 交叉编 —— 镜像基线更老（glibc 2.23 那一档），且 OpenSSL 是
-  `vendored`（从源码编、**静态链**）⇒ **不用装 `libssl`**，代价是体积大 2–3 MB。
+* **x86_64**（`x86_64-unknown-linux-gnu`）：动态链接 —— 构建于 Ubuntu 24.04
+  （glibc 2.39）+ **系统** OpenSSL ⇒ 要在 **glibc ≥ 2.39** 且装了 `libssl3` 的发行版上跑
+  （Ubuntu 24.04+、Debian 13+、Fedora 40+ 一类）。体积最小 ✓。
+* **x86_64 静态**（`x86_64-unknown-linux-musl`，2026-10-06 起 ✓）：glibc 与 OpenSSL
+  **都静态链进二进制** ⇒ **任何** Linux x86_64 都能跑（CentOS 7、Debian 11 这类老发行版
+  也一样 ✓），运行时**什么都不用装** ✓；代价是体积大 2–3 MB ✓。**拿不准就下这份** ✓。
+* **arm64**（`aarch64-unknown-linux-gnu`）：走 `cross` 交叉编 —— 镜像基线更老
+  （glibc 2.23 那一档），且 OpenSSL 是 `vendored`（从源码编、**静态链**）⇒
+  **不用装 `libssl`**，代价是体积大 2–3 MB。
 
-更老的发行版（CentOS 7、Debian 11 等）请自行从源码构建。
+判断手上那份是哪种，一条命令：
+
+```bash
+ldd ./mcloud        # 静态那份会说 "not a dynamic executable"（退出码非 0 是正常的 ✓）
+```
+
+⚠ 在这条之前，更老的发行版只能"自行从源码构建"（本文件原先就是这么写的 ✗）——
+现在下**静态**那份即可 ✓。
 
 ## 2. 起服务
 

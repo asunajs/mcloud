@@ -1296,6 +1296,61 @@ const STEPS = {
         JSON.stringify({ all: true, a: true, b: true }),
       ),
     },
+    /**
+     * ── 日志页：**类别**那一行（2026-10-06 用户口径：「这种应该分为运维日志，
+     * 且只有管理员可见吧」）──
+     *
+     * 夹具那份日志全是 `category: 'task'`（`lib.mjs` 的 `logLine` ✓）⇒
+     * 点「运维」应当**一行都不剩**（不是"没反应"✗），点回「任务」行要全回来 ✓。
+     * 这一条同时钉住了三件事：类别那一行真的铺出来了、`category` 那一格真的进了
+     * 过滤（漏了它 ⇒ 点运维还是满屏行 ✗）、以及缓存键里有它（漏了 ⇒ 切了没反应 ✗）。
+     *
+     * ⚠ 「运维」这颗按钮**只有管理员才有**（`currentIsAdmin` ✓）—— 夹具的
+     * `/api/session` 给了 `isAdmin: true` ✓，所以这里能断言它存在 ✓。
+     */
+    {
+      name: '日志页：类别行铺出来了（管理员能看见「运维」）',
+      do: 'true',
+      check: eq(
+        `(() => {
+          const all = document.querySelector('[aria-label="类别：全部"]');
+          const task = document.querySelector('[aria-label="类别：任务"]');
+          const ops = document.querySelector('[aria-label="类别：运维"]');
+          return JSON.stringify({ all: !!all, task: !!task, ops: !!ops });
+        })()`,
+        JSON.stringify({ all: true, task: true, ops: true }),
+      ),
+    },
+    {
+      name: '日志页：点「运维」⇒ 夹具里没有运维行 ⇒ 一行不剩',
+      do: `(async () => {
+        const btn = document.querySelector('[aria-label="类别：运维"]');
+        if (!btn) throw new Error('没找到类别按钮「运维」');
+        btn.click();
+        await new Promise((r) => setTimeout(r, 300));
+        return true;
+      })()`,
+      check: eq(
+        `document.querySelectorAll('#logs-scroll > div[data-k]').length === 0`,
+        true,
+      ),
+      changed: true,
+    },
+    {
+      name: '日志页：点回「任务」⇒ 行都回来',
+      do: `(async () => {
+        const btn = document.querySelector('[aria-label="类别：任务"]');
+        if (!btn) throw new Error('没找到类别按钮「任务」');
+        btn.click();
+        await new Promise((r) => setTimeout(r, 300));
+        return true;
+      })()`,
+      check: eq(
+        `document.querySelectorAll('#logs-scroll > div[data-k]').length > 5`,
+        true,
+      ),
+      changed: true,
+    },
     {
       name: '日志页：点某账号 ⇒ 只剩它的行',
       do: `(async () => {

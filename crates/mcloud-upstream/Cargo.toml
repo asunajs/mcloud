@@ -88,3 +88,19 @@ tracing-subscriber.workspace = true
 #   换来的只是"少装一个 libssl" ✓。
 [target.aarch64-unknown-linux-gnu.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
+
+# ⚠ 2026-10-06 加：**musl 那两条**（`x86_64-unknown-linux-musl` /
+# `aarch64-unknown-linux-musl`）也必须 vendored，理由与上面那条**不同**：
+# 上面是"cross 镜像里没有目标架构的 OpenSSL"，而这里是"**根本没有目标架构的系统
+# OpenSSL 可链**" —— musl 产物要的是"一个静态二进制拷到任何 Linux 上都能跑" ✓，
+# 动态链系统 `libssl` 就把这个承诺毁了（用户 2026-10-06 实测踩到的那条
+# `GLIBC_2.39 not found` 就是同一个毛病：x86_64 那份**动态链系统 OpenSSL + 构建于
+# Ubuntu 24.04** ⇒ 只能跑在 glibc ≥ 2.39 的发行版上 ✗，见 `docs/usage.md`）。
+#
+# 代价：musl 那份每次构建多约 4 分钟（从源码编一遍 OpenSSL ✓），体积大 2–3 MB ✓
+# —— 换"拷过去就能跑"，值 ✓。
+[target.x86_64-unknown-linux-musl.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+
+[target.aarch64-unknown-linux-musl.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
