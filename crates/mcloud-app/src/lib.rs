@@ -20,7 +20,7 @@ pub mod smid;
 
 pub use auth_refresh::{decide, AuthRefreshService, RefreshDecision, RefreshOutcome};
 pub use builder::{App, AppBuilder};
-pub use hub::{Delivery, EventHub};
+pub use hub::{Delivery, EventHub, SubscribeError};
 pub use login::{bare_transport, parse_platform, platform_label, AppSendSmsOutcome, LoginService};
 pub use push::{
     format_logs_for_push, send_notify, send_request, BarkConfig, Channel, ChannelOutcome,

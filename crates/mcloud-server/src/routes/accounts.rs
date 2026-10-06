@@ -192,8 +192,36 @@ pub async fn import(
     let platform = platform_for(&parsed.platform, body.platform.as_deref())?;
     let account_id = AccountId::new(mcloud_upstream::account_id_for(&parsed.phone));
 
+    // ⚠⚠ 归属检查必须用**不带过滤**的 `account()`（2026-10-06 安全审计 `SEC-05`）。
+    //
+    // `account_for` 对"别人的账号"回 `None` —— 而下面正是拿它当"这条账号不存在"
+    // 的依据：于是 A 只要导入一条**属于 B 的**账号，`existing` 就是 None，
+    // 代码走"新建"分支，然后**整行覆盖** B 的记录（连同昵称、设置、停用状态），
+    // 并把 owner 改成 A ✗。而 `parse_credential` 只做形状检查、不验真伪，
+    // 所以 A 不需要知道 B 的任何口令就能做到这件事。
+    //
+    // 现在先问一次"**库里到底有没有这一行**"：有、且属于别人 ⇒ 404（不泄露存在性）✓。
+    if let Some(prev) = state.handle.store.account(&account_id).await? {
+        if let Some(owner) = prev.owner.as_ref() {
+            if owner != &cur.0 {
+                return Err(ApiError(mcloud_core::Error::NotFound(format!(
+                    "账号不存在：{}",
+                    account_id.as_str()
+                ))));
+            }
+        }
+    }
+
     let existing = state.handle.store.account_for(&cur.0, &account_id).await?;
     let created = existing.is_none();
+    // ⚠ 只在**新建**时判上限（审计 SEC-16）：更新一条已有账号不该被"满了"挡住，
+    // 否则账号一满就再也改不了昵称/凭据 —— 那是比"灌爆"更难受的失效 ✗
+    if created && state.handle.store.accounts().await?.len() >= super::MAX_ACCOUNTS {
+        return Err(ApiError(mcloud_core::Error::Config(format!(
+            "账号数已达上限（{}），请先删掉不再使用的账号",
+            super::MAX_ACCOUNTS
+        ))));
+    }
     let mut account = match existing {
         Some(a) => a,
         None => {

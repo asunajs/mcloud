@@ -1028,6 +1028,50 @@ async fn user_count_starts_at_zero() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// ⭐⭐ 2026-10-06 安全审计 `SEC-09`：**首次初始化是"判空 + 插入"一个原子动作**。
+///
+/// 旧写法（server 层先 `user_count`、再 `save_user`）两步之间隔着一次 argon2
+/// 且不持锁 ⇒ 两个并发的 `POST /api/setup` 都能看到 0 个用户，于是各建一个
+/// 管理员 ✗（后建的那个覆盖前者，谁才是管理员从此不确定）。
+///
+/// 红测：把 `create_first_user` 改回"先 `user_count()` 再 `save_user()`" ⇒
+/// 本测试第二条断言在并发下会红（这里用"先塞一个再调用"的确定写法钉住语义，
+/// 并发本身由"判空与插入同一把写锁"保证）。
+#[tokio::test]
+async fn create_first_user_only_works_on_an_empty_instance() {
+    let d = tmpdir("create-first-user");
+    let s = JsonStore::open(&d).unwrap();
+
+    // 空库：建得成
+    assert!(
+        s.create_first_user(&user("u1", "admin")).await.unwrap(),
+        "空实例上应当建得成"
+    );
+    assert_eq!(s.user_count().await.unwrap(), 1);
+
+    // 已经有用户：**不覆盖、也不追加**，如实回 false
+    assert!(
+        !s.create_first_user(&user("u2", "second")).await.unwrap(),
+        "已经有用户时必须回 false"
+    );
+    assert_eq!(s.user_count().await.unwrap(), 1, "不该多出第二个用户");
+    assert_eq!(
+        s.user(&UserId::new("u1")).await.unwrap().unwrap().name,
+        "admin",
+        "原来那个用户必须原样还在"
+    );
+    assert!(
+        s.user(&UserId::new("u2")).await.unwrap().is_none(),
+        "竞争失败的那个不该落库"
+    );
+
+    // 落盘了才算数（重启后仍是 1 个用户）
+    drop(s);
+    let s = JsonStore::open(&d).unwrap();
+    assert_eq!(s.user_count().await.unwrap(), 1);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 #[tokio::test]
 async fn user_crud_and_lookup_by_name() {
     let d = tmpdir("users-crud");

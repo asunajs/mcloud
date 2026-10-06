@@ -64,6 +64,9 @@ pub async fn upsert(
             "编排不存在：{id}"
         ))));
     }
+    // ⚠ 在下面那句 `existing.and_then(..)`（**按值**消费 Option）之前先记下来 ——
+    // 之后再用 `existing.is_none()` 就是 use-after-move ✗
+    let is_new = existing.is_none();
     let owner = existing
         .as_ref()
         .and_then(|p| p.owner.clone())
@@ -88,6 +91,14 @@ pub async fn upsert(
     // 整条链预检：否则第 9 步任务名拼错时，前 8 步已经把真上游打了一遍
     state.handle.pipelines.preflight(&pipeline)?;
 
+    // ⚠ 只在**新建**时判上限（审计 SEC-16）
+    if is_new && state.handle.store.pipelines().await?.len() >= super::MAX_PIPELINES {
+        return Err(mcloud_core::Error::Config(format!(
+            "编排条目数已达上限（{}）",
+            super::MAX_PIPELINES
+        ))
+        .into());
+    }
     state.handle.store.save_pipeline(&pipeline).await?;
     Ok(Json(pipeline))
 }

@@ -27,6 +27,7 @@ use axum::Json;
 
 use mcloud_core::UserId;
 
+use crate::error::ApiError;
 use crate::routes::auth::{is_initialized, require_session};
 use crate::ServerState;
 
@@ -42,6 +43,57 @@ use crate::ServerState;
 /// （`docs/architecture.md`：归属错误一律 404）。
 #[derive(Debug, Clone)]
 pub struct CurrentUser(pub UserId);
+
+/// **实例管理员**是不是他（安全审计 SEC-07）。
+///
+/// # 判据：`users` 表里**创建最早**的那个
+///
+/// 与 [`mcloud_core::legacy_owner`] 同一个判据 —— 那一处是"老数据没有归属字段时
+/// 算谁的"，这一处是"实例级动作谁能做"，**两者必须是同一个人**：
+/// 否则会出现"他能看到全部账号、却不能配置任务"这种自相矛盾的权限面 ✗。
+///
+/// # 为什么不做一套真正的角色表
+///
+/// 本仓的多用户今天**不可达**（`POST /api/setup` 只在 0 用户时可建，没有用户管理路由）
+/// ⇒ 真正的角色模型（`role` 字段 + 迁移 + 前端）是在给一条走不通的路修护栏 ✗。
+/// 先用"最早的那个用户"把**实例级动作**（重启、改安全策略、看全局日志、改任务参数）
+/// 收回到管理员手里，等真的要多用户时再换成显式角色 —— 那时的改动点只有本函数 ✓。
+pub async fn is_admin(state: &ServerState, user: &UserId) -> Result<bool, ApiError> {
+    let users = state.handle.store.users().await?;
+    Ok(mcloud_core::legacy_owner(&users).as_ref() == Some(user))
+}
+
+/// 实例级动作的闸：不是管理员 ⇒ **403**（不是 401，见 [`mcloud_core::Error::Forbidden`]）。
+///
+/// ⚠ 调用点必须是**已经拿到 `CurrentUser`** 的 handler（即闸后面的业务路由）。
+pub async fn require_admin(state: &ServerState, cur: &CurrentUser) -> Result<(), ApiError> {
+    if is_admin(state, &cur.0).await? {
+        return Ok(());
+    }
+    Err(ApiError(mcloud_core::Error::Forbidden(
+        "这个操作只有实例管理员可以做".into(),
+    )))
+}
+
+/// 这个请求路径是不是"本应用不可能产生的形状"（安全审计 `SEC-21`）。
+///
+/// 判据（任一命中即拒）：
+/// * `//`（空段）—— `/api//accounts`、`//api/accounts`
+/// * `.` / `..` 段 —— `/api/./accounts`、`/../api/accounts`
+/// * 上面两者的百分号编码 —— `/api%2faccounts`、`/%2e%2e/api/accounts`
+///
+/// ⚠ 编码判定**不区分大小写**（`%2F` 与 `%2f` 等价）✓。
+/// ⚠ 这是**防御纵深**，不是"修了一个正在被利用的洞"：实测这些形状在
+/// matchit（axum 0.8.9）上本来就匹配不到任何 handler、会落到 SPA 回落
+///（见报告 §4 的交叉核对）。它挡的是"框架行为变了/有人加了个奇怪 handler"
+/// 这一类将来才会发生的事 ✓。
+fn path_is_suspicious(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    path.contains("//")
+        || lower.contains("%2f")
+        || lower.contains("%2e")
+        || path.split('/').any(|seg| seg == "." || seg == "..")
+}
 
 /// 不需要登录就能访问的 `/api/` 路由。
 ///
@@ -75,6 +127,25 @@ fn is_public(method: &str, path: &str) -> bool {
 pub async fn gate(State(state): State<ServerState>, mut req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     let method = req.method().to_string();
+
+    // ⚠⚠ 2026-10-06 安全审计 `SEC-21`（防御纵深）：下面那句
+    // `!path.starts_with("/api/") ⇒ 放行` 的安全性**完全依赖**
+    // "matchit 不做路径归一化" 这个外部事实 —— 一旦哪天的框架开始归一化
+    // （或者有人挂了一个 handler 在 `/api/` 之外的写法上），这句话就会
+    // 变成一条绕闸的路 ✗。
+    //
+    // ⇒ 先把"**永远不可能是本应用合法 URL**"的形状直接拒掉：
+    // 空段、`.` / `..` 段、以及它们的百分号编码。合法请求里一个都不会出现
+    //（前端只用 `/`、`/assets/...`、`/api/...` 这些规规矩矩的路径）✓。
+    // 这样"闸的判定"与"路由的判定"之间就不存在可利用的差额了 ✓。
+    if path_is_suspicious(&path) {
+        tracing::warn!(path = %path, "拒绝形状可疑的请求路径");
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "资源不存在" })),
+        )
+            .into_response();
+    }
 
     // 静态资源放行：登录页自己得能加载
     if !path.starts_with("/api/") {
@@ -158,6 +229,43 @@ mod tests {
             ("GET", "/api/capabilities"),
         ] {
             assert!(!is_public(m, p), "{m} {p} 不该是公开的");
+        }
+    }
+
+    /// ⭐ 审计 `SEC-21`（防御纵深）：**形状可疑的路径一律拒**。
+    ///
+    /// 那句"非 `/api/` 直接放行"的安全性原本完全依赖"matchit 不做归一化"这个
+    /// 外部事实；这一组把"本应用不可能产生的形状"直接挡掉，闸与路由之间
+    /// 就不存在可利用的差额 ✓。
+    ///
+    /// 红测：把 `gate` 里那句 `if path_is_suspicious(&path)` 删掉 ⇒ 本测试红。
+    #[test]
+    fn suspicious_path_shapes_are_rejected() {
+        for bad in [
+            "//api/accounts",
+            "/api//accounts",
+            "/api/./accounts",
+            "/../api/accounts",
+            "/api/../api/accounts",
+            "/api%2faccounts",
+            "/api%2Faccounts",
+            "/%2e%2e/api/accounts",
+            "/api/%2E/accounts",
+        ] {
+            assert!(path_is_suspicious(bad), "这条本该被判可疑：{bad}");
+        }
+
+        // 反向：正常路径一个都不许误伤
+        for ok in [
+            "/",
+            "/index.html",
+            "/assets/index-abc123.js",
+            "/api/accounts",
+            "/api/runs/abc/logs",
+            "/api/tasks/live-room/config",
+            "/api/login/qr/poll",
+        ] {
+            assert!(!path_is_suspicious(ok), "这条不该被判可疑：{ok}");
         }
     }
 

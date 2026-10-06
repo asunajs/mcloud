@@ -194,6 +194,13 @@ pub async fn upsert(
         last_error: existing.as_ref().and_then(|s| s.last_error.clone()),
         run_count: existing.as_ref().map_or(0, |s| s.run_count),
     };
+    // ⚠ 只在**新建**时判上限（审计 SEC-16）：更新已有条目不该被"满了"挡住
+    if existing.is_none() && state.handle.store.schedules().await?.len() >= super::MAX_SCHEDULES {
+        return Err(ApiError(mcloud_core::Error::Config(format!(
+            "定时条目数已达上限（{}）",
+            super::MAX_SCHEDULES
+        ))));
+    }
     state.handle.store.save_schedule(&schedule).await?;
     let now = state.handle.clock.now_ms();
     Ok(Json(SchedulePayload::build(schedule, now)))

@@ -1,6 +1,6 @@
 //! HTTP 错误映射。
 
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
@@ -29,11 +29,27 @@ impl IntoResponse for ApiError {
             }
             mcloud_core::Error::Network(_) => StatusCode::BAD_GATEWAY,
             mcloud_core::Error::NotFound(_) => StatusCode::NOT_FOUND,
+            // ⚠ 403 而不是 401（安全审计 SEC-07）：401 会让前端弹登录框，
+            // 而"登录是好的、只是权限不够"不该被显示成掉线 ✗
+            mcloud_core::Error::Forbidden(_) => StatusCode::FORBIDDEN,
+            // ⚠ 429（安全审计 SEC-02 / SEC-08）：这个码前端认，会退避重试
+            mcloud_core::Error::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         // 错误文本经过脱敏，避免凭证随错误信息外泄
         let msg = mcloud_core::event::redact(&self.0.to_string());
-        (status, Json(serde_json::json!({ "error": msg }))).into_response()
+        let mut resp = (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        // ⚠ 限速要带 `Retry-After`：没有它，客户端只能瞎猜该等多久 ——
+        // 而"猜太短"的表现就是它立刻再撞一次，等于没退避 ✗。
+        if let mcloud_core::Error::RateLimited {
+            retry_after_secs, ..
+        } = &self.0
+        {
+            if let Ok(v) = retry_after_secs.to_string().parse() {
+                resp.headers_mut().insert(header::RETRY_AFTER, v);
+            }
+        }
+        resp
     }
 }
 

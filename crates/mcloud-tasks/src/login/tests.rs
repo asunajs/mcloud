@@ -641,6 +641,102 @@ async fn persist_login_writes_account_and_state() {
     assert_eq!(states[0].1["pc_platform"], "macos");
 }
 
+/// ⭐⭐ 2026-10-06 安全审计 `SEC-05`：**重新登录 = 换凭据，不是重置这一行**。
+///
+/// `result.account` 是登录层新造的对象（昵称/设置/停用状态都是默认值、`owner` 是
+/// `None`）⇒ 整行 save 就等于"凭据过期再登一次，顺手把用户改过的东西全抹了"，
+/// 而四条登录路径**都走这里** ✗。`owner` 被清空更糟：多用户实例里归属会变成
+/// "谁最后登录谁拥有"。
+///
+/// 红测：把 `persist_login` 里那段保留式合并删掉（退回 `save_account(result.account)`）
+/// ⇒ 本测试四条断言全红。
+#[tokio::test]
+async fn persist_login_keeps_nickname_settings_enabled_and_owner() {
+    use mcloud_core::{AccountStore, DeviceId, Result as CoreResult, UserId};
+
+    #[derive(Default)]
+    struct Rec {
+        saved: Mutex<Vec<Account>>,
+    }
+
+    #[async_trait]
+    impl AccountStore for Rec {
+        async fn accounts(&self) -> CoreResult<Vec<Account>> {
+            Ok(self.saved.lock().unwrap().clone())
+        }
+        async fn account(&self, id: &AccountId) -> CoreResult<Option<Account>> {
+            Ok(self
+                .saved
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|a| &a.id == id)
+                .cloned())
+        }
+        async fn save_account(&self, account: &Account) -> CoreResult<()> {
+            let mut v = self.saved.lock().unwrap();
+            match v.iter_mut().find(|a| a.id == account.id) {
+                Some(slot) => *slot = account.clone(),
+                None => v.push(account.clone()),
+            }
+            Ok(())
+        }
+        async fn remove_account(&self, _id: &AccountId) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn account_state(&self, _id: &AccountId) -> CoreResult<serde_json::Value> {
+            Ok(serde_json::Value::Null)
+        }
+        async fn save_account_state(
+            &self,
+            _id: &AccountId,
+            _state: &serde_json::Value,
+        ) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    let info = serde_json::json!({"account":"19900000001","authToken":"tok"});
+    let fresh = account_from_login(&info, PcPlatform::MacOs, "DEV-NEW").unwrap();
+
+    // 库里那一行：用户改过昵称、动过设置、停用过，而且**属于别人**
+    let store = Rec::default();
+    {
+        let mut old = fresh.clone();
+        old.nickname = Some("我的号".into());
+        old.settings.backup_wait_secs = 4_242;
+        old.enabled = false;
+        old.owner = Some(UserId::new("someone-else"));
+        old.device_id = DeviceId("DEV-OLD".into());
+        old.auth.token = "OLD-TOKEN".into();
+        store.saved.lock().unwrap().push(old);
+    }
+
+    persist_login(
+        &store,
+        &LoginResult {
+            account: fresh.clone(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let saved = store.saved.lock().unwrap();
+    assert_eq!(saved.len(), 1, "不该多出一行");
+    let got = &saved[0];
+    assert_eq!(got.nickname.as_deref(), Some("我的号"), "昵称被抹了");
+    assert_eq!(got.settings.backup_wait_secs, 4_242, "每账号设置被抹了");
+    assert!(!got.enabled, "停用状态被改回来了");
+    assert_eq!(
+        got.owner.as_ref().map(|u| u.as_str()),
+        Some("someone-else"),
+        "归属被登录顺手清掉了（多用户实例里这就是一次归属漂移）"
+    );
+    // 该换的还是要换：凭据与设备身份必须与这次登录一致
+    assert_eq!(got.auth.token, fresh.auth.token, "凭据没换");
+    assert_eq!(got.device_id.as_str(), "DEV-NEW", "设备号没跟着换");
+}
+
 // ══════════════════════════ 退出 ══════════════════════════
 
 /// 退出是**尽力而为**：服务端回 `token 不能为空` 也不算失败。

@@ -986,48 +986,78 @@ pub async fn send_notify(ctx: &PushContext<'_>, config: &PushConfig, title: &str
 ///   未指定 / 组播 / 文档段 / CGNAT（`100.64/10`）地址；
 /// * 拒 `localhost` 与 `.localhost` / `.local` / `.internal` 这类**名字**。
 ///
+/// # ⚠⚠ 2026-10-06 安全审计 `SEC-04`：判据必须交给 `url` crate，不能自己切字符串
+///
+/// 旧实现是"按 `://` 切、再按 `@` / `:` / `[]` 切出主机，最后 `host.parse::<IpAddr>()`"。
+/// 而真正发请求的 reqwest 用的是 **WHATWG** 的 URL 解析 —— 两把尺子不一样，
+/// 差额就是一条绕过（**已实测**，见下面 `validate_push_url` 的注释）。
+/// 现在两边都交给同一份实现：`url::Url::parse` → `Url::host()` ✓。
+///
 /// # ⚠ 诚实的边界（别把这条闸当成万能的）
 ///
 /// **不做 DNS 解析** ⇒ 它挡不住"域名解析到 127.0.0.1"这一类（DNS rebinding、
 /// 或者内网自己那套域名）。要挡那一层得在**连接时**核对实际 IP，那是另一件事；
 /// 这里先把"直接写 IP 打本机/内网"这条最省事的路堵死，也把常见误配挡在前面 ✓。
 pub fn validate_push_url(url: &str) -> Result<(), String> {
-    let (scheme, after) = url
-        .split_once("://")
-        .ok_or_else(|| format!("推送地址缺少协议头（只允许 http/https）：{url}"))?;
-    let scheme = scheme.to_ascii_lowercase();
-    if scheme != "http" && scheme != "https" {
-        return Err(format!("推送地址只允许 http/https，实得 {scheme}：{url}"));
+    use url::Host;
+
+    // ⚠⚠ 为什么是 `Url::parse` 而不是自己切字符串（2026-10-06 审计 `SEC-04`，**实测**）：
+    //
+    // 下面这些写法在 WHATWG 里**都是** `127.0.0.1`（`url-2.5.8/src/host.rs:297-361`
+    // 的 `parse_ipv4number` / `parse_ipv4addr` 认十六进制、前导零八进制、单段十进制，
+    // 并会去掉末尾空段），而"自己切出来再 `parse::<IpAddr>()`"看到的分别是
+    // `2130706433` / `0x7f000001` / `017700000001` / `127.0.0.1.` —— **都不是合法
+    // IP 字面量** ⇒ 被当成普通域名放行 ✗：
+    //
+    // ```text
+    // http://2130706433/        http://0x7f000001/     http://017700000001/
+    // http://127.0.0.1./        http://[::ffff:127.0.0.1]/
+    // ```
+    //
+    // 实测方式（独立小程序，只读链接工作区的 `liburl`，不写 `target/`）：
+    // `$HOME/.cargo/bin/rustc -O /tmp/ssrf_check.rs -o /tmp/ssrf_check \
+    //    -L dependency=target/debug/deps --extern url=target/debug/deps/liburl-*.rlib`
+    let parsed = url::Url::parse(url).map_err(|e| format!("推送地址不是合法 URL（{e}）：{url}"))?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => return Err(format!("推送地址只允许 http/https，实得 {other}：{url}")),
     }
 
-    // authority → 去掉 userinfo（`user:pass@`）→ 主机（去掉端口；IPv6 是 `[::1]`）
-    let authority = after.split(['/', '?', '#']).next().unwrap_or("");
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
-    let host = if let Some(rest) = authority.strip_prefix('[') {
-        rest.split(']').next().unwrap_or("")
-    } else {
-        authority.split(':').next().unwrap_or("")
-    };
-    let host = host.to_ascii_lowercase();
-    if host.is_empty() {
+    let Some(host) = parsed.host() else {
         return Err(format!("推送地址没有主机名：{url}"));
-    }
+    };
 
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if !is_public_ip(&ip) {
-            return Err(format!("推送地址指向本机/内网（{ip}），拒绝发送：{url}"));
+    match host {
+        // `url` 已经把十进制/十六进制/八进制/末尾点这些写法归一化成真正的 IP ⇒
+        // 这里拿到的就是"reqwest 会去连的那个地址" ✓
+        Host::Ipv4(v4) => {
+            if !is_public_ip(&std::net::IpAddr::V4(v4)) {
+                return Err(format!("推送地址指向本机/内网（{v4}），拒绝发送：{url}"));
+            }
         }
-        return Ok(());
-    }
-
-    if host == "localhost"
-        || host.ends_with(".localhost")
-        || host.ends_with(".local")
-        || host.ends_with(".internal")
-    {
-        return Err(format!(
-            "推送地址指向本机/内网名字（{host}），拒绝发送：{url}"
-        ));
+        Host::Ipv6(v6) => {
+            if !is_public_ip(&std::net::IpAddr::V6(v6)) {
+                return Err(format!("推送地址指向本机/内网（{v6}），拒绝发送：{url}"));
+            }
+        }
+        Host::Domain(name) => {
+            // ⚠ 末尾点在 DNS 里与不带点**等价**（`localhost.` = `localhost`）⇒
+            // 先削掉再比，否则下面那几条判据一个字符就被绕过去了 ✗
+            let name = name.trim_end_matches('.');
+            if name.is_empty() {
+                return Err(format!("推送地址没有主机名：{url}"));
+            }
+            if name == "localhost"
+                || name.ends_with(".localhost")
+                || name.ends_with(".local")
+                || name.ends_with(".internal")
+            {
+                return Err(format!(
+                    "推送地址指向本机/内网名字（{name}），拒绝发送：{url}"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -1039,19 +1069,15 @@ pub fn validate_push_url(url: &str) -> Result<(), String> {
 /// 免得漏掉 `0.0.0.0`、`224.0.0.0/4` 这类不常见但同样不该打的地址 ✓。
 fn is_public_ip(ip: &std::net::IpAddr) -> bool {
     match ip {
-        std::net::IpAddr::V4(v4) => {
-            let o = v4.octets();
-            !(v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                || v4.is_multicast()
-                // CGNAT `100.64.0.0/10`（运营商级 NAT —— 不是公网）
-                || (o[0] == 100 && (64..=127).contains(&o[1])))
-        }
+        std::net::IpAddr::V4(v4) => is_public_v4(v4),
         std::net::IpAddr::V6(v6) => {
+            // ⚠⚠ IPv4-mapped（`::ffff:127.0.0.1`）：下面那几条 IPv6 判据**一条都不认它**
+            // （它的 segments 不是 `[0,…,1]`，也不是 fc00::/7、fe80::/10），
+            // 而 OS 连它时走的就是 IPv4 ⇒ 不拆出来按 IPv4 判就等于放行了一条打本机的路 ✗
+            //（2026-10-06 审计 `SEC-04` 实测：`http://[::ffff:127.0.0.1]/` 能过旧闸）。
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public_v4(&v4);
+            }
             !(v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
@@ -1059,6 +1085,20 @@ fn is_public_ip(ip: &std::net::IpAddr) -> bool {
                 || v6.is_unicast_link_local()) // fe80::/10
         }
     }
+}
+
+/// IPv4 那半边的判据（单独抽出来，是因为 IPv4-mapped 的 IPv6 也要走它）。
+fn is_public_v4(v4: &std::net::Ipv4Addr) -> bool {
+    let o = v4.octets();
+    !(v4.is_private()
+        || v4.is_loopback()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_documentation()
+        || v4.is_multicast()
+        // CGNAT `100.64.0.0/10`（运营商级 NAT —— 不是公网）
+        || (o[0] == 100 && (64..=127).contains(&o[1])))
 }
 
 #[cfg(test)]

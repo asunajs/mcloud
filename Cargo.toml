@@ -138,6 +138,13 @@ png = "0.17"
 # 2026-09-29 用户口径：**TLS 兼容性为主**。
 reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "gzip", "native-tls"] }
 
+# ── URL 解析（安全闸用）─────────────────────────────────────────────────
+# ⚠ 显式声明而不是蹭 reqwest 的传递依赖：`validate_push_url` 必须用**与 reqwest
+# 同一把尺子**去判主机，否则两套解析的差异就是一条 SSRF 绕过
+# （2026-10-06 实测：`http://2130706433/` 在 WHATWG 里是 `127.0.0.1`，
+#  而"自己切字符串再 parse::<IpAddr>()"看不见它 ✗）。
+url = "2"
+
 # ── WebSocket 客户端 ────────────────────────────────────────────────────
 # 直播弹幕长连（`live_ws_client`）用，本仓第一个 WS 依赖。
 #
@@ -165,7 +172,7 @@ axum = { version = "0.8", features = ["macros"] }
 # `compression-gzip`：前端产物是"大段重复文本"，gzip 后只剩四分之一
 # （实测 CSS 132846→19277、JS 147317→46409 字节）。不压的话首屏要多传 215KB，
 # 而这份开销本可以在服务端一次性消掉 —— 见 static_files.rs 顶部注释。
-tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "timeout"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 # 前端产物内嵌：单二进制交付，且与后端同源（见 webui-code-guide §7.4）
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }

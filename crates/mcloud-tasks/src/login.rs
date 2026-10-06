@@ -554,11 +554,33 @@ pub fn auth_from_user_info(user_info: &Value, prefix: &str) -> Result<String> {
 /// 落盘这一步横跨两个 store 方法（账号 + 状态），而"先写哪个、失败了怎么办"
 /// 是有讲究的：先写账号（它含凭据，是主要产物），再补状态。
 /// 状态晚一步写不会让账号不可用，反过来会留下一个"有设备号但没凭据"的孤儿。
+///
+/// # ⚠⚠ 2026-10-06 安全审计 `SEC-05`：这里是**保留式合并**，不是整行覆盖
+///
+/// `result.account` 是登录那一层**新造**出来的对象：昵称、每账号设置、
+/// 停用状态全是默认值，`owner` 是 `None`。直接 `save_account` 等于
+/// "重新登录一次，顺手把用户改过的东西全抹了"，而这条路径**四条登录方式都走**
+///（扫码 / PC 短信 / 账密 / App 短信），日常"凭据过期了再登一次"就会踩到 ✗。
+/// 同一个理由写在 `crates/mcloud-server/src/routes/accounts.rs` 的 import 上
+///（"那是本仓最忌讳的一类失效"）；而 `owner` 被清空更糟 —— 多用户实例里
+/// 它会让归属变成"谁最后登录谁拥有" ✗。
+///
+/// ⇒ 只换**凭据与设备身份**，其余字段以库里那一行为准 ✓。
+/// ⚠ `device_id` / `pc_platform` / `user_domain_id` **不保留**：它们必须与
+/// 本次登录实际用的那一套一致（下面那段"两处值必须一致"就是这个道理），
+/// 保留旧的会造成"账号里记 A 设备、状态里记 B 设备" ✓。
 pub async fn persist_login<S: AccountStore + ?Sized>(
     store: &S,
     result: &LoginResult,
 ) -> Result<()> {
-    store.save_account(&result.account).await?;
+    let mut account = result.account.clone();
+    if let Some(prev) = store.account(&account.id).await? {
+        account.nickname = prev.nickname;
+        account.settings = prev.settings;
+        account.enabled = prev.enabled;
+        account.owner = prev.owner;
+    }
+    store.save_account(&account).await?;
 
     // 设备号同时进账号（`Account::device_id`）与运行期状态。
     //

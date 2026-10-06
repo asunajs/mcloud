@@ -20,11 +20,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Serialize;
 
+use crate::auth_gate::{require_admin, CurrentUser};
 use crate::error::ApiResult;
 use crate::ServerState;
 
@@ -151,7 +152,16 @@ fn dir_bytes(dir: &Path) -> u64 {
         .sum()
 }
 
-pub async fn storage(State(state): State<ServerState>) -> ApiResult<StorageView> {
+/// `GET /api/system/storage` —— **只有管理员**（安全审计 SEC-18）。
+///
+/// 它报的是绝对路径、二进制位置、每个数据文件的字节数 —— 那是"这台机器怎么装的"
+/// 的完整地图，而它不是某个用户的数据，是**实例**的 ✗。单管理员部署下无感，
+/// 多用户时它不该是任意登录者都能拿的情报 ✓。
+pub async fn storage(
+    State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
+) -> ApiResult<StorageView> {
+    require_admin(&state, &cur).await?;
     // ⚠ 报**绝对路径**：这一块的用处就是"照着它去磁盘上找"，
     // 而数据目录可以是相对的（launchd 的 `MCLOUD_DATA_DIR=data` ⇒ 相对 cwd）。
     // `canonicalize` 失败（目录还没建）就退回原值 —— 报一个相对路径也比报错强。
@@ -195,9 +205,14 @@ pub async fn storage(State(state): State<ServerState>) -> ApiResult<StorageView>
 ///
 /// 返回 `202`（受理）：**此刻还没关**，300ms 后才优雅退出 —— 立刻触发的话
 /// 这一个响应本身会被拦腰截断，前端只看得到"网络错误"，分不清"重启了"还是"崩了"。
+///
+/// ⚠ **只有管理员**（安全审计 SEC-07）：这是**实例级**动作，停的是所有人的服务，
+/// 不是"重启我的东西"。多用户时它是现成的 DoS 开关（谁都能反复重启）✗。
 pub async fn restart(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
 ) -> Result<StatusCode, crate::error::ApiError> {
+    require_admin(&state, &cur).await?;
     let shutdown = Arc::clone(&state.handle.shutdown);
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(300)).await;

@@ -55,6 +55,19 @@ fn test_app(tag: &str) -> (Arc<AppHandle>, std::path::PathBuf) {
 /// 换成 `authed_app(...)`），于是**不会**出现"为了加认证而改动 27 处断言"——
 /// 那种改动最容易顺手改坏一条断言。
 fn authed_app(handle: Arc<AppHandle>) -> axum::Router {
+    seed_test_user_and_session(&handle);
+    authed_app_with(ServerState::new(handle))
+}
+
+/// 建一个测试用户 + 一条 Web 会话（`test-user` / [`TEST_SESSION_TOKEN`]）。
+///
+/// # 为什么单独一个函数
+///
+/// [`authed_app`] 顺带做了这件事，但有些用例要**自己造 `ServerState`**
+///（往里登记"这条 run 归属谁"），那些用例绕过了 `authed_app` ⇒ 必须能单独
+/// 把会话建出来（2026-10-06 审计 `SEC-20` 的用例第一次就漏了这一步：
+/// 请求直接 401，而报错看起来像"鉴权坏了"✗）。
+fn seed_test_user_and_session(handle: &Arc<AppHandle>) -> mcloud_core::UserId {
     use mcloud_core::{PasswordHash, Session, SessionKind, User, UserId, WEB_SESSION_TTL_MS};
 
     let now = handle.clock.now_ms();
@@ -66,7 +79,8 @@ fn authed_app(handle: Arc<AppHandle>) -> axum::Router {
         password_hash: PasswordHash("$argon2id$test-only".into()),
         created_at_ms: now,
     };
-    let token = "test-session-token";
+    let token = TEST_SESSION_TOKEN;
+    let user_id = user.id.clone();
     let session = Session {
         token_hash: mcloud_crypto::hash_session_token(token),
         user_id: user.id.clone(),
@@ -76,17 +90,28 @@ fn authed_app(handle: Arc<AppHandle>) -> axum::Router {
     };
 
     let store = Arc::clone(&handle.store);
-    let (u, se) = (user, session);
+    let (u, se, uid) = (user, session, user_id);
     // 阻塞式建好再返回：`oneshot` 之前必须已经在库里
     futures::executor::block_on(async move {
         store.save_user(&u).await.expect("建测试用户");
         store.save_session(&se).await.expect("建测试会话");
     });
+    uid
+}
 
-    let cookie = format!("mcloud_session={token}");
+/// 给**调用方自己造好的** `ServerState` 套上"注入测试 cookie"的中间件。
+///
+/// # 为什么要有这一版
+///
+/// 有些用例要往 `ServerState` 里登记东西（例如"这条 run 归属谁"的
+/// `note_run_owner`），而 [`authed_app`] 内部自己 `new` 了一个 state ⇒
+/// 登记的那个和真正处理请求的那个**不是同一个** ✗
+///（2026-10-06 审计 `SEC-20` 的用例就是这么踩到的）。
+fn authed_app_with(state: ServerState) -> axum::Router {
+    let cookie = format!("mcloud_session={TEST_SESSION_TOKEN}");
     // ⚠ 这里必须是**真正的** app 构造函数，不能是 `authed_app` 自己 ——
     // 后者会无限递归（栈溢出、SIGABRT，而报错只显示"进程被信号 6 终止"）
-    mcloud_server::app(ServerState::new(handle)).layer(axum::middleware::from_fn(
+    mcloud_server::app(state).layer(axum::middleware::from_fn(
         move |mut req: Request<Body>, next: axum::middleware::Next| {
             let cookie = cookie.clone();
             async move {
@@ -100,6 +125,9 @@ fn authed_app(handle: Arc<AppHandle>) -> axum::Router {
         },
     ))
 }
+
+/// 测试用的会话令牌（[`authed_app`] 与 [`authed_app_with`] 必须一致）。
+const TEST_SESSION_TOKEN: &str = "test-session-token";
 
 /// 发一个请求，返回状态码与响应体文本。
 async fn send(app: axum::Router, req: Request<Body>) -> (StatusCode, String) {
@@ -2146,6 +2174,18 @@ async fn sse_disconnect_unsubscribes_from_the_hub() {
         })
         .await
         .unwrap();
+    // ⚠⚠ 2026-10-06 审计 `SEC-17` 之后，"造一条**只在存储层**的 run"已经不够了：
+    // 新口径下"存储层有记录、内存里没有"= **已结束且历史被回收** ⇒ handler 直接
+    // 回放终局就收尾，压根不会建订阅者 ⇒ 本用例会测成"从来没订上"（下面那条
+    // "先断言订上了"的断言就是为防这个而写的，它这次真的逮到了 ✓）。
+    // 要让"断开时退订"这件事可测，这条 run 必须**在内存中枢里**（= 真在跑）。
+    {
+        // `emit` 来自 `EventSink` trait ⇒ 得把它带进来（生产代码里是 sink 那侧用的）
+        use mcloud_core::EventSink as _;
+        handle
+            .hub
+            .emit(mcloud_core::RunEvent::info(run_id, "跑着呢", 1));
+    }
     assert_eq!(handle.hub.subscriber_count(run_id), 0, "前提：还没人订阅");
 
     // 拿住响应体不 drop —— 此时订阅**必须**是活的
@@ -2330,5 +2370,621 @@ async fn bean_records_with_out_of_range_days_is_400() {
         let (status, text) = send(authed_app(Arc::clone(&handle)), get(&uri)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "days={bad} 实际：{text}");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ══════════════════════════ 第二批安全修复（2026-10-06）══════════════════════
+//
+// 覆盖审计报告里的 SEC-05 / SEC-07 / SEC-11 / SEC-18。
+//
+// ⚠ 这几条都需要**两个用户**的实例，而上面的 `authed_app` 只建一个 ——
+// 而"最早的那个用户 = 实例管理员"这条判据在单用户实例上**永远成立**，
+// 用它测等于什么都没测 ✗。所以这里另起一个双用户装配，让"谁是管理员"可分辨。
+
+/// 两个用户的实例：`admin-user`（创建最早 ⇒ 实例管理员）与 `other-user`。
+/// 返回 `(app, admin 的 cookie, other 的 cookie)`。
+fn two_user_app(handle: Arc<AppHandle>) -> (axum::Router, String, String) {
+    use mcloud_core::{PasswordHash, Session, SessionKind, User, UserId, WEB_SESSION_TTL_MS};
+
+    let now = handle.clock.now_ms();
+    let admin_token = "admin-session-token";
+    let other_token = "other-session-token";
+    // ⚠ `created_at_ms` 必须**差开**：管理员判据是"最早的那个"（`legacy_owner`），
+    // 同时刻建的两个用户谁早谁晚没有定义 ⇒ 那样这条测试会随机红 ✗
+    let specs = [
+        ("admin-user", "admin", admin_token, now - 1_000),
+        ("other-user", "other", other_token, now),
+    ];
+
+    let mut users = Vec::new();
+    let mut sessions = Vec::new();
+    for (id, name, token, created_at_ms) in specs {
+        users.push(User {
+            id: UserId::new(id),
+            name: name.into(),
+            // 与 `authed_app` 同一条理由：这里不真算 argon2，只用它建会话
+            password_hash: PasswordHash("$argon2id$test-only".into()),
+            created_at_ms,
+        });
+        sessions.push(Session {
+            token_hash: mcloud_crypto::hash_session_token(token),
+            user_id: UserId::new(id),
+            kind: SessionKind::Web,
+            created_at_ms: now,
+            expires_at_ms: now + WEB_SESSION_TTL_MS,
+        });
+    }
+
+    let store = Arc::clone(&handle.store);
+    futures::executor::block_on(async move {
+        for u in &users {
+            store.save_user(u).await.expect("建测试用户");
+        }
+        for s in &sessions {
+            store.save_session(s).await.expect("建测试会话");
+        }
+    });
+
+    (
+        mcloud_server::app(ServerState::new(handle)),
+        format!("mcloud_session={admin_token}"),
+        format!("mcloud_session={other_token}"),
+    )
+}
+
+/// 带指定 cookie 发 POST（`get_with_cookie` / `put_json_with_cookie` 只管 GET / PUT）。
+fn post_json_with_cookie(uri: &str, cookie: &str, body: &serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("cookie", cookie)
+        .body(Body::from(serde_json::to_vec(body).unwrap()))
+        .expect("请求应可构造")
+}
+
+/// ⭐⭐ 审计 `SEC-07` / `SEC-11` / `SEC-18`：**实例级动作只有管理员能做**。
+///
+/// 这些路由原先对"任何登录用户"开放：重启服务（现成的 DoS 开关）、
+/// 读绝对路径与文件清单、读**所有人**的服务端日志、改全局任务参数、
+/// 改全局安全策略 ✗。单管理员部署下无感，多用户时它们全都是越权面。
+///
+/// 红测：把任一 handler 里的 `require_admin(..)` 删掉 ⇒ 该行断言红。
+/// 把 `Error::Forbidden` 的映射改回 401 ⇒ 每条都红（这也是刻意的：
+/// 401 会让前端弹登录框，把"权限不够"显示成"你掉线了" ✗）。
+#[tokio::test]
+async fn instance_level_actions_are_admin_only() {
+    let (handle, dir) = test_app("admin-only");
+    let (app, admin, other) = two_user_app(handle);
+
+    // `Request` 不是 `Clone`，而同一个动作要对两个身份各发一次 ⇒ 存"按 cookie 造请求"的闭包
+    #[allow(clippy::type_complexity)]
+    let cases: Vec<(&str, Box<dyn Fn(&str) -> Request<Body>>)> = vec![
+        (
+            "POST /api/system/restart",
+            Box::new(|c: &str| {
+                post_json_with_cookie("/api/system/restart", c, &serde_json::json!({}))
+            }),
+        ),
+        (
+            "GET /api/system/storage",
+            Box::new(|c: &str| get_with_cookie("/api/system/storage", c)),
+        ),
+        (
+            "GET /api/logs",
+            Box::new(|c: &str| get_with_cookie("/api/logs", c)),
+        ),
+        (
+            "GET /api/tasks/live-room/config",
+            Box::new(|c: &str| get_with_cookie("/api/tasks/live-room/config", c)),
+        ),
+        (
+            "PUT /api/tasks/live-room/config",
+            Box::new(|c: &str| {
+                put_json_with_cookie(
+                    "/api/tasks/live-room/config",
+                    c,
+                    &serde_json::json!({ "params": { "skipKouling": true } }),
+                )
+            }),
+        ),
+        (
+            "PUT /api/admin/security",
+            Box::new(|c: &str| {
+                put_json_with_cookie(
+                    "/api/admin/security",
+                    c,
+                    // ⚠ 字段名是 camelCase（`SecurityPatch` 上有 `rename_all`）：写成 snake_case
+                    // 会先被 axum 的 Json 提取器拦成 422，压根走不到权限判断 ✗
+                    &serde_json::json!({ "minPasswordLen": 8, "sessionTtlHours": 24 }),
+                )
+            }),
+        ),
+    ];
+
+    for (what, build) in cases {
+        let (st, body) = send(app.clone(), build(&other)).await;
+        assert_eq!(
+            st,
+            StatusCode::FORBIDDEN,
+            "{what} 对非管理员该回 403，实得 {st}：{body}"
+        );
+        assert!(
+            body.contains("没有权限"),
+            "{what} 的说明要能看懂（别只说 forbidden）：{body}"
+        );
+
+        // 管理员不该被这条闸挡住（各路由自身可能另有 400/404，只要不是 403）
+        let (st, body) = send(app.clone(), build(&admin)).await;
+        assert_ne!(
+            st,
+            StatusCode::FORBIDDEN,
+            "{what} 把管理员也挡了，实得 {st}：{body}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐⭐ 审计 `SEC-05`：**别人的账号不能靠"导入"抢过来**。
+///
+/// 旧代码用 `account_for(自己)` 判"这条账号在不在"，而它对别人的账号回 `None`
+/// ⇒ 代码走"新建"分支 ⇒ **整行覆盖**（昵称、设置、停用状态一起），
+/// 并把 owner 改成自己。而 `parse_credential` 只做形状检查、不验真伪 ⇒
+/// 不需要知道对方任何口令就能做到 ✗。
+///
+/// 红测：把 `accounts::import` 里那段"用不带过滤的 `account()` 查一次"删掉 ⇒ 红。
+#[tokio::test]
+async fn importing_an_account_owned_by_someone_else_is_404() {
+    let (handle, dir) = test_app("acct-import-takeover");
+    let phone = "19900000002";
+    let id = mcloud_core::AccountId::new(mcloud_upstream::account_id_for(phone));
+
+    // 库里先有一条**属于 admin-user** 的账号，带用户改过的昵称
+    let mut theirs = seed_for(phone);
+    theirs.owner = Some(mcloud_core::UserId::new("admin-user"));
+    theirs.nickname = Some("别人的号".into());
+    {
+        let store = Arc::clone(&handle.store);
+        futures::executor::block_on(store.save_account(&theirs)).expect("落库");
+    }
+
+    let (app, _admin, other) = two_user_app(Arc::clone(&handle));
+
+    // other-user 拿一条**形状合法**（内容随便）的凭据去"导入"同一条账号
+    let body = serde_json::json!({
+        "auth": auth_string("pc", phone, 1_893_456_000_000i64),
+        "platform": "macos",
+        "nickname": "抢过来的",
+    });
+    let (st, text) = send(
+        app.clone(),
+        post_json_with_cookie("/api/accounts", &other, &body),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::NOT_FOUND,
+        "该按'不存在'处理，实得 {st}：{text}"
+    );
+
+    // 那一行必须**一个字段都没动**
+    let after = futures::executor::block_on(handle.store.account(&id))
+        .expect("读库")
+        .expect("账号还在");
+    assert_eq!(
+        after.owner.as_ref().map(|u| u.as_str()),
+        Some("admin-user"),
+        "归属被抢走了"
+    );
+    assert_eq!(after.nickname.as_deref(), Some("别人的号"), "昵称被覆盖了");
+
+    // 反向：**自己的**账号照样能更新（这条修复不能把正常路径也堵上）
+    let mine = serde_json::json!({
+        "auth": auth_string("pc", phone, 1_893_456_000_000i64),
+        "platform": "macos",
+        "nickname": "我的",
+    });
+    let (st, text) = send(
+        app.clone(),
+        post_json_with_cookie("/api/accounts", &_admin, &mine),
+    )
+    .await;
+    // admin-user 是那条账号的主人 ⇒ 200（不是 404）
+    assert_eq!(st, StatusCode::OK, "主人自己更新该成功，实得 {st}：{text}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 审计 `SEC-08`：**已登录用户的昂贵动作也要限速**。
+///
+/// `PUT /api/admin/password` 每次都算一次 argon2（19 MiB × 2 轮），而它**不受**
+/// 登录闸限速（那时已经登录了）⇒ 不设闸的话，一个已登录用户就能拿它把自己的
+/// 机器打满 ✗。键是**用户 id**（不是 IP）：这些动作身份确定，而同一个 IP 后面
+/// 可能坐着多个人（局域网），按 IP 限会误伤。
+///
+/// 这里用"当前口令错"的请求来打：限速在**校验之前**，所以第 11 发必然 429，
+/// 而前 10 发是 401（口令不对）—— 两个码不同，正好把"闸在验证前"这件事也钉住。
+///
+/// 红测：把 `change_password` 里那句 `sensitive_rate_limit` 删掉 ⇒ 最后一发拿到 401 而不是 429。
+#[tokio::test]
+async fn changing_password_is_rate_limited_per_user() {
+    let (handle, dir) = test_app("pw-ratelimit");
+    let (app, admin, _other) = two_user_app(handle);
+
+    // ⚠ camelCase（同上：字段名错了会先 422）
+    let body = serde_json::json!({ "currentPassword": "wrong", "newPassword": "whatever-long" });
+    let mut last = StatusCode::OK;
+    for i in 1..=11 {
+        let (st, text) = send(
+            app.clone(),
+            put_json_with_cookie("/api/admin/password", &admin, &body),
+        )
+        .await;
+        last = st;
+        if i <= 10 {
+            assert_eq!(
+                st,
+                StatusCode::UNAUTHORIZED,
+                "第 {i} 发在配额内，该是'当前口令不对'：{st} {text}"
+            );
+        }
+    }
+    assert_eq!(
+        last,
+        StatusCode::TOO_MANY_REQUESTS,
+        "第 11 发必须被限速（配额 10/分）"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 带指定 cookie 发 DELETE。
+fn delete_with_cookie(uri: &str, cookie: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .header("cookie", cookie)
+        .body(Body::empty())
+        .expect("请求应可构造")
+}
+
+/// ⭐⭐ 审计 `SEC-06`：扫码会话**只归发起它的那个人**。
+///
+/// `session_id` 是出码方自己拿到的一串随机值，从没打算当密码用（会出现在日志、
+/// 前端状态里）。不绑发起者的话，谁拿到它谁就能推进/取消**别人的**扫码会话 ——
+/// 而"推进"正好是"把账号挂到谁名下"那一步（QR 码是攻击者出的、受害者扫的）✗。
+///
+/// 这里用 `DELETE` 验证接线（`POST /api/login/qr` 不发任何上游请求，所以测得动）；
+/// `poll` 用的是同一份 `owner` 判据，逻辑由 `login/tests.rs` 的表级测试钉住。
+///
+/// 红测：把 `cancel_qr` 里的 `remove_for(&session_id, &cur.0)` 改回 `remove(&session_id)`
+/// ⇒ 第一条断言红。
+#[tokio::test]
+async fn a_qr_session_can_only_be_cancelled_by_its_starter() {
+    let (handle, dir) = test_app("qr-owner");
+    let (app, admin, other) = two_user_app(handle);
+
+    // admin 出一张码
+    let (st, text) = send(
+        app.clone(),
+        post_json_with_cookie(
+            "/api/login/qr",
+            &admin,
+            &serde_json::json!({ "platform": "windows" }),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "出码该成功：{st} {text}");
+    let sid = json_body(&text)["session_id"]
+        .as_str()
+        .expect("响应里该有 session_id")
+        .to_string();
+
+    // 别人删不掉，且拿到的是"不存在"（不告诉他"这个 id 有，只是不是你的"）
+    let (st, text) = send(
+        app.clone(),
+        delete_with_cookie(&format!("/api/login/qr/{sid}"), &other),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "别人不该取消得掉：{st} {text}");
+
+    // 而且那张码**还在** —— 否则"猜一个 id"就成了一次对别人扫码流程的拒绝服务 ✗
+    //（下面这次成功即证明它没被上一次顺手丢掉）
+    let (st, text) = send(
+        app.clone(),
+        delete_with_cookie(&format!("/api/login/qr/{sid}"), &admin),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "发起者自己该删得掉：{st} {text}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ══════════════════════════ 第三批安全修复（2026-10-06）══════════════════════
+//
+// 覆盖审计报告里的 SEC-12 / SEC-13 / SEC-14 / SEC-16 / SEC-19。
+
+/// ⭐⭐ 审计 `SEC-12`：**连续猜错会被挡，但"口令对的那一次"永远进得来**。
+///
+/// 这两件事必须同时成立：
+/// * 只挡错的不挡对的 ⇒ 限速器不会变成"把管理员锁在门外"的武器
+///   （`SEC-02` 那个坑的教训）；
+/// * 挡得住 ⇒ 一个每 10 秒试一次口令的脚本（撞不到 30/分/IP 那个闸）
+///   会在第 6 次撞墙。
+///
+/// 红测：① 把 `note_login_failure` 里那次 `check` 删掉 ⇒ 第 6 发拿到 401 而不是 429；
+/// ② 把成功分支的 `reset` 换成"先 check 再放行" ⇒ 最后那条"口令对了也进不来"红。
+#[tokio::test]
+async fn repeated_wrong_passwords_are_limited_but_the_right_one_still_works() {
+    let (handle, dir) = test_app("login-fail-limit");
+    let app = mcloud_server::app(ServerState::new(handle));
+
+    // 真建一个管理员（走一次 argon2，口令是 correct-horse）
+    let (st, _, _) = send_full(
+        app.clone(),
+        post_json("/api/setup", &setup_json("admin", "correct-horse")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+
+    // 前 5 次错口令：401，且文案与"用户不存在"那句一致（不构成探测器）
+    for i in 1..=5 {
+        let (st, body) = send(
+            app.clone(),
+            post_json("/api/session", &setup_json("admin", "wrong-password")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "第 {i} 次错口令：{st} {body}");
+        assert!(body.contains("用户名或口令错误"), "{body}");
+    }
+
+    // 第 6 次：撞上失败计数（5 次 / 5 分钟）
+    let (st, body) = send(
+        app.clone(),
+        post_json("/api/session", &setup_json("admin", "wrong-password")),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::TOO_MANY_REQUESTS,
+        "第 6 次该被失败计数挡住：{st} {body}"
+    );
+
+    // ⭐ 底线：口令正确的那一次**不受失败计数影响**
+    let (st, body) = send(
+        app.clone(),
+        post_json("/api/session", &setup_json("admin", "correct-horse")),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "口令对了就必须放行（配额只限制猜错的速度，不限制能不能进来）：{st} {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 审计 `SEC-13`：`MCLOUD_COOKIE_SECURE` 打开时，登录 cookie 要带 `Secure`。
+///
+/// 默认**必须**关着：本工具跑在 `http://127.0.0.1`，加了 `Secure` 浏览器不存，
+/// 表现是"登录成功但立刻又未登录" ✗（另一条测试 `session_cookie_is_hardened`
+/// 钉的就是默认关着这件事）。
+#[tokio::test]
+async fn cookie_can_carry_secure_when_the_deployment_asks_for_it() {
+    let (handle, dir) = test_app("cookie-secure");
+    let mut state = ServerState::new(handle);
+    // 等价于部署时设了 `MCLOUD_COOKIE_SECURE=1`
+    state.cookie_secure = true;
+
+    let (st, headers, _) = send_full(
+        mcloud_server::app(state),
+        post_json("/api/setup", &setup_json("admin", "correct-horse")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let raw = headers.get("set-cookie").unwrap().to_str().unwrap();
+    assert!(raw.contains("Secure"), "开了开关就该带 Secure：{raw}");
+    // 其余属性一个都不能少（与默认那条逐项一致，只是多了 Secure）
+    for attr in ["HttpOnly", "SameSite=Strict", "Path=/", "Max-Age="] {
+        assert!(raw.contains(attr), "缺 {attr}：{raw}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐⭐ 审计 `SEC-19`：**CLI 会话不能当 Web cookie 用**。
+///
+/// `SessionKind::Cli` 是给命令行用的**长期**会话（`expires_at_ms == 0` 表示
+/// 永不过期），而 WebUI 这一侧（闸、登出、改口令踢会话）全都按
+/// "Web 会话有到期时间"设计 ⇒ 放它进来等于开了一条永不失效的登录态 ✗。
+///
+/// 红测：把 `require_session` 里那句 `session.kind != SessionKind::Web` 判断删掉
+/// ⇒ 本测试拿到 200（而不是 401）。
+#[tokio::test]
+async fn cli_sessions_are_not_accepted_as_web_cookies() {
+    use mcloud_core::{PasswordHash, Session, SessionKind, User, UserId};
+
+    let (handle, dir) = test_app("cli-session-cookie");
+    let token = "cli-session-token";
+    let now = handle.clock.now_ms();
+    let uid = UserId::new("test-user");
+    let user = User {
+        id: uid.clone(),
+        name: "admin".into(),
+        password_hash: PasswordHash("$argon2id$test-only".into()),
+        created_at_ms: now,
+    };
+    let cli = Session {
+        token_hash: mcloud_crypto::hash_session_token(token),
+        user_id: uid,
+        kind: SessionKind::Cli,
+        created_at_ms: now,
+        // ⚠ 0 = **永不过期**（`is_valid_at` 的约定）⇒ 唯一挡住它的就是 kind 这道判断
+        expires_at_ms: 0,
+    };
+    {
+        let store = Arc::clone(&handle.store);
+        futures::executor::block_on(async move {
+            store.save_user(&user).await.expect("建用户");
+            store.save_session(&cli).await.expect("建会话");
+        });
+    }
+
+    let (st, body) = send(
+        mcloud_server::app(ServerState::new(handle)),
+        get_with_cookie("/api/accounts", &format!("mcloud_session={token}")),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::UNAUTHORIZED,
+        "CLI 会话不该能过 Web 闸：{st} {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 审计 `SEC-19`：会话对应的**用户被删掉**之后，那张还没到期的会话立刻失效。
+///
+/// 会话表与用户表之间没有外键，谁也不会替你对齐它们 ⇒ 只能每次读会话时对一次。
+/// 红测：把 `require_session` 里那次 `store.user(..)` 删掉 ⇒ 本测试拿到 200。
+#[tokio::test]
+async fn a_session_of_a_user_that_no_longer_exists_is_rejected() {
+    use mcloud_core::{Session, SessionKind, UserId, WEB_SESSION_TTL_MS};
+
+    use mcloud_core::{PasswordHash, User};
+
+    let (handle, dir) = test_app("orphan-session");
+    let token = "orphan-session-token";
+    let now = handle.clock.now_ms();
+    // ⚠ 库里要有**一个**用户：否则闸会先判"未初始化"回 503，根本走不到会话检查
+    //（这条我第一版就踩了 —— 断言拿到 503 而不是 401）
+    let real = User {
+        id: UserId::new("real-user"),
+        name: "admin".into(),
+        password_hash: PasswordHash("$argon2id$test-only".into()),
+        created_at_ms: now,
+    };
+    // 会话属于一个**不存在**的用户 —— 这正是"用户被删了、会话还留着"那个状态
+    let session = Session {
+        token_hash: mcloud_crypto::hash_session_token(token),
+        user_id: UserId::new("ghost"),
+        kind: SessionKind::Web,
+        created_at_ms: now,
+        expires_at_ms: now + WEB_SESSION_TTL_MS,
+    };
+    {
+        let store = Arc::clone(&handle.store);
+        futures::executor::block_on(async move {
+            store.save_user(&real).await.expect("建用户");
+            store.save_session(&session).await.expect("建会话");
+        });
+    }
+
+    let (st, body) = send(
+        mcloud_server::app(ServerState::new(handle)),
+        get_with_cookie("/api/accounts", &format!("mcloud_session={token}")),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::UNAUTHORIZED,
+        "用户没了的会话不该放行：{st} {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐⭐ 审计 `SEC-17`：订阅一条**已结束、内存历史已被回收**的 run —— 流必须
+/// **立刻收尾**，而不是永远挂着。
+///
+/// 旧行为：`hub.subscribe` 用 `entry().or_default()` 建一个**非终态**空条目 ⇒
+/// `drain` 永远空、通知永远等不到 ⇒ 客户端只能一直收 15 秒一次的 keep-alive ✗。
+/// 而这条路的入口是"`run_access` 说 Allowed（存储层有记录）、内存中枢里却没有它"
+///（内存只留 8 份终态历史，更老的被回收）—— 完全可达。
+///
+/// ⚠ 这里用 `send_full`（自带 10 秒超时）**而不是** `send_headers_only`：
+/// 本用例要断言的正是"流会结束"，超时挂死会变成一条失败的断言 ✓
+///（反过来说：如果哪天又变回"永不结束"，本用例会红在超时那条 expect 上 ✓）。
+#[tokio::test]
+async fn subscribing_to_a_finished_run_replays_the_terminal_event_then_ends() {
+    let (handle, dir) = test_app("sse-evicted-terminal");
+    // 造一条**已结束**的记录：内存中枢里没有它（本进程从没发布过它的事件），
+    // 归属只能从存储层判 ⇒ 这正是"第 9 条之后被回收"的那个形态。
+    handle
+        .store
+        .upsert_run(&mcloud_core::RunRecord {
+            run_id: mcloud_core::RunId::new(42),
+            task: "sign".into(),
+            account: "13800000000".into(),
+            outcome: mcloud_core::TaskOutcome::success("测试完成"),
+            duration_ms: 1234,
+            started_at_ms: 0,
+            status: mcloud_core::RunStatus::Done,
+            details: serde_json::Value::Null,
+            logs: Vec::new(),
+        })
+        .await
+        .expect("落盘应成功");
+
+    let (status, headers, body) = send_full(authed_app(handle), get("/api/runs/42/events")).await;
+    assert_eq!(status, StatusCode::OK, "实际体：{body}");
+    assert!(
+        headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .starts_with("text/event-stream"),
+        "该是事件流：{headers:?}"
+    );
+    assert!(
+        body.contains("event: finished"),
+        "该补发一条终局事件：{body}"
+    );
+    assert!(
+        body.contains("\"duration_ms\":1234"),
+        "终局事件要带**真实**时长（不是现编的 0）：{body}"
+    );
+    assert!(
+        body.contains("id: 1"),
+        "序号必须大于客户端已看到的最大序号（否则前端会当重复丢掉）：{body}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 审计 `SEC-20`：`/api/runs/{id}/logs` 与 `/api/runs/{id}/events` 的可见性
+/// 口径必须**一致** —— 一条**正在跑**的 run（记录是结束时才落盘的）两个端点都该 200。
+///
+/// 旧行为：`/logs` 只查存储层 ⇒ 运行中的 run 一律 404，而同一时刻 `/events` 是 200
+/// —— 同一个 run、两个端点给出相反的答案 ✗。
+///
+/// 红测：把 `list` 里那段 `run_access` 判断换回 `store.run_for(..).is_none()`
+/// ⇒ 本用例拿到 404（而不是 200）。
+#[tokio::test]
+async fn logs_of_a_running_run_are_200_just_like_its_event_stream() {
+    let (handle, dir) = test_app("logs-running");
+    let run_id = mcloud_core::RunId::new(9);
+    {
+        // 这条 run 只**在跑**：内存中枢里有它的事件，存储层里没有记录（记录结束时才写）
+        use mcloud_core::EventSink as _;
+        handle
+            .hub
+            .emit(mcloud_core::RunEvent::info(run_id, "跑起来了", 1));
+    }
+    // 归属：本服务发起的运行在**发起那一刻**就登记（生产路径就是 `note_run_owner`）。
+    // ⚠ 必须登记到**真正处理请求的那个 state** 上 ⇒ 用 `authed_app_with` 自己造
+    //（`authed_app` 内部会另 new 一个 state，登记到另一个上等于没登记 ✗）
+    let uid = seed_test_user_and_session(&handle);
+    let state = ServerState::new(Arc::clone(&handle));
+    state.note_run_owner(run_id, &uid);
+
+    let (status, body) = send(authed_app_with(state), get("/api/runs/9/logs")).await;
+    assert_eq!(status, StatusCode::OK, "运行中的 run 该能读到日志：{body}");
+    assert!(
+        body.contains("跑起来了"),
+        "该把内存里那条日志带出来：{body}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

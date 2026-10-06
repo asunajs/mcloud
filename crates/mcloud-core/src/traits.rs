@@ -370,6 +370,28 @@ pub trait UserStore: Send + Sync {
     async fn user(&self, id: &UserId) -> Result<Option<User>>;
     async fn save_user(&self, user: &User) -> Result<()>;
 
+    /// **首次初始化**：只在"一个用户都没有"时建这个管理员。
+    /// 返回 `Ok(true)` = 建成了；`Ok(false)` = 已经有用户了（调用方据此拒绝）。
+    ///
+    /// # ⚠⚠ 为什么不能"先 `user_count` 再 `save_user`"（2026-10-06 安全审计 `SEC-09`）
+    ///
+    /// 那两步之间隔着一次完整的 argon2（几十毫秒）且**不持任何锁** ⇒ 两个并发的
+    /// `POST /api/setup` 都能看到 0 个用户，于是各建一个管理员，谁也不知道对方存在：
+    /// 后一个覆盖前一个的会话表，而"管理员"到底是谁从此不确定 ✗。
+    /// 实现方必须在**同一把写锁内**完成"判空 + 插入"。
+    ///
+    /// # 为什么默认实现是**报错**
+    ///
+    /// 与 `save_settings` / `save_task_params` 同一口径：替身存储不支持就得**显式失败**，
+    /// 而不是退回那个有竞态的两步写法 —— 那样调用方会以为这条已经修好了 ✗
+    /// （而它只是把窗口缩小到"两次调用之间"，没有消除）。
+    async fn create_first_user(&self, user: &User) -> Result<bool> {
+        let _ = user;
+        Err(crate::Error::Config(
+            "这个存储不支持首次初始化（create_first_user 未实现）".into(),
+        ))
+    }
+
     /// 建会话（存的是 `sha256(token)`，不是原文）。
     async fn save_session(&self, session: &Session) -> Result<()>;
     /// 按令牌哈希查会话。

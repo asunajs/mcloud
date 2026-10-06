@@ -211,7 +211,7 @@ fn hub_with(store: Arc<MemStore>) -> EventHub {
 fn seq_starts_at_one_and_increases() {
     let h = hub();
     let id = RunId::new(1);
-    let sub = h.subscribe(id, Seq::ZERO);
+    let sub = h.subscribe_pending(id, Seq::ZERO).unwrap();
 
     h.emit(RunEvent::info(id, "第一条", NOW_MS));
     h.emit(RunEvent::info(id, "第二条", NOW_MS));
@@ -235,7 +235,7 @@ fn late_subscriber_receives_history() {
     h.emit(RunEvent::info(id, "早于订阅", NOW_MS));
     h.emit(RunEvent::info(id, "也早于订阅", NOW_MS));
 
-    let sub = h.subscribe(id, Seq::ZERO);
+    let sub = h.subscribe_pending(id, Seq::ZERO).unwrap();
     let d = h.drain(id, sub);
     assert_eq!(d.events.len(), 2, "迟到的订阅者必须拿到已发布的历史");
 }
@@ -250,7 +250,7 @@ fn resubscribe_with_seen_seq_only_gets_new_events() {
     h.emit(RunEvent::info(id, "3", NOW_MS));
 
     // 客户端说"我已经看到 2 号"
-    let sub = h.subscribe(id, Seq::seen(2));
+    let sub = h.subscribe_pending(id, Seq::seen(2)).unwrap();
     let d = h.drain(id, sub);
     assert_eq!(d.events.len(), 1, "只该补发 3 号");
     assert_eq!(d.events[0].seq, Seq(3));
@@ -266,7 +266,7 @@ fn seen_seq_does_not_skip_the_next_one() {
     for i in 1..=5 {
         h.emit(RunEvent::info(id, format!("第{i}条"), NOW_MS));
     }
-    let sub = h.subscribe(id, Seq::seen(3));
+    let sub = h.subscribe_pending(id, Seq::seen(3)).unwrap();
     let d = h.drain(id, sub);
     assert_eq!(d.events[0].seq, Seq(4), "必须是 4：跳过 4 就是那个经典 bug");
     assert_eq!(d.events.len(), 2);
@@ -280,8 +280,12 @@ fn resume_after_matches_seen() {
     for i in 1..=4 {
         h.emit(RunEvent::info(id, format!("{i}"), NOW_MS));
     }
-    let a = h.drain(id, h.subscribe(id, Seq::seen(2))).events;
-    let b = h.drain(id, h.subscribe(id, Seq::resume_after(2))).events;
+    let a = h
+        .drain(id, h.subscribe_pending(id, Seq::seen(2)).unwrap())
+        .events;
+    let b = h
+        .drain(id, h.subscribe_pending(id, Seq::resume_after(2)).unwrap())
+        .events;
     assert_eq!(a, b);
     assert_eq!(a[0].seq, Seq(3));
 }
@@ -299,7 +303,7 @@ fn subscribing_before_reading_covers_the_gap() {
     h.emit(RunEvent::info(id, "库里的老事件", NOW_MS));
 
     // 模拟：先订阅（拿到 backlog）…
-    let sub = h.subscribe(id, Seq::ZERO);
+    let sub = h.subscribe_pending(id, Seq::ZERO).unwrap();
     // …在这个窗口里又有事件发布（此时"读库"还没发生）
     h.emit(RunEvent::info(id, "窗口里的事件", NOW_MS));
 
@@ -315,7 +319,7 @@ fn subscribing_before_reading_covers_the_gap() {
 fn full_queue_drops_newest_and_reports_it() {
     let h = hub();
     let id = RunId::new(1);
-    let sub = h.subscribe(id, Seq::ZERO);
+    let sub = h.subscribe_pending(id, Seq::ZERO).unwrap();
 
     // 灌满队列再多发一些
     for i in 0..(SUBSCRIBER_CAPACITY + 5) {
@@ -338,7 +342,7 @@ fn full_queue_drops_newest_and_reports_it() {
 fn drop_count_is_cumulative() {
     let h = hub();
     let id = RunId::new(1);
-    let sub = h.subscribe(id, Seq::ZERO);
+    let sub = h.subscribe_pending(id, Seq::ZERO).unwrap();
     for i in 0..(SUBSCRIBER_CAPACITY + 3) {
         h.emit(RunEvent::info(id, format!("{i}"), NOW_MS));
     }
@@ -363,8 +367,8 @@ fn drop_count_is_cumulative() {
 fn a_stuck_subscriber_does_not_affect_a_healthy_one() {
     let h = hub();
     let id = RunId::new(1);
-    let stuck = h.subscribe(id, Seq::ZERO);
-    let healthy = h.subscribe(id, Seq::ZERO);
+    let stuck = h.subscribe_pending(id, Seq::ZERO).unwrap();
+    let healthy = h.subscribe_pending(id, Seq::ZERO).unwrap();
 
     // 发两轮容量：healthy 每轮都取走，stuck 从不取
     let total = SUBSCRIBER_CAPACITY * 2;
@@ -439,7 +443,7 @@ async fn flush_with_nothing_pending_is_ok() {
 async fn finished_is_terminal() {
     let h = hub();
     let id = RunId::new(1);
-    let sub = h.subscribe(id, Seq::ZERO);
+    let sub = h.subscribe_pending(id, Seq::ZERO).unwrap();
     h.emit(RunEvent::Finished {
         run_id: id,
         outcome: TaskOutcome::success("ok"),
@@ -504,8 +508,8 @@ fn subscriber_count_tracks_subscriptions() {
     let h = hub();
     let id = RunId::new(1);
     assert_eq!(h.subscriber_count(id), 0);
-    let a = h.subscribe(id, Seq::ZERO);
-    let b = h.subscribe(id, Seq::ZERO);
+    let a = h.subscribe_pending(id, Seq::ZERO).unwrap();
+    let b = h.subscribe_pending(id, Seq::ZERO).unwrap();
     assert_eq!(h.subscriber_count(id), 2);
     h.unsubscribe(id, a);
     assert_eq!(h.subscriber_count(id), 1);
@@ -567,7 +571,7 @@ async fn terminal_runs_are_capped_and_live_ones_are_never_reclaimed() {
     // ② 终态但**有人正在看**：回收会把这条件流当场断在半路
     let watched = RunId::new(9002);
     h.emit(RunEvent::info(watched, "快完了", NOW_MS));
-    let sub = h.subscribe(watched, Seq::ZERO);
+    let sub = h.subscribe_pending(watched, Seq::ZERO).unwrap();
     h.emit(finished(watched));
 
     // ③ 再堆一批终态、没人看的，超出上限
@@ -625,4 +629,79 @@ async fn a_terminal_run_with_unflushed_logs_is_not_reclaimed() {
             "日志还在待落盘缓冲里的 run 不能被回收：run {id} 的那批日志会真的丢"
         );
     }
+}
+
+// ── 审计 SEC-17（2026-10-06）：订阅不再凭空建条目、订阅者数有上限 ──────────
+
+/// ⭐⭐ 订阅一条**内存里没有**的 run 必须**明确失败**。
+///
+/// 旧实现是 `entry().or_default()`：它建一个**非终态**空条目 ⇒ 那条 SSE
+/// **永不结束**（`drain` 永远空、通知永远等不到），而且这个条目
+/// **永远不会被回收**（`evict_terminal_runs` 只收 `terminal` 的）⇒
+/// 反复订阅不存在的 run 就是一条内存泄漏 ✗。
+///
+/// 红测：把 `subscribe_inner` 里的 `get_mut(..).ok_or(NotTracked)?` 换回
+/// `entry(..).or_default()` ⇒ 第一条断言红（返回 `Ok` 而不是 `Err`），
+/// 第二条断言也红（空条目留下了）。
+#[test]
+fn subscribing_to_an_untracked_run_is_refused_and_leaves_nothing_behind() {
+    let h = hub();
+    let id = RunId::new(7);
+    assert!(!h.is_tracked(id));
+
+    assert_eq!(h.subscribe(id, Seq::ZERO), Err(SubscribeError::NotTracked));
+    assert!(
+        !h.is_tracked(id),
+        "订阅失败之后**不许**留下空条目（旧实现就是在这里泄漏的）"
+    );
+}
+
+/// ⭐ 同一条 run 的订阅者数有上限，且退订之后又能订。
+///
+/// 上限的意义：一条 SSE 订阅 = 一个常驻任务 + 一份队列，而**它不受 HTTP 层
+/// 并发上限约束**（`ConcurrencyLimitLayer` 的名额在 handler 返回那一刻就还回去了）
+/// ⇒ 不设上限的话，一个已登录用户开一堆连接就能把内存吃光 ✗。
+#[test]
+fn subscriber_count_is_capped_and_frees_up_after_unsubscribe() {
+    let h = hub();
+    let id = RunId::new(1);
+    h.emit(RunEvent::info(id, "先让它被跟踪", NOW_MS));
+
+    let mut first = None;
+    for i in 0..MAX_SUBSCRIBERS_PER_RUN {
+        let sub = h
+            .subscribe(id, Seq::ZERO)
+            .unwrap_or_else(|e| panic!("第 {} 个订阅该成功，却 {e:?}", i + 1));
+        first.get_or_insert(sub);
+    }
+    assert_eq!(h.subscriber_count(id), MAX_SUBSCRIBERS_PER_RUN);
+    assert_eq!(
+        h.subscribe(id, Seq::ZERO),
+        Err(SubscribeError::TooManySubscribers),
+        "到上限之后必须明确拒绝，而不是让第 N+1 个也挂上去"
+    );
+
+    // 退掉一个 ⇒ 又有一个名额（上限是"同时在线数"，不是"累计数"）
+    h.unsubscribe(id, first.unwrap());
+    assert!(h.subscribe(id, Seq::ZERO).is_ok());
+    assert_eq!(h.subscriber_count(id), MAX_SUBSCRIBERS_PER_RUN);
+}
+
+/// ⭐ `subscribe_pending` 是给"已经确认在跑、但还没发第一条事件"那个窗口用的。
+///
+/// 它必须能建条目（否则 `POST /api/runs` 之后立刻订阅会被判成"已结束"✗），
+/// 而建出来的条目一旦真的跑完就该被正常回收。
+#[test]
+fn subscribe_pending_covers_the_window_before_the_first_event() {
+    let h = hub();
+    let id = RunId::new(9);
+    assert!(!h.is_tracked(id));
+
+    let sub = h.subscribe_pending(id, Seq::ZERO).unwrap();
+    assert!(h.is_tracked(id), "在跑但还没发事件的 run 必须能建出条目");
+
+    // 第一条事件到了 ⇒ 订阅者收得到（这正是那个窗口要保证的）
+    h.emit(RunEvent::info(id, "第一条", NOW_MS));
+    let d = h.drain(id, sub);
+    assert_eq!(d.events.len(), 1);
 }

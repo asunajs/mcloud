@@ -86,6 +86,11 @@ async fn serve() -> anyhow::Result<()> {
 
     // 「重启服务」那条路要用的信号：先取出来，再把 handle 交给 state
     let restart = Arc::clone(&app.handle.shutdown);
+    // ⚠ 顺手清过期会话要用到 store 与 clock（审计 `SEC-14`），而下一行就把
+    // `app.handle` 移进 `Arc::new` 了 ⇒ **必须在这之前**各拿一份 Arc ✓
+    // （放后面就是 `borrow of moved value`，编译期就会拦下来）。
+    let store_for_purge = Arc::clone(&app.handle.store);
+    let clock_for_purge = Arc::clone(&app.handle.clock);
     let state = mcloud_server::ServerState::new(Arc::new(app.handle));
 
     // 启动调度器。
@@ -102,10 +107,35 @@ async fn serve() -> anyhow::Result<()> {
     let hub_for_flush = Arc::clone(&hub);
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+        // 每 30 个 tick（≈60 秒）清一次过期会话（2026-10-06 安全审计 `SEC-14`）。
+        //
+        // # 为什么挂在这个循环上、而不是另起一个
+        //
+        // 这个循环本来就是"每 2 秒干一件小事"（日志落盘），再加一件同量级的事
+        // 不增加任何并发面 ✓。而另起一个定时器意味着又多一处要跟着 shutdown 收尾。
+        //
+        // # 为什么必须做
+        //
+        // `purge_expired_sessions` 在此之前**没有任何生产调用者** ⇒ 会话表只进不出：
+        // 每登录一次就多一行，永远不消失（`SEC-14`）。登录/登出会删自己那一行，
+        // 但"关了浏览器不再回来"的那些只能靠清扫 ✓。
+        const PURGE_EVERY_TICKS: u32 = 30;
+        let mut since_purge: u32 = 0;
         loop {
             tick.tick().await;
             if let Err(e) = hub_for_flush.flush().await {
                 tracing::error!(error = %e, "日志落盘失败");
+            }
+            since_purge += 1;
+            if since_purge >= PURGE_EVERY_TICKS {
+                since_purge = 0;
+                let now = clock_for_purge.now_ms();
+                match store_for_purge.purge_expired_sessions(now).await {
+                    // 清不到是常态（本工具就一个管理员），别每 60 秒刷一行日志
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(removed = n, "已清理过期会话"),
+                    Err(e) => tracing::warn!(error = %e, "清理过期会话失败"),
+                }
             }
         }
     });
@@ -119,10 +149,19 @@ async fn serve() -> anyhow::Result<()> {
     // `with_graceful_shutdown`：收到信号后**先停止接收新连接**，把在途请求做完再返回。
     // 直接 `std::process::exit` 或让 main 掉出去，正在写的响应会被拦腰截断，
     // 前端看到的是"随机一个请求网络错误"—— 而重启是常事（改完代码就要重启一次）。
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal(restart))
-        .await
-        .context("服务异常退出")?;
+    //
+    // ⚠⚠ **必须是 `into_make_service_with_connect_info`，不能是裸 `router`**
+    // （2026-10-06 安全审计 `SEC-02`）：认证面的限速按 **peer IP** 分桶，
+    // 而 peer IP 只能从连接信息里拿。用裸 `router` 的话 handler 里取不到
+    // `ConnectInfo` ⇒ 所有请求挤进同一个桶 ⇒ 静默退回"全局单键"：
+    // 既挡不住分布式，又能被未认证者反过来把管理员锁在登录页外 ✗。
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(restart))
+    .await
+    .context("服务异常退出")?;
 
     // 收尾顺序：**先停调度器**（它可能正跑在 tick 里，得让它自己收干净），
     // 再把攒着的日志落盘。反过来的话，调度器最后那几条日志会丢。

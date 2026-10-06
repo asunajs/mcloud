@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::extract::{Extension, State};
 use axum::Json;
-use mcloud_core::PcPlatform;
+use mcloud_core::{PcPlatform, UserId};
 use mcloud_tasks::login::{QrLogin, QrProgress, SendSmsOutcome};
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +40,20 @@ struct QrSession {
     qr: QrLogin,
     /// 轮询用的 `x-yun-tid`：一次会话内保持一致，更像真实客户端。
     tid: String,
+    /// **发起这次扫码的 WebUI 用户**（2026-10-06 安全审计 `SEC-06`）。
+    ///
+    /// # 为什么必须记它
+    ///
+    /// 不记的话，`session_id` 就是唯一凭据 —— 而它是**出码方自己**拿到的一串
+    /// 随机值，从没打算当密码用（会出现在日志、URL、前端状态里）✗。
+    /// 谁拿到它，谁就能对**别人的**扫码会话做两件事：
+    ///
+    /// 1. `poll` 推进它 —— 于是"扫码成功后把账号挂到**轮询者**名下"这个动作
+    ///    可以被第三方完成（QR 码是攻击者出的、受害者扫的，账号落进攻击者手里）；
+    /// 2. `DELETE` 取消它（干扰）。
+    ///
+    /// 记上 owner 之后，这两条都要求"你得出示同一个登录会话" ✓。
+    owner: UserId,
 }
 
 /// 扫码会话表。
@@ -73,16 +87,35 @@ impl LoginSessions {
     }
 
     /// 推进一次。**锁只在这段同步代码里持有**，网络请求在外面。
-    fn take(&self, id: &str) -> Option<(QrLogin, String)> {
-        self.qr.lock().unwrap().remove(id).map(|s| (s.qr, s.tid))
+    ///
+    /// 连同 `owner` 一起取出来：调用方必须能核对"这是不是**你**发起的那次"（SEC-06）。
+    /// 不在表内比对，是因为"取出 → 发网络请求 → 放回"之间要**松手**，
+    /// 在松手期间持锁会把整张表卡在一次上游请求上 ✗。
+    fn take(&self, id: &str) -> Option<(QrLogin, String, UserId)> {
+        self.qr
+            .lock()
+            .unwrap()
+            .remove(id)
+            .map(|s| (s.qr, s.tid, s.owner))
     }
 
-    fn put_back(&self, id: String, qr: QrLogin, tid: String, now_ms: i64) {
-        self.insert(id, QrSession { qr, tid }, now_ms);
+    fn put_back(&self, id: String, qr: QrLogin, tid: String, owner: UserId, now_ms: i64) {
+        self.insert(id, QrSession { qr, tid, owner }, now_ms);
     }
 
-    fn remove(&self, id: &str) {
-        self.qr.lock().unwrap().remove(id);
+    /// 只删**自己的**那条（SEC-06）：`true` = 真的删掉了。
+    ///
+    /// ⚠ 判据与 `poll` 用同一个（`owner`）—— 两处判据不一样的话，
+    /// 就会出现"能轮询不能取消"（或反过来）这种自相矛盾的口子 ✗。
+    fn remove_for(&self, id: &str, owner: &UserId) -> bool {
+        let mut qr = self.qr.lock().unwrap();
+        match qr.get(id) {
+            Some(s) if &s.owner == owner => {
+                qr.remove(id);
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -136,8 +169,12 @@ pub struct StartQrResponse {
 }
 
 /// `POST /api/login/qr` —— 出码（**不发任何上游请求**）。
+///
+/// ⚠ 要 `Extension<CurrentUser>` 不是为了"挡人"（闸已经挡了），而是要把
+/// **发起者记进会话**（安全审计 `SEC-06`）—— 见 [`QrSession::owner`]。
 pub async fn start_qr(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Json(req): Json<StartQrRequest>,
 ) -> ApiResult<StartQrResponse> {
     let platform = parse_platform(&req.platform)?;
@@ -158,9 +195,14 @@ pub async fn start_qr(
     let tid = state.handle.login.new_tid();
 
     // ⚠ 顺手扫一遍过期的（复审 sv-7）：这张表原先只进不出。
-    state
-        .login_sessions
-        .put_back(session_id.clone(), qr, tid, state.handle.clock.now_ms());
+    // ⚠ `owner` 一起落进去（审计 SEC-06）：之后 poll / cancel 都要核对它。
+    state.login_sessions.put_back(
+        session_id.clone(),
+        qr,
+        tid,
+        cur.0,
+        state.handle.clock.now_ms(),
+    );
 
     Ok(Json(StartQrResponse {
         session_id,
@@ -213,14 +255,31 @@ pub async fn poll_qr(
     Json(req): Json<PollQrRequest>,
 ) -> ApiResult<PollQrResponse> {
     // 取出会话（不持锁发请求）—— 锁跨 await 是这类表最容易犯的错。
-    let Some((mut qr, tid)) = state.login_sessions.take(&req.session_id) else {
+    let Some((mut qr, tid, owner)) = state.login_sessions.take(&req.session_id) else {
         // 会话不存在：可能是过期被清了，也可能是前端拿错了 id。
         // 404 让前端能明确区分"再出一张码"与"网络问题重试"。
-        return Err(ApiError(mcloud_core::Error::NotFound(format!(
-            "扫码会话不存在或已过期：{}",
-            req.session_id
-        ))));
+        return Err(session_not_found(&req.session_id));
     };
+
+    // ⚠⚠ 必须是**发起这次扫码的那个人**（安全审计 `SEC-06`）。
+    //
+    // 少了这一条，`session_id` 就是一张"谁拿到谁能用"的通行证：第三方可以
+    // 推进别人的会话，把"扫码成功后落进谁名下"这件事从受害者手里夺走
+    //（QR 码是攻击者出的、受害者扫的 ⇒ 账号落进攻击者名下）✗。
+    //
+    // 放回去再回 404（而不是直接丢掉）：否则"猜一个 id"就成了一次
+    // **对别人扫码会话的拒绝服务** —— 真正的主人再轮询就只剩 404 了 ✗。
+    if owner != cur.0 {
+        state.login_sessions.put_back(
+            req.session_id.clone(),
+            qr,
+            tid,
+            owner,
+            state.handle.clock.now_ms(),
+        );
+        // 与"不存在"同一个响应：不告诉猜 id 的人"这个 id 是有的，只是不是你的" ✓
+        return Err(session_not_found(&req.session_id));
+    }
 
     let progress = state.handle.login.poll_qr(&mut qr, &tid).await;
 
@@ -250,9 +309,13 @@ pub async fn poll_qr(
             .is_terminal();
             // 限流不是终态：会话要放回去，前端退避后接着问。
             if !terminal {
-                state
-                    .login_sessions
-                    .put_back(req.session_id, qr, tid, state.handle.clock.now_ms());
+                state.login_sessions.put_back(
+                    req.session_id,
+                    qr,
+                    tid,
+                    owner,
+                    state.handle.clock.now_ms(),
+                );
             }
             Ok(Json(PollQrResponse {
                 phase: "failed".into(),
@@ -268,9 +331,13 @@ pub async fn poll_qr(
                 Ok(QrProgress::Scanned) => "scanned",
                 _ => "not_scanned",
             };
-            state
-                .login_sessions
-                .put_back(req.session_id, qr, tid, state.handle.clock.now_ms());
+            state.login_sessions.put_back(
+                req.session_id,
+                qr,
+                tid,
+                owner,
+                state.handle.clock.now_ms(),
+            );
             Ok(Json(PollQrResponse {
                 phase: phase.into(),
                 terminal: false,
@@ -282,20 +349,38 @@ pub async fn poll_qr(
         }
         Err(e) => {
             // 网络抖动不该让用户重出一张码：会话放回去，前端可以再问。
-            state
-                .login_sessions
-                .put_back(req.session_id, qr, tid, state.handle.clock.now_ms());
+            state.login_sessions.put_back(
+                req.session_id,
+                qr,
+                tid,
+                owner,
+                state.handle.clock.now_ms(),
+            );
             Err(ApiError(e))
         }
     }
 }
 
+/// "扫码会话不存在"的 404 —— `poll` 与 `cancel` 共用一份措辞，
+/// 免得两条路给出的说法不一样、被人拿来区分"id 存在但不是我"与"id 不存在"。
+fn session_not_found(id: &str) -> ApiError {
+    ApiError(mcloud_core::Error::NotFound(format!(
+        "扫码会话不存在或已过期：{id}"
+    )))
+}
+
 /// `DELETE /api/login/qr/{session_id}` —— 主动放弃一次扫码。
+///
+/// ⚠ 只能取消**自己发起**的那次（安全审计 `SEC-06`）：判据与 `poll` 完全一致。
+/// 不是自己的（或本来就不存在）⇒ 同样回 404，且**不动**那条会话。
 pub async fn cancel_qr(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     axum::extract::Path(session_id): axum::extract::Path<String>,
 ) -> ApiResult<serde_json::Value> {
-    state.login_sessions.remove(&session_id);
+    if !state.login_sessions.remove_for(&session_id, &cur.0) {
+        return Err(session_not_found(&session_id));
+    }
     Ok(Json(serde_json::json!({ "cancelled": true })))
 }
 
@@ -344,10 +429,19 @@ pub struct SliderPayload {
 }
 
 /// `POST /api/login/sms/start` —— 发验证码。
+///
+/// ⚠ **限速**（安全审计 `SEC-08`）：这条路是 `/api/login/*` 里唯一会对**外部**
+/// 产生副作用的一枪 —— 每调一次就真发一条短信（可能被运营商计费、也可能触发
+/// 上游风控）。已登录用户不受登录闸限速，所以必须单独设闸 ✓。
 pub async fn start_sms(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Json(req): Json<SmsStartRequest>,
 ) -> ApiResult<SmsStartResponse> {
+    // ⚠ 先过闸再干活：放后面就等于"短信已经发出去了才说你太快了" ✗
+    if let Some(err) = super::auth::sensitive_rate_limit(&state, &cur.0) {
+        return Err(err);
+    }
     let platform = parse_platform(&req.platform)?;
     if req.phone.trim().is_empty() {
         return Err(ApiError(mcloud_core::Error::Config(
@@ -545,10 +639,17 @@ pub struct AppSmsStartResponse {
 }
 
 /// `POST /api/login/app/sms/start` —— App 端发码；需要滑块时顺手把题取回来。
+///
+/// ⚠ 与 PC 那条**共用一个闸**（`sensitive_limiter`，键 = 用户 id）：两条路都是
+/// "真发一条短信"，各设一个闸等于把配额翻倍 ✓（安全审计 `SEC-08`）。
 pub async fn app_start_sms(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Json(req): Json<AppSmsStartRequest>,
 ) -> ApiResult<AppSmsStartResponse> {
+    if let Some(err) = super::auth::sensitive_rate_limit(&state, &cur.0) {
+        return Err(err);
+    }
     let phone = req.phone.trim();
     if phone.is_empty() {
         return Err(ApiError(mcloud_core::Error::Config(
@@ -792,15 +893,47 @@ pub async fn rotate_device(State(state): State<ServerState>) -> ApiResult<Device
 /// 账号是 `mcloud_app::LoginService::finish_*` 落库的，而那一层不知道
 /// 「当前 WebUI 会话是谁」（认证在 server 层）。不补的话，多用户实例里
 /// 新登录的账号就是「无主数据」—— 谁都看不到（失败关闭）。
-/// 补写是**覆盖式**的：同一条账号再 save 一次只是把 owner 钉成当前用户。
+///
+/// # ⚠⚠ 2026-10-06 安全审计 `SEC-05`：这里**不能**盲目覆盖
+///
+/// 旧实现是"`account.owner = Some(当前用户)` 然后整行 save"。两个问题：
+///
+/// 1. **整行覆盖**：`account` 是 `finish_*` 刚**新建**出来的对象（昵称 / 每账号
+///    设置 / 停用状态都是默认值）⇒ 把别人那一行的这些字段一起抹平 ✗
+///    （现在 `persist_login` 已经改成保留式合并，但这一层不该**依赖**那个前提 ——
+///    它要是退回覆盖式，这里会安静地把别人的配置删掉）；
+/// 2. **抢归属**：这一行要是已经属于**别人**，覆盖 owner 就是一次归属劫持 ✗。
+///    能走到这里说明"这个云盘账号的登录被完成了"，而登录可以由第三方促成
+///    （`SEC-06` 的 QR 场景、或知道手机号+验证码的人）⇒ 归属检查必须在这里兜底 ✓。
+///
+/// 现在的做法：**以库里那一行为准**（`persist_login` 已经做过保留式合并），
+/// 只改 `owner`；归属冲突 ⇒ 404（不泄露"这个账号存在"）。
 async fn claim_account(
     state: &ServerState,
     owner: &mcloud_core::UserId,
-    mut account: mcloud_core::Account,
+    account: mcloud_core::Account,
 ) -> Result<mcloud_core::Account, ApiError> {
-    account.owner = Some(owner.clone());
-    state.handle.store.save_account(&account).await?;
-    Ok(account)
+    // ⚠ 用**不带归属过滤**的 `account()`：`account_for` 对"别人的账号"回 None，
+    // 那正是这里要区分出来的情形 —— 用它就永远看不出冲突 ✗
+    let mut stored = state
+        .handle
+        .store
+        .account(&account.id)
+        .await?
+        .unwrap_or(account);
+
+    if let Some(prev) = stored.owner.as_ref() {
+        if prev != owner {
+            return Err(ApiError(mcloud_core::Error::NotFound(format!(
+                "账号不存在：{}",
+                stored.id.as_str()
+            ))));
+        }
+    }
+
+    stored.owner = Some(owner.clone());
+    state.handle.store.save_account(&stored).await?;
+    Ok(stored)
 }
 
 fn parse_platform(text: &str) -> Result<PcPlatform, ApiError> {

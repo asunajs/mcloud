@@ -65,6 +65,35 @@ pub const SUBSCRIBER_CAPACITY: usize = 1024;
 /// 前端看历史走 `/api/runs/{id}`（读存储层），不再依赖内存。
 pub const MAX_TERMINAL_RUNS_KEPT: usize = 8;
 
+/// 同一条 run 最多允许多少个订阅者（2026-10-06 安全审计 `SEC-17`）。
+///
+/// # 为什么要有上限
+///
+/// 一条 SSE 订阅 = 一个常驻任务 + 一份队列，而**它不受 HTTP 层并发上限约束**
+///（`ConcurrencyLimitLayer` 的名额在 handler 返回响应那一刻就还回去了，而事件流
+/// 在那之后还要活很久）。不设上限的话，"开一堆连接订阅同一条 run"就是一条
+/// 免认证？不 —— 订阅要登录；但**一个已登录用户**照样能把进程的内存吃光 ✗。
+///
+/// 32 的依据：正常使用是"一个页面一条流"（外加断线重连的短暂重叠），
+/// 32 条覆盖"多标签页 + 多设备 + 重连"绰绰有余，又远小于"能把内存吃光"的量级 ✓。
+/// 与 [`MAX_TERMINAL_RUNS_KEPT`] 一起，把订阅者总数钉在
+/// `32 × (在跑的 + 8)` 这个量级 ✓。
+pub const MAX_SUBSCRIBERS_PER_RUN: usize = 32;
+
+/// [`EventHub::subscribe`] 失败的原因。
+///
+/// ⚠ 两个原因是**不同的事**，调用方要分开处理：前者（内存里没有）应当从存储层
+/// 回放终局，后者（人太多）应当回一个明确的拒绝 —— 混成一个 `None`
+/// 会让"订阅一条已结束的 run"和"订阅者满了"变成同一种表现 ✗。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscribeError {
+    /// 内存里**没有**这条 run：它要么已结束且历史被回收，要么压根没发布过事件。
+    /// 调用方应当改走存储层（发一条终局事件然后收尾）。
+    NotTracked,
+    /// 这条 run 的订阅者已达 [`MAX_SUBSCRIBERS_PER_RUN`]。
+    TooManySubscribers,
+}
+
 /// 一个 run 的内存态。
 #[derive(Debug, Default)]
 struct RunState {
@@ -152,12 +181,70 @@ impl EventHub {
     ///
     /// `since` 是"客户端**已经看到**的序号"（用 [`Seq::seen`] 构造）。
     /// 返回订阅者 id，调用方随后用 [`EventHub::drain`] 拉取。
-    pub fn subscribe(&self, run_id: RunId, since: Seq) -> u64 {
+    ///
+    /// # ⚠⚠ 2026-10-06 安全审计 `SEC-17`：这里**不再**凭空建条目
+    ///
+    /// 旧实现是 `inner.runs.entry(run_id).or_default()` —— 订阅一条**内存里没有**
+    /// 的 run（已结束 + 历史被 `evict_terminal_runs` 回收）会建出一个
+    /// **非终态**空条目 ⇒ 之后 `drain` 永远空、通知永远等不到 ⇒ 那条 SSE
+    /// **永不结束**（客户端只能一直收 keep-alive）✗；而且这个空条目
+    /// **永远不会被回收**（`evict_terminal_runs` 只收 `terminal` 的）⇒
+    /// 反复订阅不存在的 run 就是一条内存泄漏 ✗。
+    ///
+    /// 现在返回 [`SubscribeError::NotTracked`]，由调用方决定"从存储层回放终局" ✓。
+    /// 判存在与建订阅**在同一把锁内**完成，所以不存在"查完就被回收"的窗口 ✓。
+    pub fn subscribe(&self, run_id: RunId, since: Seq) -> Result<u64, SubscribeError> {
+        self.subscribe_inner(run_id, since, false)
+    }
+
+    /// 订阅一个**已经确认在跑、但还没发布第一条事件**的 run（审计 `SEC-17` 的配套）。
+    ///
+    /// # 为什么必须有这条路
+    ///
+    /// `POST /api/runs` 在 **spawn 运行任务之前**就把归属登记进 `run_owners`
+    ///（`runs.rs` 的 `note_run_owner`）⇒ 客户端可能在"归属已经可判"到
+    /// "第一条 `started` 事件到达"之间订阅。那个窗口里 [`EventHub::subscribe`]
+    /// 会说 `NotTracked`，而**存储层也还没有记录**（运行记录是**结束时**才写的）
+    /// ⇒ 调用方若据此"回放终局"就会得到 404，把一条正在跑的流判成不存在 ✗。
+    ///
+    /// ⚠⚠ 它**只该**在调用方已经确认"这条 run 真的在跑"时用（`run_owners` 有它、
+    /// 且存储层还没有记录）。拿它去订一条不存在的 run 就退回了旧实现那个
+    /// "永不结束 + 永不回收"的坑 ✗ —— 所以两条路是两个名字，不是一个 `bool` 参数
+    /// 藏在默认值里 ✓。
+    pub fn subscribe_pending(&self, run_id: RunId, since: Seq) -> Result<u64, SubscribeError> {
+        self.subscribe_inner(run_id, since, true)
+    }
+
+    fn subscribe_inner(
+        &self,
+        run_id: RunId,
+        since: Seq,
+        create: bool,
+    ) -> Result<u64, SubscribeError> {
         let mut inner = self.lock();
+
+        // ⚠ 顺序有讲究：`id` 要在**拿到 `state` 之前**取。
+        // `state` 是对 `inner.runs` 的可变借用，而 `inner.next_subscriber` 是
+        // 另一个字段 —— 直接写两个字段本来允许（不相交借用），但中间夹一个
+        // `if/else` + `?` 之后借用区间的推断就变紧了（实测 E0502/E0499）。
+        // 先取 id 就绕开了这件事，语义完全一样 ✓。
+        // 代价：`TooManySubscribers` 那条早退会白耗一个 id —— id 只是个
+        // 单调递增的编号，跳号无害 ✓。
         let id = inner.next_subscriber;
         inner.next_subscriber = inner.next_subscriber.wrapping_add(1);
 
-        let state = inner.runs.entry(run_id).or_default();
+        let state = if create {
+            inner.runs.entry(run_id).or_default()
+        } else {
+            inner
+                .runs
+                .get_mut(&run_id)
+                .ok_or(SubscribeError::NotTracked)?
+        };
+        if state.subscribers.len() >= MAX_SUBSCRIBERS_PER_RUN {
+            return Err(SubscribeError::TooManySubscribers);
+        }
+
         // 把 since 之后的历史补进队列 —— 这样"订阅之前就已发布的事件"
         // 不会因为订阅动作本身而丢掉
         let backlog: Vec<Sequenced> = state
@@ -173,7 +260,7 @@ impl EventHub {
                 dropped: 0,
             },
         );
-        id
+        Ok(id)
     }
 
     pub fn unsubscribe(&self, run_id: RunId, subscriber: u64) {

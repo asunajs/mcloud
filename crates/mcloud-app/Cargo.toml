@@ -16,6 +16,9 @@ mcloud-upstream.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# 推送地址的安全闸用它解析主机：**必须与 reqwest 同一把尺子**，
+# 否则两套解析的差异就是一条 SSRF 绕过（见 `push::validate_push_url` ✓）。
+url.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true

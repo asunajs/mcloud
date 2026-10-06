@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use mcloud_core::{AppSettings, PasswordHash, User};
 
-use crate::auth_gate::CurrentUser;
+use crate::auth_gate::{require_admin, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::routes::auth::{login_scheme, make_session, session_expires_at, set_cookie_response};
 use crate::ServerState;
@@ -70,10 +70,17 @@ pub async fn get_security(State(state): State<ServerState>) -> ApiResult<Securit
     Ok(Json(view(&state).await?))
 }
 
+/// `PUT /api/admin/security` —— **只有管理员**（安全审计 SEC-07）。
+///
+/// 这里改的是**实例级**策略（口令长度下限、会话 TTL），影响所有人；
+/// 而 `GET` 保持开放：那些值本来就在未登录可读的 `GET /api/setup` 里
+/// （前端要靠它渲染"至少 N 位"的提示）⇒ 藏它没有意义 ✗。
 pub async fn put_security(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Json(body): Json<SecurityPatch>,
 ) -> ApiResult<SecurityView> {
+    require_admin(&state, &cur).await?;
     let next = AppSettings {
         min_password_len: body.min_password_len,
         session_ttl_hours: body.session_ttl_hours,
@@ -118,6 +125,12 @@ pub async fn change_password(
     Extension(CurrentUser(user_id)): Extension<CurrentUser>,
     Json(body): Json<PasswordChange>,
 ) -> Result<Response, ApiError> {
+    // ⚠ 先过闸（安全审计 SEC-08）：下面那次 `verify_password` 就是一次 argon2
+    // （19 MiB × 2 轮），而这个路由**不受登录闸限速**（那时已经登录了）⇒
+    // 不设闸的话，一个已登录用户就能用"反复改口令"把自己的机器打满 ✗。
+    if let Some(err) = crate::routes::auth::sensitive_rate_limit(&state, &user_id) {
+        return Err(err);
+    }
     let store = Arc::clone(&state.handle.store);
     let user = store
         .user(&user_id)
@@ -173,6 +186,7 @@ pub async fn change_password(
         StatusCode::OK,
         &token,
         session_expires_at(session.expires_at_ms, now),
+        state.cookie_secure,
         Json(PasswordChanged {
             user_id: user.id.to_string(),
             name: user.name,

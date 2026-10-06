@@ -68,30 +68,66 @@ fn too_frequent_says_retry_is_automatic() {
 /// 会话表的增删查：`take` 之后就没了吗？
 #[test]
 fn session_table_take_and_remove() {
+    use mcloud_core::UserId;
     use mcloud_crypto::SeqRandom;
 
     let table = LoginSessions::new();
+    let owner = UserId::new("u1");
     let mut rng = SeqRandom::new(1);
     let qr = QrLogin::start(PcPlatform::Windows, "DEV", &mut rng, 0);
     let sid = qr.session_id().to_string();
-    table.put_back(sid.clone(), qr, "tid-1".into(), 0);
+    table.put_back(sid.clone(), qr, "tid-1".into(), owner.clone(), 0);
 
     // 取出后表里就没了（避免两个请求同时推进同一个会话）
-    let (qr, tid) = table.take(&sid).expect("应当取得到");
+    let (qr, tid, who) = table.take(&sid).expect("应当取得到");
     assert_eq!(tid, "tid-1");
+    assert_eq!(who, owner, "发起者要跟着会话一起取出来（审计 SEC-06）");
     assert!(table.take(&sid).is_none(), "取出后不该还在");
 
     // 放回去又能取到
-    table.put_back(sid.clone(), qr, "tid-1".into(), 0);
+    table.put_back(sid.clone(), qr, "tid-1".into(), owner.clone(), 0);
     assert!(table.take(&sid).is_some());
 
     // 显式移除
     let mut rng = SeqRandom::new(2);
     let qr2 = QrLogin::start(PcPlatform::MacOs, "DEV", &mut rng, 0);
     let sid2 = qr2.session_id().to_string();
-    table.put_back(sid2.clone(), qr2, "t".into(), 0);
-    table.remove(&sid2);
+    table.put_back(sid2.clone(), qr2, "t".into(), owner.clone(), 0);
+    assert!(table.remove_for(&sid2, &owner), "自己的会话该删得掉");
     assert!(table.take(&sid2).is_none());
+}
+
+/// ⭐⭐ 审计 `SEC-06`：扫码会话**只归发起它的那个人**。
+///
+/// 不绑发起者的话，`session_id` 就是一张"谁拿到谁能用"的通行证 ——
+/// 第三方可以推进别人的会话，把"扫码成功后账号落进谁名下"从受害者手里夺走 ✗。
+///
+/// 红测：把 `remove_for` 里的 `s.owner == owner` 判断去掉（退回旧的 `remove`）
+/// ⇒ 本测试后两条断言红。
+#[test]
+fn a_qr_session_belongs_to_the_user_who_started_it() {
+    use mcloud_core::UserId;
+    use mcloud_crypto::SeqRandom;
+
+    let table = LoginSessions::new();
+    let alice = UserId::new("alice");
+    let bob = UserId::new("bob");
+    let mut rng = SeqRandom::new(11);
+    let qr = QrLogin::start(PcPlatform::Windows, "DEV", &mut rng, 0);
+    let sid = qr.session_id().to_string();
+    table.put_back(sid.clone(), qr, "tid".into(), alice.clone(), 0);
+
+    // 别人删不掉，而且**那条会话还在**（不能因为"不是你的"就顺手丢掉 ——
+    // 否则猜一个 id 就成了一次对别人扫码流程的拒绝服务 ✗）
+    assert!(!table.remove_for(&sid, &bob), "别人的会话不该删得掉");
+    assert!(table.take(&sid).is_some(), "没删掉就得还在");
+
+    // 放回去，发起者自己删得掉
+    let mut rng = SeqRandom::new(12);
+    let qr = QrLogin::start(PcPlatform::Windows, "DEV", &mut rng, 0);
+    let sid2 = qr.session_id().to_string();
+    table.put_back(sid2.clone(), qr, "tid".into(), alice.clone(), 0);
+    assert!(table.remove_for(&sid2, &alice), "发起者该删得掉");
 }
 
 /// ⚠⚠ 复审 `sv-7`：**插入时要把过期的扫掉**（这张表原先只进不出）。
@@ -102,21 +138,29 @@ fn session_table_take_and_remove() {
 /// 红测：把 `insert` 里那句 `retain(|_, s| !s.qr.is_expired(now_ms))` 删掉 ⇒ 红。
 #[test]
 fn inserting_sweeps_the_expired_sessions() {
+    use mcloud_core::UserId;
     use mcloud_crypto::SeqRandom;
 
     let table = LoginSessions::new();
+    let owner = UserId::new("u1");
     let mut rng = SeqRandom::new(7);
 
     // 一张**只有 1 秒**有效期的码（`with_ttl` 是"把码发给别人扫"用的那条口子）
     let stale = QrLogin::start(PcPlatform::Windows, "DEV", &mut rng, 0).with_ttl(1);
     let stale_id = stale.session_id().to_string();
-    table.put_back(stale_id.clone(), stale, "tid-old".into(), 0);
+    table.put_back(stale_id.clone(), stale, "tid-old".into(), owner.clone(), 0);
     assert_eq!(table.qr.lock().unwrap().len(), 1, "先是插进去了");
 
     // 5 秒后再插一条新的 ⇒ 旧的早过期了，必须被顺手扫掉
     let fresh = QrLogin::start(PcPlatform::Windows, "DEV", &mut rng, 5_000);
     let fresh_id = fresh.session_id().to_string();
-    table.put_back(fresh_id.clone(), fresh, "tid-new".into(), 5_000);
+    table.put_back(
+        fresh_id.clone(),
+        fresh,
+        "tid-new".into(),
+        owner.clone(),
+        5_000,
+    );
 
     let qr = table.qr.lock().unwrap();
     assert_eq!(qr.len(), 1, "过期那条应当被扫掉，实得 {} 条", qr.len());

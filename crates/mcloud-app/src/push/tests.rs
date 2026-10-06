@@ -822,3 +822,55 @@ fn push_urls_that_point_inside_are_refused() {
         assert!(validate_push_url(bad).is_err(), "这条本该被拒：{bad}");
     }
 }
+
+/// ⚠⚠ 2026-10-06 安全审计 `SEC-04`：**同一把尺子**才能挡住这几条。
+///
+/// 旧闸是"自己切字符串 + `host.parse::<IpAddr>()`"，而 reqwest 走 WHATWG 解析
+/// （`url` crate）—— 下面这些写法在 WHATWG 里**全是 `127.0.0.1` / 内网地址**，
+/// 但在"自己切字符串"眼里只是几个**不像 IP 的域名** ⇒ 旧闸放行 ✗（实测过）。
+///
+/// 红测：把 `validate_push_url` 改回按 `://` 切字符串 + `parse::<IpAddr>()`
+/// ⇒ 这一整组全红（尤其前四条与两条 `::ffff:`）。
+#[test]
+fn whatwg_ipv4_spellings_cannot_smuggle_a_private_host_past_the_gate() {
+    for bad in [
+        // WHATWG 的 IPv4 数字解析：十进制 / 十六进制 / 八进制 / 末尾点
+        //（`url-2.5.8/src/host.rs:297-361`）—— 都会被归一化成 127.0.0.1
+        "http://2130706433/",
+        "http://0x7f000001/",
+        "http://017700000001/",
+        "http://127.0.0.1./",
+        "http://2130706433:3000/api/system/restart",
+        // 云元数据 / 私网的同一批写法
+        "http://2852039166/", // 169.254.169.254 的十进制
+        "http://0xa9fea9fe/", // 同上，十六进制
+        "http://3232235777/", // 192.168.1.1 的十进制
+        // IPv4-mapped IPv6：`is_loopback()` 这些判据一条都不认它
+        "http://[::ffff:127.0.0.1]/",
+        "http://[::ffff:169.254.169.254]/",
+        "http://[::ffff:10.0.0.1]/",
+        "http://[::ffff:192.168.1.1]/",
+        // 名字的末尾点（DNS 里与不带点等价）
+        "http://localhost./hook",
+        "http://nas.local./hook",
+        "http://foo.internal./hook",
+    ] {
+        assert!(
+            validate_push_url(bad).is_err(),
+            "这条本该被拒（WHATWG 归一化后指向本机/内网）：{bad}"
+        );
+    }
+
+    // 反向：公网地址不能被这一轮收紧误伤（尤其"末尾点"不该把正常域名一起拒掉）
+    for ok in [
+        "https://push.example.com./hook",
+        "http://8.8.8.8/hook",
+        "http://172.32.0.1/x", // 172.16/12 之外
+    ] {
+        assert!(
+            validate_push_url(ok).is_ok(),
+            "这条本该放行：{ok} —— {:?}",
+            validate_push_url(ok)
+        );
+    }
+}

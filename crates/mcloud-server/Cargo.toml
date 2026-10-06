@@ -41,11 +41,14 @@ rust-embed.workspace = true
 mime_guess.workspace = true
 qrcode.workspace = true
 base64.workspace = true
+# `limit`：并发上限（`ConcurrencyLimitLayer`）—— 把"一次能同时跑多少个 handler"
+# 钉成一个常数，理由见 `lib.rs` 里那一层的注释 ✓。
+# `util`：`ServiceExt` —— 生产路径用不到，但**测试**要用（`oneshot` 直接打 Router，
+# 不真的起监听端口，也不与正在跑的服务抢 :3000 ✓）。放在 [dependencies] 里
+# 一份就够：dev 目标同样看得见 ✓。
+tower = { version = "0.5", features = ["util", "limit"] }
 
 [dev-dependencies]
-# 路由级测试：`oneshot` 直接打 Router，不真的起监听端口。
-# 这样测试不依赖端口分配，也不会与正在跑的服务抢 8080。
-tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 mcloud-store.workspace = true
 mcloud-core = { workspace = true, features = ["testkit"] }

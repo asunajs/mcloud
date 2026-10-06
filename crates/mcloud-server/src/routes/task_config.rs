@@ -21,13 +21,14 @@
 
 use std::collections::HashSet;
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::Json;
 use mcloud_core::Error;
 use mcloud_engine::{ParamKind, ParamSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::auth_gate::{require_admin, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::ServerState;
 
@@ -138,11 +139,18 @@ fn type_error(spec: &ParamSpec, want: &str) -> ApiError {
     )))
 }
 
-/// `GET /api/tasks/{name}/config`
+/// `GET /api/tasks/{name}/config` —— **只有管理员**（安全审计 SEC-07）。
+///
+/// ⚠ 这两个 handler 一起收，而不是只收 PUT：这份参数是**实例级**的一张表
+/// （`task_params` 按任务名存，不按用户存），所以它对所有人都一样 ——
+/// 只锁写的话，读到的仍是同一份东西，等于没分权 ✗。真正的"每个用户一套参数"
+/// 需要把存储键从 `任务名` 改成 `(用户, 任务名)`，那是另一件事（见报告 SEC-07）。
 pub async fn get_one(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Path(name): Path<String>,
 ) -> ApiResult<TaskConfigView> {
+    require_admin(&state, &cur).await?;
     let specs = specs_of(&state, &name)?;
     let saved = state.handle.store.task_params(&name).await?;
     // 存过的值与默认值合并后再归一化：老配置里缺了新加的键也能正常读出来。
@@ -167,12 +175,14 @@ fn merge(specs: &[ParamSpec], saved: &Value) -> Value {
     Value::Object(out)
 }
 
-/// `PUT /api/tasks/{name}/config`
+/// `PUT /api/tasks/{name}/config` —— **只有管理员**（安全审计 SEC-07）。
 pub async fn put_one(
     State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
     Path(name): Path<String>,
     Json(body): Json<TaskConfigPatch>,
 ) -> ApiResult<TaskConfigView> {
+    require_admin(&state, &cur).await?;
     let specs = specs_of(&state, &name)?;
     let normalized = normalize(&specs, &body.params)?;
     state

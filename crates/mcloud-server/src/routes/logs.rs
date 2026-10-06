@@ -8,6 +8,7 @@ use mcloud_core::{LogLine, RunId, Seq};
 
 use crate::auth_gate::CurrentUser;
 use crate::error::{ApiError, ApiResult};
+use crate::routes::runs::{run_access, RunAccess};
 use crate::ServerState;
 
 #[derive(Debug, Deserialize)]
@@ -33,12 +34,23 @@ pub async fn list(
     Query(q): Query<LogQuery>,
 ) -> ApiResult<Vec<LogLine>> {
     let run_id = RunId::new(id);
-    // 先确认运行记录**是自己的**，避免"不存在的 run"与"还没日志"被混为一谈，
-    // 同时把别人的运行与不存在的运行回成同一个 404（不泄露存在性）。
-    if state.handle.store.run_for(&cur.0, run_id).await?.is_none() {
-        return Err(ApiError(mcloud_core::Error::NotFound(format!(
-            "运行记录不存在：{id}"
-        ))));
+
+    // ⚠⚠ 2026-10-06 审计 `SEC-20`：可见性口径必须与 `/api/runs/{id}/events` **一致**。
+    //
+    // 旧代码只查**存储层**（`store.run_for`）⇒ 一条**正在跑**的 run 一律 404
+    //（运行记录是**结束时**才落盘的），而同一时刻 `/events` 是 200 ——
+    // 同一个 run、两个端点给出相反的答案 ✗。方向虽然是失败关闭（不泄露），
+    // 但"运行中读不到日志"是**功能损失**：前端想边跑边看日志就只能走 SSE。
+    //
+    // `run_access` 三处都看（本服务发起登记 / 存储层 / 内存中枢），并且
+    // "别人的"与"压根不存在"回**同一个 404**（不泄露存在性）✓。
+    match run_access(&state, &cur.0, run_id).await? {
+        RunAccess::Allowed => {}
+        RunAccess::Denied | RunAccess::Unknown => {
+            return Err(ApiError(mcloud_core::Error::NotFound(format!(
+                "运行记录不存在：{id}"
+            ))));
+        }
     }
 
     let since = q.after.map(Seq::seen);

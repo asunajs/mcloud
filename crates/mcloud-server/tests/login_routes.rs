@@ -225,12 +225,19 @@ async fn polling_unknown_session_is_404() {
 }
 
 /// 放弃一次扫码：会话被移除，再轮询就是 404。
+///
+/// ⚠ 路由**只建一次**：`authed_app` 每调一次都会 `ServerState::new` ⇒
+/// 扫码会话表（在 `ServerState` 里）**每次都是空的**。以前三次调用各建一次，
+/// 于是"DELETE 成功"其实是因为**表本来就是空的**（`remove` 无条件成功），
+/// 这条测试并没有真的验证"取消把会话摘掉了" ✗。
+/// 绑了发起者之后（审计 `SEC-06`）它才暴露出来：DELETE 找不到那条会话 ⇒ 404。
 #[tokio::test]
 async fn cancelling_qr_session_removes_it() {
     let (handle, dir) = test_app("qr-cancel");
+    let app = authed_app(handle.clone());
 
     let (status, body) = send(
-        authed_app(handle.clone()),
+        app.clone(),
         post_json("/api/login/qr", &serde_json::json!({"platform": "windows"})),
     )
     .await;
@@ -243,11 +250,11 @@ async fn cancelling_qr_session_removes_it() {
         .uri(format!("/api/login/qr/{sid}"))
         .body(Body::empty())
         .unwrap();
-    let (status, _) = send(authed_app(handle.clone()), req).await;
-    assert_eq!(status, StatusCode::OK);
+    let (status, body) = send(app.clone(), req).await;
+    assert_eq!(status, StatusCode::OK, "发起者自己该取消得掉：{body}");
 
     let (status, _) = send(
-        authed_app(handle.clone()),
+        app.clone(),
         post_json(
             "/api/login/qr/poll",
             &serde_json::json!({"session_id": sid}),
@@ -766,6 +773,56 @@ async fn the_public_auth_routes_are_rate_limited() {
     // `/api/setup` 是同一个闸（两条路都在 PUBLIC 里，都算 argon2）
     let (st, _) = send(app.clone(), post_json("/api/setup", &credentials)).await;
     assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "/api/setup 也该在闸内");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐⭐ 2026-10-06 安全审计 `SEC-02`：限速**按 peer IP 分桶**。
+///
+/// 与 `ratelimit.rs` 里那条单测分工不同：那条测限速器本身，这条测**装配** ——
+/// `serve` 侧要接 `ConnectInfo`（`main.rs`）、handler 要把它取出来当键（`auth.rs`）。
+/// 少任何一半，攻击者打满配额就能把**管理员**锁在登录页外（WebUI 是唯一配置入口）✗。
+///
+/// 红测：把 `auth.rs` 里 `auth_rate_limit(&state, &peer_key(&peer))` 的键换成常量
+/// ⇒ 本测试最后两条断言红（管理员也会拿到 429）。
+#[tokio::test]
+async fn the_auth_rate_limit_is_per_peer_ip() {
+    use axum::extract::ConnectInfo;
+    use mcloud_server::ratelimit::RateLimiter;
+    use std::net::SocketAddr;
+
+    let (handle, dir) = test_app("ratelimit-per-ip");
+    let mut state = ServerState::new(Arc::clone(&handle));
+    state.auth_limiter = Arc::new(RateLimiter::new(60_000, 2));
+    let app = mcloud_server::app(state);
+
+    let credentials = serde_json::json!({ "username": "admin", "password": "irrelevant" });
+    // `ConnectInfo` 正常由 `serve` 的 make-service 塞进 extensions；测试里手动塞，
+    // 形状与生产完全一致（否则这条测试就测不到真正的接线了 ✗）。
+    let from = |ip: &str| {
+        let mut req = post_json("/api/session", &credentials);
+        let addr: SocketAddr = format!("{ip}:40000").parse().expect("测试地址应合法");
+        req.extensions_mut().insert(ConnectInfo(addr));
+        req
+    };
+
+    // 攻击者打满**自己**的配额
+    for i in 1..=2 {
+        let (st, _) = send(app.clone(), from("198.51.100.9")).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "攻击者第 {i} 次在配额内：{st}");
+    }
+    let (st, _) = send(app.clone(), from("198.51.100.9")).await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "攻击者第 3 次必须被限速");
+
+    // ⭐ 管理员（另一个 IP）不受影响 —— 这正是"全局单键"那版最致命的地方
+    let (st, body) = send(app.clone(), from("192.0.2.1")).await;
+    assert_eq!(
+        st,
+        StatusCode::BAD_REQUEST,
+        "别人的洪水不该把管理员挡在门外：{st} {body}"
+    );
+    let (st, _) = send(app.clone(), from("192.0.2.1")).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "管理员自己的配额还没用完");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -26,6 +26,7 @@ use axum::Json;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
+use mcloud_app::SubscribeError;
 use mcloud_core::{visible_to, Account, AccountId, RunEvent, RunId, RunRecord, Seq, UserId};
 
 use crate::auth_gate::CurrentUser;
@@ -356,7 +357,7 @@ pub async fn events(
     Path(id): Path<u64>,
     headers: axum::http::HeaderMap,
     axum::extract::Query(q): axum::extract::Query<EventsQuery>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+) -> Result<EventResponse, ApiError> {
     let run_id = RunId::new(id);
 
     // ⚠ 归属判定必须在 `subscribe` **之前**：`subscribe` 会给中枢建一个空条目，
@@ -381,7 +382,38 @@ pub async fn events(
     // 订阅会把 `since` 之后的内存历史补进队列，因此"判存在"到"订阅"之间
     // 发布的事件不会漏。通知接收端要在订阅**之后**建：这样订阅到建接收端
     // 之间发布的事件已经在队列里（drain 会取到），之后发布的会唤醒我们。
-    let subscriber = hub.subscribe(run_id, since);
+    //
+    // ⚠⚠ 2026-10-06 安全审计 `SEC-17`：**内存里没有这条 run 时不能硬订阅**。
+    //
+    // 旧代码在这里建了一个**非终态**空条目（`subscribe` 里的 `or_default()`）⇒
+    // 之后 `drain` 永远空、通知永远等不到 ⇒ 这条 SSE **永不结束**，
+    // 客户端只能一直收 keep-alive ✗；而这条路完全可达 —— `run_access` 会因为
+    // "存储层有记录"判 `Allowed`，所以"订阅一条已结束、内存历史已被回收的 run"
+    // （`MAX_TERMINAL_RUNS_KEPT = 8`，第 9 条之后就会被回收）就是这个形态。
+    let subscriber = match hub.subscribe(run_id, since) {
+        Ok(id) => id,
+        Err(SubscribeError::NotTracked) => {
+            // 内存里没有 ⇒ 只有两种可能，**必须分开处理**：
+            //
+            // ① 存储层**也**没有记录 ⇒ 它还在跑（运行记录是**结束时**才写的），
+            //    只是第一条事件还没到。这条路必须**建**条目 —— 否则会把一条
+            //    正在跑的流立刻判成"已结束" ✗。
+            //    （"压根不存在"的 run 已经被上面的 `run_access` 挡掉了 ✓）
+            // ② 存储层**有**记录 ⇒ 已结束、且内存历史已被 `evict_terminal_runs`
+            //    回收 ⇒ 从存储层回放终局，发一条终局事件后立刻收尾 ✓。
+            match state.handle.store.run(run_id).await? {
+                None => hub
+                    .subscribe_pending(run_id, since)
+                    .map_err(|e| subscribe_error(run_id, e))?,
+                Some(record) => return finished_stream(record, since),
+            }
+        }
+        Err(SubscribeError::TooManySubscribers) => {
+            // 同一条 run 的订阅者满了：明确拒绝，而不是让第 33 个也挂上去
+            //（挂着不报错的表现是"内存慢慢涨、谁也不知道为什么"✗）
+            return Err(subscribe_error(run_id, SubscribeError::TooManySubscribers));
+        }
+    };
     let waiter = hub.waiter();
 
     let stream = futures::stream::unfold(
@@ -444,15 +476,33 @@ pub async fn events(
                     return Some((Box::pin(futures::stream::iter(out)) as EventChunk, st));
                 }
                 // 队列空：等新事件。用通知唤醒，不忙轮询。
-                if st.waiter.recv().await.is_err() {
-                    // 发送端没了（进程在收尾）⇒ 结束这条流。
-                    //
-                    // 这里**不置 `st.done`**：下面的 `return None` 把 `st` 一起丢掉了，
-                    // `done` 再也不会被读到（第 199 行那次读取在本轮之前）。
-                    // 置了它只会得到 `unused_assignments` 告警 —— 而 `RUSTFLAGS=-D warnings`
-                    // 会把它变成 CI 失败。与上面那条终局分支不同：那条要把 `st` 交回去，
-                    // 所以 `st.done = true` 是真有意义的。
-                    return None;
+                match st.waiter.recv().await {
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        // ⚠⚠ 审计 `SEC-17`：**落后不等于"发送端没了"**。
+                        //
+                        // 旧代码把任何 `Err` 都当成 Closed ⇒ 直接 `return None` ⇒
+                        // 这条流**静默中断**（前端看到的是"日志停在半截"，
+                        // 而没有任何错误提示）✗。
+                        // 通知频道只是个"醒一醒"的信号，事件本体在**每个订阅者
+                        // 自己的队列**里 ⇒ 漏掉几次唤醒不会丢事件，回到循环顶部
+                        // `drain` 一次就补上了 ✓。
+                        tracing::warn!(
+                            run = %st.run_id,
+                            skipped,
+                            "SSE 通知落后（事件本身没丢，继续 drain）"
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // 发送端没了（进程在收尾）⇒ 结束这条流。
+                        //
+                        // 这里**不置 `st.done`**：下面的 `return None` 把 `st` 一起丢掉了，
+                        // `done` 再也不会被读到（第 199 行那次读取在本轮之前）。
+                        // 置了它只会得到 `unused_assignments` 告警 —— 而 `RUSTFLAGS=-D warnings`
+                        // 会把它变成 CI 失败。与上面那条终局分支不同：那条要把 `st` 交回去，
+                        // 所以 `st.done = true` 是真有意义的。
+                        return None;
+                    }
                 }
             }
         },
@@ -461,15 +511,42 @@ pub async fn events(
     // unfold 产出的是"一批一批"的事件，flatten 摊平成一条流
     let stream = futures::StreamExt::flatten(stream);
 
-    Ok(Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text("keep-alive"),
-    ))
+    Ok(sse_response(Box::pin(stream)))
 }
 
 /// 一批已就绪的事件。用 box 是因为 unfold 的两个分支要返回同一个具体类型。
 type EventChunk = std::pin::Pin<Box<dyn futures::Stream<Item = Result<Event, Infallible>> + Send>>;
+
+/// SSE 响应体的流类型（**装箱**）。
+///
+/// # 为什么要装箱
+///
+/// 这条 handler 有两条返回路径：① 正常订阅（`unfold` + `flatten`），
+/// ② "已结束、内存历史已回收"（一条终局事件就收尾，审计 `SEC-17`）。
+/// 两条路的**具体类型不同**，而 `impl Trait` 在返回位置只允许**一个**具体类型
+/// ⇒ 装箱成同一个 `dyn Stream` 才能两路共用 ✓（不装箱的话是 E0308）。
+/// 代价是每条连接一次堆分配，相对一条 SSE 连接的其它开销可以忽略 ✓。
+type EventStream = std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
+
+/// SSE 响应的**具体**类型（装箱流 + keep-alive 包装）。
+///
+/// ⚠ `keep_alive` 会把流**再包一层**（`KeepAliveStream<S>`）⇒ "装箱"必须在
+/// `keep_alive` **之前**做，而且两条返回路径都要经过同一个 [`sse_response`]，
+/// 类型才会落到同一个具体类型上 ✓（先装箱再 keep_alive，与"先 keep_alive
+/// 再装箱"是两种类型 —— 后者写不出来，因为 `Sse` 不把内层流交出来）。
+type EventResponse = Sse<axum::response::sse::KeepAliveStream<EventStream>>;
+
+/// 把一条（已装箱的）事件流包成 SSE 响应，**keep-alive 的配置只有这一份**。
+///
+/// 15 秒一次 `keep-alive`：一是过掉中间设备的空闲超时，二是让客户端能区分
+/// "服务还活着但这次运行没动静"和"连接断了" ✓。
+fn sse_response(stream: EventStream) -> EventResponse {
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    )
+}
 
 /// 流的状态。
 struct StreamState {
@@ -534,4 +611,58 @@ fn sse_event(item: &mcloud_core::Sequenced) -> Result<Event, serde_json::Error> 
         .id(item.seq.get().to_string())
         .event(item.event.event_name())
         .data(data))
+}
+
+/// "这条 run 已经结束、内存历史也被回收了" 时给出的那条流（审计 `SEC-17`）。
+///
+/// # 为什么要有它
+///
+/// 内存里只留 [`mcloud_app::MAX_TERMINAL_RUNS_KEPT`] 份终态历史，更老的会被
+/// `evict_terminal_runs` 回收；而 `run_access` 只看**存储层有没有记录** ⇒
+/// "订阅第 9 条之前结束的 run" 完全可达。旧代码在那个情形下会建一个永远等不到
+/// 事件的订阅 ⇒ 流永不结束 ✗。现在改成：从存储层取终局，发**一条** `finished`
+/// 事件然后立刻收尾 —— 客户端看到的与"订阅到内存里的终局"完全一样 ✓。
+///
+/// ⚠ 序号取 `since + 1`：它必须**大于**客户端已看到的最大序号，否则会被前端
+/// 当成"重复推送"丢掉（事件流里那句 `item.seq <= st.last_sent` 的判断）✗。
+fn finished_stream(record: RunRecord, since: Seq) -> Result<EventResponse, ApiError> {
+    let run_id = record.run_id;
+    let event = RunEvent::Finished {
+        run_id,
+        outcome: record.outcome.clone(),
+        duration_ms: record.duration_ms,
+    };
+    let item = mcloud_core::Sequenced::new(Seq::seen(since.get().saturating_add(1)), event);
+    let first = sse_event(&item).map_err(|e| {
+        ApiError(mcloud_core::Error::Parse(format!(
+            "终局事件序列化失败：{e}"
+        )))
+    })?;
+
+    // ⚠ 也走 `sse_response`（而不是直接 `Sse::new`）：两条路必须是**同一个**
+    // 具体类型，而且这条流本来也可能被中间设备掐掉 —— keep-alive 一样有用 ✓
+    Ok(sse_response(Box::pin(futures::stream::iter([Ok(first)]))))
+}
+
+/// 把中枢的订阅失败翻成对客户端说的话（审计 `SEC-17`）。
+///
+/// ⚠ `NotTracked` 走到这里说明调用方漏判了（正常路径上它已经被
+/// "存储层有没有记录"那一分为二了）—— 所以它回 503 而不是 404：
+/// 这是服务端自己的口径问题，不是"你要的东西不存在"。
+fn subscribe_error(run_id: RunId, err: SubscribeError) -> ApiError {
+    match err {
+        SubscribeError::TooManySubscribers => {
+            tracing::warn!(run = %run_id, "SSE 订阅者已达上限，拒绝新连接");
+            ApiError(mcloud_core::Error::RateLimited {
+                what: "这条运行的事件流订阅".into(),
+                retry_after_secs: 5,
+            })
+        }
+        SubscribeError::NotTracked => {
+            tracing::error!(run = %run_id, "订阅失败：内存里没有这条 run（不该走到这里）");
+            ApiError(mcloud_core::Error::Config(
+                "这条运行的事件流暂时不可用，请稍后重试".into(),
+            ))
+        }
+    }
 }

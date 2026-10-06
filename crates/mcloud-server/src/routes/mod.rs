@@ -18,20 +18,66 @@ pub mod server_logs;
 pub mod system;
 pub mod task_config;
 
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::Router;
+use std::time::Duration;
+use tower_http::timeout::TimeoutLayer;
 
 use crate::ServerState;
+
+/// 实例级**条数上限**（2026-10-06 安全审计 `SEC-16`）。
+///
+/// # 为什么需要它
+///
+/// 存储层每次写都是"**整文件重写 + fsync**"（`json_store.rs` 的
+/// `persist_*`），所以 n 条记录的写入总代价是 O(n²)：1000 条账号意味着
+/// 每加一条就重写一次越来越大的文件 ✗。今天没有上限，而"加账号"是
+/// 免认证的？不 —— 它要登录；但**单管理员也可能脚本化地灌进去**，
+/// 而且灌爆之后恢复要手工改 JSON。
+///
+/// 上限取"正常用量的两个数量级"：本工具是一个人管几个到几十个云盘账号，
+/// 200 个账号 / 500 条定时 / 200 条编排**远超**正常使用，只挡"灌爆"这一种形态 ✓。
+/// 真到了那个量级，该换的是存储后端（SQLite），不是把上限调大。
+pub(crate) const MAX_ACCOUNTS: usize = 200;
+pub(crate) const MAX_SCHEDULES: usize = 500;
+pub(crate) const MAX_PIPELINES: usize = 200;
+
+/// 认证面两条路由的**硬超时**（2026-10-06 安全审计 `SEC-01` 的一部分）。
+///
+/// # 为什么只给这两条、而不是整站挂一层
+///
+/// `TimeoutLayer` 掐的是**整个响应 future**，而本仓有两条路由是**故意长跑**的：
+/// `/api/runs/{id}/events`（SSE，运行结束才收流）与同步的 `POST /api/runs`
+/// （直播类任务分钟级）。整站挂一层会把它们拦腰砍断 ✗ —— 那不是加固，是破坏功能。
+///
+/// 而这两条认证路由的 handler 只碰本地存储（一次 argon2 + 几次文件读写），
+/// 30 秒**远远**够：真卡住只可能是死锁或磁盘挂了，那时回 408 比让连接一直挂着好 ✓。
+const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn router() -> Router<ServerState> {
     Router::new()
         // ── 登录闸（公开部分见 auth_gate::PUBLIC）────────────────────
-        .route("/api/setup", get(auth::setup_status).post(auth::setup_create))
+        // ⚠ 这两条是本进程**唯一**免凭据且要算 argon2 的路由 ⇒ 单独套一层超时，
+        // 见 [`AUTH_TIMEOUT`]。
+        .route(
+            "/api/setup",
+            get(auth::setup_status)
+                .post(auth::setup_create)
+                .layer(TimeoutLayer::with_status_code(
+                    StatusCode::REQUEST_TIMEOUT,
+                    AUTH_TIMEOUT,
+                )),
+        )
         .route(
             "/api/session",
             get(auth::current_session)
                 .post(auth::login)
-                .delete(auth::logout),
+                .delete(auth::logout)
+                .layer(TimeoutLayer::with_status_code(
+                    StatusCode::REQUEST_TIMEOUT,
+                    AUTH_TIMEOUT,
+                )),
         )
         .route("/api/version", get(health::version))
         .route("/api/status", get(health::status))

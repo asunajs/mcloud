@@ -19,11 +19,12 @@
 //! 401 让前端弹登录框（而这时根本没有账号可登），503 让前端跳到初始化向导。
 //! 混成一个码，用户会看到"登录失败"而不是"还没建管理员"。
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, Extension, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 
 use mcloud_core::{validate_username, PasswordHash, Session, SessionKind, User, UserId};
 // 令牌原语来自 crypto 而不是 core：core 只放**类型与 trait**，
@@ -125,13 +126,18 @@ pub async fn setup_status(State(state): State<ServerState>) -> ApiResult<SetupSt
 /// —— 兼容口子开在这里，而不是"拒绝明文"，否则老 bundle 的用户一点登录就 400。
 pub async fn setup_create(
     State(state): State<ServerState>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(body): Json<Credentials>,
 ) -> Result<Response, ApiError> {
     // ⚠ 先过闸（复审 sv-5）：这条路同样在 PUBLIC 里，且要算一次 argon2。
-    if let Some(resp) = auth_rate_limit(&state) {
-        return Ok(resp);
+    let peer_ip = peer_key(&peer);
+    if let Some(err) = auth_rate_limit(&state, &peer_ip) {
+        return Err(err);
     }
     if is_initialized(&state).await? {
+        // 记一笔：正常操作碰不到这条（向导只走一次），出现它要么是重复提交、
+        // 要么是有人在探"这个实例建了没"（审计 SEC-12）✓
+        tracing::warn!(peer = %peer_ip, "拒绝重复初始化");
         return Err(ApiError(mcloud_core::Error::Config(
             "已经初始化过了，不能重复创建管理员".into(),
         )));
@@ -142,6 +148,12 @@ pub async fn setup_create(
     // ⚠ 长度下限只在**明文**这条路上判得出来：摘要恒 64 位，拿它比长度没有意义。
     // 所以"收到明文"时在这里卡一道，报错文案与从前一致（前端已经拿 minPasswordLen 卡过一次，
     // 这是服务端那道，缺了它 curl 直接 POST 就能设一个 1 位的口令）。
+    //
+    // ⚠⚠ 已知且**刻意接受**的口径（安全审计 `SEC-15`）：`is_client_digest` 的判据是
+    // "64 位小写 hex"，所以任何 64 位 hex 串都会被当成"前端摘要"从而跳过长度检查。
+    // 这不是提权 —— 那个串仍然要经 argon2 落库、下次登录还得原样再发一遍才进得来
+    //（摘要本身**就是**凭据，而它的长度不受"口令长度下限"约束是摘要方案的固有性质）。
+    // 真要卡，得改成"摘要必须由服务端下发的一次性挑战派生"，那是另一件事。
     let settings = state.handle.store.settings().await?;
     if !mcloud_crypto::is_client_digest(&body.password)
         && body.password.chars().count() < settings.min_password_len
@@ -164,17 +176,28 @@ pub async fn setup_create(
         password_hash: PasswordHash(mcloud_crypto::mark_digest_scheme(&hash)),
         created_at_ms: now,
     };
-    state.handle.store.save_user(&user).await?;
+    // ⚠⚠ 2026-10-06 安全审计 `SEC-09`：**判空与插入必须在存储层同一把锁内**。
+    //
+    // 上面那句"已经初始化过就拒绝"（TOCTOU）与这里之间隔着一次 argon2
+    //（几十毫秒，**不持锁**）⇒ 两个并发的 `POST /api/setup` 都能通过那道检查，
+    // 于是各建一个管理员 ✗。`create_first_user` 把判空挪进写锁里，
+    // 返回 `false` 就是"你输了这场竞争"，照旧回 409 ✓。
+    if !state.handle.store.create_first_user(&user).await? {
+        return Err(ApiError(mcloud_core::Error::Config(
+            "实例已经初始化过了".into(),
+        )));
+    }
 
     // 建完管理员**顺手登录** —— 让用户接着填一遍刚设的口令是多余的
     let (token, session) = make_session(&user, now, settings.session_ttl_ms());
     state.handle.store.save_session(&session).await?;
 
-    tracing::info!(user = %user.name, "已创建管理员");
+    tracing::info!(user = %user.name, peer = %peer_ip, "已创建管理员");
     Ok(set_cookie_response(
         StatusCode::CREATED,
         &token,
         session_expires_at(session.expires_at_ms, now),
+        state.cookie_secure,
         Json(SessionView {
             user_id: user.id.to_string(),
             name: user.name,
@@ -187,12 +210,17 @@ pub async fn setup_create(
 
 pub async fn login(
     State(state): State<ServerState>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(body): Json<Credentials>,
 ) -> Result<Response, ApiError> {
     // ⚠ 先过闸（复审 sv-5）——**必须在"是否已初始化"之前**，理由见助手函数的注释。
-    if let Some(resp) = auth_rate_limit(&state) {
-        return Ok(resp);
+    let peer_ip = peer_key(&peer);
+    if let Some(err) = auth_rate_limit(&state, &peer_ip) {
+        return Err(err);
     }
+    // 失败计数的键：**用户名 + peer IP**（审计 `SEC-12`，理由见 `login_fail_limiter`）。
+    // ⚠ 带 IP 是刻意的：只用用户名的话，谁都能靠"故意输错 5 次"把管理员锁在门外 ✗。
+    let fail_key = format!("{}@{peer_ip}", body.username);
 
     // 未初始化时明确告知，而不是"用户名或口令错误" ——
     // 后者会让人反复试一个根本不存在的账号
@@ -213,9 +241,12 @@ pub async fn login(
             &mcloud_crypto::to_digest_credential(&body.password),
             mcloud_crypto::strip_digest_scheme(dummy_password_hash()),
         );
-        return Err(ApiError(mcloud_core::Error::Auth(
-            "用户名或口令错误".into(),
-        )));
+        return Err(note_login_failure(
+            &state,
+            &fail_key,
+            &body.username,
+            &peer_ip,
+        ));
     };
 
     // ── 口令校验：两种档位，按**库里那条记录**决定怎么验 ──────────────────
@@ -233,8 +264,16 @@ pub async fn login(
         digest.as_str()
     };
 
-    mcloud_crypto::verify_password(candidate, mcloud_crypto::strip_digest_scheme(stored))
-        .map_err(|_| ApiError(mcloud_core::Error::Auth("用户名或口令错误".into())))?;
+    if mcloud_crypto::verify_password(candidate, mcloud_crypto::strip_digest_scheme(stored))
+        .is_err()
+    {
+        return Err(note_login_failure(
+            &state,
+            &fail_key,
+            &body.username,
+            &peer_ip,
+        ));
+    }
 
     // 老档验过 ⇒ **当场升级**。不升级的话这条记录永远只能靠明文登录，
     // "明文不出浏览器"就永远只是新装实例的事。
@@ -250,16 +289,21 @@ pub async fn login(
         tracing::info!(user = %upgraded.name, "管理员口令已升级为「前端摘要」档");
     }
 
+    // ⚠ 成功即清零失败计数（审计 `SEC-12`）：**口令对的那一次永远不该被算进配额**
+    // ⇒ 配额只限制"猜错的速度"，不限制"能不能进来" ✓（`SEC-02` 的教训）。
+    state.login_fail_limiter.reset(&fail_key);
+
     let now = state.handle.clock.now_ms();
     let ttl_ms = state.handle.store.settings().await?.session_ttl_ms();
     let (token, session) = make_session(&user, now, ttl_ms);
     state.handle.store.save_session(&session).await?;
 
-    tracing::info!(user = %user.name, "登录成功");
+    tracing::info!(user = %user.name, peer = %peer_ip, "登录成功");
     Ok(set_cookie_response(
         StatusCode::OK,
         &token,
         session_expires_at(session.expires_at_ms, now),
+        state.cookie_secure,
         Json(SessionView {
             user_id: user.id.to_string(),
             name: user.name,
@@ -292,7 +336,10 @@ pub async fn logout(
     // 否则浏览器会留下另一枚同名的 cookie，表现成"登出了还在"。
     // ⚠ 即使没有 cookie 也返回 204：登出是**幂等**的，
     // "本来就没登录"不该报错（照旧清一遍 cookie，对没登录的人也无害 ✓）。
-    Ok(clear_cookie_response(StatusCode::NO_CONTENT))
+    Ok(clear_cookie_response(
+        StatusCode::NO_CONTENT,
+        state.cookie_secure,
+    ))
 }
 
 /// 用户不存在时拿它跑一次 argon2（见 [`login`] 里的计时抹平，复审 `sv-4`）。
@@ -310,6 +357,28 @@ fn dummy_password_hash() -> &'static str {
     DUMMY.as_str()
 }
 
+/// 限速用的键：**peer IP**（2026-10-06 安全审计 `SEC-02`）。
+///
+/// # 为什么是 `Option<Extension<..>>` 而不是 `ConnectInfo<SocketAddr>`
+///
+/// `ConnectInfo<T>` 作为提取器**拿不到就直接拒绝请求**（500）—— 而"拿不到"这件事
+/// 在测试里是常态（`oneshot` 直接打 Router，没有连接信息），在将来换了 `serve`
+/// 装配时也可能发生。这里要的是"拿不到就退化成粗一点的键"，不是"整个登录接口 500" ✗。
+///
+/// # 退化为什么是 `"unknown"` 一个桶
+///
+/// 退化成全局键 = **退回旧行为**（限速仍然生效，但不同客户端会互相影响）。
+/// 反过来"拿不到键 ⇒ 干脆不限"是最糟的失效方向：一个装配失误就静默把这道闸摘掉 ✗。
+/// 所以宁可粗，不可无。
+///
+/// ⚠ `X-Forwarded-For` **不读**：那是一个可伪造的头，读它就等于让攻击者自选桶。
+/// 要按真实客户端限速必须先定义反代的信任边界（见 `ratelimit.rs` 模块头的边界说明）。
+fn peer_key(peer: &Option<Extension<ConnectInfo<SocketAddr>>>) -> String {
+    peer.as_ref()
+        .map(|Extension(ci)| ci.0.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// 认证面的限速闸（2026-10-04 复审 `sv-5`）：超限 ⇒ `Some(429 响应)`。
 ///
 /// 为什么这两个路由要单独设闸：它们在 `auth_gate::PUBLIC` 里 ⇒ **不需要凭据**，
@@ -318,28 +387,85 @@ fn dummy_password_hash() -> &'static str {
 ///
 /// ⚠ 闸放在**所有其他判断之前**（包括"实例是否已初始化"）：否则未初始化的实例上
 /// 那条 400 分支就成了一个不花 argon2 的探针，而闸也拦不住它 ✗。
-fn auth_rate_limit(state: &ServerState) -> Option<Response> {
-    let now_ms = state.handle.clock.now_ms();
-    match state.auth_limiter.check(now_ms) {
-        Ok(()) => None,
-        Err(wait_secs) => Some(
-            (
-                StatusCode::TOO_MANY_REQUESTS,
-                [(header::RETRY_AFTER, wait_secs.to_string())],
-                Json(serde_json::json!({
-                    "error": format!("尝试过于频繁，请 {wait_secs} 秒后再试"),
-                })),
-            )
-                .into_response(),
-        ),
+fn auth_rate_limit(state: &ServerState, key: &str) -> Option<ApiError> {
+    rate_limited(
+        state.auth_limiter.check(key, state.handle.clock.now_ms()),
+        // ⚠ 措辞固定成"尝试"：`tests/login_routes.rs` 断言了这句（用户看得懂的
+        // 那句提示，不该在重构里被顺手改掉）
+        "尝试",
+    )
+}
+
+/// **已登录用户**触发的昂贵动作的闸（2026-10-06 安全审计 `SEC-08`）。
+///
+/// 与 [`auth_rate_limit`] 分开的两个理由写在 [`crate::ServerState::sensitive_limiter`] 上：
+/// 键是**用户 id**（不是 IP），配额是 10/分（不是 30/分）。
+///
+/// ⚠ 顺序：**先过闸再干活**。放后面就等于"活干完了再说你太快了"，
+/// 而这里要挡的正是那件"活"（一次 argon2 / 一条真短信）✗。
+pub(crate) fn sensitive_rate_limit(
+    state: &ServerState,
+    user: &mcloud_core::UserId,
+) -> Option<ApiError> {
+    rate_limited(
+        state
+            .sensitive_limiter
+            .check(user.as_str(), state.handle.clock.now_ms()),
+        "操作",
+    )
+}
+
+/// 记一次登录失败，并给出该回给客户端的错误（2026-10-06 安全审计 `SEC-12`）。
+///
+/// * 配额内 ⇒ **401**"用户名或口令错误"（措辞与成功无关、与"用户不存在"同一句）；
+/// * 超配额 ⇒ **429**（`登录失败过于频繁`）。
+///
+/// ⚠ 两种码都**不透露口令对不对**（它们只在"口令已经错了"之后才可能返回），
+/// 所以 429 不构成新的探测器 ✓。
+///
+/// ⚠ 日志里**只记用户名与 peer IP，绝不记口令**（明文/摘要都不记）：
+/// 那条日志会被 `logbuf` 收进环、经 `/api/logs` 给管理员看，凭据进去就等于
+/// 把口令写进了一个能读回来的地方 ✗。
+fn note_login_failure(state: &ServerState, key: &str, username: &str, peer_ip: &str) -> ApiError {
+    tracing::warn!(user = %username, peer = %peer_ip, "登录失败");
+    match state
+        .login_fail_limiter
+        .check(key, state.handle.clock.now_ms())
+    {
+        Ok(()) => ApiError(mcloud_core::Error::Auth("用户名或口令错误".into())),
+        Err(wait_secs) => ApiError(mcloud_core::Error::RateLimited {
+            what: "登录失败".into(),
+            retry_after_secs: wait_secs,
+        }),
     }
+}
+
+/// 把限速结果变成错误：放行 ⇒ `None`，超限 ⇒ `Some(429 + Retry-After)`。
+///
+/// ⚠ 做成 `ApiError` 而不是直接拼响应：handler 的返回类型有两种
+/// （`Result<Response, _>` 与 `ApiResult<T> = Result<Json<T>, _>`），
+/// 只有错误能同时装进两种（详见 [`mcloud_core::Error::RateLimited`]）。
+fn rate_limited(result: Result<(), i64>, what: &str) -> Option<ApiError> {
+    result.err().map(|wait_secs| {
+        ApiError(mcloud_core::Error::RateLimited {
+            what: what.to_string(),
+            retry_after_secs: wait_secs,
+        })
+    })
 }
 
 /// 让浏览器**扔掉**登录 cookie 的那一发（登出用）。
 ///
 /// `Max-Age=0` 是标准的失效写法；值留空（不是 `token=;` —— 空值仍是"一枚 cookie"）。
-fn clear_cookie_response(status: StatusCode) -> Response {
-    let cookie = format!("{COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+///
+/// ⚠ 属性必须与登录时**逐项一致**（含 `Secure`）：浏览器按"名字 + Path + Domain +
+/// Secure"匹配已有 cookie，属性对不上时这一发清掉的可能是**另一枚** ——
+/// 表现就是"点了登出、刷新还在"。所以这里也收 `secure` ✓。
+fn clear_cookie_response(status: StatusCode, secure: bool) -> Response {
+    let mut cookie = format!("{COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+    if secure {
+        cookie.push_str("; Secure");
+    }
     (status, [(header::SET_COOKIE, cookie)]).into_response()
 }
 
@@ -425,7 +551,32 @@ pub async fn require_session(
     if !session.is_valid_at(now) {
         // 顺手清掉：过期会话留着既占地方，又会在下次被误读
         state.handle.store.remove_session(&hash).await?;
+        tracing::debug!("会话已过期，已清除");
         return Err(ApiError(mcloud_core::Error::Auth("会话已过期".into())));
+    }
+
+    // ⚠⚠ 2026-10-06 安全审计 `SEC-19`：**只查会话表是不够的**。
+    //
+    // ① **用户还在不在**：删掉一个用户（今天没有这条路，但 `remove_user` 已经在
+    //    `UserStore` 里了）之后，他那张还没到期的会话会继续放行 —— 会话表与用户表
+    //    之间没有外键，谁也不会替你把它们对齐 ✗。这里顺手对一次，
+    //    发现用户没了就**当场删掉这张会话**（失败关闭 ✓）。
+    // ② **会话种类**：`SessionKind::Cli` 是给命令行用的**长期**会话
+    //    （`expires_at_ms` 可以是 0 = 永不过期）。它要是被塞进 cookie 就能
+    //    当 Web 会话用 —— 而 WebUI 的闸、登出、改口令踢会话那几条全都按
+    //    "Web 会话有到期时间"设计 ✗。所以这里显式只认 `Web` ✓。
+    //
+    // 两条都是"今天没有可利用路径、但口径必须一致"的加固（`current_session`
+    // 早就查了用户表，这里原先没查 ⇒ 两条路口径不一致）。
+    if session.kind != mcloud_core::SessionKind::Web {
+        state.handle.store.remove_session(&hash).await?;
+        tracing::warn!("拒绝把非 Web 会话当 cookie 用（已清除该会话）");
+        return Err(ApiError(mcloud_core::Error::Auth("会话已失效".into())));
+    }
+    if state.handle.store.user(&session.user_id).await?.is_none() {
+        state.handle.store.remove_session(&hash).await?;
+        tracing::warn!(user = %session.user_id, "会话对应的用户已不存在，已清除该会话");
+        return Err(ApiError(mcloud_core::Error::Auth("会话已失效".into())));
     }
 
     Ok(session)
@@ -441,17 +592,22 @@ pub async fn require_session(
 /// - `Max-Age` —— 与库里的到期时间**一致**；只靠 cookie 过期的话，
 ///   客户端时间被改就绕过了
 ///
-/// **不加 `Secure`**：本工具默认跑在 `http://127.0.0.1`，加了 `Secure`
-/// 浏览器会直接不存这个 cookie，表现是"登录成功但立刻又未登录"。
-/// 部署在 HTTPS 后面时应当由反代加。
+/// **`Secure` 由 `secure` 参数决定**（2026-10-06 安全审计 `SEC-13`）：
+/// 本工具默认跑在 `http://127.0.0.1`，无条件加 `Secure` 会让浏览器**不存**这枚
+/// cookie，表现是"登录成功但立刻又未登录" ✗ ⇒ 默认不加；部署在 HTTPS 反代后面时
+/// 由 `MCLOUD_COOKIE_SECURE=1` 打开（见 [`crate::ServerState::cookie_secure`]）。
 pub(crate) fn set_cookie_response<T: Serialize>(
     status: StatusCode,
     token: &str,
     max_age_secs: i64,
+    secure: bool,
     body: Json<T>,
 ) -> Response {
-    let cookie =
+    let mut cookie =
         format!("{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age_secs}");
+    if secure {
+        cookie.push_str("; Secure");
+    }
     (status, [(header::SET_COOKIE, cookie)], body).into_response()
 }
 
@@ -489,6 +645,24 @@ mod tests {
     #[test]
     fn missing_cookie_header_is_none() {
         assert_eq!(cookie_token(&HeaderMap::new()), None);
+    }
+
+    /// ⭐ 限速的键：有 peer IP 就用它，没有就退化成 `"unknown"`（**不是"不限"**）。
+    ///
+    /// 红测：把 `peer_key` 改成"拿不到就返回一个每次都不同的串"（等于每人一桶 ⇒
+    /// 实际不限速）⇒ 第一条断言红；改成 `unwrap_or_default()`（空串）虽然也能限，
+    /// 但"拿不到"和"IP 恰好是空"就混成一个桶了 —— 所以这里钉的是**具体的退化值**。
+    #[test]
+    fn the_rate_limit_key_is_the_peer_ip_or_a_named_fallback() {
+        assert_eq!(peer_key(&None), "unknown");
+
+        let addr: SocketAddr = "203.0.113.7:54321".parse().unwrap();
+        let with_peer = Some(Extension(ConnectInfo(addr)));
+        assert_eq!(
+            peer_key(&with_peer),
+            "203.0.113.7",
+            "键只取 IP（端口每次都变，带上它就等于每人一桶 ⇒ 不限速）"
+        );
     }
 
     /// cookie 里存的是**原文**，库里存的是哈希 —— 两者不能混。

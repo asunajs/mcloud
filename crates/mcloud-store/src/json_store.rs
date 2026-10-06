@@ -1210,6 +1210,22 @@ impl mcloud_core::UserStore for JsonStore {
         Self::persist_users(&db, self)
     }
 
+    /// 首次初始化（2026-10-06 安全审计 `SEC-09`）：**判空与插入在同一把写锁内**。
+    ///
+    /// ⚠ 关键就在"同一把锁"上：`user_count()` + `save_user()` 是两次独立的
+    /// `read()` / `write()`，中间隔着调用方那次 argon2（几十毫秒）⇒
+    /// 第二个并发请求也会看到 0 个用户，于是各建一个管理员 ✗
+    /// （详见 `UserStore::create_first_user` 上的说明）。
+    async fn create_first_user(&self, user: &User) -> Result<bool> {
+        let mut db = self.write()?;
+        if !db.users.is_empty() {
+            return Ok(false);
+        }
+        db.users.push(user.clone());
+        Self::persist_users(&db, self)?;
+        Ok(true)
+    }
+
     async fn settings(&self) -> Result<AppSettings> {
         Ok(self.read()?.settings)
     }
