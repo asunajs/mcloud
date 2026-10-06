@@ -59,6 +59,51 @@ fn info_body(one: Option<serde_json::Value>, two: Option<serde_json::Value>) -> 
     serde_json::json!({"code":0,"msg":"success","result":result}).to_string()
 }
 
+/// 一份**邮箱月表**（`taskListV2`，`marketname=newsign_139mail`）。
+///
+/// ⚠ 形状来自旧 TS 的类型（`packages/core/src/types/task.ts:35-46`），**零实拍**
+/// —— `month` 里那条 1021 的 `button.email` 谁都没抓到过（见 `app_notice.rs`）。
+/// 这里刻意混进一条**别的 id**（549），好让"按 id 找"这件事真的被考到 ✓。
+fn email_list_body(day: Option<&str>, can_receive: Option<i64>) -> String {
+    let email = match (day, can_receive) {
+        (None, None) => serde_json::Value::Null,
+        (d, c) => {
+            let mut m = serde_json::Map::new();
+            if let Some(d) = d {
+                m.insert("day".into(), serde_json::json!(d));
+            }
+            if let Some(c) = c {
+                m.insert("canReceive".into(), serde_json::json!(c));
+            }
+            serde_json::Value::Object(m)
+        }
+    };
+    serde_json::json!({
+        "code": 0,
+        "msg": "success",
+        "result": { "month": [
+            {"id": 549, "button": {}},
+            {"id": 1021, "button": {"email": email}},
+        ]},
+    })
+    .to_string()
+}
+
+/// 月表里**没有** 1021 那一份（旧 TS 那句 `if (task1021)` 为假）。
+fn email_list_without_1021() -> String {
+    serde_json::json!({
+        "code": 0,
+        "msg": "success",
+        "result": { "month": [ {"id": 549, "button": {}} ] },
+    })
+    .to_string()
+}
+
+/// 短信那一半"没得领"的一枪答复（让邮箱那一半成为唯一变量 ✓）。
+fn sms_nothing() -> Reply {
+    Reply::Body(info_body(Some(slot_json_with(Some(0), Some(0))), None))
+}
+
 /// 一枪的答复：给个 body，或者**打挂**（传输层错误）。
 #[derive(Clone)]
 enum Reply {
@@ -91,6 +136,33 @@ impl Scripted {
 
     fn url_at(&self, n: usize) -> String {
         self.requests()[n].url.clone()
+    }
+
+    /// 打到 `reward` 的枪数 —— **这一条链最贵的那一枪**（会真记账）。
+    ///
+    /// ⚠ 用它而不是 `count()`：2026-10-06 起这条链有**两半**（短信 + 邮箱），
+    /// 总数会因为"链上多了一枪只读的"而变化 ⇒ 钉总数会把两件事混起来 ✗。
+    fn rewards(&self) -> usize {
+        self.requests()
+            .iter()
+            .filter(|r| r.url.ends_with("/openEmailsms/reward"))
+            .count()
+    }
+
+    /// 打到**邮箱月表**的枪数（`taskListV2`，只读）。
+    fn email_lists(&self) -> usize {
+        self.requests()
+            .iter()
+            .filter(|r| r.url.ends_with("/signin/task/taskListV2"))
+            .count()
+    }
+
+    /// 打到**上报通知状态**那一口的枪数（写）。
+    fn reports(&self) -> usize {
+        self.requests()
+            .iter()
+            .filter(|r| r.url.contains("/reportAppNoticeStatus"))
+            .count()
     }
 }
 
@@ -131,6 +203,21 @@ impl CollectSink {
             .iter()
             .filter_map(|e| match e {
                 RunEvent::Details { payload, .. } => Some(payload.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 取回所有 **`Info`** 级日志的正文（邮箱那一半的三句文案要在这里断言 ✓）。
+    fn infos(&self) -> Vec<String> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Log { level, message, .. } if *level == mcloud_core::LogLevel::Info => {
+                    Some(message.clone())
+                }
                 _ => None,
             })
             .collect()
@@ -350,7 +437,10 @@ async fn nothing_sends_no_write_request() {
     let body = info_body(Some(slot_json_with(Some(0), Some(0))), None);
     let (out, http, _) = run_with(vec![Reply::Body(body)]).await;
     assert!(matches!(out, TaskOutcome::Skipped { .. }), "实得：{out:?}");
-    assert_eq!(http.count(), 1, "判据没过就不该发第二枪");
+    // ⚠ 这一档要钉的是"**写请求一枪没发**" ⇒ 按 URL 数，比总数抗"链上多了一枪" ✓。
+    assert_eq!(http.rewards(), 0, "判据没过就不该发 reward");
+    assert_eq!(http.reports(), 0, "更不该上报邮箱状态");
+    assert_eq!(http.count(), 2, "只读两枪：查状态 + 邮箱月表");
     assert!(http.url_at(0).ends_with("/getTaskInfo"));
 }
 
@@ -361,7 +451,8 @@ async fn unknown_sends_no_write_request() {
     let TaskOutcome::Skipped { reason } = &out else {
         panic!("实得：{out:?}");
     };
-    assert_eq!(http.count(), 1);
+    assert_eq!(http.rewards(), 0, "判不了就一枪写请求都不发");
+    assert_eq!(http.count(), 2, "只读两枪：查状态 + 邮箱月表");
     assert!(reason.contains("cloudStatus"), "要说清缺哪两个键：{reason}");
     assert!(reason.contains("没发请求"), "实得：{reason}");
 }
@@ -381,7 +472,8 @@ async fn the_captured_body_triggers_the_reward_and_a_recheck() {
     ])
     .await;
     assert!(matches!(out, TaskOutcome::Success { .. }), "实得：{out:?}");
-    assert_eq!(http.count(), 3, "查 → 领 → 复查");
+    // ⚠ 第 4 枪是**邮箱那一半**的月表（2026-10-06 接上）⇒ 前 3 枪的次序不变 ✓。
+    assert_eq!(http.count(), 4, "查 → 领 → 复查 → 邮箱月表");
     assert!(http.url_at(0).ends_with("/getTaskInfo"));
     assert!(
         http.url_at(1).ends_with("/openEmailsms/reward"),
@@ -410,11 +502,8 @@ async fn the_reward_shot_is_a_bare_get() {
 async fn a_failed_reward_is_reported_as_failed_not_skipped() {
     let (out, http, _) = run_with(vec![Reply::Body(CAPTURED_INFO.to_string()), Reply::Fail]).await;
     assert!(matches!(out, TaskOutcome::Failed { .. }), "实得：{out:?}");
-    assert_eq!(
-        http.count(),
-        2,
-        "写请求发过了，这一趟的实况是「发过、没成」"
-    );
+    assert_eq!(http.rewards(), 1, "写请求发过了（实况是「发过、没成」）");
+    assert_eq!(http.count(), 3, "查 → 领（挂）→ 邮箱月表");
     assert!(
         !http.url_at(1).contains("getTaskInfo"),
         "失败之后不该有复查那一枪"
@@ -433,7 +522,8 @@ async fn a_non_zero_reward_code_is_a_failure() {
         panic!("实得：{out:?}");
     };
     assert!(reason.contains("500"), "要把上游那个码念出来：{reason}");
-    assert_eq!(http.count(), 2);
+    assert_eq!(http.rewards(), 1);
+    assert_eq!(http.count(), 3, "查 → 领（非 0）→ 邮箱月表");
 }
 
 /// 查判据就挂了 ⇒ **交回 `Err`**（整趟没有结论可报）。
@@ -445,7 +535,10 @@ async fn a_failed_before_query_is_an_error() {
         .await
         .expect_err("查判据失败要交回错误");
     assert!(err.to_string().contains("网络断了"), "实得：{err}");
-    assert_eq!(http.count(), 1, "只发了那一枪");
+    // ⚠ 短信那半挂了之后，邮箱那半**照样跑**（两半互不影响 ✓）⇒ 它那一枪也出去了
+    //（这一档两条都挂：`Scripted` 用尽后重复最后一个答复 ✓）。
+    assert_eq!(http.count(), 2, "两半各一枪，两枪都挂了");
+    assert_eq!(http.email_lists(), 1, "邮箱那半照跑");
 }
 
 // ══════════════════════════ ⭐ 「已领 + 复查挂了」 ══════════════════════════
@@ -477,11 +570,16 @@ async fn a_claimed_reward_with_a_failed_recheck_is_not_a_failure() {
         !summary.contains("无槽"),
         "这一档刻意不念两个槽（会把「没读到」与「本来就该没有」混起来）：{summary}"
     );
-    assert_eq!(http.count(), 3, "复查那一枪确实发出去了");
+    assert_eq!(
+        http.count(),
+        4,
+        "复查那一枪确实发出去了（第 4 枪是邮箱月表）"
+    );
 
     // 错误同时进明细，界面/脚本按字段就能看见"这一趟没走完"。
     let details = sink.details();
-    assert_eq!(details.len(), 1);
+    assert_eq!(details.len(), 2, "短信 + 邮箱各一条（短信那条在前 ✓）");
+    assert_eq!(details[0]["kind"], "notice");
     assert_eq!(details[0]["recheckFailed"], true);
     assert_eq!(details[0]["verdict"], "done");
     assert!(
@@ -495,8 +593,11 @@ async fn a_claimed_reward_with_a_failed_recheck_is_not_a_failure() {
     assert_eq!(details[0]["recheck"], serde_json::Value::Null);
 
     // 而且它留一条 warn 日志（失败会报红，这一档不该报红）。
-    assert_eq!(sink.warns().len(), 1, "实得：{:?}", sink.warns());
-    assert!(sink.warns()[0].contains("复查"));
+    // ⚠ 只数**复查**那一条：邮箱那半也挂了，它自己那条 warn 不算在这一问里 ✓。
+    let warns = sink.warns();
+    let recheck: Vec<&String> = warns.iter().filter(|w| w.contains("复查")).collect();
+    assert_eq!(recheck.len(), 1, "实得：{warns:?}");
+    assert!(recheck[0].contains("复查"));
 }
 
 // ══════════════════════════ 小结与明细 ══════════════════════════
@@ -610,7 +711,7 @@ async fn the_two_readings_are_reported_as_details() {
     assert!(matches!(out, TaskOutcome::Success { .. }));
 
     let details = sink.details();
-    assert_eq!(details.len(), 1, "这一条只自报一次");
+    assert_eq!(details.len(), 2, "短信 + 邮箱各一条（短信那条在前 ✓）");
     let d = &details[0];
     assert_eq!(d["kind"], "notice");
     assert_eq!(d["verdict"], "done");
@@ -978,4 +1079,150 @@ impl mcloud_core::UserStore for NoStore {
     async fn purge_expired_sessions(&self, _now_ms: i64) -> Result<usize> {
         Err(refuse())
     }
+}
+
+// ══════════════════════════ ⭐ 邮箱那一半（任务 1021） ══════════════════════════
+
+/// 旧 TS `tasks/notice.ts:44-50` 的**命中那一支**：`day > 0 && canReceive === 1`
+/// ⇒ 上报一枪（**写**），明细里能看到它，日志里也念出来 ✓。
+///
+/// **红测**：把 `claim_email_notice` 里那句 `report_should` 判据撤掉（恒发）⇒
+/// 下面"不该发"的三条红；把整段 `claim_email_notice` 撤掉 ⇒ 本条红（`reports()` 实得 0）。
+#[tokio::test]
+async fn the_email_half_reports_when_day_and_can_receive_agree() {
+    let (out, http, sink) = run_with(vec![
+        sms_nothing(),
+        Reply::Body(email_list_body(Some("16"), Some(1))),
+        Reply::Body(r#"{"code":0,"msg":"success"}"#.to_string()),
+    ])
+    .await;
+
+    assert!(
+        matches!(out, TaskOutcome::Skipped { .. }),
+        "短信那半没得领 ⇒ 整条仍是 Skipped（邮箱那半不改它 ✓）：{out:?}"
+    );
+    assert_eq!(http.email_lists(), 1, "要查邮箱月表");
+    assert_eq!(http.reports(), 1, "命中判据才发那一枪");
+    let report = http.requests().last().cloned().unwrap();
+    assert_eq!(report.method, "GET");
+    assert!(
+        report.url.ends_with("/reportAppNoticeStatus?status=1"),
+        "实得：{}",
+        report.url
+    );
+    assert!(
+        sink.infos()
+            .iter()
+            .any(|l| l.contains("邮箱通知已开启 16 天") && l.contains("上报通知状态")),
+        "实得：{:?}",
+        sink.infos()
+    );
+
+    let details = sink.details();
+    let d = details.last().unwrap();
+    assert_eq!(d["kind"], "noticeEmail", "邮箱那半的明细单独一条 ✓");
+    assert_eq!(d["taskId"], 1021);
+    assert_eq!(d["day"], 16, "`day` 是字符串 `\"16\"`，要收成数 ✓");
+    assert_eq!(d["canReceive"], 1);
+    assert_eq!(d["reportShould"], true);
+    assert_eq!(d["reported"], true);
+}
+
+/// `canReceive !== 1` ⇒ **只念一句，不上报**（旧 TS 的 `else` 支 ✓）。
+#[tokio::test]
+async fn the_email_half_stays_quiet_when_can_receive_is_not_one() {
+    let (_, http, sink) = run_with(vec![
+        sms_nothing(),
+        Reply::Body(email_list_body(Some("16"), Some(0))),
+    ])
+    .await;
+
+    assert_eq!(http.reports(), 0, "canReceive 不是 1 就不该上报");
+    assert!(
+        sink.infos().iter().any(|l| l == "邮箱通知已开启 16 天"),
+        "实得：{:?}",
+        sink.infos()
+    );
+    let d = sink.details().pop().unwrap();
+    assert_eq!(d["reportShould"], false);
+    assert_eq!(d["reported"], false);
+}
+
+/// `day` 读不出（缺席 / 非数字 / `0`）⇒ 「请手动开启」，不上报 ✓。
+///
+/// ⚠ 这一条与"`canReceive` 不是 1"**文案不同**：旧 TS 两处就是两句不同的话 ✓。
+#[tokio::test]
+async fn the_email_half_asks_the_user_to_open_it_when_day_is_zero() {
+    for day in [None, Some("0")] {
+        let (_, http, sink) = run_with(vec![
+            sms_nothing(),
+            Reply::Body(email_list_body(day, Some(1))),
+        ])
+        .await;
+        assert_eq!(http.reports(), 0, "day 读不出就不该上报（day={day:?}）");
+        assert!(
+            sink.infos()
+                .iter()
+                .any(|l| l == "邮箱通知未开启，请手动开启"),
+            "day={day:?} 实得：{:?}",
+            sink.infos()
+        );
+    }
+}
+
+/// 月表里**没有** 1021 ⇒ **一句都不念、一枪都不发**（旧 TS 的 `if (task1021)` ✓）。
+#[tokio::test]
+async fn the_email_half_does_nothing_when_the_list_has_no_1021() {
+    let (_, http, sink) =
+        run_with(vec![sms_nothing(), Reply::Body(email_list_without_1021())]).await;
+
+    assert_eq!(http.reports(), 0);
+    assert!(
+        !sink.infos().iter().any(|l| l.contains("邮箱")),
+        "表里没这条 ⇒ 什么都不该念：{:?}",
+        sink.infos()
+    );
+    let d = sink.details().pop().unwrap();
+    assert_eq!(d["found"], false);
+    assert_eq!(d["reportShould"], false);
+}
+
+/// ⚠⚠ 邮箱那半**挂了也不改**短信那半的结论（旧 TS 两半各自 `tryRequest` ✓）。
+#[tokio::test]
+async fn a_failed_email_half_does_not_change_the_sms_verdict() {
+    let (out, http, sink) = run_with(vec![
+        Reply::Body(CAPTURED_INFO.to_string()),
+        Reply::Body(CAPTURED_REWARD.to_string()),
+        Reply::Body(CAPTURED_INFO.to_string()),
+        Reply::Fail,
+    ])
+    .await;
+
+    assert!(
+        matches!(out, TaskOutcome::Success { .. }),
+        "短信那半已领 ⇒ 结论不许被邮箱那半的失败改掉：{out:?}"
+    );
+    assert_eq!(http.email_lists(), 1, "邮箱那半确实跑了");
+    assert!(
+        sink.warns().iter().any(|w| w.contains("邮箱通知")),
+        "本仓不照抄旧 TS 的静默 ⇒ 失败要留痕：{:?}",
+        sink.warns()
+    );
+}
+
+/// 月表回非 0 码 ⇒ 也是"这一半没跑成"，同样不改短信那半的结论 ✓。
+#[tokio::test]
+async fn a_non_zero_email_list_code_is_not_a_silent_success() {
+    let (out, _, sink) = run_with(vec![
+        sms_nothing(),
+        Reply::Body(r#"{"code":500,"msg":"系统繁忙"}"#.to_string()),
+    ])
+    .await;
+
+    assert!(matches!(out, TaskOutcome::Skipped { .. }), "实得：{out:?}");
+    assert!(
+        sink.warns().iter().any(|w| w.contains("500")),
+        "上游那个码要念出来：{:?}",
+        sink.warns()
+    );
 }

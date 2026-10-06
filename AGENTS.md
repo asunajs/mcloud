@@ -307,7 +307,12 @@ Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过�
   320/375 窄屏 + `login`/`setup` 两个认证态 + 泄漏量测，**实测约 130 s**（其中泄漏那条自己
   就≈127 s）。**提交时**跑哪档可以交给钩子：`scripts/install-git-hooks.sh` 一装，
   `pre-commit` 自动跑提交档、`pre-push` 自动跑推送档 ✓（跳过一律 `--no-verify`，
-  跳了就是没验证过 ✓）。要 Chrome 的那几条在没有浏览器的机器上会明说"跳过 ≠ 通过"。）
+  跳了就是没验证过 ✓）。要 Chrome 的那几条在没有浏览器的机器上会明说"跳过 ≠ 通过"。
+  ⚠ Rust 侧**只有格式那一档**进了钩子（2026-10-06 用户口径「A」）：暂存区里有 `.rs` 时，
+  `pre-commit` 先跑 `cargo fmt --all -- --check`（实测 ≈1.1 s、只读源码、**不碰 `target/`** ✓）；
+  `clippy` / `test` **不进钩子** —— 冷编代价 19m13s / 27m14s，且 `cargo test -p mcloud-server`
+  会**重链接** launchd 正在跑的那个 `target/debug/mcloud` ⇒ SIGKILL + 一次 TCC 弹框 ✗。
+  那两档照旧**手动**跑，或 `scripts/gates-rust.sh --full` ✓。）
 
 ## ⚠ 构建顺序（踩过坑）
 

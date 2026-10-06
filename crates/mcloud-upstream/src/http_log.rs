@@ -239,8 +239,28 @@ mod tests {
         }
     }
 
+    /// ⚠⚠ **这个模块里每条会打日志的测试都要装一个订阅器**（哪怕是丢掉的 ✗）。
+    ///
+    /// 成因：`tracing` 的 callsite interest 是**全局缓存**的 —— 一次"**没有**订阅器"的命中
+    /// 会把它**永久**缓存成 `never` ✗，此后那条 callsite 压根不再问订阅器 ⇒
+    /// [`emits_debug_line_and_warns_on_4xx`] 就**偶发**取不到日志 ✗
+    /// （2026-10-06 实测：21 次里红 1 次，报「没打出应答行」，而缓冲区里**只有出站那行** ✓
+    /// —— 出站与应答是两个 callsite，被缓存掉的是后者 ✓）。
+    ///
+    /// ⚠ 实测过一条**不管用**的修法，别照抄：在捕获那条里调
+    /// `tracing::callsite::rebuild_interest_cache()` —— 它按**全局**订阅器重建，而
+    /// `set_default` 是**线程局部**的 ⇒ 带着它照样复现 ✗（当时第一跑就红了 ✓）。
+    /// 从**源头**堵才确定：让每个会命中那些 callsite 的测试都装上订阅器 ✓。
+    fn quiet() -> tracing::subscriber::DefaultGuard {
+        let sub = tracing_subscriber::fmt()
+            .with_writer(std::io::sink)
+            .finish();
+        tracing::subscriber::set_default(sub)
+    }
+
     #[tokio::test]
     async fn request_reaches_inner_and_comes_back_untouched() {
+        let _quiet = quiet();
         let fake = Fake::new(200, r#"{"code":0}"#, Vec::new());
         let seen = fake.seen();
         let client = LoggingClient::new(fake, "acct-1");
@@ -263,6 +283,7 @@ mod tests {
     /// 用非 UTF-8 字节：走默认实现的话它们会变成 U+FFFD（有损文本），而且**不报错** ✗。
     #[tokio::test]
     async fn request_raw_is_forwarded_byte_for_byte() {
+        let _quiet = quiet();
         let bytes = vec![0xff, 0xfe, 0x00, 0x80, 0x41, 0x42];
         let fake = Fake::new(200, "", bytes.clone());
         let client = LoggingClient::new(fake, "acct-1");

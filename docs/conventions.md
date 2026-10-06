@@ -608,6 +608,10 @@ node scripts/gates-web.mjs --push   # 前端闸门（推送档 = 提交档 + 窄
 自动跑推送档 ✓（它们**只碰这两个名字**，`.git/hooks/` 里别的钩子一个都不动，也**不设**
 `core.hooksPath` ✗）。卸：`scripts/install-git-hooks.sh --uninstall`；单独跳过某一次：
 `git commit --no-verify` / `git push --no-verify` —— **跳了就是没验证** ✓。
+⚠ Rust 侧进钩子的**只有格式那一档**（2026-10-06 用户口径「A」）：暂存区里有 `.rs` 时
+`pre-commit` 先跑 `cargo fmt --all -- --check`（≈1.1 s、只读源码、不碰 `target/`）；`clippy` /
+`test` **不进钩子**（冷编 19m13s / 27m14s，且 `cargo test -p mcloud-server` 会重链接 launchd
+正在跑的那个二进制 ⇒ SIGKILL + TCC 弹框 ✗）⇒ 那两档照旧手动跑或 `scripts/gates-rust.sh --full` ✓。
 
 ⚠ 没装无头 Chrome 的机器上，要浏览器的那几条会印
 `⊘ 跳过（本机没有无头 Chrome，这条不算通过）` ——

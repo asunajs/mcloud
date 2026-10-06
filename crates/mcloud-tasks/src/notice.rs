@@ -31,9 +31,21 @@
 //! 看到的是 `getTaskInfo ×2 → reward`，另一份抓包里另有 `receiveTask?taskId=1021`。
 //!
 //! 处置：**按实拍最强的那条裁** —— 判据只用 `getTaskInfo` 的四个字段，
-//! 入账口用 `reward`。另一条入账口（`receive_task_request`）与上报口
-//! （`report_app_notice_status_request`）已在协议层实现并测过，
-//! **本模块不选它们**（选哪一个由编排层/接线拍板，这里不替它选）。
+//! 入账口用 `reward`。另一条入账口（`receive_task_request`）与打卡口
+//! （`signin_task_click_request`）已在协议层实现并测过，**本模块不选它们**
+//!（选哪一个由编排层/接线拍板，这里不替它选）。
+//!
+//! # ✅ 2026-10-06：**邮箱那一半**接上了（用户口径「跟参考」）
+//!
+//! 这一族其实有**两半**：短信那一半（上面那条链）与**邮箱那一半**
+//!（旧 TS `packages/core/src/tasks/notice.ts:32-54`，任务 **1021**
+//!「连续31天开启邮箱APP通知」）。后者是：查邮箱月表 → 找到 1021 →
+//! `day > 0 && canReceive === 1` 才 `reportAppNoticeStatus?status=1`。
+//! ⇒ [`claim_email_notice`] 逐字照它落码，`run` 里两半**各自 best-effort**
+//!（一半挂了不改另一半的结论 ✓）。
+//!
+//! ⚠ 上报口（`report_app_notice_status_request`）**从"不接链"变成"接链"**；
+//! `receive_task_request` 仍不接（旧 TS 没发过它，实拍那一枪在另一份抓包里）。
 //!
 //! # ⚠⚠ 那个"哪个 `cloudStatus` 是未领"的映射是**猜的**
 //!
@@ -83,7 +95,7 @@ use serde_json::Value;
 use mcloud_core::{HttpRequest, Result, TaskOutcome};
 use mcloud_engine::{Task, TaskContext, TaskGroup, TaskResult};
 use mcloud_upstream::app_notice as proto;
-use mcloud_upstream::app_notice::{NoticeTaskInfo, NoticeTaskSlot};
+use mcloud_upstream::app_notice::{NoticeEmailSlot, NoticeTaskInfo, NoticeTaskSlot};
 use mcloud_upstream::app_signin::SignInEnvelope;
 
 /// 「得有人去 App 里点一下」那句说明 —— **参考实现的原文**（一处用词差异见下）。
@@ -634,6 +646,153 @@ impl NoticeResult {
     }
 }
 
+// ══════════════════════════ 邮箱那一半（任务 1021） ══════════════════════════
+
+/// 邮箱那一半的结论。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EmailNoticeOutcome {
+    /// 月表里**有没有** 1021 这一条（旧 TS 的 `if (task1021)` ✓）。
+    pub found: bool,
+    /// 那一格的 `button.email`；`None` = 1021 不在表里
+    ///（与"在、但 `button.email` 缺席"不是一回事 ✓）。
+    pub slot: Option<NoticeEmailSlot>,
+    /// 旧 TS 的判据算出来**该不该上报**（`day > 0 && canReceive === 1`）——
+    /// 记下来是为了让"为什么没发那一枪"可复核 ✓。
+    pub report_should: bool,
+    /// `reportAppNoticeStatus?status=1` 发出去了、且上游认了。
+    pub reported: bool,
+    /// 这一半自己的失败原话。**不改**短信那一半的结论（TS 两半各自 best-effort ✓）。
+    pub error: String,
+}
+
+impl EmailNoticeOutcome {
+    /// 一句话小结（三句文案逐字照旧 TS，只有成功那句我们多打了一个 ✓）。
+    ///
+    /// ⚠ 返回**空串**是一种正常结果：旧 TS 在"表里没有 1021"时**一句都不念** ✓。
+    pub fn summary_line(&self) -> String {
+        if !self.found {
+            return if self.error.is_empty() {
+                String::new()
+            } else {
+                format!("邮箱通知：这一半没跑成：{}", self.error)
+            };
+        }
+        let day = self.slot.as_ref().and_then(|s| s.day).unwrap_or(0);
+        if day <= 0 {
+            // 旧 TS：「邮箱通知未开启，请手动开启」—— 与短信那一半同一句口径 ✓。
+            return "邮箱通知未开启，请手动开启".to_string();
+        }
+        if !self.report_should {
+            return format!("邮箱通知已开启 {day} 天");
+        }
+        if self.reported {
+            return format!("邮箱通知已开启 {day} 天，上报通知状态 ✓");
+        }
+        if self.error.is_empty() {
+            format!("邮箱通知已开启 {day} 天，上报通知状态**没打上** ✗")
+        } else {
+            format!(
+                "邮箱通知已开启 {day} 天，上报通知状态**没打上** ✗：{}",
+                self.error
+            )
+        }
+    }
+}
+
+/// 跑**邮箱那一半**：查月表 → 找 1021 → 判 `day` / `canReceive` → 该报才报。
+///
+/// # 逐字照旧 TS `packages/core/src/tasks/notice.ts:32-54`
+///
+/// ```ts
+/// const [emailErr, emailData] = await tryRequest(getEmailTaskList, ctx.http);
+/// if (emailData?.result?.month) {
+///   const task1021 = emailData.result.month.find((t) => t.id === 1021);
+///   if (task1021) {
+///     const day = task1021.button?.email?.day || "0";
+///     const canReceive = task1021.button?.email?.canReceive || 0;
+///     if (Number(day) > 0) {
+///       if (canReceive === 1) { await tryRequest(reportAppNoticeStatus, ctx.http, 1); }
+///       else { ctx.logger.info(`邮箱通知已开启 ${day} 天`); }
+///     } else { ctx.logger.info("邮箱通知未开启，请手动开启"); }
+///   }
+/// }
+/// ```
+///
+/// # 为什么**不返回 `Result`**
+///
+/// 旧 TS 两半各自 `tryRequest` + 只 `logger.debug` ⇒ 一半挂掉**不影响**另一半 ✓。
+/// 所以失败装进 [`EmailNoticeOutcome::error`] 交回，由调用方念出来
+///（本仓口径是"别静默"，所以失败那条走 `warn`，见 `NoticeTask::run`）。
+///
+/// ⚠ 上报那一枪是**写**（告诉上游"这个状态"），只发**一次**、不重试
+///（与 [`claim_notice`] 的 `reward` 同一口径：幂等与否零样本 ⇒ 不赌）。
+pub async fn claim_email_notice(ctx: &TaskContext) -> EmailNoticeOutcome {
+    let env = match call(ctx, proto::email_task_list_request(), "查询邮箱任务月表").await {
+        Ok(env) => env,
+        Err(e) => {
+            return EmailNoticeOutcome {
+                error: e.to_string(),
+                ..Default::default()
+            }
+        }
+    };
+    let slot = match proto::parse_email_notice_slot(&env) {
+        Ok(slot) => slot,
+        Err(e) => {
+            return EmailNoticeOutcome {
+                error: e.to_string(),
+                ..Default::default()
+            }
+        }
+    };
+    // 表里没有 1021 ⇒ 什么都不做（旧 TS 那句 `if (task1021)` ✓）。
+    let Some(slot) = slot else {
+        return EmailNoticeOutcome::default();
+    };
+    let day = slot.day.unwrap_or(0);
+    let can_receive = slot.can_receive.unwrap_or(0);
+    let mut outcome = EmailNoticeOutcome {
+        found: true,
+        slot: Some(slot),
+        report_should: day > 0 && can_receive == 1,
+        ..Default::default()
+    };
+    if !outcome.report_should {
+        return outcome;
+    }
+    match call(
+        ctx,
+        proto::report_app_notice_status_request(proto::APP_NOTICE_STATUS_ON),
+        "上报 App 通知状态",
+    )
+    .await
+    {
+        Ok(env) => match proto::parse_report_app_notice_status(&env) {
+            Ok(()) => outcome.reported = true,
+            Err(e) => outcome.error = e.to_string(),
+        },
+        Err(e) => outcome.error = e.to_string(),
+    }
+    outcome
+}
+
+/// 把邮箱那一半的结论交给明细通道（进 `record.details.reported`）。
+///
+/// 为什么值得报：`day` / `canReceive` **零实拍**，而"到底发没发那一枪"
+/// 只有这里能回答（旧 TS 连日志都只有 `debug` ✗）。
+fn report_email_details(ctx: &TaskContext, o: &EmailNoticeOutcome) {
+    ctx.details(serde_json::json!({
+        "kind": "noticeEmail",
+        "taskId": proto::NOTICE_EMAIL_TASK_ID,
+        "found": o.found,
+        "day": o.slot.as_ref().and_then(|s| s.day),
+        "canReceive": o.slot.as_ref().and_then(|s| s.can_receive),
+        "reportShould": o.report_should,
+        "reported": o.reported,
+        "error": o.error,
+    }));
+}
+
 // ══════════════════════════ 任务 ══════════════════════════
 
 /// 公告任务。
@@ -663,9 +822,34 @@ impl Task for NoticeTask {
     }
 
     async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
-        let outcome = claim_notice(ctx).await?;
+        // ⚠⚠ **两半**（旧 TS `tasks/notice.ts:12-54`）：短信那一半 + 邮箱那一半
+        //（任务 1021）。两半**各自 best-effort** ⇒ 先各跑各的，再按短信那半交回。
+        // ⚠ 顺序也照 TS：短信在前、邮箱在后 ✓。
+        let sms = claim_notice(ctx).await;
+        let email = claim_email_notice(ctx).await;
+        let email_line = email.summary_line();
+        if !email_line.is_empty() {
+            if email.error.is_empty() {
+                ctx.info(email_line);
+            } else {
+                // ⚠ 旧 TS 这一半**静默**（只 `logger.debug`）—— 本仓不照抄这份静默：
+                // "上报失败却静默"正是本仓反复批评过的那一档 ⇒ 走 `warn` ✓。
+                ctx.warn(email_line);
+            }
+        }
+        // ⚠ 明细的**先后**是行为的一部分：短信那一半在前（既有明细的下标不动 ✓），
+        // 邮箱那一半在后。短信那半挂掉时也要把邮箱的读数报出去（两半互不影响 ✓），
+        // 所以那条早退路径自己补一次。
+        let outcome = match sms {
+            Ok(o) => o,
+            Err(e) => {
+                report_email_details(ctx, &email);
+                return Err(e);
+            }
+        };
         let result = project(&outcome);
         report_details(ctx, &outcome, &result);
+        report_email_details(ctx, &email);
 
         if result.recheck_failed {
             // ⚠ 它是**警告**不是失败（见文件头"结构差之二"）：

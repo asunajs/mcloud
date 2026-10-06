@@ -110,6 +110,12 @@ pub const NOTICE_SIGNIN_PAGE_PATH: &str = "/ycloud/signin/page";
 /// ⚠ 是 `signin/task/click` 而**不是** `signin/page/…`（实拍逐字）。
 pub const NOTICE_SIGNIN_TASK_CLICK: &str = "/ycloud/signin/task/click";
 
+/// 邮箱任务月表的路径 —— 与 [`NOTICE_SIGNIN_TASK_CLICK`] 同前缀（`signin/task/*`）。
+///
+/// ⚠ 这一口是**旧 TS 独有**的（实拍里 `taskListV2` 只见过签到族那两个
+/// `marketname`，见 [`email_task_list_request`] 的注释）。
+pub const NOTICE_SIGNIN_TASK_LIST_PATH: &str = "/ycloud/signin/task/taskListV2";
+
 /// `task/click` 的 `key` 参数 —— 实拍逐字 `task`。
 pub const NOTICE_CLICK_KEY: &str = "task";
 
@@ -173,6 +179,13 @@ pub fn receive_task_request(task_id: i64) -> HttpRequest {
 ///
 /// 旧 TS 那侧的条件是 `Number(day) > 0 && canReceive === 1`，而 `day` /
 /// `canReceive` **零样本**（连在哪个响应里都不知道）。
+///
+/// # ✅ 2026-10-06：它**接链了**（在邮箱那一半里）
+///
+/// 用户口径「**跟参考**」⇒ 按旧 TS `tasks/notice.ts:44-50` 接上：查邮箱月表
+/// （[`email_task_list_request`]）→ 找到 1021 → `day > 0 && canReceive === 1` 才发这一枪。
+/// ⚠ 上面那条"跨客户端"的疑问**没有被解决**，只是被口径覆盖：照 TS 发 ✓
+///（实况由 `mcloud_tasks::notice::EmailNoticeOutcome` 如实记）。
 pub fn report_app_notice_status_request(status: i64) -> HttpRequest {
     h5(false, HttpRequest::get(report_status_url(status)), "true")
 }
@@ -191,6 +204,55 @@ pub fn report_app_notice_status_request(status: i64) -> HttpRequest {
 /// 把它留在本层是因为**形状有实拍**，哪天那条链接上了它就是现成的。
 pub fn signin_task_click_request(task_id: i64) -> HttpRequest {
     h5(false, HttpRequest::get(click_url(task_id)), "true")
+}
+
+/// 邮箱月表那一口的 `clientVersion`。
+///
+/// # ⚠ 这个数是**旧 TS 的字面量**，没有抓包支持
+///
+/// 旧 TS `packages/core/src/apis/task.ts:37-46` 写的是 `"11.2.1"`；而本仓见过的
+/// `taskListV2` 实拍（`mobile-events-…json` 第 72/73 条）是 `"11.4.0"`，且那两条的
+/// `marketname` **不是** `newsign_139mail`（是签到族那两个）⇒
+/// "邮箱市场该用哪个版本"**零样本**。
+/// 按依据优先级（TS 能跑 ⇒ 以它为准）照抄 `11.2.1`，缺口留在这里：
+/// 哪天抓到这一口，第一个要改的就是它。
+pub const EMAIL_TASK_LIST_CLIENT_VERSION: &str = "11.2.1";
+
+/// 邮箱市场名 —— 旧 TS 字面量（`apis/task.ts:41`）。
+pub const EMAIL_TASK_LIST_MARKET: &str = "newsign_139mail";
+
+/// 这一族盯的那条任务 id（「连续31天开启邮箱APP通知」）。
+///
+/// ⚠ 它与打卡那一步的 `1022` **不是一回事**（见文件头最后一格）：1022 是
+/// `signin/task/click` 上那个"开启通知"的 id，而 1021 是**邮箱月表**里的这一条。
+pub const NOTICE_EMAIL_TASK_ID: i64 = 1021;
+
+/// `POST …/signin/task/taskListV2`（`marketname=newsign_139mail`）—— **只读**。
+///
+/// 依据：旧 TS `packages/core/src/apis/task.ts:37-46` 逐字（POST + 三键 body），
+/// 调用点 `packages/core/src/tasks/notice.ts:32-54`（"邮箱通知奖励（任务 1021）"）。
+///
+/// # 为什么这里要把 `activityid` **剥掉**
+///
+/// [`h5`] 会固定补一枚 `activityid: sign_in_3`（签到页那个市场）。而旧 TS 这一口
+/// 走的是通用 `http.post`，base 层只补 `authorization` / `jwttoken` / `deviceid`
+/// （`packages/shared/src/http/base.ts:78-94`），**不补 `activityid`** ⇒ 照抄就不该带它。
+/// ⚠ 这与 `app_task_list_v2.rs` 那两处**不同**：那两处旧 TS 显式带了
+/// `activityid: <本次 marketname>`，所以那边是"先剥再补"；这里剥掉之后**不补** ✓。
+pub fn email_task_list_request() -> HttpRequest {
+    let body = serde_json::json!({
+        "marketname": EMAIL_TASK_LIST_MARKET,
+        "clientVersion": EMAIL_TASK_LIST_CLIENT_VERSION,
+        "group": "month",
+    });
+    let mut req = h5(
+        false,
+        HttpRequest::post(format!("{NOTICE_HOST}{NOTICE_SIGNIN_TASK_LIST_PATH}")).json_body(&body),
+        "true",
+    );
+    req.headers
+        .retain(|(k, _)| !k.eq_ignore_ascii_case("activityid"));
+    req
 }
 
 fn task_info_url() -> String {
@@ -345,6 +407,54 @@ pub fn parse_report_app_notice_status(env: &SignInEnvelope) -> Result<()> {
 /// 解析 `signin/task/click`：实拍响应**没有 `result`** ⇒ 只判 `code`。
 pub fn parse_signin_task_click(env: &SignInEnvelope) -> Result<()> {
     env.ensure_ok("公告任务打卡")
+}
+
+/// 邮箱月表里 `button.email` 那一格。
+///
+/// # 形状只有**旧 TS 的类型**做依据（零实拍）
+///
+/// 旧 TS `packages/core/src/types/task.ts:35-46`：
+/// `button.email?: { day: string; canReceive: number }`。
+/// ⚠ `day` 在 TS 里是**字符串**（形如 `"16"`）⇒ 这里用 `as_int` 收，
+/// 数字形态与字符串形态都认；非数字读成 `None`（= "没说"），
+/// 与旧 TS 那句 `Number(day) > 0` 在 `NaN` 上为假**同向** ✓。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NoticeEmailSlot {
+    /// `button.email.day` —— 旧 TS 的判据是 `Number(day) > 0`。
+    pub day: Option<i64>,
+    /// `button.email.canReceive` —— 旧 TS 只在 `=== 1` 时上报状态。
+    pub can_receive: Option<i64>,
+}
+
+/// 从邮箱月表里取出 **[`NOTICE_EMAIL_TASK_ID`]** 那一格的 `button.email`。
+///
+/// # 两种 `None` 的含义不同，调用方**必须**分开念
+///
+/// * 表里**没有** 1021 这一条 ⇒ `None`（旧 TS 的 `if (task1021)` 为假 ⇒ 什么都不做）；
+/// * 有 1021、但 `button.email` 缺席 ⇒ `Some(NoticeEmailSlot::default())`（两格都 `None`）。
+///
+/// 外层 `code` 非 0 仍是错（这一枪没打上）；"表里没这条"**不是**错。
+pub fn parse_email_notice_slot(env: &SignInEnvelope) -> Result<Option<NoticeEmailSlot>> {
+    env.ensure_ok("查询邮箱任务月表")?;
+    let Some(month) = env
+        .result
+        .as_ref()
+        .and_then(|r| r.get("month"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(None);
+    };
+    let Some(task) = month
+        .iter()
+        .find(|t| opt_int_at(t, "id") == Some(NOTICE_EMAIL_TASK_ID))
+    else {
+        return Ok(None);
+    };
+    let email = task.get("button").and_then(|b| b.get("email"));
+    Ok(Some(NoticeEmailSlot {
+        day: email.and_then(|e| opt_int_at(e, "day")),
+        can_receive: email.and_then(|e| opt_int_at(e, "canReceive")),
+    }))
 }
 
 /// 取一个槽对象；缺失、非对象一律 `None`（= "上游没给这一槽"）。

@@ -22,6 +22,12 @@
 #
 # ⚠ 拿不准就跑 `--full`：这里**宁可退回全量**（见下面"保守"那几条），不会漏跑 ✓。
 # ⚠ 前端那一档与本脚本无关 ⇒ 用 `node scripts/gates-web.mjs` ✓（两者可同时跑 ✓）。
+#
+# ⚠⚠ 本脚本的**第一条**（`cargo fmt --all -- --check`，见下面第 44 行）**已经单独进了
+# `pre-commit`**（2026-10-06，用户口径「A」）⇒ 钩子装着的仓库里，格式那一档不会漏 ✓。
+# `clippy` / `test` 两档**不在钩子里**：冷编 19m13s / 27m14s，且 `cargo test -p mcloud-server`
+# 会**重链接** launchd 正在跑的那个 `target/debug/mcloud` ⇒ SIGKILL + 一次 TCC 弹框 ✗
+# ⇒ 那两档照旧**手动**跑本脚本（提交前 `--full`）✓。
 
 set -uo pipefail
 

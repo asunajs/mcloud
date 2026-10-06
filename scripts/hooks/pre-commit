@@ -1,9 +1,27 @@
 #!/bin/sh
-# 提交档 Web 门禁（`node scripts/gates-web.mjs --commit`，必要且快 ✓）。
+# 提交档门禁，两道：
+#   ① Rust 格式 `cargo fmt --all -- --check`（本机实测 ≈1.1 s、**不链接** ✓）
+#   ② Web 门禁 `node scripts/gates-web.mjs --commit`（必要且快 ✓，实测 ≈40 s）
 #
-# ⚠ 只在本**暂存区里确实有 web/ 的东西**时才跑：纯 Rust / 纯文档提交不该为它等
-# 那几十秒 ✓（多会话并行时尤其重要 —— 别的写入线在跑 Rust，别被前端门禁堵住 ✗）。
+# ⚠ 两道都**只在本暂存区里确实有对应的东西**时才跑：纯文档提交不该为它们等，
+# 多会话并行时尤其重要 —— 别的写入线在跑 Rust，别被前端门禁堵住，反之亦然 ✗。
 # 判据是 `git diff --cached`（暂存区），不是工作区 —— 提交的就是暂存区那份 ✓。
+#
+# ⚠⚠ 为什么 Rust 这一档**只有 fmt**（用户口径 2026-10-06：选了「A」案）
+#
+# `cargo clippy --workspace --all-targets` / `cargo test --workspace` 的冷编代价是
+# **19m13s / 27m14s**（`docs/build-perf.md` §3.2），而且 `cargo test -p mcloud-server`
+# 还会**重链接** `target/debug/mcloud` —— 那正是 launchd 正在跑的那个文件
+# ⇒ SIGKILL + 一次 TCC 弹框 ✗（`AGENTS.md` 那一大段就是这条链）。
+# `cargo fmt` 只读源码：**不碰 `target/`、不拿 cargo 的锁、不链接** ⇒ 放进"每次提交"
+# 这一档是安全的 ✓。另外两案（B：再加 `gates-rust.sh --changed`；C：pre-push 再加 `--full`）
+# 已评估、**暂不采用**，理由与读数见 `docs/task-log.md` 第 112 行 ✓。
+#
+# ⚠ 一个已知的"连坐"：`cargo fmt --all` 查的是**整个工作区**，不是只查你暂存的那几个文件
+# ⇒ 别的写入线在工作区里留了未格式化的 `.rs`，**你**的提交也会被挡 ✗。
+# 这是照抄本仓既有的规范命令（`AGENTS.md`「提交前必须全绿」那条 + `scripts/gates-rust.sh:44`），
+# 不另发明"只查暂存文件"的第二套判据（两套迟早不一致 ✗）；真被连坐时按提示
+# `cargo fmt --all` 或跟那条线说一声 ✓。
 #
 # 跳过：`git commit --no-verify`（git 的标准开关）。跳了就是**没验证**，别当默认 ✓。
 # 卸载：`rm .git/hooks/pre-commit`（或跑 `scripts/install-git-hooks.sh --uninstall`）。
@@ -13,6 +31,61 @@ root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 [ -n "$root" ] || exit 0
 
 staged="$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)"
+
+# ── ① Rust 格式（只读源码，不碰 target/）────────────────────────────────
+#
+# ⚠ 这里用 `grep '\.rs$'` 而不是 `case "$staged" in *.rs)`：`case` 比的是**整串**，
+# 而 `staged` 是**多行**的 ⇒ `*.rs` 只在"最后一个暂存文件恰好是 .rs"时才命中 ✗
+#（下面 web 那条 `*web/*` 没这个问题，因为它的 `*` 能把换行吃掉 ✓）。
+if printf '%s\n' "$staged" | grep -q '\.rs$'; then
+  # ⚠ 钩子跑在 git 里，PATH 未必有 `~/.cargo/bin`（本仓 cargo **不在**默认 PATH，
+  # 见 `AGENTS.md`「环境」）⇒ 显式补一条候选；两处都找不到就**明说没跑**（跳过 ≠ 通过 ✓）。
+  cargo_bin="$(command -v cargo 2>/dev/null || true)"
+  if [ -z "$cargo_bin" ] && [ -x "$HOME/.cargo/bin/cargo" ]; then
+    cargo_bin="$HOME/.cargo/bin/cargo"
+  fi
+  if [ -z "$cargo_bin" ]; then
+    echo "⚠ 找不到 cargo ⇒ Rust 格式检查**没跑**（跳过 ≠ 通过）" >&2
+  else
+    # ⚠⚠ `cargo fmt` **不是** cargo 内置的：它要去找一个叫 `cargo-fmt` 的**外部二进制**，
+    # 而那个只在 **PATH** 上找 ⇒ 光把 `cargo` 解析成绝对路径**不够** ✗
+    #（2026-10-06 实测：PATH 里没有 `~/.cargo/bin` 时报 `error: no such command: fmt`，
+    #  钩子会把"没装工具"误报成"格式没过"、每次提交都挡 ✗）。
+    # 所以这里顺手把 `~/.cargo/bin` 补进 PATH（cargo-fmt / cargo-clippy 都住在那儿 ✓）。
+    case ":$PATH:" in
+      *":$HOME/.cargo/bin:"*) ;;
+      *) [ ! -d "$HOME/.cargo/bin" ] || PATH="$HOME/.cargo/bin:$PATH" ;;
+    esac
+    export PATH
+    # 本仓的 CARGO_HOME 约定（`AGENTS.md`「环境」）：没设过、且仓库里那份在，就用它 ✓。
+    if [ -z "${CARGO_HOME:-}" ] && [ -d "$root/.cargo-home" ]; then
+      CARGO_HOME="$root/.cargo-home"
+      export CARGO_HOME
+    fi
+    echo "Rust 格式：cargo fmt --all -- --check（≈1 s、不链接、不碰 target/）"
+    if fmt_out="$( (cd "$root" && "$cargo_bin" fmt --all -- --check) 2>&1 )"; then
+      :
+    else
+      # ⚠ 把"这台机器没装 rustfmt"与"你这份代码没格式化"**分开**（两句不同的话）：
+      # 前者是环境问题，照本钩子对 node 的同一条口径 —— **不拦提交**，但明说没跑 ✓；
+      # 后者是这次改动的问题，**拦** ✓。
+      case "$fmt_out" in
+        *"no such command"*|*"not installed"*)
+          echo "⚠ cargo fmt **没跑**（这台机器没有 rustfmt：$fmt_out）（跳过 ≠ 通过）" >&2
+          ;;
+        *)
+          printf '%s\n' "$fmt_out" >&2
+          echo "✗ Rust 格式没过 ⇒ 跑 \`cargo fmt --all\` 再提交（跳过 = 没验证：git commit --no-verify）" >&2
+          exit 1
+          ;;
+      esac
+    fi
+  fi
+else
+  echo "Rust 格式：暂存区里没有 .rs 改动，跳过 ✓"
+fi
+
+# ── ② Web 门禁（提交档）────────────────────────────────────────────────
 case "$staged" in
   *web/*|*scripts/gates-web.mjs*|*scripts/hooks/*) ;;
   *)

@@ -313,3 +313,91 @@ fn the_slot_sum_is_only_a_reading_not_an_amount() {
         "到账那一口给不出数 ⇒ 不能拿 sum 顶它"
     );
 }
+
+// ══════════════════════ 邮箱那一半（任务 1021） ══════════════════════
+
+/// 邮箱月表那一口：**POST** + 三键 body（旧 TS `apis/task.ts:37-46` 逐字）。
+///
+/// ⚠ 顺带钉住**不带 `activityid`**：旧 TS 这一口走通用 `http.post`，base 层只补
+/// `authorization` / `jwttoken` / `deviceid`（`packages/shared/src/http/base.ts:78-94`），
+/// 而 [`h5`] 会塞一枚 `sign_in_3` ⇒ 本函数必须把它剥掉 ✓。
+#[test]
+fn the_email_list_request_is_a_post_with_the_three_keys() {
+    let req = email_task_list_request();
+    assert_eq!(
+        req.url,
+        "https://caiyun.feixin.10086.cn:7071/ycloud/signin/task/taskListV2"
+    );
+    assert_eq!(req.method, "POST");
+    let body: serde_json::Value = serde_json::from_slice(req.body.as_deref().unwrap()).unwrap();
+    assert_eq!(body["marketname"], "newsign_139mail");
+    assert_eq!(body["clientVersion"], "11.2.1");
+    assert_eq!(body["group"], "month");
+    assert_eq!(body.as_object().unwrap().len(), 3, "只有这三键");
+    assert!(
+        header(&req, "activityid").is_none(),
+        "这一口不该带 activityid（旧 TS 没带）"
+    );
+}
+
+/// 解析：按 **id** 找 1021（表里还有别的条目），`day` 收字符串形式的数。
+#[test]
+fn the_email_slot_is_found_by_id() {
+    let body = r#"{"code":0,"msg":"success","result":{"month":[
+        {"id":549,"button":{}},
+        {"id":1021,"button":{"email":{"day":"16","canReceive":1}}}]}}"#;
+    let slot = parse_email_notice_slot(&envelope(body)).unwrap().unwrap();
+    assert_eq!(slot.day, Some(16), "`\"16\"` 要收成 16");
+    assert_eq!(slot.can_receive, Some(1));
+}
+
+/// 三种"读不出"必须分得开：**没这条** / 这条没 `button.email` / 字段缺。
+#[test]
+fn the_email_slot_distinguishes_missing_task_from_missing_field() {
+    // ① 表里没有 1021 ⇒ `None`（旧 TS 的 `if (task1021)` 为假 ⇒ 什么都不做）
+    let no_task = r#"{"code":0,"msg":"success","result":{"month":[{"id":549}]}}"#;
+    assert!(parse_email_notice_slot(&envelope(no_task))
+        .unwrap()
+        .is_none());
+    // ② 有 1021、但 `button.email` 缺席 ⇒ `Some(默认值)`（两格都 `None`）—— **不是** `None`
+    let no_email = r#"{"code":0,"msg":"success","result":{"month":[{"id":1021,"button":{}}]}}"#;
+    let slot = parse_email_notice_slot(&envelope(no_email))
+        .unwrap()
+        .unwrap();
+    assert_eq!(slot, NoticeEmailSlot::default());
+    // ③ `day` 非数字 ⇒ `None`（"没说"），与旧 TS 的 `Number(day) > 0` 在 NaN 上为假同向
+    let bad_day = r#"{"code":0,"msg":"success","result":{"month":[{"id":1021,"button":{"email":{"day":"abc","canReceive":1}}}]}}"#;
+    let slot = parse_email_notice_slot(&envelope(bad_day))
+        .unwrap()
+        .unwrap();
+    assert_eq!(slot.day, None);
+    assert_eq!(slot.can_receive, Some(1), "一格坏不该把另一格也丢掉");
+}
+
+/// `result` 里没有 `month`（或它不是数组）⇒ `None`，**不是**错。
+#[test]
+fn a_missing_month_is_not_an_error() {
+    for body in [
+        r#"{"code":0,"msg":"success"}"#,
+        r#"{"code":0,"msg":"success","result":{}}"#,
+        r#"{"code":0,"msg":"success","result":{"month":{}}}"#,
+    ] {
+        assert!(
+            parse_email_notice_slot(&envelope(body)).unwrap().is_none(),
+            "实得非 None：{body}"
+        );
+    }
+    // ⚠ 外层非 0 码**仍是错**（这一枪没打上），与"表里没这条"是两件事。
+    let bad = envelope(r#"{"code":500,"msg":"系统繁忙"}"#);
+    assert!(parse_email_notice_slot(&bad).is_err());
+}
+
+/// 那一口的 `clientVersion` 是**旧 TS 的字面量**，且本仓**没有**它的抓包依据 ——
+/// 这个用例钉的是"别顺手改成签到族那个 `12.6.0`"（那会让 body 看着对、其实换了市场语义）。
+#[test]
+fn the_email_list_client_version_is_the_ts_literal() {
+    assert_eq!(EMAIL_TASK_LIST_CLIENT_VERSION, "11.2.1");
+    assert_ne!(EMAIL_TASK_LIST_CLIENT_VERSION, "12.6.0");
+    assert_eq!(EMAIL_TASK_LIST_MARKET, "newsign_139mail");
+    assert_eq!(NOTICE_EMAIL_TASK_ID, 1021);
+}

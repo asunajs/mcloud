@@ -1,5 +1,7 @@
 #!/bin/sh
-# 把仓库里的两个 Web 门禁钩子装进 `.git/hooks/`（**软链** ⇒ 改 `scripts/hooks/*` 即刻生效 ✓）。
+# 把仓库里的两个门禁钩子装进 `.git/hooks/`（**软链** ⇒ 改 `scripts/hooks/*` 即刻生效 ✓）：
+#   pre-commit → Rust 格式（`cargo fmt --all -- --check`，有 .rs 时）+ Web 提交档（有 web/ 时）
+#   pre-push   → Web 推送档
 #
 #   scripts/install-git-hooks.sh              # 装（已装过则覆盖自己的那份）
 #   scripts/install-git-hooks.sh --uninstall  # 卸

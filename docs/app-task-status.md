@@ -11,7 +11,7 @@
 | 实现状态 | 条数 | 是哪几条 |
 |---|---|---|
 | ✅ **已实现**（会真做：上传 / 分享 / 固定入口） | **7** | 106、113、409、434、522、615、1005 |
-| ✅ **已实现**（判定门：按参考**刻意不动**） | **2** | 120（与参考一致 ✓）、1021（⚠ **与参考不一致**，待拍板） |
+| ✅ **已实现**（判定门：按参考**刻意不动**） | **2** | 120（与参考一致 ✓）、1021（**与参考一致** ✓ —— 矩阵里不做，而它的真身在**另一条任务** `notice` 的邮箱那一半，2026-10-06 已落码 ✓，见 §5-2） |
 | ✅ **无需实现**（上游已完成 ⇒ 门挡住即可，行为已正确） | **1** | 118 |
 | ❌ **未实现** | **15** | 见 §2 主表 |
 | **合计** | **25** | 活列表基数（2026-10-04 16:00:17 拉取，只读，落 `data/history.json` 的 run 93） |
@@ -57,13 +57,13 @@
 | 615 | 记录国庆节欢乐瞬间 | ✅ 已实现：`beiyong1` 的**按钮门** ⇒ 一次传 **10 张 `.jpg`**（`process` 已走的先扣掉 ✓） | `beiyong1_button_gate()` / `UPLOAD_TEN`；形状四格 `rounds=10 / stop_at_process=10 / per_round_ms=300 / file_ext=".jpg"`；门读 `button_app_link`（`app_task_list_v2.rs` 的 `button_app_link`，**2026-10-04 加**，见 §5-7） | ✅ 单测 4 处（门 3 + 解析 1）+ 运行级 **2 条**（10 张 ✓ / 补差额 ✓；都断言了 `.jpg` 与**进度分母** ✓，撤门或撤"剩余量"即红 ✓） | ☑ **已验收**（run 110，2026-10-04 20:30，测试号 `onlyTaskIds=615`：`clicked:true` ✓ `uploaded:10` ✓ `problems:[]` ✓ `收回 10/10` ✓ ⇒ run 111 矩阵 **`WAIT` → `FINISH`**、已完成 3 → 4 ✓；**当场入账** ✓） |
 | 617 | 体验智能消除 | ❌ 未实现 | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 | 618 | 体验AI相机 | ❌ 未实现 | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
-| 1004 | 给好友发邮件 | ❌ 未实现（参考 `sendMailRunner`；本仓 **mail139 整族未实现**） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
+| 1004 | 给好友发邮件 | ❌ 未实现（参考 **`sendMailTask`**，TS `runners.ts:154-159`；Go 侧记在 `toolGaps`，`dispatch.go:490`；本仓 **mail139 整族未实现**） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 | 1005 | 从固定入口进入云朵中心 | ✅ 已实现：固定入口（打卡 key 用默认 `task`） | `Step::Entry` → `entry_do_task()` | ✅ 单测 4 处；真机 `{clicked:true}` ✓ | ☐ 跑一次看明细 |
-| 1014 | 体验“PDF转换”功能 | ❌ 未实现（参考 `pdfConvertRunner`，mail139） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
+| 1014 | 体验“PDF转换”功能 | ❌ 未实现（参考 **`pdfConvertTask`**，TS `runners.ts:168-173`；Go `MailPDF`，`dispatch.go:422`；mail139） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 | 1017 | 登录移动云盘云朵中心 | ❌ 未实现 | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
-| 1020 | 完成一次邮件转存 | ❌ 未实现（参考 `backupMailRunner`，mail139） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
-| 1021 | 连续31天开启邮箱APP通知 | ⛔ 刻意不做 —— ⚠ **但与参考不一致**（参考里 `TASK_LIST[1021]` **先命中** ⇒ 会跑 `emailNotice`） | `SKIP_TASK_LIST` | ⚠ 仅黑名单字面量 | ☐ **要你拍板**：跟参考（实现）还是跟黑名单（不做） |
-| 1057 | 体验AI工作台 | ❌ 未实现（参考 `aiWorkbenchRunner`，mail139） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
+| 1020 | 完成一次邮件转存 | ❌ 未实现（参考 **`backupMailTask`**，TS `runners.ts:161-166`；Go `MailBackup`，`dispatch.go:426`；mail139） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
+| 1021 | 连续31天开启邮箱APP通知 | ⛔ 矩阵里**不做**（**与参考一致** ✓）—— 它的真身是**另一条任务** `notice` 的**邮箱那一半**（2026-10-06 已落码 ✓，见 §5-2） | 矩阵不碰它；实现在 `crates/mcloud-tasks/src/notice.rs` + `crates/mcloud-upstream/src/app_notice.rs` | ✅ `cargo test -p mcloud-tasks --lib notice`（6 条邮箱钉子）+ `cargo test -p mcloud-upstream --lib app_notice` | ☐ 跑一次 `notice`，看明细里那条 `noticeEmail`（`day` / `canReceive` / `reported`） |
+| 1057 | 体验AI工作台 | ❌ 未实现（⚠ **参考侧也没有 runner**：TS 全仓 **0 命中 1057**；Go 只把它归成 `VerifyStillOpen`「需前往邮箱完成」（`task_matrix_report_test.go:123`，组 `cloudEmail`）⇒ 不是「漏做」） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 
 ## 3. 自动验证（四层，各自能证明什么）
 
@@ -94,9 +94,33 @@
 ## 5. 已知差异 / 为什么未实现
 
 1. **本仓对"判不出形状"的条目连打卡都不发** —— 参考实现的 `default:` 分支在 `TASK_LIST[task.id]` 不命中时**仍会** `clickTask`（`mcloud-sign` 的 `services/app/tasks.ts:101-105`），而本仓主循环先 `filter_map(step_for)`（`app_task.rs:602-611`）⇒ 那 17 条一枪不发 ✗。这是**结构性差异**，不是漏写一行。
-2. **1021 的判定顺序**：参考先看 `TASK_LIST[task.id]`（命中 ⇒ 跑 `emailNotice`），黑名单只在"不是已知 runner"那一支才生效 ⇒ **同一条 id 两边结论相反** ⇒ 需要你拍板（§2 最后一行）。
-3. **mail139 整族未实现**：`grep -rln mail139 crates/` = **0 命中** ⇒ 1004 / 1014 / 1020 / 1021 的 runner 无从落。
+2. ✅ **1021：这里原先写错了，2026-10-06 更正**（旧文写的是"参考里 `TASK_LIST[1021]` 先命中 ⇒ 会跑 `emailNotice`，两边结论相反"✗）。
+   **三边实测**（`/Users/catlair/Documents/workspace/mcloud-sign` 是本机 TS 检出）：
+   * 旧 TS 的 app runner 表键 = `106/107/434/113/409/522/1005/472/473/1004/1020/1014/1028/585`（`packages/core/src/tasks/app/runners.ts:39`）——**没有 1021**；
+   * 旧 TS 的分派顺序确实是"runner 先、黑名单兜底"（`tasks.ts:96-104`），但 1021 **不在 runner 表里** ⇒ 落到 `if (!SKIP_TASK_LIST.includes(task.id))`（`:111` 含 1021）⇒ **一枪不发** ✓；
+   * Go 参考同构（`internal/app/task_matrix_dispatch.go:519-557`：runner 表 → toolGaps → beiyong1 → `taskMatrixSkipsClick` → 盲点 click），1021 两边都不在 ⇒ `StepBlockedByRule` ✓；
+   * `emailNotice` 这个符号在 **TS / Go / 本仓三边 0 命中** ✗ —— 旧文那个名字是**编的**。
+   ⇒ **两边结论一致**：矩阵都不碰 1021 ✓（本仓的 `SKIP_TASK_LIST` 与判定顺序**不动** ✓）。
+   **1021 的真身**是另一条任务：旧 TS 的 `noticeTask`（`packages/core/src/tasks/notice.ts:8`）**邮箱那一半**（`:32-54`）——
+   查邮箱月表（`getEmailTaskList`：`POST …/signin/task/taskListV2`，body `{marketname:"newsign_139mail",clientVersion:"11.2.1",group:"month"}`，`apis/task.ts:37-46`）
+   → 按 id 找 1021 → 读 `button.email.{day,canReceive}` → **只有 `Number(day) > 0 && canReceive === 1`** 才发
+   `GET …/signin/page/reportAppNoticeStatus?status=1`（`:44-50`）。
+   ⚠ 它**只上报状态、没有"做"的动作** ⇒ 语义上限就是"上报/领取"（证据缺口见 §6）。
+   **本仓落码（2026-10-06，用户口径「跟参考」）**：`claim_email_notice`（`crates/mcloud-tasks/src/notice.rs`）
+   + `email_task_list_request` / `parse_email_notice_slot`（`crates/mcloud-upstream/src/app_notice.rs`），
+   接在 `NoticeTask::run` 里**短信那一半之后**，两半各自 best-effort ✓。
+   ⚠ 旁证：活列表里 1021 的 `marketName / group` 正是 **`newsign_139mail` / `month`**（§6 附录那张表 ✓）——
+   与上面那个 body 逐字对上 ✓。
+3. **mail139 整族未实现**（参考里是 **472 / 473 / 1004 / 1014 / 1020**）：`grep -rln mail139 crates/` = **0 命中** ⇒ 那几条的 runner 无从落。⚠ 早先把 **1021** 也算进这一族是**错的** ✗ —— 1021 在 `notice` 族，见 §5-2 ✓。
 4. **113 差一个入参**：参考是 `refreshToken()` + `uploadRandomFile({channelSrc:"10200153"})`；本仓 upload **没有** `channelSrc` 这个入参（`grep -rn channelSrc crates/` 只命中 login 的头常量）。
+5. ⚠⚠ **本表曾经"编过参考符号"（2026-10-06 查实，5 处已全部修掉）**：主表里「参考实现那个 runner 叫什么」有 **5 处是编的** ——
+   `emailNotice`（1021 那行，见 §5-2）、`sendMailRunner`、`pdfConvertRunner`、`backupMailRunner`、`aiWorkbenchRunner`：
+   这些串在 **TS / Go 两边 0 命中** ✗（真名分别是 `sendMailTask` / `pdfConvertTask` / `backupMailTask` / `aiWorkbenchTask`，
+   见 `runners.ts:154/168/161/175`；而 `aiWorkbenchTask` 属于 **1028**，不是 1057 ✗）。
+   ⇒ **审计办法**（以后写"参考里有 X"时照做）：把每个引用的符号拿去做 **两遍 `grep -rn <符号>`**
+   （TS 检出 `/Users/catlair/Documents/workspace/mcloud-sign/packages` + Go 参考 `../mcloud-back/internal`），
+   **0 命中就不许写**；只写得起"能自己跑的命令或 `file:line`"的那种引用 ✓（与 `AGENTS.md` 的依据优先级同一条）。
+   ⚠ 编出来的名字比"不写"危害大：它让一行"未实现"看着像"有据可依" ✗。
 5. **615 的名字门**：`beiyong1_name_gate` 要「上传」+「图/照」（符号 `beiyong1_name_gate()`），活体名字是「记录国庆节欢乐瞬间」⇒ 不过门。
 6. **434 的原始 name 带 HTML**：上游给的是 `分享文件领好礼<span id='share_title'>0/7</span>` ⇒ 进记录前由 `clean_task_name()`剥掉 ✓。
 7. ✅ **434 的"第 0 步"曾经被吞了 —— 已修（2026-10-04）**：`should_click` 原先把"434 只在第 22 步打卡"写成了**替代**规则（`if task_id == 434 { return step == 22 }`），而参考实现里那张 `specialMap` 是**叠加**在步号规则之上的 ——
