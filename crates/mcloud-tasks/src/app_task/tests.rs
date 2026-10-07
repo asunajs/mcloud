@@ -1045,6 +1045,20 @@ fn task_json_with_process(id: i64, group: &str, name: &str, market: &str, proces
     )
 }
 
+/// 与 [`task_json`] 同形，但**带 `currstep`** —— 434 的"领奖"那一发就挂在
+/// `currstep == 22` 这一格（见 `should_click` ✓；那个魔数 `{434: 22}` 的解释就在这里 ✓）。
+fn task_json_with_currstep(
+    id: i64,
+    group: &str,
+    name: &str,
+    market: &str,
+    currstep: i64,
+) -> String {
+    format!(
+        r#"{{"id":{id},"name":"{name}","groupid":"{group}","state":"WAIT","limitType":"DAY","enable":1,"currstep":{currstep},"process":0,"marketname":"{market}"}}"#
+    )
+}
+
 /// 与 [`task_json`] 同形，但**不带 `currstep`** —— 上游确实会这么给
 ///（2026-10-04 小号 run 96 就是：面板那句自述打成"第 0 步"，而格子里是缺席 ✓）。
 fn task_json_without_step(id: i64, group: &str, name: &str, market: &str) -> String {
@@ -1745,18 +1759,77 @@ fn already_done_reads_the_upstreams_own_progress() {
     );
 }
 
-/// ⭐⭐ 用户反馈那条：**分享 7/7 之后不该再做、更不该报失败** ✓。
+/// ⭐⭐ 用户口径（2026-10-07）：「**7/7 就不应该再运行而是领取奖励**」✓
+/// —— 满了之后 **只领奖**（434 的 `task/click`，`currstep == 22` 那一格 ✓），
+/// **不再**建外链、**不再**补传文件 ✗。
 ///
-/// 旧行为：照常打卡 + 白传一个文件 + 白分享 ⇒ 次数涨不动 ⇒ 判"没记上" ⇒ **报失败** ✗。
+/// ⚠ 我上一版把打卡也一起跳过了 ✗ —— 那正是"领奖"那一发 ✓（用户当场纠正 ✓）。
 #[tokio::test]
-async fn a_full_share_task_is_left_alone_and_not_reported_as_a_failure() {
-    let items = vec![task_json(
+async fn a_full_share_task_claims_the_reward_and_stops_sharing() {
+    let items = vec![task_json_with_currstep(
         434,
         "month",
         "分享文件领好礼<span id='share_title'>7/7</span>",
         "sign_in_3",
+        22,
     )];
-    // ⚠ 只给整表那一页：做满的条目**一枪都不发**（连打卡都不发 ✓、事后整表也不拉 ✓）
+    let mut replies = replies_for(&items, vec![]);
+    replies.push(click_ok()); // ← 领奖那一发（满了之后**唯一**该发的一发 ✓）
+
+    let sink = Arc::new(CapturedSink::default());
+    let (ctx, http, _sink) = ctx_with_sink(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+        sink.clone(),
+    );
+    let result = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
+
+    assert!(result.steps[0].already_done);
+    assert!(result.steps[0].clicked, "领奖那一发要打");
+    assert_eq!(result.acted, 1, "领到了就是真推进（与 409/1005 同口径）");
+    assert!(!result.steps[0].shared, "不再建外链");
+    assert_eq!(result.steps[0].uploaded, 0, "不再补传文件");
+    assert!(result.failures.is_empty(), "{:?}", result.failures);
+    let summary = result.summary_line();
+    assert!(summary.contains("1 条上游已做满（只领奖）"), "{summary}");
+    assert!(
+        result.task_outcome().is_success(),
+        "{:?}",
+        result.task_outcome()
+    );
+    assert_eq!(http.clicks().len(), 1, "就这一发");
+    let urls: Vec<String> = http.requests().into_iter().map(|r| r.url).collect();
+    assert!(
+        !urls
+            .iter()
+            .any(|u| u.contains("getOutLink") || u.contains("hcy/file/create")),
+        "满了就不该再分享/上传：{urls:?}"
+    );
+    let lines = sink.lines();
+    assert!(
+        lines.iter().any(|l| l.contains("领奖那一发已打")),
+        "{lines:?}"
+    );
+}
+
+/// ⭐⭐ 同一条满了的条目，**领奖那一格还没到**（`currstep != 22`）⇒ 一枪都不发 ✓、
+/// 结论是"跳过"而不是"失败" ✓。
+///
+/// ⚠ 旧行为：照常打卡 + 白传一个文件 + 白分享 ⇒ 次数涨不动 ⇒ 判"没记上" ⇒ **报失败** ✗
+///（2026-10-07 用户反馈：「分享任务 7/7 了还在做，做完 7/7 说失败」✓）。
+#[tokio::test]
+async fn a_full_share_task_whose_claim_step_has_not_come_is_left_alone() {
+    let items = vec![task_json_with_currstep(
+        434,
+        "month",
+        "分享文件领好礼<span id='share_title'>7/7</span>",
+        "sign_in_3",
+        13,
+    )];
+    // ⚠ 只给整表那一页：这一条**一枪都不发**（连打卡都不发 ✓、事后整表也不拉 ✓）
     let replies = replies_for(&items, vec![]);
 
     let sink = Arc::new(CapturedSink::default());
@@ -1783,10 +1856,13 @@ async fn a_full_share_task_is_left_alone_and_not_reported_as_a_failure() {
     );
     assert!(result.steps[0].already_done);
     assert_eq!(result.steps[0].share_before.as_deref(), Some("7/7"));
-    assert!(!result.steps[0].clicked, "连打卡都不该发");
+    assert!(
+        !result.steps[0].clicked,
+        "`currstep == 13` 不是领奖那一格（22）⇒ 不打"
+    );
     assert!(!result.steps[0].shared, "更不该建外链");
     let summary = result.summary_line();
-    assert!(summary.contains("1 条上游已做满"), "{summary}");
+    assert!(summary.contains("1 条上游已做满（没动）"), "{summary}");
     assert!(
         matches!(result.task_outcome(), TaskOutcome::Skipped { .. }),
         "结论该是「跳过」而不是「失败」：{:?}",
@@ -1816,7 +1892,8 @@ async fn a_full_monthly_upload_is_left_alone() {
         "sign_in_3",
         100,
     )];
-    let replies = replies_for(&items, vec![]);
+    let mut replies = replies_for(&items, vec![]);
+    replies.push(click_ok()); // 打卡那一发照旧打（`currstep == 0` ✓）
 
     let (ctx, http) = ctx_with(
         TEST_ACCOUNT,
@@ -1829,9 +1906,12 @@ async fn a_full_monthly_upload_is_left_alone() {
 
     assert_eq!(result.full_skipped, 1);
     assert_eq!(result.steps[0].uploaded, 0, "一个都不该传");
+    assert!(result.steps[0].clicked, "打卡那一发照旧（它本来就该打 ✓）");
     assert!(result.failures.is_empty(), "{:?}", result.failures);
+    // ⚠ 打卡算推进 ⇒ 结论是 success（不是 skipped ✗）—— 与旧行为一致 ✓，
+    // 差的只是"不再白传 5 个" ✓。
     assert!(
-        matches!(result.task_outcome(), TaskOutcome::Skipped { .. }),
+        result.task_outcome().is_success(),
         "{:?}",
         result.task_outcome()
     );

@@ -1019,8 +1019,23 @@ impl AppTaskResult {
         if !self.failures.is_empty() {
             s.push_str(&format!("；{} 条有失败", self.failures.len()));
         }
-        if self.full_skipped > 0 {
-            s.push_str(&format!("；{} 条上游已做满（没动）", self.full_skipped));
+        // ⚠ 满了之后有两种去向，**别混着说** ✗：领了奖（`clicked` ✓）／门没让打、
+        // 真的没动 ✓ —— 2026-10-07 用户口径：「7/7 就不应该再运行而是领取奖励」✓。
+        let claimed = self
+            .steps
+            .iter()
+            .filter(|st| st.already_done && st.clicked)
+            .count();
+        let idle = self
+            .steps
+            .iter()
+            .filter(|st| st.already_done && !st.clicked)
+            .count();
+        if claimed > 0 {
+            s.push_str(&format!("；{claimed} 条上游已做满（只领奖）"));
+        }
+        if idle > 0 {
+            s.push_str(&format!("；{idle} 条上游已做满（没动）"));
         }
         if !self.unconfirmed.is_empty() {
             s.push_str(&format!(
@@ -1266,7 +1281,37 @@ pub async fn run_app_task(
                     _ => "读不出进度".into(),
                 }
             };
-            ctx.info(format!("{name}：上游已经做满 ⇒ 这一趟不动它（{progress}）"));
+            // ⚠⚠ **但"领奖"那一发照打** —— 用户口径（2026-10-07）：
+            // 「**7/7 就不应该再运行而是领取奖励**」✓。这里"运行"指的是**分享**
+            //（建外链 + 必要时补传一个文件 ✗），而**领取**就是 `task/click` 那一发 ✓
+            //（旧 TS 的 `clickTask`，434 的例外步号 `22` 正是为它留的 ✓ —— 见
+            // [`should_click`]；那个魔数 `{434: 22}` 现在有了解释：**分享满了 ⇒ 去领奖** ✓）。
+            // ⚠ 门照旧走 `should_click`（**不绕过** ✗）：旧实现就是拿它决定打不打的 ✓
+            // —— `currstep == 22` 才打 ✓，其余步号一律不打（照实说"没动" ✓）。
+            if should_click(item) {
+                match click(ctx, item).await {
+                    Ok(notice) => {
+                        step.clicked = true;
+                        // 领到了就是**真推进** ✓（与 409 / 1005 那种"点一下就是全部"同口径 ✓）
+                        result.acted += 1;
+                        ctx.success(format!(
+                            "{name}：上游已做满（{progress}）⇒ 领奖那一发已打，不再重复做 ✓"
+                        ));
+                        if let Some(n) = notice {
+                            step.problems.push(format!("上游附言：{n}"));
+                        }
+                    }
+                    Err(e) => {
+                        // ⚠ **领奖没成是硬失败** ✗ —— 别让它被"已做满"这顶帽子盖住 ✗
+                        //（用户口径：跳过 ≠ 通过 ✓）。
+                        let msg = format!("{name}：领奖那一发没成：{e}");
+                        step.problems.push(msg.clone());
+                        result.failures.push(msg);
+                    }
+                }
+            } else {
+                ctx.info(format!("{name}：上游已经做满 ⇒ 这一趟不动它（{progress}）"));
+            }
             result.steps.push(step);
             continue;
         }
