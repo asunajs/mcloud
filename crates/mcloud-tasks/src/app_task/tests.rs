@@ -1673,6 +1673,176 @@ async fn a_failed_upload_is_reported_not_dressed_up_as_a_delay() {
     );
 }
 
+// ── 上游"已经做满"的条目：整条不动 ────────────────────────────────────
+//    ⚠ 起因是**用户反馈**（2026-10-07）：「分享任务 7/7 了还在做，做完 7/7 说失败」✗
+
+/// ⭐⭐ `already_done`：两族各一条判据，**都用上游自己给的读数** ✓。
+#[test]
+fn already_done_reads_the_upstreams_own_progress() {
+    // ① 434：名字里的 `a/b`
+    let share = |name: &str| {
+        let mut it = item(Some(434), Some("month"), Some(name));
+        it.enable = Some(1);
+        it
+    };
+    assert!(already_done(&share("分享文件领好礼7/7")), "7/7 ⇒ 满了");
+    assert!(
+        already_done(&share("分享文件领好礼<span id='share_title'>7/7</span>")),
+        "带 span 的活体形状也算 ✓"
+    );
+    assert!(!already_done(&share("分享文件领好礼6/7")), "6/7 ⇒ 还能做");
+    assert!(
+        !already_done(&share("分享文件领好礼0/0")),
+        "分母 0 判不了 ⇒ 不算满 ✓"
+    );
+    assert!(
+        !already_done(&share("分享文件领好礼")),
+        "读不出 ⇒ 不算满（别把「读不出」读成「不用做」✗）"
+    );
+
+    // ② 522 / 615 那一族：`process` 顶到这一档形状的上限
+    // ⚠ 615 那一档的**形状门还看 group（`beiyong1`）+ `button.app.link`** ✗
+    //（见 `the_beiyong1_button_gate_routes_to_ten_uploads` ✓）—— 夹具少了哪一格就
+    // 落进"这一档没有形状" ⇒ 恒 false ✗。
+    let up = |id: i64, group: &str, name: &str, process: i64, link: Option<&str>| {
+        let mut it = item(Some(id), Some(group), Some(name));
+        it.process = Some(process);
+        it.enable = Some(1);
+        it.button_app_link = link.map(str::to_string);
+        it
+    };
+    assert!(
+        already_done(&up(522, "month", "当月上传文件满100个", 100, None)),
+        "522 到 100 ⇒ 满了"
+    );
+    assert!(!already_done(&up(
+        522,
+        "month",
+        "当月上传文件满100个",
+        99,
+        None
+    )));
+    assert!(
+        already_done(&up(
+            615,
+            "beiyong1",
+            "记录国庆节欢乐瞬间",
+            10,
+            Some("mcloud://main/uploadView")
+        )),
+        "615 到 10 ⇒ 满了"
+    );
+    assert!(!already_done(&up(
+        615,
+        "beiyong1",
+        "记录国庆节欢乐瞬间",
+        9,
+        Some("mcloud://main/uploadView")
+    )));
+    assert!(
+        !already_done(&up(106, "month", "手动上传一个文件", 99, None)),
+        "106 那一档没有「满」这个概念（`stop_at_process == 0`）⇒ 恒 false ✓"
+    );
+}
+
+/// ⭐⭐ 用户反馈那条：**分享 7/7 之后不该再做、更不该报失败** ✓。
+///
+/// 旧行为：照常打卡 + 白传一个文件 + 白分享 ⇒ 次数涨不动 ⇒ 判"没记上" ⇒ **报失败** ✗。
+#[tokio::test]
+async fn a_full_share_task_is_left_alone_and_not_reported_as_a_failure() {
+    let items = vec![task_json(
+        434,
+        "month",
+        "分享文件领好礼<span id='share_title'>7/7</span>",
+        "sign_in_3",
+    )];
+    // ⚠ 只给整表那一页：做满的条目**一枪都不发**（连打卡都不发 ✓、事后整表也不拉 ✓）
+    let replies = replies_for(&items, vec![]);
+
+    let sink = Arc::new(CapturedSink::default());
+    let (ctx, http, _sink) = ctx_with_sink(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+        sink.clone(),
+    );
+    let result = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
+
+    assert_eq!(
+        result.planned, 1,
+        "它仍会被判出来（上游 `state` 是 WAIT ✓）"
+    );
+    assert_eq!(result.acted, 0, "没动");
+    assert_eq!(result.full_skipped, 1);
+    assert!(
+        result.failures.is_empty(),
+        "做满是「没得做」、不是失败：{:?}",
+        result.failures
+    );
+    assert!(result.steps[0].already_done);
+    assert_eq!(result.steps[0].share_before.as_deref(), Some("7/7"));
+    assert!(!result.steps[0].clicked, "连打卡都不该发");
+    assert!(!result.steps[0].shared, "更不该建外链");
+    let summary = result.summary_line();
+    assert!(summary.contains("1 条上游已做满"), "{summary}");
+    assert!(
+        matches!(result.task_outcome(), TaskOutcome::Skipped { .. }),
+        "结论该是「跳过」而不是「失败」：{:?}",
+        result.task_outcome()
+    );
+    let lines = sink.lines();
+    assert!(
+        lines.iter().any(|l| l.contains("上游已经做满")),
+        "{lines:?}"
+    );
+    let writes: Vec<String> = http
+        .requests()
+        .into_iter()
+        .filter(|r| !r.url.contains("taskListV2"))
+        .map(|r| r.url)
+        .collect();
+    assert!(writes.is_empty(), "做满的条目不该发任何写请求：{writes:?}");
+}
+
+/// ⭐ 同一道门管 522：`100/100` 之后不该再传（传了也涨不动 ⇒ 白传 5 个 ✗）。
+#[tokio::test]
+async fn a_full_monthly_upload_is_left_alone() {
+    let items = vec![task_json_with_process(
+        522,
+        "month",
+        "当月上传文件满100个",
+        "sign_in_3",
+        100,
+    )];
+    let replies = replies_for(&items, vec![]);
+
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    let result = run_app_task(&ctx, 0, &[522]).await.expect("不该是 Err");
+
+    assert_eq!(result.full_skipped, 1);
+    assert_eq!(result.steps[0].uploaded, 0, "一个都不该传");
+    assert!(result.failures.is_empty(), "{:?}", result.failures);
+    assert!(
+        matches!(result.task_outcome(), TaskOutcome::Skipped { .. }),
+        "{:?}",
+        result.task_outcome()
+    );
+    let creates = http
+        .requests()
+        .into_iter()
+        .filter(|r| r.url.contains("/hcy/file/create"))
+        .count();
+    assert_eq!(creates, 0);
+}
+
 /// ⭐ 差额也要**说出来**：实测"我们传了 5 个、上游只 +4"（记账慢一步 ✓ —— run 105
 /// `48 → 52`，而 run 106 的动手前读数正好是 **53** ✓）⇒ 日志不能只写 `+4` 就完事，
 /// 否则两个数字看着像打架 ✗。

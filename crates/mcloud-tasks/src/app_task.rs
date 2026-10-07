@@ -375,10 +375,12 @@ fn parse_ratio(s: &str) -> Option<(i64, i64)> {
 ///
 /// 一次拉表而不是每档各拉一趟：同一份读数、同一个时刻 ✓（也省 16 发 GET ✓）。
 async fn settle_progress(ctx: &TaskContext, result: &mut AppTaskResult) {
+    // ⚠ "整条没动（上游已做满）"的那些档**不必再拉一次整表** ✗ —— 拉回来也没得比 ✓
+    //（2026-10-07：分享 `7/7` 那种条目每一趟都会白拉 16 次 ✓）。
     let share_i = result
         .steps
         .iter()
-        .position(|s| s.task_id == Some(SHARE_TASK_ID));
+        .position(|s| s.task_id == Some(SHARE_TASK_ID) && !s.already_done);
     // ⚠ 找的是"**报了进度的那些档**"（522 / 615 那一族…），不是写死 522 的 id ✓
     let upload_i = result.steps.iter().position(|s| s.progress_total.is_some());
     if share_i.is_none() && upload_i.is_none() {
@@ -403,6 +405,11 @@ async fn settle_progress(ctx: &TaskContext, result: &mut AppTaskResult) {
 
 /// 434 那一格的落地：比次数、决定要不要把这一条计进 `acted` ✓。
 fn settle_share(items: &[TaskV2Item], result: &mut AppTaskResult, i: usize, ctx: &TaskContext) {
+    // ⚠ 整条没动（上游已做满）⇒ **没什么可比的**，更不是失败 ✗
+    //（2026-10-07 用户反馈：分享 `7/7` 之后每一趟都报失败 ✗）。
+    if result.steps[i].already_done {
+        return;
+    }
     let Some(after) = items
         .iter()
         .find(|it| it.task_id == Some(SHARE_TASK_ID))
@@ -677,6 +684,46 @@ pub fn should_act(item: &TaskV2Item) -> bool {
     item.enable == Some(1)
 }
 
+/// 这一条**上游是不是已经做满了**（做也白做 ⇒ 整条不动 ✓）。
+///
+/// # 为什么要单开这道门（2026-10-07 用户反馈）
+///
+/// 原话：「**分享任务 7/7 了还在做，做完 7/7 说失败**」✗ —— 两件都错：
+///
+/// 1. **还在做**：434 的成败判据是"次数**有没有涨**"（[`TaskStep::share_counted`] ✓），
+///    而 `7/7` 已经顶到上限 ⇒ 次数**永远涨不动** ⇒ 每做一次就白传一个文件、
+///    白分享一次（还在链尾多删一次 ✗）；
+/// 2. **说失败**：涨不动 ⇒ `settle_share` 判"没记上" ⇒ 进 `failures` ⇒ 运行报失败 ✗。
+///
+/// ⚠ 上游那条目的 `state` **不可靠**：真机读数里 434 涨到 `7/7` 之后 `state` 仍可能是
+/// `WAIT` ✗（`should_act` 那道门拦不住它 ✓）⇒ 只能从**它自己给的进度**判 ✓。
+///
+/// # 判据（两族各一条，都用上游自己的读数）
+///
+/// * **434**：名字里那个 `a/b`（[`share_progress_from_name`] ✓）`a >= b` 且 `b > 0`
+///   ⇒ 满了 ✓。`0/0` **不算满**（分母为 0 判不了 ✓）。
+/// * **522 / 615 那一族**：`process` 到了这一档形状的 `stop_at_process`（100 / 10 ✓）
+///   ⇒ 满了 ✓（`stop_at_process == 0` 的档没有"满"这个概念 ⇒ 恒 `false` ✓）。
+///
+/// ⚠ 读不出进度**不算满** ✓（与"读不出不是 0"同一条口径 ✗）—— 判不出就照旧做，
+/// 让 `settle_*` 去如实报"没动"，别把"读不出"悄悄读成"不用做" ✗。
+pub fn already_done(item: &TaskV2Item) -> bool {
+    if item.task_id == Some(SHARE_TASK_ID) {
+        return item.name.as_deref().is_some_and(share_is_full);
+    }
+    if let Some(shape) = upload_shape_for(item) {
+        if shape.stop_at_process > 0 {
+            return item.process.unwrap_or(0) >= shape.stop_at_process;
+        }
+    }
+    false
+}
+
+/// 434 的名字里那对 `a/b` 是不是**已经满了**（`a >= b > 0`）。
+pub fn share_is_full(name: &str) -> bool {
+    matches!(share_progress_from_name(name), Some((done, total)) if total > 0 && done >= total)
+}
+
 /// 这一条**要不要打那一发 `task/click`**。
 ///
 /// # 门是 `currstep`（旧 TS `tasks.ts:19-28` 逐字）
@@ -871,6 +918,11 @@ pub struct TaskStep {
     pub share_before: Option<String>,
     /// 434：**跑完之后整张表再拉一遍**读到的次数（同 `"0/7"` 的写法）。`None` = 读不出。
     pub share_after: Option<String>,
+    /// 这一条**上游已经做满 ⇒ 整条没动**（[`already_done`] ✓）。
+    ///
+    /// ⚠ 它同时是 `settle_*` 的**免罪符**：没动是**因为没得做** ✓，不是失败 ✗
+    ///（2026-10-07 用户反馈：分享 `7/7` 之后每一趟都报失败 ✗）。
+    pub already_done: bool,
     /// 434：**上游真把这一笔记上了** —— 唯一的判据是 `share_after > share_before` ✓。
     ///
     /// # 为什么不能看别的
@@ -930,6 +982,12 @@ pub struct AppTaskResult {
     /// 填它的地方只有 [`Self::settle_unconfirmed`] **一处**（别散进各个 `settle_*`：
     /// 判定规则只有一份，才敢说它是同一把尺子）。
     pub unconfirmed: Vec<i64>,
+    /// **上游已经做满、整条没动**的条数（[`already_done`] ✓）。
+    ///
+    /// ⚠ 它是"全都没动"与"全都没得做"的分界：`planned > 0 && acted == 0` 时，
+    /// 只有它等于 `planned` 才说明**是没得做**（⇒ `skipped` ✓），否则仍是失败 ✗
+    ///（2026-10-07 用户反馈：分享 `7/7` 之后每一趟都报失败 ✗）。
+    pub full_skipped: usize,
     /// 这一趟判定用的东八区月份 / 日；`None` = 时钟读不出（那时月份门一律"不知道"）。
     pub month: Option<String>,
     pub day: Option<i64>,
@@ -960,6 +1018,9 @@ impl AppTaskResult {
         }
         if !self.failures.is_empty() {
             s.push_str(&format!("；{} 条有失败", self.failures.len()));
+        }
+        if self.full_skipped > 0 {
+            s.push_str(&format!("；{} 条上游已做满（没动）", self.full_skipped));
         }
         if !self.unconfirmed.is_empty() {
             s.push_str(&format!(
@@ -1042,6 +1103,16 @@ impl AppTaskResult {
         let summary = self.summary_line();
         // ⚠ 一条都没做成、又确实判出该做 ⇒ 报失败，别报成"没事发生"。
         if self.planned > 0 && self.acted == 0 {
+            // ⚠⚠ **但"全都没动"有两种来路**（2026-10-07 用户反馈：「分享任务 7/7 了还在做，
+            // 做完 7/7 说失败」✗）：① 判出来了却做不成 ⇒ 失败 ✓；② **上游说全都做满了**
+            // ⇒ 那是"没得做"，报失败就是把"今天没事干"说成"今天干砸了" ✗。
+            // 判据：没失败、且**每一条** planned 都是"已做满"（`full_skipped == planned` ✓）。
+            if self.failures.is_empty() && self.planned > 0 && self.full_skipped == self.planned {
+                return TaskOutcome::skipped(format!(
+                    "{summary} —— 判出的 {} 条上游都已做满，这一趟没有要做的 ✓",
+                    self.full_skipped
+                ));
+            }
             return TaskOutcome::failed(summary);
         }
         if self.planned == 0 {
@@ -1169,6 +1240,36 @@ pub async fn run_app_task(
             planned.len() as u32,
             format!("做任务 {name}"),
         );
+
+        // ③-0 **上游已经做满 ⇒ 整条不动**（2026-10-07 用户反馈：「分享任务 7/7 了还在做，
+        // 做完 7/7 说失败」✗）。连 `task/click` 都不发：那一发也是不可回滚的写 ✓，
+        // 而对一条做满的条目它没有任何意义 ✗。判据见 [`already_done`]。
+        if already_done(item) {
+            step.already_done = true;
+            result.full_skipped += 1;
+            // 顺手把读到的进度记进明细（434 那格就是上游自己给的 `a/b` ✓）
+            let progress = if item.task_id == Some(SHARE_TASK_ID) {
+                step.share_before = item
+                    .name
+                    .as_deref()
+                    .and_then(share_progress_from_name)
+                    .map(|(a, b)| format!("{a}/{b}"));
+                step.share_before
+                    .clone()
+                    .unwrap_or_else(|| "读不出进度".into())
+            } else {
+                match (
+                    item.process,
+                    upload_shape_for(item).map(|sh| sh.stop_at_process),
+                ) {
+                    (Some(p), Some(t)) if t > 0 => format!("{p}/{t}"),
+                    _ => "读不出进度".into(),
+                }
+            };
+            ctx.info(format!("{name}：上游已经做满 ⇒ 这一趟不动它（{progress}）"));
+            result.steps.push(step);
+            continue;
+        }
 
         // ③-a **先打卡**：它是一道门，成了才去做那件事。
         //
@@ -1661,6 +1762,7 @@ impl Task for AppTaskTask {
                 "clicked": s.clicked,
                 "shared": s.shared,
                 // 434 的"成没成"是**比出来的**：动手前/后的次数 + 涨没涨 ✓
+                "alreadyDone": s.already_done,
                 "shareBefore": s.share_before,
                 "shareAfter": s.share_after,
                 "shareCounted": s.share_counted,
