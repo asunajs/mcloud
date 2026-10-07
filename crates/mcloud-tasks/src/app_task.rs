@@ -931,8 +931,17 @@ pub struct TaskStep {
     /// `services/app/tasks.ts:113-125` 的 `getShareCount` + `printShareProgress`、
     /// 调用点在 `app.ts:30`（动手前记一次）与 `app.ts:56-60`（全跑完再拉整表比大小）✓）。
     /// 所以它**既不等于**"打卡门过了"（`clicked`），**也不等于**"外链建成了"
-    /// （[`Self::shared`]）—— 外链建成而次数不动时，参考实现的 `collectTaskResult`
-    ///（`results.ts:18-45`）照样把这条记进 `failed` ✓。
+    /// （[`Self::shared`]）。
+    ///
+    /// # ⚠ 这一格是**本仓自己加的判据**，不是 TS 的做法（2026-10-07 对着 TS 原文核过）
+    ///
+    /// TS 里 434 **根本不进收尾判定**：`tasks/app/index.ts:42-50` 那一支是
+    /// `if (task.id === 434) { …只打印进度…; continue; }` ✓ —— 它连
+    /// `collectTaskResult` 都**不调用** ✗；而那份 `results.ts:33-45` 判的是
+    /// `state === "FINISH"` + `doingList`（"本次跑过"），**与次数无关** ✗。
+    /// ⇒ 本仓按"次数涨没涨"算 `acted` 是**用户 2026-10-04 的口径** ✓
+    ///（依据：次数才是上游唯一的硬读数 ✓）—— 但**别**把它说成"参考实现也这么判" ✗
+    ///（本行旧注释就是这么写的，2026-10-07 查实是**错的** ✗）。
     pub share_counted: bool,
     /// 这一档要报的**分母**（`stop_at_process`：522 = 100 ✓、615 那一族 = 10 ✓）。
     ///
@@ -960,10 +969,11 @@ pub struct AppTaskResult {
     /// * `Upload` / `Entry`：传过文件**或**打过卡（那两档除了"发过写请求"没别的可看 ✓）；
     /// * `434`：**上游次数涨了**（[`TaskStep::share_counted`] ✓）—— 打卡过、外链建成都**不算**。
     ///
-    /// ⚠ 旧 TS 的 `doingList`（`services/app/tasks.ts:29-36`）记的是"打卡门过了"，
-    /// 但那一份在收尾时会被 `collectTaskResult`（`results.ts:18-45`）**按上游 state 复判**：
-    /// 处理过、state 仍非 `FINISH` ⇒ 记 `failed` ✓ ⇒ 本仓 434 这一档取的是后者那条更硬的
-    /// 判据（"次数涨没涨"），**不是**"门过了" ✗（2026-10-04 用户纠正 ✓）。
+    /// ⚠ 旧 TS 的 `doingList`（`services/app/tasks.ts:29-36`）记的是"打卡门过了"，而它的
+    /// 收尾判定 `collectTaskResult`（`results.ts:33-45`）看的是 `state === "FINISH"` ✓ ——
+    /// **434 两条都不走**：`tasks/app/index.ts:42-50` 对它 `continue` ✓（只打印进度 ✗）。
+    /// ⇒ 本仓 434 取"次数涨没涨"这条更硬的读数，是**用户 2026-10-04 的口径** ✓，
+    /// **不是**"TS 也这么判" ✗（2026-10-07 对 TS 原文核过：旧注释那句是**错的** ✗）。
     pub acted: usize,
     /// 判出来"要传"的条目数。
     pub planned: usize,
