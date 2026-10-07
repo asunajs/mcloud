@@ -70,7 +70,7 @@ npm ls @asunajs/lite        # 判据：这里显示的 commit 必须是新 tag �
 
 | 门 | 在哪跑 | 跑什么 |
 |---|---|---|
-| 框架自己的门 | **框架仓**的 CI（`npm run gates` / `test:demo` / `test:bench`） | 编译器负例（13 条形态断言）、真 DOM 验收（62 条）、编译产物行为 + 耗时护栏、运行时体积 |
+| 框架自己的门 | **框架仓**：`npm run gates` 在 CI 里跑；`test:demo` / `test:bench` 要浏览器，**故意不进 CI**，由改框架的人本地跑（`LITE_CHROME_NO_SANDBOX=1`） | 编译器负例（13 条形态断言）、真 DOM 验收（62 条）、编译产物行为 + 耗时护栏、运行时体积 |
 | 页面级验收 | **本仓** `scripts/gates-web.mjs`（两档，见 `docs/conventions.md` §9.2） | typecheck、build、交互验收（三个认证态）、大体量（分页 + 窗口化）、配置中心搜索框、窄屏 320/375、泄漏量测 |
 
 ⚠ 框架那三条**不再**出现在本仓门禁里 —— 包不发夹具（`demo/` / `bench/` / `regress/` 不在
