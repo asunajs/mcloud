@@ -397,6 +397,22 @@ async fn settle_progress(ctx: &TaskContext, result: &mut AppTaskResult) {
 
     if let Some(i) = share_i {
         settle_share(&items, result, i, ctx);
+        // 用户口径 2026-10-07：「第一次跑本地记录，成功不跑二次」✓ —— **只在真的
+        // 确认成功时写**（`share_counted` ✓）：没确认就写会把"试过了"当"成功过" ✗。
+        if result.steps[i].share_counted {
+            match beijing_day_digits(&*ctx.clock) {
+                Some(day) => {
+                    if let Err(e) = save_share_done_day(ctx, &day).await {
+                        result.steps[i]
+                            .problems
+                            .push(format!("本地记录没写进去：{e}"));
+                    }
+                }
+                None => result.steps[i]
+                    .problems
+                    .push("时钟读不出 ⇒ 这一笔没法记进本地记录".to_string()),
+            }
+        }
     }
     if let Some(i) = upload_i {
         settle_upload(&items, result, i, ctx);
@@ -825,6 +841,51 @@ pub(crate) fn beijing_month_day(clock: &dyn mcloud_core::Clock) -> Option<(Strin
     Some((month, day))
 }
 
+/// `account_state` 里那一枚键：**434 今天已经成功过**（值 = 东八区日期 `yyyyMMdd` ✓）。
+///
+/// # 为什么要这一枚键（用户口径 2026-10-07）
+///
+/// 原话：「**第一次跑本地记录，成功不跑二次**」✓。起因是 434 的"成功"只能靠
+/// **分享次数涨没涨**判（[`TaskStep::share_counted`] ✓），而上游对同一天第二次分享
+/// **不会再加数** ⇒ 那一天第二次跑（手动点一次、或定时 + 手动）必然读到"次数没动" ✗
+/// ⇒ 只跑 434 的那一趟就报 failed ✗（真机 run 151：`4/7 → 4/7` ✓）。
+/// ⇒ 把"今天成功过"记在本地 ✓，第二次直接跳过 ✓（不是失败 ✗）。
+///
+/// ⚠ **只在"成功"时写**（`share_counted == true` ✓，或满了之后的领奖那一发打成了 ✓）：
+/// 没确认成功就不写 ⇒ 下一趟照旧重试 ✓（不能拿"试过了"当"成功过" ✗）。
+pub const SHARE_DONE_STATE_KEY: &str = "share_434_done_day";
+
+/// 东八区墙钟的 `yyyyMMdd`；时钟读不出 ⇒ `None`。
+pub(crate) fn beijing_day_digits(clock: &dyn mcloud_core::Clock) -> Option<String> {
+    let digits = mcloud_core::beijing_time_digits(clock);
+    (digits.len() >= 8).then(|| digits[..8].to_string())
+}
+
+/// 读"434 上次成功是哪一天"（东八区 `yyyyMMdd`）。`None` = 没记录 / 读不出 ✓。
+pub async fn read_share_done_day(ctx: &TaskContext) -> Option<String> {
+    let state = ctx.store.account_state(&ctx.account.id).await.ok()?;
+    state
+        .get(SHARE_DONE_STATE_KEY)?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// 记下"434 今天成功了"。读-改-写，理由同 [`save_month_backup`] ✓（这张表里还躺着
+/// `device_id` / `pc_platform` / `cur_month_backup` 这些**别的任务**的键 ✗）。
+pub async fn save_share_done_day(ctx: &TaskContext, day: &str) -> Result<()> {
+    let mut state = ctx.store.account_state(&ctx.account.id).await?;
+    if !state.is_object() {
+        state = serde_json::json!({});
+    }
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert(
+            SHARE_DONE_STATE_KEY.to_string(),
+            serde_json::Value::String(day.to_string()),
+        );
+    }
+    ctx.store.save_account_state(&ctx.account.id, &state).await
+}
+
 /// 这一条**该不该因为"本月没开备份"而跳过**（旧 TS `tasks.ts:86-95` 逐字）：
 ///
 /// ```ts
@@ -918,6 +979,8 @@ pub struct TaskStep {
     pub share_before: Option<String>,
     /// 434：**跑完之后整张表再拉一遍**读到的次数（同 `"0/7"` 的写法）。`None` = 读不出。
     pub share_after: Option<String>,
+    /// 这一条**本地记录说今天已经成功过 ⇒ 不跑第二次**（[`SHARE_DONE_STATE_KEY`] ✓）。
+    pub skipped_today: bool,
     /// 这一条**上游已经做满 ⇒ 整条没动**（[`already_done`] ✓）。
     ///
     /// ⚠ 它同时是 `settle_*` 的**免罪符**：没动是**因为没得做** ✓，不是失败 ✗
@@ -998,6 +1061,8 @@ pub struct AppTaskResult {
     /// 只有它等于 `planned` 才说明**是没得做**（⇒ `skipped` ✓），否则仍是失败 ✗
     ///（2026-10-07 用户反馈：分享 `7/7` 之后每一趟都报失败 ✗）。
     pub full_skipped: usize,
+    /// **本地记录说"今天已经成功过"、因此没跑第二次**的条数 ✓（用户口径 2026-10-07 ✓）。
+    pub skipped_today: usize,
     /// 这一趟判定用的东八区月份 / 日；`None` = 时钟读不出（那时月份门一律"不知道"）。
     pub month: Option<String>,
     pub day: Option<i64>,
@@ -1046,6 +1111,12 @@ impl AppTaskResult {
         }
         if idle > 0 {
             s.push_str(&format!("；{idle} 条上游已做满（没动）"));
+        }
+        if self.skipped_today > 0 {
+            s.push_str(&format!(
+                "；{} 条今天已经成功过（本地记录，不跑二次）",
+                self.skipped_today
+            ));
         }
         if !self.unconfirmed.is_empty() {
             s.push_str(&format!(
@@ -1132,10 +1203,12 @@ impl AppTaskResult {
             // 做完 7/7 说失败」✗）：① 判出来了却做不成 ⇒ 失败 ✓；② **上游说全都做满了**
             // ⇒ 那是"没得做"，报失败就是把"今天没事干"说成"今天干砸了" ✗。
             // 判据：没失败、且**每一条** planned 都是"已做满"（`full_skipped == planned` ✓）。
-            if self.failures.is_empty() && self.planned > 0 && self.full_skipped == self.planned {
+            // ⚠ 两种"没得做"都算：上游已做满（`full_skipped` ✓）／本地记录说今天
+            // 已经成功过（`skipped_today` ✓，用户口径 2026-10-07 ✓）。
+            let nothing_to_do = self.full_skipped + self.skipped_today;
+            if self.failures.is_empty() && self.planned > 0 && nothing_to_do == self.planned {
                 return TaskOutcome::skipped(format!(
-                    "{summary} —— 判出的 {} 条上游都已做满，这一趟没有要做的 ✓",
-                    self.full_skipped
+                    "{summary} —— 判出的 {nothing_to_do} 条这一趟没有要做的 ✓"
                 ));
             }
             return TaskOutcome::failed(summary);
@@ -1266,6 +1339,23 @@ pub async fn run_app_task(
             format!("做任务 {name}"),
         );
 
+        // ③-0a **本地记录：今天已经成功过 ⇒ 不跑第二次** —— 用户口径（2026-10-07）：
+        // 「**第一次跑本地记录，成功不跑二次**」✓。理由见 [`SHARE_DONE_STATE_KEY`]：
+        // 上游对同一天第二次分享不加数 ⇒ 不拦的话那趟必然读到"次数没动" ⇒ 报失败 ✗。
+        if item.task_id == Some(SHARE_TASK_ID) {
+            if let Some(day) = beijing_day_digits(&*ctx.clock) {
+                if read_share_done_day(ctx).await.as_deref() == Some(day.as_str()) {
+                    step.skipped_today = true;
+                    result.skipped_today += 1;
+                    ctx.info(format!(
+                        "{name}：本地记录显示今天（{day}）已经成功过 ⇒ 不跑第二次"
+                    ));
+                    result.steps.push(step);
+                    continue;
+                }
+            }
+        }
+
         // ③-0 **上游已经做满 ⇒ 整条不动**（2026-10-07 用户反馈：「分享任务 7/7 了还在做，
         // 做完 7/7 说失败」✗）。连 `task/click` 都不发：那一发也是不可回滚的写 ✓，
         // 而对一条做满的条目它没有任何意义 ✗。判据见 [`already_done`]。
@@ -1307,6 +1397,17 @@ pub async fn run_app_task(
                         ctx.success(format!(
                             "{name}：上游已做满（{progress}）⇒ 领奖那一发已打，不再重复做 ✓"
                         ));
+                        // 用户口径 2026-10-07：领奖成功也算"今天成功过" ⇒ 记一笔 ✓
+                        match beijing_day_digits(&*ctx.clock) {
+                            Some(day) => {
+                                if let Err(e) = save_share_done_day(ctx, &day).await {
+                                    step.problems.push(format!("本地记录没写进去：{e}"));
+                                }
+                            }
+                            None => step
+                                .problems
+                                .push("时钟读不出 ⇒ 这一笔没法记进本地记录".to_string()),
+                        }
                         if let Some(n) = notice {
                             step.problems.push(format!("上游附言：{n}"));
                         }
@@ -1818,6 +1919,7 @@ impl Task for AppTaskTask {
                 "shared": s.shared,
                 // 434 的"成没成"是**比出来的**：动手前/后的次数 + 涨没涨 ✓
                 "alreadyDone": s.already_done,
+                "skippedToday": s.skipped_today,
                 "shareBefore": s.share_before,
                 "shareAfter": s.share_after,
                 "shareCounted": s.share_counted,

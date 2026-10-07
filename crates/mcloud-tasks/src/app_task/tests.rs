@@ -1882,6 +1882,126 @@ async fn a_full_share_task_whose_claim_step_has_not_come_is_left_alone() {
     assert!(writes.is_empty(), "做满的条目不该发任何写请求：{writes:?}");
 }
 
+// ── 本地记录：第一次成功就不跑第二次（用户口径 2026-10-07）──────────────
+//    「**第一次跑本地记录，成功不跑二次**」✓ —— 起因：同一天第二次分享上游不加数 ✗
+//    ⇒ 不拦的话那趟必然读到"次数没动" ⇒ 只跑 434 就报 failed ✗（真机 run 151 ✓）。
+
+/// ⭐⭐ 分享**记上了** ⇒ 本地落一笔"今天成功过" ✓；**昨天**那笔不算数（照跑 ✓）。
+#[tokio::test]
+async fn a_counted_share_records_the_day_locally() {
+    let before = vec![
+        task_json(106, "day", "手动上传一个文件", "sign_in_3"),
+        task_json(
+            434,
+            "month",
+            "分享文件领好礼<span id='share_title'>0/7</span>",
+            "sign_in_3",
+        ),
+    ];
+    let after = vec![
+        task_json(106, "day", "手动上传一个文件", "sign_in_3"),
+        task_json(
+            434,
+            "month",
+            "分享文件领好礼<span id='share_title'>1/7</span>",
+            "sign_in_3",
+        ),
+    ];
+    let mut replies = replies_for(&before, vec![]);
+    replies.push(click_ok()); // 106 打卡
+    replies.push(create_new());
+    replies.push("{}".to_string()); // PUT
+    replies.push(r#"{"code":"0000","success":true,"message":"请求成功"}"#.to_string());
+    replies.push(click_ok()); // 434 打卡
+    replies.push(outlink_ok());
+    replies.push(del_outlink_ok());
+    replies.push(r#"{"code":"0000","success":true,"message":"success"}"#.to_string()); // 回收站
+    replies.extend(replies_for(&after, vec![]));
+
+    let store = Arc::new(FakeStore::new());
+    // ⚠ 先塞**昨天**那笔：它不是今天 ⇒ 不该跳过 ✓，而跑完之后要被**改写成今天** ✓。
+    store.seed(
+        TEST_ACCOUNT,
+        serde_json::json!({ SHARE_DONE_STATE_KEY: "20261004" }),
+    );
+    let (ctx, _http) = ctx_with(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        store.clone(),
+    );
+    let result = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
+
+    assert_eq!(result.skipped_today, 0, "昨天那笔不算今天 ⇒ 照跑");
+    assert!(result.steps[1].share_counted, "这一次记上了");
+    let state = store.state_of(TEST_ACCOUNT);
+    assert_eq!(
+        state.get(SHARE_DONE_STATE_KEY).and_then(|v| v.as_str()),
+        Some("20261005"),
+        "跑完要把记录改成今天（测试时钟固定在 2026-10-05 ✓）：{state}"
+    );
+}
+
+/// ⭐⭐ 本地记录说**今天已经成功过** ⇒ 一枪不发 ✓、结论是"跳过"而不是"失败" ✓。
+#[tokio::test]
+async fn a_share_that_already_succeeded_today_is_not_run_twice() {
+    let items = vec![task_json(
+        434,
+        "month",
+        "分享文件领好礼<span id='share_title'>4/7</span>",
+        "sign_in_3",
+    )];
+    // ⚠ 只给整表那一页：本地记录拦住它 ⇒ 连打卡、连建外链都不发 ✓
+    let replies = replies_for(&items, vec![]);
+
+    let store = Arc::new(FakeStore::new());
+    store.seed(
+        TEST_ACCOUNT,
+        serde_json::json!({ SHARE_DONE_STATE_KEY: "20261005" }),
+    );
+    let sink = Arc::new(CapturedSink::default());
+    let (ctx, http, _sink) = ctx_with_sink(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        store.clone(),
+        sink.clone(),
+    );
+    let result = run_app_task(&ctx, 0, &[434]).await.expect("不该是 Err");
+
+    assert_eq!(result.skipped_today, 1);
+    assert_eq!(result.acted, 0, "没动");
+    assert!(
+        result.failures.is_empty(),
+        "「今天已经成功过」不是失败：{:?}",
+        result.failures
+    );
+    assert!(result.steps[0].skipped_today);
+    assert!(!result.steps[0].clicked, "连打卡都不发");
+    assert!(!result.steps[0].shared, "更不该建外链");
+    assert!(
+        result.summary_line().contains("今天已经成功过"),
+        "{}",
+        result.summary_line()
+    );
+    assert!(
+        matches!(result.task_outcome(), TaskOutcome::Skipped { .. }),
+        "{:?}",
+        result.task_outcome()
+    );
+    let lines = sink.lines();
+    assert!(lines.iter().any(|l| l.contains("不跑第二次")), "{lines:?}");
+    let writes: Vec<String> = http
+        .requests()
+        .into_iter()
+        .filter(|r| !r.url.contains("taskListV2"))
+        .map(|r| r.url)
+        .collect();
+    assert!(writes.is_empty(), "一枪都不该发：{writes:?}");
+}
+
 /// ⭐ 同一道门管 522：`100/100` 之后不该再传（传了也涨不动 ⇒ 白传 5 个 ✗）。
 #[tokio::test]
 async fn a_full_monthly_upload_is_left_alone() {
