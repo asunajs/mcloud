@@ -3,18 +3,18 @@
   "version": "3.0.0-rc.3",
   "private": true,
   "type": "module",
-  "description": "mcloud WebUI —— 自研 lite 框架（无虚拟 DOM + 编译期优化）+ TSX + Tailwind 4（@theme 令牌层）",
+  "description": "mcloud WebUI —— lite 框架（无虚拟 DOM + 编译期优化，已剥离到 asunajs/lite）+ TSX + Tailwind 4（@theme 令牌层）",
   "scripts": {
     "dev": "vite",
     "build": "vite build && node scripts/gzip-sidecars.mjs",
     "preview": "vite preview",
     "typecheck": "tsgo --noEmit"
   },
-  "//": "没有 dependencies：运行时是仓库里的 lite/（编译器 + 运行时），CSS 侧是构建期插件。",
+  "//": "运行时与编译器都在依赖 `@asunajs/lite` 里（2026-10-07 从本仓 web/lite/ 剥离）；CSS 侧是构建期插件。⚠ 它是 **git 依赖**（完整 URL，**不是** `github:` 简写 —— 那个会被 npm 解析成 `git+ssh://`，公开仓也要密钥 ⇒ CI 装不上）：`npm install` 需要能访问 GitHub，锁文件里记的是 commit SHA。⚠ `oxc-parser` 2026-10-07 从这张表里删了 —— 它现在由 `@asunajs/lite` 直接依赖（本仓没人直接 import 它），留在这里是重复声明。",
   "devDependencies": {
+    "@asunajs/lite": "github:asunajs/lite#v0.1.2",
     "@tailwindcss/vite": "^4.3.3",
     "@typescript/native-preview": "^7.0.0-dev.20260707.2",
-    "oxc-parser": "^0.152.0",
     "tailwindcss": "^4.3.3",
     "vite": "^8.3.0"
   }
