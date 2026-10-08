@@ -1134,6 +1134,7 @@ name = "mcloud-server"
 version = "3.0.0-rc.3"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "chrono",

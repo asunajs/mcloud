@@ -10,7 +10,7 @@
  * `crates/mcloud-server/src/logbuf.rs` ✓）。⚠ 它是"最近这些"而不是"全部历史"：
  * 完整历史在日志文件里 ✓；这一页解决的是"不开终端就能看" ✓。
  */
-import { onMounted, onUnmounted, ref } from 'lite'
+import { onMounted, onUnmounted, ref } from '@asunajs/lite'
 
 import { listServerLogs, type ServerLogLine } from '../api'
 import { accountName, accountNames, refreshAccountNames } from '../account-names'
@@ -204,7 +204,7 @@ export const LogsPage = () => {
    * ⚠⚠ **取满环（[`RING_LINES`]）**，2026-10-05 改的：原先这里写的是 **800**，理由是
    * "那是**浏览器**要渲染的 DOM 行数" ✗ —— 那条理由**已经被窗口化作废**了 ✓：
    * 现在 DOM 里只有"视口 + overscan"那几十行，**与总行数脱钩** ✓（实测同一条断言下
-   * 800 行与 2000 行的节点数一样 ✓，见 `lite/regress/bulk.mjs` 的节点数那一条）。
+   * 800 行与 2000 行的节点数一样 ✓，见 `regress/bulk.mjs` 的节点数那一条）。
    * 而用户要的本来就是「能看**所有**日志的窗口」（2026-10-04 口径 ✓）⇒ 没理由只给
    * 环里的前 40% ✗。
    */
@@ -434,7 +434,7 @@ export const LogsPage = () => {
   /**
    * 每行一个**稳定的行对象** —— 这是"轮询不重建行"的**全部机关**所在。
    *
-   * `createFor` 的复用条件是"**key 与 item 都没变**"（`lite/src/control.ts:94`）：
+   * `createFor` 的复用条件是"**key 与 item 都没变**"（`@asunajs/lite` 的 `src/control.ts:94`）：
    * key 用 `p.l`（日志行对象 ✓，`ui/log-identity.ts` 让它跨拍稳定 ✓）只满足一半，
    * item 若还是每帧现造的包装对象 ⇒ 照样整批重建 ✗。所以这里**按日志行对象缓存行对象** ✓
    * （日志行对象稳定 ⇒ 行对象也稳定 ⇒ 节点被复用 ✓）。
@@ -668,7 +668,7 @@ export const LogsPage = () => {
         ⚠⚠ 这张卡片**常驻**，可见性走 `class`（`hidden`）—— 别改回 `{… ? <div> : null}` ✗。
 
         条件写在外面的后果（2026-10-04 用户报「出日志会强制滚动到顶部」）：
-        `setNodes` 的语义是"先把上次铺的撤掉、再铺新的"（`lite/src/dom.ts`），
+        `setNodes` 的语义是"先把上次铺的撤掉、再铺新的"（`@asunajs/lite` 的 `src/dom.ts`），
         于是**条件每重算一次就换一颗新节点** —— 连同里面那个滚动容器 ✓。
         新节点的 `scrollTop` 是 0 ⇒ 每 2 秒轮询一次就把用户弹回最旧的那一屏 ✗。
         改成常驻之后，容器节点从头到尾是同一个 ✓，滚动位置由 `load()` 显式记/写 ✓。

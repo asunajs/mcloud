@@ -11,7 +11,7 @@
 // ⚠ 用 `fmtClockMs`（`HH:MM:SS.mmm` ✓）而不是 `fmtEpochMs`（带月日 ✓）：同一个运行里的
 // 行都发生在几分钟内，带日期只是噪音 ✗；跨天那两个位置由页面自己决定要不要
 // 带日期 ✓（见 `logs-page.tsx` ✓）。
-import { onUnmounted, ref } from 'lite'
+import { onUnmounted, ref } from '@asunajs/lite'
 import { fmtClockMs } from './time'
 import { createVirtualRows } from './virtual-rows'
 
@@ -78,7 +78,7 @@ export const MARK: Record<LogKind, string> = {
  *
  * 1. ✗ 作废：「超出部分既看不见」—— 那是"全铺进 DOM ⇒ 只有最后十几行真在文档里"的
  *    时代 ✓。现在面板是**窗口化**的（`ui/virtual-rows.ts` ✓）且能滚到底：滚动条长度
- *    就是**真实总高**（门禁 `lite/regress/bulk.mjs` 拿 600 行断言过 ✓）⇒ 留下的行
+ *    就是**真实总高**（门禁 `regress/bulk.mjs` 拿 600 行断言过 ✓）⇒ 留下的行
  *    **每一行都翻得到** ✓。留 500 行等于"把这次运行前 3/4 的日志藏起来" ✗，
  *    而用户的口径是「想看到**所有**日志」（2026-10-04 ✓）。
  * 2. ✓ 仍然成立：**内存与每次追加的复制成本**。但按 2000 行算，上界也就
@@ -160,7 +160,7 @@ export const LogPanel = (props: { get: () => LogLine[] }) => {
    * 这次要铺的行。
    *
    * ⚠ 直接铺**日志行对象本身**（不再包一层 `{i, l, text}`）：`createFor` 的复用条件是
-   * "key 与 item 都没变"（`lite/src/control.ts:94`）⇒ 包一层就等于**每帧现造 item**
+   * "key 与 item 都没变"（`@asunajs/lite` 的 `src/control.ts:94`）⇒ 包一层就等于**每帧现造 item**
    * ⇒ 一个字都没变的行也会被重建 ✗。行自带 `data-k`（自己的高度缓存键 ✓）之后
    * 也不需要绝对下标了 ✓（见 `virtual-rows.ts` 文件头那条契约变更）。
    */

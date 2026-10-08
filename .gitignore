@@ -9,12 +9,10 @@ target/
 /data
 *.log
 
-# lite 自检脚本的临时构建目录：`regress/.check-tmp`（把编译器编成 ESM 才能跑负例）、
-# `lite/.size-tmp`（体积测量用的临时入口）。两者脚本结尾都会 `rm -rf` 自己那份，
-# 但**抛错在半路就留残骸**（上次 `size.mjs` 挂了，`lite/.size-tmp/` 在
-# `git status` 里挂了一整天）。忽略掉，别让一次失败的测量污染"待提交"列表。
-/web/lite/regress/.check-tmp/
-/web/lite/.size-tmp/
+# ⚠ lite 自检脚本的临时目录（`regress/.check-tmp`、`.size-tmp`）2026-10-07 随框架剥离
+# 一起走了 —— 它们现在在框架仓 `asunajs/lite` 的 `.gitignore` 里。当初忽略它们的理由
+# 值得记着：脚本结尾都会 `rm -rf` 自己那份，但**抛错在半路就留残骸**（上次 `size.mjs`
+# 挂了，`.size-tmp/` 在 `git status` 里挂了一整天）。
 
 # 滑块题面的对拍底本（`picture.png` / `puzzle.png`）。
 #

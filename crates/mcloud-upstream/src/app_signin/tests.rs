@@ -464,6 +464,38 @@ fn unrecognised_revival_messages_stay_failures() {
     assert!(!revival_message_already_claimed("已领取"));
 }
 
+/// ⭐ 第二种"没得领"：**上一年没有云朵可复活**（2026-10-08 真账号实拍）。
+///
+/// 实拍原文：`{"code":500,"msg":"2025年无云朵记录"}` —— 用户截图里 `移动`
+/// 那一行报的就是它（另两个号是"本月已领取"⇒ 跳过 ✓）。
+///
+/// 复活卡复活的是**上一年失效的AI豆** ⇒ 上一年没有云朵 = **没东西可复活** ✓，
+/// 与"本月已领取"完全同档：**跳过，不报失败** ✓。
+#[test]
+fn nothing_to_revive_is_recognised() {
+    let body = r#"{"code":500,"msg":"2025年无云朵记录"}"#;
+    let env = SignInEnvelope::parse(body).unwrap();
+    assert!(revival_nothing_to_revive(&env), "实拍那条文案必须认出来");
+    assert!(revival_message_nothing_to_revive("2025年无云朵记录"));
+    // ⚠ 年份是**滚动**的 ⇒ 明年那句也得认 ✓（钉死年份等于明年失效 ✗）
+    assert!(revival_message_nothing_to_revive("2026年无云朵记录"));
+    assert!(revival_message_nothing_to_revive("2030年无云朵记录"));
+}
+
+/// ⚠ 这一族**没有判活接口** ⇒ 认不出的文案一律**仍按失败处理** ✗
+/// （把认不出的折成"没领"就等于把真故障洗白 ✗ —— 照"本月已领取"那条的口径 ✓）。
+#[test]
+fn unrecognised_nothing_to_revive_messages_stay_failures() {
+    assert!(!revival_message_nothing_to_revive("无记录"));
+    assert!(!revival_message_nothing_to_revive("暂无奖励"));
+    assert!(!revival_message_nothing_to_revive("没有可领取的奖励"));
+    assert!(!revival_message_nothing_to_revive("系统繁忙"));
+    assert!(!revival_message_nothing_to_revive(""));
+    // ⚠ 两条判据**互不包含**：各自只认自己那一句 ✓
+    assert!(!revival_message_nothing_to_revive("本月已领取复活卡奖励"));
+    assert!(!revival_message_already_claimed("2025年无云朵记录"));
+}
+
 /// `multiple` 没有 `result` **不判失败**（缺了不影响"领没领到"这个结论）。
 #[test]
 fn multiple_without_result_is_still_ok() {

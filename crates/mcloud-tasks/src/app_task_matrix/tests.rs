@@ -182,98 +182,20 @@ fn disabled_count_counts_anything_that_is_not_one() {
     );
 }
 
-// ══════════════════════════ 小结 ══════════════════════════
-
-/// 小结念出"拉成几次 / 去重前几条 / 去重后几条"。
-#[test]
-fn the_summary_reports_the_fetch_and_dedup_counts() {
-    let result = AppTaskMatrixResult {
-        verdict: MatrixVerdict::Read,
-        matrix: AppTaskMatrix {
-            items: vec![item(Some(1), Some("任务一"))],
-            raw_count: 3,
-            succeeded: 16,
-            ..Default::default()
-        },
-        error: String::new(),
-    };
-    let s = result.summary_line();
-    assert!(s.contains("16/16"), "实得：{s}");
-    assert!(s.contains("3 条去重后 1 条"), "实得：{s}");
-    assert!(s.contains("只读"), "实得：{s}");
-}
-
-/// 部分失败要在小结里说出来 —— 不然"少了几组"会被读成"那几组没任务"。
-#[test]
-fn partial_failures_are_announced() {
-    let result = AppTaskMatrixResult {
-        verdict: MatrixVerdict::Read,
-        matrix: AppTaskMatrix {
-            succeeded: 14,
-            failures: vec![
-                FetchFailure {
-                    market_name: "sign_in_3".into(),
-                    group: "time".into(),
-                    error: "网络断了".into(),
-                },
-                FetchFailure {
-                    market_name: "sign_in_3".into(),
-                    group: "day".into(),
-                    error: "网络断了".into(),
-                },
-            ],
-            ..Default::default()
-        },
-        error: String::new(),
-    };
-    let s = result.summary_line();
-    assert!(s.contains("14/16"), "实得：{s}");
-    assert!(s.contains("2 组没读到"), "实得：{s}");
-}
-
-/// 小结里**不出现**任务名与奖励文案。
-#[test]
-fn the_summary_never_prints_upstream_copy() {
-    let result = AppTaskMatrixResult {
-        verdict: MatrixVerdict::Read,
-        matrix: AppTaskMatrix {
-            items: vec![TaskV2Item {
-                name: Some("制作童趣3D玩偶".into()),
-                description: Some("永葆童心 领38云朵".into()),
-                ..Default::default()
-            }],
-            succeeded: 16,
-            ..Default::default()
-        },
-        error: String::new(),
-    };
-    let s = result.summary_line();
-    assert!(!s.contains("制作童趣3D玩偶"), "实得：{s}");
-    assert!(
-        !s.contains("领38云朵"),
-        "奖励文案会随改名漂移，不进小结：{s}"
-    );
-}
-
-/// 零值档位是 **Failed**：一次都没拉成时不许念出一句"矩阵 0 条"。
-#[test]
-fn the_zero_verdict_is_failed() {
-    assert_eq!(MatrixVerdict::default(), MatrixVerdict::Failed);
-    let zero = AppTaskMatrixResult::default().summary_line();
-    assert!(zero.contains("没读成"), "实得：{zero}");
-    assert!(
-        !zero.contains("0 条去重后"),
-        "零值不该看起来像一份正常读数：{zero}"
-    );
-}
-
 // ══════════════════════════ 只读与容错 ══════════════════════════
+//
+// ⚠ 这一节原来打的是那条**只读任务**（`AppTaskMatrixTask`）。2026-10-07 用户口径
+// 「app-task-matrix 这个任务本身就没有意义」⇒ 任务摘掉了，但**这段循环本身**还在
+//（`fetch_all` ✓，`app-task` 开头那一趟与收尾复查那一趟都走它 ✓）
+// ⇒ 测试改成直接打 [`fetch_all`]：行为一条没少 ✓。
 
 /// 十六次请求、**全是 POST 到同一个只读端点**，没有任何写路径。
 #[tokio::test]
-async fn the_run_sends_sixteen_read_requests() {
-    let (out, http, _) = run_with(replies_with_failures(&[])).await;
-    assert!(matches!(out, TaskOutcome::Success { .. }), "实得：{out:?}");
+async fn fetch_all_sends_sixteen_read_requests() {
+    let (ctx, http, _) = ctx_with(replies_with_failures(&[]));
+    let (pages, failures) = fetch_all(&ctx).await.expect("不该是 Err");
+    assert_eq!(pages.len(), 16, "2 个市场 × 8 个 group");
+    assert!(failures.is_empty(), "实得：{failures:?}");
     assert_eq!(http.count(), 16, "2 个市场 × 8 个 group");
     for r in &http.requests() {
         assert_eq!(r.method, "POST");
@@ -290,7 +212,8 @@ async fn the_run_sends_sixteen_read_requests() {
 /// 两个市场名都真的用上了，且**先云盘、后邮箱**（顺序是行为的一部分）。
 #[tokio::test]
 async fn both_markets_are_queried_in_order() {
-    let (_, http, _) = run_with(replies_with_failures(&[])).await;
+    let (ctx, http, _) = ctx_with(replies_with_failures(&[]));
+    let _ = fetch_all(&ctx).await.expect("不该是 Err");
     let markets: Vec<String> = http
         .requests()
         .iter()
@@ -311,30 +234,31 @@ async fn both_markets_are_queried_in_order() {
     );
 }
 
-/// ⚠ **一次失败不算失败**：某个 group 挂了仍算成功，且失败被登记。
+/// ⚠ **一次失败不算失败**：某个 group 挂了只登记，其余照拉。
 #[tokio::test]
 async fn one_failed_group_is_recorded_not_fatal() {
-    let (out, http, _) = run_with(replies_with_failures(&[3, 9])).await;
-    let TaskOutcome::Success { summary } = &out else {
-        panic!("部分失败不该让整趟失败：{out:?}");
-    };
+    let (ctx, http, _) = ctx_with(replies_with_failures(&[3, 9]));
+    let (pages, failures) = fetch_all(&ctx).await.expect("部分失败不该是 Err");
     assert_eq!(http.count(), 16, "挂了也要把十六次都走完");
-    assert!(summary.contains("14/16"), "实得：{summary}");
-    assert!(summary.contains("2 组没读到"), "实得：{summary}");
+    assert_eq!(pages.len(), 14, "16 - 2");
+    assert_eq!(failures.len(), 2);
+    assert!(
+        failures[0].contains("读取 sign_in_3/"),
+        "失败要说清是哪一组：{failures:?}"
+    );
 }
 
-/// ⚠⚠ **十六次全挂** ⇒ 交回 `Err`。
+/// ⚠⚠ **十六次全挂** ⇒ `pages` 空、`failures` 十六条。
 ///
-/// 旧 TS 那种"全失败仍回一张空表"会让"全没读到"看起来像"这个号没任务"。
+/// ⚠ "全挂算不算错"**由调用方判**（这一层只负责如实回话 ✓）——
+/// 旧 TS 那种"全失败仍回一张空表"会让"全没读到"看起来像"这个号没任务" ✗。
 #[tokio::test]
-async fn all_fetches_failing_is_an_error() {
+async fn all_fetches_failing_is_reported_not_hidden() {
     let all: Vec<usize> = (0..app_task_matrix_fetches()).collect();
     let (ctx, http, _) = ctx_with(replies_with_failures(&all));
-    let err = AppTaskMatrixTask
-        .run(&ctx, &serde_json::json!({}))
-        .await
-        .expect_err("全挂要报错");
-    assert!(err.to_string().contains("全部失败"), "实得：{err}");
+    let (pages, failures) = fetch_all(&ctx).await.expect("这一层不该自己判错");
+    assert!(pages.is_empty(), "一次都没拉到");
+    assert_eq!(failures.len(), 16, "十六组全要登记");
     assert_eq!(http.count(), 16, "确实试满了十六次");
 }
 
@@ -343,69 +267,35 @@ async fn all_fetches_failing_is_an_error() {
 async fn a_non_zero_code_counts_as_a_failed_group() {
     let mut replies = replies_with_failures(&[]);
     replies[0] = Reply::Body(r#"{"code":500,"msg":"系统繁忙"}"#.into());
-    let (out, _, _) = run_with(replies).await;
-    let TaskOutcome::Success { summary } = &out else {
-        panic!("实得：{out:?}");
-    };
-    assert!(summary.contains("15/16"), "实得：{summary}");
+    let (ctx, _, _) = ctx_with(replies);
+    let (pages, failures) = fetch_all(&ctx).await.expect("不该是 Err");
+    assert_eq!(pages.len(), 15, "只挂一组");
+    assert_eq!(failures.len(), 1);
 }
 
-// ══════════════════════════ 明细 ══════════════════════════
-
-/// 逐条读数进明细（小结刻意不念任务名，那一份只能走这里）。
-#[tokio::test]
-async fn the_items_and_group_readings_are_reported_as_details() {
-    let (out, _, sink) = run_with(replies_with_failures(&[])).await;
-    assert!(matches!(out, TaskOutcome::Success { .. }));
-
-    let details = sink.details();
-    assert_eq!(details.len(), 1);
-    let d = &details[0];
-    assert_eq!(d["kind"], "app-task-matrix");
-    assert_eq!(d["verdict"], "read");
-    assert_eq!(d["fetches"], 16);
-    assert_eq!(d["succeeded"], 16);
-    assert_eq!(d["dedupedCount"], 16, "十六组各一条、名字各不相同");
-    assert_eq!(d["stateCounts"]["waiting"], 16);
-    assert_eq!(d["items"].as_array().map(|a| a.len()), Some(16));
-    assert_eq!(d["items"][0]["state"], "WAIT");
-    assert_eq!(d["items"][0]["groupId"], "new");
-    assert_eq!(d["groups"].as_array().map(|a| a.len()), Some(16));
-    assert_eq!(d["groups"][0]["taskFinishState"], 2);
-    assert_eq!(d["failures"].as_array().map(|a| a.len()), Some(0));
-}
-
-// ══════════════════════════ 注册表接入 ══════════════════════════
-
-/// ⭐ `app-task-matrix` 真的注册进了 registry。
-///
-/// ⚠ 它与 `app-task`（"做任务"，写）**是两个 code，不是一回事**：
-/// 这一条"只看"，而两条**必须同时存在**且各自独立。
+/// 这张表转成明细 JSON 的形状 —— **字段名是对外契约**（界面上那份清单按它画 ✓）。
 #[test]
-fn app_task_matrix_is_registered_with_the_right_meta() {
-    let mut registry = mcloud_engine::Registry::new();
-    crate::register_all(&mut registry).expect("注册不该重名");
-
-    let metas = registry.list();
-    let meta = metas
-        .iter()
-        .find(|m| m.name == "app-task-matrix")
-        .expect("app-task-matrix 必须注册");
-    assert_eq!(meta.title, "App 任务矩阵（只看）");
-    assert!(meta.params.is_empty());
-    assert!(!meta.hidden);
-    // ⚠ 这条断言**以前是反的**（那时写的那一半没实现，所以断言 `app-task`
-    // 不该出现）。写侧落地之后它必须**存在**，而且与只读这条**分开**：
-    // 拿一个 code 做两件事会让它在两处指不同的东西。
-    let write = metas
-        .iter()
-        .find(|m| m.name == "app-task")
-        .expect("写的那一半（app-task）必须注册");
-    assert_ne!(write.title, meta.title, "两条的标题必须分得开");
-    assert_eq!(write.title, "App 任务（做任务）");
+fn items_json_keeps_the_field_names_the_ui_reads() {
+    let mut it = item(Some(106), Some("手动上传一个文件"));
+    it.group_id = Some("day".into());
+    it.state = Some("FINISH".into());
+    it.market_name = Some("sign_in_3".into());
+    it.curr_step = Some(3);
+    it.button_app_link = Some("mcloud://main/uploadView".into());
+    let js = items_json(&[it]);
+    assert_eq!(js[0]["taskId"], 106);
+    assert_eq!(js[0]["groupId"], "day");
+    assert_eq!(js[0]["state"], "FINISH");
+    assert_eq!(js[0]["currStep"], 3);
+    assert_eq!(js[0]["buttonAppLink"], "mcloud://main/uploadView");
+    // ⚠ 状态分布同一份口径 ✓：`WAIT` 计未完成、没给状态算"读不出"（**分开** ✓）。
+    let mut waiting = item(Some(1), Some("a"));
+    waiting.state = Some("WAIT".into());
+    let counts = state_counts_json(&[waiting, item(Some(2), Some("b"))]);
+    assert_eq!(counts["waiting"], 1);
+    assert_eq!(counts["unknown"], 1, "没给状态的那条不该被算成未完成 ✗");
 }
 
-/// 一枪的答复：给个 body，或者**打挂**（网络层错误）。
 #[derive(Clone)]
 enum Reply {
     Body(String),
@@ -471,21 +361,6 @@ struct CollectSink {
     events: Mutex<Vec<RunEvent>>,
 }
 
-impl CollectSink {
-    /// 取回所有 `Details` 事件的 payload。
-    fn details(&self) -> Vec<serde_json::Value> {
-        self.events
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|e| match e {
-                RunEvent::Details { payload, .. } => Some(payload.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-}
-
 impl EventSink for CollectSink {
     fn emit(&self, event: RunEvent) {
         self.events.lock().unwrap().push(event);
@@ -539,14 +414,7 @@ fn ctx_with_at(replies: Vec<Reply>, now_ms: i64) -> (TaskContext, Arc<Scripted>,
     (ctx, http, sink)
 }
 
-/// 跑一趟；本链不依赖时钟，给 0 即可。
-async fn run_with(replies: Vec<Reply>) -> (TaskOutcome, Arc<Scripted>, Arc<CollectSink>) {
-    let (ctx, http, sink) = ctx_with_at(replies, 0);
-    let out = AppTaskMatrixTask.run(&ctx, &serde_json::json!({})).await;
-    (out.expect("不该是 Err"), http, sink)
-}
-
-/// 同上，但把 `Err` 也交回（用来钉"全挂才失败"那一档）。
+/// 造一个上下文；本层不依赖时钟，给 0 即可。
 fn ctx_with(replies: Vec<Reply>) -> (TaskContext, Arc<Scripted>, Arc<CollectSink>) {
     ctx_with_at(replies, 0)
 }

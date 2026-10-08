@@ -4,7 +4,11 @@
 > ⚠ **账号侧的状态（`WAIT` / `FINISH` 之类）不是本项目的进度** —— 它是上游自己的记账，
 > 只作**证据输入**，一律放在 §6 附录，不出现在主表里 ✗。
 >
-> 数据来自**只读**那一档（`app-task-matrix`）：不打卡、不上传 ✓。
+> 数据来自**只读**那一档：**「上游状态」页**（`GET /api/upstream/app-task-list`）现取一份
+> App 任务表，不打卡、不上传 ✓。
+> ⚠ 2026-10-07 之前那是一条独立任务（`app-task-matrix`）—— 用户当场否了
+> （「app-task-matrix 这个任务本身就没有意义」），它现在**不是任务**了：那张表由
+> **页面按需去取**（用户同一天的口径：「需要主动获取，而不是跟着其他任务一起」）✓。
 
 ## 0. 进度总览（项目口径）
 
@@ -71,7 +75,7 @@
 |---|---|---|---|
 | L1 单测 | `cargo test -p mcloud-tasks --lib app_task` | 判据/门/形状的**逻辑** | **57 passed / 0 failed** ✓（2026-10-04 16:0x） |
 | L2 真机端到端（**写**） | `run app-task <账号> --body '{"onlyTaskIds":"409"}'` | 真的发得出去、上游认账 | 已验：106 ✓、409 / 522 / 1005 各跑过一次 ✓（**旁证** = 上游记账，见 §6） |
-| L3 界面门禁 | `node scripts/gates-web.mjs` | 页面交互不回归 | ⚠ **夹具里没有 `app-task`**（只有 daily-checkin / receive / live-room / msg-push 四条假任务，`web/lite/regress/lib.mjs:231-259`）⇒ appTask 界面自动化覆盖 **= 0** ✗ |
+| L3 界面门禁 | `node scripts/gates-web.mjs` | 页面交互不回归 | ⚠ **夹具里没有 `app-task`**（只有 daily-checkin / receive / live-room / msg-push 四条假任务，`web/regress/lib.mjs:231-259`）⇒ appTask 界面自动化覆盖 **= 0** ✗ |
 | L4 全量门禁 | `cargo test --workspace` / `scripts/gates-rust.sh --full` / `gates-web.mjs --full` | 全仓不回归 | 本轮**没跑** ✗ |
 
 ⚠ L1 里"该 id 出现 N 处"是**粗指标**：同一文件里也可能只是黑名单字面量或反例（118 / 120 / 1021）⇒ 别当成"逐条覆盖" ✗。
@@ -202,7 +206,7 @@
 
 | 项 | 值 |
 |---|---|
-| 命令（**只读**） | `MCLOUD_DATA_DIR=data ./target/debug/mcloud run app-task-matrix 0f6050105ab111f4` |
+| 命令（**只读**） | 浏览器开 `/upstream` 点「拉取」；或 `curl -s 'http://127.0.0.1:3000/api/upstream/app-task-list?account=0f6050105ab111f4'`（要带会话 cookie ✓） |
 | 时刻 | 2026-10-04 16:00:17（北京时间） |
 | 落点 | `data/history.json` 的 **run 93**（`details.reported.items`） |
 | 规模 | 16 次拉取（2 market × 8 group）⇒ 原始 35 条 ⇒ 去重 **25 条** |
@@ -244,7 +248,7 @@
 
 ```bash
 cd <repo>
-MCLOUD_DATA_DIR=data ./target/debug/mcloud run app-task-matrix 0f6050105ab111f4
+# 开 /upstream 点「拉取」（数据落在响应里，**不落运行历史** ✓）
 python3 - <<'PY'
 import json
 h = json.load(open('data/history.json'))
@@ -257,7 +261,7 @@ for i in sorted(rep['items'], key=lambda i: i['taskId']):
 PY
 ```
 
-⚠ `app-task-matrix` 是**只读**那一档；`run app-task` 是**写**的（会打卡、会传文件）✗ —— 别拿后者当"验证"。
+⚠ 「上游状态」页那一格是**只读**的；`run app-task` 是**写**的（会打卡、会传文件）✗ —— 别拿后者当"验证"。
 
 ## 7. 这张表**不**声称的东西
 

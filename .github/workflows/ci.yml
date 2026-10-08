@@ -85,7 +85,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       # 没有 legacy-peer-deps 之类的绕行开关了（`web/.npmrc` 随 Vue 依赖一起删）：
-      # 前端只剩自研 lite，devDependencies 之间没有 peer 冲突，`npm ci` 直接可复现。
+      # 前端只剩自研 lite（现为依赖 `@asunajs/lite`），devDependencies 之间没有 peer
+      # 冲突，`npm ci` 直接可复现。⚠ 它是 git 依赖 ⇒ 这个 job 要能访问 GitHub。
       - name: 安装依赖
         run: npm ci
 
@@ -97,18 +98,16 @@ jobs:
       - name: 构建（产出 web/dist，供 Rust job 嵌入）
         run: npm run build
 
-      # lite 的**编译期负例**：该抛的写法必须抛（`key` 写在 .map 外面、指令形状的属性…）。
-      # 它只要 Node、不要浏览器 ⇒ CI 跑得动；而"能 build"恰恰掩盖不了它 ——
-      # 门坏了的表现是静默编错，本地一眼看不出来。
-      #
-      # ⚠ 这里只跑 `gates-web.mjs` **10 条**里不需要浏览器的那 3 条
-      # （typecheck / build / 编译期负例）。其余 **7 条**都要无头 Chrome，
-      # ubuntu runner 上没有 ⇒ 门禁在那儿会印 `⊘ 跳过` 并且**不算通过**：
-      #   demo（lite 真 DOM 验收）· bench（编译产物行为 + 耗时护栏）· 交互 `ready`
+      # ⚠ 这里只跑 `gates-web.mjs` **9 条**里不需要浏览器的那 2 条（typecheck / build）。
+      # 其余 **7 条**都要无头 Chrome，ubuntu runner 上没有 ⇒ 门禁在那儿会印
+      # `⊘ 跳过` 并且**不算通过**：
+      #   交互 `ready` · 大体量（分页 + 窗口化）· 配置中心搜索框
       #   · narrow-320/375 · 交互 `login` · 交互 `setup` · 前端泄漏量测
       # ⇒ 这 7 条是**本地**的门：提交前 `--commit`，推送前 `--push`（约定 §9.2）。
-      - name: lite 编译期负例
-        run: node lite/regress/compiler.mjs
+      #
+      # ⚠ 2026-10-07 起这里**不再**跑 lite 的编译期负例：框架剥离到 `asunajs/lite`
+      # （见 `docs/web/lite.md`），那条门跟着框架走了，跑在**框架仓**的 CI 里。
+      # 本仓能保证的是"这套页面在这个应用上对"，框架自身对不对由它自己的门回答 ✓。
 
       - name: 上传 web/dist
         uses: actions/upload-artifact@v4

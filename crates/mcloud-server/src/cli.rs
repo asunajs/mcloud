@@ -12,6 +12,9 @@
 
 pub mod auth;
 pub mod cron;
+pub mod daily;
+pub mod live_room;
 pub mod login;
 pub mod pipeline;
+pub mod push;
 pub mod run;

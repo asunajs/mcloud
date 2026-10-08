@@ -26,8 +26,9 @@
 //! ```text
 //! 判定层（纯函数，不碰网络）    plan_exchange / locate_exchange_prize / plan_exchange_wait
 //! 编排层（链）                  exchange —— 读清单 → 判 → 取 deviceId
-//!                                          → 最多 SLIDER_ROUNDS 轮 {取题 → 解算 → 下单}
-//! 任务壳                        ExchangeTask（**当前未**注册进 Registry，见文末）
+//!                                          → 等窗口 → 预热 → 取题+解算（都在整点前）
+//!                                          → 等整点 → 最多 SLIDER_ROUNDS 轮 {下单}（514 后重取题）
+//! 任务壳                        ExchangeTask（2026-10-02 起已注册进 Registry，见文末）
 //! ```
 //!
 //! # 一个必须说清的边界：`deviceId` 是**请求体里的值**
@@ -1083,6 +1084,51 @@ async fn fetch_puzzle(env: &ExchangeEnv<'_>) -> Result<SlidePuzzle> {
     exchange::parse_slide_puzzle(&parsed)
 }
 
+/// 一次"取题 + 解算"的结果。
+///
+/// 两档刻意分开：**题没取到**是 `Err`（连题都没有 ⇒ 这一趟什么都没办成），
+/// 而**题取到了但算不出**是 [`Unresolved`](Self::Unresolved) —— 后者**不发单**，
+/// 但它不是"没走到能报结论的那一步"（结论就是 [`ExchangeStatus::SliderUnresolved`]）。
+enum Shot {
+    /// 题面到手，`puzzleOffset` 算出来了。
+    Ready(i64),
+    /// 题面到手但**算不出** `offset` ⇒ 这一趟不发（拿 `0` 去凑就是拿真豆去赌）。
+    Unresolved,
+}
+
+/// 取一次题并解算，得到这一枪要带的 `puzzleOffset`。
+///
+/// 抽出来是因为它现在有**两个**调用时机，而两处的失败语义必须一模一样：
+/// ① 整点**之前**先备好第一枪（TS 的 `preheat` 就含这一步，见 `exchange()` 里那段）；
+/// ② `514` 之后重取一枪（[`SLIDER_ROUNDS`] 上限）。
+/// 两处各写一份的话，`rounds` / `offset` 与那两档失败语义迟早分叉。
+async fn take_a_shot(
+    env: &ExchangeEnv<'_>,
+    outcome: &mut ExchangeOutcome,
+    round: u32,
+) -> Result<Shot> {
+    let puzzle = fetch_puzzle(env).await?;
+    outcome.rounds = round;
+    match mcloud_crypto::solve_slide(&puzzle.picture_png, &puzzle.puzzle_png) {
+        Ok(solution) => {
+            outcome.offset = Some(solution.offset);
+            Ok(Shot::Ready(solution.offset))
+        }
+        Err(e) => {
+            // 算不出来就**不发**：拿 `0` 或上一次的答案去凑，是拿真豆去赌
+            // （旧实现取题失败时用 `0` 兜底照常下单，那条路径我们不照搬 ——
+            // `0` 会回什么**未验证**）。
+            outcome.status = ExchangeStatus::SliderUnresolved;
+            outcome.error = if round > 1 {
+                format!("重取题后算不出 offset：{e}")
+            } else {
+                e.to_string()
+            };
+            Ok(Shot::Unresolved)
+        }
+    }
+}
+
 /// 兑换前的"预热埋点"：报一次访问日志，再等 **500ms**。
 ///
 /// # 依据（`mcloud-sign`，能跑的 TS）
@@ -1217,14 +1263,21 @@ pub struct ExchangeOptions<'a> {
 /// ```text
 /// 1  GET  exchangeList   清单：limit 与三个余量、价格（只读）
 /// 2  GET  infoV3         余额（判"够不够"，也是成交后的对照基准）
-/// 2.5 ← 换 deviceId（注入点）：**现在由路由从请求体带进来**
-///       （`SmidService::device_id`，见 [`ExchangeTask`] 说明）
+/// 2.5 ← 换 deviceId（注入点）：**在等待之前**取好
+///       （`body.deviceId` 或本机 smid 库，见 [`ExchangeTask`] 说明）
 /// 3  POST visitlog ×2    **预热**：`…_to_exchange` → `sleep(500ms)` → `…_exchange_times`
-///        ⚠ 位置：**等到 hh:59:40 → 预热 → 等到整点−offset → 下单**
-///       （与参考实现 `standalone.ts:143-171` 同序；窗口等待是
-///       [`plan_exchange_window_wait`]，带边界测试）。
-///       ⚠ 顺序还有个前提：`deviceId` 在**两段等待之前**就取好并检查 ——
-///       否则拿不到 id 时会先白等（`skipWait=false` 最长一小时）再白打两枪。
+/// 4  POST getSlide       **取滑块题面 + 本地算 offset**（`take_a_shot`）
+///        ⚠ 3 与 4 的位置：**等到 hh:59:40 → 预热 → 取题解算 → 等到整点−offset → 下单**
+///        （与参考实现同序：`standalone.ts:143-171`；窗口等待是
+///        [`plan_exchange_window_wait`]，带边界测试。TS 的 `preheat` 里就含
+///        "1 滑块 + 图像匹配"，见 `mcloud-back/docs/business-feature-inventory.md:654`
+///        —— 2026-10-07 之前本仓把它排在等待**之后**，那是偏离 ✗）。
+/// 5  POST exchangeV3     **下单**（真扣豆；`514` 之后重取一题再来一枪）
+/// 6  GET  infoV3         复查余额差
+/// ```
+///
+/// ⚠ 顺序还有个前提：`deviceId` 在**两段等待之前**就取好并检查 ——
+/// 否则拿不到 id 时会先白等（`skipWait=false` 最长一小时）再白打两枪。
 pub async fn exchange(
     env: &ExchangeEnv<'_>,
     now_ms: i64,
@@ -1256,6 +1309,20 @@ pub async fn exchange(
     // 原先它在两段等待之后 ⇒ 拿不到 id 时会先白等（`skipWait=false` 最长一小时）
     // 再白打两枪预热，最后才说"没有 deviceId" —— 那三条都是白费的。
     // 判定（`plan.blocks()`）仍排在它前面：判据没过就不该碰设备指纹。
+    // ⚠ 2026-10-07 复核：注释早就这么写，代码却把这次调用留在两段等待**之后** ✗
+    // （注释与实现相反）—— 这次把它挪到注释说的位置。
+    let device_id = match device_id_fn() {
+        Ok(id) => id,
+        Err(e) => {
+            outcome.device_id_failed = e.to_string();
+            return Ok(skipped(&judge, outcome));
+        }
+    };
+    if device_id.trim().is_empty() {
+        outcome.device_id_failed = "换到的 deviceId 是空串（不发，避免打到未定义的那一档）".into();
+        return Ok(skipped(&judge, outcome));
+    }
+
     // ── 第一段等待：**先等到 hh:59:40**（兑换窗口打开）───────────────────────
     // 依据 TS `standalone.ts:143-149` 的 `getMsToNextExchangeTime`。目标时刻由纯函数
     // [`plan_exchange_window_wait`] 算；两条"不等"的边界（已在窗口里 / 整点后 15 秒内
@@ -1283,6 +1350,12 @@ pub async fn exchange(
     // 那正是窗口那一段等待存在的意义（让服务端看到"这个人已经在兑换页"）。
     preheat(env).await?;
 
+    // 整点前已经备好的那一枪（`puzzleOffset`）。`None` ⇒ 进循环现取。
+    let mut prepared: Option<i64> = None;
+    // 滑块轮次：`1` 是主路径，`2` 是 `514` 之后的那一次重取（上限 [`SLIDER_ROUNDS`]）。
+    // ⚠ 声明在**等待之前**：整点前那次备枪也要记轮次（`outcome.rounds`）。
+    let mut round = 1u32;
+
     if !opts.skip_wait {
         let wait = plan_exchange_wait_with(now_ms, opts.offset_ms);
         if wait.needed {
@@ -1295,6 +1368,31 @@ pub async fn exchange(
                     "skipWait=false 但这一趟没接上等待实现（不静默跳过等待，本次没发请求）".into(),
                 ));
             };
+            // ★★ 2026-10-07：**先把这一枪备好（取题 + 解算），再去等整点**。
+            //
+            // 这是 TS 的顺序，不是我们的发明 —— 见 `mcloud-back/docs/business-feature-inventory.md:654`：
+            //   「cron 触发 → 等 `:59:40` → 预热（2 埋点 + **1 滑块 + 图像匹配**）→ 等整点前 10ms → 下单」
+            // 以及 `mcloud-capture/docs/capture/app-exchange-samples.txt:365` 那张
+            // 「三个项目在这一点上完全一致（都是"兑换前获取"）」的表（TS 第 5 步预热 →
+            // 第 7 步兑换；`task.ts:127 → 137`、`standalone.ts:152 → 177`）。
+            //
+            // ⚠ 本仓原先把取题解算放在等待**之后** ⇒ 等到 `整点 − 10ms` 之后还要再花
+            // 一次取题 + 一次解算（实测真运行 `data/history.json`：2451~3394 ms 全程）
+            // 才发得出去 ⇒「压着整点」名存实亡 ✗。**"514 之后重取"是重试路径，
+            // 不是主路径** —— 别把两者读成二选一（抓包那份文档专门提醒过这一条）。
+            //
+            // ⚠ 只跟 TS 的**顺序**，不跟它"算不出就拿偏移量 `0` 兜底照常下单"那一手：
+            // 解算失败仍按下面的 [`Shot::Unresolved`] 收摊（拿真豆赌一个未验证的值不是"照 TS 写"）。
+            match take_a_shot(env, &mut outcome, round).await {
+                Ok(Shot::Ready(offset)) => prepared = Some(offset),
+                Ok(Shot::Unresolved) => return Ok(outcome),
+                Err(e) => {
+                    // 一枪未发、连题都没有 ⇒ 这一趟确实什么都没办成，交回错误。
+                    outcome.status = ExchangeStatus::NotAttempted;
+                    outcome.error = e.to_string();
+                    return Err(e);
+                }
+            }
             if let Err(e) = sleep(wait.until_ms).await {
                 return Ok(set_error(skipped(&judge, outcome), e.to_string()));
             }
@@ -1314,54 +1412,26 @@ pub async fn exchange(
         }
     }
 
-    let device_id = match device_id_fn() {
-        Ok(id) => id,
-        Err(e) => {
-            outcome.device_id_failed = e.to_string();
-            return Ok(skipped(&judge, outcome));
-        }
-    };
-    if device_id.trim().is_empty() {
-        outcome.device_id_failed = "换到的 deviceId 是空串（不发，避免打到未定义的那一档）".into();
-        return Ok(skipped(&judge, outcome));
-    }
-
-    let mut round = 1u32;
     while round <= SLIDER_ROUNDS {
-        let puzzle = match fetch_puzzle(env).await {
-            Ok(puzzle) => puzzle,
-            Err(e) => {
-                if round == 1 {
-                    // 一枪未发，且连题都没有 ⇒ 这一趟确实什么都没办成，交回错误。
-                    outcome.status = ExchangeStatus::NotAttempted;
-                    outcome.error = e.to_string();
-                    return Err(e);
+        // 整点前已经备好的那一枪（没有等待的那几条路 ⇒ 现取）。
+        let offset = match prepared.take() {
+            Some(offset) => offset,
+            None => match take_a_shot(env, &mut outcome, round).await {
+                Ok(Shot::Ready(offset)) => offset,
+                Ok(Shot::Unresolved) => return Ok(outcome),
+                Err(e) => {
+                    if round == 1 {
+                        // 一枪未发，且连题都没有 ⇒ 这一趟确实什么都没办成，交回错误。
+                        outcome.status = ExchangeStatus::NotAttempted;
+                        outcome.error = e.to_string();
+                        return Err(e);
+                    }
+                    // 第二轮取题失败**不**推翻第一轮的 `514`：那一枪确实被上游判错了，
+                    // 而重试的机会已经用完。落回"滑块没过"（循环尾那一档）。
+                    break;
                 }
-                // 第二轮取题失败**不**推翻第一轮的 `514`：那一枪确实被上游判错了，
-                // 而重试的机会已经用完。落回"滑块没过"（循环尾那一档）。
-                break;
-            }
+            },
         };
-        outcome.rounds = round;
-
-        let solution = match mcloud_crypto::solve_slide(&puzzle.picture_png, &puzzle.puzzle_png) {
-            Ok(solution) => solution,
-            Err(e) => {
-                // 算不出来就**不发**：拿 `0` 或上一次的答案去凑，是拿真豆去赌
-                // （旧实现取题失败时用 `0` 兜底照常下单，那条路径我们不照搬 ——
-                // `0` 会回什么**未验证**）。
-                outcome.status = ExchangeStatus::SliderUnresolved;
-                outcome.error = if round > 1 {
-                    format!("重取题后算不出 offset：{e}")
-                } else {
-                    e.to_string()
-                };
-                return Ok(outcome);
-            }
-        };
-        let offset = solution.offset;
-        outcome.offset = Some(offset);
-
         let submitted = submit_exchange(env, &device_id, judge.prize.prize_id, offset).await;
         outcome.attempts += 1;
         let result = match submitted {
@@ -1698,21 +1768,29 @@ impl ExchangeRun<'_> {
 /// | `prizeIdOrName` | ✅ | 纯数字按 prizeId，其余按商品名**精确**找 |
 /// | `skipWait` | | `false` ⇒ 先等到下一个整点再判一次（**默认 `false`**，与 TS 一致；路由那层另有"缺省不等"的 UX 取舍，见 `routes/exchange.rs` 的 `default_skip_wait`）|
 ///
-/// # ⚠ `deviceId` 这条缺口必须说清（本任务目前**不能**单独跑通）
+/// # `deviceId` 从哪来（**两个来源**，2026-10-07 起）
 ///
-/// 生产路径上 `deviceId` 要由"上报设备指纹换 id"那一套产生
-/// （算法在 `mcloud_upstream::smid`，编排在 `mcloud_app::smid`，
-/// 它需要指纹存储 + 随机源）。而 `mcloud-tasks` 依赖不到 `mcloud-app`
-/// （那是反向依赖）—— 所以这个任务壳**没有**注入点，链会走到
-/// [`ExchangeStatus::Skipped`] 并给出 `device_id_failed`：
+/// 1. **`body.deviceId`** —— 路由层注入的那一份（`routes/exchange.rs` 调
+///    `mcloud_app::smid::device_id`，**不是** `report_device_id`）；
+/// 2. **本机 smid 库里已换回来的那一份** —— `ctx.store.get_smid_state(...)`
+///    的 `device_id`（含 `B` 前缀）。2026-10-07 补上这一档，理由很实在：
+///    定时 / 编排 / 任务页那三条路**都没有路由那层**，body 里自然没有这个键，
+///    于是它们在 `scheduler.rs` 那条链上永远是"没接上 deviceId 来源、一枪不发"
+///    —— 「定时抢兑」这个主路径等于空转（`docs/business-matrix.md` §4 记过这一格）。
+///    `Store` 在 2026-10-03 已并入 `SmidStore`，任务层本来就读得到那个真值
+///    （`signin::h5_device_id` 走的就是它），所以不必再拉一条注入线。
 ///
-/// > 这一趟没接上 deviceId 来源（下单硬需要它，一枪都没发）
+/// # ⚠ 为什么**不**回落到 `ctx.account.device_id`
 ///
-/// 这是**刻意的**：一条"随手生一个 id"的兜底会让上游不认那个 id、
-/// 白扣一次机会；而"静默不发"至少是诚实的。
+/// 那一份是**登录时冒充 PC 客户端**用的，与 H5 这条 smid 链换回来的 id 不是同一个
+/// 东西（`routes/exchange.rs` 那句"⚠ 不是 `account.device_id`"）。上游**校验内容**：
+/// 抓包 `app-signin-samples.txt` §4.2 的三档实证里，"内容无效"回 `614`。
+/// 拿它去下单就是**拿真豆去赌一个已知无效的值** ⇒ 宁可保持安全阀：
+/// 两个来源都没有 ⇒ 一枪不发，如实回 `device_id_failed`。
 ///
-/// 接线方式（留给组装层）：把 `DeviceIdFn` 从 `mcloud_app` 那层注入进来
-/// （`mcloud_app` 已经依赖 `mcloud-tasks`，方向是对的）。
+/// ⚠ 本仓**换不出新 id**（那要指纹 + 随机源，都在 `mcloud-app`，方向反了）。
+/// 库里没有时的正解是**先去兑换页点一次兑换** —— 那条路由会顺手换一个并落库
+/// （`SmidService::device_id`：库里有就直接返回，没有才换一次）。任务壳只读，不猜。
 ///
 /// # 2026-10-02 起**已注册**进 `register_all`（⇒ `/api/capabilities` 里也有它）
 ///
@@ -1728,11 +1806,16 @@ impl ExchangeRun<'_> {
 ///    `deviceid`，库里有就直接返回（不打网络），没有才换一次 ⇒ **业务请求该调的是它**"；
 ///    而 `report_device_id` 是"**每次都真的打上游**"的换 id 那条路（刚换过指纹、
 ///    或上游判定该 id 作废时才用）。⚠ 别为了"更保险"每单都重报 —— 那是白流量。
+///    ⚠ **2026-10-07 补第二档**：body 里没有时读**本机 smid 库**
+///    （`ctx.store.get_smid_state`）—— 定时 / 编排 / 任务页那三条路没有路由层，
+///    只有这一档能让它们真的走到下单（见上面「`deviceId` 从哪来」）。
 /// 2. ~~缺 `reportVisitLog` 预热两枪~~ **已接**（2026-10-02）：`preheat()` 按
 ///    参考实现的**顺序**发两枪 —— `newsignin_index_to_exchange`
 ///    → `sleep(500ms)` → `newsignin_index_exchange_times`（`task.ts:85-88`、
 ///    `utils.ts:7`），每趟**只发一次**、位置在第一次下单之前。
-///    ⚠ 参考实现那次预热里还夹着"取滑块、算不出就用偏移量 `0` 兜底"，**本仓不跟**：
+///    ⚠ 参考实现那次预热里**还夹着"取滑块 + 图像匹配"**（`business-feature-inventory.md:654`）。
+///    2026-10-07 起本仓**跟这一段顺序**（`take_a_shot` 排在整点等待之前，见 `exchange()` 里
+///    ★★ 那段）；**不跟**的只有它"算不出就拿偏移量 `0` 兜底照常下单"那一手 ——
 ///    拿真豆去赌一个未验证的偏移量不是"照 TS 写"能解释的（见 `submit_exchange` 旁那段）。
 /// 3. ~~等待档与 TS 不一致~~ **已对齐**（2026-10-02）：任务层缺省 `skipWait=false`
 ///    （`standalone.ts:214` 同款）⇒ 先等到 **hh:59:40** 预热
@@ -1747,6 +1830,39 @@ impl ExchangeRun<'_> {
 /// `lib.rs` 的 `register_all` 里登记了这件事，
 /// 哨兵是**正向**的 `tests::register_all_exposes_exchange`（谁把注册摘掉它就红）。
 pub struct ExchangeTask;
+
+/// `body.deviceId`（路由 / CLI 注入的那一份）。空串与纯空白一律当"没有" ——
+/// 上游对空串的判法等同于"不带"（与 `signin::pick_device_id` 同一口径）。
+fn body_device_id(body: &Value) -> Option<String> {
+    body.get("deviceId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// 本机 smid 库里**已换回来**的那个 `deviceId`（H5 链要的那个，含 `B` 前缀）。
+///
+/// ⚠ 只**读**不**换**：换 id 要指纹 + 随机源（`mcloud_app::smid`），本 crate 依赖不到
+/// （方向反了）。读不到就返回 `None`，**不回落** `account.device_id` ——
+/// 理由见 [`ExchangeTask`] 那段「为什么**不**回落到 `ctx.account.device_id`」。
+async fn smid_device_id(ctx: &TaskContext) -> Option<String> {
+    match ctx.store.get_smid_state(&ctx.account.id).await {
+        Ok(Some(st)) => st
+            .device_id
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty()),
+        Ok(None) => None,
+        Err(e) => {
+            // "读失败"与"库里没有"要分开：前者是存储问题，后者是"还没换过 id"
+            // （去兑换页点一次就好）。混成一句话，排查方向会整个跑偏。
+            ctx.warn(format!(
+                "读 smid 状态失败（这一趟拿不到 H5 的 deviceId）：{e}"
+            ));
+            None
+        }
+    }
+}
 
 #[async_trait]
 impl Task for ExchangeTask {
@@ -1801,14 +1917,23 @@ impl Task for ExchangeTask {
             // 它每次都会**显式**传这个字段，所以两处不冲突。
             .unwrap_or(false);
 
-        // `deviceId` 从**请求体**来（方案 c：不给 `TaskContext` 加字段，见 [`ExchangeTask`]
-        // 说明）。⚠ 只在**下单前**才用它 —— 只读路径（路由里那个 list 接口）压根不经过这里。
-        let device_id = body
-            .get("deviceId")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string);
+        // `deviceId` 的**取值顺序**（见 [`ExchangeTask`] 那段「`deviceId` 从哪来」）：
+        // ① `body.deviceId`（路由 / CLI 注入的那一份）
+        // ② 本机 smid 库里已换回来的那份（定时 / 编排 / 任务页那三条路只有这一档）
+        // ⚠ 只在**下单前**才用它 —— 只读路径（路由里那个 list 接口）压根不经过这里。
+        let device_id = match body_device_id(body) {
+            Some(id) => Some(id),
+            None => smid_device_id(ctx).await,
+        };
+        if device_id.is_none() {
+            // 一枪不发之前先把**怎么办**说清楚：这条链上"没有 id"的表现只是
+            // 一句 `device_id_failed`，而用户看不出"我该去点一次兑换页"。
+            ctx.warn(
+                "这一趟拿不到 H5 的 deviceId（`body.deviceId` 没有、本机 smid 库里也没有）\
+                 ⇒ 一枪都不会发。先到兑换页点一次兑换（那条路由会顺手换一个并落库），\
+                 定时 / 编排 / 任务页这三条路之后才有 id 可用",
+            );
+        }
         // 链上要的是"取一个 deviceId"的闭包；这里值已经取好，所以是个**常量闭包** ——
         // 链上"没有它就一枪不发"那条安全阀（`device_id_failed`）保持原样。
         // ⚠ 用 `Box<dyn …>` 而不是 `as DeviceIdFn<'_>`：后者是"转成 unsized 类型"，

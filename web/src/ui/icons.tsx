@@ -137,6 +137,19 @@ export const IconBrand = (p: IconProps): JSX.Element => (
   </svg>
 )
 
+/**
+ * 推送：铃铛。
+ *
+ * ⚠ 用**铃铛**而不是"纸飞机 / 喇叭"：这一页管的是"什么情况下**通知**我"
+ * （渠道 + 规则 ✓），铃铛在手机/桌面上的既有含义就是它 ✓。
+ * 形状取自 Material 的 `notifications`，与其余图标同为 24×24 fill 风格 ✓。
+ */
+export const IconBell = (p: IconProps): JSX.Element => (
+  <svg {...BASE} class={p.class ?? 'size-5'}>
+    <path d="M12 22a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 12 22Zm7-5v-1l-2-2v-5c0-3.07-1.64-5.64-4.5-6.32V2a1.5 1.5 0 0 0-3 0v.68C6.63 3.36 5 5.92 5 9v5l-2 2v1h16Z" />
+  </svg>
+)
+
 /** 警告三角，用于错误提示条前。 */
 export const IconAlert = (p: IconProps): JSX.Element => (
   <svg {...BASE} class={p.class ?? 'size-5'}>

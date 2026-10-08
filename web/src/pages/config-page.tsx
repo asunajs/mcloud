@@ -9,7 +9,11 @@
  * 3. 「我说的是**每个任务的配置**分为公共和账号私有」（举例：每个账号的推送不一样、
  *    上传路径可能不一样）；
  * 4. 「我准备拆分一下，**推送单独给配置页面**」⇒ 推送搬去 `account-config-page.tsx`
- *    （`/accounts/push`，账号页的子视图）；
+ *    （`/accounts/settings`，账号页的子视图）；
+ *    ⚠⚠ 2026-10-08 又搬了一次（用户口径「**很显然我说的和云盘账户没有关系**」＋
+ *    「**丢弃现有情况，重写**」）：**推送渠道**是"每个登录用户一份"的 ⇒ 现在在
+ *    「推送」页（`push-page.tsx` 的 `pushConfigCard()` ✓），
+ *    `account-config-page.tsx` 只剩**账号级**设置与功能开关 ✓。
  * 5. 拆完之后「账号私有配置」那一半**只剩指路**（每账号一行 + 一个跳去推送页的按钮，
  *    而那一页从账号页也进得去）⇒ 用户 2026-10-05 看完图一句「去掉」⇒ **整块删掉**，
  *    本页就只剩「公共配置」。
@@ -21,7 +25,8 @@
  * 「画一个存不下去的控件比空着更糟」这条不变 ✓。
  *
  * ⇒ 本页右栏只有一半：**公共配置**（这个任务的默认参数，`ui/param-field.tsx`），
- *    落盘走 `PUT /api/tasks/{name}/config`。按账号的东西全在 `/accounts/push` 那一页。
+ *    落盘走 `PUT /api/tasks/{name}/config`。**按账号**的账号级设置全在 `/accounts/settings`
+ *    那一页；而**推送渠道**是**登录用户级**的，在「推送」页（`/push`）✓（2026-10-08）。
  *
  * # 地址
  *
@@ -50,7 +55,7 @@
  * 骂人的那种静默丢失。代价说清：**不落盘**，刷新浏览器就没了 —— 真要长期保留请点「保存」。
  */
 
-import { onMounted, onUnmounted, ref } from 'lite'
+import { onMounted, onUnmounted, ref } from '@asunajs/lite'
 import { setPageRefresh } from '../ui/page-refresh'
 import {
   getTaskConfig,
@@ -63,7 +68,7 @@ import {
 import { ParamField } from '../ui/param-field'
 import { EmptyState } from '../ui/empty-state'
 import { pushToast } from '../ui/toast'
-import { IconClose, IconSearch } from '../ui/icons'
+import { IconAlert, IconClose, IconSearch } from '../ui/icons'
 
 export interface ConfigCenterPageProps {
   /** URL 里预选的任务名（`/tasks/<任务名>/config`）；`/tasks/config` 进来时是 `null`。 */
@@ -126,6 +131,14 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
   const saved = ref<Record<string, unknown>>({})
   const detailState = ref<'idle' | 'loading' | 'error' | 'ready'>('idle')
   const detailError = ref('')
+  /**
+   * 保存失败的那一句（**弹窗 + 就近**，2026-10-08 用户口径「所有的提示都是优先弹窗式」）。
+   *
+   * ⚠ 它画在卡片标题那一行下面（「保存」就在那一行右端）——
+   * 这一页的保存以前**只有**右上角 toast，长表单里滚动之后看不到，
+   * 而 `detailError` 是"读不出来"（配重试），不是"存不进去"，两者不能混用 ✓。
+   */
+  const saveError = ref('')
   const saving = ref(false)
   /**
    * 请求序号：连着点两个任务时，先发的那个响应可能后到 —— 迟到的不能覆盖新的选中
@@ -252,6 +265,7 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
   }
 
   const selectTask = (name: string) => {
+    saveError.value = ''
     if (name !== pickedTask.value) stashTaskDraft()
     draftsRev.value++
     pickedTask.value = name
@@ -263,6 +277,7 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
   const saveTask = async () => {
     const name = pickedTask.value
     if (!name) return
+    saveError.value = ''
     saving.value = true
     try {
       const view = await putTaskConfig(name, values.value)
@@ -274,7 +289,10 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
       draftsRev.value++
       pushToast('success', '已保存 —— 任务页点「运行」时会带上这份参数')
     } catch (e) {
-      pushToast('error', e instanceof Error ? e.message : '保存失败')
+      const msg = e instanceof Error ? e.message : '保存失败'
+      saveError.value = msg
+      // 弹窗优先：错误类 toast 不自动消失（见 `ui/toast.ts`）
+      pushToast('error', msg)
     } finally {
       saving.value = false
     }
@@ -360,7 +378,7 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
           当场红：「这里的 `key` 什么都不做」（本页第一版就是这样，`npm run build` 直接失败）；
           ② 片段（`<>…</>`）同样不行 —— 编译器把片段当"动态插入"处理，它里面的 map 一样
           认领不到 key。所以下面用 `<div>` 而不是 `<>` 包。
-          判据与其它编译期边界见 `docs/web/lite-guide.md` §8.2 / §10。 */}
+          判据与其它编译期边界见 `asunajs/lite` 的 `docs/guide.md` §8.2 / §10。 */}
       <div class="flex flex-col gap-1">
         {taskItems().map((t) => (
           <button
@@ -452,6 +470,14 @@ export const ConfigCenterPage = (props: ConfigCenterPageProps) => {
               </h2>
               {actions()}
             </div>
+
+            {/* ⚠ 失败那一句在**标题行下面**（保存键就在那一行右端），不是表单底部 ✓ */}
+            {saveError.value ? (
+              <div class="alert alert-soft alert-error text-sm" role="alert">
+                <IconAlert class="size-4 shrink-0" />
+                <span class="break-words">{saveError.value}</span>
+              </div>
+            ) : null}
 
             {/* ── 公共配置：这个任务的默认参数，所有账号共用这一份 ─────────── */}
             <div class="flex flex-col gap-3">

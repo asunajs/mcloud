@@ -24,7 +24,7 @@
 | 每条业务做到哪一步、证据等级 | [`docs/business-matrix.md`](docs/business-matrix.md) |
 | 单条任务的接口规格与 `path:line` | [`docs/task-inventory.md`](docs/task-inventory.md) |
 | App 任务（25 条）逐条实现/验收状态 | [`docs/app-task-status.md`](docs/app-task-status.md) |
-| 前端框架怎么用 | [`docs/web/lite-framework.md`](docs/web/lite-framework.md) |
+| 前端框架（lite）怎么用 | [`docs/web/lite.md`](docs/web/lite.md)（框架本体在 [`asunajs/lite`](https://github.com/asunajs/lite)） |
 | 全库审查结论（77 条） | [`docs/review/review-261004.md`](docs/review/review-261004.md) |
 | 用户下达的每件事 → 落点 → 状态 | [`docs/task-log.md`](docs/task-log.md) |
 
@@ -128,10 +128,12 @@ cd web && npm run typecheck   # tsgo --noEmit（类型检查只有这一套，�
 cd web && npm run build       # 产物 web/dist（含 .gz 边车）
 ```
 
-- **前端技术栈**：`web/lite/` 是自研框架（TSX 在构建期被折成"模板串 + 每个动态位一条
-  effect"，运行时只留用到的原语）；CSS 是 Tailwind 4 的 CSS-first 配置，令牌层在
-  [`web/src/app.css`](web/src/app.css) 的 `@theme`（**没注册的 token ⇒ 对应 utility 静默不生成**）；
-  daisyUI 已移除。设计/踩坑全在 [`docs/web/lite-framework.md`](docs/web/lite-framework.md)。
+- **前端技术栈**：框架是自研的 **lite**（TSX 在构建期被折成"模板串 + 每个动态位一条
+  effect"，运行时只留用到的原语）—— **2026-10-07 已剥离成独立仓库**
+  [`asunajs/lite`](https://github.com/asunajs/lite)，本仓按 `@asunajs/lite` 这个 git 依赖用
+  （接线、升级、门禁怎么分见 [`docs/web/lite.md`](docs/web/lite.md)）；CSS 是 Tailwind 4 的
+  CSS-first 配置，令牌层在 [`web/src/app.css`](web/src/app.css) 的 `@theme`
+  （**没注册的 token ⇒ 对应 utility 静默不生成**）；daisyUI 已移除。
 - **多写入线**：`target/` 上的锁是串行的 —— 两条线同时编译只会排队。
   约定每线一个 `CARGO_TARGET_DIR="$PWD/target/lines/<线名>"`（详见 [`AGENTS.md`](AGENTS.md)）。
 - **沙箱里 `~/.cargo` 不可写**时：`export CARGO_HOME="$PWD/.cargo-home"`（仓库已忽略该目录）。
@@ -203,8 +205,10 @@ crates/
   mcloud-app         组装层（把上面几层拼成一个 App）
   mcloud-server      axum 路由 + SSE + 内嵌前端 + CLI（唯一二进制 `mcloud`）
 web/
-  lite/              自研前端框架（编译器 + 运行时 + 门禁夹具 + bench）
   src/               页面与组件（pages/ · ui/ · api.ts · app.css）
+  regress/           页面级验收（交互 / 大体量 / 搜索 / 窄屏 / 泄漏，夹具后端 + CDP）
+  scripts/           gzip 边车 · chrome 参数 · daisyUI 体积探针
+                      ⚠ 框架本体（lite）已剥离到 asunajs/lite —— 见 docs/web/lite.md
 scripts/             gates-rust.sh · gates-web.mjs · dev-reload.sh · sign-local.sh · run-local.sh · hooks/
 test/golden/         黄金向量（签名 / 口令哈希 / 认证 / 签到信封 / 直播），对拍是字节级
 docs/                设计、约定、审查、任务状态与台账

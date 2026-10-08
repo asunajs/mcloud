@@ -70,6 +70,12 @@ async fn serve() -> anyhow::Result<()> {
     // 新记录会把上次启动留下的同编号记录覆盖掉（症状：历史"越重启越少"）。
     app.handle.seed_run_ids().await?;
 
+    // ⚠ **必须在调度器读盘之前**：那条默认定时是种进库里的，种晚了这一趟启动就看不见它
+    // （`scheduler.rs` 在 `run_loop` 里读一次 `store.schedules()` ✓）⇒ 表现成"第一次启动
+    // 不跑，重启一次才跑" ✗。
+    // 用户口径 2026-10-07：「不自动新建怎么算默认」✓ —— 默认编排 + 默认定时开箱就有 ✓。
+    app.handle.seed_defaults().await?;
+
     let tasks = app.registry().len();
     tracing::info!(data_dir, tasks, "mcloud 启动");
 

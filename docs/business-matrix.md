@@ -32,8 +32,8 @@
 | `backup-gift` `:468` | 备份好礼 | ✅ `backupGiftTask` | ✅ | 同上 | ✗ 0 条（只有 §5.1 单测背书）|
 | `revival` `:393` | 复活奖励 | ✅ `revivalRewardTask`（本地放行 **2 次/月**）| ✅ **每次运行盲打一发**，靠服务端"本月已领取"做闸（理由 `signin.rs:381-388`）| 同上；⚠ 界面文案是"每月一次"，读起来和行为不同 | ✅ ×2 **真用卡**（复活 81 / 114 豆）｜UI 待验 |
 | `prizes` `:544` | 待领取奖品 | ✅ `printPendingPrizes`（独立调用）| ✅ 只读 | 同上 | ✅ ×1（本页 0 条待领）｜UI 待验 |
-| `cloud-snapshot` `:612` | AI豆快照 | — TS `TASKS.md` 无；出处是 **Go 参考实现**的新能力（差异表 D4「已确认要做」）| ✅ 只读观测 | 同上 | ✗ 0 条 |
-| `task-list` `:663` | 任务清单 | — TS `TASKS.md` 无；出自 **Go 参考实现**那张能力表第 7 条（`task-inventory.md:194`，Query 类）| ✅ 只读观测 | 同上 | ✅ ×2｜UI 待验 |
+| ~~`cloud-snapshot`~~ → **「上游状态」页的签到历史那一格** | AI豆快照 | — TS `TASKS.md` 无；出处是 **Go 参考实现**的新能力（差异表 D4「已确认要做」）| ✅ 只读观测 | 同上 | ✗ 0 条｜**2026-10-07 摘掉注册**（那三个数在签到历史那格里本来就有 ✓） |
+| ~~`task-list`~~ → **「上游状态」页的签到历史那一格** | 任务清单 | — TS `TASKS.md` 无；出自 **Go 参考实现**那张能力表第 7 条（`task-inventory.md:194`，Query 类）| ✅ 只读观测 | 同上 | ✅ ×2｜**2026-10-07 摘掉注册**（只读盘点不该占一条任务；数据与签到状态**同一发请求** ✓） |
 
 ### 1.2 领取 / 活动族
 
@@ -41,7 +41,7 @@
 |---|---|---|---|---|---|
 | `msg-push` `msg_push.rs:331` | 消息推送 | ✅ `msgPushOnTask` | ✅ | 任务页卡片 | ✗ 0 条 |
 | `notice` `notice.rs:649` | 开启通知领AI豆 | ✅ `noticeTask` | ✅（先查两个槽再领）| 任务页卡片 | ✗ 0 条 |
-| `task-expansion` `task_expansion.rs:692` | 任务拓展 | ✅ `taskExpansionTask`（含文件上传）| ✅ **会写网盘**，传的文件跑完自删 | 任务页卡片 | ✗ 0 条 ⇒ **写网盘这条路从没真跑过**，代价最高的一格 |
+| `task-expansion` | 任务拓展 | ✅ `taskExpansionTask`（含文件上传）| ✅ **会写网盘**，传的文件跑完自删 | 任务页卡片 | ✗ 0 条 ⇒ **写网盘这条路从没真跑过**，代价最高的一格。**2026-10-07 按真机抓包重写**（用户口径「需要重新编写，已经有最新的抓包数据（备份上传）」）：由三发扩成**六发**（补上从没实现过的快照支 `backup/createSnapshot` → `PUT(ot=system)` → `backup/completeSnapshot`），`file/create` 也换成备份支口径（`parentPath` + `refuse_duplicate_content` + `parallelUpload:true`）|
 | `exchange` `exchange.rs:1753` | 兑换奖品 | ✅ `exchangeTask` + `exchange` + `printExchangeList` | ✅ 单测 75 / 实拍 36 / 黄金向量 3 | **专属页** `/exchange`（`nav.ts` 第 4 条）+ 任务页参数 4 个；⚠ 下单只走专属端点，见 §4 | ✅ **全仓最硬**：×19，含 1 次真兑成（50 豆、余额差核对）＋5 类上游失败；◐ 但"整点等待"那一档是 10-03 才修的（review §1.1），**修复后还没活体跑过一次** |
 | `ai-avatar` `ai_avatar.rs:112` | AI 头像 | ✅ `aiAvatarTask`（按配置）| ✅ 但账号级开关 `ai_avatar_enabled` **默认 false**（`account.rs:264`）⇒ 不开就永远 `Skipped`（`ai_avatar.rs:840`）| 任务页卡片；**开关那一块 UI 当前不显示** ⇒ 见 §6-1 | ◐ ×4 **全是"开关关着"** ⇒ 生成/抽奖那条主路 0 次 |
 | `cloud-phone-redpack` `cloud_phone_redpack.rs:82` | 红包派对 | ✅ `cloudPhoneRedpackTask`（按配置）| ✅ 开关默认 **true**（`account.rs:266`）| 任务页卡片 | ✗ 0 条 ⇒ 里面那发 `apkInstall`（真发起装机）**未验** |
@@ -50,7 +50,7 @@
 | `live-room` `live_room.rs:1727` | 直播口令小红花 | ✅ `liveRoomKoulingTask` + `getLiveKouling` + `hasActiveLiveRoom`（WS 与小红书主页**并行**后合并去重）| ✅ 两个来源**同级并发**（`collect_inner` `live_room.rs:1005-1015`），口令解析层对拍 TS 的 `koulingExtract` 36 条 + `xiaohongshuExtract` 5 条（`live_kouling/tests.rs:68-84`）；开关 `kouling_enabled` **默认 false** | **专属页** `/live-room`（口令池 + 参数 `codes`）+ 任务页；⚠ 同 §6-1 | ◐ ×4：门与"没直播/房间不对"都走通过，**但从没赶上目标房间开播** ⇒ 弹幕抓口令那一格仍无实证（§6-4 那条注释之争也没解）|
 | ~~`red-flower`~~（2026-10-05 已删，并入 `live-room` 的「只用手工口令」）| 领取小红花 | ✅ `drawRedFlower` / `autoDrawRedFlower` / `drawRedFlowerForAccount` | ✅ 独立一条（TS 那边是 3 个函数）| 任务页，参数 `codes` | ◐ ×2 都打到"领取"那一枪，喂的是无效口令 `<值已抹去>` ⇒ 链路通、**进账 0 从未变成进账 N** |
 | `app-task` `app_task.rs:791` | App 任务（做任务）| ✅ `appTask`（14 个专用执行器 + `default:` 打卡）| ◐ **只做 4 档形状**：106 / 522 / `beiyong1` 名字门 / 434（`upload_shape_for` `:105-124`、`step_for` `:203-207`）⇒ 详见 §3 | 任务页卡片 | ✅ ×1，而且那一趟**三档形状各过一次**：106 传 1 个、522 传 5 个、**434 `shared: true`**，收尾 `cleanedUp: 6`（自家传的 6 个文件移进回收站）⇒ 4 档里只有 `beiyong1` 名字门没实证｜UI 待验 |
-| `app-task-matrix` `app_task_matrix.rs:243` | App 任务矩阵（只看）| — TS 无"只看"这一条 | ✅ 只读（2 市场 × 8 组）| 任务页卡片 | ✗ 0 条 |
+| ~~`app-task-matrix`~~ → **「上游状态」页** | App 任务矩阵（只看）| — TS 无"只看"这一条 | ✅ 只读（2 市场 × 8 组）| `/upstream` 点「拉取」（**不是任务** ✓，2026-10-07 摘掉注册）| ✗ 0 条 |
 
 ## 2. 反向缺口：TS 有、本仓没有
 
@@ -59,12 +59,12 @@
 
 | TS 侧 | 它的状态 | 本仓 | 定性 / 影响 |
 |---|---|---|---|
-| `hc1tTask` 云朵大作战（TS 叫"AI豆大作战"）| ✅ 已实现并按配置调度（`packages/core/src/tasks/hc1t/`）| ✗ 无任务，而且**设置里那三个 `hc1t_*` 旋钮也被删了**（`account.rs:189-191`，老库残留键仍读得回：测试 `:777`）| **有口径的不做** —— `docs/task-inventory.md:355`「已过期，不实现，只作形态参考」＋差异表 D3。将来真要做得连字段一起加回来 |
-| 139 邮箱族：`472/473` 体验邮箱、`1004` 发邮件、`1014` PDF 转换、`1020` 邮箱备份、`1028` AI 工作台 | ✅ appTask 执行器（靠 `auth-service loginMail` 拿 session）| ✗ `mail139` / `139邮箱` 全仓 0 命中 ⇒ 连 session 层都没有 | **缺口**（差异表里没有这一行）；**§3 那半张表的主要成分**。TS 2026-09-12 实跑里 `1020` 报 404、`473` 结果不稳定 ⇒ 这条链上游本身在动 |
-| `107` 创建云笔记、`113` PC 客户端、`409` / `1005` 云朵中心页面访问 | ✅ appTask 执行器 | ✗ 无 runner（`113` 只在上传档位留了痕：`app_cloud_upload.rs:101`）| **缺口**；同上 |
-| `585` AI 相机、`587` 上传 10 张图片 | ✅ 专用 runner（经 appTask）| ✗ 本仓 `app-task` 的 4 档里没有这两个 id | **缺口**；同上 |
-| `afterTask` 任务后处理（清理临时文件）| ✅ 独立任务 | ✗ 无独立任务；**等价动作内联**在 `app_task.rs:751` `cleanup()`（把自家传上去的移进回收站）| **有口径的不做** —— 差异表 D1「`after` 不是独立能力（无 code）」⇒ 只是没有"单独调度它"这个入口 |
-| `auth-service` 邮箱登录/刷新作为可调度能力 | ✅ | ◐ CLI 有 `auth refresh`（`cli/run.rs:116`），但那是**票**的刷新，不是邮箱 session；而 P0-2 那条 `authTokenRefresh.do` 标着「零抓包的旧 TS，**刻意不实现**」（`task-inventory.md:223`）| **有口径的不做**（那一半）＋**缺口**（邮箱 session 那一半）|
+| `hc1tTask` 云朵大作战（TS 叫"AI豆大作战"）| ✅ 已实现并按配置调度（`packages/core/src/tasks/hc1t/`）| ✗ 无任务，而且**设置里那三个 `hc1t_*` 旋钮也被删了**（`account.rs:189-191`，老库残留键仍读得回：测试 `:777`）| **有口径的不做** —— `docs/task-inventory.md:355`「已过期，不实现，只作形态参考」＋差异表 D3。⚠ **2026-10-07 实测给了它硬证据**：`GET https://caiyun.feixin.10086.cn/market/signin/hecheng1T/info` → **404**（活动已下线）⇒ 维持不做 ✓ |
+| 139 邮箱族：`472/473` 体验邮箱、`1004` 发邮件、`1014` PDF 转换、`1020` 邮箱备份、`1028` AI 工作台 | ✅ appTask 执行器（靠 `auth-service loginMail` 拿 session）| ✅ **2026-10-07 已实现**（`mcloud-upstream/src/mail139.rs` + `app_task/runners.rs`）；真机读数：`1004` 发信成功、`1014` 转换完成、`1020` 上游 404、`1057`（=旧 TS 的 1028）对话成功 | **缺口已补**。⚠ 三处**上游今天坏了**（照抄实现 + 如实报）：`taskClickV2` **整体 404**、`mailsms/sms/backup` **404**、107 的笔记鉴权回不到 `headers.app_auth` |
+| `107` 创建云笔记、`113` PC 客户端、`409` / `1005` 云朵中心页面访问 | ✅ appTask 执行器 | ✅ `107` **2026-10-07 已实现**（`mcloud-upstream/src/note.rs`）；`113`/`409`/`1005` 本仓早有（`UPLOAD_ONE_PC` / `Step::Entry`）| 缺口已补。⚠ `107` 今天在两个真机账号的任务表里**都不存在**，且笔记鉴权口回不到 `app_auth` ⇒ 实现保留、如实报"跳过" |
+| `585` AI 相机、`587` 上传 10 张图片 | ✅ 专用 runner（经 appTask）| ✅ `585` **2026-10-07 已实现**（`mcloud-upstream/src/ai_cloud.rs`）；`587` 那一族本仓早有（`UPLOAD_TEN` + `beiyong1` 按钮门）| 缺口已补。⚠⚠ **旧 TS 的 585/1028 是过期 id**：两个真机账号的任务表里都是 **618「体验AI相机」/ 1057「体验AI工作台」** ⇒ 本仓两个 id 都收（按能力收，不按数字收）|
+| `afterTask` 任务后处理（清理临时文件）| ✅ 独立任务 | ✗ 无独立任务；**等价动作内联**在 `app_task.rs` 的 `cleanup()`（把自家传上去的移进回收站）| **有口径的不做** —— 差异表 D1「`after` 不是独立能力（无 code）」⇒ 只是没有"单独调度它"这个入口 |
+| `auth-service` 邮箱登录/刷新作为可调度能力 | ✅ | ✅ **邮箱 session 那一半 2026-10-07 已实现**（`app_task/runners.rs` 的 `mail_session`，一次运行内复用）；「票」的刷新照旧走 CLI `auth refresh` | 缺口已补。⚠ P0-2 那条 `authTokenRefresh.do` 仍标「零抓包的旧 TS，刻意不实现」（`task-inventory.md:223`）—— 本次**没有**改那条口径（`113` 的 runner 里那句 `refreshToken()` 照旧不做 ✓）|
 | 推送 10 条渠道（pushplus / serverChan / workWeixin / workWeixinBot / tgBot / bark / twoIm / dingTalk / email / customPost）| ✅ `shared/src/push`，10 条都发得出去（email **仅 Node**，txiki 下只 warn）| ✅ 同名 10 条都有模型（`mcloud-core/src/push.rs:385-411`）、**9 条真发**（`mcloud-app/src/push.rs:935-966`）；**email 有配置项但刻意未实现** —— 返回 `ChannelOutcome::NotImplemented` 并记一条 warn（`push.rs:905-926`，理由：不引 SMTP 依赖）| **不是缺口，是"可观测的未实现"**：配了 email 会看见 warn，不会静默"以为发了"。⚠ 而且「运行结果推送」那一块与「功能开关」是**同一个开关挡住的**（`accounts-page.tsx:1600`）⇒ 十条渠道在界面上今天**一个都配不了**，只能走那条 PUT |
 
 **双方都不做**（TS 自己也标着"未实现/已过期"，不是本仓的账）：
@@ -84,12 +84,14 @@ TS 的形状是「runner 表 + `default:` 分支打卡」；本仓是「过三�
 | 522 上传 100 个 | runner：分批循环 | ✅ `{5, 100, pace}` 档 |
 | 434 分享文件 | runner：建并删外链 | ✅ `Step::Share`，且只在第 22 步打卡（`SPECIAL_CLICK_STEP`）|
 | `beiyong1` 分组 | `switch (task.groupid)` | ✅ 名字门 → `UPLOAD_ONE` |
-| 115 / 431 / 435 / 1009 / 1010 / 1013 / 1016 / 447 | **click-only**（框架自动打卡）| ✗ **不发卡**（不在 `planned` 里）|
-| 107 / 113 / 409 / 1005 / 472 / 473 / 1004 / 1014 / 1020 / 1028 / 585 / 587 | 12 个专用 runner | ✗ 全部没有 |
+| 115 / 431 / 435 / 1009 / 1010 / 1013 / 1016 / 447 | **click-only**（框架自动打卡）| ✅ **2026-10-07 已实现**（`Step::ClickOnly`；⚠ 与 runner 那几档**不同**：它**不看 `currstep`**，照旧 TS `default:` 分支 ✓）|
+| 107 / 113 / 409 / 1005 / 472 / 473 / 1004 / 1014 / 1020 / 1028 / 585 / 587 | 12 个专用 runner | ✅ **2026-10-07 全部接上**（`Step::Runner(AppRunner)` + `app_task/runners.rs`）：`107` 笔记、`472/473` 邮箱活跃、`1004` 发信、`1014` PDF、`1020` 备份、`1028/1057` AI 工作台、`585/618` AI 相机；`113/409/1005/587` 本仓早有 |
 | 117 / 437 / 991 / 406 / 385 / 480 / 1022 / 1018 / 603 / 1021 / 120 | TS 刻意跳过 | ✅ 同一串黑名单，逐字照抄 |
+| 481 / 478 | 收尾时补发 `clickTask(…, "randomCloudTask")` | ✅ **2026-10-07 已实现**（`settle_random_cloud_clicks`；⚠ 只在第一趟的表里真出现过 478/481 时才多拉一次整表 ✓）|
 
-⚠ 这一栏给的是"有没有"，不是"该不该"。`task/click` **不可回滚**，
-所以"要不要给 click-only 那批发卡"是一个需要用户点头的产品口径，不是可以顺手补的实现。
+⚠ 这一栏给的是"有没有"，不是"该不该"。`task/click` **不可回滚** ——
+click-only 那一批**本次已按用户 2026-10-07 的「完全实现」口径接上** ✓，
+黑名单（`SKIP_TASK_LIST` 那 11 个）照旧一道不少 ✓。
 （另外：`docs/task-inventory.md` 里那句"已接的有 106/107/…/587"**说的旧项目**，
 不是本仓 —— 已在那份文件里就地加了读法说明；它对应的差异登记在差异表 **D6**「`app` 登记成一条（刻意过渡）」。）
 
@@ -97,12 +99,17 @@ TS 的形状是「runner 表 + `default:` 分支打卡」；本仓是「过三�
 
 | 入口 | 走哪段代码 | 参数怎么给 | 能下单吗（`exchange`）|
 |---|---|---|---|
-| 兑换页「兑换」按钮 / 定时抢兑 | `POST /api/accounts/{id}/exchange`（`routes/exchange.rs:547-560`）| 页面表单 | ✅ **唯一**会注入 `deviceId` 的一条（取 `smid.device_id(...)`，注释明说"不是 `account.device_id`"）|
-| 任务页跑一条 / `POST /api/runs` | `routes/runs.rs::create` → `runner.run` | `params()` 声明的那几个字段 | ✗ 拿不到 `deviceId` ⇒ 如实 `device_id_failed`、**一枪不发** |
-| 定时任务 | `scheduler.rs:446` `runner.run(&sch.task, &acc, &sch.body)` | 排期里存的 JSON | ✗ 同上（除非 body 里手填 `deviceId`，而它是设备指纹换来的）|
-| 编排 / CLI `mcloud run … --body` | `pipeline.rs` / `cli/run.rs:154-161` | 步骤 body / `--body` JSON | CLI 手填 `deviceId` 才能发；不填就是安全阀那条结论 |
+| 兑换页「兑换」按钮 | `POST /api/accounts/{id}/exchange`（`routes/exchange.rs:547-560`）| 页面表单 | ✅ 会注入 `deviceId`（取 `smid.device_id(...)`，注释明说"不是 `account.device_id`"）|
+| 兑换页「定时」弹窗 | 它**只写一条排期**（`PUT /api/schedules/<id>`，body = `{prizeIdOrName, skipWait, offset}`）⇒ 之后走下面「定时任务」那一格 | 页面表单 | ✅ **2026-10-07 起**（见下面那条）|
+| 任务页跑一条 / `POST /api/runs` | `routes/runs.rs::create` → `runner.run` | `params()` 声明的那几个字段 | ✅ **2026-10-07 起**：body 里没有 `deviceId` ⇒ 任务壳回落到**本机 smid 库**（`ctx.store.get_smid_state`）取那一份 |
+| 定时任务 | `scheduler.rs` `runner.run(&sch.task, &acc, &sch.body)` | 排期里存的 JSON | ✅ 同上（**这是「定时抢兑」的主路径**，此前它一枪都发不出去）|
+| 编排 / CLI `mcloud run … --body` | `pipeline.rs` / `cli/run.rs` | 步骤 body / `--body` JSON | ✅ 同上；`--body` 里手填 `deviceId` 仍然**优先** |
 
-⇒ 判据是 `exchange.rs:1804-1817`：**`deviceId` 从请求体来，没有 ⇒ 一枪不发**（这是刻意的安全阀，不是 bug）。
+⇒ 判据是 `exchange.rs` 的 `body_device_id` / `smid_device_id`：**`body.deviceId` 优先，
+其次本机 smid 库；两处都没有 ⇒ 一枪不发**（安全阀，不是 bug；⚠ 刻意**不**回落
+`account.device_id` —— 那是登录时冒充 PC 客户端用的，H5 链校验内容，回 `614`）。
+⚠ 本仓**换不出新 id**（要指纹 + 随机源，都在 `mcloud-app`）：库里没有时先去兑换页点一次兑换。
+**2026-10-07 之前**后三格都是 `device_id_failed`、一枪不发 ⇒ 定时抢兑空转（本表这一版修的就是它）。
 其余 19 条任务不依赖注入点，四条入口都等价。
 
 ## 5. 验收情况
@@ -119,7 +126,7 @@ CLI 默认同一个 `data`，除非另设 `MCLOUD_DATA_DIR`）。⚠ 但记录**
 |---|---|
 | ✅ **真跑成功过** | `sign`（8 次，含"签到成功 +3 AI豆"多条，最近 10-03 09:11）· `receive`（1，"本轮领取完成，余额 8837"）· `revival`（2，**真用卡**：复活 81 / 114 豆）· `task-list`（2）· `prizes`（1，本页 0 条）· `app-task`（1，"做了 3 条 / 网盘新增 6 个文件，已移进回收站"）· **`exchange`（19 次，其中 1 次真兑成**：100万tokens叠加包 50 豆、余额 9236→9186 差值核对；失败面见过 5 类上游结论：非移动用户 ×7、2303 未备份 ×3、415 单日耗尽 ×3、610 GK ×2、阈值 0 而 skipped ×3）|
 | ◐ **跑过但只到"没做成"那一步** | `ai-avatar`（4 次**全**是"开关关着"⇒ 成功路径 0 次，§6-1 的实证）· `multiple`（5 次全 skipped：本月没开备份 / 机会已用掉）· `live-room`（4 次：2 次"今天没直播"/"在播的那间不是中国移动云盘"、1 次开关关 ⇒ **从没赶上目标直播间开播**）· `red-flower`（2 次都打到领取那一枪，但喂的是无效口令 `<值已抹去>` ⇒ 链路通、口令假）|
-| ✗ **本机历史里 0 条** | `backup-gift` · `msg-push` · `notice` · `fun-ai` · `play-ai-special` · `cloud-snapshot` · `cloud-phone-redpack` · `task-expansion` · `app-task-matrix` —— **9 条一次都没跑过**，只有 §5.2 那些单测背书 |
+| ✗ **本机历史里 0 条** | `backup-gift` · `msg-push` · `notice` · `fun-ai` · `play-ai-special` · `cloud-phone-redpack` · `task-expansion` —— **7 条一次都没跑过**（`app-task-matrix` 2026-10-07 已摘掉注册 ⇒ 不再是任务 ✓），只有 §5.2 那些单测背书 |
 
 ⚠ 引活体记录要带日期：`sign` 那 8 条里有 2 条写的是「**演练**完成」，而"演练档"在 2026-10-02 已被删掉
 （全仓只剩一句说明留在 `live_room/tests.rs:1477`）⇒ 那两条是**旧构建**留下的，不能当"今天这条路还一样"。
@@ -130,7 +137,7 @@ CLI 默认同一个 `data`，除非另设 `MCLOUD_DATA_DIR`）。⚠ 但记录**
 
 | 代价 | 任务 |
 |---|---|
-| **只读，验它不产生任何上游副作用** | `app-task-matrix`（拉那张矩阵表）· `cloud-snapshot`（读余额与签到进度）· `play-ai-special`（本仓这条本来就"只盘点不代做"）|
+| **只读，验它不产生任何上游副作用** | 「上游状态」页（拉那张矩阵表）· `play-ai-special`（本仓这条本来就"只盘点不代做"）|
 | 是"领"，失败只是少领一次 | `backup-gift` ⚠ 但 `receive` 那一族是 GET 却**会记账**，同族都要按"有账"看 |
 | 会**改账号的通知开关** | `notice`（开短信/邮箱通知）· `msg-push`（开 App 消息推送）|
 | 每天只有一发 | `fun-ai`（转盘抽奖）|
@@ -177,8 +184,8 @@ CLI 默认同一个 `data`，除非另设 `MCLOUD_DATA_DIR`）。⚠ 但记录**
 | 2 | 账号 → 打开某个账号的设置 | 找「功能开关」这一块 | **当前找不到**（`accounts-page.tsx:143` 那块不显示）⇒ 4 个开关在界面上无入口，只能用 `PUT /api/accounts/{id}/settings` 改 |
 | 3 | 直播 | 不填 `codes` 直接起一场 | 看它是否自己去抓小红书主页（§6-4 说代码里两源都做）；抓不到时页面怎么陈述 |
 | 4 | 兑换 | 点一件奖品的「兑换」并确认 | 真扣豆（**不可逆**，建议先看余额截图 → 兑 → 再看余额）；结果卡上有没有 `ordered`/`already-exchanged` 这类结论 |
-| 5 | 兑换 | 把「跳过等待」关掉、目标设在整点 | 任务自己等到整点才发枪（2026-10-03 review §1.1 修的就是这一条，需要真账号才能闭环）|
-| 6 | 任务 | 在任务页把 `exchange` 当普通任务跑 | 应当**不发单**、结论 `device_id_failed`（§4 那一格）|
+| 5 | 兑换 | 把「跳过等待」关掉、目标设在整点 | 任务自己等到整点才发枪；⚠ **2026-10-07 起取滑块 + 算 offset 也排在整点之前**（与 TS 的 `preheat` 同序，见 §4 末），整点之后只剩一发下单 |
+| 6 | 任务 | 在任务页把 `exchange` 当普通任务跑 | ⚠ **2026-10-07 起会真的下单**（本机 smid 库里有 `deviceId` 就发单；`skipWait` 缺省是"等"，非整点时会等到下一个整点）⇒ **别再把它当"不发单"的安全探针**。要看 `device_id_failed` 那条安全阀，得用一个**没换过 smid id** 的账号（`data/smid.json` 里没有它）|
 | 7 | 任务 | `app-task` 跑一趟 | 步骤里只应出现 106 / 522 / `beiyong1` / 434 这几档；矩阵里其他条目**不动**（§3）|
 | 8 | 定时 | 建一条 30 秒内的排期 | 到点真触发、日志页能看到进度；重启服务后 `run_count` 不被清零 |
 | 9 | 编排 | 建两步链，第一步故意失败 | 「失败继续 / 中止」两种配置表现不同；`preflight` 说人话 |
@@ -199,7 +206,7 @@ CLI 默认同一个 `data`，除非另设 `MCLOUD_DATA_DIR`）。⚠ 但记录**
    `live-room` 那 4 次里也有 1 次是"直播口令·开启为关"（§5.0）⇒ 不是推断，是已经踩到的形状。
 2. **`play-ai-special` 同名不同物**。TS 那条会**代做**活动任务；本仓的 `description` 自己写着
    「只盘点不代做：不做任务、不抽奖、不写网盘」（`play_ai.rs:212`）。⇒ 拿 TS 的清单核对时会误以为已对齐。
-3. **click-only 那 8 条不打卡**（§3）。界面上 `app-task-matrix` 看得到它们，`app-task` 却一条都不动。
+3. **click-only 那 8 条不打卡**（§3）。界面上「上游状态」页看得到它们，`app-task` 却一条都不动。
 4. **注释与实现相反的一处**：`live_room.rs:18` 与 `cli/run.rs:151` 都说"小红书那条口令没法自动获取、
    `codes` 是唯一入口"，但同文件 `:992-1015` 真的会 GET 小红书主页并提取口令，且与弹幕**同级并发**。
    两处出自同一个提交（`c4f7f00`）。⇒ 谁对？要靠一场真直播验（§5.3 第 3 条），别先改代码。

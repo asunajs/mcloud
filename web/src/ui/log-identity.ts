@@ -5,7 +5,7 @@
  *
  * 这一页的取数是"每拍把整份列表换掉"（`logs-page.tsx` 的 `load()` ✓），而
  * `lite` 的 `.map()` 编成 `createFor(list, render, key)`，`key` 判的是 item 的
- * **对象身份** ✓（`web/lite/compiler.ts` 的说明 ✓）。`/api/logs` 每拍回来的是
+ * **对象身份** ✓（`@asunajs/lite` 的 `compiler.ts` 的说明 ✓）。`/api/logs` 每拍回来的是
  * **刚 `JSON.parse` 出来的新对象** ⇒ 就算这一行**一个字都没变**，身份也变了 ⇒
  * 视口里那几十行每 2 s 被拆掉重建一次 ✗。
  *

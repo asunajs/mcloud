@@ -11,6 +11,8 @@ const T0: i64 = 1_767_225_600_000;
 
 fn schedule(expr: &str, last_fire_ms: Option<i64>) -> Schedule {
     Schedule {
+        push_rules: Vec::new(),
+        push_events: Vec::new(),
         id: ScheduleId::new("s1"),
         name: "测试".into(),
         task: "sign".into(),
@@ -19,6 +21,10 @@ fn schedule(expr: &str, last_fire_ms: Option<i64>) -> Schedule {
         timezone: "UTC".into(),
         body: serde_json::Value::Null,
         enabled: true,
+        // 测试里全是**手建**的定时 ⇒ 系统维护标记留空（系统维护的那条见
+        // `mcloud-app::live_auto` 的用例 ✓）。
+        managed_by: None,
+        managed_wanted: None,
         owner: None,
         last_fire_ms,
         last_run_ms: None,

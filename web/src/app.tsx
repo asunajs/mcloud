@@ -5,11 +5,11 @@
  * 这里只负责：导航状态、主题开关、后端自述、把页面塞进 `main` —— 不长内容。
  */
 
-import { createComponent, onMounted, onUnmounted, ref, watch } from 'lite'
+import { createComponent, onMounted, onUnmounted, ref, watch } from '@asunajs/lite'
 import { getCurrentSession, getStatus, logoutSession, type ServiceStatus } from './api'
 import { authState, currentUser, noteAuthOk, noteAuthRequired } from './ui/auth-signal'
 import { DOCK_IDS, NAV_ITEMS, navItem, parsePath, type PageId } from './ui/nav'
-import { navigate } from './ui/router'
+import { navigate, currentPath } from './ui/router'
 import { refreshNow } from './ui/page-refresh'
 import { IconBrand, IconClose, IconLogout, IconMenu, IconMoon, IconSun, IconRefresh } from './ui/icons'
 import { currentTheme, toggleTheme, type Theme } from './ui/theme'
@@ -71,13 +71,22 @@ const ROUTES: Record<PageId, (ctx: RouteCtx) => Promise<() => unknown>> = {
     const { PipelinesPage } = await import('./pages/pipelines-page')
     return () => createComponent(PipelinesPage, {})
   },
+  /**
+   * 「历史」页 = **历史 + 日志两个 tab**（2026-10-08 用户口径「合并这两个」✓）。
+   *
+   * ⚠ 两个 tab 的**地址不同**（`/history` / `/logs`），但 `parsePath` 把它们都归到
+   * 这一个 `PageId` ⇒ `page` 信号在两者之间**不变**，光靠它界面不会动 ✗。
+   * 所以容器自己去 `watch(ui/router.ts 的 currentPath)`（见 `HistoryLogsPage`）——
+   * **不要**在这里把 `currentPath` 读进页面槽：那会让槽订阅地址，于是"切去别的页"
+   * 时槽会先按旧 page 又建一份这一页（多跑一次 `/api/runs`）✗。
+   */
   history: async (ctx) => {
-    const { HistoryPage } = await import('./pages/history-page')
-    return () => createComponent(HistoryPage, { onGo: ctx.go })
+    const { HistoryLogsPage } = await import('./pages/history-logs-page')
+    return () => createComponent(HistoryLogsPage, { onGo: ctx.go })
   },
-  logs: async () => {
-    const { LogsPage } = await import('./pages/logs-page')
-    return () => createComponent(LogsPage, {})
+  push: async () => {
+    const { PushPage } = await import('./pages/push-page')
+    return () => createComponent(PushPage, {})
   },
   settings: async () => {
     const { SettingsPage } = await import('./pages/settings-page')
@@ -148,8 +157,17 @@ export default () => {
    *
    * ⚠ 名字从 `onHashChange` 改过来不是修辞：`pushState` 自己**不发**事件，
    * 所以 `navigate()` 里补发了一次 `popstate` —— 这条监听器就是**唯一**的切页入口。
+   *
+   * ⚠ 它也是 `ui/router.ts` 那个 `currentPath` 的**唯一写入点**（"一个导航项下多个 tab"
+   * 的页面靠它切 tab，见 `HistoryLogsPage`）✓。
+   *
+   * ⚠⚠ 两句的**顺序不能反**（先 `currentPath`、后 `page`）：
+   * 反过来的话，从别的页切到 `/logs` 时页面槽会先按**旧的**地址把「历史」tab 建出来
+   * （白跑一次 `/api/runs`），紧接着地址一变再换成日志 tab ✗。
+   * 先写 `currentPath` 则"新页一挂载读到的就是新地址"✓（此刻还没有谁订阅它）。
    */
   const onNavigate = () => {
+    currentPath.value = location.pathname
     page.value = parsePath(location.pathname)
     // 移动端点了导航就把抽屉收起来，否则内容被盖住
     drawerOpen.value = false
@@ -452,7 +470,7 @@ export default () => {
       // 这里**不需要** `key`：整个 `{authGate()}` 是一个动态槽，`authState` 一变就重跑，
       // 重跑就是 `createComponent(AuthPage, …)` **新建一个实例**（旧的连同它的 effect 一起 dispose）。
       // 本框架没有"虚拟 DOM 比一比再决定复不复用"那一步，所以也就没有"得靠 key 逼它换实例"。
-      // ⚠ 别把 key 加回来：编译器会直接抛错（`lite/compiler.ts` 的 `claimKey`）。
+      // ⚠ 别把 key 加回来：编译器会直接抛错（`@asunajs/lite` 的 `compiler.ts` 的 `claimKey`）。
       return <AuthPage mode="setup" />
     }
     if (authState.value === 'login') {
@@ -615,8 +633,6 @@ export default () => {
         </div>
       </div>
 
-      <ToastView />
-
       {/* 动作失败弹窗：全局唯一（各页面用 showError(...) 触发） */}
       <ErrorDialogHost />
 
@@ -637,6 +653,19 @@ export default () => {
       />
     </div>
       )}
+
+      {/*
+        ⚠⚠ `ToastView` 挂在**根上**，不在"已登录外壳"里面（2026-10-08 改）。
+        理由：登录 / 初始化页（`authGate()`）也走 `pushToast('error', …)` ——
+        挂在 `authState === 'ready'` 那支里的话，登录页的 toast **一条都不显示**，
+        而"不显示"和"没报错"在界面上长得一样 ✗（那正是最坏的一种静默）。
+        toast 自己是 `position: fixed` 的，挂在根上不影响任何一页的布局 ✓。
+
+        ⚠⚠ 代价：这一层**不是动态槽**，所以 `ToastView` 自己**不能**在组件体里
+        读 `toasts`（那样没有任何 effect 会重跑 ⇒ 一条都不显示 ✗，实测踩过）。
+        它现在常驻、把列表放在 JSX 的 `{}` 槽里 —— 理由写在 `ui/toast-view.tsx` 头部 ✓。
+      */}
+      <ToastView />
     </>
   )
 }

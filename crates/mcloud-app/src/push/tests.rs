@@ -481,7 +481,7 @@ fn local_time_hms_agrees_with_beijing_digits() {
 // ==================== c) onlyError ====================
 
 #[test]
-fn only_error_skips_when_no_error_type_entry() {
+fn only_error_skips_until_a_log_reaches_the_error_level() {
     let config: PushConfig = parse(r#"{"onlyError":true}"#);
     let logs = PushLogCollector::new();
     assert!(config.push_text(&logs).is_none(), "没有日志不推");
@@ -492,14 +492,18 @@ fn only_error_skips_when_no_error_type_entry() {
         "只有 info 时 onlyError 不推"
     );
 
+    // ⚠ 2026-10-08 用户口径：判据是**严重级别**，不是 `type` 恰好等于 `"error"` ——
+    // `fail` / `fatal` 与 `error` 同为 level 0 ⇒ 都算 ✓、都要推 ✓。
+    // （TS 的 `test-push-filter.ts` 有一条「onlyError: fail 不算 error」钉着旧口径，
+    //   那条会把最严重的两条吞掉 ✗ —— 本仓**故意不照抄** ✓。）
     logs.write("fail", "任务失败", 0);
     assert!(
-        config.push_text(&logs).is_none(),
-        "fail 不算 error（TS 的 test-push-filter.ts 钉过）"
+        config.push_text(&logs).is_some(),
+        "fail 也是最严重那一档 ⇒ onlyError 要推"
     );
 
     logs.write("error", "网络错误", 0);
-    assert!(config.push_text(&logs).is_some(), "有 error 才推");
+    assert!(config.push_text(&logs).is_some(), "有 error 当然推");
 }
 
 #[test]

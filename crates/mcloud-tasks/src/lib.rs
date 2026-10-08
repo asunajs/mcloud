@@ -55,9 +55,16 @@ pub use login::{
 ///
 /// 1. `device_id` 走**请求体**（路由那层调 `mcloud_app::smid::device_id` 取一个可用的 id，
 ///    库里有就不打网络）⇒ 链上包成一个常量 `DeviceIdFn`；
+///    ⚠ **2026-10-07 补第二档**：body 里没有时，任务壳回落到**本机 smid 库**
+///    （`ctx.store.get_smid_state`）—— 定时 / 编排 / 任务页那三条路没有路由层，
+///    在此之前它们在链上只会得到一句 `device_id_failed`、**一枪不发** ⇒「定时抢兑」
+///    这个主路径从来没走到过下单。两处都没有才仍是安全阀（**不**回落
+///    `account.device_id`：那一份是登录时冒充 PC 客户端用的，H5 链校验内容、回 `614`）；
 /// 2. `visitlog` **两枪**（`…_to_exchange` → `sleep(500ms)` → `…_exchange_times`），
 ///    顺序照 `mcloud-sign`；
 /// 3. 等待档与 TS 对齐：任务层缺省 `skipWait = false`（等到 **hh:59:40** 预热，
+///    ⚠ 2026-10-07 起**取滑块 + 算 offset 也排在整点等待之前** —— TS 的 `preheat`
+///    本来就含这一步，本仓此前排在等待之后 ⇒ 整点后还要再花 1~2 秒才发得出去；
 ///    再等到**整点 − 10ms** 发单）；而**用户点按钮那条路不等** —— 用户口径
 ///    「用户点按钮就不用等」，路由的缺省是 `true`。
 ///
@@ -76,8 +83,6 @@ pub fn register_all(registry: &mut Registry) -> Result<(), String> {
         Arc::new(signin::BackupGiftTask),
         Arc::new(signin::RevivalTask),
         Arc::new(signin::PrizesTask),
-        Arc::new(signin::CloudSnapshotTask),
-        Arc::new(signin::TaskListTask),
         Arc::new(live_room::LiveRoomTask::production()),
         // ⭐ `exchange` 2026-10-02 起**在这里**：三条缺口已补齐（deviceId 来源
         // 走请求体 / visitlog 预热两枪 / 等待档与 TS 对齐），用户点「兑换」
@@ -89,7 +94,6 @@ pub fn register_all(registry: &mut Registry) -> Result<(), String> {
         Arc::new(play_ai::PlayAiTask),
         Arc::new(ai_avatar::AiAvatarTask::production()),
         Arc::new(cloud_phone_redpack::CloudPhoneRedpackTask::production()),
-        Arc::new(app_task_matrix::AppTaskMatrixTask),
         Arc::new(app_task::AppTaskTask::new()),
         Arc::new(task_expansion::TaskExpansionTask::new()),
     ];

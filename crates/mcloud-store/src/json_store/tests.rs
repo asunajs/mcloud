@@ -366,6 +366,8 @@ async fn schedules_crud() {
     let d = tmpdir("sched");
     let s = JsonStore::open(&d).unwrap();
     let sch = Schedule {
+        push_rules: Vec::new(),
+        push_events: Vec::new(),
         id: ScheduleId::new("s1"),
         name: "每天签到".into(),
         task: "sign".into(),
@@ -374,6 +376,10 @@ async fn schedules_crud() {
         timezone: "Asia/Shanghai".into(),
         body: serde_json::Value::Null,
         enabled: true,
+        // 这些用例造的都是**手建**的定时 ⇒ 系统维护标记留空 ✓
+        //（带标记的那条见 `mcloud-app::live_auto` 的用例 ✓）。
+        managed_by: None,
+        managed_wanted: None,
         owner: None,
         last_fire_ms: None,
         last_run_ms: None,
@@ -396,6 +402,8 @@ async fn pipelines_crud() {
     let d = tmpdir("pipe");
     let s = JsonStore::open(&d).unwrap();
     let p = Pipeline {
+        push_rules: Vec::new(),
+        push_events: Vec::new(),
         id: PipelineId::new("p1"),
         name: "早班".into(),
         accounts: vec![],
@@ -471,6 +479,8 @@ async fn mark_schedule_fired_only_touches_watermark_and_count() {
     let d = tmpdir("narrow-fire");
     let s = JsonStore::open(&d).unwrap();
     let mut sch = Schedule {
+        push_rules: Vec::new(),
+        push_events: Vec::new(),
         id: ScheduleId::new("s1"),
         name: "原名".into(),
         task: "sign".into(),
@@ -479,6 +489,10 @@ async fn mark_schedule_fired_only_touches_watermark_and_count() {
         timezone: "Asia/Shanghai".into(),
         body: serde_json::Value::Null,
         enabled: true,
+        // 这些用例造的都是**手建**的定时 ⇒ 系统维护标记留空 ✓
+        //（带标记的那条见 `mcloud-app::live_auto` 的用例 ✓）。
+        managed_by: None,
+        managed_wanted: None,
         owner: None,
         last_fire_ms: None,
         last_run_ms: None,
@@ -512,6 +526,8 @@ async fn record_schedule_run_has_asymmetric_none_semantics() {
     let d = tmpdir("narrow-record");
     let s = JsonStore::open(&d).unwrap();
     s.save_schedule(&Schedule {
+        push_rules: Vec::new(),
+        push_events: Vec::new(),
         id: ScheduleId::new("s1"),
         name: "x".into(),
         task: "sign".into(),
@@ -520,6 +536,10 @@ async fn record_schedule_run_has_asymmetric_none_semantics() {
         timezone: "Asia/Shanghai".into(),
         body: serde_json::Value::Null,
         enabled: true,
+        // 这些用例造的都是**手建**的定时 ⇒ 系统维护标记留空 ✓
+        //（带标记的那条见 `mcloud-app::live_auto` 的用例 ✓）。
+        managed_by: None,
+        managed_wanted: None,
         owner: None,
         last_fire_ms: Some(1),
         last_run_ms: None,
@@ -586,6 +606,8 @@ async fn mark_pipeline_ran_only_touches_run_time() {
     let s = JsonStore::open(&d).unwrap();
     use mcloud_core::{AccountMode, PipelineStep};
     let p = Pipeline {
+        push_rules: Vec::new(),
+        push_events: Vec::new(),
         id: PipelineId::new("p1"),
         name: "原编排".into(),
         accounts: vec![],
@@ -715,6 +737,9 @@ async fn tightening_is_idempotent() {
 /// ⚠ 2026-10-04 复审 `co-3` 又补了四个（`settings` / `task-config` /
 /// `kouling-pool` / `exchange-subscriptions`）：上面那句"覆盖**所有会落盘的表**"
 /// 在那之前是不成立的，而 `settings.json` 里正是登录口令哈希。
+///
+/// ⚠ 2026-10-08 推翻重做推送时又补了两个（`push-panel` / `push-throttle`）——
+/// 同时 `push-config.json` 那一格随文件一起删了 ✓（它不再是任何表的落点 ✓）。
 #[cfg(unix)]
 #[tokio::test]
 async fn legacy_loose_credentials_and_sessions_are_tightened_on_open() {
@@ -723,7 +748,7 @@ async fn legacy_loose_credentials_and_sessions_are_tightened_on_open() {
     let d = tmpdir("perm-legacy-secrets");
     std::fs::create_dir_all(&d).unwrap();
     // 内容必须**能解析**，否则 `JsonStore::open` 会在 load_all 那一步先报错。
-    let secrets: [(&str, &str); 8] = [
+    let secrets: [(&str, &str); 11] = [
         (files::USERS, "[]"),
         (files::SESSIONS, "{}"),
         (files::SMID, "{}"),
@@ -733,6 +758,15 @@ async fn legacy_loose_credentials_and_sessions_are_tightened_on_open() {
         (files::TASK_CONFIG, "{}"),
         (files::KOULING_POOL, "{}"),
         (files::EXCHANGE_SUBSCRIPTIONS, "{}"),
+        // ⚠ 2026-10-08 推翻重做补的两个：面板绑定（指向带 token 的规则 ✓）
+        // 与节流状态（谁在什么时候被叫醒过 ✓）。**新文件必须一起进清单** ——
+        // 漏掉就是老目录升级后仍对同机其他用户可读 ✗。
+        (files::PUSH_PANEL, "{}"),
+        (files::PUSH_THROTTLE, "{}"),
+        // ⚠ 2026-10-08 接登录触发线时补的第三个：它记着"这个账号从哪台设备/
+        // 哪个地点登进来过"（`UA|peer IP` ✓）—— 同样是"这个账号怎么活动的"，
+        // 与节流状态同一条口径 ⇒ 必须也在清单里 ✓。
+        (files::LOGIN_DEVICES, "{}"),
     ];
     for (name, body) in secrets {
         let p = d.join(name);
@@ -1361,6 +1395,8 @@ fn owned_account(phone: &str, owner: Option<&str>) -> Account {
 
 fn owned_schedule(id: &str, owner: Option<&str>) -> Schedule {
     Schedule {
+        push_rules: Vec::new(),
+        push_events: Vec::new(),
         id: ScheduleId::new(id),
         name: format!("sch-{id}"),
         task: "sign".into(),
@@ -1369,6 +1405,8 @@ fn owned_schedule(id: &str, owner: Option<&str>) -> Schedule {
         timezone: "Asia/Shanghai".into(),
         body: serde_json::Value::Null,
         enabled: true,
+        managed_by: None,
+        managed_wanted: None,
         owner: owner.map(UserId::new),
         last_fire_ms: None,
         last_run_ms: None,
@@ -1381,6 +1419,8 @@ fn owned_schedule(id: &str, owner: Option<&str>) -> Schedule {
 fn owned_pipeline(id: &str, owner: Option<&str>) -> Pipeline {
     use mcloud_core::{AccountMode, PipelineStep};
     Pipeline {
+        push_rules: Vec::new(),
+        push_events: Vec::new(),
         id: PipelineId::new(id),
         name: format!("pipe-{id}"),
         accounts: vec![],
@@ -1750,10 +1790,401 @@ async fn exchange_subscriptions_are_ordered_and_reject_duplicates() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+// ── 推送规则（用户口径 2026-10-07：按 owner 分表 + 落盘）──────────────────
+
+fn rule(id: &str, owner: Option<&str>) -> mcloud_core::PushRule {
+    let mut r = mcloud_core::PushRule::new_default(id, owner.map(UserId::new));
+    r.name = format!("规则 {id}");
+    r
+}
+
+/// 写进去 → **重开** → 读回来，而且**按 owner 分表**。
+///
+/// ⚠ 为什么这条非有不可：文件名（`push-rules.json`）与键名（owner id）都是在
+/// 这一层定的 —— 写错一个字母，功能在界面上就是"点了没反应"，而**编译期一点
+/// 提示都没有** ✗（与兑换订阅那条同一个理由 ✓）。这条测试就是那份提示 ✓。
+#[tokio::test]
+async fn push_rules_are_per_owner_and_round_trip() {
+    let d = tmpdir("push-rules");
+    let a = UserId::new("user-a");
+    let b = UserId::new("user-b");
+    let r1 = mcloud_core::push::PushRuleId::new("r1");
+    let r2 = mcloud_core::push::PushRuleId::new("r2");
+    {
+        let s = JsonStore::open(&d).unwrap();
+        // 没建过 ⇒ **空列表**（不是错误），与 `exchange_subscriptions()` 同一口径 ✓
+        assert!(s.push_rules(&a).await.unwrap().is_empty());
+        assert!(s.push_rule(&a, &r1).await.unwrap().is_none());
+
+        s.save_push_rule(&a, &rule("r1", Some("user-a")))
+            .await
+            .unwrap();
+        s.save_push_rule(&a, &rule("r2", Some("user-a")))
+            .await
+            .unwrap();
+        // 同一个 id 再存 = **原地替换**，不是新增一条
+        let mut renamed = rule("r1", Some("user-a"));
+        renamed.name = "改过名的规则".into();
+        s.save_push_rule(&a, &renamed).await.unwrap();
+        assert_eq!(s.push_rules(&a).await.unwrap().len(), 2, "覆盖不该多出一条");
+        assert_eq!(
+            s.push_rule(&a, &r1).await.unwrap().unwrap().name,
+            "改过名的规则"
+        );
+    }
+
+    let s2 = JsonStore::open(&d).unwrap();
+    let got = s2.push_rules(&a).await.unwrap();
+    assert_eq!(got.len(), 2, "重启后两条都还在");
+    assert_eq!(got[0].id.as_str(), "r1", "覆盖要保位置（界面顺序不该跳）");
+    assert_eq!(got[0].name, "改过名的规则");
+    // **分表**：换个人登录读不到别人的规则 ✓
+    assert!(
+        s2.push_rules(&b).await.unwrap().is_empty(),
+        "规则是某个人自己配的，不是实例级资源（与口令池相反）"
+    );
+    // `all_push_rules` 把 map 的所有值摊平 —— **事件匹配那一层没有"当前用户"** ✓
+    let all = s2.all_push_rules().await.unwrap();
+    assert_eq!(all.len(), 2);
+    assert!(all.iter().all(|r| r.owner == Some(a.clone())));
+
+    // 删一条：另一条还在
+    s2.remove_push_rule(&a, &r1).await.unwrap();
+    assert_eq!(s2.push_rules(&a).await.unwrap().len(), 1);
+    // 删光 ⇒ 那一格**删掉**（文件里不留空数组），读回来仍是空列表 ✓
+    s2.remove_push_rule(&a, &r2).await.unwrap();
+    let s3 = JsonStore::open(&d).unwrap();
+    assert!(s3.push_rules(&a).await.unwrap().is_empty());
+    let raw = std::fs::read_to_string(d.join("push-rules.json")).unwrap();
+    assert!(!raw.contains("user-a"), "全删后不该留空数组：{raw}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 造一条**自带 token** 的规则（用户口径：「这个规则配置推送的 token」✓）。
+fn rule_with_token(id: &str, token: &str) -> mcloud_core::PushRule {
+    let mut r = mcloud_core::PushRule::new_default(id, Some(UserId::new("user-a")));
+    r.config = serde_json::from_str(&format!(r#"{{"serverChan":{{"token":"{token}"}}}}"#)).unwrap();
+    r
+}
+
+/// ⭐ 每条规则**自带凭据** ⇒ 换一条规则的 token **只影响它自己** ✓（§6 验收第 1 条）。
+///
+/// 这一层能证明的是"落盘之后仍然各是各的" ✓ —— 而"发的时候只用自己那份"在
+/// `mcloud-app::notify` 的测试里钉 ✓（那边才是投递 ✓）。两条缺一不可：
+/// 只钉投递的话，"存的时候把 token 串了"照样漏网 ✗。
+#[tokio::test]
+async fn each_rule_keeps_its_own_credentials() {
+    let d = tmpdir("push-rules-config");
+    let a = UserId::new("user-a");
+    {
+        let s = JsonStore::open(&d).unwrap();
+        s.save_push_rule(&a, &rule_with_token("r1", "TOKEN-1"))
+            .await
+            .unwrap();
+        s.save_push_rule(&a, &rule_with_token("r2", "TOKEN-2"))
+            .await
+            .unwrap();
+    }
+
+    let s = JsonStore::open(&d).unwrap();
+    let r1 = s
+        .push_rule(&a, &mcloud_core::push::PushRuleId::new("r1"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(r1.config.server_chan.as_ref().unwrap().token, "TOKEN-1");
+
+    // 改 r1 的 token ⇒ r2 一格都不动 ✓（"改一条影响一片"正是老模型的问题 ✗）
+    let mut edited = r1.clone();
+    edited.config.server_chan.as_mut().unwrap().token = "TOKEN-1-NEW".into();
+    s.save_push_rule(&a, &edited).await.unwrap();
+    let r2 = s
+        .push_rule(&a, &mcloud_core::push::PushRuleId::new("r2"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(r2.config.server_chan.as_ref().unwrap().token, "TOKEN-2");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// ⭐ 面板绑定与节流状态：**按 owner 分表**、能重开读回，节流状态**重启不能忘** ✓。
+#[tokio::test]
+async fn panel_bindings_and_throttle_state_round_trip_per_owner() {
+    let d = tmpdir("push-panel");
+    let a = UserId::new("user-a");
+    let b = UserId::new("user-b");
+    {
+        let s = JsonStore::open(&d).unwrap();
+        // 没配过 ⇒ **默认那份**（不绑规则 + 保守节流 ✓），不是错误 ✓
+        let fresh = s.push_panel(&a).await.unwrap();
+        assert!(fresh.perf_slow.rules.is_empty());
+        assert_eq!(
+            fresh.perf_slow.throttle.mode,
+            mcloud_core::ThrottleMode::OnChange
+        );
+        assert_eq!(
+            fresh.login_new.throttle.mode,
+            mcloud_core::ThrottleMode::Every
+        );
+
+        let mut panel = mcloud_core::PanelBindings::default();
+        panel.perf_slow.rules = vec![
+            mcloud_core::push::PushRuleId::new("r1"),
+            mcloud_core::push::PushRuleId::new("r2"),
+        ];
+        panel.perf_slow.throttle.cooldown_secs = 60;
+        panel.perf_slow.throttle.daily_cap = 3;
+        s.save_push_panel(&a, &panel).await.unwrap();
+
+        let mut throttle = mcloud_core::ThrottleState::default();
+        throttle.set(
+            mcloud_core::BehaviorKey::PerfSlow,
+            mcloud_core::BehaviorState {
+                last_sent_ms: Some(1_700_000_000_000),
+                day: Some(19_675),
+                sent_today: 2,
+                throttled_today: 5,
+                last_status: Some(mcloud_core::BehaviorStatus::Abnormal),
+            },
+        );
+        s.save_push_throttle(&a, &throttle).await.unwrap();
+    }
+
+    let s = JsonStore::open(&d).unwrap();
+    let panel = s.push_panel(&a).await.unwrap();
+    assert_eq!(panel.perf_slow.rules.len(), 2, "一个行为可以选**多条**规则");
+    assert_eq!(panel.perf_slow.throttle.cooldown_secs, 60);
+    assert_eq!(panel.perf_slow.throttle.daily_cap, 3);
+
+    // ⭐ 重启不能忘（否则重启即再来一轮风暴 ✗）
+    let perf = s
+        .push_throttle(&a)
+        .await
+        .unwrap()
+        .get(mcloud_core::BehaviorKey::PerfSlow);
+    assert_eq!(perf.last_sent_ms, Some(1_700_000_000_000));
+    assert_eq!(perf.sent_today, 2);
+    assert_eq!(perf.throttled_today, 5, "「今天已节流 N 次」的留痕要活着");
+    assert_eq!(
+        perf.last_status,
+        Some(mcloud_core::BehaviorStatus::Abnormal)
+    );
+
+    // **分表**：换个人登录拿到的是默认那份 ✓
+    assert!(s.push_panel(&b).await.unwrap().perf_slow.rules.is_empty());
+    assert_eq!(
+        s.push_throttle(&b)
+            .await
+            .unwrap()
+            .get(mcloud_core::BehaviorKey::PerfSlow)
+            .sent_today,
+        0
+    );
+
+    // 全空的状态 ⇒ 那一格删掉（文件里不留空对象 ✓，读回来仍是默认 ✓）
+    s.save_push_throttle(&a, &mcloud_core::ThrottleState::default())
+        .await
+        .unwrap();
+    let raw = std::fs::read_to_string(d.join("push-throttle.json")).unwrap();
+    assert!(!raw.contains("user-a"), "全空后不该留一格：{raw}");
+    assert_eq!(
+        s.push_throttle(&a)
+            .await
+            .unwrap()
+            .get(mcloud_core::BehaviorKey::PerfSlow)
+            .sent_today,
+        0
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// ⭐ 两个新落盘文件**新写时也是 0600**（里面有 token / 状态 ✓）。
+#[cfg(unix)]
+#[tokio::test]
+async fn push_panel_and_throttle_are_created_with_0600() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let d = tmpdir("perm-push-panel");
+    let a = UserId::new("user-a");
+    let s = JsonStore::open(&d).unwrap();
+    let mut panel = mcloud_core::PanelBindings::default();
+    panel.login_failed.rules = vec![mcloud_core::push::PushRuleId::new("r1")];
+    s.save_push_panel(&a, &panel).await.unwrap();
+    let mut throttle = mcloud_core::ThrottleState::default();
+    throttle.set(
+        mcloud_core::BehaviorKey::LoginFailed,
+        mcloud_core::BehaviorState {
+            last_sent_ms: Some(1),
+            ..Default::default()
+        },
+    );
+    s.save_push_throttle(&a, &throttle).await.unwrap();
+
+    for name in [files::PUSH_PANEL, files::PUSH_THROTTLE] {
+        let mode = std::fs::metadata(d.join(name))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "{name} 创建时就必须是 0600，实际 {mode:o}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// ⭐ 「见过的登录设备」（`remember_login_device` ✓，2026-10-08 接 `loginNew` 时新增）。
+///
+/// 钉四件事：
+/// * **第一次见**回 `true`（= 该报"新设备" ✓）、**第二次见**回 `false` ✓；
+/// * **分表**：同一个判据串在别人名下仍是"第一次见" ✓（判据是"账号 + 设备" ✓）；
+/// * **落盘且读得回来**（重启之后同一台设备不再算新 ✓ —— 只放内存的话
+///   每次重启都报一轮"新设备" ✗）；
+/// * **有上限**：超出 `LOGIN_DEVICES_PER_OWNER` 丢最旧的 ✓（判据串里带 peer IP
+///   ⇒ 每换一个网络就是一条，没上限就是只涨不跌 ✗）。
+#[tokio::test]
+async fn login_devices_are_per_owner_persisted_and_capped() {
+    let d = tmpdir("login-devices");
+    let a = UserId::new("user-a");
+    let b = UserId::new("user-b");
+
+    {
+        let s = JsonStore::open(&d).unwrap();
+        assert!(
+            s.remember_login_device(&a, "UA-1|10.0.0.1").await.unwrap(),
+            "第一次见必须回 true（否则 loginNew 永远不触发 ✗）"
+        );
+        assert!(
+            !s.remember_login_device(&a, "UA-1|10.0.0.1").await.unwrap(),
+            "同一台设备第二次登录**不是**新设备"
+        );
+        assert!(
+            s.remember_login_device(&a, "UA-2|10.0.0.1").await.unwrap(),
+            "换一台设备（UA 变了）算新设备"
+        );
+        // 分表：同样的串在别人名下是第一次见 ✓
+        assert!(s.remember_login_device(&b, "UA-1|10.0.0.1").await.unwrap());
+
+        // 撑过上限：灌 30 条，只留最近 20 条 ✓
+        for i in 0..30 {
+            s.remember_login_device(&a, &format!("flood-{i}|10.0.0.9"))
+                .await
+                .unwrap();
+        }
+    }
+
+    // 重新打开 = 重启：落盘那份还在 ✓
+    let s = JsonStore::open(&d).unwrap();
+    assert!(
+        !s.remember_login_device(&a, "flood-29|10.0.0.9")
+            .await
+            .unwrap(),
+        "重启之后最近见过的设备不该又变成新的（只放内存就会这样 ✗）"
+    );
+    assert!(
+        s.remember_login_device(&a, "UA-1|10.0.0.1").await.unwrap(),
+        "被上限挤掉的最旧那条，回来时**就该**算新设备 ✓（这是刻意的语义）"
+    );
+
+    let raw = std::fs::read_to_string(d.join(files::LOGIN_DEVICES)).unwrap();
+    let map: std::collections::HashMap<String, Vec<String>> = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        map.get("user-a").map(Vec::len),
+        Some(LOGIN_DEVICES_PER_OWNER),
+        "每个 owner 最多留 {LOGIN_DEVICES_PER_OWNER} 条：{raw}"
+    );
+    assert!(
+        !raw.contains("flood-0|"),
+        "最旧的那条该被挤掉（无界增长迟早是负担 ✗）：{raw}"
+    );
+    assert!(raw.contains("flood-29|"), "最新的那条要在：{raw}");
+    assert_eq!(map.get("user-b").map(Vec::len), Some(1), "分表：{raw}");
+
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// ⭐ 旧形状的推送文件**删掉即可** ⇒ 启动不报错 ✓（§6 验收第 6 条）。
+///
+/// 两个场景都要能起来 ✓：
+/// ① 目录里躺着**旧形状**的 `push-rules.json` / `push-config.json`；
+/// ② 目录里**压根没有**这两个文件（新装 / 清空过 ✓）。
+#[tokio::test]
+async fn legacy_push_files_are_purged_and_startup_survives() {
+    let d = tmpdir("push-legacy-purge");
+    std::fs::create_dir_all(&d).unwrap();
+    // ① 旧形状的规则：只有 events/channels、**没有 config** ✓ ——
+    //    新形状读它一定报错，所以必须在 `load_all` **之前**删掉 ✓。
+    std::fs::write(
+        d.join("push-rules.json"),
+        r#"{"user-a":[{"id":"r1","name":"旧规则","events":["runFailed"],"channels":["serverChan"],"digest":"perRun","slowFactor":3.0,"failStreak":3,"enabled":true,"owner":"user-a"}]}"#,
+    )
+    .unwrap();
+    // `write_atomic` 覆盖前留的那份也一起清 ✓
+    std::fs::write(d.join("push-rules.bak"), "{}").unwrap();
+    // ② 用户级渠道配置那一层（**整个不存在了** ✓，而且里面是 token ✓）
+    std::fs::write(
+        d.join("push-config.json"),
+        r#"{"user-a":{"serverChan":{"token":"SCT"}}}"#,
+    )
+    .unwrap();
+
+    let s = JsonStore::open(&d).unwrap();
+    assert!(
+        !d.join("push-rules.json").exists(),
+        "旧形状的规则文件必须删掉（否则 load_all 整份报错、启动失败）"
+    );
+    assert!(!d.join("push-rules.bak").exists(), ".bak 也要一起清");
+    assert!(
+        !d.join("push-config.json").exists(),
+        "用户级渠道配置那一层已经不存在了，文件不该留着"
+    );
+    assert!(s
+        .push_rules(&UserId::new("user-a"))
+        .await
+        .unwrap()
+        .is_empty());
+
+    // ② 缺文件的场景：新目录照样起得来 ✓
+    let empty = tmpdir("push-legacy-absent");
+    let s2 = JsonStore::open(&empty).unwrap();
+    assert!(s2.all_push_rules().await.unwrap().is_empty());
+    assert!(s2
+        .push_panel(&UserId::new("user-a"))
+        .await
+        .unwrap()
+        .login_new
+        .rules
+        .is_empty());
+
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&empty);
+}
+
+/// ⚠ 清理**只认旧形状**：新形状的规则文件**不能**在启动时被删掉 ✓
+/// （否则规则表就成了"写进去、重启就没了" ✗ —— 那与"按 owner 分表落盘"矛盾 ✓）。
+#[tokio::test]
+async fn new_shape_push_rules_survive_a_restart() {
+    let d = tmpdir("push-purge-keeps-new");
+    let a = UserId::new("user-a");
+    {
+        let s = JsonStore::open(&d).unwrap();
+        s.save_push_rule(&a, &rule_with_token("r1", "TOKEN-1"))
+            .await
+            .unwrap();
+    }
+    let s = JsonStore::open(&d).unwrap();
+    assert_eq!(
+        s.push_rules(&a).await.unwrap().len(),
+        1,
+        "新形状的文件必须活着（清理只针对旧形状）"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 // ── 定时水位线的两种口径（2026-10-03 review §1.7）──────────────────────
 
 fn schedule(id: &str) -> Schedule {
     Schedule {
+        push_rules: Vec::new(),
+        push_events: Vec::new(),
         id: ScheduleId::new(id),
         name: "签到".into(),
         task: "sign".into(),
@@ -1762,6 +2193,10 @@ fn schedule(id: &str) -> Schedule {
         timezone: "Asia/Shanghai".into(),
         body: serde_json::Value::Null,
         enabled: true,
+        // 这些用例造的都是**手建**的定时 ⇒ 系统维护标记留空 ✓
+        //（带标记的那条见 `mcloud-app::live_auto` 的用例 ✓）。
+        managed_by: None,
+        managed_wanted: None,
         owner: None,
         last_fire_ms: None,
         last_run_ms: None,

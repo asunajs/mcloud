@@ -220,9 +220,17 @@ impl PipelineRunner {
                 }
                 // 把链令牌传下去：这样"中止整条链"能传到每一步内部，
                 // 而不是只在本层不再发起新步骤
+                // ⭐ 发起方带下去（`pipeline:<id>` ✓）：推送规则绑在**编排**上时，
+                // 每一步的投递都靠它认领（见 `RunEvent::Started.origin` ✓）。
                 let record = self
                     .runner
-                    .run_with_chain_cancel(&step.task, acc, &step.body, cancel.clone())
+                    .run_full(
+                        &step.task,
+                        acc,
+                        &step.body,
+                        cancel.clone(),
+                        Some(format!("pipeline:{}", pipeline.id)),
+                    )
                     .await?;
                 let blocked = record.run_id.get() == 0;
                 runs.push(StepRun {
@@ -306,6 +314,8 @@ pub fn ensure_supported_account_mode(mode: AccountMode) -> Result<()> {
 /// 便捷：从单个步骤构造一次性编排（供"只跑一步"的场景）。
 pub fn single_step_pipeline(id: impl Into<String>, step: PipelineStep) -> Pipeline {
     Pipeline {
+        push_rules: Vec::new(),
+        push_events: Vec::new(),
         id: mcloud_core::PipelineId::new(id),
         name: "单步".into(),
         accounts: Vec::new(),

@@ -1,9 +1,15 @@
-//! 签到族（P1 八条）：共用**一条会话**的一批能力。
+//! 签到族（P1 六条）：共用**一条会话**的一批能力。
 //!
-//! # 为什么这八条一起做
+//! ⚠ 2026-10-07 一天里摘掉两条**只读**的（用户口径）：`cloud-snapshot`
+//! （「AI豆快照」）与 `task-list`（「这个不是说没用吗」）—— 它们只读、什么都不做，
+//! 而读的那些数**本来就在同一发 `infoV3` 里** ⇒ 现在跟着「上游状态」页
+//! （`/accounts/upstream` 的签到历史那一格）按需出来 ✓。剩下的六条都是**写**的
+//! （签到 / 领取 / 翻倍 / 备份好礼 / 复活 / 奖品）⇒ 仍然各占一条任务 ✓。
+//!
+//! # 为什么这几条一起做
 //!
 //! `sign` → `receive` → `multiple` → `backup-gift` → `revival` → `prizes`
-//! → `cloud-snapshot` → `task-list` 全部打的是**同一个 H5 页面**
+//! 全部打的是**同一个 H5 页面**
 //! （`newsignin`），用的是**同一条 jwttoken 会话**。打通一条，其余是加请求。
 //!
 //! 参考实现里这就是一层装配（`run_dispatch_signin.go`）—— 本模块对应它。
@@ -25,7 +31,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use mcloud_core::{HttpRequest, Result, TaskOutcome};
+use mcloud_core::{Account, HttpClient, HttpRequest, Result, Store, TaskOutcome};
 use mcloud_engine::{ParamSpec, Task, TaskContext, TaskGroup, TaskResult};
 use mcloud_upstream::app_signin as proto;
 use mcloud_upstream::app_signin::{SignInEnvelope, SignInStatus};
@@ -107,13 +113,43 @@ fn pick_device_id(body: Option<&str>, smid: Option<&str>, account: &str) -> Opti
 /// 查签到状态（**权威判据**）。
 pub async fn query_status(ctx: &TaskContext) -> Result<SignInStatus> {
     let device_id = h5_device_id(ctx, None).await;
-    let env = call(
-        ctx,
-        proto::info_v3_request(device_id.as_deref()),
-        "查询签到状态",
-    )
-    .await?;
-    proto::parse_status(&env)
+    read_status(ctx.http.as_ref(), device_id.as_deref()).await
+}
+
+/// 查签到状态（**只读、只收 http**）。
+///
+/// ⚠ 单独开这一口是为了**服务器那条按需取数的路**（`routes/upstream.rs`）——
+/// 那边没有 [`TaskContext`]（不落运行历史、不过并发闸 ✓）。
+/// 任务侧 [`query_status`] 转调它 ⇒ 两条路**同一发请求、同一份解析** ✓。
+///
+/// ⚠ `device_id` 由调用方给：服务器那边要自己从 `store.get_smid_state` 里挑
+///（[`h5_device_id_for`] ✓）—— **别拿 `Account::device_id` 顶替**，那不是同一个东西
+///（理由见 [`h5_device_id`] 的文档 ✓）。
+pub async fn read_status(http: &dyn HttpClient, device_id: Option<&str>) -> Result<SignInStatus> {
+    let req = proto::info_v3_request(device_id);
+    let resp = http.request(req).await?;
+    let body = mcloud_upstream::session::ensure_http_ok(&resp, "查询签到状态")?;
+    proto::parse_status(&SignInEnvelope::parse(body)?)
+}
+
+/// 服务器那条按需取数的路用：从 store 里那份 smid 状态 + 账号兜底，挑出该带的 `deviceId`。
+///
+/// ⚠ 与 [`h5_device_id`] **同一套选择逻辑**（都走 `pick_device_id` ✓）——
+/// 差的只是"没有 `TaskContext` 可以告警"：那边读 store 失败会 `ctx.warn`，
+/// 这边读失败就静默回落到登录时那份 ✓（只读查询不吃这一档，不值得为它加一条日志）。
+pub async fn h5_device_id_for(
+    store: &dyn Store,
+    account: &Account,
+    body: Option<&Value>,
+) -> Option<String> {
+    let body_id = body.and_then(|b| b.get("deviceId")).and_then(Value::as_str);
+    let smid = store
+        .get_smid_state(&account.id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|st| st.device_id);
+    pick_device_id(body_id, smid.as_deref(), account.device_id.as_str())
 }
 
 /// 把状态里"今天签没签"说成一句人话（供多个任务复用）。
@@ -550,6 +586,22 @@ impl Task for RevivalTask {
             )));
         }
 
+        // ⭐ 第二种"没得领"：**上一年没有云朵可复活**。
+        //
+        // 2026-10-08 真账号实拍（用户截图）：`移动` 报
+        // 「上游错误 [500]：领取复活奖励：**2025年无云朵记录**」✓，
+        // 而同趟另外两个号是"本月已领取"⇒ 跳过 ✓。
+        //
+        // 复活卡复活的是**上一年失效的AI豆** ✓，这个号上一年压根没有云朵 ⇒
+        // **没有东西可复活** ✓。理由与上面那条**逐字相同** ✓：判成失败 =
+        // 历史页每天一条红 + `onlyError` 推送，而它**永远不会自己好** ✗。
+        if proto::revival_nothing_to_revive(&env) {
+            return Ok(TaskOutcome::skipped(format!(
+                "没有可复活的记录（上游：{}）",
+                env.message
+            )));
+        }
+
         let r = proto::parse_revival_reward(&env)?;
         let card = if r.card_type == 1 {
             "复活卡"
@@ -663,6 +715,17 @@ impl Task for BackupGiftTask {
 ///
 /// 分页判据与流水那条**不同**：H5 逐字写的是 `records.length < pageSize`
 /// ⇒ 到底了，它**不读 `total`**。
+/// 查奖品记录（**只读、只收 http**，只查第一页 ✓）。
+///
+/// ⚠ 与 [`read_status`] 同一条理由：服务器那条按需取数的路没有 [`TaskContext`] ✓。
+/// 「待领取」页签是 `type=1`，市场名用签到页那一个 ✓。
+pub async fn read_prizes(http: &dyn HttpClient) -> Result<Vec<proto::PrizeRecord>> {
+    let req = proto::prize_record_request(proto::MARKET_NAME, 1, 1, 10);
+    let resp = http.request(req).await?;
+    let body = mcloud_upstream::session::ensure_http_ok(&resp, "查询奖品记录")?;
+    proto::parse_prize_records(&SignInEnvelope::parse(body)?)
+}
+
 pub struct PrizesTask;
 
 #[async_trait]
@@ -683,10 +746,7 @@ impl Task for PrizesTask {
 
     async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
         ctx.progress(1, 1, "查询待领取奖品");
-        // 「待领取」页签是 `type=1`。市场名用签到页那一个。
-        let req = proto::prize_record_request(proto::MARKET_NAME, 1, 1, 10);
-        let env = call(ctx, req, "查询奖品记录").await?;
-        let records = proto::parse_prize_records(&env)?;
+        let records = read_prizes(ctx.http.as_ref()).await?;
 
         let pending: Vec<_> = records.iter().filter(|r| r.pending()).collect();
         if pending.is_empty() {
@@ -708,137 +768,6 @@ impl Task for PrizesTask {
             "本页有 {} 个待领取奖品（共查 {} 条，只查了第一页）",
             pending.len(),
             records.len()
-        )))
-    }
-}
-
-// ══════════════════════════ cloud-snapshot ══════════════════════════
-
-/// AI豆余额快照（**只读**）。
-///
-/// # 这是旧项目缺的那一格
-///
-/// 旧项目 `sign` 里那句 `ctx.state.totalCloud = total` 被**注释掉了**，
-/// 于是余额只进日志、不进状态 ⇒ 无法回答"这账号现在还有多少AI豆、
-/// 今天涨了多少"。
-///
-/// 本任务把余额**结构化**地报出来（进 run 记录的 `details`），
-/// 于是它是一个可被记录的读数，而不是一行日志。
-///
-/// # ⚠ `total` 与 `beforeTotal` 不是一回事
-///
-/// 实拍里两个数**不相等**（`total=10496`、`beforeTotal=8027`）。
-/// `beforeTotal` 是"**云朵**改名成 AI 豆那一刻的结转额"，是**冻结的历史快照**，
-/// 永远不变 —— 曾把它当余额记进趋势图，结果是一条直线。
-/// 所以这里只取 `total`。
-pub struct CloudSnapshotTask;
-
-#[async_trait]
-impl Task for CloudSnapshotTask {
-    fn name(&self) -> &'static str {
-        "cloud-snapshot"
-    }
-    fn title(&self) -> &'static str {
-        "AI豆快照"
-    }
-
-    fn group(&self) -> TaskGroup {
-        TaskGroup::Signin
-    }
-    fn description(&self) -> &'static str {
-        "记录当前AI豆余额与本月签到进度（只读）"
-    }
-
-    async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
-        ctx.progress(1, 1, "读取AI豆余额");
-        let st = query_status(ctx).await?;
-
-        ctx.info(format!(
-            "AI豆余额 {}｜本月已签 {} 天｜连续 {} 天｜今日{}",
-            st.total,
-            st.month_days,
-            st.sign_count,
-            if st.signed_today() {
-                "已签"
-            } else {
-                "未签"
-            }
-        ));
-        Ok(TaskOutcome::success(format!(
-            "AI豆余额 {}（本月 {} 天，连续 {} 天）",
-            st.total, st.month_days, st.sign_count
-        )))
-    }
-}
-
-// ══════════════════════════ task-list ══════════════════════════
-
-/// 任务清单（**只读**）。
-///
-/// 把AI豆中心当下"有什么可做"列出来：待领取、翻倍机会、到期的延期领取。
-///
-/// # 与 `prizes` 的分工
-///
-/// `prizes` 读的是**奖品记录**（奖品最终落点，要人去 App 领）；
-/// 本任务读的是**AI豆账目**（AI豆中心自己那本账，能自动领的）。
-/// 两者不是同一批东西，混起来会让人以为"清单里有就是奖品"。
-pub struct TaskListTask;
-
-#[async_trait]
-impl Task for TaskListTask {
-    fn name(&self) -> &'static str {
-        "task-list"
-    }
-    fn title(&self) -> &'static str {
-        "任务清单"
-    }
-
-    fn group(&self) -> TaskGroup {
-        TaskGroup::Signin
-    }
-    fn description(&self) -> &'static str {
-        "列出AI豆中心当下可做的事：待领取、翻倍机会、延期领取（只读）"
-    }
-
-    async fn run(&self, ctx: &TaskContext, _body: &Value) -> TaskResult {
-        ctx.progress(1, 1, "读取任务清单");
-        let st = query_status(ctx).await?;
-
-        let mut items: Vec<String> = Vec::new();
-        for item in &st.receive_list {
-            let label = match item.cloud_type {
-                proto::cloud_type::NOW => "现在可领",
-                proto::cloud_type::EXPANSION => "已到期可领（延期领取）",
-                proto::cloud_type::NEXT_MONTH => "下月可领",
-                // ⚠ 别只写"未知类型" ✗：用户原话「未知又是啥，不明不白」✓。
-                // 把**上游给的原始码**带出来 ⇒ 看图就能查、也知道该往哪加分支 ✓
-                // （已知的三个是 0=现在可领 / 1=已到期 / 2=下月，见 `proto::cloud_type`）。
-                _ => {
-                    return Ok(TaskOutcome::partial(format!(
-                        "任务清单里出现未识别的类型码 {}（已知 0/1/2），本次只报了能识别的部分",
-                        item.cloud_type
-                    )))
-                }
-            };
-            items.push(format!("{label} {} AI豆", item.cloud_num));
-        }
-        if st.should_claim_multiple() {
-            items.push("签到翻倍机会可用（本月尚未使用）".to_string());
-        }
-
-        if items.is_empty() {
-            return Ok(TaskOutcome::success(format!(
-                "当下没有可做的事（余额 {}）",
-                st.total
-            )));
-        }
-        for it in &items {
-            ctx.info(format!("可做：{it}"));
-        }
-        Ok(TaskOutcome::success(format!(
-            "共 {} 件可做：{}",
-            items.len(),
-            items.join("；")
         )))
     }
 }

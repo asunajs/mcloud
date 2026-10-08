@@ -23,6 +23,17 @@ import type { AccountSummary } from '../api'
 import { Select } from './select'
 
 export interface AccountPickerProps {
+  /**
+   * 稳定标识。
+   *
+   * ⚠ **一页里放两个选择器时必须各给一个不同的 id**：`Select` 靠 id 认人
+   * （面板挂在 `body` 上、展开状态是模块级的，见 `ui/select.tsx` 文件头 ✓）——
+   * 两个同 id 的选择器会互相认错，展开/收起与回调都会串台 ✗
+   * （直播页上「跑这一趟用哪些账号」与「自动定时作用在哪些账号」就是两个 ✓）。
+   *
+   * 缺省保持老值 `account-picker`（别的页面只有一个，不必改 ✓）。
+   */
+  id?: string
   accounts: AccountSummary[]
   /** `true` = 全部账号（后端会收到 `accounts: []`）。 */
   all: boolean
@@ -37,7 +48,7 @@ export function AccountPicker(props: AccountPickerProps) {
 
   return (
     <Select
-      id="account-picker"
+      id={props.id ?? 'account-picker'}
       multiple
       filterable
       ariaLabel="账号"

@@ -675,10 +675,52 @@ pub fn ensure_http_ok<'a>(resp: &'a HttpResponse, what: &str) -> Result<&'a str>
         return Err(Error::Network(format!(
             "{what} 失败，HTTP {}：{}",
             resp.status,
-            resp.body.chars().take(200).collect::<String>()
+            describe_body(&resp.body)
         )));
     }
     Ok(&resp.body)
+}
+
+/// 把响应体压成**一句话**（只给错误信息用 ✓）。
+///
+/// # 为什么不能直接贴原文（2026-10-08 用户实测报的就是它）
+///
+/// 上游的网关在路径不存在时回的是**一整页 HTML**（nginx 的 `404 Not Found` ✓）。
+/// 原样截 200 字符，用户看到的是：
+///
+/// ```text
+/// 网络错误：查询 AI 头像活动目录 失败，HTTP 404：<!DOCTYPE html> <html> <head>
+/// <title>Error</title> <style> body { width: 35em; margin: 0 auto; …
+/// ```
+///
+/// 那条信息里**没有一个字**说明"这是什么、该找谁" ✗ —— 它把真正有用的两半
+/// （**状态码** ✓ 与**是哪个接口** ✓）挤到了后面，还让人以为是"网络抖动、等会儿再试" ✗，
+/// 而真相是**那个接口整族都不存在了** ✓。
+///
+/// # 判据
+///
+/// * **JSON**（`{` / `[` 开头 ✓）⇒ 原样截断 ✓ —— 上游的业务错误码就在里面，
+///   那是最有用的一截 ✓；
+/// * **HTML**（`<` 开头 ✓）⇒ 说清"回的是**网页**不是接口" ✓，并带上 `<title>` 那一行
+///   （nginx 的 `404 Not Found` 就在那里 ✓）；
+/// * 其它 ⇒ 原样截断 ✓。
+///
+/// ⚠ **不**把整页 HTML 落进日志 ✗：那种"错误信息比代码还长"的日志会把真正的原因淹掉 ✓。
+pub(crate) fn describe_body(body: &str) -> String {
+    let trimmed = body.trim_start();
+    if trimmed.starts_with('<') {
+        // `<title>` 里那句才是人话（nginx：`404 Not Found` ✓）
+        let title = trimmed
+            .split_once("<title>")
+            .and_then(|(_, rest)| rest.split_once("</title>"))
+            .map(|(t, _)| t.trim().to_string())
+            .filter(|t| !t.is_empty());
+        return match title {
+            Some(t) => format!("上游回的是**网页**不是接口（HTML `<title>`：{t}）—— 多半是这条路径在上游已经不存在了，不是网络问题"),
+            None => "上游回的是**网页**不是接口（HTML）—— 多半是这条路径在上游已经不存在了，不是网络问题".to_string(),
+        };
+    }
+    body.chars().take(200).collect::<String>()
 }
 
 #[cfg(test)]

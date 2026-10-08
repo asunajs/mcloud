@@ -512,6 +512,157 @@ pub trait UserStore: Send + Sync {
             "这个存储不支持下改兑换订阅（save_exchange_subscriptions 未实现）".into(),
         ))
     }
+
+    /// 读某个用户的**推送规则**（用户口径 2026-10-07 的第二层，见 `crate::push`）。
+    ///
+    /// 没建过就是**空列表**（不是错误）—— 与 `exchange_subscriptions()` 同一口径 ✓。
+    ///
+    /// # 为什么也挂在 `UserStore`
+    ///
+    /// 与 `settings()` / `task_params()` / `exchange_subscriptions()` 同一个理由：
+    /// 新开一个 trait 会让本仓 16 处测试替身各补一行空实现 ✗ —— 那 16 行里
+    /// 没有一行会真的用到推送规则 ✓。
+    ///
+    /// # 为什么按 `owner` 分表
+    ///
+    /// 与 `exchange_subscriptions()` 同款：规则是**某个人自己配的**（"我这条定时
+    /// 只想推失败"✓），换个人登录不该看见、更不该改得动别人的规则 ✗。
+    async fn push_rules(&self, _owner: &UserId) -> Result<Vec<crate::push::PushRule>> {
+        Ok(Vec::new())
+    }
+
+    /// 读某个用户的**一条**推送规则。没有 ⇒ `None`（不是错误）。
+    ///
+    /// 单条读而不是每次把整份列表捞回来再筛：路由的 upsert / delete 都要先看
+    /// 「自己的那一行在不在」✓ —— 那一趟只该读一行 ✓。
+    async fn push_rule(
+        &self,
+        _owner: &UserId,
+        _id: &crate::push::PushRuleId,
+    ) -> Result<Option<crate::push::PushRule>> {
+        Ok(None)
+    }
+
+    /// 存一条推送规则（**按 id 覆盖或新增**，同一 owner 下）。
+    ///
+    /// 默认实现**报错**（与 `save_settings` / `save_exchange_subscriptions` 同一口径）：
+    /// 写不进去却回成功，界面会说"已保存"而下一次刷新就没了 ✗。
+    async fn save_push_rule(&self, _owner: &UserId, _rule: &crate::push::PushRule) -> Result<()> {
+        Err(crate::Error::Storage(
+            "这个存储不支持下改推送规则（save_push_rule 未实现）".into(),
+        ))
+    }
+
+    /// 删一条推送规则。删不存在的**不算错**（幂等 ✓）—— 调用方多半已经先查过。
+    async fn remove_push_rule(&self, _owner: &UserId, _id: &crate::push::PushRuleId) -> Result<()> {
+        Err(crate::Error::Storage(
+            "这个存储不支持删推送规则（remove_push_rule 未实现）".into(),
+        ))
+    }
+
+    /// 读**全部用户的**推送规则（摊平）。
+    ///
+    /// # 为什么它不能省（与上面几条的区别）
+    ///
+    /// 上面四条都带 `owner` ✓，而**事件匹配那一层没有"当前用户"这个概念** ✗：
+    /// 一次定时触发、一次编排跑完，手里只有 `Schedule` / `Pipeline` 与那个**账号** ——
+    /// 账号的归属是 `Account::owner`，而不是"正在看 WebUI 的人" ✓。
+    /// 要按 `push_rule` 那一格把规则捞出来，就只能不带 owner 查 ✓
+    /// （调用方自己按规则里的 `owner` 判归属 ✓）。
+    ///
+    /// ⚠ 摊平出来的每一条**自带 `owner`**（[`crate::push::PushRule::owner`] ✓）——
+    /// 归属判定用那一格，不要靠"是谁查的"来推 ✗。
+    async fn all_push_rules(&self) -> Result<Vec<crate::push::PushRule>> {
+        Ok(Vec::new())
+    }
+
+    // ⚠ 这里原先有 `push_config()` / `save_push_config()`（**用户级**渠道配置，
+    // 落盘 `data/push-config.json` ✓）—— 2026-10-08 推翻重做时**两条都删了** ✗。
+    // 用户口径是「我设置一个推送规则，**这个规则配置推送的 token，包括推送哪几个
+    // 平台**」✓ ⇒ "发给谁"全部来自**规则自己的 `config`** ✓，
+    // "用户级渠道配置"那一层（以及它带来的"两份 token 可能对不上"✓）整个不存在了 ✓。
+    // 连旧文件一起删：`data/push-config.json` 由 `JsonStore` 启动时清掉 ✓。
+
+    /// **面板行为**的绑定（没有定时/编排可绑的那几类：登录新设备 / 登录失败 /
+    /// 耗时异常 / 连续失败 ✓）。
+    ///
+    /// # 为什么它在 `UserStore` 上（与 `push_rules()` 同一格）
+    ///
+    /// 用户口径：「在**设置**里，单独为这种**面板行为**增加一个可配置推送规则的
+    /// 入口」✓ —— 那是**某个用户自己**的选择 ✓（换个人登录不该看见、更不该改得动
+    /// 别人的 ✓），与 `push_rules()` / `exchange_subscriptions()` 同一口径 ✓。
+    /// 落盘 `data/push-panel.json`（按 owner 分表 ✓）。
+    ///
+    /// # 为什么没配过也要回一份默认
+    ///
+    /// 与 `push_rules()` 回空列表同一个道理 ✓：面板绑定的**默认是"不绑任何规则"**
+    /// 但有**保守的节流默认值**（1800s 冷却 / 每日 10 条 ✓，见
+    /// [`crate::push::BehaviorKey::default_throttle`] ✓）⇒ 回 `PanelBindings::default()`
+    /// 而不是 `Option` ✓ —— 调用方拿到的一定是"能直接用的那份" ✓。
+    async fn push_panel(&self, _owner: &UserId) -> Result<crate::push::PanelBindings> {
+        Ok(crate::push::PanelBindings::default())
+    }
+
+    /// 写面板行为的绑定（**整份替换** —— 与 `save_push_rule` 同一口径 ✓）。
+    ///
+    /// 默认实现**报错**（与 `save_settings` / `save_push_rule` 同一口径）：
+    /// 写不进去却回成功，界面会说"已保存"而下次刷新就没了 ✗。
+    async fn save_push_panel(
+        &self,
+        _owner: &UserId,
+        _bindings: &crate::push::PanelBindings,
+    ) -> Result<()> {
+        Err(crate::Error::Storage(
+            "这个存储不支持下改面板推送绑定（save_push_panel 未实现）".into(),
+        ))
+    }
+
+    /// **面板行为的节流状态**（每行为：上次发送时刻 / 今日计数 / 上次状态 ✓）。
+    ///
+    /// # 为什么非得落盘（用户口径：「登录，性能，这些可能**频繁触发**，注意」✓）
+    ///
+    /// 只放内存 ⇒ **进程一重启，冷却与计数全归零** ⇒ 重启后同一批事件再来一轮 ✗
+    /// —— 而重启本来就可能紧接着一串触发 ✓。落盘 `data/push-throttle.json` ✓。
+    ///
+    /// 没记过 ⇒ 全默认（`last_sent_ms: None` ⇒ 第一次一定放行 ✓）。
+    async fn push_throttle(&self, _owner: &UserId) -> Result<crate::push::ThrottleState> {
+        Ok(crate::push::ThrottleState::default())
+    }
+
+    /// 写节流状态（**整份替换** ✓）。
+    ///
+    /// 默认实现**报错**：静默失败等于"节流没生效"，而那正是要防的风暴 ✗
+    /// —— 宁可让调用方看见一次错误，也不要它以为拦住了 ✓。
+    async fn save_push_throttle(
+        &self,
+        _owner: &UserId,
+        _state: &crate::push::ThrottleState,
+    ) -> Result<()> {
+        Err(crate::Error::Storage(
+            "这个存储不支持下改推送节流状态（save_push_throttle 未实现）".into(),
+        ))
+    }
+
+    /// 记下一次**见过的登录设备**；返回它**是不是第一次见** ✓
+    /// （`true` = 新设备/新地点 ⇒ `loginNew` 该报 ✓）。
+    ///
+    /// # 为什么"判"与"记"合成一次（不是两条方法）
+    ///
+    /// 拆成 `login_devices()` + `note_login_device()` 的话，调用方要自己
+    /// "先查后写"，而两次读之间可以插进另一次登录 —— 两台新设备会**各自以为
+    /// 自己只是第二台** ✓，于是一台都报不出来 ✗（与 `create_first_user` 那条
+    /// 判空/插入必须在同一把锁里、同一个教训 ✓）。
+    ///
+    /// # 默认实现为什么回 `false`（= **不是**新的）
+    ///
+    /// 本仓十几处测试替身不该为这一条各补一行 ✓（与 `push_rules()` 同一个理由 ✓）。
+    /// 而"没实现"必须落在**不发**那一侧：回 `true` = 每次登录都报"新设备" ✗
+    /// —— 那既是噪音，也是**骗人** ✓。
+    ///
+    /// 落盘 `data/login-devices.json`（按 owner 分表 ✓）。
+    async fn remember_login_device(&self, _owner: &UserId, _key: &str) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// 全部持久化能力的组合。
@@ -601,8 +752,41 @@ pub fn beijing_time_digits(clock: &dyn Clock) -> String {
     }
 }
 
-/// 把一个**不带时区**的本地时刻串按**东八区**解成 epoch 毫秒。
+/// 按**给定固定偏移**把注入时钟格式化成 `fmt`（chrono 格式串）。
 ///
+/// # 为什么需要它（2026-10-07）
+///
+/// 上游有两个口子要的**不是** `yyyyMMddHHmmss`，而 `chrono` 只有本 crate 引得到
+/// （`mcloud-tasks` / `mcloud-upstream` 的依赖里都没有它）⇒ 任务层要拼
+/// `"2026-10-07 10:45:30"` 这种串就只能自己算历法。那正是"各写一份时间换算"
+/// 的老毛病（`docs/conventions.md` §8.7）：写错的表现是**一个偏 8 小时的时间戳**，
+/// 而上游只会回一个含义模糊的业务码。
+///
+/// 于是把格式化也收在这里 —— 与 [`beijing_time_digits`] 同一个出处、同一条口径
+/// （时间只能来自注入的 [`Clock`]，不许 `SystemTime::now()`）。
+///
+/// * [`beijing_format`] = 东八区（旧 TS 用本地 `Date` 的字段；本机时区就是东八区）
+/// * [`utc_format`] = UTC（旧 TS `new Date().toISOString()` 那一类）
+pub fn format_with_offset(clock: &dyn Clock, offset_secs: i32, fmt: &str) -> String {
+    use chrono::TimeZone as _;
+    let offset = chrono::FixedOffset::east_opt(offset_secs).unwrap_or_else(beijing_offset);
+    match offset.timestamp_millis_opt(clock.now_ms()) {
+        chrono::LocalResult::Single(t) => t.format(fmt).to_string(),
+        _ => String::new(),
+    }
+}
+
+/// 东八区墙钟按 `fmt` 格式化（见 [`format_with_offset`]）。
+pub fn beijing_format(clock: &dyn Clock, fmt: &str) -> String {
+    format_with_offset(clock, 8 * 3600, fmt)
+}
+
+/// UTC 墙钟按 `fmt` 格式化（见 [`format_with_offset`]）。
+pub fn utc_format(clock: &dyn Clock, fmt: &str) -> String {
+    format_with_offset(clock, 0, fmt)
+}
+
+/// 把一个**不带时区**的本地时刻串按**东八区**解成 epoch 毫秒。///
 /// 解不出来回 `None`（`None` ≠ "没有边界"，调用方自己按三态处置）。
 ///
 /// # 为什么在这里，而不是各任务层各写一份

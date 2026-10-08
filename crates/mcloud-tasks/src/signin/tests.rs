@@ -449,33 +449,6 @@ async fn receive_with_one_failure_is_partial_not_success() {
     );
 }
 
-/// ⚠ 用户 2026-10-03 实测口径：「**未知又是啥，不明不白**」。
-///
-/// 上游给出已知三个常量（0/1/2）之外的 `cloudType` 时，旧代码只写「未知类型」
-/// ✗ —— 看图的人没法查、也没法判断该不该加分支。现在要把**原始码**带出来 ✓。
-#[tokio::test]
-async fn task_list_reports_the_raw_type_code_when_unknown() {
-    let info = info_with_receive(serde_json::json!([
-        {"cloudType":0,"cloudNum":5},
-        {"cloudType":9,"cloudNum":200}
-    ]));
-    let (c, _http) = Ctx::new(&[&info]);
-    let out = TaskListTask
-        .run(&c.ctx(), &serde_json::json!({}))
-        .await
-        .unwrap();
-
-    let text = out.summary();
-    assert!(text.contains("9"), "要说清上游给的原始类型码：{text}");
-    assert!(
-        !text.contains("未知类型"),
-        "「未知类型」这个词本身没有信息量：{text}"
-    );
-    // 没识别出来的那一笔 ⇒ 这条运行**不是普通成功**（但也别报成失败：能识别的部分照报了 ✓）
-    assert!(out.is_partial(), "有没识别的类型 ⇒ 部分成功：{out:?}");
-}
-
-/// `cloudType == 0` ⇒ 走 `receiveV3`，并读回 `result.receive`。
 #[tokio::test]
 async fn receive_claims_now_items_and_reads_the_amount() {
     let info = info_with_receive(serde_json::json!([
@@ -647,6 +620,38 @@ async fn revival_treats_already_claimed_as_skipped() {
     assert!(
         out.summary().contains("本月已领取过"),
         "实得：{}",
+        out.summary()
+    );
+}
+
+/// ⭐ 第二种"没得领"：**上一年没有云朵可复活** ⇒ 同样**跳过**，不是失败。
+///
+/// 2026-10-08 真账号实拍（用户截图）：`移动` 报
+/// 「上游错误 [500]：领取复活奖励：**2025年无云朵记录**」✓，
+/// 而同趟另外两个号是"本月已领取"⇒ 跳过 ✓。
+///
+/// 复活卡复活的是**上一年失效的AI豆** ⇒ 上一年没有云朵 = 没东西可复活 ✓，
+/// 与"本月已领取"完全同档（判成失败 = 每天一条红 + 推送，而它**永远不会自己好** ✗）。
+#[tokio::test]
+async fn revival_treats_nothing_to_revive_as_skipped() {
+    let (c, _http) = Ctx::new(&[r#"{"code":500,"msg":"2025年无云朵记录"}"#]);
+    let out = RevivalTask
+        .run(&c.ctx(), &serde_json::json!({}))
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(out, TaskOutcome::Skipped { .. }),
+        "没有可复活的记录是跳过，不是失败：{out:?}"
+    );
+    assert!(
+        out.summary().contains("没有可复活的记录"),
+        "实得：{}",
+        out.summary()
+    );
+    assert!(
+        out.summary().contains("2025年无云朵记录"),
+        "要把上游原话带上（那是依据）：{}",
         out.summary()
     );
 }
@@ -921,98 +926,6 @@ async fn prizes_admits_it_only_read_the_first_page() {
     );
 }
 
-// ══════════════════════════ cloud-snapshot ══════════════════════════
-
-/// ⭐ 快照报的是 `total`（现行余额），**不是** `beforeTotal`。
-///
-/// 实拍里两个数不相等。把 `beforeTotal` 当余额记进趋势图 = 一条直线。
-#[tokio::test]
-async fn snapshot_reports_total_not_before_total() {
-    let (c, http) = Ctx::new(&[&info_body(false, 10496)]);
-    let out = CloudSnapshotTask
-        .run(&c.ctx(), &serde_json::json!({}))
-        .await
-        .unwrap();
-
-    assert_eq!(http.count(), 1, "只读");
-    assert!(
-        out.summary().contains("10496"),
-        "要报 total：{}",
-        out.summary()
-    );
-    assert!(
-        !out.summary().contains("8027"),
-        "beforeTotal 是冻结快照，不能当余额：{}",
-        out.summary()
-    );
-}
-
-// ══════════════════════════ task-list ══════════════════════════
-
-/// 清单把三类账目都说出来。
-#[tokio::test]
-async fn task_list_reports_every_kind_of_item() {
-    let info = info_with_receive(serde_json::json!([
-        {"cloudType":0,"cloudNum":6},
-        {"cloudType":1,"cloudNum":20,"acceptDate":"2026-09-30"},
-        {"cloudType":2,"cloudNum":240}
-    ]));
-    let (c, http) = Ctx::new(&[&info]);
-    let out = TaskListTask
-        .run(&c.ctx(), &serde_json::json!({}))
-        .await
-        .unwrap();
-
-    assert_eq!(http.count(), 1, "只读");
-    assert!(
-        out.summary().contains("3 件可做"),
-        "实得：{}",
-        out.summary()
-    );
-    assert!(out.summary().contains("现在可领"));
-    assert!(out.summary().contains("延期领取"));
-    assert!(out.summary().contains("下月可领"));
-}
-
-/// 什么都没得做 ⇒ 成功 + 说清楚。
-#[tokio::test]
-async fn task_list_handles_the_empty_case() {
-    let v = serde_json::json!({
-        "code":0,"msg":"success",
-        "result":{"total":100,"cal":[],"curMonthBackup":true,"curMonthBackupSignAccept":true}
-    });
-    let (c, _http) = Ctx::new(&[&v.to_string()]);
-    let out = TaskListTask
-        .run(&c.ctx(), &serde_json::json!({}))
-        .await
-        .unwrap();
-    assert!(out.is_success());
-    assert!(
-        out.summary().contains("没有可做的事"),
-        "实得：{}",
-        out.summary()
-    );
-}
-
-/// 翻倍机会可用时要列进清单。
-#[tokio::test]
-async fn task_list_includes_the_doubling_opportunity() {
-    let mut v: serde_json::Value = serde_json::from_str(&info_body(false, 10496)).unwrap();
-    v["result"]["curMonthBackupSignAccept"] = serde_json::json!(false);
-    v["result"]["receiveList"] = serde_json::json!([]);
-    let (c, _http) = Ctx::new(&[&v.to_string()]);
-
-    let out = TaskListTask
-        .run(&c.ctx(), &serde_json::json!({}))
-        .await
-        .unwrap();
-    assert!(
-        out.summary().contains("签到翻倍"),
-        "实得：{}",
-        out.summary()
-    );
-}
-
 // ══════════════════════════ 全链吞错的防线 ══════════════════════════
 
 /// ⭐ 每个任务在上游报错时都必须**变成失败**，不能吞掉。
@@ -1054,18 +967,6 @@ async fn every_task_surfaces_upstream_errors() {
         .await
         .is_err());
 
-    let (c, _) = Ctx::new(&[err]);
-    assert!(CloudSnapshotTask
-        .run(&c.ctx(), &serde_json::json!({}))
-        .await
-        .is_err());
-
-    let (c, _) = Ctx::new(&[err]);
-    assert!(TaskListTask
-        .run(&c.ctx(), &serde_json::json!({}))
-        .await
-        .is_err());
-
     // revival 是唯一例外：它的失败文案要经过"是不是已领取"那一关，
     // 而"系统繁忙"认不出 ⇒ 仍按失败。
     let (c, _) = Ctx::new(&[err]);
@@ -1075,7 +976,7 @@ async fn every_task_surfaces_upstream_errors() {
         .is_err());
 }
 
-/// 八个任务的名字/标题互不重复，且与注册表一致。
+/// 六个任务的名字/标题互不重复，且与注册表一致。
 #[test]
 fn task_metadata_is_complete_and_distinct() {
     let metas = [
@@ -1085,8 +986,6 @@ fn task_metadata_is_complete_and_distinct() {
         BackupGiftTask.meta(),
         RevivalTask.meta(),
         PrizesTask.meta(),
-        CloudSnapshotTask.meta(),
-        TaskListTask.meta(),
     ];
 
     let names: Vec<String> = metas.iter().map(|m| m.name.clone()).collect();
@@ -1098,9 +997,7 @@ fn task_metadata_is_complete_and_distinct() {
             "multiple",
             "backup-gift",
             "revival",
-            "prizes",
-            "cloud-snapshot",
-            "task-list"
+            "prizes"
         ],
         "名字是 wire 契约（编排与定时都按它指）"
     );

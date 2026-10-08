@@ -15,7 +15,7 @@
  * ② 选完在按钮下方把"会影响什么"写出来。
  */
 
-import { onMounted, onUnmounted, ref } from 'lite'
+import { onMounted, onUnmounted, ref } from '@asunajs/lite'
 import { setPageRefresh } from '../ui/page-refresh'
 import {
   ApiError,
@@ -43,12 +43,14 @@ import {
 import { EmptyState } from '../ui/empty-state'
 import { ConfirmDialog, Dialog, closeDialog, openDialog } from '../ui/dialog'
 import { showError } from '../ui/error-dialog'
+import { IconAlert } from '../ui/icons'
 import { pushToast } from '../ui/toast'
-import { createPushEditor } from '../ui/push-editor'
 import { createAccountFields } from '../ui/account-fields'
 import { pathParts } from '../ui/nav'
 import { navigate } from '../ui/router'
 import { AccountConfigPage } from './account-config-page'
+// 上游状态：**子视图**，不是导航项（用户 2026-10-07：「这个不要放 nav 里」✓）
+import { UpstreamPage } from './upstream-page'
 
 type LoadState = 'loading' | 'error' | 'ready'
 type Method = 'qr' | 'sms' | 'app' | 'password' | 'auth'
@@ -80,13 +82,19 @@ const PLATFORM_LABEL: Record<PcPlatform, string> = {
 
 
 /**
- * 账号设置弹窗里那两块（**功能开关** / **运行结果推送**）暂时**不显示**。
+ * 账号设置弹窗里那一块（**功能开关**）暂时**不显示**。
  *
  * 用户口径（2026-10-02）：「这些设置先取消显示，设置后面单独弄」。
  *
  * ⚠ 代码**原样留着**：里面是上游字段、取值范围与校验（重做那一版时有依据 ✓），
  * 只是**不渲染** ⇒ 要让它回来，把这里改成 `true` 就行 ✓。
  * ⚠ **别删代码** ✗ —— 用户说的是"先取消显示"，不是"不要了"。
+ *
+ * ⚠⚠ 原来这里还藏着**运行结果推送**那一块，2026-10-08 按用户口径**整块删掉**了 ✗
+ * （「**很显然我说的和云盘账户没有关系**，为啥你这里云盘账户有配置」＋「**丢弃现有情况，
+ * 重写**」）：推送渠道收成了**登录用户级**（「推送」页 `/push` ✓），
+ * 弹窗里那一块与账号无关 ⇒ 不是"先藏起来"，是**不该在这儿** ✓。
+ * 「先取消显示、别删代码」那条只对**功能开关**（真的按账号算）继续有效 ✓。
  */
 const SHOW_ACCOUNT_SETTINGS_BLOCKS = false
 
@@ -122,7 +130,7 @@ export const AccountsPage = () => {
   /**
    * 当前地址的路径段。
    *
-   * ⚠ **本页自己盯着地址**，而不是让路由表来管：`parsePath` 把 `/accounts/push` 与
+   * ⚠ **本页自己盯着地址**，而不是让路由表来管：`parsePath` 把 `/accounts/settings` 与
    * `/accounts` 都归到「账号」这一页（账号配置不是独立导航项 —— 侧栏 9 条封顶），
    * 于是从列表切到配置时 PageId **没变**，`app.tsx` 那条动态 import 不会再跑一次。
    * 想让它工作只有两条路：把账号配置做成第 10 条导航项（规范里 9 条封顶，不行），
@@ -162,13 +170,20 @@ export const AccountsPage = () => {
   const method = ref<Method>('qr')
   const platform = ref<PcPlatform>('windows')
   /**
-   * 动作失败：内联显示在表单旁，不用弹窗。
+   * 动作失败：**弹窗优先 + 就近一句**（2026-10-08 用户口径「所有的提示都是优先弹窗式」）。
    *
-   * 这些失败都发生在**用户正在填的表单**里（手机号、验证码、账密、出码），
-   * 错误必须贴着待改的字段，弹窗会把字段推远（§6.4）。
-   * 列表上的独立动作（删除、换设备指纹）走 `showError`。
+   * ⚠ 与旧注释的口径差别：以前这里**只**内联（"错误必须贴着待改的字段，弹窗会把字段推远"）。
+   * 现在两样都要 —— `pushToast('error', …)` 负责"一眼看见"（错误类 toast 不自动消失，
+   * 见 `ui/toast.ts`），`formError` 那份内联负责"指到具体哪一格"。
+   * 这些失败都发生在**用户正在填的表单**里（手机号、验证码、账密、出码）。
+   * 列表上的独立动作（删除、换设备指纹）走 `showError`（那是 modal ✓）。
    */
   const formError = ref('')
+  /** 失败的那一句同时上屏（toast）+ 落进 `formError`（就近）。 */
+  const formFail = (msg: string): void => {
+    formError.value = msg
+    pushToast('error', msg)
+  }
   /**
    * 成功回执。
    *
@@ -284,7 +299,7 @@ export const AccountsPage = () => {
       // 轮询间隔由服务端给：客户端写死一个数会和状态机分叉
       pollTimer = window.setInterval(() => void pollOnce(), r.poll_interval_ms)
     } catch (e) {
-      formError.value = e instanceof Error ? e.message : '出码失败'
+      formFail(e instanceof Error ? e.message : '出码失败')
       qrPhase.value = 'failed'
     } finally {
       busy.value = false
@@ -374,7 +389,7 @@ export const AccountsPage = () => {
   const sendSms = async (sliderAnswer?: string) => {
     formError.value = ''
     if (!phone.value.trim()) {
-      formError.value = '请填写手机号'
+      formFail('请填写手机号')
       return
     }
     busy.value = true
@@ -398,13 +413,14 @@ export const AccountsPage = () => {
         // 是工具侧的问题 —— 不能让用户以为该自己去量像素。
         slider.value = r.slider ?? null
         smsSent.value = false
-        formError.value =
+        formFail(
           r.phase === 'slider_exhausted'
             ? '今日滑块验证次数已用完，请明天再试'
-            : '滑块题自动解不开（上游没给答案），本次没发出短信'
+            : '滑块题自动解不开（上游没给答案），本次没发出短信',
+        )
       }
     } catch (e) {
-      formError.value = e instanceof Error ? e.message : '发送验证码失败'
+      formFail(e instanceof Error ? e.message : '发送验证码失败')
     } finally {
       busy.value = false
     }
@@ -414,7 +430,7 @@ export const AccountsPage = () => {
     formError.value = ''
     formOk.value = ''
     if (!smsCode.value.trim()) {
-      formError.value = '请填写验证码'
+      formFail('请填写验证码')
       return
     }
     busy.value = true
@@ -435,7 +451,7 @@ export const AccountsPage = () => {
       slider.value = null
       await load()
     } catch (e) {
-      formError.value = e instanceof Error ? e.message : '登录失败'
+      formFail(e instanceof Error ? e.message : '登录失败')
     } finally {
       busy.value = false
     }
@@ -447,7 +463,7 @@ export const AccountsPage = () => {
   const sendAppSms = async (sliderAnswer?: string) => {
     formError.value = ''
     if (!appPhone.value.trim()) {
-      formError.value = '请填写手机号'
+      formFail('请填写手机号')
       return
     }
     busy.value = true
@@ -474,13 +490,14 @@ export const AccountsPage = () => {
           width: r.slider_width,
         }
         appSent.value = false
-        formError.value =
+        formFail(
           r.phase === 'slider_exhausted'
             ? '这道滑块题已作废，请重新发送验证码'
-            : '滑块题自动解不开（上游没给答案），本次没发出短信'
+            : '滑块题自动解不开（上游没给答案），本次没发出短信',
+        )
       }
     } catch (e) {
-      formError.value = e instanceof Error ? e.message : '发送验证码失败'
+      formFail(e instanceof Error ? e.message : '发送验证码失败')
     } finally {
       busy.value = false
     }
@@ -490,7 +507,7 @@ export const AccountsPage = () => {
     formError.value = ''
     formOk.value = ''
     if (!appCode.value.trim()) {
-      formError.value = '请填写验证码'
+      formFail('请填写验证码')
       return
     }
     busy.value = true
@@ -508,7 +525,7 @@ export const AccountsPage = () => {
       appSlider.value = null
       await load()
     } catch (e) {
-      formError.value = e instanceof Error ? e.message : '登录失败'
+      formFail(e instanceof Error ? e.message : '登录失败')
     } finally {
       busy.value = false
     }
@@ -520,7 +537,7 @@ export const AccountsPage = () => {
     formError.value = ''
     formOk.value = ''
     if (!username.value.trim() || !password.value) {
-      formError.value = '请填写用户名与口令'
+      formFail('请填写用户名与口令')
       return
     }
     busy.value = true
@@ -532,7 +549,7 @@ export const AccountsPage = () => {
       password.value = ''
       await load()
     } catch (e) {
-      formError.value = e instanceof Error ? e.message : '登录失败'
+      formFail(e instanceof Error ? e.message : '登录失败')
     } finally {
       busy.value = false
     }
@@ -594,13 +611,24 @@ export const AccountsPage = () => {
     }
   }
 
+  /**
+   * 换设备指纹。
+   *
+   * ⚠⚠ 它**不可逆**：旧指纹一换，用旧指纹开着的扫码会话立刻失效（登录态要重来）。
+   * 用户口径（2026-10-08）：「重要的直接弹窗」⇒ 点按钮先过一道 `ConfirmDialog`，
+   * 不再点了就换 ✗（2026-10-08 之前就是直接换的）。
+   */
+  const rotateDialogId = 'confirm-rotate-device'
+
   const doRotateDevice = async () => {
     try {
       const r = await rotatePcDevice()
+      closeDialog(rotateDialogId)
       deviceId.value = r.device_id
       pushToast('success', '已更换设备指纹（旧的扫码会话立即失效）')
     } catch (e) {
       // 独立动作，没有表单在场；且原因（例如上游拒绝）需要被读到
+      closeDialog(rotateDialogId)
       showError('无法更换设备指纹', e instanceof Error ? e.message : '更换失败')
     }
   }
@@ -647,7 +675,10 @@ export const AccountsPage = () => {
       await load()
     } catch (e) {
       // 弹窗**不关**：用户刚打的字还在里面，关掉等于让他重打一遍。
-      editError.value = e instanceof Error ? e.message : '保存失败'
+      const msg = e instanceof Error ? e.message : '保存失败'
+      editError.value = msg
+      // 弹窗优先（2026-10-08 用户口径）：错误类 toast 不自动消失，见 `ui/toast.ts`
+      pushToast('error', msg)
     } finally {
       savingEdit.value = false
     }
@@ -658,7 +689,7 @@ export const AccountsPage = () => {
   const doImport = async () => {
     const raw = importAuth.value.trim()
     if (!raw) {
-      formError.value = '请先粘贴一条凭据'
+      formFail('请先粘贴一条凭据')
       formOk.value = ''
       return
     }
@@ -682,7 +713,7 @@ export const AccountsPage = () => {
       closeDialog('add-account')
       await load()
     } catch (e) {
-      formError.value = e instanceof Error ? e.message : '导入失败'
+      formFail(e instanceof Error ? e.message : '导入失败')
     } finally {
       importBusy.value = false
     }
@@ -690,22 +721,19 @@ export const AccountsPage = () => {
 
   // ── 每账号设置（GET/PUT /api/accounts/{id}/settings）─────────────────
   //
-  // # 「运行结果推送」那一块是共享模块
-  //
-  // 渠道表单（结构 / 值分开的 ref、原始配置对象、打码开关…）连同"攒 payload"
-  // 一起搬去了 `../ui/push-editor`（工厂函数）+ 配置中心页复用**同一份**，
-  // 所以账号页这边只剩一个 `push` 句柄：`load` 铺数据、`build` 攒 notify、
-  // `fields()` 画那块表单。分成"结构 / 值"两个 ref 的理由见模块文件头。
-  //
-  // # 「任务参数」/「功能开关」那四格同款
+  // # 「任务参数」/「功能开关」那几格是共享模块
   //
   // 备份等待 / 刷新阈值 / 跳过任务 / AI 头像上限**连同本地校验**一起搬去了
-  // `../ui/account-fields`（同样是工厂函数），这边只剩一个 `acct` 句柄：
-  // `load` 铺数据、`build` 攒那四格、`taskFields()` / `featureFields()` 画两组表单。
+  // `../ui/account-fields`（工厂函数），这边只剩一个 `acct` 句柄：
+  // `load` 铺数据、`build` 攒那几格、`taskFields()` / `featureFields()` 画两组表单。
+  //
+  // ⚠ 2026-10-08 起这里**没有**推送编辑器了：渠道收成**登录用户级**
+  //（用户口径「很显然我说的和云盘账户没有关系」＋「丢弃现有情况，重写」✓），
+  // 弹窗里那一块整块删掉 ⇒ 这个口只管账号级那几格 ✓。
   //
   // # 打开才拉数据
   //
-  // 十条渠道 + 一堆字段，页面 `load()` 里顺手全拉一遍只会多一条失败路径（没有后端时
+  // 一堆字段，页面 `load()` 里顺手全拉一遍只会多一条失败路径（没有后端时
   // 每个账号各报一次错），而首屏一行都用不到它。所以读发生在**打开弹窗那一刻**。
   const SETTINGS_DIALOG = 'account-settings'
   const settingsAccount = ref<AccountSummary | null>(null)
@@ -716,23 +744,16 @@ export const AccountsPage = () => {
   const settingsOk = ref('')
   const settingsSaving = ref(false)
 
-  // 四格（任务参数 / 功能开关）在共享模块里 —— 账号页与配置中心复用同一份。
+  // 账号级那几格（任务参数 / 功能开关）在共享模块里 —— 账号页与配置中心复用同一份。
   const acct = createAccountFields()
-
-  // 运行结果推送（渠道表单本体在共享模块里，见上面那段）
-  const push = createPushEditor()
 
   /**
    * 把 GET / PUT 回来的一份设置铺进表单。
    *
-   * 四格交给共享模块的 `acct.load`（它自己逐格容错，理由见模块文件头）；
-   * 渠道配置**原样拿住**（里面可能有我们没建模的键）—— 那是 `push.load` 的事，
-   * 理由见 `../ui/push-editor` 文件头。
+   * 交给共享模块的 `acct.load`（它自己逐格容错，理由见模块文件头）。
    */
   const applySettings = (s: AccountSettings): void => {
     acct.load(s)
-
-    push.load(s.notify)
   }
 
   const openSettings = (a: AccountSummary): void => {
@@ -740,10 +761,6 @@ export const AccountsPage = () => {
     settingsState.value = 'loading'
     settingsError.value = ''
     settingsOk.value = ''
-    // ⚠ 先清空：上一个账号的渠道绝不能在下一次 GET 回来之前留在界面上
-    // —— 那会让人以为"这个账号也配了这些"，照着按保存就把别人的配置套过来了。
-    // `load(null)` 同时把总开关/标题/级别复位成"不推送"的默认形状。
-    push.load(null)
     openDialog(SETTINGS_DIALOG)
     void loadSettings(a)
   }
@@ -768,12 +785,23 @@ export const AccountsPage = () => {
     settingsAccount.value = null
   }
 
-  /** 攒成 PUT 的整份 DTO：四格来自共享模块，`notify` 来自推送编辑器。 */
-  const buildSettings = (): AccountSettings => ({ ...acct.build(), notify: push.build() })
+  /** 攒成 PUT 的整份 DTO：账号级那几格来自共享模块（推送渠道不在这里了 ✓）。 */
+  const buildSettings = (): AccountSettings => acct.build()
 
   const saveSettings = async (): Promise<void> => {
     const target = settingsAccount.value
     if (!target) return
+    /**
+     * ⚠ 弹窗优先 + 就近（2026-10-08 用户口径）：
+     * `pushToast('error', …)` 让人一眼看见（错误类不自动消失，见 `ui/toast.ts`），
+     * `settingsError` 那一句留在表单**顶上**（就在这张卡的标题下面）指到具体哪一格。
+     * ⚠ 读失败（`loadSettings` 的 catch）**不走 toast**：那是"这一块没读出来"，
+     * 页内带「重试」才是能操作的那一条（见 `ui/error-dialog.ts` 的口径 ✓）。
+     */
+    const settingsFail = (msg: string): void => {
+      settingsError.value = msg
+      pushToast('error', msg)
+    }
     settingsError.value = ''
     settingsOk.value = ''
     let payload: AccountSettings
@@ -781,7 +809,7 @@ export const AccountsPage = () => {
       payload = buildSettings()
     } catch (e) {
       // 本地能判的（空、不是整数、JSON 坏了）当场说，**范围**仍然留给后端。
-      settingsError.value = e instanceof Error ? e.message : '设置不完整'
+      settingsFail(e instanceof Error ? e.message : '设置不完整')
       return
     }
     settingsSaving.value = true
@@ -791,7 +819,7 @@ export const AccountsPage = () => {
       settingsOk.value = (target.nickname || target.label || target.id) + ' 的设置已保存'
       pushToast('success', '账号设置已保存')
     } catch (e) {
-      settingsError.value = describeSettingsError(e, '保存')
+      settingsFail(describeSettingsError(e, '保存'))
     } finally {
       settingsSaving.value = false
     }
@@ -824,20 +852,16 @@ export const AccountsPage = () => {
       </div>
 
       {/*
-        ⚠ 这两块**暂时不显示** —— 开关与理由见文件头那个 `SHOW_ACCOUNT_SETTINGS_BLOCKS` ✓。
+        ⚠ 「功能开关」**暂时不显示** —— 开关与理由见文件头那个 `SHOW_ACCOUNT_SETTINGS_BLOCKS` ✓。
         包成 `<>` 是因为三元的分支只认"一个 JSX 元素或 null" ✓（lite 编译器的边界）。
+        ⚠ 「运行结果推送」那一块 2026-10-08 **整块删掉了** ✗（渠道收成登录用户级 ⇒
+        见「推送」页 `/push`），不是藏起来 —— 理由见文件头那段 ⚠⚠ ✓。
       */}
       {SHOW_ACCOUNT_SETTINGS_BLOCKS ? (
         <>
         <div class="flex flex-col gap-2">
           <h4 class="text-sm font-medium">功能开关</h4>
           {acct.featureFields()}
-        </div>
-
-        <div class="flex flex-col gap-2">
-          <h4 class="text-sm font-medium">运行结果推送</h4>
-          {/* 整块表单（开关 + 标题 + 级别 + 渠道列表）在共享模块里 —— 见 `../ui/push-editor`。 */}
-          {push.fields()}
         </div>
         </>
       ) : null}
@@ -976,9 +1000,26 @@ export const AccountsPage = () => {
   )
 
   // 子路由：账号配置（推送 + 账号级设置）—— 与任务页的配置中心同一套做法。
-  // ⚠ 地址是 `/accounts/push`（用户 2026-10-05 选的：挂账号页下面，不新开导航项）
-  if (path.value[0] === 'accounts' && path.value[1] === 'push') {
+  // ⚠ 地址是 `/accounts/settings`（用户 2026-10-05 选的：挂账号页下面，不新开导航项）
+  // ⚠ 2026-10-08 改名：这一页的地址从 `/accounts/push` 改成 `/accounts/settings`
+  // —— 它的内容早就是"账号级设置 + 功能开关"了（推送渠道已搬到「推送」页 `/push` ✓），
+  // 路径里那个 `push` 名不副实 ✗。
+  //
+  // ⚠ **老地址照旧能打开** ✓（`|| === 'push'` ✓）：书签 / 浏览器历史 / 旧文档里的链接
+  // 不会 404 ✓ —— 与"老数据行为不变"同一个口径 ✓（改名只该影响**新**链接 ✓）。
+  if (
+    path.value[0] === 'accounts' &&
+    (path.value[1] === 'settings' || path.value[1] === 'push')
+  ) {
     return <AccountConfigPage onExit={() => navigate('/accounts')} />
+  }
+
+  // 子路由：上游状态（按需看上游账上的读数）。
+  // ⚠ 地址是 `/accounts/upstream` —— 用户 2026-10-07 原话：「**这个不要放 nav 里，
+  // 看放哪里好点**」✓。挂账号页下面是因为这些读数**都是按账号取的**
+  //（票与会话按账号建，不能共用 ✓）⇒ 它跟着账号走，不该占一条导航 ✓。
+  if (path.value[0] === 'accounts' && path.value[1] === 'upstream') {
+    return <UpstreamPage onExit={() => navigate('/accounts')} />
   }
 
   return (
@@ -996,11 +1037,20 @@ export const AccountsPage = () => {
             而那一句话才是这一页的主语。表单在弹窗里、宽度也够。
           */}
           {/* 账号配置（推送 + 账号级设置）：推送是"每个账号一份"的东西 ⇒ 挂在这一页下面
-              （`/accounts/push`；侧栏 9 条封顶，不为它新开导航项） */}
+              （`/accounts/settings`；侧栏 9 条封顶，不为它新开导航项） */}
+          {/* 上游状态：按需看上游账上的读数（App 任务清单 / 签到历史 / 待领取奖品 /
+              云朵记录）。**不是导航项** —— 挂在这一页下面，与「账号配置」并列 ✓ */}
           <button
             type="button"
             class="btn btn-sm btn-soft min-h-11 md:min-h-0"
-            onClick={() => navigate('/accounts/push')}
+            onClick={() => navigate('/accounts/upstream')}
+          >
+            上游状态
+          </button>
+          <button
+            type="button"
+            class="btn btn-sm btn-soft min-h-11 md:min-h-0"
+            onClick={() => navigate('/accounts/settings')}
           >
             账号配置
           </button>
@@ -1458,7 +1508,7 @@ export const AccountsPage = () => {
           <button
             type="button"
             class="btn btn-soft btn-sm self-start min-h-11 md:min-h-0"
-            onClick={() => void doRotateDevice()}
+            onClick={() => openDialog(rotateDialogId)}
           >
             换一台设备
           </button>
@@ -1481,6 +1531,19 @@ export const AccountsPage = () => {
               {' · 凭据 '}
               {expireText(editing.value.expire)}
             </p>
+
+            {/*
+              ⚠⚠ 失败那一句放在**弹窗标题下面**（保存键在弹窗底部，但这里一进来就看得见），
+              不再放弹窗最底下 —— 用户点「保存」时视线在底部，可读完后要改的字段在上面，
+              两处都够不着才是问题（2026-10-08 用户口径「所有的提示都是优先弹窗式」✓）。
+              弹窗那一份由 `doSaveEdit()` 里的 `pushToast('error', …)` 给 ✓。
+            */}
+            {editError.value ? (
+              <div class="alert alert-soft alert-error text-sm" role="alert">
+                <IconAlert class="size-4 shrink-0" />
+                <span class="break-words">{editError.value}</span>
+              </div>
+            ) : null}
 
             <label class="flex flex-col gap-1">
               <span class="text-xs opacity-70">昵称（留空就用掩码手机号）</span>
@@ -1542,12 +1605,6 @@ export const AccountsPage = () => {
               </div>
             ) : null}
 
-            {editError.value ? (
-              <div class="alert alert-soft alert-error text-sm" role="alert">
-                <span class="break-words">{editError.value}</span>
-              </div>
-            ) : null}
-
             <div class="modal-action">
               <button
                 type="button"
@@ -1588,6 +1645,24 @@ export const AccountsPage = () => {
       >
         {settingsBody()}
       </Dialog>
+
+      {/*
+        ⚠ 换设备指纹**不可逆**（旧指纹开着的扫码会话立即失效）⇒ 必须确认一次。
+        影响面写具体：换的是什么、谁会失效、谁不受影响（§6.4：只说"确定吗"等于没确认）。
+      */}
+      <ConfirmDialog
+        id={rotateDialogId}
+        title="更换本机设备指纹"
+        impact={
+          <span>
+            将把本机设备指纹换成新的一份。用<b>旧指纹</b>开着的扫码会话（二维码）
+            会立即失效，得重新出码；<b>已登录的账号不受影响</b>。
+            上游按设备指纹认设备，换掉后新的请求都会带新指纹。
+          </span>
+        }
+        confirmLabel="换掉指纹"
+        onConfirm={() => void doRotateDevice()}
+      />
 
       <ConfirmDialog
         id="confirm-delete-account"

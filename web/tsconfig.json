@@ -4,17 +4,21 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["vite/client"],
 
-    // JSX 的**类型**来自 `lite/jsx.d.ts` 里那个全局 `JSX` 命名空间（不是某个包的）。
-    // ⚠ 一旦写 `jsxImportSource`，tsc 就改去读那个包的模块声明，这份全局声明**整个失效**
+    // `vite/client` 给 `import.meta.env`；`@asunajs/lite/jsx` 是那个全局 `JSX` 命名空间
+    // （只有类型、零运行时代码）。
+    //
+    // ⚠ JSX 的**类型**来自框架包，不是某个 React/Vue 的运行时包。
+    // 一旦写 `jsxImportSource`，tsc 就改去读那个包的模块声明，这份全局声明**整个失效**
     // —— 症状是每个标签都报 TS7026，看着像"lite 不支持 JSX"。
-    // 运行时由 `lite/vite.ts` 编译（`jsx: preserve` 正好表示"tsc 别动 JSX"）。
+    // 运行时由 `@asunajs/lite/vite` 编译（`jsx: preserve` 正好表示"tsc 别动 JSX"）。
+    "types": ["vite/client", "@asunajs/lite/jsx"],
     "jsx": "preserve",
 
-    // 源码与编译器产物都写裸名 `from 'lite'`（与 `vite.config.ts` 的 alias 同一条口径）。
-    // ⚠ 两边必须同时改：只改这里会在构建时炸，只改那里会在 `npm run typecheck` 炸。
-    "paths": { "lite": ["./lite/src/index.ts"] },
+    // ⚠ 2026-10-07 起**没有** `paths` 了：lite 剥离到 `asunajs/lite` 之后它是一份
+    // 正常依赖，包名就是 `@asunajs/lite`，源码与编译器产物都写这个裸名，交给
+    // `moduleResolution: bundler` 常规解析 ✓（以前要 `paths` 是因为框架在仓里、
+    // 业务源码写裸名 `lite`）。
 
     "strict": true,
     "noUnusedLocals": true,
@@ -28,5 +32,5 @@
     // 显式写 .ts 扩展名：Vite 的原生配置加载器将来会要求；TS 需要这个开关才不报错
     "allowImportingTsExtensions": true
   },
-  "include": ["src", "lite/src", "lite/jsx.d.ts", "lite/demo", "lite/bench", "vite.config.ts"]
+  "include": ["src", "vite.config.ts"]
 }

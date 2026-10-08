@@ -8,15 +8,21 @@ pub mod capabilities;
 pub mod exchange;
 pub mod health;
 pub mod kouling;
+/// 「直播自动定时」（设置页那张卡）：`GET/PUT /api/live-room/auto-schedule`。
+/// 落盘是**那条普通定时**（`schedules.json` 里的 `auto-live-<owner>` ✓），
+/// 不是新开的一张表 ✓ —— 见模块头。
+pub mod live_room;
 pub mod login;
 pub mod logs;
 pub mod pipelines;
+pub mod push;
 pub mod runs;
 pub mod schedules;
 pub mod security;
 pub mod server_logs;
 pub mod system;
 pub mod task_config;
+pub mod upstream;
 
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -96,6 +102,9 @@ pub fn router() -> Router<ServerState> {
         // ── 系统（存储 / 重启）───────────────────────────────────────
         // ── 共享口令池（直播页看它决定"还要不要抓"）──────────────────
         .route("/api/kouling", get(kouling::get_pool))
+        // ── 直播自动定时（设置页那张卡：开关 + 账号多选 + 当前算出的时刻）──
+        // ⚠ 它落到**定时那张表**上（`auto-live-<owner>` ✓），不是新开的一张表 ✓。
+        .merge(live_room::routes())
         // ── 任务的参数配置（任务页「配置」那一页）──────────────────────
         .route(
             "/api/tasks/{name}/config",
@@ -107,6 +116,9 @@ pub fn router() -> Router<ServerState> {
         // 今日AI豆（云朵记录汇总）—— **只读**：按账号读流水，绝不合计。
         // 一个账号读不到进响应的 `failed`，不打整张卡（见 beans.rs 模块头）。
         .merge(beans::routes())
+        // 上游状态那一页**按需取**的只读通路（不落运行历史、不占任务）——
+        // 见 `upstream.rs` 模块头（用户口径 2026-10-07）。
+        .merge(upstream::routes())
         .route("/api/runs", get(runs::list).post(runs::create))
         .route("/api/runs/{id}", get(runs::get_one))
         .route("/api/runs/{id}/events", get(runs::events))
@@ -150,4 +162,8 @@ pub fn router() -> Router<ServerState> {
         .route("/api/login/device/rotate", post(login::rotate_device))
         .merge(schedules::routes())
         .merge(pipelines::routes())
+        // 推送规则（用户口径 2026-10-07 的「规则」那一层）：CRUD + 事件/渠道清单 +
+        // 试发（`POST /api/push/test`，用**某条规则自己的**平台与凭据真发一条 ✓，
+        // 见 `push.rs` 的 `test_send`）✓。
+        .merge(push::routes())
 }

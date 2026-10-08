@@ -118,10 +118,28 @@ pub struct LiveSession {
 ///
 /// 所以做成池上的一个时间戳：持久 ✓、跨重启 ✓、测试里（空池）天然放行 ✓。
 ///
-/// 取 90 秒的理由：一次抓取本身要听满 `listenSeconds`（默认 60 秒），
-/// 90 秒既能挡住"同一场里几个账号同时扑上去"，又不会让"上次什么都没抓到"
-/// 卡住太久（下一分钟的运行就能重试）。
-pub const SCRAPE_MIN_INTERVAL_MS: i64 = 90 * 1000;
+/// # ⚠⚠ 不变量：这个常量必须 **≥ 一次抓取的时长**
+///
+/// 一次抓取本身要听满 `listenSeconds` —— 缺省 180 秒，**定义在另一个 crate**
+/// （`mcloud-tasks` 的 `live_room::DEFAULT_LISTEN_SECONDS`；依赖方向是
+/// `mcloud-tasks → mcloud-core`，所以这里**引用不到**它，别硬跨 crate 依赖）。
+/// 取值的硬约束因此是：
+///
+/// ```text
+/// SCRAPE_MIN_INTERVAL_MS ≥ DEFAULT_LISTEN_SECONDS * 1000
+/// ```
+///
+/// 违反它 = **第一个账号的抓取还没结束、第二个账号就会另起一次抓取** ✗ ——
+/// 那正是"一个 mcloud 用户只开一个抓取"要消灭的事。
+/// 跨 crate 的这条断言钉在 `mcloud-tasks` 那边（两个常量都在作用域里的只有它）：
+/// `live_room/tests.rs` 的 `scrape_interval_covers_a_whole_listen`。
+///
+/// ⚠ 历史：2026-10-08 之前缺省是 60 秒、这里取 90 秒（比一次抓取长一点，
+/// 好让"上次什么都没抓到"下一分钟就能重试）。缺省改成 180 之后 `180 > 90`
+/// 就破了上面那条不变量 ⇒ 这里跟着抬到 180 秒：**正好等于一次抓取的时长**，
+/// 既不再重叠，重试延迟也仍然只有一轮运行（≈1 分钟）。
+/// 今后改 `DEFAULT_LISTEN_SECONDS` 的**任何一方**都要回来核这条不变量 ✓。
+pub const SCRAPE_MIN_INTERVAL_MS: i64 = 180 * 1000;
 
 /// 两次**小红书**主页请求之间的最小间隔。
 ///
@@ -358,6 +376,9 @@ impl KoulingPool {
     }
 
     /// 下一场是哪一间（**跳过已过去**的场次）。
+    ///
+    /// ⚠ 判据**不在这个方法里** —— 它在自由函数 [`next_room_at`] 上，
+    /// 因为"下一场"现在有两个来源（盘上的池 / 上游现取 ✓），两者必须同一套判据 ✓。
     pub fn next_room_at(&self, now_local: &str) -> Option<&ProbeRoom> {
         // ⚠⚠ **只有目标主播那一个**（用户口径 2026-10-02：「有效的主播只有一个」）✗
         //
@@ -401,15 +422,7 @@ impl KoulingPool {
     /// 定长且字典序等于时间序 ✓。**不要**解析成时间戳 —— 它没有时区，
     /// 解析只会造出一个错的时刻（这条注释原来就在这里，继续有效 ✓）。
     fn earliest_preview(&self, only_target: bool, not_before: Option<&str>) -> Option<&ProbeRoom> {
-        self.schedule
-            .iter()
-            .filter(|r| r.status == 0 && !r.expect_start_time.is_empty())
-            // ⚠ 判据是**那个唯一有效的名字**（[`KOULING_ANCHOR`]）✗ —— 不是"学出来的锚"：
-            // 从前这里比 `self.schedule_anchor`，而盘上它是 `None`、房间昵称是空串 ⇒
-            // 判据空转 ⇒ 只好取"最早"⇒ 把**别人的**场次（10-02 15:00）摆上了「下一场」✗。
-            .filter(|r| !only_target || r.anchor_nickname == KOULING_ANCHOR)
-            .filter(|r| not_before.is_none_or(|n| r.expect_start_time.as_str() >= n))
-            .min_by(|a, b| a.expect_start_time.cmp(&b.expect_start_time))
+        earliest_preview_in(&self.schedule, only_target, not_before)
     }
 
     /// 记下"这份日程属于哪个主播"（挑「下一场」时按它筛，见 [`Self::next_start`]）。
@@ -680,6 +693,51 @@ impl KoulingPool {
             },
         }
     }
+}
+
+/// 从一串**上游原样**的房间（`ProbeRoom`）里挑「下一场」。
+///
+/// 判据三条，与池上那份**逐条相同**（这里就是它唯一的实现 ✓）：
+///
+/// 1. **只认目标主播**（昵称精确等于 [`KOULING_ANCHOR`] ✓）—— 上游列表里混着
+///    别的主播（见 [`KoulingPool::next_start`] 的注释 ✓）；
+/// 2. **只认预告场**（`status == 0` ✓）—— `expect_start_time` 只在那一档有意义；
+/// 3. **跳过已经过去的场次**（`expect_start_time >= now_local` ✓）—— 上游会把
+///    开过的场次继续挂在预告里（用户实测 2026-10-02：「16:31 还显示 15:00」✗）。
+///
+/// 再取**最早**那一条（只比字符串：定长 ⇒ 字典序等于时间序 ✓）。
+///
+/// # ⚠ 为什么做成**自由函数**（而不是只有池上有）
+///
+/// 「下一场」有两个来源：盘上那份**池**（最近一次探测的结论 ✓）与**上游现取**
+/// （直播自动定时的重算 ✓，见 `mcloud_app::live_auto`）。两个来源必须**同一套判据**
+/// —— 各写一遍的话，"哪个才是对的"没人能从两份代码里读出来，而判据分叉的后果
+/// 用户已经见过一次（那一句「16:31 还显示 15:00」✓）。
+///
+/// ⇒ 判据只写在这里：[`KoulingPool::next_room_at`] 与上游那条路**都调它** ✓。
+pub fn next_room_at<'a>(rooms: &'a [ProbeRoom], now_local: &str) -> Option<&'a ProbeRoom> {
+    earliest_preview_in(rooms, true, Some(now_local))
+}
+
+/// [`KoulingPool::earliest_preview`] 与 [`next_room_at`] 共用的那一段。
+///
+/// ⚠ 两个入口的参数**刻意保留**（`only_target` / `not_before` 各是一档）：
+/// 池那边 `next_room()`（不筛时间）也要走它 —— 合成一个只认"目标 + 现在"的函数
+/// 会让那一支被迫造一个假的 `now_local` ✗。
+fn earliest_preview_in<'a>(
+    rooms: &'a [ProbeRoom],
+    only_target: bool,
+    not_before: Option<&str>,
+) -> Option<&'a ProbeRoom> {
+    rooms
+        .iter()
+        .filter(|r| r.status == 0 && !r.expect_start_time.is_empty())
+        // ⚠ 判据是**那个唯一有效的名字**（[`KOULING_ANCHOR`]）✗ —— 不是"学出来的锚"：
+        // 从前这里比 `self.schedule_anchor`，而盘上它是 `None`、房间昵称是空串 ⇒
+        // 判据空转 ⇒ 只好取"最早"⇒ 把**别人的**场次（10-02 15:00）摆上了「下一场」✗。
+        .filter(|r| !only_target || r.anchor_nickname == KOULING_ANCHOR)
+        .filter(|r| not_before.is_none_or(|n| r.expect_start_time.as_str() >= n))
+        .min_by(|a, b| a.expect_start_time.cmp(&b.expect_start_time))
 }
 
 /// 给界面/接口的池状态快照。

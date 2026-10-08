@@ -4,15 +4,21 @@
  * 一种提交就验证必要的测试」）。
  *
  * * `--commit`（**默认就是它**）：提交档 —— 改完就能自查的最小集合。
- *   类型 + 构建 + 编译器负例 + 框架真 DOM 断言（demo）+ 编译产物行为护栏（bench）
- *   + **真页面点一遍**（交互验收 `ready` 一个认证态）。
- * * `--push`：推送档 —— 上面那档 **再加**三条"范围广/看不出来"的：
- *   320/375 两档窄屏布局、`login` / `setup` 两个认证态、前端泄漏量测。
+ *   类型 + 构建 + **真页面点一遍**（交互验收 `ready` 一个认证态）+ 大体量验收
+ *   （分页 + 窗口化）+ 配置中心搜索框。共 **5 条**（要浏览器的 3 条并行）。
+ * * `--push`：推送档 —— 上面那档 **再加**四条"范围广/看不出来"的：
+ *   320/375 两档窄屏布局、`login` / `setup` 两个认证态、前端泄漏量测。共 **9 条**。
  *   ⚠ 泄漏那条自己就占了绝大部分时间（9 个路由 × 2 轮 + 9 次浏览器启动），
  *   它就是"推送档为什么长"的**全部**原因 ✓。
  *
- * 两档的关系是**包含**：`--push` 跑的就是 `--commit` 的超集（同一条命令 + 三条）✓，
+ * 两档的关系是**包含**：`--push` 跑的就是 `--commit` 的超集（同一条命令 + 四条）✓，
  * 不存在"跑了推送档反而漏了提交档某条"的情形 ✓。
+ *
+ * ⚠⚠ **2026-10-07 起这里只有"页面级"验收了**：lite 框架本体剥离到 `asunajs/lite`
+ * （见 `docs/web/lite.md`），框架自己的三条门（编译器负例 `regress/compiler.mjs`、
+ * 真 DOM 验收 `demo/`、编译产物护栏 `bench/`）**随框架走了** —— 它们跑在框架仓的
+ * CI 里，本仓拿不到（包只发 `src` + `dist`，不含夹具）。本仓保留的是"这套页面在
+ * 这个真实应用上对不对"，那才是只有这里能回答的问题 ✓。
  *
  * # 为什么这么分（而不是"提交时全跑"）
  *
@@ -80,19 +86,13 @@ const hasBrowser = () => {
  * 读的都是 `build` 刚产出的 `web/dist`）✓。
  */
 const GATES = [
-  // ── 提交档：不依赖浏览器的三条（**串行**，`build` 必须先出 `web/dist`）──
+  // ── 提交档：不依赖浏览器的两条（**串行**，`build` 必须先出 `web/dist`）──
   { tier: 'commit', name: 'typecheck', cmd: 'npm', args: ['run', 'typecheck'] },
   { tier: 'commit', name: 'build', cmd: 'npm', args: ['run', 'build'] },
-  // 编译期负例：纯 Node，CI 也跑得动 —— 该抛的没抛就是编译器的门坏了
-  { tier: 'commit', name: 'lite 编译期负例', cmd: 'node', args: ['lite/regress/compiler.mjs'] },
 
-  // ── 提交档：要浏览器的四条（**并行**）──
-  // demo：lite 的**真 DOM 断言**（绑定/列表复用/插槽/钩子/条件分支…）—— 框架自己的门
-  { tier: 'commit', name: 'lite 真 DOM 验收', cmd: 'node', args: ['lite/demo/run.mjs'], browser: true },
-  // bench：编译产物的行为断言 + 一组很松的耗时护栏（列表从"搬"退化成"重建"时能响）
-  { tier: 'commit', name: '编译产物行为 + 耗时护栏', cmd: 'node', args: ['lite/bench/run.mjs'], browser: true },
+  // ── 提交档：要浏览器的三条（**并行**）──
   // 交互验收 ready：**真页面**点一遍（9 条路由 + 各页的交互与断言）—— 提交档里最值钱的一条
-  { tier: 'commit', name: '交互验收 ready', cmd: 'node', args: ['lite/regress/interact.mjs', '--variant', 'ready'], browser: true },
+  { tier: 'commit', name: '交互验收 ready', cmd: 'node', args: ['regress/interact.mjs', '--variant', 'ready'], browser: true },
   /**
    * 大体量验收：**分页与窗口化只有数据量够大时才现形** ✓（2026-10-05 用户口径
    * 「任务记录分页，详细日志虚拟加载」）。
@@ -105,7 +105,7 @@ const GATES = [
    *
    * 实测 **≈29 s**，比同档的 `ready`（≈40 s）短 ⇒ 并行跑**不增加**墙钟时间 ✓。
    */
-  { tier: 'commit', name: '大体量验收（分页 + 窗口化）', cmd: 'node', args: ['lite/regress/bulk.mjs'], browser: true },
+  { tier: 'commit', name: '大体量验收（分页 + 窗口化）', cmd: 'node', args: ['regress/bulk.mjs'], browser: true },
   /**
    * 配置中心「搜索框」那条支路（第 103 行 ④ / 第 99 行 ③ 欠的 ✓）。
    *
@@ -115,16 +115,16 @@ const GATES = [
    * 本脚本自起「8 个任务」的大清单变体 ✓，实测 **≈25 s**（首版注释写 ≈10 s 是估的 ✗，
    * 真跑出来 24.7 s ⇒ 按实测写 ✓）⇒ 与本档其它条目并行跑，不增加墙钟 ✓。
    */
-  { tier: 'commit', name: '配置中心搜索框（大清单）', cmd: 'node', args: ['lite/regress/search.mjs'], browser: true },
+  { tier: 'commit', name: '配置中心搜索框（大清单）', cmd: 'node', args: ['regress/search.mjs'], browser: true },
 
   // ── 推送档追加：贵／"不看就发现不了"的三类 ──
   // 窄屏两档（320 / 375 真视口）：宽屏跑不到的"手机上没法用"那一类
   // ⚠ 名字里留一段 ASCII：日志文件名按 `[^0-9a-zA-Z]+` 清洗，纯中文名会退化成
   // `gates-web--.log`（跟别的门禁分不清）。
-  { tier: 'push', name: 'narrow-320-375 窄屏布局验收', cmd: 'node', args: ['lite/regress/narrow.mjs'], browser: true },
+  { tier: 'push', name: 'narrow-320-375 窄屏布局验收', cmd: 'node', args: ['regress/narrow.mjs'], browser: true },
   // 另外两个认证态：走的是**另一条代码路径**（登录闸门 / 建管理员向导），ready 态覆盖不到
-  { tier: 'push', name: '交互验收 login', cmd: 'node', args: ['lite/regress/interact.mjs', '--variant', 'login'], browser: true },
-  { tier: 'push', name: '交互验收 setup', cmd: 'node', args: ['lite/regress/interact.mjs', '--variant', 'setup'], browser: true },
+  { tier: 'push', name: '交互验收 login', cmd: 'node', args: ['regress/interact.mjs', '--variant', 'login'], browser: true },
+  { tier: 'push', name: '交互验收 setup', cmd: 'node', args: ['regress/interact.mjs', '--variant', 'setup'], browser: true },
   /**
    * 泄漏量测：**只在推送档**。要无头 Chrome 走 9 个路由 × 2 轮（实测 ≈127 s，
    * 是全部十条里最慢的一条，比其余九条加起来还长 ✓ 所以它不进提交档 ✗）。
@@ -134,7 +134,7 @@ const GATES = [
    * 当时只有一份要**真会话 cookie** 的脚本 ✗（`/tmp/mcloud-cookie.txt`），别人复现不了 ✗。
    * 现在走 `--fixture` ✓（夹具后端 + 内核分配端口，不碰 3000、不要 cookie ✓）。
    */
-  { tier: 'push', name: '前端泄漏量测', cmd: 'node', args: ['lite/regress/leak.mjs', '--fixture', '--rounds', '2'], browser: true },
+  { tier: 'push', name: '前端泄漏量测', cmd: 'node', args: ['regress/leak.mjs', '--fixture', '--rounds', '2'], browser: true },
 ]
 
 /** 本次要跑的那几条（提交档 + 推送档追加）。 */
@@ -207,7 +207,7 @@ function browserMissing(gate) {
   return true
 }
 
-// ① 顺序跑"不依赖浏览器"的那几条：typecheck / build / lite 编译期负例。
+// ① 顺序跑"不依赖浏览器"的那两条：typecheck / build。
 //    `build` 必须在浏览器的那几条之前 —— 它们服务的是它产出的 `web/dist` ✗。
 const serial = ACTIVE.filter((g) => !g.browser)
 const parallel = ACTIVE.filter((g) => g.browser)

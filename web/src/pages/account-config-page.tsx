@@ -1,33 +1,41 @@
 /**
- * 账号配置（`/accounts/push` —— 账号页的子视图，侧栏仍高亮「账号」）。
+ * 账号配置（`/accounts/settings` —— 账号页的子视图，侧栏仍高亮「账号」）。
  *
- * # 这一页是什么（用户口径 2026-10-05）
+ * # 这一页是什么（用户口径 2026-10-05；2026-10-08 收掉推送那一块）
  *
  * 「我准备拆分一下，**推送单独给配置页面**」——原来推送与任务配置挤在
  * `config-page.tsx`（配置中心）的两个 tab 里，现在拆开：
  *
  * | 页面 | 地址 | 装什么 |
  * |---|---|---|
- * | 配置中心（任务） | `/tasks/config` | 每个任务的**公共配置** + **账号私有配置**（指路） |
- * | **账号配置**（本页） | `/accounts/push` | 每个账号的**推送渠道** + 账号级设置 + 功能开关 |
+ * | 配置中心（任务） | `/tasks/config` | 每个任务的**公共配置** |
+ * | **账号配置**（本页） | `/accounts/settings` | 账号级设置 + 功能开关 |
+ * | **推送**（独立一页） | `/push` | **每个登录用户一份**的推送渠道 + 规则 |
  *
- * ⚠ 地址留在账号页下面（`/accounts/push`）：侧栏**9 条封顶**是硬约定（`nav.ts`），
- * 推送不属于新分区，而它本来就是"每个账号一份"的东西 ⇒ 挂账号页最顺 ✓。
+ * ⚠⚠ 2026-10-08 用户口径（「**很显然我说的和云盘账户没有关系**，为啥你这里云盘账户
+ * 有配置」＋「**丢弃现有情况，重写**」）：**推送渠道整块从本页删掉了** ✗ ——
+ * 渠道 / 规则 / 绑定**三层同一口径：每个登录用户一份** ✓。
+ * ⚠ 它先落在「设置」页那张卡上，当天又按用户口径「并单独给推送一个」搬进了
+ * **独立的「推送」页**（`/push`，`pages/push-page.tsx` ✓）—— 所以指路一律指「推送」页 ✓。
+ * 本页只留**真的按账号算**的两块：账号级设置（备份等待 / 凭据阈值）与功能开关 ✓。
+ *
+ * ⚠ 地址是 **`/accounts/settings`**（2026-10-05 挂账号页下面、不新开导航项 ✓；
+ * 2026-10-08 从 `/accounts/push` 改过来 ✓ —— 推送渠道搬走之后，
+ * 路径里那个 `push` 就名不副实了 ✗）。老地址 `/accounts/push` **照旧能打开** ✓
+ * （`accounts-page.tsx` 的视图判定里留着那一支 ✓）。
  *
  * # 与账号页的"设置弹窗"什么关系
  *
  * 弹窗里那两块（任务参数 / 功能开关）一直由 `SHOW_ACCOUNT_SETTINGS_BLOCKS` 藏着
  * （2026-10-02 用户口径「这些设置先取消显示，设置后面单独弄」）—— 本页就是"单独弄"的家 ✓。
- * 弹窗那边**一个字没动**：它照旧只显示"改昵称/设备/凭据"那几格，别顺手把它打开 ✗。
+ * 弹窗那边照旧只显示"改昵称/设备/凭据"那几格，别顺手把它打开 ✗。
  *
- * # 两个编辑器都是共享模块
+ * # 编辑器是共享模块
  *
- * - `ui/push-editor.tsx`：推送渠道（十条渠道 + 打码字段）
  * - `ui/account-fields.tsx`：账号级两格（备份等待 / 凭据阈值）+ 功能开关（AI 头像上限）
  *
  * ⇒ 本页只负责"挑账号、读设置、整体写回"。`PUT /api/accounts/{id}/settings` 是
- * **整体替换**：两个编辑器合起来正好覆盖 `AccountSettings` 的全部五格，保存时
- * `{...服务端那一份, ...acct.build(), notify: push.build()}` —— 少写一格就是把用户
+ * **整体替换**：保存时 `{...服务端那一份, ...acct.build()}` —— 少写一格就是把用户
  * 没碰过的设置静默抹掉 ✗。
  *
  * # 移动端与草稿
@@ -38,7 +46,7 @@
  * 那次实测见 `config-page.tsx` 文件头那段 ⚠⚠）。
  */
 
-import { onMounted, onUnmounted, ref } from 'lite'
+import { onMounted, onUnmounted, ref } from '@asunajs/lite'
 import { setPageRefresh } from '../ui/page-refresh'
 import {
   getAccountSettings,
@@ -47,12 +55,11 @@ import {
   type AccountSettings,
   type AccountSummary,
 } from '../api'
-import { createPushEditor, type PushEditorSnapshot } from '../ui/push-editor'
 import { createAccountFields, type AccountFieldsSnapshot } from '../ui/account-fields'
 import { EmptyState } from '../ui/empty-state'
 import { pushToast } from '../ui/toast'
 import { navigate } from '../ui/router'
-import { IconClose, IconSearch } from '../ui/icons'
+import { IconAlert, IconClose, IconSearch } from '../ui/icons'
 
 export interface AccountConfigPageProps {
   /** 回账号页。 */
@@ -73,9 +80,8 @@ const query = ref('')
 /** 手机上"详情是否已铺开"（false = 看列表）。宽屏不看它。 */
 const drillOpen = ref(false)
 
-/** 一个账号的草稿：两个编辑器各一份快照（都是纯数据，可 JSON 化）。 */
+/** 一个账号的草稿：账号级编辑器那一份快照（纯数据，可 JSON 化）。 */
 interface AccountDraft {
-  push: PushEditorSnapshot
   fields: AccountFieldsSnapshot
 }
 /** ⚠ **普通 Map**，不是信号 —— `onUnmounted` 也要写它（见文件头最后一段）。 */
@@ -83,33 +89,26 @@ const drafts = new Map<string, AccountDraft>()
 /** 草稿表的"版本号"。只在交互处理器里自增，用来唤醒读了草稿的那些槽。 */
 const draftsRev = ref(0)
 
-/**
- * 从别处跳进来时**预选**某个账号（配置中心「账号私有配置」那半的「改它的推送」用）。
- *
- * ⚠ 用模块级状态而不是 URL 参数：这一页的选择本来就是会话内状态（切走再回来还在），
- * 再为"预选哪一个"造一套 `/accounts/push/<id>` 解析只会多一条要维护的路径 ✗。
- * 调用方**先调它再 `navigate()`** ✓。
- */
-export const preselectAccount = (id: string) => {
-  pickedAccount.value = id
-  drillOpen.value = true
-}
-
 export const AccountConfigPage = (props: AccountConfigPageProps) => {
   const state = ref<LoadState>('loading')
   const errorMessage = ref('')
   const accounts = ref<AccountSummary[]>([])
 
-  // 两个编辑器（共享模块；见文件头）
-  const push = createPushEditor()
+  // 账号级编辑器（共享模块；见文件头）
   const acct = createAccountFields()
   const detailState = ref<'idle' | 'loading' | 'error' | 'ready'>('idle')
   const detailError = ref('')
+  /**
+   * 保存失败的那一句（**弹窗 + 就近**，2026-10-08 用户口径「所有的提示都是优先弹窗式」）。
+   * 画在卡片标题那一行下面（「保存」就在那一行右端）——
+   * 以前这里**只有** toast，长表单里滚动之后看不到；而 `detailError` 是"读不出来"
+   * （配重试），不是"存不进去"，两者不能混用 ✓。
+   */
+  const saveError = ref('')
   const saving = ref(false)
   /** 这个账号**完整**的一份设置（GET 回来的）。 */
   const acctSettings = ref<AccountSettings | null>(null)
-  /** 载入（或保存）之后的那两份快照文本：未保存修改就是它与当前快照不等。 */
-  const pushBaseline = ref('')
+  /** 载入（或保存）之后的那份快照文本：未保存修改就是它与当前快照不等。 */
   const fieldsBaseline = ref('')
   /** 请求序号：连着点两个账号时，迟到的响应不能覆盖新的选中。 */
   let seq = 0
@@ -161,8 +160,8 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
     if (pickedAccount.value && detailState.value === 'idle') void loadSettings(pickedAccount.value)
   }
 
-  const snapshotText = (): string => JSON.stringify(push.snapshot()) + '|' + JSON.stringify(acct.snapshot())
-  const baseText = (): string => pushBaseline.value + '|' + fieldsBaseline.value
+  const snapshotText = (): string => JSON.stringify(acct.snapshot())
+  const baseText = (): string => fieldsBaseline.value
   const dirty = (): boolean => detailState.value === 'ready' && snapshotText() !== baseText()
 
   const loadSettings = async (id: string) => {
@@ -173,14 +172,11 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
       const s = await getAccountSettings(id)
       if (mine !== seq || pickedAccount.value !== id) return
       acctSettings.value = s
-      push.load(s.notify)
       acct.load(s)
       // 基线取**服务端那一份**（在草稿之前）⇒ 有草稿时"未保存修改"才是对的
-      pushBaseline.value = JSON.stringify(push.snapshot())
       fieldsBaseline.value = JSON.stringify(acct.snapshot())
       const draft = drafts.get(id)
       if (draft) {
-        push.restore(draft.push)
         acct.restore(draft.fields)
       }
       detailState.value = 'ready'
@@ -196,7 +192,7 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
   const stashDraft = () => {
     const id = pickedAccount.value
     if (!id || detailState.value !== 'ready') return
-    if (dirty()) drafts.set(id, { push: push.snapshot(), fields: acct.snapshot() })
+    if (dirty()) drafts.set(id, { fields: acct.snapshot() })
     else drafts.delete(id)
   }
 
@@ -207,6 +203,7 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
   }
 
   const selectAccount = (id: string) => {
+    saveError.value = ''
     if (id !== pickedAccount.value) stashDraft()
     draftsRev.value++
     pickedAccount.value = id
@@ -217,9 +214,10 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
   /**
    * 保存这个账号的配置。
    *
-   * ⚠⚠ **整体替换**语义：请求体必须齐五格。两个编辑器合起来正好覆盖 `AccountSettings`，
-   * `...s` 那一下是给"以后 DTO 加了格子、编辑器还没跟上"兜底的（那种格子至少不会被抹成
-   * 默认值）。**加了新格子就必须给它画控件**，否则用户看不到、也改不了。
+   * ⚠⚠ **整体替换**语义：请求体必须齐 `AccountSettings` 的每一格。`...s` 那一下是给
+   * "以后 DTO 加了格子、编辑器还没跟上"兜底的（那种格子至少不会被抹成默认值）。
+   * **加了新格子就必须给它画控件**，否则用户看不到、也改不了。
+   * ⚠ 推送渠道**不在这里**了（2026-10-08 收成登录用户级 ⇒ 见「推送」页 `/push` ✓）。
    */
   const save = async () => {
     const s = acctSettings.value
@@ -228,25 +226,29 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
     let next: AccountSettings
     try {
       // 本地能判的当场说（空、不是整数）；**范围**仍然留给后端
-      next = { ...s, ...acct.build(), notify: push.build() }
+      next = { ...s, ...acct.build() }
     } catch (e) {
-      pushToast('error', e instanceof Error ? e.message : '配置不完整')
+      const msg = e instanceof Error ? e.message : '配置不完整'
+      saveError.value = msg
+      pushToast('error', msg)
       return
     }
+    saveError.value = ''
     saving.value = true
     try {
       const after = await putAccountSettings(id, next)
       acctSettings.value = after
       // 用**后端回读的那一份**回填：整体替换的语义下，"我以为存进去的"不算数
-      push.load(after.notify)
       acct.load(after)
-      pushBaseline.value = JSON.stringify(push.snapshot())
       fieldsBaseline.value = JSON.stringify(acct.snapshot())
       drafts.delete(id)
       draftsRev.value++
       pushToast('success', '已保存 —— 只对这个账号生效')
     } catch (e) {
-      pushToast('error', e instanceof Error ? e.message : '保存失败')
+      const msg = e instanceof Error ? e.message : '保存失败'
+      saveError.value = msg
+      // 弹窗优先：错误类 toast 不自动消失（见 `ui/toast.ts`）
+      pushToast('error', msg)
     } finally {
       saving.value = false
     }
@@ -373,7 +375,7 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
       {accounts.value.length === 0 ? (
         <EmptyState
           title="还没有已登录的账号。"
-          hint="推送是按账号配的：先登录一个云盘账号，再回来配它。"
+          hint="这里配的是「每个账号各一份」的账号级设置：先登录一个云盘账号，再回来配它。"
           action={
             <button type="button" class="btn btn-soft" onClick={() => navigate('/accounts')}>
               去登录
@@ -416,17 +418,32 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
               {actions()}
             </div>
 
+            {/* ⚠ 失败那一句在**标题行下面**（保存键就在那一行右端），不是表单底部 ✓ */}
+            {saveError.value ? (
+              <div class="alert alert-soft alert-error text-sm" role="alert">
+                <IconAlert class="size-4 shrink-0" />
+                <span class="break-words">{saveError.value}</span>
+              </div>
+            ) : null}
+
             <p class="text-sm opacity-70">
               <span class="badge badge-soft badge-sm mr-1">账号级</span>
-              这一页只对左边这个账号生效（本仓没有进程级兜底）。按任务的项（例如"跳过哪些任务"）
+              这一页只对左边这个账号生效。按任务的项（例如"跳过哪些任务"）
               在「任务配置」那一页里，两处各管各的。
+              {/* ⭐ 2026-10-08 用户就是被这一点绕住的（「为啥你这里云盘账户有配置」✗）⇒
+                  在页面里**明说**推送搬到哪儿了，别让用户在这页找渠道 ✓。
+                  ⚠ 落点当天又变过一次：渠道与规则一起进了**独立的「推送」页**（`/push` ✓，
+                  用户口径「并单独给推送一个」）—— 别再指去「设置」页 ✗。 */}
+              推送渠道不在这里：它是"你这个登录用户"一份的，在
+              <button
+                type="button"
+                class="link link-primary"
+                onClick={() => navigate('/push')}
+              >
+                推送
+              </button>
+              页里配。
             </p>
-
-            <div class="flex flex-col gap-2">
-              <h4 class="text-sm font-medium">推送渠道</h4>
-              {/* 十条渠道 + 打码字段的整块表单在 `ui/push-editor.tsx`（账号页的设置弹窗共用） */}
-              {push.fields()}
-            </div>
 
             <div class="flex flex-col gap-2">
               <h4 class="text-sm font-medium">账号级设置</h4>
@@ -447,7 +464,7 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
         ) : null}
 
         {detailState.value === 'idle' ? (
-          <p class="py-10 text-center text-sm opacity-70">左边挑一个账号，这里配它的推送与账号级设置。</p>
+          <p class="py-10 text-center text-sm opacity-70">左边挑一个账号，这里配它的账号级设置。</p>
         ) : null}
       </div>
     </div>
@@ -498,7 +515,7 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
           <IconClose class="size-4" />
         </button>
         <h1 class="text-base font-medium">账号配置</h1>
-        <span class="text-xs opacity-60">推送渠道 + 账号级设置</span>
+        <span class="text-xs opacity-60">账号级设置 + 功能开关</span>
       </div>
 
       {state.value === 'loading' ? (

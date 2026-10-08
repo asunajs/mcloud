@@ -8,7 +8,7 @@
  * 它必须与 Rust 那份（`mcloud-crypto::client_password_digest`）**逐字节一致** ——
  * 不一致的表现是"口令明明对、就是登不上"，而且换个端才复现。所以两边都钉了
  * 对拍向量：`SHA-256("abc") = ba7816…15ad`（Rust 单测 `client_digest_matches_the_web_side`
- * + `lite/regress` 的登录闸直接断言请求体是摘要）。
+ * + `regress` 的登录闸直接断言请求体是摘要）。
  *
  * 选裸 SHA-256 而不是慢哈希：抗暴力破解由服务端那次 argon2id 负责，
  * 这里再做一遍慢哈希只会让每次登录多等一百毫秒，而**收益是零** ——

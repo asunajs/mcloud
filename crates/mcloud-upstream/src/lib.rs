@@ -9,6 +9,7 @@
 //! 业务层只看到 `mcloud_core::HttpClient`。
 
 pub mod ai_avatar;
+pub mod ai_cloud;
 pub mod app_cloud_outlink;
 pub mod app_cloud_upload;
 pub mod app_funai;
@@ -37,6 +38,8 @@ pub mod live_room;
 pub mod live_ws;
 pub mod live_ws_client;
 pub mod login;
+pub mod mail139;
+pub mod note;
 pub mod session;
 pub mod session_source;
 pub mod smid;

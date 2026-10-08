@@ -18,17 +18,21 @@
  * 后端的错误文本**原样透出**，不翻译、不改写。
  */
 
-import { onMounted, onUnmounted, ref } from 'lite'
+import { onMounted, onUnmounted, ref } from '@asunajs/lite'
 import { setPageRefresh } from '../ui/page-refresh'
 import { accountName } from '../account-names'
 import {
   deleteSchedule,
   listAccounts,
   listCapabilities,
+  listPushEvents,
+  listPushRules,
   listSchedules,
   PIPELINE_TASK,
   saveSchedule,
   type AccountSummary,
+  type PushEventOption,
+  type PushRule,
   type Schedule,
   type ScheduleInput,
   type TaskMeta,
@@ -41,6 +45,8 @@ import { IconAlert } from '../ui/icons'
 import { fmtEpochMs } from '../ui/time'
 import { pushToast } from '../ui/toast'
 import { Select } from '../ui/select'
+import { PushEventPicker } from '../ui/push-event-picker'
+import { PushRuleSelect } from '../ui/push-rule-select'
 
 type LoadState = 'loading' | 'error' | 'ready'
 
@@ -98,6 +104,28 @@ const statusBadge = (s: Schedule['lastStatus']): { cls: string; text: string } =
   }
 }
 
+/**
+ * 这条定时是不是**系统维护**的（用户口径 2026-10-08：「为直播增加一个自动设置定时的
+ * 功能」⇒ 后端给它落了 `managedBy: "live-auto"` ✓）。
+ *
+ * # 为什么要把它标出来（而不是让它长得跟别的定时一样）
+ *
+ * 那条定时**不是用户建的**：它的**时刻**由系统按日程重算
+ *（= 下一场直播开始 + 1 小时 ✓，见 `mcloud-core::Schedule::managed_by` ✓）。
+ * ⇒ 用户在这一页把时刻改掉，下次重算会被**覆盖** ✗ —— 不说清就是坑 ✓。
+ *
+ * # ⚠ 但**开关没有第二套**
+ *
+ * 翻这条定时的「停用/启用」**就是**翻用户的意愿（后端
+ * `routes/schedules.rs` 里 `managed_by.is_some() ⇒ managed_wanted = input.enabled` 那一行，
+ * 已有用例钉住"两处是同一格" ✓）。所以这一页**照旧**发
+ * `PUT /api/schedules/{id}` ✓ —— 千万别在这里另造一个开关 ✗（两个开关会各说各话）。
+ */
+const isManaged = (s: Schedule) => s.managedBy === 'live-auto'
+
+/** 「系统维护」徽章 —— 与「已启用/已停用」并列，不是替代它 ✓。 */
+const MANAGED_BADGE = 'badge badge-soft badge-info badge-sm'
+
 export const SchedulesPage = () => {
   const state = ref<LoadState>('loading')
   /** 加载失败（整页替换）。**留在页内** —— 它要配「重试」。 */
@@ -116,6 +144,10 @@ export const SchedulesPage = () => {
   const tasks = ref<TaskMeta[]>([])
   /** 账号清单：账号那个**多选框**要用（「全部账号（N 个）」里的 N 也来自它 ✓）。 */
   const accounts = ref<AccountSummary[]>([])
+  /** 推送规则清单：「推送规则」那一格的多选要用（用户口径 2026-10-08 的「行为选规则」✓）。 */
+  const rules = ref<PushRule[]>([])
+  /** **运行类**事件清单（结局条件那排勾选框 ✓）。面板行为那几条不在这里 ✗。 */
+  const runEvents = ref<PushEventOption[]>([])
   /** 计时器：每分钟刷一次列表，让"下次执行"与"上次结果"跟上。 */
   let ticker: number | null = null
 
@@ -155,6 +187,21 @@ export const SchedulesPage = () => {
   const fExpr = ref('')
   const fTimezone = ref(DEFAULT_TZ)
   const fEnabled = ref(true)
+  /**
+   * 绑定的推送规则 id（**多选** ✓，用户口径「一个行为可以选择多个规则」）。
+   *
+   * ⚠ **必须与 `fBody` 一样"原样带回"**（见下面 `fBody` 那段说明 ✓）：
+   * 漏一处的表现是"改个名字顺手把绑定丢了" ✗。
+   * 空数组 = **不推** ✓（不是"全推"，也不是"回落到某个默认配置"✗）。
+   */
+  const fPushRules = ref<string[]>([])
+  /**
+   * 运行结局条件（**多选** ✓）。
+   *
+   * ⚠ **空数组 = 跑完就推** ✓（用户口径：「全不勾 = 跑完就推」）——
+   * 不是"不推" ✗。只含**运行类**事件（`kind === 'run'` ✓）。
+   */
+  const fPushEvents = ref<string[]>([])
   const saving = ref(false)
 
   // ── 删除确认 ──────────────────────────────────────────────────────────
@@ -168,14 +215,20 @@ export const SchedulesPage = () => {
     try {
       // 任务清单用于下拉框：**不硬编码任务名** —— 任务由后端注册表提供
       // 账号清单用于多选框（只取**已启用**的：`listAccounts()` 默认就不含停用的 ✓）
-      const [schedules, caps, accts] = await Promise.all([
+      // 推送规则清单用于「推送规则」那一格（不硬编码规则名 ✓）
+      const [schedules, caps, accts, pushRules, pushEvents] = await Promise.all([
         listSchedules(),
         listCapabilities(),
         listAccounts(),
+        listPushRules(),
+        listPushEvents(),
       ])
       items.value = schedules
       tasks.value = caps.tasks.filter((t) => !t.hidden)
       accounts.value = accts
+      rules.value = pushRules
+      // ⚠ 只留**运行类**：面板行为（登录/性能）没有定时可绑 ⇒ 摆进这张表单只会误导 ✗
+      runEvents.value = pushEvents.filter((e) => e.kind === 'run')
       state.value = 'ready'
     } catch (e) {
       errorMessage.value = e instanceof Error ? e.message : '无法连接后端'
@@ -194,44 +247,80 @@ export const SchedulesPage = () => {
 
   // ── 表单开合 ──────────────────────────────────────────────────────────
 
+  /**
+   * **原样带过去的 `body`**。
+   *
+   * # 为什么要有这一格（2026-10-07 用户实测报的 bug）
+   *
+   * 这个表单**没有参数控件**（参数在「任务配置」页编 ✓）⇒ 它以前**不发 `body`** ✗。
+   * 后果两条：
+   * * 停用/启用一条 `task: "pipeline"` 的定时 ⇒ 后端那句校验
+   *   「这条定时要跑编排，但 body 里没有 pipelineId」⇒ **连停用都做不到** ✗
+   *   （用户截图报的就是它 ✓）；
+   * * 编辑一条带参数的定时（例如 `live-room` 的口令）⇒ 参数**被清空** ✗（静默的数据丢失 ✗）。
+   *
+   * 现在：新建是 `{}` ✓；编辑时**原样带回去** ✓（后端也做了同一件事：没给就沿用旧值 ✓，
+   * 两边都堵上 —— 页面之外还有别的调用方 ✓）。
+   */
+  const fBody = ref<unknown>({})
+
   const openCreate = () => {
     editingId.value = null
-    fName.value = ''
+    fBody.value = {}
     // 默认选第一个任务，省掉一次点击；没有任务时留空由校验拦
     fTask.value = tasks.value[0]?.name ?? ''
     fAccounts.value = ''
     fExpr.value = '0 8 * * *'
     fTimezone.value = DEFAULT_TZ
     fEnabled.value = true
+    // 新定时**默认一条规则都不选** ✓（不推 —— 多这一格不会改变任何东西）
+    fPushRules.value = []
+    // 结局条件**默认全不勾** = 跑完就推 ✓（用户口径）
+    fPushEvents.value = []
     submitError.value = ''
     openDialog(dialogId)
   }
 
   const openEdit = (s: Schedule) => {
     editingId.value = s.id
+    fBody.value = s.body ?? {}
     fName.value = s.name
     fTask.value = s.task
     fAccounts.value = s.accounts.join(', ')
     fExpr.value = s.expr
     fTimezone.value = s.timezone
     fEnabled.value = s.enabled
+    // ⚠ 别的调用方可能**没有这两格** ⇒ 当"不推 / 跑完就推"读 ✓（`?? []`）
+    fPushRules.value = [...(s.pushRules ?? [])]
+    fPushEvents.value = [...(s.pushEvents ?? [])]
     submitError.value = ''
     openDialog(dialogId)
   }
 
   const save = async () => {
+    /**
+     * ⚠⚠ 呈现口径（2026-10-08 用户口径「所有的提示都是优先弹窗式」）：
+     * 失败**先弹 toast**（错误类不自动消失，见 `ui/toast.ts`），
+     * 再把同一句放在**弹窗标题下面**（`form()` 的第一句）——
+     * 那里就是用户点「保存」时看的地方。
+     * ❌ 曾经只画在表单**最底下**（一堆字段之后），等于没提示。
+     */
+    const fail = (msg: string) => {
+      submitError.value = msg
+      pushToast('error', msg)
+    }
     submitError.value = ''
     if (!fName.value.trim()) {
-      submitError.value = '请填写名称'
+      fail('请填写名称')
       return
     }
     if (!fTask.value) {
-      submitError.value = '请选择要执行的任务'
+      fail('请选择要执行的任务')
       return
     }
     const exprErr = exprFieldError(fExpr.value)
     if (exprErr) {
-      submitError.value = exprErr
+      fail(exprErr)
       return
     }
 
@@ -245,7 +334,12 @@ export const SchedulesPage = () => {
         .filter(Boolean),
       expr: fExpr.value.trim(),
       timezone: fTimezone.value,
+      // ⚠ **必须带上**（见 `fBody` 那段说明 ✓）：不带就等于把参数清空/让校验拒掉 ✗
+      body: fBody.value,
       enabled: fEnabled.value,
+      // ⚠ 这两格也要**原样带回** ✓：空数组 = 不推 / 跑完就推（后端同义 ✓）
+      pushRules: fPushRules.value,
+      pushEvents: fPushEvents.value,
     }
 
     saving.value = true
@@ -258,8 +352,8 @@ export const SchedulesPage = () => {
       pushToast('success', editingId.value ? '已保存修改' : '已创建定时任务')
       await refresh()
     } catch (e) {
-      // 后端错误原样透出
-      submitError.value = e instanceof Error ? e.message : '保存失败'
+      // 后端错误原样透出（弹窗 + 标题下那一句，见 `save()` 开头）
+      fail(e instanceof Error ? e.message : '保存失败')
     } finally {
       saving.value = false
     }
@@ -267,12 +361,26 @@ export const SchedulesPage = () => {
 
   const toggleEnabled = async (s: Schedule) => {
     try {
+      /*
+        ⚠ **系统维护的那条也走这里，不另造开关**（见 `isManaged` 的说明 ✓）：
+        后端对 `managedBy` 非空的条目会把这一格 `enabled` 落成**用户意愿**
+        （`routes/schedules.rs` 里 `managed_by.is_some() ⇒ managed_wanted = input.enabled` ✓，
+        已有用例钉住"两处是同一格"✓）⇒ 直播页那张卡上的开关与这里的开关
+        改的是**同一格**，不会各说各话 ✓。
+      */
       await saveSchedule(s.id, {
         name: s.name,
         task: s.task,
         accounts: s.accounts,
         expr: s.expr,
         timezone: s.timezone,
+        // ⚠ 这里以前**没带 body** ✗ ⇒ 一条 `task: "pipeline"` 的定时连停用都会被后端拒掉
+        //（「body 里没有 pipelineId」✓，2026-10-07 用户截图报的就是它 ✓）。
+        // 启停只该翻一个布尔位，别的字段**原样带回去** ✓。
+        body: s.body,
+        // ⚠ 这两格**同样**要带（多选）：启停只该翻一个布尔位，别的字段**原样带回去** ✓
+        pushRules: [...(s.pushRules ?? [])],
+        pushEvents: [...(s.pushEvents ?? [])],
         enabled: !s.enabled,
       })
       pushToast('success', s.enabled ? '已停用' : '已启用')
@@ -364,6 +472,8 @@ export const SchedulesPage = () => {
         ) : (
           <span class="badge badge-ghost badge-sm">已停用</span>
         )}
+        {/* ⚠ 与上面那两格**并列**（不是替代）：它是"谁在维护"、它们是"现在跑不跑" ✓ */}
+        {isManaged(s) ? <span class={MANAGED_BADGE}>系统维护</span> : null}
         {(() => {
           const b = statusBadge(s.lastStatus)
           return <span class={b.cls}>{b.text}</span>
@@ -379,6 +489,14 @@ export const SchedulesPage = () => {
         <span class="opacity-60">下次执行：</span>
         {s.enabled ? fmtEpochMs(s.nextFireAt) : '已停用，不会执行'}
       </div>
+      {isManaged(s) ? (
+        // ⚠ 这句话是这一页对那条自动定时**唯一**要补的信息（见 `isManaged` 的说明）：
+        // 时刻由系统维护 ⇒ 改它会被覆盖；而开关与账号归用户 ✓。
+        <div class="text-xs leading-5 opacity-70">
+          时刻由<b class="font-medium">系统维护</b>：它按「下一场直播开始 + 1 小时」重算，
+          你在这里改时刻会被下次重算覆盖。开关与账号归你（翻开关就是改"还想不想要"）。
+        </div>
+      ) : null}
       <div class="text-xs opacity-60">
         上次执行：{fmtEpochMs(s.lastRunMs)} · 累计触发 {s.runCount} 次
       </div>
@@ -475,9 +593,19 @@ export const SchedulesPage = () => {
                     <tr key={s.id}>
                       <td>
                         <div class="font-medium">{s.name}</div>
+                        {/* ⚠ 宽屏那一份也要标（卡片流与表格是两套 DOM ✓）——
+                            只标一处的话，"系统维护"在宽屏下根本看不见 ✗ */}
+                        {isManaged(s) ? (
+                          <div class="mt-1">
+                            <span class={MANAGED_BADGE}>系统维护</span>
+                          </div>
+                        ) : null}
                         <div class="text-xs opacity-60">
                           <code>{s.expr}</code> · {s.timezone}
                         </div>
+                        {isManaged(s) ? (
+                          <div class="text-xs opacity-60">时刻由系统维护，改它会被下次重算覆盖</div>
+                        ) : null}
                         {s.lastError ? (
                           <div class="mt-1 text-xs text-error break-words">{s.lastError}</div>
                         ) : null}
@@ -516,6 +644,19 @@ export const SchedulesPage = () => {
 
   const form = () => (
     <>
+      {/*
+        ⚠⚠ 失败那一句**放在最前**（弹窗标题下面），不是表单底部：
+        用户点「保存」时视线在弹窗标题那一行，红字跑到一堆字段之后等于没提示
+        （2026-10-08 用户口径「所有的提示都是优先弹窗式」✓）。
+        弹窗那一份由 `save()` 里的 `pushToast('error', …)` 给 ✓。
+      */}
+      {submitError.value ? (
+        <div class="alert alert-soft alert-error text-sm" role="alert">
+          <IconAlert class="size-4 shrink-0" />
+          <span class="break-words">{submitError.value}</span>
+        </div>
+      ) : null}
+
       <fieldset class="fieldset">
         <legend class="fieldset-legend">名称</legend>
         <input
@@ -611,8 +752,44 @@ export const SchedulesPage = () => {
         />
       </fieldset>
 
+      {/*
+        推送（用户口径 2026-10-08：「**行为选择规则，一个行为可以选择多个规则**」✓）。
+        一个都不选 = **不推**；结局条件全不勾 = **跑完就推** ✓。
+      */}
+      <fieldset class="fieldset">
+        <legend class="fieldset-legend">推送规则（可多选）</legend>
+        <PushRuleSelect
+          id="sched-push-rule"
+          rules={rules.value}
+          value={fPushRules.value}
+          onChange={(v) => {
+            fPushRules.value = v
+          }}
+        />
+        <p class="text-xs leading-5 opacity-60">
+          一个都不选 = 不推。选了规则就按**每条规则自己**的平台、凭据、标题发
+          —— 规则在「推送」页里建。可多选，每条规则各发一份。
+        </p>
+      </fieldset>
+
+      <fieldset class="fieldset">
+        <legend class="fieldset-legend">运行结局条件</legend>
+        <PushEventPicker
+          id="sched-push-events"
+          events={runEvents.value}
+          value={fPushEvents.value}
+          onChange={(v) => {
+            fPushEvents.value = v
+          }}
+        />
+        <p class="text-xs leading-5 opacity-60">
+          只在勾中的结局下推。<strong>全不勾 = 跑完就推</strong>（不看结局）。
+        </p>
+      </fieldset>
+
       <label class="label cursor-pointer justify-start gap-3">
         <input
+          id="sched-enabled"
           type="checkbox"
           class="checkbox"
           checked={fEnabled.value}
@@ -623,12 +800,6 @@ export const SchedulesPage = () => {
         />
         <span class="text-sm">启用（停用后不会自动执行）</span>
       </label>
-
-      {submitError.value ? (
-        <div class="alert alert-soft alert-error text-sm" role="alert">
-          <span class="break-words">{submitError.value}</span>
-        </div>
-      ) : null}
     </>
   )
 

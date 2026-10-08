@@ -629,3 +629,62 @@ fn the_signin_page_entry_url_is_unchanged() {
         )
     );
 }
+
+// ── 错误文本：网页不许当正文贴（2026-10-08 用户实测报的就是它）─────────────
+
+/// ⭐ 上游的网关在路径不存在时回**一整页 HTML** ✓。
+///
+/// 以前 `ensure_http_ok` 原样截 200 字符 ⇒ 用户看到的是
+/// `查询 AI 头像活动目录 失败，HTTP 404：<!DOCTYPE html> <html> <head> <title>Error</title>…`
+/// —— 没有一个字说明"是什么、该找谁" ✗，还让人以为是网络抖动 ✗。
+#[test]
+fn html_error_body_is_described_not_dumped() {
+    let resp = HttpResponse {
+        status: 404,
+        body: "<!DOCTYPE html>\n<html><head><title>404 Not Found</title></head><body><h1>404</h1></body></html>"
+            .into(),
+        headers: vec![],
+    };
+    let err = ensure_http_ok(&resp, "查询 AI 头像活动目录").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("HTTP 404"), "状态码必须在：{msg}");
+    assert!(
+        msg.contains("查询 AI 头像活动目录"),
+        "是哪个调用必须在：{msg}"
+    );
+    assert!(msg.contains("网页"), "要说清回的是网页不是接口：{msg}");
+    assert!(
+        msg.contains("404 Not Found"),
+        "要把 <title> 里那句人话带上：{msg}"
+    );
+    assert!(
+        !msg.contains("<!DOCTYPE") && !msg.contains("<html>"),
+        "不许把标记贴进错误信息：{msg}"
+    );
+}
+
+/// JSON 的响应体**照旧原样**带出来 ✓ —— 上游的业务错误码就在里面，那是最有用的一截 ✓。
+#[test]
+fn json_error_body_is_kept_verbatim() {
+    let resp = HttpResponse {
+        status: 500,
+        body: r#"{"code":"05050009","message":"非法的token！"}"#.into(),
+        headers: vec![],
+    };
+    let msg = ensure_http_ok(&resp, "换 token").unwrap_err().to_string();
+    assert!(msg.contains("05050009"), "业务码不能被吃掉：{msg}");
+    assert!(msg.contains("非法的token"), "{msg}");
+}
+
+/// 2xx 一律放行（含 204 那种空体 ✓）。
+#[test]
+fn two_hundred_family_passes_through() {
+    for status in [200, 201, 204, 299] {
+        let resp = HttpResponse {
+            status,
+            body: String::new(),
+            headers: vec![],
+        };
+        assert!(ensure_http_ok(&resp, "x").is_ok(), "{status} 该放行");
+    }
+}

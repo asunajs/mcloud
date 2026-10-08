@@ -9,6 +9,9 @@ pub mod error;
 pub mod event;
 pub mod exchange;
 pub mod kouling;
+/// 「直播自动定时」的纯逻辑（id / 时刻 / cron 三条算法）。
+/// ⚠ 「下一场」这个值**不在这里**算 —— 它来自共享口令池，见模块头 ✓。
+pub mod live_auto;
 pub mod log;
 pub mod owner;
 pub mod pc_device;
@@ -37,19 +40,27 @@ pub use kouling::{
     ClaimVerdict, KoulingPool, KoulingSource, KoulingState, LiveSession, PoolCode, PoolSummary,
     ProbeRoom,
 };
+pub use live_auto::{
+    beijing_now, beijing_stamp, earliest_plus_one_hour, live_auto_schedule_id, one_shot_expr,
+    LIVE_ROOM_TASK, MANAGED_BY_LIVE_AUTO,
+};
 pub use log::{AppendOutcome, LogLine, Seq, LOG_LIMIT_PER_RUN};
 pub use owner::{legacy_owner, visible_to};
 pub use pc_device::{PcDeviceStore, PC_DEVICE_SUFFIX};
 pub use pipeline::{AccountMode, Pipeline, PipelineId, PipelineStep};
-pub use push::PushConfig;
+pub use push::{
+    BehaviorBinding, BehaviorKey, BehaviorState, BehaviorStatus, PanelBindings, PushChannelKey,
+    PushConfig, PushEvent, PushRule, PushRuleId, Throttle, ThrottleDecision, ThrottleMode,
+    ThrottleReason, ThrottleState,
+};
 pub use run::{RunId, RunLogLine, RunRecord, RunStatus, TaskOutcome, RUN_LOG_LIMIT};
 pub use schedule::{Schedule, ScheduleId};
 pub use settings::{AppSettings, DEFAULT_MIN_PASSWORD_LEN, DEFAULT_SESSION_TTL_HOURS};
 pub use smid::{SmidState, SmidStore};
 pub use traits::{
-    beijing_offset, beijing_time_digits, parse_beijing_time, AccountStore, Clock, EventSink,
-    HttpClient, HttpRequest, HttpResponse, LogStore, PipelineStore, RunStore, ScheduleStore, Store,
-    UserStore,
+    beijing_format, beijing_offset, beijing_time_digits, format_with_offset, parse_beijing_time,
+    utc_format, AccountStore, Clock, EventSink, HttpClient, HttpRequest, HttpResponse, LogStore,
+    PipelineStore, RunStore, ScheduleStore, Store, UserStore,
 };
 pub use user::{
     validate_username, PasswordHash, Session, SessionKind, User, UserId, MIN_PASSWORD_LEN,

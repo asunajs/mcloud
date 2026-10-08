@@ -1,5 +1,5 @@
 import { listAccounts, type AccountSummary } from './api'
-import { ref } from 'lite'
+import { ref } from '@asunajs/lite'
 
 /**
  * 账号 id → 给人看的名字。

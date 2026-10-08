@@ -21,6 +21,30 @@
  * 哪天要挂到 `/mcloud/` 下，得给 `index.html` 加 `<base>` 并让这里的 href 跟着走。
  */
 
+import { ref } from '@asunajs/lite'
+
+/**
+ * 当前地址（`location.pathname`）的**信号化副本**。
+ *
+ * # 它解决什么
+ *
+ * 一个导航项底下可能有**多个 tab**（2026-10-08 起「历史」页就是：`/history` 与
+ * `/logs` 都归 `history` 这一页 ✓）—— 光看 `PageId` 分不出该显示哪一个 tab ✗。
+ * 让那个页面 `watch` 它，就能"地址一变、tab 跟着换" ✓。
+ *
+ * # ⚠ 它**不是**切页的依据
+ *
+ * 切页只有一条路：`app.tsx` 那条 `popstate` 监听器 + `parsePath()` ✓。
+ * 这个信号只是**读数**，不参与"该渲染哪一页"的判断 ✓（谁拿它去切页，
+ * 就等于把切页逻辑拆成两份，两边迟早分叉 ✗）。
+ *
+ * # 谁来推进
+ *
+ * 只有 `app.tsx` 的 `onNavigate`（浏览器前进/后退、手敲地址、以及 `navigate()`
+ * 补发的那次 `popstate` 都会经过它 ✓）—— **单一写入点** ✓。
+ */
+export const currentPath = ref(location.pathname)
+
 /**
  * 跳到一个应用内路径。
  *

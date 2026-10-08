@@ -91,7 +91,10 @@ impl<T: HttpClient> HttpClient for LoggingClient<T> {
                         status = resp.status,
                         ms,
                         bytes = resp.body.len(),
-                        preview = %safe(&resp.body, ERROR_PREVIEW_CHARS),
+                        // ⚠ **网页不当正文贴**（2026-10-08 用户实测）：网关在路径不存在时
+                        // 回一整页 HTML ✗，原样进日志等于往日志里倒标记，把真正的原因淹掉 ✗。
+                        // 与 `ensure_http_ok` 用同一个判据 ✓（JSON 原样、HTML 说清是网页 ✓）。
+                        preview = %crate::session::describe_body(&safe(&resp.body, ERROR_PREVIEW_CHARS)),
                         "上游应答（非 2xx）"
                     );
                 } else {

@@ -18,7 +18,7 @@
  *    再套一层 `<dialog>` 是无效结构，ESC 与遮罩会打架。
  */
 
-import { ref } from 'lite'
+import { ref } from '@asunajs/lite'
 import { ERROR_DIALOG_ID } from './error-dialog-ids'
 import { closeDialog, openDialog } from './dialog'
 

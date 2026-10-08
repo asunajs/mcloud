@@ -31,6 +31,11 @@ use mcloud_core::{validate_username, PasswordHash, Session, SessionKind, User, U
 // 密码学原语归 crypto。这条边界让 core 不必依赖任何密码学实现。
 use mcloud_crypto::{hash_session_token, new_session_token};
 
+// 面板行为（`loginNew` / `loginFailed` ✓）—— 判据与发送在 `mcloud-app::notify` ✓，
+// 这里只负责**在正确的时机调它**（用户口径：「接啊」✓）。
+use mcloud_app::notify::PanelNotice;
+use mcloud_core::push::{BehaviorKey, BehaviorStatus};
+
 use crate::error::{ApiError, ApiResult};
 use crate::ServerState;
 
@@ -227,6 +232,7 @@ pub async fn setup_create(
 pub async fn login(
     State(state): State<ServerState>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     Json(body): Json<Credentials>,
 ) -> Result<Response, ApiError> {
     // ⚠ 先过闸（复审 sv-5）——**必须在"是否已初始化"之前**，理由见助手函数的注释。
@@ -262,6 +268,9 @@ pub async fn login(
             &fail_key,
             &body.username,
             &peer_ip,
+            // ⚠ 用户名**根本不存在** ⇒ 没有 owner ⇒ `loginFailed` **不发** ✓
+            // （不许猜一个用户出来 —— 那等于把别人的规则当成他的 ✓）。
+            None,
         ));
     };
 
@@ -288,6 +297,8 @@ pub async fn login(
             &fail_key,
             &body.username,
             &peer_ip,
+            // ⭐ 用户**在库里** ⇒ owner 就是他自己 ✓ ⇒ `loginFailed` 该报 ✓。
+            Some(&user.id),
         ));
     }
 
@@ -314,7 +325,58 @@ pub async fn login(
     let (token, session) = make_session(&user, now, ttl_ms);
     state.handle.store.save_session(&session).await?;
 
+    // ⭐ 「**不能登录时給好建一个？**」（用户口径 2026-10-07 ✓）—— 就是这里 ✓。
+    //
+    // 给这个用户补上**他自己的**默认编排 + 默认定时（`daily-<他的id>` ✓，幂等 ✓）。
+    // ⚠ 放在登录而不是只在启动时：`mcloud user add` 加进来的新用户**不必等下一次重启** ✓。
+    // ⚠ 失败**不挡登录**：默认编排是附加品，建不出来不该让人进不了门 ✗（只记一条 warn ✓）。
+    if let Err(e) = state.handle.seed_defaults_for(&user.id).await {
+        tracing::warn!(user = %user.name, error = %e, "补建默认编排失败（不影响登录）");
+    }
+
     tracing::info!(user = %user.name, peer = %peer_ip, "登录成功");
+
+    // ⭐ 面板行为 `loginNew`（「登录新设备」✓）—— 判据是**这个账号 + 这台设备/
+    //    这个地点**没见过 ✓（用户口径：「登录新设备」✓）。
+    //
+    //    ⚠ 本仓**没有**真设备这个概念 ✗（登录请求里只有口令 ✓）⇒ 标识退化成
+    //    `UA|peer IP` ✓ —— 这是**明说的近似**（见 `login_device_key` 的说明 ✓），
+    //    不是"任意一次成功登录都算新设备" ✗（那是骗人 ✓）。
+    //
+    //    ⚠ 顺序：放在"口令验过、会话已建"之后 ⇒ 只有**真的登进来**才算一次 ✓；
+    //    失败那条路走 `note_login_failure` ✓，两条互不重叠 ✓。
+    //    ⚠ 失败**不挡登录**：新设备判定是附加品，判不出来不该让人进不了门 ✗。
+    let device = login_device_key(&headers, &peer_ip);
+    match state
+        .handle
+        .store
+        .remember_login_device(&user.id, &device)
+        .await
+    {
+        Ok(true) => {
+            state.handle.pushes.spawn_panel(
+                user.id.clone(),
+                PanelNotice {
+                    behavior: BehaviorKey::LoginNew,
+                    status: BehaviorStatus::Abnormal,
+                    title: format!("mcloud 登录告警 · {}", BehaviorKey::LoginNew.label()),
+                    text: format!(
+                        "账号 {} 在 {} 从没见过的一台设备/地点登录成功（来自 {}，客户端 {}）—— 不是你本人的话，去改口令",
+                        user.name,
+                        mcloud_core::push::local_time_hms(now),
+                        peer_ip,
+                        short_ua(&headers),
+                    ),
+                },
+            );
+        }
+        Ok(false) => {}
+        Err(e) => {
+            // 判不出来 ⇒ **不发**并留痕 ✓（宁可少报一次新登录，
+            // 也不要因为一次读盘失败就把每一次登录都报成"新设备" ✗）。
+            tracing::warn!(user = %user.name, error = %e, "登录设备判据读取失败，本次不报新登录");
+        }
+    }
     // ⚠ 这里要**真查**（不能照 `setup_create` 那样写死 true）：`mcloud user add`
     // 可以往库里加普通用户（2026-10-06 ✓）⇒ "登录的人一定是管理员"不再成立 ✓。
     let is_admin = crate::auth_gate::is_admin(&state, &user.id).await?;
@@ -446,8 +508,38 @@ pub(crate) fn sensitive_rate_limit(
 /// ⚠ 日志里**只记用户名与 peer IP，绝不记口令**（明文/摘要都不记）：
 /// 那条日志会被 `logbuf` 收进环、经 `/api/logs` 给管理员看，凭据进去就等于
 /// 把口令写进了一个能读回来的地方 ✗。
-fn note_login_failure(state: &ServerState, key: &str, username: &str, peer_ip: &str) -> ApiError {
+///
+/// # 面板行为 `loginFailed`（2026-10-08 接上 ✓）
+///
+/// 用户口径：**每一次失败都算一次触发** ✓ —— 频次交给 `deliver_panel` 的节流
+/// （冷却 + 每日上限 ✓），这里不做任何取舍 ✓。
+/// ⚠ `owner` 拿不到（用户名根本不存在 ✓）⇒ **不发** ✓ —— 猜一个用户出来，
+/// 等于把别人的规则当成他的用 ✗（与 `notify.rs` 模块头同一条 ✓）。
+fn note_login_failure(
+    state: &ServerState,
+    key: &str,
+    username: &str,
+    peer_ip: &str,
+    owner: Option<&UserId>,
+) -> ApiError {
     tracing::warn!(user = %username, peer = %peer_ip, "登录失败");
+    if let Some(owner) = owner {
+        // ⚠ 走 `spawn_panel`（**不 await**）：`deliver_panel` 会同步走完 HTTP
+        // （最多 10s ✓）—— 在这条路上 await 它，等于让"能不能进门"取决于
+        // "推送服务器快不快" ✗。⚠ 也**不记口令**：正文里只有用户名与 IP ✓。
+        state.handle.pushes.spawn_panel(
+            owner.clone(),
+            PanelNotice {
+                behavior: BehaviorKey::LoginFailed,
+                status: BehaviorStatus::Abnormal,
+                title: format!("mcloud 登录告警 · {}", BehaviorKey::LoginFailed.label()),
+                text: format!(
+                    "账号 {username} 在 {} 登录失败（来自 {peer_ip}）—— 不是你本人的话，去改口令",
+                    mcloud_core::push::local_time_hms(state.handle.clock.now_ms()),
+                ),
+            },
+        );
+    }
     match state
         .login_fail_limiter
         .check(key, state.handle.clock.now_ms())
@@ -458,6 +550,42 @@ fn note_login_failure(state: &ServerState, key: &str, username: &str, peer_ip: &
             retry_after_secs: wait_secs,
         }),
     }
+}
+
+/// 登录设备的判据串：**`UA|peer IP`** ✓（2026-10-08 接 `loginNew` 时新增）。
+///
+/// # 为什么只能这样（这条要说清楚，别把它当"真设备"）
+///
+/// 本仓**没有**设备这个概念 ✗ —— 登录请求里只有用户名与口令（外加 HTTP 自带的
+/// 头 ✓）。所以"新设备"只能退化成「**这个账号 + 这个 UA + 这个 peer IP** 的组合
+/// 没见过」✓：
+///
+/// * 换一台设备（或换个浏览器）⇒ UA 变 ⇒ 报 ✓；
+/// * 换一个网络（家里 → 公司 → 手机热点）⇒ IP 变 ⇒ 报 ✓；
+/// * 浏览器自动升级改了 UA 版本号 ⇒ **也会报** ✗ —— 这是这套近似的已知代价 ✓
+///   （节流会把它压到每 30 分钟最多一条 ✓，见 `BehaviorKey::default_throttle` ✓）。
+///
+/// ⚠ 它是**明说的近似**，不是"任何一次成功登录都算新设备" ✗（那是骗人 ✓）。
+/// 要做得更准，得先让登录带上一个真设备标识 —— 那是另一件事 ✓。
+///
+/// ⚠ UA 是**请求方自己给**的任意长度串 ⇒ 这里截到 200 字符：判据够用，
+/// 而落盘那格（`data/login-devices.json` ✓）不会被一个超长头撑大 ✓。
+fn login_device_key(headers: &HeaderMap, peer_ip: &str) -> String {
+    format!("{}|{peer_ip}", short_ua(headers))
+}
+
+/// 请求里的 `User-Agent`（**截断**、拿不到就是 `"unknown"` ✓）。
+///
+/// 抽出来单独一个函数，是为了让"判据串"与"告警正文"用的是**同一个**值 ✓
+/// —— 两处各拼一次，早晚会漂移成"报了新设备、正文里却是另一台" ✗。
+fn short_ua(headers: &HeaderMap) -> String {
+    headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .chars()
+        .take(200)
+        .collect()
 }
 
 /// 把限速结果变成错误：放行 ⇒ `None`，超限 ⇒ `Some(429 + Retry-After)`。

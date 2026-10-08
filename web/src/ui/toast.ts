@@ -8,7 +8,7 @@
  * - 错误必须手动关：它往往带着"该去看哪"的信息，3 秒不够读完。
  */
 
-import { ref } from 'lite'
+import { ref } from '@asunajs/lite'
 
 export type ToastLevel = 'info' | 'success' | 'warning' | 'error'
 

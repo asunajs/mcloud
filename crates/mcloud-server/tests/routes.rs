@@ -44,6 +44,54 @@ fn test_app(tag: &str) -> (Arc<AppHandle>, std::path::PathBuf) {
     (Arc::new(app.handle), dir)
 }
 
+/// 「谁来都报网络错」的假上游（见 [`test_app_with_dead_upstream`] ✓）。
+struct DeadUpstream;
+
+#[async_trait::async_trait]
+impl mcloud_core::HttpClient for DeadUpstream {
+    async fn request(
+        &self,
+        req: mcloud_core::HttpRequest,
+    ) -> mcloud_core::Result<mcloud_core::HttpResponse> {
+        // ⚠ 回 `Err` 而不是 panic：重算把"上游取不到"当**一条正常分支**处理
+        //（⇒ 走池里那份兜底 ✓），而这里要验的正是那条路 ✓。
+        Err(mcloud_core::Error::Network(format!(
+            "路由测试的假上游：不打网络（{}）",
+            req.url
+        )))
+    }
+}
+
+/// 起一个**按账号的 HTTP 客户端是假的**应用（只有「直播自动定时」那几条用例用 ✓）。
+///
+/// # 为什么必须注入（不能让它走生产那份）
+///
+/// 那条定时的重算会**按账号去上游现取**「下一场」（用户口径 2026-10-08 ✓），
+/// 而生产那份工厂会把请求打到**真的上游**（`user-njs.yun.139.com` ✗）——
+/// 路由测试里那既不可能也不该发生（与 [`test_app_with_notify_http`] 同一条理由 ✓）。
+/// 给一个"谁来都报网络错"的客户端之后，重算走**池里那份兜底** ✓，
+/// 于是那几条用例的期望（时刻来自池 ✓）原样成立 ✓。
+fn test_app_with_dead_upstream(tag: &str) -> (Arc<AppHandle>, std::path::PathBuf) {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "mcloud-server-{tag}-{}-{nanos}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let app = AppBuilder::new()
+        .data_dir(dir.clone())
+        .http_for(Arc::new(|_a: &Account| {
+            Arc::new(DeadUpstream) as Arc<dyn mcloud_core::HttpClient>
+        }))
+        .build()
+        .expect("应用应能组装");
+    (Arc::new(app.handle), dir)
+}
+
 /// 起一个**已登录**的应用：先建管理员，再把会话 cookie 注入每个请求。
 ///
 /// # 为什么用中间件注入而不是让每个测试自己带 cookie
@@ -2220,6 +2268,220 @@ async fn sse_disconnect_unsubscribes_from_the_hub() {
 
 /// ⭐ 更新定时**不能**把记账字段抹掉。
 ///
+/// ⭐⭐ 2026-10-07 用户实测报的 bug：**停用一条「跑编排」的定时被拒**。
+///
+/// 截图原话：「无法停用定时任务 / 配置错误：这条定时要跑编排，但 body 里没有 pipelineId」。
+///
+/// # 根因
+///
+/// 界面上「停用/启用」（`schedules-page.tsx` 的 `toggleEnabled` ✓）与编辑表单**都不发 `body`** ✗，
+/// 而 `ScheduleInput.body` 那时是 `serde_json::Value` + `#[serde(default)]`
+/// ⇒ 缺席与 `null` **分不出来** ✗ ⇒ 那句校验把"没给"当成"没有 pipelineId"拒掉 ✗。
+///
+/// 同一个毛病在**带参数的任务**上更坏：编辑一条 `live-room` 的定时会把口令**清空** ✗
+/// （静默的数据丢失 —— 比报错更坏）。
+///
+/// # 现在的口径
+///
+/// **没给 = 沿用旧值** ✓（新建时才是 `Null` ✓）。这条用例把两半都钉住：
+/// ① `task: "pipeline"` 的定时不带 `body` 也能停用 ✓；② 带参数的任务不带 `body` 也不丢参数 ✓。
+#[tokio::test]
+async fn schedule_update_without_body_keeps_the_old_one() {
+    let (handle, dir) = test_app("sched-put-keeps-body");
+
+    // 校验会查"这条编排属于你" ⇒ 先造一条属于 `test-user` 的编排 ✓
+    let pid = mcloud_core::PipelineId::new("p-default");
+    handle
+        .store
+        .save_pipeline(&mcloud_core::Pipeline {
+            id: pid.clone(),
+            name: "每日一键（默认）".into(),
+            accounts: vec![],
+            account_mode: mcloud_core::AccountMode::Sequential,
+            stop_on_error: false,
+            steps: vec![mcloud_core::PipelineStep {
+                task: "sign".into(),
+                body: serde_json::json!({}),
+                continue_on_error: true,
+            }],
+            enabled: true,
+            owner: Some(mcloud_core::UserId::new("test-user")),
+            last_run_ms: None,
+            push_rules: vec![],
+            push_events: vec![],
+        })
+        .await
+        .unwrap();
+
+    let id = "sched-put-keeps-body";
+    let created = serde_json::json!({
+        "name": "每日一键",
+        "task": "pipeline",
+        "accounts": [],
+        "expr": "0 8 * * *",
+        "timezone": "Asia/Shanghai",
+        "body": { "pipelineId": "p-default" },
+        "enabled": true,
+    });
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(&format!("/api/schedules/{id}"), &created),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+
+    // ① **不带 body** 地停用 —— 用户截图里那一步 ✓
+    let toggle = serde_json::json!({
+        "name": "每日一键",
+        "task": "pipeline",
+        "accounts": [],
+        "expr": "0 8 * * *",
+        "timezone": "Asia/Shanghai",
+        "enabled": false,
+    });
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(&format!("/api/schedules/{id}"), &toggle),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "不带 body 的停用必须成功：{out}");
+    let v = json_body(&out);
+    assert_eq!(v["enabled"], false, "{out}");
+    assert_eq!(
+        v["body"]["pipelineId"], "p-default",
+        "body 要**沿用旧值**，不能被这次没带 body 的请求清空：{out}"
+    );
+
+    // ② 带参数的任务同理：编辑（不带 body）不能把参数清空 ✓
+    let id2 = "sched-put-keeps-body-2";
+    let live = serde_json::json!({
+        "name": "直播口令",
+        "task": "live-room",
+        "accounts": [],
+        "expr": "0 9 * * *",
+        "timezone": "Asia/Shanghai",
+        "body": { "codes": "口令甲" },
+        "enabled": true,
+    });
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(&format!("/api/schedules/{id2}"), &live),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let renamed = serde_json::json!({
+        "name": "直播口令（改名）",
+        "task": "live-room",
+        "accounts": [],
+        "expr": "0 9 * * *",
+        "timezone": "Asia/Shanghai",
+        "enabled": true,
+    });
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(&format!("/api/schedules/{id2}"), &renamed),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(
+        json_body(&out)["body"]["codes"],
+        "口令甲",
+        "改个名字不该把口令清空（静默的数据丢失）：{out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 定时上的**推送规则绑定**（2026-10-08 新模型：**可多选** ✓）：
+/// **没给 = 保持原样** ✓、**给 `[]` = 清空** ✓。
+///
+/// # 为什么这两条必须分开（2026-10-07，A 线自报的缺口；2026-10-08 换到 `Vec` 上 ✓）
+///
+/// `Option<Vec<PushRuleId>>` 里，`{"pushRules": []}` 与"根本没有这一格"都反序列化成
+/// `None` ✗ ⇒ 只剩"沿用老行"一种可能 ⇒ **界面上「不绑」会静默失败** ✗（用户选了不推、
+/// 保存后还绑着，而且不报错 ✗ —— 最坏的一类）。所以那一格走 `absent_or_list`
+/// （**没给 ⇒ 沿用** ✓、**给了 ⇒ 用入参** ✓）。
+///
+/// 这条用例把两个方向都钉住；顺带钉住"列表上的停用/启用不带这一格"那条老路径 ✓
+/// （它必须**沿用**，否则一点停用就把绑定丢了 ✗）。
+#[tokio::test]
+async fn schedule_push_rules_binding_distinguishes_empty_from_absent() {
+    let (handle, dir) = test_app("sched-push-rules-absent-or-empty");
+
+    let base = serde_json::json!({
+        "name": "签到",
+        "task": "sign",
+        "accounts": [],
+        "expr": "0 8 * * *",
+        "timezone": "Asia/Shanghai",
+        "body": {},
+        "enabled": true,
+    });
+    let id = "sched-push-rules-bind";
+
+    // ① 先绑**两条**（可多选 ✓）
+    let mut bound = base.clone();
+    bound["pushRules"] = serde_json::json!(["r1", "r2"]);
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(&format!("/api/schedules/{id}"), &bound),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(
+        json_body(&out)["pushRules"],
+        serde_json::json!(["r1", "r2"]),
+        "绑两条要原样回两条：{out}"
+    );
+
+    // ② **不带这一格**（列表上点停用/启用就是这样 ✓）⇒ 必须沿用
+    let mut toggled = base.clone();
+    toggled["enabled"] = serde_json::json!(false);
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(&format!("/api/schedules/{id}"), &toggled),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(
+        json_body(&out)["pushRules"],
+        serde_json::json!(["r1", "r2"]),
+        "不带这一格时必须**沿用**（否则点一下停用就把绑定丢了）：{out}"
+    );
+
+    // ③ **显式给 `[]`**（界面上的「不推」✓）⇒ 必须真的清掉
+    let mut cleared = base.clone();
+    cleared["pushRules"] = serde_json::json!([]);
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(&format!("/api/schedules/{id}"), &cleared),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    // ⚠ 空清单是 `skip_serializing_if` 掉的 ⇒ 读回来是**缺席**（`null`）而不是 `[]` ✓
+    // —— 两者在"清空"这个语义上等价 ✓。
+    let v = json_body(&out);
+    assert!(
+        v["pushRules"].is_null() || v["pushRules"] == serde_json::json!([]),
+        "显式给 [] 就是**清空**（界面上的「不推」全靠它）：{out}"
+    );
+    // 再读一次列表确认落盘也是空的（不只是这次响应里没带 ✓）
+    let (_, out) = send(authed_app(Arc::clone(&handle)), get("/api/schedules")).await;
+    let got = json_body(&out);
+    let row = got
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == id)
+        .expect("这条定时还在");
+    assert!(
+        row["pushRules"].is_null() || row["pushRules"] == serde_json::json!([]),
+        "落盘也必须是空的：{out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 2026-10-03 review §1.4：`PUT /api/schedules/{id}` 那个 struct 字面量里，
 /// `last_error` / `run_count` 被重置成 `None` / `0`，而同八行上面的注释写的是
 /// "保留水位线与**记账字段**" ⇒ 改个名字就把界面上「累计触发 N 次」清零
@@ -2284,6 +2546,251 @@ async fn schedule_update_keeps_the_accounting_columns() {
         "上次错误也要留：清了就是「写着失败却答不出原因」：{out}"
     );
     assert_eq!(v["lastStatus"], "error", "{out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── 推送规则（`/api/push/rules`，用户口径 2026-10-07）──────────────────
+
+fn delete_req(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .body(Body::empty())
+        .expect("请求应可构造")
+}
+
+/// PUT 建 → GET 列表里有 → PUT 改 → DELETE → 列表空。
+///
+/// ⚠ 顺带钉住两张清单的**键名**：`key` 必须等于 serde 的 camelCase 名
+/// （`runFailed` / `pushPlus`）—— 手写字符串一旦与枚举脱钩，界面选的键与
+/// 规则里存的键就对不上，表现是「静默地永不触发」✗（不报错、也查不出）。
+#[tokio::test]
+async fn push_rules_crud_round_trip() {
+    let (handle, dir) = test_app("push-rules-crud");
+
+    // 清单：事件
+    let (s, out) = send(authed_app(Arc::clone(&handle)), get("/api/push/events")).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let events = json_body(&out);
+    let arr = events.as_array().expect("事件清单是数组");
+    let keys: Vec<&str> = arr.iter().map(|e| e["key"].as_str().unwrap()).collect();
+    assert!(keys.contains(&"runFailed"), "{out}");
+    assert!(keys.contains(&"loginFailed"), "{out}");
+    let failed = arr.iter().find(|e| e["key"] == "runFailed").unwrap();
+    assert_eq!(failed["label"], "运行失败", "{out}");
+    assert_eq!(failed["defaultSelected"], true, "失败默认选上：{out}");
+    // ⭐ 2026-10-08：每一项带 `kind`，前端靠它分组 ✓（`match` 穷尽算出来的，
+    // 不是前端按 key 硬编的一张表 ✓）。
+    assert_eq!(
+        failed["kind"], "run",
+        "运行类事件要标 run（前端靠它分组）：{out}"
+    );
+    let login = arr.iter().find(|e| e["key"] == "loginFailed").unwrap();
+    assert_eq!(
+        login["kind"], "panel",
+        "登录/性能是面板类，要标 panel：{out}"
+    );
+
+    // 清单：渠道
+    let (s, out) = send(authed_app(Arc::clone(&handle)), get("/api/push/channels")).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert!(
+        json_body(&out)
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["key"] == "pushPlus"),
+        "{out}"
+    );
+
+    // 建（⚠ 2026-10-08 新形状：**凭据在规则自己的 `config` 里** ✓；
+    // `events` / `channels` / `slowFactor` / `failStreak` 都**不在规则上**了 ✗；
+    // ⚠ 2026-10-08 当天稍后又删掉 `quiet`（静默时段）—— 用户口径「不要静默时间」✓）
+    let id = "rule-1";
+    let body = serde_json::json!({
+        "name": "失败时叫我",
+        "config": {"bark": {"key": "bark-key-1"}},
+        "digest": "perRun",
+        "enabled": true,
+    });
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(&format!("/api/push/rules/{id}"), &body),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(json_body(&out)["id"], id, "{out}");
+    assert_eq!(json_body(&out)["name"], "失败时叫我", "{out}");
+
+    // 列表里有（而且只有这一条）
+    let (s, out) = send(authed_app(Arc::clone(&handle)), get("/api/push/rules")).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let list = json_body(&out);
+    assert_eq!(list.as_array().unwrap().len(), 1, "{out}");
+    assert_eq!(list[0]["id"], id, "{out}");
+    assert_eq!(list[0]["config"]["bark"]["key"], "bark-key-1", "{out}");
+    // ⚠ 静默时段已经整块删掉 ⇒ 读回来的规则里**不该**再有 `quiet` 那一格 ✗
+    // （2026-10-08 用户口径「不要静默时间」✓）。
+    assert!(list[0].get("quiet").is_none(), "{out}");
+
+    // 改：同一个 id 再 PUT 是**覆盖**，不是又加一条
+    let mut renamed = body.clone();
+    renamed["name"] = serde_json::json!("改名了");
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(&format!("/api/push/rules/{id}"), &renamed),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(json_body(&out)["name"], "改名了", "{out}");
+    let (_, out) = send(authed_app(Arc::clone(&handle)), get("/api/push/rules")).await;
+    assert_eq!(
+        json_body(&out).as_array().unwrap().len(),
+        1,
+        "覆盖不该多出一条：{out}"
+    );
+
+    // 删
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        delete_req(&format!("/api/push/rules/{id}")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let (_, out) = send(authed_app(Arc::clone(&handle)), get("/api/push/rules")).await;
+    assert_eq!(
+        json_body(&out).as_array().unwrap().len(),
+        0,
+        "删完列表要空：{out}"
+    );
+
+    // 删不存在的 ⇒ 404（别人的 id 与不存在一样，不幂等回 200）
+    let (s, _) = send(
+        authed_app(Arc::clone(&handle)),
+        delete_req("/api/push/rules/never-existed"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ `POST /api/push/test`：**规则不存在 / 不属于当前用户 ⇒ 404** ✓
+/// （别人的 id 与不存在一样，不泄露"存在这么一条" ✓ —— 与 `DELETE` 同一条口径 ✓）。
+#[tokio::test]
+async fn push_test_rejects_unknown_rule_with_404() {
+    let (handle, dir) = test_app("push-test-404");
+
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        post_json(
+            "/api/push/test",
+            &serde_json::json!({"ruleId": "never-existed"}),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{out}");
+    assert!(out.contains("never-existed"), "要说清是哪条规则：{out}");
+
+    // 连 `ruleId` 都不给 ⇒ 400（**不是** serde 那句英文 `missing field` ✗）
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        post_json("/api/push/test", &serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{out}");
+    assert!(out.contains("ruleId"), "要告诉用户该给哪个字段：{out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ `POST /api/push/test`：规则**一个渠道都没配** ⇒ **400**（错误原话来自
+/// `PushConfig::validate` ✓）—— 一个包都发不出去，不能回一个"测试成功" ✗。
+///
+/// ⚠ 顺带钉住"**没发**"：用假的推送 HTTP 客户端数枪 ⇒ 被拒的那次**0 枪** ✓
+/// （否则"400 了但还是发出去了"这种形状照样绿 ✗）。
+#[tokio::test]
+async fn push_test_rejects_rule_without_any_channel() {
+    let fake = Arc::new(CountingHttp::default());
+    let (handle, dir) = test_app_with_notify_http(
+        "push-test-no-channel",
+        Arc::clone(&fake) as Arc<dyn mcloud_core::HttpClient>,
+    );
+    // 先让"当前用户"存在（`authed_app` 会种一个 ✓），再塞一条**空配置**的规则
+    let owner = seed_test_user_and_session(&handle);
+    let rule = mcloud_core::PushRule::new_default("empty-rule", Some(owner.clone()));
+    handle
+        .store
+        .save_push_rule(&owner, &rule)
+        .await
+        .expect("存规则");
+
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        post_json(
+            "/api/push/test",
+            &serde_json::json!({"ruleId": "empty-rule"}),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{out}");
+    assert!(
+        out.contains("没有任何渠道"),
+        "错误原话要能自己解释为什么发不出去：{out}"
+    );
+    settle_push().await;
+    assert_eq!(fake.calls(), 0, "被拒的试发一个请求都不该发出去：{out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ `POST /api/push/test` 的**正路**：用那条规则**自己的**平台与凭据发一条 ✓
+/// —— 标题以「[测试] 」开头 ✓、正文说清"来自规则 X" ✓、结果按渠道回给调用方 ✓。
+#[tokio::test]
+async fn push_test_sends_with_the_rules_own_config() {
+    let fake = Arc::new(CountingHttp::default());
+    let (handle, dir) = test_app_with_notify_http(
+        "push-test-send",
+        Arc::clone(&fake) as Arc<dyn mcloud_core::HttpClient>,
+    );
+    let owner = seed_test_user_and_session(&handle);
+    let mut rule = mcloud_core::PushRule::new_default("r1", Some(owner.clone()));
+    rule.name = "我的规则".into();
+    // 只有 Server 酱这一个渠道 ⇒ 这一枪必须正好打 1 次 ✓
+    rule.config = serde_json::from_str(r#"{"serverChan":{"token":"SCT-test"}}"#).expect("测试配置");
+    handle
+        .store
+        .save_push_rule(&owner, &rule)
+        .await
+        .expect("存规则");
+
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        post_json("/api/push/test", &serde_json::json!({"ruleId": "r1"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let v = json_body(&out);
+    assert_eq!(v["ok"], true, "{out}");
+    assert_eq!(v["ruleId"], "r1", "{out}");
+    assert_eq!(
+        v["title"], "[测试] 我的规则",
+        "标题必须以「[测试] 」开头（用户一眼认出它不是运行结果）：{out}"
+    );
+    assert!(
+        v["text"].as_str().is_some_and(|t| t.contains("来自规则")),
+        "正文要说清来自哪条规则：{out}"
+    );
+    // 每个渠道这一次的结果原样回给调用方（成败判据与运行类推送**同一套** ✓）
+    let logs = v["logs"].as_array().expect("logs 是数组");
+    assert!(
+        logs.iter()
+            .any(|l| l["msg"].as_str().is_some_and(|m| m.contains("Server酱"))),
+        "回里要带上渠道自己写的那句结果：{out}"
+    );
+    // 真的发出去了（1 个渠道 ⇒ 1 枪 ✓）
+    wait_push_calls(&fake, 1).await;
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -3082,5 +3589,946 @@ async fn an_unknown_category_is_rejected_instead_of_defaulting_to_all() {
     assert_eq!(st, StatusCode::BAD_REQUEST, "实际：{st} {body}");
     assert!(body.contains("只认 all / task / ops"), "{body}");
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ **老 `data/accounts.json` 兼容**：文件里还留着 `"notify": {...}` 时，
+/// 整份账号库必须照常读得出来。
+///
+/// # 为什么必须钉住（2026-10-08 用户口径）
+///
+/// 「**很显然我说的和云盘账户没有关系**，为啥你这里云盘账户有配置」＋
+/// 「**丢弃现有情况，重写**」⇒ 推送渠道配置从"每个云盘账号一份"收成
+/// "**每个登录用户一份**"（见 `docs/task-log.md` 154）✓ ——
+/// `AccountSettings::notify` 那一格已**整个删掉** ✗。
+///
+/// 而用户机器上那份 `accounts.json` 里**可能还存着**它 ⇒ 删字段的那一刻必须确认
+/// **旧文件照样读得出来**：`AccountSettings` 上没有 `deny_unknown_fields`
+///（只有线格式 DTO 有）⇒ serde 静默忽略未知键 ✓。
+///
+/// ⚠ 这条走的是**真 store**：`JsonStore` 启动时全量读盘，解析失败 = 账号库打不开、
+/// 整个实例起不来 ✗ —— 比只测 core 那个结构更接近事故现场 ✓。
+#[test]
+fn legacy_accounts_json_with_notify_still_loads() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "mcloud-server-legacy-notify-{}-{nanos}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // 老形状：`settings` 里带着 `notify`（渠道配置）与更早的 `notify_webhook`
+    std::fs::write(
+        dir.join("accounts.json"),
+        r#"[{
+            "id": "19900000009",
+            "nickname": "老号",
+            "auth": {"raw":"x","platform":"android","phone":"19900000009","token":"t","expire":0},
+            "device_id": "D-LEGACY",
+            "settings": {
+                "backup_wait_secs": 30,
+                "refresh_token_days": 10,
+                "skip_tasks": [],
+                "ai_avatar_daily_limit": 10,
+                "notify": {"title":"我的推送","onlyError":true,"serverChan":{"token":"SCT-SECRET"}},
+                "notify_webhook": "https://old.test/hook"
+            }
+        }]"#,
+    )
+    .unwrap();
+
+    let app = AppBuilder::new()
+        .data_dir(dir.clone())
+        .build()
+        .expect("带旧 notify 的 accounts.json 必须能读（读不出来 = 整个实例起不来）");
+    let store = Arc::clone(&app.handle.store);
+    let all = futures::executor::block_on(store.accounts()).expect("读库");
+    assert_eq!(all.len(), 1, "旧账号不许因为一个未知键被丢掉");
+    assert_eq!(
+        all[0].settings.backup_wait_secs, 30,
+        "同一条记录里别的设置照常读出来"
+    );
+    assert_eq!(all[0].settings.refresh_token_days, 10, "其余字段照常取默认");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 规则**自带凭据**（2026-10-08 用户口径：「这个规则配置推送的 token，
+/// 包括推送哪几个平台」✓）。
+///
+/// 钉两件事：
+/// * 存一份带 `serverChan.token` 的规则 ⇒ 读回来 **token 还在** ✓
+///   （凭据就在规则的 `config` 里 ✓ —— 原来那层"用户级渠道配置"已经删掉 ✗）；
+/// * `config` 里**一个渠道都没有** ⇒ **400** ✓ —— 那样配一条都发不出去 ✗，
+///   而用户会以为"我配好了" ✗（判据在 `PushConfig::validate` ✓，
+///   路由只是**存之前**调它 ✓）。
+#[tokio::test]
+async fn push_rule_config_round_trip() {
+    let (handle, dir) = test_app("push-rule-config");
+
+    let id = "rule-cfg";
+    let body = serde_json::json!({
+        "name": "带凭据的规则",
+        "config": {"title": "我的推送", "serverChan": {"token": "SCT-abc"}},
+        "digest": "perRun",
+        "enabled": true,
+    });
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(&format!("/api/push/rules/{id}"), &body),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(
+        json_body(&out)["config"]["serverChan"]["token"],
+        "SCT-abc",
+        "{out}"
+    );
+
+    // 读回来：token 在 ✓（读侧不做任何脱敏 —— 是本机管理员自己看 ✓）
+    let (s, out) = send(authed_app(Arc::clone(&handle)), get("/api/push/rules")).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let got = json_body(&out);
+    assert_eq!(got[0]["config"]["title"], "我的推送", "{out}");
+    assert_eq!(got[0]["config"]["serverChan"]["token"], "SCT-abc", "{out}");
+
+    // 一个渠道都没有 ⇒ 400（不是 200 + 一条发不出去的规则 ✗）
+    let empty = serde_json::json!({
+        "name": "空配置",
+        "config": {"title": "只有标题"},
+    });
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json("/api/push/rules/rule-empty", &empty),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "空配置必须被拒：{out}");
+    assert!(out.contains("没有任何渠道"), "{out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 面板行为绑定（`/api/push/panel`，2026-10-08 用户口径：
+/// 「在**设置**里，单独为这种**面板行为**增加一个可配置推送规则的入口」✓）。
+///
+/// 钉三件事：
+/// * **没配过 ⇒ 回内置保守默认** ✓（不是 `null` ✗ —— 用户口径
+///   「登录，性能，这些可能**频繁触发**，注意」✓）；
+/// * `PUT` 一份 ⇒ **回同一份** ✓、`GET` 读回来一致 ✓；
+/// * 规则 id 必须**存在且属于当前用户** ✓（`PUT` 校验，见下一条用例 ✓）。
+#[tokio::test]
+async fn push_panel_round_trip_and_conservative_defaults() {
+    let (handle, dir) = test_app("push-panel");
+
+    // ① 没配过 ⇒ 保守默认（登录 every/1800/10、性能 onChange/1800/10 ✓）
+    let (s, out) = send(authed_app(Arc::clone(&handle)), get("/api/push/panel")).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let d = json_body(&out);
+    assert_eq!(d["loginNew"]["throttle"]["mode"], "every", "{out}");
+    assert_eq!(d["loginNew"]["throttle"]["cooldownSecs"], 1800, "{out}");
+    assert_eq!(d["loginNew"]["throttle"]["dailyCap"], 10, "{out}");
+    assert_eq!(d["loginFailed"]["throttle"]["mode"], "every", "{out}");
+    assert_eq!(d["perfSlow"]["throttle"]["mode"], "onChange", "{out}");
+    assert_eq!(d["perfSlow"]["throttle"]["cooldownSecs"], 1800, "{out}");
+    assert_eq!(d["perfSlow"]["throttle"]["dailyCap"], 10, "{out}");
+    assert_eq!(d["perfFailStreak"]["throttle"]["mode"], "onChange", "{out}");
+
+    // ② 先建一条自己的规则（PUT panel 会校验 id 存在 ✓）
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(
+            "/api/push/rules/r1",
+            &serde_json::json!({
+                "name": "性能告警",
+                "config": {"bark": {"key": "bark-key-1"}},
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+
+    // ③ PUT 一份 ⇒ 回同一份 ✓
+    let body = serde_json::json!({
+        "loginNew": {
+            "rules": ["r1"],
+            "throttle": {"mode": "every", "cooldownSecs": 60, "dailyCap": 3}
+        },
+        "perfSlow": {
+            "rules": ["r1"],
+            "throttle": {"mode": "onChange", "cooldownSecs": 120, "dailyCap": 5},
+            "slowFactor": 2.5
+        },
+        "perfFailStreak": {
+            "rules": [],
+            "throttle": {"mode": "onChange", "cooldownSecs": 1800, "dailyCap": 10},
+            "failStreak": 4
+        }
+    });
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json("/api/push/panel", &body),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let echoed = json_body(&out);
+    assert_eq!(echoed["loginNew"]["rules"][0], "r1", "{out}");
+    assert_eq!(echoed["loginNew"]["throttle"]["cooldownSecs"], 60, "{out}");
+    assert_eq!(echoed["loginNew"]["throttle"]["dailyCap"], 3, "{out}");
+    assert_eq!(echoed["perfSlow"]["slowFactor"], 2.5, "{out}");
+    assert_eq!(echoed["perfFailStreak"]["failStreak"], 4, "{out}");
+
+    // ④ GET 读回来一致 ✓
+    let (s, out) = send(authed_app(Arc::clone(&handle)), get("/api/push/panel")).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let got = json_body(&out);
+    assert_eq!(got["loginNew"]["rules"][0], "r1", "{out}");
+    assert_eq!(got["loginNew"]["throttle"]["cooldownSecs"], 60, "{out}");
+    assert_eq!(got["perfSlow"]["slowFactor"], 2.5, "{out}");
+    assert_eq!(got["perfFailStreak"]["failStreak"], 4, "{out}");
+    // 没动过的那一格照旧是默认 ✓
+    assert_eq!(
+        got["loginFailed"]["throttle"]["cooldownSecs"], 1800,
+        "{out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ `PUT /api/push/panel` 点名的规则 id **必须存在且属于当前用户** ⇒ 否则 **400** ✓。
+///
+/// 不校验的后果：任何一个登录用户能把**别人的规则 id** 绑到自己的行为上 ✗ ——
+/// 投递侧按 owner 查不到那条规则，表现是"配了但永远不发" ✗（不报错 ✓，最难查的一类）。
+#[tokio::test]
+async fn push_panel_rejects_unknown_rule() {
+    let (handle, dir) = test_app("push-panel-unknown-rule");
+
+    let body = serde_json::json!({
+        "loginNew": {"rules": ["never-existed"]},
+    });
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json("/api/push/panel", &body),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "绑不存在的规则必须 400：{out}");
+    assert!(out.contains("never-existed"), "要说清是哪个 id：{out}");
+
+    // 而且**没落盘**（读回来还是默认：不绑任何规则 ✓）
+    let (s, out) = send(authed_app(Arc::clone(&handle)), get("/api/push/panel")).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert!(
+        json_body(&out)["loginNew"]["rules"].is_null(),
+        "被拒的请求不该留下半份绑定：{out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ `slowFactor` 必须 **> 0**（且是有限数）⇒ 否则 **400** ✓ ——
+/// `Some(0.0)` 会让「耗时异常」的判据**永远成立**（`耗时 > 中位数 × 0` 恒真 ✓）
+/// ⇒ 用户设一次 0，从此每一次运行都推一条"耗时异常" ✗（而界面上那一格看着正常 ✓）。
+///
+/// ⚠ `failStreak: 0` **不在这里拦**：0 是**合法**的语义（= 关掉连判 ✓）——
+/// 把它当错误报掉，等于把用户明确表达的一个意愿判成非法 ✗。
+#[tokio::test]
+async fn push_panel_rejects_non_positive_slow_factor() {
+    let (handle, dir) = test_app("push-panel-slow-factor");
+
+    // 先建一条自己的规则（PUT panel 会校验 id 存在 ✓；阈值那两条不需要它）
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(
+            "/api/push/rules/r1",
+            &serde_json::json!({
+                "name": "性能告警",
+                "config": {"bark": {"key": "bark-key-1"}},
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+
+    for bad in [serde_json::json!(0), serde_json::json!(-1)] {
+        let body = serde_json::json!({
+            "perfSlow": {
+                "rules": ["r1"],
+                "throttle": {"mode": "onChange", "cooldownSecs": 1800, "dailyCap": 10},
+                "slowFactor": bad
+            }
+        });
+        let (s, out) = send(
+            authed_app(Arc::clone(&handle)),
+            put_json("/api/push/panel", &body),
+        )
+        .await;
+        assert_eq!(
+            s,
+            StatusCode::BAD_REQUEST,
+            "slowFactor = {bad} 必须被拒：{out}"
+        );
+        assert!(out.contains("倍数必须大于 0"), "错误原话要说清判据：{out}");
+    }
+
+    // 正数照旧放行 ✓（2.5 是合法阈值：判据是"多少倍"，不是"至少多少" ✓）
+    let ok = serde_json::json!({
+        "perfSlow": {
+            "rules": ["r1"],
+            "throttle": {"mode": "onChange", "cooldownSecs": 1800, "dailyCap": 10},
+            "slowFactor": 2.5
+        },
+        "perfFailStreak": {
+            "rules": [],
+            "throttle": {"mode": "onChange", "cooldownSecs": 1800, "dailyCap": 10},
+            // ⚠ 0 = **关掉连判**，合法 ✓（别顺手把它也判成错 ✗）
+            "failStreak": 0
+        }
+    });
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json("/api/push/panel", &ok),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "slowFactor = 2.5 应当放行：{out}");
+    let echoed = json_body(&out);
+    assert_eq!(echoed["perfSlow"]["slowFactor"], 2.5, "{out}");
+    assert_eq!(
+        echoed["perfFailStreak"]["failStreak"], 0,
+        "0 是合法的连败阈值（关掉连判）：{out}"
+    );
+
+    // 被拒的那两次**没落盘**（读回来是刚存下的 2.5，不是 0 / -1 ✓）
+    let (s, out) = send(authed_app(Arc::clone(&handle)), get("/api/push/panel")).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(json_body(&out)["perfSlow"]["slowFactor"], 2.5, "{out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── 面板行为的**触发线**：登录那两条（2026-10-08 接上 ✓）────────────────────
+//
+// 验收要求（§6 第 3、6 条）：**认证路由**上的一次失败登录 / 一次新设备登录
+// ⇒ 面板行为收到一次触发，且**用假 HTTP 客户端断言发了几枪** ✓
+//（生产那份客户端会把包真的发到用户配的地址上去 ✗）。
+//
+// ⚠ 触发线是 `spawn` 出去的（HTTP 不能拖住登录 ✓，见 `Notifier::spawn_panel` ✓）
+// ⇒ 断言前要先**等它落地**（[`wait_push_calls`] ✓）。
+
+/// 只数"发了几枪"的假 HTTP（**推送投递**那条路 ✓）。
+#[derive(Default)]
+struct CountingHttp {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingHttp {
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl mcloud_core::HttpClient for CountingHttp {
+    async fn request(
+        &self,
+        _req: mcloud_core::HttpRequest,
+    ) -> mcloud_core::Result<mcloud_core::HttpResponse> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(mcloud_core::HttpResponse {
+            status: 200,
+            body: "{}".into(),
+            headers: Vec::new(),
+        })
+    }
+}
+
+/// 起一个应用，并把**推送投递**用的 HTTP 客户端换成假的 ✓（见 `AppBuilder::notify_http` ✓）。
+fn test_app_with_notify_http(
+    tag: &str,
+    http: Arc<dyn mcloud_core::HttpClient>,
+) -> (Arc<AppHandle>, std::path::PathBuf) {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "mcloud-server-{tag}-{}-{nanos}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let app = AppBuilder::new()
+        .data_dir(dir.clone())
+        .notify_http(http)
+        .build()
+        .expect("应用应能组装");
+    (Arc::new(app.handle), dir)
+}
+
+/// 建一条**自带凭据**的规则，并把它绑给某个面板行为（走**真落盘** ✓ ——
+/// 与设置页那条路逐格一致 ✓）。
+async fn bind_panel_rule(
+    handle: &Arc<AppHandle>,
+    owner: &UserId,
+    behavior: mcloud_core::BehaviorKey,
+    rule_id: &str,
+) {
+    let mut rule = mcloud_core::PushRule::new_default(rule_id, Some(owner.clone()));
+    rule.config = serde_json::from_str(r#"{"serverChan":{"token":"SC"}}"#).expect("测试配置");
+    handle
+        .store
+        .save_push_rule(owner, &rule)
+        .await
+        .expect("存规则");
+
+    let mut panel = handle.store.push_panel(owner).await.expect("读面板绑定");
+    let slot = panel.get_mut(behavior);
+    slot.rules = vec![mcloud_core::PushRuleId::new(rule_id)];
+    slot.throttle = mcloud_core::Throttle {
+        mode: mcloud_core::ThrottleMode::Every,
+        cooldown_secs: 1800,
+        daily_cap: 10,
+    };
+    handle
+        .store
+        .save_push_panel(owner, &panel)
+        .await
+        .expect("存面板绑定");
+}
+
+/// 登录请求（可以指定 `User-Agent` —— `loginNew` 的判据用它 ✓）。
+fn login_req(body: &serde_json::Value, ua: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/api/session")
+        .header("content-type", "application/json")
+        .header("user-agent", ua)
+        .body(Body::from(serde_json::to_vec(body).unwrap()))
+        .expect("请求应可构造")
+}
+
+/// 等 `spawn` 出去的投递落地（**只让出、不睡** ✓）。
+async fn wait_push_calls(http: &CountingHttp, n: usize) {
+    for _ in 0..3000 {
+        if http.calls() >= n {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("等待推送投递超时（期望 {n} 枪，实际 {} 枪）", http.calls());
+}
+
+/// 给 `spawn` 出去的任务一点时间，然后断言**没有新增** ✓。
+async fn settle_push() {
+    for _ in 0..500 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// ⭐ §6 验收第 3 条：认证路由上**一次失败登录** ⇒ 面板行为收到**一次触发** ✓
+/// （假 HTTP 客户端断言**发了 1 个请求** ✓）；**冷却期内第二次不发** ✓。
+///
+/// ⚠ 这里用的是**库里存在**的那个用户名 ⇒ owner 拿得到 ✓
+///（用户名根本不存在那条路**不发** —— 拿不到归属就不猜 ✓，见 `note_login_failure` ✓）。
+#[tokio::test]
+async fn a_failed_login_triggers_the_panel_once_per_cooldown() {
+    let fake = Arc::new(CountingHttp::default());
+    let (handle, dir) = test_app_with_notify_http(
+        "login-failed-panel",
+        Arc::clone(&fake) as Arc<dyn mcloud_core::HttpClient>,
+    );
+    let owner = seed_test_user_and_session(&handle);
+    bind_panel_rule(
+        &handle,
+        &owner,
+        mcloud_core::BehaviorKey::LoginFailed,
+        "login-failed-rule",
+    )
+    .await;
+
+    // ① 第一次失败（口令错）⇒ **发一枪** ✓
+    let (s, out) = send(
+        mcloud_server::app(ServerState::new(Arc::clone(&handle))),
+        login_req(
+            &serde_json::json!({"username":"admin","password":"wrong"}),
+            "UA-test",
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{out}");
+    wait_push_calls(&fake, 1).await;
+
+    // ② 冷却期内第二次失败 ⇒ **不发** ✓（节流那一档的事 ✓，不许静默 ⇒ 下面查留痕 ✓）
+    let (s, out) = send(
+        mcloud_server::app(ServerState::new(Arc::clone(&handle))),
+        login_req(
+            &serde_json::json!({"username":"admin","password":"wrong-again"}),
+            "UA-test",
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{out}");
+    settle_push().await;
+    assert_eq!(fake.calls(), 1, "冷却期内第二次不该再发");
+
+    // ③ 留痕落盘了（`data/push-throttle.json` ✓）：发过 1 条、被拦 1 次 ✓
+    let st = handle
+        .store
+        .push_throttle(&owner)
+        .await
+        .expect("读节流状态")
+        .get(mcloud_core::BehaviorKey::LoginFailed);
+    assert_eq!(st.sent_today, 1, "第一条真的发出去了");
+    assert_eq!(
+        st.throttled_today, 1,
+        "被拦下必须留痕（用户口径：不许静默 ✗）"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⚠⚠ `loginNew`（「登录新设备」）**接的是什么** —— 这条把近似关系说清楚 ✓。
+///
+/// 本仓**没有真设备**这个概念 ✗（登录请求里只有用户名与口令 ✓）⇒ 判据退化成
+/// 「这个账号 + 这个 `User-Agent` + 这个 peer IP **没见过**」✓
+///（见 `routes/auth.rs::login_device_key` ✓）。
+///
+/// ⇒ 钉三件事（全部走**成功登录**那条路 ✓）：
+/// * 第一次（这台设备没见过）⇒ **报** ✓；
+/// * 第二次（同一台设备）⇒ **不报** ✓ —— 这一条正是"**不许**拿'任何一次成功登录'
+///   冒充'新设备'"✗（那是骗人 ✓）；
+/// * 换一台设备（UA 变了）⇒ **又报** ✓。
+#[tokio::test]
+async fn login_new_fires_only_for_an_unseen_device() {
+    let fake = Arc::new(CountingHttp::default());
+    let (handle, dir) = test_app_with_notify_http(
+        "login-new-panel",
+        Arc::clone(&fake) as Arc<dyn mcloud_core::HttpClient>,
+    );
+
+    // 建一个**真能登进来**的用户（口令哈希用真 argon2 ✓ —— 登录要真验一遍 ✓）。
+    let digest = mcloud_crypto::to_digest_credential("secret-pw");
+    let hash = mcloud_crypto::hash_password(&digest).expect("算口令哈希");
+    let user = User {
+        id: UserId::new("login-new-user"),
+        name: "someone".into(),
+        password_hash: PasswordHash(mcloud_crypto::mark_digest_scheme(&hash)),
+        created_at_ms: handle.clock.now_ms(),
+    };
+    handle.store.save_user(&user).await.expect("存用户");
+    bind_panel_rule(
+        &handle,
+        &user.id,
+        mcloud_core::BehaviorKey::LoginNew,
+        "new-login-rule",
+    )
+    .await;
+    // 冷却设 0 ⇒ 后面"换设备"那一次不该被节流挡住 ✓
+    //（这一节验的是**设备判据**，不是节流 —— 节流另有专门用例 ✓）。
+    let mut panel = handle.store.push_panel(&user.id).await.expect("读面板绑定");
+    panel.login_new.throttle.cooldown_secs = 0;
+    handle
+        .store
+        .save_push_panel(&user.id, &panel)
+        .await
+        .expect("存面板绑定");
+
+    let body = serde_json::json!({"username":"someone","password":"secret-pw"});
+
+    // ① 第一次：这台设备没见过 ⇒ **报** ✓
+    let (s, out) = send(
+        mcloud_server::app(ServerState::new(Arc::clone(&handle))),
+        login_req(&body, "UA-first"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    wait_push_calls(&fake, 1).await;
+
+    // ② 同一台设备再登一次 ⇒ **不报** ✓
+    let (s, out) = send(
+        mcloud_server::app(ServerState::new(Arc::clone(&handle))),
+        login_req(&body, "UA-first"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    settle_push().await;
+    assert_eq!(
+        fake.calls(),
+        1,
+        "同一台设备再登录**不算**新设备 —— 否则就是拿「任何一次成功登录」冒充新设备 ✗"
+    );
+
+    // ③ 换一台设备（UA 变了）⇒ **又报** ✓
+    let (s, out) = send(
+        mcloud_server::app(ServerState::new(Arc::clone(&handle))),
+        login_req(&body, "UA-second"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    wait_push_calls(&fake, 2).await;
+
+    // 判据串落盘了（`data/login-devices.json` ✓）：两台设备各一条 ✓
+    let raw = std::fs::read_to_string(dir.join("login-devices.json")).expect("读设备表");
+    assert!(
+        raw.contains("UA-first") && raw.contains("UA-second"),
+        "见过的设备要落盘（重启之后同一台不该又变成新的 ✓）：{raw}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── 直播自动定时（`/api/live-room/auto-schedule`）────────────────────────
+//
+// 用户口径（2026-10-08）：「为直播增加一个自动设置定时的功能，设置为下次直播开始
+// 时间的一个小时后」⇒ 每个用户一条定时（`auto-live-<owner>` ✓），
+// 时刻 = 这批账号里最早的「下一场」+ 1 小时 ✓。这几条用例钉的是**接口那一层**：
+// 形状、鉴权口径、以及"改开关 / 改账号多选"落到哪几格上 ✓
+//（算法与幂等在 `mcloud-app::live_auto` 的用例里 ✓）。
+//
+// ⚠⚠ **这些用例必须用 [`test_app_with_dead_upstream`]**（不是 `test_app` ✓）：
+// 重算会**按账号去上游现取**「下一场」（用户口径 2026-10-08：「下一场应该从上游
+// 获取啊」✓），而 `test_app` 用的是生产那份工厂 ⇒ 会把请求打到**真的上游**去 ✗
+//（单测里既不可能也不该发生 ✓）。假上游一律报网络错 ⇒ 重算走**池里那份兜底** ✓，
+// 于是下面那几条"时刻来自池"的期望原样成立 ✓
+//（"上游现取"那条路本身由 `mcloud-app::live_auto` 的用例钉住 ✓）。
+
+/// 往共享口令池里放一场预告场。
+///
+/// ⚠ 时刻必须真的在**未来**：路由用例用的是**真时钟**（`AppBuilder` 注入的
+/// 系统时钟 ✓），而池挑「下一场」时会跳过已经过去的场次
+///（`next_start_at` ✓）⇒ 写一个过去的时刻会得到"没有下一场"，用例就会
+/// 测出一个假结论 ✗。所以这里固定写 2099 年。
+/// 相对"现在"算一个**未来**的墙钟串（东八区，与上游同形 ✓）。
+///
+/// ⚠⚠ **不要写死 2099 那样的远未来**：本仓的定时是 cron，而 cron **没有年字段**
+///（见 `mcloud_core::live_auto::one_shot_expr` ✓）⇒ 一条"2099-01-01 11:00"的表达式
+/// 下一次触发其实是 **2027-01-01 11:00** ✗ —— 用例会因此测出一个假结论
+///（实测踩过一次 ✓）。真实的"下一场"永远是几天内的事，用例也照这个量级写 ✓。
+fn future_stamp(handle: &Arc<AppHandle>, offset_ms: i64) -> String {
+    mcloud_core::live_auto::beijing_stamp(handle.clock.now_ms() + offset_ms)
+}
+
+/// 两天后的那一刻（用例统一用它当"下一场"）。
+const TWO_DAYS_MS: i64 = 2 * 24 * 60 * 60 * 1000;
+/// 一小时。
+const ONE_HOUR_MS: i64 = 60 * 60 * 1000;
+
+fn seed_live_pool(handle: &Arc<AppHandle>, expect: &str) {
+    let now = handle.clock.now_ms();
+    let mut pool = mcloud_core::kouling::KoulingPool::default();
+    pool.normalize(now);
+    pool.note_probe(
+        &[mcloud_core::kouling::ProbeRoom {
+            room_id: 147608,
+            title: "预告".into(),
+            status: 0,
+            expect_start_time: expect.into(),
+            anchor_nickname: mcloud_upstream::live_consts::KOULING_ANCHOR.into(),
+        }],
+        false,
+        now,
+    );
+    let store = Arc::clone(&handle.store);
+    futures::executor::block_on(store.save_kouling_pool(&pool)).expect("存口令池");
+}
+
+/// `GET` 在"还没跑过直播任务"时也要能回答（而不是 404 / 空对象）✓ ——
+/// 前端那张卡第一次打开就是这个状态 ✓。
+#[tokio::test]
+async fn live_auto_schedule_get_reports_nothing_computed_yet() {
+    let (handle, dir) = test_app("live-auto-get-fresh");
+    let (status, out) = send(
+        authed_app(Arc::clone(&handle)),
+        get("/api/live-room/auto-schedule"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let v = json_body(&out);
+    assert_eq!(v["enabled"], false, "{out}");
+    assert!(v["at"].is_null(), "没有时刻就给 null，不要占位值：{out}");
+    assert_eq!(v["accounts"], serde_json::json!([]), "{out}");
+    assert!(
+        v["note"].as_str().is_some_and(|s| !s.is_empty()),
+        "要说清「还没有这条自动定时」：{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ `PUT` = 改开关 + 账号多选，并**立刻重算一次** ✓ ——
+/// 算出来的时刻要真的落到那条定时上（`/api/schedules` 里看得见 ✓）。
+#[tokio::test]
+async fn live_auto_schedule_put_computes_and_persists() {
+    let (handle, dir) = test_app_with_dead_upstream("live-auto-put");
+    let acc = mcloud_upstream::account_id_for("19900000031");
+    seed_account(&handle, seed_for("19900000031"));
+    let next_live = future_stamp(&handle, TWO_DAYS_MS);
+    let want_at = future_stamp(&handle, TWO_DAYS_MS + ONE_HOUR_MS);
+    seed_live_pool(&handle, &next_live);
+
+    let (status, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(
+            "/api/live-room/auto-schedule",
+            &serde_json::json!({ "enabled": true, "accounts": [acc.clone()] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let v = json_body(&out);
+    assert_eq!(v["enabled"], true, "{out}");
+    assert_eq!(v["at"], want_at, "下一场（{next_live}）+ 1 小时：{out}");
+    assert_eq!(v["accounts"], serde_json::json!([acc.clone()]), "{out}");
+
+    // 落盘是**那条普通定时**（用户口径：进既有文件，别新开表 ✓）
+    //
+    // ⚠ 断言用**解析后的字段**而不是 `raw.contains("…")`：落盘那份是美化过的
+    // JSON（键值之间有空格 ✓），按子串比会把"格式变了"报成"字段丢了" ✗ ——
+    // 而这条要钉的恰恰是字段本身 ✓。
+    let raw = std::fs::read_to_string(dir.join("schedules.json")).expect("读定时表");
+    let saved: serde_json::Value =
+        serde_json::from_str(&raw).expect("schedules.json 应是合法 JSON");
+    let saved_auto = saved
+        .as_array()
+        .expect("定时表应是数组")
+        .iter()
+        .find(|s| s["id"] == "auto-live-test-user")
+        .unwrap_or_else(|| panic!("id 必须是 auto-live-<owner>：{raw}"));
+    assert_eq!(
+        saved_auto["managedBy"], "live-auto",
+        "必须带系统维护标记（前端靠它标注「系统维护」）：{raw}"
+    );
+
+    // 它同时出现在定时列表里（用户口径：它是**用户的**定时 ✓），且带着标记 ✓
+    let (status, out) = send(authed_app(Arc::clone(&handle)), get("/api/schedules")).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let list = json_body(&out);
+    let auto = list
+        .as_array()
+        .expect("列表应是数组")
+        .iter()
+        .find(|s| s["id"] == "auto-live-test-user")
+        .expect("那条自动定时必须出现在定时列表里");
+    assert_eq!(auto["managedBy"], "live-auto", "{out}");
+    assert_eq!(auto["task"], "live-room", "{out}");
+    assert_eq!(
+        auto["expr"],
+        mcloud_core::live_auto::one_shot_expr(&want_at).expect("算出来的时刻应能写成 cron"),
+        "那条定时的 cron 必须正好是「下一场 + 1 小时」那一刻：{out}"
+    );
+
+    // `GET` 读回来是同一份状态（它**只读**，不重算 ✓）
+    let (status, out) = send(
+        authed_app(Arc::clone(&handle)),
+        get("/api/live-room/auto-schedule"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let v = json_body(&out);
+    assert_eq!(v["enabled"], true, "{out}");
+    assert_eq!(
+        v["at"], want_at,
+        "GET 反推出来的时刻要与 PUT 算出的一致：{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `PUT` 只改开关时**不能**把账号多选清空（缺席 = 保持原样 ✓）——
+/// 定时页上踩过同一个坑（见 `ScheduleInput::body` 的注释 ✓）。
+#[tokio::test]
+async fn live_auto_schedule_put_without_accounts_keeps_them() {
+    let (handle, dir) = test_app_with_dead_upstream("live-auto-put-keep-accounts");
+    let a1 = mcloud_upstream::account_id_for("19900000041");
+    let a2 = mcloud_upstream::account_id_for("19900000042");
+    seed_account(&handle, seed_for("19900000041"));
+    seed_account(&handle, seed_for("19900000042"));
+    let want_at = future_stamp(&handle, TWO_DAYS_MS + ONE_HOUR_MS);
+    seed_live_pool(&handle, &future_stamp(&handle, TWO_DAYS_MS));
+
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(
+            "/api/live-room/auto-schedule",
+            &serde_json::json!({ "enabled": true, "accounts": [a1.clone(), a2.clone()] }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+
+    // 只翻开关（**不带** accounts 这一格）
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(
+            "/api/live-room/auto-schedule",
+            &serde_json::json!({ "enabled": false }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let v = json_body(&out);
+    assert_eq!(v["enabled"], false, "{out}");
+    assert_eq!(
+        v["accounts"],
+        serde_json::json!([a1.clone(), a2.clone()]),
+        "只改开关不能把账号多选清空：{out}"
+    );
+    assert_eq!(v["at"], want_at, "关掉之后时刻照样算出来给用户看：{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 关掉之后**不能**被下一次重算自己打开 ✓（那是 `managed_wanted` 与 `enabled`
+/// 分成两格的理由 ✓）—— 从接口这一层再钉一次：连 `PUT` 两次只带 `enabled: false`。
+#[tokio::test]
+async fn live_auto_schedule_stays_off_once_turned_off() {
+    let (handle, dir) = test_app_with_dead_upstream("live-auto-off-sticks");
+    seed_live_pool(&handle, &future_stamp(&handle, TWO_DAYS_MS));
+
+    for _ in 0..2 {
+        let (s, out) = send(
+            authed_app(Arc::clone(&handle)),
+            put_json(
+                "/api/live-room/auto-schedule",
+                &serde_json::json!({ "enabled": false }),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{out}");
+        assert_eq!(json_body(&out)["enabled"], false, "{out}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 账号必须是**自己的**：写别人的 id 会被 400 拒掉（不是静默存下一个跑不起来的定时 ✓）。
+#[tokio::test]
+async fn live_auto_schedule_put_rejects_accounts_that_are_not_yours() {
+    let (handle, dir) = test_app_with_dead_upstream("live-auto-put-foreign-account");
+    seed_live_pool(&handle, &future_stamp(&handle, TWO_DAYS_MS));
+    let (status, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(
+            "/api/live-room/auto-schedule",
+            &serde_json::json!({ "enabled": true, "accounts": ["19900000099"] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
+    assert!(out.contains("不属于你"), "要说清是哪个账号：{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 账号**存在、但属于别人** ⇒ 同样 400 ✓。
+///
+/// # 为什么这条要与上一条分开
+///
+/// 上一条给的是一个**压根不存在**的 id（`visible_to` 与"查无此号"在
+/// `account_for` 里走的是同一条分支 ✓）。只钉那一条的话，"校验写成了
+/// `store.account(id).is_some()`"（**不看归属** ✗）照样全绿 ——
+/// 而在多用户实例里那意味着 A 能把自己的定时指向 B 的云盘账号 ✗：
+/// 调度器只按定时的主人过滤账号（`Scheduler::target_accounts` ✓）⇒
+/// 那条定时到点**一个账号都跑不起来**，而接口与界面看起来是配好的 ✗。
+#[tokio::test]
+async fn live_auto_schedule_put_rejects_another_users_account() {
+    let (handle, dir) = test_app_with_dead_upstream("live-auto-put-foreign-owner");
+    seed_live_pool(&handle, &future_stamp(&handle, TWO_DAYS_MS));
+
+    // 一个**别人的**账号：id 与手机号哈希一致（与 `seed_for` 同一条口径 ✓），
+    // 归属显式写成另一个用户 ⇒ `visible_to` 对 `Some(owner)` 只认相等 ✓。
+    let foreign = mcloud_upstream::account_id_for("19900000088");
+    let mut account = seed_for("19900000088");
+    account.owner = Some(mcloud_core::UserId::new("someone-else"));
+    let store = Arc::clone(&handle.store);
+    futures::executor::block_on(store.save_account(&account)).expect("落库");
+
+    // 前置条件：它在库里**真的存在** —— 否则这条用例会退化成上面那条"不存在" ✓
+    assert!(
+        futures::executor::block_on(store.account(&mcloud_core::AccountId::new(foreign.clone())))
+            .expect("读账号")
+            .is_some(),
+        "前置条件：账号必须在库里（只是不归当前用户）"
+    );
+
+    let (status, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(
+            "/api/live-room/auto-schedule",
+            &serde_json::json!({ "enabled": true, "accounts": [foreign.clone()] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
+    assert!(out.contains("不属于你"), "要说清是哪个账号：{out}");
+
+    // 而且**没落盘**：那条自动定时压根不该被建出来 ✓
+    assert!(
+        futures::executor::block_on(
+            store.schedule(&mcloud_core::ScheduleId::new("auto-live-test-user"))
+        )
+        .expect("读定时")
+        .is_none(),
+        "被拒的请求不该留下一条跑不起来的定时"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 在**定时页**上翻那条自动定时的开关，与设置页那张卡上的开关必须是**同一格**
+///（`managed_wanted` ✓）—— 否则两处会各说各话：在定时页关掉它，
+/// 系统下一次重算又按"用户想要"把它打开 ✗（用户会报"我关了它自己又开了"✗）。
+///
+/// 顺带钉住：**编辑保存不能把"这条是系统维护的"抹掉** —— 抹掉的话，
+/// 系统从此不再维护它（变成一条永远停在那儿的普通定时 ✓ 而用户并不知道 ✗）。
+#[tokio::test]
+async fn toggling_the_auto_schedule_from_the_schedules_page_sets_the_user_intent() {
+    let (handle, dir) = test_app_with_dead_upstream("live-auto-toggle-from-schedules");
+    seed_live_pool(&handle, &future_stamp(&handle, TWO_DAYS_MS));
+
+    // 先让那条自动定时存在（第一次 PUT ⇒ 系统建出来 ✓）
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(
+            "/api/live-room/auto-schedule",
+            &serde_json::json!({ "enabled": true }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(json_body(&out)["enabled"], true, "{out}");
+
+    // 再从**定时页**把它停用（整条 PUT，enabled=false ✓）
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json(
+            "/api/schedules/auto-live-test-user",
+            &serde_json::json!({
+                "name": "直播自动定时",
+                "task": "live-room",
+                "accounts": [],
+                "expr": "0 0 11 1 1 *",
+                "timezone": "Asia/Shanghai",
+                "enabled": false,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let v = json_body(&out);
+    assert_eq!(v["enabled"], false, "{out}");
+    assert_eq!(
+        v["managedBy"], "live-auto",
+        "编辑保存不能把「系统维护」这个事实抹掉：{out}"
+    );
+
+    // 系统再重算一次（不带任何 patch）⇒ 开关必须**保持关着** ✓
+    let (s, out) = send(
+        authed_app(Arc::clone(&handle)),
+        put_json("/api/live-room/auto-schedule", &serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let v = json_body(&out);
+    assert_eq!(
+        v["enabled"], false,
+        "在定时页关掉的开关不能被下一次重算打开：{out}"
+    );
+    assert!(v["at"].as_str().is_some(), "时刻照样算出来给他看：{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }

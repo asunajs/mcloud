@@ -256,7 +256,7 @@ const TOKEN_LAYER = `
  * 于是 `src/pages/*.tsx` 一条都没进扫描 ⇒ 探针 V0 比真实构建**少 2,661 B**
  * （实测 65,855 vs 68,516）—— 差的就是页面真正用到的那批 utility。
  * 现在临时配置 **`import` 真实的 `vite.config.ts`**（同一套 plugins：tailwindcss + lite，
- * 同一个 `lite` alias，同一份 build 选项），entry 仍是 `index.html`，
+ * 同一份 build 选项），entry 仍是 `index.html`，
  * 只在 alias 里**多插一条**把 `src/main.ts` 那句 `import './app.css'` 顶到探针 CSS。
  * ⇒ 两边扫的文件集合、插件、构建选项全同，只有 CSS 来源不同，数才可比。
  * （代价：每个变体要连 JS 一起编，一次探针从 ≈8 s 变成下面实测的秒数。）
@@ -306,7 +306,7 @@ function buildVariantOnce(css) {
     PROBE_CFG,
     `import real from './vite.config'\n` +
       `const alias = (real.resolve?.alias ?? []).slice()\n` +
-      // 插在**末尾**：`lite` 那条在前，先按真配置匹配。
+      // 插在**末尾**：真配置里已有的 alias 在前，先按它们匹配。
       `alias.push({ find: './app.css', replacement: ${JSON.stringify(PROBE_CSS)} })\n` +
       `export default {\n` +
       `  ...real,\n` +

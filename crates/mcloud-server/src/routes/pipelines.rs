@@ -7,6 +7,7 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use mcloud_core::push::{PushEvent, PushRuleId};
 use mcloud_core::{Account, AccountId, Pipeline, PipelineId, PipelineStep, UserId};
 
 use crate::auth_gate::CurrentUser;
@@ -33,6 +34,17 @@ pub struct PipelineInput {
     pub steps: Vec<PipelineStep>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// **绑定哪些推送规则**（用户口径 2026-10-07：「推送规则可用于定时任务」✓；
+    /// 编排是同一件事的另一头 ✓；2026-10-08 更正：「**一个行为可以选择多个规则**」✓）。
+    ///
+    /// ⚠ 不带这一格的请求必须**沿用旧值**（与 `schedules.rs` 的 `body` 同一个坑）——
+    /// 清空会让"改个名字"顺手把绑定丢了 ✗。
+    /// ⚠ 语义（照 `double_option` ✓）：**缺席 = 保持原样** ✓、**给了 `[]` = 清空** ✓。
+    #[serde(default, deserialize_with = "absent_or_list")]
+    pub push_rules: Option<Vec<PushRuleId>>,
+    /// **只在哪些运行结局时推**（空 = 跑完就推 ✓）。语义同 `schedules.rs` ✓。
+    #[serde(default, deserialize_with = "absent_or_list")]
+    pub push_events: Option<Vec<PushEvent>>,
 }
 
 fn default_true() -> bool {
@@ -71,6 +83,23 @@ pub async fn upsert(
         .as_ref()
         .and_then(|p| p.owner.clone())
         .or_else(|| Some(cur.0.clone()));
+    // ⚠ **必须在这里算**：下面 `existing.and_then(|p| p.last_run_ms)` 是**按值**消费 ✓
+    // （那句之后再用 `existing.as_ref()` 就是 use-after-move ✗）。
+    // 口径与 `schedules.rs` 同款：入参没给就沿用老行 ✓。
+    // ⚠ `double_option` 的语义（见 [`double_option`] ✓）：**入参给了**（`[]` 或 `null` ✓）
+    // ⇒ 用入参（空清单 = 不推 ✓）；**没给** ⇒ 沿用老行 ✓。
+    let push_rules = input.push_rules.clone().unwrap_or_else(|| {
+        existing
+            .as_ref()
+            .map(|p| p.push_rules.clone())
+            .unwrap_or_default()
+    });
+    let push_events = input.push_events.clone().unwrap_or_else(|| {
+        existing
+            .as_ref()
+            .map(|p| p.push_events.clone())
+            .unwrap_or_default()
+    });
     let pipeline = Pipeline {
         id,
         name: input.name,
@@ -80,6 +109,8 @@ pub async fn upsert(
         steps: input.steps,
         enabled: input.enabled,
         owner,
+        push_rules,
+        push_events,
         last_run_ms: existing.and_then(|p| p.last_run_ms),
     };
 
@@ -259,3 +290,25 @@ async fn target_accounts(
 // 让 `Arc<AppHandle>` 能被 spawn 里的闭包捕获
 #[allow(dead_code)]
 fn _assert_send_sync(_: Arc<crate::ServerState>) {}
+
+/// 「这一格没给」与「给了（`[]` / `null` / 一串 id）」**分开**。
+///
+/// # 为什么非要分开（2026-10-07，A 线自报的第 2 条；2026-10-08 换到 `Vec` 上 ✓）
+///
+/// `Option<Vec<PushRuleId>>` 里，`{"pushRules": []}`、`{"pushRules": null}` 与
+/// **根本没有这一格**都反序列化成 `None` ✗ ⇒ 于是只有一种可能：沿用老行 ✓
+/// —— **清空不了** ✗。而界面上的「不绑」正是发 `[]`（或 `null` ✓）⇒ 用户选了
+/// "不推"、保存后却还绑着，而且**不报错** ✗（最坏的一类）。
+///
+/// 现在：**没给** ⇒ `#[serde(default)]` 给 `None` ⇒ 沿用 ✓；
+/// **给了**（`[]` / `null` / 一串 id ✓）⇒ `Some(..)` ⇒ 用入参 ✓
+/// （空清单 = 清空 ✓）。与 `schedules.rs` 那一份**逐字同款** ✓
+/// （两处各写一份是刻意的：它们是两个模块的私有反序列化器，合并要引一层
+/// 只有这一格用的公共模块 ✗）。
+fn absent_or_list<'de, T, D>(d: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<Vec<T>>::deserialize(d).map(|v| Some(v.unwrap_or_default()))
+}

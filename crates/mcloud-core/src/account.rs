@@ -3,7 +3,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::push::PushConfig;
 use crate::user::UserId;
 
 /// 账号标识，通常是手机号。
@@ -183,7 +182,6 @@ pub struct AccountSettings {
     ///
     /// ⚠ 这里只留"上限"，**没有** `ai_avatar_enabled` 那个总闸。
     pub ai_avatar_daily_limit: u32,
-
     // 这里**没有**三个"账号级总闸"：`ai_avatar_enabled` / `redpack_enabled` /
     // `play_ai_enabled`（以及更早删掉的 `kouling_enabled`）。用户口径（2026-10-03）：
     // 「**账号不应该有这个配置**」—— 任务**是用户显式点起来的**，"跑不跑"这一层已经
@@ -205,31 +203,18 @@ pub struct AccountSettings {
     // 设置里（且界面上根本没有入口 ✗）的总闸，只会让显式发起的运行在 1ms 内回一句
     // 「直播口令未启用」，而用户找不到任何地方把它打开。留着的字段就是骗人的旋钮 ——
     // 与上面 `hc1t_*` 那三个是同一条道理。
-    /// 推送渠道：这个账号的运行结果推到**哪些**渠道（每账号一份）。
-    ///
-    /// # 为什么是**每账号**而不是进程级
-    ///
-    /// 「结果发给谁」是账号自己的属性：同一台机器上可以既有归本人的账号、
-    /// 也有代跑的账号，它们不该被迫共用一个收件地址；同一进程里 A、B 两个
-    /// 账号也必须能各配各的渠道。而进程级 env 只能有一份 —— 那是**串号**：
-    /// A 的渠道会被套到 B 的运行上（见 `mcloud-core::push` 模块头）。
-    ///
-    /// ⇒ **本仓刻意不做进程级兜底**：那种「一份 env 管全进程」的配置已整个删除。
-    /// `None`（默认）⇒ 这个账号没配渠道 ⇒ **一个包都不发**（无 fallback）。
-    ///
-    /// ⚠ 与 TS 的差异：`mcloud-sign`（单用户）有一份全局配置，那是为了 DRY；
-    /// 本仓多用户 ⇒ 收件地址只能落在**账号维度**。TS 那种「一份配置套多个
-    /// 账号」的正确形态是**用户级模板**，本版**没做**（见 `mcloud-core::push`
-    /// 的未做项），绝不把它偷偷实现成 fallback。
-    ///
-    /// ⚠ `skip_serializing_if` 是刻意的：`None` 不该落盘成一个显式的
-    /// `null`，否则"没配"与"配成空"在老数据里分不开。
-    ///
-    /// ⚠ 半成品字段 `notify_webhook`（单个 webhook 串）不再被读取：serde 默认
-    /// 忽略未知键，旧值会被**静默丢弃** —— 那是刻意的，那份模型语义错误
-    /// （进程级兜底 = 串号），不做兼容迁移。要配就按 `PushConfig` 重配。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notify: Option<PushConfig>,
+
+    // 这里**没有** `notify`（推送渠道）：用户口径（2026-10-08）「**很显然我说的和云盘
+    // 账户没有关系**，为啥你这里云盘账户有配置」＋「**丢弃现有情况，重写**」⇒ 渠道配置
+    // 从"每个云盘账号一份"收成"**每个登录用户一份**"，随后（同一天，推翻重做）
+    // **连"用户级渠道配置"那一层也删了** ✓ —— 现在凭据在**推送规则自己**身上
+    // （`PushRule::config` ✓，用户口径：「我设置一个推送规则，**这个规则配置推送的
+    // token，包括推送哪几个平台**」✓）。云盘账号从此只负责"用哪个号去跑" ✓。
+    //
+    // ⚠ 老 `data/accounts.json` 里可能还留着 `"notify": {...}` —— 本结构**没有**
+    // `deny_unknown_fields`（只有线格式 DTO 有）⇒ serde 静默忽略该键，旧文件照常读得出来 ✓。
+    // 半成品字段 `notify_webhook`（单个 webhook 串）同样只是历史残留，不再被读取 ✗。
+    // 推送的落点见 `mcloud-core::push` 的模块头与 `crates/mcloud-server/src/routes/push.rs`。
 }
 
 /// [`AccountSettings::skip_tasks`] 的宽松反序列化。
@@ -272,8 +257,6 @@ impl Default for AccountSettings {
             refresh_token_days: 10,
             skip_tasks: Vec::new(),
             ai_avatar_daily_limit: 10,
-            // 默认不配推送渠道：与"未配置就零行为"同一条 —— 装完不该有包发出去。
-            notify: None,
         }
     }
 }
@@ -300,8 +283,13 @@ impl Default for AccountSettings {
 ///
 /// `PUT` 是**整体替换**：缺席的字段没有"保持不变"的意思。若给缺席字段兜一个
 /// 默认值，表现就是「少传一个键 ⇒ 那项设置被悄悄重置」——那是最难查的一类失效。
-/// 必填 ⇒ 少传就 400 并指名。`notify` 也必须显式给出（`null` = 不配推送）：
-/// JSON 里"缺席"与"null"不是一回事，而"清空推送"在这个接口上必须能表达。
+/// 必填 ⇒ 少传就 400 并指名。
+///
+/// ⚠ 这里**没有** `notify`（推送渠道）：2026-10-08 推送配置已收成**用户级**
+/// （用户口径「很显然我说的和云盘账户没有关系」＋「丢弃现有情况，重写」，
+/// 见 `docs/task-log.md` 154）⇒ 老客户端把 `notify` 塞进这个请求体会因为
+/// [`deny_unknown_fields`](serde) 拿到 400 并点名 —— 那是**要的**（响亮地失败，
+/// 而不是把渠道配置写进一个再也没人读的格子 ✗）。
 ///
 /// ⚠ 与落盘模型一一对应由**编译器**保证：两个方向的 `From`/`TryFrom` 都逐字段
 /// 列举，[`AccountSettings`] 加字段而这里不加就编不过。键名的对应另有测试
@@ -316,8 +304,6 @@ pub struct AccountSettingsDto {
     /// 跳过的任务 **id**（数字）。见 [`AccountSettings::skip_tasks`]。
     pub skip_tasks: Vec<i64>,
     pub ai_avatar_daily_limit: u32,
-    /// 推送渠道。`null` = 不配（与落盘的 `None` 同义）。
-    pub notify: Option<PushConfig>,
 }
 
 impl AccountSettingsDto {
@@ -338,8 +324,8 @@ impl AccountSettingsDto {
 
     /// 范围与结构校验（**纯函数**，不碰存储 —— 所以能在 core 层测）。
     ///
-    /// ⚠ 错误信息只说**字段名与规则**，绝不带字段值：`notify` 里有 token/secret，
-    /// 而这些字符串会进 HTTP 响应，也可能被打进日志。
+    /// ⚠ 错误信息只说**字段名与规则**，绝不带字段值：这些字符串会进 HTTP 响应，
+    /// 也可能被打进日志。
     pub fn validate(&self) -> Result<()> {
         if self.backup_wait_secs > Self::BACKUP_WAIT_SECS_MAX {
             return Err(Error::Config(format!(
@@ -369,46 +355,24 @@ impl AccountSettingsDto {
                 self.skip_tasks.len()
             )));
         }
-        if let Some(notify) = &self.notify {
-            validate_notify(notify)?;
-        }
         Ok(())
     }
 
     /// 从 HTTP 请求体解析并校验，得到可落盘的 [`AccountSettings`]。
     ///
-    /// 三步，顺序是刻意的：
+    /// 两步：
     ///
     /// 1. 最外层必须是 JSON **对象**；
-    /// 2. `notify` 的**顶层键**必须是认识的渠道 —— [`PushConfig`] 自己会静默
-    ///    忽略未知键（`dingTalk` 敲成 `dingtalk` 就被吞掉、一声不响），
-    ///    而一个不生效的渠道比不写更难查，所以这里宁可 400；
-    /// 3. 交给本类型的严格 serde（未知键 / 缺字段 / 类型不对都 400），
-    ///    再过 [`Self::validate`] 的范围与渠道结构校验。
+    /// 2. 交给本类型的严格 serde（未知键 / 缺字段 / 类型不对都 400），
+    ///    再过 [`Self::validate`] 的范围校验。
     ///
-    /// ⚠ `notify` 里**渠道内部**的未知键**不**报错，这是刻意的：`TokenConfig.extra`
-    /// 这类 `#[serde(flatten)]` 是 TS 的既定语义（多余字段原样展开进请求体），
-    /// 不是笔误。那层无法区分"有意的附加字段"与"敲错的键名"，所以不做检查。
+    /// ⚠ 这里**不再**有"`notify` 的顶层键必须是认识的渠道"那一段：2026-10-08
+    /// 推送配置已收成用户级（用户口径「很显然我说的和云盘账户没有关系」＋
+    /// 「丢弃现有情况，重写」，见 `docs/task-log.md` 154）⇒ 渠道结构的校验
+    /// 跟着那份用户级配置走，**不**在这里 ✗。
     pub fn from_wire(raw: serde_json::Value) -> Result<AccountSettings> {
         if !raw.is_object() {
             return Err(Error::Config("请求体必须是一个 JSON 对象".into()));
-        }
-        if let Some(notify) = raw.get("notify") {
-            if !notify.is_null() {
-                let obj = notify
-                    .as_object()
-                    .ok_or_else(|| Error::Config("notify 必须是对象或 null".into()))?;
-                if let Some(known) = known_notify_keys() {
-                    for key in obj.keys() {
-                        if !known.iter().any(|k| k == key) {
-                            return Err(Error::Config(format!(
-                                "notify 里不认识的渠道「{key}」；认识的是：{}",
-                                known.join("、")
-                            )));
-                        }
-                    }
-                }
-            }
         }
         // serde 的错误文本可能引用**用户自己刚提交的**那个越界值（例如把字符串
         // 传给了数字字段）。它只回给提交者本人，且本路由不把请求体写进日志 ——
@@ -419,144 +383,6 @@ impl AccountSettingsDto {
     }
 }
 
-/// [`PushConfig`] 认识的顶层键（含渠道名与 `title` / `onlyError` / `minLevel`）。
-///
-/// 不手抄一份：直接问 `PushConfig::default()` 的序列化结果，加渠道时它自己会跟上。
-/// 序列化失败时回 `None`，调用方**跳过**这道检查（它是防笔误的，不是安全边界）。
-fn known_notify_keys() -> Option<Vec<String>> {
-    match serde_json::to_value(PushConfig::default()) {
-        Ok(serde_json::Value::Object(map)) => Some(map.keys().cloned().collect()),
-        _ => None,
-    }
-}
-
-/// 推送渠道的**结构**校验。
-///
-/// 逐条对着发送侧真正会用到的字段：缺一个的后果是"配了等于没配"——
-/// `mcloud-app::push` 的 `build_*` 会 `return None` / 整条跳过，
-/// 表现是**一条都不发、也不报错**。
-///
-/// ⚠ 只报**字段名**，不报字段值（这些字段里有 token/secret）。
-fn validate_notify(notify: &PushConfig) -> Result<()> {
-    let mut any = false;
-
-    if let Some(c) = &notify.pushplus {
-        any = true;
-        require_non_empty("notify.pushplus.token", &c.token)?;
-    }
-    if let Some(c) = &notify.server_chan {
-        any = true;
-        require_non_empty("notify.serverChan.token", &c.token)?;
-    }
-    if let Some(c) = &notify.work_weixin {
-        any = true;
-        // 应用消息是两步：先 corpid+corpsecret 换 access_token，再带 agentid 发。
-        // 缺任何一个都到不了"发出去了"那一步。
-        match c.corpid.as_deref() {
-            Some(v) if !v.trim().is_empty() => {}
-            _ => {
-                return Err(Error::Config(
-                    "notify.workWeixin.corpid 缺失：取 access_token 要用它".into(),
-                ))
-            }
-        }
-        match c.corpsecret.as_deref() {
-            Some(v) if !v.trim().is_empty() => {}
-            _ => {
-                return Err(Error::Config(
-                    "notify.workWeixin.corpsecret 缺失：取 access_token 要用它".into(),
-                ))
-            }
-        }
-        if c.agentid.is_none() {
-            return Err(Error::Config(
-                "notify.workWeixin.agentid 缺失：发应用消息要用它".into(),
-            ));
-        }
-    }
-    if let Some(c) = &notify.work_weixin_bot {
-        any = true;
-        require_non_empty("notify.workWeixinBot.url", &c.url)?;
-    }
-    if let Some(c) = &notify.tg_bot {
-        any = true;
-        require_non_empty("notify.tgBot.token", &c.token)?;
-        // 判据照发送侧（`build_tg_bot` 的 JS 真值口径）：`0` / `""` / `null` 都算缺，
-        // 缺了整条跳过 —— 那是"配了不发"的典型长相。
-        match c.chat_id.as_ref() {
-            Some(v) if js_truthy(v) => {}
-            _ => {
-                return Err(Error::Config(
-                    "notify.tgBot.chat_id 缺失或为空：没有它发送侧会整条跳过".into(),
-                ))
-            }
-        }
-    }
-    if let Some(c) = &notify.bark {
-        any = true;
-        require_non_empty("notify.bark.key", &c.key)?;
-    }
-    if let Some(c) = &notify.two_im {
-        any = true;
-        require_non_empty("notify.twoIm.key", &c.key)?;
-        require_non_empty("notify.twoIm.sid", &c.sid)?;
-    }
-    if let Some(c) = &notify.ding_talk {
-        any = true;
-        require_non_empty("notify.dingTalk.token", &c.token)?;
-    }
-    if let Some(c) = &notify.email {
-        any = true;
-        // 本版不发邮件（见 `mcloud-app::push::EMAIL_NOT_IMPLEMENTED`），
-        // 但配了就要配全 —— 一份缺字段的配置只会让人以为它生效了。
-        require_non_empty("notify.email.pass", &c.pass)?;
-        require_non_empty("notify.email.from", &c.from)?;
-        require_non_empty("notify.email.host", &c.host)?;
-    }
-    if let Some(c) = &notify.custom_post {
-        any = true;
-        let items = c.items();
-        if items.is_empty() {
-            return Err(Error::Config(
-                "notify.customPost 一个模板都没有：空数组等于没配".into(),
-            ));
-        }
-        for (idx, item) in items.iter().enumerate() {
-            require_non_empty(&format!("notify.customPost[{idx}].url"), &item.url)?;
-        }
-    }
-
-    if !any {
-        return Err(Error::Config(
-            "notify 里没有任何渠道（全为 null）：这样配一条都发不出去；要关掉推送请把 notify 设为 null"
-                .into(),
-        ));
-    }
-    Ok(())
-}
-
-/// 必填字段的非空校验。**只报路径，不报值**。
-fn require_non_empty(path: &str, value: &str) -> Result<()> {
-    if value.trim().is_empty() {
-        return Err(Error::Config(format!(
-            "{path} 不能为空：配了这个渠道却发不出去"
-        )));
-    }
-    Ok(())
-}
-
-/// JS 的真值口径（与 `mcloud-app::push` 的 `js_truthy` 同义）：
-/// `0` / `""` / `null` / `false` 为假，对象与数组恒真。
-fn js_truthy(v: &serde_json::Value) -> bool {
-    match v {
-        serde_json::Value::Null => false,
-        serde_json::Value::Bool(b) => *b,
-        serde_json::Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        serde_json::Value::String(s) => !s.is_empty(),
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => true,
-    }
-}
-
 impl From<AccountSettings> for AccountSettingsDto {
     fn from(s: AccountSettings) -> Self {
         Self {
@@ -564,7 +390,6 @@ impl From<AccountSettings> for AccountSettingsDto {
             refresh_token_days: s.refresh_token_days,
             skip_tasks: s.skip_tasks,
             ai_avatar_daily_limit: s.ai_avatar_daily_limit,
-            notify: s.notify,
         }
     }
 }
@@ -580,10 +405,15 @@ impl TryFrom<AccountSettingsDto> for AccountSettings {
             refresh_token_days: dto.refresh_token_days,
             skip_tasks: dto.skip_tasks,
             ai_avatar_daily_limit: dto.ai_avatar_daily_limit,
-            notify: dto.notify,
         })
     }
 }
+
+// 这里**没有** `validate_notify` 这个函数了：2026-10-08 推送配置已收成**用户级**
+// （用户口径「很显然我说的和云盘账户没有关系」＋「丢弃现有情况，重写」，
+// 见 `docs/task-log.md` 154）⇒ 渠道结构校验跟着那份用户级配置走（`routes/push.rs` ✓），
+// 不再属于"账号设置"这一层 ✗。它原先只服务于 `AccountSettings::notify` 那一格，
+// 而那一格已经整个删掉 ⇒ 留着就是没有调用方的死代码。
 
 /// 一个受管账号。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -758,7 +588,6 @@ mod tests {
     fn default_settings_are_conservative() {
         let s = AccountSettings::default();
         assert_eq!(s.refresh_token_days, 10);
-        assert_eq!(s.notify, None, "默认不该给任何账号配推送渠道");
     }
 
     /// 删掉 `hc1t_*` 之后，带旧键的落盘值仍然读得回来。
@@ -775,38 +604,59 @@ mod tests {
         assert_eq!(s.ai_avatar_daily_limit, 10, "其余字段照常取默认");
     }
 
-    /// 推送渠道落盘：配了就留得住，没配就不占格子。
-    ///
-    /// 这条是"每账号"的回归 —— 若把它做成进程级 env，这一列就不存在，
-    /// 两个账号的 JSON 也分不出来谁该收到通知。
-    #[test]
-    fn notify_config_is_per_account_and_absent_when_unset() {
-        let mut s = AccountSettings::default();
-        let without = serde_json::to_string(&s).unwrap();
-        assert!(
-            !without.contains("notify"),
-            "没配时不该写进 JSON：{without}"
-        );
+    // 2026-10-08 推送配置已收成用户级，见 docs/task-log.md 154
+    // （整条 `notify_config_is_per_account_and_absent_when_unset` 删除：
+    //  它测的是"渠道配置落在账号设置里、没配就不占格子"，而那一格已经没了 ✗。）
 
-        s.notify = Some(serde_json::from_str(r#"{"serverChan":{"token":"tk"}}"#).unwrap());
-        let json = serde_json::to_string(&s).unwrap();
-        assert!(
-            json.contains(r#""notify":"#) && json.contains(r#""serverChan":{"token":"tk"}"#),
-            "实得：{json}"
-        );
-        let back: AccountSettings = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.notify, s.notify);
+    /// ⭐ **老 `accounts.json` 兼容**：旧文件里残留的推送键**不许**让整份设置读不出来。
+    ///
+    /// 2026-10-08 推送配置已收成用户级（用户口径「很显然我说的和云盘账户没有关系」＋
+    /// 「丢弃现有情况，重写」，见 `docs/task-log.md` 154）⇒ `AccountSettings::notify`
+    /// 与更早的半成品 `notify_webhook` 都成了**未知键**。`AccountSettings` 上没有
+    /// `deny_unknown_fields`（只有线格式 DTO 有）⇒ serde 静默忽略它们 ✓。
+    ///
+    /// 这条是**必须**钉住的：`crates/mcloud-store` 的 `Account` 反序列化走的正是这个
+    /// 结构，读不出来 = 整个实例的账号库打不开。
+    #[test]
+    fn legacy_notify_keys_are_ignored_after_removal() {
+        let s: AccountSettings = serde_json::from_str(
+            r#"{
+                "notify_webhook": "https://old.test/hook",
+                "notify": {"title": "我的推送", "serverChan": {"token": "tk"}},
+                "backup_wait_secs": 30
+            }"#,
+        )
+        .expect("旧推送键必须被忽略，不能让整份账号设置读不出来");
+        assert_eq!(s.backup_wait_secs, 30, "同一条记录里别的字段照常读出来");
+        assert_eq!(s.refresh_token_days, 10, "其余字段取默认");
+        // 落盘时也不该再写回任何推送键（否则老文件会被"复活"成新形状）
+        let back = serde_json::to_string(&s).unwrap();
+        assert!(!back.contains("notify"), "落盘不该再出现推送键：{back}");
     }
 
-    /// 旧半成品字段 `notify_webhook` 不再被读取（未知键忽略）。
+    /// ⭐ 老 `accounts.json` 里**整条账号记录**带着 `notify` 时也必须读得出来。
     ///
-    /// 这是"没有兜底、也不迁移错误模型"的回归：那个字段代表的是
-    /// 「进程级兜底」，正是串号的来源，绝不让它复活成任何推送配置。
+    /// 上一条测的是 `AccountSettings` 这一层；`crates/mcloud-store` 读盘时反序列化的
+    /// 是 **`Account`**（整份文件是 `Vec<Account>`）⇒ 这里按真文件的形状整条读一遍，
+    /// 确认删掉字段不会让账号库打不开 ✓（`Account` 上没有 `deny_unknown_fields` ✓）。
     #[test]
-    fn legacy_notify_webhook_is_ignored() {
-        let s: AccountSettings =
-            serde_json::from_str(r#"{"notify_webhook":"https://old.test/hook"}"#).unwrap();
-        assert_eq!(s.notify, None, "旧字段不许复活成推送配置");
+    fn legacy_account_record_with_notify_still_reads() {
+        let raw = r#"{
+            "id": "19900000009",
+            "nickname": "老号",
+            "auth": {"raw":"x","platform":"android","phone":"19900000009","token":"t","expire":0},
+            "device_id": "D-LEGACY",
+            "settings": {
+                "backup_wait_secs": 30,
+                "notify": {"serverChan": {"token": "SCT-SECRET"}}
+            }
+        }"#;
+        let acc: Account = serde_json::from_str(raw).expect("老账号记录必须能读");
+        assert_eq!(acc.settings.backup_wait_secs, 30);
+        assert_eq!(acc.settings.refresh_token_days, 10, "缺的字段取默认");
+        assert!(acc.enabled, "缺 `enabled` 这一列照旧当启用");
+        let back = serde_json::to_string(&acc).unwrap();
+        assert!(!back.contains("notify"), "落盘不该再写回推送键：{back}");
     }
 
     /// ⚠ `skip_tasks` 形状变更的兼容回归：旧落盘值是**任务名**数组。
@@ -916,18 +766,15 @@ mod tests {
     // ── 账号设置的**线格式**与校验（GET/PUT /api/accounts/{id}/settings）──
 
     /// 一份**合法**的请求体。各条测试在它上面只改一处，免得每回抄一遍。
+    ///
+    /// ⚠ 这里**没有** `notify`：2026-10-08 推送配置已收成用户级
+    /// （见 `docs/task-log.md` 154）✓。
     fn valid_settings_body() -> serde_json::Value {
         serde_json::json!({
             "backupWaitSecs": 20,
             "refreshTokenDays": 10,
             "skipTasks": [117, 437],
             "aiAvatarDailyLimit": 5,
-            "notify": {
-                "title": "我的推送",
-                "onlyError": true,
-                "minLevel": "warn",
-                "serverChan": { "token": "SCT-SECRET-VALUE" }
-            }
         })
     }
 
@@ -945,13 +792,6 @@ mod tests {
         assert_eq!(settings.refresh_token_days, 10);
         assert_eq!(settings.skip_tasks, vec![117, 437]);
         assert_eq!(settings.ai_avatar_daily_limit, 5);
-        let notify = settings.notify.clone().expect("notify 必须被存下来");
-        assert_eq!(notify.title, "我的推送");
-        assert!(notify.only_error);
-        assert_eq!(
-            notify.server_chan.as_ref().unwrap().token,
-            "SCT-SECRET-VALUE"
-        );
 
         let acc = Account {
             id: AccountId::new("13800000001"),
@@ -995,12 +835,7 @@ mod tests {
     /// 加进 DTO，那个字段在 HTTP 上就永远写不进去。
     #[test]
     fn the_wire_keys_match_the_stored_keys() {
-        // 让 `notify` 也真的落盘（`None` 时它被 `skip_serializing_if` 跳过）。
-        // ⚠ 用结构体初始化而不是先 default 再赋值：clippy 的 field_reassign_with_default 会拦后者。
-        let settings = AccountSettings {
-            notify: Some(PushConfig::default()),
-            ..Default::default()
-        };
+        let settings = AccountSettings::default();
         let stored = serde_json::to_value(&settings).unwrap();
         let wire = serde_json::to_value(AccountSettingsDto::from(settings)).unwrap();
         let mut stored_keys: Vec<String> = stored
@@ -1106,69 +941,28 @@ mod tests {
         );
     }
 
-    /// `notify` 的渠道结构：配了却缺必需字段 ⇒ 400。
+    // 2026-10-08 推送配置已收成用户级，见 docs/task-log.md 154
+    // （整条 `broken_channel_configs_are_rejected` 删除：它测的是"notify 里各渠道
+    //  配了却缺必填字段 ⇒ 400"；那条结构校验跟着**用户级**配置走了 ✗。
+    //  同样删掉的还有三条 —— `notify_without_any_channel_is_rejected`、
+    //  `a_misspelled_channel_name_is_rejected`、`null_notify_clears_the_channels`：
+    //  每一条都只服务于"账号设置里的 notify"这一格，而那一格已经没了 ✗。）
+
+    /// ⭐ **`notify` 不再属于账号设置**：老客户端把它塞进来必须**响亮地失败**。
     ///
-    /// 缺字段的后果不是报错，而是发送侧**整条跳过**（`配了等于没配`），
-    /// 所以必须在写入口拦下。
-    #[test]
-    fn broken_channel_configs_are_rejected() {
-        let cases: [(&str, serde_json::Value); 7] = [
-            (
-                "serverChan",
-                serde_json::json!({"serverChan": {"token": "   "}}),
-            ),
-            ("chat_id", serde_json::json!({"tgBot": {"token": "tk"}})),
-            (
-                "twoIm",
-                serde_json::json!({"twoIm": {"key": "k", "sid": ""}}),
-            ),
-            (
-                "workWeixin",
-                serde_json::json!({"workWeixin": {"corpid": "c"}}),
-            ),
-            ("customPost", serde_json::json!({"customPost": []})),
-            (
-                "customPost",
-                serde_json::json!({"customPost": [{"url": ""}]}),
-            ),
-            ("token", serde_json::json!({"pushplus": {}})),
-        ];
-        for (needle, notify) in cases {
-            let mut body = valid_settings_body();
-            body["notify"] = notify;
-            let err = AccountSettingsDto::from_wire(body).unwrap_err().to_string();
-            assert!(err.contains(needle), "错误该提到 {needle}：{err}");
-        }
-    }
-
-    /// `notify` 里一个渠道都没有 ⇒ 400（否则用户以为配上了）。
-    #[test]
-    fn notify_without_any_channel_is_rejected() {
-        let mut body = valid_settings_body();
-        body["notify"] = serde_json::json!({"title": "x", "onlyError": true});
-        let err = AccountSettingsDto::from_wire(body).unwrap_err().to_string();
-        assert!(err.contains("没有任何渠道"), "实得：{err}");
-    }
-
-    /// `notify` 顶层的渠道名敲错 ⇒ 400。
+    /// 2026-10-08 推送配置已收成用户级（用户口径「很显然我说的和云盘账户没有关系」＋
+    /// 「丢弃现有情况，重写」，见 `docs/task-log.md` 154）⇒ 渠道配置的写入口是
+    /// **用户级**那份接口 ✓，而本 DTO 带 `deny_unknown_fields` ⇒ 多出来的 `notify`
+    /// 会 400 并**点名**。
     ///
-    /// `PushConfig` 自己会静默忽略未知键（`pushPlus` 会被整个吞掉），
-    /// 而那是"看起来配好了、其实一条不发"的经典长相。
+    /// ⚠ 刻意**不**做"静默忽略"：老客户端会以为配上了、实际一条都不发 ✗ ——
+    /// "不报错、只是东西不对"正是本仓最忌讳的一类失效 ✓。
     #[test]
-    fn a_misspelled_channel_name_is_rejected() {
+    fn notify_is_no_longer_part_of_account_settings() {
         let mut body = valid_settings_body();
-        body["notify"] = serde_json::json!({"pushPlus": {"token": "tk"}});
+        body["notify"] = serde_json::json!({"serverChan": {"token": "tk"}});
         let err = AccountSettingsDto::from_wire(body).unwrap_err().to_string();
-        assert!(err.contains("pushPlus"), "要点名不认识的渠道：{err}");
-    }
-
-    /// `notify: null` 是"清空推送渠道"的表达方式（缺席则 400，见上）。
-    #[test]
-    fn null_notify_clears_the_channels() {
-        let mut body = valid_settings_body();
-        body["notify"] = serde_json::Value::Null;
-        let s = AccountSettingsDto::from_wire(body).unwrap();
-        assert_eq!(s.notify, None);
+        assert!(err.contains("notify"), "错误要点名 notify：{err}");
     }
 
     /// 请求体不是 JSON 对象 ⇒ 400（不是 serde 那句含糊的报错）。
@@ -1180,34 +974,9 @@ mod tests {
         assert!(err.contains("JSON 对象"), "实得：{err}");
     }
 
-    /// ⭐ 校验错误**绝不能**回显敏感值。
-    ///
-    /// 这些错误字符串会进 HTTP 响应、也可能被打进日志，而 `notify` 里全是
-    /// token / secret。判据：错误只许说**字段**，不许说**值**。
-    #[test]
-    fn validation_errors_never_echo_secret_values() {
-        const SECRETS: [&str; 3] = ["SECRET-SC-TOKEN", "SECRET-2IM-KEY", "SECRET-DT-TOKEN"];
-
-        // a) 渠道结构错误：坏的是 twoIm.sid，同一份配置里别的渠道的真值也不许被带出来
-        let mut body = valid_settings_body();
-        body["notify"] = serde_json::json!({
-            "serverChan": {"token": "SECRET-SC-TOKEN"},
-            "twoIm": {"key": "SECRET-2IM-KEY", "sid": "  "},
-            "dingTalk": {"token": "SECRET-DT-TOKEN"}
-        });
-        let err = AccountSettingsDto::from_wire(body).unwrap_err().to_string();
-        assert!(err.contains("twoIm"), "应当点名 twoIm：{err}");
-        for s in SECRETS {
-            assert!(!err.contains(s), "敏感值 {s} 出现在错误信息里：{err}");
-        }
-
-        // b) serde 的类型错误也不许顺手带出**别的**字段的真值
-        let mut body = valid_settings_body();
-        body["skipTasks"] = serde_json::json!("不是数组");
-        body["notify"] = serde_json::json!({"serverChan": {"token": "SECRET-SC-TOKEN"}});
-        let err = AccountSettingsDto::from_wire(body).unwrap_err().to_string();
-        for s in SECRETS {
-            assert!(!err.contains(s), "敏感值 {s} 出现在错误信息里：{err}");
-        }
-    }
+    // 2026-10-08 推送配置已收成用户级，见 docs/task-log.md 154
+    // （整条 `validation_errors_never_echo_secret_values` 删除：它的主题是
+    //  "`notify` 里全是 token/secret，所以校验错误只许说字段、不许说值"；
+    //  账号设置这个 DTO 现在**一个敏感字段都没有**（推送渠道整个搬走了）⇒
+    //  这条边界跟着用户级配置的写入口走，不在这里 ✗。）
 }

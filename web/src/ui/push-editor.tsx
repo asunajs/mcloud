@@ -1,14 +1,20 @@
 /**
- * 每账号推送（notify / PushConfig）编辑器 —— **工厂函数**，不是组件。
+ * **一条推送规则**的平台与凭据表单（`PushConfig`）—— **工厂函数**，不是组件。
+ *
+ * # 这份配置属于**规则自己**（2026-10-08 用户口径「推翻重做」）
+ *
+ * 用户原话：「我设置一个推送规则，**这个规则配置推送的 token，包括推送哪几个平台**」✓
+ * ⇒ 规则**自带凭据**，**没有**独立的"推送渠道"那一层 ✗
+ * （`GET/PUT /api/push/config` 已删 ✗）。两条规则可以各配各的 token ✓。
+ * 于是这块表单的落点从"你这个登录用户的渠道配置"改成了
+ * 「**这条规则**用哪几个平台发、凭据填在哪」✓。
  *
  * # 为什么是工厂而不是组件
  *
- * 这块表单的**归属**在不同页面不同：账号页存的是"某个账号的一份设置"，
- * 配置中心页存的是"默认推送配置"。工厂只负责**画**与**攒 payload**，值存在
- * 编辑器自己的 ref 里、由调用方决定"什么时候 load / 什么时候 build"。
- * 抽成共享模块的唯一目的：**渠道表单本体只有这一份**（原先在
- * `pages/accounts-page.tsx` 里，配置中心页要复用时不能再抄第二份 ——
- * 两份实现迟早分叉，那时候"账号页能配、配置中心配不了"就是这么来的）。
+ * 这块表单的**归属**是「推送」页 `pages/push-page.tsx` 里那个**规则编辑器**
+ * （弹窗里内嵌 ✓）：工厂只负责**画**与**攒 payload**，值存在编辑器自己的 ref 里、
+ * 由调用方决定"什么时候 load / 什么时候 build"。抽成共享模块的唯一目的：
+ * **表单本体只有这一份**（两份实现迟早分叉）。
  *
  * # ⚠ 为什么内部全是普通函数 + `get: () => string`（thunk），不是组件
  *
@@ -29,12 +35,13 @@
  *
  * # 为什么渠道配置留着**原始对象**
  *
- * PUT 是整体替换。而后端给每个渠道留了 `#[serde(flatten)] extra`（TS 的语义：多余
- * 字段原样展开进请求体），那些键我们**没有建模**。只挑认识的字段回写，等于把用户
- * 没碰过的字段静默抹掉 —— 所以界面持有 GET 回来的那个对象本身，只改看得见的键。
+ * 保存是**整份**写回（`PushRule.config` 整体替换）。而后端给每个渠道留了
+ * `#[serde(flatten)] extra`（TS 的语义：多余字段原样展开进请求体），那些键我们
+ * **没有建模**。只挑认识的字段回写，等于把用户没碰过的字段静默抹掉 ——
+ * 所以界面持有 GET 回来的那个对象本身，只改看得见的键。
  */
 
-import { ref } from 'lite'
+import { ref } from '@asunajs/lite'
 import {
   NOTIFY_CHANNELS,
   type NotifyChannelKey,
@@ -49,7 +56,7 @@ import { Select } from './select'
 const DEFAULT_NOTIFY_TITLE = 'mcloud 运行推送'
 
 /** 推送渠道的人话名字。`Record` ⇒ 加渠道时 TS 会报缺一项。 */
-const CHANNEL_LABEL: Record<NotifyChannelKey, string> = {
+export const CHANNEL_LABEL: Record<NotifyChannelKey, string> = {
   pushplus: 'PushPlus',
   serverChan: 'Server 酱',
   workWeixinBot: '企业微信机器人',
@@ -63,11 +70,12 @@ const CHANNEL_LABEL: Record<NotifyChannelKey, string> = {
 }
 
 /**
- * 渠道的**必填**字段 —— 与后端 `validate_notify` 逐条对应。
+ * 渠道的**必填**字段 —— 与后端 `PushConfig::validate` 逐条对应。
  *
  * 判据只有一条：这些字段**全空** ⇒ 这个渠道算"没配"，PUT 时整条不带
  * （⚠ **不发空对象**：`{token:""}` 会被后端当成"填了但为空"⇒ 400，而用户只是没填）。
- * 填了一部分就照发 —— 后端会指名缺哪一格，那比前端自己猜准。
+ * 填了一部分就照发 —— 后端会指名缺哪一格（`pushConfig.pushplus.token 不能为空：…` ✓），
+ * 那比前端自己猜准。
  */
 const CHANNEL_REQUIRED: Record<NotifyChannelKey, readonly string[]> = {
   pushplus: ['token'],
@@ -135,58 +143,64 @@ const toJsonScalar = (raw: string): string | number => {
   return /^-?\d+$/.test(t) && Number.isSafeInteger(Number(t)) ? Number(t) : t
 }
 
+/**
+ * 一条规则的 `config` 里**启用了哪几个平台**（人话名字，键序照 `NOTIFY_CHANNELS` ✓）。
+ *
+ * ⚠ 规则列表那一栏读的就是它 —— 新设计里**没有**"这条规则只用哪几个渠道"那一格 ✗，
+ * 平台上不上由 `config` 里那个键在不在决定 ✓。
+ */
+export const platformsOf = (config: PushConfig | null | undefined): string[] => {
+  const raw = (config ?? null) as Record<string, unknown> | null
+  if (!raw) return []
+  return NOTIFY_CHANNELS.filter((k) => raw[k] != null).map((k) => CHANNEL_LABEL[k])
+}
+
 // ── 冻结接口 ────────────────────────────────────────────────────────────
 
 /**
- * 一份 `notify` 里**配了哪些渠道**（中文名）—— 给别处做摘要用。
+ * 一份**纯数据**快照（可 JSON 化 ✓）—— 给「推送」页判"有没有未保存的修改"
+ * 与跨规则暂存草稿用 ✓。
  *
- * 例：配置中心的「任务配置 → 账号私有配置」那半要一眼看出"每个账号的推送不一样"
- * （2026-10-05 用户口径：「比如每个账号的推送就不一样」），就是靠它。
- *
- * ⚠ 渠道清单（`NOTIFY_CHANNELS`）与中文名（`CHANNEL_LABEL`）**只有这一份** ——
- * 在页面里自己再列一遍"有哪些渠道"就是第二份表，迟早与这里漂 ✗。
+ * ⚠ 与 `ui/account-fields.tsx` 的 `AccountFieldsSnapshot` 同一条口径：
+ * 页面**不复制**这里的字段表，只把快照原样 JSON 起来比字符串 —— 复制一份
+ * 就是"加了字段忘改另一处"，表现是"改了却不认为脏"✗（不报错，最难查）。
  */
-export const notifyChannelLabels = (n: PushConfig | null | undefined): string[] =>
-  n ? NOTIFY_CHANNELS.filter((k) => n[k] != null).map((k) => CHANNEL_LABEL[k]) : []
-
 export interface PushEditorSnapshot {
-  on: boolean
   title: string
   onlyError: boolean
   minLevel: PushLogLevel
-  /** 渠道配置对象（原样持有，含我们没建模的键）。 */
-  configs: Record<string, unknown>
-  /** 有哪些渠道（结构）。 */
+  notify: Record<string, unknown>
   channels: NotifyChannelKey[]
-  /** customPost 的模板体文本（每行对应一条模板）。 */
   templateBodies: string[]
 }
 
 export interface PushEditor {
-  /** 把 GET 回来的一份 notify 铺进表单（`null` = 这个账号不推）。 */
-  load(n: PushConfig | null): void
-  /** 攒成 PUT 里的 `notify`：总开关关着 ⇒ `null`；开着但一个渠道都没配 ⇒ 抛 Error（文案照抄原代码那条）。 */
-  build(): PushConfig | null
-  /** 「运行结果推送」**整块** DOM：启用推送开关 + 标题 + onlyError + 最低级别 + 渠道列表 + 空态文案。 */
+  /** 把一条规则自己的 `config` 铺进表单（`null` = 新规则，回到默认空表单 ✓）。 */
+  load(config: PushConfig | null): void
+  /**
+   * 攒成 `PushRule.config`。
+   *
+   * ⚠ **没有**"总开关"了：一条规则是不是生效由 `PushRule.enabled` 管 ✓。
+   * 但**一个平台都没配**时这里会抛 —— 那等于建了一条发不出去的规则 ✗，
+   * 本地先说，省一次注定 400 的往返 ✓。
+   */
+  build(): PushConfig
+  /** 平台与凭据**整块** DOM：标题 + 仅错误 + 最低级别 + 平台列表 + 空态文案。 */
   fields(): JSX.Element
-  /** 总开关当前是否打开。 */
-  enabled(): boolean
-  /** 打开/关掉总开关（给想自己画开关的调用方；`fields()` 内部也有一个）。 */
-  setEnabled(v: boolean): void
-  /** 草稿快照 / 还原（调用方切账号时存/取；**不包含**明文显隐状态，还原后一律重新打码）。 */
+  /** 当前表单值的纯数据快照（用于脏判定 / 草稿）。 */
   snapshot(): PushEditorSnapshot
+  /** 把一份快照铺回表单（打码状态复位 ✓，与 `load` 一致）。 */
   restore(s: PushEditorSnapshot): void
 }
 
 /**
- * 造一个推送编辑器。
+ * 造一个规则平台与凭据编辑器。
  *
  * ⚠ 必须在**组件体里**调（`const push = createPushEditor()`）—— 内部的 ref 要靠
- * lite 在组件求值时登记；在模块顶层调只会在页面加载时建一份、所有账号共用。
+ * lite 在组件求值时登记；在模块顶层调只会在页面加载时建一份、所有规则共用。
  */
 export const createPushEditor = (): PushEditor => {
   // 全局字段。数字一律以**字符串**存：原样回显用户敲的东西，解析放到提交那一刻。
-  const fNotifyOn = ref(false)
   const fNotifyTitle = ref(DEFAULT_NOTIFY_TITLE)
   const fOnlyError = ref(false)
   const fMinLevel = ref<PushLogLevel>('info')
@@ -657,7 +671,7 @@ export const createPushEditor = (): PushEditor => {
     return <p class="text-xs text-error">这个渠道还没有表单（代码里漏了一档）。</p>
   }
 
-  /** 推送那一块（总开关之外的全部内容）。 */
+  /** 平台与凭据那一块。 */
   const notifyFields = () => (
     <>
       {textField(
@@ -670,7 +684,7 @@ export const createPushEditor = (): PushEditor => {
         '只在出错时推',
         () => fOnlyError.value,
         (v) => (fOnlyError.value = v),
-        '开了之后只有 error 类型的日志会推 —— fail / fatal 不算（后端判的就是类型恰好等于 error）。',
+        '开了之后只有 error / fail / fatal 级（最严重那一档）的日志会推；warn / info / debug 不算。',
       )}
 
       <fieldset class="fieldset">
@@ -687,7 +701,9 @@ export const createPushEditor = (): PushEditor => {
       </fieldset>
 
       <div class="flex flex-col gap-2">
-        <span class="text-xs font-medium opacity-70">渠道（点开一个才能改它）</span>
+        <span class="text-xs font-medium opacity-70">
+          平台与凭据（点开一个才能改它；勾了哪个平台就用哪一份凭据发）
+        </span>
         <div class="flex flex-col gap-2">
           {settingsChannels.value.map((key) => (
             <details key={key} class="disclosure disclosure-arrow bg-base-200">
@@ -703,7 +719,7 @@ export const createPushEditor = (): PushEditor => {
                   class="btn btn-sm btn-soft btn-error min-h-11 self-start md:min-h-0"
                   onClick={() => removeChannel(key)}
                 >
-                  删除这个渠道
+                  删除这个平台
                 </button>
               </div>
             </details>
@@ -711,7 +727,7 @@ export const createPushEditor = (): PushEditor => {
         </div>
         {availableChannels().length > 0 ? (
           <div class="flex flex-wrap items-center gap-1">
-            <span class="text-xs opacity-70">+ 加渠道：</span>
+            <span class="text-xs opacity-70">+ 加平台：</span>
             {availableChannels().map((key) => (
               <button
                 key={key}
@@ -724,47 +740,38 @@ export const createPushEditor = (): PushEditor => {
             ))}
           </div>
         ) : (
-          <p class="text-xs opacity-60">十个渠道都已经在列表里了。</p>
+          <p class="text-xs opacity-60">十个平台都已经在列表里了。</p>
         )}
       </div>
     </>
   )
 
   /**
-   * 「运行结果推送」**整块**（含"启用推送"总开关与关着时的空态）。
+   * **这条规则的**平台与凭据**整块**。
    *
-   * ⚠ 外层那个 `.flex.flex-col.gap-2` 与 `<h4>运行结果推送</h4>` 归调用方
+   * ⚠ 外层那个 `.flex.flex-col.gap-2` 与卡标题归调用方
    * （标题的层级是页面的排版决定，不是这块表单的），这里只出内容。
+   *
+   * ⚠ 没有"启用推送"总开关了：规则是不是生效由 `PushRule.enabled` 管 ✓。
    */
   const fields = (): JSX.Element => (
     <>
-      {switchField(
-        '启用推送',
-        () => fNotifyOn.value,
-        (v) => (fNotifyOn.value = v),
-        '关掉 = 这个账号一个渠道都不推（保存时 notify 写 null，会清掉下面的渠道配置）。本仓没有进程级兜底，每个账号各配各的。',
-      )}
-      {fNotifyOn.value ? (
-        notifyFields()
-      ) : (
-        <p class="text-xs leading-5 opacity-60">
-          当前不推送任何渠道。打开上面的开关才会出现渠道配置。
-        </p>
-      )}
+      {notifyFields()}
+      {/* ⚠ 这是**界面上的字**，不是 markdown ⇒ 别写 `**粗体**`（会被原样画出来，
+          用户看到两个星号 ✗，与 `CHANNEL_HINT` 那条同一个坑 ✓）。 */}
+      <p class="text-xs leading-5 opacity-60">
+        上面这些是「这条规则自己的平台与凭据」—— 勾了哪个平台，就用哪一份 token / 地址发。
+        两条规则各配各的、互不影响；一条规则里一个平台都不配是保存不了的。
+      </p>
     </>
   )
 
   /**
-   * 把 GET 回来的一份 notify 铺进表单（`null` = 这个账号不推）。
+   * 把一条规则自己的 `config` 铺进表单（`null` = 新规则 ⇒ 回到默认空表单 ✓）。
    *
    * 渠道配置**原样拿住**（里面可能有我们没建模的键），另挑一份"有哪些渠道"给结构性 ref。
    */
   const load = (n: PushConfig | null): void => {
-    fNotifyOn.value = n != null
-    fNotifyTitle.value = n?.title ?? DEFAULT_NOTIFY_TITLE
-    fOnlyError.value = n?.onlyError ?? false
-    fMinLevel.value = n?.minLevel ?? 'info'
-
     const raw = (n ?? {}) as Record<string, unknown>
     const next: Record<string, unknown> = {}
     const keys: NotifyChannelKey[] = []
@@ -774,10 +781,41 @@ export const createPushEditor = (): PushEditor => {
       next[key] = v
       keys.push(key)
     }
-    settingsNotify.value = next
-    settingsChannels.value = keys
+    restore({
+      title: n?.title ?? DEFAULT_NOTIFY_TITLE,
+      onlyError: n?.onlyError ?? false,
+      minLevel: n?.minLevel ?? 'info',
+      notify: next,
+      channels: keys,
+      // 请求体文本要从 `notify.customPost` 现算（`templateList()` 读的是刚铺好的那份 ✓）
+      templateBodies: [],
+    })
     templateBodies.value = templateList().map(bodyTextOf)
-    // 换一份数据 ⇒ 打码状态一律复位：上一份"显示着"的 token 不该在新数据上继续裸着。
+  }
+
+  /**
+   * 当前表单值的**纯数据**快照。
+   *
+   * ⚠ 不深拷贝：这里每个 setter 都是**整份替换**（`settingsNotify.value = {...}` ✓），
+   * 所以拿住引用不会被后续编辑改到（与 `AccountFieldsSnapshot` 同一条口径 ✓）。
+   */
+  const snapshot = (): PushEditorSnapshot => ({
+    title: fNotifyTitle.value,
+    onlyError: fOnlyError.value,
+    minLevel: fMinLevel.value,
+    notify: settingsNotify.value,
+    channels: settingsChannels.value,
+    templateBodies: templateBodies.value,
+  })
+
+  /** 把一份快照铺回表单；打码状态一律复位（与 `load` 同一条 ✓）。 */
+  const restore = (s: PushEditorSnapshot): void => {
+    fNotifyTitle.value = s.title
+    fOnlyError.value = s.onlyError
+    fMinLevel.value = s.minLevel
+    settingsNotify.value = s.notify
+    settingsChannels.value = s.channels
+    templateBodies.value = s.templateBodies
     shownSecrets.value = {}
   }
 
@@ -827,9 +865,8 @@ export const createPushEditor = (): PushEditor => {
     return next
   }
 
-  /** 攒成 PUT 里的 `notify`（总开关关着 ⇒ `null`）。 */
-  const build = (): PushConfig | null => {
-    if (!fNotifyOn.value) return null
+  /** 攒成 `PushRule.config`（一个平台都没配 ⇒ 抛 Error，见 `PushEditor.build` 的说明）。 */
+  const build = (): PushConfig => {
     const out: Record<string, unknown> = {
       title: fNotifyTitle.value.trim() === '' ? DEFAULT_NOTIFY_TITLE : fNotifyTitle.value.trim(),
       onlyError: fOnlyError.value,
@@ -843,50 +880,12 @@ export const createPushEditor = (): PushEditor => {
       count++
     }
     if (count === 0) {
-      // 后端对这份形状的原话是「notify 里没有任何渠道（全为 null）」⇒ 400。
+      // 后端对这份形状的原话是「pushConfig 里没有任何渠道（全为 null）」⇒ 400。
       // 与其打一枪再回错误，不如在这里说同一件事（判据与后端一致，只是省一次往返）。
-      throw new Error(
-        '推送总开关开着，但一个渠道都没配。要么至少配一个，要么关掉总开关（关掉 = 这个账号不推送）。',
-      )
+      throw new Error('这条规则一个平台都没配 —— 至少配一个（token / Webhook 地址填在平台卡片里）。')
     }
     return out as unknown as PushConfig
   }
 
-  const enabled = (): boolean => fNotifyOn.value
-
-  const setEnabled = (v: boolean): void => {
-    fNotifyOn.value = v
-  }
-
-  /**
-   * 草稿快照。
-   *
-   * ⚠ `configs` / `channels` / `templateBodies` 都只做**一层拷贝**：本模块改配置时
-   * 一律"造新对象再赋值"（`{...cfg}` / `{...settingsNotify}`），从不原地改，
-   * 所以旧快照里的内层对象不会被后来的编辑动到。改成深拷贝只是白花时间。
-   * ⚠ **不含** `shownSecrets`：明文显隐是瞬时的界面状态，不是草稿的一部分。
-   */
-  const snapshot = (): PushEditorSnapshot => ({
-    on: fNotifyOn.value,
-    title: fNotifyTitle.value,
-    onlyError: fOnlyError.value,
-    minLevel: fMinLevel.value,
-    configs: { ...settingsNotify.value },
-    channels: [...settingsChannels.value],
-    templateBodies: [...templateBodies.value],
-  })
-
-  /** 还原一份草稿（见 `snapshot` 的 ⚠）。还原后一律重新打码。 */
-  const restore = (s: PushEditorSnapshot): void => {
-    fNotifyOn.value = s.on
-    fNotifyTitle.value = s.title
-    fOnlyError.value = s.onlyError
-    fMinLevel.value = s.minLevel
-    settingsNotify.value = { ...s.configs }
-    settingsChannels.value = [...s.channels]
-    templateBodies.value = [...s.templateBodies]
-    shownSecrets.value = {}
-  }
-
-  return { load, build, fields, enabled, setEnabled, snapshot, restore }
+  return { load, build, fields, snapshot, restore }
 }

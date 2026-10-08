@@ -765,6 +765,133 @@ export interface BeanRecords {
 export const getBeanRecords = (account: string, days: number): Promise<BeanRecords> =>
   request<BeanRecords>(`/api/beans/records?account=${encodeURIComponent(account)}&days=${days}`)
 
+// ── 上游状态（**按需取**）────────────────────────────────────────────────
+//
+// ⚠ 这一族**不落运行历史、不占一条任务**：页面点一下 ⇒ 后端现去上游取一份 ⇒ 回给前端 ✓
+// （用户口径 2026-10-07：「这个表单独放一个专门查看上游各种状态的页面，**需要主动获取**，
+// 而不是跟着其他任务一起」）。
+//
+// ⚠ 它们读的都是**上游账上的读数**，与本仓的运行记录无关 —— 后者是"我们做过什么"，
+// 前者是"上游那边现在是什么样"，对不上是常态 ✓。
+
+/** 一条 App 任务（后端 `app_task_matrix::items_json` 逐字对应 ✓）。 */
+export interface UpstreamAppTaskItem {
+  taskId: number | null
+  name: string | null
+  description: string | null
+  groupId: string | null
+  state: string | null
+  limitType: string | null
+  enable: number | null
+  currStep: number | null
+  process: number | null
+  marketName: string | null
+  /** 玩法 615 那一族的**门**就在这一格里 ✓。 */
+  buttonAppLink: string | null
+}
+
+/** 状态分布。三个数**分开**报 —— `unknown` 不能并进"未完成" ✗。 */
+export interface UpstreamStateCounts {
+  done: number
+  waiting: number
+  unknown: number
+}
+
+/** `GET /api/upstream/app-task-list?account=<id>` —— App 任务那张表（**16 发只读** ✓）。 */
+export interface UpstreamAppTaskList {
+  account: string
+  fetchedAtMs: number
+  /** 要拉几枪（常量 16 ✓）。 */
+  fetches: number
+  /** 真成了几枪 ✓ —— 少于 `fetches` 时清单**少了几组**，界面必须说出来。 */
+  succeeded: number
+  rawCount: number
+  dedupedCount: number
+  stateCounts: UpstreamStateCounts
+  items: UpstreamAppTaskItem[]
+  /** 没读到的那几组（空表 = 十六组全成 ✓）。 */
+  failures: string[]
+}
+
+export const getUpstreamAppTaskList = (account: string): Promise<UpstreamAppTaskList> =>
+  request<UpstreamAppTaskList>(
+    `/api/upstream/app-task-list?account=${encodeURIComponent(account)}`,
+  )
+
+/** 日历里的一格（`infoV3` 的 `cal[]` ✓）。 */
+export interface UpstreamSignInDay {
+  day: number
+  signed: boolean
+  /** 非本月的格子是上下月的补位，**不算今天** ✓。 */
+  currentMonth: boolean
+  points: number
+  today: boolean
+}
+
+/** `GET /api/upstream/signin-history?account=<id>` —— 签到历史（当月日历）。 */
+export interface UpstreamSignInHistory {
+  account: string
+  fetchedAtMs: number
+  total: number
+  signCount: number
+  monthDays: number
+  /** 今天签到**能拿**多少（不是已到手 ✓）。 */
+  signInPoints: number
+  toReceive: number | null
+  days: UpstreamSignInDay[]
+  /**
+   * **AI豆中心当下可做的事**（`receiveList` ✓）。
+   *
+   * ⚠ 它与 `days` 来自**同一发 `infoV3`** ⇒ 报出来不多花一枪 ✓。
+   * 2026-10-07 之前这是一条独立任务（`task-list`）—— 用户否了（「这个不是说没用吗」）：
+   * 它只读、什么都不做，而数据本来就在这一发里 ✗。
+   */
+  receiveList: UpstreamReceiveItem[]
+  /** 签到翻倍机会这一趟能不能用 ✓。 */
+  multipleAvailable: boolean
+}
+
+/** `receiveList` 里的一条（AI豆中心那本账上"可做的事" ✓）。 */
+export interface UpstreamReceiveItem {
+  /** 上游**原始码**（0 现在可领 / 1 已到期可领 / 2 下月可领）—— 认不出的码也原样带出来 ✓。 */
+  cloudType: number
+  cloudNum: number
+  /** 中文档位（**后端**给的，前端别各写一套映射 ✗）。 */
+  label: string
+  recordId: string | null
+  acceptDate: string | null
+}
+
+export const getUpstreamSigninHistory = (account: string): Promise<UpstreamSignInHistory> =>
+  request<UpstreamSignInHistory>(
+    `/api/upstream/signin-history?account=${encodeURIComponent(account)}`,
+  )
+
+/** 一条奖品记录（`flag == 1` ⇒ 待领取 ✓）。 */
+export interface UpstreamPrize {
+  prizeName: string
+  pending: boolean
+  market: string
+  oid: string
+  prizeId: number
+  expireTime: string | null
+  insertTime: string | null
+}
+
+/** `GET /api/upstream/pending-prizes?account=<id>` —— 待领取奖品（**只查第一页** ✓）。 */
+export interface UpstreamPendingPrizes {
+  account: string
+  fetchedAtMs: number
+  pendingCount: number
+  /** ⚠ 最多 10 条（只查第一页）⇒ 界面必须说"只查了第一页" ✗ 别读成"全部就这些"。 */
+  records: UpstreamPrize[]
+}
+
+export const getUpstreamPendingPrizes = (account: string): Promise<UpstreamPendingPrizes> =>
+  request<UpstreamPendingPrizes>(
+    `/api/upstream/pending-prizes?account=${encodeURIComponent(account)}`,
+  )
+
 export const getRun = (id: number) => request<RunRecord>(`/api/runs/${id}`)
 
 /**
@@ -865,7 +992,7 @@ export const runEventsUrl = (runId: number) => `/api/runs/${encodeURIComponent(S
  *
  * 用户口径（2026-10-03）：「刷新页面，js 堆栈内存会递增」。**Chrome 里复现不出来** ——
  * 实测：每次刷新前都开一条 SSE（`readyState=1`），6 次刷新的堆 0.79 MB、
- * 脱离文档的节点 794 个，**一个不动** ✓（口径与 `lite/regress/leak.mjs` 一致）。
+ * 脱离文档的节点 794 个，**一个不动** ✓（口径与 `regress/leak.mjs` 一致）。
  * 所以这不是"我们代码里有个 JS 泄漏"。
  *
  * 但 WebKit 与 Blink 不同：**老文档还挂着未关闭的连接时，它的销毁可能被推迟**
@@ -970,6 +1097,37 @@ export interface Schedule {
   runCount: number
   /** 下次触发时间。**未启用时为 null** —— 给一个就是在骗人。 */
   nextFireAt: number | null
+  /**
+   * 绑定的推送规则 id（**多选** ✓，用户口径「一个行为可以选择多个规则」）。
+   *
+   * ⚠ **可选**是给老数据/别的调用方留的：没有这一格时当**空数组**读 ✓
+   * （空 = 不推 ✓）。写成必填的话，老数据一读就 `undefined`，界面会把它显示成一个坏值 ✗。
+   */
+  pushRules?: string[]
+  /**
+   * 这一条定时**什么时候推**（运行结局条件 ✓）。
+   *
+   * ⚠ **空数组 = 跑完就推** ✓（用户口径：「全不勾 = 跑完就推」）——
+   * 不是"不推" ✗。只含**运行类**事件（`kind: "run"` ✓）。
+   */
+  pushEvents?: string[]
+  /**
+   * **系统维护标记**：非空 = 这条定时由某个系统功能维护
+   * （今天只有 `"live-auto"` = 「自动直播定时」✓）。
+   *
+   * ⚠ 可选是给**手建的**定时留的（它们这一格恒为 `None`，后端
+   * `skip_serializing_if` 直接不落这一格 ✓）—— 写成必填会让老数据一读就是坏值 ✗。
+   * 界面据此给它标「系统维护」并说明"时刻由系统维护" ✓。
+   */
+  managedBy?: string
+  /**
+   * **用户意愿**（只对 `managedBy` 非空的那条有意义 ✓）：用户还想不想要这条自动定时。
+   *
+   * ⚠ 它与 `enabled` **不是一回事**，别合并（见 `mcloud-core::Schedule::managed_wanted`）：
+   * `enabled` 是**算出来的**（有下一场才为真 ✓），这一格是**用户选的**。
+   * ⚠ 定时页上翻那条定时的开关 ⇒ 后端就是改这一格 ✓（**同一格**，不是第二套开关 ✓）。
+   */
+  managedWanted?: boolean
 }
 
 export interface ScheduleInput {
@@ -980,6 +1138,10 @@ export interface ScheduleInput {
   timezone: string
   body?: unknown
   enabled: boolean
+  /** 绑定的推送规则 id（多选 ✓）。空数组 = 不推 ✓。 */
+  pushRules: string[]
+  /** 运行结局条件（多选 ✓）。空数组 = 跑完就推 ✓。 */
+  pushEvents: string[]
 }
 
 /**
@@ -1022,6 +1184,10 @@ export interface Pipeline {
   steps: PipelineStep[]
   enabled: boolean
   lastRunMs: number | null
+  /** 绑定的推送规则 id（多选 ✓）。可选/缺席的理由与 `Schedule.pushRules` 逐条相同。 */
+  pushRules?: string[]
+  /** 运行结局条件（多选 ✓，空 = 跑完就推 ✓）。同 `Schedule.pushEvents`。 */
+  pushEvents?: string[]
 }
 
 export interface PipelineInput {
@@ -1031,6 +1197,10 @@ export interface PipelineInput {
   stopOnError: boolean
   steps: PipelineStep[]
   enabled: boolean
+  /** 绑定的推送规则 id（多选 ✓）。空数组 = 不推 ✓。 */
+  pushRules: string[]
+  /** 运行结局条件（多选 ✓）。空数组 = 跑完就推 ✓。 */
+  pushEvents: string[]
 }
 
 export const listPipelines = () => request<Pipeline[]>('/api/pipelines')
@@ -1312,8 +1482,11 @@ export const updateAccount = (
 //
 // 1. **线格式是 camelCase**（与 /api/schedules、/api/runs 一致）—— 不是落盘那份
 //    `AccountSettings` 的 snake_case。敲错键后端回 400，不会静默忽略。
-// 2. `PUT` 是**整体替换**：每个字段都必须显式给出（`notify: null` = 不配推送）。
+// 2. `PUT` 是**整体替换**：每个字段都必须显式给出。
 //    缺席没有"保持不变"的意思 ⇒ 客户端必须"先 GET 读全、改一处、再整体写回"。
+//    ⚠ 这里**没有** `notify` 那一格了（2026-10-08 用户口径：「很显然我说的和云盘账户
+//    没有关系」＋「丢弃现有情况，重写」）—— 推送凭据收进了**规则自己**身上
+//    （`PushRule.config` ✓），见下面「推送规则（用户级）」那一段 ✓。
 // 3. 未知键 ⇒ 400（`deny_unknown_fields`）；范围只在后端校验，前端给的是提示。
 
 /** 推送日志级别。与后端 `PushLogLevel` 一一对应（小写）。 */
@@ -1445,7 +1618,16 @@ export const NOTIFY_CHANNELS = [
 
 export type NotifyChannelKey = (typeof NOTIFY_CHANNELS)[number]
 
-/** 推送配置（`PushConfig`）。渠道字段缺省 / `null` = 那个渠道不启用。 */
+/**
+ * 一条规则**自己的**平台与凭据（`PushConfig`）。
+ *
+ * ⚠ 语义（2026-10-08 重做后）：这是 `PushRule.config` 那一格 ——
+ * **这条规则用哪几个平台发、token / corpid / 自定义 POST 模板填在哪** ✓。
+ * 它**不再是**"你这个登录用户的渠道配置" ✗（那个接口已经删了 ✗）——
+ * 所以两条规则可以各配各的 token，互不影响 ✓。
+ *
+ * 渠道字段缺省 / `null` = 那个平台在这条规则里**不启用**。
+ */
 export interface PushConfig {
   title: string
   onlyError: boolean
@@ -1465,9 +1647,9 @@ export interface PushConfig {
 /**
  * 一个账号的设置 —— `GET` 的响应体，也是 `PUT` 的请求体（**整体替换**）。
  *
- * ⚠ `notify` 里有第三方渠道的 token/secret（后端**刻意不打码**读接口，取舍见
- * `mcloud-server::routes::accounts::put_settings`）。界面必须把它们当密文：
- * 默认打码、可切换查看、**不进 console**。
+ * ⚠ 这里**没有**推送渠道（`notify`）那一格：2026-10-08 用户口径（「很显然我说的和
+ * 云盘账号没有关系」＋「丢弃现有情况，重写」）把它整个删掉了 ✗ —— 推送凭据现在
+ * 挂在**每条规则自己**身上（`PushRule.config` ✓），与云盘账号无关 ✓。
  */
 export interface AccountSettings {
   /** 备份任务等待时间（秒）。`0` = 不等。后端上限 3600。 */
@@ -1478,8 +1660,6 @@ export interface AccountSettings {
   skipTasks: number[]
   /** AI 新头像每日轮数上限。后端上限 1000。 */
   aiAvatarDailyLimit: number
-  /** `null` = 这个账号**一个渠道都不推**（后端没有进程级兜底）。 */
-  notify: PushConfig | null
 }
 
 /**
@@ -1494,7 +1674,7 @@ export const getAccountSettings = (id: string) =>
 /**
  * **整体替换**某账号的设置。
  *
- * 每个字段都必须给出（`notify: null` = 清空推送）。返回值是落盘后回读的那一份，
+ * 每个字段都必须给出。返回值是落盘后回读的那一份，
  * 调用方应当拿它**回填界面** —— 后端可能做过归一化。
  */
 export const putAccountSettings = (id: string, settings: AccountSettings) =>
@@ -1502,6 +1682,274 @@ export const putAccountSettings = (id: string, settings: AccountSettings) =>
     method: 'PUT',
     body: JSON.stringify(settings),
   })
+
+// ── 推送规则（用户级）───────────────────────────────────────────────────
+//
+// **两层**（2026-10-08 用户口径「推翻重做」✓）：
+// ① **规则** = 「怎么发」：名字 + `config`（**这条规则自己的平台与凭据** ✓）+
+//    标题 / 仅错误 / 等级下限（都在 `config` 里 ✓）+ 汇总方式 ✓。
+//    规则**自带凭据** ⇒ **没有**独立的"推送渠道"那一层 ✗
+//    （`GET/PUT /api/push/config` 已经**删掉** ✗）。
+// ② **行为** = 「什么时候发」，是**主动方**：定时 / 编排（`pushRules` 多选 ✓）与
+//    面板行为（`PanelBindings` ✓）—— **行为选规则**（可多选 ✓），规则**不**反向持有绑定 ✓。
+//
+// ⚠ 规则**只按 id 定位**，请求体里没有 `owner`：归属由服务端定
+// （沿用老行的、否则写当前用户）—— 让请求体带 owner 就等于让任何一个登录用户
+// 把规则塞给别人 ✗（后端 `PushRuleInput` 的注释写着这条 ✓）。
+//
+// ⚠ 读接口**刻意不打码**（后端取舍见 `routes/push.rs`）：`PushConfig` 里
+// 有第三方渠道的 token/secret。界面必须把它们当密文：默认打码、可切换查看、**不进 console**。
+
+/**
+ * 事件键（行为那一侧用的）。
+ *
+ * ⚠ **刻意是 `string`，不是字面量联合**：事件的权威名单由后端给
+ * （`GET /api/push/events` ✓，它自己从 `PushEvent::ALL` 生成 ✓）。
+ * 前端再抄一份联合类型，就是**第二份名单** —— 后端加事件时它不会报错，
+ * 只会让"新事件"在这一侧变成类型谎言 ✗（后端路由的注释也写着"不让前端各写一份字符串" ✓）。
+ */
+export type PushEventKey = string
+
+/**
+ * 事件的两类（`GET /api/push/events` 的 `kind` ✓）。
+ *
+ * - `run` = **运行类**：挂在定时 / 编排的 `pushEvents` 上（空 = 跑完就推 ✓）；
+ * - `panel` = **面板行为类**：没有定时可绑，只能在「设置 → 事件推送」里配规则 ✓
+ *   （登录新设备 / 登录失败 / 耗时异常 / 连续失败 ✓）。
+ */
+export type PushEventKind = 'run' | 'panel'
+
+/** 渠道键。同上：名单由 `GET /api/push/channels` 给，前端不抄第二份。 */
+export type PushChannelKey = string
+
+/** 汇总方式：一次运行推一条（默认）还是每一步推一条。 */
+export type PushDigestMode = 'perRun' | 'perStep'
+
+// ⚠ 这里原先有 `PushQuietHours`（`from` / `to` 两个 `HH:MM`，允许跨零点）——
+// 2026-10-08 用户口径「**不要静默时间**」⇒ 随整块功能一起删掉 ✗
+// （Rust 侧 `QuietHours` / `PushRule.quiet` / 投递层那句判断、界面那两格时间一起删 ✓）。
+
+/**
+ * 一条推送规则（后端 `PushRule` 的线格式，camelCase）。
+ *
+ * ⚠ 规则里**没有**"什么时候发"的字段 ✗（没有事件多选、没有耗时倍数/连续失败条数 ✗）——
+ * 那些归**行为**（`Schedule.pushEvents` / `Pipeline.pushEvents` / `PanelBindings` ✓）。
+ * ⚠ 也**没有** `quiet`（静默时段）✗ —— 那个功能整个删了 ✓。
+ */
+export interface PushRule {
+  id: string
+  name: string
+  /** **这条规则自己的平台与凭据** ✓（勾哪几个平台、token / corpid / 自定义 POST 模板都在这里 ✓）。 */
+  config: PushConfig
+  digest: PushDigestMode
+  enabled: boolean
+  /** 归属。界面不显示、也不提交（服务端定 ✓）。 */
+  owner?: string | null
+}
+
+/**
+ * `PUT /api/push/rules/{id}` 的请求体 —— **不含 `id` / `owner`**。
+ *
+ * ⚠ 缺字段会**退回默认值**（`digest` → `perRun` ✗）⇒ 编辑时照旧
+ * "读全、改一处、整份写回" ✓，尤其 `digest` 界面不编辑但要**原样带回** ✗。
+ */
+export interface PushRuleInput {
+  name: string
+  config: PushConfig
+  digest: PushDigestMode
+  enabled: boolean
+}
+
+/** `GET /api/push/events` 的一项（界面按 `kind` 分两处用）。 */
+export interface PushEventOption {
+  /** 落进行为里的那个键（serde 的 camelCase 名 ✓）。 */
+  key: string
+  label: string
+  /** 新建行为时默认勾上（后端 `PushEvent::default_selected()` ✓）。 */
+  defaultSelected: boolean
+  /** `run` = 运行类（定时/编排的结局条件 ✓）；`panel` = 面板行为类 ✓。 */
+  kind: PushEventKind
+}
+
+/** `GET /api/push/channels` 的一项。 */
+export interface PushChannelOption {
+  key: string
+  label: string
+}
+
+/**
+ * 面板行为的节流方式。
+ *
+ * - `every` = 每次触发都推；
+ * - `onChange` = **只在状态变化时推**（登录/失败/耗时异常/连续失败这四类可能
+ *   **频繁触发**，默认口径见 [`PANEL_THROTTLE_DEFAULTS`] ✓）。
+ */
+export type ThrottleMode = 'every' | 'onChange'
+
+/** 面板行为的三格节流。`cooldownSecs` / `dailyCap` 为 `0` = 不设限 ✓。 */
+export interface PushThrottle {
+  mode: ThrottleMode
+  cooldownSecs: number
+  dailyCap: number
+}
+
+/**
+ * 一个面板行为（「设置 → 事件推送」里的一行）：**行为选规则**（可多选 ✓）。
+ *
+ * ⚠ **`rules` 为空 = 这一行不推** ✓（不是"全推"✗）。
+ * ⚠ 后端对空数组是 `skip_serializing_if = "Vec::is_empty"` ⇒ **`rules` 这一格可能压根不在** ✗
+ * ⇒ 读的时候一律 `?? []`（写成必填的话，`.includes` 会在运行时炸 —— 类型检查看不出来 ✗）。
+ */
+export interface BehaviorBinding {
+  rules?: string[]
+  throttle: PushThrottle
+  /**
+   * 「耗时异常」的倍数判据：这次耗时超过同一任务历史**中位数**的这么多倍算异常 ✓。
+   *
+   * ⚠ **只有 `perfSlow` 这一格有意义** ✓（别的行为留 `null` ✓）。
+   * `null` / 缺省 = **用户没动过** ⇒ 跟随内置默认（3.0 ✓）；
+   * `Some(3)` 与 `null` 今天的判定结果一样，但界面分得清"没配过"与"配成了 3" ✓
+   * —— 与 `PushConfig` 的渠道字段（`null` = 没配 ✓）同一条口径：用可空表达"用户没设"，
+   * 而不是拿一个默认值冒充用户的选择 ✗。
+   */
+  slowFactor?: number | null
+  /**
+   * 「连续失败」的条数判据：连着栽这么多回算异常 ✓。
+   *
+   * ⚠ **只有 `perfFailStreak` 这一格有意义** ✓。`null` / 缺省 = 跟随内置默认（3 ✓）。
+   */
+  failStreak?: number | null
+}
+
+/**
+ * 四个面板行为的绑定（`GET/PUT /api/push/panel` ✓）。
+ *
+ * ⚠ 这四类**没有定时可绑** —— 它们不是运行结局，而是实例级事件，
+ * 所以入口在「设置」页里单独一块 ✓（用户口径 ✓）。
+ */
+export interface PanelBindings {
+  loginNew: BehaviorBinding
+  loginFailed: BehaviorBinding
+  perfSlow: BehaviorBinding
+  perfFailStreak: BehaviorBinding
+}
+
+/**
+ * 新建面板绑定时的**保守默认**（用户口径：登录/性能这些可能频繁触发 ✓）。
+ *
+ * - 登录新设备 / 登录失败：`every`（这两件本来就少见，漏掉比多推更糟 ✓）；
+ * - 耗时异常 / 连续失败：`onChange`（**只在状态变化时推** —— 否则一次慢跑会刷屏 ✗）。
+ *
+ * ⚠ 四格都带 `cooldownSecs: 1800`（30 分钟）与 `dailyCap: 10` ——
+ * 用户口径「登录，性能，这些可能频繁触发，注意」✓。界面上可改，`0` = 不设限 ✓。
+ */
+export const PANEL_THROTTLE_DEFAULTS: Record<keyof PanelBindings, PushThrottle> = {
+  loginNew: { mode: 'every', cooldownSecs: 1800, dailyCap: 10 },
+  loginFailed: { mode: 'every', cooldownSecs: 1800, dailyCap: 10 },
+  perfSlow: { mode: 'onChange', cooldownSecs: 1800, dailyCap: 10 },
+  perfFailStreak: { mode: 'onChange', cooldownSecs: 1800, dailyCap: 10 },
+}
+
+/**
+ * 四个面板行为的**显示顺序与文案**。
+ *
+ * ⚠ 顺序固定（登录新设备 → 登录失败 → 耗时异常 → 连续失败 ✓）：
+ * 它是界面上的行序，读起来才是"登录两件、性能两件" ✓。
+ * 标签的权威仍是 `GET /api/push/events`（按 `kind === 'panel'` 取 ✓），
+ * 这里只在后端没给那一项时兜底 ✓。
+ */
+export const PANEL_BEHAVIOR_KEYS = [
+  'loginNew',
+  'loginFailed',
+  'perfSlow',
+  'perfFailStreak',
+] as const satisfies readonly (keyof PanelBindings)[]
+
+/**
+ * 四行的**兜底文案**（`GET /api/push/events` 里没给那一项时才用 ✓）。
+ *
+ * ⚠ 只是兜底：标签的权威是后端（`kind === 'panel'` 那几条 ✓）——
+ * 后端改了措辞，界面跟着改 ✓。字面量照后端 `PushEvent::label()` 抄 ✓
+ *（`loginNew` 是「WebUI 新登录」、`loginFailed` 是「登录连续失败」✓）——
+ * 两边写不一样的措辞，用户会在"推送"与"设置"两页看到两个名字 ✗。
+ */
+export const PANEL_BEHAVIOR_LABEL: Record<keyof PanelBindings, string> = {
+  loginNew: 'WebUI 新登录',
+  loginFailed: '登录连续失败',
+  perfSlow: '耗时异常',
+  perfFailStreak: '连续失败',
+}
+
+/** 空绑定 = 这一行不推（`rules: []` ✓，节流用保守默认 ✓，两格阈值留空 = 跟随内置默认 ✓）。 */
+export const emptyPanelBindings = (): PanelBindings => ({
+  loginNew: { rules: [], throttle: { ...PANEL_THROTTLE_DEFAULTS.loginNew }, slowFactor: null, failStreak: null },
+  loginFailed: { rules: [], throttle: { ...PANEL_THROTTLE_DEFAULTS.loginFailed }, slowFactor: null, failStreak: null },
+  perfSlow: { rules: [], throttle: { ...PANEL_THROTTLE_DEFAULTS.perfSlow }, slowFactor: null, failStreak: null },
+  perfFailStreak: { rules: [], throttle: { ...PANEL_THROTTLE_DEFAULTS.perfFailStreak }, slowFactor: null, failStreak: null },
+})
+
+/** 当前用户的推送规则列表。 */
+export const listPushRules = () => request<PushRule[]>('/api/push/rules')
+
+/**
+ * 建或改一条规则（id 在路径里，幂等）。
+ *
+ * 返回值是**落盘后回读的那一份** —— 调用方应当拿它回填，而不是信自己发出去的那份。
+ */
+export const savePushRule = (id: string, input: PushRuleInput) =>
+  request<PushRule>(`/api/push/rules/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  })
+
+/**
+ * 删一条规则。
+ *
+ * ⚠ 别人的 id 与不存在的 id **一样回 404**（后端不区分，免得泄露存在性）——
+ * 界面不能把 404 说成"网络错误"。
+ *
+ * ⚠ 删掉之后，**绑着它的行为只是少了一条规则** ✓：定时 / 编排的 `pushRules` 里那个
+ * 悬空 id **不会被清掉**（没有级联删除 ✗），面板绑定的 `rules` 同理 ⇒ 界面上要能
+ * 看出这一点（见 `schedules-page.tsx` / `push-rule-select.tsx` 的"规则已删除"兜底项 ✓）。
+ */
+export const deletePushRule = (id: string) =>
+  request<{ ok: boolean }>(`/api/push/rules/${encodeURIComponent(id)}`, { method: 'DELETE' })
+
+/** 事件清单（按 `kind` 分两处用：`run` 进定时/编排、`panel` 进设置页那块 ✓）。 */
+export const listPushEvents = () => request<PushEventOption[]>('/api/push/events')
+
+/**
+ * 渠道清单。
+ *
+ * ⚠ **新设计里界面不再需要它**：规则**自带凭据**（`PushRule.config` ✓），
+ * 平台上不上由 `config` 里那个键在不在决定 —— 不再有"这条规则只用哪几个渠道"那一格 ✗。
+ * 接口留着是因为它是后端 `PushChannelKey::ALL` 的读口（§2 冻结的接口 ✓），
+ * 前端不抄第二份名单 ✓。
+ */
+export const listPushChannels = () => request<PushChannelOption[]>('/api/push/channels')
+
+/**
+ * 四个**面板行为**的绑定（登录新设备 / 登录失败 / 耗时异常 / 连续失败 ✓）。
+ *
+ * ⚠ 这四类**没有定时可绑**，入口在「设置」页的「事件推送」卡里 ✓（用户口径 ✓）。
+ */
+export const getPushPanel = () => request<PanelBindings>('/api/push/panel')
+
+/**
+ * **整份替换**四个面板行为的绑定。
+ *
+ * 返回值是落盘后回读的那一份 —— 调用方应当拿它**回填界面**（后端可能做过归一化 ✓）。
+ */
+export const putPushPanel = (bindings: PanelBindings) =>
+  request<PanelBindings>('/api/push/panel', {
+    method: 'PUT',
+    body: JSON.stringify(bindings),
+  })
+
+// ⚠ `POST /api/push/test`（试发）**刻意不包一层函数**：后端这一版明确回
+// `501 Not Implemented`（发送那条线还没接过来，见 `routes/push.rs::test_send` ✓）。
+// 包一个 `testPush()` 出来，界面上迟早会有人接一个"测试发送"按钮 ——
+// 而用户点它只会拿到一句报错 ✗。要做就等后端接线之后一起做 ✓。
 
 // ── 直播口令 → 小红花 ─────────────────────────────────────────────────
 //
@@ -2098,3 +2546,84 @@ export function runExchange(
     }),
   })
 }
+
+// ── 直播自动定时（`/api/live-room/auto-schedule`）────────────────────────
+//
+// 用户口径（2026-10-08）：「为直播增加一个自动设置定时的功能，设置为**下次直播开始
+// 时间的一个小时后**」✓。**每个登录用户一条**，落盘就是那条普通定时
+// （`data/schedules.json` 里的 `auto-live-<owner>` ✓，所以它**同时**出现在定时页里 ✓）。
+//
+// ⚠ 这里**只搬后端算好的那一刻**，前端一个字节都不推算 ✗：
+// 「下一场」来自共享口令池（`GET /api/kouling` 那份日程 ✓），自己再推一遍
+// 至少要重走一次上游鉴权，而且两处判据迟早分叉（上一版分叉的后果用户见过：
+// 「16:31 还显示 15:00」✗）。同理**不缓存 `at` 自己推算下一次** ✗ ——
+// 想看最新的就 `PUT` 一次（后端**立刻重算**并回新状态 ✓），或等直播任务跑完 ✓。
+
+/**
+ * 「自动直播定时」的当前状态（`GET`/`PUT /api/live-room/auto-schedule` 的响应体，
+ * 与后端 `mcloud_app::live_auto::AutoLiveState` 一一对应 ✓）。
+ */
+export interface LiveAutoSchedule {
+  /**
+   * **现在能不能跑** = 用户想要 **且** 算得出下一场 ✓。
+   *
+   * ⚠ 它与那条定时自己的 `enabled` **同一格**（卡片上那个开关显示的就是调度器
+   * 会看到的那一格 ✓）—— 不是"另一份状态" ✗。
+   */
+  enabled: boolean
+  /**
+   * 算出来的触发时刻：**下一场直播开始 + 1 小时**（东八区墙钟串，形如
+   * `"2026-10-08 11:00:00"` ✓）。
+   *
+   * `null` = 现在算不出来（没探测过 / 场次都过去了 / 已被停用 ✓）——
+   * ⚠ 界面上必须写清"已停用"，**留空就是坑** ✗。
+   */
+  at: string | null
+  /**
+   * 这条定时作用的云盘账号 id（用户多选 ✓）。
+   *
+   * ⚠ **空数组 = 全部已启用账号** ✓（与 `Schedule.accounts` 同一条语义 ✓）——
+   * 不是"一个都不选" ✗。界面上「全部账号」那一行对应的就是这个值 ✓。
+   */
+  accounts: string[]
+  /**
+   * 一句人话，说清"为什么现在是这个状态"（界面**原样**显示 ✓）。
+   *
+   * ⚠ 只在**说不清**的时候才有：正常有下一场时是 `null` ✓
+   * （那行时刻已经说明了一切，再挂一句就是噪音 ✗）。
+   */
+  note: string | null
+}
+
+/**
+ * `PUT` 的请求体 —— **缺席 = 保持原样** ✓（后端的双 `Option` 语义，见
+ * `routes/live_room.rs::AutoLiveInput`）。
+ *
+ * ⚠ 两格都是可选的，别把它们写成必填：只想改账号时**不带** `enabled` 才对
+ *（带 `enabled: false` 会把用户"想要"的意愿一起改掉 ✗，而那是另一件事）。
+ */
+export interface LiveAutoScheduleInput {
+  /** 不给 = 不动用户的意愿 ✓。 */
+  enabled?: boolean
+  /** 不给 = 不动 ✓；给 `[]` = 清空 ⇒ 回到"全部已启用账号" ✓。 */
+  accounts?: string[]
+}
+
+/**
+ * 读当前状态。**只读、不重算**（后端不写盘 ✓）—— 想看最新时刻就 `PUT` 一次。
+ */
+export const getLiveAutoSchedule = () =>
+  request<LiveAutoSchedule>('/api/live-room/auto-schedule')
+
+/**
+ * 改开关 / 账号多选，后端**立刻重算一次**并回**新状态** ✓。
+ *
+ * ⚠ 返回的就是新状态 ⇒ 界面**必须拿它回填**，别自己猜（自己猜的那份与后端
+ * 刚写下去的那份一旦不一致，用户看到的就是"我点了没反应" ✗）。
+ * ⚠ 账号不是自己的 ⇒ 400，错误原话要**原样**透出（`request()` 已经保住了 ✓）。
+ */
+export const saveLiveAutoSchedule = (input: LiveAutoScheduleInput) =>
+  request<LiveAutoSchedule>('/api/live-room/auto-schedule', {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  })

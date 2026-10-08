@@ -39,13 +39,13 @@
  *
  * # ⚠ 写 `load()` 的顺序不能动：`state` 最后写
  *
- * lite 没有重渲染（`docs/web/lite-guide.md` §6.1），`state.value === 'ready'` 那条分支
+ * lite 没有重渲染（`asunajs/lite` 的 `docs/guide.md` §6.1），`state.value === 'ready'` 那条分支
  * 只在 `state` 变化时重铺一次，铺的时候就把 `status` / `runs` / … 读成了**那一刻的值**。
  * 所以五个信号必须先写完、再置 `state`；写反了各卡会永远停在上一轮 ——
  * 而它不报错，只是数字不动。
  */
 
-import { onMounted, onUnmounted, ref } from 'lite'
+import { onMounted, onUnmounted, ref } from '@asunajs/lite'
 import { setPageRefresh } from '../ui/page-refresh'
 import {
   getBeanRecords,

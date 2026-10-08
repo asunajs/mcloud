@@ -19,7 +19,7 @@
  * 布局沿用规范 §7.2：桌面表格（列多、要横向比较），窄屏**卡片流**。
  */
 
-import { onMounted, ref, onUnmounted } from 'lite'
+import { onMounted, ref, onUnmounted } from '@asunajs/lite'
 import { Dialog, openDialog } from '../ui/dialog'
 import { LogPanel, type LogLine } from '../ui/log-panel'
 import { setPageRefresh } from '../ui/page-refresh'
@@ -615,6 +615,7 @@ export const HistoryPage = (props: HistoryPageProps) => {
         ) : null}
         <LogPanel get={() => logLines.value} />
       </Dialog>
+
     </div>
   )
 }

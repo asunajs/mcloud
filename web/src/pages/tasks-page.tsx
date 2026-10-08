@@ -10,7 +10,7 @@ import { navigate } from '../ui/router'
  * 并明确告诉用户可以关页面（任务在后端继续跑）。
  */
 
-import { onUnmounted, onMounted, ref } from 'lite'
+import { onUnmounted, onMounted, ref } from '@asunajs/lite'
 import { setPageRefresh } from '../ui/page-refresh'
 import {
   cancelRun,

@@ -1,4 +1,4 @@
-import { mount } from 'lite'
+import { mount } from '@asunajs/lite'
 import App from './app'
 import './app.css'
 

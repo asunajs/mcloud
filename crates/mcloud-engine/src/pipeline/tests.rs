@@ -46,6 +46,8 @@ fn step(task: &str, cont: bool) -> PipelineStep {
 
 pub(crate) fn pipeline(steps: Vec<PipelineStep>, stop_on_error: bool) -> Pipeline {
     Pipeline {
+        push_rules: Vec::new(),
+        push_events: Vec::new(),
         id: PipelineId::new("p1"),
         name: "测试链".into(),
         accounts: Vec::new(),

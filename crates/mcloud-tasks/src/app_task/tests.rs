@@ -699,12 +699,12 @@ impl HttpClient for Scripted {
 
 /// 一份**按账号**存 `account_state` 的替身；别的 store 方法一律拒绝
 /// （这条链只该碰 `account_state` / `save_account_state`）。
-struct FakeStore {
+pub(super) struct FakeStore {
     states: Mutex<HashMap<String, serde_json::Value>>,
 }
 
 impl FakeStore {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             states: Mutex::new(HashMap::new()),
         }
@@ -1023,6 +1023,14 @@ fn task_json(id: i64, group: &str, name: &str, market: &str) -> String {
     )
 }
 
+/// 与 [`task_json`] 同形，但 `state = "FINISH"` —— 收尾复查看的"**状态变了**"就是这一格 ✓
+///（用户口径 2026-10-07：「成功与否不是看你做了啥，而是状态的变化」✓）。
+fn task_json_finished(id: i64, group: &str, name: &str, market: &str) -> String {
+    format!(
+        r#"{{"id":{id},"name":"{name}","groupid":"{group}","state":"FINISH","limitType":"DAY","enable":1,"currstep":3,"process":0,"marketname":"{market}"}}"#
+    )
+}
+
 /// 与 [`task_json`] 同形，但**带 `button.app.link` 与 `process`** ——
 /// 615 那一族的门就在 `button` 这一格（实拍形状见 `app_task_list_v2.rs` 的注释 ✓）。
 fn task_json_with_button(
@@ -1298,8 +1306,11 @@ async fn the_share_task_counts_only_when_the_upstream_number_moves() {
             "sign_in_3",
         ),
     ];
+    // ⚠⚠ 复查那一轮：106 **变成 `FINISH`**（上游把上传那一条记上了 ✓）——
+    // 这是 2026-10-07 新口径下"上传那一条算做成"的**唯一**依据：
+    // 「成功与否不是看你做了啥，而是状态的变化」（只看 PUT 返回 200 已经不够了 ✗）。
     let after = vec![
-        task_json(106, "day", "手动上传一个文件", "sign_in_3"),
+        task_json_finished(106, "day", "手动上传一个文件", "sign_in_3"),
         task_json(
             434,
             "month",
@@ -1348,31 +1359,27 @@ async fn the_share_task_counts_only_when_the_upstream_number_moves() {
 
     // ⚠⚠ 复审 tk-1（口径 B）——**端到端**这一侧：**动过 ≠ 上游确认过**。
     //
-    // 这一趟里 106 打了卡、也真传了文件，但那一档**没有任何可比读数**
-    // ⇒ 必须被标成"未获上游确认"（旧实现只说"做了 2 条"，读起来像两条都验过了 ✗）；
-    // 434 的次数真涨了 ⇒ **不**算未确认 ✓。
-    //
-    // 挂在这个既有场景（而不是只测 `settle_unconfirmed` 本身）是**故意**的：
-    // 只测方法的话，`run_app_task` 哪天不再调它就没人发现
-    //（sv-2 那条钉子第一版就是这么写成绿的 ✗）。
+    // ⚠ 2026-10-07 这一格**升级**了（用户口径：「成功与否不是看你做了啥，而是状态的变化」✓）：
+    // 106 这一趟在上游那边**变成了 `FINISH`** ⇒ 它是**真被确认**的 ✓，
+    // 于是不再落进"未获上游确认"（tk-1 当初担心的"只说做了 N 条、读起来像都验过了"
+    // 这一格，现在由**状态复查**解决掉了，而不是只加一句标注 ✓）。
+    // ⚠ "读不出 ⇒ 标未确认"那条路仍由 [`acted_but_unconfirmed_is_labelled_without_flipping_the_outcome`]
+    // 钉着（那边构造的条目**没有** `state_after` ⇒ `Unknown` ✓）。
     assert_eq!(
-        result.unconfirmed,
-        vec![106],
-        "实得：{:?}",
+        result.steps[0].state_after.as_deref(),
+        Some("FINISH"),
+        "复查读到的状态要落进明细：{:?}",
+        result.steps[0]
+    );
+    assert!(
+        result.unconfirmed.is_empty(),
+        "状态变了就算确认过，不该再念：{:?}",
         result.unconfirmed
     );
     assert!(
-        result.summary_line().contains("另有 1 条未获上游确认"),
+        !result.summary_line().contains("未获上游确认"),
         "{}",
         result.summary_line()
-    );
-    assert!(
-        result.steps[0]
-            .problems
-            .iter()
-            .any(|p| p.contains("没有可核对的读数")),
-        "{:?}",
-        result.steps[0].problems
     );
     assert!(
         result.steps[1].problems.is_empty(),
@@ -1412,7 +1419,20 @@ async fn a_share_that_does_not_move_the_number_is_not_counted() {
     replies.push(outlink_ok());
     replies.push(del_outlink_ok());
     replies.push(r#"{"code":"0000","success":true,"message":"success"}"#.to_string());
-    replies.extend(replies_for(&same, vec![])); // 事后那一轮也还是 0/7
+    // ⚠ 事后那一轮：**106 变成 FINISH**（上传记上了 ✓）、434 仍是 `0/7`（分享没记上 ✗）
+    // —— 两条的差别**只在状态变化**上，这正是这一条测试要钉的东西 ✓
+    replies.extend(replies_for(
+        &[
+            task_json_finished(106, "day", "手动上传一个文件", "sign_in_3"),
+            task_json(
+                434,
+                "month",
+                "分享文件领好礼<span id='share_title'>0/7</span>",
+                "sign_in_3",
+            ),
+        ],
+        vec![],
+    ));
 
     let (ctx, http) = ctx_with(
         TEST_ACCOUNT,
@@ -1429,6 +1449,16 @@ async fn a_share_that_does_not_move_the_number_is_not_counted() {
     assert_eq!(share.share_after.as_deref(), Some("0/7"));
     assert!(!share.share_counted, "次数没动 ⇒ 不算记上");
     assert_eq!(result.acted, 1, "只算上传那一条");
+    // ⚠⚠ 2026-10-07：次数没动**也要进 `failures`** —— 以前只写 `problems` + 一行红日志，
+    // 而摘要/运行级结论看的都是 `failures` ⇒ 日志说失败、摘要却不记 ✗（同一类不一致）。
+    assert!(
+        result
+            .failures
+            .iter()
+            .any(|f| f.contains("次数没动") && f.contains("0/7 → 0/7")),
+        "次数没动要进 failures：{:?}",
+        result.failures
+    );
     assert!(
         share
             .problems
@@ -1993,6 +2023,21 @@ async fn a_share_that_already_succeeded_today_is_not_run_twice() {
     );
     let lines = sink.lines();
     assert!(lines.iter().any(|l| l.contains("不跑第二次")), "{lines:?}");
+    // ⚠⚠ 2026-10-07 **真机逮到的**（用户截图：那两行紧挨着、后一行还是红的 ✗）：
+    //     跳过之后**还**挂了一条「动手前读不出次数 ⇒ 无从比较（分享后 4/7）」的问题 ✗
+    //     —— 收尾那趟整表读数（`settle_progress`）只排除了 `already_done`，
+    //     **没排除 `skipped_today`** ⇒ 把"根本没动手"的档当成"做过但没记上"结算了 ✗。
+    //     两处症状：① 界面上"不跑第二次"后面紧跟一行红 FAIL（自相矛盾 ✗）；
+    //               ② 白拉一次整表（16 发 GET）—— 跳过的档压根没有可比的前后读数 ✓。
+    assert!(
+        result.steps[0].problems.is_empty(),
+        "跳过的档不该挂任何问题：{:?}",
+        result.steps[0].problems
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("无从比较")),
+        "跳过之后不该再打「没记上」那类话：{lines:?}"
+    );
     let writes: Vec<String> = http
         .requests()
         .into_iter()
@@ -2000,6 +2045,19 @@ async fn a_share_that_already_succeeded_today_is_not_run_twice() {
         .map(|r| r.url)
         .collect();
     assert!(writes.is_empty(), "一枪都不该发：{writes:?}");
+    // 跳过的档没有"动手前/动手后"可比 ⇒ 收尾那趟整表也该省掉（原本白拉一整趟 ✓）。
+    // 一趟 = `app_task_matrix_fetches()` 那么多发（`replies_for` 就是按它铺的 ✓）⇒
+    // 拉了两趟就是它的两倍，这里钉"只有一趟"。
+    let fetches = http
+        .requests()
+        .into_iter()
+        .filter(|r| r.url.contains("taskListV2"))
+        .count();
+    assert_eq!(
+        fetches,
+        crate::app_task_matrix::app_task_matrix_fetches(),
+        "只该有开头那一趟整表，收尾不该再拉：{fetches}"
+    );
 }
 
 /// ⭐ 同一道门管 522：`100/100` 之后不该再传（传了也涨不动 ⇒ 白传 5 个 ✗）。
@@ -2708,4 +2766,187 @@ async fn cancelling_mid_run_still_reclaims_what_was_uploaded() {
         !reqs.iter().any(|r| r.url.contains("id=113")),
         "取消之后 113 一条都不该动手"
     );
+}
+
+/// ⭐⭐ 用户口径 2026-10-07：「**成功与否不是看你做了啥，而是状态的变化**」✓
+///
+/// 只打卡那一档（431）在复查时**状态变成了 `FINISH`** ⇒ 算做成 ✓、日志里有 success ✓。
+///
+/// 红测：把 `settle_progress` 里那段"按状态订正 `acted`"摘掉 ⇒ `acted` 变 0（旧实现
+/// 只有在做那一处 `+1`，这里恰好也有 ⇒ 这条**只钉"日志里有没有 success"**）；
+/// 把 `verdict_of` 的 `FINISH` 那一支摘掉 ⇒ 这条与下一条**同时红** ✓。
+#[tokio::test]
+async fn a_click_only_step_counts_when_its_state_flips_to_finish() {
+    let before = vec![task_json(
+        431,
+        "cloudEmail",
+        "去使用移动云手机",
+        "sign_in_3",
+    )];
+    // ⚠ 复查那一轮：**同一个 id、状态变成 FINISH** ⇒ 这就是"状态的变化" ✓
+    let after = vec![task_json_finished(
+        431,
+        "cloudEmail",
+        "去使用移动云手机",
+        "sign_in_3",
+    )];
+    let mut replies = replies_for(&before, vec![]);
+    replies.push(click_ok()); // 打卡那一发
+    replies.extend(replies_for(&after, vec![]));
+
+    let store = Arc::new(FakeStore::new());
+    let sink = Arc::new(CapturedSink::default());
+    let (ctx, http, _) = ctx_with_sink(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        store,
+        sink.clone(),
+    );
+    let result = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
+
+    assert_eq!(result.acted, 1, "状态变成 FINISH ⇒ 算做成");
+    assert!(
+        result.failures.is_empty(),
+        "成了就不该有失败：{:?}",
+        result.failures
+    );
+    assert!(
+        result.steps[0].state_after.as_deref() == Some("FINISH"),
+        "复查读到的状态要落进明细：{:?}",
+        result.steps[0]
+    );
+    assert!(
+        sink.lines().iter().any(|l| l.contains("上游已确认")),
+        "要有 success 那一行（旧实现只有 START、后面一片空白 ✗）：{:?}",
+        sink.lines()
+    );
+    // ⚠ 复查那一趟**真的发了**（16 发整表）：没有它就没法判"变没变" ✓
+    assert!(
+        http.requests()
+            .iter()
+            .filter(|r| r.url.contains("taskListV2"))
+            .count()
+            > crate::app_task_matrix::app_task_matrix_fetches(),
+        "要拉第二趟整表来比对状态"
+    );
+}
+
+/// ⭐⭐ 反向：打了卡、但复查时状态**还是 `WAIT`** ⇒ **不算做成**，而且要**明说** ✗。
+///
+/// 这就是用户 2026-10-07 指的那件事：旧实现只打一句 `START`，后面**一片空白** ——
+/// 既不说成、也不说败，用户根本看不出这一条到底有没有用 ✗。
+#[tokio::test]
+async fn a_click_only_step_that_does_not_change_state_is_a_failure() {
+    let same = vec![task_json(
+        431,
+        "cloudEmail",
+        "去使用移动云手机",
+        "sign_in_3",
+    )];
+    let mut replies = replies_for(&same, vec![]);
+    replies.push(click_ok());
+    replies.extend(replies_for(&same, vec![])); // 复查还是 WAIT ⇒ 没变
+
+    let store = Arc::new(FakeStore::new());
+    let sink = Arc::new(CapturedSink::default());
+    let (ctx, _http, _) = ctx_with_sink(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        store,
+        sink.clone(),
+    );
+    let result = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
+
+    assert_eq!(result.acted, 0, "状态没变 ⇒ 不算做成");
+    assert!(
+        result
+            .failures
+            .iter()
+            .any(|f| f.contains("没记上") && f.contains("状态 WAIT → WAIT")),
+        "要说清是「哪一步没变」：{:?}",
+        result.failures
+    );
+    assert!(
+        sink.lines().iter().any(|l| l.contains("上游状态/读数没变")),
+        "日志里要有那一行（不能只有 START）：{:?}",
+        sink.lines()
+    );
+    assert!(
+        !result.summary_line().contains("未获上游确认"),
+        "判过了就别再挂「没核对」：{}",
+        result.summary_line()
+    );
+}
+
+/// ⭐⭐ 真机回归（2026-10-07，用户原话：「**不看云朵记录我都不知道成功了**」✗）：
+///
+/// **既不打门上的卡、也不走"上传 N 个"** 的 runner 步骤，也必须进收尾复查、也必须有一行结论 ✓。
+///
+/// 真机那次是 **1014（PDF 转换）**：上游已经把 `currstep` 走到 1 ⇒ `should_click` 为假
+/// ⇒ `clicked=false`；而它生成/上传那份 PDF 走的是 runner 内部 ⇒ `uploaded` 也没加
+/// ⇒ 旧的入口条件（`uploaded>0 || clicked || shared`）**三个全假** ⇒ 这条**整个跳过**
+/// 收尾复查 ⇒ 日志里只有一句含糊的「PDF转换完成」，**没有任何成/败结论** ✗，
+/// 而 AI豆 那边明明 `+10` 记上了 ✓ —— 用户看到的就是这个"日志和结果不一样"。
+///
+/// 红测：把 `acted()` 里的 `|| s.acted_counted` 摘掉 ⇒ 这条红（没有 success 行、
+/// 明细里也没有 `state_after`）✓。
+#[tokio::test]
+async fn a_runner_step_without_a_click_still_gets_a_verdict_line() {
+    // ⚠ `currstep = 1` ⇒ 门**不打**（照旧 TS 那句 `return true`：门仍通过、照常往下做 ✓）
+    let before = vec![task_json_with_currstep(
+        1020,
+        "month",
+        "完成一次邮件转存",
+        "sign_in_3",
+        1,
+    )];
+    // 复查那一轮：状态变成 FINISH ⇒ "状态的变化" ⇒ 成 ✓
+    let after = vec![task_json_finished(
+        1020,
+        "month",
+        "完成一次邮件转存",
+        "sign_in_3",
+    )];
+    let mut replies = replies_for(&before, vec![]);
+    replies.push(r#"{"success":true,"code":"0000","data":{"token":"SSO"}}"#.to_string()); // 换 SSO
+    replies.push(r#"{"var":{"sid":"S1","rmkey":"R1"}}"#.to_string()); // 邮箱登录
+    replies.push(r#"{"code":"S_OK"}"#.to_string()); // 备份那一枪
+    replies.extend(replies_for(&after, vec![]));
+
+    let store = Arc::new(FakeStore::new());
+    let sink = Arc::new(CapturedSink::default());
+    let (ctx, http, _) = ctx_with_sink(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        store,
+        sink.clone(),
+    );
+    let result = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
+
+    assert!(!result.steps[0].clicked, "这一档门不打（currstep=1）");
+    assert_eq!(result.steps[0].uploaded, 0, "它也不走「上传 N 个」那条路");
+    assert_eq!(
+        result.steps[0].state_after.as_deref(),
+        Some("FINISH"),
+        "动过就必须进收尾复查、必须记下动手后的状态：{:?}",
+        result.steps[0]
+    );
+    assert!(
+        sink.lines().iter().any(|l| l.contains("上游已确认")),
+        "必须有一行明确结论（旧实现这里什么都没有 ✗）：{:?}",
+        sink.lines()
+    );
+    assert_eq!(result.acted, 1, "状态变了 ⇒ 算做成");
+    assert!(
+        result.failures.is_empty(),
+        "成了就不该有失败：{:?}",
+        result.failures
+    );
+    assert!(http.clicks().is_empty(), "这一档压根不该打卡");
 }

@@ -52,6 +52,10 @@ tower = { version = "0.5", features = ["util", "limit"] }
 http-body-util = "0.1"
 mcloud-store.workspace = true
 mcloud-core = { workspace = true, features = ["testkit"] }
+# 集成测试要**自己实现 `HttpClient`**（那是个 async trait ✓）—— 面板行为（登录 ✓）
+# 的验收明确要求"用假 HTTP 客户端断言发了几枪" ✓，而生产路径用不到它 ⇒ 放 dev ✓
+# （与上面 `tower` 那条"dev 目标同样看得见"同一条口径 ✓）。
+async-trait.workspace = true
 
 [lints]
 workspace = true

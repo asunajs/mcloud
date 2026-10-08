@@ -1466,9 +1466,13 @@ fn params_accept_codes_as_an_array() {
     assert_eq!(p.codes, vec!["甲".to_string(), "乙".to_string()]);
     assert_eq!(p.listen_seconds, 30);
 
-    // 不给 listenSeconds ⇒ 默认 60（与参考实现一致）
+    // 不给 listenSeconds ⇒ 用缺省值（用户口径 2026-10-08「默认180」）
     let p = LiveRoomRun::params_from_body(&serde_json::json!({"codes": "甲"}));
-    assert_eq!(p.listen_seconds, 60);
+    assert_eq!(p.listen_seconds, DEFAULT_LISTEN_SECONDS);
+    assert_eq!(
+        DEFAULT_LISTEN_SECONDS, 180,
+        "缺省值本身也要钉住，别只对着常量自证"
+    );
 }
 
 // ⚠ 这里**删掉过**一条 ⭐ 用例：`disabled_kouling_is_skipped_with_zero_requests`
@@ -2717,5 +2721,24 @@ fn anchors_agree_between_core_and_upstream() {
         mcloud_core::kouling::KOULING_ANCHOR,
         mcloud_upstream::live_consts::KOULING_ANCHOR,
         "core 与 upstream 的 KOULING_ANCHOR 必须一致 —— 这是「有效的主播」的唯一判据"
+    );
+}
+
+/// 不变量：两次自动抓取之间的最小间隔 **必须 ≥ 一次抓取要听的时长**。
+///
+/// 依据：`SCRAPE_MIN_INTERVAL_MS` 存在的理由就是"一个 mcloud 用户只开一个抓取"
+/// —— 一次抓取要听满 `listenSeconds`（缺省 [`DEFAULT_LISTEN_SECONDS`]），
+/// 间隔比它短 ⇒ 第一个账号还没听完、第二个账号就另起一次 ✗。
+///
+/// ⚠ 这条断言**只能**钉在这里：两个常量分属两个 crate，依赖方向是
+/// `mcloud-tasks → mcloud-core`，`mcloud-core` 里引不到 `DEFAULT_LISTEN_SECONDS`
+/// （那边注释与这边互相点名，见两处文档）。今后任一方改了数字，这条会红。
+#[test]
+fn scrape_interval_covers_a_whole_listen() {
+    assert!(
+        mcloud_core::kouling::SCRAPE_MIN_INTERVAL_MS >= DEFAULT_LISTEN_SECONDS as i64 * 1000,
+        "抓取去重窗口（{} ms）短于一次抓取要听的时长（{} 秒）⇒ 多账号会重叠抓取",
+        mcloud_core::kouling::SCRAPE_MIN_INTERVAL_MS,
+        DEFAULT_LISTEN_SECONDS,
     );
 }

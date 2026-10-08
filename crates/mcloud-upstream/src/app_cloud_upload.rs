@@ -10,6 +10,39 @@
 //! 旧实现是 `packages/core/src/apis/file.ts`（四口）+ `utils/file.ts`（编排），
 //! 调用点在 `runners.ts:43/95/115/318` 与 `after.ts:135`（清理）。
 //!
+//! # ⭐ 2026-10-07：相册自动备份那一支是**六枪**，本文件现在管五枪
+//!
+//! 真机抓包（`../mcloud-capture/docs/capture/app-album-backup-samples.txt`，
+//! iOS App 12.6.0，通路 A ＋ mihomo TUN 按进程接管）把这一族补成：
+//!
+//! ```text
+//! ① POST {PERSONAL_KD}/hcy/file/create            ← 本文件
+//! ② PUT  <uploadUrl>（`ot=personal`，op 2/200）   ← 本文件
+//! ③ POST {PERSONAL_KD}/hcy/file/complete          ← 本文件
+//! ④ POST {PERSONAL_KD}/hcy/backup/createSnapshot  ← 本文件（历史样本里从没出现过）
+//! ⑤ PUT  <uploadUrl>（`ot=system`，op 0/0）       ← 本文件
+//! ⑥ POST {PERSONAL_KD}/hcy/backup/completeSnapshot← 本文件
+//! ```
+//!
+//! 它与**同端手动上传**（`../mcloud-capture/docs/capture/app-upload-samples.txt` §3/§5/§7）
+//! **共用同一组端点**，差别全在**档位**上（三处，抓包 §3 那张表）：
+//!
+//! | 格子 | 手动支 | 备份支（相册） |
+//! |---|---|---|
+//! | 定位目录 | `parentFileId`（str33） | **`parentPath`**（str5）—— **有它就没有 `parentFileId`** |
+//! | 查重策略 | `force_rename` | **`refuse_duplicate_content`** |
+//! | 照片那一发 `PUT` | `1 / 100` | **`2 / 200`**；快照那一发 `PUT` 是 **`0 / 0`** |
+//!
+//! ⚠ **同一台主机、同一个 `/hcy/` 前缀，真机上是三套头（20 / 25 / 12）**，
+//! 差集逐枚见抓包 §7：`file/create`·`complete` 走 **20**（多 `cache-control` 与
+//! 那两枚 op 头），`backup/*` 走 **25**（多 `pragma` / `service_identifier_key` /
+//! `x-DeviceInfo` / `x-DeviceName` / `x-huawei-channelSrc` / `x-SvcType` / `x-UserAgent` /
+//! `x-yun-user-timestamp` 这 8 枚、**不带** op 那两枚），两发 EOS `PUT` 走 **12**
+//! （零 mcloud 凭据）。三套的装配**都在本文件**，一律走 `set_cloud_header`（覆盖式）。
+//!
+//! ⚠ 分套**不是按业务链路分的**（同一条备份链里 20 与 25 并存）——
+//! **按什么分，抓包 §7 明写"仍无读数"**，不许写成「SDK 层 vs 界面层」。
+//!
 //! # ⚠ 第四枪不在这里
 //!
 //! `hcy/recyclebin/batchTrash` 已经在 [`crate::cloud_trash`] 落过（带它自己的测试），
@@ -74,8 +107,11 @@ use serde_json::Value;
 
 use mcloud_core::{Error, HttpRequest, HttpResponse, Result};
 
+use crate::app_login::{APP_DEVICE_NAME_B64, APP_X_USER_AGENT, APP_X_YUN_USER_AGENT};
 use crate::cloud_trash::{CLOUD_CHANNEL_WEB, CLOUD_CLIENT_INFO_WEB, CLOUD_CONTENT_TYPE, CODE_OK};
-use crate::endpoints::{AUTH_DOMAINS, PERSONAL_KD};
+use crate::endpoints::{
+    AUTH_DOMAINS, BACKUP_COMPLETE_SNAPSHOT, BACKUP_CREATE_SNAPSHOT, PERSONAL_KD,
+};
 
 // ══════════════════════════════ 渠道与操作类型 ══════════════════════════════
 
@@ -119,7 +155,7 @@ pub const CLOUD_CHANNEL_ANDROID: &str = "10000023";
 /// PC 档的渠道号（旧实现 `huaweiChannelSrc`）。
 pub const CLOUD_CHANNEL_PC: &str = "10200153";
 
-/// 操作类型。旧 TS 只有两档（`"backup" | "upload"`）。
+/// 操作类型。旧 TS 只有两档（`"backup" | "upload"`），2026-10-07 的真机抓包补上第三档。
 ///
 /// ⚠ 它**只对 android 档有效果**：另两档不看这个参数（`apis/file.ts:17-40` 的两个分支里
 /// `opType` 只被 android 分支读）。所以「backup 在 web 档会怎样」这一格的答案是
@@ -127,10 +163,25 @@ pub const CLOUD_CHANNEL_PC: &str = "10200153";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CloudOpType {
     /// 普通上传：`x-yun-op-type: 1`、`x-yun-sub-op-type: 100`。
+    ///
+    /// ⚠ 这也是**手动上传**那一支的读数（抓包 `app-upload-samples.txt` §5）——
+    /// 旧 TS 的默认档，不是"随便挑的零值"。
     #[default]
     Upload,
-    /// 备份上传：`op-type: 2`、`sub-op-type: 200`。旧 TS `task-expansion.ts:12` 用这一档。
+    /// 备份上传（照片那一支）：`op-type: 2`、`sub-op-type: 200`。
+    /// 旧 TS `task-expansion.ts:12` 用这一档；抓包 `app-album-backup-samples.txt` §2 逐字确认。
     Backup,
+    /// 备份**快照**那一支（`backup/createSnapshot` 之后那发 `ot=system` 的 `PUT`）：
+    /// `op-type: 0`、`sub-op-type: 0`。
+    ///
+    /// ⭐ 第三档是 2026-10-07 抓包**新读到的**（`app-album-backup-samples.txt` §4/§6）：
+    /// 同一端三档并存（手动 `1/100`、照片备份 `2/200`、快照 `0/0`）。
+    /// 它在 `android_op_codes` 里天然折出 `0` 与 `0*100 = 0`。
+    ///
+    /// ⚠ 两个 `backup/*` **控制口**（`createSnapshot` / `completeSnapshot`）**不带**这两枚头
+    /// —— 抓包 §6/§7 明写。所以「这一档」只在快照那发 `PUT` 上用，见
+    /// `snapshot_op_headers` 那段说明。
+    Snapshot,
 }
 
 /// 把 [`CloudOpType`] 折成 android 档那两个码（`opCode` 与 `opCode * 100`）。
@@ -138,12 +189,51 @@ pub enum CloudOpType {
 /// 单独一个函数是为了让「其它值 ⇒ upload」这一格可断言：参考实现那边
 /// `CloudOpType` 是字符串类型、空串就是 upload，而本层是枚举 ⇒ 默认值由
 /// `#[derive(Default)]` 表达（`CloudOpType::Upload`）。
+///
+/// ⚠ [`CloudOpType::Snapshot`] 折出来是 **`(0, 0)`** —— 这是**真机读数**
+/// （抓包 §4：快照那发 `PUT` 是 `x-yun-op-type: 0` / `x-yun-sub-op-type: 0`），
+/// 不是"没填所以是 0"。别把它当成"零值兜底"顺手改成 `1/100`：
+/// 上游收到的就是两个 0。
 fn android_op_codes(op: CloudOpType) -> (i64, i64) {
     let op_code: i64 = match op {
         CloudOpType::Backup => 2,
         CloudOpType::Upload => 1,
+        CloudOpType::Snapshot => 0,
     };
     (op_code, op_code * 100)
+}
+
+/// 重名/查重档。**手动支与备份支不是同一个值**（2026-10-07 真机抓包，逐字）。
+///
+/// 出处：`app-album-backup-samples.txt` §3 那张两支对照表 ——
+/// 手动支 `force_rename`（str12），备份支 `refuse_duplicate_content`（str24）。
+///
+/// ⚠ 它与本模块旧 TS 那个 `auto_rename`（[`CLOUD_RENAME_MODE_AUTO`]）**都不是一回事**：
+/// 移动端实拍两支里**没有** `auto_rename`，那个值是旧 TS `apis/file.ts:65` 的写法
+/// （PC 抓包也是 `force_rename`）。见 [`CLOUD_RENAME_MODE_AUTO`] 那条说明。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CloudRenameMode {
+    /// `force_rename`：撞同名就改名，**照样传**。手动上传那一支用它。
+    ///
+    /// 零值取它而不是 [`Self::RefuseDuplicateContent`] 是**故意的**：
+    /// 「拒绝重复内容」是一条会**主动失败**的策略（上游按内容哈希判重，撞上就不建），
+    /// 谁忘了显式声明而静默落到它上面，表现是"任务莫名失败"，而不是"多传了一个文件"。
+    /// 两害相权，零值放在**不会主动拒绝**的那一侧。
+    #[default]
+    ForceRename,
+    /// `refuse_duplicate_content`：**按内容哈希拒绝重复**。相册自动备份那一支用它
+    /// （同一张照片重传时不产生第二个对象）。
+    RefuseDuplicateContent,
+}
+
+impl CloudRenameMode {
+    /// 这一档在请求体 `fileRenameMode` 里的字面量。
+    pub fn value(self) -> &'static str {
+        match self {
+            CloudRenameMode::ForceRename => CLOUD_RENAME_MODE_FORCE,
+            CloudRenameMode::RefuseDuplicateContent => CLOUD_RENAME_MODE_REFUSE_DUPLICATE_CONTENT,
+        }
+    }
 }
 
 // ══════════════════════════════ 请求体里的固定字面量 ══════════════════════════════
@@ -162,7 +252,22 @@ pub const CLOUD_FILE_TYPE_FOLDER: &str = "folder";
 
 /// **上传**那一型的重名策略（`apis/file.ts:65`）。实拍两条是 `"refuse"`（建目录用 refuse）
 /// ⇒ 两档各有出处，不是猜的。
+///
+/// ⚠⚠ **移动端真机抓包里没有这个值**（`app-upload-samples.txt` §3 手动支是
+/// `force_rename`、`app-album-backup-samples.txt` §3 备份支是 `refuse_duplicate_content`）
+/// ⇒ 它是**旧 TS 的写法**，本层文件型已经不用它（改用 [`CloudRenameMode`]）。
+/// 常量**刻意留着**：它是「本层与旧 TS 在这一格上不一致」的证据本身，
+/// 删掉之后下一个人只会看到 `force_rename`，不知道曾经写的是 `auto_rename`。
 pub const CLOUD_RENAME_MODE_AUTO: &str = "auto_rename";
+
+/// 手动上传那一支的查重档：`force_rename`（抓包 `app-upload-samples.txt` §3，str12）。
+///
+/// ⚠ 与 [`CLOUD_RENAME_MODE_AUTO`] **不是同一个值** —— 上游收到过的是这一枚。
+pub const CLOUD_RENAME_MODE_FORCE: &str = "force_rename";
+
+/// 相册自动备份那一支的查重档：`refuse_duplicate_content`（抓包
+/// `app-album-backup-samples.txt` §3，str24）——「按内容哈希拒绝重复」。
+pub const CLOUD_RENAME_MODE_REFUSE_DUPLICATE_CONTENT: &str = "refuse_duplicate_content";
 
 /// **建目录**那一型的重名策略：同名目录已存在时上游不另起一个，而是在响应里给
 /// `data.exist:true` + **已有那枚** `fileId`。
@@ -189,11 +294,61 @@ pub const CLOUD_CREATE_CONTENT_TYPE: &str = "application/oct-stream";
 /// `PUT` 那一枪**真实的** `content-type` 头（`apis/file.ts:101`）。
 pub const CLOUD_PUT_CONTENT_TYPE: &str = "application/octet-stream";
 
+/// **备份支** `create` 体里那个 `contentType` 键的值：`application/octet-stream`（拼写正常）。
+///
+/// # ⚠ 两支两个读数（这是本文件里最容易"顺手统一"掉的一格）
+///
+/// - **手动支**（`parent_path: None`）走 [`CLOUD_CREATE_CONTENT_TYPE`]
+///   = `application/oct-stream`（**少一个 `e`**，旧 TS `apis/file.ts:68` 的字面量）；
+/// - **备份支**（`parent_path: Some`）走这一枚 = `application/octet-stream`
+///   —— 2026-10-07 真机抓包里 App 发的就是**正确拼写**（`app-album-backup-samples.txt` §3）。
+///
+/// 两支**两个读数**，所以是两个常量、两条分支，不许合并成一个：
+/// 合并就等于替上游"修"一次拼写，而那一枪今天还在用旧值跑。
+///
+/// ⚠ 它与 [`CLOUD_PUT_CONTENT_TYPE`] **字符串恰好相同、却是两个东西**：
+/// 一个是**请求体里 `contentType` 键的值**，一个是**真实 HTTP 头**。
+/// 别拿这一枚去替 [`CLOUD_CREATE_CONTENT_TYPE`]，也别把三处合成一个常量
+/// —— 两两的出处都不同（旧 TS / 抓包 / 旧 TS 的头）。
+pub const CLOUD_CREATE_CONTENT_TYPE_OCTET: &str = "application/octet-stream";
+
 /// `PUT` 那一枪的 `origin`（旧 TS `apis/file.ts:99`）。
+///
+/// ⚠⚠ **本版不再发这一枚**：2026-10-07 的两发 EOS `PUT`（照片 + 快照）逐枚数下来是
+/// **12 枚、没有 `origin` / `referer`**（`app-album-backup-samples.txt` §4）。
+/// 常量留着是记录「旧 TS 加过这两枚 CORS 头」这一处**已知分歧**，
+/// 不是"待补回去"。要恢复旧行为，得先有一次"带上它们更对"的读数。
 pub const CLOUD_PUT_ORIGIN: &str = "https://yun.139.com";
 
 /// `PUT` 那一枪的 `referer`（旧 TS `apis/file.ts:100`，**带结尾斜杠**）。
+/// 本版**不发**，理由见 [`CLOUD_PUT_ORIGIN`]。
 pub const CLOUD_PUT_REFERER: &str = "https://yun.139.com/";
+
+/// 数据面那一枪的 `upload-complete`（移动端独有，抓包 §4/§5）。
+///
+/// ⚠ `?1` 里那个问号**是值的一部分**（形状像 HTTP Uploadable 草案那一族）。
+/// 服务端读不读它**没有读数**（抓包 §5 明写"这一轮只登记它出现了"）⇒ 照抄。
+pub const CLOUD_PUT_UPLOAD_COMPLETE: &str = "?1";
+
+/// 数据面那一枪的 `upload-draft-interop-version`（移动端独有，抓包 §4/§5）。
+/// 读不读同样**无读数** ⇒ 照抄。
+pub const CLOUD_PUT_UPLOAD_DRAFT_INTEROP_VERSION: &str = "6";
+
+/// `Accept-Language` —— 25 套与 12 套都有这一枚。
+///
+/// 值取自**同主机同族**的 `client-profiles-ios-app.md` §3.3.3（`Accept-Language: zh-CN`）。
+/// ⚠ 相册备份那一篇抓包**只给了头名、没给值**（§7 那张差集表）⇒ 这里不是"抓包读数"，
+/// 是"同一台主机、同一个客户端在另一份通路 B 读数里的值"。
+pub const CLOUD_ACCEPT_LANGUAGE: &str = "zh-CN";
+
+/// 25 套里的 `service_identifier_key` —— `service_identifier_cloudDisk`。
+///
+/// 出处：`client-profiles-ios-app.md` §3.3.3（`personal-kd-njs.yun.139.com` 这一族的
+/// 读数；同一份文档 §3.3.1 写明这一枚**与主机一一对应**，不是端常量）。
+/// ⚠ 相册备份那一篇抓包**没给值**（只给了头名）⇒ 这是按主机查表查出来的那一枚。
+/// ⚠ 别拿 `app_login::APP_SERVICE_IDENTIFIER`（`service_identifier_userDomain`）来替：
+/// 那是**登录主机** `user-njs` 的值，发错的表现是路由到别的服务。
+pub const CLOUD_SERVICE_IDENTIFIER_CLOUD_DISK: &str = "service_identifier_cloudDisk";
 
 /// 两型的 `create` 都在这一台上。
 const FILE_CREATE_PATH: &str = "/hcy/file/create";
@@ -331,12 +486,28 @@ pub fn sends_authorization_to(raw_url: &str) -> bool {
 /// 刻意做成一个参数结构体而不是六个位置参数：这一枪有**六个可选格**，
 /// 六个 `String`/`i64` 连排会让「传错顺序」变成一个能编译通过的 bug。
 /// ⚠ 参考实现的 `Channel` / `Op` 零值是**空串**（等于「按默认」）；本层是枚举，
-/// 零值由 `#[derive(Default)]` 表达（[`CloudChannel::Android`] / [`CloudOpType::Upload`]）。
+/// 零值由 `#[derive(Default)]` 表达（[`CloudChannel::Android`] / [`CloudOpType::Upload`] /
+/// [`CloudRenameMode::ForceRename`]）。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CloudFileCreateInput {
     /// 目标目录 id；空 ⇒ 按旧实现补 `"/"`（根目录）。
     /// 旧 TS `apis/file.ts:57`：`parentFileId: parentFileId || "/"`。
+    ///
+    /// ⚠ **只在 [`Self::parent_path`] 是 `None` 时发**（见那一格的说明）。
     pub parent_file_id: String,
+    /// 目标目录**路径**。`Some` ⇒ 走**备份支**：只发 `parentPath`、**不发** `parentFileId`。
+    ///
+    /// ⭐ 这是两支唯一的"怎么定位目录"读数（抓包 `app-album-backup-samples.txt` §3）：
+    /// 手动支 `parentFileId`（str33）、备份支 `parentPath`（str5），**有它就没有另一枚**。
+    /// 上游按路径定位（同名目录存在就落进去），不需要先 `file/list` 查 id ——
+    /// 那是这一支省掉的一步。
+    ///
+    /// ⚠ 抓包**只给了长度（5）与"它在"**，值没打（是真实目录名）⇒ 本层原样转发，
+    /// 不解析、不改写、也不判它是不是绝对路径。
+    ///
+    /// ⚠ 这一支的 `contentType` 也随之换档（[`CLOUD_CREATE_CONTENT_TYPE_OCTET`]），
+    /// 两支两个读数。
+    pub parent_path: Option<String>,
     /// 文件名。旧 TS 的默认值是 `asign-<8 hex><ext||.png>`，那是**编排层**的事
     /// （见 `utils/file.ts:30`），不在这一层。
     pub name: String,
@@ -345,8 +516,31 @@ pub struct CloudFileCreateInput {
     pub size: i64,
     /// 内容的 SHA256 十六进制（小写）。旧实现用 `sha256(file)`，且**同一个串**在
     /// `complete` 那一枪再发一次 ⇒ 两枪必须一致，见 [`file_complete_request`]。
+    ///
+    /// ⚠ 快照那一支也用它（`backup/createSnapshot` 的 `contentHash` 是**快照 zip** 的哈希，
+    /// 不是照片的），见 [`CloudSnapshotCreateInput`]。
     pub content_hash: String,
+    /// 重名/查重档；零值 = [`CloudRenameMode::ForceRename`]（见那一档的说明）。
+    pub rename_mode: CloudRenameMode,
+    /// 是否并行上传（体里那一枚 `parallelUpload`，**布尔**，不是字符串）。
+    ///
+    /// ⚠ 移动端实拍**两支都是 `true`**（抓包 `app-upload-samples.txt` §3 与
+    /// `app-album-backup-samples.txt` §3 同值），而旧 TS 写的是 `false`。
+    /// 本层**不替调用方定**（契约把这一格交出来了）：两支各按自己的读数传。
+    pub parallel_upload: bool,
+    /// 本地创建时刻（ISO 形状，抓包 `app-upload-samples.txt` §3：str24，
+    /// 形如 `<日期>T<时刻>.999Z`）。`Some` 才发这一键。
+    ///
+    /// ⚠ 它**不在**旧 TS 的十键里 —— 是移动端两支**都有**、PC 没有的一枚。
+    /// 本层**没有时钟**（上游层不碰时间源）⇒ 由调用方给；
+    /// 「这一枚上游读不读」**无读数**（抓包只记了形状与长度）。
+    pub local_created_at: Option<String>,
     /// 渠道档；零值 = [`CloudChannel::Android`]（旧 TS 的默认参数）。
+    ///
+    /// ⚠ 真机 iOS App 的渠道是 `10000020`（`app_login::APP_CHANNEL`，抓包 §7 那套 25 头里
+    /// `x-yun-app-channel` / `x-huawei-channelSrc` 都是它），而 [`CloudChannel::Android`]
+    /// 是旧 TS 的 `10000023` —— **两处口径不一致，且这一档今天表达不出来**。
+    /// 本层照参数走（旧 TS 那三档在真机上跑通过），要复现真机得先给 `CloudChannel` 加一档。
     pub channel: CloudChannel,
     /// 操作类型；零值 = [`CloudOpType::Upload`]。
     pub op: CloudOpType,
@@ -367,16 +561,46 @@ fn file_create_url() -> String {
 
 /// 构造 `POST /hcy/file/create`（**写**：建一个待上传的文件位）。
 ///
-/// body **十键**逐字来自旧 TS `apis/file.ts:56-70`。三件要说清的：
+/// # 两支、两种键集（2026-10-07 真机抓包，`app-album-backup-samples.txt` §3）
 ///
-/// - **单分片**：`partInfos` 只有一项、`parallelUpload:false`。旧实现也是这样，所以
-///   「大于某个尺寸要不要分片」这一格**两版都没答案**（未测试）。本仓的调用方只传
-///   几十字节的合成内容，落在这一档里。
-/// - **键序**与旧 TS 不同：`serde_json` 的默认 `Map` 按字典序排（Go 的
-///   `map[string]any` 同样按字典序 marshal）。实拍那条 `file/create` 的请求体
-///   **恰好也是字典序**（`{"fileRenameMode":"refuse","name":…,"parentFileId":…,"type":"folder"}`），
-///   所以「上游是否依赖声明序」从样本里**读不出来** ⇒ 不加「必须按声明序」的断言，
-///   也不认为无所谓（测试钉的是键集合，不是顺序）。
+/// 这一口被**同一端的两种调用方**共用，而两支援的是**不同的键**：
+///
+/// | 格子 | 手动支（[`CloudFileCreateInput::parent_path`] = `None`） | 备份支（`Some`） |
+/// |---|---|---|
+/// | 定位目录 | `parentFileId`（空 ⇒ `"/"`） | **`parentPath`**，**不发** `parentFileId` |
+/// | 查重 | `fileRenameMode` = 调用方给的档 | 同左（备份支传 `refuse_duplicate_content`） |
+/// | `contentType` | [`CLOUD_CREATE_CONTENT_TYPE`]（少一个 `e`，旧 TS） | [`CLOUD_CREATE_CONTENT_TYPE_OCTET`]（抓包的正确拼写） |
+/// | `localCreatedAt` | `Some` 才发 | 同左 |
+/// | `parallelUpload` | 调用方给 | 调用方给（抓包两支都是 `true`） |
+///
+/// ⇒ 键集是**运行时**由 `parent_path` 与 `local_created_at` 决定的：
+/// 手动支 10 键（+ `localCreatedAt`）、备份支 11 键（+ `localCreatedAt`）。
+/// ⚠ 抓包里两支都是 **12 键**，差的第 12 枚是 `userRegion` —— 本仓**没有省/市的来源**
+/// ⇒ 这一版**不发**（见下面那一段），这是本文件与抓包**已知的一处缺口**。
+///
+/// # ⚠ 本版**不发** `userRegion`
+///
+/// 抓包两支都带 `userRegion: {provinceCode str2, cityCode str3}`
+/// （`app-album-backup-samples.txt` §3）。本仓**没有任何省/市来源**
+/// （账号落盘里没有这一列，也没有"从 IP 反查"那种能力）⇒ 按纪律**不发这一键**，
+/// 也**不编**一个 `""`/`"00"` 去占位：编出来的值会让上游按错的归属地建档，
+/// 而那是**不可回滚**的。要补这一格得先有一个真实来源（抓包 `app-upload-samples.txt`
+/// §8 也没写它从哪来）。
+///
+/// # 单分片
+///
+/// `partInfos` 只有一项、`parallelHashCtx.partOffset` = 0。抓包两支**移动端都带**
+/// `parallelHashCtx{partOffset}`（单片也一样），PC 那发只有 `{partNumber, partSize}`
+/// ⇒ 本层按移动端发。`h` 那一格在移动端请求侧**无读数**（`app-upload-samples.txt` §3 明写），
+/// 所以不发。
+///
+/// # 键序
+///
+/// 与旧 TS 不同：`serde_json` 的默认 `Map` 按字典序排（Go 的 `map[string]any` 同样按
+/// 字典序 marshal）。实拍那条 `file/create` 的请求体**恰好也是字典序**
+/// （`{"fileRenameMode":"refuse","name":…,"parentFileId":…,"type":"folder"}`），
+/// 所以「上游是否依赖声明序」从样本里**读不出来** ⇒ 不加「必须按声明序」的断言，
+/// 也不认为无所谓（测试钉的是键集合，不是顺序）。
 /// - `exist` / `rapidUpload` 两格的语义见 [`CloudFileCreated`]。
 ///
 /// # 缺 `name` / `contentHash` ⇒ 回错误，**不发**
@@ -387,6 +611,9 @@ fn file_create_url() -> String {
 /// 旧 TS 没有这一道闸（它总是先 sha256、先起名），所以这两格在实拍里从不为空；
 /// 在这里挡住是因为**返回错误比发一个空名请求更便宜**：后者会在用户网盘里留下一个
 /// 没有名字的文件位，而清理那一族靠 `fileId` 认它。
+///
+/// `parent_path: Some("")` 同样拒发：空路径既不是"根"（根要的是 `parentFileId` 那条退路），
+/// 也不是一个能定位的目录 —— 发出去的表现是"上游按空路径建了一个我们不知道在哪的文件"。
 pub fn file_create_request(input: CloudFileCreateInput) -> Result<HttpRequest> {
     if input.name.is_empty() {
         return Err(Error::Config(
@@ -400,30 +627,68 @@ pub fn file_create_request(input: CloudFileCreateInput) -> Result<HttpRequest> {
     }
     let CloudFileCreateInput {
         parent_file_id,
+        parent_path,
         name,
         size,
         content_hash,
+        rename_mode,
+        parallel_upload,
+        local_created_at,
         channel,
         op,
     } = input;
-    let body = serde_json::json!({
-        "parentFileId": parent_file_id_or_root(&parent_file_id),
-        "name": name,
-        "type": CLOUD_FILE_TYPE_FILE,
-        "size": size,
-        "fileRenameMode": CLOUD_RENAME_MODE_AUTO,
-        "contentHash": content_hash,
-        "contentHashAlgorithm": CLOUD_HASH_ALGORITHM,
-        "contentType": CLOUD_CREATE_CONTENT_TYPE,
-        "parallelUpload": false,
-        "partInfos": [{
+
+    // 定位目录：**两支二选一**（抓包 §3）。`parentPath` 那一支连 `contentType` 一起换档
+    // —— 两个读数各写各的，见 `CLOUD_CREATE_CONTENT_TYPE_OCTET`。
+    let (locate_key, locate_value, content_type) = match parent_path {
+        Some(path) => {
+            if path.is_empty() {
+                return Err(Error::Config(
+                    "file/create 的 parentPath 是空串：空路径既不是根（根走 parentFileId 那条退路），也不是一个能定位的目录 —— 发出去只会在用户网盘里留一个我们不知道落在哪的文件位".into(),
+                ));
+            }
+            ("parentPath", path, CLOUD_CREATE_CONTENT_TYPE_OCTET)
+        }
+        None => (
+            "parentFileId",
+            parent_file_id_or_root(&parent_file_id).to_string(),
+            CLOUD_CREATE_CONTENT_TYPE,
+        ),
+    };
+
+    // ⚠ 用 `Map` 逐枚插、而不是一个大 `json!`：`parentPath` / `parentFileId` 与
+    // `localCreatedAt` 三格是**条件存在**的（"缺席"与"空串"在这一口不是一回事），
+    // 写成 `json!` 再 `remove` 会让"哪些键会缺席"变成读代码才看得见的事。
+    let mut body = serde_json::Map::new();
+    body.insert("name".into(), Value::String(name));
+    body.insert("type".into(), Value::String(CLOUD_FILE_TYPE_FILE.into()));
+    body.insert("size".into(), Value::from(size));
+    body.insert(
+        "fileRenameMode".into(),
+        Value::String(rename_mode.value().into()),
+    );
+    body.insert("contentHash".into(), Value::String(content_hash));
+    body.insert(
+        "contentHashAlgorithm".into(),
+        Value::String(CLOUD_HASH_ALGORITHM.into()),
+    );
+    body.insert("contentType".into(), Value::String(content_type.into()));
+    body.insert("parallelUpload".into(), Value::Bool(parallel_upload));
+    body.insert(locate_key.into(), Value::String(locate_value));
+    if let Some(created_at) = local_created_at {
+        body.insert("localCreatedAt".into(), Value::String(created_at));
+    }
+    body.insert(
+        "partInfos".into(),
+        serde_json::json!([{
             "parallelHashCtx": { "partOffset": 0 },
             "partNumber": 1,
             "partSize": size,
-        }],
-    });
+        }]),
+    );
+
     Ok(cloud_file_op_headers(
-        HttpRequest::post(file_create_url()).json_body(&body),
+        HttpRequest::post(file_create_url()).json_body(&Value::Object(body)),
         channel,
         op,
     ))
@@ -437,7 +702,8 @@ pub fn file_create_request(input: CloudFileCreateInput) -> Result<HttpRequest> {
 ///
 /// 两型的**请求体不是同一份**：实拍那两条（`../mcloud/test/fixtures/http/3d.json`）只有四枚键
 /// —— `{"fileRenameMode":"refuse","name":…,"parentFileId":…,"type":"folder"}`，
-/// 而文件型带 `size` / `contentHash` / `partInfos` 等六枚，且重名策略是 `auto_rename`。
+/// 而文件型带 `size` / `contentHash` / `partInfos` 等六枚，重名策略也与目录型不同
+/// （目录型 `refuse`，文件型看 [`CloudRenameMode`]）。
 /// 做成「一个 builder + 类型开关」会让「这一型该发哪几枚键」变成运行时才知道的事，
 /// 而那是这一口最容易出错的一格。
 ///
@@ -474,13 +740,44 @@ pub fn folder_create_request(
 
 // ══════════════════════════════ 第二枪：PUT <uploadUrl>（预签名直传） ══════════════════════════════
 
-/// 构造那一发 `PUT`（**原始字节**，不是 JSON）。
+/// 构造那一发 `PUT`（**原始字节**，不是 JSON）。`op` 决定那两枚档位头的**值**。
 ///
-/// # 为什么这一枪不带 hcy 那套文件操作头
+/// # 头：抓包的 **12 套**里，本层只装配**有读数的**那几枚
 ///
-/// 旧 TS 的 `putFile` **只发**三枚头（`content-type` / `origin` / `referer`，
-/// `apis/file.ts:98-104`）加主实例的静态头 —— 它**不套** `getFileOpHeader`。
-/// 所以这里没有 `x-yun-*`，也**不该**有：顺手「统一」会把这一枪的画像改成另一套。
+/// 2026-10-07 真机抓包（`app-album-backup-samples.txt` §4）把两发 EOS `PUT`（照片 + 快照）
+/// 逐枚数成 **12 枚**：
+///
+/// ```text
+/// accept、accept-encoding、accept-language、connection、content-length、
+/// content-type、host、upload-complete: ?1、upload-draft-interop-version: 6、
+/// user-agent、x-yun-op-type、x-yun-sub-op-type
+/// ```
+///
+/// 逐枚去向（**这是"12 套"在本层为什么只落 6 枚的全部理由**）：
+///
+/// | 枚 | 谁发 |
+/// |---|---|
+/// | `content-type` | **本层**（[`CLOUD_PUT_CONTENT_TYPE`]）|
+/// | `accept-language` | **本层**（[`CLOUD_ACCEPT_LANGUAGE`]；⚠ 这一发的值抓包**没给**，见该常量）|
+/// | `upload-complete` | **本层**（[`CLOUD_PUT_UPLOAD_COMPLETE`]）|
+/// | `upload-draft-interop-version` | **本层**（[`CLOUD_PUT_UPLOAD_DRAFT_INTEROP_VERSION`]）|
+/// | `x-yun-op-type` / `x-yun-sub-op-type` | **本层**（由 `op` 折出，见 `android_op_codes`）|
+/// | `host` / `content-length` | 传输层（reqwest 按 URL 与体长自己发）|
+/// | `accept-encoding` / `connection` | 传输层（reqwest 的默认行为；本层不声明）|
+/// | `accept` | **本层不发**：抓包只给了头名，**值无读数** —— 编一个 `*/*` 属于推断 |
+/// | `user-agent` | 发送层（[`crate::ClientProfile::effective_user_agent`]）—— 在这儿设会是**第二根同名头** |
+///
+/// # ⚠ 本版**不发** `origin` / `referer`（与旧 TS 的一处已知分歧）
+///
+/// 旧 TS 的 `putFile` 发 `content-type` / `origin` / `referer` 三枚
+/// （`apis/file.ts:98-104`）。而真机那 12 枚里**没有** `origin` / `referer`
+/// ⇒ 本版按抓包**不发**。两枚常量（[`CLOUD_PUT_ORIGIN`] / [`CLOUD_PUT_REFERER`]）留着，
+/// 是为了把这条分歧留在代码里，而不是让下一个人以为"从来就没有过"。
+///
+/// ⚠ 这一处与 `AGENTS.md` 那条「`mcloud-sign` 优先于抓包」**表面上冲突**：
+/// 判据是**同一条链上真机自己在跑什么** —— 照片那一发真机不带这两枚也回 200
+/// （抓包 §4），而旧 TS 那两枚是 CORS 头，对一个非浏览器客户端没有语义。
+/// 若哪天这一枪开始 403，**第一处要怀疑的就是这里**（把两枚加回来再试一次即可）。
 ///
 /// # 为什么不带幂等键、也不重试
 ///
@@ -494,15 +791,40 @@ pub fn folder_create_request(
 /// `authorization` 是否带上由**发送层按主机**决定（[`sends_authorization_to`] 那条规则，
 /// 上线的是 [`crate::endpoints::accepts_basic`]）；`deviceid` 由 profile 注入。
 /// 在这里设一枚会在命中时变成两根同名头 —— 见 [`cloud_file_op_headers`] 那段。
+/// 抓包 §7 也印证了这一支「**零 mcloud 凭据**」（授权整套在查询串上）。
 ///
 /// ⚠ `content` 为空（0 字节）也是**带体**：`Some(vec![])` 与 `None` 语义不同
 /// （前者发出 `content-length: 0`），判据只看 [`HttpRequest::has_body`]。
+pub fn upload_put_request_with_op(
+    upload_url: &str,
+    content: &[u8],
+    op: CloudOpType,
+) -> HttpRequest {
+    let (op_code, sub_op_code) = android_op_codes(op);
+    let req = HttpRequest::put(upload_url).bytes_body(content);
+    // 覆盖式（`set_cloud_header`）而不是追加：这一族的三套头全靠"多哪几枚、少哪几枚"，
+    // 追加语义会让"改一个值"静默变成"多一根线"（见 `set_cloud_header` 的说明）。
+    let req = set_cloud_header(req, "content-type", CLOUD_PUT_CONTENT_TYPE);
+    let req = set_cloud_header(req, "accept-language", CLOUD_ACCEPT_LANGUAGE);
+    let req = set_cloud_header(req, "upload-complete", CLOUD_PUT_UPLOAD_COMPLETE);
+    let req = set_cloud_header(
+        req,
+        "upload-draft-interop-version",
+        CLOUD_PUT_UPLOAD_DRAFT_INTEROP_VERSION,
+    );
+    let req = set_cloud_header(req, "x-yun-op-type", &op_code.to_string());
+    set_cloud_header(req, "x-yun-sub-op-type", &sub_op_code.to_string())
+}
+
+/// 手动上传那一支的 `PUT`（旧签名，**其它调用方在用**）。
+///
+/// 转调 [`upload_put_request_with_op`] 并传 [`CloudOpType::Upload`]（`1 / 100`）——
+/// 那就是手动支的读数（抓包 `app-upload-samples.txt` §5）。
+///
+/// ⚠ **备份支不能再用这个函数**：照片那一发要 `2 / 200`、快照那一发要 `0 / 0`，
+/// 而这里写死 `Upload`。要按档位发就用带 `op` 的那个。
 pub fn upload_put_request(upload_url: &str, content: &[u8]) -> HttpRequest {
-    HttpRequest::put(upload_url)
-        .bytes_body(content)
-        .header("content-type", CLOUD_PUT_CONTENT_TYPE)
-        .header("origin", CLOUD_PUT_ORIGIN)
-        .header("referer", CLOUD_PUT_REFERER)
+    upload_put_request_with_op(upload_url, content, CloudOpType::Upload)
 }
 
 /// `PUT` 那一枪的结局：**只看状态码**。
@@ -573,6 +895,378 @@ pub fn file_complete_request(
     ))
 }
 
+// ══════════════════════════ 快照那一支：backup/createSnapshot · completeSnapshot ══════════════════════════
+//
+// 2026-10-07 真机抓包（`app-album-backup-samples.txt` §6）—— **这两口在历史样本里从没出现过**，
+// 所以下面每一句都写清"哪一格有读数、哪一格没有"。
+//
+// 它在链上的位置：照片那三枪（create → PUT(personal) → complete）跑完之后，
+// 备份支再补一发**快照**：`createSnapshot` → PUT(system) → `completeSnapshot`。
+// 快照声明的是"这一批备份里有几枚、总共多少字节、内容哈希是多少"，
+// 体是 ZIP（`fileExtension: "zip"`，抓包 §6 由魔数 `PK\x03\x04` 认出）。
+// ⚠ **ZIP 里装的是什么，抓包明写"没解"**（§9）⇒ 本层不猜、不生成、只转发字节。
+
+/// 25 套（`backup/createSnapshot` · `backup/completeSnapshot`）的**静态**头。
+///
+/// # 25 套 = 共有 17 枚 + 那 8 枚；**不带** `cache-control` 与两枚 op 头
+///
+/// 抓包 §7 那张差集表（同一台主机 `personal-kd-njs.yun.139.com`、同一个 `/hcy/` 前缀）：
+///
+/// - `backup/*` **有**而 `file/create` 没有的 8 枚：`pragma`、`service_identifier_key`、
+///   `x-DeviceInfo`、`x-DeviceName`、`x-huawei-channelSrc`、`x-SvcType`、`x-UserAgent`、
+///   `x-yun-user-timestamp`；
+/// - `file/create` **有**而 `backup/*` 没有的 3 枚：`cache-control`、`x-yun-op-type`、
+///   `x-yun-sub-op-type`。
+///
+/// ⇒ **同一端的两个口用的是两套装配**，而分套**不是按业务链路分的**
+/// （同一条备份链里 20 与 25 并存）。**按什么分，抓包 §7 明写"仍无读数"** ——
+/// 不许在这里写成「SDK 层 vs 界面层」。
+///
+/// # ⚠ 8 枚里本层只装配 5 枚，另外 3 枚**本仓没有来源**
+///
+/// | 枚 | 本层 | 依据 |
+/// |---|---|---|
+/// | `pragma` | `no-cache` | `client-profiles-ios-app.md` §3.3.3（同主机同族）|
+/// | `service_identifier_key` | `service_identifier_cloudDisk` | 同上 §3.3.3（**按主机查表**，见 [`CLOUD_SERVICE_IDENTIFIER_CLOUD_DISK`]）|
+/// | `x-SvcType` | `1` | 同上 §3.3.3 |
+/// | `x-huawei-channelSrc` | `channel.value()` | 同上 §3.3.3（与 `x-yun-app-channel` 同值）|
+/// | `x-UserAgent` / `x-yun-user-agent` / `x-DeviceName` | [`crate::app_login`] 那三个常量 | 本仓已有的 App 设备画像 |
+/// | `x-DeviceInfo` | ❌ **不发** | 它的值要一个**设备 id**（`app_login::app_device_info` 的入参），而 [`CloudSnapshotCreateInput`] 里没有这一格 |
+/// | `x-yun-user-timestamp` | ❌ **不发** | 它是**每请求**的 16 位微秒戳；这一层的入参里只有一个 13 位毫秒的 `timestamp_ms`，**换算关系无读数** |
+///
+/// ⚠ 相册备份那一篇抓包**只给了这 8 枚的头名、没给值**（§7 是差集表）⇒ 上面每一枚的值
+/// 都不是"那一发抓包的读数"，而是"同一台主机、同一个客户端在**另一份**读数里的值"。
+/// 这一条要在成文与汇报里说清楚，别把 `zh-CN` / `service_identifier_cloudDisk`
+/// 说成"抓包里读到的"。
+///
+/// ⚠ `x-yun-client-info`（17 枚共有之一）本层**不发**：真机那一枚是 143 字符的
+/// iPad 设备串（§3.3.3），要设备 id 才拼得出来 —— 与 `x-DeviceInfo` 同一条理由。
+/// 这里**不**退回 `cloud_file_op_headers` 用的那两枚旧 TS 设备串：那是**20 套**的读数，
+/// 搬进 25 套就是把两套装配混起来。
+///
+/// # 渠道那一格：真机是 `10000020`，本层只能表达 `10000023`
+///
+/// 抓包 §7 明写 25 套里有 `x-huawei-channelSrc`，而 §3.3.3 给出这一族的值是
+/// **`10000020`**（`app_login::APP_CHANNEL`）—— 那是 [`CloudChannel`] **表达不出来**的一档
+/// （它只有旧 TS 的 android `10000023` / web `10000034` / PC `10200153`）。
+/// ⇒ 本层照调用方给的档发，并在 [`CloudSnapshotCreateInput::channel`] 上点名这处不一致。
+fn snapshot_op_headers(req: HttpRequest, channel: CloudChannel) -> HttpRequest {
+    let channel_src = channel.value();
+    let req = set_cloud_header(req, "Pragma", "no-cache");
+    let req = set_cloud_header(
+        req,
+        "service_identifier_key",
+        CLOUD_SERVICE_IDENTIFIER_CLOUD_DISK,
+    );
+    // §3.3.3：`hcy/*` 网盘族的 `x-yun-api-version` 是 **v2**（登录链路才是 v1）。
+    let req = set_cloud_header(req, "x-yun-api-version", "v2");
+    let req = set_cloud_header(req, "x-yun-app-channel", channel_src);
+    let req = set_cloud_header(req, "x-huawei-channelSrc", channel_src);
+    let req = set_cloud_header(req, "x-yun-net-type", "1");
+    let req = set_cloud_header(req, "x-yun-svc-type", "1");
+    let req = set_cloud_header(req, "x-SvcType", "1");
+    let req = set_cloud_header(req, "x-UserAgent", APP_X_USER_AGENT);
+    let req = set_cloud_header(req, "x-yun-user-agent", APP_X_YUN_USER_AGENT);
+    let req = set_cloud_header(req, "x-DeviceName", APP_DEVICE_NAME_B64);
+    let req = set_cloud_header(req, "Accept-Language", CLOUD_ACCEPT_LANGUAGE);
+    // ⚠ `Content-Type` 必须**最后**覆盖式地设（与 `cloud_file_op_headers` 同一条理由）：
+    // `json_body` 自己不带头，而发送层会在"调用方没声明"时补一枚默认值 ⇒ 两枚同名线。
+    set_cloud_header(req, "Content-Type", CLOUD_CONTENT_TYPE)
+}
+
+/// 「要建一个什么快照」的调用方输入（抓包 §6 的**请求 7 键**）。
+///
+/// ⚠ 这里**没有** `content`（快照 ZIP 的字节）：建快照那一枪只声明形状，
+/// 真正的字节走 [`upload_put_request_with_op`]（`op` 传 [`CloudOpType::Snapshot`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CloudSnapshotCreateInput {
+    /// `fileExtension`：快照体的扩展名。实拍是 **`zip`**（抓包 §6，
+    /// 与 PUT 真实体的魔数 `PK\x03\x04` 对上）。
+    pub file_extension: String,
+    /// `count`：这一批**几枚**。实拍 `5`，而同一窗口只录到 **1** 发照片 `PUT`
+    /// ⇒ 抓包 §9 明写「另外 4 枚去哪了**无读数**」（可能走了没录到的那一批、
+    /// 也可能走了秒传不发 `PUT`）。**本层只转发这个数，不校验它与发数一致**。
+    pub count: i64,
+    /// `size`：快照体的字节数。实拍 `619`（= PUT 的 `content-length`）。
+    pub size: i64,
+    /// `contentHash`：**快照体**（那个 ZIP）的 SHA256 十六进制。
+    /// ⚠ 与照片那一枪的 `contentHash` **不是同一个值**（一个哈希照片、一个哈希清单）。
+    pub content_hash: String,
+    /// `timestamp`：**13 位毫秒**（抓包 §6 逐字标了 `int(13 位)`）。
+    /// ⚠ 别与 25 套里那枚 `x-yun-user-timestamp`（16 位微秒）混起来 ——
+    /// 同一个客户端里两个时间单位（`app-sms-login-samples.txt` §3 也点过这一格）。
+    /// 本层**没有时钟** ⇒ 由调用方给。
+    pub timestamp_ms: i64,
+    /// 渠道档。⚠ 真机这一族是 `10000020`，而 [`CloudChannel`] 表达不出来
+    /// （见 `snapshot_op_headers` 最后那一段）⇒ 本层照参数发，要复现真机得先加一档。
+    pub channel: CloudChannel,
+}
+
+/// `backup/createSnapshot` 回的那一格 `data`（抓包 §6 的**响应 4 键**）。
+///
+/// # 为什么三格是 `Option`，而解析器却对缺格回 Err
+///
+/// 类型与 [`CloudFileCreated`] 同形（三格 `Option` + 一枚 `bool`），是为了让**读的人**
+/// 一眼看出"协议不保证每一格都在"；而 [`parse_snapshot_create`] 在**缺格时回 Err**
+/// —— 理由见那个函数（缺 `uploadUrl` 就没法 PUT、缺 `fileId`/`uploadId` 就发不出
+/// `completeSnapshot`，三格缺任何一枚这一支都走不下去）。
+/// ⇒ 解析**成功**时三格必然是 `Some`；`Option` 不是"可能没有"的许可证，
+/// 而是"这一层不替上游承诺"。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CloudSnapshotCreated {
+    /// `data.fileId`。实拍是 **str64**（⚠ 照片那一支是 str33）。
+    /// **为什么快照的 id 是 64 位，抓包 §6 明写"无读数"** —— 不许写成"内容寻址"。
+    pub file_id: Option<String>,
+    /// `data.uploadId`（实拍 str33）。
+    pub upload_id: Option<String>,
+    /// `data.partInfos[0].uploadUrl`（实拍 str583）—— 预签名写入入口，
+    /// **绝不进日志 / 错误文本 / 夹具**（见模块头那一段）。
+    pub upload_url: Option<String>,
+    /// `data.rapidUpload`。实拍 `false`。
+    /// ⚠ 秒传那一支（`true` 时有没有 `PUT`、`uploadId` 是否 null）**移动端无读数**
+    /// （抓包 §9）⇒ 本层**不给自己开例外**，见 [`parse_snapshot_create`]。
+    pub rapid_upload: bool,
+}
+
+/// 构造 `POST /hcy/backup/createSnapshot`（**写**：声明这一批备份的形状）。
+///
+/// 体 **7 键**逐字来自抓包 §6：
+///
+/// ```text
+/// fileExtension        str3       # "zip"
+/// count                int        # 5
+/// contentHash          str64
+/// contentHashAlgorithm str6       # "SHA256"
+/// size                 int        # 619
+/// partInfos[]          长度=1     # {partNumber, partSize}
+/// timestamp            int(13 位) # epoch 毫秒
+/// ```
+///
+/// ⭐ 与照片那一支的关键差别：`partInfos[0]` **没有 `parallelHashCtx`**
+/// （抓包 §6 括号里逐字写了"与照片那一支不同"）⇒ 这里**不发**那一格。
+/// 顺手"统一"成一个 `partInfos` 构造函数就会把它加回去，而那是另一发请求的形状。
+///
+/// # 缺 `contentHash` / `count < 1` ⇒ 回错误，**不发**
+///
+/// 与 [`file_create_request`] 同一口径（[`Error::Config`]）：
+/// 快照声明的就是"这一批的内容是什么、有几枚"，这两格缺了它就不是一个快照。
+/// ⚠ `count` 的**语义**（它到底数的是什么）抓包 §9 明写无读数 ——
+/// 这里只挡住 `0`/负数（那是"声明一个空快照"，而空快照这一格**没有任何读数**），
+/// **不**校验它与实际发数一致。
+pub fn snapshot_create_request(input: CloudSnapshotCreateInput) -> Result<HttpRequest> {
+    if input.content_hash.is_empty() {
+        return Err(Error::Config(
+            "backup/createSnapshot 缺 contentHash：快照声明的就是这一批的内容哈希，而 completeSnapshot 那一枪要用同一个串 —— 少了它两枪就对不上".into(),
+        ));
+    }
+    if input.count < 1 {
+        return Err(Error::Config(format!(
+            "backup/createSnapshot 的 count 是 {}（<1）：那是「声明一个空快照」，而这一格没有任何读数 —— 不发",
+            input.count
+        )));
+    }
+    let CloudSnapshotCreateInput {
+        file_extension,
+        count,
+        size,
+        content_hash,
+        timestamp_ms,
+        channel,
+    } = input;
+    let body = serde_json::json!({
+        "fileExtension": file_extension,
+        "count": count,
+        "contentHash": content_hash,
+        "contentHashAlgorithm": CLOUD_HASH_ALGORITHM,
+        "size": size,
+        // ⚠ 单分片、**没有** `parallelHashCtx`（抓包 §6）。
+        "partInfos": [{ "partNumber": 1, "partSize": size }],
+        "timestamp": timestamp_ms,
+    });
+    Ok(snapshot_op_headers(
+        HttpRequest::post(BACKUP_CREATE_SNAPSHOT).json_body(&body),
+        channel,
+    ))
+}
+
+/// 解析 `backup/createSnapshot` 的回执（抓包 §6：923 字节、`data` **4 键**）。
+///
+/// # 与 [`parse_file_create`] 的差别：**这里缺格一律 Err**
+///
+/// `data` 缺席 ⇒ Err（这一族的载荷在 `data`，缺席说明信封形状变了）；
+/// `data` 不是对象 ⇒ Err；`fileId` / `uploadId` / `uploadUrl` 三格**缺任何一枚 ⇒ Err**：
+///
+/// - 缺 `uploadUrl` ⇒ 没有地方 PUT 那 619 字节（这一支走不下去）；
+/// - 缺 `fileId` / `uploadId` ⇒ `completeSnapshot` 那一枪发不出去
+///   （它的 7 键里这两枚是全部依据）。
+///
+/// ⇒ 三格都不"兜成 None 让调用方自己判"：`None` 在上层会变成
+/// 「这一枪成了但没给 URL」那种**两种病混在一起**的读法，
+/// 而这一支的下一步对三格的要求**完全相同**（都得有）。
+///
+/// # ⚠ 秒传那一支：本层**不给自己开例外**
+///
+/// 抓包 §9 明写「移动端 `rapidUpload:true` 时有没有 `PUT`、响应 `uploadId` 是否 null ——
+/// **仍未读**」。所以这里**不**写「`rapidUpload:true` 就允许缺 `uploadUrl`」那种例外：
+/// 开了它，真遇上那一支会**静默少发一发 PUT**（表现是"快照建了但没传上去"），
+/// 而不开它只会**明确报错**（可回滚）。要开例外得先有一次真机读数。
+pub fn parse_snapshot_create(body: &[u8]) -> Result<CloudSnapshotCreated> {
+    const WHAT: &str = "backup/createSnapshot";
+    let envelope = CloudEnvelope::parse_bytes(body, WHAT)?;
+    envelope.ensure_ok(WHAT)?;
+    let payload = envelope.payload().ok_or_else(|| {
+        Error::Parse(
+            "backup/createSnapshot 的回执里没有 data 这一格 —— 这一族的载荷在 data（不是 result），缺席说明信封形状变了，不能兜成一个全空结构"
+                .into(),
+        )
+    })?;
+    let Some(obj) = payload.as_object() else {
+        return Err(Error::Parse(format!(
+            "backup/createSnapshot 的 data 不是对象，实得 {payload}"
+        )));
+    };
+    let file_id = required_str(obj, "fileId", WHAT)?;
+    // ⚠ **先读 `rapidUpload`，再决定另外两格要不要**（2026-10-07 真机读数改的，见下）。
+    let rapid_upload = cloud_flag(obj, "rapidUpload");
+    let upload_id = obj
+        .get("uploadId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    // `partInfos` 是数组，取**第一项**的 `uploadUrl`（与 `parse_file_create` 同一条路径）。
+    let upload_url = obj
+        .get("partInfos")
+        .and_then(Value::as_array)
+        .and_then(|parts| parts.first())
+        .and_then(|first| first.get("uploadUrl"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if !rapid_upload {
+        if upload_id.is_none() {
+            return Err(Error::Parse(
+                "backup/createSnapshot 的 data.uploadId 缺席 / null / 空串，而 rapidUpload 不是 true —— 这一格是这一支继续走下去的依据（没有它就没法 PUT，也没法 complete）".into(),
+            ));
+        }
+        if upload_url.is_none() {
+            return Err(Error::Parse(
+                "backup/createSnapshot 没给出 data.partInfos[0].uploadUrl（缺席 / null / 空串），而 rapidUpload 不是 true —— 没有它这一支就没地方 PUT 那一段字节，不能当成「成了但没 URL」放过去".into(),
+            ));
+        }
+    }
+    Ok(CloudSnapshotCreated {
+        file_id: Some(file_id),
+        upload_id,
+        upload_url,
+        rapid_upload,
+    })
+}
+
+/// 「结一个快照」的调用方输入（抓包 §6 的**请求 7 键**）。
+///
+/// ⚠ 这里**没有** `channel`（契约如此）。[`snapshot_complete_request`] 因此按
+/// [`CloudChannel::default()`]（android 档）装配头 —— **与 `create` 那一发必须同档**，
+/// 调用方若给 `create` 传了别的档，这一格会不一致（见那个函数的说明）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CloudSnapshotCompleteInput {
+    /// `fileId`：`createSnapshot` 回的那一枚（实拍 str64）。
+    pub file_id: String,
+    /// `uploadId`：`createSnapshot` 回的那一枚（实拍 str33）。
+    pub upload_id: String,
+    /// `count`：与 `createSnapshot` 那一枪**同一个数**（旧实现就是同一个变量）。
+    pub count: i64,
+    /// `contentHash`：与 `createSnapshot` 那一枪**同一个串**。
+    pub content_hash: String,
+    /// `size`：与 `createSnapshot` 那一枪**同一个数**。
+    pub size: i64,
+    /// `timestamp`：13 位毫秒。⚠ 与 `createSnapshot` 那一枪是否必须**同值**没有读数
+    /// ⇒ 本层原样转发调用方给的值，不替它复用。
+    pub timestamp_ms: i64,
+}
+
+/// 构造 `POST /hcy/backup/completeSnapshot`（**写**：告诉上游这一批传完了）。
+///
+/// 体 **7 键**逐字来自抓包 §6：`{fileId, uploadId, count, contentHash,
+/// contentHashAlgorithm, size, timestamp}`。
+///
+/// # 缺 `fileId` / `uploadId` / `contentHash` ⇒ 回错误，**不发**
+///
+/// 与 [`file_complete_request`] 同一口径：这三格是"完成哪一发"的全部依据，
+/// 静默发一枪空请求的表现是「上游回了成功、但没有任何东西被完成」。
+///
+/// # ⚠ 渠道那一格（契约里没有 `channel`）
+///
+/// [`CloudSnapshotCompleteInput`] 没有渠道入参 ⇒ 这里按 [`CloudChannel::default()`]
+/// （[`CloudChannel::Android`]）装配 25 套头。**同一支链上的两发必须同档**，
+/// 所以调用方给 [`snapshot_create_request`] 传的 `channel` 应当也是它。
+/// 要支持跨档得先扩契约（加一格 `channel`）—— 本层**不**去猜。
+pub fn snapshot_complete_request(input: CloudSnapshotCompleteInput) -> Result<HttpRequest> {
+    // ⚠ `uploadId` **允许空串**：真机读数（2026-10-07）里 `createSnapshot` 会回
+    // `uploadId: null`（`rapidUpload` 那一支）—— 与 `file/complete` 同一条口径
+    // （旧实现 `stringOf(null)` 就是空串，见 [`file_complete_request`]）✓。
+    // `fileId` / `contentHash` 缺了才不发：它们是"完成哪一发"的另一半依据。
+    if input.file_id.is_empty() || input.content_hash.is_empty() {
+        return Err(Error::Config(
+            "backup/completeSnapshot 缺 fileId / contentHash：没有它们这一枪就说不清在完成哪一发（本层不发空请求）".into(),
+        ));
+    }
+    let CloudSnapshotCompleteInput {
+        file_id,
+        upload_id,
+        count,
+        content_hash,
+        size,
+        timestamp_ms,
+    } = input;
+    let body = serde_json::json!({
+        "fileId": file_id,
+        "uploadId": upload_id,
+        "count": count,
+        "contentHash": content_hash,
+        "contentHashAlgorithm": CLOUD_HASH_ALGORITHM,
+        "size": size,
+        "timestamp": timestamp_ms,
+    });
+    Ok(snapshot_op_headers(
+        HttpRequest::post(BACKUP_COMPLETE_SNAPSHOT).json_body(&body),
+        CloudChannel::default(),
+    ))
+}
+
+/// 解析 `backup/completeSnapshot` 的回执：**只判「这一枪成不成」**。
+///
+/// # ⚠⚠ 与 [`parse_file_create`] 的关键差别：`data` 是 `null` **也算成功**
+///
+/// 抓包 §6：这一口只回 **59 字节**、`data` 是 **`null`** ——
+/// 与 `file/complete`（回 29 键对象快照）**不是一套**。所以这一口**必须另写一个解析器**：
+/// [`parse_file_create`] 在"缺 `data`"与"`data` 不是对象"两处都会 Err
+/// （它要的是对象快照），拿它来解这一口会把**每一发成功**都读成失败。
+///
+/// 这里**只读信封**：`code` 必须是字符串 `"0000"`，`success:false` 否决，
+/// `data` 是 `null` / 缺席 / 任何形状都**不读**（`file/complete` 的解析器也是这个口径，
+/// 区别只在名字与"这一口有实拍证明 data 是 null"）。
+///
+/// ⚠ `data` 是 `null` 时 `CloudEnvelope::payload` 会回 `Some(Value::Null)` ——
+/// 也就是说"缺席"与"null"在这一口都合法，本函数**不看这一格**，两个都放过。
+pub fn parse_snapshot_complete(body: &[u8]) -> Result<()> {
+    let envelope = CloudEnvelope::parse_bytes(body, "backup/completeSnapshot")?;
+    envelope.ensure_ok("backup/completeSnapshot")
+}
+
+/// 取一格**必需**的非空字符串；缺席 / `null` / 非字符串 / 空串一律 Err。
+///
+/// ⚠ 与 [`opt_str_at`] 刻意分开：那一枚是"可选的、缺了交回 `None`"，
+/// 这一枚是"缺了这一枪就走不下去"。两个语义写成一个函数，
+/// 早晚会有人把必需的那一格当可选用（表现是上游回了成功、而下一步没有依据）。
+fn required_str(obj: &serde_json::Map<String, Value>, key: &str, what: &str) -> Result<String> {
+    match obj.get(key) {
+        Some(Value::String(s)) if !s.is_empty() => Ok(s.clone()),
+        other => Err(Error::Parse(format!(
+            "{what} 的 data.{key} 缺席 / null / 空串 / 不是字符串（实得 {other:?}）—— 这一格是这一支继续走下去的依据，不能兜成 None"
+        ))),
+    }
+}
+
 // ══════════════════════════════ 回执：这一族的信封 ══════════════════════════════
 
 /// 这一族的信封：`{code:"0000"(字符串), message, success, data}`，载荷在 `data`。
@@ -594,6 +1288,21 @@ impl CloudEnvelope {
         let value: Value = serde_json::from_str(body)
             .map_err(|e| Error::Parse(format!("这一族的回执不是合法 JSON：{e}")))?;
         Ok(Self { value })
+    }
+
+    /// 从**原始字节**解析（快照那两个解析器收的是 `&[u8]`，见它们的签名）。
+    ///
+    /// ⚠ 这一族的两口控制面回执都是 JSON 文本，但**非 UTF-8 的回执必须报错而不是
+    /// 被 `from_utf8_lossy` 洗成"形状变了"**：后者会让人以为"上游换了信封"，
+    /// 而真相是"这一发拿到的根本不是 JSON"（比如一个网关的 HTML 错误页、
+    /// 或一段被压缩过的体）—— 两种病的修法完全不同。
+    fn parse_bytes(body: &[u8], what: &str) -> Result<Self> {
+        let text = std::str::from_utf8(body).map_err(|e| {
+            Error::Parse(format!(
+                "{what} 的回执不是合法 UTF-8（{e}）—— 说明这一发拿到的不是这一族的 JSON 信封"
+            ))
+        })?;
+        Self::parse(text)
     }
 
     /// 业务码。缺席 ⇒ 空串 ⇒ 与 [`CODE_OK`] 不等 ⇒ 失败（不兜成成功）。

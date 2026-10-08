@@ -2157,6 +2157,10 @@ async fn waiting_rereads_and_rejudges() {
         // 重判会读到错位的响应（症状是 `groupId=beforeTotal 那一组不是数组`）。
         visitlog_body(),
         visitlog_body(),
+        // ⚠ 2026-10-07：**取滑块也排在整点等待之前**（TS 的 preheat 含"1 滑块 + 图像匹配"，
+        // 见 `mcloud-back/docs/business-feature-inventory.md:654`）⇒ 它落在预热与重判之间。
+        // 这条用例的重判会判"别人已经兑掉了"，所以这一枪**备了但不会发**（`attempts == 0`）。
+        slide_body(),
         list_body(prize_json(LIMIT_EXCHANGED, 1800, 839)),
         info_body(10496),
     ];
@@ -2206,18 +2210,21 @@ async fn waiting_rereads_and_rejudges() {
     assert_eq!(outcome.attempts, 0);
     assert_eq!(
         fx.http().count(),
-        6,
-        "两轮各两次（清单 + 余额＝4 枪）**再加预热两枪**＝6。\
-         ⚠ 预热在「窗口等待之后、整点等待之前」（与 TS 同序），\
-         所以它排在这两轮只读请求之间 —— 这不是「多读了一轮」，是那两枪埋点。\
+        7,
+        "两轮各两次（清单 + 余额＝4 枪）**再加预热两枪、整点前取题一枪**＝7。\
+         ⚠ 预热与取题都在「窗口等待之后、整点等待之前」（与 TS 同序），\
+         所以它们排在这两轮只读请求之间 —— 这不是「多读了一轮」，是那两枪埋点加一枪取题。\
          早先写 4 的时候预热还在下单循环里，这条用例走不到它。\
          ⚠ 重判那一轮**也要读余额** —— `limit` 不是定位阶段判的，\
          而定位成功之后 `judge_exchange` 一律读余额（参考实现 `judgeExchange` 同形）。\
          写成 3 会把「重判时因 limit 挡住而少读一次余额」当成正确行为，\
          那正是这条测试要排除的偏差。"
     );
-    // 到这一步为止只花了只读请求 + 预热那两枪（没发单）。⚠ `deviceId` 现在在两段等待**之前**就取好，所以这里不代表「没碰过设备指纹」。
-    assert_eq!(device.calls(), 0);
+    // 到这一步为止只花了只读请求 + 预热两枪 + 整点前那一枪取题（**没发单**）。
+    // ⚠ `deviceId` 在**两段等待之前**就取好（用户口径「deviceid 应该提前获取」）⇒
+    // 这里的 1 不代表"已经用掉了什么"，只代表"取 id 这一步确实提前做了"；
+    // 真正钉住"没花钱"的是上面那行 `attempts == 0`。
+    assert_eq!(device.calls(), 1);
 }
 
 /// 整点后 20 秒内（还在上一场尾巴里）⇒ **不等**，直接判。
@@ -2276,7 +2283,10 @@ async fn missing_wait_impl_is_refused_not_silently_skipped() {
         outcome.error
     );
     assert_eq!(fx.http().attempts(), 0);
-    assert_eq!(device.calls(), 0);
+    // ⚠ 2026-10-07 改口径：`deviceId` 现在**在等待之前**就取（用户口径「deviceid 应该
+    // 提前获取」，也免得白等一小时才发现没有 id）⇒ 这一趟虽然被挡在等待那一步，
+    // 指纹已经取过一次。这条用例仍钉的是"**一枪都没发**"（上一行）。
+    assert_eq!(device.calls(), 1);
 }
 
 /// 等待被取消（返回 `Err`）⇒ 折成 `Skipped` + 原因，一枪不发。
@@ -2301,7 +2311,8 @@ async fn cancelled_wait_sends_nothing() {
     assert_eq!(outcome.attempts, 0);
     assert_eq!(fx.http().attempts(), 0);
     assert!(outcome.error.contains("中止"), "{}", outcome.error);
-    assert_eq!(device.calls(), 0);
+    // 同上一条：`deviceId` 在等待之前就取 ⇒ 指纹已被取过一次；"一枪不发"仍由上面那行钉住。
+    assert_eq!(device.calls(), 1);
 }
 
 // ══════════════════════════════ RunReport 口径 ══════════════════════════════
@@ -2533,6 +2544,15 @@ fn unknown_summary_falls_back_to_the_local_reason() {
 // ══════════════════════════════ 任务壳 ══════════════════════════════
 
 fn task_ctx(http: Arc<dyn HttpClient>, clock: Arc<dyn Clock>) -> TaskContext {
+    task_ctx_with_store(http, clock, Arc::new(NoStore::default()))
+}
+
+/// 同上，但换一个 store（用来测"smid 库里已经有 deviceId"那一档）。
+fn task_ctx_with_store(
+    http: Arc<dyn HttpClient>,
+    clock: Arc<dyn Clock>,
+    store: Arc<dyn mcloud_core::Store>,
+) -> TaskContext {
     use mcloud_core::{Account, AccountId, AccountSettings, AuthInfo, DeviceId};
     use mcloud_engine::{ArtifactLedger, ArtifactRecorder};
     TaskContext {
@@ -2554,7 +2574,7 @@ fn task_ctx(http: Arc<dyn HttpClient>, clock: Arc<dyn Clock>) -> TaskContext {
             settings: AccountSettings::default(),
         },
         http,
-        store: Arc::new(NoStore),
+        store,
         clock,
         sink: Arc::new(NoSink),
         run_id: mcloud_core::RunId(1),
@@ -2653,6 +2673,96 @@ async fn task_shell_orders_when_the_body_carries_a_device_id() {
     );
 }
 
+/// ⭐⭐ 2026-10-07：`body` 里**没有** `deviceId` ⇒ 从**本机 smid 库**取那一份。
+///
+/// 这是"定时抢兑 / 编排 / 任务页"三条路的**唯一** id 来源（它们没有路由那层注入），
+/// 在这条之前它们在链上只会得到一句 `device_id_failed`、一枪不发 —— 也就是说
+/// 「定时抢兑」这个主路径**从来没走到过下单**（`docs/business-matrix.md` §4 记过这一格）。
+///
+/// ⚠ 断言要落在**发出去的那一枪的请求体**上，不能只看"成功了"：只看结局分不出
+/// 用的是 body 那份、smid 那份、还是别的什么。
+#[tokio::test]
+async fn task_shell_takes_device_id_from_the_smid_store() {
+    let replies = vec![
+        list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
+        info_body(10496),
+        visitlog_body(),
+        visitlog_body(),
+        slide_body(),
+        order_body(1800),
+        info_body(8696),
+    ];
+    let http = Arc::new(Scripted::new(&as_refs(&replies)));
+    let ctx = task_ctx_with_store(
+        Arc::clone(&http) as Arc<dyn HttpClient>,
+        Arc::new(FixedClock(BASE_NOW_MS)),
+        Arc::new(NoStore::with_smid("B-from-smid-store")),
+    );
+
+    let body = serde_json::json!({"prizeIdOrName": "251230053", "skipWait": true});
+    let outcome = ExchangeTask.run(&ctx, &body).await.unwrap();
+    assert!(
+        outcome.is_success(),
+        "body 里没有 id、但 smid 库里有 ⇒ 该照常下单：{outcome:?}"
+    );
+
+    let order = http
+        .requests()
+        .into_iter()
+        .find(|r| r.url.contains("exchangeV3"))
+        .expect("应当真的发过下单那一枪");
+    let sent = order.body_str().unwrap_or_default();
+    assert!(
+        sent.contains("B-from-smid-store"),
+        "下单体里要带上 smid 库那份 id：{sent}"
+    );
+}
+
+/// 两处都有 ⇒ **`body` 优先**（它是路由/CLI 显式指定的那一份，也是"现在能用"的那一份）。
+///
+/// 与上一条成对：上一条钉"库里有就能用"✓，这条钉"显式给的那份不会被库里那份盖掉"✓ ——
+/// 反了的话，手工注入 `deviceId` 的那条路会**静默失效**（表现是"我明明传了 id，它却用别的"）。
+#[tokio::test]
+async fn body_device_id_wins_over_the_smid_store() {
+    let replies = vec![
+        list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
+        info_body(10496),
+        visitlog_body(),
+        visitlog_body(),
+        slide_body(),
+        order_body(1800),
+        info_body(8696),
+    ];
+    let http = Arc::new(Scripted::new(&as_refs(&replies)));
+    let ctx = task_ctx_with_store(
+        Arc::clone(&http) as Arc<dyn HttpClient>,
+        Arc::new(FixedClock(BASE_NOW_MS)),
+        Arc::new(NoStore::with_smid("B-from-smid-store")),
+    );
+
+    let body = serde_json::json!({
+        "prizeIdOrName": "251230053",
+        "skipWait": true,
+        "deviceId": "B-from-body-wins",
+    });
+    let outcome = ExchangeTask.run(&ctx, &body).await.unwrap();
+    assert!(outcome.is_success(), "{outcome:?}");
+
+    let sent = http
+        .requests()
+        .into_iter()
+        .find(|r| r.url.contains("exchangeV3"))
+        .expect("应当真的发过下单那一枪")
+        .body_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(sent.contains("B-from-body-wins"), "body 那份要赢：{sent}");
+    assert!(
+        !sent.contains("B-from-smid-store"),
+        "库里那份不该被用上：{sent}"
+    );
+}
+
 /// ⭐⭐ 生产路径**真的注入了等待实现**（2026-10-03 review §1.1 的钉子）。
 ///
 /// 判据时刻刻意选在"整点前 15ms、缺省补偿 10ms" ⇒ 第二段等待 `needed = true`
@@ -2663,16 +2773,19 @@ async fn task_shell_orders_when_the_body_carries_a_device_id() {
 #[tokio::test]
 async fn task_shell_injects_a_real_wait() {
     // ⚠ 枪序要按**等完之后会重判**排：清单 → 余额 →（窗口等待，本用例不用等）
-    // → 预热两枪 →（整点等待）→ **重判的清单 + 余额** → 取题 → 下单 → 复查。
-    // 少了重判那两枪就会错位（症状是 `groupId=... 那一组不是数组`）。
+    // → 预热两枪 → **取题 + 解算（都在整点之前）** →（整点等待）→ 重判的清单 + 余额
+    // → 下单 → 复查。
+    // ⚠ 2026-10-07 起取题排在**整点等待之前**（TS 的 preheat 含这一步，见
+    // `mcloud-back/docs/business-feature-inventory.md:654`）⇒ 它在重判那两枪**之前**；
+    // 排错位会立刻炸出来（症状是 `groupId=… 那一组不是数组`）。
     let replies = vec![
         list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
         info_body(10496),
         visitlog_body(),
         visitlog_body(),
+        slide_body(),
         list_body(prize_json(LIMIT_AVAILABLE, 1800, 839)),
         info_body(10496),
-        slide_body(),
         order_body(1800),
         info_body(8696),
     ];
@@ -2791,7 +2904,24 @@ async fn task_shell_requires_the_prize_parameter() {
 /// 兑换链**只读** HTTP，不碰 store：给一个必然报错的替身。
 ///
 /// 于是"哪天有人给兑换链加了一句读 store"会立刻炸出来。
-struct NoStore;
+///
+/// ⚠ **唯一的例外是 `get_smid_state`**：**任务壳**（`ExchangeTask::run`）2026-10-07 起
+/// 会读它拿 H5 的 `deviceId`（定时 / 编排 / 任务页那三条路没有路由层注入）——
+/// 链本身仍然一次都不碰。所以这一格默认回 `None`（= "这个账号还没换过 id"），
+/// 而不是像别的口子那样 `Err`；要测"库里已经有 id"就给 [`NoStore::with_smid`]。
+#[derive(Default)]
+struct NoStore {
+    /// `Some(..)` ⇒ 这个 store 里已经有一个换回来的 smid `deviceId`。
+    smid: Option<&'static str>,
+}
+
+impl NoStore {
+    fn with_smid(device_id: &'static str) -> Self {
+        Self {
+            smid: Some(device_id),
+        }
+    }
+}
 
 fn refuse() -> Error {
     Error::Other("兑换链不该碰 store".into())
@@ -2834,7 +2964,10 @@ impl mcloud_core::SmidStore for NoStore {
         &self,
         _id: &mcloud_core::AccountId,
     ) -> mcloud_core::Result<Option<mcloud_core::SmidState>> {
-        Ok(None)
+        Ok(self.smid.map(|d| mcloud_core::SmidState {
+            device_id: Some(d.to_string()),
+            ..Default::default()
+        }))
     }
     async fn set_smid_fingerprint(
         &self,

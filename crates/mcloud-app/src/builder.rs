@@ -13,6 +13,26 @@ use crate::AppHandle;
 pub struct AppBuilder {
     data_dir: PathBuf,
     timeout_secs: u64,
+    /// 覆盖**推送投递**用的 HTTP 客户端（`None` = 自己造 reqwest 客户端 ✓）。
+    ///
+    /// # 为什么留这一格（只有测试会设它）
+    ///
+    /// 面板行为（登录 / 性能 ✓）的验收要求是"**用假 HTTP 客户端断言发了几枪**" ✓，
+    /// 而生产那份客户端会把包发到**用户配的地址**上去 —— 单测里那既不可能
+    /// 也不该发生（真发 DNS / TCP ✗）。`Notifier` 的 http 是构造期注入的 ✓，
+    /// 所以注入点只能在这里 ✓。
+    notify_http: Option<Arc<dyn HttpClient>>,
+    /// 覆盖**按账号**的业务 HTTP 客户端工厂（`None` = 自己造那套装饰器链 ✓）。
+    ///
+    /// # 为什么也要留一格（同样只有测试会设它）
+    ///
+    /// 「直播自动定时」的重算会**按账号去上游现取**「下一场」（用户口径 2026-10-08 ✓），
+    /// 而生产那份工厂会把请求打到**真的上游**去（`user-njs.yun.139.com` ✗）——
+    /// 路由级测试里那既不可能也不该发生（与 `notify_http` 同一条理由 ✓）。
+    /// 注入的替身可以按账号给不同应答 ⇒ "三个账号各有下一场"那种形态才测得出来 ✓
+    ///（生产里上游那份日程是**按主播的**、所有账号同一份，见
+    /// `mcloud_core::live_auto` 模块头的事实 ✓）。
+    http_for: Option<mcloud_engine::HttpClientFactory>,
 }
 
 impl Default for AppBuilder {
@@ -20,6 +40,8 @@ impl Default for AppBuilder {
         Self {
             data_dir: PathBuf::from("data"),
             timeout_secs: 30,
+            notify_http: None,
+            http_for: None,
         }
     }
 }
@@ -36,6 +58,18 @@ impl AppBuilder {
 
     pub fn timeout_secs(mut self, secs: u64) -> Self {
         self.timeout_secs = secs;
+        self
+    }
+
+    /// 换掉**推送投递**用的 HTTP 客户端（见字段说明：**测试用** ✓）。
+    pub fn notify_http(mut self, http: Arc<dyn HttpClient>) -> Self {
+        self.notify_http = Some(http);
+        self
+    }
+
+    /// 换掉**按账号**的业务 HTTP 客户端工厂（见字段说明：**测试用** ✓）。
+    pub fn http_for(mut self, http_for: mcloud_engine::HttpClientFactory) -> Self {
+        self.http_for = Some(http_for);
         self
     }
 
@@ -111,7 +145,9 @@ impl AppBuilder {
         let login = Arc::new(crate::login::LoginService::with_os_random(
             login_http,
             Arc::clone(&store) as Arc<dyn mcloud_core::PcDeviceStore>,
-            Arc::clone(&store) as Arc<dyn mcloud_core::AccountStore>,
+            // ⚠ 传 `Store`（不是 `AccountStore`）：投递现在还要读**推送规则表**与
+            // 发起方绑的那条定时/编排 ✓（见 `Notifier` 那段说明 ✓）。
+            Arc::clone(&store) as Arc<dyn mcloud_core::Store>,
             Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>,
         ));
 
@@ -128,7 +164,7 @@ impl AppBuilder {
         // `SmidClient` 在外层：它补的头要作用于**所有**出去的请求，
         // 包括 `H5Client` 建会话那三枪。
         let timeout = self.timeout_secs;
-        let http_for: mcloud_engine::HttpClientFactory = {
+        let default_http_for: mcloud_engine::HttpClientFactory = {
             let smid = Arc::clone(&smid);
             Arc::new(move |account: &Account| {
                 // PC 端账号要把"冒充哪个平台"告诉传输层：UA、设备串与渠道头都由它
@@ -195,6 +231,12 @@ impl AppBuilder {
             })
         };
 
+        // 测试注入的那一份优先（见 `AppBuilder::http_for` 的字段说明 ✓）；
+        // 没注入就是上面那套装饰器链 ✓。**一处决定**，三处（auth_refresh / Runner /
+        // 直播自动定时的重算 ✓）拿到的都是同一份 —— 各造一份的话
+        // "换个替身只换掉一半"这种假绿灯迟早出现 ✗。
+        let http_for = self.http_for.unwrap_or(default_http_for);
+
         // **凭据续期**：一个进程一份，四个触发面共用。
         //
         // 与 `login` 不同：刷新**需要凭据**（要证明"我是这个 token 的持有者"），
@@ -208,36 +250,51 @@ impl AppBuilder {
             Arc::clone(&http_for),
         ));
 
-        // ── 推送渠道（**旁路**，地址按账号解析）────────────────────────────
+        // ── 推送投递（**旁路**：规则自带凭据，行为选择规则）─────────────────
         //
         // 挂点选在 sink（而不是订阅 hub）：runner 的每个事件都从这**同一个**
         // 出口过，在它外面套一层即可，engine 零改动（理由详见 crate::notify
         // 模块头）。
         //
-        // ⚠ **总是**装饰一层（不按"启动时是否有配置"决定）：渠道是**每账号**的，
-        // 配置在投递那一刻才从该账号的 settings 读，运行期间还能改。跳过装饰
-        // 等于"账号级配置永远不会生效"。
-        // "未配置就零行为"由解析兜住：账号没配 ⇒ 回 None ⇒ 一个包都不发
-        // （见 notify::Notifier::config_for）。**没有**进程级兜底。
+        // ⚠ **总是**装饰一层（不按"启动时有没有规则"决定）：规则与绑定在运行期间
+        // 还能改（用户随时去设置页配 ✓），跳过装饰等于"后配的永远不生效" ✗。
+        // "没绑规则就零行为"由投递那一层兜住：发起方没绑 ⇒ 一个包都不发 ✓
+        // （见 notify::Notifier::deliver）。**没有**进程级兜底 ✓。
         let cancel_slot = notify::cancel_slot();
         // 推送打的是**用户自己配的外部地址**，云盘凭据一个都不能给：
         // 与 smid 的裸传输同一条理由（见上面 smid_http 的说明）。
         // ⚠ `no_redirects: true`（2026-10-04 复审 sv-8）：serverchan / day.app / 2im
         // 这类渠道把 token 放在 **URL query** 里 ⇒ 跟随重定向等于把那枚 token 交给
         // 跳转目标；而用户配的地址也不该由我们替他把跳转跟到底。
-        let notify_http: Arc<dyn HttpClient> = Arc::new(
-            mcloud_upstream::ReqwestClient::new(mcloud_upstream::ClientProfile {
-                timeout_secs: self.timeout_secs,
-                no_redirects: true,
-                ..Default::default()
-            })
-            .map_err(|e| mcloud_core::Error::Network(format!("构建推送客户端失败：{e}")))?,
+        let notify_http: Arc<dyn HttpClient> = match self.notify_http {
+            // 测试注入的那一份（见 `AppBuilder::notify_http` ✓）。
+            Some(http) => http,
+            None => Arc::new(
+                mcloud_upstream::ReqwestClient::new(mcloud_upstream::ClientProfile {
+                    timeout_secs: self.timeout_secs,
+                    no_redirects: true,
+                    ..Default::default()
+                })
+                .map_err(|e| mcloud_core::Error::Network(format!("构建推送客户端失败：{e}")))?,
+            ),
+        };
+        // ⚠ **自己造**投递器（不再让 `decorate*` 内部造 ✓）：CLI 收尾要拿同一个句柄
+        // `flush()`（`AppHandle.pushes` ✓）—— 两边必须是**同一份**，否则 flush 等的是
+        // 另一个计数器，等于没等 ✗。
+        let pushes = Arc::new(
+            notify::Notifier::new(notify_http, Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>)
+                // ⚠ **必须接**：投递要读四样东西（规则表 / 发起方绑的定时或编排 /
+                // 面板绑定 / 节流状态 ✓），全在 `Store` 上 ✓。不接 ⇒ 一条推送都不发 ✗。
+                .with_store(Some(Arc::clone(&store) as Arc<dyn mcloud_core::Store>))
+                // ⚠ **也必须接**：「直播自动定时」的重算挂在收尾那一跳上，它要拿
+                // **每个账号自己的票**去上游现取「下一场」（用户口径 2026-10-08 ✓）。
+                // 不接 ⇒ 重算退化成"读池里那份兜底"（上一版的行为 ✗，而且**不报错** ✗）
+                // —— `notify.rs` 有一条从收尾链走一遍的用例钉住它 ✓。
+                .with_http_for(Arc::clone(&http_for)),
         );
-        let sink: Arc<dyn EventSink> = notify::decorate(
+        let sink: Arc<dyn EventSink> = notify::decorate_with(
             Arc::clone(&hub) as Arc<dyn EventSink>,
-            Arc::clone(&store) as Arc<dyn mcloud_core::AccountStore>,
-            notify_http,
-            Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>,
+            Arc::clone(&pushes),
             Arc::clone(&cancel_slot),
         );
 
@@ -246,7 +303,8 @@ impl AppBuilder {
             Arc::clone(&store) as Arc<dyn mcloud_core::Store>,
             Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>,
             sink,
-            http_for,
+            // ⚠ `Arc::clone`：这一份还要挂到 `AppHandle` 上（路由那条 PUT 用它 ✓）。
+            Arc::clone(&http_for),
         ));
         // 回填取消登记表：装饰器要先于 runner 存在，而登记表由 Runner::new
         // 内部创建。这里到 build() 返回之前一定填好，且还没开始任何一次运行。
@@ -275,9 +333,11 @@ impl AppBuilder {
                 scheduler,
                 pipelines,
                 cancel,
+                pushes,
                 smid,
                 login,
                 auth_refresh,
+                http_for,
             },
         })
     }

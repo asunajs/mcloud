@@ -23,7 +23,7 @@
  * 并让后端最终说了算。
  */
 
-import { onMounted, ref } from 'lite'
+import { onMounted, ref } from '@asunajs/lite'
 import {
   createAdmin,
   getSetupStatus,
@@ -33,6 +33,7 @@ import {
 } from '../api'
 import { IconAlert, IconBrand } from '../ui/icons'
 import { credentialFor } from '../ui/password'
+import { pushToast } from '../ui/toast'
 
 export interface AuthPageProps {
   /** `setup` = 建管理员；`login` = 登录。 */
@@ -111,16 +112,27 @@ export const AuthPage = (props: AuthPageProps) => {
    *
    * （历史备注：这里以前还写着"Vapor 的提交事件类型 `FormEvent<HTMLFormElement>`
    * 与原生 `Event` 不兼容，要多一层断言"。lite 的 JSX 声明里事件属性走
-   * `on${string}` 那条索引签名 ⇒ 参数就是 `any`（见 `lite/jsx.d.ts`），
+   * `on${string}` 那条索引签名 ⇒ 参数就是 `any`（见 `@asunajs/lite` 的 `jsx.d.ts`），
    * 要精确类型就自己标注 `onSubmit={(e: SubmitEvent) => …}` —— 那个包袱
    * 2026-09-30 随 Vue 兼容层一起没了。）
    */
   const submit = async () => {
+    /**
+     * ⚠ 弹窗优先 + 就近（2026-10-08 用户口径「所有的提示都是优先弹窗式」）：
+     * 登录页的表单很短、按钮就在下面，但**统一口径**照旧 ——
+     * `pushToast('error', …)` 让人一眼看见（错误类不自动消失，见 `ui/toast.ts`），
+     * 同一句还留在按钮上方那一句里（就近）。
+     * ⚠ 这也要求 `ToastView` 在**未登录态**也挂着 —— 见 `app.tsx` 里把它提到根上的那段。
+     */
+    const fail = (msg: string): void => {
+      error.value = msg
+      pushToast('error', msg)
+    }
     error.value = ''
 
     const bad = localError()
     if (bad) {
-      error.value = bad
+      fail(bad)
       return
     }
 
@@ -139,7 +151,7 @@ export const AuthPage = (props: AuthPageProps) => {
     } catch (err) {
       // 后端原文直接透出（规范：不翻译成"操作失败"）——
       // 它已经说清了是口令短、还是不匹配。
-      error.value = err instanceof Error ? err.message : '登录失败'
+      fail(err instanceof Error ? err.message : '登录失败')
       // 口令错时清掉口令框，但不碰用户名（大概率只是打错了口令）
       password.value = ''
       confirm.value = ''

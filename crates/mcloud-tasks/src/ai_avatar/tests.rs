@@ -1110,3 +1110,46 @@ impl mcloud_core::UserStore for NoStore {
         Err(refuse())
     }
 }
+
+// ── 这一族已经下线：404 要说清"该怎么办"（2026-10-08 用户实测报的就是它）──
+
+/// ⭐ 实测：`/market/rabactive/image/*` 三个口全 404（同主机其它路径正常 ✓）
+/// ⇒ **活动下线** ✓。这里钉两件事：
+///
+/// * 404 ⇒ 翻成"**已下线 + 关掉账号开关**" ✓（用户得知道该干什么 ✓）；
+/// * **别的失败原样透出** ✗ —— 超时/500 是"这次没成、可以再试"，
+///   把它们也盖成"活动下线"会让人**放弃一个还能用的功能** ✗。
+#[test]
+fn rabactive_404_is_explained_but_other_failures_pass_through() {
+    use mcloud_core::Error;
+
+    let dead = explain_dead_activity(
+        "查询 AI 头像活动目录",
+        Error::Network("查询 AI 头像活动目录 失败，HTTP 404：上游回的是**网页**不是接口".into()),
+    );
+    let msg = dead.to_string();
+    assert!(msg.contains("已经下线"), "{msg}");
+    assert!(msg.contains("AI 头像"), "要说清是哪个活动：{msg}");
+    assert!(msg.contains("关掉"), "要给出**该怎么办**：{msg}");
+    assert!(
+        msg.contains("HTTP 404"),
+        "原始信息要留着（排查要用）：{msg}"
+    );
+
+    // 非 404 一律原样 ✓
+    for raw in [
+        "查询 AI 头像活动目录 失败，HTTP 500：boom",
+        "查询 AI 头像活动目录 失败，HTTP 405：method not allowed",
+        "连接超时",
+    ] {
+        let e = explain_dead_activity("查询 AI 头像活动目录", Error::Network(raw.into()));
+        let got = e.to_string();
+        // ⚠ `Error::Network` 的 Display 自带"网络错误："前缀 ✓ ⇒ 比的是**有没有被改写** ✓，
+        // 不是逐字相等 ✓。
+        assert!(got.contains(raw), "原文要留着：{got}");
+        assert!(
+            !got.contains("已经下线"),
+            "非 404 不许被盖成「活动下线」（那会让人放弃一个还能用的功能）：{got}"
+        );
+    }
+}

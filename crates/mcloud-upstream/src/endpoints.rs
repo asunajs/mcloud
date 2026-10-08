@@ -103,6 +103,24 @@ pub const RECYCLEBIN_BATCH_TRASH: &str =
 /// 读回收站列表（**只读**，可反复跑）。
 pub const RECYCLEBIN_LIST: &str = "https://personal-kd-njs.yun.139.com/hcy/recyclebin/list";
 
+// ── 相册自动备份的**快照**那两口（`crates/mcloud-upstream/src/app_cloud_upload.rs`）──
+//
+// 出处：`../mcloud-capture/docs/capture/app-album-backup-samples.txt` §2 / §6
+// （2026-10-07 08:59 真机抓包，iOS App 12.6.0 的相册自动备份链）。
+// ⚠ 这两口在 `mcloud-capture` 的**全部历史样本里从没出现过** —— 上面那一篇是首读，
+// 所以「上游还会不会用别的快照口」**无读数**。
+
+/// 建快照（**写**：声明「这一批备份的内容是这个哈希、这个大小」）。
+pub const BACKUP_CREATE_SNAPSHOT: &str =
+    "https://personal-kd-njs.yun.139.com/hcy/backup/createSnapshot";
+
+/// 结快照（**写**：告诉上游这一批传完了）。
+///
+/// ⚠ 它的回执与 [`crate::cloud_trash`] / `file/complete` **不是一套**：
+/// 实拍只有 59 字节、`data` 是 `null`（见 `app-album-backup-samples.txt` §6）。
+pub const BACKUP_COMPLETE_SNAPSHOT: &str =
+    "https://personal-kd-njs.yun.139.com/hcy/backup/completeSnapshot";
+
 /// 判断主机是否应注入 basic authorization。
 pub fn accepts_basic(host: &str) -> bool {
     AUTH_DOMAINS

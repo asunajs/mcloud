@@ -214,7 +214,15 @@ impl Runner {
         let task_for_spawn = task_name.to_string();
         tokio::spawn(async move {
             if let Err(e) = this
-                .run_impl(&task_for_spawn, &account, &body, run_id, None, Some(token))
+                .run_impl(
+                    &task_for_spawn,
+                    &account,
+                    &body,
+                    run_id,
+                    None,
+                    Some(token),
+                    None,
+                )
                 .await
             {
                 tracing::error!(task = %task_for_spawn, run = %run_id, error = %e, "后台运行失败");
@@ -276,7 +284,15 @@ impl Runner {
                 .zip(tokens.into_iter())
             {
                 if let Err(e) = this
-                    .run_impl(&task_for_spawn, &account, &body, id, None, Some(token))
+                    .run_impl(
+                        &task_for_spawn,
+                        &account,
+                        &body,
+                        id,
+                        None,
+                        Some(token),
+                        None,
+                    )
                     .await
                 {
                     tracing::error!(
@@ -353,13 +369,36 @@ impl Runner {
         body: &serde_json::Value,
         chain_cancel: Option<mcloud_core::CancelToken>,
     ) -> Result<RunRecord> {
+        self.run_full(task_name, account, body, chain_cancel, None)
+            .await
+    }
+
+    /// 同上，外加**发起方**（`schedule:<id>` / `pipeline:<id>` ✓）。
+    ///
+    /// # 为什么单开一个方法，而不是给上面两个各加一个参数
+    ///
+    /// 加参数要改**每一个**调用点（含几十处测试 ✓），而其中绝大多数根本不关心发起方 ✗。
+    /// 单开一个入口：老的三个签名一个字都不用动 ✓，只有"真的知道发起方"的那两处
+    /// （调度器 ✓、编排器 ✓）走这条 ✓。
+    pub async fn run_full(
+        &self,
+        task_name: &str,
+        account: &Account,
+        body: &serde_json::Value,
+        chain_cancel: Option<mcloud_core::CancelToken>,
+        origin: Option<String>,
+    ) -> Result<RunRecord> {
         let run_id = RunId::new(self.next_id.fetch_add(1, Ordering::SeqCst));
-        self.run_impl(task_name, account, body, run_id, chain_cancel, None)
+        self.run_impl(task_name, account, body, run_id, chain_cancel, None, origin)
             .await
     }
 
     /// 实际执行。`run_id` 由调用方预分配 —— 这样"立刻返回 id 再后台跑"
     /// 与"同步跑完再返回"可以共用同一条实现。
+    // ⚠ 参数确实多（2026-10-07 加了 `origin` ✓ 变成 8 个）。**不打包成结构体**的理由：
+    // 这些值全都只在 `run_impl` 内部用一次 ✓，为它们造一个只在两处出现的结构体，
+    // 换来的只是"数字好看" ✗ —— 调用点反而要多写一层构造 ✓。
+    #[allow(clippy::too_many_arguments)]
     async fn run_impl(
         &self,
         task_name: &str,
@@ -369,6 +408,8 @@ impl Runner {
         chain_cancel: Option<mcloud_core::CancelToken>,
         // 已由 `start` 预登记的令牌。`None` 表示现登记。
         pre_registered: Option<mcloud_core::CancelToken>,
+        // 发起方（见 `run_full` ✓）。`None` = 手点 / API / CLI。
+        origin: Option<String>,
     ) -> Result<RunRecord> {
         let task = self
             .registry
@@ -432,6 +473,7 @@ impl Runner {
             task: task_name.to_string(),
             account: account.id.to_string(),
             at_ms: started,
+            origin: origin.clone(),
         });
 
         // 登记取消令牌：任务在安全点检查它。
@@ -510,15 +552,6 @@ impl Runner {
             });
         }
 
-        sink.emit(RunEvent::Finished {
-            run_id,
-            outcome: outcome.clone(),
-            duration_ms,
-        });
-
-        self.inflight.lock().expect("inflight 锁中毒").remove(&key);
-        self.cancel.release(run_id);
-
         let mut record = self.record(run_id, task_name, account, duration_ms, outcome);
         // 这次运行的日志行（回看用 ✓）：取走后不再累积 ✓。
         record.logs = collector.take();
@@ -564,10 +597,40 @@ impl Runner {
         if was_cancelled {
             record.status = RunStatus::Cancelled;
         }
+
+        // ⭐ **先落库、再发 `Finished`**（2026-10-08 接性能触发线时改的顺序 ✓）。
+        //
+        // # 为什么这个顺序要紧
+        //
+        // `Finished` 那一跳现在还要跑**性能面板行为**的判据
+        // （`NotifySink` ⇒ `mcloud_app::notify::Notifier::perf_check` ✓），
+        // 而判据是从**运行历史**里数的（连续失败条数 / 耗时中位数 ✓）⇒
+        // 本次那条必须**已经在库里** ✓。反过来的话「连败 2 次」要到第 3 次才报 ✗
+        // （差一次），而"这次 250ms"也进不了它自己的中位数样本 ✓。
+        //
+        // ⚠ `cancel.release` 仍然留在 `emit` **之后**：`NotifySink` 判"这次是不是
+        // 用户主动中止"靠的正是登记表里那一条还在（见 `notify.rs` 模块头 ✓）——
+        // 提前释放会把"我自己点的中止"推成"运行失败" ✗。
+        //
+        // 顺带修掉一个既有的小竞态：客户端收到 `finished` 后立刻取这条运行详情时，
+        // 记录一定已经在了 ✓（原来是"先发事件、后落库" ✓）。
+        //
         // 历史落盘失败不应让整次运行算失败——结果已经产生。
         if let Err(e) = self.store.upsert_run(&record).await {
             tracing::warn!(error = %e, "运行历史落盘失败");
         }
+
+        sink.emit(RunEvent::Finished {
+            run_id,
+            // ⚠ 从 `record` 里取（而不是再用那个 `outcome`）：它已经被 `record`
+            // 拿走了 ✓，而事件要的正是同一份结论 ✓（`Finished` 不带 `status`，
+            // 中止那件事由 `NotifySink` 按登记表判 ✓，见 `notify.rs` 模块头 ✓）。
+            outcome: record.outcome.clone(),
+            duration_ms,
+        });
+
+        self.inflight.lock().expect("inflight 锁中毒").remove(&key);
+        self.cancel.release(run_id);
         Ok(record)
     }
 
@@ -1318,6 +1381,72 @@ mod tests {
             sink.names(),
             vec!["started", "finished"],
             "订阅方依赖这两个事件界定一次运行的始终"
+        );
+    }
+
+    /// ⭐ `Finished` 必须在**记录落库之后**发（2026-10-08 接性能触发线时定的顺序 ✓）。
+    ///
+    /// # 为什么值得单钉一条
+    ///
+    /// `Finished` 那一跳现在还要跑**性能面板行为**的判据
+    /// （`NotifySink` ⇒ `mcloud_app::notify::Notifier::perf_check` ✓），
+    /// 而判据是从**运行历史**里数的（连续失败条数 / 耗时中位数 ✓）⇒
+    /// 本次那条必须**已经在库里** ✓。反过来的话「连败 2 次」要到第 3 次才报 ✗
+    /// （差一次），而"这次 250ms"也进不了它自己的中位数样本 ✓。
+    ///
+    /// ⚠ 用"事件到达时去库里查"把顺序**直接**钉住 —— 比从告警条数反推准得多 ✓
+    /// （后者会被别的因素掩盖 ✓）。
+    #[tokio::test]
+    async fn finished_is_emitted_after_the_run_is_persisted() {
+        /// 收到 `Finished` 时立刻查一次库（`emit` 是同步的 ⇒ 直接读内存那份 ✓）。
+        struct ProbeSink {
+            store: Arc<FakeStore>,
+            seen: Mutex<Vec<bool>>,
+        }
+
+        impl EventSink for ProbeSink {
+            fn emit(&self, event: RunEvent) {
+                if let RunEvent::Finished { run_id, .. } = event {
+                    let found = self
+                        .store
+                        .runs
+                        .lock()
+                        .expect("锁中毒")
+                        .iter()
+                        .any(|r| r.run_id == run_id);
+                    self.seen.lock().expect("锁中毒").push(found);
+                }
+            }
+        }
+
+        let store = Arc::new(FakeStore::default());
+        let probe = Arc::new(ProbeSink {
+            store: Arc::clone(&store),
+            seen: Mutex::new(Vec::new()),
+        });
+        let mut registry = Registry::new();
+        registry
+            .register(Arc::new(OkTask))
+            .expect("测试任务注册失败");
+        let http: HttpClientFactory =
+            Arc::new(|_account: &Account| Arc::new(FakeHttp) as Arc<dyn HttpClient>);
+        let runner = Runner::new(
+            Arc::new(registry),
+            Arc::clone(&store) as Arc<dyn mcloud_core::Store>,
+            Arc::new(FixedClock(NOW_MS)),
+            Arc::clone(&probe) as Arc<dyn EventSink>,
+            http,
+        );
+
+        runner
+            .run("ok", &account("13800000000"), &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            probe.seen.lock().expect("锁中毒").as_slice(),
+            &[true],
+            "收到 Finished 时这条运行必须已经在库里 —— 性能判据要数它（差一次 = 晚一轮才报 ✗）"
         );
     }
 

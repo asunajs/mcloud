@@ -116,6 +116,119 @@ fn schedule_rooms(rooms: &[mcloud_upstream::live_room::LiveRoom]) -> Vec<mcloud_
         .collect()
 }
 
+// ══════════════════════════ 门的三步（只读地取「上游那份日程」）══════════════════════════
+
+/// 🌸 **门的三步里 ①②**：换直播侧 JWT。
+///
+/// 用的是**上游现成的那套请求构造**（`mcloud_upstream::session` 的
+/// `live_gate_spec_token_request` / `ensure_http_ok` / `parse_sso_token`，
+/// 与 `mcloud_upstream::live_room` 的 `cmpass_login_request` ✓）——
+/// **不另造一套 HTTP** ✓。传输层是调用方给的 `HttpClient`（生产里就是按账号
+/// 注入凭据的那份工厂产物 ✓）。
+///
+/// # 证据等级
+///
+/// - **实证**：①②两步 + 第③步（[`gate_rooms`] 的 `tabContentList`）—— 出处
+///   `../mcloud/docs/capture/app-live-redflower-samples.txt` §5.3（第 345–365 行）
+///   与证据等级表（第 466–475 行）。那一轮用临时只读探针主动走了一遍，
+///   因为门第③步是 **GET、不需要开播**。
+/// - **本条实证的两处细节**：`querySpecTokenV2(017027)` 能换到 SSO
+///   （库里那份 `authorization` 在直播族上也认 ✓）；
+///   `cmpassLoginByCmToken` 的 `object` **就是 JWT 本身**（180 字符）✓。
+/// - ⏸ **仍结构性抓不到**：WS / 弹幕 / 口令（未开播，`chatRoomId: null`）——
+///   那一段在 [`LiveKoulingCollector`] 里，与本函数分开标 ✓。
+///
+/// # ⚠ 失败**如实上抛**（带步名前缀），不照抄参考实现那条"失败即放行"
+///
+/// 参考实现早先在 SSO / 登录失败时 `return true` 放行，它自己后来明确否定了：
+/// 那条让"凭据坏了"表现成"门开着、却一条口令也听不到"，真因被盖住，
+/// 排查方向会从"今天是不是没开播"开始 —— **完全错**。
+pub async fn gate_jwt(
+    http: &dyn mcloud_core::HttpClient,
+    account: &mcloud_core::Account,
+) -> Result<String> {
+    // ① 换 SSO token。用**直播侧**的 `toSourceId`（`017027`）——
+    // 不是签到的 `001005`。混用的表现是"一条房间都筛不出来"，
+    // 而那看起来像"今天没有直播"：一个**假结论**（参考实现坑表 #106）。
+    let authorization = mcloud_upstream::basic_authorization(account);
+    let resp = http
+        .request(mcloud_upstream::session::live_gate_spec_token_request(
+            &authorization,
+        ))
+        .await
+        .map_err(|e| Error::Other(format!("[门·换 SSO token] {e}")))?;
+    let body = mcloud_upstream::session::ensure_http_ok(&resp, "门·换 SSO token")
+        .map_err(|e| Error::Other(format!("[门·换 SSO token] {e}")))?;
+    let sso = mcloud_upstream::session::parse_sso_token(body)
+        .map_err(|e| Error::Other(format!("[门·换 SSO token] {e}")))?;
+
+    // ② 用 SSO 换**直播侧** JWT。
+    let resp = http
+        .request(live::cmpass_login_request(&sso)?)
+        .await
+        .map_err(|e| Error::Other(format!("[门·换直播侧 JWT] {e}")))?;
+    let body = mcloud_upstream::session::ensure_http_ok(&resp, "门·换直播侧 JWT")
+        .map_err(|e| Error::Other(format!("[门·换直播侧 JWT] {e}")))?;
+    let env = live::CmliveEnvelope::parse(body)
+        .map_err(|e| Error::Other(format!("[门·换直播侧 JWT] {e}")))?;
+    live::parse_cmpass_login(&env).map_err(|e| Error::Other(format!("[门·换直播侧 JWT] {e}")))
+}
+
+/// 🌸 **门的三步里 ③**：拉两个页签的房间（去重合并）。
+///
+/// ⚠ 只查 `127` 会在"房间还没进福利页签"时判成**没开播**，而那正是
+/// "漏掉整场口令"这一侧的错误 —— 代价远大于多打一个 GET。
+pub async fn gate_rooms(
+    http: &dyn mcloud_core::HttpClient,
+    jwt: &str,
+) -> Result<Vec<live::LiveRoom>> {
+    let tab_ids = vec![
+        mcloud_upstream::live_consts::LIVE_TAB_ID_BENEFITS,
+        mcloud_upstream::live_consts::LIVE_TAB_ID_REPLAY,
+    ];
+    let mut groups: Vec<Vec<live::LiveRoom>> = Vec::new();
+    for tab_id in tab_ids {
+        let what = format!("直播·页签 {tab_id}");
+        let resp = http
+            .request(live::tab_content_list_request(tab_id, jwt))
+            .await?;
+        let body = mcloud_upstream::session::ensure_http_ok(&resp, &what)?;
+        groups.push(live::parse_tab_content_list(&live::CmliveEnvelope::parse(
+            body,
+        )?)?);
+    }
+    Ok(live::merge_rooms(&groups))
+}
+
+/// **只读地**取这个账号看到的「下一场」（= 口令池里那一格的**现取版** ✓）。
+///
+/// # 谁在用
+///
+/// 「直播自动定时」的重算（`mcloud_app::live_auto::reschedule_live_auto` ✓）——
+/// 它要**按账号各取一次**再取最早 ✓（用户口径 2026-10-08：「下一场应该从上游获取啊」）。
+///
+/// # 判据**不在**这里
+///
+/// 「下一场」的判据只有一份：`mcloud_core::kouling::next_room_at`
+///（按唯一有效主播筛 → 只认预告场 → 跳过已过去的场次 → 取最早 ✓）。
+/// 池那条路调的是同一个函数 —— 两处各写一遍的话迟早分叉，
+/// 而用户已经见过一次那样的后果（「16:31 还显示 15:00」✗）。
+///
+/// ⚠ `now_local` 是**东八区墙钟串**（与上游同格式 ✓）：用它筛掉已经过去的场次
+///（上游的预告里会挂着开过的场次 ✓）。传空串等于不筛 —— 别这么调 ✗。
+pub async fn fetch_next_start(
+    http: &dyn mcloud_core::HttpClient,
+    account: &mcloud_core::Account,
+    now_local: &str,
+) -> Result<Option<String>> {
+    let jwt = gate_jwt(http, account).await?;
+    let rooms = gate_rooms(http, &jwt).await?;
+    Ok(
+        mcloud_core::kouling::next_room_at(&schedule_rooms(&rooms), now_local)
+            .map(|r| r.expect_start_time.clone()),
+    )
+}
+
 /// 把一份领取报告里"验成有效"的口令并进集合（本地计"够不够两条"用）。
 ///
 /// # 为什么判据要**本地算**，而不是回读池
@@ -195,6 +308,29 @@ async fn settle_pool(
 /// 所以"还不足两条有效就继续听"在理论上可以永远听下去。
 /// 上限只兜底，不参与判据 —— 正常情况下第一、二轮就够了。
 pub const MAX_LISTEN_ROUNDS: usize = 5;
+
+/// 听弹幕时长的**缺省值**（秒）。
+///
+/// # 为什么只在这一处定义
+///
+/// 这个缺省值有两个读法：运行时解析（[`LiveRoomRun::params_from_body`] 里
+/// `listenSeconds` 缺席时用它）与参数说明（[`LiveRoomTask::params`] 里
+/// `ParamSpec` 的 `default`，配置页与直播页照它预填）。两处各写一个数字，
+/// 改一处漏一处 ⇒ 表现是"界面上写着 180、实际只听了 60"，而且两处代码
+/// 各自看都自洽，查不出来 ✗。所以两处都引用这一个常量 ✓。
+///
+/// # 取值依据
+///
+/// 用户口径（2026-10-08）：「默认180」—— 原先是 60（照参考实现）。
+/// ⚠ 校验区间是 `[5, 1800]`（见 [`LiveRoomTask::params`]），180 在区间内 ✓。
+///
+/// ⚠⚠ 改这个数字**必须**回头核 `mcloud-core` 的
+/// [`mcloud_core::kouling::SCRAPE_MIN_INTERVAL_MS`]：那个常量是"两次自动抓取之间
+/// 的最小间隔"，它必须 ≥ `DEFAULT_LISTEN_SECONDS * 1000`（一次抓取要听满一整段，
+/// 间隔比它短 ⇒ 第一个账号还没听完、第二个账号就另起一次 ✗）。
+/// 两边**互相点名**（那边引不到这里：依赖方向是 `mcloud-tasks → mcloud-core`），
+/// 断言钉在本 crate 的 `tests.rs`：`scrape_interval_covers_a_whole_listen`。
+pub const DEFAULT_LISTEN_SECONDS: u64 = 180;
 
 /// 一趟运行里**由使用者决定**的那几件事。
 ///
@@ -862,8 +998,9 @@ pub trait KoulingCollector: Send + Sync {
 ///
 /// # 为什么必须并发
 ///
-/// WS 那一源要**听满**一段（默认 60 秒）才有意义，而小红书只是一次 GET。
-/// 串行的话总耗时就是 `60s + 1s`，而其中 60 秒里网络是空闲的。
+/// WS 那一源要**听满**一段（缺省 180 秒，见 [`DEFAULT_LISTEN_SECONDS`]）才有意义，
+/// 而小红书只是一次 GET。
+/// 串行的话总耗时就是 `180s + 1s`，而其中 180 秒里网络是空闲的。
 ///
 /// # 一个源坏了不影响另一个
 ///
@@ -1219,8 +1356,8 @@ impl<'a> LiveRoomRun<'a> {
             listen_seconds: body
                 .get("listenSeconds")
                 .and_then(Value::as_u64)
-                // 默认 60 秒：与参考实现一致（听满一段才有意义）。
-                .unwrap_or(60),
+                // 缺省见 [`DEFAULT_LISTEN_SECONDS`]（听满一段才有意义）。
+                .unwrap_or(DEFAULT_LISTEN_SECONDS),
             skip_kouling: body
                 .get("skipKouling")
                 .and_then(Value::as_bool)
@@ -1269,7 +1406,8 @@ impl<'a> LiveRoomRun<'a> {
     /// 手里没有可用口令（含池里挑出来为空的）  且  池里有效 < 2 条  且  没开「只听手工」
     /// ```
     ///
-    /// 再叠一道**90 秒去重**（[`mcloud_core::KoulingPool::scrape_ready`]）：
+    /// 再叠一道去重（[`mcloud_core::KoulingPool::scrape_ready`]，窗口 =
+    /// [`mcloud_core::kouling::SCRAPE_MIN_INTERVAL_MS`]，它 ≥ 一次抓取要听的时长）：
     /// 别的账号刚开抓就别再扑上去 —— 这就是"一个 mcloud 用户只开一个抓取"那一句。
     ///
     /// # ⚠ 票（`jwttoken`）的来源：**云盘侧**，不是直播侧
@@ -1288,10 +1426,10 @@ impl<'a> LiveRoomRun<'a> {
     ///
     /// 原项目 `for (const room of rooms)` 会把该主播**每一间**在播房间都听一遍。
     /// 这里只取第一间：同时开两间以上是**少数情况**，而顺序听 N 间会把墙钟
-    /// 变成 `N × listen_seconds`（默认 60s ⇒ 3 间就是 3 分钟）。
+    /// 变成 `N × listen_seconds`（缺省 180s ⇒ 3 间就是 9 分钟）。
     ///
     /// ⚠ **代价必须说出来**：同时开两间时，第一间之外的口令会被**整场漏掉**。
-    /// 所以**只要房间数 > 1 就必须 warn**，否则用户看到"在播房间 X，听 60 秒"
+    /// 所以**只要房间数 > 1 就必须 warn**，否则用户看到"在播房间 X，听 180 秒"
     /// 会以为已经听全了。
     pub async fn run_account(
         &self,
@@ -1349,7 +1487,8 @@ impl<'a> LiveRoomRun<'a> {
         // ⇒ 不必抓。于是抓取天然只在"谁都还没拿到口令"时发生一次，
         // 而"有效够 2 条"之后全场都不再抓（用户口径）。
         //
-        // ⚠ 再加一道**去重**：别的账号刚开抓（90 秒内）就别再扑上去 ——
+        // ⚠ 再加一道**去重**：别的账号刚开抓（窗口 = `SCRAPE_MIN_INTERVAL_MS`，
+        // 180 秒 ⇒ 覆盖一次抓取听满的时长）就别再扑上去 ——
         // 用户口径"一个 mcloud 用户只需要开一个 ws/小红书抓取"。这道判据是
         // **持久化**的（不是进程内标志）：重启后仍然有效，而池存在的意义就是跨重启。
         if out.codes.is_empty()
@@ -1369,13 +1508,15 @@ impl<'a> LiveRoomRun<'a> {
             // 否则「下一场」会挑到别人的场次（用户口径 2026-10-02）。
             pool.note_schedule_anchor(mcloud_upstream::live_consts::KOULING_ANCHOR);
             pool.note_probe(&schedule_rooms(&all_rooms), out.gate.active, now_ms);
-            // ⚠ 记"我开抓了"必须在**动手之前**：收集要听满 listenSeconds（默认 60 秒），
+            // ⚠ 记"我开抓了"必须在**动手之前**：收集要听满 listenSeconds
+            //（缺省 180 秒，见 [`DEFAULT_LISTEN_SECONDS`]），
             // 抓完再记 = 整个窗口都敞着，别的账号照样扑上来。
             //
             // ⚠⚠ 这里**连"门最后是关的"也会记**（`note_scrape` 在 `if !out.gate.active`
-            // 之前）：效果是 90 秒内不再重复问门。这是**故意**的 —— 判定门的结果
+            // 之前）：效果是 180 秒（`SCRAPE_MIN_INTERVAL_MS`）内不再重复问门。
+            // 这是**故意**的 —— 判定门的结果
             // 在一分钟内不会变，而"没开播"是这一整段里最正常的结局，
-            // 每个账号每分钟都去打两枪只是白白喂风控。代价：开播最多晚 90 秒被发现。
+            // 每个账号每分钟都去打两枪只是白白喂风控。代价：开播最多晚 180 秒被发现。
             pool.note_scrape(now_ms);
             if let Err(e) = ctx.store.save_kouling_pool(&pool).await {
                 ctx.warn(format!("口令池写回失败（不影响本次运行）：{e}"));
@@ -1605,6 +1746,11 @@ impl<'a> LiveRoomRun<'a> {
     ///
     /// （第 ③ 步是 [`Self::gate_rooms`]，它要拿 ② 换到的 JWT 才能打。）
     ///
+    /// ⚠⚠ **实现搬到了 [`gate_jwt`]**（同一份代码，只是换了入口 ✓）：
+    /// "只读地取上游那份日程"现在有**两个调用方**（本任务 + 直播自动定时的重算 ✓），
+    /// 各写一遍那四枪迟早分叉 ✗ ⇒ 请求构造与编排收在自由函数里，
+    /// 这里只做"把 `TaskContext` 的两个字段递过去" ✓。
+    ///
     /// # ⚠⚠ 这张票**只**给直播侧用（`/cmlive` 与弹幕 WS）
     ///
     /// 它与六步链要的**云盘侧** `jwttoken` **不是同一个东西**，两者绝不能互换：
@@ -1622,78 +1768,15 @@ impl<'a> LiveRoomRun<'a> {
     /// 而 H5 那一族只往 `jwttoken` 上写。本函数**只**返回 JWT，
     /// 绝不去碰六步链那一边 —— 那一边的票由 `H5Client` 透明注入
     /// （见 [`Self::run_account`] 里那段说明）。
-    ///
-    /// # ⚠ 失败**如实上抛**（带步名前缀），不照抄参考实现那条"失败即放行"
-    ///
-    /// 参考实现早先在 SSO / 登录失败时 `return true` 放行，它自己后来明确否定了：
-    /// 那条让"凭据坏了"表现成"门开着、却一条口令也听不到"，
-    /// 真因被盖住，排查方向会从"今天是不是没开播"开始 —— **完全错**。
-    ///
-    /// ⇒ 这里把失败原样返回，要不要继续由**调用方**决定 ——
-    ///
-    /// # 证据等级
-    ///
-    /// - **实证**：①②两步 + 第③步（`tabContentList`）—— 出处
-    ///   `../mcloud/docs/capture/app-live-redflower-samples.txt` §5.3（第 345–365 行）
-    ///   与证据等级表（第 466–475 行）。那一轮用临时只读探针主动走了一遍，
-    ///   因为门第③步是 **GET、不需要开播**。
-    /// - **本条实证的两处细节**：`querySpecTokenV2(017027)` 能换到 SSO
-    ///   ⇒ 库里那份 `authorization` 在直播族上也认；
-    ///   `cmpassLoginByCmToken` 的 `object` **就是 JWT 本身**（180 字符），不是包着它的对象。
-    /// - ⏸ **仍结构性抓不到**：WS / 弹幕 / 口令（未开播，`chatRoomId: null`）。
-    ///   那一段在 [`LiveKoulingCollector`] 里，**与本函数分开标**。
     pub async fn open_gate(&self, ctx: &TaskContext) -> Result<String> {
-        // ① 换 SSO token。用**直播侧**的 `toSourceId`（`017027`）——
-        // 不是签到的 `001005`。混用的表现是"一条房间都筛不出来"，
-        // 而那看起来像"今天没有直播"：一个**假结论**（参考实现坑表 #106）。
-        let authorization = mcloud_upstream::basic_authorization(&ctx.account);
-        let resp = ctx
-            .http
-            .request(mcloud_upstream::session::live_gate_spec_token_request(
-                &authorization,
-            ))
-            .await
-            .map_err(|e| Error::Other(format!("[门·换 SSO token] {e}")))?;
-        let body = mcloud_upstream::session::ensure_http_ok(&resp, "门·换 SSO token")
-            .map_err(|e| Error::Other(format!("[门·换 SSO token] {e}")))?;
-        let sso = mcloud_upstream::session::parse_sso_token(body)
-            .map_err(|e| Error::Other(format!("[门·换 SSO token] {e}")))?;
-
-        // ② 用 SSO 换**直播侧** JWT。
-        let resp = ctx
-            .http
-            .request(live::cmpass_login_request(&sso)?)
-            .await
-            .map_err(|e| Error::Other(format!("[门·换直播侧 JWT] {e}")))?;
-        let body = mcloud_upstream::session::ensure_http_ok(&resp, "门·换直播侧 JWT")
-            .map_err(|e| Error::Other(format!("[门·换直播侧 JWT] {e}")))?;
-        let env = live::CmliveEnvelope::parse(body)
-            .map_err(|e| Error::Other(format!("[门·换直播侧 JWT] {e}")))?;
-        live::parse_cmpass_login(&env).map_err(|e| Error::Other(format!("[门·换直播侧 JWT] {e}")))
+        gate_jwt(&*ctx.http, &ctx.account).await
     }
 
     /// 拉两个页签的房间（门的第一步）。
     ///
-    /// ⚠ 只查 `127` 会在"房间还没进福利页签"时判成**没开播**，而那正是
-    /// "漏掉整场口令"这一侧的错误 —— 代价远大于多打一个 GET。
+    /// ⚠ 实现与判据见 [`gate_rooms`]（自由函数 ✓）—— 这一层只递 `ctx` 里的两个字段。
     async fn gate_rooms(&self, ctx: &TaskContext, jwt: &str) -> Result<Vec<live::LiveRoom>> {
-        let tab_ids = vec![
-            mcloud_upstream::live_consts::LIVE_TAB_ID_BENEFITS,
-            mcloud_upstream::live_consts::LIVE_TAB_ID_REPLAY,
-        ];
-        let mut groups: Vec<Vec<live::LiveRoom>> = Vec::new();
-        for tab_id in tab_ids {
-            let what = format!("直播·页签 {tab_id}");
-            let resp = ctx
-                .http
-                .request(live::tab_content_list_request(tab_id, jwt))
-                .await?;
-            let body = mcloud_upstream::session::ensure_http_ok(&resp, &what)?;
-            groups.push(live::parse_tab_content_list(&live::CmliveEnvelope::parse(
-                body,
-            )?)?);
-        }
-        Ok(live::merge_rooms(&groups))
+        gate_rooms(&*ctx.http, jwt).await
     }
 }
 
@@ -1761,11 +1844,13 @@ impl Task for LiveRoomTask {
             ParamSpec::number(
                 "listenSeconds",
                 "听弹幕时长",
-                60.0,
+                // ⚠ 缺省值只有一处定义（[`DEFAULT_LISTEN_SECONDS`]）——
+                // 别在这里再写一个 180。
+                DEFAULT_LISTEN_SECONDS as f64,
                 5.0,
                 1800.0,
                 "秒",
-                "听多久弹幕来抓口令（参考实现的默认是 60 秒）",
+                "听多久弹幕来抓口令（默认 180 秒）",
             ),
             ParamSpec::boolean("skipKouling", "跳过听弹幕", false, "直接用上面填的口令去领"),
         ]

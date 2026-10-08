@@ -66,6 +66,22 @@ pub async fn run_pipeline(app: &App, args: &[String]) -> anyhow::Result<()> {
         }
     };
 
+    run_one(app, &pipeline).await
+}
+
+/// 跑**一条已经在手的编排**（不查库 —— 查库那一步在调用方）。
+///
+/// # 为什么要拆出来
+///
+/// 2026-10-07 用户口径：「实现一个默认的编排任务…cli 一条命令」＋ 紧接着的更正
+/// 「**默认编排也要和普通的自定义编排一个逻辑**」✓。
+/// ⇒ "默认编排"不该有自己的一套跑法 ✗：`run-all` 与 `pipeline run <id>` 走
+/// **同一个执行体**（账号解析、逐步播报、退出码逐格相同 ✓），差别只在"这条编排是从
+/// 库里取的，还是内置预设" ✓。
+///
+/// ⚠ 只收 `&Pipeline`（不是 id）：预设因此能直接进来，而**不必**先写进库 ✓ ——
+/// 命令行顺手往用户库里塞一条，正是被否掉的行为 ✓。
+pub(crate) async fn run_one(app: &App, pipeline: &mcloud_core::Pipeline) -> anyhow::Result<()> {
     // 账号：配置里指定了就用它，否则**所有已启用账号**。
     let accounts = target_accounts(app, &pipeline.accounts).await?;
     if accounts.is_empty() {
@@ -83,7 +99,9 @@ pub async fn run_pipeline(app: &App, args: &[String]) -> anyhow::Result<()> {
     let outcome = app
         .handle
         .pipelines
-        .run(&pipeline, &accounts, None)
+        // ⚠ `pipeline` 现在已经是 `&Pipeline`（`run_one` 的入参）⇒ 这里**不再**取引用
+        // （多一层 `&` 就是 `needless_borrow`，clippy `-D warnings` 会红 ✓）。
+        .run(pipeline, &accounts, None)
         .await
         .context("编排执行失败")?;
 
@@ -105,6 +123,10 @@ pub async fn run_pipeline(app: &App, args: &[String]) -> anyhow::Result<()> {
     }
 
     let overall = outcome.status();
+    // ⚠ **先把在飞的推送等落地，再决定退出码**（2026-10-07，用户口径
+    // 「想想 cli 上该怎么做，记得写的时候兼容」✓）：投递是 spawn 出去的 ✓，
+    // 而 CLI 跑完就退 ⇒ 进程一没、在飞的 HTTP 就断了 ✗ —— 失败时那条恰恰最该到 ✓。
+    app.handle.pushes.flush().await;
     println!("{}", outcome.summary_line());
     if overall == mcloud_engine::StepStatus::Ok {
         Ok(())

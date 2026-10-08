@@ -14,11 +14,16 @@
  *  - 只用一个断点（`md`，768px）→ §7.1
  */
 
-import { IconAlert, IconClock, IconDashboard, IconExchange, IconFlower, IconHistory, IconPipeline, IconSettings, IconTask, IconUser } from './icons'
+import { IconBell, IconClock, IconDashboard, IconExchange, IconFlower, IconHistory, IconPipeline, IconSettings, IconTask, IconUser } from './icons'
 
+/**
+ * ⚠ 2026-10-08 起 **没有 `'logs'` 了**（用户口径：把「历史」与「日志」合成一条，
+ * 另外把「推送」单独开一条 ⇒ 一减一加，侧栏仍是 10 条 ✓）。
+ * 日志成了「历史」页的**第二个 tab** ✓；`/logs` 这个**地址**照旧认（见
+ * `PATH_ALIASES`）—— 它只是不再是一条独立的导航项 ✓。
+ */
 export type PageId =
   | 'dashboard'
-  | 'logs'
   | 'accounts'
   | 'tasks'
   | 'exchange'
@@ -26,6 +31,7 @@ export type PageId =
   | 'schedules'
   | 'pipelines'
   | 'history'
+  | 'push'
   | 'settings'
 
 interface NavItem {
@@ -49,11 +55,22 @@ interface NavItem {
 /**
  * 页面清单。顺序即侧栏顺序（按使用频率排：总览与任务最常用）。
  *
- * ⚠ **已经用满 9 条**（规范里"9 条封顶"是硬上限）。
- * 再加页面**不能**直接在这里开第 10 条 —— 要么并进已有页，
- * 要么先改规范。这正是那条上限存在的意义：逼一次"它真的该是独立一页吗"。
- */
-export const NAV_ITEMS: readonly NavItem[] = [
+ * ⚠ 侧栏**现在 10 条**（这句原先写的是"已经用满 9 条"，与实际不符 —— 按实际记 ✓）。
+ * 规矩照旧：**再加第 11 条之前先问一句"它真的该是独立一页吗"**。
+ *
+ * 2026-10-08 用户口径（原话「合并这两个（截图圈着侧栏的「历史」与「日志」），并单独给推送一个」）
+ * ⇒ **一减一加**，仍是 10 条 ✓：
+ * * 减：`logs` 不再是导航项，它成了「历史」页的第二个 tab ✓（地址 `/logs` 照旧认 ✓）；
+ * * 加：`push` 独立成页 ✓ —— 渠道与规则两块从「设置」整块搬过去 ✓
+ *   （用户口径 2026-10-07「我没有看到配置推送规则的页面」的根因就是它**不是导航项** ✗）。
+ *
+ * 2026-10-07 现成先例（同一个功能，答案换过一次）：用户先要「上游状态」独立成页，
+ * 加进侧栏；看到界面后又说「**这个不要放 nav 里，看放哪里好点**」⇒ 改挂
+ * **账号页的子视图** `/accounts/upstream`（`accounts-page.tsx` 那套 ✓，
+ * 与 `/accounts/settings`、`/tasks/config` 同款）—— 侧栏回到 10 条 ✓。
+ * ⇒ 判据不是"它重不重要"，而是"**它是不是一个独立的去处**"：上游状态是
+ * "看某个账号在上游那边是什么样"，**跟着账号走**，所以它是账号页的一层，不是一条导航 ✓。
+ */export const NAV_ITEMS: readonly NavItem[] = [
   {
     id: 'dashboard',
     label: '总览',
@@ -117,17 +134,20 @@ export const NAV_ITEMS: readonly NavItem[] = [
     id: 'history',
     label: '历史',
     title: '历史与日志',
-    blurb: '历次执行的结果、耗时与失败原因。',
+    // ⚠ 2026-10-08 起这一条是**两个 tab**（历史 / 日志）—— 用户口径
+    // 「合并这两个（历史与日志）」✓。blurb 里要把日志那半也说出来，
+    // 不然"日志去哪了"会变成一个只能靠点开才知道的问题 ✗。
+    blurb: '历次执行的结果与耗时；第二个 tab 是整个进程的服务端日志。',
     href: '/history',
     icon: IconHistory,
   },
   {
-    id: 'logs',
-    label: '日志',
-    title: '服务端日志',
-    blurb: '整个进程的日志：任务、调度、上游请求，一处看全。',
-    href: '/logs',
-    icon: IconAlert,
+    id: 'push',
+    label: '推送',
+    title: '推送',
+    blurb: '配推送渠道（PushPlus / 企业微信 / 邮件…）与推送规则，决定什么情况下推、推到哪。',
+    href: '/push',
+    icon: IconBell,
   },
   {
     id: 'settings',
@@ -168,9 +188,28 @@ export const DOCK_IDS: readonly PageId[] = [
 export const pathParts = (pathname: string): string[] =>
   pathname.split('/').filter((x) => x.length > 0)
 
+/**
+ * 老地址 → 页面 id。
+ *
+ * ⚠ 只放"**曾经是一条导航项、现在不是了**"的地址。放进来就等于承诺它永远打得开 ✓
+ * —— 这类地址散落在书签、浏览器历史与旧文档里，删掉就是给别人一个 404 ✗。
+ * ⚠ 与新地址**同页**的老地址（`/accounts/push` → `/accounts/settings`）不走这里：
+ * 那一对是子视图内部认的（见 `account-config-page.tsx` 的 `isPushPath` 那类判据 ✓）。
+ */
+const PATH_ALIASES: Record<string, PageId> = { '/logs': 'history' }
+
 export const parsePath = (pathname: string): PageId => {
   const found = NAV_ITEMS.find((item) => item.href === pathname)
   if (found) return found.id
+  /**
+   * 老地址（不再是一条导航项，但**必须继续认**）。
+   *
+   * ⚠ `/logs` 2026-10-08 起并进「历史」页当第二个 tab ✓ —— 但书签、浏览器历史、
+   * 旧文档里的 `/logs` 不能 404，也不能把人甩回总览 ✗（与 `/accounts/push`
+   * 那条老地址兼容同一个口径 ✓：改名只该影响**新**链接 ✓）。
+   */
+  const alias = PATH_ALIASES[pathname]
+  if (alias) return alias
   // 子路由按**第一段**归属：`/tasks/xxx/config` 仍是「任务」这一页。
   // 不做这一步的话它会被兜底成"总览"，用户点「配置」会莫名其妙跳到总览页。
   const [first] = pathParts(pathname)

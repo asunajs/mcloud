@@ -48,7 +48,7 @@
  * 「也不一定是 0 点，有些也不是」）⇒ 界面不写"0 点开抢"，只说清猜法与依据。
  */
 
-import { onMounted, ref } from 'lite'
+import { onMounted, ref } from '@asunajs/lite'
 import {
   listAccounts,
   listExchangePrizes,
@@ -442,7 +442,7 @@ const GroupHead = (props: { group: PrizeGroup; openCount: number }) => (
  * 一条**可兑**的件。
  *
  * ⚠ 为什么写成组件、而不是页面里的 `const row = (p) => (…)`：
- * `web/lite/compiler.ts` 的 `mapCallback` **刻意不认块体回调**
+ * `@asunajs/lite` 的 `compiler.ts` 的 `mapCallback` **刻意不认块体回调**
  * （`xs.map((x) => { const a = …; return <Row/> })` 会落回通用路径，
  * 于是里面的 `key` 没人认领 ⇒ 直接报"这个 key 什么都不做"）。
  * 列表行的回调因此只能写成**表达式体**，"先算再渲染"和"两种行"只能靠组件拆开。
@@ -1009,9 +1009,18 @@ export const ExchangePage = () => {
   const submitSchedule = async () => {
     const prize = planning.value
     if (!prize) return
+    /**
+     * ⚠ 弹窗优先 + 就近（2026-10-08 用户口径「所有的提示都是优先弹窗式」）：
+     * 这一句除了画在弹窗里（就在「加到定时」上面），还要上一条 toast ——
+     * 弹窗里的红字在长表单里会被看漏，而错误类 toast 不自动消失（见 `ui/toast.ts`）。
+     */
+    const planFail = (msg: string): void => {
+      planError.value = msg
+      pushToast('error', msg)
+    }
     const computed = buildPlan(planAt.value, planLead.value)
     if (computed.error) {
-      planError.value = computed.error
+      planFail(computed.error)
       return
     }
     planSaving.value = true
@@ -1033,12 +1042,16 @@ export const ExchangePage = () => {
           offset: planOffset.value,
         },
         enabled: true,
+        // ⚠ 新定时**不推**（空数组 = 一条规则都不选 / 跑完就推 ✓）——
+        // 抢兑这条定时由这一页顺手建出来，没有给用户挑推送的界面 ✓。
+        pushRules: [],
+        pushEvents: [],
       })
       closeDialog(PLAN_ID)
       planning.value = null
       pushToast('success', '已加到定时 —— 到「定时」页可以看到下次触发时间')
     } catch (e) {
-      planError.value = e instanceof Error ? e.message : String(e)
+      planFail(e instanceof Error ? e.message : String(e))
     } finally {
       planSaving.value = false
     }
@@ -1296,7 +1309,7 @@ export const ExchangePage = () => {
         </div>
       ) : (
         // ⚠ 这一层容器不能省：`.map` 必须作为**某个 JSX 元素的子表达式**出现，
-        // 编译器的三元分支只认"JSX / null"（`web/lite/compiler.ts` 的 `branchOk`）——
+        // 编译器的三元分支只认"JSX / null"（`@asunajs/lite` 的 `compiler.ts` 的 `branchOk`）——
         // 直接把 `.map(...)` 当分支放，`key` 就不会被认领（报"这个 key 什么都不做"）。
         <div class="flex flex-col gap-4">
           {/*

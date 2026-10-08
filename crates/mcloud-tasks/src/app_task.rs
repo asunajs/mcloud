@@ -34,7 +34,15 @@ use mcloud_upstream::app_task_click;
 use mcloud_upstream::app_task_list_v2::TaskV2Item;
 use mcloud_upstream::cloud_trash;
 
-use crate::app_task_matrix::{self, APP_TASK_MARKETS};
+use crate::app_task_matrix::{self};
+
+/// 专用执行器那一半（旧 TS `tasks/app/runners.ts` 的 runner 表）。
+///
+/// ⚠ 单独一个文件是为了让"**判据**"（本文件上半，全是纯函数）与"**动作**"
+/// （那个文件，一枪一枪的 IO 编排）分得开。见 `runners.rs` 文件头。
+pub mod runners;
+
+pub use runners::{AppRunner, RunnerState};
 
 /// 「这一条要往网盘传文件」的参数集。
 ///
@@ -364,27 +372,67 @@ fn parse_ratio(s: &str) -> Option<(i64, i64)> {
     None
 }
 
-/// 收尾的**事后读数**：整张表再拉一遍，把"跑之前记下的数"和"跑之后的数"对上 ✓。
+/// 收尾的**事后复查**：整张表再拉一遍，拿"动手前的状态/读数"和"动手后的"对上，
+/// **由状态的变化**判这一趟成没成 ✓。
 ///
-/// 一次拉表服务**两档**（都靠"数字"说话，都是官方没给"完成没完成"接口的那种）：
+/// # 判据（用户口径 2026-10-07）
 ///
-/// * **434** —— 分享次数 `shareBefore → shareAfter`，`after > before` 才算记上 ✓；
-/// * **522** —— 上传**进度** `42/100 → 47/100` ✓ —— 用户口径 2026-10-04：
-///   「毕竟需要 100 个，也不急着一次做完，**进度还是很重要的**」✓。
-///   这一档一趟只传 [`ROUNDS_PER_RUN`] 个，光看 `uploaded:5` 根本看不出走到哪儿了 ✗。
+/// 「**成功与否不是看你做了啥，而是状态的变化**」✓ —— 也就是旧 TS
+/// `tasks/app/results.ts:collectTaskResult` 那一套：
+/// `doingList`（本次动过）＋ 复查后的 `state === "FINISH"` ⇒ 成功；动了而没变 ⇒ 失败 ✓。
 ///
-/// 一次拉表而不是每档各拉一趟：同一份读数、同一个时刻 ✓（也省 16 发 GET ✓）。
+/// ⚠⚠ **这一句改掉了本仓原来的算法**：以前 `acted` 是"**我们发了写请求并且它返回成功**"
+/// 就 +1（打卡 200、文件 PUT 上去…）✗ —— 那是"看你做了啥"。真机读数证明它会把
+/// "没记上"说成"做了"：run 155 里 `409 / 1005` 都 `clicked:true`，
+/// 而复查时上游状态**还是 `WAIT`**（同一天 `431` 就变成了 `FINISH` ✓）⇒
+/// 前者根本不该算"做了" ✗。
+///
+/// # 三种结论
+///
+/// | 结论 | 判据 | 处理 |
+/// |---|---|---|
+/// | **成** | 状态变成 `FINISH` ✓ 或名字里的 `a/b` 变大（434 次数 / 522 进度 ✓）| `ctx.success` + 计进 `acted` ✓ |
+/// | **没记上** | 读到了状态/读数，但**没变** | `ctx.fail` + 进 `failures` ✓（**这才是"看你做了啥"该有的下场**）|
+/// | **读不出** | 拉表失败 / 表里没有这一条 | 只写"未获上游确认"标注，**不硬判失败** ✓ |
+///
+/// 一次拉表服务**所有**"动过、要判定"的条目（同一份读数、同一个时刻 ✓，也省 GET ✓）。
 async fn settle_progress(ctx: &TaskContext, result: &mut AppTaskResult) {
     // ⚠ "整条没动（上游已做满）"的那些档**不必再拉一次整表** ✗ —— 拉回来也没得比 ✓
     //（2026-10-07：分享 `7/7` 那种条目每一趟都会白拉 16 次 ✓）。
+    //
+    // ⚠⚠ **`skipped_today` 也必须排除**（2026-10-07 真机逮到，用户截图：
+    // "不跑第二次"下面紧跟一行红 FAIL ✗）。这一类是"**本地记录说今天已经成功过 ⇒
+    // 压根没动手**"，它的 `share_before` 必然是 `None`（跳过那一支不去读名字里的 a/b ✓）
+    // ⇒ 放进来就会走 [`settle_share`] 的 `None` 分支、报「动手前读不出次数 ⇒ 无从比较」✗
+    // —— 那句话的含义是"我们没读到"，而事实是"我们没打算读" ✗，两回事。
+    // 附带：排除之后 `share_i`/`upload_i` 双双为 `None` ⇒ 那趟整表**压根不发** ✓。
     let share_i = result
         .steps
         .iter()
-        .position(|s| s.task_id == Some(SHARE_TASK_ID) && !s.already_done);
+        .position(|s| s.task_id == Some(SHARE_TASK_ID) && !s.already_done && !s.skipped_today);
     // ⚠ 找的是"**报了进度的那些档**"（522 / 615 那一族…），不是写死 522 的 id ✓
     let upload_i = result.steps.iter().position(|s| s.progress_total.is_some());
-    if share_i.is_none() && upload_i.is_none() {
-        return; // 这两档都没做 ⇒ 那一趟"事后整表"压根不发 ✓
+    // ⚠⚠ 第三类：**动过、但只有状态可比**的那些（409 / 431 / 1005 / click-only 那一族…）
+    // —— 以前它们**不进这一趟复查**（所以日志里只有 START、后面一片空白 ✗，
+    // 用户 2026-10-07 指的就是这个）。现在把它们也纳进来：它们的"成"只能看状态变化 ✓。
+    //
+    // ⚠ 434 与"报进度"那两档**不在这里** —— 它们由 [`settle_share`] / [`settle_upload`]
+    // 结算（各自的读数比状态更细 ✓），放进来会对同一条记两笔 ✗。
+    let judge: Vec<usize> = result
+        .steps
+        .iter()
+        .enumerate()
+        .filter(|(i, s)| {
+            acted(s)
+                && !s.already_done
+                && !s.skipped_today
+                && Some(*i) != share_i
+                && Some(*i) != upload_i
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if share_i.is_none() && upload_i.is_none() && judge.is_empty() {
+        return; // 这一趟没有要复查的 ⇒ 那趟"事后整表"压根不发 ✓
     }
     let Some(items) = refetch_items(ctx).await else {
         for i in [share_i, upload_i].into_iter().flatten() {
@@ -394,6 +442,25 @@ async fn settle_progress(ctx: &TaskContext, result: &mut AppTaskResult) {
         }
         return;
     };
+
+    // ① 先把**动手后的状态**落到每一条上（判定的右半边 ✓）。
+    //
+    // ⚠ 覆盖**所有动过的条目**（含 434 与"报进度"那两档 ✓）—— 用户口径要的是
+    // "记录开始时的状态、运行后的状态"（2026-10-07）⇒ 明细里每一条都该有这两格，
+    // 不能只有"靠状态判"的那一批有 ✗。
+    let mut watch = judge.clone();
+    watch.extend([share_i, upload_i].into_iter().flatten());
+    watch.sort_unstable();
+    watch.dedup();
+    for &i in &watch {
+        let Some(id) = result.steps[i].task_id else {
+            continue;
+        };
+        result.steps[i].state_after = items
+            .iter()
+            .find(|it| it.task_id == Some(id))
+            .and_then(|it| it.state.clone());
+    }
 
     if let Some(i) = share_i {
         settle_share(&items, result, i, ctx);
@@ -417,13 +484,136 @@ async fn settle_progress(ctx: &TaskContext, result: &mut AppTaskResult) {
     if let Some(i) = upload_i {
         settle_upload(&items, result, i, ctx);
     }
+
+    // ② 逐条下结论，并**按状态变化重算 `acted`**。
+    //
+    // ⚠⚠ 为什么要重算而不是"在做的那一处 +1"：用户口径就是"不看做了啥、看状态变化" ✓
+    // ⇒ 只有**被上游记上**的才算做了。原处那几发 `acted += 1` 照旧留着（它们是
+    // "我们真动过"的记录 ✓，也是初值），这里按复查结果**逐条订正** ✓：
+    // 原处记了而复查说"没变" ⇒ 撤回；原处没记而复查说"变了" ⇒ 补上。
+    if !judge.is_empty() {
+        for &i in &judge {
+            let name = result.steps[i].name.clone();
+            let verdict = verdict_of(&result.steps[i]);
+            let counted = result.steps[i].acted_counted;
+            match verdict {
+                StepVerdict::Confirmed => {
+                    if !counted {
+                        result.steps[i].acted_counted = true;
+                        result.acted += 1;
+                    }
+                    let how = change_line(&result.steps[i]);
+                    ctx.success(format!("{name}：上游已确认（{how}）"));
+                }
+                StepVerdict::Unchanged => {
+                    if counted {
+                        result.steps[i].acted_counted = false;
+                        result.acted = result.acted.saturating_sub(1);
+                    }
+                    // ⚠ 已经记过一次硬失败（网络/上游报错）的**不再补一笔** ——
+                    // 同一条记两次，用户看到的失败数就比实际多 ✗
+                    if result.steps[i].hard_failed {
+                        continue;
+                    }
+                    let how = change_line(&result.steps[i]);
+                    let msg = format!("{name}：本次做了，但上游状态/读数没变（{how}）⇒ 没记上");
+                    ctx.fail(msg.clone());
+                    result.steps[i].problems.push(msg.clone());
+                    result.steps[i].hard_failed = true;
+                    result.failures.push(msg);
+                }
+                // 读不出 ⇒ 交给 [`AppTaskResult::settle_unconfirmed`] 写"未获上游确认" ✓
+                StepVerdict::Unknown => {}
+            }
+        }
+    }
+}
+
+/// 收尾那**两条特例打卡**（旧 TS `tasks/app/index.ts:44-56`）。
+///
+/// # 旧实现逐字
+///
+/// ```ts
+/// for (const task of dedupTasksByName(await getAllAppTaskList(ctx))) {
+///   if (task.id === 434) { …只打印进度…; continue; }
+///   if (task.id === 481 && task.currstep === 2) await clickTask(ctx, 481, "randomCloudTask");
+///   if (task.id === 478 && task.state !== "FINISH") await clickTask(ctx, 478, "randomCloudTask");
+///   collectTaskResult(task, doingList, taskResults);
+/// }
+/// ```
+///
+/// ⇒ 它们**不在** `dispatchTask` 那张 runner 表里，而是**收尾时**照**重新拉回来的**
+/// 表再打一发（`key = randomCloudTask`，见 [`click_key`]）。
+///
+/// # ⚠ 本仓**不无条件**再拉一次整表
+///
+/// 旧 TS 那一遍是"每趟都重新拉 16 组"。本仓 2026-10-07 刚把"已做满的档不必再拉表"
+/// 那条优化做进去（见 [`settle_progress`]）⇒ 这里只在**这一趟的表里出现过
+/// 478 / 481** 时才多拉一次。判据用的是**第一趟**的表：真出现"第一趟没有、
+/// 收尾时才有"那种情况时我们会漏掉一发 —— 而那需要上游在一趟之内新加任务，
+/// 没有样本；反过来"每趟都拉"是**确定**的多 16 次请求 ✓。
+///
+/// ⚠ 它们**算进 `planned` 与 `acted`**：这是一发真实的、不可回滚的写请求，
+/// 不该被算成"没做"（否则摘要会显示"做了 0 条（判出 0 条）"而实际上打了卡 ✗）。
+async fn settle_random_cloud_clicks(ctx: &TaskContext, result: &mut AppTaskResult) {
+    let Some(items) = refetch_items(ctx).await else {
+        result
+            .failures
+            .push("收尾拉表读不出数 ⇒ 478/481 那两条特例打卡没做".to_string());
+        return;
+    };
+    for item in &items {
+        let Some(id) = item.task_id else { continue };
+        let hit = match id {
+            // `task.currstep === 2`（旧 TS 逐字）。
+            481 => item.curr_step == Some(2),
+            // `task.state !== "FINISH"`（旧 TS 逐字）。
+            478 => item.state.as_deref() != Some(app_task_matrix::STATE_DONE),
+            _ => continue,
+        };
+        if !hit {
+            continue;
+        }
+        let name = clean_task_name(&item.name.clone().unwrap_or_default());
+        let mut step = TaskStep {
+            task_id: Some(id),
+            name: name.clone(),
+            ..Default::default()
+        };
+        match click(ctx, item).await {
+            Ok(notice) => {
+                step.clicked = true;
+                result.planned += 1;
+                // ⚠ 这一发**不算进 `acted` 的"订正"**（它不在 `judge` 里：收尾补发的条目
+                // 本身是"上游已做满/特例"那一类 ✓）⇒ 不留 `acted_counted` 标记 ✓
+                result.acted += 1;
+                ctx.success(format!("{name}：收尾那一发随机云朵任务打卡已打 ✓"));
+                if let Some(n) = notice {
+                    step.problems.push(format!("上游附言：{n}"));
+                }
+            }
+            Err(e) => {
+                let msg = format!("{name}：收尾那一发随机云朵任务打卡没成：{e}");
+                step.problems.push(msg.clone());
+                result.planned += 1;
+                result.failures.push(msg);
+            }
+        }
+        result.steps.push(step);
+    }
 }
 
 /// 434 那一格的落地：比次数、决定要不要把这一条计进 `acted` ✓。
 fn settle_share(items: &[TaskV2Item], result: &mut AppTaskResult, i: usize, ctx: &TaskContext) {
     // ⚠ 整条没动（上游已做满）⇒ **没什么可比的**，更不是失败 ✗
     //（2026-10-07 用户反馈：分享 `7/7` 之后每一趟都报失败 ✗）。
-    if result.steps[i].already_done {
+    //
+    // ⚠⚠ **`skipped_today` 同一条道理**（2026-10-07 用户截图逮到）：那一档是
+    // "本地记录说今天已经成功过 ⇒ 压根没动手"，`share_before` 必然是 `None`
+    // ⇒ 放进来只会得到一句「动手前读不出次数 ⇒ 无从比较」，而**界面上那行是红的** ✗。
+    // 调用方（[`settle_progress`]）已经把它排除了 ✓，这里再挡一道是**防回归**：
+    // 换个人来调用时，不会因为少想一步又把"没动手"结算成"没记上" ✗。
+    if result.steps[i].already_done || result.steps[i].skipped_today {
         return;
     }
     let Some(after) = items
@@ -446,6 +636,7 @@ fn settle_share(items: &[TaskV2Item], result: &mut AppTaskResult, i: usize, ctx:
     match before {
         Some((was, total)) if after.0 > was => {
             result.steps[i].share_counted = true;
+            result.steps[i].acted_counted = true;
             result.acted += 1;
             // 旧 TS 在这里打的就是 success（`printShareProgress` ✓）—— 且**只在涨了时**打 ✓
             ctx.success(format!(
@@ -454,20 +645,34 @@ fn settle_share(items: &[TaskV2Item], result: &mut AppTaskResult, i: usize, ctx:
             ));
         }
         Some((was, total)) => {
-            result.steps[i].problems.push(format!(
+            // ⚠⚠ 2026-10-07：这一档也要进 `failures`（用户口径：「成功与否不是看你做了啥，
+            // 而是状态的变化」✓）—— 以前只写一条 `problem` + 一行红日志，而摘要与运行级
+            // 结论看的都是 `failures` ⇒ **日志说失败、摘要却不记** ✗（与 434 跳过那格同一类不一致）。
+            let msg = format!(
                 "分享后上游次数没动（{was}/{total} → {}/{}）⇒ 这一条不算记上",
                 after.0, after.1
-            ));
+            );
+            result.steps[i].problems.push(msg.clone());
+            result.steps[i].hard_failed = true;
+            result
+                .failures
+                .push(format!("{}：{msg}", result.steps[i].name));
             ctx.fail(format!(
                 "{name}：{was}/{total} → {}/{}（上游次数没动 ⇒ 不算记上）",
                 after.0, after.1
             ));
         }
         None => {
-            result.steps[i].problems.push(format!(
+            // 同上：读不出 ⇒ 也算"没记上"（进 `failures` ✓），别只写明细 ✗
+            let msg = format!(
                 "动手前读不出次数（名字里没有 a/b）⇒ 无从比较，保守当作没记上（分享后 {}/{}）",
                 after.0, after.1
-            ));
+            );
+            result.steps[i].problems.push(msg.clone());
+            result.steps[i].hard_failed = true;
+            result
+                .failures
+                .push(format!("{}：{msg}", result.steps[i].name));
             ctx.fail(format!(
                 "{name}：动手前读不出次数 ⇒ 无从比较（分享后 {}/{}）",
                 after.0, after.1
@@ -558,15 +763,9 @@ fn settle_upload(items: &[TaskV2Item], result: &mut AppTaskResult, i: usize, ctx
 /// 本仓照抄这条口径，而不是去猜它这次落在了哪一组（条目会换组、组名也会换 ✗）。
 /// 代价是 16 发只读 GET（与开跑前那次同量 ✓，实测整表读一次约 1.4 s ✓）。
 async fn refetch_items(ctx: &TaskContext) -> Option<Vec<TaskV2Item>> {
-    let mut pages: Vec<mcloud_upstream::app_task_list_v2::TaskListV2> = Vec::new();
-    for market in app_task_matrix::APP_TASK_MARKETS {
-        for group in mcloud_upstream::app_task_list_v2::TASK_LIST_V2_GROUPS {
-            // 单组失败不炸整件事（与只读矩阵同口径 ✓），只是少一页证据。
-            if let Ok(p) = app_task_matrix::fetch_one(ctx, market, group).await {
-                pages.push(p);
-            }
-        }
-    }
+    // 单组失败不炸整件事（与开头那一趟同口径 ✓），只是少一页证据。
+    // ⚠ 取消错误也走 `.ok()?` ⇒ 这一格回 `None`；真正的取消由调用方在链尾原样报出去 ✓。
+    let (pages, _failures) = app_task_matrix::fetch_all(ctx).await.ok()?;
     if pages.is_empty() {
         // 16 发**全**没成 ⇒ "读不出"（这与"拉到了、只是表里没这条"是两回事 ✗）
         return None;
@@ -647,6 +846,20 @@ pub enum Step {
     /// 那发是按步数打的 ⇒ **两发都要** ✓。key 由 [`click_key`] 给
     ///（409 → `task2` ✓，1005 → 默认 `task` ✓）。
     Entry,
+    /// **专用执行器**（107 / 472 / 473 / 1004 / 1014 / 1020 / 1028 / 585）。
+    ///
+    /// 旧 TS 的 `taskRunners` 表（`runners.ts:39-186`）—— 与 `Upload` / `Entry` 走
+    /// **同一条门**（`handleTaskClick`：先打卡、门过了才跑 runner ✓），
+    /// 差别只在"那一件事"由 [`runners::run_runner`] 去做。
+    Runner(AppRunner),
+    /// **click-only**：框架替它打卡，没有 runner（旧 TS `tasks.ts:97-100` 的
+    /// `default:` 分支：`if (!SKIP_TASK_LIST.includes(task.id)) await clickTask(...)`）。
+    ///
+    /// ⚠⚠ 它和上面几档有一处**行为差异**，别抹平：**那一发不看 `currstep`** ✗ ——
+    /// 旧 TS 在 `default:` 分支里是**无条件** `clickTask`，而 runner 那一支走
+    /// `clickTaskWithStep`（`currstep != 0` 就不打）。本仓照抄：这一档
+    /// **不走** [`should_click`] 那道门。
+    ClickOnly,
 }
 
 /// 这一条该做哪件事。判不出来 ⇒ `None`（**什么都不做**）。
@@ -663,7 +876,34 @@ pub fn step_for(item: &TaskV2Item) -> Option<Step> {
     if item.task_id == Some(SHARE_TASK_ID) {
         return Some(Step::Share);
     }
+    if let Some(id) = item.task_id {
+        // 专用执行器（旧 TS 的 runner 表）排在 click-only 之前：
+        // 两串 id 今天**没有交集**，但真出现交集时"有 runner 的走 runner"
+        // 才是旧 TS 的顺序（`tasks.ts:97-100` 先问 `taskRunner[task.id]` ✓）。
+        if let Some(r) = AppRunner::for_task(id) {
+            return Some(Step::Runner(r));
+        }
+        if is_click_only(id) {
+            return Some(Step::ClickOnly);
+        }
+    }
     upload_shape_for(item).map(Step::Upload)
+}
+
+/// **click-only** 那一串 —— 旧 TS 里"框架自动打卡"的 id。
+///
+/// 依据：`mcloud-sign/TASKS.md`「**click-only 任务（框架自动处理）：** 115、431、
+/// 435、1009、1010、1013、1016、447」，与 `tasks.ts:97-100` 的 `default:` 分支
+///（有 runner 的走 runner，否则只要不在 [`SKIP_TASK_LIST`] 里就打卡 ✓）。
+///
+/// ⚠ 与 [`SKIP_TASK_LIST`] 是**互补**关系、**不是**子集关系：那一串是"刻意不打"，
+/// 这一串是"刻意要打"。两串**不得有交集**（有交集时 [`should_act`] 里那道黑名单
+/// 门会让这一档永远到不了这里 —— 那是安全的方向 ✓），由测试钉住。
+pub const CLICK_ONLY_TASK_IDS: [i64; 8] = [115, 431, 435, 1009, 1010, 1013, 1016, 447];
+
+/// 这一条是不是 click-only 那一档。
+pub fn is_click_only(task_id: i64) -> bool {
+    CLICK_ONLY_TASK_IDS.contains(&task_id)
 }
 
 /// 这一条**要不要动**。
@@ -1020,8 +1260,113 @@ pub struct TaskStep {
     /// 它只是给用户看"走到哪儿了" ✓（用户口径 2026-10-04：「毕竟需要 100 个，
     /// 也不急着一次做完，**进度还是很重要的**」✓）。
     pub progress_after: Option<String>,
+    /// 上游在这一条**动手前**自报的状态（`"WAIT"` / `"DOING"` / `"FINISH"` …）。`None` = 没读到。
+    ///
+    /// # 它是"这一趟成没成"的**左半边**（用户口径 2026-10-07）
+    ///
+    /// 「**成功与否不是看你做了啥，而是状态的变化**」✓ —— 旧 TS 就是这么判的：
+    /// `tasks/app/results.ts:collectTaskResult` 拿 `doingList`（本次动过）配上
+    /// **复查后**的 `state === "FINISH"` ⇒ 成功；动了而没变 `FINISH` ⇒ **失败** ✓。
+    ///
+    /// ⚠ 左半边几乎恒为"非 FINISH" —— 因为 [`should_act`] 本来就不会把
+    /// `FINISH` 的条目放进 `planned` ✓（真出现 `FINISH` 说明判据被改坏了）。
+    pub state_before: Option<String>,
+    /// 收尾复查（整表再拉一遍）读到的状态 —— 判定的**右半边** ✓。`None` = 读不出。
+    pub state_after: Option<String>,
+    /// 这一条**已经记过一次硬失败**（网络/解析/上游报错）。
+    ///
+    /// ⚠ 收尾复查**不再**给它补一条"状态没变"的失败 —— 同一条任务记两笔，
+    /// 用户看到的失败数就比实际多 ✗（2026-10-07）。
+    pub hard_failed: bool,
+    /// 这一条**已经计进过 `acted`**（做那一件事的那一处 `acted += 1` ✓）。
+    ///
+    /// ⚠ 收尾复查要按**状态变化**逐条订正 `acted`（用户口径 2026-10-07）⇒
+    /// 没有这枚标记就分不清"该撤回"还是"本来就该补上" ✗。
+    pub acted_counted: bool,
     /// 逐条的原因。
     pub problems: Vec<String>,
+}
+
+/// 这一条**动过没有**（技术动作层面，**不等于**上游记上了 ✓）。
+///
+/// ⚠ 它是收尾复查的**入口条件**：没动过的条目没有"变化"可言 ✓。
+fn acted(s: &TaskStep) -> bool {
+    // ⚠⚠ `acted_counted` **必须算进来**（2026-10-07 真机逮到，用户截图）：
+    // 有几档 runner 干活的方式**既不打门上的卡、也不走"上传 N 个"** —— 典型是 1014
+    //（PDF 转换）：上游那一步已经把 `currstep` 走到 1 了 ⇒ `should_click` 为假 ⇒
+    // `clicked=false`；而它生成/上传那份 PDF 走的是 runner 内部，`uploaded` 也没加 ⇒
+    // 三个条件**全为假** ⇒ 这条**整个跳过收尾复查**、日志里一行结论都没有 ✗，
+    // 而 AI豆 那边明明 +10 记上了 ✓（用户看到的就是这个"日志和结果不一样"✗）。
+    // `acted_counted` 是"我们确实动了它"的**总账**（每一处 `acted += 1` 都留痕 ✓）
+    // ⇒ 用它当入口条件才不漏 ✓。
+    s.uploaded > 0 || s.clicked || s.shared || s.acted_counted
+}
+
+/// 收尾复查给一条条目下的结论（[`settle_progress`] ✓）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepVerdict {
+    /// 上游的状态/读数**真的变了** ⇒ 这一趟做成了 ✓。
+    Confirmed,
+    /// 读到了状态/读数，但**没变** ⇒ 没记上 ✓。
+    Unchanged,
+    /// 读不出（拉表失败 / 表里没这条）⇒ 说不清，别硬判 ✗。
+    Unknown,
+}
+
+/// **由状态的变化**判这一趟成没成（用户口径 2026-10-07：
+/// 「成功与否不是看你做了啥，而是状态的变化」✓）。
+///
+/// 判据次序（能用的最硬读数优先）：
+///
+/// 1. `state` 变成了 `FINISH` ⇒ 成 ✓（旧 TS `results.ts` 判的就是这一条 ✓）；
+/// 2. 名字里的 `a/b` 变大了（434 次数 / 522 进度）⇒ 成 ✓ —— 它比 `state` 更细：
+///    522 要传满 100 个才 `FINISH`，而"这一趟 +5 个"本身就是变化 ✓；
+/// 3. 三个读数**一个都没读到** ⇒ [`StepVerdict::Unknown`]（不是"没变" ✗）；
+/// 4. 其余 ⇒ [`StepVerdict::Unchanged`]（读到了、没变 ⇒ 没记上 ✓）。
+fn verdict_of(s: &TaskStep) -> StepVerdict {
+    if s.state_after.as_deref() == Some("FINISH") {
+        return StepVerdict::Confirmed;
+    }
+    let moved = |before: Option<&str>, after: Option<&str>| -> bool {
+        match (before.and_then(parse_ratio), after.and_then(parse_ratio)) {
+            (Some(b), Some(a)) => a > b,
+            _ => false,
+        }
+    };
+    if moved(s.share_before.as_deref(), s.share_after.as_deref())
+        || moved(s.progress_before.as_deref(), s.progress_after.as_deref())
+    {
+        return StepVerdict::Confirmed;
+    }
+    let read_anything =
+        s.state_after.is_some() || s.share_after.is_some() || s.progress_after.is_some();
+    if !read_anything {
+        return StepVerdict::Unknown;
+    }
+    StepVerdict::Unchanged
+}
+
+/// 把"动手前 → 动手后"写成一行，给日志与明细用 ✓（读不出的那一侧写 `读不出` ✓）。
+fn change_line(s: &TaskStep) -> String {
+    if s.share_before.is_some() || s.share_after.is_some() {
+        return format!(
+            "次数 {} → {}",
+            s.share_before.as_deref().unwrap_or("读不出"),
+            s.share_after.as_deref().unwrap_or("读不出")
+        );
+    }
+    if s.progress_before.is_some() || s.progress_after.is_some() {
+        return format!(
+            "进度 {} → {}",
+            s.progress_before.as_deref().unwrap_or("读不出"),
+            s.progress_after.as_deref().unwrap_or("读不出")
+        );
+    }
+    format!(
+        "状态 {} → {}",
+        s.state_before.as_deref().unwrap_or("读不出"),
+        s.state_after.as_deref().unwrap_or("读不出")
+    )
 }
 
 /// 这一趟的结论。
@@ -1152,8 +1497,7 @@ impl AppTaskResult {
     pub fn settle_unconfirmed(&mut self) {
         self.unconfirmed.clear();
         for step in &mut self.steps {
-            let acted = step.uploaded > 0 || step.clicked || step.shared;
-            if !acted {
+            if !acted(step) {
                 continue;
             }
             // 两档读数都是"a/b"形状（434 是次数、522 是进度）⇒ 同一个比较器
@@ -1165,11 +1509,17 @@ impl AppTaskResult {
                 }
             };
             let confirmed = step.share_counted
+                // ⚠⚠ **状态变成 `FINISH` 也算确认**（用户口径 2026-10-07：「成功与否不是
+                // 看你做了啥，而是状态的变化」✓）—— 这一格是 2026-10-07 新加的：
+                // 以前只认"次数/进度涨了"，于是 `409 / 431 / 1005` 这种**只有状态可比**
+                // 的条目永远落在"未获上游确认"里 ✗（而 `431` 复查时明明已经 `FINISH` ✓）。
+                || step.state_after.as_deref() == Some("FINISH")
                 || moved(
                     step.progress_before.as_deref(),
                     step.progress_after.as_deref(),
                 );
-            if confirmed {
+            // ⚠ 收尾复查已经判过"没记上"（进 `failures` ✓）的不再重复念一遍 ✗
+            if confirmed || step.hard_failed {
                 continue;
             }
 
@@ -1253,24 +1603,22 @@ pub async fn run_app_task(
     only_task_ids: &[i64],
 ) -> Result<AppTaskResult> {
     let mut result = AppTaskResult::default();
+    // ⚠ 专用执行器之间**共用一份状态**（旧 TS `ctx.state.mail139` 那个缓存）：
+    // 一次运行只登一次邮箱，472/473/1004/1014/1020/1028 各自复用同一份 sid/rmkey ✓。
+    let mut runner_state = RunnerState::new();
     // ⚠ 取消**不能**用 `?` 直接窜出去（2026-10-04 复审 tk-2）：这条链会往用户网盘里
     // 传文件，而清理挂在链尾 —— `?` 一窜就绕过了它，这一趟传上去的文件**永远留着**。
     // 所以取消记在这里，先走完收尾（清理 + 事后读数），最后再把取消原样报出去。
     let mut cancelled: Option<mcloud_core::Error> = None;
 
     // ① 读整张表（十六组，逐次容错）。
-    let mut pages: Vec<mcloud_upstream::app_task_list_v2::TaskListV2> = Vec::new();
-    for market in APP_TASK_MARKETS {
-        for group in mcloud_upstream::app_task_list_v2::TASK_LIST_V2_GROUPS {
-            ctx.check_cancelled()?;
-            match app_task_matrix::fetch_one(ctx, market, group).await {
-                Ok(p) => pages.push(p),
-                // 一次失败不算失败 —— 登记它、继续拉下一组（与只读那一半同口径）。
-                Err(e) => result.failures.push(format!("读取 {market}/{group}：{e}")),
-            }
-        }
-    }
+    let (pages, fetch_failures) = app_task_matrix::fetch_all(ctx).await?;
+    // 一次失败不算失败 —— 登记它、继续拉下一组（与只读那一半同口径）。
+    result.failures.extend(fetch_failures);
     let (items, _raw) = app_task_matrix::merge_pages(&pages);
+    // 收尾那两条特例打卡要不要做（旧 TS 每趟都重新拉表判；本仓只在表里真出现过
+    // 478/481 时才多拉一次 —— 理由见 [`settle_random_cloud_clicks`]）。
+    let had_random_cloud_special = items.iter().any(|i| matches!(i.task_id, Some(478 | 481)));
 
     // ② 取**本账号当月**的备份读数（月份门的输入），再逐条判。判不出来的一律**不动**。
     //
@@ -1331,6 +1679,9 @@ pub async fn run_app_task(
         let mut step = TaskStep {
             task_id: item.task_id,
             name: name.clone(),
+            // 动手前那一份状态 ⇒ 收尾复查拿它跟"动手后"比（用户口径 2026-10-07：
+            // 「成功与否不是看你做了啥，而是状态的变化」✓）
+            state_before: item.state.clone(),
             ..Default::default()
         };
         ctx.progress(
@@ -1393,6 +1744,7 @@ pub async fn run_app_task(
                     Ok(notice) => {
                         step.clicked = true;
                         // 领到了就是**真推进** ✓（与 409 / 1005 那种"点一下就是全部"同口径 ✓）
+                        step.acted_counted = true;
                         result.acted += 1;
                         ctx.success(format!(
                             "{name}：上游已做满（{progress}）⇒ 领奖那一发已打，不再重复做 ✓"
@@ -1427,6 +1779,37 @@ pub async fn run_app_task(
             continue;
         }
 
+        // ③-0c **click-only 那一档：打卡就是它的全部动作**，而且**不看 `currstep`**。
+        //
+        // 旧 TS `tasks.ts:97-100` 的 `default:` 分支：
+        // `if (!SKIP_TASK_LIST.includes(task.id)) await clickTask(ctx, task.id);`
+        // —— 它**不经过** `clickTaskWithStep` ⇒ 第 0 步之外也照打 ✓
+        //（这是与 `Upload` / `Entry` / `Runner` 那三档**唯一**的行为差异，
+        //  写在 [`Step::ClickOnly`] 的文档里）。
+        //
+        // ⚠ 黑名单由 `should_act` 那一层挡（`is_skipped_task` ✓），这一档到不了
+        // 那些 id ⇒ 这里不必再判一次（判了也不会错，只是重复）。
+        if matches!(step_kind, Step::ClickOnly) {
+            match click(ctx, item).await {
+                Ok(notice) => {
+                    step.clicked = true;
+                    step.acted_counted = true;
+                    result.acted += 1;
+                    if let Some(n) = notice {
+                        step.problems.push(format!("上游附言：{n}"));
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("{name}：打卡没成：{e}");
+                    step.problems.push(msg.clone());
+                    step.hard_failed = true;
+                    result.failures.push(msg);
+                }
+            }
+            result.steps.push(step);
+            continue;
+        }
+
         // ③-a **先打卡**：它是一道门，成了才去做那件事。
         //
         // ⚠ 但"打不打"本身还有一道门（[`should_click`]）：已经走起来的条目
@@ -1455,6 +1838,38 @@ pub async fn run_app_task(
 
         // ③-b 门过了 ⇒ 做那一件事。
         // ⚠ 434 与上传**互斥**（见 `Step`）：它消费的是别人生产的文件。
+        if let Step::Runner(runner) = step_kind {
+            let report = runners::run_runner(
+                ctx,
+                &mut runner_state,
+                *runner,
+                item.task_id.unwrap_or(0),
+                &mut result.file_ids,
+            )
+            .await;
+            for n in &report.notes {
+                ctx.info(format!("{name}：{n}"));
+            }
+            if report.acted {
+                step.acted_counted = true;
+                result.acted += 1;
+            }
+            // ⚠ 硬失败必须进 `failures`（那是摘要与运行级结论唯一的来源 ✓）。
+            for f in &report.failures {
+                step.problems.push(f.clone());
+                // ⚠ 记过硬的之后，收尾复查**不再**给它补一条"状态没变" ✗（同一条记两笔）
+                step.hard_failed = true;
+                // ⚠⚠ **必须打日志**（2026-10-07 真机逮到，用户截图）：以前只 push 明细
+                // ⇒ 摘要写着"4 条有失败"、日志里却只有 3 行 FAIL ✗（对不上账）。
+                ctx.fail(format!("{name}：{f}"));
+                result.failures.push(format!("{name}：{f}"));
+            }
+            for n in &report.notes {
+                step.problems.push(n.clone());
+            }
+            result.steps.push(step);
+            continue;
+        }
         if matches!(step_kind, Step::Entry) {
             match entry_do_task(ctx).await {
                 Ok(()) => {}
@@ -1477,6 +1892,7 @@ pub async fn run_app_task(
                 Err(e) => step.problems.push(format!("入口那一发打卡失败：{e}")),
             }
             if step.clicked {
+                step.acted_counted = true;
                 result.acted += 1;
             }
             result.steps.push(step);
@@ -1584,9 +2000,11 @@ pub async fn run_app_task(
         // 摘要一个字都没提，结论还因为别的条目"打卡成功"报了 success ✗✗。
         // ⚠ 每条**只记一次**：`problems` 里是一发一条，按条数记会把"1 条任务失败"说成"10 条" ✗。
         if let Some(first) = step.problems.iter().find(|p| p.starts_with("上传失败")) {
+            step.hard_failed = true;
             result.failures.push(format!("{}：{first}", step.name));
         }
         if step.uploaded > 0 || step.clicked {
+            step.acted_counted = true;
             result.acted += 1;
             // 旧 TS `tasks.ts:41-46`（`handleTaskClick`）做完一条之后那句
             // `await sleep(500)` —— **只对真动过的条目**等：没做的事（`clicked=false`
@@ -1607,6 +2025,11 @@ pub async fn run_app_task(
     //    （参考实现的位置一样：`app.ts:56-60`，全部任务跑完 → `getAllAppTaskList()`
     //     → `printShareProgress` 比 `state.shareCount` ✓）。
     settle_progress(ctx, &mut result).await;
+
+    // ⑤-2 收尾那两条特例打卡（478 / 481，旧 TS `index.ts:51-55`）。
+    if had_random_cloud_special {
+        settle_random_cloud_clicks(ctx, &mut result).await;
+    }
 
     // ⑤′ 结算"动了、但**没得到上游确认**"的条目（2026-10-04 复审 tk-1，口径 B）：
     //     只往明细与 summary 里加诚实标注，**不改成败**（用户 2026-10-04 拍板）。
@@ -1687,13 +2110,42 @@ async fn upload_one_file(
 ) -> Result<Option<String>> {
     let mut rng = mcloud_crypto::OsRandom;
     let plan = crate::task_expansion::random_plan_with_ext(&mut rng, 0, ext);
-    let hash = mcloud_crypto::sha256_hex_bytes(&plan.content);
+    upload_bytes(ctx, channel, &plan.name, &plan.content, owned).await
+}
+
+/// 传一个**内容与名字都给定**的文件（`create → PUT → complete` 三枪）。
+///
+/// # 为什么从 `upload_one_file` 里抽出来
+///
+/// 玩法 **1014（PDF 转换）** 要传的是一份**确定的 PDF**（文件名 `asign-pdf-<ts>.pdf`、
+/// 内容是那 20 行最小 PDF ✓，旧 TS `runners.ts:296-343` 逐字），而
+/// [`upload_one_file`] 传的是随机内容。抽出来之后两条路**共用同一套落账与自清**
+/// —— 各写一份的后果是"PDF 那个文件链尾删不掉"，而那种失败**不报错**，
+/// 只是永久留在用户网盘里 ✗。
+///
+/// ⚠ `owned` 落账在 **PUT / complete 之前**（与 [`upload_one_file`] 同一条理由：
+/// 后面任何一步失败都会提前返回，不提前落账那个文件就永远留在用户网盘里 ✓）。
+pub(crate) async fn upload_bytes(
+    ctx: &TaskContext,
+    channel: CloudChannel,
+    name: &str,
+    content: &[u8],
+    owned: &mut Vec<String>,
+) -> Result<Option<String>> {
+    let hash = mcloud_crypto::sha256_hex_bytes(content);
     let (created, raw_body) = {
         let req = upload::file_create_request(CloudFileCreateInput {
             parent_file_id: "/".into(),
-            name: plan.name.clone(),
-            size: plan.content.len() as i64,
+            // ⚠ 这一条是**手动上传**支（任务要求传文件），不是备份支：
+            // 抓包篇 §3 那三处差里，手动支就是"按 id 定位 + force_rename"那一侧 ✓
+            // （备份支才用 parentPath + refuse_duplicate_content，见 `task_expansion.rs`）。
+            parent_path: None,
+            name: name.to_string(),
+            size: content.len() as i64,
             content_hash: hash.clone(),
+            rename_mode: upload::CloudRenameMode::ForceRename,
+            parallel_upload: false,
+            local_created_at: None,
             channel,
             op: CloudOpType::Upload,
         })?;
@@ -1736,7 +2188,7 @@ async fn upload_one_file(
         };
         let resp = ctx
             .http
-            .request(upload::upload_put_request(&url, &plan.content))
+            .request(upload::upload_put_request(&url, content))
             .await?;
         upload::ensure_put_ok(&resp)?;
         let req = upload::file_complete_request(
@@ -1881,7 +2333,9 @@ impl Task for AppTaskTask {
         TaskGroup::App
     }
     fn description(&self) -> &'static str {
-        "把 App 任务矩阵里能做的做掉：按玩法传文件、逐条打卡（传上去的文件跑完自己删）"
+        "把 App 任务矩阵里能做的做掉：按玩法传文件、逐条打卡（传上去的文件跑完自己删）\
+         —— 含 107 云笔记 / 139 邮箱族（1004 发信、1014 PDF、1020 备份、1057 AI 工作台）/ \
+         618 AI 相机 / click-only 那 8 条（旧 TS 的 runners.ts 表）"
     }
 
     fn params(&self) -> Vec<mcloud_engine::ParamSpec> {
@@ -1920,6 +2374,10 @@ impl Task for AppTaskTask {
                 // 434 的"成没成"是**比出来的**：动手前/后的次数 + 涨没涨 ✓
                 "alreadyDone": s.already_done,
                 "skippedToday": s.skipped_today,
+                // ⚠ 判"这一趟成没成"的两半边（用户口径 2026-10-07：「成功与否不是看你
+                // 做了啥，而是状态的变化」✓）—— 留在这里，界面上能自己核对 ✓
+                "stateBefore": s.state_before,
+                "stateAfter": s.state_after,
                 "shareBefore": s.share_before,
                 "shareAfter": s.share_after,
                 "shareCounted": s.share_counted,

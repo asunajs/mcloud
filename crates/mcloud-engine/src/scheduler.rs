@@ -491,7 +491,14 @@ impl Scheduler {
 
         for acc in accounts {
             // 同一 task+account 正在跑 ⇒ 跳过不排队（在 runner 里判定）
-            match self.runner.run(&sch.task, &acc, &sch.body).await {
+            // ⭐ 发起方带下去（`schedule:<id>` ✓）—— 推送规则绑在定时上就靠它认领
+            // （见 `RunEvent::Started.origin` 那段说明 ✓）。
+            let origin = format!("schedule:{}", sch.id);
+            match self
+                .runner
+                .run_full(&sch.task, &acc, &sch.body, None, Some(origin))
+                .await
+            {
                 Ok(rec) => {
                     if rec.run_id.get() == 0 {
                         // 被并发闸挡住，不算"跑过"

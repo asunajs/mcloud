@@ -53,7 +53,7 @@
  *  ③ 面板里的回调闭包会**过期**（它指着第一次打开时那份 props）⇒ 点击按 `id`
  *     查 `fresh` 里最新那一份，不直接用闭包。
  */
-import { mount, onMounted, onUnmounted, ref } from 'lite'
+import { mount, onMounted, onUnmounted, ref } from '@asunajs/lite'
 import { IconCheck, IconChevronDown, IconClose, IconSearch } from './icons'
 
 export interface SelectOption {
@@ -546,7 +546,7 @@ export function Select(props: SelectProps) {
       tabindex={props.disabled === true ? -1 : 0}
       /*
         `data-value`：当前值的**可读出口**。
-        门禁（`lite/regress/interact.mjs`）要断言"选中的到底是哪个值"，而这是个
+        门禁（`regress/interact.mjs`）要断言"选中的到底是哪个值"，而这是个
         div、没有 `select.value` 可读；顺带也方便在 DevTools 里一眼看出状态。
       */
       data-value={isMulti ? values.join(',') : props.value}

@@ -55,6 +55,20 @@ use mcloud_core::{
 /// 否则日志文件会无限堆积而没人再引用它们。
 pub const HISTORY_LIMIT: usize = 200;
 
+/// 每个 owner 记住几台"见过的登录设备"。
+///
+/// # 为什么要有上限
+///
+/// 判据串里有 peer IP ✓ ⇒ **每换一个网络就是一条新记录**（家里 / 公司 / 手机热点 ✓），
+/// 没有上限就是一份只涨不跌的文件 ✗。
+///
+/// # 挤掉老记录是**刻意**的
+///
+/// 超出之后丢最旧的 ⇒ 半年前那台设备下次再来会被判成"新设备" ✓ —— 这**不是**
+/// 丢数据，而是这条口径本来就要的语义：「**最近没见过的设备**进来了，值得看一眼」✓
+/// （与"有史以来第一次"相比，前者才是用户真正想被叫醒的那件事 ✓）。
+pub const LOGIN_DEVICES_PER_OWNER: usize = 20;
+
 /// 内存中的全量数据。
 ///
 /// 不直接暴露：所有访问都经 [`JsonStore`] 的加锁方法，
@@ -99,6 +113,36 @@ struct Db {
     /// ⚠ 键是 **owner id（`UserId` 的字符串形态）** —— 订阅是"我想看哪几件"，
     /// 属于某个人 ✓，与全场共享的 `kouling_pool` 正好相反 ✓。
     exchange_subscriptions: HashMap<String, Vec<mcloud_core::ExchangeSubscription>>,
+    /// 推送规则（用户口径 2026-10-07 的第二层，见 `mcloud_core::push`）。
+    ///
+    /// ⚠ 键是 **owner id** —— 规则是"我想什么情况下被叫醒"，
+    /// 属于某个人 ✓（与全场共享的 `kouling_pool` 相反 ✓）。
+    ///
+    /// ⚠ 2026-10-08 推翻重做：**形状变了**（规则自带 `config` ✓，见
+    /// `mcloud_core::PushRule`）⇒ 旧文件启动时先删 ✓（`purge_legacy_push_files`）。
+    push_rules: HashMap<String, Vec<mcloud_core::PushRule>>,
+    /// **面板行为**的绑定（键 = owner id ✓，2026-10-08 新增）。
+    ///
+    /// 登录 / 性能这类事件没有定时可绑 ⇒ 用户在设置里单独给它们选规则 ✓
+    /// （`data/push-panel.json` ✓）。与 `push_rules` 同一层：都是"某个人的选择" ✓。
+    push_panel: HashMap<String, mcloud_core::PanelBindings>,
+    /// **面板行为的节流状态**（键 = owner id ✓，2026-10-08 新增）。
+    ///
+    /// ⚠ 它是**运行时状态**而不是配置（上次发送时刻 / 今日计数 / 上次状态 ✓），
+    /// 但**照样要落盘**：只放内存 ⇒ 重启即忘记冷却与计数 ⇒ 重启后同一批事件
+    /// 再来一轮风暴 ✗（用户口径：「登录，性能，这些可能**频繁触发**，注意」✓）。
+    push_throttle: HashMap<String, mcloud_core::ThrottleState>,
+    /// **见过的登录设备**（键 = owner id ✓，2026-10-08 新增）。
+    ///
+    /// # 它是什么、不是什么
+    ///
+    /// 值是"这台设备/这个地点"的判据串（`UA|peer IP` ✓，见
+    /// `mcloud-server` 的 `routes/auth.rs::login_device_key` ✓）—— 本仓**没有**
+    /// 真设备这个概念 ✗，所以只能拿请求里有的东西当标识 ✓。
+    /// ⚠ 它**不是**"有史以来见过的集合"，而是"最近见过的"（有上限 ✓）：
+    /// 被挤掉的老设备下次再来会被当成新的 ✓ —— 那是**刻意**的（见
+    /// [`LOGIN_DEVICES_PER_OWNER`] ✓），不是丢数据 ✓。
+    login_devices: HashMap<String, Vec<String>>,
     /// 会话，按 `token_hash` 存。
     ///
     /// 用 `HashMap` 而不是 `Vec`：查会话是**每个请求**都走的路径。
@@ -146,6 +190,44 @@ mod files {
     ///
     /// **后来才有的文件** —— 缺了就是"还没订阅过"，按空列表走 ✓（与 `settings.json` 同一条路）。
     pub const EXCHANGE_SUBSCRIPTIONS: &str = "exchange-subscriptions.json";
+    /// 推送规则（按 owner 分表）。
+    ///
+    /// **后来才有的文件** —— 缺了就是"还没建过规则"，按空列表走 ✓
+    /// （与 `exchange-subscriptions.json` / `settings.json` 同一条路）。
+    ///
+    /// ⚠ **文件名没变、形状变了**（2026-10-08 推翻重做 ✓）：`PushRule` 现在
+    /// 自带一份 `config`（凭据在里面 ✓）、没有 `events`/`channels` 了 ✓ ⇒
+    /// 旧文件读进来会**整份报错**、把启动带崩 ✗ ⇒ 启动时**先删掉** ✓
+    /// （`purge_legacy_push_files` ✓，用户口径：「目前一切都可以重写，
+    /// 并没有分发 rc4 版本」✓）。
+    pub const PUSH_RULES: &str = "push-rules.json";
+    /// **面板行为**的绑定（按 owner 分表 ✓，2026-10-08 新增）。
+    ///
+    /// ⚠ 里面是"哪个行为用哪几条规则 + 节流参数" ⇒ 进 `harden_existing_permissions`
+    /// 的清单 ✓（规则 id 本身不是凭据，但它指向的规则带着 token ✓，
+    /// 而且与其余用户数据同一条口径：老目录升级后不该对同机其他用户可读 ✓）。
+    pub const PUSH_PANEL: &str = "push-panel.json";
+    /// **面板行为的节流状态**（按 owner 分表 ✓，2026-10-08 新增）。
+    ///
+    /// ⚠ 它装的是"谁在什么时候被叫醒过"（含**被节流拦下**的计数 ✓）——
+    /// 同机其他用户读得到它就能看出这个账号的活动节奏 ⇒ 一样进权限清单 ✓。
+    pub const PUSH_THROTTLE: &str = "push-throttle.json";
+    /// **见过的登录设备**（按 owner 分表 ✓，2026-10-08 新增）。
+    ///
+    /// ⚠ 里面是"谁从哪台设备/哪个地点登进来过"（`UA|peer IP` ✓）——
+    /// 同机其他用户读得到它，就能看出这个账号从哪些网络活动过 ⇒
+    /// 与 `push-throttle.json` 同一条口径，**进 `harden_existing_permissions`** ✓。
+    ///
+    /// **后来才有的文件** —— 缺了就是"还没见过任何设备"，按空表走 ✓
+    /// （与 `exchange-subscriptions.json` / `push-panel.json` 同一条路 ✓）。
+    pub const LOGIN_DEVICES: &str = "login-devices.json";
+    /// **已废弃**：用户级推送渠道配置（`push-config.json`）。
+    ///
+    /// 只留在这里给 [`JsonStore::purge_legacy_push_files`] 当删除清单用 ✓ ——
+    /// 它**不再是任何表的落点** ✗：用户口径是「我设置一个推送规则，**这个规则配置
+    /// 推送的 token，包括推送哪几个平台**」✓ ⇒ 凭据在规则自己身上 ✓，
+    /// "用户级渠道配置"那一层整个不存在了 ✓。
+    pub const LEGACY_PUSH_CONFIG: &str = "push-config.json";
     /// 设备指纹：**单独一个文件**，不与 `state.json` 混。
     ///
     /// 混在一起的话，`save_account_state` 那种整块覆盖写会顺手把指纹清掉；
@@ -223,6 +305,10 @@ impl JsonStore {
             write_gate: Mutex::new(()),
             dir,
         };
+        // ⚠ **先删旧形状的推送文件**（`load_all` 之前 ✓）：`PushRule` 的形状这一版
+        // 变了（多了必填的 `config` ✓）⇒ 旧 `push-rules.json` 读进来会整份报错、
+        // 把启动带崩 ✗。用户口径：「目前一切都可以重写，并没有分发 rc4 版本」✓。
+        store.purge_legacy_push_files();
         store.harden_existing_permissions();
         store.load_all()?;
         // 归属回填：老数据（没有 owner 列）必须在这里补上，否则升级后
@@ -231,6 +317,64 @@ impl JsonStore {
         store.backfill_owners()?;
         store.recover_orphans()?;
         Ok(store)
+    }
+
+    /// 删掉**旧形状**的推送落盘文件（2026-10-08 推翻重做 ✓）。
+    ///
+    /// # 为什么是"直接删"而不是"迁移"
+    ///
+    /// 用户口径：「目前一切都可以重写，**并没有分发 rc4 版本**」✓ ⇒ 没有历史用户
+    /// 需要照顾，迁移代码只会留下一份"两种形状都能读"的复杂度 ✗。
+    ///
+    /// 而**非删不可**的理由更硬：
+    /// * `push-rules.json`：`PushRule` 的形状变了（多了必填的 `config` ✓、
+    ///   少了 `events`/`channels` ✓）⇒ 旧文件读进来**整份报错** ⇒ 启动失败 ✗；
+    /// * `push-config.json`：用户级渠道配置那一层**整个不存在了** ✗ ⇒ 留着它
+    ///   只会让人以为"渠道配置还在某处"，而且里面是 token ✓ ⇒ **无条件删** ✓。
+    ///
+    /// # ⚠ `push-rules.json` 是"**旧形状才删**"，不是"每次启动都删"
+    ///
+    /// 用户口径里的「启动时先删掉这个文件 —— 它现在是旧形状」说的是**这次升级**
+    /// 要清掉那份旧文件 ✓。写成"每次启动无条件删"就把规则表变成**不持久**的 ✗
+    /// （写进去、重启就没了 ⇒ 规则页配完等于白配 ✓）—— 那是与"按 owner 分表
+    /// 落盘"直接矛盾的一件事 ✗。所以判据落在**形状**上：
+    ///
+    /// * 合法 JSON 但**读不出新形状** ⇒ 是旧形状 ⇒ 删（连 `.bak` 一起 ✓）；
+    /// * **压根不是合法 JSON** ⇒ **不删**：那是"写坏了的文件"，
+    ///   本仓的既有口径是**大声报错**而不是静默当空库 ✓（见模块头第 3 条 ✓）
+    ///   —— 删掉它等于把用户的规则悄悄扔了 ✓。
+    ///
+    /// ⚠ 只删这两个（外加各自的 `.bak` ✓）—— 别顺手删别的：
+    /// 这一层跑在启动路径上，删错一个就是"用户数据不见了" ✗。
+    ///
+    /// 失败**不**让启动失败（与 [`Self::harden_existing_permissions`] 同一口径 ✓）：
+    /// 删不掉（权限/占用）最多是"旧文件还躺在目录里"，而它已经不会被读了 ✓。
+    fn purge_legacy_push_files(&self) {
+        let rules = self.path(files::PUSH_RULES);
+        if let Ok(text) = std::fs::read_to_string(&rules) {
+            // 是合法 JSON，但**读不出新形状** ⇒ 旧形状 ⇒ 删 ✓。
+            let is_json = serde_json::from_str::<serde_json::Value>(&text).is_ok();
+            let is_new_shape =
+                serde_json::from_str::<HashMap<String, Vec<mcloud_core::PushRule>>>(&text).is_ok();
+            if is_json && !is_new_shape {
+                self.remove_with_backup(files::PUSH_RULES);
+            }
+        }
+        // 用户级渠道配置那一层已经不存在了 ⇒ 无条件删 ✓（它连"读"都没有了 ✓）。
+        self.remove_with_backup(files::LEGACY_PUSH_CONFIG);
+    }
+
+    /// 删一个数据文件及其 `.bak`（`write_atomic` 覆盖前留的那份 ✓）。删不掉只警告 ✓。
+    fn remove_with_backup(&self, name: &str) {
+        let p = self.path(name);
+        for path in [p.clone(), p.with_extension("bak")] {
+            if !path.exists() {
+                continue;
+            }
+            if let Err(e) = std::fs::remove_file(&path) {
+                eprintln!("警告：无法删除旧推送文件 {}：{e}", path.display());
+            }
+        }
     }
 
     /// 收紧**已存在**文件的权限（老版本装出来的数据目录是默认权限）。
@@ -270,6 +414,19 @@ impl JsonStore {
             files::TASK_CONFIG,
             files::KOULING_POOL,
             files::EXCHANGE_SUBSCRIPTIONS,
+            // 推送规则里是"什么情况下被叫醒"，同样是用户数据 ✓。
+            files::PUSH_RULES,
+            // ⚠ 2026-10-08 推翻重做时补的两个：面板绑定（指向带 token 的规则 ✓）
+            // 与节流状态（谁在什么时候被叫醒过 ✓）。**两个新文件必须都在清单里** ——
+            // 漏掉 = 老目录升级后那两个文件仍对同机其他用户可读 ✗
+            // （`push-config.json` 那一格随文件一起删掉了 ✓，它已经不再是落点 ✓）。
+            files::PUSH_PANEL,
+            files::PUSH_THROTTLE,
+            // ⚠ 2026-10-08 接登录触发线时补的第三个：它记着"这个账号从哪台设备/
+            // 哪个地点登进来过"（`UA|peer IP` ✓）。同机其他用户读得到它，就能看出
+            // 这个账号的活动网络 ⇒ 与节流状态同一条口径，**必须也在清单里** ✓
+            // （漏掉 = 老目录升级后这个文件仍对同机其他用户可读 ✗）。
+            files::LOGIN_DEVICES,
         ];
         for name in names {
             let p = self.path(name);
@@ -563,6 +720,14 @@ impl JsonStore {
             self.read_json(&self.path(files::KOULING_POOL))?;
         let exchange_subscriptions: HashMap<String, Vec<mcloud_core::ExchangeSubscription>> =
             self.read_json(&self.path(files::EXCHANGE_SUBSCRIPTIONS))?;
+        let push_rules: HashMap<String, Vec<mcloud_core::PushRule>> =
+            self.read_json(&self.path(files::PUSH_RULES))?;
+        let push_panel: HashMap<String, mcloud_core::PanelBindings> =
+            self.read_json(&self.path(files::PUSH_PANEL))?;
+        let push_throttle: HashMap<String, mcloud_core::ThrottleState> =
+            self.read_json(&self.path(files::PUSH_THROTTLE))?;
+        let login_devices: HashMap<String, Vec<String>> =
+            self.read_json(&self.path(files::LOGIN_DEVICES))?;
         let sessions: HashMap<String, Session> = self.read_json(&self.path(files::SESSIONS))?;
 
         // 日志按 run 分文件，按需读取（只读还保留着的那些 run）
@@ -588,6 +753,10 @@ impl JsonStore {
         db.task_config = task_config;
         db.kouling_pool = kouling_pool;
         db.exchange_subscriptions = exchange_subscriptions;
+        db.push_rules = push_rules;
+        db.push_panel = push_panel;
+        db.push_throttle = push_throttle;
+        db.login_devices = login_devices;
         db.sessions = sessions;
         db.logs = logs;
         Ok(())
@@ -686,6 +855,38 @@ impl JsonStore {
             &store.path(files::EXCHANGE_SUBSCRIPTIONS),
             &db.exchange_subscriptions,
         )
+    }
+
+    fn persist_push_rules(db: &Db, store: &Self) -> Result<()> {
+        let _gate = store
+            .write_gate
+            .lock()
+            .map_err(|_| Error::Storage("写锁中毒".into()))?;
+        store.write_json(&store.path(files::PUSH_RULES), &db.push_rules)
+    }
+
+    fn persist_push_panel(db: &Db, store: &Self) -> Result<()> {
+        let _gate = store
+            .write_gate
+            .lock()
+            .map_err(|_| Error::Storage("写锁中毒".into()))?;
+        store.write_json(&store.path(files::PUSH_PANEL), &db.push_panel)
+    }
+
+    fn persist_push_throttle(db: &Db, store: &Self) -> Result<()> {
+        let _gate = store
+            .write_gate
+            .lock()
+            .map_err(|_| Error::Storage("写锁中毒".into()))?;
+        store.write_json(&store.path(files::PUSH_THROTTLE), &db.push_throttle)
+    }
+
+    fn persist_login_devices(db: &Db, store: &Self) -> Result<()> {
+        let _gate = store
+            .write_gate
+            .lock()
+            .map_err(|_| Error::Storage("写锁中毒".into()))?;
+        store.write_json(&store.path(files::LOGIN_DEVICES), &db.login_devices)
     }
 
     fn persist_task_config(db: &Db, store: &Self) -> Result<()> {
@@ -1305,6 +1506,157 @@ impl mcloud_core::UserStore for JsonStore {
         Self::persist_exchange_subscriptions(&db, self)
     }
 
+    async fn push_panel(&self, owner: &mcloud_core::UserId) -> Result<mcloud_core::PanelBindings> {
+        // 没配过 ⇒ **默认那份**（"不绑规则" + 保守节流 ✓）—— 不是错误，
+        // 与 `push_rules()` 回空列表同一口径 ✓（见 `UserStore::push_panel` 的说明 ✓）。
+        Ok(self
+            .read()?
+            .push_panel
+            .get(owner.as_str())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn save_push_panel(
+        &self,
+        owner: &mcloud_core::UserId,
+        bindings: &mcloud_core::PanelBindings,
+    ) -> Result<()> {
+        let mut db = self.write()?;
+        db.push_panel
+            .insert(owner.as_str().to_string(), bindings.clone());
+        Self::persist_push_panel(&db, self)
+    }
+
+    async fn push_throttle(
+        &self,
+        owner: &mcloud_core::UserId,
+    ) -> Result<mcloud_core::ThrottleState> {
+        // 没记过 ⇒ 全默认（`last_sent_ms: None` ⇒ 第一次一定放行 ✓）。
+        Ok(self
+            .read()?
+            .push_throttle
+            .get(owner.as_str())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn save_push_throttle(
+        &self,
+        owner: &mcloud_core::UserId,
+        state: &mcloud_core::ThrottleState,
+    ) -> Result<()> {
+        let mut db = self.write()?;
+        if state.behaviors.is_empty() {
+            // 全空的就**不留一格**（与 `remove_push_rule` 删光后的口径一致 ✓）：
+            // 文件里少一行垃圾 ✓，读回来时缺键 = 全默认 ✓ 对得上。
+            if db.push_throttle.remove(owner.as_str()).is_none() {
+                return Ok(()); // 本来就没有这一格 ⇒ 不必重写整份文件 ✓
+            }
+        } else {
+            db.push_throttle
+                .insert(owner.as_str().to_string(), state.clone());
+        }
+        Self::persist_push_throttle(&db, self)
+    }
+
+    async fn remember_login_device(&self, owner: &mcloud_core::UserId, key: &str) -> Result<bool> {
+        let mut db = self.write()?;
+        let seen = db
+            .login_devices
+            .entry(owner.as_str().to_string())
+            .or_default();
+        if seen.iter().any(|k| k == key) {
+            // 见过 ⇒ **不落盘** ✓：这条路上每一次成功登录都会走一遍，
+            // 每次都把整份文件重写一次是白费 ✓（判据在内存里已经有了 ✓）。
+            return Ok(false);
+        }
+        seen.push(key.to_string());
+        if seen.len() > LOGIN_DEVICES_PER_OWNER {
+            // 超出就丢**最旧**的（队首 ✓）。见 `LOGIN_DEVICES_PER_OWNER`：
+            // 这是"最近见过的"，被挤掉的老设备下次再来会被当成新的 —— 刻意 ✓。
+            let drop = seen.len() - LOGIN_DEVICES_PER_OWNER;
+            seen.drain(..drop);
+        }
+        Self::persist_login_devices(&db, self)?;
+        Ok(true)
+    }
+
+    async fn push_rules(&self, owner: &mcloud_core::UserId) -> Result<Vec<mcloud_core::PushRule>> {
+        // 没建过 ⇒ 空列表（不是错误），与 `exchange_subscriptions()` 同一口径 ✓。
+        Ok(self
+            .read()?
+            .push_rules
+            .get(owner.as_str())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn push_rule(
+        &self,
+        owner: &mcloud_core::UserId,
+        id: &mcloud_core::PushRuleId,
+    ) -> Result<Option<mcloud_core::PushRule>> {
+        Ok(self
+            .read()?
+            .push_rules
+            .get(owner.as_str())
+            .and_then(|rules| rules.iter().find(|r| &r.id == id).cloned()))
+    }
+
+    async fn save_push_rule(
+        &self,
+        owner: &mcloud_core::UserId,
+        rule: &mcloud_core::PushRule,
+    ) -> Result<()> {
+        let mut db = self.write()?;
+        let rules = db.push_rules.entry(owner.as_str().to_string()).or_default();
+        match rules.iter_mut().find(|r| r.id == rule.id) {
+            // 老行**原地替换**：保持它在列表里的位置 ⇒ 改一次名字不会让界面顺序跳 ✓
+            Some(slot) => *slot = rule.clone(),
+            None => rules.push(rule.clone()),
+        }
+        Self::persist_push_rules(&db, self)
+    }
+
+    async fn remove_push_rule(
+        &self,
+        owner: &mcloud_core::UserId,
+        id: &mcloud_core::PushRuleId,
+    ) -> Result<()> {
+        let mut db = self.write()?;
+        let mut changed = false;
+        let mut empty = false;
+        if let Some(rules) = db.push_rules.get_mut(owner.as_str()) {
+            let before = rules.len();
+            rules.retain(|r| &r.id != id);
+            changed = rules.len() != before;
+            empty = rules.is_empty();
+        }
+        if empty {
+            // 全删光就把这一格删掉，而不是留一个空数组：文件里少一行垃圾 ✓
+            //（读回来时缺键 = 空列表，与上面 `unwrap_or_default` 对上 ✓）。
+            db.push_rules.remove(owner.as_str());
+        }
+        if !changed {
+            // 删不存在的**不落盘**：幂等，也省一次整文件重写 ✓。
+            return Ok(());
+        }
+        Self::persist_push_rules(&db, self)
+    }
+
+    async fn all_push_rules(&self) -> Result<Vec<mcloud_core::PushRule>> {
+        // 摊平所有 owner —— 事件匹配那一层手里只有账号/定时/编排，
+        // **没有"当前用户"** ✓（归属判定用每条自己的 `owner` 那一格 ✓）。
+        Ok(self
+            .read()?
+            .push_rules
+            .values()
+            .flatten()
+            .cloned()
+            .collect())
+    }
+
     async fn save_settings(&self, settings: &AppSettings) -> Result<()> {
         // 领域约束在这里也守一道：绕过 HTTP 的调用方（CLI / 脚本）同样不该写进非法值。
         settings.validate().map_err(Error::Config)?;
@@ -1356,3 +1708,8 @@ impl mcloud_core::UserStore for JsonStore {
 
 #[cfg(test)]
 mod tests;
+
+// ⚠ 这里原先有 `impl mcloud_core::PushConfigStore for JsonStore`（给 `Notifier` 用的
+// 那个窄 trait ✓）—— 2026-10-08 推翻重做时与 trait 一起**整个删掉** ✗：
+// 投递层不再读"用户级渠道配置"（规则自带 `config` ✓，用户口径：
+// 「这个规则配置推送的 token，包括推送哪几个平台」✓）。

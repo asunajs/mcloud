@@ -27,24 +27,35 @@ import { accountName, refreshAccountNames } from '../account-names'
  *
  * 提交期间**只禁用提交按钮**，页面其余部分照常可操作；并且明确告诉用户
  * 可以关掉页面 —— 任务在后端继续跑完（已经领到的不会撤回）。
+ *
+ * # 「自动直播定时」那张卡（用户口径 2026-10-08）
+ *
+ * 用户原话：「为直播增加一个自动设置定时的功能，设置为**下次直播开始时间的一个小时后**」。
+ * 它落盘就是一条**普通定时**（`data/schedules.json` 里的 `auto-live-<owner>` ✓），
+ * 所以它**同时**出现在「定时」页里、带着 `managedBy: "live-auto"` ✓。
+ * ⚠ 这一页只**显示**后端算好的 `at`：时刻由系统算（用户手改会被下次重算覆盖 ✓），
+ * 用户能改的只有**开关**与**账号多选** ✓ —— 前端一个字节都不推算，见 `autoCard()` ✓。
  */
 
-import { onMounted, onUnmounted, ref } from 'lite'
+import { onMounted, onUnmounted, ref } from '@asunajs/lite'
 import { setPageRefresh } from '../ui/page-refresh'
 import {
   LIVE_IDLE_REASON,
   LIVE_ROOM_TASK,
   cancelRun,
   getKoulingPool,
+  getLiveAutoSchedule,
   getTaskConfig,
   listAccounts,
   listCapabilities,
+  saveLiveAutoSchedule,
   splitKouling,
   startRun,
   subscribeRun,
   toLiveRoomRunView,
   type AccountSummary,
   type KoulingPoolView,
+  type LiveAutoSchedule,
   type LiveRoomIdleReason,
   type LiveRoomParams,
   type LiveRoomRunView,
@@ -59,15 +70,22 @@ import { AccountPicker } from '../ui/account-picker'
 import { EmptyState } from '../ui/empty-state'
 import { showError } from '../ui/error-dialog'
 import { LogPanel, pushLog, type LogLine } from '../ui/log-panel'
+import { pushToast } from '../ui/toast'
 
 type LoadState = 'loading' | 'error' | 'ready'
 
 /**
- * 听弹幕时长的缺省。**与后端 `params_from_body` 里那个 60 同一个人填**：
+ * 听弹幕时长的缺省。**与后端那个 180 同一个人填**（Rust 侧的定义只有一处：
+ * `mcloud_tasks::live_room::DEFAULT_LISTEN_SECONDS`；用户口径 2026-10-08
+ * 「默认180」，原先是 60）：
  * 留空不送这一栏时后端用自己的默认值，界面把那个默认值**显式摆出来**，
- * 免得出现"界面显示 60、实际听了别的数"。
+ * 免得出现"界面显示 180、实际听了别的数"。
+ *
+ * ⚠ 下面那句说明文字（「默认 X 秒」）读的就是这个常量 —— 它**不会**跟着
+ * 后端 `ParamSpec.default` 走（`defaultListen` 从来没有从后端刷过），
+ * 所以后端改了缺省值，这里必须同步改，否则页面上会写着一个过期的数 ✗。
  */
-const DEFAULT_LISTEN_SECONDS = 60
+const DEFAULT_LISTEN_SECONDS = 180
 
 /** 前端校验的结论。`null` = 可以跑。 */
 interface Validation {
@@ -97,6 +115,26 @@ export const LiveRoomPage = () => {
   const pool = ref<KoulingPoolView | null>(null)
   /** 后端自述的默认听写时长 —— 模板里那个 60 是**兜底**，不是权威。 */
   const defaultListen = ref(DEFAULT_LISTEN_SECONDS)
+
+  // ── 自动直播定时（`/api/live-room/auto-schedule`）────────────────────
+  /**
+   * 后端算好的那一份状态。`null` = 后端没有这条接口（老后端 / 读失败）
+   * ⇒ **整张卡不画** —— 画一张只能报错的卡，用户拿它没办法（与池卡片同一条处置 ✓）。
+   */
+  const autoState = ref<LiveAutoSchedule | null>(null)
+  /**
+   * 卡上的**草稿**（开关 + 账号多选）。
+   *
+   * ⚠⚠ **时刻不在这里**：它是后端算出来的（`autoState.at` ✓），前端只负责显示 ✓。
+   * 把 `at` 读进一个 ref 再自己推算下一次，就是"两处各算一遍迟早分叉"那条老路 ✗
+   * （模块头那段产品事实里"16:31 还显示 15:00"就是它的后果）。
+   */
+  const autoEnabled = ref(false)
+  /** 已勾选的账号 id；`autoAll` 为真时忽略（后端口径：空数组 = 全部已启用账号 ✓）。 */
+  const autoPicked = ref<string[]>([])
+  /** `true` = 全部账号 ⇒ 请求发 `accounts: []` ✓。 */
+  const autoAll = ref(false)
+  const autoSaving = ref(false)
 
   // ── 表单 ──────────────────────────────────────────────────────────
   const codesRaw = ref('')
@@ -152,22 +190,42 @@ export const LiveRoomPage = () => {
     }
   }
 
+  /**
+   * 把后端那一份状态**原样**铺到卡上（`GET` 与 `PUT` 的返回**同一个形状** ✓）。
+   *
+   * ⚠ `PUT` 之后必须走这里回填，**不能**拿本地那份草稿当结果：
+   * 后端刚刚重算过（`at` 可能变了、也可能因为"算不出下一场"把 `enabled` 按成 `false` ✓），
+   * 自己猜的话用户看到的就是"我点了没反应" ✗。
+   */
+  const applyAuto = (s: LiveAutoSchedule | null) => {
+    autoState.value = s
+    if (s == null) return
+    autoEnabled.value = s.enabled
+    autoPicked.value = [...s.accounts]
+    // 空数组 = 全部已启用账号（不是"一个都没选"✗）⇒ 界面上的「全部账号」那一行亮起来 ✓
+    autoAll.value = s.accounts.length === 0
+  }
+
   const load = async () => {
     state.value = 'loading'
     errorMessage.value = ''
     try {
-      const [caps, accts, cfg] = await Promise.all([
+      const [caps, accts, cfg, auto] = await Promise.all([
         listCapabilities(),
         listAccounts(),
         // ⚠ 配置页存的那份也拉回来（与任务页**同一口径** ✓）：以前这里不拉，
-        // 于是"配置页把听弹幕时长改成 300、从直播页跑仍然发 60" ✗
+        // 于是"配置页把听弹幕时长改成 300、从直播页跑仍然发 180" ✗
         //（任务页每次运行都现拉一次配置，它注释里写着理由：「配置页改了、这次运行还用着
         // 旧参数」那种不一致没有任何迹象 ✗）。拉不到就退回默认值，**不**让整页失败 ✓。
         getTaskConfig(LIVE_ROOM_TASK).catch(() => null),
+        // ⚠ 自动定时那一份**单独兜底**：这条接口是后加的，旧后端会 404 ——
+        // 让整页跟着失败等于"少一张卡"变成"整页打不开" ✗。读不到就不画那张卡 ✓。
+        getLiveAutoSchedule().catch(() => null),
       ])
       void refreshPool()
       task.value = caps.tasks.find((t) => t.name === LIVE_ROOM_TASK) ?? null
       accounts.value = accts
+      applyAuto(auto)
       /**
        * ⚠ **只在首次**灌进表单：`load()` 也是「刷新」按钮的入口，每次刷新都灌一遍
        * 会把用户刚填的口令/时长冲掉 ✗（那是"看着像刷新、其实丢输入"）。
@@ -443,6 +501,59 @@ export const LiveRoomPage = () => {
     }
   }
 
+  // ─────────────────────────────────────────────────────────────────────
+  // 自动直播定时：保存
+  // ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * 勾/取消「全部账号」。
+   *
+   * ⚠ 取消时**把当前已启用的账号全勾上**，而不是留一个空名单 ✗ ——
+   * 空名单与"全部"在后端**是同一个值**（`accounts: []` ✓），取消之后名单还是空的，
+   * 用户会以为没生效 ✗（与定时页那条同一处置 ✓）。
+   */
+  const toggleAutoAll = () => {
+    if (autoAll.value) {
+      autoAll.value = false
+      autoPicked.value = accounts.value.map((a) => a.id)
+      return
+    }
+    autoAll.value = true
+  }
+
+  const toggleAutoAccount = (id: string) => {
+    autoPicked.value = autoPicked.value.includes(id)
+      ? autoPicked.value.filter((x) => x !== id)
+      : [...autoPicked.value, id]
+  }
+
+  /**
+   * 保存开关 + 账号多选。后端**立刻重算**，返回的就是新状态 ⇒ 回填它 ✓。
+   *
+   * ⚠ 只发这两格（**时刻不在这里** ✗）：`at` 是算出来的，用户改了也会被下次重算覆盖，
+   * 所以这一页压根不给它输入框 —— 那正是"写了也白写"的那种控件 ✗。
+   * ⚠ `accounts: []` 是**有意义的**（= 全部已启用账号 ✓），所以不能用
+   * `autoPicked.value.length ? … : undefined` 那种"空就不发"的写法：
+   * 那会让"全部账号"这个选择**发不出去** ✗。
+   */
+  const saveAuto = async () => {
+    autoSaving.value = true
+    try {
+      applyAuto(
+        await saveLiveAutoSchedule({
+          enabled: autoEnabled.value,
+          accounts: autoAll.value ? [] : autoPicked.value,
+        }),
+      )
+      pushToast('success', '已保存自动直播定时')
+    } catch (e) {
+      // 账号不是自己的那种 400：后端原话要**原样**显示（它写着哪个 id、为什么 ✗）
+      showError('保存「自动直播定时」失败', e instanceof Error ? e.message : '保存失败')
+    } finally {
+      autoSaving.value = false
+    }
+  }
+
   onMounted(() => {
   setPageRefresh({ run: () => void load() })
     // 先把"id → 名字"填上，否则运行记录里显示的是一串哈希
@@ -713,6 +824,122 @@ export const LiveRoomPage = () => {
     </div>
   )
 
+  /**
+   * 「自动直播定时」卡（用户口径 2026-10-08：「为直播增加一个自动设置定时的功能，
+   * 设置为**下次直播开始时间的一个小时后**」✓）。
+   *
+   * # 卡上那三句话一句都不能省
+   *
+   * 1. **时刻 = 下一场直播开始 + 1 小时** —— 用户原话里唯一被指定的规则 ✓；
+   * 2. **到点跑直播任务（检测口令 + 领取）** —— 开了它到底会干什么 ✓；
+   * 3. ⚠ **时刻由系统算、你改它会被下次重算覆盖；开关和账号是你说了算** ——
+   *    这条最要紧：那条定时**同时**出现在「定时」页里，用户在那儿改时刻**改得动**
+   *    （它就是一条普通定时 ✓），而下次直播任务跑完重算会把它覆盖回去 ⇒
+   *    不写清就是坑 ✗（口径见 `mcloud-core::Schedule::managed_by` 的注释 ✓）。
+   *
+   * # ⚠ `at == null` 必须写"已停用"，不能留空
+   *
+   * 留空的话用户分不清"还没算出来"与"算出来是空的"✗ —— 而这两种的下一步完全不同
+   * （前者等下一场、后者要去看 note 里那句人话 ✓）。
+   * `note` 是后端给的人话（没有下一场 / 用户关了 / id 被手建占用 ✓），**原样**显示 ✓。
+   *
+   * # ⚠ 这一页**不算时间**
+   *
+   * `at` 直接取后端给的串 ✓。前端不缓存它、也不自己推算"下一次"—— 上游的日程
+   * 每次直播任务跑完都会变，自己推一份出来迟早与后端分叉 ✗
+   * （上一版分叉的后果用户见过：「16:31 还显示 15:00」✗）。
+   */
+  const autoCard = () => {
+    const s = autoState.value
+    // 后端没有这条接口（老后端 / 读失败）⇒ 整张卡不画（见 `autoState` 那段说明 ✓）
+    if (s == null) return null
+    return (
+      <div class="card bg-base-100 shadow-sm">
+        <div class="card-body gap-3">
+          <h2 class="card-title text-base">自动直播定时</h2>
+
+          <label class="flex min-h-11 cursor-pointer items-center gap-2">
+            <input
+              id="auto-live-enabled"
+              type="checkbox"
+              class="toggle toggle-primary"
+              aria-label="自动直播定时开关"
+              checked={autoEnabled.value}
+              onChange={(e) => {
+                autoEnabled.value = (e.target as HTMLInputElement).checked
+              }}
+            />
+            <span class="text-sm">到点自动跑一趟直播任务</span>
+          </label>
+
+          <fieldset class="fieldset">
+            <legend class="fieldset-legend">作用在哪些账号</legend>
+            {accounts.value.length === 0 ? (
+              // 没账号时**给出下一步**，而不是一个会失败的输入框（与上面「账号」那一栏同处置）
+              <div class="alert alert-soft alert-warning text-sm" role="alert">
+                <span>还没有已登录的账号。请先到「账号」页登录一个云盘账号。</span>
+              </div>
+            ) : (
+              /*
+                ⚠ **必须给 id**：这一页上有**两个**账号选择器（上面那个是"跑这一趟用哪些"），
+                而 `Select` 靠 id 认人（面板挂在 body 上、展开状态是模块级的 ✓）——
+                两个同 id 会互相认错，展开/收起与回调都串台 ✗（见 `ui/account-picker.tsx` ✓）。
+              */
+              <AccountPicker
+                id="auto-live-accounts"
+                accounts={accounts.value}
+                all={autoAll.value}
+                picked={autoPicked.value}
+                onToggleAll={toggleAutoAll}
+                onToggle={toggleAutoAccount}
+              />
+            )}
+          </fieldset>
+
+          <div class="flex flex-col gap-1">
+            <p class="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+              <span class="text-xs font-semibold opacity-60">当前算出的时刻</span>
+              {s.at ? (
+                <span class="font-mono text-xl font-semibold">{s.at}</span>
+              ) : (
+                // ⚠ 不留空（见上面那段说明）
+                <span class="text-sm font-medium">已停用</span>
+              )}
+            </p>
+            {s.note ? (
+              <p class="break-words text-xs leading-5 opacity-70">{s.note}</p>
+            ) : s.at == null ? (
+              <p class="break-words text-xs leading-5 opacity-70">现在没有下一场，已停用。</p>
+            ) : null}
+          </div>
+
+          <p class="text-xs leading-5 opacity-60">
+            时刻 = <b class="font-medium">下一场直播开始 + 1 小时</b>；到点会拿上面这些账号跑一趟
+            <b class="font-medium">直播任务（检测口令 + 领取）</b>。
+            ⚠ <b class="font-medium">时刻由系统算</b>：你在「定时」页改它，会被下次重算覆盖；
+            <b class="font-medium">开关和账号是你说了算</b>，改完点保存即可。
+            算不出下一场时自动停用，条目留着，下次算出来再自动启用。
+          </p>
+
+          <div class="modal-action items-center justify-between gap-2">
+            <span class="text-xs opacity-70">
+              这一条在「定时」页里也看得到，标着「系统维护」。
+            </span>
+            <button
+              id="auto-live-save"
+              type="button"
+              class="btn btn-primary min-h-11 md:min-h-0"
+              disabled={autoSaving.value || accounts.value.length === 0}
+              onClick={() => void saveAuto()}
+            >
+              {autoSaving.value ? '保存中…' : '保存'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   // ─────────────────────────────────────────────────────────────────────
   // 渲染：结果
   // ─────────────────────────────────────────────────────────────────────
@@ -906,6 +1133,7 @@ export const LiveRoomPage = () => {
       {state.value === 'ready' ? (
         <>
           {form()}
+          {autoCard()}
           {poolCard()}
           {task.value == null ? notRegistered() : null}
           {result.value ? resultSection(result.value) : null}

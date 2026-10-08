@@ -16,8 +16,10 @@
 
 use anyhow::Context;
 
+use crate::cli::push as cli_push;
 use crate::cli::{
-    auth as cli_auth, cron as cli_cron, login as cli_login, pipeline as cli_pipeline,
+    auth as cli_auth, cron as cli_cron, daily as cli_daily, live_room as cli_live_room,
+    login as cli_login, pipeline as cli_pipeline,
 };
 
 /// 跑一条 CLI 命令。`args` 是**去掉程序名之后**的参数（`src/main.rs` 负责切）。
@@ -113,6 +115,23 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
             // `pipeline run <id>` 与 `pipeline <id>` 都走这里（形状与 `auth refresh` 对齐）
             cli_pipeline::run_pipeline(&app, &args[1..]).await?;
         }
+        // 一键：内置默认编排。用户口径 2026-10-07「cli 一条命令」✓ ——
+        // 与 `pipeline run daily` 等价，但**不需要先知道那个 id** ✓。
+        Some("run-all") => {
+            cli_daily::run_all(&app, &args[1..]).await?;
+        }
+        // 推送规则（2026-10-07 用户口径「想想 cli 上该怎么做，记得写的时候兼容」✓）：
+        // **新加的一条子命令** ⇒ 老命令/老脚本一个字都不用改 ✓（见 `cli/push.rs` 头部的兼容清单 ✓）。
+        Some("push") => {
+            cli_push::run(&app, &args[1..]).await?;
+        }
+        // 直播（目前只有「自动定时」那一支 ✓）—— 与 `push` 同一条形状：
+        // **新加的一条子命令** ⇒ 老命令/老脚本一个字都不用改 ✓。
+        // ⚠ 它是**本机管理员工具**（`legacy_owner` ✓）：那张卡是"每个登录用户一条"，
+        // 命令行上只能落到管理员那一份 ✓（理由写在 `cli/live_room.rs` 头部 ✓）。
+        Some("live-room") => {
+            cli_live_room::run(&app, &args[1..]).await?;
+        }
         Some("auth") => {
             let rest = &args[1..];
             match rest.first().map(String::as_str) {
@@ -160,6 +179,11 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
                 None => serde_json::json!({}),
             };
             let record = app.runner().run(task, &acct, &body).await?;
+            // ⚠ **先把在飞的推送等落地，再决定退出码**（2026-10-07）。
+            // 投递是 spawn 出去的 ✓（服务长驻无所谓 ✓），而 **CLI 跑完就退** ✗ ⇒
+            // 进程一没，在飞的那条 HTTP 就被掐了 ✗ —— 而"这次失败了"恰恰是最该推的一条 ✓。
+            // TS 那份是 `await sendNotify(...)` ✓，这里补回同一个语义 ✓。
+            app.handle.pushes.flush().await;
             println!("[{}] {}", record.outcome.summary(), record.task);
             if record.outcome.is_failure() {
                 std::process::exit(1);
@@ -359,6 +383,14 @@ fn print_usage() {
     eprintln!("  pending                         查看本进程里还没清理的网盘产物");
     eprintln!("  cron <定时id>                   跑一条已配置的定时（给系统 crontab 调用）");
     eprintln!("  pipeline run <编排id>           跑一条已配置的编排");
+    eprintln!("  push [list|show|add|rm|events|bind]  推送规则（每账号的渠道之上那一层 ✓）");
+    eprintln!("  live-room auto-schedule [on|off|accounts <id,…>]");
+    eprintln!("                                 直播自动定时（**不带参数 = 只看状态** ✓；");
+    eprintln!("                                 写那几条会去上游现取下一场，约 10 秒）");
+    eprintln!("  run-all                         一键跑**默认编排**（= pipeline run daily，");
+    eprintln!(
+        "                                 不需要先知道 id；默认编排与它的定时由服务启动时种下 ✓）"
+    );
     eprintln!("  auth refresh <--account|--all>  刷新凭据");
     eprintln!("  login <方式>                    登录账号（qr / sms / app / password / device）");
     eprintln!("  user list|add|passwd            用户管理（加测试账号用；见 `mcloud user`）");

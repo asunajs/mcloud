@@ -54,6 +54,23 @@ fn create_body(file_id: &str, exist: bool, rapid: bool) -> String {
 const COMPLETE_BODY: &str = r#"{"success":true,"code":"0000","message":"ok","data":{}}"#;
 const TRASH_BODY: &str = r#"{"success":true,"code":"0000","message":"ok"}"#;
 
+/// `backup/createSnapshot` 的响应（抓包篇 §6）。
+///
+/// ⚠ `fileId` 在抓包里是 **str64**（照片那发是 str33）—— 两套形状，这里用 64 位串钉住。
+fn snapshot_create_body(file_id: &str, rapid: bool) -> String {
+    format!(
+        r#"{{"success":true,"code":"0000","message":"ok","data":{{"fileId":"{file_id}","rapidUpload":{rapid},"uploadId":"U-SNAP","partInfos":[{{"partNumber":1,"partSize":null,"uploadUrl":"https://eos.example.com/snap?ot=system","cdnUploadUrl":null,"etag":null,"parallelHashCtx":{{"h":null,"partOffset":null}}}}]}}}}"#
+    )
+}
+
+/// `backup/completeSnapshot` 的响应：**`data` 是 `null`**（抓包篇 §6，59 字节）。
+///
+/// ⚠ 它正是"不能复用 `parse_file_create`"的原因：那个解析器要求 `data` 是对象 ✗。
+const SNAPSHOT_COMPLETE_BODY: &str = r#"{"success":true,"code":"0000","message":"ok","data":null}"#;
+
+/// 快照 `createSnapshot` 的响应 `fileId`（64 位，照抓包形状）。
+const SNAPSHOT_FILE_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 fn plan() -> ExpansionPlan {
     ExpansionPlan {
         name: "probe.bin".into(),
@@ -276,6 +293,10 @@ async fn a_successful_backup_is_trashed_afterwards() {
         Reply::Body(create_body("F-1", false, false)),
         Reply::Body(String::new()), // PUT 的响应体不参与判定（只看状态码）
         Reply::Body(COMPLETE_BODY.into()),
+        // ④⑤⑥ 快照那一支（2026-10-07 按抓包补上的三发）
+        Reply::Body(snapshot_create_body(SNAPSHOT_FILE_ID, false)),
+        Reply::Body(String::new()), // 快照 PUT：同样只看状态码
+        Reply::Body(SNAPSHOT_COMPLETE_BODY.into()),
         Reply::Body(NEEDS_BACKUP.into()), // 重读：备份仍 false
         Reply::Body(TRASH_BODY.into()),
     ])
@@ -283,7 +304,11 @@ async fn a_successful_backup_is_trashed_afterwards() {
     let TaskOutcome::Skipped { reason } = &out else {
         panic!("实得：{out:?}");
     };
-    assert_eq!(http.count(), 6, "读 + 三枪上传 + 重读 + 删");
+    assert_eq!(
+        http.count(),
+        9,
+        "读 + 六枪上传（照片三发 + 快照三发）+ 重读 + 删"
+    );
     // 第二枪是 PUT，且带的是**原始字节**
     let put = &http.requests()[2];
     assert_eq!(put.method, "PUT");
@@ -301,6 +326,110 @@ async fn a_successful_backup_is_trashed_afterwards() {
     assert!(
         reason.contains("本月备份仍读成 false") || reason.contains("备份"),
         "凑完仍未开要说出来：{reason}"
+    );
+}
+
+/// ⭐ **六发顺序与抓包一致**（`app-album-backup-samples.txt` §2）。
+///
+/// 抓包那一窗是：`file/create` → `PUT(ot=personal)` → `file/complete`
+/// → `backup/createSnapshot` → `PUT(ot=system)` → `backup/completeSnapshot`。
+/// 2026-10-07 之前本仓只有前三发 —— 用户口径「需要重新编写，已经有最新的抓包数据（备份上传）」。
+#[tokio::test]
+async fn the_chain_follows_the_captured_album_backup_order() {
+    let (_, http, _) = run_with(vec![
+        Reply::Body(NEEDS_BACKUP.into()),
+        Reply::Body(create_body("F-1", false, false)),
+        Reply::Body(String::new()),
+        Reply::Body(COMPLETE_BODY.into()),
+        Reply::Body(snapshot_create_body(SNAPSHOT_FILE_ID, false)),
+        Reply::Body(String::new()),
+        Reply::Body(SNAPSHOT_COMPLETE_BODY.into()),
+        Reply::Body(NEEDS_BACKUP.into()),
+        Reply::Body(TRASH_BODY.into()),
+    ])
+    .await;
+    let shape: Vec<&str> = http
+        .requests()
+        .iter()
+        .map(|r| {
+            let u = r.url.as_str();
+            if u.contains("file/create") {
+                "create"
+            } else if u.contains("file/complete") {
+                "complete"
+            } else if u.contains("backup/createSnapshot") {
+                "snap-create"
+            } else if u.contains("backup/completeSnapshot") {
+                "snap-complete"
+            } else if u.contains("batchTrash") {
+                "trash"
+            } else if r.method == "PUT" {
+                "put"
+            } else {
+                "read"
+            }
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            "read",
+            "create",
+            "put",
+            "complete",
+            "snap-create",
+            "put",
+            "snap-complete",
+            "read",
+            "trash"
+        ],
+        "六发顺序就是抓包那一窗的顺序"
+    );
+}
+
+/// ⭐ 备份支 `file/create` 的三处差（抓包篇 §3）在**任务层**逐条落地。
+///
+/// 旧版发的是**手动支**的定位法（`parentFileId`）与旧 TS 的改名档（`auto_rename`），
+/// 而抓包实测备份支是 `parentPath` + `refuse_duplicate_content`。
+#[tokio::test]
+async fn the_backup_create_uses_the_album_branch_shape() {
+    let (_, http, _) = run_with(vec![
+        Reply::Body(NEEDS_BACKUP.into()),
+        Reply::Body(create_body("F-1", false, false)),
+        Reply::Body(String::new()),
+        Reply::Body(COMPLETE_BODY.into()),
+        Reply::Body(snapshot_create_body(SNAPSHOT_FILE_ID, false)),
+        Reply::Body(String::new()),
+        Reply::Body(SNAPSHOT_COMPLETE_BODY.into()),
+        Reply::Body(NEEDS_BACKUP.into()),
+        Reply::Body(TRASH_BODY.into()),
+    ])
+    .await;
+    let reqs = http.requests();
+    let create = reqs
+        .iter()
+        .find(|r| r.url.contains("file/create"))
+        .expect("有 create 那一发");
+    let body: serde_json::Value =
+        serde_json::from_str(create.body_str().expect("create 有体")).expect("体是 JSON");
+    assert_eq!(body["parentPath"], "/", "备份支**按路径**定位目录");
+    assert!(
+        body.get("parentFileId").is_none(),
+        "备份支**没有** parentFileId（那是手动支的定位法）"
+    );
+    assert_eq!(
+        body["fileRenameMode"], "refuse_duplicate_content",
+        "备份支拒绝重复内容（手动支是 force_rename）"
+    );
+    assert_eq!(body["parallelUpload"], true, "抓包里是 true");
+    let ts = body["localCreatedAt"].as_str().expect("有 localCreatedAt");
+    assert!(
+        ts.contains('T') && ts.ends_with('Z'),
+        "ISO 毫秒 Z 串，实得 {ts}"
+    );
+    assert_eq!(
+        body["contentType"], "application/octet-stream",
+        "抓包是真 App 发的**正确拼写**"
     );
 }
 
@@ -367,6 +496,10 @@ async fn a_rapid_upload_skips_put_and_complete_but_is_still_trashed() {
     let (out, http, _) = run_with(vec![
         Reply::Body(NEEDS_BACKUP.into()),
         Reply::Body(create_body("F-RAPID", false, true)),
+        // 秒传 ⇒ 照片那一发 PUT 与 complete 不发，但**快照三发照走** ✓
+        Reply::Body(snapshot_create_body(SNAPSHOT_FILE_ID, false)),
+        Reply::Body(String::new()),
+        Reply::Body(SNAPSHOT_COMPLETE_BODY.into()),
         Reply::Body(NEEDS_BACKUP.into()),
         Reply::Body(TRASH_BODY.into()),
     ])
@@ -376,10 +509,17 @@ async fn a_rapid_upload_skips_put_and_complete_but_is_still_trashed() {
     };
     assert_eq!(
         http.count(),
-        4,
-        "读 + create + 重读 + 删；PUT/complete 不发"
+        7,
+        "读 + create + 快照三发 + 重读 + 删；照片那一发 PUT/complete 不发"
     );
-    assert!(!http.requests().iter().any(|r| r.method == "PUT"));
+    // ⚠ 只剩**快照**那一发 PUT（照片那发的体是 "hello"，这里不该出现）
+    assert!(
+        !http
+            .requests()
+            .iter()
+            .any(|r| r.method == "PUT" && r.body.as_deref() == Some(b"hello".as_slice())),
+        "秒传时照片那一发 PUT 不该发"
+    );
     assert!(http.requests().iter().any(|r| r.url.contains("batchTrash")));
     assert!(reason.contains("秒传"), "实得：{reason}");
 }
@@ -413,6 +553,9 @@ async fn a_failed_cleanup_surfaces_its_reason() {
         Reply::Body(create_body("F-1", false, false)),
         Reply::Body(String::new()),
         Reply::Body(COMPLETE_BODY.into()),
+        Reply::Body(snapshot_create_body(SNAPSHOT_FILE_ID, false)),
+        Reply::Body(String::new()),
+        Reply::Body(SNAPSHOT_COMPLETE_BODY.into()),
         Reply::Body(NEEDS_BACKUP.into()),
         Reply::Fail,
     ])

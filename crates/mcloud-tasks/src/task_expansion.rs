@@ -43,7 +43,10 @@ use serde_json::Value;
 use mcloud_core::{HttpRequest, Result, TaskOutcome};
 use mcloud_engine::{Task, TaskContext, TaskGroup, TaskResult};
 use mcloud_upstream::app_cloud_upload as upload;
-use mcloud_upstream::app_cloud_upload::{CloudChannel, CloudFileCreateInput, CloudOpType};
+use mcloud_upstream::app_cloud_upload::{
+    CloudChannel, CloudFileCreateInput, CloudOpType, CloudRenameMode, CloudSnapshotCompleteInput,
+    CloudSnapshotCreateInput,
+};
 use mcloud_upstream::app_signin as proto;
 use mcloud_upstream::app_signin::{SignInEnvelope, TaskExpansion};
 use mcloud_upstream::cloud_trash;
@@ -136,6 +139,34 @@ pub enum ExpansionVerdict {
     ///
     /// 不返回错误：请求发过、没成，这是实况；报成错误会把"发过"这件事抹掉。
     ClaimFailed,
+}
+
+/// 快照那一支（抓包 ④⑤⑥）的结局。
+///
+/// ⚠ 单独一档而不是并进 [`BackupUpload`]：照片传成 ≠ 快照落账成，
+/// 而"这次备份到底记上没有"是**快照那一支**说了算（推断，抓包无直接读数 ⇒ 见 `run_snapshot`）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SnapshotStep {
+    /// 没走到（备份本来就开着、或照片链没成）。
+    #[default]
+    NotReached,
+    /// 三发全成（`createSnapshot` → `PUT` → `completeSnapshot`）。
+    Done,
+    /// 走到某一步没成 —— 原因在 [`ExpansionResult::reason`] 里。
+    Failed,
+}
+
+impl SnapshotStep {
+    /// 人话名（播报与明细共用一份）。
+    pub fn word(self) -> &'static str {
+        match self {
+            SnapshotStep::NotReached => "没走到（备份本来就开着 / 照片链没成）",
+            // ⚠ 不说"三发"：秒传那一支只发**两发**（createSnapshot + completeSnapshot，
+            // 不 PUT）—— 2026-10-07 真机读数里 `uploadId: null` 那一支就是它 ✓。
+            SnapshotStep::Done => "快照落账已成（秒传那一支只发两发）",
+            SnapshotStep::Failed => "快照那一支没成",
+        }
+    }
 }
 
 /// "凑备份那一发"的结局档位。
@@ -253,6 +284,8 @@ pub struct ExpansionResult {
     pub second: Option<TaskExpansion>,
     /// 结论：凑过一次之后 `cur_month_backup` **仍然是** `Some(false)`。
     pub backup_still_off: bool,
+    /// 快照那一支（抓包 ④⑤⑥）的结局。
+    pub snapshot: SnapshotStep,
     /// 链尾清理的结局。
     pub cleanup: CleanupVerdict,
     /// 清理失败的原因（单独一格：它与领取失败是**两件事**）。
@@ -480,15 +513,194 @@ async fn persist_month_backup(ctx: &TaskContext, result: &ExpansionResult) {
     }
 }
 
+/// 最小合法 ZIP（只有中央目录结尾 EOCD 的 22 字节）。
+///
+/// ⚠ 为什么是**空**的：抓包篇 §9 明写"**zip 里装的是什么本轮没解**"❓ ⇒ 我们照
+/// **形状**发（`fileExtension:"zip"` + 合法 zip 魔数 `PK\x03\x04` 那一族），
+/// 内容留空。服务端会不会校验 zip 内容**无读数** ⇒ 验收方式是**真跑一次看
+/// `curMonthBackup` 翻不翻**（见 `run_snapshot` 的注释）。
+const EMPTY_ZIP: &[u8] =
+    b"PK\x05\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+
+/// 快照那一支：`backup/createSnapshot` → `PUT(ot=system)` → `backup/completeSnapshot`。
+///
+/// # 为什么照片传完还要再走这三发
+///
+/// 抓包篇 §2 那六发里，后三发是**另一条链**：照片那一支只是把对象放上去，
+/// 快照这一支才是"这次备份"的落账口。旧版本仓里**只有照片三发**（用户 2026-10-07
+/// 口径「需要重新编写」的直接原因）—— 抓包篇原话：那两口
+/// （`backup/createSnapshot` / `backup/completeSnapshot`）"在全部历史样本里**从没出现过**"，
+/// 也就是说这一支是本仓**第一次**实现。
+///
+/// ⚠ 一句推断要标明：**"是快照让它记上本月已备份"这件事没有直接读数** ❓ ——
+/// 抓包只给了形状与顺序。所以这一支失败**不改** `result.upload`（照片那一支的结局照旧），
+/// 只把 [`SnapshotStep`] 置成 `Failed` 并把原因追加进 `reason` ✓。
+///
+/// # `ot=personal` / `ot=system` 不由本仓构造
+///
+/// 两发 `PUT` 的 URL 都是**上游在 create 响应里给的预签名串**（照片发 `ot=personal`、
+/// 快照发 `ot=system`）⇒ 本仓原样用，不拼查询串 ✓（这也是本仓对 `ot` 这一枚
+/// **零构造、零读数**的原因）。
+async fn run_snapshot(ctx: &TaskContext, result: &mut ExpansionResult) {
+    let zip = EMPTY_ZIP;
+    let hash = sha256_hex(zip);
+    let timestamp_ms = ctx.clock.now_ms();
+    // `count` 按"我们这一趟只凑了 1 个文件"给 1（抓包里是 5，那是那个号真备了 5 张）。
+    let count = 1i64;
+
+    let create = match upload::snapshot_create_request(CloudSnapshotCreateInput {
+        file_extension: "zip".into(),
+        count,
+        size: zip.len() as i64,
+        content_hash: hash.clone(),
+        timestamp_ms,
+        channel: CloudChannel::Android,
+    }) {
+        Ok(r) => r,
+        Err(e) => return snapshot_failed(result, &format!("构造 backup/createSnapshot 失败：{e}")),
+    };
+    let created = match ctx.http.request(create).await {
+        Ok(resp) =>
+        // ⚠ 这两个解析器收 `&[u8]`（不是同文件里 `parse_file_create` 那种 `&str`）——
+        // 那是**故意**的：协议层有一条"响应体不是 UTF-8 必须算失败"的用例靠它 ✓。
+        {
+            match upload::parse_snapshot_create(resp.body.as_bytes()) {
+                Ok(c) => c,
+                Err(e) => {
+                    return snapshot_failed(result, &format!("createSnapshot 响应解不动：{e}"))
+                }
+            }
+        }
+        Err(e) => return snapshot_failed(result, &format!("createSnapshot 没发出去：{e}")),
+    };
+    let Some(file_id) = created.file_id.clone() else {
+        return snapshot_failed(result, "createSnapshot 没给出 fileId");
+    };
+    // ⚠ `uploadId` 可能**缺席**：2026-10-07 **真机读数**里 `createSnapshot` 回了
+    // `uploadId: null`（就是抓包篇 §9 记的"仍未读"的秒传那一支 ✓）⇒ 空串照发，
+    // 与 `file/complete` 同一条口径（旧实现 `stringOf(null)` 就是空串 ✓）。
+    let upload_id = created.upload_id.clone().unwrap_or_default();
+    if created.rapid_upload {
+        // 快照秒传：对象在上游了 ⇒ 直接 complete（不 PUT）。
+        return match snapshot_complete(
+            ctx,
+            &file_id,
+            &upload_id,
+            count,
+            &hash,
+            zip.len() as i64,
+            timestamp_ms,
+        )
+        .await
+        {
+            Ok(()) => result.snapshot = SnapshotStep::Done,
+            Err(e) => snapshot_failed(result, &e),
+        };
+    }
+    let Some(url) = created.upload_url.clone() else {
+        return snapshot_failed(
+            result,
+            "createSnapshot 没给出 uploadUrl（而 rapidUpload 不是 true）",
+        );
+    };
+    // 快照那一发 PUT：档位是 **0 / 0**（抓包篇 §6 —— 与照片那发的 2/200 不是一档）。
+    match ctx
+        .http
+        .request(upload::upload_put_request_with_op(
+            &url,
+            zip,
+            CloudOpType::Snapshot,
+        ))
+        .await
+    {
+        Ok(resp) => {
+            if let Err(e) = upload::ensure_put_ok(&resp) {
+                return snapshot_failed(result, &format!("快照 PUT 没成：{e}"));
+            }
+        }
+        Err(e) => return snapshot_failed(result, &format!("快照 PUT 没发出去：{e}")),
+    }
+    match snapshot_complete(
+        ctx,
+        &file_id,
+        &upload_id,
+        count,
+        &hash,
+        zip.len() as i64,
+        timestamp_ms,
+    )
+    .await
+    {
+        Ok(()) => result.snapshot = SnapshotStep::Done,
+        Err(e) => snapshot_failed(result, &e),
+    }
+}
+
+/// `backup/completeSnapshot` 那一发。
+///
+/// ⚠ 它的响应是 **`data: null`**（抓包篇 §6）⇒ **不能**复用 `parse_file_create`
+/// 那类"要求 `data` 是对象"的解析器，要用 [`upload::parse_snapshot_complete`]。
+async fn snapshot_complete(
+    ctx: &TaskContext,
+    file_id: &str,
+    upload_id: &str,
+    count: i64,
+    hash: &str,
+    size: i64,
+    timestamp_ms: i64,
+) -> std::result::Result<(), String> {
+    let req = upload::snapshot_complete_request(CloudSnapshotCompleteInput {
+        file_id: file_id.to_string(),
+        upload_id: upload_id.to_string(),
+        count,
+        content_hash: hash.to_string(),
+        size,
+        timestamp_ms,
+    })
+    .map_err(|e| format!("构造 backup/completeSnapshot 失败：{e}"))?;
+    let resp = ctx
+        .http
+        .request(req)
+        .await
+        .map_err(|e| format!("completeSnapshot 没发出去：{e}"))?;
+    upload::parse_snapshot_complete(resp.body.as_bytes())
+        .map_err(|e| format!("completeSnapshot 没成：{e}"))
+}
+
+/// 快照那支失败：**不改** `result.upload`（照片那一支的结局是另一件事），只追加原因。
+fn snapshot_failed(result: &mut ExpansionResult, why: &str) {
+    result.snapshot = SnapshotStep::Failed;
+    result.reason = match result.reason.is_empty() {
+        true => why.to_string(),
+        false => format!("{}；{why}", result.reason),
+    };
+}
+
 /// 走上传那三枪（`file/create` → `PUT` → `file/complete`）。
 async fn run_upload(ctx: &TaskContext, plan: &ExpansionPlan, result: &mut ExpansionResult) {
     let hash = sha256_hex(&plan.content);
     let input = CloudFileCreateInput {
-        // 旧实现逐字 `parentFileId: "/"` —— 传进**根目录**。
-        parent_file_id: "/".into(),
+        // ⚠⚠ 2026-10-07 **按新抓包重写**（用户口径：「需要重新编写，已经有最新的抓包数据
+        // （备份上传）」）：备份支**按路径**定位目录 —— 抓包篇 §3 那三处差之一
+        // （备份支有 `parentPath`、**没有** `parentFileId`；手动支反过来）。
+        // 旧版这里是 `parentFileId: "/"` = 手动支的定位法 ✗。
+        parent_file_id: String::new(),
+        // 值用 `/`（根）：抓包那支是 `/手机图片`（相册备份的落点）。我们这一枪是
+        // **凑数**用的、跑完就删 ⇒ 放根目录，少依赖一个"那个目录存不存在"。
+        parent_path: Some("/".into()),
         name: plan.name.clone(),
         size: plan.content.len() as i64,
         content_hash: hash.clone(),
+        // 抓包篇 §3 第三处差：备份支 `refuse_duplicate_content`，手动支 `force_rename`。
+        // 旧版用的是 `auto_rename`（旧 TS 的档）—— **两支都不是** ✗。
+        rename_mode: CloudRenameMode::RefuseDuplicateContent,
+        // 抓包 `parallelUpload: true`（旧版 false ✗）。
+        parallel_upload: true,
+        // 抓包有这一键（str24 = ISO 毫秒 Z 串，例 `2026-10-07T00:58:09.000Z`）⇒ 照同一格式生成。
+        local_created_at: Some(mcloud_core::utc_format(
+            &*ctx.clock,
+            "%Y-%m-%dT%H:%M:%S%.3fZ",
+        )),
         // ⚠ 旧 TS 的默认档就是安卓端（`getFileOpHeader` 的缺省值）。
         channel: CloudChannel::Android,
         op: CloudOpType::Backup,
@@ -544,6 +756,9 @@ async fn run_upload(ctx: &TaskContext, plan: &ExpansionPlan, result: &mut Expans
     result.upload_file_id = created.file_id.clone();
     if created.rapid_upload {
         result.upload = BackupUpload::Rapid;
+        // ⚠ 秒传**也要接着走快照**：照片对象本来就在上游（秒传=不用再传字节），
+        // 而"这次备份"要落账的是**快照**那一支 ⇒ 这里 return 掉会让备份永远记不上 ✗。
+        run_snapshot(ctx, result).await;
         return;
     }
     let (Some(file_id), Some(url)) = (created.file_id.clone(), created.upload_url.clone()) else {
@@ -554,7 +769,11 @@ async fn run_upload(ctx: &TaskContext, plan: &ExpansionPlan, result: &mut Expans
     // ② PUT 原始字节。
     match ctx
         .http
-        .request(upload::upload_put_request(&url, &plan.content))
+        .request(upload::upload_put_request_with_op(
+            &url,
+            &plan.content,
+            CloudOpType::Backup,
+        ))
         .await
     {
         Ok(resp) => {
@@ -587,7 +806,10 @@ async fn run_upload(ctx: &TaskContext, plan: &ExpansionPlan, result: &mut Expans
     };
     match ctx.http.request(complete).await {
         Ok(resp) => match upload::parse_file_complete(&resp.body) {
-            Ok(()) => result.upload = BackupUpload::Done,
+            Ok(()) => {
+                result.upload = BackupUpload::Done;
+                run_snapshot(ctx, result).await;
+            }
             Err(e) => {
                 result.upload = BackupUpload::Failed;
                 result.reason = format!("file/complete 没成：{e}");
@@ -798,6 +1020,7 @@ fn report_details(ctx: &TaskContext, result: &ExpansionResult) {
         "error": result.error,
         "cloudCount": result.cloud_count,
         "upload": result.upload.word(),
+        "snapshot": result.snapshot.word(),
         "uploadName": result.upload_name,
         "uploadFileId": result.upload_file_id,
         "backupStillOff": result.backup_still_off,

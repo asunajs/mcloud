@@ -86,6 +86,21 @@ pub enum RunEvent {
         task: String,
         account: String,
         at_ms: i64,
+        /// **谁发起的**这次运行：`schedule:<id>` / `pipeline:<id>` / `None`（手点、API、CLI）。
+        ///
+        /// # 为什么要有这一格（2026-10-07，推送规则那件事带出来的）
+        ///
+        /// 用户口径：「**用户可将推送规则用于定时任务**」✓ —— 而"这条运行是哪个定时发起的"
+        /// 在事件里**根本没有** ✗（`Started` 只有 task/account ✓，`run_labels` 那张表也只记账号 ✓）。
+        /// 没有它，投递那一层就只能按账号挑配置 ✗ ⇒ **规则绑在定时上等于绑不上** ✗。
+        ///
+        /// # 为什么不去翻调度器的状态
+        ///
+        /// "现在正在跑的是哪条定时"那种反查是**猜** ✗：同一账号可能同时被手点和定时跑，
+        /// 而投递发生在运行**结束**时（`notify.rs` 的 spawn ✓）—— 那时调度器早就不在那一发了 ✓。
+        /// 发起方在**开跑之前**就知道答案 ⇒ 让它带下来才是准的 ✓。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
     },
     Log {
         run_id: RunId,
@@ -872,6 +887,7 @@ mod tests {
             task: "sign".into(),
             account: "0f6050105ab111f4".into(),
             at_ms: 0,
+            origin: None,
         };
         assert_eq!(started.scrubbed(), started);
     }

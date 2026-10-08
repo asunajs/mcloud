@@ -21,7 +21,7 @@
  * 那个槽订阅了值信号 ⇒ 每敲一个字整块重建（含 `<input>` 节点）⇒ 焦点与光标全丢 ✗。
  * 传 thunk 时槽里读到的只是**一个函数**，真正的读发生在**这个组件自己的属性槽**里
  * ⇒ 每次按键只重跑那几个属性槽，`<input>` 节点原地不动 ⇒ 焦点与光标都在 ✓
- * （`setValue` 有 `old !== s` 的判等，值相同时连赋值都不做，见 `lite/src/dom.ts:483`）。
+ * （`setValue` 有 `old !== s` 的判等，值相同时连赋值都不做，见 `@asunajs/lite` 的 `src/dom.ts:483`）。
  */
 
 import type { TaskParamSpec } from '../api'

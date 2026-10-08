@@ -3,7 +3,8 @@
 > 移动云盘（中国移动云盘 / 139 / 和彩云）自动化平台。
 > 后端 Rust，前端自研 **`lite`**（无虚拟 DOM + 编译期优化）+ TSX。
 > ⚠ 前端这一侧本文件只留**契约与结论**；现状与实测读数以
-> [`lite-framework.md`](web/lite-framework.md) 为准（原先写的 Vue Vapor 栈已于 2026-09-30 拆掉）。
+> 框架仓 `asunajs/lite` 的 `docs/design.md` 为准（原先写的 Vue Vapor 栈已于 2026-09-30 拆掉；
+> lite 本体已于 2026-10-07 剥离出本仓，见 [`docs/web/lite.md`](web/lite.md)）。
 >
 > 状态：**设计定稿 + 脚手架**。本文件是唯一设计来源。
 
@@ -589,8 +590,6 @@ pub struct PipelineStep { task, body, continue_on_error }
 | | `backup-gift` | 备份好礼 |
 | | `revival` | 复活奖励（每月 2 次） |
 | | `prizes` | 待领取奖品列表 |
-| | `cloud-snapshot` | AI豆余额快照 |
-| | `task-list` | 任务清单 |
 | 直播 | `live-room` | 直播口令 → 小红花（WebSocket + 小红书） |
 | | ~~`red-flower`~~ | 小红花领取 —— **2026-10-05 已删**（用户口径：它就是 `live-room` 的「只用手工口令」那一支，直播页上有开关，单独一个任务多余）|
 | 活动 | `exchange` | 兑换奖品（**真扣AI豆、不可回滚**） |
@@ -598,11 +597,10 @@ pub struct PipelineStep { task, body, continue_on_error }
 | | `fun-ai` | 趣玩 AI 抽奖 |
 | | `notice` | 开启通知领AI豆 |
 | | `play-ai-special` | 拍拍盘点（只读那两口） |
-| | `ai-avatar` | AI 新头像 + 抽奖（**默认关**） |
+| | `ai-avatar` | AI 新头像 + 抽奖（**默认关**；⚠ **2026-10-08 起不进默认编排** —— 上游活动已结束，`/market/rabactive/image/*` 三个口实测全 404。任务仍注册着，要跑就手动 `mcloud run ai-avatar <账号>`） |
 | | `cloud-phone-redpack` | 红包派对 |
-| App 任务 | `app-task-matrix` | App 任务矩阵（**只读那一半**） |
-| | `app-task` | App 任务做任务（写侧：逐条 `task/click` + 传文件） |
-| 任务拓展 | `task-expansion` | 任务拓展（读 → 凑备份 → 领 → 删自己传的文件） |
+| App 任务 | `app-task` | App 任务做任务（写侧：逐条 `task/click` + 传文件） |
+| 任务拓展 | `task-expansion` | 任务拓展（读 → 凑备份**六发**：`file/create` → `PUT(personal)` → `file/complete` → `backup/createSnapshot` → `PUT(system)` → `backup/completeSnapshot` → 领 → 删自己传的文件）|
 
 活动类任务由账号级开关控制（`AccountSettings`），默认关闭的需显式开启。
 
@@ -891,7 +889,7 @@ data: {"type":"finished","run_id":1,"outcome":{...},"duration_ms":156}
 JS 约 **69%**、`index.html` 约 **35%**，合计约 **76%**。
 ⚠ **绝对字节别背**（产物每轮都在变，且现在已按页拆 chunk）——
 要复现就对自己构建出的 `web/dist` 跑 `gzip -9`；运行时体积的现算命令见
-[`lite-framework.md`](web/lite-framework.md) §5（`node web/lite/size.mjs`）。
+框架仓 `asunajs/lite` 的 `docs/design.md` §5（`npm run size`）。
 
 不做压缩时首屏要多传几百 KB —— 这不是"优化项"而是缺陷，
 `Content-Encoding` 是服务端的责任，浏览器不会替你压。
@@ -930,9 +928,10 @@ JS 约 **69%**、`index.html` 约 **35%**，合计约 **76%**。
 
 ```jsonc
 {
-  // 运行时就是仓库里的 web/lite/（编译器 + 运行时），**不是** npm 包
-  "lite": "web/lite/",
-  "oxc-parser": "^0.152",                  // TSX 解析（web/lite/ast.ts 是适配层）
+  // ⚠ 2026-10-07 起运行时**是**一个包：lite 已剥离到 asunajs/lite，
+  //   本仓按 git 依赖引用（见 docs/web/lite.md）
+  "@asunajs/lite": "github:asunajs/lite#v0.1.0",
+  // oxc-parser 由 @asunajs/lite 直接依赖，本仓不再单独声明
   "@typescript/native-preview": "^7.0.0-dev.20260707.2",  // 类型检查：npm run typecheck = tsgo --noEmit
   "tailwindcss": "^4", "daisyui": "^5",
   "vite": "^8"
@@ -945,7 +944,7 @@ CSS 侧是构建期插件，其余全在 `devDependencies`。
 
 `lite` 模式**无虚拟 DOM**：TSX 在构建期被折成"模板串 + 每个动态位置一条 effect"，
 运行时只留本项目真用到的那几个原语。写法保留类型安全与组合能力。
-详见 [`lite-framework.md`](web/lite-framework.md)。
+详见框架仓 `asunajs/lite` 的 `docs/design.md`（本仓只剩「怎么用它」：[`docs/web/lite.md`](web/lite.md)）。
 
 ### 10.2 目录
 
@@ -1008,7 +1007,7 @@ chunk 条数**别背数**，现算：`cd web && npm run build && ls web/dist/ass
 > 2026-09-30 全部拆掉、换成自研 `lite`；`lite` 没有 Suspense/异步组件这一层，
 > 页面本身就是"异步工厂 + `createComponent`"的形状，所以那三条坑**一条都不再成立**。
 > 保留原文只为"别再按它规划工作量"；要问现状看上面这句与
-> [`lite-framework.md`](web/lite-framework.md)。
+> 框架仓 `asunajs/lite` 的 `docs/design.md`（本仓见 [`docs/web/lite.md`](web/lite.md)）。
 
 <details>
 <summary>历史记录（Vue 时代，已不适用）——为什么当时拆不动</summary>
@@ -1119,7 +1118,7 @@ t+1000ms #a=""  #b=""
 
 > ⚠ **整节是 Vue 时代（迁移到 `lite` 之前）的字节分析，数字与模块名都已过期** ——
 > 现在没有 `@vue/*` 这些模块，产物也**按页拆 chunk**、不再是单 chunk。
-> 现状与现算命令看 [`lite-framework.md`](web/lite-framework.md) §5（`node web/lite/size.mjs`）。
+> 现状与现算命令看 框架仓 `asunajs/lite` 的 `docs/design.md` §5（`npm run size`）。
 > 保留本节只为"当时为什么这么压"的来龙去脉。
 
 当时的产物现状：**单 chunk 154,441 B raw / 48,718 B gzip**。要压它，先得知道字节在哪。
@@ -1335,6 +1334,7 @@ run <任务名> <账号>             跑一次任务
 pending                        查看本进程里还没清理的网盘产物
 cron <定时id>                   跑一条已配置的定时（给系统 crontab 调用）
 pipeline run <编排id>           跑一条已配置的编排
+run-all                         一键跑**默认编排**（= pipeline run daily）
 auth refresh <--account|--all>  刷新凭据
 login <方式>                    登录账号（qr / sms / app / password / device）
 ```
@@ -1343,6 +1343,27 @@ login <方式>                    登录账号（qr / sms / app / password / dev
 前者落盘 `mobile:` 前缀、走 App 的设备头与加密体（见 §12.1.1）。
 
 **定时与编排的「创建」不在命令行** —— 改配置文件或用 WebUI。
+
+⚠ **默认编排 + 默认定时是"开箱就有"的**（用户口径 2026-10-07：「实现一个默认的编排任务，让本项目
+能和 ts 版一样一键运行，**cli 一条命令**，**webui 一个定时**」＋ 两次更正：「**默认编排也要和普通的
+自定义编排一个逻辑**」「**啊？不自动新建怎么算默认**」✓）：
+
+* **服务启动时种下两条**（`AppHandle::seed_defaults`，`main.rs` 里在**调度器读盘之前** ✓）：
+  * 编排 `daily`「每日一键（默认）」，14 步（`mcloud_core::pipeline::default_pipeline` ✓）；
+  * 定时 `daily`，`task:"pipeline"` + `body.pipelineId:"daily"`、`0 8 * * *`、`Asia/Shanghai`、启用 ✓。
+  两条都是**普通实体** ✓：没有"内置"标记、没有专用执行路径，在界面上能运行/定时/编辑/删除，
+  与手建的**逐格相同** ✓。幂等按 id 判 ⇒ 用户改过就不会被覆盖 ✓（删掉的话下次启动会再种 ——
+  "默认"就是这个语义 ✓）。
+* **CLI 一条命令**：`mcloud run-all` ✓ —— 库里有 `daily` 就跑**库里那份**（尊重你的修改 ✓），
+  没有就跑**内置预设**、**不写库** ✗（命令行不该顺手往你库里塞东西 ✓）；执行体与
+  `pipeline run <id>` 是**同一个** `run_one` ✓。
+
+⚠⚠ **默认编排里刻意没有 `exchange`（兑换）与 `live-room`（直播口令）** —— 用户同一条口径的
+下一句：「比如兑换，直播这种**不能固定运行**的就不要编排进去，ts 那个是把口令错误编排但是
+**一直没开过配置**」✓（TS 那条虽然写在序列里，但被 `if (config.直播口令?.开启)` 挡着、
+**从来没真跑过** ⇒ "TS 编了它"不构成依据 ✗）。顺序是**契约**（用户：「还有注意顺序，
+比如**任务签到 / app Task 等做完了才能领取 ai 豆**」✓）：`receive` 收在最后、
+`task-expansion` 在 `app-task` 之前（后者有一道"本月已备份"的月份门）、`multiple` 紧跟 `sign` ✓。
 少一个入口就少一处会与 WebUI 漂移的语义。
 
 `cron` **不常驻**：时间由系统 crontab 管，它只跑一条然后退出。

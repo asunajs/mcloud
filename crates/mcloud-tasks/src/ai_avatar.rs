@@ -433,9 +433,50 @@ async fn call_env<T>(
     parse: fn(&mcloud_upstream::app_signin::SignInEnvelope) -> Result<T>,
 ) -> Result<T> {
     let resp = ctx.http.request(req).await?;
-    let body = mcloud_upstream::session::ensure_http_ok(&resp, what)?;
+    // ⚠ 这一族的 404 = **活动下线**（见 `explain_dead_activity` ✓），别的失败原样透出 ✓。
+    let body = mcloud_upstream::session::ensure_http_ok(&resp, what)
+        .map_err(|e| explain_dead_activity(what, e))?;
     let env = mcloud_upstream::app_signin::SignInEnvelope::parse(body)?;
     parse(&env)
+}
+
+/// 把这一族的 **404** 翻成"**活动已经下线，你该关掉开关**" ✓。
+///
+/// # 实测（2026-10-08，只读探测；用户报的就是它）
+///
+/// | 口 | 结果 |
+/// |---|---|
+/// | `GET /market/rabactive/image/catalogFullPath?marketName=rabbityearpic` | **404** |
+/// | `GET /market/rabactive/image/getWorkList?type=1` | **404** |
+/// | `GET /market/rabactive/image/getHashLeft` | **404** |
+///
+/// 同主机的 `/` 仍是 301 ✓ ⇒ **不是域名/网络挂了** ✗，是**这一族接口没了** ✓。
+/// `rabbityearpic` 是**兔年**（2023 那期）的活动 ✓ ⇒ 到期下线是合理的 ✓。
+/// 而本仓、Go 参考实现、抓包仓里**都没有别的 `marketName` 可用** ✓
+/// （Go 那边写着「rabactive 那六口**整族零实拍**」✓、抓包仓零命中 ✓）
+/// ⇒ **没有据实可换的替代** ✓，这一条**修不好** ✓ —— 只能让人**别误判** ✓。
+///
+/// # 为什么单加这一层
+///
+/// 404 的原话经 `ensure_http_ok` 之后已经会说"上游回的是**网页**不是接口" ✓，
+/// 但用户还得自己推理"那我该干什么" ✗ ⇒ 这里补上**该怎么办** ✓：
+/// **把账号设置里的「AI 头像」开关关掉** ✓ —— 本任务受那个账号级开关控制 ✓
+/// （默认关 ✓，用户是**主动开**的 ✓），关掉就不再跑、也不再报 ✓。
+///
+/// ⚠ 只认 **404** ✓：别的失败（超时、500、业务码）**原样透出** ✗ ——
+/// 那些是"这次没成、可以再试"，把它们也盖成"活动下线"会让人**放弃一个还能用的功能** ✗。
+fn explain_dead_activity(what: &str, err: mcloud_core::Error) -> mcloud_core::Error {
+    match &err {
+        mcloud_core::Error::Network(msg) if msg.contains("HTTP 404") => {
+            mcloud_core::Error::Network(format!(
+                "{what} 失败：AI 头像活动（`rabbityearpic`，兔年那一期）在上游**已经下线** —— \
+                 `/market/rabactive/image/*` 三个口实测全是 404（同主机其它路径正常 ⇒ 不是网络问题）。\
+                 该怎么办：到账号设置里把「AI 头像」开关**关掉**（本任务受它控制，关掉就不再跑）。\
+                 这一条修不了：没有据实可换的新活动名（抓包仓与 Go 参考里都没有）。原始错误：{msg}"
+            ))
+        }
+        _ => err,
+    }
 }
 
 /// 下载回来的合成图字节 → `upload` 要的 base64（**形状校验在这里**）。

@@ -457,6 +457,7 @@ mod tests {
                     task: "app-task".into(),
                     account: "0f6050105ab111f4".into(),
                     at_ms: 0,
+                    origin: None,
                 },
             );
             trace_event(&labels, &log(1, "分享文件领好礼1/7：1/7 → 1/7"));
@@ -569,6 +570,7 @@ mod category_tests {
                     task: "app-task".into(),
                     account: "0f6050105ab111f4".into(),
                     at_ms: 0,
+                    origin: None,
                 },
             );
         });

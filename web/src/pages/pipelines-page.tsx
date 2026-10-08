@@ -25,15 +25,19 @@
  * 复刻的代价是两处语义迟早分叉（尤其是"后端错误原文透出"这条）。
  */
 
-import { onMounted, ref, onUnmounted } from 'lite'
+import { onMounted, ref, onUnmounted } from '@asunajs/lite'
 import { setPageRefresh } from '../ui/page-refresh'
 import {
   listAccounts,
   listCapabilities,
+  listPushEvents,
+  listPushRules,
   PIPELINE_TASK,
   request,
   saveSchedule,
   type AccountSummary,
+  type PushEventOption,
+  type PushRule,
   type TaskMeta,
 } from '../api'
 import { EmptyState } from '../ui/empty-state'
@@ -41,9 +45,12 @@ import { EmptyState } from '../ui/empty-state'
 import { ParamField } from '../ui/param-field'
 import { closeDialog, ConfirmDialog, Dialog, openDialog } from '../ui/dialog'
 import { showError } from '../ui/error-dialog'
+import { IconAlert } from '../ui/icons'
 import { pushToast } from '../ui/toast'
 import { fmtEpochMs } from '../ui/time'
 import { Select } from '../ui/select'
+import { PushEventPicker } from '../ui/push-event-picker'
+import { PushRuleSelect } from '../ui/push-rule-select'
 
 type LoadState = 'loading' | 'error' | 'ready'
 
@@ -68,6 +75,14 @@ interface Pipeline {
   steps: PipelineStep[]
   enabled: boolean
   lastRunMs: number | null
+  /**
+   * 绑定的推送规则 id（**多选** ✓，用户口径 2026-10-08「一个行为可以选择多个规则」）。
+   *
+   * ⚠ **可选**是给老数据留的：没有这一格时当**空数组**读 ✓（空 = 不推 ✓）。
+   */
+  pushRules?: string[]
+  /** 运行结局条件（多选 ✓）。**空数组 = 跑完就推** ✓。 */
+  pushEvents?: string[]
 }
 
 /** 提交给 `PUT /api/pipelines/{id}` 的体。刻意不含 `lastRunMs`：那是服务端维护的。 */
@@ -82,6 +97,10 @@ interface PipelineInput {
   stopOnError: boolean
   steps: { task: string; body: unknown; continueOnError: boolean }[]
   enabled: boolean
+  /** 绑定的推送规则 id（多选 ✓）。空数组 = 不推 ✓。 */
+  pushRules: string[]
+  /** 运行结局条件（多选 ✓）。空数组 = 跑完就推 ✓。 */
+  pushEvents: string[]
 }
 
 /** 编辑期的一份草稿。`uid` 只在前端用，给步骤列表当稳定的 key。 */
@@ -117,6 +136,7 @@ const SCHED_DIALOG_ID = 'pipeline-schedule'
 // ── 网络 ────────────────────────────────────────────────────────────────
 
 const listPipelines = () => request<Pipeline[]>('/api/pipelines')
+
 
 const savePipeline = (id: string, input: PipelineInput) =>
   request<Pipeline>(`/api/pipelines/${encodeURIComponent(id)}`, {
@@ -169,9 +189,31 @@ export const PipelinesPage = () => {
 
   const pipelines = ref<Pipeline[]>([])
   const tasks = ref<TaskMeta[]>([])
+  /** 推送规则清单：「推送规则」那一格的多选要用（用户口径 2026-10-08 的「行为选规则」✓）。 */
+  const rules = ref<PushRule[]>([])
+  /** **运行类**事件清单（结局条件那排勾选框 ✓）。面板行为那几条不在这里 ✗。 */
+  const runEvents = ref<PushEventOption[]>([])
   const draft = ref<Draft | null>(null)
   /** 删除确认框里要显示的那条。 */
   const deleteTarget = ref<Pipeline | null>(null)
+
+  /**
+   * 草稿里绑的推送规则 id（**多选** ✓，用户口径「一个行为可以选择多个规则」）。
+   *
+   * ⚠ 它是**页面级 ref**、不是 `Draft` 上的字段：`draft` 那个对象是原地改的
+   * （`d.name = …`），改它**不会通知任何人** ⇒ 下拉选完以后触发器上的字不会更新 ✗
+   * （`ui/select.tsx` 的 `data-value` / 触发器文字是响应式读 `props.value` 的，
+   * 前提是有人读得到那个信号 ✓）。定时页的 `fTask` 也是这个形状 ✓。
+   *
+   * 空数组 = **不推** ✓。
+   */
+  const fPushRules = ref<string[]>([])
+  /**
+   * 运行结局条件（**多选** ✓）。**空数组 = 跑完就推** ✓（用户口径）。
+   *
+   * 与 `fPushRules` 同一个理由单独成 ref ✓。
+   */
+  const fPushEvents = ref<string[]>([])
 
   const saving = ref(false)
   const deleting = ref(false)
@@ -199,9 +241,18 @@ export const PipelinesPage = () => {
     errorMessage.value = ''
     try {
       // 任务清单必须一起拿：步骤的任务下拉是**从能力表生成**的，不硬编码任务名
-      const [ps, caps] = await Promise.all([listPipelines(), listCapabilities()])
+      // 推送规则清单同一条口径：下拉里不许出现前端写死的规则名 ✓
+      const [ps, caps, pushRules, pushEvents] = await Promise.all([
+        listPipelines(),
+        listCapabilities(),
+        listPushRules(),
+        listPushEvents(),
+      ])
       pipelines.value = ps
       tasks.value = caps.tasks.filter((t) => !t.hidden)
+      rules.value = pushRules
+      // ⚠ 只留**运行类**：面板行为（登录/性能）没有定时可绑 ⇒ 摆进这张表单只会误导 ✗
+      runEvents.value = pushEvents.filter((e) => e.kind === 'run')
       state.value = 'ready'
     } catch (e) {
       errorMessage.value = e instanceof Error ? e.message : '无法连接后端'
@@ -229,6 +280,10 @@ export const PipelinesPage = () => {
   const startNew = () => {
     submitError.value = ''
     steps.value = [emptyStep()]
+    // 新编排**默认一条规则都不选** ✓（不推 —— 多这一格不会改变任何东西）
+    fPushRules.value = []
+    // 结局条件**默认全不勾** = 跑完就推 ✓（用户口径）
+    fPushEvents.value = []
     draft.value = {
       id: `p-${Date.now().toString(36)}-${idSeq++}`,
       isNew: true,
@@ -248,6 +303,9 @@ export const PipelinesPage = () => {
       body: s.body,
       continueOnError: s.continueOnError,
     }))
+    // ⚠ 别的调用方可能**没有这两格** ⇒ 当"不推 / 跑完就推"读 ✓（`?? []`）
+    fPushRules.value = [...(p.pushRules ?? [])]
+    fPushEvents.value = [...(p.pushEvents ?? [])]
     draft.value = {
       id: p.id,
       isNew: false,
@@ -320,15 +378,29 @@ export const PipelinesPage = () => {
       continueOnError: s.continueOnError,
     })),
     enabled: d.enabled,
+    // ⚠ 每一格都要给（后端 upsert 不是 patch）：空数组 = 不推 / 跑完就推 ✓
+    pushRules: fPushRules.value,
+    pushEvents: fPushEvents.value,
   })
 
   const save = async () => {
     const d = draft.value
     if (!d) return
+    /**
+     * ⚠⚠ 呈现口径（2026-10-08 用户口径「所有的提示都是优先弹窗式」）：
+     * 失败**先弹 toast**（错误类不自动消失，见 `ui/toast.ts`），
+     * 同一句再放在**卡片标题下面**（`form()` 的第一句）——
+     * 那里紧挨着用户点的「保存」。
+     * ❌ 曾经只画在表单**最底下**（步骤编辑器之后），等于没提示。
+     */
+    const fail = (msg: string) => {
+      submitError.value = msg
+      pushToast('error', msg)
+    }
     submitError.value = ''
     const invalid = validate(d)
     if (invalid) {
-      submitError.value = invalid
+      fail(invalid)
       return
     }
 
@@ -341,7 +413,7 @@ export const PipelinesPage = () => {
       await load()
     } catch (e) {
       // 服务端原文（含"第 N 步的任务不存在：x"这类预检结论）
-      submitError.value = e instanceof Error ? e.message : '保存失败'
+      fail(e instanceof Error ? e.message : '保存失败')
     } finally {
       saving.value = false
     }
@@ -410,6 +482,16 @@ export const PipelinesPage = () => {
   const schedTarget = ref<Pipeline | null>(null)
   const schedAccounts = ref<string[]>([])
   const schedExpr = ref('0 8 * * *')
+  /**
+   * 这条**新定时**绑的推送规则（**多选** ✓，空 = 不推）。
+   *
+   * ⚠ 它是**定时**（`Schedule`）上的一格，不是编排上那一格：编排的 `pushRules` 在
+   * 上面的编辑表单里 ✓，而这里建出来的是一条 `task: "pipeline"` 的定时 ✓
+   * —— 两者在后端是两张表、两条记录 ✓。
+   */
+  const schedPushRules = ref<string[]>([])
+  /** 这条新定时的**运行结局条件**（多选 ✓，空 = 跑完就推 ✓）。 */
+  const schedPushEvents = ref<string[]>([])
   const schedTz = ref(
     // 浏览器时区作为缺省 ✓（用户就在这个时区里点按钮）。
     Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
@@ -419,6 +501,8 @@ export const PipelinesPage = () => {
   const openSched = async (p: Pipeline) => {
     schedTarget.value = p
     schedAccounts.value = []
+    schedPushRules.value = []
+    schedPushEvents.value = []
     schedBusy.value = false
     if (runChoices.value.length === 0) {
       try {
@@ -454,6 +538,9 @@ export const PipelinesPage = () => {
         timezone: schedTz.value.trim() || 'Asia/Shanghai',
         body: { pipelineId: p.id },
         enabled: true,
+        // 新定时默认不推 ✓（空数组 = 一条规则都不选 / 跑完就推 ✓）
+        pushRules: schedPushRules.value,
+        pushEvents: schedPushEvents.value,
       })
       closeDialog(SCHED_DIALOG_ID)
       pushToast('success', '已加定时 —— 到「定时」页能看到下次触发时间')
@@ -809,6 +896,19 @@ export const PipelinesPage = () => {
       <div class="card-body">
         <h2 class="card-title text-base">{d.isNew ? '新建编排' : '编辑编排'}</h2>
 
+        {/*
+          ⚠⚠ 失败那一句**放在卡片标题下面**（紧挨着下面那个「保存」），不是表单底部：
+          用户点保存时视线在标题那一行，红字跑到步骤编辑器之后等于没提示
+          （2026-10-08 用户口径「所有的提示都是优先弹窗式」✓）。
+          弹窗那一份由 `save()` 里的 `pushToast('error', …)` 给 ✓。
+        */}
+        {submitError.value ? (
+          <div class="alert alert-soft alert-error text-sm" role="alert">
+            <IconAlert class="size-4 shrink-0" />
+            <span class="break-words">{submitError.value}</span>
+          </div>
+        ) : null}
+
         <fieldset class="fieldset">
           <legend class="fieldset-legend">名称</legend>
           <input
@@ -820,6 +920,41 @@ export const PipelinesPage = () => {
               d.name = (e.target as HTMLInputElement).value
             }}
           />
+        </fieldset>
+
+        {/*
+          推送（用户口径 2026-10-08：「**行为选择规则，一个行为可以选择多个规则**」✓）。
+          编排上那一格与"给这条编排新建的定时"那一格**不是同一处** ✓。
+        */}
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">推送规则（可多选）</legend>
+          <PushRuleSelect
+            id="pipe-push-rule"
+            rules={rules.value}
+            value={fPushRules.value}
+            onChange={(v) => {
+              fPushRules.value = v
+            }}
+          />
+          <p class="text-xs leading-5 opacity-60">
+            一个都不选 = 不推。选了规则就按**每条规则自己**的平台、凭据、标题发
+            —— 规则在「推送」页里建。可多选，每条规则各发一份。
+          </p>
+        </fieldset>
+
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">运行结局条件</legend>
+          <PushEventPicker
+            id="pipe-push-events"
+            events={runEvents.value}
+            value={fPushEvents.value}
+            onChange={(v) => {
+              fPushEvents.value = v
+            }}
+          />
+          <p class="text-xs leading-5 opacity-60">
+            只在勾中的结局下推。<strong>全不勾 = 跑完就推</strong>（不看结局）。
+          </p>
         </fieldset>
 
 
@@ -837,12 +972,6 @@ export const PipelinesPage = () => {
 
 
         {stepEditor()}
-
-        {submitError.value ? (
-          <div class="alert alert-soft alert-error text-sm" role="alert">
-            <span class="break-words">{submitError.value}</span>
-          </div>
-        ) : null}
 
         <div class="card-actions justify-end">
           <button
@@ -1006,6 +1135,41 @@ export const PipelinesPage = () => {
             value={schedTz.value}
             onInput={(e) => (schedTz.value = (e.target as HTMLInputElement).value)}
           />
+        </fieldset>
+
+        {/*
+          这条**新定时**绑哪几条推送规则、什么结局才推。⚠ 与编排自己那两格不是同一处
+          （编排的绑定在上面那个编辑表单里 ✓）—— 建出来的是一条定时，
+          它才是运行时真正被读的那一格 ✓。
+        */}
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">推送规则（可多选）</legend>
+          <PushRuleSelect
+            id="sched-new-push-rule"
+            rules={rules.value}
+            value={schedPushRules.value}
+            onChange={(v) => {
+              schedPushRules.value = v
+            }}
+          />
+          <p class="text-xs leading-5 opacity-60">
+            一个都不选 = 不推。选了规则就按**每条规则自己**的平台、凭据、标题发。
+          </p>
+        </fieldset>
+
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">运行结局条件</legend>
+          <PushEventPicker
+            id="sched-new-push-events"
+            events={runEvents.value}
+            value={schedPushEvents.value}
+            onChange={(v) => {
+              schedPushEvents.value = v
+            }}
+          />
+          <p class="text-xs leading-5 opacity-60">
+            只在勾中的结局下推。<strong>全不勾 = 跑完就推</strong>（不看结局）。
+          </p>
         </fieldset>
 
         <fieldset class="fieldset">

@@ -21,7 +21,7 @@
 > `exchange`（兑换）+ `msg-push`（消息推送）+ `fun-ai`（趣玩AI抽奖）+ `notice`（公告任务）
 > + `play-ai-special`（拍拍盘点，**只读那一半**）
 > + `app-task-matrix`（App 任务矩阵，**只读那一半**）
-> + `task-expansion`（任务拓展，**全链**：读 → 凑备份 → 等 → 重读 → 领 → **删自己传的那个文件**）
+> + `task-expansion`（任务拓展，**全链**：读 → 凑备份**六发**（照片 `create`/`PUT`/`complete` ＋ 快照 `createSnapshot`/`PUT`/`completeSnapshot`，2026-10-07 按真机抓包重写）→ 等 → 重读 → 领 → **删自己传的那个文件**）
 > + `app-task`（App 任务**做任务**，写侧：106 / 522 / beiyong1 名字门三档玩法 → 逐条打卡 → 清理）。
 > ⇒ 下面 §2 的 **P2「只读查询」那一档已经全部落完**（那四条的实拍材料都拿到了）。
 > 下面那张 19 条清单是**参考实现的规格表**，不是本项目的进度表；
@@ -191,7 +191,7 @@ mcloud 的实拍结论（`../mcloud-back/docs/business-feature-inventory.md` §5
 | 4 | `backup-gift` | 备份好礼 | Action | ✅ | | catch-up | 记账（**GET 却是写**） | jwt |
 | 5 | `revival` | 用复活卡/回馈卡 | Action | ❌ | | skip | **不可逆** | jwt |
 | 6 | `prizes` | 待领取奖品 | Query | ❌ | | catch-up | 无 | jwt |
-| 7 | `task-list` | 任务清单 | Query | ❌ | | catch-up | 无 | jwt |
+| 7 | ~~`task-list`~~ | 任务清单 | Query | ❌ | | catch-up | 无 | jwt |
 | 8 | `notice` | 开启通知领AI豆 | Action | ✅ | | catch-up | 记账 | jwt |
 | 9 | `app-task` | App 任务（做任务） | Action | ❌ | | skip | **上传/建删外链/发邮件** | jwt |
 | 10 | `fun-ai` | 趣玩AI抽奖 | Action | ✅ | | catch-up | 记账 | jwt |
@@ -202,7 +202,7 @@ mcloud 的实拍结论（`../mcloud-back/docs/business-feature-inventory.md` §5
 | 15 | `task-expansion` | 任务拓展 | Action | ❌ | | skip | **往网盘写文件** | jwt |
 | 16 | `live-room` | 直播口令 → 小红花 | Action | ❌ | | skip | 入群足迹 + **WS 长连** | jwt + WebSocket |
 | 17 | `exchange` | 兑换奖品 | Action | ❌ | ✅ | skip | **真扣AI豆、不可回滚** | jwt + 滑块 |
-| 18 | `cloud-snapshot` | AI豆余额快照 | Query | ❌ | | catch-up | 无 | jwt |
+| 18 | ~~`cloud-snapshot`~~ | AI豆余额快照 | Query | ❌ | | catch-up | 无 | jwt |
 | 19 | `auth-refresh` | 刷新 auth 凭据 | Action | ❌ | ✅ | catch-up | 换 token | basic（**唯一不需要 jwt 的写操作**） |
 
 > **隐藏的只有两条**：`exchange`（有自己的奖品页与抢兑规则）与 `auth-refresh`（只给调度指向）。
@@ -258,7 +258,7 @@ mcloud 的实拍结论（`../mcloud-back/docs/business-feature-inventory.md` §5
 
 ### 🅿️ P1 — 签到族（共用一条会话，一次打通 8 条）✅ **已完成（2026-09-26）**
 
-`sign` → `receive` → `multiple` → `backup-gift` → `revival` → `prizes` → `cloud-snapshot` → `task-list`
+`sign` → `receive` → `multiple` → `backup-gift` → `revival` → `prizes`（`task-list` 与 `cloud-snapshot` 2026-10-07 已摘掉注册 —— 只读盘点不是任务，数据并进「上游状态」页的签到历史那一格 ✓）
 
 **为什么这批一起做**：它们**共用签到页那一条会话**，mcloud 侧就是 `run_dispatch_signin.go`
 一层装配（§0 表格里"2026-09-23 那一批接线"）。打通一条，其余是加请求。

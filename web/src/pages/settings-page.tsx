@@ -14,6 +14,59 @@
  * - **补「存储信息」与「重启服务」**：数据目录/日志占用/二进制路径，以及一个真的
  *   会优雅重启服务的按钮（后端 `GET /api/system/storage`、`POST /api/system/restart`）。
  *
+ * # 2026-10-08：**推送那两块搬走了**（用户口径「并单独给推送一个」）
+ *
+ * 「推送渠道」与「推送规则」两张卡**整块**搬去新的「推送」页（`pages/push-page.tsx` ✓），
+ * 这一页**删掉**它们（不是藏起来 ✗）。留下的卡片顺序：
+ * 服务 → 口令 → 口令策略 | 会话控制 → 存储信息 → **事件推送** → 服务操作 → 关于 ✓。
+ * 之所以搬：那两块**藏在设置页里、要往下滚才看得见**，用户 2026-10-07 的原话是
+ * 「**我没有看到配置推送规则的页面**」✗ —— 而配置推送本来就该有自己的门 ✓。
+ *
+ * # 2026-10-08（同日，第二次口径）：**新增「事件推送」卡**
+ *
+ * 用户原话：「在**设置**里，单独为这种**面板行为**增加一个可配置推送规则的入口」✓
+ * —— 登录新设备 / 登录失败 / 耗时异常 / 连续失败这四类**没有定时可绑**，
+ * 所以入口在这里，而不是在「推送」页或定时表单里 ✓。
+ * ⚠ 它是**行为**那一侧（「什么时候发」）：每行**选规则**（可多选 ✓）＋ 节流
+ * （触发方式 / 冷却 / 每日上限 ✓，保守默认见 `api.ts::PANEL_THROTTLE_DEFAULTS` ✓）。
+ *
+ * # 2026-10-08（同日，第三次口径）：**八张卡拆成顶部四节 tab**
+ *
+ * 用户原话：「**设置页面内容太多了，也没有分页面**」✓ —— 这一页从 2026-10-01 起一路
+ * 加卡（服务 / 口令 / 策略 / 会话 / 存储 / 事件推送 / 服务操作 / 关于 = **8 张**），
+ * 一屏堆下来只能靠滚，找哪一块全靠眼力 ✗。
+ *
+ * 分法（用户选的）：**顶部 tab 切换**，四节 —— 服务 / 安全 / 事件推送 / 关于 ✓。
+ * ⚠ **一张卡都没丢**（8 张照旧，只是换了位置 ✓），卡的**内容与顺序**一个字没改 ✓：
+ *
+ * | tab | 装哪几张 |
+ * |---|---|
+ * | 服务 | 版本/服务信息 · 存储信息 · 服务操作 |
+ * | 安全 | 修改管理员口令 · 口令策略 · 会话控制 |
+ * | 事件推送 | 「事件推送」卡（面板行为入口，2026-10-08 第二次口径那一条 ✓）|
+ * | 关于 | 关于 |
+ *
+ * # ⚠⚠ tab 的样式：`join` + `btn join-item`，**不用 daisyUI 的 `.tab`**
+ *
+ * 与 `tasks-page.tsx` 的分组 tab、`history-logs-page.tsx` 的「历史/日志」同款 ✓。
+ * `.tab` 在本仓**被排除过**（见 `app.css` 顶部 `@theme` 那段注释：它是 daisyUI 组件，
+ * 本仓只保留手写的那批）—— 用了它**不报错、只是静默不生成样式**，
+ * 界面退化成"一串连在一起的纯文字"✗。
+ *
+ * # 地址：选中哪一节**进 URL**
+ *
+ * `/settings`（服务，**老地址照旧落第一节** ✓）/ `/settings/security` / `/settings/events`
+ * / `/settings/about` ✓。`ui/nav.ts::parsePath` 的"子路由按第一段归属"天然把它们都
+ * 归到 `settings` 这一页 ⇒ **不用动路由表** ✓，刷新 / 书签 / 浏览器后退都能用 ✓。
+ * 三个新段都不带 `.` ✓（`static_files.rs` 的 SPA 回落把"末段带点"的当静态资源 ✗）。
+ *
+ * ⚠ 与 `history-logs-page.tsx` 同一条口径：tab 由**地址**决定（`watch(currentPath)` ✓），
+ * 不是本地 `ref` —— 否则"直接开 `/settings/security`"会先落在服务节（地址与界面不一致 ✗），
+ * 而且浏览器后退也切不动 ✓。
+ *
+ * ⚠ **只渲染当前那一节**（不是"四节都渲染、各用 CSS 藏"✗）：省掉同时挂着的四份控件，
+ * 也顺带把「安全节那几张卡不在服务节里」这件事变成**结构性**的 ✓（门禁就钉这条）。
+ *
  * # 为什么账户安全那块只认"当前口令"而不认身份
  *
  * 会话被盗时这一条拦不住 —— 但那是会话本身的语义：能改口令的会话本来就有全部权限。
@@ -21,21 +74,33 @@
  * 然后给当前浏览器换一张新的。
  */
 
-import { onMounted, onUnmounted, ref } from 'lite'
+import { onMounted, onUnmounted, ref, watch } from '@asunajs/lite'
 import { setPageRefresh } from '../ui/page-refresh'
+import { currentPath, navigate } from '../ui/router'
 import {
   changePassword,
+  emptyPanelBindings,
   getAbout,
+  getPushPanel,
   getSecurity,
   getStatus,
   getStorage,
   getVersion,
+  listPushEvents,
+  listPushRules,
+  PANEL_BEHAVIOR_KEYS,
+  PANEL_BEHAVIOR_LABEL,
+  putPushPanel,
   putSecurity,
   restartService,
   type AboutView,
+  type PanelBindings,
+  type PushEventOption,
+  type PushRule,
   type SecurityView,
   type ServiceStatus,
   type StorageView,
+  type ThrottleMode,
   type VersionInfo,
 } from '../api'
 import { ConfirmDialog, closeDialog, openDialog } from '../ui/dialog'
@@ -44,13 +109,43 @@ import { credentialFor } from '../ui/password'
 import { StatRow, type StatItem } from '../ui/stat-row'
 import { fmtClock, fmtEpochMs, fmtUptime } from '../ui/time'
 import { runStatusOf, statusBadge, statusLabel } from '../ui/history'
-import { IconBrand } from '../ui/icons'
+import { IconAlert, IconBrand } from '../ui/icons'
+import { PushRuleSelect } from '../ui/push-rule-select'
 import { Select } from '../ui/select'
 
 type LoadState = 'loading' | 'error' | 'ready'
 
 /** 「运行时间」得自己往前走，30 秒一格（与总览页同一个口径）。 */
 const TICK_MS = 30_000
+
+// ── 顶部四节 tab（2026-10-08 用户口径「设置页面内容太多了，也没有分页面」）──────
+
+/** 四节的 id。顺序即 tab 顺序，也是门禁认的顺序 ✓。 */
+type Tab = 'service' | 'security' | 'events' | 'about'
+
+/** tab 的标签（顺序照用户口径：服务 / 安全 / 事件推送 / 关于 ✓）。 */
+const TABS: readonly (readonly [Tab, string])[] = [
+  ['service', '服务'],
+  ['security', '安全'],
+  ['events', '事件推送'],
+  ['about', '关于'],
+]
+
+/**
+ * 地址 → tab。
+ *
+ * ⚠ **老地址 `/settings` 必须落在第一节（服务）** ✓ —— 书签、浏览器历史、
+ * 侧栏 / dock 上那条「设置」（`ui/nav.ts` 的 `href: '/settings'` ✓）走的都是它，
+ * 落到空节或 404 都是把用户的东西弄丢 ✗。
+ * 认不出的段（`/settings/xxx`）也一律回服务节：宁可多显示一节，也不要白屏 ✓。
+ */
+const tabOf = (path: string): Tab => {
+  const seg = path.startsWith('/settings/') ? path.slice('/settings/'.length) : ''
+  return seg === 'security' || seg === 'events' || seg === 'about' ? seg : 'service'
+}
+
+/** tab → 地址（服务节用**老地址** `/settings` ✓，其余各自一段 ✓）。 */
+const hrefOf = (tab: Tab): string => (tab === 'service' ? '/settings' : `/settings/${tab}`)
 
 /** 会话时长的可选项（小时）。后端允许 1 小时 ~ 90 天。 */
 const TTL_CHOICES = [
@@ -70,7 +165,115 @@ const fmtBytes = (n: number): string => {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+// ── 「事件推送」那四行的草稿（2026-10-08 用户口径）────────────────────────
+
+/**
+ * 一行的草稿。
+ *
+ * ⚠ 冷却 / 上限在界面上是**分钟**与**条数**，落盘是 `cooldownSecs` / `dailyCap`
+ * （见 `api.ts::PushThrottle` ✓）—— 提交时才换算。
+ * 两格都存**字符串**：数字框"正在输入"的空串不该被 `Number()` 吃成 0 ✗。
+ */
+interface PanelRowDraft {
+  rules: string[]
+  mode: ThrottleMode
+  /** 冷却（分钟）。`'0'` = 不冷却 ✓。 */
+  cooldownMins: string
+  /** 每日上限（条）。`'0'` = 不限 ✓。 */
+  dailyCap: string
+  /**
+   * 「耗时异常」的倍数判据（只有那一行有这一格 ✓）。
+   * **空串 = 用户没动过** ⇒ 提交 `null` = 跟随内置默认 3.0 ✓。
+   */
+  slowFactor: string
+  /** 「连续失败」的条数判据（只有那一行有这一格 ✓）。空串 = 跟随内置默认 3 ✓。 */
+  failStreak: string
+}
+
+/** 触发方式的两个选项（用户口径：每次触发都推 / **只在状态变化时推** ✓）。 */
+const THROTTLE_MODES: { value: ThrottleMode; label: string }[] = [
+  { value: 'every', label: '每次触发都推' },
+  { value: 'onChange', label: '只在状态变化时推' },
+]
+
+/** 每行一句话说明（界面上那几个字，不是 markdown ⇒ 别写 `**粗体**` ✗）。 */
+const PANEL_BEHAVIOR_HINT: Record<string, string> = {
+  loginNew: 'WebUI 有新设备登录时',
+  loginFailed: '登录连续失败时',
+  perfSlow: '某次运行耗时远超同一任务的历史中位数时',
+  perfFailStreak: '同一任务连续失败时',
+}
+
+/** 服务端那份 → 草稿。秒 → 分钟（整数，避免 1800 秒显示成 30.000001 ✓）。 */
+const panelDraftOf = (b: PanelBindings): Record<string, PanelRowDraft> => {
+  const out: Record<string, PanelRowDraft> = {}
+  for (const k of PANEL_BEHAVIOR_KEYS) {
+    out[k] = {
+      // ⚠ `?? []`：后端对空数组是 `skip_serializing_if` ⇒ 这一格可能压根不在 ✗
+      rules: [...(b[k].rules ?? [])],
+      mode: b[k].throttle.mode,
+      cooldownMins: String(Math.round(b[k].throttle.cooldownSecs / 60)),
+      dailyCap: String(b[k].throttle.dailyCap),
+      // `null` / 缺省 = 用户没动过 ⇒ 输入框留空（**不写 3**：那会假装用户设过 ✗）
+      slowFactor: b[k].slowFactor == null ? '' : String(b[k].slowFactor),
+      failStreak: b[k].failStreak == null ? '' : String(b[k].failStreak),
+    }
+  }
+  return out
+}
+
+/** 非负整数；空串 / 乱填 → `0`（= 不设限 ✓，与后端同义）。 */
+const nonNegInt = (s: string): number => {
+  const n = Number(s)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
+}
+
+/** 正数；**空串 / 乱填 → `null`**（= 用户没动过 ⇒ 跟随内置默认 ✓，不是 0 ✗）。 */
+const positiveOrNull = (s: string): number | null => {
+  if (s.trim() === '') return null
+  const n = Number(s)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+/** 草稿 → 线格式（分钟 → 秒 ✓；空阈值 → `null` = 跟随内置默认 ✓）。 */
+const panelBindingsOf = (d: Record<string, PanelRowDraft>): PanelBindings => {
+  const out = {} as PanelBindings
+  for (const k of PANEL_BEHAVIOR_KEYS) {
+    const row = d[k]
+    out[k] = {
+      rules: [...(row?.rules ?? [])],
+      throttle: {
+        mode: row?.mode ?? 'every',
+        cooldownSecs: nonNegInt(row?.cooldownMins ?? '0') * 60,
+        dailyCap: nonNegInt(row?.dailyCap ?? '0'),
+      },
+      // ⚠ 两格阈值**只在自己那一行有意义**：别的行一律 `null` ✓
+      //（界面不给它们输入框，用户也就不会"设过" ✗）。
+      slowFactor: k === 'perfSlow' ? positiveOrNull(row?.slowFactor ?? '') : null,
+      failStreak: k === 'perfFailStreak' ? positiveOrNull(row?.failStreak ?? '') : null,
+    }
+  }
+  return out
+}
+
 export const SettingsPage = () => {
+  /**
+   * 当前那一节（顶部四节 tab ✓）。
+   *
+   * ⚠ 初值在**组件体**里读 `currentPath`：组件体只跑一次、且不在任何 effect 里
+   * ⇒ 不会给外壳那条页面槽挂上地址依赖 ✓（否则"从别的页切到 `/settings/security`"
+   * 会先按旧地址把这一页建一遍 ✗）。与 `history-logs-page.tsx` 同款 ✓。
+   */
+  const tab = ref<Tab>(tabOf(currentPath.value))
+
+  /**
+   * ⚠ 只在地址落回**本页这四个**时才动 tab：切去 `/push` 之类的地址时 `currentPath`
+   * 也会变，而那一刻这一页马上就要被卸载 ⇒ 不过滤就是白重建一次当前节 ✗。
+   */
+  watch(currentPath, (p) => {
+    if (p === '/settings' || p.startsWith('/settings/')) tab.value = tabOf(p)
+  })
+
   const state = ref<LoadState>('loading')
   const errorMessage = ref('')
   const version = ref<VersionInfo | null>(null)
@@ -95,24 +298,60 @@ export const SettingsPage = () => {
   const restarting = ref(false)
   const restartWaited = ref(0)
 
+  // ── 事件推送（**面板行为**：登录 / 性能那四类，2026-10-08 用户口径）────────
+  //
+  // ⚠ 这一块是**行为**那一侧（「什么时候发」）：每行选**规则**（可多选 ✓）
+  // ＋ 节流三格 ✓。规则本身（平台 / 凭据 / 标题）在「推送」页里建 ✓。
+  /** 当前用户的规则清单（多选要用）。 */
+  const panelRules = ref<PushRule[]>([])
+  /** 事件清单（取 `kind === 'panel'` 的那四条当行标题 ✓）。 */
+  const panelEvents = ref<PushEventOption[]>([])
+  /**
+   * 四行的草稿。
+   *
+   * ⚠ 冷却 / 上限在界面上是**分钟**与**条数**，落盘是 `cooldownSecs` / `dailyCap`
+   * （`api.ts::PushThrottle` ✓）—— 提交时才换算，中间态存字符串
+   * （数字框"正在输入"的空串不该被 `Number()` 吃成 0 ✗）。
+   */
+  const panelDraft = ref<Record<string, PanelRowDraft>>(panelDraftOf(emptyPanelBindings()))
+  const panelSaving = ref(false)
+  const panelError = ref('')
+
   let ticker: ReturnType<typeof setInterval> | undefined
 
+  /**
+   * 这一页的取数。
+   *
+   * ⚠ 这里**每一个**并发端点都必须在 fixture（`web/regress/lib.mjs`）里有一份：
+   * 少一个的表现不是"那一块空着"，而是**整页错误态** ✗（这一页的注释写着这条）。
+   *
+   * ⚠ 2026-10-08：推送那几件（渠道 / 规则 / 事件 / 渠道清单 / 定时 / 编排）**整块搬去
+   * 「推送」页**了（`pages/push-page.tsx` ✓）—— 这里不能再顺手拉它们：白花的往返是小事，
+   * 那些端点在别的变体里缺一个就会把**设置页**打成整页错误 ✗。
+   */
   const load = async () => {
     state.value = 'loading'
     errorMessage.value = ''
     try {
-      const [v, s, sec, st, ab] = await Promise.all([
+      const [v, s, sec, st, ab, prs, pevs, pn] = await Promise.all([
         getVersion(),
         getStatus(),
         getSecurity(),
         getStorage(),
         getAbout(),
+        listPushRules(),
+        listPushEvents(),
+        getPushPanel(),
       ])
       version.value = v
       status.value = s
       security.value = sec
       storage.value = st
       about.value = ab
+      panelRules.value = prs
+      panelEvents.value = pevs
+      panelDraft.value = panelDraftOf(pn)
+      panelError.value = ''
       minLen.value = sec.minPasswordLen
       ttlHours.value = sec.sessionTtlHours
       now.value = Date.now()
@@ -124,7 +363,7 @@ export const SettingsPage = () => {
   }
 
   onMounted(() => {
-  setPageRefresh({ run: () => void load() })
+    setPageRefresh({ run: () => void load() })
     void load()
     ticker = setInterval(() => {
       now.value = Date.now()
@@ -132,6 +371,13 @@ export const SettingsPage = () => {
   })
 
   onUnmounted(() => clearInterval(ticker))
+  /**
+   * ⚠ 刷新动作的**注销必须挂在组件这一层**，不能写在某张卡的渲染函数里
+   * （2026-10-08 拆 tab 时收口的）：原来那句在 `serviceCard()` 里 —— 只有**服务节**
+   * 被渲染过才会登记。于是"直接开 `/settings/security`"再离开这一页时，
+   * 登记处留着这一页的 `load()` ⇒ navbar 的刷新图标在**别的页**上点的还是这一页 ✗。
+   */
+  onUnmounted(() => setPageRefresh(null))
 
   /** 指标卡。读数全来自 `/api/status`，一个都不编。 */
   const metrics = (): StatItem[] => {
@@ -166,7 +412,6 @@ export const SettingsPage = () => {
     const s = status.value
     if (!s) return null
     const last = s.lastRun
-    onUnmounted(() => setPageRefresh(null))
 
   return (
       <div class="card bg-base-100 shadow-sm">
@@ -521,6 +766,226 @@ export const SettingsPage = () => {
     )
   }
 
+  // ── 事件推送（面板行为）────────────────────────────────────────────────
+
+  /** 一行的名字：以后端那份事件清单为准（`kind === 'panel'` ✓），认不出才用兜底文案。 */
+  const panelEventLabel = (k: string): string =>
+    panelEvents.value.find((o) => o.kind === 'panel' && o.key === k)?.label ??
+    PANEL_BEHAVIOR_LABEL[k as keyof PanelBindings] ??
+    k
+
+  /** 改一行的草稿（⚠ 整体换新对象 —— 浅响应的 `ref` 只认引用换没换 ✗）。 */
+  const setPanelRow = (k: string, patch: Partial<PanelRowDraft>) => {
+    panelDraft.value = {
+      ...panelDraft.value,
+      [k]: { ...panelDraft.value[k], ...patch },
+    }
+  }
+
+  /**
+   * 保存四个面板行为的绑定。
+   *
+   * ⚠ 失败信息**原样显示**：后端校验不过时它指名了是哪一格，自己再翻译一遍只会把线索弄丢 ✗。
+   */
+  const savePanel = async () => {
+    panelError.value = ''
+    panelSaving.value = true
+    try {
+      // 用**后端回读的那一份**回填（它可能做过归一化 ✓）
+      panelDraft.value = panelDraftOf(await putPushPanel(panelBindingsOf(panelDraft.value)))
+      pushToast('success', '事件推送已保存')
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '保存失败'
+      panelError.value = msg
+      // ⚠ 弹窗优先（2026-10-08 用户口径）：错误类 toast 不自动消失，见 `ui/toast.ts`。
+      // 同一句还会画在这张卡的**标题下面**（保存键就在标题行上 ✓）——
+      // 曾经它画在卡片最底下、隔着两段说明文字 ✗
+      pushToast('error', msg)
+    } finally {
+      panelSaving.value = false
+    }
+  }
+
+  /** 「事件推送」里的一行：规则多选 + 三个节流控件 ✓。 */
+  const panelRow = (k: string) => {
+    const row = panelDraft.value[k]
+    if (!row) return null
+    const label = panelEventLabel(k)
+    return (
+      <div class="flex flex-col gap-3 rounded-box bg-base-200 p-3">
+        <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <h3 class="text-sm font-medium">{label}</h3>
+          <span class="text-xs opacity-60">{PANEL_BEHAVIOR_HINT[k] ?? ''}</span>
+        </div>
+
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">用哪几条规则</legend>
+          <PushRuleSelect
+            id={`panel-rules-${k}`}
+            rules={panelRules.value}
+            value={row.rules}
+            onChange={(v) => setPanelRow(k, { rules: v })}
+          />
+          <p class="text-xs leading-5 opacity-60">
+            一个都不选 = 这一类不推。可以选多条：每条规则各按自己的平台与凭据发。
+          </p>
+        </fieldset>
+
+        <div class="grid min-w-0 gap-3 md:grid-cols-3">
+          <fieldset class="fieldset min-w-0">
+            <legend class="fieldset-legend">触发方式</legend>
+            <Select
+              id={`panel-mode-${k}`}
+              class="w-full min-w-0"
+              ariaLabel={`${label} 触发方式`}
+              value={row.mode}
+              options={THROTTLE_MODES.map((m) => ({ value: m.value, label: m.label }))}
+              onChange={(v) => setPanelRow(k, { mode: v as ThrottleMode })}
+            />
+          </fieldset>
+          <fieldset class="fieldset min-w-0">
+            <legend class="fieldset-legend">冷却（分钟）</legend>
+            <input
+              id={`panel-cooldown-${k}`}
+              class="input w-full min-w-0"
+              type="number"
+              min="0"
+              step="1"
+              aria-label={`${label} 冷却分钟`}
+              value={row.cooldownMins}
+              onInput={(e) => setPanelRow(k, { cooldownMins: (e.target as HTMLInputElement).value })}
+            />
+            <p class="text-xs opacity-60">这段时间内同一类不再重复推。0 = 不冷却。</p>
+          </fieldset>
+          <fieldset class="fieldset min-w-0">
+            <legend class="fieldset-legend">每日上限（条）</legend>
+            <input
+              id={`panel-cap-${k}`}
+              class="input w-full min-w-0"
+              type="number"
+              min="0"
+              step="1"
+              aria-label={`${label} 每日上限`}
+              value={row.dailyCap}
+              onInput={(e) => setPanelRow(k, { dailyCap: (e.target as HTMLInputElement).value })}
+            />
+            <p class="text-xs opacity-60">一天最多推这么多条。0 = 不限。</p>
+          </fieldset>
+        </div>
+
+        {/*
+          ⭐ **判据**（用户口径：「耗时异常多一个"倍数"、连续失败多一个"条数"」✓）。
+          ⚠ 只有这两行有：别的行为带一格阈值没有意义（后端也只在对应的那一格读它 ✓）。
+          ⚠ **留空 = 用户没动过** ⇒ 提交 `null` = 跟随内置默认（3.0 / 3 ✓）——
+          预填一个 3 会让界面假装用户设过 ✗。
+        */}
+        {k === 'perfSlow' ? (
+          <fieldset class="fieldset min-w-0 md:max-w-xs">
+            <legend class="fieldset-legend">耗时异常倍数</legend>
+            <input
+              id="panel-slow-factor"
+              class="input w-full min-w-0"
+              type="number"
+              min="1"
+              step="0.5"
+              aria-label="耗时异常倍数"
+              placeholder="跟随默认 3"
+              value={row.slowFactor}
+              onInput={(e) => setPanelRow(k, { slowFactor: (e.target as HTMLInputElement).value })}
+            />
+            <p class="text-xs opacity-60">
+              这次耗时超过同一任务历史中位数的这么多倍算异常。留空 = 跟随默认 3。
+            </p>
+          </fieldset>
+        ) : null}
+        {k === 'perfFailStreak' ? (
+          <fieldset class="fieldset min-w-0 md:max-w-xs">
+            <legend class="fieldset-legend">连续失败条数</legend>
+            <input
+              id="panel-fail-streak"
+              class="input w-full min-w-0"
+              type="number"
+              min="1"
+              step="1"
+              aria-label="连续失败条数"
+              placeholder="跟随默认 3"
+              value={row.failStreak}
+              onInput={(e) => setPanelRow(k, { failStreak: (e.target as HTMLInputElement).value })}
+            />
+            <p class="text-xs opacity-60">
+              同一任务连着失败这么多回算异常。留空 = 跟随默认 3。
+            </p>
+          </fieldset>
+        ) : null}
+      </div>
+    )
+  }
+
+  /**
+   * 「事件推送」卡（2026-10-08 用户口径：**面板行为**的配置入口在设置里 ✓）。
+   *
+   * ⚠ 开头那句必须说清"这几类没有定时可绑" —— 否则用户会去定时表单里找它们 ✗。
+   * ⚠ 还要写清「**恢复正常那一条永远会发**」：冷却与上限只挡"还在坏着"的重复告警，
+   * 不挡"好了"那一条 —— 不说的话用户会以为它一直坏着 ✗。
+   */
+  const panelCard = () => (
+    <div class="card bg-base-100 shadow-sm">
+      <div class="card-body gap-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <h2 class="card-title text-base">事件推送</h2>
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-soft badge-sm">面板行为</span>
+            <button
+              type="button"
+              class="btn btn-sm btn-primary min-h-11 md:min-h-0"
+              disabled={panelSaving.value}
+              onClick={() => void savePanel()}
+            >
+              {panelSaving.value ? '保存中…' : '保存'}
+            </button>
+          </div>
+        </div>
+
+        {/*
+          ⚠⚠ 失败那一句**放在标题行下面**（保存键就在那一行），不是卡片底部 ——
+          用户点保存时视线在标题那一行，红字隔着两段说明跑到最底下等于没提示
+          （2026-10-08 用户口径「所有的提示都是优先弹窗式」✓）。
+          弹窗那一份由 `savePanel()` 里的 `pushToast('error', …)` 给 ✓。
+        */}
+        {panelError.value ? (
+          <div class="alert alert-soft alert-error text-sm" role="alert">
+            <IconAlert class="size-4 shrink-0" />
+            <span class="break-words">{panelError.value}</span>
+          </div>
+        ) : null}
+
+        <p class="text-xs leading-5 opacity-60">
+          这几类是<strong>没有定时可绑</strong>的事件（登录、性能），所以入口在这里：
+          每一行**选规则**（可多选）—— 至于"怎么发"（平台、凭据、标题），
+          在「推送」页里建的那一条条规则上。
+        </p>
+        <p class="text-xs leading-5 opacity-60">
+          冷却与每日上限只挡<strong>重复</strong>告警：<strong>恢复正常那一条永远会发</strong>，
+          不受它们影响。
+        </p>
+
+        <div class="flex flex-col gap-3">
+          {/*
+            ⚠ `key` 必须挂在 **`.map()` 返回的那个元素**上（lite 的 `createFor` 靠它复用 ✓）——
+            `panelRow()` 是普通函数调用，把 key 写在它内部会被编译期直接拒掉
+            （"这里的 key 什么都不做"✗，实测踩到）。所以外面套一层 `contents` 包装：
+            它不参与布局（`display: contents`），只负责当那个"被 map 出来的元素" ✓。
+          */}
+          {PANEL_BEHAVIOR_KEYS.map((k) => (
+            <div key={k} class="contents">
+              {panelRow(k)}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+
   // ── 服务操作 ──────────────────────────────────────────────────────────
 
   /**
@@ -670,6 +1135,47 @@ export const SettingsPage = () => {
     )
   }
 
+  /**
+   * 顶部四节 tab。
+   *
+   * ⚠ 用本仓自建的**分组 tab**（`join` + `btn join-item`，与 `tasks-page.tsx` 的分组 tab、
+   * `history-logs-page.tsx` 的「历史 / 日志」同款 ✓），**不用** daisyUI 的 `.tab` ——
+   * 它在 `app.css` 顶部 `@theme` 那段注释里被排除过：用了**静默不生成样式**，
+   * 界面退化成"一串连在一起的纯文字"（实测 padding / 边框 / `::after` 全为 0/none ✗）。
+   *
+   * ⚠ `overflow-x-auto` + `whitespace-nowrap`：320 宽下宁可这一排**自己横向滚**
+   * （页面本身绝不横向溢出 ✓），也不要让标签折行、或把内容顶出去 ——
+   * 与 `tasks-page.tsx` 那一排同一条口径 ✓。
+   * 实测：四个标签（2~4 字）在 320 宽下**本来就放得下**，这一句是兜底 ✓。
+   */
+  const tabs = () => (
+    <div role="tablist" class="join w-full overflow-x-auto" aria-label="设置分组">
+      {/*
+        ⚠ **解构参数 + 不写 `key`** —— 这不是漏了，是照 `history-logs-page.tsx` 那一排
+        固定 tab 的写法 ✓：lite 的 `.map()` 只认**单个标识符参数**的表达式体
+        （`compiler.js::mapCallback`：`ps.some((p) => !isIdentifier(p.name))` ⇒ 解构一律走
+        通用路径），而 `key` 只有那条 `for` 路径会认领 —— 写在这里编译期直接抛
+        「这里的 key 什么都不做」✗（实测踩到）。
+        通用路径的代价是"换 tab 时这一排整块重建"，四个按钮，无所谓 ✓。
+      */}
+      {TABS.map(([id, label]) => (
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab.value === id}
+          class={`btn join-item btn-sm min-h-11 whitespace-nowrap md:min-h-0 ${
+            tab.value === id ? 'btn-primary' : 'btn-soft'
+          }`}
+          // 点 tab = 换地址（应用内跳转一律走 `navigate()` ✓）——
+          // 于是"点 tab"与"直接开那个地址"是**同一条路** ✓（浏览器后退也切得动 ✓）。
+          onClick={() => navigate(hrefOf(id))}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  )
+
   return (
     /**
      * 桌面形态：**用满宽度，但要有结构**。
@@ -681,7 +1187,8 @@ export const SettingsPage = () => {
      *
      * 所以这里的口径是：
      * - `max-w-7xl`：超大屏别无限拉（2560 宽的显示器上不然每行字都太长）；
-     * - 卡内用 `grid` 分栏：`lg` 起「存储信息 | 服务操作」并排，路径/数据文件各占三列；
+     * - 卡内用 `grid` 分栏：路径 / 数据文件各占三列，安全节里「口令策略 | 会话控制」
+     *   在 `lg` 起并排（⚠ 服务操作**不跟存储信息并排**，理由见 `actionCard()` 上面那段）；
      * - 窄屏一切照旧堆叠（`grid` 的默认单列）。
      */
     <div class="mx-auto flex w-full max-w-7xl flex-col gap-4">
@@ -703,21 +1210,53 @@ export const SettingsPage = () => {
 
       {state.value === 'ready' ? (
         <>
-          {serviceCard()}
-          {passwordCard()}
-          {/* 「口令策略 | 会话控制」并排 —— 与参照图同一结构（两件互不相关的事，别叠成一列） */}
-          <div class="grid min-w-0 gap-4 lg:grid-cols-2">
-            <div class="min-w-0">{policyCard()}</div>
-            <div class="min-w-0">{sessionCard()}</div>
-          </div>
+          {tabs()}
+
           {/*
-            ⚠ 「服务操作」**不跟存储信息并排**（第一版并排过）：它只有一段话 + 一个按钮，
-            而存储信息有 7 个数据文件 —— 等高会对着一张几乎空的卡，不等高就是"不平"。
-            它改成一整行、按钮放右边，两边都不空。
+            ⚠ 四节**只渲染当前那一节**（不是四份都渲染、各用 CSS 藏一份 ✗）——
+            省掉同时挂着的三份无关控件，也把"别的节的卡不在这里"变成**结构性**的事实 ✓
+            （门禁就钉这一条：点「安全」之后服务那几张卡**必须整个不在** ✓）。
+            本框架没有 diff 复用那一步（槽重跑就是新建实例 ✓）⇒ 这里不需要 `key`（加了会抛错 ✗）。
           */}
-          {storageCard()}
-          {actionCard()}
-          {aboutCard()}
+          {tab.value === 'service' ? (
+            <>
+              {serviceCard()}
+              {storageCard()}
+              {/*
+                ⚠ 「服务操作」**不跟存储信息并排**（第一版并排过）：它只有一段话 + 一个按钮，
+                而存储信息有 7 个数据文件 —— 等高会对着一张几乎空的卡，不等高就是"不平"。
+                它改成一整行、按钮放右边，两边都不空。
+              */}
+              {actionCard()}
+            </>
+          ) : null}
+
+          {tab.value === 'security' ? (
+            <>
+              {passwordCard()}
+              {/* 「口令策略 | 会话控制」并排 —— 与参照图同一结构（两件互不相关的事，别叠成一列） */}
+              <div class="grid min-w-0 gap-4 lg:grid-cols-2">
+                <div class="min-w-0">{policyCard()}</div>
+                <div class="min-w-0">{sessionCard()}</div>
+              </div>
+            </>
+          ) : null}
+
+          {/*
+            ⭐ 「事件推送」卡（面板行为的配置入口 ✓）—— 用户口径 2026-10-08 第二次：
+            它**留在设置里**（登录 / 性能这四类**没有定时可绑** ✓）；第三次口径（拆 tab）
+            也只是把它挪成**一节**，卡的**内容一个字没改** ✓。
+          */}
+          {tab.value === 'events' ? panelCard() : null}
+
+          {tab.value === 'about' ? aboutCard() : null}
+
+          {/*
+            ⚠ 2026-10-08：「推送渠道」与「推送规则」两张卡**整块搬去「推送」页**了
+            （`pages/push-page.tsx` ✓，用户口径「并单独给推送一个」）——
+            这里**删掉**、不是藏起来 ✗：留在这一页就等于有两个配置推送的入口，
+            迟早两边分叉 ✓。四节里也**没有**它们 ✓。
+          */}
         </>
       ) : null}
 
