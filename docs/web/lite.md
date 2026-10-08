@@ -24,7 +24,7 @@
 
 ```jsonc
 "devDependencies": {
-  "@asunajs/lite": "git+https://github.com/asunajs/lite.git#v0.1.2",   // git 依赖，tag 即版本
+  "@asunajs/lite": "git+https://github.com/asunajs/lite.git#v0.1.3",   // git 依赖，tag 即版本
   ...
 }
 ```
@@ -37,7 +37,7 @@
 那条 spec，没重解析已固定的 SHA）。要真升级，得**显式再装一次**：
 
 ```bash
-cd web && npm install -D --no-audit --no-fund "git+https://github.com/asunajs/lite.git#v0.1.2"
+cd web && npm install -D --no-audit --no-fund "git+https://github.com/asunajs/lite.git#v0.1.3"
 npm ls @asunajs/lite        # 判据：这里显示的 commit 必须是新 tag 指的那个
 ```
 
@@ -66,6 +66,33 @@ npm ls @asunajs/lite        # 判据：这里显示的 commit 必须是新 tag �
 `vite` / `compiler` 的 JS）。这不是将就：`src/dev.ts` 靠 `import.meta.env.DEV` 在**我们的**
 构建里被静态替换（生产折掉诊断代码、开发保留），预编译一遍那句话就变成字面量 `false` ✗。
 实测 dev（依赖预打包）与 build（Rolldown）两条路都对 ✓。
+
+## 按需付费：用哪个 API、体积怎么算
+
+框架的选型口径是「**用不到就摇得掉**」：`computed` / `untrack` 这类**业务 API 编译器不生成**，
+不用就 0 B；而 `createFor` 这类**编译器会生成**的，是任何用了列表的页面躲不掉的**地板** ——
+对它们的取舍要按"每个用户都付"来算。
+
+读数在框架仓 `npm run size`，**分两段**（别只看第一段）：
+
+| 段 | 量的是什么 |
+|---|---|
+| 运行时全量 | `src/index.ts` 每个导出都用上 —— **上界** |
+| **典型页面端到端** | 运行时**子集** + 编译器产物 + 页面代码 —— **用户真正下载的** |
+
+2026-10-08 的现值：最小页 **1,769 B gzip**（比全量小约 800 B ⇒ 摇树确实在省）；
+边际代价 `computed` **+46 B**、`untrack` **+28 B**、`watch` **+51 B**、
+**keyed 列表 +446 B**（最贵的一档）。
+
+本仓实际只 import 了 **7 个**：`ref` `watch` `mount` `useSlots` `onMounted` `onUnmounted`
+`createComponent` —— `computed` / `untrack` 一次都没用 ⇒ 那两个原语在本仓产物里是 **0 字节**。
+（⚠ `src/pages/exchange-page.tsx` 里那个 `const computed = buildPlan(...)` 是**局部变量**，
+与框架 API 无关，grep 时别误判。）
+
+⚠ 真要上 `computed` 之前先想清它**急**（依赖一变就算，哪怕当轮没人读）；它真正的收益是
+**去重** —— 派生值没变就不惊动下游 effect。只想"读一眼当前值、不订阅它"用 `untrack(() => …)`。
+对标 7 个主流框架、以及"为什么不加 cleanup / context / 双向绑定"的完整理由，
+在框架仓 `docs/design.md` §5.2。
 
 ## 门禁怎么分
 

@@ -12,7 +12,7 @@
   },
   "//": "运行时与编译器都在依赖 `@asunajs/lite` 里（2026-10-07 从本仓 web/lite/ 剥离）；CSS 侧是构建期插件。⚠ 它是 **git 依赖**（完整 URL，**不是** `github:` 简写 —— 那个会被 npm 解析成 `git+ssh://`，公开仓也要密钥 ⇒ CI 装不上）：`npm install` 需要能访问 GitHub，锁文件里记的是 commit SHA。⚠ `oxc-parser` 2026-10-07 从这张表里删了 —— 它现在由 `@asunajs/lite` 直接依赖（本仓没人直接 import 它），留在这里是重复声明。",
   "devDependencies": {
-    "@asunajs/lite": "github:asunajs/lite#v0.1.2",
+    "@asunajs/lite": "github:asunajs/lite#v0.1.3",
     "@tailwindcss/vite": "^4.3.3",
     "@typescript/native-preview": "^7.0.0-dev.20260707.2",
     "tailwindcss": "^4.3.3",
