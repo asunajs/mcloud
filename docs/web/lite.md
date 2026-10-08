@@ -13,6 +13,7 @@
 | `web/lite/regress/compiler.mjs`、`demo/`、`bench/`、`size.mjs` | 框架仓（框架自己的门） |
 | `web/lite/regress/{lib,interact,bulk,search,narrow,leak,live-logs,preview}.mjs` | **本仓** `web/regress/`（页面级验收，见下） |
 | `web/lite/chrome-flags.mjs` | **本仓** `web/scripts/chrome-flags.mjs` |
+| （新）**写页面前先看的那一屏** | [框架仓 `docs/agent.md`](https://github.com/asunajs/lite/blob/main/docs/agent.md) —— 硬约束 + 静默编错速查 + 归属/销毁；**本仓/框架仓的作业须知**见 [框架仓 `AGENTS.md`](https://github.com/asunajs/lite/blob/main/AGENTS.md) |
 
 框架仓的历史是**接着本仓走的**：用 `git subtree split -P web/lite` 切出来的 57 个提交，
 不是"从零开始的新仓" ⇒ 想知道"某段代码为什么长这样"，在框架仓里 `git log` 一样查得到 ✓。

@@ -303,9 +303,10 @@ Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过�
   ```
   （前端门禁**分两档**（2026-10-04 用户口径：「一种在 push 时再验证，时间长范围广；
   一种提交就验证必要的测试」）—— `--commit`（**默认**）是必要且快的那档：类型 + 构建 +
-  编译期负例 + demo/bench + 交互验收 `ready`；`--push`（旧名 `--full` 仍认）在它之上再加
-  320/375 窄屏 + `login`/`setup` 两个认证态 + 泄漏量测，**实测约 130 s**（其中泄漏那条自己
-  就≈127 s）。**提交时**跑哪档可以交给钩子：`scripts/install-git-hooks.sh` 一装，
+  交互验收 `ready` + 大体量（分页 + 窗口化）+ 搜索框；`--push`（旧名 `--full` 仍认）在它之上
+  再加 320/375 窄屏 + `login`/`setup` 两个认证态 + 泄漏量测。⚠ **2026-10-07 起框架自己的
+  三条门（编译期负例 / demo / bench）不在这里了** —— lite 已剥离到 `asunajs/lite`，那三条
+  跑在框架仓的 CI 里（见 `docs/web/lite.md`）。**提交时**跑哪档可以交给钩子：`scripts/install-git-hooks.sh` 一装，
   `pre-commit` 自动跑提交档、`pre-push` 自动跑推送档 ✓（跳过一律 `--no-verify`，
   跳了就是没验证过 ✓）。要 Chrome 的那几条在没有浏览器的机器上会明说"跳过 ≠ 通过"。
   ⚠ Rust 侧**只有格式那一档**进了钩子（2026-10-06 用户口径「A」）：暂存区里有 `.rs` 时，
@@ -343,8 +344,8 @@ Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过�
 - ⚠ **无头 Chrome 在某些环境里必须加 `--no-sandbox`**（本机 DSH 沙箱：不加就是
   `Target crashed` / `CDP 调用超时：Page.enable`，2026-10-05 实测）。它是**显式开关，默认关**
   （关沙箱是降级，开发机不需要）：`MCLOUD_CHROME_NO_SANDBOX=1 node scripts/gates-web.mjs --push`。
-  三条 spawn 路径的公共参数**只有一份来源** `web/lite/chrome-flags.mjs`（在那之前是几条写入线
-  各改一份、互相覆盖，双方各红了若干条 ✗）。环境变量**会穿过 git 钩子** ✓ —— 过 `pre-commit` /
+  公共参数**只有一份来源** `web/scripts/chrome-flags.mjs`（2026-10-07 之前它在
+  `web/lite/chrome-flags.mjs`；框架剥离时本仓只留下页面级验收这一处 spawn）。环境变量**会穿过 git 钩子** ✓ —— 过 `pre-commit` /
   `pre-push` 不需要改任何文件。
 - ⚠ **编译/检查为什么慢、怎么跑才快 —— 实测归因见 `docs/build-perf.md`**（2026-10-01）。
   三条最省事的：① 日常自检用 **`cargo check -p <crate>`**，别动不动 `--workspace --all-targets`
@@ -369,22 +370,24 @@ Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过�
   只有"确实要共用同一份产物"时才回到默认 `target/`（例如要给托管部署的那份 debug 二进制 ✓）。
   ⚠ 判据别只看 "Finished"：先 `pgrep -fl 'cargo (build|check|test)'` 数一下有几条线 ✓。
 - **前端工具链（2026-10-01 起，两条都换过）**：
-  * 编译：TSX 由 **`oxc-parser`** 解析（`web/lite/ast.ts` 是适配层，`typescript` 包
-    **已不在依赖里**）。⚠ 它是**原生**包 ⇒ 凡把它打进 Node 侧产物的构建都要标 `external`
-    （见 `web/lite/regress/check.vite.config.ts`）。
+  * 编译：TSX 由 **`oxc-parser`** 解析（框架仓 `asunajs/lite` 的 `ast.ts` 是适配层，
+    `typescript` 包**已不在依赖里**）。⚠ 它是**原生**包 ⇒ 凡把它打进 Node 侧产物的构建
+    都要标 `external`（见框架仓的 `regress/check.vite.config.ts`）。⚠ 2026-10-07 起
+    它由 `@asunajs/lite` 直接依赖，本仓 `web/package.json` 里**不再**单独声明。
   * 类型检查：`npm run typecheck` = **`tsgo --noEmit`**（`@typescript/native-preview`，原生实现）。
     原来那个 `@ts-macro/tsc` fork 已删（全仓没有 ts-macro 宏用法，且它对 TS 大版本最敏感）。
     ⚠ **用户口径（2026-10-01）：只要 tsgo** —— 不要把 `typescript`/`tsc` 加回来做"互校兜底"。
     已验证它真在检查：故意写错时与 `typescript@5.9.3` 各报 7 条、错误码/行列/文案逐条相同，
     有错时退出码 1（门禁会红）；两边 `--listFiles` 项目文件清单逐行相同。
   * 换解析器的验收方式（以后动这一层照做）：**先存黄金样本**（18 个 tsx 的旧产物），
-    换完逐字节对比 + 12 条编译期负例 + `dist` 的 chunk hash 不变。见 `docs/web/lite-framework.md` §4.6。
+    换完逐字节对比 + 12 条编译期负例 + `dist` 的 chunk hash 不变。见框架仓 `asunajs/lite` 的
+  `docs/design.md` §4.6（⚠ 2026-10-07 起框架已剥离出本仓，见 `docs/web/lite.md`）。
 
 - ⚠ **框架不够用时：把"改框架"和"绕开"摆上秤比一比再选**（用户口径 2026-10-01）：
   「有些时候前端框架不够用，这时候可以在优化前端框架和避免这个问题上对比择优」。
   **别默认绕，也别默认改** —— lite 存在的理由就是体积，框架侧 +200 B 是**全站每个用户**都付，
   页面侧绕一下只在那一页付；**同一个"绕"在第 3 处出现**才算"该改框架"的证据。
-  两个要一并检查的静默坑：① `web/lite/compiler.ts` 的语法边界（如 `.map` 的 `key`
+  两个要一并检查的静默坑：① 框架仓 `asunajs/lite` 的 `compiler.ts` 的语法边界（如 `.map` 的 `key`
   必须挂在 JSX 元素的子表达式位置、三元分支只认 JSX / null）；
   ② **`web/src/app.css` 顶部的 `@theme` 令牌层**（2026-10-03 起取代了 daisyUI 的
   `@plugin` + `exclude` 清单）—— **没在 `@theme` 里注册的颜色/圆角，对应的 utility 会
@@ -393,4 +396,8 @@ Go 那边是**同一件事的第二次实现**，它的价值在于"**它踩过�
   `/::after` 全为 0/none，界面退化成"一串连在一起的纯文字"）。要加新颜色就先在 `@theme`
   注册 `--color-*`，**深色那份 `[data-theme="dark"]` 要成对写** ✓。
   页面多数时候**更划算的是用本仓已有的自建控件**（如分组 tab 用 `join` + `btn join-item`，
-  见 `tasks-page.tsx`）。完整判据与两个真例：`docs/web/lite-framework.md` §8.0。
+  见 `tasks-page.tsx`）。完整判据与两个真例：框架仓 `asunajs/lite` 的 `docs/design.md` §8.0。
+  ⚠ **写 lite 页面前先读框架仓的「一屏契约」**：`asunajs/lite` 的 `docs/agent.md`
+  （硬约束 + 静默编错速查 + 归属/销毁，一屏；比翻 `design.md` 便宜得多）。
+  （那份文件在 `web/node_modules/@asunajs/lite/` 里没有 —— 包只发 `src/`+`dist/`，
+  要看去框架仓或 <https://github.com/asunajs/lite/blob/main/docs/agent.md>。）
