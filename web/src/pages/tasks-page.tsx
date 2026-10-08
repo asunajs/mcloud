@@ -1,6 +1,6 @@
 import { accountName, refreshAccountNames } from '../account-names'
 import { pathParts } from '../ui/nav'
-import { navigate } from '../ui/router'
+import { currentPath, navigate } from '../ui/router'
 /**
  * 任务中心：选账号 → 运行任务 → 实时看日志。
  *
@@ -10,7 +10,7 @@ import { navigate } from '../ui/router'
  * 并明确告诉用户可以关页面（任务在后端继续跑）。
  */
 
-import { onUnmounted, onMounted, ref } from '@asunajs/lite'
+import { onUnmounted, onMounted, ref, watch } from '@asunajs/lite'
 import { setPageRefresh } from '../ui/page-refresh'
 import {
   cancelRun,
@@ -53,17 +53,22 @@ export const TasksPage = () => {
   /**
    * 当前地址的路径段。
    *
-   * ⚠ **本页自己盯着地址**，而不是让路由表来管：`parsePath` 把
+   * ⚠ **本页自己盯着地址**，而不是让路由表来管：路由表把
    * `/tasks/x/config` 与 `/tasks` 都归到「任务」这一页（配置页不是独立导航项），
-   * 于是从列表切到配置时 PageId **没变**，`app.tsx` 那条动态 import 不会再跑一次。
-   * 想让它工作只有两条路：把配置页做成第 10 条导航项（规范里 9 条封顶，不行），
+   * 于是从列表切到配置时 `page` **没变**，`app.tsx` 那条动态 import 不会再跑一次。
+   * 想让它工作只有两条路：把配置页做成第 10 条导航项（规范里封顶，不行），
    * 或者本页自己听地址变化换视图（就是这里）。切换时列表**不会**被卸载重建 ——
    * 用户从配置页点回来，看到的还是原来那份列表和滚动位置。
+   *
+   * ⚠ 2026-10-08 起盯的是**路由的 `currentPath`**，不再是本页自己挂的 `popstate`
+   * 监听器 —— 原先那套依赖"`navigate()` 里补发一次合成 `popstate`"，而那个补发
+   * 随着路由原语搬进 lite 已经没有了（lite 的 `push()` 只同步自己的信号）。
+   * 改成 `watch(currentPath)` 反而更短，且**不必再手写摘监听器**（组件卸载即停）。
    */
-  const path = ref<string[]>(pathParts(location.pathname))
-  const onNavigate = () => {
-    path.value = pathParts(location.pathname)
-  }
+  const path = ref<string[]>(pathParts(currentPath.value))
+  watch(currentPath, (p) => {
+    path.value = pathParts(p)
+  })
 
   /**
    * 当前是不是「配置中心」这条子路由；是的话要不要预选某个任务。
@@ -317,14 +322,12 @@ export const TasksPage = () => {
   setPageRefresh({ run: () => void load() })
     // 编排那一格的**计数**要一进来就有 ✓（不点它也是 0 会让人以为没有编排）。
     void loadPipelines()
-    window.addEventListener('popstate', onNavigate)
     // 先把"id → 名字"填上，否则运行记录里显示的是一串哈希
     void refreshAccountNames()
     void load()
   })
   onUnmounted(() => {
   setPageRefresh(null)
-    window.removeEventListener('popstate', onNavigate)
     stopTicker()
     for (const stop of stopStreams) stop()
   })

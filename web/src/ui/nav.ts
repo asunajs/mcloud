@@ -176,46 +176,22 @@ export const DOCK_IDS: readonly PageId[] = [
   'settings',
 ] as const
 
-/** 把 `#/tasks` 这样的 hash 解析成 PageId；无法识别时回落到总览。 */
 /**
- * 把 hash 切成路径段：`#/tasks/sign/config` → `['tasks','sign','config']`。
+ * 把 `location.pathname` 切成路径段（**不**解码，需要时由调用方 `decodeURIComponent`）。
  *
  * 子路由（`/tasks/<任务名>/config`，任务配置页）靠它取参数 ——
- * 那类页面**不是**一条独立导航项：规范里"侧栏 9 条封顶"是硬上限，
+ * 那类页面**不是**一条独立导航项：规范里"侧栏条数封顶"是硬上限，
  * 而配置页本来就属于「任务」，多开一条只会多一个不该出现的入口。
+ *
+ * ⚠ 2026-10-08 起**地址 → 页面**的解析搬去了 `ui/router.ts` 的**路由表**
+ * （原先这里的 `parsePath` + `PATH_ALIASES`）。原因：路由表能一眼看全"哪一页拥有
+ * 哪些地址"（子视图、改名后的老地址都在表里），而"按第一段归属"那种隐式规则
+ * 要读完整段函数才知道 —— 加一条路由时很容易漏掉它。
+ *
+ * 本文件因此只留**取参数**用的切段函数，不再参与"该渲染哪一页"的判断。
  */
-/** 把 `location.pathname` 切成路径段（**不**解码，需要时由调用方 `decodeURIComponent`）。 */
 export const pathParts = (pathname: string): string[] =>
   pathname.split('/').filter((x) => x.length > 0)
-
-/**
- * 老地址 → 页面 id。
- *
- * ⚠ 只放"**曾经是一条导航项、现在不是了**"的地址。放进来就等于承诺它永远打得开 ✓
- * —— 这类地址散落在书签、浏览器历史与旧文档里，删掉就是给别人一个 404 ✗。
- * ⚠ 与新地址**同页**的老地址（`/accounts/push` → `/accounts/settings`）不走这里：
- * 那一对是子视图内部认的（见 `account-config-page.tsx` 的 `isPushPath` 那类判据 ✓）。
- */
-const PATH_ALIASES: Record<string, PageId> = { '/logs': 'history' }
-
-export const parsePath = (pathname: string): PageId => {
-  const found = NAV_ITEMS.find((item) => item.href === pathname)
-  if (found) return found.id
-  /**
-   * 老地址（不再是一条导航项，但**必须继续认**）。
-   *
-   * ⚠ `/logs` 2026-10-08 起并进「历史」页当第二个 tab ✓ —— 但书签、浏览器历史、
-   * 旧文档里的 `/logs` 不能 404，也不能把人甩回总览 ✗（与 `/accounts/push`
-   * 那条老地址兼容同一个口径 ✓：改名只该影响**新**链接 ✓）。
-   */
-  const alias = PATH_ALIASES[pathname]
-  if (alias) return alias
-  // 子路由按**第一段**归属：`/tasks/xxx/config` 仍是「任务」这一页。
-  // 不做这一步的话它会被兜底成"总览"，用户点「配置」会莫名其妙跳到总览页。
-  const [first] = pathParts(pathname)
-  const parent = NAV_ITEMS.find((item) => item.href === `/${first ?? ''}`)
-  return parent ? parent.id : 'dashboard'
-}
 
 /** 由 PageId 取配置。总览是兜底，所以一定找得到。 */
 export const navItem = (id: PageId): NavItem => {

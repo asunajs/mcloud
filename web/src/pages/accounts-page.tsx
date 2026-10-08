@@ -15,7 +15,7 @@
  * ② 选完在按钮下方把"会影响什么"写出来。
  */
 
-import { onMounted, onUnmounted, ref } from '@asunajs/lite'
+import { onMounted, onUnmounted, ref, watch } from '@asunajs/lite'
 import { setPageRefresh } from '../ui/page-refresh'
 import {
   ApiError,
@@ -47,7 +47,7 @@ import { IconAlert } from '../ui/icons'
 import { pushToast } from '../ui/toast'
 import { createAccountFields } from '../ui/account-fields'
 import { pathParts } from '../ui/nav'
-import { navigate } from '../ui/router'
+import { currentPath, navigate } from '../ui/router'
 import { AccountConfigPage } from './account-config-page'
 // 上游状态：**子视图**，不是导航项（用户 2026-10-07：「这个不要放 nav 里」✓）
 import { UpstreamPage } from './upstream-page'
@@ -130,16 +130,21 @@ export const AccountsPage = () => {
   /**
    * 当前地址的路径段。
    *
-   * ⚠ **本页自己盯着地址**，而不是让路由表来管：`parsePath` 把 `/accounts/settings` 与
-   * `/accounts` 都归到「账号」这一页（账号配置不是独立导航项 —— 侧栏 9 条封顶），
-   * 于是从列表切到配置时 PageId **没变**，`app.tsx` 那条动态 import 不会再跑一次。
-   * 想让它工作只有两条路：把账号配置做成第 10 条导航项（规范里 9 条封顶，不行），
+   * ⚠ **本页自己盯着地址**，而不是让路由表来管：路由表把 `/accounts/settings` 与
+   * `/accounts` 都归到「账号」这一页（账号配置不是独立导航项 —— 侧栏条数封顶），
+   * 于是从列表切到配置时 `page` **没变**，`app.tsx` 那条动态 import 不会再跑一次。
+   * 想让它工作只有两条路：把账号配置做成第 10 条导航项（规范里封顶，不行），
    * 或者本页自己听地址变化换视图（就是这里，与 `tasks-page.tsx` 的配置中心同款）。
+   *
+   * ⚠ 2026-10-08 起盯的是**路由的 `currentPath`**，不再是本页自己挂的 `popstate`
+   * 监听器 —— 原先那套依赖"`navigate()` 里补发一次合成 `popstate`"，而那个补发
+   * 随着路由原语搬进 lite 已经没有了（lite 的 `push()` 只同步自己的信号）。
+   * 改成 `watch(currentPath)` 反而更短，且**不必再手写摘监听器**（组件卸载即停）。
    */
-  const path = ref<string[]>(pathParts(location.pathname))
-  const onNavigate = () => {
-    path.value = pathParts(location.pathname)
-  }
+  const path = ref<string[]>(pathParts(currentPath.value))
+  watch(currentPath, (p) => {
+    path.value = pathParts(p)
+  })
 
   // ── 账号列表 ─────────────────────────────────────────────────────────
   const state = ref<LoadState>('loading')
@@ -920,12 +925,10 @@ export const AccountsPage = () => {
 
   onMounted(() => {
   setPageRefresh({ run: () => void load() })
-    window.addEventListener('popstate', onNavigate)
     void load()
   })
   onUnmounted(() => {
     setPageRefresh(null)
-    window.removeEventListener('popstate', onNavigate)
     stopPolling()
   })
 

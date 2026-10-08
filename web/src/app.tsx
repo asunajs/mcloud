@@ -5,11 +5,11 @@
  * 这里只负责：导航状态、主题开关、后端自述、把页面塞进 `main` —— 不长内容。
  */
 
-import { createComponent, onMounted, onUnmounted, ref, watch } from '@asunajs/lite'
+import { createComponent, onMounted, ref, watch } from '@asunajs/lite'
 import { getCurrentSession, getStatus, logoutSession, type ServiceStatus } from './api'
 import { authState, currentUser, noteAuthOk, noteAuthRequired } from './ui/auth-signal'
-import { DOCK_IDS, NAV_ITEMS, navItem, parsePath, type PageId } from './ui/nav'
-import { navigate, currentPath } from './ui/router'
+import { DOCK_IDS, NAV_ITEMS, navItem, type PageId } from './ui/nav'
+import { navigate, currentPath, page } from './ui/router'
 import { refreshNow } from './ui/page-refresh'
 import { IconBrand, IconClose, IconLogout, IconMenu, IconMoon, IconSun, IconRefresh } from './ui/icons'
 import { currentTheme, toggleTheme, type Theme } from './ui/theme'
@@ -74,8 +74,8 @@ const ROUTES: Record<PageId, (ctx: RouteCtx) => Promise<() => unknown>> = {
   /**
    * 「历史」页 = **历史 + 日志两个 tab**（2026-10-08 用户口径「合并这两个」✓）。
    *
-   * ⚠ 两个 tab 的**地址不同**（`/history` / `/logs`），但 `parsePath` 把它们都归到
-   * 这一个 `PageId` ⇒ `page` 信号在两者之间**不变**，光靠它界面不会动 ✗。
+   * ⚠ 两个 tab 的**地址不同**（`/history` / `/logs`），但 `ui/router.ts` 的路由表把它们
+   * 都归到这一个 `PageId` ⇒ `page` 在两者之间**不变**，光靠它界面不会动 ✗。
    * 所以容器自己去 `watch(ui/router.ts 的 currentPath)`（见 `HistoryLogsPage`）——
    * **不要**在这里把 `currentPath` 读进页面槽：那会让槽订阅地址，于是"切去别的页"
    * 时槽会先按旧 page 又建一份这一页（多跑一次 `/api/runs`）✗。
@@ -128,7 +128,14 @@ const RefreshButton = (): JSX.Element => (
 )
 
 export default () => {
-  const page = ref<PageId>(parsePath(location.pathname))
+  /**
+   * ⚠ `page` 与 `currentPath` 都**不在这里定义** —— 它们由 `ui/router.ts` 从 lite 的路由
+   * 派生（`computed`），两者**同源** ⇒ 一起更新。
+   *
+   * 改之前这里是 `ref(parsePath(...))`，并由下面那条 `popstate` 监听器**手写**
+   * "先 `currentPath`、后 `page`"的顺序 —— 反了就会拿旧地址多建一次页面。
+   * 现在那个顺序问题**结构上不可能发生** ✓。
+   */
   const theme = ref<Theme>(currentTheme())
   const drawerOpen = ref(false)
   /**
@@ -151,27 +158,6 @@ export default () => {
   const backendFailed = ref(false)
 
   const loggingOut = ref(false)
-
-  /**
-   * 地址变了（浏览器前进/后退、手敲地址、或 `navigate()` 广播）。
-   *
-   * ⚠ 名字从 `onHashChange` 改过来不是修辞：`pushState` 自己**不发**事件，
-   * 所以 `navigate()` 里补发了一次 `popstate` —— 这条监听器就是**唯一**的切页入口。
-   *
-   * ⚠ 它也是 `ui/router.ts` 那个 `currentPath` 的**唯一写入点**（"一个导航项下多个 tab"
-   * 的页面靠它切 tab，见 `HistoryLogsPage`）✓。
-   *
-   * ⚠⚠ 两句的**顺序不能反**（先 `currentPath`、后 `page`）：
-   * 反过来的话，从别的页切到 `/logs` 时页面槽会先按**旧的**地址把「历史」tab 建出来
-   * （白跑一次 `/api/runs`），紧接着地址一变再换成日志 tab ✗。
-   * 先写 `currentPath` 则"新页一挂载读到的就是新地址"✓（此刻还没有谁订阅它）。
-   */
-  const onNavigate = () => {
-    currentPath.value = location.pathname
-    page.value = parsePath(location.pathname)
-    // 移动端点了导航就把抽屉收起来，否则内容被盖住
-    drawerOpen.value = false
-  }
 
   const onToggleTheme = () => {
     theme.value = toggleTheme()
@@ -303,8 +289,18 @@ export default () => {
     }
   }
 
+  /**
+   * 地址一变就收起移动端抽屉，否则内容被盖住。
+   *
+   * ⚠ 这件事原先塞在 `popstate` 监听器里 —— 那条监听器已经交给 lite 的路由了，
+   * 所以改成"盯着 `currentPath`"：它由路由派生，前进/后退、手敲地址、点按钮
+   * 都会让它变 ✓（少一处调用点，就少一处"某种方式切页时抽屉没收"）。
+   */
+  watch(currentPath, () => {
+    drawerOpen.value = false
+  })
+
   onMounted(() => {
-    window.addEventListener('popstate', onNavigate)
     void probeSession()
     // 已经放行时（例如热重载后重挂）立刻装当前页；否则由下面那个 watch 负责。
     if (authState.value === 'ready') void loadPage(page.value)
@@ -328,17 +324,13 @@ export default () => {
   /**
    * 切页就装载。
    *
-   * 依赖放在 `page`（由 `onNavigate` 推进）而不是直接在 `go()` 里调 ——
+   * 依赖放在 `page`（由 lite 的路由派生）而不是直接在 `go()` 里调 ——
    * 这样浏览器前进/后退、手敲地址、以及页面里其它地方的 `navigate()` 调用
    * 都走同一条路。少一处调用点，就少一处"某种方式切页不生效"。
    */
   watch(page, (id) => {
     void loadPage(id)
   })
-  onUnmounted(() => {
-    window.removeEventListener('popstate', onNavigate)
-  })
-
   /**
    * 侧栏底部那一行：只报**后端确实知道**的事实（产品名+版本、最近一次执行）。
    * 不放账号数/任务数 —— 那是各页面的内容，搬进常驻侧栏等于把同一个数字
