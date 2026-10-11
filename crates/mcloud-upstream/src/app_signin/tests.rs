@@ -914,3 +914,25 @@ fn record_id_accepts_both_number_and_string() {
         "数字必须转成十进制串"
     );
 }
+
+// ── 1017 的 `interfacecallback`（2026-10-10）────────────────────────────
+
+/// 端点与体照 **H5 页面自己的 JS** 抄：`{taskToken: …}` ✓。
+///
+/// ⚠ 这一发**今天没有调用方**（拿 SSO 票当 `taskToken` 上游回 `code=500`，
+/// 说明那一格要的是"中国移动那条任务自己的 token" ✗ —— 见 `docs/app-task-status.md` §5-11）。
+/// 留这条测试是因为"端点存在、体长这样"已经是读数 ✓，将来拿到真 token 时不用重查。
+#[test]
+fn sign_in_callback_posts_the_task_token() {
+    let req = sign_in_callback_request("TT-1");
+    assert_eq!(req.method, "POST");
+    assert_eq!(
+        req.url,
+        "https://m.mcloud.139.com/ycloud/signin/mobileApp/signInCallback"
+    );
+    assert_eq!(req.body_str(), Some(r#"{"taskToken":"TT-1"}"#));
+    // ⚠ 不钉 `Content-Type`：页面 JS 那一发**带** `application/json;charset=UTF-8`，
+    // 而本模块同族的口**一律不带**，上游照样受理（2026-10-10 真机那一发就没带 ⇒ 回了业务码 ✓）
+    // ⇒ 按本模块的既有口径写，别为"更像 JS"多塞一枚头 ✓。
+    assert_eq!(req.headers.len(), 4, "只有 h5 那四枚：{:?}", req.headers);
+}

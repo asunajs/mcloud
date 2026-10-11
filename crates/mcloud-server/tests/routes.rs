@@ -542,6 +542,114 @@ async fn runs_list_only_returns_own_records() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// ⭐ 「重启后回看日志」那条路的**接口形状**：列表不带日志、按 id 取详情带日志。
+///
+/// 前端正是这两步（`/api/runs` 拿列表 ⇒ 点一条 ⇒ `getRun(id)` 拿详情，
+/// 见 `web/src/pages/history-page.tsx::openRunLog` ✓），详情走 `routes/runs.rs::get_one`。
+/// 列表**故意**剥掉日志（100 条 × 200 行不是列表该有的体量 ✓）⇒
+/// 这里把两侧都钉住：列表剥得干净（连 `logs` 键都不出现 ✓）、详情一条不少 ✓。
+///
+/// ⚠ 后半段**真的重开一次**（丢掉第一个实例、用 `AppBuilder` 在**同一份数据目录**
+/// 上再组装一个）—— 这才是用户说的"重启"在进程内的等价物 ✓。
+///
+/// ⚠⚠ 2026-10-09：日志的**家换了**（用户口径「日志和历史不要全加入内存，
+/// 使用本地记录」✓）—— 现在写进 `data/logs/<id>.json`（`append_logs` ✓），
+/// 而 `history.json` 里一个字节都不带 ✓；详情那格由 `get_one` **现取** ✓。
+#[tokio::test]
+async fn run_list_strips_logs_and_detail_keeps_them() {
+    let (handle, dir) = test_app("runs-logs-shape");
+    handle
+        .store
+        .upsert_run(&mcloud_core::RunRecord {
+            run_id: mcloud_core::RunId::new(1),
+            task: "sign".into(),
+            account: "13800000000".into(),
+            outcome: mcloud_core::TaskOutcome::success("ok"),
+            duration_ms: 1,
+            started_at_ms: 1,
+            status: mcloud_core::RunStatus::Done,
+            details: serde_json::Value::Null,
+            logs: Vec::new(),
+        })
+        .await
+        .unwrap();
+    // 日志走**唯一**那条路：`data/logs/<id>.json` ✓（带 `kind`，界面按它上颜色 ✓）
+    handle
+        .store
+        .append_logs(
+            mcloud_core::RunId::new(1),
+            &[
+                mcloud_core::LogLine::new(
+                    1,
+                    mcloud_core::LogLevel::Info,
+                    "第一行",
+                    1,
+                    mcloud_core::Seq(1),
+                )
+                .with_kind(mcloud_core::LogKind::Info),
+                mcloud_core::LogLine::new(
+                    1,
+                    mcloud_core::LogLevel::Error,
+                    "第二行",
+                    2,
+                    mcloud_core::Seq(2),
+                )
+                .with_kind(mcloud_core::LogKind::Fail),
+            ],
+        )
+        .await
+        .unwrap();
+
+    // ⭐ 历史文件里**不带**日志正文（"不要全加入内存"的落点 ✓）
+    let history = std::fs::read_to_string(dir.join("history.json")).unwrap();
+    assert!(
+        !history.contains("第一行"),
+        "history.json 里不该有日志正文：{history}"
+    );
+    assert!(
+        dir.join("logs").join("1.json").exists(),
+        "日志该落在自己的文件里"
+    );
+
+    let (status, body) = send(authed_app(Arc::clone(&handle)), get("/api/runs")).await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        v[0].get("logs").is_none(),
+        "列表必须**不带**日志（连键都不该出现），实际：{body}"
+    );
+    // 汇总字段照旧在（剥的只是日志那一格 ✓）
+    assert_eq!(v[0]["run_id"], 1, "实际：{body}");
+    assert_eq!(v[0]["task"], "sign", "实际：{body}");
+
+    let (status, body) = send(authed_app(Arc::clone(&handle)), get("/api/runs/1")).await;
+    assert_eq!(status, StatusCode::OK, "实际体：{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let logs = v["logs"].as_array().expect("详情必须带日志");
+    assert_eq!(logs.len(), 2, "实际：{body}");
+    assert_eq!(logs[0]["message"], "第一行", "实际：{body}");
+    assert_eq!(logs[0]["level"], "info", "实际：{body}");
+    assert_eq!(logs[0]["kind"], "info", "实际：{body}");
+    assert_eq!(logs[1]["message"], "第二行", "实际：{body}");
+    assert_eq!(logs[1]["level"], "error", "实际：{body}");
+    assert_eq!(logs[1]["kind"], "fail", "实际：{body}");
+
+    // ── 重启（同一份数据目录上重新组装一个实例）⇒ 详情仍要拿到那两行 ──
+    drop(handle);
+    let restarted = AppBuilder::new()
+        .data_dir(dir.clone())
+        .build()
+        .expect("重启后应用应能组装");
+    let (status, body) = send(authed_app(Arc::new(restarted.handle)), get("/api/runs/1")).await;
+    assert_eq!(status, StatusCode::OK, "重启后按 id 取详情：{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let logs = v["logs"].as_array().expect("重启后详情仍必须带日志");
+    assert_eq!(logs.len(), 2, "重启后行数不变：{body}");
+    assert_eq!(logs[0]["message"], "第一行", "重启后逐行相同：{body}");
+    assert_eq!(logs[1]["message"], "第二行", "重启后逐行相同：{body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // 登录闸
 // ══════════════════════════════════════════════════════════════════════════
@@ -2146,6 +2254,58 @@ async fn storage_reports_real_paths() {
     );
     assert!(v["dataBytes"].as_u64().unwrap() > 0, "占用不该恒为 0");
 
+    // ⭐ 2026-10-09：日志用量与三个**用户可设**的上限（用户口径：「让用户设置最大大小」✓）
+    assert_eq!(v["logUsage"]["files"].as_u64().unwrap(), 0, "还没写过日志");
+    assert_eq!(
+        v["logUsage"]["maxBytes"].as_u64().unwrap(),
+        mcloud_core::DEFAULT_LOG_TOTAL_MB * 1024 * 1024,
+        "默认上限 = 64 MB：{body}"
+    );
+    assert_eq!(
+        v["limits"]["historyLimit"].as_u64().unwrap(),
+        mcloud_core::DEFAULT_HISTORY_LIMIT as u64,
+        "默认 = 老的 HISTORY_LIMIT（行为不变 ✓）：{body}"
+    );
+    assert_eq!(
+        v["limits"]["logLimitPerRun"].as_u64().unwrap(),
+        mcloud_core::LOG_LIMIT_PER_RUN as u64,
+        "默认 = 老的 LOG_LIMIT_PER_RUN：{body}"
+    );
+    assert_eq!(
+        v["limits"]["logTotalMb"].as_u64().unwrap(),
+        mcloud_core::DEFAULT_LOG_TOTAL_MB,
+        "默认 64 MB：{body}"
+    );
+    // ⭐ 服务端日志是**第二个目录**（`server-logs/`）：运行日志按 run 归档、
+    // 服务端日志按天追加 ⇒ 淘汰单位不同，不能混在一个目录里 ✓
+    assert!(
+        v["serverLogDir"]
+            .as_str()
+            .unwrap()
+            .ends_with("/server-logs"),
+        "{body}"
+    );
+    assert_eq!(
+        v["serverLogUsage"]["files"].as_u64().unwrap(),
+        0,
+        "还没写过服务端日志：{body}"
+    );
+    assert_eq!(
+        v["serverLogUsage"]["maxBytes"].as_u64().unwrap(),
+        mcloud_core::DEFAULT_SERVER_LOG_TOTAL_MB * 1024 * 1024,
+        "{body}"
+    );
+    assert_eq!(
+        v["limits"]["serverLogMemLines"].as_u64().unwrap(),
+        2000,
+        "内存窗口默认 = 老的 RING_CAPACITY（行为不变 ✓）：{body}"
+    );
+    assert_eq!(
+        v["limits"]["serverLogTotalMb"].as_u64().unwrap(),
+        mcloud_core::DEFAULT_SERVER_LOG_TOTAL_MB,
+        "{body}"
+    );
+
     // 没登录 ⇒ 401（存储路径属于"这台机器怎么部署的"，不该匿名可见）
     let (s, _) = send(
         mcloud_server::app(ServerState::new(Arc::clone(&handle))),
@@ -2153,6 +2313,247 @@ async fn storage_reports_real_paths() {
     )
     .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐⭐ 容量上限：能改、立刻生效、**只有管理员**；而改安全策略**不许**把它冲回默认 ✓。
+///
+/// 最后那一条是这次最值钱的一条：`AppSettings` 是一份**整体**（口令下限、会话时长、
+/// 容量三格都在里面 ✓）⇒ 两个 PUT 各写一半的话，`PUT /api/admin/security`
+/// 会把容量上限重置成默认值 ✗ —— 那种 bug 只有"先改容量、再改策略"才现形 ✓。
+#[tokio::test]
+async fn storage_limits_round_trip_and_are_admin_only() {
+    let (handle, dir) = test_app("storage-limits");
+    let (app, admin, other) = two_user_app(Arc::clone(&handle));
+
+    let body_ok = serde_json::json!({
+        "historyLimit": 50,
+        "logLimitPerRun": 500,
+        "logTotalMb": 2,
+        "serverLogMemLines": 400,
+        "serverLogTotalMb": 3,
+    });
+
+    // 非管理员 ⇒ 403（实例级设置，与 `restart` 同一条口径 ✓）
+    let (st, body) = send(
+        app.clone(),
+        put_json_with_cookie("/api/admin/storage", &other, &body_ok),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "普通用户不该能改实例容量：{body}"
+    );
+
+    // 管理员 ⇒ 200，且回的是**改完的即时状态** ✓
+    let (st, body) = send(
+        app.clone(),
+        put_json_with_cookie("/api/admin/storage", &admin, &body_ok),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let v = json_body(&body);
+    assert_eq!(v["limits"]["historyLimit"], 50, "{body}");
+    assert_eq!(v["limits"]["logLimitPerRun"], 500, "{body}");
+    assert_eq!(v["limits"]["logTotalMb"], 2, "{body}");
+    assert_eq!(v["limits"]["serverLogMemLines"], 400, "{body}");
+    assert_eq!(v["limits"]["serverLogTotalMb"], 3, "{body}");
+    assert_eq!(
+        v["logUsage"]["maxBytes"].as_u64().unwrap(),
+        2 * 1024 * 1024,
+        "上限换了，用量里那份也要跟着换：{body}"
+    );
+    assert_eq!(
+        v["serverLogUsage"]["maxBytes"].as_u64().unwrap(),
+        3 * 1024 * 1024,
+        "服务端日志那格同理：{body}"
+    );
+
+    // ⭐⭐ **只给一格**也能改，其余原样（这条钉的是"老页面只发三格"那种兼容：
+    // 加了一个设置项不能让另一个设置项突然存不了 ✗）
+    let (st, body) = send(
+        app.clone(),
+        put_json_with_cookie(
+            "/api/admin/storage",
+            &admin,
+            &serde_json::json!({ "serverLogMemLines": 600 }),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let s = handle.store.settings().await.unwrap();
+    assert_eq!(s.server_log_mem_lines, 600, "给的那格要改到");
+    assert_eq!(s.history_limit, 50, "没给的那几格必须原样 ✗");
+    assert_eq!(s.server_log_total_mb, 3);
+    assert_eq!(s.log_total_mb, 2);
+
+    // ⚠ 一个都不给 ⇒ 400（静默成功会让人以为改了 ✓）
+    let (st, body) = send(
+        app.clone(),
+        put_json_with_cookie("/api/admin/storage", &admin, &serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("至少要给一格"), "{body}");
+
+    // ⚠⚠ 再改**安全策略**：容量那三格必须原样保留 ✓
+    let (st, body) = send(
+        app.clone(),
+        put_json_with_cookie(
+            "/api/admin/security",
+            &admin,
+            &serde_json::json!({ "minPasswordLen": 10, "sessionTtlHours": 24 }),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let s = handle.store.settings().await.unwrap();
+    assert_eq!(s.min_password_len, 10, "口令下限该改到了");
+    assert_eq!(s.history_limit, 50, "改安全策略**不该**把容量上限冲回默认");
+    assert_eq!(s.log_limit_per_run, 500);
+    assert_eq!(s.log_total_mb, 2);
+    assert_eq!(s.server_log_mem_lines, 600, "服务端日志那两格同理");
+    assert_eq!(s.server_log_total_mb, 3);
+
+    // 越界 ⇒ 400 + 人话（不静默夹取：用户以为设成了 0 就是"一条都不留"✗）
+    for (bad, want) in [
+        (
+            serde_json::json!({"historyLimit": 1, "logLimitPerRun": 500, "logTotalMb": 2}),
+            "历史保留条数",
+        ),
+        (
+            serde_json::json!({"historyLimit": 50, "logLimitPerRun": 1, "logTotalMb": 2}),
+            "单次运行日志行数",
+        ),
+        (
+            serde_json::json!({"historyLimit": 50, "logLimitPerRun": 500, "logTotalMb": 0}),
+            "日志总量上限",
+        ),
+    ] {
+        let (st, body) = send(
+            app.clone(),
+            put_json_with_cookie("/api/admin/storage", &admin, &bad),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains(want), "报错该说清是哪一格：{body}");
+    }
+    // 越界那次不许写进去 ✓
+    assert_eq!(handle.store.settings().await.unwrap().log_total_mb, 2);
+
+    // 没登录 ⇒ 401
+    let (st, _) = send(
+        mcloud_server::app(ServerState::new(Arc::clone(&handle))),
+        put_json("/api/admin/storage", &body_ok),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 运行日志**分页**（用户口径 2026-10-09：「大日志做虚拟加载或者分页，
+/// 避免一次加载太多」✓）。
+///
+/// 三条语义各钉一次：不带游标取**最后**一页、`before` **往上**翻、`after` **往下**接。
+#[tokio::test]
+async fn run_logs_are_paged_by_cursor() {
+    let (handle, dir) = test_app("run-logs-page");
+    handle
+        .store
+        .upsert_run(&mcloud_core::RunRecord {
+            run_id: mcloud_core::RunId::new(1),
+            task: "sign".into(),
+            account: "13800000000".into(),
+            outcome: mcloud_core::TaskOutcome::success("ok"),
+            duration_ms: 1,
+            started_at_ms: 1,
+            status: mcloud_core::RunStatus::Done,
+            details: serde_json::Value::Null,
+            logs: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let lines: Vec<mcloud_core::LogLine> = (1..=12u64)
+        .map(|i| {
+            mcloud_core::LogLine::new(
+                1,
+                mcloud_core::LogLevel::Info,
+                format!("第 {i} 行"),
+                i as i64,
+                mcloud_core::Seq(i),
+            )
+        })
+        .collect();
+    handle
+        .store
+        .append_logs(mcloud_core::RunId::new(1), &lines)
+        .await
+        .unwrap();
+    let app = authed_app(Arc::clone(&handle));
+
+    // 不带游标 ⇒ **最后** 5 行（打开就是最近这些 ✓）
+    let (st, body) = send(app.clone(), get("/api/runs/1/logs?limit=5")).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let v = json_body(&body);
+    let got: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        got,
+        vec!["第 8 行", "第 9 行", "第 10 行", "第 11 行", "第 12 行"]
+    );
+
+    // `before` ⇒ 往上翻（要更早的 ✓）
+    let (_, body) = send(app.clone(), get("/api/runs/1/logs?limit=5&before=8")).await;
+    let v = json_body(&body);
+    let got: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        got,
+        vec!["第 3 行", "第 4 行", "第 5 行", "第 6 行", "第 7 行"]
+    );
+
+    // 翻到头 ⇒ 给能给的（少于 limit 就是"没有更多了" ✓，前端据此收起按钮 ✓）
+    let (_, body) = send(app.clone(), get("/api/runs/1/logs?limit=5&before=3")).await;
+    let v = json_body(&body);
+    assert_eq!(v.as_array().unwrap().len(), 2, "{body}");
+
+    // `after` ⇒ 往下接（断线续传，既有语义 ✓）
+    let (_, body) = send(app.clone(), get("/api/runs/1/logs?limit=3&after=7")).await;
+    let v = json_body(&body);
+    let got: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(got, vec!["第 8 行", "第 9 行", "第 10 行"]);
+
+    // `limit` 被夹到**设置里那一格**（一页不该比"一次运行能留的全部"还大 ✓）
+    handle
+        .store
+        .save_settings(&{
+            let mut s = handle.store.settings().await.unwrap();
+            s.log_limit_per_run = mcloud_core::LOG_LIMIT_PER_RUN_RANGE.0; // 200
+            s
+        })
+        .await
+        .unwrap();
+    let (_, body) = send(app.clone(), get("/api/runs/1/logs?limit=100000")).await;
+    let v = json_body(&body);
+    assert_eq!(
+        v.as_array().unwrap().len(),
+        12,
+        "总共只有 12 行 ⇒ 夹到上限也只是这 12 行：{body}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3542,6 +3943,33 @@ async fn ops_logs_are_admin_only() {
         body.contains("只有实例管理员"),
         "文案该与别的实例级动作一致：{body}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ `before` 游标**被接受**（分页参数不能把接口打挂 ✓）。
+///
+/// ⚠ 分页**语义**（往上翻、到头）钉在 `logbuf::persistence_tests` 里
+///（那边能直接往环/盘里塞行 ✓）；这里只钉"路由这一层认得它" ✓ ——
+/// 集成测试进程里 `logbuf` 没挂落盘目录（`init` 在 `serve()` 里 ✓），
+/// 所以这里必然拿到**空数组**而不是报错 ✓。
+#[tokio::test]
+async fn the_logs_page_cursor_is_accepted() {
+    let (handle, dir) = test_app("logs-before-cursor");
+    let (app, admin, other) = two_user_app(handle);
+
+    for uri in [
+        "/api/logs?limit=5",
+        "/api/logs?limit=5&before=12345",
+        "/api/logs?limit=5&before=0&category=task",
+    ] {
+        let (st, body) = send(app.clone(), get_with_cookie(uri, &admin)).await;
+        assert_eq!(st, StatusCode::OK, "{uri} 该放行：{st} {body}");
+        assert_eq!(body.trim(), "[]", "{uri}：测试进程里环是空的 ✓");
+    }
+    // 普通用户也一样（不带 category=ops 时 ✓）
+    let (st, body) = send(app.clone(), get_with_cookie("/api/logs?before=1", &other)).await;
+    assert_eq!(st, StatusCode::OK, "{st} {body}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -201,6 +201,35 @@ const SETTINGS_CARD_LIST = `[...document.querySelectorAll('#app .card')].map((c)
 /** 同上，拼成一个字符串（顺序也在里面 ✓）。 */
 const SETTINGS_CARDS = `${SETTINGS_CARD_LIST}.join(',')`
 
+/**
+ * 滚到**日志页**列表的最上面，并**等窗口真的落在那儿**（2026-10-09 分页那几步要用 ✓）。
+ *
+ * ⚠⚠ 为什么要"等"而不是"睡 400ms"：那一页是**窗口化**的（只铺看得见的那几十行 ✓）
+ * ⇒ "最上面那一行"只能先把 `scrollTop` 归零、让窗口挪到 0 才读得到 ✓；而"挪"要经过
+ * 一次滚动事件 + 一次渲染，机器一忙（推送档 7 条并行跑）就要几百毫秒 ⇒ 固定睡一觉会读到
+ * **窗口还没挪过去**时那一段行（实测：`topDrop` 读到 **6** 而不是 500 ✗ ——
+ * 那不是功能坏了，是**量错了** ✓，而"量错"比"红"更坏：它会让人去查一个不存在的问题 ✗）。
+ *
+ * ⚠ 判据用**上垫片的高度**（`win().top` ✓）：窗口起点是 0 时它就是 0px ✓ ——
+ * 这是"窗口真的在最上面"的**直接**证据（比"睡够时间"稳 ✓，也比"第一行的行号是几"
+ * 可用：那个数正是要量的东西，不能拿来当前置条件 ✗）。
+ */
+const logsToTop = `(async () => {
+  const box = document.getElementById('logs-scroll')
+  if (!box) throw new Error('没有滚动容器 #logs-scroll')
+  box.scrollTop = 0
+  box.dispatchEvent(new Event('scroll', { bubbles: true }))
+  const atTop = () => {
+    const spacer = box.firstElementChild
+    return !!spacer && spacer.getBoundingClientRect().height === 0
+  }
+  for (let i = 0; i < 100; i++) {
+    if (atTop()) return true
+    await new Promise((r) => setTimeout(r, 50))
+  }
+  throw new Error('窗口没挪到最上面（上垫片还撑着 —— 页面卡住了？）')
+})()`
+
 const STEPS = {
   /** 已登录：切页、导航、抽屉、主题、弹窗、受控输入框、下拉框、勾选框、编排页的增删重排。 */
   ready: [
@@ -306,6 +335,129 @@ const STEPS = {
       name: '历史页：200112 写成「本号已领过」（带主语，不歧义）',
       do: null,
       check: has(APP_TEXT, '本号已领过'),
+    },
+    /**
+     * ── 历史页：「运行日志」弹窗**分页取**（2026-10-09 用户口径「大日志做虚拟加载
+     *    或者分页，避免一次加载太多」✓）────────────────────────────────────────
+     *
+     * 钉三件事，⚠ **都要真的取到更早的行**，不能只断言"按钮在"：
+     * ① 首屏只取**最近 500 行**（夹具那次运行共 800 行 ✓）—— 一次全取就没有分页可言 ✗；
+     * ② 点「加载更早的 500 行」⇒ 界面读数变成 **800 行**、按钮消失（到头了 ✓）；
+     * ③ 滚到顶之后**第一行是第 0001 行**，而且窗口里那几行是**连续**的 ✓ ——
+     *    只数行数的话，"`before` 写成别的游标 ⇒ 同一段行取了两遍"会得到 1000 行，
+     *    行数照样"变多了" ✗（夹具正文里带行号，正是为了能逐字对上 ✓）。
+     *
+     * ⚠ 面板是窗口化的（只铺看得见的那几十行 ✓）⇒ 要读"第一行"得先滚到顶。
+     * 滚动放在 `do` 里、断言放在 `check` 里（`check` 不许改页面 ✓）。
+     */
+    {
+      name: '历史页：开「运行日志」弹窗 ⇒ 首屏只取最近 500 行（夹具共 800 行）',
+      do: `(() => {
+        const b = document.querySelector('#app button[aria-label="查看日志：live-room #1024"]')
+        if (!b) throw new Error('找不到那次运行的「日志」按钮')
+        b.click()
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const d = document.getElementById('run-log-dialog')
+           if (!d || !d.open) return 'not-open'
+           const t = d.textContent
+           return [t.includes('已显示 500 行'), t.includes('加载更早的 500 行'),
+                   d.querySelectorAll('[data-k]').length > 0].join('/')
+         })()`,
+        'true/true/true',
+      ),
+      changed: true,
+    },
+    {
+      /**
+       * ⚠ 往上拼接**不许**把已有行整批换新对象（`createFor` 按"key 与 item 都没变"复用行 ✓）——
+       * 换新对象的表现是"已经渲染的每一行都被重建"，用户那边是**正在选中的文字被清掉、
+       * 滚动位置丢掉** ✗（`ui/log-panel.tsx` 与 `ui/virtual-rows.ts` 文件头那条契约 ✓）。
+       *
+       * 判据与 `bulk.mjs` ⑥′ 同款：给窗口**中间**那一行打一个 **JS 属性** ⇒
+       * 翻页之后按它自己的 `data-k` 找回那一行，属性还在 = 同一个节点被留住了 ✓
+       * （打中间那一行：翻页前后**看到的是同一段内容** —— 页面上那一下滚动补偿
+       * 就是为了这个 ✓，所以那一行必定还在窗口里 ✓）。
+       */
+      name: '历史页：往上翻页前，给窗口中间那一行打个记号',
+      do: `(() => {
+        const box = document.querySelector('#run-log-dialog .h-64')
+        if (!box) throw new Error('找不到日志滚动容器')
+        const rows = [...box.querySelectorAll('[data-k]')]
+        if (rows.length < 5) throw new Error('面板里行太少（' + rows.length + '）')
+        const el = rows[Math.floor(rows.length / 2)]
+        el.__keep = 1
+        window.__runLogKey = el.dataset.k
+        return true
+      })()`,
+      check: eq(`!!window.__runLogKey`, true),
+    },
+    {
+      name: '历史页：点「加载更早的 500 行」⇒ 真的取到更早的行（800 行，按钮消失）',
+      do: `(async () => {
+        const b = [...document.querySelectorAll('#run-log-dialog button')]
+          .find((x) => x.textContent.trim() === '加载更早的 500 行')
+        if (!b) throw new Error('没有「加载更早」按钮')
+        b.click()
+        for (let i = 0; i < 60; i++) {
+          const t = document.getElementById('run-log-dialog')?.textContent ?? ''
+          if (t.includes('已显示 800 行')) break
+          await new Promise((r) => setTimeout(r, 100))
+        }
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const d = document.getElementById('run-log-dialog')
+           const t = d ? d.textContent : ''
+           return [t.includes('已显示 800 行'), t.includes('加载更早')].join('/')
+         })()`,
+        'true/false',
+      ),
+      changed: true,
+    },
+    {
+      name: '历史页：往上翻页**不重建已有行**（打了记号的那一行还是同一个节点）',
+      do: null,
+      check: eq(
+        `(() => {
+           const box = document.querySelector('#run-log-dialog .h-64')
+           const el = [...box.querySelectorAll('[data-k]')].find((d) => d.dataset.k === window.__runLogKey)
+           return [!!el, el ? el.__keep === 1 : false].join('/')
+         })()`,
+        'true/true',
+      ),
+    },
+    {
+      // ⚠ 滚到顶（`scrollTop = 0` + 补一次 `scroll` 事件）—— 面板据此重算窗口，
+      // 第一行才会真的铺出来（窗口化只画看得见的那几十行 ✓）。
+      name: '历史页：把日志滚到顶 ⇒ 第一行是第 0001 行，窗口里那几行连续（没有重复取）',
+      do: `(() => {
+        const box = document.querySelector('#run-log-dialog .h-64')
+        if (!box) throw new Error('找不到日志滚动容器')
+        box.scrollTop = 0
+        box.dispatchEvent(new Event('scroll', { bubbles: true }))
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const box = document.querySelector('#run-log-dialog .h-64')
+           if (!box) return 'no-box'
+           const rows = [...box.querySelectorAll('[data-k]')]
+           const nums = rows.map((r) => Number((r.textContent.match(/夹具运行日志 (\\d{4})/) ?? [])[1]))
+           const contiguous = nums.length >= 5 && nums.every((n, i) => i === 0 || n === nums[i - 1] + 1)
+           return [nums[0], contiguous, rows.length > 0].join('/')
+         })()`,
+        '1/true/true',
+      ),
+    },
+    {
+      name: '历史页：关掉运行日志弹窗（后面几步要用干净的页面）',
+      do: `document.getElementById('run-log-dialog').close()`,
+      check: eq('document.querySelectorAll("dialog[open]").length', 0),
+      changed: true,
     },
     { name: '点 dock：任务', do: clickText('.dock button', '任务'), check: eq('location.pathname', '/tasks') },
     { name: '展开抽屉', do: clickSel('label[for="nav-drawer"]'), check: eq("document.getElementById('nav-drawer').checked", true), changed: true },
@@ -1050,6 +1202,129 @@ const STEPS = {
       check: eq(SETTINGS_CARDS, 'mcloudv0.1.0,存储信息,服务操作'),
     },
     { name: '设置页：存储信息报到数据目录', do: null, check: has(APP_TEXT, '数据目录') },
+    /**
+     * ── 存储信息卡：**日志与历史的容量上限**（2026-10-09 用户口径
+     *    「日志和历史不要全加入内存，使用本地记录，**让用户设置最大大小**」✓）──────
+     *
+     * 钉五件事：
+     * ① 两份日志占用都写成「**占用 / 上限**」（夹具：运行日志 556 KiB / 64 MB ✓、
+     *    服务端日志 1.2 MB / 64 MB ✓）—— 只报占用的话，用户看不出"还剩多少、
+     *    该不该调大"，而那是他打开这张卡要回答的问题 ✗；
+     * ② **五个**框按**服务端那份状态**回填（200 / 2000 / 64 / 2000 / 64 ✓），
+     *    且两格新说明写着"内存 vs 磁盘"（调小内存那格**不丢历史** ✓ —— 说反了
+     *    会让人以为"调小 = 丢日志" ✗）；
+     * ③ 越界先被**前端**挡住（弹窗 + 就近 inline，且不发请求 ✓）；
+     * ④ 改完保存 ⇒ 五个框回填服务端的值、**两份**「占用 / 上限」都跟着变 ✓。
+     *
+     * ⚠ ④ 里"跟着变"那一半是**关键**：两个 `maxBytes` 在装置那边分别是
+     * `limits.logTotalMb` / `limits.serverLogTotalMb × 1 MiB` **现算**的
+     * （`lib.mjs::storageView` ✓）⇒ 页面若只把用户输的数在本地回显、
+     * 没真发出去/没读响应，那两行不会变 ✗。
+     * ⚠ 两份读数用的是**不同的数**（556 KiB/139 个文件 vs 1.2 MB/12 个文件 ✓）——
+     * 同一个数的话，"界面把两份搞混了"照样绿 ✗。
+     */
+    {
+      name: '设置页：两份日志占用都写成「占用 / 上限」（556 KB / 64 MB、1.2 MB / 64 MB），五个上限框都在',
+      do: null,
+      check: eq(
+        `(() => {
+           const card = [...document.querySelectorAll('#app .card')]
+             .find((c) => (c.querySelector('.card-title')?.textContent ?? '').trim() === '存储信息')
+           if (!card) return 'no-card'
+           const t = card.textContent
+           return [t.includes('556 KB / 64 MB'), t.includes('139 个文件'),
+                   t.includes('1.2 MB / 64 MB'), t.includes('12 个文件'),
+                   // 两格新说明的**要义**：内存那格讲清"更早的按需从磁盘读"（不丢历史 ✓）、
+                   // 磁盘那格讲清淘汰粒度是"整天文件" ✓
+                   t.includes('更早的按需从磁盘读'), t.includes('整天文件'),
+                   document.querySelectorAll('#app input[id^=storage-]').length].join('/')
+         })()`,
+        'true/true/true/true/true/true/5',
+      ),
+    },
+    {
+      name: '设置页：五个上限按服务端的值回填（200 / 2000 / 64 / 2000 / 64）',
+      do: null,
+      check: eq(
+        `[document.getElementById('storage-history-limit').value,
+          document.getElementById('storage-log-per-run').value,
+          document.getElementById('storage-log-total-mb').value,
+          document.getElementById('storage-server-log-mem-lines').value,
+          document.getElementById('storage-server-log-total-mb').value].join('/')`,
+        '200/2000/64/2000/64',
+      ),
+    },
+    {
+      // ⚠ 越界先在前端挡住：装置那边越界会回 400（照真后端校验 ✓）⇒ 前端没挡的话
+      // 这一步会看到错误弹窗、卡片上也不会出现范围提示，两条断言一起红 ✓。
+      name: '设置页：上限越界 ⇒ 前端先挡（错误弹窗 + 就近 inline）',
+      do: `(() => {
+        const el = document.getElementById('storage-history-limit')
+        el.value = '5'
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        ;[...document.querySelectorAll('#app button')].find((b) => b.textContent.trim() === '保存上限').click()
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const card = [...document.querySelectorAll('#app .card')]
+             .find((c) => (c.querySelector('.card-title')?.textContent ?? '').trim() === '存储信息')
+           return [document.querySelectorAll('dialog[open]').length,
+                   [...document.querySelectorAll('dialog[open]')].map((d) => d.id).join(','),
+                   card.textContent.includes('20~2000')].join('/')
+         })()`,
+        '1/error-dialog/true',
+      ),
+      changed: true,
+    },
+    {
+      name: '设置页：关掉错误弹窗',
+      do: clickText('#error-dialog .modal-action button', '知道了'),
+      check: eq('document.querySelectorAll("dialog[open]").length', 0),
+      changed: true,
+    },
+    {
+      /**
+       * ⭐⭐ 「保存体对得上」：装置**照冻结的契约**校验（**给哪格改哪格**、一格都不给才 400、
+       * 越界回 400 + 人话 ✓）⇒ 这一步能走到"成功提示"，就说明页面确实把用户输的数
+       * **发出去了** ✓。
+       *
+       * ⚠⚠ **五格一起改**是刻意的（不只是"改一格"）：装置那边只覆盖**给了的**那几格 ✓
+       * ⇒ 页面若只发改过的那一格（或漏发几格），响应回读之后**没发的那几格会跳回旧值**，
+       * 下面那五条读数当场红 ✓ —— 这正是"少发一格"这类 bug 唯一能现形的时机 ✓。
+       *
+       * ⚠ 断言里那五条一起读是**故意的**：只判"有成功提示"的话，
+       * "本地回显 + 假成功"照样绿 ✗；只判五个框的值的话，那本来就是本地草稿 ✗。
+       */
+      name: '设置页：改五个上限 ⇒ 保存成功、回填服务端的值、两份占用/上限那行都跟着变',
+      do: `(() => {
+        const set = (id, v) => { const el = document.getElementById(id); el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })) }
+        set('storage-history-limit', '500')
+        set('storage-log-per-run', '3000')
+        set('storage-log-total-mb', '128')
+        set('storage-server-log-mem-lines', '5000')
+        set('storage-server-log-total-mb', '256')
+        ;[...document.querySelectorAll('#app button')].find((b) => b.textContent.trim() === '保存上限').click()
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const card = [...document.querySelectorAll('#app .card')]
+             .find((c) => (c.querySelector('.card-title')?.textContent ?? '').trim() === '存储信息')
+           const t = card ? card.textContent : ''
+           return [document.getElementById('storage-history-limit').value,
+                   document.getElementById('storage-log-per-run').value,
+                   document.getElementById('storage-log-total-mb').value,
+                   document.getElementById('storage-server-log-mem-lines').value,
+                   document.getElementById('storage-server-log-total-mb').value,
+                   t.includes('556 KB / 128 MB'),
+                   t.includes('1.2 MB / 256 MB'),
+                   (document.getElementById('app').textContent ?? '').includes('存储上限已保存')].join('/')
+         })()`,
+        '500/3000/128/5000/256/true/true/true',
+      ),
+      changed: true,
+    },
     {
       name: '设置页：点「安全」⇒ 地址变 /settings/security，只有安全那三张卡在',
       do: clickText('#app [role="tablist"] button', '安全'),
@@ -2726,17 +3001,41 @@ const STEPS = {
     //
     // ⚠ 夹具那份 `/api/logs` 挂在 **`VARIANTS.ready`** 上（`lib.mjs` 的 `logsState`）——
     // 所以下面这几步只属于 **ready 档** ✓（别的变体里那条路径是 404）。
-    // 没有这一条"贴底跟随"就量不出来（静态名单下 `scrollHeight` 不变，
-    // 坏代码也可能满足"还在底部"✗）。所以下面 `do` 里**先断言容器真的可滚**：
-    // 夹具一旦没给日志，"通过"就成了一句空话 ⇒ 宁可当场红 ✗。
+    // 没有这一条"贴底跟随"就量不出来（静态名单下"还在底部"这句在坏代码里也可能成立 ✗）。
+    // 所以下面 `do` 里**先断言容器真的可滚**：夹具一旦没给日志，"通过"就成了一句空话
+    // ⇒ 宁可当场红 ✗。
     // ⚠ 只量 `scrollTop` 也不够：真坏法是"换了节点"（新节点的 `scrollTop` 天然是 0），
     // 所以"还是不是同一个容器"（`__probe` 标记）必须一起量 ✓ —— 实测：
     // 把卡片改回条件渲染（其余不动）后，**中间那条**靠 `__probe` 才红 ✗；
     // 而"贴底"那条会**照过**（`load()` 的写回把新容器重新钉到了底部）⇒
     // 两条一起才是完整的钉子，别删任何一条 ✓。
+    //
+    // ⚠⚠ 2026-10-09 分页时"贴底"那条的**判据换了**（不是放宽，是**跟着夹具的模型换**）：
+    // 夹具现在照真后端分**两层**（内存窗口 + 盘上 ✓，见 `lib.mjs::logsState`）——
+    // 实时那一份是"最新 `limit` 行"，一旦总量超过 2000，**窗口大小就恒定了**
+    // ⇒ 每拍新来两行时 `scrollHeight` **不再变**（老夹具只有 60 行、窗口还在长，
+    // 所以那时"变高"是有效的判据 ✓）。现在改成量**内容**：底部那一行的行号必须**变大**
+    // （新行真的来了 ✓）＋ 位置仍贴着底（跟随没丢 ✓）—— 比"总高变大"更直接 ✓。
     {
+      /**
+       * ⚠ 2026-10-09：这一条的 `do` 从"只导航"改成"**导航 + 等首屏铺出来**"。
+       *
+       * 为什么必须等：夹具那份 `/api/logs` 现在照真后端的**窗口**给（最新 2000 行 ✓，
+       * 见 `lib.mjs::logsState`）—— 一次 300 KB 上下，机器一忙（推送档 7 条并行、
+       * 或别的写入线在编 Rust）**导航完立刻查**就会读到还没铺的空列表 ✗
+       * （实测：负载高时读到 `/logs/false`，而页面本身是好的 ✓）。
+       * 断言**一个字没改**（还是"路径对 + 列表里铺了 20 行以上" ✓），
+       * 只是把"睡够就算"换成"**轮询到条件成立**"（本仓的门禁口径 ✓）。
+       */
       name: '切到日志页（服务端全量日志，夹具每次请求多两行）',
-      do: go('logs'),
+      do: `(async () => {
+        ${go('logs')}
+        for (let i = 0; i < 160; i++) {
+          if (document.querySelectorAll('#logs-scroll > div[data-k]').length > 20) break
+          await new Promise((r) => setTimeout(r, 50))
+        }
+        return true
+      })()`,
       check: eq('location.pathname + "/" + (document.querySelectorAll("#logs-scroll > div").length > 20)', '/logs/true'),
       changed: true,
     },
@@ -2762,17 +3061,33 @@ const STEPS = {
       ),
     },
     {
-      name: '日志页：贴底后跨一次轮询仍贴着底（新行跟着来）',
+      name: '日志页：贴底后跨一次轮询仍贴着底（底部那一行换成更新的了）',
       do: `(async () => {
         const el = document.getElementById('logs-scroll');
-        window.__logsHeight = el.scrollHeight;
+        if (!el) throw new Error('没有滚动容器 #logs-scroll');
         el.scrollTop = el.scrollHeight;
+        el.dispatchEvent(new Event('scroll', { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 300));
+        const rows = [...el.querySelectorAll('div[data-k]')];
+        const last = rows[rows.length - 1];
+        window.__bottomSeq = Number((last ? last.textContent.match(/第 (\\d+) 行/) : [])?.[1]);
+        if (!(window.__bottomSeq > 0)) throw new Error('没读到最下面那一行的行号');
         await new Promise((r) => setTimeout(r, 2400));
         return true;
       })()`,
       check: eq(
-        `(() => { const el = document.getElementById('logs-scroll'); return el.scrollHeight > window.__logsHeight && el.scrollHeight - el.scrollTop - el.clientHeight < 4 })()`,
-        true,
+        `(() => {
+           const el = document.getElementById('logs-scroll');
+           const rows = [...el.querySelectorAll('div[data-k]')];
+           const last = rows[rows.length - 1];
+           const seq = Number((last ? last.textContent.match(/第 (\\d+) 行/) : [])?.[1]);
+           // ① 新行真的来了（底部那一行更靠后 ✓）；② 视图仍贴着底（跟随没丢 ✓）
+           return JSON.stringify({
+             newer: seq > window.__bottomSeq,
+             pinned: el.scrollHeight - el.scrollTop - el.clientHeight < 4,
+           });
+         })()`,
+        JSON.stringify({ newer: true, pinned: true }),
       ),
     },
 
@@ -2908,6 +3223,144 @@ const STEPS = {
           return JSON.stringify({ both: ids.has('13800000000') && ids.has('13900000001') });
         })()`,
         JSON.stringify({ both: true }),
+      ),
+      changed: true,
+    },
+
+    /**
+     * ── 日志页：**分页**（2026-10-09 用户口径「大日志做虚拟加载或者分页，
+     *    避免一次加载太多」✓）──────────────────────────────────────────────
+     *
+     * 夹具那边是**两层**（`lib.mjs` 的 `logsState` ✓）：盘上 **2600** 行，
+     * 而不带 `before` 的实时那一份只给**最新 2000 行**（= 页面要的 `RING_LINES` ✓）——
+     * 这正是真后端的样子（内存环 + 盘上按需读 ✓）。于是：
+     *
+     * * 首屏「已显示 **2000** 行」（live 只有那么多 ✓）；
+     * * 点一次「加载更早的 500 行」⇒ 取回**满 500 行**（seq 更小的那一段 ✓）
+     *   ⇒ 计数 **2500**、最上面那一行的行号**小了 500** ✓；
+     * * 再点一次 ⇒ 只剩 100 行出头（**不满一页** ✓）⇒ 按钮撤掉（到头了 ✓）。
+     *
+     * ⚠ 钉四件事，**都要真的取到更早的行**，不能只断言"按钮在"：
+     * ① 按钮在、计数写着「已显示 N 行」；
+     * ② 点一次 ⇒ 计数**变大**、而且最上面那一行**更旧**（只数行数的话，
+     *    "`before` 传错 ⇒ 同一段行又取了一遍"也会让行数变多 ✗ —— 夹具正文里带行号
+     *    正是为了能逐字对上 ✓，与历史页那条同一个手法 ✓）；
+     * ③ ⭐ **跨一次轮询之后，翻上来的历史行还在最上面** —— 这一条是这个功能的命门：
+     *    轮询只许动 `live` ✓，冲掉 `older` 的表现正是"用户翻上去看完历史、
+     *    下一次轮询把历史全抹了"✗（`logs-page.tsx` 文件头第 1 条 ✓）；
+     * ④ 翻到不满一页 ⇒ 按钮**整颗撤掉**（`hasMore` ✓）。
+     *
+     * ⚠ 面板是窗口化的（只铺看得见的那几十行 ✓）⇒ 要读"最上面那一行"得先滚到顶；
+     * 滚动与等待放在 `do` 里、断言放在 `check` 里（`check` 不许改页面 ✓）。
+     */
+    {
+      name: '日志页：分页按钮在，且计数写着「已显示 N 行」',
+      do: 'true',
+      check: eq(
+        `(() => {
+           const t = document.getElementById('app').textContent ?? '';
+           const btn = [...document.querySelectorAll('#app button')]
+             .find((b) => b.textContent.trim() === '加载更早的 500 行');
+           return JSON.stringify({ btn: !!btn, count: /已显示 \\d+ 行/.test(t) });
+         })()`,
+        JSON.stringify({ btn: true, count: true }),
+      ),
+    },
+    {
+      name: '日志页：点「加载更早的 500 行」⇒ 计数变大、最上面那行更旧（真取到更早的行）',
+      do: `(async () => {
+        const readCount = () =>
+          Number((document.getElementById('app').textContent.match(/已显示 (\\d+) 行/) ?? [])[1]);
+        const readTop = () => {
+          const row = document.querySelector('#logs-scroll > div[data-k]');
+          return Number((row ? row.textContent.match(/第 (\\d+) 行/) : [])?.[1]);
+        };
+        // 先滚到顶（并**等窗口真的落在那儿** ✓）：窗口化只铺看得见的那几十行，
+        // "最上面那一行"得先让它出来才读得到 ✓
+        await ${logsToTop};
+        window.__countBefore = readCount();
+        window.__topBefore = readTop();
+        if (!(window.__countBefore > 0) || !(window.__topBefore > 0)) {
+          throw new Error('没读到「已显示 N 行」/ 最上面那一行：' + window.__countBefore + '/' + window.__topBefore);
+        }
+        const btn = [...document.querySelectorAll('#app button')]
+          .find((b) => b.textContent.trim() === '加载更早的 500 行');
+        if (!btn) throw new Error('没有「加载更早」按钮');
+        btn.click();
+        for (let i = 0; i < 80; i++) {
+          if (readCount() > window.__countBefore) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        // 拼接之后视图停在"原来那段内容"上 ⇒ 要再滚到顶才看得到新拼上去的那几行 ✓
+        await ${logsToTop};
+        window.__countAfter = readCount();
+        window.__topAfter = readTop();
+        return true;
+      })()`,
+      check: eq(
+        `(() => {
+           const grew = window.__countAfter - window.__countBefore;
+           // 夹具那边：实时那一份 2000 行 + 翻回来的满 500 行 ⇒ 正好 500 ✓；
+           // 而最上面那一行的行号要**恰好小 500**（"更早的那一段" ✓，不是同一段取两遍 ✗）
+           return JSON.stringify({ by: grew, topDrop: window.__topBefore - window.__topAfter });
+         })()`,
+        JSON.stringify({ by: 500, topDrop: 500 }),
+      ),
+      changed: true,
+    },
+    {
+      /**
+       * ⭐⭐ 这一条是这个功能的**命门**（`logs-page.tsx` 文件头第 1 条 ✓）：
+       * 轮询每 2 s 换一次 `live`，**不许**把用户翻出来的 `older` 冲掉 ——
+       * 冲掉的表现就是"翻上去看完历史，下一次轮询历史全没了"✗。
+       *
+       * 判据取"最上面那一行的行号还等于翻页之后那个"（而不是"行数没变"）：
+       * 行数在轮询里**本来就该变**（live 每拍多两行 ✓），而"最上面那一行"只有
+       * 在 `older` 被抹掉时才会突然变回实时窗口的最旧那一行 ✓。
+       */
+      name: '日志页：跨一次轮询后，翻上来的历史行还在最上面（轮询只动 live）',
+      do: `(async () => {
+        // 2.4 s > 那一拍 2 s ⇒ 至少跨过一次轮询 ✓
+        await new Promise((r) => setTimeout(r, 2400));
+        await ${logsToTop};
+        return true;
+      })()`,
+      check: eq(
+        `(() => {
+           const row = document.querySelector('#logs-scroll > div[data-k]');
+           const top = Number((row ? row.textContent.match(/第 (\\d+) 行/) : [])?.[1]);
+           const n = Number((document.getElementById('app').textContent.match(/已显示 (\\d+) 行/) ?? [])[1]);
+           return JSON.stringify({ kept: top === window.__topAfter, liveGrew: n >= window.__countAfter });
+         })()`,
+        JSON.stringify({ kept: true, liveGrew: true }),
+      ),
+    },
+    {
+      name: '日志页：再点一次 ⇒ 回不满一页（到头了）⇒ 按钮整颗撤掉',
+      do: `(async () => {
+        const find = () => [...document.querySelectorAll('#app button')]
+          .find((b) => b.textContent.trim().startsWith('加载更早'));
+        const btn = find();
+        if (!btn) throw new Error('没有「加载更早」按钮');
+        btn.click();
+        for (let i = 0; i < 80; i++) {
+          if (!find()) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        return true;
+      })()`,
+      check: eq(
+        `(() => {
+           const t = document.getElementById('app').textContent ?? '';
+           const btn = [...document.querySelectorAll('#app button')]
+             .some((b) => b.textContent.trim().startsWith('加载更早'));
+           const n = Number((t.match(/已显示 (\\d+) 行/) ?? [])[1]);
+           // ⚠ 三条一起读：按钮撤了（到头 ✓）、计数还在（它是"翻到底了"的证据 ✓）、
+           // 而且第二次翻页**真的又取到了行**（只判按钮消失的话，"游标算错 ⇒ 取回空页"
+           // 也会让按钮消失 ✗ —— 那样两次点击加起来只翻了一页，功能是半坏的 ✓）
+           return JSON.stringify({ btn, count: /已显示 \\d+ 行/.test(t), grew: n > window.__countAfter });
+         })()`,
+        JSON.stringify({ btn: false, count: true, grew: true }),
       ),
       changed: true,
     },

@@ -23,10 +23,10 @@ use std::time::Duration;
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::Json;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth_gate::{require_admin, CurrentUser};
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::ServerState;
 
 /// 构建期写进二进制的东西（见 `build.rs`）。
@@ -127,6 +127,72 @@ pub struct StorageView {
     /// 刻意**不含** `.bak`（那是覆盖前的备份，翻出来只会让人以为是两份数据）
     /// 与目录本身（`logs/` 单独报）。
     pub files: Vec<FileSize>,
+    /// 日志目录的用量与上限（用户可设 ✓）。
+    pub log_usage: LogUsageView,
+    /// **服务端日志**目录（`<数据目录>/server-logs`）—— 与运行日志分开 ✓。
+    pub server_log_dir: String,
+    /// 服务端日志的用量与上限 ✓。
+    pub server_log_usage: LogUsageView,
+    /// 用户可设的容量上限 —— 与 [`LogUsageView`] 一起给界面渲染"当前 / 上限" ✓。
+    pub limits: LimitsView,
+}
+
+/// 日志目录的用量读数（`logUsage` ✓）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogUsageView {
+    /// 目录里有几个日志文件（不含 `.bak` ✓）。
+    pub files: usize,
+    /// 目录合计字节（含 `.bak` ✓ —— 它照样占磁盘 ✓）。
+    pub bytes: u64,
+    /// 当前生效的总量上限（字节 ✓）—— 界面显示成 `占用 / 上限` ✓。
+    pub max_bytes: u64,
+}
+
+/// 用户可设的**容量上限**（`limits` ✓）。
+///
+/// 用户口径 2026-10-09：「日志和历史不要全加入内存，使用本地记录，
+/// **让用户设置最大大小**」✓ —— 这五格就是那个"最大大小" ✓
+/// （前两格是**历史/运行日志**，后两格是**服务端日志**：内存窗口 + 磁盘总量 ✓）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitsView {
+    /// 运行历史保留多少条。
+    pub history_limit: usize,
+    /// **单次运行**留多少行日志。
+    pub log_limit_per_run: usize,
+    /// `data/logs/` 的总量上限（MB ✓）。
+    pub log_total_mb: u64,
+    /// **服务端日志**在内存里留多少行（窗口 ✓；更早的按需读盘 ✓）。
+    pub server_log_mem_lines: usize,
+    /// `data/server-logs/` 的总量上限（MB ✓）。
+    pub server_log_total_mb: u64,
+}
+
+/// 改容量上限（`PUT /api/admin/storage` ✓）。
+///
+/// # ⚠ 为什么每格都是 `Option`（**给哪格改哪格**）
+///
+/// 原先这里是"三格都要给"（PUT = 整体替换 ✓）。2026-10-09 加了服务端日志那两格之后
+/// 这条口径就**不能**再要了：界面上那份前端可能还是旧的（只发三格 ✓），
+/// 严格要求五格 ⇒ 老页面一保存就 400 ✗ —— 而"加了一个设置项，
+/// 另一个设置项突然存不了"是最难归因的那类回归 ✗。
+///
+/// ⇒ 缺席 = **保持原值** ✓；**一个都不给** ⇒ 400（那多半是调错了接口，
+/// 静默成功会让人以为改了 ✓）。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoragePatch {
+    #[serde(default)]
+    pub history_limit: Option<usize>,
+    #[serde(default)]
+    pub log_limit_per_run: Option<usize>,
+    #[serde(default)]
+    pub log_total_mb: Option<u64>,
+    #[serde(default)]
+    pub server_log_mem_lines: Option<usize>,
+    #[serde(default)]
+    pub server_log_total_mb: Option<u64>,
 }
 
 /// 单个文件的字节数；读不到算 0（**不让这个接口失败** —— 报告"多大"失败毫无意义）。
@@ -152,6 +218,23 @@ fn dir_bytes(dir: &Path) -> u64 {
         .sum()
 }
 
+/// 目录里的文件数与合计字节（一层，不递归 ✓）—— 服务端日志目录就是这么用的
+/// （它是平的：一天一个 `.jsonl` ✓）。
+fn flat_dir_usage(dir: &Path) -> (usize, u64) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    for e in entries.flatten() {
+        if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            files += 1;
+            bytes += file_bytes(&e.path());
+        }
+    }
+    (files, bytes)
+}
+
 /// `GET /api/system/storage` —— **只有管理员**（安全审计 SEC-18）。
 ///
 /// 它报的是绝对路径、二进制位置、每个数据文件的字节数 —— 那是"这台机器怎么装的"
@@ -162,12 +245,21 @@ pub async fn storage(
     Extension(cur): Extension<CurrentUser>,
 ) -> ApiResult<StorageView> {
     require_admin(&state, &cur).await?;
+    Ok(Json(view(&state).await?))
+}
+
+/// 组装存储视图（`GET` 与 `PUT` 共用 ✓ —— 免得"改完回的那份"与"再查一次"
+/// 长得不一样 ✗）。
+async fn view(state: &ServerState) -> Result<StorageView, ApiError> {
     // ⚠ 报**绝对路径**：这一块的用处就是"照着它去磁盘上找"，
     // 而数据目录可以是相对的（launchd 的 `MCLOUD_DATA_DIR=data` ⇒ 相对 cwd）。
     // `canonicalize` 失败（目录还没建）就退回原值 —— 报一个相对路径也比报错强。
     let raw: PathBuf = state.handle.data_dir.clone();
     let data_dir = std::fs::canonicalize(&raw).unwrap_or(raw);
     let log_dir = data_dir.join("logs");
+    // ⚠ 服务端日志是**另一个目录**（`server-logs/`）：运行日志是"一次运行一个文件、
+    // 整份重写"，服务端日志是"一天一个文件、追加写" ⇒ 两者的淘汰单位不同 ✓。
+    let server_log_dir = data_dir.join(crate::logbuf::LOG_DIR_NAME);
 
     let mut files: Vec<FileSize> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&data_dir) {
@@ -189,7 +281,12 @@ pub async fn storage(
     }
     files.sort_by(|a, b| a.name.cmp(&b.name));
 
-    Ok(Json(StorageView {
+    // 日志用量：走存储层那一份读数（它按需扫目录 ✓，不维护计数器 ——
+    // 计数器要与删除/迁移/外部清理三处同步，漏一处就永远对不上 ✗）。
+    let stats = state.handle.store.log_stats().await?;
+    let s = state.handle.store.settings().await?;
+
+    Ok(StorageView {
         data_dir: data_dir.display().to_string(),
         log_dir: log_dir.display().to_string(),
         binary: std::env::current_exe()
@@ -198,7 +295,94 @@ pub async fn storage(
         data_bytes: files.iter().map(|f| f.bytes).sum(),
         log_bytes: dir_bytes(&log_dir),
         files,
-    }))
+        log_usage: LogUsageView {
+            files: stats.files,
+            bytes: stats.bytes,
+            max_bytes: stats.max_bytes,
+        },
+        server_log_dir: server_log_dir.display().to_string(),
+        // 服务端日志目录是**平的**（一天一个文件 ✓）⇒ 一层就够，不走递归 ✓
+        server_log_usage: {
+            let (files, bytes) = flat_dir_usage(&server_log_dir);
+            LogUsageView {
+                files,
+                bytes,
+                max_bytes: s.server_log_total_bytes(),
+            }
+        },
+        limits: LimitsView {
+            history_limit: s.history_limit,
+            log_limit_per_run: s.log_limit_per_run,
+            log_total_mb: s.log_total_mb,
+            server_log_mem_lines: s.server_log_mem_lines,
+            server_log_total_mb: s.server_log_total_mb,
+        },
+    })
+}
+
+/// `PUT /api/admin/storage` —— 改**容量上限**（只有管理员 ✓，与 `restart` 同一条口径）。
+///
+/// # 为什么"读-改-写"
+///
+/// `AppSettings` 是一份**整体**（安全那两格也在里面 ✓）。直接拿请求体构造一个新
+/// 的会把口令下限、会话时长重置成默认值 ✗ —— 那种 bug 只有在"先改容量、再登录"
+/// 时才现形，极难查。所以两个接口各改**自己那几格**，其余原样带回去 ✓。
+///
+/// # 改完立刻生效
+///
+/// `JsonStore::save_settings` 里会把新上限**应用一次**（历史超出 ⇒ 丢最旧的；
+/// 日志超预算 ⇒ 按最旧删 ✓）—— 用户把上限调小之后不必等下一次运行 ✓。
+pub async fn put_storage(
+    State(state): State<ServerState>,
+    Extension(cur): Extension<CurrentUser>,
+    Json(body): Json<StoragePatch>,
+) -> ApiResult<StorageView> {
+    require_admin(&state, &cur).await?;
+    // ⚠ 一个都不给 ⇒ 400（见 `StoragePatch` 的说明：静默成功会让人以为改了 ✓）
+    if body.history_limit.is_none()
+        && body.log_limit_per_run.is_none()
+        && body.log_total_mb.is_none()
+        && body.server_log_mem_lines.is_none()
+        && body.server_log_total_mb.is_none()
+    {
+        return Err(ApiError(mcloud_core::Error::Config(
+            "至少要给一格上限（historyLimit / logLimitPerRun / logTotalMb / serverLogMemLines / serverLogTotalMb）"
+                .into(),
+        )));
+    }
+    let mut next = state.handle.store.settings().await?;
+    // 缺席 = 保持原值 ✓（改哪格写哪格 —— 老前端只发三格也不会把新两格冲掉 ✓）
+    if let Some(v) = body.history_limit {
+        next.history_limit = v;
+    }
+    if let Some(v) = body.log_limit_per_run {
+        next.log_limit_per_run = v;
+    }
+    if let Some(v) = body.log_total_mb {
+        next.log_total_mb = v;
+    }
+    if let Some(v) = body.server_log_mem_lines {
+        next.server_log_mem_lines = v;
+    }
+    if let Some(v) = body.server_log_total_mb {
+        next.server_log_total_mb = v;
+    }
+    next.validate()
+        .map_err(|e| ApiError(mcloud_core::Error::Config(e)))?;
+    state.handle.store.save_settings(&next).await?;
+    // ⚠ **服务端日志那两格要单独告诉 `logbuf`**：它活在进程级静态量里（不是走 store 读的 ✓）
+    // ⇒ 不推给它的话，"改了内存行数/磁盘上限"要等到下次重启才生效 ✗
+    // （而"改完看不出变化"正是用户最烦的那种反馈 ✓）。
+    crate::logbuf::apply_settings(&next);
+    tracing::info!(
+        history_limit = next.history_limit,
+        log_limit_per_run = next.log_limit_per_run,
+        log_total_mb = next.log_total_mb,
+        server_log_mem_lines = next.server_log_mem_lines,
+        server_log_total_mb = next.server_log_total_mb,
+        "存储上限已更新（立即生效：超出部分会按最旧的淘汰）"
+    );
+    Ok(Json(view(&state).await?))
 }
 
 /// 重启服务。

@@ -17,13 +17,26 @@
  *    全部在**前端**过滤：`/api/runs` 一次把记录取全，不新增接口、不改后端。
  *
  * 布局沿用规范 §7.2：桌面表格（列多、要横向比较），窄屏**卡片流**。
+ *
+ * # 2026-10-09：运行日志弹窗改成**分页取**
+ *
+ * 用户口径：「大日志做虚拟加载或者分页，避免一次加载太多」✓ —— 弹窗不再借
+ * `getRun()` 里那份"最近 200 行"（那是**取不到的更早的行** ✗），改成打
+ * `/api/runs/{id}/logs`：首屏最近 500 行，往上翻用 `before=<第一行的 seq>` 拼 ✓。
+ * 详见 `openRunLog()` / `loadEarlier()` 上面那两段（**行对象身份**与**滚动位置**
+ * 那两条讲究都在那里 ✓）。
  */
 
-import { onMounted, ref, onUnmounted } from '@asunajs/lite'
+import { batch, onMounted, ref, onUnmounted, type Ref } from '@asunajs/lite'
 import { Dialog, openDialog } from '../ui/dialog'
 import { LogPanel, type LogLine } from '../ui/log-panel'
 import { setPageRefresh } from '../ui/page-refresh'
-import { getRun, listRuns, type RunLogLine, type RunRecord } from '../api'
+// ⚠ `ESTIMATE`：面板对**没量过**的行就是按它算高度的（`ui/virtual-rows.ts` ✓）——
+// 往上拼接时要预挪滚动位置，用的必须是**同一个数**，否则两边对不上 ✓。
+import { ESTIMATE } from '../ui/virtual-rows'
+// ⚠ 接口那一行的类型与面板那一行**同名不同物**（前者是 `runId/level/message/atMs/seq`，
+// 后者是 `kind/text/at` ✓）⇒ 这里把接口那个起个别名，免得两处混用 ✗。
+import { getRunLogs, listRuns, type LogLine as ApiLogLine, type RunRecord } from '../api'
 // 直播的结构化明细：与直播页**共用同一份**渲染（从前只有"当前这次"能看到）。
 import { LiveRoomResult } from '../ui/live-room-result'
 import { toLiveRoomRunView } from '../api'
@@ -62,19 +75,110 @@ type StatusFilter = 'all' | RunStatusView
 const RUN_LOG_DIALOG_ID = 'run-log-dialog'
 
 /**
- * 后端那四个级别 → 面板认的三档。
+ * 面板里的一行 + 它在**这次运行里**的 `seq`。
+ *
+ * ⚠ 为什么把 `seq` 挂在行对象上，而不是另开一份 `seq[]` 与它并行：
+ * 「加载更早」的游标就是**当前第一行**的 `seq`（`before` ✓），两者必须永远指向同一行 ——
+ * 拆成两个数组等于有两份真相，任何一处漏更新都会静默取错页 ✗。
+ * 多一个字段对 `LogPanel` 没有影响（它只读 `kind`/`text`/`at` ✓）。
+ */
+type RunLogRow = LogLine & { seq: number }
+
+/**
+ * 接口那四个级别 → 面板认的三档（**分类优先** ✓）。
  *
  * ⚠ `debug` 并进 `info` 是刻意的：**回看**时"调试行"与"普通行"同色是对的 ✓
  * —— 实时面板也是这么归的 ✓。两处别归得不一样 ✗（同一份日志两种颜色最费解 ✓）。
+ *
+ * ⚠ 分类那一格（`kind`）是 2026-10-09 才进 `mcloud_core::LogLine` 的
+ * ⇒ 老记录没有它，那时按级别兜底 ✓（兜底只能分出三档，会丢掉"成功/失败"的区别 ✓）。
  */
-const toLogLines = (lines: RunLogLine[]): LogLine[] =>
-  lines.map((l) => ({
-    // ⚠ 优先用**后端给的分类** ✓（info/success/fail/start…）；只有老记录没有它时
-    // 才按级别兜底 ✓ —— 兜底出来的只能三分，颜色会丢掉"成功/失败"的区别 ✓。
-    kind: l.kind ?? (l.level === 'error' ? 'error' : l.level === 'warn' ? 'warn' : 'info'),
-    text: l.message,
-    at: l.at_ms,
-  }))
+const toLogRow = (l: ApiLogLine): RunLogRow => ({
+  kind: l.kind ?? (l.level === 'error' ? 'error' : l.level === 'warn' ? 'warn' : 'info'),
+  text: l.message,
+  at: l.atMs,
+  seq: l.seq,
+})
+
+/**
+ * 首屏一次取多少行。
+ *
+ * ⚠ 它与实时面板的 `MAX_LOG_LINES`（2000）不是一回事，别合并：那个是"一次运行最多留多少行"
+ * （内存里的上限 ✓），这个是"**一屏**先取多少"（`ui/log-panel.tsx` 的文件头解释过
+ * "上限是 2000 而不是 500" 的理由 ✓）—— 分页之后，取少一点只是多翻一次页，
+ * 而取太多就把"别一次加载太多"这条口径丢了 ✗。
+ *
+ * ⚠ 后端会拿用户设的 `logLimitPerRun` 夹一下（要多了不会报错、只会少给 ✓）⇒
+ * **不能**拿"要了 500 就一定有 500"当"还有更早的"的判据 ✗（见 `fetchLogPage`）。
+ */
+const LOG_PAGE = 500
+
+/**
+ * 「运行日志」弹窗里**除面板之外**的那几块：谁 / 已显示 N 行 / 三个状态 / 「加载更早」。
+ *
+ * ⚠⚠ **它必须是一个组件**，不能把这几个 `{cond ? … : null}` 直接写在 `<Dialog>` 的
+ * 插槽里 —— 这条是实测出来的，不是猜的：
+ *
+ * 组件插槽里的条件表达式是**在插槽函数体里直接求值**的（插槽没有占位注释可以包住它们，
+ * 编译产物就是一串裸三元表达式 ✓，与"模板元素的动态子节点"不同 —— 那些会被
+ * 包进 `setNodes` 的 effect ✓）。于是它们读到的信号（`logLines` / `logHasMore` …）
+ * 会挂到**调用插槽的那个 effect** 上 ⇒ **每拼接一页日志都会重跑整个插槽**，
+ * 而插槽里那个 `<LogPanel>` 会被**整个重建**：新滚动容器 ⇒ 滚动位置清零、
+ * 打上记号的节点全丢 ✗（实测：面板 id 从 `log-panel-2` 跳到 `log-panel-4`，
+ * 往上翻页之后用户看到的还是最顶上那几行 —— 也就是这次要避免的那件事本身 ✗）。
+ *
+ * 收进组件之后，读发生在这个组件**自己的**模板占位里（细粒度 effect ✓），
+ * 兄弟节点 `LogPanel` 不再被牵连 ✓。
+ * ⚠ `ui/log-panel.tsx` 文件头那条"传 thunk"的约定治的是"面板**内部**"，
+ * 治不了"插槽里还读了别的信号" ✗ —— 两条要一起守。
+ */
+const RunLogHeader = (props: {
+  /** 看的是哪一次运行。 */
+  who: Ref<string>
+  state: Ref<'loading' | 'ready' | 'error'>
+  /** 取日志/取更早失败那句（**已经取到的行不清空** ⇒ 它可能和行同时在场 ✓）。 */
+  error: Ref<string>
+  /** 已取到多少行（**thunk**：这里读一下就等于订阅它，而这一读必须发生在本组件内部 ✓）。 */
+  count: () => number
+  hasMore: Ref<boolean>
+  loadingMore: Ref<boolean>
+  onLoadEarlier: () => void
+}) => (
+  <div class="flex flex-col gap-2">
+    <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+      <p class="text-xs opacity-60">{props.who.value}</p>
+      {/*
+        ⚠ 「已显示 N 行」是**往上翻页到底取到了没有**唯一写在界面上的证据 ✓
+        （只给按钮、不给计数的话，"点了没反应"与"真的到头了"分不开 ✗）。
+      */}
+      {props.state.value === 'ready' ? (
+        <span class="text-xs opacity-60">已显示 {props.count()} 行</span>
+      ) : null}
+    </div>
+    {props.state.value === 'loading' ? <p class="text-sm opacity-70">正在取日志 …</p> : null}
+    {props.error.value ? <p class="break-words text-sm text-error">{props.error.value}</p> : null}
+    {props.state.value === 'ready' && props.count() === 0 ? (
+      <p class="text-sm opacity-70">这次运行没有留下日志。</p>
+    ) : null}
+    {/*
+      「加载更早」放在**面板上方**：更早的行是拼到上面的（时间序 ✓），而且它在滚动容器
+      外面 ⇒ 用户滚日志时它不会被滚走 ✓。⚠ 只有"上一页回满了"才给（`hasMore` ✓）——
+      没有更多还摆一个按钮，点下去只是白跑一次请求 ✗。
+    */}
+    {props.state.value === 'ready' && props.hasMore.value ? (
+      <div class="flex justify-center">
+        <button
+          type="button"
+          class="btn btn-sm btn-soft min-h-11 md:min-h-0"
+          disabled={props.loadingMore.value}
+          onClick={() => props.onLoadEarlier()}
+        >
+          {props.loadingMore.value ? '正在取更早的日志 …' : `加载更早的 ${LOG_PAGE} 行`}
+        </button>
+      </div>
+    ) : null}
+  </div>
+)
 
 /**
  * 「日志」入口。
@@ -311,31 +415,162 @@ export const HistoryPage = (props: HistoryPageProps) => {
     id === 'all' ? runs.value.length : runs.value.filter((r) => runStatusOf(r) === id).length
 
   /**
-   * 运行日志（**回看**）。
+   * 运行日志（**回看**，分页取）。
    *
-   * ⚠ 列表接口**不带日志**（`/api/runs` 会剥掉 ✓，见 `routes/runs.rs::list`）
-   * ⇒ 点开的这一刻才按 id 取详情 ✓。那一下是网络请求 ⇒ 必须有"正在取 / 取失败"
-   * 两个状态 ✓：点了没反应会让人以为功能坏了 ✗。
+   * # 2026-10-09 改了什么（原来错在哪）
+   *
+   * 原来这里 `getRun(run_id)` 把**整条运行记录**取回来、只读它的 `logs`（后端最多 200 行 ✓）——
+   * 两条毛病：① 那 200 行是"最近 200 行"，**更早的压根取不到**（用户要看全 ✗）；
+   * ② 为了日志把整条记录（含结构化明细）也拉了一遍 ✓。
+   * 现在只打 `/api/runs/{id}/logs`：首屏取**最近 500 行**，往上翻用
+   * `before=<当前第一行的 seq>` 一页一页拼 ✓（用户口径：「大日志做虚拟加载或者分页，
+   * 避免一次加载太多」✓）。渲染仍走 `LogPanel`（窗口化 ✓）。
+   *
+   * ⚠⚠ `logLines` 是**拼接**出来的数组，**已有行的对象身份必须保持不变** ——
+   * `LogPanel` 的 `createFor` 靠"key 与 item 都没变"复用行节点（`ui/log-panel.tsx`
+   * 与 `ui/virtual-rows.ts` 的文件头写着这条契约 ✓）：每取一页就把整批行
+   * `toLogRow(...)` 重造一遍的话，**已经渲染的每一行都会被重建** ⇒
+   * 用户正选中的文字与滚动位置全丢 ✗（那正是这次要避免的东西 ✓）。
    */
-  const logLines = ref<LogLine[]>([])
+  const logLines = ref<RunLogRow[]>([])
   const logState = ref<'loading' | 'ready' | 'error'>('loading')
   const logWho = ref('')
   const logError = ref('')
+  /** 当前看的是哪次运行（「加载更早」要用 ✓）。 */
+  const logRunId = ref(0)
+  /**
+   * 还有没有更早的。
+   *
+   * ⚠ 判据**只有一条**：上一次取回来的条数 `<` 请求的条数（后端没给"总共有多少行"，
+   * 也不该去猜 ✗）。⚠ 用户把 `logLimitPerRun` 设得比 `LOG_PAGE` 小时，后端会夹到那个上限
+   * —— 那一页自然"不满"，于是不再给按钮 ✓，这是对的：那种设置下**那次运行的日志
+   * 总共就只留了那么多行** ✓。
+   */
+  const logHasMore = ref(false)
+  const logLoadingMore = ref(false)
+
+  /**
+   * 弹窗里那个滚动容器。
+   *
+   * ⚠ `ui/log-panel.tsx` 里的 id 是 `log-panel-<自增号>`（一个面板一个 id ✓）⇒ 只能按前缀找。
+   * ⚠ **不去改 `log-panel.tsx`**（两页共用的件）：需要"补回滚动高度"的只有**往上翻页**
+   * 这一个动作，而它只发生在这里 ✓（改共用件要连带考虑实时面板那一侧 ✗）。
+   */
+  const logScroller = (): HTMLElement | null =>
+    document.querySelector<HTMLElement>(`#${RUN_LOG_DIALOG_ID} [id^="log-panel-"]`)
+
+  /**
+   * 取一页日志。
+   *
+   * ⚠ `before` 缺席 = 首屏（后端给**最后** `LOG_PAGE` 行 ✓）；给了 = 往**上**取
+   * （`seq < before` 的最后 `LOG_PAGE` 行 ✓）。
+   * ⚠ 它**只取**、不动 `logLines` —— 往上拼接要与滚动位置**同一批**生效，所以拼接由
+   * `loadEarlier()` 在 `batch` 里做 ✓（理由见那里）。
+   */
+  const fetchLogPage = async (runId: number, before?: number): Promise<RunLogRow[]> => {
+    const rows = await getRunLogs(
+      runId,
+      before == null ? { limit: LOG_PAGE } : { limit: LOG_PAGE, before },
+    )
+    // ⚠ 回满一页 ⇒ 可能还有更早的；不满 ⇒ 到头了（后端**唯一**给的判据 ✓，别自己猜 ✗）
+    logHasMore.value = rows.length === LOG_PAGE
+    // ⚠ 只把**新取回来的这一页**转成新对象（已有行的对象身份由调用方保住 ✓）
+    return rows.map(toLogRow)
+  }
 
   const openRunLog = async (r: RunRecord) => {
+    /**
+     * ⚠ 先把上一次的行清掉：不清的话，取新那次运行的日志**期间**面板里还挂着**上一个运行**
+     * 的日志 ✗（标题写着这次是哪个运行、内容却是别次的 —— 那比空着更容易看错 ✓）。
+     */
     logLines.value = []
     logState.value = 'loading'
     logWho.value = `${r.task} #${r.run_id}`
     logError.value = ''
+    logHasMore.value = false
+    logLoadingMore.value = false
+    logRunId.value = r.run_id
     // 先开弹窗再取（网络那一下不该让界面"没反应" ✓）
     openDialog(RUN_LOG_DIALOG_ID)
     try {
-      const full = await getRun(r.run_id)
-      logLines.value = toLogLines(full.logs ?? [])
+      logLines.value = await fetchLogPage(r.run_id)
       logState.value = 'ready'
     } catch (e) {
       logError.value = e instanceof Error ? e.message : String(e)
       logState.value = 'error'
+    }
+    /**
+     * 打开就把视图拉回顶部。
+     *
+     * ⚠ 面板实例是**跨次复用**的（这正是"弹窗插槽里只许有组件"那条的收益 ✓）⇒
+     * 上一次看别的那次运行时滚到的位置会留着，而"新打开一次日志却停在中间"很难解释 ✗。
+     * 第一次打开时它本来就是 0，这一句是空操作 ✓。
+     */
+    requestAnimationFrame(() => {
+      const box = logScroller()
+      if (box) box.scrollTop = 0
+    })
+  }
+
+  /**
+   * 往上翻一页（「加载更早的 N 行」）。
+   *
+   * # ⚠⚠ 拼接与滚动位置必须**同一批**生效（这是这一页最容易写错的一处）
+   *
+   * 面板的窗口是**按滚动位置算**的（`ui/log-panel.tsx` 的 `win()` ✓）。往**上**拼一页之后，
+   * 原来那一行在数组里的下标整个往后挪了 `page.length`，它在**像素坐标**上也跟着往下挪了
+   * `page.length × 行高`。于是：
+   *
+   * * 先拼、下一帧再挪滚动位置 ⇒ 中间那一帧按**旧**位置算窗口 ⇒ 用户正在看的那几行被判成
+   *   "滚出窗口"而**摘掉**，下一帧再按新位置**重建** ✗ —— 实测过：面板里打上记号的节点
+   *   全没了、id 从 `log-panel-2` 跳到 `log-panel-4`（选中文字与滚动位置一起丢 ✓，
+   *   而那正是这次要避免的东西 ✗）。
+   * * 所以这里用 `batch()` 把"改行数组"与"挪滚动位置"合成一批：两个信号一起落，
+   *   渲染只发生**一次**，窗口直接落在**同一段内容**上 ✓（行对象身份没变 ⇒ 节点被复用 ✓）。
+   *
+   * ⚠ 还有两个细节，都是"不做就白做"的：
+   * 1. **挪之前先给容器垫高**：此刻 DOM 还没长（这一批还没铺 ✓），直接赋一个超出当前
+   *    可滚范围的 `scrollTop` 会被浏览器**钳住** ✗（用户滚得越靠下钳得越狠）。垫一层临时
+   *    下边距把可滚范围撑开，挪到位后立刻撤掉 —— 全在同一帧里，用户看不到这一层 ✓。
+   * 2. **`scrollTop` 的信号要同步跟上**：面板读的是它**自己的** `scrollTop` 信号，而原生
+   *    `scroll` 事件是**异步**派的 ⇒ 赶不上这一批 ✗。这里手动派一个 `scroll`，让
+   *    `syncScroll` 在批内把它同步过来 ✓（面板的 `onScroll` 是普通监听器 ⇒ 同步调用 ✓）。
+   *
+   * ⚠ 失败**不清空**已经取到的行（清掉等于把用户正在看的东西弄丢 ✗）：只把错误说出来 ✓。
+   * ⚠ 错误只**就近**显示，不再套一层弹窗 —— 这里本来就在一个 `<dialog>` 里，
+   * 再弹一个会与 ESC / 遮罩打架（`ui/error-dialog.ts` 文件头那条 ✓）。
+   */
+  const loadEarlier = async () => {
+    const first = logLines.value[0]
+    if (!first) return
+    logLoadingMore.value = true
+    logError.value = ''
+    const box = logScroller()
+    const was = box ? { top: box.scrollTop, height: box.scrollHeight } : null
+    try {
+      const page = await fetchLogPage(logRunId.value, first.seq)
+      // 新行都还没量过 ⇒ 面板自己也是按 `ESTIMATE` 算它们的高度的（`ui/virtual-rows.ts` ✓）
+      // ⇒ 用同一个数预挪，两边才对得上 ✓
+      const added = page.length * ESTIMATE
+      if (box && was) box.style.paddingBottom = `${added}px`
+      batch(() => {
+        logLines.value = [...page, ...logLines.value]
+        if (box && was) {
+          box.scrollTop = was.top + added
+          box.dispatchEvent(new Event('scroll'))
+        }
+      })
+      if (box && was) {
+        box.style.paddingBottom = ''
+        // 真实高度落定后再钉一次（预挪用的是估计值；通常是个空操作 ✓）
+        requestAnimationFrame(() => {
+          box.scrollTop = box.scrollHeight - was.height + was.top
+        })
+      }
+    } catch (e) {
+      logError.value = `取更早的日志失败：${e instanceof Error ? e.message : String(e)}`
+    } finally {
+      logLoadingMore.value = false
     }
   }
 
@@ -603,16 +838,21 @@ export const HistoryPage = (props: HistoryPageProps) => {
       {state.value === 'ready' ? body() : null}
 
       {/* ⚠ 内容必须写在**默认插槽**里：Vapor 下 JSX 子节点编译成第三个实参，
-          而 `props.children` 永远是 undefined ✗（`ui/dialog.tsx` 文件头写着这条 ✓）。 */}
+          而 `props.children` 永远是 undefined ✗（`ui/dialog.tsx` 文件头写着这条 ✓）。
+
+          ⚠⚠ 这个插槽里**只许有组件**（`RunLogHeader` + `LogPanel`）—— 一个信号都不许直接读：
+          插槽体里的条件表达式会挂到"调用插槽的那个 effect"上，一改就重跑整个插槽、
+          把 `<LogPanel>` 整个重建（见 `RunLogHeader` 上面那段实测 ✓）。 */}
       <Dialog id={RUN_LOG_DIALOG_ID} title="运行日志">
-        <p class="text-xs opacity-60">{logWho.value}</p>
-        {logState.value === 'loading' ? <p class="text-sm opacity-70">正在取日志 …</p> : null}
-        {logState.value === 'error' ? (
-          <p class="break-words text-sm text-error">{logError.value}</p>
-        ) : null}
-        {logState.value === 'ready' && logLines.value.length === 0 ? (
-          <p class="text-sm opacity-70">这次运行没有留下日志。</p>
-        ) : null}
+        <RunLogHeader
+          who={logWho}
+          state={logState}
+          error={logError}
+          count={() => logLines.value.length}
+          hasMore={logHasMore}
+          loadingMore={logLoadingMore}
+          onLoadEarlier={() => void loadEarlier()}
+        />
         <LogPanel get={() => logLines.value} />
       </Dialog>
 

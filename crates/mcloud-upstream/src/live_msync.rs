@@ -873,7 +873,87 @@ pub fn decode_notice_meta_payload(data: &[u8]) -> Result<Option<Vec<u8>>, MsyncE
     Ok(None)
 }
 
-/// 从一帧推送里取出**第一条**弹幕文本。
+// ─────────────────────────────────────────────────────────────────────────────
+// 弹幕的**消息类型**：哪一条才可能是口令
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `MessageBody.ext`（字段 5，`repeated KeyValue`）里那个键：消息类型。
+pub const EXT_KEY_MSG_TYPE: &str = "msgType";
+
+/// `msgType` 的实拍取值 —— **观测**，不是文档。
+///
+/// # 依据
+///
+/// 2026-09-23 实拍（`mcloud-capture/har/live-room-raw-2026-09-23.json`：两条 WS 连接
+/// id 632 / 1127，服务端共推了 17 条带文本的帧）。**没有**任何上游文档或 H5 源码可对：
+/// 抓包里直播间那三个 JS 产物只有 102 字节的壳，`docs/capture/app-live-ws-samples.txt`
+/// 也只把 `msgType` 当 `ext` 的**例子**列了一次（那一例正好是 `4`）。
+/// 那一批帧（脱敏后）留在 `test/fixtures/live-ws-danmaku-2026-09-23.json`。
+///
+/// | 取值 | 实拍文本 | 判 |
+/// |---|---|---|
+/// | `2` | `加入直播间` | **事件**：入场提示 |
+/// | `4` | `小红花口令：一键9图出圈` | **口令** —— 17 条里唯一真的那一种 |
+/// | `5` | `点赞` | **事件**：点赞 |
+/// | `6` | `中国移动云盘` | **事件**：系统提示（文本**就是主播昵称本身**） |
+/// | `7` | `送了1个火箭` / `送了1个棒棒糖` / `送了1个鲜花` | **事件**：礼物 |
+///
+/// ⚠⚠ `1` / `3` / `0` **一次都没观测到** ⇒ 表里没有它们，判据也**不**把它们当事件
+/// （见 [`is_event_message`]）。这是刻意的，见那里关于"两个方向的代价不对称"的说明。
+pub const MSG_TYPE_JOIN: u64 = 2;
+/// 口令。实拍里 `小红花口令：…` 全是它。
+pub const MSG_TYPE_KOULING: u64 = 4;
+/// 点赞。
+pub const MSG_TYPE_LIKE: u64 = 5;
+/// 系统提示（实拍文本恰是主播昵称 `中国移动云盘`）。
+pub const MSG_TYPE_SYSTEM: u64 = 6;
+/// 礼物（`送了1个…`）。
+pub const MSG_TYPE_GIFT: u64 = 7;
+
+/// 已知**不是口令**的那几个 `msgType`（[`is_event_message`] 的判据表）。
+pub const EVENT_MSG_TYPES: [u64; 4] =
+    [MSG_TYPE_JOIN, MSG_TYPE_LIKE, MSG_TYPE_SYSTEM, MSG_TYPE_GIFT];
+
+/// 这条推送是不是**弹幕流里的事件消息**（入场 / 点赞 / 系统 / 礼物），而不是人发的话。
+///
+/// # 判据只有一条：上游 `ext.msgType` 落在已知的**事件**取值上
+///
+/// ⚠ **不要**换成形状猜测（"中文四个字就算口令"这类）：实拍里事件文本
+/// （`加入直播间` 五个字、`点赞` 两个字、`中国移动云盘` 六个字）与真口令
+/// （`一键9图出圈` 五个字）在**字形上分不开**，只有 `msgType` 分得开。
+///
+/// ⚠ **也不要**按"发信人是不是主播"过滤：口令是**谁都能用**的，而实拍里
+/// `小红花口令：…` 那 4 条的发信人都是普通观众（`cmlive_c_<手机号>` / `wechat10086_…`），
+/// **没有一条**来自主播账号。
+///
+/// # ⚠ 未知取值一律**放行**（返回 `false`）
+///
+/// `None`（这一帧没带 `msgType`）与表外的取值都当作"可能是口令"。
+/// 两个方向的代价**不对称**：
+///
+/// - 严过头 ⇒ 把**真口令**滤掉。口令只在直播那一小时有效，
+///   **没有第二次机会**（这一条写在 `live_kouling.rs` 的模块头）。
+/// - 松一点 ⇒ 多投一条废口令。代价是一次 `200108`，
+///   而实拍证明那一枪**零消耗**（什么都不扣）。
+///
+/// ⇒ 所以这是一张**事件黑名单**，不是"口令白名单"。
+pub fn is_event_message(msg_type: Option<u64>) -> bool {
+    matches!(msg_type, Some(t) if EVENT_MSG_TYPES.contains(&t))
+}
+
+/// 一帧推送解出来的弹幕：**文本** + **上游的消息类型**。
+///
+/// 两样一起返回而不是分两次解：`msgType` 就在同一个 `MessageBody` 里，
+/// 分两次解要扫两遍字节，而且两次解出来的可能**不是同一条**（多 `meta` 的帧上会分叉）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DanmakuFrame {
+    /// `MessageBody.contents[0].text`（空串 = 这一帧没有文本）。
+    pub text: String,
+    /// `MessageBody.ext` 里 `msgType` 的取值（`None` = 这一帧没带这个键）。
+    pub msg_type: Option<u64>,
+}
+
+/// 从一帧推送里取出弹幕文本（**多个 body 拼成一条**），外加它的 `msgType`。
 ///
 /// 这是原实现那套**三级兜底**的等价物（`live-room-kouling.ts` 的 `onMessage`）：
 ///
@@ -891,14 +971,23 @@ pub fn decode_notice_meta_payload(data: &[u8]) -> Result<Option<Vec<u8>>, MsyncE
 /// 这一级的存在本身就是"猜错过一次"的证据。纯协议实现如果只留一条路，等于把
 /// 那次踩坑重新踩一遍。
 ///
-/// 返回 `Ok("")` 表示"这一帧没有文本"（不是错误）：心跳、无 payload 的控制帧
+/// 返回空文本表示"这一帧没有文本"（不是错误）：心跳、无 payload 的控制帧
 /// 都会走到这里，而它们**本来就不该被当成异常**。
-pub fn extract_danmaku_text(command: u8, payload: &[u8]) -> Result<String, MsyncError> {
+///
+/// # ⚠ 一处**已知**缺口：payload 里有多条 `meta` 时只读第一条
+///
+/// `decode_notice_meta_payload` 取的是**第一个** `payload.2`，而实拍里 payload
+/// 可以带**多条** meta（17 条带文本的帧里有 2 条如此：`conn 1127` 的 `msg 8` / `msg 58`），
+/// 那条弹幕在**靠后的** meta 里 ⇒ 这里读不到它（返回空文本）。
+/// TS 那边用 protobufjs 解 singular 字段，取的是**最后一条**，反而读得到。
+/// ⚠ 这**不是**本轮改的那件事（本轮只排除事件消息），所以**没动**它 ——
+/// 见 `test/fixtures/live-ws-danmaku-2026-09-23.json` 的 `$knownGap`。
+pub fn extract_danmaku_frame(command: u8, payload: &[u8]) -> Result<DanmakuFrame, MsyncError> {
     if payload.is_empty() {
-        return Ok(String::new());
+        return Ok(DanmakuFrame::default());
     }
     if command != CMD_SYNC && command != CMD_NOTICE {
-        return Ok(String::new());
+        return Ok(DanmakuFrame::default());
     }
 
     let outer = if command == CMD_SYNC {
@@ -911,29 +1000,97 @@ pub fn extract_danmaku_text(command: u8, payload: &[u8]) -> Result<String, Msync
         // （兜底失败时把外层错误报上去）。按值解构会把 `Vec<u8>` move 走，
         // 那段 `match outer` 就编译不过。
         Ok(Some(inner)) if !inner.is_empty() => {
-            if let Some(text) = first_content_text(inner) {
-                return Ok(text);
+            if let Some(frame) = content_frame(inner) {
+                return Ok(frame);
             }
         }
         _ => {}
     }
 
     // 兜底：把整段 payload 当 MessageBody 再解一次。
-    if let Some(text) = first_content_text(payload) {
-        return Ok(text);
+    if let Some(frame) = content_frame(payload) {
+        return Ok(frame);
     }
     match outer {
         // 外层解不开、兜底也没解出文本 —— 这时才把外层的错误报上去：
         // 它至少比"空文本"多一条线索（前 64 字节 hex 由调用方打）。
         Err(err) => Err(err),
-        Ok(_) => Ok(String::new()),
+        Ok(_) => Ok(DanmakuFrame::default()),
     }
 }
 
-fn first_content_text(data: &[u8]) -> Option<String> {
+/// 只要文本那一半（[`extract_danmaku_frame`] 的旧签名）。
+///
+/// ⚠ 拿它做"这条是不是口令"的判断是**不够的** —— 事件消息也有文本。
+/// 生产路径（`live_ws` 的状态机）用的是 [`extract_danmaku_frame`] +
+/// [`is_event_message`]；这个只留给出入不需要消息类型的地方与既有测试。
+pub fn extract_danmaku_text(command: u8, payload: &[u8]) -> Result<String, MsyncError> {
+    Ok(extract_danmaku_frame(command, payload)?.text)
+}
+
+/// 把 `MessageBody.contents`（repeated）里的文本**拼成一条**，外加 `msgType`。
+///
+/// # ⚠ 为什么不是"只取第一条"
+///
+/// 抓包实拍：**一条弹幕可以有多个 body，文本要拼起来**
+/// （`../mcloud-back/docs/capture/app-live-ws-samples.txt:534-537`：
+/// `{"payload":{"bodies":[{"msg":"小红花口令：…","type":"txt"}]}, …}`
+/// —— 文件里紧跟着那句「一条弹幕可以有**多个** body，要拼起来」）。
+/// 只取第一条的表现是：`小红花口令：` 与 `一键9图出圈` 落在两个 body 上时，
+/// 前半段被丢掉 ⇒ **一条口令都解不出来**，而丢掉的那一侧没有第二次机会。
+///
+/// # 拼接**不加分隔符**
+///
+/// body 是同一条消息被切开的碎片（实拍那个例子里 `小红花口令：` 就是前缀本身），
+/// 加一个空格会把 `小红花口令：` + `一键9图出圈` 拼成 `小红花口令： 一键9图出圈`
+/// —— 那不是实拍见过的形状。首尾相接才是（`:141` 那条整条就是这个结果）。
+fn content_frame(data: &[u8]) -> Option<DanmakuFrame> {
     let body = decode_message_body(data).ok()?;
-    let first = body.contents.first()?;
-    Some(first.text.clone())
+    if body.contents.is_empty() {
+        return None;
+    }
+    let text: String = body.contents.iter().map(|c| c.text.as_str()).collect();
+    Some(DanmakuFrame {
+        text,
+        msg_type: msg_type_of(data),
+    })
+}
+
+/// 从 `MessageBody.ext`（字段 5）里读 `msgType`。
+///
+/// # 为什么单独扫一遍，而不是把它加进 [`MessageBody`]
+///
+/// [`MessageBody`] 是公开结构、还配着 [`encode_message_body`] 的往返断言。
+/// 往里加一个 `ext` 字段意味着编码侧也得跟着写（否则往返就对不上），
+/// 而口令这条链**只需要读一个键**。加字段是改协议层的形状，读一个键不是。
+///
+/// # 判据落在**字段号**上，不落在 `ValueType` 上
+///
+/// `KeyValue` 是 `{key = 1(string), type = 2(ValueType), oneof value {varintValue = 3 …}}`
+/// （`proto.ts` 逐字）。实拍里 `msgType` 的 `type` 是 **`INT(2)`**（入场/点赞/系统/口令）
+/// 或 **`LLINT(4)`**（礼物那一批），值都在**字段 3**。
+/// ⇒ 拿 `type` 当门会让 `LLINT` 那 4 条整批漏掉（表现是"礼物被当成口令"那一类
+/// 反过来的一半：本来该滤掉的没滤掉）。
+fn msg_type_of(data: &[u8]) -> Option<u64> {
+    let fields = scan_proto_fields(data).ok()?;
+    for field in fields {
+        if field.num != 5 || field.wire != WIRE_BYTES {
+            continue;
+        }
+        let mut key: Option<String> = None;
+        let mut value: Option<u64> = None;
+        for kv in scan_proto_fields(field.raw).ok()? {
+            match kv.num {
+                1 if kv.wire == WIRE_BYTES => key = Some(kv.as_str()),
+                3 if kv.wire == WIRE_VARINT => value = Some(kv.varint),
+                _ => {}
+            }
+        }
+        if key.as_deref() == Some(EXT_KEY_MSG_TYPE) {
+            return value;
+        }
+    }
+    None
 }
 
 #[cfg(test)]

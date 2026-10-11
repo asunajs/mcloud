@@ -76,6 +76,14 @@ async fn serve() -> anyhow::Result<()> {
     // 用户口径 2026-10-07：「不自动新建怎么算默认」✓ —— 默认编排 + 默认定时开箱就有 ✓。
     app.handle.seed_defaults().await?;
 
+    // ⚠ 服务端日志**落盘**（2026-10-09 用户口径：「使用本地记录」✓）：
+    // 在这之前它只在内存环里（2000 行封顶、重启即清空 ✗）。挂上目录之后，
+    // 每条 `tracing` 事件都会攒批写进 `data/server-logs/<日期>.jsonl` ✓，
+    // 内存里只留窗口（行数由设置 `serverLogMemLines` 管 ✓），翻页时按需读盘 ✓。
+    // 顺带把两格设置推给它（内存窗口 + 磁盘上限 ✓）。
+    let settings = app.handle.store.settings().await?;
+    mcloud_server::logbuf::init(std::path::Path::new(&data_dir), &settings);
+
     let tasks = app.registry().len();
     tracing::info!(data_dir, tasks, "mcloud 启动");
 

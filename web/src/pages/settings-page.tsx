@@ -67,6 +67,15 @@
  * ⚠ **只渲染当前那一节**（不是"四节都渲染、各用 CSS 藏"✗）：省掉同时挂着的四份控件，
  * 也顺带把「安全节那几张卡不在服务节里」这件事变成**结构性**的 ✓（门禁就钉这条）。
  *
+ * # 2026-10-09：**「存储信息」卡能改容量上限了**
+ *
+ * 用户口径：「日志和历史不要全加入内存，使用本地记录，**让用户设置最大大小**」✓ ——
+ * 后端把运行日志改成按需读盘 + 分页，并加了**五个**上限（`PUT /api/admin/storage` ✓）；
+ * 这一页负责**看得见、改得动**：日志占用写成「占用 / 上限」（`556 KB / 64 MB` ✓）、
+ * 服务端日志那行同理（`1.2 MB / 64 MB（12 个文件）` ✓），
+ * 下面**五个**数字框 + 一个保存键 ✓。⚠ 卡**没有**多加一张（`存储信息` 仍是同一张卡 ✓）——
+ * 那张「八张卡一张没丢」的门禁钉子就是防这个的 ✗。
+ *
  * # 为什么账户安全那块只认"当前口令"而不认身份
  *
  * 会话被盗时这一条拦不住 —— 但那是会话本身的语义：能改口令的会话本来就有全部权限。
@@ -92,6 +101,7 @@ import {
   PANEL_BEHAVIOR_LABEL,
   putPushPanel,
   putSecurity,
+  putStorageLimits,
   restartService,
   type AboutView,
   type PanelBindings,
@@ -99,11 +109,13 @@ import {
   type PushRule,
   type SecurityView,
   type ServiceStatus,
+  type StorageLimits,
   type StorageView,
   type ThrottleMode,
   type VersionInfo,
 } from '../api'
 import { ConfirmDialog, closeDialog, openDialog } from '../ui/dialog'
+import { showError } from '../ui/error-dialog'
 import { pushToast } from '../ui/toast'
 import { credentialFor } from '../ui/password'
 import { StatRow, type StatItem } from '../ui/stat-row'
@@ -156,11 +168,37 @@ const TTL_CHOICES = [
   { hours: 720, label: '30 天' },
 ]
 
-/** 字节数说人话。只到 MB —— 这个量级的目录报到 GB 反而看不出差别。 */
+/**
+ * **五个**存储上限的**范围**（与后端一致 ✓，见 `api.ts::StorageLimits`）。
+ *
+ * ⚠ 前端先卡一道只是为了不白跑一次往返 —— **权威在后端**（它会回一句人话的 400 ✓）。
+ * 两边范围写不一样的表现是"前端说可以、后端拒绝"（或反过来，白等一次请求 ✗）。
+ *
+ * ⚠ 后两格是**服务端日志**（WebUI「日志」页那份 ✓）：`serverLogMemLines` 是**内存**里
+ * 留多少行（它不影响"能不能看到历史"—— 更早的在磁盘上、翻页时按需读 ✓）、
+ * `serverLogTotalMb` 是那个目录的**磁盘**总量 ✓。
+ */
+const LIMIT_RANGE = {
+  historyLimit: [20, 2000],
+  logLimitPerRun: [200, 20000],
+  logTotalMb: [1, 4096],
+  serverLogMemLines: [200, 20000],
+  serverLogTotalMb: [1, 4096],
+} as const
+
+/** 一位小数，**整数就不带小数点**（`64` / `556`，而不是 `64.0` / `556.0`）。 */
+const round1 = (v: number): string => (Number.isInteger(v) ? String(v) : v.toFixed(1))
+
+/**
+ * 字节数说人话。只到 MB —— 这个量级的目录报到 GB 反而看不出差别。
+ *
+ * ⚠ 整数不带 `.0`（见 [`round1`]）：这一块要写成「占用 / 上限」那样的一行
+ * （`556 KB / 64 MB` ✓），两串数并排时那个 `.0` 只是噪音 ✓。
+ */
 const fmtBytes = (n: number): string => {
   if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`
+  if (n < 1024 * 1024) return `${round1(n / 1024)} KB`
+  return `${round1(n / (1024 * 1024))} MB`
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -294,6 +332,25 @@ export const SettingsPage = () => {
   const ttlHours = ref(168)
   const savingPolicy = ref(false)
 
+  /**
+   * 存储上限那**五个**框（2026-10-09 用户口径「日志和历史不要全加入内存，使用本地记录，
+   * 让用户设置最大大小」✓）。
+   *
+   * ⚠ 五格都存**字符串**：数字框"正在输入"的空串不该被 `Number()` 吃成 0 ✗
+   * （空串会变成"0 条"、看着像用户设的，其实他正在改 ✓ —— 与事件推送那几格同款）。
+   *
+   * ⚠ 后两格是**服务端日志**（WebUI「日志」页那份：调度器 / 上游 http / 认证 ✓）——
+   * 与前三格（运行历史 / 运行日志）管的是**两个不同的目录** ✓，别混 ✓。
+   */
+  const limitHistory = ref('')
+  const limitPerRun = ref('')
+  const limitTotalMb = ref('')
+  const limitServerLogMem = ref('')
+  const limitServerLogTotalMb = ref('')
+  const savingLimits = ref(false)
+  /** 保存失败那句（**就近**贴在保存键旁边；同时也会弹一次窗，见 `saveLimits()` ✓）。 */
+  const limitsError = ref('')
+
   // 重启
   const restarting = ref(false)
   const restartWaited = ref(0)
@@ -354,6 +411,10 @@ export const SettingsPage = () => {
       panelError.value = ''
       minLen.value = sec.minPasswordLen
       ttlHours.value = sec.sessionTtlHours
+      // ⚠ 老后端没有 `limits` ⇒ 五个框**留空**（那一块编辑器整个不铺，见 `storageCard()` ✓）——
+      // 拿 `0` 或默认值顶上就是在假装"服务端是这么设的" ✗。
+      applyLimits(st.limits)
+      limitsError.value = ''
       now.value = Date.now()
       state.value = 'ready'
     } catch (e) {
@@ -720,6 +781,142 @@ export const SettingsPage = () => {
     </div>
   )
 
+  /**
+   * 「日志占用」那一行（**运行**日志：`data/logs/` ✓）。
+   *
+   * ⚠ 新后端给了上限 ⇒ 写成 `占用 / 上限`（`556 KB / 64 MB` ✓）—— 只报占用的话，
+   * 用户看不出"还剩多少、该不该调大"，而那是他打开这张卡要回答的问题 ✓。
+   * 老后端没有 `logUsage` ⇒ **只报占用**（退回 `logBytes`）：少报一个数，
+   * 也别编一个上限出来 ✗（编出来的那个数看着像真的，比缺一个数糟得多）。
+   */
+  const logUsageText = (st: StorageView): string => {
+    const u = st.logUsage
+    if (!u) return fmtBytes(st.logBytes)
+    return `${fmtBytes(u.bytes)} / ${fmtBytes(u.maxBytes)}（${u.files} 个文件）`
+  }
+
+  /**
+   * 「服务端日志」那一行（WebUI「日志」页那份：`data/server-logs/` ✓）。
+   *
+   * ⚠ 与 [`logUsageText`] **两个目录、两个上限**，别合并成一行 ✗ ——
+   * 它们各删各的（运行日志按"单次运行的行数"、服务端日志按"最旧的整天文件" ✓）。
+   * ⚠ 老后端没有这一格时**不编数**：`StorageView` 里没有 `serverLogBytes` 可退回
+   * ⇒ 这一行整个不铺（见 JSX ✓）—— 摆一行"服务端日志 ——"只会让人以为占用是 0 ✗。
+   */
+  const serverLogUsageText = (st: StorageView): string => {
+    const u = st.serverLogUsage
+    if (!u) return ''
+    return `${fmtBytes(u.bytes)} / ${fmtBytes(u.maxBytes)}（${u.files} 个文件）`
+  }
+
+  /**
+   * 服务端**有没有**给"服务端日志"那两格上限（`limits.serverLogMemLines` /
+   * `limits.serverLogTotalMb` ✓）。
+   *
+   * ⚠ 为什么需要它：后端那条线**重启才生效** ⇒ "前端已经有这两格、本地那个后端还没有"
+   * 会短暂存在 ✓（`api.ts::StorageLimits` 那两格写成可选就是为这个）。
+   * 那几分钟里**不能**硬铺这两个框：填进去的是字符串 `"undefined"`
+   * （`String(undefined)` ✗），而保存时 `Number('undefined')` 是 `NaN` ⇒ 换来一句 400 ✓
+   * —— 那正是"别摆一个必然失败的按钮"要避免的东西（`ui/error-dialog.ts` 的口径 ✓）。
+   * 老后端下退回**今天这个样子**（三个框 ✓），新后端下五个框 ✓。
+   */
+  const hasServerLogLimits = (): boolean => {
+    const l = storage.value?.limits
+    return typeof l?.serverLogMemLines === 'number' && typeof l?.serverLogTotalMb === 'number'
+  }
+
+  /** 把后端回读的那一份填回**框里**（回填的是**服务端的值**：它可能做过归一化 ✓）。 */
+  const applyLimits = (l: StorageLimits | undefined) => {
+    if (!l) return
+    limitHistory.value = String(l.historyLimit)
+    limitPerRun.value = String(l.logLimitPerRun)
+    limitTotalMb.value = String(l.logTotalMb)
+    // ⚠⚠ 只填**服务端真给了的**那两格（判据同 `hasServerLogLimits` ✓）—— 少了这一道，
+    // 老后端下这两个框会变成 `undefined` 那串字 ✓（理由见上面那段）。
+    if (typeof l.serverLogMemLines === 'number') limitServerLogMem.value = String(l.serverLogMemLines)
+    if (typeof l.serverLogTotalMb === 'number')
+      limitServerLogTotalMb.value = String(l.serverLogTotalMb)
+  }
+
+  /**
+   * 上限的**本地**校验：返回一句人话（哪一格、该在什么范围），没问题就空串。
+   *
+   * ⚠ 空串 / 乱填 / 小数一律拦下：`Number('')` 是 `0`、`Number('abc')` 是 `NaN`，
+   * 直接发出去只会换来后端一句 400 —— 而这里本来就看得出来是哪一格 ✗。
+   * ⚠ 后端的范围才是权威（`api.ts::StorageLimits` ✓），两边**同一组数** ✓。
+   * ⚠ 服务端日志那两格**只在后端给了它们时才查**（否则那两个框根本没铺，
+   * 查它们等于"用户没动过的格子把保存拦下来" ✗ —— 见 `hasServerLogLimits` ✓）。
+   */
+  const limitsProblem = (): string => {
+    const rows: (readonly [string, string, readonly [number, number]])[] = [
+      ['历史保留条数', limitHistory.value, LIMIT_RANGE.historyLimit],
+      ['单次运行日志行数', limitPerRun.value, LIMIT_RANGE.logLimitPerRun],
+      ['日志总量上限', limitTotalMb.value, LIMIT_RANGE.logTotalMb],
+    ]
+    if (hasServerLogLimits()) {
+      rows.push(['服务端日志内存行数', limitServerLogMem.value, LIMIT_RANGE.serverLogMemLines])
+      rows.push(['服务端日志总量上限', limitServerLogTotalMb.value, LIMIT_RANGE.serverLogTotalMb])
+    }
+    for (const [label, raw, [min, max]] of rows) {
+      const n = Number(raw.trim())
+      if (raw.trim() === '' || !Number.isInteger(n) || n < min || n > max) {
+        return `${label}要填 ${min}~${max} 之间的整数（现在填的是「${raw.trim()}」）`
+      }
+    }
+    return ''
+  }
+
+  /**
+   * 保存五个上限。
+   *
+   * ⚠ **五格一起发**（2026-10-09 起后端是"给哪格改哪格、全不给才 400" ✓）——
+   * 只发改过的那一格虽然也能成，但"少发的那格保持服务端旧值"会让
+   * "界面上改了、其实没发出去"这类 bug 躲过去 ✗（五格一起发 = 与整体替换等价 ✓，
+   * 与 `savePolicy()` 同一条口径 ✓）。
+   *
+   * 反馈按仓库规范：失败**弹窗优先 + 就近 inline**（`showError` + 卡里那句 ✓）、
+   * 成功走轻量 toast ✓。这里的失败是"用户当前动作的直接答案"，塞进右上角等于没提示
+   * （见 `ui/error-dialog.ts` 文件头那段分工 ✓）。
+   */
+  const saveLimits = async () => {
+    const bad = limitsProblem()
+    if (bad) {
+      limitsError.value = bad
+      showError('存储上限没保存', bad)
+      return
+    }
+    savingLimits.value = true
+    limitsError.value = ''
+    try {
+      const next = await putStorageLimits({
+        historyLimit: Number(limitHistory.value),
+        logLimitPerRun: Number(limitPerRun.value),
+        logTotalMb: Number(limitTotalMb.value),
+        // ⚠ 服务端日志那两格**只在后端支持时才发**（`hasServerLogLimits` ✓）：
+        // 老后端那边它们是"不认识的字段"，发过去只会被静默丢掉（`StoragePatch` 没有
+        // `deny_unknown_fields` ✓）—— 而那种"看着保存成功、其实没落盘"最费解 ✗。
+        ...(hasServerLogLimits()
+          ? {
+              serverLogMemLines: Number(limitServerLogMem.value),
+              serverLogTotalMb: Number(limitServerLogTotalMb.value),
+            }
+          : {}),
+      })
+      // 用**后端回读的那一份**替换本地读数（它同时带上新的 `logUsage` —— 占用/上限那行
+      // 会立刻跟着变 ✓，用户不用刷新就能看出"上限真的改了" ✓）。
+      storage.value = next
+      applyLimits(next.limits)
+      pushToast('success', '存储上限已保存')
+    } catch (e) {
+      // ⚠ 后端那句人话**原样**显示（它指名了是哪一格 ✗ 别自己翻译）
+      const msg = e instanceof Error ? e.message : '保存失败'
+      limitsError.value = msg
+      showError('存储上限没保存', msg)
+    } finally {
+      savingLimits.value = false
+    }
+  }
+
   const storageCard = () => {
     const st = storage.value
     if (!st) return null
@@ -739,7 +936,14 @@ export const SettingsPage = () => {
 
           <div class="flex flex-col gap-1.5">
             {kv('数据占用', fmtBytes(st.dataBytes))}
-            {kv('日志占用', fmtBytes(st.logBytes))}
+            {kv('日志占用', logUsageText(st))}
+            {/*
+              ⚠ **服务端日志**（WebUI「日志」页那份 ✓）—— 与上面那行「日志占用」
+              （运行日志 `data/logs/` ✓）是**两个目录、两个上限** ✓，所以各占一行。
+              ⚠ 老后端没有这一格 ⇒ **整行不铺**（不编一个占用数出来 ✓，理由见
+              `serverLogUsageText` 上面那段）。
+            */}
+            {st.serverLogUsage ? kv('服务端日志', serverLogUsageText(st)) : null}
           </div>
 
           {/*
@@ -761,6 +965,162 @@ export const SettingsPage = () => {
               </div>
             ))}
           </div>
+
+          {/*
+            ⭐ 日志与历史的**容量上限**（2026-10-09 用户口径「日志和历史不要全加入内存，
+            使用本地记录，**让用户设置最大大小**」＋「大日志做虚拟加载或者分页」✓）。
+            **五个**数字框 + 一个保存键 —— 日志现在按需读盘、分页显示（不再整份进内存 ✓），
+            这五个数决定**磁盘上留多少 / 内存里留多少** ✓。
+
+            ⚠ 前三个是**运行**那一侧（历史条数 / 单次运行的行数 / `data/logs/` 总量 ✓）、
+            后两个是**服务端日志**（`data/server-logs/`：内存窗口行数 + 磁盘总量 ✓）——
+            五个框摆在一起是因为它们是**同一件事**（"留多少"）的五个旋钮 ✓。
+
+            ⚠ 这一卡**只有管理员能改**，而这不需要前端再加一道闸：`GET /api/system/storage`
+            本身就是管理员接口（后端 `require_admin`，安全审计 SEC-18 ✓）——
+            卡能渲染出来 ⇒ 看的人就是管理员 ✓。再造第二套判据（`currentIsAdmin`）
+            只会有"两处判得不一样"的隐患 ✗，与这一页别处（口令策略 / 会话）也是同款 ✓。
+
+            ⚠ `st.limits` 缺席 = **老后端**（这一格是刚加的）⇒ 编辑器整个不铺，
+            只留一句说明：铺出来就是一个必然 400/404 的保存键 ✗
+            （`ui/error-dialog.ts` 的口径：别摆一个必然失败的按钮 ✓）。
+          */}
+          {st.limits ? (
+            <div class="flex flex-col gap-3 border-t border-base-300 pt-3">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <h3 class="text-sm font-medium">日志与历史的容量上限</h3>
+                <button
+                  type="button"
+                  class="btn btn-sm btn-soft min-h-11 md:min-h-0"
+                  disabled={savingLimits.value}
+                  onClick={() => void saveLimits()}
+                >
+                  {savingLimits.value ? '保存中…' : '保存上限'}
+                </button>
+              </div>
+
+              {/*
+                ⚠ 失败那句紧贴**保存键所在的这一行下面**（用户点保存时视线就在这里）；
+                弹窗那一份由 `saveLimits()` 的 `showError()` 给 ✓（规范：弹窗优先 + 就近 inline）。
+              */}
+              {limitsError.value ? (
+                <div class="alert alert-soft alert-error text-sm" role="alert">
+                  <IconAlert class="size-4 shrink-0" />
+                  <span class="break-words">{limitsError.value}</span>
+                </div>
+              ) : null}
+
+              <div class="grid min-w-0 gap-3 md:grid-cols-3">
+                <fieldset class="fieldset min-w-0">
+                  <legend class="fieldset-legend">历史保留条数</legend>
+                  <input
+                    id="storage-history-limit"
+                    class="input w-full min-w-0"
+                    type="number"
+                    min="20"
+                    max="2000"
+                    step="1"
+                    aria-label="历史保留条数"
+                    value={limitHistory.value}
+                    onInput={(e) => (limitHistory.value = (e.target as HTMLInputElement).value)}
+                  />
+                  <p class="text-xs opacity-60">运行记录最多留多少条（20~2000），超了从最旧的丢。</p>
+                </fieldset>
+                <fieldset class="fieldset min-w-0">
+                  <legend class="fieldset-legend">单次运行日志行数</legend>
+                  <input
+                    id="storage-log-per-run"
+                    class="input w-full min-w-0"
+                    type="number"
+                    min="200"
+                    max="20000"
+                    step="1"
+                    aria-label="单次运行日志行数"
+                    value={limitPerRun.value}
+                    onInput={(e) => (limitPerRun.value = (e.target as HTMLInputElement).value)}
+                  />
+                  <p class="text-xs opacity-60">
+                    一次运行最多留多少行（200~20000），也是回看时能往上翻的总量。
+                  </p>
+                </fieldset>
+                <fieldset class="fieldset min-w-0">
+                  <legend class="fieldset-legend">日志总量上限（MB）</legend>
+                  <input
+                    id="storage-log-total-mb"
+                    class="input w-full min-w-0"
+                    type="number"
+                    min="1"
+                    max="4096"
+                    step="1"
+                    aria-label="日志总量上限（MB）"
+                    value={limitTotalMb.value}
+                    onInput={(e) => (limitTotalMb.value = (e.target as HTMLInputElement).value)}
+                  />
+                  <p class="text-xs opacity-60">运行日志目录最多占多少磁盘（1~4096 MB），超了从最旧的丢。</p>
+                </fieldset>
+                {/*
+                  ⚠⚠ 下面两格是**服务端日志**（WebUI「日志」页那份 ✓）——
+                  用户口径 2026-10-09：「日志和历史不要全加入内存，使用本地记录」✓。
+                  ⚠ 两格的说明**必须写清"内存 vs 磁盘"**：内存那一格调小**不会**让用户
+                  看不到历史（更早的在盘上、翻页时按需读 ✓）—— 说反了会让人以为
+                  "调小 = 丢日志" ✗。
+                  ⚠ 两块都挂在 `hasServerLogLimits()` 上（后端还没这两格 ⇒ 不铺 ✓，
+                  理由见那个函数上面那段 ✓）。
+                */}
+                {hasServerLogLimits() ? (
+                  <fieldset class="fieldset min-w-0">
+                    <legend class="fieldset-legend">服务端日志内存行数</legend>
+                    <input
+                      id="storage-server-log-mem-lines"
+                      class="input w-full min-w-0"
+                      type="number"
+                      min="200"
+                      max="20000"
+                      step="1"
+                      aria-label="服务端日志内存行数"
+                      value={limitServerLogMem.value}
+                      onInput={(e) =>
+                        (limitServerLogMem.value = (e.target as HTMLInputElement).value)
+                      }
+                    />
+                    <p class="text-xs opacity-60">
+                      内存里只留最近这些行（200~20000）；更早的按需从磁盘读。
+                    </p>
+                  </fieldset>
+                ) : null}
+                {hasServerLogLimits() ? (
+                  <fieldset class="fieldset min-w-0">
+                    <legend class="fieldset-legend">服务端日志总量上限（MB）</legend>
+                    <input
+                      id="storage-server-log-total-mb"
+                      class="input w-full min-w-0"
+                      type="number"
+                      min="1"
+                      max="4096"
+                      step="1"
+                      aria-label="服务端日志总量上限（MB）"
+                      value={limitServerLogTotalMb.value}
+                      onInput={(e) =>
+                        (limitServerLogTotalMb.value = (e.target as HTMLInputElement).value)
+                      }
+                    />
+                    <p class="text-xs opacity-60">
+                      服务端日志目录最多占多少磁盘（1~4096 MB），超出按最旧的整天文件淘汰。
+                    </p>
+                  </fieldset>
+                ) : null}
+              </div>
+
+              <p class="text-xs leading-5 opacity-60">
+                日志与历史都<strong>按需读盘</strong>（不再整份进内存）：这几个数决定磁盘与内存里留多少，
+                不影响界面上一次显示多少 —— 回看时按页取。
+              </p>
+            </div>
+          ) : (
+            <p class="text-xs opacity-60">
+              这份后端还没有容量设置（升级后这里可以改日志与历史各留多少）。
+            </p>
+          )}
         </div>
       </div>
     )

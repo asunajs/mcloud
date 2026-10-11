@@ -520,3 +520,101 @@ fn false_positive_is_a_deliberate_contract() {
     assert!(extract_kouling("口令是什么").is_empty());
     assert!(extract_kouling("口令是什么？").is_empty());
 }
+
+// ══════════ 实拍前缀形态：TS 那几种形态**之一**（WS 路径走 `extract_kouling`）══════════
+//
+// ⚠ 2026-10-09 用户口径：「**不要只认，ts版有规则**」—— WS 路径**不许**把
+// 「弹幕文本 → 口令」这一步收窄成"只认 `小红花口令：` 前缀"。
+//
+// 曾经有过一个 `extract_prefixed_kouling` 收窄版（连同一个 `KOULING_PREFIX`），
+// 本次回退**已把它删掉**：它在生产代码里一个调用者都没有，而它钉住的
+// 恰恰是用户否掉的那个口径（"抓包没看到 ⇒ 只认前缀"）。
+//
+// 下面这一组把**同一些实拍事实**改钉在真正的抽取器 [`extract_kouling`] 上 ——
+// 用例一条没少，只是换了被测对象。
+
+/// ⭐ 实拍那两条口令（带前缀）⇒ 挑得出来，且**去掉前缀**。
+///
+/// 原文：`../mcloud-back/docs/capture/app-live-ws-samples.txt:141`
+/// （`小红花口令：一键9图出圈`）与 `:605-606`（实跑收到
+/// `一键9图出圈` / `中秋美好存云盘`，与 §3.1 那条逐字对上）。
+#[test]
+fn capture_prefix_codes_are_still_extracted() {
+    assert_eq!(extract_kouling("小红花口令：一键9图出圈"), ["一键9图出圈"]);
+    assert_eq!(
+        extract_kouling("小红花口令：中秋美好存云盘"),
+        ["中秋美好存云盘"]
+    );
+    // 前缀**之后**的部分才是口令 ⇒ 两侧空白 trim 掉
+    assert_eq!(
+        extract_kouling("  小红花口令：  一键9图出圈  "),
+        ["一键9图出圈"]
+    );
+}
+
+/// ⭐ 用户日志里那 5 条事件消息 ⇒ **一条都不进**（口令列表为空）。
+///
+/// ⚠ 它们**不含任何**口令形态 —— 所以"事件不进口令列表"这件事**不靠**
+/// `live_ws` 那道 `msgType` 黑名单，抽取器自己就够（两层都在，见 `live_ws`）。
+#[test]
+fn unprefixed_event_messages_are_dropped() {
+    for text in [
+        "加入直播间",
+        "送了1个火箭",
+        "送了1个棒棒糖",
+        "点赞",
+        "中国移动云盘",
+    ] {
+        assert!(
+            extract_kouling(text).is_empty(),
+            "【{text}】不含口令形态 ⇒ 不许产出任何口令"
+        );
+    }
+    // 观众闲聊同理（实拍里弹幕流是口令与闲聊混着推的）
+    assert!(extract_kouling("大家好").is_empty());
+    assert!(extract_kouling("").is_empty());
+}
+
+/// 前缀后面什么都没有 ⇒ 口令在**下一帧**（跨帧拼接，见 `live_ws` 状态机）。
+#[test]
+fn a_bare_prefix_has_no_code_of_its_own() {
+    assert!(extract_kouling("小红花口令：").is_empty());
+}
+
+/// ⚠ 半角冒号：**TS 认**（`小红花口令[：:]`），本仓照 TS 也认。
+///
+/// 曾经那个收窄版只认全角 —— 那是"拿抓包没观测到"去盖 TS 的规则。
+#[test]
+fn halfwidth_colon_is_accepted_like_ts() {
+    assert_eq!(extract_kouling("小红花口令:一键9图出圈"), ["一键9图出圈"]);
+}
+
+/// ⭐⭐ TS 的另外几种形态**照认** —— 这就是 2026-10-09 回退掉的那个收窄。
+///
+/// 黄金向量 `test/golden/live-room-vectors.json` 的 `msyncInbound` 里那条
+/// NOTICE 帧正是 `口令1:… 口令2:…` 形状（钉在
+/// `live_ws::tests::notice_payload_yields_two_kouling_codes`）。
+#[test]
+fn ts_only_shapes_are_accepted_on_the_ws_path() {
+    assert_eq!(
+        extract_kouling("口令1:MClaw全能小助手 口令2:毕业之旅MClaw相伴"),
+        ["MClaw全能小助手", "毕业之旅MClaw相伴"],
+        "黄金向量那条 NOTICE 帧要解出两条"
+    );
+    assert_eq!(
+        extract_kouling("口令是相伴什么"),
+        ["相伴什么"],
+        "`口令是XXX` 形态照认"
+    );
+    assert_eq!(
+        extract_kouling("复制口令1：\n短漫上新免费看"),
+        ["短漫上新免费看"],
+        "「头在上一行、内容在下一行」照认（跨行，与跨帧拼接是两件事）"
+    );
+}
+
+/// 前缀之后的疑问句仍然被滤掉（与 [`extract_kouling`] 同一套收尾处理）。
+#[test]
+fn capture_prefix_still_drops_questions() {
+    assert!(extract_kouling("小红花口令：什么？").is_empty());
+}

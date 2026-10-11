@@ -63,8 +63,8 @@ use mcloud_core::{Error, Result};
 use mcloud_crypto::Random;
 
 use crate::live_msync::{
-    decode_msync, encode_msync, extract_danmaku_text, live_msync_frame, live_provision_payload,
-    MsyncMessage, CMD_PROVISION, CMD_UNREAD,
+    decode_msync, encode_msync, extract_danmaku_frame, is_event_message, live_msync_frame,
+    live_provision_payload, MsyncMessage, CMD_PROVISION, CMD_UNREAD,
 };
 
 // ══════════════════════════ SockJS 帧前缀 ══════════════════════════
@@ -108,6 +108,12 @@ pub enum FrameKind {
     ProvisionAck,
     /// 解出了文本的 SYNC / NOTICE 帧。
     Danmaku,
+    /// 弹幕流里的**事件消息**（入场 / 点赞 / 系统 / 礼物）—— 有文本，但**不是口令来源**。
+    ///
+    /// ⚠ 它单列一档而不是并进 [`Self::Silent`]：这两种在日志里必须分得开。
+    /// "这一帧什么都没解出来"（协议层没读懂）与"这一帧读懂了、但它是条礼物提示"
+    /// 的排查方向完全不同 —— 前者要去看帧格式，后者要看上游的 `msgType` 表。
+    EventMessage,
     /// 数据帧但解不出文本（心跳类的 SYNC、别的 command）。
     Silent,
     /// 数据帧但 base64 / protobuf 解不开。
@@ -124,6 +130,7 @@ impl FrameKind {
             Self::Closed => "closed",
             Self::ProvisionAck => "provision_ack",
             Self::Danmaku => "danmaku",
+            Self::EventMessage => "event_message",
             Self::Silent => "silent",
             Self::Malformed => "malformed",
         }
@@ -280,29 +287,22 @@ impl FrameActions {
 
 // ══════════════════════════ 跨帧拼接的口令头判据 ══════════════════════════
 
-/// 「这一整条就是口令头」的判据 —— 下一条弹幕整条可能就是口令。
-///
-/// # ⚠ 它放在**本模块**，而口令的抽取在 `live_kouling`
-///
-/// 这两件事的**归属**不同：
-///
-/// - **抽取**（从一条文本里切出口令）是纯字符串处理，属于 `live_kouling`；
-/// - **跨帧拼接**（上一条是口令头 ⇒ 下一条整条就是口令）是**状态机**的一部分：
-///   「上一条」只在帧序列里存在，单看一条文本看不出来。
-///
-/// ⇒ 所以判据留在这里、用**最窄**的形式（只认「口令」这个词），
-/// 而不是去 `live_kouling` 里拽一个更复杂的正则：那会让本模块依赖
-/// 一个不属于它的抽象层次。
-///
-/// 对齐原实现的 `/(?:复制)?口令/.test(danmaku)` 那一半。
-fn is_kouling_head(text: &str) -> bool {
-    text.contains("口令")
-}
+// ⚠ 「整条就是口令头」的判据**不在这里**，用 `live_kouling::is_kouling_head`
+// （严格版：`(?:复制)?口令\d*[：:]` 结尾）。
+//
+// 2026-10-09 改掉的是**原来这里那个宽松版**（`text.contains("口令")`）：
+// 实拍那条完整口令 `小红花口令：一键9图出圈` **含**「口令」二字，于是它会给
+// **下一条**弹幕挂上"整条即口令"的状态 —— 而实拍那 15 条正是口令与
+// 入场/礼物提示**交替**推的，下一条恰好是 `加入直播间` / `送了1个火箭` 时，
+// 整条就被当成口令（用户日志里的「口令：加入直播间」就是这么来的）。
+//
+// 那件事的另一半（"弹幕文本 → 口令"只认前缀）在 `live_kouling`；
+// 两处判据都收紧了，事件消息从**两条路**上都进不来。
 
 /// 这段文本**本身还是个口令头/收尾词**，不能当口令用。
 ///
 /// 对齐原实现的 `!/(?:复制)?口令|无随机/.test(trimmed)`
-/// —— 注意它比 [`is_kouling_head`] 多一个「无随机」。
+/// —— 注意它比 [`crate::live_kouling::is_kouling_head`] 多一个「无随机」。
 fn is_kouling_head_fragment(text: &str) -> bool {
     text.contains("口令") || text.contains("无随机")
 }
@@ -636,8 +636,8 @@ impl KoulingListener {
             return Ok(false);
         }
 
-        let danmaku = match extract_danmaku_text(sync.command, &sync.payload) {
-            Ok(text) => text,
+        let frame = match extract_danmaku_frame(sync.command, &sync.payload) {
+            Ok(frame) => frame,
             Err(_) => {
                 // 解不开**不算**这一帧的失败：还有下一帧。
                 // 但要把它记下来（`Malformed`）—— 只回一个空文本的话，
@@ -646,18 +646,38 @@ impl KoulingListener {
                 return Ok(true);
             }
         };
-        if danmaku.is_empty() {
+        if frame.text.is_empty() {
             // 心跳类的 SYNC、别的 command：正常，没有文本。
             return Ok(false);
         }
 
+        // ── 事件消息：**整条丢掉**，它根本不是口令来源 ──────────────────
+        //
+        // ⚠⚠ 这里**必须**在跨帧拼接**之前**返回，两个理由都是硬的：
+        //
+        // 1. 判据是上游的 `ext.msgType`（实拍：2 入场 / 5 点赞 / 6 系统 / 7 礼物），
+        //    而不是文本形状 —— 实拍里 `加入直播间`（五个字）与真口令
+        //    `一键9图出圈`（五个字）在字形上分不开。
+        // 2. 下面那段跨帧拼接是**唯一**一条"整条文本当口令"的路：
+        //    上一条是口令头（`复制口令1：`）时，**下一条整条**会被当成口令。
+        //    而弹幕流是**混着推**的 —— 头与内容之间随时会插进来一条入场/礼物提示。
+        //    不在这里挡住，`加入直播间` 这种事件就会被当成口令投上去。
+        //    （漏挡的代价：一次 `200108` 口令无效，外加用户看到一串莫名其妙的口令名。）
+        if is_event_message(frame.msg_type) {
+            actions.kind = FrameKind::EventMessage;
+            // ⚠ `danmaku` **留空**：它表示"这一帧解出了弹幕文本"，
+            // 而事件消息不该出现在任何"弹幕"口径里（也顺带说明为什么没进 `codes`）。
+            return Ok(false);
+        }
+
+        let danmaku = frame.text;
         actions.kind = FrameKind::Danmaku;
         actions.danmaku = danmaku.clone();
 
         // ── 跨帧拼接 ────────────────────────────────────────────────
         //
-        // 上一条弹幕整条是「复制口令N：」这样的**头**，下一条整条就是口令本身
-        // —— 口令被服务端切成了两条消息。
+        // 上一条弹幕**整条就是个口令头**（`复制口令1：` / 裸的 `小红花口令：`），
+        // 下一条整条就是口令本身 —— 口令被服务端切成了两条消息。
         if self.pending_head {
             self.pending_head = false;
             let trimmed = danmaku.trim();
@@ -670,14 +690,43 @@ impl KoulingListener {
             }
         }
 
-        // 本条里**显式**抽出来的口令（`口令1:AAA 口令2:BBB` 一次给两条）。
+        // ── 口令：走 `live_kouling` 的**全形态**抽取器 ──────────────────
+        //
+        // ⚠⚠ 这里**刻意**不用"只认前缀「小红花口令：」"的那一版 ——
+        // 本仓**曾**有一个 `live_kouling::extract_prefixed_kouling` 收窄版，
+        // 2026-10-09 按用户口径（「不要只认，ts版有规则」）**已删除**：
+        //
+        // 1. **依据优先级**（用户口径 2026-09-28，写在 `AGENTS.md`）是
+        //    **TS 参考实现 > 真机抓包 > 推断**。TS 的 `extractKouling` 认四种形态
+        //    （`小红花口令：X` / `复制口令N：` / `口令是X` / `1:X 2:Y 无随机`），
+        //    收窄成"只认前缀"是在**抓包没看到**的形态上做减法 —— 而那属于
+        //    "拿推断盖过 TS"。
+        // 2. **黄金向量钉着它**：`test/golden/live-room-vectors.json` 的
+        //    `msyncInbound` 里那条 NOTICE 帧的文本就是
+        //    `口令1:MClaw全能小助手 口令2:毕业之旅MClaw相伴`（实拍形状），
+        //    `live_ws::tests::notice_payload_yields_two_kouling_codes` 期望解出两条。
+        // 3. **代价不对称**：口令只在直播那一小时有效，**漏掉真口令没有第二次机会**；
+        //    多试一条废口令的代价只是一次 `200108`（实拍证明零消耗）。
+        //
+        // ⚠ 事件消息进不来这件事**不靠这一层**（这一层从来就没把事件当口令：
+        // `加入直播间` / `送了1个火箭` 不含任何口令形态，解出来本来就是空）。
+        // 真正漏进来的那条路是**跨帧拼接**（见下），而它现在由上面那道
+        // `is_event_message` 挡住 + 下面那个**严格**的口令头判据一起收口。
         for code in crate::live_kouling::extract_kouling(&danmaku) {
             let added = self.add(&code);
             actions.codes.extend(added);
         }
 
-        // 本条本身是个头 ⇒ 下一条整条可能就是口令。
-        if is_kouling_head(&danmaku) {
+        // 本条**整条**是个口令头 ⇒ 下一条整条可能就是口令。
+        //
+        // ⚠ 判据必须是**严格**的"整条只是个头"（以冒号结尾），
+        // 不能是"含口令二字"：实拍里那条完整口令 `小红花口令：一键9图出圈`
+        // **也含**「口令」，用宽松判据会给它的**下一条**弹幕挂上拼接状态
+        // —— 而弹幕流是**混着推**的（实拍那 15 条就是口令与入场/礼物交替），
+        // 下一条正好是 `加入直播间` / `送了1个火箭` 时，整条会被当成口令，
+        // 于是日志里出现「口令：加入直播间」（上游回一次 `200108`）。
+        // 判据取自 `live_kouling`（那边是 `(?:复制)?口令\d*[：:]$`）。
+        if crate::live_kouling::is_kouling_head(&danmaku) {
             self.pending_head = true;
         }
 

@@ -1,0 +1,69 @@
+# mcloud —— 一份能直接 `docker compose up -d` 的编排（Linux）。
+#
+# ⚠ 它是**给人抄的**：每个非默认取值旁边都写了为什么，别当模板无脑套。
+# 完整的说明、反代示例、备份与升级、以及"哪些还没验过"都在 `docs/docker.md`。
+#
+# 三条命令：
+#   docker compose up -d --build     # 首次：构建镜像 + 起服务
+#   docker compose logs -f mcloud    # 看日志（等价于 docker logs -f mcloud）
+#   docker compose down              # 停（数据留在命名卷里，不会丢）
+name: mcloud
+
+services:
+  mcloud:
+    # `build: .` + `image:` 一起给：本地构建出来的那份会**打上这个名字**，
+    # 于是 `docker compose up -d --build`（自己编）与 `docker run mcloud:local`（用现成的）
+    # 说的是同一个镜像 ✓。想用 CI 出的那份就把 `build` 注掉、`image` 改成
+    # `ghcr.io/asunajs/mcloud:latest`（见 docs/docker.md §10）。
+    build:
+      context: .
+    image: mcloud:local
+    container_name: mcloud
+    restart: unless-stopped
+
+    # ⚠ 这里**故意不写 `platform:`**：不写 ⇒ 用宿主机的架构（arm64 机器上就是 arm64、
+    #    x86 上就是 amd64），而 Dockerfile 是架构无关的 ⇒ 在哪台机器上编就出哪一份 ✓。
+    #    只有"想强行跑另一个架构"时才需要写，例如：
+    #      platform: linux/arm64
+    #    ⚠ 那在 x86 机器上会走 QEMU 模拟 —— 本镜像的 LTO fat + vendored OpenSSL
+    #      在模拟下慢到不可用（见 docs/docker.md §8）。
+    #    用 CI 出的多架构镜像（`ghcr.io/asunajs/mcloud:latest`）时更不用写：一个标签里
+    #    两个架构都有，`docker pull` 按机器自动挑 ✓。
+
+    ports:
+      # ⚠ 左边**故意**绑到宿主机的 127.0.0.1：默认形态是"本机自托管"，
+      #    谁都不该在没想清楚的情况下把一个**登录页**直接摊在网络上 ✗。
+      #    要局域网访问就改成 "3000:3000"，并**先**做两件事（见 docs/docker.md §6）：
+      #      ① 前面挂 HTTPS（反代 / 隧道），② 设 `MCLOUD_COOKIE_SECURE=1`。
+      - "127.0.0.1:3000:3000"
+
+    environment:
+      # 容器里**必须**绑 0.0.0.0，否则端口映射打不进来（容器自己的 loopback 不等于宿主机的）。
+      # 暴露面由上面那行 `ports` 决定 —— 这两条要一起看，别只看这一条。
+      MCLOUD_ADDR: 0.0.0.0:3000
+      MCLOUD_DATA_DIR: /data
+      # 只影响日志日期与时间戳（`chrono::Local`）；定时/编排的时区在数据里，是固定偏移。
+      TZ: Asia/Shanghai
+
+      # ── 下面几条按需打开（都是**服务级**的，不是页面里能勾的）──────────────
+      # 走 HTTPS 反代时打开：会话 cookie 只走安全通道（见 docs/usage.md §2）
+      # MCLOUD_COOKIE_SECURE: "1"
+      # ⚠ 危险开关：放行"推送地址指向本机/内网"。缺省关着是有理由的（盲 SSRF，见
+      # docs/usage.md §2 那一节）—— 只在你**自愿**往内网 webhook 推时才打开。
+      # MCLOUD_ALLOW_LOCAL_PUSH: "1"
+      # 排查上游问题时打开（请求/应答正文会进日志，已脱敏）
+      # RUST_LOG: info,mcloud=trace
+
+    volumes:
+      # 命名卷 = 全部持久化数据（账号 / Cookie / 定时 / 编排 / 日志 / 口令池）。
+      # ⚠ 用**命名卷**而不是 `./data:/data`：镜像里那个用户是固定的 **uid 1000**，
+      #    命名卷的属主会被 compose 对齐到镜像里 `/data` 的属主（= 1000）✓，
+      #    而绑定挂载用的是宿主机目录的属主 —— 不是 1000 的话会以
+      #    `Permission denied` 告终（改法：`mkdir -p ./data && sudo chown -R 1000:1000 ./data`）。
+      - mcloud-data:/data
+
+    # 健康检查不在这儿重复写：镜像里已经有一条（`wget /api/health`，端口从 MCLOUD_ADDR 现取）
+    # ⇒ `docker compose ps` 的 STATUS 会显示 healthy / unhealthy ✓。
+
+volumes:
+  mcloud-data:

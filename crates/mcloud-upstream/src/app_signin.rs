@@ -85,6 +85,26 @@ pub const RECEIVE_TASK_EXPANSION: &str =
 /// 奖品记录（默认页签是「待领取」）。
 pub const PRIZE_RECORD: &str = "https://m.mcloud.139.com/ycloud/signin/public/record";
 
+/// App 端"登录回调"那一发（玩法 **1017** 的 `interfacecallback` 步骤）。
+///
+/// # 出处（H5 页面自己的 JS，逐字读的）
+///
+/// `https://img.mcloud.139.com/portal/mobilecloud/public/js/newsignin.75080fd5.js`
+/// （2026-10-10 取回）：
+///
+/// ```js
+/// re = Object(r["ref"])(Da["a"].getHashQueryString("taskToken") || "")
+/// /* … */
+/// re.value && Ke()
+/// function Ke(){ Qe(I["a"].signInCallback, {taskToken: re.value}) }
+/// signInCallback: function(e){ return c["a"].post("/ycloud/signin/mobileApp/signInCallback",
+///     JSON.stringify(e), {headers:{showLoading:!0,"Content-Type":"application/json;charset=UTF-8"}}) }
+/// ```
+///
+/// ⇒ 页面是**带着 `taskToken` 进来**（hash query 那一格）才会回调 ✓。
+pub const SIGN_IN_CALLBACK: &str =
+    "https://m.mcloud.139.com/ycloud/signin/mobileApp/signInCallback";
+
 /// 豆的收支流水（审计线）。
 pub const CLOUD_RECORD_V2: &str = "https://m.mcloud.139.com/ycloud/signin/public/cloudRecordV2";
 
@@ -424,6 +444,30 @@ pub fn cloud_record_v2_request(
 /// 兑换那一族（`crate::exchange`）用的是**同一套 H5 头**（同一个 `activityid`、
 /// 同一个 `appversion`）。各写一遍的后果是两边各自漂移，而漂移的表现是
 /// "签到能用、兑换回 90001"这种最难查的组合。
+/// `POST /ycloud/signin/mobileApp/signInCallback` —— App 端"登录回调"那一发。
+///
+/// 玩法 **1017**（「登录移动云盘云朵中心」）的 `stepTypeSet` 里那一格
+/// `interfacecallback` 就是它（端点出处见 [`SIGN_IN_CALLBACK`] ✓）。
+///
+/// # ⚠ 2026-10-10 实测：它**不是** 1017 缺的那一格
+///
+/// 拿账号的 SSO 票当 `taskToken` 发一发，上游回
+/// **`code=500 msg=无法获取中国移动任务信息`**（run 308）—— 也就是说这一格要的是
+/// **中国移动那边某条任务自己的 token**，不是我们手里的票 ✗；而 1017 真正缺的那一格
+/// 是**页面初始化上报**（`doTaskPost`，见 `mcloud_tasks::app_task` 的 `Step::PortalEntry` ✓）：
+/// 补上之后 1017 当趟 `WAIT → FINISH` ✓。
+///
+/// ⇒ 这一发**今天没有调用方**（留着是因为"端点存在、体长这样、错票会回什么"这三格
+/// 已经是读数 ✓，将来真拿到那一枚 token 时不用重查）。
+pub fn sign_in_callback_request(task_token: &str) -> HttpRequest {
+    let body = serde_json::json!({ "taskToken": task_token });
+    h5(
+        false,
+        HttpRequest::post(SIGN_IN_CALLBACK).json_body(&body),
+        "true",
+    )
+}
+
 pub(crate) fn h5(is_device_id: bool, req: HttpRequest, show_loading: &str) -> HttpRequest {
     let req = req
         .header("Accept", "*/*")

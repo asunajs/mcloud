@@ -116,6 +116,16 @@ pub enum RunEvent {
         step: u32,
         total: u32,
         label: String,
+        /// 上报时刻（毫秒）。
+        ///
+        /// ⚠ 2026-10-09 才加的这一格：**落盘的日志行要用它**（回看时"这一步什么时候
+        /// 做的"正是要看的东西 ✓）。以前只有 `Log` 带时刻，而进度行落盘时只能拿
+        /// "落盘那一刻"的钟 ✗ —— 攒批是 2 秒一次，偏差最多 2 秒 ✓；
+        /// 而"从内存回放"那条路连钟都没有（会写成 0 ✗，界面上时间永远是空的 ✓）。
+        ///
+        /// `default` 是给老前端 / 老测试留的：缺这一格按 0 读 ✓（不是解析失败 ✓）。
+        #[serde(default)]
+        at_ms: i64,
     },
     Finished {
         run_id: RunId,
@@ -225,11 +235,13 @@ impl RunEvent {
                 step,
                 total,
                 label,
+                at_ms,
             } => RunEvent::Progress {
                 run_id: *run_id,
                 step: *step,
                 total: *total,
                 label: redact(label),
+                at_ms: *at_ms,
             },
             RunEvent::Details {
                 run_id,
@@ -863,6 +875,7 @@ mod tests {
                 step: 1,
                 total: 2,
                 label: "password=hunter2".into(),
+                at_ms: 0,
             },
             RunEvent::Details {
                 run_id: RunId::new(1),

@@ -85,12 +85,13 @@ pub async fn list(
     Extension(cur): Extension<CurrentUser>,
 ) -> ApiResult<Vec<RunRecord>> {
     let mut runs = state.handle.store.runs_for(&cur.0, 100).await?;
-    // ⚠ 列表**不带日志** ✗：一次运行最多留 200 行（`RUN_LOG_LIMIT` ✓），
-    // 100 条记录全带上就是几 MB 的响应 ✗ —— 而列表要的是"一眼扫过去" ✓。
-    // 要日志就按 id 取详情（`get_one` ✓，它原样带 ✓）。
+    // ⚠ 列表**不带日志** ✗ —— 100 条记录各带 200 行就不是列表该有的体量了 ✓。
+    // 要日志就按 id 取详情（`get_one` ✓）。
     //
-    // 置空 + `skip_serializing_if` ⇒ 响应里连 `logs` 这个键都不出现 ✓，
-    // 前端也就不必区分"空数组"与"没这个字段" ✓。
+    // ⚠ 2026-10-09 起这一格**本来就空**：存储层不再内联日志（见
+    // `RunRecord::logs` 的文档 ✓）⇒ 这个循环是**兜底**（万一将来有人在记录里
+    // 塞了日志，列表这一侧也不该把它带出去 ✓）。置空 + `skip_serializing_if`
+    // ⇒ 响应里连 `logs` 这个键都不出现 ✓，前端也就不必区分"空数组"与"没这个字段" ✓。
     for r in &mut runs {
         r.logs = Vec::new();
     }
@@ -100,17 +101,64 @@ pub async fn list(
 /// 查询单次运行。
 ///
 /// 不是自己的记录与不存在的记录**回同一个 404** —— 不泄露存在性。
+///
+/// ⚠⚠ 2026-10-09：`logs` 那一格是**现取**的（最近 [`RUN_LOG_LIMIT`] 行 ✓）。
+/// 日志的家是 `data/logs/<id>.json`（按需读盘 ✓，见 `JsonStore::logs_page` ✓），
+/// 不再内联在 `history.json` 里 ✓ —— 用户口径：「日志和历史不要全加入内存，
+/// 使用本地记录」✓。要看更早的走 `/api/runs/{id}/logs`（分页 ✓）。
 pub async fn get_one(
     State(state): State<ServerState>,
     Extension(cur): Extension<CurrentUser>,
     Path(id): Path<u64>,
 ) -> Result<Json<RunRecord>, ApiError> {
     match state.handle.store.run_for(&cur.0, RunId::new(id)).await? {
-        Some(r) => Ok(Json(r)),
+        Some(mut r) => {
+            r.logs = recent_logs(&state, RunId::new(id)).await?;
+            Ok(Json(r))
+        }
         None => Err(ApiError(mcloud_core::Error::NotFound(format!(
             "运行记录不存在：{id}"
         )))),
     }
+}
+
+/// 详情里带的那几行：**最近** [`RUN_LOG_LIMIT`] 行 ✓。
+///
+/// ⚠ 与 `/api/runs/{id}/logs` **同一套判据**（`log_line_of` + `slice_page` ✓）：
+/// 两条路各写一份的话，"详情里带的"与"日志接口给的"会出现不同的行 ✗
+/// （进度行在一边有、在另一边没有 ✓）。
+///
+/// ⚠ 内存优先（它还含尚未落盘的那部分 ✓），没有才读盘 ✓ —— 与 `logs.rs` 同一条口径 ✓。
+pub(crate) async fn recent_logs(
+    state: &ServerState,
+    run_id: RunId,
+) -> Result<Vec<mcloud_core::RunLogLine>, ApiError> {
+    let q = mcloud_core::LogPageQuery {
+        after: None,
+        before: None,
+        limit: mcloud_core::RUN_LOG_LIMIT,
+    };
+    let from_memory: Vec<mcloud_core::LogLine> = state
+        .handle
+        .hub
+        .replay(run_id, Seq::ZERO)
+        .into_iter()
+        .filter_map(|s| mcloud_core::log_line_of(&s.event, s.seq))
+        .collect();
+    let lines = if from_memory.is_empty() {
+        state.handle.store.logs_page(run_id, q).await?.lines
+    } else {
+        mcloud_core::slice_page(&from_memory, &q).lines
+    };
+    Ok(lines
+        .into_iter()
+        .map(|l| mcloud_core::RunLogLine {
+            level: l.level,
+            kind: l.kind,
+            message: l.message,
+            at_ms: l.at_ms,
+        })
+        .collect())
 }
 
 /// 一次运行对某个用户的可见性。

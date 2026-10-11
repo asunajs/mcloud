@@ -43,6 +43,13 @@ pub struct LogsQuery {
     /// 关键词（大小写不敏感 ✓，匹配正文与来源 ✓）。
     #[serde(default)]
     pub q: Option<String>,
+    /// **翻页游标**：给上一页最上面那一行的 `seq` ⇒ 回 `seq < before` 的最后 `limit` 行 ✓
+    /// （= 往上翻 ✓）。不给 ⇒ **最新** `limit` 行 ✓（界面打开时的第一屏 ✓）。
+    ///
+    /// ⚠ 游标是 `seq` 而不是"第几页"：日志一直在追加，页码会漂 ✗；
+    /// 而 `seq` 是**跨重启单调**的（见 `logbuf::ServerLog::seq` ✓）⇒ 翻页不会取错页 ✓。
+    #[serde(default)]
+    pub before: Option<u64>,
     /// `all`（缺省）/ `task` / `ops` ✓。
     ///
     /// ⚠ `ops` 是**管理员专属**的（普通用户拿到 403 ✓）；
@@ -106,5 +113,8 @@ pub async fn list(
         f.accounts = Some(set);
     }
 
-    Ok(Json(logbuf::recent(&f)))
+    // ⚠ 走**分页**那条（`page` ✓）：`before` 为空 = 最新一页 ✓，
+    // 给了就往上翻 ✓ —— 内存环不够时它自己会去磁盘补 ✓
+    // （用户口径 2026-10-09：「大日志做虚拟加载或者分页，避免一次加载太多」✓）。
+    Ok(Json(logbuf::page(&f, q.before)))
 }

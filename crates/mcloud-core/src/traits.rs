@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::account::{Account, AccountId};
 use crate::error::Result;
 use crate::event::RunEvent;
-use crate::log::{AppendOutcome, LogLine, Seq};
+use crate::log::{slice_page, AppendOutcome, LogLine, LogPage, LogPageQuery, LogStats, Seq};
 use crate::pipeline::{Pipeline, PipelineId};
 use crate::run::{RunId, RunRecord};
 use crate::schedule::{Schedule, ScheduleId};
@@ -269,6 +269,28 @@ pub trait LogStore: Send + Sync {
     async fn logs(&self, run_id: RunId, after_seq: Option<Seq>) -> Result<Vec<LogLine>>;
     /// 删除某次运行的日志（运行记录被清理时一并删）。
     async fn clear_logs(&self, run_id: RunId) -> Result<()>;
+
+    /// **分页**取某次运行的日志（用户口径 2026-10-09：
+    /// 「大日志做虚拟加载或者分页，避免一次加载太多」✓）。
+    ///
+    /// # 为什么给默认实现
+    ///
+    /// 本仓有二十来处"假 store"（各任务的测试夹具 ✓）只实现了上面三个方法。
+    /// 让它们全部跟着改 = 为一个纯函数式的切片改动二十个文件 ✗。
+    /// 默认实现**就是**那条判据本身（[`slice_page`] ✓）⇒ "没覆盖"不等于
+    /// "语义不同" ✓ —— 只有 `JsonStore` 需要覆盖它（它要**按需读盘**，
+    /// 而不是先把整个文件读进内存 ✓）。
+    async fn logs_page(&self, run_id: RunId, q: LogPageQuery) -> Result<LogPage> {
+        let all = self.logs(run_id, q.after).await?;
+        Ok(slice_page(&all, &q))
+    }
+
+    /// 日志存储的用量读数（给「存储信息」卡与容量上限用 ✓）。
+    ///
+    /// 默认全 0：假的 store 不落盘，报 0 是**真话** ✓（比编一个数强 ✓）。
+    async fn log_stats(&self) -> Result<LogStats> {
+        Ok(LogStats::default())
+    }
 }
 
 /// 定时任务。

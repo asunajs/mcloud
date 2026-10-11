@@ -9,6 +9,7 @@
 - 交付形态是**一个二进制** `mcloud`：
   - **不带参数** ⇒ 起 WebUI 服务（默认 `http://127.0.0.1:3000`）
   - **带子命令** ⇒ CLI（`tasks` / `run` / `login` / `cron` / `pipeline` / `auth` / `pending`）
+- 也能**跑在容器里**（Linux，`amd64` + `arm64` 都有）：`docker compose up -d --build` ⇒ [`docs/docker.md`](docs/docker.md)
 
 > 当前版本 `3.0.0-rc.4`。现算（别背数）：
 > ```bash
@@ -20,6 +21,7 @@
 | 你想干什么 | 看哪 |
 |---|---|
 | 拿到 Release 包，想跑起来 | [`docs/usage.md`](docs/usage.md) |
+| **想用 Docker / 容器跑**（Linux） | [`docs/docker.md`](docs/docker.md) |
 | 改代码：分层、约定、门禁 | [`docs/conventions.md`](docs/conventions.md) · [`docs/architecture.md`](docs/architecture.md) |
 | 每条业务做到哪一步、证据等级 | [`docs/business-matrix.md`](docs/business-matrix.md) |
 | 单条任务的接口规格与 `path:line` | [`docs/task-inventory.md`](docs/task-inventory.md) |
@@ -117,6 +119,25 @@ MCLOUD_ADDR=127.0.0.1:3000 MCLOUD_DATA_DIR=./data ./target/release/mcloud
 随手指一个未知子命令会打出用法文本并 `exit 2`。
 定时与编排的**创建**不在命令行：用 WebUI（或改 `data/` 下的配置）。
 
+### 4. Docker（Linux，**amd64 + arm64**）
+
+```bash
+docker compose up -d --build     # 构建镜像（十几分钟；在**本机架构**上原生编）+ 起服务
+open http://127.0.0.1:3000       # 首次进「创建管理员」向导
+docker compose logs -f mcloud    # 日志
+```
+
+不想自己编就拉 CI 出的那份（**一个标签含 amd64 + arm64**，`docker pull` 按机器自动挑）：
+
+```bash
+docker pull ghcr.io/asunajs/mcloud:latest
+```
+
+镜像里是**静态 musl 二进制**（不依赖 glibc / libssl）+ `ca-certificates` + `tzdata`，
+数据全在命名卷里（`MCLOUD_DATA_DIR=/data`）。端口默认**只发到宿主机 127.0.0.1** ——
+要局域网/公网访问、挂 HTTPS、备份与升级、故障排查，见 [`docs/docker.md`](docs/docker.md)
+（⚠ 别在 x86 上 `--platform linux/arm64` 编：那要走 QEMU，本镜像慢到不可用 —— 见那份 §8）。
+
 ## 开发
 
 ```bash
@@ -173,6 +194,15 @@ scripts/install-git-hooks.sh        # 装钩子：pre-commit 跑提交档、pre-
 冒烟是**真起服务** + 轮询 `/api/health`，不是跑 `--help`。
 `workflow_dispatch` 只出 artifact、不发 Release（方便先验一遍）。
 
+打 `v*` tag 同时会出 **Docker 镜像**（[`.github/workflows/docker.yml`](.github/workflows/docker.yml)
+⇒ `ghcr.io/asunajs/mcloud`，标签 `3.0.0-rc.4` / `sha-<短提交>`，正式版另打 `latest`）：
+**一个标签 = 一个多架构清单列表（`linux/amd64` + `linux/arm64`）**，`docker pull` 时按机器自动挑。
+做法是**每个架构各跑一台原生 runner**（`ubuntu-latest` / `ubuntu-24.04-arm`）各编一份、
+各自冒烟（并断言 `Architecture` 就是它该编的那个），最后合并清单、再**拉回来冒烟一遍** ——
+**不用 QEMU**（本镜像 `lto="fat"` + vendored OpenSSL 在模拟下慢到不可用）。
+手动触发（`gh workflow run docker.yml`）**只构建 + 起容器冒烟、不推送**（`-f arm64=false` 可只编 amd64）
+—— 开发机上没有 Docker，所以那是镜像**唯一**的自动验证入口（见 [`docs/docker.md`](docs/docker.md) §10 / §13）。
+
 ## 数据与安全
 
 ```
@@ -212,6 +242,8 @@ web/
 scripts/             gates-rust.sh · gates-web.mjs · dev-reload.sh · sign-local.sh · run-local.sh · hooks/
 test/golden/         黄金向量（签名 / 口令哈希 / 认证 / 签到信封 / 直播），对拍是字节级
 docs/                设计、约定、审查、任务状态与台账
+Dockerfile           容器镜像（多阶段；Linux）+ .dockerignore + docker-compose.yml
+                     ⚠ 开发机上没有 Docker ⇒ 改动只能靠 `gh workflow run docker.yml` 验（docs/docker.md §13）
 ```
 
 依赖只能自上而下：`core ← crypto/upstream/store ← engine ← tasks ← app ← server`。

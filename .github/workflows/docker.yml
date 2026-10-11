@@ -1,0 +1,306 @@
+name: Docker 镜像
+
+# 出**多架构容器镜像**（`linux/amd64` + `linux/arm64`），推到 GitHub Container Registry（ghcr.io）。
+#
+# 与另外两个 workflow 的分工：
+#   * `ci.yml`      —— 改错了没有（fmt / clippy / test / MSRV + 前端三条）；跑在 PR 与手动
+#   * `release.yml` —— 出**可分发二进制**（5 个目标的 tar.gz / zip）；跑在 `v*` tag
+#   * 本文件        —— 出**镜像**；跑在 `v*` tag（并推 ghcr）+ 手动（**只构建 + 冒烟，不推**）
+#
+# ── 两个架构怎么来的：**每个架构各跑一台原生 runner**（不用 QEMU）──────────
+#
+# `docker buildx build --platform linux/arm64` 在 x86 机器上要 QEMU 模拟，而本镜像最贵的一步是
+# Rust release 编译（`lto = "fat"` + `codegen-units = 1` + **vendored OpenSSL 要从源码编一遍**）
+# ⇒ 模拟下会慢到不可用 ✗。所以这里**不用 QEMU**：
+#
+#   linux/amd64 → `ubuntu-latest`（x86_64，原生）
+#   linux/arm64 → `ubuntu-24.04-arm`（aarch64，原生）
+#
+# 两台各自 `--load` 起容器**在真机上冒烟**（arm64 那条因此是**真在 arm 上跑起来**的 ✓），
+# tag 上各自按架构名推一份（`<版本>-amd64` / `<版本>-arm64`），最后由 `merge` job 用
+# `docker buildx imagetools create` 合成**一个清单列表** ⇒ 用户 `docker pull` 时按机器自动挑 ✓。
+#
+# ⚠ **arm = arm64（aarch64）**，不含 32 位 armv7：`crates/mcloud-upstream/Cargo.toml` 只给
+#    `x86_64/aarch64-unknown-linux-musl` 开了 vendored OpenSSL，armv7 要另加一条并验一遍。
+#
+# ⚠ 计费（口径以 GitHub 当时的价格为准）：`release.yml` 里有一条 2026-10-02 的注释写着
+#    「私有仓库的 arm runner 要额外计费」，所以 arm64 那条**给了开关**：
+#    手动触发可 `-f arm64=false` 只出 amd64；tag 上默认两个架构都出（要关就删 `prepare` 里
+#    arm 那条矩阵项）。
+#
+# ── 为什么本机验不了、只能靠这个 workflow ────────────────────────────────
+#
+# 开发机（macOS，无 Docker）上**跑不了 `docker build`** ⇒ Dockerfile 的正确性只有两条路验：
+#   ① 手动触发本 workflow（`gh workflow run docker.yml`）—— 它会**真构建 + 真起容器 +
+#      真打 `/api/health`**（两个架构各跑一遍），不推任何东西 ✓；
+#   ② 打 tag 时那条路（构建 + 推 ghcr + 合并清单 + 拉回来再冒烟）。
+# ⇒ 这条 workflow 本身就是那个"验过没有"的装置，不是附赠品 ✓。
+#
+# ── 三条口径 ────────────────────────────────────────────────────────────
+#
+# 1. **只在 tag 上推**。手动触发（含从别的分支）一律 `push: false` ——
+#    免得"点一下手动跑"就往 ghcr 上留一份来源不明的镜像 ✗。
+# 2. **构建要能看见"架构对不对"**：冒烟那一步除了打 `/api/health`，还断言
+#    `docker image inspect` 的 `Architecture` == 该矩阵项期望值 ⇒ 防止"以为在编 arm64、
+#    其实编了 amd64"这种**看起来全绿**的错 ✗。
+# 3. **`cache-to: mode=max` 是有意为之**，代价写在构建那一步的注释里（可一行关掉）；
+#    两个架构的缓存用 `scope` 分开（同一个 scope 会互相覆盖 ✗）。
+#
+# ⚠ 一次构建 ≈ 十几分钟/架构（冷启动）：`npm ci` + 全量 Rust release 编译（含 vendored OpenSSL）
+#    + LTO fat。所以它**不在 push / PR 上跑** —— Actions 分钟数要花钱，与 ci.yml 同一条口径。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      arm64:
+        description: '是否也构建 linux/arm64（arm runner 可能要额外计费；关掉只出 amd64）'
+        type: boolean
+        default: true
+
+# 最小权限：只有真的推镜像时才需要 packages: write（放在 job 上，不摊到顶层）。
+permissions:
+  contents: read
+
+# 同一个 ref 重复触发只保留最后一次（Actions 按分钟计费）
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── 计划：要编哪几个架构（矩阵）────────────────────────────────────────
+  #
+  # 为什么单独一个 job：矩阵要**按输入动态生成**（手动触发可以只要 amd64），
+  # 而 `strategy.matrix` 不能写条件表达式 ⇒ 只能用 `fromJSON(needs.…outputs.matrix)` 这条官方路子 ✓。
+  prepare:
+    name: 计划（架构矩阵）
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      arches: ${{ steps.plan.outputs.arches }}
+    steps:
+      - name: 生成矩阵
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          AMD='{"runner":"ubuntu-latest","platform":"linux/amd64","arch":"amd64"}'
+          ARM='{"runner":"ubuntu-24.04-arm","platform":"linux/arm64","arch":"arm64"}'
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.arm64 }}" != "true" ]]; then
+            echo "matrix={\"include\":[${AMD}]}" >> "$GITHUB_OUTPUT"
+            echo "arches=amd64" >> "$GITHUB_OUTPUT"
+            echo "只要 amd64（手动触发时 arm64=false）"
+          else
+            echo "matrix={\"include\":[${AMD},${ARM}]}" >> "$GITHUB_OUTPUT"
+            echo "arches=amd64 arm64" >> "$GITHUB_OUTPUT"
+            echo "两个架构都编：amd64（ubuntu-latest 原生）+ arm64（ubuntu-24.04-arm 原生）"
+          fi
+
+  # ── 构建：每个架构各一台**原生** runner，各自冒烟 ────────────────────────
+  build:
+    name: 构建 ${{ matrix.arch }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # 一个架构挂了也要看到另一个的结果（跨架构问题常常只挂在一边）
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    # ⚠ ghcr 的写权限**必须**在 job 级给：推镜像的步骤在 job 内部，
+    #    而顶层只给 read（与 ci.yml / release.yml 同一条口径）。
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # buildx：`RUN --mount=type=cache` 要 BuildKit；`--load` / 多平台也要它。
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 计算镜像名 / 标签 / 版本
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"   # ghcr 要求全小写
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            # 手动触发**不推**，版本号只用于镜像标签与 OCI label
+            VERSION="$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
+          fi
+          # ⚠ 这里推/加载的是**按架构分的那一份**；用户看到的最终标签由 merge job 合成清单时打 ✓
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "TAG=${VERSION}-${{ matrix.arch }}" >> "$GITHUB_ENV"
+          else
+            echo "TAG=ci-${{ matrix.arch }}-${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+          fi
+          echo "本次：${IMAGE}:${VERSION}-${{ matrix.arch }}（平台 ${{ matrix.platform }}）"
+
+      - name: 登录 ghcr（仅 tag）
+        if: github.ref_type == 'tag'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建 ${{ matrix.arch }}（tag 时推送本架构那份）
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # ⚠ 这个值**必须**与该 runner 的架构一致：一致 ⇒ 原生编译、不碰 QEMU ✓；
+          #    写成另一个架构 ⇒ buildx 会去装 QEMU 模拟，慢到不可用（而且下面那条架构断言会拦下）
+          platforms: ${{ matrix.platform }}
+          # ⚠ 只有 tag 上才推（见文件头第 1 条）；`load` 是为了下面能在**本机**起容器冒烟
+          push: ${{ github.ref_type == 'tag' }}
+          load: true
+          tags: ${{ env.IMAGE }}:${{ env.TAG }}
+          labels: |
+            org.opencontainers.image.title=mcloud
+            org.opencontainers.image.description=中国移动云盘自动化平台（WebUI + 定时 + 编排）
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.licenses=Apache-2.0
+          # 缓存：本镜像最贵的一步是 Rust release 编译（LTO fat + vendored OpenSSL）
+          # ⇒ 冷编十几分钟、暖编几分钟。
+          # ⚠ `scope` 必须按架构分开：两个架构共用一个 scope 会互相覆盖，等于永远冷编 ✗。
+          # ⚠ `mode=max` 会连**中间层**一起存（含那条 `target/` cache mount 的内容），
+          #    对私有仓库来说这是一笔真实的对象存储开销。介意就把 `cache-to` 那行删掉
+          #    （只留 `cache-from`）—— 代价是每次构建都从头编一遍。
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      # ── 冒烟：真起容器、真打 `/api/health`、**真断言架构** ────────────────
+      #
+      # ⚠ 这一步是"镜像能不能用"的**唯一**自动证据。构建成功 ≠ 跑得起来：
+      #   静态 musl + vendored OpenSSL 这类组合，最容易出问题的地方恰恰是**运行时**
+      #   （缺 ca-certificates ⇒ https 全失败；权限不对 ⇒ 启动即退出）。
+      # ⚠ 不带参数就是起服务（合并后的规则）⇒ 容器默认行为就是我们要冒烟的那件事 ✓。
+      # ⚠ 挂的是**匿名卷**（不指定 `-v`）：数据落在容器自己那儿，冒烟完随容器一起删，
+      #    也不会在 runner 上留一个属主不对的目录（那是绑定挂载最常见的翻车点）。
+      # ⚠ 架构断言放在**起容器之前**：编错架构的话容器会直接 `exec format error` 退出，
+      #    而那个报错长得像"镜像坏了"、不像"编错平台" ✗。
+      - name: 冒烟 ${{ matrix.arch }}（架构断言 + 起容器 + /api/health）
+        shell: bash
+        run: |
+          set -euo pipefail
+          REF="${IMAGE}:${TAG}"
+          ARCH="$(docker image inspect --format '{{.Architecture}}' "$REF")"
+          if [[ "$ARCH" != "${{ matrix.arch }}" ]]; then
+            echo "::error::架构不符：镜像里是 ${ARCH}，期望 ${{ matrix.arch }}（${{ matrix.platform }}）—— 说明这台 runner 没在原生编"
+            exit 1
+          fi
+          echo "架构断言通过：$ARCH ✓（原生编，没用 QEMU）"
+
+          docker run -d --name mcloud-smoke -p 127.0.0.1:39123:3000 "$REF"
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 2 http://127.0.0.1:39123/api/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          # 起不来时把容器日志打出来 —— 否则只剩一句"health 不通"，无从下手
+          if [ "$ok" != 1 ]; then
+            echo "::group::容器日志"
+            docker logs mcloud-smoke || true
+            echo "::endgroup::"
+          fi
+          docker rm -f mcloud-smoke >/dev/null
+          if [ "$ok" != 1 ]; then
+            echo "::error::冒烟失败：${{ matrix.arch }} 镜像起来了但 /api/health 一直不通"
+            exit 1
+          fi
+          echo "冒烟通过（${{ matrix.arch }}）：镜像能起、/api/health 通"
+
+  # ── 合并：把两份按架构分的镜像合成**一个多架构清单列表** ────────────────
+  #
+  # 用户看到的是 `ghcr.io/asunajs/mcloud:3.0.0-rc.4` 一个标签，`docker pull` 时按自己的机器
+  # 自动挑 amd64 / arm64 ✓ —— 这就是"arm/amd 都要"的交付形态。
+  #
+  # ⚠ 只在 tag 上跑：手动触发不推任何东西，没有可合并的源 ✗。
+  # ⚠ `needs: build` 没有 `always()` ⇒ 任何一个架构失败这条就不跑（**要的就是这个**：
+  #    半份清单（只有 amd64）比"没清单"更危险 —— 用户以为拉到了 arm64 ✗）。
+  merge:
+    name: 合并清单（ghcr）
+    needs: [prepare, build]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 合成清单列表并打最终标签
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          VERSION="${GITHUB_REF_NAME#v}"
+          SRC=()
+          for a in ${{ needs.prepare.outputs.arches }}; do
+            SRC+=("${IMAGE}:${VERSION}-${a}")
+          done
+          # 最终标签：版本号 + `sha-<短提交>`；`latest` **只给正式版**
+          # （tag 名里带 `-` 的是 RC/beta ⇒ 不标 latest —— 与 release.yml 的
+          #  `prerelease: contains(github.ref_name, '-')` 同一条判据 ✓）
+          ARGS=(-t "${IMAGE}:${VERSION}" -t "${IMAGE}:sha-${GITHUB_SHA:0:7}")
+          if [[ "${VERSION}" != *-* ]]; then
+            ARGS+=(-t "${IMAGE}:latest")
+          fi
+          echo "源：${SRC[*]}"
+          docker buildx imagetools create "${ARGS[@]}" "${SRC[@]}"
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+          echo "digest=$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "${IMAGE}:${VERSION}")" >> "$GITHUB_OUTPUT"
+
+      # ── 从 ghcr **拉回来**再冒烟一遍 ────────────────────────────────────
+      #
+      # ⚠ 前面那条冒烟验的是"本机 `--load` 出来的那份"，这一条验的是**推上去、清单解析出来**的那份：
+      #    清单合成错了（比如 arm64 那份没进列表）只有真拉一次才看得出来 ✗。
+      - name: 拉回来再冒烟（验清单解析 + 推上去那份真能跑）
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          VERSION="${GITHUB_REF_NAME#v}"
+          docker pull "${IMAGE}:${VERSION}"
+          docker run -d --name mcloud-pulled -p 127.0.0.1:39124:3000 "${IMAGE}:${VERSION}"
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 2 http://127.0.0.1:39124/api/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::group::容器日志"
+            docker logs mcloud-pulled || true
+            echo "::endgroup::"
+          fi
+          docker rm -f mcloud-pulled >/dev/null
+          if [ "$ok" != 1 ]; then
+            echo "::error::从 ghcr 拉回来的镜像起不来（清单或推送环节有问题）"
+            exit 1
+          fi
+          echo "拉回来冒烟通过：清单解析正常、推上去的那份能起、/api/health 通"
+
+      - name: 记录摘要
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Docker 镜像（多架构）"
+            echo
+            echo "- 架构：\`${{ needs.prepare.outputs.arches }}\`"
+            echo "- 标签：\`${GITHUB_REF_NAME#v}\` / \`sha-${GITHUB_SHA:0:7}\`（正式版另有 \`latest\`）"
+            echo "- 清单摘要：\`${{ steps.merge.outputs.digest }}\`"
+            echo
+            echo "- 拉取：\`docker pull ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME#v}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

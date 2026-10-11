@@ -138,6 +138,8 @@ impl TaskContext {
             step,
             total,
             label: label.into(),
+            // ⚠ 时刻要带上（落盘的日志行按它显示 ✓，见 `RunEvent::Progress::at_ms` ✓）
+            at_ms: self.clock.now_ms(),
         });
     }
 

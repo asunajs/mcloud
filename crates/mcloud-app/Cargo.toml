@@ -19,7 +19,11 @@ serde_json.workspace = true
 # 推送地址的安全闸用它解析主机：**必须与 reqwest 同一把尺子**，
 # 否则两套解析的差异就是一条 SSRF 绕过（见 `push::validate_push_url` ✓）。
 url.workspace = true
-tokio.workspace = true
+# ⚠ `net` 是给推送地址闸的第二层用的：`push::SystemResolver` 要
+# `tokio::net::lookup_host`（把 OS 的 `getaddrinfo` 异步化）✓。
+# 之前是靠别的 crate（server / reqwest）把 `net` 传递着打开的 ——
+# 蹭传递特性太脆：哪天那条依赖没了，这里就编不过 ✗ ⇒ 显式声明 ✓。
+tokio = { workspace = true, features = ["net"] }
 tracing.workspace = true
 anyhow.workspace = true
 

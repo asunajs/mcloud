@@ -504,7 +504,73 @@ export interface FileSize {
   bytes: number
 }
 
-/** 存储信息（数据目录 / 日志占用 / 二进制）。 */
+/**
+ * 一个日志目录的**用量与上限**（运行日志 `data/logs/` 与服务端日志 `data/server-logs/`
+ * 共用这个形状 ✓）。
+ *
+ * ⚠ 2026-10-09 新增（用户口径「日志和历史不要全加入内存，使用本地记录，让用户设置最大大小」✓）：
+ * `maxBytes` = 该目录的总量上限（来自用户设的 [`StorageLimits`] 那一格 ✓），
+ * `bytes` = 当前占用 ✓。两个数要**一起**给 —— 只报占用的话，用户看不出"还剩多少"✗，
+ * 而"该不该调大"正是他来这里要回答的问题 ✓。
+ */
+export interface LogUsage {
+  /** 日志目录里有多少个文件。 */
+  files: number
+  /** 当前占用（字节）。 */
+  bytes: number
+  /** 上限（字节）。 */
+  maxBytes: number
+}
+
+/**
+ * 用户可设的**五个**上限 —— 也是 `PUT /api/admin/storage` 的**请求体**。
+ *
+ * ⚠ 前三个是 2026-10-09 加的（运行历史与运行日志 ✓），后两个是同一天补的
+ * **服务端日志**（WebUI「日志」页那份：调度器 / 上游 http / 认证 ✓）——
+ * 用户口径「日志和历史不要全加入内存，使用本地记录，让用户设置最大大小」✓。
+ *
+ * ⚠⚠ 2026-10-09 后端改成**给哪格改哪格**（不是整体替换 ✗）：请求体里出现的格子
+ * 才改，一**格都不给**才回 400 ✓。调用方**五格一起发**最省事 ✓ ——
+ * 界面上那五个框本来就是"当前值"，一起发回去与"整体替换"等价 ✓，
+ * 而"以为改了、其实没改"也不可能发生 ✓。
+ *
+ * 范围（**后端也卡一遍**，前端先卡一道只是为了不白跑一次往返 ✓）：
+ * `historyLimit` 20~2000 / `logLimitPerRun` 200~20000 / `logTotalMb` 1~4096 /
+ * `serverLogMemLines` 200~20000 / `serverLogTotalMb` 1~4096。
+ */
+export interface StorageLimits {
+  /** 运行历史留多少条（超了从最旧的开始丢）。 */
+  historyLimit: number
+  /**
+   * **一次运行**最多留多少行日志。
+   *
+   * ⚠ 它同时是 `GET /api/runs/{id}/logs` 的 `limit` 上限 ✓ ——
+   * 也就是说这个数决定"那次运行的日志总共还剩多少行可翻" ✓（不是"每页多少行"✗）。
+   */
+  logLimitPerRun: number
+  /** 运行日志目录（`data/logs/`）总量上限（MB）。 */
+  logTotalMb: number
+  /**
+   * **服务端日志**在内存里留多少行（200~20000，缺省 2000 ✓）。
+   *
+   * ⚠ 它是**窗口**不是全量：更早的行在磁盘上（`data/server-logs/<日期>.jsonl` ✓），
+   * 「日志」页往上翻时按需读 ✓（所以调小它不会让用户"看不到"历史，只是少一层内存缓存 ✓）。
+   *
+   * ⚠⚠ **可选**只为一件事：这一格是**刚加的**，而后端那条线要重启才生效 ⇒
+   * "前端已经有、本地那个后端还没有"会短暂存在 ✓（`StorageView.logUsage` 那一段写过
+   * 同一条）。那几分钟里这一格缺席 ⇒ 界面**不铺**这两个框（而不是写一个 `undefined` 进
+   * 输入框、再让保存必然 400 ✗，见 `settings-page.tsx::applyLimits` ✓）。
+   */
+  serverLogMemLines?: number
+  /**
+   * 服务端日志的**磁盘**总量上限（MB，1~4096）—— 超出按最旧的**整天文件**淘汰 ✓。
+   *
+   * ⚠ 可选的理由同上（与 `serverLogMemLines` 同一格状态：要么都有、要么都没有 ✓）。
+   */
+  serverLogTotalMb?: number
+}
+
+/** 存储信息（数据目录 / 日志占用 / 二进制 / 容量上限）。 */
 export interface StorageView {
   dataDir: string
   logDir: string
@@ -514,9 +580,45 @@ export interface StorageView {
   /** `data/logs` 递归合计。 */
   logBytes: number
   files: FileSize[]
+  /**
+   * **运行日志**目录的用量与上限（2026-10-09 新增）。
+   *
+   * ⚠ **可选**：这一格是刚加的，而前端改完 `npm run build` + 刷新就生效、
+   * 后端那条线要重启才生效 ⇒ "界面上先有、后端还没有"是常态 ✓。
+   * 写成必填会让**整张存储卡**（乃至这一页 `Promise.all` 的整页取数）当场炸 ✗ ——
+   * 缺这一格时界面退回只报占用（`logBytes` ✓），**不编**一个上限出来 ✓。
+   */
+  logUsage?: LogUsage
+  /**
+   * **服务端日志**（WebUI「日志」页那份）的用量与上限 —— 与 [`StorageView.logUsage`]
+   * 同一形状、同一取舍（可选 ✓，缺了只报占用 ✓）。
+   *
+   * ⚠ 两份别混：`logUsage` 管的是 `data/logs/`（**运行**日志 ✓），
+   * 这一格管的是 `data/server-logs/`（整个进程的日志 ✓）—— 两个目录、两个上限 ✓。
+   */
+  serverLogUsage?: LogUsage
+  /** 同上：老后端没有这一格 ⇒ 那一块编辑器整个不铺（见 `settings-page.tsx::storageCard`）✓。 */
+  limits?: StorageLimits
 }
 
 export const getStorage = () => request<StorageView>('/api/system/storage')
+
+/**
+ * 改存储上限（**管理员**，`PUT /api/admin/storage`）。
+ *
+ * ⚠ 后端是**给哪格改哪格**（2026-10-09 改的；在这之前是"整体替换、少一格 400" ✗）：
+ * 调用方把**当前五格**一起发回来最省事 ✓（少发的那格会保持服务端的旧值，
+ * 于是"界面上改了、其实没发"这类 bug 会以"保存后又被回填回去"的形式现形 ✓）。
+ *
+ * 200 时回的是**与 [`getStorage`] 完全相同形状**的那一份（改完的即时状态 ✓）⇒
+ * 调用方拿它直接替换本地读数即可 ✓（不必再补一次 GET）。
+ *
+ * 400 时 `request()` 抛出的 `Error.message` **就是**后端那句人话
+ * （例如"服务端日志总量上限要在 1~4096 MB 之间"）—— 原样显示，别自己翻译一遍：
+ * 翻译只会把"是哪一格错了"这条线索弄丢 ✗。
+ */
+export const putStorageLimits = (body: StorageLimits) =>
+  request<StorageView>('/api/admin/storage', { method: 'PUT', body: JSON.stringify(body) })
 
 /**
  * 重启服务。
@@ -918,11 +1020,42 @@ export interface ServerLogLine {
    * 那是"环里没有结构化字段"时代的将就 ✓。
    */
   account: string | null
+  /**
+   * **全局单调**序号（2026-10-09 新增）—— 翻页游标 ✓（`?before=<seq>` ✓）。
+   *
+   * ⚠⚠ 它**跨重启单调**（起点是"启动时刻毫秒 << 12"再自增 ✓，见
+   * `crates/mcloud-server/src/logbuf.rs::ServerLog::seq`）—— 游标一旦会重复，
+   * 往上翻页就会取错页、甚至翻不动 ✗。
+   *
+   * ⚠ 它**不是"第几行"**：中间会跳号（进程重启、以及被内存窗口淘汰掉的行 ✓）——
+   * 游标只需要"可比大小"，不需要连续 ✓。所以界面上**别**拿它算行号 ✗。
+   */
+  seq: number
 }
 
-/** 取最近的服务端日志（`level` 的语义是"**不低于**它" ✓）。 */
+/**
+ * 取一页服务端日志。
+ *
+ * `level` 的语义是"**不低于**它" ✓（与后端 `logbuf::rank_of` 同一口径 ✓）。
+ *
+ * # 两条路（2026-10-09 冻结的契约 ✓）
+ *
+ * | 参数 | 给什么 |
+ * |---|---|
+ * | 不给 `before` | **最近** `limit` 行 ✓（打开页面时的第一屏 / 实时轮询 ✓） |
+ * | `before=<seq>` | `seq < before` 的最后 `limit` 行 ✓（**往上翻页** ✓） |
+ *
+ * 两条路都**升序**返回 ✓，且 `level` / `q` / `category` 在两条路上**都生效** ✓
+ * ⇒ 翻历史时要把当前筛选条件一起带上，否则"翻上去的那几页突然不过滤了"✗。
+ *
+ * ⚠ 返回条数 `< limit` ⇒ **到头了**（这是后端给的唯一判据 ✓）——
+ * 别拿"要了 500 就一定有 500"当判据 ✗：后端会把 `limit` 夹到自己的上限，
+ * 而且末尾那一页天然不足 ✓。
+ */
 export const listServerLogs = (params: {
   limit?: number
+  /** 往上翻页的游标：`seq < before` 的最后 `limit` 行 ✓（= 当前最上面那一行的 `seq` ✓）。 */
+  before?: number
   level?: string
   q?: string
   /** `'all'`（缺省）/ `'task'` / `'ops'` —— ⚠ `'ops'` 只有管理员能拿（普通用户 403 ✓）。 */
@@ -930,6 +1063,9 @@ export const listServerLogs = (params: {
 }): Promise<ServerLogLine[]> => {
   const sp = new URLSearchParams()
   if (params.limit) sp.set('limit', String(params.limit))
+  // ⚠ `before` 用 `!= null` 判（不是 `if (params.before)`）：`0` 是**合法**游标，
+  // 而 `if (0)` 会把它悄悄丢掉 ⇒ 那一页变成"最近 limit 行"（整页重复 ✗）。
+  if (params.before != null) sp.set('before', String(params.before))
   if (params.level) sp.set('level', params.level)
   if (params.q) sp.set('q', params.q)
   if (params.category) sp.set('category', params.category)
@@ -1226,20 +1362,49 @@ export const runPipeline = (id: string) =>
 export interface LogLine {
   runId: number
   level: 'debug' | 'info' | 'warn' | 'error'
+  /**
+   * 分类（界面按它上徽章与颜色 ✓）。
+   *
+   * ⚠ 可选是给**老记录**留的：这一格 2026-10-09 才进 `mcloud_core::LogLine`
+   * （此前只有 `RunRecord.logs` 那份内联日志带分类，落盘那份只有级别 ✓）⇒
+   * 缺它就按 `level` 兜底（那只能分出三档，会丢掉"成功/失败"的区别 ✓）。
+   */
+  kind?: LogKind
   message: string
   atMs: number
   seq: number
 }
 
 /**
- * 取某次运行的日志。
+ * 取某次运行的日志（**分页**，2026-10-09 用户口径「大日志做虚拟加载或者分页，
+ * 避免一次加载太多」✓）。
  *
- * `after` 是"**已经看到**的序号"（不是"下一个要取"）——
- * 混淆会静默跳过一条。
+ * 三个游标**互斥**（给两个以上是调用方的错，后端只认一个）：
+ *
+ * | 参数 | 拿到的 |
+ * |---|---|
+ * | 都不给 | **最后** `limit` 行（`limit` 缺省 500 ✓） |
+ * | `before=<seq>` | `seq < before` 的最后 `limit` 行 —— **往上翻页**用 ✓ |
+ * | `after=<seq>` | `seq > after` 的最前 `limit` 行 —— **断线续传**用 ✓ |
+ *
+ * ⚠ `limit` 的**上限是用户设的 [`StorageLimits.logLimitPerRun`]**（后端夹一下 ✓）——
+ * 要多了不会报错，只会少给 ⇒ 调用方**不能**拿"要了 500 就一定有 500"当判据 ✗。
+ * 判"还有没有更早的"只有一条：**返回条数 < `limit`** ✓。
+ *
+ * ⚠ `after` / `before` 的语义都是"**已经看到**的那一行的 `seq`"，不是"下一个要取"——
+ * 混淆会静默跳过（`after`）或重复（`before`）一条 ✓（旧签名那个位置参数就是 `after` ✓，
+ * 现在收进 opts 里，别再留一个半死不活的位置参数 ✗）。
  */
-export const getRunLogs = (runId: number, after?: number) => {
-  const q = after != null ? `?after=${after}` : ''
-  return request<LogLine[]>(`/api/runs/${runId}/logs${q}`)
+export const getRunLogs = (
+  runId: number,
+  opts: { limit?: number; before?: number; after?: number } = {},
+): Promise<LogLine[]> => {
+  const sp = new URLSearchParams()
+  if (opts.limit != null) sp.set('limit', String(opts.limit))
+  if (opts.before != null) sp.set('before', String(opts.before))
+  if (opts.after != null) sp.set('after', String(opts.after))
+  const q = sp.toString()
+  return request<LogLine[]>(`/api/runs/${runId}/logs${q ? `?${q}` : ''}`)
 }
 
 /**

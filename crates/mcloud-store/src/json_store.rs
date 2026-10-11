@@ -44,16 +44,30 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use mcloud_core::{
-    legacy_owner, visible_to, Account, AccountId, AppSettings, AppendOutcome, Error, LogLine,
-    Pipeline, PipelineId, Result, RunId, RunRecord, RunStatus, Schedule, ScheduleId, Seq, Session,
-    User, UserId, LOG_LIMIT_PER_RUN,
+    legacy_owner, slice_page, visible_to, Account, AccountId, AppSettings, AppendOutcome, Error,
+    LogLine, LogPage, LogPageQuery, LogStats, Pipeline, PipelineId, Result, RunId, RunRecord,
+    RunStatus, Schedule, ScheduleId, Seq, Session, User, UserId,
 };
 
-/// 运行历史保留条数。
+/// 运行历史保留条数的**默认值**（= `mcloud_core::DEFAULT_HISTORY_LIMIT` ✓）。
 ///
-/// 超出后丢弃最旧的**运行记录及其日志** —— 两者必须一起丢，
-/// 否则日志文件会无限堆积而没人再引用它们。
-pub const HISTORY_LIMIT: usize = 200;
+/// ⚠ 2026-10-09 起真正生效的是**设置里那一格**（`AppSettings::history_limit` ✓，
+/// 用户口径「让用户设置最大大小」）—— 这个常量只是它的默认值与编译期依据 ✓。
+pub const HISTORY_LIMIT: usize = mcloud_core::DEFAULT_HISTORY_LIMIT;
+
+/// 内存里最多缓存**几个 run** 的日志。
+///
+/// # 为什么要有它（用户口径 2026-10-09）
+///
+/// 「日志和历史不要全加入内存，使用本地记录」✓ —— 以前 `load_all` 把
+/// `data/logs/` 下**每个** run 的文件都读进内存（按 200 个文件 × 2000 行算，
+/// 最坏 ≈48 MB ✗，实测现网 139 文件 / 556 KB ✓）。
+///
+/// 现在磁盘是**唯一真源**，内存只放"最近碰过"的那几个 ✓：
+/// 正在跑的那次运行（每 2 秒追加一次 ✓）＋ 用户刚点开看的那几次 ✓。
+/// 4 个够覆盖这两条路 ✓ —— 每个 run 至多 `log_limit_per_run` 行
+/// （默认 2000 ⇒ 4 个 ≈ 1 MB ✓）。
+pub const LOG_CACHE_RUNS: usize = 4;
 
 /// 每个 owner 记住几台"见过的登录设备"。
 ///
@@ -69,7 +83,67 @@ pub const HISTORY_LIMIT: usize = 200;
 /// （与"有史以来第一次"相比，前者才是用户真正想被叫醒的那件事 ✓）。
 pub const LOGIN_DEVICES_PER_OWNER: usize = 20;
 
-/// 内存中的全量数据。
+/// 运行日志的**有界内存缓存**。
+///
+/// # 定位（2026-10-09 用户口径）
+///
+/// 「日志和历史不要全加入内存，使用本地记录」✓ ⇒ **磁盘是唯一真源**
+/// （`data/logs/<id>.json` ✓），这里只是"最近碰过的那几个 run"的加速层 ✓：
+/// 丢缓存不丢数据 —— 下一次访问会从盘上重新读回来 ✓。
+///
+/// 容量见 [`LOG_CACHE_RUNS`] ✓。淘汰按**最近使用**（LRU ✓）：正在跑的那次运行
+/// 每 2 秒追加一次，它永远在最热那一头 ✓；用户点开看过、之后不再碰的，
+/// 会被后来者挤出去 ✓。
+#[derive(Debug, Default)]
+struct LogCache {
+    /// `run_id → 行`（按 `seq` 升序 ✓）。
+    lines: HashMap<RunId, Vec<LogLine>>,
+    /// 最近使用顺序：**尾 = 刚用过**，头 = 最久没用 ✓。
+    lru: VecDeque<RunId>,
+}
+
+impl LogCache {
+    /// 记一次使用（已存在才动顺序 ✓ —— 不凭空建条目 ✗）。
+    fn touch(&mut self, run_id: RunId) {
+        if !self.lines.contains_key(&run_id) {
+            return;
+        }
+        self.lru.retain(|id| *id != run_id);
+        self.lru.push_back(run_id);
+    }
+
+    /// 放进来（并标记为刚用过 ✓），随后按上限淘汰 ✓。
+    fn insert(&mut self, run_id: RunId, lines: Vec<LogLine>) {
+        self.lines.insert(run_id, lines);
+        self.lru.retain(|id| *id != run_id);
+        self.lru.push_back(run_id);
+        while self.lru.len() > LOG_CACHE_RUNS {
+            if let Some(old) = self.lru.pop_front() {
+                self.lines.remove(&old);
+            }
+        }
+    }
+
+    fn get(&mut self, run_id: RunId) -> Option<&Vec<LogLine>> {
+        self.touch(run_id);
+        self.lines.get(&run_id)
+    }
+
+    fn remove(&mut self, run_id: RunId) {
+        self.lines.remove(&run_id);
+        self.lru.retain(|id| *id != run_id);
+    }
+
+    /// 缓存里有几个 run（诊断用 ✓）。
+    fn len(&self) -> usize {
+        self.lines.len()
+    }
+}
+
+/// 内存中的数据。
+///
+/// ⚠ 2026-10-09 起**不再**是"全量"：运行日志只在 [`LogCache`] 里留最近几个 run ✓
+/// （其余按需读盘 ✓）。别处（账号、定时、编排、设置）仍是全量 —— 那些是 KB 量级 ✓。
 ///
 /// 不直接暴露：所有访问都经 [`JsonStore`] 的加锁方法，
 /// 避免有人拿到 `&mut` 绕过持久化。
@@ -78,8 +152,8 @@ struct Db {
     accounts: Vec<Account>,
     /// 运行记录，**最新的在前**。
     runs: VecDeque<RunRecord>,
-    /// 按运行归档的日志。
-    logs: HashMap<RunId, Vec<LogLine>>,
+    /// 运行日志的**内存缓存**（不是全量 ✗ —— 见 [`LogCache`]）。
+    logs: LogCache,
     schedules: Vec<Schedule>,
     pipelines: Vec<Pipeline>,
     /// 账号运行期状态（deviceId、jwtToken 缓存等），按账号 id 存。
@@ -502,12 +576,33 @@ impl JsonStore {
     /// 只在 unix 上做这件事：Windows 没有等价的 mode 位，其 ACL 模型
     /// 由用户目录继承，硬套 `0600` 反而会写出奇怪的东西。
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        self.write_atomic_opts(path, bytes, true)
+    }
+
+    /// 同上，但**不留 `.bak`** —— 给运行日志用（`data/logs/<id>.json` ✓）。
+    ///
+    /// # 为什么日志不留备份
+    ///
+    /// ① 它**可再生**：日志是观测数据，丢了不影响任何业务结果 ✓（而账号/会话丢了
+    /// 就是真丢 ✓）；
+    /// ② 它**每 2 秒被重写一次**（`EventHub::flush` 攒批 ✓）⇒ 留 `.bak` 等于
+    /// 让日志目录**凭空翻倍**、还要占用户设的容量上限 ✗
+    /// （2026-10-09 实测现网：139 个文件里有 30 个是 `.bak` ✓）。
+    fn write_json_log<T: Serialize>(&self, path: &Path, v: &T) -> Result<()> {
+        let bytes = serde_json::to_vec_pretty(v)?;
+        self.write_atomic_opts(path, &bytes, false)
+    }
+
+    /// `backup` = 覆盖前是否留一份 `.bak`（见上面两条的说明 ✓）。
+    fn write_atomic_opts(&self, path: &Path, bytes: &[u8], backup: bool) -> Result<()> {
         // ⚠ 备份只从**非空**的旧文件来。0 字节只可能是上一次半截写入的残骸
         // （见 `read_json`），拿它 `copy` 过去等于把唯一一份好 `.bak` 也毁掉
         // —— 那正是"掉电后连备份一起失效"的原因（2026-10-04 复审 co-1）。
-        if let Ok(old) = std::fs::read(path) {
-            if !old.is_empty() {
-                let _ = std::fs::copy(path, path.with_extension("bak"));
+        if backup {
+            if let Ok(old) = std::fs::read(path) {
+                if !old.is_empty() {
+                    let _ = std::fs::copy(path, path.with_extension("bak"));
+                }
             }
         }
         let tmp = path.with_extension(format!("tmp{}", std::process::id()));
@@ -730,16 +825,13 @@ impl JsonStore {
             self.read_json(&self.path(files::LOGIN_DEVICES))?;
         let sessions: HashMap<String, Session> = self.read_json(&self.path(files::SESSIONS))?;
 
-        // 日志按 run 分文件，按需读取（只读还保留着的那些 run）
-        let mut logs = HashMap::new();
-        for r in &runs {
-            let p = self.log_path(r.run_id);
-            if p.exists() {
-                if let Ok(lines) = self.read_json::<Vec<LogLine>>(&p) {
-                    logs.insert(r.run_id, lines);
-                }
-            }
-        }
+        // ⚠⚠ 日志**一个文件都不读**（2026-10-09 用户口径：「日志和历史不要全加入内存，
+        // 使用本地记录」✓）。磁盘是唯一真源，内存只留最近碰过的那几个 run
+        // （`LogCache` ✓），其余按需读盘（`ensure_logs_loaded` ✓）。
+        //
+        // 以前这里会 `for r in &runs { read_json(log_path) }` —— 200 个文件
+        // 全量进内存，最坏 ≈48 MB ✗（现网实测 139 文件 / 556 KB ✓，量级差异见
+        // `LOG_CACHE_RUNS` 的说明 ✓）。
 
         let mut db = self.write()?;
         db.accounts = accounts;
@@ -758,7 +850,153 @@ impl JsonStore {
         db.push_throttle = push_throttle;
         db.login_devices = login_devices;
         db.sessions = sessions;
-        db.logs = logs;
+        db.logs = LogCache::default();
+        // 老 `history.json` 里那份**内联日志**搬到日志文件里（一次性 ✓）：
+        // 那份形状从这一版起不再落盘 ⇒ 不搬就等于把升级前的回看日志丢了 ✗。
+        let cleared = self.migrate_inline_logs(&mut db.runs)?;
+        // 盘上那份可能是在**没有**容量上限之前写下的（历史遗留）⇒ 读回来先收一次口，
+        // 免得"启动就把几万行读进内存"这件事重演 ✗（下一次写盘自然是限过的形状 ✓）。
+        self.enforce_log_budget(&mut db)?;
+        if cleared > 0 {
+            // ⚠ 搬完**立刻把盘上那份也写小**（2026-10-09 ✓）：不写的话那份内联日志会
+            // **一直躺在盘上**（实测 0.5 MB ✓），而且每次重启都再"迁移"一遍
+            //（幂等，但白做 ✓）—— 用户口径里的"不要全加入内存"看起来就没发生 ✓。
+            let runs: Vec<RunRecord> = db.runs.iter().cloned().collect();
+            drop(db);
+            let _gate = self
+                .write_gate
+                .lock()
+                .map_err(|_| Error::Storage("写锁中毒".into()))?;
+            self.write_json(&self.path(files::RUNS), &runs)?;
+        }
+        Ok(())
+    }
+
+    /// 把老 `history.json` 里**内联**的日志搬进 `data/logs/<id>.json`（一次性迁移 ✓）。
+    ///
+    /// # 为什么必须搬
+    ///
+    /// 2026-10-09 起 `RunRecord.logs` 不再落盘（见它的文档 ✓），写盘前会被清空 ✓
+    /// ⇒ 升级前写下的那份内联日志如果只是"读进来、然后丢掉"，用户的回看日志
+    /// 就**静默消失**了 ✗（正是台账 184 行专门补上的那个功能 ✓）。
+    ///
+    /// # 两条判据
+    ///
+    /// * 日志文件**已经有** ⇒ 什么都不做，只把内联那份清掉 ✓（文件是更全的那一份：
+    ///   2000 行 vs 200 行 ✓，而且带 `seq` ✓）；
+    /// * 日志文件**没有** ⇒ 把内联那些写成一个日志文件 ✓（`seq` 按顺序现编
+    ///   —— 内联那份本来就不带序号 ✓，顺序即真相 ✓）。
+    ///
+    /// 迁移失败（写盘错）**只警告、不拦启动**：这是"尽力保住旧日志"，
+    /// 拦下启动等于"为了 200 行旧日志让整个服务起不来" ✗（那 200 行本来就快被清了 ✓）。
+    ///
+    /// 返回值 = **有多少条记录的内联日志被清掉**（不管有没有真写出文件 ✓）——
+    /// 调用方据此决定"要不要顺手把盘上那份重写小" ✓。
+    fn migrate_inline_logs(&self, runs: &mut VecDeque<RunRecord>) -> Result<usize> {
+        let mut moved = 0usize;
+        let mut cleared = 0usize;
+        for r in runs.iter_mut() {
+            if r.logs.is_empty() {
+                continue;
+            }
+            let path = self.log_path(r.run_id);
+            if !path.exists() {
+                let lines: Vec<LogLine> = r
+                    .logs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| LogLine {
+                        run_id: r.run_id.get(),
+                        level: l.level,
+                        kind: l.kind,
+                        message: l.message.clone(),
+                        at_ms: l.at_ms,
+                        seq: Seq::seen(i as u64 + 1),
+                    })
+                    .collect();
+                if let Err(e) = self.write_json_log(&path, &lines) {
+                    eprintln!(
+                        "警告：运行 {} 的内联日志迁移失败（这 {n} 行会丢）：{e}",
+                        r.run_id,
+                        n = r.logs.len()
+                    );
+                    continue;
+                }
+                moved += 1;
+            }
+            // 内存里也不再留着它 ✓（磁盘那份才是真源 ✓）
+            r.logs = Vec::new();
+            cleared += 1;
+        }
+        if moved > 0 {
+            eprintln!("已把 {moved} 条老记录的运行日志迁移到 data/logs/（它们以前内联在 history.json 里）");
+        }
+        Ok(cleared)
+    }
+
+    /// 日志目录超预算 ⇒ 按**最旧**删文件，直到回到预算内 ✓。
+    ///
+    /// # 判据
+    ///
+    /// 预算 = `AppSettings::log_total_mb`（字节形态 ✓，用户可设 ✓）。
+    /// 排序按 **mtime 升序**（`run_id` 当并列时的次序 —— 编号单调递增 ✓）：
+    /// 删的是"最久没被写过"的那些 ✓，而**正在跑**的那次运行总是最新的
+    /// ⇒ 它排在最后、只有在"预算连一次运行都装不下"时才会被删 ✓
+    /// （那时删掉的也只是文件，内存缓存与后续追加会把它重新写出来 ✓）。
+    ///
+    /// ⚠ `.bak` 一起删 ✓（它照样占磁盘 ✓）；运行记录**不动** ✓
+    /// —— 用户仍然看得到"跑过什么、结果如何"，只是回看日志没了 ✓
+    /// （与老 `strip_logs_beyond_budget` 的语义一致，只是判据从"行数"换成了"字节" ✓）。
+    ///
+    /// ⚠ 目录扫一遍是 100 多个 `stat`（微秒级 ✓），每次追加日志后跑一次可以接受 ✓
+    /// —— 它换来的是"日志真的封得住"这件事 ✓。
+    fn enforce_log_budget(&self, db: &mut Db) -> Result<()> {
+        let max = db.settings.log_total_bytes();
+        let dir = self.dir.join(files::LOG_DIR);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Ok(()); // 目录还没建（第一次启动）⇒ 没有超预算这回事
+        };
+        let mut files: Vec<(std::time::SystemTime, PathBuf, u64)> = Vec::new();
+        let mut total: u64 = 0;
+        for e in entries.flatten() {
+            let Ok(meta) = e.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            let bytes = meta.len();
+            let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            total = total.saturating_add(bytes);
+            files.push((mtime, e.path(), bytes));
+        }
+        if total <= max {
+            return Ok(());
+        }
+        // 最旧的先走 ✓（时间相同则按文件名，保证顺序稳定、不会每拍删不同的 ✓）
+        files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let mut removed = 0usize;
+        for (_, path, bytes) in files {
+            if total <= max {
+                break;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(bytes);
+                removed += 1;
+                // 缓存里也清掉 ✓ —— 否则"盘上删了、内存还留着"，下次读会给出
+                // 一份盘上已经不存在的日志 ✗（用户会以为它没被清 ✓）
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if let Ok(id) = stem.parse::<u64>() {
+                        db.logs.remove(RunId::new(id));
+                    }
+                }
+            }
+        }
+        if removed > 0 {
+            tracing::warn!(
+                removed,
+                limit_bytes = max,
+                "日志目录超出上限，已按最旧的删掉 {removed} 个文件（上限可在设置里调大）"
+            );
+        }
         Ok(())
     }
 
@@ -802,7 +1040,19 @@ impl JsonStore {
             .write_gate
             .lock()
             .map_err(|_| Error::Storage("写锁中毒".into()))?;
-        let runs: Vec<&RunRecord> = db.runs.iter().collect();
+        // ⚠⚠ 写盘前把 `logs` 清空（2026-10-09 用户口径：「日志和历史不要全加入内存，
+        // 使用本地记录」✓）。这一格只是**接口形状**：`GET /api/runs/{id}` 会从日志文件
+        // 现取最近 200 行填进来 ✓（见 `RunRecord::logs` 的文档 ✓）。
+        // 日志的家是 `data/logs/<id>.json` ✓ —— 一份数据只存一处 ✓。
+        let runs: Vec<RunRecord> = db
+            .runs
+            .iter()
+            .map(|r| {
+                let mut c = r.clone();
+                c.logs = Vec::new();
+                c
+            })
+            .collect();
         store.write_json(&store.path(files::RUNS), &runs)
     }
 
@@ -920,17 +1170,62 @@ impl JsonStore {
             .map_err(|_| Error::Storage("写锁中毒".into()))?;
         store.write_json(&store.path(files::SMID), &db.smid)
     }
-
     /// 淘汰超出上限的运行记录，并**连同其日志文件一起删除**。
+    ///
+    /// ⚠ 上限来自**设置**（`AppSettings::history_limit` ✓，用户可设 ✓），
+    /// 默认 = [`HISTORY_LIMIT`] ✓。
     fn evict_runs(db: &mut Db, store: &Self) {
-        while db.runs.len() > HISTORY_LIMIT {
+        let limit = db.settings.history_limit;
+        while db.runs.len() > limit {
             if let Some(old) = db.runs.pop_back() {
-                db.logs.remove(&old.run_id);
+                db.logs.remove(old.run_id);
                 let p = store.log_path(old.run_id);
                 let _ = std::fs::remove_file(&p);
                 let _ = std::fs::remove_file(p.with_extension("bak"));
             }
         }
+    }
+
+    /// 内存里缓存了几个 run 的日志（**诊断与用例用** ✓）。
+    ///
+    /// 它存在的理由很具体：用户口径「日志和历史不要全加入内存」需要一个
+    /// **可断言**的读数 —— 否则"启动时不再全量读日志""缓存有界"这两件事
+    /// 一条用例都钉不住 ✗。
+    #[cfg(test)]
+    pub(crate) fn cached_log_runs(&self) -> usize {
+        self.read().map(|db| db.logs.len()).unwrap_or(0)
+    }
+
+    /// 取某个 run 的日志行（**缓存优先，未命中读盘** ✓）。
+    ///
+    /// # 为什么读盘要在这里做（而不是启动时全读）
+    ///
+    /// 用户口径 2026-10-09：「日志和历史不要全加入内存，使用本地记录」✓。
+    /// 读进来就进 [`LogCache`]（有界 ✓）—— 下一次同一条 run 的访问不必再读盘 ✓，
+    /// 而缓存满了会挤掉最久没用的那个 ✓（磁盘那份还在，随时能再读 ✓）。
+    ///
+    /// # 锁内做文件 IO
+    ///
+    /// 与本文件头第 2 点同一条口径：日志文件在 KB 量级（实测均 119 B/行 ✓，
+    /// 默认上限 2000 行 ≈ 240 KB ✓），一次读盘是微秒级 ✓；
+    /// 而"读盘 + 放进缓存"必须是**一次原子动作**，否则两个请求会各读一遍、
+    /// 后写的覆盖先写的 ✓（代价只是白读一次，不值得为它拆锁 ✗）。
+    ///
+    /// ⚠ 读**坏**的文件（0 字节 / 解析失败）**报错**而不是当空 —— 与
+    /// [`JsonStore::read_json`] 同一条口径：静默当空会让人以为"这次运行没日志" ✗，
+    /// 而真相是"文件坏了，能去 `.bak` 或磁盘上找" ✓。
+    fn ensure_logs_loaded(&self, db: &mut Db, run_id: RunId) -> Result<()> {
+        if db.logs.get(run_id).is_some() {
+            return Ok(());
+        }
+        let path = self.log_path(run_id);
+        let lines: Vec<LogLine> = if path.exists() {
+            self.read_json(&path)?
+        } else {
+            Vec::new()
+        };
+        db.logs.insert(run_id, lines);
+        Ok(())
     }
 }
 
@@ -942,11 +1237,14 @@ impl std::fmt::Debug for JsonStore {
                 db.runs.len(),
                 db.schedules.len(),
                 db.pipelines.len(),
+                // 日志是**缓存**不是全量（见 `LogCache` ✓）—— 排障时"内存里留了几个 run
+                // 的日志"正是要看的那一格 ✓
+                db.logs.len(),
             )
         });
         f.debug_struct("JsonStore")
             .field("dir", &self.dir)
-            .field("accounts/runs/schedules/pipelines", &counts)
+            .field("accounts/runs/schedules/pipelines/logs_cached", &counts)
             .finish()
     }
 }
@@ -1111,6 +1409,14 @@ impl mcloud_core::SmidStore for JsonStore {
 impl mcloud_core::RunStore for JsonStore {
     async fn upsert_run(&self, record: &RunRecord) -> Result<()> {
         let mut db = self.write()?;
+        // ⚠ 进来就把内联日志丢掉（2026-10-09 口径 ✓）：日志的家是
+        // `data/logs/<id>.json` ✓，`RunRecord.logs` 只是**接口形状**、
+        // 由 `GET /api/runs/{id}` 现取现填 ✓。
+        // 在这里清掉 ⇒ **内存与磁盘两边都不背它** ✓
+        //（写盘那侧还有 `persist_runs` 兜一道 ✓，两条路都不漏 ✓）。
+        let mut record = record.clone();
+        record.logs = Vec::new();
+        let record = &record;
         match db.runs.iter_mut().find(|r| r.run_id == record.run_id) {
             Some(slot) => {
                 // 同一次运行的**更新**（起 → 完）走这里，是正常路径。
@@ -1184,31 +1490,57 @@ impl mcloud_core::LogStore for JsonStore {
         }
         let (outcome, snapshot) = {
             let mut db = self.write()?;
-            let bucket = db.logs.entry(run_id).or_default();
-            bucket.extend_from_slice(lines);
-            let mut outcome = AppendOutcome::Appended;
-            if bucket.len() > LOG_LIMIT_PER_RUN {
-                // 丢**最旧**的：排错时最近的日志信息量最大
-                let excess = bucket.len() - LOG_LIMIT_PER_RUN;
-                bucket.drain(..excess);
-                outcome = AppendOutcome::Trimmed;
-            }
-            (outcome, bucket.clone())
+            // ⚠ 缓存里没有就从**盘上**读回来（用户口径 2026-10-09：
+            // 「日志和历史不要全加入内存，使用本地记录」✓）——
+            // 追加是"读改写"，所以必须先拿到已有的那部分 ✓。
+            self.ensure_logs_loaded(&mut db, run_id)?;
+            // 上限来自**设置**（用户可设 ✓），默认 `LOG_LIMIT_PER_RUN` ✓
+            let limit = db.settings.log_limit_per_run;
+            let outcome = {
+                let bucket = db.logs.lines.entry(run_id).or_default();
+                bucket.extend_from_slice(lines);
+                let mut outcome = AppendOutcome::Appended;
+                if bucket.len() > limit {
+                    // 丢**最旧**的：排错时最近的日志信息量最大
+                    let excess = bucket.len() - limit;
+                    bucket.drain(..excess);
+                    outcome = AppendOutcome::Trimmed;
+                }
+                outcome
+            };
+            db.logs.touch(run_id);
+            let snapshot = db.logs.lines.get(&run_id).cloned().unwrap_or_default();
+            (outcome, snapshot)
         };
-        // 日志每次追加都整体重写该 run 的文件。单 run 上限 2000 条，
+        // 日志每次追加都整体重写该 run 的文件。单 run 上限默认 2000 条，
         // 文件在百 KB 级，这个代价可以接受；换成"追加到文件尾"会让
         // JSON 不再是一个完整文档，读的时候还得容错解析半截内容。
-        let _gate = self
-            .write_gate
-            .lock()
-            .map_err(|_| Error::Storage("写锁中毒".into()))?;
-        self.write_json(&self.log_path(run_id), &snapshot)?;
+        //
+        // ⚠ 日志**不留 `.bak`**（见 `write_json_log` ✓）：它是可再生的观测数据，
+        // 覆盖前的副本只会让日志目录凭空翻倍、还得占预算 ✗。
+        {
+            let _gate = self
+                .write_gate
+                .lock()
+                .map_err(|_| Error::Storage("写锁中毒".into()))?;
+            self.write_json_log(&self.log_path(run_id), &snapshot)?;
+        }
+        // 写盘之后才可能超预算 ⇒ 在这里收一次口 ✓
+        // （锁外做：`enforce_log_budget` 要拿写锁 ✓，而上面那段已经放掉了 ✓）
+        {
+            let mut db = self.write()?;
+            self.enforce_log_budget(&mut db)?;
+        }
         Ok(outcome)
     }
 
     async fn logs(&self, run_id: RunId, after_seq: Option<Seq>) -> Result<Vec<LogLine>> {
-        let db = self.read()?;
-        let all = db.logs.get(&run_id);
+        let mut db = self.write()?;
+        // ⚠ 用**写锁**：缓存是"读到就塞进去"的（有界 LRU ✓），
+        // 只读锁改不了缓存 —— 而每次访问都读盘就白做了这层缓存 ✗。
+        // 代价：同一 run 的并发读会串行（微秒级 ✓）。
+        self.ensure_logs_loaded(&mut db, run_id)?;
+        let all = db.logs.lines.get(&run_id);
         Ok(match (all, after_seq) {
             (None, _) => Vec::new(),
             // 断线重连续传：只要比已收到的 seq 更新的
@@ -1217,9 +1549,50 @@ impl mcloud_core::LogStore for JsonStore {
         })
     }
 
+    /// 分页取（用户口径 2026-10-09：「大日志做虚拟加载或者分页，避免一次加载太多」✓）。
+    ///
+    /// ⚠ 切片判据只有一份（`mcloud_core::slice_page` ✓）—— 默认实现（从内存那份拿）
+    /// 与这里（从盘上拿）必须是**同一条**判据，否则"内存命中"与"盘上命中"会给出
+    /// 不同的页 ✗。
+    async fn logs_page(&self, run_id: RunId, q: LogPageQuery) -> Result<LogPage> {
+        let mut db = self.write()?;
+        self.ensure_logs_loaded(&mut db, run_id)?;
+        let all = db.logs.lines.get(&run_id).cloned().unwrap_or_default();
+        Ok(slice_page(&all, &q))
+    }
+
+    /// 日志目录的用量读数（给「存储信息」卡与容量上限用 ✓）。
+    ///
+    /// 直接扫目录（`stat` 一次一个 ✓）—— 不维护"计数器"是**刻意**的：
+    /// 计数器要与"删除/迁移/外部清理"三处同步，漏一处就永远对不上 ✗，
+    /// 而扫 100 多个文件是微秒级 ✓。
+    async fn log_stats(&self) -> Result<LogStats> {
+        let dir = self.dir.join(files::LOG_DIR);
+        let max_bytes = self.read()?.settings.log_total_bytes();
+        let mut stats = LogStats {
+            max_bytes,
+            ..LogStats::default()
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Ok(stats);
+        };
+        for e in entries.flatten() {
+            let Ok(meta) = e.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            stats.bytes = stats.bytes.saturating_add(meta.len());
+            // `.bak` 占磁盘但不算"日志文件"（见 `write_json_log`：日志本来就不留它 ✓）
+            if e.path().extension().is_some_and(|x| x == "json") {
+                stats.files += 1;
+            }
+        }
+        Ok(stats)
+    }
+
     async fn clear_logs(&self, run_id: RunId) -> Result<()> {
         let mut db = self.write()?;
-        db.logs.remove(&run_id);
+        db.logs.remove(run_id);
         let p = self.log_path(run_id);
         let _ = std::fs::remove_file(&p);
         let _ = std::fs::remove_file(p.with_extension("bak"));
@@ -1662,7 +2035,20 @@ impl mcloud_core::UserStore for JsonStore {
         settings.validate().map_err(Error::Config)?;
         let mut db = self.write()?;
         db.settings = *settings;
-        Self::persist_settings(&db, self)
+        // ⚠ 新上限**立刻应用一次**（2026-10-09 用户口径：「让用户设置最大大小」✓）：
+        // 把上限调小之后，不该等到"下一次运行"才看见效果 ✓。
+        // 两件事都是幂等的（没超就是空操作 ✓），所以这里无脑调一次 ✓。
+        let before = db.runs.len();
+        Self::evict_runs(&mut db, self);
+        let runs_shrunk = db.runs.len() != before;
+        self.enforce_log_budget(&mut db)?;
+        Self::persist_settings(&db, self)?;
+        // ⚠ 淘汰了运行记录就**顺手把盘上那份也写小**：只改内存不落盘的话，
+        // 重启后那几条又回来了 ✗（"上限看起来没生效"就是这么来的 ✓）。
+        if runs_shrunk {
+            Self::persist_runs(&db, self)?;
+        }
+        Ok(())
     }
 
     async fn save_session(&self, session: &Session) -> Result<()> {

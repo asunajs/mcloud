@@ -132,6 +132,70 @@ const FAIL_STREAK: u32 = 3;
 /// 的理由（见 mcloud-app::push 模块头）。
 struct HttpPushTransport {
     http: Arc<dyn HttpClient>,
+    /// DNS 解析器（⚠ **可注入**：单测给假解析器，**不打真 DNS** ✗ —— 真打 DNS 的
+    /// 单测会在离网机器上红、还会变慢 ✓）。
+    resolver: Arc<dyn crate::push::PushHostResolver>,
+    /// `MCLOUD_ALLOW_LOCAL_PUSH` 的取值（构造时读一次 ✓）。
+    /// ⚠ 它是**服务级**开关（环境变量），不是"每个用户自己勾"的那一格 ✗。
+    allow_local: bool,
+}
+
+/// 测试进程里用的解析器：**一律解析成公网 IP** ✓。
+///
+/// # 为什么必须有它
+///
+/// 单测里那些域名全是**假名**（`qyapi.test`、`sctapi.ftqq.com` 之类 ✓）⇒ 交给真解析器
+/// 必然解析失败 ⇒ 投递这条路在单测里**永远不成功** ✗。症状是"等投递完成超时"
+/// （`wait_calls` ✓）—— 看起来像**业务坏了**，其实是测试打了真 DNS ✗。
+///
+/// ⚠ 返回**公网**地址（`93.184.216.34`）：SSRF 闸门（`crate::push::validate_push_url_resolved` ✓）
+/// 对私网/回环是**拒**的 ⇒ 用 `127.0.0.1` 的话每条投递都会被闸门拦下 ✗，
+/// 那组"本地地址要拒"的用例在别处（直接传解析器 ✓）已经覆盖了 ✓。
+#[cfg(test)]
+struct TestResolver;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl crate::push::PushHostResolver for TestResolver {
+    async fn resolve(&self, _host: &str, _port: u16) -> Result<Vec<std::net::IpAddr>, String> {
+        Ok(vec![std::net::IpAddr::from([93, 184, 216, 34])])
+    }
+}
+
+impl HttpPushTransport {
+    /// 生产用：真解析器 + 从环境变量读开关。
+    ///
+    /// ⚠ **测试进程**换成 [`TestResolver`]（假名不能真解析 ✓，理由见它的文档 ✓）。
+    fn new(http: Arc<dyn HttpClient>) -> Self {
+        let allow_local = crate::push::allow_local_push_from_env();
+        #[cfg(test)]
+        {
+            Self::with_resolver(http, Arc::new(TestResolver), allow_local)
+        }
+        #[cfg(not(test))]
+        {
+            Self {
+                http,
+                resolver: Arc::new(crate::push::SystemResolver),
+                allow_local,
+            }
+        }
+    }
+
+    /// 测试用：换解析器 / 显式给开关状态（⚠ 不在测试里改环境变量 ——
+    /// `set_var` 是**进程级**的，并行测试会互相踩 ✗）。
+    #[cfg(test)]
+    fn with_resolver(
+        http: Arc<dyn HttpClient>,
+        resolver: Arc<dyn crate::push::PushHostResolver>,
+        allow_local: bool,
+    ) -> Self {
+        Self {
+            http,
+            resolver,
+            allow_local,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -139,12 +203,18 @@ impl PushTransport for HttpPushTransport {
     async fn send(&self, req: PushRequest) -> anyhow::Result<PushResponse> {
         // ⚠⚠ 用户配的地址**先过闸**（2026-10-04 复审 sv-8）：这一枪是**服务进程**发的，
         // 而地址整条来自用户配置 ⇒ 不设闸就是一条盲 SSRF（打本机路由、云元数据、
-        // 内网段）。闸的判据与边界写在 `push::validate_push_url` 上 ✓。
+        // 内网段）。闸的判据与边界写在 `push::validate_push_url_resolved` 上 ✓。
         //
         // ⚠ 放在**这个**位置（唯一的 HTTP 出口）而不是各个渠道的 builder 里：
         // 渠道会多起来（customPost / 企业微信 / TG / serverchan / …），
         // 一处一处加早晚漏一处 ✗。这里是所有渠道的必经之路 ✓。
-        crate::push::validate_push_url(&req.url).map_err(|e| anyhow::anyhow!(e))?;
+        //
+        // ⚠⚠ 2026-10-09 起走的是**第二层**（`validate_push_url_resolved` ✓）：
+        // 字面量那层挡不住 `http://127.0.0.1.nip.io:3998/`（**实测绕过** ✗）——
+        // 名字里嵌的 IP 要**真的解析**才看得见 ✓。放行留痕（warn）在闸里面发 ✓。
+        crate::push::validate_push_url_resolved(&req.url, self.resolver.as_ref(), self.allow_local)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         let http_req = HttpRequest {
             method: req.method.clone(),
@@ -665,9 +735,7 @@ impl Notifier {
         state.set(notice.behavior, next);
         self.save_throttle(store, owner, &state).await;
 
-        let transport = HttpPushTransport {
-            http: Arc::clone(&self.http),
-        };
+        let transport = HttpPushTransport::new(Arc::clone(&self.http));
         // ⚠ 面板告警**不是**"运行日志的转写" ⇒ 正文直接来自 `notice.text` ✓
         // （`onlyError` / `minLevel` 那两个过滤旋钮在这里不参与 ✓ —— 它们管的是
         // "一次运行的日志里挑哪几行" ✓）。但 `send_notify` 需要一个收集器记失败/跳过 ✓，
@@ -726,9 +794,7 @@ impl Notifier {
         title: &str,
         text: &str,
     ) -> Vec<PushLogEntry> {
-        let transport = HttpPushTransport {
-            http: Arc::clone(&self.http),
-        };
+        let transport = HttpPushTransport::new(Arc::clone(&self.http));
         // 临时收集器（不会被读回运行历史 ✓）：它与运行类那条路用的是同一份
         // `send_notify` ✓ —— 试发因此**不可能**与真发送走两套判据 ✓。
         let logs = PushLogCollector::new();
@@ -808,9 +874,7 @@ impl Notifier {
 
         // ④ **每条规则各按自己的 `config` 发一次** ✓（§6 验收第 1、2 条）——
         //    平台与 token 全部来自那条规则自己 ✓，互相之间没有任何共享状态 ✓。
-        let transport = HttpPushTransport {
-            http: Arc::clone(&self.http),
-        };
+        let transport = HttpPushTransport::new(Arc::clone(&self.http));
         let ctx = PushContext::new(&transport, self.clock.as_ref(), &logs);
         for id in &target.rules {
             let Some(rule) = self.rule_anywhere(store, id).await else {
@@ -3272,20 +3336,58 @@ mod transport_gate_tests {
         }
     }
 
+    /// 假解析器：只认下面这张表，**不打真 DNS** ✓
+    /// （真打 DNS 的单测会在离网机器上红、还会变慢 ✗）。
+    struct FakeDns {
+        table: Vec<(&'static str, Vec<&'static str>)>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::push::PushHostResolver for FakeDns {
+        async fn resolve(&self, host: &str, _port: u16) -> Result<Vec<std::net::IpAddr>, String> {
+            match self.table.iter().find(|(h, _)| *h == host) {
+                Some((_, ips)) => Ok(ips
+                    .iter()
+                    .map(|s| s.parse().expect("测试表里写的必须是 IP 字面量"))
+                    .collect()),
+                None => Err(format!("假解析器里没有 {host} 这条记录")),
+            }
+        }
+    }
+
+    /// 表里刻意放一条 `127.0.0.1.nip.io`：名字里嵌着回环 IP，而**字面量那层看不见**
+    /// （它只看见一个普通域名 ✓）—— 这正是本轮要堵的那条（**实测绕过**过旧闸 ✗）。
+    fn fake_dns() -> Arc<dyn crate::push::PushHostResolver> {
+        Arc::new(FakeDns {
+            table: vec![
+                ("push.example.com", vec!["93.184.216.34"]),
+                ("127.0.0.1.nip.io", vec!["127.0.0.1"]),
+                ("nas.lan.test", vec!["10.0.0.5"]),
+            ],
+        })
+    }
+
     /// ⚠⚠ 复审 `sv-8`：内网地址**一个包都不许发**（闸在 HTTP 出口，所有渠道共用）。
     ///
-    /// 红测：把 `send` 里那句 `validate_push_url` 删掉 ⇒ `calls()` 会变成 3，红。
+    /// 红测：把 `send` 里那句 `validate_push_url_resolved` 删掉 ⇒ `calls()` 会变成 5，红。
     #[tokio::test]
     async fn private_targets_never_reach_the_http_layer() {
         let http = Arc::new(CountingHttp::default());
-        let transport = HttpPushTransport {
-            http: Arc::clone(&http) as Arc<dyn HttpClient>,
-        };
+        let transport = HttpPushTransport::with_resolver(
+            Arc::clone(&http) as Arc<dyn HttpClient>,
+            fake_dns(),
+            false,
+        );
 
         for url in [
+            // 字面量那层就挡下的
             "http://127.0.0.1:3000/api/system/restart",
             "http://169.254.169.254/latest/meta-data/",
             "http://192.168.1.10/hook",
+            // ⚠⚠ **解析出来**才看得见的（本轮的核心）：名字里嵌着 IP
+            "http://127.0.0.1.nip.io:3998/",
+            // 解析出来是私网的名字
+            "http://nas.lan.test/hook",
         ] {
             let err = transport
                 .send(req(url))
@@ -3304,5 +3406,38 @@ mod transport_gate_tests {
             .await
             .is_ok());
         assert_eq!(http.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// 服务级开关 `MCLOUD_ALLOW_LOCAL_PUSH` 开着 ⇒ 上面那一组**都放行**（照发 ✓）。
+    ///
+    /// ⚠ 它验的是"**这个开关真的接到了出口上**"（`calls()` 会涨 ✓）——
+    /// 开关的解析规则与"因开关放行"的标记由 `push/tests.rs` 逐条钉 ✓。
+    #[tokio::test]
+    async fn local_push_switch_lets_private_targets_through() {
+        let http = Arc::new(CountingHttp::default());
+        let transport = HttpPushTransport::with_resolver(
+            Arc::clone(&http) as Arc<dyn HttpClient>,
+            fake_dns(),
+            true,
+        );
+
+        for url in [
+            "http://127.0.0.1:3000/api/system/restart",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://192.168.1.10/hook",
+            "http://127.0.0.1.nip.io:3998/",
+            "http://nas.lan.test/hook",
+            "https://push.example.com/hook",
+        ] {
+            assert!(
+                transport.send(req(url)).await.is_ok(),
+                "开关开着时这条本该照发：{url}"
+            );
+        }
+        assert_eq!(
+            http.calls.load(Ordering::SeqCst),
+            6,
+            "开关开着 ⇒ 一条都不该被闸拦下"
+        );
     }
 }

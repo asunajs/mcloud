@@ -112,6 +112,12 @@ pub fn router() -> Router<ServerState> {
         )
         .route("/api/system/about", get(system::about))
         .route("/api/system/storage", get(system::storage))
+        // 容量上限（历史保留条数 / 单次运行日志行数 / 日志总量 MB）——
+        // **只有管理员**（实例级设置 ✓，与 `restart` 同一条口径 ✓）。
+        .route(
+            "/api/admin/storage",
+            axum::routing::put(system::put_storage),
+        )
         .route("/api/system/restart", post(system::restart))
         // 今日AI豆（云朵记录汇总）—— **只读**：按账号读流水，绝不合计。
         // 一个账号读不到进响应的 `failed`，不打整张卡（见 beans.rs 模块头）。

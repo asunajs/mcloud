@@ -2625,6 +2625,113 @@ fn entry_tasks_get_the_entry_step() {
     }
 }
 
+/// ⭐⭐ 409 / 1005：这一族要发**两发上报**（新 `doTaskPost` + 旧 `page/doTask`），
+/// 且各自的 `activityid` 跟着**本条任务的市场名**走 ✓
+///（409 在 `sign_in_3`、1005 在 `newsign_139mail` —— 两条各自冒充自己那一页）。
+///
+/// 加新那发的动因是**真机读数**：只发旧那发时，409 / 1005 在三个账号上连着多趟
+/// 都是 `WAIT → WAIT`（run 280 / 281 / 282）⇒ 旧那发没让上游翻账。
+#[tokio::test]
+async fn entry_tasks_report_the_page_on_both_paths_with_their_own_market() {
+    let items = vec![
+        task_json(409, "month", "从固定入口访问云朵中心", "sign_in_3"),
+        task_json(1005, "time", "从固定入口进入云朵中心", "newsign_139mail"),
+    ];
+    // 每条：新上报 → 旧上报 → 打卡；末尾补一趟事后整表（`Scripted` 用尽后重复最后一条 ✓）。
+    let mut replies = replies_for(&items, vec![]);
+    for _ in 0..2 {
+        replies.push(click_ok());
+        replies.push(click_ok());
+        replies.push(click_ok());
+    }
+    replies.push(page_body(&items));
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    let _ = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
+
+    let reqs = http.requests();
+    let news: Vec<_> = reqs
+        .iter()
+        .filter(|r| r.url == mcloud_upstream::app_task_entry::DO_TASK_POST_URL)
+        .collect();
+    assert_eq!(news.len(), 2, "两条各发一发新上报，实得 {}", news.len());
+    let olds = reqs
+        .iter()
+        .filter(|r| {
+            r.url
+                .starts_with(mcloud_upstream::app_task_entry::ENTRY_DO_TASK_URL)
+        })
+        .count();
+    assert_eq!(olds, 2, "旧那发也照发（上游认过、别删）");
+
+    // 新那一发：方法 / 体 / `isdeviceid` 三格逐条钉住。
+    for r in &news {
+        assert_eq!(r.method, "POST");
+        assert_eq!(header(r, "isdeviceid").as_deref(), Some("true"));
+        assert!(
+            r.body_str()
+                .unwrap()
+                .starts_with(r#"{"client":"app","deviceId":""#),
+            "体两键逐字：{}",
+            r.body_str().unwrap()
+        );
+    }
+    // ⭐ 市场名：新那发的 `activityid` 被压成**本条任务**那一页（传输层去重取最后一条 ✓）。
+    let markets: Vec<Option<String>> = news
+        .iter()
+        .map(|r| {
+            r.headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("activityid"))
+                .map(|(_, v)| v.clone())
+                .next_back()
+        })
+        .collect();
+    assert_eq!(
+        markets,
+        vec![
+            Some("sign_in_3".to_string()),
+            Some("newsign_139mail".to_string())
+        ],
+        "409 冒充签到页、1005 冒充邮箱市场那一页"
+    );
+
+    // ⭐⭐ 打卡**两发**，且 key 各按参考实现那一档（这是 2026-10-10 修的那一格）：
+    // ③-a 的"先打卡"走**默认 key `task`**（`tasks.ts:19-27` 的 `clickTaskWithStep`），
+    // `Step::Entry` 的"补那一发"才用**专用 key**（`runners.ts:107` 的 409 → `task2`）。
+    // 本仓原先两处共用一个 `click_key(id)` ⇒ 409 变成 `task2` 打两发 ✗。
+    let clicks = http.clicks();
+    assert_eq!(clicks.len(), 4, "两条各两发，实得 {clicks:?}");
+    let keys: Vec<&str> = clicks
+        .iter()
+        .map(|u| {
+            if u.contains("key=task2") {
+                "task2"
+            } else {
+                "task"
+            }
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["task", "task2", "task", "task2"],
+        "两条都是「先打卡 task → 补发 task2」（1005 的 task2 是真机实测档 ✓）"
+    );
+    assert!(
+        clicks[0].contains("id=409") && clicks[1].contains("id=409"),
+        "前两发都是 409：{clicks:?}"
+    );
+    assert!(
+        clicks[2].contains("id=1005") && clicks[3].contains("id=1005"),
+        "后两发都是 1005：{clicks:?}"
+    );
+}
+
 // ── 复审 tk-2 / tk-3（2026-10-04）：上传产物的回收不能因为一次失败或取消就漏 ──
 
 /// 让某一发请求在**传输层**失败（`Scripted` 只会回 200，没有失败档）。
@@ -2914,7 +3021,10 @@ async fn a_runner_step_without_a_click_still_gets_a_verdict_line() {
     let mut replies = replies_for(&before, vec![]);
     replies.push(r#"{"success":true,"code":"0000","data":{"token":"SSO"}}"#.to_string()); // 换 SSO
     replies.push(r#"{"var":{"sid":"S1","rmkey":"R1"}}"#.to_string()); // 邮箱登录
-    replies.push(r#"{"code":"S_OK"}"#.to_string()); // 备份那一枪
+                                                                      // 1020 现在是三发（App 实拍）：① 目录 → ② 邮件号 → ③ 转存
+    replies.push(r#"<object><string name="directoryId">DIR1</string></object>"#.to_string());
+    replies.push(r#"<object><string name="mid">MID1</string></object>"#.to_string());
+    replies.push(r#"{"code":"S_OK"}"#.to_string()); // 转存那一枪
     replies.extend(replies_for(&after, vec![]));
 
     let store = Arc::new(FakeStore::new());
@@ -2949,4 +3059,206 @@ async fn a_runner_step_without_a_click_still_gets_a_verdict_line() {
         result.failures
     );
     assert!(http.clicks().is_empty(), "这一档压根不该打卡");
+}
+
+// ── 1017「登录移动云盘云朵中心」（2026-10-10 接上）──────────────────────
+
+/// 与 [`task_json`] 同形，另带 `button.email.link`（1017 的入口页那一格 ✓）。
+fn task_json_with_email_link(id: i64, group: &str, name: &str, market: &str, link: &str) -> String {
+    format!(
+        r#"{{"id":{id},"name":"{name}","groupid":"{group}","state":"WAIT","limitType":"MONTH","enable":1,"currstep":1,"process":0,"marketname":"{market}","button":{{"email":{{"action":"jump","link":"{link}","text":"去完成"}}}}}}"#
+    )
+}
+
+/// 1017 走**入口页**那一档（409 / 1005 照旧走 `Entry` ✓）。
+#[test]
+fn portal_entry_task_gets_its_own_step() {
+    let link =
+        "https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&token=#ssoToken#";
+    let it = mcloud_upstream::app_task_list_v2::TaskV2Item {
+        task_id: Some(1017),
+        name: Some("登录移动云盘云朵中心".into()),
+        market_name: Some("newsign_139mail".into()),
+        button_email_link: Some(link.into()),
+        ..Default::default()
+    };
+    assert_eq!(step_for(&it), Some(Step::PortalEntry));
+    // 那两条**没被顺手改掉** ✓
+    let it409 = mcloud_upstream::app_task_list_v2::TaskV2Item {
+        task_id: Some(409),
+        button_email_link: Some(link.into()),
+        ..Default::default()
+    };
+    assert_eq!(step_for(&it409), Some(Step::Entry), "409 照旧");
+}
+
+/// ⭐⭐ 1017 的四发顺序 + 入口页里的票：**页面初始化上报**（`doTaskPost`）是翻账缺的那一格
+/// （run 306 / 307 / 308 只发"入口页 + 打卡" ⇒ 恒 `WAIT → WAIT` ✗；补上它之后 run 309 当趟
+/// `WAIT → FINISH` ✓）。
+#[tokio::test]
+async fn portal_entry_reports_the_page_then_opens_the_link_then_clicks() {
+    let link = "https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&sourceid=1179&enableShare=1&targetSourceId=001005&token=#ssoToken#";
+    let items = vec![task_json_with_email_link(
+        1017,
+        "month",
+        "登录移动云盘云朵中心",
+        "newsign_139mail",
+        link,
+    )];
+    let mut replies = replies_for(&items, vec![]);
+    replies.push(click_ok()); // ① 新上报（doTaskPost）
+    replies.push(click_ok()); // ② 旧上报（page/doTask）
+    replies.push("<html></html>".to_string()); // ③ 入口页
+    replies.push(click_ok()); // ④ 打卡
+    replies.push(page_body(&items)); // 收尾复查
+
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    let _ = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
+    let reqs = http.requests();
+
+    // ① 两发上报都在（1017 的 `activityid` 跟着本任务的市场名走 ✓）。
+    let news: Vec<_> = reqs
+        .iter()
+        .filter(|r| r.url == mcloud_upstream::app_task_entry::DO_TASK_POST_URL)
+        .collect();
+    assert_eq!(news.len(), 1, "新上报一发");
+    // ⚠ 传输层去重取**最后**一条（头里 `activityid` 会出现两次：基线 `sign_in_3` + 本任务覆盖 ✓）。
+    let market = news[0]
+        .headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("activityid"))
+        .map(|(_, v)| v.clone())
+        .next_back();
+    assert_eq!(
+        market.as_deref(),
+        Some("newsign_139mail"),
+        "报到邮箱市场那一页"
+    );
+    assert_eq!(
+        reqs.iter()
+            .filter(|r| r
+                .url
+                .starts_with(mcloud_upstream::app_task_entry::ENTRY_DO_TASK_URL))
+            .count(),
+        1,
+        "旧上报也照发"
+    );
+
+    // ② 入口页：占位**必须**换成真票（假账号那枚是 `t` ✓），且只发 https ✓。
+    let page = reqs
+        .iter()
+        .find(|r| r.url.contains("/portal/mobilecloud/index.html"))
+        .expect("要取入口页");
+    assert!(
+        !page.url.contains("#ssoToken#"),
+        "占位不许原样发出去：{}",
+        page.url
+    );
+    assert!(page.url.ends_with("token=t"), "换成真票：{}", page.url);
+    assert_eq!(page.method, "GET");
+
+    // ③ 打卡那一发：`currstep = 1` ⇒ 只有这一发，key 走 [`click_key`]（1017 → `task2` ✓）。
+    let clicks: Vec<_> = reqs
+        .iter()
+        .filter(|r| r.url.contains("/ycloud/signin/task/click"))
+        .collect();
+    assert_eq!(clicks.len(), 1, "只发一发（那道「先打卡」门不打）");
+    assert!(clicks[0].url.contains("key=task2"), "{}", clicks[0].url);
+    assert!(clicks[0].url.contains("id=1017"), "{}", clicks[0].url);
+}
+
+// ── 604「去云盘图书馆阅读书籍」（2026-10-10 接上）────────────────────────
+
+/// 与 [`task_json`] 同形，另带 `button.app.link`（604 的入口页那一格 ✓）。
+fn task_json_with_app_link(
+    id: i64,
+    group: &str,
+    name: &str,
+    market: &str,
+    currstep: i64,
+    link: &str,
+) -> String {
+    format!(
+        r#"{{"id":{id},"name":"{name}","groupid":"{group}","state":"WAIT","limitType":"MONTH","enable":1,"currstep":{currstep},"process":0,"marketname":"{market}","button":{{"app":{{"action":"popjump","link":"{link}","text":"去体验"}}}}}}"#
+    )
+}
+
+/// 604 也走入口页那一档（入口那一格在 `button.app` ✓）。
+#[test]
+fn books_task_gets_the_portal_entry_step() {
+    let it = mcloud_upstream::app_task_list_v2::TaskV2Item {
+        task_id: Some(604),
+        name: Some("去云盘图书馆阅读书籍".into()),
+        market_name: Some("sign_in_3".into()),
+        button_app_link: Some("https://h.139.com/content/cloudClass?columnId=56".into()),
+        ..Default::default()
+    };
+    assert_eq!(step_for(&it), Some(Step::PortalEntry));
+}
+
+/// ⭐⭐ 604 与 1017 的**关键差别**：604 的 `currstep = 0` ⇒ ③-a 那道门自己会打一发
+/// ⇒ 这一档**不许再补第二发**（旧 TS 里 604 没有 runner ⇒ 全趟只有一发 ✓）。
+///
+/// 红测：把那句 `if !step.clicked` 去掉 ⇒ 这条红（打卡会变成两发）✓。
+#[tokio::test]
+async fn books_task_clicks_exactly_once() {
+    let link =
+        "https://h.139.com/content/cloudClass?columnId=56&level=1&channel=400&token=#ssoToken#";
+    let items = vec![task_json_with_app_link(
+        604,
+        "month",
+        "去云盘图书馆阅读书籍",
+        "sign_in_3",
+        0,
+        link,
+    )];
+    let mut replies = replies_for(&items, vec![]);
+    replies.push(click_ok()); // ① 新上报（doTaskPost）
+    replies.push(click_ok()); // ② 旧上报（page/doTask）
+    replies.push("<html></html>".to_string()); // ③ 入口页
+    replies.push(click_ok()); // ④ ③-a 那道门那一发
+    replies.push(page_body(&items)); // 收尾复查
+
+    let (ctx, http) = ctx_with(
+        TEST_ACCOUNT,
+        replies,
+        beijing_noon(5),
+        AccountSettings::default(),
+        Arc::new(FakeStore::new()),
+    );
+    let _ = run_app_task(&ctx, 0, &[]).await.expect("不该是 Err");
+    let reqs = http.requests();
+
+    let clicks: Vec<_> = reqs
+        .iter()
+        .filter(|r| r.url.contains("/ycloud/signin/task/click"))
+        .collect();
+    assert_eq!(
+        clicks.len(),
+        1,
+        "只发一发（604 没有 runner ⇒ 不补第二发）：{clicks:#?}"
+    );
+    assert!(clicks[0].url.contains("key=task"), "{}", clicks[0].url);
+    assert!(clicks[0].url.contains("id=604"), "{}", clicks[0].url);
+
+    // 入口页：占位换成真票（假账号那枚是 `t` ✓）。
+    let page = reqs
+        .iter()
+        .find(|r| r.url.contains("h.139.com/content/cloudClass"))
+        .expect("要取入口页");
+    assert!(!page.url.contains("#ssoToken#"), "{}", page.url);
+    assert!(page.url.ends_with("token=t"), "{}", page.url);
+    // 两发上报照发（与 1017 同一条口径 ✓）
+    assert_eq!(
+        reqs.iter()
+            .filter(|r| r.url == mcloud_upstream::app_task_entry::DO_TASK_POST_URL)
+            .count(),
+        1
+    );
 }

@@ -26,7 +26,7 @@ use axum::response::Response;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use mcloud_core::{AppSettings, PasswordHash, User};
+use mcloud_core::{PasswordHash, User};
 
 use crate::auth_gate::{require_admin, CurrentUser};
 use crate::error::{ApiError, ApiResult};
@@ -81,10 +81,14 @@ pub async fn put_security(
     Json(body): Json<SecurityPatch>,
 ) -> ApiResult<SecurityView> {
     require_admin(&state, &cur).await?;
-    let next = AppSettings {
-        min_password_len: body.min_password_len,
-        session_ttl_hours: body.session_ttl_hours,
-    };
+    // ⚠ **读-改-写**（2026-10-09 起 ✓）：`AppSettings` 是一份整体，
+    // 容量那三格（历史条数 / 单次日志行数 / 日志总量 ✓）也在里面 ——
+    // 直接拿请求体构造一个新的会把它们重置成默认值 ✗，而那种 bug 只有
+    // "先改容量、再改策略"时才现形，极难查 ✓。所以这里只改**自己这两格** ✓
+    // （`put_storage` 那侧同一条口径 ✓）。
+    let mut next = state.handle.store.settings().await?;
+    next.min_password_len = body.min_password_len;
+    next.session_ttl_hours = body.session_ttl_hours;
     next.validate()
         .map_err(|e| ApiError(mcloud_core::Error::Config(e)))?;
     state.handle.store.save_settings(&next).await?;

@@ -79,8 +79,7 @@ impl AppBuilder {
         let clock = Arc::new(mcloud_store::SystemClock);
         // 事件中枢取代原来的纯广播：它额外负责序号分配、内存重放与日志落盘。
         let hub = Arc::new(EventHub::new(
-            Arc::clone(&store) as Arc<dyn mcloud_core::Store>,
-            Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>,
+            Arc::clone(&store) as Arc<dyn mcloud_core::Store>
         ));
 
         let mut registry = mcloud_engine::Registry::new();

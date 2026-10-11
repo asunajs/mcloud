@@ -993,12 +993,48 @@ pub async fn send_notify(ctx: &PushContext<'_>, config: &PushConfig, title: &str
 /// 差额就是一条绕过（**已实测**，见下面 `validate_push_url` 的注释）。
 /// 现在两边都交给同一份实现：`url::Url::parse` → `Url::host()` ✓。
 ///
-/// # ⚠ 诚实的边界（别把这条闸当成万能的）
+/// # ⚠ 闸分两层（2026-10-09 加固：第二层看**真实解析出来的 IP**）
 ///
-/// **不做 DNS 解析** ⇒ 它挡不住"域名解析到 127.0.0.1"这一类（DNS rebinding、
-/// 或者内网自己那套域名）。要挡那一层得在**连接时**核对实际 IP，那是另一件事；
-/// 这里先把"直接写 IP 打本机/内网"这条最省事的路堵死，也把常见误配挡在前面 ✓。
+/// * **第一层**（本函数，字面量、不联网）—— 挡"直接写 IP / 本机名字"；
+/// * **第二层**（[`validate_push_url_resolved`]，要 DNS）—— 挡"域名解析到本机/内网"，
+///   也就是 `http://127.0.0.1.nip.io:3998/` 这一类（**已实测绕过**过第一层 ✗）。
+///
+/// ⚠ 真正发请求的那条路（`notify.rs` 的 `HttpPushTransport`）走的是**第二层** ✓；
+/// 本函数留着有两条理由：① 它是第二层的**第一跳**（两者共用同一份字面量判据，
+/// 见 [`check_push_url_literal`] ✓）；② 它是**同步**的、**不联网** ⇒ 以后要在
+/// "不想为一次校验去碰 DNS"的地方（设置页即时校验那类）先用它挡一遍，直接用 ✓。
+///
+/// # 诚实的边界（第二层也解决不了的）
+///
+/// 第二层解析完到真正连上之间，DNS 还能变（**DNS rebinding / TOCTOU**）⇒
+/// 本轮**没有**把连接钉在已核过的 IP 上（做不到的理由与残留写在
+/// [`validate_push_url_resolved`] 上 ✓，别当成已解决 ✗）。
 pub fn validate_push_url(url: &str) -> Result<(), String> {
+    match check_push_url_literal(url)? {
+        LiteralCheck::Pass { .. } => Ok(()),
+        LiteralCheck::Local { reason } => Err(reason),
+    }
+}
+
+/// 字面量那一层的结论（[`check_push_url_literal`] 的返回值）。
+enum LiteralCheck {
+    /// 字面量判据过了。`domain` 非空 ⇒ **还需要 DNS**（名字 + 端口）；
+    /// 为空 ⇒ 字面量本身就是已核过的公网 IP，判完了 ✓。
+    Pass { domain: Option<(String, u16)> },
+    /// 指向本机 / 内网（字面量 IP 或本机名字）。`reason` 是给用户看的原因。
+    Local { reason: String },
+}
+
+/// **字面量那一层**的实现：解析 URL、判 scheme、判字面量 IP、判本机/内网名字。
+///
+/// ⚠ 单独抽出来是为了让 [`validate_push_url`]（同步）与
+/// [`validate_push_url_resolved`]（要 DNS）**共用同一份判据** ——
+/// 写两份迟早分叉，而分叉的那一半就是绕过 ✗。
+///
+/// ⚠ `Err` 只用于"**与内网无关**"的错（不是合法 URL / scheme 不对 / 没有主机名）：
+/// 这类错**任何开关都不放行**（`MCLOUD_ALLOW_LOCAL_PUSH` 管的是"地址指向哪"，
+/// 不是"用什么协议"）✓。指向本机/内网一律走 `Ok(LiteralCheck::Local { .. })` ✓。
+fn check_push_url_literal(url: &str) -> Result<LiteralCheck, String> {
     use url::Host;
 
     // ⚠⚠ 为什么是 `Url::parse` 而不是自己切字符串（2026-10-06 审计 `SEC-04`，**实测**）：
@@ -1033,13 +1069,19 @@ pub fn validate_push_url(url: &str) -> Result<(), String> {
         // 这里拿到的就是"reqwest 会去连的那个地址" ✓
         Host::Ipv4(v4) => {
             if !is_public_ip(&std::net::IpAddr::V4(v4)) {
-                return Err(format!("推送地址指向本机/内网（{v4}），拒绝发送：{url}"));
+                return Ok(LiteralCheck::Local {
+                    reason: format!("推送地址指向本机/内网（{v4}），拒绝发送：{url}"),
+                });
             }
+            Ok(LiteralCheck::Pass { domain: None })
         }
         Host::Ipv6(v6) => {
             if !is_public_ip(&std::net::IpAddr::V6(v6)) {
-                return Err(format!("推送地址指向本机/内网（{v6}），拒绝发送：{url}"));
+                return Ok(LiteralCheck::Local {
+                    reason: format!("推送地址指向本机/内网（{v6}），拒绝发送：{url}"),
+                });
             }
+            Ok(LiteralCheck::Pass { domain: None })
         }
         Host::Domain(name) => {
             // ⚠ 末尾点在 DNS 里与不带点**等价**（`localhost.` = `localhost`）⇒
@@ -1053,13 +1095,246 @@ pub fn validate_push_url(url: &str) -> Result<(), String> {
                 || name.ends_with(".local")
                 || name.ends_with(".internal")
             {
-                return Err(format!(
-                    "推送地址指向本机/内网名字（{name}），拒绝发送：{url}"
-                ));
+                return Ok(LiteralCheck::Local {
+                    reason: format!("推送地址指向本机/内网名字（{name}），拒绝发送：{url}"),
+                });
             }
+            // ⚠ 交给第二层去解析。端口只影响 `lookup_host` 的入参形状（DNS 不关心
+            // 端口 ✓），取不到就用 0（reqwest 的 `resolve_to_addrs` 也是这个约定 ✓）。
+            Ok(LiteralCheck::Pass {
+                domain: Some((
+                    name.to_string(),
+                    parsed.port_or_known_default().unwrap_or(0),
+                )),
+            })
         }
     }
-    Ok(())
+}
+
+// ── 第二层：看**真实解析出来的 IP**（2026-10-09）────────────────────────────
+
+/// 用户**显式**放行本机/内网推送地址的环境变量。
+///
+/// ⚠⚠ **管理员级 / 服务级**，**不是**每个用户自己能勾的开关 ——
+/// 后者等于把闸拆了（普通用户勾一下就能拿服务当内网探针 ✗）。
+/// 命名与既有环境变量（`MCLOUD_ADDR` / `MCLOUD_DATA_DIR` / `MCLOUD_COOKIE_SECURE` ✓）
+/// 对齐 ✓。
+pub const ALLOW_LOCAL_PUSH_ENV: &str = "MCLOUD_ALLOW_LOCAL_PUSH";
+
+/// DNS 解析的**超时**：一条坏 DNS 不许把推送卡住（推送整体本来就只有 10s ✓）。
+///
+/// 3s 的取法：公网 DNS 正常在 100ms 内回；3s 已经远超正常值，又明显小于推送的
+/// 10s 总预算 ⇒ 解析卡住时**这一条推送**失败（日志留原因 ✓），不影响别的渠道 ✓。
+///
+/// ⚠ 它是**加在**推送那 10s **之外**的（闸在 `HttpPushTransport::send` 里跑在
+/// `tokio::time::timeout(req.timeout_ms, …)` **之前** ✓）⇒ 最坏情况是
+/// 3s（解析卡住）+ 10s（请求超时）= 13s，比加固前多 3s ✗。
+/// 为什么这样摆而不是把解析算进那 10s：`PushRequest::timeout_ms` 今天就是
+/// "**这一枪 HTTP 请求**的预算" ✓（`notify.rs` 的 `HttpPushTransport::send` 拿它
+/// `tokio::time::timeout` 包住 `self.http.request(..)` ✓），改它要动推送别的语义 ✗
+/// ⇒ 不改，只把这条代价写在这里 ✓。
+/// 实际影响很小：只有 DNS 坏掉时才会走到 3s，而那时这条推送本来也要失败 ✓。
+pub const DNS_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// `MCLOUD_ALLOW_LOCAL_PUSH` 的**解析规则**（单独一个函数是为了可测，与
+/// `mcloud-server` 的 `cookie_secure_from_env` 同一形状 ✓）。
+///
+/// ⚠ **只有真值才放行**：`1` / `true` / `yes`。
+/// **读不到（`None`）= 拒** —— 别写成"读不到就当开" ✗；`0` / `false` / 别的串也一律是拒 ✓。
+pub fn parse_allow_local_push(raw: Option<&str>) -> bool {
+    matches!(raw, Some("1") | Some("true") | Some("yes"))
+}
+
+/// 从环境变量读 [`ALLOW_LOCAL_PUSH_ENV`]（缺省 = **关** ✓）。
+pub fn allow_local_push_from_env() -> bool {
+    parse_allow_local_push(std::env::var(ALLOW_LOCAL_PUSH_ENV).ok().as_deref())
+}
+
+/// DNS 解析的**可替换接口**。
+///
+/// ⚠⚠ 抽成 trait 的**唯一**理由是测试：单测里给一个假解析器就能把
+/// "名字解析到 127.0.0.1"这类场景逐条钉死，而**不用真去打公网 DNS** ✗
+/// （真打 DNS 的测试会在离网机器上红、在别人机器上绿，还会变慢 ✓）。
+#[async_trait::async_trait]
+pub trait PushHostResolver: Send + Sync {
+    /// 解析 `host`。失败 ⇒ `Err(原因)`（调用方**不许**把失败当放行 ✗）。
+    async fn resolve(&self, host: &str, port: u16) -> Result<Vec<std::net::IpAddr>, String>;
+}
+
+/// 生产用的解析器：交给 OS（`getaddrinfo`，异步封装在 tokio 的阻塞池里 ✓）。
+pub struct SystemResolver;
+
+#[async_trait::async_trait]
+impl PushHostResolver for SystemResolver {
+    async fn resolve(&self, host: &str, port: u16) -> Result<Vec<std::net::IpAddr>, String> {
+        let addrs = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|e| format!("DNS 解析失败（{host}）：{e}"))?;
+        Ok(addrs.map(|a| a.ip()).collect())
+    }
+}
+
+/// 闸的**结论**（放行时还要告诉调用方"是不是靠开关放的"）。
+///
+/// ⚠ 为什么要有这个返回值而不是只回 `Ok(())`：单测里抓 `tracing` 日志**不稳**
+/// （全局订阅者、并发、`RUST_LOG` 都会影响 ✗）⇒ 把"是否因开关放行"做成
+/// **可断言的结构** ✓。日志照发（见 [`local_verdict`] ✓），但它不是唯一证据 ✓。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushUrlVerdict {
+    /// 地址指向公网 ⇒ 正常放行，没动开关。
+    Public,
+    /// 本该拒，但 `MCLOUD_ALLOW_LOCAL_PUSH` 开着 ⇒ 放行。
+    /// `reason` 就是"本来要拒的原因"（同时已经 `warn` 过一条 ✓）。
+    AllowedByLocalSwitch { reason: String },
+}
+
+impl PushUrlVerdict {
+    /// 这一次放行**是不是**靠 [`ALLOW_LOCAL_PUSH_ENV`] 换来的。
+    pub fn allowed_by_switch(&self) -> bool {
+        matches!(self, Self::AllowedByLocalSwitch { .. })
+    }
+}
+
+/// **第二层**：在字面量判据之上，把域名**真正解析出来**，逐个 IP 判公网。
+///
+/// # 判据
+///
+/// 1. 先跑 [`check_push_url_literal`]（快、不联网 ✓）；它判 `Local` ⇒ 走下面的开关；
+/// 2. 是域名就解析（**带超时** [`DNS_LOOKUP_TIMEOUT`] ✓）：解析失败 / 超时 /
+///    一个地址都没有 ⇒ **拒**（⚠ 不许"解析失败就放过" ✗）；
+/// 3. 解析出来的**每一个** IP 都必须是公网（[`is_public_ip`]）—— **只要有一个
+///    不合格就拒** ✗（只挑第一个看 = 绕过 ✓）；
+/// 4. 全过 ⇒ [`PushUrlVerdict::Public`] ✓。
+///
+/// # ⚠⚠ TOCTOU / DNS rebinding：这条**没有**解决（诚实记录）
+///
+/// 本函数解析完到 reqwest 真正连上之间，DNS **还能变** —— 攻击者控制的权威 DNS
+/// 可以在两次查询里给不同答案（第一次公网、第二次 `127.0.0.1`）✗。
+///
+/// 真正的堵法是"把连接**钉在已核过的那个 IP** 上"，而本仓今天**做不到**，理由具体：
+///
+/// * reqwest 0.12.28 的 `ClientBuilder::resolve` / `resolve_to_addrs`
+///   （`reqwest-0.12.28/src/async_impl/client.rs:2270` / `:2278` ✓ **已核过源码**）
+///   是 **builder 级**的 —— 只作用于**新建的 `Client`**，**没有** per-request 版本 ✗；
+/// * 而本仓的 HTTP 出口是 `mcloud_core::HttpClient` 这个抽象，底下
+///   `ReqwestClient`（`mcloud-upstream/src/client.rs:108`）**共用两个预建的
+///   `reqwest::Client`**（`inner` / `legacy` ✓），且 `HttpRequest`
+///   （`mcloud-core/src/traits.rs:26`）里**没有**"这次请求钉哪个 IP"的位置 ✗；
+/// * ⇒ 要钉就得给 `HttpClient` 加一条新方法 + 让 `ReqwestClient` **每次推送现建
+///   一个 `Client`**（要复制 profile / cookie / gzip / 超时一整套设置，重复就是
+///   分叉的来源 ✗），这是**跨 crate 改动共享层**，超出"推送 SSRF 闸"这一件事的范围，
+///   也和"别顺手改推送别的语义"冲突 ⇒ 本轮**不做**，只把残留写在这里 ✓。
+///
+/// 残留的**实际**大小：窗口是从本函数返回（已核过）到 reqwest 自己再解析那一次，
+/// 中间只隔一个函数调用 ⇒ 要打中得**精确踩点**这个毫秒级窗口，比第一层的洞难得多；
+/// 但它**不是 0** ✓。要真正关掉这条，走上面那三步（下一轮单独做 ✓）。
+///
+/// ⚠ 另外：**重定向**那条路已经堵着（推送客户端 `no_redirects` ✓）——
+/// 否则"先答公网、再 302 到 127.0.0.1"根本不用抢窗口 ✗。
+pub async fn validate_push_url_resolved(
+    url: &str,
+    resolver: &dyn PushHostResolver,
+    allow_local: bool,
+) -> Result<PushUrlVerdict, String> {
+    validate_push_url_resolved_within(url, resolver, allow_local, DNS_LOOKUP_TIMEOUT).await
+}
+
+/// [`validate_push_url_resolved`] 的实现（超时是入参 ⇒ 单测能用毫秒级超时钉住
+/// "解析卡住 ⇒ 拒"那条 ✓，不必真等 3 秒）。
+async fn validate_push_url_resolved_within(
+    url: &str,
+    resolver: &dyn PushHostResolver,
+    allow_local: bool,
+    dns_timeout: std::time::Duration,
+) -> Result<PushUrlVerdict, String> {
+    let (host, port) = match check_push_url_literal(url)? {
+        LiteralCheck::Pass { domain: None } => return Ok(PushUrlVerdict::Public),
+        LiteralCheck::Local { reason } => return local_verdict(reason, url, allow_local),
+        LiteralCheck::Pass {
+            domain: Some(host_port),
+        } => host_port,
+    };
+
+    // ⚠⚠ 解析必须**带超时**：一条坏 DNS 不许把推送卡住（`tokio::time::timeout`
+    // 包住 —— 与 `notify.rs` 里给推送本身加超时是同一手法 ✓）。
+    let ips = match tokio::time::timeout(dns_timeout, resolver.resolve(&host, port)).await {
+        Ok(Ok(ips)) if !ips.is_empty() => ips,
+        Ok(Ok(_)) => {
+            return local_verdict(
+                format!("推送地址的名字 {host} 解析不出任何地址，拒绝发送：{url}"),
+                url,
+                allow_local,
+            )
+        }
+        Ok(Err(e)) => {
+            return local_verdict(
+                format!("推送地址的名字 {host} 解析失败（{e}），拒绝发送：{url}"),
+                url,
+                allow_local,
+            )
+        }
+        Err(_) => {
+            return local_verdict(
+                format!(
+                    "推送地址的名字 {host} 解析超时（{}ms），拒绝发送：{url}",
+                    dns_timeout.as_millis()
+                ),
+                url,
+                allow_local,
+            )
+        }
+    };
+
+    // ⚠ **每一个** IP 都要是公网：一个公网 + 一个 `127.0.0.1` 的应答也必须拒 ✗
+    // （只判第一个/任一个是常见的写错法，等于给绕过留门 ✓）。
+    let bad: Vec<std::net::IpAddr> = ips.iter().copied().filter(|ip| !is_public_ip(ip)).collect();
+    if !bad.is_empty() {
+        let list = bad
+            .iter()
+            .map(|ip| ip.to_string())
+            .collect::<Vec<_>>()
+            .join("、");
+        return local_verdict(
+            format!("推送地址的名字 {host} 解析到本机/内网地址（{list}），拒绝发送：{url}"),
+            url,
+            allow_local,
+        );
+    }
+    Ok(PushUrlVerdict::Public)
+}
+
+/// 一条**指向本机/内网**（或解析不出来）的判定该走哪边：
+/// 开关关着 ⇒ `Err`（拒，**这一条推送**失败 ✓）；开关开着 ⇒ 放行 **+ 一条 warn** ✓。
+///
+/// ⚠ 放行**必须留痕**，不许静默 ✗ —— 用户口径是"我显式允许了，但我要在日志里看见它" ✓。
+/// ⚠ 日志在这里发（而不是让调用方自己记得发）：调用方有 4 处以上，靠"记得"迟早漏一处 ✗。
+fn local_verdict(reason: String, url: &str, allow_local: bool) -> Result<PushUrlVerdict, String> {
+    if !allow_local {
+        return Err(reason);
+    }
+    // ⚠ 留痕的**正文**由 [`local_switch_warn_message`] 单独产出（可断言 ✓），
+    // 这里只负责真的把它打出去 —— 结构化字段（url / reason / env）一并带上 ✓。
+    let message = local_switch_warn_message(url, &reason);
+    tracing::warn!(
+        url = %url,
+        reason = %reason,
+        env = ALLOW_LOCAL_PUSH_ENV,
+        "{message}"
+    );
+    Ok(PushUrlVerdict::AllowedByLocalSwitch { reason })
+}
+
+/// 开关放行时那条 warn 的**正文**（单独抽出来是为了**可断言** ✓）。
+///
+/// ⚠ 为什么不是"直接写在 `tracing::warn!` 里"：单测抓 `tracing` **不稳**
+/// （`with_default` 是线程局部的，而 `tracing` 的 interest 缓存是**进程全局**的 ——
+/// 并行跑的另一个用例先在没有 subscriber 时碰过同一个 callsite，事件就再也出不来了 ✗，
+/// 实测过：同一份代码全量跑绿、`--exact` 单独跑红）。⇒ 把正文做成**纯函数**，
+/// 逐字断言；"有没有真的打出去"由 `local_verdict` 里那一处 `warn!` 保证（只有一处 ✓）。
+fn local_switch_warn_message(url: &str, reason: &str) -> String {
+    format!(
+        "用户显式允许了本机/内网推送地址（{ALLOW_LOCAL_PUSH_ENV}=1），照发：{url}（本来要拒的原因：{reason}）"
+    )
 }
 
 /// 这个 IP 能不能当推送目标（能 ⇒ `true`）。

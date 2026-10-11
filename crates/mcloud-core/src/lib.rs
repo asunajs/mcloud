@@ -44,7 +44,10 @@ pub use live_auto::{
     beijing_now, beijing_stamp, earliest_plus_one_hour, live_auto_schedule_id, one_shot_expr,
     LIVE_ROOM_TASK, MANAGED_BY_LIVE_AUTO,
 };
-pub use log::{AppendOutcome, LogLine, Seq, LOG_LIMIT_PER_RUN};
+pub use log::{
+    log_line_of, slice_page, AppendOutcome, LogLine, LogPage, LogPageQuery, LogStats, Seq,
+    LOG_LIMIT_PER_RUN,
+};
 pub use owner::{legacy_owner, visible_to};
 pub use pc_device::{PcDeviceStore, PC_DEVICE_SUFFIX};
 pub use pipeline::{AccountMode, Pipeline, PipelineId, PipelineStep};
@@ -55,7 +58,12 @@ pub use push::{
 };
 pub use run::{RunId, RunLogLine, RunRecord, RunStatus, TaskOutcome, RUN_LOG_LIMIT};
 pub use schedule::{Schedule, ScheduleId};
-pub use settings::{AppSettings, DEFAULT_MIN_PASSWORD_LEN, DEFAULT_SESSION_TTL_HOURS};
+pub use settings::{
+    AppSettings, DEFAULT_HISTORY_LIMIT, DEFAULT_LOG_LIMIT_PER_RUN, DEFAULT_LOG_TOTAL_MB,
+    DEFAULT_MIN_PASSWORD_LEN, DEFAULT_SERVER_LOG_MEM_LINES, DEFAULT_SERVER_LOG_TOTAL_MB,
+    DEFAULT_SESSION_TTL_HOURS, HISTORY_LIMIT_RANGE, LOG_LIMIT_PER_RUN_RANGE, LOG_TOTAL_MB_RANGE,
+    SERVER_LOG_MEM_LINES_RANGE, SERVER_LOG_TOTAL_MB_RANGE,
+};
 pub use smid::{SmidState, SmidStore};
 pub use traits::{
     beijing_format, beijing_offset, beijing_time_digits, format_with_offset, parse_beijing_time,

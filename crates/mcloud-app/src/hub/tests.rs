@@ -4,10 +4,9 @@
 
 use super::*;
 use async_trait::async_trait;
-use mcloud_core::testkit::FixedClock;
 use mcloud_core::{
-    Account, AccountId, AppendOutcome, Pipeline, PipelineId, RunRecord, RunStatus, Schedule,
-    ScheduleId, TaskOutcome,
+    Account, AccountId, AppendOutcome, LogKind, LogLevel, Pipeline, PipelineId, RunRecord,
+    RunStatus, Schedule, ScheduleId, TaskOutcome,
 };
 use std::sync::Mutex;
 
@@ -195,14 +194,11 @@ impl mcloud_core::UserStore for MemStore {
 }
 
 fn hub() -> EventHub {
-    EventHub::new(
-        Arc::new(MemStore::default()) as Arc<dyn Store>,
-        Arc::new(FixedClock(NOW_MS)),
-    )
+    EventHub::new(Arc::new(MemStore::default()) as Arc<dyn Store>)
 }
 
 fn hub_with(store: Arc<MemStore>) -> EventHub {
-    EventHub::new(store as Arc<dyn Store>, Arc::new(FixedClock(NOW_MS)))
+    EventHub::new(store as Arc<dyn Store>)
 }
 
 // ── 序号 ────────────────────────────────────────────────────────────────
@@ -407,6 +403,50 @@ async fn flush_persists_logs() {
     assert_eq!(saved.len(), 2);
     assert_eq!(saved[0].message, "要落盘的日志");
     assert_eq!(saved[0].seq, Seq(1), "落盘的序号要与事件流一致，才能续传");
+}
+
+/// ⭐ 2026-10-09：**进度行与分类也要落盘**。
+///
+/// 这两样以前只进引擎那份内联日志（`RunRecord.logs` ✓），而落盘这一路只认
+/// `RunEvent::Log` ⇒ 两条路合一之后不补它们，回看里就再也看不到"做到第几步"、
+/// 也分不出「领到了 6 颗」与「这一笔没领到」✗（用户 2026-10-04 口径：
+/// 「info warn error success 等等标记都没有，更别说颜色」✓）。
+#[tokio::test]
+async fn progress_lines_and_kinds_are_persisted_too() {
+    let store = Arc::new(MemStore::default());
+    let h = hub_with(Arc::clone(&store));
+    let id = RunId::new(1);
+
+    h.emit(RunEvent::Log {
+        run_id: id,
+        level: LogLevel::Info,
+        kind: LogKind::Success,
+        message: "领到了 6 颗".into(),
+        at_ms: NOW_MS,
+    });
+    h.emit(RunEvent::Progress {
+        run_id: id,
+        step: 2,
+        total: 3,
+        label: "领取AI豆".into(),
+        at_ms: NOW_MS,
+    });
+    h.flush().await.unwrap();
+
+    let saved = store.logs.lock().unwrap();
+    assert_eq!(saved.len(), 2, "两条都该落盘：{saved:?}");
+    assert_eq!(
+        saved[0].kind,
+        LogKind::Success,
+        "分类要跟着落盘（界面按它上徽章与颜色）"
+    );
+    assert_eq!(
+        saved[1].message, "[2/3] 领取AI豆",
+        "进度行也要落盘，且格式与实时面板同一份"
+    );
+    assert_eq!(saved[1].kind, LogKind::Start);
+    assert_eq!(saved[1].level, LogLevel::Info);
+    assert_eq!(saved[1].seq, Seq(2), "序号照旧按事件流走（续传靠它）");
 }
 
 /// 落盘失败**不能**影响正在跑的任务，且日志要留着重试。

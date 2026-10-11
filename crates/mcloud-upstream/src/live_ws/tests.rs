@@ -27,7 +27,9 @@ use mcloud_crypto::SeqRandom;
 use serde_json::Value;
 
 use crate::live_msync::{
-    decode_msync, encode_msync, extract_danmaku_text, live_msync_frame, CMD_NOTICE, CMD_SYNC,
+    decode_msync, encode_message_body, encode_msync, extract_danmaku_frame, extract_danmaku_text,
+    is_event_message, live_msync_frame, MessageBody, MessageContent, CMD_NOTICE, CMD_SYNC,
+    MSG_TYPE_JOIN,
 };
 
 /// 黄金向量文件（`msyncInbound` 的真弹幕文本 + `msyncFrames` 的报文）。
@@ -1185,4 +1187,368 @@ fn empty_payload_yields_empty_text_not_an_error() {
     assert_eq!(extract_danmaku_text(CMD_NOTICE, &[]).unwrap(), "");
     // 非 SYNC/NOTICE 的 command 也不解文本
     assert_eq!(extract_danmaku_text(4, &[1, 2, 3]).unwrap(), "");
+}
+
+// ══════════════════ 事件消息不算口令（2026-09-23 实拍回放）══════════════════
+
+/// 2026-09-23 实拍的那批弹幕帧（**只换值不换形**的脱敏版）。
+///
+/// 语料出处、抽取方法、脱敏口径与 `msgType` 的观测表都写在文件自己的
+/// `$source` / `$how` / `$sanitize` / `$msgType` / `$knownGap` 里 —— 这里不重复，
+/// 因为重复的那一份一定会先过期。
+fn danmaku_fixture() -> Value {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test/fixtures/live-ws-danmaku-2026-09-23.json"
+    );
+    let text =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("读不到实拍语料 {path}：{e}"));
+    serde_json::from_str(&text).expect("实拍语料不是合法 JSON")
+}
+
+/// 实拍观测到的**事件** `msgType` 取值（语料文件 `$msgType` 那张表里判"事件"的几行）。
+///
+/// ⚠ 这里把观测事实**再写一遍**是刻意的：测试用被测函数给自己分类的话，
+/// 表写错了测试照样绿（测的是"函数等于自己"）。这一份是**独立的口径**，
+/// 它与生产表不一致时由 [`real_capture_replay_keeps_only_the_kouling_messages`]
+/// 里那句 `is_event_message` 断言抓出来。
+const CAPTURE_EVENT_TYPES: [u64; 4] = [2, 5, 6, 7];
+
+/// 实拍语料里的一帧：`(文本, msgType, payload 字节)`。
+fn danmaku_cases() -> Vec<(String, u64, Vec<u8>)> {
+    danmaku_fixture()["frames"]
+        .as_array()
+        .expect("frames 是数组")
+        .iter()
+        .map(|f| {
+            let text = f["text"].as_str().expect("text").to_owned();
+            let msg_type = f["msgType"].as_u64().expect("msgType");
+            let payload =
+                mcloud_crypto::b64_decode(f["payloadBase64"].as_str().expect("payloadBase64"))
+                    .expect("payload 应当是合法 base64");
+            (text, msg_type, payload)
+        })
+        .collect()
+}
+
+/// ⭐⭐ 实拍回放：**事件消息一条都不进口令列表**，只有真口令进。
+///
+/// # 语料
+///
+/// 2026-09-23 15:17–15:19 实拍的两条 WS 连接（`conn 632` / `1127`）里
+/// 17 条带文本的服务端推送中的 **15 条**（另 2 条是另一个缺口，见语料文件的
+/// `$knownGap`，本轮没动）。这 15 条里：
+///
+/// - **4 条是真口令**（`小红花口令：一键9图出圈`，`msgType = 4`）；
+/// - **11 条是事件**（入场 5 / 礼物 4 / 系统 2 / 点赞 1，`msgType` 分别是 2 / 7 / 6 / 5）。
+///
+/// # 两层都断言
+///
+/// ① **解码层**：文本与 `msgType` 都要从**同一条** `MessageBody` 上读出来；
+/// ② **状态机层**：事件消息归成 `EventMessage`、不进 `codes`、也不进 `danmaku`。
+///
+/// ⚠ **分类用的是语料里那张观测表**（[`CAPTURE_EVENT_TYPES`]），**不是**
+/// [`is_event_message`] —— 拿被测函数给用例分类的话，表写错了测试照样绿。
+/// 反过来还多一条真断言：那四个观测取值**必须**被 [`is_event_message`] 认成事件。
+#[test]
+fn real_capture_replay_keeps_only_the_kouling_messages() {
+    let mut l = listener();
+    let cases = danmaku_cases();
+    assert_eq!(cases.len(), 15, "语料帧数（见文件的 $how）");
+
+    let mut event_count = 0usize;
+    let mut kouling_count = 0usize;
+    for (i, (text, msg_type, payload)) in cases.into_iter().enumerate() {
+        let now = NOW + i as i64;
+
+        // ① 解码层
+        let frame = extract_danmaku_frame(CMD_NOTICE, &payload)
+            .unwrap_or_else(|e| panic!("【{text}】解帧不该报错：{e}"));
+        assert_eq!(frame.text, text, "【{text}】实拍语料的文本");
+        assert_eq!(
+            frame.msg_type,
+            Some(msg_type),
+            "【{text}】实拍语料的 msgType"
+        );
+
+        // ② 状态机层
+        let actions = l.on_frame(&inbound(CMD_NOTICE, payload, now), now).unwrap();
+        if CAPTURE_EVENT_TYPES.contains(&msg_type) {
+            event_count += 1;
+            assert!(
+                is_event_message(Some(msg_type)),
+                "【{text}】msgType={msg_type} 是实拍观测到的事件，判据表里必须有它"
+            );
+            assert!(
+                actions.codes.is_empty(),
+                "【{text}】事件消息**不许**变成口令（这就是本轮修的那件事）"
+            );
+            assert_eq!(
+                actions.kind,
+                FrameKind::EventMessage,
+                "【{text}】msgType={msg_type} 应当归成事件消息"
+            );
+            assert!(
+                actions.danmaku.is_empty(),
+                "【{text}】事件消息也不该出现在「弹幕」口径里"
+            );
+        } else {
+            kouling_count += 1;
+            assert_eq!(actions.kind, FrameKind::Danmaku, "【{text}】");
+            assert_eq!(actions.danmaku, text, "【{text}】");
+        }
+    }
+
+    assert_eq!(event_count, 11, "实拍语料里事件消息的条数");
+    assert_eq!(kouling_count, 4, "实拍语料里口令消息的条数");
+    assert_eq!(
+        l.codes().to_vec(),
+        vec!["一键9图出圈".to_string()],
+        "那一场只有这一条口令（4 条推送是同一句，去重后 1 条）"
+    );
+}
+
+/// ⭐ **只有**事件消息的那一段 ⇒ 口令列表为空 ⇒ 上层**不会**发领取请求。
+///
+/// 这一条对应"事件消息只有事件、没有口令"那个场景：状态机一个口令都不产出，
+/// 于是 `run_account` 里 `out.codes.is_empty()` 直接返回（一个 `draw` 都不发）。
+#[test]
+fn a_stream_of_only_events_yields_no_kouling_at_all() {
+    let mut l = listener();
+    let events: Vec<_> = danmaku_cases()
+        .into_iter()
+        .filter(|(_, msg_type, _)| CAPTURE_EVENT_TYPES.contains(msg_type))
+        .collect();
+    assert_eq!(events.len(), 11, "实拍语料里的事件消息（见 $msgType）");
+
+    for (i, (text, _, payload)) in events.into_iter().enumerate() {
+        let now = NOW + i as i64;
+        let actions = l.on_frame(&inbound(CMD_NOTICE, payload, now), now).unwrap();
+        assert!(
+            actions.codes.is_empty(),
+            "【{text}】事件消息不许产出任何口令"
+        );
+    }
+    assert!(
+        l.codes().is_empty(),
+        "全是事件 ⇒ 一条口令都没有（上层据此**不发**领取请求）"
+    );
+}
+
+/// ⭐⭐ 跨帧拼接**不能**把事件消息当口令 —— 本轮修的就是这一条。
+///
+/// # 为什么这条是真问题
+///
+/// 口令被服务端拆成两条消息发时（先 `复制口令1：`、后内容），状态机靠
+/// `pending_head` 把**下一条整条**当成口令。而弹幕流是**混着推**的：
+/// 头与内容之间随时会插进来一条入场 / 礼物提示。
+///
+/// 改之前，那条事件消息会被**整条**当成口令投上去（上游回 `200108` 口令无效），
+/// 而且日志里会出现「口令：加入直播间」这种谁也看不懂的行。
+/// 改之后按 `ext.msgType` 挡住，并且**头不被吃掉** —— 真正的内容到了照样接上。
+#[test]
+fn a_head_followed_by_an_event_does_not_take_the_event_as_a_kouling() {
+    let mut l = listener();
+
+    // ① 口令头（主播把口令拆成两条发：先头、后内容）
+    let head = encode_message_body(&MessageBody {
+        body_type: 3,
+        contents: vec![MessageContent {
+            content_type: 0,
+            text: "复制口令1：".to_string(),
+        }],
+    });
+    let a = l.on_frame(&inbound(CMD_NOTICE, head, NOW), NOW).unwrap();
+    assert_eq!(a.kind, FrameKind::Danmaku, "口令头本身有文本");
+    assert!(a.codes.is_empty(), "头本身解不出口令");
+
+    // ② 中间插进来一条**事件**（用实拍的那条 `加入直播间`，msgType = 2）
+    //
+    // ⚠ 断言顺序：**先判 codes、再判 kind** —— 反过来的话，改坏了这条测试会停在
+    // "kind 不对"上，而真正要说清的是"它被当成口令投上去了"。
+    let (event_text, _, event_payload) = danmaku_cases()
+        .into_iter()
+        .find(|(_, msg_type, _)| *msg_type == MSG_TYPE_JOIN)
+        .expect("实拍语料里有入场消息");
+    assert_eq!(event_text, "加入直播间");
+    let b = l
+        .on_frame(&inbound(CMD_NOTICE, event_payload, NOW + 1), NOW + 1)
+        .unwrap();
+    assert!(
+        b.codes.is_empty(),
+        "⚠ 事件消息被当成口令了（`{event_text}`）—— 这就是本轮修的那个 bug"
+    );
+    assert_eq!(b.kind, FrameKind::EventMessage, "【{event_text}】");
+
+    // ③ 真正的内容到了 ⇒ 它才是口令；而且口令头**没有被事件消息吃掉**
+    let content = encode_message_body(&MessageBody {
+        body_type: 3,
+        contents: vec![MessageContent {
+            content_type: 0,
+            text: "AI笔记一键提炼".to_string(),
+        }],
+    });
+    let c = l
+        .on_frame(&inbound(CMD_NOTICE, content, NOW + 2), NOW + 2)
+        .unwrap();
+    assert_eq!(
+        c.codes,
+        vec!["AI笔记一键提炼".to_string()],
+        "头后面那条真内容要接上"
+    );
+    assert_eq!(l.codes().to_vec(), vec!["AI笔记一键提炼".to_string()]);
+}
+
+// ══════════ 只认实拍前缀「小红花口令：」（2026-10-09 用户口径）══════════
+//
+// 判据出处：`../mcloud-back/docs/capture/app-live-ws-samples.txt:141`
+//   `.2 = "小红花口令：一键9图出圈"      ← 文本在这里`
+// 取前缀**之后**的部分才是口令；不带前缀的（事件消息、闲聊）整条丢弃。
+// 下面这几条用的就是用户那次运行的样本（两条真口令 + 五条事件消息）。
+
+/// ⭐⭐ 用户日志里那 5 条事件消息 ⇒ 一条口令都不出。
+///
+/// # 为什么特意**不带** `msgType`
+///
+/// `ext.msgType` 那条黑名单是另一层（实拍 2 / 5 / 6 / 7）。这一条钉的是
+/// **前缀那一层自己也够**：缺键（或上游哪天冒出一个没观测到的取值）时，
+/// 事件消息照样进不来 —— 否则"上游加了一种新提示"就会变成一串假口令。
+#[test]
+fn event_texts_without_msg_type_never_become_kouling() {
+    let mut l = listener();
+    for (i, text) in [
+        "加入直播间",
+        "送了1个火箭",
+        "送了1个棒棒糖",
+        "点赞",
+        "中国移动云盘",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let actions = l.on_frame(&make_danmaku(text), NOW + i as i64).unwrap();
+        assert!(
+            actions.codes.is_empty(),
+            "【{text}】不带实拍前缀 ⇒ 不许变成口令（这就是用户日志里那几行）"
+        );
+        assert_eq!(
+            actions.danmaku, text,
+            "【{text}】它仍然算「弹幕」（日志口径）"
+        );
+    }
+    assert!(l.codes().is_empty(), "五条事件 ⇒ 口令列表为空");
+}
+
+/// ⭐⭐ 混合样本：**两条真口令 + 五条事件** ⇒ 只出那 2 条。
+#[test]
+fn mixed_stream_keeps_only_the_two_real_codes() {
+    let mut l = listener();
+    let stream = [
+        "小红花口令：一键9图出圈",
+        "加入直播间",
+        "送了1个火箭",
+        "小红花口令：中秋美好存云盘",
+        "送了1个棒棒糖",
+        "点赞",
+        "中国移动云盘",
+    ];
+    let mut got: Vec<String> = Vec::new();
+    for (i, text) in stream.into_iter().enumerate() {
+        let actions = l.on_frame(&make_danmaku(text), NOW + i as i64).unwrap();
+        got.extend(actions.codes);
+    }
+    assert_eq!(got, ["一键9图出圈", "中秋美好存云盘"], "只出两条真口令");
+    assert_eq!(l.codes(), ["一键9图出圈", "中秋美好存云盘"]);
+}
+
+/// ⭐⭐ 真口令**不会**给下一条弹幕挂上"整条即口令"的状态 —— 本轮修的那个 bug。
+///
+/// 用户日志的顺序就是：`口令：AI笔记一键提炼` 后面跟着
+/// `口令：中国移动云盘` / `口令：加入直播间` / `口令：送了1个火箭` / `口令：点赞`。
+/// 根因是判据曾经是**含「口令」二字**，而实拍那条**完整**口令
+/// `小红花口令：AI笔记一键提炼` 也含它 ⇒ 它的下一条弹幕整条被当成口令。
+#[test]
+fn a_complete_prefixed_code_does_not_arm_the_join_state() {
+    let mut l = listener();
+    let first = l
+        .on_frame(&make_danmaku("小红花口令：AI笔记一键提炼"), NOW)
+        .unwrap();
+    assert_eq!(first.codes, ["AI笔记一键提炼"], "真口令照常挑出来");
+
+    for (i, text) in ["中国移动云盘", "加入直播间", "送了1个火箭", "点赞"]
+        .into_iter()
+        .enumerate()
+    {
+        let actions = l.on_frame(&make_danmaku(text), NOW + 1 + i as i64).unwrap();
+        assert!(
+            actions.codes.is_empty(),
+            "【{text}】不该被当成口令 —— 完整口令没有给下一条挂拼接状态"
+        );
+    }
+    assert_eq!(l.codes(), ["AI笔记一键提炼"]);
+}
+
+/// 跨帧拼接的头判据是**严格**的"整条只是个口令头"，不是"含口令二字"。
+#[test]
+fn the_join_head_predicate_is_strict() {
+    assert!(
+        crate::live_kouling::is_kouling_head("复制口令1："),
+        "TS 那种「头 + 正文」的头仍然算头（既有逻辑不回归）"
+    );
+    assert!(
+        crate::live_kouling::is_kouling_head("小红花口令："),
+        "裸前缀也是个头（口令在下一帧）"
+    );
+    assert!(
+        !crate::live_kouling::is_kouling_head("小红花口令：一键9图出圈"),
+        "整条口令**不是**头 —— 宽松判据正是事件消息混进口令列表的源头"
+    );
+}
+
+/// ⭐ 多 body 拼接：`小红花口令：` + `一键9图出圈` 落在**同一条**弹幕的两个 body 上。
+///
+/// 出处：`app-live-ws-samples.txt:534-537`（"一条弹幕可以有**多个** body，要拼起来"）。
+#[test]
+fn two_bodies_in_one_danmaku_join_into_one_code() {
+    let payload = encode_message_body(&MessageBody {
+        body_type: 3,
+        contents: vec![
+            MessageContent {
+                content_type: 0,
+                text: "小红花口令：".to_string(),
+            },
+            MessageContent {
+                content_type: 0,
+                text: "一键9图出圈".to_string(),
+            },
+        ],
+    });
+    let mut l = listener();
+    let actions = l.on_frame(&inbound(CMD_NOTICE, payload, NOW), NOW).unwrap();
+    assert_eq!(
+        actions.danmaku, "小红花口令：一键9图出圈",
+        "两个 body 拼成一条"
+    );
+    assert_eq!(actions.codes, ["一键9图出圈"], "拼完之后才认得出前缀");
+    assert_eq!(l.codes(), ["一键9图出圈"]);
+}
+
+/// 同一条带前缀的口令**刷屏** ⇒ 只记一次（去重不回归）。
+#[test]
+fn repeated_prefixed_codes_are_still_deduplicated() {
+    let mut l = listener();
+    let first = l
+        .on_frame(&make_danmaku("小红花口令：一键9图出圈"), NOW)
+        .unwrap();
+    assert_eq!(first.codes, ["一键9图出圈"]);
+
+    let second = l
+        .on_frame(&make_danmaku("小红花口令：一键9图出圈"), NOW + 1)
+        .unwrap();
+    assert!(
+        second.codes.is_empty(),
+        "重复口令不该再报：{:?}",
+        second.codes
+    );
+    assert_eq!(l.codes(), ["一键9图出圈"], "全局只留一条");
 }

@@ -6,7 +6,7 @@
 use super::*;
 use mcloud_core::{
     AccountSettings, AccountStore, AuthInfo, DeviceId, LogLevel, LogStore, PipelineStore, RunStore,
-    ScheduleStore,
+    ScheduleStore, LOG_LIMIT_PER_RUN,
 };
 
 fn tmpdir(tag: &str) -> PathBuf {
@@ -356,6 +356,437 @@ async fn empty_log_append_is_a_noop() {
         AppendOutcome::Appended
     );
     assert!(s.logs(RunId::new(1), None).await.unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ── 运行日志：**只在磁盘上**（2026-10-09 用户口径）─────────────────────────
+//
+// 用户口径：「日志和历史不要全加入内存，使用本地记录，让用户设置最大大小」✓。
+//
+// 这一组钉住存储层那一半：
+// * 日志的家是 `data/logs/<id>.json`，**按需读盘**（启动不再全量读 ✓）；
+// * `history.json` **不再内联**日志（`RunRecord.logs` 只是接口形状 ✓）；
+// * 老 `history.json` 里那份内联日志**迁移**进日志文件（不丢 ✓）；
+// * 三个上限（历史条数 / 单次行数 / 目录总量）真的生效 ✓。
+
+/// 造一条**带内联日志**的运行记录（`n` 行）—— 模拟 2026-10-09 之前落盘的形状。
+fn run_record_with_logs(id: u64, n: usize) -> RunRecord {
+    let mut r = run_record(id, RunStatus::Done);
+    r.logs = (0..n)
+        .map(|i| mcloud_core::RunLogLine {
+            level: LogLevel::Info,
+            kind: mcloud_core::LogKind::Info,
+            message: format!("第 {i} 行"),
+            at_ms: 1_700_000_000_000 + i as i64,
+        })
+        .collect();
+    r
+}
+
+/// ⚠ 跨 crate 的钉子：`mcloud_store::HISTORY_LIMIT` 必须**等于**设置里那一格的默认值。
+///
+/// 两个常量在两个 crate 里（core 不能依赖 store ⇒ 对照只能放在这边 ✓）。
+/// 漂了的话，"没改过设置的实例"行为会与改之前不一样 ✗ —— 而那种回归最难查。
+#[test]
+fn the_history_default_matches_the_store_constant() {
+    assert_eq!(
+        HISTORY_LIMIT,
+        mcloud_core::DEFAULT_HISTORY_LIMIT,
+        "两个 crate 的默认值必须一致"
+    );
+    assert_eq!(
+        mcloud_core::AppSettings::default().history_limit,
+        HISTORY_LIMIT
+    );
+}
+
+/// 造 `n` 行日志（`seq = 1..=n` ✓）。
+fn log_lines(run: u64, n: usize) -> Vec<LogLine> {
+    (1..=n as u64)
+        .map(|i| LogLine::new(run, LogLevel::Info, format!("l{i}"), 0, Seq(i)))
+        .collect()
+}
+
+/// ⭐ 日志落在**自己的文件**里，换个进程（新 `JsonStore`）逐行读得回来；
+/// 而 `history.json` 里**一个字节的日志都没有** ✓。
+#[tokio::test]
+async fn run_logs_live_in_their_own_file_and_survive_a_reopen() {
+    let d = tmpdir("runlog-file");
+    {
+        let s = JsonStore::open(&d).unwrap();
+        s.upsert_run(&run_record(7, RunStatus::Done)).await.unwrap();
+        let lines: Vec<LogLine> = (1..=5)
+            .map(|i| {
+                LogLine::new(
+                    7,
+                    LogLevel::Info,
+                    format!("第 {i} 行"),
+                    100 + i as i64,
+                    Seq(i),
+                )
+                .with_kind(mcloud_core::LogKind::Success)
+            })
+            .collect();
+        s.append_logs(RunId::new(7), &lines).await.unwrap();
+        assert!(s.log_path(RunId::new(7)).exists(), "日志该落成自己的文件");
+    }
+
+    // 重启那一半：新实例（= 新进程）按 id 取
+    let s2 = JsonStore::open(&d).unwrap();
+    let got = s2.logs(RunId::new(7), None).await.unwrap();
+    assert_eq!(got.len(), 5, "重启后日志一行都不能少");
+    assert_eq!(got[0].message, "第 1 行");
+    assert_eq!(got[0].at_ms, 101, "时刻要逐行保住（回看按它显示）");
+    assert_eq!(
+        got[0].kind,
+        mcloud_core::LogKind::Success,
+        "分类也要保住（界面按它上徽章与颜色）"
+    );
+
+    // ⭐ 历史文件里**没有**日志 —— 这一格正是"不要全加入内存"的落点 ✓
+    let raw = std::fs::read_to_string(d.join(files::RUNS)).unwrap();
+    assert!(
+        !raw.contains("第 1 行"),
+        "history.json 里不该再有日志正文，实际：{raw}"
+    );
+    let on_disk: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(
+        on_disk.as_array().unwrap()[0].get("logs").is_none(),
+        "记录里连 `logs` 键都不该出现，实际：{raw}"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// ⭐⭐ 启动**不再把日志读进内存**（这条就是用户那句口径的直接钉子）。
+///
+/// 盘上有 5 个 run 的日志文件，新开的 store 里缓存应当**是空的** ✓；
+/// 而按 id 一取就回来了（按需读盘 ✓）。
+#[tokio::test]
+async fn startup_does_not_load_logs_into_memory() {
+    let d = tmpdir("runlog-lazy");
+    {
+        let s = JsonStore::open(&d).unwrap();
+        for id in 1..=5u64 {
+            s.upsert_run(&run_record(id, RunStatus::Done))
+                .await
+                .unwrap();
+            s.append_logs(RunId::new(id), &log_lines(id, 3))
+                .await
+                .unwrap();
+        }
+    }
+    // 新实例：装载时一个日志文件都不读
+    let s2 = JsonStore::open(&d).unwrap();
+    assert_eq!(s2.cached_log_runs(), 0, "启动不该把日志读进内存");
+    // 但按需读得回来（磁盘才是真源 ✓）
+    assert_eq!(s2.logs(RunId::new(3), None).await.unwrap().len(), 3);
+    assert_eq!(s2.cached_log_runs(), 1, "读过之后才进缓存");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 缓存**有界**：超过 `LOG_CACHE_RUNS` 个 run 就按最近使用淘汰；
+/// 被挤出去的那个**数据不丢**（下次访问从盘上读回来 ✓）。
+#[tokio::test]
+async fn the_log_cache_is_bounded_and_eviction_loses_nothing() {
+    let d = tmpdir("runlog-cache");
+    let s = JsonStore::open(&d).unwrap();
+    let n = (LOG_CACHE_RUNS + 2) as u64;
+    for id in 1..=n {
+        s.append_logs(RunId::new(id), &log_lines(id, 2))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        s.cached_log_runs(),
+        LOG_CACHE_RUNS,
+        "缓存必须封顶（否则又变成'全在内存里'✗）"
+    );
+    // 最早那个被挤出去了 —— 但盘上还在、读得回来 ✓
+    assert_eq!(
+        s.logs(RunId::new(1), None).await.unwrap().len(),
+        2,
+        "被淘汰只是离开内存，不是丢数据"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// ⭐ 老 `history.json` 里**内联**的那份日志要**迁移**进日志文件（一次性 ✓）——
+/// 不迁就等于把升级前的回看日志丢了 ✗。
+#[tokio::test]
+async fn inline_logs_from_old_files_are_migrated_into_the_log_file() {
+    let d = tmpdir("runlog-migrate");
+    // 手写一份"旧形状"的 history.json（内联 logs ✓，没有 data/logs/ 目录）
+    let runs = vec![run_record_with_logs(1, 3), run_record(2, RunStatus::Done)];
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join(files::RUNS), serde_json::to_vec(&runs).unwrap()).unwrap();
+
+    let s = JsonStore::open(&d).unwrap();
+    let got = s.logs(RunId::new(1), None).await.unwrap();
+    assert_eq!(got.len(), 3, "老日志必须被搬进日志文件，而不是丢掉");
+    assert_eq!(got[0].message, "第 0 行");
+    assert_eq!(
+        got[0].seq,
+        Seq(1),
+        "老那份没有序号 ⇒ 按顺序现编（顺序即真相）"
+    );
+    assert_eq!(got[2].seq, Seq(3));
+    assert!(s.log_path(RunId::new(1)).exists(), "日志文件该被建出来");
+    // ⭐ 盘上那份也**立刻**变小（不是等下一次运行才写 ✓）：内联日志搬完就从
+    // `history.json` 里消失 —— 否则用户"改了却看不出变化" ✓
+    let raw = std::fs::read_to_string(d.join(files::RUNS)).unwrap();
+    assert!(
+        !raw.contains("第 0 行"),
+        "迁移之后 history.json 里不该还留着内联日志：{raw}"
+    );
+    // 内存里那份也清掉了（磁盘那份才是真源 ✓）
+    assert!(
+        s.run(RunId::new(1)).await.unwrap().unwrap().logs.is_empty(),
+        "迁移完记录里不该还留着内联日志"
+    );
+
+    // 再写一次盘：`logs` 键彻底消失（以后不会再内联 ✓）
+    s.upsert_run(&run_record(3, RunStatus::Done)).await.unwrap();
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(d.join(files::RUNS)).unwrap()).unwrap();
+    assert!(
+        after
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r.get("logs").is_none()),
+        "迁移之后不该再有内联日志：{after}"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 老数据兼容：**没有 `logs` 键**的记录照旧读得进来、取详情不报错（空日志 ✓）。
+///
+/// 盘上确实有这种记录 —— 加那一格之前落盘的（2026-10-09 实测 `data/history.json`
+/// 200 条里还有 29 条是这种 ✓）。
+#[tokio::test]
+async fn records_without_a_logs_key_still_load_and_keep_their_summary() {
+    let d = tmpdir("runlog-legacy");
+    // 先正常写一条，再**手工把 `logs` 键删掉** —— 精确模拟"加那一格之前"的落盘形状
+    {
+        let s = JsonStore::open(&d).unwrap();
+        s.upsert_run(&run_record(1, RunStatus::Done)).await.unwrap();
+    }
+    let p = d.join(files::RUNS);
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    v.as_array_mut().unwrap()[0]
+        .as_object_mut()
+        .unwrap()
+        .remove("logs");
+    let legacy_shape = v.as_array().unwrap()[0].clone();
+    std::fs::write(&p, serde_json::to_string(&v).unwrap()).unwrap();
+
+    let s = JsonStore::open(&d).unwrap();
+    let got = s
+        .run(RunId::new(1))
+        .await
+        .unwrap()
+        .expect("老记录照旧读得进");
+    assert!(got.logs.is_empty(), "没这一格 ⇒ 空日志，不是报错");
+    // 汇总字段一个都不能丢（逐字段比：读回来的形状应当与盘上那份**一字不差**）
+    assert_eq!(
+        serde_json::to_value(&got).unwrap(),
+        legacy_shape,
+        "读回来的记录必须与盘上那份完全一致（含 outcome/details/status ✓）"
+    );
+
+    // 再写一次盘：不许**凭空长出** `"logs": []`
+    s.upsert_run(&run_record(2, RunStatus::Done)).await.unwrap();
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    let old = after
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == 1)
+        .expect("老记录还在");
+    assert!(
+        old.get("logs").is_none(),
+        "空日志不该写回 `logs` 键，实际：{old}"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// `history.json` 的体积**不再随日志长度涨**（日志已经搬去自己的文件 ✓）。
+///
+/// 这是"最坏体积"那条旧用例的替代：以前 200 条 × 200 行内联日志能到 MB 级 ✓，
+/// 现在无论引擎往记录里塞多少行，**写盘那份都只有汇总** ✓（`persist_runs` 与
+/// `upsert_run` 两道都把 `logs` 清掉 ✓）。
+#[tokio::test]
+async fn history_json_does_not_grow_with_logs() {
+    let d = tmpdir("history-size");
+    let s = JsonStore::open(&d).unwrap();
+    // 200 条记录，每条都塞满 200 行日志（模拟"引擎还在攒"的中间态）
+    for i in 1..=HISTORY_LIMIT as u64 {
+        s.upsert_run(&run_record_with_logs(i, mcloud_core::RUN_LOG_LIMIT))
+            .await
+            .unwrap();
+    }
+    let raw = std::fs::read_to_string(d.join(files::RUNS)).unwrap();
+    assert!(
+        !raw.contains("第 0 行"),
+        "写盘那份不该带日志正文（{HISTORY_LIMIT} 条 × {} 行会到 MB 级 ✗）",
+        mcloud_core::RUN_LOG_LIMIT
+    );
+    assert!(
+        raw.len() < 512 * 1024,
+        "history.json（{HISTORY_LIMIT} 条汇总）不该到 512 KB，实际 {} B",
+        raw.len()
+    );
+    // 记录里那份也没进内存（否则"不要全加入内存"只做了一半 ✓）
+    assert_eq!(s.cached_log_runs(), 0, "记录里带的日志不该被收进缓存");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// ⭐ 日志目录的**总量上限**：超了按**最旧**删文件，运行记录本身不动 ✓。
+#[tokio::test]
+async fn the_log_directory_is_capped_by_bytes_and_drops_the_oldest() {
+    let d = tmpdir("runlog-budget");
+    std::fs::create_dir_all(d.join("logs")).unwrap();
+    // 直接造文件（不必真跑一遍日志流程）：5 个 × 400 KB = 2 MB > 1 MB 的上限
+    for id in 1..=5u64 {
+        let blob: Vec<LogLine> = vec![LogLine::new(
+            id,
+            LogLevel::Info,
+            "y".repeat(400 * 1024),
+            0,
+            Seq(1),
+        )];
+        std::fs::write(
+            d.join("logs").join(format!("{id}.json")),
+            serde_json::to_vec(&blob).unwrap(),
+        )
+        .unwrap();
+    }
+    // 上限设成最小（1 MB ✓）；同时把记录写进 history.json（记录该留着 ✓）
+    let runs: Vec<RunRecord> = (1..=5u64).map(|i| run_record(i, RunStatus::Done)).collect();
+    std::fs::write(d.join(files::RUNS), serde_json::to_vec(&runs).unwrap()).unwrap();
+    let settings = mcloud_core::AppSettings {
+        log_total_mb: 1,
+        ..mcloud_core::AppSettings::default()
+    };
+    std::fs::write(
+        d.join(files::SETTINGS),
+        serde_json::to_vec(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let s = JsonStore::open(&d).unwrap();
+    let stats = s.log_stats().await.unwrap();
+    assert!(
+        stats.bytes <= 1024 * 1024,
+        "启动装载就该把日志目录收到上限内，实际 {} B",
+        stats.bytes
+    );
+    // 留的是**最新**的那几个 ✓（`5.json` 必在，`1.json` 必走）
+    assert!(s.log_path(RunId::new(5)).exists(), "最新的必须留着");
+    assert!(!s.log_path(RunId::new(1)).exists(), "最旧的该被删");
+    // ⚠ 运行记录**一条都不许少**：用户照样看得到"跑过什么、结果如何" ✓
+    assert_eq!(s.runs(usize::MAX).await.unwrap().len(), 5);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 上限**调小之后立刻生效**（不等下一次运行 ✓），而且盘上那份也跟着变小 ✓。
+#[tokio::test]
+async fn shrinking_a_limit_applies_immediately_and_persists() {
+    let d = tmpdir("limit-shrink");
+    let s = JsonStore::open(&d).unwrap();
+    for id in 1..=30u64 {
+        s.upsert_run(&run_record(id, RunStatus::Done))
+            .await
+            .unwrap();
+    }
+    assert_eq!(s.runs(usize::MAX).await.unwrap().len(), 30);
+
+    let mut next = s.settings().await.unwrap();
+    next.history_limit = 20;
+    s.save_settings(&next).await.unwrap();
+    assert_eq!(
+        s.runs(usize::MAX).await.unwrap().len(),
+        20,
+        "调小上限要立刻生效"
+    );
+    // 重启后仍是 20（盘上那份也写了小 ✓）
+    drop(s);
+    let s2 = JsonStore::open(&d).unwrap();
+    assert_eq!(s2.runs(usize::MAX).await.unwrap().len(), 20);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 分页：不带游标取**最后** limit 行；`before` 往上翻；`after` 往下接 ✓。
+#[tokio::test]
+async fn logs_page_walks_the_file_by_cursor() {
+    let d = tmpdir("runlog-page");
+    let s = JsonStore::open(&d).unwrap();
+    s.append_logs(RunId::new(1), &log_lines(1, 10))
+        .await
+        .unwrap();
+
+    let tail = s
+        .logs_page(RunId::new(1), mcloud_core::LogPageQuery::new(3))
+        .await
+        .unwrap();
+    assert_eq!(
+        tail.lines.iter().map(|l| l.seq.get()).collect::<Vec<_>>(),
+        vec![8, 9, 10]
+    );
+    assert_eq!(
+        tail.total, 10,
+        "total 是全部行数（界面显示'已显示 N / 共 M'）"
+    );
+
+    let up = s
+        .logs_page(
+            RunId::new(1),
+            mcloud_core::LogPageQuery {
+                before: Some(Seq(8)),
+                ..mcloud_core::LogPageQuery::new(3)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        up.lines.iter().map(|l| l.seq.get()).collect::<Vec<_>>(),
+        vec![5, 6, 7]
+    );
+
+    let down = s
+        .logs_page(
+            RunId::new(1),
+            mcloud_core::LogPageQuery {
+                after: Some(Seq(7)),
+                ..mcloud_core::LogPageQuery::new(2)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        down.lines.iter().map(|l| l.seq.get()).collect::<Vec<_>>(),
+        vec![8, 9]
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 单次运行的行数上限是**设置**说了算（不是写死的常量 ✓）。
+#[tokio::test]
+async fn the_per_run_limit_comes_from_the_settings() {
+    let d = tmpdir("runlog-perrun");
+    let s = JsonStore::open(&d).unwrap();
+    let mut next = s.settings().await.unwrap();
+    next.log_limit_per_run = mcloud_core::LOG_LIMIT_PER_RUN_RANGE.0; // 200
+    s.save_settings(&next).await.unwrap();
+
+    s.append_logs(RunId::new(1), &log_lines(1, 300))
+        .await
+        .unwrap();
+    let kept = s.logs(RunId::new(1), None).await.unwrap();
+    assert_eq!(kept.len(), 200, "上限该按设置走");
+    assert_eq!(kept.last().unwrap().seq, Seq(300), "留最新那 200 行");
     let _ = std::fs::remove_dir_all(&d);
 }
 

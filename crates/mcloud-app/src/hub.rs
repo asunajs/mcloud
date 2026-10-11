@@ -32,7 +32,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use mcloud_core::{
-    AppendOutcome, Clock, EventSink, LogLine, RunEvent, RunId, Seq, SeqAllocator, Sequenced, Store,
+    log_line_of, AppendOutcome, EventSink, LogLine, RunEvent, RunId, Seq, SeqAllocator, Sequenced,
+    Store,
 };
 use tokio::sync::broadcast;
 
@@ -136,7 +137,6 @@ pub struct Delivery {
 pub struct EventHub {
     inner: Mutex<Inner>,
     store: Arc<dyn Store>,
-    clock: Arc<dyn Clock>,
     /// 用于唤醒正在等待的 SSE 任务，避免忙轮询。
     notify: broadcast::Sender<RunId>,
     /// `run_id → 账号`：让**每一行**日志都认得出主人（见 [`crate::run_labels`]）。
@@ -157,12 +157,15 @@ struct Inner {
 }
 
 impl EventHub {
-    pub fn new(store: Arc<dyn Store>, clock: Arc<dyn Clock>) -> Self {
+    /// ⚠ 2026-10-09 起不再要 `Clock`：落盘那一行的时刻取**事件自己的 `at_ms`**
+    /// （见 `mcloud_core::log_line_of` ✓）—— 以前用"中枢收到事件那一刻"的钟，
+    /// 而攒批是 2 秒一次、`Details` 之类的构造点又不带时刻 ⇒ 只能写 0 ✗。
+    /// 事件本来就带着准确的时刻（`TaskContext::log` 打的 ✓），用它更准 ✓。
+    pub fn new(store: Arc<dyn Store>) -> Self {
         let (notify, _) = broadcast::channel(256);
         Self {
             inner: Mutex::new(Inner::default()),
             store,
-            clock,
             notify,
             labels: RunLabels::default(),
         }
@@ -350,7 +353,6 @@ impl EventHub {
     fn publish(&self, event: RunEvent) -> Seq {
         let run_id = event.run_id();
         let is_terminal = matches!(event, RunEvent::Finished { .. });
-        let at_ms = self.clock.now_ms();
 
         let seq = {
             let mut inner = self.lock();
@@ -383,15 +385,10 @@ impl EventHub {
                 sub.queue.push(item.clone());
             }
 
-            // 日志进待落盘缓冲
-            if let RunEvent::Log { level, message, .. } = &event {
-                inner.pending.entry(run_id).or_default().push(LogLine::new(
-                    run_id.get(),
-                    *level,
-                    message.clone(),
-                    at_ms,
-                    seq,
-                ));
+            // 日志进待落盘缓冲（`Log` 与 `Progress` 都进 —— 判据只有一份，
+            // 见 `mcloud_core::log_line_of` ✓）。
+            if let Some(line) = log_line_of(&event, seq) {
+                inner.pending.entry(run_id).or_default().push(line);
             }
 
             if is_terminal {

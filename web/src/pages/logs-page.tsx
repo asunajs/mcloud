@@ -6,11 +6,31 @@
  * * 历史页 = 每次运行的记录，以及**那次运行**的日志 ✓；
  * * 本页   = **整个进程**看到的日志 ✓（调度器 ✓、凭据续期 ✓、上游 http ✓）。
  *
- * 数据来自 `/api/logs` ✓ —— 内存里的环形缓冲（最近 2000 行 ✓，见
- * `crates/mcloud-server/src/logbuf.rs` ✓）。⚠ 它是"最近这些"而不是"全部历史"：
- * 完整历史在日志文件里 ✓；这一页解决的是"不开终端就能看" ✓。
+ * 数据来自 `/api/logs` ✓ —— 内存里那圈（最近 `serverLogMemLines` 行 ✓，见
+ * `crates/mcloud-server/src/logbuf.rs` ✓）＋ 磁盘上按需读的更早那些 ✓。
+ *
+ * # 2026-10-09：**分页**（用户口径「大日志做虚拟加载或者分页，避免一次加载太多」✓）
+ *
+ * 在这之前这一页只拿"环里那 2000 行"——环一满，更早的日志**压根取不到** ✗
+ * （而磁盘上其实一直存着，见 `data/server-logs/<日期>.jsonl` ✓）。
+ * 现在拆成两段（**渲染顺序 = `older` ++ `live`** ✓）：
+ *
+ * * `live`  —— 轮询来的最新一页 ✓（不带 `before`，与今天完全一样 ✓）；
+ * * `older` —— 用户按「加载更早的 N 行」往上翻出来的历史 ✓（`before=<当前最上面那行的 seq>` ✓）。
+ *
+ * ⚠⚠ 三条必须守住的（每一条都是"不做就白做"）：
+ *
+ * 1. **轮询只能动 `live`**：绝不能把 `older` 冲掉 ✗ —— 用户翻上去看完历史、
+ *    下一次轮询把历史全抹了 = 这个功能白做 ✓（`load()` 里只写 `live.value` ✓）。
+ * 2. **已有行的对象身份必须保持不变**：框架的 `createFor` 靠"key 与 item 都没变"
+ *    复用行节点（`ui/log-identity.ts` 与 `ui/virtual-rows.ts` 的文件头写着这条契约 ✓）
+ *    ⇒ 往上翻页只**往 `older` 前面插入**新取到的行，别 `map` 重建整个数组 ✗
+ *    （重建 = 已渲染的每一行都被重建 ⇒ 用户选中的文字与滚动位置全丢 ✗）。
+ *    同一口径的现成范例是「运行日志」弹窗（`history-page.tsx` 的 `loadEarlier()` ✓）。
+ * 3. **滚动位置要补偿**：往**上**拼一页之后，用户正看的那几行在像素坐标上整体下移了
+ *    `页长 × 行高` ⇒ 不补的话"一点按钮，眼前的内容就跳走"✗（做法见 `loadEarlier()` ✓）。
  */
-import { onMounted, onUnmounted, ref } from '@asunajs/lite'
+import { batch, onMounted, onUnmounted, ref } from '@asunajs/lite'
 
 import { listServerLogs, type ServerLogLine } from '../api'
 import { accountName, accountNames, refreshAccountNames } from '../account-names'
@@ -18,7 +38,7 @@ import { currentIsAdmin } from '../ui/auth-signal'
 import { IconSearch } from '../ui/icons'
 import { reuseLogLines } from '../ui/log-identity'
 import { MARK, TONE, type LogKind } from '../ui/log-panel'
-import { createVirtualRows } from '../ui/virtual-rows'
+import { createVirtualRows, ESTIMATE } from '../ui/virtual-rows'
 import { fmtStampMs } from '../ui/time'
 
 /** 级别档位。⚠ 语义是"**不低于**它" ✓（与后端 `min_level` 同一口径 ✓）。 */
@@ -111,6 +131,19 @@ interface AccOption {
 const SCROLL_ID = 'logs-scroll'
 
 /**
+ * 「加载更早」一次取多少行（2026-10-09 分页 ✓）。
+ *
+ * ⚠ 它与实时那一份的 [`RING_LINES`]（2000）**不是一回事**，别合并：
+ * 那是"打开页面先铺多少"（要够铺满好几屏 ✓），这是"用户主动往上翻一次要多少" ✓。
+ * 500 行 ≈ 60 KB（实测均 119 B/行 ✓）—— 翻一次就到手好几屏，而"再往上"是用户自己的动作 ✓
+ * （与「运行日志」弹窗的 `LOG_PAGE` 同一个数、同一条理由 ✓）。
+ *
+ * ⚠ 后端会把 `limit` 夹到自己的上限（`logbuf::MAX_PAGE` = 5000 ✓）⇒ 要多了不会报错、
+ * 只会少给 ✓；而"回满了没有"**不能**拿"要了 500 就一定有 500"当判据 ✗（见 `loadEarlier()` ✓）。
+ */
+const LOG_PAGE = 500
+
+/**
  * 窗口化渲染的状态（**模块级单例**：这一页同时只会挂一份 ✓）。
  *
  * 放模块级而不是组件体里：组件体每次重渲染都会跑 ✓ ⇒ 建在那里等于每帧新建一份、
@@ -125,7 +158,7 @@ const vr = createVirtualRows()
  * 为什么必须有它：这一页每 2 s 打一次 `/api/logs`，而单请求超时上限是 **30 s**
  * （`api.ts` 的 `REQUEST_TIMEOUT_MS`）—— 慢后端/抖动网络下一屏还没回来，
  * 后面几拍已经发出去 ⇒ 同时有好几个 `load()` 在飞。
- * 各拍的收尾是**无条件**写 `lines.value` / `state.value` 的，于是：
+ * 各拍的收尾是**无条件**写 `live.value` / `state.value` 的，于是：
  * * 先发的**旧**响应后到 ⇒ 把新一屏整份盖回旧内容 ✗；
  * * 旧的那拍超时失败、新的那拍已经成功 ⇒ `state.value = 'error'`
  *   把**已经渲染好**的页面重新打成红屏 ✗（用户看到的是"刚才还好好的"）。
@@ -146,7 +179,33 @@ let loadSeq = 0
 const TAIL_SLACK = 32
 
 export const LogsPage = () => {
-  const lines = ref<ServerLogLine[]>([])
+  /**
+   * 列表拆成**两段**（2026-10-09 分页 ✓，见文件头）。
+   *
+   * ⚠ 渲染顺序 = `older` ++ `live`（时间序 ✓）—— 取"这一页现在有哪些行"一律走
+   * [`allLines`] ✓，**别**在别处各拼一次（拼错顺序的表现是"新行跑到上面去了"✗）。
+   */
+  /** 轮询来的**最新一页** —— 只有它会每 2 s 被整份换掉 ✓。 */
+  const live = ref<ServerLogLine[]>([])
+  /**
+   * 用户往上翻出来的**历史页**（按时间正序 ✓，越靠前越旧 ✓）。
+   *
+   * ⚠⚠ 轮询**不许碰它**（`load()` 里只写 `live.value` ✓）—— 否则用户翻上去看完历史，
+   * 下一次轮询就把历史全抹了 ✗（那正是这个功能存在的理由 ✓）。
+   */
+  const older = ref<ServerLogLine[]>([])
+  /**
+   * 「可能还有更早的」。
+   *
+   * ⚠ 首屏一律 `true`：实时那一份是"最近 limit 行"，它满不满**说明不了盘上有没有更早的**
+   * （进程刚重启时环是空的、而盘上存着一年的日志 ✓）⇒ 取一次才知道 ✓。
+   * 之后每取一页按**唯一那条判据**更新：**回满 `LOG_PAGE` ⇒ 可能还有；不满 ⇒ 到头了** ✓。
+   */
+  const hasMore = ref(true)
+  /** 正在取更早的（按钮禁用 + 换文案 ✓，兼作重入闸 ✓）。 */
+  const loadingMore = ref(false)
+  /** 翻页失败那句（⚠ **已经取到的行不清空** ⇒ 它可能与行同时在场 ✓）。 */
+  const earlierError = ref('')
   const level = ref('')
   const q = ref('')
   /**
@@ -194,12 +253,17 @@ export const LogsPage = () => {
   let lastPin = Number.NaN
 
   /**
-   * 取回来的行**先不过滤** ✓ —— 级别与关键词都在**本地**筛 ✓。
+   * 取回来的行**先不过滤** ✓ —— 级别 / 关键词 / 类别都在**本地**筛 ✓（见 `visible()`）。
    *
-   * ⚠ 为什么不在请求里带 `level`/`q`（接口支持 ✓，但这一页不用 ✗）：
+   * ⚠ 为什么**实时那一份**不在请求里带 `level`/`q`/`category`（接口支持 ✓，但这一路不用 ✗）：
    * 一次取全之后，点按钮/打字是**立刻**出结果 ✓；
    * 而"每点一下发一次请求"既慢 ✓，又会让刚看到的那屏内容被整体换掉 ✓
    * —— 排查时最烦的就是"内容在我眼前跳走" ✗。
+   *
+   * ⚠⚠ 但**往上翻页那一路要带上筛选条件**（2026-10-09 分页时定的 ✓）：
+   * 翻的是**盘上的老行**，不带条件就会把"用户明明筛过的日志"里不符合的行也翻进来 ✗
+   * —— 本地筛虽然能再滤掉，可那样"一页 500 行"里真正显示的可能只剩几行，
+   * 而 `回满一页` 这条判据也跟着失真 ✓（见 `loadEarlier()` ✓）。
    *
    * ⚠⚠ **取满环（[`RING_LINES`]）**，2026-10-05 改的：原先这里写的是 **800**，理由是
    * "那是**浏览器**要渲染的 DOM 行数" ✗ —— 那条理由**已经被窗口化作废**了 ✓：
@@ -209,13 +273,16 @@ export const LogsPage = () => {
    * 环里的前 40% ✗。
    */
   /**
-   * 每拍取多少行 = 服务端环形缓冲的容量（`crates/mcloud-server/src/logbuf.rs` 的
-   * `RING_CAPACITY` ✓）。
+   * 实时那一份**每拍取多少行**（2026-10-09 起它的角色更明确了：这是"第一屏"的体量，
+   * 再往前的由「加载更早」按 [`LOG_PAGE`] 一页一页取 ✓）。
+   *
+   * ⚠ 它与服务端 `RING_CAPACITY`（`crates/mcloud-server/src/logbuf.rs` ✓）**同一个数**，
+   * 但那边是"内存里留多少"，这边是"一次要多少"——**今天两者相等**，明天不必相等 ✓。
    *
    * ⚠ 这边**不 import 那个常量**（前端/Rust 两个构建单元之间没有共享常量 ✓），所以
-   * 它是个**会漂的副本** —— 但漂了也不出事：服务端 `limit` 会 `clamp(1, RING_CAPACITY)`
-   * （`logbuf.rs` ✓）⇒ 要多了只会**多给不了**、不会报错 ✓，而"环比这个数大"的唯一后果
-   * 是最后那几行看不到（用户下次刷新就赶上了 ✓）。
+   * 它是个**会漂的副本** —— 但漂了也不出事：服务端 `limit` 会 `clamp(1, MAX_PAGE)`
+   * （`logbuf.rs` ✓）⇒ 要多了只会**多给不了**、不会报错 ✓。
+   * ⚠ `regress/bulk.mjs` 会拿这个常量与服务端那个对账（源码级 ✓）⇒ 改一个别忘另一个 ✓。
    */
   const RING_LINES = 2000
   /**
@@ -280,8 +347,9 @@ export const LogsPage = () => {
        * （这一页的用途就是"一边跑一边看、顺手复制一行去查" ✗）。
        * 复用之后：没变的行还是原来那个对象 ⇒ 节点不换、选中不丢 ✓。
        * ⚠ 返回的是**新数组**（信号要变 ✓），只有元素对象被复用 ✓。
+       * ⚠⚠ 只写 `live` —— `older` 那一段**一个字都不许动**（见文件头第 1 条 ✓）。
        */
-      lines.value = reuseLogLines(lines.value, next)
+      live.value = reuseLogLines(live.value, next)
       state.value = 'ready'
       const after = scroller()
       if (after) {
@@ -301,6 +369,102 @@ export const LogsPage = () => {
       // 失败这一支**不碰滚动位置**（页面内容没变，动它反而把人拽走 ✗），
       // 只把窗口的输入同步一下 ✓。
       syncScroll()
+    }
+  }
+
+  /**
+   * 这一页现在**有哪些行** = `older` ++ `live`（时间正序 ✓）。
+   *
+   * ⚠ 结果按**两个数组的身份**缓存一次：窗口化之后这个函数每帧要被调用好几次
+   * （`visible()` / `accOptions()` / 计数 ✓），而每帧现拼一次几千行的数组是白花的 ✓。
+   * 缓存键必须是**两个**数组（只认一个 ⇒ "翻了页但列表没变"这类幽灵 ✗）。
+   * ⚠ `older` 为空时直接交回 `live`（不复制）：这样"没翻过页"的常见情形下，
+   * 这个数组的身份与 `live` 完全同步 ⇒ 与分页之前的行为一模一样 ✓。
+   */
+  let allCache: { o: ServerLogLine[]; l: ServerLogLine[]; out: ServerLogLine[] } | undefined
+  const allLines = (): ServerLogLine[] => {
+    const o = older.value
+    const l = live.value
+    if (allCache && allCache.o === o && allCache.l === l) return allCache.out
+    const out = o.length === 0 ? l : [...o, ...l]
+    allCache = { o, l, out }
+    return out
+  }
+
+  /**
+   * 往上翻一页（「加载更早的 N 行」）。
+   *
+   * # 三条要点
+   *
+   * 1. **游标 = 当前最上面那一行的 `seq`**（`before=<它>` ✓）——
+   *    别自己另存一份"页码 / 第几行"✗：那种东西与真实的行会漂（轮询每 2 s 在动 ✓，
+   *    而且 `seq` 本来就会跳号 ✓），漂了就是**静默取错页**（用户看到的是"翻着翻着重复了"✗）。
+   * 2. **带上当前筛选条件**（`level` / `q` / `category` ✓）：翻的是盘上的老行，
+   *    不带条件就会把"筛过之后不该出现的行"也翻进来 ✗（理由见上面那段注释 ✓）。
+   *    ⚠ **账号**那一格不在这里：接口没有这个参数，它是**本地**筛（`visible()` ✓）。
+   * 3. **拼接与滚动位置同一批生效**：往**上**拼一页之后，用户正看的那几行在像素坐标上
+   *    整体下移了 `页长 × 行高` ⇒ 不补的话"一点按钮，眼前的内容就跳走"✗。
+   *    做法与「运行日志」弹窗（`history-page.tsx::loadEarlier()` ✓）同款，两处细节都是
+   *    "不做就白做"：
+   *    * **先给容器垫高**（临时 `paddingBottom` ✓）：此刻 DOM 还没长，直接赋一个超出
+   *      当前可滚范围的 `scrollTop` 会被浏览器**钳住** ✗；垫一层把范围撑开，挪到位后
+   *      立刻撤掉 —— 全在同一帧里，用户看不到 ✓。
+   *    * **手动派一个 `scroll`**：窗口化读的是 `scrollTop` **信号**，而原生 `scroll`
+   *      事件是**异步**派的 ⇒ 赶不上这一批 ✗（`syncScroll` 是普通监听器 ⇒ 同步调用 ✓）。
+   *    ⚠ 用 `ESTIMATE`（20px）预挪：新行都还没量过，面板自己也是按它估的 ⇒ 两边才对得上 ✓；
+   *    真实高度落定后再补一次（那一句用的是**响应到手那一刻**记下的 `高度/位置`，
+   *    所以轮询在这一页期间插进来的新行也不会把它算歪 ✓）。
+   *
+   * ⚠ 失败**不清空**已经取到的行（清掉等于把用户正在看的东西弄丢 ✗）：就近说一句错误、
+   * 按钮留着 ⇒ 用户可以直接重试 ✓。
+   */
+  const loadEarlier = async () => {
+    if (loadingMore.value) return // 重入闸（按钮那一刻是 disabled ✓，键盘/脚本也可能连点 ✓）
+    const top = allLines()[0]
+    if (!top) return
+    loadingMore.value = true
+    earlierError.value = ''
+    const box = scroller()
+    try {
+      const page = await listServerLogs({
+        limit: LOG_PAGE,
+        before: top.seq,
+        level: level.value,
+        q: q.value,
+        category: category.value,
+      })
+      // ⚠ 唯一那条判据：**回满一页 ⇒ 可能还有；不满 ⇒ 到头了** ✓
+      //（后端会把 `limit` 夹到自己的上限，末尾那页天然不足 ⇒ 别拿"要了 500 就一定有 500"当判据 ✗）
+      hasMore.value = page.length === LOG_PAGE
+      if (page.length === 0) return
+      /**
+       * ⚠ 快照取在**响应到手**这一刻（不是发请求之前 ✓）：请求可能飞几十毫秒到 30 s
+       * （`api.ts` 的超时上限 ✓），这期间用户完全可能已经滚走、轮询也可能已经加过行 ✓。
+       */
+      const at = box ? { top: box.scrollTop, height: box.scrollHeight } : null
+      const added = page.length * ESTIMATE
+      if (box && at) box.style.paddingBottom = `${added}px`
+      batch(() => {
+        // ⚠ **只往前面插**这一页（新对象仅限这一页 ✓）—— 已有行的对象身份一个字都不动 ✓
+        older.value = [...page, ...older.value]
+        if (box && at) {
+          box.scrollTop = at.top + added
+          box.dispatchEvent(new Event('scroll'))
+        }
+      })
+      if (box && at) {
+        box.style.paddingBottom = ''
+        // 真实高度落定后再补一次：预挪用的是估计值（通常是个空操作 ✓）
+        requestAnimationFrame(() => {
+          box.scrollTop = box.scrollHeight - at.height + at.top
+          syncScroll()
+        })
+      }
+    } catch (e) {
+      earlierError.value = `取更早的日志失败：${e instanceof Error ? e.message : String(e)}`
+      syncScroll()
+    } finally {
+      loadingMore.value = false
     }
   }
 
@@ -360,7 +524,9 @@ export const LogsPage = () => {
       }
     | undefined
   const visible = (): ServerLogLine[] => {
-    const src = lines.value
+    // ⚠ 源是 `older` ++ `live`（见 [`allLines`]）—— 别改回只看 `live` ✗：
+    // 那样"翻上去的历史"会在下一次渲染里整段消失（= 这个功能白做 ✓）。
+    const src = allLines()
     const lv = level.value
     const qq = q.value
     const aa = account.value
@@ -460,14 +626,17 @@ export const LogsPage = () => {
   /**
    * 当前数据里**出现过**的账号（去重 ✓、带上人名 ✓）—— 筛选按钮按它铺 ✓。
    *
-   * ⚠ 缓存键要**两个**：`lines` 的身份 ✓ + **名字缓存的 Map 身份** ✓
-   * （`accountNames` 每次更新都换一张新 Map ✓）。只按 `lines` 缓存的话，
+   * ⚠ 源同样是 `older` ++ `live`（[`allLines`] ✓）：只认 `live` 的话，
+   * "只在更早那几页里出现过的账号"就没有按钮 ⇒ 用户按不了它 ✗。
+   *
+   * ⚠ 缓存键要**两个**：那一份行数组的身份 ✓ + **名字缓存的 Map 身份** ✓
+   * （`accountNames` 每次更新都换一张新 Map ✓）。只按行缓存的话，
    * 账号列表**后到**时这份结果不会重算 ⇒ 筛选按钮一直停在哈希上 ✗
    * （`account-names.ts` 模块头记的就是这一类"名字不出现"✓）。
    */
   let accCache: { src: ServerLogLine[]; names: Map<string, string>; out: AccOption[] } | undefined
   const accOptions = (): AccOption[] => {
-    const src = lines.value
+    const src = allLines()
     const nm = accountNames.value
     if (accCache && accCache.src === src && accCache.names === nm) return accCache.out
     const seen = new Map<string, string>()
@@ -661,7 +830,10 @@ export const LogsPage = () => {
       ) : null}
 
       {state.value === 'ready' && visible().length === 0 ? (
-        <p class="text-sm opacity-70">{`没有匹配的日志（账号 / 级别 / 关键词任一不匹配都会没有 ✓；内存里只留最近 ${RING_LINES} 行 ✓，这一页取的就是那全部 ${RING_LINES} 行 ✓）。`}</p>
+        // ⚠ 这里**不提**「加载更早」那颗按钮：这一句与卡片是**互斥**的
+        //（`visible().length === 0` 时卡片整个 `hidden` ⇒ 按钮也看不见 ✗）——
+        // 指着一个看不见的按钮说"用它去翻"只会让人找不到它 ✓。
+        <p class="text-sm opacity-70">{`没有匹配的日志（账号 / 级别 / 关键词任一不匹配都会没有 ✓；已经取到的那几页里没有就是没有 ✓ —— 内存里只留最近 ${RING_LINES} 行，更早的按需从磁盘读 ✓）。`}</p>
       ) : null}
 
       {/*
@@ -679,6 +851,49 @@ export const LogsPage = () => {
       */}
       <div class={`card bg-base-100 shadow-sm ${visible().length > 0 ? '' : 'hidden'}`}>
         <div class="card-body gap-2">
+          {/*
+            ── 「加载更早」+ 「已显示 N 行」（2026-10-09 分页 ✓）────────────────────
+
+            ⚠ 位置：**列表上方、滚动容器外面** —— 更早的行是拼到上面的（时间序 ✓），
+            而放在容器外面 ⇒ 用户滚日志时它不会被滚走 ✓。
+
+            ⚠ 布局：**计数在左、按钮在右**。到头之后按钮整颗撤掉、计数留在原位 ✓ ——
+            反过来放的话，"到头了"会让计数突然横跳一下 ✗。
+
+            ⚠⚠ 计数那一格**常驻**（只有它里面的文本是动态的 ✓）：它是"翻到底了没有"
+            唯一写在界面上的证据 ✓（只给按钮不给计数的话，"点了没反应"与"真的到头了"
+            分不开 ✗ —— 与「运行日志」弹窗同一条口径 ✓）。
+            按钮本身**条件渲染**（`hasMore` ✓，与那个弹窗同款 ✓）：它是本行**最后**一个
+            子节点 ⇒ 撤掉/铺上只动它自己那一个槽（`setNodes` 的 `cur` 是**按槽**记的 ✓），
+            计数与下面那个滚动容器**一个节点都不动** ✓。
+
+            ⚠ 文案/状态：正在取时**禁用**并写「正在取更早的日志 …」✓；
+            禁用是必须的（连点会同时飞两个 `before` 相同的请求 ⇒ 同一页拼两遍 ✗）。
+          */}
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <span class="text-xs opacity-60">{`已显示 ${allLines().length} 行`}</span>
+            {hasMore.value ? (
+              <button
+                type="button"
+                class="btn btn-sm btn-soft min-h-11 md:min-h-0"
+                disabled={loadingMore.value}
+                onClick={() => void loadEarlier()}
+              >
+                {loadingMore.value ? '正在取更早的日志 …' : `加载更早的 ${LOG_PAGE} 行`}
+              </button>
+            ) : null}
+          </div>
+          {/*
+            ⚠ 翻页失败那句（**已经取到的行不清空** ⇒ 它可能与行同时在场 ✓）：
+            就地给一句、按钮留着 ⇒ 用户可以直接重试 ✓。
+            ⚠ 用条件渲染（不是"常驻 + hidden"）：它和按钮一样是本行之外的独立槽，
+            撤掉/铺上不碰别的节点 ✓；而"没有错误时不留一个空 alert 在 a11y 树里"更干净 ✓。
+          */}
+          {earlierError.value ? (
+            <div class="alert alert-soft alert-error text-sm" role="alert">
+              <span class="break-words">{earlierError.value}</span>
+            </div>
+          ) : null}
           <div
             id={SCROLL_ID}
             class="max-h-[70vh] overflow-y-auto overscroll-contain rounded-box bg-base-200 p-3 font-mono text-xs leading-5 [overflow-anchor:none]"

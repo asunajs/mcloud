@@ -677,6 +677,26 @@ impl RedFlowerReport {
         !self.draws.is_empty()
     }
 
+    /// **逐口令**那一组日志行（每个口令一行，保序）。
+    ///
+    /// # 为什么要有它
+    ///
+    /// 只打 [`Self::summary_line`] 的话，用户看到的是"进账 20、成功 2/2"，
+    /// 却**看不出每个口令各领了多少** —— 而"哪条口令只给了 5 朵、哪条给了 15 朵"
+    /// 恰恰是核对时最想看到的。
+    ///
+    /// # 口径与汇总对齐
+    ///
+    /// 单位同用「小红花」，只有"领到"才出现数量（正数），
+    /// 没领到的一律写成 `没领到：<原因>`（**不许只写"失败"两个字**）。
+    ///
+    /// ⚠ **首次参与惊喜奖（③）不进这里**：它是**独立**的一笔奖励，不属于任何一个
+    /// 口令 —— 硬塞进某一行会让"这条口令领到了 10 朵"变成一句假话。
+    /// 它照旧由 [`Self::notes_suffix`] 并在汇总行里（`首次参与 +10`）。
+    pub fn draw_lines(&self) -> Vec<String> {
+        self.draws.iter().map(draw_line).collect()
+    }
+
     /// "这一趟跑成了什么"的那句话，**不含**账号前缀。
     pub fn summary_line(&self) -> String {
         let mut out = format!(
@@ -728,6 +748,62 @@ impl RedFlowerReport {
             return String::new();
         }
         format!("（{}）", parts.join("；"))
+    }
+}
+
+/// 一个口令的结论行（[`RedFlowerReport::draw_lines`] 的单元）。
+///
+/// # 上游到底给不给"这个口令领到多少"
+///
+/// **给**：`draw` 成功时 `result.flowerNum` 就是"这一口令换到几朵"
+/// （实拍字段，见 `mcloud_upstream::live_flower::RedFlowerDrawResult::flower_num`，
+/// TS 参考实现也把它打进日志：`口令「X」领取成功，获得 N 朵`）。
+/// ⇒ 成功那一支能**如实**写出数量，不用推断、不用拿余额去摊。
+///
+/// 失败各支上游**不给数量**（本来也没领到），所以只写原因：
+/// 已兑换过 / 口令无效 / 口令已失效 / 上游业务码 + 原话 / 响应解不开。
+pub fn draw_line(record: &DrawRecord) -> String {
+    let code = &record.code;
+    let outcome = &record.outcome;
+    match outcome.kind {
+        RedFlowerDrawKind::Succeeded => {
+            let num = outcome.result.flower_num;
+            // 奖品名上游给就给：它与 TS 那句 `获得 N 朵（prizeName）` 同源，
+            // 而"同样是 10 朵、奖品名却不同"是核对时会问的问题。
+            if outcome.result.prize_name.is_empty() {
+                format!("口令「{code}」领到 {num} 小红花")
+            } else {
+                format!(
+                    "口令「{code}」领到 {num} 小红花（{}）",
+                    outcome.result.prize_name
+                )
+            }
+        }
+        // ⚠ 措辞与 [`RedFlowerDrawKind`] 各档的语义对齐，别把三种"没领到"
+        // 混成一句：它们的排查方向完全不同（见各变体的文档）。
+        RedFlowerDrawKind::AlreadyDrawn => format!("口令「{code}」没领到：已兑换过"),
+        RedFlowerDrawKind::InvalidKouling => format!("口令「{code}」没领到：口令无效"),
+        RedFlowerDrawKind::KoulingExpired => {
+            format!("口令「{code}」没领到：口令已失效（本场已结束）")
+        }
+        RedFlowerDrawKind::Other => {
+            // 未分类码：把上游**原话**带上（只有 code 的话，排查时还是要再去问一次）。
+            let n = outcome.code.unwrap_or_default();
+            if outcome.message.is_empty() {
+                format!("口令「{code}」没领到：上游回 code={n}")
+            } else {
+                format!(
+                    "口令「{code}」没领到：上游回 code={n}（{}）",
+                    outcome.message
+                )
+            }
+        }
+        RedFlowerDrawKind::Unparsable => match outcome.code {
+            // 与 [`RedFlowerDrawKind::Other`] 分开说：那边是"上游说了个别的码"，
+            // 这边是"上游这次没按信封说话"。
+            None => format!("口令「{code}」没领到：上游响应没有 code 字段"),
+            Some(n) => format!("口令「{code}」没领到：上游回了 code={n} 但没有 result"),
+        },
     }
 }
 
@@ -1892,13 +1968,24 @@ impl Task for LiveRoomTask {
         };
         let result = run.run_account(ctx, &params).await?;
 
-        if !result.codes.is_empty() {
+        // 逐口令一行（**含"这个口令领到多少"**），再打汇总。
+        //
+        // ⚠ 这里从"只打口令名"（`口令：X`）换成 [`RedFlowerReport::draw_lines`]：
+        // 口令名照旧在行里，多出来的是**这一条领到几朵 / 为什么没领到**
+        // —— 用户口径「我总得看到每个口令领取了多少吧」。
+        //
+        // ⚠ 顺序仍是"逐条在前、汇总在后"（与原来一致），且**每个口令只占一行**。
+        if let Some(report) = &result.report {
+            for line in report.draw_lines() {
+                ctx.info(line);
+            }
+            ctx.info(report.summary_line());
+        } else if !result.codes.is_empty() {
+            // 兜底：报告缺席时（理论上不会：有 codes 就一定会走完六步链）
+            // 至少把"投了哪些口令"如实打出来，别把口令名一起丢了。
             for code in &result.codes {
                 ctx.info(format!("口令：{code}"));
             }
-        }
-        if let Some(report) = &result.report {
-            ctx.info(report.summary_line());
         }
         Ok(result.outcome())
     }

@@ -61,7 +61,7 @@
 | **SEC-01** | 高（LAN）/ 中（本机） | DoS | 请求头读超时被静默关闭 + 无连接/并发上限 + 无请求超时 ⇒ slowloris 可按住连接不放 · **部分修复**（见 §9） | `lib.rs:27-49`、`main.rs:113-124` |
 | **SEC-02** | 高（LAN）/ 中（本机） | 登录频率 | 限速器是**全局单键**且被拒不计数 ⇒ 挡不住分布式，反被用来**永久锁死管理员** · **已修复**（见 §9） | `ratelimit.rs:66-87`、`state.rs:61`、`auth.rs:321-336` |
 | **SEC-03** | 中 | 凭据落盘 | 云盘 token/手机号/base64 原串**明文**写 `accounts.json`，无加密与密钥管理 | `mcloud-core/src/account.rs:104-125`、`json_store.rs:623-629` |
-| **SEC-04** | 中 | 出网/SSRF | 推送地址闸可被 **IPv4-mapped IPv6** 与 **WHATWG 十进制/十六进制/八进制 IPv4** 绕过（**已实测**） · **已修复**（见 §9） | `mcloud-app/src/push.rs:994-1060` |
+| **SEC-04** | 中 | 出网/SSRF | 推送地址闸可被 **IPv4-mapped IPv6** 与 **WHATWG 十进制/十六进制/八进制 IPv4** 绕过（**已实测**） · **已修复**（见 §9） · ⚠ 残留的"**域名解析到 127.0.0.1**"（`nip.io`）已实测绕过，**第二层**修在 §15（2026-10-09） | `mcloud-app/src/push.rs:994-1060` |
 | **SEC-05** | 中（多用户） | 越权 | 账号归属可被**覆盖式**写入；构造一条假凭据即可接管/清空他人账号行与历史 · **已修复**（见 §10） | `accounts.rs:195-223`、`login.rs:796-804` |
 | **SEC-06** | 中（多用户） | 越权 | 扫码会话不与发起者绑定，归属归"轮询者" ⇒ QRLJacking · **已修复**（见 §10） | `login.rs:39-43`、`210-236` |
 | **SEC-07** | 中（多用户） | 越权 | 无角色模型：`restart` / `admin/security` / `tasks/*/config` 都是实例级、任何登录用户可改 · **已修复**（实例级动作收归"最早的用户"= 管理员，见 §10） | `system.rs:198-208`、`security.rs:69-90`、`task_config.rs:142-188` |
@@ -218,6 +218,11 @@ http://[::ffff:169.254.169.254]/    project_host=::ffff:169.254.169.254 parse_as
 响应体不回给调用方，但**状态码会进推送日志**（`GET /api/logs` 可读，SEC-11）⇒ 盲 SSRF 探测。
 **闸自己写明的边界**：不做 DNS 解析 ⇒ 挡不住"域名解析到 127.0.0.1"（DNS rebinding / 内网自有域名），
 这条是已知且诚实记录的。
+> ⚠ **2026-10-09 补**：这条边界当天就被**真机实测**踩成了绕过 ——
+> `http://127.0.0.1.nip.io:3998/` 过闸且真的连到本机 ✗（服务日志里那次"指向本机/内网"
+> 是字面量那次；换成 nip.io 就发出去了）。**已修**：闸加了**第二层**（真解析出来的 IP，
+> 逐个判公网 + 服务级开关 `MCLOUD_ALLOW_LOCAL_PUSH` ✓），见 **§15**。
+> ⚠ DNS rebinding / TOCTOU 那一条**仍然没堵**（§15.3 写了做不到的具体理由 ✓）。
 **修复**：不要在字符串上判 —— 先 `url::Url::parse(url)`，取 `url.host()`（它已经是归一化后的
 `Host::Ipv4/Ipv6`），再对 `IpAddr` 判公网；IPv6 分支补 `to_ipv4_mapped()`；
 最好在**连接时**核对实际解析出的 IP（`reqwest` 的 `resolve`/自定义 connector）。
@@ -840,3 +845,90 @@ mcloud user passwd <名字> <新口令>     # 改口令
 * 前端「运维」页签的**可见性**没有自动化用例（门禁那几条不含登录态下的页签断言 ✓）。
 * `mcloud user` 三条命令**没有单元测试**（走的是真 `data/` + 真 argon2 ✓）——
   它的正确性靠 14.6 那条"建出来的账号真能登录"端到端验的 ✓。
+
+---
+
+## 15. 附录：第五批修复记录 —— `SEC-04` 的**第二层**（2026-10-09，方案 B）
+
+### 15.1 起因（上一轮**诚实记录**的那条残留，被真机实测踩到了）
+
+§3 的 `SEC-04` 修的是"**同一把尺子**"（字面量交给 `url` crate 判 ✓），并在末尾
+**明说**了边界：*"不做 DNS 解析 ⇒ 挡不住『域名解析到 127.0.0.1』"*。
+
+2026-10-09 真机实测把这条边界变成了**可利用**的绕过：
+
+```text
+http://127.0.0.1:3998/            ⇒ 服务日志：推送地址指向本机/内网（127.0.0.1），拒绝发送 ✓
+http://127.0.0.1.nip.io:3998/     ⇒ **发出去了** ✗（nip.io 把名字里嵌的 IP 解析出来）
+```
+
+⇒ 只要有一个能建自定义 POST 推送规则的账号（本仓是**多用户**：`admin` + 普通用户，
+推送规则**每用户各配各的** ✓），就能拿服务进程当**内网跳板** ✗ —— 这是权限边界问题，
+不是"管理员自伤"。
+
+### 15.2 落了什么（`mcloud-app/src/push.rs`）
+
+闸从**一层**变**两层**：
+
+| 层 | 函数 | 判据 | 联网 |
+|---|---|---|---|
+| 第一层 | `check_push_url_literal`（`validate_push_url` 是它的薄封装 ✓） | scheme 白名单 + 字面量 IP 必须公网 + 本机/内网**名字**黑名单 | 否 ✓ |
+| 第二层 | `validate_push_url_resolved` | 域名**真解析**，解析出来的**每一个** IP 都必须公网 | 是（**带超时** ✓） |
+
+* 解析走**可替换接口** `PushHostResolver`（生产实现 `SystemResolver` = `tokio::net::lookup_host` ✓）
+  ⇒ 单测给假解析器，**不打真 DNS** ✓（真打 DNS 的单测会在离网机器上红 ✗）。
+* 回环 / 私网 / 链路本地 / `0.0.0.0` / `::` / 组播 / 广播 / `100.64/10`(CGNAT) 一律拒，
+  **有一个不合格就拒** ✓（"一个公网 + 一个 `127.0.0.1`"的应答也拒 ✓）。
+* **DNS 失败 / 超时 / 零地址一律拒** ✓（不许"解析失败就放过" ✗）；超时 3s
+  （`DNS_LOOKUP_TIMEOUT` ✓），失败**只拒这一条推送**、不 panic ✓。
+* 出口接在 `notify.rs::HttpPushTransport::send`（唯一的 HTTP 出口 ✓，所有渠道共用 ✓）。
+
+**开关**（⚠ **服务级**，不是"每个用户自己勾" ✗ —— 否则闸等于没有）：
+
+| 项 | 值 |
+|---|---|
+| 变量名 | `MCLOUD_ALLOW_LOCAL_PUSH` |
+| 真值 | `1` / `true` / `yes`（与 `MCLOUD_COOKIE_SECURE` 同一口径 ✓）；**缺省 = 拒** ✓ |
+| 留痕 | 放行时**必发**一条 `tracing::warn!`（带 URL + 原因 + 变量名 ✓），在 `local_verdict` 里发 ⇒ 调用方**漏不了** ✓ |
+| 可断言证据 | 闸返回 `PushUrlVerdict::AllowedByLocalSwitch { reason }` ⇒ 单测断言 `allowed_by_switch()` ✓（不靠日志 ✓） |
+
+### 15.3 ⚠ 这一批**没做**的（连同理由，别当成已解决）
+
+**DNS rebinding / TOCTOU 没有堵** —— 第二层解析完到 reqwest 真正连上之间 DNS 还能变 ✗。
+"把连接钉在已核过的 IP 上"在本仓**做不到**，理由是具体核过的：
+
+* `reqwest 0.12.28` 的 `ClientBuilder::resolve` / `resolve_to_addrs`
+  （`reqwest-0.12.28/src/async_impl/client.rs:2270` / `:2278`）是 **builder 级**的，
+  **没有** per-request 版本 ✗；
+* 本仓的 HTTP 出口是 `mcloud_core::HttpClient` 抽象，底下 `ReqwestClient`
+  （`mcloud-upstream/src/client.rs:108`）**共用两个预建的 `reqwest::Client`**，
+  且 `HttpRequest`（`mcloud-core/src/traits.rs:26`）里没有"这次请求钉哪个 IP"的位置 ✗；
+* ⇒ 要钉就得给 `HttpClient` 加新方法 + 每次推送现建一个 `Client`（复制 profile /
+  cookie / gzip / 超时一整套设置 = 分叉的来源 ✗）—— 那是**跨 crate 改共享层**，
+  超出"推送 SSRF 闸"这一件事，也和"别顺手改推送别的语义"冲突 ⇒ 本轮不做 ✓。
+
+残留窗口的实际大小：本函数返回（已核过）到 reqwest 自己再解析那一次之间**只隔一个
+函数调用** ⇒ 要打中得精确踩点毫秒级窗口；但**它不是 0** ✓。
+⚠ 另外"重定向"那条路本来就堵着（推送客户端 `no_redirects` ✓）—— 否则
+"先答公网、再 302 到 `127.0.0.1`"根本不用抢窗口 ✗。
+
+### 15.4 测试（`cargo test -p mcloud-app --lib` ✓）
+
+| 用例 | 钉的是什么 |
+|---|---|
+| `push::tests::names_that_resolve_inside_are_refused` | ⚠⚠ **本轮核心**：`127.0.0.1.nip.io` / `10.0.0.5` / `::1` / `169.254.1.1` / `100.64.0.1` / `fe80::1` / `fd00::1` / "公网+回环混合" 全拒；字面量那组不回归 ✓。用例开头**显式断言第一层放行 nip.io** ⇒ 把"洞"钉在测试里 ✓ |
+| `push::tests::names_that_resolve_public_pass` | 解析到公网 ⇒ 过 ✓（别焊死在"永远拒"） |
+| `push::tests::dns_failure_and_timeout_are_refused` | 解析不出来 ⇒ 拒；解析卡住 ⇒ 拒（毫秒级超时，不真等 3s ✓）；**卡住的只拒那一条**、后面的照样过 ✓ |
+| `push::tests::local_switch_allows_every_refused_case_and_marks_it` | 开关开着 ⇒ 上面被拒的**全放行** + `allowed_by_switch()` 标记 + 原因里带 URL；公网那条**不**标成"靠开关" ✓；`file:` / 没 scheme 这类**开关也放不了** ✓ |
+| `push::tests::allow_local_switch_defaults_to_off` | 缺省（读不到）= 拒；`0`/`false`/`no`/空串/`on`/`TRUE`/`2` 一律不当开 ✓ |
+| `push::tests::the_switch_off_leaves_no_mark_and_no_allowance` | 开关**关**着 ⇒ 拒、**不**发 warn、**没有**"因开关放行"的标记 ✓ |
+| `push::tests::the_switch_leaves_a_warn_message_carrying_the_url` | ⚠ 留痕的**正文**逐字钉住（带 URL + 变量名 + "本来要拒的原因" ✓）。**为什么不去真装 subscriber 抓事件**：`with_default` 是线程局部的、`tracing` 的 interest 缓存却是**进程全局**的 ⇒ 并行用例先在没有 subscriber 时碰过同一个 callsite，事件就再也出不来 ✗（**实测**：全量跑绿、`--exact` 单独跑红 —— 这就是"抓 tracing 不稳"的来源 ✓）。"有没有真打出去"由 `local_verdict` 里**唯一那一处** `warn!` 保证 ✓ |
+| `notify::transport_gate_tests::private_targets_never_reach_the_http_layer` | 出口那一层：内网地址（含 nip.io）**一个包都不发** ✓ |
+| `notify::transport_gate_tests::local_push_switch_lets_private_targets_through` | 开关**真的接在出口上**（`calls()` 会涨 ✓） |
+
+### 15.5 文档落点
+
+用户可见的那份在 **`docs/usage.md`**（§2 环境变量表新增一行 `MCLOUD_ALLOW_LOCAL_PUSH` ✓）——
+那里是"拿到二进制怎么用"的唯一入口，也是 `MCLOUD_ADDR` / `MCLOUD_DATA_DIR` 的家 ✓；
+闸本身管什么、为什么默认关，写在 `push.rs::validate_push_url` /
+`validate_push_url_resolved` 的文档注释上（代码旁 ✓）。

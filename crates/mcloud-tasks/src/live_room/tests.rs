@@ -2742,3 +2742,196 @@ fn scrape_interval_covers_a_whole_listen() {
         DEFAULT_LISTEN_SECONDS,
     );
 }
+
+// ══════════════════════ 判据 14：逐口令那一行（"每个口令领了多少"）══════════════════════
+//
+// 用户口径：「我总得看到每个口令领取了多少吧」。
+//
+// ⚠ 断言打在**产生文案的纯函数**（`RedFlowerReport::draw_lines` / `draw_line`）上，
+// **不**去抓 tracing 事件：`with_default` 是线程局部、interest 缓存是进程全局
+// ⇒ 并行用例会互相踩（本仓刚踩过）。纯函数是逐字稳定的。
+
+/// 造一条 `draw` 记录（直接给判定，不走 HTTP —— 断的就是文案）。
+fn draw_rec(code: &str, outcome: RedFlowerDrawOutcome) -> DrawRecord {
+    DrawRecord {
+        code: code.to_string(),
+        outcome,
+    }
+}
+
+/// `draw` 成功那一档的判定（含奖品名）。
+fn draw_success(flower_num: i64, prize_name: &str) -> RedFlowerDrawOutcome {
+    RedFlowerDrawOutcome {
+        kind: RedFlowerDrawKind::Succeeded,
+        result: proto::RedFlowerDrawResult {
+            flower_num,
+            prize_name: prize_name.to_string(),
+            ..Default::default()
+        },
+        code: Some(0),
+        message: "success".into(),
+    }
+}
+
+/// 造一条"上游回了业务码"的判定（**走真实分类函数**，不手搓 kind）。
+fn draw_by_code(code: &str, biz: i64, msg: &str) -> DrawRecord {
+    draw_rec(
+        code,
+        proto::classify_red_flower_draw(&RedFlowerEnvelope::parse(&code_body(biz, msg))),
+    )
+}
+
+/// ⭐ 全部成功 ⇒ 每个口令一行，**带上它领到几朵**（上游 `result.flowerNum`）。
+#[test]
+fn draw_lines_all_succeeded_carry_the_count() {
+    let report = RedFlowerReport {
+        draws: vec![
+            draw_rec("AI笔记一键提炼", draw_success(10, "会员日奖励")),
+            // 奖品名为空时不多打一对空括号。
+            draw_rec("云盘AI高效办公", draw_success(15, "")),
+        ],
+        ..Default::default()
+    };
+
+    assert_eq!(
+        report.draw_lines(),
+        vec![
+            "口令「AI笔记一键提炼」领到 10 小红花（会员日奖励）",
+            "口令「云盘AI高效办公」领到 15 小红花",
+        ]
+    );
+}
+
+/// ⭐ 部分成功部分失败 ⇒ **成功的写数量、失败的写原因**，一行一个、保序。
+///
+/// ⚠ 断言里刻意要求三种"没领到"**措辞各不相同** —— 它们的排查方向不同
+/// （已兑换过 = 口令有效只是领过 / 口令无效 = 抄错了 / 已失效 = 本场结束了）。
+#[test]
+fn draw_lines_mixed_success_and_failure() {
+    let report = RedFlowerReport {
+        draws: vec![
+            draw_rec("甲", draw_success(10, "")),
+            draw_by_code("乙", 200112, "已兑换"),
+            draw_by_code("丙", 200108, "口令无效"),
+        ],
+        ..Default::default()
+    };
+
+    assert_eq!(
+        report.draw_lines(),
+        vec![
+            "口令「甲」领到 10 小红花",
+            "口令「乙」没领到：已兑换过",
+            "口令「丙」没领到：口令无效",
+        ]
+    );
+}
+
+/// ⭐ 全失败 ⇒ 每行都**写清原因**，不许只有"失败"两个字。
+#[test]
+fn draw_lines_all_failed_state_each_reason() {
+    let report = RedFlowerReport {
+        draws: vec![
+            draw_by_code("甲", 200112, "已兑换"),
+            draw_by_code("乙", 200108, "口令无效"),
+            draw_by_code("丙", 200118, "口令已失效"),
+            // 未分类码：把上游**原话**带上，别只留一个数字。
+            draw_by_code("丁", 400001, "上游说了个别的码"),
+            // 响应解不开：没有 code 字段 / 有 code=0 却没有 result，两种分开说。
+            draw_rec(
+                "戊",
+                proto::classify_red_flower_draw(&RedFlowerEnvelope::parse(r#"{"msg":"无码"}"#)),
+            ),
+            draw_rec(
+                "己",
+                proto::classify_red_flower_draw(&RedFlowerEnvelope::parse(
+                    r#"{"code":0,"msg":"success"}"#,
+                )),
+            ),
+        ],
+        ..Default::default()
+    };
+
+    assert_eq!(
+        report.draw_lines(),
+        vec![
+            "口令「甲」没领到：已兑换过",
+            "口令「乙」没领到：口令无效",
+            "口令「丙」没领到：口令已失效（本场已结束）",
+            "口令「丁」没领到：上游回 code=400001（上游说了个别的码）",
+            "口令「戊」没领到：上游响应没有 code 字段",
+            "口令「己」没领到：上游回了 code=0 但没有 result",
+        ]
+    );
+    for line in report.draw_lines() {
+        assert!(line.contains("没领到："), "每行都要写清原因：{line}");
+    }
+}
+
+/// ⭐ 口令数 0 ⇒ 一行都不打（**别刷屏**：没投过口令就没什么可说的）。
+#[test]
+fn draw_lines_empty_when_no_codes() {
+    assert!(RedFlowerReport::default().draw_lines().is_empty());
+}
+
+/// ⭐⭐ 首次参与惊喜奖（③）**不归到任何口令头上**：它是独立的一笔。
+///
+/// 口径：口令那一行说"这条口令领到 10 朵"必须**是真话** ⇒ 那 +10 不能塞进去；
+/// 它照旧由 `summary_line` 的尾巴说（`首次参与 +10`）。
+#[test]
+fn first_participate_bonus_is_not_attributed_to_a_code() {
+    let report = RedFlowerReport {
+        balance_before: balance(100),
+        balance_after: balance(120),
+        first_participate: Some(proto::FirstParticipateOutcome {
+            kind: FirstParticipateKind::Gained,
+            flower_num: 10,
+            ..Default::default()
+        }),
+        draws: vec![draw_rec("甲", draw_success(10, ""))],
+        ..Default::default()
+    };
+
+    assert_eq!(report.draw_lines(), vec!["口令「甲」领到 10 小红花"]);
+    assert!(
+        !report.draw_lines()[0].contains("首次参与"),
+        "独立奖励不许塞进口令那一行"
+    );
+    assert!(
+        report.summary_line().contains("首次参与 +10"),
+        "它该在汇总里：{}",
+        report.summary_line()
+    );
+    assert_eq!(report.gained(), 20, "进账 = ⑥−① = 口令 10 + 首参 10");
+}
+
+/// ⭐ 端到端：真跑六步链（口令 10 + 已兑换）⇒ `draw_lines` 与判定逐字对得上。
+///
+/// 这条钉的是"报告里的 `draws` 真的带着上游 `flowerNum`"（纯函数用例是手搓判定，
+/// 单独跑通不能证明解析那条路）。
+#[tokio::test]
+async fn draw_lines_reflect_the_real_chain() {
+    let (c, _http) = ctx_with(&happy_chain(
+        235,
+        245,
+        Some(give_ok(0)),
+        &[draw_ok(10), code_body(200112, "已兑换")],
+        0,
+    ));
+    let collector = FakeCollector::empty();
+    let params = no_retry_params(&["甲", "乙"]);
+
+    let res = run_with(&collector)
+        .run_account(&c.ctx(), &params)
+        .await
+        .unwrap();
+    let report = res.report.as_ref().unwrap();
+
+    assert_eq!(
+        report.draw_lines(),
+        vec![
+            "口令「甲」领到 10 小红花（小红花）",
+            "口令「乙」没领到：已兑换过"
+        ]
+    );
+}

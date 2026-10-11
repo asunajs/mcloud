@@ -145,6 +145,8 @@ pub fn trace_event(labels: &RunLabels, event: &RunEvent) {
             step,
             total,
             label,
+            // 时刻不参与这行 tracing 文本（它是给人看的一行）⇒ 显式忽略 ✓
+            at_ms: _,
         } => {
             let account = labels.get(*run_id);
             match account {

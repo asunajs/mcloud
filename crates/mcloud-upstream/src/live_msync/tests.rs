@@ -695,7 +695,7 @@ fn comm_sync_ul_and_notice_payload_are_not_interchangeable() {
     let cross_back = decode_comm_sync_ul_meta_payload(&notice_payload).unwrap();
     if let Some(inner) = cross_back {
         assert!(
-            first_content_text(&inner).is_none(),
+            content_frame(&inner).is_none(),
             "NoticePayload.queue 被误当成 CommSyncUL.meta 时不该解出文本"
         );
     }
@@ -717,7 +717,7 @@ fn fallback_level_recovers_a_bare_message_body() {
     // 先确认裸帧确实**不是**合法 CommSyncUL.meta.payload（否则这条测试没意义）
     let outer = decode_comm_sync_ul_meta_payload(&payload).unwrap();
     assert!(
-        outer.is_none() || first_content_text(&outer.unwrap()).is_none(),
+        outer.is_none() || content_frame(&outer.unwrap()).is_none(),
         "裸帧在第一级不该解出文本 —— 否则兜底这一级没被测到"
     );
 
@@ -867,4 +867,191 @@ fn phone_selects_the_guid_branch() {
     let sdk = live_msync_frame("t", None, "ROOM", CMD_SYNC, vec![], 0, &mut rng);
     assert_eq!(sdk.guid.app_key, SDK_APP_KEY);
     assert_eq!(sdk.guid.name, "cmlive_ROOM");
+}
+
+// ══════════════════ 弹幕的 `msgType`（事件消息的判据） ══════════════════
+
+/// 造一个带 `ext` 的 `MessageBody`（`{1: type, 4: [{1: ctype, 2: text}], 5: [KeyValue]}`）。
+///
+/// ⚠ 生产侧**没有**能写 `ext` 的编码器：口令这条链只需要**读**它
+/// （见 [`msg_type_of`] 那段"为什么不把它加进 `MessageBody`"）。
+/// 所以这里按 `proto.ts` 的 `KeyValue` 手工拼 wire 字节：
+/// `{key = 1(string), type = 2(ValueType), oneof value { varintValue = 3 }}`。
+///
+/// `msg_type` 给的是 `(ValueType, 值)` 两截 —— 实拍里两截**都出现过**
+/// （入场/点赞/系统/口令是 `INT(2)`，礼物那一批是 `LLINT(4)`），
+/// 而判据必须只看**值**那一截。
+fn body_with_msg_type(text: &str, msg_type: Option<(u64, u64)>) -> Vec<u8> {
+    let mut body = Vec::new();
+    append_scalar(&mut body, 1, 3); // MessageBody.type = CHATROOM
+    let mut content = Vec::new();
+    append_scalar(&mut content, 1, 0); // Content.type = TEXT
+    append_string(&mut content, 2, text);
+    append_message(&mut body, 4, &content);
+    if let Some((value_type, value)) = msg_type {
+        let mut kv = Vec::new();
+        append_string(&mut kv, 1, EXT_KEY_MSG_TYPE);
+        // ⚠ 两截都用 `_forced`：`ValueType` / 值取 0 时也要写出去，
+        // 否则 `msgType = 0` 这个用例会退化成"没有这个键"，测的东西就变了。
+        append_scalar_forced(&mut kv, 2, value_type);
+        append_scalar_forced(&mut kv, 3, value);
+        append_message(&mut body, 5, &kv);
+    }
+    body
+}
+
+/// `ext.msgType` 被读出来，且**判据只看值、不看 `ValueType`**。
+///
+/// ⚠ 拿 `ValueType` 当门会让 `LLINT(4)` 那一批（实拍里的礼物）**整批漏掉** ——
+/// 表现是"送了1个火箭"照旧被当成口令，而这条测试正是钉它的。
+#[test]
+fn msg_type_is_read_from_ext_regardless_of_value_type() {
+    let int = body_with_msg_type("点赞", Some((2, MSG_TYPE_LIKE)));
+    assert_eq!(
+        extract_danmaku_frame(CMD_SYNC, &int).unwrap().msg_type,
+        Some(MSG_TYPE_LIKE),
+        "INT(2) 的 msgType 要读得到"
+    );
+
+    let llint = body_with_msg_type("送了1个火箭", Some((4, MSG_TYPE_GIFT)));
+    assert_eq!(
+        extract_danmaku_frame(CMD_SYNC, &llint).unwrap().msg_type,
+        Some(MSG_TYPE_GIFT),
+        "LLINT(4) 的 msgType 也要读得到（拿 ValueType 当门就漏这批）"
+    );
+
+    // 值本身是 0 时也要读出来（proto3 的"零值不写"不适用于 KeyValue 的 oneof 值）
+    let zero = body_with_msg_type("X", Some((2, 0)));
+    assert_eq!(
+        extract_danmaku_frame(CMD_SYNC, &zero).unwrap().msg_type,
+        Some(0)
+    );
+}
+
+/// 文本与 `msgType` 是**同一条** `MessageBody` 上的两半。
+#[test]
+fn text_and_msg_type_come_from_the_same_body() {
+    let body = body_with_msg_type("小红花口令：一键9图出圈", Some((2, MSG_TYPE_KOULING)));
+    let frame = extract_danmaku_frame(CMD_SYNC, &body).unwrap();
+    assert_eq!(frame.text, "小红花口令：一键9图出圈");
+    assert_eq!(frame.msg_type, Some(MSG_TYPE_KOULING));
+}
+
+/// 没有 `ext` / 没有 `msgType` 键时是 `None`，而 `None` **不算事件**。
+#[test]
+fn missing_msg_type_is_none_and_is_not_an_event() {
+    let bare = body_with_msg_type("小红花口令：AAA", None);
+    let frame = extract_danmaku_frame(CMD_SYNC, &bare).unwrap();
+    assert_eq!(frame.text, "小红花口令：AAA");
+    assert_eq!(frame.msg_type, None, "没带 ext ⇒ None");
+    assert!(
+        !is_event_message(frame.msg_type),
+        "⚠ 缺键必须**放行**：宁可多投一条废口令，也不能把真口令滤掉"
+    );
+
+    // 有 `ext`、但没有 `msgType` 那个键（别的键都在）
+    let mut body = Vec::new();
+    append_scalar(&mut body, 1, 3);
+    let mut content = Vec::new();
+    append_string(&mut content, 2, "口令是AAA");
+    append_message(&mut body, 4, &content);
+    let mut kv = Vec::new();
+    append_string(&mut kv, 1, "userName");
+    append_scalar_forced(&mut kv, 2, 7);
+    append_string(&mut kv, 6, "用户0000");
+    append_message(&mut body, 5, &kv);
+    let frame = extract_danmaku_frame(CMD_SYNC, &body).unwrap();
+    assert_eq!(frame.text, "口令是AAA");
+    assert_eq!(frame.msg_type, None, "有别的 ext 键但没有 msgType ⇒ None");
+}
+
+/// 事件表：**实拍观测到的那四个**算事件，其余（含未观测到的取值）一律放行。
+///
+/// 取值与文本的对应关系见 [`MSG_TYPE_JOIN`] 那张表，语料是
+/// `test/fixtures/live-ws-danmaku-2026-09-23.json`。
+#[test]
+fn event_msg_types_match_the_capture() {
+    for (t, what) in [
+        (MSG_TYPE_JOIN, "入场"),
+        (MSG_TYPE_LIKE, "点赞"),
+        (MSG_TYPE_SYSTEM, "系统"),
+        (MSG_TYPE_GIFT, "礼物"),
+    ] {
+        assert!(
+            is_event_message(Some(t)),
+            "msgType {t}（{what}）是实拍观测到的事件"
+        );
+    }
+
+    assert!(
+        !is_event_message(Some(MSG_TYPE_KOULING)),
+        "msgType 4 是口令，绝不能进事件表"
+    );
+    for t in [0u64, 1, 3, 8, 9, 100] {
+        assert!(
+            !is_event_message(Some(t)),
+            "msgType {t} **未观测到** ⇒ 必须放行（事件表是黑名单，不是口令白名单）"
+        );
+    }
+    assert!(!is_event_message(None), "缺键 ⇒ 放行");
+}
+
+// ══════════════ 多 body 拼接（2026-09-23 抓包口径）══════════════
+
+/// ⭐⭐ 一条弹幕的文本可能被拆在**多个** `contents`（= 抓包里的 `bodies`）里，
+/// 要**拼起来**才是一条完整的弹幕。
+///
+/// # 出处（抓包实拍）
+///
+/// `../mcloud-back/docs/capture/app-live-ws-samples.txt:534-537`：
+///
+/// ```json
+/// {"payload":{"bodies":[{"msg":"小红花口令：…","type":"txt"}]}, "timestamp":…, "from":"…"}
+/// ```
+///
+/// 紧跟着那句：「⇒ 弹幕文本在 **`payload.bodies[].msg`**（一条弹幕可以有**多个**
+/// body，要拼起来）」。
+///
+/// # 只取第一条会怎样
+///
+/// 前缀与口令分在两个 body 上时（`小红花口令：` + `一键9图出圈`），
+/// 只取第一条 ⇒ 文本是 `小红花口令：` ⇒ **一条口令都解不出来**，
+/// 而丢掉的那一侧没有第二次机会。所以这里两层都断言：
+/// 拼出来的文本**逐字等于**实拍那条，且它**真的解得出**口令。
+#[test]
+fn multiple_bodies_are_joined_into_one_danmaku_text() {
+    let body = encode_message_body(&MessageBody {
+        body_type: 3,
+        contents: vec![
+            MessageContent {
+                content_type: 0,
+                text: "小红花口令：".to_string(),
+            },
+            MessageContent {
+                content_type: 0,
+                text: "一键9图出圈".to_string(),
+            },
+        ],
+    });
+    let frame = extract_danmaku_frame(CMD_SYNC, &body).expect("这条帧解得开");
+    assert_eq!(
+        frame.text, "小红花口令：一键9图出圈",
+        "多个 body 要**首尾相接**拼成一条（不加分隔符）"
+    );
+    assert_eq!(
+        crate::live_kouling::extract_kouling(&frame.text),
+        ["一键9图出圈"],
+        "拼完之后才认得出来 —— 这就是「要拼起来」的实际后果"
+    );
+
+    // 只有一个 body 时行为不变（既有形状不能回归）
+    let single = encode_message_body(&MessageBody {
+        body_type: 3,
+        contents: vec![MessageContent {
+            content_type: 0,
+            text: "小红花口令：一键9图出圈".to_string(),
+        }],
+    });
+    let frame = extract_danmaku_frame(CMD_SYNC, &single).expect("这条帧解得开");
+    assert_eq!(frame.text, "小红花口令：一键9图出圈");
 }

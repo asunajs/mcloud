@@ -878,3 +878,281 @@ fn whatwg_ipv4_spellings_cannot_smuggle_a_private_host_past_the_gate() {
         );
     }
 }
+
+// ══════════════ 推送地址的闸 · 第二层：真实解析出来的 IP（2026-10-09）══════════════
+//
+// 第一层（`validate_push_url` ✓）只看**字面量** ⇒ `http://127.0.0.1.nip.io:3998/`
+// 在它眼里只是个普通域名，**放行** ✗（**实测绕过**过：服务日志里那次"指向本机/内网"
+// 是字面量那次；换成 nip.io 就真发出去了 ✓）。第二层把域名**解析出来**再逐个判 ✓。
+//
+// ⚠ 这一组**不打真 DNS** ✗：解析走 `PushHostResolver` 这个可替换接口，
+// 测试给假解析器 ✓（真打 DNS 的测试会在离网机器上红、在别人机器上绿，还会变慢 ✗）。
+
+/// 假解析器：只认 `table` 里的 host，其余一律当"解析失败" ✓。
+struct FakeDns {
+    table: Vec<(&'static str, Vec<&'static str>)>,
+    /// 这个 host 解析前先睡一会儿（用来钉"解析卡住 ⇒ 拒"那条 ✓，不必真等 3 秒 ✓）。
+    /// ⚠ 按 host 指定而不是"整个解析器都慢"：这样才证得出"卡住的**只拒那一条**" ✓。
+    slow: Option<(&'static str, std::time::Duration)>,
+}
+
+impl FakeDns {
+    fn new(table: Vec<(&'static str, Vec<&'static str>)>) -> Self {
+        Self { table, slow: None }
+    }
+}
+
+#[async_trait::async_trait]
+impl PushHostResolver for FakeDns {
+    async fn resolve(&self, host: &str, _port: u16) -> Result<Vec<std::net::IpAddr>, String> {
+        if let Some((slow_host, d)) = self.slow {
+            if slow_host == host {
+                tokio::time::sleep(d).await;
+            }
+        }
+        match self.table.iter().find(|(h, _)| *h == host) {
+            Some((_, ips)) => Ok(ips
+                .iter()
+                .map(|s| s.parse().expect("表里写的必须是 IP 字面量"))
+                .collect()),
+            None => Err(format!("假解析器里没有 {host} 这条记录")),
+        }
+    }
+}
+
+/// 过闸的简写（超时用生产那个常量 ✓）。
+async fn gate(url: &str, dns: &FakeDns, allow_local: bool) -> Result<PushUrlVerdict, String> {
+    validate_push_url_resolved_within(url, dns, allow_local, DNS_LOOKUP_TIMEOUT).await
+}
+
+/// ⚠⚠ 本轮的核心验收：**名字解析到内网** ⇒ 拒（nip.io 那个洞）。
+///
+/// 红测：把第二层拆掉（只留 `validate_push_url` 字面量判据）⇒
+/// `127.0.0.1.nip.io` 与后面那几个名字**全红** ✓。
+#[tokio::test]
+async fn names_that_resolve_inside_are_refused() {
+    // ⚠⚠ 先把"洞"钉在这里：字面量那层**放行** `127.0.0.1.nip.io`（它只看见一个
+    // 普通域名 ✗）—— 这正是第二层必须存在、且本组用例必须走第二层的原因 ✓。
+    assert!(
+        validate_push_url("http://127.0.0.1.nip.io:3998/").is_ok(),
+        "第一层本来就看不见这条（看见了反而说明判据被改坏了）"
+    );
+
+    let dns = FakeDns::new(vec![
+        // 名字里嵌着回环 IP —— 字面量那层**看不见**（它只看见一个普通域名 ✗）
+        ("127.0.0.1.nip.io", vec!["127.0.0.1"]),
+        ("nas.lan.test", vec!["10.0.0.5"]),
+        ("v6.lan.test", vec!["::1"]),
+        ("meta.lan.test", vec!["169.254.1.1"]),
+        ("cgnat.lan.test", vec!["100.64.0.1"]),
+        ("v6meta.lan.test", vec!["fe80::1"]),
+        ("ulo.lan.test", vec!["fd00::1"]),
+        // ⚠ 一个公网 + 一个回环：**只要有一个不合格就拒** ✗（只看第一个 = 绕过）
+        ("mixed.lan.test", vec!["93.184.216.34", "127.0.0.1"]),
+    ]);
+
+    for bad in [
+        // 字面量那层（既有行为不回归 ✓）
+        "http://127.0.0.1:3000/api/system/restart",
+        "http://[::1]/x",
+        "http://localhost:8080/hook",
+        // ⚠⚠ 第二层才挡得住的
+        "http://127.0.0.1.nip.io:3998/",
+        "http://nas.lan.test/hook",
+        "http://v6.lan.test/hook",
+        "http://meta.lan.test/latest/meta-data/",
+        "http://cgnat.lan.test/x",
+        "http://v6meta.lan.test/x",
+        "http://ulo.lan.test/x",
+        "http://mixed.lan.test/hook",
+    ] {
+        let err = gate(bad, &dns, false)
+            .await
+            .expect_err("指向本机/内网的地址必须被拒");
+        assert!(
+            err.contains("拒绝发送"),
+            "错因要能看出是「地址被拒」：{bad} —— {err}"
+        );
+    }
+}
+
+/// 反向：**解析出来是公网** ⇒ 过（别把闸焊死在"永远拒"上 ✗）。
+#[tokio::test]
+async fn names_that_resolve_public_pass() {
+    let dns = FakeDns::new(vec![
+        ("push.example.com", vec!["93.184.216.34"]),
+        (
+            "dual.example.com",
+            vec!["93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"],
+        ),
+    ]);
+
+    for ok in [
+        "https://push.example.com/hook",
+        "https://dual.example.com/hook",
+        "http://8.8.8.8/hook", // 字面量公网 IP，第二层直接放行、不解析 ✓
+        "http://172.32.0.1/x", // 172.16/12 之外
+    ] {
+        assert_eq!(
+            gate(ok, &dns, false).await,
+            Ok(PushUrlVerdict::Public),
+            "这条本该放行：{ok}"
+        );
+    }
+}
+
+/// ⚠ **DNS 失败 / 超时一律拒**（不许"解析失败就放过" ✗），且**只拒这一条** ✓。
+#[tokio::test]
+async fn dns_failure_and_timeout_are_refused() {
+    // ① 解析不出来（表里没有这条 host）
+    let dns = FakeDns::new(vec![]);
+    let err = gate("https://nowhere.test/hook", &dns, false)
+        .await
+        .expect_err("解析不出来必须拒");
+    assert!(err.contains("拒绝发送"), "{err}");
+
+    // ② 解析**卡住**：毫秒级超时钉住这条（真等 3 秒的测试没人愿意跑 ✓）
+    //    ⚠ 解析器里同时放一条**不慢**的 host ⇒ 顺带证"卡住的只拒这一条" ✓
+    let mixed = FakeDns {
+        table: vec![
+            ("slow.test", vec!["93.184.216.34"]),
+            ("push.example.com", vec!["93.184.216.34"]),
+        ],
+        slow: Some(("slow.test", std::time::Duration::from_millis(200))),
+    };
+    let err = validate_push_url_resolved_within(
+        "https://slow.test/hook",
+        &mixed,
+        false,
+        std::time::Duration::from_millis(20),
+    )
+    .await
+    .expect_err("解析超时必须拒");
+    assert!(err.contains("解析超时"), "{err}");
+
+    // ③ ⚠ 失败**只拒这一条推送**、不 panic、不污染后面的判定：
+    //    同一个解析器上，慢的那条被超时拒掉之后，正常的那条照样过 ✓
+    assert_eq!(
+        gate("https://push.example.com/hook", &mixed, false).await,
+        Ok(PushUrlVerdict::Public)
+    );
+}
+
+/// ⚠⚠ 开关开着 ⇒ **上面被拒的都放行**，且每一次都留下
+/// "**因开关放行**"这个**可断言**的标记 ✓（单测抓 tracing 不稳，标记才是主证据 ✓）。
+#[tokio::test]
+async fn local_switch_allows_every_refused_case_and_marks_it() {
+    let dns = FakeDns::new(vec![
+        ("127.0.0.1.nip.io", vec!["127.0.0.1"]),
+        ("nas.lan.test", vec!["10.0.0.5"]),
+        ("v6.lan.test", vec!["::1"]),
+        ("meta.lan.test", vec!["169.254.1.1"]),
+        ("mixed.lan.test", vec!["93.184.216.34", "127.0.0.1"]),
+    ]);
+
+    for url in [
+        "http://127.0.0.1:3000/api/system/restart", // 字面量
+        "http://[::1]/x",
+        "http://localhost:8080/hook",
+        "http://127.0.0.1.nip.io:3998/", // 解析出来才是回环
+        "http://nas.lan.test/hook",
+        "http://v6.lan.test/hook",
+        "http://meta.lan.test/latest/meta-data/",
+        "http://mixed.lan.test/hook",
+        "https://nowhere.test/hook", // ⚠ 解析失败：开关开着也放行
+    ] {
+        let v = gate(url, &dns, true).await.expect("开关开着必须放行");
+        assert!(
+            v.allowed_by_switch(),
+            "必须留下「因开关放行」的标记：{url} —— {v:?}"
+        );
+        // ⚠ 留痕里要带 URL（`reason` 就是那条 warn 的 reason 字段 ✓）
+        let PushUrlVerdict::AllowedByLocalSwitch { reason } = &v else {
+            panic!("标记不对：{v:?}");
+        };
+        assert!(reason.contains(url), "原因里要带上 URL：{reason}");
+    }
+
+    // 公网那条**不是**靠开关放的 ⇒ 标记要如实 ✓（别把"开关开着"当"全都算开关"）
+    assert_eq!(
+        gate("http://8.8.8.8/hook", &dns, true).await,
+        Ok(PushUrlVerdict::Public)
+    );
+
+    // ⚠ 开关管的是"地址指向哪"，**不是**"用什么协议" ⇒ `file:` 这类错开关也放不了 ✓
+    for still_bad in [
+        "file:///etc/passwd",
+        "gopher://127.0.0.1:6379/_x",
+        "example.com/hook",
+    ] {
+        assert!(
+            gate(still_bad, &dns, true).await.is_err(),
+            "这条与内网无关，开关不该放：{still_bad}"
+        );
+    }
+}
+
+/// ⚠ 开关**缺省 = 关**（别写成"读不到就当开" ✗）。
+#[test]
+fn allow_local_switch_defaults_to_off() {
+    // 读不到 ⇒ 拒
+    assert!(!parse_allow_local_push(None));
+
+    // 明确关 / 拼写不对 / 别的值 ⇒ 一律拒（与 `MCLOUD_COOKIE_SECURE` 同一口径 ✓）
+    for off in [
+        Some("0"),
+        Some("false"),
+        Some("no"),
+        Some(""),
+        Some("on"),
+        Some("TRUE"),
+        Some("True"),
+        Some("2"),
+        Some("yes "),
+    ] {
+        assert!(!parse_allow_local_push(off), "这个值不该当开：{off:?}");
+    }
+
+    // 真值 ⇒ 开
+    for on in [Some("1"), Some("true"), Some("yes")] {
+        assert!(parse_allow_local_push(on), "这个值该当开：{on:?}");
+    }
+}
+
+/// ⚠⚠ **放行必须留痕**（不许静默 ✗）—— 留痕的**正文**逐字钉住 ✓。
+///
+/// 为什么钉的是"正文函数"而不是"真装一个 subscriber 抓事件"：
+/// `tracing::subscriber::with_default` 是**线程局部**的，而 `tracing` 的 interest
+/// 缓存是**进程全局**的 —— 并行跑的另一个用例先在没有 subscriber 时碰过同一个
+/// callsite，事件就再也出不来了 ✗（**实测过**：同一份代码 `cargo test -p mcloud-app --lib`
+/// 全量跑绿、`--exact` 单独跑红 —— 正是"抓 tracing 不稳"这句话的来源 ✓）。
+/// ⇒ 正文做成纯函数、逐字断言 ✓；"有没有真的打出去"由 `local_verdict` 里
+/// **唯一那一处** `tracing::warn!` 保证 ✓（`PushUrlVerdict` 那个标记同时保证
+/// 调用方不可能走到"放行了却没留痕"这条路上 ✓）。
+#[test]
+fn the_switch_leaves_a_warn_message_carrying_the_url() {
+    let url = "http://127.0.0.1.nip.io:3998/";
+    let reason = "推送地址指向本机/内网（127.0.0.1），拒绝发送：http://127.0.0.1.nip.io:3998/";
+    let line = local_switch_warn_message(url, reason);
+
+    assert!(line.contains("显式允许了本机/内网推送地址"), "{line}");
+    assert!(line.contains(url), "warn 里必须带 URL：{line}");
+    assert!(
+        line.contains("MCLOUD_ALLOW_LOCAL_PUSH"),
+        "warn 里要点明是哪个开关放的行：{line}"
+    );
+    assert!(
+        line.contains(reason),
+        "warn 里要带「本来要拒的原因」：{line}"
+    );
+}
+
+/// ⚠ 开关**关**着时走的是 `Err` 那条路 ⇒ **不发** warn（拒不是"放行"，别乱报 ✓）。
+#[tokio::test]
+async fn the_switch_off_leaves_no_mark_and_no_allowance() {
+    let dns = FakeDns::new(vec![("127.0.0.1.nip.io", vec!["127.0.0.1"])]);
+    let err = gate("http://127.0.0.1.nip.io:3998/", &dns, false)
+        .await
+        .expect_err("缺省（开关关）必须拒");
+    assert!(err.contains("拒绝发送"), "{err}");
+}

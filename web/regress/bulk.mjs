@@ -20,7 +20,7 @@
  * 2. `/logs`：**2.5 秒内的 `/api/logs` 请求数必须是个位数** —— 这是"页面反复重挂载"
  *    那个坑的直接钉子（实测踩到过 **2 秒 218 次** ✗，起因是在挂载路径上写了信号）；
  * 3. 历史页：一页 20 条、页码读数对、翻页真换内容、**换档位回第 1 页**；
- * 4. 「运行日志」弹窗：600 行只铺窗口内那几十行。
+ * 4. 「运行日志」弹窗：**首屏 500 行**（夹具共 600 行 ✓）只铺窗口内那几十行。
  *
  * ⚠ 交互细节（点按钮的时序、两侧文本一致）仍归 `interact.mjs` ✓，这里**不重复**
  * —— 这一条只回答"数据一大，上面四件事还成不成立" ✓。
@@ -28,7 +28,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { FIXTURES, gotoJs, openSession, serve, sleep, VARIANTS } from './lib.mjs'
+import { FIXTURES, gotoJs, openSession, serve, sleep, sliceRunLogs, sliceServerLogs, VARIANTS } from './lib.mjs'
 
 const DIST = new URL('../dist/', import.meta.url).pathname
 const PORT = 48931
@@ -36,8 +36,9 @@ const PORT = 48931
 const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'mcloud-bulk-'))
 
 /**
- * 体量：照本机真实数据取整 —— **2000 行日志就是服务端的环容量**（`logbuf.rs` 的
- * `RING_CAPACITY` ✓，日志页 2026-10-05 起也**取满环** ✓），113 条运行取 100，
+ * 体量：照本机真实数据取整 —— **2000 行日志就是服务端内存窗口的默认行数**（2026-10-09 起
+ * 那个数住在 `mcloud-core` 的 `DEFAULT_SERVER_LOG_MEM_LINES` ✓，`logbuf::RING_CAPACITY`
+ * 只是它的别名 ✓；日志页 2026-10-05 起也**取满窗口** ✓），113 条运行取 100，
  * 单次运行日志取 600 ✓。
  */
 const LOG_ROWS = 2000
@@ -70,15 +71,28 @@ for (let i = 0; i < LOG_ROWS; i++) {
     // 长度不一：日志会折行 ⇒ 行高不能假定固定 20px（窗口化按内容量高 ✓）
     message: `第 ${i} 行 —— 大体量验收用的日志，长一点以便测折行：${'x'.repeat(i % 40)}`,
     at_ms: 1790581000000 + i * 1000,
+    // ⚠ 2026-10-09：`/api/logs` 的每一行多了 `seq`（**翻页游标** ✓）——
+    // 形状照 `web/src/api.ts::ServerLogLine` 给（本文件开头那条"别把夹具写成空壳" ✓）。
+    // 本脚本不点「加载更早」（那条归 `interact.mjs` ✓），但少一格会让页面拿到
+    // `undefined` 游标：现在看不出来，等哪天这里加了翻页那一步就成了"静默取错页" ✗。
+    category: 'task',
+    account: null,
+    seq: i + 1,
   })
 }
 const runLogs = []
 for (let i = 0; i < RUN_LOG_ROWS; i++) {
   runLogs.push({
+    // ⚠ 形状照 `web/src/api.ts::LogLine`（**camelCase** + `seq` ✓）：2026-10-09 起
+    // 弹窗改打 `/api/runs/{id}/logs`，那条路的每一行都带序号（往上翻页要用它 ✓）——
+    // 还照 `RunRecord.logs` 那份 snake_case（`at_ms`、没有 seq）写的话，界面上时间是 `NaN`、
+    // 而"翻页"根本无从谈起 ✗（本文件开头那条"别把夹具写成空壳"的教训）。
+    runId: 9000,
     level: 'info',
     kind: i % 5 === 0 ? 'success' : 'info',
     message: `运行日志第 ${i} 行`,
-    at_ms: 1790581000000 + i * 1000,
+    atMs: 1790581000000 + i * 1000,
+    seq: i + 1,
   })
 }
 const runs = []
@@ -96,18 +110,69 @@ VARIANTS.__bulk = {
    */
   __sseLogs: { lines: 4, gapMs: 300 },
   'GET /api/runs': { handler: () => ({ status: 200, body: runs }) },
-  'GET /api/runs/9000': { handler: () => ({ status: 200, body: { ...runs[0], logs: runLogs } }) },
-  'GET /api/logs': { handler: () => ({ status: 200, body: logs }) },
+  /**
+   * 「运行日志」弹窗那一份（⑥ / ⑥′）：夹具共 **600 行**，够长到能看出
+   * "只铺窗口内那几十行" ✓（首屏按契约取**最后 500 行** ✓）。
+   *
+   * ⚠ 2026-10-09 起弹窗改打 `/api/runs/{id}/logs`（**分页**取，不再借 `getRun()` 里
+   * 那份最多 200 行的 `logs` ✗，见 `history-page.tsx::openRunLog`）⇒ 这条夹具跟着挪过来 ✓。
+   * ⚠ 游标必须**真按契约切**（`sliceRunLogs` ✓，与全局那份共用同一段实现）——
+   * 不切的话"首屏只取最近 500 行"在装置里根本不成立，而页面上看不出来 ✗。
+   * 本脚本不点「加载更早」（分页那条归 `interact.mjs` ✓），只量窗口化与滚动 ✓。
+   */
+  'GET /api/runs/9000/logs': {
+    handler: (_body, req) => {
+      const q = new URL(String(req?.url ?? ''), 'http://x').searchParams
+      const num = (k) => (q.get(k) == null ? undefined : Number(q.get(k)))
+      return {
+        status: 200,
+        body: sliceRunLogs(runLogs, {
+          limit: num('limit'),
+          before: num('before'),
+          after: num('after'),
+        }),
+      }
+    },
+  },
+  /**
+   * ⚠ 这一份也**按契约切**（`sliceServerLogs` ✓，与全局那份共用同一段实现）——
+   * 本脚本不点「加载更早」（分页那条归 `interact.mjs` ✓），但"忽略查询串、把整份
+   * 2000 行原样回给任何请求"是个**陷阱**：哪天这里加一步翻页，取回来的会是**同一段行**
+   * （看起来"行数翻倍了"✓，其实全是重复 ✓）⇒ 门禁照样绿而功能是错的 ✗。
+   */
+  'GET /api/logs': {
+    handler: (_body, req) => {
+      const q = new URL(String(req?.url ?? ''), 'http://x').searchParams
+      const num = (k) => (q.get(k) == null ? undefined : Number(q.get(k)))
+      return {
+        status: 200,
+        body: sliceServerLogs(logs, {
+          limit: num('limit'),
+          before: num('before'),
+          level: q.get('level') ?? '',
+          q: q.get('q') ?? '',
+          category: q.get('category') ?? '',
+        }),
+      }
+    },
+  },
 }
 
 /**
- * ⚠ 先做一次**纯源码的交叉核对**（不碰浏览器 ✓）：前端的 `RING_LINES` 与服务端
- * `logbuf.rs` 的 `RING_CAPACITY` 必须一样、而且**本门禁的夹具大小就是它** ✓。
+ * ⚠ 先做一次**纯源码的交叉核对**（不碰浏览器 ✓）：前端的 `RING_LINES` 与服务端那个
+ * **内存窗口行数**的默认值必须一样、而且**本门禁的夹具大小就是它** ✓。
  *
  * 为什么要有这一条：这两个数**在各自的构建单元里**（前端 TS / Rust ✓，没有共享常量
  * ⇒ 只能靠对账 ✓）。漂了的后果不是崩溃而是**静默少给**（服务端 `limit.clamp` 会把多要的
- * 截掉 ⇒ 用户以为"全都在"，其实只拿到环里的一部分 ✗）—— 正是这一类"功能全对、数不对"
+ * 截掉 ⇒ 用户以为"全都在"，其实只拿到窗口里的一部分 ✗）—— 正是这一类"功能全对、数不对"
  * 只有门禁能看出来 ✓。
+ *
+ * ⚠⚠ 2026-10-09：**那个数搬家了**（后端把"内存窗口行数"改成**用户可设** ✓，
+ * 见 `AppSettings::server_log_mem_lines` / `serverLogMemLines` ✓）——
+ * `logbuf::RING_CAPACITY` 现在是 `mcloud_core::DEFAULT_SERVER_LOG_MEM_LINES` 的**别名**，
+ * 它自己那行里**没有数字**了 ⇒ 老正则（只认 `RING_CAPACITY: usize = <数字>`）读到 `NaN`
+ * ⇒ 这条对账**永远红**，而它要防的"前端与服务端两个数漂了"反倒没人看了 ✗。
+ * 所以改成去**新家**读（`settings.rs` 的默认值 ✓），老那行留作兜底 ✓。
  *
  * ⚠ 它跟着浏览器门禁跑（没 chrome 时整条是"⊘ 跳过 不算通过"✓）⇒ 这一小段也一起被跳过 ✗。
  * 挪进纯 Node 的门禁就得同时改 CI 的 web job 清单，权衡之后先放这里 ✓。
@@ -119,7 +184,18 @@ const readConst = (file, re) => {
   const m = src.match(re)
   return m ? Number(m[1]) : Number.NaN
 }
-const rustRing = readConst(path.join(REPO_DIR, 'crates/mcloud-server/src/logbuf.rs'), /RING_CAPACITY\s*:\s*usize\s*=\s*(\d+)/)
+/** 按顺序去几个可能的位置找同一个数（搬家了也不会读到 NaN ✓）。 */
+const readFirst = (specs) => {
+  for (const [file, re] of specs) {
+    const n = readConst(path.join(REPO_DIR, file), re)
+    if (Number.isFinite(n)) return n
+  }
+  return Number.NaN
+}
+const rustRing = readFirst([
+  ['crates/mcloud-core/src/settings.rs', /DEFAULT_SERVER_LOG_MEM_LINES\s*:\s*usize\s*=\s*(\d+)/],
+  ['crates/mcloud-server/src/logbuf.rs', /RING_CAPACITY\s*:\s*usize\s*=\s*(\d+)/],
+])
 const pageRing = readConst(path.join(WEB_DIR, 'src/pages/logs-page.tsx'), /RING_LINES\s*=\s*(\d+)/)
 
 const cases = []
@@ -129,11 +205,11 @@ const check = (name, ok, detail = '') => {
 }
 
 check(
-  `前端 RING_LINES(${pageRing}) 与服务端 RING_CAPACITY(${rustRing}) 一致`,
+  `前端 RING_LINES(${pageRing}) 与服务端内存窗口默认值(${rustRing}) 一致`,
   pageRing === rustRing && Number.isFinite(pageRing),
   '两个数在各自的构建单元里，只能对账；漂了是"静默少给"而不是崩溃',
 )
-check(`本门禁的夹具大小 LOG_ROWS(${LOG_ROWS}) 就是环容量(${rustRing})`, LOG_ROWS === rustRing, `LOG_ROWS=${LOG_ROWS}`)
+check(`本门禁的夹具大小 LOG_ROWS(${LOG_ROWS}) 就是内存窗口默认值(${rustRing})`, LOG_ROWS === rustRing, `LOG_ROWS=${LOG_ROWS}`)
 
 let server
 let session
@@ -182,7 +258,7 @@ try {
   // ── ① /logs：800 行只铺窗口内那几十行 ──
   const ready = await waitFor(`document.querySelectorAll('#logs-scroll [data-k]').length > 0`, 10000)
   const a = await probe(LOGS)
-  check(`日志页大体量下仍有内容（夹具 ${LOG_ROWS} 行 = 服务端的环容量）`, ready && !a.missing && a.rendered > 0, JSON.stringify(a))
+  check(`日志页大体量下仍有内容（夹具 ${LOG_ROWS} 行 = 服务端内存窗口的默认行数）`, ready && !a.missing && a.rendered > 0, JSON.stringify(a))
   check(
     `只铺窗口内那几十行（渲染 ${a.rendered} 行 / 总 ${LOG_ROWS} 行，上限 ${MAX_ROWS}）`,
     a.rendered > 0 && a.rendered <= MAX_ROWS,
@@ -308,7 +384,13 @@ try {
   h = await probe(HIST)
   check('换档位自动回第 1 页（否则"停在第 5 页看到空列表"）', h.page.includes('第 1 /'), h.page)
 
-  // ── ⑥ 「运行日志」弹窗：600 行只铺窗口内那几十行 ──
+  /**
+   * ── ⑥ 「运行日志」弹窗：首屏那 500 行只铺窗口内那几十行 ──
+   *
+   * ⚠ 2026-10-09 起弹窗是**分页**取的（首屏 = 最近 500 行 ✓，夹具共 600 行 ⇒
+   * 还有 100 行更早的没取 ✓，那正是 `interact.mjs` 里「加载更早」那条钉子的场景）。
+   * 这一条只管窗口化：**500 行**（≈ 10,000px）也只铺几十个节点 ✓。
+   */
   await cdp.eval(`(() => { const b = [...document.querySelectorAll('#app table tbody tr:first-child button')].find((x) => x.textContent.includes('日志')); b.click(); return true })()`)
   const dialogReady = await waitFor(`document.querySelectorAll('dialog[open] [data-k]').length > 0`, 10000)
   const panel = await probe(`(() => {
@@ -317,11 +399,18 @@ try {
       title: document.querySelector('dialog[open] h2')?.textContent?.trim() ?? '',
       rendered: document.querySelectorAll('dialog[open] [data-k]').length,
       height: box?.scrollHeight ?? 0,
+      count: document.querySelector('dialog[open]')?.textContent?.match(/已显示 (\\d+) 行/)?.[1] ?? '',
     }
   })()`)
   check('运行日志弹窗开起来了', dialogReady && panel.title === '运行日志', JSON.stringify(panel))
-  check(`600 行只铺窗口内那几十行（渲染 ${panel.rendered} 行）`, panel.rendered > 0 && panel.rendered <= MAX_ROWS, JSON.stringify(panel))
-  check('弹窗滚动条长度是真实总高（600 行 ≈ 12,000px）', panel.height > 6000, `scrollHeight=${panel.height}`)
+  // ⚠ 「已显示 500 行」一起钉住：只量节点数的话，"首屏把 600 行全取了"照样绿 ✗
+  //（那正是这次要治的"一次加载太多" ✓）。
+  check(
+    `首屏取最近 500 行（界面读数 ${panel.count}），且只铺窗口内那几十行（渲染 ${panel.rendered} 行）`,
+    panel.count === '500' && panel.rendered > 0 && panel.rendered <= MAX_ROWS,
+    JSON.stringify(panel),
+  )
+  check('弹窗滚动条长度是真实总高（500 行 ≈ 10,000px）', panel.height > 6000, `scrollHeight=${panel.height}`)
 
   /**
    * ⑥′ 弹窗里**滚一段**：那一行要被**搬动**，不是重建。
@@ -336,6 +425,12 @@ try {
    * 属性还在 = 同一个节点被搬过来了 ✓。⚠ 只滚 120px（≈6 行）—— 保证那一行**仍在窗口里** ✓
    * （滚太多它就正常地离开窗口了，那时"找不到"是对的 ✓）。
    */
+  // ⚠⚠ 滚之前先等一下（2026-10-09 加）：`history-page::openRunLog()` 打开弹窗时会
+  // 排一次 `requestAnimationFrame(() => scrollTop = 0)` ✓ —— 机器忙的时候它**晚到**，
+  // 就会把门禁刚滚的 120px 又拉回 0 ✗。症状很误导：`scrolled:false` 而打了记号的那行
+  // **还在**（`kept:true`）⇒ 看起来像"面板被重建"，其实只是那次归零晚到 ✓
+  // （实测：单跑 3/3 绿、并行满载时偶发 ✗）。150ms 足够盖住它，又不会让这条变慢 ✓。
+  await sleep(150)
   const taggedPanel = await probe(`(() => {
     const box = document.querySelector('dialog[open] .h-64')
     const rows = [...box.querySelectorAll('[data-k]')]

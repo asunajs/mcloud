@@ -94,17 +94,33 @@ const resetAcctState = () => {
 }
 
 /**
- * 服务端日志（`/api/logs`）—— **会长**的一份。
+ * 服务端日志（`/api/logs`）—— **会长**的一份，而且**分两段**（2026-10-09 分页 ✓）。
  *
  * 为什么必须会长：日志页每 2s 轮询一次，而「贴底时新行要跟到底部」这条
  * 只有内容真的变多才量得出来 —— 静态名单下 `scrollHeight` 不变，
  * "还在底部"这句在坏代码里也可能成立 ⇒ 门禁绿得没有意义 ✗。
  * 每次请求多两行，正好模拟"进程还在打日志" ✓。
  *
+ * # 为什么是"内存窗口 + 盘上全量"两层（**别退回单层** ✗）
+ *
+ * 真后端的 `/api/logs` 有两条路（`crates/mcloud-server/src/logbuf.rs::page` ✓）：
+ * 不带 `before` = **最新** `limit` 行 ✓、带 `before=<seq>` = `seq < before` 的最后 `limit` 行 ✓
+ * （内存环只装最新的那些、更早的在 `data/server-logs/*.jsonl` 上按需读 ✓）。
+ * 装置这边**必须照着分层**：单层（只有一份清单）时"实时那一份"就是全部 ⇒
+ * 翻页**永远翻不出东西**（`before` = 最旧那一行 ⇒ 返回空 ✓）——
+ * 那样门禁里"点了按钮、行数变大"这条**根本立不起来**（装置测不到 = 没测 ✓）。
+ *
+ * ⚠ `SERVER_LOG_ROWS` 必须**大于**日志页一次要的行数（`RING_LINES` = 2000 ✓）：
+ * 实时那一份只给最新 2000 行，剩下的才轮得到「加载更早」去翻 ✓。
+ * 夹具取 2600 ⇒ 头一次翻页能翻回满 500 行、第二次翻到 100 行（**不满 ⇒ 到头了** ✓）——
+ * 于是"按钮消失"那条能在**两次点击**内走完 ✓。
+ *
  * ⚠ 与 `acctState`/`taskCfg` 同一个理由要有 `reset`：同一次进程里跑两个变体时
  * 别把上一轮攒的行带过去 ✓。
  */
-const logsState = { lines: [], seq: 0 }
+const logsState = { all: [], seq: 0 }
+/** 盘上总量（含"内存窗口"里那些 ✓）—— 必须 > 2000，见上面那段 ✓。 */
+const SERVER_LOG_ROWS = 2600
 /**
  * 一行服务端日志。
  *
@@ -116,22 +132,182 @@ const logsState = { lines: [], seq: 0 }
  *
  * ⚠ 字段落在**正文末尾**（`message account="…"` ✓）而不是拼在前面：真后端就是这么排的
  * （`RingLayer` 的 `Fields::finish` 先 message 再 k=v ✓）—— 页面得能处理"账号在尾巴上" ✓。
+ *
+ * ⚠ `seq`（2026-10-09 ✓）：**翻页游标** ✓（`?before=<seq>` ✓）。它必须是**全局单调**的
+ * （真后端还保证跨重启单调 ✓）—— 夹具里就是"这一行是第几条" ✓。
+ * 少了这一格，页面算不出游标 ⇒ 翻页无从谈起 ✗（本文件开头那条"别把夹具写成空壳"的教训）。
  */
-const logLine = (i, at) => ({
-  level: i % 7 === 0 ? 'warn' : 'info',
+const logLine = (seq, at) => ({
+  level: seq % 7 === 0 ? 'warn' : 'info',
   target: 'mcloud_engine::scheduler',
-  message: `第 ${i} 行 —— 门禁用（量滚动位置） account="${i % 2 === 0 ? ACCOUNT.id : ACCOUNT2.id}"`,
+  message: `第 ${seq} 行 —— 门禁用（量滚动位置） account="${seq % 2 === 0 ? ACCOUNT.id : ACCOUNT2.id}"`,
   at_ms: at,
   // ⚠ 2026-10-06：`/api/logs` 的每一行多了这两格（后端 `ServerLog` ✓）——
   // `category`（`task`/`ops`，判据是"谁打的" ✓）与 `account`（正文那格的**结构化**副本 ✓）。
   // 少了它们，页面就认不出这一行是哪个账号的（身份改读结构化那格了 ✓）⇒
   // 门禁当场红（"账号筛选行"那三条断言）—— 这正是它该抓的 ✓。
   category: 'task',
-  account: i % 2 === 0 ? ACCOUNT.id : ACCOUNT2.id,
+  account: seq % 2 === 0 ? ACCOUNT.id : ACCOUNT2.id,
+  seq,
 })
 const resetLogsState = () => {
-  logsState.lines = Array.from({ length: 60 }, (_, i) => logLine(i, 1790581000000 + i * 1000))
-  logsState.seq = logsState.lines.length
+  logsState.all = Array.from({ length: SERVER_LOG_ROWS }, (_, i) =>
+    logLine(i + 1, 1790581000000 + i * 1000),
+  )
+  logsState.seq = SERVER_LOG_ROWS + 1
+}
+
+/** 一页最多多少行（照 `crates/mcloud-server/src/logbuf.rs::MAX_PAGE` ✓，超出会被夹 ✓）。 */
+const SERVER_LOG_MAX_PAGE = 5000
+
+/**
+ * 按契约切一页服务端日志（`limit` / `before` / `level` / `q` / `category` ✓，
+ * 见 `web/src/api.ts::listServerLogs`）。
+ *
+ * ⚠ 两条路的语义照 `logbuf::page` ✓：不带 `before` = **最新** `limit` 行（实时那一份 ✓）；
+ * 带 `before` = `seq < before` 的最后 `limit` 行（往上翻 ✓）。**都升序** ✓。
+ * ⚠ 筛选判据照 `logbuf::keeps` ✓（级别是"**不低于**"、类别、关键词匹配正文与来源）——
+ * 少一条的表现是"翻上去的那几页突然不过滤了"，而页面上看不出来 ✗。
+ */
+export const sliceServerLogs = (all, { limit, before, level, q, category }) => {
+  // 与 `logbuf::rank_of` 同一个口径 ✓（`trace` 并入最低那档 ✓）
+  const rank = { error: 4, warn: 3, info: 2, debug: 1, trace: 0 }
+  const floor = rank[level] ?? 0
+  const needle = String(q ?? '').trim().toLowerCase()
+  const keep = (l) =>
+    (rank[l.level] ?? 0) >= floor &&
+    (!category || category === 'all' || l.category === category) &&
+    (needle === '' ||
+      l.message.toLowerCase().includes(needle) ||
+      l.target.toLowerCase().includes(needle))
+  const n = Math.max(
+    1,
+    Math.min(Number.isFinite(limit) && limit > 0 ? limit : 500, SERVER_LOG_MAX_PAGE),
+  )
+  const matched = all.filter(keep)
+  return before == null ? matched.slice(-n) : matched.filter((l) => l.seq < before).slice(-n)
+}
+
+/**
+ * 存储信息（数据目录 / 日志占用 / **容量上限**）—— 上限那一份是**有状态**的。
+ *
+ * ⚠ 为什么必须有状态（`PUT` 改它、`GET` 读它 ✓）：用户口径 2026-10-09
+ * 「日志和历史不要全加入内存，使用本地记录，**让用户设置最大大小**」—— 要验的是
+ * "改了这些数 ⇒ 服务端记住了、界面读数跟着变" ✓。回一份静态值就只能证明
+ * "按钮点了有反应" ✗（本仓在"装置测不到 = 没测"上栽过：`acctState` / `pushPanelState`
+ * 都是同一个理由 ✓）。
+ *
+ * ⚠ `logUsage.maxBytes` **由 `limits.logTotalMb` 现算**（不是各写一份常数）——
+ * 这样门禁把上限改成 128 之后，卡片上那行「占用 / 上限」必须跟着变成 128 MB，
+ * 而那个数**只能**来自服务端那份状态 ✓（页面把用户输的数原样回显也能"看着对"，
+ * 那是假绿 ✗）。
+ * ⚠ `serverLogUsage`（2026-10-09 加的第二份 ✓）**同一个口径**：`maxBytes` 由
+ * `limits.serverLogTotalMb` 现算 ✓ —— 它管的是**另一个目录**（`data/server-logs/` ✓）。
+ *
+ * ⚠⚠ **五个**上限（2026-10-09 ✓）：前三个是运行那一侧（历史条数 / 单次运行的行数 /
+ * `data/logs/` 总量），后两个是**服务端日志**（内存窗口行数 / `data/server-logs/` 总量）✓。
+ * 少一格的表现是"界面上改了、装置里没这一格" ⇒ 那一条断言静默失效 ✗。
+ */
+const storageState = {
+  limits: {
+    historyLimit: 200,
+    logLimitPerRun: 2000,
+    logTotalMb: 64,
+    serverLogMemLines: 2000,
+    serverLogTotalMb: 64,
+  },
+}
+/** 日志占用（固定）：556 KiB / 139 个文件 —— 让界面算出 `556 KB / 64 MB` 那样的人话 ✓。 */
+const LOG_BYTES = 569344
+const LOG_FILES = 139
+/**
+ * 服务端日志占用（固定，**与上面那两份不同的数** ✓）：1.2 MB / 12 个文件。
+ *
+ * ⚠ 数刻意**不一样**：两份读数用同一组数时，"界面把两份搞混了"（把运行日志那份
+ * 显示在服务端日志那行上）照样绿 ✗ —— 那是这类"多一行读数"最可能出的错 ✓。
+ */
+const SERVER_LOG_BYTES = 1258291
+const SERVER_LOG_FILES = 12
+const resetStorageState = () => {
+  storageState.limits = {
+    historyLimit: 200,
+    logLimitPerRun: 2000,
+    logTotalMb: 64,
+    serverLogMemLines: 2000,
+    serverLogTotalMb: 64,
+  }
+}
+/** 当前状态按后端的口径算一遍（`GET` / `PUT` 的返回**同一个形状** ✓）。 */
+const storageView = () => ({
+  dataDir: '/tmp/mcloud-fixture/data',
+  logDir: '/tmp/mcloud-fixture/data/logs',
+  binary: '/tmp/mcloud-fixture/target/release/mcloud-server',
+  dataBytes: 20480,
+  logBytes: LOG_BYTES,
+  files: [
+    { name: 'accounts.json', bytes: 4096 },
+    { name: 'users.json', bytes: 512 },
+  ],
+  logUsage: { files: LOG_FILES, bytes: LOG_BYTES, maxBytes: storageState.limits.logTotalMb * 1024 * 1024 },
+  serverLogUsage: {
+    files: SERVER_LOG_FILES,
+    bytes: SERVER_LOG_BYTES,
+    maxBytes: storageState.limits.serverLogTotalMb * 1024 * 1024,
+  },
+  limits: { ...storageState.limits },
+})
+
+/**
+ * 存储上限的**范围**（与后端一致 ✓，见 `web/src/api.ts::StorageLimits`）——
+ * 装置这一层也要卡一遍：真后端会回 400 + 人话 ✓，装置不卡的话"前端把越界值发出去了"
+ * 照样绿 ✗。
+ */
+const LIMIT_RANGE = {
+  historyLimit: [20, 2000],
+  logLimitPerRun: [200, 20000],
+  logTotalMb: [1, 4096],
+  serverLogMemLines: [200, 20000],
+  serverLogTotalMb: [1, 4096],
+}
+
+/**
+ * 某次运行的日志（`GET /api/runs/{id}/logs` 的数据源）。
+ *
+ * ⚠ 为什么要**按游标真分页**（而不是回一份固定行数的清单）：用户口径
+ * 「大日志做虚拟加载或者分页」⇒ 要验的是"点「加载更早」取到的**确实是更早的**" ✓。
+ * 装置若不认 `before`，页面上"行数变多了"照样成立 ⇒ 一条空转 ✗。
+ *
+ * 行里那个 `seq` 就是**行号**（1 起 ✓）⇒ 门禁能一眼看出"往上翻之后第一行变小了" ✓。
+ * 字段形状照 `web/src/api.ts::LogLine`（camelCase：`runId`/`level`/`kind`/`message`/`atMs`/`seq` ✓）。
+ */
+const RUN_LOG_LINES = 800
+const fixtureRunLogs = (runId) =>
+  Array.from({ length: RUN_LOG_LINES }, (_, i) => ({
+    runId,
+    level: i % 9 === 0 ? 'warn' : 'info',
+    // ⚠ 分类那格**照真后端给**（`mcloud_core::LogLine` 2026-10-09 起带 `kind` ✓）——
+    // 装置少给一格的表现是"界面上永远只有三档颜色"，而看不出来是装置抠的 ✗。
+    kind: i % 5 === 0 ? 'success' : 'info',
+    // 正文里带**行号**：门禁据此断言"翻上去之后首行是第 1 行"（而不是只数行数 ✓）。
+    message: `夹具运行日志 ${String(i + 1).padStart(4, '0')} —— 行号就是 seq`,
+    atMs: 1790581000000 + i * 1000,
+    seq: i + 1,
+  }))
+
+/**
+ * 按契约切一页（`limit` / `before` / `after` ✓，见 `web/src/api.ts::getRunLogs`）。
+ *
+ * ⚠ 全局那份夹具与 `bulk.mjs` 的私有变体**共用它**：两边各写一份"分页"迟早分叉，
+ * 而分页正是这次要验的东西 ✗。
+ * ⚠ `limit` 缺省 500、上限 = 用户设的 `logLimitPerRun`（与真后端一致 ✓）——
+ * 上限那一格从 `storageState` 读，于是"改小了上限 ⇒ 一次能翻回来的行变少"也成立 ✓。
+ */
+export const sliceRunLogs = (all, { limit, before, after }) => {
+  const cap = storageState.limits.logLimitPerRun
+  const n = Math.min(Number.isFinite(limit) && limit > 0 ? limit : 500, cap)
+  if (before != null) return all.filter((l) => l.seq < before).slice(-n)
+  if (after != null) return all.filter((l) => l.seq > after).slice(0, n)
+  return all.slice(-n)
 }
 const RUN = {
   run_id: 1024,
@@ -493,17 +669,14 @@ export const FIXTURES = {
   '/api/session': { userId: 'u-1', name: 'admin', kind: 'web', isAdmin: true },
   // 账户安全（改口令 / 策略）与存储信息：设置页那两块要它们
   '/api/admin/security': { minPasswordLen: 8, sessionTtlHours: 168, passwordScheme: 'sha256' },
-  '/api/system/storage': {
-    dataDir: '/tmp/mcloud-fixture/data',
-    logDir: '/tmp/mcloud-fixture/data/logs',
-    binary: '/tmp/mcloud-fixture/target/release/mcloud-server',
-    dataBytes: 20480,
-    logBytes: 1024,
-    files: [
-      { name: 'accounts.json', bytes: 4096 },
-      { name: 'users.json', bytes: 512 },
-    ],
-  },
+  /**
+   * 存储信息（**静态**一份，给 `login` / `setup` 两个变体兜底；`ready` 里那份是
+   * **有状态**的 ✓，见 `storageState` / `VARIANTS.ready`）。
+   *
+   * ⚠ 形状与有状态那份**必须一致**（同一份 `storageView()` 算出来的 ✓）——
+   * 两边各写一遍就是"某个变体里少一格、界面上少一块"的经典来源 ✗。
+   */
+  '/api/system/storage': storageView(),
   '/api/version': { name: 'mcloud', version: '0.1.0' },
   // 「关于」卡片（构建期从 git 抓的那几项）
   '/api/system/about': {
@@ -751,21 +924,32 @@ export const VARIANTS = {
    */
   ready: {
     /**
-     * 服务端日志（`/logs` 那一页）：**每次请求多两行** ✓。
+     * 服务端日志（`/logs` 那一页）：**每次请求多两行** ✓，且**按契约分页** ✓。
      *
      * 为什么必须会长：那一页每 2 s 轮询一次，而「贴底时新行要跟到底部」这条
      * 只有内容真的变多才量得出来（见 `logsState`）✓。
-     * `limit` 照真后端那个口径夹一下（界面传的是环容量 2000 ✓，见日志页的 `RING_LINES` ✓）✓。
+     * ⚠ 分页那一半（`before` / `limit` / 筛选 ✓）走 [`sliceServerLogs`]：
+     * 不切的话「加载更早」在装置里**永远取不到东西** ⇒ 那几条断言成了空转 ✗
+     * （装置测不到 = 没测 ✓）。
      */
     'GET /api/logs': {
       handler: (_body, req) => {
-        logsState.lines.push(
+        logsState.all.push(
           logLine(logsState.seq++, Date.now()),
           logLine(logsState.seq++, Date.now()),
         )
         const q = new URL(String(req?.url ?? ''), 'http://x').searchParams
-        const limit = Number(q.get('limit') ?? '800')
-        return { status: 200, body: logsState.lines.slice(-limit) }
+        const num = (k) => (q.get(k) == null ? undefined : Number(q.get(k)))
+        return {
+          status: 200,
+          body: sliceServerLogs(logsState.all, {
+            limit: num('limit'),
+            before: num('before'),
+            level: q.get('level') ?? '',
+            q: q.get('q') ?? '',
+            category: q.get('category') ?? '',
+          }),
+        }
       },
     },
     /**
@@ -910,6 +1094,51 @@ export const VARIANTS = {
     'PUT /api/admin/security': {
       handler: (body) => ({ status: 200, body: { ...body, passwordScheme: 'sha256' } }),
     },
+    /**
+     * 存储信息 + **容量上限**（2026-10-09 用户口径「让用户设置最大大小」✓）：
+     * `GET` 读那份有状态的值、`PUT` 改它并回**改完的即时状态** ✓。
+     *
+     * ⚠ 为什么必须有状态：门禁要钉的是"改了这些数 ⇒ 服务端记住了、卡片读数跟着变" ✓ ——
+     * 回一份静态值就只能证明"按钮点了有反应" ✗（本仓在"装置测不到 = 没测"上栽过）。
+     *
+     * ⚠⚠ 校验照**冻结的契约**来（2026-10-09 后端改的 ✓）：**给哪格改哪格**、
+     * **一格都不给**才回 **400**（"整体替换、少一格就 400"是**旧**语义 ✗）。
+     * ⚠ 这一点在装置里很要紧：前端现在**五格一起发** ✓ ⇒ 只发了改过那一格的实现
+     * 会在这里**留下旧值** ⇒ 门禁里"保存后五个框都是新值"那条当场红 ✓
+     * （比"装置不卡"强：那样测的是"按钮有反应"，不是"值真的到了服务端" ✗）。
+     * ⚠ 越界回 **400 + 人话**（`{error}` 是字符串 ✓，`api.ts` 读的就是它 ✓）。
+     */
+    'GET /api/system/storage': {
+      handler: () => ({ status: 200, body: storageView() }),
+    },
+    'PUT /api/admin/storage': {
+      handler: (body) => {
+        const keys = Object.keys(LIMIT_RANGE)
+        const given = keys.filter((k) => body != null && body[k] !== undefined)
+        if (given.length === 0) {
+          return {
+            status: 400,
+            body: { error: '至少要给一格上限（historyLimit / logLimitPerRun / logTotalMb / serverLogMemLines / serverLogTotalMb）', code: 'no_limit' },
+          }
+        }
+        for (const k of given) {
+          const v = body[k]
+          const [min, max] = LIMIT_RANGE[k]
+          if (typeof v !== 'number' || !Number.isInteger(v) || v < min || v > max) {
+            return {
+              status: 400,
+              body: {
+                error: `${k} 要在 ${min}~${max} 之间（收到 ${JSON.stringify(v)}）`,
+                code: 'invalid_limit',
+              },
+            }
+          }
+        }
+        // 只覆盖**给了的**那几格（其余保持原样 ✓ —— 这就是"给哪格改哪格" ✓）
+        for (const k of given) storageState.limits[k] = body[k]
+        return { status: 200, body: storageView() }
+      },
+    },
     // 改口令：默认成功。⚠ 真断言在 `routes.rs`（踢会话/换 cookie 那是后端的事）
     'PUT /api/admin/password': {
       handler: () => ({
@@ -999,6 +1228,7 @@ export const serve = (root, port, variant) =>
     resetAcctState()
     resetTaskCfg()
     resetLogsState()
+    resetStorageState()
     resetPushRulesState()
     resetPushPanelState()
     resetLiveAutoState()
@@ -1155,6 +1385,39 @@ export const serve = (root, port, variant) =>
           })
           return
         }
+      }
+      /**
+       * 某次运行的日志（`GET /api/runs/{id}/logs?limit=&before=&after=`）—— **分页**取
+       * （2026-10-09 用户口径「大日志做虚拟加载或者分页，避免一次加载太多」✓）。
+       *
+       * ⚠ 为什么走**前缀匹配**而不是 `FIXTURES` / `VARIANTS` 里的精确路径：run id 是
+       * 列表里来的、还会被别的变体重写（`bulk.mjs` 就有自己那份 100 条运行 ✓）⇒
+       * 列不出来 ✗。与下面推送规则那条同一个理由 ✓。
+       *
+       * ⚠ 变体**可以按精确路径接管**（`overrides['GET /api/runs/9000/logs']` ✓）——
+       * `bulk.mjs` 就用它换成自己那份很长的日志（窗口化那条钉子要的是"够长"，
+       * 与这里这份"分页"夹具是两件事 ✓）。不接管才用这份 800 行 ✓。
+       */
+      const runLogsMatch = url.match(/^\/api\/runs\/(\d+)\/logs$/)
+      if (runLogsMatch) {
+        const override = overrides[`GET ${url}`]
+        if (override) {
+          send(req, res, override, false)
+          return
+        }
+        const q = new URL(String(req.url ?? ''), 'http://x').searchParams
+        const num = (k) => (q.get(k) == null ? undefined : Number(q.get(k)))
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(
+          JSON.stringify(
+            sliceRunLogs(fixtureRunLogs(Number(runLogsMatch[1])), {
+              limit: num('limit'),
+              before: num('before'),
+              after: num('after'),
+            }),
+          ),
+        )
+        return
       }
       if (url.startsWith('/api/')) {
         /**
