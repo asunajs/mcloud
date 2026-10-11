@@ -76,6 +76,37 @@ pub struct StateCounts {
     pub unknown: usize,
 }
 
+/// 通知那一口（`getTaskInfo`）里**一个槽**的读数 ✓。
+///
+/// ⚠ 实拍只有 `cloudStatus` / `sum` / `taskStatus`，**邮箱那个槽多一个 `progress`** ✓
+/// ⇒ `progress` 是**分母**（31 ✓），不是"进行到第几天" ✗。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoticeSlotView {
+    pub cloud_status: Option<i64>,
+    pub sum: Option<i64>,
+    pub progress: Option<i64>,
+    pub task_status: Option<i64>,
+}
+
+/// 通知那一口（`getTaskInfo`）的读数 —— 给界面补"能不能领" ✓。
+///
+/// ⚠ **槽的对应关系是从 `sum` 认出来的**（不是猜的 ✓）：
+/// 实拍 `taskOneInfo.sum = 200` 对得上 550「开启云盘APP通知领好礼」条目上的 `+200豆` ✓；
+/// `taskTwoInfo.progress = 31` 对得上 1021/1079 那族名字里的「连续**31**天」✓、`sum = 100`
+/// 对得上它们条目上的 `+100豆` ✓。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoticeView {
+    /// 云盘通知那一槽（550/551 那族 ✓）。
+    pub cloud: NoticeSlotView,
+    /// 邮箱通知那一槽（1021/1079 那族 ✓）。
+    pub email: NoticeSlotView,
+    /// 该不该领 —— 复用任务链**同一份判据** ✓（`notice_slot_claimable` ✓），不另写一套 ✗。
+    pub cloud_claimable: bool,
+    pub email_claimable: bool,
+}
+
 /// 一次"按需取"的读数。
 ///
 /// ⚠ 字段名与**以前那条只读任务**报的明细**逐字相同**（`taskId` / `currStep` /
@@ -99,6 +130,9 @@ pub struct AppTaskListResponse {
     pub items: Vec<Value>,
     /// 没读到的那几组（空表 = 十六组全成 ✓）。
     pub failures: Vec<String>,
+    /// 通知那一口（`getTaskInfo`，**只读** ✓）—— `None` = 这一口没读到 ✓
+    ///（**best-effort**：它挂了不影响任务表 ✓）。
+    pub notice: Option<NoticeView>,
 }
 
 /// `GET /api/upstream/app-task-list?account=<id>`
@@ -125,6 +159,14 @@ pub async fn app_task_list(
         ))));
     }
 
+    // 通知那一口（`getTaskInfo`，**只读** ✓ —— 这一族会产生副作用的只有 `reward` 与
+    // `reportAppNoticeStatus`，都不在这里 ✓）⇒ **best-effort**：挂了就报 `None`，
+    // 任务表照给 ✓（任务表是本页主读数 ✓）。
+    let notice = match mcloud_tasks::notice::read_task_info(http.as_ref()).await {
+        Ok(info) => Some(notice_view(&info)),
+        Err(_) => None,
+    };
+
     let (items, raw_count) = app_task_matrix::merge_pages(&pages);
     let counts = app_task_matrix::state_counts_json(&items);
     let read = |k: &str| counts.get(k).and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -143,7 +185,25 @@ pub async fn app_task_list(
         },
         items: app_task_matrix::items_json(&items),
         failures,
+        notice,
     }))
+}
+
+/// 把协议层的两个槽摊成界面读数 ✓（`cloudStatus` / `sum` / `progress` / `taskStatus` ✓）。
+fn notice_view(info: &mcloud_upstream::app_notice::NoticeTaskInfo) -> NoticeView {
+    use mcloud_tasks::notice::notice_slot_claimable;
+    let slot = |s: Option<&mcloud_upstream::app_notice::NoticeTaskSlot>| NoticeSlotView {
+        cloud_status: s.and_then(|x| x.cloud_status),
+        sum: s.and_then(|x| x.sum),
+        progress: s.and_then(|x| x.progress),
+        task_status: s.and_then(|x| x.task_status),
+    };
+    NoticeView {
+        cloud: slot(info.task_one_info.as_ref()),
+        email: slot(info.task_two_info.as_ref()),
+        cloud_claimable: notice_slot_claimable(info.task_one_info.as_ref()),
+        email_claimable: notice_slot_claimable(info.task_two_info.as_ref()),
+    }
 }
 
 // ══════════════════════════ 签到历史（当月日历） ══════════════════════════

@@ -23,7 +23,11 @@
 
 import { ref } from '@asunajs/lite'
 
-import type { UpstreamAppTaskItem, UpstreamAppTaskList } from '../api'
+import type {
+  UpstreamAppTaskItem,
+  UpstreamAppTaskList,
+  UpstreamNoticeView,
+} from '../api'
 import { IconChevronDown } from './icons'
 
 /** 分组的中文名（照抄旧 TS `results.ts:GROUP_NAMES` ✓）。 */
@@ -92,7 +96,7 @@ const stateView = (i: UpstreamAppTaskItem): { label: string; cls: string } => {
  * lite 编译器对**子节点位置**的三元分支有约束（只认 JSX / null，见
  * `asunajs/lite` 的 `docs/design.md` §8.0），拼句子放在普通函数里就完全不受那条限制 ✓。
  */
-const metaLine = (i: UpstreamAppTaskItem): string => {
+const metaLine = (i: UpstreamAppTaskItem, notice: UpstreamNoticeView | null): string => {
   const bits: string[] = [`#${i.taskId ?? '—'}`, i.marketName ?? '—', `第 ${i.currStep ?? 0} 步`]
   if (i.process != null && i.process > 0) bits.push(`进度 ${i.process}`)
   // 上游那一格 `button.out.day`（**字符串** ✓）—— 实拍「连续31天开启邮箱APP通知」是 `"5"`，
@@ -102,11 +106,28 @@ const metaLine = (i: UpstreamAppTaskItem): string => {
   //   `5` = 条目里的 `button.*.day` ✓（1021 实拍 `"5"` ✓）；
   //   `31` = 名字里的「连续**31**天」✓（App 那个分母也是这么来的 ✓）。
   //   分母读不出就只写分子 ✓，别编 ✗。
-  const day = (i.buttonOutDay ?? '').trim()
+  // ⚠ 分子**两个来源**，先到先用 ✓（2026-10-11 live 读数）：
+  //   ① 条目自己的 `button.*.day`（1021「邮箱**APP**通知」实拍 `"5"` ✓）；
+  //   ② 条目没有 `day` 时，取**通知那一口**（`getTaskInfo`）里 `sum` 对得上本条奖励
+  //      那个槽的 `progress` —— live 实拍 `taskTwoInfo{sum:100, progress:17}` ✓
+  //      正是 1079「邮箱**短信**通知」在 App 上显示的「(17/31)」✓。
+  const rewardSum = Number((i.rewardText ?? '').replace(/[^0-9]/g, ''))
+  const slotProgress = (): number | null => {
+    const n = notice
+    if (n == null || !(rewardSum > 0)) return null
+    if (n.cloud.sum === rewardSum && n.cloud.progress != null) return n.cloud.progress
+    if (n.email.sum === rewardSum && n.email.progress != null) return n.email.progress
+    return null
+  }
+  const fromNotice = slotProgress()
+  const day = (i.buttonOutDay ?? '').trim() || (fromNotice != null ? String(fromNotice) : '')
   if (day !== '') {
     const total = /连续(\d+)天/.exec(plainName(i.name ?? ''))?.[1] ?? ''
     bits.push(total === '' ? `完成进度 ${day}` : `完成进度 (${day}/${total})`)
   }
+  // 条目上那句奖励（`content_display2` ✓ —— App 那行「完成进度 (5/31) **+100豆**」的尾巴 ✓）。
+  const reward = (i.rewardText ?? '').trim()
+  if (reward !== '') bits.push(reward)
   if (i.buttonCanReceive === 1) bits.push('可领取')
   if (i.enable === 0) bits.push('上游已停用')
   if (i.buttonAppLink != null && i.buttonAppLink !== '') bits.push(i.buttonAppLink)
@@ -138,6 +159,25 @@ export const AppTaskListView = (props: { matrix: UpstreamAppTaskList }) => {
   const onToggle = (g: string, open: boolean) => {
     if (groupOpen.value[g] === open) return
     groupOpen.value = { ...groupOpen.value, [g]: open }
+  }
+
+  /**
+   * 这一条**现在能不能领** ✓ —— 拿条目上那句奖励（`+100豆` ✓）的**数字**去通知那一口对槽 ✓。
+   *
+   * ⚠ 对槽是**从 `sum` 认的**（不是猜的 ✓）：实拍 `taskOneInfo.sum = 200` 对得上 550
+   * 条目上的 `+200豆` ✓、`taskTwoInfo.sum = 100` 对得上 1021/1079 的 `+100豆` ✓。
+   * 通知那一口没读到（`notice == null` ✓）⇒ 一律**不显示** ✓，别猜 ✗。
+   *
+   * ⚠ 它要挂在**组件体**里（不能塞进 `items()` 那个函数里 ✗ —— 那样渲染处看不见它 ✗）。
+   */
+  const claimable = (i: UpstreamAppTaskItem): boolean => {
+    const n = props.matrix.notice
+    if (n == null) return false
+    const sum = Number((i.rewardText ?? '').replace(/[^0-9]/g, ''))
+    if (!(sum > 0)) return false
+    if (n.cloud.sum === sum) return n.cloudClaimable
+    if (n.email.sum === sum) return n.emailClaimable
+    return false
   }
 
   /** 当前档位下的条目。 */
@@ -252,14 +292,19 @@ export const AppTaskListView = (props: { matrix: UpstreamAppTaskList }) => {
               >
                 <div class="flex min-w-0 flex-col gap-0.5">
                   <span class="break-words text-sm">{plainName(i.name ?? '')}</span>
-                  <span class="break-words font-mono text-xs opacity-60">{metaLine(i)}</span>
+                  <span class="break-words font-mono text-xs opacity-60">{metaLine(i, props.matrix.notice)}</span>
                   {i.description != null && i.description !== '' ? (
                     <span class="break-words text-xs opacity-50">{i.description}</span>
                   ) : null}
                 </div>
-                <span class={`badge badge-sm shrink-0 ${stateView(i).cls}`}>
-                  {stateView(i).label}
-                </span>
+                <div class="flex shrink-0 flex-col items-end gap-1">
+                  <span class={`badge badge-sm shrink-0 ${stateView(i).cls}`}>
+                    {stateView(i).label}
+                  </span>
+                  {claimable(i) ? (
+                    <span class="badge badge-sm shrink-0 badge-info">可领取</span>
+                  ) : null}
+                </div>
               </div>
             ))}
           </div>

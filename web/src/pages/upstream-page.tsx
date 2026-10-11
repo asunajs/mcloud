@@ -161,6 +161,8 @@ const AppTaskCell = (props: { account: string }) => {
       dedupedCount: 0,
       stateCounts: { done: 0, waiting: 0, unknown: 0 },
       items: [],
+      // 通知那一口没读到时的空档 ✓（真值由服务端给 ✓）。
+      notice: null,
       failures: [],
     }
 

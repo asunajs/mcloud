@@ -911,6 +911,8 @@ export interface UpstreamAppTaskItem {
   buttonTextFinish: string | null
   /** `actionMiddle` —— 空/非空区分"在不在进行中" ✓（实拍 551/1079 是 `"jump"`、550 是 `""`）。 */
   buttonActionMiddle: string | null
+  /** 条目上那句奖励（`content_display2` ✓，实拍 550 是 `"+200豆"` ✓）。 */
+  rewardText: string | null
 }
 
 /** 状态分布。三个数**分开**报 —— `unknown` 不能并进"未完成" ✗。 */
@@ -921,6 +923,28 @@ export interface UpstreamStateCounts {
 }
 
 /** `GET /api/upstream/app-task-list?account=<id>` —— App 任务那张表（**16 发只读** ✓）。 */
+/** 通知那一口（`getTaskInfo`）里**一个槽**的读数 ✓（`progress` 是**分母** ✓）。 */
+export interface UpstreamNoticeSlot {
+  cloudStatus: number | null
+  sum: number | null
+  progress: number | null
+  taskStatus: number | null
+}
+
+/**
+ * 通知那一口（`getTaskInfo`，**只读** ✓）—— 给界面补"能不能领" ✓。
+ *
+ * ⚠ 槽的对应是**从 `sum` 认出来的**（不是猜的 ✓）：实拍 `taskOneInfo.sum = 200`
+ * 对得上 550 条目上的 `+200豆` ✓；`taskTwoInfo.progress = 31` 对得上 1021/1079
+ * 名字里的「连续**31**天」✓、`sum = 100` 对得上它们的 `+100豆` ✓。
+ */
+export interface UpstreamNoticeView {
+  cloud: UpstreamNoticeSlot
+  email: UpstreamNoticeSlot
+  cloudClaimable: boolean
+  emailClaimable: boolean
+}
+
 export interface UpstreamAppTaskList {
   account: string
   fetchedAtMs: number
@@ -932,6 +956,8 @@ export interface UpstreamAppTaskList {
   dedupedCount: number
   stateCounts: UpstreamStateCounts
   items: UpstreamAppTaskItem[]
+  /** 通知那一口（`getTaskInfo`）—— `null` = 没读到 ✓（best-effort，不影响任务表 ✓）。 */
+  notice: UpstreamNoticeView | null
   /** 没读到的那几组（空表 = 十六组全成 ✓）。 */
   failures: string[]
 }

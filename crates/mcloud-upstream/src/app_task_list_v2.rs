@@ -172,6 +172,9 @@ pub struct TaskV2Item {
     /// 取 `buttonProperty.out`（**外部端**那一份 ✓ —— WebUI 就是外部端 ✓），
     /// 缺了再回落 `button.out` ✓；两层都缺 / 不是字符串 ⇒ `None`（界面回落状态词 ✓）。
     pub button_out_text: Option<String>,
+    /// `content_display2` —— 条目上那句**奖励**（实拍 550 是 `"+200豆"` ✓）——
+    /// App 那一行「完成进度 (5/31) **+100豆**」里的「+100豆」就是它 ✓。
+    pub reward_text: Option<String>,
     /// `textMiddle` —— **进行中**那一档（实拍 551/1079 是「开启中」✓、550 是「领AI豆」✓）。
     pub button_text_middle: Option<String>,
     /// `textFinish` —— **已完成**那一档（实拍 550 是「已领取」✓、551/1079 是「领AI豆」✓）。
@@ -311,6 +314,8 @@ pub fn parse_task_list_v2(body: &str, group: &str) -> Result<TaskListV2> {
                     curr_step: int_at(get("currstep")),
                     process: int_at(get("process")),
                     market_name: str_at(get("marketname")),
+                    reward_text: str_at(get("content_display2")),
+
                     // `button.app.link`（玩法 615 那一族唯一的门 ✓）。缺键 / 少一层 /
                     // 不是字符串 ⇒ `None`（"读不出" ⇒ 那一族就**不动**，不会误点 ✓）。
                     // `button.out` 那一族（`buttonProperty.out` 优先 ✓，两处形态都实拍过 ✓）。

@@ -123,6 +123,21 @@ pub async fn query_notice_task_info(ctx: &TaskContext) -> Result<NoticeTaskInfo>
     proto::parse_notice_task_info(&env)
 }
 
+/// 只读一次 `getTaskInfo`（**不发** `reward`、**不**上报状态 ✓）—— 给界面的只读路由用 ✓。
+///
+/// ⚠ 与 [`query_notice_task_info`] 的差别**只在入口**：那条收 `TaskContext`（任务链里 ✓），
+/// 这条收一个裸 `HttpClient`（WebUI 路由里 ✓）。判定与副作用一概不碰 ✓
+///（这一族**唯一**会产生副作用的两个口是 `reward` 与 `reportAppNoticeStatus` ✓，都不在这里 ✓）。
+///
+/// ⚠ 它**给不出**"进行到第几天"：实拍两个槽的四个字段是
+/// `cloudStatus` / `sum` / `taskStatus`（+ 邮箱那个槽多一个 `progress` = **分母 31** ✓）
+/// ⇒ 分子（`day`）只能来自任务条目 ✓（见 `app_task_list_v2` 的 `button_out_day` ✓）。
+pub async fn read_task_info(http: &dyn mcloud_core::HttpClient) -> Result<NoticeTaskInfo> {
+    let resp = http.request(proto::notice_task_info_request()).await?;
+    let body = mcloud_upstream::session::ensure_http_ok(&resp, "查询通知任务状态")?;
+    proto::parse_notice_task_info(&SignInEnvelope::parse(body)?)
+}
+
 // ══════════════════════════ 判定 ══════════════════════════
 
 /// [`plan_notice`] 的结论档位。
