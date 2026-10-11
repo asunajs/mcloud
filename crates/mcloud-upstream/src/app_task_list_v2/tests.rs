@@ -491,3 +491,26 @@ fn button_text_slots_are_read_for_the_three_phases() {
     assert_eq!(it3.button_text_middle, None);
     assert_eq!(it3.button_out_day.as_deref(), Some("5"));
 }
+
+/// 形态优先级：`email` → **`app`** → `out` ✓（实拍三种都出现过 ✓）。
+///
+/// 550/551 那两条**只有 `app` + `out`**（没有 `email` ✗）—— 而用户就是拿**原生 App** 比 ✓。
+#[test]
+fn button_shape_falls_back_to_app_then_out() {
+    // 只有 `app`（550/551 实拍那种）⇒ 取 `app` ✓
+    let body = r##"{"code":0,"msg":"success","result":{"month":[
+        {"id":551,"name":"连续31天开启云盘APP通知","state":"WAIT",
+         "button":{"app":{"text":"去开启","textMiddle":"开启中","textFinish":"领AI豆",
+                          "actionMiddle":"jump","btnBg":"#ffa939"},
+                   "out":{"text":"out 的","textMiddle":"out 中"}}}]}}"##;
+    let it = &parse_task_list_v2(body, "month").expect("解析得出").items[0];
+    assert_eq!(it.button_out_text.as_deref(), Some("去开启"));
+    assert_eq!(it.button_text_middle.as_deref(), Some("开启中"));
+    assert_eq!(it.button_action_middle.as_deref(), Some("jump"));
+
+    // 只有 `out` 时才用 `out` ✓
+    let body2 = r#"{"code":0,"msg":"success","result":{"month":[
+        {"id":9,"name":"x","state":"WAIT","button":{"out":{"text":"只有 out"}}}]}}"#;
+    let it2 = &parse_task_list_v2(body2, "month").expect("解析得出").items[0];
+    assert_eq!(it2.button_out_text.as_deref(), Some("只有 out"));
+}

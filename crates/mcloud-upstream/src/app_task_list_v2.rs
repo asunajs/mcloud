@@ -289,9 +289,14 @@ pub fn parse_task_list_v2(body: &str, group: &str) -> Result<TaskListV2> {
                 //   不是"补一个不同的值" ✓；真出现分歧时以 App 那一份为准 ✓。
                 //   顺序：`email` **跨形态**先取 ✓（`buttonProperty.email` → `button.email`），
                 //   再退到 `out`（`buttonProperty.out` → `button.out`）✓。
+                //   顺序：`email`（139邮箱 H5 ✓）→ `app`（**原生 App** ✓，用户就是拿 App 比 ✓）
+                //   → `out`（外部端 ✓）；同一形态内 `buttonProperty` 先于 `button` ✓。
+                //   实拍三种形态都出现过：1021/1079 有 `email` ✓、550/551 只有 `app` + `out` ✓。
                 let out_obj = get("buttonProperty")
                     .and_then(|b| b.get("email"))
                     .or_else(|| get("button").and_then(|b| b.get("email")))
+                    .or_else(|| get("buttonProperty").and_then(|b| b.get("app")))
+                    .or_else(|| get("button").and_then(|b| b.get("app")))
                     .or_else(|| get("buttonProperty").and_then(|b| b.get("out")))
                     .or_else(|| get("button").and_then(|b| b.get("out")));
                 out.items.push(TaskV2Item {
