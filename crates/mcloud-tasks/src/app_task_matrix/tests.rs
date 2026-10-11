@@ -194,19 +194,28 @@ fn disabled_count_counts_anything_that_is_not_one() {
 async fn fetch_all_sends_sixteen_read_requests() {
     let (ctx, http, _) = ctx_with(replies_with_failures(&[]));
     let (pages, failures) = fetch_all(&ctx).await.expect("不该是 Err");
-    assert_eq!(pages.len(), 16, "2 个市场 × 8 个 group");
+    assert_eq!(
+        pages.len(),
+        16,
+        "**页数**仍是 16：V3 那两发不产页、只并字段 ✓"
+    );
     assert!(failures.is_empty(), "实得：{failures:?}");
-    assert_eq!(http.count(), 16, "2 个市场 × 8 个 group");
+    assert_eq!(http.count(), 18, "16 发 V2 + 2 发 V3");
+    let mut v2 = 0;
+    let mut v3 = 0;
     for r in &http.requests() {
         assert_eq!(r.method, "POST");
-        assert_eq!(
-            r.url,
-            "https://m.mcloud.139.com/ycloud/signin/task/taskListV2"
-        );
+        // ⚠ 现在有**两口**：V2 那 16 发 + V3 那 2 发 ✓（都只读 ✓）。
+        match r.url.as_str() {
+            "https://m.mcloud.139.com/ycloud/signin/task/taskListV2" => v2 += 1,
+            "https://m.mcloud.139.com/ycloud/signin/task/taskListV3" => v3 += 1,
+            other => panic!("多了一个没预期的端点：{other}"),
+        }
         for forbidden in ["task/click", "file/create", "batchTrash", "upload"] {
             assert!(!r.url.contains(forbidden), "不许出现写路径：{}", r.url);
         }
     }
+    assert_eq!((v2, v3), (16, 2), "16 发 V2 + 2 发 V3");
 }
 
 /// 两个市场名都真的用上了，且**先云盘、后邮箱**（顺序是行为的一部分）。
@@ -222,16 +231,22 @@ async fn both_markets_are_queried_in_order() {
             Some(v["marketname"].as_str()?.to_string())
         })
         .collect();
-    assert_eq!(markets.len(), 16);
+    assert_eq!(
+        markets.len(),
+        18,
+        "16 发 V2 + 2 发 V3（V3 的 body 也带 marketname ✓）"
+    );
     assert_eq!(markets[0], "sign_in_3");
     assert!(
         markets[..8].iter().all(|m| m == "sign_in_3"),
         "前八次是云盘那一支：{markets:?}"
     );
     assert!(
-        markets[8..].iter().all(|m| m == "newsign_139mail"),
-        "后八次是邮箱那一支：{markets:?}"
+        markets[8..16].iter().all(|m| m == "newsign_139mail"),
+        "第 9~16 次是邮箱那一支：{markets:?}"
     );
+    // V3 那两发（每市场一发 ✓）也带 `marketname` ✓，顺序与市场表一致 ✓。
+    assert_eq!(&markets[16..], &["sign_in_3", "newsign_139mail"]);
 }
 
 /// ⚠ **一次失败不算失败**：某个 group 挂了只登记，其余照拉。
@@ -239,7 +254,7 @@ async fn both_markets_are_queried_in_order() {
 async fn one_failed_group_is_recorded_not_fatal() {
     let (ctx, http, _) = ctx_with(replies_with_failures(&[3, 9]));
     let (pages, failures) = fetch_all(&ctx).await.expect("部分失败不该是 Err");
-    assert_eq!(http.count(), 16, "挂了也要把十六次都走完");
+    assert_eq!(http.count(), 18, "挂了也要把 18 次都走完（16 V2 + 2 V3）");
     assert_eq!(pages.len(), 14, "16 - 2");
     assert_eq!(failures.len(), 2);
     assert!(
@@ -258,8 +273,8 @@ async fn all_fetches_failing_is_reported_not_hidden() {
     let (ctx, http, _) = ctx_with(replies_with_failures(&all));
     let (pages, failures) = fetch_all(&ctx).await.expect("这一层不该自己判错");
     assert!(pages.is_empty(), "一次都没拉到");
-    assert_eq!(failures.len(), 16, "十六组全要登记");
-    assert_eq!(http.count(), 16, "确实试满了十六次");
+    assert_eq!(failures.len(), 18, "16 组 + 2 发 V3 全要登记");
+    assert_eq!(http.count(), 18, "确实试满了 18 次");
 }
 
 /// 某一次返回非 0 码，同样按"这一组失败"登记（不中断）。
@@ -613,4 +628,58 @@ impl mcloud_core::UserStore for NoStore {
     async fn purge_expired_sessions(&self, _now_ms: i64) -> Result<usize> {
         Err(refuse())
     }
+}
+
+/// `overlay_v3` 只**补字段**、不新建条目 ✓（主条目以 V2 那份为准 ✓）。
+#[test]
+fn overlay_v3_fills_fields_without_adding_items() {
+    use mcloud_upstream::app_task_list_v2::{parse_v3_overlay, V3Overlay};
+    use std::collections::HashMap;
+
+    let mut it = item(Some(551), Some("连续31天开启云盘APP通知"));
+    it.button_out_text = Some("去开启".into());
+    it.button_text_middle = Some("开启中".into());
+    let mut page = TaskListV2 {
+        group: "time".into(),
+        items: vec![it],
+        ..Default::default()
+    };
+    let mut map: HashMap<i64, V3Overlay> = HashMap::new();
+    map.insert(
+        551,
+        V3Overlay {
+            text: Some("开启中".into()),
+            day: Some("1".into()),
+            total: Some(31),
+            can_receive: Some(0),
+            ..Default::default()
+        },
+    );
+    // 表里**没有**的 id ⇒ 不许新建条目 ✗
+    map.insert(
+        999999,
+        V3Overlay {
+            day: Some("9".into()),
+            ..Default::default()
+        },
+    );
+
+    overlay_v3(std::slice::from_mut(&mut page), &map);
+
+    assert_eq!(page.items.len(), 1, "V3 不许新建条目 ✗");
+    let got = &page.items[0];
+    assert_eq!(
+        got.button_out_text.as_deref(),
+        Some("开启中"),
+        "V3 的当前档覆盖 V2 ✓"
+    );
+    assert_eq!(got.button_out_day.as_deref(), Some("1"));
+    assert_eq!(got.button_out_total, Some(31));
+    assert_eq!(got.button_can_receive, Some(0));
+
+    // 空 overlay 不动任何东西 ✓
+    let before = page.items[0].clone();
+    overlay_v3(std::slice::from_mut(&mut page), &HashMap::new());
+    assert_eq!(page.items[0], before);
+    let _ = parse_v3_overlay(r#"{"code":0,"msg":"success"}"#);
 }

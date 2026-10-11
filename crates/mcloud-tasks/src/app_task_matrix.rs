@@ -42,8 +42,16 @@ use mcloud_upstream::app_task_list_v2::{TaskListV2, TaskV2Item};
 pub const APP_TASK_MARKETS: [&str; 2] = ["sign_in_3", proto::TASK_LIST_V2_EMAIL_MARKET];
 
 /// 这一趟要发几次请求 = 市场数 × group 数。
-pub fn app_task_matrix_fetches() -> usize {
+/// 其中 **V2 那 16 发**（2 市场 × 8 组 ✓）—— 想数"整表拉了几趟"就用它 ✓
+///（`app_task_matrix_fetches()` 现在含 2 发 V3 ✓，直接比会差 2 ✓）。
+pub fn app_task_matrix_v2_fetches() -> usize {
     APP_TASK_MARKETS.len() * proto::TASK_LIST_V2_GROUPS.len()
+}
+
+pub fn app_task_matrix_fetches() -> usize {
+    // 16 发 V2（2 市场 × 8 组 ✓）+ **2 发 V3**（每个市场一发、空 `group` 一次拿全 ✓）。
+    // ⚠ 加上 V3 之后这一口**不再是"只读 16 发"** ✗ —— 界面上那句"拉到 N/N 次"也跟着变 ✓。
+    APP_TASK_MARKETS.len() * proto::TASK_LIST_V2_GROUPS.len() + APP_TASK_MARKETS.len()
 }
 
 /// 一次拉取的失败记录。
@@ -190,6 +198,8 @@ pub fn items_json(items: &[TaskV2Item]) -> Vec<Value> {
                 // 进度与"能不能领"（`button.out.day` / `canReceive` ✓）—— 界面此前只读
                 // `process`，于是"App 里有进度、这里没有" ✗（2026-10-11 用户口径 ✓）。
                 "buttonOutDay": t.button_out_day,
+                // 上游**直接给**的分母（V3 那一口 ✓，实拍 551 是 `31` ✓）。
+                "buttonOutTotal": t.button_out_total,
                 // 上游那格是**三档**文案（`text` / `textMiddle` / `textFinish` ✓）——
                 // 界面按阶段挑，别只读第一档 ✗（2026-10-11 用户口径 ✓）。
                 "buttonTextMiddle": t.button_text_middle,
@@ -249,7 +259,65 @@ pub async fn fetch_all_with(
             }
         }
     }
+    // ⚠⚠ **再拉 V3 那一口**（每个市场一发、空 body ✓）—— 它给的字段 V2 **没有** ✗：
+    //   `day` / `total`（App 那个「完成进度 (1/31)」✓）、以及**当前阶段**那一档 `text`
+    //   （V3 的 551 是「开启中」✓，V2 同一条是「去开启」+`textMiddle`「开启中」✗）。
+    //   ⇒ 这不是"换个版本号"，是**两个口各给一半** ✓（实拍见 `app_task_list_v2` 的
+    //   `V3Overlay` 注释 ✓）。best-effort：V3 挂了不挡 V2 那份 ✓。
+    for market in APP_TASK_MARKETS {
+        match fetch_v3(http, market).await {
+            Ok(map) => overlay_v3(&mut pages, &map),
+            Err(e) => failures.push(format!("读取 {market}/taskListV3：{e}")),
+        }
+    }
     Ok((pages, failures))
+}
+
+/// 拉一个市场的 `taskListV3` 并摊成 `id → overlay` ✓。
+async fn fetch_v3(
+    http: &dyn HttpClient,
+    market: &str,
+) -> Result<std::collections::HashMap<i64, proto::V3Overlay>> {
+    let resp = http.request(proto::task_list_v3_request(market)).await?;
+    let body = mcloud_upstream::session::ensure_http_ok(&resp, "读取 App 任务矩阵（V3）")?;
+    proto::parse_v3_overlay(body)
+}
+
+/// 把 V3 的字段并进 V2 的条目 ✓（**V3 有值就覆盖** ✓ —— 它就是 App 显示的那一份 ✓）。
+///
+/// ⚠ 按 `id` 对 ✓（不是按名字 ✗ —— 名字里有 HTML、还可能重名 ✓）。
+/// ⚠ V2 里没有的 id **不新建** ✗：主条目以 V2 那份为准 ✓，V3 只补它缺的那几格 ✓。
+pub fn overlay_v3(
+    pages: &mut [TaskListV2],
+    map: &std::collections::HashMap<i64, proto::V3Overlay>,
+) {
+    for page in pages.iter_mut() {
+        for item in page.items.iter_mut() {
+            let Some(id) = item.task_id else { continue };
+            let Some(v) = map.get(&id) else { continue };
+            if v.text.is_some() {
+                item.button_out_text = v.text.clone();
+            }
+            if v.text_middle.is_some() {
+                item.button_text_middle = v.text_middle.clone();
+            }
+            if v.text_finish.is_some() {
+                item.button_text_finish = v.text_finish.clone();
+            }
+            if v.action_middle.is_some() {
+                item.button_action_middle = v.action_middle.clone();
+            }
+            if v.day.is_some() {
+                item.button_out_day = v.day.clone();
+            }
+            if v.total.is_some() {
+                item.button_out_total = v.total;
+            }
+            if v.can_receive.is_some() {
+                item.button_can_receive = v.can_receive;
+            }
+        }
+    }
 }
 
 /// 任务侧那一份：把 [`TaskContext`] 的取消信号接进去 ✓。

@@ -99,6 +99,115 @@ pub fn task_list_v2_request(marketname: &str, group: &str) -> HttpRequest {
     req.header("activityid", marketname)
 }
 
+/// `POST /ycloud/signin/task/taskListV3` —— **只读** ✓。
+pub const TASK_LIST_V3_PATH: &str = "/ycloud/signin/task/taskListV3";
+
+/// 构造 `POST /ycloud/signin/task/taskListV3` —— **只读** ✓。
+///
+/// ⚠⚠ **body 与 V2 同形，但 `group` 是空串** ✓ —— 实拍（2026-10-11 云盘 App 云朵中心）：
+/// Reqable 没存下 body ✗（`request.body: null`），但 `content-length: 62` ✓ ⇒ 逐字节对出来的
+/// 就是 `{"marketname":"sign_in_3","clientVersion":"12.6.0","group":""}` ✓
+/// （`{`1 `"marketname"`12 `:`1 `"sign_in_3"`11 `,`1 `"clientVersion"`15 `:`1 `"12.6.0"`8
+/// `,`1 `"group"`7 `:`1 `""`2 `}`1 = **62** ✓）。
+/// ⇒ **空 `group` = 一次拿整个市场** ✓（这就是它 1 发能顶 V2 那 8 发的原因 ✓）。
+///
+/// ⚠ 本文件顶上那句旧说明（"V3 body 多一枚 `client`、没有 `group`" ✗）是**更早**的抓包读数 ✓，
+/// 已被这一发**覆盖** ✗ —— 按"抓包 > 推断"取新的 ✓（旧形状发出去会 404 ✗，实测过 ✓）。
+/// 空 body / 带 `client` 两种写法都试过：**都 404** ✗。
+pub fn task_list_v3_request(market: &str) -> HttpRequest {
+    let req = h5(
+        false,
+        HttpRequest::post(format!("{MCLOUD_HOST}{TASK_LIST_V3_PATH}")).json_body(
+            &serde_json::json!({
+                "marketname": market,
+                "clientVersion": TASK_CLIENT_VERSION,
+                "group": "",
+            }),
+        ),
+        "true",
+    );
+    let mut req = req;
+    req.headers
+        .retain(|(k, _)| !k.eq_ignore_ascii_case("activityid"));
+    req.header("activityid", market)
+        .header("content-type", "application/json;charset=UTF-8")
+}
+
+/// `taskListV3` 里**V2 没有**的那几格 ✓。
+///
+/// ⚠⚠ 两个口**不是"同一件事换个版本号"** ✗ —— 实拍同一天同一条任务（551 ✓）：
+///
+/// ```text
+/// V3  buttonProperty.app = {"text":"开启中","day":"1","total":31,"canReceive":0}
+/// V2  button.app         = {"text":"去开启","textMiddle":"开启中","textFinish":"领AI豆"}
+/// ```
+///
+/// ⇒ **进度（`day` / `total`）只在 V3 里** ✓ —— App 上那个「完成进度 **(1/31)**」
+/// 就是这两格 ✓（`total` 是上游**直接给的** ✓，不是从名字里猜的 ✗）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct V3Overlay {
+    pub text: Option<String>,
+    pub text_middle: Option<String>,
+    pub text_finish: Option<String>,
+    pub action_middle: Option<String>,
+    pub day: Option<String>,
+    pub total: Option<i64>,
+    pub can_receive: Option<i64>,
+    pub description: Option<String>,
+}
+
+/// 从 `taskListV3` 响应里取 `id → [`V3Overlay`]` ✓。
+///
+/// ⚠ 这一口的 `result` 是**数组**（V2 是按 group 分组的**对象** ✓）—— 两者别混解 ✗。
+/// 只认 [`V3Overlay`] 那几格，**不抄整条** ✓（V2 那份才是主条目 ✓）。
+pub fn parse_v3_overlay(body: &str) -> Result<std::collections::HashMap<i64, V3Overlay>> {
+    let env = SignInEnvelope::parse(body)?;
+    env.ensure_ok("读取 App 任务矩阵（V3）")?;
+    let mut out = std::collections::HashMap::new();
+    let Some(arr) = env.result.as_ref().and_then(Value::as_array) else {
+        return Ok(out);
+    };
+    for raw in arr {
+        let Some(obj) = raw.as_object() else { continue };
+        let Some(id) = obj.get("id").and_then(Value::as_i64) else {
+            continue;
+        };
+        let get = |k: &str| obj.get(k);
+        // 形态优先级与条目那份**同一口径** ✓（`email` → `app` → `out` ✓，`buttonProperty` 先于 `button` ✓）。
+        let shape = ["buttonProperty", "button"]
+            .iter()
+            .filter_map(|k| get(k))
+            .flat_map(|b| {
+                ["email", "app", "out"]
+                    .iter()
+                    .filter_map(move |s| b.get(*s))
+                    .collect::<Vec<_>>()
+            })
+            .next();
+        let str_at = |v: Option<&Value>, k: &str| {
+            v.and_then(|o| o.get(k))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        out.insert(
+            id,
+            V3Overlay {
+                text: str_at(shape, "text"),
+                text_middle: str_at(shape, "textMiddle"),
+                text_finish: str_at(shape, "textFinish"),
+                action_middle: str_at(shape, "actionMiddle"),
+                day: str_at(shape, "day"),
+                total: shape.and_then(|o| o.get("total")).and_then(Value::as_i64),
+                can_receive: shape
+                    .and_then(|o| o.get("canReceive"))
+                    .and_then(Value::as_i64),
+                description: str_at(Some(raw), "description"),
+            },
+        );
+    }
+    Ok(out)
+}
+
 /// `taskListV2` 响应里的一条任务。
 ///
 /// # 取哪些字段
@@ -172,6 +281,11 @@ pub struct TaskV2Item {
     /// 取 `buttonProperty.out`（**外部端**那一份 ✓ —— WebUI 就是外部端 ✓），
     /// 缺了再回落 `button.out` ✓；两层都缺 / 不是字符串 ⇒ `None`（界面回落状态词 ✓）。
     pub button_out_text: Option<String>,
+    /// `total` —— 上游**直接给的**分母 ✓（实拍 V3 的 551 是 `31` ✓）。
+    ///
+    /// ⚠ 只有 **V3** 给这一格 ✗（V2 没有 ✓）⇒ 由 [`crate::app_task_list_v2::parse_v3_overlay`]
+    /// 并进来 ✓。有了它就**不用**从名字里猜「连续N天」✗。
+    pub button_out_total: Option<i64>,
     /// `content_display2` —— 条目上那句**奖励**（实拍 550 是 `"+200豆"` ✓）——
     /// App 那一行「完成进度 (5/31) **+100豆**」里的「+100豆」就是它 ✓。
     pub reward_text: Option<String>,
@@ -327,6 +441,9 @@ pub fn parse_task_list_v2(body: &str, group: &str) -> Result<TaskListV2> {
                         .and_then(|o| o.get("canReceive"))
                         .and_then(Value::as_i64),
                     // 与上面的 `out_obj` **同一份来源** ✓（`email` 优先 —— App 渲染的就是它 ✓）。
+                    // ⚠ V2 **不给** `total` ✗（那是 V3 那一格 ✓）⇒ 这里恒 `None`，
+                    // 由 `app_task_matrix` 用 V3 的 overlay 并进来 ✓。
+                    button_out_total: None,
                     button_out_text: out_obj
                         .and_then(|o| o.get("text"))
                         .and_then(Value::as_str)

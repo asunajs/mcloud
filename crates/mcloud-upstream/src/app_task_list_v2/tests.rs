@@ -514,3 +514,61 @@ fn button_shape_falls_back_to_app_then_out() {
     let it2 = &parse_task_list_v2(body2, "month").expect("解析得出").items[0];
     assert_eq!(it2.button_out_text.as_deref(), Some("只有 out"));
 }
+
+/// `taskListV3` 的**请求形状**与 `day`/`total` 的解析 ✓。
+///
+/// ⚠ 这一口最坑的一点：**body 不是空的** ✗ —— 实拍（2026-10-11 云盘 App 云朵中心）
+/// Reqable 没存下 body ✗，只有 `content-length: 62` ✓ ⇒ 逐字节对出来就是下面这条 ✓。
+/// 发空 body / 发带 `client` 的旧形状，上游一律 **404** ✗（都实测过 ✓）。
+#[test]
+fn task_list_v3_request_body_is_62_bytes_with_empty_group() {
+    let req = task_list_v3_request("sign_in_3");
+    assert!(req.url.ends_with("/ycloud/signin/task/taskListV3"));
+    let body = String::from_utf8(req.body.clone().expect("有 body")).unwrap();
+    // ⚠ `serde_json::json!` 走 BTreeMap ⇒ **键按字母序** ✗（实拍那发是书写序 ✓）。
+    // 上游不看键序 ✓（live 实测这样发**成了** ✓），所以只钉"长度 62 + 三个键的值" ✓。
+    assert_eq!(
+        body,
+        r#"{"clientVersion":"12.6.0","group":"","marketname":"sign_in_3"}"#
+    );
+    assert_eq!(body.len(), 62, "实拍 `content-length: 62` ✓");
+    for want in [
+        r#""marketname":"sign_in_3""#,
+        r#""clientVersion":"12.6.0""#,
+        r#""group":"""#,
+    ] {
+        assert!(body.contains(want), "少了 {want}：{body}");
+    }
+    let act = req
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("activityid"))
+        .map(|(_, v)| v.clone());
+    assert_eq!(
+        act.as_deref(),
+        Some("sign_in_3"),
+        "市场靠 activityid 头认 ✓"
+    );
+}
+
+/// `parse_v3_overlay` 要把 **V2 没有的那几格**取出来 ✓（`day` / `total` / `canReceive` ✓）。
+#[test]
+fn parse_v3_overlay_reads_day_and_total() {
+    // 实拍形状（551 ✓）：`buttonProperty.app = {text:"开启中", day:"1", total:31, canReceive:0}`
+    let body = r#"{"code":0,"msg":"success","result":[
+        {"id":551,"name":"连续31天开启云盘APP通知","groupid":"time",
+         "description":"+200豆","state":"WAIT",
+         "buttonProperty":{"app":{"text":"开启中","day":"1","total":31,"canReceive":0}}}]}"#;
+    let map = parse_v3_overlay(body).expect("解析得出");
+    let v = map.get(&551).expect("有 551");
+    assert_eq!(v.text.as_deref(), Some("开启中"));
+    assert_eq!(v.day.as_deref(), Some("1"));
+    assert_eq!(v.total, Some(31));
+    assert_eq!(v.can_receive, Some(0));
+    assert_eq!(v.description.as_deref(), Some("+200豆"));
+
+    // 空 result / 不是数组 ⇒ 空表（不报错 ✓ —— 这口是 best-effort ✓）。
+    assert!(parse_v3_overlay(r#"{"code":0,"msg":"success"}"#)
+        .unwrap()
+        .is_empty());
+}

@@ -903,6 +903,8 @@ export interface UpstreamAppTaskItem {
    * 而 `day` 是 `"5"` ⇒ 只读 `process` 就会"App 有进度、这里没有" ✗。
    */
   buttonOutDay: string | null
+  /** `total` —— **上游直接给的分母**（V3 那一口 ✓，实拍 551 是 `31` ✓）。 */
+  buttonOutTotal: number | null
   /** `button.out.canReceive` —— 上游说"现在能不能领"（`1` 才算能领 ✓）。 */
   buttonCanReceive: number | null
   /** **进行中**那一档文案（实拍 551/1079 是「开启中」✓）。 */

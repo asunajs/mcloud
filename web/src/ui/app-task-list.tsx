@@ -135,8 +135,17 @@ const metaLine = (i: UpstreamAppTaskItem, notice: UpstreamNoticeView | null): st
   const fromNotice = slotProgress()
   const day = (i.buttonOutDay ?? '').trim() || (fromNotice != null ? String(fromNotice) : '')
   if (day !== '') {
-    const total = /连续(\d+)天/.exec(plainName(i.name ?? ''))?.[1] ?? ''
-    bits.push(total === '' ? `完成进度 ${day}` : `完成进度 (${day}/${total})`)
+    // ⚠ 分母**优先用上游直接给的 `total`** ✓（V3 那一口，实拍 551 是 `31` ✓）——
+    //   读不出才回落到名字里的「连续N天」✓（那是**猜**，标出来 ✓），都没有就只写分子 ✓。
+    const total = i.buttonOutTotal != null ? String(i.buttonOutTotal) : ''
+    const guess = total === '' ? (/连续(\d+)天/.exec(plainName(i.name ?? ''))?.[1] ?? '') : ''
+    bits.push(
+      total !== ''
+        ? `完成进度 (${day}/${total})`
+        : guess !== ''
+          ? `完成进度 (${day}/${guess}，分母取自名字)`
+          : `完成进度 ${day}`,
+    )
   }
   // 条目上那句奖励（`content_display2` ✓ —— App 那行「完成进度 (5/31) **+100豆**」的尾巴 ✓）。
   const reward = (i.rewardText ?? '').trim()
