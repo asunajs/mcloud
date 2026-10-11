@@ -162,6 +162,15 @@ pub struct TaskV2Item {
     /// ⚠ 只取这一格、**不**抄整份 `button`：这条链只判"是不是那个按钮" ✓
     ///（那 25 个键里其余的是七份端形态、素材、排序之类，本层不判 ✓）。
     pub button_app_link: Option<String>,
+    /// `button.email.link` —— **邮箱端**那一档的入口（实拍是短链 `https://y.10086.cn/x/<码>`
+    /// 或带 `token=#ssoToken#` 占位的落地页）。
+    ///
+    /// ⚠ 2026-10-10 真机读数（临时取证，见 `docs/app-task-status.md` §5-11）：**十来个条目都有这一格**
+    /// （548/549/522/1075/1005/1017/1004/1014/1020 …）⇒ 它**不是**"某一条任务的特征"，
+    /// 谁拿它做什么**必须逐条看** ✗（本仓今天只有 **1017** 会去取它 ✓）。
+    ///
+    /// `#ssoToken#` 是**上游给的占位**（1075 与 1017 两条实拍都带它）⇒ 真发之前要换成真票 ✓。
+    pub button_email_link: Option<String>,
 }
 
 /// **一次**（一个 group 的）`taskListV2` 响应的解析结果。
@@ -247,6 +256,12 @@ pub fn parse_task_list_v2(body: &str, group: &str) -> Result<TaskListV2> {
                     button_app_link: get("button")
                         .and_then(|b| b.get("app"))
                         .and_then(|a| a.get("link"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    // `button.email.link`（1017 的"云朵中心"入口页 ✓）。
+                    button_email_link: get("button")
+                        .and_then(|b| b.get("email"))
+                        .and_then(|e| e.get("link"))
                         .and_then(Value::as_str)
                         .map(str::to_string),
                 });

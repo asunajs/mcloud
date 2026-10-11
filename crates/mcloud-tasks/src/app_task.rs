@@ -846,6 +846,28 @@ pub enum Step {
     /// 那发是按步数打的 ⇒ **两发都要** ✓。key 由 [`click_key`] 给
     ///（409 → `task2` ✓，1005 → 默认 `task` ✓）。
     Entry,
+    /// 「登录移动云盘云朵中心」（1017）那一档：条目自己给了**能直接取的入口页**
+    /// （`button.email.link`，里面 `token=#ssoToken#` 是占位）。
+    ///
+    /// 依据是 **2026-10-10 的真机原始条目**（临时取证，见 `docs/app-task-status.md` §5-11）：
+    /// `marketname=newsign_139mail`、`currstep=1`、`stepTypeSet=["sendcloud","click","interfacecallback"]`、
+    /// `button.email.link = https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&…&token=#ssoToken#`
+    /// —— 与 409/1005 同族（都是"进云朵中心"），但**入口是一个 http 页**而不是 `mcloud://` 深链
+    /// ⇒ 本仓能直接取它（深链那两条只能"发两发上报"来代替 ✓）。
+    ///
+    /// ⚠ `button.email.link` **别的条目也有**（实拍十来个）⇒ 这一档**只认 1017**，
+    /// 不要按"有这一格"推广出去 ✗（别的条目各有自己的 runner ✓）。
+    ///
+    /// # 604「去云盘图书馆阅读书籍」（2026-10-10 加）
+    ///
+    /// 同一天真机取到的原始条目（`sign_in_3` / `month`）：
+    /// `button.app.link = https://h.139.com/content/cloudClass?columnId=56&level=1&channel=400&token=#ssoToken#`、
+    /// `currstep = 0`、`stepTypeSet = ["sendcloud","click"]`（**没有** `interfacecallback` ✓）。
+    /// 与 1017 的差别有两处，都按读数处理：
+    /// * 入口那一格在 **`button.app`**（不是 `email` ✓）；
+    /// * `currstep = 0` ⇒ **③-a 那道门自己会打一发**（默认 key `task` ✓）⇒ 这一档**不再补第二发** ✗
+    ///   （604 在旧 TS 里没有 runner ⇒ 全趟只有那一发 ✓，与 409 的"两发"形状不同 ✓）。
+    PortalEntry,
     /// **专用执行器**（107 / 472 / 473 / 1004 / 1014 / 1020 / 1028 / 585）。
     ///
     /// 旧 TS 的 `taskRunners` 表（`runners.ts:39-186`）—— 与 `Upload` / `Entry` 走
@@ -873,6 +895,14 @@ pub fn step_for(item: &TaskV2Item) -> Option<Step> {
     if matches!(item.task_id, Some(409 | 1005)) {
         return Some(Step::Entry);
     }
+    // 1017「登录移动云盘云朵中心」：同族，但入口是**能取的 http 页**（见 [`Step::PortalEntry`]）。
+    // 604「去云盘图书馆阅读书籍」：同一档（入口 `button.app.link` 带 `#ssoToken#`，`currstep = 0` ✓）。
+    if item
+        .task_id
+        .is_some_and(|id| PORTAL_ENTRY_TASK_IDS.contains(&id))
+    {
+        return Some(Step::PortalEntry);
+    }
     if item.task_id == Some(SHARE_TASK_ID) {
         return Some(Step::Share);
     }
@@ -890,6 +920,20 @@ pub fn step_for(item: &TaskV2Item) -> Option<Step> {
     upload_shape_for(item).map(Step::Upload)
 }
 
+/// 走 [`Step::PortalEntry`] 那一档的 id —— 共同点是**条目自己给了一个能取的 http 入口**，
+/// 而**取那一页就是它要的动**（1017 的 `m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin` ✓、
+/// 604 的 `h.139.com/content/cloudClass` ✓）。
+///
+/// ⚠ 这是**逐条实拍**收进来的，不是"有入口链接就收" ✗：
+/// `button.email.link` / `button.app.link` 十来个条目都有（548 / 549 / 522 / 1075 / 1005 /
+/// 1004 / 1014 / 1020 … ✓），**谁拿它做什么必须逐条看** ✓。
+/// ⚠⚠ **1029 不在这一档**（2026-10-11 定）：它的入口也是 http（短链 `y.10086.cn/x/wdzd` ✓，
+/// 落点是 `html5.mail.10086.cn/pe/PE_html/open_download.html?aid=wdzd&name=MyBillFolder&…` ✓），
+/// 但真机读数说"取那一页**不够**"（run 327：上报 + 取页 + 打卡 ⇒ `WAIT → WAIT` ✗）
+/// ⇒ 它走 [`AppRunner::BillView`]（那一档里有**邮箱会话**，能发那一页自己的行为像素 ✓）。
+/// ⚠ 到 2026-10-11 为止这一条**还没做成**（见 `docs/app-task-status.md` §5-14 ✓）。
+pub const PORTAL_ENTRY_TASK_IDS: [i64; 2] = [1017, 604];
+
 /// **click-only** 那一串 —— 旧 TS 里"框架自动打卡"的 id。
 ///
 /// 依据：`mcloud-sign/TASKS.md`「**click-only 任务（框架自动处理）：** 115、431、
@@ -899,7 +943,28 @@ pub fn step_for(item: &TaskV2Item) -> Option<Step> {
 /// ⚠ 与 [`SKIP_TASK_LIST`] 是**互补**关系、**不是**子集关系：那一串是"刻意不打"，
 /// 这一串是"刻意要打"。两串**不得有交集**（有交集时 [`should_act`] 里那道黑名单
 /// 门会让这一档永远到不了这里 —— 那是安全的方向 ✓），由测试钉住。
-pub const CLICK_ONLY_TASK_IDS: [i64; 8] = [115, 431, 435, 1009, 1010, 1013, 1016, 447];
+///
+/// # 1017 不在这一串里（2026-10-10）
+///
+/// 「登录移动云盘云朵中心」**有过**半天被放进来（当时只看到"TS 会打卡它"），
+/// 真机读数否掉了那一档：**默认 key 与 `task2` 各打一发都是 `WAIT → WAIT`** ✗
+/// （run 302 / 303）。抓到它的**原始条目**之后才看清：它的入口是一张
+/// **能直接取的 http 页**（`button.email.link`）⇒ 它走 [`Step::PortalEntry`] ✓，
+/// 不进这一串 ✓（`step_for` 里那一档排在 click-only 之前 ✓）。
+/// # 547 / 609（2026-10-11 加）
+///
+/// 两条都是**两边都没有 runner** 的条目（TS 全仓 0 命中 ✓），真机原始条目给的是
+/// **`mcloud://` 深链**（`mcloud://main/aiAssistantGlobal?params=<base64>` ⇒ **取不了** ✗，
+/// 与 1017 / 604 那种 http 入口不同 ✓），`currstep` 都是 0、`marketname` 都是 `sign_in_3`：
+///
+/// * **547「加入一个知识库」**：`params` 解出来是
+///   `{"params":{"jumpConfig":{"tab":"squareList","targetUrl":"/pages/knowledgeBase/squareList?from=app"},"sourceId":"101151000"}}`；
+///   `stepTypeSet = ["sendcloud","click"]`。
+///
+/// ⚠ **609「和AI助手对话」不在这一串里**：它同族（也是 `mcloud://` 深链、`currstep = 0`），
+/// 但真机实测**打卡不够**（run 318 只打卡 ⇒ `WAIT → WAIT` ✗，而它把 `currstep` 从 0 推到了 3 ✓
+/// —— 打卡**确实动了**上游，只是不算完成 ✓）⇒ 它走 [`AppRunner::AiAssistant`]（AI 对话链 ✓）。
+pub const CLICK_ONLY_TASK_IDS: [i64; 9] = [115, 431, 435, 1009, 1010, 1013, 1016, 447, 547];
 
 /// 这一条是不是 click-only 那一档。
 pub fn is_click_only(task_id: i64) -> bool {
@@ -1790,7 +1855,9 @@ pub async fn run_app_task(
         // ⚠ 黑名单由 `should_act` 那一层挡（`is_skipped_task` ✓），这一档到不了
         // 那些 id ⇒ 这里不必再判一次（判了也不会错，只是重复）。
         if matches!(step_kind, Step::ClickOnly) {
-            match click(ctx, item).await {
+            // ⚠ 走 [`click_key`] 而**不是**写死默认 key：那一串里绝大多数取到默认值 ✓，
+            // 但 1017（2026-10-10 加）要走专用 key —— 与 `Step::Entry` 的口径一致 ✓。
+            match click_with_key(ctx, item, click_key(item.task_id)).await {
                 Ok(notice) => {
                     step.clicked = true;
                     step.acted_counted = true;
@@ -1870,19 +1937,58 @@ pub async fn run_app_task(
             result.steps.push(step);
             continue;
         }
-        if matches!(step_kind, Step::Entry) {
-            match entry_do_task(ctx).await {
-                Ok(()) => {}
-                // 埋点失败**不挡路**（TS 那句 `tryRequest` 也不看结果 ✓）
+        if matches!(step_kind, Step::PortalEntry) {
+            // ① 页面初始化上报（**与 409/1005 同一发**：H5 页面自己的 `initTaskStatus`
+            //    就是 `POST /ycloud/signin/page/doTaskPost` ✓，`activityid` 跟着本条任务的
+            //    市场名走 ⇒ 1017 报的是 `newsign_139mail` ✓）。
+            let reports = entry_reports(ctx, item.market_name.as_deref()).await;
+            step.problems.extend(reports);
+            // ② 取入口页（`button.email.link`，`#ssoToken#` 换成真票 ✓）。
+            match portal_entry(ctx, item).await {
+                Ok(notes) => step.problems.extend(notes),
                 Err(e) => step
                     .problems
-                    .push(format!("入口埋点没打成（不影响后面的打卡）：{e}")),
+                    .push(format!("云朵中心入口页取不到（后面照常打卡）：{e}")),
             }
+            // 旧 TS：埋点 → `sleep(500)` → `clickTask`（同一族的口径 ✓）。
+            if pace_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(pace_ms as u64)).await;
+            }
+            // ③ 打卡：**只在③-a 那道门没打的时候补这一发** ✓
+            //（1017 `currstep = 1` ⇒ 门不打 ⇒ 这里补 ✓；604 `currstep = 0` ⇒ 门已经打过了
+            // ⇒ 这里**不补**，否则同一条任务连打两发 ✗，而 604 在旧 TS 里全趟只有一发 ✓）。
+            if !step.clicked {
+                match click_with_key(ctx, item, click_key(item.task_id)).await {
+                    Ok(notice) => {
+                        step.clicked = true;
+                        if let Some(n) = notice {
+                            step.problems.push(format!("上游附言：{n}"));
+                        }
+                    }
+                    Err(e) => step.problems.push(format!("入口那一发打卡失败：{e}")),
+                }
+            }
+            if step.clicked {
+                step.acted_counted = true;
+                result.acted += 1;
+            }
+            result.steps.push(step);
+            continue;
+        }
+        if matches!(step_kind, Step::Entry) {
+            // ⚠ `market_name` 要传下去：这一发上报的 `activityid` 跟着**本条任务的市场名**走
+            //（409 在 `sign_in_3`、1005 在 `newsign_139mail` ⇒ 两条各自冒充自己那一页 ✓）。
+            let reports = entry_reports(ctx, item.market_name.as_deref()).await;
+            step.problems.extend(reports);
             // 旧 TS：埋点 → `sleep(500)` → `clickTask`。
             if pace_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(pace_ms as u64)).await;
             }
-            match click(ctx, item).await {
+            // ⚠ 这一发用**本任务的专用 key**（409 → `task2` ✓，1005 用默认 ✓）——
+            // 它对应旧 TS runner 里那句 `clickTask(ctx, 409, "task2")`；
+            // 而上面"③-a 先打卡"那一发是 `handleTaskClick` 的，走**默认 key** ✓。
+            // 两发**不是重复**：参考实现 409 那一趟就是 `task` → `task2` 各一发 ✓。
+            match click_with_key(ctx, item, click_key(item.task_id)).await {
                 Ok(notice) => {
                     step.clicked = true;
                     if let Some(n) = notice {
@@ -2231,15 +2337,113 @@ fn parse_only_task_ids(body: &Value) -> Vec<i64> {
     out
 }
 
-/// 「从固定入口进一次」那一发埋点（409 / 1005）。
+/// 「从固定入口进一次」那一族的**两发上报**（409 / 1005）。
 ///
-/// 旧 TS `runners.ts:98-108` / `:126-133`。`deviceId` 用 smid 换回来的那一个 ✓。
-async fn entry_do_task(ctx: &TaskContext) -> Result<()> {
+/// 两发**同义**（都是"我打开了云朵中心那一页"），分属新旧两条路径，形状与出处见
+/// [`mcloud_upstream::app_task_entry`]：新那发是 **App 实拍**（`POST …/ycloud/signin/page/doTaskPost`），
+/// 旧那发是**旧 TS 的路径**（`GET mrp…/market/signin/page/doTask`，Go 探针实测回 `code 0`）。
+///
+/// ⚠ 加新那发的动因是**形状对齐**（App 12.6.0 实拍走的就是它），**不是**"它让上游翻账"
+/// —— 2026-10-10 实测过：只补这一发、不改打卡 key 时三个账号仍然 `WAIT → WAIT`
+///（run 289 / 290）；翻账的真因是**打卡 key**（见 [`click_with_key`] 与 §5-9）。
+/// 两条都留：删哪一条都得先有"它没用"的读数，而现在**没有** ✓。
+///
+/// ⚠ 两发**都失败不挡路**（旧 TS 也用 `tryRequest` 包着、结果不看 ✓）：
+/// 返回的是"要记进明细的问题"，**不返回 `Err`** —— 判定用的是后面那一发打卡，
+/// 上报打不成不该把整条任务判死。
+async fn entry_reports(ctx: &TaskContext, market_name: Option<&str>) -> Vec<String> {
     let device_id = crate::signin::h5_device_id(ctx, None).await;
-    let req = mcloud_upstream::app_task_entry::entry_do_task_request(device_id.as_deref())?;
-    let resp = ctx.http.request(req).await?;
-    mcloud_upstream::session::ensure_http_ok(&resp, "入口埋点（page/doTask）")?;
-    Ok(())
+    let mut problems = Vec::new();
+    let new =
+        mcloud_upstream::app_task_entry::do_task_post_request(device_id.as_deref(), market_name);
+    report_once(ctx, new, "入口上报（doTaskPost）", &mut problems).await;
+    let old = mcloud_upstream::app_task_entry::entry_do_task_request(device_id.as_deref());
+    report_once(ctx, old, "入口埋点（page/doTask）", &mut problems).await;
+    problems
+}
+
+/// 取「云朵中心」那一档的**入口页**（1017 的 `button.email.link` ✓）。
+///
+/// * `#ssoToken#` 是**上游给的占位** ⇒ 发之前换成真票（两条实拍都带它：1075 / 1017 ✓）。
+/// * 这一发走 `ctx.http`（会话层）⇒ 那套按主机的头（含带票的 `Referer`）由它注入 ✓，
+///   这里不另拼头。
+/// * 返回的是"要记进明细的问题"、**不返回 `Err` 挡路** —— 与 [`entry_reports`] 同一条口径：
+///   入口页取不成，后面那一发打卡照发 ✓（判定用打卡 + 收尾复查的读数 ✓）。
+///
+/// ⚠ **只认 1017 给的那条链接**：`button.email.link` 这一格实拍里**十来个条目都有**
+/// （548/549/522/1075/1005/1004/1014/1020 …）⇒ 这条规则**不许**按"有这一格"推广 ✗。
+async fn portal_entry(ctx: &TaskContext, item: &TaskV2Item) -> Result<Vec<String>> {
+    let mut notes = Vec::new();
+    // 两格都可能是入口：1017 在 `button.email.link`、604 在 `button.app.link`（实拍各一处 ✓）。
+    let link = item
+        .button_email_link
+        .as_deref()
+        .or(item.button_app_link.as_deref());
+    let Some(link) = link else {
+        notes.push(
+            "条目没给入口链接（`button.email.link` / `button.app.link` 都缺席）⇒ 只打卡".into(),
+        );
+        return Ok(notes);
+    };
+    // ⚠ 只发 https（那两枚实拍都是 https；别的形状没有样本 ⇒ 不发，也不猜 ✗）。
+    if !link.starts_with("https://") {
+        notes.push(format!("入口链接不是 https ⇒ 不发（{}）", link.len()));
+        return Ok(notes);
+    }
+    let url = link.replace(SSO_TOKEN_PLACEHOLDER, &ctx.account.auth.token);
+    let resp = ctx.http.request(HttpRequest::get(url)).await?;
+    notes.push(format!(
+        "云朵中心入口页已取（HTTP {}，{} 字节）",
+        resp.status,
+        resp.body.len()
+    ));
+
+    Ok(notes)
+}
+
+/// 上游在入口链接里用的**票占位**（实拍：1075 与 1017 两条的 `token=#ssoToken#` ✓）。
+const SSO_TOKEN_PLACEHOLDER: &str = "#ssoToken#";
+
+/// 发一发**失败不挡路**的上报：失败只记进 `problems`（带标签，能分清是哪一发 ✓）。
+///
+/// ⚠⚠ 这里**不能只判 HTTP 状态**（2026-10-10 修）：这一族的失败长相是
+/// **HTTP 200 + `code` 非 0**（`{"code":90001,"msg":"未登录"}` 这类），
+/// 而 [`mcloud_upstream::session::ensure_http_ok`] 只看状态码 ⇒ 打回也当成功 ✗。
+/// 所以这里按**签到族的信封**解一次 `code`：非 0 记进 `problems`（含上游原文的 `msg` ✓）。
+async fn report_once(
+    ctx: &TaskContext,
+    req: Result<HttpRequest>,
+    label: &str,
+    problems: &mut Vec<String>,
+) {
+    let resp = match req {
+        Ok(req) => match ctx.http.request(req).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                problems.push(format!("{label}没打成（不影响后面的打卡）：{e}"));
+                return;
+            }
+        },
+        Err(e) => {
+            problems.push(format!("{label}没打成（不影响后面的打卡）：{e}"));
+            return;
+        }
+    };
+    if !(200..300).contains(&resp.status) {
+        problems.push(format!(
+            "{label}没打成（不影响后面的打卡）：HTTP {}",
+            resp.status
+        ));
+        return;
+    }
+    match mcloud_upstream::app_signin::SignInEnvelope::parse(&resp.body) {
+        Ok(env) if env.code == 0 => {}
+        Ok(env) => problems.push(format!(
+            "{label}被上游打回了（不影响后面的打卡）：code={} msg={}",
+            env.code, env.message
+        )),
+        Err(e) => problems.push(format!("{label}的响应读不出（不影响后面的打卡）：{e}")),
+    }
 }
 
 /// 打卡用的 `key`。默认 `task`；个别任务按参考实现换成专用值。
@@ -2258,27 +2462,82 @@ async fn entry_do_task(ctx: &TaskContext) -> Result<()> {
 /// 是 `{uploaded:1, clicked:true, problems:[]}`，可上游的 `state` 始终是 `WAIT` ✗。
 fn click_key(task_id: Option<i64>) -> &'static str {
     match task_id {
-        // `runners.ts:107`：409「从固定入口进入云朵中心」—— `Step::Entry` 里
-        // **补的那一发**打卡用的就是它 ✓（`handleTaskClick` 那发另算）。
+        // `runners.ts:107`：409「从固定入口访问云朵中心」—— `Step::Entry` 里
+        // **补的那一发**打卡用的就是它 ✓（`handleTaskClick` 那发走默认 key ✓）。
+        //
+        // ⭐⭐ **2026-10-10 真机实测**：这条 key 是本轮修的那一格 —— 修之前
+        // 「先打卡」那发也发 `task2`（两发都是 `task2`），409 连着多趟 `WAIT → WAIT`；
+        // 改成「`task`（先打卡）→ `task2`（补发）」之后**当趟就翻 `FINISH`** ✓
+        // （run 293，测试号）。
         Some(409) => "task2",
+        // 1005「从固定入口**进入**云朵中心」：参考实现用的是**默认 key**（`clickTask(ctx, 1005)` ✓），
+        // 而那条路径在参考实现里**也没成**（`state` 停在 `WAIT`、`currstep` = 1 ✗）。
+        // ⚠ 2026-10-10 实测：它 `currstep` 恒为 1 ⇒ 上面那道「先打卡」门
+        // （`currstep == 0` 才打）**永远不打** ⇒ 这一条只发得出**一发**，
+        // 与 409 那个"两发才成"的读数**形状不同**。
+        // 于是按 409 的读数外推：**完成那一发**用 `task2`（`currstep = 1` ⇒ 第 2 档 ✓）——
+        // 这是**待验证的实验档**，成败看真机读数（见 `docs/app-task-status.md`）。
+        Some(1005) => "task2",
         // `index.ts:51,54`：478 / 481 走「随机云朵任务」；这两条本仓**还没接**
         //（`step_for` 里没有它们）⇒ 先留在这里，将来接上时不漏 ✓。
         Some(478) | Some(481) => "randomCloudTask",
+        // 1017「登录移动云盘云朵中心」：参考实现给的是**默认 key**（`clickTask(ctx, 1017)` ✓，
+        // 它只是不在 `SKIP_TASK_LIST` 里），而**默认 key 在本仓真机上不翻**（2026-10-10
+        // run 302：`WAIT → WAIT` ✗）。同市场的 1005 就是靠 `task2` 翻的 ⇒ 这一格按同一读数
+        // 试 `task2`（**实验档**，成败看真机读数，见 `docs/app-task-status.md` §5-11）。
+        Some(1017) => "task2",
         _ => app_task_click::TASK_CLICK_DEFAULT_KEY,
     }
 }
 
-/// 打一发「这条我做完了」。
+/// 打一发「这条我做完了」—— **默认 key `task`**（旧 TS `clickTask(ctx, id)` 那一档 ✓）。
+///
+/// ⚠⚠ 这一发**不许**按任务换成专用 key（2026-10-10 修）：旧 TS 里换 key 的只有
+/// **`Step::Entry` 补的那一发**（`runners.ts:107` 的 `task2`），而"先打卡"那一发
+/// （`tasks.ts:19-27` 的 `clickTaskWithStep` → `clickTask(ctx, id)`）走的是**默认值** ✓。
+/// 本仓原先两处共用一个 `click_key(id)` ⇒ 409 变成 `task2` **打两发**，
+/// 而参考实现是 **`task` → `task2` 各一发**（`handleTaskClick` 那发 + runner 那发）✗。
 async fn click(ctx: &TaskContext, item: &TaskV2Item) -> Result<Option<String>> {
+    click_with_key(ctx, item, app_task_click::TASK_CLICK_DEFAULT_KEY).await
+}
+
+/// 打一发**指定 key** 的打卡 —— 只有 [`Step::Entry`] 的"补那一发"用得上 ✓。
+async fn click_with_key(ctx: &TaskContext, item: &TaskV2Item, key: &str) -> Result<Option<String>> {
     let Some(id) = item.task_id else {
         return Err(mcloud_core::Error::Config("这一条没有 id，不打卡".into()));
     };
-    let key = click_key(item.task_id);
     let req: HttpRequest = app_task_click::task_click_request(key, id)?;
     let resp = ctx.http.request(req).await?;
     let body = mcloud_upstream::session::ensure_http_ok(&resp, "打卡（task/click）")?;
     let env = mcloud_upstream::app_signin::SignInEnvelope::parse(body)?;
-    Ok(app_task_click::parse_task_click(&env)?.notice)
+    let notice = app_task_click::parse_task_click(&env)?.notice;
+
+    // ③-a 的**后半发**：真机上"点一条任务"其实是**两发** —— `task/click` ✓ 加上云盘侧的
+    // 访问日志 `visitlog/journaling`（`optkeyword` 里带 `task_<id>` ✓）。2026-10-11 真机实拍
+    // 见抓包仓 `app-task-run-account-samples.txt` §12.6 ✓ —— 本仓此前**只有前一发** ✗。
+    //
+    // ⚠ **best-effort**：那一发是 fire-and-forget（上游回 `{"code":0,"msg":"success"}` ✓，
+    // 失败也不影响打卡本身 ✓）⇒ 这里**不**把它的失败算成打卡失败 ✗，只记一条明细 ✓。
+    if let Some(market) = item.market_name.as_deref() {
+        match app_task_click::visitlog_journaling_request(id, market) {
+            Ok(req) => match ctx.http.request(req).await {
+                Ok(resp) => {
+                    if let Ok(text) = mcloud_upstream::session::ensure_http_ok(
+                        &resp,
+                        "访问日志（visitlog/journaling）",
+                    ) {
+                        ctx.info(format!(
+                            "访问日志已发（market={market} id={id}）：{}",
+                            mcloud_upstream::mail139::masked_preview(text, 60)
+                        ));
+                    }
+                }
+                Err(e) => ctx.info(format!("访问日志没成（不影响打卡）：{e}")),
+            },
+            Err(e) => ctx.info(format!("访问日志拼不出（不影响打卡）：{e}")),
+        }
+    }
+    Ok(notice)
 }
 
 /// 把我们自己传上去的那些移进回收站。

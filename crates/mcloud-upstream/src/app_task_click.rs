@@ -21,6 +21,7 @@ use mcloud_core::{Error, HttpRequest, Result};
 
 use crate::app_signin::{h5, percent_encode, SignInEnvelope};
 use crate::endpoints::MCLOUD_HOST;
+use crate::live_consts::BASE_MCLOUD;
 
 /// `task/click` 的路径。
 pub const TASK_CLICK_PATH: &str = "/ycloud/signin/task/click";
@@ -39,6 +40,58 @@ pub const TASK_CLICK_DEFAULT_KEY: &str = "task";
 ///
 /// ⚠ `key` 走 `percent_encode`：它是查询串里的一格 —— "少一层编码"的表现是上游回一个
 /// **业务码**，不像"我们拼错了 URL"。
+/// `POST {BASE_MCLOUD}/ycloud/visitlog/journaling` —— 云盘侧的**访问日志**（"点了哪条任务"）。
+///
+/// # 为什么要有这一发（2026-10-11 真机实拍）
+///
+/// 真机上点一条任务的"打卡"其实是**两发**（抓包仓 `app-task-run-account-samples.txt` §12.6 ✓）：
+///
+/// ```text
+/// 08:32:43  GET  m.mcloud.139.com/ycloud/signin/task/click?key=task&id=1029
+/// 08:32:43  POST m.mcloud.139.com/ycloud/visitlog/journaling
+///           体: module=uservisit&optkeyword=139newsignin_index_task_1029&sourceid=1077&marketName=newsign_139mail
+///           → {"code":0,"msg":"success"}
+/// ```
+///
+/// 同一份抓包里 `optkeyword` 一共四个取值：`…_index_pv` / `…_index_client` /
+/// `…_index_app_client`（**进页面就有** ✓）与 **`…_index_task_<id>`（只在点那一条时出现 ✓）**。
+/// ⇒ 本仓此前**只有** `task/click` 那一发 ✗，这一发是**缺的那一半** ✓。
+///
+/// ⚠ `activityid` 请求头跟着 `marketName` 走（与 [`crate::app_task_list_v2`] 那口的规矩一致 ✓）；
+/// 体里 `sourceid=1077` 是实拍那一格的值（`139newsignin` 那个页面的来源号 ✓）。
+pub fn visitlog_journaling_request(task_id: i64, marketname: &str) -> Result<HttpRequest> {
+    if task_id <= 0 || marketname.is_empty() {
+        return Err(Error::Config(format!(
+            "访问日志需要正整数任务 id 与非空 marketname，实得 id={task_id} marketname={marketname:?}"
+        )));
+    }
+    let body = format!(
+        "module=uservisit&optkeyword=139newsignin_index_task_{task_id}\
+         &sourceid=1077&marketName={}",
+        percent_encode(marketname)
+    );
+    // ⚠ `h5()` 会先写死 `activityid: sign_in_3` 与 `appversion: 12.6.0.0` ✗ ——
+    //   照 [`crate::app_task_list_v2`] 那口的既定做法**先剥再补** ✓
+    //   （[`HttpRequest::header`] 是 `push`，同名两枚头会让"哪枚生效"变成传输层的事 ✗）。
+    let mut req = h5(
+        false,
+        HttpRequest::post(format!("{BASE_MCLOUD}/ycloud/visitlog/journaling")),
+        "true",
+    );
+    req.headers.retain(|(k, _)| {
+        !k.eq_ignore_ascii_case("activityid") && !k.eq_ignore_ascii_case("appversion")
+    });
+    let req = req
+        .header("activityid", marketname)
+        .header("appversion", "11.4.1.0")
+        .header(
+            "Content-Type",
+            "application/x-www-form-urlencoded;charset=UTF-8",
+        )
+        .text_body(body);
+    Ok(req)
+}
+
 pub fn task_click_request(key: &str, task_id: i64) -> Result<HttpRequest> {
     if task_id <= 0 {
         return Err(Error::Config(format!(
@@ -93,3 +146,54 @@ pub fn parse_task_click(env: &SignInEnvelope) -> Result<TaskClick> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod visitlog_tests {
+    use super::*;
+
+    /// 真机实拍的那一发（抓包仓 `app-task-run-account-samples.txt` §12.6 ✓）：
+    /// URL 落在 `m.mcloud.139.com/ycloud/visitlog/journaling` ✓、
+    /// 体是**表单**（不是 XML ✗）：`module=uservisit&optkeyword=139newsignin_index_task_<id>&sourceid=1077&marketName=<市场>` ✓、
+    /// `activityid` 请求头跟着市场走 ✓。
+    #[test]
+    fn visitlog_journaling_matches_the_captured_shape() {
+        let req = visitlog_journaling_request(1029, "newsign_139mail").expect("拼得出");
+        assert_eq!(req.method, "POST");
+        assert!(
+            req.url.ends_with("/ycloud/visitlog/journaling"),
+            "URL 不对：{}",
+            req.url
+        );
+        // 体是**表单**（逐字对齐实拍 ✓）。
+        let body = String::from_utf8(req.body.clone().unwrap_or_default()).expect("体是 UTF-8");
+        assert_eq!(
+            body,
+            "module=uservisit&optkeyword=139newsignin_index_task_1029&sourceid=1077&marketName=newsign_139mail"
+        );
+        // ⚠ 同名头**只能一枚**：`h5()` 会先写死 `activityid: sign_in_3` / `appversion: 12.6.0.0`，
+        //   本函数必须**先剥再补**（两枚同名头会让"哪枚生效"变成传输层的事 ✗）。
+        let pick = |name: &str| -> Vec<String> {
+            req.headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+                .collect()
+        };
+        assert_eq!(pick("activityid"), vec!["newsign_139mail".to_string()]);
+        assert_eq!(pick("appversion"), vec!["11.4.1.0".to_string()]);
+        assert!(
+            pick("content-type")
+                .iter()
+                .any(|v| v.contains("x-www-form-urlencoded")),
+            "Content-Type 不对：{:?}",
+            pick("content-type")
+        );
+    }
+
+    /// 拿不到 id / 市场名时**不拼半成品**（宁可报错，也不发一条缺格的上报 ✗）。
+    #[test]
+    fn visitlog_journaling_refuses_incomplete_input() {
+        assert!(visitlog_journaling_request(0, "newsign_139mail").is_err());
+        assert!(visitlog_journaling_request(1029, "").is_err());
+    }
+}

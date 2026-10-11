@@ -17,6 +17,7 @@
 //! | 1020 | `POST /mailsms/sms/backup` | [`AppRunner::MailBackup`] |
 //! | 1028 | `queryUserToken → cloudTaskStatus → SSE 对话 → 复查` | [`AppRunner::AiWorkbench`] |
 //! | 585 | `aiRecognize → SSE 对话` | [`AppRunner::AiCamera`] |
+//! | 609 | `queryUserToken → cloudTaskStatus(609) → SSE 对话 → 复查` | [`AppRunner::AiAssistant`] |
 //!
 //! ⚠ 后两行那两个 id 是**旧 TS 的键**，今天两张真机任务表里都不存在
 //! （同一个能力现在叫 **1057 / 618**）⇒ 两个 id 都收，理由见 [`AppRunner::for_task`]。
@@ -59,6 +60,17 @@ pub enum AppRunner {
     AiWorkbench,
     /// 585 AI 相机。
     AiCamera,
+    /// 1029「查看"我的账单"」（**2026-10-11 按真机抓包补 ✓**）。
+    BillView,
+    /// 609「和AI助手对话」—— 与 [`AppRunner::AiWorkbench`] **同一条 AI 链**，两处不同：
+    ///
+    /// * 状态查询用**本条任务自己的 id**（`609` ✓）—— 那一口是**按 taskId** 作答的
+    ///   （抓包仓 `app-ai-workbench-samples.txt` §2 那张对照表：1028 → `501 任务不存在`、
+    ///   585 / 106 / 1020 → 真实读数 ✓）⇒ 用别人的 id 问出来的读数对这条没有意义 ✗。
+    /// * **不跳对话**：1028 那边照 TS 的 `needChat` 门（前置已满足就不发 ✗）；
+    ///   609 在旧 TS 里**根本没有 runner**（全仓 0 命中 ✓）⇒ 那道门没有出处，
+    ///   而这一条的**名字就是"对话"** ⇒ 每趟都发 ✓（状态读数只当诊断记进 notes ✓）。
+    AiAssistant,
 }
 
 impl AppRunner {
@@ -98,6 +110,10 @@ impl AppRunner {
             1028 | 1057 => Self::AiWorkbench,
             // 585 = 旧 TS 的键；618 = 今天真机表里那个「体验AI相机」。
             585 | 618 => Self::AiCamera,
+            // 609「和AI助手对话」：两边都没有 runner ⇒ 这一条是本仓按读数补的 ✓
+            //（打卡那一发照发，见 `app_task.rs` 的 click-only 串 —— 实测打卡**不翻账** ✗）。
+            1029 => Self::BillView,
+            609 => Self::AiAssistant,
             _ => return None,
         })
     }
@@ -112,6 +128,8 @@ impl AppRunner {
             Self::MailBackup => "邮箱备份",
             Self::AiWorkbench => "AI工作台",
             Self::AiCamera => "AI相机",
+            Self::BillView => "查看“我的账单”",
+            Self::AiAssistant => "和AI助手对话",
         }
     }
 }
@@ -200,7 +218,271 @@ pub async fn run_runner(
         AppRunner::MailBackup => mail_backup_runner(ctx, state).await,
         AppRunner::AiWorkbench => ai_workbench_runner(ctx, state).await,
         AppRunner::AiCamera => ai_camera_runner(ctx, state).await,
+        AppRunner::BillView => bill_view_runner(ctx, state).await,
+        AppRunner::AiAssistant => ai_assistant_runner(ctx, state, task_id).await,
     }
+}
+
+// ── 1029 查看"我的账单" ─────────────────────────────────────────────────
+
+/// 「查看"我的账单"」（**2026-10-11 按真机抓包补 ✓**）。
+///
+/// # 为什么长这样（真机读数，抓包仓 `app-task-run-account-samples.txt` §12.6 ✓）
+///
+/// **小号**那条真机走完**真的翻账了**（面板「已完成 · 第 4 步」✓）⇒ 这一族是**能做成**的 ✓。
+/// 那一趟的账单页（WebView 里）逐字发了这一串：
+///
+/// ```text
+/// GET  html5.mail.10086.cn/html/mobilebill.html?sendId=1000006&sid=&cguid=
+/// POST html5.mail.10086.cn/RmWeb/mail?func=mbox:searchMessages&…&encryptType=…   ← 账单邮件列表
+/// POST html5.mail.10086.cn/setting/s?func=user:getCommConfig&…&behaviorData=…
+/// POST html5.mail.10086.cn/RmWeb/mail?func=mbox:updateMessagesStatus&…          ← 标已读
+/// GET  html5.mail.10086.cn/html/readmail.html?sid=&mid=
+/// GET  html5.mail.10086.cn/RmWeb/view.do?func=view:readMessage&…&comefrom=166…  ← 打开那一封
+/// GET  html5.mail.10086.cn/mw2/weather/weather?func=user:logBehaviorAction&action=111631&thingId=261
+/// ```
+///
+/// 本执行器**逐格对齐实拍**（一趟发五发 ✓）：
+///
+/// ① `mobilebill.html?sendId=1000006&sid=&cguid=`（页面本体 ✓）；
+/// ② `mbox:searchMessages`（账单邮件列表 ✓，五条 `sendId` 条件见
+///    [`mail139::bill_mails_search_request`]）→ 取第一封的 `mid`；
+/// ③ `mbox:updateMessagesStatus`（标已读 ✓）；
+/// ④ `view.do?func=view:readMessage`（打开那一封 ✓）；
+/// ⑤ 像素 `logBehaviorAction(action=111631, thingId=261)` ✓（**实拍那一对** ✓）。
+///
+/// ⚠ 第 ⑤ 格**必须用实拍编号**：本仓常量里的 `108365/66` 是从页面包
+/// `CONFIG_INFO[1000006].loadCount` 推出来的 ✗，而那一趟真机**根本没发**它 ✗
+/// ⇒ 别再把那一对当"账单页加载像素"用 ✗。
+///
+/// ⚠ 判据仍然只有上游读数（`state` / 任务读数 ✓）—— "两发都 200"**不算做成** ✗。
+async fn bill_view_runner(ctx: &TaskContext, state: &mut RunnerState) -> RunnerReport {
+    let mut report = RunnerReport::default();
+    let session = match mail_session(ctx, state).await {
+        Ok(s) => s,
+        Err(e) => return report.note(format!("邮箱登录失败：{e}")),
+    };
+    let cguid = state.random_cguid();
+
+    // ① 账单页本体（实拍：`mobilebill.html?sendId=1000006&sid=&cguid=` ✓）。
+    //    ⚠ 这一格此前**从没发过**（早先那版 `bill_page_request` 连 `sendId` 都没有 ✗）。
+    match send(
+        ctx,
+        mail139::bill_page_request(&session, &cguid),
+        "账单页（mobilebill.html）",
+    )
+    .await
+    {
+        Ok(body) => report
+            .notes
+            .push(format!("账单页已拉（{} 字节）", body.len())),
+        Err(e) => report.notes.push(format!("账单页没成：{e}")),
+    }
+
+    // ② 账单邮件列表（账单页自己的 getMailsList ✓）。
+    let mid = match send(
+        ctx,
+        mail139::bill_mails_search_request(&session, &cguid),
+        "账单邮件列表（mbox:searchMessages）",
+    )
+    .await
+    {
+        Ok(body) => match mail139::first_mail_id(&body) {
+            Some(mid) => {
+                report.notes.push(format!("账单邮件列表：拿到第一封的 mid"));
+                mid
+            }
+            None => {
+                return report.fail(format!(
+                    "账单邮件列表里没有 mid（体的键名：{}）",
+                    mail139::shape_hint(&body, 12)
+                ))
+            }
+        },
+        Err(e) => return report.fail(format!("账单邮件列表没成：{e}")),
+    };
+
+    // ③ 标已读（实拍里 `mbox:updateMessagesStatus` 就在"打开那一封"之前 ✓）。
+    match send(
+        ctx,
+        mail139::mark_mail_read_request(&session, &cguid, &mid),
+        "标已读（mbox:updateMessagesStatus）",
+    )
+    .await
+    {
+        Ok(body) => report
+            .notes
+            .push(format!("标已读已发（{} 字节）", body.len())),
+        Err(e) => report.notes.push(format!("标已读没成：{e}")),
+    }
+
+    // ④ 打开那一封（账单页的 view:readMessage ✓）。
+    match send(
+        ctx,
+        mail139::read_message_request(&session, &cguid, &mid),
+        "读邮件（view:readMessage）",
+    )
+    .await
+    {
+        Ok(body) => report
+            .notes
+            .push(format!("读邮件已发（正文 {} 字节）", body.len())),
+        Err(e) => report.notes.push(format!("读邮件没成：{e}")),
+    }
+
+    // ⑤ 上报到 MQ（实拍里"打开那一封"之后连发**三发** ✓：`actionType=1003` ×2 + `1017` ×1 ✓）。
+    for (action_type, client_type, channel) in [
+        ("1003", "2", ""),
+        ("1003", "2", ""),
+        ("1017", "1", "10242400"),
+    ] {
+        let rnd = state.random_fraction();
+        match send(
+            ctx,
+            mail139::mail_report_to_mq_request(
+                &session,
+                &cguid,
+                &rnd,
+                &mail139::mail_report_body(action_type, client_type, &mid, channel),
+            ),
+            "上报到 MQ（disk:mailReportToMQ）",
+        )
+        .await
+        {
+            Ok(body) => report
+                .notes
+                .push(format!("MQ 上报已发（{action_type}）：{body}")),
+            Err(e) => report
+                .notes
+                .push(format!("MQ 上报没成（{action_type}）：{e}")),
+        }
+    }
+
+    // ⑥ 那一发像素（实拍里"打开那封信"那一刻发的就是它 ✓）。
+    //
+    // ⚠ **编号以实拍为准**：`action=111631` / `thingId=261` ✓ ——
+    //   不是本仓常量里那对从页面包推出来的 `108365/66` ✗（那一发实拍里**根本没发** ✗）。
+    match send(
+        ctx,
+        // ⚠ `behaviorData` 用**实拍那一对**（`110542_6` ✓）—— 它和像素自己的
+        //   `action/thingId` 是**两回事**：前者是"这一发属于哪个行为"的标签 ✓。
+        mail139::log_behavior_action_request(&session, 111631, 261, &cguid, "110542_6"),
+        "行为像素（logBehaviorAction 111631/261）",
+    )
+    .await
+    {
+        Ok(_) => report.notes.push("行为像素已发（111631 / 261）".into()),
+        Err(e) => report.notes.push(format!("行为像素没成：{e}")),
+    }
+
+    report
+}
+
+// ── 609 和AI助手对话 ────────────────────────────────────────────────────
+
+/// 「和AI助手对话」（**2026-10-11 加**，两边都没有 runner ⇒ 本仓按读数补 ✓）。
+///
+/// # 为什么要补（真机读数）
+///
+/// 真机原始条目：`mcloud://main/aiAssistantGlobal?params=<base64>` 深链
+/// （解出来 `{"params":{"adId":"66197","adVt":"47535","sourceId":"101151000"}}` ✓）、
+/// `currstep = 0`、`stepTypeSet = ["cloudtasklogstep","sendcloud","processbindtask","click","interfacecallback"]`
+/// —— 比同族的 547（`["sendcloud","click"]`）多三格 ✓。
+/// **先只打卡**（旧 TS 的 `default:` 分支口径）：真机 run 318 `WAIT → WAIT` ✗
+/// （同趟的 547 打卡就翻了 ✓）⇒ 这一条**打卡不够** ✓。
+///
+/// ⇒ 按"这一条的名字就是对话"接上 AI 链（1028 那套件全部复用 ✓）：
+/// ① 派生 AI 域鉴权 → ② 状态查询（**taskId = 本条任务自己的 id** ✓，读数只当诊断）
+/// → ③ 对话（SSE）→ ④ `sleep 5s` 复查。
+///
+/// ⚠ **不跳对话**（与 1028 不同的那一格）：1028 照 TS 的 `needChat` 门"前置已满足就不发"，
+/// 而 609 在旧 TS 里没有 runner ⇒ 那道门**没有出处**；这一条的动因就是"发一发对话" ✓
+/// ⇒ 每趟都发，状态读数写进 notes 供下次判断 ✓。
+async fn ai_assistant_runner(
+    ctx: &TaskContext,
+    state: &mut RunnerState,
+    task_id: i64,
+) -> RunnerReport {
+    let session = match mail_session(ctx, state).await {
+        Ok(s) => s,
+        Err(e) => return RunnerReport::default().note(format!("邮箱登录失败：{e}")),
+    };
+    let mut report = RunnerReport::default();
+
+    // ① 派生 AI 域鉴权（与 1028 同一条取法 ✓）。
+    let auth = match derive_ai_auth(ctx, state, &session).await {
+        Ok(a) => a,
+        Err(e) => return report.note(format!("AI 助手鉴权派生失败：{e}")),
+    };
+    if auth.user_domain_id.is_empty() {
+        return report.note("AI 助手对话需要 userDomainId，未取到");
+    }
+
+    // ② 状态查询：**用本条任务自己的 id**（那一口是按 taskId 作答的 ✓）——只当诊断 ✓。
+    if let Ok(rsa) = ai_cloud::encrypt_phone_for_task_status(&auth.phone, &mut state.rng) {
+        let req = ai_cloud::cloud_task_status_request(
+            &rsa,
+            task_id,
+            ai_cloud::AI_WORKBENCH_SOURCE_CHANNEL,
+        );
+        match send(ctx, req, "cloudTaskStatus").await {
+            Ok(body) => match ai_cloud::parse_cloud_task_status(&body) {
+                Ok(cs) => report.notes.push(format!(
+                    "状态读数（taskId={task_id}）：code={:?} taskStatus={:?} cloudStatus={:?}",
+                    cs.code, cs.task_status, cs.cloud_status
+                )),
+                Err(e) => report.notes.push(format!("状态读数解不出：{e}")),
+            },
+            Err(e) => report.notes.push(format!("cloudTaskStatus 查询异常：{e}")),
+        }
+    }
+
+    // ③ 对话（SSE）—— 这一条的正事 ✓。
+    let input_time = beijing_stamp(ctx, "%Y-%m-%d %H:%M:%S");
+    let dialogue = ai_cloud::build_dialogue_input("你好", &input_time);
+    let req = ai_cloud::workbench_chat_request(
+        &auth.authorization,
+        &auth.user_domain_id,
+        &dialogue,
+        ai_cloud::AI_WORKBENCH_SOURCE_CHANNEL,
+    );
+    match send(ctx, req, "AI 助手对话（chat/v2/add）").await {
+        Ok(body) => {
+            let sse = ai_cloud::parse_sse_stream(&body);
+            if sse.event_count == 0 || sse.full_text.is_empty() {
+                report
+                    .notes
+                    .push("AI 对话未取到任何输出（可能内容触发审核被断流）".into());
+            } else {
+                report.acted = true;
+                let head: String = sse.full_text.chars().take(40).collect();
+                report.notes.push(format!(
+                    "AI 对话成功（events={}，回复：{head}…）",
+                    sse.event_count
+                ));
+            }
+        }
+        Err(e) => report.notes.push(format!("AI 对话异常：{e}")),
+    }
+
+    // ④ 复查（同 1028 的口径：`sleep 5s` 再问一次 ✓）。
+    tokio::time::sleep(std::time::Duration::from_millis(5_000)).await;
+    if let Ok(rsa) = ai_cloud::encrypt_phone_for_task_status(&auth.phone, &mut state.rng) {
+        let req = ai_cloud::cloud_task_status_request(
+            &rsa,
+            task_id,
+            ai_cloud::AI_WORKBENCH_SOURCE_CHANNEL,
+        );
+        if let Ok(body) = send(ctx, req, "cloudTaskStatus 复查").await {
+            if let Ok(cs) = ai_cloud::parse_cloud_task_status(&body) {
+                report.notes.push(format!(
+                    "复查：taskStatus={:?} cloudStatus={:?}",
+                    cs.task_status, cs.cloud_status
+                ));
+            }
+        }
+    }
+    report
 }
 
 // ── 公共件 ──────────────────────────────────────────────────────────────
@@ -549,29 +831,90 @@ async fn pdf_convert_runner(
     report
 }
 
-// ── 1020 邮箱备份（⚠ 实测 404）─────────────────────────────────────────
+// ── 1020 邮件转存（App 实拍三发；旧路 `mailsms/sms/backup` 实测 404）──────
 
+/// 「完成一次邮件转存」（描述：**重要邮件存储云盘**）。
+///
+/// 三发，全部来自 **139邮箱 App 自己的字面量**（旧 TS 这一条只有一条今天 404 的口 ✗）：
+/// ① `disk:getDirectorys`（落点目录）→ ② `mbox:SearchByFidOrCondition`（一枚邮件号 `mid`）
+/// → ③ `disk:backupMail`（转存）。形状与出处见 [`mcloud_upstream::mail139`] 那一节 ✓。
+///
+/// ⚠ 判据：**只有 ③ 被上游认了才算做成** ✓ —— ①② 是取参数（取不到就如实记、并把
+/// **体的键名形状**打进明细，好让下一次改动有依据 ✓）。
 async fn mail_backup_runner(ctx: &TaskContext, state: &mut RunnerState) -> RunnerReport {
+    let mut report = RunnerReport::default();
     let session = match mail_session(ctx, state).await {
         Ok(s) => s,
-        Err(e) => return RunnerReport::default().note(format!("邮箱登录失败：{e}")),
+        Err(e) => return report.note(format!("邮箱登录失败：{e}")),
     };
+    let cguid = state.random_cguid();
+
+    // ① 落点目录。取不到就**留空**（上游可能自己落到根/默认目录）—— 不猜一个 id 塞进去 ✗。
+    let mut directory_id = String::new();
     match send(
         ctx,
-        mail139::mail_backup_request(&session),
-        "邮箱备份（mailsms/sms/backup）",
+        mail139::cloud_directories_request(&session, &cguid, ""),
+        "云盘目录（disk:getDirectorys）",
     )
     .await
     {
-        Ok(_) => RunnerReport {
-            acted: true,
-            notes: vec!["邮箱备份请求已提交".into()],
-            failures: Vec::new(),
+        Ok(body) => match mail139::first_field(&body, "directoryId") {
+            Some(id) => directory_id = id,
+            None => report.notes.push(format!(
+                "目录列表里没有 directoryId ⇒ 落点留空（体的键名：{}）",
+                mail139::shape_hint(&body, 12)
+            )),
         },
-        // ⚠ 旧 TS 把它记成 `logger.error`；本仓也当**硬失败**记一笔
-        //（它是这一条任务的**唯一**动作 ⇒ 不成就是这条没做成 ✓）。
-        Err(e) => RunnerReport::default().fail(format!("邮箱备份请求失败：{e}")),
+        Err(e) => report
+            .notes
+            .push(format!("云盘目录取不到（落点留空）：{e}")),
     }
+
+    // ② 一枚邮件号。
+    let mid = match send(
+        ctx,
+        mail139::mail_search_request(&session, &cguid),
+        "邮件列表（mbox:SearchByFidOrCondition）",
+    )
+    .await
+    {
+        Ok(body) => match mail139::first_field(&body, "mid") {
+            Some(mid) => mid,
+            None => {
+                return report.fail(format!(
+                    "邮件列表里取不到 mid（体的键名：{}）",
+                    mail139::shape_hint(&body, 12)
+                ))
+            }
+        },
+        Err(e) => return report.fail(format!("邮件列表请求失败：{e}")),
+    };
+
+    // ③ 转存。
+    match send(
+        ctx,
+        mail139::backup_mail_request(&session, &cguid, &mid, &directory_id),
+        "邮件转存（disk:backupMail）",
+    )
+    .await
+    {
+        Ok(body) => match mail139::parse_mail_code(&body) {
+            Ok(code) if code.is_ok() => {
+                report.acted = true;
+                report.notes.push("邮件转存已提交（上游认了）".into());
+            }
+            // ⚠ 打回就是**没做成**（它是这一条唯一的动作 ✓）⇒ 进 `failures`，
+            // 让摘要里带上上游的 `code`/`summary`（旧那条 404 就是这么报的 ✓）。
+            Ok(code) => report.failures.push(format!(
+                "邮件转存被上游打回：code={} summary={}",
+                code.code,
+                code.summary.unwrap_or_default()
+            )),
+            Err(e) => report.notes.push(format!("邮件转存响应读不出：{e}")),
+        },
+        Err(e) => report.notes.push(format!("邮件转存请求失败：{e}")),
+    }
+    report
 }
 
 // ── 1028 AI 工作台 ──────────────────────────────────────────────────────
