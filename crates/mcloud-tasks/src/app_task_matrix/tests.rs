@@ -33,16 +33,23 @@ fn page(items: Vec<TaskV2Item>) -> TaskListV2 {
     }
 }
 
-/// 一个 group 的正常响应（一条任务）。
+/// 一个市场的 V3 正常响应（一条任务）—— `result` 是**数组** ✓（V2 那份是按 group 分的对象 ✗）。
+///
+/// ⚠ 夹具必须与被测形状一致：`parse_task_list_v3` 见 `result` **不是数组**时**静默**回一张
+/// 空表 ✓（**不报错** ✗）⇒ 铺成 V2 形状的话，测试就在**空页**上数数 —— 看着绿、其实一条都没解出来 ✗。
 fn ok_body(id: i64) -> String {
     format!(
-        r#"{{"code":0,"msg":"success","groupState":{{"new":{{"taskFinishState":2}}}},
-           "result":{{"new":[{{"id":{id},"name":"任务{id}","groupid":"new","state":"WAIT",
-           "limitType":"DAY","enable":1,"currstep":0,"process":0,"marketname":"sign_in_3"}}]}}}}"#
+        r#"{{"code":0,"msg":"success","result":[{{"id":{id},"name":"任务{id}","groupid":"new",
+           "state":"WAIT","limitType":"DAY","enable":1,"currstep":0,"process":0,
+           "marketname":"sign_in_3",
+           "buttonProperty":{{"app":{{"text":"去完成","day":"1","total":31,"canReceive":1}}}}}}]}}"#
     )
 }
 
-/// 构造十六份"哪个第几次失败"的答复。
+/// 按"第几次失败"铺答复 —— **每市场一发** ⇒ 铺够 [`app_task_matrix_fetches`] 份 ✓。
+///
+/// ⚠ 份数**必须**跟着那个常量走：夹具短了，多出来的那几发会取不到答复、回落成 `{}` 而
+/// **失败** ✗ —— 那就把"本该成功"的几发算成失败，测试假红 ✓。
 fn replies_with_failures(fail_at: &[usize]) -> Vec<Reply> {
     (0..app_task_matrix_fetches())
         .map(|i| {
@@ -115,7 +122,7 @@ fn entries_without_a_name_are_all_kept() {
     assert_eq!(items.len(), 3, "没名字的条目不许被折成一条");
 }
 
-/// `raw_count` 是**去重之前**的总数（十六次加起来）。
+/// `raw_count` 是**去重之前**的总数（各次拉回来的加起来）。
 #[test]
 fn raw_count_is_measured_before_dedup() {
     let (items, raw) = merge_pages(&[
@@ -189,23 +196,37 @@ fn disabled_count_counts_anything_that_is_not_one() {
 //（`fetch_all` ✓，`app-task` 开头那一趟与收尾复查那一趟都走它 ✓）
 // ⇒ 测试改成直接打 [`fetch_all`]：行为一条没少 ✓。
 
-/// 十六次请求、**全是 POST 到同一个只读端点**，没有任何写路径。
+/// **只打 `taskListV3` 一口**、全是 POST，没有任何写路径 ✓。
+///
+/// ⚠ 2026-10-11 起**只走 V3** ✓（V2 会把 `548`/`550`/`1078` 那三条**过期任务**也列出来 ✗ ——
+/// 见 [`app_task_matrix_fetches`] 的注释 ✓）；原来这条叫 `…_sixteen_read_requests`
+/// （16 发 V2 ✗），名字已不准 ⇒ 改名 ✓（**行为一条没改** ✓）。
 #[tokio::test]
-async fn fetch_all_sends_sixteen_read_requests() {
+async fn fetch_all_sends_only_v3_read_requests() {
     let (ctx, http, _) = ctx_with(replies_with_failures(&[]));
     let (pages, failures) = fetch_all(&ctx).await.expect("不该是 Err");
     assert_eq!(
         pages.len(),
-        16,
-        "**页数**仍是 16：V3 那两发不产页、只并字段 ✓"
+        app_task_matrix_fetches(),
+        "**每市场一页** ✓（`fetch_v3_list` 一发市场一页 ✓）"
     );
     assert!(failures.is_empty(), "实得：{failures:?}");
-    assert_eq!(http.count(), 18, "16 发 V2 + 2 发 V3");
+    assert_eq!(
+        merge_pages(&pages).0.len(),
+        app_task_matrix_fetches(),
+        "两页各解出一条、id 不同 ⇒ 合起来 {} 条 ✓（夹具真产条目，不是空页 ✓）",
+        app_task_matrix_fetches()
+    );
+    assert_eq!(
+        http.count(),
+        app_task_matrix_fetches(),
+        "每市场一发、就这一轮 ✓（`{}` 发）",
+        app_task_matrix_fetches()
+    );
     let mut v2 = 0;
     let mut v3 = 0;
     for r in &http.requests() {
         assert_eq!(r.method, "POST");
-        // ⚠ 现在有**两口**：V2 那 16 发 + V3 那 2 发 ✓（都只读 ✓）。
         match r.url.as_str() {
             "https://m.mcloud.139.com/ycloud/signin/task/taskListV2" => v2 += 1,
             "https://m.mcloud.139.com/ycloud/signin/task/taskListV3" => v3 += 1,
@@ -215,10 +236,11 @@ async fn fetch_all_sends_sixteen_read_requests() {
             assert!(!r.url.contains(forbidden), "不许出现写路径：{}", r.url);
         }
     }
-    assert_eq!((v2, v3), (16, 2), "16 发 V2 + 2 发 V3");
+    assert_eq!(v2, 0, "**不许**再打 V2 ✗（它会把过期任务列出来 ✓）");
+    assert_eq!(v3, app_task_matrix_fetches(), "全是 V3 ✓");
 }
 
-/// 两个市场名都真的用上了，且**先云盘、后邮箱**（顺序是行为的一部分）。
+/// 两个市场名都真的用上了，且**先云盘、后邮箱**（顺序是行为的一部分 ✓）。
 #[tokio::test]
 async fn both_markets_are_queried_in_order() {
     let (ctx, http, _) = ctx_with(replies_with_failures(&[]));
@@ -233,37 +255,41 @@ async fn both_markets_are_queried_in_order() {
         .collect();
     assert_eq!(
         markets.len(),
-        18,
-        "16 发 V2 + 2 发 V3（V3 的 body 也带 marketname ✓）"
+        app_task_matrix_fetches(),
+        "每市场一发 ✓（V3 的 body 也带 marketname ✓）"
     );
-    assert_eq!(markets[0], "sign_in_3");
-    assert!(
-        markets[..8].iter().all(|m| m == "sign_in_3"),
-        "前八次是云盘那一支：{markets:?}"
-    );
-    assert!(
-        markets[8..16].iter().all(|m| m == "newsign_139mail"),
-        "第 9~16 次是邮箱那一支：{markets:?}"
-    );
-    // V3 那两发（每市场一发 ✓）也带 `marketname` ✓，顺序与市场表一致 ✓。
-    assert_eq!(&markets[16..], &["sign_in_3", "newsign_139mail"]);
+    // 顺序本身是行为的一部分 ⇒ 期望值由 `APP_TASK_MARKETS` 拼出来 ✓（别写死 ✗）。
+    let expected: Vec<String> = APP_TASK_MARKETS.iter().map(|m| (*m).to_string()).collect();
+    assert_eq!(markets, expected, "先云盘、后邮箱 ✓");
+    // 那两格**字面**也钉一下（改 `APP_TASK_MARKETS` 的次序会被上面那条抓住 ✓）。
+    assert_eq!(markets[0], "sign_in_3", "第一发是云盘那一支 ✓");
+    assert_eq!(markets[1], "newsign_139mail", "第二发是邮箱那一支 ✓");
 }
 
-/// ⚠ **一次失败不算失败**：某个 group 挂了只登记，其余照拉。
+/// ⚠ **一次失败不算失败**：某一发挂了只登记，其余照拉 ✓。
 #[tokio::test]
 async fn one_failed_group_is_recorded_not_fatal() {
-    let (ctx, http, _) = ctx_with(replies_with_failures(&[3, 9]));
+    // 第 0 发 = 云盘那一支 ⇒ 挂它 ✓（第 1 发邮箱那一支照走 ✓）。
+    let (ctx, http, _) = ctx_with(replies_with_failures(&[0]));
     let (pages, failures) = fetch_all(&ctx).await.expect("部分失败不该是 Err");
-    assert_eq!(http.count(), 18, "挂了也要把 18 次都走完（16 V2 + 2 V3）");
-    assert_eq!(pages.len(), 14, "16 - 2");
-    assert_eq!(failures.len(), 2);
+    assert_eq!(
+        http.count(),
+        app_task_matrix_fetches(),
+        "挂了也要把每一发都走完 ✓"
+    );
+    assert_eq!(
+        pages.len(),
+        app_task_matrix_fetches() - 1,
+        "挂一发 ⇒ 少一页，其余照拉 ✓"
+    );
+    assert_eq!(failures.len(), 1);
     assert!(
-        failures[0].contains("读取 sign_in_3/"),
+        failures[0].contains("读取 sign_in_3/taskListV3"),
         "失败要说清是哪一组：{failures:?}"
     );
 }
 
-/// ⚠⚠ **十六次全挂** ⇒ `pages` 空、`failures` 十六条。
+/// ⚠⚠ **每一发全挂** ⇒ `pages` 空、`failures` 与实发数一样多。
 ///
 /// ⚠ "全挂算不算错"**由调用方判**（这一层只负责如实回话 ✓）——
 /// 旧 TS 那种"全失败仍回一张空表"会让"全没读到"看起来像"这个号没任务" ✗。
@@ -273,19 +299,36 @@ async fn all_fetches_failing_is_reported_not_hidden() {
     let (ctx, http, _) = ctx_with(replies_with_failures(&all));
     let (pages, failures) = fetch_all(&ctx).await.expect("这一层不该自己判错");
     assert!(pages.is_empty(), "一次都没拉到");
-    assert_eq!(failures.len(), 18, "16 组 + 2 发 V3 全要登记");
-    assert_eq!(http.count(), 18, "确实试满了 18 次");
+    assert_eq!(
+        failures.len(),
+        app_task_matrix_fetches(),
+        "每一发都要登记 ✓"
+    );
+    assert_eq!(
+        http.count(),
+        app_task_matrix_fetches(),
+        "确实把每一发都试了 ✓"
+    );
 }
 
 /// 某一次返回非 0 码，同样按"这一组失败"登记（不中断）。
 #[tokio::test]
 async fn a_non_zero_code_counts_as_a_failed_group() {
     let mut replies = replies_with_failures(&[]);
+    // 第 0 发 = 云盘那一支 ⇒ 拿非 0 码打回它 ✓（答复按顺序发，这一发是确定的 ✓）。
     replies[0] = Reply::Body(r#"{"code":500,"msg":"系统繁忙"}"#.into());
     let (ctx, _, _) = ctx_with(replies);
     let (pages, failures) = fetch_all(&ctx).await.expect("不该是 Err");
-    assert_eq!(pages.len(), 15, "只挂一组");
-    assert_eq!(failures.len(), 1);
+    assert_eq!(
+        pages.len(),
+        app_task_matrix_fetches() - 1,
+        "只挂一发 ⇒ 只少一页 ✓"
+    );
+    assert_eq!(failures.len(), 1, "只记这一发 ✓");
+    assert!(
+        failures[0].contains("读取 sign_in_3/taskListV3"),
+        "非 0 码要按「这一组失败」登记：{failures:?}"
+    );
 }
 
 /// 这张表转成明细 JSON 的形状 —— **字段名是对外契约**（界面上那份清单按它画 ✓）。

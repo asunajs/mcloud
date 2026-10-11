@@ -351,6 +351,90 @@ pub struct TaskListV2 {
     pub group_finish_states: Vec<(String, Option<i64>)>,
 }
 
+/// 解析**一条**任务条目 ✓ —— V2 与 V3 **共用这一份** ✓。
+///
+/// ⚠ 两个口的条目**键集逐键相同** ✓（实拍 26 条共有条目逐条对照过 ✓，见抓包仓
+/// `app-task-run-account-samples.txt` §12.10 ✓）⇒ 不必写两份解析 ✗。
+fn parse_item(raw_item: &Value) -> TaskV2Item {
+    let item = raw_item.as_object();
+    let get = |key: &str| item.and_then(|m| m.get(key));
+    // `buttonProperty.out` 优先、回落 `button.out`（实拍两种形态都出现过 ✓：
+    // 1029 有 `buttonProperty` ✓、1021 只有 `button` ✓）。每条现取 ✓，别提到循环外 ✗。
+    // ⚠ **`email` 优先于 `out`**（2026-10-11 用户口径：以 **App 里看到的**为准 ✓）：
+    //   App 渲染的是 `email` 那一份（实拍 `"email":{"itemBg":"#fff6e5","btnBg":"#ffa939"…}`
+    //   —— `#ffa939` 就是那个**橙色按钮** ✓，用户截图里正是它 ✓）。
+    //   实拍 14 条任务里两处 `text`/`day` **逐条相同** ✓，所以这是"按谁为准"的排序，
+    //   不是"补一个不同的值" ✓；真出现分歧时以 App 那一份为准 ✓。
+    //   顺序：`email` **跨形态**先取 ✓（`buttonProperty.email` → `button.email`），
+    //   再退到 `out`（`buttonProperty.out` → `button.out`）✓。
+    //   顺序：`email`（139邮箱 H5 ✓）→ `app`（**原生 App** ✓，用户就是拿 App 比 ✓）
+    //   → `out`（外部端 ✓）；同一形态内 `buttonProperty` 先于 `button` ✓。
+    //   实拍三种形态都出现过：1021/1079 有 `email` ✓、550/551 只有 `app` + `out` ✓。
+    let out_obj = get("buttonProperty")
+        .and_then(|b| b.get("email"))
+        .or_else(|| get("button").and_then(|b| b.get("email")))
+        .or_else(|| get("buttonProperty").and_then(|b| b.get("app")))
+        .or_else(|| get("button").and_then(|b| b.get("app")))
+        .or_else(|| get("buttonProperty").and_then(|b| b.get("out")))
+        .or_else(|| get("button").and_then(|b| b.get("out")));
+    TaskV2Item {
+        task_id: int_at(get("id")),
+        name: str_at(get("name")),
+        description: str_at(get("description")),
+        // ⚠ 全小写 `groupid`（不是 `groupId`）
+        group_id: str_at(get("groupid")),
+        state: str_at(get("state")),
+        limit_type: str_at(get("limitType")),
+        enable: int_at(get("enable")),
+        curr_step: int_at(get("currstep")),
+        process: int_at(get("process")),
+        market_name: str_at(get("marketname")),
+        reward_text: str_at(get("content_display2")),
+
+        // `button.app.link`（玩法 615 那一族唯一的门 ✓）。缺键 / 少一层 /
+        // 不是字符串 ⇒ `None`（"读不出" ⇒ 那一族就**不动**，不会误点 ✓）。
+        // `button.out` 那一族（`buttonProperty.out` 优先 ✓，两处形态都实拍过 ✓）。
+        button_out_day: out_obj
+            .and_then(|o| o.get("day"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        button_can_receive: out_obj
+            .and_then(|o| o.get("canReceive"))
+            .and_then(Value::as_i64),
+        // 与上面的 `out_obj` **同一份来源** ✓（`email` 优先 —— App 渲染的就是它 ✓）。
+        // ⚠ V2 **不给** `total` ✗（那是 V3 那一格 ✓）⇒ 这里恒 `None`，
+        // 由 `app_task_matrix` 用 V3 的 overlay 并进来 ✓。
+        button_out_total: None,
+        button_out_text: out_obj
+            .and_then(|o| o.get("text"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        button_text_middle: out_obj
+            .and_then(|o| o.get("textMiddle"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        button_text_finish: out_obj
+            .and_then(|o| o.get("textFinish"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        button_action_middle: out_obj
+            .and_then(|o| o.get("actionMiddle"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        button_app_link: get("button")
+            .and_then(|b| b.get("app"))
+            .and_then(|a| a.get("link"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        // `button.email.link`（1017 的"云朵中心"入口页 ✓）。
+        button_email_link: get("button")
+            .and_then(|b| b.get("email"))
+            .and_then(|e| e.get("link"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
 /// 解析一次 `taskListV2` 响应。
 ///
 /// `group` 只用于回填 [`TaskListV2::group`]（见上）。
@@ -395,83 +479,7 @@ pub fn parse_task_list_v2(body: &str, group: &str) -> Result<TaskListV2> {
                 // ⚠ 这一口与拍拍那族**不同**：单条不是对象时**不报错**，
                 // 而是落成一条全 `None` 的条目（照参考实现）。它会进"状态读不出"那一档，
                 // 而这一条链今天**只读**，所以不至于改变任何行为。
-                let item = raw_item.as_object();
-                let get = |key: &str| item.and_then(|m| m.get(key));
-                // `buttonProperty.out` 优先、回落 `button.out`（实拍两种形态都出现过 ✓：
-                // 1029 有 `buttonProperty` ✓、1021 只有 `button` ✓）。每条现取 ✓，别提到循环外 ✗。
-                // ⚠ **`email` 优先于 `out`**（2026-10-11 用户口径：以 **App 里看到的**为准 ✓）：
-                //   App 渲染的是 `email` 那一份（实拍 `"email":{"itemBg":"#fff6e5","btnBg":"#ffa939"…}`
-                //   —— `#ffa939` 就是那个**橙色按钮** ✓，用户截图里正是它 ✓）。
-                //   实拍 14 条任务里两处 `text`/`day` **逐条相同** ✓，所以这是"按谁为准"的排序，
-                //   不是"补一个不同的值" ✓；真出现分歧时以 App 那一份为准 ✓。
-                //   顺序：`email` **跨形态**先取 ✓（`buttonProperty.email` → `button.email`），
-                //   再退到 `out`（`buttonProperty.out` → `button.out`）✓。
-                //   顺序：`email`（139邮箱 H5 ✓）→ `app`（**原生 App** ✓，用户就是拿 App 比 ✓）
-                //   → `out`（外部端 ✓）；同一形态内 `buttonProperty` 先于 `button` ✓。
-                //   实拍三种形态都出现过：1021/1079 有 `email` ✓、550/551 只有 `app` + `out` ✓。
-                let out_obj = get("buttonProperty")
-                    .and_then(|b| b.get("email"))
-                    .or_else(|| get("button").and_then(|b| b.get("email")))
-                    .or_else(|| get("buttonProperty").and_then(|b| b.get("app")))
-                    .or_else(|| get("button").and_then(|b| b.get("app")))
-                    .or_else(|| get("buttonProperty").and_then(|b| b.get("out")))
-                    .or_else(|| get("button").and_then(|b| b.get("out")));
-                out.items.push(TaskV2Item {
-                    task_id: int_at(get("id")),
-                    name: str_at(get("name")),
-                    description: str_at(get("description")),
-                    // ⚠ 全小写 `groupid`（不是 `groupId`）
-                    group_id: str_at(get("groupid")),
-                    state: str_at(get("state")),
-                    limit_type: str_at(get("limitType")),
-                    enable: int_at(get("enable")),
-                    curr_step: int_at(get("currstep")),
-                    process: int_at(get("process")),
-                    market_name: str_at(get("marketname")),
-                    reward_text: str_at(get("content_display2")),
-
-                    // `button.app.link`（玩法 615 那一族唯一的门 ✓）。缺键 / 少一层 /
-                    // 不是字符串 ⇒ `None`（"读不出" ⇒ 那一族就**不动**，不会误点 ✓）。
-                    // `button.out` 那一族（`buttonProperty.out` 优先 ✓，两处形态都实拍过 ✓）。
-                    button_out_day: out_obj
-                        .and_then(|o| o.get("day"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    button_can_receive: out_obj
-                        .and_then(|o| o.get("canReceive"))
-                        .and_then(Value::as_i64),
-                    // 与上面的 `out_obj` **同一份来源** ✓（`email` 优先 —— App 渲染的就是它 ✓）。
-                    // ⚠ V2 **不给** `total` ✗（那是 V3 那一格 ✓）⇒ 这里恒 `None`，
-                    // 由 `app_task_matrix` 用 V3 的 overlay 并进来 ✓。
-                    button_out_total: None,
-                    button_out_text: out_obj
-                        .and_then(|o| o.get("text"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    button_text_middle: out_obj
-                        .and_then(|o| o.get("textMiddle"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    button_text_finish: out_obj
-                        .and_then(|o| o.get("textFinish"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    button_action_middle: out_obj
-                        .and_then(|o| o.get("actionMiddle"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    button_app_link: get("button")
-                        .and_then(|b| b.get("app"))
-                        .and_then(|a| a.get("link"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    // `button.email.link`（1017 的"云朵中心"入口页 ✓）。
-                    button_email_link: get("button")
-                        .and_then(|b| b.get("email"))
-                        .and_then(|e| e.get("link"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                });
+                out.items.push(parse_item(raw_item));
             }
         }
     }
@@ -507,3 +515,27 @@ fn str_at(v: Option<&Value>) -> Option<String> {
 
 #[cfg(test)]
 mod tests;
+
+/// 解析一次 `taskListV3` 响应 ⇒ **条目列表** ✓。
+///
+/// ⚠⚠ 这一口的 `result` 是**数组** ✗（V2 是按 group 分组的**对象** ✓），别混解 ✓。
+///
+/// ⚠⚠ **它是"现在有哪几条"的权威** ✓（2026-10-11 查实）：真机云盘 App 云朵中心那一趟
+/// **只调了 V3** ✓（抓包里 `taskListV2` **0 处** ✓），而 V2 里那三条 `limitType=EVER`、
+/// `lastupdate=09-12` 的（`548`/`550`/`1078` ✓）是 **10-01 被月版顶掉的过期任务** ✗ ——
+/// App 不显示它们 ✓，走 V2 就会把过期的也列出来 ✗。
+pub fn parse_task_list_v3(body: &str, market: &str) -> Result<TaskListV2> {
+    let env = SignInEnvelope::parse(body)?;
+    env.ensure_ok("读取 App 任务矩阵（V3）")?;
+    let mut out = TaskListV2 {
+        group: format!("V3/{market}"),
+        ..Default::default()
+    };
+    let Some(arr) = env.result.as_ref().and_then(Value::as_array) else {
+        return Ok(out);
+    };
+    for raw in arr {
+        out.items.push(parse_item(raw));
+    }
+    Ok(out)
+}

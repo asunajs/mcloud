@@ -1906,7 +1906,7 @@ async fn a_full_share_task_whose_claim_step_has_not_come_is_left_alone() {
     let writes: Vec<String> = http
         .requests()
         .into_iter()
-        .filter(|r| !r.url.contains("taskListV2") && !r.url.contains("taskListV3"))
+        .filter(|r| !r.url.contains("taskListV3"))
         .map(|r| r.url)
         .collect();
     assert!(writes.is_empty(), "做满的条目不该发任何写请求：{writes:?}");
@@ -2041,7 +2041,7 @@ async fn a_share_that_already_succeeded_today_is_not_run_twice() {
     let writes: Vec<String> = http
         .requests()
         .into_iter()
-        .filter(|r| !r.url.contains("taskListV2") && !r.url.contains("taskListV3"))
+        .filter(|r| !r.url.contains("taskListV3"))
         .map(|r| r.url)
         .collect();
     assert!(writes.is_empty(), "一枪都不该发：{writes:?}");
@@ -2051,11 +2051,11 @@ async fn a_share_that_already_succeeded_today_is_not_run_twice() {
     let fetches = http
         .requests()
         .into_iter()
-        .filter(|r| r.url.contains("taskListV2"))
+        .filter(|r| r.url.contains("taskListV3"))
         .count();
     assert_eq!(
         fetches,
-        crate::app_task_matrix::app_task_matrix_v2_fetches(),
+        crate::app_task_matrix::app_task_matrix_fetches(),
         "只该有开头那一趟整表，收尾不该再拉：{fetches}"
     );
 }
@@ -2933,9 +2933,9 @@ async fn a_click_only_step_counts_when_its_state_flips_to_finish() {
     assert!(
         http.requests()
             .iter()
-            .filter(|r| r.url.contains("taskListV2"))
+            .filter(|r| r.url.contains("taskListV3"))
             .count()
-            > crate::app_task_matrix::app_task_matrix_v2_fetches(),
+            > crate::app_task_matrix::app_task_matrix_fetches(),
         "要拉第二趟整表来比对状态"
     );
 }

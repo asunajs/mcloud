@@ -49,9 +49,13 @@ pub fn app_task_matrix_v2_fetches() -> usize {
 }
 
 pub fn app_task_matrix_fetches() -> usize {
-    // 16 发 V2（2 市场 × 8 组 ✓）+ **2 发 V3**（每个市场一发、空 `group` 一次拿全 ✓）。
-    // ⚠ 加上 V3 之后这一口**不再是"只读 16 发"** ✗ —— 界面上那句"拉到 N/N 次"也跟着变 ✓。
-    APP_TASK_MARKETS.len() * proto::TASK_LIST_V2_GROUPS.len() + APP_TASK_MARKETS.len()
+    // **每市场一发 `taskListV3`** ✓（空 `group` 一次拿全 ✓）⇒ 2 发。
+    //
+    // ⚠⚠ 2026-10-11 改成**只走 V3** ✗：真机云盘 App 云朵中心那一趟**只调了 V3** ✓
+    //（抓包里 `taskListV2` **0 处** ✓），而 V2 会多列出三条 `limitType=EVER`、
+    // `lastupdate=09-12` 的**过期任务**（`548`/`550`/`1078` ✓ —— 10-01 被月版顶掉的 ✓，
+    // App 根本不显示它们 ✓，用户当场指出「550 就是过期的」✓）。
+    APP_TASK_MARKETS.len()
 }
 
 /// 一次拉取的失败记录。
@@ -248,25 +252,14 @@ pub async fn fetch_all_with(
 ) -> Result<(Vec<TaskListV2>, Vec<String>)> {
     let mut pages: Vec<TaskListV2> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
+    // ⚠ **只走 V3** ✓（App 就只调这一口 ✓）—— V2 那份会把**过期任务**也列出来 ✗，
+    // 见 [`app_task_matrix_fetches`] 的注释 ✓。
     for market in APP_TASK_MARKETS {
-        for group in proto::TASK_LIST_V2_GROUPS {
-            if cancelled() {
-                return Err(Error::Cancelled);
-            }
-            match fetch_one(http, market, group).await {
-                Ok(p) => pages.push(p),
-                Err(e) => failures.push(format!("读取 {market}/{group}：{e}")),
-            }
+        if cancelled() {
+            return Err(Error::Cancelled);
         }
-    }
-    // ⚠⚠ **再拉 V3 那一口**（每个市场一发、空 body ✓）—— 它给的字段 V2 **没有** ✗：
-    //   `day` / `total`（App 那个「完成进度 (1/31)」✓）、以及**当前阶段**那一档 `text`
-    //   （V3 的 551 是「开启中」✓，V2 同一条是「去开启」+`textMiddle`「开启中」✗）。
-    //   ⇒ 这不是"换个版本号"，是**两个口各给一半** ✓（实拍见 `app_task_list_v2` 的
-    //   `V3Overlay` 注释 ✓）。best-effort：V3 挂了不挡 V2 那份 ✓。
-    for market in APP_TASK_MARKETS {
-        match fetch_v3(http, market).await {
-            Ok(map) => overlay_v3(&mut pages, &map),
+        match fetch_v3_list(http, market).await {
+            Ok(p) => pages.push(p),
             Err(e) => failures.push(format!("读取 {market}/taskListV3：{e}")),
         }
     }
@@ -274,6 +267,16 @@ pub async fn fetch_all_with(
 }
 
 /// 拉一个市场的 `taskListV3` 并摊成 `id → overlay` ✓。
+/// 拉一个市场的 **V3 列表** ⇒ 一页条目 ✓（App 就只调这一口 ✓）。
+async fn fetch_v3_list(http: &dyn HttpClient, market: &str) -> Result<TaskListV2> {
+    let resp = http.request(proto::task_list_v3_request(market)).await?;
+    let body = mcloud_upstream::session::ensure_http_ok(&resp, "读取 App 任务矩阵（V3）")?;
+    proto::parse_task_list_v3(body, market)
+}
+
+/// ⚠ **已不接线** ✗（2026-10-11 起列表只走 V3 ✓）—— 留着是因为它测过、也说明过
+/// "两口各给什么"✓；将来若要再对照 V2 可以直接用 ✓。
+#[allow(dead_code)]
 async fn fetch_v3(
     http: &dyn HttpClient,
     market: &str,
@@ -287,6 +290,8 @@ async fn fetch_v3(
 ///
 /// ⚠ 按 `id` 对 ✓（不是按名字 ✗ —— 名字里有 HTML、还可能重名 ✓）。
 /// ⚠ V2 里没有的 id **不新建** ✗：主条目以 V2 那份为准 ✓，V3 只补它缺的那几格 ✓。
+/// ⚠ **已不接线** ✗（同上 ✓）。
+#[allow(dead_code)]
 pub fn overlay_v3(
     pages: &mut [TaskListV2],
     map: &std::collections::HashMap<i64, proto::V3Overlay>,
