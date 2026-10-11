@@ -11,6 +11,13 @@
 //! | `GET /api/auth/refresh-schedule` | 那条自动定时现在是什么状态（**只读** ✓）|
 //! | `PUT /api/auth/refresh-schedule` | 改开关 / 改预设时间 ⇒ **立刻重算**并回新状态 ✓ |
 //!
+//! ⚠⚠ **手动 = 强制**（2026-10-11 第二轮用户口径：「**点击后强制刷新，不检测时间**」✓）：
+//! 界面上那两颗手动按钮（每账号的「刷新」＋ 工具行的「刷新全部凭据」）**显式传
+//! `force: true`** ⇒ 未到提前量也**真换新**（不看还剩多少天 ✓），**不走**
+//! "剩余不足 `refresh_token_days` 天"那个检测 ✗。缺省仍是 `false`（见
+//! [`RefreshInput::force`] ✓），**自动定时那条路一个字节没动** ✓（它直接调
+//! `AuthRefreshService::refresh` ✓，`force = false` ⇒ 到点只是"**检查**" ✓）。
+//!
 //! # ⚠ 判据与上游调用**一个字都不改**（那是既有正确逻辑 ✓）
 //!
 //! 刷新走的是 [`AuthRefreshService`]（四个触发面共用同一份 ✓，见它的模块头 ✓）。
@@ -70,12 +77,26 @@ pub fn routes() -> Router<ServerState> {
 
 /// `POST /api/auth/refresh` 的请求体。
 ///
-/// ⚠ 两个字段**恰好给一个**：
+/// ⚠ 目标两个字段**恰好给一个**：
 /// * `{"account": "<id>"}` ⇒ 刷这一个 ✓；
 /// * `{"all": true}` ⇒ 刷**我名下的全部** ✓（空表 = 没有账号可刷，回空结果 ✓）。
 ///
 /// 两个都不给 / 两个都给 ⇒ **400**（与 CLI 的 `auth refresh` 同一条口径 ✓：
 /// "不默认「全部」—— 那是个会改凭据的动作" ✓）。
+///
+/// # `force`：手动那条路要**强制**（2026-10-11 用户口径）
+///
+/// 原话：「**点击后强制刷新，不检测时间**」✓ ⇒ 手动点「刷新」/「刷新全部凭据」
+/// 要**立刻换新**、**不走**"剩余不足 `refresh_token_days` 天"那个检测 ✗
+///（旧行为：天数还够 ⇒ `skipped`、一枪都不打 ⇒ 界面表现成"点了没反应" ✗）。
+///
+/// ⚠ **缺省 `false`**（显式传 `true` 才强制 ✓）。理由两条：
+///
+/// 1. 别的调用方（脚本、将来的批量口子）**不传就照旧**走天数判据 ✓ ——
+///    缺省 `true` 会让"我只是想刷一下看看"的调用**真打一次上游、换掉本地那一串** ✗；
+/// 2. 那条**自动定时**的路根本不经过这里（它直接调 [`AuthRefreshService::refresh`] ✓，
+///    见 `mcloud_app::auth_refresh_auto` ✓）⇒ 这一格不会把它带成强制 ✓，
+///    但缺省值的取向仍要与它一致：**"不传" = "按判据来"** ✓。
 #[derive(Debug, Deserialize)]
 pub struct RefreshInput {
     /// 要刷的那个账号 id。
@@ -84,6 +105,12 @@ pub struct RefreshInput {
     /// 刷我名下的全部账号。
     #[serde(default)]
     pub all: Option<bool>,
+    /// **强制刷**（越过 `not-yet`）：手动那两颗按钮显式传 `true` ✓，缺省 `false` ✓。
+    ///
+    /// ⚠ 它**越不过** `ManualOnly`（库里没有有效的过期时刻 ⇒ 打了上游也注定失败 ✓，
+    /// 见 [`AuthRefreshService::refresh`] ✓）—— 那一档照旧回 `kind: "manual"` ✓。
+    #[serde(default)]
+    pub force: Option<bool>,
 }
 
 /// 一个账号的刷新结局（**照 [`RefreshOutcome`] 的真实形状** ✓）。
@@ -100,6 +127,11 @@ pub struct RefreshInput {
 ///
 /// ⚠ `skipped` 与 `manual` **必须分开**：合成"没刷"的话，用户看到的就是
 /// "没刷"而不知道**要不要管** ✓（前者什么都不用做，后者要重新登录 ✓）。
+///
+/// ⚠ 2026-10-11 起手动那条路**一律 `force`**（用户口径：「点击后强制刷新，
+/// 不检测时间」✓）⇒ 从这两颗按钮点出来时 **`skipped` 不会再出现** ✓
+///（天数不够也真刷 ⇒ 走 `refreshed` ✓）。这一档留着是为了**接口本身的完整**：
+/// 不传 `force` 的调用方（脚本 ✓）照旧会拿到它 ✓。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshResultView {
@@ -115,10 +147,12 @@ pub struct RefreshResultView {
     /// `kind == "refreshed"` 时有值：新的过期时刻（epoch 毫秒 ✓）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_expire_ms: Option<i64>,
-    /// `kind == "refreshed"` 时有值：这次是不是 `--force` 越过了 `not-yet` ✓。
+    /// `kind == "refreshed"` 时有值：这次是不是**越过了 `not-yet`** ✓。
     ///
-    /// ⚠ 手动这条路今天恒为 `false`（界面不做 `--force` ✓），但**留着这一格**：
-    /// 与 `RefreshOutcome` 逐格对应，"同一句已换新凭据"才不会被误读成"提前量生效过" ✓。
+    /// ⚠ 手动那两颗按钮传 `force: true` ⇒ 未到提前量也真刷 ⇒ 这里就是 `true` ✓
+    ///（界面照它把话说成"**已强制换新**"，而不是"提前量生效过" ✓ ——
+    /// 同一句"已换新凭据"不区分这两件事，会让人以为判据起过作用 ✓，
+    /// 与 CLI 的 `--force` 那一支同一条处置 ✓）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forced: Option<bool>,
     /// `kind == "manual"` 时有值：库里那个（无效的）过期时刻 ✓。
@@ -153,6 +187,15 @@ pub struct RefreshResponse {
 
 /// `POST /api/auth/refresh` —— **手动一键刷新**。
 ///
+/// # ⚠ 手动 = **强制**（2026-10-11 用户口径：「点击后强制刷新，不检测时间」✓）
+///
+/// 前端那两颗手动按钮（每账号的「刷新」＋ 工具行的「刷新全部凭据」）**显式传
+/// `force: true`** ✓ ⇒ 未到提前量也**真打上游、真换新串** ✓（不看还剩多少天 ✓）。
+///
+/// ⚠ **只改手动这一条** ✗：那条自动定时（`mcloud_app::auth_refresh_auto`）与
+/// CLI 的默认行为都**不经过这里** ✓，它们仍是"到点**检查**、该刷才刷" ✓
+/// （`force = false` ✓）。这一格缺省也是 `false` ✓（见 [`RefreshInput::force`] ✓）。
+///
 /// # 返回 200 还是 502
 ///
 /// * 有账号**刷新失败**（上游那档）⇒ **502**（`Error::Network` 的既有映射 ✓）——
@@ -167,7 +210,7 @@ pub struct RefreshResponse {
 ///
 /// 上游实测最慢一次 28.4 秒（见 `mcloud_app::auth_refresh` 模块头 ✓）。
 /// 界面那边必须给"进行中"状态 ✓；服务端这边**不设**额外超时 ——
-/// 掐掉它不会让上游那边少轮换一次（那是不可逆的 ✓），只会让用户看到"失败"
+/// 掐掉它不会让上游那边少换一串新的（那一枪已经打出去了 ✓），只会让用户看到"失败"
 /// 而凭据其实已经换了 ✓。
 pub async fn refresh(
     State(state): State<ServerState>,
@@ -175,6 +218,8 @@ pub async fn refresh(
     Json(input): Json<RefreshInput>,
 ) -> ApiResult<RefreshResponse> {
     let all = input.all.unwrap_or(false);
+    // ⚠ 缺省 `false`（**显式传才强制** ✓）—— 见 `RefreshInput::force` 那两条理由 ✓。
+    let force = input.force.unwrap_or(false);
     match (&input.account, all) {
         (None, false) => {
             return Err(ApiError(Error::Config(
@@ -215,12 +260,12 @@ pub async fn refresh(
     for account in &targets {
         let label =
             mcloud_upstream::account_label(account.nickname.as_deref(), &account.auth.phone);
-        // 提前量走**账号配置**（`refresh_token_days` ✓）、`force = false`
-        // —— 手动这一条就是"按判据刷一次"，与定时那条**同一份判据** ✓。
+        // 提前量走**账号配置**（`refresh_token_days` ✓）；`force` 来自请求体
+        //（手动那两颗按钮显式传 `true` ⇒ 未到提前量也真刷 ✓，见 `refresh` 的说明 ✓）。
         let view = match state
             .handle
             .auth_refresh
-            .refresh(account, None, false)
+            .refresh(account, None, force)
             .await
         {
             Ok(RefreshOutcome::Rotated {

@@ -1142,6 +1142,37 @@ export const VARIANTS = {
         return { status: 200, body: acctState.accounts.filter((a) => all || a.enabled) }
       },
     },
+    /**
+     * 手动刷新凭据（`POST /api/auth/refresh` ✓ 2026-10-11）。
+     *
+     * ⚠ 这一格要量的是**请求体里有没有 `force`**（断言在 `interact.mjs` ✓），
+     * 不是服务端行为 —— 服务端那侧由 `crates/mcloud-server/tests/routes.rs` 钉 ✓。
+     * 所以这里只回一份**形状对**的逐条结局（照 `web/src/api.ts` 的 `RefreshResponse` ✓），
+     * 让界面把"toast + 重读列表"那条正常路径走完 ✓。
+     *
+     * ⚠ 按请求体回**对应的账号**：`{all:true}` 要回**每一个**（界面把逐条明细
+     * 拼成 toast 第二行 ✓）—— 回死一份的话，"全部"那颗按钮那条路等于没验 ✗。
+     */
+    'POST /api/auth/refresh': {
+      handler: (body) => {
+        const ids = body && body.all === true ? acctState.accounts.map((a) => a.id) : [body?.account]
+        const results = ids.filter(Boolean).map((id) => {
+          const a = acctState.accounts.find((x) => x.id === id)
+          return {
+            account: id,
+            label: a?.nickname ?? a?.label ?? id,
+            kind: 'refreshed',
+            newExpireMs: 1793000000000,
+            // 手动这条路**一律强制**（`force: true` ✓）⇒ 逐条都带 `forced` ✓
+            forced: true,
+          }
+        })
+        return {
+          status: 200,
+          body: { results, refreshed: results.length, skipped: 0, manual: 0, failed: 0 },
+        }
+      },
+    },
     // 停用 / 启用：改上面那份状态，返回改完的那一条（页面据此重画卡片）
     'PATCH /api/accounts/13800000000': {
       handler: (body) => setFixtureEnabled('13800000000', body),

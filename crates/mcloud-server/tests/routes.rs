@@ -4969,7 +4969,7 @@ async fn toggling_the_auto_schedule_from_the_schedules_page_sets_the_user_intent
 ///
 /// ⚠ 新 token **自带过期段**（`a|b|c|<expire_ms>|e` 是实拍形状 ✓）——
 /// `AuthRefreshService` 就是从这里取新过期时刻的 ✓（喂明文的话它取不到，
-/// 于是每次判"该刷"、**反复真轮换凭据** ✗，见那个函数头上的说明 ✓）。
+/// 于是每次判"该刷"、**反复真打上游换新凭据** ✗，见那个函数头上的说明 ✓）。
 struct FakeRefreshUpstream {
     /// 新 token 里那个过期时刻（毫秒）。
     new_expire_ms: i64,
@@ -5074,7 +5074,7 @@ async fn auth_refresh_single_account_rotates_it() {
     .expect("账号还在");
     assert_eq!(
         stored.auth.expire, new_expire,
-        "库里那串凭据的过期时刻必须跟着换（否则每轮都判「该刷」⇒ 反复真轮换 ✗）"
+        "库里那串凭据的过期时刻必须跟着换（否则每轮都判「该刷」⇒ 反复真打上游 ✗）"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -5220,6 +5220,113 @@ async fn auth_refresh_skips_when_not_due() {
         v["results"][0]["remainingDays"].as_f64().unwrap_or(0.0) > 1.0,
         "跳过必须说清「还剩多少天」（用户口径：把跳过的原因写出来 ✓）：{out}"
     );
+    assert!(
+        v["results"][0].get("forced").is_none(),
+        "跳过时不该有「强制」那一格（它不是 `refreshed` ✓）：{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐⭐ 手动刷新**强制**：`force: true` ⇒ **不因天数跳过** ✓
+///（2026-10-11 用户口径：「**点击后强制刷新，不检测时间**」✓）。
+///
+/// 判据取三样，缺一不可：
+/// ① 响应是 `refreshed`（不是 `skipped` ✓）；
+/// ② `forced: true`（界面照它把话说成"**强制**换新" ✓）；
+/// ③ **库里那串真的换了**（`auth.expire` 跟着动 ✓）——
+///    "响应说换了、库里没动"是这次改动最可能出的错 ✓。
+#[tokio::test]
+async fn auth_refresh_force_ignores_the_remaining_days() {
+    let new_expire = 1_893_456_000_000i64;
+    let (handle, dir) = test_app_with_refresh_upstream("auth-refresh-force", new_expire);
+    // 过期时刻在很远的将来（还剩几万天 ⇒ NotYet ✓）——
+    // 与 `auth_refresh_skips_when_not_due` **同一个形状**：不传 `force` 时它跳过 ✓。
+    let id = seed_refreshable_account(&handle, "19900000036", 9_999_999_999_999);
+
+    // ① 显式 `force: false` ⇒ 与不传**同一条路**（缺省值就是这个 ✓，
+    //    "别的调用方不被这次改动改行为"就靠它 ✓）。
+    let (status, out) = send(
+        authed_app(Arc::clone(&handle)),
+        post_json(
+            "/api/auth/refresh",
+            &serde_json::json!({ "account": id, "force": false }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let v = json_body(&out);
+    assert_eq!(v["skipped"], 1, "`force: false` 必须照旧跳过：{out}");
+    assert_eq!(v["results"][0]["kind"], "skipped", "{out}");
+
+    // ② `force: true` ⇒ 越过 not-yet、真打上游 ✓
+    let (status, out) = send(
+        authed_app(Arc::clone(&handle)),
+        post_json(
+            "/api/auth/refresh",
+            &serde_json::json!({ "account": id, "force": true }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let v = json_body(&out);
+    assert_eq!(v["refreshed"], 1, "`force: true` 不许再按天数跳过：{out}");
+    assert_eq!(v["skipped"], 0, "{out}");
+    assert_eq!(v["failed"], 0, "{out}");
+    assert_eq!(v["results"][0]["kind"], "refreshed", "{out}");
+    assert_eq!(
+        v["results"][0]["forced"], true,
+        "要能看出「这次是强制刷的」（界面照它说「已强制换新」✓）：{out}"
+    );
+    assert_eq!(v["results"][0]["newExpireMs"], new_expire, "{out}");
+
+    // ③ 库里**真的**换了（窄写落盘 ✓）
+    let stored = futures::executor::block_on(
+        Arc::clone(&handle.store).account(&mcloud_core::AccountId::new(id)),
+    )
+    .expect("读账号")
+    .expect("账号还在");
+    assert_eq!(
+        stored.auth.expire, new_expire,
+        "强制刷新必须把库里那串也换掉（只改响应字段 = 界面说换了、实际没换 ✗）"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐⭐ 「刷新**全部**凭据」也是强制：`{all: true, force: true}` ⇒
+/// **每一个**未到提前量的账号都真刷 ✓（2026-10-11 用户口径：手动那两颗都要强制 ✓）。
+#[tokio::test]
+async fn auth_refresh_force_all_rotates_every_account_that_is_not_due() {
+    let new_expire = 1_893_456_000_000i64;
+    let (handle, dir) = test_app_with_refresh_upstream("auth-refresh-force-all", new_expire);
+    // 两个都**远未到**提前量 ⇒ 不强制的话两个都是 `skipped` ✓
+    let a = seed_refreshable_account(&handle, "19900000037", 9_999_999_999_999);
+    let b = seed_refreshable_account(&handle, "19900000038", 9_999_999_999_998);
+
+    let (status, out) = send(
+        authed_app(Arc::clone(&handle)),
+        post_json(
+            "/api/auth/refresh",
+            &serde_json::json!({ "all": true, "force": true }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let v = json_body(&out);
+    assert_eq!(v["refreshed"], 2, "两个都要换新（一个都不能漏）：{out}");
+    assert_eq!(v["skipped"], 0, "{out}");
+    for r in v["results"].as_array().expect("结果应是数组") {
+        assert_eq!(r["kind"], "refreshed", "{out}");
+        assert_eq!(r["forced"], true, "{out}");
+    }
+
+    for id in [a, b] {
+        let stored = futures::executor::block_on(
+            Arc::clone(&handle.store).account(&mcloud_core::AccountId::new(id.clone())),
+        )
+        .expect("读账号")
+        .expect("账号还在");
+        assert_eq!(stored.auth.expire, new_expire, "{id} 库里那串也要换");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

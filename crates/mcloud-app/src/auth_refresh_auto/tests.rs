@@ -15,6 +15,7 @@
 //!    **初始值** ✓，而"再跑一次迁移"（= 重开存储 ✓）**不覆盖**用户后来改的值 ✓；
 //! 7. 没有 `auth-refresh.json` 的老目录照样读得进（回落默认值 ✓）。
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use mcloud_core::auth_refresh::{
@@ -723,6 +724,58 @@ async fn hook_skips_when_the_credential_is_not_due() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// ⭐⭐ **自动定时那条路永远是 `force = false`** —— 手动改成强制时**不许把它带过去** ✗
+///（2026-10-11 用户口径：手动点「刷新」要"**点击后强制刷新，不检测时间**" ✓，
+/// 而这条定时是"到点**检查**，该刷才刷" ✓ —— 两件事，判据不同 ✓）。
+///
+/// 判据是**上游一次都没被打**（计数器 ✓），比"看 `last_status` 是不是 ok"更直接：
+/// `last_status` 记错还能是别的原因，而"打了上游"只有一个原因 —— 判据被改宽了 ✓。
+/// 顺带钉住 `last_status` 仍是 `ok`（"跳过"是**正常结局**，不是失败 ✓）。
+#[tokio::test]
+async fn hook_never_forces_even_when_the_credential_is_not_due() {
+    let (store, dir) = store("hook-never-force");
+    let clock = Arc::new(FixedClock(1_700_000_000_000));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&calls);
+    let service = Arc::new(AuthRefreshService::new(
+        Arc::clone(&store),
+        Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>,
+        Arc::new(move |_a: &Account| {
+            Arc::new(CountingUpstream {
+                calls: Arc::clone(&seen),
+            }) as Arc<dyn mcloud_core::HttpClient>
+        }),
+    ));
+    seed_auth_refresh_schedule(&store, &owner()).await.unwrap();
+    let sch = store
+        .schedule(&auth_refresh_schedule_id(&owner()))
+        .await
+        .unwrap()
+        .unwrap();
+
+    // 还剩 300 天 ⇒ `NotYet` ⇒ 这条定时只该"检查"、**一枪都不打** ✓
+    let acct = account("acc-1", clock.now_ms() + 300 * 86_400_000);
+    let hook = auth_refresh_hook(Arc::clone(&service), Arc::clone(&store));
+    let _ = hook(&sch, std::slice::from_ref(&acct), 0).await;
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "自动定时**不许**强制刷：未到提前量时上游一次都不能被打（`force` 必须还是 false）"
+    );
+    let after = store
+        .schedule(&auth_refresh_schedule_id(&owner()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.last_status.as_deref(),
+        Some("ok"),
+        "跳过是**正常**结局：{after:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 没有账号 ⇒ 记 `ok`、**不动 `last_run_ms`** ✓（这一趟什么都没做 ✓）。
 #[tokio::test]
 async fn hook_with_no_accounts_records_ok_and_does_not_touch_last_run() {
@@ -793,5 +846,27 @@ impl mcloud_core::HttpClient for DeadUpstream {
             "不该打到上游（{}）",
             req.url
         )))
+    }
+}
+
+/// 会**记账**的上游：每被调用一次就 +1 ✓。
+///
+/// ⚠ 与 [`DeadUpstream`] 的分工：那个只能证明"打了就报错"（于是结论落在
+/// `last_status` 上 ✓），这个能**直接数**"到底打了几枪" ✓ ——
+/// 钉"`force` 必须还是 false"这件事，计数器比间接读数直接得多 ✓。
+struct CountingUpstream {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl mcloud_core::HttpClient for CountingUpstream {
+    async fn request(
+        &self,
+        _req: mcloud_core::HttpRequest,
+    ) -> mcloud_core::Result<mcloud_core::HttpResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(mcloud_core::Error::Network(
+            "不该打到上游（自动定时不许强制刷）".into(),
+        ))
     }
 }

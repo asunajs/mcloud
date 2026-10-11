@@ -271,12 +271,22 @@ export const AccountsPage = () => {
   //
   // # 为什么要二次确认（判断 + 理由，写在代码里免得后人当"多此一举"删掉）
   //
-  // 刷新**不是删数据**，但它会**真轮换上游那串凭据**（旧串当场作废 ✓，
-  // 见 `mcloud_app::auth_refresh` 模块头：那是**不可逆**动作 ✓）。
+  // 刷新**不是删数据**，它只是**向云盘要一串新的、换掉本地存的那一串** ✓
+  //（上游那串旧的并不因此失效 —— 实拍见 `mcloud_app::auth_refresh` 模块头 ✓）。
   // 而这一页上"编辑 / 设置 / 停用 / 移除"四颗按钮挨着它 ——
-  // 手滑一下的代价是"这个账号得重新登录"✗。所以两颗都过一道确认 ✓
-  //（与「移除账号」「更换本机设备指纹」同一条处置 ✓；本仓口径：
-  //  "重要的（刷全部 / 不可逆）走 modal 确认" ✓）。
+  // 手滑一下就得白等一趟上游（每个最慢约半分钟 ✓）。所以两颗都过一道确认 ✓
+  //（与「移除账号」同一条处置 ✓）。
+  //
+  // # ⚠⚠ 手动 = **强制**（2026-10-11 用户口径：「点击后强制刷新，不检测时间」✓）
+  //
+  // 两颗按钮都**显式传 `force: true`** ✓ ⇒ 未到提前量也**真换新**（不看还剩多少天 ✓）。
+  // ⚠ 自动定时那条路**不在这里**（后端 `auth_refresh_auto` ✓，`force = false` ✓）。
+  //
+  // # ⚠ 界面「啥也不说」（2026-10-11 用户口径）
+  //
+  // 确认框只问一句"要不要刷" ✓ —— **不**解释会怎样、**不**写"撤不回来 / 旧的就没了" ✗。
+  // 理由：刷新既不改上游那串旧的、也不删数据 ⇒ 那些话本身就是**错的** ✓，
+  // 而写上去只会吓人、啰嗦 ✓（含糊话比不说更坏 ✓）。
   /**
    * 正在刷新的目标：`null` = 没在刷；`''` = **全部账号**；其余 = 那个账号 id。
    *
@@ -309,11 +319,20 @@ export const AccountsPage = () => {
    * ⚠ **四档不能合成一句"没刷"**：`skipped`（还剩 N 天，什么都不用做 ✓）与
    * `manual`（库里没有有效的过期时刻 ⇒ **要重新登录** ✓）的下一步完全不同 ✓
    * —— 合成一句，用户就不知道该不该管了 ✗（后端也是为此把四档分开的 ✓）。
+   *
+   * ⚠ 手动这条路现在一律 `force: true` ⇒ **`skipped` 走不到了** ✓
+   *（天数不够也真刷 ⇒ `refreshed` ✓）。留着这一档是因为接口本身仍会回它
+   *（不传 `force` 的调用方 ✓），而且 `kind` 是四档的联合类型 ⇒ 少一档就编译不过 ✓。
    */
   const describeRefresh = (r: RefreshResult): string => {
     switch (r.kind) {
       case 'refreshed':
-        return `已换新凭据（新过期 ${fmtEpochMs(r.newExpireMs ?? 0)}）`
+        // ⚠ `forced` 要**说出来**：同一句"已换新凭据"不区分"提前量生效过"与
+        //    "手动强制越过了提前量"—— 后者才是这两颗按钮的实际行为 ✓
+        //（与 CLI `--force` 那一支的处置逐字相同 ✓）。
+        return r.forced
+          ? `已强制换新凭据（新过期 ${fmtEpochMs(r.newExpireMs ?? 0)}）`
+          : `已换新凭据（新过期 ${fmtEpochMs(r.newExpireMs ?? 0)}）`
       case 'skipped':
         return `未到提前量（还剩 ${(r.remainingDays ?? 0).toFixed(1)} 天），未打上游`
       case 'manual':
@@ -325,6 +344,9 @@ export const AccountsPage = () => {
 
   /**
    * 真刷（一个账号 / 全部 ✓）。
+   *
+   * ⚠ **两颗按钮都强制**（`force: true` ✓）：手动点就是要"立刻换新"，
+   * **不检测时间**（用户口径 2026-10-11 ✓）—— 见 `askRefresh` 那段说明 ✓。
    *
    * ⚠ 后端在有账号**刷新失败**时回 **502**，但 body 里**仍然是**那份逐条结局
    *（`request()` 把 body 原文放进 `Error.message` ✓）⇒ 这里在 catch 里也解析一次，
@@ -338,7 +360,9 @@ export const AccountsPage = () => {
     if (target === null) return
     refreshing.value = target
     try {
-      const out = await refreshAuth(target === '' ? { all: true } : { account: target })
+      const out = await refreshAuth(
+        target === '' ? { all: true, force: true } : { account: target, force: true },
+      )
       closeDialog(target === '' ? REFRESH_ALL_DIALOG : REFRESH_ONE_DIALOG)
       pendingRefresh.value = null
       reportRefresh(out, target)
@@ -370,10 +394,16 @@ export const AccountsPage = () => {
       return
     }
     // 成功走**轻量** toast（3 秒自动消失 ✓）——逐条明细放第二行，长了也读得完 ✓
+    //
+    // ⚠ 汇总句分三种（不是两种）：**换了新串** / **全都要重新登录**（一颗都没换 ✓）/
+    // 其余。中间那一档不能落进"没有需要刷新的凭据"——手动这条路是强制的，
+    // "没换"只可能是"要重新登录"，说成"没有需要刷新的"会把人引到错的方向 ✗。
     const summary =
       out.refreshed > 0
-        ? `已刷新 ${out.refreshed} 个凭据`
-        : `没有需要刷新的凭据（跳过 ${out.skipped} 个）`
+        ? `已强制换新 ${out.refreshed} 个凭据`
+        : out.manual > 0
+          ? `${out.manual} 个账号需要重新登录`
+          : `没有需要刷新的凭据（跳过 ${out.skipped} 个）`
     pushToast(out.manual > 0 ? 'warning' : 'success', `${summary}\n${lines}`)
   }
 
@@ -1840,21 +1870,14 @@ export const AccountsPage = () => {
       />
 
       {/*
-        刷新凭据的两道确认（见 `askRefresh` 那段说明：**不可逆 + 手滑代价** ✓）。
-        ⚠ 文案要说清"会换掉会话"与"旧串当场作废" —— 只写「确定吗？」等于没确认 ✓
-        （本仓 §6.4：影响面要具体到数字/名字 ✓）。
+        刷新凭据的两道确认（理由见 `askRefresh` 那段注释 ✓）。
+        ⚠ 文案**只问一句**（2026-10-11 用户口径：界面「啥也不说」✓）——
+        **不**解释会怎样、**不**写"撤不回来"这类话 ✗。
       */}
       <ConfirmDialog
         id={REFRESH_ONE_DIALOG}
-        title="刷新这个账号的凭据"
-        impact={
-          <span>
-            将向云盘请求一份<b>新的凭据</b>，换掉{' '}
-            <b>{refreshTargetLabel(pendingRefresh.value ?? '')}</b> 现在用的那一串。
-            换完之后旧凭据当场作废（<b>这一步撤不回来</b>）；用新凭据登录的会话不受影响。
-            还没到提前量时不会真的去刷，只会跳过。
-          </span>
-        }
+        title="确定要刷新这个账号的凭据吗？"
+        impact={<b>{refreshTargetLabel(pendingRefresh.value ?? '')}</b>}
         confirmLabel="刷新"
         busy={refreshing.value !== null}
         onConfirm={() => void doRefresh()}
@@ -1862,14 +1885,8 @@ export const AccountsPage = () => {
 
       <ConfirmDialog
         id={REFRESH_ALL_DIALOG}
-        title="刷新全部账号的凭据"
-        impact={
-          <span>
-            将对 <b>{refreshTargetLabel('')}</b> 逐个请求新凭据（<b>慢</b>，每个最慢约半分钟）。
-            换完之后各自的旧凭据当场作废（<b>这一步撤不回来</b>）。
-            没到提前量的账号会跳过、不会打上游。
-          </span>
-        }
+        title="确定要刷新全部账号的凭据吗？"
+        impact={<b>{refreshTargetLabel('')}</b>}
         confirmLabel="全部刷新"
         busy={refreshing.value !== null}
         onConfirm={() => void doRefresh()}

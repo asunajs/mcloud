@@ -501,6 +501,104 @@ const STEPS = {
     { name: '账号页：确认移除（后端 404 ⇒ 错误弹窗）', do: clickText('#confirm-delete-account .modal-action button', '移除'), check: has('[...document.querySelectorAll("dialog[open]")].map((d) => d.id).join(",")', 'error-dialog'), changed: true },
     { name: '账号页：关掉错误弹窗', do: clickText('#error-dialog .modal-action button', '知道了'), check: eq('document.querySelectorAll("dialog[open]").length', 0), changed: true },
 
+    // ⭐⭐ 手动刷新**强制**（2026-10-11 用户口径：「**点击后强制刷新，不检测时间**」✓）：
+    // 每账号的「刷新」与工具行的「刷新全部凭据」**都要**在请求体里带 `force: true` ✓。
+    //
+    // ⚠ 判据取的是**发出去的请求体**（不是"弹窗关了"/"toast 出来了" ✓）——
+    // 后者在"漏传 force ⇒ 后端按天数跳过"时**照样成立**（界面同样回一条
+    // "未到提前量、跳过"的 toast）⇒ 那样等于没测到这次改动 ✓。
+    // ⚠ 装置那侧（`lib.mjs` 的 `POST /api/auth/refresh`）只回一份形状对的结局；
+    // "`force: true` 真的越过了天数判据"由 `crates/mcloud-server/tests/routes.rs` 钉 ✓。
+    { name: '账号页：点某行的「刷新」⇒ 开确认框', do: clickText('#app ul li.card button', '刷新'), check: eq('[...document.querySelectorAll("dialog[open]")].map((d) => d.id).join(",")', 'confirm-refresh-one'), changed: true },
+    {
+      // ⚠⚠ 文案**只问一句**（2026-10-11 用户口径：界面「啥也不说」✓）。
+      // 这条同时把**错话**钉死：刷新**不**让上游那串旧的失效 ⇒
+      // "作废 / 不可逆 / 撤不回来 / 还剩多少天"这类字**一个都不许**再出现 ✗
+      //（旧文案正是那么写的 —— 那是**前提错**，不是措辞重 ✗）。
+      name: '账号页：刷新确认框只问一句（不解释会怎样、不说旧的没了）',
+      do: null,
+      check: eq(
+        `(() => {
+           const t = document.getElementById('confirm-refresh-one')?.textContent ?? ''
+           return [t.includes('确定要刷新'), t.includes('作废'), t.includes('不可逆'), t.includes('撤不回来'), t.includes('还剩多少天')].join('/')
+         })()`,
+        'true/false/false/false/false',
+      ),
+    },
+    {
+      name: '账号页：确认刷新 ⇒ 请求体含 force:true（不是"有反应"就算过）',
+      do: `(async () => {
+        const posts = []
+        const orig = window.fetch
+        window.fetch = async (input, init) => {
+          const url = typeof input === 'string' ? input : input.url
+          if (url === '/api/auth/refresh') posts.push({ url, body: init && init.body })
+          return orig(input, init)
+        }
+        try {
+          ;[...document.querySelectorAll('#confirm-refresh-one .modal-action button')]
+            .find((b) => b.textContent.trim() === '刷新').click()
+          for (let i = 0; i < 80 && posts.length === 0; i++) await new Promise((r) => setTimeout(r, 100))
+          window.__refreshOnePost = posts.map((p) => ({ url: p.url, body: JSON.parse(p.body) }))
+        } finally {
+          window.fetch = orig
+        }
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const p = (window.__refreshOnePost ?? [])[0]
+           return p ? p.url + ' ' + JSON.stringify(p.body) : '没发出 /api/auth/refresh 请求'
+         })()`,
+        '/api/auth/refresh {"account":"13800000000","force":true}',
+      ),
+      changed: true,
+    },
+    { name: '账号页：单个刷新后确认框关掉', do: null, check: eq('document.querySelectorAll("dialog[open]").length', 0) },
+    { name: '账号页：点「刷新全部凭据」⇒ 开确认框', do: clickText('#app button', '刷新全部凭据'), check: eq('[...document.querySelectorAll("dialog[open]")].map((d) => d.id).join(",")', 'confirm-refresh-all'), changed: true },
+    {
+      // ⚠ 同上面那条：「刷新全部」的确认框也只问一句 ✓（错话同样钉死 ✗）。
+      name: '账号页：刷新全部确认框也只问一句（不解释会怎样）',
+      do: null,
+      check: eq(
+        `(() => {
+           const t = document.getElementById('confirm-refresh-all')?.textContent ?? ''
+           return [t.includes('确定要刷新'), t.includes('作废'), t.includes('不可逆'), t.includes('撤不回来'), t.includes('还剩多少天')].join('/')
+         })()`,
+        'true/false/false/false/false',
+      ),
+    },
+    {
+      name: '账号页：确认全部刷新 ⇒ 请求体含 all:true + force:true',
+      do: `(async () => {
+        const posts = []
+        const orig = window.fetch
+        window.fetch = async (input, init) => {
+          const url = typeof input === 'string' ? input : input.url
+          if (url === '/api/auth/refresh') posts.push({ url, init })
+          return orig(input, init)
+        }
+        try {
+          ;[...document.querySelectorAll('#confirm-refresh-all .modal-action button')]
+            .find((b) => b.textContent.trim() === '全部刷新').click()
+          for (let i = 0; i < 80 && posts.length === 0; i++) await new Promise((r) => setTimeout(r, 100))
+          window.__refreshAllPost = posts.map((p) => ({ url: p.url, body: JSON.parse(p.init.body) }))
+        } finally {
+          window.fetch = orig
+        }
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const p = (window.__refreshAllPost ?? [])[0]
+           return p ? p.url + ' ' + JSON.stringify(p.body) : '没发出 /api/auth/refresh 请求'
+         })()`,
+        '/api/auth/refresh {"all":true,"force":true}',
+      ),
+      changed: true,
+    },
+    { name: '账号页：全部刷新后确认框关掉', do: null, check: eq('document.querySelectorAll("dialog[open]").length', 0) },
+
     // 计划页：新建表单填一遍（文本、下拉、勾选框都覆盖到）
     { name: '切到计划页', do: go('schedules'), check: eq('location.pathname', '/schedules') },
     { name: '计划页：填名称', do: typeIn('input[placeholder="例如 每天签到"]', '每周签到'), check: eq('document.querySelector("input[placeholder=\\"例如 每天签到\\"]").value', '每周签到') },

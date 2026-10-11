@@ -1903,8 +1903,10 @@ export const putAccountSettings = (id: string, settings: AccountSettings) =>
 // ① **手动一键刷新**（`POST /api/auth/refresh` ✓）—— 一个账号 / 我名下全部 ✓；
 // ② **自动定时的开关与预设时间**（`GET|PUT /api/auth/refresh-schedule` ✓）。
 //
-// ⚠ 到点之后**先走既有判据**（账号设置里的「剩余多少天刷新token」✓）——
-// 不需要刷就**跳过**，所以逐条结局有四档（见 `RefreshResult.kind` ✓）。
+// ⚠ 两件事的判据**不一样**（2026-10-11 用户口径：「点击后强制刷新，不检测时间」✓）：
+// ① **手动**那两颗按钮 ⇒ 一律 `force: true`，**立刻换新、不看还剩多少天** ✓；
+// ② **自动**到点 ⇒ 先走既有判据（账号设置里的「剩余多少天刷新token」✓），
+//    不需要刷就**跳过** ✓ —— 所以逐条结局有四档（见 `RefreshResult.kind` ✓）。
 
 /**
  * 一个账号的刷新结局 —— **四档**，不是"成功/失败"两档。
@@ -1947,12 +1949,25 @@ export interface RefreshResponse {
  * ⚠ `account` 与 `all` **恰好给一个**：两个都不给 / 都给 ⇒ **400** ✓
  *（不默认「全部」—— 那是个会改凭据的动作 ✓）。
  *
+ * # ⚠⚠ `force`：手动这条路**一律强制**（2026-10-11 用户口径）
+ *
+ * 原话：「**点击后强制刷新，不检测时间**」✓ ⇒ 手动点就是"**立刻换新**"，
+ * **不走**"剩余不足 `refresh_token_days` 天"那个检测 ✗（旧行为：天数还够 ⇒
+ * 后端回 `skipped`、一枪都不打 ⇒ 界面表现成"点了没反应" ✗）。
+ *
+ * ⚠ 所以它是**必填**（不是 `force?: boolean`）：漏传会静默退回"按天数判据"，
+ * 而这里正是最容易漏的一格 ✓ —— 让 TS 逼着每个调用点写清楚 ✓。
+ * ⚠ 自动定时那条路**不走这个函数** ✗（它在后端由 `auth_refresh_auto` 直接调服务 ✓，
+ * `force = false` ⇒ 到点只是"**检查**" ✓）。
+ *
  * ⚠ 它**可能慢**（每个账号最慢约 28 秒，实测 ✓）⇒ 调用方必须有"进行中"状态 ✓。
  * ⚠ 有账号**刷新失败**时后端回 **502**，但 body 里**仍然**是这份逐条结局
  *（`request()` 会把 body 原文带在 `Error.message` 里 ✓）——
  * 所以调用方在 catch 里也该试着解析一次，别把"哪一个失败、为什么"丢掉 ✓。
  */
-export const refreshAuth = (input: { account: string } | { all: true }) =>
+export const refreshAuth = (
+  input: { account: string; force: boolean } | { all: true; force: boolean },
+) =>
   request<RefreshResponse>('/api/auth/refresh', {
     method: 'POST',
     body: JSON.stringify(input),

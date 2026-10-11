@@ -240,7 +240,7 @@ fn lenient_by_design() {
 //   `rotate()` 拿 `format!("{}:{}:{}", platform, phone, token)` **明文**去解析，
 //   而 `parse_auth` 的契约是"`Basic ` + base64 整串"。它不报错 —— 只是拿不到
 //   expire ⇒ 库里 `expire` 停在旧值 ⇒ `decide()` 下一轮仍判"该刷"
-//   ⇒ **每轮都真轮换凭据**（对上游是不可逆动作）。
+//   ⇒ **每轮都真打上游换新凭据**（白跑一次上游调用）。
 //
 // 2026-09-30 复核 qwen review 时查实并修掉；这两条测试是它的护栏。
 
