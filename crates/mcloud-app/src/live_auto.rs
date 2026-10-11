@@ -208,6 +208,7 @@ fn seeded_auto_schedule(owner: &UserId) -> Schedule {
         last_run_ms: None,
         last_status: None,
         last_error: None,
+        last_note: None,
         run_count: 0,
     }
 }
@@ -490,6 +491,7 @@ pub async fn reschedule_live_auto(
         last_run_ms: None,
         last_status: None,
         last_error: None,
+        last_note: None,
         run_count: 0,
     });
 

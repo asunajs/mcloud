@@ -586,6 +586,16 @@ export const SchedulesPage = () => {
       <div class="text-xs opacity-60">
         上次执行：{fmtEpochMs(s.lastRunMs)} · 累计触发 {s.runCount} 次
       </div>
+      {/*
+        ⭐ **上次结果的那句人话**（`lastNote` ✓）：`lastStatus` 只有三个词，
+        全跳过时它是 `ok`、`lastError` 是空 ⇒ 光看徽章**看不出"今天为什么没刷"** ✗
+        （那句话原先只进服务端日志 ✗）。放在「上次执行」那一行**下面**（把两句
+        "上次…"挨着排 ✓），与 `lastError` 一样是"上次结果"的展开 ✓ ——
+        后者自己就把汇总说全了 ⇒ 后端这时写 `null`，两格不会同时有话说 ✓。
+      */}
+      {s.lastNote ? (
+        <div class="text-xs break-words opacity-70">上次结果：{s.lastNote}</div>
+      ) : null}
       {s.lastError ? (
         // 后端已脱敏；原样显示，不改写、不截断到看不见
         <div class="alert alert-soft alert-error text-xs" role="alert">
@@ -714,6 +724,12 @@ export const SchedulesPage = () => {
                           return (
                             <div class="flex flex-col gap-1">
                               <span class={b.cls}>{b.text}</span>
+                              {/* ⭐ 那一行的**结果说明**（`lastNote` ✓）——宽屏这份也要有：
+                                  只画在卡片上，表格里就**永远看不见**"今天为什么没刷" ✗
+                                  （两套 DOM 是各画一遍的，见上面那条 `系统维护` 的教训 ✓）。 */}
+                              {s.lastNote ? (
+                                <span class="text-xs break-words opacity-70">{s.lastNote}</span>
+                              ) : null}
                               <span class="text-xs opacity-60">{fmtEpochMs(s.lastRunMs)}</span>
                             </div>
                           )

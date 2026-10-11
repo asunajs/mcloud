@@ -11,7 +11,8 @@
 //!   触发时刻  **每天**那个钟点（**每用户一份** ✓，见下）
 //!   怎么更新  改预设时间 / 翻开关 ⇒ 立刻 upsert 一次 ✓（[`reschedule_auth_refresh`] ✓）
 //!   到点之后  **先走既有判据**（`refresh_token_days` ✓）——
-//!             不需要刷就跳过，并把"跳过的原因"记进日志与那条定时的 `last_status` ✓
+//!             不需要刷就跳过，并把"跳过的原因"记进日志**与那条定时的
+//!             `last_note`**（定时页那一行看得见 ✓，状态仍是 `ok` ✓）
 //!   它从哪来  **开箱就有**：每个用户在自己的默认数据那一步被种上一条
 //!             （[`seed_auth_refresh_schedule`] ✓，意愿=开、`enabled=true`、时刻已算好 ✓）
 //! ```
@@ -154,6 +155,7 @@ fn seeded_auth_refresh_schedule(owner: &UserId, at: &str) -> Option<Schedule> {
         last_run_ms: None,
         last_status: None,
         last_error: None,
+        last_note: None,
         run_count: 0,
     })
 }
@@ -476,9 +478,16 @@ fn squat_note(id: &ScheduleId) -> String {
 ///
 /// # ⚠ 记账在这里做（`Store::record_schedule_run` ✓）
 ///
-/// 钩子手里本来就有 `Store` ✓ ⇒ 由它写那三列（`last_status` / `last_error` /
-/// `last_run_ms`）✓ —— 调度器那边就不必再开一个"代别人记账"的公开口子 ✓
+/// 钩子手里本来就有 `Store` ✓ ⇒ 由它写那几列（`last_status` / `last_error` /
+/// `last_note` / `last_run_ms`）✓ —— 调度器那边就不必再开一个"代别人记账"的公开口子 ✓
 ///（理由见 `AuthRefreshHook` 的说明 ✓）。
+///
+/// # ⚠ `last_note` 是**给定时页看的那句话**（2026-10-11 补 ✓）
+///
+/// 全跳过时 `last_status` 是 `ok`、`last_error` 是空 ⇒ 定时页那一行只剩一个
+/// 「成功」徽章，**用户看不出"今天为什么没刷"** ✗ —— 那句人话原先只进服务端日志 ✗。
+/// ⇒ 另写一格 [`Schedule::last_note`]（见 [`note_of`] ✓），状态那三个词**一个都不动** ✓
+///（`ok` 仍是"跳过是正常结局"那个意思 ✓，`force = false` 那条钉子照旧 ✓）。
 pub fn auth_refresh_hook(
     service: Arc<AuthRefreshService>,
     store: Arc<dyn Store>,
@@ -500,7 +509,7 @@ pub fn auth_refresh_hook(
                         schedule = %sch.id,
                         "凭据自动刷新：这个用户名下没有账号，这一趟什么都不做"
                     );
-                    record(&store, &sch, None, "ok", None).await;
+                    record(&store, &sch, None, "ok", None, Some(NO_ACCOUNTS_NOTE)).await;
                     // ⚠ `SkippedBusy` 在这里只是"没有可跑的东西"的中性表达
                     //（凭据刷新不产生 `RunRecord` ⇒ 没有 `run_id` 可报 ✓）。
                     return mcloud_engine::FireOutcome::SkippedBusy;
@@ -508,6 +517,8 @@ pub fn auth_refresh_hook(
 
                 let mut rotated = 0usize;
                 let mut skipped = 0usize;
+                // 跳过里**最先到期**的那个还剩多少天（`last_note` 那句要说它 ✓）。
+                let mut nearest_days: Option<f64> = None;
                 let mut manual: Vec<String> = Vec::new();
                 let mut failures: Vec<String> = Vec::new();
 
@@ -526,6 +537,13 @@ pub fn auth_refresh_hook(
                         }
                         Ok(RefreshOutcome::Skipped { remaining_days }) => {
                             skipped += 1;
+                            // 「最近还剩几天」= 这批里**最先到期**的那个（`min` ✓）——
+                            // 定时页那句话说的是它 ✓（多账号时"都未到提前量"之外
+                            // 还答得出"最快那个还剩多久" ✓）。
+                            nearest_days = Some(match nearest_days {
+                                Some(m) => m.min(remaining_days),
+                                None => remaining_days,
+                            });
                             // ⭐ **"跳过的原因"必须写进日志**（用户口径 ✓）：
                             // 不写的话，用户看到"到点了却什么都没发生"会以为定时坏了 ✓。
                             tracing::info!(
@@ -578,11 +596,27 @@ pub fn auth_refresh_hook(
                 } else {
                     Some(format!("{summary}；{}", errs.join("；")))
                 };
+                // ⭐ 定时页那句人话：**只在没有错误时**写 ——
+                // 有错误时 `err_text` 自己就把汇总说全了（`{summary}；{errs}` ✓），
+                // 再来一句同样的等于同一件事说两遍 ✗（这时写 `None` ⇒ 清掉旧说明 ✓）。
+                let note = if errs.is_empty() {
+                    note_of(rotated, skipped, nearest_days)
+                } else {
+                    None
+                };
                 tracing::info!(schedule = %sch.id, status, %summary, "凭据自动刷新：这一趟的结论");
 
                 // ⚠ `last_run_ms` 传 `None`：凭据刷新**不产生 `RunRecord`**，
                 // 「上次运行」那一格拿它没有意义 ✓（真实结论在 `last_status` 上 ✓）。
-                record(&store, &sch, None, status, err_text.as_deref()).await;
+                record(
+                    &store,
+                    &sch,
+                    None,
+                    status,
+                    err_text.as_deref(),
+                    note.as_deref(),
+                )
+                .await;
 
                 // 凭据刷新不产生 `RunRecord` ⇒ 没有 `run_id` 可报 ✓。
                 mcloud_engine::FireOutcome::SkippedBusy
@@ -591,22 +625,87 @@ pub fn auth_refresh_hook(
     )
 }
 
-/// 写那条定时的记账三列（`last_status` / `last_error` / `last_run_ms` ✓）。
+/// 名下**一个账号都没有**时那句说明（正常状态，不是故障 ✓）。
+const NO_ACCOUNTS_NOTE: &str = "这个用户名下没有账号";
+
+/// 「上次结果」那句**人话**（写进 [`Schedule::last_note`] ⇒ 定时页那一行看得见 ✓）。
+///
+/// # 为什么要有它（2026-10-11）
+///
+/// 全部账号都没到提前量时，这条定时记的是 `ok`（跳过是**正常结局** ✓）、
+/// `last_error` 是空 ⇒ 定时页只剩一个「成功」徽章 —— **用户看不出"今天为什么没刷"** ✗。
+/// 那句人话原先只进服务端日志（上面那几条 `tracing::info!` ✓）✗。
+///
+/// # 措辞纪律（`AGENTS.md`「刷新凭据的正确说法」✓）
+///
+/// **只陈述结果**：换了几个、几个没到提前量、还剩几天 ✓。
+/// **不解释**会怎样、**不提**"旧的会怎样"、**不说**"慢/撤不回来" ✗ ——
+/// 那是解释，不是结果 ✓。
+///
+/// # 三种形态
+///
+/// * 全跳过（一个都没换）⇒ `未到提前量，跳过（还剩 12 天）` ✓
+///   （多账号 ⇒ `3 个账号都未到提前量（最近还剩 12 天）` ✓）
+/// * 真换了 ⇒ `已换 2 个凭据` ✓
+/// * 换了一些、跳过一些 ⇒ `已换 1 个凭据、1 个未到提前量（还剩 300 天）` ✓
+///   （跳过不止一个时才说"最近"⇒ `已换 1 个凭据、2 个未到提前量（最近还剩 12 天）` ✓）
+///
+/// `remaining` 取**最先到期**的那个（上面按 `min` 收敛 ✓）——
+/// "最近还剩 12 天"说的是"最快那个还剩 12 天" ✓，用户据此知道下次先轮到谁 ✓。
+/// ⚠ 只有**一个**账号跳过时不写"最近"：那两个字在只有一个候选时是废话 ✗。
+/// 天数按**整天**显示（`{:.0}` ✓）：界面上写"11.6 天"是把内部精度漏给用户 ✗。
+fn note_of(rotated: usize, skipped: usize, remaining_days: Option<f64>) -> Option<String> {
+    if rotated == 0 && skipped == 0 {
+        return None;
+    }
+    let left = remaining_days.map(|d| format!("还剩 {:.0} 天", d.max(0.0)));
+    let mut parts: Vec<String> = Vec::new();
+    if rotated > 0 {
+        parts.push(format!("已换 {rotated} 个凭据"));
+    }
+    if skipped > 0 {
+        parts.push(match (rotated, skipped, left.as_deref()) {
+            // 一个账号、一个都没换 ⇒ 正是那句"今天为什么没刷"。
+            (0, 1, Some(l)) => format!("未到提前量，跳过（{l}）"),
+            (0, 1, None) => "未到提前量，跳过".to_string(),
+            // 全跳过且不止一个：`都` 成立 ✓（没有错误时 `skipped` 就是账号总数 ✓）。
+            (0, n, Some(l)) => format!("{n} 个账号都未到提前量（最近{l}）"),
+            (0, n, None) => format!("{n} 个账号都未到提前量"),
+            // 换了一些、跳过一些：只有一个跳过的不说"最近"（废话 ✗）。
+            (_, 1, Some(l)) => format!("1 个未到提前量（{l}）"),
+            (_, 1, None) => "1 个未到提前量".to_string(),
+            (_, n, Some(l)) => format!("{n} 个未到提前量（最近{l}）"),
+            (_, n, None) => format!("{n} 个未到提前量"),
+        });
+    }
+    Some(parts.join("、"))
+}
+
+/// 写那条定时的记账列（`last_status` / `last_error` / `last_note` / `last_run_ms` ✓）。
 ///
 /// ⚠ 失败只 warn：调度器的触发路径**不该**因为"记账写不进去"而失败 ✓
 ///（与 `Scheduler::record` 那条处置逐字相同 ✓）。
+///
+/// ⚠ 两次窄写（状态那三列 + 那句说明）而不是一次：理由见
+/// [`mcloud_core::ScheduleStore::record_schedule_note`] ✓ —— 并进去要改二十来处假 store ✗。
 async fn record(
     store: &Arc<dyn Store>,
     sch: &Schedule,
     ran_at_ms: Option<i64>,
     status: &str,
     error: Option<&str>,
+    note: Option<&str>,
 ) {
     if let Err(e) = store
         .record_schedule_run(&sch.id, ran_at_ms, status, error)
         .await
     {
         tracing::warn!(schedule = %sch.id, error = %e, "凭据自动刷新的结论记账失败");
+    }
+    // `None` 也要写（= 清空 ✓）：结论换了却留着上一趟的说明，
+    // 就是"成功旁边挂着旧错误"那一类形态 ✗。
+    if let Err(e) = store.record_schedule_note(&sch.id, note).await {
+        tracing::warn!(schedule = %sch.id, error = %e, "凭据自动刷新那句说明记账失败");
     }
 }
 

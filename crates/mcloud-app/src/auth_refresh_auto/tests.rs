@@ -585,6 +585,7 @@ async fn a_handmade_schedule_on_that_id_is_never_touched() {
         last_run_ms: None,
         last_status: None,
         last_error: None,
+        last_note: None,
         run_count: 0,
     };
     store.save_schedule(&handmade).await.unwrap();
@@ -683,6 +684,12 @@ async fn hook_rotates_when_the_credential_is_due() {
         .unwrap();
     assert_eq!(after.last_status.as_deref(), Some("ok"), "{after:?}");
     assert!(after.last_error.is_none(), "成功时不该留旧错误：{after:?}");
+    // ⭐ 定时页那句人话（`last_note` ✓）：真换了 ⇒ 说得出换了几个 ✓。
+    assert_eq!(
+        after.last_note.as_deref(),
+        Some("已换 1 个凭据"),
+        "换了就要说得出换了几个（定时页那一行照它显示）：{after:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -721,6 +728,19 @@ async fn hook_skips_when_the_credential_is_not_due() {
         "跳过是**正常**结局（不是失败）：{after:?}"
     );
     assert!(after.last_error.is_none(), "{after:?}");
+    // ⭐⭐ **本用例要钉的新东西**：那句"今天为什么没刷"必须落在 `last_note` 上 ✓
+    // —— 它原先**只进服务端日志** ⇒ 定时页那一行只剩一个「成功」徽章 ✗
+    //（用户口径 2026-10-11：「自动定时的跳过原因在定时页上看不出来」✗）。
+    //
+    // ⚠ 判据是**那句完整的人话**（含"还剩 300 天" ✓），不是"非空"✗：
+    //   只说"有值"的话，写一句"已跳过"照样绿，而用户要的正是**还剩几天** ✓。
+    // ⚠ 也**不许**顺手把状态改成 `skipped`：`ok` 是"跳过是正常结局"那条既有语义 ✓
+    //   （上面那一条断言还在 ✓），别的定时类型也在用这三个词 ✓。
+    assert_eq!(
+        after.last_note.as_deref(),
+        Some("未到提前量，跳过（还剩 300 天）"),
+        "全跳过 ⇒ 定时页必须看得出「今天为什么没刷」：{after:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -806,7 +826,183 @@ async fn hook_with_no_accounts_records_ok_and_does_not_touch_last_run() {
         after.last_run_ms.is_none(),
         "什么都没做 ⇒ 不该动「上次运行」：{after:?}"
     );
+    // ⚠ 这一格**每次触发都要写**（`Some` 或 `None` ✓）：不写的话，用户删光账号之后
+    // 上一趟那句"已换 N 个"会**留着不动** ⇒ 定时页显示一件已经没发生的事 ✗。
+    assert_eq!(
+        after.last_note.as_deref(),
+        Some("这个用户名下没有账号"),
+        "「没有账号」也是结果，要说出来（并顺手清掉上一趟那句）：{after:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 一个成功、一个跳过 ⇒ **两条都看得出**（换了一个 ✓ + 还剩几天 ✓）。
+///
+/// ⚠ 为什么要单独钉这一条：全跳过与全成功各有一条用例，但**混合**那一档最容易写成
+/// "只报换了的那个"（跳过的那个被吞掉 ✗）或反过来 —— 而用户要看的是**这一趟的完整结论** ✓。
+#[tokio::test]
+async fn hook_mixed_rotate_and_skip_shows_both() {
+    let (store, dir) = store("hook-mixed");
+    let clock = Arc::new(FixedClock(1_700_000_000_000));
+    let service = Arc::new(AuthRefreshService::new(
+        Arc::clone(&store),
+        Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>,
+        Arc::new(|_a: &Account| Arc::new(FakeRefresh) as Arc<dyn mcloud_core::HttpClient>),
+    ));
+    seed_auth_refresh_schedule(&store, &owner()).await.unwrap();
+    let sch = store
+        .schedule(&auth_refresh_schedule_id(&owner()))
+        .await
+        .unwrap()
+        .unwrap();
+
+    // ① 已过期 ⇒ 真刷 ✓；② 还剩 300 天 ⇒ 跳过 ✓
+    let due = account("acc-due", clock.now_ms() - 86_400_000);
+    let not_due = account("acc-fresh", clock.now_ms() + 300 * 86_400_000);
+    let hook = auth_refresh_hook(Arc::clone(&service), Arc::clone(&store));
+    let _ = hook(&sch, &[due, not_due], 0).await;
+
+    let after = store
+        .schedule(&auth_refresh_schedule_id(&owner()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.last_status.as_deref(), Some("ok"), "{after:?}");
+    assert_eq!(
+        after.last_note.as_deref(),
+        Some("已换 1 个凭据、1 个未到提前量（还剩 300 天）"),
+        "一个换了一个跳过 ⇒ 两句都要在：{after:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 多账号**全都**没到提前量 ⇒ 说清有几个、以及**最快那个**还剩几天 ✓。
+#[tokio::test]
+async fn hook_all_skipped_says_how_many_and_the_nearest_deadline() {
+    let (store, dir) = store("hook-all-skip");
+    let clock = Arc::new(FixedClock(1_700_000_000_000));
+    let service = Arc::new(AuthRefreshService::new(
+        Arc::clone(&store),
+        Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>,
+        Arc::new(|_a: &Account| Arc::new(DeadUpstream) as Arc<dyn mcloud_core::HttpClient>),
+    ));
+    seed_auth_refresh_schedule(&store, &owner()).await.unwrap();
+    let sch = store
+        .schedule(&auth_refresh_schedule_id(&owner()))
+        .await
+        .unwrap()
+        .unwrap();
+
+    // 三个账号都在提前量之外；**12 天**那个最先到期 ⇒ 那句话说的是它 ✓。
+    let a = account("acc-1", clock.now_ms() + 300 * 86_400_000);
+    let b = account("acc-2", clock.now_ms() + 12 * 86_400_000);
+    let c = account("acc-3", clock.now_ms() + 40 * 86_400_000);
+    let hook = auth_refresh_hook(Arc::clone(&service), Arc::clone(&store));
+    let _ = hook(&sch, &[a, b, c], 0).await;
+
+    let after = store
+        .schedule(&auth_refresh_schedule_id(&owner()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.last_status.as_deref(),
+        Some("ok"),
+        "全跳过仍是正常结局：{after:?}"
+    );
+    assert_eq!(
+        after.last_note.as_deref(),
+        Some("3 个账号都未到提前量（最近还剩 12 天）"),
+        "要说清几个、以及最快那个还剩几天：{after:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 有账号**刷失败** ⇒ 那句说明写**空**（错误那一段自己就把汇总说全了 ✓）。
+///
+/// 不这么做的话，定时页会同时挂着 `lastError`（含"已换 0 个、未到提前量跳过 0 个、
+/// 共 1 个；刷新失败：…"✓）与一句重复的 `lastNote` ⇒ 同一件事说两遍 ✗。
+#[tokio::test]
+async fn hook_clears_the_note_when_something_failed() {
+    let (store, dir) = store("hook-note-cleared");
+    let clock = Arc::new(FixedClock(1_700_000_000_000));
+    let service = Arc::new(AuthRefreshService::new(
+        Arc::clone(&store),
+        Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>,
+        // 一被调用就报错 ⇒ 走到 `failures` 那一支 ✓
+        Arc::new(|_a: &Account| Arc::new(DeadUpstream) as Arc<dyn mcloud_core::HttpClient>),
+    ));
+    seed_auth_refresh_schedule(&store, &owner()).await.unwrap();
+    let sid = auth_refresh_schedule_id(&owner());
+    let sch = store.schedule(&sid).await.unwrap().unwrap();
+
+    // 先造一句"上一趟的说明"（模拟昨天全跳过那次 ✓）⇒ 本趟必须把它**清掉** ✓。
+    store
+        .record_schedule_note(&sid, Some("未到提前量，跳过（还剩 300 天）"))
+        .await
+        .unwrap();
+
+    let due = account("acc-due", clock.now_ms() - 86_400_000);
+    let hook = auth_refresh_hook(Arc::clone(&service), Arc::clone(&store));
+    let _ = hook(&sch, std::slice::from_ref(&due), 0).await;
+
+    let after = store.schedule(&sid).await.unwrap().unwrap();
+    assert_eq!(after.last_status.as_deref(), Some("error"), "{after:?}");
+    assert!(
+        after
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("刷新失败")),
+        "错误那一段要说得出失败原因：{after:?}"
+    );
+    assert!(
+        after.last_note.is_none(),
+        "有错误时那句说明必须清空（汇总已经在 `last_error` 里了）：{after:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ [`note_of`] 是**纯函数** ⇒ 三种形态逐条钉在它上面（上面几条用例钉的是"接上了" ✓）。
+#[test]
+fn note_of_says_what_happened_in_plain_words() {
+    // 什么都没发生 ⇒ 不写（不是"写一句空的" ✗）
+    assert_eq!(note_of(0, 0, None), None);
+
+    // ① 全跳过：一个账号说"跳过"，多个账号说"都未到提前量（最近…）"
+    assert_eq!(
+        note_of(0, 1, Some(12.0)).as_deref(),
+        Some("未到提前量，跳过（还剩 12 天）")
+    );
+    assert_eq!(
+        note_of(0, 3, Some(12.0)).as_deref(),
+        Some("3 个账号都未到提前量（最近还剩 12 天）")
+    );
+    // ② 真换了
+    assert_eq!(note_of(2, 0, None).as_deref(), Some("已换 2 个凭据"));
+    // ③ 混合
+    assert_eq!(
+        note_of(1, 2, Some(11.6)).as_deref(),
+        Some("已换 1 个凭据、2 个未到提前量（最近还剩 12 天）")
+    );
+    // ⚠ 只有一个账号跳过时不写"最近"（只有一个候选 ⇒ 那两个字是废话 ✗）
+    assert_eq!(
+        note_of(2, 1, Some(300.0)).as_deref(),
+        Some("已换 2 个凭据、1 个未到提前量（还剩 300 天）")
+    );
+    // 天数按**整天**显示（界面上写"11.6 天"是把内部精度漏给用户 ✗）
+    assert_eq!(
+        note_of(0, 1, Some(0.4)).as_deref(),
+        Some("未到提前量，跳过（还剩 0 天）")
+    );
+    // 算不出剩余天数也照说（不写"0 天"糊过去 ✓）
+    assert_eq!(note_of(0, 2, None).as_deref(), Some("2 个账号都未到提前量"));
+
+    // ⚠ 措辞纪律（`AGENTS.md`「刷新凭据的正确说法」✓）：**只陈述结果**，
+    // 不解释会怎样、不提"旧的怎么样" ✗。
+    for bad in ["作废", "吊销", "不可逆", "撤不回来", "强制", "因为", "所以"] {
+        let s = note_of(1, 1, Some(3.0)).unwrap();
+        assert!(!s.contains(bad), "那句人话里不许出现「{bad}」：{s}");
+    }
 }
 
 // ════════════ 上游替身 ════════════

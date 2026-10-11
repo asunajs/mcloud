@@ -816,6 +816,7 @@ async fn schedules_crud() {
         last_run_ms: None,
         last_status: None,
         last_error: None,
+        last_note: None,
         run_count: 0,
     };
     s.save_schedule(&sch).await.unwrap();
@@ -929,6 +930,7 @@ async fn mark_schedule_fired_only_touches_watermark_and_count() {
         last_run_ms: None,
         last_status: None,
         last_error: None,
+        last_note: None,
         run_count: 0,
     };
     s.save_schedule(&sch).await.unwrap();
@@ -976,6 +978,7 @@ async fn record_schedule_run_has_asymmetric_none_semantics() {
         last_run_ms: None,
         last_status: None,
         last_error: None,
+        last_note: None,
         run_count: 1,
     })
     .await
@@ -1025,9 +1028,58 @@ async fn narrow_writes_on_missing_row_are_noops_not_errors() {
     s.record_schedule_run(&ScheduleId::new("gone"), Some(1), "ok", None)
         .await
         .unwrap();
+    s.record_schedule_note(&ScheduleId::new("gone"), Some("没得写"))
+        .await
+        .unwrap();
     s.mark_pipeline_ran(&PipelineId::new("gone"), 1)
         .await
         .unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// ⭐ 「上次结果」那句说明是**独立的一格**（`Schedule::last_note` ✓）：
+/// 这条窄写**只动它**，且 `None` = **清空**（与 `last_error` 同一条口径 ✓）。
+///
+/// ⚠ 为什么要专门钉"只动它"：它是**第二次**窄写（理由见 trait 那边 ✓）⇒
+/// 一旦写宽了（顺手把状态/水位也写一遍），定时页上「上次结果」与「下次执行」
+/// 就会互相打架 ✗ —— 本仓在窄写这件事上栽过（`mark_schedule_fired` 与整行覆盖
+/// 抹掉用户刚改的名字 ✓，那条教训就写在 `Store::mark_schedule_fired` 的注释里 ✓）。
+#[tokio::test]
+async fn record_schedule_note_only_touches_that_column() {
+    let d = tmpdir("narrow-note");
+    let s = JsonStore::open(&d).unwrap();
+    let mut sch = schedule("s1");
+    sch.name = "原名".into();
+    sch.last_status = Some("ok".into());
+    sch.last_run_ms = Some(777);
+    sch.last_fire_ms = Some(888);
+    sch.run_count = 5;
+    s.save_schedule(&sch).await.unwrap();
+
+    s.record_schedule_note(
+        &ScheduleId::new("s1"),
+        Some("未到提前量，跳过（还剩 12 天）"),
+    )
+    .await
+    .unwrap();
+    let a = s.schedule(&ScheduleId::new("s1")).await.unwrap().unwrap();
+    assert_eq!(
+        a.last_note.as_deref(),
+        Some("未到提前量，跳过（还剩 12 天）")
+    );
+    assert_eq!(a.name, "原名", "窄写不许碰别的列：{a:?}");
+    assert_eq!(a.last_status.as_deref(), Some("ok"), "{a:?}");
+    assert_eq!(a.last_run_ms, Some(777), "窄写不许动「上次运行」：{a:?}");
+    assert_eq!(a.last_fire_ms, Some(888), "窄写不许动水位线：{a:?}");
+    assert_eq!(a.run_count, 5, "窄写不许动「累计触发」：{a:?}");
+
+    // `None` ⇒ **显式清空**（不是"不动"）：结论换了却留着上一趟的说明，
+    // 就是"成功旁边挂着旧错误"那一类形态 ✗。
+    s.record_schedule_note(&ScheduleId::new("s1"), None)
+        .await
+        .unwrap();
+    let b = s.schedule(&ScheduleId::new("s1")).await.unwrap().unwrap();
+    assert_eq!(b.last_note, None, "None 必须清空那一格：{b:?}");
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -1843,6 +1895,7 @@ fn owned_schedule(id: &str, owner: Option<&str>) -> Schedule {
         last_run_ms: None,
         last_status: None,
         last_error: None,
+        last_note: None,
         run_count: 0,
     }
 }
@@ -2749,6 +2802,7 @@ fn schedule(id: &str) -> Schedule {
         last_run_ms: None,
         last_status: None,
         last_error: None,
+        last_note: None,
         run_count: 0,
     }
 }

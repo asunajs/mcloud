@@ -391,7 +391,7 @@ impl Notifier {
     ///
     /// 投递是 `spawn` 出去的（`notify.rs` 的 `Finished` 分支 ✓）—— 对**长驻的服务**
     /// 这是对的 ✓（HTTP 慢不该拖住运行收尾 ✓）。但 **CLI 是短命进程** ✗：
-    /// `mcloud run-all` 跑完就 `main` 返回 ⇒ 进程退出 ⇒ 在飞的推送**被一起掐掉** ✗，
+    /// `mcloud run` 跑完就 `main` 返回 ⇒ 进程退出 ⇒ 在飞的推送**被一起掐掉** ✗，
     /// 而用户看到的却是"命令跑完了、退出码 0" ✗ —— 那比不推还坏 ✓。
     ///
     /// TS 那份（`mcloud-sign/packages/cli/src/index.ts` ✓）是 `await sendNotify(...)` ✓
@@ -1375,6 +1375,7 @@ mod tests {
             last_run_ms: None,
             last_status: None,
             last_error: None,
+            last_note: None,
             run_count: 0,
         };
         store.save_schedule(&sch).await.expect("存定时应当成功");

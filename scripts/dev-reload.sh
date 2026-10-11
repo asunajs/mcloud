@@ -80,24 +80,61 @@ restore_on_exit() {
 }
 trap restore_on_exit EXIT
 
-echo "── ① 停掉托管（$LABEL）"
-
-# ⚠⚠ 停之前先看有没有**别的写入线**在编译 —— 两个理由：
+# ⚠⚠ 停之前先看**本仓的 target 目录**有没有别的写入线在编 —— 两个理由：
 #
 # 1. cargo 对 `target/` 上独占锁，硬抢两边都慢（AGENTS.md 那条 ✓）。
 # 2. 更要命的是本脚本**先停服务再编** ✗ ⇒ 一旦在锁上等几分钟，WebUI 就白停几分钟 ✗
 #    （2026-10-03 实测踩到两次：一次约 30 分钟 ✓）。
 #
 # ⇒ 有别人在编就**先不动服务** ✓、明确报出来 ✓（要硬上就设 MCLOUD_SKIP_LOCK_CHECK=1）。
+#
+# # 判据：**本仓 target 目录上的 cargo 独占锁**，用 lsof 问"谁正持有"
+#
+# cargo 在 `<target>/<profile>/.cargo-lock` 上持一把排他锁 ✓ ⇒ 问 `lsof` **现在谁持有
+# 这个文件**就是最准的判据 ✓。
+#
+# ⚠ 不能按"有没有 cargo 进程"判 ✗（旧写法是 `pgrep -fl 'cargo (build|test|clippy|check|run)'`）：
+#   2026-10-11 实测踩到 —— 本机在跑**另一个仓**的 `cargo test -p unpanel-server …`，
+#   本仓的上线就被无故拦下 ✗（当时只能靠 MCLOUD_SKIP_LOCK_CHECK=1 放行）。
+#   进程名/命令行都不区分仓库 ⇒ 判据必须落到**本仓的 target 目录**上 ✓。
+# ⚠ 也不能只看"锁文件在不在"✗：cargo 建完**不删**（本仓 `target/debug/.cargo-lock`
+#   是 2026-09-25 建的一直躺着 ✓）⇒ 文件存在 ≠ 被占用；只有 lsof 报出持有者才算真占用 ✓。
+#
+# ⚠ target 目录取"**本次构建真会用的那个**"：`CARGO_TARGET_DIR` 的相对值由 cargo 按
+#   **当前目录**解析，而下面会 `cd "$REPO"` ⇒ 相对值按 $REPO 展开 ✓
+#   （写死 `target/` 会漏掉 AGENTS.md 那条 `CARGO_TARGET_DIR=target/lines/<线名>` 约定 ✗）。
 if [[ "${MCLOUD_SKIP_LOCK_CHECK:-0}" != "1" ]]; then
-  OTHERS="$(pgrep -fl 'cargo (build|test|clippy|check|run)' 2>/dev/null | grep -v "$$" || true)"
-  if [[ -n "$OTHERS" ]]; then
-    echo "⚠ 检测到别的 cargo 在跑 ⇒ **不动服务**（它还在正常提供 WebUI ✓）：" >&2
-    echo "$OTHERS" | sed 's/^/    /' >&2
-    echo "  等它结束再跑一次；坚持要现在上就 MCLOUD_SKIP_LOCK_CHECK=1 $0" >&2
+  TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+  [[ "$TARGET_DIR" = /* ]] || TARGET_DIR="$REPO/$TARGET_DIR"
+  OCCUPIED=""
+  if [[ -d "$TARGET_DIR" ]]; then
+    # maxdepth 2：既覆盖 `target/debug/`，也覆盖交叉编译的 `target/<triple>/debug/` ✓
+    while IFS= read -r LOCK; do
+      [[ -n "$LOCK" ]] || continue
+      # sort -n：cargo 是父进程、PID 更小 ⇒ 它排在最前面，一眼就能看到"是谁在编" ✓
+      for PID in $(lsof -F p -- "$LOCK" 2>/dev/null | sed -n 's/^p//p' | sort -n -u); do
+        if [[ "$PID" == "$$" ]]; then continue; fi
+        CMD="$(ps -o command= -p "$PID" 2>/dev/null || true)"
+        [[ -n "$CMD" ]] || continue   # 刚退出 ⇒ 不是占用者 ✓
+        OCCUPIED="${OCCUPIED}    PID $PID：${CMD:0:240}"$'\n'"      ↳ 持有 $LOCK"$'\n'
+      done
+    done < <(find "$TARGET_DIR" -maxdepth 2 -name .cargo-lock -type f 2>/dev/null)
+  fi
+  if [[ -n "$OCCUPIED" ]]; then
+    {
+      echo "⚠ 检测到**本仓**的 target 目录正被占用 ⇒ **不动服务**（它还在正常提供 WebUI ✓）："
+      echo "    判据：cargo 对 target 的独占锁（<target>/<profile>/.cargo-lock）当前被这些进程持有（lsof 实测 ✓）"
+      printf '%s' "$OCCUPIED"
+      echo "    本次会用的 target 目录：$TARGET_DIR"
+      echo "  等它结束再跑一次；坚持要现在上就 MCLOUD_SKIP_LOCK_CHECK=1 $0"
+    } >&2
     exit 1
   fi
 fi
+
+# ⚠ 这句必须放在**锁检查之后** ✓：拦住时不该打"① 停掉托管" —— 打了会让人以为服务
+#   已经被停过，其实一个字节都没动 ✗（2026-10-11 修；那天差点被它误导）。
+echo "── ① 停掉托管（$LABEL）"
 
 # ⚠ `kickstart -k` **不重读 plist** ✗ —— 改过 plist 就必须 bootout+bootstrap（踩过）
 launchctl bootout "gui/$UID_/$LABEL" 2>/dev/null || true

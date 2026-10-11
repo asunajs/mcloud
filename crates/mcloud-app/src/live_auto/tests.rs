@@ -330,6 +330,7 @@ async fn seed_handmade(store: &dyn Store, id: &str) -> Schedule {
         last_run_ms: Some(456),
         last_status: Some("ok".into()),
         last_error: None,
+        last_note: None,
         run_count: 7,
     };
     store.save_schedule(&s).await.expect("存定时应当成功");
@@ -361,6 +362,7 @@ async fn seed_managed_auto(store: &dyn Store, managed_wanted: Option<bool>) -> S
         last_run_ms: None,
         last_status: None,
         last_error: None,
+        last_note: None,
         run_count: 0,
     };
     store.save_schedule(&s).await.expect("存定时应当成功");

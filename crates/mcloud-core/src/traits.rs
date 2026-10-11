@@ -350,6 +350,28 @@ pub trait ScheduleStore: Send + Sync {
         status: &str,
         error: Option<&str>,
     ) -> Result<()>;
+
+    /// **窄写**：只记「上次结果」的那句**人话说明**（[`Schedule::last_note`] ✓）。
+    ///
+    /// `note` 为 `None` ⇒ **写入空**（与 `record_schedule_run` 的 `error` 同一条口径：
+    /// 结论变了却留着上一趟的说明，就是"成功旁边挂着旧错误"那类形态 ✓）。
+    ///
+    /// # 为什么不并进 `record_schedule_run`
+    ///
+    /// 并进去要给那一格加一个参数 ⇒ 本仓**二十来处**假 store（各任务的测试夹具 ✓）
+    /// 全得跟着改签名 —— 为一个纯展示字段改二十个文件 ✗。
+    /// 给一个**默认实现**（什么都不做 ✓），才不用动那些桩
+    ///（与 [`Store::advance_schedule_watermark`] 那条理由逐字相同 ✓）。
+    ///
+    /// ⚠ 代价说清楚：它是**第二次**窄写，两写之间进程被杀会留下
+    /// "状态是新的、说明是上一趟的"那一瞬。这里接受它 ——
+    /// 这一格**纯展示**、两写相隔微秒，且只有「凭据自动刷新」那条定时会写它
+    ///（它每次触发都写 ⇒ 下一趟就纠正回来 ✓）。
+    ///
+    /// 默认实现什么都不做 ⇒ 假 store 不记这一格，而**真 store（`JsonStore`）会记** ✓。
+    async fn record_schedule_note(&self, _id: &ScheduleId, _note: Option<&str>) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// 任务编排。

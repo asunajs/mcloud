@@ -277,6 +277,10 @@ pub async fn upsert(
         // 还留着 `error`、`last_error` 却是空 ⇒ 写着失败却答不出原因 ——
         // 正是那段注释自己说要避免的形态。
         last_error: existing.as_ref().and_then(|s| s.last_error.clone()),
+        // ⚠ 与 `last_error` **同一条处置**（记账字段一个都不能漏 ✓）：
+        // 这一格是「上次结果」那句人话（见 `Schedule::last_note` ✓），
+        // 在界面上改个名字就把它清掉，用户会以为"那次跳过的原因没了" ✗。
+        last_note: existing.as_ref().and_then(|s| s.last_note.clone()),
         run_count: existing.as_ref().map_or(0, |s| s.run_count),
     };
     // ⚠ 只在**新建**时判上限（审计 SEC-16）：更新已有条目不该被"满了"挡住

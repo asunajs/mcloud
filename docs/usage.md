@@ -47,7 +47,6 @@ Get-FileHash ..\mcloud-v<版本>-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 
 解压出来的就是**一个可执行文件 `mcloud`** —— 它既是网页界面，也是命令行。
 
-> **一个文件两种用法**（2026-10-03 起 `mcloud-server` 与 `mcloud-cli` 合并）：
 > **不带参数 = 起网页服务、带子命令 = 命令行**。
 
 ### ⚠ Linux 有三份，别拿错
@@ -103,9 +102,6 @@ INFO mcloud: 监听 http://127.0.0.1:3000
 
 ⚠ 这个窗口**要一直开着** —— 它就是服务本身，窗口关掉服务就停了
 （想让它自己常驻、开机自启，见「进阶 → 常驻与自启」）。
-
-> `tasks=` 后面是**注册表里任务的条数**，随版本变，别背数 —— 现算：
-> `grep -c "Arc::new" crates/mcloud-tasks/src/lib.rs`。
 
 ## 2. 第一次打开：建管理员、登录
 
@@ -227,7 +223,11 @@ mcloud help               # 所有命令的清单（`mcloud --help`、`-h` 同�
 
 `mcloud run` 第一次跑会告诉你**还没有可跑的账号** —— 先 `mcloud login qr` 登一个再来。
 
-其余命令（`run-all`、`cron`、`pipeline run`、`auth`、`push`、`live-room` …）都在
+⚠ `mcloud run`（不带参数）是**立即**把「系统默认每日任务」跑在**本机管理员名下的全部账号**上 ✓
+（**不是**库里全部账号 ✗：多用户实例里别人的账号一个都不碰 ✓）。
+`mcloud run --help` 打的是帮助清单、退出码 0 ✓（`run help` / `run -h` 同）。
+
+其余命令（`cron`、`pipeline run`、`auth`、`push`、`live-room` …）都在
 `mcloud help` 打出来的清单里，需要时再看 —— 这份指南**故意不把它们全抄一遍**
 （那是参考手册的活）。
 
@@ -371,8 +371,8 @@ MCLOUD_ALLOW_LOCAL_PUSH=1 ./mcloud
 
 ```bash
 mcloud cron <定时id>          # 给系统 crontab 调用（跑一条已配好的定时）
-mcloud pipeline run <编排id>  # 跑一条已配好的编排
-mcloud run-all               # 一键跑「默认编排」（= `pipeline run daily`，不用先知道 id）
+mcloud pipeline run <编排id>  # 跑一条已配好的编排                             # （= 立即把「系统默认每日任务」跑在**本机管理员名下的全部账号**上，
+                             #   不用先知道 id；**不是**库里全部账号 ✗）
 ```
 
 顶层命令清单以 `crates/mcloud-server/src/cli/run.rs` 的分派为准，**别背数**，现算：

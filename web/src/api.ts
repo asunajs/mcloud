@@ -313,7 +313,33 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
           : '请求已取消',
       )
     }
-    throw e
+    /**
+     * ⭐ 「连不上后端」在**这一处**统一翻成中文（2026-10-11 用户口径）。
+     *
+     * 服务没起 / 正在重启 / 网线断了时，浏览器抛的是 `TypeError: Failed to fetch`
+     * —— **英文**；它原先被原样透出、页面又原样渲染 ⇒ 用户看到的就是一句
+     * `Failed to fetch` ✗（用户截图指出：「应该改成中文提示，说明是无法连接后端」）。
+     *
+     * ⚠ **只在这里翻一次**：`web/src` 里只有这一个 `fetch` 调用点 ✓，全站的请求都从
+     * 这里过 ⇒ 一处改完全站生效 ✓。各页面各翻一遍迟早漏一个，而"漏了"没有任何测试会红 ✗。
+     *
+     * ⚠⚠ 与 **HTTP 错误**分清楚：4xx/5xx 走下面 `!response.ok` 那条路，照旧显示
+     * **后端给的那句人话**（本来就是中文 ✓）—— 那是"后端拒绝了这次请求"，
+     * 不是"连不上后端" ✗。所以这里只认**传输层**的失败（`TypeError` ✓）。
+     *
+     * ⚠ 原始错误**不丢**：控制台留一条（排查时要用 ✓）—— 界面上那句是给用户看的，
+     * `Failed to fetch` 是给查问题的人看的。
+     * ⚠ 必须是 `console.warn` **不是** `console.error`：门禁把页面里的
+     * `console.error` 一律算成"页面异常"（见 `web/regress/interact.mjs` 末尾 ✓）。
+     */
+    if (e instanceof TypeError) {
+      console.warn('[mcloud] 连不上后端（原始错误）', path, e)
+      throw new ApiError(0, '无法连接后端服务（服务可能未启动或正在重启）')
+    }
+    // 其余非 HTTP 的异常：各自一句中文，**别混进上面那两句里** ✗（混起来等于把
+    // "到底哪种失败"这件事在界面上抹平了 —— 而用户下一步的动作完全不同）。
+    console.warn('[mcloud] 请求失败（原始错误）', path, e)
+    throw new ApiError(0, `请求失败：${e instanceof Error ? e.message : String(e)}`)
   }
 
   const text = await response.text()
@@ -1279,6 +1305,20 @@ export interface Schedule {
   lastRunMs: number | null
   lastStatus: 'ok' | 'error' | 'skipped' | null
   lastError: string | null
+  /**
+   * 上次结果的那句**人话**（"今天为什么没刷 / 换了几个" ✓）。
+   *
+   * # 为什么单独一格（与 `lastError` 不是二选一的两半）
+   *
+   * `lastStatus` 只有三个词 ⇒ 说不出结果是什么：凭据自动刷新那条定时
+   * **全部账号都没到提前量**时记的是 `ok`（跳过是正常结局 ✓）、`lastError` 是空 ⇒
+   * 定时页那一行只剩一个「成功」徽章，用户看不出"到点了为什么什么都没发生" ✗。
+   * 有错误时后端写的是 `null`（错误那一段自己就把汇总说全了 ✓）⇒ 两格不会同时有话说 ✓。
+   *
+   * ⚠ 后端**没有** `skip_serializing_if` ⇒ 这一格总是在（成功/跳过时是那句人话、
+   * 有错或从未触发时是 `null` ✓）。渲染处仍按"空就不显示"处理 ✓。
+   */
+  lastNote: string | null
   runCount: number
   /** 下次触发时间。**未启用时为 null** —— 给一个就是在骗人。 */
   nextFireAt: number | null

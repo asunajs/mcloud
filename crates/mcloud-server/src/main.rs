@@ -1,6 +1,6 @@
 //! mcloud 入口：**一个二进制，两种用法**。
 //!
-//! * **不带参数** ⇒ 起 HTTP 服务（原 `mcloud-server`）
+//! * **不带参数** ⇒ 起 HTTP 服务（原 `mcloud-server`）；**`mcloud serve` 等价** ✓
 //! * **带子命令** ⇒ 命令行（原 `mcloud-cli`，逻辑在 `mcloud_server::cli::run`）
 //!
 //! # 为什么合并（2026-10-03 用户口径：「合并为一个，以后就叫 mcloud」）
@@ -12,25 +12,33 @@
 //!
 //! ⚠ 分发规则刻意定成「**无参数 = 起服务**」：托管（launchd）那份就是不带参数跑的，
 //! 而 CLI 的用法文本本来就写着 `mcloud <命令>` ⇒ 两条路都自然 ✓。
-//! 反过来（要求 `mcloud serve`）会让托管方那条命令行也得改，且与既有文档不一致 ✗。
+//! 2026-10-11 用户口径补了一条：**`serve` 是这条路的显式写法**
+//! （「**`mcloud serve` 为 webui 命令，简写为 `mcloud`**」✓）⇒ 认它 ✓，但**不要求**任何人
+//! 改命令行 —— 不带参数照旧起服务 ✓（托管那份一个字都不用动 ✓）。
+//! ⚠ 判据只有一份，在 `cli::run::dispatch` 里 ✓；这里**不复制**启动逻辑 ✗
+//! （`serve` 与不带参数走的是**同一个** `serve()` ✓）。
 
 use std::sync::Arc;
 
 use anyhow::Context;
+use mcloud_server::cli::run::Dispatch;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // ⚠⚠ 分流**只有这一处判据**（`cli::run::dispatch` ✓）：它同时回答
+    // "日志默认值取哪档"与"走哪个入口函数"，两件事不会分叉 ✓。
+    let mode = mcloud_server::cli::run::dispatch(args);
+
     // ⚠ 两条路的**日志默认值保持各自原样**（合并前 server 与 cli 各有一份）：
     //   服务要 `mcloud=debug`（调度/任务那些才看得见），CLI 只要 `info`
     //   —— 后者是命令输出，塞 debug 日志进去会把结果淹掉 ✗。
     // `RUST_LOG` 仍然优先（两条路都是 `try_from_default_env`）。
-    let default_filter = if args.is_empty() {
-        "info,mcloud=debug"
-    } else {
-        "info"
+    let default_filter = match mode {
+        Dispatch::Serve => "info,mcloud=debug",
+        Dispatch::Cli(_) | Dispatch::BadServeArg(_) => "info",
     };
     // ⚠ 从 `fmt().init()` 换成"registry + 两个 layer"：**stdout 那份输出一个字不变** ✓
     // （`fmt::layer()` 就是原来的默认格式化 ✓），只是**多挂一层**把事件抄进
@@ -46,10 +54,12 @@ async fn main() -> anyhow::Result<()> {
         .with(mcloud_server::logbuf::RingLayer)
         .init();
 
-    if args.is_empty() {
-        serve().await
-    } else {
-        mcloud_server::cli::run::run(&args).await
+    match mode {
+        // **不带参数** 与 **`serve`** 都到这里 —— 同一个函数，不是两份启动逻辑 ✓
+        Dispatch::Serve => serve().await,
+        Dispatch::Cli(args) => mcloud_server::cli::run::run(&args).await,
+        // `serve` 后面跟了不认识的东西 ⇒ 报错 + 用法 + 退 2（文案在 `cli::run` 里 ✓）
+        Dispatch::BadServeArg(arg) => mcloud_server::cli::run::bad_serve_arg(&arg),
     }
 }
 

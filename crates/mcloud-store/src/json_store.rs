@@ -1742,6 +1742,20 @@ impl mcloud_core::ScheduleStore for JsonStore {
         }
         Self::persist_schedules(&db, self)
     }
+
+    /// **窄写**：只记「上次结果」那句人话说明（`Schedule::last_note` ✓）。
+    ///
+    /// 为什么与 `record_schedule_run` 分成两写：见 trait 那边那条说明
+    ///（并进去要改二十来处假 store 的签名 ✗）。
+    /// 语义与它**逐字相同**：`None` ⇒ **显式清空**（不是"不动" ✓）——
+    /// 结论换了却留着上一趟的说明，就是"成功旁边挂着旧错误"那一类形态 ✓。
+    async fn record_schedule_note(&self, id: &ScheduleId, note: Option<&str>) -> Result<()> {
+        let mut db = self.write()?;
+        if let Some(sl) = db.schedules.iter_mut().find(|s| &s.id == id) {
+            sl.last_note = note.map(str::to_string);
+        }
+        Self::persist_schedules(&db, self)
+    }
 }
 
 // ── 编排 ────────────────────────────────────────────────────────────────

@@ -229,6 +229,7 @@ pub fn default_schedule(owner: Option<crate::user::UserId>) -> crate::schedule::
         last_run_ms: None,
         last_status: None,
         last_error: None,
+        last_note: None,
         run_count: 0,
     }
 }

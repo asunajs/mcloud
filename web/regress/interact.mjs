@@ -20,7 +20,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { appSubtree, arg, gotoJs, openSession, readVariant, routeUrl, serve, sleep } from './lib.mjs'
+import { appSubtree, arg, gotoJs, openSession, readVariant, routeUrl, serve, sleep, VARIANTS } from './lib.mjs'
 
 const variant = readVariant()
 const only = arg('--only', '')
@@ -109,6 +109,22 @@ const pickOption = (sel, value) =>
      return document.querySelector(${JSON.stringify(sel)}).dataset.value;
    })()`
 const go = (route) => gotoJs(route)
+
+/**
+ * 夹具的**失败注入**开关（`lib.mjs::__inject` ✓）—— `pre` 钩子用它 ✓。
+ *
+ * 起手先把容器挂上去：`serve()` 是**按请求现读** `overrides.__inject` 的，而
+ * `overrides` 就是 `VARIANTS[variant]` 这个对象本身 ⇒ 之后每一步都能换掉它 ✓。
+ * 挂的是**当前变体**那一份（`ready` 与 `login` 各自独立 ✓）。
+ *
+ * ⚠ 为什么不用"在页面里换掉 `window.fetch`"这种省事的写法：那样测的是**我们自己
+ * 造的桩**，量不到"浏览器真抛的那句英文" ✗（本仓在"装置测不到 = 没测"上栽过 ✓）。
+ * 只有 `{ drop: true }`（真拆 socket ✓）才等于用户遇到的"服务没起 / 正在重启" ✓。
+ */
+VARIANTS[variant].__inject = {}
+const setInject = (map) => {
+  VARIANTS[variant].__inject = map
+}
 
 /** 向导里那两个口令框（setup 态下 `autocomplete` 撞车，只能按序号取，见 `typeNth`）。 */
 const PWDS = '#app input[type="password"]'
@@ -846,6 +862,34 @@ const STEPS = {
         'true/true',
       ),
     },
+    {
+      // ⭐⭐ **自动定时的"跳过原因"必须在定时页上看出来**（2026-10-11 用户口径）。
+      //
+      // 全跳过时后端记的是 `ok`（跳过是**正常结局**，不是失败 ✓）、`lastError` 是空 ⇒
+      // 那一行只剩一个「成功」徽章，**用户看不出"今天为什么没刷"** ✗
+      //（那句人话原先只进服务端日志 ✗）。补的是 `lastNote`
+      //（`crates/mcloud-app/src/auth_refresh_auto.rs::note_of` ✓，夹具照它的产物逐字写 ✓）。
+      //
+      // ⚠ 判据取**渲染出来的那句话本身**（`未到提前量，跳过（还剩 12 天）` ✓）——
+      //   不是"有反应"，也不是"整页文本里有这几个字"✗：后者在
+      //   "那句话长到别的行上"时照样绿（上面那条「系统维护」的注释里记过同一条教训 ✓）。
+      // ⚠ 宽屏（`table tbody tr`）与窄屏（`.grid > .card`）是**两套 DOM 各画一遍** ⇒
+      //   两边都判：只画在卡片上的话，本脚本默认的 1280（走表格那一支）**永远量不到** ✗。
+      name: '定时页：全跳过的那条定时把「未到提前量，跳过（还剩 12 天）」画在那一行上',
+      do: null,
+      check: eq(
+        `(() => {
+           const NOTE = '未到提前量，跳过（还剩 12 天）'
+           const row = [...document.querySelectorAll('#app table tbody tr')]
+             .find((r) => r.textContent.includes('凭据自动刷新'))
+           const card = [...document.querySelectorAll('#app .grid > .card')]
+             .find((c) => c.textContent.includes('凭据自动刷新'))
+           if (!row || !card) return 'no-host'
+           return [row.textContent.includes(NOTE), card.textContent.includes(NOTE)].join('/')
+         })()`,
+        'true/true',
+      ),
+    },
 
     // ── 定时页：目标里要有「编排」（用户口径 2026-10-11）────────────────────────
     //
@@ -1111,7 +1155,12 @@ const STEPS = {
            const rows = [...document.querySelectorAll('#app table tbody tr')]
            return [rows.length, rows.filter((r) => r.textContent.includes('晚间编排')).length].join('/')
          })()`,
-        '2/0',
+        // ⚠ 原来写的是 `2/0`：装置那份定时表本来两条（`SCHEDULE` + `AUTO_SCHEDULE` ✓），
+        // 删掉刚建的那条 ⇒ 回到 2 ✓。2026-10-11 装置里**加了第三条**
+        // （`REFRESH_SCHEDULE` = 那条「凭据自动刷新」定时，见 `lib.mjs` 的说明 ✓）
+        // ⇒ 同样的动作现在是 4 → 3 ✓。**判据没变**（"删掉的那条不见了、
+        //  其余一条不少" ✓），变的只是装置里原本有几条 ✓。
+        '3/0',
       ),
       changed: true,
     },
@@ -3732,6 +3781,118 @@ const STEPS = {
       changed: true,
     },
 
+    // ── 「连不上后端」必须是中文（2026-10-11 用户截图指出 ✗）──────────────────────
+    //
+    // 用户原话：「我觉得应该改成中文提示，说明是无法连接后端」✓。
+    // 那句 `Failed to fetch` **不是我们写的** —— 它是**浏览器**在 `fetch` 传输层失败时
+    // 抛的 `TypeError` 的 message（服务没起 / 正在重启 / 网线断了都是它 ✓），
+    // 原先被 `api.ts::request` 原样透出、页面又原样渲染 ⇒ 用户看到一句英文 ✗。
+    // 修法在**唯一那一处**（`web/src/api.ts` 的 catch ✓）：中文主文案 + 原始错误进控制台 ✓。
+    //
+    // ⚠ 复现必须**真断开**（`{ drop: true }` 把 socket 拆掉 ✓，见 `lib.mjs::__inject`）：
+    //   回个 502 之类**不是**同一件事 —— 那会走 HTTP 错误那条路，测错分支 ✗。
+    // ⚠ 判据取**渲染出来的文字**：中文那句要在、裸的 `Failed to fetch` 一个字都不许在 ✓
+    //   （"界面有反应"不算 —— 那句话必须真的是中文的 ✓）。
+    // ⚠ 走 navbar 那个「刷新当前页」按钮**重跑这一页的 `load()`**，而不是 `location.reload()`：
+    //   ① 路由**有缓存**（`app.tsx::routeCache` ✓）⇒ 切回看过的页**不会**重新发请求，
+    //      那样这条断言量的是上一次的好状态 ✗；
+    //   ② 整页重载会让下一条 `cdp.eval` 撞上"执行上下文已销毁" ✗
+    //   （口径：能走页面自己的动作就别造导航 ✓）。
+    // ⚠ 位置：放在**登出那一段之前** —— 登出是破坏性的（外壳会拆掉 ✓），
+    //   这两条要在"还登录着"的时候跑 ✓。
+    { name: '任务中心：切过去（这时后端还是好的）', do: go('tasks'), check: eq('location.pathname', '/tasks'), changed: true },
+    {
+      name: '任务中心：后端连不上 ⇒ 红条是中文「无法连接后端服务（服务可能未启动或正在重启）」',
+      pre: () => setInject({ 'GET /api/capabilities': { drop: true } }),
+      do: clickSel('[aria-label="刷新当前页"]'),
+      check: eq(
+        `(() => {
+           const t = ${APP_TEXT}
+           return [t.includes('无法连接后端服务（服务可能未启动或正在重启）'), t.includes('Failed to fetch')].join('/')
+         })()`,
+        'true/false',
+      ),
+      changed: true,
+    },
+    {
+      // ⚠ 反向：HTTP 错误**照旧**显示后端那句话（本来就是中文 ✓）——
+      // 这条是防"一刀切"的：把 5xx 也说成"连不上后端"就把"后端拒绝了这次请求"
+      // 和"后端不在"抹平了，用户下一步的动作完全不同 ✗。
+      name: '任务中心：HTTP 500 ⇒ 显示的**仍是后端那句话**（不是「无法连接后端服务」✗）',
+      pre: () =>
+        setInject({
+          'GET /api/capabilities': {
+            status: 500,
+            body: { error: '后端内部错误（夹具）：签到模块炸了', code: 'boom' },
+          },
+        }),
+      do: clickText('button', '重试'),
+      check: eq(
+        `(() => {
+           const t = ${APP_TEXT}
+           return [t.includes('后端内部错误（夹具）：签到模块炸了'), t.includes('无法连接后端服务')].join('/')
+         })()`,
+        'true/false',
+      ),
+      changed: true,
+    },
+    {
+      name: '收尾：夹具恢复正常 ⇒ 这一页也回到正常（红条消失、任务分组回来）',
+      pre: () => setInject({}),
+      do: clickText('button', '重试'),
+      check: eq(
+        `(() => {
+           const t = ${APP_TEXT}
+           // ⚠ 判"恢复正常"用**分组 tab 在不在**，不用某一组的具体任务名：
+           // 任务页一次只显示一组（上面切过 tab ✓），钉某个任务名就等于把
+           // "当时选的是哪一组"也钉进去了 —— 那是另一个功能的事 ✗。
+           const tabs = document.querySelectorAll('#app [role="tab"]').length
+           return [t.includes('无法连接后端服务'), t.includes('后端内部错误（夹具）'), tabs > 0].join('/')
+         })()`,
+        'false/false/true',
+      ),
+      changed: true,
+    },
+    {
+      // ⚠ 用户截图里**弹窗**也是英文 ⇒ 弹窗那条路也要有钉子（`showError` 那条 ✓）。
+      // 它和红条走的是**同一个**字符串化点（页面把 `e.message` 交给 `showError` ✓），
+      // 所以两处一起量才等于"用户看到的那两处都翻了" ✓。
+      name: '任务中心：点「运行」时连不上 ⇒ 错误弹窗里也是中文',
+      pre: () => setInject({ 'POST /api/runs': { drop: true } }),
+      do: `(() => {
+        // 账号那一格没勾的话 run() 会被**本地**拦下（「请先选择账号」✗，压根不发请求）
+        // ⇒ 先勾上「全部账号」（面板第 0 项，见 ui/account-picker.tsx ✓）。
+        // ⚠ 这段在模板字符串里 ⇒ **绝不能出现反引号**（文件开头那条 ⚠ 就是这个坑 ✗）。
+        const picker = document.querySelector('#account-picker')
+        if (!picker) throw new Error('找不到账号选择器')
+        picker.click()
+        const all = document.querySelectorAll('.select-panel .select-option')[0]
+        if (!all) throw new Error('面板里没有「全部账号」那一行')
+        if (all.getAttribute('aria-selected') !== 'true') all.click()
+        const btn = [...document.querySelectorAll('#app button')].find((b) => b.textContent.trim() === '运行')
+        if (!btn) throw new Error('找不到「运行」按钮')
+        btn.click()
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const d = document.getElementById('error-dialog')
+           if (!d || !d.hasAttribute('open')) return '没有弹窗'
+           const t = d.textContent
+           return [t.includes('无法连接后端服务（服务可能未启动或正在重启）'), t.includes('Failed to fetch')].join('/')
+         })()`,
+        'true/false',
+      ),
+      changed: true,
+    },
+    {
+      name: '收尾：关掉弹窗 + 夹具恢复正常（后面的步骤照常）',
+      pre: () => setInject({}),
+      do: clickText('#error-dialog .modal-action button', '知道了'),
+      check: eq('document.querySelectorAll("dialog[open]").length', 0),
+      changed: true,
+    },
+
     /**
      * ⚠ 登出确认放在**最后**：它是破坏性的（确认后应用回到登录页），
      * 放在中间会让后面每一步都找不到元素。第一版就踩了：18 步"两侧一致"，
@@ -3822,6 +3983,40 @@ const STEPS = {
         'true/true',
       ),
     },
+    {
+      // ⚠ 与 `ready` 档那三条同一个理由，但这一档量的是**登录页**（用户问的
+      // 「别的页面是不是也一样」✓）：全站只有**一个** `fetch` 调用点
+      //（`web/src/api.ts::request` ✓）⇒ 一处改完全站生效 ✓，这条就是它的证据。
+      // ⚠ 同一句中文必须**两处都在**（按钮上方那句 + toast ✓ —— 那是本仓的口径：
+      // "弹窗优先 + 就近"✓），且裸英文一处都不许有 ✓。
+      name: '登录页：后端连不上 ⇒ 内联 + toast 都是中文（不是 Failed to fetch）',
+      pre: () => setInject({ 'POST /api/session': { drop: true } }),
+      // ⚠ 必须先**把口令填回去**：上一步（口令错）的 `catch` 会把口令框清空
+      //（`auth-page.tsx` ✓），空口令会被**本地校验**拦在请求之前
+      //（`localError()` 的「请填写口令」✓）⇒ 那样压根没发出请求，
+      // 这条断言就变成了"测本地校验"，而不是"测连不上后端" ✗（实测踩到）。
+      do: `(() => {
+        const el = document.querySelector('#app input[type="password"]')
+        if (!el) throw new Error('找不到口令框')
+        el.value = 'any-pass'
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+        const btn = [...document.querySelectorAll('#app button')].find((b) => b.textContent.trim() === '登录')
+        if (!btn) throw new Error('找不到登录按钮')
+        btn.click()
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const ZH = '无法连接后端服务（服务可能未启动或正在重启）'
+           const inline = (document.getElementById('app')?.textContent ?? '').includes(ZH)
+           const toast = [...document.querySelectorAll('#app .toast .alert')].map((x) => x.textContent).join('|')
+           return [inline, toast.includes(ZH), (document.getElementById('app')?.textContent ?? '').includes('Failed to fetch')].join('/')
+         })()`,
+        'true/true/false',
+      ),
+    },
+    { name: '登录页：夹具恢复（后面的步骤照常）', pre: () => setInject({}) },
     { name: '填对口令', do: typeNth(PWDS, 0, 'right-pass'), check: eq(nthValue(PWDS, 0), 'right-pass') },
     { name: '提交成功 ⇒ 闸门放行（外壳出现）', do: clickText('button', '登录'), check: eq('!!document.querySelector("#app .dock")', true), changed: true },
     { name: '放行后：切到账号页', do: go('accounts'), check: eq('location.pathname', '/accounts'), changed: true },
@@ -3934,6 +4129,20 @@ try {
      * 最后按"有几步没过"退出。那比"跑到第 20 步炸了、前面 19 步的结论全丢"有用。
      */
     const problems = []
+    /**
+     * ⚠ `pre`：**Node 侧**的动作（拨夹具开关），在 `do` 之前跑 ✓。
+     *
+     * `do` 是**在页面里**求值的字符串 ⇒ 它够不到夹具服务（`web/regress/lib.mjs`）；
+     * 而"这一条路由现在连不上 / 回 500"这种前置条件只能在夹具那边造 ✓。
+     * 2026-10-11 加（"连不上后端必须是中文"那两条钉子要用 ✓）。
+     */
+    if (step.pre) {
+      try {
+        await step.pre()
+      } catch (e) {
+        problems.push(`这步的夹具开关没拨成：${firstLine(e)}`)
+      }
+    }
     if (step.do) {
       try {
         await session.cdp.eval(step.do)

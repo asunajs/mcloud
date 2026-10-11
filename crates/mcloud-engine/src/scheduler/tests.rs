@@ -30,6 +30,7 @@ fn schedule(expr: &str, last_fire_ms: Option<i64>) -> Schedule {
         last_run_ms: None,
         last_status: None,
         last_error: None,
+        last_note: None,
         run_count: 0,
     }
 }

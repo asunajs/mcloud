@@ -331,6 +331,9 @@ const SCHEDULE = {
   lastRunMs: 1790581009200,
   lastStatus: 'ok',
   lastError: null,
+  // 手建的定时：这一格**恒为 `null`**（只有「凭据自动刷新」那条写它 ✓，
+  // 见 `crates/mcloud-app/src/auth_refresh_auto.rs` 的 `note_of` ✓）
+  lastNote: null,
   runCount: 12,
   nextFireAt: 1790667400000,
   // 绑了一条（**已停用**的）规则：编辑弹窗里那一格要显示它、并标出「已停用」✓
@@ -366,6 +369,7 @@ const AUTO_SCHEDULE = {
   lastRunMs: null,
   lastStatus: null,
   lastError: null,
+  lastNote: null,
   runCount: 0,
   // ⚠ 与 `/api/live-room/auto-schedule` 那份 `at`（`AUTO_LIVE_AT` = 2026-10-08 11:00:00
   // 东八区 ✓）**必须是同一刻**：两处读的是同一条定时（`expr` 也照它写 ✓）——
@@ -374,6 +378,51 @@ const AUTO_SCHEDULE = {
   pushRules: [],
   pushEvents: [],
   managedBy: 'live-auto',
+  managedWanted: true,
+}
+
+/**
+ * 那条「**凭据自动刷新**」定时（`auto-auth-refresh-<owner>` ✓，每个用户开箱就有 ✓）。
+ *
+ * # 为什么装置里非要有一条它（2026-10-11）
+ *
+ * 它**全跳过**时后端记的是 `lastStatus: "ok"`（跳过是正常结局 ✓）、
+ * `lastError: null` ⇒ 光看徽章是「成功」，**看不出"今天为什么没刷"** ✗。
+ * 补的那一格是 `lastNote`（`crates/mcloud-app/src/auth_refresh_auto.rs` 的 `note_of` ✓），
+ * 界面上必须**真的把那句话画出来** ✓ —— 而"画没画出来"只有装置里有一条带这格的
+ * 定时才量得到（本仓在"装置测不到 = 没测"上栽过 ✗）。
+ *
+ * ⚠ `lastNote` 照 `note_of` 对**一个账号、还剩 12 天**的产物逐字写
+ *（`未到提前量，跳过（还剩 12 天）` ✓）—— 自己编一句的话，
+ * 门禁钉住的就是装置、不是后端 ✓。
+ *
+ * ⚠ `task` 是 `auth-refresh`：它**不是**注册表里的任务（见 `mcloud_core::AUTH_REFRESH_TASK` ✓）
+ * ⇒ 这一页照原样显示这个任务名（与真后端一样 ✓），不是夹具写错了 ✗。
+ */
+const REFRESH_SCHEDULE = {
+  id: 'auto-auth-refresh-u-1',
+  name: '凭据自动刷新',
+  task: 'auth-refresh',
+  // 空 = 该用户**全部已启用账号**（`Schedule::accounts` 的既有语义 ✓）
+  accounts: [],
+  // 每天 03:00（东八区墙钟 ⇒ 6 段表达式 ✓，与 `daily_expr` 的产物同形 ✓）
+  expr: '0 0 3 * * *',
+  timezone: 'Asia/Shanghai',
+  body: {},
+  enabled: true,
+  lastFireMs: 1790581000000,
+  // ⚠ 凭据刷新**不产生 `RunRecord`** ⇒ `lastRunMs` 恒为 `null`（后端传 `None` ✓）：
+  // 界面上「上次执行」显示成"从未执行"是**对的**，真实结论在 `lastStatus`/`lastNote` 上 ✓
+  //（照真后端写，别为了好看编一个时刻 ✗）。
+  lastRunMs: null,
+  lastStatus: 'ok',
+  lastError: null,
+  lastNote: '未到提前量，跳过（还剩 12 天）',
+  runCount: 7,
+  nextFireAt: 1790672400000,
+  pushRules: [],
+  pushEvents: [],
+  managedBy: 'auth-refresh',
   managedWanted: true,
 }
 
@@ -641,7 +690,7 @@ const liveAutoView = () => {
 const schedState = { schedules: [] }
 const resetSchedState = () => {
   // 深拷贝：`body` / `accounts` / `pushRules` 都是嵌套的 ⇒ 浅拷贝会让夹具与断言共享引用 ✗
-  schedState.schedules = JSON.parse(JSON.stringify([SCHEDULE, AUTO_SCHEDULE]))
+  schedState.schedules = JSON.parse(JSON.stringify([SCHEDULE, AUTO_SCHEDULE, REFRESH_SCHEDULE]))
 }
 /** 新建一条时服务端**自己**补的那几格（`nextFireAt` 由服务端算 ✓，别让页面猜 ✗）。 */
 const schedDefaults = (id) => ({
@@ -650,6 +699,10 @@ const schedDefaults = (id) => ({
   lastRunMs: null,
   lastStatus: null,
   lastError: null,
+  // ⚠ 这一格照真后端写（`Schedule` 那一列没有 `skip_serializing_if` ⇒ **总是在** ✓）：
+  // 少一格的表现是页面读成 `undefined` —— 而"空就不显示"恰好把它兜住了 ✗
+  // ⇒ 装置里少了它，页面渲染得**看不出来**（那正是"装置测不到 = 没测" ✗）。
+  lastNote: null,
   runCount: 0,
   // 与 `SCHEDULE` 同一个值：装置里"下次执行"是个**固定**时刻，
   // 用 `Date.now()` 会让每次跑门禁渲染出来的东西都不一样 ✗
@@ -873,7 +926,7 @@ export const FIXTURES = {
       },
     },
   ],
-  '/api/schedules': [SCHEDULE, AUTO_SCHEDULE],
+  '/api/schedules': [SCHEDULE, AUTO_SCHEDULE, REFRESH_SCHEDULE],
   '/api/pipelines': [PIPELINE, PIPELINE2],
   '/api/accounts': [ACCOUNT, ACCOUNT2],
   /**
@@ -1366,6 +1419,32 @@ export const serve = (root, port, variant) =>
     const server = http.createServer((req, res) => {
       const url = (req.url ?? '/').split('?')[0]
       const key = `${req.method} ${url}`
+      /**
+       * ⚠⚠ `overrides.__inject`：**按路由注入一次失败**（不是路由 ⇒ `overrides[key]`
+       * 永远查不到它 ✓，与 `__sseLogs` 同一套保留键手法 ✓）。
+       *
+       * 键是 `"METHOD /path"`，值两种：
+       * * `{ drop: true }` —— **传输层直接断开**（不写任何响应，`destroy` 掉 socket ✓）：
+       *   浏览器那边就是 `TypeError: Failed to fetch` ✓。**只有这条路**能复现
+       *   "服务没起 / 正在重启"（在页面里把 `window.fetch` 换掉测的是我们自己的桩 ✗）；
+       * * `{ status, body }` —— 照 `VARIANTS` 那条形状回一份错（例如 500 + 后端那句话 ✓）。
+       *
+       * ⚠ 开关是**按请求现读**的 ⇒ 脚本可以在**跑到一半**改它（`interact.mjs` 的
+       * `pre` 钩子 ✓）。这是"连不上后端"与"HTTP 500 各显示什么"那两条钉子
+       * 唯一能复现的地方 —— 前端那两条分支（`api.ts::request` 的 catch 与 `!ok`）
+       * 只有真造出这两种失败才走得到 ✓。
+       */
+      const injected = overrides?.__inject?.[key]
+      if (injected) {
+        if (injected.drop) {
+          // ⚠ 不写任何响应、直接拆连接：这才是浏览器眼里"连不上"的样子
+          //（回 502 之类的**不是** —— 那会走 HTTP 错误那条路，测错分支 ✗）。
+          req.socket.destroy()
+          return
+        }
+        send(req, res, injected, false)
+        return
+      }
       const override = overrides[key] ?? overrides[url]
       if (override) {
         send(req, res, override, false)
