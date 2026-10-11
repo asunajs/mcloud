@@ -4459,21 +4459,48 @@ fn login_req(body: &serde_json::Value, ua: &str) -> Request<Body> {
         .expect("请求应可构造")
 }
 
-/// 等 `spawn` 出去的投递落地（**只让出、不睡** ✓）。
+/// 等 `spawn` 出去的投递落地。
+///
+/// 先"只让出"（快机器上几乎立刻命中，不浪费一点时间）；让出若干轮还没到，就改成小睡重试，
+/// 直到 10 秒上限才判超时。
+///
+/// 为什么不能只让出：2026-10-11 实测，CI 的 runner 只有 2 核且与其它 job 抢，
+/// 固定的 3000 次 `yield_now` 可能在投递任务还没被调度到之前就耗尽，
+/// 于是报"等待推送投递超时（期望 1 枪，实际 0 枪）"—— 那是**假失败**，
+/// 让这两条计时用例在 CI 上稳定变红（本地则偶发）。
 async fn wait_push_calls(http: &CountingHttp, n: usize) {
-    for _ in 0..3000 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut yields = 0u32;
+    loop {
         if http.calls() >= n {
             return;
         }
-        tokio::task::yield_now().await;
+        if std::time::Instant::now() >= deadline {
+            panic!("等待推送投递超时（期望 {n} 枪，实际 {} 枪）", http.calls());
+        }
+        if yields < 200 {
+            yields += 1;
+            tokio::task::yield_now().await;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
-    panic!("等待推送投递超时（期望 {n} 枪，实际 {} 枪）", http.calls());
 }
 
-/// 给 `spawn` 出去的任务一点时间，然后断言**没有新增** ✓。
+/// 给 `spawn` 出去的任务一点时间，然后断言**没有新增**。
+///
+/// 与 `wait_push_calls` 同理：只让出在慢机器上可能还没轮到那个任务，
+/// 于是"没新增"变成**假通过**。这里同样先让出、再小睡，把窗口撑到 1 秒。
 async fn settle_push() {
-    for _ in 0..500 {
-        tokio::task::yield_now().await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let mut yields = 0u32;
+    while std::time::Instant::now() < deadline {
+        if yields < 200 {
+            yields += 1;
+            tokio::task::yield_now().await;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
 }
 
