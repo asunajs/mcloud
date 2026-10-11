@@ -211,8 +211,6 @@ jobs:
             target: x86_64-pc-windows-msvc
             name: Windows x86_64
             cross: false
-            name: macOS arm64
-            cross: false
     steps:
       - uses: actions/checkout@v4
 
