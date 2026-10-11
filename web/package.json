@@ -1,6 +1,6 @@
 {
   "name": "mcloud-web",
-  "version": "3.0.0-rc.4",
+  "version": "3.0.0-rc.5",
   "private": true,
   "type": "module",
   "description": "mcloud WebUI —— lite 框架（无虚拟 DOM + 编译期优化，已剥离到 asunajs/lite）+ TSX + Tailwind 4（@theme 令牌层）",
