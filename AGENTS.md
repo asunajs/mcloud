@@ -342,6 +342,19 @@ grep -o '^| [0-9]*' docs/task-log.md | grep -o '[0-9]*' | sort -n | tail -1
 - 服务端口用环境变量 `MCLOUD_ADDR`（默认 `127.0.0.1:3000`），数据目录 `MCLOUD_DATA_DIR`
   （⚠ 不是 `MCLOUD_DATA`）；`PORT` 环境变量**被忽略**
 - macOS 没有 `timeout` 命令；SSH 用 `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=20"`
+- **Docker 支持（2026-10-10 加）**：`Dockerfile`（多阶段：web → 静态 musl 二进制 → alpine 运行时）
+  + `.dockerignore` + `docker-compose.yml` + `.github/workflows/docker.yml` + `docs/docker.md`。
+  ⚠⚠ **本机没有 `docker` 命令**（`which docker` 为空）⇒ 改了这一层**本地跑不了 `docker build`**，
+  唯一能真验的是手动触发那条 workflow：`gh workflow run docker.yml`（构建 + 起容器 + 打
+  `/api/health`，**不推送**）。别把"文档写完了"当成"验过了" —— 没验就写没验（`docs/docker.md` §13）。
+  两条容易踩的静态坑：`rust-embed` 要 `web/dist` 在 `cargo build` **之前**就位；
+  `target/` 是 cache mount（不是镜像层）⇒ 二进制必须在**同一条 `RUN`** 里拷出去。
+  ⚠ **架构是 arm64 + amd64 两份都要**（用户口径「arm/amd」）：Dockerfile **不含架构判断**
+  （在哪个架构上编就出哪个），CI 用**每个架构各一台原生 runner**（`ubuntu-latest` /
+  `ubuntu-24.04-arm`）各编一份 + **各自断言 `Architecture`** + 合并清单 + 拉回来再冒烟 ⇒
+  **别改成 QEMU 单机多平台**（`lto="fat"` + vendored OpenSSL 在模拟下慢到不可用 ✗）；
+  **arm = arm64，不含 32 位 armv7**（`crates/mcloud-upstream/Cargo.toml` 里只给两条 musl
+  目标开了 vendored）。
 - **要测试账号 / 多用户场景**（2026-10-06 加）：
   `mcloud user list` / `mcloud user add <名字> <口令>` / `mcloud user passwd <名字> <新口令>`。
   空实例上第一条 `add` 建的就是**管理员**（= 不必再走 WebUI 初始化向导 ✓）；之后加的都是
@@ -423,6 +436,16 @@ grep -o '^| [0-9]*' docs/task-log.md | grep -o '[0-9]*' | sort -n | tail -1
 > ⚠⚠ 但**"没有抓包"不是不做的理由** —— 用户同日另一句原话：
 > 「**你之前是抓包没有实拍你就拒绝编码，但是 ts 是有实现的**」⇒
 > **TS 有实现就照 TS 写** ✓；只有真写不了的分支才留空，且必须注明为什么。
+
+### ⚠⚠ 抓包前必须确定账号（2026-10-11 用户口径）
+
+**用户原话：「记住抓包前需要确定账号」。** 开抓前钉住这次是**哪个号**；
+**读 `state` / 下结论的那个号必须与抓包的号一致** ✓。取证从 HAR 里搜：
+邮件收件人 `to:"<号>@139.com"` ✓、`uin` ✓、`rmkey` ✓（`userNumber` 多为密文 ✗）。
+⚠ **不许默认**"抓包号 = 我一直在测的那个号" ✗ —— 2026-10-11 就是栽在这上面：
+用户在小号（159****7542）上真机把 1029 做成了（面板「已完成」✓），
+agent 却读**移动**（178****4979）的列表、写下"两趟走完都没翻账"的**错结论** ✗。
+细则：`../mcloud-capture/docs/capture-guidelines.md` §1.4 ✓。
 
 ### 连带一条教训：**别把 TS 的严格判据抄宽**（2026-10-09 实拍事故）
 

@@ -47,25 +47,26 @@
 | 113 | 使用PC客户端 | ✅ 已实现：上传·单件，但**按 PC 档发**（`channelSrc=10200153` ✓） | `UPLOAD_ONE_PC`（`upload_shape_for()`，`channel: CloudChannel::Pc` ✓）；渠道头 `app_cloud_upload::cloud_file_op_headers()`（**2026-10-04 加**，见 §5-7） | ✅ 单测 2 处（形状✓）+ 运行级 1 条（**逐枚头断言** PC 档的 4 枚 + 断言安卓档那 2 枚**缺席** ✓，退回安卓档即红 ✓） | ☑ **已验收**（run 108，2026-10-04 20:07，测试号 `onlyTaskIds=113`：`clicked:true` ✓ `uploaded:1` ✓ `problems:[]` ✓ ⇒ run 109 矩阵 **`WAIT` → `FINISH`**、`currStep 0 → 3` ✓，**1 分钟就入账** ✓） |
 | 118 | 调查问卷 | ✅门 判定门（上游已记完成 ⇒ 不动） | `should_click()`（判定门） | ⚠ 该 id 仅作"不在黑名单"的反例（`app_task/tests.rs:793`） | ☐ 无需人工动作 |
 | 120 | 30G流量0元领 | ⛔ 刻意不做（**与参考一致** ✓） | `SKIP_TASK_LIST` | ⚠ 仅黑名单字面量（`tests.rs:785`） | ☐ 无需人工动作 |
-| 409 | 从固定入口访问云朵中心 | ✅ 已实现：固定入口（埋点 → 停一拍 → 补一发打卡，key `task2`） | `Step::Entry` → `entry_do_task()` | ✅ 单测 4 处；真机 `{clicked:true, problems:[]}` ✓ | ☐ 跑一次看两发打卡与埋点 |
+| 409 | 从固定入口访问云朵中心 | ✅ 已实现：固定入口（**两发上报**：新 `doTaskPost` + 旧 `page/doTask`；→ 停一拍 → **两发打卡**：先 `task`（`clickTaskWithStep` 那一发）→ 补 `task2`） | `Step::Entry` → `entry_reports()` + `click_with_key()` | ✅ 单测 5 处 + 运行级 1 条（断言两发上报的市场名与两发打卡的 key ✓） | ☑ **已验收**（2026-10-10，三账号：测试 `0f6050105ab111f4` run 293 `WAIT → FINISH` ✓、移动 `b73bb07d5971e8e7` run 295 ✓；**真因见 §5-8**） |
 | 431 | 去使用移动云手机 | ❌ 未实现（两边都无 runner；**参考会打卡，本仓连打卡都不发**） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 | 434 | 分享文件领好礼（原始 name 带 HTML） | ✅ 已实现：分享本趟传上去的第一个文件、随即删外链；**手里空着就自己传一个** ✓；**成没成按"次数涨没涨"判**（`shareBefore`/`shareAfter`/`shareCounted`） | `share_first_uploaded()`；打卡门 `should_click()`；判据 `settle_share_progress` + `share_progress_from_name`；**计划里排末尾**（`sort_by_key(task_id == 434)` ✓）（**2026-10-04 修**，见 §5-7） | ✅ 单测 18 处 + 运行级 **5 条**（打卡门正反 ✓ + 次数正反 ✓ + **顺序/补传** ✓；三条红测都验过 ✓） | ☑ **已验收**（run 104，2026-10-04 19:37，测试号 `onlyTaskIds=434`：`uploaded:1` ✓ `shared:true` ✓ `0/7 → 1/7` ✓ `shareCounted:true` ✓ `acted=1`、success、文件已收回 1/1 ✓） |
 | 522 | 当月上传文件满100个 | ✅ 已实现：上传·每趟 5 件、上限 100；**跑完报进度**（`progressBefore`/`progressAfter` + 日志一行 ✓） | `ROUNDS_PER_RUN` / `STOP_AT_PROCESS`；进度 `settle_upload()`（**2026-10-04 加**，见 §5-7） | ✅ 单测 16 处 + 运行级 **2 条**（进度正常 ✓ / 差额说明 ✓，都断言了**日志行** ✓，撤掉即红 ✓） | ☑ **已验收**（run 105/106/107，2026-10-04 19:55-19:58：日志打出 `48/100 → 52/100`、`53/100 → 58/100`、`58/100 → 63/100` ✓；明细两格同步 ✓） |
-| 547 | 加入一个知识库 | ❌ 未实现（同 431） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
+| 547 | 加入一个知识库 | ✅ 已实现：**打卡**（与 431 同档 ✓）—— 入口是 `mcloud://main/aiAssistantGlobal?params=<base64>` 深链（**取不了** ✗），打卡就当趟翻 ✓（见 §5-13） | `Step::ClickOnly`（`CLICK_ONLY_TASK_IDS` ✓） | ✅ 单测 1 条（在那一串里 ✓） | ☑ **已验收**（2026-10-11：测试 run 318 `WAIT → FINISH` ✓、移动 run 322 ✓；小号 `planned=0` ⇒ 没排进计划） |
 | 548 | 开启备份领好礼 | ❌ 未实现（⚠ 它在 `time` 组，**不是**月门那条） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 | 550 | 开启云盘APP通知领好礼 | ❌ 未实现 | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 | 551 | 连续31天开启云盘APP通知 | ❌ 未实现 | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
-| 604 | 去云盘图书馆阅读书籍 | ❌ 未实现 | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
+| 604 | 去云盘图书馆阅读书籍 | ✅ 已实现：与 1017 **同一档**（页面初始化上报 + 取入口页 + 打卡）—— 差别是入口那一格在 **`button.app.link`**（不是 `email` ✓）、且 `currstep = 0` ⇒ **不补第二发**打卡 ✓（见 §5-12） | `Step::PortalEntry` → `entry_reports()` + `portal_entry()` + ③-a 那道门自己那一发 | ✅ 单测 2 条（分档 ✓、**只打一发** ✓）+ 上游 1 条（入口页解析同 1017 ✓） | ☑ **已验收**（2026-10-10：测试 run 313 `WAIT → FINISH` ✓、移动 run 314 ✓；小号 run 315 早已 `FINISH` ⇒ 三档都在） |
 | 607 | 下月签到领惊喜福利 | ❌ 未实现 | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
-| 609 | 和AI助手对话 | ❌ 未实现（参考亦无 runner） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
+| 609 | 和AI助手对话 | ✅ 已实现：**打卡不够**（run 318 `WAIT → WAIT` ✗）⇒ 接上 **AI 对话链**（派生 AI 鉴权 → 状态查询（`taskId=609`）→ SSE 对话 → 复查 ✓）—— 真机读数钉住"翻账靠对话"：对话前 `taskStatus=0 / cloudStatus=-1`，对话后 `1 / 0` ✓（见 §5-13） | `AppRunner::AiAssistant` | ✅ 单测 1 条（映射 ✓）+ 真机读数（对话前后两格对照 ✓） | ☑ **已验收**（2026-10-11：测试 run 319 `WAIT → FINISH` ✓、移动 run 320 ✓；小号 `planned=0`） |
 | 615 | 记录国庆节欢乐瞬间 | ✅ 已实现：`beiyong1` 的**按钮门** ⇒ 一次传 **10 张 `.jpg`**（`process` 已走的先扣掉 ✓） | `beiyong1_button_gate()` / `UPLOAD_TEN`；形状四格 `rounds=10 / stop_at_process=10 / per_round_ms=300 / file_ext=".jpg"`；门读 `button_app_link`（`app_task_list_v2.rs` 的 `button_app_link`，**2026-10-04 加**，见 §5-7） | ✅ 单测 4 处（门 3 + 解析 1）+ 运行级 **2 条**（10 张 ✓ / 补差额 ✓；都断言了 `.jpg` 与**进度分母** ✓，撤门或撤"剩余量"即红 ✓） | ☑ **已验收**（run 110，2026-10-04 20:30，测试号 `onlyTaskIds=615`：`clicked:true` ✓ `uploaded:10` ✓ `problems:[]` ✓ `收回 10/10` ✓ ⇒ run 111 矩阵 **`WAIT` → `FINISH`**、已完成 3 → 4 ✓；**当场入账** ✓） |
 | 617 | 体验智能消除 | ❌ 未实现 | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 | 618 | 体验AI相机 | ❌ 未实现 | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 | 1004 | 给好友发邮件 | ❌ 未实现（参考 **`sendMailTask`**，TS `runners.ts:154-159`；Go 侧记在 `toolGaps`，`dispatch.go:490`；本仓 **mail139 整族未实现**） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
-| 1005 | 从固定入口进入云朵中心 | ✅ 已实现：固定入口（打卡 key 用默认 `task`） | `Step::Entry` → `entry_do_task()` | ✅ 单测 4 处；真机 `{clicked:true}` ✓ | ☐ 跑一次看明细 |
+| 1005 | 从固定入口进入云朵中心 | ✅ 已实现：固定入口（**两发上报**同上；打卡 key = **`task2`** —— `currstep` 恒为 1 ⇒ 上面那道"先打卡"门永远不打，所以它只发得出**一发**，那一发必须是 `task2`） | `Step::Entry` → `entry_reports()` + `click_with_key()` | ✅ 单测 5 处 + 运行级 1 条（同 409 那条一起钉 ✓） | ☑ **已验收**（2026-10-10，三账号：测试 run 294 `WAIT → FINISH` ✓、移动 run 295 ✓、小号 `9f611bba8206ca0a` run 296 ✓） |
 | 1014 | 体验“PDF转换”功能 | ❌ 未实现（参考 **`pdfConvertTask`**，TS `runners.ts:168-173`；Go `MailPDF`，`dispatch.go:422`；mail139） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
-| 1017 | 登录移动云盘云朵中心 | ❌ 未实现 | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
-| 1020 | 完成一次邮件转存 | ❌ 未实现（参考 **`backupMailTask`**，TS `runners.ts:161-166`；Go `MailBackup`，`dispatch.go:426`；mail139） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
+| 1017 | 登录移动云盘云朵中心 | ✅ 已实现：**页面初始化上报**（`doTaskPost` + 旧 `page/doTask`，`activityid` 走本条任务的市场名）+ **取入口页**（`button.email.link` 里的 `#ssoToken#` 换成真票）+ **打卡**（key = `task2`）—— 缺那一格上报时连着三趟 `WAIT → WAIT` ✗，补上就当趟翻 ✓（见 §5-11） | `Step::PortalEntry` → `entry_reports()` + `portal_entry()` + `click_with_key()` | ✅ 单测 2 条（分档 ✓、四发顺序与占位替换 ✓）+ 上游 2 条（`button.email.link` 解析 ✓、`signInCallback` 形状 ✓） | ☑ **已验收**（2026-10-10：测试 run 309 `WAIT → FINISH` ✓、移动 run 310 ✓；小号 run 311 早已 `FINISH` ⇒ 三档都在） |
+| 1020 | 完成一次邮件转存 | ✅ 已实现：**App 实拍的三发**（① `disk:getDirectorys` 拿落点目录 → ② `mbox:SearchByFidOrCondition` 拿一枚 `mid` → ③ `disk:backupMail` 转存）。⚠ 旧 TS 那条 `POST mail.10086.cn/mailsms/sms/backup` **实测 404**（那台主机上只认 `/login/inlogin.action`）⇒ 参考实现里这一条**没有活路**，形状只能来自 139邮箱 App 的字面量（见 §5-10） | `Step::Runner(AppRunner::MailBackup)` → `mail139::{cloud_directories_request, mail_search_request, backup_mail_request}` | ✅ 单测 3 条（三发形状 + 取不到 `mid` 的硬失败 + 业务码打回的硬失败）+ 上游 5 条（形状/取值器/形状提示） | ☑ **已验收**（2026-10-10：测试 run 299 `WAIT → FINISH` ✓、移动 run 300 `WAIT → FINISH` ✓；小号那条早已 `FINISH` ⇒ 三档都有） |
+| 1029 | 查看"我的账单" | ⚠ **部分实现（形状齐、读数不动 ✗）**：2026-10-11 用户在小号真机走了一趟**真的翻账了**（面板「已完成 · 第 4 步」✓）⇒ 这一族**是能做成的** ✓；照那一趟逐格复刻出 `AppRunner::BillView`（**五发**：账单页 `mobilebill.html?sendId=1000006` → `mbox:searchMessages` → `mbox:updateMessagesStatus` → `view:readMessage` → 像素 `111631/261`，外加打卡的**后半发** `visitlog/journaling` ✓），在**移动**上跑 **run 379/380/381 全 `WAIT → WAIT`** ✗ ⇒ **差的不是形状**（响应体大小逐格对得上：页面 12013 / 正文 61959 字节 ✓）。**还剩的候选**（下一轮一次只加一格）：`encryptType=1` 版 search / `getCommConfig` 带 `behaviorData=108365_66` / `disk:mailReportToMQ` / 账号侧（小号是重庆移动）。依据与实拍见 **§5-14**、**§5-16** | — | ✅ 单测（`visitlog` 2 条形状钉子 + `runners` 14 条 ✓；⚠ 旧的"断言它没有执行器"那条已随实现撤掉 ✓） | ☐ **未验收**（移动仍 `WAIT` ✓；**小号已翻 ⇒ 月限不可重试** ✗） |
 | 1021 | 连续31天开启邮箱APP通知 | ⛔ 矩阵里**不做**（**与参考一致** ✓）—— 它的真身是**另一条任务** `notice` 的**邮箱那一半**（2026-10-06 已落码 ✓，见 §5-2） | 矩阵不碰它；实现在 `crates/mcloud-tasks/src/notice.rs` + `crates/mcloud-upstream/src/app_notice.rs` | ✅ `cargo test -p mcloud-tasks --lib notice`（6 条邮箱钉子）+ `cargo test -p mcloud-upstream --lib app_notice` | ☐ 跑一次 `notice`，看明细里那条 `noticeEmail`（`day` / `canReceive` / `reported`） |
 | 1057 | 体验AI工作台 | ❌ 未实现（⚠ **参考侧也没有 runner**：TS 全仓 **0 命中 1057**；Go 只把它归成 `VerifyStillOpen`「需前往邮箱完成」（`task_matrix_report_test.go:123`，组 `cloudEmail`）⇒ 不是「漏做」） | — | ❌ 单测 0 处 | ☐ 待实现后验收 |
 
@@ -199,6 +200,333 @@
     ⚠⚠ **顺带认一个我自己造的 bug（真机抓到的）**：`progressBefore` 的分母我写成了 522 的常量 `STOP_AT_PROCESS` ⇒ 615 那一格里冒出 **`0/100`** ✗（run 110 明细实拍 ✓）。改成**按各档自己的 `stop_at_process`** 之后，615 显示 `0/10 → 10/10` ✓、522 仍是 `42/100` ✓（钉子在 `task_615_*` 两条里 ✓）。⚠ 615 已 FINISH ⇒ 那条修复**没法再真机复现**（钉子复刻的就是 run 110 的原值 ✓）。
     ⚠ **另记一条现场观察**：615 完成后，上游那一格的 `button.app.link` **没有了**（run 112 的 `buttonAppLink=None`，而同样 FINISH 的 106 仍带着 `mcloud://main/uploadView` ⇒ 是**那条任务自己的状态变化**、不是解析问题 ✓ —— 全表 15 条都读得出 link ✓）。影响：**615 之后再也没法用它真机复验这个门** ✗；但门在它 WAIT 期间确实命中过（run 110 那 10 张就是证据 ✓）。
     `cargo test -p mcloud-tasks --lib` = **451 passed / 0 failed** ✓；`cargo test -p mcloud-upstream --lib` = **724 passed / 0 failed** ✓；fmt ✓；clippy ✓。
+
+9. ✅✅ **409 / 1005 从来"没记上"的真因：打卡 key 发错了**（**2026-10-10 修，真机读数钉死**）——
+   症状是用户截图里那两行：`从固定入口访问云朵中心：本次做了，但上游状态/读数没变（状态 WAIT → WAIT）⇒ 没记上`
+   （`docs/task-log.md` 第 190 行）。
+   **真因**：旧 TS 里这一族是**两发打卡**，而两发的 key **不一样** ——
+   * `tasks.ts:19-27` 的 `clickTaskWithStep` → `clickTask(ctx, id)` ⇒ **默认 key `task`**（"先打卡"那一发，`handleTaskClick` 打的）；
+   * `runners.ts:107` 的 `await clickTask(ctx, 409, "task2")` ⇒ **`task2`**（runner 里"补的那一发"）。
+   本仓原先 `click(ctx, item)` **两处共用一个 `click_key(id)`** ⇒ 409 变成 **`task2` 打两发** ✗，
+   而"先打卡"那一发在参考实现里是 **`task`** ⇒ 上游没把它算成"进过固定入口" ⇒ 状态永远 `WAIT` ✗。
+   （`click_key()` 的注释里本来就写着"`handleTaskClick` 那发**另算**"，只是没落到代码上 ✗。）
+   **修法**：`click()` 固定走默认 key；新增 `click_with_key()`，只有 `Step::Entry` 的"补那一发"传 `click_key(id)` ✓。
+   **1005 那一格**：它 `currstep` 恒为 1 ⇒ "先打卡"那道门（`currstep == 0` 才打）**永远不打** ⇒
+   这一条只发得出**一发**；按 409 的读数（`task` → `task2` 才翻）外推，**完成那一发必须是 `task2`** ✓
+   —— 参考实现给 1005 用的是默认 key，而它在参考实现里**也没成**（`state` 停在 `WAIT`、`currstep` = 1 ✗）
+   ⇒ 这一格是**照真机读数改的**，不是照 TS 抄的 ✓。
+   **真机验收（三账号，`onlyTaskIds=409,1005`）**：
+   | 账号 | 409 | 1005 |
+   |---|---|---|
+   | 测试 `0f6050105ab111f4` | `WAIT → FINISH` ✓（run 293） | `WAIT → FINISH` ✓（run 294） |
+   | 移动 `b73bb07d5971e8e7` | `WAIT → FINISH` ✓（run 295，同趟两条都翻） | 同左 ✓ |
+   | 小号 `9f611bba8206ca0a` | 早已 `FINISH`（本轮不计划） | `WAIT → FINISH` ✓（run 296） |
+   ⇒ 三个账号、**零失败**（修之前同一批账号连着多趟都是 `WAIT → WAIT`，run 280/281/282 ✓）。
+   **顺带的两处**：① 这一族**两发上报**（新 `POST …/ycloud/signin/page/doTaskPost`（App 12.6.0 实拍）+ 旧 `GET mrp…/market/signin/page/doTask`（TS 路径，Go 探针实测回 `code 0`）），
+   `activityid` 跟着**本条任务的市场名**走（409 = `sign_in_3`、1005 = `newsign_139mail`）✓；
+   ⚠ 实测这两发**都不是**翻账的原因（修 key 之前发着也不翻）—— 它们是"照 App 的形状补齐"，别把功劳记在它们头上 ✓；
+   ② 上报那一发**按业务码判**（`SignInEnvelope` 的 `code`）而不是只看 HTTP 状态 ——
+   这一族的失败长相是 `HTTP 200 + code≠0`，而 `ensure_http_ok` 只看状态码 ⇒ 打回也当成功 ✗。
+   **测试**：`cargo test -p mcloud-tasks --lib` = **489 passed / 0 failed** ✓；`mcloud-upstream --lib` = **809 passed / 0 failed** ✓
+   （运行级新用例 `entry_tasks_report_the_page_on_both_paths_with_their_own_market` 断言两发上报的市场名 + 两发打卡的 key 顺序 ✓）。
+10. ✅✅ **1020「完成一次邮件转存」：旧 TS 那条路今天 404，活路在 App 的字面量里**（**2026-10-10 修，真机两个账号各翻一次**）——
+   **现象**：跑一趟就报 `邮箱备份请求失败：网络错误：邮箱备份（mailsms/sms/backup）失败，HTTP 404：上游回的是**网页**不是接口` ✗，
+   状态恒 `WAIT → WAIT`（用户 2026-10-10 08:00 的截图就是它）。
+   **这不是网络问题、也不是我们抄错了地址**：旧 TS 就是 `POST https://mail.10086.cn/mailsms/sms/backup?sid=`（`runners.ts:285-294`，空 JSON 体 ✓），
+   而**抓包**证明那台 `mail.10086.cn` 今天只认 `/login/inlogin.action`（同一张会话在它上面 `autologin.action` 与 `mailsms/sms/backup` 都 404，
+   在 `html5.mail.10086.cn` 上却连**写**都被认 ✓）⇒ **参考实现里这一条没有活路** ✗，照抄只会一直 404 ✓。
+   **活路（App 实拍三发）**：139邮箱 App 自己的字面量里有这一族（`-[PMCaixunInterface uploadMailToCloudWithMid:directoryId:user:onFinish:]` 与 `disk:backupMail` 同簇 ✓）：
+   ① `disk:getDirectorys`（落点目录）→ ② `mbox:SearchByFidOrCondition`（一枚邮件号 `mid`）→ ③ `disk:backupMail`（`mailIds` / `backupType` 空 / `channel=16861` / `directoryId`）。
+   主机取 **`html5.mail.10086.cn` + `/mw2/file/disk`**（**抓包**那一档：同一台同一前缀上 `disk:surplusNum`、`disk:convertPdfFromYunFile` 都被认 ✓；App 模板里的 `%@` 是运行期路由域）
+   ⇒ 这一条是**"App 字面量 + 抓包主机"的拼装**，标注在 `mail139.rs` 那一节的文档注释里 ✓。
+   ⚠⚠ **② 不能带 `encryptType=1`**（App 字面量里**有**它）：真机实测带上之后响应体是 **3296 个十六进制字符**（按客户端那一套加密回的，我们没有那把钥匙）⇒ 读不出 `mid` ✗；
+   去掉它同一个口回**可读体** ✓ —— 这一格是**两次真机读数**（run 297/298 失败 → 去掉后 run 299 成）钉下来的，不是推的 ✓。
+   **真机验收**：测试 `0f6050105ab111f4` run **299** `WAIT → FINISH` ✓、移动 `b73bb07d5971e8e7` run **300** `WAIT → FINISH` ✓；
+   小号 `9f611bba8206ca0a` 这一条早已 `FINISH`（run 301 直接跳过 ✓）⇒ **三档读数都在** ✓。
+   **测试**：`cargo test -p mcloud-tasks --lib` = **491 passed / 0 failed** ✓；`mcloud-upstream --lib` = **814 passed / 0 failed** ✓
+   （新增：三发形状 ✓、取不到 `mid` 时**把体的键名形状**带进失败明细 ✓、业务码打回算硬失败 ✓、`first_field` 两种形状都收且取不到不猜 ✓）。
+
+11. ✅✅ **1017「登录移动云盘云朵中心」：缺的是"页面初始化上报"那一发**（**2026-10-10 修，真机两个账号各翻一次**）——
+   **现象**：这一条在旧表里是"❌ 未实现"（它属于 §5-1 说的"判不出形状的 17 条"之一：本仓连打卡都不发 ✗），
+   面板上写着「福利同步，探索更多任务」、`newsign_139mail` / `month` / 第 1 步 / `state=WAIT`。
+   **先按 TS 试打卡（都不成）**：TS 的分派里它**会被打卡**（不在 runner 表、也不在 `SKIP_TASK_LIST`
+   ⇒ 落到 `tasks.ts:101-103` 的 `clickTask(ctx, task.id)` ✓），于是先加进 click-only 试了两档 key：
+   **默认 `task` → `WAIT → WAIT` ✗（run 302）**、**`task2` → 还是 `WAIT → WAIT` ✗（run 303）**
+   ⇒ 打卡这一格不是答案（这一条与 409/1005 的"key 发错"**不是同一类** ✗）。
+   **拿到原始条目之后才看清形状**（临时取证，见下）：它的 `button` 里是
+   **`button.email.link`**（**不是** `button.app.link` ✗）——
+   `https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&sourceid=1179&enableShare=1&targetSourceId=001005&token=#ssoToken#`，
+   且 `stepTypeSet = ["sendcloud","click","interfacecallback"]`、`currstep = 1` ⇒
+   与 409/1005 同族（"进云朵中心"），但**入口是一张能直接取的 http 页**（那两条是 `mcloud://` 深链，取不了 ⇒ 只能发上报 ✓）。
+   **修法（四发固定顺序）**：① **页面初始化上报**（`doTaskPost` + 旧 `page/doTask`，`activityid` = 本条任务的
+   `newsign_139mail` ✓ —— 出处：H5 页面自己的 JS 里 `initTaskStatus: POST /ycloud/signin/page/doTaskPost` ✓）
+   → ② 取入口页（`#ssoToken#` 换成真票 ✓）→ ③ 打卡（`currstep = 1` ⇒ 只发这一发，key = `task2` ✓）。
+   **归因是分开的**（run 306/307/308 三趟只发"入口页 + 打卡"、外加一发登录回调 ⇒ **恒 `WAIT → WAIT`** ✗；
+   run 309 补上那两发上报 ⇒ **当趟 `WAIT → FINISH`** ✓）⇒ 缺的就是**上报那一格** ✓，入口页与打卡**不是**翻账的原因 ✓。
+   **走过的一条岔路（记着，别重复）**：`interfacecallback` 那一格先猜成
+   `POST /ycloud/signin/mobileApp/signInCallback`（端点与体都出自页面 JS ✓），拿账号 SSO 票当 `taskToken`
+   发一发 ⇒ 上游回 **`code=500 msg=无法获取中国移动任务信息`** ✗（那一格要的是"中国移动那条任务自己的 token"，
+   不是我们手里的票）⇒ **1017 不需要它** ✓（构造器留在 `app_signin`，标注"今天没有调用方" ✓）。
+   **真机验收**：测试 `0f6050105ab111f4` run **309** `WAIT → FINISH` ✓、移动 `b73bb07d5971e8e7` run **310** ✓、
+   小号 `9f611bba8206ca0a` run 311 早已 `FINISH`（跳过 ✓）⇒ **三档读数都在** ✓。
+   **测试**：`cargo test -p mcloud-tasks --lib` = **493 passed / 0 failed** ✓；`mcloud-upstream --lib` = **816 passed / 0 failed** ✓
+   （新增：分档 ✓、四发顺序 + 占位替换 ✓、`button.email.link` 与 `button.app.link` **不许串台** ✓、`signInCallback` 形状 ✓）。
+   ⚠ **口径**：`button.email.link` 这一格**别的条目也有**（同日临时取证：548/549/522/1075/1005/1004/1014/1020 都有 ✓）
+   ⇒ 这一档**只认 1017**，**不许**按"有这一格"推广 ✗（别的条目各有自己的 runner ✓）。
+
+
+12. ✅✅ **604「去云盘图书馆阅读书籍」：与 1017 同一档，但"入口那一格"和"打几发"都不同**（**2026-10-10 修，真机两个账号各翻一次**）——
+   **现象**：面板上直接把它给的链接印出来了
+   （`https://h.139.com/content/cloudClass?columnId=56&level=1&channel=400&token=#ssoToken#`），
+   而本仓**一枪都没发**（它在"判不出形状"那一档里 ✗）；旧 TS 里也没有 runner（全仓 0 命中 604 ✓）。
+   **真机原始条目**（`sign_in_3` / `month`）给的三格：
+   `button.app.link = 上面那条`、`currstep = 0`、`stepTypeSet = ["sendcloud","click"]`（**没有** `interfacecallback` ✓）。
+   **与 1017 的两处差别，都按读数处理**：
+   ① 入口那一格在 **`button.app`**（1017 在 `button.email` ✓）⇒ `portal_entry()` 两格都收 ✓；
+   ② `currstep = 0` ⇒ **③-a 那道门自己会打一发**（默认 key `task` ✓）⇒ 这一档**不许再补第二发** ✗
+   （旧 TS 里 604 没有 runner ⇒ 全趟只有那一发；而 409 是"门那一发 + runner 补的 `task2`"两发 ⇒ **形状不同** ✓）。
+   **修法**：`step_for` 把 604 与 1017 一起收进 [`Step::PortalEntry`] ✓；那一档的打卡改成
+   **只在③-a 没打过的时候才补**（`if !step.clicked` ✓）—— 1017 `currstep = 1` ⇒ 门不打 ⇒ 补 ✓；
+   604 `currstep = 0` ⇒ 门打过 ⇒ 不补 ✓。两条都有测试钉住（604 那条断言**只发一发** ✓，红测：去掉那个 `if` ⇒ 变两发 ⇒ 红 ✓）。
+   **真机验收**：测试 run **313** `WAIT → FINISH` ✓、移动 run **314** ✓、小号 run 315 早已 `FINISH`（跳过 ✓）。
+   ⚠ **归因没有分开**（与 1017 那次不同）：604 原先**一枪不发** ⇒ "整链（上报 + 入口页 + 门那一发）"是**一起上的** ✓，
+   "到底哪一格让它翻"**没有单独验过** ✗ —— 想分离得在别的账号上做（月限任务翻过不能重试 ✓）。
+   **测试**：`cargo test -p mcloud-tasks --lib` = **495 passed / 0 failed** ✓；`mcloud-upstream --lib` = **816 passed / 0 failed** ✓。
+
+
+13. ✅✅ **547 / 609：同一族的 `mcloud://` 深链两条，一条打卡就翻、一条必须真对话**（**2026-10-11 修，各两个账号验收**）——
+   两条都在"判不出形状"那一档里（本仓原先**一枪不发** ✗），旧 TS 里也**都没有 runner**（全仓 0 命中 ✓
+   ⇒ 旧 TS 只会在 `default:` 分支给它们打卡 ✓）。
+   **真机原始条目**（都是 `sign_in_3` / `currstep = 0`，入口都是 **`mcloud://` 深链** ⇒ **取不了** ✗，
+   与 1017 / 604 那种 http 入口是两回事 ✓）：
+   * **547「加入一个知识库」**（`groupid = time`、`+10豆`）：`button.app.link = mcloud://main/aiAssistantGlobal?params=<base64>`，
+     `params` 解出来 = `{"params":{"jumpConfig":{"tab":"squareList","targetUrl":"/pages/knowledgeBase/squareList?from=app"},"sourceId":"101151000"}}`；
+     `stepTypeSet = ["sendcloud","click"]` ✓。
+   * **609「和AI助手对话」**（`groupid = time`、`+20豆`）：同一个深链前缀，`params` 解出来 =
+     `{"params":{"adId":"66197","adVt":"47535","sourceId":"101151000"}}`；
+     `stepTypeSet = ["cloudtasklogstep","sendcloud","processbindtask","click","interfacecallback"]`（**多三格** ✓）。
+   **先按旧 TS 的 `default:` 口径试打卡**（同族的 431 就是打卡翻的 ✓）：真机 run 318 一趟跑两条 ——
+   **547 `WAIT → FINISH` ✓**、**609 `WAIT → WAIT` ✗**（同趟、同账号、同一发打卡 ⇒ 这一对**互为对照** ✓）。
+   还看到一格细节：609 那一趟打卡**确实动了上游**（`currstep` 从 0 推到 3 ✓），只是**不算完成** ✗
+   ⇒ "打卡没反应"和"打卡不算数"是两件事 ✓。
+   **609 的修法**：接 AI 那一族（1028 的整套件复用 ✓）—— 派生 AI 域鉴权 → 状态查询
+   （**用本条任务自己的 id**：那一口是**按 `taskId` 作答**的 ✓，抓包仓那张对照表写着 1028 → `501 任务不存在`、
+   585 / 106 / 1020 → 真实读数 ✓）→ **SSE 对话** → `sleep 5s` 复查 ✓。
+   ⚠ **不抄 1028 的"前置已满足就跳过对话"那道门**：609 在旧 TS 里没有 runner ⇒ 那道门**没有出处**，
+   而这一条的名字就是"对话" ✓ ⇒ 每趟都发；状态读数只当诊断写进 notes ✓。
+   **⭐ 归因是钉死的**（这一条比 1017 / 604 干净）：run 319 里打卡**根本没发**（`currstep = 3` ⇒ 门不打 ✓），
+   而**对话前后**的状态读数变了：**对话前 `code=0 taskStatus=0 cloudStatus=-1`** ⇒
+   **对话后 `taskStatus=1 cloudStatus=0`** ✓ ⇒ **翻账的就是那一发对话** ✓（不是打卡 ✓）。
+   **真机验收**：547 —— 测试 run 318 ✓ / 移动 run 322 ✓；609 —— 测试 run 319 ✓ / 移动 run 320 ✓；
+   小号两个 id 都是 `planned = 0`（没排进计划 ⇒ 上游那边不是"待做" ✓）。
+   **测试**：`cargo test -p mcloud-tasks --lib` = **495 passed / 0 failed** ✓（映射 1 条 ✓、click-only 串 1 条 ✓）。
+   ⚠ **AI 那条链没有运行级单测**（1028 也没有 ⇒ 本仓现状 ✓）：运行级要真登邮箱 + 派生 AI 鉴权 + 打 SSE，
+   成本高；这一条的验收靠**真机读数**（对话前后两格 ✓）✓ —— 想补的话按 `runners/tests.rs` 那套 scripted 回复接 ✓。
+
+
+14. ❌ **1029「查看"我的账单"」：今天没做成 —— 把试过什么、还剩什么候选如实记下来**（**2026-10-11**）——
+   **现象**：面板印着 `https://y.10086.cn/x/wdzd`（短链 ✓）、`newsign_139mail` · 第 0 步 ·
+   「一键掌握话费及流量使用情况」· 状态 `WAIT` ✓；本仓原先**一枪不发** ✗（不在任何表里 ✓）。
+   ⚠ 这一条**只在移动 / 小号两张表里**（测试那张**没有**它 ✓）⇒ 两个账号都能迭代（没翻就不算用掉 ✓）。
+   **真机原始条目**（两张表逐字相同）：`currstep = 0`、`groupid = month`、`content_display2 = "+15豆"`、
+   `button.app.link` 与 `button.email.link` **两格同一条短链** `https://y.10086.cn/x/wdzd`（**没有** `#ssoToken#` ✓）、
+   `stepTypeSet = ["cloudtasklogstep","sendcloud","sendsms","email"]` ✓、
+   `show = {"limitMoveNet":"1"}` ✓。
+   **短链落点**（实拍，`curl -L` ✓）：
+   `https://y.10086.cn/x/wdzd` →（浏览器档 UA）`https://html5.mail.10086.cn/pe/PE_html/open_download.html?aid=wdzd&name=MyBillFolder&channel=4013001&thingId=50668` ✓
+   —— 也就是说这个 thing 是**邮箱里的一个文件夹**（`name=MyBillFolder` ✓），
+   而那一页是"装 App / 用微信打开"的**落地页** ✓。
+   **那一页自己会发的两个像素**（内联 JS 逐字 ✓，体在 `peCommonFun.js` 的 `addBehavior` 里 ✓）：
+   `clickDownload → addBehavior(111949, thingId)`（下载 App ✓）、
+   `clickOpen → addBehavior(111948, thingId)`（在 App 里打开 ✓），
+   端点 = `https://smsrebuild1.mail.10086.cn/weather/weather?func=user:logBehaviorAction&action=…&thingId=…&version=html5&cguid=…` ✓
+   （**空 200**，fire-and-forget ✓）。
+   **试过的四档，全是 `WAIT → WAIT` ✗**：
+   | # | 试了什么 | run | 读数 |
+   |---|---|---|---|
+   | ① | 上报 + 取入口页 + 打卡（入口页那一档的口径 ✓） | 327 | ✗ |
+   | ② | 像素 `action=111949`（不带 cookie） | 328 | ✗ |
+   | ③ | 像素 `action=111949` + **邮箱 cookie**（`RMKEY`/`Os_Sso_Sid` ✓） | 329 | ✗ |
+   | ④ | 像素 `action=111948`（"在 App 里打开"那一格 ✓）+ cookie | 330 | ✗ |
+   **另有一个读探针的读数**（找"账单文件夹"的 `fid`）：`mbox:getAllFolders`（体照同族拼 ✓）
+   回 `{"code":"S_OK","var":""}` ✓ —— **路由通、会话可用**，但**我的体形状要不到清单** ✗
+   （探针用完已删 ✗，读数留在抓包仓 §12.3 ✓）。
+
+   ---
+   ### 2026-10-11 上午续查（第二轮，读数更全了，**仍然没做成** ✗）
+   **用户口径（关键）**：「**移动号才有账单任务**」 ✓ ⇒ 这一条是**话费账单**（10086 侧 ✓），
+   不是"邮箱里那个文件夹" ✗ —— 顺带把那条岔路走死了 ✓。
+   **① 列目录那一口的**正确形状**拿到了**（webmail 自己的 JS：`/html5/js/T.mvc.pack.js` 的 `getFolderList` ✓）：
+   `POST {HTML5_MAIL_HOST}/s?func=mbox:getAllFolders&sid=…`，体 **`stats=1&type=0`** ✓
+   （不是我先前拼的 `<object><int name=…>` ✗）。实测移动那个号回 **2326 字节** 的清单 ✓：
+   收件箱(1) / 服务邮件(8) / 草稿箱(2) / 订阅邮件(9) / 已发送(3) / 已删除(4) / 垃圾邮件(5) ✓
+   ⇒ **这个号根本没有"账单"文件夹** ✗（那条 JS 里 `"我的帐单" == list[i].name` 那一句
+   对应的是**有账单的号** ✓）⇒ **候选①（读账单文件夹）在这号上不成立** ✓。
+   **② 找到账单页本体**（App 字面量：`https://html5.mail.10086.cn/html/mobilebill.html?sid=` ✓，
+   `mobilebill` = 手机账单 ✓）⇒ 扒它自己的包 `/js/mobilebill.html.pack.js` ✓，里面：
+   * **账单数据口**：`POST {HTML5_MAIL_HOST}/setting/s?func=bill:getBatterypitcherBill&sid=…`，
+     体 **`<null></null>`**（`T.json2xml(null)` 的产物 ✓，逐字照抄 ✓）—— 实测回
+     `{"code":"S_OK","summary":"","billDates":[]}` ✓（**路由通、会话可用**，该号**没有可补投月份** ✓）；
+   * **页面加载那一发像素**（这一条最像"看了账单" ✓）：模型里那张表写着
+     `CONFIG_INFO: { common:{}, 1000006:{ loadCount:[108365, 66] } }` ✓，
+     而 `initConfigData` 里就是 `T.addBehavior.apply(T, CONFIG_INFO[sendId].loadCount)` ✓
+     ⇒ 打开账单页 = **`addBehavior(108365, 66)`** ✓。
+   **③ 同一发像素有两台主机**（各读到一处 ✓）：PE 落地页那版发
+   `//smsrebuild1.mail.10086.cn/weather/weather`（带 `cguid` ✓）；
+   webmail 框架那版（`T.mvc.pack.js` 的 `T.addBehaviorAction` ✓）发**相对**路径 `/mw2/weather/weather`
+   ⇒ 落在 `html5.mail.10086.cn`（**不带 `cguid`** ✓）—— **两版都试过** ✗。
+   **这一轮试的（全 `WAIT → WAIT` ✗）**：
+   | # | 发了什么 | 读数 |
+   |---|---|---|
+   | ⑤ | webmail 那台主机上的像素（`action=111948` + 邮箱 cookie） | ✗ |
+   | ⑥ | 账单数据口 `bill:getBatterypitcherBill` + 像素 | ✗ |
+   | ⑦ | **页面加载那一发**（`action=108365 thingId=66`，webmail 主机 + cookie） | ✗ |
+   ⚠ 那一发像素**上游什么都不回**（0 字节空 200 ✓，fire-and-forget ✓）⇒ 从回应里看不出对错 ✓。
+   **下一轮该往哪走**（都还没有读数支持 ✓）：① 10086 侧（`happy.mail.10086.cn/jsp/cn/billsubscibe/sso.do`
+   那一发"账单订阅 SSO" ✓ —— 账单页里 `mobile.billAccount` 就指它 ✓）；
+   ② 账单页的**主数据**（那一页是"按标签列账单邮件" ✓：`noMailTip` = "该标签下没有邮件哦" ✓
+   ⇒ 也许是 `mbox:searchMessages` 按某个 `sendId` 标签读 ✓）；
+   ③ PE 活跃上报（`func=user:activeAction` ✓）。
+   **结论（已排除 / 还剩什么）**：
+   * 已排除：打卡（run 318 那一族的读法）、取落地页、两个行为像素（带/不带 cookie ✓）。
+   * 还剩的候选（**都没有读数支持**，下一个接手的人从这里挑 ✓）：
+     ① **邮箱侧读"账单文件夹"** —— `stepTypeSet` 里有 `email` ✓、thing 名字就叫 `MyBillFolder` ✓
+        ⇒ 先拿对 `mbox:getAllFolders` 的体（或别的列目录口），再 `mbox:SearchByFidOrCondition` 换 `fid` 读它 ✓；
+     ② **PE 活跃上报**（`func=user:activeAction` ✓ —— 旧 TS 那句注释写着"用于推进 mail139 邮箱活跃度及**各类任务进度**" ✓，
+        1004 用它发 `eventType="3"` ✓；1029 该用哪一格**未知** ✗）；
+     ③ 云盘 App 侧的市场任务通知（`/marketPlat/api/marketTaskNotify.action` 之类 ✓ —— 只在 App 表面文档里见过路径 ✗，形状未知）。
+   **代码现状**：**已撤回**（半成品不留 ✗）—— 只留下 `mail139::log_behavior_action_request` +
+   `BEHAVIOR_ACTION_URL` / `BILL_VIEW_ACTION` / `BILL_THING_ID` 三个常量，**明确标注"今天没有调用方"** ✓
+   （端点存在、形状长这样、上游回空 200 这三格已经是读数 ✓）；
+   测试里加了一条 `AppRunner::for_task(1029) == None` ✓，**防止半成品被当成能用** ✓。
+   ⚠ 所以这一条现在的状态就是 **❌ 未实现** ✓ —— 宁可写这个，也不写"记着要做" ✗。
+
+
+   ---
+   ### 2026-10-11 上午第三轮：**把能想到的 16 条全试了，一条都不翻** ✗（按用户口径「你先测试所有可能性」✓）
+   这一轮改法：写了个**临时探针**（`MCLOUD_BILL_PROBE=<n>` 选一条 ✓，**一趟只发一条** ⇒ 万一哪条翻了，
+   立刻知道是哪条 ✓ —— 这一条月限，翻过就不能重试 ✓）；试完**探针已撤** ✗。
+   | # | 候选（依据） | 结果 |
+   |---|---|---|
+   | ① | `addBehavior(108372, 3)` —— 包里底部菜单那格 `{action:"108372", thing:"3", menuName:"查话费"}` ✓ | ✗ |
+   | ② | `mbox:searchMessages` 按 5 条 `sendId` 条件搜账单邮件（包里 `getMailsList` ✓） | ✗（但**真回了 12886 字节的账单邮件列表** ✓） |
+   | ③ | `GET mobilebill.html?sid=`（App 字面量 ✓） | ✗ |
+   | ④ | `GET /?id=bill`（App 字面量 ✓） | ✗ |
+   | ⑤ | `GET happy.mail.10086.cn/jsp/cn/billsubscibe/sso.do`（包里 `mobile.billAccount` ✓） | **502**（这条路径今天不在 ✗） |
+   | ⑥ | ② → `disk:backupAllBillMail` **转存账单邮件**（真转存 ✓ 回 31 字节） | ✗ |
+   | ⑦ | PE `user:activeAction`（`eventType="1"`） | ✗ |
+   | ⑧ | `addBehavior(108372, 2)`（"139云朵中心"那格 ✓） | ✗ |
+   | ⑨ | `setting:queryServiceNumbers&type=2&comefrom=2001` | **502** |
+   | ⑩ | `addBehavior(110542, 6)` —— 包里 `case "readMail"` 里 `1==read && 1000006==sendId` 才发的那一格 ✓ | ✗ |
+   | ⑪ | ② → `updateMessagesStatus`（**把第一封账单邮件标已读** ✓，真发 ✓ 回 23 字节） | ✗ |
+   | ⑬ | ② → `view:readMessage`（**真读邮件正文** ✓，回 **27816 字节** ✓） | ✗ |
+   | ⑮ | `click?key=task2`（1017 当初就是换 key 才翻的 ✓） | ✗ |
+   | ⑯ | `click?key=randomCloudTask` | ✗ |
+   **这一轮新拿到的读数**（都在抓包仓 §12.5 ✓）：
+   * **账单邮件列表的壳**（`mbox:searchMessages` ✓，12886 字节 ✓）：`{'code':'S_OK','var':[{'mid':"…",'fid':1,'imapId':…,'size':…,'sendId':…,'billType':…,'billFlag':…,'sendNewNum':…}]}`
+     —— ⚠ **键是单引号、值是双引号**（`'mid':"d506…"` ✓）⇒ `serde_json` 直接失败 ✗，
+     本仓的 `first_field` 也只认两种壳 ✗ ⇒ 补了**第三种**（值不带引号那一支旁边又加引号壳 ✓）。
+   * 邮件列表里**确实有账单邮件**（`billType` / `billFlag` / `sendNewNum` 这些键 ✓）⇒ 搜索条件是对的 ✓。
+   * `logBehaviorAction` 那一发**上游什么都不回**（0 字节空 200 ✓，fire-and-forget ✓）⇒ 从回应看不出对错 ✓。
+   **结论**：邮箱侧能做的**读**（列表/正文/标已读/转存/像素/页面/换 key）**都试遍了** ✗ ⇒
+   这一条的读数**多半不在邮箱侧** ✓。**用户已点头下一步抓包** ✓ —— 抓的时候最有用的是：
+   **在 App 里点这条任务、一直点到它显示完成**，以及**看它有没有跳到 10086/账单页之外的什么地方** ✓
+   （云盘侧还有一族 `/marketPlat/api/{marketTaskNotify,marketTaskQuery,marketGetPrize}.action` ✓
+   只在 App 表面文档里见过**路径名**、形状未知 ✗，那是最可能的"上报口" ✓）。
+
+   ---
+   ### 2026-10-11 抓包准备（**已就绪并实拍验证** ✓ —— 用户口径「你做好抓包准备」）
+   **Mac 侧（我做完了 ✓）**：
+   * Reqable GUI 已起（`/Applications/Reqable.app` ✓，PID 见 `pgrep -fl "Reqable.app/Contents/MacOS/Reqable"` ✓）；
+   * 系统代理已接管：`networksetup -getsecurewebproxy Wi-Fi` = `Enabled: Yes / 127.0.0.1:9000` ✓
+     —— **原状是 `Enabled: No / 127.0.0.1:7897`** ✓（回滚就把它设回这个 ✓）；
+   * 录制 `active` ✓、记录已清空 ✓、`9000` 在 LISTEN ✓；
+   * **实拍验证过"抓了真有数据"** ✓：从 `python3 urllib`（它会走系统代理 ✓）打一发
+     `https://html5.mail.10086.cn/html/mobilebill.html` ⇒ `reqable-capture.py summary` 回
+     **`总记录 1 条`（进程 `python3.14`）** ✓ —— 那一发 python 自己报
+     `CERTIFICATE_VERIFY_FAILED` 是**正常的**（它不认 Reqable 的 CA ✓，iOS App 认 ✓）。
+   **手机侧（要你动手 ✓）**：Wi-Fi → 代理 → 手动 → 服务器 **`192.168.3.187`**（本机 `en0` ✓）、端口 **`9000`**；
+   HTTPS 要能被解密才看得到内容（Reqable 的 CA 已在信任列表里就够 ✓ —— 若记录里只有 `CONNECT` 隧道、
+   没有明文请求，就是 CA 那一步没成 ✓）。
+   **要抓的那一趟（按顺序 ✓）**：
+   ① 先跟我说一声「开始了」⇒ 我在本仓 `clear` 并记下时刻 ✓；
+   ② 在 **139 邮箱 App** 里走这一条：**我的账单** → 点「去完成」→ **它跳到哪就跟着走**
+      （跳到 10086 / 浏览器 / 微信也照走 ✓ —— 手机级代理把这些都看得见 ✓）；
+   ③ 一直到它显示 **已完成 / 已领取** 为止 ✓，**中途别回退重来**（这一条月限，重来就多花一次 ✓）；
+   ④ 抓完**立刻**说一声 ⇒ 我马上导出 HAR（记录按体积滚，晚一步可能就没了 ✓）：
+      `python3 scripts/reqable-capture.py har har/2026-10-11-1029-bill.har --all` ✓。
+   **顺手记两个读数（我没法从包里推 ✓）**：点之前卡片上写的字（`去完成` ✓）、点之后写的字（`已完成`？✓）、
+   以及**有没有弹提示**（"任务已完成"/"明天再来"这类 ✓）。
+
+15. ⚠⚠ **原生 App 的行为上报走 `logreport/s`，不是 H5 那套 `logBehaviorAction` 像素**（**2026-10-11 抓包实拍**）——
+   **出处**：`../mcloud-capture/docs/capture/app-mail139-notice-samples.txt` ✓
+   （139邮箱 App 11.4.1 真机抓包 ✓，原始素材 `har/2026-10-11-1029-login.har` ✓）。
+   **形状**（`POST https://pesupport.mail.10086.cn/logreport/s?func=user:logDatas&cguid=&sid=&timestamp=&ver=` ✓）：
+
+   ```json
+   {"head": {"bindAccounts":"…","comeFrom":"…","netType":"2","version":"11.4.1","eMode":"1",
+             "osVersion":"26.6","os":"IOS","appCode":"…","installPack":"…ipa",
+             "manufacturer":"Apple","userAccount":"…","model":"iPad8,6"},
+    "body": {"logDatas": [ {"eventTime":"2026-10-11 08:28:34","thingId":"2","actionId":"110635"} ] }}
+   → {"code":"S_OK","summary":"S_OK"}
+   ```
+
+   ⇒ 键是 **`actionId` + `thingId`**（可带 `ext1` ✓）—— **与 H5 页那一套 `addBehavior(action, thingId)`
+   是同一个编号体系** ✓，但**通道不同** ✓：H5 打的是 `logBehaviorAction` 像素 ✗。
+   **实拍到的编号**（都在 `thingId` 1..9 上 ✓，含义这一趟**没验** ✗）：
+   `110296` / `110625` / `110630` / `110633` / **`110635`（= 用户点「开启139邮箱通知」那一下 ✓，有口述佐证）** /
+   `110640` / `110644` / `110652` ✓。
+   同族还有 `func=user:activeAction`（`{"body":{"logDatas":[{"startType":"1","eventType":"1","eventTime":"…"}]}}` ✓）
+   与 `func=user:saveAuthorizeUser`（`<object>…confirmType=1|3…forceConfirm=0|1…</object>` ✓ = **授权/通知同意的落账** ✓）。
+
+   **为什么记在这里**（三条都还没有定论 ✓）：
+   * **对本节的 1029** ✓：16 条候选里我**一次都没用过这条通道** ✗（只用了 `logBehaviorAction` 像素与
+     `user:activeAction` ✓）⇒ 如果账单那一趟走原生上报，它就会以 `actionId` 的形式出现 ✓
+     —— **下一趟抓包要盯的就是这一格** ✓。
+   * **对 550「开启云盘APP通知领好礼」/ 551「连续31天开启云盘APP通知」**（本表里都还是 ❌ 未实现 ✓）：
+     "通知已开"这件事要用这条通道报 ✓（云盘侧的同类口这一趟没拿到 ✗ —— `yun.mcloud.139.com` 全 TLS 被拒 ✓）。
+   * **对 1021「连续31天开启邮箱APP通知」**（走 `notice.rs` ✓）：这条是**邮箱侧**的同类动作 ✓
+     ⇒ 若 `notice.rs` 现在打的是别的口，值得拿这份形状对一遍 ✓。
+   同趟还拿到 **推送注册那一族**（`pnsmsg-svr.mail.10086.cn:8443/rsv/{deviceBind, unDeviceBind,
+   getUserConfig, setUserConfig, clearNotifyCnt}` ✓ —— 响应是 `<responseData><resultCode>…` ✓ 不是 JSON ✓，
+   `configId` 是"哪一类通知"那一格 ✓ 只见 `11` ✗）与 **139PushMail 别名**（`139pe.mail.10086.cn:9443/scanWeb/QueryAliasService` ✓，**XML 体** ✓）✓
+   —— 都在那份样本里 ✓。
+
+16. ⚑ **`behaviorData` —— 账单页每一发都挂的"行为标签"（明文 ✓，2026-10-11 实拍）**：
+   形状 `<action>_<thingId>`（可 `|` 串多对 ✓），挂在查询串上 ✓。实拍那一趟（`html5.mail.10086.cn` ✓）：
+   `getCommConfig` → **`108365_66`** ✓ / `logBehaviorAction` → **`110542_6`** ✓ /
+   `GetUserAddrJsonDataV2` → `110542_2|30129_82` ✓ / `getTrustedAuthState` → `110511_46` ✓。
+   ⇒ 读法是"**我这一发属于哪个行为**" ✓ —— 和像素自己的 `action`/`thingId` 是**两回事** ✓
+   （同一发像素上是 `action=111631&thingId=261` ✓ 而 `behaviorData=110542_6` ✓）。
+   ⚠ **本仓此前一发都没带** ✗（所以"发过像素但不翻账"未必是像素没用 ✓，可能是**标签缺了** ✓）；
+   ⚠ 也**别再把它当密文** ✗ —— 它是明文，可照抄 ✓。
+   **连带纠正**：本仓常量 `BILL_VIEW_ACTION=108365` / `BILL_THING_ID=66` 是从页面包
+   `CONFIG_INFO[1000006].loadCount` **推**的 ✗ —— 实拍里它**只作为 `behaviorData` 标签出现** ✓，
+   **没作为像素的 `action` 发过** ✗；那一趟真正发的像素只有 **`action=111631&thingId=261`** ✓。
+   出处：`../mcloud-capture/docs/capture/app-task-run-account-samples.txt` **§12.7/§12.8** ✓。
+
+
+17. ✅ **1029「查看"我的账单"」—— 从"16 条候选全败"到翻账（2026-10-11）**
+   * **现象**：`WAIT → WAIT` ✗，前后**四轮**都没动（候选 16 条 + 真机复刻三趟 ✓）。
+   * **真因**：缺 **`disk:mailReportToMQ`** —— 账单页在"打开那一封信"之后连发的**三发**
+     （`actionType=1003` ×2 + `1017` ×1 ✓，体是 **JSON** ✗ 而头写 `application/xml` ✓ 实拍如此 ✓）。
+     **形状**：`POST {HTML5_MAIL_HOST}/mw2/file/disk?func=disk:mailReportToMQ&sid=&rnd=<0.xxx>&cguid=&comefrom=166`
+     ＋ `Content-Type: application/xml` ＋ `Referer: …/html/readmail.html` ✓
+     ＋ 体 `{"actionType":"1003","clientType":"2","imapId":"<mid>","clientVersion":"h5","channel":""}` ✓
+     → `{"code":"S_OK","summary":"successed to process!"}` ✓。
+   * **修法**（最小 ✓）：`crates/mcloud-upstream/src/mail139.rs` 加
+     `mail_report_to_mq_request` + `mail_report_body` ✓；`AppRunner::BillView` 在"读信"之后照实拍发三发 ✓。
+     ⚠ 顺带补齐的同族（都在同一条链上、都有实拍出处 ✓）：`read_message_request`（`comefrom=166` ✓）、
+     `bill_page_request` 补 `sendId=1000006` ✓、打卡后半发 `visitlog/journaling` ✓、像素 `111631/261` ✓。
+   * **归因**（一次只加一格 ✓）：run **379/380/381**（页面/列表/标已读/读信/像素/`behaviorData` ✓）
+     全 `WAIT → WAIT` ✗ ⇒ run **382** **只多**了三发 MQ 上报 ⇒ `WAIT → **FINISH**` ✓
+     ⇒ **归因干净：缺的就是它** ✓（三发里具体哪一发必要**未再细分** ✗ —— 用户口径「试出来再停」✓）。
+   * **真机验收**：**移动** `b73bb07d5971e8e7` run **382** `WAIT → FINISH` ✓（`上游已确认` ✓）。
+   * **测试数**：`cargo test -p mcloud-upstream --lib mail_report` **2** ✓、
+     `-p mcloud-tasks --lib runners::` **14** ✓、`visitlog` **2** ✓。
+   * ⚠ **两条老教训**（这次都用上了 ✓）：① 归因靠"同一串只多一格" ✓，不靠"改了两处就一起记功" ✗；
+     ② **读状态前先确定账号** ✓（见本表 §5-15 那一节与 `../mcloud-capture/docs/capture-guidelines.md` §1.4 ✓）。
+
 
 ## 6. 附录：账号侧读数（**不是本项目进度**）
 
