@@ -160,6 +160,14 @@ fn runner_table_matches_the_legacy_keys() {
     //    同一个能力今天叫 618 / 1057）—— 按能力收，不按数字收 ✓。
     assert_eq!(AppRunner::for_task(1057), Some(AppRunner::AiWorkbench));
     assert_eq!(AppRunner::for_task(618), Some(AppRunner::AiCamera));
+    // 609「和AI助手对话」（2026-10-11 加）：**两边都没有 runner** ⇒ 这一条是本仓补的
+    //（真机读数：只打卡 `WAIT → WAIT` ✗，接上 AI 对话链才翻 ✓，见 §5-13）。
+    assert_eq!(AppRunner::for_task(609), Some(AppRunner::AiAssistant));
+    assert_eq!(
+        AppRunner::for_task(547),
+        None,
+        "547 只打卡就翻 ⇒ 不进执行器表 ✓"
+    );
     // 不在表里的 id 一律 None（**不许**兜底到某一个执行器）
     for id in [106, 113, 409, 434, 522, 1005, 115, 478, 481, 0, -1] {
         assert_eq!(AppRunner::for_task(id), None, "id={id} 不该有执行器");
@@ -181,11 +189,25 @@ fn click_only_and_skip_lists_do_not_overlap() {
 }
 
 /// click-only 那一串逐字对上 TS 文档（`TASKS.md`）。
+///
+/// ⚠ 1017 **不在**这里（它走 `Step::PortalEntry`）—— 见 `docs/app-task-status.md` §5-11。
 #[test]
 fn click_only_ids_are_the_legacy_eight() {
     assert_eq!(
         CLICK_ONLY_TASK_IDS,
-        [115, 431, 435, 1009, 1010, 1013, 1016, 447]
+        [115, 431, 435, 1009, 1010, 1013, 1016, 447, 547]
+    );
+    // ⚠ 609 **不在**这一串里（它走 `AppRunner::AiAssistant` ✓ —— 打卡不翻账，见 §5-13）
+    assert!(!crate::app_task::is_click_only(609));
+    // ⚠ 1017 **不在**这一串里（它走 `Step::PortalEntry`，见 §5-11）✓
+    assert!(!crate::app_task::is_click_only(1017));
+    assert!(
+        !crate::app_task::is_click_only(604),
+        "604 也走入口页那一档 ✓"
+    );
+    assert!(
+        !crate::app_task::is_click_only(1017),
+        "1017 走入口页那一档，不进 click-only"
     );
 }
 
@@ -323,16 +345,80 @@ async fn send_mail_stops_when_compose_id_is_missing() {
     );
 }
 
-// ── 1020 邮箱备份（今天 404）──────────────────────────────────────────
+// ── 1020 邮件转存（App 实拍三发；旧路 404）────────────────────────────
 
-/// 备份那一枪 404 ⇒ **进 `failures`**（它是这条任务唯一的动作）。
+/// ⭐ 三发都成 ⇒ 做成；三发的**形状**逐条钉住，且旧那条死路**一枪不发** ✓。
 #[tokio::test]
-async fn mail_backup_404_is_a_hard_failure() {
+async fn mail_backup_walks_the_app_chain_and_counts_only_the_transfer() {
     let (ctx, http) = ctx_with(
         vec![
             Reply::ok(r#"{"success":true,"code":"0000","data":{"token":"SSO"}}"#),
             Reply::ok(r#"{"var":{"sid":"S1","rmkey":"R1"}}"#),
-            Reply::status(404),
+            // ① 目录（形状是**合成**的：这一口的体零实拍，键名照 App 的字面量 ✓）
+            Reply::ok(
+                r#"<object><array name="directorys"><object><string name="directoryId">DIR1</string></object></array></object>"#,
+            ),
+            // ② 邮件列表
+            Reply::ok(
+                r#"<object><array name="messages"><object><string name="mid">MID1</string><int name="fid">1</int></object></array></object>"#,
+            ),
+            // ③ 转存
+            Reply::ok(r#"{"code":"S_OK"}"#),
+        ],
+        None,
+    );
+    let mut state = RunnerState::new();
+    let mut owned = Vec::new();
+    let r = run_runner(&ctx, &mut state, AppRunner::MailBackup, 1020, &mut owned).await;
+
+    assert!(r.acted, "{:?}", r.failures);
+    assert!(r.failures.is_empty(), "{:?}", r.failures);
+
+    let urls = http.urls();
+    assert!(
+        urls.iter().any(|u| u.contains("func=disk:getDirectorys")),
+        "{urls:?}"
+    );
+    assert!(
+        urls.iter()
+            .any(|u| u.contains("func=mbox:SearchByFidOrCondition")),
+        "{urls:?}"
+    );
+    let backup = urls
+        .iter()
+        .find(|u| u.contains("func=disk:backupMail"))
+        .expect("转存那一发");
+    assert!(backup.contains("comefrom=16861"), "{backup}");
+    assert_eq!(
+        http.hits("mailsms/sms/backup"),
+        0,
+        "旧那条死路**不再发**（实测 404）"
+    );
+
+    // 体里要带上 ② 拿到的 `mid` 与 ① 拿到的目录 ✓
+    let req = http
+        .requests()
+        .into_iter()
+        .find(|r| r.url.contains("func=disk:backupMail"))
+        .unwrap();
+    let body = req.body_str().unwrap().to_string();
+    assert!(body.contains(">MID1<"), "{body}");
+    assert!(body.contains(">DIR1<"), "{body}");
+    assert!(
+        body.contains(r#"<string name="channel">16861</string>"#),
+        "{body}"
+    );
+}
+
+/// 取不到 `mid` ⇒ **硬失败**，且明细里要带上**体的键名形状**（这一口零实拍 ⇒ 靠它取证 ✓）。
+#[tokio::test]
+async fn a_mail_list_without_mid_fails_with_the_body_shape() {
+    let (ctx, http) = ctx_with(
+        vec![
+            Reply::ok(r#"{"success":true,"code":"0000","data":{"token":"SSO"}}"#),
+            Reply::ok(r#"{"var":{"sid":"S1","rmkey":"R1"}}"#),
+            Reply::ok(r#"<object><string name="directoryId">DIR1</string></object>"#),
+            Reply::ok(r#"<object><string name="somethingElse">X</string></object>"#),
         ],
         None,
     );
@@ -342,8 +428,40 @@ async fn mail_backup_404_is_a_hard_failure() {
 
     assert!(!r.acted);
     assert_eq!(r.failures.len(), 1, "{:?}", r.failures);
-    assert!(r.failures[0].contains("404"), "{:?}", r.failures);
-    assert_eq!(http.hits("mailsms/sms/backup"), 1);
+    assert!(r.failures[0].contains("mid"), "{:?}", r.failures);
+    assert!(
+        r.failures[0].contains("somethingElse"),
+        "要把体的键名形状带出来：{:?}",
+        r.failures
+    );
+    assert_eq!(
+        http.hits("func=disk:backupMail"),
+        0,
+        "拿不到 mid 就不该转存"
+    );
+}
+
+/// 转存那一发被上游打回（业务码）⇒ **硬失败**，不是"提交过了" ✓。
+#[tokio::test]
+async fn a_rejected_transfer_is_a_hard_failure() {
+    let (ctx, http) = ctx_with(
+        vec![
+            Reply::ok(r#"{"success":true,"code":"0000","data":{"token":"SSO"}}"#),
+            Reply::ok(r#"{"var":{"sid":"S1","rmkey":"R1"}}"#),
+            Reply::ok(r#"<object><string name="directoryId">DIR1</string></object>"#),
+            Reply::ok(r#"<object><string name="mid">MID1</string></object>"#),
+            Reply::ok(r#"{"code":"PML10410050","summary":"转存失败"}"#),
+        ],
+        None,
+    );
+    let mut state = RunnerState::new();
+    let mut owned = Vec::new();
+    let r = run_runner(&ctx, &mut state, AppRunner::MailBackup, 1020, &mut owned).await;
+
+    assert!(!r.acted);
+    assert_eq!(r.failures.len(), 1, "{:?}", r.failures);
+    assert!(r.failures[0].contains("PML10410050"), "{:?}", r.failures);
+    assert_eq!(http.hits("func=disk:backupMail"), 1);
 }
 
 // ── 585 AI 相机 ────────────────────────────────────────────────────────

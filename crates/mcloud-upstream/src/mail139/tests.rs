@@ -259,3 +259,103 @@ fn query_user_token_shape_and_parse() {
 
     assert!(parse_query_user_token("{'code':'S_OK'}").is_err());
 }
+
+// ── 1020 邮件转存：App 实拍的三发（2026-10-10 接上）─────────────────────
+
+/// ① 目录：URL 三格 + **上游那个拼写**（`qureySubDirectory`，少一个 `e`）照抄。
+#[test]
+fn cloud_directories_keeps_the_upstream_typo() {
+    let req = cloud_directories_request(&session(), "0abc", "");
+    assert_eq!(req.method, "POST");
+    assert_eq!(
+        req.url,
+        "https://html5.mail.10086.cn/mw2/file/disk?func=disk:getDirectorys&sid=00c5SID&comefrom=54&cguid=0abc"
+    );
+    let body = req.body_str().unwrap();
+    assert!(
+        body.contains(r#"<string name="qureySubDirectory">1</string>"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"<string name="parentId"></string>"#),
+        "{body}"
+    );
+    assert_eq!(
+        header(&req, "Cookie"),
+        Some("RMKEY=rm-key; Os_SSo_Sid=00c5SID")
+    );
+    assert_eq!(header(&req, "X-Requested-With"), Some("cn.cj.pe"));
+}
+
+/// ② 邮件列表：`mbox:SearchByFidOrCondition`（`peFlag=1` 在、**`encryptType` 不在**）。
+///
+/// ⚠ 不写 `encryptType=1` 是**实测**：带上它响应体变成十六进制密文（3296 字符）⇒ 拿不到 `mid`。
+#[test]
+fn mail_search_is_the_app_side_mbox_list() {
+    let req = mail_search_request(&session(), "0abc");
+    assert!(req.url.starts_with(
+        "https://appmail.mail.10086.cn/RmWeb/mail?func=mbox:SearchByFidOrCondition&peFlag=1&sid=00c5SID"
+    ));
+    assert!(req.url.contains("comefrom=54"));
+    assert!(
+        !req.url.contains("encryptType"),
+        "带上它响应就是密文（真机实测）：{}",
+        req.url
+    );
+    let body = req.body_str().unwrap();
+    assert!(body.contains(r#"<int name="fid">1</int>"#), "{body}");
+    assert!(
+        body.contains(r#"<string name="order">receiveDate</string>"#),
+        "{body}"
+    );
+    assert!(body.contains(r#"<int name="limit">10</int>"#), "{body}");
+}
+
+/// ③ 转存：体**逐字**来自 App（`backupType` 是自闭合空串、`channel` 16861）。
+#[test]
+fn backup_mail_body_is_verbatim_from_the_app() {
+    let req = backup_mail_request(&session(), "0abc", "MID1", "DIR1");
+    assert_eq!(
+        req.url,
+        "https://html5.mail.10086.cn/mw2/file/disk?func=disk:backupMail&sid=00c5SID&comefrom=16861&cguid=0abc"
+    );
+    assert_eq!(
+        req.body_str().unwrap(),
+        "<object><string name=\"mailIds\">MID1</string><string name=\"backupType\" />\
+         <string name=\"channel\">16861</string><string name=\"directoryId\">DIR1</string></object>"
+    );
+    // ⚠ 值要转义（`escape_xml`），别把用户数据拼成标签 ✗
+    let req = backup_mail_request(&session(), "0abc", "A&B<C>", "D");
+    assert!(req.body_str().unwrap().contains("A&amp;B&lt;C&gt;"));
+}
+
+/// 取值器：XML 属性式与 JSON 式**两种都收**；取不到就 `None`（不猜 ✓）。
+#[test]
+fn first_field_reads_both_shapes_and_refuses_to_guess() {
+    assert_eq!(
+        first_field(
+            r#"<object><string name="mid">MID1</string><string name="mid">MID2</string></object>"#,
+            "mid"
+        )
+        .as_deref(),
+        Some("MID1"),
+        "取第一枚"
+    );
+    assert_eq!(
+        first_field(r#"{"var":{"mid":"MID9"}}"#, "mid").as_deref(),
+        Some("MID9")
+    );
+    assert_eq!(first_field(r#"{"var":{}}"#, "mid"), None);
+    assert_eq!(first_field("<object></object>", "mid"), None);
+}
+
+/// 形状提示：**只列键名、不列值**（那一族体里有邮件标题 ⇒ 别整段记进日志 ✗）。
+#[test]
+fn shape_hint_lists_key_names_without_values() {
+    let hint = shape_hint(
+        r#"<object><string name="mid">SECRET-TITLE</string><string name="fid">1</string></object>"#,
+        8,
+    );
+    assert!(hint.contains("mid") && hint.contains("fid"), "{hint}");
+    assert!(!hint.contains("SECRET-TITLE"), "值不许出现：{hint}");
+}

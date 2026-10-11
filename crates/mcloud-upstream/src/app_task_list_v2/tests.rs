@@ -343,3 +343,47 @@ fn a_non_json_body_is_an_error() {
 fn the_json_helper_is_available() {
     let _ = json!({});
 }
+
+/// ⭐ `button.email.link`（玩法 1017 的入口页那一格）—— 2026-10-10 真机原始条目里的形状 ✓。
+///
+/// 实拍（`newsign_139mail` 组）：
+/// `"button":{"email":{"action":"jump","link":"https://m.mcloud.139.com/portal/mobilecloud/index.html?…&token=#ssoToken#","text":"去完成"},"out":{"text":"去完成"}}`
+/// ⇒ 两件事一起钉住：① 读得出这一格；② `button.app` 与 `button.email` **互不串台** ✓。
+#[test]
+fn button_email_link_is_read_and_does_not_leak_into_app_link() {
+    let link = "https://m.mcloud.139.com/portal/mobilecloud/index.html?path=newsignin&sourceid=1179&enableShare=1&targetSourceId=001005&token=#ssoToken#";
+    let body = serde_json::json!({
+        "code": 0,
+        "msg": "success",
+        "result": { "month": [{
+            "id": 1017,
+            "name": "登录移动云盘云朵中心",
+            "groupid": "month",
+            "state": "WAIT",
+            "currstep": 1,
+            "enable": 1,
+            "process": 0,
+            "marketname": "newsign_139mail",
+            "button": {
+                "email": { "action": "jump", "link": link, "text": "去完成" },
+                "out": { "text": "去完成" }
+            }
+        }]}
+    })
+    .to_string();
+    let p = parse_task_list_v2(&body, "month").unwrap();
+    assert_eq!(p.items[0].button_email_link.as_deref(), Some(link));
+    assert_eq!(
+        p.items[0].button_app_link, None,
+        "只有 email 那一层 ⇒ app 那一格必须是 None（两格不许串台 ✓）"
+    );
+
+    // 坏形状一律 `None`（读到假值会让那一档去发一条空链接 ✗）。
+    for bad in ["{}", r#"{"email":{}}"#, r#"{"email":{"link":null}}"#] {
+        let b = format!(
+            r#"{{"code":0,"msg":"success","result":{{"month":[{{"id":1017,"button":{bad}}}]}}}}"#
+        );
+        let p = parse_task_list_v2(&b, "month").unwrap();
+        assert_eq!(p.items[0].button_email_link, None, "坏形状 ⇒ None：{bad}");
+    }
+}
