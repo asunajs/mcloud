@@ -1059,7 +1059,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mcloud-app"
-version = "3.0.0-rc.4"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "mcloud-core"
-version = "3.0.0-rc.4"
+version = "3.0.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "mcloud-crypto"
-version = "3.0.0-rc.4"
+version = "3.0.0"
 dependencies = [
  "aes",
  "argon2",
@@ -1116,7 +1116,7 @@ dependencies = [
 
 [[package]]
 name = "mcloud-engine"
-version = "3.0.0-rc.4"
+version = "3.0.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1131,7 +1131,7 @@ dependencies = [
 
 [[package]]
 name = "mcloud-server"
-version = "3.0.0-rc.4"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "mcloud-store"
-version = "3.0.0-rc.4"
+version = "3.0.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1177,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "mcloud-tasks"
-version = "3.0.0-rc.4"
+version = "3.0.0"
 dependencies = [
  "aes",
  "async-trait",
@@ -1196,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "mcloud-upstream"
-version = "3.0.0-rc.4"
+version = "3.0.0"
 dependencies = [
  "aes",
  "async-trait",
