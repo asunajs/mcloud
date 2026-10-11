@@ -22,12 +22,94 @@ use crate::cli::{
     login as cli_login, pipeline as cli_pipeline,
 };
 
+/// 起服务那条路的**显式写法**：`mcloud serve` **等价于**不带参数的 `mcloud` ✓。
+///
+/// 2026-10-11 用户口径：「**`mcloud serve` 为 webui 命令，简写为 `mcloud`**」✓ ——
+/// 两条是**同一个命令**，不是"另一条路"：`serve` 只是那个词的显式版本 ✓。
+pub const SERVE: &str = "serve";
+
+/// 入口（`src/main.rs`）那条分流的**唯一**一份判据 ✓。
+///
+/// # 为什么放在库里
+///
+/// 分流的形状是"行为契约"（`serve` 与不带参数必须**永远**走同一条路 ✓），
+/// 而放在 `src/main.rs` 里就没法被 `cargo test` 直接钉住（bin 的测试要另起进程 ✗）。
+/// 这里出一份纯函数 ⇒ 单测能逐条断言"谁走哪条路"✓。
+#[derive(Debug, PartialEq, Eq)]
+pub enum Dispatch {
+    /// 起 HTTP 服务 —— **不带参数**，或显式写 `serve`（两者同一条路 ✓）。
+    Serve,
+    /// 跑 CLI 命令（`serve` 那个词若写了，这里已经摘掉 ✓）。
+    Cli(Vec<String>),
+    /// `serve` 后面跟了不认识的东西（且不是帮助开关）⇒ 报错退 2 ✓。
+    BadServeArg(String),
+}
+
+/// 把 argv（**去掉程序名之后** ✓）判成"起服务 / 跑 CLI"。
+///
+/// ⚠ 只在**这一处**判：`src/main.rs` 拿它选日志默认值与入口函数，
+/// **不再自己写一遍** `args.is_empty()` ✗ —— 两份判据迟早分叉 ✓。
+pub fn dispatch(args: Vec<String>) -> Dispatch {
+    // **不带参数 = 起服务**（2026-10-03 起的老口径，一个字没改 ✓）
+    if args.is_empty() {
+        return Dispatch::Serve;
+    }
+    // ⚠ `run` 也认帮助开关（2026-10-11，与 `serve --help` **同一款写法** ✓）：
+    //
+    // `mcloud run` 光一个词 = **立即跑默认每日任务**（见 `cli/daily.rs` ✓），
+    // 而 `run --help` 问的是"这条命令怎么用" ⇒ 收敛成**看帮助** ✓
+    //（= `mcloud --help` 那一份文本、打 **stdout**、退 **0** ✓）。
+    //
+    // 改前它落进**带参数那条老路**：`--help` 被当成任务名 ⇒ 报"用法错"退 1 ✗
+    // —— 问一句"怎么用"却被训一顿，正是用户点名的「用法简化」要抹平的那种小坑 ✓。
+    //
+    // ⚠ 只在 `args.len() == 2` 时认：`mcloud run <任务名> <账号>` 里那两个位置
+    // 一个都不能被吃掉 ✓（万一将来真有个任务叫 `help`，三参数那种写法照旧走老路 ✓）。
+    if args[0] == "run" && args.len() == 2 {
+        if let Some(flag @ ("help" | "--help" | "-h")) = args.get(1).map(String::as_str) {
+            return Dispatch::Cli(vec![flag.to_string()]);
+        }
+    }
+    if args[0] != SERVE {
+        return Dispatch::Cli(args);
+    }
+    match args.get(1).map(String::as_str) {
+        // 光一个 `serve` ⇒ 就是"不带参数"那条路 ✓（默认行为一个字没改 ✓）
+        None => Dispatch::Serve,
+        // `serve --help` / `serve help` ⇒ 看帮助：与 `mcloud --help` 是**同一份**文本 ✓
+        Some(flag @ ("help" | "--help" | "-h")) => Dispatch::Cli(vec![flag.to_string()]),
+        // 其余一律**报错**，不静默忽略 ✗（口径与 `cli/push.rs` 的
+        // `reject_user_selection` 同款：静默忽略比报错更糟 ✓）
+        Some(other) => Dispatch::BadServeArg(other.to_string()),
+    }
+}
+
+/// `serve` 后面跟了别的东西：**报错 + 用法 + 退 2** ✓。
+pub fn bad_serve_arg(arg: &str) -> anyhow::Result<()> {
+    eprintln!("`serve` 不接受参数：{arg}");
+    eprintln!("它等价于**不带参数**跑 `mcloud`（= 起 WebUI 服务 ✓）。");
+    eprintln!("要跑 CLI 命令就直接写 `mcloud <命令>` ✓（`mcloud --help` 看清单 ✓）。");
+    print_usage();
+    std::process::exit(2)
+}
+
 /// 跑一条 CLI 命令。`args` 是**去掉程序名之后**的参数（`src/main.rs` 负责切）。
 ///
-/// 空 `args` 不会走到这里 —— 那是"起服务"，由 `src/main.rs` 分流
+/// 空 `args` 不会走到这里 —— 那是"起服务"，由 `src/main.rs` 按 [`dispatch`] 分流
 /// （这里仍然保留 `None => print_usage()` 那一支：它防的是"将来有人从别处
 /// 调进来"这种形状，不是给 `mcloud` 无参数用的）。
 pub async fn run(args: &[String]) -> anyhow::Result<()> {
+    // ⚠ **在组装应用之前**处理帮助：`mcloud --help` 不该去建/读数据目录 ✗
+    // （`AppBuilder::build` + `seed_run_ids` 会碰盘，而"看帮助"是一次纯输出 ✓）。
+    // `mcloud help` / `-h` / `serve --help` 都由 [`dispatch`] 收敛到这里 ✓。
+    if matches!(
+        args.first().map(String::as_str),
+        Some("help" | "--help" | "-h")
+    ) {
+        print!("{USAGE}");
+        return Ok(());
+    }
+
     let data_dir = std::env::var("MCLOUD_DATA_DIR").unwrap_or_else(|_| "data".to_string());
 
     let app = mcloud_app::AppBuilder::new()
@@ -115,11 +197,15 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
             // `pipeline run <id>` 与 `pipeline <id>` 都走这里（形状与 `auth refresh` 对齐）
             cli_pipeline::run_pipeline(&app, &args[1..]).await?;
         }
-        // 一键：内置默认编排。用户口径 2026-10-07「cli 一条命令」✓ ——
-        // 与 `pipeline run daily` 等价，但**不需要先知道那个 id** ✓。
-        Some("run-all") => {
-            cli_daily::run_all(&app, &args[1..]).await?;
-        }
+        // ⚠ 2026-10-11 用户裁定：**`run-all` 已删** ✗ —— 它原先在这里。
+        //
+        // 删它的理由（用户原话）：它**是多余的** ✗ —— 与 `mcloud run`（**不带参数**）
+        // **逐格相同**（同一条链、同一份判据 ✓、都只跑**本机管理员名下的全部账号** ✓），
+        // 而 `AGENTS.md` 的「补充裁定 2」写着 **CLI 要简单** ✓。
+        // ⇒ 一键跑「系统默认每日任务」只剩上面 `Some("run")` 那一支 ✓
+        //（光一个 `run` = 不带参数那条 ✓，见 `cli/daily.rs::run_default` ✓）。
+        // 现在它落进下面 `Some(other)` 那一支：**未知子命令 + 用法 + 退 2** ✓。
+        //
         // 推送规则（2026-10-07 用户口径「想想 cli 上该怎么做，记得写的时候兼容」✓）：
         // **新加的一条子命令** ⇒ 老命令/老脚本一个字都不用改 ✓（见 `cli/push.rs` 头部的兼容清单 ✓）。
         Some("push") => {
@@ -158,6 +244,25 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
             }
         }
         Some("run") => {
+            // ⚠⚠ **不带参数**是 2026-10-11 **新加**的一条路 ✓。
+            //
+            // 用户口径原话：「**`mcloud run` 为简写，主要功能是立即执行所有账号的
+            // 系统的默认每日任务**」✓ ⇒ `mcloud run`（光一个词）= **立即**把
+            // 「系统默认每日任务」跑在**本机管理员名下的全部账号**上 ✓。
+            //
+            // 判据（哪条链 = "系统默认每日任务"、哪些账号 = "所有账号"）**不在本地发明** ✗：
+            // 全在 `cli/daily.rs` 里、且复用既有那一处（`default_pipeline_id(管理员)` +
+            // `accounts_for(管理员)` ✓）—— 与那条 `daily-<owner>` 定时跑的是同一条链 ✓。
+            //
+            // ⚠ 下面那条**带参数**的路（`run <任务名> <账号>`）**一个字都没改** ✓
+            //（含它的用法错文案 ✓）—— 这里只是**先**判"光一个 `run`"。
+            if args.len() == 1 {
+                let outcome = cli_daily::run_default(&app).await?;
+                if outcome.code != 0 {
+                    std::process::exit(outcome.code);
+                }
+                return Ok(());
+            }
             let task = args
                 .get(1)
                 .context("用法：mcloud run <任务名> <账号> [--body <JSON>]")?;
@@ -377,39 +482,207 @@ fn print_login_usage() {
     eprintln!("另一套设备头，请求体还要加密；落盘的 auth 前缀也不同（mobile vs pc）。");
 }
 
+/// 顶层用法文本 —— **只有这一份** ✓。
+///
+/// * `mcloud help` / `mcloud --help` / `-h`（含 `mcloud serve --help`）⇒ 打到 **stdout**、退 0 ✓
+///   （见 [`run`] 开头那一支：**在组装应用之前**就返回，不碰数据目录 ✓）；
+/// * 不认识的子命令 ⇒ 走 [`print_usage`] 打到 **stderr**、退 2 ✓。
+///
+/// ⚠ 两处共用这一份：抄成两份迟早分叉，而"帮助在说谎"是最难发现的那种错 ✗。
+///
+/// # 为什么分成两组（2026-10-11 用户口径）
+///
+/// 用户原话：「**`mcloud serve` 为 webui 命令，简写为 `mcloud`；`mcloud user` 为 webui 命令**」✓，
+/// 而 `AGENTS.md` 的「补充裁定 2」把两个视角写死了：**WebUI = 多用户共享一份后端** ✓、
+/// **CLI = 个人 · 本地 · 简单** ✗（不许把 WebUI 的功能整批搬进 CLI ✗）。
+/// ⇒ 用法文本里把这两组**分开列** ✓（只分组与标注，**不改**任何子命令的行为/参数 ✓）。
+const USAGE: &str = r#"用法：mcloud [<命令> [参数]]
+
+── 服务端 / WebUI 命令（一个实例、多个登录用户各看各的 ✓）────────────────
+  serve                           起 WebUI 服务（默认 http://127.0.0.1:3000）
+                                  ⚠ **不带参数跑 `mcloud` 就是它** —— 两者等价 ✓
+  user list|add|passwd            给实例建账号（空实例上第一条 add = 管理员 ✓；
+                                  之后加的都是普通用户 ✓。见 `mcloud user`）
+
+── 个人 CLI（**只作用于本机那一个用户** = 管理员 ✓；没有 `--user`/`--owner` ✓）──
+  tasks                          列出可用任务
+  run                             不带参数 = **立即**把「系统默认每日任务」跑在
+                                  **本机管理员名下的全部账号**上（不是库里全部 ✗）
+                                  ⚠ `run --help` / `run help` / `run -h` 打这份清单（退 0 ✓）
+  run <任务名> <账号> [--body <JSON>]  带参数 = 只跑一次那个任务（照旧 ✓）
+                                 要参数的任务必须用 --body，例如：
+                                 run live-room <账号> --body '{"codes":"口令甲 口令乙","listenSeconds":45}'
+  pending                         查看本进程里还没清理的网盘产物
+  cron <定时id>                   跑一条已配置的定时（给系统 crontab 调用）
+  pipeline run <编排id>           跑一条已配置的编排
+  push [list|show|add|rm|events|bind]  推送规则（每账号的渠道之上那一层 ✓）
+  live-room auto-schedule [on|off|accounts <id,…>]
+                                 直播自动定时（**不带参数 = 只看状态** ✓；
+                                 写那几条会去上游现取下一场，约 10 秒）
+  auth refresh <--account|--all>  刷新凭据
+  auth auto-schedule [on|off|at HH:MM]  凭据自动刷新的开关与刷新时间
+                                 （刷新时间**每用户一个** ✓；CLI **只作用于本机那个用户** ✓，
+                                  选谁请在 WebUI 上改 —— 见 `mcloud auth auto-schedule help`）
+  login <方式>                    登录账号（qr / sms / app / password / device）
+  help, --help, -h                打印这份清单
+
+定时与编排的**创建**不在命令行：改配置文件，或用 WebUI。
+完整的 WebUI（含登录闸、账号管理、日志）在服务进程里：默认 http://127.0.0.1:3000
+"#;
+
 fn print_usage() {
-    eprintln!("用法：mcloud <命令> [参数]");
-    eprintln!();
-    // 2026-10-03 合并成一个二进制后，**不带参数**就是起服务（原来那条路只有
-    // `mcloud-server` 那个二进制有）。必须写在这里：CLI 的用法文本是唯一会被人看到的说明。
-    eprintln!("  （不带参数 = 起 WebUI 服务，默认 http://127.0.0.1:3000）");
-    eprintln!();
-    eprintln!("  tasks                          列出可用任务");
-    eprintln!("  run <任务名> <账号> [--body <JSON>]  跑一次任务");
-    eprintln!("                                 要参数的任务必须用 --body，例如：");
-    eprintln!("                                 run live-room <账号> --body '{{\"codes\":\"口令甲 口令乙\",\"listenSeconds\":45}}'");
-    eprintln!("  pending                         查看本进程里还没清理的网盘产物");
-    eprintln!("  cron <定时id>                   跑一条已配置的定时（给系统 crontab 调用）");
-    eprintln!("  pipeline run <编排id>           跑一条已配置的编排");
-    eprintln!("  push [list|show|add|rm|events|bind]  推送规则（每账号的渠道之上那一层 ✓）");
-    eprintln!("  live-room auto-schedule [on|off|accounts <id,…>]");
-    eprintln!("                                 直播自动定时（**不带参数 = 只看状态** ✓；");
-    eprintln!("                                 写那几条会去上游现取下一场，约 10 秒）");
-    eprintln!("  run-all                         一键跑**默认编排**（= pipeline run daily，");
-    eprintln!(
-        "                                 不需要先知道 id；默认编排与它的定时由服务启动时种下 ✓）"
-    );
-    eprintln!("  auth refresh <--account|--all>  刷新凭据");
-    eprintln!("  auth auto-schedule [on|off|at HH:MM]  凭据自动刷新的开关与刷新时间");
-    eprintln!("                                 （刷新时间**每用户一个** ✓；CLI **只作用于本机那个用户** ✓，");
-    eprintln!("                                  选谁请在 WebUI 上改 —— 见 `mcloud auth auto-schedule help`）");
-    eprintln!("  login <方式>                    登录账号（qr / sms / app / password / device）");
-    eprintln!("  user list|add|passwd            用户管理（加测试账号用；见 `mcloud user`）");
-    eprintln!();
-    eprintln!("定时与编排的**创建**不在命令行：改配置文件，或用 WebUI。");
-    // ⚠ 这里原先教用户跑 `mcloud serve` —— 那时**没有这个子命令**（全仓零命中），
-    // 照着打就是 `unknown command`（2026-10-03 review §1.15）。
-    // 合并成单个二进制后改成"不带参数就是服务"（上面那行）✓ —— 仍然**没有** `serve`
-    // 子命令：多一个别名只会让"托管那条命令行"与"文档"分叉 ✗。
-    eprintln!("完整的 WebUI（含登录闸、账号管理、日志）在服务进程里：默认 http://127.0.0.1:3000");
+    eprint!("{USAGE}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cli(args: &[&str]) -> Dispatch {
+        Dispatch::Cli(args.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// 门：**`serve` 与"不带参数"是同一条路** ✓（2026-10-11 用户口径：
+    /// 「`mcloud serve` 为 webui 命令，简写为 `mcloud`」✓）。
+    ///
+    /// ⚠ 这条断言是**行为契约**：谁要是把 `serve` 改成另起一条路（复制一份启动逻辑），
+    /// 这里就红 ✓。
+    #[test]
+    fn serve_and_no_args_take_the_same_path() {
+        assert_eq!(dispatch(Vec::new()), Dispatch::Serve, "不带参数 = 起服务 ✓");
+        assert_eq!(
+            dispatch(vec!["serve".to_string()]),
+            Dispatch::Serve,
+            "`serve` = 同一条路 ✓"
+        );
+        // `serve --help` / `serve help` ⇒ 看帮助（与 `mcloud --help` 同一份文本 ✓）
+        assert_eq!(
+            dispatch(vec!["serve".to_string(), "--help".to_string()]),
+            cli(&["--help"])
+        );
+        assert_eq!(
+            dispatch(vec!["serve".to_string(), "help".to_string()]),
+            cli(&["help"])
+        );
+        // `serve` 后面跟别的东西 ⇒ **报错**，不静默忽略 ✗
+        assert_eq!(
+            dispatch(vec!["serve".to_string(), "x".to_string()]),
+            Dispatch::BadServeArg("x".to_string())
+        );
+        // 既有子命令一个字都不变 ✓（`serve` 只是**新加**的一格 ✓）
+        assert_eq!(dispatch(vec!["tasks".to_string()]), cli(&["tasks"]));
+        assert_eq!(
+            dispatch(vec!["run".to_string(), "sign".to_string()]),
+            cli(&["run", "sign"])
+        );
+        assert_eq!(dispatch(vec!["--help".to_string()]), cli(&["--help"]));
+        assert_eq!(dispatch(vec!["user".to_string()]), cli(&["user"]));
+    }
+
+    /// 门：**`mcloud run --help` 是"看帮助"，不是"用法错"** ✓（2026-10-11）。
+    ///
+    /// 改前它落进**带参数那条老路**（`--help` 被当任务名 ⇒ 报用法错、退 1 ✗）；
+    /// 现在与 `serve --help` **同款**收敛成 [`cli`] 的 `--help` 那一格 ⇒
+    /// 与 `mcloud --help` **同一份文本**、打 stdout、退 0 ✓（见 [`run`] 开头那一支 ✓）。
+    ///
+    /// ⚠ 这条断言是**行为契约**：谁要是把 `run --help` 再拉回老路，这里就红 ✓。
+    #[test]
+    fn run_help_is_help_not_a_usage_error() {
+        for flag in ["help", "--help", "-h"] {
+            assert_eq!(
+                dispatch(vec!["run".to_string(), flag.to_string()]),
+                cli(&[flag]),
+                "`run {flag}` 要与 `mcloud {flag}` 走**同一条**路 ✓"
+            );
+        }
+        // ⚠ 只认"光一个 `run` + 一个帮助开关"：带参数那条老路**一个字都没被吃掉** ✓
+        assert_eq!(dispatch(vec!["run".to_string()]), cli(&["run"]));
+        assert_eq!(
+            dispatch(vec![
+                "run".to_string(),
+                "sign".to_string(),
+                "13900000000".to_string()
+            ]),
+            cli(&["run", "sign", "13900000000"]),
+            "`run <任务名> <账号>` 照旧走老路 ✓"
+        );
+        // 三参数时哪怕第二个词是 `help` 也不当帮助（那个位置是**任务名** ✓）
+        assert_eq!(
+            dispatch(vec![
+                "run".to_string(),
+                "help".to_string(),
+                "13900000000".to_string()
+            ]),
+            cli(&["run", "help", "13900000000"]),
+            "别把 `run <任务名> <账号>` 里那两个位置吃掉 ✓"
+        );
+    }
+
+    /// 门：帮助文本里**两组都在**，且 `serve` 与 `user` 归在**服务端 / WebUI** 那一组 ✓。
+    #[test]
+    fn usage_lists_both_groups() {
+        let server = USAGE
+            .find("服务端 / WebUI 命令")
+            .expect("帮助里要有「服务端 / WebUI 命令」那一组 ✓");
+        let personal = USAGE
+            .find("个人 CLI")
+            .expect("帮助里要有「个人 CLI」那一组 ✓");
+        assert!(server < personal, "服务端那组要在前面 ✓");
+
+        // 这两条是用户点名的"webui 命令"⇒ 必须落在**服务端 / WebUI** 那一段里 ✓
+        for line in ["  serve", "  user list|add|passwd"] {
+            let at = USAGE
+                .find(line)
+                .unwrap_or_else(|| panic!("帮助里少了 `{line}`"));
+            assert!(
+                server < at && at < personal,
+                "`{line}` 要归在「服务端 / WebUI」那组里 ✓"
+            );
+        }
+
+        // 个人 CLI 那几条要在**它自己**那一段里 ✓
+        for line in [
+            "  tasks",
+            "  run <任务名>",
+            "  login <方式>",
+            "  help, --help, -h",
+        ] {
+            let at = USAGE
+                .find(line)
+                .unwrap_or_else(|| panic!("帮助里少了 `{line}`"));
+            assert!(at > personal, "`{line}` 要归在「个人 CLI」那组里 ✓");
+        }
+
+        // ⚠ 默认行为**没被改**：不带参数仍然起服务，这句话必须还在 ✓
+        assert!(
+            USAGE.contains("不带参数跑 `mcloud` 就是它"),
+            "「不带参数 = 起服务」这条口径不能丢 ✓"
+        );
+    }
+
+    /// 门：`mcloud run` 的**两种形式**都要在帮助里说清 ✓（2026-10-11 用户口径：
+    /// 「`mcloud run` 为简写…两种形式都留」✓）。
+    ///
+    /// 两条断言各对应一种形式：不带参数 = **全部账号跑系统默认每日任务** ✓；
+    /// 带参数 = **只跑一次那个任务**（照旧 ✓）。
+    #[test]
+    fn usage_documents_both_forms_of_run() {
+        assert!(
+            USAGE.contains("不带参数 = **立即**把「系统默认每日任务」跑在"),
+            "帮助里要写清「不带参数 = 全部账号跑系统默认每日任务」✓"
+        );
+        assert!(
+            USAGE.contains("**本机管理员名下的全部账号**"),
+            "「所有账号」= 管理员名下的全部账号，这句要说出来 ✓"
+        );
+        assert!(
+            USAGE.contains("带参数 = 只跑一次那个任务"),
+            "带参数那条（照旧）也要写清 ✓"
+        );
+        // 带参数那条的**老用法行**一个字没改 ✓（既有测试也钉着它 ✓）
+        assert!(
+            USAGE.contains("  run <任务名> <账号> [--body <JSON>]"),
+            "带参数那条的用法行不能被改动 ✓"
+        );
+    }
 }

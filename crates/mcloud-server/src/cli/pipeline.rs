@@ -75,7 +75,7 @@ pub async fn run_pipeline(app: &App, args: &[String]) -> anyhow::Result<()> {
 ///
 /// 2026-10-07 用户口径：「实现一个默认的编排任务…cli 一条命令」＋ 紧接着的更正
 /// 「**默认编排也要和普通的自定义编排一个逻辑**」✓。
-/// ⇒ "默认编排"不该有自己的一套跑法 ✗：`run-all` 与 `pipeline run <id>` 走
+/// ⇒ "默认编排"不该有自己的一套跑法 ✗：`mcloud run`（不带参数）与 `pipeline run <id>` 走
 /// **同一个执行体**（账号解析、逐步播报、退出码逐格相同 ✓），差别只在"这条编排是从
 /// 库里取的，还是内置预设" ✓。
 ///
@@ -139,7 +139,10 @@ pub(crate) async fn run_one(app: &App, pipeline: &mcloud_core::Pipeline) -> anyh
 ///
 /// 不在 `StepStatus` 上实现 `Display`：那是引擎层的类型，服务端/前端/推送
 /// 各有各的措辞需求，把它钉死成一种语言会让别处只能绕开它。
-fn status_label(s: mcloud_engine::StepStatus) -> &'static str {
+///
+/// ⚠ `pub(crate)`：`cli/daily.rs`（`mcloud run` 不带参数那条 ✓）也用它 ——
+/// 同一档状态在两条命令上**措辞必须一致** ✓，所以不复制一份到那边 ✗。
+pub(crate) fn status_label(s: mcloud_engine::StepStatus) -> &'static str {
     use mcloud_engine::StepStatus as S;
     match s {
         S::Ok => "成功",

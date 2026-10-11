@@ -349,7 +349,9 @@ async fn run_without_any_account_is_400() {
 /// 两条错误必须可区分：一个是"你没给"，一个是"给了但没有可跑的账号"。
 #[tokio::test]
 async fn run_with_empty_account_list_is_400_when_user_has_none() {
-    let (handle, dir) = test_app("run-all-empty");
+    // ⚠ 临时目录名改过一次：旧名说的是"全部账号"那个语义 ✓，而 2026-10-11 删掉 CLI
+    // 那条同名子命令后它只剩歧义 ⇒ 顺手改成描述这条用例自己的名字 ✓（断言一条没动 ✓）。
+    let (handle, dir) = test_app("empty-accounts-400");
     let req = post_json(
         "/api/runs",
         &serde_json::json!({ "task": "sign", "accounts": [] }),
@@ -2911,6 +2913,18 @@ async fn schedule_update_keeps_the_accounting_columns() {
     .await;
     assert_eq!(s, StatusCode::OK, "{out}");
     assert_eq!(json_body(&out)["id"], id, "{out}");
+    // ⚠ 「上次结果」那句说明（`lastNote` ✓）**这一格总是在**（`Schedule` 那一列没有
+    // `skip_serializing_if` ✓）：不在的话前端读成 `undefined`，而"空就不显示"恰好
+    // 把它兜住了 ⇒ 少了这一格**看不出来** ✗（`web/src/api.ts` 的 `Schedule` 也是
+    // 按"总在"写的 ✓）。
+    assert!(
+        json_body(&out).get("lastNote").is_some(),
+        "`lastNote` 这一格必须一直在（缺了看不出来）：{out}"
+    );
+    assert!(
+        json_body(&out)["lastNote"].is_null(),
+        "还没跑过 ⇒ 空：{out}"
+    );
 
     // 直接把"跑过一次、且上次失败了"写进库（不跑调度器：那要等 tick）
     let sid = mcloud_core::ScheduleId::new(id);
@@ -2922,6 +2936,12 @@ async fn schedule_update_keeps_the_accounting_columns() {
     handle
         .store
         .record_schedule_run(&sid, Some(1_700_000_000_500), "error", Some("上游 500"))
+        .await
+        .unwrap();
+    // 「上次结果」那句人话（`Schedule::last_note` ✓，凭据自动刷新那条定时会写它 ✓）
+    handle
+        .store
+        .record_schedule_note(&sid, Some("未到提前量，跳过（还剩 12 天）"))
         .await
         .unwrap();
 
@@ -2947,6 +2967,10 @@ async fn schedule_update_keeps_the_accounting_columns() {
         "上次错误也要留：清了就是「写着失败却答不出原因」：{out}"
     );
     assert_eq!(v["lastStatus"], "error", "{out}");
+    assert_eq!(
+        v["lastNote"], "未到提前量，跳过（还剩 12 天）",
+        "「上次结果」那句说明也要留（清了就是「那次为什么没刷」没了）：{out}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -5912,6 +5936,26 @@ async fn the_scheduled_tick_refreshes_only_what_is_due() {
         Some("ok"),
         "记 ok（跳过是正常结局）：{after:?}"
     );
+
+    // ⭐⭐ **这一趟的结论要在定时页上看得见**（2026-10-11 用户口径：
+    // 「自动定时的跳过原因在定时页上看不出来」✗）——
+    // 它原先**只进服务端日志**（上面那几条 `tracing::info!` ✓）✗。
+    //
+    // ⚠ 走的是**真路径**（`Scheduler::tick()` → 钩子 → `record_schedule_note` ✓），
+    // 不是直接调 store ⇒ 这才钉得住"到点了会不会真写这一格" ✓
+    //（本仓在"只测下层、没测接没接上"上栽过：见本用例开头那段说明 ✓）。
+    // ⚠ 天数不写死：这条用例的钟是**真钟**（`test_app_with_refresh_upstream` ✓）⇒
+    // 只钉形状（"已换 1 个凭据、1 个未到提前量（还剩 N 天）"✓），钉死数字会变成
+    // 每天都会烂的用例 ✗。
+    let note = after
+        .last_note
+        .as_deref()
+        .unwrap_or_else(|| panic!("全跳过也要在定时页上留一句人话：{after:?}"));
+    assert!(
+        note.starts_with("已换 1 个凭据、1 个未到提前量（还剩 "),
+        "要同时说清换了几个、跳过几个、还剩几天：{note}"
+    );
+    assert!(note.ends_with(" 天）"), "那句要说得出还剩几天：{note}");
 
     // ⭐ 而且**逐条的结局与原因**都留了痕：把这条定时再触发一次、看日志里那句
     //（`record_schedule_run` 只记一句汇总 ✓ ⇒ 逐条原因在服务端日志里 ✓，
