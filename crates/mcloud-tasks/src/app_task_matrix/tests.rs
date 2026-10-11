@@ -283,6 +283,11 @@ fn items_json_keeps_the_field_names_the_ui_reads() {
     it.curr_step = Some(3);
     it.button_app_link = Some("mcloud://main/uploadView".into());
     let js = items_json(&[it]);
+    // `buttonProperty.out.text` —— 界面照抄上游那句话的那一格 ✓（2026-10-11 加 ✓）。
+    assert!(
+        js[0].get("buttonOutText").is_some(),
+        "`items_json` 必须报出 `buttonOutText`（界面靠它显示上游自己的文案 ✓）"
+    );
     assert_eq!(js[0]["taskId"], 106);
     assert_eq!(js[0]["groupId"], "day");
     assert_eq!(js[0]["state"], "FINISH");

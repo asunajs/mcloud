@@ -182,6 +182,9 @@ pub fn items_json(items: &[TaskV2Item]) -> Vec<Value> {
                 // `button.app.link` 里（`beiyong1_button_gate`）⇒ 不报出来就没法在界面上
                 // 核"它到底该不该传 10 张" ✓（2026-10-04 加，接 615 时 ✓）。
                 "buttonAppLink": t.button_app_link,
+                // 上游自己给这条任务、这个状态写的那句话（`buttonProperty.out.text` ✓）——
+                // 界面照抄它，读不出才回落状态词（2026-10-11 用户口径 ✓）。
+                "buttonOutText": t.button_out_text,
             })
         })
         .collect()

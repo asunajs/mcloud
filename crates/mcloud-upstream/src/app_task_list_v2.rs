@@ -161,6 +161,17 @@ pub struct TaskV2Item {
     ///
     /// ⚠ 只取这一格、**不**抄整份 `button`：这条链只判"是不是那个按钮" ✓
     ///（那 25 个键里其余的是七份端形态、素材、排序之类，本层不判 ✓）。
+    /// `buttonProperty.out.text` —— **上游自己给这一条、这一状态写的那句话** ✓。
+    ///
+    /// ⚠⚠ **别拿它当状态词**（2026-10-11 用户口径：「与原接口文案一致」）：
+    /// 它是**逐条**的 —— 真机实拍同一趟里 `state=WAIT` 的两条，
+    /// 1029「查看"我的账单"」是 **「去完成」** ✓，而「连续31天开启邮箱APP通知」是 **「开启中」** ✓；
+    /// `state=FINISH` 的「下月签到领惊喜福利」是 **「次月可领」** ✓。
+    /// ⇒ 界面若一刀切写「待做」，就把"上游已经给了具体动作"这件事盖掉了 ✗。
+    ///
+    /// 取 `buttonProperty.out`（**外部端**那一份 ✓ —— WebUI 就是外部端 ✓），
+    /// 缺了再回落 `button.out` ✓；两层都缺 / 不是字符串 ⇒ `None`（界面回落状态词 ✓）。
+    pub button_out_text: Option<String>,
     pub button_app_link: Option<String>,
     /// `button.email.link` —— **邮箱端**那一档的入口（实拍是短链 `https://y.10086.cn/x/<码>`
     /// 或带 `token=#ssoToken#` 占位的落地页）。
@@ -253,6 +264,17 @@ pub fn parse_task_list_v2(body: &str, group: &str) -> Result<TaskListV2> {
                     market_name: str_at(get("marketname")),
                     // `button.app.link`（玩法 615 那一族唯一的门 ✓）。缺键 / 少一层 /
                     // 不是字符串 ⇒ `None`（"读不出" ⇒ 那一族就**不动**，不会误点 ✓）。
+                    button_out_text: get("buttonProperty")
+                        .and_then(|b| b.get("out"))
+                        .and_then(|o| o.get("text"))
+                        .and_then(Value::as_str)
+                        .or_else(|| {
+                            get("button")
+                                .and_then(|b| b.get("out"))
+                                .and_then(|o| o.get("text"))
+                                .and_then(Value::as_str)
+                        })
+                        .map(str::to_string),
                     button_app_link: get("button")
                         .and_then(|b| b.get("app"))
                         .and_then(|a| a.get("link"))

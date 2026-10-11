@@ -387,3 +387,30 @@ fn button_email_link_is_read_and_does_not_leak_into_app_link() {
         assert_eq!(p.items[0].button_email_link, None, "坏形状 ⇒ None：{bad}");
     }
 }
+
+/// `buttonProperty.out.text` —— **上游自己给这条任务、这个状态写的那句话** ✓。
+///
+/// 2026-10-11 用户口径「与原接口文案一致」：界面原先把 `WAIT` 一刀切写成「待做」✗，
+/// 而上游同一趟里 `WAIT` 的两条文案**不一样**（「去完成」/「开启中」✓）⇒ 这一格必须读到 ✓。
+#[test]
+fn button_out_text_prefers_button_property_then_falls_back() {
+    // ① 实拍那条 1029 的形状：`buttonProperty.out.text` = 「去完成」✓
+    //    ⚠ 这一口的外壳是 `result` 按 group 分组的**对象**（与 V3 不同形 ✗）。
+    let body = r#"{"code":0,"msg":"success","result":{"month":[
+        {"id":1029,"name":"查看“我的账单”","state":"WAIT","currstep":0,
+         "buttonProperty":{"out":{"text":"去完成"}},"button":{"out":{"text":"别取这格"}}}]}}"#;
+    let list = parse_task_list_v2(body, "month").expect("解析得出");
+    assert_eq!(list.items[0].button_out_text.as_deref(), Some("去完成"));
+
+    // ② 只有 `button.out.text` 时回落它 ✓
+    let body2 = r#"{"code":0,"msg":"success","result":{"month":[
+        {"id":7,"name":"x","state":"WAIT","button":{"out":{"text":"开启中"}}}]}}"#;
+    let list2 = parse_task_list_v2(body2, "month").expect("解析得出");
+    assert_eq!(list2.items[0].button_out_text.as_deref(), Some("开启中"));
+
+    // ③ 两层都没有 ⇒ `None`（界面回落状态词 ✓，不猜 ✗）
+    let body3 =
+        r#"{"code":0,"msg":"success","result":{"month":[{"id":8,"name":"y","state":"WAIT"}]}}"#;
+    let list3 = parse_task_list_v2(body3, "month").expect("解析得出");
+    assert_eq!(list3.items[0].button_out_text, None);
+}

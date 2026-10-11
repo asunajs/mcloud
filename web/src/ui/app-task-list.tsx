@@ -41,10 +41,21 @@ const GROUP_NAMES: Record<string, string> = {
 /** 剥掉上游名字里的 HTML 标签（顺带把空白收一下 ✓）。 */
 const plainName = (name: string): string => name.replace(/<[^>]*>/g, '').trim()
 
-/** 状态 → 徽章（`FINISH` 是**唯一**的"完成"✓，别把 `WAIT` 也画成绿的 ✗）。 */
-const stateView = (state: string): { label: string; cls: string } => {
+/**
+ * 状态 → 徽章（`FINISH` 是**唯一**的"完成"✓，别把 `WAIT` 也画成绿的 ✗）。
+ *
+ * ⚠⚠ `WAIT` **不写死**「待做」✗（2026-10-11 用户口径：「**与原接口文案一致**」）：
+ * 上游那一格 `buttonProperty.out.text` 是**逐条**的 —— 真机实拍同一趟里 `state=WAIT`
+ * 的两条，1029「查看"我的账单"」是 **「去完成」** ✓、而「连续31天开启邮箱APP通知」是
+ * **「开启中」** ✓。一刀切写「待做」会把"上游已经给了具体动作"这件事盖掉 ✗。
+ * ⇒ 有就**照抄** ✓；读不出才回落「**未完成**」✓（与档位按钮上那个词一致，不再另造一个 ✗）。
+ */
+const stateView = (state: string, outText?: string | null): { label: string; cls: string } => {
   if (state === 'FINISH') return { label: '已完成', cls: 'badge-success' }
-  if (state === 'WAIT') return { label: '待做', cls: 'badge-warning' }
+  if (state === 'WAIT') {
+    const text = (outText ?? '').trim()
+    return { label: text === '' ? '未完成' : text, cls: 'badge-warning' }
+  }
   if (state === 'DOING') return { label: '进行中', cls: 'badge-info' }
   return { label: state === '' ? '未知' : state, cls: 'badge-ghost' }
 }
@@ -208,8 +219,8 @@ export const AppTaskListView = (props: { matrix: UpstreamAppTaskList }) => {
                     <span class="break-words text-xs opacity-50">{i.description}</span>
                   ) : null}
                 </div>
-                <span class={`badge badge-sm shrink-0 ${stateView(i.state ?? '').cls}`}>
-                  {stateView(i.state ?? '').label}
+                <span class={`badge badge-sm shrink-0 ${stateView(i.state ?? '', i.buttonOutText).cls}`}>
+                  {stateView(i.state ?? '', i.buttonOutText).label}
                 </span>
               </div>
             ))}

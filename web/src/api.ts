@@ -890,6 +890,12 @@ export interface UpstreamAppTaskItem {
   marketName: string | null
   /** 玩法 615 那一族的**门**就在这一格里 ✓。 */
   buttonAppLink: string | null
+  /**
+   * `buttonProperty.out.text` —— **上游自己给这条任务、这个状态写的那句话** ✓。
+   *
+   * ⚠ 别当状态词用：它是**逐条**的（实拍同一趟 `WAIT` 的两条，一条「去完成」一条「开启中」✓）。
+   */
+  buttonOutText: string | null
 }
 
 /** 状态分布。三个数**分开**报 —— `unknown` 不能并进"未完成" ✗。 */
