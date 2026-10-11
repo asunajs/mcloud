@@ -128,6 +128,12 @@ const metaLine = (i: UpstreamAppTaskItem, notice: UpstreamNoticeView | null): st
   // 条目上那句奖励（`content_display2` ✓ —— App 那行「完成进度 (5/31) **+100豆**」的尾巴 ✓）。
   const reward = (i.rewardText ?? '').trim()
   if (reward !== '') bits.push(reward)
+  // ⚠ 与上面那块**撤掉的**「可领取」牌**不是一回事** ✗：
+  //   这一句读的是**上游自己的字段** `button.*.canReceive` ✓（实拍 `canReceive: 0` ✓），
+  //   而 TS 参考实现（`notice.ts`）的判据正是 `day > 0 && canReceive === 1` ✓
+  //   ⇒ 有 TS 依据 ✓（依据优先级：抓包 > TS > 推断 ✓）。
+  //   撤掉那块牌读的是 `cloudStatus` / `taskStatus` 的**猜测映射** ✗（至今没有一条"未领"
+  //   的正面样本 ✗）—— 那个不许当读数摆 ✗（2026-10-11 用户口径 ✓）。
   if (i.buttonCanReceive === 1) bits.push('可领取')
   if (i.enable === 0) bits.push('上游已停用')
   if (i.buttonAppLink != null && i.buttonAppLink !== '') bits.push(i.buttonAppLink)
@@ -159,25 +165,6 @@ export const AppTaskListView = (props: { matrix: UpstreamAppTaskList }) => {
   const onToggle = (g: string, open: boolean) => {
     if (groupOpen.value[g] === open) return
     groupOpen.value = { ...groupOpen.value, [g]: open }
-  }
-
-  /**
-   * 这一条**现在能不能领** ✓ —— 拿条目上那句奖励（`+100豆` ✓）的**数字**去通知那一口对槽 ✓。
-   *
-   * ⚠ 对槽是**从 `sum` 认的**（不是猜的 ✓）：实拍 `taskOneInfo.sum = 200` 对得上 550
-   * 条目上的 `+200豆` ✓、`taskTwoInfo.sum = 100` 对得上 1021/1079 的 `+100豆` ✓。
-   * 通知那一口没读到（`notice == null` ✓）⇒ 一律**不显示** ✓，别猜 ✗。
-   *
-   * ⚠ 它要挂在**组件体**里（不能塞进 `items()` 那个函数里 ✗ —— 那样渲染处看不见它 ✗）。
-   */
-  const claimable = (i: UpstreamAppTaskItem): boolean => {
-    const n = props.matrix.notice
-    if (n == null) return false
-    const sum = Number((i.rewardText ?? '').replace(/[^0-9]/g, ''))
-    if (!(sum > 0)) return false
-    if (n.cloud.sum === sum) return n.cloudClaimable
-    if (n.email.sum === sum) return n.emailClaimable
-    return false
   }
 
   /** 当前档位下的条目。 */
@@ -297,14 +284,9 @@ export const AppTaskListView = (props: { matrix: UpstreamAppTaskList }) => {
                     <span class="break-words text-xs opacity-50">{i.description}</span>
                   ) : null}
                 </div>
-                <div class="flex shrink-0 flex-col items-end gap-1">
-                  <span class={`badge badge-sm shrink-0 ${stateView(i).cls}`}>
-                    {stateView(i).label}
-                  </span>
-                  {claimable(i) ? (
-                    <span class="badge badge-sm shrink-0 badge-info">可领取</span>
-                  ) : null}
-                </div>
+                <span class={`badge badge-sm shrink-0 ${stateView(i).cls}`}>
+                  {stateView(i).label}
+                </span>
               </div>
             ))}
           </div>

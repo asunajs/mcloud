@@ -102,9 +102,11 @@ pub struct NoticeView {
     pub cloud: NoticeSlotView,
     /// 邮箱通知那一槽（1021/1079 那族 ✓）。
     pub email: NoticeSlotView,
-    /// 该不该领 —— 复用任务链**同一份判据** ✓（`notice_slot_claimable` ✓），不另写一套 ✗。
-    pub cloud_claimable: bool,
-    pub email_claimable: bool,
+    // ⚠⚠ **这里不报"该不该领"** ✗（2026-10-11 用户口径：「那个牌是旧项目口径的推断，
+    // 别当读数」）—— `notice_slot_claimable` 那套映射**至今没有一条"未领"的正面样本**
+    // ⇒ 它是**推断**，摆到界面上就会被当成读数 ✗。
+    // 要判"该不该领"就在任务链里用 `notice_slot_claimable` ✓（那里本来就复用同一份 ✓）；
+    // 这里只给**逐字读数**：`cloudStatus` / `sum` / `progress` / `taskStatus` ✓。
 }
 
 /// 一次"按需取"的读数。
@@ -191,7 +193,6 @@ pub async fn app_task_list(
 
 /// 把协议层的两个槽摊成界面读数 ✓（`cloudStatus` / `sum` / `progress` / `taskStatus` ✓）。
 fn notice_view(info: &mcloud_upstream::app_notice::NoticeTaskInfo) -> NoticeView {
-    use mcloud_tasks::notice::notice_slot_claimable;
     let slot = |s: Option<&mcloud_upstream::app_notice::NoticeTaskSlot>| NoticeSlotView {
         cloud_status: s.and_then(|x| x.cloud_status),
         sum: s.and_then(|x| x.sum),
@@ -201,8 +202,6 @@ fn notice_view(info: &mcloud_upstream::app_notice::NoticeTaskInfo) -> NoticeView
     NoticeView {
         cloud: slot(info.task_one_info.as_ref()),
         email: slot(info.task_two_info.as_ref()),
-        cloud_claimable: notice_slot_claimable(info.task_one_info.as_ref()),
-        email_claimable: notice_slot_claimable(info.task_two_info.as_ref()),
     }
 }
 

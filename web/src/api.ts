@@ -941,8 +941,8 @@ export interface UpstreamNoticeSlot {
 export interface UpstreamNoticeView {
   cloud: UpstreamNoticeSlot
   email: UpstreamNoticeSlot
-  cloudClaimable: boolean
-  emailClaimable: boolean
+  // ⚠⚠ **没有"该不该领"这一项** ✗（2026-10-11 用户口径：「那个牌是旧项目口径的推断，
+  // 别当读数」）⇒ 界面不许把推断当读数摆出来 ✗。要判就在任务链里判 ✓。
 }
 
 export interface UpstreamAppTaskList {
