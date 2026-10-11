@@ -108,16 +108,29 @@ const metaLine = (i: UpstreamAppTaskItem, notice: UpstreamNoticeView | null): st
   //   分母读不出就只写分子 ✓，别编 ✗。
   // ⚠ 分子**两个来源**，先到先用 ✓（2026-10-11 live 读数）：
   //   ① 条目自己的 `button.*.day`（1021「邮箱**APP**通知」实拍 `"5"` ✓）；
-  //   ② 条目没有 `day` 时，取**通知那一口**（`getTaskInfo`）里 `sum` 对得上本条奖励
-  //      那个槽的 `progress` —— live 实拍 `taskTwoInfo{sum:100, progress:17}` ✓
-  //      正是 1079「邮箱**短信**通知」在 App 上显示的「(17/31)」✓。
-  const rewardSum = Number((i.rewardText ?? '').replace(/[^0-9]/g, ''))
+  //   ② 条目没有 `day` 时，取**通知那一口**（`getTaskInfo`）里**对应族**那个槽的
+  //      `progress` —— live 实拍 `taskTwoInfo.progress = 17` ✓ 正是 1079
+  //      「连续31天开启邮箱**短信**通知」在 App 上显示的「(17/31)」✓。
+  //
+  // ⚠⚠ **对族只能按名字认** ✗（2026-10-11 实测踩到）：先按"奖励数字对槽"对 ✗ ——
+  //   可 1079 的 `+100豆` 落在 `description` 里、它的 `content_display2` 是**空的** ✗
+  //   （#550/#551/#1078 才有 `content_display2` ✓）⇒ 对不上 ⇒ 分子接不上 ✗。
+  //   而 `sum` 本身也分不开族：`taskOneInfo.sum = 200` ✓、`taskTwoInfo.sum = 100` ✓，
+  //   可 1078 也是 `+200豆` ✗ ⇒ 数字对不上号 ✓。
+  //   ⇒ 按**名字**认：云盘那一族 ↔ `taskOneInfo` ✓、**短信**那一族 ↔ `taskTwoInfo` ✓
+  //   （那一口的模块名就是 `openemailsms-service` = **短信** ✓，这是实拍的主机路径 ✓）。
+  const name = plainName(i.name ?? '')
+  const family: 'cloud' | 'sms' | null =
+    name.includes('云盘') && name.includes('通知')
+      ? 'cloud'
+      : name.includes('短信') && name.includes('通知')
+        ? 'sms'
+        : null
   const slotProgress = (): number | null => {
     const n = notice
-    if (n == null || !(rewardSum > 0)) return null
-    if (n.cloud.sum === rewardSum && n.cloud.progress != null) return n.cloud.progress
-    if (n.email.sum === rewardSum && n.email.progress != null) return n.email.progress
-    return null
+    if (n == null || family == null) return null
+    const p = family === 'cloud' ? n.cloud.progress : n.email.progress
+    return p == null ? null : p
   }
   const fromNotice = slotProgress()
   const day = (i.buttonOutDay ?? '').trim() || (fromNotice != null ? String(fromNotice) : '')
