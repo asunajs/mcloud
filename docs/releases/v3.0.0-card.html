@@ -1,0 +1,62 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<style>
+:root{--bg:#0b1020;--fg:#e8ecf8;--dim:#9aa6c4;--line:#232c46;--accent:#6ee7ff;--ok:#5ee6a8}
+*{box-sizing:border-box;margin:0;padding:0}
+body{width:1080px;background:linear-gradient(160deg,#0b1020,#131a33 60%,#0e1428);
+ color:var(--fg);font:16px/1.75 -apple-system,"PingFang SC","Helvetica Neue",sans-serif;padding:56px 60px}
+.head{display:flex;align-items:flex-end;gap:18px;border-bottom:1px solid var(--line);padding-bottom:22px}
+h1{font-size:52px;letter-spacing:-1px}
+.tag{font-size:15px;color:#0b1020;background:var(--ok);border-radius:999px;padding:5px 14px;font-weight:700;margin-bottom:9px}
+.sub{color:var(--dim);margin-top:12px;font-size:17px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:26px}
+.card{background:#161e38;border:1px solid var(--line);border-radius:16px;padding:20px 22px}
+.card h3{font-size:19px;color:var(--accent);margin-bottom:10px}
+.card li{list-style:none;color:#cfd7ee;font-size:15.5px;margin:7px 0;padding-left:16px;position:relative}
+.card li:before{content:"";position:absolute;left:0;top:11px;width:6px;height:6px;border-radius:50%;background:var(--accent);opacity:.85}
+table{width:100%;border-collapse:collapse;margin-top:12px;font-size:15px}
+td,th{border-bottom:1px solid var(--line);padding:9px 4px;text-align:left}
+th{color:var(--dim);font-weight:600}
+code{background:#0d1striped;background:#0d142a;border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:14px;color:#a5f3fc}
+.foot{margin-top:26px;border-top:1px solid var(--line);padding-top:16px;color:var(--dim);font-size:15px;display:flex;justify-content:space-between}
+.wide{grid-column:1 / -1}
+</style></head><body>
+<div class="head"><h1>mcloud 3.0.0</h1><span class="tag">第一个正式版</span></div>
+<div class="sub">中国移动云盘的自动化工具 · 一个可执行文件，既是命令行也是网页服务</div>
+<div class="grid">
+  <div class="card"><h3>直播小红花</h3><ul>
+    <li>修掉口令误判：入场/送礼/点赞不再被当成口令投出去</li>
+    <li>每条口令都能看到领到了什么，不再只报总数</li>
+    <li>默认最长收听 60 秒 → 180 秒</li></ul></div>
+  <div class="card"><h3>凭据（登录状态）</h3><ul>
+    <li>每天到你设的钟点检查一次，该换才换；不需要换就跳过并写明原因</li>
+    <li>每个登录用户各设各的钟点，互不影响</li>
+    <li>账号页可一键刷新（手动刷新不看还剩多少天）</li></ul></div>
+  <div class="card"><h3>推送（通知）</h3><ul>
+    <li>规则管「怎么发」，行为管「什么时候发」，一个行为可选多条规则</li>
+    <li>默认保守、不刷屏；被限流会记日志</li>
+    <li>每日上限填 0 表示不限</li></ul></div>
+  <div class="card"><h3>定时与编排</h3><ul>
+    <li>定时页可直接选「编排」作为目标</li>
+    <li>直播自动定时：按上游「下一场」自动设好</li></ul></div>
+  <div class="card"><h3>命令行更简单</h3><ul>
+    <li><code>mcloud</code> 起网页服务；<code>mcloud run</code> 立即跑默认每日任务</li>
+    <li>只操作本机管理员那一个用户，没有 <code>--user</code> 之类的选择</li></ul></div>
+  <div class="card"><h3>更安全的默认</h3><ul>
+    <li>推送地址默认拒绝指向本机/内网</li>
+    <li>运行日志有总量上限</li>
+    <li>连不上服务端时显示中文说明，不再是英文 Failed to fetch</li></ul></div>
+  <div class="card wide"><h3>云朵中心任务（App 里的任务）</h3><ul>
+    <li>列表改走新版接口：不再把<b>已经过期的任务</b>列出来，与 App 看到的一致，并补回之前缺的条目</li>
+    <li>进度与文案照 App 显示：「完成进度 (17/31)」；状态词按上游那一档显示（「开启中」「下月再来」「去完成」），不再一律写「待做」</li>
+    <li>新做出来：「去云盘图书馆阅读书籍」(604)、「和AI助手对话」(609)、「加入一个知识库」(547)、「查看"我的账单"」(1029)</li>
+    <li>上游已做满的条目：只领奖、不再重复运行，也不再误报失败</li>
+    <li>通知口接上：能读到「+100豆」与进度分子</li></ul></div>
+  <div class="card wide"><h3>下载哪个</h3>
+    <table><tr><th>你的机器</th><th>选哪个</th></tr>
+      <tr><td>Linux（Intel/AMD 64 位）</td><td><code>x86_64-unknown-linux-gnu</code></td></tr>
+      <tr><td>Linux，系统较老或缺库</td><td><code>x86_64-unknown-linux-musl</code>（静态，不挑系统）</td></tr>
+      <tr><td>Linux（ARM 64 位）</td><td><code>aarch64-unknown-linux-gnu</code></td></tr>
+      <tr><td>Windows</td><td><code>x86_64-pc-windows-msvc</code>（zip）</td></tr></table></div>
+</div>
+<div class="foot"><span>github.com/asunajs/mcloud · v3.0.0</span><span>数据就在程序旁边的 data/ 目录，整个拷走就是备份</span></div>
+</body></html>
