@@ -188,6 +188,11 @@ pub fn items_json(items: &[TaskV2Item]) -> Vec<Value> {
                 // 进度与"能不能领"（`button.out.day` / `canReceive` ✓）—— 界面此前只读
                 // `process`，于是"App 里有进度、这里没有" ✗（2026-10-11 用户口径 ✓）。
                 "buttonOutDay": t.button_out_day,
+                // 上游那格是**三档**文案（`text` / `textMiddle` / `textFinish` ✓）——
+                // 界面按阶段挑，别只读第一档 ✗（2026-10-11 用户口径 ✓）。
+                "buttonTextMiddle": t.button_text_middle,
+                "buttonTextFinish": t.button_text_finish,
+                "buttonActionMiddle": t.button_action_middle,
                 "buttonCanReceive": t.button_can_receive,
             })
         })

@@ -50,11 +50,36 @@ const plainName = (name: string): string => name.replace(/<[^>]*>/g, '').trim()
  * **「开启中」** ✓。一刀切写「待做」会把"上游已经给了具体动作"这件事盖掉 ✗。
  * ⇒ 有就**照抄** ✓；读不出才回落「**未完成**」✓（与档位按钮上那个词一致，不再另造一个 ✗）。
  */
-const stateView = (state: string, outText?: string | null): { label: string; cls: string } => {
-  if (state === 'FINISH') return { label: '已完成', cls: 'badge-success' }
+const stateView = (i: UpstreamAppTaskItem): { label: string; cls: string } => {
+  const state = i.state ?? ''
+  // 上游那格是**三档**文案（`text` / `textMiddle` / `textFinish` ✓，2026-10-11 真机实拍）：
+  //
+  // | 任务 | text（未开始） | textMiddle（进行中） | textFinish（已完成） |
+  // | --- | --- | --- | --- |
+  // | 550 开启云盘APP通知领好礼 | 去开启 | 领AI豆 | 已领取 |
+  // | 551 连续31天开启云盘APP通知 | 去开启 | **开启中** | 领AI豆 |
+  // | 1079 连续31天开启邮箱短信通知 | 去开启 | **开启中** | 领AI豆 |
+  //
+  // ⇒ 只读 `text` 就会把进行中的条目全显示成「去开启」✗（用户口径：「我在 app 看到的是已开启」✓）。
+  // **阶段怎么判**：`actionMiddle` 空/非空 —— 实拍 551/1079 是 `"jump"` ✓、550 是 `""` ✓。
+  const pick = (first?: string | null, ...rest: (string | null | undefined)[]): string => {
+    for (const v of [first, ...rest]) {
+      const t = (v ?? '').trim()
+      if (t !== '') return t
+    }
+    return ''
+  }
+  const middle = (i.buttonActionMiddle ?? '').trim()
+  if (state === 'FINISH') {
+    const t = pick(i.buttonTextFinish, i.buttonOutText)
+    return { label: t === '' ? '已完成' : t, cls: 'badge-success' }
+  }
   if (state === 'WAIT') {
-    const text = (outText ?? '').trim()
-    return { label: text === '' ? '未完成' : text, cls: 'badge-warning' }
+    const t =
+      middle === ''
+        ? pick(i.buttonOutText, i.buttonTextMiddle)
+        : pick(i.buttonTextMiddle, i.buttonOutText)
+    return { label: t === '' ? '未完成' : t, cls: 'badge-warning' }
   }
   if (state === 'DOING') return { label: '进行中', cls: 'badge-info' }
   return { label: state === '' ? '未知' : state, cls: 'badge-ghost' }
@@ -225,8 +250,8 @@ export const AppTaskListView = (props: { matrix: UpstreamAppTaskList }) => {
                     <span class="break-words text-xs opacity-50">{i.description}</span>
                   ) : null}
                 </div>
-                <span class={`badge badge-sm shrink-0 ${stateView(i.state ?? '', i.buttonOutText).cls}`}>
-                  {stateView(i.state ?? '', i.buttonOutText).label}
+                <span class={`badge badge-sm shrink-0 ${stateView(i).cls}`}>
+                  {stateView(i).label}
                 </span>
               </div>
             ))}

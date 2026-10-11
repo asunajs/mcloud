@@ -905,6 +905,12 @@ export interface UpstreamAppTaskItem {
   buttonOutDay: string | null
   /** `button.out.canReceive` —— 上游说"现在能不能领"（`1` 才算能领 ✓）。 */
   buttonCanReceive: number | null
+  /** **进行中**那一档文案（实拍 551/1079 是「开启中」✓）。 */
+  buttonTextMiddle: string | null
+  /** **已完成**那一档文案（实拍 550 是「已领取」✓）。 */
+  buttonTextFinish: string | null
+  /** `actionMiddle` —— 空/非空区分"在不在进行中" ✓（实拍 551/1079 是 `"jump"`、550 是 `""`）。 */
+  buttonActionMiddle: string | null
 }
 
 /** 状态分布。三个数**分开**报 —— `unknown` 不能并进"未完成" ✗。 */

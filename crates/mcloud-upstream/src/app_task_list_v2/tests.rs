@@ -454,3 +454,40 @@ fn button_out_day_and_can_receive_come_from_button_out() {
     assert_eq!(list3.items[0].button_out_text.as_deref(), Some("email 的"));
     assert_eq!(list3.items[0].button_out_day.as_deref(), Some("2"));
 }
+
+/// 上游那格是**三档**文案 ✓（`text` / `textMiddle` / `textFinish` ✓）——
+/// 用真机实拍的三条原样（抓包仓 §12.6 与 2026-10-11 小号活读数 ✓）：
+///
+/// | 任务 | text | textMiddle | textFinish | actionMiddle |
+/// | --- | --- | --- | --- | --- |
+/// | 550 | 去开启 | 领AI豆 | 已领取 | `""`（**没有**中间动作）|
+/// | 551 / 1079 | 去开启 | **开启中** | 领AI豆 | `"jump"`（**在**进行中）|
+#[test]
+fn button_text_slots_are_read_for_the_three_phases() {
+    let body = r##"{"code":0,"msg":"success","result":{"month":[
+        {"id":551,"name":"连续31天开启云盘APP通知","state":"WAIT","process":0,
+         "button":{"email":{"text":"去开启","textMiddle":"开启中","textFinish":"领AI豆",
+                            "actionMiddle":"jump","btnBg":"#ffa939"}}}]}}"##;
+    let it = &parse_task_list_v2(body, "month").expect("解析得出").items[0];
+    assert_eq!(it.button_out_text.as_deref(), Some("去开启"));
+    assert_eq!(it.button_text_middle.as_deref(), Some("开启中"));
+    assert_eq!(it.button_text_finish.as_deref(), Some("领AI豆"));
+    assert_eq!(it.button_action_middle.as_deref(), Some("jump"));
+
+    // 550 那种：**没有**中间动作（`actionMiddle` 是空串 ✓）⇒ 界面显示 `text`「去开启」✓。
+    let body2 = r##"{"code":0,"msg":"success","result":{"month":[
+        {"id":550,"name":"开启云盘APP通知领好礼","state":"WAIT",
+         "button":{"email":{"text":"去开启","textMiddle":"领AI豆","textFinish":"已领取","actionMiddle":""}}}]}}"##;
+    let it2 = &parse_task_list_v2(body2, "month").expect("解析得出").items[0];
+    assert_eq!(it2.button_action_middle.as_deref(), Some(""));
+    assert_eq!(it2.button_text_middle.as_deref(), Some("领AI豆"));
+
+    // 1021 那种：**只有 `text`**（它本身就是「开启中」✓）+ `day` ✓。
+    let body3 = r##"{"code":0,"msg":"success","result":{"month":[
+        {"id":1021,"name":"连续31天开启邮箱APP通知","state":"WAIT",
+         "button":{"email":{"text":"开启中","day":"5","canReceive":0,"btnBg":"#ffa939"}}}]}}"##;
+    let it3 = &parse_task_list_v2(body3, "month").expect("解析得出").items[0];
+    assert_eq!(it3.button_out_text.as_deref(), Some("开启中"));
+    assert_eq!(it3.button_text_middle, None);
+    assert_eq!(it3.button_out_day.as_deref(), Some("5"));
+}

@@ -172,6 +172,16 @@ pub struct TaskV2Item {
     /// 取 `buttonProperty.out`（**外部端**那一份 ✓ —— WebUI 就是外部端 ✓），
     /// 缺了再回落 `button.out` ✓；两层都缺 / 不是字符串 ⇒ `None`（界面回落状态词 ✓）。
     pub button_out_text: Option<String>,
+    /// `textMiddle` —— **进行中**那一档（实拍 551/1079 是「开启中」✓、550 是「领AI豆」✓）。
+    pub button_text_middle: Option<String>,
+    /// `textFinish` —— **已完成**那一档（实拍 550 是「已领取」✓、551/1079 是「领AI豆」✓）。
+    pub button_text_finish: Option<String>,
+    /// `actionMiddle` —— **"在不在进行中"就看这一格** ✓（实拍 551/1079 是 `"jump"` ✓、550 是 `""` ✓）。
+    ///
+    /// ⚠ 它本身是"点了要跳哪" ✓，但**空/非空**恰好区分了阶段 ✓：
+    /// 550（没有中间动作）⇒ 界面显示 `text`「去开启」✓；
+    /// 551/1079（有中间动作）⇒ 显示 `textMiddle`「开启中」✓ —— 与 App 一致 ✓。
+    pub button_action_middle: Option<String>,
     /// `button.out.day` —— **上游给的"进行到第几天"** ✓（**字符串**，实拍 `"5"` ✗ 不是数字 ✗）。
     ///
     /// 出处：真机实拍任务 **1021「连续31天开启邮箱APP通知」**（抓包仓
@@ -309,6 +319,18 @@ pub fn parse_task_list_v2(body: &str, group: &str) -> Result<TaskListV2> {
                     // 与上面的 `out_obj` **同一份来源** ✓（`email` 优先 —— App 渲染的就是它 ✓）。
                     button_out_text: out_obj
                         .and_then(|o| o.get("text"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    button_text_middle: out_obj
+                        .and_then(|o| o.get("textMiddle"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    button_text_finish: out_obj
+                        .and_then(|o| o.get("textFinish"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    button_action_middle: out_obj
+                        .and_then(|o| o.get("actionMiddle"))
                         .and_then(Value::as_str)
                         .map(str::to_string),
                     button_app_link: get("button")
