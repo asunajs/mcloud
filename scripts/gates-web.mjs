@@ -119,8 +119,8 @@ const GATES = [
 
   // ── 推送档追加：贵／"不看就发现不了"的三类 ──
   // 窄屏两档（320 / 375 真视口）：宽屏跑不到的"手机上没法用"那一类
-  // ⚠ 名字里留一段 ASCII：日志文件名按 `[^0-9a-zA-Z]+` 清洗，纯中文名会退化成
-  // `gates-web--.log`（跟别的门禁分不清）。
+  // ⚠ 名字里留一段 ASCII（下面 `slug` 的既有文件名也照旧）。纯中文名现在**不再**退化成
+  // `gates-web--.log`（保留中文，见 `slug`）—— 但名字里带一段 ASCII 仍然更好认。
   { tier: 'push', name: 'narrow-320-375 窄屏布局验收', cmd: 'node', args: ['regress/narrow.mjs'], browser: true },
   // 另外两个认证态：走的是**另一条代码路径**（登录闸门 / 建管理员向导），ready 态覆盖不到
   { tier: 'push', name: '交互验收 login', cmd: 'node', args: ['regress/interact.mjs', '--variant', 'login'], browser: true },
@@ -145,9 +145,52 @@ const results = []
 
 console.log(`=== 档位：${MODE === 'push' ? '推送档（--push）' : '提交档（--commit，默认）'} · ${ACTIVE.length} 条 ===`)
 
-/** 把一条门禁的输出落盘（名字里的非字母数字按老口径清洗成 `-`）。 */
-const logPath = (gate) =>
-  path.join(ROOT, 'target', `gates-web-${gate.name.replace(/[^0-9a-zA-Z]+/g, '-')}.log`)
+/**
+ * 门禁日志的文件名。
+ *
+ * 老口径是把名字里的非字母数字一律换成 `-`：名字里**有** ASCII 的照旧走它，
+ * 既有那几份日志（`gates-web-build.log`、`gates-web--ready.log` 等）的名字一个都不改。
+ *
+ * 但纯中文名会被它整条吃掉 —— `配置中心搜索框（大清单）`、`大体量验收（分页 + 窗口化）`、
+ * `前端泄漏量测` 三条清洗后都只剩一个 `-`，于是三条**共用** `gates-web--.log`，
+ * 后写的那条把前面那条整个覆盖掉（实测：最慢的「前端泄漏量测」总在最后写，
+ * 前两条的断言原文在盘上根本找不到）。所以一个 ASCII 字母数字都提不出来时**保留中文**，
+ * 只换掉文件名里真会出问题的字符：路径分隔符、空白、Windows 保留字符。
+ */
+const slug = (name) => {
+  const ascii = name.replace(/[^0-9a-zA-Z]+/g, '-')
+  if (ascii.replace(/-/g, '') !== '') return ascii
+  return name.replace(/[\s/\\:*?"<>|]+/g, '-')
+}
+
+/** 已经分下去的日志路径，给下面那条「两条门禁绝不许落到同一个文件」兜底。 */
+const assignedLog = new Map()
+
+/**
+ * 一条门禁的落盘路径（同一个 gate 每次问都得到同一个答案）。
+ *
+ * 两条门禁落到同一个文件就是**互相覆盖**，所以这里不只靠 `slug` 把名字分开，
+ * 还真查一遍重名：撞上就按序号错开，并**明说**撞了 —— 别让盘上悄悄少一份日志。
+ * 今天不会有这条告警（三条纯中文名已被 `slug` 分开），它是给以后新增的门禁兜的。
+ */
+const logPath = (gate) => {
+  if (!assignedLog.has(gate)) {
+    const dir = path.join(ROOT, 'target')
+    const stem = `gates-web-${slug(gate.name)}`
+    let p = path.join(dir, `${stem}.log`)
+    const taken = [...assignedLog.values()]
+    for (let i = 2; taken.includes(p); i++) p = path.join(dir, `${stem}-${i}.log`)
+    if (p !== path.join(dir, `${stem}.log`)) {
+      console.log(`注意：日志名跟别人撞了，${gate.name} 改落 ${path.basename(p)}（不改就会覆盖别人的日志）`)
+    }
+    assignedLog.set(gate, p)
+  }
+  return assignedLog.get(gate)
+}
+
+// 先把本次要跑的那几条的日志路径**按清单顺序**钉下来：并行那几条的完成先后是不定的，
+// 不钉的话"谁先落盘谁先占名字"，日志名会随机器快慢变来变去。
+ACTIVE.forEach(logPath)
 
 /**
  * 跑一条门禁。同步版给"必须先于浏览器那几条"的那几条用 ——

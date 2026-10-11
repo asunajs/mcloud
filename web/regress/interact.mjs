@@ -1990,20 +1990,59 @@ const STEPS = {
        * ⚠ 点击放在 `do` 里、断言放在 `check` 里（`check` **不许改页面**：它跑在快照之后，
        * 改了会让下一步的"界面变了没有"误判 ✗）。收尾停在「关于」节，下一步就切去推送页了 ✓。
        * ⚠ 两端标题都是产品名（`mcloud`）—— 服务节与关于节靠**后面那几张**区分 ✓。
+       *
+       * ⚠⚠ 2026-10-12：这一段原来写的是"点一下、等固定 120 ms"，**那是假红的来源**。
+       * 这一排 tab 是**整块重建**的（`settings-page.tsx:1519` 明写：lite 的 `.map()` 走通用
+       * 路径 ⇒ 换 tab 时这一排整块重建），重建的空窗里 `[role="tablist"] button` **一个都没有**；
+       * 而机器负载高时（实测 10 核上 load 35~180）120 ms 正好落在这个空窗里 —— 实测两种表现：
+       * ① 抛「没有 tab：事件推送」；② 某一节读到「共 0 张」（下面那条断言就红了）。
+       * 同一份源码在空载时另有多次全绿 ⇒ 那是夹具等太短，不是产品回归。
+       * 现在改成**等条件成立**：那一排 tab 回来、点中的那个 `aria-selected="true"`、
+       * 并且这一节的卡连着两次读数一致，10 秒等不到才算这步失败。
+       * ⚠ 用的是本文件既有的等待写法（页面里"轮询 + `setTimeout(r, 100)`"，与上面那些
+       * 等请求落地的步骤同款）—— `waitStable` 是 **Node 侧**的，`do` 跑在页面里够不到它，
+       * 所以不能直接调它；也不许只把 120 ms 调大（那只是把窗口往后推，负载再高照样落进去）。
        */
       name: '设置页：四节各装哪几张卡，加起来还是 8 张（一张没丢）',
       do: `(async () => {
+        const labels = ['服务', '安全', '事件推送', '关于']
         const read = () => [...document.querySelectorAll('#app .card')]
           .map((c) => (c.querySelector('.card-title')?.textContent ?? '').trim())
-        const out = {}
-        for (const label of ['服务', '安全', '事件推送', '关于']) {
-          const b = [...document.querySelectorAll('#app [role="tablist"] button')]
-            .find((x) => x.textContent.trim() === label)
-          if (!b) throw new Error('没有 tab：' + label)
-          b.click()
-          await new Promise((r) => setTimeout(r, 120))
-          out[label] = read()
+        const tabs = () => [...document.querySelectorAll('#app [role="tablist"] button')]
+        /** 点一节、并等它真的落地（tab 排回来 + 它被选中 + 卡列表连着两次一样）。 */
+        const open = async (label) => {
+          let last = null
+          let same = 0
+          for (let i = 0; i < 100; i++) {
+            const bs = tabs()
+            const b = bs.find((x) => x.textContent.trim() === label)
+            if (!b) {
+              // 整排正在重建：等它回来，别把这一帧当成"这个 tab 不存在"
+              last = null
+              same = 0
+              await new Promise((r) => setTimeout(r, 100))
+              continue
+            }
+            const sel = bs.find((x) => x.getAttribute('aria-selected') === 'true')
+            const on = !!sel && sel.textContent.trim() === label
+            // 头一次点；久点还没换过去就补点一次（重建的空窗里那一下可能被丢掉）
+            if (!on && (i === 0 || i % 20 === 19)) b.click()
+            const key = JSON.stringify(read())
+            if (on && key === last) {
+              if (++same >= 2) return read()
+            } else {
+              same = 0
+            }
+            last = key
+            await new Promise((r) => setTimeout(r, 100))
+          }
+          throw new Error(
+            '这一节没稳定下来：' + label + '（最后一次：tabs=' +
+              tabs().map((x) => x.textContent.trim()).join('、') + '；cards=' + last + '）',
+          )
         }
+        const out = {}
+        for (const label of labels) out[label] = await open(label)
         window.__settingsTabs = out
         return true
       })()`,
@@ -4046,6 +4085,55 @@ const waitStable = async (s, tries = 40) => {
 }
 
 /**
+ * 等夹具页面**真的**起来：地址落在夹具上，且 `#app` 已经挂上内容。
+ *
+ * ⚠⚠ 2026-10-12 实测：`openSession` 连上 CDP 时，chrome **有时还没把夹具那个 URL 提交上来**，
+ * 页面上是那张空白的 `about:blank`（12 个忙循环压着跑 6 次，2 次如此；24 个忙循环跑 8 次，
+ * 2 次如此）。那张空文档 `document.getElementById('app')` 是 null、`location.pathname`
+ * 是 `blank`，而它**两次读数一模一样** ⇒ 上面那个 `waitStable` 会认为"已经稳定"，于是
+ * `HELPERS` 注进了这份**马上要被顶掉**的文档里；真文档一提交，注入全丢 —— 后面每一条
+ * 用到 `window.__*` 的断言都报 "window.__platformBtns is not a function"（实测一轮红 10 项，
+ * 而页面本身一条异常都没有）。那不是产品的问题，是**注入落在了错的那份文档上**。
+ *
+ * 两条判据缺一不可：地址对了只说明文档提交了，而模块脚本要等解析完才跑（实测三种
+ * variant 都在 100~200 ms 内挂上 `#app`）—— 只等地址的话，`waitStable` 仍可能对着
+ * 一个还没挂上内容的 `#app` 说"稳定了"。
+ */
+const waitFixturePage = async (s, port, tries = 100) => {
+  let href = ''
+  for (let i = 0; i < tries; i++) {
+    try {
+      href = await s.cdp.eval('location.href')
+      if (href.startsWith(`http://127.0.0.1:${port}/`)) {
+        const kids = await s.cdp.eval('(document.getElementById("app")?.children.length ?? 0)')
+        if (kids > 0) return
+      }
+    } catch {
+      href = ''
+    }
+    await sleep(100)
+  }
+  throw new Error(`夹具页面一直没起来（最后一次 location.href = ${href}）`)
+}
+
+/**
+ * 把页面侧的辅助函数注进去，并**确认真的落上了**。
+ *
+ * 只在首屏之后注一次就够（页面不重载就一直有效），但"注进去了没有"必须**当场问一句**：
+ * 上面那条竞态一旦发生，注入是**静默**消失的，等到 10 条断言一起报 "is not a function"
+ * 才看得出来，那时已经很难判断是夹具的问题还是产品的问题。落不上就再注一次，
+ * 两次都落不上就明说 —— 别让这一条变成一串莫名其妙的断言失败。
+ */
+const injectHelpers = async (s) => {
+  for (let i = 0; i < 3; i++) {
+    await s.cdp.eval(HELPERS)
+    if ((await s.cdp.eval('typeof window.__platformBtns')) === 'function') return
+    await sleep(100)
+  }
+  throw new Error('页面侧的辅助函数注不进去（页面在注入的一瞬间被整体换掉了？）')
+}
+
+/**
  * 截图前**先关掉所有 transition / animation**：否则同一份代码连跑两次会截到过渡中的
  * 不同帧，人工看图时容易被"看着不一样"带走。关掉之后截图是确定的，便于事后核对。
  */
@@ -4115,9 +4203,11 @@ try {
 let bad = 0
 let checks = 0
 try {
+  await waitFixturePage(session, port)
   await waitStable(session)
   // ⚠ 注入必须在**首屏之后**、且只注入一次：页面不重载，所以它一直有效
-  await session.cdp.eval(HELPERS)
+  //（"真的落上了没有"由 `injectHelpers` 当场确认 —— 那条竞态是静默的）
+  await injectHelpers(session)
   await session.cdp.eval(NO_ANIM)
   await shoot(session, `/tmp/shots/interact-${variant}.png`)
   console.log(`交互验收（variant=${variant}，产物 ${dir}，${STEPS[variant].length} 步）`)
