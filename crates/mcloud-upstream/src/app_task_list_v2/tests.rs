@@ -433,7 +433,8 @@ fn button_out_day_and_can_receive_come_from_button_out() {
     // ⚠ 进度**不在这两格**：`process` 是 0 ✓（只读它就会"App 有进度、这里没有" ✗）。
     assert_eq!(it.process, Some(0));
 
-    // `buttonProperty.out` 优先于 `button.out`（1029 那种形态 ✓）。
+    // ⚠ **`email` 优先于 `out`**（2026-10-11 用户口径：以 App 里看到的为准 ✓ ——
+    //   App 渲染的是 `email` 那份橙色按钮 ✓）；同一份形态内 `buttonProperty` 优先于 `button` ✓。
     let body2 = r#"{"code":0,"msg":"success","result":{"month":[
         {"id":1029,"name":"x","state":"WAIT",
          "buttonProperty":{"out":{"text":"去完成","day":"9","canReceive":1}},
@@ -441,4 +442,15 @@ fn button_out_day_and_can_receive_come_from_button_out() {
     let list2 = parse_task_list_v2(body2, "month").expect("解析得出");
     assert_eq!(list2.items[0].button_out_day.as_deref(), Some("9"));
     assert_eq!(list2.items[0].button_can_receive, Some(1));
+
+    // ⚠ **`email` 跨形态优先**（2026-10-11 用户口径：以 **App 里看到的**为准 ✓ ——
+    //   App 渲染的就是 `email` 那份橙色按钮 `btnBg:#ffa939` ✓）：
+    //   哪怕 `buttonProperty.out` 在，也先取 `button.email` ✓。
+    let body3 = r#"{"code":0,"msg":"success","result":{"month":[
+        {"id":30,"name":"z","state":"WAIT",
+         "buttonProperty":{"out":{"text":"out 的","day":"1"}},
+         "button":{"email":{"text":"email 的","day":"2"}}}]}}"#;
+    let list3 = parse_task_list_v2(body3, "month").expect("解析得出");
+    assert_eq!(list3.items[0].button_out_text.as_deref(), Some("email 的"));
+    assert_eq!(list3.items[0].button_out_day.as_deref(), Some("2"));
 }

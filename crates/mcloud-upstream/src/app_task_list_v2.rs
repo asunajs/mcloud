@@ -272,8 +272,17 @@ pub fn parse_task_list_v2(body: &str, group: &str) -> Result<TaskListV2> {
                 let get = |key: &str| item.and_then(|m| m.get(key));
                 // `buttonProperty.out` 优先、回落 `button.out`（实拍两种形态都出现过 ✓：
                 // 1029 有 `buttonProperty` ✓、1021 只有 `button` ✓）。每条现取 ✓，别提到循环外 ✗。
+                // ⚠ **`email` 优先于 `out`**（2026-10-11 用户口径：以 **App 里看到的**为准 ✓）：
+                //   App 渲染的是 `email` 那一份（实拍 `"email":{"itemBg":"#fff6e5","btnBg":"#ffa939"…}`
+                //   —— `#ffa939` 就是那个**橙色按钮** ✓，用户截图里正是它 ✓）。
+                //   实拍 14 条任务里两处 `text`/`day` **逐条相同** ✓，所以这是"按谁为准"的排序，
+                //   不是"补一个不同的值" ✓；真出现分歧时以 App 那一份为准 ✓。
+                //   顺序：`email` **跨形态**先取 ✓（`buttonProperty.email` → `button.email`），
+                //   再退到 `out`（`buttonProperty.out` → `button.out`）✓。
                 let out_obj = get("buttonProperty")
-                    .and_then(|b| b.get("out"))
+                    .and_then(|b| b.get("email"))
+                    .or_else(|| get("button").and_then(|b| b.get("email")))
+                    .or_else(|| get("buttonProperty").and_then(|b| b.get("out")))
                     .or_else(|| get("button").and_then(|b| b.get("out")));
                 out.items.push(TaskV2Item {
                     task_id: int_at(get("id")),
@@ -297,16 +306,10 @@ pub fn parse_task_list_v2(body: &str, group: &str) -> Result<TaskListV2> {
                     button_can_receive: out_obj
                         .and_then(|o| o.get("canReceive"))
                         .and_then(Value::as_i64),
-                    button_out_text: get("buttonProperty")
-                        .and_then(|b| b.get("out"))
+                    // 与上面的 `out_obj` **同一份来源** ✓（`email` 优先 —— App 渲染的就是它 ✓）。
+                    button_out_text: out_obj
                         .and_then(|o| o.get("text"))
                         .and_then(Value::as_str)
-                        .or_else(|| {
-                            get("button")
-                                .and_then(|b| b.get("out"))
-                                .and_then(|o| o.get("text"))
-                                .and_then(Value::as_str)
-                        })
                         .map(str::to_string),
                     button_app_link: get("button")
                         .and_then(|b| b.get("app"))
