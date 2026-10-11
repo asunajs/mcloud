@@ -66,6 +66,11 @@ const stateView = (i: UpstreamAppTaskItem): { label: string; cls: string } => {
   //
   // ⇒ 只读 `text` 就会把进行中的条目全显示成「去开启」✗（用户口径：「我在 app 看到的是已开启」✓）。
   // **阶段怎么判**：`actionMiddle` 空/非空 —— 实拍 551/1079 是 `"jump"` ✓、550 是 `""` ✓。
+  // ⚠⚠ 但这条启发式**已被证伪过一次** ✗（2026-10-11 逐条对照 V2/V3 时发现）：
+  //   549「开启备份领好礼」的 `actionMiddle` 也是 `""` ✓ ⇒ 按它会显示「去开启」✗，
+  //   而 App 显示的是 **「下月再来」** ✓（= **V3** 那一口的 `text` ✓，见抓包仓 §12.10 ✓）。
+  //   ⇒ 所以 **V3 的 `text` 才是准的** ✓（覆盖在它上面 ✓）；这条只当 V3 没有该条目时的
+  //   **兜底** ✓（`548`/`550`/`1078` 那三条只在 V2 里 ✓）。
   const pick = (first?: string | null, ...rest: (string | null | undefined)[]): string => {
     for (const v of [first, ...rest]) {
       const t = (v ?? '').trim()
