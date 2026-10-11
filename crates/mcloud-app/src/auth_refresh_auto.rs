@@ -8,13 +8,25 @@
 //!   带一个"系统维护"标记（managed_by）   ⇒ 系统只动自己这条，绝不碰用户手建的 ✗
 //!   跑什么    `auth-refresh`（**不是**注册表里的任务 ✓，见 core 那个常量的说明 ✓）
 //!   作用于    该定时上配置的**一个或多个云盘账号**（复用 Schedule::accounts ✓）
-//!   触发时刻  **每天**那个预设钟点（`AppSettings::auth_refresh_at`，东八区 ✓）
+//!   触发时刻  **每天**那个钟点（**每用户一份** ✓，见下）
 //!   怎么更新  改预设时间 / 翻开关 ⇒ 立刻 upsert 一次 ✓（[`reschedule_auth_refresh`] ✓）
 //!   到点之后  **先走既有判据**（`refresh_token_days` ✓）——
 //!             不需要刷就跳过，并把"跳过的原因"记进日志与那条定时的 `last_status` ✓
 //!   它从哪来  **开箱就有**：每个用户在自己的默认数据那一步被种上一条
 //!             （[`seed_auth_refresh_schedule`] ✓，意愿=开、`enabled=true`、时刻已算好 ✓）
 //! ```
+//!
+//! # ⚠⚠ 「预设刷新时间」是**钟点**，而且是**每用户一个**（两轮用户口径，别搞混）
+//!
+//! * 「**明天检查是否到达预设刷新时间**，到了就刷」（2026-10-11 第一轮 ✓）⇒
+//!   这里的"时间"读作**墙钟钟点**（例如「每天 03:00」✓），**不是**"剩余天数"——
+//!   依据是"到没到"是**一个时刻**的事，而 `refresh_token_days` 那套是"剩余不足 N 天"
+//!   的**阈值**（没有"到没到"可言 ✓，见 `mcloud_core::auth_refresh` 模块头 ✓）；
+//! * 「**要每用户一个钟点**」（2026-10-11 第二轮 ✓）⇒ 那个钟点**按 owner 存**
+//!   （`data/auth-refresh.json` ✓），于是两个用户各按各自的钟点响 ✓。
+//!   升级前它是实例级一格（`AppSettings::auth_refresh_at` ✓，**那个键留着** ✓）——
+//!   谁没自己设过就用它 ⇒ 老实例里用户改过的钟点**不会凭空回到 03:00** ✓。
+//!   判据只有一处：[`mcloud_core::auth_refresh::effective_at`] ✓，本模块只调它 ✓。
 //!
 //! # ⚠⚠ 「预设刷新时间」是**钟点**（用户口径的读法，见 `mcloud_core::auth_refresh` 模块头 ✓）
 //!
@@ -49,7 +61,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use mcloud_core::auth_refresh::{
-    auth_refresh_schedule_id, daily_expr, DEFAULT_AUTH_REFRESH_AT, MANAGED_BY_AUTH_REFRESH,
+    auth_refresh_schedule_id, daily_expr, effective_at, DEFAULT_AUTH_REFRESH_AT,
+    MANAGED_BY_AUTH_REFRESH,
 };
 use mcloud_core::{Account, Error, Result, Schedule, ScheduleId, Store, UserId};
 
@@ -63,11 +76,18 @@ pub const AUTO_AUTH_REFRESH_NAME: &str = "凭据自动刷新";
 /// ⚠ 与 `Schedule` 的编辑分开：这里**只能**改"开关"与"预设钟点" ✓ ——
 /// 时刻是**算出来的**（`expr` 由 [`reschedule_auth_refresh`] 写 ✓），
 /// 不在这个结构里 ✓。
+///
+/// ⚠ 这里**没有"改谁"这一格** ✗：钟点是**每用户一份**的，而"我是谁"由调用方
+/// （HTTP 的当前登录用户 / CLI 解析出来的那个用户 ✓）定 ⇒ 这个结构只描述
+/// "把**他的**那两格改成什么" ✓。想改别人的钟点，在这条路上**连指都指不到** ✓。
 #[derive(Debug, Clone, Default)]
 pub struct AuthRefreshPatch {
     /// 用户意愿（`None` = 不改 ✓）。
     pub wanted: Option<bool>,
     /// 预设刷新时间（`HH:MM`，`None` = 不改 ✓）。
+    ///
+    /// ⚠ 给了就**只写这个用户自己那一格**（`data/auth-refresh.json` ✓）——
+    /// 不动 `AppSettings::auth_refresh_at`（实例级默认值 ✓）、更不动别人的 ✓。
     pub at: Option<String>,
 }
 
@@ -80,7 +100,11 @@ pub struct AuthRefreshState {
     /// ⚠ 它与那条定时自己的 `enabled` **同一格**（不是"另一份状态"）——
     /// 卡片上那个开关显示的就是调度器会看到的那一格 ✓。
     pub enabled: bool,
-    /// 预设刷新时间（东八区墙钟 `HH:MM` ✓）—— 界面上那个输入框的当前值 ✓。
+    /// **这个用户**的预设刷新时间（东八区墙钟 `HH:MM` ✓）—— 界面上那个输入框的当前值 ✓。
+    ///
+    /// ⚠ 它是**他设过的那个值**；他还没自己设过时，这里显示的是**实例级默认值**
+    ///（`AppSettings::auth_refresh_at` ✓）—— 也就是"他改之前会用的那个钟点" ✓
+    ///（见 [`user_at`] ✓）。两种情况在界面上长得一样，因为**行为**本来就一样 ✓。
     pub at: String,
     /// **下一次**触发时刻（东八区墙钟串，形如 `2026-10-12 03:00:00` ✓）。
     ///
@@ -154,11 +178,11 @@ pub async fn seed_auth_refresh_schedule(store: &Arc<dyn Store>, owner: &UserId) 
     if store.schedule(&id).await?.is_some() {
         return Ok(false);
     }
-    // 预设钟点从设置里取；设置读不出来 / 那个值不合法（**只可能是手改坏了文件** ✓）
+    // 预设钟点取**这个用户现在生效的那一个**（他自己设过就是他的，否则实例级那一格 ✓）；
+    // 设置读不出来 / 那个值不合法（**只可能是手改坏了文件** ✓）
     // ⇒ 回落默认值种下去，**不 panic、也不不种** ✗：一条都没有的话，界面上那张卡
     // 连"下一次什么时候"都说不出来 ✓。
-    let settings = store.settings().await.unwrap_or_default();
-    let at = normalized_at(&settings.auth_refresh_at);
+    let at = user_at(store, owner).await;
     let schedule = seeded_auth_refresh_schedule(owner, &at).ok_or_else(|| {
         Error::Config(format!(
             "凭据自动刷新的预设时间不合法（{at}），种不出那条定时"
@@ -174,11 +198,43 @@ pub async fn seed_auth_refresh_schedule(store: &Arc<dyn Store>, owner: &UserId) 
     Ok(true)
 }
 
+/// 某个用户**现在生效**的预设钟点（`HH:MM` ✓）—— 本模块读钟点的**唯一入口** ✓。
+///
+/// # 三层，顺序不能换
+///
+/// 1. **他自己设过的**（`data/auth-refresh.json` 里他那一行 ✓）—— 有就用它 ✓；
+/// 2. 没有 ⇒ **实例级那一格**（`AppSettings::auth_refresh_at` ✓，**老键、留着** ✓）——
+///    它是"每用户值的初始值"，于是老实例里用户改过的钟点**不会凭空回到默认** ✓
+///    （判据在 [`effective_at`] ✓，这里只调它 ✓）；
+/// 3. 连那一格也不合法（**只可能是手改坏了 `settings.json`** ✓）⇒ 回默认值，
+///    并留一条 warn（[`normalized_at`] ✓，不静默 ✓）。
+///
+/// ⚠ 它**不读盘失败也不报错**（回 `Result` 的那两处读取一律 `unwrap_or_default` ✓）：
+/// 这是"界面上那张卡能不能画出来"的前置，为一个坏文件把整张卡打没了不划算 ✓
+///（而坏值会**如实显示出来** —— 卡片上那个输入框就是它 ✓，不骗人 ✓）。
+async fn user_at(store: &Arc<dyn Store>, owner: &UserId) -> String {
+    let own = store.auth_refresh_at(owner).await.unwrap_or(None);
+    if let Some(v) = &own {
+        // 手改坏了那一格：**不认它**、回落实例级 —— 但要留痕（不静默 ✓）
+        //（认了的话 `daily_expr` 当场报"写不成 cron"，表现是"卡上写着 半夜、定时却装不上"✗）。
+        if mcloud_core::auth_refresh::parse_clock(v).is_none() {
+            tracing::warn!(
+                owner = %owner,
+                at = %v,
+                "auth-refresh.json 里这个用户的钟点不合法 ⇒ 这次按实例级默认值处理"
+            );
+        }
+    }
+    let instance = store.settings().await.unwrap_or_default().auth_refresh_at;
+    normalized_at(&effective_at(own.as_deref(), &instance))
+}
+
 /// 预设时间**归一化**：不合法就回默认值。
 ///
-/// ⚠ 只有**手改坏了 `data/settings.json`** 才会走到那一支（HTTP 与 CLI 两条路都先
-/// 过了 `mcloud_core::auth_refresh::parse_clock` ✓）⇒ 这里回落默认值是"让实例还能跑"
-/// 的处置，并**留一条 warn**（不静默 ✓）。
+/// ⚠ 只有**手改坏了落盘文件**才会走到那一支（`data/auth-refresh.json` 里他自己那一格
+/// 或 `data/settings.json` 那一格 ✓）—— HTTP 与 CLI 两条路都先过了
+/// `mcloud_core::auth_refresh::parse_clock` ✓，存储那层也守了一道 ✓
+/// ⇒ 这里回落默认值是"让实例还能跑"的处置，并**留一条 warn**（不静默 ✓）。
 fn normalized_at(raw: &str) -> String {
     if mcloud_core::auth_refresh::parse_clock(raw).is_some() {
         return raw.trim().to_string();
@@ -195,9 +251,17 @@ fn normalized_at(raw: &str) -> String {
 /// 做四件事，顺序要紧：
 ///
 /// 1. 读那条自动定时（可能还不存在 ✓），取出**用户意愿**；
-/// 2. 读设置里的预设钟点（`patch.at` 给了就用它 ✓，并**写回设置** ✓）；
+/// 2. 读**这个用户**的预设钟点（`patch.at` 给了就用它 ✓，并**只写他自己那一格** ✓）；
 /// 3. 把钟点写成 cron（[`daily_expr`] ✓）；
 /// 4. upsert：`expr` 与 `enabled` 每次都写 ✓，`accounts` / 记账字段原样保留 ✓。
+///
+/// # ⚠ 改钟点**只动这个用户**（2026-10-11 用户口径：「要每用户一个钟点」✓）
+///
+/// 写的是 `data/auth-refresh.json` 里**他那一行**（`save_auth_refresh_at` ✓），
+/// **不碰** `AppSettings::auth_refresh_at` ✗ —— 那一格是**实例级默认值**
+///（老键 ✓），写它等于把"还没自己设过的所有人"的钟点一起改了 ✗。
+/// 同理，这里 upsert 的只有 `auto-auth-refresh-<他自己>` 这一条 ✓
+///（别人的那条连读都不读 ✓）。
 ///
 /// # ⚠ `enabled` = **用户意愿**（与「直播自动定时」不同的那一点）
 ///
@@ -206,56 +270,68 @@ fn normalized_at(raw: &str) -> String {
 /// 于是"用户关掉后不许再打开"这条口径由**同一个判据**保住：
 /// `managed_wanted = Some(false)` 一直保留着，重算读到的 `wanted` 就是 `false` ✓
 ///（`None` 才按"要"算 ✓，见下面那句 `unwrap_or(true)` ✓）。
+/// ⚠ 改钟点**不许**把它打开 ✗（用户口径点名的那条 ✓）。
 ///
-/// # 撞车保护
+/// # 撞车保护（两条都算"撞车"）
 ///
 /// `auto-auth-refresh-<owner>` 这个 id 用户**也能**手建 ✗（id 是用户可写的 ✓）。
-/// 那条定时的 `managed_by` 是 `None` ⇒ **绝不碰** ✗，只回一句可操作的说明 ✓
-///（`enabled: false` ✓，见 [`squat_note`] ✓）—— 与 `live_auto` 同一条处置 ✓。
+/// 而 `ScheduleId` 是**全局唯一**的 ⇒ 这个 id 上可能有三种东西：
+///
+/// | id 上是什么 | 处置 |
+/// |---|---|
+/// | 没有 | 正常：按这个用户的钟点建一条 ✓ |
+/// | **他自己**那条（`managed_by = auth-refresh` ✓） | 正常：重算它 ✓ |
+/// | 用户手建的（`managed_by = None` ✓）/ **别人**名下的 | **绝不碰** ✗，只回一句可操作的说明 ✓ |
+///
+/// ⚠ 判据必须**按 id 全局查**（`Store::schedule` ✓，不是 `schedule_for` ✗）——
+/// 与 [`seed_auth_refresh_schedule`] 逐字同一条理由，而且这里更要紧：
+/// 写的时候 `save_schedule` 是**按 id 全局覆盖**的 ⇒ 只按 `(owner, id)` 查的话，
+/// 别人手建的同名定时会**查不到**、然后被这一下**覆盖掉** ✗
+///（"别人的一个字节都改不了"就是这么破的 ✓）。撞车时回 `enabled: false` ✓，
+/// 说明见 [`squat_note`] ✓。
 pub async fn reschedule_auth_refresh(
     store: &Arc<dyn Store>,
     owner: &UserId,
     patch: Option<AuthRefreshPatch>,
 ) -> Result<AuthRefreshState> {
     let id = auth_refresh_schedule_id(owner);
-    let existing = store.schedule_for(owner, &id).await?;
+    let existing = store.schedule(&id).await?;
 
     // ── 撞车保护（必须在任何写入之前 ✓）──────────────────────────────
+    //
+    // 判据两条，缺一不可：**带系统标记** ✓ 且 **归属就是这个用户** ✓ ——
+    // 只看标记的话，一条被别人复制过去的 `auth-refresh` 定时会被当成"自己那条"
+    // 就地改掉 ✗（`owner` 那一格是数据，不是身份 ✓）。
     if let Some(s) = &existing {
-        if !s.is_managed_by(MANAGED_BY_AUTH_REFRESH) {
+        if !is_ours(s, owner) {
             tracing::warn!(
                 schedule = %id,
                 owner = %owner,
-                "auto-auth-refresh-<owner> 这个 id 上是用户手建的定时 ⇒ 不碰它（自动刷新这一轮跳过）"
+                "auto-auth-refresh-<owner> 这个 id 上是用户手建的（或别人的）定时 ⇒ 不碰它（自动刷新这一轮跳过）"
             );
-            let at = normalized_at(&store.settings().await.unwrap_or_default().auth_refresh_at);
             return Ok(AuthRefreshState {
                 enabled: false,
-                at,
+                at: user_at(store, owner).await,
                 next_at: None,
                 note: Some(squat_note(&id)),
             });
         }
     }
 
-    // ── 预设钟点：patch 优先，否则读设置 ✓ ────────────────────────────
-    let mut settings = store.settings().await?;
+    // ── 预设钟点：patch 优先（**只写他自己那一格** ✓），否则读现在生效的 ✓ ──
     if let Some(at) = patch.as_ref().and_then(|p| p.at.as_ref()) {
-        // ⚠ 非法值**当场拒**（不静默兜默认值 ✗）—— 与 `AppSettings::validate` 同一条判据 ✓。
+        // ⚠ 非法值**当场拒**（不静默兜默认值 ✗）—— 与 `AppSettings::validate` 同一条判据 ✓
+        //（存储那层也守了一道 ✓，这里这一道是为了**给人看的那句话** ✓）。
         if mcloud_core::auth_refresh::parse_clock(at).is_none() {
             return Err(Error::Config(format!(
                 "预设刷新时间要是 24 小时制的 HH:MM（例如 03:00），收到的是「{at}」"
             )));
         }
-        settings.auth_refresh_at = at.trim().to_string();
-        // 校验整份设置（**唯一的判据**在 `AppSettings::validate` ✓）——
-        // 只写这一格却漏了校验的话，一个坏值会一直留在 `settings.json` 里 ✗。
-        settings
-            .validate()
-            .map_err(|e| Error::Config(format!("设置没通过校验：{e}")))?;
-        store.save_settings(&settings).await?;
+        // ⚠ 这一下**只动他那一行**（`insert` 按 owner 覆盖 ✓）—— 别人的钟点碰不到 ✓。
+        // 也**不动** `AppSettings::auth_refresh_at` ✗（那是实例级默认值 ✓）。
+        store.save_auth_refresh_at(owner, at).await?;
     }
-    let at = normalized_at(&settings.auth_refresh_at);
+    let at = user_at(store, owner).await;
 
     // ── 用户意愿：**每次都保留** ✓ ──────────────────────────────────
     //
@@ -301,17 +377,18 @@ pub async fn reschedule_auth_refresh(
 ///
 /// 判据与 [`reschedule_auth_refresh`] **同一套**（意愿 / 撞车 / 预设时间 ✓），
 /// 只是不落盘 —— 两处各写一遍的话，"界面显示的下一次"与"实际会响的那一刻"
-/// 迟早分叉 ✗。
+/// 迟早分叉 ✗（撞车那一条尤其：读那边若按 `(owner, id)` 查、写那边按 id 全局查，
+/// 同一个 id 在两处就会得到两个结论 ✓）。
 pub async fn read_auth_refresh_state(
     store: &Arc<dyn Store>,
     owner: &UserId,
 ) -> Result<AuthRefreshState> {
     let id = auth_refresh_schedule_id(owner);
-    let existing = store.schedule_for(owner, &id).await?;
-    let at = normalized_at(&store.settings().await.unwrap_or_default().auth_refresh_at);
+    let existing = store.schedule(&id).await?;
+    let at = user_at(store, owner).await;
 
     if let Some(s) = &existing {
-        if !s.is_managed_by(MANAGED_BY_AUTH_REFRESH) {
+        if !is_ours(s, owner) {
             return Ok(AuthRefreshState {
                 enabled: false,
                 at,
@@ -335,6 +412,15 @@ pub async fn read_auth_refresh_state(
     })
 }
 
+/// 这个 id 上那条定时**是不是系统为这个用户维护的那一条** ✓。
+///
+/// 两条判据缺一不可（理由见 [`reschedule_auth_refresh`] 的撞车那一段 ✓）：
+/// * `managed_by = Some(auth-refresh)` —— 系统只动自己那条 ✓；
+/// * `owner = Some(这个用户)` —— `owner` 那一格是数据，不能只靠它、但也不能不看它 ✓。
+fn is_ours(s: &Schedule, owner: &UserId) -> bool {
+    s.is_managed_by(MANAGED_BY_AUTH_REFRESH) && s.owner.as_ref() == Some(owner)
+}
+
 /// 下一次触发时刻（东八区墙钟串 ✓）。
 ///
 /// ⚠ 它必须与调度器实际会响的那一刻**一致**：那条定时的表达式就是"每天那个钟点"
@@ -352,10 +438,15 @@ fn next_stamp(at: &str) -> String {
 }
 
 /// 撞车时给用户看的一句话（可操作 ✓，不是"出错了" ✓）。
+///
+/// ⚠ 说的是"这个 id 上有一条**不归系统维护**的定时"——它可能是用户手建的（常见 ✓），
+/// 也可能是别人名下恰好叫这个名的（id 是全局唯一的 ✓）。两种都不碰 ✓，
+/// 而对用户来说"改名或删掉那条"是同一个动作 ⇒ 一句话就够 ✓。
 fn squat_note(id: &ScheduleId) -> String {
     format!(
-        "定时 `{id}` 这个名字上有一条**你自己手建的**定时 ⇒ 系统不会去动它，\
-         所以「凭据自动刷新」这一条装不上。改名或删掉那条手建的定时之后，这里会自动恢复。"
+        "定时 `{id}` 这个名字上有一条**不是系统为你维护的**定时（多半是你自己手建的）\
+         ⇒ 系统不会去动它，所以「凭据自动刷新」这一条装不上。\
+         改名或删掉那条定时之后，这里会自动恢复。"
     )
 }
 

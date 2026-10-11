@@ -23,6 +23,24 @@
 //! * 手动刷新：**只刷自己的账号** ✓ —— 别人的账号回 **404**（不泄露存在性 ✓，
 //!   与 `accounts::owned_account` 同一条处置 ✓）；
 //! * 定时：`owner` 就是当前用户 ✓（别人的那条既看不到、也改不动 ✓）。
+//!
+//! # ⚠⚠ 预设钟点是**每用户一个**（2026-10-11 用户口径：「**要每用户一个钟点**」✓）
+//!
+//! 它按 owner 存在 `data/auth-refresh.json` 里（不是 `data/settings.json` 那一格 ✗ ——
+//! 那一格是**实例级默认值**，见 `mcloud_core::auth_refresh::effective_at` ✓）。
+//! 于是这条路由上的"别人的钟点"：
+//!
+//! * `GET` 永远只回**自己**的 ✓（连读都读不到别人的 ✓）；
+//! * `PUT` 只写**自己**那一格 ✓，且**没有任何"给谁"的字段** ⇒ 想指也指不到别人的 ✗；
+//! * 万一有人硬塞一个 `owner`（脚本作者的直觉写法 ✓）：**不是你自己就 404** ✓ ——
+//!   静默把它当"改自己"会让人以为改到了别人 ✓（与 `accounts::owned_account`
+//!   同一条处置：别人的与不存在的回**同一个** 404，不泄露存在性 ✓）。
+//!
+//! ⚠ 还有一条**真正的**越界面在这里堵掉了：那条定时的 id 是
+//! `auto-auth-refresh-<owner>`，而 `ScheduleId` **全局唯一**、`save_schedule` 又是
+//! **按 id 全局覆盖**的 ⇒ 查的时候若按 `(owner, id)` 查，别人名下那条同名定时会被
+//! 就地覆盖 ✗。判据现在**按 id 全局查** ✓（`mcloud_app::auth_refresh_auto` ✓），
+//! 不是自己那条就一个字节都不碰 ✓（有测试钉住 ✓）。
 
 use axum::extract::{Extension, State};
 use axum::routing::{get, post};
@@ -306,6 +324,9 @@ pub async fn refresh(
 // ════════════ ② 自动定时的开关与预设时间 ════════════
 
 /// `GET /api/auth/refresh-schedule` —— **只读**（不重算、不写盘 ✓）。
+///
+/// 回的是**当前登录用户**的钟点：他自己设过就是他的 ✓，没设过就是实例级那一格
+///（升级前那个值 ✓，见 `mcloud_core::auth_refresh::effective_at` ✓）。
 pub async fn get_schedule(
     State(state): State<ServerState>,
     Extension(cur): Extension<CurrentUser>,
@@ -317,14 +338,24 @@ pub async fn get_schedule(
 
 /// `PUT /api/auth/refresh-schedule` 的请求体。
 ///
-/// ⚠ 两格都是 `Option`，语义照 `routes/schedules.rs` 那套**双 Option**
+/// ⚠ 三格都是 `Option`，语义照 `routes/schedules.rs` 那套**双 Option**
 ///（缺席 = 保持原样 ✓）：
 ///
 /// * `enabled`：**不给** = 不动用户的意愿 ✓；
-/// * `at`：**不给** = 不动预设时间 ✓。
+/// * `at`：**不给** = 不动预设时间 ✓；
+/// * `owner`：**不给** = 改自己（正常路径 ✓，前端从不发它 ✓）。
 ///
-/// 两条都是"没给 ≠ 清空"那件事的另一面：混起来的话，前端只改时间那一次
+/// 前两条都是"没给 ≠ 清空"那件事的另一面：混起来的话，前端只改时间那一次
 /// 会把用户关掉的开关**静默打开** ✗（那正是用户口径里点名不许的事 ✓）。
+///
+/// # `owner` 是**守一道**，不是功能
+///
+/// 这条路由**没有**"改别人的"这条路（钟点是每用户一份、归属只来自会话 ✓）。
+/// 留着这一格是为了**把误用变成明确的拒绝**：脚本作者很容易照 CLI 的
+/// `--user` 直觉写一个 `{"owner": "<别人>"}` —— 不收这一格的话，那个字段会被
+/// serde 忽略、请求**成功**、改的却是自己的 ✓ ⇒ 他会以为改到了别人 ✗。
+/// 现在给了别人就回 **404**（与 `accounts::owned_account` 同口径：
+/// 别人的与不存在的回**同一个** 404，不泄露存在性 ✓）。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshScheduleInput {
@@ -332,17 +363,29 @@ pub struct RefreshScheduleInput {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub at: Option<String>,
+    /// ⚠ **仅供守一道**（见上 ✓）：给了且不是你自己 ⇒ 404 ✓。前端不发它 ✓。
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 /// `PUT /api/auth/refresh-schedule` —— 改开关 / 预设时间，并**立刻重算** ✓。
 ///
 /// 重算与落盘都在 [`reschedule_auth_refresh`] 里（唯一入口 ✓）——
 /// 这条路由**不自己**拼那条定时 ✗。
+///
+/// ⚠ 写的是**当前用户自己那一格**（`data/auth-refresh.json` ✓）与**他自己那条定时**
+///（`auto-auth-refresh-<他自己>` ✓）—— 别人的钟点与定时一个字节都碰不到 ✓。
 pub async fn put_schedule(
     State(state): State<ServerState>,
     Extension(cur): Extension<CurrentUser>,
     Json(input): Json<RefreshScheduleInput>,
 ) -> ApiResult<AuthRefreshState> {
+    // ── 守一道：指名了别人 ⇒ 404（**不是**静默改自己 ✓，见 `RefreshScheduleInput` ✓）──
+    if let Some(owner) = &input.owner {
+        if owner != cur.0.as_str() {
+            return Err(ApiError(Error::NotFound(format!("用户不存在：{owner}"))));
+        }
+    }
     let patch = AuthRefreshPatch {
         wanted: input.enabled,
         at: input.at,

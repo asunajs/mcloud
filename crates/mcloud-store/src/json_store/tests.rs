@@ -2462,6 +2462,122 @@ async fn push_panel_and_throttle_are_created_with_0600() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// ⭐ 「每用户一个钟点」（`data/auth-refresh.json` ✓，2026-10-11 第二轮口径）。
+///
+/// 钉四件事：
+/// * **按 owner 分表**：一个用户设了，另一个读到的仍是"没设过"（`None` ✓）；
+/// * **落盘且读得回来**（重启后还认那个钟点 ✓ —— 只放内存的话重启就回到初始值 ✗）；
+/// * **缺文件 / 缺键 ⇒ `None`**（老目录升级路径 ✓，**不报错** ✓）；
+/// * **非法钟点当场拒**（`半夜` 不许进这个文件 ✓ —— 写进去之后 `daily_expr` 当场
+///   报"写不成 cron"，表现是"钟点存上了、定时却装不上" ✗）。
+#[tokio::test]
+async fn auth_refresh_clock_is_per_owner_and_round_trips() {
+    let d = tmpdir("auth-refresh");
+    let a = UserId::new("user-a");
+    let b = UserId::new("user-b");
+    {
+        let s = JsonStore::open(&d).unwrap();
+        // 前置条件：**文件都还没有** —— 老目录就是这样 ✓（读得进、回 `None` ✓）
+        assert!(!d.join(files::AUTH_REFRESH).exists());
+        assert_eq!(s.auth_refresh_at(&a).await.unwrap(), None);
+
+        s.save_auth_refresh_at(&a, "22:30").await.unwrap();
+        // 另一个用户**不受影响**（分表 ✓）
+        assert_eq!(s.auth_refresh_at(&b).await.unwrap(), None);
+        s.save_auth_refresh_at(&b, "07:15").await.unwrap();
+        // 前后空白先 trim（与 `parse_clock` 同一条口径 ✓）
+        s.save_auth_refresh_at(&b, " 07:15 ").await.unwrap();
+        assert_eq!(
+            s.auth_refresh_at(&b).await.unwrap().as_deref(),
+            Some("07:15")
+        );
+
+        // ⭐ 非法钟点**当场拒**，而且**不落盘** ✓
+        for bad in ["", "25:00", "12:60", "半夜", "0300"] {
+            assert!(
+                s.save_auth_refresh_at(&a, bad).await.is_err(),
+                "「{bad}」不是钟点，应被拒"
+            );
+        }
+        assert_eq!(
+            s.auth_refresh_at(&a).await.unwrap().as_deref(),
+            Some("22:30"),
+            "被拒的写入不该把原来那个值改掉"
+        );
+    }
+
+    // 重启：两个用户各是各的 ✓
+    let s = JsonStore::open(&d).unwrap();
+    assert_eq!(
+        s.auth_refresh_at(&a).await.unwrap().as_deref(),
+        Some("22:30")
+    );
+    assert_eq!(
+        s.auth_refresh_at(&b).await.unwrap().as_deref(),
+        Some("07:15")
+    );
+    // 文件里也真的是按 owner 存的（键就是 owner id ✓）
+    let raw = std::fs::read_to_string(d.join(files::AUTH_REFRESH)).unwrap();
+    assert!(raw.contains("user-a") && raw.contains("22:30"), "{raw}");
+    assert!(raw.contains("user-b") && raw.contains("07:15"), "{raw}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// ⭐ 新落盘的那个文件**新写时也是 0600**（它记着"这个账号每天几点轮换凭据" ✓）。
+///
+/// ⚠ 与 `push_panel_and_throttle_are_created_with_0600` 同一个理由：
+/// 进了 `harden_existing_permissions` 清单的文件，**新写时**就已经是 0600 ✓
+///（那道 hardening 只管历史遗留 ✓）。
+#[cfg(unix)]
+#[tokio::test]
+async fn auth_refresh_file_is_created_with_0600() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let d = tmpdir("perm-auth-refresh");
+    let s = JsonStore::open(&d).unwrap();
+    s.save_auth_refresh_at(&UserId::new("user-a"), "22:30")
+        .await
+        .unwrap();
+    let mode = std::fs::metadata(d.join(files::AUTH_REFRESH))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode,
+        0o600,
+        "{} 创建时就必须是 0600，实际 {mode:o}",
+        files::AUTH_REFRESH
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// ⭐ 老目录上那个文件**权限松**（手工拷过来的 / 建得早 ✓）⇒ 启动时收紧 ✓。
+#[cfg(unix)]
+#[tokio::test]
+async fn a_loose_auth_refresh_file_is_tightened_on_open() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let d = tmpdir("perm-auth-refresh-legacy");
+    std::fs::create_dir_all(&d).unwrap();
+    let p = d.join(files::AUTH_REFRESH);
+    std::fs::write(&p, r#"{"user-a":"22:30"}"#).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let s = JsonStore::open(&d).unwrap();
+    let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "老目录升级后不该对同机其他用户可读");
+    // 顺手钉住：那份老内容读得进来 ✓（不是"收权限把内容搞丢了" ✓）
+    assert_eq!(
+        s.auth_refresh_at(&UserId::new("user-a"))
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("22:30")
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// ⭐ 「见过的登录设备」（`remember_login_device` ✓，2026-10-08 接 `loginNew` 时新增）。
 ///
 /// 钉四件事：

@@ -32,11 +32,14 @@ const USAGE: &str = "\
   mcloud auth refresh <--account <id> | --all> [--lead-days N] [--force]
   mcloud auth auto-schedule                    看当前状态（只读，不写盘 ✓）
   mcloud auth auto-schedule on|off             开/关（会立刻重算一次 ✓）
-  mcloud auth auto-schedule at HH:MM           设预设刷新时间（24 小时制，东八区 ✓）
+  mcloud auth auto-schedule at HH:MM           设刷新时间（24 小时制，东八区 ✓）
 
-⚠ `auth auto-schedule` 是本机管理员工具：那条定时是**每个登录用户一条**
-（`auto-auth-refresh-<owner>` ✓），命令行上只能落到**管理员**那一份 ✓
-（与 `mcloud live-room auto-schedule` 同一条口径 ✓）。
+⚠ 刷新时间是**每个登录用户各一份**（`data/auth-refresh.json` 按 owner 存 ✓）——
+但**命令行只作用于本机那一个用户**（= 创建最早的那个 ✓，`mcloud user list` 里
+标着「管理员」的那个 ✓），**没有** `--user` / `--owner` ✗：
+「选谁」是 **WebUI** 的事（让他登录，在**账号配置页**那张「凭据自动刷新」卡上改 ✓）——
+CLI 存在的理由是「无头且无公网的设备」，那种机器上本来就只有一个本机用户 ✓。
+⚠ 命令每次都会把**动的是谁**打出来 ✓，所以不会默默落到别人/所有人身上 ✗。
 ⚠ 到点之后**先走既有判据**（账号设置里的「剩余多少天刷新token」✓）——
 不需要刷就跳过，并把原因写进日志 ✓。";
 
@@ -239,23 +242,63 @@ fn print_accounts(all: &[mcloud_core::Account]) {
 // ⚠ **不带选项 = 只读** ✓（走 `read_auth_refresh_state` ✓，与 `GET` 同一口径 ✓）——
 // 一条"什么参数都不给"的命令把用户配好的时间/开关重算一遍，是那种
 // "手滑一下、状态就变了"的形态 ✗（与 `mcloud push panel` 不带参数 = 看一眼 同口径 ✓）。
+//
+// # ⚠⚠ 钟点是**每用户一个**，但 CLI **不加 `--user`** ✗
+//
+// 两条口径叠在一起，别搞混：
+//
+// 1. **数据层是 per-owner 的** ✓（2026-10-11 第一轮：钟点按 owner 存在
+//    `data/auth-refresh.json` ✓）—— 这里**只动那一个人**的钟点与他自己那条定时 ✓；
+// 2. **CLI 的视角是"本机那一个用户"** ✓（2026-10-11 第二轮，用户口径：
+//    「**多用户是面向 webui 给不同设备的用户使用**，**cli 仅用于本地用户**，
+//    在无头且无公网的设备没条件使用 webui 或者仅想使用命令行的情况」✓，
+//    见 `AGENTS.md` 的「CLI 与 WebUI 的视角分工」✓）⇒
+//    **命令行上不加 `--owner` / `--user`** ✗，「选谁」是 **WebUI** 的事 ✓。
+//
+// ⇒ 这条命令**一律作用于本机那个用户**（`cli_owner` = `legacy_owner`
+//   = 创建最早的那个 ✓，与 `push` / `live-room auto-schedule` 逐字同一条口径 ✓），
+//   并把"动的是谁"**每次都打出来** ✓ —— 于是它既不会默默作用到**所有人** ✗、
+//   也不会默默作用到**别的用户** ✗。
+//
+// ⚠ 顺带说明"为什么不加 `--user` 也行"：多用户实例里想改**某个人的**钟点，
+// 让他**登录 WebUI 在账号配置页那张卡上改** ✓（那才是"给不同设备的用户使用"的入口 ✓）；
+// 而 CLI 存在的理由是"无头且无公网的设备" ✓ —— 那种机器上本来就只有一个本机用户 ✓。
 
 /// `auth auto-schedule [on|off|at <HH:MM>]`
+///
+/// ⚠ **没有** `--user` / `--owner` ✓（理由见上面那段与 `AGENTS.md` ✓）。
 pub async fn auto_schedule(app: &App, args: &[String]) -> anyhow::Result<()> {
     // 与 `mcloud push` / `mcloud live-room` 同一条口径：CLI 是本机管理员工具 ✓，
-    // 而这条定时是**每个登录用户一条** ✓ ⇒ 命令行上动的是管理员那一份 ✓。
+    // 而这条定时是**每个登录用户一条** ✓ ⇒ 命令行上动的是**本机那个用户**那一份 ✓。
     let owner = crate::cli::push::cli_owner(app).await?;
+    // ⚠ 把**名字**查出来（`cli_owner` 只回 id ✓）：下面每一行都要打"动的是谁" ✓ ——
+    // 不打的话，用户无从确认这一下落在谁身上 ✓（那正是"默默作用"的形态 ✗）。
+    let name = local_user_name(app, &owner).await?;
     let store = &app.handle.store;
+
+    // ⚠⚠ **整条 `argv` 都扫一遍**（不是只看第一个位置 ✓）：`--user` 要是写在 `on`
+    // 后面，只看首位就会把它**静默忽略** ✗ —— 用户口径点名了这种形态：
+    // 「**静默忽略比报错更糟**」✗（判据在 `cli/push.rs::reject_user_selection` ✓，
+    // 与 `push` / `live-room` 共用同一份 ✓）。
+    crate::cli::push::reject_user_selection(args)?;
 
     match args.first().map(String::as_str) {
         // ── 不带选项 = **只读** ✓（= `GET /api/auth/refresh-schedule` 的口径 ✓）
         None => {
             let state = mcloud_app::read_auth_refresh_state(store, &owner).await?;
-            print_schedule(&state);
+            print_schedule(&state, &name);
             Ok(())
         }
         // ── 开 / 关（= `PUT {enabled}` ✓，预设时间那一格不动 ✓）
         Some("on") | Some("off") => {
+            // ⚠ 多给参数**当场拒** ✗（`on extra` 不能"静默按 on 走" ✓）——
+            // 静默吃掉一个用户以为生效了的参数，比报错难查得多 ✗。
+            if args.len() > 1 {
+                anyhow::bail!(
+                    "`on` / `off` 不带别的参数（多给了 {} 个）✗\n\n{USAGE}",
+                    args.len() - 1
+                );
+            }
             let wanted = args[0] == "on";
             let state = mcloud_app::reschedule_auth_refresh(
                 store,
@@ -266,16 +309,23 @@ pub async fn auto_schedule(app: &App, args: &[String]) -> anyhow::Result<()> {
                 }),
             )
             .await?;
-            print_schedule(&state);
+            print_schedule(&state, &name);
             Ok(())
         }
         // ── 设预设刷新时间（= `PUT {at}` ✓，开关那一格不动 ✓）
         Some("at") => {
+            // ⚠ 同上：`at 03:00 extra` 不能"静默按 03:00 走" ✗（多给一律报错 ✓）。
+            if args.len() > 2 {
+                anyhow::bail!(
+                    "`at` 只跟一个 HH:MM（多给了 {} 个）✗\n\n{USAGE}",
+                    args.len() - 2
+                );
+            }
             let raw = args
                 .get(1)
                 .ok_or_else(|| anyhow::anyhow!("要给一个 24 小时制的 HH:MM：\n\n{USAGE}"))?;
             // ⚠ 非法值**当场拒**（不静默兜默认值 ✗）—— 判据只有一处
-            //（`mcloud_core::auth_refresh::parse_clock` ✓，路由那边用的是同一个 ✓）。
+            //（`mcloud_core::auth_refresh::parse_clock` ✓，路由与存储那边用的是同一个 ✓）。
             if mcloud_core::auth_refresh::parse_clock(raw).is_none() {
                 eprintln!("预设刷新时间要是 24 小时制的 HH:MM（例如 03:00），收到的是「{raw}」");
                 std::process::exit(EXIT_CONFIG);
@@ -289,20 +339,44 @@ pub async fn auto_schedule(app: &App, args: &[String]) -> anyhow::Result<()> {
                 }),
             )
             .await?;
-            print_schedule(&state);
+            print_schedule(&state, &name);
             Ok(())
         }
         Some("help" | "--help" | "-h") => {
             println!("{USAGE}");
             Ok(())
         }
+        // ⚠ `--user` / `--owner` / `-u` **不在这里认** —— 整条 `argv` 在上面
+        // `reject_user_selection` 里已经扫过并报错 ✓（写在 `on` / `at` 后面也躲不过去 ✓）。
+        // 留一格在这里反而会退化成"只认第一个位置"的半格 ✗（见 `cli/push.rs` ✓）。
         Some(other) => anyhow::bail!("未知的 auto-schedule 参数：{other}\n\n{USAGE}"),
     }
 }
 
+/// 本机那个用户**叫什么**（`cli_owner` 只回 id ✓）—— 打给用户看"这次动的是谁" ✓。
+///
+/// ⚠ 查不到就回 id 那串（**不报错**）：能查到用户就一定查得到名字，查不到说明
+/// 库里那一刻正在被改写 —— 为一句"显示用的话"把命令打挂不划算 ✓。
+async fn local_user_name(app: &App, owner: &mcloud_core::UserId) -> anyhow::Result<String> {
+    Ok(app
+        .handle
+        .store
+        .users()
+        .await?
+        .into_iter()
+        .find(|u| &u.id == owner)
+        .map(|u| u.name)
+        .unwrap_or_else(|| owner.to_string()))
+}
+
 /// 把状态打成几行（`GET` / `PUT` 两条路共用一份 ✓ —— 两边各写一遍的话，
 /// 命令行看到的与界面看到的迟早不一样 ✓）。
-fn print_schedule(state: &mcloud_app::AuthRefreshState) {
+///
+/// ⚠ `who` 是**这次动的是谁**（= 本机那个用户 ✓），必须打出来 ——
+/// 不打的话，"这一下落到谁身上"对用户就是不可见的 ✗
+///（而"默默作用到别人/所有人"正是用户口径里点名不许的 ✓）。
+fn print_schedule(state: &mcloud_app::AuthRefreshState, who: &str) {
+    println!("用户：{who}（本机用户；只影响他一个人 ✓）");
     println!(
         "凭据自动刷新：{}",
         if state.enabled {
@@ -311,7 +385,7 @@ fn print_schedule(state: &mcloud_app::AuthRefreshState) {
             "已关闭"
         }
     );
-    println!("预设刷新时间：{}（东八区）", state.at);
+    println!("刷新时间：{}（东八区）", state.at);
     match state.next_at.as_deref() {
         Some(at) => println!("下一次触发：{at}"),
         None => println!("下一次触发：算不出来（见下面的说明）"),
@@ -322,5 +396,6 @@ fn print_schedule(state: &mcloud_app::AuthRefreshState) {
     }
     println!();
     println!("（那条定时是 `auto-auth-refresh-<用户id>`，在「定时」页也看得到；");
+    println!("  别的用户各有一份自己的刷新时间 —— 改他们那几份请让他在 WebUI 上改。）");
     println!("  到点之后先走既有判据：不需要刷就跳过，并把原因写进日志。）");
 }

@@ -5352,9 +5352,12 @@ async fn auth_refresh_schedule_time_change_moves_the_next_fire() {
     .expect("读定时")
     .expect("那条定时还在");
     assert_eq!(sch.expr, "0 30 22 * * *", "{sch:?}");
-    // 而且**落进了设置**（重启后还认这个钟点 ✓）
-    let saved = futures::executor::block_on(Arc::clone(&handle.store).settings()).expect("读设置");
-    assert_eq!(saved.auth_refresh_at, "22:30");
+    // 而且**落进了他自己那一格**（`data/auth-refresh.json` ✓，重启后还认这个钟点 ✓）
+    let saved = futures::executor::block_on(
+        Arc::clone(&handle.store).auth_refresh_at(&mcloud_core::UserId::new("test-user")),
+    )
+    .expect("读他那一格");
+    assert_eq!(saved.as_deref(), Some("22:30"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -5382,6 +5385,346 @@ async fn auth_refresh_schedule_rejects_a_bad_clock() {
         mcloud_core::auth_refresh::DEFAULT_AUTH_REFRESH_AT,
         "被拒的请求不该把设置写坏"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── 每用户一个钟点（2026-10-11 第二轮口径：「要每用户一个钟点」✓）────────────
+//
+// ⚠ 这四条必须用**两个真用户**（`two_user_app` ✓）：钟点从"实例级一格"改成
+// "按 owner 存"之后，最容易破的正是"改 A 的顺手动到 B" ✗ —— 单用户用例看不见它 ✓。
+
+/// 那条定时**整条**读回来（用来做"一个字节不变"的逐格比较 ✓）。
+fn schedule_of(handle: &Arc<AppHandle>, who: &mcloud_core::UserId) -> mcloud_core::Schedule {
+    futures::executor::block_on(
+        Arc::clone(&handle.store)
+            .schedule(&mcloud_core::auth_refresh::auth_refresh_schedule_id(who)),
+    )
+    .expect("读定时")
+    .unwrap_or_else(|| panic!("{who} 那条定时必须已经落库"))
+}
+
+/// ⭐⭐ **核心验收**：两个用户各自设**不同**钟点 ⇒ 各自那条定时的 `expr` **互不影响** ✓。
+///
+/// ⚠ 顺带钉住：改钟点**不许**再写 `AppSettings::auth_refresh_at` ✗ ——
+/// 那一格是"还没自己设过的人"的初始值，写它等于把所有人一起改了 ✗。
+#[tokio::test]
+async fn auth_refresh_clock_is_per_user_and_schedules_stay_independent() {
+    let (handle, dir) = test_app("auth-refresh-per-user");
+    let (app, admin, other) = two_user_app(Arc::clone(&handle));
+    let admin_id = mcloud_core::UserId::new("admin-user");
+    let other_id = mcloud_core::UserId::new("other-user");
+
+    // 管理员设 22:30
+    let (s, out) = send(
+        app.clone(),
+        put_json_with_cookie(
+            "/api/auth/refresh-schedule",
+            &admin,
+            &serde_json::json!({ "at": "22:30" }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(json_body(&out)["at"], "22:30", "{out}");
+
+    // 另一个用户设 07:15
+    let (s, out) = send(
+        app.clone(),
+        put_json_with_cookie(
+            "/api/auth/refresh-schedule",
+            &other,
+            &serde_json::json!({ "at": "07:15" }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(json_body(&out)["at"], "07:15", "{out}");
+
+    // ⭐ 两条定时各按各自的钟点 ✓
+    assert_eq!(
+        schedule_of(&handle, &admin_id).expr,
+        "0 30 22 * * *",
+        "管理员那条必须是他自己的钟点"
+    );
+    assert_eq!(
+        schedule_of(&handle, &other_id).expr,
+        "0 15 7 * * *",
+        "另一个用户那条必须是他自己的钟点（两条不许一样 ✗）"
+    );
+
+    // ⭐ 各自 `GET` 也只看见自己的 ✓
+    let (s, out) = send(
+        app.clone(),
+        get_with_cookie("/api/auth/refresh-schedule", &admin),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(json_body(&out)["at"], "22:30", "{out}");
+    let (s, out) = send(
+        app.clone(),
+        get_with_cookie("/api/auth/refresh-schedule", &other),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(json_body(&out)["at"], "07:15", "{out}");
+
+    // ⭐ 落盘也各是各的（`data/auth-refresh.json` 按 owner 存 ✓）
+    let store = Arc::clone(&handle.store);
+    assert_eq!(
+        futures::executor::block_on(store.auth_refresh_at(&admin_id))
+            .unwrap()
+            .as_deref(),
+        Some("22:30")
+    );
+    assert_eq!(
+        futures::executor::block_on(store.auth_refresh_at(&other_id))
+            .unwrap()
+            .as_deref(),
+        Some("07:15")
+    );
+    // ⚠ **实例级那一格一个字节没动** ✓（它不再是"那个钟点"了 ✓）
+    let saved = futures::executor::block_on(Arc::clone(&store).settings()).expect("读设置");
+    assert_eq!(
+        saved.auth_refresh_at,
+        mcloud_core::auth_refresh::DEFAULT_AUTH_REFRESH_AT,
+        "改自己的钟点不许动实例级那一格（那会把别人的初始值一起改了 ✗）"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐⭐ **A 改钟点 ⇒ B 的定时与那一格一个字节不变** ✓。
+#[tokio::test]
+async fn changing_one_users_clock_leaves_the_others_untouched() {
+    let (handle, dir) = test_app("auth-refresh-per-user-isolated");
+    let (app, admin, other) = two_user_app(Arc::clone(&handle));
+    let admin_id = mcloud_core::UserId::new("admin-user");
+    let other_id = mcloud_core::UserId::new("other-user");
+
+    // 先让两边都设成**不同**的值（否则"没变"可能只是"两边都没生效" ✓）
+    for (cookie, at) in [(&admin, "22:30"), (&other, "07:15")] {
+        let (s, out) = send(
+            app.clone(),
+            put_json_with_cookie(
+                "/api/auth/refresh-schedule",
+                cookie,
+                &serde_json::json!({ "at": at }),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{out}");
+    }
+
+    // 把 B（other）那一份整条记下来
+    let before = schedule_of(&handle, &other_id);
+    let before_at =
+        futures::executor::block_on(Arc::clone(&handle.store).auth_refresh_at(&other_id))
+            .expect("读他那一格");
+
+    // A 连改两轮（一轮改时间、一轮翻开关）
+    let (s, out) = send(
+        app.clone(),
+        put_json_with_cookie(
+            "/api/auth/refresh-schedule",
+            &admin,
+            &serde_json::json!({ "at": "01:20" }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let (s, out) = send(
+        app.clone(),
+        put_json_with_cookie(
+            "/api/auth/refresh-schedule",
+            &admin,
+            &serde_json::json!({ "enabled": false }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+
+    // ⭐ B 的定时**逐格**没变 ✓、他那一格也没变 ✓
+    assert_eq!(
+        schedule_of(&handle, &other_id),
+        before,
+        "改 A 的钟点/开关，绝不能动 B 那条定时"
+    );
+    assert_eq!(
+        futures::executor::block_on(Arc::clone(&handle.store).auth_refresh_at(&other_id))
+            .expect("读他那一格"),
+        before_at
+    );
+    // 而 A 自己确实变了 ✓
+    let a = schedule_of(&handle, &admin_id);
+    assert_eq!(a.expr, "0 20 1 * * *");
+    assert!(!a.enabled);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ `PUT` 指名**别人** ⇒ **404** ✓（与 `accounts::owned_account` 同口径：
+/// 别人的与不存在的回**同一个** 404，不泄露存在性 ✓），而且**一个字节都不写** ✓。
+///
+/// # 为什么这一格要有
+///
+/// 这条路由**没有**"改别人的"这条路（归属只来自会话 ✓），但脚本作者很容易照
+/// CLI 的 `--user` 直觉写一个 `{"owner": "<别人>"}` —— 不收这一格的话，那个字段
+/// 会被 serde **静默忽略**、请求成功、改的却是自己 ✓ ⇒ 他会以为改到了别人 ✗。
+#[tokio::test]
+async fn auth_refresh_schedule_put_refuses_another_users_owner() {
+    let (handle, dir) = test_app("auth-refresh-put-foreign-owner");
+    let (app, admin, other) = two_user_app(Arc::clone(&handle));
+    let admin_id = mcloud_core::UserId::new("admin-user");
+    let other_id = mcloud_core::UserId::new("other-user");
+
+    // 前置条件：两边都还没有自己那一格（这样"没被写"是能一眼看出来的 ✓）
+    let store = Arc::clone(&handle.store);
+    assert!(
+        futures::executor::block_on(store.auth_refresh_at(&admin_id))
+            .unwrap()
+            .is_none()
+    );
+
+    // 以管理员的身份，指名改**别人**的钟点
+    let (s, out) = send(
+        app.clone(),
+        put_json_with_cookie(
+            "/api/auth/refresh-schedule",
+            &admin,
+            &serde_json::json!({ "owner": "other-user", "at": "22:30" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::NOT_FOUND,
+        "指名别人 ⇒ 404（不是静默改自己 ✗）：{out}"
+    );
+    assert!(out.contains("用户不存在"), "{out}");
+
+    // ⭐ 谁都没被写：自己那一格、别人那一格、两条定时，全都没动 ✓
+    assert!(
+        futures::executor::block_on(Arc::clone(&store).auth_refresh_at(&admin_id))
+            .unwrap()
+            .is_none(),
+        "被拒的请求不许改到自己头上"
+    );
+    assert!(
+        futures::executor::block_on(Arc::clone(&store).auth_refresh_at(&other_id))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        futures::executor::block_on(Arc::clone(&store).schedule(
+            &mcloud_core::auth_refresh::auth_refresh_schedule_id(&admin_id)
+        ))
+        .unwrap()
+        .is_none(),
+        "被拒的请求不该留下一条定时"
+    );
+    assert!(
+        futures::executor::block_on(Arc::clone(&store).schedule(
+            &mcloud_core::auth_refresh::auth_refresh_schedule_id(&other_id)
+        ))
+        .unwrap()
+        .is_none(),
+        "更不该碰别人那条"
+    );
+
+    // 指名**自己**是可以的（这一格只是"守一道"，不是"谁也不许给" ✓）
+    let (s, out) = send(
+        app.clone(),
+        put_json_with_cookie(
+            "/api/auth/refresh-schedule",
+            &admin,
+            &serde_json::json!({ "owner": "admin-user", "at": "22:30" }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(json_body(&out)["at"], "22:30", "{out}");
+
+    // 而**别人**读自己的那一份，完全不受影响（还是"没设过"⇒ 显示实例级默认值 ✓）
+    let (s, out) = send(
+        app.clone(),
+        get_with_cookie("/api/auth/refresh-schedule", &other),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let v = json_body(&out);
+    assert_eq!(
+        v["at"],
+        mcloud_core::auth_refresh::DEFAULT_AUTH_REFRESH_AT,
+        "别人那一份不该被这一串请求碰到：{out}"
+    );
+    assert!(
+        futures::executor::block_on(Arc::clone(&store).auth_refresh_at(&other_id))
+            .unwrap()
+            .is_none()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 用户**关掉**之后改钟点 ⇒ **仍然关** ✓，而且**只影响他自己** ✓。
+#[tokio::test]
+async fn a_user_who_turned_it_off_stays_off_after_changing_the_clock() {
+    let (handle, dir) = test_app("auth-refresh-off-then-clock");
+    let (app, admin, other) = two_user_app(Arc::clone(&handle));
+    let admin_id = mcloud_core::UserId::new("admin-user");
+    let other_id = mcloud_core::UserId::new("other-user");
+
+    // 先让**另一个用户**也有一条自己的定时（否则"没变"可能只是"他压根没有" ✓）
+    let (s, out) = send(
+        app.clone(),
+        put_json_with_cookie(
+            "/api/auth/refresh-schedule",
+            &other,
+            &serde_json::json!({ "at": "07:15" }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+
+    // 管理员关掉它
+    let (s, out) = send(
+        app.clone(),
+        put_json_with_cookie(
+            "/api/auth/refresh-schedule",
+            &admin,
+            &serde_json::json!({ "enabled": false }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let other_before = schedule_of(&handle, &other_id);
+
+    // 只改钟点（**不带** `enabled` ✓）⇒ 不许把开关打开 ✗
+    let (s, out) = send(
+        app.clone(),
+        put_json_with_cookie(
+            "/api/auth/refresh-schedule",
+            &admin,
+            &serde_json::json!({ "at": "22:30" }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(json_body(&out)["enabled"], false, "{out}");
+
+    let a = schedule_of(&handle, &admin_id);
+    assert!(!a.enabled, "调度器读的那一格必须还是关的：{a:?}");
+    assert_eq!(a.managed_wanted, Some(false), "意愿如实留着：{a:?}");
+    assert_eq!(a.expr, "0 30 22 * * *", "钟点还是要改掉的 ✓");
+    // 另一个用户那条**一个字节不变** ✓
+    assert_eq!(schedule_of(&handle, &other_id), other_before);
+    // ⭐ 从**接口**上看也一样：别人读自己那份，还是"开着 + 他自己那个 07:15" ✓
+    let (s, out) = send(
+        app.clone(),
+        get_with_cookie("/api/auth/refresh-schedule", &other),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let v = json_body(&out);
+    assert_eq!(v["enabled"], true, "别人的开关不该被翻动：{out}");
+    assert_eq!(v["at"], "07:15", "别人的钟点不该被改：{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

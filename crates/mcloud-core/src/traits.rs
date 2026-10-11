@@ -500,6 +500,42 @@ pub trait UserStore: Send + Sync {
         ))
     }
 
+    /// 读**某个用户自己设的**预设刷新钟点（`HH:MM` ✓，2026-10-11 新增）。
+    ///
+    /// # 它只回"他自己设过的那一份" —— 没设过就是 `None`
+    ///
+    /// ⚠ 这里**刻意不回落**到 [`AppSettings::auth_refresh_at`]（老那个实例级值 ✓）：
+    /// 回落那一步是**口径**（"他自己的优先，没设过用实例级那一格" ✓），
+    /// 只能有一处实现 —— 在 [`crate::auth_refresh::effective_at`] ✓。
+    /// 在这里也回落一次的话，"谁的值算数"就有了两份写法，迟早分叉 ✗
+    /// （与 `push_panel()` 只回"他自己那份"、默认值由类型自己带是同一条取向 ✓）。
+    ///
+    /// 没设过 ⇒ `None`（**不是错误**）—— 与 `push_rules()` 回空列表同一口径 ✓。
+    ///
+    /// # 为什么按 `owner` 分表
+    ///
+    /// 用户口径（2026-10-11）：「**要每用户一个钟点**」✓ —— 那是**某个人自己**的选择，
+    /// 与 `push_rules()` / `exchange_subscriptions()` 同一档 ✓：
+    /// 换个人登录不该看见、更不该改得动别人的钟点 ✗。
+    /// 落盘 `data/auth-refresh.json`（按 owner 分表 ✓）。
+    async fn auth_refresh_at(&self, _owner: &UserId) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// 写**某个用户自己那份**预设刷新钟点（**整格替换** ✓）。
+    ///
+    /// 默认实现**报错**（与 `save_settings` / `save_push_rule` 同一口径）：
+    /// 写不进去却回成功，界面会说"已保存"而下次刷新就回到旧钟点 ✗。
+    ///
+    /// ⚠ 实现方要**自己守一道钟点的形状**（`auth_refresh::parse_clock` ✓）——
+    /// 绕过 HTTP 的调用方（CLI / 脚本）同样不该写进非法值 ✓
+    ///（与 `save_settings` 里那道 `validate()` 同一条理由 ✓）。
+    async fn save_auth_refresh_at(&self, _owner: &UserId, _at: &str) -> Result<()> {
+        Err(crate::Error::Storage(
+            "这个存储不支持下改预设刷新时间（save_auth_refresh_at 未实现）".into(),
+        ))
+    }
+
     /// 读兑换页的**订阅**（用户钉在顶部的那几件奖品）。
     ///
     /// 没订阅过就是**空列表**（不是错误）—— 与 `task_params()` 同一口径 ✓。

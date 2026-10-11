@@ -52,6 +52,9 @@ const USAGE: &str = "\
   mcloud push panel <loginNew|loginFailed|perfSlow|perfFailStreak> [选项] <规则id,…>
   mcloud push events                                列事件名（run/panel 分组）与渠道键
 
+⚠ CLI 上**没有** `--user` / `--owner` ✓ —— 上面每一条动的都是**本机管理员**
+（= 创建最早的那个用户 ✓）那一份规则；想管别的用户请在 **WebUI** 上改 ✓。
+
 add 的 JSON 形状（camelCase，字段与 PushRule 一致；`id` / `owner` 由本命令定 ✓，
 名字也可省 —— 位置参数那个说话 ✓）：
   {\"config\":{\"serverChan\":{\"token\":\"SCT…\"}},\"digest\":\"perRun\"}
@@ -77,7 +80,37 @@ pub(crate) async fn cli_owner(app: &App) -> anyhow::Result<UserId> {
     })
 }
 
+/// ⚠ CLI **不提供**"选谁"的参数（`--user` / `--owner` / `-u`）✗ —— 见到就**报错** ✓。
+///
+/// 用户口径（2026-10-11）：「**让 cli 仅操作管理员账号**」✓ ⇒ 命令行上"我是谁"
+/// **只有一个答案**（= 本机管理员 ✓，见 [`cli_owner`] ✓），
+/// 没有任何"动别人那一份"的入口 ✓ —— 想管别的用户 ⇒ **WebUI**（那里有登录态 ✓）。
+///
+/// ⚠⚠ 这里必须扫**整条 `argv`**、不能只看第一个位置：只看首位的话
+/// `mcloud auth auto-schedule on --user bob` 会把那一格**静默忽略** ✗ ——
+/// 那比报错更糟 ✓（用户以为动的是 bob，实际动的是管理员，而输出里没有任何提示 ✗）。
+///
+/// ⚠ 判据只此一处 ✓：`cli/push.rs` / `cli/auth.rs` / `cli/live_room.rs` 都调它 ——
+/// 三处各写一遍的话，迟早只认住一半 ✗（而那半格正是"偏离设计"的形态 ✗）。
+pub(crate) fn reject_user_selection(args: &[String]) -> anyhow::Result<()> {
+    let Some(flag) = args
+        .iter()
+        .find(|a| matches!(a.as_str(), "--user" | "--owner" | "-u"))
+    else {
+        return Ok(());
+    };
+    anyhow::bail!(
+        "命令行不加 `{flag}` ✗ —— CLI **只作用于本机那一个用户**\
+         （= 管理员 ✓，创建最早的那个 ✓，`mcloud user list` 里标着「管理员」的那个 ✓）。\n\
+         想动**别的用户**那一份：让**他**登录 **WebUI** 改 ✓\
+         （多用户是给不同设备的用户用的，那是 WebUI 的视角 ✓）。"
+    )
+}
+
 pub async fn run(app: &App, args: &[String]) -> anyhow::Result<()> {
+    // ⚠ CLI 不提供"选谁" ✓ —— 先扫一遍，免得 `mcloud push list --user bob`
+    // 那类写法被**静默忽略** ✗（见 `reject_user_selection` ✓）。
+    reject_user_selection(args)?;
     let sub = args.first().map(String::as_str).unwrap_or("list");
     let rest = if args.is_empty() { args } else { &args[1..] };
     let outcome = match sub {

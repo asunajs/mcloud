@@ -1961,6 +1961,9 @@ export const refreshAuth = (input: { account: string } | { all: true }) =>
 /**
  * 「凭据自动刷新定时」的当前状态（`GET`/`PUT` 的响应体 ✓）。
  *
+ * ⚠ 它是**当前登录用户自己**那一份（2026-10-11 用户口径：「要每用户一个钟点」✓）——
+ * 钟点按 owner 存在 `data/auth-refresh.json` 里，**别人改不动、也看不见** ✓。
+ *
  * ⚠ `nextAt` 是**人话**（`"每天 03:00（东八区）"` ✓），不是可解析的时间戳 ——
  * 它是"那条定时的 cron 逐字对应"的那一格，界面**原样显示**即可 ✓。
  * 自己再算一遍"今天还是明天"就是**第二套算法**，迟早与调度器分叉 ✗。
@@ -1968,7 +1971,12 @@ export const refreshAuth = (input: { account: string } | { all: true }) =>
 export interface AuthRefreshSchedule {
   /** **现在能不能跑**（= 用户想要 ✓，与调度器看到的那一格同源 ✓）。 */
   enabled: boolean
-  /** 预设刷新时间（24 小时制 `HH:MM`，东八区 ✓）。 */
+  /**
+   * **你自己**的刷新时间（24 小时制 `HH:MM`，东八区 ✓）。
+   *
+   * ⚠ 你自己设过就是你的 ✓；**从没设过**时这里是实例级默认值
+   *（= "你改之前会用的那个钟点" ✓，行为本来就一样 ✓）。
+   */
   at: string
   /** 下一次触发（人话 ✓）；`null` = 算不出来（见 `note` ✓）。 */
   nextAt: string | null
@@ -1982,19 +1990,22 @@ export interface AuthRefreshSchedule {
  * ⚠ 两格都是可选的，别把它们写成必填：只想改时间时**不带** `enabled` 才对
  *（带上 `enabled: true` 会把用户**关掉**的开关静默打开 ✗ —— 那是用户口径里
  *  明确不许的事 ✓）。
+ *
+ * ⚠ 这里**没有**"改谁"这一格 ✗：后端只认会话里的那个用户（指名别人回 404 ✓）——
+ * 所以**不要**试着往这个对象里塞 `owner` ✓（那是后端"守一道"用的，见路由注释 ✓）。
  */
 export interface AuthRefreshScheduleInput {
   /** 不给 = 不动用户的意愿 ✓。 */
   enabled?: boolean
-  /** 不给 = 不动预设时间 ✓；必须是 `HH:MM`（后端非法一律 400 ✓）。 */
+  /** 不给 = 不动**你自己**的刷新时间 ✓；必须是 `HH:MM`（后端非法一律 400 ✓）。 */
   at?: string
 }
 
-/** 读当前状态（**只读**，后端不重算、不写盘 ✓）。 */
+/** 读**你自己**的当前状态（**只读**，后端不重算、不写盘 ✓）。 */
 export const getAuthRefreshSchedule = () =>
   request<AuthRefreshSchedule>('/api/auth/refresh-schedule')
 
-/** 改开关 / 预设时间，后端**立刻重算**并回**新状态** ✓（拿它回填界面 ✓）。 */
+/** 改**你自己**的开关 / 刷新时间，后端**立刻重算**并回**新状态** ✓（拿它回填界面 ✓）。 */
 export const saveAuthRefreshSchedule = (input: AuthRefreshScheduleInput) =>
   request<AuthRefreshSchedule>('/api/auth/refresh-schedule', {
     method: 'PUT',

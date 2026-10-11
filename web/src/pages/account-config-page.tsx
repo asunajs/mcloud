@@ -32,14 +32,21 @@
  *
  * # 「凭据自动刷新」那张卡（2026-10-11 用户口径「刷新auth」✓）
  *
- * ⚠ 它是**实例级**设置（`AppSettings::auth_refresh_at` ✓，落 `data/settings.json` ✓），
- * **不是**账号级 —— 但它紧挨着 `refreshTokenDays`（「剩余多少天刷新token」✓）显示，
+ * ⚠ 它是**每用户一份**的设置（`data/auth-refresh.json` 按 owner 存 ✓，接口
+ * `GET|PUT /api/auth/refresh-schedule` ✓），**不是**账号级 —— 但它紧挨着
+ * `refreshTokenDays`（「剩余多少天刷新token」✓）显示，
  * 因为两格回答的是**同一件事的两半**：
  *
  * | 格 | 是什么 | 归谁 |
  * |---|---|---|
  * | 「剩余多少天刷新token」（账号级 ✓） | **判据**：剩不到这么多天**才**刷 ✓ | 每个账号一份 ✓ |
- * | 「预设刷新时间」（本卡 ✓） | **钟点**：每天几点**去检查一次** ✓ | 实例一份 ✓ |
+ * | 「你自己**的**刷新时间」（本卡 ✓） | **钟点**：每天几点**去检查一次** ✓ | **每个登录用户一份** ✓ |
+ *
+ * ⚠⚠ 「**每用户一份**」是 2026-10-11 第二轮用户口径（原话：「**要每用户一个钟点**」✓）——
+ * 改之前它是**实例级**一格（全实例共用一个钟点 ✗）。所以这张卡上的文案必须让用户
+ * 一眼看出"**改的是我自己那一份**" ✓：
+ * 改它**只影响你自己**的检查钟点，多用户实例里别人那一份**一个字节都不动** ✓
+ *（后端只认会话里的那个用户 —— 连"指名改别人"都回 404 ✓）。
  *
  * ⇒ 到点之后**先走既有判据**：不需要刷就跳过，并把原因写进日志 ✓
  *（见 `mcloud_core::auth_refresh` 模块头 ✓）。
@@ -125,7 +132,7 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
   const saveError = ref('')
   const saving = ref(false)
 
-  // ── 凭据自动刷新（**实例级**那张卡 ✓，见文件头）────────────────────────
+  // ── 凭据自动刷新（**每用户一份**那张卡 ✓，见文件头）────────────────────
   //
   // ⚠ `schedule` 为 `null` = 后端没有这条接口（老后端）⇒ **整张卡不画** ✓
   //（画一张只能报错的卡，用户拿它没办法 ✓ —— 与直播那张卡的处置一致 ✓）。
@@ -176,6 +183,9 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
    *
    * ⚠ 读失败**不把整页打成 error**：账号列表与账号级设置与它无关 ✓ ——
    * 一个读不到的卡不该让"改昵称阈值"这件事也做不成 ✓（只把错误留在卡里 ✓）。
+   *
+   * ⚠ 回的是**你自己**那一份（后端按会话里的用户取 ✓）——
+   * 界面这边**不需要**带任何"我是谁"（带了也没用：后端只认会话 ✓）。
    */
   const loadSchedule = async () => {
     try {
@@ -347,7 +357,7 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
     mq = undefined
   })
 
-  // ── 凭据自动刷新：存那两格（开关 / 预设时间 ✓）────────────────────────
+  // ── 凭据自动刷新：存那两格（开关 / 你自己的刷新时间 ✓）─────────────────
 
   /**
    * 存一次（**只发改动的那一格** ✓）。
@@ -355,6 +365,9 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
    * ⚠ 后端是**双 `Option`** 语义（缺席 = 保持原样 ✓）⇒ 只改时间那一次**不带**
    * `enabled` —— 带上 `enabled: true` 会把用户关掉的开关静默打开 ✗，
    * 而那正是用户口径里点名不许的事 ✓。
+   *
+   * ⚠ 改的**只有你自己**那一份（后端按会话取 owner ✓）—— 这里**不带**任何
+   * "给谁"的字段 ✓（后端收到指名的会回 404 ✓，见 `AuthRefreshScheduleInput` ✓）。
    *
    * ⚠ 返回的是**后端重算后的新状态** ⇒ 必须拿它回填（自己猜的那份与后端刚写下去的
    * 那份一旦不一致，用户看到的就是"我点了没反应" ✗）。
@@ -367,7 +380,12 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
       schedule.value = st
       scheduleAt.value = st.at
       scheduleEnabled.value = st.enabled
-      pushToast('success', st.enabled ? `已保存：每天 ${st.at} 检查一次` : '已保存：自动刷新已关闭')
+      // ⚠ 说清"是你自己那份"（多用户下每人一个钟点 ✓）——
+      // 只说"已保存"的话，用户会以为这一下把全实例都改了 ✗。
+      pushToast(
+        'success',
+        st.enabled ? `已保存：你自己的刷新时间是每天 ${st.at}` : '已保存：自动刷新已关闭',
+      )
     } catch (e) {
       // 失败：把草稿**退回**到服务端那一份（否则输入框里留着那个没存进去的值 ✓）
       const msg = e instanceof Error ? e.message : '保存失败'
@@ -479,11 +497,15 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
   )
 
   /**
-   * 「凭据自动刷新」那张卡（**实例级** ✓，见文件头）。
+   * 「凭据自动刷新」那张卡（**每用户一份** ✓，见文件头）。
    *
-   * ⚠ 它是**系统维护的那条定时**（`auto-auth-refresh-<owner>` ✓）在界面上的家：
-   * 开关与时间都落在那条定时上 ✓（`GET/PUT /api/auth/refresh-schedule` ✓），
+   * ⚠ 它是**系统维护的那条定时**（`auto-auth-refresh-<你自己>` ✓）在界面上的家：
+   * 开关与时间都落在那条定时与**你自己**那一份钟点上 ✓
+   *（`GET/PUT /api/auth/refresh-schedule` ✓），
    * 而它在「定时」页里**也看得到**（带着 `managedBy: "auth-refresh"` ✓）。
+   *
+   * ⚠ 文案必须说清"**这是你自己那一份**"：多用户实例里每人一个钟点 ✓，
+   * 改这里**不动别人** ✓ —— 不说的话，用户会以为"我改了这一下全实例都跟着变" ✗。
    */
   const scheduleCard = () => {
     const st = schedule.value
@@ -494,9 +516,13 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
         <div class="card-body gap-3">
           <h2 class="card-title text-base">凭据自动刷新</h2>
           <p class="text-xs leading-5 opacity-60">
-            每天到下面这个钟点，系统会<b>检查一次</b>所有云盘账号的凭据 ——
+            每天到下面这个钟点，系统会<b>检查一次</b><b>你自己名下</b>云盘账号的凭据 ——
             <b>该刷才刷</b>：还没到上面那个「剩余多少天刷新token」的账号会跳过，
             一枪都不打上游。
+          </p>
+          <p class="text-xs leading-5 opacity-60">
+            ⚠ 这个钟点是<b>每个登录用户各一份</b>：改它<b>只动你自己</b>的检查时间，
+            别人那一份不受影响。
           </p>
 
           <label class="flex min-h-11 cursor-pointer items-center gap-2">
@@ -518,13 +544,13 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
           </label>
 
           <fieldset class="fieldset">
-            <legend class="fieldset-legend">预设刷新时间（东八区）</legend>
+            <legend class="fieldset-legend">你自己的刷新时间（东八区）</legend>
             <div class="flex flex-wrap items-center gap-2">
               <input
                 id="auth-refresh-at"
                 type="time"
                 class="input input-sm w-32"
-                aria-label="预设刷新时间"
+                aria-label="你自己的刷新时间"
                 value={scheduleAt.value}
                 disabled={scheduleSaving.value}
                 onInput={(e) => (scheduleAt.value = (e.target as HTMLInputElement).value)}
@@ -558,8 +584,9 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
             </div>
           ) : null}
           <p class="text-xs leading-5 opacity-60">
-            这条定时在「定时」页里也看得到（标着「系统维护」），
-            命令行上改它是 <code>mcloud auth auto-schedule at HH:MM</code>。
+            这条定时在「定时」页里也看得到（标着「系统维护」）。
+            命令行上 <code>mcloud auth auto-schedule at HH:MM</code> 只作用于**本机那个用户** ——
+            你自己的这份在这里改 ✓。
           </p>
         </div>
       </div>
@@ -659,8 +686,9 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
           {detail()}
         </div>
         {/*
-          「凭据自动刷新」是**实例级**的，放在**按账号那份卡下面**、
-          而不是塞进账号卡里 —— 混进去会让人以为"换个账号就是另一套时间" ✗
+          「凭据自动刷新」是**每用户一份**的（2026-10-11 起 ✓），放在**按账号那份卡下面**、
+          而不是塞进账号卡里 —— 混进去会让人以为"换个账号就是另一套时间" ✗。
+          ⚠ 它也不在账号卡里，因为它**不按账号**：它是"**你自己**每天几点去检查" ✓。
         */}
         {scheduleCard()}
       </div>

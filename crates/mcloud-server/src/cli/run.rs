@@ -136,8 +136,11 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
             let rest = &args[1..];
             match rest.first().map(String::as_str) {
                 Some("refresh") => cli_auth::refresh(&app, &rest[1..]).await?,
-                // 「凭据自动刷新定时」的开关与预设时间（用户口径 2026-10-11 ✓）。
+                // 「凭据自动刷新定时」的开关与刷新时间（用户口径 2026-10-11 ✓）。
                 // ⚠ 与 `live-room auto-schedule` 同一条形状：**不带选项 = 只读** ✓。
+                // ⚠ 刷新时间自 2026-10-11 起是**每用户一个**（数据层 ✓），但这条命令
+                // **只作用于本机那一个用户**、**没有** `--user` ✗ —— 理由（用户口径
+                // 「cli 仅用于本地用户」✓）写在 `cli/auth.rs` 那段与 `AGENTS.md` ✓。
                 Some("auto-schedule") => cli_auth::auto_schedule(&app, &rest[1..]).await?,
                 Some(other) => {
                     eprintln!("未知 auth 子命令：{other}");
@@ -397,7 +400,9 @@ fn print_usage() {
         "                                 不需要先知道 id；默认编排与它的定时由服务启动时种下 ✓）"
     );
     eprintln!("  auth refresh <--account|--all>  刷新凭据");
-    eprintln!("  auth auto-schedule [on|off|at HH:MM]  凭据自动刷新的开关与预设时间");
+    eprintln!("  auth auto-schedule [on|off|at HH:MM]  凭据自动刷新的开关与刷新时间");
+    eprintln!("                                 （刷新时间**每用户一个** ✓；CLI **只作用于本机那个用户** ✓，");
+    eprintln!("                                  选谁请在 WebUI 上改 —— 见 `mcloud auth auto-schedule help`）");
     eprintln!("  login <方式>                    登录账号（qr / sms / app / password / device）");
     eprintln!("  user list|add|passwd            用户管理（加测试账号用；见 `mcloud user`）");
     eprintln!();

@@ -40,7 +40,7 @@ use mcloud_app::live_auto::{read_auto_state, reschedule_live_auto, AutoLivePatch
 use mcloud_app::App;
 use mcloud_core::AccountId;
 
-use crate::cli::push::cli_owner;
+use crate::cli::push::{cli_owner, reject_user_selection};
 
 const USAGE: &str = "\
 用法：
@@ -50,11 +50,16 @@ const USAGE: &str = "\
   mcloud live-room auto-schedule accounts <id,…>   设作用账号（并**立刻重算**一次）
   mcloud live-room auto-schedule accounts -|all    清空 = 全部已启用账号
 
+⚠ CLI 上**没有** `--user` / `--owner` ✓ —— 这条命令只动**本机那个用户**那一份
+（= 管理员 ✓，创建最早的那个 ✓）；想管别的用户请在 **WebUI** 上改 ✓。
 ⚠ 重算会**去上游现取**「下一场」（每个账号最多约 10 秒，并发）⇒ 写那几条会等一会儿。
 ⚠ 算不出下一场 ⇒ 那条定时**停用但保留**（账号多选与你的开关都留着，下次算出来自动启用 ✓）。";
 
 /// 跑一条 `live-room` 命令。`args` 是**去掉 `live-room` 之后**的参数 ✓。
 pub async fn run(app: &App, args: &[String]) -> anyhow::Result<()> {
+    // ⚠ CLI **不提供**"选谁"的参数 ✓（判据在 `cli/push.rs::reject_user_selection` ✓）：
+    // 这条命令也**只动本机那个用户**那一份 ✓ —— `--user` 见到就报错 ✗，不静默忽略 ✓。
+    reject_user_selection(args)?;
     let outcome = match args.first().map(String::as_str) {
         Some("auto-schedule") => auto_schedule(app, &args[1..]).await,
         Some("help" | "--help" | "-h") | None => {
@@ -86,6 +91,14 @@ async fn auto_schedule(app: &App, args: &[String]) -> anyhow::Result<()> {
         }
         // ── 开 / 关（= `PUT {enabled}` ✓，账号那一格不动 ✓）
         Some("on") | Some("off") => {
+            // ⚠ 多给参数**当场拒** ✗（`on extra` 不能"静默按 on 走" ✓ —— 与
+            // `cli/auth.rs` 那条同口径：静默吃掉参数比报错难查得多 ✗）。
+            if args.len() > 1 {
+                anyhow::bail!(
+                    "`on` / `off` 不带别的参数（多给了 {} 个）✗\n\n{USAGE}",
+                    args.len() - 1
+                );
+            }
             let wanted = args[0] == "on";
             let state = recompute(
                 app,
@@ -101,6 +114,13 @@ async fn auto_schedule(app: &App, args: &[String]) -> anyhow::Result<()> {
         }
         // ── 设作用账号（= `PUT {accounts}` ✓，开关那一格不动 ✓）
         Some("accounts") => {
+            // ⚠ 同上：`accounts a b` 不能"只认第一个、第二个静默丢掉" ✗。
+            if args.len() > 2 {
+                anyhow::bail!(
+                    "`accounts` 只跟一份清单（多给了 {} 个）✗\n\n{USAGE}",
+                    args.len() - 2
+                );
+            }
             let raw = args.get(1).ok_or_else(|| {
                 anyhow::anyhow!("要给账号 id 清单（`-` 或 `all` = 清空）：\n\n{USAGE}")
             })?;

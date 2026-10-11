@@ -125,21 +125,37 @@ pub struct AppSettings {
     pub server_log_mem_lines: usize,
     /// `data/server-logs/` 的**总量**上限（MB）。超出后按**最旧**删整天文件 ✓。
     pub server_log_total_mb: u64,
-    /// **凭据自动刷新的预设时间**（东八区墙钟 `HH:MM`，例如 `"03:00"` ✓）。
+    /// **凭据自动刷新的预设时间**（东八区墙钟 `HH:MM`，例如 `"03:00"` ✓）——
+    /// ⚠⚠ 它现在是**实例级默认值**（2026-10-11 用户口径：「**要每用户一个钟点**」✓），
+    /// **不是**"那个钟点"本身 ✗。
     ///
-    /// # 为什么在这里（实例级设置），而不是账号设置里
+    /// # 谁是"那个钟点"（改完之后）
     ///
-    /// 用户口径（2026-10-11）：「自动设置定时，**明天检查是否到达预设刷新时间**，
-    /// 到了就刷」⇒ 落盘是**那条定时**（`data/schedules.json` 里的
-    /// `auto-auth-refresh-<owner>` ✓），而定时是**每个登录用户一条** ✓
-    /// （与「直播自动定时」同一条形状 ✓）。
+    /// 每个用户自己那一份在 `data/auth-refresh.json` 里（**按 owner 存** ✓，
+    /// 见 [`crate::auth_refresh::effective_at`] ✓）。本格的角色只剩一个：
+    /// **还没自己设过的用户读到的就是它** ✓ —— 于是它是"每用户值的初始值" ✓。
     ///
-    /// 本项目的实例级设置（`AppSettings`）本来就是"一个实例一份、WebUI 里改"的
-    /// 那一档（口令下限 / 会话时长 / 日志上限……✓）⇒ 预设时间也放这里 ✓。
+    /// # 为什么**留着这个键**（不删、也不改名）
+    ///
+    /// * **它是老实例里唯一记得"用户改过几点"的地方** ✓ —— 升级前用户把钟点改成
+    ///   22:30 就是写在这一格上的；删掉（或改名让 serde 读不到）等于那个值
+    ///   **凭空回到 03:00** ✗，而那正是用户点名不许的事 ✓；
+    /// * 留着之后**迁移天然幂等**：读的时候回落过去，**没有任何写盘动作** ⇒
+    ///   不存在"跑第二遍把用户后来改的值盖掉"这条路 ✓
+    ///   （理由与那张表的形状见 `mcloud_core::auth_refresh` 模块头 ✓）；
+    /// * 改名要 `#[serde(rename = "auth_refresh_at")]` 才保得住旧键 ——
+    ///   为"名字更准"付一次落盘键名的兼容成本，不划算 ✗
+    ///   （含义由本注释与 [`crate::auth_refresh::effective_at`] 的注释钉住 ✓）。
+    ///
+    /// ⚠ 别的代码**不该**再拿它当"用户设的钟点"读 ✗：读用户钟点走
+    /// [`crate::auth_refresh::effective_at`]（或 `mcloud_app::auth_refresh_auto` 里
+    /// 那个已经组装好的读法 ✓），写用户钟点走 `UserStore::save_auth_refresh_at` ✓。
+    /// 今天只有**手改 `data/settings.json`** 会让这一格变 ✓
+    ///（WebUI 两条设置接口都是读-改-写、各改自己那几格 ✓，谁也不碰它 ✓）。
     ///
     /// ⚠ 与 `AccountSettings::refresh_token_days` **不是同一件事**，别合并 ✗：
     /// 那一格是"剩余不足 N 天就刷"的**阈值**（按账号 ✓，是既有判据 ✓），
-    /// 这一格是"每天几点检查一次"的**钟点**（全实例 ✓）—— 到点之后**先走既有判据**
+    /// 这一格是"每天几点检查一次"的**钟点** —— 到点之后**先走既有判据**
     /// （不需要刷就跳过 ✓，见 `mcloud_core::auth_refresh` 的模块头 ✓）。
     ///
     /// # 为什么是字符串而不是"两个整数"
@@ -429,6 +445,17 @@ mod tests {
         assert_eq!(part.history_limit, DEFAULT_HISTORY_LIMIT);
         assert_eq!(part.log_limit_per_run, DEFAULT_LOG_LIMIT_PER_RUN);
         assert_eq!(part.log_total_mb, DEFAULT_LOG_TOTAL_MB);
+        // ⭐ 老实例那份（只有 `auth_refresh_at`、没有后来那些容量格 ✓）也要读得进，
+        // 而且**钟点那个值要保住** —— 它是"每用户值的初始值"（见 `effective_at` ✓），
+        // 读丢了就等于用户改过的钟点凭空回到 03:00 ✗。
+        let old: AppSettings = serde_json::from_str(r#"{"auth_refresh_at":"22:30"}"#).unwrap();
+        assert_eq!(old.auth_refresh_at, "22:30");
+        assert_eq!(old.history_limit, DEFAULT_HISTORY_LIMIT, "其余格走默认值");
+        assert_eq!(
+            old.validate(),
+            Ok(()),
+            "老文件里那个钟点是合法的，不该让启动报错"
+        );
     }
 
     /// 新三格能存能读（写盘 → 读回是同一份）✓。

@@ -5,6 +5,15 @@
 //! 1. 默认种出来就是**开启**，且**算得出下一次触发** ✓；
 //! 2. **用户关掉后重算不许打开** ✓；
 //! 3. 预设时间改了 ⇒ **下一次触发时刻跟着变** ✓（那条定时的 cron 就是它 ✓）。
+//!
+//! ⚠ 2026-10-11 第二轮口径（「**要每用户一个钟点**」✓）又加了四条，
+//! 钉的是"钟点按 owner 存"这件事：
+//!
+//! 4. 两个用户各设**不同**钟点 ⇒ 各自那条定时的 `expr` **互不影响** ✓；
+//! 5. A 改钟点 ⇒ B 的定时与那一格**一个字节不变** ✓；
+//! 6. 老实例的**实例级**那个值（`AppSettings::auth_refresh_at` ✓）是每个用户的
+//!    **初始值** ✓，而"再跑一次迁移"（= 重开存储 ✓）**不覆盖**用户后来改的值 ✓；
+//! 7. 没有 `auth-refresh.json` 的老目录照样读得进（回落默认值 ✓）。
 
 use std::sync::Arc;
 
@@ -12,7 +21,9 @@ use mcloud_core::auth_refresh::{
     auth_refresh_schedule_id, daily_expr, DEFAULT_AUTH_REFRESH_AT, MANAGED_BY_AUTH_REFRESH,
 };
 use mcloud_core::testkit::FixedClock;
-use mcloud_core::{Account, AccountSettings, AuthInfo, Clock as _, DeviceId, Store, UserId};
+use mcloud_core::{
+    Account, AccountSettings, AppSettings, AuthInfo, Clock as _, DeviceId, Store, UserId,
+};
 
 use super::*;
 
@@ -34,8 +45,30 @@ fn store(tag: &str) -> (Arc<dyn Store>, std::path::PathBuf) {
     (Arc::new(s), dir)
 }
 
+/// 在**同一个目录**上再开一个存储 —— 等价于"重启一次" ✓。
+///
+/// ⚠ 它是"再跑一次迁移"的等价物：迁移没有写盘动作（读的时候回落 ✓），
+/// 所以"第二遍迁移会不会盖掉用户改的值"这件事，只能在**重开存储**上看 ✓。
+fn reopen(dir: &std::path::Path) -> Arc<dyn Store> {
+    Arc::new(mcloud_store::JsonStore::open(dir).expect("存储应能再打开"))
+}
+
 fn owner() -> UserId {
     UserId::new("u-1")
+}
+
+/// 第二个用户（多用户那几条用 ✓）。
+fn other() -> UserId {
+    UserId::new("u-2")
+}
+
+/// 那条定时**整条**读回来（用来做"一个字节不变"的逐格比较 ✓）。
+async fn schedule_of(store: &Arc<dyn Store>, who: &UserId) -> mcloud_core::Schedule {
+    store
+        .schedule(&auth_refresh_schedule_id(who))
+        .await
+        .expect("读定时")
+        .unwrap_or_else(|| panic!("{who} 那条定时必须已经落库"))
 }
 
 /// 一条账号（`expire_ms` 决定它"该刷"还是"该跳过" ✓）。
@@ -227,11 +260,18 @@ async fn changing_the_clock_changes_the_next_fire() {
     );
     assert_eq!(after.managed_wanted, Some(true), "只改时间不该动意愿");
 
-    // ⭐ 而且**落进了设置**（`data/settings.json` ✓）—— 重启后还认这个钟点 ✓
+    // ⭐ 而且**落进了他自己那一格**（`data/auth-refresh.json` ✓）—— 重启后还认这个钟点 ✓
+    assert_eq!(
+        store.auth_refresh_at(&owner()).await.unwrap().as_deref(),
+        Some("22:30"),
+        "预设时间要落到**这个用户自己**那一格（否则重启就回到默认值 ✗）"
+    );
+    // ⚠ 而**实例级那一格**（老键 ✓）**一个字节都不该动** —— 它是"还没自己设过的
+    // 那些人"的初始值，写它等于把别人的钟点也改了 ✗。
     assert_eq!(
         store.settings().await.unwrap().auth_refresh_at,
-        "22:30",
-        "预设时间要落到实例设置里（否则重启就回到默认值 ✗）"
+        DEFAULT_AUTH_REFRESH_AT,
+        "改自己的钟点不许动实例级那一格"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -257,11 +297,264 @@ async fn a_bad_clock_is_rejected_not_defaulted() {
             "错误里要说清正确形状：{err}"
         );
     }
-    // 设置里还是原来那个值（没被写坏 ✓）
+    // 他自己那一格还是"没设过"（没被写坏 ✓），实例级那一格也没被动 ✓
+    assert_eq!(store.auth_refresh_at(&owner()).await.unwrap(), None);
     assert_eq!(
         store.settings().await.unwrap().auth_refresh_at,
         DEFAULT_AUTH_REFRESH_AT
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ════════════ ④⑤ 每用户一个钟点（2026-10-11 第二轮口径 ✓）════════════
+
+/// ⭐⭐ **核心验收**：两个用户各设**不同**钟点 ⇒ 各自那条定时的 `expr` **互不影响** ✓
+///（改之前两格共用实例级那一格 ⇒ 两条永远同一个 `expr` ✗）。
+#[tokio::test]
+async fn two_users_keep_their_own_clocks() {
+    let (store, dir) = store("per-user-clock");
+    seed_auth_refresh_schedule(&store, &owner()).await.unwrap();
+    seed_auth_refresh_schedule(&store, &other()).await.unwrap();
+
+    // 开箱两条都按默认值 ✓
+    assert_eq!(schedule_of(&store, &owner()).await.expr, "0 0 3 * * *");
+    assert_eq!(schedule_of(&store, &other()).await.expr, "0 0 3 * * *");
+
+    // A 设 22:30、B 设 07:15
+    let a = reschedule_auth_refresh(
+        &store,
+        &owner(),
+        Some(AuthRefreshPatch {
+            wanted: None,
+            at: Some("22:30".into()),
+        }),
+    )
+    .await
+    .expect("A 改得掉");
+    let b = reschedule_auth_refresh(
+        &store,
+        &other(),
+        Some(AuthRefreshPatch {
+            wanted: None,
+            at: Some("07:15".into()),
+        }),
+    )
+    .await
+    .expect("B 改得掉");
+
+    assert_eq!(a.at, "22:30");
+    assert_eq!(b.at, "07:15");
+    // ⭐ 两条定时各按各自的钟点 ✓
+    assert_eq!(schedule_of(&store, &owner()).await.expr, "0 30 22 * * *");
+    assert_eq!(schedule_of(&store, &other()).await.expr, "0 15 7 * * *");
+    // ⭐ 落盘也各是各的 ✓
+    assert_eq!(
+        store.auth_refresh_at(&owner()).await.unwrap().as_deref(),
+        Some("22:30")
+    );
+    assert_eq!(
+        store.auth_refresh_at(&other()).await.unwrap().as_deref(),
+        Some("07:15")
+    );
+    // 读回来（= 界面那张卡）也各是各的 ✓
+    assert_eq!(
+        read_auth_refresh_state(&store, &owner()).await.unwrap().at,
+        "22:30"
+    );
+    assert_eq!(
+        read_auth_refresh_state(&store, &other()).await.unwrap().at,
+        "07:15"
+    );
+
+    // 重启之后仍然各是各的 ✓
+    drop(store);
+    let s = reopen(&dir);
+    assert_eq!(schedule_of(&s, &owner()).await.expr, "0 30 22 * * *");
+    assert_eq!(schedule_of(&s, &other()).await.expr, "0 15 7 * * *");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐⭐ **A 改钟点 ⇒ B 的定时与那一格一个字节不变** ✓（多用户下最容易破的一条 ✓）。
+#[tokio::test]
+async fn changing_one_users_clock_leaves_the_other_untouched() {
+    let (store, dir) = store("per-user-isolated");
+    seed_auth_refresh_schedule(&store, &owner()).await.unwrap();
+    seed_auth_refresh_schedule(&store, &other()).await.unwrap();
+    reschedule_auth_refresh(
+        &store,
+        &other(),
+        Some(AuthRefreshPatch {
+            wanted: None,
+            at: Some("07:15".into()),
+        }),
+    )
+    .await
+    .unwrap();
+
+    // 改 A 之前，把 B 那一份**整条**记下来（逐格比较 ✓）
+    let b_schedule = schedule_of(&store, &other()).await;
+    let b_at = store.auth_refresh_at(&other()).await.unwrap();
+    let b_state = read_auth_refresh_state(&store, &other()).await.unwrap();
+
+    // A 连改两轮（一轮设时间、一轮翻开关 ✓）
+    reschedule_auth_refresh(
+        &store,
+        &owner(),
+        Some(AuthRefreshPatch {
+            wanted: None,
+            at: Some("22:30".into()),
+        }),
+    )
+    .await
+    .unwrap();
+    reschedule_auth_refresh(
+        &store,
+        &owner(),
+        Some(AuthRefreshPatch {
+            wanted: Some(false),
+            at: None,
+        }),
+    )
+    .await
+    .unwrap();
+
+    // ⭐ B 的定时**逐格**没变 ✓
+    assert_eq!(
+        schedule_of(&store, &other()).await,
+        b_schedule,
+        "改 A 的钟点/开关，绝不能动 B 那条定时"
+    );
+    assert_eq!(store.auth_refresh_at(&other()).await.unwrap(), b_at);
+    assert_eq!(
+        read_auth_refresh_state(&store, &other()).await.unwrap(),
+        b_state
+    );
+    // 而 A 自己确实变了 ✓（否则上面那些断言可能只是"两边都没生效"✓）
+    assert_eq!(schedule_of(&store, &owner()).await.expr, "0 30 22 * * *");
+    assert!(!schedule_of(&store, &owner()).await.enabled);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐⭐ **迁移**：盘上那个**实例级**的老值就是每个用户的**初始值** ✓，
+/// 而且**再跑一次迁移**（= 重开存储 ✓）**不覆盖**用户后来改的值 ✓（幂等 ✓）。
+#[tokio::test]
+async fn the_instance_level_value_is_every_users_starting_point_and_migration_is_idempotent() {
+    let (store, dir) = store("migration");
+    // 盘上先有**实例级** `auth_refresh_at = 22:30`（升级前那个值 ✓）
+    let settings = AppSettings {
+        auth_refresh_at: "22:30".into(),
+        ..AppSettings::default()
+    };
+    store.save_settings(&settings).await.expect("写老值");
+    drop(store);
+
+    // 第一次"迁移"：重开存储 ⇒ 每个用户读到的都是 22:30 ✓
+    let s = reopen(&dir);
+    seed_auth_refresh_schedule(&s, &owner()).await.unwrap();
+    seed_auth_refresh_schedule(&s, &other()).await.unwrap();
+    for who in [owner(), other()] {
+        assert_eq!(
+            read_auth_refresh_state(&s, &who).await.unwrap().at,
+            "22:30",
+            "{who} 的初始值必须是老那个实例级值（不许凭空回到 03:00 ✗）"
+        );
+        assert_eq!(schedule_of(&s, &who).await.expr, "0 30 22 * * *");
+    }
+    // 而且**没有任何写盘迁移**：那一格本来就是"没设过" ✓
+    assert_eq!(s.auth_refresh_at(&owner()).await.unwrap(), None);
+
+    // A 后来改成 07:15
+    reschedule_auth_refresh(
+        &s,
+        &owner(),
+        Some(AuthRefreshPatch {
+            wanted: None,
+            at: Some("07:15".into()),
+        }),
+    )
+    .await
+    .unwrap();
+    drop(s);
+
+    // ⭐ **再跑一次迁移**（重开存储）⇒ A 改过的值**不被覆盖** ✓，B 仍是初始值 ✓
+    let s = reopen(&dir);
+    assert_eq!(
+        read_auth_refresh_state(&s, &owner()).await.unwrap().at,
+        "07:15",
+        "第二遍迁移不许把用户改过的值盖回去"
+    );
+    assert_eq!(schedule_of(&s, &owner()).await.expr, "0 15 7 * * *");
+    assert_eq!(
+        read_auth_refresh_state(&s, &other()).await.unwrap().at,
+        "22:30"
+    );
+    // ⚠ 老键**还在**（它是"没设过的人"的来源 ✓）—— 没人去删它 ✓
+    assert_eq!(s.settings().await.unwrap().auth_refresh_at, "22:30");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ 用户**关掉**之后改钟点 ⇒ **仍然关** ✓（而且这只影响他自己 ✓）。
+///
+/// 与 [`stays_off_once_the_user_turned_it_off`] 的区别：那一条钉的是"同一个用户
+/// 连算两轮"，这一条钉的是"关着的那个用户改了钟点 ⇒ 关的状态保住、而**别人不受影响**" ✓。
+#[tokio::test]
+async fn a_user_who_turned_it_off_stays_off_after_changing_the_clock() {
+    let (store, dir) = store("off-then-clock");
+    seed_auth_refresh_schedule(&store, &owner()).await.unwrap();
+    seed_auth_refresh_schedule(&store, &other()).await.unwrap();
+
+    // A 关掉；B 不动
+    reschedule_auth_refresh(
+        &store,
+        &owner(),
+        Some(AuthRefreshPatch {
+            wanted: Some(false),
+            at: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let b_before = schedule_of(&store, &other()).await;
+
+    // A 只改钟点（**不带** `wanted` ✓）
+    let state = reschedule_auth_refresh(
+        &store,
+        &owner(),
+        Some(AuthRefreshPatch {
+            wanted: None,
+            at: Some("22:30".into()),
+        }),
+    )
+    .await
+    .expect("改得掉");
+    assert!(
+        !state.enabled,
+        "只改时间不能把用户关掉的开关打开：{state:?}"
+    );
+    let a = schedule_of(&store, &owner()).await;
+    assert!(!a.enabled, "调度器读的那一格必须还是关的：{a:?}");
+    assert_eq!(a.managed_wanted, Some(false), "意愿那一格如实留着 ✓");
+    assert_eq!(a.expr, "0 30 22 * * *", "钟点还是要改掉的 ✓");
+    // B 那条**一个字节不变** ✓
+    assert_eq!(schedule_of(&store, &other()).await, b_before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐ **旧数据兼容**：老目录上没有 `auth-refresh.json` ⇒ 读得进、按默认值走 ✓。
+///
+/// 这是"加一张表不让老实例失效"的保证 ✓（与 `settings.json` 缺字段同一条路 ✓）。
+#[tokio::test]
+async fn an_old_directory_without_the_new_table_still_works() {
+    let (store, dir) = store("old-dir");
+    // 前置条件：这个目录上**真的**还没有那个文件（老实例就是这样 ✓）
+    assert!(!dir.join("auth-refresh.json").exists());
+
+    assert_eq!(store.auth_refresh_at(&owner()).await.unwrap(), None);
+    seed_auth_refresh_schedule(&store, &owner()).await.unwrap();
+    let state = read_auth_refresh_state(&store, &owner()).await.unwrap();
+    assert_eq!(state.at, DEFAULT_AUTH_REFRESH_AT, "没有那一格 ⇒ 用默认值 ✓");
+    assert!(state.enabled);
+    assert_eq!(schedule_of(&store, &owner()).await.expr, "0 0 3 * * *");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -311,6 +604,49 @@ async fn a_handmade_schedule_on_that_id_is_never_touched() {
     // 那条手建的定时**逐格没变** ✓
     let after = store.schedule(&id).await.unwrap().unwrap();
     assert_eq!(after, handmade, "系统绝不能动用户手建的定时");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ⭐⭐ 那个 id 上是**别人名下**的定时（不是"不归系统维护"，而是"不归**我**"）⇒
+/// 同样**一个字节都不许动** ✗。
+///
+/// # 为什么这条必须单独钉
+///
+/// `ScheduleId` 是**全局唯一**的，而写的时候 `save_schedule` 是**按 id 全局覆盖**的。
+/// 查的时候若按 `(owner, id)` 查（`schedule_for` ✗），别人名下那条同名定时就**查不到**
+/// ⇒ 被当成"还没有"⇒ 就地建一条把它**覆盖掉** ✗ —— 表现是"B 手建的那条定时，
+/// 被 A 打开一次设置页就没了" ✓。判据必须是**按 id 全局查**（与 seed 那一步同口径 ✓）。
+#[tokio::test]
+async fn a_schedule_of_another_user_on_that_id_is_never_touched() {
+    let (store, dir) = store("squat-other");
+    // A 的那条 id 上，放着一条**归 B** 的定时（带系统标记也不行 —— `owner` 才是归属 ✓）
+    let id = auth_refresh_schedule_id(&owner());
+    let mut foreign = seeded_auth_refresh_schedule(&other(), "22:30").expect("造得出来");
+    foreign.id = id.clone();
+    foreign.owner = Some(other());
+    store.save_schedule(&foreign).await.unwrap();
+
+    // A 重算 / 只读：都不碰它，并如实说明 ✓
+    let state = reschedule_auth_refresh(&store, &owner(), None)
+        .await
+        .expect("不该报错");
+    assert!(!state.enabled, "装不上 ⇒ 报「没开」（不报一个假的 true ✓）");
+    assert!(state.next_at.is_none());
+    assert!(
+        state.note.as_deref().unwrap_or("").contains("手建"),
+        "要说清为什么装不上：{state:?}"
+    );
+    assert_eq!(
+        read_auth_refresh_state(&store, &owner()).await.unwrap(),
+        state
+    );
+
+    // B 那条定时**逐格没变** ✓
+    assert_eq!(
+        store.schedule(&id).await.unwrap().unwrap(),
+        foreign,
+        "别人的定时一个字节都不能动"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

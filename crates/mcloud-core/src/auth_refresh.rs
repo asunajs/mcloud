@@ -17,14 +17,28 @@
 //! 本模块只管"那条定时什么时候响"，**一个字都不改**既有判据 ✓
 //!（见 [`AUTH_REFRESH_TASK`] 那段说明 ✓）。
 //!
-//! # 三个纯问题（都能单测、都不碰 IO）
+//! # ⚠⚠ 那个钟点是**每用户一份**（2026-10-11 用户口径：「**要每用户一个钟点**」✓）
+//!
+//! 改之前它是**实例级**的（`AppSettings::auth_refresh_at` 一格，全实例共用 ✓）——
+//! 多用户下两个用户只能共用同一个钟点 ✗。现在：
+//!
+//! | 谁 | 落在哪 | 什么时候写 |
+//! |---|---|---|
+//! | 某个用户自己设的钟点 | `data/auth-refresh.json`（**按 owner 存** ✓） | 他改一次写一次 ✓ |
+//! | 实例级那一格（`AppSettings::auth_refresh_at`） | `data/settings.json`（**老键，留着** ✓） | 只在手改文件时变 ✓ |
+//!
+//! 两者怎么合起来：见 [`effective_at`] ✓ —— **他自己的优先，没设过就用实例级那一格** ✓。
+//! 老键**不删**的理由也在那里（它是"用户改过几点"这件事在升级前的唯一落点 ✓）。
+//!
+//! # 四个纯问题（都能单测、都不碰 IO）
 //!
 //! 1. [`auth_refresh_schedule_id`]：那条定时叫什么 id（确定性 ⇒ upsert 幂等 ✓）；
 //! 2. [`parse_clock`] / [`format_clock`]：`HH:MM` 与人话之间来回；
-//! 3. [`daily_expr`]：把 `HH:MM` 写成一条**每天那一刻**的 cron ✓。
+//! 3. [`daily_expr`]：把 `HH:MM` 写成一条**每天那一刻**的 cron ✓；
+//! 4. [`effective_at`]：某个用户**现在生效**的钟点是谁的（每用户 vs 实例级 ✓）。
 //!
 //! 组装与落盘在 `mcloud_app::auth_refresh_auto`，接口在
-//! `mcloud_server::routes::auth`，命令行在 `mcloud auth auto-schedule` ✓。
+//! `mcloud_server::routes::auth_refresh`，命令行在 `mcloud auth auto-schedule` ✓。
 
 use crate::schedule::ScheduleId;
 use crate::traits::{beijing_offset, parse_beijing_time};
@@ -64,7 +78,38 @@ pub const AUTH_REFRESH_TASK: &str = "auth-refresh";
 ///
 /// ⚠ 它必须与 [`crate::settings::AppSettings`] 那格的 serde 默认值**同一个值** ——
 /// 抽成常量、两处共用（各写一遍的话，"从没改过设置"的实例行为会与默认值分叉 ✗）。
+///
+/// ⚠ 它是**两层回落之后**才用到的那一个：用户自己的（`auth-refresh.json` ✓）
+/// → 实例级那一格（`AppSettings::auth_refresh_at` ✓）→ 本常量 ✓（见 [`effective_at`] ✓）。
 pub const DEFAULT_AUTH_REFRESH_AT: &str = "03:00";
+
+/// 某个用户**现在生效**的预设钟点：**他自己的优先**，没设过就回落到**实例级那一格**。
+///
+/// # 为什么需要这一层（2026-10-11 用户口径：「要每用户一个钟点」✓）
+///
+/// 钟点从**实例级**改成了**每用户一份**（`data/auth-refresh.json`，按 owner 存 ✓），
+/// 而升级之前那个值写在 `AppSettings::auth_refresh_at` 里 ✓。那个键**不删** ✗ ——
+/// 它是老实例里唯一记得"用户把钟点改成了 22:30"的地方 ✓，删了那个值就**凭空回到
+/// 默认的 03:00** ✗。于是它的新身份就是"**还没自己设过的用户的初始值**" ✓。
+///
+/// # 为什么"迁移"就是这个函数（没有第二个写盘动作）
+///
+/// 用户口径要的是两件事：**每个用户的初始值 = 老那个值** ✓、**迁移幂等**
+///（跑两遍不许覆盖用户后来改的值 ✗）。本函数一次满足两条：
+///
+/// * 读的时候**回落**过去 ⇒ 谁都没设过时，读到的就是老那个值 ✓
+///   （连**后来新加**的用户也一样 ✓ —— 写盘式迁移做不到这一点 ✗）；
+/// * 它**只读不写** ⇒ 不存在"第二次迁移把 `auth-refresh.json` 里已有的值盖掉"
+///   这条路 ✓ —— 幂等是**结构上**成立的，不靠"记得判一次有没有" ✓。
+pub fn effective_at(own: Option<&str>, instance: &str) -> String {
+    match own {
+        // 自己设过（且是合法钟点 ✓）⇒ 用他的
+        Some(v) if parse_clock(v).is_some() => v.trim().to_string(),
+        // 没设过 / 那一格被手改坏了 ⇒ 实例级那一格（老键 ✓）
+        //（⚠ 手改坏的那支由调用方留一条 warn ✓ —— 这里不静默，只是"不认它"✓）
+        _ => instance.trim().to_string(),
+    }
+}
 
 /// 某个**登录用户**那条「凭据自动刷新定时」的 id：`auto-auth-refresh-<owner>`。
 ///
@@ -295,5 +340,23 @@ mod tests {
         assert_eq!(next_clock("03:00").as_deref(), Some("03:00"));
         assert_eq!(next_clock("7:5").as_deref(), Some("07:05"), "补零后同形");
         assert_eq!(next_clock("乱写"), None);
+    }
+
+    /// ⭐⭐ **每用户一个钟点**：自己的优先，没设过才回落实例级那一格 ✓
+    ///（这条就是"用户改过的钟点不许凭空回到默认"那道闸 ✓）。
+    #[test]
+    fn effective_at_prefers_the_users_own_clock() {
+        // 自己设过 ⇒ 用他自己的（哪怕实例级是另一个值 ✓）
+        assert_eq!(effective_at(Some("22:30"), "03:00"), "22:30");
+        // 没设过 ⇒ 实例级那一格（= 升级前那个值 ⇒ **不会凭空回到 03:00** ✓）
+        assert_eq!(effective_at(None, "22:30"), "22:30");
+        // 前后空白先 trim（与 `parse_clock` 同一条口径 ✓）
+        assert_eq!(effective_at(Some(" 07:05 "), "22:30"), "07:05");
+        // ⚠ 自己那一格被手改坏了 ⇒ **不认它**、回落实例级（调用方留 warn ✓）——
+        // 认了的话，`daily_expr` 会当场报"写不成 cron"，界面上就成了"装不上" ✗
+        assert_eq!(effective_at(Some("半夜"), "22:30"), "22:30");
+        assert_eq!(effective_at(Some(""), "22:30"), "22:30");
+        // 两边都没有 ⇒ 空串（调用方按 `DEFAULT_AUTH_REFRESH_AT` 兜 ✓）
+        assert_eq!(effective_at(None, ""), "");
     }
 }

@@ -206,6 +206,25 @@ struct Db {
     /// 但**照样要落盘**：只放内存 ⇒ 重启即忘记冷却与计数 ⇒ 重启后同一批事件
     /// 再来一轮风暴 ✗（用户口径：「登录，性能，这些可能**频繁触发**，注意」✓）。
     push_throttle: HashMap<String, mcloud_core::ThrottleState>,
+    /// **每个用户自己那份**「凭据自动刷新的预设钟点」。
+    ///
+    /// ⚠ 键是 **owner id**，值是 `HH:MM`（东八区墙钟 ✓）—— 用户口径
+    /// （2026-10-11）：「**要每用户一个钟点**」✓。与 `push_rules` / `push_panel`
+    /// 同一层：都是"某个人的选择" ✓，落盘 `data/auth-refresh.json` ✓。
+    ///
+    /// # ⚠ 没有这一格 ≠ 用默认值 —— 是回落到**实例级那一格**
+    ///
+    /// 升级之前钟点是**实例级**的（`AppSettings::auth_refresh_at` ✓，那个键**留着** ✓）。
+    /// 所以"这个用户从没自己设过"时读到的是**实例级那一格**，不是硬编码的 `03:00`
+    /// —— 判据只有一处：[`mcloud_core::auth_refresh::effective_at`] ✓。
+    /// 在这里就地兜一个默认值的话，"用户改过的钟点凭空回到 03:00"就会从这个口子漏出来 ✗。
+    ///
+    /// # 为什么值是裸字符串、不是一个小结构体
+    ///
+    /// 它**就一格**（`HH:MM`），而那个串的合法形状已经由 `parse_clock` 钉死 ✓
+    /// ⇒ 包一层 `{"at": …}` 只会给每个调用点添一次解包 ✓
+    ///（`login_devices: HashMap<String, Vec<String>>` 同款：值不是结构体也照存 ✓）。
+    auth_refresh: HashMap<String, String>,
     /// **见过的登录设备**（键 = owner id ✓，2026-10-08 新增）。
     ///
     /// # 它是什么、不是什么
@@ -295,6 +314,18 @@ mod files {
     /// **后来才有的文件** —— 缺了就是"还没见过任何设备"，按空表走 ✓
     /// （与 `exchange-subscriptions.json` / `push-panel.json` 同一条路 ✓）。
     pub const LOGIN_DEVICES: &str = "login-devices.json";
+    /// **每个用户自己那份**「凭据自动刷新的预设钟点」（按 owner 分表 ✓，2026-10-11 新增）。
+    ///
+    /// ⚠ 值就是 `HH:MM`（东八区墙钟 ✓）—— 里面**没有凭据**，但**照样进
+    /// `harden_existing_permissions` 的清单** ✓：它记着"这个账号每天几点会去轮换凭据"，
+    /// 与 `push-throttle.json` / `login-devices.json` 同一条口径 ——
+    /// 老目录升级后不该对同机其他用户可读 ✓
+    ///（漏掉 = 那个文件仍对同机其他用户可读 ✗）。
+    ///
+    /// **后来才有的文件** —— 缺了就是"还没有人自己设过"，按空表走 ✓
+    ///（与 `push-panel.json` / `login-devices.json` 同一条路 ✓）；
+    /// 那时读到的钟点回落到实例级那一格 ✓（见 `Db::auth_refresh` 的说明 ✓）。
+    pub const AUTH_REFRESH: &str = "auth-refresh.json";
     /// **已废弃**：用户级推送渠道配置（`push-config.json`）。
     ///
     /// 只留在这里给 [`JsonStore::purge_legacy_push_files`] 当删除清单用 ✓ ——
@@ -501,6 +532,10 @@ impl JsonStore {
             // 这个账号的活动网络 ⇒ 与节流状态同一条口径，**必须也在清单里** ✓
             // （漏掉 = 老目录升级后这个文件仍对同机其他用户可读 ✗）。
             files::LOGIN_DEVICES,
+            // ⚠ 2026-10-11 把钟点改成**每用户一份**时补的第五个：它记着
+            // "这个账号每天几点会去轮换凭据" ⇒ 与上面那个同一条口径，
+            // **必须也在清单里** ✓（漏掉 = 老目录升级后这个文件仍对同机其他用户可读 ✗）。
+            files::AUTH_REFRESH,
         ];
         for name in names {
             let p = self.path(name);
@@ -823,6 +858,10 @@ impl JsonStore {
             self.read_json(&self.path(files::PUSH_THROTTLE))?;
         let login_devices: HashMap<String, Vec<String>> =
             self.read_json(&self.path(files::LOGIN_DEVICES))?;
+        // ⚠ 老目录上这个文件**还不存在**（2026-10-11 才有 ✓）⇒ `read_json` 对缺文件
+        // 回 `Default`（空表 ✓），于是"还没人自己设过钟点"这条升级路径天然成立 ✓。
+        let auth_refresh: HashMap<String, String> =
+            self.read_json(&self.path(files::AUTH_REFRESH))?;
         let sessions: HashMap<String, Session> = self.read_json(&self.path(files::SESSIONS))?;
 
         // ⚠⚠ 日志**一个文件都不读**（2026-10-09 用户口径：「日志和历史不要全加入内存，
@@ -849,6 +888,7 @@ impl JsonStore {
         db.push_panel = push_panel;
         db.push_throttle = push_throttle;
         db.login_devices = login_devices;
+        db.auth_refresh = auth_refresh;
         db.sessions = sessions;
         db.logs = LogCache::default();
         // 老 `history.json` 里那份**内联日志**搬到日志文件里（一次性 ✓）：
@@ -1137,6 +1177,14 @@ impl JsonStore {
             .lock()
             .map_err(|_| Error::Storage("写锁中毒".into()))?;
         store.write_json(&store.path(files::LOGIN_DEVICES), &db.login_devices)
+    }
+
+    fn persist_auth_refresh(db: &Db, store: &Self) -> Result<()> {
+        let _gate = store
+            .write_gate
+            .lock()
+            .map_err(|_| Error::Storage("写锁中毒".into()))?;
+        store.write_json(&store.path(files::AUTH_REFRESH), &db.auth_refresh)
     }
 
     fn persist_task_config(db: &Db, store: &Self) -> Result<()> {
@@ -1935,6 +1983,32 @@ impl mcloud_core::UserStore for JsonStore {
                 .insert(owner.as_str().to_string(), state.clone());
         }
         Self::persist_push_throttle(&db, self)
+    }
+
+    async fn auth_refresh_at(&self, owner: &mcloud_core::UserId) -> Result<Option<String>> {
+        // 没设过 ⇒ `None`（**不在这里回落实例级那一格** ✓ ——
+        // 回落是口径、只有一处实现，见 `UserStore::auth_refresh_at` 的说明 ✓）。
+        Ok(self.read()?.auth_refresh.get(owner.as_str()).cloned())
+    }
+
+    async fn save_auth_refresh_at(&self, owner: &mcloud_core::UserId, at: &str) -> Result<()> {
+        // 领域约束在这里也守一道（与 `save_settings` 里那道 `validate()` 同一条理由 ✓）：
+        // 绕过 HTTP 的调用方（CLI / 脚本）同样不该把 `半夜` 写进这个文件 ——
+        // 写进去之后 `daily_expr` 当场报"写不成 cron"，表现是"钟点存上了、定时却装不上" ✗。
+        //
+        // ⚠ 判据**只有一处**（`auth_refresh::parse_clock` ✓）—— 在这里再写一遍
+        // "两段、冒号、范围"就是第二份口径，迟早与它分叉 ✗。
+        if mcloud_core::auth_refresh::parse_clock(at).is_none() {
+            return Err(Error::Config(format!(
+                "预设刷新时间要是 24 小时制的 HH:MM（例如 03:00），收到的是「{at}」"
+            )));
+        }
+        let mut db = self.write()?;
+        // ⚠ **只动这个 owner 那一行** ✓（`insert` 按 key 覆盖 ⇒ 别人的那一行碰不到 ✓）——
+        // 这正是"别人的钟点一个字节都改不了"的落点 ✓。
+        db.auth_refresh
+            .insert(owner.as_str().to_string(), at.trim().to_string());
+        Self::persist_auth_refresh(&db, self)
     }
 
     async fn remember_login_device(&self, owner: &mcloud_core::UserId, key: &str) -> Result<bool> {
