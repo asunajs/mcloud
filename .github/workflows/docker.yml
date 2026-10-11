@@ -50,8 +50,11 @@ name: Docker 镜像
 #    + LTO fat。所以它**不在 push / PR 上跑** —— Actions 分钟数要花钱，与 ci.yml 同一条口径。
 
 on:
-  push:
-    tags: ['v*']
+  # ⚠ 2026-10-11 用户口径：**只在手动触发时跑** ✗ —— 原先跟着 `v*` tag 自动跑，
+  #   而它一次要起 **两台** runner（amd64 + arm64，arm runner 还更贵），
+  #   把 Actions 额度吃得很凶（当月 2000 分钟被用光 ✓）。
+  #   镜像不是发版的必需品 ⇒ 需要时手动跑：
+  #     gh workflow run docker.yml --ref <tag或分支>
   workflow_dispatch:
     inputs:
       arm64:
