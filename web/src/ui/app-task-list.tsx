@@ -70,6 +70,12 @@ const stateView = (state: string, outText?: string | null): { label: string; cls
 const metaLine = (i: UpstreamAppTaskItem): string => {
   const bits: string[] = [`#${i.taskId ?? '—'}`, i.marketName ?? '—', `第 ${i.currStep ?? 0} 步`]
   if (i.process != null && i.process > 0) bits.push(`进度 ${i.process}`)
+  // 上游那一格 `button.out.day`（**字符串** ✓）—— 实拍「连续31天开启邮箱APP通知」是 `"5"`，
+  // 而它的 `process` 是 **0** ⇒ 只读 `process` 就会"App 里有进度、这里没有" ✗
+  //（2026-10-11 用户口径 ✓）。
+  const day = (i.buttonOutDay ?? '').trim()
+  if (day !== '') bits.push(`已 ${day} 天`)
+  if (i.buttonCanReceive === 1) bits.push('可领取')
   if (i.enable === 0) bits.push('上游已停用')
   if (i.buttonAppLink != null && i.buttonAppLink !== '') bits.push(i.buttonAppLink)
   return bits.join(' · ')

@@ -172,6 +172,26 @@ pub struct TaskV2Item {
     /// 取 `buttonProperty.out`（**外部端**那一份 ✓ —— WebUI 就是外部端 ✓），
     /// 缺了再回落 `button.out` ✓；两层都缺 / 不是字符串 ⇒ `None`（界面回落状态词 ✓）。
     pub button_out_text: Option<String>,
+    /// `button.out.day` —— **上游给的"进行到第几天"** ✓（**字符串**，实拍 `"5"` ✗ 不是数字 ✗）。
+    ///
+    /// 出处：真机实拍任务 **1021「连续31天开启邮箱APP通知」**（抓包仓
+    /// `app-task-run-account-samples.txt` §12.6 ✓）：
+    ///
+    /// ```json
+    /// "button": { "out":   { "text": "开启中", "day": "5", "canReceive": 0 },
+    ///             "email": { "itemBg": "#fff6e5", "btnBg": "#ffa939",
+    ///                        "text": "开启中", "day": "5", "canReceive": 0 } }
+    /// ```
+    ///
+    /// ⇒ **进度不在 `process` 里** ✗（那条 `process` 是 0 ✓），就在这一格 ✓ ——
+    /// 界面此前只读 `process`，于是"App 里有进度、这里没有" ✗（2026-10-11 用户口径 ✓）。
+    /// ⚠ 同一条任务**没有** `buttonProperty`（只有 `button` ✓），而 1029 反过来有 ✓
+    /// ⇒ 两处都取，`buttonProperty.out` 优先 ✓（与 [`Self::button_out_text`] 同一口径 ✓）。
+    pub button_out_day: Option<String>,
+    /// `button.out.canReceive` —— 上游说"现在能不能领" ✓（实拍 `0` ✓；`1` 才算能领 ✓）。
+    ///
+    /// ⚠ 它和"任务完成没完成"**不是一回事** ✗（实拍 1021 是 `WAIT` + `canReceive=0` ✓）。
+    pub button_can_receive: Option<i64>,
     pub button_app_link: Option<String>,
     /// `button.email.link` —— **邮箱端**那一档的入口（实拍是短链 `https://y.10086.cn/x/<码>`
     /// 或带 `token=#ssoToken#` 占位的落地页）。
@@ -250,6 +270,11 @@ pub fn parse_task_list_v2(body: &str, group: &str) -> Result<TaskListV2> {
                 // 而这一条链今天**只读**，所以不至于改变任何行为。
                 let item = raw_item.as_object();
                 let get = |key: &str| item.and_then(|m| m.get(key));
+                // `buttonProperty.out` 优先、回落 `button.out`（实拍两种形态都出现过 ✓：
+                // 1029 有 `buttonProperty` ✓、1021 只有 `button` ✓）。每条现取 ✓，别提到循环外 ✗。
+                let out_obj = get("buttonProperty")
+                    .and_then(|b| b.get("out"))
+                    .or_else(|| get("button").and_then(|b| b.get("out")));
                 out.items.push(TaskV2Item {
                     task_id: int_at(get("id")),
                     name: str_at(get("name")),
@@ -264,6 +289,14 @@ pub fn parse_task_list_v2(body: &str, group: &str) -> Result<TaskListV2> {
                     market_name: str_at(get("marketname")),
                     // `button.app.link`（玩法 615 那一族唯一的门 ✓）。缺键 / 少一层 /
                     // 不是字符串 ⇒ `None`（"读不出" ⇒ 那一族就**不动**，不会误点 ✓）。
+                    // `button.out` 那一族（`buttonProperty.out` 优先 ✓，两处形态都实拍过 ✓）。
+                    button_out_day: out_obj
+                        .and_then(|o| o.get("day"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    button_can_receive: out_obj
+                        .and_then(|o| o.get("canReceive"))
+                        .and_then(Value::as_i64),
                     button_out_text: get("buttonProperty")
                         .and_then(|b| b.get("out"))
                         .and_then(|o| o.get("text"))

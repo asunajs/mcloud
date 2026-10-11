@@ -288,6 +288,11 @@ fn items_json_keeps_the_field_names_the_ui_reads() {
         js[0].get("buttonOutText").is_some(),
         "`items_json` 必须报出 `buttonOutText`（界面靠它显示上游自己的文案 ✓）"
     );
+    // 进度那一格也要报出来（`button.out.day` ✓ —— 界面此前只读 `process` ⇒ "App 有进度、这里没有" ✗）。
+    assert!(
+        js[0].get("buttonOutDay").is_some() && js[0].get("buttonCanReceive").is_some(),
+        "`items_json` 必须报出 `buttonOutDay` / `buttonCanReceive`"
+    );
     assert_eq!(js[0]["taskId"], 106);
     assert_eq!(js[0]["groupId"], "day");
     assert_eq!(js[0]["state"], "FINISH");

@@ -414,3 +414,31 @@ fn button_out_text_prefers_button_property_then_falls_back() {
     let list3 = parse_task_list_v2(body3, "month").expect("解析得出");
     assert_eq!(list3.items[0].button_out_text, None);
 }
+
+/// `button.out.day` / `canReceive` —— **进度不在 `process` 里** ✗。
+///
+/// 用真机实拍那条 **1021「连续31天开启邮箱APP通知」** 的原样（抓包仓 §12.6 ✓）：
+/// `process` 是 0、而 `day` 是 `"5"`、`canReceive` 是 0，且这一条**只有 `button`**（没有 `buttonProperty` ✓）。
+#[test]
+fn button_out_day_and_can_receive_come_from_button_out() {
+    let body = r#"{"code":0,"msg":"success","result":{"month":[
+        {"id":1021,"name":"连续31天开启邮箱APP通知","state":"WAIT","process":0,
+         "button":{"out":{"text":"开启中","day":"5","canReceive":0},
+                   "email":{"text":"开启中","day":"5","canReceive":0}}}]}}"#;
+    let list = parse_task_list_v2(body, "month").expect("解析得出");
+    let it = &list.items[0];
+    assert_eq!(it.button_out_day.as_deref(), Some("5"));
+    assert_eq!(it.button_can_receive, Some(0));
+    assert_eq!(it.button_out_text.as_deref(), Some("开启中"));
+    // ⚠ 进度**不在这两格**：`process` 是 0 ✓（只读它就会"App 有进度、这里没有" ✗）。
+    assert_eq!(it.process, Some(0));
+
+    // `buttonProperty.out` 优先于 `button.out`（1029 那种形态 ✓）。
+    let body2 = r#"{"code":0,"msg":"success","result":{"month":[
+        {"id":1029,"name":"x","state":"WAIT",
+         "buttonProperty":{"out":{"text":"去完成","day":"9","canReceive":1}},
+         "button":{"out":{"text":"别取这格","day":"1","canReceive":0}}}]}}"#;
+    let list2 = parse_task_list_v2(body2, "month").expect("解析得出");
+    assert_eq!(list2.items[0].button_out_day.as_deref(), Some("9"));
+    assert_eq!(list2.items[0].button_can_receive, Some(1));
+}

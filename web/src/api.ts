@@ -896,6 +896,15 @@ export interface UpstreamAppTaskItem {
    * ⚠ 别当状态词用：它是**逐条**的（实拍同一趟 `WAIT` 的两条，一条「去完成」一条「开启中」✓）。
    */
   buttonOutText: string | null
+  /**
+   * `button.out.day` —— **上游给的"进行到第几天"**（**字符串**，实拍 `"5"` ✓）。
+   *
+   * ⚠ 进度**不在** `process` 里：实拍那条「连续31天开启邮箱APP通知」`process` 是 0，
+   * 而 `day` 是 `"5"` ⇒ 只读 `process` 就会"App 有进度、这里没有" ✗。
+   */
+  buttonOutDay: string | null
+  /** `button.out.canReceive` —— 上游说"现在能不能领"（`1` 才算能领 ✓）。 */
+  buttonCanReceive: number | null
 }
 
 /** 状态分布。三个数**分开**报 —— `unknown` 不能并进"未完成" ✗。 */

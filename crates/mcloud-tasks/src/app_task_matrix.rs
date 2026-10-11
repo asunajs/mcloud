@@ -185,6 +185,10 @@ pub fn items_json(items: &[TaskV2Item]) -> Vec<Value> {
                 // 上游自己给这条任务、这个状态写的那句话（`buttonProperty.out.text` ✓）——
                 // 界面照抄它，读不出才回落状态词（2026-10-11 用户口径 ✓）。
                 "buttonOutText": t.button_out_text,
+                // 进度与"能不能领"（`button.out.day` / `canReceive` ✓）—— 界面此前只读
+                // `process`，于是"App 里有进度、这里没有" ✗（2026-10-11 用户口径 ✓）。
+                "buttonOutDay": t.button_out_day,
+                "buttonCanReceive": t.button_can_receive,
             })
         })
         .collect()
