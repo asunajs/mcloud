@@ -16,12 +16,12 @@ h1{font-size:52px;letter-spacing:-1px}
 table{width:100%;border-collapse:collapse;margin-top:12px;font-size:15px}
 td,th{border-bottom:1px solid var(--line);padding:9px 4px;text-align:left}
 th{color:var(--dim);font-weight:600}
-code{background:#0d1striped;background:#0d142a;border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:14px;color:#a5f3fc}
+code{background:#0d142a;border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:14px;color:#a5f3fc}
 .foot{margin-top:26px;border-top:1px solid var(--line);padding-top:16px;color:var(--dim);font-size:15px;display:flex;justify-content:space-between}
 .wide{grid-column:1 / -1}
 </style></head><body>
 <div class="head"><h1>mcloud 3.0.0</h1><span class="tag">第一个正式版</span></div>
-<div class="sub">中国移动云盘的自动化工具 · 一个可执行文件，既是命令行也是网页服务</div>
+<div class="sub">中国移动云盘的自动化工具 · 一个可执行文件，既是命令行也是网页服务 · 相对上一个正式版 v0.1.0 的重点摘要</div>
 <div class="grid">
   <div class="card"><h3>直播小红花</h3><ul>
     <li>修掉口令误判：入场/送礼/点赞不再被当成口令投出去</li>
@@ -43,20 +43,33 @@ code{background:#0d1striped;background:#0d142a;border:1px solid var(--line);bord
     <li>只操作本机管理员那一个用户，没有 <code>--user</code> 之类的选择</li></ul></div>
   <div class="card"><h3>更安全的默认</h3><ul>
     <li>推送地址默认拒绝指向本机/内网</li>
-    <li>运行日志有总量上限</li>
     <li>连不上服务端时显示中文说明，不再是英文 Failed to fetch</li></ul></div>
+  <div class="card wide"><h3>Docker / 容器（Linux）</h3><ul>
+    <li>仓库里有 <code>Dockerfile</code> 与 <code>docker-compose.yml</code>：<code>docker compose up -d --build</code> 就起服务；镜像里是静态 musl 二进制 + <code>ca-certificates</code> + <code>tzdata</code>，数据在命名卷里</li>
+    <li>CI 出的那份在 ghcr：<code>ghcr.io/asunajs/mcloud</code>，一个标签含 <code>linux/amd64</code> 与 <code>linux/arm64</code>，<code>docker pull</code> 按机器自动挑</li>
+    <li>注意：<code>docker.yml</code> 已改成不跟 tag 自动跑，所以 <b>3.0.0 在 ghcr 上有没有对应镜像属于待确认</b>；这一层本机没验过（开发机没装 docker），以 <code>docs/docker.md</code> 为准</li></ul></div>
   <div class="card wide"><h3>云朵中心任务（App 里的任务）</h3><ul>
     <li>列表改走新版接口：不再把<b>已经过期的任务</b>列出来，与 App 看到的一致，并补回之前缺的条目</li>
     <li>进度与文案照 App 显示：「完成进度 (17/31)」；状态词按上游那一档显示（「开启中」「下月再来」「去完成」），不再一律写「待做」</li>
     <li>新做出来：「去云盘图书馆阅读书籍」(604)、「和AI助手对话」(609)、「加入一个知识库」(547)、「查看"我的账单"」(1029)</li>
+    <li>两条 App 任务修复：「登录移动云盘云朵中心」(1017) 补上<b>页面初始化上报</b>那一发；「完成一次邮件转存」(1020) 旧路径实测 404，改成 App 实拍的三发链 —— 真机两个账号各翻一次</li>
     <li>上游已做满的条目：只领奖、不再重复运行，也不再误报失败</li>
     <li>通知口接上：能读到「+100豆」与进度分子</li></ul></div>
+  <div class="card wide"><h3>日志与存储</h3><ul>
+    <li>运行日志<b>按需读盘</b>：不再把 <code>data/logs/</code> 全读进内存，打开某次运行的日志时才读</li>
+    <li>服务端日志<b>落盘</b>到 <code>data/server-logs/&lt;日期&gt;.jsonl</code>；以前只在内存里，重启就清空</li>
+    <li>设置页<b>五个上限格</b>：历史保留条数、单次运行日志行数、日志总量上限、服务端日志内存行数、服务端日志总量上限（日志上限默认 64 MB，按目录字节预算，不再是按行数封顶）</li>
+    <li>日志页「<b>加载更早的 N 行</b>」一页页往上翻，并显示「已显示 N 行」</li></ul></div>
   <div class="card wide"><h3>下载哪个</h3>
     <table><tr><th>你的机器</th><th>选哪个</th></tr>
       <tr><td>Linux（Intel/AMD 64 位）</td><td><code>x86_64-unknown-linux-gnu</code></td></tr>
       <tr><td>Linux，系统较老或缺库</td><td><code>x86_64-unknown-linux-musl</code>（静态，不挑系统）</td></tr>
       <tr><td>Linux（ARM 64 位）</td><td><code>aarch64-unknown-linux-gnu</code></td></tr>
-      <tr><td>Windows</td><td><code>x86_64-pc-windows-msvc</code>（zip）</td></tr></table></div>
+      <tr><td>Windows</td><td><code>x86_64-pc-windows-msvc</code>（zip）</td></tr></table>
+    <ul>
+      <li>包名 <code>mcloud-v3.0.0-&lt;三元组&gt;.tar.gz</code>（Windows 是 <code>.zip</code>），各附一个 <code>.sha256</code>，一共 8 个资产</li>
+      <li><b>这一版没有 macOS 预编译包</b>：CI 的 macOS runner 太贵已去掉，macOS 请自行 <code>cargo build --release</code></li>
+    </ul></div>
 </div>
 <div class="foot"><span>github.com/asunajs/mcloud · v3.0.0</span><span>数据就在程序旁边的 data/ 目录，整个拷走就是备份</span></div>
 </body></html>
