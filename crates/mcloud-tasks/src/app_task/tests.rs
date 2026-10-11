@@ -680,8 +680,16 @@ fn header(req: &mcloud_core::HttpRequest, name: &str) -> Option<String> {
 #[async_trait]
 impl HttpClient for Scripted {
     async fn request(&self, req: mcloud_core::HttpRequest) -> Result<HttpResponse> {
+        // ⚠ `visitlog/journaling`（打卡那一发的**后半枪**，fire-and-forget 埋点 ✓）**不排队** ✗：
+        // 夹具是**按顺序**发答复的，而这一枪插在"打卡"与"上传三枪"中间 ⇒ 若它也从队里 pop，
+        // 后面每一发都**错位一格**，表现是上传次数莫名少两个（`left: 2 / right: 4` ✓，
+        // 2026-10-11 实测 ✓）。它与被测判据无关（上游回什么都**不影响打卡结果** ✓）⇒
+        // 这里直接回一发固定成功，**不消耗**夹具的答复槽 ✓。
+        let is_journaling = req.url.contains("visitlog/journaling");
         self.seen.lock().unwrap().push(req);
-        let body = {
+        let body = if is_journaling {
+            r#"{"code":0,"msg":"success"}"#.to_string()
+        } else {
             let mut r = self.replies.lock().unwrap();
             if r.len() > 1 {
                 r.pop().unwrap()
@@ -1075,18 +1083,46 @@ fn task_json_without_step(id: i64, group: &str, name: &str, market: &str) -> Str
     )
 }
 
-/// 十六次拉取都回同一份"这一组就这些条目"的响应（去重后留下的就是它们）。
-fn page_body(items: &[String]) -> String {
+/// 一个市场的 `taskListV3` 答复 —— `result` 是**数组** ✓（V2 那份是按 group 分组的对象 ✗）。
+///
+/// ⚠⚠ **夹具必须与被测形状一致**：`parse_task_list_v3` 见 `result` **不是数组**时
+/// **静默**回一张空表 ✓（**不报错** ✗）⇒ 铺成 V2 形状的话，测试是在**空页**上数数 ——
+/// 看着"跑完了"、其实一条都没解出来 ✗（2026-10-11 那 29 条 `left: 0 / right: 1` 就是它 ✓）。
+///
+/// ⚠ V3 **一次返回整个市场**的全部条目 ✓ ⇒ 这一发只放**这个市场**的条目 ✓
+/// （市场名就是条目自己那一格 `marketname` ✓）。
+fn page_body(items: &[String], market: &str) -> String {
+    let own: Vec<&str> = items
+        .iter()
+        .map(String::as_str)
+        .filter(|s| s.contains(&format!("\"marketname\":\"{market}\"")))
+        .collect();
     format!(
-        r#"{{"code":0,"msg":"success","groupState":{{}},"result":{{"g":[{}]}}}}"#,
-        items.join(",")
+        r#"{{"code":0,"msg":"success","result":[{}]}}"#,
+        own.join(",")
     )
 }
 
-/// 十六份相同页面 + 后续的打卡 / 上传答复（页数用生产同一个函数算）。
+/// 整表那几发的答复 —— **每市场一发** ✓：第 0 发 = 云盘 `sign_in_3`、
+/// 第 1 发 = 邮箱 `newsign_139mail`（顺序就是 `APP_TASK_MARKETS` ✓）。
+fn market_pages(items: &[String]) -> Vec<String> {
+    let pages: Vec<String> = crate::app_task_matrix::APP_TASK_MARKETS
+        .iter()
+        .map(|m| page_body(items, m))
+        .collect();
+    // 发数**必须**跟着生产那个常量走：夹具短了，多出来的那几发会取不到答复、
+    // 回落成 `{}` 而**失败** ✗ —— 那就把"本该成功"的几发算成失败，测试假红 ✓。
+    assert_eq!(
+        pages.len(),
+        crate::app_task_matrix::app_task_matrix_fetches(),
+        "整表那几发的份数要跟生产常量一致"
+    );
+    pages
+}
+
+/// 整表那几发 + 后续的打卡 / 上传答复（发数用生产同一个函数算）。
 fn replies_for(items: &[String], tail: Vec<String>) -> Vec<String> {
-    let n = crate::app_task_matrix::app_task_matrix_fetches();
-    let mut v = vec![page_body(items); n];
+    let mut v = market_pages(items);
     v.extend(tail);
     v
 }
@@ -1115,6 +1151,41 @@ fn outlink_ok() -> String {
 /// `delOutLink` 成功。
 fn del_outlink_ok() -> String {
     r#"{"code":"0","data":{}}"#.to_string()
+}
+
+/// ⚠⚠ 夹具**真解出条目**、不是空页 —— 这条单独钉"形状"，别让下面几十条运行级测试
+/// 在空表上跑出一堆看着像业务错的 `left: 0` ✗（2026-10-11 那 29 条的真因就是这个 ✓）。
+///
+/// 走的路与生产**同一份**：夹具体 → `parse_task_list_v3` → `merge_pages` ✓。
+#[test]
+fn the_fixture_parses_into_the_items_it_lays_out() {
+    let items = vec![
+        task_json(118, "beiyong1", "上传图片乙", "sign_in_3"),
+        task_json(1005, "time", "从固定入口进入云朵中心", "newsign_139mail"),
+    ];
+    let bodies = market_pages(&items);
+    let pages: Vec<mcloud_upstream::app_task_list_v2::TaskListV2> = bodies
+        .iter()
+        .enumerate()
+        .map(|(i, body)| {
+            let market = crate::app_task_matrix::APP_TASK_MARKETS[i];
+            mcloud_upstream::app_task_list_v2::parse_task_list_v3(body, market)
+                .expect("夹具必须解得出来")
+        })
+        .collect();
+    // 每一发都非空 ⇒ 市场分对了（空页 = `result` 铺成了 V2 那个形状 ✗）
+    let counts: Vec<usize> = pages.iter().map(|p| p.items.len()).collect();
+    assert!(
+        counts.iter().all(|n| *n > 0),
+        "每一发都该解出条目（空页 = 形状铺错）：{counts:?}"
+    );
+    // 合并后两条都在（`merge_pages` 按 id 升序 ✓）
+    let (merged, _raw) = crate::app_task_matrix::merge_pages(&pages);
+    assert_eq!(
+        merged.iter().map(|t| t.task_id).collect::<Vec<_>>(),
+        vec![Some(118), Some(1005)],
+        "夹具里铺的条目要真解出来"
+    );
 }
 
 // ── a) 黑名单：命中就一枪不发 ────────────────────────────────────────
@@ -2644,7 +2715,7 @@ async fn entry_tasks_report_the_page_on_both_paths_with_their_own_market() {
         replies.push(click_ok());
         replies.push(click_ok());
     }
-    replies.push(page_body(&items));
+    replies.extend(market_pages(&items)); // 收尾复查（也是**每市场一发** ✓）
     let (ctx, http) = ctx_with(
         TEST_ACCOUNT,
         replies,
@@ -3110,7 +3181,7 @@ async fn portal_entry_reports_the_page_then_opens_the_link_then_clicks() {
     replies.push(click_ok()); // ② 旧上报（page/doTask）
     replies.push("<html></html>".to_string()); // ③ 入口页
     replies.push(click_ok()); // ④ 打卡
-    replies.push(page_body(&items)); // 收尾复查
+    replies.extend(market_pages(&items)); // 收尾复查（也是**每市场一发** ✓）
 
     let (ctx, http) = ctx_with(
         TEST_ACCOUNT,
@@ -3223,7 +3294,7 @@ async fn books_task_clicks_exactly_once() {
     replies.push(click_ok()); // ② 旧上报（page/doTask）
     replies.push("<html></html>".to_string()); // ③ 入口页
     replies.push(click_ok()); // ④ ③-a 那道门那一发
-    replies.push(page_body(&items)); // 收尾复查
+    replies.extend(market_pages(&items)); // 收尾复查（也是**每市场一发** ✓）
 
     let (ctx, http) = ctx_with(
         TEST_ACCOUNT,
