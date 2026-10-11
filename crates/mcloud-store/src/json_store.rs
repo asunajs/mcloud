@@ -1801,7 +1801,11 @@ impl mcloud_core::UserStore for JsonStore {
     }
 
     async fn settings(&self) -> Result<AppSettings> {
-        Ok(self.read()?.settings)
+        // ⚠ `.clone()` 不能省：`AppSettings` 自 2026-10-11 起**不是 `Copy`**
+        //（它多了一格 `auth_refresh_at: String`，`HH:MM` 的落盘形态 ✓）。
+        // 去掉 clone 会直接编不过（`cannot move out of … RwLockReadGuard` ✓）——
+        // 这里如实记一笔，免得后人以为它是"多余的一次克隆" ✗。
+        Ok(self.read()?.settings.clone())
     }
 
     async fn kouling_pool(&self) -> Result<Box<mcloud_core::KoulingPool>> {
@@ -2034,7 +2038,9 @@ impl mcloud_core::UserStore for JsonStore {
         // 领域约束在这里也守一道：绕过 HTTP 的调用方（CLI / 脚本）同样不该写进非法值。
         settings.validate().map_err(Error::Config)?;
         let mut db = self.write()?;
-        db.settings = *settings;
+        // ⚠ `.clone()` 不能省：`AppSettings` 自 2026-10-11 起**不是 `Copy`**
+        //（多了一格 `auth_refresh_at: String` ✓）—— 解引用搬移会直接编不过 ✓。
+        db.settings = settings.clone();
         // ⚠ 新上限**立刻应用一次**（2026-10-09 用户口径：「让用户设置最大大小」✓）：
         // 把上限调小之后，不该等到"下一次运行"才看见效果 ✓。
         // 两件事都是幂等的（没超就是空操作 ✓），所以这里无脑调一次 ✓。

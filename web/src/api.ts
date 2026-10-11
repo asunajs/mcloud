@@ -1897,6 +1897,110 @@ export const putAccountSettings = (id: string, settings: AccountSettings) =>
     body: JSON.stringify(settings),
   })
 
+// ── 凭据刷新（用户口径 2026-10-11：「刷新auth」）─────────────────────────
+//
+// 两件事：
+// ① **手动一键刷新**（`POST /api/auth/refresh` ✓）—— 一个账号 / 我名下全部 ✓；
+// ② **自动定时的开关与预设时间**（`GET|PUT /api/auth/refresh-schedule` ✓）。
+//
+// ⚠ 到点之后**先走既有判据**（账号设置里的「剩余多少天刷新token」✓）——
+// 不需要刷就**跳过**，所以逐条结局有四档（见 `RefreshResult.kind` ✓）。
+
+/**
+ * 一个账号的刷新结局 —— **四档**，不是"成功/失败"两档。
+ *
+ * ⚠ `skipped` 与 `manual` **必须分开**：前者"什么都不用做"，后者"要重新登录" ✓
+ *（合成一句"没刷"，用户就不知道要不要管了 ✗）。
+ */
+export type RefreshResultKind = 'refreshed' | 'skipped' | 'manual' | 'failed'
+
+export interface RefreshResult {
+  /** 账号主键（那串十六进制）—— **别拿去显示**，显示用 `label` ✓。 */
+  account: string
+  /** 给界面看的名字（有手机号就是掩码 ✓）。 */
+  label: string
+  kind: RefreshResultKind
+  /** `kind === 'skipped'` 时有值：还剩多少天 ✓。 */
+  remainingDays?: number
+  /** `kind === 'refreshed'` 时有值：新的过期时刻（epoch 毫秒 ✓）。 */
+  newExpireMs?: number
+  /** `kind === 'refreshed'` 时有值：这次是不是 `--force` 越过了 `not-yet` ✓。 */
+  forced?: boolean
+  /** `kind === 'manual'` 时有值：库里那个（无效的）过期时刻 ✓。 */
+  expireMs?: number
+  /** `kind === 'failed'` 时有值：错误原文 ✓。 */
+  error?: string
+}
+
+/** `POST /api/auth/refresh` 的响应体：逐账号结局 + 一句汇总 ✓。 */
+export interface RefreshResponse {
+  results: RefreshResult[]
+  refreshed: number
+  skipped: number
+  manual: number
+  failed: number
+}
+
+/**
+ * **手动一键刷新**（用户口径：「可手动一键刷新」✓）。
+ *
+ * ⚠ `account` 与 `all` **恰好给一个**：两个都不给 / 都给 ⇒ **400** ✓
+ *（不默认「全部」—— 那是个会改凭据的动作 ✓）。
+ *
+ * ⚠ 它**可能慢**（每个账号最慢约 28 秒，实测 ✓）⇒ 调用方必须有"进行中"状态 ✓。
+ * ⚠ 有账号**刷新失败**时后端回 **502**，但 body 里**仍然**是这份逐条结局
+ *（`request()` 会把 body 原文带在 `Error.message` 里 ✓）——
+ * 所以调用方在 catch 里也该试着解析一次，别把"哪一个失败、为什么"丢掉 ✓。
+ */
+export const refreshAuth = (input: { account: string } | { all: true }) =>
+  request<RefreshResponse>('/api/auth/refresh', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+
+/**
+ * 「凭据自动刷新定时」的当前状态（`GET`/`PUT` 的响应体 ✓）。
+ *
+ * ⚠ `nextAt` 是**人话**（`"每天 03:00（东八区）"` ✓），不是可解析的时间戳 ——
+ * 它是"那条定时的 cron 逐字对应"的那一格，界面**原样显示**即可 ✓。
+ * 自己再算一遍"今天还是明天"就是**第二套算法**，迟早与调度器分叉 ✗。
+ */
+export interface AuthRefreshSchedule {
+  /** **现在能不能跑**（= 用户想要 ✓，与调度器看到的那一格同源 ✓）。 */
+  enabled: boolean
+  /** 预设刷新时间（24 小时制 `HH:MM`，东八区 ✓）。 */
+  at: string
+  /** 下一次触发（人话 ✓）；`null` = 算不出来（见 `note` ✓）。 */
+  nextAt: string | null
+  /** 一句人话，说清"为什么现在是这个状态"（原样显示 ✓）。 */
+  note: string | null
+}
+
+/**
+ * `PUT` 的请求体 —— **缺席 = 保持原样** ✓（后端的双 `Option` 语义 ✓）。
+ *
+ * ⚠ 两格都是可选的，别把它们写成必填：只想改时间时**不带** `enabled` 才对
+ *（带上 `enabled: true` 会把用户**关掉**的开关静默打开 ✗ —— 那是用户口径里
+ *  明确不许的事 ✓）。
+ */
+export interface AuthRefreshScheduleInput {
+  /** 不给 = 不动用户的意愿 ✓。 */
+  enabled?: boolean
+  /** 不给 = 不动预设时间 ✓；必须是 `HH:MM`（后端非法一律 400 ✓）。 */
+  at?: string
+}
+
+/** 读当前状态（**只读**，后端不重算、不写盘 ✓）。 */
+export const getAuthRefreshSchedule = () =>
+  request<AuthRefreshSchedule>('/api/auth/refresh-schedule')
+
+/** 改开关 / 预设时间，后端**立刻重算**并回**新状态** ✓（拿它回填界面 ✓）。 */
+export const saveAuthRefreshSchedule = (input: AuthRefreshScheduleInput) =>
+  request<AuthRefreshSchedule>('/api/auth/refresh-schedule', {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  })
+
 // ── 推送规则（用户级）───────────────────────────────────────────────────
 //
 // **两层**（2026-10-08 用户口径「推翻重做」✓）：

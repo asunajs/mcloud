@@ -4,6 +4,9 @@
 //! 所有外部能力通过 trait 暴露，由上层注入实现，便于离线测试与 fixture 回放。
 
 pub mod account;
+/// 「凭据自动刷新定时」的纯逻辑（id / 预设时间 / cron 三条算法）。
+/// ⚠ 凭据续期的**判据与上游调用**不在这里 —— 那些在 `mcloud_app::auth_refresh` ✓。
+pub mod auth_refresh;
 pub mod cancel;
 pub mod error;
 pub mod event;
@@ -32,6 +35,9 @@ pub mod user;
 pub mod testkit;
 
 pub use account::{Account, AccountId, AccountSettings, AuthInfo, DeviceId, PcPlatform};
+pub use auth_refresh::{
+    auth_refresh_schedule_id, daily_expr, parse_clock, AUTH_REFRESH_TASK, MANAGED_BY_AUTH_REFRESH,
+};
 pub use cancel::CancelToken;
 pub use error::{Error, Result};
 pub use event::{LogKind, LogLevel, RunEvent, SeqAllocator, Sequenced};

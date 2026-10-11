@@ -749,6 +749,275 @@ const STEPS = {
       ),
     },
 
+    // ── 定时页：目标里要有「编排」（用户口径 2026-10-11）────────────────────────
+    //
+    // 用户原话：「**在定时界面找不到编排任务，虽然可以通过编排界面定时**」——
+    // 编排**不是**注册表里的任务（它是一条链 ✓，见 `api.ts` 的 `PIPELINE_TASK`）⇒
+    // 它不在 `/api/capabilities` 里，而定时弹窗那个下拉**只列任务** ⇒
+    // 定时页压根建不出"跑编排"的定时 ✗（路只通一半：编排页能反向建 ✓）。
+    //
+    // 这一组把另一半补上，并钉住 **建 / 启停 / 改 / 删** 四条路**都能走** ✓
+    // （只钉"下拉里多了个选项"是不够的：建完进不了列表、或者建完删不掉，
+    //  用户要的这件事就只做了一半 ✗）。
+    {
+      name: '定时页：打开新建弹窗（下面几条要用）',
+      do: `(async () => {
+        ;[...document.querySelectorAll('#app button')].find((b) => b.textContent.trim() === '新建定时').click()
+        await new Promise((r) => setTimeout(r, 200))
+        return true
+      })()`,
+      check: eq('document.getElementById("schedule-dialog").open', true),
+      changed: true,
+    },
+    {
+      // ⭐ 目标下拉里必须有「编排」那一项（值 = `pipeline`，与后端 `PIPELINE_TASK` 同 ✓）；
+      // 选中它之后要多出「要跑的编排」那一格 —— 两件事一起判：
+      // 只判"多了一格"的话，那一格长在一个**选不到编排**的页面上照样绿 ✗。
+      name: '定时页：目标里能选到「编排」⇒ 多出「要跑的编排」那一格',
+      do: pickOption('#sched-task', 'pipeline'),
+      check: eq(
+        `(() => {
+           const t = document.querySelector('#sched-task')
+           return [t.dataset.value, !!document.querySelector('#sched-pipeline')].join('/')
+         })()`,
+        'pipeline/true',
+      ),
+      changed: true,
+    },
+    {
+      // ⭐⭐ 装置里有**两条**编排（「早班」/「晚班」）—— 这一条钉的是"下拉里列的是
+      // **用户的编排**、显示的是**名字**、而且**能挑**" ✓。
+      // ⚠ 只有一条的话，「把第一条硬编码进去」那种实现**照样过** ✗
+      //（本仓在"装置测不到 = 没测"上栽过）。所以这里**特意挑第二条** ✓。
+      name: '定时页：编排下拉列出用户的编排（两条、带名字），并能挑中第二条',
+      do: `(() => {
+        const t = document.querySelector('#sched-pipeline')
+        if (!t) throw new Error('没有「要跑的编排」下拉')
+        t.click()
+        const opts = [...document.querySelectorAll('.select-portal .select-option')]
+        window.__pipeOpts = opts.map((o) => o.dataset.value + ':' + o.textContent.trim()).join(',')
+        const hit = opts.find((o) => o.dataset.value === 'pipe-2')
+        if (!hit) throw new Error('下拉里没有「晚班」那条编排')
+        hit.click()
+        return true
+      })()`,
+      check: eq(
+        `[window.__pipeOpts, document.querySelector('#sched-pipeline').dataset.value,
+          document.querySelector('#sched-pipeline').textContent.trim()].join(' | ')`,
+        'pipe-1:早班,pipe-2:晚班 | pipe-2 | 晚班',
+      ),
+      changed: true,
+    },
+    {
+      // ⭐⭐ 保存体：`task` 是编排、`body.pipelineId` 是**挑中的那一条**（不是第一条 ✓）。
+      // ⚠ 判据取**请求体**：这一条正是"选了编排却把 `body` 留成上一个任务的参数"那个
+      // 坑的钉子（后端会回「这条定时要跑编排，但 body 里没有 pipelineId」✗）。
+      name: '定时页：建一条编排定时 ⇒ 请求体是 task=pipeline + body.pipelineId=挑中的那条',
+      do: `(async () => {
+        const inp = document.querySelector('#schedule-dialog input[placeholder="例如 每天签到"]')
+        if (!inp) throw new Error('弹窗里没有「名称」那一格')
+        inp.value = '晚间编排'
+        inp.dispatchEvent(new Event('input', { bubbles: true }))
+        await new Promise((r) => setTimeout(r, 120))
+        const put = []
+        const orig = window.fetch
+        window.fetch = async (input, init) => {
+          const url = typeof input === 'string' ? input : input.url
+          if (((init && init.method) || 'GET').toUpperCase() === 'PUT') put.push({ url, body: init && init.body })
+          return orig(input, init)
+        }
+        try {
+          ;[...document.querySelectorAll('#schedule-dialog .modal-action button')]
+            .find((b) => b.textContent.trim() === '保存').click()
+          for (let i = 0; i < 80 && put.length === 0; i++) await new Promise((r) => setTimeout(r, 100))
+          window.__schedPipePut = put.map((p) => ({ url: p.url, body: JSON.parse(p.body) }))
+          // 再等一会儿：保存之后还有一次 refresh（列表要跟着更新 ✓）
+          await new Promise((r) => setTimeout(r, 600))
+        } finally {
+          window.fetch = orig
+        }
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const p = (window.__schedPipePut ?? [])[0]
+           if (!p) return '没发出 PUT'
+           const b = p.body ?? {}
+           return [
+             p.url.startsWith('/api/schedules/sch-'),
+             b.task,
+             (b.body ?? {}).pipelineId,
+             b.enabled,
+           ].join('/')
+         })()`,
+        'true/pipeline/pipe-2/true',
+      ),
+      changed: true,
+    },
+    {
+      // ⭐⭐ 建出来的那条**真的进了列表** —— 装置那份定时表是**有状态**的 ✓
+      //（以前 `PUT` 只对 `sch-1` 一条做了回显 ⇒ 新建这条路**根本没被接住** ✗）。
+      // ⚠ 列表里要能看出**是哪一条编排**（只写"编排"两个字等于没说 ✓）。
+      // ⚠ 「启用」这一头取"**没有**「已停用」"：宽屏是表格、表格里**没有**「已启用」
+      //    那个徽章（只有停用时会多一行「已停用」✓，见 `schedules-page.tsx` 的两个分支）——
+      //    写死判「已启用」在表格形态下必红 ✗。
+      name: '定时页：新建的编排定时出现在列表里，并显示绑的是哪一条编排',
+      do: null,
+      check: eq(
+        `(() => {
+           const row = [...document.querySelectorAll('#app table tbody tr')].find((r) => r.textContent.includes('晚间编排'))
+           if (!row) return '列表里没有新建那条'
+           return [row.textContent.includes('编排：晚班'), row.textContent.includes('已停用')].join('/')
+         })()`,
+        'true/false',
+      ),
+    },
+    {
+      // ⭐ **启停**这条路对编排定时必须也能走（2026-10-07 报过的 bug：不带 `body` ⇒
+      // 后端回「body 里没有 pipelineId」⇒ **连停用都做不到** ✗）。
+      // 判据取请求体：`body` 原样带回、`enabled` 翻成 false ✓。
+      name: '定时页：编排定时能停用（请求体里 body 原样带回、enabled 翻成 false）',
+      do: `(async () => {
+        const put = []
+        const orig = window.fetch
+        window.fetch = async (input, init) => {
+          const url = typeof input === 'string' ? input : input.url
+          if (((init && init.method) || 'GET').toUpperCase() === 'PUT') put.push({ url, body: init && init.body })
+          return orig(input, init)
+        }
+        try {
+          const row = [...document.querySelectorAll('#app table tbody tr')].find((r) => r.textContent.includes('晚间编排'))
+          if (!row) throw new Error('列表里没有那条编排定时')
+          const btn = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '停用')
+          if (!btn) throw new Error('那一行没有「停用」')
+          btn.click()
+          for (let i = 0; i < 80 && put.length === 0; i++) await new Promise((r) => setTimeout(r, 100))
+          window.__schedPipeToggle = put.map((p) => ({ url: p.url, body: JSON.parse(p.body) }))
+          await new Promise((r) => setTimeout(r, 600))
+        } finally {
+          window.fetch = orig
+        }
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const p = (window.__schedPipeToggle ?? [])[0]
+           if (!p) return '没发出 PUT'
+           const b = p.body ?? {}
+           const row = [...document.querySelectorAll('#app table tbody tr')].find((r) => r.textContent.includes('晚间编排'))
+           return [b.task, (b.body ?? {}).pipelineId, b.enabled, !!row && row.textContent.includes('已停用')].join('/')
+         })()`,
+        'pipeline/pipe-2/false/true',
+      ),
+      changed: true,
+    },
+    {
+      // ⭐ **改**这条路：编辑编排定时 ⇒ 「要跑的编排」那一格必须**回填**成它绑的那条
+      //（`body.pipelineId` ✓）。显示成空就是错的 —— 用户一保存就把绑定丢了 ✗
+      //（静默的数据丢失，这一页最忌讳的一类）。
+      name: '定时页：编辑编排定时 ⇒ 编排那一格回填成它绑的那条',
+      do: `(() => {
+        const row = [...document.querySelectorAll('#app table tbody tr')].find((r) => r.textContent.includes('晚间编排'))
+        if (!row) throw new Error('列表里没有那条编排定时')
+        const btn = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '编辑')
+        if (!btn) throw new Error('那一行没有「编辑」')
+        btn.click()
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const t = document.querySelector('#sched-pipeline')
+           if (!t) return 'no-select'
+           const inp = document.querySelector('#schedule-dialog input[placeholder="例如 每天签到"]')
+           return [t.dataset.value, t.textContent.trim(), inp ? inp.value : '(没有名称那一格)'].join('/')
+         })()`,
+        'pipe-2/晚班/晚间编排',
+      ),
+      changed: true,
+    },
+    {
+      // ⭐ **改**这条路要走完（不只是"回填对"）：在编辑弹窗里**换一条编排**再保存 ⇒
+      // 请求体里的 `body.pipelineId` 必须是**换过的那条** ✓，列表跟着显示新的那条 ✓。
+      // ⚠ 只钉"回填对"是不够的：保存时若把 `body` 拼回老值（或干脆不带），
+      // 用户改了等于没改，而界面看着"保存成功" ✗（最坏的一类）。
+      name: '定时页：编辑里换一条编排并保存 ⇒ 请求体换成新那条、列表跟着变',
+      do: `(async () => {
+        const t = document.querySelector('#sched-pipeline')
+        if (!t) throw new Error('没有「要跑的编排」下拉')
+        t.click()
+        const opt = [...document.querySelectorAll('.select-portal .select-option')]
+          .find((o) => o.dataset.value === 'pipe-1')
+        if (!opt) throw new Error('下拉里没有「早班」那条编排')
+        opt.click()
+        await new Promise((r) => setTimeout(r, 250))
+        const put = []
+        const orig = window.fetch
+        window.fetch = async (input, init) => {
+          const url = typeof input === 'string' ? input : input.url
+          if (((init && init.method) || 'GET').toUpperCase() === 'PUT') put.push({ url, body: init && init.body })
+          return orig(input, init)
+        }
+        try {
+          ;[...document.querySelectorAll('#schedule-dialog .modal-action button')]
+            .find((b) => b.textContent.trim() === '保存').click()
+          for (let i = 0; i < 80 && put.length === 0; i++) await new Promise((r) => setTimeout(r, 100))
+          window.__schedPipeEdit = put.map((p) => ({ url: p.url, body: JSON.parse(p.body) }))
+          await new Promise((r) => setTimeout(r, 600))
+        } finally {
+          window.fetch = orig
+        }
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const p = (window.__schedPipeEdit ?? [])[0]
+           if (!p) return '没发出 PUT'
+           const b = p.body ?? {}
+           const row = [...document.querySelectorAll('#app table tbody tr')].find((r) => r.textContent.includes('晚间编排'))
+           return [
+             b.task,
+             (b.body ?? {}).pipelineId,
+             !!row && row.textContent.includes('编排：早班'),
+             document.getElementById('schedule-dialog').open,
+           ].join('/')
+         })()`,
+        'pipeline/pipe-1/true/false',
+      ),
+      changed: true,
+    },
+    {
+      // ⭐ **删**这条路：编排定时是**用户自己建的**（`managedBy` 空 ✓）⇒ 该能删 ✓。
+      // 删除是不可逆动作 ⇒ 先弹确认框（本仓的规矩 ✓）。
+      name: '定时页：删编排定时 ⇒ 先弹确认框',
+      do: `(() => {
+        const row = [...document.querySelectorAll('#app table tbody tr')].find((r) => r.textContent.includes('晚间编排'))
+        if (!row) throw new Error('列表里没有那条编排定时')
+        const btn = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '删除')
+        if (!btn) throw new Error('那一行没有「删除」')
+        btn.click()
+        return true
+      })()`,
+      check: eq('document.getElementById("schedule-delete").open', true),
+      changed: true,
+    },
+    {
+      name: '定时页：确认删除 ⇒ 它从列表里消失（装置那份定时表也少一条）',
+      do: `(async () => {
+        ;[...document.querySelectorAll('#schedule-delete .modal-action button')]
+          .find((b) => b.textContent.trim() === '删除').click()
+        for (let i = 0; i < 40; i++) await new Promise((r) => setTimeout(r, 100))
+        return true
+      })()`,
+      check: eq(
+        `(() => {
+           const rows = [...document.querySelectorAll('#app table tbody tr')]
+           return [rows.length, rows.filter((r) => r.textContent.includes('晚间编排')).length].join('/')
+         })()`,
+        '2/0',
+      ),
+      changed: true,
+    },
+
     // 编排页：步骤列表的**增 / 删 / 改序**（本框架里最容易出错的一块 —— createFor + 位置敏感行）
     { name: '切到编排页', do: go('pipelines'), check: eq('location.pathname', '/pipelines') },
     { name: '编排页：点「编辑」（草稿带 2 步）', do: clickText('button', '编辑'), check: has(APP_TEXT, '共 2 步'), changed: true },

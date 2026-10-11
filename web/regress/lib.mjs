@@ -397,6 +397,31 @@ const PIPELINE = {
 }
 
 /**
+ * 第二条编排。
+ *
+ * ⚠ **为什么非要两条**：定时页那个「要跑的编排」下拉要钉住的是"**列出用户自己的编排、
+ * 显示名字、能挑**" ✓ —— 装置里只有一条的话，「把第一条硬编码进去」那种实现**照样过** ✗
+ * （本仓在"装置测不到 = 没测"上栽过）。
+ *
+ * ⚠ 它**不绑任何规则**、也**不绑任何定时** ⇒ 推送页那几条"绑着谁 / 没绑给谁"的断言
+ * 一条都不受影响 ✓（`push-page.tsx` 的引用列是遍历这份清单算出来的 ✓）。
+ * 它排在 `PIPELINE` **后面** ⇒ 编排页里"第一张卡"仍然是「早班」✓（门禁靠 `clickText`
+ * 取第一个「编辑」✓）。
+ */
+const PIPELINE2 = {
+  id: 'pipe-2',
+  name: '晚班',
+  accounts: [],
+  accountMode: 'parallel',
+  stopOnError: true,
+  steps: [{ task: 'receive', continueOnError: false }],
+  enabled: true,
+  lastRunMs: null,
+  pushRules: [],
+  pushEvents: [],
+}
+
+/**
  * 推送规则（2026-10-08 用户口径「推翻重做」：**规则自带平台与凭据** ✓）。
  *
  * ⚠ 三条是**故意配成三种形态**的，正好把「推送」页左栏那几格的显示都覆盖到：
@@ -593,6 +618,43 @@ const liveAutoView = () => {
   // 给一个"看着像时刻"的值就是在骗人 ✗
   return { enabled, at: enabled ? at : null, accounts: liveAutoState.accounts, note }
 }
+
+/**
+ * 定时那份**有状态**的值（`GET/PUT/DELETE /api/schedules…`）。
+ *
+ * # 为什么必须要有状态（2026-10-11 加）
+ *
+ * 定时页这一轮新增的闭环是「**选到编排 ⇒ 建一条 ⇒ 它出现在列表里 ⇒ 能删**」✓
+ * （用户口径：「在定时界面找不到编排任务」✓）。以前 `GET /api/schedules` 是
+ * `FIXTURES` 里一份**静态数组**、而 `PUT` 只对 `sch-1` 一条精确路径做了回显 ⇒
+ * 新建那条（id 由前端生成 ✓）**根本没有装置能接** ✗ ⇒ "建出来的那条出现在列表里"
+ * 这句话**量不出来**（回显一个响应只能证明"按钮点了有反应"✗，本仓在这一点上栽过）。
+ *
+ * # 语义照真后端（`crates/mcloud-server/src/routes/schedules.rs` ✓）
+ *
+ * * `PUT` 是 **upsert**：同 id 覆盖、没有就新增 ✓；
+ * * **服务端那几格不许前端覆盖**（`owner` / `managedBy` / 记账字段 ✓）——
+ *   所以覆盖是"老行打底 + 请求体那几格" ✓，不是整份替换 ✗；
+ * * `task: "pipeline"` 时 **`body.pipelineId` 必须在** ✓（否则回 400 + 人话，
+ *   就是界面上"选了编排却没挑是哪一条"兜住的那一句 ✓）。
+ */
+const schedState = { schedules: [] }
+const resetSchedState = () => {
+  // 深拷贝：`body` / `accounts` / `pushRules` 都是嵌套的 ⇒ 浅拷贝会让夹具与断言共享引用 ✗
+  schedState.schedules = JSON.parse(JSON.stringify([SCHEDULE, AUTO_SCHEDULE]))
+}
+/** 新建一条时服务端**自己**补的那几格（`nextFireAt` 由服务端算 ✓，别让页面猜 ✗）。 */
+const schedDefaults = (id) => ({
+  id,
+  lastFireMs: null,
+  lastRunMs: null,
+  lastStatus: null,
+  lastError: null,
+  runCount: 0,
+  // 与 `SCHEDULE` 同一个值：装置里"下次执行"是个**固定**时刻，
+  // 用 `Date.now()` 会让每次跑门禁渲染出来的东西都不一样 ✗
+  nextFireAt: SCHEDULE.nextFireAt,
+})
 
 /**
  * 启动链路要的 4 个接口 + 首屏几个列表；三个 variant 共用同一份。
@@ -812,7 +874,7 @@ export const FIXTURES = {
     },
   ],
   '/api/schedules': [SCHEDULE, AUTO_SCHEDULE],
-  '/api/pipelines': [PIPELINE],
+  '/api/pipelines': [PIPELINE, PIPELINE2],
   '/api/accounts': [ACCOUNT, ACCOUNT2],
   /**
    * 推送的**两张纯清单**。
@@ -1011,14 +1073,11 @@ export const VARIANTS = {
       },
     },
     /**
-     * 定时保存：把请求体**原样回显**（页面拿它刷新列表 ✓）。
-     *
-     * ⚠ 门禁真正要钉的是**请求体**（`pushRules` 两条 / `pushEvents` 只有 `runFailed` ✓），
-     * 所以这里不需要一份有状态的定时表 —— 回显就够，而且"回显"本身还能验
-     * "页面确实按整份写回在发" ✓。
+     * 定时：读那份**有状态**的值 ✓（写口走 `serve()` 里的**前缀匹配**分支，
+     * 因为新建时 id 由**前端生成** ⇒ 这里列不出来 ✗，见 `schedState` ✓）。
      */
-    'PUT /api/schedules/sch-1': {
-      handler: (body) => ({ status: 200, body: { ...SCHEDULE, ...body } }),
+    'GET /api/schedules': {
+      handler: () => ({ status: 200, body: schedState.schedules }),
     },
     'POST /api/exchange/subscriptions/toggle': {
       handler: (body) => {
@@ -1232,6 +1291,7 @@ export const serve = (root, port, variant) =>
     resetPushRulesState()
     resetPushPanelState()
     resetLiveAutoState()
+    resetSchedState()
     const overrides = VARIANTS[variant]
     /**
      * 一条 fixture 可以是 `{status, body}`，也可以是 `{handler(body) → {status, body}}` ——
@@ -1337,6 +1397,78 @@ export const serve = (root, port, variant) =>
           req.on('close', () => timers.forEach((t) => clearTimeout(t)))
         }
         return
+      }
+      /**
+       * 定时的写口（`PUT` / `DELETE /api/schedules/{id}`）。
+       *
+       * ⚠ 为什么是**前缀匹配**而不是 `FIXTURES` / `VARIANTS` 里的一条精确路径：
+       * 新建时 id 由**前端生成**（`sch-<base36>-<随机>` ✓，见
+       * `schedules-page.tsx::newId`）—— 装置里根本列不出来 ✗。
+       * 与下面推送规则那条**同一个理由** ✓（以前这里只对 `sch-1` 一条做了回显，
+       * 于是"新建一条 ⇒ 它出现在列表里"**根本没被装置接住** ✗）。
+       *
+       * ⚠ 语义照真后端（`routes/schedules.rs::upsert` ✓）：`PUT` 是 upsert、
+       * **服务端那几格不许前端覆盖**（老行打底 ✓）；`task: "pipeline"` 而
+       * `body.pipelineId` 缺失 ⇒ **400 + 人话** ✓（界面上"选了编排却没挑是哪一条"
+       * 那句校验就是照它写的 ✓）。`DELETE` 幂等回 `{ok:true}` ✓。
+       */
+      const schedMatch = url.match(/^\/api\/schedules\/([^/]+)$/)
+      if (schedMatch) {
+        const id = decodeURIComponent(schedMatch[1])
+        if (req.method === 'DELETE') {
+          const at = schedState.schedules.findIndex((s) => s.id === id)
+          if (at >= 0) schedState.schedules.splice(at, 1)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: true }))
+          return
+        }
+        if (req.method === 'PUT') {
+          let raw = ''
+          req.on('data', (d) => {
+            raw += d
+          })
+          req.on('end', () => {
+            let b = null
+            try {
+              b = raw ? JSON.parse(raw) : null
+            } catch {
+              /* 非 JSON 体：按空体处理（真后端会回 400，装置只服务正常路径 ✓） */
+            }
+            const at = schedState.schedules.findIndex((s) => s.id === id)
+            const prev = at >= 0 ? schedState.schedules[at] : schedDefaults(id)
+            const body = b ?? {}
+            if (body.task === 'pipeline' && !(body.body && typeof body.body.pipelineId === 'string')) {
+              res.writeHead(400, { 'content-type': 'application/json' })
+              res.end(
+                JSON.stringify({
+                  error: '这条定时要跑编排，但 body 里没有 pipelineId',
+                  code: 'config',
+                }),
+              )
+              return
+            }
+            // ⚠ 老行打底 + 请求体那几格（`owner` / `managedBy` 这类**服务端**的格
+            // 前端压根不发 ⇒ 只有"打底"才留得住 ✓）
+            const saved = {
+              ...prev,
+              id,
+              name: body.name,
+              task: body.task,
+              accounts: body.accounts ?? [],
+              expr: body.expr,
+              timezone: body.timezone ?? 'Asia/Shanghai',
+              body: body.body ?? {},
+              enabled: body.enabled !== false,
+              pushRules: body.pushRules ?? [],
+              pushEvents: body.pushEvents ?? [],
+            }
+            if (at >= 0) schedState.schedules[at] = saved
+            else schedState.schedules.push(saved)
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify(saved))
+          })
+          return
+        }
       }
       /**
        * 推送规则的写口（`PUT` / `DELETE /api/push/rules/{id}`）。

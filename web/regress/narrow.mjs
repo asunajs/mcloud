@@ -427,6 +427,85 @@ try {
   check('320px · 就近那一句内联也在', toastProbe.hasInline === true)
 
   /**
+   * ⑤″ 定时弹窗里的**「编排」那一格**（2026-10-11 加）。
+   *
+   * 用户口径：「在定时界面找不到编排任务，虽然可以通过编排界面定时」⇒ 定时页的
+   * 目标里补上了**编排** ✓，选中之后多出「要跑的编排」那一格（与「执行的任务」
+   * 同款的下拉 ✓）。
+   *
+   * ⚠ **为什么必须单开这一段**：这一格长在**弹窗里**，而上面那个全路由循环走的是
+   * 关闭态（`<dialog>` 没 `open` 时 `display: none`）—— 弹窗内容**不参与**
+   * `documentElement.scrollWidth` ✗ ⇒ 光靠"路由无溢出"**量不到它**
+   * （装置测不到 = 没测 ✓）。所以这里真把弹窗开起来、真选一次编排再量。
+   *
+   * 判据三条，缺一条都可能是"看着没事"：① 页面不横向溢出 ✓；② **弹窗自己的内容区**
+   * 不横向溢出（这一格真顶破时先破的是它 ✓）；③ 那一格**在视口内**（只判 ② 的话，
+   * 它被推到屏幕外、弹窗自己横向滚照样"不溢出" ✗）。
+   */
+  for (const w of [320, 375]) {
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: w,
+      height: 812,
+      deviceScaleFactor: 2,
+      mobile: true,
+    })
+    await cdp.eval(gotoJs('schedules'))
+    await sleep(800)
+    const schedDlg = JSON.parse(
+      await cdp.eval(`(async () => {
+        const mk = [...document.querySelectorAll('#app button')].find((b) => b.textContent.trim() === '新建定时')
+        if (mk) mk.click()
+        await new Promise((r) => setTimeout(r, 350))
+        const d = document.getElementById('schedule-dialog')
+        const task = document.querySelector('#sched-task')
+        if (task) {
+          task.click()
+          await new Promise((r) => setTimeout(r, 250))
+          const opt = [...document.querySelectorAll('.select-portal .select-option')]
+            .find((o) => o.dataset.value === 'pipeline')
+          if (opt) opt.click()
+          await new Promise((r) => setTimeout(r, 300))
+        }
+        const box = d ? d.querySelector('.modal-box') : null
+        const pipe = document.querySelector('#sched-pipeline')
+        const pr = pipe ? pipe.getBoundingClientRect() : null
+        // ⚠ 这里**必须重新查一遍** #sched-task：选了编排之后这个下拉的 props 变了
+        // ⇒ lite 会把它**重建**成新节点（ui/select.tsx 里那条"组件会因 props 变化
+        // 被卸载 + 新建" ✓）—— 拿着点之前那个引用读，读到的是**已经摘掉的旧节点**
+        // （实测：界面明明铺出了编排那一格，旧引用却还写着 daily-checkin ✗）。
+        const taskNow = document.querySelector('#sched-task')
+        return JSON.stringify({
+          open: !!d && d.open,
+          picked: taskNow ? taskNow.dataset.value : '',
+          hasPipe: !!pipe,
+          pipeRight: pr ? Math.round(pr.right) : -1,
+          boxScrollW: box ? box.scrollWidth : -1,
+          boxClientW: box ? box.clientWidth : -1,
+          docOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+          vw: window.innerWidth,
+        })
+      })()`),
+    )
+    check(
+      `${w}px · 定时弹窗能选到「编排」并铺出「要跑的编排」那一格`,
+      schedDlg.open === true && schedDlg.picked === 'pipeline' && schedDlg.hasPipe === true,
+      JSON.stringify(schedDlg),
+    )
+    check(
+      `${w}px · 定时弹窗选「编排」后无横向溢出`,
+      schedDlg.docOverflow === false && schedDlg.boxScrollW <= schedDlg.boxClientW + 1,
+      `页面溢出 ${schedDlg.docOverflow} / 弹窗内容 ${schedDlg.boxScrollW} ≤ ${schedDlg.boxClientW}`,
+    )
+    check(
+      `${w}px · 「要跑的编排」那一格在视口内`,
+      schedDlg.pipeRight >= 0 && schedDlg.pipeRight <= schedDlg.vw + 1,
+      `右边界 ${schedDlg.pipeRight} / 视口 ${schedDlg.vw}`,
+    )
+    await cdp.eval(`document.getElementById('schedule-dialog')?.close()`)
+    await sleep(250)
+  }
+
+  /**
    * ⑥ 桌面：设置页要**有结构地用宽度**。
    *
    * 用户原话："pc端这样太宽了视觉体验差"，并贴了另一套系统的同页做参照 ——

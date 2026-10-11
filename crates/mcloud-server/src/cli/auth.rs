@@ -1,4 +1,5 @@
-//! `auth refresh` —— 续期凭据（命令行入口）。
+//! `auth refresh` —— 续期凭据（命令行入口）；
+//! `auth auto-schedule` —— 「凭据自动刷新定时」的开关与预设时间（命令行入口）。
 //!
 //! # 这一层只做"说给人听"与"读人输进来的东西"
 //!
@@ -7,11 +8,16 @@
 //! 四个触发面（CLI 单账号 / CLI 批量 / WebUI 按钮 / 服务内调度）
 //! 共用同一个 service，于是不会各自漂移。
 //!
+//! ⚠ 自动定时那一条同理：**算 cron 与 upsert 那条定时**都在
+//! `mcloud_app::auth_refresh_auto`（唯一入口 ✓），本文件只解析参数、调它、打印 ✓
+//!（与 `cli/live_room.rs` 同一个形状 ✓）。
+//!
 //! # 退出码
 //!
 //! - `0` —— 全部成功（含"还没到点，没打上游"）
 //! - `1` —— 有账号刷新失败
-//! - `2` —— 用法错（`--lead-days` 给了 0 或负数、账号不存在、参数矛盾）
+//! - `2` —— 用法错（`--lead-days` 给了 0 或负数、账号不存在、参数矛盾、
+//!   预设时间不是 `HH:MM`）
 
 use anyhow::Context;
 use mcloud_app::auth_refresh::RefreshOutcome;
@@ -20,6 +26,19 @@ use mcloud_core::AccountId;
 use mcloud_app::App;
 
 const EXIT_CONFIG: i32 = 2;
+
+const USAGE: &str = "\
+用法：
+  mcloud auth refresh <--account <id> | --all> [--lead-days N] [--force]
+  mcloud auth auto-schedule                    看当前状态（只读，不写盘 ✓）
+  mcloud auth auto-schedule on|off             开/关（会立刻重算一次 ✓）
+  mcloud auth auto-schedule at HH:MM           设预设刷新时间（24 小时制，东八区 ✓）
+
+⚠ `auth auto-schedule` 是本机管理员工具：那条定时是**每个登录用户一条**
+（`auto-auth-refresh-<owner>` ✓），命令行上只能落到**管理员**那一份 ✓
+（与 `mcloud live-room auto-schedule` 同一条口径 ✓）。
+⚠ 到点之后**先走既有判据**（账号设置里的「剩余多少天刷新token」✓）——
+不需要刷就跳过，并把原因写进日志 ✓。";
 
 struct Args {
     account: Option<String>,
@@ -208,4 +227,100 @@ fn print_accounts(all: &[mcloud_core::Account]) {
         let name = a.nickname.as_deref().unwrap_or("");
         eprintln!("  {:<20} {:<12}", a.id, name);
     }
+}
+
+// ════════════ `auth auto-schedule`（「凭据自动刷新定时」的命令行入口 ✓）════════════
+//
+// # 为什么命令行上也要有它（本仓口径：WebUI 能做的 CLI 要能 ✓）
+//
+// 与 `cli/live_room.rs` 同一条理由：那张卡先在 WebUI 上落了地，
+// 而"服务器上没有浏览器"这种场景就只剩手改 `data/schedules.json` 一条路 ✗。
+//
+// ⚠ **不带选项 = 只读** ✓（走 `read_auth_refresh_state` ✓，与 `GET` 同一口径 ✓）——
+// 一条"什么参数都不给"的命令把用户配好的时间/开关重算一遍，是那种
+// "手滑一下、状态就变了"的形态 ✗（与 `mcloud push panel` 不带参数 = 看一眼 同口径 ✓）。
+
+/// `auth auto-schedule [on|off|at <HH:MM>]`
+pub async fn auto_schedule(app: &App, args: &[String]) -> anyhow::Result<()> {
+    // 与 `mcloud push` / `mcloud live-room` 同一条口径：CLI 是本机管理员工具 ✓，
+    // 而这条定时是**每个登录用户一条** ✓ ⇒ 命令行上动的是管理员那一份 ✓。
+    let owner = crate::cli::push::cli_owner(app).await?;
+    let store = &app.handle.store;
+
+    match args.first().map(String::as_str) {
+        // ── 不带选项 = **只读** ✓（= `GET /api/auth/refresh-schedule` 的口径 ✓）
+        None => {
+            let state = mcloud_app::read_auth_refresh_state(store, &owner).await?;
+            print_schedule(&state);
+            Ok(())
+        }
+        // ── 开 / 关（= `PUT {enabled}` ✓，预设时间那一格不动 ✓）
+        Some("on") | Some("off") => {
+            let wanted = args[0] == "on";
+            let state = mcloud_app::reschedule_auth_refresh(
+                store,
+                &owner,
+                Some(mcloud_app::AuthRefreshPatch {
+                    wanted: Some(wanted),
+                    at: None,
+                }),
+            )
+            .await?;
+            print_schedule(&state);
+            Ok(())
+        }
+        // ── 设预设刷新时间（= `PUT {at}` ✓，开关那一格不动 ✓）
+        Some("at") => {
+            let raw = args
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!("要给一个 24 小时制的 HH:MM：\n\n{USAGE}"))?;
+            // ⚠ 非法值**当场拒**（不静默兜默认值 ✗）—— 判据只有一处
+            //（`mcloud_core::auth_refresh::parse_clock` ✓，路由那边用的是同一个 ✓）。
+            if mcloud_core::auth_refresh::parse_clock(raw).is_none() {
+                eprintln!("预设刷新时间要是 24 小时制的 HH:MM（例如 03:00），收到的是「{raw}」");
+                std::process::exit(EXIT_CONFIG);
+            }
+            let state = mcloud_app::reschedule_auth_refresh(
+                store,
+                &owner,
+                Some(mcloud_app::AuthRefreshPatch {
+                    wanted: None,
+                    at: Some(raw.clone()),
+                }),
+            )
+            .await?;
+            print_schedule(&state);
+            Ok(())
+        }
+        Some("help" | "--help" | "-h") => {
+            println!("{USAGE}");
+            Ok(())
+        }
+        Some(other) => anyhow::bail!("未知的 auto-schedule 参数：{other}\n\n{USAGE}"),
+    }
+}
+
+/// 把状态打成几行（`GET` / `PUT` 两条路共用一份 ✓ —— 两边各写一遍的话，
+/// 命令行看到的与界面看到的迟早不一样 ✓）。
+fn print_schedule(state: &mcloud_app::AuthRefreshState) {
+    println!(
+        "凭据自动刷新：{}",
+        if state.enabled {
+            "已开启"
+        } else {
+            "已关闭"
+        }
+    );
+    println!("预设刷新时间：{}（东八区）", state.at);
+    match state.next_at.as_deref() {
+        Some(at) => println!("下一次触发：{at}"),
+        None => println!("下一次触发：算不出来（见下面的说明）"),
+    }
+    if let Some(note) = &state.note {
+        println!();
+        println!("⚠ {note}");
+    }
+    println!();
+    println!("（那条定时是 `auto-auth-refresh-<用户id>`，在「定时」页也看得到；");
+    println!("  到点之后先走既有判据：不需要刷就跳过，并把原因写进日志。）");
 }

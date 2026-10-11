@@ -312,12 +312,26 @@ impl AppBuilder {
         // ⚠ 顺序：编排运行器**必须先建**，调度器要拿它（定时跑编排）。
         // 同一个实例也交给 `AppHandle::pipelines`（路由那条路）—— 共用一份。
         let pipelines = Arc::new(mcloud_engine::PipelineRunner::new(Arc::clone(&runner)));
-        let scheduler = Arc::new(mcloud_engine::Scheduler::new(
-            Arc::clone(&store) as Arc<dyn mcloud_core::Store>,
-            Arc::clone(&runner),
-            Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>,
-            Arc::clone(&pipelines),
-        ));
+        let scheduler = Arc::new(
+            mcloud_engine::Scheduler::new(
+                Arc::clone(&store) as Arc<dyn mcloud_core::Store>,
+                Arc::clone(&runner),
+                Arc::clone(&clock) as Arc<dyn mcloud_core::Clock>,
+                Arc::clone(&pipelines),
+            )
+            // ⭐ 接上「凭据自动刷新」那个钩子（用户口径 2026-10-11 ✓）。
+            //
+            // ⚠ 必须在 `Arc::new` **之前**接：`with_auth_refresh` 吃的是 `self`
+            //（builder 链式风格 ✓），包进 `Arc` 之后就改不动它了 ✓。
+            //
+            // ⚠ 钩子拿的是**上面那一份** `auth_refresh`（四个触发面共用的同一份 ✓）——
+            // 另造一份的话，"界面按钮刷的"与"定时刷的"会是两套判据 ✓（那正是
+            // `AuthRefreshService` 的模块头要消灭的东西 ✗）。
+            .with_auth_refresh(crate::auth_refresh_auto::auth_refresh_hook(
+                Arc::clone(&auth_refresh),
+                Arc::clone(&store) as Arc<dyn mcloud_core::Store>,
+            )),
+        );
         let cancel = runner.cancel_registry();
 
         Ok(App {

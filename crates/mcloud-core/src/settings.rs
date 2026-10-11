@@ -84,7 +84,12 @@ pub const SERVER_LOG_TOTAL_MB_RANGE: (u64, u64) = (1, 4096);
 /// ⚠ `#[serde(default)]` 不能省：`settings.json` 是**后来才有的**文件，
 /// 老实例第一次读它时文件是空的（或缺字段），那时必须按默认值走 ——
 /// 而不是"配置损坏，起不来"。加一个设置项也不该让老文件失效。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// ⚠ **不是 `Copy`**（2026-10-11 起 ✓）：[`AppSettings::auth_refresh_at`] 是一个
+/// `String`（`HH:MM` 落盘形态与界面/CLI 说的是同一个串 ✓）⇒ 有 `String` 字段的
+/// 类型拿不到 `Copy` ✓。改之前它恰好全是 `Copy` 标量，所以那时是 `Copy` ——
+/// 去掉它不影响任何调用点：`store.settings()` 本来就返回**所有权** ✓。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
     /// 口令长度下限。
@@ -120,6 +125,32 @@ pub struct AppSettings {
     pub server_log_mem_lines: usize,
     /// `data/server-logs/` 的**总量**上限（MB）。超出后按**最旧**删整天文件 ✓。
     pub server_log_total_mb: u64,
+    /// **凭据自动刷新的预设时间**（东八区墙钟 `HH:MM`，例如 `"03:00"` ✓）。
+    ///
+    /// # 为什么在这里（实例级设置），而不是账号设置里
+    ///
+    /// 用户口径（2026-10-11）：「自动设置定时，**明天检查是否到达预设刷新时间**，
+    /// 到了就刷」⇒ 落盘是**那条定时**（`data/schedules.json` 里的
+    /// `auto-auth-refresh-<owner>` ✓），而定时是**每个登录用户一条** ✓
+    /// （与「直播自动定时」同一条形状 ✓）。
+    ///
+    /// 本项目的实例级设置（`AppSettings`）本来就是"一个实例一份、WebUI 里改"的
+    /// 那一档（口令下限 / 会话时长 / 日志上限……✓）⇒ 预设时间也放这里 ✓。
+    ///
+    /// ⚠ 与 `AccountSettings::refresh_token_days` **不是同一件事**，别合并 ✗：
+    /// 那一格是"剩余不足 N 天就刷"的**阈值**（按账号 ✓，是既有判据 ✓），
+    /// 这一格是"每天几点检查一次"的**钟点**（全实例 ✓）—— 到点之后**先走既有判据**
+    /// （不需要刷就跳过 ✓，见 `mcloud_core::auth_refresh` 的模块头 ✓）。
+    ///
+    /// # 为什么是字符串而不是"两个整数"
+    ///
+    /// `HH:MM` 是用户看得见、也输得进去的形态 ✓，而落盘形态与它**逐字相同**
+    /// ⇒ 界面 / CLI / 日志三处说的是同一个串，不需要任何换算 ✓。
+    /// 解析成"当天毫秒偏移"只有一处：`mcloud_core::auth_refresh::parse_clock` ✓。
+    ///
+    /// ⚠ 默认值 = `crate::auth_refresh::DEFAULT_AUTH_REFRESH_AT` ✓
+    /// （那条口径：没改过设置的实例行为必须与默认值一致 ✓）。
+    pub auth_refresh_at: String,
 }
 
 impl Default for AppSettings {
@@ -132,6 +163,7 @@ impl Default for AppSettings {
             log_total_mb: DEFAULT_LOG_TOTAL_MB,
             server_log_mem_lines: DEFAULT_SERVER_LOG_MEM_LINES,
             server_log_total_mb: DEFAULT_SERVER_LOG_TOTAL_MB,
+            auth_refresh_at: crate::auth_refresh::DEFAULT_AUTH_REFRESH_AT.to_string(),
         }
     }
 }
@@ -182,6 +214,14 @@ impl AppSettings {
         if self.server_log_total_mb < lo || self.server_log_total_mb > hi {
             return Err(format!("服务端日志总量上限要在 {lo}~{hi} MB 之间"));
         }
+        // ⚠ 预设刷新时间的判据**只有一处**（`auth_refresh::parse_clock`）——
+        // 在这里再写一遍"两段、冒号、范围"就是第二份口径，迟早与它分叉 ✗。
+        if crate::auth_refresh::parse_clock(&self.auth_refresh_at).is_none() {
+            return Err(format!(
+                "凭据自动刷新的预设时间要是 24 小时制的 HH:MM（例如 03:00），当前是「{}」",
+                self.auth_refresh_at
+            ));
+        }
         Ok(())
     }
 }
@@ -216,24 +256,72 @@ mod tests {
             d.server_log_total_bytes(),
             DEFAULT_SERVER_LOG_TOTAL_MB * 1024 * 1024
         );
+        // ⚠ 凭据自动刷新的预设时间同理：默认值必须 = `auth_refresh` 那个常量 ✓
+        //（两处各写一遍的话，"从没改过设置"的实例与 `auth_refresh::daily_expr`
+        //  会各说各话 ✗）。
+        assert_eq!(
+            d.auth_refresh_at,
+            crate::auth_refresh::DEFAULT_AUTH_REFRESH_AT
+        );
+    }
+
+    /// ⭐ 预设刷新时间**非法一律拒**（不静默兜默认值 ✗ —— 那会让"我设了 22:30、
+    /// 它却在半夜刷"变成查不出来的事 ✓）。
+    #[test]
+    fn validate_rejects_a_bad_refresh_clock() {
+        let ok = AppSettings::default();
+        for bad in [
+            "",
+            "3",
+            "0300",
+            "24:00",
+            "12:60",
+            "十二点",
+            "3:5:1",
+            "-1:00",
+        ] {
+            assert!(
+                AppSettings {
+                    auth_refresh_at: bad.to_string(),
+                    ..ok
+                }
+                .validate()
+                .is_err(),
+                "「{bad}」不是钟点，应被拒"
+            );
+        }
+        for good in ["00:00", "03:00", "3:05", "23:59"] {
+            assert!(
+                AppSettings {
+                    auth_refresh_at: good.to_string(),
+                    ..ok
+                }
+                .validate()
+                .is_ok(),
+                "「{good}」是合法钟点，应放行"
+            );
+        }
     }
 
     #[test]
     fn validate_rejects_out_of_range() {
         let ok = AppSettings::default();
         assert!(ok.validate().is_ok());
+        // ⚠ `AppSettings` 不是 `Copy`（`auth_refresh_at` 是 `String` ✓）⇒ 下面那些
+        // `..ok` 的结构体更新会**部分移动**它，所以逐处写 `..ok.clone()` ✓。
+        // 断言要看的是"只动了这一格、其余照旧" ✓。
 
         for bad in [3usize, 65] {
             let s = AppSettings {
                 min_password_len: bad,
-                ..ok
+                ..ok.clone()
             };
             assert!(s.validate().is_err(), "下限 {bad} 应被拒");
         }
         for bad in [0u32, 24 * 91] {
             let s = AppSettings {
                 session_ttl_hours: bad,
-                ..ok
+                ..ok.clone()
             };
             assert!(s.validate().is_err(), "会话 {bad} 小时应被拒");
         }
@@ -241,7 +329,7 @@ mod tests {
         assert!(AppSettings {
             min_password_len: 4,
             session_ttl_hours: 24 * 90,
-            ..ok
+            ..ok.clone()
         }
         .validate()
         .is_ok());
@@ -251,7 +339,7 @@ mod tests {
             assert!(
                 AppSettings {
                     history_limit: bad,
-                    ..ok
+                    ..ok.clone()
                 }
                 .validate()
                 .is_err(),
@@ -262,7 +350,7 @@ mod tests {
             assert!(
                 AppSettings {
                     log_limit_per_run: bad,
-                    ..ok
+                    ..ok.clone()
                 }
                 .validate()
                 .is_err(),
@@ -276,7 +364,7 @@ mod tests {
             assert!(
                 AppSettings {
                     server_log_mem_lines: bad,
-                    ..ok
+                    ..ok.clone()
                 }
                 .validate()
                 .is_err(),
@@ -290,7 +378,7 @@ mod tests {
             assert!(
                 AppSettings {
                     server_log_total_mb: bad,
-                    ..ok
+                    ..ok.clone()
                 }
                 .validate()
                 .is_err(),
@@ -301,7 +389,7 @@ mod tests {
             assert!(
                 AppSettings {
                     log_total_mb: bad,
-                    ..ok
+                    ..ok.clone()
                 }
                 .validate()
                 .is_err(),
@@ -312,7 +400,7 @@ mod tests {
             history_limit: HISTORY_LIMIT_RANGE.0,
             log_limit_per_run: LOG_LIMIT_PER_RUN_RANGE.0,
             log_total_mb: LOG_TOTAL_MB_RANGE.0,
-            ..ok
+            ..ok.clone()
         }
         .validate()
         .is_ok());
@@ -320,7 +408,7 @@ mod tests {
             history_limit: HISTORY_LIMIT_RANGE.1,
             log_limit_per_run: LOG_LIMIT_PER_RUN_RANGE.1,
             log_total_mb: LOG_TOTAL_MB_RANGE.1,
-            ..ok
+            ..ok.clone()
         }
         .validate()
         .is_ok());

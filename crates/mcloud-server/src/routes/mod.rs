@@ -2,6 +2,9 @@
 
 pub mod accounts;
 pub mod auth;
+/// 「凭据刷新」：手动一键刷新 + 自动定时的开关与预设时间
+///（`POST /api/auth/refresh` / `GET|PUT /api/auth/refresh-schedule` ✓）。
+pub mod auth_refresh;
 pub mod beans;
 pub mod cancel;
 pub mod capabilities;
@@ -105,6 +108,12 @@ pub fn router() -> Router<ServerState> {
         // ── 直播自动定时（设置页那张卡：开关 + 账号多选 + 当前算出的时刻）──
         // ⚠ 它落到**定时那张表**上（`auto-live-<owner>` ✓），不是新开的一张表 ✓。
         .merge(live_room::routes())
+        // ── 凭据刷新（账号页那枚「一键刷新」按钮 + 账号设置里那两格）──────────
+        // ⚠ 与 `live_room::routes()` 同一条形状：也是落到**定时那张表**上
+        //（`auto-auth-refresh-<owner>` ✓），不是新开的一张表 ✓。
+        // ⚠ 路由名 `auth/refresh` **不与** `auth.rs` 那套（`/api/session` 等）撞 ✓
+        // —— 那套管的是"登录闸"，这套管的是"云盘凭据" ✓（两件事，见 `accounts.rs` 模块头 ✓）。
+        .merge(auth_refresh::routes())
         // ── 任务的参数配置（任务页「配置」那一页）──────────────────────
         .route(
             "/api/tasks/{name}/config",

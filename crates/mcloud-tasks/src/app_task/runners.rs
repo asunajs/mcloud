@@ -289,7 +289,9 @@ async fn bill_view_runner(ctx: &TaskContext, state: &mut RunnerState) -> RunnerR
     {
         Ok(body) => match mail139::first_mail_id(&body) {
             Some(mid) => {
-                report.notes.push(format!("账单邮件列表：拿到第一封的 mid"));
+                report
+                    .notes
+                    .push("账单邮件列表：拿到第一封的 mid".to_string());
                 mid
             }
             None => {

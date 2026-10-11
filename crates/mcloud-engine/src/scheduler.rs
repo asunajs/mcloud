@@ -93,6 +93,44 @@ pub enum FireOutcome {
     UnknownTask(String),
 }
 
+/// 触发「凭据自动刷新定时」时调的那个钩子。
+///
+/// # 为什么是钩子，而不是一条注册表里的 `Task`
+///
+/// 凭据刷新**不是一条任务**：它没有 `Task` 实现、不产生 `RunRecord`
+///（它的产物是"库里那串凭据换了" ✓，由 `mcloud_app::auth_refresh::AuthRefreshService`
+/// 自己窄写落库 ✓）。而**判据、上游调用、窄写**全都在 `mcloud-app` 那一层
+///（那是既有正确逻辑，一处都不能重写 ✗）。
+///
+/// 于是这里留一个**注入点**：本 crate 不做 IO（铁律 ✓），它只负责
+/// "到点了 ⇒ 把这条定时与该跑的账号交给钩子" ✓ —— 钩子由 `AppBuilder` 接上
+///（`AuthRefreshService` ✓）。这与编排走 [`crate::pipeline::PipelineRunner`]
+/// 是同一条路子：调度器认得出这一支，真正干活的在别处 ✓。
+///
+/// # 入参 / 返回
+///
+/// * `schedule`：那条定时（钩子只读它的 `owner` 与 `accounts` ✓）；
+/// * `accounts`：**已经按归属过滤好**的账号清单（[`Scheduler::target_accounts`] ✓）
+///   —— 钩子**不要**自己去查库：归属是硬边界，只该有一处判据 ✓；
+/// * 返回 [`FireOutcome`] ✓。
+///
+/// # ⚠ 记账（`last_status` / `last_error` / `last_run_ms`）**由钩子自己做**
+///
+/// 调度器把结论交给钩子之后就不再插手：钩子手里有 `Store`（它本来就要用库 ✓）
+/// ⇒ 由它调 `Store::record_schedule_run` 写那三列 ✓。反过来的话（钩子只回结论、
+/// 调度器代记）就要给调度器开一个"代别人记账"的公开口子 ✗ —— 那个口子的存在
+/// 只会让"谁在写这一行"更难查 ✓。
+pub type AuthRefreshHook = std::sync::Arc<
+    dyn Fn(
+            &Schedule,
+            &[mcloud_core::Account],
+            i64,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = FireOutcome> + Send + 'static>>
+        + Send
+        + Sync,
+>;
+
 /// 单条定时的触发判定。
 ///
 /// 抽成纯函数（不碰 IO），因为它是最容易算错的地方，
@@ -229,6 +267,16 @@ pub struct Scheduler {
     stop_tx: watch::Sender<bool>,
     /// 让 `run_loop` 能被告知停止。
     stop_rx: watch::Receiver<bool>,
+    /// **凭据自动刷新的钩子**（`None` = 还没接上 / 没接线的组装 ✓）。
+    ///
+    /// 见 [`AuthRefreshHook`]：到点了把"那条定时 + 已过滤好的账号"交给它，
+    /// 真正的判据与上游调用在 `mcloud-app` 那一层 ✓。
+    ///
+    /// ⚠ 用 `Option` 而不是"构造期必填"：调度器的构造在 `AppBuilder` 里
+    /// **早于** `AuthRefreshService` 可注入的位置（那份服务由 builder 在别处造 ✓），
+    /// 而且本 crate 的测试根本不需要它 ✓。`None` 时那一支**如实报错**
+    ///（`UnknownTask`），不静默跳过 ✗ —— 静默的话用户看到的是"定时跑了、什么也没发生" ✗。
+    auth_refresh: Option<AuthRefreshHook>,
 }
 
 impl Scheduler {
@@ -261,7 +309,18 @@ impl Scheduler {
             _state_rx: state_rx,
             stop_tx,
             stop_rx,
+            auth_refresh: None,
         }
+    }
+
+    /// 接上「凭据自动刷新」那个钩子（见 [`AuthRefreshHook`] ✓）。
+    ///
+    /// ⚠ 单独一个入口而不是加进 `new()`：`new()` 有 4 个位置参数，再加一个
+    /// 就要改**每一处**构造点（含几十处测试 ✓），而其中绝大多数根本不关心它 ✗。
+    /// 与 `Runner::run_full` 那条"单开一个入口"是同一条处置 ✓。
+    pub fn with_auth_refresh(mut self, hook: AuthRefreshHook) -> Self {
+        self.auth_refresh = Some(hook);
+        self
     }
 
     /// 运行状态的订阅端，供 `/api/status` 用。
@@ -404,10 +463,34 @@ impl Scheduler {
         }
     }
 
+    /// 给[「凭据自动刷新」那个钩子](AuthRefreshHook)用的**记账入口**。
+    ///
+    /// # 为什么要把 `record` 开一个公开的口子
+    ///
+    /// 那一支的结论**不在本 crate**（判据与上游调用都在 `mcloud-app` ✓）⇒
+    /// 钩子跑完得把 `ok / error / skipped` 记进那条定时（「定时」页要看得见 ✓）。
+    /// 而记账的落点是 `Store::record_schedule_run`，本 crate 是唯一持有它、
+    /// 且已经有一处 `record`（含"记账失败只 warn"那条处置 ✓）的地方 ✓。
+    ///
+    /// ⚠ 让 `mcloud-app` 自己去调 `store.record_schedule_run` 也行，但那样
+    /// "记账失败怎么办"就有两份写法（这里只 warn ✓）—— 迟早分叉 ✗。
+    ///
+    /// `status` 只用三个既有取值（`ok` / `error` / `skipped`，与 `Schedule.last_status`
+    /// 同一套 ✓）；`ran_at_ms` 传触发点（**已经真的做了事**才传，没做事传 `None` ✓，
+    /// 与 `fire()` 里 `blocked_all` 那一条同口径 ✓）。
+    pub async fn record_hook_result(
+        &self,
+        sch: &Schedule,
+        ran_at_ms: Option<i64>,
+        status: &str,
+        error: Option<&str>,
+    ) {
+        self.record(sch, ran_at_ms, status, error).await;
+    }
+
     /// 真正触发：对定时指向的每个账号起一次运行。
     ///
-    /// 触发一条**编排**（`sch.task == PIPELINE_TASK`）。
-    ///
+    /// 触发一条**编排**（`sch.task == PIPELINE_TASK`）。    ///
     /// # 三点与任务分支**刻意不同**
     ///
     /// 1. **整份账号**交给编排器 ✓ —— 不逐个账号跑一遍 ✗：编排自己按 `accountMode`
@@ -476,6 +559,33 @@ impl Scheduler {
             Ok(a) => a,
             Err(e) => return (FireOutcome::UnknownTask(e.to_string()), false),
         };
+
+        // ── 凭据自动刷新：交给钩子（判据与上游调用在 `mcloud-app` 那一层 ✓）──
+        //
+        // ⚠ 必须在**查注册表之前**认出来：`auth-refresh` **不是**注册表里的任务
+        //（见 [`AuthRefreshHook`] ✓），走普通任务分支会回 `UnknownTask` ✗。
+        // 与 `PIPELINE_TASK` 同一条处置 ✓。
+        //
+        // ⚠ 也必须在**"账号为空"那个早退之前**：那条早退回的是 `SkippedBusy`
+        //（"被并发闸挡住"的语义 ✓），而"这个用户一个账号都没有"**不是**那个意思
+        // —— 它是一条正常分支（钩子自己会把"没有账号"记成 ok ✓）。
+        //
+        // ⚠ 钩子没接上（`None`）⇒ **如实报错**，不静默跳过 ✗：静默的话用户看到的是
+        // "定时跑了、什么也没发生"，而真因是组装漏了一处 ✓。
+        if sch.task == mcloud_core::AUTH_REFRESH_TASK {
+            return match &self.auth_refresh {
+                // ⚠ 第二格传 `false`：凭据刷新没有"被并发闸挡住"这个概念
+                //（它不走 `runner` ✓）—— 那一格的语义见 `fire()` 的返回说明 ✓。
+                Some(hook) => (hook(sch, &accounts, point_ms).await, false),
+                None => (
+                    FireOutcome::UnknownTask(
+                        "这条定时要刷凭据，但调度器没接上凭据刷新的钩子（组装问题）".into(),
+                    ),
+                    false,
+                ),
+            };
+        }
+
         if accounts.is_empty() {
             return (FireOutcome::SkippedBusy, true);
         }

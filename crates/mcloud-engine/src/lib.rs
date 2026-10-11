@@ -16,7 +16,9 @@ pub use details_ledger::{DetailsLedger, DetailsRecorder, SharedDetails};
 pub use pipeline::{PipelineOutcome, PipelineRunner, StepStatus, StepSummary};
 pub use registry::{ParamKind, ParamSpec, Registry, Task, TaskGroup, TaskMeta};
 pub use runner::{HttpClientFactory, Runner};
-pub use scheduler::{next_fire_at, Decision, FireOutcome, Scheduler, SchedulerState};
+pub use scheduler::{
+    next_fire_at, AuthRefreshHook, Decision, FireOutcome, Scheduler, SchedulerState,
+};
 
 use mcloud_core::{Account, LogKind, LogLevel, TaskOutcome};
 use std::sync::Arc;

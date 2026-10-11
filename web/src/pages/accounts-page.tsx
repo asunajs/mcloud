@@ -28,6 +28,7 @@ import {
   loginWithPassword,
   pollQrLogin,
   putAccountSettings,
+  refreshAuth,
   rotatePcDevice,
   startAppSmsLogin,
   startQrLogin,
@@ -38,6 +39,8 @@ import {
   type AccountSettings,
   type AccountSummary,
   type PcPlatform,
+  type RefreshResponse,
+  type RefreshResult,
   type SliderPayload,
 } from '../api'
 import { EmptyState } from '../ui/empty-state'
@@ -48,6 +51,7 @@ import { pushToast } from '../ui/toast'
 import { createAccountFields } from '../ui/account-fields'
 import { pathParts } from '../ui/nav'
 import { currentPath, navigate } from '../ui/router'
+import { fmtEpochMs } from '../ui/time'
 import { AccountConfigPage } from './account-config-page'
 // 上游状态：**子视图**，不是导航项（用户 2026-10-07：「这个不要放 nav 里」✓）
 import { UpstreamPage } from './upstream-page'
@@ -102,28 +106,55 @@ const SHOW_ACCOUNT_SETTINGS_BLOCKS = false
 // —— 账号页与配置中心复用**同一份**，别在这里再写第二份（两份实现迟早分叉）。
 
 /**
- * 把设置的读写失败翻成**能分辨**的一句话。
+ * 把账号相关动作（读/写设置、刷新凭据……）的失败翻成**能分辨**的一句话。
  *
  * ⚠ 三种状态**不能**都落到「网络错误」：
  * - **404** = 账号不存在**或**不属于当前登录用户（后端对两种情形回同一个 404，
  *   不泄露存在性）—— 用户该做的是刷新列表 / 重新登录，不是"再点一次"；
- * - **400** = 请求体被后端拒绝（未知键、越界、渠道缺字段），**后端原话必须显出来**，
- *   否则用户只看到一句无从下手的"保存失败"；
+ * - **400** = 请求体被后端拒绝（未知键、越界、渠道缺字段、`HH:MM` 形状不对），
+ *   **后端原话必须显出来**，否则用户只看到一句无从下手的"保存失败"；
  * - **401** = 登录态失效（`request` 已经让整个应用转去登录页），这里补一句说明。
  *
  * `status === 0` 是 `request` 自己造的"超时/取消"，那时 `message` 已经是人话。
+ *
+ * ⚠ **502 那一档对"刷新凭据"有特殊含义**：后端在有账号没刷成时回 502，
+ * 而 body 里**仍然**是逐条结局（见 [`partialRefresh`] ✓）——
+ * 所以刷新那条路要**先**试 `partialRefresh`，解析不出来才走这里 ✓。
  */
 const describeSettingsError = (e: unknown, action: string): string => {
   if (e instanceof ApiError) {
     if (e.status === 404) {
       return '这个账号不存在，或者不属于当前登录用户（后端对两种情形回的是同一个 404）。请刷新账号列表后再试。'
     }
-    if (e.status === 401) return '登录状态已失效，请重新登录后再' + action + '设置。'
-    if (e.status === 400) return '后端拒绝了这份设置：' + e.message
+    if (e.status === 401) return '登录状态已失效，请重新登录后再' + action + '。'
+    if (e.status === 400) return '后端拒绝了这次请求：' + e.message
     if (e.status === 0) return e.message
-    return action + '账号设置失败（HTTP ' + e.status + '）：' + e.message
+    return action + '失败（HTTP ' + e.status + '）：' + e.message
   }
-  return e instanceof Error ? e.message : action + '账号设置失败'
+  return e instanceof Error ? e.message : action + '失败'
+}
+
+/**
+ * 从一次**失败**的刷新里把逐条结局捞回来（捞不到回 `null` ✓）。
+ *
+ * # 为什么后端在 502 时还把结局放在 body 里
+ *
+ * 「有账号没刷成」这件事**必须让用户看见**（是哪一个、为什么 ✓），
+ * 而 502 只是个状态码 —— 把 body 丢掉，用户拿到的就是一句"服务器出错了" ✗。
+ * 前端这边同理：`request()` 把 body 原文塞进 `Error.message` ✓ ⇒ 这里试着解析它 ✓。
+ *
+ * ⚠ 解析失败**不报错、不抛**（回 `null` 让调用方走通用错误提示 ✓）：
+ * 一个形状对不上的 body 只该让提示"降级"，不该让页面崩 ✓。
+ */
+const partialRefresh = (e: unknown): RefreshResponse | null => {
+  if (!(e instanceof ApiError) || e.status !== 502) return null
+  try {
+    const parsed = JSON.parse(e.message) as RefreshResponse
+    if (parsed && Array.isArray(parsed.results)) return parsed
+  } catch {
+    // 不是 JSON（或形状不对）⇒ 交给通用提示 ✓
+  }
+  return null
 }
 
 export const AccountsPage = () => {
@@ -235,6 +266,116 @@ export const AccountsPage = () => {
 
   /** 正在启停的账号 id（按钮期间禁用，避免连点两下发两次相反的请求）。 */
   const enabling = ref<string | null>(null)
+
+  // ── 一键刷新凭据（用户口径 2026-10-11：「可手动一键刷新」✓）───────────
+  //
+  // # 为什么要二次确认（判断 + 理由，写在代码里免得后人当"多此一举"删掉）
+  //
+  // 刷新**不是删数据**，但它会**真轮换上游那串凭据**（旧串当场作废 ✓，
+  // 见 `mcloud_app::auth_refresh` 模块头：那是**不可逆**动作 ✓）。
+  // 而这一页上"编辑 / 设置 / 停用 / 移除"四颗按钮挨着它 ——
+  // 手滑一下的代价是"这个账号得重新登录"✗。所以两颗都过一道确认 ✓
+  //（与「移除账号」「更换本机设备指纹」同一条处置 ✓；本仓口径：
+  //  "重要的（刷全部 / 不可逆）走 modal 确认" ✓）。
+  /**
+   * 正在刷新的目标：`null` = 没在刷；`''` = **全部账号**；其余 = 那个账号 id。
+   *
+   * ⚠ 用"目标"而不是一个布尔：界面上有 N+1 个按钮（每个账号一个 + 全部一个），
+   * 布尔量说不出"现在是哪一个在忙" —— 表现就是所有按钮一起转圈 ✓。
+   */
+  const refreshing = ref<string | null>(null)
+  /** 待确认的刷新目标（`''` = 全部 ✓）。 */
+  const pendingRefresh = ref<string | null>(null)
+
+  const REFRESH_ALL_DIALOG = 'confirm-refresh-all'
+  const REFRESH_ONE_DIALOG = 'confirm-refresh-one'
+
+  /** 一颗按钮按下 ⇒ 先弹确认（`''` = 全部 ✓）。 */
+  const askRefresh = (id: string) => {
+    pendingRefresh.value = id
+    openDialog(id === '' ? REFRESH_ALL_DIALOG : REFRESH_ONE_DIALOG)
+  }
+
+  /** 确认弹窗里那句"刷的是谁"（人话，不是空串 ✓）。 */
+  const refreshTargetLabel = (id: string): string => {
+    if (id === '') return `全部 ${accounts.value.length} 个账号`
+    const a = accounts.value.find((x) => x.id === id)
+    return a ? a.nickname || a.label || a.id : id
+  }
+
+  /**
+   * 把逐条结局说成一句人话。
+   *
+   * ⚠ **四档不能合成一句"没刷"**：`skipped`（还剩 N 天，什么都不用做 ✓）与
+   * `manual`（库里没有有效的过期时刻 ⇒ **要重新登录** ✓）的下一步完全不同 ✓
+   * —— 合成一句，用户就不知道该不该管了 ✗（后端也是为此把四档分开的 ✓）。
+   */
+  const describeRefresh = (r: RefreshResult): string => {
+    switch (r.kind) {
+      case 'refreshed':
+        return `已换新凭据（新过期 ${fmtEpochMs(r.newExpireMs ?? 0)}）`
+      case 'skipped':
+        return `未到提前量（还剩 ${(r.remainingDays ?? 0).toFixed(1)} 天），未打上游`
+      case 'manual':
+        return `需重新登录：库里没有有效的过期时刻`
+      case 'failed':
+        return `刷新失败：${r.error ?? '（上游没给原因）'}`
+    }
+  }
+
+  /**
+   * 真刷（一个账号 / 全部 ✓）。
+   *
+   * ⚠ 后端在有账号**刷新失败**时回 **502**，但 body 里**仍然是**那份逐条结局
+   *（`request()` 把 body 原文放进 `Error.message` ✓）⇒ 这里在 catch 里也解析一次，
+   * 别把"哪一个失败、为什么"丢掉 ✓。
+   *
+   * ⚠ 刷完**要重新读账号列表**：凭据换了 ⇒ 列表上那行「凭据 X 天后」得跟着变 ✓
+   *（不重读的话，用户看到的是刷新前那个过期时间，会以为没生效 ✓）。
+   */
+  const doRefresh = async () => {
+    const target = pendingRefresh.value
+    if (target === null) return
+    refreshing.value = target
+    try {
+      const out = await refreshAuth(target === '' ? { all: true } : { account: target })
+      closeDialog(target === '' ? REFRESH_ALL_DIALOG : REFRESH_ONE_DIALOG)
+      pendingRefresh.value = null
+      reportRefresh(out, target)
+      await load()
+    } catch (e) {
+      const partial = partialRefresh(e)
+      if (partial) {
+        closeDialog(target === '' ? REFRESH_ALL_DIALOG : REFRESH_ONE_DIALOG)
+        pendingRefresh.value = null
+        reportRefresh(partial, target)
+        await load()
+      } else {
+        showError('刷新凭据失败', describeSettingsError(e, '刷新'))
+      }
+    } finally {
+      refreshing.value = null
+    }
+  }
+
+  /** 把一份逐条结局报到界面上（toast 说结论 + 弹窗列逐条原因 ✓）。 */
+  const reportRefresh = (out: RefreshResponse, target: string) => {
+    const who = refreshTargetLabel(target)
+    const lines = out.results
+      .map((r) => `${r.label || r.account}：${describeRefresh(r)}`)
+      .join('\n')
+    if (out.failed > 0) {
+      // 失败与"需人工"都要用户去看 ⇒ 弹窗（错误 toast 不自动消失，但列不下逐条 ✓）
+      showError('刷新凭据：有账号没刷成', `${who}\n\n${lines}`)
+      return
+    }
+    // 成功走**轻量** toast（3 秒自动消失 ✓）——逐条明细放第二行，长了也读得完 ✓
+    const summary =
+      out.refreshed > 0
+        ? `已刷新 ${out.refreshed} 个凭据`
+        : `没有需要刷新的凭据（跳过 ${out.skipped} 个）`
+    pushToast(out.manual > 0 ? 'warning' : 'success', `${summary}\n${lines}`)
+  }
 
   const load = async () => {
     state.value = 'loading'
@@ -1057,6 +1198,24 @@ export const AccountsPage = () => {
           >
             账号配置
           </button>
+          {/*
+            一键刷新凭据（用户口径 2026-10-11：「可手动一键刷新」✓）。
+            ⚠ 放在「添加账号」**左边**、用 `btn-soft` 而不是 `btn-primary`：
+            这一页的主行动是"加账号"（实心只有一个位置 ✓）。
+            ⚠ 没有账号时**不画**它 —— 一个必然回"没有需要刷新的凭据"的按钮
+            只会让人以为坏了 ✓（与列表空态那条处置一致 ✓）。
+          */}
+          {accounts.value.length > 0 ? (
+            <button
+              type="button"
+              class="btn btn-sm btn-soft min-h-11 md:min-h-0"
+              disabled={refreshing.value !== null}
+              onClick={() => askRefresh('')}
+            >
+              {refreshing.value === '' ? <span class="loading loading-xs" /> : null}
+              刷新全部凭据
+            </button>
+          ) : null}
           <button
             type="button"
             class="btn btn-sm btn-primary min-h-11 md:min-h-0"
@@ -1148,6 +1307,19 @@ export const AccountsPage = () => {
                   触控高度仍是 44（§6.1 那条不变）。
                 */}
                 <div class="flex w-full items-center justify-end gap-2 md:w-auto">
+                  {/*
+                    刷新凭据（按账号 ✓）—— 放在「编辑」前：它改的是**凭据本身**，
+                    与"改名字/设备"同一类动作，而"停用/移除"是另一类（影响可见性）✓。
+                  */}
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-soft min-h-11 md:min-h-0"
+                    disabled={refreshing.value !== null}
+                    onClick={() => askRefresh(a.id)}
+                  >
+                    {refreshing.value === a.id ? <span class="loading loading-xs" /> : null}
+                    刷新
+                  </button>
                   <button
                     type="button"
                     class="btn btn-sm btn-soft min-h-11 md:min-h-0"
@@ -1665,6 +1837,42 @@ export const AccountsPage = () => {
         }
         confirmLabel="换掉指纹"
         onConfirm={() => void doRotateDevice()}
+      />
+
+      {/*
+        刷新凭据的两道确认（见 `askRefresh` 那段说明：**不可逆 + 手滑代价** ✓）。
+        ⚠ 文案要说清"会换掉会话"与"旧串当场作废" —— 只写「确定吗？」等于没确认 ✓
+        （本仓 §6.4：影响面要具体到数字/名字 ✓）。
+      */}
+      <ConfirmDialog
+        id={REFRESH_ONE_DIALOG}
+        title="刷新这个账号的凭据"
+        impact={
+          <span>
+            将向云盘请求一份<b>新的凭据</b>，换掉{' '}
+            <b>{refreshTargetLabel(pendingRefresh.value ?? '')}</b> 现在用的那一串。
+            换完之后旧凭据当场作废（<b>这一步撤不回来</b>）；用新凭据登录的会话不受影响。
+            还没到提前量时不会真的去刷，只会跳过。
+          </span>
+        }
+        confirmLabel="刷新"
+        busy={refreshing.value !== null}
+        onConfirm={() => void doRefresh()}
+      />
+
+      <ConfirmDialog
+        id={REFRESH_ALL_DIALOG}
+        title="刷新全部账号的凭据"
+        impact={
+          <span>
+            将对 <b>{refreshTargetLabel('')}</b> 逐个请求新凭据（<b>慢</b>，每个最慢约半分钟）。
+            换完之后各自的旧凭据当场作废（<b>这一步撤不回来</b>）。
+            没到提前量的账号会跳过、不会打上游。
+          </span>
+        }
+        confirmLabel="全部刷新"
+        busy={refreshing.value !== null}
+        onConfirm={() => void doRefresh()}
       />
 
       <ConfirmDialog

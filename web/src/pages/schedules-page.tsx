@@ -25,12 +25,14 @@ import {
   deleteSchedule,
   listAccounts,
   listCapabilities,
+  listPipelines,
   listPushEvents,
   listPushRules,
   listSchedules,
   PIPELINE_TASK,
   saveSchedule,
   type AccountSummary,
+  type Pipeline,
   type PushEventOption,
   type PushRule,
   type Schedule,
@@ -126,6 +128,21 @@ const isManaged = (s: Schedule) => s.managedBy === 'live-auto'
 /** 「系统维护」徽章 —— 与「已启用/已停用」并列，不是替代它 ✓。 */
 const MANAGED_BADGE = 'badge badge-soft badge-info badge-sm'
 
+/**
+ * 从定时的 `body` 里读出 `pipelineId`。
+ *
+ * 只有 `task === PIPELINE_TASK` 的定时才有这一格（后端 `upsert` 里那句校验要求它必须
+ * 存在 ✓，否则连建都建不出来）。`Schedule.body` 在类型上是 `unknown` ⇒ 这里**逐层收窄**
+ * 再读：直接 `body.pipelineId` 读不到，而"读不出来就当空串"的后果是**编辑一条已绑编排的
+ * 定时时，那一格显示成没选** ✗ —— 用户一保存就把绑定丢了（静默的数据丢失，本页最忌讳的一类）。
+ */
+const pipelineIdOf = (s: Schedule): string => {
+  const b = s.body
+  if (b === null || typeof b !== 'object') return ''
+  const v = (b as { pipelineId?: unknown }).pipelineId
+  return typeof v === 'string' ? v : ''
+}
+
 export const SchedulesPage = () => {
   const state = ref<LoadState>('loading')
   /** 加载失败（整页替换）。**留在页内** —— 它要配「重试」。 */
@@ -142,6 +159,20 @@ export const SchedulesPage = () => {
 
   const items = ref<Schedule[]>([])
   const tasks = ref<TaskMeta[]>([])
+  /**
+   * 编排清单（`GET /api/pipelines` ✓）。
+   *
+   * # 为什么定时页要读它
+   *
+   * 编排**不是**注册表里的任务（它是一条链 ✓，见 `api.ts` 的 `PIPELINE_TASK`）⇒
+   * 它不在 `/api/capabilities` 里 ⇒ 只列任务的下拉**永远选不到编排** ✗。
+   * 后果就是用户报的那句：「在定时界面找不到编排任务，虽然可以通过编排界面定时」——
+   * 路只通一半（编排页能反向建 ✓，定时页建不出来 ✗）。
+   *
+   * 这一份同时供两处用：选到编排时那个**挑哪一条**的下拉 ✓，以及列表里把
+   * `body.pipelineId` 显示成编排的名字 ✓（只显示"编排"两个字，用户不知道是哪条 ✗）。
+   */
+  const pipelines = ref<Pipeline[]>([])
   /** 账号清单：账号那个**多选框**要用（「全部账号（N 个）」里的 N 也来自它 ✓）。 */
   const accounts = ref<AccountSummary[]>([])
   /** 推送规则清单：「推送规则」那一格的多选要用（用户口径 2026-10-08 的「行为选规则」✓）。 */
@@ -156,6 +187,13 @@ export const SchedulesPage = () => {
   const editingId = ref<string | null>(null)
   const fName = ref('')
   const fTask = ref('')
+  /**
+   * 选到「编排」时要跑的是**哪一条**编排（`Schedule.body.pipelineId` ✓）。
+   *
+   * ⚠ 它**不是** `fBody` 的一部分：`fBody` 是"别的任务的参数，原样带回" ✓，
+   * 而这一格是本页真正会编辑的东西 ⇒ 保存时按 `fTask` 分岔拼 `body` ✓（见 `save()`）。
+   */
+  const fPipelineId = ref('')
   const fAccounts = ref('')
   /**
    * 账号那一栏在界面上的形态（用户口径 2026-10-02：「这里账号和任务应该用新的多选框」）。
@@ -216,17 +254,20 @@ export const SchedulesPage = () => {
       // 任务清单用于下拉框：**不硬编码任务名** —— 任务由后端注册表提供
       // 账号清单用于多选框（只取**已启用**的：`listAccounts()` 默认就不含停用的 ✓）
       // 推送规则清单用于「推送规则」那一格（不硬编码规则名 ✓）
-      const [schedules, caps, accts, pushRules, pushEvents] = await Promise.all([
+      // 编排清单：任务下拉里的「编排」选中后要挑是哪一条（同样不硬编码 ✓）
+      const [schedules, caps, accts, pushRules, pushEvents, pipes] = await Promise.all([
         listSchedules(),
         listCapabilities(),
         listAccounts(),
         listPushRules(),
         listPushEvents(),
+        listPipelines(),
       ])
       items.value = schedules
       tasks.value = caps.tasks.filter((t) => !t.hidden)
       accounts.value = accts
       rules.value = pushRules
+      pipelines.value = pipes
       // ⚠ 只留**运行类**：面板行为（登录/性能）没有定时可绑 ⇒ 摆进这张表单只会误导 ✗
       runEvents.value = pushEvents.filter((e) => e.kind === 'run')
       state.value = 'ready'
@@ -245,6 +286,32 @@ export const SchedulesPage = () => {
     }
   }
 
+  // ── 编排 ──────────────────────────────────────────────────────────────
+
+  /** 编排的名字。查不到（别人删了 / 不是自己的）就**退回 id** —— 显示成空是骗人 ✗。 */
+  const pipelineName = (id: string) => pipelines.value.find((p) => p.id === id)?.name ?? id
+
+  /**
+   * 「执行的任务」下拉的选项。
+   *
+   * ⚠ **编排得手工补上**：它不在 `/api/capabilities` 里（见 `pipelines` 那段说明 ✓），
+   * 所以以前这个下拉里只有任务 ⇒ 定时页建不出"跑编排"的定时 ✗。
+   * 标签形状与任务那几条**保持一致**（`标题（名字）` ✓），不新造一套 ✓。
+   */
+  const taskOptions = () => [
+    ...tasks.value.map((t) => ({ value: t.name, label: `${t.title}（${t.name}）` })),
+    { value: PIPELINE_TASK, label: '编排（pipeline）' },
+  ]
+
+  /**
+   * 列表里那一格显示什么：跑编排的定时要显示**是哪一条**，只写"编排"等于没说 ✓。
+   *
+   * ⚠ 用冒号而不是括号：编排的名字**自己就常带括号**（默认那条叫「每日一键（默认）」✓）
+   * ⇒ 套起来会变成「编排（每日一键（默认））」这种双层括号 ✗。
+   */
+  const taskLabel = (s: Schedule) =>
+    s.task === PIPELINE_TASK ? `编排：${pipelineName(pipelineIdOf(s))}` : s.task
+
   // ── 表单开合 ──────────────────────────────────────────────────────────
 
   /**
@@ -261,6 +328,9 @@ export const SchedulesPage = () => {
    *
    * 现在：新建是 `{}` ✓；编辑时**原样带回去** ✓（后端也做了同一件事：没给就沿用旧值 ✓，
    * 两边都堵上 —— 页面之外还有别的调用方 ✓）。
+   *
+   * ⚠ **唯一例外是"跑编排"**：那时 `body` 由 `fPipelineId` 现拼（`{ pipelineId }` ✓，
+   * 见 `save()`）—— 编排那一格是**本页真的会改**的东西，不是"别的任务的参数"✓。
    */
   const fBody = ref<unknown>({})
 
@@ -269,6 +339,8 @@ export const SchedulesPage = () => {
     fBody.value = {}
     // 默认选第一个任务，省掉一次点击；没有任务时留空由校验拦
     fTask.value = tasks.value[0]?.name ?? ''
+    // 编排那一格同理：默认选第一条（用户真要跑编排时，多半就是最上面那条 ✓）
+    fPipelineId.value = pipelines.value[0]?.id ?? ''
     fAccounts.value = ''
     fExpr.value = '0 8 * * *'
     fTimezone.value = DEFAULT_TZ
@@ -286,6 +358,9 @@ export const SchedulesPage = () => {
     fBody.value = s.body ?? {}
     fName.value = s.name
     fTask.value = s.task
+    // ⚠ **必须回填**：跑编排的定时如果这一格留空，用户一保存就把绑定丢了 ✗
+    //（后端会回「body 里没有 pipelineId」，而那是**保存之后**才知道的）
+    fPipelineId.value = pipelineIdOf(s)
     fAccounts.value = s.accounts.join(', ')
     fExpr.value = s.expr
     fTimezone.value = s.timezone
@@ -318,6 +393,12 @@ export const SchedulesPage = () => {
       fail('请选择要执行的任务')
       return
     }
+    // 选了编排却没挑是哪一条 ⇒ 后端会回「body 里没有 pipelineId」（400 ✓）。
+    // 前端先挡一道：这条**本地就能判**（不用等一个来回），而且错的是这一格 ✓。
+    if (fTask.value === PIPELINE_TASK && !fPipelineId.value) {
+      fail('请选择要执行的编排')
+      return
+    }
     const exprErr = exprFieldError(fExpr.value)
     if (exprErr) {
       fail(exprErr)
@@ -334,8 +415,13 @@ export const SchedulesPage = () => {
         .filter(Boolean),
       expr: fExpr.value.trim(),
       timezone: fTimezone.value,
-      // ⚠ **必须带上**（见 `fBody` 那段说明 ✓）：不带就等于把参数清空/让校验拒掉 ✗
-      body: fBody.value,
+      /**
+       * ⚠ **跑编排时 `body` 就是 `{ pipelineId }`**（后端 `upsert` 里那句校验的判据 ✓）——
+       * 这里**不能**把"原样带回"的 `fBody` 发出去：那是**上一个任务**的参数，后端会回
+       * 「这条定时要跑编排，但 body 里没有 pipelineId」✗。
+       * 反过来，别的任务照旧原样带回（见 `fBody` 那段说明 ✓），一个字都不动 ✓。
+       */
+      body: fTask.value === PIPELINE_TASK ? { pipelineId: fPipelineId.value } : fBody.value,
       enabled: fEnabled.value,
       // ⚠ 这两格也要**原样带回** ✓：空数组 = 不推 / 跑完就推（后端同义 ✓）
       pushRules: fPushRules.value,
@@ -480,7 +566,7 @@ export const SchedulesPage = () => {
         })()}
       </div>
       <div class="text-xs opacity-70">
-        任务 <code class="break-all">{s.task === PIPELINE_TASK ? '编排' : s.task}</code> · 表达式 <code>{s.expr}</code> · {s.timezone}
+        任务 <code class="break-all">{taskLabel(s)}</code> · 表达式 <code>{s.expr}</code> · {s.timezone}
       </div>
       <div class="text-xs opacity-70">
         账号：{s.accounts.length === 0 ? '全部已启用账号' : s.accounts.map(accountName).join('、')}
@@ -551,7 +637,9 @@ export const SchedulesPage = () => {
             title="还没有定时任务。"
             hint="点右上角「新建定时」创建一条，或先挑一个常用表达式：每天 08:00 自动签到。"
             action={
-              tasks.value.length > 0 ? (
+              // ⚠ 编排也算一个可定的目标（用户口径 2026-10-11）⇒ 一条任务都没有、
+              // 但有编排时，这个按钮**照样要给** —— 否则空页面上没有任何入口 ✗
+              tasks.value.length > 0 || pipelines.value.length > 0 ? (
                 <button type="button" class="btn btn-primary" onClick={openCreate}>
                   新建定时
                 </button>
@@ -611,7 +699,7 @@ export const SchedulesPage = () => {
                         ) : null}
                       </td>
                       <td class="text-xs">
-                        <code>{s.task === PIPELINE_TASK ? '编排' : s.task}</code>
+                        <code>{taskLabel(s)}</code>
                         <div class="opacity-60">
                           {s.accounts.length === 0 ? '全部账号' : `${s.accounts.length} 个账号`}
                         </div>
@@ -677,12 +765,46 @@ export const SchedulesPage = () => {
           ariaLabel="执行的任务"
           placeholder="请选择任务"
           value={fTask.value}
-          options={tasks.value.map((t) => ({ value: t.name, label: `${t.title}（${t.name}）` }))}
+          options={taskOptions()}
           onChange={(v) => {
             fTask.value = v
           }}
         />
       </fieldset>
+
+      {/*
+        ⭐ 「哪一条编排」——**只在选到编排时出现** ✓。
+
+        用户口径（2026-10-11）：「在定时界面找不到编排任务，虽然可以通过编排界面定时」
+        ⇒ 定时页的目标里要能选到编排 ✓，而且选了之后要能挑**是哪一条**（列出用户自己的
+        编排、显示名字 ✓）。控件沿用本页既有那套 `Select` ✓（与上面「执行的任务」
+        同一个形状），不新造一套 ✗。
+
+        ⚠ 条件分支只认 JSX / `null`（lite 的硬约束 ✓）⇒ 这里写成三元 + `null` ✓。
+      */}
+      {fTask.value === PIPELINE_TASK ? (
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">要跑的编排</legend>
+          <Select
+            id="sched-pipeline"
+            class="w-full"
+            ariaLabel="要跑的编排"
+            filterable
+            placeholder="请选择编排"
+            emptyText="还没有编排"
+            value={fPipelineId.value}
+            options={pipelines.value.map((p) => ({ value: p.id, label: p.name }))}
+            onChange={(v) => {
+              fPipelineId.value = v
+            }}
+          />
+          <p class="text-xs leading-5 opacity-60">
+            {pipelines.value.length === 0
+              ? '还没有编排 —— 先到「编排」页把几个任务串成一条链，再回来给它定时。'
+              : '到点把这条链整条跑一遍（步骤由编排决定，账号用上面选的那份）。'}
+          </p>
+        </fieldset>
+      ) : null}
 
       <fieldset class="fieldset">
         <legend class="fieldset-legend">账号</legend>

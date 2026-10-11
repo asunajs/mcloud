@@ -4,6 +4,9 @@
 //! 供 `mcloud` 那个唯一二进制共用（2026-10-03 起 CLI 与服务合并成一个 bin）。
 
 pub mod auth_refresh;
+/// 「凭据自动刷新定时」的组装层（预设钟点 → cron → upsert 那条定时 + 调度器钩子 ✓）。
+/// ⚠ 判据与上游调用**不在这里**（那是 `auth_refresh` 既有正确逻辑 ✓）。
+pub mod auth_refresh_auto;
 pub mod builder;
 pub mod hub;
 pub mod login;
@@ -22,6 +25,10 @@ pub mod sink;
 pub mod smid;
 
 pub use auth_refresh::{decide, AuthRefreshService, RefreshDecision, RefreshOutcome};
+pub use auth_refresh_auto::{
+    auth_refresh_hook, read_auth_refresh_state, reschedule_auth_refresh,
+    seed_auth_refresh_schedule, AuthRefreshPatch, AuthRefreshState,
+};
 pub use builder::{App, AppBuilder};
 pub use hub::{Delivery, EventHub, SubscribeError};
 pub use live_auto::{read_auto_state, reschedule_live_auto, AutoLivePatch, AutoLiveState};
@@ -189,6 +196,20 @@ impl AppHandle {
             owner,
         )
         .await?;
+        // ⭐ 第四条：**「凭据自动刷新定时」也开箱就有**（用户口径 2026-10-11
+        // 「自动设置定时，明天检查是否到达预设刷新时间，到了就刷」✓）。
+        //
+        // ⚠ 与上面三条**同一个幂等口径**：已经有就一个字节都不动 ✓ ——
+        // 尤其**不覆盖用户的 `managed_wanted: Some(false)`**（他明确关过 ✓），
+        // 也**不碰**恰好占着这个 id 的用户手建定时 ✓（判据在
+        // `auth_refresh_auto::seed_auth_refresh_schedule` 那一处 ✓）。
+        //
+        // ⚠ 与「直播自动定时」**不用后台 spawn**：那一条种完要去**上游现取**
+        // 「下一场」（每账号最多 4 枪 ✓），而这一条的触发时刻**就是一个设置值**
+        //（`auth_refresh_at` ✓）⇒ 这里只写一行 `schedules.json` ✓，
+        // 没有任何网络动作 ⇒ 当场 `await` 得起、也**必须**当场做完
+        //（`seed_defaults_for` 的调用方紧接着就要读那张表 ✓）。
+        crate::auth_refresh_auto::seed_auth_refresh_schedule(&self.store, owner).await?;
         Ok(())
     }
 
@@ -317,12 +338,17 @@ mod tests {
             "管理员那份不该混进别人的"
         );
 
-        // 定时：每人**两条** —— 默认编排那条（`daily-<id>`）+ 「直播自动定时」
-        //（`auto-live-<id>` ✓，2026-10-08 起"开箱就有" ✓）。两条都各归各的 ✓。
+        // 定时：每人**三条** —— 默认编排那条（`daily-<id>`）+ 「直播自动定时」
+        //（`auto-live-<id>` ✓，2026-10-08 起"开箱就有" ✓）+ 「凭据自动刷新」
+        //（`auto-auth-refresh-<id>` ✓，2026-10-11 起"开箱就有" ✓）。三条都各归各的 ✓。
         let ss_admin = app.handle.store.schedules_for(&admin).await.unwrap();
         let ss_other = app.handle.store.schedules_for(&other).await.unwrap();
-        assert_eq!(ss_admin.len(), 2, "默认编排 + 直播自动定时：{ss_admin:?}");
-        assert_eq!(ss_other.len(), 2, "{ss_other:?}");
+        assert_eq!(
+            ss_admin.len(),
+            3,
+            "默认编排 + 直播自动定时 + 凭据自动刷新：{ss_admin:?}"
+        );
+        assert_eq!(ss_other.len(), 3, "{ss_other:?}");
         assert!(
             ss_admin.iter().all(|s| s.owner.as_ref() == Some(&admin)),
             "别人的定时不该混进来"
@@ -360,10 +386,36 @@ mod tests {
         );
         assert_eq!(auto.task, mcloud_core::live_auto::LIVE_ROOM_TASK);
 
-        // 幂等：再种一次不报错、也不多出条目（每人仍是各两条 ✓）
+        // ⭐ 那条「凭据自动刷新」也在，而且是**开箱就可跑**的 ✓
+        //（与「直播自动定时」**刻意不同**：这一条的时刻只依赖一个设置值
+        //  `AppSettings::auth_refresh_at` ⇒ 种下去就是 `enabled=true` ✓）。
+        let refresh = ss_admin
+            .iter()
+            .find(|s| s.is_managed_by(mcloud_core::auth_refresh::MANAGED_BY_AUTH_REFRESH))
+            .expect("「凭据自动刷新」必须开箱就有");
+        assert_eq!(
+            refresh.id,
+            mcloud_core::auth_refresh::auth_refresh_schedule_id(&admin)
+        );
+        assert!(refresh.enabled, "预设钟点当下算得出来 ⇒ 直接开 ✓");
+        assert_eq!(
+            refresh.managed_wanted,
+            Some(true),
+            "「自动设置定时」= 意愿是「要」"
+        );
+        assert_eq!(refresh.task, mcloud_core::AUTH_REFRESH_TASK);
+        assert_eq!(
+            refresh.expr,
+            mcloud_core::auth_refresh::daily_expr(
+                mcloud_core::auth_refresh::DEFAULT_AUTH_REFRESH_AT
+            )
+            .expect("默认钟点应能写成 cron")
+        );
+
+        // 幂等：再种一次不报错、也不多出条目（每人仍是各三条 ✓）
         app.handle.seed_defaults().await.unwrap();
         assert_eq!(app.handle.store.pipelines().await.unwrap().len(), 2);
-        assert_eq!(app.handle.store.schedules().await.unwrap().len(), 4);
+        assert_eq!(app.handle.store.schedules().await.unwrap().len(), 6);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

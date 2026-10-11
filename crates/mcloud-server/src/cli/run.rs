@@ -136,15 +136,20 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
             let rest = &args[1..];
             match rest.first().map(String::as_str) {
                 Some("refresh") => cli_auth::refresh(&app, &rest[1..]).await?,
+                // 「凭据自动刷新定时」的开关与预设时间（用户口径 2026-10-11 ✓）。
+                // ⚠ 与 `live-room auto-schedule` 同一条形状：**不带选项 = 只读** ✓。
+                Some("auto-schedule") => cli_auth::auto_schedule(&app, &rest[1..]).await?,
                 Some(other) => {
                     eprintln!("未知 auth 子命令：{other}");
                     eprintln!("可用：auth refresh <--account <id> | --all>");
+                    eprintln!("      auth auto-schedule [on|off|at HH:MM]");
                     std::process::exit(2);
                 }
                 None => {
                     eprintln!(
                         "用法：auth refresh <--account <id> | --all> [--lead-days 7] [--force]"
                     );
+                    eprintln!("      auth auto-schedule [on|off|at HH:MM]");
                     std::process::exit(2);
                 }
             }
@@ -392,6 +397,7 @@ fn print_usage() {
         "                                 不需要先知道 id；默认编排与它的定时由服务启动时种下 ✓）"
     );
     eprintln!("  auth refresh <--account|--all>  刷新凭据");
+    eprintln!("  auth auto-schedule [on|off|at HH:MM]  凭据自动刷新的开关与预设时间");
     eprintln!("  login <方式>                    登录账号（qr / sms / app / password / device）");
     eprintln!("  user list|add|passwd            用户管理（加测试账号用；见 `mcloud user`）");
     eprintln!();

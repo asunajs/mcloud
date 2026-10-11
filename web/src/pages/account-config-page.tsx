@@ -30,6 +30,21 @@
  * （2026-10-02 用户口径「这些设置先取消显示，设置后面单独弄」）—— 本页就是"单独弄"的家 ✓。
  * 弹窗那边照旧只显示"改昵称/设备/凭据"那几格，别顺手把它打开 ✗。
  *
+ * # 「凭据自动刷新」那张卡（2026-10-11 用户口径「刷新auth」✓）
+ *
+ * ⚠ 它是**实例级**设置（`AppSettings::auth_refresh_at` ✓，落 `data/settings.json` ✓），
+ * **不是**账号级 —— 但它紧挨着 `refreshTokenDays`（「剩余多少天刷新token」✓）显示，
+ * 因为两格回答的是**同一件事的两半**：
+ *
+ * | 格 | 是什么 | 归谁 |
+ * |---|---|---|
+ * | 「剩余多少天刷新token」（账号级 ✓） | **判据**：剩不到这么多天**才**刷 ✓ | 每个账号一份 ✓ |
+ * | 「预设刷新时间」（本卡 ✓） | **钟点**：每天几点**去检查一次** ✓ | 实例一份 ✓ |
+ *
+ * ⇒ 到点之后**先走既有判据**：不需要刷就跳过，并把原因写进日志 ✓
+ *（见 `mcloud_core::auth_refresh` 模块头 ✓）。
+ * ⚠ 别把两者合并成一句"到点就刷" ✗ —— 那会让"还剩 300 天"的账号每天真轮换一次凭据 ✗。
+ *
  * # 编辑器是共享模块
  *
  * - `ui/account-fields.tsx`：账号级两格（备份等待 / 凭据阈值）+ 功能开关（AI 头像上限）
@@ -50,10 +65,13 @@ import { onMounted, onUnmounted, ref } from '@asunajs/lite'
 import { setPageRefresh } from '../ui/page-refresh'
 import {
   getAccountSettings,
+  getAuthRefreshSchedule,
   listAccounts,
   putAccountSettings,
+  saveAuthRefreshSchedule,
   type AccountSettings,
   type AccountSummary,
+  type AuthRefreshSchedule,
 } from '../api'
 import { createAccountFields, type AccountFieldsSnapshot } from '../ui/account-fields'
 import { EmptyState } from '../ui/empty-state'
@@ -106,6 +124,17 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
    */
   const saveError = ref('')
   const saving = ref(false)
+
+  // ── 凭据自动刷新（**实例级**那张卡 ✓，见文件头）────────────────────────
+  //
+  // ⚠ `schedule` 为 `null` = 后端没有这条接口（老后端）⇒ **整张卡不画** ✓
+  //（画一张只能报错的卡，用户拿它没办法 ✓ —— 与直播那张卡的处置一致 ✓）。
+  const schedule = ref<AuthRefreshSchedule | null>(null)
+  /** 输入框里的草稿（`HH:MM` ✓）。它**不是**权威值 —— 保存后拿后端回的那份回填 ✓。 */
+  const scheduleAt = ref('')
+  const scheduleEnabled = ref(false)
+  const scheduleSaving = ref(false)
+  const scheduleError = ref('')
   /** 这个账号**完整**的一份设置（GET 回来的）。 */
   const acctSettings = ref<AccountSettings | null>(null)
   /** 载入（或保存）之后的那份快照文本：未保存修改就是它与当前快照不等。 */
@@ -139,6 +168,26 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
     } catch (e) {
       errorMessage.value = e instanceof Error ? e.message : '读不到账号列表'
       state.value = 'error'
+    }
+  }
+
+  /**
+   * 读「凭据自动刷新」那张卡。
+   *
+   * ⚠ 读失败**不把整页打成 error**：账号列表与账号级设置与它无关 ✓ ——
+   * 一个读不到的卡不该让"改昵称阈值"这件事也做不成 ✓（只把错误留在卡里 ✓）。
+   */
+  const loadSchedule = async () => {
+    try {
+      const st = await getAuthRefreshSchedule()
+      schedule.value = st
+      scheduleAt.value = st.at
+      scheduleEnabled.value = st.enabled
+      scheduleError.value = ''
+    } catch (e) {
+      // 接口不存在（老后端 / 404）⇒ 整张卡不画 ✓；其余错误留在卡里 ✓
+      schedule.value = null
+      scheduleError.value = e instanceof Error ? e.message : '读不到凭据自动刷新的设置'
     }
   }
 
@@ -272,12 +321,14 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
 
   onMounted(() => {
     void load()
+    void loadSchedule()
     // ⚠ 推到微任务：子视图的 onMounted 先于父页面跑（见上面那段注释）
     queueMicrotask(() => {
       if (!alive) return
       prevRefresh = setPageRefresh({
         run: () => {
           void load()
+          void loadSchedule()
           if (pickedAccount.value) void loadSettings(pickedAccount.value)
         },
       })
@@ -295,6 +346,44 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
     mq?.removeEventListener('change', onWideChange)
     mq = undefined
   })
+
+  // ── 凭据自动刷新：存那两格（开关 / 预设时间 ✓）────────────────────────
+
+  /**
+   * 存一次（**只发改动的那一格** ✓）。
+   *
+   * ⚠ 后端是**双 `Option`** 语义（缺席 = 保持原样 ✓）⇒ 只改时间那一次**不带**
+   * `enabled` —— 带上 `enabled: true` 会把用户关掉的开关静默打开 ✗，
+   * 而那正是用户口径里点名不许的事 ✓。
+   *
+   * ⚠ 返回的是**后端重算后的新状态** ⇒ 必须拿它回填（自己猜的那份与后端刚写下去的
+   * 那份一旦不一致，用户看到的就是"我点了没反应" ✗）。
+   */
+  const saveSchedule = async (patch: { enabled?: boolean; at?: string }) => {
+    scheduleSaving.value = true
+    scheduleError.value = ''
+    try {
+      const st = await saveAuthRefreshSchedule(patch)
+      schedule.value = st
+      scheduleAt.value = st.at
+      scheduleEnabled.value = st.enabled
+      pushToast('success', st.enabled ? `已保存：每天 ${st.at} 检查一次` : '已保存：自动刷新已关闭')
+    } catch (e) {
+      // 失败：把草稿**退回**到服务端那一份（否则输入框里留着那个没存进去的值 ✓）
+      const msg = e instanceof Error ? e.message : '保存失败'
+      scheduleError.value = msg
+      pushToast('error', msg)
+      if (schedule.value) {
+        scheduleAt.value = schedule.value.at
+        scheduleEnabled.value = schedule.value.enabled
+      }
+    } finally {
+      scheduleSaving.value = false
+    }
+  }
+
+  /** 预设时间那一格的本地形状检查（**范围仍以后端为准** —— 前端不实现第二遍 ✓）。 */
+  const scheduleAtLooksValid = (): boolean => /^\d{1,2}:\d{2}$/.test(scheduleAt.value.trim())
 
   // ── 渲染 ──────────────────────────────────────────────────────────────
 
@@ -389,6 +478,94 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
     </div>
   )
 
+  /**
+   * 「凭据自动刷新」那张卡（**实例级** ✓，见文件头）。
+   *
+   * ⚠ 它是**系统维护的那条定时**（`auto-auth-refresh-<owner>` ✓）在界面上的家：
+   * 开关与时间都落在那条定时上 ✓（`GET/PUT /api/auth/refresh-schedule` ✓），
+   * 而它在「定时」页里**也看得到**（带着 `managedBy: "auth-refresh"` ✓）。
+   */
+  const scheduleCard = () => {
+    const st = schedule.value
+    // 后端没有这条接口（老后端 / 读失败）⇒ 整张卡不画（见 `schedule` 那段说明 ✓）
+    if (st == null) return null
+    return (
+      <div class="card bg-base-100 shadow-sm">
+        <div class="card-body gap-3">
+          <h2 class="card-title text-base">凭据自动刷新</h2>
+          <p class="text-xs leading-5 opacity-60">
+            每天到下面这个钟点，系统会<b>检查一次</b>所有云盘账号的凭据 ——
+            <b>该刷才刷</b>：还没到上面那个「剩余多少天刷新token」的账号会跳过，
+            一枪都不打上游。
+          </p>
+
+          <label class="flex min-h-11 cursor-pointer items-center gap-2">
+            <input
+              id="auth-refresh-enabled"
+              type="checkbox"
+              class="toggle toggle-primary"
+              aria-label="凭据自动刷新开关"
+              checked={scheduleEnabled.value}
+              disabled={scheduleSaving.value}
+              onChange={(e) => {
+                const on = (e.target as HTMLInputElement).checked
+                // 先在本地翻（手感即时 ✓），存失败时由 `saveSchedule` 退回 ✓
+                scheduleEnabled.value = on
+                void saveSchedule({ enabled: on })
+              }}
+            />
+            <span class="text-sm">到点自动检查并刷新</span>
+          </label>
+
+          <fieldset class="fieldset">
+            <legend class="fieldset-legend">预设刷新时间（东八区）</legend>
+            <div class="flex flex-wrap items-center gap-2">
+              <input
+                id="auth-refresh-at"
+                type="time"
+                class="input input-sm w-32"
+                aria-label="预设刷新时间"
+                value={scheduleAt.value}
+                disabled={scheduleSaving.value}
+                onInput={(e) => (scheduleAt.value = (e.target as HTMLInputElement).value)}
+              />
+              <button
+                type="button"
+                class="btn btn-sm btn-primary min-h-11 md:min-h-0"
+                disabled={scheduleSaving.value || !scheduleAtLooksValid() || scheduleAt.value === st.at}
+                onClick={() => void saveSchedule({ at: scheduleAt.value })}
+              >
+                {scheduleSaving.value ? '保存中…' : '保存时间'}
+              </button>
+              {scheduleAt.value !== st.at && scheduleAtLooksValid() ? (
+                <span class="badge badge-warning badge-sm">还没保存</span>
+              ) : null}
+            </div>
+            {/* ⚠ 失败那一句就近 inline（保存键就在旁边 ✓）+ 上面那句 toast ✓ */}
+            {scheduleError.value ? (
+              <p class="mt-2 text-xs break-words text-error">{scheduleError.value}</p>
+            ) : null}
+          </fieldset>
+
+          <p class="text-xs leading-5 opacity-60">
+            下一次触发：
+            <b>{st.nextAt ?? '算不出来'}</b>
+            {st.enabled ? null : '（已关闭，到点不会跑）'}
+          </p>
+          {st.note ? (
+            <div class="alert alert-soft alert-warning text-sm" role="alert">
+              <span class="break-words">{st.note}</span>
+            </div>
+          ) : null}
+          <p class="text-xs leading-5 opacity-60">
+            这条定时在「定时」页里也看得到（标着「系统维护」），
+            命令行上改它是 <code>mcloud auth auto-schedule at HH:MM</code>。
+          </p>
+        </div>
+      </div>
+    )
+  }
+
   const detail = () => (
     <div class="card min-w-0 bg-base-100 shadow-sm">
       <div class="card-body gap-4">
@@ -476,9 +653,16 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
       <div class="md:sticky md:top-20 md:max-h-[calc(100dvh-7rem)] md:self-start md:overflow-y-auto md:pr-1">
         {rail()}
       </div>
-      {/* ⚠ `#acct-detail` 这个 id 是给门禁用的锚（左右两边都印着账号名 ⇒ 只能靠容器区分） */}
-      <div id="acct-detail" class="min-w-0">
-        {detail()}
+      <div class="flex min-w-0 flex-col gap-4">
+        {/* ⚠ `#acct-detail` 这个 id 是给门禁用的锚（左右两边都印着账号名 ⇒ 只能靠容器区分） */}
+        <div id="acct-detail" class="min-w-0">
+          {detail()}
+        </div>
+        {/*
+          「凭据自动刷新」是**实例级**的，放在**按账号那份卡下面**、
+          而不是塞进账号卡里 —— 混进去会让人以为"换个账号就是另一套时间" ✗
+        */}
+        {scheduleCard()}
       </div>
     </div>
   )
@@ -494,8 +678,11 @@ export const AccountConfigPage = (props: AccountConfigPageProps) => {
         >
           ← 全部账号
         </button>
-        <div id="acct-detail" class="min-w-0">
-          {detail()}
+        <div class="flex flex-col gap-4">
+          <div id="acct-detail" class="min-w-0">
+            {detail()}
+          </div>
+          {scheduleCard()}
         </div>
       </div>
     ) : (
