@@ -446,10 +446,12 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
           # RC / beta 这类**带连字符**的 tag 自动标成 pre-release，正式版（`v3.0.0`）不标。
           # 写死 true/false 都不行：那会让"以后那个正式版"或"以后的 RC"其中一边标错。
           prerelease: ${{ contains(github.ref_name, '-') }}
+          body_path: docs/releases/${{ github.ref_name }}.md
+          # ⚠ 发布说明是**手写**的（`docs/releases/v<版本>.md` ✓）——
+          #   不自动从提交记录生成：那是给开发者看的，用户看不懂 ✗（2026-10-11 用户口径）。
           body: |
             五个目标的产物，**每个平台一种格式**，包内**只有一个可执行文件 `mcloud`**
             —— CLI 与服务已合并进它（不带参数 = 起服务，带子命令 = CLI）：
