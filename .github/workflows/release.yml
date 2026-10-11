@@ -211,7 +211,6 @@ jobs:
             target: x86_64-pc-windows-msvc
             name: Windows x86_64
             cross: false
-          - os: macos-14
             name: macOS arm64
             cross: false
     steps:
