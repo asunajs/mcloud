@@ -127,7 +127,8 @@ open http://127.0.0.1:3000       # 首次进「创建管理员」向导
 docker compose logs -f mcloud    # 日志
 ```
 
-不想自己编就拉 CI 出的那份（**一个标签含 amd64 + arm64**，`docker pull` 按机器自动挑）：
+不想自己编就拉 CI 出的那份（**一个标签含 amd64 + arm64**，`docker pull` 按机器自动挑；
+镜像要手动触发 `docker.yml` 才构建，打 tag 不会自动出 —— 见「发布」一节）：
 
 ```bash
 docker pull ghcr.io/asunajs/mcloud:latest
@@ -194,14 +195,23 @@ scripts/install-git-hooks.sh        # 装钩子：pre-commit 跑提交档、pre-
 冒烟是**真起服务** + 轮询 `/api/health`，不是跑 `--help`。
 `workflow_dispatch` 只出 artifact、不发 Release（方便先验一遍）。
 
-打 `v*` tag 同时会出 **Docker 镜像**（[`.github/workflows/docker.yml`](.github/workflows/docker.yml)
-⇒ `ghcr.io/asunajs/mcloud`，标签 `3.0.0-rc.4` / `sha-<短提交>`，正式版另打 `latest`）：
+打 `v*` tag **只出上面那四个二进制产物**；Docker 镜像**不跟着 tag 出**，要**手动跑**
+（[`.github/workflows/docker.yml`](.github/workflows/docker.yml) ⇒ `ghcr.io/asunajs/mcloud`）：
+
+```bash
+gh workflow run docker.yml --ref <tag或分支>
+```
+
+在 **tag** 上跑：构建 + 推 ghcr + 合并清单 + 拉回来再冒烟（标签 `3.0.0-rc.4` / `sha-<短提交>`，
+正式版另打 `latest`）；在**分支**上跑：只构建 + 起容器冒烟，不推任何东西。
+镜像不是发版的必需品，改成手动触发（提交 `b1023f7`）是因为它一次要起**两台** runner
+（`amd64` + `arm64`，arm runner 还更贵），是这几条 workflow 里最吃 Actions 额度的那个。
 **一个标签 = 一个多架构清单列表（`linux/amd64` + `linux/arm64`）**，`docker pull` 时按机器自动挑。
 做法是**每个架构各跑一台原生 runner**（`ubuntu-latest` / `ubuntu-24.04-arm`）各编一份、
 各自冒烟（并断言 `Architecture` 就是它该编的那个），最后合并清单、再**拉回来冒烟一遍** ——
 **不用 QEMU**（本镜像 `lto="fat"` + vendored OpenSSL 在模拟下慢到不可用）。
-手动触发（`gh workflow run docker.yml`）**只构建 + 起容器冒烟、不推送**（`-f arm64=false` 可只编 amd64）
-—— 开发机上没有 Docker，所以那是镜像**唯一**的自动验证入口（见 [`docs/docker.md`](docs/docker.md) §10 / §13）。
+`-f arm64=false` 可只编 amd64。开发机上没有 Docker，所以这条 workflow 是镜像**唯一**的自动验证入口
+（见 [`docs/docker.md`](docs/docker.md) §10 / §13）。
 
 ## 数据与安全
 
