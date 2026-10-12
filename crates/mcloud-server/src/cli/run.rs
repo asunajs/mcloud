@@ -546,9 +546,14 @@ const USAGE: &str = r#"用法：mcloud [<命令> [参数]]
   auth auto-schedule [on|off|at HH:MM]  凭据自动刷新的开关与刷新时间
                                  （刷新时间**每用户一个** ✓；CLI **只作用于本机那个用户** ✓，
                                   选谁请在 WebUI 上改 —— 见 `mcloud auth auto-schedule help`）
-  config export [--out <路径>]    导出本机用户的配置（推送规则 / 面板绑定 / 兑换订阅 /
-                                  定时 / 编排 / 刷新钟点）；省略 --out 就打 stdout
-  config import <路径> [--with-instance]  把那份 JSON **覆盖式**应用到本机用户
+  config export [--out <路径>]    导出本机用户的配置 —— **含账号凭据与设备指纹**
+                                 （推送规则 / 面板绑定 / 兑换订阅 / 定时 / 编排 / 刷新钟点 /
+                                  账号 / 账号状态 / 账号设备指纹 / 本机设备指纹）；
+                                  省略 --out 就打 stdout。⚠ 这份文件等于你的登录态：
+                                  别乱发、别提交进版本库
+                                 （有界面的话，WebUI「设置 → 服务」里点「导出配置」同效）
+  config import <路径> [--with-instance]  把那份 JSON **覆盖式**应用到本机用户 ——
+                                 导入后**不用重新登录**就能跑任务
                                  （导入前自动备份成 `<名字>.bak-<时间戳>`，失败回滚；
                                   实例级设置默认不动，要一起改加 --with-instance；
                                   导入完要 `scripts/dev-reload.sh --no-build` 重启才生效）

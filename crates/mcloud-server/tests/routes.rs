@@ -5989,3 +5989,219 @@ async fn the_scheduled_tick_refreshes_only_what_is_due() {
     //  那条路由测试覆盖不到，所以这里只钉"记了 ok"这一格 ✓）。
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ══════════════════════════════════════════════════════════════════════════
+// 导出配置（`GET /api/config/export`）—— WebUI 那一侧（2026-10-12）
+// ══════════════════════════════════════════════════════════════════════════
+//
+// 用户口径：「**导出功能最好也能在 webui 使用**」✓。
+//
+// 这一组钉三件事（都是"错了不会崩、只会静默出事"的那类）：
+//
+// ① **per-owner**：WebUI 导的是**当前登录用户自己**那份（`AGENTS.md` 的
+//    「CLI 与 WebUI 的视角分工」✓）—— 别人的规则 / 账号 / 凭据一条都不许进 ✓；
+// ② **未登录 401**：它落在登录闸后面，不是公开路由 ✓；
+// ③ 下载响应的两个头（`Content-Type` / `Content-Disposition` 的文件名要带
+//    用户名与时间戳 ✓），以及**敏感标记** `containsCredentials: true` ✓。
+
+/// 建一个**指定名字**的用户 + 一条会话（token 由调用方给）。
+///
+/// 与 [`seed_test_user_and_session`] 的区别只有一处：那条固定用 `test-user` +
+/// [`TEST_SESSION_TOKEN`]（业务用例不关心"我是谁"✓）；这一组要**两个不同的登录用户**
+/// 才能验归属隔离，所以得能指定 ✓。
+fn seed_named_user_and_session(
+    handle: &Arc<AppHandle>,
+    id: &str,
+    name: &str,
+    token: &str,
+    created_at_ms: i64,
+) -> mcloud_core::UserId {
+    use mcloud_core::{PasswordHash, Session, SessionKind, User, UserId, WEB_SESSION_TTL_MS};
+
+    let now = handle.clock.now_ms();
+    let user = User {
+        id: UserId::new(id),
+        name: name.into(),
+        // 同 `seed_test_user_and_session`：这里不真算 argon2（这条路径只用来建会话）
+        password_hash: PasswordHash("$argon2id$test-only".into()),
+        created_at_ms,
+    };
+    let session = Session {
+        token_hash: mcloud_crypto::hash_session_token(token),
+        user_id: user.id.clone(),
+        kind: SessionKind::Web,
+        created_at_ms: now,
+        expires_at_ms: now + WEB_SESSION_TTL_MS,
+    };
+    let uid = user.id.clone();
+    let store = Arc::clone(&handle.store);
+    futures::executor::block_on(async move {
+        store.save_user(&user).await.expect("建测试用户");
+        store.save_session(&session).await.expect("建测试会话");
+    });
+    uid
+}
+
+/// 造一个**属于某个 owner** 的账号（含凭据）。
+fn owned_account(id: &str, nickname: &str, token: &str, owner: &mcloud_core::UserId) -> Account {
+    let mut a = account(id);
+    a.nickname = Some(nickname.into());
+    a.auth.raw = format!("raw-{id}");
+    a.auth.token = token.into();
+    a.auth.expire = 1_790_000_000_000;
+    a.owner = Some(owner.clone());
+    a
+}
+
+#[tokio::test]
+async fn config_export_is_scoped_to_the_logged_in_user() {
+    use mcloud_core::push::PushRule;
+
+    let (handle, dir) = test_app("config-export-scope");
+    // 名字用 ASCII：下面要断言文件名里带用户名（中文会走 `filename*=UTF-8''` 那一份 ✓）
+    let a = seed_named_user_and_session(&handle, "user-a", "alice", "token-a", 100);
+    let b = seed_named_user_and_session(&handle, "user-b", "bob", "token-b", 200);
+
+    let store = Arc::clone(&handle.store);
+    futures::executor::block_on(async {
+        // A 两条规则 + 两个账号；B 一条规则 + 一个账号（"各有多条"✓）
+        for (id, name, owner) in [("ra1", "甲的规则一", &a), ("ra2", "甲的规则二", &a)] {
+            let mut r = PushRule::new_default(id, None);
+            r.name = name.into();
+            r.owner = Some(owner.clone());
+            store.save_push_rule(owner, &r).await.unwrap();
+        }
+        let mut rb = PushRule::new_default("rb1", None);
+        rb.name = "乙的规则".into();
+        rb.owner = Some(b.clone());
+        store.save_push_rule(&b, &rb).await.unwrap();
+
+        for (id, nick, tok) in [
+            ("13800000000", "甲的号一", "tok-a1"),
+            ("13900000001", "甲的号二", "tok-a2"),
+        ] {
+            store
+                .save_account(&owned_account(id, nick, tok, &a))
+                .await
+                .unwrap();
+        }
+        store
+            .save_account(&owned_account("13700000002", "乙的号", "tok-b1", &b))
+            .await
+            .unwrap();
+    });
+
+    let state = ServerState::new(Arc::clone(&handle));
+    let app = mcloud_server::app(state);
+
+    // ── ① 未登录 ⇒ **401**（它必须落在登录闸后面 ✓）──────────────────
+    let (status, _) = send(app.clone(), get("/api/config/export")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "没登录不能导任何人的配置");
+
+    // ── ② 以 A 的身份导 ──────────────────────────────────────────────
+    let (status, headers, body) = send_full(
+        app.clone(),
+        get_with_cookie("/api/config/export", "mcloud_session=token-a"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "登录了就该拿到文件：{body}");
+
+    // 响应头：`Content-Type` 是一份 JSON ✓
+    assert_eq!(
+        headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default(),
+        "application/json; charset=utf-8"
+    );
+    // 响应头：`Content-Disposition` 是下载，且文件名带**用户名与时间戳** ✓
+    let cd = headers
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(cd.starts_with("attachment;"), "{cd}");
+    let stamp = mcloud_core::beijing_format(&*handle.clock, "%Y%m%d-%H%M%S");
+    assert!(
+        cd.contains(&format!("mcloud-config-alice-{stamp}.json")),
+        "文件名要带用户名与时间戳（实得 {cd}）"
+    );
+    assert!(cd.contains("filename*=UTF-8''"), "中文名那一份也要给：{cd}");
+
+    // 内容：JSON + 敏感标记 + 只有 A 的东西
+    let v: serde_json::Value = serde_json::from_str(&body).expect("导出的应当是一份 JSON");
+    assert_eq!(
+        v.get("containsCredentials"),
+        Some(&serde_json::Value::Bool(true)),
+        "顶层要有明确的敏感标记"
+    );
+    assert_eq!(
+        v.get("owner").and_then(|o| o.get("name")),
+        Some(&serde_json::Value::String("alice".into())),
+        "文件里那份 `owner` 是当前登录用户"
+    );
+    let rule_ids: Vec<String> = v["push-rules"]
+        .as_array()
+        .expect("push-rules 是数组")
+        .iter()
+        .map(|r| r["id"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(rule_ids, vec!["ra1", "ra2"], "只有 A 的规则（且稳定排序）");
+    let acct_ids: Vec<String> = v["accounts"]
+        .as_array()
+        .expect("accounts 是数组")
+        .iter()
+        .map(|x| x["id"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(
+        acct_ids,
+        vec!["13800000000", "13900000001"],
+        "只有 A 的账号（含凭据）"
+    );
+    assert_eq!(
+        v["accounts"][0]["auth"]["token"],
+        serde_json::Value::String("tok-a1".into()),
+        "凭据确实在导出里"
+    );
+
+    // ⚠ B 的东西**一条都不在**（规则 / 账号 / 凭据三条线索各查一遍）
+    for needle in ["rb1", "乙的规则", "13700000002", "乙的号", "tok-b1"] {
+        assert!(
+            !body.contains(needle),
+            "B 的「{needle}」不该出现在 A 的导出里"
+        );
+    }
+
+    // ── ③ 反过来：B 导出来的也只有 B 的 ─────────────────────────────
+    let (status, headers, body_b) = send_full(
+        app,
+        get_with_cookie("/api/config/export", "mcloud_session=token-b"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let cd_b = headers
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(cd_b.contains("mcloud-config-bob-"), "{cd_b}");
+    let vb: serde_json::Value = serde_json::from_str(&body_b).expect("JSON");
+    assert_eq!(
+        vb["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["id"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec!["13700000002"],
+        "B 只看到自己那个账号"
+    );
+    for needle in ["ra1", "13800000000", "tok-a1"] {
+        assert!(
+            !body_b.contains(needle),
+            "A 的「{needle}」不该在 B 的导出里"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

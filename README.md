@@ -128,27 +128,45 @@ MCLOUD_ADDR=127.0.0.1:3000 MCLOUD_DATA_DIR=./data ./target/release/mcloud
    `http://127.0.0.1:3000` 照常用 WebUI（登录闸也是那一份）。
 2. **curl 打 API**：登录取到会话 cookie 之后直接打 `/api/push/rules`、`/api/schedules`
    这些路由（形状见 `crates/mcloud-server/src/routes/`）。
-3. **导出 / 导入**（最省事的一条）：在任意一台有界面的机器上配好，导出成一份 JSON，
-   拷过去导入 ——
+3. **导出 / 导入**（最省事的一条）：在任意一台配好的机器上导出成一份 JSON，拷过去导入 ——
+   **有界面就点一下**，没界面就敲命令（两条路导出的是**同一种文件**）。
 
 ```bash
-# 有界面的那台：导出（省略 --out 就打 stdout，可重定向到文件）
+# 有界面的那台：WebUI「设置 → 服务 → 服务操作」里点「导出配置」，
+# 浏览器会下载一份 mcloud-config-<用户名>-<时间戳>.json（导的是**当前登录用户自己**那份）。
+
+# 没界面（只有 SSH）的那台：命令行导出（省略 --out 就打 stdout，可重定向到文件）
 ./target/release/mcloud config export --out mcloud-config.json
 
-# 拷过去（scp / U 盘 / 粘贴都行），在无头机器上：覆盖式导入
+# 拷过去（scp / U 盘 / 粘贴都行），在目标机器上：覆盖式导入
 ./target/release/mcloud config import mcloud-config.json
 ./target/release/mcloud config import mcloud-config.json --with-instance   # 连实例级设置一起改
 
 scripts/dev-reload.sh --no-build     # 导入完必须重启才生效（JsonStore 启动时全量读进内存）
 ```
 
+⚠ **导入只在 CLI 里，界面上没有**：它是覆盖式操作（见下），一键覆盖风险高，
+所以界面只放导出。
+
+⚠⚠ **导出文件里含凭据** —— 它等于你的登录态，**别乱发、别提交进版本库**。
+文件顶层标着 `containsCredentials: true`，里面有：
+
+* **每个账号的凭据**（token / 到期时间 / 设备号 / 平台 / 用户域 —— `accounts` 那一类）；
+* **账号的设备指纹**与运行期状态（`account-smid` / `account-state`）、本机 PC 设备指纹（`pc-device`）——
+  凭据是**跟设备绑**的，不带这些，导到新机器上可能直接失效；
+* 推送渠道的 token 与 webhook 地址（那本来就是配置的一部分，不带就没法在新机器上发通知）。
+
+**好处就是搬到另一台机器之后不用重新登录**：导入完那些账号是可用状态，直接能跑任务。
+CLI 导的是**本机那一个用户**（管理员）那份，WebUI 导的是**当前登录用户自己**那份；
+两条命令都没有 `--user` / `--owner`（多用户的"选谁"是 WebUI 的事）。
+
 导入是**覆盖式**的：文件里有的那一类整类替换（本机多出来的那几条会被删掉），
 文件里**没有**的类别一个字节都不动；动手前会把要改的文件备份成 `<名字>.bak-<时间戳>`，
 中途失败自动回滚。导入的几类与存储里的文件名一一对应（`push-rules` / `push-panel` /
-`exchange-subscriptions` / `auth-refresh` / `pipelines` / `schedules` / `settings`）。
-注意：导出文件里**有推送渠道的 token**（那本来就是配置的一部分，不带就没法在新机器上发通知），
-别随手发给别人；**登录凭据不在里面**（账号要在新机器上重新登录）。CLI 只作用于本机那一个
-用户（管理员），两条命令都没有 `--user` / `--owner`。
+`exchange-subscriptions` / `auth-refresh` / `pipelines` / `schedules` / `settings` /
+`accounts` / `account-state` / `account-smid` / `pc-device`）。
+⚠ 例外：`account-state` / `account-smid` 是**按账号 id 合并**（那两张表装着本机所有账号
+的东西，整类替换会连别人的一起抹掉）。
 
 ### 4. Docker（Linux，**amd64 + arm64**）
 

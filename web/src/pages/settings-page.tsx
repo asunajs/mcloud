@@ -89,6 +89,7 @@ import { currentPath, navigate } from '../ui/router'
 import {
   changePassword,
   emptyPanelBindings,
+  exportConfig,
   getAbout,
   getPushPanel,
   getSecurity,
@@ -354,6 +355,15 @@ export const SettingsPage = () => {
   // 重启
   const restarting = ref(false)
   const restartWaited = ref(0)
+
+  /**
+   * 导出配置（2026-10-12 用户口径：「**导出功能最好也能在 webui 使用**」✓）。
+   *
+   * ⚠ 只放**导出**，不放导入：导入是**覆盖式**操作（文件里有的那一类整类替换，
+   * 连账号与凭据一起 ✓），一键覆盖风险高 ⇒ 界面只放导出，导入走
+   * `mcloud config import <文件>`（用户口径「导入不要做界面」✓）。
+   */
+  const exporting = ref(false)
 
   // ── 事件推送（**面板行为**：登录 / 性能那四类，2026-10-08 用户口径）────────
   //
@@ -1379,6 +1389,49 @@ export const SettingsPage = () => {
     await load()
   }
 
+  /**
+   * 把一段文本存成文件（浏览器那一侧唯一要做的事）。
+   *
+   * ⚠ 用 `<a download>` + 对象 URL，而不是 `window.location = url`：
+   * 后者会把**当前页面**导航走（拿到 JSON 就把界面顶掉了 ✗），
+   * 而 `download` 属性让浏览器只存文件、不动页面 ✓。
+   * ⚠ 对象 URL 用完要释放（它一直占着那份内容 ✓）—— 放到下一个宏任务里释放：
+   * 当场 `revoke` 在个别浏览器上会把刚发起的下载掐掉 ✓。
+   */
+  const saveTextFile = (filename: string, text: string): void => {
+    const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
+
+  /**
+   * 导出配置（`GET /api/config/export` ✓）。
+   *
+   * ⚠ 导的是**当前登录用户自己**那份（per-owner ✓，服务端按会话认人）；
+   * 文件名由服务端 `Content-Disposition` 给（带用户名与时间戳 ✓）。
+   *
+   * ⚠ 失败走 `showError`（弹窗）：它是**独立动作**（点了按钮、没有表单在场 ✓，
+   * 与「重启服务」「运行任务」同一条口径 ✓）；而"连不上后端"那句已经是中文，
+   * 由 `api.ts::request` 那一层统一翻好 ✓，这里**原样透出**（再翻一遍只会把线索弄丢 ✗）。
+   */
+  const doExport = async () => {
+    exporting.value = true
+    try {
+      const { filename, json } = await exportConfig()
+      saveTextFile(filename, json)
+      pushToast('success', `已导出配置：${filename}`)
+    } catch (e) {
+      showError('导出配置失败', e instanceof Error ? e.message : '导出失败')
+    } finally {
+      exporting.value = false
+    }
+  }
+
   const actionCard = () => (
     <div class="card bg-base-100 shadow-sm">
       <div class="card-body gap-3 md:flex-row md:items-center md:justify-between">
@@ -1388,6 +1441,17 @@ export const SettingsPage = () => {
             重启 = 让服务进程优雅退出，由 launchd / systemd 重新拉起。
             正在跑的任务会被中止；数据在退出前已经落盘。
           </p>
+          {/*
+            ⚠ 「导出配置」那三句要说全（用户口径 2026-10-12 ✓）：
+            ① 这文件**含凭据**（等于登录态）⇒ 别乱发、别进版本库 ✓；
+            ② 它是给**另一台机器**用的 ⇒ 目标机器上怎么用（`mcloud config import <文件>`）✓；
+            ③ **导入在 CLI 里**（界面只放导出 ✓）—— 不说的话用户会在这页上找导入按钮 ✗。
+          */}
+          <p class="mt-1 text-sm opacity-70">
+            导出配置 = 把本账号名下的配置与**账号凭据**打成一个 JSON 下载下来，
+            拷到另一台机器上用 <code>mcloud config import &lt;文件&gt;</code> 导入，
+            那边不用重新登录就能跑任务。这份文件等于你的登录态，别乱发、也别提交进版本库。
+          </p>
         </div>
         {restarting.value ? (
           <div class="flex shrink-0 flex-wrap items-center gap-2 text-sm" role="status">
@@ -1396,6 +1460,21 @@ export const SettingsPage = () => {
           </div>
         ) : (
           <div class="card-actions shrink-0">
+            <button
+              type="button"
+              class="btn btn-sm btn-soft min-h-11 md:min-h-0"
+              disabled={exporting.value || state.value !== 'ready'}
+              onClick={() => void doExport()}
+            >
+              {exporting.value ? (
+                <>
+                  <span class="loading loading-sm" />
+                  导出中…
+                </>
+              ) : (
+                '导出配置'
+              )}
+            </button>
             <button
               type="button"
               class="btn btn-sm btn-soft min-h-11 md:min-h-0"

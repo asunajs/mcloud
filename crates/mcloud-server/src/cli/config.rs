@@ -1,5 +1,5 @@
-//! `mcloud config export` / `mcloud config import <文件>` —— 把**列表型配置**
-//! 从一台机器搬到另一台。
+//! `mcloud config export` / `mcloud config import <文件>` —— 把配置（含**账号凭据**）
+//! 从一台机器搬到另一台，搬完**不用重新登录**。
 //!
 //! # 为什么要有这两条命令
 //!
@@ -14,28 +14,17 @@
 //! 都搬过去，cli 还是人用的吗」）。导出/导入是一对**通用的搬运口**，不给 CLI 添
 //! 任何"配置面板"形状的东西 —— 所以是两条命令，不是"每个配置项各一条子命令"。
 //!
-//! # 哪些进文件、哪些不进
+//! # 导出/导入哪几类、文件什么形状
 //!
-//! 进文件的（键名**照 `data/` 下的文件名**，这样导出文件与 `data/*.json` 能对着看，
-//! 排查时不用再翻译一层）：
+//! **不在这个文件里定义** —— 唯一那一份在 [`crate::config_doc`] ✓
+//! （CLI 与 WebUI 的 `GET /api/config/export` 共用它，两份必然漂移 ✗）。
+//! 那里列了完整的表：进文件的**十一类**（含**账号与凭据**、**设备指纹**）、
+//! 不进的那几类（`sessions.json` / `history.json` 与 `logs/` / `kouling-pool.json` /
+//! `users.json`）、以及敏感标记 `containsCredentials` ✓。
 //!
-//! | 键 | 存储里的落点 | 是什么 |
-//! |---|---|---|
-//! | `push-rules` | `data/push-rules.json` | 推送规则（**渠道 token 在里面**） |
-//! | `push-panel` | `data/push-panel.json` | 面板行为的绑定（登录新设备 / 登录失败 / 耗时异常 / 连续失败） |
-//! | `exchange-subscriptions` | `data/exchange-subscriptions.json` | 兑换页订阅的那几件奖品 |
-//! | `auth-refresh` | `data/auth-refresh.json` | 凭据自动刷新的钟点（`HH:MM`） |
-//! | `pipelines` | `data/pipelines.json` | 任务编排 |
-//! | `schedules` | `data/schedules.json` | 定时（含系统维护的那两条自动条目） |
-//! | `settings` | `data/settings.json` | 实例级设置（见下面那段取舍） |
-//!
-//! 不进文件的：**凭据**（`accounts.json` / `state.json` / `smid.json` /
-//! `sessions.json`）。那是登录态：搬到另一台机器**没用**（账号要在新机器上重新
-//! 登录），却平白多一份泄漏面。
-//!
-//! 注意 `push-rules` 里**确实**带着推送渠道的 token 与 webhook 地址 —— 那些本来
-//! 就是"配置"的一部分（不带就没法在另一台机器上把通知发出去）。所以文件里留了
-//! 一个 `notice` 字段把这件事写明，让用户知道这份文件别乱发。
+//! ⚠ **凭据是带的**（2026-10-12 用户口径：「**凭据也需要导出啊，不导出我怎么使用**」✓）：
+//! 导出的意义就是搬到另一台机器**直接用**，不带上凭据就得把每个账号重新登录一遍，
+//! 这个功能等于废一半 ✓。上一轮那份"凭据不进文件"的口径**已被推翻** ✓。
 //!
 //! # 实例级设置（`data/settings.json`）怎么处置
 //!
@@ -46,6 +35,9 @@
 //! 到本机"——顺手把实例策略也改掉，就是那种"手滑一下、整台机器行为就变了"的形态。
 //! 所以默认只在导出文件里**读出来给人看**，改不改由 `--with-instance` 显式说。
 //!
+//! ⚠ `pc-device`（本机设备指纹）**不**走这个开关：它跟的是"凭据要能用"那条线
+//! （`--with-instance` 管的是整台机器的策略格），所以导入时**一律应用** ✓。
+//!
 //! # 导入的语义
 //!
 //! * **覆盖式**：文件里有的那一类**整类替换**（本机多出来的那几条会被删掉）；
@@ -54,6 +46,11 @@
 //! * **先全解析、后落盘**：读文件、认版本、逐类校验、id 归属冲突检查全过了，才动第一笔。
 //! * **归属重指**：文件里的 `owner` 一律改成**本机那个用户**（见 [`repoint_id`]）——
 //!   两台机器的用户 id 是各自生成的 uuid，照抄过去那份数据谁也看不见。
+//!   ⚠ 账号那一类走的是**同一套**：`accounts.json` 里每个账号的 `owner` 也重指到
+//!   本机用户 ✓（用的是同一道冲突闸，见 [`check_id_conflicts`]）✓。
+//! * ⚠ **按账号 id 存的那两张表**（`state.json` / `smid.json`）是**按键合并**、
+//!   不是整类替换：它们装着**本机所有账号**的运行期状态与设备指纹（别的用户的也在里面 ✓）
+//!   ⇒ 整类替换会把别人的那份一起抹掉 ✗。文件里给了哪个账号，就写哪个账号那一格 ✓。
 //! * 导完打印**逐类条数**，并提醒**重启服务**才生效（`JsonStore` 启动时全量读进内存）。
 
 use std::collections::HashSet;
@@ -63,11 +60,11 @@ use anyhow::Context;
 use mcloud_app::App;
 use mcloud_core::push::BehaviorKey;
 use mcloud_core::{
-    auth_refresh, AppSettings, ExchangeSubscription, PanelBindings, Pipeline, PipelineId, PushRule,
-    Schedule, ScheduleId, UserId,
+    auth_refresh, Account, AccountId, Pipeline, PipelineId, Schedule, ScheduleId, UserId,
 };
 
 use crate::cli::push::{cli_owner, reject_user_selection};
+use crate::config_doc::{self, ExportDoc, FORMAT_KEY, FORMAT_VERSION};
 
 pub const USAGE: &str = "\
 用法：
@@ -91,24 +88,21 @@ CLI 上**没有** `--user` / `--owner` —— 两条命令都只作用于**本�
   pipelines               任务编排
   schedules               定时（含系统维护的「直播自动定时」「凭据自动刷新」两条）
   settings                实例级设置 —— 导出带上、导入默认不动（要一起改加 --with-instance）
+  accounts                账号列表与**每个账号的凭据**（token / 到期时间 / 设备号 / 平台 / 用户域）
+  account-state           账号运行期状态（按账号 id）
+  account-smid            账号的**设备指纹**（按账号 id；凭据是跟设备绑的，所以要带上）
+  pc-device               本机 PC 设备指纹（实例级，一枚）
 
-登录凭据（token / 登录态）**不在**这份文件里 —— 那是账号的事，搬到另一台机器也没用。
+⚠ 这份文件**等于你的登录态**（顶层 `containsCredentials: true` 标着它）：
+里面有账号凭据、设备指纹与推送渠道的 token ⇒ 别随手发给别人，也别提交进版本库。
+导出的意义就是搬到另一台机器**直接用** —— 导入之后不用重新登录就能跑任务。
 导入是**覆盖式**：文件里有的那一类整类替换（本机多出来的那几条会被删掉）；
 文件里**没有**的类别一个字节都不动。
+（例外：`account-state` / `account-smid` 按**账号 id 合并** —— 那两张表装着本机所有
+账号的东西，整类替换会连别人的一起抹掉。）
 导入前会先把要改的文件备份成 `<名字>.bak-<时间戳>`，中途失败自动回滚到导入前那份。
 导入完**必须重启服务**才生效（`JsonStore` 启动时把那些文件全量读进内存）：
     scripts/dev-reload.sh --no-build";
-
-/// 顶层版本键：导入时**必须**认它 —— 认不出就报错退非 0，一个字节都不改。
-const FORMAT_KEY: &str = "mcloudConfig";
-
-/// 当前格式版本。改形状时 +1（老文件会被**明确拒掉**，而不是"读进去一半"）。
-const FORMAT_VERSION: u32 = 1;
-
-/// 导出文件里那句"这份文件别乱发"的说明（见模块头那段）。
-const NOTICE: &str = "这份文件是配置、不是凭据：它含推送渠道的 token 与 webhook 地址\
-（原样导出 —— 不带就没法在另一台机器上把通知发出去），别随手发给别人。\
-登录凭据（token / 登录态）不在里面，账号要在新机器上重新登录。";
 
 /// 命令行解析结果（纯数据，便于单测）。
 #[derive(Debug, PartialEq, Eq)]
@@ -199,177 +193,38 @@ fn parse_import(rest: &[String]) -> anyhow::Result<Cmd> {
     })
 }
 
-// ── 导出文件的形状 ──────────────────────────────────────────────────────
-
-/// 导出时那份"我是谁"的信息。
-///
-/// 它有两个用处：人看着知道这份是从哪个账号导的；导入时**按它算 id 重指**
-/// （见 [`repoint_id`] —— `daily-<owner>` 这类 id 是从 owner 推出来的）。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct OwnerRef {
-    id: String,
-    name: String,
-}
-
-/// 导出/导入的那一份文档。
-///
-/// 每一类都是 `Option`：`None` 既表示"导出时本机这一类是空的"，
-/// 也表示"导入时**不许动**这一类"。导入侧只认后者 —— 文件里没写的键
-/// 反序列化出来就是 `None`，于是"文件里没有的类别不动"是**结构上**成立的，
-/// 不靠一句 `if` 记得去判。
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-struct ExportDoc {
-    #[serde(rename = "mcloudConfig")]
-    format: u32,
-    #[serde(
-        rename = "exportedAt",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    exported_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    notice: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    owner: Option<OwnerRef>,
-    #[serde(
-        rename = "push-rules",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    push_rules: Option<Vec<PushRule>>,
-    #[serde(
-        rename = "push-panel",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    push_panel: Option<PanelBindings>,
-    #[serde(
-        rename = "exchange-subscriptions",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    exchange_subscriptions: Option<Vec<ExchangeSubscription>>,
-    #[serde(
-        rename = "auth-refresh",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    auth_refresh: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pipelines: Option<Vec<Pipeline>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    schedules: Option<Vec<Schedule>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    settings: Option<AppSettings>,
-}
-
-impl ExportDoc {
-    /// 文件里那个"源 owner"（没有就不重指 id）。
-    fn source_owner(&self) -> Option<UserId> {
-        self.owner.as_ref().map(|o| UserId::new(o.id.clone()))
-    }
-}
-
-/// 读 store，组装成一份文档。
-///
-/// **稳定排序**（同一次导出跑两遍结果一样，方便 diff）：三类有 id 的按 id 升序；
-/// 订阅按"订阅时刻 + 奖品 id"排（那本来就是它的语义顺序 —— 兑换页顶部按它从早到晚）。
-async fn collect(app: &App, owner: &UserId) -> anyhow::Result<ExportDoc> {
-    let store = &app.handle.store;
-    let settings = store.settings().await?;
-
-    let mut push_rules = store.push_rules(owner).await?;
-    push_rules.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
-
-    let mut pipelines = store.pipelines_for(owner).await?;
-    pipelines.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
-
-    let mut schedules = store.schedules_for(owner).await?;
-    schedules.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
-
-    let mut subs = store.exchange_subscriptions(owner).await?;
-    subs.sort_by_key(|s| (s.subscribed_at_ms, s.prize_id));
-
-    // 钟点导**生效值**：自己的那份优先、没设过就回落到实例级那一格
-    // （`auth_refresh::effective_at` 是这条口径**唯一**的实现）。
-    // 用户要搬的是"我这台机器上几点刷"，而不是"我这一格写没写过"。
-    let at = auth_refresh::effective_at(
-        store.auth_refresh_at(owner).await?.as_deref(),
-        &settings.auth_refresh_at,
-    );
-
-    Ok(ExportDoc {
-        format: FORMAT_VERSION,
-        exported_at: Some(mcloud_core::beijing_format(
-            &*app.handle.clock,
-            "%Y-%m-%d %H:%M:%S",
-        )),
-        notice: Some(NOTICE.to_string()),
-        owner: store.user(owner).await?.map(|u| OwnerRef {
-            id: u.id.to_string(),
-            name: u.name,
-        }),
-        push_rules: Some(push_rules),
-        push_panel: Some(store.push_panel(owner).await?),
-        exchange_subscriptions: Some(subs),
-        auth_refresh: Some(at),
-        pipelines: Some(pipelines),
-        schedules: Some(schedules),
-        settings: Some(settings),
-    })
-}
-
-fn to_json(doc: &ExportDoc) -> anyhow::Result<String> {
-    let mut s = serde_json::to_string_pretty(doc)?;
-    s.push('\n');
-    Ok(s)
-}
-
-/// 逐类一句话（导出与导入两边共用这一份措辞）。
-fn describe(doc: &ExportDoc) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(v) = &doc.push_rules {
-        out.push(format!("推送规则 {} 条", v.len()));
-    }
-    if doc.push_panel.is_some() {
-        out.push(format!("面板绑定 {} 个", BehaviorKey::ALL.len()));
-    }
-    if let Some(v) = &doc.exchange_subscriptions {
-        out.push(format!("兑换订阅 {} 条", v.len()));
-    }
-    if let Some(v) = &doc.auth_refresh {
-        out.push(format!("刷新钟点 {v}"));
-    }
-    if let Some(v) = &doc.pipelines {
-        out.push(format!("编排 {} 条", v.len()));
-    }
-    if let Some(v) = &doc.schedules {
-        out.push(format!("定时 {} 条", v.len()));
-    }
-    if doc.settings.is_some() {
-        out.push("实例设置 1 份".to_string());
-    }
-    out
-}
-
 // ── export ─────────────────────────────────────────────────────────────
+
+/// 那句"这份文件等于你的登录态"的提醒（**只有一处措辞** —— 写盘与打 stdout 两条路共用）。
+const CREDENTIAL_WARNING: &str =
+    "注意：这份文件等于你的登录态（含账号凭据、设备指纹与推送渠道的 token）—— \
+     别随手发给别人，也别提交进版本库。";
 
 async fn export(app: &App, out: Option<PathBuf>) -> anyhow::Result<()> {
     let owner = cli_owner(app).await?;
-    let doc = collect(app, &owner).await?;
-    let json = to_json(&doc)?;
+    // ⚠ 文档形状与"导哪几类"只有一份实现（`crate::config_doc`），WebUI 那条路由调的是
+    // 同一个函数 ⇒ 界面导出的文件与这里导出的**逐字节同形** ✓。
+    let doc = config_doc::collect(&app.handle, &owner).await?;
+    let json = config_doc::to_json(&doc)?;
     match out {
-        // 省略 `--out` ⇒ **只有** JSON 进 stdout（`mcloud config export > f.json` 能用）
-        None => print!("{json}"),
+        // 省略 `--out` ⇒ **只有** JSON 进 stdout（`mcloud config export > f.json` 能用）。
+        //
+        // ⚠ 提醒走 **stderr**：stdout 要留给 JSON（重定向进文件时一个字都不能多 ✗），
+        // 而"这文件别乱发"这句必须在**终端上**看得见 ✓（写进 stdout 会被一起重定向走，
+        // 用户把文件发出去时反而没看到那句警告）。
+        None => {
+            print!("{json}");
+            eprintln!("{CREDENTIAL_WARNING}");
+        }
         Some(path) => {
             write_private(&path, json.as_bytes())?;
             println!(
                 "已导出本机用户「{owner}」的配置到 {}：{}",
                 path.display(),
-                describe(&doc).join(" / ")
+                config_doc::describe(&doc).join(" / ")
             );
-            println!("注意：文件里有推送渠道的 token 与 webhook 地址，别随手发给别人。");
-            println!("      拷到目标机器后：mcloud config import <文件>");
+            println!("{CREDENTIAL_WARNING}");
+            println!("      拷到目标机器后：mcloud config import <文件>（导入后不用重新登录）");
         }
     }
     Ok(())
@@ -377,7 +232,7 @@ async fn export(app: &App, out: Option<PathBuf>) -> anyhow::Result<()> {
 
 /// 写导出文件：**落盘就是 0600**，并且先写临时文件再改名。
 ///
-/// 两条都照 `JsonStore::write_atomic` 的理由来：文件里有推送渠道的 token，
+/// 两条都照 `JsonStore::write_atomic` 的理由来：文件里有账号凭据与推送渠道的 token，
 /// 先按默认权限（通常 0644）写、再 `chmod` 收紧，中间那一小段窗口同机其他用户
 /// 正好读得到；而直接往目标路径写，半截文件会把上一份好文件顶掉。
 fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
@@ -424,6 +279,14 @@ struct Report {
     pipelines: Option<Counts>,
     schedules: Option<Counts>,
     instance: Option<bool>,
+    /// 账号那一类（**带凭据**）。
+    accounts: Option<Counts>,
+    /// 账号运行期状态：按账号 id 合并，所以只报"写了几份"。
+    account_state: Option<usize>,
+    /// 账号设备指纹：同上。
+    account_smid: Option<usize>,
+    /// 本机设备指纹是不是换了。
+    pc_device: Option<bool>,
 }
 
 /// 列表型那一类的条数读数。
@@ -475,6 +338,29 @@ impl Report {
                     "已应用（--with-instance）"
                 } else {
                     "没动（要一起改，加 --with-instance）"
+                }
+            ));
+        }
+        if let Some(c) = &self.accounts {
+            out.push(format!("  账号（含凭据）        {}", c.line("个")));
+        }
+        if let Some(n) = self.account_state {
+            out.push(format!(
+                "  账号状态              写入 {n} 份（按账号 id 合并）"
+            ));
+        }
+        if let Some(n) = self.account_smid {
+            out.push(format!(
+                "  账号设备指纹          写入 {n} 份（按账号 id 合并）"
+            ));
+        }
+        if let Some(replaced) = self.pc_device {
+            out.push(format!(
+                "  本机设备指纹          {}",
+                if replaced {
+                    "已换成文件里那一枚"
+                } else {
+                    "没动"
                 }
             ));
         }
@@ -645,7 +531,63 @@ fn validate_doc(doc: &ExportDoc) -> anyhow::Result<()> {
         set.validate()
             .map_err(|e| anyhow::anyhow!("`settings`（实例级设置）不合法：{e}"))?;
     }
+    // ── 凭据那一组（2026-10-12 起进文件 ✓）────────────────────────────
+    if let Some(accounts) = &doc.accounts {
+        ensure_unique("accounts", accounts.iter().map(|a| a.id.as_str()))?;
+        for a in accounts {
+            if a.id.as_str().trim().is_empty() {
+                anyhow::bail!(
+                    "`accounts` 里有一个账号没有 id（昵称是「{}」）",
+                    a.nickname.clone().unwrap_or_default()
+                );
+            }
+            // 凭据本身不做"合不合法"的判断（那是上游的事，形状也可能变 ✓）——
+            // 只拦**空的**：空的凭据搬过去等于没搬，而它看起来又像"搬成功了" ✗。
+            if a.auth.raw.trim().is_empty() && a.auth.token.trim().is_empty() {
+                anyhow::bail!(
+                    "`accounts` 里的账号 {} 没有凭据（`auth.raw` 与 `auth.token` 都是空的）\
+                     —— 搬过去也用不了，先停在这里",
+                    a.id
+                );
+            }
+        }
+    }
+    if let Some(smid) = &doc.account_smid {
+        for (id, s) in smid {
+            if id.trim().is_empty() {
+                anyhow::bail!("`account-smid` 里有一个空账号 id");
+            }
+            // 指纹那一格是"JSON 文本"，读不出来就是文件被改坏了 —— 早拦，
+            // 免得写进盘之后上游按"库里那串读不出来"报错（那时已经改了一半 ✗）。
+            if let Some(fp) = &s.fingerprint_json {
+                if serde_json::from_str::<serde_json::Value>(fp).is_err() {
+                    anyhow::bail!("`account-smid` 里账号 {id} 的 `fingerprintJson` 不是合法 JSON");
+                }
+            }
+        }
+    }
+    if let Some(dev) = &doc.pc_device {
+        if !pc_device_shape_ok(dev) {
+            anyhow::bail!(
+                "`pc-device` 形状不合法（应形如 32 位**大写** HEX 加 `{}` 后缀，实得「{dev}」）",
+                mcloud_core::PC_DEVICE_SUFFIX
+            );
+        }
+    }
     Ok(())
+}
+
+/// `pc-device` 的形状判据（**与存储层同一套**）。
+///
+/// `JsonStore::parse_pc_device_id` 是私有的、在另一个 crate 里 ⇒ 这里只能再写一份；
+/// 判据本身很短，而**漏了它的代价**是"写进去一个半截 id ⇒ 下一次读判成没有 ⇒
+/// 每轮生成一枚新的"（那正是 `pc_device.txt` 要防的事 ✓），所以宁可在这里早拦一次 ✓。
+fn pc_device_shape_ok(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    let Some(body) = trimmed.strip_suffix(mcloud_core::PC_DEVICE_SUFFIX) else {
+        return false;
+    };
+    body.len() == 32 && body.chars().all(|c| c.is_ascii_hexdigit()) && body == body.to_uppercase()
 }
 
 fn ensure_unique<'a>(kind: &str, ids: impl Iterator<Item = &'a str>) -> anyhow::Result<()> {
@@ -658,10 +600,36 @@ fn ensure_unique<'a>(kind: &str, ids: impl Iterator<Item = &'a str>) -> anyhow::
     Ok(())
 }
 
+/// 定时 / 编排 / **账号**的 id 在本机已经属于**别人**时，当场停下。
+///
 /// 定时与编排的 id 是**全局唯一**的（`save_schedule` / `save_pipeline` 按 id upsert），
-/// 所以"文件里这条 id 在本机已经属于**别人**"必须**当场停下**：照 upsert 走下去
-/// 等于把别人的那条**抢过来**，而 CLI 的立场是"只动本机管理员那一个用户"。
+/// 账号 id 也是全局唯一的（它是从上游那个账号推出来的 ✓，两台机器上同一个云盘账号
+/// 就是同一个 id ✓）—— 照 upsert 走下去等于把别人那条**抢过来**，
+/// 而 CLI 的立场是"只动本机管理员那一个用户" ✓。
+///
+/// ⚠ 账号这一格与定时/编排走的是**同一道闸**（不是另起一套 ✓）：判据都是
+/// "本机这条 id 的 `owner` 存在、且不是本机用户" ⇒ 停下 ✓。区别只有一处 ——
+/// 账号 id **不重指**（它不是从 owner 推出来的，它就是上游那个账号的标识 ✓）。
 async fn check_id_conflicts(app: &App, owner: &UserId, doc: &ExportDoc) -> anyhow::Result<()> {
+    if let Some(accounts) = &doc.accounts {
+        let all = app.handle.store.accounts().await?;
+        for a in accounts {
+            if let Some(hit) = all
+                .iter()
+                .find(|x| x.id == a.id && x.owner.as_ref().is_some_and(|o| o != owner))
+            {
+                anyhow::bail!(
+                    "账号 {} 在本机属于**另一个用户**（{}）—— 导入会把它抢过来，先停在这里。\
+                     要么让那个用户在 WebUI 上自己处理，要么先从文件里删掉这一个账号。",
+                    a.id,
+                    hit.owner
+                        .as_ref()
+                        .map(UserId::to_string)
+                        .unwrap_or_default()
+                );
+            }
+        }
+    }
     let src = doc.source_owner();
     if let Some(schs) = &doc.schedules {
         let all = app.handle.store.schedules().await?;
@@ -793,6 +761,23 @@ fn touched_files(doc: &ExportDoc, with_instance: bool) -> Vec<&'static str> {
     // 实例级：只有真去改它的时候才需要备份
     if with_instance && doc.settings.is_some() {
         names.push("settings.json");
+    }
+    // ── 凭据那一组（2026-10-12 起进文件 ✓）────────────────────────────
+    // 账号列表与凭据：整类替换（本机多出来的账号会被删掉，与规则/定时同一条口径 ✓）。
+    if doc.accounts.is_some() {
+        names.push("accounts.json");
+    }
+    // ⚠ 按账号 id 合并的那两张：备份它们是**必须**的（改的是整份文件），
+    // 但**不是**"整类替换" —— 见 `apply` 里那段说明 ✓。
+    if doc.account_state.is_some() {
+        names.push("state.json");
+    }
+    if doc.account_smid.is_some() {
+        names.push("smid.json");
+    }
+    // 机器级那一枚：跟的是"凭据要能用"那条线，不走 --with-instance ✓（见模块头）。
+    if doc.pc_device.is_some() {
+        names.push("pc_device.txt");
     }
     names
 }
@@ -961,6 +946,88 @@ async fn apply(
         report.schedules = Some(counts);
     }
 
+    // ── 凭据那一组（2026-10-12 起进文件 ✓）────────────────────────────
+    //
+    // 账号：逐条 upsert（**归属重指到本机用户** ✓），本机**名下**多出来的按 id 删掉
+    //（与规则 / 定时同一条口径：文件里有的那一类整类替换 ✓）。
+    //
+    // ⚠ 归属重指在这里是**必须**的：两台机器的 `UserId` 是各自生成的 uuid，
+    // 照抄过去那份数据谁也看不见（`visible_to` 只认相等 ✓）—— 与定时 / 编排
+    // 走的是**同一套**策略 ✓（账号 id 本身**不**重指：它是上游那个账号的标识，
+    // 两台机器上同一个云盘账号就是同一个 id ✓）。
+    //
+    // ⚠ 删除只按"**显式归属**"收窄（`mine_accounts` ✓，与 `mine_schedules` 同款）：
+    // 无主条目（`owner = None`）不是"这个用户名下的"，不该被这一步带走 ✓。
+    if let Some(accounts) = &doc.accounts {
+        let existing = mine_accounts(app, owner).await?;
+        let want: HashSet<String> = accounts.iter().map(|a| a.id.to_string()).collect();
+        let mut counts = Counts {
+            total: accounts.len(),
+            ..Default::default()
+        };
+        for a in accounts {
+            let mut acc = a.clone();
+            acc.owner = Some(owner.clone());
+            if existing.iter().any(|e| e.id == acc.id) {
+                counts.updated += 1;
+            } else {
+                counts.added += 1;
+            }
+            store.save_account(&acc).await?;
+        }
+        for e in &existing {
+            if !want.contains(e.id.as_str()) {
+                store.remove_account(&e.id).await?;
+                counts.removed += 1;
+            }
+        }
+        report.accounts = Some(counts);
+    }
+
+    // ⚠⚠ 下面这两张是**按账号 id 合并**，**不是**整类替换。
+    //
+    // 理由：`state.json` / `smid.json` 装着本机**所有**账号的运行期状态与设备指纹
+    //（别的用户的也在里面 ✓）—— 整类替换会连别人的那份一起抹掉 ✗。
+    // 所以：文件里给了哪个账号，就写哪个账号那一格；其余一个字节都不动 ✓。
+    if let Some(state) = &doc.account_state {
+        let mut n = 0;
+        for (id, value) in state {
+            store
+                .save_account_state(&AccountId::new(id.clone()), value)
+                .await?;
+            n += 1;
+        }
+        report.account_state = Some(n);
+    }
+
+    if let Some(smid) = &doc.account_smid {
+        let mut n = 0;
+        for (id, s) in smid {
+            let id = AccountId::new(id.clone());
+            // 指纹与 `deviceId` 是**两列独立事实**（`SmidStore` 的文件头 ✓），
+            // 而"换长相"那条窄写会**顺手把旧 deviceId 清空**（新的长相配旧的 id
+            // 才是自相矛盾 ✓）⇒ 顺序必须是**先写指纹、再把文件里那个 id 写回去** ✓。
+            if let Some(fp) = &s.fingerprint_json {
+                store.set_smid_fingerprint(&id, fp).await?;
+            }
+            if let Some(dev) = &s.device_id {
+                store.set_smid_device_id(&id, dev).await?;
+            }
+            n += 1;
+        }
+        report.account_smid = Some(n);
+    }
+
+    // 机器级那一枚：**不走 `--with-instance`**（它跟的是"凭据要能用"那条线 ✓，
+    // 见模块头那段）—— 文件里有它就应用 ✓。本来就是同一枚时不写（省一次盘 IO ✓）。
+    if let Some(dev) = &doc.pc_device {
+        let already = app.handle.login.pc_device_id_opt().await?.as_deref() == Some(dev.as_str());
+        if !already {
+            app.handle.login.set_pc_device_id(dev).await?;
+        }
+        report.pc_device = Some(!already);
+    }
+
     // 实例级：**默认不动**（见模块头那段取舍），要改得显式说。
     if with_instance {
         if let Some(settings) = &doc.settings {
@@ -1002,6 +1069,18 @@ async fn mine_pipelines(app: &App, owner: &UserId) -> anyhow::Result<Vec<Pipelin
         .collect())
 }
 
+/// 本机**管理员名下**的账号（判据与 [`mine_schedules`] 同款：只看**显式归属** ✓）。
+async fn mine_accounts(app: &App, owner: &UserId) -> anyhow::Result<Vec<Account>> {
+    Ok(app
+        .handle
+        .store
+        .accounts()
+        .await?
+        .into_iter()
+        .filter(|a| a.owner.as_ref() == Some(owner))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1010,7 +1089,11 @@ mod tests {
 
     use mcloud_app::AppBuilder;
     use mcloud_core::push::{PushConfig, PushRuleId, TokenConfig};
-    use mcloud_core::{Account, HttpClient, HttpRequest, HttpResponse, PasswordHash, User};
+    use mcloud_core::{
+        Account, AccountSettings, AppSettings, AuthInfo, DeviceId, ExchangeSubscription,
+        HttpClient, HttpRequest, HttpResponse, PanelBindings, PasswordHash, PcPlatform, PushRule,
+        User,
+    };
 
     /// 「谁来都报网络错」的假上游 —— 这几条用例**绝不打真上游**
     /// （与 `cli/daily.rs` 的 `DeadUpstream` 同款）。
@@ -1208,6 +1291,96 @@ mod tests {
         .await;
     }
 
+    /// 一个账号（`owner` 留空，由调用方填 —— 与 [`seed_rich`] 同一条理由）。
+    fn account(id: &str, nickname: Option<&str>, raw: &str, token: &str, expire: i64) -> Account {
+        Account {
+            id: AccountId::new(id),
+            nickname: nickname.map(str::to_string),
+            auth: AuthInfo {
+                raw: raw.into(),
+                platform: "android".into(),
+                phone: id.into(),
+                token: token.into(),
+                expire,
+            },
+            device_id: DeviceId("B-dev".into()),
+            pc_platform: None,
+            user_domain_id: None,
+            owner: None,
+            enabled: true,
+            settings: AccountSettings::default(),
+        }
+    }
+
+    /// 造一份"**已经登录过**"的凭据组（2026-10-12 起这一组要进导出文件 ✓）。
+    ///
+    /// 两件事都要有，缺一条这类用例就测不到真东西：
+    /// * **账号本身的凭据**（`auth.raw` / `token` / `expire` / `phone` + 设备号 / 平台 / 用户域）；
+    /// * **与设备绑的那一半**：`state.json`（运行期状态）与 `smid.json`（设备指纹）✓，
+    ///   外加机器级那一枚 `pc_device.txt` ✓。
+    ///
+    /// 别人名下也放一个账号：往返与跨机器那几条要能证明"别人的一个字节都没进来" ✓。
+    async fn seed_credentials(app: &App, admin: &UserId, other: &UserId) {
+        let store = &app.handle.store;
+
+        let mut a1 = account(
+            "13800000000",
+            Some("主力号"),
+            "raw-1",
+            "tok-1|seg|seg|1790000000000",
+            1_790_000_000_000,
+        );
+        a1.owner = Some(admin.clone());
+        a1.device_id = DeviceId("B-admin-1".into());
+        a1.pc_platform = Some(PcPlatform::MacOs);
+        a1.user_domain_id = Some("1234567890123456789".into());
+        a1.settings.backup_wait_secs = 7;
+        store.save_account(&a1).await.unwrap();
+        store
+            .save_account_state(
+                &a1.id,
+                &serde_json::json!({ "cur_month_backup": "202610", "device_id": "B-admin-1" }),
+            )
+            .await
+            .unwrap();
+        // ⚠ 顺序照 `apply` 里的口径：先写指纹（它会清掉 deviceId ✓），再把 deviceId 写回去 ✓
+        store
+            .set_smid_fingerprint(&a1.id, r#"{"screen":"1920x1080"}"#)
+            .await
+            .unwrap();
+        store.set_smid_device_id(&a1.id, "B-admin-1").await.unwrap();
+
+        let mut a2 = account("13900000001", None, "raw-2", "tok-2|seg|seg|0", 0);
+        a2.owner = Some(admin.clone());
+        a2.pc_platform = Some(PcPlatform::Windows);
+        store.save_account(&a2).await.unwrap();
+        store
+            .set_smid_fingerprint(&a2.id, r#"{"screen":"2560x1440"}"#)
+            .await
+            .unwrap();
+
+        let mut ao = account(
+            "13700000002",
+            Some("别人的号"),
+            "raw-o",
+            "tok-o|seg|seg|0",
+            0,
+        );
+        ao.owner = Some(other.clone());
+        store.save_account(&ao).await.unwrap();
+        store
+            .save_account_state(&ao.id, &serde_json::json!({ "谁的": "别人" }))
+            .await
+            .unwrap();
+
+        // 机器级那一枚（实例级 ✓）：形状必须是 32 位大写 hex + `-ENDIN`（存储层会校验 ✓）
+        app.handle
+            .login
+            .set_pc_device_id("62AA2BDA29F99744536E142A83CA5B03-ENDIN")
+            .await
+            .unwrap();
+    }
+
     /// 把"数据目录下那几个文件"的原始字节读出来 —— 独立于 store 内存的那份读数。
     fn snapshot_files(dir: &Path) -> Vec<(String, Option<Vec<u8>>)> {
         [
@@ -1218,17 +1391,22 @@ mod tests {
             "pipelines.json",
             "schedules.json",
             "settings.json",
+            "accounts.json",
+            "state.json",
+            "smid.json",
+            "pc_device.txt",
         ]
         .into_iter()
         .map(|name| (name.to_string(), std::fs::read(dir.join(name)).ok()))
         .collect()
     }
 
-    /// 门：**往返逐字段相同**。
+    /// 门：**往返逐字段相同**（2026-10-12 起**含凭据那一组** ✓）。
     ///
     /// 造一份有内容的配置 ⇒ export 到临时文件 ⇒ 清空（规则删光、定时删光、编排删光、
-    /// 面板回默认、订阅清空、钟点改掉）⇒ import ⇒ 与导出前**逐字段**比，
-    /// 并且把 `managed_by` / `enabled` / cron 表达式这几格单独点一遍名。
+    /// 面板回默认、订阅清空、钟点改掉、**账号删光、设备指纹换掉**）⇒ import
+    /// ⇒ 与导出前**逐字段**比，并且把 `managed_by` / `enabled` / cron 表达式 /
+    /// `auth.token` / `auth.expire` / `pc_platform` 这几格单独点一遍名。
     #[tokio::test]
     async fn export_then_import_round_trips_every_field() {
         let (app, dir) = test_app("config-roundtrip");
@@ -1237,10 +1415,13 @@ mod tests {
         seed_user(&app, "admin", "admin", 100);
         seed_user(&app, "other", "other", 200);
         seed_rich(&app, &admin, &other).await;
+        seed_credentials(&app, &admin, &other).await;
         let store = &app.handle.store;
 
-        let before = collect(&app, &admin).await.expect("导出");
-        let json = to_json(&before).expect("序列化");
+        let before = config_doc::collect(&app.handle, &admin)
+            .await
+            .expect("导出");
+        let json = config_doc::to_json(&before).expect("序列化");
         let path = dir.join("export.json");
         write_private(&path, json.as_bytes()).expect("写导出文件");
 
@@ -1271,17 +1452,30 @@ mod tests {
             .await
             .unwrap();
         store.save_auth_refresh_at(&admin, "01:23").await.unwrap();
+        // 凭据那一组也清空：账号删光（`remove_account` 会顺手带走它的 state 与 smid ✓）、
+        // 机器级那一枚换成**另一枚**（证明导入真的把文件里那枚写回去了 ✓）。
+        for a in mine_accounts(&app, &admin).await.unwrap() {
+            store.remove_account(&a.id).await.unwrap();
+        }
+        app.handle
+            .login
+            .set_pc_device_id("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-ENDIN")
+            .await
+            .unwrap();
         assert!(store.push_rules(&admin).await.unwrap().is_empty());
         assert!(store.schedules_for(&admin).await.unwrap().is_empty());
+        assert!(mine_accounts(&app, &admin).await.unwrap().is_empty());
 
         import_cmd(&app, &path, false).await.expect("导入");
 
         // 逐字段比：导出时刻每次不同，抹掉它再比
         let mut want = before.clone();
-        let mut got = collect(&app, &admin).await.expect("再导出");
+        let mut got = config_doc::collect(&app.handle, &admin)
+            .await
+            .expect("再导出");
         want.exported_at = None;
         got.exported_at = None;
-        assert_eq!(got, want, "往返之后每一类逐字段相同");
+        assert_eq!(got, want, "往返之后每一类逐字段相同（含账号与凭据）");
 
         // 关键格点名（失败信息一眼看出是哪一类漂了）
         let rules = store.push_rules(&admin).await.unwrap();
@@ -1320,6 +1514,61 @@ mod tests {
         );
         assert_eq!(mine_pipelines(&app, &admin).await.unwrap().len(), 1);
 
+        // ── 凭据那几格点名（失败信息一眼看出是哪一格漂了 ✓）────────────
+        let accs = mine_accounts(&app, &admin).await.unwrap();
+        assert_eq!(accs.len(), 2, "两个账号都回来了");
+        let a1 = accs
+            .iter()
+            .find(|a| a.id.as_str() == "13800000000")
+            .expect("主力号要在");
+        assert_eq!(a1.auth.raw, "raw-1", "原始凭据串原样搬过来");
+        assert_eq!(a1.auth.token, "tok-1|seg|seg|1790000000000");
+        assert_eq!(a1.auth.expire, 1_790_000_000_000, "到期时间逐字相同");
+        assert_eq!(a1.auth.phone, "13800000000");
+        assert_eq!(a1.device_id.as_str(), "B-admin-1", "设备号搬过来了");
+        assert_eq!(a1.pc_platform, Some(PcPlatform::MacOs), "平台搬过来了");
+        assert_eq!(a1.user_domain_id.as_deref(), Some("1234567890123456789"));
+        assert_eq!(a1.nickname.as_deref(), Some("主力号"));
+        assert_eq!(a1.settings.backup_wait_secs, 7);
+        assert_eq!(a1.owner, Some(admin.clone()), "归属重指到本机管理员");
+        assert_eq!(
+            store
+                .get_smid_state(&a1.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .fingerprint_json
+                .as_deref(),
+            Some(r#"{"screen":"1920x1080"}"#),
+            "设备指纹搬过来了（凭据是跟设备绑的）"
+        );
+        assert_eq!(
+            store
+                .get_smid_state(&a1.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .device_id
+                .as_deref(),
+            Some("B-admin-1"),
+            "上报换回的 deviceId 也回来了"
+        );
+        assert_eq!(
+            store.account_state(&a1.id).await.unwrap()["cur_month_backup"],
+            serde_json::json!("202610"),
+            "账号运行期状态搬过来了"
+        );
+        assert_eq!(
+            app.handle
+                .login
+                .pc_device_id_opt()
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("62AA2BDA29F99744536E142A83CA5B03-ENDIN"),
+            "机器级那一枚被写回文件里那个值"
+        );
+
         // 别人那一份一个字节都没动
         assert_eq!(store.push_rules(&other).await.unwrap().len(), 1);
         assert!(store
@@ -1328,24 +1577,35 @@ mod tests {
             .unwrap()
             .iter()
             .any(|s| s.id.as_str() == "sch-other"));
+        let others = store.accounts_for(&other).await.unwrap();
+        assert_eq!(others.len(), 1, "别人的账号没被带走");
+        assert_eq!(others[0].auth.raw, "raw-o", "别人的凭据原样");
+        assert_eq!(
+            store.account_state(&others[0].id).await.unwrap()["谁的"],
+            serde_json::json!("别人"),
+            "别人的运行期状态没被覆盖（按账号 id 合并那条口径）"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 门：**只动该动的** —— 一份只有 `push-rules` 的文件导进去，
-    /// 定时 / 编排 / 订阅 / 钟点 / 面板**一条都不许少**。
+    /// 定时 / 编排 / 订阅 / 钟点 / 面板 / **账号与凭据**一个都不许少。
     #[tokio::test]
     async fn importing_one_category_leaves_the_others_untouched() {
         let (app, dir) = test_app("config-one-category");
         let admin = UserId::new("admin");
         seed_user(&app, "admin", "admin", 100);
         seed_rich(&app, &admin, &UserId::new("other")).await;
+        seed_credentials(&app, &admin, &UserId::new("other")).await;
         let store = &app.handle.store;
 
         let schs_before = store.schedules_for(&admin).await.unwrap();
         let pipes_before = mine_pipelines(&app, &admin).await.unwrap();
         let subs_before = store.exchange_subscriptions(&admin).await.unwrap();
         let panel_before = store.push_panel(&admin).await.unwrap();
+        let accounts_before = mine_accounts(&app, &admin).await.unwrap();
+        let pc_before = app.handle.login.pc_device_id_opt().await.unwrap();
 
         // 只有规则那一类，而且只有一条（证明"这一类被整类替换了"）
         let doc = serde_json::json!({
@@ -1398,14 +1658,27 @@ mod tests {
             AppSettings::default(),
             "实例级设置没动"
         );
+        // ⚠ 凭据那一组：文件里**没有** `accounts` ⇒ 账号一个都不许动
+        //（这一条尤其要紧：整类替换写歪了就会把本机账号全删掉 ✗）
+        assert_eq!(
+            mine_accounts(&app, &admin).await.unwrap(),
+            accounts_before,
+            "文件里没有 `accounts` ⇒ 本机账号一个都没动"
+        );
+        assert_eq!(
+            app.handle.login.pc_device_id_opt().await.unwrap(),
+            pc_before,
+            "文件里没有 `pc-device` ⇒ 本机那一枚没动"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 门：**坏文件要报得清、且一个字节都不改**。
     ///
-    /// 七种：路径不存在 / 不是合法 JSON / 没有版本键 / 版本不认识 / 形状不对 /
-    /// 钟点不是 `HH:MM` / cron 表达式不合法。每种都断言：错误里带文件名、
+    /// 九种：路径不存在 / 不是合法 JSON / 没有版本键 / 版本不认识 / 形状不对 /
+    /// 钟点不是 `HH:MM` / cron 表达式不合法 / `accounts` 里凭据是空的 /
+    /// `pc-device` 形状不对。每种都断言：错误里带文件名、
     /// 退非 0（这里就是 `Err`），并且**落库读数**（原始文件字节 + store 里的条数）
     /// 与导入前完全一致 —— 也就是"要么全改、要么不改"。
     #[tokio::test]
@@ -1414,11 +1687,13 @@ mod tests {
         let admin = UserId::new("admin");
         seed_user(&app, "admin", "admin", 100);
         seed_rich(&app, &admin, &UserId::new("other")).await;
+        seed_credentials(&app, &admin, &UserId::new("other")).await;
         let store = &app.handle.store;
 
         let files_before = snapshot_files(&dir);
         let rules_before = store.push_rules(&admin).await.unwrap();
         let schs_before = store.schedules_for(&admin).await.unwrap();
+        let accounts_before = mine_accounts(&app, &admin).await.unwrap();
 
         let write = |name: &str, body: &str| -> PathBuf {
             let path = dir.join(name);
@@ -1458,6 +1733,22 @@ mod tests {
                 ),
                 "cron 表达式不合法",
             ),
+            // 凭据那一组：空的凭据搬过去等于没搬，而它看起来又像"搬成功了" ⇒ 当场拦 ✓
+            (
+                write(
+                    "bad-empty-auth.json",
+                    r#"{"mcloudConfig":1,"accounts":[{"id":"13800000000","auth":{"raw":"","platform":"android","phone":"13800000000","token":"","expire":0},"device_id":"D"}]}"#,
+                ),
+                "没有凭据",
+            ),
+            // 半截的设备指纹：写进去会被判成"没有" ⇒ 每轮生成一枚新的（正是它要防的事）
+            (
+                write(
+                    "bad-pc-device.json",
+                    r#"{"mcloudConfig":1,"pc-device":"半截的指纹"}"#,
+                ),
+                "pc-device",
+            ),
         ];
 
         for (path, needle) in cases {
@@ -1481,6 +1772,11 @@ mod tests {
         );
         assert_eq!(store.push_rules(&admin).await.unwrap(), rules_before);
         assert_eq!(store.schedules_for(&admin).await.unwrap(), schs_before);
+        assert_eq!(
+            mine_accounts(&app, &admin).await.unwrap(),
+            accounts_before,
+            "账号（含凭据）一个字节都没动"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1610,6 +1906,218 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 门：**账号**撞到别人名下也当场停下（与定时/编排走的是**同一道闸** ✓）。
+    ///
+    /// 账号 id 是从上游那个账号推出来的、两台机器上同一个云盘账号就是同一个 id
+    /// ⇒ 照 upsert 走下去会把别人的账号**抢过来**（连凭据一起换掉 ✗）。
+    #[tokio::test]
+    async fn an_account_owned_by_someone_else_stops_the_import() {
+        let (app, dir) = test_app("config-account-conflict");
+        let other = UserId::new("other");
+        seed_user(&app, "admin", "admin", 100);
+        seed_user(&app, "other", "other", 200);
+
+        let mut theirs = account("13800000000", Some("别人的号"), "raw-theirs", "tok", 0);
+        theirs.owner = Some(other.clone());
+        app.handle.store.save_account(&theirs).await.unwrap();
+
+        let doc = serde_json::json!({
+            "mcloudConfig": 1,
+            "accounts": [account("13800000000", Some("抢过来的"), "raw-mine", "tok2", 0)],
+        });
+        let path = dir.join("conflict-account.json");
+        write_private(
+            &path,
+            serde_json::to_string_pretty(&doc).unwrap().as_bytes(),
+        )
+        .unwrap();
+
+        let files_before = snapshot_files(&dir);
+        let err = import_cmd(&app, &path, false)
+            .await
+            .expect_err("撞到别人名下的账号必须报错")
+            .to_string();
+        assert!(err.contains("另一个用户"), "报错要说清为什么：{err}");
+        assert!(err.contains("13800000000"), "报错要说清是哪个账号：{err}");
+        assert_eq!(snapshot_files(&dir), files_before, "一个字节都没动");
+
+        // 别人那个账号连凭据都没被换掉
+        let still = app
+            .handle
+            .store
+            .account(&AccountId::new("13800000000"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(still.auth.raw, "raw-theirs", "别人的凭据不许被换");
+        assert_eq!(still.owner, Some(other));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 门（2026-10-12 用户口径「凭据也需要导出啊」）：**换一台机器导入之后不用重新登录**。
+    ///
+    /// 这是那件事的自动化版本：造一个"已登录"的实例 ⇒ 导出 ⇒ 换**另一个数据目录**
+    /// （= 另一台机器，管理员 id 也换一个）导入 ⇒ 逐字段核 ——
+    /// 凭据、设备指纹、运行期状态、机器级那一枚都要在，且归属重指到新机器那个用户。
+    #[tokio::test]
+    async fn credentials_survive_a_move_to_another_machine() {
+        // ── 源机器：一个"已登录"的实例 ─────────────────────────────────
+        let (src, src_dir) = test_app("config-move-src");
+        let src_admin = UserId::new("src-admin");
+        seed_user(&src, "src-admin", "src-admin", 100);
+        seed_credentials(&src, &src_admin, &UserId::new("src-other")).await;
+
+        let src_doc = config_doc::collect(&src.handle, &src_admin)
+            .await
+            .expect("源机器导出");
+        assert_eq!(
+            src_doc.accounts.as_ref().map(Vec::len),
+            Some(2),
+            "源机器上管理员名下两个账号（别人那个不该在里面）"
+        );
+        let json = config_doc::to_json(&src_doc).expect("序列化");
+        let path = src_dir.join("export.json");
+        write_private(&path, json.as_bytes()).expect("写导出文件");
+
+        // ── 目标机器：**另一个数据目录**、另一个管理员 id、一开始空空如也 ──
+        let (dst, dst_dir) = test_app("config-move-dst");
+        let dst_admin = UserId::new("dst-admin");
+        seed_user(&dst, "dst-admin", "dst-admin", 100);
+        assert!(mine_accounts(&dst, &dst_admin).await.unwrap().is_empty());
+        assert!(dst.handle.login.pc_device_id_opt().await.unwrap().is_none());
+
+        import_cmd(&dst, &path, false).await.expect("跨机器导入");
+
+        let dst_doc = config_doc::collect(&dst.handle, &dst_admin)
+            .await
+            .expect("目标机器再导出");
+
+        // ① 账号**逐字段**相同 —— 只把 `owner` 换成目标机器那个用户
+        let mut want = src_doc.accounts.clone().unwrap();
+        let have = dst_doc.accounts.clone().unwrap();
+        assert_eq!(have.len(), 2, "两个账号都搬过去了");
+        for a in &mut want {
+            a.owner = Some(dst_admin.clone());
+        }
+        assert_eq!(have, want, "账号逐字段（含 auth 里的凭据）相同");
+
+        // ② 关键凭据格点名（失败信息一眼看出是哪一格漂了）
+        let a1 = have
+            .iter()
+            .find(|a| a.id.as_str() == "13800000000")
+            .expect("主力号要在");
+        assert_eq!(a1.auth.raw, "raw-1", "原始凭据串搬过来了");
+        assert_eq!(a1.auth.token, "tok-1|seg|seg|1790000000000");
+        assert_eq!(a1.auth.expire, 1_790_000_000_000);
+        assert_eq!(a1.device_id.as_str(), "B-admin-1");
+        assert_eq!(a1.pc_platform, Some(PcPlatform::MacOs));
+        assert_eq!(a1.user_domain_id.as_deref(), Some("1234567890123456789"));
+        assert_eq!(a1.owner, Some(dst_admin.clone()), "归属重指到新机器的用户");
+
+        // ③ 与设备绑的那一半：运行期状态 / 账号设备指纹 / 机器级那一枚
+        assert_eq!(dst_doc.account_state, src_doc.account_state);
+        assert_eq!(dst_doc.account_smid, src_doc.account_smid);
+        assert_eq!(dst_doc.pc_device, src_doc.pc_device);
+        assert_eq!(
+            dst.handle
+                .store
+                .get_smid_state(&AccountId::new("13800000000"))
+                .await
+                .unwrap()
+                .unwrap()
+                .fingerprint_json
+                .as_deref(),
+            Some(r#"{"screen":"1920x1080"}"#)
+        );
+
+        // ④ 新机器上这些账号是**可用状态**：看得到（归属对 ✓）、凭据非空、没过期 ✓
+        let visible = dst.handle.store.accounts_for(&dst_admin).await.unwrap();
+        assert_eq!(visible.len(), 2, "账号在新机器上属于本机用户，看得见");
+        for a in &visible {
+            assert!(!a.auth.raw.is_empty() && !a.auth.token.is_empty());
+            assert!(a.enabled, "启用状态搬过来了");
+        }
+        assert!(
+            visible
+                .iter()
+                .any(|a| a.auth.expire > 0 && a.auth.days_until_expiry(1_790_000_000_000).is_some()),
+            "到期时间能算出来（不是 0）—— 也就是这个凭据在本机是**能用的**"
+        );
+
+        // ⑤ 别人那个账号**没有**跟着搬过来（它不属于源机器的管理员）
+        assert!(
+            !have.iter().any(|a| a.id.as_str() == "13700000002"),
+            "别人名下的账号不该进这份文件"
+        );
+
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let _ = std::fs::remove_dir_all(&dst_dir);
+    }
+
+    /// 门：**凭据字段确实在导出里** —— 防的是"以后有人顺手把它删掉"。
+    ///
+    /// 判据落在**序列化后的文本**上（不是结构体字段名）：字段名改了、`serde` 的
+    /// rename 被去掉、或某一类被从 `collect` 里摘掉，这一条都会红 ✓。
+    #[tokio::test]
+    async fn export_text_carries_the_credential_marker_and_fields() {
+        let (app, dir) = test_app("config-marker");
+        let admin = UserId::new("admin");
+        seed_user(&app, "admin", "admin", 100);
+        seed_credentials(&app, &admin, &UserId::new("other")).await;
+
+        let doc = config_doc::collect(&app.handle, &admin)
+            .await
+            .expect("导出");
+        let json = config_doc::to_json(&doc).expect("序列化");
+
+        // ① 顶层那个**明确的敏感标记**
+        assert!(
+            json.contains(r#""containsCredentials": true"#),
+            "顶层要有 containsCredentials: true —— 这文件等于登录态"
+        );
+        // ② `notice` 那句要改成"别乱发、别进版本库"那一版
+        assert!(
+            json.contains("别提交进版本库"),
+            "notice 要说清别乱发、别进版本库：{json}"
+        );
+        // ③ 十一类键都在（少了哪一类这条就红）
+        for key in [
+            "push-rules",
+            "push-panel",
+            "exchange-subscriptions",
+            "auth-refresh",
+            "pipelines",
+            "schedules",
+            "settings",
+            "accounts",
+            "account-state",
+            "account-smid",
+            "pc-device",
+        ] {
+            assert!(json.contains(&format!("\"{key}\"")), "导出里缺了 `{key}`");
+        }
+        // ④ **凭据本身**那几个字段（token / 到期时间 / 账号标识）
+        for needle in [
+            r#""raw": "raw-1""#,
+            r#""token": "tok-1|seg|seg|1790000000000""#,
+            r#""expire": 1790000000000"#,
+            r#""phone": "13800000000""#,
+            r#""user_domain_id": "1234567890123456789""#,
+            r#""fingerprint_json": "{\"screen\":\"1920x1080\"}""#,
+            r#""pc-device": "62AA2BDA29F99744536E142A83CA5B03-ENDIN""#,
+        ] {
+            assert!(json.contains(needle), "导出里缺了 {needle}：{json}");
+        }
+        // ⑤ 别人的账号**不在**（归属过滤那条边界）
+        assert!(
+            !json.contains("13700000002") && !json.contains("raw-o"),
+            "别人名下的账号与凭据都不该进这份文件"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 门：CLI **不提供"选谁"** —— `--user` / `--owner` / `-u` 一律报错。
     ///
     /// 判据只有一处（`cli/push.rs::reject_user_selection`）；这里钉的是
@@ -1690,6 +2198,16 @@ mod tests {
         assert!(USAGE.contains("mcloud config import"));
         assert!(USAGE.contains("--with-instance"));
         assert!(USAGE.contains("--user"));
+        // ⚠ 2026-10-12 起凭据也进文件 ⇒ 用法里必须把这件事说清（否则用户以为
+        // "导出的只是配置"，把这份登录态随手发出去 ✗）
+        for key in ["accounts", "account-state", "account-smid", "pc-device"] {
+            assert!(USAGE.contains(key), "用法里要说清导出带上 `{key}`");
+        }
+        assert!(USAGE.contains("登录态"), "用法里要说清这文件等于登录态");
+        assert!(
+            USAGE.contains("不用重新登录"),
+            "用法里要说清导入后不用重新登录"
+        );
     }
 
     /// 门：`run` 的三条路都不 panic —— 不带子命令 / `help` 退 0，未知子命令报错。

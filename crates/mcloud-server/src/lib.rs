@@ -8,6 +8,8 @@
 
 pub mod auth_gate;
 pub mod cli;
+/// 导出文档的**唯一**实现（CLI `config export` 与 WebUI `GET /api/config/export` 共用）。
+pub mod config_doc;
 pub mod error;
 pub mod logbuf;
 pub mod qr;

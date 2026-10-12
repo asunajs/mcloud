@@ -89,6 +89,29 @@ impl LoginService {
         Ok(fresh)
     }
 
+    /// **只读**地取机器级那一枚：从没生成过就是 `None`。
+    ///
+    /// # 为什么不能拿 [`Self::pc_device_id`] 顶替
+    ///
+    /// 那个是"没有就生成并落盘"（[`proto::load_or_create_pc_device`]）。导出配置时
+    /// 用它，就等于"用户只是导出一下，这台机器就多了一枚设备指纹"—— 凭空多出一个
+    /// 副作用，而且是**改盘**的那种。要读就得有不带副作用的读。
+    pub async fn pc_device_id_opt(&self) -> Result<Option<String>> {
+        self.store.pc_device_id().await
+    }
+
+    /// 写入机器级那一枚（**导入配置**用：把源机器登记的那枚搬过来）。
+    ///
+    /// 形状由 `JsonStore::set_pc_device_id` 校验（32 位大写 hex + `-ENDIN`），
+    /// 不合法的值会被拒 —— 写进去一个半截 id，下一次读会被判成"没有"，
+    /// 于是每轮都生成一枚新的，那正是这个文件要防的事。
+    ///
+    /// ⚠ 与 [`Self::rotate_pc_device_id`] 同一层语义：只改随后读到的那个值，
+    /// 不作废任何扫码会话、不影响任何账号的登录。
+    pub async fn set_pc_device_id(&self, device_id: &str) -> Result<()> {
+        self.store.set_pc_device_id(device_id).await
+    }
+
     /// 给**这个账号**取一枚 PC 设备指纹。
     ///
     /// # 一枚指纹只属于一个账号

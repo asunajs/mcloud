@@ -293,6 +293,37 @@ function isAuthActionFailure(method: string, path: string): boolean {
 const REQUEST_TIMEOUT_MS = 30_000
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetchChecked(path, init)
+  if (response.status === 204) return undefined as T
+
+  const text = await response.text()
+  let data: unknown = null
+  if (text) {
+    try {
+      data = JSON.parse(text)
+    } catch {
+      // 后端异常时可能返回非 JSON（例如反向代理的 HTML 错误页），
+      // 保留原文片段便于排查，而不是抛一句无信息的解析错误
+      throw new ApiError(response.status, `响应不是 JSON：${text.slice(0, 200)}`)
+    }
+  }
+  return data as T
+}
+
+/**
+ * 发一次请求，把**传输层失败**与 **HTTP 错误**两条路都在这一处处理掉。
+ *
+ * # 为什么要从 [`request`] 里抽出来
+ *
+ * `web/src` 里**只有这一处** `fetch(`（见下面那段注释：中文错误提示靠这个唯一性
+ * 才"一处改完全站生效"✓）。而导出配置那条路要拿的是**响应头与原文**
+ *（文件名在 `Content-Disposition` 里、内容要**原样**落盘 ✓）——
+ * 在页面里自己再 `fetch` 一次就破了那个唯一性 ✗。
+ *
+ * 所以：两条路共用这一个函数（`request` 拿 JSON、[`exportConfig`] 拿原文 ✓），
+ * `fetch(` 仍然只有一处 ✓。
+ */
+async function fetchChecked(path: string, init?: RequestInit): Promise<Response> {
   let response: Response
   try {
     response = await fetch(path, {
@@ -342,6 +373,9 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(0, `请求失败：${e instanceof Error ? e.message : String(e)}`)
   }
 
+  if (response.ok) return response
+
+  // ── HTTP 错误（4xx / 5xx）：把**后端给的那句人话**透出去 ──────────────
   const text = await response.text()
   let data: unknown = null
   if (text) {
@@ -350,37 +384,84 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // 后端异常时可能返回非 JSON（例如反向代理的 HTML 错误页），
       // 保留原文片段便于排查，而不是抛一句无信息的解析错误
-      if (!response.ok) {
-        throw new ApiError(response.status, `响应不是 JSON（HTTP ${response.status}）：${text.slice(0, 200)}`)
-      }
-      throw new ApiError(response.status, `响应不是 JSON：${text.slice(0, 200)}`)
+      throw new ApiError(
+        response.status,
+        `响应不是 JSON（HTTP ${response.status}）：${text.slice(0, 200)}`,
+      )
     }
   }
 
-  if (!response.ok) {
-    const body = data && typeof data === 'object' ? (data as ApiErrorBody) : null
-    const message = body && 'error' in body ? String(body.error) : `HTTP ${response.status}`
-    const code = body && typeof body.code === 'string' ? body.code : undefined
+  const body = data && typeof data === 'object' ? (data as ApiErrorBody) : null
+  const message = body && 'error' in body ? String(body.error) : `HTTP ${response.status}`
+  const code = body && typeof body.code === 'string' ? body.code : undefined
 
-    // ⭐ 认证失败要在**这一层**统一识别。
-    //
-    // 放在这里而不是各页面：每个页面都要处理的话，漏一个就是那一个页面
-    // 永远卡在错误态；而"漏了"没有任何测试会红。
-    //
-    // ⚠ 登录接口自己**排除在外**：它返回 401 表示"用户名或口令错误"，
-    // 那是这个动作的正常失败，不是"整个应用要跳登录页"——
-    // 而用户此刻**就在**登录页上。
-    const method = (init?.method ?? 'GET').toUpperCase()
-    if (!isAuthActionFailure(method, path)) {
-      const authFailure = classifyAuthFailure(response.status, code)
-      if (authFailure) noteAuthRequired(authFailure)
-    }
-
-    throw new ApiError(response.status, message, code)
+  // ⭐ 认证失败要在**这一层**统一识别。
+  //
+  // 放在这里而不是各页面：每个页面都要处理的话，漏一个就是那一个页面
+  // 永远卡在错误态；而"漏了"没有任何测试会红。
+  //
+  // ⚠ 登录接口自己**排除在外**：它返回 401 表示"用户名或口令错误"，
+  // 那是这个动作的正常失败，不是"整个应用要跳登录页"——
+  // 而用户此刻**就在**登录页上。
+  const method = (init?.method ?? 'GET').toUpperCase()
+  if (!isAuthActionFailure(method, path)) {
+    const authFailure = classifyAuthFailure(response.status, code)
+    if (authFailure) noteAuthRequired(authFailure)
   }
 
-  if (response.status === 204) return undefined as T
-  return data as T
+  throw new ApiError(response.status, message, code)
+}
+
+/**
+ * 导出的那份配置（页面据此落盘）。
+ *
+ * ⚠ `json` 是**服务端那份原文**（不重新序列化）：CLI 写盘的那份与界面下载到的
+ * 那一份因此是**逐字节同形**的 ✓ —— 重新 `JSON.stringify` 一遍的话，键序、缩进
+ * 都可能与后端不同（而导入侧只认自己那一套形状，两边漂移就要等用户换机器才发现 ✗）。
+ */
+export interface ConfigExport {
+  /** 服务端 `Content-Disposition` 里给的文件名（带用户名与时间戳 ✓）。 */
+  filename: string
+  /** 文件内容（原样）。 */
+  json: string
+}
+
+/**
+ * `GET /api/config/export` —— 导出**当前登录用户自己**那份配置。
+ *
+ * ⚠ **per-owner**：服务端用的是登录会话的 owner（`auth_gate::CurrentUser` ✓），
+ * 别人的账号 / 规则 / 凭据一条都不会进来 ✓ —— 这里没有任何"导谁的"参数可传 ✓。
+ *
+ * ⚠ 拿到的是**一份登录态**（含账号凭据与推送渠道 token）⇒ 界面上要说清
+ * "别乱发、别进版本库" ✓（那句话在设置页那枚按钮旁边 ✓）。
+ */
+export async function exportConfig(): Promise<ConfigExport> {
+  const resp = await fetchChecked('/api/config/export')
+  const json = await resp.text()
+  return {
+    filename: downloadFilename(resp.headers.get('content-disposition')) ?? 'mcloud-config.json',
+    json,
+  }
+}
+
+/**
+ * 从 `Content-Disposition` 里取文件名。
+ *
+ * 优先 RFC 5987 的 `filename*=UTF-8''…`（中文用户名走这一份 ✓），
+ * 认不出就给 `null`（调用方回落到一个固定名 ✓）。
+ */
+function downloadFilename(header: string | null): string | null {
+  if (!header) return null
+  const star = /filename\*=UTF-8''([^;]+)/i.exec(header)
+  if (star) {
+    try {
+      return decodeURIComponent(star[1].trim())
+    } catch {
+      // 编码坏了就往下试 ASCII 那一份（不把整个导出带崩 ✓）
+    }
+  }
+  const plain = /filename="([^"]+)"/i.exec(header)
+  return plain ? plain[1] : null
 }
 
 // ── 认证（WebUI 登录闸）──────────────────────────────────────────────

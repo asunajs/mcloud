@@ -1391,7 +1391,14 @@ export const serve = (root, port, variant) =>
      */
     const send = (req, res, entry, plain) => {
       const respond = (r) => {
-        res.writeHead(plain ? 200 : (r.status ?? 200), { 'content-type': 'application/json' })
+        // ⚠ `headers` 是**可选**的（2026-10-12 加）：默认那份只有 `content-type` ✓；
+        // 个别端点要额外头才能测到真行为 —— 例如「导出配置」的下载文件名在
+        // `Content-Disposition` 里，前端要**真的**去读它（`web/src/api.ts` 的
+        // `downloadFilename` ✓）⇒ 装置得能把它发出来 ✓（否则那条断言是空转 ✗）。
+        res.writeHead(plain ? 200 : (r.status ?? 200), {
+          'content-type': 'application/json',
+          ...(plain ? {} : (r.headers ?? {})),
+        })
         res.end(JSON.stringify(plain ? r : r.body))
       }
       if (!entry.handler) {
