@@ -140,6 +140,24 @@ try {
   check('服务节「服务操作」卡里有「导出配置」按钮', btn.found === true, JSON.stringify(btn))
   check('那枚按钮在「服务操作」卡里、且可点', btn.cardTitle === '服务操作' && btn.disabled === false, JSON.stringify(btn))
 
+  /**
+   * ⚠ 旁边那句话也要在（用户口径 2026-10-12 ✓）——两件事缺一不可：
+   * ① "要搬到另一台机器，用 `mcloud config import <文件>`"（导入**没有界面**，
+   *    不说的话用户会在这页上找导入按钮 ✗）；
+   * ② 这文件**含凭据**、别乱发别进版本库（不说的话用户会把它当普通配置文件发出去 ✗）。
+   * 只判"卡里有这几段字" —— 排版怎么放不归门禁管 ✓。
+   */
+  const hint = await ev(`(() => {
+    const b = [...document.querySelectorAll('#app button')].find((x) => x.textContent.trim() === '导出配置')
+    const t = b?.closest('.card')?.textContent ?? ''
+    return {
+      importCmd: t.includes('mcloud config import'),
+      credentials: t.includes('账号凭据') && t.includes('别乱发'),
+    }
+  })()`)
+  check('卡里说清了"另一台机器上用 mcloud config import 导入"', hint.importCmd === true, JSON.stringify(hint))
+  check('卡里说清了"这份文件含凭据、别乱发"', hint.credentials === true, JSON.stringify(hint))
+
   // ── 点它 ──
   const clicked = await ev(`(() => {
     const b = [...document.querySelectorAll('#app button')].find((x) => x.textContent.trim() === '导出配置')
