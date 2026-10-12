@@ -135,7 +135,8 @@ pub fn router() -> Router<ServerState> {
         .route("/api/system/restart", post(system::restart))
         // ── 导出配置（设置页「服务」节那枚按钮）────────────────────────
         // ⚠ **只读**（GET）：它导的是**当前登录用户自己**那份配置，一个字节都不改；
-        // ⚠ 导入**没有**界面 —— 那是覆盖式操作，走 CLI `mcloud config import <文件>` ✓。
+        // ⚠ 导入**没有**界面（用户口径「导入不要做界面」）—— 走 CLI
+        // `mcloud config import <文件>` ✓。
         .merge(config::routes())
         // 今日AI豆（云朵记录汇总）—— **只读**：按账号读流水，绝不合计。
         // 一个账号读不到进响应的 `failed`，不打整张卡（见 beans.rs 模块头）。

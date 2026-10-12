@@ -38,20 +38,32 @@
 //! ⚠ `pc-device`（本机设备指纹）**不**走这个开关：它跟的是"凭据要能用"那条线
 //! （`--with-instance` 管的是整台机器的策略格），所以导入时**一律应用** ✓。
 //!
-//! # 导入的语义
+//! # 导入的语义：**按 id 合并**（2026-10-12 用户裁定「不要整体吧」）
 //!
-//! * **覆盖式**：文件里有的那一类**整类替换**（本机多出来的那几条会被删掉）；
-//!   文件里**没有**的类别一个字节都不动。
+//! * **列表型类别一律按 id 合并**（账号 / 推送规则 / 面板绑定 / 兑换订阅 / 定时 / 编排）：
+//!   * 文件里有、本机也有同一个 id ⇒ **覆盖那一条**（逐字段以文件为准）；
+//!   * 文件里有、本机没有 ⇒ **新增**；
+//!   * 本机有、文件里没有 ⇒ **原样留着**（不删）。
+//!
+//!   上一版是"文件里有哪一类就把那一类整类替换"（本机多出来的会被删掉），用户裁定不要
+//!   那个。这条对**所有**列表型类别是同一份口径，不是"一类一套" —— 读数也共用
+//!   [`merge_counts`] 一处。
+//! * 文件里**没有**的类别一个字节都不动（键缺席 = 这一类不许动，`Option` 的语义兜着）。
 //! * **先备份**：动手之前把要改的文件备成 `<名字>.bak-<时间戳>`，中途失败自动回滚。
 //! * **先全解析、后落盘**：读文件、认版本、逐类校验、id 归属冲突检查全过了，才动第一笔。
 //! * **归属重指**：文件里的 `owner` 一律改成**本机那个用户**（见 [`repoint_id`]）——
 //!   两台机器的用户 id 是各自生成的 uuid，照抄过去那份数据谁也看不见。
-//!   ⚠ 账号那一类走的是**同一套**：`accounts.json` 里每个账号的 `owner` 也重指到
-//!   本机用户 ✓（用的是同一道冲突闸，见 [`check_id_conflicts`]）✓。
-//! * ⚠ **按账号 id 存的那两张表**（`state.json` / `smid.json`）是**按键合并**、
-//!   不是整类替换：它们装着**本机所有账号**的运行期状态与设备指纹（别的用户的也在里面 ✓）
-//!   ⇒ 整类替换会把别人的那份一起抹掉 ✗。文件里给了哪个账号，就写哪个账号那一格 ✓。
-//! * 导完打印**逐类条数**，并提醒**重启服务**才生效（`JsonStore` 启动时全量读进内存）。
+//!   账号那一类走的是**同一套**：`accounts.json` 里每个账号的 `owner` 也重指到本机用户
+//!   （用的是同一道冲突闸，见 [`check_id_conflicts`]）。
+//! * **归属闸不放松**：文件里那条 id 若在本机属于**别人**，导入当场停下并回滚，一条都不写
+//!   —— 合并语义说的是"本机多出来的留着"，不是"把别人的抢过来"。
+//! * **按账号 id 存的那两张表**（`state.json` / `smid.json`）本来就是按键合并（它们装着
+//!   **本机所有账号**的运行期状态与设备指纹，别的用户的也在里面）—— 这一版起与别的类别
+//!   同一条口径了：文件里给了哪个账号，就写哪个账号那一格，其余一个字节都不动。
+//! * **实例级那几格是标量**（`--with-instance` 管的那份 `settings.json`）⇒ 覆盖语义照旧、
+//!   不必"合并"：标量没有"本机多出来的一条"这回事。默认不动，加了开关才整格覆盖。
+//! * 导完打印**逐类条数**（含"本机另有 N 条原样保留"），并提醒**重启服务**才生效
+//!   （`JsonStore` 启动时全量读进内存）。
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -60,18 +72,27 @@ use anyhow::Context;
 use mcloud_app::App;
 use mcloud_core::push::BehaviorKey;
 use mcloud_core::{
-    auth_refresh, Account, AccountId, Pipeline, PipelineId, Schedule, ScheduleId, UserId,
+    auth_refresh, Account, AccountId, ExchangeSubscription, PanelBindings, Pipeline, PipelineId,
+    Schedule, ScheduleId, UserId,
 };
 
 use crate::cli::push::{cli_owner, reject_user_selection};
 use crate::config_doc::{self, ExportDoc, FORMAT_KEY, FORMAT_VERSION};
+
+/// 导出文件里"面板绑定"那一格的键名。
+///
+/// 它必须与 `config_doc::ExportDoc` 的 `#[serde(rename = "push-panel")]` 是同一个字面量
+/// （`serde` 的 rename 只吃字面量，没法引常量）—— 改一处要改两处，单测里那条
+/// "文件里只给一格面板绑定"的用例就是钉这件事的。
+const KEY_PUSH_PANEL: &str = "push-panel";
 
 pub const USAGE: &str = "\
 用法：
   mcloud config export [--out <路径>]       导出本机用户的配置
                                             （省略 --out 就打 stdout，可重定向到文件）
   mcloud config import <路径> [--with-instance]
-                                            把那份 JSON **覆盖式**应用到本机用户
+                                            把那份 JSON **按 id 合并**到本机用户
+                                            （同 id 覆盖、本机多出来的保留）
   mcloud config help                        打印帮助（`--help` / `-h` 同；
                                             打的是 `mcloud --help` 那份命令清单）
   mcloud config                             不带子命令 = 打印下面这份详细用法
@@ -96,10 +117,14 @@ CLI 上**没有** `--user` / `--owner` —— 两条命令都只作用于**本�
 ⚠ 这份文件**等于你的登录态**（顶层 `containsCredentials: true` 标着它）：
 里面有账号凭据、设备指纹与推送渠道的 token ⇒ 别随手发给别人，也别提交进版本库。
 导出的意义就是搬到另一台机器**直接用** —— 导入之后不用重新登录就能跑任务。
-导入是**覆盖式**：文件里有的那一类整类替换（本机多出来的那几条会被删掉）；
-文件里**没有**的类别一个字节都不动。
-（例外：`account-state` / `account-smid` 按**账号 id 合并** —— 那两张表装着本机所有
-账号的东西，整类替换会连别人的一起抹掉。）
+导入是**按 id 合并**：文件里有的那一类，同一个 id 就把本机那一条**覆盖**掉（逐字段以文件
+为准）、本机没有的就**新增**，而**本机多出来的原样留着**（不删）；文件里**没有**的类别
+一个字节都不动。账号 / 推送规则 / 面板绑定 / 兑换订阅 / 定时 / 编排一律是这条口径
+（`account-state` / `account-smid` 本来就按账号 id 合并）。
+文件里那条 id 若在本机属于**别人**，导入会当场停下并回滚，一条都不写（CLI 不抢别人的东西）。
+`--with-instance` 是**另一回事**：实例级那几格（口令下限 / 会话时长 / 历史与日志上限 /
+实例级刷新钟点）是**标量**，没有「本机多出来的一条」这回事 ⇒ 加了它才整格覆盖，不加就一格
+都不动。列表类那一半**不需要**这个开关，合并是默认行为。
 导入前会先把要改的文件备份成 `<名字>.bak-<时间戳>`，中途失败自动回滚到导入前那份。
 导入完**必须重启服务**才生效（`JsonStore` 启动时把那些文件全量读进内存）：
     scripts/dev-reload.sh --no-build";
@@ -273,8 +298,9 @@ fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 #[derive(Debug, Default)]
 struct Report {
     push_rules: Option<Counts>,
-    push_panel: bool,
-    exchange_subscriptions: Option<usize>,
+    /// 面板绑定：文件里给了**几格**（那四格是固定的，本机不会多出第五格 ⇒ 报"给了几格"）。
+    push_panel: Option<usize>,
+    exchange_subscriptions: Option<Counts>,
     auth_refresh: Option<String>,
     pipelines: Option<Counts>,
     schedules: Option<Counts>,
@@ -289,22 +315,109 @@ struct Report {
     pc_device: Option<bool>,
 }
 
-/// 列表型那一类的条数读数。
+/// 列表型那一类的条数读数（**按 id 合并**那一套的唯一一份读数）。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Counts {
+    /// 文件里给了几条。
     total: usize,
+    /// 本机原来没有 ⇒ 新增。
     added: usize,
+    /// 本机原来有同一个 id ⇒ 覆盖。
     updated: usize,
-    removed: usize,
+    /// 本机有、文件里没有 ⇒ 原样留着（**上一版会把它们删掉**，这个数就是这次改动的意义）。
+    kept: usize,
 }
 
 impl Counts {
     fn line(&self, unit: &str) -> String {
         format!(
-            "共 {} {unit}（新增 {}、更新 {}、删除 {}）",
-            self.total, self.added, self.updated, self.removed
+            "文件里 {} {unit}（新增 {}、覆盖 {}）；本机另有 {} {unit}原样保留",
+            self.total, self.added, self.updated, self.kept
         )
     }
+}
+
+/// 列表类**按 id 合并**的读数（**只有这一份** —— 每一类都调它，免得一类一套口径）。
+///
+/// `local` 是本机**管理员名下**现有的那些 id（`mine_*` 的读数），`from_file` 是文件里给的、
+/// **重指之后**的 id。返回的 `kept` 就是"本机有、文件里没有 ⇒ 原样留着"的条数。
+fn merge_counts(local: &HashSet<String>, from_file: impl IntoIterator<Item = String>) -> Counts {
+    let file: HashSet<String> = from_file.into_iter().collect();
+    let updated = local.intersection(&file).count();
+    Counts {
+        total: file.len(),
+        added: file.len() - updated,
+        updated,
+        kept: local.len() - updated,
+    }
+}
+
+/// 兑换订阅**按奖品 id 合并**：同 id 用文件里那条覆盖，本机多出来的**留在原位**。
+///
+/// 顺序只影响"订阅时刻完全相同"那种边角：落盘时 `save_exchange_subscriptions` 会再按
+/// （订阅时刻, 奖品 id）排一遍，读回来与导出那份同序（那是它自己的口径，不归这里管）。
+fn merge_subscriptions(
+    local: Vec<ExchangeSubscription>,
+    from_file: &[ExchangeSubscription],
+) -> (Vec<ExchangeSubscription>, Counts) {
+    let mut merged = local;
+    let local_ids: HashSet<i64> = merged.iter().map(|s| s.prize_id).collect();
+    let mut updated = 0;
+    for s in from_file {
+        match merged.iter_mut().find(|e| e.prize_id == s.prize_id) {
+            Some(slot) => {
+                *slot = s.clone();
+                updated += 1;
+            }
+            None => merged.push(s.clone()),
+        }
+    }
+    let counts = Counts {
+        total: from_file.len(),
+        added: from_file.len() - updated,
+        updated,
+        // 文件里的 `prize_id` 在校验那一步已经保证互不相同 ⇒ 命中的必是本机不同的那几条
+        kept: local_ids.len() - updated,
+    };
+    (merged, counts)
+}
+
+/// 面板绑定**按行为格合并**：文件里写了哪几格就覆盖哪几格，其余保留本机。
+///
+/// 为什么不直接用反序列化出来的那份 `PanelBindings`：那四格都带 `serde(default = ...)`，
+/// 文件里**漏写**的格子会被悄悄填成默认值 —— 那正是"把本机多出来的删掉"的另一种形状
+/// （比如文件只写了 `loginNew`，本机那格 `perfSlow` 就会被清回默认）。
+/// 导出的文件里四格必然都在，所以这一条对"导出再导入"与整格覆盖结果相同；
+/// 差别只出现在**手写的**部分文件上，而那时"文件里没给的保留本机"才是与别的类别一致的口径。
+///
+/// 这里按**文件里的键名**盖（`PanelBindings` 上有 `rename_all = "camelCase"` ⇒
+/// `loginNew` / `loginFailed` / `perfSlow` / `perfFailStreak`，不是 Rust 那边的字段名）。
+///
+/// 返回文件里真正给了几格（报告用）。
+async fn merge_panel(
+    app: &App,
+    owner: &UserId,
+    from_file: Option<&serde_json::Value>,
+) -> anyhow::Result<usize> {
+    let store = &app.handle.store;
+    let mut merged = serde_json::to_value(store.push_panel(owner).await?)?;
+    let mut n = 0;
+    if let Some(serde_json::Value::Object(from_file)) = from_file {
+        let base = merged
+            .as_object_mut()
+            .expect("`PanelBindings` 序列化出来就是一个 JSON 对象");
+        for (key, value) in from_file {
+            // 只认已知那几格：多出来的键（文件被改坏、或来自别的版本）不写进本机那一份
+            if base.contains_key(key) {
+                base.insert(key.clone(), value.clone());
+                n += 1;
+            }
+        }
+    }
+    let panel: PanelBindings = serde_json::from_value(merged)
+        .context("合并之后的面板绑定读不回来（文件里那一格形状不对？）")?;
+    store.save_push_panel(owner, &panel).await?;
+    Ok(n)
 }
 
 impl Report {
@@ -313,14 +426,14 @@ impl Report {
         if let Some(c) = &self.push_rules {
             out.push(format!("  推送规则              {}", c.line("条")));
         }
-        if self.push_panel {
+        if let Some(n) = self.push_panel {
             out.push(format!(
-                "  面板绑定              已替换（{} 个行为）",
+                "  面板绑定              按行为合并（文件里给了 {n}/{} 格，其余保留本机）",
                 BehaviorKey::ALL.len()
             ));
         }
-        if let Some(n) = self.exchange_subscriptions {
-            out.push(format!("  兑换订阅              共 {n} 条"));
+        if let Some(c) = &self.exchange_subscriptions {
+            out.push(format!("  兑换订阅              {}", c.line("条")));
         }
         if let Some(at) = &self.auth_refresh {
             out.push(format!("  刷新钟点              {at}"));
@@ -376,7 +489,7 @@ async fn import_cmd(app: &App, path: &Path, with_instance: bool) -> anyhow::Resu
     //
     //    后两步的报错都**带上文件名**：只说"`schedules` 里的 cron 不合法"，
     //    而用户手上可能同时有几份导出文件 —— 说清是哪一份才叫说清了。
-    let doc = read_doc(path)?;
+    let (doc, raw) = read_doc(path)?;
     validate_doc(&doc).map_err(|e| anyhow::anyhow!("{} 里有不合法的配置：{e}", path.display()))?;
     check_id_conflicts(app, &owner, &doc)
         .await
@@ -388,7 +501,7 @@ async fn import_cmd(app: &App, path: &Path, with_instance: bool) -> anyhow::Resu
     let backups = backup_files(&app.handle.data_dir, &names, &stamp)?;
 
     // ③ 落盘。中途任何一步失败 ⇒ 把备份盖回去（并说清回滚有没有做干净）。
-    let report = match apply(app, &owner, &doc, with_instance).await {
+    let report = match apply(app, &owner, &doc, &raw, with_instance).await {
         Ok(r) => r,
         Err(e) => {
             let errs = rollback(&backups);
@@ -417,7 +530,12 @@ async fn import_cmd(app: &App, path: &Path, with_instance: bool) -> anyhow::Resu
 ///
 /// 四种失败各说清是哪一种（文件读不到 / 不是 JSON / 没有版本键 / 版本不认识），
 /// 并且**都带上文件名** —— 只报一句"解析失败"等于让人去猜是哪个文件坏了。
-fn read_doc(path: &Path) -> anyhow::Result<ExportDoc> {
+///
+/// 返回**解析好的文档**与**文件里那份原始 JSON**两份：原始那一份只给 `push-panel` 用 ——
+/// 那四格在类型里都带 `serde(default = ...)`，文件里漏写的格子会**悄悄变成默认值**，
+/// 而"按 id 合并"要的是"文件里没给的那一格保留本机" ⇒ 只有拿原始 JSON 逐键盖上去才做得到
+/// （见 [`merge_panel`]）。别的类别不需要它：它们按 id 合并，读出来的列表就是全部信息。
+fn read_doc(path: &Path) -> anyhow::Result<(ExportDoc, serde_json::Value)> {
     let text = std::fs::read_to_string(path).with_context(|| {
         format!(
             "读不到导入文件：{}（先确认路径对不对；导出用 `mcloud config export --out <文件>`）",
@@ -451,12 +569,13 @@ fn read_doc(path: &Path) -> anyhow::Result<ExportDoc> {
         }
     }
 
-    serde_json::from_value(value).with_context(|| {
+    let doc = serde_json::from_value(value.clone()).with_context(|| {
         format!(
             "{} 的形状不对（按 `mcloud config export` 导出的那份逐类核对一遍）",
             path.display()
         )
-    })
+    })?;
+    Ok((doc, value))
 }
 
 /// 逐类校验：**存之前**就把不合法的拦下（与 WebUI 路由走的是同一批判据）。
@@ -763,12 +882,12 @@ fn touched_files(doc: &ExportDoc, with_instance: bool) -> Vec<&'static str> {
         names.push("settings.json");
     }
     // ── 凭据那一组（2026-10-12 起进文件 ✓）────────────────────────────
-    // 账号列表与凭据：整类替换（本机多出来的账号会被删掉，与规则/定时同一条口径 ✓）。
+    // 账号列表与凭据：按账号 id 合并（与规则 / 定时同一条口径：同 id 覆盖、本机多出来的留着）。
     if doc.accounts.is_some() {
         names.push("accounts.json");
     }
-    // ⚠ 按账号 id 合并的那两张：备份它们是**必须**的（改的是整份文件），
-    // 但**不是**"整类替换" —— 见 `apply` 里那段说明 ✓。
+    // 按账号 id 合并的那两张：备份它们是**必须**的（改的是整份文件），
+    // 合并只决定"写哪几格"，不决定"要不要整份重写" —— 见 `apply` 里那段说明。
     if doc.account_state.is_some() {
         names.push("state.json");
     }
@@ -835,51 +954,44 @@ fn rollback(backups: &[Backup]) -> Vec<String> {
 }
 
 /// 真正落盘。**只在 `read_doc` / `validate_doc` / `check_id_conflicts` 全过之后调**。
+///
+/// `raw` 是导入文件那份**原始 JSON**（只给 [`merge_panel`] 用，见 `read_doc` 的说明）。
 async fn apply(
     app: &App,
     owner: &UserId,
     doc: &ExportDoc,
+    raw: &serde_json::Value,
     with_instance: bool,
 ) -> anyhow::Result<Report> {
     let store = &app.handle.store;
     let src = doc.source_owner();
     let mut report = Report::default();
 
-    // 规则：逐条 upsert（归属重指），本机多出来的按 id 删掉。
+    // 规则：**按 id 合并** —— 文件里给的逐条 upsert（归属重指到本机用户），
+    // 本机多出来的那几条**一个都不删**（上一版在这里 remove，用户裁定不要）。
     if let Some(rules) = &doc.push_rules {
         let existing = store.push_rules(owner).await?;
-        let want: HashSet<String> = rules.iter().map(|r| r.id.to_string()).collect();
-        let mut counts = Counts {
-            total: rules.len(),
-            ..Default::default()
-        };
+        let local: HashSet<String> = existing.iter().map(|e| e.id.to_string()).collect();
         for r in rules {
             let mut rule = r.clone();
             rule.owner = Some(owner.clone());
-            if existing.iter().any(|e| e.id == rule.id) {
-                counts.updated += 1;
-            } else {
-                counts.added += 1;
-            }
             store.save_push_rule(owner, &rule).await?;
         }
-        for e in &existing {
-            if !want.contains(e.id.as_str()) {
-                store.remove_push_rule(owner, &e.id).await?;
-                counts.removed += 1;
-            }
-        }
-        report.push_rules = Some(counts);
+        report.push_rules = Some(merge_counts(&local, rules.iter().map(|r| r.id.to_string())));
     }
 
-    if let Some(panel) = &doc.push_panel {
-        store.save_push_panel(owner, panel).await?;
-        report.push_panel = true;
+    // 面板绑定：**按行为格合并**（见 [`merge_panel`]）。
+    if doc.push_panel.is_some() {
+        let n = merge_panel(app, owner, raw.get(KEY_PUSH_PANEL)).await?;
+        report.push_panel = Some(n);
     }
 
+    // 兑换订阅：**按奖品 id 合并**（同 id 覆盖、本机多出来的留着）。
     if let Some(items) = &doc.exchange_subscriptions {
-        store.save_exchange_subscriptions(owner, items).await?;
-        report.exchange_subscriptions = Some(items.len());
+        let (merged, counts) =
+            merge_subscriptions(store.exchange_subscriptions(owner).await?, items);
+        store.save_exchange_subscriptions(owner, &merged).await?;
+        report.exchange_subscriptions = Some(counts);
     }
 
     if let Some(at) = &doc.auth_refresh {
@@ -889,106 +1001,67 @@ async fn apply(
 
     // 编排放在定时**之前**：默认编排那条定时指向 `daily-<owner>`，
     // 先把编排落到本机，后面那条定时才有东西可指。
+    // 合并口径同上：文件里给的逐条 upsert，本机多出来的留着。
     if let Some(pipes) = &doc.pipelines {
         let existing = mine_pipelines(app, owner).await?;
-        let mut counts = Counts {
-            total: pipes.len(),
-            ..Default::default()
-        };
-        let mut want: HashSet<String> = HashSet::new();
+        let local: HashSet<String> = existing.iter().map(|e| e.id.to_string()).collect();
+        let mut from_file = Vec::with_capacity(pipes.len());
         for p in pipes {
             let mut pipe = p.clone();
             pipe.owner = Some(owner.clone());
             pipe.id = PipelineId::new(repoint_id(p.id.as_str(), src.as_ref(), owner));
-            want.insert(pipe.id.to_string());
-            if existing.iter().any(|e| e.id == pipe.id) {
-                counts.updated += 1;
-            } else {
-                counts.added += 1;
-            }
+            from_file.push(pipe.id.to_string());
             store.save_pipeline(&pipe).await?;
         }
-        for e in &existing {
-            if !want.contains(e.id.as_str()) {
-                store.remove_pipeline(&e.id).await?;
-                counts.removed += 1;
-            }
-        }
-        report.pipelines = Some(counts);
+        report.pipelines = Some(merge_counts(&local, from_file));
     }
 
     if let Some(schs) = &doc.schedules {
         let existing = mine_schedules(app, owner).await?;
-        let mut counts = Counts {
-            total: schs.len(),
-            ..Default::default()
-        };
-        let mut want: HashSet<String> = HashSet::new();
+        let local: HashSet<String> = existing.iter().map(|e| e.id.to_string()).collect();
+        let mut from_file = Vec::with_capacity(schs.len());
         for s in schs {
             let mut sch = s.clone();
             sch.owner = Some(owner.clone());
             sch.id = ScheduleId::new(repoint_id(s.id.as_str(), src.as_ref(), owner));
             repoint_body(&mut sch.body, src.as_ref(), owner);
-            want.insert(sch.id.to_string());
-            if existing.iter().any(|e| e.id == sch.id) {
-                counts.updated += 1;
-            } else {
-                counts.added += 1;
-            }
+            from_file.push(sch.id.to_string());
             store.save_schedule(&sch).await?;
         }
-        for e in &existing {
-            if !want.contains(e.id.as_str()) {
-                store.remove_schedule(&e.id).await?;
-                counts.removed += 1;
-            }
-        }
-        report.schedules = Some(counts);
+        report.schedules = Some(merge_counts(&local, from_file));
     }
 
     // ── 凭据那一组（2026-10-12 起进文件 ✓）────────────────────────────
     //
-    // 账号：逐条 upsert（**归属重指到本机用户** ✓），本机**名下**多出来的按 id 删掉
-    //（与规则 / 定时同一条口径：文件里有的那一类整类替换 ✓）。
+    // 账号：**按账号 id 合并**（与规则 / 定时同一条口径）—— 文件里给的逐条 upsert
+    // （**归属重指到本机用户**），本机**名下**多出来的那些**原样留着**，不删。
     //
-    // ⚠ 归属重指在这里是**必须**的：两台机器的 `UserId` 是各自生成的 uuid，
-    // 照抄过去那份数据谁也看不见（`visible_to` 只认相等 ✓）—— 与定时 / 编排
-    // 走的是**同一套**策略 ✓（账号 id 本身**不**重指：它是上游那个账号的标识，
-    // 两台机器上同一个云盘账号就是同一个 id ✓）。
+    // 归属重指在这里是**必须**的：两台机器的 `UserId` 是各自生成的 uuid，
+    // 照抄过去那份数据谁也看不见（`visible_to` 只认相等）—— 与定时 / 编排走的是**同一套**
+    // 策略（账号 id 本身**不**重指：它是上游那个账号的标识，两台机器上同一个云盘账号
+    // 就是同一个 id）。
     //
-    // ⚠ 删除只按"**显式归属**"收窄（`mine_accounts` ✓，与 `mine_schedules` 同款）：
-    // 无主条目（`owner = None`）不是"这个用户名下的"，不该被这一步带走 ✓。
+    // 合并的读数只按"**显式归属**"算（`mine_accounts`，与 `mine_schedules` 同款）：
+    // 无主条目（`owner = None`）不算"这个用户名下的" ⇒ 它既不进"保留"那个数，
+    // 也不受"文件里没有就留着"这条保护 —— 它与文件里同 id 的那条相遇时照旧被覆盖、
+    // 并认到本机管理员名下（这是上一版逐条 upsert 就有的行为，这次没改）。
     if let Some(accounts) = &doc.accounts {
         let existing = mine_accounts(app, owner).await?;
-        let want: HashSet<String> = accounts.iter().map(|a| a.id.to_string()).collect();
-        let mut counts = Counts {
-            total: accounts.len(),
-            ..Default::default()
-        };
+        let local: HashSet<String> = existing.iter().map(|e| e.id.to_string()).collect();
         for a in accounts {
             let mut acc = a.clone();
             acc.owner = Some(owner.clone());
-            if existing.iter().any(|e| e.id == acc.id) {
-                counts.updated += 1;
-            } else {
-                counts.added += 1;
-            }
             store.save_account(&acc).await?;
         }
-        for e in &existing {
-            if !want.contains(e.id.as_str()) {
-                store.remove_account(&e.id).await?;
-                counts.removed += 1;
-            }
-        }
-        report.accounts = Some(counts);
+        report.accounts = Some(merge_counts(
+            &local,
+            accounts.iter().map(|a| a.id.to_string()),
+        ));
     }
 
-    // ⚠⚠ 下面这两张是**按账号 id 合并**，**不是**整类替换。
-    //
-    // 理由：`state.json` / `smid.json` 装着本机**所有**账号的运行期状态与设备指纹
-    //（别的用户的也在里面 ✓）—— 整类替换会连别人的那份一起抹掉 ✗。
-    // 所以：文件里给了哪个账号，就写哪个账号那一格；其余一个字节都不动 ✓。
+    // 下面这两张**按账号 id 合并**（文件里给了哪个账号，就写哪个账号那一格；
+    // 其余一个字节都不动）—— 从这一版起，它俩与别的类别是**同一条口径**了
+    // （上一版只有它俩是合并、其余是整类替换，那正是这次要抹平的不一致）。
     if let Some(state) = &doc.account_state {
         let mut n = 0;
         for (id, value) in state {
@@ -1045,8 +1118,8 @@ async fn apply(
 ///
 /// 用 `schedules()` + 按 `owner` 过滤，而不是 `schedules_for()`：后者按
 /// `visible_to` 判可见性，单用户实例上连**未归属**（`owner = None`）的那些也算
-/// 可见 —— 而"删除本机多出来的"这一步不该动那些无主条目（它们不是"这个用户
-/// 名下的"）。收窄到显式归属，才与"只动本机管理员那一个用户"的立场一致。
+/// 可见 —— 而合并的读数只该算"这个用户名下的"那几条（无主条目不是）。
+/// 收窄到显式归属，才与"只动本机管理员那一个用户"的立场一致。
 async fn mine_schedules(app: &App, owner: &UserId) -> anyhow::Result<Vec<Schedule>> {
     Ok(app
         .handle
@@ -1589,15 +1662,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 门：**只动该动的** —— 一份只有 `push-rules` 的文件导进去，
-    /// 定时 / 编排 / 订阅 / 钟点 / 面板 / **账号与凭据**一个都不许少。
+    /// 断言：这一组 `data/` 文件的**字节**里，只有 `changed` 那几个变了，其余逐字节相同。
+    ///
+    /// 判据落在**原始字节**上（不是 store 的内存读数）："文件里没有的类别一个字节都不动"
+    /// 这条只有看盘才算数 —— 内存读数相同、盘上被重写一遍（例如顺序变了、多了个空数组）
+    /// 同样是把没被要求改的东西改了。
+    fn assert_only_these_files_changed(
+        before: &[(String, Option<Vec<u8>>)],
+        after: &[(String, Option<Vec<u8>>)],
+        changed: &[&str],
+    ) {
+        for (name, was) in before {
+            if changed.contains(&name.as_str()) {
+                continue;
+            }
+            let now = after
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("{name} 不见了"));
+            assert_eq!(
+                &now.1, was,
+                "{name} 不该被这次导入动到（该变的只有 {changed:?}）"
+            );
+        }
+    }
+
+    /// 门：**只动该动的**，而且那一类是**按 id 合并**（2026-10-12 用户裁定「不要整体吧」）。
+    ///
+    /// 两份钉子合在一条里（同一份夹具）：
+    /// * **合并**：文件里给两条规则 —— 一条与本机 `r1` 同 id（内容不同）、一条本机没有；
+    ///   本机另有 `r2`（本机独有）⇒ 导入后 `r1` 被文件**逐字段**覆盖、`r2` **仍在**、
+    ///   文件里那条新的新增。上一版这里是"整类替换"，`r1`/`r2` 会被整类换掉。
+    /// * **只动该动的**：一份只有 `push-rules` 的文件导进去，定时 / 编排 / 订阅 / 钟点 /
+    ///   面板 / **账号与凭据**一个都不许少，它们对应的**文件字节**也一个都不许变。
     #[tokio::test]
     async fn importing_one_category_leaves_the_others_untouched() {
         let (app, dir) = test_app("config-one-category");
         let admin = UserId::new("admin");
+        let other = UserId::new("other");
         seed_user(&app, "admin", "admin", 100);
-        seed_rich(&app, &admin, &UserId::new("other")).await;
-        seed_credentials(&app, &admin, &UserId::new("other")).await;
+        seed_rich(&app, &admin, &other).await;
+        seed_credentials(&app, &admin, &other).await;
         let store = &app.handle.store;
 
         let schs_before = store.schedules_for(&admin).await.unwrap();
@@ -1606,12 +1711,26 @@ mod tests {
         let panel_before = store.push_panel(&admin).await.unwrap();
         let accounts_before = mine_accounts(&app, &admin).await.unwrap();
         let pc_before = app.handle.login.pc_device_id_opt().await.unwrap();
+        let rules_before = store.push_rules(&admin).await.unwrap();
+        assert_eq!(
+            rules_before.len(),
+            2,
+            "夹具：本机管理员名下有 r1 / r2 两条规则"
+        );
+        let files_before = snapshot_files(&dir);
 
-        // 只有规则那一类，而且只有一条（证明"这一类被整类替换了"）
+        // 文件里只有规则那一类，两条：`r1` 与本机同 id（内容逐格不同 ⇒ 覆盖）、
+        // `r9` 本机没有（⇒ 新增）。本机独有的 `r2` 不许被删。
+        let mut r1_from_file = rule("r1", "文件里那一条");
+        r1_from_file.enabled = false;
+        r1_from_file.config.pushplus = Some(TokenConfig {
+            token: "9999".into(),
+            extra: Default::default(),
+        });
         let doc = serde_json::json!({
             "mcloudConfig": 1,
             "owner": { "id": "admin", "name": "admin" },
-            "push-rules": [rule("r9", "换掉的一条")],
+            "push-rules": [r1_from_file, rule("r9", "新增的一条")],
         });
         let path = dir.join("only-rules.json");
         write_private(
@@ -1622,10 +1741,38 @@ mod tests {
 
         import_cmd(&app, &path, false).await.expect("导入");
 
+        // ── 合并：同 id 覆盖（逐字段）、本机独有的留着、文件里新的新增 ──────────
         let rules = store.push_rules(&admin).await.unwrap();
-        assert_eq!(rules.len(), 1, "文件里那一类整类替换");
-        assert_eq!(rules[0].id.as_str(), "r9");
-        assert_eq!(rules[0].owner, Some(admin.clone()));
+        let ids: Vec<&str> = rules.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["r1", "r2", "r9"],
+            "同 id 的原地覆盖、本机独有的留着、文件里新的追加"
+        );
+        let r1 = rules.iter().find(|r| r.id.as_str() == "r1").unwrap();
+        assert_eq!(r1.name, "文件里那一条", "同 id 那条被文件覆盖（名字）");
+        assert_eq!(
+            r1.config.pushplus.as_ref().unwrap().token,
+            "9999",
+            "逐字段：渠道 token 也以文件为准"
+        );
+        assert!(!r1.enabled, "逐字段：enabled 也以文件为准");
+        assert_eq!(r1.owner, Some(admin.clone()), "归属重指到本机管理员");
+        let r2 = rules.iter().find(|r| r.id.as_str() == "r2").unwrap();
+        let r2_before = rules_before.iter().find(|r| r.id.as_str() == "r2").unwrap();
+        assert_eq!(
+            r2, r2_before,
+            "本机独有那条逐字段原样 —— 这就是这次改动的核心（上一版会把它删掉）"
+        );
+        assert_eq!(
+            rules.iter().find(|r| r.id.as_str() == "r9").unwrap().owner,
+            Some(admin.clone())
+        );
+        // 别人名下那条规则一个字节都没动
+        assert_eq!(store.push_rules(&other).await.unwrap().len(), 1);
+
+        // ── 只动该动的：别的类别连**盘上字节**都没变 ─────────────────────────
+        assert_only_these_files_changed(&files_before, &snapshot_files(&dir), &["push-rules.json"]);
 
         assert_eq!(
             store.schedules_for(&admin).await.unwrap(),
@@ -1658,8 +1805,8 @@ mod tests {
             AppSettings::default(),
             "实例级设置没动"
         );
-        // ⚠ 凭据那一组：文件里**没有** `accounts` ⇒ 账号一个都不许动
-        //（这一条尤其要紧：整类替换写歪了就会把本机账号全删掉 ✗）
+        // 凭据那一组：文件里**没有** `accounts` ⇒ 账号一个都不许动
+        //（这一条尤其要紧：写歪了就会把本机账号全删掉）
         assert_eq!(
             mine_accounts(&app, &admin).await.unwrap(),
             accounts_before,
@@ -1669,6 +1816,263 @@ mod tests {
             app.handle.login.pc_device_id_opt().await.unwrap(),
             pc_before,
             "文件里没有 `pc-device` ⇒ 本机那一枚没动"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 门：**账号那一类也是按 id 合并** —— 本机管理员名下 3 个账号，文件里只给 1 个
+    /// （与其中一个同 id）⇒ 导入后仍是 3 个：那 1 个被文件逐字段覆盖，另外 2 个原样
+    /// （尤其**凭据字段**：`raw` / `token` / `expire` 一个都不许被动）。
+    ///
+    /// 上一版这里是"整类替换"：那 2 个账号（连凭据）会被删掉 —— 用户裁定不要那个。
+    #[tokio::test]
+    async fn importing_accounts_merges_by_id_and_keeps_the_local_ones() {
+        let (app, dir) = test_app("config-account-merge");
+        let admin = UserId::new("admin");
+        let other = UserId::new("other");
+        seed_user(&app, "admin", "admin", 100);
+        seed_user(&app, "other", "other", 200);
+        let store = &app.handle.store;
+
+        // 本机管理员名下三个账号，各有各的凭据与那几格
+        let mut a1 = account(
+            "13800000000",
+            Some("主力号"),
+            "raw-1",
+            "tok-1|seg|seg|1",
+            111,
+        );
+        a1.owner = Some(admin.clone());
+        a1.device_id = DeviceId("B-1".into());
+        a1.settings.backup_wait_secs = 7;
+        store.save_account(&a1).await.unwrap();
+        let mut a2 = account(
+            "13900000001",
+            Some("备用号"),
+            "raw-2",
+            "tok-2|seg|seg|2",
+            222,
+        );
+        a2.owner = Some(admin.clone());
+        store.save_account(&a2).await.unwrap();
+        let mut a3 = account("13900000003", None, "raw-3", "tok-3|seg|seg|3", 333);
+        a3.owner = Some(admin.clone());
+        store.save_account(&a3).await.unwrap();
+        // 别人名下也放一个：合并只按**本机管理员名下**算，别人的一个字节都不许动
+        let mut ao = account("13700000002", Some("别人的号"), "raw-o", "tok-o", 0);
+        ao.owner = Some(other.clone());
+        store.save_account(&ao).await.unwrap();
+
+        let before = mine_accounts(&app, &admin).await.unwrap();
+        assert_eq!(before.len(), 3, "夹具：本机管理员名下 3 个账号");
+        let files_before = snapshot_files(&dir);
+
+        // 文件里只有 1 个账号，与 `13800000000` 同 id：逐字段都换了
+        let mut from_file = account(
+            "13800000000",
+            Some("文件里的号"),
+            "raw-new",
+            "tok-new|seg|seg|9",
+            999,
+        );
+        from_file.device_id = DeviceId("B-file".into());
+        from_file.pc_platform = Some(PcPlatform::Windows);
+        from_file.user_domain_id = Some("9999999999999999999".into());
+        from_file.settings.backup_wait_secs = 42;
+        let doc = serde_json::json!({
+            "mcloudConfig": 1,
+            "owner": { "id": "admin", "name": "admin" },
+            "accounts": [from_file],
+        });
+        let path = dir.join("accounts-merge.json");
+        write_private(
+            &path,
+            serde_json::to_string_pretty(&doc).unwrap().as_bytes(),
+        )
+        .unwrap();
+
+        import_cmd(&app, &path, false).await.expect("导入");
+
+        let after = mine_accounts(&app, &admin).await.unwrap();
+        assert_eq!(after.len(), 3, "本机另外两个账号（连凭据）不许被删");
+
+        let a1_after = after
+            .iter()
+            .find(|a| a.id.as_str() == "13800000000")
+            .unwrap();
+        assert_eq!(a1_after.auth.raw, "raw-new", "同 id 那个：凭据以文件为准");
+        assert_eq!(a1_after.auth.token, "tok-new|seg|seg|9");
+        assert_eq!(a1_after.auth.expire, 999, "到期时间逐字以文件为准");
+        assert_eq!(a1_after.auth.phone, "13800000000");
+        assert_eq!(a1_after.nickname.as_deref(), Some("文件里的号"));
+        assert_eq!(a1_after.device_id.as_str(), "B-file");
+        assert_eq!(a1_after.pc_platform, Some(PcPlatform::Windows));
+        assert_eq!(
+            a1_after.user_domain_id.as_deref(),
+            Some("9999999999999999999")
+        );
+        assert_eq!(a1_after.settings.backup_wait_secs, 42);
+        assert_eq!(a1_after.owner, Some(admin.clone()), "归属重指到本机管理员");
+
+        for id in ["13900000001", "13900000003"] {
+            let was = before.iter().find(|a| a.id.as_str() == id).unwrap();
+            let now = after.iter().find(|a| a.id.as_str() == id).unwrap();
+            assert_eq!(
+                now, was,
+                "{id} 逐字段原样（凭据 raw / token / expire 尤其不许动）"
+            );
+        }
+        assert_eq!(
+            store.accounts_for(&other).await.unwrap().len(),
+            1,
+            "别人的账号没动"
+        );
+        // 文件里只有 `accounts` ⇒ 盘上只有 accounts.json 变
+        assert_only_these_files_changed(&files_before, &snapshot_files(&dir), &["accounts.json"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 门：**其余列表型类别同样是"按 id 合并"**（别一类一套口径）。
+    ///
+    /// 一次导入里把编排 / 定时 / 兑换订阅 / 面板绑定都摆上：
+    /// * 编排与定时：同 id 的覆盖、本机独有的留着、文件里新的新增；
+    /// * 兑换订阅：按**奖品 id** 合并（同 id 覆盖、本机多出来的留着）；
+    /// * 面板绑定：按**行为格**合并 —— 文件里只给了 `login_new` ⇒ 本机那格 `perf_slow`
+    ///   保留（要是拿反序列化出来那份整格写下去，它会回落成默认值，等于把本机的清掉）。
+    #[tokio::test]
+    async fn the_other_list_categories_merge_by_id_too() {
+        let (app, dir) = test_app("config-merge-others");
+        let admin = UserId::new("admin");
+        let other = UserId::new("other");
+        seed_user(&app, "admin", "admin", 100);
+        seed_user(&app, "other", "other", 200);
+        seed_rich(&app, &admin, &other).await;
+        let store = &app.handle.store;
+
+        // 本机再加一条**独有**的编排，并把面板那两格都绑上规则
+        let mut p_local = pipeline("p-local", "本机独有的编排");
+        p_local.owner = Some(admin.clone());
+        store.save_pipeline(&p_local).await.unwrap();
+        let mut panel = store.push_panel(&admin).await.unwrap();
+        panel.login_new.rules = vec![PushRuleId::new("r1")];
+        panel.perf_slow.rules = vec![PushRuleId::new("r2")];
+        store.save_push_panel(&admin, &panel).await.unwrap();
+
+        let pipes_before = mine_pipelines(&app, &admin).await.unwrap();
+        let schs_before = mine_schedules(&app, &admin).await.unwrap();
+        assert_eq!(pipes_before.len(), 2, "夹具：本机两条编排");
+        assert_eq!(schs_before.len(), 4, "夹具：本机四条定时");
+        assert_eq!(store.exchange_subscriptions(&admin).await.unwrap().len(), 2);
+        let files_before = snapshot_files(&dir);
+
+        // 文件里：编排两条（`daily-admin` 同 id、`p-file` 新）、定时两条（`daily-admin`
+        // 同 id、`sch-file` 新）、订阅两条（奖品 11 同 id、33 新）、面板一格（`login_new`）
+        let mut pipe_over = pipeline("daily-admin", "文件里的默认编排");
+        pipe_over.enabled = false;
+        let mut sch_over = schedule("daily-admin", "文件里的默认定时", "0 7 * * *", None);
+        sch_over.run_count = 99;
+        let panel_from_file = {
+            // 那四格的键名是 camelCase（`PanelBindings` 上有 `rename_all = "camelCase"`）——
+            // 覆盖用的正是**文件里那些键名**，所以这里也照它写。
+            let mut v = serde_json::to_value(PanelBindings::default()).unwrap();
+            let obj = v.as_object_mut().unwrap();
+            obj.retain(|k, _| k == "loginNew");
+            obj.get_mut("loginNew").unwrap()["rules"] = serde_json::json!(["r-file"]);
+            v
+        };
+        let doc = serde_json::json!({
+            "mcloudConfig": 1,
+            "owner": { "id": "admin", "name": "admin" },
+            "pipelines": [pipe_over, pipeline("p-file", "文件里新加的编排")],
+            "schedules": [
+                sch_over,
+                schedule("sch-file", "文件里新加的定时", "0 6 * * *", None),
+            ],
+            "exchange-subscriptions": [
+                sub(11, "文件里的奖品甲", 3_000),
+                sub(33, "文件里新加的奖品", 4_000),
+            ],
+            "push-panel": panel_from_file,
+        });
+        let path = dir.join("merge-others.json");
+        write_private(
+            &path,
+            serde_json::to_string_pretty(&doc).unwrap().as_bytes(),
+        )
+        .unwrap();
+
+        import_cmd(&app, &path, false).await.expect("导入");
+
+        // ── 编排 ──────────────────────────────────────────────────────────
+        let pipes = mine_pipelines(&app, &admin).await.unwrap();
+        let ids: Vec<&str> = pipes.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids.len(), 3, "本机两条都在 + 文件里新的一条：{ids:?}");
+        assert!(ids.contains(&"p-local"), "本机独有的编排留着：{ids:?}");
+        assert!(ids.contains(&"p-file"), "文件里新的编排新增：{ids:?}");
+        let over = pipes
+            .iter()
+            .find(|p| p.id.as_str() == "daily-admin")
+            .unwrap();
+        assert_eq!(over.name, "文件里的默认编排", "同 id 的编排被文件覆盖");
+        assert!(!over.enabled, "逐字段：enabled 也以文件为准");
+        assert_eq!(over.owner, Some(admin.clone()));
+
+        // ── 定时 ──────────────────────────────────────────────────────────
+        let schs = mine_schedules(&app, &admin).await.unwrap();
+        let sids: Vec<&str> = schs.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(sids.len(), 5, "本机四条都在 + 文件里新的一条：{sids:?}");
+        for keep in ["sch-1", "auto-live-admin", "auto-auth-refresh-admin"] {
+            assert!(
+                sids.contains(&keep),
+                "本机独有的定时留着（{keep}）：{sids:?}"
+            );
+        }
+        assert!(sids.contains(&"sch-file"), "文件里新的定时新增：{sids:?}");
+        let daily = schs
+            .iter()
+            .find(|s| s.id.as_str() == "daily-admin")
+            .unwrap();
+        assert_eq!(daily.name, "文件里的默认定时", "同 id 的定时被文件覆盖");
+        assert_eq!(daily.expr, "0 7 * * *", "cron 表达式逐字以文件为准");
+        assert_eq!(daily.run_count, 99, "逐字段：run_count 也以文件为准");
+        assert_eq!(daily.owner, Some(admin.clone()));
+
+        // ── 兑换订阅（按奖品 id）──────────────────────────────────────────
+        let subs = store.exchange_subscriptions(&admin).await.unwrap();
+        assert_eq!(subs.len(), 3, "11 覆盖、22 留着、33 新增");
+        let s11 = subs.iter().find(|s| s.prize_id == 11).unwrap();
+        assert_eq!(s11.name, "文件里的奖品甲", "同 id 的订阅以文件为准");
+        assert_eq!(s11.subscribed_at_ms, 3_000);
+        let s22 = subs.iter().find(|s| s.prize_id == 22).unwrap();
+        assert_eq!(s22.name, "奖品乙", "本机多出来的那条订阅留着");
+        assert_eq!(s22.subscribed_at_ms, 2_000);
+        assert!(subs.iter().any(|s| s.prize_id == 33));
+
+        // ── 面板绑定（按行为格）───────────────────────────────────────────
+        let panel = store.push_panel(&admin).await.unwrap();
+        assert_eq!(
+            panel.login_new.rules,
+            vec![PushRuleId::new("r-file")],
+            "文件里给了的那一格被覆盖"
+        );
+        assert_eq!(
+            panel.perf_slow.rules,
+            vec![PushRuleId::new("r2")],
+            "文件里没给的那一格保留本机（不是回落成默认）"
+        );
+
+        // ── 只动该动的：盘上只有这四类变 ──────────────────────────────────
+        assert_only_these_files_changed(
+            &files_before,
+            &snapshot_files(&dir),
+            &[
+                "pipelines.json",
+                "schedules.json",
+                "exchange-subscriptions.json",
+                "push-panel.json",
+            ],
         );
 
         let _ = std::fs::remove_dir_all(&dir);

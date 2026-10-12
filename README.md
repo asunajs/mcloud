@@ -138,15 +138,15 @@ MCLOUD_ADDR=127.0.0.1:3000 MCLOUD_DATA_DIR=./data ./target/release/mcloud
 # 没界面（只有 SSH）的那台：命令行导出（省略 --out 就打 stdout，可重定向到文件）
 ./target/release/mcloud config export --out mcloud-config.json
 
-# 拷过去（scp / U 盘 / 粘贴都行），在目标机器上：覆盖式导入
+# 拷过去（scp / U 盘 / 粘贴都行），在目标机器上：按 id 合并导入
 ./target/release/mcloud config import mcloud-config.json
 ./target/release/mcloud config import mcloud-config.json --with-instance   # 连实例级设置一起改
 
 scripts/dev-reload.sh --no-build     # 导入完必须重启才生效（JsonStore 启动时全量读进内存）
 ```
 
-⚠ **导入只在 CLI 里，界面上没有**：它是覆盖式操作（见下），一键覆盖风险高，
-所以界面只放导出。
+⚠ **导入只在 CLI 里，界面上没有**（用户口径「导入不要做界面」）：它会按 id 覆盖同名条目
+（连账号与凭据一起），而且导入完还要重启服务才生效，所以界面只放导出。
 
 ⚠⚠ **导出文件里含凭据** —— 它等于你的登录态，**别乱发、别提交进版本库**。
 文件顶层标着 `containsCredentials: true`，里面有：
@@ -160,13 +160,18 @@ scripts/dev-reload.sh --no-build     # 导入完必须重启才生效（JsonStor
 CLI 导的是**本机那一个用户**（管理员）那份，WebUI 导的是**当前登录用户自己**那份；
 两条命令都没有 `--user` / `--owner`（多用户的"选谁"是 WebUI 的事）。
 
-导入是**覆盖式**的：文件里有的那一类整类替换（本机多出来的那几条会被删掉），
-文件里**没有**的类别一个字节都不动；动手前会把要改的文件备份成 `<名字>.bak-<时间戳>`，
-中途失败自动回滚。导入的几类与存储里的文件名一一对应（`push-rules` / `push-panel` /
-`exchange-subscriptions` / `auth-refresh` / `pipelines` / `schedules` / `settings` /
-`accounts` / `account-state` / `account-smid` / `pc-device`）。
-⚠ 例外：`account-state` / `account-smid` 是**按账号 id 合并**（那两张表装着本机所有账号
-的东西，整类替换会连别人的一起抹掉）。
+导入是**按 id 合并**：文件里有的那一类，同一个 id 就把本机那一条**覆盖**掉（逐字段以文件
+为准）、本机没有的就**新增**，而**本机多出来的原样留着**（不删）；文件里**没有**的类别一个
+字节都不动。账号 / 推送规则 / 面板绑定 / 兑换订阅 / 定时 / 编排一律是这条口径
+（`account-state` / `account-smid` 本来就按账号 id 合并）。文件里那条 id 若在本机属于**别人**，
+导入会当场停下并回滚，一条都不写（CLI 不抢别人的东西）。动手前会把要改的文件备份成
+`<名字>.bak-<时间戳>`，中途失败自动回滚。导入的几类与存储里的文件名一一对应（`push-rules` /
+`push-panel` / `exchange-subscriptions` / `auth-refresh` / `pipelines` / `schedules` /
+`settings` / `accounts` / `account-state` / `account-smid` / `pc-device`）。
+
+`--with-instance` 是**另一回事**：实例级那几格（口令下限 / 会话时长 / 历史与日志上限 /
+实例级刷新钟点）是**标量**，没有"本机多出来的一条"这回事，所以加了它才整格覆盖、不加就一格
+都不动；列表类那一半**不需要**这个开关，合并是默认行为。
 
 ### 4. Docker（Linux，**amd64 + arm64**）
 

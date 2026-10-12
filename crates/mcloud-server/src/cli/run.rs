@@ -552,10 +552,14 @@ const USAGE: &str = r#"用法：mcloud [<命令> [参数]]
                                   省略 --out 就打 stdout。⚠ 这份文件等于你的登录态：
                                   别乱发、别提交进版本库
                                  （有界面的话，WebUI「设置 → 服务」里点「导出配置」同效）
-  config import <路径> [--with-instance]  把那份 JSON **覆盖式**应用到本机用户 ——
+  config import <路径> [--with-instance]  把那份 JSON **按 id 合并**到本机用户 ——
+                                 同 id 覆盖（逐字段以文件为准）、本机没有的新增、
+                                 **本机多出来的保留**；文件里没有的类别一个字节都不动
+                                 （`--with-instance` 是**另一回事**：实例级那几格是标量，
+                                  没有「本机多出来的一条」这回事 ⇒ 加了它才整格覆盖，
+                                  不加就一格都不动）
                                  导入后**不用重新登录**就能跑任务
                                  （导入前自动备份成 `<名字>.bak-<时间戳>`，失败回滚；
-                                  实例级设置默认不动，要一起改加 --with-instance；
                                   导入完要 `scripts/dev-reload.sh --no-build` 重启才生效）
   login <方式>                    登录账号（qr / sms / app / password / device）
   help, --help, -h                打印这份清单
