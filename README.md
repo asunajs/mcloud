@@ -119,6 +119,37 @@ MCLOUD_ADDR=127.0.0.1:3000 MCLOUD_DATA_DIR=./data ./target/release/mcloud
 随手指一个未知子命令会打出用法文本并 `exit 2`。
 定时与编排的**创建**不在命令行：用 WebUI（或改 `data/` 下的配置）。
 
+#### 无头机器怎么配（没有浏览器 / 只有 SSH）
+
+推送规则、面板绑定、兑换订阅、定时、编排这些**列表型**配置，界面入口全在后端 API 上
+（WebUI 只是个壳），所以没有浏览器时有三条路：
+
+1. **SSH 端口转发**：`ssh -L 3000:127.0.0.1:3000 <无头机>`，把本机浏览器指到
+   `http://127.0.0.1:3000` 照常用 WebUI（登录闸也是那一份）。
+2. **curl 打 API**：登录取到会话 cookie 之后直接打 `/api/push/rules`、`/api/schedules`
+   这些路由（形状见 `crates/mcloud-server/src/routes/`）。
+3. **导出 / 导入**（最省事的一条）：在任意一台有界面的机器上配好，导出成一份 JSON，
+   拷过去导入 ——
+
+```bash
+# 有界面的那台：导出（省略 --out 就打 stdout，可重定向到文件）
+./target/release/mcloud config export --out mcloud-config.json
+
+# 拷过去（scp / U 盘 / 粘贴都行），在无头机器上：覆盖式导入
+./target/release/mcloud config import mcloud-config.json
+./target/release/mcloud config import mcloud-config.json --with-instance   # 连实例级设置一起改
+
+scripts/dev-reload.sh --no-build     # 导入完必须重启才生效（JsonStore 启动时全量读进内存）
+```
+
+导入是**覆盖式**的：文件里有的那一类整类替换（本机多出来的那几条会被删掉），
+文件里**没有**的类别一个字节都不动；动手前会把要改的文件备份成 `<名字>.bak-<时间戳>`，
+中途失败自动回滚。导入的几类与存储里的文件名一一对应（`push-rules` / `push-panel` /
+`exchange-subscriptions` / `auth-refresh` / `pipelines` / `schedules` / `settings`）。
+注意：导出文件里**有推送渠道的 token**（那本来就是配置的一部分，不带就没法在新机器上发通知），
+别随手发给别人；**登录凭据不在里面**（账号要在新机器上重新登录）。CLI 只作用于本机那一个
+用户（管理员），两条命令都没有 `--user` / `--owner`。
+
 ### 4. Docker（Linux，**amd64 + arm64**）
 
 ```bash

@@ -11,6 +11,7 @@
 //! `src/main.rs`，它按 argv 分发到 [`run`]。
 
 pub mod auth;
+pub mod config;
 pub mod cron;
 pub mod daily;
 pub mod live_room;

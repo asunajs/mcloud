@@ -18,8 +18,8 @@ use anyhow::Context;
 
 use crate::cli::push as cli_push;
 use crate::cli::{
-    auth as cli_auth, cron as cli_cron, daily as cli_daily, live_room as cli_live_room,
-    login as cli_login, pipeline as cli_pipeline,
+    auth as cli_auth, config as cli_config, cron as cli_cron, daily as cli_daily,
+    live_room as cli_live_room, login as cli_login, pipeline as cli_pipeline,
 };
 
 /// 起服务那条路的**显式写法**：`mcloud serve` **等价于**不带参数的 `mcloud` ✓。
@@ -66,6 +66,16 @@ pub fn dispatch(args: Vec<String>) -> Dispatch {
     // ⚠ 只在 `args.len() == 2` 时认：`mcloud run <任务名> <账号>` 里那两个位置
     // 一个都不能被吃掉 ✓（万一将来真有个任务叫 `help`，三参数那种写法照旧走老路 ✓）。
     if args[0] == "run" && args.len() == 2 {
+        if let Some(flag @ ("help" | "--help" | "-h")) = args.get(1).map(String::as_str) {
+            return Dispatch::Cli(vec![flag.to_string()]);
+        }
+    }
+    // `mcloud config --help` 同理（2026-10-12，与上面 `run --help` 逐格同款）：
+    // `config` 光一个词 = 打用法，而 `config --help` 问的也是"这条命令怎么用"
+    // ⇒ 收敛成**看帮助**（= `mcloud --help` 那一份文本、打 stdout、退 0）。
+    // 不收的话 `--help` 会落进子命令解析里被当成"不认识的参数"而报用法错。
+    // 只认 `args.len() == 2`：`config export --out x` 那些位置一个都不能被吃掉。
+    if args[0] == "config" && args.len() == 2 {
         if let Some(flag @ ("help" | "--help" | "-h")) = args.get(1).map(String::as_str) {
             return Dispatch::Cli(vec![flag.to_string()]);
         }
@@ -217,6 +227,19 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
         // 命令行上只能落到管理员那一份 ✓（理由写在 `cli/live_room.rs` 头部 ✓）。
         Some("live-room") => {
             cli_live_room::run(&app, &args[1..]).await?;
+        }
+        // 配置的**离线搬运**（2026-10-12 用户裁定：加 `config export` / `config import`）：
+        // 推送规则、面板绑定、兑换订阅、定时、编排这些"列表型"配置，界面上的入口
+        // 全在后端 API 上（WebUI 只是壳）⇒ 没有浏览器 / 只有 SSH / 界面某页点不动的
+        // 机器上用户配不了它们。这一对命令给的是一条离线通路：有界面的机器上配好、
+        // 导出成一份 JSON、拷到无头机器上导入。
+        //
+        // 为什么是**一对通用命令**而不是"每个配置项各一条子命令"：`AGENTS.md` 的
+        // 「补充裁定 2」写着 CLI 要简单（用户原话「你把 webui 的功能都搬过去，
+        // cli 还是人用的吗」）—— 导出/导入不新增任何"配置面板"形状的东西。
+        // 细节（导出哪几类、实例级怎么处置、备份与回滚）见 `cli/config.rs` 的模块头。
+        Some("config") => {
+            cli_config::run(&app, &args[1..]).await?;
         }
         Some("auth") => {
             let rest = &args[1..];
@@ -523,6 +546,12 @@ const USAGE: &str = r#"用法：mcloud [<命令> [参数]]
   auth auto-schedule [on|off|at HH:MM]  凭据自动刷新的开关与刷新时间
                                  （刷新时间**每用户一个** ✓；CLI **只作用于本机那个用户** ✓，
                                   选谁请在 WebUI 上改 —— 见 `mcloud auth auto-schedule help`）
+  config export [--out <路径>]    导出本机用户的配置（推送规则 / 面板绑定 / 兑换订阅 /
+                                  定时 / 编排 / 刷新钟点）；省略 --out 就打 stdout
+  config import <路径> [--with-instance]  把那份 JSON **覆盖式**应用到本机用户
+                                 （导入前自动备份成 `<名字>.bak-<时间戳>`，失败回滚；
+                                  实例级设置默认不动，要一起改加 --with-instance；
+                                  导入完要 `scripts/dev-reload.sh --no-build` 重启才生效）
   login <方式>                    登录账号（qr / sms / app / password / device）
   help, --help, -h                打印这份清单
 
@@ -684,5 +713,70 @@ mod tests {
             USAGE.contains("  run <任务名> <账号> [--body <JSON>]"),
             "带参数那条的用法行不能被改动 ✓"
         );
+    }
+
+    /// 门：**`mcloud config --help` 是"看帮助"，不是"用法错"**（2026-10-12）。
+    ///
+    /// 与 `run --help` / `serve --help` 逐格同款：收敛成 [`cli`] 的 `--help` 那一格
+    /// ⇒ 与 `mcloud --help` 同一份文本、打 stdout、退 0。
+    ///
+    /// 这条断言是行为契约：谁要是把 `config --help` 拉回子命令解析，
+    /// 它就会变成"不认识的参数"报用法错，这里就红。
+    #[test]
+    fn config_help_is_help_not_a_usage_error() {
+        for flag in ["help", "--help", "-h"] {
+            assert_eq!(
+                dispatch(vec!["config".to_string(), flag.to_string()]),
+                cli(&[flag]),
+                "`config {flag}` 要与 `mcloud {flag}` 走同一条路"
+            );
+        }
+        // 只认"光一个 `config` + 一个帮助开关"：带参数那些写法一个都不能被吃掉
+        assert_eq!(dispatch(vec!["config".to_string()]), cli(&["config"]));
+        assert_eq!(
+            dispatch(vec![
+                "config".to_string(),
+                "export".to_string(),
+                "--out".to_string(),
+                "x.json".to_string()
+            ]),
+            cli(&["config", "export", "--out", "x.json"]),
+            "`config export --out <路径>` 照旧走子命令解析"
+        );
+        assert_eq!(
+            dispatch(vec![
+                "config".to_string(),
+                "import".to_string(),
+                "f.json".to_string()
+            ]),
+            cli(&["config", "import", "f.json"])
+        );
+    }
+
+    /// 门：`config` 那两条用法行归在**个人 CLI** 那一组（不是"服务端 / WebUI"组）。
+    ///
+    /// 它与 `push` / `live-room` / `auth` 同一条立场：CLI 只作用于本机那一个用户，
+    /// 是"个人 CLI"那一档；而 `serve` / `user` 是服务端那一档。
+    #[test]
+    fn usage_puts_config_in_the_personal_group() {
+        let server = USAGE
+            .find("服务端 / WebUI 命令")
+            .expect("帮助里要有「服务端 / WebUI 命令」那一组");
+        let personal = USAGE
+            .find("个人 CLI")
+            .expect("帮助里要有「个人 CLI」那一组");
+        for line in [
+            "  config export [--out <路径>]",
+            "  config import <路径> [--with-instance]",
+        ] {
+            let at = USAGE
+                .find(line)
+                .unwrap_or_else(|| panic!("帮助里少了 `{line}`"));
+            assert!(at > personal, "`{line}` 要归在「个人 CLI」那组里");
+            assert!(at > server, "`{line}` 不该落在「服务端 / WebUI」那组里");
+        }
+        // 实例级那个开关与"导入完要重启才生效"都要在用法里说清
+        assert!(USAGE.contains("--with-instance"));
+        assert!(USAGE.contains("scripts/dev-reload.sh --no-build"));
     }
 }
